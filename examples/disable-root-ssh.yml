@@ -1,0 +1,17 @@
+- name: CIS 5.2.1 - Disable SSH root login
+  hosts: all
+  become: true
+  tasks:
+    - name: Set PermitRootLogin to no
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PermitRootLogin'
+        line: 'PermitRootLogin no'
+        state: present
+      notify: restart sshd
+
+  handlers:
+    - name: restart sshd
+      ansible.builtin.service:
+        name: sshd
+        state: restarted

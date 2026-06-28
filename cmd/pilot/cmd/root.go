@@ -1,0 +1,241 @@
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/spf13/cobra"
+
+	"github.com/anomalyco/pilot/internal/agent"
+	"github.com/anomalyco/pilot/internal/app"
+	"github.com/anomalyco/pilot/internal/config"
+	"github.com/anomalyco/pilot/internal/sanitizer"
+	"github.com/anomalyco/pilot/internal/store"
+	"github.com/anomalyco/pilot/internal/ui"
+	"github.com/anomalyco/pilot/internal/ui/tui"
+)
+
+var (
+	cfgFile   string
+	ollamaURL string
+	model     string
+	stream    bool
+	autoOK    string
+	dataDir   string
+	noTUI     bool
+	// index management
+	runNoIndex       bool
+	runNoIndexOnStart bool
+	runStrictIndex    bool
+	// Sandbox mode (shared between `pilot run` and `pilot chat`).
+	// Values: "" / "docker" (default) | "docker-exec".
+	runSandboxMode string
+)
+
+var rootCmd = &cobra.Command{
+	Use:   "pilot",
+	Short: "AI-assisted Ubuntu security hardening via Ollama",
+	Long: `pilot is an AI agent that helps harden Ubuntu hosts to CIS Benchmark.
+It uses a local or cloud Ollama model to reason about failures, generate fixes,
+and propose Ansible playbooks — but every write is gated by human approval.`,
+	Version: "0.2.0",
+}
+
+func Execute() error {
+	return rootCmd.Execute()
+}
+
+func init() {
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default ~/.config/pilot/config.yaml)")
+	rootCmd.PersistentFlags().StringVar(&ollamaURL, "ollama", "", "Ollama server URL")
+	rootCmd.PersistentFlags().StringVar(&model, "model", "", "Ollama model name")
+	rootCmd.PersistentFlags().BoolVar(&stream, "stream", true, "stream LLM responses")
+	rootCmd.PersistentFlags().StringVar(&autoOK, "auto-approve", "", "auto-approve proposals by risk: low|medium|never")
+	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "data directory for proposals, db, generated playbooks")
+	rootCmd.PersistentFlags().BoolVar(&noTUI, "no-tui", false, "force-disable the TUI (use promptui)")
+
+	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(chatCmd)
+	rootCmd.AddCommand(diagnoseCmd)
+	rootCmd.AddCommand(modelsCmd)
+	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(indexDocsCmd)
+	rootCmd.AddCommand(indexPlaybooksCmd)
+	rootCmd.AddCommand(searchDocsCmd)
+	rootCmd.AddCommand(listRunsCmd)
+rootCmd.AddCommand(showPlanCmd)
+	rootCmd.AddCommand(doctorCmd)
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print version",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("pilot %s\n", rootCmd.Version)
+	},
+}
+
+func loadConfig() *config.Config {
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to load config: %v\n", err)
+		cfg = config.Default()
+	}
+	if ollamaURL != "" {
+		cfg.OllamaURL = ollamaURL
+	}
+	if model != "" {
+		cfg.Model = model
+	}
+	if autoOK != "" {
+		cfg.AutoApprove = autoOK
+	}
+	if dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+	// Sandbox CLI flags (set on `pilot run` / `pilot chat` via
+	// package-level vars in run.go / chat.go). loadConfig is the
+	// central place to fold CLI flags into the config struct.
+	if runSandbox {
+		cfg.Sandbox.Enabled = true
+	}
+	if runSandboxImage != "" {
+		cfg.Sandbox.Image = runSandboxImage
+		cfg.Sandbox.Enabled = true
+	}
+	if runSandboxNetwork != "" {
+		cfg.Sandbox.Network = runSandboxNetwork
+	}
+	if runSandboxMode != "" {
+		cfg.Sandbox.Mode = runSandboxMode
+	}
+	return cfg
+}
+
+// setupResult is now a thin alias over *app.App. The fields and
+// methods of *app.App match the previous setupResult surface; this
+// keeps every existing call site working while centralising the
+// stack construction in internal/app.
+type setupResult = app.App
+
+// setupRun prepares the full stack. It is now a thin wrapper around
+// app.New that supplies the CLI's --no-tui / --data-dir configuration.
+// All actual stack assembly lives in internal/app.
+func setupRun(ctx context.Context) (*setupResult, error) {
+	cfg := loadConfig()
+	return app.New(ctx, cfg, app.Options{
+		NoTUI:  noTUI,
+		Banner: true,
+	})
+}
+
+// setupRunWithOpts is setupRun plus the ability to pass additional
+// app.Options (e.g. ForceSandbox from --sandbox CLI flag, or
+// SkipSandbox from --dry-run-all). It is the hook for commands
+// that need to override the default environment policy.
+func setupRunWithOpts(ctx context.Context, opt app.Options) (*setupResult, error) {
+	cfg := loadConfig()
+	opt.NoTUI = noTUI
+	opt.Banner = true
+	return app.New(ctx, cfg, opt)
+}
+
+func newRunRecord(cfg *config.Config, mode, playbook, inventory string) *store.Run {
+	r := &store.Run{
+		ID:        uuid.NewString(),
+		StartedAt: time.Now(),
+		Mode:      mode,
+		Playbook:  playbook,
+		Inventory: inventory,
+		Model:     cfg.Model,
+		Status:    "running",
+	}
+	// Audit: record the docker image when sandbox mode is enabled.
+	// LocalEnvironment reports "local" — we leave SandboxImage empty
+	// in that case so the column reads as "no sandbox" on plain runs.
+	if cfg.Sandbox.Enabled {
+		switch cfg.Sandbox.Image {
+		case "":
+			// Auto-detect resolved at app.New; we don't have it
+			// here. Leave empty and let the next migration fill it
+			// in via a separate audit hook. For now, mark the run
+			// as sandboxed by storing the auto-detect marker.
+			r.SandboxImage = "<auto-detect>"
+		default:
+			r.SandboxImage = cfg.Sandbox.Image
+		}
+	}
+	return r
+}
+
+// newAgentLoop assembles an agent.Loop with the full tool stack and
+// TUI bridge. The actual stack assembly lives in internal/app; this
+// function preserves the historical 7-argument signature so every
+// caller continues to compile.
+func newAgentLoop(
+	cfg *config.Config,
+	runID string,
+	st *store.Store,
+	redactor *sanitizer.Redactor,
+	approver *ui.ConsoleApprover,
+	tp *tui.Program,
+	streamWriter io.Writer,
+) *agent.Loop {
+	_ = st
+	_ = redactor
+	_ = approver
+	a, err := app.New(context.Background(), cfg, app.Options{
+		NoTUI:  tp == nil,
+		Banner: false,
+	})
+	if err != nil {
+		// App construction only fails if Ollama is unreachable or the
+		// data dir is unusable. Returning a Loop that fails on first
+		// call keeps the historical signature; callers can inspect
+		// the App error separately via direct construction.
+		return agent.NewLoop(agent.Config{RunID: runID, DataDir: cfg.DataDir})
+	}
+	a.TUI = tp
+	if streamWriter == nil {
+		streamWriter = os.Stderr
+	}
+	return a.NewLoop(runID, streamWriter)
+}
+
+// newAgentLoopWithDefaults wires chat-session defaults (from
+// `pilot chat --inventory/--limit`) into both the run_ansible tool
+// (deterministic fill-in) and the system prompt (visible hint to
+// the LLM). See internal/tools/defaults.go for the tool-side logic.
+func newAgentLoopWithDefaults(
+	res *setupResult,
+	systemPrompt string,
+	streamWriter io.Writer,
+	defaultInventory string,
+	defaultLimit string,
+) *agent.Loop {
+	if res == nil {
+		// Defensive fallback — same shape as newAgentLoop's error
+		// path. This should not happen in practice.
+		return agent.NewLoop(agent.Config{RunID: "", DataDir: ""})
+	}
+	if streamWriter == nil {
+		streamWriter = os.Stderr
+	}
+	// System prompt override: App.NewLoop reads from Cfg.SystemPrompt
+	// which we mutated via appendSessionDefaults in chat.go.
+	return res.NewLoopWithDefaults("", streamWriter, defaultInventory, defaultLimit)
+}
+
+
+
+// shutdownTUI is a helper to call from main cleanup.
+func shutdownTUI(tp *tui.Program) {
+	if tp != nil {
+		tp.Shutdown()
+	}
+}
+

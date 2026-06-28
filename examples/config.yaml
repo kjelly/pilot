@@ -1,0 +1,24 @@
+# pilot config example
+# Copy to ~/.config/pilot/config.yaml
+
+ollama_url: http://localhost:11434
+model: qwen3.5:cloud
+max_iterations: 20
+max_concurrent: 5
+auto_approve: never   # never | low | medium
+
+data_dir: ~/.local/share/pilot
+
+# Block specific tools from being callable (defense in depth)
+# blocked_tools:
+#   - run_command
+
+# Allow only these tools (overrides the default set)
+# allowed_tools:
+#   - read_file
+#   - ask_user
+#   - generate_playbook
+
+# Custom system prompt (optional)
+# system_prompt: |
+#   You are pilot, an AI co-pilot for Ansible automation.

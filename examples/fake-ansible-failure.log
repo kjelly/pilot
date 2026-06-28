@@ -1,0 +1,24 @@
+PLAY [CIS 5.2.1 - Disable SSH root login] **************************************
+
+TASK [Gathering Facts] *********************************************************
+ok: [web01]
+ok: [web02]
+ok: [web03]
+
+TASK [Set PermitRootLogin to no] ***********************************************
+changed: [web01]
+changed: [web02]
+fatal: [web03]: FAILED! => {
+    "changed": false,
+    "msg": "Failed to set permissions on the temporary files Ansible needs to create when becoming an unprivileged user",
+    "stderr": "sudo: unable to open /var/db/sudo: No such file or directory\nsudo: error initializing audit plugin sudoers_audit\n\nWeb03 host has a custom sudo configuration that is missing the audit plugin directory."
+}
+
+RUNNING HANDLER [restart sshd] *************************************************
+fatal: [web01]: FAILED! => {"changed": false, "msg": "Job for sshd.service failed because the control process exited with error code."}
+fatal: [web02]: FAILED! => {"changed": false, "msg": "Job for sshd.service failed because the control process exited with error code."}
+
+PLAY RECAP *********************************************************************
+web01                       : ok=2    changed=1    failed=1
+web02                       : ok=2    changed=1    failed=1
+web03                       : ok=1    changed=0    failed=1

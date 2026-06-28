@@ -1,0 +1,325 @@
+package ollama
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+)
+
+type Client struct {
+	baseURL    string
+	model      string
+	embedModel string
+	http       *http.Client
+}
+
+func NewClient(baseURL, model string) *Client {
+	return &Client{
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		model:      model,
+		embedModel: "nomic-embed-text", // sensible default
+		http:       &http.Client{}, // no static Timeout — rely on per-call context for cancellation
+	}
+}
+
+// SetEmbeddingModel overrides the embedding model used by Embeddings
+// and BatchEmbeddings. The default is "nomic-embed-text".
+func (c *Client) SetEmbeddingModel(m string) { c.embedModel = m }
+
+// EmbeddingModel returns the model currently used for embeddings.
+func (c *Client) EmbeddingModel() string { return c.embedModel }
+
+type Message struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+type ToolCall struct {
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type Tool struct {
+	Type     string      `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type ChatRequest struct {
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+	Tools    []Tool    `json:"tools,omitempty"`
+	Stream   bool      `json:"stream"`
+	Think    bool      `json:"think,omitempty"`
+}
+
+type ChatResponse struct {
+	Model      string  `json:"model"`
+	Message    Message `json:"message"`
+	DoneReason string  `json:"done_reason,omitempty"`
+	Error      string  `json:"error,omitempty"`
+}
+
+type StreamChunk struct {
+	Model   string `json:"model"`
+	Message struct {
+		Role      string `json:"role"`
+		Content   string `json:"content"`
+		Thinking  string `json:"thinking,omitempty"`
+		Done      bool   `json:"done"`
+	} `json:"message"`
+	Done bool `json:"done"`
+}
+
+// Chat sends a non-streaming chat request
+func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (*ChatResponse, error) {
+	req := ChatRequest{
+		Model:    c.model,
+		Messages: messages,
+		Tools:    tools,
+		Stream:   false,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("ollama request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama returned %d: %s", resp.StatusCode, string(errBody))
+	}
+
+	var result ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("ollama error: %s", result.Error)
+	}
+	return &result, nil
+}
+
+// ChatStream sends a streaming chat request, calling onChunk for each event.
+// Returns the final assembled message.
+func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Tool, onChunk func(content, thinking string)) (*ChatResponse, error) {
+	req := ChatRequest{
+		Model:    c.model,
+		Messages: messages,
+		Tools:    tools,
+		Stream:   true,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("ollama request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama returned %d: %s", resp.StatusCode, string(errBody))
+	}
+
+	final := &ChatResponse{Model: c.model}
+	final.Message.Role = "assistant"
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		// Honour context cancellation between chunks. The scanner
+		// blocks on the next chunk read, so we have to poll ctx
+		// at the top of each iteration rather than mid-read.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var chunk StreamChunk
+		if err := json.Unmarshal(line, &chunk); err != nil {
+			continue
+		}
+		if chunk.Message.Content != "" {
+			final.Message.Content += chunk.Message.Content
+			if onChunk != nil {
+				onChunk(chunk.Message.Content, "")
+			}
+		}
+		if chunk.Message.Thinking != "" {
+			if onChunk != nil {
+				onChunk("", chunk.Message.Thinking)
+			}
+		}
+		// Tool calls typically come in the final chunk when streaming
+		if chunk.Done && len(final.Message.ToolCalls) == 0 {
+			// Re-fetch as non-streaming to get tool calls reliably
+			return c.Chat(ctx, messages, tools)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return final, nil
+}
+
+// ListModels lists available Ollama models
+func (c *Client) ListModels(ctx context.Context) ([]string, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/tags", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(result.Models))
+	for _, m := range result.Models {
+		names = append(names, m.Name)
+	}
+	return names, nil
+}
+
+// EmbeddingRequest is the body of POST /api/embeddings.
+type EmbeddingRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+}
+
+// EmbeddingResponse is the response from /api/embeddings.
+type EmbeddingResponse struct {
+	Embedding []float32 `json:"embedding"`
+}
+
+// Embeddings returns the vector embedding of a single text using the
+// configured Ollama model. For batched embedding, use BatchEmbeddings.
+func (c *Client) Embeddings(ctx context.Context, text string) ([]float32, error) {
+	req := EmbeddingRequest{Model: c.embedModel, Prompt: text}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("ollama embeddings request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama embeddings returned %d: %s", resp.StatusCode, string(errBody))
+	}
+	var out EmbeddingResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if len(out.Embedding) == 0 {
+		return nil, fmt.Errorf("ollama returned empty embedding (model=%s)", c.embedModel)
+	}
+	return out.Embedding, nil
+}
+
+// BatchEmbeddings calls Embeddings in parallel for each text. The
+// concurrency is capped at 4 to avoid overwhelming the Ollama server.
+// Results preserve the input order; if any single call fails the
+// error is returned and remaining results are discarded.
+func (c *Client) BatchEmbeddings(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	const maxConc = 2
+	sem := make(chan struct{}, maxConc)
+	results := make([][]float32, len(texts))
+	errs := make([]error, len(texts))
+
+	var wg sync.WaitGroup
+	for i, t := range texts {
+		wg.Add(1)
+		go func(i int, text string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			vec, err := c.Embeddings(ctx, text)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			results[i] = vec
+		}(i, t)
+	}
+	wg.Wait()
+
+	for _, e := range errs {
+		if e != nil {
+			return nil, e
+		}
+	}
+	return results, nil
+}
+
+// Ping checks if the Ollama server is reachable
+func (c *Client) Ping(ctx context.Context) error {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/tags", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama returned %d", resp.StatusCode)
+	}
+	return nil
+}

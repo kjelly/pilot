@@ -1,0 +1,68 @@
+---
+- name: Pilot smoke test - system info probe
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    probe_paths:
+      - /etc/os-release
+      - /etc/hostname
+      - /proc/loadavg
+
+  tasks:
+    - name: "1) Greeting"
+      ansible.builtin.debug:
+        msg: "Hello from pilot - host={{ ansible_hostname }} os={{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    - name: "2) Show kernel"
+      ansible.builtin.command: uname -a
+      register: kernel_out
+      changed_when: false
+
+    - name: "2b) Show load average"
+      ansible.builtin.command: cat /proc/loadavg
+      register: load
+      changed_when: false
+
+    - name: "2c) Print kernel and load"
+      ansible.builtin.debug:
+        msg: |
+          kernel: {{ kernel_out.stdout }}
+          load:   {{ load.stdout }}
+
+    - name: "3) Read probe files"
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      register: slurped
+      loop: "{{ probe_paths }}"
+      ignore_errors: true
+
+    - name: "3b) Decode and show first 5 lines"
+      ansible.builtin.debug:
+        msg: "{{ item.item }} -> {{ (item.content | b64decode).splitlines()[:5] }}"
+      loop: "{{ slurped.results }}"
+      when: item.content is defined
+
+    - name: "4) Health checks"
+      block:
+        - name: "4a) Assert /etc/os-release is readable"
+          ansible.builtin.command: test -r /etc/os-release
+          changed_when: false
+
+        - name: "4b) Assert load average < 20.0"
+          ansible.builtin.assert:
+            that:
+              - load.stdout.split()[0] | float < 20.0
+            success_msg: "Load OK: {{ load.stdout.split()[0] }}"
+            fail_msg: "Load too high: {{ load.stdout.split()[0] }}"
+      rescue:
+        - name: "Health check failed - surfaced via rescue"
+          ansible.builtin.debug:
+            msg: "WARNING: health check failed but playbook continues"
+
+    - name: "5) Final summary"
+      ansible.builtin.debug:
+        msg: |
+          pilot smoke test complete
+          host={{ ansible_hostname }} tasks_run={{ ansible_play_hosts | length }}
