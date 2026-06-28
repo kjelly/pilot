@@ -239,7 +239,10 @@ class CallbackModule(CallbackBase):
                 import yaml
                 return yaml.safe_dump({action: args}, default_flow_style=False, sort_keys=False)
             except ImportError:
-                return "%s:\n  args: %r" % (action, args)
+                parts = ["%s:" % action]
+                for k, v in sorted(args.items()):
+                    parts.append("  %s: %s" % (k, v))
+                return "\n".join(parts)
         except Exception:
             return ""
 

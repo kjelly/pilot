@@ -13,6 +13,7 @@ jobs:
   test:
     name: Go test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -28,24 +29,28 @@ jobs:
           python-version: '3.11'
 
       - name: Download Go modules
-        working-directory: harden-ai
         run: go mod download
 
       - name: go vet
-        working-directory: harden-ai
         run: go vet ./...
 
+      - name: go build
+        run: go build ./...
+
       - name: go test
-        working-directory: harden-ai
         run: go test -race -count=1 ./...
 
+      - name: Install PyYAML
+        run: python3 -m pip install pyyaml
+
       - name: ansible_callback unit tests
-        working-directory: harden-ai/ansible_callback
+        working-directory: ansible_callback
         run: python3 -m unittest test_pilot_diagnose.py -v
 
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -59,14 +64,4 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.61.0
-          working-directory: harden-ai
           args: --timeout=5m
-
-      - name: golangci-lint (issues only)
-        working-directory: harden-ai
-        # Allow pre-existing issues to be visible without blocking
-        # PRs that touch unrelated code. Exit 0 either way.
-        run: |
-          out=$(golangci-lint run ./... 2>&1 || true)
-          echo "$out" | tail -200
-          echo "::notice::lint-issues-count=$(echo "$out" | grep -c ':' || true)"
