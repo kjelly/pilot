@@ -23,6 +23,8 @@ var (
 	specInventory   string
 	specLimit       string
 	specRunIDFlag   string
+	specHosts        string
+	specConnection   string
 )
 
 var specCmd = &cobra.Command{
@@ -57,6 +59,8 @@ func init() {
 	specCmd.Flags().StringVarP(&specInventory, "inventory", "i", "", "inventory file (used with --apply)")
 	specCmd.Flags().StringVarP(&specLimit, "limit", "l", "", "limit pattern (forwarded to ansible-playbook)")
 	specCmd.Flags().StringVar(&specRunIDFlag, "run-id", "", "pilot run id to record against (default: derived from spec path)")
+	specCmd.Flags().StringVar(&specHosts, "hosts", "", "override play hosts (default: localhost). Use with --apply/-i to target real hosts.")
+	specCmd.Flags().StringVar(&specConnection, "connection", "", "override play connection (default: local). Use a real SSH-style value to disable local connection.")
 	rootCmd.AddCommand(specCmd)
 }
 
@@ -98,7 +102,11 @@ func runSpec(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	pb, err := spec.Generate(parsed, spec.GenerateOptions{IncludeRaw: true})
+	pb, err := spec.Generate(parsed, spec.GenerateOptions{
+		IncludeRaw: true,
+		Hosts:      specHosts,
+		Connection: specConnection,
+	})
 	if err != nil {
 		return fmt.Errorf("generate: %w", err)
 	}

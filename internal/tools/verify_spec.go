@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -149,16 +150,20 @@ func (t *VerifySpecTool) runLocal(ctx context.Context, r spec.Row, timeoutSec in
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "sh", "-c", r.Command)
 	out, err := cmd.CombinedOutput()
-	vr := VerifyRow{ID: r.ID, Detail: strings.TrimSpace(string(out))}
+	rawOut := strings.TrimSpace(string(out))
+	rc := 0
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			vr.ExitCode = ee.ExitCode()
+			rc = ee.ExitCode()
 		}
-		vr.Status = "fail"
-		return vr
 	}
-	vr.Status = "pass"
-	return vr
+	detail := fmt.Sprintf("(rc=%d) %s", rc, rawOut)
+	ok, mismatch := matchExpected(r.Expected, detail, rc)
+	status := "pass"
+	if !ok {
+		status = "fail"
+	}
+	return VerifyRow{ID: r.ID, Status: status, Detail: mismatch, ExitCode: rc}
 }
 
 func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host string, timeoutSec int) VerifyRow {
@@ -178,17 +183,151 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(cctx, "ansible", args...).CombinedOutput()
-	vr := VerifyRow{ID: r.ID, Detail: strings.TrimSpace(string(out))}
+	rawOut := strings.TrimSpace(string(out))
+	rc := 0
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			vr.ExitCode = ee.ExitCode()
+			rc = ee.ExitCode()
 		}
-		vr.Status = "fail"
-		return vr
 	}
-	vr.Status = "pass"
-	return vr
+	detail := fmt.Sprintf("(rc=%d) %s", rc, rawOut)
+	ok, mismatch := matchExpected(r.Expected, detail, rc)
+	status := "pass"
+	if !ok {
+		status = "fail"
+	}
+	return VerifyRow{ID: r.ID, Status: status, Detail: mismatch, ExitCode: rc}
 }
+
+
+// matchExpected decides whether captured stdout (or, for rc-equality,
+// the captured rc) satisfies the spec row's Expected value. The
+// previous implementation only checked exit code, which made rows
+// like C1 in pam-oidc-sshd report pass when the command explicitly
+// printed `1` (the rc-echo trick). The matrix this implements:
+//
+//   expected == ""          → rc == 0
+//   expected starts with "^" → anchored regex on stripped stdout
+//   expected is a pure int   → rc (taken from stdout `(rc=N)` first)
+//   expected == "present"    → rc == 0
+//   otherwise                → exact equality after trim
+//
+// The second case is what unblocks the verify-passes-when-it-shouldn't
+// regression in the pam-oidc-sshd spec.
+func matchExpected(expected, detail string, rc int) (bool, string) {
+
+	expected = strings.TrimSpace(expected)
+	clean := stripRunnerPrefix(detail)
+	rcOnly := extractRC(detail)
+
+	switch {
+	case expected == "":
+		return rc == 0, "expected: rc=0 (default)"
+	case strings.HasPrefix(expected, "^"):
+		re, err := regexp.Compile(expected)
+		if err != nil {
+			return false, fmt.Sprintf("invalid regex %q: %v", expected, err)
+		}
+		if re.MatchString(clean) {
+			return true, fmt.Sprintf("regex %q matched %q", expected, truncate(clean, 80))
+		}
+		return false, fmt.Sprintf("regex %q did not match stdout %q", expected, truncate(clean, 80))
+	case isInt(expected):
+		want := atoi(expected)
+		if rcOnly >= 0 {
+			if rcOnly == want {
+				return true, fmt.Sprintf("rc-from-stdout=%d matches expected %d", rcOnly, want)
+			}
+			return false, fmt.Sprintf("rc-from-stdout=%d, expected %d", rcOnly, want)
+		}
+		if rc == want {
+			return true, fmt.Sprintf("rc=%d matches expected %d", rc, want)
+		}
+		return false, fmt.Sprintf("rc=%d, expected %d (detail: %q)", rc, want, truncate(detail, 80))
+	case expected == "present":
+		return rc == 0, "expected: present (rc=0)"
+	default:
+		if clean == expected {
+			return true, fmt.Sprintf("stdout matched %q", expected)
+		}
+		return false, fmt.Sprintf("stdout=%q, expected %q", truncate(clean, 80), expected)
+	}
+}
+
+// stripRunnerPrefix removes a leading rc-only or "(rc=N)" marker from
+// the captured detail so comparison focuses on the semantic content.
+// Pure rc echo (e.g. `sh -c 'cmd; echo $?'`) becomes "" so rc-equality
+// expected values compare cleanly.
+func stripRunnerPrefix(s string) string {
+	if isInt(s) {
+		return ""
+	}
+	if rcOnlyPattern.MatchString(s) {
+		return ""
+	}
+	if loc := rcPrefixPattern.FindStringIndex(s); loc != nil {
+		return strings.TrimSpace(s[loc[1]:])
+	}
+	return s
+}
+
+// extractRC pulls a recovered rc from the runner-prefixed detail.
+// Returns -1 when no rc is present.
+func extractRC(s string) int {
+	// 1) Pure rc echo: the whole string is an integer (e.g. `sh -c 'cmd; echo $?'`).
+	if isInt(s) {
+		return atoi(s)
+	}
+	// 2) Runner-prepended "(rc=N) ...": skip that prefix and look at the rest.
+	stripped := s
+	if loc := rcPrefixPattern.FindStringIndex(s); loc != nil {
+		stripped = strings.TrimSpace(s[loc[1]:])
+	}
+	// 3) If the remaining stdout is itself an integer, that's the rc-echo.
+	if isInt(stripped) {
+		return atoi(stripped)
+	}
+	return -1
+}
+
+func isInt(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, c := range s {
+		if c == '-' && i == 0 {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func atoi(s string) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
+}
+
+var (
+	rcOnlyPattern   = regexp.MustCompile(`^\(rc=\d+\)$`)
+	rcPrefixPattern = regexp.MustCompile(`^\(rc=\d+\)\s+`)
+	rcInText        = regexp.MustCompile(`\brc=(\d+)\b`)
+)
 
 // ReadNDJSON is a helper for the CLI to parse the Result.Content
 // back into VerifyRow slices.
