@@ -50,7 +50,11 @@ func init() {
 	verifyCmd.Flags().StringVarP(&verifyInventory, "inventory", "i", "", "inventory file (run each row via ansible ad-hoc)")
 	verifyCmd.Flags().StringVarP(&verifyLimit, "limit", "l", "", "limit pattern (forwarded to ansible)")
 	verifyCmd.Flags().StringVar(&verifyHost, "host", "", "override target host (default: 'all')")
-	verifyCmd.Flags().BoolVar(&verifyLocal, "local", true, "run commands locally (skip ansible)")
+	// Default false: when an --inventory is supplied we run each row via
+	// ansible ad-hoc against the fleet; with no inventory the tool falls
+	// back to local automatically (see VerifySpecTool.runRow). Defaulting
+	// to true silently ignored -i and made fleet verification unreachable.
+	verifyCmd.Flags().BoolVar(&verifyLocal, "local", false, "force-run commands on the control node, even if --inventory is set")
 	verifyCmd.Flags().StringVar(&verifyProposalID, "proposal-id", "", "record results against this proposal in proposal_results")
 	verifyCmd.Flags().StringVar(&verifyReportDir, "report-dir", ".verification", "where to write NDJSON + markdown reports")
 	verifyCmd.Flags().IntVar(&verifyTimeoutSec, "timeout", 15, "per-row command timeout (seconds)")

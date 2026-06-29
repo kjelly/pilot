@@ -89,7 +89,7 @@ type Store struct {
 // migration is added to migrateSteps. PRAGMA user_version is used to
 // record the installed version on disk so that startup is idempotent
 // and free of swallowed errors.
-const SchemaVersion = 8
+const SchemaVersion = 9
 
 const schema = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -262,6 +262,55 @@ var migrateSteps = []migration{
 				UNIQUE(proposal_id, check_id)
 			);
 			CREATE INDEX IF NOT EXISTS idx_presults_proposal ON proposal_results(proposal_id);`,
+	},
+	{
+		// Rebuild spec_checkpoints with UNIQUE(spec_path, row_id) instead
+		// of UNIQUE(spec_path, row_id, run_id). A checkpoint is the
+		// canonical state of ONE requirement advancing through
+		// compiled → applied → verified-*; including run_id in the key
+		// meant `pilot verify` (which used a different run_id than
+		// `pilot spec --generate`) inserted a parallel row instead of
+		// flipping the existing one, double-counting coverage. The
+		// INSERT collapses any pre-existing duplicate (spec_path,row_id)
+		// rows: MAX(module/task_index/param_hash) keeps the non-empty
+		// compile-time values, and the status ranking keeps the most
+		// advanced state.
+		Description: "spec_checkpoints: unique on (spec_path,row_id), collapse dup rows",
+		SQL: `CREATE TABLE spec_checkpoints_new (
+				id            INTEGER PRIMARY KEY AUTOINCREMENT,
+				spec_path     TEXT NOT NULL,
+				row_id        TEXT NOT NULL,
+				run_id        TEXT NOT NULL,
+				proposal_id   TEXT DEFAULT '',
+				task_index    INTEGER NOT NULL DEFAULT 0,
+				module        TEXT DEFAULT '',
+				param_hash    TEXT DEFAULT '',
+				status        TEXT NOT NULL DEFAULT 'compiled',
+				verified_at   DATETIME,
+				verify_detail TEXT DEFAULT '',
+				created_at    DATETIME NOT NULL,
+				UNIQUE(spec_path, row_id)
+			);
+			INSERT INTO spec_checkpoints_new
+				(spec_path, row_id, run_id, proposal_id, task_index, module, param_hash, status, verified_at, verify_detail, created_at)
+			SELECT a.spec_path, a.row_id,
+				(SELECT run_id FROM spec_checkpoints b WHERE b.spec_path=a.spec_path AND b.row_id=a.row_id ORDER BY id DESC LIMIT 1),
+				MAX(a.proposal_id), MAX(a.task_index), MAX(a.module), MAX(a.param_hash),
+				(SELECT status FROM spec_checkpoints c WHERE c.spec_path=a.spec_path AND c.row_id=a.row_id
+					ORDER BY CASE status
+						WHEN 'verified-fail' THEN 4
+						WHEN 'verified-pass' THEN 3
+						WHEN 'applied' THEN 2
+						WHEN 'compiled' THEN 1
+						ELSE 0 END DESC, id DESC LIMIT 1),
+				MAX(a.verified_at), MAX(a.verify_detail), MIN(a.created_at)
+			FROM spec_checkpoints a
+			GROUP BY a.spec_path, a.row_id;
+			DROP TABLE spec_checkpoints;
+			ALTER TABLE spec_checkpoints_new RENAME TO spec_checkpoints;
+			CREATE INDEX IF NOT EXISTS idx_checkpoints_spec ON spec_checkpoints(spec_path, row_id);
+			CREATE INDEX IF NOT EXISTS idx_checkpoints_run ON spec_checkpoints(run_id);
+			CREATE INDEX IF NOT EXISTS idx_checkpoints_proposal ON spec_checkpoints(proposal_id);`,
 	},
 }
 
@@ -753,10 +802,13 @@ type Checkpoint struct {
 	CreatedAt    time.Time
 }
 
-// UpsertCheckpoint inserts or updates a (spec_path, row_id, run_id)
-// checkpoint. Used by `pilot spec --generate` to record the
-// (spec → task → proposal) linkage, and by `pilot verify` to flip
-// Status to verified-pass / verified-fail.
+// UpsertCheckpoint inserts or updates the canonical checkpoint for a
+// (spec_path, row_id) requirement. Used by `pilot spec --generate` to
+// record the (spec → task → proposal) linkage, and by `pilot verify`
+// to flip Status to verified-pass / verified-fail on the SAME row.
+// The update preserves compile-time fields (module/task_index/
+// param_hash/proposal_id) when the caller passes empty values, so a
+// verify pass doesn't wipe the linkage recorded at generate time.
 func (s *Store) UpsertCheckpoint(cp *Checkpoint) error {
 	if cp.CreatedAt.IsZero() {
 		cp.CreatedAt = time.Now()
@@ -765,8 +817,12 @@ func (s *Store) UpsertCheckpoint(cp *Checkpoint) error {
 		`INSERT INTO spec_checkpoints
 		 (spec_path, row_id, run_id, proposal_id, task_index, module, param_hash, status, verified_at, verify_detail, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(spec_path, row_id, run_id) DO UPDATE SET
-			proposal_id = excluded.proposal_id,
+		 ON CONFLICT(spec_path, row_id) DO UPDATE SET
+			run_id = excluded.run_id,
+			proposal_id = CASE WHEN excluded.proposal_id <> '' THEN excluded.proposal_id ELSE spec_checkpoints.proposal_id END,
+			task_index  = CASE WHEN excluded.task_index <> 0  THEN excluded.task_index  ELSE spec_checkpoints.task_index END,
+			module      = CASE WHEN excluded.module <> ''      THEN excluded.module      ELSE spec_checkpoints.module END,
+			param_hash  = CASE WHEN excluded.param_hash <> ''  THEN excluded.param_hash  ELSE spec_checkpoints.param_hash END,
 			status = excluded.status,
 			verified_at = excluded.verified_at,
 			verify_detail = excluded.verify_detail`,

@@ -163,25 +163,32 @@ func classifyRow(r Row, includeRaw bool) (mod string, params string, raw string)
 			""
 	}
 	// Pattern C: sysctl -n <key> → ansible.posix.sysctl
+	//
+	// Param continuation lines must NOT carry their own indentation:
+	// RenderYAML adds a uniform 8-space indent to every line. Embedding
+	// leading spaces here double-indents the continuation key and yields
+	// invalid YAML.
 	if strings.HasPrefix(cmd, "sysctl -n ") {
 		key := strings.TrimPrefix(cmd, "sysctl -n ")
 		key = strings.TrimSpace(key)
+		// unquote the expected: the spec uses quotes (e.g. "0") to mark
+		// it as a string; those quotes must not leak into the YAML value.
 		return "ansible.posix.sysctl",
-			fmt.Sprintf("name: %s\n        value: %s", quoteScalar(key), quoteScalar(exp)),
+			fmt.Sprintf("name: %s\nvalue: %s", quoteScalar(key), quoteScalar(unquote(exp))),
 			""
 	}
 	// Pattern D: systemctl is-active <svc> → ansible.builtin.systemd
 	if strings.HasPrefix(cmd, "systemctl is-active ") {
 		svc := strings.TrimSpace(strings.TrimPrefix(cmd, "systemctl is-active "))
 		return "ansible.builtin.systemd",
-			fmt.Sprintf("name: %s\n        state: started\n        enabled: true", quoteScalar(svc)),
+			fmt.Sprintf("name: %s\nstate: started\nenabled: true", quoteScalar(svc)),
 			""
 	}
 	// Pattern E: dpkg -s <pkg> → ansible.builtin.apt
 	if strings.HasPrefix(cmd, "dpkg -s ") {
 		pkg := strings.TrimSpace(strings.TrimPrefix(cmd, "dpkg -s "))
 		return "ansible.builtin.apt",
-			fmt.Sprintf("name: %s\n        state: present", quoteScalar(pkg)),
+			fmt.Sprintf("name: %s\nstate: present", quoteScalar(pkg)),
 			""
 	}
 	// Pattern F: explicit awk "{if ($1+0 < 20.0) print OK; else print FAIL:...}" — load avg sanity
@@ -228,6 +235,20 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// unquote strips a single layer of surrounding single or double quotes.
+// The spec's Expected column uses quotes to denote a string value
+// (e.g. "0" for a sysctl); those quotes are presentation, not part of
+// the value, and must not leak into generated YAML.
+func unquote(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 func lastWord(s string) string {

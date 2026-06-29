@@ -3,7 +3,64 @@ package spec
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+// TestGenerate_RenderYAML_MultiLineModulesAreValid is a regression test
+// for the double-indentation bug: sysctl/systemd/apt tasks have
+// multi-key params, and the generator used to pre-indent the
+// continuation lines which RenderYAML then indented again, producing
+// unparseable YAML. The whole playbook must round-trip through a YAML
+// parser, and the nested keys must land at the right depth.
+func TestGenerate_RenderYAML_MultiLineModulesAreValid(t *testing.T) {
+	body := `# Verification Spec — multiline
+
+## 2. Checklist
+
+| ID | Category | Check | Expected | Command |
+|----|----------|-------|----------|---------|
+| C1 | sysctl | ip_forward | "0" | ` + "`sysctl -n net.ipv4.ip_forward`" + ` |
+| C2 | service | sshd | active | ` + "`systemctl is-active sshd`" + ` |
+| C3 | package | fail2ban | present | ` + "`dpkg -s fail2ban`" + ` |
+`
+	s, err := ParseReader(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := Generate(s, GenerateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := pb.RenderYAML()
+
+	// 1. The whole document must parse.
+	var plays []map[string]any
+	if err := yaml.Unmarshal([]byte(out), &plays); err != nil {
+		t.Fatalf("generated YAML does not parse: %v\n--- output ---\n%s", err, out)
+	}
+	if len(plays) != 1 {
+		t.Fatalf("want 1 play, got %d", len(plays))
+	}
+
+	// 2. The sysctl task's params must be a nested mapping with both keys.
+	tasks, _ := plays[0]["tasks"].([]any)
+	if len(tasks) != 3 {
+		t.Fatalf("want 3 tasks, got %d", len(tasks))
+	}
+	sysctl, _ := tasks[0].(map[string]any)
+	params, ok := sysctl["ansible.posix.sysctl"].(map[string]any)
+	if !ok {
+		t.Fatalf("sysctl params did not parse as a mapping: %#v", sysctl["ansible.posix.sysctl"])
+	}
+	// 3. The expected quotes must have been stripped: value is 0, not "0".
+	if got := params["value"]; got != "0" {
+		t.Errorf("sysctl value = %#v, want %q (surrounding quotes should be stripped)", got, "0")
+	}
+	if got := params["name"]; got != "net.ipv4.ip_forward" {
+		t.Errorf("sysctl name = %#v", got)
+	}
+}
 
 func TestGenerate_Dedup(t *testing.T) {
 	// Three rows with the same dedup key (all "test -f /tmp/a").
