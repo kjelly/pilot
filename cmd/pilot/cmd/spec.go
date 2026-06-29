@@ -25,6 +25,8 @@ var (
 	specRunIDFlag   string
 	specHosts        string
 	specConnection   string
+	specToInv        string
+	specFromSSH      bool
 )
 
 var specCmd = &cobra.Command{
@@ -61,6 +63,8 @@ func init() {
 	specCmd.Flags().StringVar(&specRunIDFlag, "run-id", "", "pilot run id to record against (default: derived from spec path)")
 	specCmd.Flags().StringVar(&specHosts, "hosts", "", "override play hosts (default: localhost). Use with --apply/-i to target real hosts.")
 	specCmd.Flags().StringVar(&specConnection, "connection", "", "override play connection (default: local). Use a real SSH-style value to disable local connection.")
+	specCmd.Flags().StringVar(&specToInv, "to-inventory", "", "render a Targets table to an ansible inventory file at the given path")
+	specCmd.Flags().BoolVar(&specFromSSH, "from-ssh-config", false, "use ~/.ssh/config to fill missing host fields before generating the inventory")
 	rootCmd.AddCommand(specCmd)
 }
 
@@ -88,6 +92,9 @@ func runSpec(cmd *cobra.Command, args []string) error {
 
 	// Default action: short summary.
 	action := "summary"
+	if specToInv != "" {
+		action = "to-inventory"
+	}
 	if specGenerateOut != "" {
 		action = "generate"
 	}
@@ -96,6 +103,8 @@ func runSpec(cmd *cobra.Command, args []string) error {
 	}
 
 	switch action {
+	case "to-inventory":
+		return emitSpecInventory(cmd, parsed, specToInv, specFromSSH)
 	case "summary":
 		fmt.Printf("spec %s: %d rows\n", parsed.Title, len(parsed.Rows))
 		fmt.Println("Use --lint / --generate / --apply to take action.")
@@ -273,4 +282,84 @@ func toSpecCheckpoints(in []*store.Checkpoint) []spec.Checkpoint {
 		}
 	}
 	return out
+}
+
+// emitSpecInventory renders a Spec's Targets table (or whatever
+// InventoryFromSSHConfig fills in) to an ansible inventory YAML
+// at `out`. It is the bridge between the spec — the human-edited
+// source of truth — and the inventory — the runtime artifact the
+// runner consumes.
+//
+// The function is also where `pilot spec --apply -i …` could
+// eventually skip the user's `inventory.yaml` entirely: if a
+// spec author wrote a Targets table, `--to-inventory` here
+// replaces the manual `cat > inventory.yaml` ritual we used in
+// the v1 pam-oidc-sshd run.
+func emitSpecInventory(cmd *cobra.Command, parsed *spec.Spec, out string, fromSSH bool) error {
+	if parsed == nil {
+		return fmt.Errorf("spec: nil parsed")
+	}
+	if out == "" {
+		return fmt.Errorf("--to-inventory requires an output path")
+	}
+	// If the spec has no Targets table AND fromSSH is set, we can
+	// synthesize a single-host Hosts entry from the alias passed on
+	// the CLI (via --inventory alias?). For now we just call out the
+	// missing inputs — expanding this is left as a follow-up.
+	if !parsed.HasTargets() && !fromSSH {
+		return fmt.Errorf("spec %s has no Targets table; pass --from-ssh-config ALIAS "+
+			"to synthesize from $HOME/.ssh/config",
+			parsed.Title)
+	}
+	opts := spec.GenerateInventoryOptions{}
+	// When fromSSH is set, augment any blank Address/User/IdentityFile
+	// fields from the matching ~/.ssh/config block. The simplest MVP
+	// applies the resolved-once config to every Host with a blank;
+	// production-grade would let columns choose which alias to look up.
+	if fromSSH {
+		opts.SSHDefaults = map[string]string{}
+		// We still let the spec's own values win — only fill blanks.
+	}
+	for i := range parsed.Hosts {
+		if fromSSH {
+			if h, _ := spec.InventoryFromSSHConfig(parsed.Hosts[i].Hostname); h != nil {
+				if parsed.Hosts[i].Address == "" {
+					parsed.Hosts[i].Address = h.Address
+				}
+				if parsed.Hosts[i].User == "" {
+					parsed.Hosts[i].User = h.User
+				}
+				if parsed.Hosts[i].IdentityFile == "" {
+					parsed.Hosts[i].IdentityFile = h.IdentityFile
+				}
+				if parsed.Hosts[i].Port == "" {
+					parsed.Hosts[i].Port = h.Port
+				}
+			}
+		}
+	}
+	rendered, err := parsed.GenerateInventory(opts)
+	if err != nil {
+		return err
+	}
+	if rendered == "" {
+		return fmt.Errorf("spec %s has no inventory content to write", parsed.Title)
+	}
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil && filepath.Dir(out) != "" {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(out), err)
+	}
+	if err := os.WriteFile(out, []byte(rendered), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", out, err)
+	}
+	fmt.Printf("✔ inventory written: %s (%d hosts from spec%s)\n",
+		out, len(parsed.Hosts),
+		ternary(fromSSH, " + ~/.ssh/config augmented", ""))
+	return nil
+}
+
+func ternary(b bool, t, f string) string {
+	if b {
+		return t
+	}
+	return f
 }
