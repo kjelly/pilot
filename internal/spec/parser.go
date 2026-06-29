@@ -1,0 +1,155 @@
+package spec
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+)
+
+// Row is one checklist entry from a spec.
+type Row struct {
+	ID       string // e.g. "C1", "C2.5.1"
+	Category string // e.g. "file", "sysctl", "service"
+	Check    string // human description
+	Expected string // machine-comparable expected value
+	Command  string // one-line shell command, executed on target host
+	// line is the 1-based source line (used for diagnostics).
+	Line int
+}
+
+// Spec is the parsed content of one verification markdown file.
+type Spec struct {
+	Path      string // absolute path on disk
+	Title     string // "# Verification Spec — <title>"
+	Version   string // `> 版本：vX.Y`
+	Alignment string // `> 對齊規範：...`
+	Maintainer string
+	Rows      []Row
+	// rawChecklist keeps the markdown table so we can re-emit it
+	// in reports without reparsing.
+	rawChecklist []string
+}
+
+// Parse reads a markdown spec file and returns a Spec.
+func Parse(path string) (*Spec, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("spec: open %s: %w", path, err)
+	}
+	defer f.Close()
+	s, err := ParseReader(f)
+	if err != nil {
+		return nil, err
+	}
+	abs, _ := filepath.Abs(path)
+	s.Path = abs
+	return s, nil
+}
+
+// ParseReader parses a spec from any io.Reader. Used by tests and
+// when reading specs from stdin.
+func ParseReader(r io.Reader) (*Spec, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	s := &Spec{}
+	state := stateNormal
+	checklistHeaders := []string{}
+	for lineNo := 1; scanner.Scan(); lineNo++ {
+		line := scanner.Text()
+		switch state {
+		case stateNormal:
+			switch {
+			case strings.HasPrefix(line, "# "):
+				if s.Title == "" {
+					s.Title = strings.TrimSpace(strings.TrimPrefix(line, "# "))
+				}
+			case strings.HasPrefix(line, "> 版本："):
+				s.Version = strings.TrimSpace(strings.TrimPrefix(line, "> 版本："))
+			case strings.HasPrefix(line, "> 對齊規範："):
+				s.Alignment = strings.TrimSpace(strings.TrimPrefix(line, "> 對齊規範："))
+			case strings.HasPrefix(line, "> 維護者："):
+				s.Maintainer = strings.TrimSpace(strings.TrimPrefix(line, "> 維護者："))
+			case strings.HasPrefix(line, "## 2. Checklist"):
+				state = stateChecklist
+			}
+		case stateChecklist:
+			if strings.HasPrefix(line, "## ") {
+				state = stateNormal
+				continue
+			}
+			if !strings.HasPrefix(line, "|") {
+				continue
+			}
+			s.rawChecklist = append(s.rawChecklist, line)
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "|----") || strings.HasPrefix(trimmed, "| ---") {
+				continue
+			}
+			cols := splitRow(line)
+			if len(cols) < 5 {
+				continue // malformed row — Lint will report
+			}
+			if len(checklistHeaders) == 0 {
+				checklistHeaders = cols
+				continue
+			}
+			row := Row{
+				ID:       cols[0],
+				Category: cols[1],
+				Check:    cols[2],
+				Expected: cols[3],
+				Command:  stripBackticks(cols[4]),
+				Line:     lineNo,
+			}
+			s.Rows = append(s.Rows, row)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("spec: read: %w", err)
+	}
+	if s.Title == "" {
+		return nil, errors.New("spec: missing top-level `# Verification Spec — <title>` heading")
+	}
+	if len(s.Rows) == 0 {
+		return nil, errors.New("spec: no checklist rows found under `## 2. Checklist`")
+	}
+	return s, nil
+}
+
+const (
+	stateNormal = iota
+	stateChecklist
+)
+
+// splitRow splits a markdown table row "| a | b | c |" into its
+// trimmed column values. Empty leading/trailing pipes are tolerated.
+func splitRow(line string) []string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "|")
+	line = strings.TrimSuffix(line, "|")
+	parts := strings.Split(line, "|")
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		out[i] = strings.TrimSpace(p)
+	}
+	return out
+}
+
+// stripBackticks removes a single layer of surrounding backticks
+// from a cell value. spec-runner.py and Lint both treat `…` and `…`
+// identically.
+func stripBackticks(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '`' && s[len(s)-1] == '`' {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// IDPattern matches valid spec IDs like "C1", "C2.5.1", "REQ-001".
+var IDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]*$`)

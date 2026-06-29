@@ -26,21 +26,23 @@ type Run struct {
 }
 
 type Proposal struct {
-	ID         string
-	RunID      string
-	Host       string
-	Tool       string
-	Args       json.RawMessage
-	Rationale  string
-	RiskLevel  string
-	CISControl string
-	Status     string
-	CreatedAt  time.Time
-	ReviewedAt *time.Time
-	AppliedAt  *time.Time
-	FilePath   string
-	Reversible bool
-	DryRun     bool // true if this proposal was generated under --dry-run-all
+	ID         string          `json:"id"`
+	RunID      string          `json:"run_id"`
+	Host       string          `json:"host"`
+	Tool       string          `json:"tool"`
+	Args       json.RawMessage `json:"args"`
+	Rationale  string          `json:"rationale"`
+	RiskLevel  string          `json:"risk_level"`
+	CISControl string          `json:"cis_control,omitempty"`
+	SpecID     string          `json:"spec_id,omitempty"`
+	RowID      string          `json:"row_id,omitempty"`
+	Status     string          `json:"status"`
+	Reversible bool            `json:"reversible"`
+	DryRun     bool            `json:"dry_run,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+	ReviewedAt *time.Time      `json:"reviewed_at,omitempty"`
+	AppliedAt  *time.Time      `json:"applied_at,omitempty"`
+	FilePath   string          `json:"file_path,omitempty"`
 }
 
 // PlanOperation is one step inside a Plan. A plan can be approved in
@@ -87,7 +89,7 @@ type Store struct {
 // migration is added to migrateSteps. PRAGMA user_version is used to
 // record the installed version on disk so that startup is idempotent
 // and free of swallowed errors.
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 const schema = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -225,6 +227,41 @@ var migrateSteps = []migration{
 	{
 		Description: "add runs.sandbox_image (sandbox mode audit trail)",
 		SQL:         `ALTER TABLE runs ADD COLUMN sandbox_image TEXT DEFAULT '';`,
+	},
+	{
+		Description: "add spec traceability (proposals.spec_id/row_id + spec_checkpoints + proposal_results)",
+		SQL: `ALTER TABLE proposals ADD COLUMN spec_id TEXT DEFAULT '';
+		      ALTER TABLE proposals ADD COLUMN row_id TEXT DEFAULT '';
+		      CREATE INDEX IF NOT EXISTS idx_proposals_spec ON proposals(spec_id, row_id);
+		      CREATE TABLE IF NOT EXISTS spec_checkpoints (
+				id            INTEGER PRIMARY KEY AUTOINCREMENT,
+				spec_path     TEXT NOT NULL,
+				row_id        TEXT NOT NULL,
+				run_id        TEXT NOT NULL,
+				proposal_id   TEXT DEFAULT '',
+				task_index    INTEGER NOT NULL DEFAULT 0,
+				module        TEXT DEFAULT '',
+				param_hash    TEXT DEFAULT '',
+				status        TEXT NOT NULL DEFAULT 'compiled',
+				verified_at   DATETIME,
+				verify_detail TEXT DEFAULT '',
+				created_at    DATETIME NOT NULL,
+				UNIQUE(spec_path, row_id, run_id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_checkpoints_spec ON spec_checkpoints(spec_path, row_id);
+			CREATE INDEX IF NOT EXISTS idx_checkpoints_run ON spec_checkpoints(run_id);
+			CREATE INDEX IF NOT EXISTS idx_checkpoints_proposal ON spec_checkpoints(proposal_id);
+			CREATE TABLE IF NOT EXISTS proposal_results (
+				id           INTEGER PRIMARY KEY AUTOINCREMENT,
+				proposal_id  TEXT NOT NULL,
+				check_id     TEXT NOT NULL,
+				host         TEXT NOT NULL DEFAULT '',
+				status       TEXT NOT NULL,
+				detail       TEXT DEFAULT '',
+				recorded_at  DATETIME NOT NULL,
+				UNIQUE(proposal_id, check_id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_presults_proposal ON proposal_results(proposal_id);`,
 	},
 }
 
@@ -451,7 +488,7 @@ func (s *Store) UpdateProposalStatus(id, status string) error {
 }
 
 func (s *Store) GetProposal(id string) (*Proposal, error) {
-	row := s.db.QueryRow(`SELECT id, run_id, host, tool, args, rationale, risk_level, cis_control, status, reversible, created_at, reviewed_at, applied_at, file_path, dry_run FROM proposals WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, run_id, host, tool, args, rationale, risk_level, cis_control, spec_id, row_id, status, reversible, created_at, reviewed_at, applied_at, file_path, dry_run FROM proposals WHERE id = ?`, id)
 	var p Proposal
 	var argsStr string
 	var reversible, dryRun int
@@ -465,7 +502,7 @@ func (s *Store) GetProposal(id string) (*Proposal, error) {
 }
 
 func (s *Store) ListProposals(runID string) ([]*Proposal, error) {
-	rows, err := s.db.Query(`SELECT id, run_id, host, tool, args, rationale, risk_level, cis_control, status, reversible, created_at, reviewed_at, applied_at, file_path, dry_run FROM proposals WHERE run_id = ? ORDER BY created_at`, runID)
+	rows, err := s.db.Query(`SELECT id, run_id, host, tool, args, rationale, risk_level, cis_control, spec_id, row_id, status, reversible, created_at, reviewed_at, applied_at, file_path, dry_run FROM proposals WHERE run_id = ? ORDER BY created_at`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -475,7 +512,7 @@ func (s *Store) ListProposals(runID string) ([]*Proposal, error) {
 		var p Proposal
 		var argsStr string
 		var reversible, dryRun int
-		if err := rows.Scan(&p.ID, &p.RunID, &p.Host, &p.Tool, &argsStr, &p.Rationale, &p.RiskLevel, &p.CISControl, &p.Status, &reversible, &p.CreatedAt, &p.ReviewedAt, &p.AppliedAt, &p.FilePath, &dryRun); err != nil {
+		if err := rows.Scan(&p.ID, &p.RunID, &p.Host, &p.Tool, &argsStr, &p.Rationale, &p.RiskLevel, &p.CISControl, &p.SpecID, &p.RowID, &p.Status, &reversible, &p.CreatedAt, &p.ReviewedAt, &p.AppliedAt, &p.FilePath, &dryRun); err != nil {
 			return nil, err
 		}
 		p.Args = json.RawMessage(argsStr)
@@ -694,4 +731,120 @@ func (s *Store) GetEmbedding(textHash, model string) ([]float32, error) {
 		return nil, err
 	}
 	return vec, nil
+}
+
+// --- spec traceability (apply → verify closure) -----------------------
+
+// Checkpoint is the persisted (spec_path, row_id, run_id, proposal_id)
+// mapping. It lets auditors answer "where in run X did requirement
+// C2.5.1 land?" and "have all spec rows been verified?".
+type Checkpoint struct {
+	ID           int64
+	SpecPath     string
+	RowID        string
+	RunID        string
+	ProposalID   string
+	TaskIndex    int
+	Module       string
+	ParamHash    string
+	Status       string // compiled | applied | verified-pass | verified-fail
+	VerifiedAt   *time.Time
+	VerifyDetail string
+	CreatedAt    time.Time
+}
+
+// UpsertCheckpoint inserts or updates a (spec_path, row_id, run_id)
+// checkpoint. Used by `pilot spec --generate` to record the
+// (spec → task → proposal) linkage, and by `pilot verify` to flip
+// Status to verified-pass / verified-fail.
+func (s *Store) UpsertCheckpoint(cp *Checkpoint) error {
+	if cp.CreatedAt.IsZero() {
+		cp.CreatedAt = time.Now()
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO spec_checkpoints
+		 (spec_path, row_id, run_id, proposal_id, task_index, module, param_hash, status, verified_at, verify_detail, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(spec_path, row_id, run_id) DO UPDATE SET
+			proposal_id = excluded.proposal_id,
+			status = excluded.status,
+			verified_at = excluded.verified_at,
+			verify_detail = excluded.verify_detail`,
+		cp.SpecPath, cp.RowID, cp.RunID, cp.ProposalID, cp.TaskIndex, cp.Module, cp.ParamHash,
+		cp.Status, cp.VerifiedAt, cp.VerifyDetail, cp.CreatedAt,
+	)
+	return err
+}
+
+// ListCheckpoints returns every checkpoint for a given spec path.
+// Used by `pilot spec --status` and by Coverage rolls.
+func (s *Store) ListCheckpoints(specPath string) ([]*Checkpoint, error) {
+	rows, err := s.db.Query(`SELECT id, spec_path, row_id, run_id, proposal_id, task_index, module, param_hash, status, verified_at, verify_detail, created_at FROM spec_checkpoints WHERE spec_path = ? ORDER BY row_id`, specPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*Checkpoint
+	for rows.Next() {
+		var cp Checkpoint
+		var verifiedAt sql.NullTime
+		if err := rows.Scan(&cp.ID, &cp.SpecPath, &cp.RowID, &cp.RunID, &cp.ProposalID, &cp.TaskIndex, &cp.Module, &cp.ParamHash, &cp.Status, &verifiedAt, &cp.VerifyDetail, &cp.CreatedAt); err != nil {
+			return nil, err
+		}
+		if verifiedAt.Valid {
+			t := verifiedAt.Time
+			cp.VerifiedAt = &t
+		}
+		out = append(out, &cp)
+	}
+	return out, rows.Err()
+}
+
+// ProposalResult is one row of the verify report tied back to the
+// proposal that produced the change.
+type ProposalResult struct {
+	ID         int64
+	ProposalID string
+	CheckID    string
+	Host       string
+	Status     string // pass | fail | skip
+	Detail     string
+	RecordedAt time.Time
+}
+
+// RecordProposalResult stores one {proposal, check_id, status} triple.
+// Re-recording the same (proposal, check_id) updates the previous row,
+// so a re-run reflects the latest outcome.
+func (s *Store) RecordProposalResult(r *ProposalResult) error {
+	if r.RecordedAt.IsZero() {
+		r.RecordedAt = time.Now()
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO proposal_results (proposal_id, check_id, host, status, detail, recorded_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(proposal_id, check_id) DO UPDATE SET
+			status = excluded.status,
+			detail = excluded.detail,
+			recorded_at = excluded.recorded_at`,
+		r.ProposalID, r.CheckID, r.Host, r.Status, r.Detail, r.RecordedAt,
+	)
+	return err
+}
+
+// ListProposalResults returns every verify result for one proposal.
+func (s *Store) ListProposalResults(proposalID string) ([]*ProposalResult, error) {
+	rows, err := s.db.Query(`SELECT id, proposal_id, check_id, host, status, detail, recorded_at FROM proposal_results WHERE proposal_id = ? ORDER BY check_id`, proposalID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*ProposalResult
+	for rows.Next() {
+		var r ProposalResult
+		if err := rows.Scan(&r.ID, &r.ProposalID, &r.CheckID, &r.Host, &r.Status, &r.Detail, &r.RecordedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &r)
+	}
+	return out, rows.Err()
 }

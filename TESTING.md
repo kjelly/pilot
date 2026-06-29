@@ -5,6 +5,29 @@
 
 ---
 
+## 0. Repository layout & version control policy
+
+pilot is a generic tool repo. The split between "code in git" and "state on disk" matters:
+
+| Path                          | In git? | Why                                        |
+|-------------------------------|---------|--------------------------------------------|
+| `docs/verification/*.md`      | yes     | Spec is the source of truth — must review  |
+| `playbooks/*.yaml` / `.yml`   | yes     | Hand-written, peer-reviewed                |
+| `playbooks/generated/*.yml`   | **no**  | Derived from `pilot spec --generate`; reproducible |
+| `.verification/*.md`         | **no**  | One file per `pilot verify` run; local evidence only |
+| `~/.local/share/pilot/history.db` | **no** | SQLite: runs / proposals / spec_checkpoints / agent_messages |
+| `*.ndjson`                    | **no**  | Raw verifier output (also covered by `.verification/`) |
+
+The pattern: **specs and playbooks in git, execution state in SQLite, evidence on local disk.**
+SQLite only stores *paths and IDs* (e.g. `spec_checkpoints.spec_path = "docs/verification/X.md"`),
+never spec content. This way `git clone` + a DB restore is enough to bootstrap any machine.
+
+To wipe all local state without touching git:
+
+```bash
+rm -rf .verification/ ~/.local/share/pilot/history.db
+```
+
 ## TL;DR — 一行驗證所有東西
 
 ```bash

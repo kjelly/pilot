@@ -142,9 +142,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// ----- 2. Mode parsing ---------------------------------------------
-	// \`mode\` is a placeholder for future parallel-execution support.
-	// Currently every run is serial; the flag is accepted for forward
-	// compatibility but its value is not used downstream.
+	// mode is "serial" (default) or "parallel". When "parallel",
+	// multiple playbooks run concurrently up to cfg.MaxConc
+	// (default 5). Fail-fast cancels remaining work on first
+	// failure and waits for in-flight goroutines to drain.
 	mode := runMode
 
 	// ----- 3. Setup stack ----------------------------------------------
@@ -233,13 +234,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 			br  batchResult
 		}
 		resChan := make(chan indexedResult, len(targets))
+		// failFastCtx is cancelled the moment any worker reports
+		// failure (when --fail-fast is set). runOneTarget checks
+		// ctx.Err() between stages so an in-flight ansible run
+		// still gets to finish its current call before yielding,
+		// instead of leaving zombie subprocesses behind.
+		failFastCtx, cancelFailFast := context.WithCancel(ctx)
+		defer cancelFailFast()
 
 		for i, tgt := range targets {
 			go func(index int, target playbookTarget) {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				prefix := fmt.Sprintf("[%d/%d] ", index+1, len(targets))
-				br := runOneTarget(ctx, res, batchID, prefix, target, mode)
+				br := runOneTarget(failFastCtx, res, batchID, prefix, target, mode)
 				resChan <- indexedResult{idx: index, br: br}
 			}(i, tgt)
 		}
@@ -260,8 +268,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 			if runFailFast && !ir.br.OK {
 				if res.TUI == nil {
-					fmt.Fprintln(os.Stderr, "  --fail-fast: stopping batch run")
+					fmt.Fprintln(os.Stderr, "  --fail-fast: cancelling remaining workers")
 				}
+				cancelFailFast()
 			}
 		}
 	} else {

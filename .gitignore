@@ -36,3 +36,10 @@ coverage.txt
 .ansible/
 *.vault
 *vault-password*
+
+# `pilot spec --generate` output — derived, not source
+/playbooks/generated/
+/playbooks/*/generated/
+
+# Stale test artifact
+*.tmp
