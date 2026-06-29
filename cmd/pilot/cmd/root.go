@@ -13,9 +13,7 @@ import (
 	"github.com/anomalyco/pilot/internal/agent"
 	"github.com/anomalyco/pilot/internal/app"
 	"github.com/anomalyco/pilot/internal/config"
-	"github.com/anomalyco/pilot/internal/sanitizer"
 	"github.com/anomalyco/pilot/internal/store"
-	"github.com/anomalyco/pilot/internal/ui"
 	"github.com/anomalyco/pilot/internal/ui/tui"
 )
 
@@ -172,38 +170,29 @@ func newRunRecord(cfg *config.Config, mode, playbook, inventory string) *store.R
 	return r
 }
 
-// newAgentLoop assembles an agent.Loop with the full tool stack and
-// TUI bridge. The actual stack assembly lives in internal/app; this
-// function preserves the historical 7-argument signature so every
-// caller continues to compile.
+// newAgentLoop assembles an agent.Loop from an already-constructed
+// *App. It deliberately does NOT call app.New again — the caller
+// (runOneTarget) was given the *App from setupRunWithOpts, and
+// rebuilding the stack here would re-open the 100 MB bleve index,
+// re-Ping Ollama, and re-walk every default. For batch runs that
+// meant N+1 App constructions for N playbooks; for a single run it
+// still cost a full duplicate start-up that could hang.
+//
+// Callers that hit the nil-res path get a failing Loop so the failure
+// surfaces in the same place (the agent loop) rather than silently
+// returning a working-but-stale Loop.
 func newAgentLoop(
-	cfg *config.Config,
+	res *setupResult,
 	runID string,
-	st *store.Store,
-	redactor *sanitizer.Redactor,
-	approver *ui.ConsoleApprover,
-	tp *tui.Program,
 	streamWriter io.Writer,
 ) *agent.Loop {
-	_ = st
-	_ = redactor
-	_ = approver
-	a, err := app.New(context.Background(), cfg, app.Options{
-		NoTUI:  tp == nil,
-		Banner: false,
-	})
-	if err != nil {
-		// App construction only fails if Ollama is unreachable or the
-		// data dir is unusable. Returning a Loop that fails on first
-		// call keeps the historical signature; callers can inspect
-		// the App error separately via direct construction.
-		return agent.NewLoop(agent.Config{RunID: runID, DataDir: cfg.DataDir})
+	if res == nil {
+		return agent.NewLoop(agent.Config{RunID: runID, DataDir: ""})
 	}
-	a.TUI = tp
 	if streamWriter == nil {
 		streamWriter = os.Stderr
 	}
-	return a.NewLoop(runID, streamWriter)
+	return res.NewLoop(runID, streamWriter)
 }
 
 // newAgentLoopWithDefaults wires chat-session defaults (from

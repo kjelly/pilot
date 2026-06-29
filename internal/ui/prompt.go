@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -124,6 +125,17 @@ func printProposal(p *agent.Proposal) {
 	}
 	fmt.Fprintf(os.Stderr, "  可逆:     %s\n", boolMark(p.Reversible))
 	fmt.Fprintln(os.Stderr)
+	// 操作: the tool's actual arguments — what will really happen. Without
+	// this, run_command/read_file proposals hid the concrete command/path
+	// behind "Show full details". Meta fields (_rationale/_risk_level/…)
+	// are stripped since they're surfaced separately.
+	if action := summarizeArgs(p.Args); action != "" {
+		fmt.Fprintf(os.Stderr, "  📦 操作（實際參數）:\n")
+		for _, line := range strings.Split(action, "\n") {
+			fmt.Fprintf(os.Stderr, "     %s\n", line)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
 	fmt.Fprintf(os.Stderr, "  💭 理由:\n")
 	for _, line := range wrap(p.Rationale, 60) {
 		fmt.Fprintf(os.Stderr, "     %s\n", line)
@@ -140,6 +152,49 @@ func printProposal(p *agent.Proposal) {
 		}
 	}
 	fmt.Fprintln(os.Stderr, strings.Repeat("─", 70))
+}
+
+// summarizeArgs renders a tool's real arguments for the approval screen.
+// pilot-internal metadata fields (_rationale / _risk_level / _host /
+// _cis_control) are stripped because they are shown separately. Common
+// single-argument tools (run_command, read_file) get a compact one-line
+// form; everything else is pretty-printed JSON. Returns "" when there is
+// nothing meaningful to show.
+func summarizeArgs(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		// Not a JSON object (or malformed) — show the raw text.
+		return truncateStr(strings.TrimSpace(string(raw)), 800)
+	}
+	for _, k := range []string{"_rationale", "_risk_level", "_host", "_cis_control"} {
+		delete(m, k)
+	}
+	if len(m) == 0 {
+		return ""
+	}
+	// Compact one-liner for the common read-only probes so the actual
+	// command/path is front-and-centre, not buried in JSON braces.
+	if cmd, ok := m["command"].(string); ok && len(m) == 1 {
+		return truncateStr(strings.TrimSpace(cmd), 800)
+	}
+	if path, ok := m["path"].(string); ok && len(m) == 1 {
+		return truncateStr(strings.TrimSpace(path), 800)
+	}
+	pretty, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return truncateStr(strings.TrimSpace(string(raw)), 800)
+	}
+	return truncateStr(string(pretty), 800)
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "\n... [truncated, use 🔧 Show full details for everything]"
 }
 
 func colorizeLine(line string) string {

@@ -154,6 +154,23 @@ var commandWhitelist = []CmdSpec{
 	{Program: "uptime"},
 	{Program: "dpkg", Args: []ArgPattern{{Exact: "-l"}}},
 	{Program: "apt", Args: []ArgPattern{{Exact: "list"}, {Exact: "--upgradable"}}},
+
+	// Read-only filesystem / environment probes. These are the
+	// first things the LLM reaches for when it has no idea what
+	// host it's looking at. Without them the LLM guesses the cwd
+	// and the playbook path, which produces a flood of "not in
+	// allowed paths" errors and noisy proposal spam.
+	{Program: "pwd"},
+	{Program: "ls"},
+	{Program: "find", Args: []ArgPattern{{Prefix: "-"}}}, // require at least one flag (defense)
+	{Program: "realpath"},
+	{Program: "stat"},
+	{Program: "head"},
+	{Program: "tail"},
+	{Program: "wc"},
+	{Program: "which"},
+	{Program: "echo"},
+	{Program: "env"},
 }
 
 type RunCommandTool struct {
@@ -245,8 +262,16 @@ func (t *RunCommandTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		}, nil
 	}
 	if !t.isWhitelisted(argv) {
+		// Build a short list of allowed program names so the LLM
+		// can self-correct instead of guessing. Including this in
+		// the error message is what unblocks the LLM in the common
+		// "agent doesn't know which commands are safe" case.
+		programs := make([]string, 0, len(commandWhitelist))
+		for _, s := range commandWhitelist {
+			programs = append(programs, s.Program)
+		}
 		return &Result{
-			Content: fmt.Sprintf("ERROR: command %q is not on the whitelist. Allowed: read-only inspection commands (systemctl status, ss, ip, sysctl <read-only>, aa-status, ufw, dpkg).", cmdStr),
+			Content: fmt.Sprintf("ERROR: command %q is not on the whitelist. Allowed programs: %v. (read-only inspection only — no mutating commands, no shell metacharacters)", cmdStr, programs),
 			IsError: true,
 		}, nil
 	}
@@ -335,7 +360,31 @@ func (t *RunCommandTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		out += "\n--- stderr ---\n" + esb.String()
 	}
 	if err != nil {
-		return &Result{Content: fmt.Sprintf("ERROR (exit non-zero): %s\n%s", err, out), IsError: true}, nil
+		// Prefix the result so the LLM knows this is a tool failure,
+		// not an empty response. The earlier form was
+		//   "ERROR (exit non-zero): <err>\n<out>"
+		// which the LLM could misread as "empty". Adding a structured
+		// header + actionable hint prevents the "I see no output"
+		// hallucination we saw in the original run.
+		hint := ""
+		if isWhitelistHint(err) {
+			hint = " (command is not in the whitelist — try one of: ls, pwd, find -name ..., uname -a, cat <path>, systemctl status, ss -tlnp, ip addr show, sysctl net.*, id, whoami, date, uptime, dpkg -l)"
+		}
+		return &Result{Content: fmt.Sprintf("run_command FAILED (exit non-zero)%s\n%v\n--- output ---\n%s", hint, err, out), IsError: true}, nil
 	}
 	return &Result{Content: out}, nil
+}
+
+// isWhitelistHint returns true if the err string looks like the
+// kind of failure that the LLM should respond to by trying a
+// different command (e.g. "exit status 1" from ls on a path
+// that doesn't exist is NOT a whitelist hint, but "command not
+// found" is).
+func isWhitelistHint(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "executable file not found") ||
+		strings.Contains(s, "no such file or directory") && strings.Contains(s, "bin/")
 }

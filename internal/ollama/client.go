@@ -1,6 +1,7 @@
 package ollama
 
 import (
+	"time"
 	"bufio"
 	"bytes"
 	"context"
@@ -19,12 +20,22 @@ type Client struct {
 	http       *http.Client
 }
 
+// defaultHTTPTimeout caps any single Ollama HTTP call when the
+// caller passes a context without a deadline (i.e. context.Background()
+// or the agent loop's root context). Per-call contexts with their own
+// deadlines still take precedence — http.Client's built-in Timeout
+// is only used when the context has no deadline. 2 minutes is well
+// above the slowest real call we've seen (a streaming chat with the
+// cloud model cold-starts in ~5s and finishes inside 30s for the
+// playbooks used in CI).
+const defaultHTTPTimeout = 2 * time.Minute
+
 func NewClient(baseURL, model string) *Client {
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		model:      model,
 		embedModel: "nomic-embed-text", // sensible default
-		http:       &http.Client{}, // no static Timeout — rely on per-call context for cancellation
+		http:       &http.Client{Timeout: defaultHTTPTimeout},
 	}
 }
 
@@ -80,10 +91,11 @@ type ChatResponse struct {
 type StreamChunk struct {
 	Model   string `json:"model"`
 	Message struct {
-		Role      string `json:"role"`
-		Content   string `json:"content"`
-		Thinking  string `json:"thinking,omitempty"`
-		Done      bool   `json:"done"`
+		Role      string     `json:"role"`
+		Content   string     `json:"content"`
+		Thinking  string     `json:"thinking,omitempty"`
+		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+		Done      bool       `json:"done"`
 	} `json:"message"`
 	Done bool `json:"done"`
 }
@@ -176,6 +188,9 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 		if err := json.Unmarshal(line, &chunk); err != nil {
 			continue
 		}
+		if len(chunk.Message.ToolCalls) > 0 {
+			final.Message.ToolCalls = append(final.Message.ToolCalls, chunk.Message.ToolCalls...)
+		}
 		if chunk.Message.Content != "" {
 			final.Message.Content += chunk.Message.Content
 			if onChunk != nil {
@@ -187,10 +202,8 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 				onChunk("", chunk.Message.Thinking)
 			}
 		}
-		// Tool calls typically come in the final chunk when streaming
-		if chunk.Done && len(final.Message.ToolCalls) == 0 {
-			// Re-fetch as non-streaming to get tool calls reliably
-			return c.Chat(ctx, messages, tools)
+		if chunk.Done {
+			return final, nil
 		}
 	}
 	if err := scanner.Err(); err != nil {

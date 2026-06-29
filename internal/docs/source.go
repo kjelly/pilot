@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"time"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -328,9 +329,19 @@ func stringOf(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
+// ansibleVersionTimeout bounds a single `ansible`/`ansible-doc`
+// invocation. Without this, a stuck subprocess (or a slow first
+// invocation on a cold ansible-core install) would hang the whole
+// agent loop forever because exec.CommandContext only fires when
+// the subprocess polls Go's runtime — which ansible-doc does not.
+// 30s is generous: a warm run is ~50 ms, a cold one is ~8s.
+const ansibleVersionTimeout = 30 * time.Second
+
 // AnsibleVersion returns the installed ansible-core version string.
 func AnsibleVersion(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "ansible", "--version")
+	timedCtx, cancel := context.WithTimeout(ctx, ansibleVersionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(timedCtx, "ansible", "--version")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
@@ -344,7 +355,9 @@ func AnsibleVersion(ctx context.Context) (string, error) {
 // ModuleNames returns a sorted list of module names by invoking
 // `ansible-doc -t module -l`. Used for version-hash computation.
 func ModuleNames(ctx context.Context) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "ansible-doc", "-t", "module", "-l")
+	timedCtx, cancel := context.WithTimeout(ctx, ansibleVersionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(timedCtx, "ansible-doc", "-t", "module", "-l")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {

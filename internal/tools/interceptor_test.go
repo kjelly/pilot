@@ -63,14 +63,17 @@ func TestRunPlaybookInterceptorDryRunRewrite(t *testing.T) {
 	spec := tp.Spec()
 
 	// Without dry-run, interceptor is a no-op.
-	DryRun = false
-	if res, _ := spec.Interceptor(context.Background(), json.RawMessage(`{"check":false}`)); res != nil {
+	ctxNoDry := ContextWithDryRun(context.Background(), false)
+	if res, _ := spec.Interceptor(ctxNoDry, json.RawMessage(`{"check":false}`)); res != nil {
 		t.Errorf("interceptor should be no-op outside dry-run, got: %+v", res)
 	}
 
 	// With dry-run, the agent loop's handleToolCall will call
 	// OverrideCheckFlag. Verify it does the rewrite correctly.
-	DryRun = true
+	ctxDry := ContextWithDryRun(context.Background(), true)
+	if res, _ := spec.Interceptor(ctxDry, json.RawMessage(`{"check":false}`)); res != nil {
+		t.Errorf("interceptor should be no-op on success/valid args under dry-run, got: %+v", res)
+	}
 	out, err := OverrideCheckFlag(json.RawMessage(`{"check":false,"playbook":"x.yml"}`))
 	if err != nil {
 		t.Fatalf("OverrideCheckFlag: %v", err)

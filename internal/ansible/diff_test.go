@@ -62,28 +62,28 @@ func TestParseDiff_NewAndDeleted(t *testing.T) {
 }
 
 func TestParseDiff_SensitiveRedacted(t *testing.T) {
-	// Construct a DiffSummary directly and confirm the sensitive path
-	// detection + redaction works through the public API.
-	path := "/etc/shadow"
-	diff := FileDiff{
-		Path:   path,
-		Before: "root:$y$j9T$OLD...",
-		After:  "root:$y$j9T$NEW...",
+	stdout := `--- before: /etc/shadow
++++ after: /etc/shadow
+@@ -1,1 +1,1 @@
+-root:$y$j9T$OLD...
++root:$y$j9T$NEW...
+`
+	summary := ParseDiff(stdout)
+	if summary.FilesTotal == 0 {
+		t.Fatalf("expected at least one file, got %d", summary.FilesTotal)
 	}
-	if !isSensitivePath(path) {
-		t.Fatalf("isSensitivePath(%q) returned false; expected true", path)
+	d := summary.Diffs[0]
+	if d.Path != "/etc/shadow" {
+		t.Errorf("expected path '/etc/shadow', got %q", d.Path)
 	}
-	// Simulate the redaction that ParseDiff would do.
-	if isSensitivePath(diff.Path) {
-		diff.IsSensitive = true
-		diff.Before = "[REDACTED: sensitive file]"
-		diff.After = "[REDACTED: sensitive file]"
+	if !d.IsSensitive {
+		t.Errorf("expected file to be marked sensitive")
 	}
-	if !strings.Contains(diff.Before, "REDACTED") {
-		t.Errorf("before not redacted: %q", diff.Before)
+	if strings.Contains(d.Before, "OLD") || !strings.Contains(d.Before, "REDACTED") {
+		t.Errorf("before not redacted: %q", d.Before)
 	}
-	if !strings.Contains(diff.After, "REDACTED") {
-		t.Errorf("after not redacted: %q", diff.After)
+	if strings.Contains(d.After, "NEW") || !strings.Contains(d.After, "REDACTED") {
+		t.Errorf("after not redacted: %q", d.After)
 	}
 }
 

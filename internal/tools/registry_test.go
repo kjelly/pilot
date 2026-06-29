@@ -190,3 +190,58 @@ func TestRegistryOllamaToolsSorted(t *testing.T) {
 		}
 	}
 }
+
+// TestWithProposalMeta_InjectsFields pins fix "B": every tool's schema
+// gains the _rationale / _risk_level / _cis_control properties so the
+// model has a declared channel to supply proposal metadata, while the
+// tool's own properties are preserved.
+func TestWithProposalMeta_InjectsFields(t *testing.T) {
+	in := json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)
+	out := withProposalMeta(in)
+
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if err := json.Unmarshal(out, &schema); err != nil {
+		t.Fatalf("augmented schema is not valid JSON: %v", err)
+	}
+	for _, k := range []string{"command", "_rationale", "_risk_level", "_cis_control"} {
+		if _, ok := schema.Properties[k]; !ok {
+			t.Errorf("expected property %q in augmented schema", k)
+		}
+	}
+	// Meta fields must stay optional — never forced into "required".
+	for _, r := range schema.Required {
+		if r == "_rationale" || r == "_risk_level" || r == "_cis_control" {
+			t.Errorf("meta field %q must not be required", r)
+		}
+	}
+}
+
+// TestWithProposalMeta_EmptyAndNonObject pins the fail-open behaviour:
+// an empty schema is synthesised into an object; a non-object schema is
+// returned untouched rather than breaking the tool.
+func TestWithProposalMeta_EmptyAndNonObject(t *testing.T) {
+	// Empty → synthesised object schema carrying the meta fields.
+	out := withProposalMeta(nil)
+	var schema struct {
+		Type       string                     `json:"type"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(out, &schema); err != nil {
+		t.Fatalf("empty input should yield valid JSON, got %q: %v", out, err)
+	}
+	if schema.Type != "object" {
+		t.Errorf("synthesised schema should have type=object, got %q", schema.Type)
+	}
+	if _, ok := schema.Properties["_rationale"]; !ok {
+		t.Error("synthesised schema should carry _rationale")
+	}
+
+	// Non-object JSON (a bare string) is returned verbatim.
+	weird := json.RawMessage(`"not a schema"`)
+	if got := withProposalMeta(weird); string(got) != string(weird) {
+		t.Errorf("non-object schema should be returned untouched, got %q", got)
+	}
+}

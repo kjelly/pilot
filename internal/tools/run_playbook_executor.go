@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/anomalyco/pilot/internal/ansible"
@@ -58,10 +59,20 @@ type playbookExecRequest struct {
 // tool state. Returns an error with an actionable message when the
 // configuration is invalid (e.g. docker-exec mode without a docker
 // connection).
+//
+// IMPORTANT: "no sandbox" is detected by Env.Name() too, not just
+// by Env being nil. App.New always sets App.Env to a
+// LocalEnvironment in the no-sandbox path — the previous
+// `t.Env == nil` check was effectively a no-op and EVERY
+// run_ansible call fell into the docker path, immediately failing
+// with "sandbox requires a docker ConnectionInfo, got \"local\"".
+// That made run_ansible unusable for any user without
+// `--sandbox`. The check below treats a LocalEnvironment as
+// "no sandbox" too.
 func (t *RunPlaybookTool) selectExecutor(mode sandbox.SandboxMode) (playbookExecutor, error) {
 	// No sandbox: always local. Use the tool's Runner so custom
 	// Defaults / Timeout settings are honoured (was H2 bug).
-	if t.Env == nil {
+	if t.Env == nil || t.Env.Name() == "local" {
 		return localExecutor{runner: t.runner()}, nil
 	}
 
@@ -77,7 +88,12 @@ func (t *RunPlaybookTool) selectExecutor(mode sandbox.SandboxMode) (playbookExec
 			return nil, errors.New(
 				"--sandbox-mode=docker-exec: empty container id from Environment")
 		}
-		return &dockerExecExecutor{containerID: conn.ContainerID}, nil
+		r := t.runner()
+		return &dockerExecExecutor{
+			containerID:  conn.ContainerID,
+			stdoutWriter: r.StdoutWriter,
+			stderrWriter: r.StderrWriter,
+		}, nil
 
 	case sandbox.SandboxModeDocker:
 		return &dockerConnExecutor{env: t.Env, runner: t.runner()}, nil
@@ -181,7 +197,9 @@ func (e *dockerConnExecutor) Run(ctx context.Context, req playbookExecRequest) (
 // host-side docker-py needed.
 
 type dockerExecExecutor struct {
-	containerID string
+	containerID  string
+	stdoutWriter io.Writer
+	stderrWriter io.Writer
 }
 
 func (e *dockerExecExecutor) Name() string {
@@ -200,5 +218,7 @@ func (e *dockerExecExecutor) Run(ctx context.Context, req playbookExecRequest) (
 		args = append([]string{"--check", "--diff"}, args...)
 	}
 	der := newDockerExecRunner(e.containerID)
+	der.stdoutWriter = e.stdoutWriter
+	der.stderrWriter = e.stderrWriter
 	return der.runInContainer(ctx, req.PlaybookPath, req.InventoryPath, req.ExtraVarsFile, args, req.Timeout)
 }

@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -121,6 +123,18 @@ func runChat(cmd *cobra.Command, args []string) error {
 	if err := res.Store.CreateRun(run); err != nil {
 		return fmt.Errorf("create run: %w", err)
 	}
+
+	// Clean up run status to "aborted" if process is interrupted
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		_ = res.Store.FinishRun(run.ID, "aborted")
+		os.Exit(130)
+	}()
+	defer func() {
+		signal.Stop(sigChan)
+	}()
 
 	if res.TUI != nil {
 		res.TUI.SendRunStart(run.ID, "Interactive chat session")

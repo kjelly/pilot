@@ -140,11 +140,33 @@ func ParseDiff(stdout string) DiffSummary {
 				continue
 			}
 			current = &FileDiff{}
-			// Try to extract the path from the next lines.
+			// Extract path from "--- before: /path/to/file" or "--- /path/to/file"
+			if idx := strings.Index(trimmed, "before:"); idx >= 0 {
+				current.Path = extractPath(trimmed[idx+7:])
+			} else if idx := strings.Index(trimmed, "before "); idx >= 0 {
+				current.Path = extractPath(trimmed[idx+7:])
+			} else if len(trimmed) > 4 {
+				p := extractPath(trimmed[4:])
+				if p != "before" && p != "" {
+					current.Path = p
+				}
+			}
 			continue
 		}
 		if strings.HasPrefix(trimmed, diffMarkerAlt) {
-			// second marker; path likely on a line right before/after
+			// For new files, before path is /dev/null; try extracting from after marker
+			if current != nil && (current.Path == "" || current.Path == "/dev/null" || strings.Contains(current.Path, "dev/null")) {
+				if idx := strings.Index(trimmed, "after:"); idx >= 0 {
+					current.Path = extractPath(trimmed[idx+6:])
+				} else if idx := strings.Index(trimmed, "after "); idx >= 0 {
+					current.Path = extractPath(trimmed[idx+6:])
+				} else if len(trimmed) > 4 {
+					p := extractPath(trimmed[4:])
+					if p != "after" && p != "" {
+						current.Path = p
+					}
+				}
+			}
 			continue
 		}
 		if !inDiff {
@@ -155,7 +177,9 @@ func ParseDiff(stdout string) DiffSummary {
 		}
 		// First non-marker line is usually the path.
 		if current != nil && current.Path == "" {
-			current.Path = extractPath(trimmed)
+			if !strings.HasPrefix(trimmed, "@@") {
+				current.Path = extractPath(trimmed)
+			}
 			current.UnifiedDiff = line + "\n"
 			continue
 		}

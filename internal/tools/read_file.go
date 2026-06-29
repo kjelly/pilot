@@ -61,6 +61,14 @@ var DefaultSensitivePaths = []string{
 // DefaultAllowedReadPrefixes is the baseline set of prefixes the
 // LLM is permitted to read when no per-run BaseDir is configured.
 // We deliberately keep this small and conservative.
+//
+// Special prefixes:
+//   - "./playbooks/" and "./examples/" are added at runtime by
+//     defaultRegistry when the directory exists, so the agent can
+//     read the playbook it was just asked to run. This is opt-in
+//     (it requires the directory to be present) and matches the
+//     AllowedPlaybookRoots policy so the agent has read access to
+//     every playbook it can ask run_ansible to execute.
 var DefaultAllowedReadPrefixes = []string{
 	"/etc/ansible/",
 	"/etc/ssh/sshd_config",
@@ -176,7 +184,8 @@ func (t *ReadFileTool) ValidatePath(expanded string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("reading %s is not in the allowed paths (configure AllowedPrefixes or BaseDir to broaden)", expanded)
+	allowed := t.allowedPrefixes()
+	return fmt.Errorf("reading %s is not in the allowed paths. Allowed prefixes: %v. (configure AllowedPrefixes or BaseDir in pilot config, or run from a directory that contains the file)", expanded, allowed)
 }
 
 func (t *ReadFileTool) Execute(ctx context.Context, args json.RawMessage) (*Result, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -30,13 +31,15 @@ import (
 // Cleanup uses `docker exec rm` so we never leak tmpfiles even if
 // the process is killed mid-run.
 type dockerExecRunner struct {
-	containerID string
+	containerID  string
 	// DockerBinary is the docker CLI to invoke. Empty means
 	// fall back to "docker" (looked up in $PATH).
 	DockerBinary string
 	// StagingDir is the directory inside the container where
 	// files are copied. Empty means "/tmp".
-	StagingDir string
+	StagingDir   string
+	stdoutWriter io.Writer
+	stderrWriter io.Writer
 }
 
 func newDockerExecRunner(containerID string) *dockerExecRunner {
@@ -171,8 +174,16 @@ func (r *dockerExecRunner) runInContainer(
 	// progress in real time and so the captured output for the
 	// result is the same stream the user sees.
 	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	if r.stdoutWriter != nil {
+		cmd.Stdout = io.MultiWriter(&stdout, r.stdoutWriter)
+	} else {
+		cmd.Stdout = &stdout
+	}
+	if r.stderrWriter != nil {
+		cmd.Stderr = io.MultiWriter(&stderr, r.stderrWriter)
+	} else {
+		cmd.Stderr = &stderr
+	}
 
 	err := cmd.Run()
 	res.Duration = time.Since(start)

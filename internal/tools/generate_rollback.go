@@ -11,6 +11,7 @@ import (
 
 	"github.com/anomalyco/pilot/internal/docs"
 	"github.com/anomalyco/pilot/internal/ollama"
+	"gopkg.in/yaml.v3"
 )
 
 // GenerateRollbackTool asks the LLM to produce a rollback playbook for
@@ -76,6 +77,12 @@ func (t *GenerateRollbackTool) Execute(ctx context.Context, args json.RawMessage
 		return &Result{Content: fmt.Sprintf("ERROR: model did not return a YAML code block.\n\nRaw response:\n%s", resp.Message.Content), IsError: true}, nil
 	}
 
+	// Validate YAML syntax
+	var temp any
+	if err := yaml.Unmarshal([]byte(yamlText), &temp); err != nil {
+		return &Result{Content: fmt.Sprintf("ERROR: generated content is not valid YAML: %v\n\nYAML:\n%s", err, yamlText), IsError: true}, nil
+	}
+
 	trimmed := strings.TrimSpace(yamlText)
 	if !strings.HasPrefix(trimmed, "- name:") && !strings.HasPrefix(trimmed, "---") {
 		return &Result{Content: fmt.Sprintf("ERROR: generated content does not look like an Ansible task.\n\nYAML:\n%s", yamlText), IsError: true}, nil
@@ -101,7 +108,11 @@ func (t *GenerateRollbackTool) Execute(ctx context.Context, args json.RawMessage
 	fmt.Fprintf(&sb, "--- generated YAML ---\n%s\n", yamlText)
 	fmt.Fprintf(&sb, "\n--- next step ---\n")
 	fmt.Fprintf(&sb, "Run with run_ansible --check=true to preview the rollback, then run_ansible --check=false to apply it.\n")
-	return &Result{Content: sb.String()}, nil
+	meta, _ := json.Marshal(map[string]string{"rollback_path": path})
+	return &Result{
+		Content:  sb.String(),
+		Metadata: meta,
+	}, nil
 }
 
 func buildRollbackPrompt(a generateRollbackArgsStruct) string {

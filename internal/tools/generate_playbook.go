@@ -11,6 +11,7 @@ import (
 
 	"github.com/anomalyco/pilot/internal/docs"
 	"github.com/anomalyco/pilot/internal/ollama"
+	"gopkg.in/yaml.v3"
 )
 
 // GeneratePlaybookTool asks the LLM to generate an Ansible task YAML
@@ -83,6 +84,12 @@ func (t *GeneratePlaybookTool) Execute(ctx context.Context, args json.RawMessage
 	yamlText := extractYAML(resp.Message.Content)
 	if yamlText == "" {
 		return &Result{Content: fmt.Sprintf("ERROR: model did not return a YAML code block.\n\nRaw response:\n%s", resp.Message.Content), IsError: true}, nil
+	}
+
+	// Validate YAML syntax
+	var temp any
+	if err := yaml.Unmarshal([]byte(yamlText), &temp); err != nil {
+		return &Result{Content: fmt.Sprintf("ERROR: generated content is not valid YAML: %v\n\nYAML:\n%s", err, yamlText), IsError: true}, nil
 	}
 
 	// Sanity-check the YAML by ensuring it starts with `- name:` or `---`
@@ -197,9 +204,9 @@ func (t *GeneratePlaybookTool) ragContext(ctx context.Context, description strin
 		if body == "" {
 			continue
 		}
-		// Cap each entry to ~400 chars to keep total prompt size sane.
-		if len(body) > 400 {
-			body = body[:400] + "..."
+		// Cap each entry to ~1200 chars to keep total prompt size sane.
+		if len(body) > 1200 {
+			body = body[:1200] + "..."
 		}
 		fmt.Fprintf(&sb, "[%d] %s :: %s\n%s\n\n", i+1, c.Ref, c.Section, body)
 	}

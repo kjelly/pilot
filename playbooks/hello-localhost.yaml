@@ -1,0 +1,77 @@
+---
+# Spec alignment: docs/verification/hello-localhost.md
+#   C0      = greeting (smoke intro)
+#   C3-pre  = kernel probe (feeds C3 verify)
+#   C2-pre  = load average probe (feeds C2 verify)
+#   C3-print= print kernel+load
+#   C1-pre  = slurp /etc/os-release (feeds C1 verify)
+#   C1      = assert /etc/os-release readable
+#   C2      = assert load average < 20.0
+# Verify script: scripts/verify-hello-localhost.sh (NDJSON, ids C1/C2/C3)
+- name: Pilot smoke test - system info probe
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    probe_paths:
+      - /etc/os-release
+      - /etc/hostname
+      - /proc/loadavg
+
+  tasks:
+    - name: "C0 — Greeting (smoke intro)"
+      ansible.builtin.debug:
+        msg: "Hello from pilot - host={{ ansible_hostname }} os={{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    - name: "C3-pre — Probe kernel version"
+      ansible.builtin.command: uname -r
+      register: kernel_out
+      changed_when: false
+
+    - name: "C2-pre — Probe load average (1m)"
+      ansible.builtin.command: cat /proc/loadavg
+      register: load
+      changed_when: false
+
+    - name: "C3-print — Print kernel and load"
+      ansible.builtin.debug:
+        msg: |
+          kernel: {{ kernel_out.stdout }}
+          load:   {{ load.stdout }}
+
+    - name: "C1-pre — Read probe files (slurp)"
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      register: slurped
+      loop: "{{ probe_paths }}"
+      ignore_errors: true
+
+    - name: "C1-pre — Decode and show first 5 lines"
+      ansible.builtin.debug:
+        msg: "{{ item.item }} -> {{ (item.content | b64decode).splitlines()[:5] }}"
+      loop: "{{ slurped.results }}"
+      when: item.content is defined
+
+    - name: "Health checks (C1, C2)"
+      block:
+        - name: "C1 — Assert /etc/os-release is readable"
+          ansible.builtin.command: test -r /etc/os-release
+          changed_when: false
+
+        - name: "C2 — Assert load average < 20.0"
+          ansible.builtin.assert:
+            that:
+              - load.stdout.split()[0] | float < 20.0
+            success_msg: "Load OK: {{ load.stdout.split()[0] }}"
+            fail_msg: "Load too high: {{ load.stdout.split()[0] }}"
+      rescue:
+        - name: "Health check failed - surfaced via rescue"
+          ansible.builtin.debug:
+            msg: "WARNING: health check failed but playbook continues"
+
+    - name: "Final summary"
+      ansible.builtin.debug:
+        msg: |
+          pilot smoke test complete
+          host={{ ansible_hostname }} tasks_run={{ ansible_play_hosts | length }}

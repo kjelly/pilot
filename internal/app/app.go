@@ -143,6 +143,10 @@ func New(ctx context.Context, cfg *config.Config, opt Options) (*App, error) {
 	}
 	redactor := sanitizer.NewWith(extraRules...)
 	runner := ansible.NewRunner()
+	if opt.NoTUI {
+		runner.StdoutWriter = os.Stdout
+		runner.StderrWriter = os.Stderr
+	}
 
 	app := &App{
 		Cfg:       cfg,
@@ -440,7 +444,20 @@ func (a *App) BuildRegistry(defaultInventory, defaultLimit string) *tools.Regist
 }
 
 func (a *App) NewLoopWithDefaults(runID string, streamWriter io.Writer, defaultInventory, defaultLimit string) *agent.Loop {
-	registry := a.BuildRegistry(defaultInventory, defaultLimit)
+	// Reuse the registry built in app.New whenever possible. The previous
+	// behaviour called BuildRegistry on every NewLoop, which re-opens the
+	// 100 MB bleve index from scratch — a 30+ second stall per call
+	// that made `pilot run` feel like it was hanging between "Starting
+	// run" and the first LLM proposal.
+	//
+	// We still rebuild the registry if the caller passed chat-session
+	// defaults (inventory / limit) that differ from what the cached
+	// registry was built with. For pilot run (no chat defaults), this
+	// is a no-op and NewLoop is O(1).
+	registry := a.Tools
+	if defaultInventory != "" || defaultLimit != "" {
+		registry = a.BuildRegistry(defaultInventory, defaultLimit)
+	}
 
 	var tuiEmitter agent.TUIEmitter
 	if a.TUI != nil {

@@ -244,6 +244,12 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// Auto-clean stale runs: any run in 'running' status for more than 2 hours is marked as aborted
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	_, _ = db.Exec(
+		`UPDATE runs SET status = 'aborted', finished_at = ? WHERE status = 'running' AND started_at < ?`,
+		time.Now(), twoHoursAgo,
+	)
 	return &Store{db: db}, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -20,9 +21,11 @@ type Result struct {
 
 // Runner wraps ansible-playbook invocation
 type Runner struct {
-	Binary   string        // path to ansible-playbook (default "ansible-playbook")
-	Defaults []string      // extra args always passed, e.g. ["-i", "inv.yml"]
-	Timeout  time.Duration // per-run timeout
+	Binary       string        // path to ansible-playbook (default "ansible-playbook")
+	Defaults     []string      // extra args always passed, e.g. ["-i", "inv.yml"]
+	Timeout      time.Duration // per-run timeout
+	StdoutWriter io.Writer     // if set, stdout is streamed in real-time here
+	StderrWriter io.Writer     // if set, stderr is streamed in real-time here
 }
 
 func NewRunner(defaults ...string) *Runner {
@@ -44,8 +47,16 @@ func (r *Runner) Run(ctx context.Context, args ...string) (*Result, error) {
 
 	cmd := exec.CommandContext(c, r.Binary, allArgs...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	if r.StdoutWriter != nil {
+		cmd.Stdout = io.MultiWriter(&stdout, r.StdoutWriter)
+	} else {
+		cmd.Stdout = &stdout
+	}
+	if r.StderrWriter != nil {
+		cmd.Stderr = io.MultiWriter(&stderr, r.StderrWriter)
+	} else {
+		cmd.Stderr = &stderr
+	}
 
 	start := time.Now()
 	err := cmd.Run()

@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/anomalyco/pilot/internal/config"
 	"github.com/anomalyco/pilot/internal/sandbox"
+	"github.com/anomalyco/pilot/internal/tools"
 )
 
 // TestNewRequiresCfg ensures that the cfg parameter is enforced.
@@ -141,4 +143,92 @@ func TestSandboxImage_NeverPanics(t *testing.T) {
 	if got := a.SandboxImage(); got != "" {
 		t.Errorf("empty env name should return empty string, got %q", got)
 	}
+}
+
+
+// buildTestApp constructs a minimal *App suitable for NewLoopWithDefaults tests
+// without going through New() (which would require a live Ollama). Only the
+// fields NewLoopWithDefaults actually touches are populated.
+func buildTestApp(toolsRegistry *tools.Registry) *App {
+	cfg := config.Default()
+	cfg.DataDir = "" // no store/db needed for this test
+	return &App{
+		Cfg:    cfg,
+		Tools:  toolsRegistry,
+		Ollama: nil, // NewLoop doesn't call ollama during construction
+		Store:  nil, // NewDedupTracker tolerates nil store
+	}
+}
+
+// TestNewLoopWithDefaults_ReusesCachedRegistry is a regression test for the
+// hang where each call to NewLoopWithDefaults rebuilt the tool registry, which
+// in turn re-opened the 100 MB bleve index — a 30+ second stall per call
+// that made `pilot run` feel hung between "Starting run" and the first
+// proposal.
+//
+// We verify that calling NewLoopWithDefaults with empty defaults reuses the
+// App's already-built registry (pointer equality) instead of rebuilding it.
+func TestNewLoopWithDefaults_ReusesCachedRegistry(t *testing.T) {
+	original := tools.NewRegistry()
+	app := buildTestApp(original)
+
+	loop := app.NewLoopWithDefaults("test-run-1", nil, "", "")
+	if loop == nil {
+		t.Fatal("NewLoopWithDefaults returned nil")
+	}
+	got := loop.Tools()
+	if got != original {
+		t.Errorf("NewLoopWithDefaults rebuilt the registry; expected to reuse the cached one (pointer %p vs %p)", original, got)
+	}
+}
+
+// TestNewLoopWithDefaults_RebuildsWhenDefaultsProvided covers the chat-session
+// path. When the caller passes a non-empty defaultInventory or defaultLimit
+// (the `pilot chat --inventory ...` path), the registry must be rebuilt so
+// run_ansible picks up the new defaults. This is the complement of the
+// "reuse" test above and protects against an over-aggressive optimization.
+func TestNewLoopWithDefaults_RebuildsWhenDefaultsProvided(t *testing.T) {
+	original := tools.NewRegistry()
+	app := buildTestApp(original)
+
+	// Pass a non-empty defaultInventory to force a rebuild.
+	loop := app.NewLoopWithDefaults("test-run-2", nil, "hosts.ini", "")
+	if loop == nil {
+		t.Fatal("NewLoopWithDefaults returned nil")
+	}
+	got := loop.Tools()
+	if got == original {
+		t.Errorf("NewLoopWithDefaults reused the registry when a non-empty defaultInventory was provided; expected a fresh build")
+	}
+	if got == nil {
+		t.Error("NewLoopWithDefaults produced a nil registry for the chat-defaults path")
+	}
+}
+
+// TestNewLoopWithDefaults_FastOnWarmCache is the timing-based complement of
+// the pointer-equality test above. We measure how long NewLoopWithDefaults
+// takes when the App already has a registry. The previous buggy version took
+// 30+ seconds (bleve open). After the fix it must complete in well under
+// a second — this catches any future regression that re-introduces a slow
+// path into the cached call.
+//
+// We give a generous 2-second budget to avoid flakiness on slow CI while
+// still catching the 30-second regression.
+func TestNewLoopWithDefaults_FastOnWarmCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timing test under -short")
+	}
+	original := tools.NewRegistry()
+	app := buildTestApp(original)
+
+	start := time.Now()
+	loop := app.NewLoopWithDefaults("test-run-3", nil, "", "")
+	elapsed := time.Since(start)
+	if loop == nil {
+		t.Fatal("NewLoopWithDefaults returned nil")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("NewLoopWithDefaults took %s on a warm cache; expected < 2s (the 30s bleve-open regression is back)", elapsed)
+	}
+	t.Logf("NewLoopWithDefaults completed in %s", elapsed)
 }

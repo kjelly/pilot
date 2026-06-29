@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -82,6 +84,35 @@ type Loop struct {
 	// mistake into the context window more than twice. Reset at the
 	// start of each new user turn.
 	recentRejections map[string]int
+
+	// recentToolCalls counts consecutive identical tool calls. When
+	// the same tool+args fires 3 times in a row, the loop guard
+	// aborts to prevent the user from being stuck in an infinite
+	// "let me try the same thing again" loop. Reset whenever the LLM
+	// calls a different tool or with different args.
+	recentToolCalls map[string]int
+
+	// playbookSucceeded is set once a run_ansible / apply_playbook
+	// call returns a non-error result (exit 0). It powers the
+	// post-success spiral guard: weaker models often keep issuing
+	// read-only probes after the playbook is already done instead of
+	// concluding. Reset to false if a later playbook run fails (the
+	// model legitimately gets a fresh budget to fix it).
+	playbookSucceeded bool
+	// postSuccessProbes counts consecutive read-only probes
+	// (run_command / read_file / run_inspec …) issued AFTER the
+	// playbook succeeded, regardless of args. This is what makes the
+	// guard catch spirals that recentToolCalls misses (each probe
+	// uses different args, so the identical-args guard never fires).
+	postSuccessProbes int
+
+	// lastAssistantText holds the assistant message content of the
+	// current turn. It is the fallback rationale for a proposal when
+	// the model did not supply an explicit _rationale arg: the model
+	// almost always narrates its reason in prose ("Let me check …"),
+	// and that sentence is far more useful to the human reviewer than
+	// a blank 理由. Set in runSession before each tool-call dispatch.
+	lastAssistantText string
 }
 
 // NewLoop constructs an agent loop ready to run.
@@ -94,6 +125,7 @@ func NewLoop(cfg Config) *Loop {
 		dedup:            NewDedupTracker(cfg.Store),
 		history:          []ollama.Message{},
 		recentRejections: make(map[string]int),
+		recentToolCalls:  make(map[string]int),
 	}
 }
 
@@ -102,7 +134,13 @@ func NewLoop(cfg Config) *Loop {
 // after the loop is built.
 func (l *Loop) SetDryRun(on bool) {
 	l.cfg.DryRun = on
-	tools.DryRun = on
+}
+
+// Tools returns the registry the loop will dispatch tool calls to.
+// Exposed for tests and (in the future) tooling that needs to inspect
+// the available tool set without running the loop.
+func (l *Loop) Tools() *tools.Registry {
+	return l.cfg.Tools
 }
 
 // Run executes the agent loop for the given user goal. The system
@@ -166,6 +204,10 @@ func (l *Loop) runSession(ctx context.Context, userGoal string, emitAssistantTex
 		if len(resp.Message.ToolCalls) == 0 {
 			return nil
 		}
+
+		// Remember this turn's prose so handleToolCall can use it as a
+		// fallback rationale when the model omits an explicit _rationale.
+		l.lastAssistantText = resp.Message.Content
 
 		abort := false
 		for _, tc := range resp.Message.ToolCalls {
@@ -246,6 +288,13 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 
 	// Extract proposal metadata from the args
 	host, rationale, risk, cis := extractProposalMeta(tc.Function.Arguments)
+	// Fallback: when the model didn't fill an explicit _rationale arg,
+	// use this turn's narration so the reviewer sees *why*, not a blank.
+	if rationale == "" {
+		if fb := strings.TrimSpace(l.lastAssistantText); fb != "" {
+			rationale = truncate(fb, 600)
+		}
+	}
 	risk = upgradeRiskForApply(risk, tc.Function.Name, tc.Function.Arguments)
 
 	p := NewProposal(
@@ -305,7 +354,8 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 	// policy is encoded; per-tool logic lives next to its Spec, not
 	// in the agent loop.
 	if toolSpec.Interceptor != nil {
-		interceptResult, err := toolSpec.Interceptor(ctx, json.RawMessage(sanitizedArgs))
+		ctxWithDryRun := tools.ContextWithDryRun(ctx, l.cfg.DryRun)
+		interceptResult, err := toolSpec.Interceptor(ctxWithDryRun, json.RawMessage(sanitizedArgs))
 		if err != nil {
 			l.reflectOnFailure(p, err.Error())
 			return DecisionRejected, fmt.Errorf("interceptor for %q failed: %w", tc.Function.Name, err)
@@ -409,6 +459,28 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 	}
 	l.appendToolResult(tc, summary)
 
+	// Loop guard: if the LLM calls the SAME tool with the SAME args
+	// twice in a row, it is almost certainly stuck in a retry loop
+	// (e.g. "let me run the playbook again with slightly different
+	// args"). We bail out with a clear message so the user can see
+	// the final state instead of getting an infinite run. The first
+	// run is allowed; the second identical call gets a warning;
+	// the third is rejected and the loop ends.
+	if l.recordAndMaybeBreakLoop(tc, summary) {
+		// Agent has been calling the same tool with the same args 3
+		// times in a row. The LOOP GUARD footer was just appended;
+		// signal runSession to stop at the next iteration boundary.
+		return DecisionAbort, nil
+	}
+
+	// Post-success spiral guard: once the playbook has run cleanly,
+	// further read-only probing (with whatever args) is the classic
+	// "weaker model won't stop" pattern. Unlike recordAndMaybeBreakLoop
+	// this does NOT require identical args.
+	if l.recordAndMaybeBreakPostSuccess(tc, result) {
+		return DecisionAbort, nil
+	}
+
 	// Send tool result to TUI activity log
 	if l.cfg.TUI != nil {
 		isErr := result != nil && result.IsError
@@ -465,15 +537,24 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 					})
 					genRes, err := rollbackTool.Execute(ctx, genArgs)
 					if err == nil && genRes != nil && !genRes.IsError {
-						// Extract path
 						var path string
-						const prefix = "Rollback playbook written to: "
-						idxPath := strings.Index(genRes.Content, prefix)
-						if idxPath != -1 {
-							rem := genRes.Content[idxPath+len(prefix):]
-							endIdx := strings.Index(rem, "\n")
-							if endIdx != -1 {
-								path = strings.TrimSpace(rem[:endIdx])
+						if len(genRes.Metadata) > 0 {
+							var meta struct {
+								RollbackPath string `json:"rollback_path"`
+							}
+							if err := json.Unmarshal(genRes.Metadata, &meta); err == nil && meta.RollbackPath != "" {
+								path = meta.RollbackPath
+							}
+						}
+						if path == "" {
+							const prefix = "Rollback playbook written to: "
+							idxPath := strings.Index(genRes.Content, prefix)
+							if idxPath != -1 {
+								rem := genRes.Content[idxPath+len(prefix):]
+								endIdx := strings.Index(rem, "\n")
+								if endIdx != -1 {
+									path = strings.TrimSpace(rem[:endIdx])
+								}
 							}
 						}
 						if path != "" {
@@ -577,6 +658,95 @@ func (l *Loop) persistMessage(role, content string, toolCalls json.RawMessage) {
 		ToolCalls: toolCalls,
 		CreatedAt: time.Now(),
 	})
+}
+
+// recordAndMaybeBreakLoop tracks the most recent N tool calls. If the
+// LLM calls the same tool+args twice in a row, we know it is stuck in
+// a retry loop (the classic "let me try the same thing one more time"
+// pattern that wastes cycles and confuses the user). On the SECOND
+// identical call we add a strong hint to the next tool result. On the
+// THIRD identical call we return DecisionAbort so the loop ends.
+//
+// This is a guard, not a hard kill: a legitimate "rerun the playbook
+// with the same args" workflow is rare, and even when it happens the
+// hint will help the LLM understand why we're stopping.
+//
+// Hash key is sha256(toolName + sorted args) — order-independent so
+// {"a":1,"b":2} and {"b":2,"a":1} are considered identical.
+// recordAndMaybeBreakLoop tracks the most recent N tool calls. If the
+// LLM calls the same tool+args twice in a row, it is almost certainly
+// stuck in a retry loop (the classic "let me try the same thing one
+// more time" pattern). On the THIRD identical call we:
+//   1. Append a "LOOP GUARD" footer to the tool result so the user
+//      sees the final state.
+//   2. Return true so the agent loop can abort cleanly with a
+//      clear final message instead of looping forever.
+//
+// Returns true when the loop should abort, false otherwise.
+func (l *Loop) recordAndMaybeBreakLoop(tc ollama.ToolCall, summary string) bool {
+	key := l.toolCallKey(tc)
+	count := l.recentToolCalls[key]
+	l.recentToolCalls[key] = count + 1
+	if count+1 >= 3 {
+		l.appendToolResult(tc, "\n=== LOOP GUARD ===\nYou have called "+tc.Function.Name+" with the same arguments 3 times in a row. The agent loop is now aborting. If you believe further action is needed, the user can re-run pilot manually with adjusted arguments. Do NOT call any more tools.\n==================")
+		return true
+	}
+	return false
+}
+
+// recordAndMaybeBreakPostSuccess implements the post-success spiral
+// guard. It complements recordAndMaybeBreakLoop, which only catches
+// the SAME tool+args repeated; this one catches the more common
+// real-world spiral where the playbook has already finished with
+// failed=0 but the model keeps issuing DIFFERENT read-only probes
+// ("let me check one more thing") and never concludes.
+//
+// State machine:
+//   - A successful run_ansible / apply_playbook sets playbookSucceeded
+//     and resets the probe counter (the apply itself is not a probe).
+//   - A FAILED playbook run clears playbookSucceeded — the model
+//     legitimately needs a fresh budget of probes to diagnose/fix.
+//   - Each read-only probe after success increments the counter:
+//       1st probe → allowed silently (verifying the result is fine)
+//       2nd probe → soft nudge appended to the tool result
+//       3rd probe → LOOP GUARD footer appended and the loop aborts
+//
+// Mutating tools (run_ansible/apply_playbook) and ask_user are never
+// counted as probes — they represent real follow-up work.
+//
+// Returns true when the loop should abort.
+func (l *Loop) recordAndMaybeBreakPostSuccess(tc ollama.ToolCall, result *tools.Result) bool {
+	name := tc.Function.Name
+	if name == "run_ansible" || name == "apply_playbook" {
+		l.playbookSucceeded = result != nil && !result.IsError
+		l.postSuccessProbes = 0
+		return false
+	}
+	// Not a playbook run. Only count when we're already in the
+	// post-success window; ask_user is a legitimate way to get a new
+	// goal so it doesn't count.
+	if !l.playbookSucceeded || name == "ask_user" {
+		return false
+	}
+	l.postSuccessProbes++
+	if l.postSuccessProbes >= 3 {
+		l.appendToolResult(tc, fmt.Sprintf("\n=== LOOP GUARD ===\nThe playbook already completed successfully (failed=0) and you have issued %d further read-only probes without concluding. The task is DONE — the agent loop is now aborting. Do NOT call any more tools; just summarise the result for the user.\n==================", l.postSuccessProbes))
+		return true
+	}
+	if l.postSuccessProbes == 2 {
+		l.appendToolResult(tc, "\n=== NOTE ===\nThe playbook already completed successfully (failed=0). If nothing else genuinely needs fixing, STOP now: reply with a short summary and do NOT call any more tools.\n============")
+	}
+	return false
+}
+
+func (l *Loop) toolCallKey(tc ollama.ToolCall) string {
+	// Hash the tool name + args. We don't normalise arg order —
+	// JSON maps are already canonicalised by the Go encoder.
+	h := sha256.New()
+	h.Write([]byte(tc.Function.Name))
+	h.Write([]byte{0})
+	h.Write([]byte(tc.Function.Arguments))
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 func (l *Loop) appendToolResult(tc ollama.ToolCall, content string) {

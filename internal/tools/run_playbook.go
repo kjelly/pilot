@@ -52,10 +52,16 @@ type RunPlaybookTool struct {
 	SandboxMode sandbox.SandboxMode
 }
 
-// DryRun is set by the agent loop (Loop.SetDryRun) so the Interceptor
-// can see whether --dry-run-all is active and force check=true when
-// the LLM asked for apply.
-var DryRun bool
+type dryRunKey struct{}
+
+func ContextWithDryRun(ctx context.Context, dryRun bool) context.Context {
+	return context.WithValue(ctx, dryRunKey{}, dryRun)
+}
+
+func IsDryRun(ctx context.Context) bool {
+	v, _ := ctx.Value(dryRunKey{}).(bool)
+	return v
+}
 
 func (t *RunPlaybookTool) Spec() *Spec {
 	return &Spec{
@@ -76,7 +82,7 @@ func (t *RunPlaybookTool) Spec() *Spec {
 // runs, but only in check mode). Outside dry-run, we leave the args
 // alone.
 func (t *RunPlaybookTool) intercept(ctx context.Context, args json.RawMessage) (*Result, error) {
-	if !DryRun {
+	if !IsDryRun(ctx) {
 		return nil, nil // no interception; proceed normally
 	}
 	var a struct {
@@ -178,7 +184,63 @@ func (t *RunPlaybookTool) Execute(ctx context.Context, args json.RawMessage) (*R
 	}
 
 	res, err := executor.Run(ctx, req)
-	return t.renderResult(res, err, req.Check)
+	if err != nil {
+		return t.renderResult(res, err, req.Check)
+	}
+
+	toolResult, renderErr := t.renderResult(res, nil, req.Check)
+	if renderErr != nil {
+		return nil, renderErr
+	}
+
+	// Auto-verification after successful playbook execution (check=false)
+	if !req.Check && res.ExitCode == 0 {
+		hostTag := hostTagFromPlaybook(req.PlaybookPath)
+		verifyScriptPath := filepath.Join("scripts", fmt.Sprintf("verify-%s.sh", hostTag))
+		if _, statErr := os.Stat(verifyScriptPath); statErr == nil {
+			// Generate temporary verification playbook
+			verifyPlaybookContent := fmt.Sprintf(`- name: Auto-verification
+  hosts: all
+  become: true
+  tasks:
+    - name: Run verification script
+      ansible.builtin.script:
+        cmd: "%s"
+      register: verify_output
+
+    - name: Print verification output
+      ansible.builtin.debug:
+        var: verify_output.stdout_lines
+`, verifyScriptPath)
+
+			f, tempPlaybookErr := os.CreateTemp("", "pilot-auto-verify-*.yml")
+			if tempPlaybookErr == nil {
+				_, _ = f.WriteString(verifyPlaybookContent)
+				_ = f.Close()
+				defer os.Remove(f.Name())
+
+				verifyReq := req
+				verifyReq.PlaybookPath = f.Name()
+				verifyReq.Check = false // Run it for real
+				verifyReq.EffectiveArgs = make([]string, len(req.EffectiveArgs))
+				copy(verifyReq.EffectiveArgs, req.EffectiveArgs)
+				if len(verifyReq.EffectiveArgs) > 0 {
+					verifyReq.EffectiveArgs[0] = verifyReq.PlaybookPath
+				}
+
+				verifyRes, verifyErr := executor.Run(ctx, verifyReq)
+				if verifyErr == nil && verifyRes.ExitCode == 0 {
+					ndjsonLines := extractNDJSON(verifyRes.Stdout)
+					report := renderVerifyReport(ndjsonLines)
+					if report != "" {
+						toolResult.Content += report
+					}
+				}
+			}
+		}
+	}
+
+	return toolResult, nil
 }
 
 // prepareRequest parses the JSON arguments, validates paths, creates
@@ -483,4 +545,83 @@ func buildSandboxInventory(conn sandbox.AnsibleConnection, limit string) (string
 		fmt.Fprintf(&sb, "  # effective --limit: %s\n", limit)
 	}
 	return sb.String(), nil
+}
+
+func hostTagFromPlaybook(path string) string {
+	base := filepath.Base(path)
+	ext := filepath.Ext(base)
+	return strings.TrimSuffix(base, ext)
+}
+
+func extractNDJSON(stdout string) []string {
+	var results []string
+	lines := strings.Split(stdout, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		trimmed = strings.TrimSuffix(trimmed, ",")
+		if strings.HasPrefix(trimmed, "\"") && strings.HasSuffix(trimmed, "\"") {
+			trimmed = trimmed[1 : len(trimmed)-1]
+		}
+		trimmed = strings.ReplaceAll(trimmed, `\"`, `"`)
+		trimmed = strings.ReplaceAll(trimmed, `\\`, `\`)
+		if strings.HasPrefix(trimmed, `{"id"`) {
+			results = append(results, trimmed)
+		}
+	}
+	return results
+}
+
+type verifyRecord struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
+
+func renderVerifyReport(ndjsonLines []string) string {
+	var records []verifyRecord
+	passed := 0
+	failed := 0
+	skipped := 0
+	for _, line := range ndjsonLines {
+		var rec verifyRecord
+		if err := json.Unmarshal([]byte(line), &rec); err == nil {
+			records = append(records, rec)
+			switch rec.Status {
+			case "pass":
+				passed++
+			case "fail":
+				failed++
+			case "skip":
+				skipped++
+			}
+		}
+	}
+	if len(records) == 0 {
+		return ""
+	}
+	
+	verdict := "PASS"
+	if failed > 0 {
+		verdict = "FAIL"
+	}
+	
+	var sb strings.Builder
+	sb.WriteString("\n\n=== Auto-Verification Report ===\n")
+	fmt.Fprintf(&sb, "Verdict: %s (Total: %d, Pass: %d, Fail: %d, Skip: %d)\n\n", verdict, len(records), passed, failed, skipped)
+	sb.WriteString("| ID | Status | Detail |\n")
+	sb.WriteString("|----|--------|--------|\n")
+	
+	// Fails first
+	for _, r := range records {
+		if r.Status == "fail" {
+			fmt.Fprintf(&sb, "| %s | %s | %s |\n", r.ID, r.Status, r.Detail)
+		}
+	}
+	// Others
+	for _, r := range records {
+		if r.Status != "fail" {
+			fmt.Fprintf(&sb, "| %s | %s | %s |\n", r.ID, r.Status, r.Detail)
+		}
+	}
+	return sb.String()
 }

@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -18,8 +20,8 @@ import (
 	"github.com/anomalyco/pilot/internal/ansible"
 	"github.com/anomalyco/pilot/internal/app"
 	"github.com/anomalyco/pilot/internal/store"
-
-	"github.com/anomalyco/pilot/internal/sandbox")
+	"github.com/anomalyco/pilot/internal/sandbox"
+)
 
 var runCmd = &cobra.Command{
 	Use:   "run [<playbook>] [goal]",
@@ -418,15 +420,46 @@ func runOneTarget(ctx context.Context, res *setupResult, batchID, prefix string,
 		return br
 	}
 
+	// Clean up run status to "aborted" if process is interrupted
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		_ = res.Store.FinishRun(run.ID, "aborted")
+		os.Exit(130)
+	}()
+	defer func() {
+		signal.Stop(sigChan)
+	}()
+
 	// ----- c. Run the agent loop ---------------------------------------
+	// Preflight: read the playbook file and inline its content into the
+	// goal. This is the most reliable way to make sure the LLM sees the
+	// playbook on turn 0 — every observed LLM hallucination of "the file
+	// is empty / not at that path" goes away once the content is in the
+	// initial user message. We keep this best-effort: if the read fails
+	// for any reason (e.g. file unreadable, sandbox), we fall back to the
+	// bare path-based goal and let the LLM figure it out.
 	goal := buildGoal(tgt, lintIssues)
+	if content, preflightErr := preflightReadPlaybook(tgt.Playbook); preflightErr == nil && content != "" {
+		goal = goal + "\n\n--- playbook contents (preloaded; do NOT call read_file on the playbook again) ---\n" + content + "\n--- end of playbook contents ---"
+	} else if preflightErr != nil {
+		// Surface a clear early warning so the user knows the LLM will
+		// have to read the file itself.
+		fmt.Fprintf(os.Stderr, "⚠️  preflight read of playbook failed: %v\n", preflightErr)
+	}
 	if res.TUI != nil {
 		res.TUI.SendRunStart(run.ID, goal)
 	} else if prefix == "" {
 		fmt.Fprintf(os.Stderr, "▶ Starting run %s\n", run.ID)
 	}
 
-	loop := newAgentLoop(res.Cfg, run.ID, res.Store, res.Sanitizer, res.Approver, res.TUI, os.Stderr)
+	// Reuse the *App that setupRunWithOpts already built — do NOT call
+	// app.New() again here. The previous 7-arg form rebuilt the entire
+	// stack (bleve open, ollama Ping, registry default-walk) for every
+	// playbook in a batch, which doubled the work for N=1 and made
+	// hangs much more likely.
+	loop := newAgentLoop(res, run.ID, os.Stderr)
 	// Inject dry-run flag
 	loop.SetDryRun(runDryRunAll)
 
@@ -463,21 +496,82 @@ func runOneTarget(ctx context.Context, res *setupResult, batchID, prefix string,
 	return br
 }
 
+// preflightReadPlaybook returns the playbook's content so the agent loop
+// can include it in the initial user message. The LLM otherwise spends
+// its first 2-3 turns trying to read the file and either hallucinating
+// "the file is empty" or proposing wrong paths ("/root/playbooks/...").
+// Inlining the content on turn 0 is the most reliable fix.
+//
+// Errors are non-fatal: the caller logs them and continues with a
+// path-only goal. We do NOT want preflight failure to abort the run
+// — the LLM can still try read_file on its own.
+func preflightReadPlaybook(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 func buildGoal(tgt playbookTarget, lintIssues string) string {
 	goal := "Run this Ansible playbook and fix any failures you encounter."
 	lintSection := ""
 	if lintIssues != "" {
 		lintSection = fmt.Sprintf("\n\n⚠️  ansible-lint detected the following issues in the playbook. Please fix/refactor them before proposing to apply changes:\n%s", lintIssues)
 	}
-	return fmt.Sprintf(`Playbook: %s
+
+	// Resolve the playbook path to an absolute path so the LLM does not
+	// have to guess where the user's CWD is. The previous wording
+	// "Playbook: %s" left the path relative; some LLM models then
+	// hallucinated an absolute path (e.g. /root/playbooks/...) that
+	// did not exist, causing read_file to fail with "not in the allowed
+	// paths" and the run to spiral.
+	//
+	// We also surface the user's CWD explicitly so any subsequent
+	// read_file / run_command call uses the same root.
+	playbookAbs := tgt.Playbook
+	if abs, err := filepath.Abs(tgt.Playbook); err == nil {
+		playbookAbs = abs
+	}
+	cwd, _ := os.Getwd()
+
+	// When no inventory was supplied, say so explicitly. The model
+	// otherwise fixates on the "No inventory was parsed" warning and
+	// wastes turns hunting for an inventory file instead of just
+	// running the playbook against the implicit localhost.
+	invLine := tgt.Inventory
+	if strings.TrimSpace(invLine) == "" {
+		invLine = "(none — do NOT look for or pass an inventory file; run_ansible against the playbook's own hosts: line. For localhost playbooks Ansible's implicit local connection is used.)"
+	}
+
+	return fmt.Sprintf(`Playbook (absolute path): %s
+Working directory: %s
+Original (relative) spec: %s
 Inventory: %s
 Limit: %s
 
 User goal: %s%s
 
-You may use the read_file, run_command, run_ansible, generate_playbook, ask_user, and run_inspec tools.
-Every write operation must go through a tool call which will be presented to the human for approval.`,
-		tgt.Playbook, tgt.Inventory, tgt.Limit, goal, lintSection)
+IMPORTANT — this is a "run playbook" task; stay focused on running it:
+- Your PRIMARY job is to RUN this playbook with the run_ansible tool. Under normal
+  circumstances your VERY FIRST tool call must be run_ansible with "playbook" set to the
+  absolute path above. Running the playbook IS how you observe the current state — do not
+  "observe first".
+- Do NOT explore the filesystem, hunt for inventory files, or run read-only probes
+  (run_command / read_file / run_inspec) BEFORE you have run the playbook at least once.
+- If Inventory above says "(none …)", do not pass an inventory at all — just call run_ansible
+  with the playbook path.
+- Use the other tools ONLY AFTER a run_ansible call actually FAILS, to diagnose and fix the
+  failure, then re-run. When the PLAY RECAP shows failed=0 the task is COMPLETE: give a short
+  summary and stop — do not call any more tools.
+
+Every write operation goes through a tool call presented to the human for approval.
+When calling read_file with the playbook, USE THE ABSOLUTE PATH above; do not invent a path.`,
+		playbookAbs, cwd, tgt.Playbook, invLine, tgt.Limit, goal, lintSection)
 }
 
 func indentString(s string, spaces int) string {

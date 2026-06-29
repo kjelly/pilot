@@ -135,7 +135,7 @@ func (r *Registry) OllamaTools() []ollama.Tool {
 			Function: ollama.ToolFunction{
 				Name:        t.Name,
 				Description: t.Description,
-				Parameters:  t.Parameters,
+				Parameters:  withProposalMeta(t.Parameters),
 			},
 		})
 	}
@@ -146,6 +146,56 @@ func (r *Registry) OllamaTools() []ollama.Tool {
 	cached := make([]ollama.Tool, len(out))
 	copy(cached, out)
 	r.ollamaCache.Store(&cached)
+	return out
+}
+
+// proposalMetaProps are injected into every tool's parameter schema so
+// the model has a DECLARED channel to attach a per-call rationale and
+// risk assessment. The agent loop reads them back via extractProposalMeta
+// (the leading underscore marks them as pilot-internal metadata, not real
+// tool arguments). They are intentionally optional — never added to a
+// schema's "required" list — and tool Execute() implementations ignore
+// unknown fields, so injecting them never breaks a tool.
+var proposalMetaProps = map[string]json.RawMessage{
+	"_rationale":   json.RawMessage(`{"type":"string","description":"Why this action is needed, 1-2 sentences. Shown verbatim to the human reviewer as the proposal's rationale."}`),
+	"_risk_level":  json.RawMessage(`{"type":"string","enum":["low","medium","high"],"description":"Risk of this action: low (read-only inspection), medium (changes config/files), high (stops/restarts/removes services)."}`),
+	"_cis_control": json.RawMessage(`{"type":"string","description":"Relevant CIS Benchmark control number, if this action maps to one (e.g. '5.2.1'). Omit if not applicable."}`),
+}
+
+// withProposalMeta returns a copy of the given JSON-Schema parameter
+// object with the proposalMetaProps merged into its "properties". If
+// params is empty it synthesises a bare object schema; if params is not
+// a JSON object it is returned untouched (fail-open — never break a tool
+// just to add metadata fields). Existing properties of the same name are
+// left as-is so a tool can override the description if it ever needs to.
+func withProposalMeta(params json.RawMessage) json.RawMessage {
+	schema := map[string]json.RawMessage{}
+	if len(params) == 0 {
+		schema["type"] = json.RawMessage(`"object"`)
+	} else if err := json.Unmarshal(params, &schema); err != nil {
+		return params
+	}
+
+	props := map[string]json.RawMessage{}
+	if raw, ok := schema["properties"]; ok {
+		if err := json.Unmarshal(raw, &props); err != nil {
+			return params
+		}
+	}
+	for k, v := range proposalMetaProps {
+		if _, exists := props[k]; !exists {
+			props[k] = v
+		}
+	}
+	newProps, err := json.Marshal(props)
+	if err != nil {
+		return params
+	}
+	schema["properties"] = newProps
+	out, err := json.Marshal(schema)
+	if err != nil {
+		return params
+	}
 	return out
 }
 

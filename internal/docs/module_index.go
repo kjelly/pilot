@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"time"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,6 +31,27 @@ func NewModuleIndex(path string) *ModuleIndex {
 	return &ModuleIndex{path: path}
 }
 
+// bleveOpenTimeout bounds the underlying bbolt.Open. bbolt's flock
+// retry loop has no upper bound, so a stuck lock (e.g. another pilot
+// process left over from a SIGKILL) would hang the agent loop forever.
+// 30 s is generous for a 100 MB local index.
+//
+// Override at test time by setting the package-level variable
+// bleveOpenTimeoutForTest BEFORE calling Open(). Tests should always
+// defer-undo the override. The const-form is retained as the default.
+var bleveOpenTimeoutForTest time.Duration
+
+func bleveOpenTimeoutOrDefault() time.Duration {
+	if bleveOpenTimeoutForTest > 0 {
+		return bleveOpenTimeoutForTest
+	}
+	return 30 * time.Second
+}
+
+// bleveOpenTimeout is kept as a const for the docstring above; the
+// runtime value is bleveOpenTimeoutOrDefault().
+const bleveOpenTimeout = 30 * time.Second
+
 // Open creates or opens the underlying bleve index. Must be called before
 // any other method. On a successful open of an existing index, the
 // in-memory chunks slice is reloaded from the sidecar chunks file.
@@ -42,7 +64,28 @@ func (m *ModuleIndex) Open() error {
 	if err := ensureParentDir(m.path); err != nil {
 		return err
 	}
-	idx, err := bleve.Open(m.path)
+	// bleve.Open -> bbolt.Open -> flock(LOCK_EX|LOCK_NB) with no Timeout.
+	// We can't pass options into bleve.Open, so we race the open against
+	// a timer in a goroutine and surface a context-deadline-style error.
+	type openResult struct {
+		idx bleve.Index
+		err error
+	}
+	resCh := make(chan openResult, 1)
+	go func() {
+		idx, err := bleve.Open(m.path)
+		resCh <- openResult{idx: idx, err: err}
+	}()
+	var (
+		idx bleve.Index
+		err error
+	)
+	select {
+	case r := <-resCh:
+		idx, err = r.idx, r.err
+	case <-time.After(bleveOpenTimeoutOrDefault()):
+		return fmt.Errorf("open bleve index: timed out after %s (likely a stale bbolt lock — another pilot or stale process holds %s; remove the file and retry)", bleveOpenTimeoutOrDefault(), filepath.Join(m.path, "store", "root.bolt"))
+	}
 	if isMissingIndex(err) {
 		idx, err = bleve.New(m.path, moduleIndexMapping())
 		if err != nil {
