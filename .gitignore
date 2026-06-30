@@ -43,3 +43,8 @@ coverage.txt
 
 # Stale test artifact
 *.tmp
+
+# Local-only pilot artifacts
+.verification/
+.playbooks/generated/
+inventory*.yaml

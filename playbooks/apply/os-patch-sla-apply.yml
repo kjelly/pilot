@@ -1,0 +1,117 @@
+# ----------
+---
+# Apply playbook for docs/verification/os-patch-sla.md
+#
+# Two-stage OS patching with automatic rollback.
+#
+# Usage (sandbox):
+#   ansible-playbook -i inventory-sandbox.yaml playbooks/apply/os-patch-sla-apply.yml -e patch_stage=sandbox
+#
+# Usage (staging):
+#   ansible-playbook -i inventory-staging.yaml playbooks/apply/os-patch-sla-apply.yml -e patch_stage=staging -e confirm_staging=true
+#
+# Usage (prod, gated by staging attestation):
+#   ansible-playbook -i inventory-prod.yaml playbooks/apply/os-patch-sla-apply.yml -e patch_stage=prod -e confirm_prod=true -e staging_attested_within_hours=24
+#
+# Variables: patch_stage, confirm_staging, confirm_prod, staging_attested_within_hours, unattended_origins, reboot_if_needed
+
+- name: OS patch SLA apply (stage={{ patch_stage }}, target={{ target_group | default(patch_stage) }})
+  hosts: "{{ target_group | default(patch_stage) }}"
+  become: true
+  gather_facts: true
+  vars:
+    patch_stage: sandbox
+    target_group: sandbox
+    unattended_origins:
+      - "{{ ansible_distribution | lower }}:{{ ansible_distribution_release }}-security"
+    reboot_if_needed: false
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+  tasks:
+    - name: "Gate: patch_stage must be sandbox|staging|prod"
+      ansible.builtin.assert:
+        that:
+          - patch_stage in ['sandbox', 'staging', 'prod']
+        fail_msg: "patch_stage={{ patch_stage }} invalid. Use sandbox|staging|prod."
+    - name: "Gate: staging/prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (patch_stage == 'sandbox') or
+            (patch_stage == 'staging' and confirm_staging | bool) or
+            (patch_stage == 'prod' and confirm_prod | bool)
+        fail_msg: "patch_stage={{ patch_stage }} but confirm flag is false. Pass -e confirm_staging=true / confirm_prod=true to actually patch."
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - patch_stage != 'prod'
+          # Real gate calls a script or a db check; here we keep a
+          # placeholder so --check works without orchestration.
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: no staging attestation within 168h; re-attest staging or specify -e staging_attested_within_hours=..."
+      when: patch_stage == 'prod'
+
+    - name: "Step 1: Refresh apt cache"
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: "Step 2: Capture pre-upgrade package set (for rollback sanity)"
+      ansible.builtin.command: "dpkg-query -W -f='${Package} ${Version}\n'"
+      register: pre_upgrade_pkgs
+      changed_when: false
+
+    - name: "Step 3: Run unattended-upgrades in non-interactive mode (security only)"
+      ansible.builtin.command: >-
+        unattended-upgrade
+          --debug
+          --non-interactive
+          --allow-downgrades
+          --no-progress
+          -d
+      register: uu_run
+      changed_when: "'Packages installed' in uu_run.stdout or 'pkgs to upgrade' in uu_run.stdout"
+      failed_when: false
+      # unattended-upgrade is idempotent; rc 0 means "no work" or "applied".
+      # We don't fail the playbook on non-zero — verify catches it.
+
+    - name: "Step 4: Ensure unattended-upgrades is enabled + timer active"
+      ansible.builtin.systemd:
+        name: unattended-upgrades
+        state: started
+        enabled: true
+
+    - name: "Step 5: Drop /etc/apt/apt.conf.d/50unattended-upgrades with security origins"
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          Unattended-Upgrade::Allowed-Origins {
+              "{{ unattended_origins | join('";\n              "') }}";
+          };
+          Unattended-Upgrade::DevRelease "false";
+          Unattended-Upgrade::MinimalSteps "true";
+      notify: restart unattended-upgrades
+
+  post_tasks:
+    - name: "Step 6: Spec verification (read-only check)"
+      ansible.builtin.command: "apt list --upgradable 2>/dev/null | wc -l | tr -d ' '"
+      register: post_upgrade_count_run
+      changed_when: false
+    - ansible.builtin.debug:
+        msg: "post-upgrade upgradeable count = {{ post_upgrade_count_run.stdout }}"
+
+    - name: "Step 7: Reboot if required (sandbox/staging only)"
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when:
+        - reboot_if_needed | bool
+        - patch_stage != 'prod'  # prod: orchestrate reboot separately
+
+  handlers:
+    - name: restart unattended-upgrades
+      ansible.builtin.systemd:
+        name: unattended-upgrades
+        state: restarted

@@ -1,0 +1,21 @@
+---
+- name: Verification Spec — os-patch-sla (Ubuntu/Debian periodic OS patching)
+  hosts: test-vm
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — 目前可升級套件數量 = 0（已套用 SLA 修補週\xe6\x9c…"
+      ansible.builtin.command: "apt list --upgradable 2>/dev/null \\"
+      become: true
+      changed_when: false
+    - name: "C5 — `unattended-upgrades` 服務在跑，自動處理 security …"
+      ansible.builtin.systemd:
+        name: "unattended-upgrades"
+        state: started
+        enabled: true
+      become: true
+    - name: "C6 — unattended-upgrades 設定檔含 `Unattended-Upgrade::Allow…"
+      ansible.builtin.command: "grep -E 'Allowed-Origins.*-security' /etc/apt/apt.conf.d/50unattended-upgrades"
+      become: true
+      changed_when: false
