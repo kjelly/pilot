@@ -1,0 +1,251 @@
+# Apply playbook for docs/verification/core-infra-provider.md
+#
+# Three roles in one playbook, gated by `-e infra_role=...`:
+#
+#   dns      install + configure unbound (or bind9 / dnsmasq per host)
+#   ntp      install + configure chrony (or ntpd / ntpsec) with a sane
+#            pool so this host itself becomes a stratum source
+#   keycloak install + start Keycloak (Quarkus standalone or container;
+#            issuer + realm come from -e @vault.yaml at run time)
+#
+# Usage examples:
+#
+#   ansible-playbook -i inventory.yaml \
+#       playbooks/apply/core-infra-provider-apply.yml \
+#       -e infra_role=dns \
+#       -e dns_provider=unbound \
+#       -e dns_listen_addr=10.0.0.53 \
+#       --check --diff
+#
+#   ansible-playbook -i inventory.yaml \
+#       playbooks/apply/core-infra-provider-apply.yml \
+#       -e infra_role=ntp \
+#       -e ntp_provider=chrony \
+#       -e ntp_pool="ntp.ubuntu.com pool.ntp.org"
+#
+#   ansible-playbook -i inventory.yaml \
+#       playbooks/apply/core-infra-provider-apply.yml \
+#       -e infra_role=keycloak \
+#       -e keycloak_admin_user=admin \
+#       -e @~/.vault/keycloak-sandbox.yaml
+#
+# Stage gating:
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND -e staging_attested_within_hours<=168
+---
+- name: Core infra provider apply
+  hosts: "{{ target_group | default(infra_role) | default('dns') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    dns_provider: unbound
+    ntp_provider: chrony
+    backup_suffix: .pre-core-infra.bak
+    target_group: "{{ infra_role }}"
+
+  pre_tasks:
+    - name: "Gate: infra_role must be dns, ntp, or keycloak"
+      ansible.builtin.assert:
+        that:
+          - infra_role in ['dns', 'ntp', 'keycloak']
+        fail_msg: "infra_role={{ infra_role }} invalid. Pass -e infra_role=dns|ntp|keycloak."
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - stage != 'prod'
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+
+  tasks:
+    ### DNS role
+    - name: "DNS — snapshot /etc/systemd/resolved.conf before mutation"
+      ansible.builtin.copy:
+        src: /etc/systemd/resolved.conf
+        dest: "/etc/systemd/resolved.conf{{ backup_suffix }}"
+        remote_src: true
+        force: false
+        mode: '0644'
+      when: infra_role == 'dns'
+      register: resolved_backup
+
+    - name: "DNS — install unbound"
+      ansible.builtin.apt:
+        name: "{{ dns_provider }}"
+        state: present
+        update_cache: true
+      when:
+        - infra_role == 'dns'
+        - not ansible_check_mode
+
+    - name: "DNS — write unbound config"
+      ansible.builtin.copy:
+        dest: /etc/unbound/unbound.conf.d/infra-pilot.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          server:
+              interface: {{ dns_listen_addr | default('0.0.0.0') }}
+              access-control: 10.0.0.0/8 allow
+              access-control: 192.168.0.0/16 allow
+              do-not-query-localhost: no
+              forward-zone:
+                  name: "."
+                      forward-addr: {{ dns_upstream | default('1.1.1.1#cloudflare-dns.com') }}
+      when:
+        - infra_role == 'dns'
+        - not ansible_check_mode
+      notify: restart unbound
+
+    - name: "DNS — flip systemd-resolved from stub to client of our DNS"
+      ansible.builtin.copy:
+        dest: /etc/systemd/resolved.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Resolve]
+          DNS={{ dns_listen_addr | default('127.0.0.1') }}
+          FallbackDNS=1.1.1.1 9.9.9.9
+      when:
+        - infra_role == 'dns'
+        - not ansible_check_mode
+
+    - name: "DNS — restart systemd-resolved after config change"
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
+      when:
+        - infra_role == 'dns'
+        - not ansible_check_mode
+
+    - name: "DNS — enable + start unbound"
+      ansible.builtin.systemd:
+        name: unbound
+        state: started
+        enabled: true
+      when:
+        - infra_role == 'dns'
+        - not ansible_check_mode
+      notify: restart unbound
+
+    - name: "DNS — final check: unbound listening on port 53 (NOT stub)"
+      ansible.builtin.command: >-
+        sh -c 'ss -tulnH | grep ":53 " | grep -vE "127\.0\.0\.5[34]" | head -n1'
+      register: dns_post
+      failed_when: dns_post.stdout == ''
+      changed_when: false
+      when: infra_role == 'dns'
+
+    ### NTP role
+    - name: "NTP — install chrony"
+      ansible.builtin.apt:
+        name: "{{ ntp_provider }}"
+        state: present
+        update_cache: true
+      when:
+        - infra_role == 'ntp'
+        - not ansible_check_mode
+
+    - name: "NTP — write chrony.conf"
+      ansible.builtin.copy:
+        dest: /etc/chrony/chrony.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          pool {{ ntp_pool | default('ntp.ubuntu.com') }} iburst maxsources 4
+          sourcedir /run/chrony-dhcp
+          driftfile /var/lib/chrony/chrony.drift
+          makestep 1.0 3
+          rtcsync
+          logdir /var/log/chrony
+          allow 10.0.0.0/8
+          allow 192.168.0.0/16
+          local stratum 3
+      when:
+        - infra_role == 'ntp'
+        - not ansible_check_mode
+      notify: restart chrony
+
+    - name: "NTP — enable + start chronyd"
+      ansible.builtin.systemd:
+        name: "{{ ntp_provider }}"
+        state: started
+        enabled: true
+      when:
+        - infra_role == 'ntp'
+        - not ansible_check_mode
+      notify: restart chrony
+
+    - name: "NTP — final check: chronyd active"
+      ansible.builtin.command: systemctl is-active chronyd
+      register: ntp_post
+      failed_when: ntp_post.stdout != 'active'
+      changed_when: false
+      when: infra_role == 'ntp'
+
+    ### Keycloak role
+    - name: "Keycloak — render env file from -e + vault"
+      ansible.builtin.copy:
+        dest: /etc/keycloak/pilot.env
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          KEYCLOAK_ADMIN={{ keycloak_admin_user | default('admin') }}
+          KEYCLOAK_ADMIN_PASSWORD={{ keycloak_admin_password | mandatory }}
+          KC_DB=postgres
+          KC_DB_URL={{ keycloak_db_url | default('jdbc:postgresql://localhost:5432/keycloak') }}
+          KC_DB_USERNAME={{ keycloak_db_user | mandatory }}
+          KC_DB_PASSWORD={{ keycloak_db_password | mandatory }}
+          KC_HOSTNAME={{ keycloak_issuer_url | default('idp.infra.internal') }}
+      when:
+        - infra_role == 'keycloak'
+        - not ansible_check_mode
+
+    - name: "Keycloak — start via systemd"
+      ansible.builtin.systemd:
+        name: keycloak
+        state: started
+        enabled: true
+      when:
+        - infra_role == 'keycloak'
+        - not ansible_check_mode
+      failed_when: false
+
+    - name: "Keycloak — final check: discovery endpoint reachable"
+      ansible.builtin.uri:
+        url: "https://{{ keycloak_issuer_url | default('idp.infra.internal') }}/realms/master/.well-known/openid-configuration"
+        status_code: 200
+        validate_certs: false
+      register: kc_post
+      failed_when: kc_post.status != 200
+      when:
+        - infra_role == 'keycloak'
+        - not ansible_check_mode
+
+  handlers:
+    - name: restart unbound
+      ansible.builtin.systemd:
+        name: unbound
+        state: restarted
+    - name: restart chrony
+      ansible.builtin.systemd:
+        name: chrony
+        state: restarted
