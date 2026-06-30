@@ -608,7 +608,7 @@ func execExternal(stdout io.Writer, bin string, args ...string) error {
 // newCmd is package-local so tests can swap it for a fake. Default
 // implementation is exec.CommandContext with no timeout (the binary
 // itself enforces one, and the user can Ctrl-C).
-func newCmd(ctx context.Context, bin string, args ...string) *exec.Cmd {
+var newCmd = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, bin, args...)
 }
 

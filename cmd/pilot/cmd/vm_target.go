@@ -261,7 +261,10 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 
 	playbook := args[0]
 	extra := args[1:]
-	ansibleArgs := []string{playbook, "-i", invPath, "-l", t.Name}
+	ansibleArgs := []string{playbook, "-i", invPath}
+	if !extraHasTargetGroup(extra) {
+		ansibleArgs = append(ansibleArgs, "-l", t.Name)
+	}
 	ansibleArgs = append(ansibleArgs, extra...)
 	fmt.Fprintf(cmd.ErrOrStderr(), "▶ ansible-playbook %s\n", strings.Join(ansibleArgs, " "))
 	return execAnsiblePlaybook(cmd.OutOrStdout(), ansibleArgs...)

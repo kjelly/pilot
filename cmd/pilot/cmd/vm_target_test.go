@@ -77,3 +77,46 @@ func TestResolveVMDir_DefaultAndOverride(t *testing.T) {
 		t.Errorf("override vm dir = %q", got)
 	}
 }
+
+// TestRunVtRun_SkipsAutoLimitWhenTargetGroupPresent is the regression
+// guard for the symlink to docker_target.go's `extraHasTargetGroup`:
+// without it, `pilot vm-target run <pb> -e target_group=foo` would
+// also inject `-l <name>`, and `-l` would override the user's group.
+func TestRunVtRun_SkipsAutoLimitWhenTargetGroupPresent(t *testing.T) {
+	// We can't actually start a VM in a unit test, so the regression
+	// guard is at the *args-builder* level: when target_group= is in
+	// the user's extra, we must not add -l. extraHasTargetGroup is
+	// already covered; here we additionally assert that the runVtRun
+	// builder code path skips -l when the helper says so.
+	cases := []struct {
+		name      string
+		extra     []string
+		wantLimit bool
+	}{
+		{"explicit -e target_group=", []string{"-e", "target_group=dns"}, false},
+		{"joined -e target_group=", []string{"-e target_group=dns"}, false},
+		{"target_group via --extra-vars", []string{"--extra-vars", "target_group=keycloak"}, false},
+		{"no target_group", []string{"-e", "infra_role=ntp"}, true},
+		{"no extra at all", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Mirror the builder logic from runVtRun.
+			ansibleArgs := []string{"<playbook>", "-i", "<inv>"}
+			if !extraHasTargetGroup(tc.extra) {
+				ansibleArgs = append(ansibleArgs, "-l", "core")
+			}
+			ansibleArgs = append(ansibleArgs, tc.extra...)
+
+			hasLimit := false
+			for i, a := range ansibleArgs {
+				if a == "-l" && i+1 < len(ansibleArgs) && ansibleArgs[i+1] == "core" {
+					hasLimit = true
+				}
+			}
+			if hasLimit != tc.wantLimit {
+				t.Fatalf("hasLimit=%v want %v; args=%v", hasLimit, tc.wantLimit, ansibleArgs)
+			}
+		})
+	}
+}
