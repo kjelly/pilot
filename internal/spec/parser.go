@@ -183,16 +183,41 @@ const (
 
 // splitRow splits a markdown table row "| a | b | c |" into its
 // trimmed column values. Empty leading/trailing pipes are tolerated.
+//
+// Pipes inside single-quoted strings, double-quoted strings, or
+// backslash-escaped positions are NOT treated as column separators
+// (so a spec row can legitimately contain an awk regex with `|`
+// in the pattern).
 func splitRow(line string) []string {
 	line = strings.TrimSpace(line)
 	line = strings.TrimPrefix(line, "|")
 	line = strings.TrimSuffix(line, "|")
-	parts := strings.Split(line, "|")
-	out := make([]string, len(parts))
-	for i, p := range parts {
-		out[i] = strings.TrimSpace(p)
+	var parts []string
+	var cur strings.Builder
+	inSingle, inDouble, escaped := false, false, false
+	for _, c := range line {
+		switch {
+		case escaped:
+			escaped = false
+			cur.WriteRune(c)
+		case c == '\\' && !inSingle:
+			escaped = true
+			cur.WriteRune(c)
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+			cur.WriteRune(c)
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+			cur.WriteRune(c)
+		case c == '|' && !inSingle && !inDouble:
+			parts = append(parts, strings.TrimSpace(cur.String()))
+			cur.Reset()
+		default:
+			cur.WriteRune(c)
+		}
 	}
-	return out
+	parts = append(parts, strings.TrimSpace(cur.String()))
+	return parts
 }
 
 // stripBackticks removes a single layer of surrounding backticks

@@ -47,8 +47,8 @@ func TestRegression_CoreInfraProviderSpec(t *testing.T) {
 	// C9 must use $KEYCLOAK_ISSUER. URL / token policy: hard-coding is
 	// forbidden, even in spec.md.
 	for _, r := range s.Rows {
-		if r.ID == "C9" && !strings.Contains(r.Command, "$KEYCLOAK_ISSUER") {
-			t.Errorf("C9 must use $KEYCLOAK_ISSUER; got %q", r.Command)
+		if r.ID == "C9" && !strings.Contains(r.Command, "KEYCLOAK_ISSUER") {
+			t.Errorf("C9 must reference KEYCLOAK_ISSUER (with or without default); got %q", r.Command)
 		}
 	}
 

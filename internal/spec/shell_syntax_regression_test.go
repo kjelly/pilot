@@ -2,9 +2,9 @@ package spec
 
 import (
 	"bytes"
+	"os/exec"
 	"path/filepath"
 	"sort"
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -112,8 +112,11 @@ func TestShellSyntax_AllRowCommands(t *testing.T) {
 // hack — but that's brittle. Easier: prepend `if true; then <cmd>; fi`
 // so `bash -n` parses it as a script.
 func bashSyntaxCheck(cmd string) (string, error) {
-	// Wrap into a script so bash -n sees a multi-line structure.
-	script := "true\n" + cmd + "\ntrue\n"
+	// Wrap into a single-line script so quote-parsing stays in
+	// one chunk. (A multi-line true/false wrapping makes bash -n
+	// complain about unclosed single quotes from the inner
+	// sh -c '...awk "..."' pattern.)
+	script := "{ " + cmd + "; } 2>/dev/null; :"
 	out, err := exec.Command("bash", "-n", "-c", script).CombinedOutput()
 	if err != nil {
 		return string(out), err
