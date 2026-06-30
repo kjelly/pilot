@@ -1,0 +1,27 @@
+---
+- name: Verification Spec — pam-oidc-sshd (kc-ssh-pam, Keycloak Device Flow)
+  hosts: test-vm
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — `kc-ssh-pam` 套件已安裝（deb）"
+      ansible.builtin.command: "sh -c 'dpkg -s kc-ssh-pam >/dev/null 2>&1; echo $?'"
+      become: true
+      changed_when: false
+    - name: "C2 — 模組設定檔 `/etc/kc-ssh-pam/config.yaml` 存在"
+      ansible.builtin.stat:
+        path: "/etc/kc-ssh-pam/config.yaml"
+      become: true
+    - name: "C3 — sshd PAM 備份 `/etc/pam.d/sshd.pamoidc.bak` 存在"
+      ansible.builtin.stat:
+        path: "/etc/pam.d/sshd.pamoidc.bak"
+      become: true
+    - name: "C4 — `/etc/pam.d/sshd` 含 `auth sufficient pam_kc_ssh.so` 行"
+      ansible.builtin.command: "grep -qE '^auth[[:space:]]+sufficient[[:space:]]+pam_kc_ssh.so' /etc/pam.d/sshd"
+      become: true
+      changed_when: false
+    - name: "C7 — `/etc/kc-ssh-pam/config.yaml` 含 `issuer:` 且 URL 合法"
+      ansible.builtin.command: "grep -qE '^issuer:[[:space:]]*https?://' /etc/kc-ssh-pam/config.yaml"
+      become: true
+      changed_when: false

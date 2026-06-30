@@ -1,0 +1,178 @@
+---
+# Apply playbook for docs/verification/pam-oidc-sshd.md
+#
+# Usage:
+#
+#   # dry run / preview (no changes)
+#   ansible-playbook -i inventory.yaml playbooks/apply/pam-oidc-sshd-apply.yml \
+#     --check --diff \
+#     -e kc_ssh_pam_deb=/abs/path/kc-ssh-pam_X.Y.Z_amd64.deb \
+#     -e keycloak_issuer=https://keycloak.example/realms/eng \
+#     -e keycloak_client_id=ssh-oidc
+#
+#   # real apply (writes /etc/pam.d/sshd, /etc/kc-ssh-pam/)
+#   ansible-playbook -i inventory.yaml playbooks/apply/pam-oidc-sshd-apply.yml \
+#     -e kc_ssh_pam_deb=/abs/path/kc-ssh-pam_X.Y.Z_amd64.deb \
+#     -e keycloak_issuer=https://keycloak.example/realms/eng \
+#     -e keycloak_client_id=ssh-oidc
+#
+# Or via pilot:
+#
+#   pilot run --no-tui --model minimax-m3:cloud \
+#     "Apply pam-oidc-sshd to test-vm with kc-ssh-pam_1.2.3.deb \
+#      and keycloak issuer https://keycloak.example/realms/eng"
+#
+# Variables (with safe defaults so --check runs without arguments):
+#   kc_ssh_pam_deb         (REQUIRED for real run; absent in --check OK)
+#   kc_ssh_pam_apt_name    default: kc-ssh-pam
+#   keycloak_issuer        (REQUIRED for real run)
+#   keycloak_client_id     default: ssh-oidc
+#   keycloak_port          default: 22
+#   backup_suffix          default: .pamoidc.bak
+#   pam_d_path             default: /etc/pam.d/sshd
+#   config_dir             default: /etc/kc-ssh-pam
+#
+# The block/rescue pair guarantees that ANY task failure after the
+# backup is taken restores /etc/pam.d/sshd. This is the lockout
+# safety net promised in the spec.
+- name: Apply PAM OIDC for sshd (kc-ssh-pam)
+  hosts: test-vm
+  become: true
+  gather_facts: true
+  vars:
+    kc_ssh_pam_apt_name: kc-ssh-pam
+    keycloak_client_id: ssh-oidc
+    keycloak_port: "22"
+    backup_suffix: ".pamoidc.bak"
+    pam_d_path: /etc/pam.d/sshd
+    config_dir: /etc/kc-ssh-pam
+  # Required variables (passed via -e on the CLI, never hard-coded):
+  #   kc_ssh_pam_deb   path to the .deb on the controller (str)
+  #   keycloak_issuer  https://keycloak/realms/... (str)
+  #
+  # To set interactively:
+  #   ansible-playbook -i inv.yaml apply.yml -e kc_ssh_pam_deb=@path -e keycloak_issuer=@url
+  #
+  # To call from python/jinja elsewhere:  vars_files + -e @vars.yaml
+  tasks:
+    - name: "Step 0: Pre-flight — kc-ssh-pam inputs present"
+      ansible.builtin.assert:
+        that:
+          - kc_ssh_pam_deb | length > 0
+          - keycloak_issuer is match('^https?://')
+          - keycloak_issuer is not search('127\\.0\\.0\\.1')
+        fail_msg: >-
+          Missing required vars. Provide --extra-vars kc_ssh_pam_deb=...
+          and --extra-vars keycloak_issuer=https://...  (--check bypasses
+          this gate so the playbook can be syntax-checked without args.)
+      when: not ansible_check_mode
+
+    - name: "Step 1: Snapshot /etc/pam.d/sshd before any modification"
+      ansible.builtin.copy:
+        src: "{{ pam_d_path }}"
+        dest: "{{ pam_d_path }}{{ backup_suffix }}"
+        remote_src: true
+        force: false
+        mode: '0644'
+      register: pam_backup
+      # `force: false` makes the backup a no-op if it already exists, so
+      # repeated runs don't clobber a known-good backup from a prior run.
+
+    - block:
+        - name: "Step 2: Install kc-ssh-pam from local .deb"
+          ansible.builtin.apt:
+            deb: "{{ kc_ssh_pam_deb | default('@placeholder.deb') }}"
+            state: present
+          register: apt_install
+          until: apt_install is succeeded
+          retries: 2
+          delay: 3
+          when:
+            - not ansible_check_mode
+            - kc_ssh_pam_deb | default('') | length > 0
+
+        - name: "Step 2a: Verify the package is now installed (C1 of the spec)"
+          ansible.builtin.command: "dpkg-query -W -f='${Status}' {{ kc_ssh_pam_apt_name }}"
+          register: pkg_status
+          changed_when: false
+          failed_when: "'install ok installed' not in pkg_status.stdout"
+
+        - name: "Step 3: Ensure /etc/kc-ssh-pam directory exists"
+          ansible.builtin.file:
+            path: "{{ config_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: '0750'
+
+        - name: "Step 4: Render kc-ssh-pam config.yaml"
+          ansible.builtin.copy:
+            dest: "{{ config_dir }}/config.yaml"
+            owner: root
+            group: root
+            mode: '0640'
+            content: |
+              # Managed by ansible — do not edit by hand
+              issuer: {{ keycloak_issuer | default('https://placeholder.invalid') }}
+              client_id: {{ keycloak_client_id }}
+              ssh_port: {{ keycloak_port }}
+              device_flow: true
+              mfa: required
+          when: not ansible_check_mode
+
+        - name: "Step 4a: Spec C7 — issuer URL in config uses https?"
+          ansible.builtin.command: >-
+            grep -qE '^issuer:[[:space:]]*https://' {{ config_dir }}/config.yaml
+          changed_when: false
+          failed_when: false
+          register: c7_check
+          when: not ansible_check_mode
+          # We don't fail the apply if C7 is unhealthy — that's verify's job.
+          # We just surface it for visibility.
+
+        - name: "Step 5: Wire pam_kc_ssh.so into /etc/pam.d/sshd (idempotent)"
+          ansible.builtin.lineinfile:
+            path: "{{ pam_d_path }}"
+            regexp: '^auth[[:space:]]+sufficient[[:space:]]+pam_kc_ssh\.so'
+            line: "auth sufficient pam_kc_ssh.so"
+            insertbefore: BOF
+            state: present
+            backup: false  # we already took the backup at Step 1
+          register: line_added
+          when: not ansible_check_mode
+
+        - name: "Step 6: Sanity-check sshd can still parse its config"
+          ansible.builtin.command: "sshd -T -f /etc/ssh/sshd_config"
+          changed_when: false
+          failed_when: false
+          register: sshd_t
+          # Same — sanity, not a gate. Verify surfaces the verdict.
+
+        - name: "Step 7: pam-auth --check"
+          ansible.builtin.command: "pam-auth --check"
+          register: pam_auth_check
+          changed_when: false
+          failed_when: false
+          # Best-effort probe: kc-ssh-pam may not ship `pam-auth` on every
+          # version. A non-zero rc here is information, not a failure of
+          # the apply itself.
+
+      rescue:
+        - name: "ROLLBACK — restore /etc/pam.d/sshd from backup"
+          ansible.builtin.copy:
+            src: "{{ pam_d_path }}{{ backup_suffix }}"
+            dest: "{{ pam_d_path }}"
+            remote_src: true
+            force: true
+            mode: '0644'
+          when:
+            - pam_backup is defined
+            - pam_backup is succeeded
+            - pam_backup.dest | default('') | length > 0
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              pam-oidc-sshd apply failed and /etc/pam.d/sshd was restored
+              from backup. Inspect the task above for the root cause and
+              re-run after fixing it.
