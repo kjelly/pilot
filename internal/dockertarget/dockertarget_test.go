@@ -487,3 +487,154 @@ esac`
 	// the StartedAt timestamps are populated (downstream columns).
 	_ = time.Second // keep import alive for future tests
 }
+
+// TestUp_AcceptsHostAliases is the multi-host happy path. The target
+// record gets a Hosts slice that RenderInventory expands to multiple
+// inventory entries pointing at the same container.
+func TestUp_AcceptsHostAliases(t *testing.T) {
+	shim := `case "$1" in
+  inspect) exit 1 ;;
+  run)     echo "cid-mh" ;;
+  *)       exit 0 ;;
+esac`
+	m, _ := newTestManager(t, shim)
+	tgt, err := m.Up(context.Background(), Options{
+		Name:  "core",
+		Image: "pilot-target:ubuntu-24.04",
+		Hosts: []string{"dns", "ntp", "keycloak"},
+	})
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if len(tgt.Hosts) != 4 { // core + dns + ntp + keycloak
+		t.Errorf("Hosts = %v (want 4 entries)", tgt.Hosts)
+	}
+	inv, err := tgt.RenderInventory()
+	if err != nil {
+		t.Fatalf("RenderInventory: %v", err)
+	}
+	// Each alias should appear as its own inventory host entry.
+	for _, want := range []string{"core:", "dns:", "ntp:", "keycloak:"} {
+		if !strings.Contains(inv, want) {
+			t.Errorf("inventory missing host %q\n%s", want, inv)
+		}
+	}
+	// All should route to ansible_host: core (the container name).
+	count := strings.Count(inv, "ansible_host: core")
+	if count != 4 {
+		t.Errorf("ansible_host: core appeared %d times, want 4", count)
+	}
+}
+
+// TestUp_RejectsInvalidHostAlias protects the same regex we use
+// for Name. An alias like "has space" or "with/slash" would break
+// ansible inventory parsing.
+func TestUp_RejectsInvalidHostAlias(t *testing.T) {
+	shim := `case "$1" in
+  inspect) exit 1 ;;
+  run)     echo "cid-bad" ;;
+  *)       exit 0 ;;
+esac`
+	m, _ := newTestManager(t, shim)
+	_, err := m.Up(context.Background(), Options{
+		Name:  "core",
+		Image: "pilot-target:ubuntu-24.04",
+		Hosts: []string{"bad name"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid host alias") {
+		t.Fatalf("want invalid-alias error, got %v", err)
+	}
+}
+
+// TestUp_DedupesHostAliases is the regression guard: passing the
+// same alias twice (or the same as the primary Name) must not
+// produce duplicate inventory entries.
+func TestUp_DedupesHostAliases(t *testing.T) {
+	shim := `case "$1" in
+  inspect) exit 1 ;;
+  run)     echo "cid-dedup" ;;
+  *)       exit 0 ;;
+esac`
+	m, _ := newTestManager(t, shim)
+	tgt, err := m.Up(context.Background(), Options{
+		Name:  "core",
+		Image: "pilot-target:ubuntu-24.04",
+		Hosts: []string{"core", "dns", "dns"},
+	})
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	// Expected: [core, dns] only
+	if len(tgt.Hosts) != 2 {
+		t.Errorf("Hosts = %v (want [core dns])", tgt.Hosts)
+	}
+	inv, err := tgt.RenderInventory()
+	if err != nil {
+		t.Fatalf("RenderInventory: %v", err)
+	}
+	// "core:" should appear exactly once (no duplicate inventory host).
+	if c := strings.Count(inv, "    core:"); c != 1 {
+		t.Errorf("core: appears %d times, want 1", c)
+	}
+}
+
+// TestDockerRaw_PassesArgsVerbatim ensures the escape hatch for
+// snapshot/rollback works as advertised (caller can call any
+// `docker` subcommand).
+func TestDockerRaw_PassesArgsVerbatim(t *testing.T) {
+	shim := `case "$1" in
+  commit) echo "$@" >> /tmp/pilot-commit.log ; echo "img123" ;;
+  *)       exit 0 ;;
+esac`
+	dir := t.TempDir()
+	shimFile := filepath.Join(dir, "docker")
+	if err := os.WriteFile(shimFile, []byte("#!/bin/sh\n"+shim), 0o755); err != nil {
+		t.Fatalf("shim: %v", err)
+	}
+	t.Setenv("PILOT_DOCKER_BIN", shimFile)
+	t.Setenv("PILOT_COMMIT_LOG", filepath.Join(dir, "commit.log"))
+	m, err := NewManager(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	res, err := m.DockerRaw(context.Background(), "commit", "x", "mytag")
+	if err != nil {
+		t.Fatalf("DockerRaw: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d", res.ExitCode)
+	}
+	if strings.TrimSpace(res.Stdout) != "img123" {
+		t.Errorf("stdout = %q", res.Stdout)
+	}
+}
+
+// TestRenderInventory_PrimaryMatchesName protects a subtle regression:
+// the primary inventory host key must be the docker container's --name
+// (so `ansible_host: <name>` works), not the Hostname override.
+func TestRenderInventory_PrimaryMatchesName(t *testing.T) {
+	shim := `case "$1" in
+  inspect) exit 1 ;;
+  run)     echo "cid-pm" ;;
+  *)       exit 0 ;;
+esac`
+	m, _ := newTestManager(t, shim)
+	tgt, err := m.Up(context.Background(), Options{
+		Name:     "outer",
+		Hostname: "inner", // override hostname
+		Image:    "pilot-target:ubuntu-24.04",
+	})
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	inv, err := tgt.RenderInventory()
+	if err != nil {
+		t.Fatalf("RenderInventory: %v", err)
+	}
+	if !strings.Contains(inv, "    outer:") {
+		t.Errorf("primary host 'outer' missing from inventory:\n%s", inv)
+	}
+	if !strings.Contains(inv, "ansible_host: outer") {
+		t.Errorf("ansible_host should be 'outer' (container name), not hostname:\n%s", inv)
+	}
+}
