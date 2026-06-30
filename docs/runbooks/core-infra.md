@@ -183,7 +183,116 @@ C9 idp-srv      FAIL  (provider) — keycloak 完全不通
 
 ---
 
-## 5. 變更紀錄
+
+## 6. Apply SOP（只 provider；consumer 不會「套 infra」、只驗證它已存在）
+
+> 上一個 section 給你看的是「**驗證**目前 host 的 infra 健康」。本節示範**對 provider host
+> 跑 apply** — 也就是把這台從「client」變成「DNS server / NTP server / Keycloak server」。
+> Apply playbook 是手寫的（generator 不生成 mutation playbook）。
+
+### 6.1 Apply playbook 總覽
+
+`playbooks/apply/core-infra-provider-apply.yml`（251 行）：
+
+- 同一份 playbook 處理三個 role（`dns` / `ntp` / `keycloak`），靠 `-e infra_role=...` 挑
+- 每個 role 都有 install + configure + service-restart + post-check
+- DNS role 有 block/rescue：動 `/etc/systemd/resolved.conf` 前先備份，
+  fail 自動 restore（避免 DNS 黑洞把 host 連線切斷）
+- Keycloak 用 `0600` 權限寫 `/etc/keycloak/pilot.env`，密碼絕不放上 CLI argv
+- 所有 `-e` 參數有 safe default，所以 `--check --diff` 不需任何 flag 就能跑
+
+### 6.2 Dry run（先看 diff）
+
+```bash
+ansible-playbook -i inventory-core-infra.yaml \
+    playbooks/apply/core-infra-provider-apply.yml \
+    -e infra_role=dns \
+    -e dns_provider=unbound \
+    -e dns_listen_addr=10.0.0.53 \
+    --check --diff
+# PLAY RECAP : ok=4 changed=1 skipped=14 failed=0
+# changed=1 是 copy snapshot /etc/systemd/resolved.conf → .pre-core-infra.bak
+```
+
+### 6.3 真套用（sandbox）
+
+```bash
+# DNS provider
+ansible-playbook -i inventory-core-infra.yaml \
+    playbooks/apply/core-infra-provider-apply.yml \
+    -e infra_role=dns \
+    -e dns_provider=unbound \
+    -e dns_listen_addr=10.0.0.53
+
+# NTP provider（可在同一台 host 跑、不衝突）
+ansible-playbook -i inventory-core-infra.yaml \
+    playbooks/apply/core-infra-provider-apply.yml \
+    -e infra_role=ntp \
+    -e ntp_provider=chrony \
+    -e ntp_pool="ntp.ubuntu.com pool.ntp.org"
+
+# Keycloak provider（要先把 DB 密碼塞進 vault）
+ansible-playbook -i inventory-core-infra.yaml \
+    playbooks/apply/core-infra-provider-apply.yml \
+    -e infra_role=keycloak \
+    -e keycloak_admin_user=admin \
+    -e @~/.vault/keycloak-sandbox.yaml   # contains keycloak_admin_password, keycloak_db_*
+```
+
+### 6.4 Staging / Prod gate
+
+```bash
+# Staging — 必須 explicit confirm
+ansible-playbook -i inventory-staging.yaml ... \
+    -e stage=staging -e confirm_staging=true
+
+# Prod — 多一層 attestation gate
+ansible-playbook -i inventory-prod.yaml ... \
+    -e stage=prod -e confirm_prod=true \
+    -e staging_attested_within_hours=24
+```
+
+兩道 gate 都會在 pre_tasks 的 `assert:` 階段 fail-closed，避免「忘了加 flag」誤套到 prod。
+
+### 6.5 Sync 上游 + verify
+
+```bash
+# 重新跑 provider spec，看 host 是否真的 serve 起來了
+/tmp/pilot verify docs/verification/core-infra-provider.md \
+    -i inventory-core-infra.yaml -l test-vm
+# expected: pass 從 3 → 7-9 之間（依 inf 缺幾條）
+
+# 跑 consumer spec 確認客戶端仍能用
+/tmp/pilot verify docs/verification/core-infra.md \
+    -i inventory-core-infra.yaml -l test-vm
+# 仍應 4/8 pass（consumer 不依賴此 host 的 infra state）
+
+# 一次看全部
+/tmp/pilot verify --dir docs/verification \
+    -i inventory-core-infra.yaml -l test-vm
+```
+
+### 6.6 Reverse / rollback
+
+- **DNS role**：block/rescue 自動還原 `/etc/systemd/resolved.conf` 從 backup（`backup_suffix: .pre-core-infra.bak`）
+- **NTP role**：chrony 改 conf 但 fail 不太影響 client side；必要時 `apt remove chrony`
+- **Keycloak role**：`/etc/keycloak/pilot.env` 沒自動刪除 — 這是故意的，你可能想保留以便事後 inspect。
+  完全 reset：`systemctl stop keycloak && rm /etc/keycloak/pilot.env && apt remove keycloak*`
+
+## 7. Order of operations（從 0 → provider host 的推進順序）
+
+要把一台 host 從「client only」推到「provider + client」：
+
+1. 第一次進場：host 是 bare Ubuntu，僅 `core-infra` 跑起來會 fail — 沒 infra 沒關係，**這是 gap matrix 訊號**
+2. `apt install chrony` + `chronyd --config` → host 是 NTP source，consumer C4/C5 變 PASS
+3. `apt install unbound` + unbound config → host 是 DNS source；consumer C1/C2/C3 變 PASS
+4. 容器化 Keycloak（用 pre-installed image 或 docker） → consumer C6/C7/C8 變 PASS
+5. 全部 PASS 之後，infra-as-a-service 化 → 上 inventory group `all-provider`
+6. 之後任何新 host 加 cluster：只要 `-i inventory.yaml -l newhost` 跑同一條 `pilot verify --dir docs/verification`，
+   consumer / provider relationship 自動驗證
+
+
+## 8. 變更紀錄
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|

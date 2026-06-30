@@ -12,6 +12,7 @@
 | **寫 apply playbook** | 範本在 `playbooks/apply/pam-oidc-sshd-apply.yml` 跟 `playbooks/apply/os-patch-sla-apply.yml`（必含 `-e` vars + `block/rescue` + stage gate） |
 | **跑完整閉環** | 從 `verification/<name>.md` → `apply/<name>-apply.yml` → 對 inventory 跑 ansible-playbook | 
 | 看一份完整的「spec → apply → verify → 失敗 → 修」| [`runbooks/pam-oidc-sshd.md`](./runbooks/pam-oidc-sshd.md) |
+| spec-to-spec supplier pattern（同一 host 多 spec 如何 cross-check）| [`runbooks/sso-composition.md`](./runbooks/sso-composition.md) |
 | 開發 ansible playbook 的心法 | [`ansible-playbook-development.md`](./ansible-playbook-development.md) |
 | 跑測試 | [`../TESTING.md`](../TESTING.md) |
 
