@@ -9,6 +9,11 @@
 #
 # What this image adds:
 #   - python3            ansible's interpreter
+#   - systemd + systemd-sysv
+#                        full init so `pilot docker-target up --systemd`
+#                        can boot /sbin/init as PID 1; without it
+#                        `systemctl`/`service` tasks fail with "System
+#                        has not been booted with systemd as init system"
 #   - systemd-resolved   so apply playbooks can flip /etc/resolv.conf
 #                        without "Source not found" failures
 #   - ca-certificates    apt update + HTTPS pulls
@@ -45,6 +50,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-apt \
+        systemd \
+        systemd-sysv \
         systemd-resolved \
         iproute2 \
         procps \
@@ -72,9 +79,17 @@ LABEL org.opencontainers.image.source="https://github.com/anomalyco/pilot" \
       pilot.target="true" \
       pilot.target.base="ubuntu:24.04"
 
+# systemd (when booted as PID 1 via `pilot docker-target up --systemd`)
+# shuts down on SIGRTMIN+3, not the default SIGTERM. Setting STOPSIGNAL
+# lets `docker stop` / `pilot docker-target down` halt the target
+# gracefully instead of waiting out the 10s kill timeout. Harmless for
+# the non-systemd `sleep infinity` path (sleep dies on either signal).
+STOPSIGNAL SIGRTMIN+3
+
 # Keep container alive; `pilot docker-target exec` reaches into it.
-# We use CMD (not ENTRYPOINT) so `docker run <image> sleep infinity`
-# from pilot replaces the default — without this, appending
-# `sleep infinity` after ENTRYPOINT yields "sleep infinity sleep
-# infinity" which busybox sleep rejects as invalid time interval.
+# We use CMD (not ENTRYPOINT) so the command pilot appends at
+# `docker run` replaces the default: `sleep infinity` for the plain
+# path, or `/sbin/init` when --systemd is set. Without CMD (i.e. with
+# ENTRYPOINT) appending `sleep infinity` would yield "sleep infinity
+# sleep infinity" which busybox sleep rejects as an invalid interval.
 CMD ["sleep", "infinity"]

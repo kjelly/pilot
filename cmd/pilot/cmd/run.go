@@ -482,6 +482,12 @@ func runOneTarget(ctx context.Context, res *setupResult, batchID, prefix string,
 	// for every playbook it proposes.
 	var loop *agent.Loop
 	if inv := resolveTargetInventory(); inv != "" {
+		// resolveTargetInventory stages the target's generated inventory
+		// to a temp file and hands us ownership of the path. Remove it
+		// when this run finishes — the file only needs to outlive
+		// loop.Run below. (Previously this leaked one tmpfile per
+		// `pilot run --target` invocation into $TMPDIR.)
+		defer os.Remove(inv)
 		loop = res.NewLoopWithDefaults(run.ID, os.Stderr, inv, runTarget)
 	} else {
 		loop = newAgentLoop(res, run.ID, os.Stderr)

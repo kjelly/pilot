@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/anomalyco/pilot/images"
 	"github.com/anomalyco/pilot/internal/dockertarget"
 )
 
@@ -75,6 +76,7 @@ var (
 	dtHostname    string
 	dtNetwork     string
 	dtNoPrivileged bool
+	dtSystemd     bool
 	dtExtraArgs   []string
 	dtHosts       []string
 )
@@ -125,6 +127,7 @@ func init() {
 	dtUpCmd.Flags().StringVar(&dtHostname, "hostname", "", "container --hostname (default = --name)")
 	dtUpCmd.Flags().StringVar(&dtNetwork, "network", "host", "docker --network (host|bridge|none)")
 	dtUpCmd.Flags().BoolVar(&dtNoPrivileged, "no-privileged", false, "disable docker --privileged (default: enabled)")
+	dtUpCmd.Flags().BoolVar(&dtSystemd, "systemd", false, "boot systemd as PID 1 so `systemctl`/`service` tasks and systemd-resolved work (requires an image that ships systemd, e.g. --image-pilot ubuntu-24.04; implies privileged)")
 	dtUpCmd.Flags().StringSliceVar(&dtExtraArgs, "docker-arg", nil, "extra arg for `docker run` (may repeat)")
 	dtUpCmd.Flags().StringSliceVar(&dtHosts, "hosts", nil, "additional ansible host aliases for this target (may repeat). All aliases route to the same container.")
 }
@@ -146,6 +149,16 @@ func runDtUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Auto-build the pre-baked pilot-target image if it's missing
+	// locally, so users don't need a separate `./images/build.sh` step.
+	// Only applies to `pilot-target:*` tags (whether reached via
+	// --image-pilot or an explicit --image pilot-target:...); plain
+	// user images are left to docker run to pull/resolve.
+	if variant, ok := strings.CutPrefix(dtImage, "pilot-target:"); ok {
+		if err := ensurePilotImage(context.Background(), m, variant, dtSystemd, cmd.ErrOrStderr()); err != nil {
+			return err
+		}
+	}
 	opts := dockertarget.Options{
 		Name:      dtName,
 		Image:     dtImage,
@@ -161,6 +174,10 @@ func runDtUp(cmd *cobra.Command, args []string) error {
 		f := false
 		opts.Privileged = &f
 	}
+	if dtSystemd {
+		s := true
+		opts.Systemd = &s
+	}
 	tgt, err := m.Up(context.Background(), opts)
 	if err != nil {
 		return err
@@ -172,6 +189,7 @@ func runDtUp(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "  hostname     : %s\n", tgt.Hostname)
 	fmt.Fprintf(out, "  network      : %s\n", tgt.Network)
 	fmt.Fprintf(out, "  privileged   : %v\n", tgt.Privileged)
+	fmt.Fprintf(out, "  systemd      : %v\n", tgt.Systemd)
 	fmt.Fprintf(out, "  inventory    : `pilot docker-target show-inventory --name %s`\n", tgt.Name)
 	return nil
 }
@@ -471,6 +489,77 @@ func shortCID(s string) string {
 	return s[:12]
 }
 
+// dockerBin returns the docker binary to invoke, honouring the
+// PILOT_DOCKER_BIN override (the same one internal/dockertarget uses)
+// so tests / power users can point at a shim.
+func dockerBin() string {
+	if b := os.Getenv("PILOT_DOCKER_BIN"); b != "" {
+		return b
+	}
+	return "docker"
+}
+
+// ensurePilotImage builds the pre-baked pilot-target image on demand
+// when it is missing locally, so `pilot docker-target up --image-pilot
+// <variant>` just works without a separate `./images/build.sh` step.
+//
+// The Dockerfile is embedded in the binary (package images), so this
+// works regardless of CWD. The build context is an empty temp dir —
+// the pilot-target Dockerfiles have no COPY/ADD, so nothing else is
+// needed. Build output is streamed so a multi-minute apt install does
+// not look hung; there is no timeout (matches ansible-playbook — the
+// user can Ctrl-C).
+func ensurePilotImage(ctx context.Context, m *dockertarget.Manager, variant string, needInit bool, progress io.Writer) error {
+	tag := "pilot-target:" + variant
+	// Already present? `docker image inspect` exits 0 iff the tag exists.
+	present := false
+	if res, err := m.DockerRaw(ctx, "image", "inspect", tag); err == nil && res.ExitCode == 0 {
+		present = true
+	}
+	// When --systemd is requested the image must be able to boot
+	// /sbin/init. Images built before --systemd support lack it, so a
+	// stale local tag would otherwise fail at `docker run` with a
+	// cryptic OCI "stat /sbin/init: no such file" error. Probe for it
+	// and rebuild instead.
+	if present && needInit && !imageHasInit(ctx, m, tag) {
+		fmt.Fprintf(progress, "▶ image %s has no /sbin/init (predates --systemd support); rebuilding…\n", tag)
+		present = false
+	}
+	if present {
+		return nil
+	}
+	df, ok := images.DockerfileFor(variant)
+	if !ok {
+		return fmt.Errorf("image %s not found locally and no built-in Dockerfile for variant %q (known: %s); build/tag it yourself or pass --image",
+			tag, variant, strings.Join(images.Variants(), ", "))
+	}
+	tmpDir, err := os.MkdirTemp("", "pilot-img-build-*")
+	if err != nil {
+		return fmt.Errorf("create build context: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	if err := os.WriteFile(filepath.Join(tmpDir, "Dockerfile"), df, 0o644); err != nil {
+		return fmt.Errorf("stage Dockerfile: %w", err)
+	}
+	fmt.Fprintf(progress, "▶ image %s not found locally; building from built-in Dockerfile (one-time, takes a few minutes)…\n", tag)
+	c := newCmd(ctx, dockerBin(), "build", "-t", tag, "-f", filepath.Join(tmpDir, "Dockerfile"), tmpDir)
+	c.Stdout = progress
+	c.Stderr = os.Stderr
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("build %s: %w", tag, err)
+	}
+	fmt.Fprintf(progress, "✓ built %s\n", tag)
+	return nil
+}
+
+// imageHasInit reports whether the image can boot systemd as PID 1, i.e.
+// whether /sbin/init exists inside it. Runs a throwaway `test -e` with
+// the entrypoint overridden so the image's own CMD/init is not invoked.
+func imageHasInit(ctx context.Context, m *dockertarget.Manager, tag string) bool {
+	res, err := m.DockerRaw(ctx, "run", "--rm", "--entrypoint", "test", tag, "-e", "/sbin/init")
+	return err == nil && res.ExitCode == 0
+}
+
 // execAnsiblePlaybook invokes the locally-installed ansible-playbook
 // binary. Kept as a thin wrapper so tests / future Windows ports
 // have a single seam to patch.
@@ -632,6 +721,10 @@ func runDtRollback(cmd *cobra.Command, args []string) error {
 	} else {
 		ff := false
 		upOpts.Privileged = &ff
+	}
+	if t.Systemd {
+		ss := true
+		upOpts.Systemd = &ss
 	}
 	newT, err := m.Up(context.Background(), upOpts)
 	if err != nil {

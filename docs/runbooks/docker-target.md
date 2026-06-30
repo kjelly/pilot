@@ -59,9 +59,27 @@ docker rm -f infra-test
 | 設定 | 預設 | 為什麼 |
 |------|------|--------|
 | `--network` | `host` | 不開 bridge，省 DNS / port mapping 麻煩 |
-| `--privileged` | `true` | 讓 container 內能 `apt install` / 跑 systemd 服務 |
+| `--privileged` | `true` | 讓 container 內能 `apt install`、掛 cgroup |
+| `--systemd` | `false` | 預設不開機 systemd（見下方說明） |
 | `--hostname` | = `--name` | ansible inventory key 跟 docker container name 一致 |
 | entrypoint | `sleep infinity` | 容器常駐，playbook 跑完也不會自己退出 |
+
+> **⚠️ systemd 服務管理要加 `--systemd`**：預設 entrypoint 是 `sleep infinity`，
+> 容器內 **PID 1 不是 systemd**，所以 `ansible.builtin.systemd` / `service` module、
+> 或任何 `systemctl start/restart`（含啟動 `systemd-resolved`）都會回
+> `System has not been booted with systemd as init system (PID 1)`。
+> 要跑這類 playbook（例如 core-infra 的 DNS role），起 target 時加 `--systemd`：
+>
+> ```bash
+> pilot docker-target up --image-pilot ubuntu-24.04 --systemd --name infra-test
+> #   systemd      : true
+> ```
+>
+> `--systemd` 會把 entrypoint 換成 `/sbin/init`，並掛上 `--tmpfs /run`
+> `--tmpfs /run/lock`，讓 systemd 能在容器內當 PID 1 開機。它**需要 privileged**
+> （和 `--no-privileged` 互斥，會直接報錯）以及一個**真的裝了 systemd 的 image**——
+> stock `ubuntu:24.04` 沒有 `/sbin/init` 會起不來，請用 `--image-pilot ubuntu-24.04`
+> （或自己 build 帶 systemd 的 image）。
 
 ### 2.2 列出現有 targets
 
@@ -204,8 +222,8 @@ docker rm -f infra-test
 
 | 限制 | 影響 | 解法 |
 |------|------|------|
-| container 必須先裝 `python3`（ubuntu:24.04 minimal 沒預設） | ansible 跑不動 | run 前先 `pilot docker-target exec -- bash -c 'apt install -y python3'`；或預先 `docker commit` 一個帶 python 的 image |
-| `playbooks/apply/core-infra-provider-apply.yml` 假設 `/etc/systemd/resolved.conf` 存在 | 全新 ubuntu container 沒裝 systemd-resolved | playbook 改成 `creates: ...` 條件；或 `apt install -y systemd-resolved` |
+| container 必須先裝 `python3`（ubuntu:24.04 minimal 沒預設） | ansible 跑不動 | 用 `--image-pilot ubuntu-24.04`（已預裝）；或 run 前 `apt install -y python3`；或自己 `docker commit` |
+| 預設 entrypoint 是 `sleep infinity`，PID 1 不是 systemd | `systemctl` / `service` / `systemd-resolved` 任務全炸 | 起 target 時加 `--systemd`（見 §2.1 / §8.5），用 `/sbin/init` 開機 |
 | `show-inventory` 不支援多 host | 一個 target = 一台 host | 多 host 用 `--sandbox-topology` 走 sandbox 那條 |
 | `--privileged` 是 default | 在多租戶環境不適用 | `--no-privileged` + 自己手動 `--cap-add=...` |
 | inventory 寫到 tmpfile | 失敗時可能留垃圾 | `defer os.Remove(invPath)` 已處理 |
@@ -231,19 +249,23 @@ docker rm -f infra-test
 
 ### 8.1 Pre-baked image（`--image-pilot`）
 
-stock `ubuntu:24.04` 沒帶 `python3` / `systemd-resolved`，每次起 target 都要手動裝。
-我們提供一份預裝好的 image：
+stock `ubuntu:24.04` 沒帶 `python3` / `systemd` / `systemd-resolved`，每次起 target
+都要手動裝。我們提供一份預裝好的 image，而且**第一次 `up` 會自動 build，不用先手動跑**：
 
 ```bash
-# 1. 一次性 build
-./images/build.sh
-# pilot-target:ubuntu-24.04    211MB
-
-# 2. 用 --image-pilot 走捷徑（展開為 pilot-target:ubuntu-24.04）
+# 直接 up；image 不在本機時會自動從內建 Dockerfile build（一次性，幾分鐘）
 pilot docker-target up --image-pilot ubuntu-24.04 --name infra-test
-# 或顯式：
+# ▶ image pilot-target:ubuntu-24.04 not found locally; building from built-in Dockerfile (one-time, takes a few minutes)…
+# ✓ built pilot-target:ubuntu-24.04
+# ✓ target infra-test up
+
+# 顯式 --image pilot-target:... 也會觸發同樣的自動 build：
 pilot docker-target up --image pilot-target:ubuntu-24.04 --name infra-test
 ```
+
+> 自動 build 只對 `pilot-target:*` tag 生效（內建 Dockerfile 已 embed 進 binary，
+> 不依賴 CWD）。一般 `--image ubuntu:24.04` 之類仍交給 docker 自己 pull。
+> 想預先 build（例如 CI、離線）仍可顯式跑 `./images/build.sh`。
 
 預裝的東西：`python3` / `systemd-resolved` / `iproute2` / `procps` / `dnsutils` /
 `curl` / `sudo` / `ca-certificates` / `openssh-client` / `gnupg`。
@@ -317,11 +339,57 @@ pilot run --target core playbooks/apply/core-infra-provider-apply.yml \
 讓 LLM 跑在 sandbox container A，但 `run_ansible` 對 sandbox container B 操作。
 實務上 99% 不會這樣搞。
 
+### 8.5 systemd target（`--systemd`）
+
+讓 docker container 真正當 VM 用：以 systemd 開機，`systemctl` / `service` /
+`systemd-resolved` 都能動。完整可還原、可測試的流程：
+
+```bash
+# 1. 以 systemd 開機起一台 target（image 不在本機會自動 build，含 systemd +
+#    systemd-sysv + systemd-resolved，不用先手動 ./images/build.sh）
+pilot docker-target up --image-pilot ubuntu-24.04 --systemd --name infra-test
+#   privileged   : true
+#   systemd      : true
+
+# 2. 確認 PID 1 真的是 systemd（而不是 sleep）
+pilot docker-target exec --name infra-test -- ps -p 1 -o comm=
+# systemd
+pilot docker-target exec --name infra-test -- systemctl is-system-running
+# running   (或 degraded — 容器內部分 unit 起不來屬正常，systemctl 仍可用)
+
+# 3. 跑需要 systemd 的 apply playbook（DNS role 會 restart systemd-resolved）
+pilot docker-target run --name infra-test -- \
+    playbooks/apply/core-infra-provider-apply.yml -e infra_role=dns
+
+# 4. 驗證
+pilot docker-target verify --name infra-test -- docs/verification/core-infra-provider.md
+```
+
+**還原（snapshot / rollback）對 systemd target 一樣適用**，且 rollback 會
+preserve `--systemd` 設定（換 image / container 但 init 模式不變）：
+
+```bash
+pilot docker-target snapshot --name infra-test --tag dns-baseline
+# ... 玩壞了 ...
+pilot docker-target rollback --name infra-test --image dns-baseline
+#   新 container 仍以 systemd 開機（Systemd 欄位隨 state 一起 round-trip）
+
+# 徹底拆掉（systemd 收到 SIGRTMIN+3 會 graceful shutdown，不會卡 10s timeout）
+pilot docker-target down --name infra-test
+```
+
+注意事項：
+- `--systemd` **必須 privileged**（與 `--no-privileged` 互斥，會直接報錯）。
+- image 必須有 `/sbin/init`；stock `ubuntu:24.04` 沒有，請用 `--image-pilot`。
+- 不需要 systemd 的 playbook 就別開 `--systemd`，`sleep infinity` 更輕量、
+  也能用任何沒裝 systemd 的 image（含 alpine / distroless）。
+
 ---
 
-## 9. 變更紀錄（v1.1 增量）
+## 9. 變更紀錄（v1.1+ 增量）
 
 | 日期 | 版本 | 變更 |
 |------|------|------|
+| 2026-06-30 | v1.2 | ＋`--systemd`（以 /sbin/init 開機，systemctl/service/systemd-resolved 可用，rollback 保留設定）；image 補 systemd+systemd-sysv+STOPSIGNAL；`up` 對 `pilot-target:*` image 缺漏時自動 build（Dockerfile embed 進 binary，免先跑 build.sh）；修 `pilot run --target` 的 inventory tmpfile 外洩 |
 | 2026-06-30 | v1.1 | ＋pre-bake image (`--image-pilot`) / ＋multi-host (`--hosts`) / ＋snapshot+rollback / ＋`pilot run --target` |
 | 2026-06-30 | v1.0 | 初版：up/down/list/run/verify/exec/show-inventory |

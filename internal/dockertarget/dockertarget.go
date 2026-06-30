@@ -60,6 +60,11 @@ type Target struct {
 	// whose target_group is a role name ('dns', 'ntp', 'keycloak') —
 	// with multi-host, one target can pretend to be all of them.
 	Hosts []string `json:"hosts,omitempty"`
+	// Systemd records whether the container was booted with systemd as
+	// PID 1 (vs the default `sleep infinity`). Persisted so rollback
+	// recreates the target with the same init, and so `list`/`get`
+	// callers can tell whether `systemctl` tasks will work.
+	Systemd bool `json:"systemd,omitempty"`
 }
 
 // Options bundles user-facing knobs for Up.
@@ -79,6 +84,13 @@ type Options struct {
 	// playbooks that target groups by name.
 	Hosts      []string
 	ExtraArgs  []string
+	// Systemd, when non-nil and true, boots the container with systemd
+	// as PID 1 (entrypoint /sbin/init + writable /run tmpfs) instead of
+	// `sleep infinity`. This is what makes ansible's systemd/service
+	// modules and systemd-resolved work. Requires a privileged
+	// container AND an image that actually ships systemd (e.g.
+	// pilot-target:ubuntu-24.04); stock ubuntu:24.04 has no /sbin/init.
+	Systemd *bool
 }
 
 // state is the on-disk JSON shape. Versioned so future schema breaks
@@ -262,6 +274,17 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if opt.Privileged != nil {
 		privileged = *opt.Privileged
 	}
+	systemd := false
+	if opt.Systemd != nil {
+		systemd = *opt.Systemd
+	}
+	// systemd as PID 1 needs the container to be privileged (it mounts
+	// cgroups and talks to the kernel). Refuse the impossible combo up
+	// front instead of letting the container boot-loop and leaving a
+	// confusing half-started target in state.
+	if systemd && !privileged {
+		return nil, errors.New("dockertarget: systemd requires a privileged container; drop --no-privileged")
+	}
 
 	args := []string{
 		"run", "-d",
@@ -272,8 +295,25 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if privileged {
 		args = append(args, "--privileged")
 	}
+	if systemd {
+		// Writable /run + /run/lock are what systemd needs to boot as
+		// PID 1 inside a container. On a cgroup v2 host --privileged
+		// already gives rw access to /sys/fs/cgroup, so no explicit
+		// cgroup mount or --cgroupns is required.
+		args = append(args, "--tmpfs", "/run", "--tmpfs", "/run/lock")
+	}
 	args = append(args, opt.ExtraArgs...)
-	args = append(args, opt.Image, "sleep", "infinity")
+	args = append(args, opt.Image)
+	if systemd {
+		// Boot the image's init so ansible's systemd/service modules and
+		// systemd-resolved actually work. Requires an image that ships
+		// systemd (e.g. pilot-target:ubuntu-24.04); a stock image with
+		// no /sbin/init will fail at `docker run` and we surface that.
+		args = append(args, "/sbin/init")
+	} else {
+		// No init: keep the container alive so `exec` can reach in.
+		args = append(args, "sleep", "infinity")
+	}
 
 	runRes, err := m.docker(ctx, args...)
 	if err != nil {
@@ -311,6 +351,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		Hostname:    hostname,
 		Network:     network,
 		Privileged:  privileged,
+		Systemd:     systemd,
 		Hosts:       hosts,
 		CreatedAt:   now,
 		StartedAt:   now,

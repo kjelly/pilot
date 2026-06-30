@@ -609,6 +609,133 @@ esac`
 	}
 }
 
+// TestUp_SystemdBootsInitNotSleep is the regression guard for the
+// "docker as ansible target can't run systemctl" bug. With Systemd
+// set, Up must boot /sbin/init (not `sleep infinity`) and pass the
+// writable-tmpfs flags systemd needs to come up as PID 1. The flag
+// must also survive a state reload so rollback recreates it.
+func TestUp_SystemdBootsInitNotSleep(t *testing.T) {
+	shim := `case "$1" in
+  inspect) exit 1 ;;
+  run)
+    shift
+    echo "$@" > "$PILOT_RUN_ARGS_FILE"
+    echo "cid-systemd"
+    ;;
+  *) exit 0 ;;
+esac`
+	dir := t.TempDir()
+	shimFile := filepath.Join(dir, "docker")
+	if err := os.WriteFile(shimFile, []byte("#!/bin/sh\n"+shim), 0o755); err != nil {
+		t.Fatalf("shim: %v", err)
+	}
+	argsFile := filepath.Join(dir, "run-args")
+	t.Setenv("PILOT_DOCKER_BIN", shimFile)
+	t.Setenv("PILOT_RUN_ARGS_FILE", argsFile)
+	stateDir := filepath.Join(dir, "state")
+	m, err := NewManager(stateDir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	st := true
+	tgt, err := m.Up(context.Background(), Options{Name: "sysd", Image: "pilot-target:ubuntu-24.04", Systemd: &st})
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if !tgt.Systemd {
+		t.Error("Target.Systemd should be true")
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read run args: %v", err)
+	}
+	argv := string(data)
+	for _, want := range []string{"--tmpfs /run", "--tmpfs /run/lock", "/sbin/init"} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("systemd run argv missing %q\n%s", want, argv)
+		}
+	}
+	if strings.Contains(argv, "sleep infinity") {
+		t.Errorf("systemd target must not use `sleep infinity`:\n%s", argv)
+	}
+
+	// Reload: the Systemd flag must persist so rollback can recreate it.
+	m2, err := NewManager(stateDir)
+	if err != nil {
+		t.Fatalf("reload NewManager: %v", err)
+	}
+	got, err := m2.Get(context.Background(), "sysd")
+	if err != nil {
+		t.Fatalf("Get after reload: %v", err)
+	}
+	if !got.Systemd {
+		t.Error("Systemd flag should survive state reload")
+	}
+}
+
+// TestUp_NonSystemdUsesSleep is the negative case: without Systemd the
+// container keeps the `sleep infinity` entrypoint and gains none of the
+// systemd tmpfs flags (so stock images like ubuntu:24.04 still start).
+func TestUp_NonSystemdUsesSleep(t *testing.T) {
+	shim := `case "$1" in
+  inspect) exit 1 ;;
+  run)
+    shift
+    echo "$@" > "$PILOT_RUN_ARGS_FILE"
+    echo "cid-plain"
+    ;;
+  *) exit 0 ;;
+esac`
+	dir := t.TempDir()
+	shimFile := filepath.Join(dir, "docker")
+	if err := os.WriteFile(shimFile, []byte("#!/bin/sh\n"+shim), 0o755); err != nil {
+		t.Fatalf("shim: %v", err)
+	}
+	argsFile := filepath.Join(dir, "run-args")
+	t.Setenv("PILOT_DOCKER_BIN", shimFile)
+	t.Setenv("PILOT_RUN_ARGS_FILE", argsFile)
+	m, err := NewManager(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	tgt, err := m.Up(context.Background(), Options{Name: "plain", Image: "ubuntu:24.04"})
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if tgt.Systemd {
+		t.Error("Target.Systemd should default to false")
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read run args: %v", err)
+	}
+	argv := string(data)
+	if !strings.Contains(argv, "sleep infinity") {
+		t.Errorf("non-systemd target should use `sleep infinity`:\n%s", argv)
+	}
+	if strings.Contains(argv, "/sbin/init") || strings.Contains(argv, "--tmpfs") {
+		t.Errorf("non-systemd target must not get systemd flags:\n%s", argv)
+	}
+}
+
+// TestUp_SystemdRequiresPrivileged guards the impossible combo: systemd
+// needs a privileged container, so --no-privileged + --systemd must
+// error before we ever call docker run.
+func TestUp_SystemdRequiresPrivileged(t *testing.T) {
+	m, _ := newTestManager(t, shimAlwaysFail)
+	st := true
+	pf := false
+	_, err := m.Up(context.Background(), Options{
+		Name:       "sysd",
+		Image:      "pilot-target:ubuntu-24.04",
+		Systemd:    &st,
+		Privileged: &pf,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires a privileged") {
+		t.Fatalf("want privileged-required error, got %v", err)
+	}
+}
+
 // TestRenderInventory_PrimaryMatchesName protects a subtle regression:
 // the primary inventory host key must be the docker container's --name
 // (so `ansible_host: <name>` works), not the Hostname override.

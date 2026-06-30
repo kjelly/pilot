@@ -2,11 +2,138 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/pflag"
+
+	"github.com/anomalyco/pilot/internal/dockertarget"
 )
+
+// newImageShim writes a fake `docker` that logs argv to PILOT_CALLS_LOG
+// and dispatches on the given script body, then points PILOT_DOCKER_BIN
+// at it. Returns the calls-log path.
+func newImageShim(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "docker")
+	log := filepath.Join(dir, "calls.log")
+	script := "#!/bin/sh\necho \"$@\" >> \"$PILOT_CALLS_LOG\"\n" + body
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+	t.Setenv("PILOT_DOCKER_BIN", shim)
+	t.Setenv("PILOT_CALLS_LOG", log)
+	return log
+}
+
+func newImageTestManager(t *testing.T) *dockertarget.Manager {
+	t.Helper()
+	m, err := dockertarget.NewManager(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return m
+}
+
+// TestEnsurePilotImage_BuildsWhenMissing is the headline behaviour:
+// `docker image inspect` says the tag is missing, so ensurePilotImage
+// must shell out to `docker build` with the right tag.
+func TestEnsurePilotImage_BuildsWhenMissing(t *testing.T) {
+	log := newImageShim(t, `case "$1" in
+  image) exit 1 ;;   # image inspect -> missing
+  build) exit 0 ;;
+  *)     exit 0 ;;
+esac`)
+	m := newImageTestManager(t)
+	var buf bytes.Buffer
+	if err := ensurePilotImage(context.Background(), m, "ubuntu-24.04", false, &buf); err != nil {
+		t.Fatalf("ensurePilotImage: %v", err)
+	}
+	data, _ := os.ReadFile(log)
+	if !strings.Contains(string(data), "build -t pilot-target:ubuntu-24.04") {
+		t.Errorf("expected a `docker build -t pilot-target:ubuntu-24.04` call, got:\n%s", data)
+	}
+}
+
+// TestEnsurePilotImage_SkipsWhenPresent: inspect exits 0 → no build.
+func TestEnsurePilotImage_SkipsWhenPresent(t *testing.T) {
+	log := newImageShim(t, `case "$1" in
+  image) exit 0 ;;   # present
+  build) exit 0 ;;
+  *)     exit 0 ;;
+esac`)
+	m := newImageTestManager(t)
+	var buf bytes.Buffer
+	if err := ensurePilotImage(context.Background(), m, "ubuntu-24.04", false, &buf); err != nil {
+		t.Fatalf("ensurePilotImage: %v", err)
+	}
+	data, _ := os.ReadFile(log)
+	if strings.Contains(string(data), "build") {
+		t.Errorf("must not build when image already present, got:\n%s", data)
+	}
+}
+
+// TestEnsurePilotImage_RebuildsStaleSystemdImage: the image is present
+// but lacks /sbin/init (the `docker run --entrypoint test` probe exits
+// non-zero), and --systemd was requested, so it must rebuild rather
+// than let `docker run` fail with a cryptic OCI error.
+func TestEnsurePilotImage_RebuildsStaleSystemdImage(t *testing.T) {
+	log := newImageShim(t, `case "$1" in
+  image) exit 0 ;;   # present
+  run)   exit 1 ;;   # test -e /sbin/init -> missing (stale image)
+  build) exit 0 ;;
+  *)     exit 0 ;;
+esac`)
+	m := newImageTestManager(t)
+	var buf bytes.Buffer
+	if err := ensurePilotImage(context.Background(), m, "ubuntu-24.04", true, &buf); err != nil {
+		t.Fatalf("ensurePilotImage: %v", err)
+	}
+	data, _ := os.ReadFile(log)
+	if !strings.Contains(string(data), "build -t pilot-target:ubuntu-24.04") {
+		t.Errorf("stale systemd image should be rebuilt, got:\n%s", data)
+	}
+}
+
+// TestEnsurePilotImage_PresentWithInitSkips: image present AND init
+// probe passes → no rebuild even with --systemd.
+func TestEnsurePilotImage_PresentWithInitSkips(t *testing.T) {
+	log := newImageShim(t, `case "$1" in
+  image) exit 0 ;;   # present
+  run)   exit 0 ;;   # /sbin/init present
+  build) exit 1 ;;   # must not be called
+  *)     exit 0 ;;
+esac`)
+	m := newImageTestManager(t)
+	var buf bytes.Buffer
+	if err := ensurePilotImage(context.Background(), m, "ubuntu-24.04", true, &buf); err != nil {
+		t.Fatalf("ensurePilotImage: %v", err)
+	}
+	data, _ := os.ReadFile(log)
+	if strings.Contains(string(data), "build") {
+		t.Errorf("must not rebuild when /sbin/init present, got:\n%s", data)
+	}
+}
+
+// TestEnsurePilotImage_UnknownVariantErrors: missing image + a variant
+// we have no embedded Dockerfile for → a helpful error (not a build of
+// nothing, not a doomed registry pull).
+func TestEnsurePilotImage_UnknownVariantErrors(t *testing.T) {
+	newImageShim(t, `case "$1" in
+  image) exit 1 ;;   # missing
+  *)     exit 0 ;;
+esac`)
+	m := newImageTestManager(t)
+	var buf bytes.Buffer
+	err := ensurePilotImage(context.Background(), m, "fedora-99", false, &buf)
+	if err == nil || !strings.Contains(err.Error(), "no built-in Dockerfile") {
+		t.Fatalf("want unknown-variant error, got %v", err)
+	}
+}
 
 // TestDockerTargetCmdRegistered is the regression guard for "I added
 // the subcommand but forgot to rootCmd.AddCommand(dockerTargetCmd)".
