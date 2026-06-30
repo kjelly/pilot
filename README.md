@@ -32,6 +32,7 @@
 - [安裝](#安裝)
 - [5 分鐘快速上手](#5-分鐘快速上手)
 - [指定 Playbook 的三種方式](#指定-playbook-的三種方式)
+- [📋 Spec-driven 工作流（寫需求 → 套用 → 驗證）](#-spec-driven-工作流寫需求--套用--驗證)
 - [核心概念](#核心概念)
 - [完整指令參考](#完整指令參考)
 - [設定檔 `config.yaml`](#設定檔-configyaml)
@@ -291,7 +292,8 @@ EOF
 | `--stream` | `true` | 把 LLM token 即時串流到 stderr |
 | `--auto-approve <lvl>` | `never` | `low` / `medium` / `never`。⚠️ `medium` 會自動通過所有 low/medium 提議，**包含寫入類工具**。Apply-mode 的 playbook 一律升級為 `high`，仍需手動審批。 |
 | `--data-dir <path>` | `~/.local/share/pilot` | 提議、SQLite、生成 playbook 的存放位置 |
-| `--no-tui` | `false` | 強制關閉 TUI，改用 promptui 終端機介面 |
+| `--tui` | `false` | **Opt-in**：啟動互動式 Bubbletea TUI（須有 TTY；無 TTY 時退回 promptui）。**預設為 off**，CI / agent / SSH 用者更乾淨 |
+| `--no-tui` | `false` | `DEPRECATED` 別名，等同「不傳 `--tui`」。留一個版本給舊腳本用 |
 
 ### `pilot run` — 對 playbook 跑 agent
 
@@ -792,6 +794,154 @@ make build
 
 ---
 
+## 📋 Spec-driven 工作流（寫需求 → 套用 → 驗證）
+
+> 寫 ansible playbook 最痛苦的事不是寫，是**事後才知道 spec 跟實際系統不一致**。
+> pilot 把這條鏈接起來：
+
+```
+┌───────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│  docs/verification│    │ playbooks/      │    │  .verification/ │
+│  <feature>.md     │ --→│ verify/         │ --→│ <spec>-<UTC>.  │
+│  (人寫：spec)     │    │ <spec>.yml      │    │   {.ndjson,.md}│
+└───────────────────┘    └─────────────────┘    └─────────────────┘
+                              ↑                       ↑
+                              │  generator 1-to-1      │  結構化 verdict
+                              └───────────────────────┘
+                              pilot spec --generate
+                              pilot verify
+
+┌───────────────────────────┐    ┌───────────────────────────┐
+│  playbooks/apply/          │    │  ~/.local/share/pilot/    │
+│  <spec>-apply.yml          │ --→│  history.db                │
+│  (人寫：mutations + block/ │    │  spec_checkpoints table    │
+│  rescue with -e params)    │    │  (spec → proposal 追溯)   │
+└───────────────────────────┘    └───────────────────────────┘
+         ↑                                ↑
+         ansible-playbook -i inv.yaml …   SQLite 寫下每次 verdict
+```
+
+### 三個產物的分工（必讀）
+
+| 產物 | 誰寫 | 是不是 mutate | 用什麼跑 |
+|------|------|--------------|---------|
+| `docs/verification/<feature>.md` | **你** | 不 mutate，只是 checklist | `pilot spec --lint` 把關 |
+| `playbooks/verify/<feature>.yml` | **generator** (`pilot spec --generate`) | ❌ 純 inspect | `ansible-playbook … verify.yml` 或 `pilot verify` |
+| `playbooks/apply/<feature>-apply.yml` | **你**（手寫，但有結構） | ✅ 會改系統 | `ansible-playbook … apply.yml -e patch_stage=…` |
+
+**原則**：inspect 跟 mutate 分開。你看到 `playbooks/apply/*-apply.yml` 就是在動 host；看到 `playbooks/verify/*-yml` 純 read。
+
+> 範例：`docs/runbooks/pam-oidc-sshd.md` 是一份完整的 spec-driven runbook，
+> 從寫 spec、generate inspect playbook、手寫 apply playbook、套用到 test-vm、
+> 看 SQLite 追蹤 verdict 的 SOP 全在裡面。
+
+### 四個核心命令
+
+#### `pilot spec <spec.md> --lint`
+只 parse + lint。不動檔案。修完所有 error 才進下一步。
+
+```bash
+pilot spec docs/verification/pam-oidc-sshd.md --lint
+# spec Verification Spec — pam-oidc-sshd: 7 rows, 0 findings (0 errors)
+```
+
+Lint 規則：
+- `ID` 非空 + 唯一 + 符合 `^[A-Za-z][A-Za-z0-9._-]*$`
+- `Expected` 必填、**不可**是 vague 詞（`OK` / `合理` / `maybe` 之類）
+- `Command` 必填且非空白
+
+#### `pilot spec <spec.md> --generate <out.yml>`
+機械化生成 **inspect-only** playbook。直接跑這個最常踩到的坑：
+
+```bash
+pilot spec docs/verification/pam-oidc-sshd.md \
+    --generate playbooks/verify/pam-oidc-sshd.yml
+ansible-playbook -i inventory.yaml \
+    playbooks/verify/pam-oidc-sshd.yml    # inspection only，changed=0
+```
+
+#### `pilot verify <spec.md> --inventory <yaml> --limit <host>`
+對 inventory 跑 spec 7 個 row，比對 expected，回寫 SQLite + 落 `.verification/`。
+
+```bash
+pilot verify docs/verification/pam-oidc-sshd.md \
+    -i inventory.yaml -l test-vm \
+    --report-dir .verification
+# verdict: **FAIL**  (pass=2 fail=5 skip=0)
+```
+
+Verify 對 Expected 的判斷支援：
+- `0`、`1` 等純數字：比對 exit code（會從 stdout 抓 `echo $?`）
+- `present`：`exit code = 0`
+- `~active`：stdout 包含 `active`（substring match，前面加 `~`）
+- `^OK provider=…`：anchored regex
+- 其他：字串完全相等
+
+#### `pilot spec <spec.md> --to-inventory <out.yaml>`
+從 spec `## 1. 目標系統` 表格產 ansible inventory，`--from-ssh-config` 還能從 `~/.ssh/config` 補欄位：
+
+```bash
+pilot spec docs/verification/os-patch-sla.md \
+    --to-inventory inventory.yaml --from-ssh-config
+# ✔ inventory written: inventory.yaml (3 hosts from spec + ~/.ssh/config augmented)
+```
+
+### 5 分鐘走完整個閉環（範例）
+
+```bash
+# 0. 寫 spec.md → docs/verification/hello-localhost.md
+#    (用法見 docs/verification-spec-template.md)
+
+# 1. Lint
+pilot spec docs/verification/hello-localhost.md --lint
+
+# 2. 抽出 inventory（從 spec 表格）
+pilot spec docs/verification/hello-localhost.md \
+    --to-inventory inventory.yaml
+
+# 3. 跑 inspect
+pilot verify docs/verification/hello-localhost.md -i inventory.yaml -l myhost
+
+# 4. 寫一份 apply playbook（如果會動系統）
+#    範本見 playbooks/apply/pam-oidc-sshd-apply.yml：
+#      - 先 snapshot / 備份
+#      - block/rescue 寫進 lockout safety net
+#      - 用 -e key=value 帶 host-specific 參數
+
+# 5. 真套用：dry run 先
+ansible-playbook -i inventory.yaml playbooks/apply/pam-oidc-sshd-apply.yml \
+    -e kc_ssh_pam_deb=/abs/path.deb -e keycloak_issuer=https://… \
+    --check --diff
+
+# 6. 真套用
+ansible-playbook -i inventory.yaml playbooks/apply/pam-oidc-sshd-apply.yml \
+    -e kc_ssh_pam_deb=/abs/path.deb -e keycloak_issuer=https://…
+
+# 7. 再 verify 一次：apply → verify 閉環
+pilot verify docs/verification/hello-localhost.md -i inventory.yaml -l myhost
+
+# 8. 看 SQLite 覆蓋率
+pilot spec status docs/verification/hello-localhost.md
+# spec=…/hello-localhost.md total=3 verified=3 (pass=3) coverage=100.0%
+```
+
+### Spec-driven 對純 `ansible-playbook` 多了什麼好處
+
+| | 純 ansible-playbook | pilot spec-driven |
+|---|---|---|
+| Spec 寫完到能跑要多久 | 自己寫 playbook（一條 row → 一個 task） | `pilot spec --generate` 1 秒 |
+| 跑結果怎麼看 | stdout 紅綠字 | `.verification/<spec>-<UTC>.md` 表格 + SQLite |
+| 改 row 的時候 spec 跟 playbook 會不會漂 | 很容易漂（沒人檢查） | generator 重產時漂移會立刻被 lint 抓到 |
+| 跨 sandbox/staging/prod 同一份 playbook | 要 fork 三份 | 一份 + `-e patch_stage=…` gate |
+| rollback | 自己寫或靠記憶 | apply playbook 用 `block/rescue` 強制送你 |
+| DRY-run | `--check --diff` 一條指令 | 同一條（apply playbook 須支援 `--check`） |
+| **什麼時候「我適合 spec 寫好就行、跑 ansible 就夠了」** | 你已寫好 apply playbook、CI 環境、要可重現 | spec 還在變、要 explore、發現新東西 |
+
+詳細的 ansible-playbook 開發 workflow 看 [`docs/ansible-playbook-development.md`](./docs/ansible-playbook-development.md)。
+完整閉環的範例（從 spec → apply → verify → 失敗 → 修 spec）看 [`docs/runbooks/pam-oidc-sshd.md`](./docs/runbooks/pam-oidc-sshd.md)。
+
+---
+
 ## Sandbox 模式（Docker 容器）
 
 ### 為什麼需要 Sandbox？
@@ -821,7 +971,7 @@ pilot chat --sandbox --sandbox-image rockylinux:9
 
 ```
 📦 sandbox active: docker:ubuntu:22.04
-💡 TUI not available (no TTY), using promptui
+💡 TUI requested but no TTY available; using promptui   ← 只有在 `--tui` 但無 TTY 時才印
 ▶ Starting run ...
 ```
 

@@ -3,6 +3,10 @@
 > 適用場景：把模糊的合規 / 資安 / 維運需求落地成可重現、可驗證、可回歸的 Ansible Playbook。
 > 核心精神：**先寫 spec → 再寫 playbook → 用證據驗證 → 用 baseline 回歸**。
 
+> **2026-06 更新**：文件內的目錄結構、`pilot run` vs `ansible-playbook` 抉擇、
+> apply playbook 樣板結構請見 [`README.md` 的「Spec-driven 工作流」章節](../README.md#-spec-driven-工作流寫需求--套用--驗證)。
+> 本檔是「為何這樣做」的心法，README 是「今天怎麼跑」的 SOP。
+
 ---
 
 ## 0. 心法（讀後當 cheatsheet）
@@ -93,28 +97,34 @@ commit: spec + playbook + verify script + report
 
 ## 3. Step 2 — Playbook 結構
 
-### 檔案布局
+### 檔案布局（**2026-06 版**）
 
 ```
-playbooks/
-  <host>-hardening.yml        # 主要 playbook
-  roles/
-    <host>-hardening/
-      tasks/main.yml          # 若用 role 拆
-      handlers/main.yml
-      defaults/main.yml
-inventory/
-  dev/                        # 開發用 VM
-  staging/
-  prod/
-scripts/
-  verify-<host>.sh            # 對應 spec 的驗證腳本
 docs/verification/
-  <host>.md                   # spec
-.verification/                # baseline reports（gitignored 或進 LFS）
-  <host>-20260101-1200.md
-  <host>-20260102-0930.md
+  <name>.md                   # spec（人寫；pilot spec --lint 把關）
+
+playbooks/
+  verify/
+    <name>.yml                # inspect-only（不要手寫；pilot spec --generate 產）
+  apply/
+    <name>-apply.yml          # mutations（人寫；含 -e vars + block/rescue）
+
+inventory/
+  <env>.yaml                  # sandbox / staging / prod 三份
+
+.verification/                # baseline reports（gitignored）
+  <name>-<UTC>.{ndjson,md}
+
+~/.local/share/pilot/history.db
+  spec_checkpoints row per (spec, row_id) per run
 ```
+
+**原則**：
+
+- `verify/<name>.yml` 用 `pilot spec --generate` 產出；手寫會跟 spec 漂移
+- `apply/<name>-apply.yml` 永遠手寫（這就是 mutate playbook）；必須含 `-e` 參數、
+  `block/rescue`、stage gate
+- **不要**把兩種產物放在同個檔
 
 ### Task 命名對齊 spec
 
@@ -393,3 +403,38 @@ Playbook 可以 merge / ship 的條件：
 - Verify shell template：`scripts/verify.sh`
 - 範例 playbook：`playbooks/hello-localhost.yml`（smoke test 起點）
 - Sandbox 行為：見 `docs/sandbox-notes.md`（若需要可另外建立）
+
+---
+
+## 12. `ansible-playbook` vs `pilot run`：開發期間怎麼選
+
+這兩個**不是替代關係** — `pilot run` 底下就是 `ansible-playbook`。
+差別在誰負責「產生 playbook」這件事：
+
+| 場景 | 選誰 | 理由 |
+|------|------|-----|
+| CI、production、可重現執行 | `ansible-playbook` | 你已寫好 playbook、不需 LLM |
+| 第一次寫 playbook、要 iterate | `pilot run "<goal>"` | LLM 幫你看 spec、自己生出 playbook + 自動 root-cause 失敗 |
+| 失敗後 debug | `pilot run "<我懷疑 X>"` | LLM 讀 stderr、自己 trace |
+| Spec 還在變、要 explore | `pilot run` | 不用先把全部 playbook 寫對 |
+| 改 apply playbook | **`ansible-playbook --check --diff`** + 然後 `ansible-playbook` 真套用 | 你已知道答案，只需要驗證 + 真套用 |
+
+**判斷訣竅**：如果你問得出「該跑哪一條 ansible-playbook、帶什麼 flag、衝到哪個 host」，
+**用 `ansible-playbook`**（省 token / 省錢 / 可 audit）。
+
+如果你只講得出「我想要 Y 結果」但不知道 playbook 該怎麼寫，
+**用 `pilot run`**（LLM 幫你 derive，你給意圖就好）。
+
+### 開發期間用 `pilot run` 的 4 個 best practices
+
+1. **`pilot run --no-tui --model minimax-m3:cloud`** 起手：non-interactive、方便抓 CI 跑的 log
+2. **prompt 要包含意圖 + 環境**：「Apply pam-oidc-sshd 到 test-vm（libvirt 192.168.122.232），
+   帶 .deb path X 跟 keycloak issuer Y」 — 別只給意圖不給環境，LLM 會猜錯
+3. **第一次跑 agent 一定先 `--check --diff`**：spec → apply 失敗的鎖定 ssh 行為風險高，
+   一定要看 dry-run diff 才放行
+4. **一旦 playbook 收斂，把成果 commit 下來**：`pilot run` 適合 prototype，**不適合作為
+   production 執行路徑**。 Prototype 完成後轉成 `playbooks/apply/<name>-apply.yml` +
+   `ansible-playbook` 配上 inventory，三層分工：spec (人) / verify playbook (generator) / apply
+   playbook (人)
+
+詳細比較見 [README 的 Spec-driven 工作流章節](../README.md#-spec-driven-工作流寫需求--套用--驗證)。

@@ -1,7 +1,7 @@
 # Verification Spec Template
 
 > 給「把模糊需求落地成可驗證狀態」的標準格式。
-> 每一個 row 對應 playbook 一個 task、verify script 一個 check。
+> 每一個 row 對應 verify 的一個 check、apply playbook 的一個 step。
 
 ---
 
@@ -31,67 +31,117 @@
 | OS / version | |
 | 角色 | |
 | 套用範圍 | |
-| 風險等級 | |
+| 風險等級 | Low / Medium / High |
 
 ## 2. Checklist
 
-| ID  | Category | Check                          | Expected                      | Command |
-|-----|----------|--------------------------------|-------------------------------|---------|
-| C1  | file     | /etc/ssh/sshd_config           | present                       | test -f /etc/ssh/sshd_config |
-| C2  | file     | /etc/ssh/sshd_config PermitRootLogin | `^PermitRootLogin\s+no$` | grep -E '^PermitRootLogin\s+no$' /etc/ssh/sshd_config |
-| C3  | sysctl   | net.ipv4.ip_forward            | "0"                           | sysctl -n net.ipv4.ip_forward |
-| C4  | service  | sshd.service state             | active                        | systemctl is-active sshd |
-| C5  | port     | 22/tcp listening               | yes                           | ss -tlnH 'sport = :22' |
-| C6  | user     | /etc/passwd 權限               | 0644                          | stat -c '%a' /etc/passwd |
-| C7  | package  | fail2ban installed             | present                       | dpkg -s fail2ban |
-| ... |          |                                |                               | |
+| ID  | Category | Check                          | Expected        | Command |
+|-----|----------|--------------------------------|-----------------|---------|
+| C1  | file     | /etc/ssh/sshd_config           | present         | test -f /etc/ssh/sshd_config |
+| C2  | file     | PermitRootLogin no             | ^PermitRootLogin\s+no$ | grep -qE '^PermitRootLogin\s+no$' /etc/ssh/sshd_config |
+| C3  | sysctl   | net.ipv4.ip_forward            | 0               | sysctl -n net.ipv4.ip_forward |
+| C4  | service  | sshd.service                   | ~active         | systemctl is-active sshd |
+| C5  | package  | fail2ban installed             | present         | dpkg -s fail2ban |
+| ... |          |                                |                 | |
 
 ## 3. 證據收集
 
-- 腳本路徑：`scripts/verify-<host>.sh`
-- 輸出格式：NDJSON（每行一個 `{id, status, detail}` object）
+- 工具：`pilot verify docs/verification/<name>.md -i inv.yaml`
+- 輸出格式：`.verification/<name>-<UTC>.{ndjson,md}`
 - 預期 row 數：N（等於 checklist row 數）
-
-範例輸出：
-
-```json
-{"id":"C1","status":"pass","detail":"exists"}
-{"id":"C2","status":"pass","detail":"PermitRootLogin no"}
-{"id":"C3","status":"fail","detail":"got=1 want=0"}
-```
 
 ## 4. PASS / FAIL 規則
 
 - 全部 row `status=pass` 或 `status=skip`（且 skip 有正當理由）→ **PASS**
-- 任一 row `status=fail` → **FAIL**，報告列出 fail 的 id + actual + want
+- 任一 row `status=fail` → **FAIL**，列出 fail id + actual + want
 
 ## 5. 例外與已知偏差
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
-| C2 | 測試環境允許 PermitRootLogin yes | dev / ci | 無 |
-| C5 | 22 port 在 staging 改 2222 | staging | 至 2026-Q3 |
+| C2 | dev 環境允許 PermitRootLogin yes | dev | 無 |
 
 ## 6. 變更紀錄
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
-| 2026-06-28 | v1.0 | 初版 | alice |
+| 2026-06-30 | v1.0 | 初版 | alice |
 ```
+
+---
+
+## Expected 值的語法（必讀！）
+
+`pilot verify` 用 `matchExpected` 比對，這是 v1 grammar：
+
+| Expected 寫法 | 怎麼比對 | 範例 |
+|---------------|---------|------|
+| `0` / `1` 等純數字 | 比對 exit code；runner 會自動從 `echo $?` 抓 rc | `0`（exit code = 0）|
+| `present` | 退出碼 0 即通過 | 檔案存在檢查 |
+| `~active` | stdout **包含** substring（前面加 `~`） | `~active`、`~running` |
+| `^OK provider=...` | anchored regex（從 `^` 開頭） | `^OK provider=kc-ssh-pam` |
+| 其他字串 | stdout 與 expected **完全相等**（去除 `(rc=N) ` 前綴） | `OK` / 任意固定字串 |
+
+> **不要寫** `OK` / `正常` / `合理` / `足夠` — 這些詞會被 lint 攔下。
+
+Command 欄位的注意事項：
+
+- 含 `|`、`&&`、`||`、`;`、`>`、`<` 的 shell pipeline，verify 工具會自動改用 `ansible.builtin.shell`，不必改用 `command` module
+- 含 `|` 的 command 因為 markdown 表格 cell 分隔，需要 **多寫幾個 column**：
+
+  | 寫法 | 視覺上像 |
+  |------|---------|
+  | 不要這樣 | `\| C1 \| pkg \| check \| 0 \| apt list \| grep security \|` |
+  | 不要這樣 | `\| C1 \| pkg \| check \| 0 \| apt list --upgradable \| grep security \|` |
+  | 對 | `\| C1 \| pkg \| check \| 0 \| apt list --upgradable \| grep security \| wc -l \|` |
+
+  parser 會自動把 `\| wc -l` 接回 Command，所以 `apt list ... | grep security | wc -l` 會被當成一個完整 pipeline 傳給 ansible。
 
 ---
 
 ## 撰寫 Checklist（給 spec 作者）
 
-寫的時候自我檢查：
-
-- [ ] 每個 row 的 **expected** 都是單一可判定值（避免「合理」「足夠」這類）
+- [ ] 每個 row 的 **expected** 都是可判定值
 - [ ] 每個 row 的 **command** 在目標主機上可單獨跑出結果
+- [ ] ID 連號 `C1` / `C2` / `C3` ... 不跳號
 - [ ] 涉及檔案權限的 row 寫出數字（`0644`）而非文字（`644` 或 `0o644`）
-- [ ] 涉及 service 的 row 寫出 `active` / `inactive` / `enabled` / `disabled`
+- [ ] 涉及 service 的 row 用 `~active` / `~inactive` substring 比較
 - [ ] 涉及 sysctl 的 row 寫出字串型 expected（`sysctl -n` 永遠回字串）
 - [ ] 例外有寫清楚「適用環境」跟「為什麼」
 - [ ] 有版本號跟變更紀錄
+
+---
+
+## 對應的 apply playbook 約定
+
+Spec-driven 工作流把 **inspect 跟 mutate 分開**：
+
+| 檔 | 誰寫 | 用什麼跑 |
+|----|------|---------|
+| `docs/verification/<name>.md`（這份） | 你 | `pilot spec --lint` |
+| `playbooks/verify/<name>.yml` | **`pilot spec --generate`**（不要手寫） | `ansible-playbook … verify.yml` 或 `pilot verify` |
+| `playbooks/apply/<name>-apply.yml` | **你手寫**，但有結構 | `ansible-playbook … apply.yml -e key=value` |
+
+**Apply playbook 必須做的 3 件事**：
+
+1. **可參數化**：所有 host-specific 值走 `-e kc_ssh_pam_deb=… -e keycloak_issuer=…`，
+   不要 hard-code 套用到哪個 host
+2. **`block/rescue` 包起來**：把 snapshot → mutate → verify 包成一個區塊；
+   任何 mutate 失敗 rescue 自動還原 `/etc/pam.d/sshd` 或類似關鍵檔案
+3. **`pre_tasks: assert:` 寫 gate**：例如套用到 prod 必須先確認 staging 通過過、
+   帶 explicit confirm flag，不能靠「跑的人自己記得」
+
+完整示範見 [`playbooks/apply/pam-oidc-sshd-apply.yml`](./playbooks/apply/pam-oidc-sshd-apply.yml)
+與 [`playbooks/apply/os-patch-sla-apply.yml`](./playbooks/apply/os-patch-sla-apply.yml)。
+
+範例 spec：
+
+- [`docs/verification/hello-localhost.md`](./docs/verification/hello-localhost.md)：最簡單，
+  3 rows；用來熟悉 generator / verify 流程
+- [`docs/verification/pam-oidc-sshd.md`](./docs/verification/pam-oidc-sshd.md)：7 rows，
+  PAM OIDC / Keycloak Device Flow；lockout-safety 範例
+- [`docs/verification/os-patch-sla.md`](./docs/verification/os-patch-sla.md)：7 rows，
+  OS 套件 SLA；stage-gating 範例
 
 ---
 
@@ -116,25 +166,25 @@
 
 ## 2. Checklist
 
-| ID  | Category | Check                                | Expected                   | Command |
-|-----|----------|--------------------------------------|----------------------------|---------|
-| C1  | file     | /etc/ssh/sshd_config                 | present                    | test -f /etc/ssh/sshd_config |
-| C2  | file     | PermitRootLogin                       | `^PermitRootLogin\s+no$`   | grep -E '^PermitRootLogin\s+no$' /etc/ssh/sshd_config |
-| C3  | file     | PasswordAuthentication                | `^PasswordAuthentication\s+no$` | grep -E '^PasswordAuthentication\s+no$' /etc/ssh/sshd_config |
-| C4  | sysctl   | net.ipv4.ip_forward                  | "0"                        | sysctl -n net.ipv4.ip_forward |
-| C5  | sysctl   | kernel.randomize_va_space            | "2"                        | sysctl -n kernel.randomize_va_space |
-| C6  | service  | sshd.service state                   | active                     | systemctl is-active sshd |
-| C7  | service  | fail2ban.service state               | active                     | systemctl is-active fail2ban |
-| C8  | port     | 22/tcp listening                     | yes                        | ss -tlnH 'sport = :22' |
-| C9  | user     | UID 0 帳號只允許 root                | exactly 1                  | getent passwd 0 \| wc -l |
-| C10 | file     | /etc/passwd 權限                     | 0644                       | stat -c '%a' /etc/passwd |
-| C11 | file     | /etc/shadow 權限                     | 0000 or 0640              | stat -c '%a' /etc/shadow |
-| C12 | package  | unattended-upgrades installed        | present                    | dpkg -s unattended-upgrades |
+| ID  | Category | Check                                | Expected        | Command |
+|-----|----------|--------------------------------------|-----------------|---------|
+| C1  | file     | /etc/ssh/sshd_config                 | present         | test -f /etc/ssh/sshd_config |
+| C2  | file     | PermitRootLogin no                   | ^PermitRootLogin\s+no$   | grep -qE '^PermitRootLogin\s+no$' /etc/ssh/sshd_config |
+| C3  | file     | PasswordAuthentication no            | ^PasswordAuthentication\s+no$ | grep -qE '^PasswordAuthentication\s+no$' /etc/ssh/sshd_config |
+| C4  | sysctl   | net.ipv4.ip_forward                  | 0               | sysctl -n net.ipv4.ip_forward |
+| C5  | sysctl   | kernel.randomize_va_space            | 2               | sysctl -n kernel.randomize_va_space |
+| C6  | service  | sshd.service state                   | ~active         | systemctl is-active sshd |
+| C7  | service  | fail2ban.service state               | ~active         | systemctl is-active fail2ban |
+| C8  | port     | 22/tcp listening                     | present         | ss -tln 'sport = :22' |
+| C9  | user     | UID 0 帳號只允許 root                | 1               | getent passwd 0 | wc -l |
+| C10 | file     | /etc/passwd 權限                     | 0               | stat -c '%a' /etc/passwd | tr -d ' ' |
+| C11 | file     | /etc/shadow 權限                     | 0               | stat -c '%a' /etc/shadow | tr -d ' ' |
+| C12 | package  | unattended-upgrades installed        | present         | dpkg -s unattended-upgrades |
 
 ## 3. 證據收集
 
-- 腳本：scripts/verify-bastion.sh
-- 格式：NDJSON
+- 工具：`pilot verify docs/verification/bastion-host.md -i inv.yaml`
+- 格式：`.verification/bastion-host-<UTC>.{ndjson,md}`
 - Row 數：12
 
 ## 4. PASS / FAIL 規則
@@ -152,5 +202,5 @@
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
-| 2026-06-28 | v1.0 | 初版 | infra-team |
+| 2026-06-30 | v1.0 | 初版 | infra-team |
 ```
