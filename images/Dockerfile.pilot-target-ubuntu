@@ -1,0 +1,80 @@
+# Pre-baked image for `pilot docker-target` (and `pilot run --target`).
+#
+# Why this exists:
+#   The stock ubuntu:24.04 image ships with NO python, NO systemd, and
+#   NO systemd-resolved. ansible's setup module then can't gather
+#   facts, and `pilot verify` rows that depend on /etc/resolv.conf
+#   return empty results. Manually apt-installing these on every
+#   `pilot docker-target up` is friction.
+#
+# What this image adds:
+#   - python3            ansible's interpreter
+#   - systemd-resolved   so apply playbooks can flip /etc/resolv.conf
+#                        without "Source not found" failures
+#   - ca-certificates    apt update + HTTPS pulls
+#   - iproute2           `ss` for verify rows like
+#                        "ss -tulnH | grep :53"
+#   - procps             `ps`, `pgrep`, `pidof` for verify rows like
+#                        "pidof keycloak"
+#   - dnsutils           `dig` / `host` for DNS verify rows
+#   - curl               for the keycloak discovery endpoint check
+#   - sudo               so non-root ansible tasks (rare) still work
+#
+# Build:
+#   docker build -t pilot-target:ubuntu-24.04 \
+#       -f images/Dockerfile.pilot-target-ubuntu .
+#
+# Use:
+#   pilot docker-target up --image pilot-target:ubuntu-24.04 \
+#       --name infra-test
+#   # or just:
+#   pilot docker-target up --image-pilot ubuntu-24.04 --name infra-test
+#   # (the --image-pilot flag is a shortcut for this image)
+#
+# Layered so the apt cache layer is reusable across builds.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Refresh apt index in its own layer so subsequent RUNs reuse the cache.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bulk install in one layer to keep the image small.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-apt \
+        systemd-resolved \
+        iproute2 \
+        procps \
+        dnsutils \
+        curl \
+        sudo \
+        openssh-client \
+        gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ensure /etc/resolv.conf exists so copy/snapshot tasks don't fail.
+# Stock ubuntu:24.04 ships without systemd-resolved, which means
+# /etc/resolv.conf points at the docker bridge DNS. After installing
+# systemd-resolved we leave /etc/resolv.conf as docker wrote it; the
+# pilot apply playbooks handle the flip themselves (see core-infra
+# apply §DNS).
+RUN [ -f /etc/resolv.conf ] || echo 'nameserver 1.1.1.1' > /etc/resolv.conf
+
+# Sentinel that lets verify rows detect "this is a pilot target"
+# without depending on package presence. (Future: the apply playbook
+# could read this for stage branching.)
+LABEL org.opencontainers.image.source="https://github.com/anomalyco/pilot" \
+      org.opencontainers.image.title="pilot-target-ubuntu" \
+      org.opencontainers.image.description="Ubuntu base image with python3 + systemd-resolved pre-installed for `pilot docker-target` and `pilot run --target`" \
+      pilot.target="true" \
+      pilot.target.base="ubuntu:24.04"
+
+# Keep container alive; `pilot docker-target exec` reaches into it.
+# We use CMD (not ENTRYPOINT) so `docker run <image> sleep infinity`
+# from pilot replaces the default — without this, appending
+# `sleep infinity` after ENTRYPOINT yields "sleep infinity sleep
+# infinity" which busybox sleep rejects as invalid time interval.
+CMD ["sleep", "infinity"]
