@@ -172,15 +172,19 @@ func New(ctx context.Context, cfg *config.Config, opt Options) (*App, error) {
 		fmt.Fprintf(os.Stderr, "📦 sandbox active: %s\n", env.Name())
 	}
 
-	// TUI
-	if !opt.NoTUI && tui.IsSupported(uintptr(os.Stderr.Fd())) {
+	// TUI opt-in. --tui was not passed → NoTUI=true → skip the check entirely
+	// (no notice, no fallback message). --tui + TTY → Bubbletea. --tui + no
+	// TTY → fall back to promptui with the explanatory notice.
+	if opt.NoTUI {
+		// TUI explicitly disabled; stay silent.
+	} else if tui.IsSupported(uintptr(os.Stderr.Fd())) {
 		app.TUI = tui.New(st)
 		app.TUI.Start()
 		if opt.Banner {
 			fmt.Fprintln(os.Stderr, "💡 TUI active (Ctrl-C to quit, ? for help)")
 		}
 	} else if opt.Banner {
-		fmt.Fprintln(os.Stderr, "💡 TUI not available (no TTY), using promptui")
+		fmt.Fprintln(os.Stderr, "💡 TUI requested but no TTY available; using promptui")
 	}
 
 	app.Approver = ui.NewConsoleApprover(cfg.AutoApprove)

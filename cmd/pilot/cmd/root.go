@@ -24,9 +24,11 @@ var (
 	stream    bool
 	autoOK    string
 	dataDir   string
-	noTUI     bool
+	noTUI      bool // deprecated
+	useTUI     bool // --tui (persistent flag, default false)
+
 	// index management
-	runNoIndex       bool
+		runNoIndex       bool
 	runNoIndexOnStart bool
 	runStrictIndex    bool
 	// Sandbox mode (shared between `pilot run` and `pilot chat`).
@@ -54,7 +56,18 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&stream, "stream", true, "stream LLM responses")
 	rootCmd.PersistentFlags().StringVar(&autoOK, "auto-approve", "", "auto-approve proposals by risk: low|medium|never")
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "data directory for proposals, db, generated playbooks")
-	rootCmd.PersistentFlags().BoolVar(&noTUI, "no-tui", false, "force-disable the TUI (use promptui)")
+	// TUI defaults to OFF. Use --tui to opt in. The flag respects TTY:
+	//   --tui + TTY       → Bubbletea TUI
+	//   --tui + no TTY    → falls back to promptui (with a one-line notice)
+	//   (no --tui)        → promptui directly, no notice
+	// --no-tui is kept as a deprecated alias for one release.
+	rootCmd.PersistentFlags().BoolVar(&useTUI, "tui", false, "enable the interactive TUI (default: off; requires a TTY)")
+	rootCmd.PersistentFlags().BoolVar(&noTUI, "no-tui", false, "DEPRECATED alias for omitting --tui (kept for backward compat)")
+	if noTUI {
+		// backward compat: --no-tui=true suppresses --tui.
+		// We just leave useTUI=false so this branch is a no-op.
+		_ = noTUI
+	}
 
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(chatCmd)
@@ -126,7 +139,7 @@ type setupResult = app.App
 func setupRun(ctx context.Context) (*setupResult, error) {
 	cfg := loadConfig()
 	return app.New(ctx, cfg, app.Options{
-		NoTUI:  noTUI,
+		NoTUI:  !useTUI,
 		Banner: true,
 	})
 }
@@ -137,7 +150,7 @@ func setupRun(ctx context.Context) (*setupResult, error) {
 // that need to override the default environment policy.
 func setupRunWithOpts(ctx context.Context, opt app.Options) (*setupResult, error) {
 	cfg := loadConfig()
-	opt.NoTUI = noTUI
+	opt.NoTUI = !useTUI
 	opt.Banner = true
 	return app.New(ctx, cfg, opt)
 }
