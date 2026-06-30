@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -172,7 +173,20 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 	if target == "" {
 		target = "all"
 	}
-	args := []string{target, "-i", t.Inventory, "-m", "command", "-a", r.Command, "--one-line"}
+	module := "command"
+	shellMetachars := func(s string) bool {
+		for _, c := range s {
+			if c == '|' || c == '>' || c == '<' || c == ';' || c == '$' || c == '`' {
+				return true
+			}
+		}
+		return strings.Contains(s, "&&") || strings.Contains(s, "||")
+	}
+	if shellMetachars(r.Command) {
+		module = "shell"
+	}
+		fmt.Fprintf(os.Stderr, "[verify-adhoc] module=%s cmd=%q\n", module, r.Command)
+	args := []string{target, "-i", t.Inventory, "-m", module, "-a", r.Command, "--one-line"}
 	if t.Limit != "" {
 		args = append(args, "-l", t.Limit)
 	}
@@ -246,6 +260,12 @@ func matchExpected(expected, detail string, rc int) (bool, string) {
 		return false, fmt.Sprintf("rc=%d, expected %d (detail: %q)", rc, want, truncate(detail, 80))
 	case expected == "present":
 		return rc == 0, "expected: present (rc=0)"
+	case strings.HasPrefix(expected, "~"):
+		want := strings.TrimPrefix(expected, "~")
+		if strings.Contains(clean, want) {
+			return true, fmt.Sprintf("stdout contains %q", want)
+		}
+		return false, fmt.Sprintf("stdout=%q, expected substring ~%q", truncate(clean, 80), want)
 	default:
 		if clean == expected {
 			return true, fmt.Sprintf("stdout matched %q", expected)

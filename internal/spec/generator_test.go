@@ -119,7 +119,7 @@ func TestGenerate_ModuleSelection(t *testing.T) {
 		"ansible.posix.sysctl",
 		"ansible.builtin.systemd",
 		"ansible.builtin.apt",
-		"ansible.builtin.debug", // grep → debug placeholder (no clean module match)
+		"ansible.builtin.command", // grep -E ... → command (was debug, see TestGenerate_GrepRowsAvoidDebug)
 	}
 	for i, want := range wants {
 		if pb.Tasks[i].Module != want {

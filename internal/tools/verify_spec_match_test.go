@@ -119,3 +119,28 @@ func TestVerifySpec_ExtractRC(t *testing.T) {
 		}
 	}
 }
+
+// TestVerifySpec_MatchExpected_Substring locks the `~` prefix that lets
+// a spec say "stdout contains substring". This is the same substring
+// mode the C5 os-patch-sla row uses: systemctl is-active returns
+// `active` somewhere inside multi-line stdout, and we only care that
+// the substring is present.
+func TestVerifySpec_MatchExpected_Substring(t *testing.T) {
+	cases := []struct {
+		name     string
+		expected string
+		detail   string
+		wantPass bool
+	}{
+		{"substring present", "~active", "(rc=0) test-vm | CHANGED | rc=0 | (stdout) active", true},
+		{"substring absent", "~running", "(rc=0) test-vm | CHANGED | rc=0 | (stdout) inactive", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, _ := matchExpected(c.expected, c.detail, 0)
+			if got != c.wantPass {
+				t.Errorf("matchExpected(%q, %q) = %v want %v", c.expected, c.detail, got, c.wantPass)
+			}
+		})
+	}
+}

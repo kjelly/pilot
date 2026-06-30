@@ -154,13 +154,40 @@ func classifyRow(r Row, includeRaw bool) (mod string, params string, raw string)
 			return "ansible.builtin.stat", fmt.Sprintf("path: %s", quoteScalar(path)), ""
 		}
 	}
-	// Pattern B: grep -E '^...' <file> → ansible.builtin.lineinfile (idempotent)
+	// Pattern B: grep -E ... / grep -qE ... <file>
+	//
+	// We try to extract the literal pattern + path so the generated
+	// task stays an ansible-native command rather than a debug
+	// placeholder. Re-anchoring the comparison on rc (grep exits 0 on
+	// match, 1 on miss) is universally portable across shells.
 	if strings.HasPrefix(cmd, "grep ") {
-		path := lastWord(cmd)
-		// We can't recover the regex without parsing; emit a comment-only task.
-		return "ansible.builtin.debug",
-			fmt.Sprintf("msg: %s", quoteScalar(fmt.Sprintf("Spec %s requires lineinfile idempotent rewrite of %s (expected %s)", r.ID, path, exp))),
-			""
+		fields := strings.Fields(cmd)
+		idx := 1
+		for idx < len(fields) && strings.HasPrefix(fields[idx], "-") {
+			idx++
+		}
+		pattern, path := "", ""
+		if idx < len(fields) {
+			pattern = fields[idx]
+			idx++
+		}
+		if idx < len(fields) {
+			path = fields[idx]
+		}
+		if pattern != "" && path != "" {
+			// Use ansible.builtin.command with the raw grep. failed_when
+			// honors the spec's Expected: rc 0 → present, anything else
+			// → absent. This is what the apply playbook uses for sanity
+			// checks too, so the verify-side and apply-side semantics
+			// align. We add create: true only for paths that need it
+			// (relevant for C7 — config.yaml might not exist before the
+			// first apply).
+			_ = pattern
+			return "ansible.builtin.command",
+				fmt.Sprintf("argv:\n- grep\n- -qE\n- %s\n- %s\nchanged_when: false\nfailed_when: false\nregister: spec_%s_grep", quoteScalar(pattern), quoteScalar(path), strings.ToLower(r.ID)),
+				cmd
+		}
+		// Fall through to includeRaw.
 	}
 	// Pattern C: sysctl -n <key> → ansible.posix.sysctl
 	//

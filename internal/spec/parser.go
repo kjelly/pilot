@@ -135,12 +135,22 @@ func ParseReader(r io.Reader) (*Spec, error) {
 				checklistHeaders = cols
 				continue
 			}
+			// If the row has more than the canonical 5 columns, treat
+			// the extra columns as part of the Command (the spec author
+			// was forced to split because the command itself contained
+			// a `|` which would otherwise terminate the markdown table
+			// cell). Re-join with ` | ` so the verifier sees the
+			// intended whole command.
+			cmd := cols[4]
+			if len(cols) > 5 {
+				cmd = cols[4] + " | " + strings.Join(cols[5:], " | ")
+			}
 			row := Row{
 				ID:       cols[0],
 				Category: cols[1],
 				Check:    cols[2],
 				Expected: cols[3],
-				Command:  stripBackticks(cols[4]),
+				Command:  stripBackticks(cmd),
 				Line:     lineNo,
 			}
 			s.Rows = append(s.Rows, row)
