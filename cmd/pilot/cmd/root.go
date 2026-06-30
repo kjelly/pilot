@@ -12,6 +12,7 @@ import (
 
 	"github.com/anomalyco/pilot/internal/agent"
 	"github.com/anomalyco/pilot/internal/app"
+	"github.com/anomalyco/pilot/internal/dockertarget"
 	"github.com/anomalyco/pilot/internal/config"
 	"github.com/anomalyco/pilot/internal/store"
 	"github.com/anomalyco/pilot/internal/ui/tui"
@@ -153,6 +154,49 @@ func setupRunWithOpts(ctx context.Context, opt app.Options) (*setupResult, error
 	opt.NoTUI = !useTUI
 	opt.Banner = true
 	return app.New(ctx, cfg, opt)
+}
+
+// resolveTargetInventory returns a non-empty path to a generated
+// inventory file when --target <name> was passed and the named
+// docker target exists and is running. Returns "" otherwise.
+//
+// Called from `pilot run` and `pilot chat` so the LLM agent loop's
+// run_ansible tool calls pick up the docker target's generated
+// inventory automatically — no inventory-*.yaml file needed.
+func resolveTargetInventory() string {
+	if runTarget == "" {
+		return ""
+	}
+	cfg := loadConfig()
+	m, err := dockertarget.NewManager(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: --target %q: %v\n", runTarget, err)
+		return ""
+	}
+	t, err := m.Get(context.Background(), runTarget)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: --target %q: %v\n", runTarget, err)
+		return ""
+	}
+	if t.Status != dockertarget.StatusRunning {
+		fmt.Fprintf(os.Stderr, `warning: --target %q not running (status=%s); bring it up with ` + "`pilot docker-target up --name %s`" + `\n`, runTarget, t.Status, runTarget)
+		return ""
+	}
+	inv, err := t.RenderInventory()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: --target %q render inventory: %v\n", runTarget, err)
+		return ""
+	}
+	f, err := os.CreateTemp("", "pilot-run-target-*.yaml")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if _, err := f.WriteString(inv); err != nil {
+		os.Remove(f.Name())
+		return ""
+	}
+	return f.Name()
 }
 
 func newRunRecord(cfg *config.Config, mode, playbook, inventory string) *store.Run {

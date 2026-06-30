@@ -58,6 +58,11 @@ var (
 	runSandboxDryRun      bool
 	runSandboxTopology    string
 	runSandboxMounts      []string
+	// runTarget is the name of a docker target (managed by
+	// `pilot docker-target`). When set, the LLM agent loop's
+	// run_ansible tool calls get pointed at that target's
+	// generated inventory. See app.ResolveDockerTarget.
+	runTarget             string
 	// runSandboxMode is declared in root.go as a shared global so
 	// `pilot chat` can set it too. We don't redeclare it here.
 )
@@ -96,6 +101,8 @@ func init() {
 	// container must ship its own ansible.
 	runCmd.Flags().StringVar(&runSandboxMode, "sandbox-mode", "",
 		"sandbox execution mode: 'docker' (default; host ansible+docker connection) or 'docker-exec' (run ansible inside the container via `docker exec`)")
+	runCmd.Flags().StringVar(&runTarget, "target", "",
+		"docker target name (managed by `pilot docker-target`); routes the LLM agent's run_ansible tool calls to that container's generated inventory")
 }
 
 // playbookTarget is a single playbook to run, possibly with overrides.
@@ -192,6 +199,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	defer res.Store.Close()
 	defer shutdownTUI(res.TUI)
 
@@ -468,7 +476,16 @@ func runOneTarget(ctx context.Context, res *setupResult, batchID, prefix string,
 	// stack (bleve open, ollama Ping, registry default-walk) for every
 	// playbook in a batch, which doubled the work for N=1 and made
 	// hangs much more likely.
-	loop := newAgentLoop(res, run.ID, os.Stderr)
+	// If --target is set, build the loop with the target's
+	// generated inventory + limit as the run_ansible tool's defaults.
+	// This means the LLM doesn't have to spell out "-i <file> -l <n>"
+	// for every playbook it proposes.
+	var loop *agent.Loop
+	if inv := resolveTargetInventory(); inv != "" {
+		loop = res.NewLoopWithDefaults(run.ID, os.Stderr, inv, runTarget)
+	} else {
+		loop = newAgentLoop(res, run.ID, os.Stderr)
+	}
 	// Inject dry-run flag
 	loop.SetDryRun(runDryRunAll)
 

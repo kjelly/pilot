@@ -19,6 +19,7 @@ import (
 	"github.com/anomalyco/pilot/internal/agent"
 	"github.com/anomalyco/pilot/internal/ansible"
 	"github.com/anomalyco/pilot/internal/config"
+	"github.com/anomalyco/pilot/internal/dockertarget"
 	"github.com/anomalyco/pilot/internal/docs"
 	"github.com/anomalyco/pilot/internal/ollama"
 	"github.com/anomalyco/pilot/internal/sandbox"
@@ -43,6 +44,10 @@ type App struct {
 	// Env is the execution environment tools target. Always set
 	// (defaults to LocalEnvironment when sandbox is disabled).
 	Env sandbox.Environment
+	// ctx is the startup context; passed to ResolveDockerTarget so
+	// the docker CLI invocation honours the same cancellation as
+	// the rest of the app.
+	ctx context.Context
 
 }
 
@@ -154,6 +159,7 @@ func New(ctx context.Context, cfg *config.Config, opt Options) (*App, error) {
 		Store:     st,
 		Sanitizer: redactor,
 		Runner:    runner,
+		ctx:       ctx,
 	}
 
 	// Build the execution environment. Default: LocalEnvironment.
@@ -336,6 +342,43 @@ func (a *App) SandboxImage() string {
 
 // Close releases owned resources (Env, Store, TUI). It is safe to
 // call multiple times.
+
+// ResolveDockerTarget looks up a docker target by name and returns a
+// temp-file path containing its generated inventory. Returns
+// ("", error) if the target doesn't exist or isn't running.
+//
+// This is the bridge that lets `pilot run --target <docker-target>`
+// route the LLM agent loop's run_ansible tool calls to a docker
+// container without the user having to write an inventory-*.yaml
+// file.
+func (a *App) ResolveDockerTarget(name, dataDir string) (string, error) {
+	m, err := dockertarget.NewManager(dataDir)
+	if err != nil {
+		return "", err
+	}
+	t, err := m.Get(a.ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if t.Status != dockertarget.StatusRunning {
+		return "", fmt.Errorf("target %q is not running (status=%s); bring it up with `pilot docker-target up`", name, t.Status)
+	}
+	inv, err := t.RenderInventory()
+	if err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp("", "pilot-run-target-*.yaml")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(inv); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
 func (a *App) Close() {
 	if a == nil {
 		return
