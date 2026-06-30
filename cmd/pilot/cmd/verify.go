@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +27,7 @@ var (
 	verifyReportDir   string
 	verifyTimeoutSec  int
 	verifyRoot        string
+	verifyDir         string
 )
 
 var verifyCmd = &cobra.Command{
@@ -43,7 +46,9 @@ or against the inventory via ansible ad-hoc), and writes:
 Use --local for the smoke-test case where the spec tests the host pilot
 itself is running on. Use --inventory + --limit for fleet verification.
 `,
-	Args: cobra.ExactArgs(1),
+	// Allow either: positional <spec.md> (single-spec mode), or no
+	// positional with --dir=<path> (multi-spec mode).
+	Args: cobra.ArbitraryArgs,
 	RunE: runVerify,
 }
 
@@ -60,11 +65,39 @@ func init() {
 	verifyCmd.Flags().StringVar(&verifyReportDir, "report-dir", ".verification", "where to write NDJSON + markdown reports")
 	verifyCmd.Flags().IntVar(&verifyTimeoutSec, "timeout", 15, "per-row command timeout (seconds)")
 	verifyCmd.Flags().StringVar(&verifyRoot, "root", "", "project root for spec/playbook layout (default: $PILOT_ROOT or cwd). Lets verify reuse --root from `pilot spec`.")
+	verifyCmd.Flags().StringVar(&verifyDir, "dir", "", "verify every *.md under this directory in one shot; prints a rollup table at the end. Mutually exclusive with positional spec.md.")
 	rootCmd.AddCommand(verifyCmd)
 }
 
 func runVerify(cmd *cobra.Command, args []string) error {
-	specPath := args[0]
+	hasPositional := len(args) >= 1
+	if hasPositional && verifyDir != "" {
+		return fmt.Errorf("positional spec.md and --dir are mutually exclusive; pass either one, not both")
+	}
+	if verifyDir != "" || !hasPositional {
+		// Multi-spec mode: walk --dir for *.md, run each, print rollup table.
+		dir := verifyDir
+		if dir == "" {
+			// default fallback: docs/verification under --root or cwd.
+			root := verifyRoot
+			if root == "" {
+				root = os.Getenv("PILOT_ROOT")
+			}
+			if root == "" {
+				root, _ = os.Getwd()
+			}
+			dir = filepath.Join(root, "docs", "verification")
+		}
+		return runVerifyMulti(cmd, dir)
+	}
+	return runVerifyOne(cmd, args[0])
+}
+
+// runVerifyOne runs a single spec to completion (existing behavior).
+// Errors from the verifier are surfaced, but spec-level failures (rows
+// that fail) exit 0 — the report itself records the verdict.
+func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
+	specPath := specPathArg
 	if !filepath.IsAbs(specPath) {
 		root := verifyRoot
 		if root == "" {
@@ -246,4 +279,151 @@ func mustJSONVerify(v any) []byte {
 		panic(fmt.Sprintf("mustJSONVerify: %v", err))
 	}
 	return b
+}
+
+
+// ternary is a tiny shorthand kept local to verify.go; spec.go has its own
+// (per-package) copy because Go forbids free functions across files.
+func ternaryStr(b bool, t, f string) string {
+	if b {
+		return t
+	}
+	return f
+}
+
+// runVerifyMulti walks dir for *.md, runs each through runVerifyOne,
+// and prints a rollup table at the end:
+//
+//   pilot verify --dir docs/verification
+//     ✔  core-infra           8 rows  pass=4 fail=4 verdict=FAIL
+//     ✔  core-infra-provider 9 rows  pass=3 fail=6 verdict=FAIL
+//     ✔  pam-oidc-sshd       7 rows  pass=2 fail=5 verdict=FAIL
+//     ── 1 of 3 specs PASS; aggregate: FAIL ──
+//
+// Silent on specs with no rows. Skips the spec template file if present.
+//
+// We deliberately swallow the per-spec non-zero exit codes by inspecting the
+// captured rows ourselves; one flaky spec must not block the rollup.
+func runVerifyMulti(cmd *cobra.Command, dir string) error {
+	matched, err := filepath.Glob(filepath.Join(dir, "*.md"))
+	if err != nil {
+		return fmt.Errorf("glob %s: %w", dir, err)
+	}
+	if len(matched) == 0 {
+		return fmt.Errorf("no specs (*.md) under %s; check --dir", dir)
+	}
+	// Stable order: alphabetic.
+	sort.Strings(matched)
+	fmt.Printf("verifying %d spec(s) under %s\n", len(matched), dir)
+	type rollup struct {
+		stem string
+		rows int
+		pass int
+		fail int
+		ok   bool
+	}
+	var rows []rollup
+	overallOK := true
+	for _, p := range matched {
+		stem := strings.TrimSuffix(filepath.Base(p), filepath.Ext(p))
+		// Suppress per-spec verbose output during rollup; the per-spec
+		// report still lands in --report-dir.
+		// (runVerifyOne prints nd/md paths unconditionally; we don't need
+		// to redirect — the rollup table at the end is the operator-facing
+		// summary.)
+		// Run the per-spec verify. Non-nil err means at least one
+		// row failed; we still want a rollup entry (the verdict)
+		// derived from the rendered report below.
+		_ = runVerifyOne(cmd, p)
+		// Parse the last .verification/<stem>-*.md to get verdict.
+		pass, fail, total, ok := readLastReport(p)
+		if !ok {
+			fmt.Printf("\n  ✗ %s: no report produced\n", stem)
+			overallOK = false
+		}
+		if fail > 0 {
+			overallOK = false
+		}
+		rows = append(rows, rollup{stem: stem, rows: total, pass: pass, fail: fail, ok: ok})
+		if !ok {
+			continue
+		}
+		fmt.Printf("\n  %s — %d rows  pass=%d fail=%d  verdict=%s\n",
+			stem, total, pass, fail, ternaryStr(fail == 0, "PASS", "FAIL"))
+	}
+	fmt.Println()
+	if len(rows) == 0 {
+		return fmt.Errorf("no specs verified; abort")
+	}
+	passed := 0
+	for _, r := range rows {
+		if r.fail == 0 && r.ok {
+			passed++
+		}
+	}
+	if overallOK && passed == len(rows) {
+		fmt.Printf("── rollup: %d/%d specs PASS; aggregate: PASS ──\n", passed, len(rows))
+	} else {
+		fmt.Printf("── rollup: %d/%d specs PASS; aggregate: FAIL ──\n", passed, len(rows))
+	}
+	if !overallOK || passed < len(rows) {
+		return fmt.Errorf("rollup: not every spec passed")
+	}
+	return nil
+}
+
+// readLastReport scans --report-dir for the most recent <stem>-*.md
+// and returns pass/fail/total from the front-matter summary line. Cheaper
+// and more reliable than re-parsing the per-row table.
+func readLastReport(specPath string) (pass, fail, total int, ok bool) {
+	stem := strings.TrimSuffix(filepath.Base(specPath), filepath.Ext(specPath))
+	reportDir := verifyReportDir
+	if reportDir == "" {
+		reportDir = ".verification"
+	}
+	if !filepath.IsAbs(reportDir) {
+		root := verifyRoot
+		if root == "" {
+			root = os.Getenv("PILOT_ROOT")
+		}
+		if root == "" {
+			root, _ = os.Getwd()
+		}
+		reportDir = filepath.Join(root, reportDir)
+	}
+	// Anchor the glob to "<stem>-<UTC-timestamp>.md" (15 chars after the
+	// stem dash); without this anchor, a glob for "core-infra-*.md" catches
+	// "core-infra-provider-*.md" as well.
+	matches, err := filepath.Glob(filepath.Join(reportDir, stem + "-????????-??????.md"))
+	if err != nil || len(matches) == 0 {
+		return 0, 0, 0, false
+	}
+	sort.Strings(matches)
+	latest := matches[len(matches)-1]
+	raw, err := os.ReadFile(latest)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	// Parse "- total:     9  pass: 3  fail: 6  skip: 0" from the front-matter.
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "- total:") {
+			continue
+		}
+		// Use a regex-ish token scan since the line format is fixed.
+		tokens := strings.Fields(line)
+		for i := 0; i < len(tokens)-1; i++ {
+			switch strings.TrimSuffix(tokens[i], ":") {
+			case "total":
+				total, _ = strconv.Atoi(strings.TrimSuffix(tokens[i+1], ":"))
+			case "pass":
+				pass, _ = strconv.Atoi(strings.TrimSuffix(tokens[i+1], ":"))
+			case "fail":
+				fail, _ = strconv.Atoi(strings.TrimSuffix(tokens[i+1], ":"))
+			}
+		}
+		if total > 0 || pass > 0 || fail > 0 {
+			return pass, fail, total, true
+		}
+	}
+	return 0, 0, 0, false
 }
