@@ -27,6 +27,7 @@ var (
 	specConnection   string
 	specToInv        string
 	specFromSSH      bool
+	specRoot         string
 )
 
 var specCmd = &cobra.Command{
@@ -63,6 +64,7 @@ func init() {
 	specCmd.Flags().StringVar(&specRunIDFlag, "run-id", "", "pilot run id to record against (default: derived from spec path)")
 	specCmd.Flags().StringVar(&specHosts, "hosts", "", "override play hosts (default: localhost). Use with --apply/-i to target real hosts.")
 	specCmd.Flags().StringVar(&specConnection, "connection", "", "override play connection (default: local). Use a real SSH-style value to disable local connection.")
+	specCmd.Flags().StringVar(&specRoot, "root", "", "project root (where docs/ and playbooks/ live). Default: $PILOT_ROOT or current working directory. Lets specs and generated playbooks live outside this tool repo.")
 	specCmd.Flags().StringVar(&specToInv, "to-inventory", "", "render a Targets table to an ansible inventory file at the given path")
 	specCmd.Flags().BoolVar(&specFromSSH, "from-ssh-config", false, "use ~/.ssh/config to fill missing host fields before generating the inventory")
 	rootCmd.AddCommand(specCmd)
@@ -70,6 +72,9 @@ func init() {
 
 func runSpec(cmd *cobra.Command, args []string) error {
 	specPath := args[0]
+	if !filepath.IsAbs(specPath) && specRoot != "" {
+		specPath = filepath.Join(specRoot, specPath)
+	}
 	parsed, err := spec.Parse(specPath)
 	if err != nil {
 		return fmt.Errorf("parse spec: %w", err)
@@ -122,7 +127,18 @@ func runSpec(cmd *cobra.Command, args []string) error {
 
 	outPath := specGenerateOut
 	if outPath == "" {
-		outPath = filepath.Join("playbooks", "generated", strings.TrimSuffix(filepath.Base(specPath), filepath.Ext(specPath))+".yml")
+		root, err := resolveSpecRoot()
+		if err != nil {
+			return err
+		}
+		outPath = filepath.Join(root, "playbooks", "generated", strings.TrimSuffix(filepath.Base(specPath), filepath.Ext(specPath))+".yml")
+	}
+	if !filepath.IsAbs(outPath) {
+		root, err := resolveSpecRoot()
+		if err != nil {
+			return err
+		}
+		outPath = filepath.Join(root, outPath)
 	}
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -240,6 +256,9 @@ func init() {
 
 func runSpecStatus(cmd *cobra.Command, args []string) error {
 	specPath := args[0]
+	if !filepath.IsAbs(specPath) && specRoot != "" {
+		specPath = filepath.Join(specRoot, specPath)
+	}
 	st, err := openSpecStore()
 	if err != nil {
 		return err
@@ -362,4 +381,34 @@ func ternary(b bool, t, f string) string {
 		return t
 	}
 	return f
+}
+
+// resolveSpecRoot returns the absolute project root for spec/playbook
+// paths. Resolution order:
+//
+//   1. --root flag (specRoot)
+//   2. $PILOT_ROOT env var
+//   3. current working directory
+//
+// Everything spec-relative (docs/verification/*.md sources,
+// playbooks/generated/*.yml outputs) is laid out under this root so
+// the tool repo can be a thin CLI sitting next to any number of
+// sibling repos (or a single mono-repo layout).
+func resolveSpecRoot() (string, error) {
+	root := specRoot
+	if root == "" {
+		root = os.Getenv("PILOT_ROOT")
+	}
+	if root == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve cwd: %w", err)
+		}
+		root = cwd
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolveSpecRoot: %w", err)
+	}
+	return abs, nil
 }

@@ -24,6 +24,7 @@ var (
 	verifyProposalID  string
 	verifyReportDir   string
 	verifyTimeoutSec  int
+	verifyRoot        string
 )
 
 var verifyCmd = &cobra.Command{
@@ -58,12 +59,22 @@ func init() {
 	verifyCmd.Flags().StringVar(&verifyProposalID, "proposal-id", "", "record results against this proposal in proposal_results")
 	verifyCmd.Flags().StringVar(&verifyReportDir, "report-dir", ".verification", "where to write NDJSON + markdown reports")
 	verifyCmd.Flags().IntVar(&verifyTimeoutSec, "timeout", 15, "per-row command timeout (seconds)")
+	verifyCmd.Flags().StringVar(&verifyRoot, "root", "", "project root for spec/playbook layout (default: $PILOT_ROOT or cwd). Lets verify reuse --root from `pilot spec`.")
 	rootCmd.AddCommand(verifyCmd)
 }
 
 func runVerify(cmd *cobra.Command, args []string) error {
 	specPath := args[0]
-
+	if !filepath.IsAbs(specPath) {
+		root := verifyRoot
+		if root == "" {
+			root = os.Getenv("PILOT_ROOT")
+		}
+		if root == "" {
+			root, _ = os.Getwd()
+		}
+		specPath = filepath.Join(root, specPath)
+	}
 	parsed, err := spec.Parse(specPath)
 	if err != nil {
 		return fmt.Errorf("parse spec: %w", err)
@@ -99,6 +110,19 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	// Render the report and write to disk.
 	ts := time.Now().UTC().Format("20060102-150405")
 	stem := strings.TrimSuffix(filepath.Base(specPath), filepath.Ext(specPath))
+	if !filepath.IsAbs(verifyReportDir) {
+		// Anchor the report directory under --root so a spec that lives
+		// outside this tool's repo can still produce its own .verification/
+		// next to itself rather than spilling into cwd.
+		root := verifyRoot
+		if root == "" {
+			root = os.Getenv("PILOT_ROOT")
+		}
+		if root == "" {
+			root, _ = os.Getwd()
+		}
+		verifyReportDir = filepath.Join(root, verifyReportDir)
+	}
 	if err := os.MkdirAll(verifyReportDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir report-dir: %w", err)
 	}
