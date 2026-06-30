@@ -62,17 +62,21 @@ func init() {
 	dockerTargetCmd.AddCommand(dtVerifyCmd)
 	dockerTargetCmd.AddCommand(dtExecCmd)
 	dockerTargetCmd.AddCommand(dtShowInventoryCmd)
+	dockerTargetCmd.AddCommand(dtSnapshotCmd)
+	dockerTargetCmd.AddCommand(dtRollbackCmd)
 }
 
 // ---- shared flags ---------------------------------------------------------
 
 var (
-	dtName       string
-	dtImage      string
-	dtHostname   string
-	dtNetwork    string
+	dtName        string
+	dtImage       string
+	dtImagePilot  string
+	dtHostname    string
+	dtNetwork     string
 	dtNoPrivileged bool
-	dtExtraArgs  []string
+	dtExtraArgs   []string
+	dtHosts       []string
 )
 
 // resolveDataDir returns the active pilot data dir. Centralised so the
@@ -103,8 +107,13 @@ var dtUpCmd = &cobra.Command{
 
 Examples:
   pilot docker-target up --image ubuntu:24.04 --name infra-test
+  pilot docker-target up --image-pilot ubuntu-24.04 --name infra-test
   pilot docker-target up --image rockylinux:9 --name rocky-1 \
       --hostname rocky-1 --network bridge --no-privileged
+
+The --image-pilot shortcut resolves to pilot-target:<arg>, e.g.
+--image-pilot ubuntu-24.04 -> pilot-target:ubuntu-24.04. Build the
+image first with ./images/build.sh.
 `,
 	RunE: runDtUp,
 }
@@ -112,18 +121,26 @@ Examples:
 func init() {
 	dtUpCmd.Flags().StringVar(&dtName, "name", "", "container name (also ansible host key)")
 	dtUpCmd.Flags().StringVar(&dtImage, "image", "", "docker image (e.g. ubuntu:24.04, rockylinux:9)")
+	dtUpCmd.Flags().StringVar(&dtImagePilot, "image-pilot", "", "shortcut for --image pilot-target:<arg> (e.g. ubuntu-24.04). Mutually exclusive with --image.")
 	dtUpCmd.Flags().StringVar(&dtHostname, "hostname", "", "container --hostname (default = --name)")
 	dtUpCmd.Flags().StringVar(&dtNetwork, "network", "host", "docker --network (host|bridge|none)")
 	dtUpCmd.Flags().BoolVar(&dtNoPrivileged, "no-privileged", false, "disable docker --privileged (default: enabled)")
 	dtUpCmd.Flags().StringSliceVar(&dtExtraArgs, "docker-arg", nil, "extra arg for `docker run` (may repeat)")
+	dtUpCmd.Flags().StringSliceVar(&dtHosts, "hosts", nil, "additional ansible host aliases for this target (may repeat). All aliases route to the same container.")
 }
 
 func runDtUp(cmd *cobra.Command, args []string) error {
 	if dtName == "" {
 		return fmt.Errorf("--name is required")
 	}
+	if dtImage == "" && dtImagePilot == "" {
+		return fmt.Errorf("--image or --image-pilot is required")
+	}
+	if dtImage != "" && dtImagePilot != "" {
+		return fmt.Errorf("--image and --image-pilot are mutually exclusive")
+	}
 	if dtImage == "" {
-		return fmt.Errorf("--image is required")
+		dtImage = "pilot-target:" + dtImagePilot
 	}
 	m, err := dtNewManager()
 	if err != nil {
@@ -134,6 +151,7 @@ func runDtUp(cmd *cobra.Command, args []string) error {
 		Image:     dtImage,
 		Network:   dtNetwork,
 		Hostname:  dtHostname,
+		Hosts:     dtHosts,
 		ExtraArgs: dtExtraArgs,
 	}
 	if !dtNoPrivileged {
@@ -491,4 +509,135 @@ func execExternal(stdout io.Writer, bin string, args ...string) error {
 // itself enforces one, and the user can Ctrl-C).
 func newCmd(ctx context.Context, bin string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, bin, args...)
+}
+
+// ---- snapshot -------------------------------------------------------------
+
+var (
+	dtSnapshotName string
+	dtSnapshotTag  string
+)
+
+var dtSnapshotCmd = &cobra.Command{
+	Use:   "snapshot",
+	Short: "Commit the target container as a reusable image tag",
+	Long: `Capture the target's current filesystem as a new docker image tag,
+so future ` + "`pilot docker-target up --image <tag>`" + ` starts from this
+snapshot instead of the original base.
+
+Mirrors ` + "`pilot sandbox snapshot`" + ` for the docker-target feature.
+
+Examples:
+  pilot docker-target snapshot --name infra-test --tag my-baseline
+  # later, restore by tag:
+  pilot docker-target rollback --name infra-test --image my-baseline
+`,
+	RunE: runDtSnapshot,
+}
+
+func init() {
+	dtSnapshotCmd.Flags().StringVar(&dtName, "name", "", "target name (required)")
+	dtSnapshotCmd.Flags().StringVar(&dtSnapshotTag, "tag", "", "image tag to write (required)")
+	_ = dtSnapshotCmd.MarkFlagRequired("tag")
+}
+
+func runDtSnapshot(cmd *cobra.Command, args []string) error {
+	if dtName == "" {
+		return fmt.Errorf("--name is required")
+	}
+	m, err := dtNewManager()
+	if err != nil {
+		return err
+	}
+	t, err := m.Get(context.Background(), dtName)
+	if err != nil {
+		return err
+	}
+	if t.Status != dockertarget.StatusRunning {
+		return fmt.Errorf("target %q is not running (status=%s); cannot snapshot", dtName, t.Status)
+	}
+	res, err := m.DockerRaw(context.Background(), "commit", dtName, dtSnapshotTag)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("docker commit: %s", res.Stderr)
+	}
+	imageID := strings.TrimSpace(res.Stdout)
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ snapshotted %s as %s (image id: %s)\n", dtName, dtSnapshotTag, shortCID(imageID))
+	return nil
+}
+
+// ---- rollback -------------------------------------------------------------
+
+var (
+	dtRollbackImage string
+)
+
+var dtRollbackCmd = &cobra.Command{
+	Use:   "rollback",
+	Short: "Recreate a target from a previously snapshotted image tag",
+	Long: `Stops the existing target (if running), then brings it back up from
+the given image tag. The state record is preserved (Name / ContainerID
+are reset to the new container).
+
+Mirrors ` + "`pilot sandbox rollback`" + ` for the docker-target feature.
+
+Examples:
+  pilot docker-target rollback --name infra-test --image my-baseline
+`,
+	RunE: runDtRollback,
+}
+
+func init() {
+	dtRollbackCmd.Flags().StringVar(&dtName, "name", "", "target name (required)")
+	dtRollbackCmd.Flags().StringVar(&dtRollbackImage, "image", "", "image tag to roll back to (required)")
+	_ = dtRollbackCmd.MarkFlagRequired("image")
+}
+
+func runDtRollback(cmd *cobra.Command, args []string) error {
+	if dtName == "" {
+		return fmt.Errorf("--name is required")
+	}
+	if dtRollbackImage == "" {
+		return fmt.Errorf("--image is required")
+	}
+	m, err := dtNewManager()
+	if err != nil {
+		return err
+	}
+	// Capture the current target so we can preserve Hostname / Hosts /
+	// Network / Privileged after rollback.
+	t, err := m.Get(context.Background(), dtName)
+	if err != nil {
+		return err
+	}
+	// 1. Tear down (idempotent if container already gone)
+	if err := m.Down(context.Background(), dtName); err != nil {
+		return err
+	}
+	// 2. Bring back up from the snapshot image, preserving the rest
+	//    of the target config.
+	upOpts := dockertarget.Options{
+		Name:      t.Name,
+		Image:     dtRollbackImage,
+		Network:   t.Network,
+		Hostname:  t.Hostname,
+		Hosts:     t.Hosts,
+		ExtraArgs: nil,
+	}
+	if t.Privileged {
+		tt := true
+		upOpts.Privileged = &tt
+	} else {
+		ff := false
+		upOpts.Privileged = &ff
+	}
+	newT, err := m.Up(context.Background(), upOpts)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ rolled back %s to image %s (new container: %s)\n",
+		dtName, dtRollbackImage, shortCID(newT.ContainerID))
+	return nil
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
 )
 
 // TestDockerTargetCmdRegistered is the regression guard for "I added
@@ -76,8 +78,8 @@ func TestRunDtUp_RequiresImage(t *testing.T) {
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
 	err := rootCmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "--image is required") {
-		t.Fatalf("want --image-required error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "--image or --image-pilot is required") {
+		t.Fatalf("want --image-or-image-pilot-required error, got %v", err)
 	}
 }
 
@@ -121,5 +123,110 @@ func TestResolveDataDir_RespectsFlag(t *testing.T) {
 	got := resolveDataDir()
 	if got != "/tmp/explicit-data" {
 		t.Errorf("resolveDataDir = %q, want /tmp/explicit-data", got)
+	}
+}
+
+// TestRunDtUp_ImageAndImagePilotExclusive is the regression guard:
+// the previous "both flags accepted" silently picked the last one
+// bound, masking CLI flag wiring bugs.
+func TestRunDtUp_ImageAndImagePilotExclusive(t *testing.T) {
+	dtName = ""; dtImage = ""; dtImagePilot = ""
+	rootCmd.SetArgs([]string{"docker-target", "up", "--name", "x", "--image", "u", "--image-pilot", "u"})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("want mutex error, got %v", err)
+	}
+}
+
+// TestRunDtUp_RequiresImageOrImagePilot mirrors the name check.
+func TestRunDtUp_RequiresImageOrImagePilot(t *testing.T) {
+	dtName = ""; dtImage = ""; dtImagePilot = ""
+	rootCmd.SetArgs([]string{"docker-target", "up", "--name", "x"})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--image or --image-pilot is required") {
+		t.Fatalf("want image-required error, got %v", err)
+	}
+}
+
+
+// TestDockerTargetSubCommandsAllRegistered_AfterSnapshotRollback
+// walks the new command set. If anyone refactors and drops
+// snapshot / rollback, this trips.
+func TestDockerTargetSubCommandsAllRegistered_AfterSnapshotRollback(t *testing.T) {
+	want := []string{
+		"up", "down", "list", "show-inventory",
+		"run", "verify", "exec",
+		"snapshot", "rollback",
+	}
+	var have []string
+	for _, c := range dockerTargetCmd.Commands() {
+		have = append(have, c.Name())
+	}
+	for _, w := range want {
+		ok := false
+		for _, h := range have {
+			if h == w {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			t.Errorf("subcommand %q missing; have %v", w, have)
+		}
+	}
+}
+
+// TestRunDtSnapshot_RequiresTag is the regression guard: a previous
+// "snapshots to 'latest' by default" silently overwrote whatever
+// 'latest' pointed at.
+func TestRunDtSnapshot_RequiresTag(t *testing.T) {
+	dtName = ""; dtSnapshotTag = ""
+	rootCmd.SetArgs([]string{"docker-target", "snapshot", "--name", "x"})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	err := rootCmd.Execute()
+	if err == nil || (!strings.Contains(err.Error(), "--tag") && !strings.Contains(err.Error(), "required")) {
+		t.Fatalf("want --tag-required error, got %v", err)
+	}
+}
+
+// TestRunDtRollback_RequiresImage is the matching guard.
+func TestRunDtRollback_RequiresImage(t *testing.T) {
+	dtName = ""; dtRollbackImage = ""
+	rootCmd.SetArgs([]string{"docker-target", "rollback", "--name", "x"})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	err := rootCmd.Execute()
+	if err == nil || (!strings.Contains(err.Error(), "--image") && !strings.Contains(err.Error(), "required")) {
+		t.Fatalf("want --image-required error, got %v", err)
+	}
+}
+
+// TestRunTargetFlagRegistered ensures `pilot run --target` is wired.
+func TestRunTargetFlagRegistered(t *testing.T) {
+	var found bool
+	runCmd.Flags().VisitAll(func(f *pflag.Flag) {
+		if f.Name == "target" {
+			found = true
+		}
+	})
+	if !found {
+		t.Fatal("--target flag not registered on runCmd")
+	}
+}
+
+// TestResolveTargetInventory_NoTarget is the regression guard for
+// "we always called resolveTargetInventory and it touched state"
+// — should be a no-op when --target is empty.
+func TestResolveTargetInventory_NoTarget(t *testing.T) {
+	old := runTarget
+	runTarget = ""
+	defer func() { runTarget = old }()
+	if got := resolveTargetInventory(); got != "" {
+		t.Errorf("resolveTargetInventory with no --target should return \"\", got %q", got)
 	}
 }
