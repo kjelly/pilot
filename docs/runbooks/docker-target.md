@@ -224,3 +224,104 @@ docker rm -f infra-test
 | 日期 | 版本 | 變更 |
 |------|------|------|
 | 2026-06-30 | v1.0 | 初版：up/down/list/run/verify/exec/show-inventory 7 個子命令 |
+
+---
+
+## 8. 進階功能（v1.1 增量）
+
+### 8.1 Pre-baked image（`--image-pilot`）
+
+stock `ubuntu:24.04` 沒帶 `python3` / `systemd-resolved`，每次起 target 都要手動裝。
+我們提供一份預裝好的 image：
+
+```bash
+# 1. 一次性 build
+./images/build.sh
+# pilot-target:ubuntu-24.04    211MB
+
+# 2. 用 --image-pilot 走捷徑（展開為 pilot-target:ubuntu-24.04）
+pilot docker-target up --image-pilot ubuntu-24.04 --name infra-test
+# 或顯式：
+pilot docker-target up --image pilot-target:ubuntu-24.04 --name infra-test
+```
+
+預裝的東西：`python3` / `systemd-resolved` / `iproute2` / `procps` / `dnsutils` /
+`curl` / `sudo` / `ca-certificates` / `openssh-client` / `gnupg`。
+跑 ansible playbooks 不會再「fatal: python3 not found」。
+
+`--image` 跟 `--image-pilot` 互斥，避免 typo。
+
+### 8.2 Multi-host targets（`--hosts`）
+
+一台 docker container 可以有多個 ansible inventory alias，**全部指向同一台**。
+給「一個 role 一個 group 名」的 playbook 用：
+
+```bash
+pilot docker-target up --image-pilot ubuntu-24.04 \
+    --name core --hosts dns,ntp,keycloak
+# inventory 同時有 core: dns: ntp: keycloak: 四個 host entry，
+# 全部 ansible_host: core（同一台 container）
+```
+
+驗證：
+
+```bash
+pilot docker-target show-inventory --name core
+# all:
+#   hosts:
+#     core:        { ansible_host: core, ... }
+#     dns:         { ansible_host: core, ... }
+#     ntp:         { ansible_host: core, ... }
+#     keycloak:    { ansible_host: core, ... }
+```
+
+`--hosts` 接受 comma-separated 跟 repeated flag 兩種形式。Aliases 會被
+去重（同一個名稱給兩次只出現一次）；無效字元（空白、slash）會被拒絕。
+
+### 8.3 Snapshot / Rollback（`snapshot` / `rollback`）
+
+跟 `pilot sandbox snapshot` 對齊：
+
+```bash
+# 1. 套完 DNS role 後存盤
+pilot docker-target snapshot --name core --tag my-baseline
+# ✓ snapshotted core as my-baseline (image id: sha256:23df9)
+
+# 2. ... 跑其他 playbook 玩壞了 ...
+pilot docker-target rollback --name core --image my-baseline
+# ✓ rolled back core to image my-baseline (new container: 736f5160)
+
+# rollback 會 preserve Hostname / Hosts / Network / Privileged，
+# 換 image + 換 container_id，其他設定不動
+```
+
+### 8.4 整合進 `pilot run`（`--target`）
+
+新 flag：`pilot run --target <docker-target-name> <playbook>...`。
+LLM agent loop 的 `run_ansible` tool 會自動拿該 target 的 generated
+inventory + limit 當 default，使用者不用手動帶 `-i /tmp/... -l core`：
+
+```bash
+pilot docker-target up --image-pilot ubuntu-24.04 --name core
+pilot run --target core playbooks/apply/core-infra-provider-apply.yml \
+    -e infra_role=dns
+# agent loop 看到 playbook 給 LLM 時，run_ansible 預設就會用
+# /tmp/pilot-run-target-XXX.yaml + --limit core
+```
+
+跟 `--sandbox` 是正交：
+- `--target core` → LLM 的 `run_ansible` 跑在 host，把 inventory 指到 container
+- `--sandbox`     → LLM 自己整套跑在一個 disposable container
+
+兩個可以疊：`pilot run --sandbox --sandbox-image ubuntu:24.04 --target core`
+讓 LLM 跑在 sandbox container A，但 `run_ansible` 對 sandbox container B 操作。
+實務上 99% 不會這樣搞。
+
+---
+
+## 9. 變更紀錄（v1.1 增量）
+
+| 日期 | 版本 | 變更 |
+|------|------|------|
+| 2026-06-30 | v1.1 | ＋pre-bake image (`--image-pilot`) / ＋multi-host (`--hosts`) / ＋snapshot+rollback / ＋`pilot run --target` |
+| 2026-06-30 | v1.0 | 初版：up/down/list/run/verify/exec/show-inventory |
