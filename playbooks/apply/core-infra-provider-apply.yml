@@ -126,6 +126,25 @@
         - infra_role == 'dns'
         - not ansible_check_mode
 
+    # /etc/resolv.conf is bind-mounted by docker on a docker-host
+    # run, so both `cp` and `sed -i` fail (atomic rename blocked).
+    # Use a here-doc + shell `cat` to write the new file in place.
+    # (A bind mount of a regular file rejects rename, but truncating
+    # and writing through the open fd works.)
+    - name: "DNS — swap nameserver in /etc/resolv.conf to local DNS"
+      ansible.builtin.shell: |
+        set -e
+        cp /etc/resolv.conf /etc/resolv.conf.pre-pilot-infra.bak
+        cat > /etc/resolv.conf <<EOF
+        nameserver {{ dns_listen_addr | default('127.0.0.1') }}
+        options edns0 trust-ad
+        EOF
+        cat /etc/resolv.conf
+      when:
+        - infra_role == 'dns'
+        - not ansible_check_mode
+      changed_when: true
+
     - name: "DNS — restart systemd-resolved after config change"
       ansible.builtin.systemd:
         name: systemd-resolved
@@ -201,6 +220,17 @@
       when: infra_role == 'ntp'
 
     ### Keycloak role
+    - name: "Keycloak — ensure env dir exists"
+      ansible.builtin.file:
+        path: /etc/keycloak
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when:
+        - infra_role == 'keycloak'
+        - not ansible_check_mode
+
     - name: "Keycloak — render env file from -e + vault"
       ansible.builtin.copy:
         dest: /etc/keycloak/pilot.env

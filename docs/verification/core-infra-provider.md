@@ -18,10 +18,10 @@
 
 | ID | Category  | Check                                                                              | Expected    | Command |
 |----|-----------|------------------------------------------------------------------------------------|-------------|---------|
-| C1 | dns       | DNS 服務 daemon 已安裝（unbound / bind9 / dnsmasq 三擇一；至少一個）                       | 1           | sh -c 'dpkg-query -W -f=%{Package} bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | grep -xE "(unbound|bind9|dnsmasq)" | head -n1 | wc -l' |
+| C1 | dns       | DNS 服務 daemon 已安裝（unbound / bind9 / dnsmasq 三擇一；至少一個）                       | 1           | sh -c 'dpkg-query -W -f='${Package}\n' bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | grep -xE "(unbound|bind9|dnsmasq)" | head -n1 | wc -l' |
 | C2 | dns       | DNS 服務在本機 listening，且不是 systemd-resolved stub (`127.0.0.53`)                  | present     | sh -c 'ss -tulnH \| grep ":53 " \| grep -v "127.0.0.53" \| head -n1' |
 | C3 | dns       | 本機是 authoritive（本機 resolv.conf 第一個 nameserver 不是 127.0.0.1）                     | 0           | awk 'NR==1{print $2}' /etc/resolv.conf \| grep -qE '^(127\.[0-9]+\.[0-9]+\.[0-9]+|::1)$' |
-| C4 | ntp       | NTP daemon 已安裝（chrony / ntp / ntpsec 三擇一；至少一個）                              | 1           | sh -c 'dpkg-query -W -f=%{Package} chrony ntp ntpsec 2>/dev/null | grep -xE "(chrony|ntp|ntpsec)" | head -n1 | wc -l' |
+| C4 | ntp       | NTP daemon 已安裝（chrony / ntp / ntpsec 三擇一；至少一個）                              | 1           | sh -c 'dpkg-query -W -f='${Package}\n' chrony ntp ntpsec 2>/dev/null | grep -xE "(chrony|ntp|ntpsec)" | head -n1 | wc -l' |
 | C5 | ntp       | chronyd 或 ntpd active                                                            | ~active     | systemctl is-active chronyd ntpd 2>&1 \| head -n1 |
 | C6 | ntp       | Stratum ≤ 5（本機沒被上上游設成 leaf-of-leaf）                                          | ~Stratum    | timedatectl show-timesync 2>&1 \| grep -oE 'Stratum=[0-5]' |
 | C7 | keycloak  | keycloak process 可見（容器或 binary；容忍任何啟動方式）                                    | present     | pidof keycloak 2>/dev/null |

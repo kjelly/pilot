@@ -357,3 +357,74 @@ func TestResolveTargetInventory_NoTarget(t *testing.T) {
 		t.Errorf("resolveTargetInventory with no --target should return \"\", got %q", got)
 	}
 }
+
+// TestExtraHasTargetGroup_DetectsForms is the regression guard for the
+// 3 ways a user can pass target_group: separate -e flag, joined -e target_group=...
+// and the explicit -e target_group=... form.
+func TestExtraHasTargetGroup_DetectsForms(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want bool
+	}{
+		{"plain flag", []string{"-e", "target_group=dns"}, true},
+		{"joined arg", []string{"-e target_group=dns"}, true},
+		{"no target_group", []string{"-e", "infra_role=dns"}, false},
+		{"empty", nil, false},
+		{"only -e without value", []string{"-e"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extraHasTargetGroup(tc.in); got != tc.want {
+				t.Errorf("extraHasTargetGroup(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidDockerTag_RejectsShell is the regression guard for the
+// "snapshot --tag a+b" silent error path. '+' is a valid char in
+// YAML/JSON but not in docker image references.
+func TestValidDockerTag_RejectsShell(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"good", true},
+		{"my-tag", true},
+		{"registry.example.com/x:y", true},
+		{"a+b", false},
+		{"with space", false},
+		{"semi;colon", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := validDockerTag(tc.in); got != tc.want {
+			t.Errorf("validDockerTag(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestRunDtSnapshot_RejectsInvalidTag is the regression guard.
+func TestRunDtSnapshot_RejectsInvalidTag(t *testing.T) {
+	dtName = ""; dtSnapshotTag = "bad+tag"
+	rootCmd.SetArgs([]string{"docker-target", "snapshot", "--name", "x", "--tag", "bad+tag"})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--tag") {
+		t.Fatalf("want --tag validation error, got %v", err)
+	}
+}
+
+// TestRunDtRollback_RejectsInvalidImage is the matching guard.
+func TestRunDtRollback_RejectsInvalidImage(t *testing.T) {
+	dtName = ""; dtRollbackImage = "bad+image"
+	rootCmd.SetArgs([]string{"docker-target", "rollback", "--name", "x", "--image", "bad+image"})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--image") {
+		t.Fatalf("want --image validation error, got %v", err)
+	}
+}

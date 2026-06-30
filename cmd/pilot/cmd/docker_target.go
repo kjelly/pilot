@@ -276,6 +276,9 @@ func runDtShowInventory(cmd *cobra.Command, args []string) error {
 	if dtName == "" {
 		return fmt.Errorf("--name is required")
 	}
+	if !validDockerTag(dtSnapshotTag) {
+		return fmt.Errorf("--tag %q must match [a-zA-Z0-9_./-]+ (no '+' or whitespace)", dtSnapshotTag)
+	}
 	m, err := dtNewManager()
 	if err != nil {
 		return err
@@ -321,6 +324,9 @@ func runDtRun(cmd *cobra.Command, args []string) error {
 	if dtName == "" {
 		return fmt.Errorf("--name is required")
 	}
+	if !validDockerTag(dtSnapshotTag) {
+		return fmt.Errorf("--tag %q must match [a-zA-Z0-9_./-]+ (no '+' or whitespace)", dtSnapshotTag)
+	}
 	m, err := dtNewManager()
 	if err != nil {
 		return err
@@ -357,7 +363,13 @@ func runDtRun(cmd *cobra.Command, args []string) error {
 
 	playbook := args[0]
 	extra := args[1:]
-	ansibleArgs := []string{playbook, "-i", invPath, "-l", t.Hostname}
+	ansibleArgs := []string{playbook, "-i", invPath}
+	// Only auto-inject -l when the user hasn't specified target_group
+	// (which is the playbook's hosts: pattern). The user is in charge
+	// of choosing which one to drive.
+	if !extraHasTargetGroup(extra) {
+		ansibleArgs = append(ansibleArgs, "-l", t.Hostname)
+	}
 	ansibleArgs = append(ansibleArgs, extra...)
 	if cmd.Flags().Changed("check") {
 		v, _ := cmd.Flags().GetString("check")
@@ -634,6 +646,9 @@ func runDtSnapshot(cmd *cobra.Command, args []string) error {
 	if dtName == "" {
 		return fmt.Errorf("--name is required")
 	}
+	if !validDockerTag(dtSnapshotTag) {
+		return fmt.Errorf("--tag %q must match [a-zA-Z0-9_./-]+ (no '+' or whitespace)", dtSnapshotTag)
+	}
 	m, err := dtNewManager()
 	if err != nil {
 		return err
@@ -691,6 +706,9 @@ func runDtRollback(cmd *cobra.Command, args []string) error {
 	if dtRollbackImage == "" {
 		return fmt.Errorf("--image is required")
 	}
+	if !validDockerTag(dtRollbackImage) {
+		return fmt.Errorf("--image %q must match [a-zA-Z0-9_./:.-]+ (must be a valid docker image reference)", dtRollbackImage)
+	}
 	m, err := dtNewManager()
 	if err != nil {
 		return err
@@ -734,3 +752,49 @@ func runDtRollback(cmd *cobra.Command, args []string) error {
 		dtName, dtRollbackImage, shortCID(newT.ContainerID))
 	return nil
 }
+
+// extraHasTargetGroup scans the user's extra-args for an explicit
+// -e target_group= or -e 'target_group=...' so we don't both inject
+// -l <name> and let the user run against a different group.
+func extraHasTargetGroup(extra []string) bool {
+	for _, e := range extra {
+		if e == "-e" || e == "--extra-vars" {
+			continue
+		}
+		// -e target_group=dns
+		if strings.HasPrefix(e, "target_group=") || strings.HasPrefix(e, "target_group:") {
+			return true
+		}
+		// -e target_group=dns (joined form)
+		if strings.HasPrefix(e, "-e target_group=") || strings.HasPrefix(e, "-etarget_group=") {
+			return true
+		}
+		// --extra-vars target_group=dns (joined form)
+		if strings.HasPrefix(e, "--extra-vars target_group=") {
+			return true
+		}
+	}
+	return false
+}
+
+// validDockerTag returns true for a string safe to pass as a docker
+// image tag. Rejects '+', spaces, and other shell-significant
+// characters that lead to "invalid reference format" from docker
+// commit / docker run.
+func validDockerTag(s string) bool {
+	if s == "" || len(s) > 255 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '.' || r == '-' || r == '/' || r == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
