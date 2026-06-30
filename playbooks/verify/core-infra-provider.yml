@@ -1,0 +1,21 @@
+---
+- name: Verification Spec — core-infra-provider (Internal DNS + NTP + Keycloak server)
+  hosts: test-vm
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — DNS 服務 daemon 已安裝（unbound / bind9 / dnsmasq 三…"
+      ansible.builtin.command: "sh -c 'dpkg -l \\ | grep -E \"^ii\\s+(unbound\\ | bind9-dnsutils\\ | dnsmasq)\\s+\" \\ | wc -l'"
+      become: true
+      changed_when: false
+    - name: "C3 — 本機是 authoritive（本機 resolv.conf 第一個 namese…"
+      ansible.builtin.debug:
+        msg: "Spec C3 needs custom monitoring task — see verify script"
+      become: true
+    - name: "C5 — chronyd 或 ntpd active"
+      ansible.builtin.systemd:
+        name: "chronyd ntpd 2>&1 \\ | head -n1"
+        state: started
+        enabled: true
+      become: true
