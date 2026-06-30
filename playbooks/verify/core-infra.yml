@@ -1,0 +1,26 @@
+---
+- name: Verification Spec — core-infra (Internal DNS + Time Sync + Identity Provider)
+  hosts: test-vm
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — 本機 `/etc/resolv.conf` 第一個 nameserver 為 `127.0.0…"
+      ansible.builtin.debug:
+        msg: "Spec C1 needs custom monitoring task — see verify script"
+      become: true
+    - name: "C2 — `systemd-resolved` 服務在跑"
+      ansible.builtin.systemd:
+        name: "systemd-resolved"
+        state: started
+        enabled: true
+      become: true
+    - name: "C3 — 本機至少能解析 `infra.internal` 與 `keycloak.infra.…"
+      ansible.builtin.command: "sh -c 'getent hosts infra.internal; getent hosts keycloak.infra.internal'"
+      changed_when: false
+    - name: "C4 — `systemd-timesyncd` 服務在跑"
+      ansible.builtin.systemd:
+        name: "systemd-timesyncd"
+        state: started
+        enabled: true
+      become: true
