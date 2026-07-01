@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -63,16 +64,18 @@ func init() {
 // ---- shared flags ---------------------------------------------------------
 
 var (
-	vtName      string
-	vtBaseImage string
-	vtSSHUser   string
-	vtVCPUs     int
-	vtMemoryMB  int
-	vtNetwork   string
-	vtHosts     []string
-	vtVMDir     string
-	vtSnapTag   string
-	vtRollTag   string
+	vtName        string
+	vtBaseImage   string
+	vtSSHUser     string
+	vtVCPUs       int
+	vtMemoryMB    int
+	vtNetwork     string
+	vtHosts       []string
+	vtVMDir       string
+	vtSnapTag     string
+	vtRollTag     string
+	vtSSHTimeout  time.Duration
+	vtBootTimeout time.Duration
 )
 
 // resolveVMDir returns the directory where per-target qcow2/seed live.
@@ -113,6 +116,8 @@ func init() {
 	vtUpCmd.Flags().StringVar(&vtNetwork, "network", "default", "libvirt network name")
 	vtUpCmd.Flags().StringSliceVar(&vtHosts, "hosts", nil, "additional ansible host aliases (may repeat); all route to the same VM")
 	vtUpCmd.Flags().StringVar(&vtVMDir, "vm-dir", "", "directory for qcow2 overlays/seed ISOs (default /var/lib/libvirt/images/pilot)")
+	vtUpCmd.Flags().DurationVar(&vtSSHTimeout, "ssh-timeout", 0, "override SSH readiness timeout (default 2m)")
+	vtUpCmd.Flags().DurationVar(&vtBootTimeout, "boot-timeout", 0, "override boot/IP-acquisition timeout (default 3m)")
 }
 
 func runVtUp(cmd *cobra.Command, args []string) error {

@@ -99,13 +99,15 @@ type Target struct {
 
 // Options bundles user-facing knobs for Up.
 type Options struct {
-	Name      string // required; domain name AND ansible host key
-	BaseImage string // required; path to a qcow2 cloud image (read-only backing)
-	SSHUser   string // login user created/authorised via cloud-init; default "root"
-	VCPUs     int    // default 2
-	MemoryMB  int    // default 2048
-	Network   string // libvirt network name; default "default"
-	Hosts     []string
+	Name        string // required; domain name AND ansible host key
+	BaseImage   string // required; path to a qcow2 cloud image (read-only backing)
+	SSHUser     string // login user created/authorised via cloud-init; default "root"
+	VCPUs       int    // default 2
+	MemoryMB    int    // default 2048
+	Network     string // libvirt network name; default "default"
+	Hosts       []string
+	SSHTimeout  time.Duration // override sshTimeout  (0 = use default 2m)
+	BootTimeout time.Duration // override bootTimeout (0 = use default 3m)
 }
 
 // state is the on-disk JSON shape, versioned like dockertarget's.
@@ -386,6 +388,12 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	}
 	if err = m.defineAndStart(ctx, tg); err != nil {
 		return nil, err
+	}
+	if opt.SSHTimeout > 0 {
+		m.sshTimeout = opt.SSHTimeout
+	}
+	if opt.BootTimeout > 0 {
+		m.bootTimeout = opt.BootTimeout
 	}
 	if err = m.waitForIP(ctx, tg); err != nil {
 		return nil, err
