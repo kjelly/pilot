@@ -519,26 +519,29 @@ func (m *Manager) defineAndStart(ctx context.Context, t *Target) error {
 	}
 	return nil
 }
-// waitForIP polls libvirt for the VM's DHCP lease. We use the lease (not
-// a guess) as the authoritative address; this removes the classic
-// "what IP did it get" race. Bounded by bootTimeout.
-// Progress and the last diagnostic error are reported to stderr so the
-// user sees what is happening rather than staring at a silent timeout.
+// waitForIP polls the libvirt network's DHCP lease table (not domifaddr,
+// which can return stale leases when the deterministic MAC has
+// accumulated old leases from previous Up/Down cycles). We pick the
+// latest-expiring lease matching our MAC, which is always the active one.
+// Bounded by bootTimeout.
+// Progress and the last diagnostic error are reported to stderr.
 func (m *Manager) waitForIP(ctx context.Context, t *Target) error {
 	deadline := m.now().Add(m.bootTimeout)
 	var lastDetail string
 	lastReport := m.now()
 	for {
-		res, err := m.virsh(ctx, "domifaddr", t.Name, "--source", "lease")
+		// Query the network's DHCP lease table (not domifaddr) so
+		// we can pick the most recent lease for our MAC, ignoring
+		// stale leases left by previous Up/Down cycles.
+		res, err := m.virsh(ctx, "net-dhcp-leases", t.Network)
 		if err == nil && res.ExitCode == 0 {
-			if ip := parseDomifaddr(res.Stdout); ip != "" {
+			if ip := latestLeaseIP(res.Stdout, t.MAC); ip != "" {
 				t.IP = ip
 				return nil
 			}
-			lastDetail = "virsh returned ok but no lease found yet"
+			lastDetail = fmt.Sprintf("no active lease for MAC %s yet", t.MAC)
 		}
-		// Capture the last meaningful diagnostic so the timeout
-		// message can tell the user *why* we never got an IP.
+		// Capture the last meaningful diagnostic.
 		if err != nil {
 			lastDetail = err.Error()
 		} else if res.ExitCode != 0 {
@@ -555,7 +558,7 @@ func (m *Manager) waitForIP(ctx context.Context, t *Target) error {
 			}
 			return fmt.Errorf("vmtarget: timed out waiting for %q to acquire an IP (waited %s)%s", t.Name, m.bootTimeout, tail)
 		}
-		// Periodic progress so the user isn't staring at nothing.
+		// Periodic progress.
 		if m.now().Sub(lastReport) >= 10*time.Second {
 			elapsed := m.now().Sub(deadline.Add(-m.bootTimeout)).Round(time.Second)
 			suffix := ""
@@ -870,11 +873,55 @@ func dedupeHosts(primary string, extra []string) []string {
 
 var ipv4CIDR = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/\d+`)
 
-// parseDomifaddr extracts the first IPv4 address from `virsh domifaddr`
-// output (which prints "192.168.122.45/24" in the Address column).
-func parseDomifaddr(out string) string {
-	if m := ipv4CIDR.FindStringSubmatch(out); m != nil {
-		return m[1]
+// latestLeaseIP parses the table output of `virsh net-dhcp-leases` and
+// returns the IP address (without /prefix) of the latest-expiring lease
+// matching mac. Falls back to the latest-expiring lease overall if no
+// matching MAC is found. This avoids picking a stale lease when the
+// same deterministic MAC has accumulated old leases from previous cycles.
+//
+// The table columns are whitespace-separated:
+//   Expiry Time  MAC address  Protocol  IP address  Hostname  Client ID
+// The expiry column contains both date and time separated by a space;
+// we join fields[0]+" "+fields[1] to reconstruct the full timestamp.
+func latestLeaseIP(out, mac string) string {
+	// Two-pass: first try exact MAC match, then fall back to any lease.
+	for _, filter := range []bool{true, false} {
+		var bestIP string
+		var bestExpiry time.Time
+		lines := strings.Split(out, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if filter && !strings.Contains(line, mac) {
+				continue
+			}
+			ip := ipv4CIDR.FindString(line)
+			if ip == "" {
+				continue
+			}
+			if idx := strings.Index(ip, "/"); idx >= 0 {
+				ip = ip[:idx]
+			}
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				ts := fields[0] + " " + fields[1]
+				if t, err := time.Parse("2006-01-02 15:04:05", ts); err == nil {
+					if t.After(bestExpiry) {
+						bestExpiry = t
+						bestIP = ip
+					}
+				} else if bestIP == "" {
+					bestIP = ip
+				}
+			} else if bestIP == "" {
+				bestIP = ip
+			}
+		}
+		if bestIP != "" {
+			return bestIP
+		}
 	}
 	return ""
 }

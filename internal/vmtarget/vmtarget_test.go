@@ -70,7 +70,7 @@ func newTestManager(t *testing.T, virshBody string) (*Manager, string) {
 // happyVirsh is the virsh body for a target that comes up cleanly: no
 // pre-existing domain, gets an IP, reports running.
 const happyVirsh = `  dominfo)            exit 1 ;;
-  domifaddr)          echo " vnet0  52:54:00:aa:bb:cc  ipv4  192.168.122.42/24" ; exit 0 ;;
+  net-dhcp-leases)    echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.42/24     myvm" ; exit 0 ;;
   domstate)           echo "running" ; exit 0 ;;
   define)             exit 0 ;;
   start)              exit 0 ;;
@@ -177,8 +177,8 @@ func TestUp_RefusesHijack(t *testing.T) {
 func TestUp_CleansUpOnBootTimeout(t *testing.T) {
 	// domifaddr returns nothing → waitForIP times out.
 	body := strings.Replace(happyVirsh,
-		`domifaddr)          echo " vnet0  52:54:00:aa:bb:cc  ipv4  192.168.122.42/24" ; exit 0 ;;`,
-		`domifaddr)          exit 0 ;;`, 1)
+		`net-dhcp-leases)    echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.42/24     myvm" ; exit 0 ;;`,
+		`net-dhcp-leases)    exit 0 ;;`, 1)
 	m, base := newTestManager(t, body)
 	_, err := m.Up(context.Background(), Options{Name: "stuck", BaseImage: base})
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
@@ -330,16 +330,28 @@ func TestMacFor_DeterministicAndQemuOUI(t *testing.T) {
 	}
 }
 
-func TestParseDomifaddr(t *testing.T) {
-	cases := map[string]string{
-		" vnet0 52:54:00:aa:bb:cc ipv4 192.168.122.42/24": "192.168.122.42",
-		"no address here":                                  "",
-		"Name MAC Protocol Address\nfoo bar ipv4 10.0.0.5/8": "10.0.0.5",
+func TestLatestLeaseIP(t *testing.T) {
+	// Realistic net-dhcp-leases output with one active + two stale
+	// leases for the same MAC. latestLeaseIP must return the
+	// latest-expiring one, not the first text match.
+	out := "" +
+		" Expiry Time           MAC address         Protocol   IP address           Hostname\n" +
+		"-------------------------------------------------------------------------------------------\n" +
+		" 2026-06-01 00:00:00   52:54:00:aa:bb:cc   ipv4       10.0.0.1/24          -\n" +
+		" 2026-07-01 00:00:00   52:54:00:aa:bb:cc   ipv4       10.0.0.2/24          myvm\n" +
+		" 2026-06-15 00:00:00   52:54:00:aa:bb:cc   ipv4       10.0.0.3/24          -\n" +
+		" 2026-07-01 12:00:00   52:54:00:dd:ee:ff   ipv4       10.0.0.99/24         other\n"
+	got := latestLeaseIP(out, "52:54:00:aa:bb:cc")
+	if got != "10.0.0.2" {
+		t.Errorf("latestLeaseIP(...) = %q, want %q (should pick latest expiry)", got, "10.0.0.2")
 	}
-	for in, want := range cases {
-		if got := parseDomifaddr(in); got != want {
-			t.Errorf("parseDomifaddr(%q) = %q, want %q", in, got, want)
-		}
+	// No matching MAC — falls back to latest lease overall.
+	if got := latestLeaseIP(out, "00:00:00:00:00:00"); got != "10.0.0.99" {
+		t.Errorf("latestLeaseIP(wrong mac) = %q, want %q (fallback to latest overall)", got, "10.0.0.99")
+	}
+	// Empty input
+	if got := latestLeaseIP("", "52:54:00:aa:bb:cc"); got != "" {
+		t.Errorf("latestLeaseIP(empty) = %q, want empty", got)
 	}
 }
 
