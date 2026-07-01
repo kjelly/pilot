@@ -11,6 +11,15 @@
 > 在 **真 KVM VM** 上跑完 `core-infra-provider` apply + verify 全鏈，
 > 從 DNS / NTP / Keycloak 三個 provider 角色到 9 條 spec 全部 PASS。
 
+需要直接登入看狀態：
+
+```bash
+pilot vm-target ssh --name core                              # 互動 ssh (real PTY, sudo / resize 都 OK)
+pilot vm-target shell --name core                           # 互動 shell (預設 bash -l, 沒 bash 退 sh)
+pilot vm-target shell --name core -- bash -c "uname -a; ip a" # 跑一行指令
+pilot vm-target exec --name core -- systemctl is-active unbound  # 不開 PTY, 給 ansible 用
+```
+
 這份 runbook 是 `pilot vm-target` + `core-infra-provider` apply +
 verify 的 **end-to-end 一次跑通**紀錄。對應的 commit chain 在
 `19c4ac2` 之前，verify 只能拿 5/9（沒裝東西）或 7/9（裝了
