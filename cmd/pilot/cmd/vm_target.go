@@ -256,6 +256,24 @@ Everything after the playbook is forwarded verbatim to ansible-playbook.`,
 func init() { vtRunCmd.Flags().StringVar(&vtName, "name", "", "target name") }
 
 func runVtRun(cmd *cobra.Command, args []string) error {
+	// DisableFlagParsing is on so -e foo=bar flows through to the
+	// child ansible-playbook. But we still need to honour --name.
+	// Parse it ourselves when the global is empty, AND strip it
+	// from `args` so we don't re-forward it to ansible-playbook.
+	if vtName == "" {
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--name" && i+1 < len(args) {
+				vtName = args[i+1]
+				args = append(args[:i], args[i+2:]...)
+				break
+			}
+			if strings.HasPrefix(args[i], "--name=") {
+				vtName = strings.TrimPrefix(args[i], "--name=")
+				args = append(args[:i], args[i+1:]...)
+				break
+			}
+		}
+	}
 	t, cleanup, invPath, err := vtStageInventory()
 	if err != nil {
 		return err
@@ -286,6 +304,25 @@ var vtVerifyCmd = &cobra.Command{
 func init() { vtVerifyCmd.Flags().StringVar(&vtName, "name", "", "target name") }
 
 func runVtVerify(cmd *cobra.Command, args []string) error {
+	// DisableFlagParsing is on so -e foo=bar flows through to the
+	// child pilot verify. But we still need to honour --name. Parse
+	// it ourselves when the global is empty, AND strip it from
+	// `args` so we don't re-forward it to `pilot verify` (which
+	// doesn't know --name).
+	if vtName == "" {
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--name" && i+1 < len(args) {
+				vtName = args[i+1]
+				args = append(args[:i], args[i+2:]...)
+				break
+			}
+			if strings.HasPrefix(args[i], "--name=") {
+				vtName = strings.TrimPrefix(args[i], "--name=")
+				args = append(args[:i], args[i+1:]...)
+				break
+			}
+		}
+	}
 	t, cleanup, invPath, err := vtStageInventory()
 	if err != nil {
 		return err
