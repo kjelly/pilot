@@ -49,31 +49,34 @@ pre-bake 的 ubuntu 24.04 cloud image（含 `python3` + `systemd-resolved`，
 
 ---
 
-## 2. 一行 inventory（給 ansible-playbook 用）
+## 2. Inventory：直接 `show-inventory`，不用手寫
 
 ```bash
-cat > /tmp/inv-core.yaml <<'YAML'
-all:
-  hosts:
-    core:
-      ansible_connection: ssh
-      ansible_host: 192.168.123.232
-      ansible_user: ubuntu
-      ansible_ssh_private_key_file: /var/lib/libvirt/images/pilot/core/id_ed25519
-      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-      ansible_become: true
-      ansible_become_method: sudo
-      ansible_python_interpreter: /usr/bin/python3
-  children:
-    dns:      { hosts: { core: {} } }
-    ntp:      { hosts: { core: {} } }
-    keycloak: { hosts: { core: {} } }
-YAML
+# 自動生成（含 children groups，所以 `hosts: dns` / `hosts: ntp`
+# / `hosts: keycloak` 三種 role-gated apply 都能跑）：
+pilot vm-target show-inventory --name core > /tmp/inv-core.yaml
 ```
 
-> 為什麼不直接用 `pilot vm-target show-inventory`？
-> 因為 `core-infra-provider-apply.yml` 的 role 是 `target_group`
-> 對應到 `dns` / `ntp` / `keycloak`，所以 inventory 要有 children。
+產出：
+
+```yaml
+all:
+  hosts:
+    core:    { ansible_connection: ssh, ansible_host: 192.168.123.232, ... }
+    dns:     { ... 同一個 IP + 同一把 key ... }
+    ntp:     { ... }
+    keycloak:{ ... }
+  children:
+    core:     { hosts: { core: {} } }   # primary self-group
+    dns:      { hosts: { core: {} } }   # role group
+    ntp:      { hosts: { core: {} } }
+    keycloak: { hosts: { core: {} } }
+```
+
+> 早期版本 `show-inventory` 只印 `all.hosts`，所以使用者要自己
+> 補 `all.children`；commit `da74bde` 把 children 自動帶出，
+> 從此 `core-infra-provider-apply.yml` 三個 role 都能直接用
+> `show-inventory` 輸出當 inventory，不再需要手寫 inventory。
 
 ---
 
@@ -195,6 +198,9 @@ KEYCLOAK_ISSUER='http://127.0.0.1:8080/realms/master' \
 
 ```bash
 go build -o /tmp/pilot ./cmd/pilot/
+
+# 0) inventory 自動生成（`show-inventory` 已含 children，無需手寫）
+pilot vm-target show-inventory --name core > /tmp/inv-core.yaml
 
 # 1) 起 VM
 /tmp/pilot vm-target up --base-image /var/lib/libvirt/images/pilot/noble-base.qcow2 \
