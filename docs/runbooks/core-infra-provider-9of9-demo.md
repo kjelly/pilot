@@ -20,6 +20,23 @@ pilot vm-target shell --name core -- bash -c "uname -a; ip a" # 跑一行指令
 pilot vm-target exec --name core -- systemctl is-active unbound  # 不開 PTY, 給 ansible 用
 ```
 
+也有一層更簡的 wrapper — `pilot target` — 自動判斷 docker 或 vm target，
+不用記哪個子指令對哪種 backend：
+
+```bash
+pilot target up     --target core                          # auto-detect docker/vm
+pilot target run    --target core \
+    --playbook playbooks/apply/core-infra-provider-apply.yml --role dns  # 自動帶 -i, -l, -e target_group
+pilot target verify --target core --spec docs/verification/core-infra-provider.md
+pilot target shell  --target core -- bash -c "uname -a; ip a"
+pilot target exec   --target core -- systemctl is-active unbound
+pilot target down   --target core
+pilot target list                                          # 列出 docker + vm
+```
+
+對比原本三行指令，現在一行的 wrapper 就夠了。
+commit `abbafa7` 加這個 wrapper。
+
 這份 runbook 是 `pilot vm-target` + `core-infra-provider` apply +
 verify 的 **end-to-end 一次跑通**紀錄。對應的 commit chain 在
 `19c4ac2` 之前，verify 只能拿 5/9（沒裝東西）或 7/9（裝了
