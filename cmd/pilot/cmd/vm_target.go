@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/anomalyco/pilot/internal/sandbox"
 	"github.com/anomalyco/pilot/internal/vmtarget"
 )
 
@@ -256,19 +257,52 @@ var vtRunCmd = &cobra.Command{
 	Use:   "run <playbook.yml> [<extra>...]",
 	Short: "Run an ansible playbook against the VM target",
 	Long: `Passes --inventory and --limit automatically based on the target name.
-Everything after the playbook is forwarded verbatim to ansible-playbook.`,
-	Args:              cobra.MinimumNArgs(1),
+Everything after the playbook is forwarded verbatim to ansible-playbook.
+
+Use --sandbox to run ansible-playbook inside a Docker container instead of
+on the host. The container image comes from the config (sandbox.image) or
+can be overridden with --sandbox-image. The VM's SSH key is automatically
+mounted into the container, so ansible can reach the VM over SSH without
+any host-side ansible installation.`,
+	Args:               cobra.MinimumNArgs(1),
 	DisableFlagParsing: true,
-	RunE: runVtRun,
+	RunE:               runVtRun,
 }
 
 func init() { vtRunCmd.Flags().StringVar(&vtName, "name", "", "target name") }
 
+// extractBoolFlag scans args for a boolean flag (e.g. "--sandbox"),
+// removes it from the slice and returns whether it was found.
+func extractBoolFlag(args []string, flag string) ([]string, bool) {
+	for i, a := range args {
+		if a == flag {
+			return append(args[:i], args[i+1:]...), true
+		}
+	}
+	return args, false
+}
+
+// extractValueFlag scans args for a key-value flag (e.g. "--sandbox-image img"),
+// removes both elements, and returns the value. Supports both
+// "--flag value" and "--flag=value" forms.
+func extractValueFlag(args []string, flag string) ([]string, string) {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			val := args[i+1]
+			return append(args[:i], args[i+2:]...), val
+		}
+		if strings.HasPrefix(a, flag+"=") {
+			val := strings.TrimPrefix(a, flag+"=")
+			return append(args[:i], args[i+1:]...), val
+		}
+	}
+	return args, ""
+}
+
 func runVtRun(cmd *cobra.Command, args []string) error {
 	// DisableFlagParsing is on so -e foo=bar flows through to the
-	// child ansible-playbook. But we still need to honour --name.
-	// Parse it ourselves when the global is empty, AND strip it
-	// from `args` so we don't re-forward it to ansible-playbook.
+	// child ansible-playbook. But we still need to honour --name
+	// and --sandbox. Parse them ourselves and strip from `args`.
 	if vtName == "" {
 		for i := 0; i < len(args); i++ {
 			if args[i] == "--name" && i+1 < len(args) {
@@ -283,6 +317,16 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
+
+	// Parse --sandbox / --sandbox-image before forwarding to ansible.
+	var useSandbox bool
+	var sandboxImage string
+	args, useSandbox = extractBoolFlag(args, "--sandbox")
+	args, sandboxImage = extractValueFlag(args, "--sandbox-image")
+	if sandboxImage != "" {
+		useSandbox = true
+	}
+
 	t, cleanup, invPath, err := vtStageInventory()
 	if err != nil {
 		return err
@@ -296,18 +340,144 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 		ansibleArgs = append(ansibleArgs, "-l", t.Name)
 	}
 	ansibleArgs = append(ansibleArgs, extra...)
+
+	if useSandbox {
+		return vtRunViaContainer(cmd, t, playbook, invPath, ansibleArgs, sandboxImage)
+	}
+
 	fmt.Fprintf(cmd.ErrOrStderr(), "▶ ansible-playbook %s\n", strings.Join(ansibleArgs, " "))
 	return execAnsiblePlaybook(cmd.OutOrStdout(), ansibleArgs...)
+}
+
+// vtRunViaContainer runs ansible-playbook inside a Docker container
+// while targeting the VM over SSH. It:
+//  1. Resolves the sandbox image from the explicit flag or config.
+//  2. Starts a sandbox container with --network host and the SSH key
+//     bind-mounted read-only.
+//  3. docker-cp's the playbook and inventory into the container,
+//     rewriting ansible_ssh_private_key_file to the container path.
+//  4. docker exec ansible-playbook inside the container.
+//  5. Tears down the container.
+func vtRunViaContainer(cmd *cobra.Command, t *vmtarget.Target, playbookPath, invPath string, ansibleArgs []string, imageOverride string) error {
+	ctx := context.Background()
+
+	// 1. Resolve image: explicit flag > config > error
+	image := imageOverride
+	if image == "" {
+		cfg := loadConfig()
+		image = cfg.Sandbox.Image
+	}
+	if image == "" {
+		return fmt.Errorf("--sandbox requires a container image; set sandbox.image in config or pass --sandbox-image")
+	}
+
+	// 2. Determine container-side SSH key path
+	const cntKeyDir = "/tmp/pilot-ssh"
+	const cntKeyPath = "/tmp/pilot-ssh/id_ed25519"
+
+	// 3. Rewrite the inventory: replace the host-side SSH key path
+	//    with the container-side mount path. Write to a new temp file.
+	invData, err := os.ReadFile(invPath)
+	if err != nil {
+		return fmt.Errorf("read inventory: %w", err)
+	}
+	rewrittenInv := strings.ReplaceAll(string(invData), t.KeyPath, cntKeyPath)
+	cntInvFile, err := os.CreateTemp("", "pilot-vt-sandbox-inv-*.yaml")
+	if err != nil {
+		return fmt.Errorf("create rewritten inventory: %w", err)
+	}
+	cntInvPath := cntInvFile.Name()
+	defer os.Remove(cntInvPath)
+	if _, err := cntInvFile.WriteString(rewrittenInv); err != nil {
+		cntInvFile.Close()
+		return err
+	}
+	cntInvFile.Close()
+
+	// 4. Start the container with SSH key mounted using the core DockerEnvironment backend.
+	de := sandbox.NewDockerEnvironment(image)
+	de.Network = "host"
+	de.Mounts = []sandbox.SandboxMount{
+		{
+			HostPath:      t.KeyPath,
+			ContainerPath: cntKeyPath,
+			RO:            true,
+		},
+	}
+	cfg := loadConfig()
+	if cfg.Sandbox.Pull != "" {
+		de.Pull = cfg.Sandbox.Pull
+	}
+
+	fmt.Fprintf(cmd.ErrOrStderr(), "📦 starting sandbox container (%s)...\n", image)
+	if err := de.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start sandbox container: %w", err)
+	}
+	containerID := de.ContainerName
+	defer func() {
+		fmt.Fprintf(cmd.ErrOrStderr(), "📦 stopping sandbox container...\n")
+		_ = de.Stop(context.Background())
+	}()
+
+	// 6. Fix SSH key permissions inside the container (bind mount
+	//    may have different uid). Also create ~/.ssh/known_hosts.
+	fixPerms := newCmd(ctx, "docker", "exec", containerID,
+		"/bin/sh", "-c",
+		"cp "+cntKeyPath+" /tmp/pilot-ssh-key && chmod 600 /tmp/pilot-ssh-key && mkdir -p ~/.ssh && touch ~/.ssh/known_hosts")
+	if out, err := fixPerms.CombinedOutput(); err != nil {
+		return fmt.Errorf("fix SSH key permissions: %w\n%s", err, string(out))
+	}
+	// Rewrite inventory to use the copied key with correct perms
+	rewrittenInv = strings.ReplaceAll(rewrittenInv, cntKeyPath, "/tmp/pilot-ssh-key")
+	if err := os.WriteFile(cntInvPath, []byte(rewrittenInv), 0o644); err != nil {
+		return fmt.Errorf("rewrite inventory for copied key: %w", err)
+	}
+
+	// 7. docker cp playbook + inventory into the container
+	pbCnt := "/tmp/pilot-playbook.yml"
+	cpPb := newCmd(ctx, "docker", "cp", playbookPath, containerID+":"+pbCnt)
+	if out, err := cpPb.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker cp playbook: %w\n%s", err, string(out))
+	}
+
+	invCnt := "/tmp/pilot-inventory.yaml"
+	cpInv := newCmd(ctx, "docker", "cp", cntInvPath, containerID+":"+invCnt)
+	if out, err := cpInv.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker cp inventory: %w\n%s", err, string(out))
+	}
+
+	// 8. Rewrite ansibleArgs: replace host paths with container paths
+	cntAnsibleArgs := make([]string, len(ansibleArgs))
+	copy(cntAnsibleArgs, ansibleArgs)
+	for i, a := range cntAnsibleArgs {
+		if a == playbookPath {
+			cntAnsibleArgs[i] = pbCnt
+		}
+		if a == invPath {
+			cntAnsibleArgs[i] = invCnt
+		}
+	}
+
+	// 9. docker exec ansible-playbook
+	execArgs := []string{"exec", "-t", containerID, "ansible-playbook"}
+	execArgs = append(execArgs, cntAnsibleArgs...)
+	fmt.Fprintf(cmd.ErrOrStderr(), "▶ docker exec %s ansible-playbook %s\n",
+		containerID, strings.Join(cntAnsibleArgs, " "))
+
+	runCmd := newCmd(ctx, "docker", execArgs...)
+	runCmd.Stdout = cmd.OutOrStdout()
+	runCmd.Stderr = os.Stderr
+	return runCmd.Run()
 }
 
 // ---- verify ---------------------------------------------------------------
 
 var vtVerifyCmd = &cobra.Command{
-	Use:   "verify <spec.md> [<extra>...]",
-	Short: "Run `pilot verify` against the VM target",
+	Use:                "verify <spec.md> [<extra>...]",
+	Short:              "Run `pilot verify` against the VM target",
 	Args:               cobra.MinimumNArgs(1),
 	DisableFlagParsing: true,
-	RunE:  runVtVerify,
+	RunE:               runVtVerify,
 }
 
 func init() { vtVerifyCmd.Flags().StringVar(&vtName, "name", "", "target name") }
