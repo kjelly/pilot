@@ -293,15 +293,9 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if !validName(opt.Name) {
 		return nil, fmt.Errorf("vmtarget: invalid name %q (want [a-zA-Z0-9_.-]+)", opt.Name)
 	}
-	if opt.BaseImage == "" {
-		return nil, errors.New("vmtarget: base image is required")
-	}
-	baseAbs, err := filepath.Abs(opt.BaseImage)
+	baseAbs, err := m.PrepareBaseImage(ctx, opt.BaseImage)
 	if err != nil {
-		return nil, fmt.Errorf("vmtarget: resolve base image: %w", err)
-	}
-	if _, err := os.Stat(baseAbs); err != nil {
-		return nil, fmt.Errorf("vmtarget: base image %s: %w", baseAbs, err)
+		return nil, fmt.Errorf("vmtarget: prepare base image: %w", err)
 	}
 
 	m.mu.Lock()
@@ -886,7 +880,7 @@ func (t *Target) RenderInventory() (string, error) {
 		fmt.Fprintf(&sb, "      ansible_user: %s\n", t.SSHUser)
 		fmt.Fprintf(&sb, "      ansible_port: %d\n", t.SSHPort)
 		fmt.Fprintf(&sb, "      ansible_ssh_private_key_file: %s\n", t.KeyPath)
-		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\n")
+		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=~/.ansible/cp/pilot-%%r@%%h:%%p -o ControlPersist=60s\n")
 	}
 	writeHost(t.Name)
 	// Aliases that are NOT the primary name become both a host entry

@@ -528,6 +528,7 @@ func (a *App) NewLoopWithDefaults(runID string, streamWriter io.Writer, defaultI
 		TUI:          tuiEmitter,
 		Runner:       a.Runner,
 		Env:          a.Env,
+		AllowDisposableApply: a.Cfg.AllowDisposableApply,
 	})
 }
 

@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -234,7 +236,8 @@ func TestUpgradeRiskForApply(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := upgradeRiskForApply(RiskMedium, c.tool, json.RawMessage(c.args))
+			loop := &Loop{}
+			got := loop.upgradeRiskForApply(RiskMedium, c.tool, json.RawMessage(c.args))
 			if got != c.want {
 				t.Errorf("upgradeRiskForApply(%s, %s, %s) = %s, want %s",
 					RiskMedium, c.tool, c.args, got, c.want)
@@ -242,6 +245,36 @@ func TestUpgradeRiskForApply(t *testing.T) {
 		})
 	}
 }
+
+func TestUpgradeRiskForApply_Disposable(t *testing.T) {
+	// Create a temp file for inventory
+	tmp, err := os.CreateTemp("", "pilot-vt-inv-*.yaml")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+
+	loop := &Loop{
+		cfg: Config{
+			AllowDisposableApply: true,
+		},
+	}
+
+	// 1. VM Target inventory (temp file prefix)
+	args := fmt.Sprintf(`{"check":false,"inventory":"%s"}`, tmp.Name())
+	got := loop.upgradeRiskForApply(RiskMedium, "run_ansible", json.RawMessage(args))
+	if got != RiskMedium {
+		t.Errorf("expected RiskMedium for disposable VM target, got %s", got)
+	}
+
+	// 2. Not disposable, should upgrade to RiskHigh
+	argsNotDisposable := `{"check":false,"inventory":"/etc/ansible/hosts"}`
+	gotNot := loop.upgradeRiskForApply(RiskMedium, "run_ansible", json.RawMessage(argsNotDisposable))
+	if gotNot != RiskHigh {
+		t.Errorf("expected RiskHigh for non-disposable target, got %s", gotNot)
+	}
+}
+
 
 func TestPreviewAnsibleRunHandlesMissingRunner(t *testing.T) {
 	// With a nil runner, previewAnsibleRun should return a helpful

@@ -7,25 +7,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestRegression_PamOidcSshdSpec is a regression test pinned to
-// docs/verification/pam-oidc-sshd.md. It enforces the schema AND the
-// cross-row invariants that made the previous version of this spec
-// silently rot:
-//
-//   - 7 rows, IDs C1..C7, no gaps and no duplicates
-//   - every Expected is non-empty AND not on the vague-word list
-//   - every Command is non-empty AND runnable as a shell command
-//   - C3 (backup) precedes C4 (modify sshd) — i.e. a fail of C4
-//     must not happen before C3 was verified (lockout safety)
-//   - the generated playbook, after IncludeRaw, parses as valid YAML
-//     and contains 7 task entries (before dedup) covering all rows.
-//
-// The intent is that any future refactor of the parser, the lint
-// rules, or the spec schema that breaks this concrete spec is caught
-// here without spinning up a real ansible run. The "double regression
-// pattern" (fix in place, revert fix, restore) is applied at the
-// spec level — see TestRegression_PamOidcSshdSpec_BackupBeforeEdit
-// below for the targeted lockout-safety invariant.
+// TestRegression_PamOidcSshdSpec v2.0 — aligned with kha7iq/kc-ssh-pam upstream.
+// Key changes from v1:
+//   - 9 rows (C1..C9), not 7 (added C6 monitor binary, C8/C9 config validation)
+//   - PAM module is pam_keycloak_device.so (not pam_kc_ssh.so)
+//   - Config path is /etc/keycloak-ssh/ (not /etc/kc-ssh-pam/)
+//   - Backup suffix is .kcsssh.bak (not .pamoidc.bak)
 func TestRegression_PamOidcSshdSpec(t *testing.T) {
 	const specPath = "../../docs/verification/pam-oidc-sshd.md"
 	s, err := Parse(specPath)
@@ -33,13 +20,13 @@ func TestRegression_PamOidcSshdSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	// 1. Row count is locked at 7.
-	if len(s.Rows) != 7 {
-		t.Fatalf("rows=%d want=7 (spec must cover C1..C7 inclusive)", len(s.Rows))
+	// 1. Row count is locked at 9.
+	if len(s.Rows) != 9 {
+		t.Fatalf("rows=%d want=9 (spec must cover C1..C9 inclusive)", len(s.Rows))
 	}
 
-	// 2. IDs are C1..C7 with no gaps and no duplicates.
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7"}
+	// 2. IDs are C1..C9 with no gaps and no duplicates.
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"}
 	gotIDs := make([]string, 0, len(s.Rows))
 	seen := map[string]bool{}
 	for _, r := range s.Rows {
@@ -56,7 +43,7 @@ func TestRegression_PamOidcSshdSpec(t *testing.T) {
 	// 3. No vague expected values, no empty fields.
 	fs := Lint(s)
 	if HasErrors(fs) {
-		t.Errorf("Lint produced errors:\n%s", joinFindings(fs))
+		t.Errorf("Lint produced errors:\n%s", fsToString(fs))
 	}
 	for _, r := range s.Rows {
 		if strings.TrimSpace(r.Expected) == "" {
@@ -84,8 +71,7 @@ func TestRegression_PamOidcSshdSpec(t *testing.T) {
 	if len(raw) == 0 || len(raw) > len(s.Rows) {
 		t.Errorf("generated tasks=%d, expected 1..%d (dedup <= rows)", len(raw), len(s.Rows))
 	}
-	// Every spec row must appear in at least one task's SourceIDs,
-	// otherwise the playbook can't claim to satisfy that requirement.
+	// Every spec row must appear in at least one task's SourceIDs.
 	covered := map[string]bool{}
 	for _, tk := range pb.Tasks {
 		for _, id := range tk.SourceIDs {
@@ -99,16 +85,8 @@ func TestRegression_PamOidcSshdSpec(t *testing.T) {
 	}
 }
 
-// TestRegression_PamOidcSshdSpec_BackupBeforeEdit is the targeted
-// lockout-safety invariant. The check has nothing to do with YAML
-// parsing — it's about the *order* of the rows: C3 (backup file
-// present) must be evaluated before C4 (sshd PAM contains the new
-// module line). If a future maintainer reorders the markdown table
-// naively (alphabetical, newest-first), this test fails and they are
-// forced to think about why the order exists.
-//
-// To prove the test isn't a tautology: temporarily delete the file,
-// observe the failure, then restore it.
+// TestRegression_PamOidcSshdSpec_BackupBeforeEdit — lockout-safety invariant.
+// C3 (backup file present) must be evaluated before C4 (sshd PAM contains new module).
 func TestRegression_PamOidcSshdSpec_BackupBeforeEdit(t *testing.T) {
 	const specPath = "../../docs/verification/pam-oidc-sshd.md"
 	s, err := Parse(specPath)
@@ -127,35 +105,73 @@ func TestRegression_PamOidcSshdSpec_BackupBeforeEdit(t *testing.T) {
 	}
 	if lineOf["C3"] >= lineOf["C4"] {
 		t.Errorf("lockout-safety order violated: C3 (backup) at line %d, "+
-			"C4 (modify sshd) at line %d — C3 MUST come before C4 so a fail "+
-			"of C4 still leaves a restorable backup", lineOf["C3"], lineOf["C4"])
+			"C4 (modify sshd) at line %d — C3 MUST come before C4", lineOf["C3"], lineOf["C4"])
 	}
 }
 
-// TestRegression_PamOidcSshdSpec_IssuerHTTPS is a content-level guard:
-// C7 demands that the issuer URL scheme be http(s) in order to keep
-// the spec aligned with the "Keycloak Device Flow" requirement that
-// the spec calls out. If a future maintainer rewrites the command
-// without the `https?` part (e.g. `^issuer:` alone), this fails.
-func TestRegression_PamOidcSshdSpec_IssuerHTTPS(t *testing.T) {
+// TestRegression_PamOidcSshdSpec_ServerUrlHTTPS — C8 must require https in server_url.
+func TestRegression_PamOidcSshdSpec_ServerUrlHTTPS(t *testing.T) {
 	const specPath = "../../docs/verification/pam-oidc-sshd.md"
 	s, err := Parse(specPath)
 	if err != nil {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 	for _, r := range s.Rows {
-		if r.ID != "C7" {
+		if r.ID != "C8" {
 			continue
 		}
 		if !strings.Contains(r.Command, "https?://") {
-			t.Errorf("C7 must require an http(s) URL: got %q", r.Command)
+			t.Errorf("C8 must require an http(s) URL: got %q", r.Command)
 		}
 		return
 	}
-	t.Fatal("C7 row missing from spec")
+	t.Fatal("C8 row missing from spec")
 }
 
-func joinFindings(fs []Finding) string {
+// TestRegression_PamOidcSshdSpec_CorrectModuleName — C2/C4 must reference
+// pam_keycloak_device.so (not pam_kc_ssh.so which doesn't exist upstream).
+func TestRegression_PamOidcSshdSpec_CorrectModuleName(t *testing.T) {
+	const specPath = "../../docs/verification/pam-oidc-sshd.md"
+	s, err := Parse(specPath)
+	if err != nil {
+		t.Fatalf("parse %s: %v", specPath, err)
+	}
+	for _, r := range s.Rows {
+		if r.ID == "C2" || r.ID == "C4" {
+			if !strings.Contains(r.Command, "pam_keycloak_device.so") && !strings.Contains(r.Command, "pam_keycloak_device\\.so") {
+				t.Errorf("row %s must reference pam_keycloak_device.so: got %q", r.ID, r.Command)
+			}
+			if strings.Contains(r.Command, "pam_kc_ssh.so") {
+				t.Errorf("row %s must NOT reference non-existent pam_kc_ssh.so: got %q", r.ID, r.Command)
+			}
+		}
+	}
+}
+
+// TestRegression_PamOidcSshdSpec_CorrectConfigPath — C8/C9 must reference
+// /etc/keycloak-ssh/ (the real upstream path, not /etc/kc-ssh-pam/).
+func TestRegression_PamOidcSshdSpec_CorrectConfigPath(t *testing.T) {
+	const specPath = "../../docs/verification/pam-oidc-sshd.md"
+	s, err := Parse(specPath)
+	if err != nil {
+		t.Fatalf("parse %s: %v", specPath, err)
+	}
+	for _, r := range s.Rows {
+		if r.ID == "C8" || r.ID == "C9" {
+			if !strings.Contains(r.Command, "/etc/keycloak-ssh/") {
+				t.Errorf("row %s must reference /etc/keycloak-ssh/: got %q", r.ID, r.Command)
+			}
+			if strings.Contains(r.Command, "/etc/kc-ssh-pam/") {
+				t.Errorf("row %s must NOT reference wrong path /etc/kc-ssh-pam/: got %q", r.ID, r.Command)
+			}
+		}
+	}
+}
+
+// fsToString mirrors the joinFindings helper from the old test file.
+// Since Finding.String() is a method on a type defined in lint.go, we
+// format the slice ourselves here.
+func fsToString(fs []Finding) string {
 	var sb strings.Builder
 	for _, f := range fs {
 		sb.WriteString(f.String())

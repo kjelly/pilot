@@ -55,17 +55,6 @@ func TestRunVtUp_RequiresName(t *testing.T) {
 	}
 }
 
-func TestRunVtUp_RequiresBaseImage(t *testing.T) {
-	vtName = ""
-	vtBaseImage = ""
-	rootCmd.SetArgs([]string{"vm-target", "up", "--name", "x"})
-	rootCmd.SetOut(&bytes.Buffer{})
-	rootCmd.SetErr(&bytes.Buffer{})
-	err := rootCmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "--base-image is required") {
-		t.Fatalf("want --base-image-required, got %v", err)
-	}
-}
 
 func TestResolveVMDir_DefaultAndOverride(t *testing.T) {
 	old := vtVMDir

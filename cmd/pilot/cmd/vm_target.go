@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -59,6 +61,7 @@ func init() {
 	vmTargetCmd.AddCommand(vtRollbackCmd)
 	vmTargetCmd.AddCommand(vtSSHCmd)
 	vmTargetCmd.AddCommand(vtShellCmd)
+	vmTargetCmd.AddCommand(vtTestCmd)
 }
 
 // ---- shared flags ---------------------------------------------------------
@@ -109,7 +112,7 @@ Examples:
 
 func init() {
 	vtUpCmd.Flags().StringVar(&vtName, "name", "", "domain name (also ansible host key)")
-	vtUpCmd.Flags().StringVar(&vtBaseImage, "base-image", "", "path to a qcow2 cloud image used as the read-only backing (required)")
+	vtUpCmd.Flags().StringVar(&vtBaseImage, "base-image", "", "path or alias of qcow2 base image (defaults to ubuntu-24.04)")
 	vtUpCmd.Flags().StringVar(&vtSSHUser, "ssh-user", "root", "login user authorised via cloud-init")
 	vtUpCmd.Flags().IntVar(&vtVCPUs, "vcpus", 2, "number of vCPUs")
 	vtUpCmd.Flags().IntVar(&vtMemoryMB, "memory", 2048, "memory in MiB")
@@ -125,7 +128,7 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--name is required")
 	}
 	if vtBaseImage == "" {
-		return fmt.Errorf("--base-image is required")
+		vtBaseImage = "ubuntu-24.04"
 	}
 	m, err := vtNewManager()
 	if err != nil {
@@ -598,5 +601,135 @@ func runVtRollback(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "✓ rolled back %s to %s\n", vtName, vtRollTag)
+	return nil
+}
+
+// ---- test -----------------------------------------------------------------
+
+var (
+	vtTestPlaybook   string
+	vtTestSpec       string
+	vtTestSkipLint   bool
+	vtTestNoRollback bool
+)
+
+var vtTestCmd = &cobra.Command{
+	Use:   "test",
+	Short: "Run syntax, apply, verify, and idempotency tests against a VM target",
+	Long: `Run a full integration and verification test suite against a VM target.
+
+Steps executed:
+  1. L1 syntax check: 'ansible-playbook --syntax-check'
+  2. Auto-snapshot: captures current state under 'pre-test' tag
+  3. L4 apply: runs the playbook
+  4. L5 verify: runs 'pilot verify' against the target
+  5. L6 idempotency: runs the playbook again and checks that changed=0
+  6. Auto-rollback: if any step fails, automatically rolls back to 'pre-test'
+`,
+	RunE: runVtTest,
+}
+
+func init() {
+	vtTestCmd.Flags().StringVar(&vtName, "name", "", "target VM name (required)")
+	vtTestCmd.Flags().StringVar(&vtTestPlaybook, "playbook", "", "path to the playbook to run (required)")
+	vtTestCmd.Flags().StringVar(&vtTestSpec, "spec", "", "path to the verification spec.md (required)")
+	vtTestCmd.Flags().BoolVar(&vtTestSkipLint, "skip-lint", false, "skip syntax check pre-flight")
+	vtTestCmd.Flags().BoolVar(&vtTestNoRollback, "no-rollback", false, "disable automatic rollback on failure")
+
+	_ = vtTestCmd.MarkFlagRequired("name")
+	_ = vtTestCmd.MarkFlagRequired("playbook")
+	_ = vtTestCmd.MarkFlagRequired("spec")
+}
+
+func runVtTest(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	m, err := vtNewManager()
+	if err != nil {
+		return err
+	}
+	t, err := m.Get(ctx, vtName)
+	if err != nil {
+		return err
+	}
+	if t.Status != vmtarget.StatusRunning {
+		return fmt.Errorf("target %q is not running; bring it up first", vtName)
+	}
+
+	// Step 1: L1 Syntax Check
+	if !vtTestSkipLint {
+		fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 1/5] L1 Syntax Check ===")
+		syntaxArgs := []string{vtTestPlaybook, "--syntax-check"}
+		if err := execAnsiblePlaybook(cmd.OutOrStdout(), syntaxArgs...); err != nil {
+			return fmt.Errorf("syntax check failed: %w", err)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "✓ Syntax check passed")
+	}
+
+	// Step 2: Auto-snapshot
+	snapTag := fmt.Sprintf("pre-test-%d", time.Now().Unix())
+	fmt.Fprintf(cmd.OutOrStdout(), "=== [Step 2/5] Auto-snapshotting VM state (tag: %s) ===\n", snapTag)
+	if err := m.Snapshot(ctx, vtName, snapTag); err != nil {
+		return fmt.Errorf("failed to create auto-snapshot: %w", err)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "✓ Auto-snapshot created")
+
+	// Helper for rollback on failure
+	rollbackOnFailure := func(origErr error) error {
+		if vtTestNoRollback {
+			fmt.Fprintln(cmd.ErrOrStderr(), "⚠️ Auto-rollback is disabled via --no-rollback")
+			return origErr
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed: %v. Rolling back VM to %s...\n", origErr, snapTag)
+		if rerr := m.Rollback(ctx, vtName, snapTag); rerr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 Double fault: failed to rollback: %v\n", rerr)
+			return fmt.Errorf("%w (rollback also failed: %v)", origErr, rerr)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "✓ Rollback successful. Target VM restored to pre-test state.")
+		return origErr
+	}
+
+	// Step 3: L4 Apply
+	fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 3/5] L4 Apply Playbook ===")
+	t, cleanup, invPath, err := vtStageInventory()
+	if err != nil {
+		return rollbackOnFailure(err)
+	}
+	defer cleanup()
+
+	ansibleArgs := []string{vtTestPlaybook, "-i", invPath, "-l", t.Name}
+	var applyBuf bytes.Buffer
+	mw := io.MultiWriter(cmd.OutOrStdout(), &applyBuf)
+
+	if err := execExternal(mw, "ansible-playbook", ansibleArgs...); err != nil {
+		return rollbackOnFailure(fmt.Errorf("playbook apply failed: %w", err))
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "✓ Playbook apply completed")
+
+	// Step 4: L5 Verify
+	fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 4/5] L5 Verification Spec ===")
+	pilotArgs := []string{"verify", vtTestSpec, "-i", invPath, "-l", t.Name}
+
+	if err := execPilot(cmd.OutOrStdout(), pilotArgs...); err != nil {
+		return rollbackOnFailure(fmt.Errorf("verification failed: %w", err))
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "✓ Verification checks passed")
+
+	// Step 5: L6 Idempotency Check
+	fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 5/5] L6 Idempotency Check ===")
+	var idemBuf bytes.Buffer
+	mwIdem := io.MultiWriter(cmd.OutOrStdout(), &idemBuf)
+	if err := execExternal(mwIdem, "ansible-playbook", ansibleArgs...); err != nil {
+		return rollbackOnFailure(fmt.Errorf("idempotency run failed: %w", err))
+	}
+
+	reChanged := regexp.MustCompile(`changed=([1-9]\d*)`)
+	if reChanged.Match(idemBuf.Bytes()) {
+		matches := reChanged.FindSubmatch(idemBuf.Bytes())
+		changedCount := string(matches[1])
+		return rollbackOnFailure(fmt.Errorf("idempotency check failed: playbook reported %s changed task(s) on second run", changedCount))
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "✓ Idempotency check passed (changed=0)")
+	fmt.Fprintln(cmd.OutOrStdout(), "🎉 ALL TESTS PASSED SUCCESSFULLY!")
+
 	return nil
 }

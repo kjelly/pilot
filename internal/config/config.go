@@ -36,6 +36,7 @@ type Config struct {
 	AllowedReadPaths     []string `yaml:"allowed_read_paths,omitempty"`
 	AllowedPlaybookRoots []string `yaml:"allowed_playbook_roots,omitempty"`
 	Sandbox              SandboxConfig `yaml:"sandbox,omitempty"`
+	AllowDisposableApply bool     `yaml:"allow_disposable_apply"`
 }
 
 // SandboxConfig configures the optional Docker-sandbox mode. When
@@ -100,6 +101,7 @@ func Default() *Config {
 			Pull:       "missing",
 			AutoDetect: "docker-inspect",
 		},
+		AllowDisposableApply: true,
 	}
 }
 
