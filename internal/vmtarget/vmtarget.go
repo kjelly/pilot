@@ -388,6 +388,16 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	}
 	// Capture pre-existing DHCP leases for our MAC so waitForIP
 	// can ignore them — they're from previous VM runs, not this one.
+	// Allocate a static DHCP reservation BEFORE starting the VM. This
+	// guarantees the VM always gets the same IP and prevents the
+	// "two VMs get the same IP" conflict that occurs when a previous VM
+	// with the same MAC had an active lease.
+	if _, err = m.allocateStaticIP(ctx, tg); err != nil {
+		return nil, fmt.Errorf("vmtarget: static IP allocation: %w", err)
+	}
+
+	// Capture pre-existing DHCP leases for our MAC so waitForIP
+	// can ignore them — they're from previous VM runs, not this one.
 	preExistingLeases := m.captureLeaseSet(ctx, tg.Network, tg.MAC)
 
 	if err = m.defineAndStart(ctx, tg); err != nil {
@@ -415,7 +425,12 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 }
 
 // generateKey writes an ephemeral ed25519 keypair into the target dir.
+// Removes any pre-existing key first so ssh-keygen never sees an "Overwrite (y/n)?"
+// prompt (which would fail in non-interactive contexts).
 func (m *Manager) generateKey(ctx context.Context, t *Target) error {
+	// Remove existing key so ssh-keygen never prompts for overwrite.
+	_ = os.Remove(t.KeyPath)
+	_ = os.Remove(t.KeyPath + ".pub")
 	res, err := m.sshKeygen(ctx, "-t", "ed25519", "-N", "", "-q", "-f", t.KeyPath, "-C", "pilot-vm-target:"+t.Name)
 	if err != nil {
 		return err
@@ -523,46 +538,60 @@ func (m *Manager) defineAndStart(ctx context.Context, t *Target) error {
 	}
 	return nil
 }
-// waitForIP polls the libvirt network's DHCP lease table (not domifaddr,
-// which can return stale leases when the deterministic MAC has
-// accumulated old leases from previous Up/Down cycles). We pick the
-// latest-expiring lease matching our MAC, which is always the active one.
-// Bounded by bootTimeout.
-// Progress and the last diagnostic error are reported to stderr.
+// waitForIP waits for the VM to acquire an IP address. We use
+// domifaddr (which queries the live kernel ARP table) as the primary
+// source, since it immediately reflects the IP the VM is actually using.
+// net-dhcp-leases is only used as a fallback to detect stale leases.
+//
+// This two-source approach fixes the "DHCP table shows old lease" bug:
+// - domifaddr always shows the current IP from the kernel ARP table
+// - net-dhcp-leases may show stale leases from previous VM runs
+//
+// Bounded by bootTimeout. Progress is reported to stderr.
 func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[string]time.Time) error {
 	deadline := m.now().Add(m.bootTimeout)
 	var lastDetail string
 	lastReport := m.now()
 
 	for {
-		// Query the network's DHCP lease table (not domifaddr) so
-		// we can pick the most recent lease for our MAC, ignoring
-		// stale leases left by previous Up/Down cycles.
+		// Primary: try domifaddr first (kernel ARP, always current).
+		ip, err := m.getIPFromDomifaddr(ctx, t.Name)
+		if err == nil && ip != "" {
+			// Found an IP via domifaddr. This is authoritative.
+			t.IP = ip
+			return nil
+		}
+		if err != nil {
+			lastDetail = err.Error()
+		} else {
+			lastDetail = "no IP from domifaddr yet"
+		}
+
+		// Fallback: check net-dhcp-leases for a fresh lease.
+		//
+		// MAC-strict: we accept ONLY a lease whose MAC is ours. We must
+		// never fall back to "the latest lease overall" here: on a shared
+		// network vm2 boots while vm1 already holds a lease, and an
+		// any-lease fallback would hand vm2 vm1's IP during the window
+		// before vm2 has DHCPed. Since Up allocates a static reservation
+		// for our exact MAC before boot, our lease is guaranteed to appear
+		// under our MAC once the VM leases — there is no legitimate reason
+		// to accept some other VM's address.
 		res, err := m.virsh(ctx, "net-dhcp-leases", t.Network)
 		if err == nil && res.ExitCode == 0 {
-			ip, expiry := latestLeaseInfo(res.Stdout, t.MAC)
-			if ip != "" {
-				// Accept the lease unless it matches a
-				// pre-existing one (same IP + expiry).
-				if preExp, ok := preExisting[ip]; !ok || preExp != expiry {
-					t.IP = ip
+			dhcpIP, expiry := macLeaseInfo(res.Stdout, t.MAC)
+			if dhcpIP != "" {
+				preExp, ok := preExisting[dhcpIP]
+				if !ok || !expiry.Equal(preExp) {
+					t.IP = dhcpIP
 					return nil
 				}
-				lastDetail = fmt.Sprintf("lease %s (exp %s) is pre-existing, waiting for new lease", ip, expiry.Format("15:04:05"))
+				lastDetail = fmt.Sprintf("stale pre-existing lease %s (exp %s), waiting for renewal", dhcpIP, expiry.Format("15:04:05"))
 			} else {
 				lastDetail = fmt.Sprintf("no active lease for MAC %s yet", t.MAC)
 			}
 		}
-		// Capture the last meaningful diagnostic.
-		if err != nil {
-			lastDetail = err.Error()
-		} else if res.ExitCode != 0 {
-			detail := strings.TrimSpace(res.Stderr)
-			if detail == "" {
-				detail = fmt.Sprintf("exit code %d (no stderr)", res.ExitCode)
-			}
-			lastDetail = detail
-		}
+
 		if m.now().After(deadline) {
 			tail := ""
 			if lastDetail != "" {
@@ -584,6 +613,27 @@ func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[stri
 			return err
 		}
 	}
+}
+
+// getIPFromDomifaddr runs "virsh domifaddr <name>" and returns the IPv4
+// address, or "" if not found. Returns an error only on virsh failure.
+func (m *Manager) getIPFromDomifaddr(ctx context.Context, name string) (string, error) {
+	res, err := m.virsh(ctx, "domifaddr", name)
+	if err != nil {
+		return "", fmt.Errorf("domifaddr: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("domifaddr exit %d: %s", res.ExitCode, res.Stderr)
+	}
+	// Parse "vnetN  MAC  ipv4  IP/24" lines.
+	ip := ipv4CIDR.FindString(res.Stdout)
+	if ip == "" {
+		return "", fmt.Errorf("no IP in domifaddr output")
+	}
+	if idx := strings.Index(ip, "/"); idx >= 0 {
+		ip = ip[:idx]
+	}
+	return ip, nil
 }
 
 // waitForSSH blocks until the VM answers SSH with the injected key, i.e.
@@ -642,6 +692,9 @@ func (m *Manager) teardown(ctx context.Context, t *Target) {
 	// the overlay, which RemoveAll below discards anyway.
 	_, _ = m.virsh(ctx, "undefine", t.Name,
 		"--snapshots-metadata", "--managed-save", "--nvram") // ignore "not found"
+	if err := m.removeStaticIP(ctx, t); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: failed to remove static IP reservation for %s: %v\n", t.Name, err)
+	}
 	if t.Dir != "" {
 		_ = os.RemoveAll(t.Dir)
 	}
@@ -855,7 +908,6 @@ func (t *Target) RenderInventory() (string, error) {
 	// resolves to the alias name, and ansible matches the host
 	// directly — no group required.
 	return sb.String(), nil
-	return sb.String(), nil
 }
 
 // ---- helpers --------------------------------------------------------------
@@ -886,9 +938,14 @@ func dedupeHosts(primary string, extra []string) []string {
 var ipv4CIDR = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/\d+`)
 
 // captureLeaseSet queries net-dhcp-leases and returns a set of
-// (IP → expiry) for the given MAC. Used by Up to snapshot the
+// (IP → expiry) for the given MAC ONLY. Used by Up to snapshot the
 // pre-existing state before starting the VM, so waitForIP can
 // ignore stale leases from previous runs.
+//
+// NOTE: we only collect leases for THIS MAC. Collecting leases for all
+// MACs caused the "IP conflict" bug where a new VM would see another
+// host's old lease and incorrectly treat it as pre-existing, causing
+// waitForIP to skip the new lease and use the wrong IP.
 func (m *Manager) captureLeaseSet(ctx context.Context, network, mac string) map[string]time.Time {
 	set := make(map[string]time.Time)
 	res, err := m.virsh(ctx, "net-dhcp-leases", network)
@@ -922,45 +979,62 @@ func (m *Manager) captureLeaseSet(ctx context.Context, network, mac string) map[
 // latestLeaseInfo parses the table output of `virsh net-dhcp-leases` and
 // returns the IP address (without /prefix) and expiry time of the
 // latest-expiring lease matching mac.
+//
+// IMPORTANT: when mac is specified, we ALWAYS prefer the MAC-specific lease
+// over any other lease, regardless of expiry time. This prevents the bug where
+// two VMs with same expiry → fallback returns the wrong VM's IP (e.g.,
+// bastion gets core's IP because core's IP is alphabetically smaller).
 func latestLeaseInfo(out, mac string) (string, time.Time) {
-	// Two-pass: first try exact MAC match, then fall back to any lease.
-	for _, filter := range []bool{true, false} {
-		var bestIP string
-		var bestExpiry time.Time
-		lines := strings.Split(out, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			if filter && !strings.Contains(line, mac) {
-				continue
-			}
-			ip := ipv4CIDR.FindString(line)
-			if ip == "" {
-				continue
-			}
-			if idx := strings.Index(ip, "/"); idx >= 0 {
-				ip = ip[:idx]
-			}
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				ts := fields[0] + " " + fields[1]
-				if t, err := time.Parse("2006-01-02 15:04:05", ts); err == nil {
-					if t.After(bestExpiry) {
-						bestExpiry = t
-						bestIP = ip
-					}
-				} else if bestIP == "" {
-					bestIP = ip
-				}
-			} else if bestIP == "" {
-				bestIP = ip
+	var macSpecificIP string
+	var macSpecificExpiry time.Time
+	var anyIP string
+	var anyExpiry time.Time
+
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		isOurMAC := mac != "" && strings.Contains(line, mac)
+		ip := ipv4CIDR.FindString(line)
+		if ip == "" {
+			continue
+		}
+		if idx := strings.Index(ip, "/"); idx >= 0 {
+			ip = ip[:idx]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		ts := fields[0] + " " + fields[1]
+		expiry, err := time.Parse("2006-01-02 15:04:05", ts)
+		if err != nil {
+			continue
+		}
+		if isOurMAC {
+			if expiry.After(macSpecificExpiry) {
+				macSpecificExpiry = expiry
+				macSpecificIP = ip
 			}
 		}
-		if bestIP != "" {
-			return bestIP, bestExpiry
+		// Track any lease (fallback)
+		if expiry.After(anyExpiry) {
+			anyExpiry = expiry
+			anyIP = ip
 		}
+	}
+
+	// Prefer MAC-specific lease. Since we now use static DHCP reservations,
+	// there should be exactly one lease per MAC, and we want that exact IP.
+	if macSpecificIP != "" {
+		return macSpecificIP, macSpecificExpiry
+	}
+	if anyIP != "" && mac != "" {
+		// Fallback: MAC-specific lease not found, use any lease.
+		// This handles the case where the DHCP table has stale leases.
+		return anyIP, anyExpiry
 	}
 	return "", time.Time{}
 }
@@ -974,6 +1048,45 @@ func latestLeaseInfo(out, mac string) (string, time.Time) {
 func latestLeaseIP(out, mac string) string {
 	ip, _ := latestLeaseInfo(out, mac)
 	return ip
+}
+
+// macLeaseInfo returns the latest-expiring lease belonging to mac ONLY,
+// or ("", zero) if mac has no lease. Unlike latestLeaseInfo it never
+// falls back to another host's lease — this is what waitForIP needs so a
+// booting VM cannot latch onto a sibling VM's address during the window
+// before it has acquired its own lease.
+func macLeaseInfo(out, mac string) (string, time.Time) {
+	var ip string
+	var expiry time.Time
+	if mac == "" {
+		return "", time.Time{}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, mac) {
+			continue
+		}
+		leaseIP := ipv4CIDR.FindString(line)
+		if leaseIP == "" {
+			continue
+		}
+		if idx := strings.Index(leaseIP, "/"); idx >= 0 {
+			leaseIP = leaseIP[:idx]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		exp, err := time.Parse("2006-01-02 15:04:05", fields[0]+" "+fields[1])
+		if err != nil {
+			continue
+		}
+		if exp.After(expiry) {
+			expiry = exp
+			ip = leaseIP
+		}
+	}
+	return ip, expiry
 }
 
 // validName mirrors dockertarget.validName so names are portable across
@@ -1005,4 +1118,223 @@ func sleep(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+
+
+// ---- Static DHCP Reservation (IP conflict prevention) -----------------------
+
+// allocateStaticIP finds an unused IP in the network's DHCP range and
+// registers a permanent <host> entry so the VM always gets the same address.
+// This prevents the "two VMs get the same IP" problem that occurs when:
+//   1. VM A has an active lease for IP X
+//   2. VM B's deterministic MAC produces the same lease, DHCP gives X again
+//   3. → IP conflict, neither VM can be reached reliably
+//
+// The reservation is persistent (written to network config), so even after
+// host reboots the static entries survive.
+//
+// Returns the allocated IP string, or an error.
+func (m *Manager) allocateStaticIP(ctx context.Context, t *Target) (string, error) {
+	network := t.Network
+	if network == "" {
+		network = "default"
+	}
+
+	// 1. Get current network XML so we know the DHCP range.
+	netRes, err := m.virsh(ctx, "net-dumpxml", network)
+	if err != nil {
+		return "", fmt.Errorf("vmtarget: net-dumpxml %s: %w", network, err)
+	}
+	if netRes.ExitCode != 0 {
+		return "", fmt.Errorf("vmtarget: net-dumpxml %s failed: %s", network, netRes.Stderr)
+	}
+
+	// If a static IP reservation already exists for this MAC, reuse it.
+	if existingIP := findStaticIPForMAC(netRes.Stdout, t.MAC); existingIP != "" {
+		fmt.Fprintf(os.Stderr, "  ✓ reusing existing static IP %s for %s (MAC %s) on network %s\n",
+			existingIP, t.Name, t.MAC, network)
+		return existingIP, nil
+	}
+
+	// 2. Parse the DHCP range and existing static <host> entries from XML.
+	rangeStart, rangeEnd, err := parseDHCPRange(netRes.Stdout)
+	if err != nil {
+		return "", fmt.Errorf("vmtarget: parse DHCP range from network %s: %w", network, err)
+	}
+
+	// 3. Collect all IPs already in use: dynamic leases + static <host> entries.
+	used := make(map[string]bool)
+	if err := m.collectUsedIPs(ctx, network, netRes.Stdout, used); err != nil {
+		return "", fmt.Errorf("vmtarget: collect used IPs: %w", err)
+	}
+
+	// 4. Scan the DHCP range for the first unused IP.
+	ip, err := findFreeIP(rangeStart, rangeEnd, used)
+	if err != nil {
+		return "", fmt.Errorf("vmtarget: no free IP in range %s-%s: %w", rangeStart, rangeEnd, err)
+	}
+
+	// 5. Register the static host entry with libvirt.
+	//    This makes the DHCP server always give `ip` to `t.MAC`.
+	hostXML := fmt.Sprintf(`<host mac='%s' ip='%s'/>`, t.MAC, ip)
+	res, err := m.virsh(ctx, "net-update", network, "add", "ip-dhcp-host",
+		"--live", "--config", hostXML)
+	if err != nil {
+		return "", fmt.Errorf("vmtarget: net-update add ip-dhcp-host: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("vmtarget: net-update failed: %s", res.Stderr)
+	}
+
+	fmt.Fprintf(os.Stderr, "  ✓ reserved static IP %s for %s (MAC %s) on network %s\n",
+		ip, t.Name, t.MAC, network)
+	return ip, nil
+}
+
+// parseDHCPRange extracts <range start='x.x.x.x' end='y.y.y.y'/> from the
+// libvirt network XML.
+func parseDHCPRange(xmlContent string) (start, end string, err error) {
+	startRe := regexp.MustCompile(`(?i)<range[^>]+start=['"]([\d.]+)['"][^>]*/?>`)
+	endRe := regexp.MustCompile(`(?i)<range[^>]+end=['"]([\d.]+)['"][^>]*/?>`)
+
+	sm := startRe.FindStringSubmatch(xmlContent)
+	em := endRe.FindStringSubmatch(xmlContent)
+	if len(sm) < 2 || len(em) < 2 {
+		return "", "", fmt.Errorf("no <range start=... end=...> found in network XML")
+	}
+	return sm[1], em[1], nil
+}
+
+// collectUsedIPs populates `used` with every IP currently in use on the
+// network: dynamic DHCP leases from net-dhcp-leases, plus static <host>
+// entries parsed from the network XML.
+func (m *Manager) collectUsedIPs(ctx context.Context, network, netXML string, used map[string]bool) error {
+	// Dynamic leases.
+	res, err := m.virsh(ctx, "net-dhcp-leases", network)
+	if err == nil && res.ExitCode == 0 {
+		for _, ip := range extractIPsFromLeases(res.Stdout) {
+			used[ip] = true
+		}
+	}
+
+	// Static <host> entries already configured in the network.
+	for _, ip := range extractStaticHostIPs(netXML) {
+		used[ip] = true
+	}
+
+	return nil
+}
+
+// extractIPsFromLeases parses `virsh net-dhcp-leases` output and returns all
+// assigned IPs (without the /prefix).
+func extractIPsFromLeases(output string) []string {
+	var ips []string
+	re := regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/\d+`)
+	for _, match := range re.FindAllStringSubmatch(output, -1) {
+		if len(match) >= 2 {
+			ips = append(ips, match[1])
+		}
+	}
+	return ips
+}
+
+// extractStaticHostIPs parses <host mac='...' ip='x.x.x.x'/> entries from the
+// libvirt network XML and returns the IP addresses.
+func extractStaticHostIPs(xmlContent string) []string {
+	var ips []string
+	re := regexp.MustCompile(`(?i)<host[^>]+ip=['"]([\d.]+)['"][^>]*/?>`)
+	for _, match := range re.FindAllStringSubmatch(xmlContent, -1) {
+		if len(match) >= 2 {
+			ips = append(ips, match[1])
+		}
+	}
+	return ips
+}
+
+// ipToUint32 and uint32ToIP convert a dotted-quad IPv4 address to a uint32
+// and back, for numeric range scanning.
+func ipToUint32(ipStr string) (uint32, error) {
+	var b [4]byte
+	if _, err := fmt.Fscanf(strings.NewReader(ipStr), "%d.%d.%d.%d",
+		&b[0], &b[1], &b[2], &b[3]); err != nil {
+		return 0, err
+	}
+	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3]), nil
+}
+
+func uint32ToIP(n uint32) string {
+	return fmt.Sprintf("%d.%d.%d.%d",
+		byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+}
+
+// findFreeIP scans from rangeStart to rangeEnd (inclusive) and returns the
+// first IP not in `used`. rangeStart and rangeEnd are inclusive.
+func findFreeIP(rangeStart, rangeEnd string, used map[string]bool) (string, error) {
+	start, err := ipToUint32(rangeStart)
+	if err != nil {
+		return "", err
+	}
+	end, err := ipToUint32(rangeEnd)
+	if err != nil {
+		return "", err
+	}
+	if end < start {
+		return "", fmt.Errorf("range end %s < start %s", rangeEnd, rangeStart)
+	}
+	for ip := start; ip <= end; ip++ {
+		s := uint32ToIP(ip)
+		if !used[s] {
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("no free IP in range %s-%s", rangeStart, rangeEnd)
+}
+
+// removeStaticIP deletes the static DHCP host reservation for the target.
+func (m *Manager) removeStaticIP(ctx context.Context, t *Target) error {
+	network := t.Network
+	if network == "" {
+		network = "default"
+	}
+	netRes, err := m.virsh(ctx, "net-dumpxml", network)
+	if err != nil {
+		return fmt.Errorf("net-dumpxml %s: %w", network, err)
+	}
+	if netRes.ExitCode != 0 {
+		return fmt.Errorf("net-dumpxml %s failed: %s", network, netRes.Stderr)
+	}
+
+	ip := findStaticIPForMAC(netRes.Stdout, t.MAC)
+	if ip == "" {
+		return nil
+	}
+
+	hostXML := fmt.Sprintf(`<host mac='%s' ip='%s'/>`, t.MAC, ip)
+	res, err := m.virsh(ctx, "net-update", network, "delete", "ip-dhcp-host",
+		"--live", "--config", hostXML)
+	if err != nil {
+		return fmt.Errorf("net-update delete ip-dhcp-host: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("net-update delete failed: %s", res.Stderr)
+	}
+	return nil
+}
+
+// findStaticIPForMAC extracts the ip address allocated to mac from the libvirt network XML.
+func findStaticIPForMAC(xmlContent, mac string) string {
+	re := regexp.MustCompile(`(?i)<host\s+([^>]+)/?>`)
+	matches := re.FindAllStringSubmatch(xmlContent, -1)
+	for _, m := range matches {
+		attrs := m[1]
+		if strings.Contains(strings.ToLower(attrs), strings.ToLower(mac)) {
+			ipRe := regexp.MustCompile(`(?i)ip=['"]([\d.]+)['"]`)
+			ipMatch := ipRe.FindStringSubmatch(attrs)
+			if len(ipMatch) >= 2 {
+				return ipMatch[1]
+			}
+		}
+	}
+	return ""
 }

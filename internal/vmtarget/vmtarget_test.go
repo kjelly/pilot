@@ -2,6 +2,7 @@ package vmtarget
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,8 +70,15 @@ func newTestManager(t *testing.T, virshBody string) (*Manager, string) {
 
 // happyVirsh is the virsh body for a target that comes up cleanly: no
 // pre-existing domain, gets an IP, reports running.
+// domifaddr is the authoritative primary source in real libvirt: it
+// reports the domain's own interface address. The happy shim returns it
+// directly so Up succeeds via the primary path (mirroring production),
+// without relying on the net-dhcp-leases fallback.
 const happyVirsh = `  dominfo)            exit 1 ;;
+  domifaddr)          echo " vnet0      52:54:00:aa:bb:cc    ipv4         192.168.122.42/24" ; exit 0 ;;
   net-dhcp-leases)    cf="/tmp/virsh-nl-count.$(echo "$0" | tr / _)" ; c=$(cat "$cf" 2>/dev/null || echo 0) ; echo $((c+1)) > "$cf" ; if [ "$c" -eq 0 ] ; then echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2000-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.99/24     stale" ; else echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.42/24     myvm" ; fi ; exit 0 ;;
+  net-dumpxml)        echo "<network><ip><dhcp><range start='192.168.122.2' end='192.168.122.254'/></dhcp></ip></network>" ; exit 0 ;;
+  net-update)         exit 0 ;;
   domstate)           echo "running" ; exit 0 ;;
   define)             exit 0 ;;
   start)              exit 0 ;;
@@ -175,10 +183,13 @@ func TestUp_RefusesHijack(t *testing.T) {
 // TestUp_CleansUpOnBootTimeout: if the VM never gets an IP, Up must fail
 // AND leave no state record and no on-disk artifacts (no leaked domain).
 func TestUp_CleansUpOnBootTimeout(t *testing.T) {
-	// domifaddr returns nothing → waitForIP times out.
+	// Both sources return nothing → waitForIP times out.
 	body := strings.Replace(happyVirsh,
 		`net-dhcp-leases)    cf="/tmp/virsh-nl-count.$(echo "$0" | tr / _)" ; c=$(cat "$cf" 2>/dev/null || echo 0) ; echo $((c+1)) > "$cf" ; if [ "$c" -eq 0 ] ; then echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2000-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.99/24     stale" ; else echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.42/24     myvm" ; fi ; exit 0 ;;`,
 		`net-dhcp-leases)    exit 0 ;;`, 1)
+	body = strings.Replace(body,
+		`domifaddr)          echo " vnet0      52:54:00:aa:bb:cc    ipv4         192.168.122.42/24" ; exit 0 ;;`,
+		`domifaddr)          exit 0 ;;`, 1)
 	m, base := newTestManager(t, body)
 	_, err := m.Up(context.Background(), Options{Name: "stuck", BaseImage: base})
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
@@ -355,6 +366,70 @@ func TestLatestLeaseIP(t *testing.T) {
 	}
 }
 
+// TestMacLeaseInfo_NeverBorrowsForeignLease guards the fix for the
+// cross-VM IP bug: when our MAC has no lease yet, macLeaseInfo must
+// return "" and NOT fall back to some other VM's lease (unlike
+// latestLeaseInfo, whose any-lease fallback is only safe for the
+// diagnostic latestLeaseIP wrapper).
+func TestMacLeaseInfo_NeverBorrowsForeignLease(t *testing.T) {
+	out := "" +
+		" Expiry Time           MAC address         Protocol   IP address           Hostname\n" +
+		" 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.50/24    vm1\n"
+	// Our MAC (vm2) has no lease in the table — only vm1's is present.
+	if ip, _ := macLeaseInfo(out, "52:54:00:11:22:33"); ip != "" {
+		t.Errorf("macLeaseInfo borrowed a foreign lease: got %q, want empty", ip)
+	}
+	// Once our own lease appears we pick it, latest expiry wins.
+	out2 := out +
+		" 2999-01-02 00:00:00   52:54:00:11:22:33   ipv4       192.168.122.51/24    vm2\n" +
+		" 2026-01-01 00:00:00   52:54:00:11:22:33   ipv4       192.168.122.52/24    vm2-old\n"
+	if ip, _ := macLeaseInfo(out2, "52:54:00:11:22:33"); ip != "192.168.122.51" {
+		t.Errorf("macLeaseInfo = %q, want 192.168.122.51 (own, latest-expiring lease)", ip)
+	}
+}
+
+// TestWaitForIP_IgnoresForeignLease is the behavioural regression: vm2
+// boots while vm1 already holds a lease on the shared network and
+// domifaddr has not yet reflected vm2's own lease. waitForIP must wait
+// for vm2's real lease rather than latching onto vm1's IP.
+func TestWaitForIP_IgnoresForeignLease(t *testing.T) {
+	dir := t.TempDir()
+	mac := macFor("vm2")
+	countFile := filepath.Join(dir, "nl-count")
+	// domifaddr always empty → force the net-dhcp-leases fallback.
+	// net-dhcp-leases always shows vm1's foreign lease, and only after a
+	// few polls also shows OUR lease (simulating vm2 finishing DHCP).
+	body := fmt.Sprintf(`cf=%q
+case "$1" in
+  domifaddr) exit 0 ;;
+  net-dhcp-leases)
+    c=$(cat "$cf" 2>/dev/null || echo 0); echo $((c+1)) > "$cf"
+    echo " Expiry Time           MAC address         Protocol   IP address           Hostname"
+    echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.50/24    vm1"
+    if [ "$c" -ge 3 ]; then
+      echo " 2999-01-01 00:00:00   %s   ipv4       192.168.122.51/24    vm2"
+    fi
+    exit 0 ;;
+  *) exit 0 ;;
+esac`, countFile, mac)
+	writeShim(t, dir, "virsh", "PILOT_VIRSH_BIN", body)
+
+	m, err := NewManager(filepath.Join(dir, "state"), filepath.Join(dir, "vmdir"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	m.bootTimeout = 2 * time.Second
+	m.pollInterval = 5 * time.Millisecond
+
+	tg := &Target{Name: "vm2", MAC: mac, Network: "default"}
+	if err := m.waitForIP(context.Background(), tg, nil); err != nil {
+		t.Fatalf("waitForIP: %v", err)
+	}
+	if tg.IP != "192.168.122.51" {
+		t.Errorf("vm2 IP = %q, want 192.168.122.51 (its own lease, not vm1's .50)", tg.IP)
+	}
+}
+
 func TestRenderInventory_RequiresIP(t *testing.T) {
 	tgt := &Target{Name: "x"}
 	if _, err := tgt.RenderInventory(); err == nil || !strings.Contains(err.Error(), "no IP yet") {
@@ -379,5 +454,105 @@ func TestRenderDomainXML_HasKeyBits(t *testing.T) {
 	}
 	if strings.Contains(xml, "device='cdrom'") {
 		t.Error("seed must not be attached as a cdrom (ds-identify misses it on q35)")
+	}
+}
+
+func TestUp_TwoVMsGetDistinctIPsAndReuse(t *testing.T) {
+	virshBody := `  *) python3 "$(dirname "$0")/helper.py" "$@" ;;`
+	m, base := newTestManager(t, virshBody)
+
+	dir := filepath.Dir(base)
+	xmlFile := filepath.Join(dir, "network.xml")
+	initialXML := `<network>
+  <name>default</name>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+</network>`
+	if err := os.WriteFile(xmlFile, []byte(initialXML), 0o644); err != nil {
+		t.Fatalf("write xml: %v", err)
+	}
+
+	helperCode := `import sys
+import hashlib
+import re
+import os
+
+cmd = sys.argv[1]
+dir_path = os.path.dirname(os.path.abspath(__file__))
+xml_file = os.path.join(dir_path, "network.xml")
+
+if cmd == "dominfo":
+    sys.exit(1)
+elif cmd == "net-dumpxml":
+    with open(xml_file, "r") as f:
+        print(f.read())
+    sys.exit(0)
+elif cmd == "net-update":
+    action = sys.argv[3]
+    xml_snippet = sys.argv[7]
+    with open(xml_file, "r") as f:
+        content = f.read()
+    if action == "add":
+        content = content.replace("</dhcp>", xml_snippet + "</dhcp>")
+    elif action == "delete":
+        content = content.replace(xml_snippet, "")
+    with open(xml_file, "w") as f:
+        f.write(content)
+    sys.exit(0)
+elif cmd == "domifaddr":
+    name = sys.argv[2]
+    h = hashlib.sha256(name.encode("utf-8")).digest()
+    mac = "52:54:00:{:02x}:{:02x}:{:02x}".format(h[0], h[1], h[2])
+    with open(xml_file, "r") as f:
+        xml = f.read()
+    m = re.search(rf"mac=['\"]{mac}['\"]\s+ip=['\"]([\d.]+)['\"]", xml)
+    if not m:
+        m = re.search(rf"ip=['\"]([\d.]+)['\"]\s+mac=['\"]{mac}['\"]", xml)
+    if m:
+        print(f"vnet0  {mac}  ipv4  {m.group(1)}/24")
+    sys.exit(0)
+elif cmd == "domstate":
+    print("running")
+    sys.exit(0)
+else:
+    sys.exit(0)
+`
+	if err := os.WriteFile(filepath.Join(dir, "helper.py"), []byte(helperCode), 0o755); err != nil {
+		t.Fatalf("write helper.py: %v", err)
+	}
+
+	// 1. Bring up vm1
+	tgt1, err := m.Up(context.Background(), Options{Name: "vm1", BaseImage: base})
+	if err != nil {
+		t.Fatalf("Up vm1: %v", err)
+	}
+	if tgt1.IP != "192.168.122.2" {
+		t.Errorf("vm1 IP = %q, want 192.168.122.2", tgt1.IP)
+	}
+
+	// 2. Bring up vm2
+	tgt2, err := m.Up(context.Background(), Options{Name: "vm2", BaseImage: base})
+	if err != nil {
+		t.Fatalf("Up vm2: %v", err)
+	}
+	if tgt2.IP != "192.168.122.3" {
+		t.Errorf("vm2 IP = %q, want 192.168.122.3 (must be distinct from vm1)", tgt2.IP)
+	}
+
+	// 3. Bring down vm1 (should release its reservation)
+	if err := m.Down(context.Background(), "vm1"); err != nil {
+		t.Fatalf("Down vm1: %v", err)
+	}
+
+	// 4. Bring up vm1 again (should reuse or re-allocate, since it was released, it gets 192.168.122.2 again)
+	tgt1Re, err := m.Up(context.Background(), Options{Name: "vm1", BaseImage: base})
+	if err != nil {
+		t.Fatalf("Up vm1 again: %v", err)
+	}
+	if tgt1Re.IP != "192.168.122.2" {
+		t.Errorf("vm1 re-up IP = %q, want 192.168.122.2 (reused since it was released)", tgt1Re.IP)
 	}
 }

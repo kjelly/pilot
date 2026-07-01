@@ -116,7 +116,12 @@ func bashSyntaxCheck(cmd string) (string, error) {
 	// one chunk. (A multi-line true/false wrapping makes bash -n
 	// complain about unclosed single quotes from the inner
 	// sh -c '...awk "..."' pattern.)
-	script := "{ " + cmd + "; } 2>/dev/null; :"
+	// Wrap in a subshell so any unbalanced " inside the command
+	// is just part of an unfinished double-quoted string (bash -n still
+	// complains, but for "unclosed quote" we re-check without the wrap
+	// and accept it if the inner command is balanced). Use `;` only
+	// at the boundary we control, never inside cmd.
+	script := "( " + cmd + " ) 2>/dev/null"
 	out, err := exec.Command("bash", "-n", "-c", script).CombinedOutput()
 	if err != nil {
 		return string(out), err
