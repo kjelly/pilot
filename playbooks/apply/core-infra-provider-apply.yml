@@ -112,19 +112,46 @@
         - not ansible_check_mode
       notify: restart unbound
 
-    - name: "DNS — flip systemd-resolved from stub to client of our DNS"
-      ansible.builtin.copy:
-        dest: /etc/systemd/resolved.conf
-        owner: root
-        group: root
-        mode: '0644'
-        content: |
-          [Resolve]
-          DNS={{ dns_listen_addr | default('127.0.0.1') }}
-          FallbackDNS=1.1.1.1 9.9.9.9
+    # Both systemd-resolved write AND restart are guarded by a
+    # creates marker. The marker file (/etc/pilot-infra-resolved.conf.applied)
+    # is created on the first run; subsequent runs see it and skip BOTH
+    # the write AND the restart. This is critical because:
+    #
+    #   * On the first run, the resolved.conf write + restart puts
+    #     systemd-resolved into proxy mode (listening on 127.0.0.1:53,
+    #     which is a subset of 0.0.0.0:53). That bind HAPPENS BEFORE
+    #     unbound starts because of the task order, so unbound's
+    #     0.0.0.0:53 bind would fail with EADDRINUSE.
+    #
+    #   * We work around this by:
+    #     (a) starting unbound FIRST (in the existing "enable + start unbound"
+    #         task below), and
+    #     (b) writing/setting resolved only on the FIRST run. After the
+    #         first run, the resolved config is already correct, and
+    #         restarting it would race with unbound (who has 0.0.0.0:53).
+    #
+    # The marker is in /etc so it survives a reboot, and so it's
+    # captured by the qcow2 snapshot, so a "rollback --tag pre-apply"
+    # also rolls back the marker.
+    # Atomic: write resolved config AND touch the marker in one task.
+    # The creates= guard means: if the marker exists, skip everything
+    # (no write, no notify). The marker is in /etc so a qcow2
+    # snapshot/rollback captures it too.
+    - name: "DNS — write resolved config (first run only)"
+      ansible.builtin.shell: |
+        cat > /etc/systemd/resolved.conf <<EOF
+        [Resolve]
+        DNS={{ dns_listen_addr | default('127.0.0.1') }}
+        FallbackDNS=1.1.1.1 9.9.9.9
+        EOF
+        touch /etc/pilot-infra-resolved.conf.applied
+      args:
+        creates: /etc/pilot-infra-resolved.conf.applied
       when:
         - infra_role == 'dns'
         - not ansible_check_mode
+      changed_when: true
+      notify: restart systemd-resolved
 
     # /etc/resolv.conf is bind-mounted by docker on a docker-host
     # run, so both `cp` and `sed -i` fail (atomic rename blocked).
@@ -144,14 +171,6 @@
         - infra_role == 'dns'
         - not ansible_check_mode
       changed_when: true
-
-    - name: "DNS — restart systemd-resolved after config change"
-      ansible.builtin.systemd:
-        name: systemd-resolved
-        state: restarted
-      when:
-        - infra_role == 'dns'
-        - not ansible_check_mode
 
     - name: "DNS — enable + start unbound"
       ansible.builtin.systemd:
@@ -278,4 +297,8 @@
     - name: restart chrony
       ansible.builtin.systemd:
         name: chrony
+        state: restarted
+    - name: restart systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
         state: restarted
