@@ -70,7 +70,7 @@ func newTestManager(t *testing.T, virshBody string) (*Manager, string) {
 // happyVirsh is the virsh body for a target that comes up cleanly: no
 // pre-existing domain, gets an IP, reports running.
 const happyVirsh = `  dominfo)            exit 1 ;;
-  net-dhcp-leases)    echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.42/24     myvm" ; exit 0 ;;
+  net-dhcp-leases)    cf="/tmp/virsh-nl-count.$(echo "$0" | tr / _)" ; c=$(cat "$cf" 2>/dev/null || echo 0) ; echo $((c+1)) > "$cf" ; if [ "$c" -eq 0 ] ; then echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2000-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.99/24     stale" ; else echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.42/24     myvm" ; fi ; exit 0 ;;
   domstate)           echo "running" ; exit 0 ;;
   define)             exit 0 ;;
   start)              exit 0 ;;
@@ -177,7 +177,7 @@ func TestUp_RefusesHijack(t *testing.T) {
 func TestUp_CleansUpOnBootTimeout(t *testing.T) {
 	// domifaddr returns nothing → waitForIP times out.
 	body := strings.Replace(happyVirsh,
-		`net-dhcp-leases)    echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.42/24     myvm" ; exit 0 ;;`,
+		`net-dhcp-leases)    cf="/tmp/virsh-nl-count.$(echo "$0" | tr / _)" ; c=$(cat "$cf" 2>/dev/null || echo 0) ; echo $((c+1)) > "$cf" ; if [ "$c" -eq 0 ] ; then echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2000-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.99/24     stale" ; else echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.42/24     myvm" ; fi ; exit 0 ;;`,
 		`net-dhcp-leases)    exit 0 ;;`, 1)
 	m, base := newTestManager(t, body)
 	_, err := m.Up(context.Background(), Options{Name: "stuck", BaseImage: base})

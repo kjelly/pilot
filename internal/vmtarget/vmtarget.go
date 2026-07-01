@@ -386,6 +386,10 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if err = m.createOverlay(ctx, tg); err != nil {
 		return nil, err
 	}
+	// Capture pre-existing DHCP leases for our MAC so waitForIP
+	// can ignore them — they're from previous VM runs, not this one.
+	preExistingLeases := m.captureLeaseSet(ctx, tg.Network, tg.MAC)
+
 	if err = m.defineAndStart(ctx, tg); err != nil {
 		return nil, err
 	}
@@ -395,7 +399,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if opt.BootTimeout > 0 {
 		m.bootTimeout = opt.BootTimeout
 	}
-	if err = m.waitForIP(ctx, tg); err != nil {
+	if err = m.waitForIP(ctx, tg, preExistingLeases); err != nil {
 		return nil, err
 	}
 	if err = m.waitForSSH(ctx, tg); err != nil {
@@ -525,21 +529,29 @@ func (m *Manager) defineAndStart(ctx context.Context, t *Target) error {
 // latest-expiring lease matching our MAC, which is always the active one.
 // Bounded by bootTimeout.
 // Progress and the last diagnostic error are reported to stderr.
-func (m *Manager) waitForIP(ctx context.Context, t *Target) error {
+func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[string]time.Time) error {
 	deadline := m.now().Add(m.bootTimeout)
 	var lastDetail string
 	lastReport := m.now()
+
 	for {
 		// Query the network's DHCP lease table (not domifaddr) so
 		// we can pick the most recent lease for our MAC, ignoring
 		// stale leases left by previous Up/Down cycles.
 		res, err := m.virsh(ctx, "net-dhcp-leases", t.Network)
 		if err == nil && res.ExitCode == 0 {
-			if ip := latestLeaseIP(res.Stdout, t.MAC); ip != "" {
-				t.IP = ip
-				return nil
+			ip, expiry := latestLeaseInfo(res.Stdout, t.MAC)
+			if ip != "" {
+				// Accept the lease unless it matches a
+				// pre-existing one (same IP + expiry).
+				if preExp, ok := preExisting[ip]; !ok || preExp != expiry {
+					t.IP = ip
+					return nil
+				}
+				lastDetail = fmt.Sprintf("lease %s (exp %s) is pre-existing, waiting for new lease", ip, expiry.Format("15:04:05"))
+			} else {
+				lastDetail = fmt.Sprintf("no active lease for MAC %s yet", t.MAC)
 			}
-			lastDetail = fmt.Sprintf("no active lease for MAC %s yet", t.MAC)
 		}
 		// Capture the last meaningful diagnostic.
 		if err != nil {
@@ -873,17 +885,44 @@ func dedupeHosts(primary string, extra []string) []string {
 
 var ipv4CIDR = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/\d+`)
 
-// latestLeaseIP parses the table output of `virsh net-dhcp-leases` and
-// returns the IP address (without /prefix) of the latest-expiring lease
-// matching mac. Falls back to the latest-expiring lease overall if no
-// matching MAC is found. This avoids picking a stale lease when the
-// same deterministic MAC has accumulated old leases from previous cycles.
-//
-// The table columns are whitespace-separated:
-//   Expiry Time  MAC address  Protocol  IP address  Hostname  Client ID
-// The expiry column contains both date and time separated by a space;
-// we join fields[0]+" "+fields[1] to reconstruct the full timestamp.
-func latestLeaseIP(out, mac string) string {
+// captureLeaseSet queries net-dhcp-leases and returns a set of
+// (IP → expiry) for the given MAC. Used by Up to snapshot the
+// pre-existing state before starting the VM, so waitForIP can
+// ignore stale leases from previous runs.
+func (m *Manager) captureLeaseSet(ctx context.Context, network, mac string) map[string]time.Time {
+	set := make(map[string]time.Time)
+	res, err := m.virsh(ctx, "net-dhcp-leases", network)
+	if err != nil || res.ExitCode != 0 {
+		return set
+	}
+	lines := strings.Split(res.Stdout, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, mac) {
+			continue
+		}
+		ip := ipv4CIDR.FindString(line)
+		if ip == "" {
+			continue
+		}
+		if idx := strings.Index(ip, "/"); idx >= 0 {
+			ip = ip[:idx]
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			ts := fields[0] + " " + fields[1]
+			if t, err := time.Parse("2006-01-02 15:04:05", ts); err == nil {
+				set[ip] = t
+			}
+		}
+	}
+	return set
+}
+
+// latestLeaseInfo parses the table output of `virsh net-dhcp-leases` and
+// returns the IP address (without /prefix) and expiry time of the
+// latest-expiring lease matching mac.
+func latestLeaseInfo(out, mac string) (string, time.Time) {
 	// Two-pass: first try exact MAC match, then fall back to any lease.
 	for _, filter := range []bool{true, false} {
 		var bestIP string
@@ -920,10 +959,21 @@ func latestLeaseIP(out, mac string) string {
 			}
 		}
 		if bestIP != "" {
-			return bestIP
+			return bestIP, bestExpiry
 		}
 	}
-	return ""
+	return "", time.Time{}
+}
+
+// latestLeaseIP parses the table output of `virsh net-dhcp-leases` and
+// returns the IP address (without /prefix) of the latest-expiring lease
+// matching mac. Falls back to the latest-expiring lease overall if no
+// matching MAC is found.
+//
+// This is a convenience wrapper around latestLeaseInfo.
+func latestLeaseIP(out, mac string) string {
+	ip, _ := latestLeaseInfo(out, mac)
+	return ip
 }
 
 // validName mirrors dockertarget.validName so names are portable across
