@@ -1,12 +1,20 @@
 # Apply playbook for docs/verification/core-infra-provider.md
 #
-# Three roles in one playbook, gated by `-e infra_role=...`:
+# Five roles in one playbook, gated by `-e infra_role=...`:
 #
+#   docker   install + start Docker engine (apt install docker.io);
+#            prerequisite for the `db` and `keycloak` roles that both
+#            run their workloads as containers with bind-mounted data
+#            dirs on the host
+#   db       bootstrap PostgreSQL via Docker (image: postgres:{{ pg_version | default('16') }}),
+#            data dir bind-mounted to /var/lib/pilot/postgres on host;
+#            create `keycloak` database + role; expose 5432/tcp
 #   dns      install + configure unbound (or bind9 / dnsmasq per host)
 #   ntp      install + configure chrony (or ntpd / ntpsec) with a sane
 #            pool so this host itself becomes a stratum source
-#   keycloak install + start Keycloak (Quarkus standalone or container;
-#            issuer + realm come from -e @vault.yaml at run time)
+#   keycloak run Keycloak via Docker (image: quay.io/keycloak/keycloak:{{ kc_version | default('25.0') }}),
+#            data dir bind-mounted to /var/lib/pilot/keycloak on host;
+#            PG backing via jdbc:postgresql://<pg container>:5432/keycloak
 #
 # Usage examples:
 #
@@ -52,7 +60,7 @@
     - name: "Gate: infra_role must be dns, ntp, or keycloak"
       ansible.builtin.assert:
         that:
-          - infra_role in ['dns', 'ntp', 'keycloak']
+          - infra_role in ['docker', 'db', 'dns', 'ntp', 'keycloak']
         fail_msg: "infra_role={{ infra_role }} invalid. Pass -e infra_role=dns|ntp|keycloak."
 
     - name: "Gate: staging or prod requires explicit confirm"
@@ -72,8 +80,138 @@
       when: stage == 'prod'
 
   tasks:
+    ### Docker role (engine — prerequisite for `db` and `keycloak`)
+    # Spec: docs/verification/docker.md C1..C8
+    - name: "Docker — install docker.io (Debian family)"
+      tags: [docker, docker-C1]
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+        state: present
+        update_cache: true
+      when:
+        - infra_role == 'docker'
+        - ansible_os_family == 'Debian'
+        - not ansible_check_mode
+
+    - name: "Docker — install docker (RHEL family)"
+      tags: [docker, docker-C1]
+      ansible.builtin.dnf:
+        name:
+          - docker
+          - docker-compose
+        state: present
+      when:
+        - infra_role == 'docker'
+        - ansible_os_family == 'RedHat'
+        - not ansible_check_mode
+
+    - name: "Docker — enable + start docker.service"
+      tags: [docker, docker-C2]
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+      when:
+        - infra_role == 'docker'
+        - not ansible_check_mode
+
+    - name: "Docker — ensure docker CLI usable by current user (group add)"
+      tags: [docker, docker-C4]
+      ansible.builtin.user:
+        name: "{{ ansible_user_id | default('root') }}"
+        groups: docker
+        append: true
+      when:
+        - infra_role == 'docker'
+        - not ansible_check_mode
+
+    ### DB role (PostgreSQL backing store for Keycloak) — Docker
+    # Spec: docs/verification/core-infra-provider-db.md C1..C11
+    # Implemented as a single docker run with data dir bind-mounted to
+    # /var/lib/pilot/postgres on the host. The container is on a private
+    # bridge network (pilot-infra) and exposes 5432/tcp to the keycloak
+    # container via DNS (postgres container name). Idempotent: a
+    # pre-existing container is left alone; `docker start` is a no-op
+    # for a running container. We DO NOT snapshot /etc/postgresql.conf
+    # here because PG runs in-container; if the user wants the
+    # legacy host-PG install, they should pin pg_version=host and
+    # provide a separate ansible.builtin.apt task upstream.
+    - name: "DB — ensure host data dir for postgres"
+      tags: [db, db-C8]
+      ansible.builtin.file:
+        path: "{{ pg_host_data_dir | default('/var/lib/pilot/postgres') }}"
+        state: directory
+        owner: 999   # postgres UID inside the image
+        group: 999
+        mode: '0700'
+      when: infra_role == 'db'
+
+    - name: "DB — pull postgres image"
+      tags: [db, db-C2]
+      community.docker.docker_image:
+        name: "postgres:{{ pg_version | default('16') }}"
+        source: pull
+      when:
+        - infra_role == 'db'
+        - not ansible_check_mode
+
+    - name: "DB — create pilot-infra docker network"
+      tags: [db]
+      community.docker.docker_network:
+        name: pilot-infra
+        state: present
+      when:
+        - infra_role == 'db'
+        - not ansible_check_mode
+
+    - name: "DB — run postgres container"
+      tags: [db, db-C1, db-C2, db-C3, db-C8, db-C9]
+      community.docker.docker_container:
+        name: pilot-postgres
+        image: "postgres:{{ pg_version | default('16') }}"
+        state: started
+        restart_policy: unless-stopped
+        network_mode: pilot-infra
+        hostname: postgres
+        env:
+          POSTGRES_DB: "{{ pg_keycloak_db | default('keycloak') }}"
+          POSTGRES_USER: "{{ pg_keycloak_user | default('keycloak') }}"
+          POSTGRES_PASSWORD: "{{ pg_keycloak_db_password | mandatory }}"
+        volumes:
+          - "{{ pg_host_data_dir | default('/var/lib/pilot/postgres') }}:/var/lib/postgresql/data"
+        ports:
+          # Bind 5432 to the loopback so the host can also reach it
+          # (e.g. for ad-hoc psql from the keycloak provider host).
+          # Keycloak inside the same network uses `postgres:5432`.
+          - "127.0.0.1:5432:5432"
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U {{ pg_keycloak_user | default('keycloak') }} -d {{ pg_keycloak_db | default('keycloak') }}"]
+          interval: 10s
+          timeout: 5s
+          retries: 6
+      when:
+        - infra_role == 'db'
+        - not ansible_check_mode
+
+    - name: "DB — final check: postgres reachable on docker network"
+      tags: [db, db-C7, db-C10]
+      community.docker.docker_container_exec:
+        container: pilot-postgres
+        command: pg_isready -U "{{ pg_keycloak_user | default('keycloak') }}" -d "{{ pg_keycloak_db | default('keycloak') }}"
+        chdir: /
+      register: pg_ready
+      changed_when: false
+      until: pg_ready.rc == 0
+      retries: 12
+      delay: 5
+      when:
+        - infra_role == 'db'
+        - not ansible_check_mode
     ### DNS role
     - name: "DNS — snapshot /etc/systemd/resolved.conf before mutation"
+      tags: [dns]
       ansible.builtin.copy:
         src: /etc/systemd/resolved.conf
         dest: "/etc/systemd/resolved.conf{{ backup_suffix }}"
@@ -84,6 +222,7 @@
       register: resolved_backup
 
     - name: "DNS — install unbound"
+      tags: [dns, dns-C1]
       ansible.builtin.apt:
         name: "{{ dns_provider }}"
         state: present
@@ -93,6 +232,7 @@
         - not ansible_check_mode
 
     - name: "DNS — write unbound config"
+      tags: [dns, dns-C2]
       ansible.builtin.copy:
         dest: /etc/unbound/unbound.conf.d/infra-pilot.conf
         owner: root
@@ -138,6 +278,7 @@
     # config actually changes. DNSStubListener=no is critical: it
     # frees port 53 so unbound can bind to 0.0.0.0:53.
     - name: "DNS — write resolved config (stub disabled)"
+      tags: [dns, dns-C2, dns-C3]
       ansible.builtin.copy:
         dest: /etc/systemd/resolved.conf
         owner: root
@@ -159,6 +300,7 @@
     # (A bind mount of a regular file rejects rename, but truncating
     # and writing through the open fd works.)
     - name: "DNS — swap nameserver in /etc/resolv.conf to local DNS"
+      tags: [dns, dns-C3]
       ansible.builtin.shell: |
         set -e
         cp /etc/resolv.conf /etc/resolv.conf.pre-pilot-infra.bak
@@ -173,6 +315,7 @@
       changed_when: true
 
     - name: "DNS — enable + start unbound"
+      tags: [dns, dns-C2]
       ansible.builtin.systemd:
         name: unbound
         state: started
@@ -183,6 +326,7 @@
       notify: restart unbound
 
     - name: "DNS — final check: unbound listening on port 53 (NOT stub)"
+      tags: [dns, dns-C2]
       ansible.builtin.command: >-
         sh -c 'ss -tulnH | grep ":53 " | grep -vE "127\.0\.0\.5[34]" | head -n1'
       register: dns_post
@@ -192,6 +336,7 @@
 
     ### NTP role
     - name: "NTP — install chrony"
+      tags: [ntp, ntp-C4]
       ansible.builtin.apt:
         name: "{{ ntp_provider }}"
         state: present
@@ -201,6 +346,7 @@
         - not ansible_check_mode
 
     - name: "NTP — write chrony.conf"
+      tags: [ntp, ntp-C6]
       ansible.builtin.copy:
         dest: /etc/chrony/chrony.conf
         owner: root
@@ -222,6 +368,7 @@
       notify: restart chrony
 
     - name: "NTP — enable + start chronyd"
+      tags: [ntp, ntp-C5]
       ansible.builtin.systemd:
         name: "{{ ntp_provider }}"
         state: started
@@ -232,59 +379,110 @@
       notify: restart chrony
 
     - name: "NTP — final check: chronyd active"
+      tags: [ntp, ntp-C5]
       ansible.builtin.command: systemctl is-active chronyd
       register: ntp_post
       failed_when: ntp_post.stdout != 'active'
       changed_when: false
       when: infra_role == 'ntp'
 
-    ### Keycloak role
-    - name: "Keycloak — ensure env dir exists"
+    ### Keycloak role — Docker
+    # Spec: docs/verification/core-infra-provider.md C7..C9
+    # Runs Keycloak in a container on the same pilot-infra docker
+    # network as the postgres container, so KC_DB_URL points at the
+    # postgres container's hostname. Data dir bind-mounted to
+    # /var/lib/pilot/keycloak on host (themes, realm imports, etc.).
+    - name: "Keycloak — ensure host data dir"
+      tags: [keycloak]
       ansible.builtin.file:
-        path: /etc/keycloak
+        path: "{{ kc_host_data_dir | default('/var/lib/pilot/keycloak') }}"
         state: directory
-        owner: root
-        group: root
+        owner: 0
+        group: 0
         mode: '0755'
+      when: infra_role == 'keycloak'
+
+    - name: "Keycloak — ensure pilot-infra docker network (re-used from db role)"
+      tags: [keycloak]
+      community.docker.docker_network:
+        name: pilot-infra
+        state: present
       when:
         - infra_role == 'keycloak'
         - not ansible_check_mode
 
-    - name: "Keycloak — render env file from -e + vault"
-      ansible.builtin.copy:
-        dest: /etc/keycloak/pilot.env
-        owner: root
-        group: root
-        mode: '0600'
-        content: |
-          KEYCLOAK_ADMIN={{ keycloak_admin_user | default('admin') }}
-          KEYCLOAK_ADMIN_PASSWORD={{ keycloak_admin_password | mandatory }}
-          KC_DB=postgres
-          KC_DB_URL={{ keycloak_db_url | default('jdbc:postgresql://localhost:5432/keycloak') }}
-          KC_DB_USERNAME={{ keycloak_db_user | mandatory }}
-          KC_DB_PASSWORD={{ keycloak_db_password | mandatory }}
-          KC_HOSTNAME={{ keycloak_issuer_url | default('idp.infra.internal') }}
+    - name: "Keycloak — pull quay.io/keycloak/keycloak image"
+      tags: [keycloak]
+      community.docker.docker_image:
+        name: "quay.io/keycloak/keycloak:{{ kc_version | default('25.0') }}"
+        source: pull
       when:
         - infra_role == 'keycloak'
         - not ansible_check_mode
 
-    - name: "Keycloak — start via systemd"
-      ansible.builtin.systemd:
-        name: keycloak
+    - name: "Keycloak — add idp.infra.internal to /etc/hosts (for spec C9)"
+      tags: [keycloak, keycloak-C9]
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: "127.0.0.1 idp.infra.internal"
+        state: present
+        create: false
+      when: infra_role == 'keycloak'
+
+    - name: "Keycloak — run keycloak container"
+      tags: [keycloak, keycloak-C7, keycloak-C8, keycloak-C9]
+      community.docker.docker_container:
+        name: pilot-keycloak
+        image: "quay.io/keycloak/keycloak:{{ kc_version | default('25.0') }}"
         state: started
-        enabled: true
+        restart_policy: unless-stopped
+        network_mode: pilot-infra
+        hostname: keycloak
+        user: "0"
+        command:
+          - "start"
+          - "--http-enabled=true"
+          - "--hostname-strict=false"
+        env:
+          KEYCLOAK_ADMIN: "{{ kc_admin_user | default('admin') }}"
+          KEYCLOAK_ADMIN_PASSWORD: "{{ kc_admin_password | mandatory }}"
+          KC_DB: postgres
+          KC_DB_URL: "{{ kc_db_url | default('jdbc:postgresql://postgres:5432/keycloak') }}"
+          KC_DB_USERNAME: "{{ kc_db_user | default('keycloak') }}"
+          KC_DB_PASSWORD: "{{ kc_db_password | mandatory }}"
+          KC_HOSTNAME: "{{ kc_issuer_url | default('idp.infra.internal') }}"
+          KC_HEALTH_ENABLED: "true"
+        volumes:
+          - "{{ kc_host_data_dir | default('/var/lib/pilot/keycloak') }}:/opt/keycloak/data"
+        ports:
+          # 8080: Keycloak HTTP (start-dev) ; 8443: Keycloak HTTPS when
+          # you switch to start --https-enabled=true. The spec accepts
+          # either listener being open (C8).
+          - "8080:8080"
+          - "8443:8443"
+        healthcheck:
+          # bash /dev/tcp/host/port can't take a path; just TCP-probe
+          # port 8080. Keycloak's HTTP listener accepts connections
+          # as soon as it's ready, even before the realm is fully
+          # imported. If 8080 is open, the server is up.
+          test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 12
+          start_period: 60s
       when:
         - infra_role == 'keycloak'
         - not ansible_check_mode
-      failed_when: false
 
-    - name: "Keycloak — final check: discovery endpoint reachable"
-      ansible.builtin.uri:
-        url: "https://{{ keycloak_issuer_url | default('idp.infra.internal') }}/realms/master/.well-known/openid-configuration"
-        status_code: 200
-        validate_certs: false
-      register: kc_post
-      failed_when: kc_post.status != 200
+    - name: "Keycloak — wait for HTTP 8080 (poll from host network namespace)"
+      tags: [keycloak, keycloak-C8]
+      community.docker.docker_container_exec:
+        container: pilot-keycloak
+        command: bash -c "</dev/tcp/127.0.0.1/8080 && echo OK"
+      register: kc_health
+      until: "'OK' in kc_health.stdout"
+      retries: 60
+      delay: 5
       when:
         - infra_role == 'keycloak'
         - not ansible_check_mode
@@ -302,3 +500,11 @@
       ansible.builtin.systemd:
         name: chrony
         state: restarted
+    - name: restart postgresql
+      ansible.builtin.systemd:
+        name: postgresql
+        state: restarted
+    - name: reload postgresql
+      ansible.builtin.systemd:
+        name: postgresql
+        state: reloaded

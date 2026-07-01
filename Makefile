@@ -84,7 +84,28 @@ test-prereq: ## Check go / docker / ansible / ollama / image availability
 test-cleanup: ## Remove all pilot-sandbox / pilot-dexec containers
 	./scripts/test-sandbox.sh --cleanup-only
 
-.PHONY: help build test vet run-demo chat clean install install-callback-user install-callback-system uninstall-callback test-callback test-sandbox test-prereq test-no-llm test-cleanup pb-check-spec pb-init pb-iter pb-verify pb-idempotent pb-baseline pb-report pb-lint pb-clean
+playbook-lint: ## L1 syntax (blocking) + L2 lint (advisory) over ALL playbooks — no VM needed
+	@fail=0; \
+	for pb in playbooks/apply/*.yml playbooks/verify/*.yml; do \
+	  [ -e "$$pb" ] || continue; \
+	  printf '── syntax-check %s\n' "$$pb"; \
+	  ansible-playbook --syntax-check "$$pb" || fail=1; \
+	done; \
+	if [ $$fail -ne 0 ]; then echo "✗ syntax check failed (blocking)"; exit 1; fi; \
+	echo "✓ syntax clean"; \
+	if command -v ansible-lint >/dev/null 2>&1; then \
+	  echo "── ansible-lint playbooks/ (advisory — does not block)"; \
+	  ansible-lint playbooks/ || echo "⚠ ansible-lint reported findings (advisory; run 'ansible-lint playbooks/' to review)"; \
+	else \
+	  echo "ansible-lint not installed — skipping L2 (pip install ansible-lint)"; \
+	fi
+
+install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each commit)
+	git config core.hooksPath .githooks
+	@echo "✓ git hooksPath set to .githooks — playbook-lint now runs on commit"
+	@echo "  bypass a single commit with: git commit --no-verify"
+
+.PHONY: help build test vet run-demo chat clean install install-callback-user install-callback-system uninstall-callback test-callback test-sandbox test-prereq test-no-llm test-cleanup playbook-lint install-hooks pb-check-spec pb-init pb-iter pb-verify pb-idempotent pb-baseline pb-report pb-lint pb-clean
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）

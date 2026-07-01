@@ -353,6 +353,69 @@ diff <(grep '^|.*fail' .verification/old.md) \
 
 VM 比 docker 好的地方：systemd / sysctl / network 行為與真機一致。
 
+### 8.1 用 `pilot vm-target` 的快速迭代迴圈（推薦）
+
+開發期最貴的動作是「重來一次」。`vm-target down` + `up` 要重跑 cloud-init 開機、
+等 DHCP、等 SSH，動輒分鐘級。**不要用 down/up 當重置手段。**
+
+`vm-target up` 成功後會自動打一個 `clean` snapshot（含 RAM 的 running checkpoint）。
+迭代時用 `vm-target reset` 秒級還原到「剛開機好」的乾淨狀態，不必再等開機：
+
+```bash
+# 一次性：開機（結尾自動 snapshot "clean"）
+pilot vm-target up --name core --hosts core,dns,ntp
+
+# 迭代迴圈（每輪都秒級）：
+pilot vm-target reset --name core                        # 還原到乾淨基線
+pilot vm-target run   --name core \
+    playbooks/apply/<name>-apply.yml -e target_group=... # 套用
+# 看結果 → 改 playbook → reset → run …
+```
+
+**只調一個 check 時，用 `--tags` 只跑那一條** —— `pilot spec --generate` 產出的 verify
+playbook 每個 task 都帶對齊 spec ID 的 tag，apply playbook 也已手動補上：
+
+```bash
+pilot vm-target run --name core playbooks/verify/<name>.yml --tags C3
+```
+
+tag 命名慣例（apply playbook 手動補時遵循）：
+
+- **單一 spec 的 playbook**（如 `pam-oidc-sshd-apply.yml`）：直接用裸 `tags: [C3]`。
+- **多 spec / 多 role 的 playbook**（如 `core-infra-provider-apply.yml`，一個檔涵蓋
+  docker / db / dns / ntp / keycloak 各自的 spec）：裸 `Cx` 會跨 spec 撞號
+  （docker 的 C1 ≠ db 的 C1），所以用 **role 粗標籤 + `<role>-Cx` 命名空間細標籤**：
+  ```bash
+  pilot vm-target run --name core playbooks/apply/core-infra-provider-apply.yml \
+      -e infra_role=dns --tags dns-C2          # 只重跑 DNS 的 C2 那條
+  ansible-playbook --list-tags playbooks/apply/core-infra-provider-apply.yml  # 列出所有 tag
+  ```
+  （`--tags` 只縮小 role 內範圍；`-e infra_role=` 的 `when:` gate 仍要帶。`--tags` 適合
+  在「已 apply 過的 box」上重調單一 task，不適合 reset 後從零套用——prerequisite task
+  會被 tag 濾掉。）
+
+不滿意到無法用 reset 收拾（例如改壞了 base 層）才 `down` + `up` 重建。
+
+### 8.2 每次 apply/verify 都在付的 SSH 稅（已預設優化）
+
+repo 根的 `ansible.cfg` 已開啟：
+
+- **`pipelining = true`** — 每個 task 省一次 sftp round-trip，多 task 的 hardening
+  playbook 差很多（VM inventory 也內建 `ansible_ssh_pipelining`，換 cwd 也有效）。
+- **fact caching（jsonfile）+ `gathering = smart`** — `vm-target test` 的
+  verify + idempotency 連跑不再每次重抓 facts。
+
+apply playbook 若不吃 facts，直接 `gather_facts: false` 再更快。
+
+### 8.3 碰 VM 前先本地擋掉語法錯（L1/L2 不需要 VM）
+
+syntax-check 與 ansible-lint 秒回、不需要開 VM。碰 VM 前先跑，別浪費一次 round-trip：
+
+```bash
+make playbook-lint     # L1 syntax（硬擋）+ L2 ansible-lint（建議性顯示），掃全部 playbook
+make install-hooks     # 裝 git pre-commit hook：commit 前自動跑 playbook-lint
+```
+
 ---
 
 ## 9. 常見地雷

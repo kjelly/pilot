@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# pilot pre-commit hook — fast local gate for Ansible playbooks.
+#
+# Runs L1 syntax-check + L2 ansible-lint (no VM required) whenever a
+# playbook is staged, so YAML/lint errors are caught in seconds before
+# they ever cost a VM round-trip. Enable with `make install-hooks`.
+# Bypass a single commit with `git commit --no-verify`.
+set -euo pipefail
+
+if git diff --cached --name-only --diff-filter=ACM | grep -qE '^playbooks/.*\.ya?ml$'; then
+  echo "▶ pre-commit: linting staged playbooks (L1 syntax + L2 lint)…"
+  make --no-print-directory playbook-lint
+fi

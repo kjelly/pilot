@@ -126,6 +126,7 @@ func (p *Playbook) RenderYAML() string {
 				sb.WriteString("      become: true\n")
 			}
 			sb.WriteString("      changed_when: false\n")
+			writeTags(&sb, t.SourceIDs)
 			continue
 		}
 		fmt.Fprintf(&sb, "    - name: %q\n", t.Name)
@@ -139,8 +140,20 @@ func (p *Playbook) RenderYAML() string {
 		if t.Become {
 			sb.WriteString("      become: true\n")
 		}
+		writeTags(&sb, t.SourceIDs)
 	}
 	return sb.String()
+}
+
+// writeTags emits `tags: [C1, C2]` so `ansible-playbook --tags C3` runs
+// just the task(s) for one spec row during iteration — no need to re-run
+// the whole playbook while tuning a single check. Tags mirror the spec
+// IDs the task satisfies, keeping the spec↔playbook trace grep-able.
+func writeTags(sb *strings.Builder, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	fmt.Fprintf(sb, "      tags: [%s]\n", strings.Join(ids, ", "))
 }
 
 func classifyRow(r Row, includeRaw bool) (mod string, params string, raw string) {

@@ -1,0 +1,11 @@
+---
+- name: Verification Spec — core-infra-provider-db (PostgreSQL backing store for Keycloak — Docker)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — `pilot-postgres` container 存在且 running"
+      ansible.builtin.command: "/usr/bin/docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'pilot-postgres' | head -n1"
+      become: true
+      changed_when: false

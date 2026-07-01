@@ -1,0 +1,17 @@
+---
+- name: Verification Spec — docker (container engine)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — docker server 已安裝（`docker.io` 套件；dev box 沒\xe8…"
+      ansible.builtin.command: "dpkg-query -W -f='${Package}\\n' docker.io 2>/dev/null | awk \"/^docker\\\\.io$/ {f=1} END{print f+0}\""
+      become: true
+      changed_when: false
+    - name: "C2 — docker 服務 active（systemd unit 為 `docker.service`）"
+      ansible.builtin.systemd:
+        name: "docker 2>&1 | head -n1"
+        state: started
+        enabled: true
+      become: true

@@ -59,6 +59,7 @@ func init() {
 	vmTargetCmd.AddCommand(vtExecCmd)
 	vmTargetCmd.AddCommand(vtSnapshotCmd)
 	vmTargetCmd.AddCommand(vtRollbackCmd)
+	vmTargetCmd.AddCommand(vtResetCmd)
 	vmTargetCmd.AddCommand(vtSSHCmd)
 	vmTargetCmd.AddCommand(vtShellCmd)
 	vmTargetCmd.AddCommand(vtTestCmd)
@@ -601,6 +602,45 @@ func runVtRollback(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "✓ rolled back %s to %s\n", vtName, vtRollTag)
+	return nil
+}
+
+// ---- reset ----------------------------------------------------------------
+
+var vtResetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Revert the VM to the pristine post-boot state (fast dev/test loop reset)",
+	Long: `Revert the VM to the automatic "clean" checkpoint captured at 'up' time.
+
+This is the fast path for iterating on a playbook: instead of
+'vm-target down' + 'vm-target up' (a full reprovision plus boot wait),
+reset restores the freshly-booted state in seconds — then re-apply.
+
+Loop:
+  pilot vm-target reset --name core
+  pilot vm-target run   --name core playbooks/apply/foo-apply.yml -e ...
+  # inspect, tweak the playbook, then reset + run again
+`,
+	RunE: runVtReset,
+}
+
+func init() {
+	vtResetCmd.Flags().StringVar(&vtName, "name", "", "target name (required)")
+	_ = vtResetCmd.MarkFlagRequired("name")
+}
+
+func runVtReset(cmd *cobra.Command, args []string) error {
+	if vtName == "" {
+		return fmt.Errorf("--name is required")
+	}
+	m, err := vtNewManager()
+	if err != nil {
+		return err
+	}
+	if err := m.Reset(context.Background(), vtName); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ reset %s to %q (pristine post-boot state)\n", vtName, vmtarget.CleanSnapshotTag)
 	return nil
 }
 

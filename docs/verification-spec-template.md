@@ -33,6 +33,16 @@
 | 套用範圍 | |
 | 風險等級 | Low / Medium / High |
 
+
+## 1.5 依賴變數契約
+
+在套用或驗證此主機時，Playbook 與變數參數必須嚴格遵守以下命名，禁止擅自縮寫（如 password 改為 passwd）或發明新變數：
+
+| 變數名稱 | 說明/用途 | 是否必填 |
+|---------|----------|---------|
+| `keycloak_db_password` | Keycloak 資料庫的密碼 | 是 |
+| `keycloak_db_user` | Keycloak 資料庫連線使用者 | 是 |
+
 ## 2. Checklist
 
 | ID  | Category | Check                          | Expected        | Command |

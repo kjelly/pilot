@@ -1,0 +1,29 @@
+# ==============================================================================
+# Keycloak SSH PAM Configuration — managed by ansible
+# ==============================================================================
+# Generated from: playbooks/templates/keycloak-ssh-config.yaml.j2
+# DO NOT EDIT BY HAND — changes will be overwritten on next apply
+# ==============================================================================
+
+keycloak:
+  server_url: "{{ _server_url }}"
+  realm: "{{ keycloak_realm }}"
+  client_id: "{{ keycloak_client_id }}"
+  client_secret: "{{ keycloak_client_secret | default('') }}"
+
+auth:
+  poll_interval_seconds: 5
+  poll_timeout_seconds: 300
+  scopes: "openid"
+
+session:
+  storage_dir: "/var/run/keycloak-ssh/sessions"
+
+monitor:
+  listen_address: "0.0.0.0:{{ kc_monitor_port | default('7291') }}"
+  tls_cert: ""
+  tls_key: ""
+
+logging:
+  level: "info"
+  syslog: true

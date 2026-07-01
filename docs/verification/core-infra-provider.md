@@ -35,7 +35,7 @@ export KEYCLOAK_ISSUER=https://idp.infra.internal/realms/master
 ```
 
 > Secret / token 不進版控：`$KEYCLOAK_ISSUER` 是 URL，安全；admin token
->   跟 password 由 vault file (`-e @keycloak-vault.yaml`) 在 apply playbook 階段帶入，
+>   跟 password 由 vault file (`-e @~/.vault/keycloak-sandbox.yaml`) 在 apply playbook 階段帶入，變數名：kc_admin_user/password、kc_db_user/password、pg_keycloak_db_password，
 >   不污染 spec。
 
 ## 3. 證據收集

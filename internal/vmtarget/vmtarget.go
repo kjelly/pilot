@@ -286,6 +286,12 @@ func SSHBaseArgs(t *Target) []string {
 // Up provisions a new VM target and blocks until it has a DHCP lease and
 // answers SSH. On any failure after the domain is defined, it tears the
 // half-built target down so we never leak a domain or disk.
+// CleanSnapshotTag is the libvirt snapshot tag captured automatically at
+// the end of a successful Up. `vm-target reset` reverts to it, giving the
+// dev/test loop a seconds-fast return to a pristine, freshly-booted VM
+// instead of a full down/up reprovision.
+const CleanSnapshotTag = "clean"
+
 func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if opt.Name == "" {
 		return nil, errors.New("vmtarget: name is required")
@@ -414,6 +420,23 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	s.Targets = append(s.Targets, *tg)
 	if err = m.save(s); err != nil {
 		return nil, err
+	}
+
+	// Capture a "clean" checkpoint of the freshly-booted VM so the
+	// dev/test loop can reset to a pristine state in seconds
+	// (`vm-target reset`) instead of paying a full down/up reprovision.
+	// A running-domain snapshot includes RAM, so a later revert returns
+	// an already-booted VM — no re-wait for DHCP/SSH. Best-effort: a
+	// failure here must NOT null out the named err (that would trigger
+	// the teardown defer and destroy an otherwise-healthy target).
+	if snapRes, snapErr := m.virsh(ctx, "snapshot-create-as", tg.Name, CleanSnapshotTag); snapErr != nil || (snapRes != nil && snapRes.ExitCode != 0) {
+		detail := ""
+		if snapErr != nil {
+			detail = snapErr.Error()
+		} else {
+			detail = snapRes.Stderr
+		}
+		fmt.Fprintf(os.Stderr, "  ⚠ %s: could not create %q snapshot (%s); `vm-target reset` unavailable until you snapshot manually\n", tg.Name, CleanSnapshotTag, strings.TrimSpace(detail))
 	}
 	return tg, nil
 }
@@ -847,6 +870,17 @@ func (m *Manager) Rollback(ctx context.Context, name, tag string) error {
 	return nil
 }
 
+// Reset reverts the target to the automatic "clean" checkpoint captured
+// at Up time. It is the fast path for the dev/test loop: instead of
+// `down` + `up` (a full reprovision + boot wait), reset restores the
+// pristine post-boot state in seconds.
+func (m *Manager) Reset(ctx context.Context, name string) error {
+	if err := m.Rollback(ctx, name, CleanSnapshotTag); err != nil {
+		return fmt.Errorf("vmtarget: reset to %q snapshot failed — if the VM predates auto-snapshot, capture one with `vm-target snapshot --name %s --tag %s`: %w", CleanSnapshotTag, name, CleanSnapshotTag, err)
+	}
+	return nil
+}
+
 // ---- RenderInventory ------------------------------------------------------
 
 // RenderInventory renders a YAML inventory targeting this VM via
@@ -881,6 +915,13 @@ func (t *Target) RenderInventory() (string, error) {
 		fmt.Fprintf(&sb, "      ansible_port: %d\n", t.SSHPort)
 		fmt.Fprintf(&sb, "      ansible_ssh_private_key_file: %s\n", t.KeyPath)
 		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=~/.ansible/cp/pilot-%%r@%%h:%%p -o ControlPersist=60s\n")
+		// Pipelining collapses each task to a single SSH round-trip
+		// (no per-task sftp of the module) — a large win on the many
+		// small tasks in a hardening playbook. Cloud images have no
+		// sudoers `requiretty`, so this is safe. Belt-and-suspenders
+		// with the repo ansible.cfg for when ansible is run from a
+		// different cwd (e.g. a staged temp inventory).
+		fmt.Fprintf(&sb, "      ansible_ssh_pipelining: true\n")
 	}
 	writeHost(t.Name)
 	// Aliases that are NOT the primary name become both a host entry
