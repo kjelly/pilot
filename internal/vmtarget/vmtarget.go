@@ -766,27 +766,16 @@ func (t *Target) RenderInventory() (string, error) {
 		}
 		writeHost(h)
 	}
-	// Child groups so `hosts: "{{ target_group }}"` finds a real group.
-	// Primary gets a self-group, every alias gets a single-host group
-	// whose sole member is the primary. de-dup is by group name so
-	// `Hosts == ["core", "dns", "dns"]` still emits one `dns:` group.
-	sb.WriteString("  children:\n")
-	seen := map[string]bool{}
-	writeGroup := func(name string) {
-		if seen[name] || name == "" {
-			return
-		}
-		seen[name] = true
-		fmt.Fprintf(&sb, "    %s:\n", name)
-		sb.WriteString("      hosts:\n")
-		fmt.Fprintf(&sb, "        %s:\n", t.Name)
-	}
-	// Primary self-group first, then aliases (so a `hosts: core`
-	// playbook still finds core under children).
-	writeGroup(t.Name)
-	for _, h := range t.Hosts {
-		writeGroup(h)
-	}
+	// We used to emit alias-name child groups here, but they trigger
+	// ansible's `[WARNING]: Found both group and host with same name`
+	// because the alias host entries above are also present. The
+	// child groups are not actually needed: an alias host entry in
+	// all.hosts.<alias> already lets `hosts: <alias>` and
+	// `ansible -i inv <alias>` both match. The apply playbook's
+	// `hosts: "{{ target_group | default(infra_role) }}"` then
+	// resolves to the alias name, and ansible matches the host
+	// directly — no group required.
+	return sb.String(), nil
 	return sb.String(), nil
 }
 

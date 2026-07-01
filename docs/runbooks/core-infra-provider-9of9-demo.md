@@ -78,8 +78,9 @@ pre-bake 的 ubuntu 24.04 cloud image（含 `python3` + `systemd-resolved`，
 ## 2. Inventory：直接 `show-inventory`，不用手寫
 
 ```bash
-# 自動生成（含 children groups，所以 `hosts: dns` / `hosts: ntp`
-# / `hosts: keycloak` 三種 role-gated apply 都能跑）：
+# 自動生成。每個 alias 都是獨立的 host entry，所以 `hosts: dns`
+# / `hosts: ntp` / `hosts: keycloak` 三種 role-gated apply 都能跑
+# （ansible 直接 match host，不必透過 group）：
 pilot vm-target show-inventory --name core > /tmp/inv-core.yaml
 ```
 
@@ -92,17 +93,16 @@ all:
     dns:     { ... 同一個 IP + 同一把 key ... }
     ntp:     { ... }
     keycloak:{ ... }
-  children:
-    core:     { hosts: { core: {} } }   # primary self-group
-    dns:      { hosts: { core: {} } }   # role group
-    ntp:      { hosts: { core: {} } }
-    keycloak: { hosts: { core: {} } }
+# 沒有 `children:` 區塊 — 早期版本有，但因為 alias name 同時
+# 出現在 `all.hosts` 跟 `all.children.<alias>` 兩個地方，會觸發
+# ansible 的 [WARNING] "Found both group and host with same name:
+# <alias>"。host entry 已經能 cover `hosts: dns` / `-l dns` 兩種用法，
+# 所以後來直接不 emit children 區塊了。
 ```
 
-> 早期版本 `show-inventory` 只印 `all.hosts`，所以使用者要自己
-> 補 `all.children`；commit `da74bde` 把 children 自動帶出，
-> 從此 `core-infra-provider-apply.yml` 三個 role 都能直接用
-> `show-inventory` 輸出當 inventory，不再需要手寫 inventory。
+> 早期版本（commit `da74bde`）會 emit children 區塊強制讓
+> `hosts: dns` 透過 group 命中，但 2026-07 後（commit 見下）改成
+> 全靠 host entry 直接命中，少 4 條 ansible warning。
 
 ---
 
