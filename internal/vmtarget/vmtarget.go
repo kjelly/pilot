@@ -721,8 +721,18 @@ func (m *Manager) Rollback(ctx context.Context, name, tag string) error {
 // ---- RenderInventory ------------------------------------------------------
 
 // RenderInventory renders a YAML inventory targeting this VM via
-// ansible_connection=ssh. The primary host key is the target Name; any
-// Hosts aliases route to the same IP (mirrors dockertarget).
+// ansible_connection=ssh. The primary host key is the target Name;
+// every alias in t.Hosts (passed as `--hosts dns,ntp,keycloak` at
+// `up` time) appears twice:
+//   - as a top-level host in `all.hosts`, so `-l <alias>` works
+//   - as a single-host child group in `all.children`, so
+//     `hosts: "{{ target_group }}"` apply playbooks can pick
+//     a role-specific group without the user hand-writing an
+//     inventory file.
+//
+// This is what lets `pilot vm-target run` + a role-gated apply
+// playbook (`-e infra_role=dns -e target_group=dns`) work end-to-end
+// with no human-built inventory.
 func (t *Target) RenderInventory() (string, error) {
 	if t == nil {
 		return "", errors.New("vmtarget: nil target")
@@ -744,11 +754,35 @@ func (t *Target) RenderInventory() (string, error) {
 		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\n")
 	}
 	writeHost(t.Name)
+	// Aliases that are NOT the primary name become both a host entry
+	// AND a child group. The primary is also a self-group (children:
+	// primary) so playbooks that pin to the primary by name also work.
 	for _, h := range t.Hosts {
 		if h == t.Name {
 			continue
 		}
 		writeHost(h)
+	}
+	// Child groups so `hosts: "{{ target_group }}"` finds a real group.
+	// Primary gets a self-group, every alias gets a single-host group
+	// whose sole member is the primary. de-dup is by group name so
+	// `Hosts == ["core", "dns", "dns"]` still emits one `dns:` group.
+	sb.WriteString("  children:\n")
+	seen := map[string]bool{}
+	writeGroup := func(name string) {
+		if seen[name] || name == "" {
+			return
+		}
+		seen[name] = true
+		fmt.Fprintf(&sb, "    %s:\n", name)
+		sb.WriteString("      hosts:\n")
+		fmt.Fprintf(&sb, "        %s:\n", t.Name)
+	}
+	// Primary self-group first, then aliases (so a `hosts: core`
+	// playbook still finds core under children).
+	writeGroup(t.Name)
+	for _, h := range t.Hosts {
+		writeGroup(h)
 	}
 	return sb.String(), nil
 }
