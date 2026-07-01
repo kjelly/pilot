@@ -104,9 +104,10 @@
               access-control: 10.0.0.0/8 allow
               access-control: 192.168.0.0/16 allow
               do-not-query-localhost: no
-              forward-zone:
-                  name: "."
-                      forward-addr: {{ dns_upstream | default('1.1.1.1#cloudflare-dns.com') }}
+
+          forward-zone:
+              name: "."
+              forward-addr: {{ dns_upstream | default('1.1.1.1') }}
       when:
         - infra_role == 'dns'
         - not ansible_check_mode
@@ -133,24 +134,23 @@
     # The marker is in /etc so it survives a reboot, and so it's
     # captured by the qcow2 snapshot, so a "rollback --tag pre-apply"
     # also rolls back the marker.
-    # Atomic: write resolved config AND touch the marker in one task.
-    # The creates= guard means: if the marker exists, skip everything
-    # (no write, no notify). The marker is in /etc so a qcow2
-    # snapshot/rollback captures it too.
-    - name: "DNS — write resolved config (first run only)"
-      ansible.builtin.shell: |
-        cat > /etc/systemd/resolved.conf <<EOF
-        [Resolve]
-        DNS={{ dns_listen_addr | default('127.0.0.1') }}
-        FallbackDNS=1.1.1.1 9.9.9.9
-        EOF
-        touch /etc/pilot-infra-resolved.conf.applied
-      args:
-        creates: /etc/pilot-infra-resolved.conf.applied
+    # Idempotent via content hash — only writes and notifies when the
+    # config actually changes. DNSStubListener=no is critical: it
+    # frees port 53 so unbound can bind to 0.0.0.0:53.
+    - name: "DNS — write resolved config (stub disabled)"
+      ansible.builtin.copy:
+        dest: /etc/systemd/resolved.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Resolve]
+          DNS={{ dns_listen_addr | default('127.0.0.1') }}
+          FallbackDNS=1.1.1.1 9.9.9.9
+          DNSStubListener=no
       when:
         - infra_role == 'dns'
         - not ansible_check_mode
-      changed_when: true
       notify: restart systemd-resolved
 
     # /etc/resolv.conf is bind-mounted by docker on a docker-host
@@ -290,6 +290,10 @@
         - not ansible_check_mode
 
   handlers:
+    - name: restart systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
     - name: restart unbound
       ansible.builtin.systemd:
         name: unbound
@@ -297,8 +301,4 @@
     - name: restart chrony
       ansible.builtin.systemd:
         name: chrony
-        state: restarted
-    - name: restart systemd-resolved
-      ansible.builtin.systemd:
-        name: systemd-resolved
         state: restarted
