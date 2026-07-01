@@ -246,7 +246,8 @@ var vtRunCmd = &cobra.Command{
 	Short: "Run an ansible playbook against the VM target",
 	Long: `Passes --inventory and --limit automatically based on the target name.
 Everything after the playbook is forwarded verbatim to ansible-playbook.`,
-	Args: cobra.MinimumNArgs(1),
+	Args:              cobra.MinimumNArgs(1),
+	DisableFlagParsing: true,
 	RunE: runVtRun,
 }
 
@@ -275,7 +276,8 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 var vtVerifyCmd = &cobra.Command{
 	Use:   "verify <spec.md> [<extra>...]",
 	Short: "Run `pilot verify` against the VM target",
-	Args:  cobra.MinimumNArgs(1),
+	Args:               cobra.MinimumNArgs(1),
+	DisableFlagParsing: true,
 	RunE:  runVtVerify,
 }
 
