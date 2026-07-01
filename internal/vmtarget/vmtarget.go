@@ -511,12 +511,15 @@ func (m *Manager) defineAndStart(ctx context.Context, t *Target) error {
 	}
 	return nil
 }
-
 // waitForIP polls libvirt for the VM's DHCP lease. We use the lease (not
 // a guess) as the authoritative address; this removes the classic
 // "what IP did it get" race. Bounded by bootTimeout.
+// Progress and the last diagnostic error are reported to stderr so the
+// user sees what is happening rather than staring at a silent timeout.
 func (m *Manager) waitForIP(ctx context.Context, t *Target) error {
 	deadline := m.now().Add(m.bootTimeout)
+	var lastDetail string
+	lastReport := m.now()
 	for {
 		res, err := m.virsh(ctx, "domifaddr", t.Name, "--source", "lease")
 		if err == nil && res.ExitCode == 0 {
@@ -524,9 +527,35 @@ func (m *Manager) waitForIP(ctx context.Context, t *Target) error {
 				t.IP = ip
 				return nil
 			}
+			lastDetail = "virsh returned ok but no lease found yet"
+		}
+		// Capture the last meaningful diagnostic so the timeout
+		// message can tell the user *why* we never got an IP.
+		if err != nil {
+			lastDetail = err.Error()
+		} else if res.ExitCode != 0 {
+			detail := strings.TrimSpace(res.Stderr)
+			if detail == "" {
+				detail = fmt.Sprintf("exit code %d (no stderr)", res.ExitCode)
+			}
+			lastDetail = detail
 		}
 		if m.now().After(deadline) {
-			return fmt.Errorf("vmtarget: timed out waiting for %q to acquire an IP (waited %s)", t.Name, m.bootTimeout)
+			tail := ""
+			if lastDetail != "" {
+				tail = fmt.Sprintf("; last: %s", lastDetail)
+			}
+			return fmt.Errorf("vmtarget: timed out waiting for %q to acquire an IP (waited %s)%s", t.Name, m.bootTimeout, tail)
+		}
+		// Periodic progress so the user isn't staring at nothing.
+		if m.now().Sub(lastReport) >= 10*time.Second {
+			elapsed := m.now().Sub(deadline.Add(-m.bootTimeout)).Round(time.Second)
+			suffix := ""
+			if lastDetail != "" {
+				suffix = fmt.Sprintf("  (%s)", lastDetail)
+			}
+			fmt.Fprintf(os.Stderr, "  … %s waiting for IP (elapsed %s)%s\n", t.Name, elapsed, suffix)
+			lastReport = m.now()
 		}
 		if err := sleep(ctx, m.pollInterval); err != nil {
 			return err
@@ -536,15 +565,42 @@ func (m *Manager) waitForIP(ctx context.Context, t *Target) error {
 
 // waitForSSH blocks until the VM answers SSH with the injected key, i.e.
 // cloud-init has applied the key and sshd is up. Bounded by sshTimeout.
+// Progress and the last diagnostic are reported to stderr.
 func (m *Manager) waitForSSH(ctx context.Context, t *Target) error {
 	deadline := m.now().Add(m.sshTimeout)
+	var lastDetail string
+	lastReport := m.now()
 	for {
 		res, err := m.ssh(ctx, t, []string{"true"})
 		if err == nil && res.ExitCode == 0 {
 			return nil
 		}
+		// Capture the last meaningful diagnostic.
+		if err != nil {
+			lastDetail = err.Error()
+		} else if res.ExitCode != 0 {
+			detail := strings.TrimSpace(res.Stderr)
+			if detail == "" {
+				detail = fmt.Sprintf("exit code %d (no stderr)", res.ExitCode)
+			}
+			lastDetail = detail
+		}
 		if m.now().After(deadline) {
-			return fmt.Errorf("vmtarget: timed out waiting for %q to answer SSH at %s (waited %s)", t.Name, t.IP, m.sshTimeout)
+			tail := ""
+			if lastDetail != "" {
+				tail = fmt.Sprintf("; last: %s", lastDetail)
+			}
+			return fmt.Errorf("vmtarget: timed out waiting for %q to answer SSH at %s (waited %s)%s", t.Name, t.IP, m.sshTimeout, tail)
+		}
+		// Periodic progress.
+		if m.now().Sub(lastReport) >= 10*time.Second {
+			elapsed := m.now().Sub(deadline.Add(-m.sshTimeout)).Round(time.Second)
+			suffix := ""
+			if lastDetail != "" {
+				suffix = fmt.Sprintf("  (%s)", lastDetail)
+			}
+			fmt.Fprintf(os.Stderr, "  … %s waiting for SSH at %s (elapsed %s)%s\n", t.Name, t.IP, elapsed, suffix)
+			lastReport = m.now()
 		}
 		if err := sleep(ctx, m.pollInterval); err != nil {
 			return err
