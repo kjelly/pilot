@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,6 +90,27 @@ type VerifyRow struct {
 	ExitCode int    `json:"exit_code,omitempty"`
 }
 
+// stageVerifyEnv writes /etc/pilot-verify.env on every host reachable
+// from the inventory when KEYCLOAK_ISSUER is set in our env. The spec
+// rows that need to reference the issuer can `source /etc/pilot-verify.env`
+// (ansible ad-hoc does NOT propagate env vars across SSH to the target,
+// so we drop a file). Best-effort: spec rows fall back to the in-spec
+// default if this fails.
+func stageVerifyEnv(invPath string) {
+	val := os.Getenv("KEYCLOAK_ISSUER")
+	if val == "" || invPath == "" {
+		return
+	}
+	content := "KEYCLOAK_ISSUER=" + val + "\n"
+	args := []string{
+		"all", "-i", invPath, "-m", "copy",
+		"-a", fmt.Sprintf("dest=/etc/pilot-verify.env content=%s mode=0644", strconv.Quote(content)),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "ansible", args...).Run()
+}
+
 // Execute runs every row in the spec and returns the joined NDJSON
 // stream as the tool Result. It does NOT touch proposal_results —
 // callers that need that should call RecordVerifyResults separately
@@ -118,6 +140,7 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 	if host == "" {
 		host = t.Host
 	}
+	stageVerifyEnv(t.Inventory)
 	rows := make([]VerifyRow, 0, len(parsed.Rows))
 	for _, r := range parsed.Rows {
 		vr := t.runRow(ctx, r, host, timeoutSec)
