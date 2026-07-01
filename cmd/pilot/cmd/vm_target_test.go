@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/anomalyco/pilot/internal/vmtarget"
 )
 
 // TestVMTargetCmdRegistered guards the rootCmd.AddCommand wiring.
@@ -22,7 +24,7 @@ func TestVMTargetCmdRegistered(t *testing.T) {
 
 // TestVMTargetSubCommandsAllRegistered walks the promised subcommands.
 func TestVMTargetSubCommandsAllRegistered(t *testing.T) {
-	want := []string{"up", "down", "list", "show-inventory", "run", "verify", "exec", "snapshot", "rollback"}
+	want := []string{"up", "down", "list", "show-inventory", "run", "verify", "exec", "snapshot", "rollback", "ssh", "shell"}
 	var have []string
 	for _, c := range vmTargetCmd.Commands() {
 		have = append(have, c.Name())
@@ -119,4 +121,83 @@ func TestRunVtRun_SkipsAutoLimitWhenTargetGroupPresent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildVtSSHArgv_PTYAndConnectionFlags is the regression guard
+// for the `pilot vm-target ssh` / `shell` argv builder. We must:
+//   1) start with the same flags vmtarget.Exec would build (single
+//      source of truth for host-key / key / port),
+//   2) add -tt to force PTY allocation (so resize and sudo prompts
+//      work, and so the user gets an actual terminal instead of
+//      captured pipes),
+//   3) add `--` so a remote argv starting with `-` is not parsed
+//      as a flag by the remote sshd.
+func TestBuildVtSSHArgv_PTYAndConnectionFlags(t *testing.T) {
+	tgt := &vmtarget.Target{
+		Name:    "core",
+		IP:      "192.168.123.232",
+		SSHUser: "ubuntu",
+		SSHPort: 22,
+		KeyPath: "/var/lib/libvirt/images/pilot/core/id_ed25519",
+	}
+	argv := buildVtSSHArgv(tgt, []string{"bash", "-l"})
+
+	// 1) Connection flags (same as vmtarget.Exec's shim)
+	mustContain(t, argv, "-i", "/var/lib/libvirt/images/pilot/core/id_ed25519")
+	mustContain(t, argv, "-p", "22")
+	mustContain(t, argv, "ubuntu@192.168.123.232")
+
+	// 2) PTY
+	mustContain(t, argv, "-tt")
+
+	// 3) Separator + remote command
+	mustContain(t, argv, "--", "bash", "-l")
+
+	// Order check: PTY comes before `--` so the remote command
+	// doesn't accidentally include the PTY flag.
+	idxTT, idxSep := -1, -1
+	for i, a := range argv {
+		if a == "-tt" && idxTT < 0 {
+			idxTT = i
+		}
+		if a == "--" && idxSep < 0 {
+			idxSep = i
+		}
+	}
+	if !(idxTT >= 0 && idxSep >= 0 && idxTT < idxSep) {
+		t.Fatalf("-tt must come before --; got argv=%v", argv)
+	}
+}
+
+// TestBuildVtSSHArgv_NoRemoteArgv still emits the connection flags
+// (so a future default like ["$SHELL"] lands in the right place).
+func TestBuildVtSSHArgv_NoRemoteArgv(t *testing.T) {
+	tgt := &vmtarget.Target{
+		Name: "core", IP: "10.0.0.5", SSHUser: "u", SSHPort: 22, KeyPath: "/k",
+	}
+	argv := buildVtSSHArgv(tgt, nil)
+	mustContain(t, argv, "-tt", "--")
+	// Trailing `--` followed by no command: ssh on the other end
+	// will run the user's login shell, which is what we want.
+	last := argv[len(argv)-1]
+	if last != "--" {
+		t.Errorf("argv should end with --; got last=%q argv=%v", last, argv)
+	}
+}
+
+func mustContain(t *testing.T, argv []string, want ...string) {
+	t.Helper()
+	for i := 0; i+len(want) <= len(argv); i++ {
+		match := true
+		for j, w := range want {
+			if argv[i+j] != w {
+				match = false
+				break
+			}
+		}
+		if match {
+			return
+		}
+	}
+	t.Fatalf("argv missing %v; got %v", want, argv)
 }

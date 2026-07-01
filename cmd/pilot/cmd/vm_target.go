@@ -56,6 +56,8 @@ func init() {
 	vmTargetCmd.AddCommand(vtExecCmd)
 	vmTargetCmd.AddCommand(vtSnapshotCmd)
 	vmTargetCmd.AddCommand(vtRollbackCmd)
+	vmTargetCmd.AddCommand(vtSSHCmd)
+	vmTargetCmd.AddCommand(vtShellCmd)
 }
 
 // ---- shared flags ---------------------------------------------------------
@@ -371,6 +373,132 @@ func runVtExec(cmd *cobra.Command, args []string) error {
 	// Do NOT fail on non-zero exit (matches docker-target exec): many
 	// legitimate checks (grep -q, test -f) exit non-zero by design.
 	return nil
+}
+
+// ---- ssh / shell ---------------------------------------------------------
+
+// vtSSHCmd drops the user into an interactive SSH session on the VM
+// target. Default remote command is the user's login shell. Pass
+// extra argv after `--` to run a non-interactive command while still
+// getting a PTY (useful for sudo prompts, paginators, etc).
+//
+// Implementation note: we exec `ssh` directly with `os.Stdin/Stdout/
+// Stderr` wired in. We do NOT route through the vmtarget ssh shim
+// because that one captures output — fine for ansible, wrong for
+// interactive use. The `-tt` flag forces PTY allocation, which
+// also makes ssh forward SIGWINCH so terminal resize Just Works.
+var vtSSHCmd = &cobra.Command{
+	Use:   "ssh [-- <remote-argv>...]",
+	Short: "Open an interactive SSH session to the VM target (or run a remote command with a PTY)",
+	Long: `Open an interactive SSH session to the VM target.
+
+Examples:
+  pilot vm-target ssh --name core
+  pilot vm-target ssh --name core -- bash -l
+  pilot vm-target ssh --name core -- sudo systemctl restart unbound`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runVtSSH,
+}
+
+func init() { vtSSHCmd.Flags().StringVar(&vtName, "name", "", "target name") }
+
+// vtShellCmd is the friendlier alias users will reach for first.
+// Default remote argv is ["sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l"]
+// (probed at login time, so it works on minimal cloud images without bash).
+var vtShellCmd = &cobra.Command{
+	Use:   "shell [-- <remote-argv>...]",
+	Short: "Drop into an interactive shell on the VM target (alias for `ssh` with a default remote shell)",
+	Long: `Open an interactive shell on the VM target. Equivalent to
+
+  pilot vm-target ssh --name <n> [-- bash -l]
+
+Examples:
+  pilot vm-target shell --name core
+  pilot vm-target shell --name core -- bash -c "uname -a; ip a"
+  pilot vm-target shell --name core -- sudo systemctl status unbound
+
+Note: the remote argv must NOT begin with a dash, because ssh(1) eats
+leading-dash arguments as ssh flags (it inserts a space to prevent the
+remote shell from parsing them, but on a hard -- boundary the space
+is also dropped). Always start the remote argv with a program name
+(bash, sudo, journalctl, ...) — ssh's -c flag is the only
+exception we use internally and we never pass it through verbatim.`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runVtShell,
+}
+
+func init() { vtShellCmd.Flags().StringVar(&vtName, "name", "", "target name") }
+
+// buildVtSSHArgv composes the full argv for `ssh` against a target,
+// matching what vmtarget.SSHBaseArgs would produce for `Exec` plus
+// `-tt` for PTY. Centralised so the unit test can lock it in
+// without touching os/exec.
+func buildVtSSHArgv(t *vmtarget.Target, remote []string) []string {
+	args := vmtarget.SSHBaseArgs(t)
+	args = append(args, "-tt", "--")
+	args = append(args, remote...)
+	return args
+}
+
+func runVtSSH(cmd *cobra.Command, args []string) error {
+	if vtName == "" {
+		return fmt.Errorf("--name is required")
+	}
+	m, err := vtNewManager()
+	if err != nil {
+		return err
+	}
+	t, err := m.Get(context.Background(), vtName)
+	if err != nil {
+		return err
+	}
+	if t.Status != vmtarget.StatusRunning {
+		return fmt.Errorf("target %q is not running (status=%s); bring it up first", vtName, t.Status)
+	}
+	if len(args) == 0 {
+		args = []string{"$SHELL"}
+	}
+	argv := buildVtSSHArgv(t, args)
+	fmt.Fprintf(cmd.ErrOrStderr(), "▶ ssh %s@%s %s\n", t.SSHUser, t.IP, strings.Join(args, " "))
+	return runInteractiveSSH(argv)
+}
+
+func runVtShell(cmd *cobra.Command, args []string) error {
+	if vtName == "" {
+		return fmt.Errorf("--name is required")
+	}
+	m, err := vtNewManager()
+	if err != nil {
+		return err
+	}
+	t, err := m.Get(context.Background(), vtName)
+	if err != nil {
+		return err
+	}
+	if t.Status != vmtarget.StatusRunning {
+		return fmt.Errorf("target %q is not running (status=%s); bring it up first", vtName, t.Status)
+	}
+	if len(args) == 0 {
+		args = []string{"sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l"}
+	}
+	argv := buildVtSSHArgv(t, args)
+	fmt.Fprintf(cmd.ErrOrStderr(), "▶ shell on %s@%s\n", t.SSHUser, t.IP)
+	return runInteractiveSSH(argv)
+}
+
+// runInteractiveSSH execs ssh as a child process with the user's
+// stdio piped in, returning ssh's exit code as our own. Honors
+// $PILOT_SSH_BIN for the same testability as vmtarget.ssh.
+func runInteractiveSSH(argv []string) error {
+	bin := os.Getenv("PILOT_SSH_BIN")
+	if bin == "" {
+		bin = "ssh"
+	}
+	c := newCmd(context.Background(), bin, argv...)
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
 }
 
 // ---- snapshot -------------------------------------------------------------

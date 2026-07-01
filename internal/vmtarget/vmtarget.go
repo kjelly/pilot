@@ -254,17 +254,20 @@ func (m *Manager) sshKeygen(ctx context.Context, args ...string) (*cmdResult, er
 }
 
 func (m *Manager) ssh(ctx context.Context, t *Target, argv []string) (*cmdResult, error) {
-	args := sshBaseArgs(t)
+	args := SSHBaseArgs(t)
 	args = append(args, argv...)
 	return run(ctx, "PILOT_SSH_BIN", "ssh", 60*time.Second, args...)
 }
 
-// sshBaseArgs are the connection flags shared by Exec and readiness
-// probing. Host-key checking is disabled because the VM is disposable
-// and its host key changes on every recreate — the security tradeoff is
-// intentional for throwaway test targets (mirrors the docker-target
-// stance of not caring about target hardening).
-func sshBaseArgs(t *Target) []string {
+// SSHBaseArgs are the connection flags shared by Exec and readiness
+// probing, exported so the CLI's `vm-target ssh` / `shell`
+// subcommands can build the same argv (with `-tt` for PTY on top)
+// without re-listing every flag here. Host-key checking is disabled
+// because the VM is disposable and its host key changes on every
+// recreate — the security tradeoff is intentional for throwaway test
+// targets (mirrors the docker-target stance of not caring about
+// target hardening).
+func SSHBaseArgs(t *Target) []string {
 	return []string{
 		"-i", t.KeyPath,
 		"-o", "StrictHostKeyChecking=no",
