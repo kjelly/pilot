@@ -341,36 +341,11 @@ func TestMacFor_DeterministicAndQemuOUI(t *testing.T) {
 	}
 }
 
-func TestLatestLeaseIP(t *testing.T) {
-	// Realistic net-dhcp-leases output with one active + two stale
-	// leases for the same MAC. latestLeaseIP must return the
-	// latest-expiring one, not the first text match.
-	out := "" +
-		" Expiry Time           MAC address         Protocol   IP address           Hostname\n" +
-		"-------------------------------------------------------------------------------------------\n" +
-		" 2026-06-01 00:00:00   52:54:00:aa:bb:cc   ipv4       10.0.0.1/24          -\n" +
-		" 2026-07-01 00:00:00   52:54:00:aa:bb:cc   ipv4       10.0.0.2/24          myvm\n" +
-		" 2026-06-15 00:00:00   52:54:00:aa:bb:cc   ipv4       10.0.0.3/24          -\n" +
-		" 2026-07-01 12:00:00   52:54:00:dd:ee:ff   ipv4       10.0.0.99/24         other\n"
-	got := latestLeaseIP(out, "52:54:00:aa:bb:cc")
-	if got != "10.0.0.2" {
-		t.Errorf("latestLeaseIP(...) = %q, want %q (should pick latest expiry)", got, "10.0.0.2")
-	}
-	// No matching MAC — falls back to latest lease overall.
-	if got := latestLeaseIP(out, "00:00:00:00:00:00"); got != "10.0.0.99" {
-		t.Errorf("latestLeaseIP(wrong mac) = %q, want %q (fallback to latest overall)", got, "10.0.0.99")
-	}
-	// Empty input
-	if got := latestLeaseIP("", "52:54:00:aa:bb:cc"); got != "" {
-		t.Errorf("latestLeaseIP(empty) = %q, want empty", got)
-	}
-}
-
 // TestMacLeaseInfo_NeverBorrowsForeignLease guards the fix for the
 // cross-VM IP bug: when our MAC has no lease yet, macLeaseInfo must
-// return "" and NOT fall back to some other VM's lease (unlike
-// latestLeaseInfo, whose any-lease fallback is only safe for the
-// diagnostic latestLeaseIP wrapper).
+// return "" and NOT fall back to some other VM's lease. (The old
+// latestLeaseInfo/latestLeaseIP any-lease fallback was removed as dead,
+// hazardous code — it was the original source of this bug.)
 func TestMacLeaseInfo_NeverBorrowsForeignLease(t *testing.T) {
 	out := "" +
 		" Expiry Time           MAC address         Protocol   IP address           Hostname\n" +
@@ -422,7 +397,7 @@ esac`, countFile, mac)
 	m.pollInterval = 5 * time.Millisecond
 
 	tg := &Target{Name: "vm2", MAC: mac, Network: "default"}
-	if err := m.waitForIP(context.Background(), tg, nil); err != nil {
+	if err := m.waitForIP(context.Background(), tg, nil, m.bootTimeout); err != nil {
 		t.Fatalf("waitForIP: %v", err)
 	}
 	if tg.IP != "192.168.122.51" {

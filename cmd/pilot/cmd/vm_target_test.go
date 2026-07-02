@@ -174,6 +174,80 @@ func TestBuildVtSSHArgv_NoRemoteArgv(t *testing.T) {
 	}
 }
 
+// TestContainerFixPermsScript_CreatesControlPathDir guards the sandbox fix:
+// the generated inventory pins ssh ControlPath under ~/.ansible/cp, so the
+// in-container prep MUST create that directory (and ~/.ssh) or ControlMaster
+// socket creation fails and every ansible task errors.
+func TestContainerFixPermsScript_CreatesControlPathDir(t *testing.T) {
+	s := containerFixPermsScript("/tmp/pilot-ssh/id_ed25519")
+	for _, want := range []string{
+		"cp /tmp/pilot-ssh/id_ed25519 /tmp/pilot-ssh-key",
+		"chmod 600 /tmp/pilot-ssh-key",
+		"~/.ansible/cp", // the ControlPath parent dir the inventory requires
+		"~/.ssh",
+		"touch ~/.ssh/known_hosts",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("fix-perms script missing %q\ngot: %s", want, s)
+		}
+	}
+}
+
+// TestIdempotencyChangedCount locks in the recap-scoped idempotency parser:
+// it must sum changed= across PLAY RECAP host lines only, ignoring any
+// "changed=N" that appears elsewhere in task/debug output, and report
+// ok=false when there is no recap at all.
+func TestIdempotencyChangedCount(t *testing.T) {
+	const recapClean = "\nPLAY RECAP *********\n" +
+		"core                       : ok=5    changed=0    unreachable=0    failed=0    skipped=1\n"
+	const recapChanged = "\nPLAY RECAP *********\n" +
+		"core                       : ok=5    changed=2    unreachable=0    failed=0    skipped=1\n"
+	const recapTwoHosts = "\nPLAY RECAP *********\n" +
+		"a                          : ok=1    changed=1    unreachable=0    failed=0\n" +
+		"b                          : ok=1    changed=3    unreachable=0    failed=0\n"
+
+	cases := []struct {
+		name   string
+		out    string
+		wantN  int
+		wantOK bool
+	}{
+		{"clean single host", recapClean, 0, true},
+		{"changed single host", recapChanged, 2, true},
+		{"summed across hosts", recapTwoHosts, 4, true},
+		{
+			"debug line before recap is ignored",
+			"TASK [debug] ok: msg 'changed=9 things happened'\n" + recapClean,
+			0, true,
+		},
+		{"no recap at all", "TASK failed with changed=1 in the text\nfatal: unreachable", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotN, gotOK := idempotencyChangedCount(tc.out)
+			if gotN != tc.wantN || gotOK != tc.wantOK {
+				t.Fatalf("idempotencyChangedCount() = (%d,%v), want (%d,%v)", gotN, gotOK, tc.wantN, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestVMTargetTestAndResetRegistered rounds out the subcommand wiring guard
+// for the newer `test`/`reset` subcommands.
+func TestVMTargetTestAndResetRegistered(t *testing.T) {
+	want := map[string]bool{"test": false, "reset": false}
+	for _, c := range vmTargetCmd.Commands() {
+		if _, ok := want[c.Name()]; ok {
+			want[c.Name()] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("subcommand %q not registered", name)
+		}
+	}
+}
+
 func mustContain(t *testing.T, argv []string, want ...string) {
 	t.Helper()
 	for i := 0; i+len(want) <= len(argv); i++ {

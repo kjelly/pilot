@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -138,13 +139,15 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "▶ provisioning VM %s (this can take a minute while it boots)…\n", vtName)
 	tgt, err := m.Up(context.Background(), vmtarget.Options{
-		Name:      vtName,
-		BaseImage: vtBaseImage,
-		SSHUser:   vtSSHUser,
-		VCPUs:     vtVCPUs,
-		MemoryMB:  vtMemoryMB,
-		Network:   vtNetwork,
-		Hosts:     vtHosts,
+		Name:        vtName,
+		BaseImage:   vtBaseImage,
+		SSHUser:     vtSSHUser,
+		VCPUs:       vtVCPUs,
+		MemoryMB:    vtMemoryMB,
+		Network:     vtNetwork,
+		Hosts:       vtHosts,
+		SSHTimeout:  vtSSHTimeout,
+		BootTimeout: vtBootTimeout,
 	})
 	if err != nil {
 		return err
@@ -349,6 +352,20 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 	return execAnsiblePlaybook(cmd.OutOrStdout(), ansibleArgs...)
 }
 
+// containerFixPermsScript builds the /bin/sh script run inside the sandbox
+// container before ansible: it copies the bind-mounted key to a path it can
+// chmod 600 (the mount may carry a foreign uid/perms), and pre-creates the
+// two directories the generated inventory relies on — ~/.ssh (for
+// known_hosts) and ~/.ansible/cp (the SSH ControlPath parent). Without the
+// latter, ssh's ControlMaster socket creation fails inside the container
+// because its parent dir does not exist, breaking every task.
+func containerFixPermsScript(cntKeyPath string) string {
+	return "cp " + cntKeyPath + " /tmp/pilot-ssh-key" +
+		" && chmod 600 /tmp/pilot-ssh-key" +
+		" && mkdir -p ~/.ssh ~/.ansible/cp" +
+		" && touch ~/.ssh/known_hosts"
+}
+
 // vtRunViaContainer runs ansible-playbook inside a Docker container
 // while targeting the VM over SSH. It:
 //  1. Resolves the sandbox image from the explicit flag or config.
@@ -420,10 +437,10 @@ func vtRunViaContainer(cmd *cobra.Command, t *vmtarget.Target, playbookPath, inv
 	}()
 
 	// 6. Fix SSH key permissions inside the container (bind mount
-	//    may have different uid). Also create ~/.ssh/known_hosts.
+	//    may have different uid). Also create ~/.ssh/known_hosts and the
+	//    ControlPath parent dir the generated inventory expects.
 	fixPerms := newCmd(ctx, "docker", "exec", containerID,
-		"/bin/sh", "-c",
-		"cp "+cntKeyPath+" /tmp/pilot-ssh-key && chmod 600 /tmp/pilot-ssh-key && mkdir -p ~/.ssh && touch ~/.ssh/known_hosts")
+		"/bin/sh", "-c", containerFixPermsScript(cntKeyPath))
 	if out, err := fixPerms.CombinedOutput(); err != nil {
 		return fmt.Errorf("fix SSH key permissions: %w\n%s", err, string(out))
 	}
@@ -932,14 +949,41 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 		return rollbackOnFailure(fmt.Errorf("idempotency run failed: %w", err))
 	}
 
-	reChanged := regexp.MustCompile(`changed=([1-9]\d*)`)
-	if reChanged.Match(idemBuf.Bytes()) {
-		matches := reChanged.FindSubmatch(idemBuf.Bytes())
-		changedCount := string(matches[1])
-		return rollbackOnFailure(fmt.Errorf("idempotency check failed: playbook reported %s changed task(s) on second run", changedCount))
+	changed, ok := idempotencyChangedCount(idemBuf.String())
+	if !ok {
+		return rollbackOnFailure(fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)"))
+	}
+	if changed > 0 {
+		return rollbackOnFailure(fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed))
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "✓ Idempotency check passed (changed=0)")
 	fmt.Fprintln(cmd.OutOrStdout(), "🎉 ALL TESTS PASSED SUCCESSFULLY!")
 
 	return nil
+}
+
+// recapChangedRe matches a single ansible PLAY RECAP host line and captures
+// its changed count, e.g. "host : ok=5 changed=0 unreachable=0 ...".
+var recapChangedRe = regexp.MustCompile(`:\s+ok=\d+\s+changed=(\d+)`)
+
+// idempotencyChangedCount reads ONLY ansible's PLAY RECAP block and returns
+// the total number of changed tasks across all hosts, plus whether a recap
+// was present at all. Scoping to the recap (rather than grepping the whole
+// output for "changed=N") avoids false idempotency failures from a debug or
+// task line that merely prints the substring "changed=1". Returns ok=false
+// when no PLAY RECAP is found, which the caller treats as an inconclusive
+// (and therefore failed) idempotency check.
+func idempotencyChangedCount(output string) (total int, ok bool) {
+	idx := strings.Index(output, "PLAY RECAP")
+	if idx < 0 {
+		return 0, false
+	}
+	for _, m := range recapChangedRe.FindAllStringSubmatch(output[idx:], -1) {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		total += n
+	}
+	return total, true
 }

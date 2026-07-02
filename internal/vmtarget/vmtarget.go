@@ -54,6 +54,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -121,6 +122,7 @@ type state struct {
 // (atomic state rewrite).
 type Manager struct {
 	mu        sync.Mutex
+	imgMu     sync.Mutex // serializes base-image prepare (download/customize)
 	stateDir  string
 	stateFile string
 	vmDir     string // where per-target qcow2/seed live (libvirt-accessible)
@@ -403,16 +405,23 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if err = m.defineAndStart(ctx, tg); err != nil {
 		return nil, err
 	}
-	if opt.SSHTimeout > 0 {
-		m.sshTimeout = opt.SSHTimeout
-	}
+	// Resolve the effective timeouts for THIS call as locals. They must
+	// not be written back onto the Manager: the timeout knobs are
+	// per-Up options, and mutating m.{ssh,boot}Timeout would leak one
+	// call's override onto every later operation that reuses the same
+	// Manager (e.g. the agent loop, or a second Up without options).
+	bootTimeout := m.bootTimeout
 	if opt.BootTimeout > 0 {
-		m.bootTimeout = opt.BootTimeout
+		bootTimeout = opt.BootTimeout
 	}
-	if err = m.waitForIP(ctx, tg, preExistingLeases); err != nil {
+	sshTimeout := m.sshTimeout
+	if opt.SSHTimeout > 0 {
+		sshTimeout = opt.SSHTimeout
+	}
+	if err = m.waitForIP(ctx, tg, preExistingLeases, bootTimeout); err != nil {
 		return nil, err
 	}
-	if err = m.waitForSSH(ctx, tg); err != nil {
+	if err = m.waitForSSH(ctx, tg, sshTimeout); err != nil {
 		return nil, err
 	}
 	tg.Status = StatusRunning
@@ -564,9 +573,10 @@ func (m *Manager) defineAndStart(ctx context.Context, t *Target) error {
 // - domifaddr always shows the current IP from the kernel ARP table
 // - net-dhcp-leases may show stale leases from previous VM runs
 //
-// Bounded by bootTimeout. Progress is reported to stderr.
-func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[string]time.Time) error {
-	deadline := m.now().Add(m.bootTimeout)
+// Bounded by bootTimeout (passed in so a per-Up override does not have to
+// mutate shared Manager state). Progress is reported to stderr.
+func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[string]time.Time, bootTimeout time.Duration) error {
+	deadline := m.now().Add(bootTimeout)
 	var lastDetail string
 	lastReport := m.now()
 
@@ -614,11 +624,11 @@ func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[stri
 			if lastDetail != "" {
 				tail = fmt.Sprintf("; last: %s", lastDetail)
 			}
-			return fmt.Errorf("vmtarget: timed out waiting for %q to acquire an IP (waited %s)%s", t.Name, m.bootTimeout, tail)
+			return fmt.Errorf("vmtarget: timed out waiting for %q to acquire an IP (waited %s)%s", t.Name, bootTimeout, tail)
 		}
 		// Periodic progress.
 		if m.now().Sub(lastReport) >= 10*time.Second {
-			elapsed := m.now().Sub(deadline.Add(-m.bootTimeout)).Round(time.Second)
+			elapsed := m.now().Sub(deadline.Add(-bootTimeout)).Round(time.Second)
 			suffix := ""
 			if lastDetail != "" {
 				suffix = fmt.Sprintf("  (%s)", lastDetail)
@@ -654,10 +664,11 @@ func (m *Manager) getIPFromDomifaddr(ctx context.Context, name string) (string, 
 }
 
 // waitForSSH blocks until the VM answers SSH with the injected key, i.e.
-// cloud-init has applied the key and sshd is up. Bounded by sshTimeout.
-// Progress and the last diagnostic are reported to stderr.
-func (m *Manager) waitForSSH(ctx context.Context, t *Target) error {
-	deadline := m.now().Add(m.sshTimeout)
+// cloud-init has applied the key and sshd is up. Bounded by sshTimeout
+// (passed in so a per-Up override does not have to mutate shared Manager
+// state). Progress and the last diagnostic are reported to stderr.
+func (m *Manager) waitForSSH(ctx context.Context, t *Target, sshTimeout time.Duration) error {
+	deadline := m.now().Add(sshTimeout)
 	var lastDetail string
 	lastReport := m.now()
 	for {
@@ -680,11 +691,11 @@ func (m *Manager) waitForSSH(ctx context.Context, t *Target) error {
 			if lastDetail != "" {
 				tail = fmt.Sprintf("; last: %s", lastDetail)
 			}
-			return fmt.Errorf("vmtarget: timed out waiting for %q to answer SSH at %s (waited %s)%s", t.Name, t.IP, m.sshTimeout, tail)
+			return fmt.Errorf("vmtarget: timed out waiting for %q to answer SSH at %s (waited %s)%s", t.Name, t.IP, sshTimeout, tail)
 		}
 		// Periodic progress.
 		if m.now().Sub(lastReport) >= 10*time.Second {
-			elapsed := m.now().Sub(deadline.Add(-m.sshTimeout)).Round(time.Second)
+			elapsed := m.now().Sub(deadline.Add(-sshTimeout)).Round(time.Second)
 			suffix := ""
 			if lastDetail != "" {
 				suffix = fmt.Sprintf("  (%s)", lastDetail)
@@ -1011,78 +1022,25 @@ func (m *Manager) captureLeaseSet(ctx context.Context, network, mac string) map[
 	return set
 }
 
-// latestLeaseInfo parses the table output of `virsh net-dhcp-leases` and
-// returns the IP address (without /prefix) and expiry time of the
-// latest-expiring lease matching mac.
-//
-// IMPORTANT: when mac is specified, we ALWAYS prefer the MAC-specific lease
-// over any other lease, regardless of expiry time. This prevents the bug where
-// two VMs with same expiry → fallback returns the wrong VM's IP (e.g.,
-// bastion gets core's IP because core's IP is alphabetically smaller).
-func latestLeaseInfo(out, mac string) (string, time.Time) {
-	var macSpecificIP string
-	var macSpecificExpiry time.Time
-	var anyIP string
-	var anyExpiry time.Time
-
-	lines := strings.Split(out, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		isOurMAC := mac != "" && strings.Contains(line, mac)
-		ip := ipv4CIDR.FindString(line)
-		if ip == "" {
-			continue
-		}
-		if idx := strings.Index(ip, "/"); idx >= 0 {
-			ip = ip[:idx]
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		ts := fields[0] + " " + fields[1]
-		expiry, err := time.Parse("2006-01-02 15:04:05", ts)
-		if err != nil {
-			continue
-		}
-		if isOurMAC {
-			if expiry.After(macSpecificExpiry) {
-				macSpecificExpiry = expiry
-				macSpecificIP = ip
-			}
-		}
-		// Track any lease (fallback)
-		if expiry.After(anyExpiry) {
-			anyExpiry = expiry
-			anyIP = ip
-		}
+// withNetworkLock serializes libvirt network mutations (static DHCP host
+// entries) ACROSS processes via an advisory file lock. allocateStaticIP and
+// removeStaticIP each do a read-modify-write on the network XML through
+// `virsh net-update`; the Manager mutex only covers one process, so without
+// this lock two concurrent `pilot vm-target up` invocations could scan the
+// same free IP and reserve it for two different VMs. The lock file lives
+// next to the state json and is created on demand.
+func (m *Manager) withNetworkLock(fn func() error) error {
+	lockPath := filepath.Join(m.stateDir, "network.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("vmtarget: open network lock %s: %w", lockPath, err)
 	}
-
-	// Prefer MAC-specific lease. Since we now use static DHCP reservations,
-	// there should be exactly one lease per MAC, and we want that exact IP.
-	if macSpecificIP != "" {
-		return macSpecificIP, macSpecificExpiry
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("vmtarget: acquire network lock: %w", err)
 	}
-	if anyIP != "" && mac != "" {
-		// Fallback: MAC-specific lease not found, use any lease.
-		// This handles the case where the DHCP table has stale leases.
-		return anyIP, anyExpiry
-	}
-	return "", time.Time{}
-}
-
-// latestLeaseIP parses the table output of `virsh net-dhcp-leases` and
-// returns the IP address (without /prefix) of the latest-expiring lease
-// matching mac. Falls back to the latest-expiring lease overall if no
-// matching MAC is found.
-//
-// This is a convenience wrapper around latestLeaseInfo.
-func latestLeaseIP(out, mac string) string {
-	ip, _ := latestLeaseInfo(out, mac)
-	return ip
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	return fn()
 }
 
 // macLeaseInfo returns the latest-expiring lease belonging to mac ONLY,
@@ -1170,7 +1128,22 @@ func sleep(ctx context.Context, d time.Duration) error {
 // host reboots the static entries survive.
 //
 // Returns the allocated IP string, or an error.
+//
+// The whole scan-then-reserve is done under a cross-process file lock: the
+// in-process mutex (m.mu) only serializes Up calls within one process, but
+// two separate `pilot vm-target up` processes would otherwise both
+// net-dumpxml, both pick the same first-free IP, and hand it to two VMs.
 func (m *Manager) allocateStaticIP(ctx context.Context, t *Target) (string, error) {
+	var ip string
+	err := m.withNetworkLock(func() error {
+		var e error
+		ip, e = m.allocateStaticIPLocked(ctx, t)
+		return e
+	})
+	return ip, err
+}
+
+func (m *Manager) allocateStaticIPLocked(ctx context.Context, t *Target) (string, error) {
 	network := t.Network
 	if network == "" {
 		network = "default"
@@ -1327,7 +1300,14 @@ func findFreeIP(rangeStart, rangeEnd string, used map[string]bool) (string, erro
 }
 
 // removeStaticIP deletes the static DHCP host reservation for the target.
+// Held under the same cross-process network lock as allocateStaticIP so a
+// concurrent teardown and bring-up cannot interleave their read-modify-write
+// of the network's <host> entries.
 func (m *Manager) removeStaticIP(ctx context.Context, t *Target) error {
+	return m.withNetworkLock(func() error { return m.removeStaticIPLocked(ctx, t) })
+}
+
+func (m *Manager) removeStaticIPLocked(ctx context.Context, t *Target) error {
 	network := t.Network
 	if network == "" {
 		network = "default"
