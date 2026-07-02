@@ -141,6 +141,13 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		host = t.Host
 	}
 	stageVerifyEnv(t.Inventory)
+	// Warm the SSH master ONCE before the per-row loop (ad-hoc mode only).
+	// Otherwise the first row pays the full cold TCP+SSH+auth handshake
+	// inside its own per-row timeout and intermittently trips the 15s
+	// deadline, reporting a spurious rc=-1 on an otherwise-healthy target.
+	if !t.LocalOnly && t.Inventory != "" {
+		t.warmConnection(ctx, host)
+	}
 	rows := make([]VerifyRow, 0, len(parsed.Rows))
 	for _, r := range parsed.Rows {
 		vr := t.runRow(ctx, r, host, timeoutSec)
@@ -196,18 +203,7 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 	if target == "" {
 		target = "all"
 	}
-	module := "command"
-	shellMetachars := func(s string) bool {
-		for _, c := range s {
-			if c == '|' || c == '>' || c == '<' || c == ';' || c == '$' || c == '`' {
-				return true
-			}
-		}
-		return strings.Contains(s, "&&") || strings.Contains(s, "||")
-	}
-	if shellMetachars(r.Command) {
-		module = "shell"
-	}
+	module := adHocModule(r.Command)
 	// Decide privilege the SAME way the apply path does: spec.NeedsBecome
 	// is the single source of truth. If the row touches root-owned state
 	// (a privileged path, systemctl, the docker socket, pg_isready, …),
@@ -244,6 +240,40 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 		status = "fail"
 	}
 	return VerifyRow{ID: r.ID, Status: status, Detail: mismatch, ExitCode: rc}
+}
+
+// adHocModule picks the ansible module for a spec command: `shell` when the
+// command uses shell features (pipes, redirects, sequencing, expansion),
+// otherwise `command`. Kept as a package function so both the row runner and
+// the --probe path decide identically.
+func adHocModule(command string) string {
+	for _, c := range command {
+		if c == '|' || c == '>' || c == '<' || c == ';' || c == '$' || c == '`' {
+			return "shell"
+		}
+	}
+	if strings.Contains(command, "&&") || strings.Contains(command, "||") {
+		return "shell"
+	}
+	return "command"
+}
+
+// warmConnection opens (and, via the inventory's ControlPersist, leaves open)
+// the SSH master connection once before the per-row loop. Best-effort: any
+// failure here is ignored — a real connectivity problem still surfaces on the
+// row itself. Uses a generous fixed budget so a cold connect completes
+// regardless of the (possibly tight) per-row timeout, and the `raw` module so
+// it needs no remote Python.
+func (t *VerifySpecTool) warmConnection(ctx context.Context, host string) {
+	target := host
+	if target == "" {
+		target = "all"
+	}
+	args := []string{target, "-i", t.Inventory, "-m", "raw", "-a", "true", "--one-line"}
+	if t.Limit != "" {
+		args = append(args, "-l", t.Limit)
+	}
+	_, _ = t.execAnsible(ctx, args, 60)
 }
 
 // execAnsible runs one `ansible` ad-hoc invocation and returns its exit
@@ -415,6 +445,83 @@ var (
 	rcOnlyPattern   = regexp.MustCompile(`^\(rc=\d+\)$`)
 	rcPrefixPattern = regexp.MustCompile(`^\(rc=\d+\)\s+`)
 )
+
+// ProbeResult is the outcome of VerifySpecTool.Probe: one candidate command
+// run through the exact verify pipeline, with every intermediate value the
+// matcher sees exposed so a spec author can pick the right Expected grammar
+// (rc vs ~contains vs ^regex) without guessing.
+type ProbeResult struct {
+	Command  string `json:"command"`
+	Expected string `json:"expected"`
+	Module   string `json:"module"` // command | shell | local
+	Become   bool   `json:"become"`
+	RC       int    `json:"rc"`
+	Raw      string `json:"raw"`   // trimmed combined output as the matcher receives it
+	Clean    string `json:"clean"` // Raw with the "(rc=N)" runner prefix stripped
+	Pass     bool   `json:"pass"`  // only meaningful when Expected != ""
+	Verdict  string `json:"verdict"`
+}
+
+// Probe runs a single command through the same module/become/ad-hoc (or local)
+// path as a real spec row and returns the raw + cleaned output plus the match
+// verdict for the given expected value. It writes no NDJSON, no report and no
+// store rows — it exists purely to make authoring Expected values a
+// see-what-verify-sees exercise. When expected is "", Pass/Verdict reflect the
+// default rc==0 rule.
+func (t *VerifySpecTool) Probe(ctx context.Context, command, expected, host string, timeoutSec int) ProbeResult {
+	if timeoutSec <= 0 {
+		timeoutSec = 15
+	}
+	r := spec.Row{ID: "probe", Command: command, Expected: expected}
+	var (
+		rc     int
+		rawOut string
+		module string
+		become bool
+	)
+	if t.LocalOnly || t.Inventory == "" {
+		module = "local"
+		cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+		out, err := exec.CommandContext(cctx, "sh", "-c", command).CombinedOutput()
+		cancel()
+		rawOut = strings.TrimSpace(string(out))
+		if ee, ok := err.(*exec.ExitError); ok {
+			rc = ee.ExitCode()
+		}
+	} else {
+		target := host
+		if target == "" {
+			target = t.Host
+		}
+		if target == "" {
+			target = "all"
+		}
+		module = adHocModule(command)
+		become = spec.NeedsBecome(r)
+		t.warmConnection(ctx, target)
+		args := []string{target, "-i", t.Inventory, "-m", module, "-a", command, "--one-line"}
+		if t.Limit != "" {
+			args = append(args, "-l", t.Limit)
+		}
+		if become {
+			args = append(args, "-b")
+		}
+		rc, rawOut = t.execAnsible(ctx, args, timeoutSec)
+	}
+	detail := fmt.Sprintf("(rc=%d) %s", rc, rawOut)
+	pass, verdict := matchExpected(expected, detail, rc)
+	return ProbeResult{
+		Command:  command,
+		Expected: expected,
+		Module:   module,
+		Become:   become,
+		RC:       rc,
+		Raw:      rawOut,
+		Clean:    stripRunnerPrefix(detail),
+		Pass:     pass,
+		Verdict:  verdict,
+	}
+}
 
 // ReadNDJSON is a helper for the CLI to parse the Result.Content
 // back into VerifyRow slices.

@@ -46,6 +46,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -202,6 +203,13 @@ type cmdResult struct {
 // override lets tests point each tool at a shim and lets power users
 // pick alternative binaries. timeout bounds a single call.
 func run(ctx context.Context, envKey, dflt string, timeout time.Duration, args ...string) (*cmdResult, error) {
+	return runIO(ctx, envKey, dflt, timeout, nil, args...)
+}
+
+// runIO is run with an optional stdin. When stdin is non-nil it is wired to
+// the child process (used by Exec to forward a piped stdin — e.g. a password
+// piped into `kinit` on the target). All other callers pass nil.
+func runIO(ctx context.Context, envKey, dflt string, timeout time.Duration, stdin io.Reader, args ...string) (*cmdResult, error) {
 	bin := os.Getenv(envKey)
 	if bin == "" {
 		bin = dflt
@@ -209,6 +217,9 @@ func run(ctx context.Context, envKey, dflt string, timeout time.Duration, args .
 	c, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(c, bin, args...)
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -225,8 +236,23 @@ func run(ctx context.Context, envKey, dflt string, timeout time.Duration, args .
 }
 
 func (m *Manager) virsh(ctx context.Context, args ...string) (*cmdResult, error) {
-	return run(ctx, "PILOT_VIRSH_BIN", "virsh", 60*time.Second, args...)
+	return m.virshWithTimeout(ctx, 60*time.Second, args...)
 }
+
+// virshWithTimeout is virsh with a caller-chosen deadline. Most virsh calls
+// are quick queries (60s is ample), but a running-VM snapshot/rollback also
+// dumps/restores the full guest RAM to disk, which for a multi-GB VM on slow
+// storage routinely exceeds 60s. Killing virsh mid-snapshot leaves the
+// snapshot half-done server-side while the CLI reports a bogus (empty-stderr,
+// non-zero) failure — so those operations pass a generous budget instead.
+func (m *Manager) virshWithTimeout(ctx context.Context, timeout time.Duration, args ...string) (*cmdResult, error) {
+	return run(ctx, "PILOT_VIRSH_BIN", "virsh", timeout, args...)
+}
+
+// snapshotOpTimeout bounds a running-VM snapshot/rollback (includes the guest
+// RAM dump/restore). Deliberately large: the failure mode it prevents (SIGKILL
+// mid-snapshot) is far worse than waiting.
+const snapshotOpTimeout = 5 * time.Minute
 
 func (m *Manager) qemuImg(ctx context.Context, args ...string) (*cmdResult, error) {
 	return run(ctx, "PILOT_QEMU_IMG_BIN", "qemu-img", 5*time.Minute, args...)
@@ -240,10 +266,53 @@ func (m *Manager) sshKeygen(ctx context.Context, args ...string) (*cmdResult, er
 	return run(ctx, "PILOT_SSH_KEYGEN_BIN", "ssh-keygen", 30*time.Second, args...)
 }
 
-func (m *Manager) ssh(ctx context.Context, t *Target, argv []string) (*cmdResult, error) {
+func (m *Manager) ssh(ctx context.Context, t *Target, argv []string, stdin io.Reader) (*cmdResult, error) {
 	args := SSHBaseArgs(t)
-	args = append(args, argv...)
-	return run(ctx, "PILOT_SSH_BIN", "ssh", 60*time.Second, args...)
+	// ssh flattens all command arguments into a SINGLE space-joined string
+	// that the remote LOGIN SHELL re-parses. Appending argv unquoted
+	// therefore corrupts any element containing spaces or shell metachars —
+	// e.g. `sh -c "echo a | tee f"` arrives at the remote as
+	// `sh -c echo a | tee f`, i.e. `sh -c echo` piped into `tee`. Shell-quote
+	// each element and join so the remote shell reconstructs the exact argv
+	// the caller passed (this is what makes `sh -c "<multi word>"` work).
+	args = append(args, shellJoinArgv(argv))
+	return runIO(ctx, "PILOT_SSH_BIN", "ssh", 60*time.Second, stdin, args...)
+}
+
+// shellJoinArgv renders argv into one POSIX-sh command string that a remote
+// shell will re-split into exactly argv. See ssh() for why this is required.
+func shellJoinArgv(argv []string) string {
+	parts := make([]string, len(argv))
+	for i, a := range argv {
+		parts[i] = shellQuoteArg(a)
+	}
+	return strings.Join(parts, " ")
+}
+
+// shellQuoteArg single-quotes s if it contains anything outside a
+// conservative "safe" set, so the remote shell treats it as one literal
+// argument. Safe args (plain flags/paths) pass through unquoted to keep
+// logs readable. Embedded single quotes are escaped the POSIX way ('\”).
+func shellQuoteArg(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '-', '_', '/', '.', ':', '=', '@', ',', '+':
+			continue
+		}
+		safe = false
+		break
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // SSHBaseArgs are the connection flags shared by Exec and readiness
@@ -737,7 +806,7 @@ func (m *Manager) waitForSSH(ctx context.Context, t *Target, sshTimeout time.Dur
 	var lastDetail string
 	lastReport := m.now()
 	for {
-		res, err := m.ssh(ctx, t, []string{"true"})
+		res, err := m.ssh(ctx, t, []string{"true"}, nil)
 		if err == nil && res.ExitCode == 0 {
 			return nil
 		}
@@ -884,10 +953,19 @@ func (m *Manager) refreshStatus(ctx context.Context, t Target) Status {
 
 // ---- Exec -----------------------------------------------------------------
 
-// Exec runs argv inside the VM over SSH. argv is passed positionally; no
-// host shell is involved (matches dockertarget's no-shell contract). For
-// shell features the caller invokes `sh -c "<cmd>"` themselves.
+// Exec runs argv inside the VM over SSH. No LOCAL host shell is involved
+// (matches dockertarget's no-shell contract), but argv is shell-quoted so the
+// REMOTE shell reconstructs it faithfully — so `sh -c "<multi word cmd>"`
+// works as written. For a piped stdin (e.g. a password into `kinit`), use
+// ExecStdin.
 func (m *Manager) Exec(ctx context.Context, name string, argv []string) (*cmdResult, error) {
+	return m.ExecStdin(ctx, name, argv, nil)
+}
+
+// ExecStdin is Exec with stdin forwarded to the remote command. stdin may be
+// nil (no input). Useful for feeding a secret to a target-side tool over a
+// pipe instead of exposing it in argv (ps-visible on the remote).
+func (m *Manager) ExecStdin(ctx context.Context, name string, argv []string, stdin io.Reader) (*cmdResult, error) {
 	if name == "" {
 		return nil, errors.New("vmtarget: name is required")
 	}
@@ -901,7 +979,7 @@ func (m *Manager) Exec(ctx context.Context, name string, argv []string) (*cmdRes
 	if t.IP == "" {
 		return nil, fmt.Errorf("vmtarget: target %q has no IP yet", name)
 	}
-	return m.ssh(ctx, t, argv)
+	return m.ssh(ctx, t, argv, stdin)
 }
 
 // ---- Snapshot / Rollback (delegated to libvirt) ---------------------------
@@ -917,7 +995,7 @@ func (m *Manager) Snapshot(ctx context.Context, name, tag string) error {
 	if err != nil {
 		return err
 	}
-	res, err := m.virsh(ctx, "snapshot-create-as", t.Name, tag)
+	res, err := m.virshWithTimeout(ctx, snapshotOpTimeout, "snapshot-create-as", t.Name, tag)
 	if err != nil {
 		return err
 	}
@@ -936,7 +1014,7 @@ func (m *Manager) Rollback(ctx context.Context, name, tag string) error {
 	if err != nil {
 		return err
 	}
-	res, err := m.virsh(ctx, "snapshot-revert", t.Name, tag)
+	res, err := m.virshWithTimeout(ctx, snapshotOpTimeout, "snapshot-revert", t.Name, tag)
 	if err != nil {
 		return err
 	}

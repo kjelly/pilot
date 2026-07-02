@@ -182,13 +182,18 @@ enroll 完成後 10/10 pass。（enroll 前、乾淨 Ubuntu → C1/C4/C5/C6/… 
 
 ### 7.2 server 端建立示範用的中央 sudo 規則（C8 的來源）
 
+C8 依賴 server 端存在一個帳號 + sudo 規則。這是**跨 host 的前置狀態**，已固化成
+fixtures playbook（冪等，密碼走 vault），跑在 **FreeIPA server** 上：
+
 ```bash
-# 在 server 上 kinit admin 後用 ipa CLI（admin 密碼由操作者互動輸入，不落 spec）
-pilot vm-target exec --name <server-vm> -- kinit admin
-pilot vm-target exec --name <server-vm> -- ipa user-add pilotuser --first=Pilot --last=User
-pilot vm-target exec --name <server-vm> -- ipa sudorule-add pilot-all --hostcat=all --cmdcat=all
-pilot vm-target exec --name <server-vm> -- ipa sudorule-add-user pilot-all --users=pilotuser
+pilot vm-target run --name <server-vm> playbooks/fixtures/freeipa-client-fixtures.yml \
+    -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
 ```
+
+它會確保 `pilotuser` 帳號、`pilot-all` sudo 規則（hostcat=all cmdcat=all）、以及
+把 `pilotuser` 掛進該規則都存在（實測冪等：重跑 `ok=6 changed=0`）。
+（慣例見 `AGENTS.md` §4.1：`docs/verification/<spec>.md` 的跨 host 前置放
+`playbooks/fixtures/<spec>-fixtures.yml`。）
 
 ### 7.3 client enroll（Ubuntu）
 

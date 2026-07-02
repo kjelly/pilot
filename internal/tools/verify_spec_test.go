@@ -53,6 +53,57 @@ func TestVerifySpec_LocalMode(t *testing.T) {
 	}
 }
 
+func TestAdHocModule(t *testing.T) {
+	cases := map[string]string{
+		"test -f /etc/ipa/default.conf": "command",
+		"systemctl is-active sssd":      "command",
+		"sudo -l -U pilotuser":          "command",
+		"ss -tlnH | grep -q ':389 '":    "shell",
+		"grep -q IPA /etc/krb5.conf":    "command",
+		"echo $HOME":                    "shell",
+		"a && b":                        "shell",
+		"cat f > /tmp/x":                "shell",
+	}
+	for cmd, want := range cases {
+		if got := adHocModule(cmd); got != want {
+			t.Errorf("adHocModule(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+}
+
+// TestProbe_LocalMode exercises the --probe path in local mode (no VM): it
+// must expose rc, raw, clean and the matcher verdict for each Expected
+// grammar, matching what a real spec row would decide.
+func TestProbe_LocalMode(t *testing.T) {
+	tool := &VerifySpecTool{LocalOnly: true}
+	ctx := context.Background()
+
+	// rc-based expected.
+	pr := tool.Probe(ctx, "test -f /etc/os-release", "0", "", 10)
+	if pr.Module != "local" || pr.RC != 0 || !pr.Pass {
+		t.Errorf("rc-probe: module=%q rc=%d pass=%v verdict=%q", pr.Module, pr.RC, pr.Pass, pr.Verdict)
+	}
+
+	// ~contains against real stdout.
+	pr = tool.Probe(ctx, "echo hello-world", "~hello", "", 10)
+	if !pr.Pass || pr.Clean != "hello-world" {
+		t.Errorf("contains-probe: clean=%q pass=%v verdict=%q", pr.Clean, pr.Pass, pr.Verdict)
+	}
+
+	// A failing match still returns cleanly with Pass=false so the author
+	// sees exactly why. `echo active` never contains "inactive".
+	pr = tool.Probe(ctx, "echo active", "~inactive", "", 10)
+	if pr.Pass {
+		t.Errorf("expected FAIL for `echo active` vs ~inactive (clean=%q), got pass; verdict=%q", pr.Clean, pr.Verdict)
+	}
+
+	// Empty expected → default rc==0 rule, no crash.
+	pr = tool.Probe(ctx, "true", "", "", 10)
+	if !pr.Pass {
+		t.Errorf("empty-expected probe on `true` should default-pass; verdict=%q", pr.Verdict)
+	}
+}
+
 func TestVerifySpec_SpecPathRequired(t *testing.T) {
 	tool := &VerifySpecTool{}
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{}`))

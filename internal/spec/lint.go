@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -86,6 +87,11 @@ func Lint(s *Spec) []Finding {
 			out = append(out, Finding{Severity: SeverityError, Line: r.Line, ID: r.ID,
 				Message: "command is empty"})
 		}
+
+		// Matcher-semantics warnings — the three traps that pass lint but
+		// misbehave under `pilot verify`'s ansible ad-hoc path. All are
+		// SeverityWarn (guidance, non-blocking).
+		out = append(out, matcherWarnings(r)...)
 	}
 	// Stable order: by line, then by ID.
 	sort.SliceStable(out, func(i, j int) bool {
@@ -112,6 +118,71 @@ func HasErrors(fs []Finding) bool {
 // designed to prevent.
 var vagueExpectedWords = []string{
 	"ok", "normal", "合理", "足夠", "適當", "should", "may",
+}
+
+var (
+	// reverseGrepRe matches a command that pipes into grep.
+	reverseGrepRe = regexp.MustCompile(`(?i)\|\s*grep\b`)
+	// negationTokenRe matches "bad state" words a reverse-logic grep looks
+	// for (the healthy path then makes grep exit non-zero).
+	negationTokenRe = regexp.MustCompile(`(?i)\b(STOPPED|FAILED|inactive|dead|disabled|not\s+running|not\s+found|error)\b`)
+)
+
+// matcherWarnings flags the three verify matcher-semantics traps documented in
+// docs/verification-spec-template.md. Each is a real defect seen in practice
+// but not a hard error (the row is still runnable), so they are SeverityWarn.
+func matcherWarnings(r Row) []Finding {
+	var out []Finding
+	exp := strings.TrimSpace(r.Expected)
+	cmd := r.Command
+
+	// (a) Reverse-logic grep for a bad-state token with an integer expected.
+	// Under ansible ad-hoc, a piped command that exits non-zero on the
+	// HEALTHY path marks the whole task FAILED and surfaces ansible's own rc
+	// (2), never the pipe's rc (1) — so `... | grep -q STOPPED` expected `1`
+	// can never match. Use positive logic (assert the healthy string / rc 0).
+	if looksNumeric(exp) && reverseGrepRe.MatchString(cmd) && negationTokenRe.MatchString(cmd) {
+		out = append(out, Finding{Severity: SeverityWarn, Line: r.Line, ID: r.ID,
+			Message: "reverse-logic grep for a failure token with a numeric expected: " +
+				"ansible ad-hoc reports rc=2 (task-failed), not the pipe's rc, on the healthy path — " +
+				"use positive logic (assert the RUNNING/active string, or rc 0)"})
+	}
+
+	// (b) Anchored-regex expected. `pilot verify`'s ad-hoc output keeps the
+	// `host | CHANGED | rc=0 >> …` wrapper (stripRunnerPrefix only removes the
+	// "(rc=N)" marker), so a `^…`-anchored regex matches the wrapper, not the
+	// stdout — it only works in --local mode. Prefer `~contains`.
+	if strings.HasPrefix(exp, "^") {
+		out = append(out, Finding{Severity: SeverityWarn, Line: r.Line, ID: r.ID,
+			Message: "^-anchored expected only matches in --local mode: over ansible ad-hoc the " +
+				"`host | CHANGED | rc=0 >>` prefix precedes stdout and defeats the anchor — prefer `~<substring>`"})
+	}
+
+	// (c) `~active` also matches "inactive"/"reloading"/"deactivating".
+	if strings.EqualFold(exp, "~active") {
+		out = append(out, Finding{Severity: SeverityWarn, Line: r.Line, ID: r.ID,
+			Message: `~active also matches "inactive" (substring) — a stopped service would pass; ` +
+				"prefer a numeric expected `0` with `systemctl is-active <svc>` (exits 0 iff active)"})
+	}
+	return out
+}
+
+// looksNumeric reports whether s (after trimming and stripping surrounding
+// quotes) is an optionally-signed integer — an rc-comparison expected value.
+func looksNumeric(s string) bool {
+	s = strings.Trim(strings.TrimSpace(s), `"'`+"`")
+	if s == "" {
+		return false
+	}
+	for i, c := range s {
+		if c == '-' && i == 0 {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isVagueExpected(s string) bool {

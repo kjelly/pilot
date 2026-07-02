@@ -28,6 +28,8 @@ var (
 	verifyTimeoutSec int
 	verifyRoot       string
 	verifyDir        string
+	verifyProbe      string
+	verifyProbeExp   string
 )
 
 var verifyCmd = &cobra.Command{
@@ -66,11 +68,19 @@ func init() {
 	verifyCmd.Flags().IntVar(&verifyTimeoutSec, "timeout", 15, "per-row command timeout (seconds)")
 	verifyCmd.Flags().StringVar(&verifyRoot, "root", "", "project root for spec/playbook layout (default: $PILOT_ROOT or cwd). Lets verify reuse --root from `pilot spec`.")
 	verifyCmd.Flags().StringVar(&verifyDir, "dir", "", "verify every *.md under this directory in one shot; prints a rollup table at the end. Mutually exclusive with positional spec.md.")
+	verifyCmd.Flags().StringVar(&verifyProbe, "probe", "", "author aid: run a SINGLE command through the exact verify pipeline (same module/become/ad-hoc as a spec row) and print rc + raw stdout + cleaned stdout + matcher verdict. Writes no report/store. Combine with --probe-expected to test a match.")
+	verifyCmd.Flags().StringVar(&verifyProbeExp, "probe-expected", "", "expected value to test the --probe command against (same grammar as a spec Expected cell: int=rc, ~=contains, ^=regex).")
 	rootCmd.AddCommand(verifyCmd)
 }
 
 func runVerify(cmd *cobra.Command, args []string) error {
 	hasPositional := len(args) >= 1
+	if verifyProbe != "" {
+		if hasPositional || verifyDir != "" {
+			return fmt.Errorf("--probe is standalone; do not combine it with a spec.md or --dir")
+		}
+		return runVerifyProbe(cmd)
+	}
 	if hasPositional && verifyDir != "" {
 		return fmt.Errorf("positional spec.md and --dir are mutually exclusive; pass either one, not both")
 	}
@@ -221,6 +231,35 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	if fail > 0 {
 		return fmt.Errorf("verification failed: %d rows", fail)
 	}
+	return nil
+}
+
+// runVerifyProbe runs one command through the verify pipeline and prints
+// everything the matcher sees, so a spec author can pick the right Expected
+// grammar without trial-and-error. It writes no report and touches no store.
+func runVerifyProbe(cmd *cobra.Command) error {
+	tool := &tools.VerifySpecTool{
+		Inventory: verifyInventory,
+		Limit:     verifyLimit,
+		LocalOnly: verifyLocal,
+		Host:      verifyHost,
+	}
+	pr := tool.Probe(context.Background(), verifyProbe, verifyProbeExp, verifyHost, verifyTimeoutSec)
+	w := cmd.OutOrStdout()
+	fmt.Fprintf(w, "command:  %s\n", pr.Command)
+	fmt.Fprintf(w, "module:   %s  (become=%v)\n", pr.Module, pr.Become)
+	fmt.Fprintf(w, "rc:       %d\n", pr.RC)
+	fmt.Fprintf(w, "stdout:   %q\n", pr.Raw)
+	fmt.Fprintf(w, "clean:    %q  ← what ~contains / ^regex / string-equality match against\n", pr.Clean)
+	if strings.TrimSpace(verifyProbeExp) == "" {
+		fmt.Fprintf(w, "\nNo --probe-expected given (raw result only). Pick an Expected from:\n"+
+			"  0            → rc must equal 0        (rc=%d here)\n"+
+			"  ~<substr>    → clean must contain it\n"+
+			"  ^<regex>     → regex must match clean (NOT the raw ansible wrapper)\n", pr.RC)
+		return nil
+	}
+	fmt.Fprintf(w, "expected: %s\n", pr.Expected)
+	fmt.Fprintf(w, "verdict:  %s — %s\n", ternaryStr(pr.Pass, "PASS", "FAIL"), pr.Verdict)
 	return nil
 }
 

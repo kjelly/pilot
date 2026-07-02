@@ -596,7 +596,14 @@ func runVtExec(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	res, err := m.Exec(context.Background(), vtName, args)
+	// Forward stdin only when it is piped/redirected (not an interactive
+	// terminal), so `echo secret | pilot vm-target exec -- kinit admin` works
+	// while a plain interactive `exec` doesn't block waiting on the tty.
+	var stdin io.Reader
+	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
+		stdin = os.Stdin
+	}
+	res, err := m.ExecStdin(context.Background(), vtName, args, stdin)
 	if err != nil {
 		return err
 	}
@@ -891,14 +898,15 @@ func runVtResizeDisk(cmd *cobra.Command, args []string) error {
 // ---- test -----------------------------------------------------------------
 
 var (
-	vtTestPlaybook   string
-	vtTestSpec       string
-	vtTestSkipLint   bool
-	vtTestNoRollback bool
+	vtTestPlaybook      string
+	vtTestSpec          string
+	vtTestSkipLint      bool
+	vtTestNoRollback    bool
+	vtTestVerifyTimeout int
 )
 
 var vtTestCmd = &cobra.Command{
-	Use:   "test",
+	Use:   "test [-- <ansible extra-vars>...]",
 	Short: "Run syntax, apply, verify, and idempotency tests against a VM target",
 	Long: `Run a full integration and verification test suite against a VM target.
 
@@ -909,7 +917,22 @@ Steps executed:
   4. L5 verify: runs 'pilot verify' against the target
   5. L6 idempotency: runs the playbook again and checks that changed=0
   6. Auto-rollback: if any step fails, automatically rolls back to 'pre-test'
+
+Everything after '--' is forwarded VERBATIM to the apply AND idempotency
+ansible-playbook runs — this is how you pass playbook variables the run needs:
+
+  pilot vm-target test --name ubuntu-vm \
+      --playbook playbooks/apply/freeipa-client-apply.yml \
+      --spec docs/verification/freeipa-client.md \
+      -- -e target_group=all -e ipa_server_ip=192.168.123.5 \
+         -e ipa_verify_user=pilotuser -e @~/.vault/freeipa-sandbox.yaml
+
+As with 'vm-target run', passing '-e target_group=<g>' switches the apply off
+the default '-l <name>' limit (the playbook's own hosts: pattern takes over).
 `,
+	// Extras after '--' are collected as positional args and forwarded to
+	// ansible; the required flags are still parsed normally.
+	Args: cobra.ArbitraryArgs,
 	RunE: runVtTest,
 }
 
@@ -919,10 +942,24 @@ func init() {
 	vtTestCmd.Flags().StringVar(&vtTestSpec, "spec", "", "path to the verification spec.md (required)")
 	vtTestCmd.Flags().BoolVar(&vtTestSkipLint, "skip-lint", false, "skip syntax check pre-flight")
 	vtTestCmd.Flags().BoolVar(&vtTestNoRollback, "no-rollback", false, "disable automatic rollback on failure")
+	vtTestCmd.Flags().IntVar(&vtTestVerifyTimeout, "verify-timeout", 0, "per-row timeout (seconds) forwarded to `pilot verify` (0 = verify's own default)")
 
 	_ = vtTestCmd.MarkFlagRequired("name")
 	_ = vtTestCmd.MarkFlagRequired("playbook")
 	_ = vtTestCmd.MarkFlagRequired("spec")
+}
+
+// buildApplyArgs assembles the ansible-playbook argv for the apply +
+// idempotency runs of `vm-target test`. Extras (post-`--` -e vars etc.) are
+// forwarded verbatim. Like `vm-target run`, a target_group in the extras means
+// the playbook's own hosts: pattern owns targeting, so the -l <name> limit is
+// dropped; otherwise the run is limited to the single target host.
+func buildApplyArgs(playbook, invPath, limitName string, extras []string) []string {
+	out := []string{playbook, "-i", invPath}
+	if !extraHasTargetGroup(extras) {
+		out = append(out, "-l", limitName)
+	}
+	return append(out, extras...)
 }
 
 func runVtTest(cmd *cobra.Command, args []string) error {
@@ -980,7 +1017,11 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 	}
 	defer cleanup()
 
-	ansibleArgs := []string{vtTestPlaybook, "-i", invPath, "-l", t.Name}
+	// Extras after '--' (e.g. -e ipa_server_ip=…, -e @vault) are forwarded to
+	// the apply run. Mirror `vm-target run`: when the caller supplies
+	// target_group, the playbook's own hosts: pattern owns targeting, so drop
+	// the -l <name> limit (otherwise keep it).
+	ansibleArgs := buildApplyArgs(vtTestPlaybook, invPath, t.Name, args)
 	var applyBuf bytes.Buffer
 	mw := io.MultiWriter(cmd.OutOrStdout(), &applyBuf)
 
@@ -992,6 +1033,9 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 	// Step 4: L5 Verify
 	fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 4/5] L5 Verification Spec ===")
 	pilotArgs := []string{"verify", vtTestSpec, "-i", invPath, "-l", t.Name}
+	if vtTestVerifyTimeout > 0 {
+		pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTestVerifyTimeout))
+	}
 
 	if err := execPilot(cmd.OutOrStdout(), pilotArgs...); err != nil {
 		return rollbackOnFailure(fmt.Errorf("verification failed: %w", err))

@@ -1,0 +1,111 @@
+# Fixtures for docs/verification/freeipa-client.md
+#
+# A verification spec sometimes depends on STATE THAT LIVES ON ANOTHER HOST.
+# freeipa-client C8 ("central sudo rule reaches an IPA account") only passes if
+# the FreeIPA *server* has a user + sudo rule to hand out. That precondition
+# used to be tribal knowledge (hand-run `kinit` + `ipa` commands). This
+# playbook makes it a committed, idempotent, reproducible artifact.
+#
+# It runs against the FreeIPA SERVER (not the client) and ensures:
+#   * an IPA user            (default: pilotuser)
+#   * a sudo rule            (default: pilot-all, hostcat=all cmdcat=all)
+#   * the user is attached to the rule
+#
+# Convention: cross-host preconditions for docs/verification/<spec>.md live in
+# playbooks/fixtures/<spec>-fixtures.yml and are applied BEFORE the client
+# apply+verify. See AGENTS.md §4.1.
+#
+# Secrets: ipa_admin_password comes from a vault file, NEVER hard-coded (the
+# kinit task is no_log):
+#   -e @~/.vault/freeipa-sandbox.yaml
+#
+# Usage (against the FreeIPA server VM, whose host is in group `all`):
+#   pilot vm-target run --name alma-vm playbooks/fixtures/freeipa-client-fixtures.yml \
+#       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
+---
+- name: FreeIPA client verification fixtures (run on the FreeIPA server)
+  hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    ipa_domain: ipa.pilot.internal
+    ipa_realm: "{{ ipa_domain | upper }}"
+    ipa_fixture_user: pilotuser
+    ipa_fixture_user_first: Pilot
+    ipa_fixture_user_last: User
+    ipa_fixture_sudorule: pilot-all
+
+  pre_tasks:
+    - name: "Gate: admin password present (fail before touching the directory)"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+        fail_msg: >-
+          Missing ipa_admin_password. Pass a vault file, e.g.
+          -e @~/.vault/freeipa-sandbox.yaml
+      tags: [always]
+
+  tasks:
+    # kinit reads the password from stdin (no_log so it never lands in the
+    # ansible log). changed_when:false — obtaining a ticket is not a change.
+    - name: "Fixtures — kinit admin (ticket for the ipa CLI below)"
+      ansible.builtin.shell:
+        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+      register: ipa_kinit
+      changed_when: false
+      no_log: true
+      tags: [fixtures]
+
+    - name: "Fixtures — ensure IPA user {{ ipa_fixture_user }} exists"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - user-add
+          - "{{ ipa_fixture_user }}"
+          - "--first={{ ipa_fixture_user_first }}"
+          - "--last={{ ipa_fixture_user_last }}"
+      register: ipa_user_add
+      changed_when: "'Added user' in (ipa_user_add.stdout | default(''))"
+      failed_when:
+        - ipa_user_add.rc != 0
+        - "'already exists' not in (ipa_user_add.stderr | default(''))"
+      tags: [fixtures]
+
+    - name: "Fixtures — ensure sudo rule {{ ipa_fixture_sudorule }} exists (all hosts, all cmds)"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add
+          - "{{ ipa_fixture_sudorule }}"
+          - "--hostcat=all"
+          - "--cmdcat=all"
+      register: ipa_rule_add
+      changed_when: "'Added Sudo Rule' in (ipa_rule_add.stdout | default(''))"
+      failed_when:
+        - ipa_rule_add.rc != 0
+        - "'already exists' not in (ipa_rule_add.stderr | default(''))"
+      tags: [fixtures]
+
+    # sudorule-add-user exits NON-ZERO (rc=1) when the user is already a
+    # member ("This entry is already a member" / "Number of members added 0").
+    # Treat that as the idempotent no-op it is: only a real error (not the
+    # already-member case) fails the task; only an actual add is a change.
+    - name: "Fixtures — attach {{ ipa_fixture_user }} to {{ ipa_fixture_sudorule }}"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-user
+          - "{{ ipa_fixture_sudorule }}"
+          - "--users={{ ipa_fixture_user }}"
+      register: ipa_rule_user
+      changed_when: "'Number of members added 1' in (ipa_rule_user.stdout | default(''))"
+      failed_when:
+        - ipa_rule_user.rc != 0
+        - "'already a member' not in (ipa_rule_user.stdout | default(''))"
+      tags: [fixtures]
+
+    - name: "Fixtures — release the Kerberos ticket"
+      ansible.builtin.command: kdestroy
+      changed_when: false
+      failed_when: false
+      tags: [fixtures]

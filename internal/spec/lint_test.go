@@ -101,6 +101,53 @@ func TestLint_VagueExpected(t *testing.T) {
 	}
 }
 
+// TestLint_MatcherWarnings covers the three verify matcher-semantics traps.
+// All are SeverityWarn (never block generate) but must be surfaced.
+func TestLint_MatcherWarnings(t *testing.T) {
+	countWarns := func(body, substr string) int {
+		s, _ := ParseReader(strings.NewReader(body))
+		fs := Lint(s)
+		if HasErrors(fs) {
+			t.Fatalf("matcher issues must be warnings, not errors: %v", fs)
+		}
+		n := 0
+		for _, f := range fs {
+			if f.Severity == SeverityWarn && strings.Contains(f.Message, substr) {
+				n++
+			}
+		}
+		return n
+	}
+	hdr := "# Verification Spec — x\n\n## 2. Checklist\n\n| ID | Category | Check | Expected | Command |\n|----|----------|-------|----------|---------|\n"
+
+	// (a) reverse-logic grep + numeric expected.
+	revBody := hdr + "| C1 | service | svc down? | 1 | " + "`sudo ipactl status | grep -q STOPPED`" + " |\n"
+	if got := countWarns(revBody, "positive logic"); got != 1 {
+		t.Errorf("reverse-grep warn: got %d, want 1", got)
+	}
+	// A positive-logic grep (no negation token) must NOT warn.
+	okBody := hdr + "| C1 | service | up | 0 | " + "`systemctl is-active sssd`" + " |\n"
+	if got := countWarns(okBody, "positive logic"); got != 0 {
+		t.Errorf("positive-logic must not warn: got %d", got)
+	}
+
+	// (b) ^-anchored expected.
+	anchorBody := hdr + "| C1 | id | fqdn | " + `^ipa1\.example\.com` + " | `hostname -f` |\n"
+	if got := countWarns(anchorBody, "anchored expected"); got != 1 {
+		t.Errorf("^-anchor warn: got %d, want 1", got)
+	}
+
+	// (c) ~active.
+	activeBody := hdr + "| C1 | service | up | ~active | `systemctl is-active docker` |\n"
+	if got := countWarns(activeBody, `~active also matches`); got != 1 {
+		t.Errorf("~active warn: got %d, want 1", got)
+	}
+	// rc-based active check must NOT warn.
+	if got := countWarns(okBody, "~active also matches"); got != 0 {
+		t.Errorf("rc-based is-active must not warn: got %d", got)
+	}
+}
+
 func TestIsVagueExpected(t *testing.T) {
 	cases := map[string]bool{
 		"ok":      true,

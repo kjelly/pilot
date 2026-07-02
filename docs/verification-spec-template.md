@@ -88,11 +88,42 @@
 |---------------|---------|------|
 | `0` / `1` 等純數字 | 比對 exit code；runner 會自動從 `echo $?` 抓 rc | `0`（exit code = 0）|
 | `present` | 退出碼 0 即通過 | 檔案存在檢查 |
-| `~active` | stdout **包含** substring（前面加 `~`） | `~active`、`~running` |
+| `~running` | stdout **包含** substring（前面加 `~`） | `~running`、`~host/` |
 | `^OK provider=...` | anchored regex（從 `^` 開頭） | `^OK provider=kc-ssh-pam` |
 | 其他字串 | stdout 與 expected **完全相等**（去除 `(rc=N) ` 前綴） | `OK` / 任意固定字串 |
 
 > **不要寫** `OK` / `正常` / `合理` / `足夠` — 這些詞會被 lint 攔下。
+
+### 三個實測踩過的陷阱（`pilot spec --lint` 會 warn）
+
+`pilot verify` 對 inventory 是走 **ansible ad-hoc**（`ansible <host> -m command/shell -a "<cmd>"`），
+輸出長這樣：`host | CHANGED | rc=0 >> <stdout>`。這個 wrapper + ad-hoc 的退出碼語意，
+造成三個「lint 過、但 verify 行為不如預期」的坑：
+
+1. **反邏輯 grep + 數字 expected**（例 `... | grep -q STOPPED` expected `1`）：健康時 grep 找不到
+   → 管線 rc=1 → ansible 把整個 task 判為 **FAILED**、回自己的 **rc=2**（不是管線的 1），expected `1`
+   永遠對不上。**改用正邏輯**：直接斷言健康字串，或讓指令健康時自身回 0（expected `0`）。
+
+2. **`^…$` anchored regex**：比對對象 `clean` 只有去掉 `(rc=N)` 前綴，**仍保留** `host | CHANGED | rc=0 >>`
+   這段 wrapper，所以 `^` 錨點會對到 wrapper 而不是 stdout —— 只有 `--local`（無 ansible）時才有效。
+   對 inventory 驗證請改用 **`~<substring>`**。
+
+3. **`~active` 會誤命中 `inactive`**：`active` 是 `inactive` 的子字串，服務停掉也會 PASS。
+   **服務健康檢查改用數字 rc**：`systemctl is-active <svc>` expected `0`（active 才回 0）。
+
+### 拿不準 expected 怎麼寫？用 `--probe` 先探
+
+不要靠猜。把候選指令丟進**與 verify 完全相同**的管線，看它實際回什麼：
+
+```bash
+# 對 vm-target（先取 inventory）：
+pilot vm-target show-inventory --name <vm> > /tmp/inv.yaml
+pilot verify --probe 'sudo -l -U pilotuser' --probe-expected '~(root) ALL' \
+    -i /tmp/inv.yaml -l <vm>
+# 會印出 module/become、rc、raw stdout、clean（matcher 實際比對的字串）、以及 verdict
+```
+
+`--probe` 不寫任何 report / store，純粹讓你「看到 verify 看到的」再決定 expected 的寫法。
 
 Command 欄位的注意事項：
 
@@ -115,7 +146,7 @@ Command 欄位的注意事項：
 - [ ] 每個 row 的 **command** 在目標主機上可單獨跑出結果
 - [ ] ID 連號 `C1` / `C2` / `C3` ... 不跳號
 - [ ] 涉及檔案權限的 row 寫出數字（`0644`）而非文字（`644` 或 `0o644`）
-- [ ] 涉及 service 的 row 用 `~active` / `~inactive` substring 比較
+- [ ] 涉及 service 的 row 用 `systemctl is-active <svc>` + expected `0`（**不要**用 `~active`，會誤命中 `inactive`）
 - [ ] 涉及 sysctl 的 row 寫出字串型 expected（`sysctl -n` 永遠回字串）
 - [ ] 例外有寫清楚「適用環境」跟「為什麼」
 - [ ] 有版本號跟變更紀錄

@@ -267,9 +267,12 @@ func TestGet_RefreshStatus_Missing(t *testing.T) {
 	}
 }
 
-// TestExec_PassesArgvVerbatim guarantees argv reaches ssh unchanged (no
-// host-shell wrapping).
-func TestExec_PassesArgvVerbatim(t *testing.T) {
+// TestExec_ReconstructsArgvOnRemote guarantees argv is shell-quoted so the
+// REMOTE shell reconstructs it faithfully. ssh flattens command args into one
+// space-joined string; without quoting, `sh -c "echo hi | tee /tmp/out"`
+// would arrive as `sh -c echo hi | tee /tmp/out` (i.e. `sh -c echo` piped into
+// tee). The multi-word `-c` argument must survive as a single quoted token.
+func TestExec_ReconstructsArgvOnRemote(t *testing.T) {
 	m, base := newTestManager(t, happyVirsh)
 	if _, err := m.Up(context.Background(), Options{Name: "x", BaseImage: base}); err != nil {
 		t.Fatalf("Up: %v", err)
@@ -283,8 +286,31 @@ func TestExec_PassesArgvVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read args: %v", err)
 	}
-	if !strings.Contains(string(data), "sh -c echo hi | tee /tmp/out") {
-		t.Errorf("argv not passed verbatim:\n%s", data)
+	// The remote command is a single argument: the safe tokens pass through,
+	// the multi-word script is single-quoted.
+	if !strings.Contains(string(data), "sh -c 'echo hi | tee /tmp/out'") {
+		t.Errorf("argv not shell-quoted for faithful remote reconstruction:\n%s", data)
+	}
+}
+
+// TestShellQuoteArg pins the quoting rule the remote-argv reconstruction
+// relies on: safe tokens pass through untouched; anything with whitespace or
+// metachars is single-quoted; embedded single quotes are POSIX-escaped.
+func TestShellQuoteArg(t *testing.T) {
+	cases := map[string]string{
+		"sh":                   "sh",
+		"-c":                   "-c",
+		"/etc/krb5.keytab":     "/etc/krb5.keytab",
+		"target_group=all":     "target_group=all",
+		"echo hi | tee /tmp/x": "'echo hi | tee /tmp/x'",
+		"":                     "''",
+		"it's":                 `'it'\''s'`,
+		"a$b`c":                "'a$b`c'",
+	}
+	for in, want := range cases {
+		if got := shellQuoteArg(in); got != want {
+			t.Errorf("shellQuoteArg(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
