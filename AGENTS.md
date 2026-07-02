@@ -138,9 +138,60 @@ group set 跟 inventory 實際的 host set。任何不一致 CI 會 fail。
 ## 5. 寫 / 改 Go code 時
 
 - `go build ./...` 跟 `go test ./...` 都過才能 commit
+- **`go test -race ./...` 也必須綠**（CI 就是跑這個）。不要在測試裡對共用
+  slice / map 做「goroutine 寫 + 主 goroutine 讀」而沒有同步——用 channel
+  關閉或 `sync` 建立 happens-before。race gate 紅掉，等於後面每個 agent 都
+  失去「測試綠 = 安全」這個判準。
 - 新增 public symbol 寫一行 doc comment
 - 任何改 spec parser / generator / verifier 行為的 PR，必須把對應的 regression
   test 一起改（不要在 regression 失敗時 revert parser；先想 spec 為什麼這樣寫）
+- 改完跑 `gofmt -w`（或 `make lint`）；不要留下手縮排。
+
+### 5.1 target backend（docker / vm）是「兩份平行實作」——一起改
+
+`internal/dockertarget` 與 `internal/vmtarget` 是刻意平行的兩個 backend，
+**沒有**共用 interface（`Target`/`Options`/`Exec` 回傳型別各自不同，硬抽
+interface 是 speculative generality）。因此：
+
+- 動到 target 生命週期（`Up`/`Down`/staging inventory/旗標）時，**先問這個行為
+  是不是兩個 backend 都該有**。是的話兩邊一起改，或把共用部分下沉到共用層，
+  **不要只改一邊**（`--ssh-timeout` 失效、docker 有 `--check` 而 vm 沒有，都是
+  只改一邊造成的漂移）。
+- 狀態持久化**一律**走 `internal/statefile.Store[T]`（版本化 + 原子寫入，已測）。
+  不要再手寫 temp-file+rename。
+- CLI 端把 inventory 寫到暫存檔一律用 `writeTempInventory`（`cmd/pilot/cmd`）。
+
+### 5.2 長生命週期物件不要把 per-call option 寫回自身欄位
+
+`Manager` 這種跨多次呼叫重用的物件，per-call 的選項（timeout、旗標）要用
+**區域變數**傳進去，不可寫回 `m.xxx` 欄位——否則一次呼叫的 override 會外洩到
+之後每一次操作（vmtarget 的 `m.sshTimeout` 就中過這個雷）。
+
+### 5.3 加一個 LLM tool 的步驟
+
+1. `internal/tools/<tool>.go`：定義 struct + `Spec()` + `Execute(ctx, args)`。
+2. `internal/tools/schemas.go`：加參數的 JSON schema（手寫字串）。
+3. `internal/tools/defaults.go`：在 `DefaultRegistryWithConfig()` 註冊
+   （`spec := t.Spec(); spec.Execute = t.Execute; r.MustRegister(spec)`）。
+4. `internal/tools/<tool>_test.go`：input 驗證 + 行為 + 安全性測試。
+
+注意事項：
+
+- schema 的 property 名稱與 `Execute` 裡 `json:"..."` unpack struct 的欄位是
+  **手動同步**的，沒有 codegen。改一邊就要改另一邊，否則 LLM 那個欄位會靜默
+  傳不進來。`TestToolSchemasAreStructurallyValid` 會擋住 `required` 名稱打錯，
+  但**擋不了**「struct 少了一個 schema 有的欄位」——自己對齊。
+- **Interceptor 在 agent loop 與 MCP server 兩條路徑都會跑**。MCP 那條路徑
+  **沒有**人工核准 / dry-run 保護（見 `internal/tools/registry.go` 的
+  `Interceptor` doc）。任何會 mutate 的 tool，若靠 interceptor 做防護，要確保
+  該防護不依賴 dry-run context，否則經 MCP 呼叫會直接執行。
+
+### 5.4 agent loop 的 `handleToolCall`
+
+它是一條 pipeline：`size-cap → buildProposal → approve → applyInterceptor →
+dry-run skip → preExecSnapshot → Execute → persist → loop-guards →
+recoverFromFailedApply → per-host dedup`。每個階段是獨立的具名 method。加新階段
+時延續這個切法，不要把邏輯塞回主函式變回 god function。
 
 ---
 
@@ -161,3 +212,4 @@ group set 跟 inventory 實際的 host set。任何不一致 CI 會 fail。
 |------------|------|------|--------|
 | 2026-07-01 | v1.0 | 初版（spec-vs-inventory 事故後寫的硬規則）| sre |
 | 2026-07-01 | v1.1 | §4 加 apply playbook `tags:` 硬規則（對齊 spec ID / 多 role 命名空間 / `--list-tags` 驗證）| sre |
+| 2026-07-02 | v1.2 | §5 大幅擴充 Go 架構約定（`-race` gate、target 兩份平行實作、`statefile`/`writeTempInventory` 共用層、per-call option 不寫回欄位、加 tool 步驟 + schema/struct 同步、Interceptor 雙路徑、`handleToolCall` pipeline）| sre |

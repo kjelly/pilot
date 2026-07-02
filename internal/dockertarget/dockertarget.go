@@ -2,14 +2,14 @@
 // for pilot. It is intentionally separate from internal/sandbox:
 //
 //   - internal/sandbox     controls where the pilot *agent's tool calls*
-//                          run (LocalEnvironment vs DockerEnvironment).
-//                          That mode is opt-in via `--sandbox`.
+//     run (LocalEnvironment vs DockerEnvironment).
+//     That mode is opt-in via `--sandbox`.
 //
 //   - internal/dockertarget controls the *target host* that ansible-playbook
-//                          operates against. The user can spin up a
-//                          disposable container, run a playbook against it,
-//                          verify a spec, then tear it down. This is the
-//                          "docker as a VM" use case.
+//     operates against. The user can spin up a
+//     disposable container, run a playbook against it,
+//     verify a spec, then tear it down. This is the
+//     "docker as a VM" use case.
 //
 // The two are orthogonal: a `pilot docker-target run ...` command talks
 // to a docker container via the `docker` ansible connection plugin,
@@ -19,16 +19,16 @@ package dockertarget
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/anomalyco/pilot/internal/statefile"
 )
 
 // Status is the lifecycle state of a docker target.
@@ -69,9 +69,9 @@ type Target struct {
 
 // Options bundles user-facing knobs for Up.
 type Options struct {
-	Name       string // required; the container name AND ansible host key
-	Image      string // required; e.g. "ubuntu:24.04"
-	Network    string // docker --network; default "host"
+	Name    string // required; the container name AND ansible host key
+	Image   string // required; e.g. "ubuntu:24.04"
+	Network string // docker --network; default "host"
 	// Privileged controls docker --privileged. Defaults to true so
 	// the container can run apt / systemd / mount cgroups. Pass a
 	// non-nil pointer set to false to opt out.
@@ -82,8 +82,8 @@ type Options struct {
 	// always one of the names (so `pilot docker-target exec --name`
 	// keeps working); the extras are inventory aliases useful for
 	// playbooks that target groups by name.
-	Hosts      []string
-	ExtraArgs  []string
+	Hosts     []string
+	ExtraArgs []string
 	// Systemd, when non-nil and true, boots the container with systemd
 	// as PID 1 (entrypoint /sbin/init + writable /run tmpfs) instead of
 	// `sleep infinity`. This is what makes ansible's systemd/service
@@ -109,7 +109,7 @@ const stateVersion = 1
 type Manager struct {
 	mu       sync.Mutex
 	stateDir string
-	stateFile string
+	store    *statefile.Store[Target]
 	now      func() time.Time // overridable in tests
 }
 
@@ -120,61 +120,30 @@ func NewManager(stateDir string) (*Manager, error) {
 	if stateDir == "" {
 		return nil, errors.New("dockertarget: stateDir is required")
 	}
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		return nil, fmt.Errorf("dockertarget: mkdir %s: %w", stateDir, err)
+	store, err := statefile.New[Target](stateDir, "docker-targets.json", stateVersion, "dockertarget")
+	if err != nil {
+		return nil, err
 	}
 	return &Manager{
-		stateDir:  stateDir,
-		stateFile: filepath.Join(stateDir, "docker-targets.json"),
-		now:       time.Now,
+		stateDir: stateDir,
+		store:    store,
+		now:      time.Now,
 	}, nil
 }
 
-// load reads + parses the state file. Missing file is not an error —
-// the user simply has no targets yet.
+// load/save delegate persistence to the shared, tested statefile.Store
+// (atomic write + version check). The local *state shape is kept so the
+// rest of the package is untouched.
 func (m *Manager) load() (*state, error) {
-	data, err := os.ReadFile(m.stateFile)
+	targets, err := m.store.Load()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &state{Version: stateVersion}, nil
-		}
-		return nil, fmt.Errorf("dockertarget: read state: %w", err)
+		return nil, err
 	}
-	var s state
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("dockertarget: parse state: %w", err)
-	}
-	if s.Version != stateVersion {
-		return nil, fmt.Errorf("dockertarget: state version %d (want %d); refusing to load", s.Version, stateVersion)
-	}
-	return &s, nil
+	return &state{Version: stateVersion, Targets: targets}, nil
 }
 
-// save writes the state file atomically.
 func (m *Manager) save(s *state) error {
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return fmt.Errorf("dockertarget: marshal state: %w", err)
-	}
-	tmp, err := os.CreateTemp(m.stateDir, ".docker-targets-*.json.tmp")
-	if err != nil {
-		return fmt.Errorf("dockertarget: create temp: %w", err)
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("dockertarget: write temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("dockertarget: close temp: %w", err)
-	}
-	if err := os.Rename(tmpName, m.stateFile); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("dockertarget: rename temp: %w", err)
-	}
-	return nil
+	return m.store.Save(s.Targets)
 }
 
 // dockerResult captures the output of one docker CLI invocation.

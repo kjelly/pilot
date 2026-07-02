@@ -199,7 +199,40 @@ func (s *Server) handleToolsCall(ctx context.Context, req Request) {
 		return
 	}
 
-	res, err := spec.Execute(ctx, params.Arguments)
+	// Run the tool's Interceptor first, matching the agent loop's contract:
+	// a non-nil Result short-circuits the call; a non-nil error is a hard
+	// failure; (nil, nil) means proceed. Without this, an interceptor-gated
+	// tool would execute unguarded over MCP (the interceptor is the single
+	// place per-tool policy lives). MCP is a "live" path — it sets no
+	// dry-run context — so dry-run interceptors are correctly inert here.
+	args := params.Arguments
+	if spec.Interceptor != nil {
+		interceptRes, ierr := spec.Interceptor(ctx, args)
+		if ierr != nil {
+			s.writeResponse(Response{
+				JSONRPC: "2.0",
+				Result: ToolsCallResult{
+					Content: []TextContent{{Type: "text", Text: "Error: " + ierr.Error()}},
+					IsError: true,
+				},
+				ID: req.ID,
+			})
+			return
+		}
+		if interceptRes != nil {
+			s.writeResponse(Response{
+				JSONRPC: "2.0",
+				Result: ToolsCallResult{
+					Content: []TextContent{{Type: "text", Text: interceptRes.Content}},
+					IsError: interceptRes.IsError,
+				},
+				ID: req.ID,
+			})
+			return
+		}
+	}
+
+	res, err := spec.Execute(ctx, args)
 	if err != nil {
 		s.writeResponse(Response{
 			JSONRPC: "2.0",

@@ -20,12 +20,13 @@ import (
 // dockerTargetCmd is the parent for `pilot docker-target ...`.
 //
 // Subcommands:
-//   up       bring up a docker container to use as a target host
-//   down     tear down a target (docker rm -f + remove state)
-//   list     list all known targets with live status
-//   run      run an ansible playbook against the target (uses generated inventory)
-//   verify   run a spec against the target (`pilot verify <spec>` semantics)
-//   exec     run a single command inside the container (`docker exec <name> ...`)
+//
+//	up       bring up a docker container to use as a target host
+//	down     tear down a target (docker rm -f + remove state)
+//	list     list all known targets with live status
+//	run      run an ansible playbook against the target (uses generated inventory)
+//	verify   run a spec against the target (`pilot verify <spec>` semantics)
+//	exec     run a single command inside the container (`docker exec <name> ...`)
 //
 // docker-target is the user-facing entry to internal/dockertarget.
 // It does NOT spin up a sandbox for the agent — it just gives you a
@@ -70,15 +71,15 @@ func init() {
 // ---- shared flags ---------------------------------------------------------
 
 var (
-	dtName        string
-	dtImage       string
-	dtImagePilot  string
-	dtHostname    string
-	dtNetwork     string
+	dtName         string
+	dtImage        string
+	dtImagePilot   string
+	dtHostname     string
+	dtNetwork      string
 	dtNoPrivileged bool
-	dtSystemd     bool
-	dtExtraArgs   []string
-	dtHosts       []string
+	dtSystemd      bool
+	dtExtraArgs    []string
+	dtHosts        []string
 )
 
 // resolveDataDir returns the active pilot data dir. Centralised so the
@@ -347,19 +348,11 @@ func runDtRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	invFile, err := os.CreateTemp("", "pilot-dt-inv-*.yaml")
+	invPath, cleanup, err := writeTempInventory(inv)
 	if err != nil {
-		return fmt.Errorf("create inventory tmpfile: %w", err)
-	}
-	invPath := invFile.Name()
-	defer os.Remove(invPath)
-	if _, err := invFile.WriteString(inv); err != nil {
-		invFile.Close()
 		return err
 	}
-	if err := invFile.Close(); err != nil {
-		return err
-	}
+	defer cleanup()
 
 	playbook := args[0]
 	extra := args[1:]
@@ -422,17 +415,11 @@ func runDtVerify(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	invFile, err := os.CreateTemp("", "pilot-dt-inv-*.yaml")
+	invPath, cleanup, err := writeTempInventory(inv)
 	if err != nil {
 		return err
 	}
-	invPath := invFile.Name()
-	defer os.Remove(invPath)
-	if _, err := invFile.WriteString(inv); err != nil {
-		invFile.Close()
-		return err
-	}
-	invFile.Close()
+	defer cleanup()
 
 	spec := args[0]
 	extra := args[1:]
@@ -797,4 +784,3 @@ func validDockerTag(s string) bool {
 	}
 	return true
 }
-

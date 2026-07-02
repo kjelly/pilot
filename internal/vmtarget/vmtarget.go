@@ -3,15 +3,15 @@
 // internal/dockertarget:
 //
 //   - internal/dockertarget  a docker container as a disposable target
-//                            host (shares the host kernel; great for
-//                            package/config/systemd-service testing).
+//     host (shares the host kernel; great for
+//     package/config/systemd-service testing).
 //
 //   - internal/vmtarget      a real VM as a disposable target host
-//                            (its own kernel; needed for kernel modules,
-//                            reboot/bootloader, LVM/filesystem, SELinux
-//                            enforcing, real networking — anything a
-//                            shared-kernel container cannot faithfully
-//                            reproduce).
+//     (its own kernel; needed for kernel modules,
+//     reboot/bootloader, LVM/filesystem, SELinux
+//     enforcing, real networking — anything a
+//     shared-kernel container cannot faithfully
+//     reproduce).
 //
 // Both expose the same shape (Up/Down/Get/List/Exec/RenderInventory +
 // Snapshot/Rollback) so the CLI and the agent loop treat them
@@ -44,7 +44,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -56,6 +55,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/anomalyco/pilot/internal/statefile"
 )
 
 // Status is the lifecycle state of a vm target.
@@ -121,12 +122,12 @@ type state struct {
 // Safe for concurrent use within a process (mutex) and across processes
 // (atomic state rewrite).
 type Manager struct {
-	mu        sync.Mutex
-	imgMu     sync.Mutex // serializes base-image prepare (download/customize)
-	stateDir  string
-	stateFile string
-	vmDir     string // where per-target qcow2/seed live (libvirt-accessible)
-	now       func() time.Time
+	mu       sync.Mutex
+	imgMu    sync.Mutex // serializes base-image prepare (download/customize)
+	stateDir string
+	store    *statefile.Store[Target]
+	vmDir    string // where per-target qcow2/seed live (libvirt-accessible)
+	now      func() time.Time
 
 	// Tunables — real defaults in NewManager; tests shrink them so the
 	// boot/ssh polling loops return immediately against shims.
@@ -147,12 +148,13 @@ func NewManager(stateDir, vmDir string) (*Manager, error) {
 	if vmDir == "" {
 		vmDir = "/var/lib/libvirt/images/pilot"
 	}
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		return nil, fmt.Errorf("vmtarget: mkdir %s: %w", stateDir, err)
+	store, err := statefile.New[Target](stateDir, "vm-targets.json", stateVersion, "vmtarget")
+	if err != nil {
+		return nil, err
 	}
 	return &Manager{
 		stateDir:     stateDir,
-		stateFile:    filepath.Join(stateDir, "vm-targets.json"),
+		store:        store,
 		vmDir:        vmDir,
 		now:          time.Now,
 		bootTimeout:  3 * time.Minute,
@@ -163,48 +165,19 @@ func NewManager(stateDir, vmDir string) (*Manager, error) {
 
 // ---- state load/save (atomic; mirrors dockertarget) -----------------------
 
+// load/save delegate persistence to the shared, tested statefile.Store
+// (atomic write + version check). The local *state shape is kept so the
+// rest of the package (Up/Down/Get/List) is untouched.
 func (m *Manager) load() (*state, error) {
-	data, err := os.ReadFile(m.stateFile)
+	targets, err := m.store.Load()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &state{Version: stateVersion}, nil
-		}
-		return nil, fmt.Errorf("vmtarget: read state: %w", err)
+		return nil, err
 	}
-	var s state
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("vmtarget: parse state: %w", err)
-	}
-	if s.Version != stateVersion {
-		return nil, fmt.Errorf("vmtarget: state version %d (want %d); refusing to load", s.Version, stateVersion)
-	}
-	return &s, nil
+	return &state{Version: stateVersion, Targets: targets}, nil
 }
 
 func (m *Manager) save(s *state) error {
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return fmt.Errorf("vmtarget: marshal state: %w", err)
-	}
-	tmp, err := os.CreateTemp(m.stateDir, ".vm-targets-*.json.tmp")
-	if err != nil {
-		return fmt.Errorf("vmtarget: create temp: %w", err)
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("vmtarget: write temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("vmtarget: close temp: %w", err)
-	}
-	if err := os.Rename(tmpName, m.stateFile); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("vmtarget: rename temp: %w", err)
-	}
-	return nil
+	return m.store.Save(s.Targets)
 }
 
 // ---- external command seams -----------------------------------------------
@@ -564,6 +537,7 @@ func (m *Manager) defineAndStart(ctx context.Context, t *Target) error {
 	}
 	return nil
 }
+
 // waitForIP waits for the VM to acquire an IP address. We use
 // domifaddr (which queries the live kernel ARP table) as the primary
 // source, since it immediately reflects the IP the VM is actually using.
@@ -1113,16 +1087,14 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-
-
 // ---- Static DHCP Reservation (IP conflict prevention) -----------------------
 
 // allocateStaticIP finds an unused IP in the network's DHCP range and
 // registers a permanent <host> entry so the VM always gets the same address.
 // This prevents the "two VMs get the same IP" problem that occurs when:
-//   1. VM A has an active lease for IP X
-//   2. VM B's deterministic MAC produces the same lease, DHCP gives X again
-//   3. → IP conflict, neither VM can be reached reliably
+//  1. VM A has an active lease for IP X
+//  2. VM B's deterministic MAC produces the same lease, DHCP gives X again
+//  3. → IP conflict, neither VM can be reached reliably
 //
 // The reservation is persistent (written to network config), so even after
 // host reboots the static entries survive.

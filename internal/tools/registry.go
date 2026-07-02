@@ -23,19 +23,19 @@ type Executor func(ctx context.Context, args json.RawMessage) (*Result, error)
 
 // Spec describes a tool that the LLM can invoke
 type Spec struct {
-	Name         string          `json:"name"`
-	Description  string          `json:"description"`
-	RiskLevel    string          `json:"-"` // low / medium / high
-	Reversible   bool            `json:"-"`
-	Parameters   json.RawMessage `json:"parameters"`
-	DoubleConfirm bool           `json:"-"`
+	Name          string          `json:"name"`
+	Description   string          `json:"description"`
+	RiskLevel     string          `json:"-"` // low / medium / high
+	Reversible    bool            `json:"-"`
+	Parameters    json.RawMessage `json:"parameters"`
+	DoubleConfirm bool            `json:"-"`
 	// DryRunSafe indicates the tool can be safely executed under
 	// --dry-run-all (e.g. read_file, run_command in read-only mode,
 	// run_inspec, ask_user, run_ansible with --check).
 	// When false, the agent loop intercepts the call and records a
 	// "[DRY-RUN] would call …" proposal instead of executing.
-	DryRunSafe   bool            `json:"-"`
-	Execute      Executor        `json:"-"`
+	DryRunSafe bool     `json:"-"`
+	Execute    Executor `json:"-"`
 
 	// Interceptor is an optional pre-execution hook run by the agent
 	// loop. It can mutate args, surface a synthetic dry-run preview,
@@ -48,14 +48,20 @@ type Spec struct {
 	//
 	// Returning (nil, nil) means "no interception, proceed normally".
 	// Returning (nil, err) is a hard error.
-	Interceptor Interceptor     `json:"-"`
+	Interceptor Interceptor `json:"-"`
 }
 
 // Interceptor is the signature of Spec.Interceptor. The agent loop
 // passes the resolved tool args; the interceptor can return a
 // synthetic Result to skip execution entirely.
+//
+// BOTH execution paths run the interceptor: the agent loop (which sets a
+// dry-run context via ContextWithDryRun) and the MCP server (which does
+// not, so it is a "live" path). The MCP path executes tools directly and
+// applies NO approval or dry-run policy of its own — a tool exposed over
+// MCP must therefore be safe to run on its own or encode its guard in the
+// interceptor/Execute, not rely on the agent loop's human-approval gate.
 type Interceptor func(ctx context.Context, args json.RawMessage) (*Result, error)
-
 
 // Registry holds all available tools. The OllamaTools() output is
 // cached and invalidated on Register/Delete; the cache is safe for

@@ -151,16 +151,20 @@ func TestModuleIndex_Open_ReturnsPromptError(t *testing.T) {
 		holder.Close()
 	}()
 
+	// Override the timeout for fast feedback in CI. This MUST be set
+	// before launching the goroutine below: the goroutine's Open() reads
+	// bleveOpenTimeoutForTest, so writing it here (pre-launch) establishes
+	// a happens-before edge — writing it after the `go` statement is a data
+	// race the -race gate rightly catches.
+	prev := bleveOpenTimeoutForTest
+	bleveOpenTimeoutForTest = 200 * time.Millisecond
+	defer func() { bleveOpenTimeoutForTest = prev }()
+
 	done := make(chan error, 1)
 	go func() {
 		victim := NewModuleIndex(path)
 		done <- victim.Open()
 	}()
-
-	// Override the timeout for fast feedback in CI.
-	prev := bleveOpenTimeoutForTest
-	bleveOpenTimeoutForTest = 200 * time.Millisecond
-	defer func() { bleveOpenTimeoutForTest = prev }()
 
 	select {
 	case err := <-done:

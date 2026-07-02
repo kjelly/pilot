@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/ollama"
-	"github.com/anomalyco/pilot/internal/sanitizer"
 	"github.com/anomalyco/pilot/internal/ansible"
+	"github.com/anomalyco/pilot/internal/ollama"
 	"github.com/anomalyco/pilot/internal/sandbox"
+	"github.com/anomalyco/pilot/internal/sanitizer"
 	"github.com/anomalyco/pilot/internal/store"
 	"github.com/anomalyco/pilot/internal/tools"
 )
@@ -261,69 +261,17 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 		return DecisionRejected, fmt.Errorf("model called unknown tool %q", tc.Function.Name)
 	}
 
-	// Size cap: refuse tool calls with huge args. The model could
-	// otherwise pass an entire playbook as a base64 string and
-	// exhaust the context window before the tool even runs. We
-	// treat this as a recoverable rejection: persist a failed
-	// proposal, surface the error to the model as a tool result,
-	// and continue the loop so the model can retry with smaller
-	// args.
-	if len(tc.Function.Arguments) > maxToolArgsBytes {
-		errMsg := fmt.Sprintf("tool %q args too large: %d bytes (limit %d)",
-			tc.Function.Name, len(tc.Function.Arguments), maxToolArgsBytes)
-		p := NewProposal(
-			l.cfg.RunID,
-			"", "", json.RawMessage(tc.Function.Arguments),
-			errMsg, RiskMedium, "", false,
-		)
-		p.Status = StatusRejected
-		l.saveProposal(p)
-		l.appendToolResult(tc, "ERROR: "+errMsg)
-		if l.cfg.TUI != nil {
-			l.cfg.TUI.SendToolResult(tc.Function.Name, errMsg, true)
-		}
+	// Size cap: refuse tool calls with huge args (recoverable rejection).
+	if l.rejectOversizedArgs(tc) {
 		return DecisionRejected, nil
 	}
 
 	// Sanitize the incoming arguments (defense in depth)
 	sanitizedArgs := l.cfg.Sanitizer.Sanitize(string(tc.Function.Arguments))
 
-	// Extract proposal metadata from the args
-	host, rationale, risk, cis := extractProposalMeta(tc.Function.Arguments)
-	// Fallback: when the model didn't fill an explicit _rationale arg,
-	// use this turn's narration so the reviewer sees *why*, not a blank.
-	if rationale == "" {
-		if fb := strings.TrimSpace(l.lastAssistantText); fb != "" {
-			rationale = truncate(fb, 600)
-		}
-	}
-	risk = l.upgradeRiskForApply(risk, tc.Function.Name, tc.Function.Arguments)
-
-	p := NewProposal(
-		l.cfg.RunID,
-		host,
-		tc.Function.Name,
-		json.RawMessage(sanitizedArgs),
-		rationale,
-		risk,
-		cis,
-		toolSpec.Reversible,
-	)
-
-	// Notify the TUI that a tool is about to be called (before approval)
-	if l.cfg.TUI != nil {
-		l.cfg.TUI.SendToolCall(tc.Function.Name, truncateArgs(string(sanitizedArgs), 200))
-	}
-
-	// For run_ansible / apply_playbook, run a real --check --diff
-	// pre-flight so the human can see the actual proposed changes
-	// before approving. The check is run synchronously here (with a
-	// generous timeout) so the prompt the user sees contains the
-	// diff. If check=false is explicitly requested we still attempt
-	// it — it's read-only on the target.
-	if tc.Function.Name == "run_ansible" || tc.Function.Name == "apply_playbook" {
-		p.DryRunOutput = previewAnsibleRun(ctx, sanitizedArgs, l.cfg.Runner)
-	}
+	// Build the proposal (metadata extraction, rationale fallback, risk
+	// upgrade, TUI notification, and the run_ansible --check preview).
+	p, host := l.buildProposal(ctx, tc, sanitizedArgs, toolSpec.Reversible)
 
 	// Ask the human
 	decision := l.cfg.Approver.Ask(p)
@@ -351,39 +299,11 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 	now := time.Now()
 	p.ReviewedAt = &now
 
-	// Run the tool's Interceptor hook (may rewrite args or
-	// short-circuit). The Interceptor is the SINGLE place where dry-run
-	// policy is encoded; per-tool logic lives next to its Spec, not
-	// in the agent loop.
-	if toolSpec.Interceptor != nil {
-		ctxWithDryRun := tools.ContextWithDryRun(ctx, l.cfg.DryRun)
-		interceptResult, err := toolSpec.Interceptor(ctxWithDryRun, json.RawMessage(sanitizedArgs))
-		if err != nil {
-			l.reflectOnFailure(p, err.Error())
-			return DecisionRejected, fmt.Errorf("interceptor for %q failed: %w", tc.Function.Name, err)
-		}
-		if interceptResult != nil {
-			// Interceptor short-circuited the call.
-			return l.applySyntheticResult(tc, p, toolSpec, interceptResult)
-		}
-		// Interceptor may have signalled "rewrite args" by returning
-		// (nil, nil) under dry-run for run_ansible — apply the known
-		// rewrite. Other tools can extend this pattern by exposing a
-		// helper on the Spec (see RunPlaybookTool.OverrideCheckFlag).
-		if tc.Function.Name == "run_ansible" && l.cfg.DryRun {
-			var a struct {
-				Check *bool `json:"check"`
-			}
-			_ = json.Unmarshal(json.RawMessage(sanitizedArgs), &a)
-			if a.Check == nil || !*a.Check {
-				rewritten, err := tools.OverrideCheckFlag(json.RawMessage(sanitizedArgs))
-				if err != nil {
-					return DecisionRejected, err
-				}
-				sanitizedArgs = string(rewritten)
-				p.Args = json.RawMessage(sanitizedArgs)
-			}
-		}
+	// Run the tool's Interceptor hook (may rewrite sanitizedArgs or
+	// short-circuit the call). The Interceptor is the SINGLE place where
+	// dry-run policy is encoded; per-tool logic lives next to its Spec.
+	if handled, dec, err := l.applyInterceptor(ctx, tc, p, toolSpec, &sanitizedArgs); handled {
+		return dec, err
 	}
 
 	// Dry-run: tool is not safe to execute; record a "would do" proposal.
@@ -402,34 +322,9 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 		}
 	}
 
-	// Docker snapshot pre-execution: if sandbox is a Snapshotable, take a commit snapshot.
-	var snapshotID string
-	var snapshotErr error
-	var snapshotable sandbox.Snapshotable
-	if !l.cfg.DryRun && l.cfg.Env != nil && (tc.Function.Name == "run_ansible" || tc.Function.Name == "apply_playbook") {
-		var a struct {
-			Check *bool `json:"check"`
-		}
-		_ = json.Unmarshal([]byte(sanitizedArgs), &a)
-		if a.Check != nil && !*a.Check {
-			if snap, ok := l.cfg.Env.(sandbox.Snapshotable); ok {
-				snapshotable = snap
-				if l.cfg.TUI == nil {
-					fmt.Fprintln(l.cfg.StreamWriter, "📸 正在建立 Docker 沙箱狀態快照...")
-				}
-				snapshotID, snapshotErr = snap.CreateSnapshot(ctx)
-				if snapshotErr != nil {
-					if l.cfg.TUI == nil {
-						fmt.Fprintf(l.cfg.StreamWriter, "⚠️  建立快照失敗: %v\n", snapshotErr)
-					}
-				} else {
-					if l.cfg.TUI == nil {
-						fmt.Fprintf(l.cfg.StreamWriter, "✓ 快照建立成功: %s\n", snapshotID)
-					}
-				}
-			}
-		}
-	}
+	// Docker snapshot pre-execution: if the sandbox is Snapshotable and
+	// this is a real apply, take a commit snapshot for one-click rollback.
+	snapshotable, snapshotID := l.preExecSnapshot(ctx, tc, sanitizedArgs)
 
 	result, err := toolSpec.Execute(ctx, json.RawMessage(sanitizedArgs))
 	if err != nil {
@@ -493,115 +388,8 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 		l.cfg.TUI.SendToolResult(tc.Function.Name, sum, isErr)
 	}
 
-	// One-click rollback / recovery if a playbook run fails
-	if result != nil && result.IsError && (tc.Function.Name == "run_ansible" || tc.Function.Name == "apply_playbook") {
-		restored := false
-		if snapshotable != nil && snapshotID != "" {
-			if rollbacker, ok := l.cfg.Approver.(interface{ AskRollback(string) bool }); ok {
-				if rollbacker.AskRollback("⚠️  Playbook 執行失敗！是否直接還原 Docker 沙箱至執行前快照狀態？（注意：外部掛載卷 Volume 的修改將不會被還原）") {
-					if l.cfg.TUI == nil {
-						fmt.Fprintln(l.cfg.StreamWriter, "🔄 正在還原 Docker 沙箱狀態（注意：外部掛載卷 Volume 的修改無法還原）...")
-					}
-					if rerr := snapshotable.RestoreSnapshot(ctx, snapshotID); rerr == nil {
-						if l.cfg.TUI == nil {
-							fmt.Fprintln(l.cfg.StreamWriter, "✓ 沙箱狀態還原成功。")
-						} else {
-							l.cfg.TUI.SendToolResult("run_ansible", "Docker sandbox restored to pre-apply snapshot", false)
-						}
-						_ = snapshotable.DeleteSnapshot(ctx, snapshotID)
-						restored = true
-					} else {
-						if l.cfg.TUI == nil {
-							fmt.Fprintf(l.cfg.StreamWriter, "❌ 還原沙箱狀態失敗: %v\n", rerr)
-						} else {
-							l.cfg.TUI.SendToolResult("run_ansible", "Failed to restore Docker snapshot: "+rerr.Error(), true)
-						}
-					}
-				}
-			}
-		}
-		if !restored {
-			if rollbacker, ok := l.cfg.Approver.(interface{ AskRollback(string) bool }); ok {
-				if rollbacker.AskRollback("⚠️  Playbook 執行失敗！是否要一鍵還原 (Generate & Run Rollback)？") {
-				if l.cfg.TUI == nil {
-					fmt.Fprintln(l.cfg.StreamWriter, "🔄 正在生成還原 Playbook...")
-				}
-				rollbackTool, okGen := l.cfg.Tools.Get("generate_rollback")
-				runAnsibleTool, okRun := l.cfg.Tools.Get("run_ansible")
-				if okGen && okRun {
-					// 1. Generate rollback
-					genArgs, _ := json.Marshal(map[string]any{
-						"proposal_id":   p.ID,
-						"description":   p.Rationale,
-						"original_tool": p.Tool,
-						"original_args": string(p.Args),
-						"context":       result.Content,
-					})
-					genRes, err := rollbackTool.Execute(ctx, genArgs)
-					if err == nil && genRes != nil && !genRes.IsError {
-						var path string
-						if len(genRes.Metadata) > 0 {
-							var meta struct {
-								RollbackPath string `json:"rollback_path"`
-							}
-							if err := json.Unmarshal(genRes.Metadata, &meta); err == nil && meta.RollbackPath != "" {
-								path = meta.RollbackPath
-							}
-						}
-						if path == "" {
-							const prefix = "Rollback playbook written to: "
-							idxPath := strings.Index(genRes.Content, prefix)
-							if idxPath != -1 {
-								rem := genRes.Content[idxPath+len(prefix):]
-								endIdx := strings.Index(rem, "\n")
-								if endIdx != -1 {
-									path = strings.TrimSpace(rem[:endIdx])
-								}
-							}
-						}
-						if path != "" {
-							if l.cfg.TUI == nil {
-								fmt.Fprintf(l.cfg.StreamWriter, "▶ 正在套用還原 Playbook: %s...\n", path)
-							}
-							var orig struct {
-								Inventory string `json:"inventory"`
-								Limit     string `json:"limit"`
-							}
-							_ = json.Unmarshal(p.Args, &orig)
-
-							runArgs, _ := json.Marshal(map[string]any{
-								"playbook":  path,
-								"check":     false,
-								"inventory": orig.Inventory,
-								"limit":     orig.Limit,
-							})
-							runRes, runErr := runAnsibleTool.Execute(ctx, runArgs)
-							if runErr == nil && runRes != nil && !runRes.IsError {
-								if l.cfg.TUI == nil {
-									fmt.Fprintln(l.cfg.StreamWriter, "✓ 一鍵還原執行成功！系統已復原。")
-								} else {
-									l.cfg.TUI.SendToolResult("run_ansible", "Rollback applied successfully", false)
-								}
-							} else {
-								errMsg := ""
-								if runRes != nil {
-									errMsg = runRes.Content
-								} else if runErr != nil {
-									errMsg = runErr.Error()
-								}
-								if l.cfg.TUI == nil {
-									fmt.Fprintf(l.cfg.StreamWriter, "❌ 一鍵還原執行失敗: %s\n", errMsg)
-								} else {
-									l.cfg.TUI.SendToolResult("run_ansible", "Rollback failed: "+errMsg, true)
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-		}
-	}
+	// One-click rollback / recovery if a playbook run fails.
+	l.recoverFromFailedApply(ctx, tc, p, result, snapshotable, snapshotID)
 
 	// Per-host failure dedup: if tool errored, give model a chance to diagnose
 	// but only for the first failure per host per run.
@@ -616,6 +404,263 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 		_ = snapshotable.DeleteSnapshot(ctx, snapshotID)
 	}
 	return decision, nil
+}
+
+// rejectOversizedArgs enforces the tool-args size cap. The model could
+// otherwise pass an entire playbook as a base64 blob and exhaust the
+// context window before the tool runs. It is a recoverable rejection:
+// persist a failed proposal, surface the error to the model, and let the
+// caller continue the loop. Returns true when the call was rejected.
+// recoverFromFailedApply offers one-click recovery when a run_ansible /
+// apply_playbook call fails. It first offers to restore the pre-apply
+// Docker snapshot (if one was taken); failing that, it offers to generate
+// and run a rollback playbook. A no-op for any call that did not fail or is
+// not an apply.
+func (l *Loop) recoverFromFailedApply(ctx context.Context, tc ollama.ToolCall, p *Proposal, result *tools.Result, snapshotable sandbox.Snapshotable, snapshotID string) {
+	if result == nil || !result.IsError || (tc.Function.Name != "run_ansible" && tc.Function.Name != "apply_playbook") {
+		return
+	}
+	restored := false
+	if snapshotable != nil && snapshotID != "" {
+		if rollbacker, ok := l.cfg.Approver.(interface{ AskRollback(string) bool }); ok {
+			if rollbacker.AskRollback("⚠️  Playbook 執行失敗！是否直接還原 Docker 沙箱至執行前快照狀態？（注意：外部掛載卷 Volume 的修改將不會被還原）") {
+				if l.cfg.TUI == nil {
+					fmt.Fprintln(l.cfg.StreamWriter, "🔄 正在還原 Docker 沙箱狀態（注意：外部掛載卷 Volume 的修改無法還原）...")
+				}
+				if rerr := snapshotable.RestoreSnapshot(ctx, snapshotID); rerr == nil {
+					if l.cfg.TUI == nil {
+						fmt.Fprintln(l.cfg.StreamWriter, "✓ 沙箱狀態還原成功。")
+					} else {
+						l.cfg.TUI.SendToolResult("run_ansible", "Docker sandbox restored to pre-apply snapshot", false)
+					}
+					_ = snapshotable.DeleteSnapshot(ctx, snapshotID)
+					restored = true
+				} else {
+					if l.cfg.TUI == nil {
+						fmt.Fprintf(l.cfg.StreamWriter, "❌ 還原沙箱狀態失敗: %v\n", rerr)
+					} else {
+						l.cfg.TUI.SendToolResult("run_ansible", "Failed to restore Docker snapshot: "+rerr.Error(), true)
+					}
+				}
+			}
+		}
+	}
+	if restored {
+		return
+	}
+	rollbacker, ok := l.cfg.Approver.(interface{ AskRollback(string) bool })
+	if !ok || !rollbacker.AskRollback("⚠️  Playbook 執行失敗！是否要一鍵還原 (Generate & Run Rollback)？") {
+		return
+	}
+	if l.cfg.TUI == nil {
+		fmt.Fprintln(l.cfg.StreamWriter, "🔄 正在生成還原 Playbook...")
+	}
+	rollbackTool, okGen := l.cfg.Tools.Get("generate_rollback")
+	runAnsibleTool, okRun := l.cfg.Tools.Get("run_ansible")
+	if !okGen || !okRun {
+		return
+	}
+	// 1. Generate rollback
+	genArgs, _ := json.Marshal(map[string]any{
+		"proposal_id":   p.ID,
+		"description":   p.Rationale,
+		"original_tool": p.Tool,
+		"original_args": string(p.Args),
+		"context":       result.Content,
+	})
+	genRes, err := rollbackTool.Execute(ctx, genArgs)
+	if err != nil || genRes == nil || genRes.IsError {
+		return
+	}
+	var path string
+	if len(genRes.Metadata) > 0 {
+		var meta struct {
+			RollbackPath string `json:"rollback_path"`
+		}
+		if err := json.Unmarshal(genRes.Metadata, &meta); err == nil && meta.RollbackPath != "" {
+			path = meta.RollbackPath
+		}
+	}
+	if path == "" {
+		const prefix = "Rollback playbook written to: "
+		idxPath := strings.Index(genRes.Content, prefix)
+		if idxPath != -1 {
+			rem := genRes.Content[idxPath+len(prefix):]
+			endIdx := strings.Index(rem, "\n")
+			if endIdx != -1 {
+				path = strings.TrimSpace(rem[:endIdx])
+			}
+		}
+	}
+	if path == "" {
+		return
+	}
+	if l.cfg.TUI == nil {
+		fmt.Fprintf(l.cfg.StreamWriter, "▶ 正在套用還原 Playbook: %s...\n", path)
+	}
+	var orig struct {
+		Inventory string `json:"inventory"`
+		Limit     string `json:"limit"`
+	}
+	_ = json.Unmarshal(p.Args, &orig)
+
+	runArgs, _ := json.Marshal(map[string]any{
+		"playbook":  path,
+		"check":     false,
+		"inventory": orig.Inventory,
+		"limit":     orig.Limit,
+	})
+	runRes, runErr := runAnsibleTool.Execute(ctx, runArgs)
+	if runErr == nil && runRes != nil && !runRes.IsError {
+		if l.cfg.TUI == nil {
+			fmt.Fprintln(l.cfg.StreamWriter, "✓ 一鍵還原執行成功！系統已復原。")
+		} else {
+			l.cfg.TUI.SendToolResult("run_ansible", "Rollback applied successfully", false)
+		}
+		return
+	}
+	errMsg := ""
+	if runRes != nil {
+		errMsg = runRes.Content
+	} else if runErr != nil {
+		errMsg = runErr.Error()
+	}
+	if l.cfg.TUI == nil {
+		fmt.Fprintf(l.cfg.StreamWriter, "❌ 一鍵還原執行失敗: %s\n", errMsg)
+	} else {
+		l.cfg.TUI.SendToolResult("run_ansible", "Rollback failed: "+errMsg, true)
+	}
+}
+
+func (l *Loop) rejectOversizedArgs(tc ollama.ToolCall) bool {
+	if len(tc.Function.Arguments) <= maxToolArgsBytes {
+		return false
+	}
+	errMsg := fmt.Sprintf("tool %q args too large: %d bytes (limit %d)",
+		tc.Function.Name, len(tc.Function.Arguments), maxToolArgsBytes)
+	p := NewProposal(l.cfg.RunID, "", "", json.RawMessage(tc.Function.Arguments), errMsg, RiskMedium, "", false)
+	p.Status = StatusRejected
+	l.saveProposal(p)
+	l.appendToolResult(tc, "ERROR: "+errMsg)
+	if l.cfg.TUI != nil {
+		l.cfg.TUI.SendToolResult(tc.Function.Name, errMsg, true)
+	}
+	return true
+}
+
+// buildProposal assembles the Proposal shown to the human: it extracts
+// metadata from the args, falls back to this turn's narration for a blank
+// rationale, upgrades the risk for apply-mode runs, notifies the TUI, and
+// runs the run_ansible/apply_playbook --check preview. It returns the
+// proposal and the resolved host (needed later for per-host dedup).
+func (l *Loop) buildProposal(ctx context.Context, tc ollama.ToolCall, sanitizedArgs string, reversible bool) (*Proposal, string) {
+	host, rationale, risk, cis := extractProposalMeta(tc.Function.Arguments)
+	if rationale == "" {
+		if fb := strings.TrimSpace(l.lastAssistantText); fb != "" {
+			rationale = truncate(fb, 600)
+		}
+	}
+	risk = l.upgradeRiskForApply(risk, tc.Function.Name, tc.Function.Arguments)
+
+	p := NewProposal(
+		l.cfg.RunID,
+		host,
+		tc.Function.Name,
+		json.RawMessage(sanitizedArgs),
+		rationale,
+		risk,
+		cis,
+		reversible,
+	)
+
+	// Notify the TUI that a tool is about to be called (before approval).
+	if l.cfg.TUI != nil {
+		l.cfg.TUI.SendToolCall(tc.Function.Name, truncateArgs(string(sanitizedArgs), 200))
+	}
+
+	// For run_ansible / apply_playbook, run a real --check --diff pre-flight
+	// so the human sees the actual proposed changes before approving. Even
+	// if check=false is requested, this is read-only on the target.
+	if tc.Function.Name == "run_ansible" || tc.Function.Name == "apply_playbook" {
+		p.DryRunOutput = previewAnsibleRun(ctx, sanitizedArgs, l.cfg.Runner)
+	}
+	return p, host
+}
+
+// applyInterceptor runs the tool's Interceptor hook. It may rewrite
+// *sanitizedArgs (and p.Args) or short-circuit the call. It returns
+// handled=true when the caller must return (dec, err) immediately — either
+// because the interceptor errored or produced a synthetic result. A
+// handled=false return means "proceed to execute" (args may have been
+// rewritten in place).
+func (l *Loop) applyInterceptor(ctx context.Context, tc ollama.ToolCall, p *Proposal, toolSpec *tools.Spec, sanitizedArgs *string) (handled bool, dec Decision, err error) {
+	if toolSpec.Interceptor == nil {
+		return false, DecisionApproved, nil
+	}
+	ctxWithDryRun := tools.ContextWithDryRun(ctx, l.cfg.DryRun)
+	interceptResult, ierr := toolSpec.Interceptor(ctxWithDryRun, json.RawMessage(*sanitizedArgs))
+	if ierr != nil {
+		l.reflectOnFailure(p, ierr.Error())
+		return true, DecisionRejected, fmt.Errorf("interceptor for %q failed: %w", tc.Function.Name, ierr)
+	}
+	if interceptResult != nil {
+		// Interceptor short-circuited the call.
+		d, e := l.applySyntheticResult(tc, p, toolSpec, interceptResult)
+		return true, d, e
+	}
+	// Interceptor may have signalled "rewrite args" by returning (nil, nil)
+	// under dry-run for run_ansible — apply the known rewrite. Other tools
+	// can extend this pattern via a helper on the Spec (see OverrideCheckFlag).
+	if tc.Function.Name == "run_ansible" && l.cfg.DryRun {
+		var a struct {
+			Check *bool `json:"check"`
+		}
+		_ = json.Unmarshal(json.RawMessage(*sanitizedArgs), &a)
+		if a.Check == nil || !*a.Check {
+			rewritten, rerr := tools.OverrideCheckFlag(json.RawMessage(*sanitizedArgs))
+			if rerr != nil {
+				return true, DecisionRejected, rerr
+			}
+			*sanitizedArgs = string(rewritten)
+			p.Args = json.RawMessage(*sanitizedArgs)
+		}
+	}
+	return false, DecisionApproved, nil
+}
+
+// preExecSnapshot takes a pre-execution commit snapshot of the sandbox when
+// it is Snapshotable and this is a real (check=false) apply of a playbook,
+// enabling one-click rollback if the apply fails. Returns the Snapshotable
+// and snapshot id (both zero when no snapshot was taken).
+func (l *Loop) preExecSnapshot(ctx context.Context, tc ollama.ToolCall, sanitizedArgs string) (sandbox.Snapshotable, string) {
+	if l.cfg.DryRun || l.cfg.Env == nil || (tc.Function.Name != "run_ansible" && tc.Function.Name != "apply_playbook") {
+		return nil, ""
+	}
+	var a struct {
+		Check *bool `json:"check"`
+	}
+	_ = json.Unmarshal([]byte(sanitizedArgs), &a)
+	if a.Check == nil || *a.Check {
+		return nil, ""
+	}
+	snap, ok := l.cfg.Env.(sandbox.Snapshotable)
+	if !ok {
+		return nil, ""
+	}
+	if l.cfg.TUI == nil {
+		fmt.Fprintln(l.cfg.StreamWriter, "📸 正在建立 Docker 沙箱狀態快照...")
+	}
+	snapshotID, snapErr := snap.CreateSnapshot(ctx)
+	if snapErr != nil {
+		if l.cfg.TUI == nil {
+			fmt.Fprintf(l.cfg.StreamWriter, "⚠️  建立快照失敗: %v\n", snapErr)
+		}
+		return snap, ""
+	}
+	if l.cfg.TUI == nil {
+		fmt.Fprintf(l.cfg.StreamWriter, "✓ 快照建立成功: %s\n", snapshotID)
+	}
+	return snap, snapshotID
 }
 
 func (l *Loop) saveProposal(p *Proposal) {
@@ -679,10 +724,10 @@ func (l *Loop) persistMessage(role, content string, toolCalls json.RawMessage) {
 // LLM calls the same tool+args twice in a row, it is almost certainly
 // stuck in a retry loop (the classic "let me try the same thing one
 // more time" pattern). On the THIRD identical call we:
-//   1. Append a "LOOP GUARD" footer to the tool result so the user
-//      sees the final state.
-//   2. Return true so the agent loop can abort cleanly with a
-//      clear final message instead of looping forever.
+//  1. Append a "LOOP GUARD" footer to the tool result so the user
+//     sees the final state.
+//  2. Return true so the agent loop can abort cleanly with a
+//     clear final message instead of looping forever.
 //
 // Returns true when the loop should abort, false otherwise.
 func (l *Loop) recordAndMaybeBreakLoop(tc ollama.ToolCall, summary string) bool {
@@ -709,9 +754,9 @@ func (l *Loop) recordAndMaybeBreakLoop(tc ollama.ToolCall, summary string) bool 
 //   - A FAILED playbook run clears playbookSucceeded — the model
 //     legitimately needs a fresh budget of probes to diagnose/fix.
 //   - Each read-only probe after success increments the counter:
-//       1st probe → allowed silently (verifying the result is fine)
-//       2nd probe → soft nudge appended to the tool result
-//       3rd probe → LOOP GUARD footer appended and the loop aborts
+//     1st probe → allowed silently (verifying the result is fine)
+//     2nd probe → soft nudge appended to the tool result
+//     3rd probe → LOOP GUARD footer appended and the loop aborts
 //
 // Mutating tools (run_ansible/apply_playbook) and ask_user are never
 // counted as probes — they represent real follow-up work.
@@ -767,7 +812,6 @@ func (l *Loop) appendToolResult(tc ollama.ToolCall, content string) {
 	// Persist the wrapped form so audit logs reflect what the model saw.
 	l.persistMessage("tool", wrapped, nil)
 }
-
 
 func marshalToolCalls(tcs []ollama.ToolCall) json.RawMessage {
 	if len(tcs) == 0 {
@@ -856,7 +900,6 @@ func truncateArgs(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
-
 
 // applySyntheticResult is called when a tool's Interceptor short-circuits
 // the actual execution (e.g. to surface a synthetic dry-run preview).
@@ -992,22 +1035,22 @@ func previewAnsibleRun(ctx context.Context, args string, runner *ansible.Runner)
 	// by the tool's Execute() so the preview exactly mirrors the
 	// real run.
 	var a struct {
-		Playbook          string            `json:"playbook"`
-		Inventory         string            `json:"inventory"`
-		Limit             string            `json:"limit"`
-		Check             *bool             `json:"check"`
-		Tags              []string          `json:"tags"`
-		SkipTags          []string          `json:"skip_tags"`
-		ExtraVars         map[string]any    `json:"extra_vars"`
-		RawExtraVars      string            `json:"extra_vars_raw"`
-		Become            *bool             `json:"become"`
-		Forks             *int              `json:"forks"`
-		User              string            `json:"user"`
-		Connection        string            `json:"connection"`
-		VaultPasswordFile string            `json:"vault_password_file"`
-		Diff              *bool             `json:"diff"`
-		Timeout           *int              `json:"timeout"`
-		FlushCache        *bool             `json:"flush_cache"`
+		Playbook          string         `json:"playbook"`
+		Inventory         string         `json:"inventory"`
+		Limit             string         `json:"limit"`
+		Check             *bool          `json:"check"`
+		Tags              []string       `json:"tags"`
+		SkipTags          []string       `json:"skip_tags"`
+		ExtraVars         map[string]any `json:"extra_vars"`
+		RawExtraVars      string         `json:"extra_vars_raw"`
+		Become            *bool          `json:"become"`
+		Forks             *int           `json:"forks"`
+		User              string         `json:"user"`
+		Connection        string         `json:"connection"`
+		VaultPasswordFile string         `json:"vault_password_file"`
+		Diff              *bool          `json:"diff"`
+		Timeout           *int           `json:"timeout"`
+		FlushCache        *bool          `json:"flush_cache"`
 	}
 	if err := json.Unmarshal([]byte(args), &a); err != nil {
 		return fmt.Sprintf("(could not parse args for preview: %v)", err)

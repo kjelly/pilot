@@ -556,19 +556,8 @@ func vtStageInventory() (*vmtarget.Target, func(), string, error) {
 	if err != nil {
 		return nil, func() {}, "", err
 	}
-	f, err := os.CreateTemp("", "pilot-vt-inv-*.yaml")
+	path, cleanup, err := writeTempInventory(inv)
 	if err != nil {
-		return nil, func() {}, "", fmt.Errorf("create inventory tmpfile: %w", err)
-	}
-	path := f.Name()
-	cleanup := func() { os.Remove(path) }
-	if _, err := f.WriteString(inv); err != nil {
-		f.Close()
-		cleanup()
-		return nil, func() {}, "", err
-	}
-	if err := f.Close(); err != nil {
-		cleanup()
 		return nil, func() {}, "", err
 	}
 	return t, cleanup, path, nil
