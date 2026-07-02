@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,7 +144,7 @@ func runIndexDocs(cmd *cobra.Command, args []string) error {
 	// Remove legacy JSON index if present.
 	if _, err := os.Stat(legacyPath); err == nil {
 		if err := os.Remove(legacyPath); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to remove legacy index %s: %v\n", legacyPath, err)
+			slog.Warn("failed to remove legacy index", "path", legacyPath, "err", err)
 		}
 	}
 

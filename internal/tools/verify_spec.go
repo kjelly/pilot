@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"regexp"
@@ -207,7 +208,7 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 	if shellMetachars(r.Command) {
 		module = "shell"
 	}
-	fmt.Fprintf(os.Stderr, "[verify-adhoc] module=%s cmd=%q\n", module, r.Command)
+	slog.Debug("verify ad-hoc", "module", module, "cmd", r.Command)
 	args := []string{target, "-i", t.Inventory, "-m", module, "-a", r.Command, "--one-line"}
 	if t.Limit != "" {
 		args = append(args, "-l", t.Limit)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/anomalyco/pilot/internal/app"
 	"github.com/anomalyco/pilot/internal/config"
 	"github.com/anomalyco/pilot/internal/dockertarget"
+	"github.com/anomalyco/pilot/internal/logx"
 	"github.com/anomalyco/pilot/internal/store"
 	"github.com/anomalyco/pilot/internal/ui/tui"
 )
@@ -25,8 +27,9 @@ var (
 	stream    bool
 	autoOK    string
 	dataDir   string
-	noTUI     bool // deprecated
-	useTUI    bool // --tui (persistent flag, default false)
+	logLevel  string // --log-level (persistent); default from $PILOT_LOG_LEVEL or "warn"
+	noTUI     bool   // deprecated
+	useTUI    bool   // --tui (persistent flag, default false)
 
 	// index management
 	runNoIndex        bool
@@ -44,6 +47,18 @@ var rootCmd = &cobra.Command{
 It uses a local or cloud Ollama model to reason about failures, generate fixes,
 and propose Ansible playbooks — but every write is gated by human approval.`,
 	Version: "0.2.0",
+	// PersistentPreRun installs the diagnostic logger before any command
+	// runs, so every `slog.Warn/Debug/...` call is leveled and formatted
+	// consistently. User-facing UX output is unaffected (it never goes
+	// through slog). The default level is WARN, overridable via --log-level
+	// or $PILOT_LOG_LEVEL; $PILOT_LOG_FORMAT=json switches to JSON output.
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		lvl := logLevel
+		if lvl == "" {
+			lvl = os.Getenv("PILOT_LOG_LEVEL")
+		}
+		logx.Init(lvl, os.Getenv("PILOT_LOG_FORMAT"), os.Stderr)
+	},
 }
 
 func Execute() error {
@@ -57,6 +72,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&stream, "stream", true, "stream LLM responses")
 	rootCmd.PersistentFlags().StringVar(&autoOK, "auto-approve", "", "auto-approve proposals by risk: low|medium|never")
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "data directory for proposals, db, generated playbooks")
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "diagnostic log level: debug|info|warn|error (default warn; also $PILOT_LOG_LEVEL)")
 	// TUI defaults to OFF. Use --tui to opt in. The flag respects TTY:
 	//   --tui + TTY       → Bubbletea TUI
 	//   --tui + no TTY    → falls back to promptui (with a one-line notice)
@@ -94,7 +110,7 @@ var versionCmd = &cobra.Command{
 func loadConfig() *config.Config {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to load config: %v\n", err)
+		slog.Warn("failed to load config; using defaults", "err", err)
 		cfg = config.Default()
 	}
 	if ollamaURL != "" {
@@ -159,21 +175,22 @@ func resolveTargetInventory() string {
 	cfg := loadConfig()
 	m, err := dockertarget.NewManager(cfg.DataDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: --target %q: %v\n", runTarget, err)
+		slog.Warn("--target: docker-target manager", "target", runTarget, "err", err)
 		return ""
 	}
 	t, err := m.Get(context.Background(), runTarget)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: --target %q: %v\n", runTarget, err)
+		slog.Warn("--target: lookup", "target", runTarget, "err", err)
 		return ""
 	}
 	if t.Status != dockertarget.StatusRunning {
-		fmt.Fprintf(os.Stderr, `warning: --target %q not running (status=%s); bring it up with `+"`pilot docker-target up --name %s`"+`\n`, runTarget, t.Status, runTarget)
+		slog.Warn("--target not running; bring it up with `pilot docker-target up`",
+			"target", runTarget, "status", t.Status)
 		return ""
 	}
 	inv, err := t.RenderInventory()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: --target %q render inventory: %v\n", runTarget, err)
+		slog.Warn("--target: render inventory", "target", runTarget, "err", err)
 		return ""
 	}
 	f, err := os.CreateTemp("", "pilot-run-target-*.yaml")

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +22,7 @@ import (
 	"github.com/anomalyco/pilot/internal/config"
 	"github.com/anomalyco/pilot/internal/dockertarget"
 	"github.com/anomalyco/pilot/internal/docs"
+	"github.com/anomalyco/pilot/internal/logx"
 	"github.com/anomalyco/pilot/internal/ollama"
 	"github.com/anomalyco/pilot/internal/sandbox"
 	"github.com/anomalyco/pilot/internal/sanitizer"
@@ -48,6 +50,10 @@ type App struct {
 	// the docker CLI invocation honours the same cancellation as
 	// the rest of the app.
 	ctx context.Context
+	// logFile, when non-nil, is the diagnostic log slog was redirected to
+	// while the TUI owns the terminal (so warnings don't smear the UI).
+	// Closed and un-redirected in Close().
+	logFile *os.File
 }
 
 // Options controls how App is built. The zero value is usable and
@@ -142,7 +148,7 @@ func New(ctx context.Context, cfg *config.Config, opt Options) (*App, error) {
 				Description: cr.Description,
 			})
 		} else {
-			fmt.Fprintf(os.Stderr, "warning: invalid custom redact regex %q: %v\n", cr.Pattern, err)
+			slog.Warn("invalid custom redact regex; skipping", "pattern", cr.Pattern, "err", err)
 		}
 	}
 	redactor := sanitizer.NewWith(extraRules...)
@@ -185,6 +191,14 @@ func New(ctx context.Context, cfg *config.Config, opt Options) (*App, error) {
 	} else if tui.IsSupported(uintptr(os.Stderr.Fd())) {
 		app.TUI = tui.New(st)
 		app.TUI.Start()
+		// The TUI owns the terminal now; slog diagnostics on stderr would
+		// smear the rendered UI. Redirect them to a logfile for the TUI's
+		// lifetime (restored in Close()).
+		if lf, err := os.OpenFile(filepath.Join(cfg.DataDir, "pilot.log"),
+			os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+			app.logFile = lf
+			logx.Redirect(lf)
+		}
 		if opt.Banner {
 			fmt.Fprintln(os.Stderr, "💡 TUI active (Ctrl-C to quit, ? for help)")
 		}
@@ -385,6 +399,12 @@ func (a *App) Close() {
 	if a.TUI != nil {
 		a.TUI.Shutdown()
 		a.TUI = nil
+	}
+	if a.logFile != nil {
+		// TUI is down; send diagnostics back to stderr and close the file.
+		logx.Redirect(os.Stderr)
+		_ = a.logFile.Close()
+		a.logFile = nil
 	}
 	if a.Env != nil {
 		_ = a.Env.Stop(context.Background())

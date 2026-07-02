@@ -46,6 +46,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -695,7 +696,7 @@ func (m *Manager) teardown(ctx context.Context, t *Target) {
 	_, _ = m.virsh(ctx, "undefine", t.Name,
 		"--snapshots-metadata", "--managed-save", "--nvram") // ignore "not found"
 	if err := m.removeStaticIP(ctx, t); err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: failed to remove static IP reservation for %s: %v\n", t.Name, err)
+		slog.Warn("failed to remove static IP reservation", "target", t.Name, "err", err)
 	}
 	if t.Dir != "" {
 		_ = os.RemoveAll(t.Dir)

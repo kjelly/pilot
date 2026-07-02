@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -22,7 +23,7 @@ var playbookEmbedMod = "nomic-embed-text"
 // rebuild. Returns true if a rebuild was performed.
 func ensureDocsIndex(ctx context.Context, dataDir string) (rebuilt bool, err error) {
 	if err := ensurePlaybooksIndex(ctx, dataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: ensurePlaybooksIndex: %v\n", err)
+		slog.Warn("ensurePlaybooksIndex failed", "err", err)
 	}
 
 	ver, err := docs.AnsibleVersion(ctx)

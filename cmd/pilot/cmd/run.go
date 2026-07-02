@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -206,7 +207,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if !runNoIndex {
 		if _, err := ensureDocsIndex(ctx, res.Cfg.DataDir); err != nil {
 			if res.TUI == nil {
-				fmt.Fprintf(os.Stderr, "warning: ensureDocsIndex: %v\n", err)
+				slog.Warn("ensureDocsIndex failed", "err", err)
 			}
 		}
 	}

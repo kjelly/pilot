@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -56,7 +57,7 @@ func runSearchDocs(cmd *cobra.Command, args []string) error {
 	modIdx := docs.NewModuleIndex(blevePath)
 	modErr := modIdx.Open()
 	if modErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: module index not found at %s (run `pilot index-docs` first): %v\n", blevePath, modErr)
+		slog.Warn("module index not found (run `pilot index-docs` first)", "path", blevePath, "err", modErr)
 	}
 	if source == docs.SourceModule {
 		if modErr != nil {
@@ -79,7 +80,7 @@ func runSearchDocs(cmd *cobra.Command, args []string) error {
 	pbIdx := docs.NewIndex()
 	pbPath := docs.PathFor(cfg.DataDir, docs.SourcePlaybook)
 	if err := pbIdx.Load(pbPath); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: playbook index not found at %s\n", pbPath)
+		slog.Warn("playbook index not found", "path", pbPath)
 	}
 
 	// Playbook search still needs an embedder; set up the Ollama client

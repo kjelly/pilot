@@ -193,6 +193,23 @@ dry-run skip → preExecSnapshot → Execute → persist → loop-guards →
 recoverFromFailedApply → per-host dedup`。每個階段是獨立的具名 method。加新階段
 時延續這個切法，不要把邏輯塞回主函式變回 god function。
 
+### 5.5 三種輸出管道分清楚（error / 診斷 / 使用者 UX）
+
+pilot 有三種輸出，**不要混用**：
+
+1. **回傳的 error** — 主要控制流。用 `%w` 包裝往上回傳。**不要對同一個 error
+   又 log 又 return**（log XOR return）；由最上層決定怎麼呈現。
+2. **診斷（diagnostics）** — 「復原型」警告（"index 找不到，繼續"）、內部
+   debug trace。一律走 **`log/slog`**（`slog.Warn/Debug/Error(msg, "key", val)`）。
+   由 `internal/logx` 設定：分級（預設 WARN）、結構化 k/v、可被 `--log-level`
+   /`$PILOT_LOG_LEVEL` 調整、TUI 啟動時自動改寫到 `pilot.log` 不污染畫面。
+   **新的內部診斷寫 `slog`，不要再 `fmt.Fprintf(os.Stderr, "warning: …")`。**
+3. **使用者 UX** — agent 的 LLM stream、提案、進度、結果（含 emoji 狀態行）。
+   走 CLI writer（`cmd.OutOrStdout()`/`ErrOrStderr()`、`cfg.StreamWriter`）或
+   TUI。這是產品介面,**不是 log**,不要塞進 slog（會被分級藏掉、破壞 UX）。
+
+判斷：**使用者為了完成任務需要看到的 → UX；操作者 debug 時才需要的 → slog。**
+
 ---
 
 ## 6. 不要做的事
@@ -213,3 +230,4 @@ recoverFromFailedApply → per-host dedup`。每個階段是獨立的具名 meth
 | 2026-07-01 | v1.0 | 初版（spec-vs-inventory 事故後寫的硬規則）| sre |
 | 2026-07-01 | v1.1 | §4 加 apply playbook `tags:` 硬規則（對齊 spec ID / 多 role 命名空間 / `--list-tags` 驗證）| sre |
 | 2026-07-02 | v1.2 | §5 大幅擴充 Go 架構約定（`-race` gate、target 兩份平行實作、`statefile`/`writeTempInventory` 共用層、per-call option 不寫回欄位、加 tool 步驟 + schema/struct 同步、Interceptor 雙路徑、`handleToolCall` pipeline）| sre |
+| 2026-07-02 | v1.3 | §5.5 三種輸出管道約定（error / `slog` 診斷 / 使用者 UX）；導入 `internal/logx` 結構化 logging，`--log-level`/`$PILOT_LOG_LEVEL`| sre |
