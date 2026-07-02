@@ -675,6 +675,101 @@ func TestResizeDisk_HappyPath(t *testing.T) {
 	}
 }
 
+// newResizeManager builds a Manager whose virsh and qemu-img shims both log
+// their argv, so a test can assert exactly which tool ResizeDisk drove. The
+// virsh domstate reply is controlled by `domState` ("running" vs "shut off"),
+// which is what ResizeDisk branches on. Returns the manager, a fake base
+// image, and the two argv log paths.
+func newResizeManager(t *testing.T, domState string) (m *Manager, base, virshLog, qemuLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	virshLog = filepath.Join(dir, "virsh.log")
+	qemuLog = filepath.Join(dir, "qemu-img.log")
+
+	// happyVirsh but with a caller-chosen domstate, and argv logging.
+	body := strings.Replace(happyVirsh,
+		`domstate)           echo "running" ; exit 0 ;;`,
+		fmt.Sprintf(`domstate)           echo %q ; exit 0 ;;`, domState), 1)
+	virshScript := fmt.Sprintf("echo \"$@\" >> %q\ncase \"$1\" in\n%s\nesac", virshLog, body)
+	writeShim(t, dir, "virsh", "PILOT_VIRSH_BIN", virshScript)
+	writeShim(t, dir, "qemu-img", "PILOT_QEMU_IMG_BIN",
+		fmt.Sprintf(`echo "$@" >> %q; exit 0`, qemuLog))
+	writeShim(t, dir, "cloud-localds", "PILOT_CLOUD_LOCALDS_BIN", `: > "$1" 2>/dev/null; exit 0`)
+	writeShim(t, dir, "ssh", "PILOT_SSH_BIN", sshShim)
+	writeShim(t, dir, "ssh-keygen", "PILOT_SSH_KEYGEN_BIN", keygenShim)
+
+	base = filepath.Join(dir, "base.qcow2")
+	if err := os.WriteFile(base, []byte("fake-qcow2"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	var err error
+	m, err = NewManager(filepath.Join(dir, "state"), filepath.Join(dir, "vmdir"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	m.bootTimeout = 300 * time.Millisecond
+	m.sshTimeout = 300 * time.Millisecond
+	m.pollInterval = 5 * time.Millisecond
+	return m, base, virshLog, qemuLog
+}
+
+// TestResizeDisk_RunningUsesBlockresize locks the bug fix: on a RUNNING VM the
+// overlay is locked/owned by the qemu process, so ResizeDisk must grow it via
+// `virsh blockresize` (through libvirtd) and must NOT touch it with a direct
+// `qemu-img resize`, which fails with "Permission denied".
+func TestResizeDisk_RunningUsesBlockresize(t *testing.T) {
+	m, base, virshLog, qemuLog := newResizeManager(t, "running")
+	if _, err := m.Up(context.Background(), Options{Name: "grow", BaseImage: base, DiskGB: 30}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	// Ignore any qemu-img create argv logged during Up.
+	if err := os.WriteFile(qemuLog, nil, 0o644); err != nil {
+		t.Fatalf("truncate qemu log: %v", err)
+	}
+	if err := m.ResizeDisk(context.Background(), "grow", 60); err != nil {
+		t.Fatalf("ResizeDisk: %v", err)
+	}
+
+	vlog, _ := os.ReadFile(virshLog)
+	if !strings.Contains(string(vlog), "blockresize") || !strings.Contains(string(vlog), "60G") {
+		t.Errorf("running resize must call `virsh blockresize ... 60G`, virsh log:\n%s", vlog)
+	}
+	if qlog, _ := os.ReadFile(qemuLog); strings.Contains(string(qlog), "resize") {
+		t.Errorf("running resize must NOT call `qemu-img resize` (overlay is locked by qemu); qemu-img log:\n%s", qlog)
+	}
+}
+
+// TestResizeDisk_StoppedUsesQemuImg is the complement: with no running qemu
+// holding the lock, ResizeDisk grows the file directly with `qemu-img resize`
+// and does not need blockresize.
+func TestResizeDisk_StoppedUsesQemuImg(t *testing.T) {
+	m, base, virshLog, qemuLog := newResizeManager(t, "running")
+	if _, err := m.Up(context.Background(), Options{Name: "grow", BaseImage: base, DiskGB: 30}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	// Flip the domstate shim so the VM now reports stopped, and reset logs so
+	// we only see the resize-time argv.
+	writeShim(t, filepath.Dir(virshLog), "virsh", "PILOT_VIRSH_BIN",
+		fmt.Sprintf("echo \"$@\" >> %q\ncase \"$1\" in domstate) echo \"shut off\" ;; *) exit 0 ;; esac", virshLog))
+	if err := os.WriteFile(virshLog, nil, 0o644); err != nil {
+		t.Fatalf("truncate virsh log: %v", err)
+	}
+	if err := os.WriteFile(qemuLog, nil, 0o644); err != nil {
+		t.Fatalf("truncate qemu log: %v", err)
+	}
+	if err := m.ResizeDisk(context.Background(), "grow", 60); err != nil {
+		t.Fatalf("ResizeDisk: %v", err)
+	}
+
+	qlog, _ := os.ReadFile(qemuLog)
+	if !strings.Contains(string(qlog), "resize") || !strings.Contains(string(qlog), "60G") {
+		t.Errorf("stopped resize must call `qemu-img resize ... 60G`, qemu-img log:\n%s", qlog)
+	}
+	if vlog, _ := os.ReadFile(virshLog); strings.Contains(string(vlog), "blockresize") {
+		t.Errorf("stopped resize must NOT call `virsh blockresize`; virsh log:\n%s", vlog)
+	}
+}
+
 // TestResizeDisk_RejectsShrink verifies that ResizeDisk refuses a size
 // smaller than or equal to the current one.
 func TestResizeDisk_RejectsShrink(t *testing.T) {

@@ -1039,15 +1039,21 @@ func (m *Manager) Reset(ctx context.Context, name string) error {
 
 // ResizeDisk grows the root disk of an existing target to newGB GiB.
 // Only grow is supported — shrinking a qcow2 overlay is destructive and
-// not a safe online operation. The resize is done in two steps:
+// not a safe online operation.
 //
-//  1. `qemu-img resize overlay.qcow2 <newGB>G` — grows the file.
-//  2. `virsh blockresize <domain> <overlay> <newGB>G` — notifies the
-//     running VM so the kernel sees the larger block device immediately
-//     (no reboot needed; the guest can then `growpart` + `resize2fs`).
+// The tool used depends on whether the VM is running, because a running
+// VM's qemu process holds an exclusive write-lock on (and typically owns,
+// as libvirt-qemu) the overlay file:
 //
-// If the VM is not running, only step 1 is performed (the guest will
-// see the new size on next boot).
+//   - Running: `virsh blockresize <domain> <overlay> <newGB>G` — libvirtd
+//     directs the running qemu process (the lock holder) to grow the qcow2
+//     in place AND notifies the guest kernel, so the larger block device is
+//     visible immediately with no reboot (the guest can then `growpart` +
+//     `resize2fs`). Running `qemu-img resize` directly here fails with
+//     "Permission denied" / "Failed to get shared write lock".
+//   - Stopped: `qemu-img resize overlay.qcow2 <newGB>G` — no qemu process,
+//     so the file is unlocked and writable; the guest sees the new size on
+//     next boot.
 //
 // The target's DiskGB in the state file is updated on success.
 func (m *Manager) ResizeDisk(ctx context.Context, name string, newGB int) error {
@@ -1084,30 +1090,29 @@ func (m *Manager) ResizeDisk(ctx context.Context, name string, newGB int) error 
 		return fmt.Errorf("vmtarget: new size %dG must be larger than current %dG (shrink is not supported)", newGB, t.DiskGB)
 	}
 
-	// Step 1: grow the overlay file.
+	// Grow the disk with the tool that respects the running qemu's lock:
+	// virsh blockresize while running (goes through libvirtd → the lock
+	// holder), qemu-img resize while stopped (direct file access).
 	sizeArg := fmt.Sprintf("%dG", newGB)
-	res, err := m.qemuImg(ctx, "resize", t.OverlayPath, sizeArg)
-	if err != nil {
-		return fmt.Errorf("vmtarget: qemu-img resize: %w", err)
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("vmtarget: qemu-img resize failed: %s", res.Stderr)
-	}
-
-	// Step 2: if the VM is running, notify the guest kernel via blockresize
-	// so it sees the larger device without a reboot.
-	live := m.refreshStatus(ctx, *t)
-	if live == StatusRunning {
-		res, err = m.virsh(ctx, "blockresize", t.Name, t.OverlayPath, sizeArg)
+	if m.refreshStatus(ctx, *t) == StatusRunning {
+		res, err := m.virsh(ctx, "blockresize", t.Name, t.OverlayPath, sizeArg)
 		if err != nil {
 			return fmt.Errorf("vmtarget: virsh blockresize: %w", err)
 		}
 		if res.ExitCode != 0 {
-			return fmt.Errorf("vmtarget: virsh blockresize failed (qemu-img resize succeeded; reboot to pick up): %s", res.Stderr)
+			return fmt.Errorf("vmtarget: virsh blockresize failed: %s", res.Stderr)
+		}
+	} else {
+		res, err := m.qemuImg(ctx, "resize", t.OverlayPath, sizeArg)
+		if err != nil {
+			return fmt.Errorf("vmtarget: qemu-img resize: %w", err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("vmtarget: qemu-img resize failed: %s", res.Stderr)
 		}
 	}
 
-	// Step 3: persist.
+	// Persist the new size.
 	t.DiskGB = newGB
 	return m.save(s)
 }
