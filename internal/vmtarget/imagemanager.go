@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 )
 
 // DefaultOSImages maps OS names to their official cloud image download URLs.
@@ -88,6 +91,14 @@ func (m *Manager) PrepareBaseImage(ctx context.Context, nameOrPath string) (stri
 
 		// Try to run virt-customize if available
 		if _, err := exec.LookPath("virt-customize"); err == nil {
+			// Preflight: virt-customize (libguestfs) runs as the invoking user
+			// and needs /dev/kvm for hardware acceleration. Without it, it
+			// silently falls back to software emulation (TCG) and crawls. Print
+			// an actionable fix before libguestfs buries it under its own noisy
+			// warning.
+			if hint := kvmAccessHint(); hint != "" {
+				fmt.Printf("warning: %s\n", hint)
+			}
 			cmd := exec.CommandContext(ctx, "virt-customize",
 				"-a", goldenTmp,
 				"--install", "python3,sudo,curl,net-tools,systemd",
@@ -119,6 +130,46 @@ func (m *Manager) PrepareBaseImage(ctx context.Context, nameOrPath string) (stri
 	}
 
 	return goldenPath, nil
+}
+
+// kvmAccessHint returns an actionable remediation string when the current
+// process cannot access /dev/kvm, which forces libguestfs/virt-customize into
+// slow software emulation (TCG). It returns "" when /dev/kvm is usable — or
+// when it is simply absent (no VT-x/AMD-V or nested virt off), a case where
+// group advice would be misleading and libguestfs's own message is clearer.
+//
+// The definitive test is opening the device for read/write, exactly what
+// libguestfs does. This also correctly catches the "just ran usermod -aG kvm
+// but haven't re-logged-in yet" case, where group membership looks fixed on
+// disk but the running process still lacks it.
+func kvmAccessHint() string {
+	const dev = "/dev/kvm"
+	if f, err := os.OpenFile(dev, os.O_RDWR, 0); err == nil {
+		_ = f.Close()
+		return ""
+	} else if !os.IsPermission(err) {
+		// Not-exist or any other error: no clean group advice to give.
+		return ""
+	}
+
+	// Permission denied — name the owning group precisely so the fix is exact.
+	grpName := "kvm"
+	if fi, err := os.Stat(dev); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			if g, err := user.LookupGroupId(strconv.FormatUint(uint64(st.Gid), 10)); err == nil && g.Name != "" {
+				grpName = g.Name
+			}
+		}
+	}
+	who := "$USER"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		who = u.Username
+	}
+	return fmt.Sprintf(
+		"current user cannot access %s — virt-customize will run WITHOUT KVM acceleration (very slow).\n"+
+			"         fix: add your user to the %q group, then re-login (or run 'newgrp %s' in this shell):\n"+
+			"              sudo usermod -aG %s %s",
+		dev, grpName, grpName, grpName, who)
 }
 
 // downloadFile fetches url to dest atomically: it streams into a temp file
