@@ -531,3 +531,130 @@ else:
 		t.Errorf("vm1 re-up IP = %q, want 192.168.122.2 (reused since it was released)", tgt1Re.IP)
 	}
 }
+
+// TestUp_DiskGBDefault checks that Up() with DiskGB=0 defaults to DefaultDiskGB.
+func TestUp_DiskGBDefault(t *testing.T) {
+	m, base := newTestManager(t, happyVirsh)
+	tgt, err := m.Up(context.Background(), Options{Name: "diskdef", BaseImage: base})
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if tgt.DiskGB != DefaultDiskGB {
+		t.Errorf("DiskGB = %d, want default %d", tgt.DiskGB, DefaultDiskGB)
+	}
+}
+
+// TestUp_DiskGBCustom checks that a custom DiskGB is honoured and persisted.
+func TestUp_DiskGBCustom(t *testing.T) {
+	m, base := newTestManager(t, happyVirsh)
+	tgt, err := m.Up(context.Background(), Options{Name: "disk50", BaseImage: base, DiskGB: 50})
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if tgt.DiskGB != 50 {
+		t.Errorf("DiskGB = %d, want 50", tgt.DiskGB)
+	}
+	// Verify persistence via Get.
+	got, err := m.Get(context.Background(), "disk50")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DiskGB != 50 {
+		t.Errorf("persisted DiskGB = %d, want 50", got.DiskGB)
+	}
+}
+
+// TestUp_DiskGBPassedToQemuImg verifies that the DiskGB value reaches the
+// qemu-img create argv as a trailing "<N>G" argument.
+func TestUp_DiskGBPassedToQemuImg(t *testing.T) {
+	dir := t.TempDir()
+
+	// qemu-img shim that records argv.
+	qemuLog := filepath.Join(dir, "qemu-img.log")
+	writeShim(t, dir, "qemu-img", "PILOT_QEMU_IMG_BIN",
+		fmt.Sprintf(`echo "$@" >> %q; exit 0`, qemuLog))
+
+	// Wire remaining shims.
+	writeShim(t, dir, "virsh", "PILOT_VIRSH_BIN", "case \"$1\" in\n"+happyVirsh+"\nesac")
+	writeShim(t, dir, "cloud-localds", "PILOT_CLOUD_LOCALDS_BIN", `: > "$1" 2>/dev/null; exit 0`)
+	writeShim(t, dir, "ssh", "PILOT_SSH_BIN", sshShim)
+	writeShim(t, dir, "ssh-keygen", "PILOT_SSH_KEYGEN_BIN", keygenShim)
+
+	base := filepath.Join(dir, "base.qcow2")
+	if err := os.WriteFile(base, []byte("fake"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	m, err := NewManager(filepath.Join(dir, "state"), filepath.Join(dir, "vmdir"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	m.bootTimeout = 300 * time.Millisecond
+	m.sshTimeout = 300 * time.Millisecond
+	m.pollInterval = 5 * time.Millisecond
+
+	if _, err := m.Up(context.Background(), Options{Name: "imgtest", BaseImage: base, DiskGB: 42}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	data, err := os.ReadFile(qemuLog)
+	if err != nil {
+		t.Fatalf("read qemu-img log: %v", err)
+	}
+	if !strings.Contains(string(data), "42G") {
+		t.Errorf("qemu-img create should include '42G' size arg, got:\n%s", data)
+	}
+}
+
+// TestResizeDisk_HappyPath tests that ResizeDisk grows a target's disk
+// and updates the state.
+func TestResizeDisk_HappyPath(t *testing.T) {
+	m, base := newTestManager(t, happyVirsh)
+	if _, err := m.Up(context.Background(), Options{Name: "grow", BaseImage: base, DiskGB: 30}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if err := m.ResizeDisk(context.Background(), "grow", 60); err != nil {
+		t.Fatalf("ResizeDisk: %v", err)
+	}
+	got, err := m.Get(context.Background(), "grow")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DiskGB != 60 {
+		t.Errorf("DiskGB after resize = %d, want 60", got.DiskGB)
+	}
+}
+
+// TestResizeDisk_RejectsShrink verifies that ResizeDisk refuses a size
+// smaller than or equal to the current one.
+func TestResizeDisk_RejectsShrink(t *testing.T) {
+	m, base := newTestManager(t, happyVirsh)
+	if _, err := m.Up(context.Background(), Options{Name: "shrk", BaseImage: base, DiskGB: 30}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	// Same size.
+	if err := m.ResizeDisk(context.Background(), "shrk", 30); err == nil || !strings.Contains(err.Error(), "shrink is not supported") {
+		t.Fatalf("want shrink-rejected for same size, got %v", err)
+	}
+	// Smaller.
+	if err := m.ResizeDisk(context.Background(), "shrk", 20); err == nil || !strings.Contains(err.Error(), "shrink is not supported") {
+		t.Fatalf("want shrink-rejected for smaller, got %v", err)
+	}
+}
+
+// TestResizeDisk_UnknownTarget errors cleanly.
+func TestResizeDisk_UnknownTarget(t *testing.T) {
+	m, _ := newTestManager(t, happyVirsh)
+	if err := m.ResizeDisk(context.Background(), "nope", 50); err == nil || !strings.Contains(err.Error(), "no target named") {
+		t.Fatalf("want not-found, got %v", err)
+	}
+}
+
+// TestResizeDisk_RejectsZeroAndNegative validates input.
+func TestResizeDisk_RejectsZeroAndNegative(t *testing.T) {
+	m, _ := newTestManager(t, happyVirsh)
+	if err := m.ResizeDisk(context.Background(), "x", 0); err == nil || !strings.Contains(err.Error(), "positive integer") {
+		t.Fatalf("want positive-int error for 0, got %v", err)
+	}
+	if err := m.ResizeDisk(context.Background(), "x", -5); err == nil || !strings.Contains(err.Error(), "positive integer") {
+		t.Fatalf("want positive-int error for -5, got %v", err)
+	}
+}

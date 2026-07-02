@@ -87,6 +87,13 @@ type Target struct {
 	Network  string `json:"network"`
 	VCPUs    int    `json:"vcpus"`
 	MemoryMB int    `json:"memory_mb"`
+	// DiskGB is the root disk virtual size in GiB. The per-target qcow2
+	// overlay is created at this size (grown from the smaller base
+	// image's virtual size); the guest's cloud-init grows the root
+	// partition to fill it on first boot. 0 means "inherit the base
+	// image's size" — the value for legacy targets created before this
+	// field existed.
+	DiskGB int `json:"disk_gb,omitempty"`
 	// Dir is the per-target scratch dir holding overlay.qcow2, seed.iso
 	// and the ephemeral SSH keypair.
 	Dir         string `json:"dir"`
@@ -107,6 +114,7 @@ type Options struct {
 	SSHUser     string // login user created/authorised via cloud-init; default "root"
 	VCPUs       int    // default 2
 	MemoryMB    int    // default 2048
+	DiskGB      int    // root disk virtual size in GiB; default 30
 	Network     string // libvirt network name; default "default"
 	Hosts       []string
 	SSHTimeout  time.Duration // override sshTimeout  (0 = use default 2m)
@@ -268,6 +276,12 @@ func SSHBaseArgs(t *Target) []string {
 // instead of a full down/up reprovision.
 const CleanSnapshotTag = "clean"
 
+// DefaultDiskGB is the root disk size used when Options.DiskGB is 0. Cloud
+// images ship a small virtual size (~2-4 GiB); 30 GiB gives apply/verify
+// runs headroom for packages, pulled container images, and logs without the
+// user having to think about it.
+const DefaultDiskGB = 30
+
 func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if opt.Name == "" {
 		return nil, errors.New("vmtarget: name is required")
@@ -309,6 +323,10 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if mem == 0 {
 		mem = 2048
 	}
+	disk := opt.DiskGB
+	if disk == 0 {
+		disk = DefaultDiskGB
+	}
 	network := opt.Network
 	if network == "" {
 		network = "default"
@@ -326,6 +344,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		Network:     network,
 		VCPUs:       vcpus,
 		MemoryMB:    mem,
+		DiskGB:      disk,
 		Dir:         dir,
 		OverlayPath: filepath.Join(dir, "overlay.qcow2"),
 		SeedPath:    filepath.Join(dir, "seed.iso"),
@@ -506,8 +525,15 @@ func renderUserData(t *Target, pubKey string) string {
 // createOverlay creates the per-target qcow2 overlay backed by the
 // immutable base image. All writes land here; the base is never touched.
 func (m *Manager) createOverlay(ctx context.Context, t *Target) error {
-	res, err := m.qemuImg(ctx, "create", "-f", "qcow2",
-		"-b", t.BaseImage, "-F", "qcow2", t.OverlayPath)
+	args := []string{"create", "-f", "qcow2", "-b", t.BaseImage, "-F", "qcow2", t.OverlayPath}
+	// A non-zero DiskGB sizes the overlay larger than the (small) base
+	// image's virtual size. qemu-img refuses a size smaller than the
+	// backing file, so a too-small request surfaces as a clear error here
+	// rather than a silent truncation.
+	if t.DiskGB > 0 {
+		args = append(args, fmt.Sprintf("%dG", t.DiskGB))
+	}
+	res, err := m.qemuImg(ctx, args...)
 	if err != nil {
 		return err
 	}
@@ -865,6 +891,83 @@ func (m *Manager) Reset(ctx context.Context, name string) error {
 		return fmt.Errorf("vmtarget: reset to %q snapshot failed — if the VM predates auto-snapshot, capture one with `vm-target snapshot --name %s --tag %s`: %w", CleanSnapshotTag, name, CleanSnapshotTag, err)
 	}
 	return nil
+}
+
+// ---- ResizeDisk -----------------------------------------------------------
+
+// ResizeDisk grows the root disk of an existing target to newGB GiB.
+// Only grow is supported — shrinking a qcow2 overlay is destructive and
+// not a safe online operation. The resize is done in two steps:
+//
+//  1. `qemu-img resize overlay.qcow2 <newGB>G` — grows the file.
+//  2. `virsh blockresize <domain> <overlay> <newGB>G` — notifies the
+//     running VM so the kernel sees the larger block device immediately
+//     (no reboot needed; the guest can then `growpart` + `resize2fs`).
+//
+// If the VM is not running, only step 1 is performed (the guest will
+// see the new size on next boot).
+//
+// The target's DiskGB in the state file is updated on success.
+func (m *Manager) ResizeDisk(ctx context.Context, name string, newGB int) error {
+	if name == "" {
+		return errors.New("vmtarget: name is required")
+	}
+	if newGB <= 0 {
+		return fmt.Errorf("vmtarget: disk size must be a positive integer (got %d)", newGB)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, err := m.load()
+	if err != nil {
+		return err
+	}
+	idx := -1
+	for i, t := range s.Targets {
+		if t.Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("vmtarget: no target named %q in state", name)
+	}
+	t := &s.Targets[idx]
+
+	// Guard: only grow. A current DiskGB of 0 means "legacy / base image
+	// size" — we don't know the exact size, so we allow the resize and
+	// let qemu-img enforce the "no shrink past backing" invariant.
+	if t.DiskGB > 0 && newGB <= t.DiskGB {
+		return fmt.Errorf("vmtarget: new size %dG must be larger than current %dG (shrink is not supported)", newGB, t.DiskGB)
+	}
+
+	// Step 1: grow the overlay file.
+	sizeArg := fmt.Sprintf("%dG", newGB)
+	res, err := m.qemuImg(ctx, "resize", t.OverlayPath, sizeArg)
+	if err != nil {
+		return fmt.Errorf("vmtarget: qemu-img resize: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("vmtarget: qemu-img resize failed: %s", res.Stderr)
+	}
+
+	// Step 2: if the VM is running, notify the guest kernel via blockresize
+	// so it sees the larger device without a reboot.
+	live := m.refreshStatus(ctx, *t)
+	if live == StatusRunning {
+		res, err = m.virsh(ctx, "blockresize", t.Name, t.OverlayPath, sizeArg)
+		if err != nil {
+			return fmt.Errorf("vmtarget: virsh blockresize: %w", err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("vmtarget: virsh blockresize failed (qemu-img resize succeeded; reboot to pick up): %s", res.Stderr)
+		}
+	}
+
+	// Step 3: persist.
+	t.DiskGB = newGB
+	return m.save(s)
 }
 
 // ---- RenderInventory ------------------------------------------------------

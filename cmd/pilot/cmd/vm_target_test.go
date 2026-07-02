@@ -24,7 +24,7 @@ func TestVMTargetCmdRegistered(t *testing.T) {
 
 // TestVMTargetSubCommandsAllRegistered walks the promised subcommands.
 func TestVMTargetSubCommandsAllRegistered(t *testing.T) {
-	want := []string{"up", "down", "list", "show-inventory", "run", "verify", "exec", "snapshot", "rollback", "ssh", "shell"}
+	want := []string{"up", "down", "list", "show-inventory", "run", "verify", "exec", "snapshot", "rollback", "ssh", "shell", "resize-disk"}
 	var have []string
 	for _, c := range vmTargetCmd.Commands() {
 		have = append(have, c.Name())

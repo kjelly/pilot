@@ -65,6 +65,7 @@ func init() {
 	vmTargetCmd.AddCommand(vtSSHCmd)
 	vmTargetCmd.AddCommand(vtShellCmd)
 	vmTargetCmd.AddCommand(vtTestCmd)
+	vmTargetCmd.AddCommand(vtResizeDiskCmd)
 }
 
 // ---- shared flags ---------------------------------------------------------
@@ -75,6 +76,7 @@ var (
 	vtSSHUser     string
 	vtVCPUs       int
 	vtMemoryMB    int
+	vtDiskGB      int
 	vtNetwork     string
 	vtHosts       []string
 	vtVMDir       string
@@ -119,6 +121,7 @@ func init() {
 	vtUpCmd.Flags().StringVar(&vtSSHUser, "ssh-user", "root", "login user authorised via cloud-init")
 	vtUpCmd.Flags().IntVar(&vtVCPUs, "vcpus", 2, "number of vCPUs")
 	vtUpCmd.Flags().IntVar(&vtMemoryMB, "memory", 2048, "memory in MiB")
+	vtUpCmd.Flags().IntVar(&vtDiskGB, "disk", vmtarget.DefaultDiskGB, "root disk size in GiB")
 	vtUpCmd.Flags().StringVar(&vtNetwork, "network", "default", "libvirt network name")
 	vtUpCmd.Flags().StringSliceVar(&vtHosts, "hosts", nil, "additional ansible host aliases (may repeat); all route to the same VM")
 	vtUpCmd.Flags().StringVar(&vtVMDir, "vm-dir", "", "directory for qcow2 overlays/seed ISOs (default /var/lib/libvirt/images/pilot)")
@@ -144,6 +147,7 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 		SSHUser:     vtSSHUser,
 		VCPUs:       vtVCPUs,
 		MemoryMB:    vtMemoryMB,
+		DiskGB:      vtDiskGB,
 		Network:     vtNetwork,
 		Hosts:       vtHosts,
 		SSHTimeout:  vtSSHTimeout,
@@ -158,6 +162,7 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "  ssh_user  : %s\n", tgt.SSHUser)
 	fmt.Fprintf(out, "  base_image: %s\n", tgt.BaseImage)
 	fmt.Fprintf(out, "  vcpus/mem : %d / %d MiB\n", tgt.VCPUs, tgt.MemoryMB)
+	fmt.Fprintf(out, "  disk      : %d GiB\n", tgt.DiskGB)
 	fmt.Fprintf(out, "  inventory : `pilot vm-target show-inventory --name %s`\n", tgt.Name)
 	return nil
 }
@@ -216,10 +221,14 @@ func runVtList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTATUS\tIP\tVCPU\tMEM(MiB)\tCREATED")
+	fmt.Fprintln(tw, "NAME\tSTATUS\tIP\tVCPU\tMEM(MiB)\tDISK(GiB)\tCREATED")
 	for _, t := range all {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\n",
-			t.Name, t.Status, t.IP, t.VCPUs, t.MemoryMB, t.CreatedAt.Format("2006-01-02 15:04:05"))
+		diskStr := "-"
+		if t.DiskGB > 0 {
+			diskStr = strconv.Itoa(t.DiskGB)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
+			t.Name, t.Status, t.IP, t.VCPUs, t.MemoryMB, diskStr, t.CreatedAt.Format("2006-01-02 15:04:05"))
 	}
 	return tw.Flush()
 }
@@ -816,6 +825,60 @@ func runVtReset(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "✓ reset %s to %q (pristine post-boot state)\n", vtName, vmtarget.CleanSnapshotTag)
+	return nil
+}
+
+// ---- resize-disk ----------------------------------------------------------
+
+var (
+	vtResizeDiskGB int
+)
+
+var vtResizeDiskCmd = &cobra.Command{
+	Use:   "resize-disk",
+	Short: "Grow the root disk of an existing VM target",
+	Long: `Grow the root disk of an existing VM target to a new size in GiB.
+
+Only growing is supported — shrinking is destructive and not a safe
+operation. If the VM is running, the resize is applied online (the
+guest kernel sees the larger block device immediately); a stopped VM
+will see the new size on next boot.
+
+After the block device is grown, the guest still needs to expand its
+partition and filesystem. Most cloud images handle this automatically
+via cloud-init's growpart module. If not, run inside the VM:
+  growpart /dev/vda 1 && resize2fs /dev/vda1
+
+Examples:
+  pilot vm-target resize-disk --name core --disk 50
+  pilot vm-target resize-disk --name core --disk 100
+`,
+	RunE: runVtResizeDisk,
+}
+
+func init() {
+	vtResizeDiskCmd.Flags().StringVar(&vtName, "name", "", "target name (required)")
+	vtResizeDiskCmd.Flags().IntVar(&vtResizeDiskGB, "disk", 0, "new root disk size in GiB (must be larger than current)")
+	_ = vtResizeDiskCmd.MarkFlagRequired("name")
+	_ = vtResizeDiskCmd.MarkFlagRequired("disk")
+}
+
+func runVtResizeDisk(cmd *cobra.Command, args []string) error {
+	if vtName == "" {
+		return fmt.Errorf("--name is required")
+	}
+	if vtResizeDiskGB <= 0 {
+		return fmt.Errorf("--disk must be a positive integer (got %d)", vtResizeDiskGB)
+	}
+	m, err := vtNewManager()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "▶ resizing %s root disk to %d GiB…\n", vtName, vtResizeDiskGB)
+	if err := m.ResizeDisk(context.Background(), vtName, vtResizeDiskGB); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ %s root disk resized to %d GiB\n", vtName, vtResizeDiskGB)
 	return nil
 }
 
