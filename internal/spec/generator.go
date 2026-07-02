@@ -91,7 +91,7 @@ func Generate(s *Spec, opts GenerateOptions) (*Playbook, error) {
 			Name:       fmt.Sprintf("%s — %s", r.ID, truncate(r.Check, 60)),
 			Module:     mod,
 			Params:     params,
-			Become:     needsBecome(r),
+			Become:     NeedsBecome(r),
 			SourceIDs:  []string{r.ID},
 			RawCommand: raw,
 		}
@@ -291,15 +291,34 @@ func unquote(s string) string {
 	return s
 }
 
-// needsBecome inspects the row command for any sign that the check
-// runs against a privileged path. file mode checks (stat -c '%a' /etc/shadow)
-// and many systemd checks fall under this. The check is intentionally
-// permissive: false positives just emit `become: true` on a task,
-// which is harmless on sudoers-running systems.
-func needsBecome(r Row) bool {
+// NeedsBecome inspects the row command for any sign that the check
+// runs against a privileged path or a root-only daemon. File mode
+// checks (stat -c '%a' /etc/shadow), systemd checks, and container /
+// service-inspection commands (docker ps, pg_isready) fall under this.
+//
+// This is the single source of truth for "does this row need root",
+// shared by both the apply path (generated tasks get `become: true`)
+// and the verify path (ad-hoc runs get `-b`). Keeping them on the
+// same heuristic stops apply and verify from disagreeing about
+// privilege — which is exactly what produced verify false-negatives
+// when apply had already run the operation as root.
+//
+// The check is intentionally permissive: false positives just escalate
+// a read-only check, which is harmless on passwordless-sudo systems
+// (the vm-target's ubuntu user is one).
+func NeedsBecome(r Row) bool {
 	cmd := strings.ToLower(r.Command)
 	exp := strings.ToLower(r.Expected)
-	markers := []string{"/etc/", "/usr/", "/var/", "/boot/", "/proc/", "/sys/", "systemctl", "sysctl", "dpkg", "apt"}
+	markers := []string{
+		// privileged filesystem paths
+		"/etc/", "/usr/", "/var/", "/boot/", "/proc/", "/sys/",
+		// service / package management
+		"systemctl", "sysctl", "dpkg", "apt", "journalctl",
+		// container runtimes (socket is root-owned)
+		"docker", "podman",
+		// root-only daemon / socket probes
+		"pg_isready", "ss ", "netstat",
+	}
 	joined := cmd + " " + exp
 	for _, m := range markers {
 		if strings.Contains(joined, m) {

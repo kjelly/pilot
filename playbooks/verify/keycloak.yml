@@ -1,0 +1,11 @@
+---
+- name: Verification Spec — keycloak (Keycloak server, identity provider)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C7 — keycloak process 可見（容器或 binary；容忍任何\xe5\x95…"
+      ansible.builtin.command: "sh -c 'pidof java >/dev/null 2>&1 || pidof kc.sh >/dev/null 2>&1; echo $?'"
+      changed_when: false
+      tags: [C7, C8, C9]

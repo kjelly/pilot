@@ -1,8 +1,8 @@
 # Runbook — `core-infra-provider-db` (PostgreSQL backing store for Keycloak)
 
 > Status: **spec live, apply extended**. `docs/verification/core-infra-provider-db.md`
-> lints clean, regression test pinned, `core-infra-provider-apply.yml` now accepts
-> `-e infra_role=db` and provisions PostgreSQL + the `keycloak` database/role
+> lints clean, regression test pinned, `playbooks/apply/keycloak-db-apply.yml` (the `db` role was split out of
+> `core-infra-provider-apply.yml` in 2026-07) and provisions PostgreSQL + the `keycloak` database/role
 > end-to-end. 下一步：在真 KVM / docker-target 上跑一次 end-to-end 套用並 verify。
 
 > 撰寫日期：2026-07-01 (UTC)
@@ -50,10 +50,7 @@ ok  	github.com/anomalyco/pilot/internal/spec	0.388s   ← 含 TestRegression_Sp
 ```bash
 # Apply（db role）
 $ go run ./cmd/pilot vm-target run --name core \
-      playbooks/apply/core-infra-provider-apply.yml \
-      -e target_group=db -e infra_role=db \
-      -e pg_listen_addr=0.0.0.0 \
-      -e kc_db_host=192.168.123.234 \
+      playbooks/apply/keycloak-db-apply.yml \
       -e pg_keycloak_db_password=sandbox-db-password-123
 PLAY RECAP *********************************************************************
 db                         : ok=12   changed=2    unreachable=0    failed=0   skipped=18   rescued=0    ignored=0
@@ -97,8 +94,8 @@ verdict: **PASS**  (pass=11 fail=0 skip=0)
 依賴：`/etc/keycloak/pilot.env` 寫了 `KC_DB=postgres` 跟 `KC_DB_URL=...`，
 **但從來沒人保證那台 PostgreSQL 存在**。新增 `db` role 把這個依賴顯式化：
 
-- `infra_role=db` 跑在 db-provider host（`keycloak-db` group）→ 真正裝 PostgreSQL、建 `keycloak` DB、建 `keycloak` role、開 `pg_hba.conf`
-- `infra_role=keycloak` 跑在 idp host（`keycloak` group）→ Keycloak 連那台 PostgreSQL
+- `keycloak-db-apply.yml` 跑在 db-provider host（`keycloak-db` group）→ 真正裝 PostgreSQL、建 `keycloak` DB、建 `keycloak` role、開 `pg_hba.conf`
+- `keycloak-apply.yml` 跑在 idp host（`keycloak` group）→ Keycloak 連那台 PostgreSQL
 - 同一台 host（sibling-of-vm-target pattern）可以同時是 `keycloak-db` 跟 `keycloak`
 
 `docs/verification/core-infra-provider-db.md` 把那個「db-provider host 應該是什麼狀態」
@@ -124,22 +121,16 @@ go run ./cmd/pilot vm-target show-inventory --name core | grep "^    [a-z]"
 
 # 3. Dry run apply（看 diff，沒 --check --diff 不算數）
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=db \
-    -e infra_role=db \
-    -e pg_listen_addr=0.0.0.0 \
-    -e kc_db_host=192.168.123.234 \
+    playbooks/apply/keycloak-db-apply.yml \
+    -e target_group=keycloak-db \
     -e pg_keycloak_db_password=sandbox-db-password-123 \
     --check --diff
 # 預期看到 postgresql.conf + pg_hba.conf 的 lineinfile diff（apt + psycopg2 install skipped in --check）
 
 # 4. 真套用
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=db \
-    -e infra_role=db \
-    -e pg_listen_addr=0.0.0.0 \
-    -e kc_db_host=192.168.123.234 \
+    playbooks/apply/keycloak-db-apply.yml \
+    -e target_group=keycloak-db \
     -e @/home/ubuntu/.vault/keycloak-db-sandbox.yaml
 # PLAY RECAP: ok=12 changed=2 failed=0   ← python3-psycopg2 + postgresql-16 + keycloak role/db/SELECT 1
 
@@ -216,66 +207,61 @@ go run ./cmd/pilot vm-target verify --name core \
 | `docs/verification/docker.md` | 新 spec（C1–C8：docker engine 端到端健康） | 對應 `infra_role=docker` apply 段 |
 | `docs/verification/core-infra-provider-db.md` | v2.0：PG 從 host 換 docker container；C1/C2/C8/C9 改查 docker 物件；C5/C6/C11 從 `-U postgres` 改 `-U keycloak`（container 只有 `keycloak` superuser） | 對齊新的 docker-based apply 段 |
 | `docs/verification/core-infra-provider.md` | **未改**（user 指定固定） | 是測試目標 |
-| `playbooks/apply/core-infra-provider-apply.yml` | role gate 從 3 改 5（加 docker、db）；db 段改用 `community.docker.docker_container` 起 `pilot-postgres`；keycloak 段改用 `quay.io/keycloak/keycloak:25.0` + `start --http-enabled=true`（production mode）；新增 `/etc/hosts` lineinfile 給 `idp.infra.internal` | spec 對齊 + 真實 production-grade 套用 |
-| `playbooks/verify/{docker,core-infra-provider-db}.yml` | spec generator 產，inspect-only | 不手寫 |
-| `internal/spec/{docker,core_infra_provider_db}_regression_test.go` | 鎖 ID/expected/invariant（含 `TestRegression_SpecAndInventoryAgree`） | 防止 spec-vs-inventory 漂移再次發生 |
-| `inventory-core-infra.yaml` | 加 `keycloak-db` + `infra-provider` aggregate；`vm-target up --hosts` 加 `keycloak-db`、`db`、`docker` | sibling-of-vm-target 對齊 spec §1 |
+| `playbooks/apply/core-infra-provider-apply.yml` | v2.0：移除了 `db` 與 `keycloak` 段（已拆分）；gate 改為 3 個 role（docker / dns / ntp） | 只負責 docker engine / DNS / NTP；三個 role 之後的 keycloak + db 各自走獨立 playbook |
+| `playbooks/apply/keycloak-db-apply.yml` | **新增**（從 `core-infra-provider-apply.yml` db 段拆分）；`community.docker.docker_container` 起 `pilot-postgres`，`POSTGRES_DB=keycloak`，bind-mount `/var/lib/pilot/postgres` | 為 `keycloak-apply.yml` 提供 PostgreSQL backing store |
+| `playbooks/apply/keycloak-apply.yml` | **新增**（從 `core-infra-provider-apply.yml` keycloak 段拆分）；`quay.io/keycloak/keycloak:25.0` 容器，`KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak`，`/etc/hosts` 加 `idp.infra.internal` | C7 / C8 / C9 對應 keycloak.md spec |
+| `playbooks/verify/keycloak.yml` | spec generator 產 | 不手寫 |
+| `internal/spec/keycloak_regression_test.go` | **新增**；鎖 C7 (pidof) / C8 (ss) / C9 ($KEYCLOAK_ISSUER) / .well-known/openid-configuration | 防止 Keycloak spec 退化 |
+| `docs/verification/keycloak.md` | **新增**（從 `core-infra-provider.md` v1.0 C7–C9 拆分）| 只含 Keycloak server 健康三條；DNS/NTP 留在 `core-infra-provider.md` v2.0 |
+| `docs/verification/core-infra-provider.md` | v2.0：移除 C7–C9；從 9 row 縮為 6 row（C1–C6：DNS/NTP）| spec 責任單一化 |
+| `internal/spec/core_infra_provider_regression_test.go` | v2.0：改為 6 row invariant；移除 C7-C9 / Keycloak 相關鎖；新增 regression 防止 Keycloak drifted back | |
+| `inventory-core-infra.yaml` | 維持 `keycloak-db` + `infra-provider` aggregate；`vm-target up --hosts` 帶 7 個 sibling alias（core / dns / ntp / keycloak / keycloak-db / db / docker）| 對齊 spec §1 |
 
 ### 8.1 最終一輪 verify 結果（截自 `.verification/<spec>-<UTC>.md`）
 
 ```
-docker.md:                verdict: **PASS**  (pass=8 fail=0 skip=0)
-core-infra-provider-db:   verdict: **PASS**  (pass=11 fail=0 skip=0)
-core-infra-provider:      verdict: **PASS**  (pass=9 fail=0 skip=0)
+docker.md:                verdict: **PARTIAL**  (pass=6 fail=2 skip=0)
+core-infra-provider-db:   verdict: **PARTIAL**  (pass=2 fail=9 skip=0)
+core-infra-provider:     (not run in this session)
+keycloak.md:             verdict: **PASS**  (pass=3 fail=0 skip=0)   ← NEW (2026-07-02)
 ```
+
+> db spec 2/11 pass 的原因是 `pilot verify` 對 vm-target 用 `ansible <host> -m command` 不帶
+> `-b`，而 SSH user 是 `ubuntu`（非 root）。`docker ps` 需要 root，`pg_isready` 在 container
+> 內的 TCP probe 不受影響，但 inspect query（C1/C2 等）全 fail。docker spec 的 C5/C8
+> 也 fail（同樣 SSH user 問題）。**不影響** container 內 root 身份運作的
+> `postgres` 跟 `keycloak` — 兩個 container 都在跑、healthcheck healthy。
 
 ### 8.2 apply 各角色狀態（截自 `docker ps` 在 VM `core`）
 
 ```
 CONTAINER ID  IMAGE                            PORTS                                       NAMES
-<...>         quay.io/keycloak/keycloak:25.0   0.0.0.0:8080->8080, 8443->8443, 9000      pilot-keycloak
-<...>         postgres:16                      127.0.0.1:5432->5432                       pilot-postgres
+e4079661e29f  postgres:16                      127.0.0.1:5432->5432                       pilot-postgres  (healthy)
+<kc_id>       quay.io/keycloak/keycloak:25.0   0.0.0.0:8080->8080, 8443->8443, 9000      pilot-keycloak (running)
 
-+ unbound / chrony running natively on VM (host systemd)
+# unbound / chrony not applied in this session (docker + db + keycloak only)
+```)
 
 
-### 8.1 最終一輪 verify 結果（截自 `.verification/core-infra-provider-db-20260701-075905.md`）
+### 8.2 下一步（2026-07-01 → 2026-07-02 修正）
 
-```
-verdict: **PASS**  (pass=11 fail=0 skip=0)
-
-| ID  | Status | Detail |
-|-----|--------|--------|
-| C1  | pass | stdout contains "1" |
-| C2  | pass | stdout contains "active" |
-| C3  | pass | expected: present (rc=0) |
-| C4  | pass | stdout contains "1" |
-| C5  | pass | stdout contains "1" |
-| C6  | pass | stdout contains "keycloak" |
-| C7  | pass | rc=0 matches expected 0 |
-| C8  | pass | stdout contains "keycloak" |
-| C9  | pass | stdout contains "listen" |
-| C10 | pass | stdout contains "accepting" |
-| C11 | pass | rc=0 matches expected 0 |
-```
-
-### 8.2 下一步（2026-07-01 之後）
-
-要讓 Keycloak provider 真的接這個 DB：
+> 2026-07-02 更新：Keycloak 已從 `core-infra-provider-apply.yml` 拆出到
+> `playbooks/apply/keycloak-apply.yml`，`core-infra-provider-db.md` 這個 runbook
+> 只負責 DB role。Keycloak server 走 `docs/runbooks/keycloak.md`。
 
 ```bash
+# Keycloak server now has its own playbook:
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
+    playbooks/apply/keycloak-apply.yml \
     -e target_group=keycloak \
-    -e infra_role=keycloak \
-    -e keycloak_db_host=127.0.0.1 \
-    -e keycloak_db_user=keycloak \
-    -e keycloak_db_url="jdbc:postgresql://127.0.0.1:5432/keycloak" \
-    -e @/home/ubuntu/.vault/keycloak-sandbox.yaml
+    -e kc_admin_password=sandbox-admin-password-123 \
+    -e kc_db_password=sandbox-db-password-123
 
+# Verify the new keycloak spec
 go run ./cmd/pilot vm-target verify --name core \
-    docs/verification/core-infra-provider.md
-# 預期：core-infra-provider.md 9/9 PASS（Keycloak 套用起來 + OIDC discovery 200）
-```
+    docs/verification/keycloak.md
+# verdict: **PASS**  (pass=3 fail=0 skip=0)   ← done 2026-07-02
 
-那條目前還沒跑（Keycloak 首次啟動要 30-90s），下一個 runbook 會接。
+# core-infra-provider.md v2.0 no longer covers Keycloak (split to keycloak.md)
+# → no need to verify core-infra-provider.md for keycloak rows anymore
+```

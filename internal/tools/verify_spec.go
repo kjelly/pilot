@@ -208,25 +208,35 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 	if shellMetachars(r.Command) {
 		module = "shell"
 	}
-	slog.Debug("verify ad-hoc", "module", module, "cmd", r.Command)
+	// Decide privilege the SAME way the apply path does: spec.NeedsBecome
+	// is the single source of truth. If the row touches root-owned state
+	// (a privileged path, systemctl, the docker socket, pg_isready, …),
+	// apply generated the task with `become: true`, so verify must run it
+	// with `-b` too — otherwise verify reports false-negatives on
+	// operations that apply already performed as root.
+	become := spec.NeedsBecome(r)
+	slog.Debug("verify ad-hoc", "module", module, "cmd", r.Command, "become", become)
 	args := []string{target, "-i", t.Inventory, "-m", module, "-a", r.Command, "--one-line"}
 	if t.Limit != "" {
 		args = append(args, "-l", t.Limit)
 	}
-	// We piggy-back on the same ansible.Runner that drives run_ansible.
-	// Runner.Run is hardcoded to ansible-playbook, so we shell out to
-	// `ansible` directly here. This keeps the dependency surface small
-	// and avoids refactoring Runner.Run's signature.
-	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(cctx, "ansible", args...).CombinedOutput()
-	rawOut := strings.TrimSpace(string(out))
-	rc := 0
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			rc = ee.ExitCode()
-		}
+	if become {
+		args = append(args, "-b")
 	}
+	rc, rawOut := t.execAnsible(ctx, args, timeoutSec)
+
+	// Reactive safety net: if the heuristic missed it and the command
+	// failed with what looks like a privilege error, retry once with
+	// become. The vm-target's ubuntu user has NOPASSWD sudo, so this
+	// never prompts; the extra round-trip only hits rows that already
+	// failed. Skip when we already escalated (become == true) — a second
+	// identical run would just fail the same way.
+	if !become && rc != 0 && looksLikePermissionError(rawOut) {
+		retryArgs := append(append([]string{}, args...), "-b") // copy: args may have spare cap from -l
+		rc, rawOut = t.execAnsible(ctx, retryArgs, timeoutSec)
+		rawOut = "[escalated] " + rawOut // mark in the report for traceability
+	}
+
 	detail := fmt.Sprintf("(rc=%d) %s", rc, rawOut)
 	ok, mismatch := matchExpected(r.Expected, detail, rc)
 	status := "pass"
@@ -234,6 +244,42 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 		status = "fail"
 	}
 	return VerifyRow{ID: r.ID, Status: status, Detail: mismatch, ExitCode: rc}
+}
+
+// execAnsible runs one `ansible` ad-hoc invocation and returns its exit
+// code and trimmed combined output. We piggy-back on the same ansible
+// binary that drives run_ansible; ansible.Runner.Run is hardcoded to
+// ansible-playbook, so we shell out to `ansible` directly here to keep
+// the dependency surface small and avoid refactoring Runner.Run.
+func (t *VerifySpecTool) execAnsible(ctx context.Context, args []string, timeoutSec int) (int, string) {
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, "ansible", args...).CombinedOutput()
+	rc := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		rc = ee.ExitCode()
+	}
+	return rc, strings.TrimSpace(string(out))
+}
+
+// permissionErrorRe matches the stderr signatures a command emits when
+// it fails purely for lack of privilege. Kept narrow enough that a
+// non-permission failure that merely mentions "denied" in unrelated
+// output won't trip it — and it only ever runs on already-failed rows,
+// so a rare false positive costs one extra become round-trip, nothing more.
+var permissionErrorRe = regexp.MustCompile(`(?i)permission denied` +
+	`|operation not permitted` +
+	`|must be root|are you root|need(s)? to be root|requires root` +
+	`|(has|have) to be run (as|under)[^.]*root` + // ansible: "run under the root user"
+	`|to be run as root|run as the root` +
+	`|connect: permission denied` + // docker: dial unix /var/run/docker.sock
+	`|docker daemon socket` +
+	`|eacces|access is denied|insufficient priv`)
+
+// looksLikePermissionError reports whether ad-hoc output reads like a
+// privilege failure, gating the verify-path reactive become retry.
+func looksLikePermissionError(out string) bool {
+	return permissionErrorRe.MatchString(out)
 }
 
 // matchExpected decides whether captured stdout (or, for rc-equality,

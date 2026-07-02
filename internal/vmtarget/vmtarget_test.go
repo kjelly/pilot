@@ -203,6 +203,32 @@ func TestUp_CleansUpOnBootTimeout(t *testing.T) {
 	}
 }
 
+// TestUp_KeepOnFailure: if the VM never gets an IP and KeepOnFailure is true,
+// Up must fail but it MUST preserve the state record and the target dir.
+func TestUp_KeepOnFailure(t *testing.T) {
+	body := strings.Replace(happyVirsh,
+		`net-dhcp-leases)    cf="/tmp/virsh-nl-count.$(echo "$0" | tr / _)" ; c=$(cat "$cf" 2>/dev/null || echo 0) ; echo $((c+1)) > "$cf" ; if [ "$c" -eq 0 ] ; then echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2000-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.99/24     stale" ; else echo " Expiry Time           MAC address         Protocol   IP address           Hostname" ; echo " 2999-01-01 00:00:00   52:54:00:aa:bb:cc   ipv4       192.168.122.42/24     myvm" ; fi ; exit 0 ;;`,
+		`net-dhcp-leases)    exit 0 ;;`, 1)
+	body = strings.Replace(body,
+		`domifaddr)          echo " vnet0      52:54:00:aa:bb:cc    ipv4         192.168.122.42/24" ; exit 0 ;;`,
+		`domifaddr)          exit 0 ;;`, 1)
+	m, base := newTestManager(t, body)
+	_, err := m.Up(context.Background(), Options{Name: "kept", BaseImage: base, KeepOnFailure: true})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
+		t.Fatalf("want boot-timeout error, got %v", err)
+	}
+	tgt, gerr := m.Get(context.Background(), "kept")
+	if gerr != nil {
+		t.Fatalf("Up with KeepOnFailure must preserve state record: %v", gerr)
+	}
+	if tgt.Name != "kept" {
+		t.Errorf("expected target name 'kept', got %q", tgt.Name)
+	}
+	if _, serr := os.Stat(filepath.Join(m.vmDir, "kept")); os.IsNotExist(serr) {
+		t.Error("Up with KeepOnFailure must preserve the target dir")
+	}
+}
+
 func TestDown_RemovesState(t *testing.T) {
 	m, base := newTestManager(t, happyVirsh)
 	if _, err := m.Up(context.Background(), Options{Name: "doomed", BaseImage: base}); err != nil {

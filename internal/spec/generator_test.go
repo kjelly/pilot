@@ -194,3 +194,34 @@ func TestGenerate_IncludeRaw(t *testing.T) {
 		t.Errorf("RawCommand=%q", pb.Tasks[0].RawCommand)
 	}
 }
+
+// TestNeedsBecome covers the shared apply/verify privilege heuristic,
+// including the container/daemon markers added so verify stops reporting
+// false-negatives on root-only operations (docker ps, pg_isready) that
+// apply already ran as root.
+func TestNeedsBecome(t *testing.T) {
+	priv := []string{
+		"docker ps --format '{{.Names}}'",
+		"podman inspect keycloak",
+		"pg_isready -h 127.0.0.1",
+		"systemctl is-active sshd",
+		"stat -c '%a' /etc/shadow",
+		"journalctl -u keycloak --no-pager",
+		"ss -ltnp",
+	}
+	for _, c := range priv {
+		if !NeedsBecome(Row{Command: c}) {
+			t.Errorf("NeedsBecome(%q) = false, want true", c)
+		}
+	}
+	unpriv := []string{
+		"id -u",
+		"curl -s http://localhost:8080/health",
+		"echo hello",
+	}
+	for _, c := range unpriv {
+		if NeedsBecome(Row{Command: c}) {
+			t.Errorf("NeedsBecome(%q) = true, want false", c)
+		}
+	}
+}

@@ -109,16 +109,17 @@ type Target struct {
 
 // Options bundles user-facing knobs for Up.
 type Options struct {
-	Name        string // required; domain name AND ansible host key
-	BaseImage   string // required; path to a qcow2 cloud image (read-only backing)
-	SSHUser     string // login user created/authorised via cloud-init; default "root"
-	VCPUs       int    // default 2
-	MemoryMB    int    // default 2048
-	DiskGB      int    // root disk virtual size in GiB; default 30
-	Network     string // libvirt network name; default "default"
-	Hosts       []string
-	SSHTimeout  time.Duration // override sshTimeout  (0 = use default 2m)
-	BootTimeout time.Duration // override bootTimeout (0 = use default 3m)
+	Name          string // required; domain name AND ansible host key
+	BaseImage     string // required; path to a qcow2 cloud image (read-only backing)
+	SSHUser       string // login user created/authorised via cloud-init; default "root"
+	VCPUs         int    // default 2
+	MemoryMB      int    // default 2048
+	DiskGB        int    // root disk virtual size in GiB; default 30
+	Network       string // libvirt network name; default "default"
+	Hosts         []string
+	SSHTimeout    time.Duration // override sshTimeout  (0 = use default 2m)
+	BootTimeout   time.Duration // override bootTimeout (0 = use default 3m)
+	KeepOnFailure bool          // keep VM on failure for debugging
 }
 
 // state is the on-disk JSON shape, versioned like dockertarget's.
@@ -361,6 +362,26 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	// scope from the load/Abs calls above; the defer captures it.)
 	defer func() {
 		if err != nil {
+			if opt.KeepOnFailure {
+				fmt.Fprintf(os.Stderr, "  ⚠ --keep-on-failure is set; preserving VM %q and its state/files for investigation.\n", tg.Name)
+				fmt.Fprintf(os.Stderr, "  ⚠ To tear down later, run: pilot vm-target down --name %s\n", tg.Name)
+				s, loadErr := m.load()
+				if loadErr == nil {
+					found := false
+					for _, existing := range s.Targets {
+						if existing.Name == tg.Name {
+							found = true
+							break
+						}
+					}
+					if !found {
+						tg.Status = StatusStopped
+						s.Targets = append(s.Targets, *tg)
+						_ = m.save(s)
+					}
+				}
+				return
+			}
 			m.teardown(ctx, tg)
 		}
 	}()
@@ -381,12 +402,6 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if err = m.createOverlay(ctx, tg); err != nil {
 		return nil, err
 	}
-	// Capture pre-existing DHCP leases for our MAC so waitForIP
-	// can ignore them — they're from previous VM runs, not this one.
-	// Allocate a static DHCP reservation BEFORE starting the VM. This
-	// guarantees the VM always gets the same IP and prevents the
-	// "two VMs get the same IP" conflict that occurs when a previous VM
-	// with the same MAC had an active lease.
 	if _, err = m.allocateStaticIP(ctx, tg); err != nil {
 		return nil, fmt.Errorf("vmtarget: static IP allocation: %w", err)
 	}
@@ -514,7 +529,7 @@ func renderUserData(t *Target, pubKey string) string {
 		sb.WriteString("users:\n")
 		fmt.Fprintf(&sb, "  - name: %s\n", t.SSHUser)
 		sb.WriteString("    sudo: ALL=(ALL) NOPASSWD:ALL\n")
-		sb.WriteString("    groups: sudo\n")
+		sb.WriteString("    groups: [sudo, wheel]\n")
 		sb.WriteString("    shell: /bin/bash\n")
 		sb.WriteString("    ssh_authorized_keys:\n")
 		fmt.Fprintf(&sb, "      - %s\n", pubKey)
@@ -583,16 +598,41 @@ func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[stri
 
 	for {
 		// Primary: try domifaddr first (kernel ARP, always current).
-		ip, err := m.getIPFromDomifaddr(ctx, t.Name)
-		if err == nil && ip != "" {
-			// Found an IP via domifaddr. This is authoritative.
-			t.IP = ip
-			return nil
-		}
-		if err != nil {
+		ips, err := m.getIPsFromDomifaddr(ctx, t.Name)
+		if err == nil && len(ips) > 0 {
+			var validIP string
+			var leasesOut string
+			for _, ip := range ips {
+				preExp, exists := preExisting[ip]
+				if !exists {
+					validIP = ip
+					break
+				}
+				// It exists in preExisting. Let's check if the lease has been renewed.
+				if leasesOut == "" {
+					res, lerr := m.virsh(ctx, "net-dhcp-leases", t.Network)
+					if lerr == nil && res.ExitCode == 0 {
+						leasesOut = res.Stdout
+					}
+				}
+				if leasesOut != "" {
+					if currentExp, ok := ipLeaseExpiry(leasesOut, t.MAC, ip); ok {
+						if !currentExp.Equal(preExp) {
+							validIP = ip
+							break
+						}
+					}
+				}
+			}
+			if validIP != "" {
+				t.IP = validIP
+				return nil
+			}
+			lastDetail = "no new or renewed IP in domifaddr yet"
+		} else if err != nil {
 			lastDetail = err.Error()
 		} else {
-			lastDetail = "no IP from domifaddr yet"
+			lastDetail = "no IP in domifaddr yet"
 		}
 
 		// Fallback: check net-dhcp-leases for a fresh lease.
@@ -643,25 +683,49 @@ func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[stri
 	}
 }
 
-// getIPFromDomifaddr runs "virsh domifaddr <name>" and returns the IPv4
-// address, or "" if not found. Returns an error only on virsh failure.
-func (m *Manager) getIPFromDomifaddr(ctx context.Context, name string) (string, error) {
+// getIPsFromDomifaddr runs "virsh domifaddr <name>" and returns all IPv4
+// addresses found in the output. Returns an error only on virsh failure.
+func (m *Manager) getIPsFromDomifaddr(ctx context.Context, name string) ([]string, error) {
 	res, err := m.virsh(ctx, "domifaddr", name)
 	if err != nil {
-		return "", fmt.Errorf("domifaddr: %w", err)
+		return nil, fmt.Errorf("domifaddr: %w", err)
 	}
 	if res.ExitCode != 0 {
-		return "", fmt.Errorf("domifaddr exit %d: %s", res.ExitCode, res.Stderr)
+		return nil, fmt.Errorf("domifaddr exit %d: %s", res.ExitCode, res.Stderr)
 	}
-	// Parse "vnetN  MAC  ipv4  IP/24" lines.
-	ip := ipv4CIDR.FindString(res.Stdout)
-	if ip == "" {
-		return "", fmt.Errorf("no IP in domifaddr output")
+	lines := strings.Split(res.Stdout, "\n")
+	var ips []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		ip := ipv4CIDR.FindString(line)
+		if ip == "" {
+			continue
+		}
+		if idx := strings.Index(ip, "/"); idx >= 0 {
+			ip = ip[:idx]
+		}
+		ips = append(ips, ip)
 	}
-	if idx := strings.Index(ip, "/"); idx >= 0 {
-		ip = ip[:idx]
+	return ips, nil
+}
+
+// ipLeaseExpiry parses net-dhcp-leases output and returns the lease expiry time for a specific MAC and IP.
+func ipLeaseExpiry(out, mac, ip string) (time.Time, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, mac) || !strings.Contains(line, ip) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		exp, err := time.Parse("2006-01-02 15:04:05", fields[0]+" "+fields[1])
+		if err == nil {
+			return exp, true
+		}
 	}
-	return ip, nil
+	return time.Time{}, false
 }
 
 // waitForSSH blocks until the VM answers SSH with the injected key, i.e.

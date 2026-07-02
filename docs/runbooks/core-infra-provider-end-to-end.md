@@ -24,7 +24,7 @@
 | `db`         | docker run postgres:16 + 建 keycloak role/db + bind-mount  | `core-infra-provider-db.md` | 11/11 PASS |
 | `dns`        | apt install unbound + 切 system-resolved stub off       | `core-infra-provider.md`   | C1-C3 PASS |
 | `ntp`        | apt install chrony + 接上游 pool                       | `core-infra-provider.md`   | C4-C6 PASS |
-| `keycloak`   | docker run quay.io/keycloak/keycloak:25.0 (prod mode)  | `core-infra-provider.md`   | C7-C9 PASS |
+| `keycloak`   | docker run quay.io/keycloak/keycloak:25.0 (prod mode)  | `keycloak.md`   | C7-C9 PASS |
 
 ---
 
@@ -39,7 +39,7 @@ go run ./cmd/pilot vm-target up \
 
 for role in docker db dns ntp keycloak; do
     go run ./cmd/pilot vm-target run --name core \
-        playbooks/apply/core-infra-provider-apply.yml \
+        playbooks/apply/keycloak-apply.yml \
         -e target_group=core -e infra_role=$role \
         -e pg_keycloak_db_password=sandbox-db-password-123 \
         -e kc_admin_password=sandbox-admin-password-123 \
@@ -95,7 +95,7 @@ go run ./cmd/pilot vm-target up \
 
 ```bash
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
+    playbooks/apply/keycloak-apply.yml \
     -e target_group=core -e infra_role=docker
 # PLAY RECAP: ok=6 changed=2 failed=0
 #   - apt install docker.io docker-compose-v2
@@ -112,11 +112,12 @@ go run ./cmd/pilot vm-target verify --name core \
 ### 2.3 套 db role（PostgreSQL container）
 
 ```bash
+# db role now lives in its own playbook
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=core -e infra_role=db \
+    playbooks/apply/keycloak-db-apply.yml \
+    -e target_group=keycloak-db \
     -e pg_keycloak_db_password=sandbox-db-password-123
-# PLAY RECAP: ok=8 changed=4 failed=0
+# PLAY RECAP: ok=7 changed=1 failed=0
 #   - mkdir /var/lib/pilot/postgres
 #   - docker pull postgres:16
 #   - docker network create pilot-infra
@@ -138,7 +139,7 @@ go run ./cmd/pilot vm-target verify --name core \
 
 ```bash
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
+    playbooks/apply/keycloak-apply.yml \
     -e target_group=core -e infra_role=dns
 # PLAY RECAP: ok=12 changed=7 failed=0
 #   - apt install unbound
@@ -152,7 +153,7 @@ go run ./cmd/pilot vm-target run --name core \
 
 ```bash
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
+    playbooks/apply/keycloak-apply.yml \
     -e target_group=core -e infra_role=ntp
 # PLAY RECAP: ok=8 changed=3 failed=0
 #   - apt install chrony
@@ -164,8 +165,8 @@ go run ./cmd/pilot vm-target run --name core \
 
 ```bash
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=core -e infra_role=keycloak \
+    playbooks/apply/keycloak-apply.yml \
+    -e target_group=core -e kc_admin_password=sandbox-admin-password-123 \
     -e kc_admin_password=sandbox-admin-password-123 \
     -e kc_db_password=sandbox-db-password-123
 # PLAY RECAP: ok=8 changed=3 failed=0

@@ -71,19 +71,20 @@ func init() {
 // ---- shared flags ---------------------------------------------------------
 
 var (
-	vtName        string
-	vtBaseImage   string
-	vtSSHUser     string
-	vtVCPUs       int
-	vtMemoryMB    int
-	vtDiskGB      int
-	vtNetwork     string
-	vtHosts       []string
-	vtVMDir       string
-	vtSnapTag     string
-	vtRollTag     string
-	vtSSHTimeout  time.Duration
-	vtBootTimeout time.Duration
+	vtName          string
+	vtBaseImage     string
+	vtSSHUser       string
+	vtVCPUs         int
+	vtMemoryMB      int
+	vtDiskGB        int
+	vtNetwork       string
+	vtHosts         []string
+	vtVMDir         string
+	vtSnapTag       string
+	vtRollTag       string
+	vtSSHTimeout    time.Duration
+	vtBootTimeout   time.Duration
+	vtKeepOnFailure bool
 )
 
 // resolveVMDir returns the directory where per-target qcow2/seed live.
@@ -117,7 +118,7 @@ Examples:
 
 func init() {
 	vtUpCmd.Flags().StringVar(&vtName, "name", "", "domain name (also ansible host key)")
-	vtUpCmd.Flags().StringVar(&vtBaseImage, "base-image", "", "path or alias of qcow2 base image (defaults to ubuntu-24.04)")
+	vtUpCmd.Flags().StringVar(&vtBaseImage, "base-image", "", "path or alias of qcow2 base image (defaults to ubuntu-24.04, supports fedora-40, almalinux-9, centos-9)")
 	vtUpCmd.Flags().StringVar(&vtSSHUser, "ssh-user", "root", "login user authorised via cloud-init")
 	vtUpCmd.Flags().IntVar(&vtVCPUs, "vcpus", 2, "number of vCPUs")
 	vtUpCmd.Flags().IntVar(&vtMemoryMB, "memory", 2048, "memory in MiB")
@@ -127,6 +128,7 @@ func init() {
 	vtUpCmd.Flags().StringVar(&vtVMDir, "vm-dir", "", "directory for qcow2 overlays/seed ISOs (default /var/lib/libvirt/images/pilot)")
 	vtUpCmd.Flags().DurationVar(&vtSSHTimeout, "ssh-timeout", 0, "override SSH readiness timeout (default 2m)")
 	vtUpCmd.Flags().DurationVar(&vtBootTimeout, "boot-timeout", 0, "override boot/IP-acquisition timeout (default 3m)")
+	vtUpCmd.Flags().BoolVar(&vtKeepOnFailure, "keep-on-failure", false, "keep the VM and its on-disk files/state on provisioning failure for investigation")
 }
 
 func runVtUp(cmd *cobra.Command, args []string) error {
@@ -142,18 +144,22 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "▶ provisioning VM %s (this can take a minute while it boots)…\n", vtName)
 	tgt, err := m.Up(context.Background(), vmtarget.Options{
-		Name:        vtName,
-		BaseImage:   vtBaseImage,
-		SSHUser:     vtSSHUser,
-		VCPUs:       vtVCPUs,
-		MemoryMB:    vtMemoryMB,
-		DiskGB:      vtDiskGB,
-		Network:     vtNetwork,
-		Hosts:       vtHosts,
-		SSHTimeout:  vtSSHTimeout,
-		BootTimeout: vtBootTimeout,
+		Name:          vtName,
+		BaseImage:     vtBaseImage,
+		SSHUser:       vtSSHUser,
+		VCPUs:         vtVCPUs,
+		MemoryMB:      vtMemoryMB,
+		DiskGB:        vtDiskGB,
+		Network:       vtNetwork,
+		Hosts:         vtHosts,
+		SSHTimeout:    vtSSHTimeout,
+		BootTimeout:   vtBootTimeout,
+		KeepOnFailure: vtKeepOnFailure,
 	})
 	if err != nil {
+		if !vtKeepOnFailure {
+			fmt.Fprintf(cmd.ErrOrStderr(), "\n💡 Hint: you can run this command with '--keep-on-failure' to preserve the VM on failure for debugging.\n")
+		}
 		return err
 	}
 	out := cmd.OutOrStdout()

@@ -71,18 +71,18 @@ func TestTeatestSmoke_InitRendersPlaceholder(t *testing.T) {
 	// process. The status bar shows "iter 0/20" which we use as
 	// a smoke sentinel that the main view rendered.
 	waitForText(t, tm, "iter")
-
-	// Width/height made it through the program correctly.
-	if got := m.width; got != 120 {
-		t.Errorf("model width not propagated: got %d", got)
-	}
-	if got := m.height; got != 40 {
-		t.Errorf("model height not propagated: got %d", got)
-	}
-
 	// Clean shutdown.
 	if err := tm.Quit(); err != nil {
 		t.Errorf("Quit: %v", err)
+	}
+
+	finalModel := tm.FinalModel(t).(*Model)
+	// Width/height made it through the program correctly.
+	if got := finalModel.width; got != 120 {
+		t.Errorf("model width not propagated: got %d", got)
+	}
+	if got := finalModel.height; got != 40 {
+		t.Errorf("model height not propagated: got %d", got)
 	}
 }
 

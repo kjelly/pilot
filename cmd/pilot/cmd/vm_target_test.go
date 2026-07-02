@@ -263,3 +263,13 @@ func mustContain(t *testing.T, argv []string, want ...string) {
 	}
 	t.Fatalf("argv missing %v; got %v", want, argv)
 }
+
+func TestVMTargetUp_KeepOnFailureFlagRegistered(t *testing.T) {
+	flag := vtUpCmd.Flags().Lookup("keep-on-failure")
+	if flag == nil {
+		t.Fatal("keep-on-failure flag not registered on vtUpCmd")
+	}
+	if flag.Value.Type() != "bool" {
+		t.Errorf("expected keep-on-failure flag to be bool, got %s", flag.Value.Type())
+	}
+}

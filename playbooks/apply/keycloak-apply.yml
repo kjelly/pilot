@@ -1,0 +1,169 @@
+---
+# Apply playbook for docs/verification/keycloak.md
+#
+# Single-role playbook: runs the Keycloak IdP. Split out of
+# playbooks/apply/core-infra-provider-apply.yml (which now only
+# owns the dns/ntp/docker provider roles). This file only knows
+# how to bring up Keycloak — it assumes the Docker engine and
+# the Keycloak DB backing store (postgres container on the
+# pilot-infra docker network) are already in place.
+#
+# Pre-flight checklist (run BEFORE this playbook):
+#   1. docs/verification/docker.md              → 8/8 PASS
+#      (apt install docker.io + start docker.service)
+#   2. docs/verification/core-infra-provider-db.md → 11/11 PASS
+#      (postgres container + keycloak role/db on the
+#       pilot-infra docker network)
+#
+# If either pre-flight fails, this playbook will fail at the
+# docker network join (pilot-infra missing) or at the
+# KC_DB_URL resolution (postgres hostname not in DNS).
+#
+# Usage (sandbox):
+#
+#   go run ./cmd/pilot vm-target run --name core \
+#       playbooks/apply/keycloak-apply.yml \
+#       -e target_group=keycloak \
+#       -e kc_admin_password=sandbox-admin-password-123 \
+#       -e kc_db_password=sandbox-db-password-123
+#
+# Stage gating:
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND -e staging_attested_within_hours<=168
+- name: Keycloak IdP apply
+  hosts: "{{ target_group | default('keycloak') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    backup_suffix: .pre-keycloak.bak
+    kc_version: "25.0"
+    kc_host_data_dir: /var/lib/pilot/keycloak
+    kc_db_url: "jdbc:postgresql://postgres:5432/keycloak"
+    kc_issuer_hostname: "idp.infra.internal"
+    target_group: keycloak
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - stage != 'prod'
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+
+  tasks:
+    # Spec: docs/verification/keycloak.md C7 (process visible)
+    - name: "Keycloak — ensure host data dir (idempotent)"
+      tags: [keycloak]
+      ansible.builtin.file:
+        path: "{{ kc_host_data_dir }}"
+        state: directory
+        owner: 0
+        group: 0
+        mode: '0755'
+
+    # Spec: docs/verification/keycloak.md C9 (OIDC discovery)
+    # `idp.infra.internal` is the issuer hostname baked into KC_HOSTNAME
+    # below; without this /etc/hosts entry, OIDC discovery in dev /
+    # sandbox will fail (DNS doesn't know about it).
+    - name: "Keycloak — add {{ kc_issuer_hostname }} to /etc/hosts (for spec C9)"
+      tags: [keycloak, keycloak-C9]
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: "127.0.0.1 {{ kc_issuer_hostname }}"
+        state: present
+        create: false
+
+    # Pre-flight: pilot-infra docker network must exist. It is created
+    # by playbooks/apply/keycloak-db-apply.yml; if absent, fail fast
+    # with a clear message rather than letting docker_container create
+    # a new (unconnected) network.
+    - name: "Keycloak — pre-flight: pilot-infra docker network exists (created by keycloak-db-apply)"
+      tags: [keycloak]
+      ansible.builtin.command: docker network inspect pilot-infra
+      register: pilot_infra_pre
+      changed_when: false
+      failed_when: pilot_infra_pre.rc != 0
+      check_mode: false
+
+    - name: "Keycloak — pull quay.io/keycloak/keycloak:{{ kc_version }} image"
+      tags: [keycloak]
+      community.docker.docker_image:
+        name: "quay.io/keycloak/keycloak:{{ kc_version }}"
+        source: pull
+
+    # Spec: docs/verification/keycloak.md C7, C8, C9
+    # Keycloak runs as root (uid=0) inside the container because the
+    # narayana JTA object store writes transaction logs to
+    # /opt/keycloak/data, which is bind-mounted from the host. Setting
+    # user: "0" avoids the alternative of chmod-ing the host data dir
+    # to 1000:1000 (which then breaks for the realm-import workflow).
+    - name: "Keycloak — run pilot-keycloak container (production mode)"
+      tags: [keycloak, keycloak-C7, keycloak-C8, keycloak-C9]
+      community.docker.docker_container:
+        name: pilot-keycloak
+        image: "quay.io/keycloak/keycloak:{{ kc_version }}"
+        state: started
+        restart_policy: unless-stopped
+        network_mode: pilot-infra
+        hostname: keycloak
+        user: "0"
+        command:
+          - "start"
+          - "--http-enabled=true"
+          - "--hostname-strict=false"
+        env:
+          KEYCLOAK_ADMIN: "{{ kc_admin_user | default('admin') }}"
+          KEYCLOAK_ADMIN_PASSWORD: "{{ kc_admin_password | mandatory }}"
+          KC_DB: postgres
+          KC_DB_URL: "{{ kc_db_url }}"
+          KC_DB_USERNAME: "{{ kc_db_user | default('keycloak') }}"
+          KC_DB_PASSWORD: "{{ kc_db_password | mandatory }}"
+          KC_HOSTNAME: "{{ kc_issuer_hostname }}"
+          KC_HEALTH_ENABLED: "true"
+        volumes:
+          - "{{ kc_host_data_dir }}:/opt/keycloak/data"
+        ports:
+          # 8080: Keycloak HTTP (start --http-enabled=true)
+          # 8443: Keycloak HTTPS (when start --https-enabled=true)
+          # Spec C8 accepts either listener being open.
+          - "8080:8080"
+          - "8443:8443"
+        healthcheck:
+          # TCP-probe port 8080; Keycloak's HTTP listener accepts
+          # connections as soon as it's ready, even before the
+          # realm is fully imported.
+          test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 12
+          start_period: 60s
+
+    # Spec: docs/verification/keycloak.md C8
+    # Poll the container-internal 8080 (network namespace share via
+    # docker exec) until the listener is up. Spec C8 expected=~1,
+    # so a non-zero retry count is expected; we don't fail here.
+    - name: "Keycloak — wait for HTTP 8080 (poll from container network namespace)"
+      tags: [keycloak, keycloak-C8]
+      community.docker.docker_container_exec:
+        container: pilot-keycloak
+        command: bash -c "</dev/tcp/127.0.0.1/8080 && echo OK"
+      register: kc_health
+      until: "'OK' in kc_health.stdout"
+      retries: 60
+      delay: 5
+      changed_when: false
+

@@ -7,17 +7,21 @@ import (
 
 // TestRegression_CoreInfraProviderSpec locks the dual-side
 // counterpart of core-infra.md. Where core-infra specifies what a
-// *client* of internal DNS/NTP/Keycloak must satisfy, this spec
-// locks what a *provider* host must satisfy:
+// *client* of internal DNS/NTP must satisfy, this spec locks what a
+// *provider* host must satisfy:
 //
 //	C1-C3   DNS server installed + listening + authoritive
 //	C4-C6   NTP server installed + active + valid stratum
-//	C7-C9   Keycloak process + listener + discovery endpoint
+//
+// (Keycloak C7-C9 was here in v1.0, but has been split out into
+// docs/verification/keycloak.md as of v2.0. Don't re-add them here —
+// if you need a Keycloak regression invariant, write it in
+// internal/spec/keycloak_regression_test.go.)
 //
 // Why this matters: a provider-side regression (e.g. someone
-// deletes C9 because "discovery will be checked upstream") lets a
-// Keycloak whose OIDC config is borked still pass this host's
-// spec — but every other host's spec then also silently flips to
+// silently drops C6 because "Stratum is a NTS detail") lets a
+// misconfigured NTP upstream still pass this host's spec — but
+// every other host's spec then also silently flips to
 // pass-on-bad-data. Pin it down.
 func TestRegression_CoreInfraProviderSpec(t *testing.T) {
 	const specPath = "../../docs/verification/core-infra-provider.md"
@@ -26,10 +30,11 @@ func TestRegression_CoreInfraProviderSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	// C1..C9 inclusive, no gaps, no duplicates.
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"}
-	if len(s.Rows) != 9 {
-		t.Fatalf("rows=%d want=9", len(s.Rows))
+	// C1..C6 inclusive, no gaps, no duplicates. (Was C1..C9 in v1.0
+	// before Keycloak split out.)
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6"}
+	if len(s.Rows) != 6 {
+		t.Fatalf("rows=%d want=6", len(s.Rows))
 	}
 	for i, id := range wantIDs {
 		if s.Rows[i].ID != id {
@@ -44,28 +49,12 @@ func TestRegression_CoreInfraProviderSpec(t *testing.T) {
 		}
 	}
 
-	// C9 must use $KEYCLOAK_ISSUER. URL / token policy: hard-coding is
-	// forbidden, even in spec.md.
-	for _, r := range s.Rows {
-		if r.ID == "C9" && !strings.Contains(r.Command, "KEYCLOAK_ISSUER") {
-			t.Errorf("C9 must reference KEYCLOAK_ISSUER (with or without default); got %q", r.Command)
-		}
-	}
-
 	// Lint must not produce errors.
 	fs := Lint(s)
 	if HasErrors(fs) {
 		t.Errorf("Lint produced errors:\n%s", joinFindings(fs))
 	}
 
-	// C7 must use pidof, not pgrep. pgrep matches its own shell
-	// command line (which contains the literal "keycloak") and
-	// false-positives on every host — even ones without Keycloak.
-	for _, r := range s.Rows {
-		if r.ID == "C7" && strings.Contains(r.Command, "pgrep") {
-			t.Errorf("C7 must use pidof (not pgrep); got %q", r.Command)
-		}
-	}
 	// C1 must mention at least one server-only DNS package, NOT
 	// bind9-dnsutils (that's the client tools package).
 	for _, r := range s.Rows {
@@ -79,4 +68,22 @@ func TestRegression_CoreInfraProviderSpec(t *testing.T) {
 		}
 	}
 
+	// Regression: Keycloak's C7-C9 must NOT have crept back into
+	// this spec (the whole point of the v2.0 split). If you find
+	// yourself adding C7 here, move it to keycloak.md instead.
+	for _, r := range s.Rows {
+		if r.ID == "C7" || r.ID == "C8" || r.ID == "C9" {
+			t.Errorf("row %s must not exist in core-infra-provider.md (Keycloak split out to keycloak.md in v2.0); got %q", r.ID, r.Command)
+		}
+	}
+
+	// Regression: nothing in this spec should mention Keycloak.
+	// Anything Keycloak-shaped belongs in keycloak.md.
+	for _, r := range s.Rows {
+		if strings.Contains(strings.ToLower(r.Command), "keycloak") ||
+			strings.Contains(strings.ToLower(r.Check), "keycloak") {
+			t.Errorf("row %s mentions Keycloak — must be in keycloak.md, not core-infra-provider.md: cmd=%q check=%q",
+				r.ID, r.Command, r.Check)
+		}
+	}
 }

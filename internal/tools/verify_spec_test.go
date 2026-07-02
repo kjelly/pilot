@@ -90,3 +90,29 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	}
 	return b
 }
+
+func TestLooksLikePermissionError(t *testing.T) {
+	positives := []string{
+		`docker: Got permission denied while trying to connect to the Docker daemon socket`,
+		`dial unix /var/run/docker.sock: connect: permission denied`,
+		`pg_isready: could not open file "/var/run/postgresql": Permission denied`,
+		`mount: only root can do that (Operation not permitted)`,
+		`This command has to be run as root`,
+	}
+	for _, s := range positives {
+		if !looksLikePermissionError(s) {
+			t.Errorf("expected permission error for %q", s)
+		}
+	}
+	negatives := []string{
+		`connection refused`,
+		`no such file or directory`,
+		`could not resolve host`,
+		``,
+	}
+	for _, s := range negatives {
+		if looksLikePermissionError(s) {
+			t.Errorf("did not expect permission error for %q", s)
+		}
+	}
+}

@@ -1,0 +1,134 @@
+---
+# Apply playbook for docs/verification/core-infra-provider-db.md
+#
+# Single-role playbook: runs the PostgreSQL backing store for
+# Keycloak. Split out of playbooks/apply/core-infra-provider-apply.yml
+# (which now only owns the dns/ntp/docker provider roles).
+#
+# Pre-flight: docker engine must be up (spec docs/verification/docker.md
+# 8/8 PASS). Otherwise the docker_container / docker_network tasks fail
+# with "Cannot connect to the Docker daemon".
+#
+# Implementation: a single docker run with data dir bind-mounted to
+# /var/lib/pilot/postgres on the host. The container is on a private
+# bridge network (pilot-infra) and exposes 5432/tcp to the keycloak
+# container via DNS (postgres container name). Idempotent: a
+# pre-existing container is left alone; `docker start` is a no-op for
+# a running container.
+#
+# Usage (sandbox):
+#
+#   go run ./cmd/pilot vm-target run --name core \
+#       playbooks/apply/keycloak-db-apply.yml \
+#       -e target_group=keycloak-db \
+#       -e pg_keycloak_db_password=sandbox-db-password-123
+#
+# Stage gating:
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND -e staging_attested_within_hours<=168
+- name: Keycloak PostgreSQL backing store apply
+  hosts: "{{ target_group | default('keycloak-db') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    backup_suffix: .pre-keycloak-db.bak
+    pg_version: "16"
+    pg_host_data_dir: /var/lib/pilot/postgres
+    target_group: keycloak-db
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - stage != 'prod'
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+
+    - name: "Pre-flight: docker engine is up (spec docs/verification/docker.md)"
+      ansible.builtin.command: docker info
+      register: docker_pre
+      changed_when: false
+      failed_when: docker_pre.rc != 0
+      check_mode: false
+
+  tasks:
+    # Spec: docs/verification/core-infra-provider-db.md C8
+    - name: "DB — ensure host data dir for postgres"
+      tags: [db, db-C8]
+      ansible.builtin.file:
+        path: "{{ pg_host_data_dir }}"
+        state: directory
+        owner: 999   # postgres UID inside the image
+        group: 999
+        mode: '0700'
+
+    # Spec: docs/verification/core-infra-provider-db.md C2
+    - name: "DB — pull postgres:{{ pg_version }} image"
+      tags: [db, db-C2]
+      community.docker.docker_image:
+        name: "postgres:{{ pg_version }}"
+        source: pull
+
+    # pilot-infra is the bridge network shared with the Keycloak
+    # container; created here (idempotent — re-creating an existing
+    # network is a no-op).
+    - name: "DB — create pilot-infra docker network"
+      tags: [db]
+      community.docker.docker_network:
+        name: pilot-infra
+        state: present
+
+    # Spec: docs/verification/core-infra-provider-db.md C1, C2, C3, C8, C9
+    - name: "DB — run pilot-postgres container"
+      tags: [db, db-C1, db-C2, db-C3, db-C8, db-C9]
+      community.docker.docker_container:
+        name: pilot-postgres
+        image: "postgres:{{ pg_version }}"
+        state: started
+        restart_policy: unless-stopped
+        network_mode: pilot-infra
+        hostname: postgres
+        env:
+          POSTGRES_DB: "{{ pg_keycloak_db | default('keycloak') }}"
+          POSTGRES_USER: "{{ pg_keycloak_user | default('keycloak') }}"
+          POSTGRES_PASSWORD: "{{ pg_keycloak_db_password | mandatory }}"
+        volumes:
+          - "{{ pg_host_data_dir }}:/var/lib/postgresql/data"
+        ports:
+          # Bind 5432 to the loopback so the host can also reach it
+          # (e.g. for ad-hoc psql from the keycloak provider host).
+          # Keycloak inside the same network uses `postgres:5432`.
+          - "127.0.0.1:5432:5432"
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U {{ pg_keycloak_user | default('keycloak') }} -d {{ pg_keycloak_db | default('keycloak') }}"]
+          interval: 10s
+          timeout: 5s
+          retries: 6
+
+    # Spec: docs/verification/core-infra-provider-db.md C7, C10
+    - name: "DB — final check: postgres reachable on docker network"
+      tags: [db, db-C7, db-C10]
+      community.docker.docker_container_exec:
+        container: pilot-postgres
+        command: pg_isready -U "{{ pg_keycloak_user | default('keycloak') }}" -d "{{ pg_keycloak_db | default('keycloak') }}"
+        chdir: /
+      register: pg_ready
+      changed_when: false
+      until: pg_ready.rc == 0
+      retries: 12
+      delay: 5
+
