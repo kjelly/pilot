@@ -19,13 +19,14 @@ import (
 // containers used as loop-engineering scratchpads.
 //
 // Subcommands:
-//   list       - show all kept / running pilot sandbox containers
-//   prune      - delete all pilot sandbox containers
-//   attach     - docker exec -it <name> bash (interactive)
-//   snapshot   - commit current container state as a new image tag
-//   rollback   - revert to a previously snapshotted image
-//   warmup     - pre-pull a docker image so the next --sandbox is fast
-//   status     - show the running container's uptime, image, etc.
+//
+//	list       - show all kept / running pilot sandbox containers
+//	prune      - delete all pilot sandbox containers
+//	attach     - docker exec -it <name> bash (interactive)
+//	snapshot   - commit current container state as a new image tag
+//	rollback   - revert to a previously snapshotted image
+//	warmup     - pre-pull a docker image so the next --sandbox is fast
+//	status     - show the running container's uptime, image, etc.
 var sandboxCmd = &cobra.Command{
 	Use:   "sandbox",
 	Short: "Manage Docker containers used as sandboxed test environments",
@@ -54,12 +55,12 @@ func init() {
 
 // sandboxListItem is one row of the `pilot sandbox list` output.
 type sandboxListItem struct {
-	Name      string    `json:"name"`
-	Image     string    `json:"image"`
-	State     string    `json:"state"`
-	Status    string    `json:"status"`
-	Created   time.Time `json:"created"`
-	Keepable  bool      `json:"keepable"`
+	Name     string    `json:"name"`
+	Image    string    `json:"image"`
+	State    string    `json:"state"`
+	Status   string    `json:"status"`
+	Created  time.Time `json:"created"`
+	Keepable bool      `json:"keepable"`
 }
 
 var sandboxListCmd = &cobra.Command{

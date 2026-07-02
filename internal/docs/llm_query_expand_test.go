@@ -122,10 +122,10 @@ func TestApplyIntentBoosts_LiftsMatchingChunk(t *testing.T) {
 
 	chunks := []Chunk{
 		{
-			ID: "modules:ansible.builtin.service:param:state",
-			Ref: "ansible.builtin.service",
+			ID:      "modules:ansible.builtin.service:param:state",
+			Ref:     "ansible.builtin.service",
 			Section: "param",
-			Text: "service.state (type=str, choices=started|stopped|restarted)",
+			Text:    "service.state (type=str, choices=started|stopped|restarted)",
 			Metadata: map[string]any{
 				"section":    "param",
 				"param_name": "state",
@@ -133,10 +133,10 @@ func TestApplyIntentBoosts_LiftsMatchingChunk(t *testing.T) {
 			},
 		},
 		{
-			ID: "modules:ansible.builtin.service:param:enabled",
-			Ref: "ansible.builtin.service",
+			ID:      "modules:ansible.builtin.service:param:enabled",
+			Ref:     "ansible.builtin.service",
 			Section: "param",
-			Text: "service.enabled (type=bool)",
+			Text:    "service.enabled (type=bool)",
 			Metadata: map[string]any{
 				"section":    "param",
 				"param_name": "enabled",
@@ -173,20 +173,20 @@ func TestApplyIntentBoosts_AtBootWinsOverRestart(t *testing.T) {
 
 	chunks := []Chunk{
 		{
-			ID: "modules:ansible.builtin.service:param:state",
-			Ref: "ansible.builtin.service",
+			ID:      "modules:ansible.builtin.service:param:state",
+			Ref:     "ansible.builtin.service",
 			Section: "param",
-			Text: "service.state (type=str) restart the service on boot or change.",
+			Text:    "service.state (type=str) restart the service on boot or change.",
 			Metadata: map[string]any{
 				"param_name": "state",
 				"section":    "param",
 			},
 		},
 		{
-			ID: "modules:ansible.builtin.service:param:enabled",
-			Ref: "ansible.builtin.service",
+			ID:      "modules:ansible.builtin.service:param:enabled",
+			Ref:     "ansible.builtin.service",
 			Section: "param",
-			Text: "service.enabled (type=bool) Whether the service should start on boot.",
+			Text:    "service.enabled (type=bool) Whether the service should start on boot.",
 			Metadata: map[string]any{
 				"param_name": "enabled",
 				"section":    "param",
@@ -210,4 +210,3 @@ func TestApplyIntentBoosts_AtBootWinsOverRestart(t *testing.T) {
 		t.Errorf("at-boot should pick enabled, got %s", pn)
 	}
 }
-

@@ -148,8 +148,8 @@ type PlaybookArgs struct {
 	Limit     string
 
 	// Tag / var selection
-	Tags         []string
-	SkipTags     []string
+	Tags          []string
+	SkipTags      []string
 	ExtraVarsFile string // path to a JSON file written by the caller; -e @<file>
 	RawExtraVars  string // raw `-e k=v k2=v2` value
 
@@ -288,4 +288,3 @@ func FilterOutput(stdout string) string {
 
 	return strings.Join(filtered, "\n")
 }
-

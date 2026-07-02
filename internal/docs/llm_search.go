@@ -79,14 +79,6 @@ func (m *ModuleIndex) SearchLLM(q string, opts SearchLLMOpts) ([]Match, error) {
 	if limit <= 0 {
 		limit = 5
 	}
-	tolerance := opts.FuzzyTolerance
-	if tolerance < 0 {
-		tolerance = 0
-	}
-	if tolerance > 2 {
-		tolerance = 2
-	}
-
 	// Build the bleve query tree. We intentionally keep it small:
 	// BM25 on text, optional prefix-match on ref, optional term
 	// filters. No fuzzy here — we do fuzzy at the lexical layer

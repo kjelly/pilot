@@ -119,9 +119,7 @@ func ExpandQuery(original string) (expandedQuery string, intents []IntentHit) {
 		origTokens[t] = true
 	}
 	var parts []string
-	for _, t := range tokens {
-		parts = append(parts, t)
-	}
+	parts = append(parts, tokens...)
 	var keys []string
 	for k := range expansions {
 		if !origTokens[k] {

@@ -7,32 +7,32 @@ import (
 // Checkpoint is the persisted (spec_id, run_id, task_index, row_id)
 // mapping. The store layer uses this to answer:
 //
-//   "Which task in run X satisfied requirement C2.5.1?"
-//   "Have all rows of spec docs/verification/bastion.md been applied?"
+//	"Which task in run X satisfied requirement C2.5.1?"
+//	"Have all rows of spec docs/verification/bastion.md been applied?"
 //
 // Checkpoints are written when a spec is compiled into a playbook,
 // and again when each generated proposal is reviewed/applied, so the
 // audit trail captures the full lifecycle.
 type Checkpoint struct {
-	SpecPath   string // source spec path (relative to repo root)
-	RowID      string // e.g. "C2.5.1"
-	RunID      string // pilot run UUID
-	ProposalID string // corresponding proposal (set on apply)
-	TaskIndex  int    // index into the generated playbook.Tasks slice
-	Module     string // e.g. "ansible.builtin.lineinfile"
-	ParamHash  string // sha256(module + params); mirrors Generator dedup key
-	Status     string // "compiled" | "applied" | "verified-pass" | "verified-fail"
-	VerifiedAt string // RFC3339 timestamp set on verify completion
+	SpecPath     string // source spec path (relative to repo root)
+	RowID        string // e.g. "C2.5.1"
+	RunID        string // pilot run UUID
+	ProposalID   string // corresponding proposal (set on apply)
+	TaskIndex    int    // index into the generated playbook.Tasks slice
+	Module       string // e.g. "ansible.builtin.lineinfile"
+	ParamHash    string // sha256(module + params); mirrors Generator dedup key
+	Status       string // "compiled" | "applied" | "verified-pass" | "verified-fail"
+	VerifiedAt   string // RFC3339 timestamp set on verify completion
 	VerifyDetail string // human-readable NDJSON `detail` for the latest run
 }
 
 // Coverage is a roll-up of all checkpoints for a spec.
 type Coverage struct {
-	SpecPath    string
-	Total       int
-	Compiled    int
-	Applied     int
-	Verified    int
+	SpecPath     string
+	Total        int
+	Compiled     int
+	Applied      int
+	Verified     int
 	VerifiedPass int
 	VerifiedFail int
 }

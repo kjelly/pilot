@@ -23,11 +23,11 @@ var (
 	specInventory   string
 	specLimit       string
 	specRunIDFlag   string
-	specHosts        string
-	specConnection   string
-	specToInv        string
-	specFromSSH      bool
-	specRoot         string
+	specHosts       string
+	specConnection  string
+	specToInv       string
+	specFromSSH     bool
+	specRoot        string
 )
 
 var specCmd = &cobra.Command{
@@ -386,9 +386,9 @@ func ternary(b bool, t, f string) string {
 // resolveSpecRoot returns the absolute project root for spec/playbook
 // paths. Resolution order:
 //
-//   1. --root flag (specRoot)
-//   2. $PILOT_ROOT env var
-//   3. current working directory
+//  1. --root flag (specRoot)
+//  2. $PILOT_ROOT env var
+//  3. current working directory
 //
 // Everything spec-relative (docs/verification/*.md sources,
 // playbooks/generated/*.yml outputs) is laid out under this root so

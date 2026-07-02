@@ -50,12 +50,12 @@ type RunFinishedMsg struct {
 
 // StatusUpdateMsg refreshes the status bar with current counters.
 type StatusUpdateMsg struct {
-	Iter           int
-	MaxIter        int
-	ProposalCount  int
-	PendingCount   int
-	CurrentTool    string
-	CurrentHost    string
+	Iter          int
+	MaxIter       int
+	ProposalCount int
+	PendingCount  int
+	CurrentTool   string
+	CurrentHost   string
 }
 
 // ToolCallMsg records that the LLM is about to call a tool (for the

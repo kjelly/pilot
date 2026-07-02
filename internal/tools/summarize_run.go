@@ -44,12 +44,12 @@ var summarizeRunArgs = json.RawMessage(`{
 
 func (t *SummarizeRunTool) Spec() *Spec {
 	return &Spec{
-		Name: "summarize_run",
+		Name:        "summarize_run",
 		Description: "Produce a structured end-of-run summary from the audit log (SQLite). Call this as the LAST tool call when you believe the user's goal has been achieved. The output is rendered to the user as the task summary. Do NOT call this for intermediate steps — only when the task is genuinely done.",
-		RiskLevel:    "none",
-		Reversible:   true,
-		DryRunSafe:   true,
-		Parameters:   summarizeRunArgs,
+		RiskLevel:   "none",
+		Reversible:  true,
+		DryRunSafe:  true,
+		Parameters:  summarizeRunArgs,
 	}
 }
 

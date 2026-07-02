@@ -9,9 +9,9 @@ func TestReflectOnRejection_AppendsSystemMessage(t *testing.T) {
 	l := &Loop{recentRejections: map[string]int{}}
 	l.history = nil
 	p := &Proposal{
-		ID:    "p-1",
-		Tool:  "run_ansible",
-		Args:  []byte(`{"playbook":"/tmp/x.yml"}`),
+		ID:   "p-1",
+		Tool: "run_ansible",
+		Args: []byte(`{"playbook":"/tmp/x.yml"}`),
 	}
 	l.reflectOnRejection(p, "missing become:true")
 	if len(l.history) != 1 {

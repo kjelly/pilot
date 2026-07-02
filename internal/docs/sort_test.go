@@ -9,10 +9,10 @@ func TestCosineBatchSortedDescending(t *testing.T) {
 	// Build a batch where we know the expected order.
 	q := []float32{1, 0, 0}
 	batch := [][]float32{
-		{0.5, 0.5, 0},   // score 0.707
-		{1, 0, 0},       // score 1.000
-		{0.3, 0.4, 0},   // score 0.6
-		{0, 1, 0},       // score 0
+		{0.5, 0.5, 0}, // score 0.707
+		{1, 0, 0},     // score 1.000
+		{0.3, 0.4, 0}, // score 0.6
+		{0, 1, 0},     // score 0
 	}
 	idx, scores := CosineBatch(q, batch)
 	if len(idx) != 4 {

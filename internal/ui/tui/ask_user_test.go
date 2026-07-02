@@ -3,8 +3,8 @@ package tui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/anomalyco/pilot/internal/agent"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestAskUserFreeTextAccumulates(t *testing.T) {
@@ -89,7 +89,6 @@ func TestAskUserNumberedOptionStillWorks(t *testing.T) {
 	}
 }
 
-
 func TestAskUserEscCancels(t *testing.T) {
 	m := newModel(nil)
 	m.width = 120
@@ -113,7 +112,6 @@ func TestAskUserEscCancels(t *testing.T) {
 		t.Fatal("ESC should have submitted")
 	}
 }
-
 
 func TestAskUserOptionsEnterPicksFirst(t *testing.T) {
 	m := newModel(nil)
@@ -139,7 +137,6 @@ func TestAskUserOptionsEnterPicksFirst(t *testing.T) {
 		t.Fatal("ENTER should submit")
 	}
 }
-
 
 // Ensure agent.Proposal import is used (linter sometimes flags unused).
 var _ = agent.Proposal{}

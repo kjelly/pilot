@@ -161,8 +161,7 @@ func TestUpdateRejectKeySendsDecision(t *testing.T) {
 	reply := make(chan agent.Decision, 1)
 	updated, _ := m.Update(ProposalRequestMsg{Proposal: &agent.Proposal{ID: "p", Tool: "x"}, Reply: reply})
 	m = updated.(*Model)
-	updated, cmd := m.Update(key('n'))
-	m = updated.(*Model)
+	_, cmd := m.Update(key('n'))
 	if cmd != nil {
 		_ = cmd()
 	}
@@ -182,8 +181,7 @@ func TestUpdateAbortKeySendsDecision(t *testing.T) {
 	reply := make(chan agent.Decision, 1)
 	updated, _ := m.Update(ProposalRequestMsg{Proposal: &agent.Proposal{ID: "p"}, Reply: reply})
 	m = updated.(*Model)
-	updated, cmd := m.Update(key('a'))
-	m = updated.(*Model)
+	_, cmd := m.Update(key('a'))
 	if cmd != nil {
 		_ = cmd()
 	}
@@ -226,10 +224,10 @@ func TestUpdateEnterAppliesHighlightedOption(t *testing.T) {
 	updated, _ := m.Update(ProposalRequestMsg{Proposal: &agent.Proposal{ID: "p"}, Reply: reply})
 	m = updated.(*Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}) // index = 1 (ApproveAll)
+	m = updated.(*Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}) // index = 2 (Reject)
 	m = updated.(*Model)
-	updated, cmd := m.Update(enterKey())
-	m = updated.(*Model)
+	_, cmd := m.Update(enterKey())
 	if cmd != nil {
 		_ = cmd()
 	}
@@ -257,8 +255,7 @@ func TestUpdateAskUserReplyWithNumber(t *testing.T) {
 	if m.mode != ModeAskUser {
 		t.Errorf("not in ask mode: %v", m.mode)
 	}
-	updated, cmd := m.Update(key('2'))
-	m = updated.(*Model)
+	_, cmd := m.Update(key('2'))
 	if cmd != nil {
 		_ = cmd()
 	}
@@ -277,8 +274,7 @@ func TestUpdateAskUserEscCancels(t *testing.T) {
 	reply := make(chan string, 1)
 	updated, _ := m.Update(AskUserMsg{Question: "q", Options: []string{"a"}, Reply: reply})
 	m = updated.(*Model)
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = updated.(*Model)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd != nil {
 		_ = cmd()
 	}
@@ -352,7 +348,7 @@ func TestViewStatusBarShowsCounters(t *testing.T) {
 
 func TestIsSupportedReturnsBool(t *testing.T) {
 	// Just ensure it doesn't panic and returns a bool.
-	_ = IsSupported(0)         // invalid fd → false
+	_ = IsSupported(0)          // invalid fd → false
 	_ = IsSupported(uintptr(0)) // also fine
 }
 

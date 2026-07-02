@@ -55,7 +55,6 @@ func TestRunVtUp_RequiresName(t *testing.T) {
 	}
 }
 
-
 func TestResolveVMDir_DefaultAndOverride(t *testing.T) {
 	old := vtVMDir
 	defer func() { vtVMDir = old }()
@@ -114,13 +113,13 @@ func TestRunVtRun_SkipsAutoLimitWhenTargetGroupPresent(t *testing.T) {
 
 // TestBuildVtSSHArgv_PTYAndConnectionFlags is the regression guard
 // for the `pilot vm-target ssh` / `shell` argv builder. We must:
-//   1) start with the same flags vmtarget.Exec would build (single
-//      source of truth for host-key / key / port),
-//   2) add -tt to force PTY allocation (so resize and sudo prompts
-//      work, and so the user gets an actual terminal instead of
-//      captured pipes),
-//   3) add `--` so a remote argv starting with `-` is not parsed
-//      as a flag by the remote sshd.
+//  1. start with the same flags vmtarget.Exec would build (single
+//     source of truth for host-key / key / port),
+//  2. add -tt to force PTY allocation (so resize and sudo prompts
+//     work, and so the user gets an actual terminal instead of
+//     captured pipes),
+//  3. add `--` so a remote argv starting with `-` is not parsed
+//     as a flag by the remote sshd.
 func TestBuildVtSSHArgv_PTYAndConnectionFlags(t *testing.T) {
 	tgt := &vmtarget.Target{
 		Name:    "core",
@@ -153,7 +152,7 @@ func TestBuildVtSSHArgv_PTYAndConnectionFlags(t *testing.T) {
 			idxSep = i
 		}
 	}
-	if !(idxTT >= 0 && idxSep >= 0 && idxTT < idxSep) {
+	if idxTT < 0 || idxSep < 0 || idxTT >= idxSep {
 		t.Fatalf("-tt must come before --; got argv=%v", argv)
 	}
 }

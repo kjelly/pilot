@@ -16,31 +16,31 @@ import (
 // We use the YAML library's raw map round-trip so we don't depend on
 // the (heavy) ansible runner being importable from this package.
 type Playbook struct {
-	Path     string
-	Plays    []Play
-	Raw      []byte
+	Path  string
+	Plays []Play
+	Raw   []byte
 }
 
 // Play is one entry in a playbook's top-level list.
 type Play struct {
-	Name        string
-	Hosts       string
-	Tasks       []Task
-	Tags        []string
-	Vars        map[string]any
-	Become      bool
-	LineNumber  int // 1-based
+	Name       string
+	Hosts      string
+	Tasks      []Task
+	Tags       []string
+	Vars       map[string]any
+	Become     bool
+	LineNumber int // 1-based
 }
 
 // Task is a single task within a play.
 type Task struct {
-	Name     string
-	Module   string
-	Args     map[string]any
-	Tags     []string
-	When     string
-	Become   bool
-	Line     int
+	Name   string
+	Module string
+	Args   map[string]any
+	Tags   []string
+	When   string
+	Become bool
+	Line   int
 }
 
 // ParsePlaybook reads a YAML playbook file and returns a Playbook
@@ -163,14 +163,13 @@ func parseTask(node *yaml.Node) Task {
 			if !moduleFound && !taskMetaKeys[k] {
 				t.Module = k
 				moduleFound = true
-				if v.Kind == yaml.MappingNode {
-					_ = v.Decode(&t.Args)
-				} else if v.Kind == yaml.ScalarNode {
+				switch v.Kind {
+				case yaml.ScalarNode:
 					if t.Args == nil {
 						t.Args = map[string]any{}
 					}
 					t.Args[k] = decodeScalar(v)
-				} else {
+				default:
 					_ = v.Decode(&t.Args)
 				}
 			} else {

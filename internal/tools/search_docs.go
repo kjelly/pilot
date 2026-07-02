@@ -79,19 +79,19 @@ func (t *SearchDocsTool) Spec() *Spec {
 // the same module so the LLM can chain a follow-up call. SuggestedNext
 // is a tiny workflow hint the LLM can echo back to the user.
 type SearchHit struct {
-	ID         string   `json:"id"`
-	Ref        string   `json:"ref"`
-	Section    string   `json:"section"`
-	Score      float64  `json:"score"`
-	Confidence float64  `json:"confidence"`
-	Text       string   `json:"text"`
-	ParamName  string   `json:"param_name,omitempty"`
-	ParamType  string   `json:"param_type,omitempty"`
-	Required   bool     `json:"required,omitempty"`
-	Default    any      `json:"default,omitempty"`
-	Choices    []string `json:"choices,omitempty"`
-	Aliases    []string `json:"aliases,omitempty"`
-	FromPlaybook bool   `json:"from_playbook,omitempty"`
+	ID           string   `json:"id"`
+	Ref          string   `json:"ref"`
+	Section      string   `json:"section"`
+	Score        float64  `json:"score"`
+	Confidence   float64  `json:"confidence"`
+	Text         string   `json:"text"`
+	ParamName    string   `json:"param_name,omitempty"`
+	ParamType    string   `json:"param_type,omitempty"`
+	Required     bool     `json:"required,omitempty"`
+	Default      any      `json:"default,omitempty"`
+	Choices      []string `json:"choices,omitempty"`
+	Aliases      []string `json:"aliases,omitempty"`
+	FromPlaybook bool     `json:"from_playbook,omitempty"`
 
 	// RelatedExampleID is the chunk ID of the example block for the
 	// same module, if one exists in the index. The LLM can either

@@ -102,8 +102,8 @@ func TestSearchLLM_PrefersParamOverSynopsis(t *testing.T) {
 	// "service" matches both synopsis and params; with PreferParam the
 	// param chunks should be at the top.
 	matches, err := idx.SearchLLM("service", SearchLLMOpts{
-		Limit:        5,
-		PreferParam:  true,
+		Limit:          5,
+		PreferParam:    true,
 		PrefixMatchRef: true,
 	})
 	if err != nil {
@@ -147,7 +147,7 @@ func TestSearchLLM_PrefixMatchFindsShortRef(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	matches, err := idx.SearchLLM("servic", SearchLLMOpts{
-		Limit:         3,
+		Limit:          3,
 		PrefixMatchRef: true,
 	})
 	if err != nil {
@@ -256,10 +256,10 @@ func TestSearchLLM_SectionFilter(t *testing.T) {
 
 func TestFirstToken(t *testing.T) {
 	cases := map[string]string{
-		"hello world":   "hello",
-		"service.name":  "service",
-		"foo":           "foo",
-		"  spaced  ":    "",
+		"hello world":  "hello",
+		"service.name": "service",
+		"foo":          "foo",
+		"  spaced  ":   "",
 	}
 	for in, want := range cases {
 		got := firstToken(in)

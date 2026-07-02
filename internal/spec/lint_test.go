@@ -103,15 +103,15 @@ func TestLint_VagueExpected(t *testing.T) {
 
 func TestIsVagueExpected(t *testing.T) {
 	cases := map[string]bool{
-		"ok":         true,
-		"OK":         true,
-		"合理":        true,
-		"normal":     true,
-		"should":     true,
-		"present":    false,
-		"\"0\"":      false,
-		"active":     false,
-		"0644":       false,
+		"ok":      true,
+		"OK":      true,
+		"合理":      true,
+		"normal":  true,
+		"should":  true,
+		"present": false,
+		"\"0\"":   false,
+		"active":  false,
+		"0644":    false,
 	}
 	for in, want := range cases {
 		if got := isVagueExpected(in); got != want {

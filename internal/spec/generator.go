@@ -88,12 +88,12 @@ func Generate(s *Spec, opts GenerateOptions) (*Playbook, error) {
 			continue
 		}
 		t := Task{
-			Name:        fmt.Sprintf("%s — %s", r.ID, truncate(r.Check, 60)),
-			Module:      mod,
-			Params:      params,
-			Become:      needsBecome(r),
-			SourceIDs:   []string{r.ID},
-			RawCommand:  raw,
+			Name:       fmt.Sprintf("%s — %s", r.ID, truncate(r.Check, 60)),
+			Module:     mod,
+			Params:     params,
+			Become:     needsBecome(r),
+			SourceIDs:  []string{r.ID},
+			RawCommand: raw,
 		}
 		pb.Tasks = append(pb.Tasks, t)
 		idx := len(pb.Tasks) - 1
@@ -289,14 +289,6 @@ func unquote(s string) string {
 		}
 	}
 	return s
-}
-
-func lastWord(s string) string {
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[len(fields)-1]
 }
 
 // needsBecome inspects the row command for any sign that the check

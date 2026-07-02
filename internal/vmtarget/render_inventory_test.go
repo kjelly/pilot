@@ -8,14 +8,14 @@ import (
 // TestRenderInventory_AliasHostEntries is the regression guard
 // for the user passing `--hosts dns,ntp,keycloak` at `up` time.
 // We expect:
-//   1) the primary is a top-level host entry (so `-l core` works)
-//   2) every alias is also a top-level host entry (so `-l dns`
-//      and `hosts: dns` both work — ansible matches the host
-//      directly without needing a child group)
-//   3) NO `all.children` block at all, because the alias host
-//      entries already provide everything the user needs and a
-//      same-name child group would trigger an ansible warning
-//      (`Found both group and host with same name: <alias>`).
+//  1. the primary is a top-level host entry (so `-l core` works)
+//  2. every alias is also a top-level host entry (so `-l dns`
+//     and `hosts: dns` both work — ansible matches the host
+//     directly without needing a child group)
+//  3. NO `all.children` block at all, because the alias host
+//     entries already provide everything the user needs and a
+//     same-name child group would trigger an ansible warning
+//     (`Found both group and host with same name: <alias>`).
 func TestRenderInventory_AliasHostEntries(t *testing.T) {
 	tgt := &Target{
 		Name:    "core",

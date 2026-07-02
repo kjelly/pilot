@@ -16,13 +16,13 @@ import (
 //
 //   - localExecutor:      runs ansible-playbook on the host.
 //   - dockerConnExecutor: host runs ansible-playbook with a generated
-//                         `connection: docker` inventory pointing at
-//                         the sandbox container. Requires host-side
-//                         docker-py + community.docker.
+//     `connection: docker` inventory pointing at
+//     the sandbox container. Requires host-side
+//     docker-py + community.docker.
 //   - dockerExecExecutor: copies the playbook + inventory + extra-vars
-//                         into the sandbox container and runs
-//                         ansible-playbook there via `docker exec`.
-//                         No host Python deps needed.
+//     into the sandbox container and runs
+//     ansible-playbook there via `docker exec`.
+//     No host Python deps needed.
 //
 // Each strategy receives a fully-validated request (paths checked,
 // extra_vars temp file created, check/timeout decided) and returns

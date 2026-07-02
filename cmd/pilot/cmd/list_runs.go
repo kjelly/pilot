@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	listRunsLimit  int
-	listRunsBatch  string
+	listRunsLimit int
+	listRunsBatch string
 )
 
 var listRunsCmd = &cobra.Command{

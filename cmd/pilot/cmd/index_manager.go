@@ -107,12 +107,6 @@ func newEmbedderClient(baseURL, model, embedModel string) *ollama.Client {
 	return c
 }
 
-// indexExists returns true if the module index file exists.
-func indexExists(dataDir string) bool {
-	_, err := os.Stat(filepath.Join(dataDir, "docs-index.json"))
-	return err == nil
-}
-
 // ensurePlaybooksIndex performs incremental RAG updates for playbooks.
 // It discovers all playbooks in `./playbooks` and `~/.local/share/pilot/playbooks`,
 // parses and embeds any playbooks that are new or have modified mtime or size.

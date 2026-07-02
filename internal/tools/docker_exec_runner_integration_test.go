@@ -173,12 +173,12 @@ func TestRunPlaybookTool_DockerExecMode_RejectsNonDockerEnv(t *testing.T) {
 // NOT exec anything — tests that touch docker go through
 // dockerExecRunner directly (not this stub).
 type fakeSandboxEnv struct {
-	connType   string
+	connType    string
 	containerID string
 }
 
-func (f *fakeSandboxEnv) Start(ctx context.Context) error   { return nil }
-func (f *fakeSandboxEnv) Stop(ctx context.Context) error    { return nil }
+func (f *fakeSandboxEnv) Start(ctx context.Context) error { return nil }
+func (f *fakeSandboxEnv) Stop(ctx context.Context) error  { return nil }
 func (f *fakeSandboxEnv) Exec(ctx context.Context, argv []string, opts sandbox.ExecOptions) (*sandbox.ExecResult, error) {
 	return &sandbox.ExecResult{ExitCode: 0, Stdout: "", Stderr: ""}, nil
 }

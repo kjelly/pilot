@@ -33,7 +33,7 @@ func TestPilotVerify_DirRollup(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"alpha.md", "beta.md", "gamma.md"} {
-		os.WriteFile(filepath.Join(dir, name), []byte(`# Verification Spec — `+name+`
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(`# Verification Spec — `+name+`
 
 > 版本：v1.0
 > 對齊規範：none
@@ -59,7 +59,7 @@ none.
 	// needing the spec verifier to actually run.
 	for i, name := range []string{"alpha", "beta", "gamma"} {
 		path := filepath.Join(rptDir, name+"-20260630-090000.md")
-		os.WriteFile(path, []byte(`# stub
+		_ = os.WriteFile(path, []byte(`# stub
 
 - total:     9  pass: `+itoa(i*2+1)+`  fail: 8  skip: 0
 `), 0o644)
@@ -69,7 +69,7 @@ none.
 	// (alpha, beta, gamma) only — not picking up an unrelated report
 	// whose basename happens to start with a stem.
 	probe := filepath.Join(rptDir, "shared-20260630-090000.md")
-	os.WriteFile(probe, []byte("- total:     99  pass: 99  fail: 99\n"), 0o644)
+	_ = os.WriteFile(probe, []byte("- total:     99  pass: 99  fail: 99\n"), 0o644)
 
 	for _, name := range []string{"alpha", "beta", "gamma"} {
 		p, f, n, ok := readLastReport(filepath.Join(dir, name+".md"))
@@ -92,7 +92,7 @@ none.
 	// now the 15-char anchor (`-YYYYMMDD-HHMMSS.md`) forbids this.
 	// Probe by giving beta.md a stem-like sister.
 	sister := filepath.Join(rptDir, "alpha-shared-20260630-090000.md")
-	os.WriteFile(sister, []byte("- total:     99  pass: 99  fail: 99\n"), 0o644)
+	_ = os.WriteFile(sister, []byte("- total:     99  pass: 99  fail: 99\n"), 0o644)
 	_, _, n2, _ := readLastReport(filepath.Join(dir, "alpha.md"))
 	if n2 != 9 {
 		t.Errorf("alpha.md picked up alpha-shared-*.md: total=%d want 9", n2)

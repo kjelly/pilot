@@ -10,7 +10,7 @@ import (
 
 func TestMcpServer_Initialize(t *testing.T) {
 	s := &Server{}
-	
+
 	r, w, _ := os.Pipe()
 	s.stdout = w
 
@@ -34,7 +34,7 @@ func TestMcpServer_Initialize(t *testing.T) {
 	if resp.JSONRPC != "2.0" {
 		t.Errorf("expected jsonrpc 2.0, got: %s", resp.JSONRPC)
 	}
-	
+
 	resMap, ok := resp.Result.(map[string]any)
 	if !ok {
 		t.Fatal("expected result map")

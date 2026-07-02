@@ -208,4 +208,3 @@ func buildStdinPrompt(ctx failureContext) string {
 `)
 	return sb.String()
 }
-

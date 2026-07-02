@@ -10,9 +10,9 @@ import (
 // *client* of internal DNS/NTP/Keycloak must satisfy, this spec
 // locks what a *provider* host must satisfy:
 //
-//   C1-C3   DNS server installed + listening + authoritive
-//   C4-C6   NTP server installed + active + valid stratum
-//   C7-C9   Keycloak process + listener + discovery endpoint
+//	C1-C3   DNS server installed + listening + authoritive
+//	C4-C6   NTP server installed + active + valid stratum
+//	C7-C9   Keycloak process + listener + discovery endpoint
 //
 // Why this matters: a provider-side regression (e.g. someone
 // deletes C9 because "discovery will be checked upstream") lets a
@@ -57,7 +57,6 @@ func TestRegression_CoreInfraProviderSpec(t *testing.T) {
 	if HasErrors(fs) {
 		t.Errorf("Lint produced errors:\n%s", joinFindings(fs))
 	}
-
 
 	// C7 must use pidof, not pgrep. pgrep matches its own shell
 	// command line (which contains the literal "keycloak") and

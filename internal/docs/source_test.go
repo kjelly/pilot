@@ -90,8 +90,8 @@ func TestStringOf(t *testing.T) {
 
 func TestChunkModuleBasic(t *testing.T) {
 	m := ModuleDoc{
-		Name:      "lineinfile",
-		ShortDesc: "Manage lines",
+		Name:        "lineinfile",
+		ShortDesc:   "Manage lines",
 		Description: "Detailed description here.",
 		Options: map[string]string{
 			"path":  "File to modify",
@@ -132,7 +132,7 @@ func TestChunkModuleEmpty(t *testing.T) {
 
 func TestChunkModuleTruncates(t *testing.T) {
 	m := ModuleDoc{
-		Name:    "long",
+		Name:        "long",
 		Description: strings.Repeat("x", 10000),
 	}
 	chunks := ChunkModule(m)

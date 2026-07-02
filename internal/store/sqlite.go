@@ -60,16 +60,16 @@ type PlanOperation struct {
 // Plan is a batch of operations submitted by the model for
 // human-in-the-loop approval as a group.
 type Plan struct {
-	ID          string
-	RunID       string
-	Title       string
-	Summary     string
-	Operations  []PlanOperation
-	Status      string // pending | approved | rejected | executed | failed
-	CreatedAt   time.Time
-	ReviewedAt  *time.Time
-	ExecutedAt  *time.Time
-	Notes       string // human comments
+	ID         string
+	RunID      string
+	Title      string
+	Summary    string
+	Operations []PlanOperation
+	Status     string // pending | approved | rejected | executed | failed
+	CreatedAt  time.Time
+	ReviewedAt *time.Time
+	ExecutedAt *time.Time
+	Notes      string // human comments
 }
 
 type AgentMessage struct {
@@ -200,7 +200,7 @@ var migrateSteps = []migration{
 	},
 	{
 		Description: "create plans table",
-		SQL:         `CREATE TABLE IF NOT EXISTS plans (
+		SQL: `CREATE TABLE IF NOT EXISTS plans (
 			id TEXT PRIMARY KEY,
 			run_id TEXT DEFAULT '',
 			title TEXT NOT NULL,

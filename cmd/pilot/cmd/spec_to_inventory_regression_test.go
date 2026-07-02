@@ -19,7 +19,7 @@ import (
 // had no flag to call it, so users kept hand-rolling inventories. The
 // fix wires --to-inventory into runSpec so the cycle is:
 //
-//   spec.md  --(pilot spec --to-inventory out.yaml)-->  inventory.yaml
+//	spec.md  --(pilot spec --to-inventory out.yaml)-->  inventory.yaml
 //
 // To prove the test isn't a tautology: delete the
 // `emitSpecInventory(cmd, parsed, specToInv, specFromSSH)` call from

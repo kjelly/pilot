@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -102,9 +101,9 @@ func TestSSHEnvironment_ExecNoArgs(t *testing.T) {
 // refuse rather than silently shelling out to `ansible all`.
 func TestSSHEnvironment_RequiresHost(t *testing.T) {
 	cases := []*SSHEnvironment{
-		{Host: "h1"},                   // no inventory
-		{Inventory: "inv.ini"},         // no host
-		{},                             // neither
+		{Host: "h1"},           // no inventory
+		{Inventory: "inv.ini"}, // no host
+		{},                     // neither
 	}
 	for _, e := range cases {
 		if err := e.IsAvailable(context.Background()); err == nil {
@@ -123,7 +122,3 @@ func TestSSHEnvironment_RequiresHost(t *testing.T) {
 		}
 	}
 }
-
-// errorsAs is a tiny helper so the test doesn't have to import
-// errors/As directly into multiple call sites.
-func errorsAs(err error, target any) bool { return errors.As(err, target) }

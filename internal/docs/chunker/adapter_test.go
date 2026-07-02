@@ -23,13 +23,13 @@ func TestBuildLLMChunks_PreservesRichTypes(t *testing.T) {
 				Description: "Whether the service should start on boot.",
 			},
 			"state": {
-				Name:        "state",
-				Type:        "str",
-				Default:     "started",
-				Choices:     []any{"started", "stopped", "restarted", "reloaded"},
-				Description: "Desired state of the service.",
+				Name:         "state",
+				Type:         "str",
+				Default:      "started",
+				Choices:      []any{"started", "stopped", "restarted", "reloaded"},
+				Description:  "Desired state of the service.",
 				VersionAdded: "0.1",
-				Aliases:     []string{"status"},
+				Aliases:      []string{"status"},
 			},
 			"validate": {
 				Name:        "validate",
@@ -46,9 +46,9 @@ func TestBuildLLMChunks_PreservesRichTypes(t *testing.T) {
 		},
 	}
 	in := ModuleInput{
-		Name:        m.Name,
-		ShortDesc:   m.ShortDesc,
-		Options:     convertOptionsForTest(m.RichOptions),
+		Name:      m.Name,
+		ShortDesc: m.ShortDesc,
+		Options:   convertOptionsForTest(m.RichOptions),
 	}
 	chunks := ChunkModule(in)
 	var state, enabled, validate *Chunk
@@ -149,4 +149,3 @@ func convertOptionsForTest(rich map[string]docs.OptionDoc) map[string]OptionsEnt
 	}
 	return out
 }
-

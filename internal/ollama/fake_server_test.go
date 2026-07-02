@@ -230,7 +230,6 @@ func TestFakeOllamaPingSucceeds(t *testing.T) {
 var _ = httptest.NewServer
 var _ = time.Second
 
-
 // TestFakeOllamaStreamHonoursContextCancellation verifies that
 // ChatStream returns ctx.Err() when the caller cancels the context
 // mid-stream.

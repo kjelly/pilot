@@ -11,12 +11,12 @@
 // resolving which host they meant:
 //
 //   - Environment:    single-host; all exec/read/write targets
-//                     the same machine.
+//     the same machine.
 //   - MultiEnvironment: multi-host; per-host operations go via
-//                       Host(name).X(...). The Env-level methods
-//                       only exist for inventory/banner plumbing
-//                       (Start/Stop/IsAvailable/ConnectionInfo/
-//                       Name/Topology).
+//     Host(name).X(...). The Env-level methods
+//     only exist for inventory/banner plumbing
+//     (Start/Stop/IsAvailable/ConnectionInfo/
+//     Name/Topology).
 //
 // Adding new backends (SSH, podman, remote docker daemon) only
 // requires satisfying the appropriate interface for that backend's

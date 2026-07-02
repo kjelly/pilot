@@ -9,10 +9,10 @@ import (
 //
 // The integration bug in pam-oidc-sshd was:
 //
-//   ansible <host> -m command -a "sh -c 'dpkg -s kc-ssh-pam >/dev/null 2>&1; echo $?'"
-//   → ansible's exit code is 0 (the wrapper), while stdout is "1" (the real result).
-//   Pre-fix verifier saw rc=0 → reported PASS.
-//   Post-fix verifier extracts rc-from-stdout=1 and compares to expected 0 → FAIL.
+//	ansible <host> -m command -a "sh -c 'dpkg -s kc-ssh-pam >/dev/null 2>&1; echo $?'"
+//	→ ansible's exit code is 0 (the wrapper), while stdout is "1" (the real result).
+//	Pre-fix verifier saw rc=0 → reported PASS.
+//	Post-fix verifier extracts rc-from-stdout=1 and compares to expected 0 → FAIL.
 //
 // The cases below exercise every branch the post-fix switch handles.
 // To prove they aren't tautological, point matchExpected back at the
@@ -33,7 +33,7 @@ func TestVerifySpec_MatchExpected(t *testing.T) {
 		{"C1 happy rc-echo", "0", "(rc=0) 0", 0, true},
 
 		// Regex expected (C6): "OK provider=..."
-		{"regex match",   "^OK provider=kc-ssh-pam", "(rc=0) OK provider=kc-ssh-pam", 0, true},
+		{"regex match", "^OK provider=kc-ssh-pam", "(rc=0) OK provider=kc-ssh-pam", 0, true},
 		{"regex mismatch", "^OK provider=kc-ssh-pam", "(rc=0) something else", 0, false},
 
 		// expected=present: rc=0 wins.
@@ -45,7 +45,7 @@ func TestVerifySpec_MatchExpected(t *testing.T) {
 		{"empty expected rc=2", "", "(rc=2) stuff", 2, false},
 
 		// Exact-string match expected, with the runner prefix stripped.
-		{"exact match",   "OK provider=kc-ssh-pam", "(rc=0) OK provider=kc-ssh-pam", 0, true},
+		{"exact match", "OK provider=kc-ssh-pam", "(rc=0) OK provider=kc-ssh-pam", 0, true},
 		{"exact mismatch", "OK provider=kc-ssh-pam", "(rc=0) DIFFERENT", 0, false},
 	}
 	for _, c := range cases {

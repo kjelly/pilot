@@ -4,19 +4,19 @@
 // is to let the user stop typing long subcommand-prefixed commands
 // like:
 //
-//   pilot vm-target up --base-image /var/lib/libvirt/images/pilot/noble-base.qcow2 \
-//       --name core --hosts dns,ntp,keycloak
-//   ansible-playbook -i /tmp/inv-core.yaml \
-//       playbooks/apply/core-infra-provider-apply.yml \
-//       -e infra_role=dns -e target_group=dns -e dns_listen_addr=127.0.0.1
-//   KEYCLOAK_ISSUER=... pilot verify docs/verification/core-infra-provider.md \
-//       -i /tmp/inv-core.yaml
+//	pilot vm-target up --base-image /var/lib/libvirt/images/pilot/noble-base.qcow2 \
+//	    --name core --hosts dns,ntp,keycloak
+//	ansible-playbook -i /tmp/inv-core.yaml \
+//	    playbooks/apply/core-infra-provider-apply.yml \
+//	    -e infra_role=dns -e target_group=dns -e dns_listen_addr=127.0.0.1
+//	KEYCLOAK_ISSUER=... pilot verify docs/verification/core-infra-provider.md \
+//	    -i /tmp/inv-core.yaml
 //
 // and write instead:
 //
-//   pilot target up     --target core
-//   pilot target run    --target core --playbook playbooks/apply/core-infra-provider-apply.yml --role dns
-//   pilot target verify --target core --spec docs/verification/core-infra-provider.md
+//	pilot target up     --target core
+//	pilot target run    --target core --playbook playbooks/apply/core-infra-provider-apply.yml --role dns
+//	pilot target verify --target core --spec docs/verification/core-infra-provider.md
 //
 // The wrapper is *thin*: it does not duplicate any of the up / run /
 // verify / ssh logic — it just looks up which backend owns the named
@@ -518,9 +518,10 @@ type parsedTargetArgs struct {
 // gets it verbatim.
 //
 // The wrapper accepts a mix of:
-//   --target X  --playbook pb  --role dns  -- <extras>
-//   --target X  pb  -e foo=bar  (positional playbook)
-//   --target X  --spec spec.md -- <extras>
+//
+//	--target X  --playbook pb  --role dns  -- <extras>
+//	--target X  pb  -e foo=bar  (positional playbook)
+//	--target X  --spec spec.md -- <extras>
 func splitWrapperArgs(args []string) (parsedTargetArgs, []string, error) {
 	var p parsedTargetArgs
 	extra := make([]string, 0, len(args))

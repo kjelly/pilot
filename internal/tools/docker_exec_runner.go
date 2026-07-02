@@ -31,7 +31,7 @@ import (
 // Cleanup uses `docker exec rm` so we never leak tmpfiles even if
 // the process is killed mid-run.
 type dockerExecRunner struct {
-	containerID  string
+	containerID string
 	// DockerBinary is the docker CLI to invoke. Empty means
 	// fall back to "docker" (looked up in $PATH).
 	DockerBinary string
@@ -67,6 +67,7 @@ func (r *dockerExecRunner) staging() string {
 //   - the playbook positional arg (first non-flag arg)
 //   - the inventory (-i)
 //   - the extra-vars file (-e @<file>)
+//
 // before copying the source files into the container with `docker cp`.
 //
 // Returns an *ansible.Result with the same shape as Runner.Run so

@@ -318,7 +318,6 @@ func TestFilterOutputStdoutCallback(t *testing.T) {
 	}
 }
 
-
 // stubDockerEnv is a minimal sandbox.Environment used to drive
 // resolveInventory / prepareRequest under a docker sandbox without
 // requiring a real Docker daemon. Only ConnectionInfo matters for
@@ -327,16 +326,18 @@ type stubDockerEnv struct {
 	conn sandbox.AnsibleConnection
 }
 
-func (s *stubDockerEnv) Start(_ context.Context) error  { return nil }
-func (s *stubDockerEnv) Stop(_ context.Context) error   { return nil }
+func (s *stubDockerEnv) Start(_ context.Context) error { return nil }
+func (s *stubDockerEnv) Stop(_ context.Context) error  { return nil }
 func (s *stubDockerEnv) Exec(_ context.Context, _ []string, _ sandbox.ExecOptions) (*sandbox.ExecResult, error) {
 	return nil, nil
 }
 func (s *stubDockerEnv) ReadFile(_ context.Context, _ string) ([]byte, error) { return nil, nil }
-func (s *stubDockerEnv) WriteFile(_ context.Context, _ string, _ []byte, _ os.FileMode) error { return nil }
+func (s *stubDockerEnv) WriteFile(_ context.Context, _ string, _ []byte, _ os.FileMode) error {
+	return nil
+}
 func (s *stubDockerEnv) ConnectionInfo() sandbox.AnsibleConnection { return s.conn }
-func (s *stubDockerEnv) IsAvailable(_ context.Context) error { return nil }
-func (s *stubDockerEnv) Name() string { return "stub-docker" }
+func (s *stubDockerEnv) IsAvailable(_ context.Context) error       { return nil }
+func (s *stubDockerEnv) Name() string                              { return "stub-docker" }
 
 // writePlaybookAndRoot drops a minimal playbook into a temp root
 // so the tool passes ValidatePath and actually shells out to

@@ -188,7 +188,8 @@ func TestDockerTargetSubCommandsAllRegistered(t *testing.T) {
 // "accepts empty --name and silently picked default" bug — which
 // produced a target named "" that broke ansible inventory keys.
 func TestRunDtUp_RequiresName(t *testing.T) {
-	dtName = ""; dtImage = ""
+	dtName = ""
+	dtImage = ""
 	rootCmd.SetArgs([]string{"docker-target", "up"})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
@@ -200,7 +201,8 @@ func TestRunDtUp_RequiresName(t *testing.T) {
 
 // TestRunDtUp_RequiresImage mirrors the name check.
 func TestRunDtUp_RequiresImage(t *testing.T) {
-	dtName = ""; dtImage = ""
+	dtName = ""
+	dtImage = ""
 	rootCmd.SetArgs([]string{"docker-target", "up", "--name", "x"})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
@@ -257,7 +259,9 @@ func TestResolveDataDir_RespectsFlag(t *testing.T) {
 // the previous "both flags accepted" silently picked the last one
 // bound, masking CLI flag wiring bugs.
 func TestRunDtUp_ImageAndImagePilotExclusive(t *testing.T) {
-	dtName = ""; dtImage = ""; dtImagePilot = ""
+	dtName = ""
+	dtImage = ""
+	dtImagePilot = ""
 	rootCmd.SetArgs([]string{"docker-target", "up", "--name", "x", "--image", "u", "--image-pilot", "u"})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
@@ -269,7 +273,9 @@ func TestRunDtUp_ImageAndImagePilotExclusive(t *testing.T) {
 
 // TestRunDtUp_RequiresImageOrImagePilot mirrors the name check.
 func TestRunDtUp_RequiresImageOrImagePilot(t *testing.T) {
-	dtName = ""; dtImage = ""; dtImagePilot = ""
+	dtName = ""
+	dtImage = ""
+	dtImagePilot = ""
 	rootCmd.SetArgs([]string{"docker-target", "up", "--name", "x"})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
@@ -278,7 +284,6 @@ func TestRunDtUp_RequiresImageOrImagePilot(t *testing.T) {
 		t.Fatalf("want image-required error, got %v", err)
 	}
 }
-
 
 // TestDockerTargetSubCommandsAllRegistered_AfterSnapshotRollback
 // walks the new command set. If anyone refactors and drops
@@ -311,7 +316,8 @@ func TestDockerTargetSubCommandsAllRegistered_AfterSnapshotRollback(t *testing.T
 // "snapshots to 'latest' by default" silently overwrote whatever
 // 'latest' pointed at.
 func TestRunDtSnapshot_RequiresTag(t *testing.T) {
-	dtName = ""; dtSnapshotTag = ""
+	dtName = ""
+	dtSnapshotTag = ""
 	rootCmd.SetArgs([]string{"docker-target", "snapshot", "--name", "x"})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
@@ -323,7 +329,8 @@ func TestRunDtSnapshot_RequiresTag(t *testing.T) {
 
 // TestRunDtRollback_RequiresImage is the matching guard.
 func TestRunDtRollback_RequiresImage(t *testing.T) {
-	dtName = ""; dtRollbackImage = ""
+	dtName = ""
+	dtRollbackImage = ""
 	rootCmd.SetArgs([]string{"docker-target", "rollback", "--name", "x"})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
@@ -407,7 +414,8 @@ func TestValidDockerTag_RejectsShell(t *testing.T) {
 
 // TestRunDtSnapshot_RejectsInvalidTag is the regression guard.
 func TestRunDtSnapshot_RejectsInvalidTag(t *testing.T) {
-	dtName = ""; dtSnapshotTag = "bad+tag"
+	dtName = ""
+	dtSnapshotTag = "bad+tag"
 	rootCmd.SetArgs([]string{"docker-target", "snapshot", "--name", "x", "--tag", "bad+tag"})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
@@ -419,7 +427,8 @@ func TestRunDtSnapshot_RejectsInvalidTag(t *testing.T) {
 
 // TestRunDtRollback_RejectsInvalidImage is the matching guard.
 func TestRunDtRollback_RejectsInvalidImage(t *testing.T) {
-	dtName = ""; dtRollbackImage = "bad+image"
+	dtName = ""
+	dtRollbackImage = "bad+image"
 	rootCmd.SetArgs([]string{"docker-target", "rollback", "--name", "x", "--image", "bad+image"})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})

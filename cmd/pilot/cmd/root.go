@@ -12,8 +12,8 @@ import (
 
 	"github.com/anomalyco/pilot/internal/agent"
 	"github.com/anomalyco/pilot/internal/app"
-	"github.com/anomalyco/pilot/internal/dockertarget"
 	"github.com/anomalyco/pilot/internal/config"
+	"github.com/anomalyco/pilot/internal/dockertarget"
 	"github.com/anomalyco/pilot/internal/store"
 	"github.com/anomalyco/pilot/internal/ui/tui"
 )
@@ -25,11 +25,11 @@ var (
 	stream    bool
 	autoOK    string
 	dataDir   string
-	noTUI      bool // deprecated
-	useTUI     bool // --tui (persistent flag, default false)
+	noTUI     bool // deprecated
+	useTUI    bool // --tui (persistent flag, default false)
 
 	// index management
-		runNoIndex       bool
+	runNoIndex        bool
 	runNoIndexOnStart bool
 	runStrictIndex    bool
 	// Sandbox mode (shared between `pilot run` and `pilot chat`).
@@ -79,7 +79,7 @@ func init() {
 	rootCmd.AddCommand(indexPlaybooksCmd)
 	rootCmd.AddCommand(searchDocsCmd)
 	rootCmd.AddCommand(listRunsCmd)
-rootCmd.AddCommand(showPlanCmd)
+	rootCmd.AddCommand(showPlanCmd)
 	rootCmd.AddCommand(doctorCmd)
 }
 
@@ -134,17 +134,6 @@ func loadConfig() *config.Config {
 // stack construction in internal/app.
 type setupResult = app.App
 
-// setupRun prepares the full stack. It is now a thin wrapper around
-// app.New that supplies the CLI's --no-tui / --data-dir configuration.
-// All actual stack assembly lives in internal/app.
-func setupRun(ctx context.Context) (*setupResult, error) {
-	cfg := loadConfig()
-	return app.New(ctx, cfg, app.Options{
-		NoTUI:  !useTUI,
-		Banner: true,
-	})
-}
-
 // setupRunWithOpts is setupRun plus the ability to pass additional
 // app.Options (e.g. ForceSandbox from --sandbox CLI flag, or
 // SkipSandbox from --dry-run-all). It is the hook for commands
@@ -179,7 +168,7 @@ func resolveTargetInventory() string {
 		return ""
 	}
 	if t.Status != dockertarget.StatusRunning {
-		fmt.Fprintf(os.Stderr, `warning: --target %q not running (status=%s); bring it up with ` + "`pilot docker-target up --name %s`" + `\n`, runTarget, t.Status, runTarget)
+		fmt.Fprintf(os.Stderr, `warning: --target %q not running (status=%s); bring it up with `+"`pilot docker-target up --name %s`"+`\n`, runTarget, t.Status, runTarget)
 		return ""
 	}
 	inv, err := t.RenderInventory()
@@ -276,12 +265,9 @@ func newAgentLoopWithDefaults(
 	return res.NewLoopWithDefaults("", streamWriter, defaultInventory, defaultLimit)
 }
 
-
-
 // shutdownTUI is a helper to call from main cleanup.
 func shutdownTUI(tp *tui.Program) {
 	if tp != nil {
 		tp.Shutdown()
 	}
 }
-

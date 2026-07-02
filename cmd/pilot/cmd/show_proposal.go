@@ -12,6 +12,8 @@ import (
 	"github.com/anomalyco/pilot/internal/store"
 )
 
+func init() { rootCmd.AddCommand(showProposalCmd) }
+
 var showProposalCmd = &cobra.Command{
 	Use:   "show-proposal <proposal-id>",
 	Short: "Show a single proposal from the audit log",

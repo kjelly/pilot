@@ -1,7 +1,6 @@
 package ollama
 
 import (
-	"time"
 	"bufio"
 	"bytes"
 	"context"
@@ -11,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Client struct {
@@ -63,7 +63,7 @@ type ToolCallFunction struct {
 }
 
 type Tool struct {
-	Type     string      `json:"type"`
+	Type     string       `json:"type"`
 	Function ToolFunction `json:"function"`
 }
 

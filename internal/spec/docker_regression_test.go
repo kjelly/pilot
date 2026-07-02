@@ -11,14 +11,14 @@ import (
 //
 // Cross-row invariants:
 //
-//   * C1 must use dpkg-query -W -f=${Package} (NOT `dpkg -l | grep`)
+//   - C1 must use dpkg-query -W -f=${Package} (NOT `dpkg -l | grep`)
 //     — same lesson as core-infra-provider-db C1: client-only false
 //     positives. The package here is `docker.io` (not just `docker`).
-//   * C5 must use `docker run --rm hello-world` (idempotent + the
+//   - C5 must use `docker run --rm hello-world` (idempotent + the
 //     smallest possible end-to-end smoke). If a future maintainer
 //     swaps in a custom image, that change needs conscious review.
-//   * C4 must reference /var/run/docker.sock by literal path.
-//   * C7 must reference the v2 plugin (`docker compose version`, NOT
+//   - C4 must reference /var/run/docker.sock by literal path.
+//   - C7 must reference the v2 plugin (`docker compose version`, NOT
 //     `docker-compose --version` which is the legacy v1 binary).
 func TestRegression_DockerSpec(t *testing.T) {
 	const specPath = "../../docs/verification/docker.md"

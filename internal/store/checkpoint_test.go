@@ -16,13 +16,13 @@ func TestCheckpointUpsertAndList(t *testing.T) {
 	// Need a run to satisfy proposals FK if we ever wire that — checkpoints
 	// are independent so we can skip.
 	cp := &Checkpoint{
-		SpecPath:   "docs/verification/bastion.md",
-		RowID:      "C2",
-		RunID:      "run-1",
-		TaskIndex:  3,
-		Module:     "ansible.builtin.lineinfile",
-		ParamHash:  "abc123",
-		Status:     "compiled",
+		SpecPath:  "docs/verification/bastion.md",
+		RowID:     "C2",
+		RunID:     "run-1",
+		TaskIndex: 3,
+		Module:    "ansible.builtin.lineinfile",
+		ParamHash: "abc123",
+		Status:    "compiled",
 	}
 	if err := s.UpsertCheckpoint(cp); err != nil {
 		t.Fatalf("UpsertCheckpoint: %v", err)

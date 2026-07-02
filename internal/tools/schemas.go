@@ -156,52 +156,6 @@ var runInSpecArgs = json.RawMessage(`{
   }
 }`)
 
-var applyPatchArgs = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "playbook": {
-      "type": "string",
-      "description": "Absolute path to a generated playbook YAML to apply"
-    },
-    "inventory": {
-      "type": "string",
-      "description": "Absolute path to the inventory file"
-    },
-    "limit": {
-      "type": "string",
-      "description": "Optional host pattern to limit execution (e.g. 'web01' or 'webservers')"
-    },
-    "tags": {
-      "type": "array",
-      "items": {"type": "string"},
-      "description": "Only run plays and tasks tagged with these values (--tags tag1,tag2)"
-    },
-    "skip_tags": {
-      "type": "array",
-      "items": {"type": "string"},
-      "description": "Skip plays and tasks tagged with these values (--skip-tags tag1,tag2)"
-    },
-    "extra_vars": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "Object form of --extra-vars; written to a temp JSON file and passed via -e @<file>."
-    },
-    "extra_vars_raw": {
-      "type": "string",
-      "description": "Raw --extra-vars string."
-    },
-    "become": {"type": "boolean", "description": "Run with privilege escalation (--become)."},
-    "forks": {"type": "integer", "minimum": 1, "description": "Number of parallel processes to use (--forks N)."},
-    "user": {"type": "string", "description": "Connect as this user (--user)."},
-    "connection": {"type": "string", "enum": ["local", "ssh", "paramiko", "docker"], "description": "Connection type to use (--connection)."},
-    "vault_password_file": {"type": "string", "description": "Absolute path to a vault password file. Must live under one of the configured allowed_roots."},
-    "diff": {"type": "boolean", "description": "Show file changes (--diff)."},
-    "timeout": {"type": "integer", "minimum": 1, "description": "Override the per-run timeout in seconds."},
-    "flush_cache": {"type": "boolean", "description": "Clear the fact cache for every host in the inventory before running (--flush-cache)."}
-  },
-  "required": ["playbook"]
-}`)
-
 var gatherFactsArgs = json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -242,5 +196,3 @@ var vaultEncryptArgs = json.RawMessage(`{
   },
   "required": ["plaintext", "name"]
 }`)
-
-

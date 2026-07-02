@@ -87,7 +87,7 @@ func TestSummarizeInSpec_StableFailedOrdering(t *testing.T) {
 	idx1 := strings.Index(out, "1.1.1")
 	idx2 := strings.Index(out, "2.2.2")
 	idx3 := strings.Index(out, "3.3.3")
-	if !(idx1 < idx2 && idx2 < idx3) {
+	if idx1 >= idx2 || idx2 >= idx3 {
 		t.Errorf("failed controls not in sorted order: %s", out)
 	}
 }

@@ -81,9 +81,9 @@ func TestSearchDocsTool_ReturnsJSONWithStructuredFields(t *testing.T) {
 	}
 	// Body must be valid JSON.
 	var payload struct {
-		Query   string       `json:"query"`
-		Count   int          `json:"count"`
-		Results []SearchHit  `json:"results"`
+		Query   string      `json:"query"`
+		Count   int         `json:"count"`
+		Results []SearchHit `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(res.Content), &payload); err != nil {
 		t.Fatalf("result is not JSON: %v\n%s", err, res.Content)
@@ -258,11 +258,11 @@ func TestSearchDocsTool_PopulatesRelatedExampleAndSuggestedNext(t *testing.T) {
 	idx := newLLMTestModuleIndex(t)
 	chunks := []docs.Chunk{
 		{
-			ID: "modules:ansible.builtin.service:param:state",
-			Source: docs.SourceModule,
-			Ref:    "ansible.builtin.service",
+			ID:      "modules:ansible.builtin.service:param:state",
+			Source:  docs.SourceModule,
+			Ref:     "ansible.builtin.service",
 			Section: "param",
-			Text: "service.state (type=str, choices=started|stopped|restarted)",
+			Text:    "service.state (type=str, choices=started|stopped|restarted)",
 			Metadata: map[string]any{
 				"section":    "param",
 				"param_name": "state",
@@ -271,11 +271,11 @@ func TestSearchDocsTool_PopulatesRelatedExampleAndSuggestedNext(t *testing.T) {
 			},
 		},
 		{
-			ID: "modules:ansible.builtin.service:example",
-			Source: docs.SourceModule,
-			Ref:    "ansible.builtin.service",
-			Section: "example",
-			Text: "- service: name=httpd state=started enabled=yes",
+			ID:       "modules:ansible.builtin.service:example",
+			Source:   docs.SourceModule,
+			Ref:      "ansible.builtin.service",
+			Section:  "example",
+			Text:     "- service: name=httpd state=started enabled=yes",
 			Metadata: map[string]any{"section": "examples"},
 		},
 	}

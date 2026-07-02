@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
-	"sort"
 	"sync"
 )
 
@@ -269,7 +269,7 @@ func (idx *Index) Search(ctx context.Context, emb Embedder, query string, k int,
 		if source != "" && idx.chunks[i].Source != source {
 			continue
 		}
-		
+
 		// Lexical score calculations
 		lexicalScore := 0.0
 		chunk := idx.chunks[i]
@@ -391,9 +391,9 @@ func (idx *Index) Meta() Meta {
 // indexFile is the on-disk envelope. We use a struct with JSON tags
 // (rather than yaml) because floats-as-JSON is more compact.
 type indexFile struct {
-	Version int       `json:"version"`
-	Meta    Meta      `json:"meta"`
-	Chunks  []Chunk   `json:"chunks"`
+	Version int         `json:"version"`
+	Meta    Meta        `json:"meta"`
+	Chunks  []Chunk     `json:"chunks"`
 	Vectors [][]float32 `json:"vectors"`
 }
 

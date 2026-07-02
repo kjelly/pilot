@@ -14,15 +14,15 @@ type Keymap struct {
 	Refresh keyBinding
 
 	// Approval modal
-	Approve     keyBinding
-	Reject      keyBinding
-	Details     keyBinding
-	Abort       keyBinding
-	UpDown      keyBinding
+	Approve keyBinding
+	Reject  keyBinding
+	Details keyBinding
+	Abort   keyBinding
+	UpDown  keyBinding
 
 	// Ask user
-	Select      keyBinding
-	Cancel      keyBinding
+	Select keyBinding
+	Cancel keyBinding
 }
 
 type keyBinding struct {

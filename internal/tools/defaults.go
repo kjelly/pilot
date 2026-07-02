@@ -132,7 +132,7 @@ func DefaultRegistryWithConfig(
 			DefaultInventory:     cfg.DefaultInventory,
 			DefaultLimit:         cfg.DefaultLimit,
 			Env:                  cfg.Env,
-			SandboxMode:          cfg.SandboxMode,  // already sandbox.SandboxMode
+			SandboxMode:          cfg.SandboxMode, // already sandbox.SandboxMode
 		}
 		spec := t.Spec()
 		spec.Execute = t.Execute
@@ -152,7 +152,6 @@ func DefaultRegistryWithConfig(
 		spec.Execute = t.Execute
 		r.MustRegister(spec)
 	}
-
 
 	// generate_playbook (requires ollama)
 	if ollamaClient != nil {
@@ -189,7 +188,6 @@ func DefaultRegistryWithConfig(
 		spec.Execute = t.Execute
 		r.MustRegister(spec)
 	}
-
 
 	// ask_user
 	{
@@ -239,4 +237,3 @@ func DefaultRegistryWithConfig(
 	}
 	return r
 }
-

@@ -40,12 +40,12 @@ func (s *Spec) HasTargets() bool { return len(s.Hosts) > 0 }
 // and English headers are accepted so the spec stays usable for
 // non-Chinese-first teams without rewriting existing docs.
 var inventoryHeaderAliases = map[string][]string{
-	"hostname":      {"hostname", "host", "name", "主機"},
-	"group":         {"group", "inventory group", "分類"},
-	"address":       {"address", "ip", "ansible_host", "位址"},
-	"user":          {"user", "ansible_user", "使用者", "ssh user"},
-	"port":          {"port", "ansible_port", "埠"},
-	"identityfile":  {"identityfile", "key", "ansible_ssh_private_key_file", "金鑰"},
+	"hostname":     {"hostname", "host", "name", "主機"},
+	"group":        {"group", "inventory group", "分類"},
+	"address":      {"address", "ip", "ansible_host", "位址"},
+	"user":         {"user", "ansible_user", "使用者", "ssh user"},
+	"port":         {"port", "ansible_port", "埠"},
+	"identityfile": {"identityfile", "key", "ansible_ssh_private_key_file", "金鑰"},
 }
 
 // parseTargetsTable scans a raw markdown table block into Hosts.
@@ -166,10 +166,6 @@ func (s *Spec) GenerateInventory(opts GenerateInventoryOptions) (string, error) 
 	}
 	if !s.HasTargets() {
 		return "", nil
-	}
-	group := opts.Group
-	if group == "" {
-		group = "all"
 	}
 	// Bucket hosts by group for the nested YAML form ansible wants.
 	byGroup := map[string][]Host{}

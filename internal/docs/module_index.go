@@ -1,7 +1,6 @@
 package docs
 
 import (
-	"time"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/mapping"
@@ -31,14 +31,14 @@ func NewModuleIndex(path string) *ModuleIndex {
 	return &ModuleIndex{path: path}
 }
 
-// bleveOpenTimeout bounds the underlying bbolt.Open. bbolt's flock
-// retry loop has no upper bound, so a stuck lock (e.g. another pilot
+// bleveOpenTimeoutOrDefault bounds the underlying bbolt.Open. bbolt's
+// flock retry loop has no upper bound, so a stuck lock (e.g. another pilot
 // process left over from a SIGKILL) would hang the agent loop forever.
 // 30 s is generous for a 100 MB local index.
 //
 // Override at test time by setting the package-level variable
 // bleveOpenTimeoutForTest BEFORE calling Open(). Tests should always
-// defer-undo the override. The const-form is retained as the default.
+// defer-undo the override.
 var bleveOpenTimeoutForTest time.Duration
 
 func bleveOpenTimeoutOrDefault() time.Duration {
@@ -47,10 +47,6 @@ func bleveOpenTimeoutOrDefault() time.Duration {
 	}
 	return 30 * time.Second
 }
-
-// bleveOpenTimeout is kept as a const for the docstring above; the
-// runtime value is bleveOpenTimeoutOrDefault().
-const bleveOpenTimeout = 30 * time.Second
 
 // Open creates or opens the underlying bleve index. Must be called before
 // any other method. On a successful open of an existing index, the

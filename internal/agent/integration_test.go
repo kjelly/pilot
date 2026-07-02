@@ -109,8 +109,9 @@ func jsonToolCalls(tcs []ollama.ToolCall) string {
 
 // TestAgentLoopEndToEndWithScriptedLLM drives the agent loop with a
 // scripted Ollama server that returns:
-//   1. an assistant message asking for a tool call (read_file)
-//   2. a final assistant message (no more tool calls)
+//  1. an assistant message asking for a tool call (read_file)
+//  2. a final assistant message (no more tool calls)
+//
 // The loop should reach the iteration cap's "done" path without
 // errors and emit one tool result.
 func TestAgentLoopEndToEndWithScriptedLLM(t *testing.T) {
@@ -119,11 +120,11 @@ func TestAgentLoopEndToEndWithScriptedLLM(t *testing.T) {
 		// Round 1: model calls read_file.
 		{
 			Message: ollama.Message{
-				Role: "assistant",
+				Role:    "assistant",
 				Content: "I'll read the file.",
 				ToolCalls: []ollama.ToolCall{
 					{Function: ollama.ToolCallFunction{
-						Name: "read_file",
+						Name:      "read_file",
 						Arguments: []byte(`{"path":"/etc/hostname"}`),
 					}},
 				},
@@ -211,7 +212,7 @@ func TestToolArgsSizeCapRejectsOversizedPayload(t *testing.T) {
 	so.queue = []ollama.ChatResponse{
 		{
 			Message: ollama.Message{
-				Role: "assistant",
+				Role:    "assistant",
 				Content: "trying to read huge file",
 				ToolCalls: []ollama.ToolCall{
 					{Function: ollama.ToolCallFunction{
@@ -231,8 +232,10 @@ func TestToolArgsSizeCapRejectsOversizedPayload(t *testing.T) {
 	redactor := sanitizer.New()
 	registry := tools.NewRegistry()
 	registry.MustRegister(&tools.Spec{
-		Name:    "read_file",
-		Execute: func(_ context.Context, _ json.RawMessage) (*tools.Result, error) { return &tools.Result{Content: "x"}, nil },
+		Name: "read_file",
+		Execute: func(_ context.Context, _ json.RawMessage) (*tools.Result, error) {
+			return &tools.Result{Content: "x"}, nil
+		},
 	})
 	approver := &testApprover{decision: DecisionApproved}
 	loop := NewLoop(Config{

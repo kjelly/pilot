@@ -10,7 +10,7 @@ import (
 // was silently truncated to everything before the first pipe. The
 // os-patch-sla C2 row had:
 //
-//   | C2  | security | ... | 0 | apt list --upgradable | grep security | wc -l | tr -d " " |
+//	| C2  | security | ... | 0 | apt list --upgradable | grep security | wc -l | tr -d " " |
 //
 // and the parser picked only the first half. The fix: if a row has
 // more than the canonical 5 columns, join the extras back with ` | `

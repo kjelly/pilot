@@ -63,10 +63,10 @@ func TestEmbeddingCosineSimilarity(t *testing.T) {
 func TestTopK(t *testing.T) {
 	query := []float32{1, 0, 0}
 	batch := [][]float32{
-		{1, 0, 0},   // 1.0
+		{1, 0, 0},     // 1.0
 		{0.9, 0.1, 0}, // ~0.99
-		{0, 1, 0},   // 0
-		{-1, 0, 0},  // -1
+		{0, 1, 0},     // 0
+		{-1, 0, 0},    // -1
 	}
 	matches := docs.TopK(query, batch, 2)
 	if len(matches) != 2 {

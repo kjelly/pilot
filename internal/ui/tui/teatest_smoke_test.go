@@ -166,7 +166,7 @@ func TestTeatestSmoke_ApprovalRejectFlow(t *testing.T) {
 		Proposal: &agent.Proposal{
 			ID: "p2", Tool: "run_command", RiskLevel: "low",
 			Rationale: "should be rejected",
-			Args:       []byte(`{"command":"uname -a"}`),
+			Args:      []byte(`{"command":"uname -a"}`),
 		},
 		Reply: reply,
 	})
@@ -307,22 +307,3 @@ func TestTeatestSmoke_ApprovalModalRendersToolAndRisk(t *testing.T) {
 }
 
 // --- helpers ---------------------------------------------------------------
-
-// readAll drains the teatest output reader and returns the full
-// rendered buffer. Used by assertions that don't need WaitFor
-// polling (e.g. terminal state after Init).
-func readAll(tm *teatest.TestModel) string {
-	out := tm.Output()
-	buf := make([]byte, 0, 4096)
-	tmp := make([]byte, 1024)
-	for {
-		n, err := out.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-		}
-		if err != nil {
-			break
-		}
-	}
-	return string(buf)
-}

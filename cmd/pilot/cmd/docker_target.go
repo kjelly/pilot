@@ -463,10 +463,10 @@ func runDtExec(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if res.Stdout != "" {
-		cmd.OutOrStdout().Write([]byte(res.Stdout))
+		_, _ = cmd.OutOrStdout().Write([]byte(res.Stdout))
 	}
 	if res.Stderr != "" {
-		cmd.ErrOrStderr().Write([]byte(res.Stderr))
+		_, _ = cmd.ErrOrStderr().Write([]byte(res.Stderr))
 	}
 	// Do NOT fail on non-zero exit. Many legitimate exec calls
 	// (grep -q, test -f, apt list checks) intentionally exit non-zero.
@@ -601,10 +601,7 @@ var newCmd = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
 
 // ---- snapshot -------------------------------------------------------------
 
-var (
-	dtSnapshotName string
-	dtSnapshotTag  string
-)
+var dtSnapshotTag string
 
 var dtSnapshotCmd = &cobra.Command{
 	Use:   "snapshot",

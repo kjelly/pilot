@@ -121,16 +121,10 @@ func TestRegistryOllamaToolsCache(t *testing.T) {
 	})
 
 	first := r.OllamaTools()
-	second := r.OllamaTools()
-	if &first[0] == &second[0] {
-		// Same backing array means cache hit. We can't compare
-		// pointer-of-slice directly; instead check that the slice
-		// headers point at the same backing array by mutating first
-		// and seeing second reflect the change.
-		// Note: OllamaTools returns a slice value, not a pointer,
-		// so identity comparison isn't meaningful. The test below
-		// uses InvalidateCache to verify the recompute path.
-	}
+	_ = r.OllamaTools()
+	// Note: OllamaTools returns a slice value, not a pointer, so identity
+	// comparison isn't meaningful. Instead we verify cache behaviour below
+	// via mutation + InvalidateCache.
 
 	// Mutating a returned slice shouldn't affect the cache.
 	first[0].Function.Name = "MUTATED"

@@ -84,7 +84,7 @@ type verifySpecArgsStruct struct {
 // tooling (render-report.py, dashboards) keeps working.
 type VerifyRow struct {
 	ID       string `json:"id"`
-	Status   string `json:"status"`   // pass | fail | skip
+	Status   string `json:"status"` // pass | fail | skip
 	Detail   string `json:"detail"`
 	Host     string `json:"host,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
@@ -127,10 +127,9 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 	if err != nil {
 		return &Result{Content: fmt.Sprintf("ERROR: %v", err), IsError: true}, nil
 	}
-	if findings := spec.Lint(parsed); spec.HasErrors(findings) {
-		// Run anyway but warn — verifier might be the first time
-		// an author sees the lint issues.
-	}
+	// NOTE: spec.Lint(parsed) may report errors here; we intentionally run
+	// the verifier anyway (lint issues are surfaced by `pilot spec --lint`,
+	// not by the verify tool).
 
 	timeoutSec := a.TimeoutSec
 	if timeoutSec <= 0 {
@@ -208,7 +207,7 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 	if shellMetachars(r.Command) {
 		module = "shell"
 	}
-		fmt.Fprintf(os.Stderr, "[verify-adhoc] module=%s cmd=%q\n", module, r.Command)
+	fmt.Fprintf(os.Stderr, "[verify-adhoc] module=%s cmd=%q\n", module, r.Command)
 	args := []string{target, "-i", t.Inventory, "-m", module, "-a", r.Command, "--one-line"}
 	if t.Limit != "" {
 		args = append(args, "-l", t.Limit)
@@ -236,18 +235,17 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 	return VerifyRow{ID: r.ID, Status: status, Detail: mismatch, ExitCode: rc}
 }
 
-
 // matchExpected decides whether captured stdout (or, for rc-equality,
 // the captured rc) satisfies the spec row's Expected value. The
 // previous implementation only checked exit code, which made rows
 // like C1 in pam-oidc-sshd report pass when the command explicitly
 // printed `1` (the rc-echo trick). The matrix this implements:
 //
-//   expected == ""          → rc == 0
-//   expected starts with "^" → anchored regex on stripped stdout
-//   expected is a pure int   → rc (taken from stdout `(rc=N)` first)
-//   expected == "present"    → rc == 0
-//   otherwise                → exact equality after trim
+//	expected == ""          → rc == 0
+//	expected starts with "^" → anchored regex on stripped stdout
+//	expected is a pure int   → rc (taken from stdout `(rc=N)` first)
+//	expected == "present"    → rc == 0
+//	otherwise                → exact equality after trim
 //
 // The second case is what unblocks the verify-passes-when-it-shouldn't
 // regression in the pam-oidc-sshd spec.
@@ -369,7 +367,6 @@ func truncate(s string, n int) string {
 var (
 	rcOnlyPattern   = regexp.MustCompile(`^\(rc=\d+\)$`)
 	rcPrefixPattern = regexp.MustCompile(`^\(rc=\d+\)\s+`)
-	rcInText        = regexp.MustCompile(`\brc=(\d+)\b`)
 )
 
 // ReadNDJSON is a helper for the CLI to parse the Result.Content

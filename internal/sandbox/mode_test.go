@@ -7,9 +7,9 @@ import (
 
 func TestParseSandboxMode(t *testing.T) {
 	cases := []struct {
-		in       string
-		want     SandboxMode
-		wantErr  bool
+		in      string
+		want    SandboxMode
+		wantErr bool
 	}{
 		{"", SandboxModeDocker, false},
 		{"docker", SandboxModeDocker, false},

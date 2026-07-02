@@ -18,25 +18,25 @@ type CmdSpec struct {
 }
 
 type Config struct {
-	OllamaURL            string   `yaml:"ollama_url"`
-	Model                string   `yaml:"model"`
-	MaxIter              int      `yaml:"max_iterations"`
-	AutoApprove          string   `yaml:"auto_approve"` // "never" | "low" | "medium"
-	MaxConc              int      `yaml:"max_concurrent"`
-	DataDir              string   `yaml:"data_dir"`
-	SystemPrompt         string   `yaml:"system_prompt"`
-	AllowedTools         []string `yaml:"allowed_tools"`
-	BlockedTools         []string `yaml:"blocked_tools"`
-	AllowedCommands      []CmdSpec `yaml:"allowed_commands,omitempty"`
-	CustomRedactRules    []struct {
+	OllamaURL         string    `yaml:"ollama_url"`
+	Model             string    `yaml:"model"`
+	MaxIter           int       `yaml:"max_iterations"`
+	AutoApprove       string    `yaml:"auto_approve"` // "never" | "low" | "medium"
+	MaxConc           int       `yaml:"max_concurrent"`
+	DataDir           string    `yaml:"data_dir"`
+	SystemPrompt      string    `yaml:"system_prompt"`
+	AllowedTools      []string  `yaml:"allowed_tools"`
+	BlockedTools      []string  `yaml:"blocked_tools"`
+	AllowedCommands   []CmdSpec `yaml:"allowed_commands,omitempty"`
+	CustomRedactRules []struct {
 		Pattern     string `yaml:"pattern"`
 		Replace     string `yaml:"replace"`
 		Description string `yaml:"description"`
 	} `yaml:"custom_redact_rules,omitempty"`
-	AllowedReadPaths     []string `yaml:"allowed_read_paths,omitempty"`
-	AllowedPlaybookRoots []string `yaml:"allowed_playbook_roots,omitempty"`
+	AllowedReadPaths     []string      `yaml:"allowed_read_paths,omitempty"`
+	AllowedPlaybookRoots []string      `yaml:"allowed_playbook_roots,omitempty"`
 	Sandbox              SandboxConfig `yaml:"sandbox,omitempty"`
-	AllowDisposableApply bool     `yaml:"allow_disposable_apply"`
+	AllowDisposableApply bool          `yaml:"allow_disposable_apply"`
 }
 
 // SandboxConfig configures the optional Docker-sandbox mode. When

@@ -121,15 +121,15 @@ type inspecProfile struct {
 }
 
 type inspecControl struct {
-	ID         string             `json:"id"`
-	Title      string             `json:"title"`
-	Desc       string             `json:"desc"`
-	Impact     float64            `json:"impact"`
-	Refs       []inspecRef        `json:"refs"`
-	Tags       map[string]any     `json:"tags"`
-	CodeString string             `json:"code_string"`
+	ID             string          `json:"id"`
+	Title          string          `json:"title"`
+	Desc           string          `json:"desc"`
+	Impact         float64         `json:"impact"`
+	Refs           []inspecRef     `json:"refs"`
+	Tags           map[string]any  `json:"tags"`
+	CodeString     string          `json:"code_string"`
 	SourceLocation *inspecLocation `json:"source_location,omitempty"`
-	Results    []inspecResult     `json:"results"`
+	Results        []inspecResult  `json:"results"`
 }
 
 type inspecRef struct {
@@ -143,13 +143,13 @@ type inspecLocation struct {
 }
 
 type inspecResult struct {
-	Status     string  `json:"status"`
+	Status     string `json:"status"`
 	CodeResult struct {
-		RunTime float64 `json:"run_time"`
+		RunTime   float64   `json:"run_time"`
 		StartTime time.Time `json:"start_time"`
 	} `json:"code_result"`
-	Message  string `json:"message"`
-	RunTime  float64 `json:"run_time"`
+	Message string  `json:"message"`
+	RunTime float64 `json:"run_time"`
 }
 
 // summarizeInSpec parses the JSON output of `inspec exec --reporter json`

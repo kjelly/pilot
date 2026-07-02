@@ -27,7 +27,6 @@ func TestWrapUntrustedStripsNestedCloser(t *testing.T) {
 	}
 }
 
-
 // TestWrapUntrusted_DoesNotUseOldScaryMarker is a regression test for the
 // LLM-hallucination bug observed with minimax-m3: the old marker
 // "<untrusted_tool_output>" caused some models to skip the entire block

@@ -92,18 +92,18 @@ func TestDefaultRegistryConservativeDefaults(t *testing.T) {
 // only for the Name() method, which is all SandboxImage touches.
 type fakeEnv struct{ name string }
 
-func (f *fakeEnv) Start(_ context.Context) error                         { return nil }
-func (f *fakeEnv) Stop(_ context.Context) error                          { return nil }
+func (f *fakeEnv) Start(_ context.Context) error { return nil }
+func (f *fakeEnv) Stop(_ context.Context) error  { return nil }
 func (f *fakeEnv) Exec(_ context.Context, _ []string, _ sandbox.ExecOptions) (*sandbox.ExecResult, error) {
 	return nil, nil
 }
-func (f *fakeEnv) ReadFile(_ context.Context, _ string) ([]byte, error)  { return nil, nil }
+func (f *fakeEnv) ReadFile(_ context.Context, _ string) ([]byte, error) { return nil, nil }
 func (f *fakeEnv) WriteFile(_ context.Context, _ string, _ []byte, _ os.FileMode) error {
 	return nil
 }
-func (f *fakeEnv) ConnectionInfo() sandbox.AnsibleConnection             { return sandbox.AnsibleConnection{} }
-func (f *fakeEnv) IsAvailable(_ context.Context) error                   { return nil }
-func (f *fakeEnv) Name() string                                          { return f.name }
+func (f *fakeEnv) ConnectionInfo() sandbox.AnsibleConnection { return sandbox.AnsibleConnection{} }
+func (f *fakeEnv) IsAvailable(_ context.Context) error       { return nil }
+func (f *fakeEnv) Name() string                              { return f.name }
 
 func TestSandboxImage_HandlesAllShapes(t *testing.T) {
 	cases := []struct {
@@ -144,7 +144,6 @@ func TestSandboxImage_NeverPanics(t *testing.T) {
 		t.Errorf("empty env name should return empty string, got %q", got)
 	}
 }
-
 
 // buildTestApp constructs a minimal *App suitable for NewLoopWithDefaults tests
 // without going through New() (which would require a live Ollama). Only the

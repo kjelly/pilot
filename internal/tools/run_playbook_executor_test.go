@@ -57,8 +57,8 @@ type fakeNonLocalEnv struct{}
 
 func (fakeNonLocalEnv) Name() string { return "docker-fake" }
 
-func (fakeNonLocalEnv) Start(_ context.Context) error   { return nil }
-func (fakeNonLocalEnv) Stop(_ context.Context) error    { return nil }
+func (fakeNonLocalEnv) Start(_ context.Context) error       { return nil }
+func (fakeNonLocalEnv) Stop(_ context.Context) error        { return nil }
 func (fakeNonLocalEnv) IsAvailable(_ context.Context) error { return nil }
 
 func (fakeNonLocalEnv) Exec(_ context.Context, _ []string, _ sandbox.ExecOptions) (*sandbox.ExecResult, error) {

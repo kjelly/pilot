@@ -19,8 +19,8 @@ import (
 	"github.com/anomalyco/pilot/internal/agent"
 	"github.com/anomalyco/pilot/internal/ansible"
 	"github.com/anomalyco/pilot/internal/app"
-	"github.com/anomalyco/pilot/internal/store"
 	"github.com/anomalyco/pilot/internal/sandbox"
+	"github.com/anomalyco/pilot/internal/store"
 )
 
 var runCmd = &cobra.Command{
@@ -40,29 +40,29 @@ Use one of these to specify which playbook(s) to run:
 }
 
 var (
-	runInventory        string
-	runLimit            string
-	runMode             string
-	runFromStdin        bool
-	runDiscover         string
-	runDryRunAll        bool
-	runSkipSyntax       bool
-	runSkipLint         bool
-	runFailFast         bool
-	runSandbox            bool
-	runSandboxImage       string
-	runSandboxHostname    string
-	runSandboxNetwork     string
-	runSandboxKeep        bool
+	runInventory           string
+	runLimit               string
+	runMode                string
+	runFromStdin           bool
+	runDiscover            string
+	runDryRunAll           bool
+	runSkipSyntax          bool
+	runSkipLint            bool
+	runFailFast            bool
+	runSandbox             bool
+	runSandboxImage        string
+	runSandboxHostname     string
+	runSandboxNetwork      string
+	runSandboxKeep         bool
 	runSandboxPreferCached bool
-	runSandboxDryRun      bool
-	runSandboxTopology    string
-	runSandboxMounts      []string
+	runSandboxDryRun       bool
+	runSandboxTopology     string
+	runSandboxMounts       []string
 	// runTarget is the name of a docker target (managed by
 	// `pilot docker-target`). When set, the LLM agent loop's
 	// run_ansible tool calls get pointed at that target's
 	// generated inventory. See app.ResolveDockerTarget.
-	runTarget             string
+	runTarget string
 	// runSandboxMode is declared in root.go as a shared global so
 	// `pilot chat` can set it too. We don't redeclare it here.
 )
@@ -71,7 +71,6 @@ func init() {
 	runCmd.Flags().StringVarP(&runInventory, "inventory", "i", "", "Ansible inventory file")
 	runCmd.Flags().StringVar(&runLimit, "limit", "", "limit execution to a host pattern")
 	runCmd.Flags().StringVar(&runMode, "execution-mode", "serial", "execution mode: serial|parallel")
-
 
 	// New flags
 	runCmd.Flags().BoolVar(&runFromStdin, "from-stdin", false, "read playbook paths from stdin (one per line, or JSON Lines)")
@@ -118,10 +117,10 @@ type playbookTarget struct {
 	Limit     string `json:"limit,omitempty"`
 
 	// Tag / var selection
-	Tags       []string       `json:"tags,omitempty"`
-	SkipTags   []string       `json:"skip_tags,omitempty"`
-	ExtraVars  map[string]any `json:"extra_vars,omitempty"`
-	RawExtraVars string       `json:"extra_vars_raw,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
+	SkipTags     []string       `json:"skip_tags,omitempty"`
+	ExtraVars    map[string]any `json:"extra_vars,omitempty"`
+	RawExtraVars string         `json:"extra_vars_raw,omitempty"`
 
 	// Privilege / connection
 	Become     *bool  `json:"become,omitempty"`
@@ -341,7 +340,7 @@ type batchResult struct {
 	// Proposals is the full proposal list for this target. Only populated
 	// when --dry-run-all is on (so we can print a useful WOULD-DO summary);
 	// otherwise the audit log has the canonical copy.
-	Proposals           []*agent.Proposal
+	Proposals []*agent.Proposal
 }
 
 func runOneTarget(ctx context.Context, res *setupResult, batchID, prefix string, tgt playbookTarget, mode string) batchResult {
@@ -637,11 +636,9 @@ func resolveTargets(args []string) ([]playbookTarget, error) {
 	if hasPositional && (runFromStdin || runDiscover != "") {
 		return nil, fmt.Errorf("positional playbook cannot be combined with --from-stdin or --discover")
 	}
-	if hasPositional && len(args) >= 2 {
-		// we currently don't use the goal as a separate arg; the
-		// default goal is used. We could parse args[1] as a goal in
-		// the future.
-	}
+	// NOTE: when hasPositional && len(args) >= 2, extra positional args are
+	// currently ignored — the default goal is used. args[1] could become a
+	// separate goal in the future.
 
 	// Fall back to ANSIBLE_INVENTORY when the CLI flag is empty.
 	// Limit has no env-var convention; --limit is intentionally per-run.

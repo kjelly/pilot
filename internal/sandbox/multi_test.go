@@ -168,8 +168,8 @@ func TestMultiEnvironment_HostsIsReadOnlyCopy(t *testing.T) {
 // picks the topology-ordered host.
 type namedEnv struct{ name string }
 
-func (n *namedEnv) Start(_ context.Context) error                       { return nil }
-func (n *namedEnv) Stop(_ context.Context) error                        { return nil }
+func (n *namedEnv) Start(_ context.Context) error { return nil }
+func (n *namedEnv) Stop(_ context.Context) error  { return nil }
 func (n *namedEnv) Exec(_ context.Context, _ []string, _ ExecOptions) (*ExecResult, error) {
 	return &ExecResult{}, nil
 }

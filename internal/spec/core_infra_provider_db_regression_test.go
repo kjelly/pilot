@@ -16,23 +16,23 @@ import (
 //
 // C1–C11 cover:
 //
-//   C1      container running
-//   C2      image is postgres:16
-//   C3      host 5432/tcp LISTEN (port mapping 127.0.0.1:5432:5432)
-//   C4–C6   keycloak database + role exist, role owns the db
-//   C7      keycloak role can TCP-login and SELECT 1
-//   C8      host bind-mount is wired to /var/lib/postgresql/data
-//   C9      container healthcheck status = healthy
-//   C10     pg_isready inside the container
-//   C11     DB size < 10 GiB (capacity tripwire)
+//	C1      container running
+//	C2      image is postgres:16
+//	C3      host 5432/tcp LISTEN (port mapping 127.0.0.1:5432:5432)
+//	C4–C6   keycloak database + role exist, role owns the db
+//	C7      keycloak role can TCP-login and SELECT 1
+//	C8      host bind-mount is wired to /var/lib/postgresql/data
+//	C9      container healthcheck status = healthy
+//	C10     pg_isready inside the container
+//	C11     DB size < 10 GiB (capacity tripwire)
 //
 // Cross-row invariants locked below:
 //
-//   * C1 + C2 must query docker (NOT systemctl / dpkg).
-//   * C7 must reference $KEYCLOAK_DB_PASSWORD.
-//   * C8 must reference the host bind-mount path /var/lib/pilot/postgres.
-//   * C9 must query docker healthcheck status (.State.Health.Status).
-//   * C11 must use pg_database_size with an explicit `::bigint` cast
+//   - C1 + C2 must query docker (NOT systemctl / dpkg).
+//   - C7 must reference $KEYCLOAK_DB_PASSWORD.
+//   - C8 must reference the host bind-mount path /var/lib/pilot/postgres.
+//   - C9 must query docker healthcheck status (.State.Health.Status).
+//   - C11 must use pg_database_size with an explicit `::bigint` cast
 //     (the literal 10737418240 exceeds int4; lesson learned in v1.0).
 func TestRegression_CoreInfraProviderDbSpec(t *testing.T) {
 	const specPath = "../../docs/verification/core-infra-provider-db.md"

@@ -17,11 +17,11 @@ import (
 // The questions are pre-baked — the LLM doesn't generate them, because
 // that opens the door to prompt injection. We give the LLM a small,
 // curated decision tree of the four most common first-turn forks:
-//   1. What scope (read-only audit vs. active hardening)
-//   2. Which CIS profile level (Level 1 vs. Level 2)
-//   3. Which focus area (network / accounts / packages / logging)
-//   4. Whether the user wants InSpec scan first or wants the LLM to
-//      jump straight to playbook generation.
+//  1. What scope (read-only audit vs. active hardening)
+//  2. Which CIS profile level (Level 1 vs. Level 2)
+//  3. Which focus area (network / accounts / packages / logging)
+//  4. Whether the user wants InSpec scan first or wants the LLM to
+//     jump straight to playbook generation.
 //
 // The tool reads nothing from disk and asks nothing of the human —
 // it is purely a planning aid the LLM uses to drive ask_user.

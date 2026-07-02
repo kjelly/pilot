@@ -146,4 +146,3 @@ func redactSecret(match string) string {
 
 	return key + sep + quote + "[REDACTED]" + quote
 }
-

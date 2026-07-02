@@ -19,15 +19,15 @@ import (
 )
 
 var (
-	verifyInventory   string
-	verifyLimit       string
-	verifyHost        string
-	verifyLocal       bool
-	verifyProposalID  string
-	verifyReportDir   string
-	verifyTimeoutSec  int
-	verifyRoot        string
-	verifyDir         string
+	verifyInventory  string
+	verifyLimit      string
+	verifyHost       string
+	verifyLocal      bool
+	verifyProposalID string
+	verifyReportDir  string
+	verifyTimeoutSec int
+	verifyRoot       string
+	verifyDir        string
 )
 
 var verifyCmd = &cobra.Command{
@@ -281,7 +281,6 @@ func mustJSONVerify(v any) []byte {
 	return b
 }
 
-
 // ternary is a tiny shorthand kept local to verify.go; spec.go has its own
 // (per-package) copy because Go forbids free functions across files.
 func ternaryStr(b bool, t, f string) string {
@@ -294,11 +293,11 @@ func ternaryStr(b bool, t, f string) string {
 // runVerifyMulti walks dir for *.md, runs each through runVerifyOne,
 // and prints a rollup table at the end:
 //
-//   pilot verify --dir docs/verification
-//     ✔  core-infra           8 rows  pass=4 fail=4 verdict=FAIL
-//     ✔  core-infra-provider 9 rows  pass=3 fail=6 verdict=FAIL
-//     ✔  pam-oidc-sshd       7 rows  pass=2 fail=5 verdict=FAIL
-//     ── 1 of 3 specs PASS; aggregate: FAIL ──
+//	pilot verify --dir docs/verification
+//	  ✔  core-infra           8 rows  pass=4 fail=4 verdict=FAIL
+//	  ✔  core-infra-provider 9 rows  pass=3 fail=6 verdict=FAIL
+//	  ✔  pam-oidc-sshd       7 rows  pass=2 fail=5 verdict=FAIL
+//	  ── 1 of 3 specs PASS; aggregate: FAIL ──
 //
 // Silent on specs with no rows. Skips the spec template file if present.
 //
@@ -394,7 +393,7 @@ func readLastReport(specPath string) (pass, fail, total int, ok bool) {
 	// Anchor the glob to "<stem>-<UTC-timestamp>.md" (15 chars after the
 	// stem dash); without this anchor, a glob for "core-infra-*.md" catches
 	// "core-infra-provider-*.md" as well.
-	matches, err := filepath.Glob(filepath.Join(reportDir, stem + "-????????-??????.md"))
+	matches, err := filepath.Glob(filepath.Join(reportDir, stem+"-????????-??????.md"))
 	if err != nil || len(matches) == 0 {
 		return 0, 0, 0, false
 	}

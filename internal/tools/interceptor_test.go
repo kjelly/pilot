@@ -13,8 +13,11 @@ func TestInterceptorShortCircuits(t *testing.T) {
 	var executed bool
 	r := NewRegistry()
 	mustReg(t, r, &Spec{
-		Name:    "preview_tool",
-		Execute: func(ctx context.Context, args json.RawMessage) (*Result, error) { executed = true; return &Result{Content: "real"}, nil },
+		Name: "preview_tool",
+		Execute: func(ctx context.Context, args json.RawMessage) (*Result, error) {
+			executed = true
+			return &Result{Content: "real"}, nil
+		},
 		Interceptor: func(ctx context.Context, args json.RawMessage) (*Result, error) {
 			return &Result{Content: "synthetic preview"}, nil
 		},

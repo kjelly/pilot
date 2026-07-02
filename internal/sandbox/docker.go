@@ -3,12 +3,11 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"crypto/rand"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -306,14 +305,14 @@ func stripArg(args []string, target string) []string {
 // multiple times, and safe to call if Start was never called.
 //
 // Behaviour:
-//   1. Capture the set of changed filesystem paths via `docker diff`
-//      and store on the receiver.
-//   2. Print a short summary to stderr so a human running
-//      `pilot run --sandbox` immediately sees what changed.
-//   3. If Keep is set, do NOT remove the container. The container
-//      stays around for the next `pilot run --sandbox-keep` to
-//      re-start. Loop-engineering fast path.
-//   4. Otherwise, docker rm -f. "No such container" is fine.
+//  1. Capture the set of changed filesystem paths via `docker diff`
+//     and store on the receiver.
+//  2. Print a short summary to stderr so a human running
+//     `pilot run --sandbox` immediately sees what changed.
+//  3. If Keep is set, do NOT remove the container. The container
+//     stays around for the next `pilot run --sandbox-keep` to
+//     re-start. Loop-engineering fast path.
+//  4. Otherwise, docker rm -f. "No such container" is fine.
 func (e *DockerEnvironment) Stop(ctx context.Context) error {
 	if e.containerID == "" && e.ContainerName == "" {
 		return nil
@@ -372,9 +371,10 @@ func (e *DockerEnvironment) ChangedPaths() []string {
 
 // detectChangedPaths runs `docker diff <name>` and parses the
 // A/C/D rows.
-//   A = added
-//   C = changed
-//   D = deleted
+//
+//	A = added
+//	C = changed
+//	D = deleted
 func (e *DockerEnvironment) detectChangedPaths(ctx context.Context, name string) []string {
 	res, err := e.dockerCmd(ctx, "diff", name)
 	if err != nil || res.ExitCode != 0 {
@@ -687,17 +687,6 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// pathIsSafe is a defensive sanity check used by callers that want
-// to validate paths before passing them to WriteFile. Currently
-// unused but kept as a public helper for future code.
-func pathIsSafe(p string) bool {
-	if p == "" {
-		return false
-	}
-	cleaned := filepath.Clean(p)
-	return cleaned == p
-}
-
 // CreateSnapshot commits the current container's filesystem to a temporary image name
 // and returns the image tag as the snapshot ID.
 func (e *DockerEnvironment) CreateSnapshot(ctx context.Context) (string, error) {
@@ -743,7 +732,6 @@ func (e *DockerEnvironment) DeleteSnapshot(ctx context.Context, snapshotID strin
 	_, err := e.dockerCmd(ctx, "rmi", snapshotID)
 	return err
 }
-
 
 // Compile-time check: DockerEnvironment satisfies Environment.
 // Keep this in production source so accidental interface drift

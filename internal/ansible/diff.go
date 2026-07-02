@@ -38,14 +38,14 @@ type FileDiff struct {
 // Sensitive files (ssh keys, shadow, sudoers, etc.) are detected by
 // path prefix; their Before/After is replaced by a redacted marker.
 type DiffSummary struct {
-	Diffs       []FileDiff `json:"diffs"`
-	FilesTotal  int        `json:"files_total"`
-	FilesNew    int        `json:"files_new"`
-	FilesChanged int       `json:"files_changed"`
-	FilesDeleted int       `json:"files_deleted"`
-	FilesSensitive int     `json:"files_sensitive"`
-	Truncated   bool       `json:"truncated"`
-	Raw         string     `json:"raw,omitempty"`
+	Diffs          []FileDiff `json:"diffs"`
+	FilesTotal     int        `json:"files_total"`
+	FilesNew       int        `json:"files_new"`
+	FilesChanged   int        `json:"files_changed"`
+	FilesDeleted   int        `json:"files_deleted"`
+	FilesSensitive int        `json:"files_sensitive"`
+	Truncated      bool       `json:"truncated"`
+	Raw            string     `json:"raw,omitempty"`
 }
 
 const (

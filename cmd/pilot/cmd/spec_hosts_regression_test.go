@@ -14,7 +14,7 @@ import (
 //
 // Pre-fix wiring in cmd/pilot/cmd/spec.go:
 //
-//     pb, err := spec.Generate(parsed, spec.GenerateOptions{IncludeRaw: true})
+//	pb, err := spec.Generate(parsed, spec.GenerateOptions{IncludeRaw: true})
 //
 // → produces `hosts: localhost` (generator default). When the user
 // supplies `--inventory` and runs `pilot spec --apply`, ansible-playbook
@@ -24,11 +24,11 @@ import (
 //
 // Post-fix wiring:
 //
-//     pb, err := spec.Generate(parsed, spec.GenerateOptions{
-//         IncludeRaw: true,
-//         Hosts:      specHosts,
-//         Connection: specConnection,
-//     })
+//	pb, err := spec.Generate(parsed, spec.GenerateOptions{
+//	    IncludeRaw: true,
+//	    Hosts:      specHosts,
+//	    Connection: specConnection,
+//	})
 //
 // → respects --hosts and --connection. We exercise the wiring here by
 // running runSpec directly with the flags set and asserting the YAML

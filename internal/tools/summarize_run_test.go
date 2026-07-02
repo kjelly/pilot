@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -102,7 +103,7 @@ func TestBuildRunSummary_FilesFromNestedArgs(t *testing.T) {
 
 func TestSummarizeRunTool_NoStore_Errors(t *testing.T) {
 	t1 := &SummarizeRunTool{} // no store
-	res, err := t1.Execute(nil, json.RawMessage(`{}`))
+	res, err := t1.Execute(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestSummarizeRunTool_RoundTrip(t *testing.T) {
 		t.Fatalf("SaveProposal: %v", err)
 	}
 	t1 := &SummarizeRunTool{Store: s}
-	res, err := t1.Execute(nil, json.RawMessage(`{"run_id":"run-rt","outcome":"done"}`))
+	res, err := t1.Execute(context.TODO(), json.RawMessage(`{"run_id":"run-rt","outcome":"done"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

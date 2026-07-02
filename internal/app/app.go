@@ -8,13 +8,13 @@ package app
 
 import (
 	"context"
-	"strings"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/anomalyco/pilot/internal/agent"
 	"github.com/anomalyco/pilot/internal/ansible"
@@ -48,7 +48,6 @@ type App struct {
 	// the docker CLI invocation honours the same cancellation as
 	// the rest of the app.
 	ctx context.Context
-
 }
 
 // Options controls how App is built. The zero value is usable and
@@ -514,20 +513,20 @@ func (a *App) NewLoopWithDefaults(runID string, streamWriter io.Writer, defaultI
 		streamWriter = os.Stderr
 	}
 	return agent.NewLoop(agent.Config{
-		RunID:        runID,
-		DataDir:      a.Cfg.DataDir,
-		Ollama:       a.Ollama,
-		Tools:        registry,
-		Store:        a.Store,
-		Sanitizer:    a.Sanitizer,
-		Approver:     a.Approver,
-		Stream:       true,
-		MaxIter:      a.Cfg.MaxIter,
-		SystemPrompt: a.Cfg.SystemPrompt,
-		StreamWriter: streamWriter,
-		TUI:          tuiEmitter,
-		Runner:       a.Runner,
-		Env:          a.Env,
+		RunID:                runID,
+		DataDir:              a.Cfg.DataDir,
+		Ollama:               a.Ollama,
+		Tools:                registry,
+		Store:                a.Store,
+		Sanitizer:            a.Sanitizer,
+		Approver:             a.Approver,
+		Stream:               true,
+		MaxIter:              a.Cfg.MaxIter,
+		SystemPrompt:         a.Cfg.SystemPrompt,
+		StreamWriter:         streamWriter,
+		TUI:                  tuiEmitter,
+		Runner:               a.Runner,
+		Env:                  a.Env,
 		AllowDisposableApply: a.Cfg.AllowDisposableApply,
 	})
 }
@@ -594,4 +593,3 @@ func defaultRegistry(cfg *config.Config, tp *tui.Program, oc *ollama.Client, run
 		regCfg,
 	)
 }
-

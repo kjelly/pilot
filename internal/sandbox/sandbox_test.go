@@ -248,7 +248,7 @@ func execLookPathSkip(t *testing.T, name string) (string, error) {
 
 func TestValidateExecPath(t *testing.T) {
 	cases := map[string]bool{
-		"/etc/ssh/sshd_config":   true,
+		"/etc/ssh/sshd_config":    true,
 		"/etc/shadow":             true,
 		"/home/alice/.ssh/id_rsa": true,
 		"relative/path":           true,
@@ -295,7 +295,6 @@ func TestDockerEnvironment_ReadFileRejectsBadPath(t *testing.T) {
 		t.Error("expected error for empty path")
 	}
 }
-
 
 func TestDockerEnvironment_WriteFileUsesDockerCpNotShell(t *testing.T) {
 	e := NewDockerEnvironment("ubuntu:22.04")
@@ -355,7 +354,7 @@ func TestDefaultContainerName_IncludesNanoID(t *testing.T) {
 			t.Errorf("nano suffix wrong length: %q (full name: %s)", suffix, n)
 		}
 		for _, r := range suffix {
-			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
 				t.Errorf("nano suffix has non-hex char %q in %s", r, n)
 			}
 		}
@@ -372,9 +371,9 @@ func TestDefaultContainerName_IncludesNanoID(t *testing.T) {
 
 func TestStripArg_RemovesSingleOccurrence(t *testing.T) {
 	cases := []struct {
-		in    []string
-		drop  string
-		want  []string
+		in   []string
+		drop string
+		want []string
 	}{
 		{[]string{"a", "--rm", "b"}, "--rm", []string{"a", "b"}},
 		{[]string{"--rm", "a", "--rm", "b"}, "--rm", []string{"a", "b"}},
@@ -405,13 +404,9 @@ func TestParseDockerDiff_AllStatuses(t *testing.T) {
 	stdout := "A /etc/newfile\nC /etc/ssh/sshd_config\nD /tmp/removed\n"
 	// Use a fake docker CLI: print stdout verbatim, exit 0.
 	dir := t.TempDir()
-	path := writeFakeDocker(t, dir,
-		"#!/bin/sh\ncat\n") // 'cat' ignores argv, prints stdin (empty)
-	// We can't easily feed docker diff stdout via the fake; instead
-	// call detectChangedPaths through a manual docker exec. Use the
-	// dockerCmd path: set CLI to a script that prints the literal
-	// diff output.
-	path = writeFakeDocker(t, dir, "#!/bin/sh\ncat <<'EOF'\n"+stdout+"EOF\n")
+	// Fake docker CLI that prints the diff output on stdin-less invocation:
+	// a script that cats a heredoc of the literal `docker diff` output.
+	path := writeFakeDocker(t, dir, "#!/bin/sh\ncat <<'EOF'\n"+stdout+"EOF\n")
 	e := NewDockerEnvironment("ubuntu:22.04")
 	e.CLI = path
 	paths := e.detectChangedPaths(context.Background(), "fake")

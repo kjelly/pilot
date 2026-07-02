@@ -15,15 +15,15 @@ import (
 )
 
 var (
-	chatInventory     string
-	chatLimit         string
-	chatSandbox            bool
-	chatSandboxImage       string
-	chatSandboxHost        string
-	chatSandboxNet         string
-	chatSandboxKeep        bool
+	chatInventory           string
+	chatLimit               string
+	chatSandbox             bool
+	chatSandboxImage        string
+	chatSandboxHost         string
+	chatSandboxNet          string
+	chatSandboxKeep         bool
 	chatSandboxPreferCached bool
-	chatSandboxDryRun      bool
+	chatSandboxDryRun       bool
 	// chatSandboxMode is folded into the shared `runSandboxMode`
 	// global (declared in root.go) so loadConfig picks it up.
 )
@@ -90,12 +90,12 @@ func runChat(cmd *cobra.Command, args []string) error {
 	// runSandboxMode is the shared global set by --sandbox-mode;
 	// nothing to copy here (the flag is already registered above).
 	res, err := setupRunWithOpts(ctx, app.Options{
-		ForceSandbox:       chatSandbox,
-		SandboxHostname:    chatSandboxHost,
-		SandboxKeep:        chatSandboxKeep,
+		ForceSandbox:        chatSandbox,
+		SandboxHostname:     chatSandboxHost,
+		SandboxKeep:         chatSandboxKeep,
 		SandboxPreferCached: chatSandboxPreferCached,
-		SandboxDryRun:      chatSandboxDryRun,
-		SandboxMode:        runSandboxMode,
+		SandboxDryRun:       chatSandboxDryRun,
+		SandboxMode:         runSandboxMode,
 	})
 	if err != nil {
 		return err

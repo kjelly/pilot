@@ -142,7 +142,6 @@ func TestE2E_RealAnsibleDoc(t *testing.T) {
 			wantType:    "bool",
 			description: "direct param name",
 		},
-
 	}
 	for _, tc := range tests {
 		t.Run(tc.description, func(t *testing.T) {
@@ -249,7 +248,7 @@ func serviceChunksForTest(m docs.ModuleDoc) []docs.Chunk {
 }
 
 /*
-*/
+ */
 
 // binOverrideForTest returns the ansible-doc binary, or skips when
 // not available.

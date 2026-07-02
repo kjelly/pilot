@@ -21,20 +21,20 @@ import (
 type Section string
 
 const (
-	SectionSynopsis    Section = "synopsis"
-	SectionParam       Section = "param"
-	SectionExample     Section = "example"
-	SectionNote        Section = "note"
-	SectionRequire     Section = "requirements"
-	SectionReturn      Section = "return"
+	SectionSynopsis Section = "synopsis"
+	SectionParam    Section = "param"
+	SectionExample  Section = "example"
+	SectionNote     Section = "note"
+	SectionRequire  Section = "requirements"
+	SectionReturn   Section = "return"
 )
 
 // Chunk is the unit of retrieval. It is structurally compatible with
 // docs.Chunk but carries an explicit Kind so the LLM can branch on it
 // without parsing strings.
 type Chunk struct {
-	ID      string         // "modules:<fqcn>:param:<paramname>"
-	Ref     string         // module FQCN
+	ID      string // "modules:<fqcn>:param:<paramname>"
+	Ref     string // module FQCN
 	Section Section
 	Text    string         // what the LLM actually reads
 	Search  string         // BM25-visible expanded query text
@@ -163,7 +163,7 @@ func exampleChunk(m ModuleInput) Chunk {
 		Ref:     m.Name,
 		Section: SectionExample,
 		Text:    truncate(m.Examples, 2500),
-		Search: "Example playbook using " + moduleShortName(m.Name) + " module:\n" + m.Examples,
+		Search:  "Example playbook using " + moduleShortName(m.Name) + " module:\n" + m.Examples,
 		Meta:    map[string]any{"name": m.Name},
 	}
 }

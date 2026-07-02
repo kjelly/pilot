@@ -428,9 +428,10 @@ func (m *Model) renderHistoryRunsPane(width, height int) string {
 		for i := start; i < end; i++ {
 			r := m.historyRuns[i]
 			statusMarker := "▶"
-			if r.Status == "finished" || r.Status == "success" {
+			switch r.Status {
+			case "finished", "success":
 				statusMarker = "✓"
-			} else if r.Status == "failed" {
+			case "failed":
 				statusMarker = "✗"
 			}
 
@@ -467,15 +468,15 @@ func (m *Model) renderHistoryDetailsPane(width, height int) string {
 	} else {
 		r := m.historyRuns[m.selectedRunIdx]
 		// General Run Info
-		sb.WriteString(fmt.Sprintf("Run ID:   %s\n", r.ID))
-		sb.WriteString(fmt.Sprintf("開始時間: %s\n", r.StartedAt.Format("2006-01-02 15:04:05")))
+		fmt.Fprintf(&sb, "Run ID:   %s\n", r.ID)
+		fmt.Fprintf(&sb, "開始時間: %s\n", r.StartedAt.Format("2006-01-02 15:04:05"))
 		if r.FinishedAt != nil {
-			sb.WriteString(fmt.Sprintf("結束時間: %s\n", r.FinishedAt.Format("2006-01-02 15:04:05")))
+			fmt.Fprintf(&sb, "結束時間: %s\n", r.FinishedAt.Format("2006-01-02 15:04:05"))
 		}
-		sb.WriteString(fmt.Sprintf("執行模式: %s\n", r.Mode))
-		sb.WriteString(fmt.Sprintf("Playbook: %s\n", r.Playbook))
-		sb.WriteString(fmt.Sprintf("Inventory:%s\n", r.Inventory))
-		sb.WriteString(fmt.Sprintf("狀態:     %s\n", r.Status))
+		fmt.Fprintf(&sb, "執行模式: %s\n", r.Mode)
+		fmt.Fprintf(&sb, "Playbook: %s\n", r.Playbook)
+		fmt.Fprintf(&sb, "Inventory:%s\n", r.Inventory)
+		fmt.Fprintf(&sb, "狀態:     %s\n", r.Status)
 		if r.Error != "" {
 			errStyle := lipgloss.NewStyle().Foreground(m.styles.Palette.ToolError)
 			sb.WriteString(errStyle.Render(fmt.Sprintf("錯誤:     %s\n", r.Error)))
@@ -487,12 +488,13 @@ func (m *Model) renderHistoryDetailsPane(width, height int) string {
 		} else {
 			for _, p := range m.selectedProposals {
 				statusMarker := "⏳"
-				if p.Status == "approved" {
+				switch p.Status {
+				case "approved":
 					statusMarker = "✓"
-				} else if p.Status == "rejected" {
+				case "rejected":
 					statusMarker = "✗"
 				}
-				sb.WriteString(fmt.Sprintf("  %s 主機:%s, 工具:%s, 風險:%s\n", statusMarker, p.Host, p.Tool, p.RiskLevel))
+				fmt.Fprintf(&sb, "  %s 主機:%s, 工具:%s, 風險:%s\n", statusMarker, p.Host, p.Tool, p.RiskLevel)
 				if p.Rationale != "" {
 					wrapped := wordWrap(p.Rationale, width-6)
 					// Indent rationale

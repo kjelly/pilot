@@ -93,8 +93,8 @@ func ParseReader(r io.Reader) (*Spec, error) {
 			if strings.HasPrefix(line, "## ") {
 				// Flush what we collected so far.
 				if err := commitTargetsTable(s, &targetsBuf, targetsBase); err != nil {
-		return nil, err
-	}
+					return nil, err
+				}
 				targetsBuf = nil
 				// Decide the next state based on the H2 text and re-emit
 				// this line by falling through to stateNormal, where the
@@ -113,7 +113,7 @@ func ParseReader(r io.Reader) (*Spec, error) {
 			targetsBuf = append(targetsBuf, line)
 			continue
 		fallthrough_process:
-		_ = line
+			_ = line
 		case stateChecklist:
 			if strings.HasPrefix(line, "## ") {
 				state = stateNormal

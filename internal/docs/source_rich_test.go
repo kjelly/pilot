@@ -148,7 +148,6 @@ func TestParseModuleJSON_RichOptions_MetadataDumpShape(t *testing.T) {
 	}
 }
 
-
 func TestParseOptionEntry_HandlesLooseTypes(t *testing.T) {
 	// Some options have description: "single string" rather than ["list"].
 	raw := map[string]any{

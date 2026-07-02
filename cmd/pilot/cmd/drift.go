@@ -161,8 +161,8 @@ func parseDrift(stdout string) []HostDrift {
 				metrics := parts[1]
 				changed := 0
 				failed := 0
-				fmt.Sscanf(extractMetric(metrics, "changed="), "%d", &changed)
-				fmt.Sscanf(extractMetric(metrics, "failed="), "%d", &failed)
+				_, _ = fmt.Sscanf(extractMetric(metrics, "changed="), "%d", &changed)
+				_, _ = fmt.Sscanf(extractMetric(metrics, "failed="), "%d", &failed)
 				if changed > 0 || failed > 0 {
 					drifts = append(drifts, HostDrift{Host: host, Changed: changed, Failed: failed})
 				}

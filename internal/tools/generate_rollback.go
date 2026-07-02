@@ -27,12 +27,12 @@ type GenerateRollbackTool struct {
 
 func (t *GenerateRollbackTool) Spec() *Spec {
 	return &Spec{
-		Name: "generate_rollback",
+		Name:        "generate_rollback",
 		Description: "Generate a rollback Ansible playbook for a previously-applied proposal. The output is written to disk as a YAML file for human review. The rollback is NOT applied automatically — the user must run it explicitly via run_ansible after inspecting the generated tasks.",
-		RiskLevel:    "low", // write a file, not apply
-		Reversible:   true,
-		DryRunSafe:   true,
-		Parameters:   generateRollbackArgs,
+		RiskLevel:   "low", // write a file, not apply
+		Reversible:  true,
+		DryRunSafe:  true,
+		Parameters:  generateRollbackArgs,
 	}
 }
 

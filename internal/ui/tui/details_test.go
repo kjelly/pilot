@@ -3,8 +3,8 @@ package tui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/anomalyco/pilot/internal/agent"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // TestDetailsToggleOnApprovalModal verifies that pressing '?' while
@@ -69,15 +69,15 @@ func TestExpandedRenderingContainsFullArgs(t *testing.T) {
 		longArgs[i] = 'x'
 	}
 	m.approving = &agent.Proposal{
-		ID:       "abc",
-		Tool:     "run_ansible",
-		Args:     longArgs,
+		ID:        "abc",
+		Tool:      "run_ansible",
+		Args:      longArgs,
 		RiskLevel: "medium",
 	}
 
 	collapsed := m.View()
-	if !m.modalExpanded {
-		// default is collapsed
+	if m.modalExpanded {
+		t.Fatal("modal should default to collapsed")
 	}
 	m.modalExpanded = true
 	expanded := m.View()

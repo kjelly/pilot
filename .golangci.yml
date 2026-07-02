@@ -1,0 +1,32 @@
+# golangci-lint v2 configuration.
+#
+# We run the standard linter set (errcheck, govet, ineffassign, staticcheck,
+# unused). The only customization is an errcheck exclude list for the
+# well-known, conventionally-ignored calls: deferred Close() on readers we
+# are done with, best-effort cleanup Remove(), console Fprint*, and Setenv in
+# tests. Ignoring these is idiomatic Go — checking them adds noise, not
+# safety. Any call whose error genuinely matters (e.g. fmt.Sscanf parsing,
+# Writer.Write to a real sink) is still checked and handled in code.
+version: "2"
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      exclude-functions:
+        # Deferred / best-effort Close on things we are finished with.
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*database/sql.DB).Close
+        - (*github.com/anomalyco/pilot/internal/store.Store).Close
+        - (*github.com/anomalyco/pilot/internal/docs.ModuleIndex).Close
+        # Best-effort filesystem cleanup.
+        - os.Remove
+        - os.RemoveAll
+        # Console / stream diagnostics — the write target is stdout/stderr.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Test-only environment setup.
+        - os.Setenv
+        - os.Unsetenv

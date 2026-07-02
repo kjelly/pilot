@@ -275,7 +275,6 @@ func TestUpgradeRiskForApply_Disposable(t *testing.T) {
 	}
 }
 
-
 func TestPreviewAnsibleRunHandlesMissingRunner(t *testing.T) {
 	// With a nil runner, previewAnsibleRun should return a helpful
 	// diagnostic string, not panic.

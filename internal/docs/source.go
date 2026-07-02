@@ -1,7 +1,6 @@
 package docs
 
 import (
-	"time"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 )
 
 // ModuleDoc is the structured representation of an Ansible module
@@ -32,8 +32,8 @@ type ModuleDoc struct {
 	Version      string `json:"-"`
 	Filename     string `json:"filename"`
 
-	RichOptions map[string]OptionDoc   `json:"-"`
-	Options     map[string]string      `json:"-"`
+	RichOptions map[string]OptionDoc `json:"-"`
+	Options     map[string]string    `json:"-"`
 }
 
 // OptionDoc is the structured shape of one entry under
@@ -112,9 +112,9 @@ func ParseModuleJSON(data []byte) ([]ModuleDoc, error) {
 			// so the unmarshal below Just Works.
 			var wrapped struct {
 				All map[string]map[string]struct {
-					Doc        map[string]json.RawMessage `json:"doc"`
-					Examples   json.RawMessage            `json:"examples"`
-					Metadata   map[string]json.RawMessage `json:"metadata"`
+					Doc      map[string]json.RawMessage `json:"doc"`
+					Examples json.RawMessage            `json:"examples"`
+					Metadata map[string]json.RawMessage `json:"metadata"`
 				} `json:"all"`
 			}
 			if err := json.Unmarshal(data, &wrapped); err == nil {
@@ -164,10 +164,10 @@ func ParseModuleJSON(data []byte) ([]ModuleDoc, error) {
 	}
 
 	var raw map[string]struct {
-		Doc        json.RawMessage            `json:"doc"`
-		Filename   string                     `json:"filename"`
-		Category   string                     `json:"category"`
-		Collection string                     `json:"collection"`
+		Doc        json.RawMessage `json:"doc"`
+		Filename   string          `json:"filename"`
+		Category   string          `json:"category"`
+		Collection string          `json:"collection"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse ansible-doc JSON: %w", err)
@@ -186,18 +186,6 @@ func ParseModuleJSON(data []byte) ([]ModuleDoc, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
-
-
-// mustMarshal returns the JSON encoding of v or null on error.
-// Used internally to build the legacy-shaped envelope.
-func mustMarshal(v any) json.RawMessage {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return []byte("null")
-	}
-	return b
-}
-
 
 // jsonString takes a json.RawMessage that is expected to encode a string
 // and returns the unquoted string. If unquoting fails it returns the raw

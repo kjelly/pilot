@@ -31,14 +31,14 @@ type Model struct {
 	keymap Keymap
 
 	// State
-	mode   Mode
-	dark   bool
-	quit   bool
+	mode         Mode
+	dark         bool
+	quit         bool
 	showThinking bool
 
 	// Run metadata
-	runID   string
-	goal    string
+	runID string
+	goal  string
 
 	// Counters for status bar
 	iter          int
@@ -66,17 +66,14 @@ type Model struct {
 	// Approval modal
 	approving        *agent.Proposal
 	approvingReply   chan agent.Decision
-	modalSelectedIdx int // for the option list (0=approve,1=reject,2=details,3=abort)
-	modalExpanded bool  // true when the user has pressed '?' to view full details
+	modalSelectedIdx int  // for the option list (0=approve,1=reject,2=details,3=abort)
+	modalExpanded    bool // true when the user has pressed '?' to view full details
 
 	// Ask user modal
 	askingQuestion string
 	askingOptions  []string
 	askingReply    chan string
 	askingBuffer   []rune // accumulates the user's typed answer for free-text questions
-
-	// Last error
-	lastErr string
 
 	// History state
 	store             *store.Store
@@ -88,23 +85,23 @@ type Model struct {
 }
 
 type activityEntry struct {
-	Kind   string // "call" or "result" or "error"
-	Tool   string
-	Text   string
-	IsErr  bool
+	Kind  string // "call" or "result" or "error"
+	Tool  string
+	Text  string
+	IsErr bool
 }
 
 func newModel(st *store.Store) *Model {
 	dark := DetectTheme()
 	return &Model{
-		styles:        NewStyles(dark),
-		keymap:        defaultKeymap,
-		mode:          ModeRunning,
-		dark:          dark,
-		showThinking:  false,
-		maxIter:       20,
+		styles:           NewStyles(dark),
+		keymap:           defaultKeymap,
+		mode:             ModeRunning,
+		dark:             dark,
+		showThinking:     false,
+		maxIter:          20,
 		modalSelectedIdx: 0,
-		store:         st,
+		store:            st,
 	}
 }
 

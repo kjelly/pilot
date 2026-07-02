@@ -37,12 +37,12 @@ type planArgsStruct struct {
 
 func (t *PlanOperationsTool) Spec() *Spec {
 	return &Spec{
-		Name: "plan_operations",
+		Name:        "plan_operations",
 		Description: "Submit a batch of operations for human review as a single plan. The human sees the entire list at once and either approves or rejects the whole plan. Approved plans are then executed sequentially. Use this when a complex task would generate many individual tool calls.",
-		RiskLevel: "low", // doesn't actually mutate; just creates a Plan record
-		Reversible: true,
-		DryRunSafe: true,
-		Parameters: planOperationsArgs,
+		RiskLevel:   "low", // doesn't actually mutate; just creates a Plan record
+		Reversible:  true,
+		DryRunSafe:  true,
+		Parameters:  planOperationsArgs,
 	}
 }
 

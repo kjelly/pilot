@@ -252,25 +252,25 @@ func (t *RunPlaybookTool) Execute(ctx context.Context, args json.RawMessage) (*R
 // Execute needs to distinguish:
 //   - err != nil:           hard failure (JSON parse, internal error)
 //   - result != nil && err: validation failure with a user-facing
-//                           message wrapped in a Result{IsError:true}
+//     message wrapped in a Result{IsError:true}
 func (t *RunPlaybookTool) prepareRequest(args json.RawMessage) (playbookExecRequest, *Result) {
 	var a struct {
-		Playbook          string            `json:"playbook"`
-		Inventory         string            `json:"inventory"`
-		Limit             string            `json:"limit"`
-		Check             *bool             `json:"check"`
-		Tags              []string          `json:"tags"`
-		SkipTags          []string          `json:"skip_tags"`
-		ExtraVars         map[string]any    `json:"extra_vars"`
-		RawExtraVars      string            `json:"extra_vars_raw"`
-		Become            *bool             `json:"become"`
-		Forks             *int              `json:"forks"`
-		User              string            `json:"user"`
-		Connection        string            `json:"connection"`
-		VaultPasswordFile string            `json:"vault_password_file"`
-		Diff              *bool             `json:"diff"`
-		Timeout           *int              `json:"timeout"`
-		FlushCache        *bool             `json:"flush_cache"`
+		Playbook          string         `json:"playbook"`
+		Inventory         string         `json:"inventory"`
+		Limit             string         `json:"limit"`
+		Check             *bool          `json:"check"`
+		Tags              []string       `json:"tags"`
+		SkipTags          []string       `json:"skip_tags"`
+		ExtraVars         map[string]any `json:"extra_vars"`
+		RawExtraVars      string         `json:"extra_vars_raw"`
+		Become            *bool          `json:"become"`
+		Forks             *int           `json:"forks"`
+		User              string         `json:"user"`
+		Connection        string         `json:"connection"`
+		VaultPasswordFile string         `json:"vault_password_file"`
+		Diff              *bool          `json:"diff"`
+		Timeout           *int           `json:"timeout"`
+		FlushCache        *bool          `json:"flush_cache"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return playbookExecRequest{}, &Result{
@@ -599,18 +599,18 @@ func renderVerifyReport(ndjsonLines []string) string {
 	if len(records) == 0 {
 		return ""
 	}
-	
+
 	verdict := "PASS"
 	if failed > 0 {
 		verdict = "FAIL"
 	}
-	
+
 	var sb strings.Builder
 	sb.WriteString("\n\n=== Auto-Verification Report ===\n")
 	fmt.Fprintf(&sb, "Verdict: %s (Total: %d, Pass: %d, Fail: %d, Skip: %d)\n\n", verdict, len(records), passed, failed, skipped)
 	sb.WriteString("| ID | Status | Detail |\n")
 	sb.WriteString("|----|--------|--------|\n")
-	
+
 	// Fails first
 	for _, r := range records {
 		if r.Status == "fail" {

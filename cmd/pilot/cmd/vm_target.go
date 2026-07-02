@@ -389,7 +389,6 @@ func vtRunViaContainer(cmd *cobra.Command, t *vmtarget.Target, playbookPath, inv
 	}
 
 	// 2. Determine container-side SSH key path
-	const cntKeyDir = "/tmp/pilot-ssh"
 	const cntKeyPath = "/tmp/pilot-ssh/id_ed25519"
 
 	// 3. Rewrite the inventory: replace the host-side SSH key path
@@ -587,10 +586,10 @@ func runVtExec(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if res.Stdout != "" {
-		cmd.OutOrStdout().Write([]byte(res.Stdout))
+		_, _ = cmd.OutOrStdout().Write([]byte(res.Stdout))
 	}
 	if res.Stderr != "" {
-		cmd.ErrOrStderr().Write([]byte(res.Stderr))
+		_, _ = cmd.ErrOrStderr().Write([]byte(res.Stderr))
 	}
 	// Do NOT fail on non-zero exit (matches docker-target exec): many
 	// legitimate checks (grep -q, test -f) exit non-zero by design.
