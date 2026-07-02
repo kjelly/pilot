@@ -2,8 +2,12 @@
 
 > **TL;DR** — 寫進 `docs/runbooks/*.md` 或 `docs/verification/*.md` 的每一條
 > `bash` / `go run` / `ansible-playbook` 指令，**寫進文件前**必須在
-> 對應的 vm-target / docker-target / 本地環境實際跑過一次並截到真實輸出。
-> 沒跑過的 SOP 是負債，不是文檔。
+> **對應的目標環境**（vm-target / docker-target / 本地 / 真實主機）實際跑過一次
+> 並截到真實輸出。沒跑過的 SOP 是負債，不是文檔。
+>
+> 本檔的規則以「host / inventory」為核心，一律指**你這一步實際要執行的那份
+> inventory**——不管它來自拋棄式測試 VM 還是真實主機。讀它的事實，不要照
+> spec 設計意圖腦補（見 §0.1 的讀法對照）。
 
 ---
 
@@ -18,6 +22,21 @@
 
 修法見 §1 / §2 / §3。所有後續 PR 都要符合這三條。
 
+### 0.1 名詞：「目標 inventory」與怎麼讀它的事實
+
+本檔說的「inventory」「host」「group」，一律指**你這一步實際要執行的那份
+inventory**。事故的教訓與所有規則都與它的來源無關——同一條紀律適用於拋棄式
+測試 VM，也適用於真實主機。讀它的**事實**（不是 spec 說「應該」有什麼）：
+
+| 目標環境 | 讀 group→host 事實的指令 |
+|----------|--------------------------|
+| vm-target（拋棄式 KVM VM） | `go run ./cmd/pilot vm-target show-inventory --name <n>` |
+| docker-target（拋棄式容器） | `go run ./cmd/pilot docker-target show-inventory --name <n>` |
+| 真實主機 / 任意 inventory 檔 | `ansible-inventory -i <inventory> --graph`（或 `--list`） |
+
+下文出現 `show-inventory` 之處，若你的目標是真實主機，一律換成
+`ansible-inventory -i <inventory> --graph`——規則不變，只是讀事實的工具不同。
+
 ---
 
 ## 1. 寫「可執行的步驟」之前 — actual-run 規則
@@ -31,13 +50,19 @@
 具體動作：
 
 ```bash
-# 1. 跑前先看 inventory / 服務狀態
+# 1. 跑前先讀「你這一步要執行的那份 inventory」的事實（見 §0.1）
+#    拋棄式測試 VM：
 go run ./cmd/pilot vm-target list
 go run ./cmd/pilot vm-target show-inventory --name core
+#    真實主機 / 任意 inventory 檔：
+ansible-inventory -i <inventory> --graph
 
-# 2. 跑指令
+# 2. 對「同一個」環境跑指令
 go run ./cmd/pilot vm-target run --name core \
     playbooks/apply/...yml -e ... --check --diff
+#    真實主機等價（playbook 的 hosts 是變數，inventory 是外部參數）：
+ansible-playbook -i <inventory> playbooks/apply/...yml \
+    -e target_group=<group> --check --diff
 
 # 3. 截真實輸出（PLAY RECAP / 退出碼 / PASS FAIL 數字）
 ```
@@ -56,12 +81,16 @@ core                       : ok=12  changed=8    unreachable=0    failed=0
 
 ### 1.3 spec / playbook / inventory 寫的 host alias 要對得起
 
-寫 `-e target_group=keycloak-db` 之前先 `show-inventory` 確認 `keycloak-db` 真的在
-inventory 裡。寫 `-l <group>` 之前也一樣。
+寫 `-e target_group=keycloak-db` 或 `-l <group>` 之前，先讀**你要執行的那份
+inventory**（§0.1）確認該 group / host 真的存在——vm-target 用 `show-inventory`，
+真實主機用 `ansible-inventory -i <inv> --graph`。對不上就是 `skipping: no hosts
+matched`（或更糟，打錯機器）。**不要**從 spec 設計意圖推斷它「應該」在。
 
 **對應 regression test**：`internal/spec/core_infra_provider_db_regression_test.go::TestRegression_SpecAndInventoryAgree`
-會跑 `go run ./cmd/pilot vm-target show-inventory --name core`，比對 spec §1 聲稱的
-group set 跟 inventory 實際的 host set。任何不一致 CI 會 fail。
+以 vm-target 作為參考環境，跑 `go run ./cmd/pilot vm-target show-inventory --name core`，
+比對 spec §1 聲稱的 group set 跟 inventory 實際的 host set。任何不一致 CI 會 fail。
+（這條 CI 檢查的是 repo 內 spec 文件對測試環境的一致性；上真實主機時，同樣的
+「對齊」責任落在你執行前的 `ansible-inventory` 確認,不受此 test 影響。）
 
 新增 spec 時也照這個 pattern 寫 regression test — 見 §3 範本。
 
@@ -74,8 +103,8 @@ group set 跟 inventory 實際的 host set。任何不一致 CI 會 fail。
 
 | 必含項 | 範例指令 |
 |--------|---------|
-| vm-target list 當下輸出 | `go run ./cmd/pilot vm-target list` |
-| inventory 當下 host 集合 | `go run ./cmd/pilot vm-target show-inventory --name core \| grep '^    [a-z]'` |
+| 目標環境當下狀態 | `go run ./cmd/pilot vm-target list`（真實主機：你的 inventory 檔路徑 + 來源） |
+| inventory 當下 host 集合 | vm-target：`… show-inventory --name core \| grep '^    [a-z]'`；真實主機：`ansible-inventory -i <inv> --graph` |
 | vault / spec 依賴的外部 state | `~/.vault/keycloak-sandbox.yaml` 的 key 列表（不印密碼） |
 | 對齊決定 | spec 跟 inventory 不一致時走 A 還是 B（見下） |
 
@@ -85,8 +114,8 @@ group set 跟 inventory 實際的 host set。任何不一致 CI 會 fail。
 
 | 選項 | 動作 | 適用 |
 |------|------|------|
-| **A. 改 inventory** | `vm-target down` + `vm-target up --hosts <包括 spec 提到的全部 alias>` | 願意 reprovision（會丟現有服務，spec 對齊的代價） |
-| **B. 改 spec** | 把 spec §1 目標系統表對齊 inventory 當下 host 集合 | 不想 reprovision，spec 跟現實妥協 |
+| **A. 改 inventory** | vm-target：`down` + `up --hosts <包括 spec 提到的全部 alias>`；真實主機：編輯你的 inventory 檔，把該 group / host 補上（或加到既有 group） | 願意動環境讓它符合 spec（測試 VM 是 reprovision，真實主機是改 inventory 定義） |
+| **B. 改 spec** | 把 spec §1 目標系統表對齊 inventory 當下 host 集合 | 不想動環境，spec 跟現實妥協 |
 
 > **不準**「假裝對齊」 — 兩邊都寫一點、看起來一致但其實沒跑過。regression test
 > `TestRegression_SpecAndInventoryAgree` 會 fail。
@@ -102,7 +131,7 @@ group set 跟 inventory 實際的 host set。任何不一致 CI 會 fail。
 3. **regression test**：`internal/spec/<feature>_regression_test.go` 至少鎖：
    - row ID 連號、無 vague expected
    - cross-row invariant（哪個 row 必含 `$KEYCLOAK_ISSUER` 之類）
-   - **若 spec §1 有 Targets table：spec 跟 vm-target inventory 對齊**（抄 `TestRegression_SpecAndInventoryAgree`）
+   - **若 spec §1 有 Targets table：spec 跟目標 inventory 對齊**（抄 `TestRegression_SpecAndInventoryAgree`；該範本以 vm-target 作參考環境，真實主機部署時對齊責任在執行前的 `ansible-inventory` 確認）
 
 範本已存在：`core-infra-provider-db_regression_test.go`（含 `TestRegression_SpecAndInventoryAgree`）。
 新 spec 照抄這個結構。
@@ -131,7 +160,9 @@ group set 跟 inventory 實際的 host set。任何不一致 CI 會 fail。
   - `pilot spec --generate` 產的 verify playbook 已自動帶 tag，不用手補；手補的是
     `playbooks/apply/*.yml`。
 - 改完後 `ansible-playbook --syntax-check` + `ansible-playbook --list-tags <file>`
-  （確認 tag 齊全無撞號）+ 對 vm-target 跑一次 `--check --diff` 才能 commit
+  （確認 tag 齊全無撞號）+ 對目標環境（vm-target / docker-target；上真實主機前
+  至少對一台 staging）跑一次 `--check --diff` 才能 commit。真實主機沒有
+  snapshot→rollback 安全網，`--check --diff` 與 §4 開頭的 `block/rescue` 備份更不能省。
 
 ---
 
@@ -214,7 +245,7 @@ pilot 有三種輸出，**不要混用**：
 
 ## 6. 不要做的事
 
-- ❌ 不要從「spec 設計意圖」推「inventory 應該有的 host」 — 從 `show-inventory` 讀事實
+- ❌ 不要從「spec 設計意圖」推「inventory 應該有的 host」 — 從**你實際要執行的那份 inventory** 讀事實（vm-target：`show-inventory`；真實主機：`ansible-inventory -i <inv> --graph`，見 §0.1）
 - ❌ 不要在 runbook 寫「預期 PASS 11/11」沒實際跑過 — 寫「這次跑 PASS 11/11，截錄如下」
 - ❌ 不要把硬規則繞過（「這次特例」是滑坡的開始）
 - ❌ 不要把密碼 / token 寫進 spec、playbook、runbook — 走 `-e @~/.vault/...yaml`
@@ -231,3 +262,4 @@ pilot 有三種輸出，**不要混用**：
 | 2026-07-01 | v1.1 | §4 加 apply playbook `tags:` 硬規則（對齊 spec ID / 多 role 命名空間 / `--list-tags` 驗證）| sre |
 | 2026-07-02 | v1.2 | §5 大幅擴充 Go 架構約定（`-race` gate、target 兩份平行實作、`statefile`/`writeTempInventory` 共用層、per-call option 不寫回欄位、加 tool 步驟 + schema/struct 同步、Interceptor 雙路徑、`handleToolCall` pipeline）| sre |
 | 2026-07-02 | v1.3 | §5.5 三種輸出管道約定（error / `slog` 診斷 / 使用者 UX）；導入 `internal/logx` 結構化 logging，`--log-level`/`$PILOT_LOG_LEVEL`| sre |
+| 2026-07-02 | v1.4 | inventory 規則改為**來源中立**：新增 §0.1「目標 inventory」名詞與讀法對照（vm-target `show-inventory` / 真實主機 `ansible-inventory --graph`）；§1.1/§1.3/§2/§2.1/§3/§4/§6 一併泛化，同一套紀律適用測試 VM 與真實主機 | sre |

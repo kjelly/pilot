@@ -1,0 +1,333 @@
+# Apply playbook for docs/verification/freeipa-client.md
+#
+# Enrolls an UBUNTU host into an existing FreeIPA realm (see
+# freeipa-server-apply.yml) so that FreeIPA becomes this host's source of:
+#   * Authentication — Kerberos + LDAP identities via SSSD (getent/id/kinit).
+#   * Authorization   — HBAC (who may log in here) + centrally-defined sudo
+#                       rules (SSSD ipa sudo provider).
+#   * Audit/Accounting— host has a Kerberos machine identity so its actions
+#                       are attributable on the IPA KDC; the local audit
+#                       daemon (auditd) captures the login/sudo events that
+#                       FreeIPA authorizes.
+#
+# Client-first-on-Ubuntu (spec §1): package is apt `freeipa-client`, which
+# provides `ipa-client-install` and pulls in sssd + krb5. EL clients would use
+# `dnf install ipa-client`; only the package-install task differs — the
+# enrollment + SSSD wiring is identical, so this playbook gates on the OS
+# family and installs the right package.
+#
+# NO built-in DNS in this pilot (the server runs with --no-host-dns): the
+# client cannot discover the KDC via SRV records, so we (a) pass --server /
+# --domain / --realm explicitly and (b) pin the server FQDN in /etc/hosts.
+# NO NTP here (--no-ntp): time sync is owned by the existing `ntp`(chrony)
+# role; Kerberos needs clock skew < 5 min — asserted/warned below.
+#
+# Secrets: ipa_admin_password (the enrollment principal's password) comes from
+# a vault file, NEVER hard-coded (and the enroll task is no_log):
+#   -e @~/.vault/freeipa-sandbox.yaml
+#
+# Usage:
+#
+#   ansible-playbook -i inventory-freeipa.yaml \
+#       playbooks/apply/freeipa-client-apply.yml \
+#       -e ipa_server_ip=10.0.0.10 \
+#       -e @~/.vault/freeipa-sandbox.yaml \
+#       --check --diff
+#
+#   # against a pilot vm-target (host lives in group `all`, not freeipa-client):
+#   pilot vm-target run --name freeipa-client playbooks/apply/freeipa-client-apply.yml \
+#       -e target_group=all -e ipa_server_ip=<server-vm-ip> \
+#       -e @~/.vault/freeipa-sandbox.yaml
+#
+# Stage gating (same convention as freeipa-server-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: FreeIPA client enroll
+  hosts: "{{ target_group | default('freeipa-client') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    # Realm coordinates — MUST match the FreeIPA server (freeipa-server.md §1.5).
+    ipa_domain: ipa.pilot.internal
+    ipa_realm: "{{ ipa_domain | upper }}"
+    ipa_server_fqdn: "ipa1.{{ ipa_domain }}"
+
+    # Enrollment principal — reuses the same admin creds as the server vault.
+    ipa_enroll_principal: admin
+    ipa_enroll_password: "{{ ipa_admin_password }}"
+
+    # This client's own FQDN (must be a resolvable, non-loopback name). Default
+    # derives from the host's short name under the realm domain.
+    ipa_client_fqdn: "{{ ansible_hostname }}.{{ ipa_domain }}"
+
+    ipa_config_marker: /etc/ipa/default.conf   # created iff already enrolled
+    ipa_enroll_timeout_s: 300
+
+    # Ubuntu package that provides ipa-client-install (EL uses ipa-client).
+    ipa_client_packages_debian: [freeipa-client]
+    ipa_client_packages_redhat: [ipa-client]
+    # Local host-audit daemon (the "audit/accounting" leg of AAA).
+    ipa_audit_packages: [auditd]
+
+  pre_tasks:
+    - name: "Gate: required vars present (fail early, before any mutation)"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+          - ipa_server_ip is defined and ipa_server_ip | length > 0
+        fail_msg: >-
+          Missing required vars. Pass -e ipa_server_ip=<FreeIPA server IP> and a
+          vault file with ipa_admin_password (>=8 chars), e.g. -e @~/.vault/freeipa-sandbox.yaml
+      tags: [always]
+
+    - name: "Gate: supported client OS (Debian/Ubuntu primary; EL also handled)"
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family in ['Debian', 'RedHat']
+        fail_msg: >-
+          freeipa-client-apply supports Debian/Ubuntu (apt freeipa-client) and
+          Enterprise Linux (dnf ipa-client). Detected {{ ansible_distribution }}
+          {{ ansible_distribution_version }} ({{ ansible_os_family }}).
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)"
+      ansible.builtin.command: systemctl is-active chronyd ntpd systemd-timesyncd
+      register: ipa_ntp_check
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: "Warn if no active time sync (client enrolls with --no-ntp; ntp role must cover this)"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: no active time sync on this host ({{ ipa_ntp_check.stdout | default('') }}).
+          The client enrolls with --no-ntp; apply the `ntp`(chrony) role first or Kerberos
+          auth will fail on clock skew (> 5 min).
+      when: "'active' not in (ipa_ntp_check.stdout | default(''))"
+      tags: [always]
+
+  tasks:
+    # ipa-client-install needs this host's own FQDN to resolve to a
+    # non-loopback address, and (with no DNS) it must resolve the SERVER FQDN
+    # too. Pin BOTH in /etc/hosts BEFORE changing the hostname — otherwise the
+    # moment the hostname becomes an FQDN that /etc/hosts can't resolve, every
+    # `sudo` does a slow failing name lookup (~10–30s) and the next become task
+    # times out with "waiting for privilege escalation prompt". Pinning first
+    # keeps sudo fast throughout. The client FQDN must be the FIRST (canonical)
+    # name for its IP.
+    - name: "FreeIPA client — pin this host {{ ipa_client_fqdn }} to its own IP in /etc/hosts (FQDN canonical)"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ ipa_client_fqdn | regex_escape }}(\s|$)'
+        line: "{{ ansible_default_ipv4.address }} {{ ipa_client_fqdn }} {{ ipa_client_fqdn.split('.')[0] }}"
+        state: present
+        create: false
+      tags: [freeipa-client, C1]
+
+    - name: "FreeIPA client — pin the FreeIPA server {{ ipa_server_fqdn }} to {{ ipa_server_ip }} in /etc/hosts"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ ipa_server_fqdn | regex_escape }}(\s|$)'
+        line: "{{ ipa_server_ip }} {{ ipa_server_fqdn }} {{ ipa_server_fqdn.split('.')[0] }}"
+        state: present
+        create: false
+      tags: [freeipa-client, C3]
+
+    - name: "FreeIPA client — set system hostname to the client FQDN (after /etc/hosts pin so sudo stays fast)"
+      ansible.builtin.hostname:
+        name: "{{ ipa_client_fqdn }}"
+      tags: [freeipa-client, C1]
+
+    - name: "FreeIPA client — install ipa-client package (apt freeipa-client on Ubuntu)"
+      ansible.builtin.apt:
+        name: "{{ ipa_client_packages_debian }}"
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
+      tags: [freeipa-client, C1]
+
+    - name: "FreeIPA client — install ipa-client package (dnf ipa-client on EL)"
+      ansible.builtin.dnf:
+        name: "{{ ipa_client_packages_redhat }}"
+        state: present
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'RedHat'
+      tags: [freeipa-client, C1]
+
+    - name: "FreeIPA client — install host-audit daemon (auditd)"
+      ansible.builtin.package:
+        name: "{{ ipa_audit_packages }}"
+        state: present
+      when: not ansible_check_mode
+      tags: [freeipa-client, C9]
+
+    - name: "FreeIPA client — detect prior enrollment ({{ ipa_config_marker }})"
+      ansible.builtin.stat:
+        path: "{{ ipa_config_marker }}"
+      register: ipa_cfg
+      tags: [freeipa-client, C1]
+
+    # ipa-client-install is NOT idempotent (re-running on an enrolled host errors
+    # "IPA client is already configured"). `creates:` makes this a no-op once
+    # /etc/ipa/default.conf exists, so the playbook is idempotent by
+    # construction. no_log: true keeps the enrollment password out of Ansible's
+    # logs (it is still only ever supplied from vault).
+    #   --server/--domain/--realm : explicit (no DNS SRV discovery in this pilot)
+    #   --mkhomedir               : create home dirs for IPA users on first login
+    #   --no-ntp                  : time sync owned by the ntp role
+    #   --no-dns-sshfp            : we don't manage DNS, so don't publish SSHFP
+    #   --force-join              : recover cleanly if a stale host entry exists
+    - name: "FreeIPA client — run ipa-client-install (enroll into {{ ipa_realm }})"
+      ansible.builtin.command:
+        argv:
+          - ipa-client-install
+          - "-U"                                       # unattended
+          - "--server={{ ipa_server_fqdn }}"
+          - "--domain={{ ipa_domain }}"
+          - "--realm={{ ipa_realm }}"
+          - "--principal={{ ipa_enroll_principal }}"
+          - "--password={{ ipa_enroll_password }}"
+          - "--hostname={{ ipa_client_fqdn }}"
+          - "--mkhomedir"
+          - "--no-ntp"
+          - "--no-dns-sshfp"
+          - "--force-join"
+        creates: "{{ ipa_config_marker }}"
+      register: ipa_enroll
+      no_log: true
+      when: not ansible_check_mode
+      tags: [freeipa-client, C2]
+
+    # ipa-client-install on Ubuntu does NOT always wire nsswitch's `sudoers`
+    # database or enable the SSSD `sudo` service the way it does on EL. Make
+    # both explicit and idempotent so centrally-defined sudo rules resolve.
+    - name: "FreeIPA client — route sudoers lookups through SSSD (nsswitch)"
+      ansible.builtin.lineinfile:
+        path: /etc/nsswitch.conf
+        regexp: '^sudoers:'
+        line: "sudoers:        files sss"
+        state: present
+        create: true
+        mode: "0644"
+      when: not ansible_check_mode
+      tags: [freeipa-client, C7]
+
+    - name: "FreeIPA client — ensure SSSD offers the sudo service"
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: '^services\s*='
+        line: "services = nss, pam, ssh, sudo"
+        state: present
+        create: false
+      register: ipa_sssd_services
+      when: not ansible_check_mode
+      tags: [freeipa-client, C8]
+
+    - name: "FreeIPA client — restart SSSD after wiring sudo (only if sssd.conf changed)"
+      ansible.builtin.systemd:
+        name: sssd
+        state: restarted
+      when:
+        - not ansible_check_mode
+        - ipa_sssd_services is changed
+      tags: [freeipa-client, C8]
+
+    - name: "FreeIPA client — enable + start SSSD (survives reboot)"
+      ansible.builtin.systemd:
+        name: sssd
+        state: started
+        enabled: true
+      when: not ansible_check_mode
+      tags: [freeipa-client, C2]
+
+    - name: "FreeIPA client — enable + start auditd (survives reboot)"
+      ansible.builtin.systemd:
+        name: auditd
+        state: started
+        enabled: true
+      when: not ansible_check_mode
+      tags: [freeipa-client, C9]
+
+    - name: "FreeIPA client — post-enroll health + AAA checks"
+      when: not ansible_check_mode
+      tags: [freeipa-client, freeipa-client-verify]
+      block:
+        - name: "FreeIPA client — wait until SSSD resolves an IPA identity (spec C5)"
+          ansible.builtin.command: "id {{ ipa_verify_user | default('admin') }}@{{ ipa_domain }}"
+          register: ipa_id
+          changed_when: false
+          until: ipa_id.rc == 0
+          retries: "{{ (ipa_enroll_timeout_s | int) // 10 }}"
+          delay: 10
+          failed_when: false
+
+        - name: "FreeIPA client — fail loudly if SSSD never resolved an IPA user (spec C5)"
+          ansible.builtin.assert:
+            that:
+              - ipa_id.rc == 0
+            fail_msg: >-
+              SSSD never resolved {{ ipa_verify_user | default('admin') }}@{{ ipa_domain }}
+              within {{ ipa_enroll_timeout_s }}s. Check enrollment (`ipa-client-install`)
+              and that the server {{ ipa_server_fqdn }} ({{ ipa_server_ip }}) is reachable.
+
+        - name: "FreeIPA client — confirm host Kerberos keytab exists (spec C4)"
+          ansible.builtin.command: klist -k /etc/krb5.keytab
+          register: ipa_keytab
+          changed_when: false
+          failed_when: "'host/' + ipa_client_fqdn not in ipa_keytab.stdout"
+
+      rescue:
+        - name: "FreeIPA client — rescue: dump SSSD status"
+          ansible.builtin.command: sssctl domain-status "{{ ipa_domain }}"
+          register: ipa_rescue_sssd
+          changed_when: false
+          failed_when: false
+
+        - name: "FreeIPA client — rescue: tail client-install log"
+          ansible.builtin.command: tail -n 60 /var/log/ipaclient-install.log
+          register: ipa_rescue_log
+          changed_when: false
+          failed_when: false
+
+        - name: "FreeIPA client — rescue: surface diagnostics + fail"
+          ansible.builtin.fail:
+            msg: |
+              FreeIPA client enrollment/health FAILED. Diagnostics:
+              --- sssctl domain-status {{ ipa_domain }} ---
+              {{ ipa_rescue_sssd.stdout | default('(unavailable)') }}
+              {{ ipa_rescue_sssd.stderr | default('') }}
+              --- /var/log/ipaclient-install.log (tail 60) ---
+              {{ ipa_rescue_log.stdout | default('(unavailable)') }}
+              Common causes: server FQDN {{ ipa_server_fqdn }} not resolving (check
+              /etc/hosts has "{{ ipa_server_ip }} {{ ipa_server_fqdn }}"); clock skew
+              (apply ntp role — Kerberos needs < 5 min); a half-finished prior enroll
+              (run `ipa-client-install --uninstall -U` then rerun).

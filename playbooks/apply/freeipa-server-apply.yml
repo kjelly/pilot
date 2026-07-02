@@ -1,0 +1,281 @@
+# Apply playbook for docs/verification/freeipa-server.md
+#
+# Stands up a FreeIPA server (identity + Kerberos + sudo directory) by a
+# NATIVE `ipa-server-install` on an Enterprise-Linux 9 host (AlmaLinux /
+# Rocky / RHEL 9), so *other hosts can enroll against it* for central
+# account and sudo management.
+#
+# WHY NATIVE (not a container) — locked-in design, see spec §0/§6:
+#   An earlier revision ran FreeIPA as a systemd-in-Docker container
+#   (quay.io/freeipa/freeipa-server). It installed every server component
+#   (DS/KDC/CA/HTTP) but DETERMINISTICALLY failed at the final self-enroll
+#   step: httpd's mod_auth_gssapi could not acquire its HTTP/… acceptor
+#   credential (SPNEGO "cannot find mechanisms to negotiate"), regardless of
+#   runtime (Docker == podman) or config (gssproxy interposer OR direct
+#   keytab). That is a container-level GSSAPI mechglue problem, not a
+#   playbook bug. The identical install on a native EL9 host self-enrolls
+#   cleanly (`ipa user-find` over SPNEGO returns rc=0). So this playbook
+#   installs on the host directly. Do NOT reintroduce a container path here.
+#
+# Design decisions (locked in the spec, do not change without bumping it):
+#   * host-native: all of 389/636/88/464/80/443 bind on the host directly.
+#   * NO built-in DNS (no --setup-dns; --no-host-dns skips the DNS precheck
+#     since we resolve the FQDN via /etc/hosts): DNS is owned by the
+#     existing `dns`(unbound) role; FreeIPA's bind9 would fight over :53.
+#   * NO built-in NTP (--no-ntp): time sync is owned by the existing
+#     `ntp`(chrony) role. Kerberos needs clock skew < 5 min — a
+#     PRE-CONDITION the ntp role handles; asserted/ warned below.
+#   * realm IPA.PILOT.INTERNAL / domain ipa.pilot.internal (override with
+#     -e ipa_realm=... -e ipa_domain=...). Suffix DN dc=ipa,dc=pilot,dc=internal.
+#   * FreeIPA HARD-FORBIDS the server FQDN == domain name; the FQDN must be a
+#     host *under* the domain — default ipa1.<domain>.
+#
+# Secrets: ipa_admin_password (and optional ipa_dm_password) come from a
+# vault file, NEVER hard-coded (and the install task is no_log):
+#   -e @~/.vault/freeipa-sandbox.yaml
+#
+# Usage:
+#
+#   ansible-playbook -i inventory-freeipa.yaml \
+#       playbooks/apply/freeipa-server-apply.yml \
+#       -e ipa_server_ip=10.0.0.10 \
+#       -e @~/.vault/freeipa-sandbox.yaml \
+#       --check --diff
+#
+#   # against a pilot vm-target (host lives in group `all`, not freeipa-server):
+#   pilot vm-target run --name alma-vm playbooks/apply/freeipa-server-apply.yml \
+#       -e target_group=all -e ipa_server_ip=<vm-ip> -e @~/.vault/freeipa-sandbox.yaml
+#
+# Stage gating (same convention as core-infra-provider-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: FreeIPA server apply
+  hosts: "{{ target_group | default('freeipa-server') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    # Identity / realm
+    ipa_domain: ipa.pilot.internal
+    ipa_realm: "{{ ipa_domain | upper }}"
+    # FreeIPA HARD-FORBIDS the server FQDN being equal to the domain name
+    # ("hostname cannot be the same as the domain name"). The FQDN must be a
+    # host *under* the domain — default to ipa1.<domain>. The short alias
+    # (ipa1) is derived from this in the /etc/hosts pin below.
+    ipa_server_fqdn: "ipa1.{{ ipa_domain }}"
+
+    # Native install
+    ipa_packages:
+      - ipa-server
+    ipa_config_marker: /etc/ipa/default.conf        # created iff already configured
+    ipa_install_timeout_s: 900                       # first install runs 8–12 min
+
+    # DM password defaults to the admin password unless explicitly given
+    ipa_dm_password: "{{ ipa_admin_password }}"
+
+  pre_tasks:
+    - name: "Gate: required vars present (fail early, before any mutation)"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+          - ipa_server_ip is defined and ipa_server_ip | length > 0
+        fail_msg: >-
+          Missing required vars. Pass -e ipa_server_ip=<LAN IP> and a vault file
+          with ipa_admin_password (>=8 chars), e.g. -e @~/.vault/freeipa-sandbox.yaml
+      tags: [always]
+
+    - name: "Gate: this playbook installs FreeIPA NATIVELY — require EL9 host"
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'RedHat'
+          - (ansible_distribution_major_version | int) >= 9
+        fail_msg: >-
+          freeipa-server-apply installs ipa-server natively and REQUIRES an
+          Enterprise-Linux 9 host (AlmaLinux / Rocky / RHEL 9). Detected
+          {{ ansible_distribution }} {{ ansible_distribution_version }}.
+          Bring up an EL9 target, e.g. `pilot vm-target up --base-image almalinux-9`.
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)"
+      ansible.builtin.command: systemctl is-active chronyd ntpd
+      register: ipa_ntp_check
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: "Warn if no active time sync (FreeIPA runs with --no-ntp; ntp role must cover this)"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: no active chronyd/ntpd on this host ({{ ipa_ntp_check.stdout | default('') }}).
+          FreeIPA is installed with --no-ntp; apply the `ntp`(chrony) role first or Kerberos
+          auth will fail on clock skew.
+      when: "'active' not in (ipa_ntp_check.stdout | default(''))"
+      tags: [always]
+
+  tasks:
+    # FreeIPA install HARD-REQUIRES the server FQDN to resolve to a
+    # non-loopback address, and that FQDN must be the FIRST (canonical) name
+    # for that IP in /etc/hosts — otherwise get_server_ip_address aborts with
+    # "does not match configured canonical hostname". With --no-host-dns we
+    # guarantee resolution via /etc/hosts.
+    - name: "FreeIPA — set system hostname to the FQDN"
+      ansible.builtin.hostname:
+        name: "{{ ipa_server_fqdn }}"
+      tags: [freeipa, freeipa-hostname]
+
+    # Single idempotent line: the regexp matches ANY existing mapping for
+    # this FQDN, so a stale line (e.g. a different IP from a prior life) is
+    # REPLACED in place rather than duplicated — and a rerun with the line
+    # already correct is a clean no-op. The FQDN must be the FIRST
+    # (canonical) name for the IP or get_server_ip_address aborts with "does
+    # not match configured canonical hostname".
+    - name: "FreeIPA — pin {{ ipa_server_fqdn }} to {{ ipa_server_ip }} (FQDN canonical) in /etc/hosts"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ ipa_server_fqdn | regex_escape }}(\s|$)'
+        line: "{{ ipa_server_ip }} {{ ipa_server_fqdn }} {{ ipa_server_fqdn.split('.')[0] }}"
+        state: present
+        create: false
+      tags: [freeipa, freeipa-hosts]
+
+    - name: "FreeIPA — install server packages (idm:DL1 module stream on EL9)"
+      ansible.builtin.dnf:
+        name: "{{ ipa_packages }}"
+        state: present
+      when: not ansible_check_mode
+      tags: [freeipa, freeipa-install]
+
+    - name: "FreeIPA — detect prior configuration ({{ ipa_config_marker }})"
+      ansible.builtin.stat:
+        path: "{{ ipa_config_marker }}"
+      register: ipa_cfg
+      tags: [freeipa, freeipa-install]
+
+    # ipa-server-install is NOT idempotent (re-running on a configured host
+    # errors with "IPA server is already configured"). `creates:` makes this
+    # task a no-op once /etc/ipa/default.conf exists, so the playbook is
+    # idempotent by construction. no_log: true keeps the admin/DM passwords
+    # out of Ansible's logs (they are still only ever supplied from vault).
+    - name: "FreeIPA — run ipa-server-install (native; first run is 8–12 min)"
+      ansible.builtin.command:
+        argv:
+          - ipa-server-install
+          - "-U"                                # unattended
+          - "-r"
+          - "{{ ipa_realm }}"
+          - "-n"
+          - "{{ ipa_domain }}"
+          - "-p"
+          - "{{ ipa_dm_password }}"             # Directory Manager
+          - "-a"
+          - "{{ ipa_admin_password }}"          # IPA admin
+          - "--ip-address={{ ipa_server_ip }}"  # deterministic; FQDN is canonical in /etc/hosts
+          - "--no-host-dns"                     # skip DNS precheck (we resolve via /etc/hosts)
+          - "--no-ntp"                          # do NOT run chrony (ntp role owns time)
+          - "--hostname={{ ipa_server_fqdn }}"
+        creates: "{{ ipa_config_marker }}"
+      register: ipa_install
+      no_log: true
+      when: not ansible_check_mode
+      tags: [freeipa, freeipa-install]
+
+    - name: "FreeIPA — enable + start ipa.service (survives reboot)"
+      ansible.builtin.systemd:
+        name: ipa
+        state: started
+        enabled: true
+      when: not ansible_check_mode
+      tags: [freeipa, freeipa-service]
+
+    - name: "FreeIPA — bring-up health + LDAP checks"
+      when: not ansible_check_mode
+      tags: [freeipa, freeipa-verify]
+      block:
+        - name: "FreeIPA — wait until all IPA services RUNNING (spec C2)"
+          ansible.builtin.command: ipactl status
+          register: ipa_health
+          changed_when: false
+          # Healthy iff no service is STOPPED/FAILED. During the (idempotent)
+          # rerun path services are already up so this passes on the first
+          # try; on a host that is still settling we poll until the budget is
+          # exhausted. failed_when:false so the assert below surfaces a clean
+          # diagnostic instead of a raw module failure.
+          until: >-
+            ipa_health.rc == 0 and
+            'STOPPED' not in ipa_health.stdout and
+            'FAILED' not in ipa_health.stdout
+          retries: "{{ (ipa_install_timeout_s | int) // 15 }}"
+          delay: 15
+          failed_when: false
+
+        - name: "FreeIPA — show last ipactl status when still not healthy"
+          ansible.builtin.debug:
+            var: ipa_health.stdout_lines
+          when: (ipa_health.rc | default(1)) != 0
+
+        - name: "FreeIPA — fail loudly if services never came up (spec C2)"
+          ansible.builtin.assert:
+            that:
+              - ipa_health.rc == 0
+              - "'STOPPED' not in ipa_health.stdout"
+              - "'FAILED' not in ipa_health.stdout"
+            fail_msg: >-
+              ipactl status never reported healthy within {{ ipa_install_timeout_s }}s.
+              Last output: {{ ipa_health.stdout | default('(none)') }}
+
+        - name: "FreeIPA — final check: LDAP rootDSE advertises realm suffix (spec C11)"
+          ansible.builtin.command: ldapsearch -x -H ldap://localhost -b "" -s base namingContexts
+          register: ipa_ldap
+          changed_when: false
+          failed_when: >-
+            ('dc=' + ipa_domain.replace('.', ',dc=')) not in (ipa_ldap.stdout | default(''))
+
+      rescue:
+        - name: "FreeIPA — rescue: dump ipactl status"
+          ansible.builtin.command: ipactl status
+          register: ipa_rescue_status
+          changed_when: false
+          failed_when: false
+
+        - name: "FreeIPA — rescue: tail install log"
+          ansible.builtin.command: tail -n 60 /var/log/ipaserver-install.log
+          register: ipa_rescue_log
+          changed_when: false
+          failed_when: false
+
+        - name: "FreeIPA — rescue: surface diagnostics + fail"
+          ansible.builtin.fail:
+            msg: |
+              FreeIPA bring-up FAILED. Diagnostics:
+              --- ipactl status ---
+              {{ ipa_rescue_status.stdout | default('(unavailable)') }}
+              {{ ipa_rescue_status.stderr | default('') }}
+              --- /var/log/ipaserver-install.log (tail 60) ---
+              {{ ipa_rescue_log.stdout | default('(unavailable)') }}
+              Common causes: FQDN not resolving to a non-loopback IP (check /etc/hosts
+              has "{{ ipa_server_ip }} {{ ipa_server_fqdn }}" with the FQDN FIRST);
+              clock skew (apply ntp role — Kerberos needs < 5 min); a half-finished
+              prior install (run `ipa-server-install --uninstall -U` then rerun).
