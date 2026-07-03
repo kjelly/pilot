@@ -48,3 +48,10 @@ coverage.txt
 .verification/
 .playbooks/generated/
 inventory*.yaml
+
+# DNS zone data is infra topology for a PUBLIC repo — real data lives OUTSIDE
+# the repo tree (in group_vars/ next to an out-of-git inventory). If anyone
+# ever creates group_vars/dns/ in-repo, ignore every zone file EXCEPT the
+# committed schema example. See docs/runbooks/core-infra-provider-dns-zones.md
+/group_vars/dns/*.yaml
+!/group_vars/dns/zones.example.yaml

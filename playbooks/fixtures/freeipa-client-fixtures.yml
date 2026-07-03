@@ -104,6 +104,24 @@
         - "'already a member' not in (ipa_rule_user.stdout | default(''))"
       tags: [fixtures]
 
+    # `pilot-all` (cmdcategory=all) still requires a password by default.
+    # Without !authenticate, `sudo -n` inside a non-interactive shell hangs
+    # waiting for a password.  Add it here so the C8 check (runuser + sudo -l)
+    # works without a TTY.  Idempotent: already-exists → rc=1 → no change.
+    - name: "Fixtures — set {{ ipa_fixture_sudorule }} to not require auth"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-option
+          - "{{ ipa_fixture_sudorule }}"
+          - --sudooption=!authenticate
+      register: ipa_rule_opt
+      changed_when: "'Added option' in (ipa_rule_opt.stdout | default(''))"
+      failed_when:
+        - ipa_rule_opt.rc != 0
+        - "'already exists' not in (ipa_rule_opt.stderr | default(''))"
+      tags: [fixtures]
+
     - name: "Fixtures — release the Kerberos ticket"
       ansible.builtin.command: kdestroy
       changed_when: false

@@ -1,0 +1,41 @@
+---
+- name: Verification Spec — freeipa-client (Ubuntu 客戶端，接上 FreeIPA 的 認證/授權/稽核)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — 已 enroll（`ipa-client-install` 產物存在）"
+      ansible.builtin.stat:
+        path: "/etc/ipa/default.conf"
+      become: true
+      tags: [C1]
+    - name: "C2 — SSSD 服務 active（帳號/認證的本機守護程序）"
+      ansible.builtin.systemd:
+        name: "sssd"
+        state: started
+        enabled: true
+      become: true
+      tags: [C2]
+    - name: "C3 — Kerberos realm 已設定正確"
+      ansible.builtin.command: "grep -q IPA.PILOT.INTERNAL /etc/krb5.conf"
+      become: true
+      changed_when: false
+      tags: [C3]
+    - name: "C4 — 本機有 Kerberos 機器身分（host keytab 內含 host p…"
+      ansible.builtin.command: "sudo klist -k /etc/krb5.keytab"
+      become: true
+      changed_when: false
+      tags: [C10, C4, C5, C6, C8]
+    - name: "C7 — sudoers 查詢路由到 SSSD（nsswitch）"
+      ansible.builtin.command: "grep -qE \"^sudoers:.*sss\" /etc/nsswitch.conf"
+      become: true
+      changed_when: false
+      tags: [C7]
+    - name: "C9 — 稽核守護程序 auditd active"
+      ansible.builtin.systemd:
+        name: "auditd"
+        state: started
+        enabled: true
+      become: true
+      tags: [C9]

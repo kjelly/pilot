@@ -1,0 +1,50 @@
+# EXAMPLE custom DNS zones for core-infra-provider-apply.yml (infra_role=dns).
+# SCHEMA ONLY — fake hostnames/IPs. This file IS committed so the schema is
+# documented; your REAL zone data must NOT live in this (public) repo.
+#
+# WHY OUT OF THE REPO — this repo is public. Internal hostname→IP mappings are
+# infra topology you want version-controlled and reviewed, but not published to
+# the world. So keep the real data OUTSIDE the repo tree, next to your (already
+# git-ignored) inventory, where Ansible auto-loads it with ZERO extra flags:
+#
+#     ~/.infra/pilot/
+#     ├── inventory-core-infra.yaml     # your real inventory (git-ignored)
+#     └── group_vars/
+#         └── dns/
+#             ├── pilot-lan.yaml        # dns_zones: [...]  (auto-merged)
+#             └── corp-internal.yaml    # dns_zones: [...]  (auto-merged)
+#
+# Ansible auto-loads group_vars/ adjacent to the inventory file, so:
+#
+#     ansible-playbook -i ~/.infra/pilot/inventory-core-infra.yaml \
+#         playbooks/apply/core-infra-provider-apply.yml \
+#         -e infra_role=dns -e dns_listen_addr=10.0.0.53 --check --diff
+#
+# picks up dns_zones with no -e. Split across many files under group_vars/dns/
+# — Ansible merges same-group files (use unique zone names across them).
+#
+# To scale beyond a few hundred records, or when a zone is owned by a separate
+# authoritative server, use `stub_addr` (delegation) instead of inline records.
+#
+# NEVER put a filled-in copy of this under the repo's own group_vars/dns/ — the
+# .gitignore blocks group_vars/dns/*.yaml except this example, but the safest
+# guarantee is that the real file lives entirely outside the repo tree.
+---
+dns_zones:
+  # Authoritative local zone — unbound answers these names directly and returns
+  # NXDOMAIN for anything else under the zone (mode: static). Use `transparent`
+  # to fall through to the forwarder for names you did not define.
+  - name: pilot.lan
+    mode: static                       # static (default) | transparent | redirect
+    records:
+      - { name: core,     type: A, value: 10.0.0.53 }
+      - { name: keycloak, type: A, value: 10.0.0.10 }
+      - { name: git,      type: A, value: 10.0.0.20 }
+      # CNAME / AAAA also work — `type` defaults to A when omitted:
+      - { name: www,      type: CNAME, value: git.pilot.lan. }
+
+  # Delegation (scale path) — hand the whole zone to an upstream authoritative
+  # server instead of listing records here. `stub_addr` and `records` are
+  # mutually exclusive; when stub_addr is set the records list is ignored.
+  - name: corp.internal
+    stub_addr: 10.0.1.2

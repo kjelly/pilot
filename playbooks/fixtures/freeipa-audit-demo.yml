@@ -1,0 +1,243 @@
+# Fixtures playbook: FreeIPA audit demonstration
+#
+# Creates:
+#   1. IPA user 'audituser' with password 'AuditDemo123'
+#   2. Sudo rule 'audit-demo-ls-only' — allows only /usr/bin/ls on all hosts
+#      This means: sudo ls /    → SUCCEEDS  (audited on KDC)
+#                  sudo ps aux  → FAILS     (audited, denied by rule)
+#
+# The FreeIPA KDC records both events in its audit log, identifiable by
+# Kerberos principal 'audituser@IPA.PILOT.INTERNAL'.
+#
+# Variables (all from vault):
+#   ipa_admin_password          — FreeIPA admin credential
+#   audit_demo_user_password    — password for audituser
+#
+# Usage:
+#   pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-audit-demo.yml \
+#       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
+---
+- name: FreeIPA audit demonstration fixtures
+  hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    ipa_domain: ipa.pilot.internal
+    ipa_realm: "{{ ipa_domain | upper }}"
+    ipa_server_fqdn: "ipa1.{{ ipa_domain }}"
+    audit_demo_user: audituser
+    audit_demo_user_pass: "{{ audit_demo_user_password | default('AuditDemo123') }}"
+    audit_demo_sudorule: audit-demo-ls-only
+
+  pre_tasks:
+    - name: "Gate: required vars present"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+          - audit_demo_user_pass | length >= 8
+        fail_msg: >-
+          Pass -e @~/.vault/freeipa-sandbox.yaml with ipa_admin_password
+          and -e audit_demo_user_password=<pass> (>=8 chars)
+      tags: [always]
+
+  tasks:
+    # ── Admin authentication ──────────────────────────────────────────
+    - name: "Fixtures — kinit admin"
+      ansible.builtin.shell:
+        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+      register: ipa_kinit
+      changed_when: false
+      no_log: true
+      tags: [fixtures]
+
+    # ── User creation ──────────────────────────────────────────────────
+    - name: "Fixtures — ensure IPA user {{ audit_demo_user }} exists"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - user-add
+          - "{{ audit_demo_user }}"
+          - "--first=Audit"
+          - "--last=Demo"
+      register: ipa_user_add
+      changed_when: "'Added user' in (ipa_user_add.stdout | default(''))"
+      failed_when:
+        - ipa_user_add.rc != 0
+        - "'already exists' not in (ipa_user_add.stderr | default(''))"
+      tags: [fixtures]
+
+    # ── Sudo rule: allow ONLY /usr/bin/ls on ALL hosts ─────────────────
+    # This creates a deliberately restrictive rule: audituser can only run
+    # `ls`.  `sudo ps aux` will fail because ps is not in the allowlist,
+    # and FreeIPA will record the denied authorisation in the KDC audit log.
+    - name: "Fixtures — ensure sudo rule {{ audit_demo_sudorule }} exists (all hosts)"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add
+          - "{{ audit_demo_sudorule }}"
+          - "--hostcat=all"
+      register: ipa_rule_add
+      changed_when: "'Added Sudo Rule' in (ipa_rule_add.stdout | default(''))"
+      failed_when:
+        - ipa_rule_add.rc != 0
+        - "'already exists' not in (ipa_rule_add.stderr | default(''))"
+      tags: [fixtures]
+
+    # Ensure command category is NOT 'all'.  With cmdcategory=all the rule
+    # matches EVERY command and the allow/deny lists below are ignored — the
+    # user could run anything, including ps.  Clearing it makes the explicit
+    # allow/deny commands authoritative.  Fresh rules default to unset; this
+    # also self-heals rules left at cmdcat=all by an earlier run of this fixture.
+    - name: "Fixtures — clear command category for {{ audit_demo_sudorule }} (allow/deny list governs)"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-mod
+          - "{{ audit_demo_sudorule }}"
+          - "--cmdcat="
+      register: ipa_rule_mod
+      # rc != 0 with "no modifications" just means it was already cleared.
+      changed_when: ipa_rule_mod.rc == 0
+      failed_when: false
+      tags: [fixtures]
+
+    # ── Sudo command objects (MUST exist before sudorule references them) ──
+    # FreeIPA's sudo rules reference sudoCommand objects that must first be
+    # registered in the sudocmd list.  Without this step, a sudorule that
+    # *appears* correct (ipa sudorule-show shows the allow/deny lists) still
+    # yields "not allowed" at runtime — SSSD's sudo provider finds zero allowed
+    # commands because the objects don't exist in the LDAP subtree SSSD queries.
+    # Idempotent: already-exists is not an error.
+    - name: "Fixtures — register /usr/bin/ls as a sudoCommand object"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudocmd-add
+          - /usr/bin/ls
+          - --desc=List files
+      register: ipa_ls_cmd
+      changed_when: "'Added Sudo Command' in (ipa_ls_cmd.stdout | default(''))"
+      failed_when:
+        - ipa_ls_cmd.rc != 0
+        - "'already exists' not in (ipa_ls_cmd.stderr | default(''))"
+      tags: [fixtures]
+
+    - name: "Fixtures — register /usr/bin/ps as a sudoCommand object"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudocmd-add
+          - /usr/bin/ps
+          - --desc=Process status
+      register: ipa_ps_cmd
+      changed_when: "'Added Sudo Command' in (ipa_ps_cmd.stdout | default(''))"
+      failed_when:
+        - ipa_ps_cmd.rc != 0
+        - "'already exists' not in (ipa_ps_cmd.stderr | default(''))"
+      tags: [fixtures]
+
+    # Explicitly allow only /usr/bin/ls
+    - name: "Fixtures — allow only /usr/bin/ls for {{ audit_demo_sudorule }}"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-allow-command
+          - "{{ audit_demo_sudorule }}"
+          - "--sudocmds=/usr/bin/ls"
+      register: ipa_allow_cmd
+      changed_when: "'Added Sudo Command' in (ipa_allow_cmd.stdout | default(''))"
+      failed_when:
+        - ipa_allow_cmd.rc != 0
+        - "'already a member' not in (ipa_allow_cmd.stdout | default(''))"
+        - "'already a member' not in (ipa_allow_cmd.stderr | default(''))"
+        - "'Number of members added 0' not in (ipa_allow_cmd.stdout | default(''))"
+      tags: [fixtures]
+
+    # Explicitly deny /usr/bin/ps (makes intent unambiguous)
+    - name: "Fixtures — explicitly deny /usr/bin/ps for {{ audit_demo_sudorule }}"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-deny-command
+          - "{{ audit_demo_sudorule }}"
+          - "--sudocmds=/usr/bin/ps"
+      register: ipa_deny_cmd
+      changed_when: "'Added Sudo Command' in (ipa_deny_cmd.stdout | default(''))"
+      failed_when:
+        - ipa_deny_cmd.rc != 0
+        - "'already a member' not in (ipa_deny_cmd.stdout | default(''))"
+        - "'already a member' not in (ipa_deny_cmd.stderr | default(''))"
+        - "'Number of members added 0' not in (ipa_deny_cmd.stdout | default(''))"
+      tags: [fixtures]
+
+    # Central sudo rules require password auth by default. Set !authenticate
+    # so `sudo -n ls` succeeds non-interactively (matches the automated
+    # audit-sim demo, which asserts on rc rather than driving a TTY prompt).
+    - name: "Fixtures — set {{ audit_demo_sudorule }} to not require authentication"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-option
+          - "{{ audit_demo_sudorule }}"
+          - "--sudooption=!authenticate"
+      register: ipa_rule_option
+      changed_when: "'Added Sudo Option' in (ipa_rule_option.stdout | default(''))"
+      failed_when:
+        - ipa_rule_option.rc != 0
+        - "'already exists' not in (ipa_rule_option.stderr | default(''))"
+      tags: [fixtures]
+
+    - name: "Fixtures — attach {{ audit_demo_user }} to {{ audit_demo_sudorule }}"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-user
+          - "{{ audit_demo_sudorule }}"
+          - "--users={{ audit_demo_user }}"
+      register: ipa_rule_user
+      changed_when: "'Number of members added 1' in (ipa_rule_user.stdout | default(''))"
+      failed_when:
+        - ipa_rule_user.rc != 0
+        - "'already a member' not in (ipa_rule_user.stdout | default(''))"
+      tags: [fixtures]
+
+    # ── Release ticket ─────────────────────────────────────────────────
+    - name: "Fixtures — release the Kerberos ticket"
+      ansible.builtin.command: kdestroy
+      changed_when: false
+      failed_when: false
+      tags: [fixtures]
+
+    # ── Set audituser password via kadmin.local (non-expiring) ─────────
+    # `ipa passwd` sets a password that expires immediately and requires
+    # change-on-next-login.  Use kadmin.local to set a stable password so
+    # `sudo kinit` in the audit sim works without interactive prompts.
+    - name: "Fixtures — set stable password for {{ audit_demo_user }} via kadmin.local (no forced change)"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          printf "cpw {{ audit_demo_user }}\n{{ audit_demo_user_pass }}\n{{ audit_demo_user_pass }}\n" \
+            | kadmin.local 2>&1 | grep -E "(changed|error|Error)" || true
+      register: ipa_cpw
+      changed_when: "'changed' in ipa_cpw.stdout"
+      failed_when: false
+      tags: [fixtures]
+
+    # ── End state summary ──────────────────────────────────────────────
+    - name: "Fixtures — summary"
+      ansible.builtin.debug:
+        msg: |
+          Fixtures ready:
+            IPA user          : {{ audit_demo_user }}
+            IPA realm         : {{ ipa_realm }}
+            sudo rule         : {{ audit_demo_sudorule }}
+            allowed commands  : /usr/bin/ls
+            denied commands   : /usr/bin/ps (and everything else)
+            user in rule      : YES
+          Audit simulation plan:
+            1. kinit as {{ audit_demo_user }} → Kerberos TGT obtained
+            2. sudo ls /           → SUCCEEDS, KDC records authz request
+            3. sudo ps aux         → FAILS  (ps not in allowlist), KDC records DENIAL
+            4. On server: grep audituser /var/log/krb5kdc.log
+      tags: [fixtures]

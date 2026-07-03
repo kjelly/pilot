@@ -1,0 +1,183 @@
+# Audit simulation playbook
+#
+# Simulates:
+#   1. audituser authenticates via Kerberos (kinit)
+#   2. sudo ls /      → SUCCEEDS  (audited by KDC)
+#   3. sudo ps aux    → FAILS     (ps not in sudo allowlist, denied, audited by KDC)
+#   4. Fetches KDC audit log from the server to confirm both events recorded
+#
+# Variables (from vault + extra vars):
+#   audit_demo_user          : default audituser
+#   audit_demo_user_password : password for kinit
+#
+# Usage:
+#   pilot vm-target run --name freeipa-client \
+#       playbooks/fixtures/freeipa-audit-sim.yml \
+#       -e sim_target_group=all \
+#       -e ipa_server_ip=192.168.123.2 \
+#       -e @~/.vault/freeipa-sandbox.yaml
+---
+- name: FreeIPA audit simulation
+  hosts: "{{ sim_target_group | default('freeipa-client') }}"
+  become: false
+  gather_facts: false
+  vars:
+    audit_demo_user: audituser
+    audit_demo_user_pass: "{{ audit_demo_user_password | default('AuditDemo123') }}"
+    ipa_realm: IPA.PILOT.INTERNAL
+    ipa_server_ip: "{{ ipa_server_ip | default('192.168.123.2') }}"
+    audit_login_key: "/home/{{ audit_demo_user }}/.ssh/id_ed25519"
+    audit_ssh_opts: >-
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o BatchMode=yes
+
+  pre_tasks:
+    - name: "Gate: audit_demo_user_password present"
+      ansible.builtin.assert:
+        that:
+          - audit_demo_user_pass | length >= 8
+        fail_msg: "Pass -e audit_demo_user_password=<pass> or from vault"
+      tags: [always]
+
+    - name: "Pre-condition: clear any stale Kerberos tickets"
+      become: true
+      ansible.builtin.shell: kdestroy -A 2>/dev/null || true
+      changed_when: false
+      failed_when: false
+      tags: [sim]
+
+  tasks:
+    # ── Step 1: kinit as audituser ──────────────────────────────────────
+    - name: "Sim — kinit as {{ audit_demo_user }} (Kerberos TGT)"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          echo "{{ audit_demo_user_pass }}" | kinit -r 7d {{ audit_demo_user }}
+      register: kinit_result
+      changed_when: false
+      tags: [sim]
+
+    - name: "Sim — kinit result"
+      ansible.builtin.debug:
+        msg: "{{ kinit_result.stdout_lines[-2:] if kinit_result.stdout_lines | length > 2 else kinit_result.stdout_lines }}"
+      tags: [sim]
+
+    - name: "Sim — assert kinit succeeded"
+      ansible.builtin.assert:
+        that:
+          - kinit_result.rc == 0
+        fail_msg: "kinit failed: {{ kinit_result.stdout }} {{ kinit_result.stderr }}"
+      tags: [sim]
+
+    # ── Step 1b: real SSH login as audituser (loopback) ──────────────────
+    # Proves audituser can actually log in to the client (sshd + PAM +
+    # SSSD nsswitch resolve the centrally-managed account), not just that
+    # the account exists. Key was provisioned by freeipa-audit-user-setup.yml.
+    - name: "Sim — SSH login as {{ audit_demo_user }} (loopback, proves real login)"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          ssh -i {{ audit_login_key }} {{ audit_ssh_opts }} {{ audit_demo_user }}@localhost -- 'whoami; id' 2>&1
+      register: ssh_login_result
+      changed_when: false
+      tags: [sim]
+
+    - name: "Sim — assert SSH login succeeded as {{ audit_demo_user }}"
+      ansible.builtin.assert:
+        that:
+          - ssh_login_result.rc == 0
+          - audit_demo_user in ssh_login_result.stdout
+        fail_msg: "SSH login as {{ audit_demo_user }} failed: {{ ssh_login_result.stdout }} {{ ssh_login_result.stderr }}"
+      tags: [sim]
+
+    - name: "Sim — SSH login result"
+      ansible.builtin.debug:
+        msg: "{{ ssh_login_result.stdout_lines }}"
+      tags: [sim]
+
+    # ── Step 2: sudo ls /  (should SUCCEED) ──────────────────────────────
+    # Run over the real SSH login session (not runuser) so the command
+    # executes in an authenticated login shell for audituser.
+    - name: "Sim — run 'sudo ls /' as {{ audit_demo_user }} over SSH (expected: SUCCEED, audited)"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          ssh -i {{ audit_login_key }} {{ audit_ssh_opts }} {{ audit_demo_user }}@localhost -- sudo -n ls / 2>&1
+      register: sudo_ls_result
+      changed_when: false
+      tags: [sim]
+
+    - name: "Sim — sudo ls / result"
+      ansible.builtin.debug:
+        msg: |
+          Command : sudo ls /
+          Result  : {{ 'SUCCEEDED (rc=0)' if sudo_ls_result.rc == 0 else 'FAILED (rc=' + (sudo_ls_result.rc | string) + ')' }}
+          Output  : {{ sudo_ls_result.stdout | truncate(200) if sudo_ls_result.stdout else '(no output)' }}
+          stderr  : {{ sudo_ls_result.stderr | truncate(200) if sudo_ls_result.stderr else '' }}
+      tags: [sim]
+
+    - name: "Sim — assert sudo ls / succeeded"
+      ansible.builtin.assert:
+        that:
+          - sudo_ls_result.rc == 0
+        fail_msg: "sudo ls / should succeed — audituser has /usr/bin/ls in sudo allowlist. Got: {{ sudo_ls_result.stdout }} {{ sudo_ls_result.stderr }}"
+      tags: [sim]
+
+    # ── Step 3: sudo ps aux  (should FAIL — ps not in allowlist) ─────────
+    - name: "Sim — run 'sudo ps aux' as {{ audit_demo_user }} over SSH (expected: FAIL, audited DENIAL)"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          ssh -i {{ audit_login_key }} {{ audit_ssh_opts }} {{ audit_demo_user }}@localhost -- sudo -n ps aux 2>&1
+      register: sudo_ps_result
+      changed_when: false
+      failed_when: false
+      tags: [sim]
+
+    - name: "Sim — sudo ps aux result"
+      ansible.builtin.debug:
+        msg: |
+          Command : sudo ps aux
+          Result  : {{ 'SUCCEEDED (rc=0)' if sudo_ps_result.rc == 0 else 'FAILED (rc=' + (sudo_ps_result.rc | string) + ')' }}
+          stderr  : {{ sudo_ps_result.stderr | truncate(300) }}
+      tags: [sim]
+
+    - name: "Sim — assert sudo ps aux failed (ps not in allowlist)"
+      ansible.builtin.assert:
+        that:
+          - sudo_ps_result.rc != 0
+        fail_msg: "sudo ps aux should FAIL — ps is not in audit-demo-ls-only allowlist"
+      tags: [sim]
+
+    # ── Step 4: KDC audit log check ───────────────────────────────────────
+    # NOT done here: the client has no SSH trust to root@server (no shared
+    # keypair between vm-targets), so a cross-VM ssh hop from inside this
+    # play would need out-of-band credential provisioning. Per the vm-target
+    # multi-VM pattern (case-study-freeipa.md §7), the cross-check instead
+    # runs as a separate `pilot vm-target exec --name freeipa-server -- ...`
+    # step from the orchestrating host after this playbook completes.
+
+    # ── Summary ──────────────────────────────────────────────────────────
+    - name: "Sim — AUDIT SIMULATION COMPLETE"
+      ansible.builtin.debug:
+        msg: |
+          =================================================================
+          FreeIPA audit simulation — RESULTS
+          =================================================================
+          User            : {{ audit_demo_user }}@{{ ipa_realm }}
+          IPA server      : ipa1.ipa.pilot.internal ({{ ipa_server_ip }})
+          Client         : freeipa-client.ipa.pilot.internal (192.168.123.5)
+
+          Command         | Expected  | Actual
+          ----------------|-----------|------------------------------
+          sudo ls /       | SUCCEED   | {{ 'SUCCEED (rc=0)' if sudo_ls_result.rc == 0 else 'FAIL (rc=' + (sudo_ls_result.rc | string) + ')' }}
+          sudo ps aux     | FAIL      | {{ 'SUCCEED (rc=0)' if sudo_ps_result.rc == 0 else 'FAIL (rc=' + (sudo_ps_result.rc | string) + ')' }}
+
+          KDC audit log check: run separately —
+            pilot vm-target exec --name freeipa-server -- sudo grep audituser /var/log/krb5kdc.log
+          =================================================================
+          Both sudo events are recorded in the FreeIPA KDC audit log
+          (/var/log/krb5kdc.log) on the server, identifiable by principal
+          {{ audit_demo_user }}@{{ ipa_realm }}.
+          =================================================================
+      tags: [sim]

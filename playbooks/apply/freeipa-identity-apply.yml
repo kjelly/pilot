@@ -1,0 +1,473 @@
+# Apply playbook: FreeIPA identity & authorization management (DATA-DRIVEN)
+#
+# This playbook contains NO user names, group names, or sudo rules of its own.
+# It is a generic reconciler that loops over lists supplied at runtime:
+#
+#   ipa_users        — accounts to ensure exist (+ optional group membership)
+#   ipa_groups       — groups to ensure exist
+#   ipa_hostgroups   — host groups to ensure exist (+ member hosts)
+#   ipa_hbac_rules   — HBAC rules: who may LOG IN to which host(s)/service(s)
+#   ipa_sudo_rules   — sudo rules: what a logged-in user may run, and where
+#
+# Per-host authorization = two layers, both host-scoped via ipa_hostgroups:
+#   HBAC   gates login itself (SSH/PAM). Without an explicit HBAC rule, IPA's
+#          shipped "allow_all" rule lets every enrolled user log in to every
+#          enrolled host — set ipa_hbac_disable_allow_all: true once your own
+#          HBAC rules cover the access you want, or narrow rules are moot.
+#   sudo   gates what an already-logged-in user may run as root. A sudo rule
+#          with no hosts/hostgroups defaults to hostcat=all (applies
+#          everywhere); give it `hosts:` or `hostgroups:` to scope it.
+#
+# WHY THIS SHAPE — secrets & roster stay OUT of git:
+#   The *logic* (how to create a user / attach a sudo rule) lives here in git.
+#   The *data* (who the users are, their initial passwords, what each rule
+#   grants) lives in an ansible-vault-encrypted roster OUTSIDE the repo, e.g.
+#   ~/.vault/ipa-identity.yaml, and is injected with `-e @<file>`. Anyone who
+#   clones this repo gets the reconciler but none of your real accounts.
+#   See playbooks/apply/freeipa-identity.roster.example.yaml for the schema.
+#
+# Idempotency: every task treats "already exists / already a member" as a
+# no-op (changed_when/failed_when mirror freeipa-server-apply.yml). Passwords
+# are set unconditionally (IPA has no "read" to diff against) but no_log keeps
+# them out of Ansible output; set force_password: false on a user to skip.
+#
+# Usage (against a pilot vm-target that hosts the IPA server in group `all`):
+#
+#   pilot vm-target run --name alma-vm \
+#       playbooks/apply/freeipa-identity-apply.yml \
+#       -e target_group=all \
+#       -e @~/.vault/ipa-identity.yaml \
+#       --vault-password-file ~/.vault/vault-pass
+#
+#   # or straight ansible-playbook against a real inventory:
+#   ansible-playbook -i inventory-freeipa.yaml \
+#       playbooks/apply/freeipa-identity-apply.yml \
+#       -e @~/.vault/ipa-identity.yaml --ask-vault-pass --check --diff
+#
+# The roster file (~/.vault/ipa-identity.yaml) MUST also define ipa_admin_password.
+#
+# Stage gating (same convention as freeipa-server-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: FreeIPA identity & authorization apply
+  hosts: "{{ target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    ipa_domain: ipa.pilot.internal
+    ipa_realm: "{{ ipa_domain | upper }}"
+
+    # Data lists default to empty so a partial roster (e.g. only users, no
+    # sudo rules) is valid and each block below simply skips.
+    ipa_users: []
+    ipa_groups: []
+    ipa_hostgroups: []
+    ipa_hbac_rules: []
+    ipa_sudo_rules: []
+
+    # Once your own ipa_hbac_rules cover the access you want, set this true
+    # to disable IPA's shipped "allow_all" rule — otherwise it keeps granting
+    # every user login to every host regardless of the rules above.
+    ipa_hbac_disable_allow_all: false
+
+  pre_tasks:
+    - name: "Gate: admin credential present (fail early, before any mutation)"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+        fail_msg: >-
+          Missing ipa_admin_password. Pass an ansible-vault roster with the
+          admin credential, e.g. -e @~/.vault/ipa-identity.yaml
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+  tasks:
+    # ── Admin authentication ───────────────────────────────────────────
+    - name: "Kinit admin"
+      ansible.builtin.shell:
+        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+      changed_when: false
+      no_log: true
+      tags: [identity]
+
+    # ── Groups ─────────────────────────────────────────────────────────
+    - name: "Ensure IPA groups exist"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - group-add
+          - "{{ item.name }}"
+          - "--desc={{ item.desc | default(item.name) }}"
+      loop: "{{ ipa_groups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_group_add
+      changed_when: "'Added group' in (ipa_group_add.stdout | default(''))"
+      failed_when:
+        - ipa_group_add.rc != 0
+        - "'already exists' not in (ipa_group_add.stderr | default(''))"
+      tags: [identity, groups]
+
+    # ── Users ──────────────────────────────────────────────────────────
+    - name: "Ensure IPA users exist"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - user-add
+          - "{{ item.name }}"
+          - "--first={{ item.first | default(item.name) }}"
+          - "--last={{ item.last | default(item.name) }}"
+      loop: "{{ ipa_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_user_add
+      changed_when: "'Added user' in (ipa_user_add.stdout | default(''))"
+      failed_when:
+        - ipa_user_add.rc != 0
+        - "'already exists' not in (ipa_user_add.stderr | default(''))"
+      tags: [identity, users]
+
+    # Passwords are set unconditionally (no read-back to diff against). Skip a
+    # user by setting force_password: false — e.g. after first login the user
+    # owns their own password and you don't want to reset it every run.
+    - name: "Set initial password for users (force_password not false)"
+      ansible.builtin.shell:
+        cmd: |
+          printf '%s\n%s\n' "{{ item.password }}" "{{ item.password }}" \
+            | ipa passwd {{ item.name }}
+      loop: "{{ ipa_users | selectattr('password', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.force_password | default(true) | bool
+      register: ipa_passwd
+      changed_when: ipa_passwd.rc == 0
+      failed_when: false
+      no_log: true
+      tags: [identity, users, passwords]
+
+    # SSH public keys are declarative: user-mod REPLACES the whole ipaSshPubKey
+    # set with exactly the keys listed, so removing a key from the roster and
+    # rerunning revokes it. Enrolled clients serve these via SSSD's
+    # AuthorizedKeysCommand (sss_ssh_authorizedkeys), configured by
+    # ipa-client-install — no per-host authorized_keys file needed.
+    # Keys go through argv (not shell) so their spaces/base64 never hit a shell.
+    - name: "Set SSH public keys for users (declarative replace)"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'user-mod', item.name]
+             + (item.ssh_keys | map('regex_replace', '^(.*)$', '--sshpubkey=\1') | list) }}
+      loop: "{{ ipa_users | selectattr('ssh_keys', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.ssh_keys | length }} key(s))"
+      register: ipa_sshkey
+      changed_when: "'Modified user' in (ipa_sshkey.stdout | default(''))"
+      failed_when:
+        - ipa_sshkey.rc != 0
+        - "'no modifications to be performed' not in (ipa_sshkey.stderr | default(''))"
+      tags: [identity, users, sshkeys]
+
+    - name: "Ensure user group membership"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - group-add-member
+          - "{{ item.1 }}"
+          - "--users={{ item.0.name }}"
+      loop: "{{ ipa_users | subelements('groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -> {{ item.1 }}"
+      register: ipa_grp_member
+      changed_when: "'Number of members added 1' in (ipa_grp_member.stdout | default(''))"
+      failed_when:
+        - ipa_grp_member.rc != 0
+        - "'already a member' not in (ipa_grp_member.stdout | default('') + ipa_grp_member.stderr | default(''))"
+      tags: [identity, users, groups]
+
+    # ── Host groups ────────────────────────────────────────────────────
+    # Groups of enrolled hosts (e.g. web-hosts, db-hosts) that HBAC rules and
+    # sudo rules below can target instead of naming individual hosts.
+    - name: "Ensure IPA hostgroups exist"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hostgroup-add
+          - "{{ item.name }}"
+          - "--desc={{ item.desc | default(item.name) }}"
+      loop: "{{ ipa_hostgroups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_hostgroup_add
+      changed_when: "'Added hostgroup' in (ipa_hostgroup_add.stdout | default(''))"
+      failed_when:
+        - ipa_hostgroup_add.rc != 0
+        - "'already exists' not in (ipa_hostgroup_add.stderr | default(''))"
+      tags: [identity, hostgroups]
+
+    - name: "Ensure hostgroup membership"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hostgroup-add-member
+          - "{{ item.0.name }}"
+          - "--hosts={{ item.1 }}"
+      loop: "{{ ipa_hostgroups | subelements('hosts', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -> {{ item.1 }}"
+      register: ipa_hostgroup_member
+      changed_when: "'Number of members added 1' in (ipa_hostgroup_member.stdout | default(''))"
+      failed_when:
+        - ipa_hostgroup_member.rc != 0
+        - "'already a member' not in (ipa_hostgroup_member.stdout | default('') + ipa_hostgroup_member.stderr | default(''))"
+      tags: [identity, hostgroups]
+
+    # ── HBAC rules (who may LOG IN, and where) ──────────────────────────
+    # A rule with no hosts/hostgroups defaults to hostcat=all (login allowed
+    # on every host); give it `hosts:`/`hostgroups:` to restrict login to a
+    # subset of hosts. A rule with no services defaults to servicecat=all;
+    # give it `services: [sshd]` to restrict which access method it grants.
+    - name: "Ensure HBAC rules exist"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'hbac-rule-add', item.name]
+             + ([] if (item.hostgroups is defined or item.hosts is defined)
+                else ['--hostcat=' ~ (item.hostcat | default('all'))])
+             + ([] if (item.services is defined)
+                else ['--servicecat=' ~ (item.servicecat | default('all'))]) }}
+      loop: "{{ ipa_hbac_rules }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_hbac_add
+      changed_when: "'Added HBAC rule' in (ipa_hbac_add.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_add.rc != 0
+        - "'already exists' not in (ipa_hbac_add.stderr | default(''))"
+      tags: [identity, hbac]
+
+    - name: "Attach hostgroups to HBAC rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hbac-rule-add-host
+          - "{{ item.0.name }}"
+          - "--hostgroups={{ item.1 }}"
+      loop: "{{ ipa_hbac_rules | subelements('hostgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} hostgroup {{ item.1 }}"
+      register: ipa_hbac_hostgroup
+      changed_when: "'Number of members added 1' in (ipa_hbac_hostgroup.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_hostgroup.rc != 0
+        - "'already a member' not in (ipa_hbac_hostgroup.stdout | default('') + ipa_hbac_hostgroup.stderr | default(''))"
+      tags: [identity, hbac]
+
+    - name: "Attach hosts to HBAC rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hbac-rule-add-host
+          - "{{ item.0.name }}"
+          - "--hosts={{ item.1 }}"
+      loop: "{{ ipa_hbac_rules | subelements('hosts', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} host {{ item.1 }}"
+      register: ipa_hbac_host
+      changed_when: "'Number of members added 1' in (ipa_hbac_host.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_host.rc != 0
+        - "'already a member' not in (ipa_hbac_host.stdout | default('') + ipa_hbac_host.stderr | default(''))"
+      tags: [identity, hbac]
+
+    - name: "Attach services to HBAC rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hbac-rule-add-service
+          - "{{ item.0.name }}"
+          - "--hbacsvcs={{ item.1 }}"
+      loop: "{{ ipa_hbac_rules | subelements('services', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} service {{ item.1 }}"
+      register: ipa_hbac_service
+      changed_when: "'Number of members added 1' in (ipa_hbac_service.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_service.rc != 0
+        - "'already a member' not in (ipa_hbac_service.stdout | default('') + ipa_hbac_service.stderr | default(''))"
+      tags: [identity, hbac]
+
+    - name: "Attach users to HBAC rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hbac-rule-add-user
+          - "{{ item.0.name }}"
+          - "--users={{ item.1 }}"
+      loop: "{{ ipa_hbac_rules | subelements('users', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} user {{ item.1 }}"
+      register: ipa_hbac_user
+      changed_when: "'Number of members added 1' in (ipa_hbac_user.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_user.rc != 0
+        - "'already a member' not in (ipa_hbac_user.stdout | default('') + ipa_hbac_user.stderr | default(''))"
+      tags: [identity, hbac]
+
+    - name: "Attach groups to HBAC rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hbac-rule-add-user
+          - "{{ item.0.name }}"
+          - "--groups={{ item.1 }}"
+      loop: "{{ ipa_hbac_rules | subelements('groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} group {{ item.1 }}"
+      register: ipa_hbac_group
+      changed_when: "'Number of members added 1' in (ipa_hbac_group.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_group.rc != 0
+        - "'already a member' not in (ipa_hbac_group.stdout | default(''))"
+      tags: [identity, hbac]
+
+    - name: "Disable the default allow_all HBAC rule"
+      ansible.builtin.command: ipa hbac-rule-disable allow_all
+      when: ipa_hbac_disable_allow_all | bool
+      register: ipa_hbac_disable
+      changed_when: "'Disabled HBAC rule' in (ipa_hbac_disable.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_disable.rc != 0
+        - "'already disabled' not in (ipa_hbac_disable.stderr | default(''))"
+      tags: [identity, hbac]
+
+    # ── Sudo rules (what a logged-in user may run, and where) ───────────
+    # A rule with no hosts/hostgroups defaults to hostcat=all (applies
+    # everywhere); give it `hosts:`/`hostgroups:` to scope it to a subset.
+    - name: "Ensure sudo rules exist"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'sudorule-add', item.name]
+             + ([] if (item.hostgroups is defined or item.hosts is defined)
+                else ['--hostcat=' ~ (item.hostcat | default('all'))]) }}
+      loop: "{{ ipa_sudo_rules }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_rule_add
+      changed_when: "'Added Sudo Rule' in (ipa_rule_add.stdout | default(''))"
+      failed_when:
+        - ipa_rule_add.rc != 0
+        - "'already exists' not in (ipa_rule_add.stderr | default(''))"
+      tags: [identity, sudo]
+
+    - name: "Attach allowed commands to sudo rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-allow-command
+          - "{{ item.0.name }}"
+          - "--command={{ item.1 }}"
+      loop: "{{ ipa_sudo_rules | subelements('allow_commands', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} allow {{ item.1 }}"
+      register: ipa_allow_cmd
+      changed_when: "'Added Sudo Command' in (ipa_allow_cmd.stdout | default(''))"
+      failed_when:
+        - ipa_allow_cmd.rc != 0
+        - "'already a member' not in (ipa_allow_cmd.stderr | default(''))"
+      tags: [identity, sudo]
+
+    - name: "Attach users to sudo rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-user
+          - "{{ item.0.name }}"
+          - "--users={{ item.1 }}"
+      loop: "{{ ipa_sudo_rules | subelements('users', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} user {{ item.1 }}"
+      register: ipa_rule_user
+      changed_when: "'Number of members added 1' in (ipa_rule_user.stdout | default(''))"
+      failed_when:
+        - ipa_rule_user.rc != 0
+        - "'already a member' not in (ipa_rule_user.stdout | default(''))"
+      tags: [identity, sudo]
+
+    - name: "Attach groups to sudo rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-user
+          - "{{ item.0.name }}"
+          - "--groups={{ item.1 }}"
+      loop: "{{ ipa_sudo_rules | subelements('groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} group {{ item.1 }}"
+      register: ipa_rule_group
+      changed_when: "'Number of members added 1' in (ipa_rule_group.stdout | default(''))"
+      failed_when:
+        - ipa_rule_group.rc != 0
+        - "'already a member' not in (ipa_rule_group.stdout | default(''))"
+      tags: [identity, sudo]
+
+    - name: "Attach hostgroups to sudo rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-host
+          - "{{ item.0.name }}"
+          - "--hostgroups={{ item.1 }}"
+      loop: "{{ ipa_sudo_rules | subelements('hostgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} hostgroup {{ item.1 }}"
+      register: ipa_rule_hostgroup
+      changed_when: "'Number of members added 1' in (ipa_rule_hostgroup.stdout | default(''))"
+      failed_when:
+        - ipa_rule_hostgroup.rc != 0
+        - "'already a member' not in (ipa_rule_hostgroup.stdout | default('') + ipa_rule_hostgroup.stderr | default(''))"
+      tags: [identity, sudo]
+
+    - name: "Attach hosts to sudo rules"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudorule-add-host
+          - "{{ item.0.name }}"
+          - "--hosts={{ item.1 }}"
+      loop: "{{ ipa_sudo_rules | subelements('hosts', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} host {{ item.1 }}"
+      register: ipa_rule_host
+      changed_when: "'Number of members added 1' in (ipa_rule_host.stdout | default(''))"
+      failed_when:
+        - ipa_rule_host.rc != 0
+        - "'already a member' not in (ipa_rule_host.stdout | default('') + ipa_rule_host.stderr | default(''))"
+      tags: [identity, sudo]
+
+    # ── Release ticket ─────────────────────────────────────────────────
+    - name: "Release the Kerberos ticket"
+      ansible.builtin.command: kdestroy
+      changed_when: false
+      failed_when: false
+      tags: [identity]

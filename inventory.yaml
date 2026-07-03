@@ -1,7 +1,0 @@
-all:
-  hosts:
-    test-vm:
-      ansible_host: 192.168.122.232
-      ansible_user: ubuntu
-      ansible_ssh_private_key_file: ~/.ssh/simple-20220321
-      ansible_python_interpreter: /usr/bin/python3

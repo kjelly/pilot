@@ -1,0 +1,126 @@
+# EXAMPLE roster for freeipa-identity-apply.yml — SCHEMA ONLY, no real data.
+#
+# This file is committed so the roster schema is documented. Your REAL roster
+# lives OUTSIDE the repo and is ansible-vault-encrypted, e.g.:
+#
+#   1. Copy this file:
+#        mkdir -p ~/.vault
+#        cp playbooks/apply/freeipa-identity.roster.example.yaml ~/.vault/ipa-identity.yaml
+#   2. Fill in your real users / groups / rules and a real ipa_admin_password.
+#   3. Encrypt it in place:
+#        ansible-vault encrypt ~/.vault/ipa-identity.yaml
+#      (store the vault password in ~/.vault/vault-pass — already gitignored via
+#       *vault-password* / the ~/.vault dir being outside the repo).
+#   4. Apply:
+#        pilot vm-target run --name alma-vm \
+#            playbooks/apply/freeipa-identity-apply.yml \
+#            -e target_group=all \
+#            -e @~/.vault/ipa-identity.yaml \
+#            --vault-password-file ~/.vault/vault-pass
+#
+# To edit later without decrypting to disk:  ansible-vault edit ~/.vault/ipa-identity.yaml
+#
+# NEVER commit the filled-in / encrypted roster. .gitignore already blocks
+# *.vault and inventory*.yaml; keeping the real file under ~/.vault keeps it
+# out of the repo entirely.
+---
+# Admin credential used to kinit before any ipa command. REQUIRED.
+ipa_admin_password: "CHANGE-ME-min-8-chars"
+
+# Realm/domain default to ipa.pilot.internal in the playbook; override here if needed.
+# ipa_domain: ipa.pilot.internal
+
+ipa_groups:
+  - name: developers
+    desc: "Application developers"
+  - name: sysops
+    desc: "Systems operators"
+
+ipa_users:
+  - name: alice
+    first: Alice
+    last: Wang
+    password: "CHANGE-ME-alice-initial"   # initial password; user resets on first login
+    groups: [developers, sysops]
+    # SSH public keys are DECLARATIVE: the list here is the complete set of keys
+    # on the account. Drop a key from this list + rerun to revoke it. Enrolled
+    # clients serve these automatically via SSSD (sss_ssh_authorizedkeys), so the
+    # user can `ssh alice@<enrolled-host>` with no local authorized_keys entry.
+    # Paste the full public-key line (type + base64 + optional comment).
+    ssh_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...EXAMPLE... alice@laptop"
+  - name: bob
+    first: Bob
+    last: Lee
+    password: "CHANGE-ME-bob-initial"
+    groups: [developers]
+  - name: carol
+    first: Carol
+    last: Chen
+    # No password key => account created without a password set here
+    # (e.g. you'll set an OTP/enrollment token out-of-band).
+    groups: [sysops]
+    # Set force_password: false to leave an existing password untouched on rerun.
+    # Key-ONLY account: no password key above, only SSH keys => passwordless,
+    # key-based login exactly as in the FreeIPA SSH key-management workshop.
+    ssh_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...EXAMPLE... carol@workstation"
+
+ipa_sudo_rules:
+  # sysops may restart services on all hosts
+  - name: sysops-systemctl
+    hostcat: all
+    allow_commands:
+      - /usr/bin/systemctl
+    groups: [sysops]
+
+  # a single named user granted a narrow command
+  - name: alice-read-journal
+    hostcat: all
+    allow_commands:
+      - /usr/bin/journalctl
+    users: [alice]
+
+  # HOST-SCOPED: developers may only restart services on webhosts, nowhere
+  # else. Omit hostcat and give hostgroups/hosts instead of `hostcat: all`.
+  - name: developers-restart-web
+    hostgroups: [webhosts]
+    allow_commands:
+      - /usr/bin/systemctl
+    groups: [developers]
+
+# ── Per-host access control ───────────────────────────────────────────────
+# Two things are needed to make "not everyone can touch every host" real:
+#   1. ipa_hostgroups   — name the host sets you want to scope rules to.
+#   2. ipa_hbac_rules   — gate LOGIN itself. Without an explicit HBAC rule,
+#      IPA's shipped "allow_all" rule lets any enrolled user log in to any
+#      enrolled host, no matter how sudo is scoped above. Once your own
+#      rules below cover every login path you need, set
+#      ipa_hbac_disable_allow_all: true (top-level, alongside
+#      ipa_admin_password) to turn that default off.
+
+ipa_hostgroups:
+  - name: webhosts
+    desc: "Front-end / web tier"
+    hosts: [web1.ipa.pilot.internal, web2.ipa.pilot.internal]
+  - name: dbhosts
+    desc: "Database tier"
+    hosts: [db1.ipa.pilot.internal]
+
+ipa_hbac_rules:
+  # developers may SSH into webhosts only
+  - name: developers-login-web
+    hostgroups: [webhosts]
+    services: [sshd]
+    groups: [developers]
+
+  # sysops may SSH into every host (hostcat defaults to 'all' since no
+  # hosts/hostgroups given)
+  - name: sysops-login-all
+    services: [sshd]
+    groups: [sysops]
+
+# Set true only once ipa_hbac_rules above cover all the login paths you
+# actually want — this disables IPA's default "allow everyone everywhere"
+# rule. Leave false while you're still building out rules incrementally.
+# ipa_hbac_disable_allow_all: true

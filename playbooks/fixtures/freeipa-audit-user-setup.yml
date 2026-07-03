@@ -1,0 +1,36 @@
+# Sets up audituser on the FreeIPA client so we can SSH in as that user.
+# Runs as root, sets audituser's local password (chpasswd), then we SSH as audituser.
+---
+- name: Set up audituser on client
+  hosts: "{{ target_group | default('freeipa-client') }}"
+  become: false
+  gather_facts: false
+  vars:
+    audit_demo_user: audituser
+    audit_demo_user_pass: "{{ audit_demo_user_password | default('AuditDemo123') }}"
+    audit_client_ssh_key: /tmp/pilot-vms/freeipa-client/id_ed25519
+
+  tasks:
+    # Generate an SSH key for audituser so we can SSH without password
+    - name: "Setup — generate SSH key for {{ audit_demo_user }}"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          mkdir -p /home/{{ audit_demo_user }}/.ssh
+          ssh-keygen -t ed25519 -f /home/{{ audit_demo_user }}/.ssh/id_ed25519 -N ""
+          cp /home/{{ audit_demo_user }}/.ssh/id_ed25519.pub /home/{{ audit_demo_user }}/.ssh/authorized_keys
+          chown -R {{ audit_demo_user }}:{{ audit_demo_user }} /home/{{ audit_demo_user }}/.ssh
+          chmod 700 /home/{{ audit_demo_user }}/.ssh
+          chmod 600 /home/{{ audit_demo_user }}/.ssh/authorized_keys
+          chmod 600 /home/{{ audit_demo_user }}/.ssh/id_ed25519
+      register: ssh_key_gen
+      changed_when: true
+      tags: [setup]
+
+    - name: "Setup — copy SSH key to local runner"
+      ansible.builtin.fetch:
+        src: "/home/{{ audit_demo_user }}/.ssh/id_ed25519"
+        dest: "/tmp/pilot-vms/audituser-ed25519"
+        flat: true
+      changed_when: true
+      tags: [setup]

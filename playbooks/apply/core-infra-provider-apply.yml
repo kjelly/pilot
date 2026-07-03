@@ -28,6 +28,13 @@
 #       -e dns_listen_addr=10.0.0.53 \
 #       --check --diff
 #
+#   # Serving custom internal zones: keep `dns_zones` in group_vars adjacent
+#   # to an out-of-git inventory (auto-loaded, zero -e), so the (public) repo
+#   # never carries your hostnames. See docs/runbooks/core-infra-provider-dns-zones.md
+#   ansible-playbook -i ~/.infra/pilot/inventory-core-infra.yaml \
+#       playbooks/apply/core-infra-provider-apply.yml \
+#       -e infra_role=dns -e dns_listen_addr=10.0.0.53 --check --diff
+#
 #   ansible-playbook -i inventory.yaml \
 #       playbooks/apply/core-infra-provider-apply.yml \
 #       -e infra_role=ntp \
@@ -51,6 +58,21 @@
     ntp_provider: chrony
     backup_suffix: .pre-core-infra.bak
     target_group: "{{ infra_role }}"
+
+    # Custom internal DNS zones. DATA-DRIVEN: this playbook carries NO zone
+    # data of its own — supply `dns_zones` from group_vars adjacent to your
+    # (out-of-git) inventory, or with -e @<file>. Empty by default so a
+    # forward-only resolver is still valid. Schema + examples:
+    #   group_vars/dns/zones.example.yaml
+    # Each entry is either an authoritative local zone:
+    #   - name: pilot.lan
+    #     mode: static            # static (default) | transparent | redirect
+    #     records:
+    #       - { name: core, type: A, value: 10.0.0.53 }
+    # or a delegation to an upstream authoritative server (scale path):
+    #   - name: corp.internal
+    #     stub_addr: 10.0.1.2
+    dns_zones: []
 
   pre_tasks:
     - name: "Gate: infra_role must be docker, dns, or ntp"
@@ -158,10 +180,22 @@
               access-control: 10.0.0.0/8 allow
               access-control: 192.168.0.0/16 allow
               do-not-query-localhost: no
+          {% for z in dns_zones | default([]) if z.stub_addr is not defined %}
+              local-zone: "{{ z.name }}." {{ z.mode | default('static') }}
+          {% for r in z.records | default([]) %}
+              local-data: "{{ r.name }}.{{ z.name }}. IN {{ r.type | default('A') }} {{ r.value }}"
+          {% endfor %}
+          {% endfor %}
 
           forward-zone:
               name: "."
               forward-addr: {{ dns_upstream | default('1.1.1.1') }}
+          {% for z in dns_zones | default([]) if z.stub_addr is defined %}
+
+          stub-zone:
+              name: "{{ z.name }}."
+              stub-addr: {{ z.stub_addr }}
+          {% endfor %}
       when:
         - infra_role == 'dns'
         - not ansible_check_mode

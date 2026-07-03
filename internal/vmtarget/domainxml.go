@@ -38,8 +38,13 @@ func renderDomainXML(t *Target) string {
 	sb.WriteString("  <devices>\n")
 	sb.WriteString("    <emulator>/usr/bin/qemu-system-x86_64</emulator>\n")
 	// Root disk: per-target qcow2 overlay (backed by the immutable base).
+	//
+	// cache='unsafe': ignore all guest flush/sync requests for maximum I/O
+	// throughput. These are ephemeral, disposable test VMs — a host crash may
+	// corrupt the overlay, but that overlay is thrown away and rebuilt on the
+	// next `vm-target up`, so the durability trade is worth the speed.
 	sb.WriteString("    <disk type='file' device='disk'>\n")
-	sb.WriteString("      <driver name='qemu' type='qcow2'/>\n")
+	sb.WriteString("      <driver name='qemu' type='qcow2' cache='unsafe'/>\n")
 	fmt.Fprintf(&sb, "      <source file='%s'/>\n", t.OverlayPath)
 	sb.WriteString("      <target dev='vda' bus='virtio'/>\n")
 	sb.WriteString("    </disk>\n")
@@ -54,7 +59,7 @@ func renderDomainXML(t *Target) string {
 	// sees the cidata label. (Confirmed empirically; do not "simplify"
 	// back to a cdrom.)
 	sb.WriteString("    <disk type='file' device='disk'>\n")
-	sb.WriteString("      <driver name='qemu' type='raw'/>\n")
+	sb.WriteString("      <driver name='qemu' type='raw' cache='unsafe'/>\n")
 	fmt.Fprintf(&sb, "      <source file='%s'/>\n", t.SeedPath)
 	sb.WriteString("      <target dev='vdb' bus='virtio'/>\n")
 	sb.WriteString("      <readonly/>\n")
