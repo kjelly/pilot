@@ -1,0 +1,190 @@
+---
+# Apply playbook for docs/verification/seaweedfs-s3.md
+#
+# Single-role playbook: runs SeaweedFS in "server" mode
+# (`weed server -s3`), which starts a master, a volume server, a
+# filer, and the S3 gateway all in one process/container — mirrors
+# the single-container simplicity of playbooks/apply/keycloak-apply.yml.
+#
+# Pre-flight checklist (run BEFORE this playbook):
+#   1. docs/verification/docker.md → 8/8 PASS (docker.io + docker.service)
+#
+# Usage (sandbox):
+#
+#   go run ./cmd/pilot vm-target run --name <vm> \
+#       playbooks/apply/seaweedfs-s3-apply.yml \
+#       -e target_group=seaweedfs-s3
+#
+# Stage gating:
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND -e staging_attested_within_hours<=168
+- name: SeaweedFS S3 gateway apply
+  hosts: "{{ target_group | default('seaweedfs-s3') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    seaweedfs_version: "4.37"
+    seaweedfs_host_data_dir: /var/lib/pilot/seaweedfs
+    seaweedfs_check_file: /etc/pilot/seaweedfs-s3-check.txt
+    seaweedfs_check_content: "pilot-s3-smoke-check"
+    seaweedfs_test_bucket: pilot-s3-smoke
+    # Optional path (on the target host) to a SeaweedFS S3 identity
+    # config (s3.json) for production use. Left unset by default:
+    # with no -s3.config, the S3 API allows anonymous access to any
+    # bucket (SeaweedFS's documented default), which is what lets
+    # spec rows C6/C7 probe the API without a secret in the spec
+    # (see docs/verification/seaweedfs-s3.md §5).
+    seaweedfs_s3_config_path: ""
+    target_group: seaweedfs-s3
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - stage != 'prod'
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+
+    - name: "Gate: prod must not run with anonymous S3 access"
+      ansible.builtin.assert:
+        that:
+          - seaweedfs_s3_config_path | length > 0
+        fail_msg: "stage=prod requires -e seaweedfs_s3_config_path=<path to s3.json> — anonymous S3 access (the sandbox default) is not safe for prod."
+      when: stage == 'prod'
+
+  tasks:
+    # Spec: docs/verification/seaweedfs-s3.md C1 (process visible)
+    # owner/group 1000:1000 matches the `seaweed` user the official
+    # image's entrypoint drops privileges to before starting `weed`
+    # (confirmed via `docker exec pilot-seaweedfs id` / `/etc/passwd`).
+    # Using owner=0 here fights the container, which chowns the bind
+    # mount back to 1000:1000 on every start — that ping-pong broke
+    # idempotency (changed=1 forever) until this was pinned to match.
+    - name: "SeaweedFS — ensure host data dir (idempotent)"
+      tags: [seaweedfs-s3, s3-C1]
+      ansible.builtin.file:
+        path: "{{ seaweedfs_host_data_dir }}"
+        state: directory
+        owner: 1000
+        group: 1000
+        mode: '0755'
+
+    # Spec: docs/verification/seaweedfs-s3.md C6 (S3 PUT)
+    # Fixed-content file the C6/C7 smoke-test rows read from / compare
+    # against. Lives on the host (not inside the container) because
+    # C6's `curl -X PUT` runs against the published port from the host
+    # shell, same as the healthz curls in C2-C5.
+    - name: "SeaweedFS — ensure /etc/pilot exists (for spec C6 check file)"
+      tags: [seaweedfs-s3, s3-C6]
+      ansible.builtin.file:
+        path: "{{ seaweedfs_check_file | dirname }}"
+        state: directory
+        owner: 0
+        group: 0
+        mode: '0755'
+
+    - name: "SeaweedFS — write S3 smoke-test source file (for spec C6)"
+      tags: [seaweedfs-s3, s3-C6]
+      ansible.builtin.copy:
+        dest: "{{ seaweedfs_check_file }}"
+        content: "{{ seaweedfs_check_content }}"
+        owner: 0
+        group: 0
+        mode: '0644'
+
+    - name: "SeaweedFS — pull chrislusf/seaweedfs:{{ seaweedfs_version }} image"
+      tags: [seaweedfs-s3]
+      community.docker.docker_image:
+        name: "chrislusf/seaweedfs:{{ seaweedfs_version }}"
+        source: pull
+
+    # Spec: docs/verification/seaweedfs-s3.md C1-C5
+    # `weed server -s3` starts master (9333) + volume (8080) +
+    # filer (8888, auto-enabled because -s3 implies -filer) + the S3
+    # gateway (8333) in a single process. -ip.bind=0.0.0.0 makes each
+    # sub-service listen on all interfaces inside the container so the
+    # published ports are reachable from the host.
+    - name: "SeaweedFS — run pilot-seaweedfs container (server -s3 mode)"
+      tags: [seaweedfs-s3, s3-C1, s3-C2, s3-C3, s3-C4, s3-C5]
+      community.docker.docker_container:
+        name: pilot-seaweedfs
+        image: "chrislusf/seaweedfs:{{ seaweedfs_version }}"
+        state: started
+        restart_policy: unless-stopped
+        hostname: seaweedfs
+        command: >-
+          server -dir=/data -s3
+          -ip.bind=0.0.0.0
+          {{ '-s3.config=/etc/seaweedfs/s3.json' if seaweedfs_s3_config_path else '' }}
+        volumes: >-
+          {{
+            ["{}:/data".format(seaweedfs_host_data_dir)]
+            + ([ "{}:/etc/seaweedfs/s3.json:ro".format(seaweedfs_s3_config_path) ] if seaweedfs_s3_config_path else [])
+          }}
+        ports:
+          - "9333:9333"   # master HTTP
+          - "8080:8080"   # volume HTTP
+          - "8888:8888"   # filer HTTP
+          - "8333:8333"   # S3 API
+        healthcheck:
+          test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8333/healthz || exit 1"]
+          interval: 10s
+          timeout: 5s
+          retries: 12
+          start_period: 20s
+
+    # Spec: docs/verification/seaweedfs-s3.md C5
+    # Poll the S3 gateway from inside the container's network namespace
+    # until it accepts connections. Master/volume/filer come up first
+    # (S3 gateway depends on the filer being registered), so this is
+    # the natural "everything is ready" signal.
+    - name: "SeaweedFS — wait for S3 gateway 8333 (poll from container network namespace)"
+      tags: [seaweedfs-s3, s3-C5]
+      community.docker.docker_container_exec:
+        container: pilot-seaweedfs
+        # busybox/scratch-based image: no bash, so no /dev/tcp. curl is
+        # bundled in the image and is what the S3 gateway itself uses
+        # internally, so this doubles as an image-capability check.
+        command: sh -c "curl -fsS -o /dev/null http://127.0.0.1:8333/healthz && echo OK"
+      register: seaweedfs_s3_health
+      until: "'OK' in seaweedfs_s3_health.stdout"
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    # Spec: docs/verification/seaweedfs-s3.md C6/C7
+    # `s3.bucket.create` (weed shell) always reports "created bucket"
+    # and rc=0 even when the bucket already exists (filer-side mkdir
+    # semantics, not create-exclusive) — using its own output for
+    # changed_when made every run report changed=1. List first and
+    # only create when actually missing, same idempotent shape as
+    # `playbooks/fixtures/*-fixtures.yml`.
+    - name: "SeaweedFS — check S3 smoke-test bucket exists"
+      tags: [seaweedfs-s3, s3-C6, s3-C7]
+      community.docker.docker_container_exec:
+        container: pilot-seaweedfs
+        command: sh -c "echo 's3.bucket.list' | weed shell"
+      register: seaweedfs_bucket_list
+      changed_when: false
+
+    - name: "SeaweedFS — create S3 smoke-test bucket (idempotent)"
+      tags: [seaweedfs-s3, s3-C6, s3-C7]
+      community.docker.docker_container_exec:
+        container: pilot-seaweedfs
+        command: "sh -c \"echo 's3.bucket.create -name {{ seaweedfs_test_bucket }}' | weed shell\""
+      when: seaweedfs_test_bucket not in seaweedfs_bucket_list.stdout
+      changed_when: true

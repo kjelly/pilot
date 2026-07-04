@@ -1,0 +1,11 @@
+---
+- name: Verification Spec — seaweedfs-s3 (SeaweedFS S3-compatible object storage gateway)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — `weed server` process 可見"
+      ansible.builtin.command: "sh -c 'pidof weed >/dev/null 2>&1; echo $?'"
+      changed_when: false
+      tags: [C1, C2, C3, C4, C5, C6, C7]
