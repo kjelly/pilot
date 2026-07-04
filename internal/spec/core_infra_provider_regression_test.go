@@ -12,11 +12,15 @@ import (
 //
 //	C1-C3   DNS server installed + listening + authoritive
 //	C4-C6   NTP server installed + active + valid stratum
+//	C7      DNS server can resolve a custom internal domain (v2.1,
+//	        optional — gated on $DNS_PROBE_NAME, SKIP-as-pass if unset)
 //
 // (Keycloak C7-C9 was here in v1.0, but has been split out into
 // docs/verification/keycloak.md as of v2.0. Don't re-add them here —
 // if you need a Keycloak regression invariant, write it in
-// internal/spec/keycloak_regression_test.go.)
+// internal/spec/keycloak_regression_test.go. v2.1's C7 is unrelated
+// to that split — it's the data-driven DNS zones feature's own probe
+// row, reusing the ID that Keycloak vacated.)
 //
 // Why this matters: a provider-side regression (e.g. someone
 // silently drops C6 because "Stratum is a NTS detail") lets a
@@ -30,11 +34,11 @@ func TestRegression_CoreInfraProviderSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	// C1..C6 inclusive, no gaps, no duplicates. (Was C1..C9 in v1.0
-	// before Keycloak split out.)
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6"}
-	if len(s.Rows) != 6 {
-		t.Fatalf("rows=%d want=6", len(s.Rows))
+	// C1..C7 inclusive, no gaps, no duplicates. (Was C1..C6 in v2.0;
+	// v2.1 added the optional DNS-probe C7.)
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7"}
+	if len(s.Rows) != 7 {
+		t.Fatalf("rows=%d want=7", len(s.Rows))
 	}
 	for i, id := range wantIDs {
 		if s.Rows[i].ID != id {
@@ -68,12 +72,30 @@ func TestRegression_CoreInfraProviderSpec(t *testing.T) {
 		}
 	}
 
-	// Regression: Keycloak's C7-C9 must NOT have crept back into
-	// this spec (the whole point of the v2.0 split). If you find
-	// yourself adding C7 here, move it to keycloak.md instead.
+	// Regression: Keycloak's C8-C9 must NOT have crept back into this
+	// spec (the whole point of the v2.0 split). Keycloak used to sit
+	// at C7-C9; v2.1 reused C7 for the unrelated DNS-probe row above,
+	// so only C8/C9 are guarded here — if you find yourself adding
+	// either, move it to keycloak.md instead.
 	for _, r := range s.Rows {
-		if r.ID == "C7" || r.ID == "C8" || r.ID == "C9" {
+		if r.ID == "C8" || r.ID == "C9" {
 			t.Errorf("row %s must not exist in core-infra-provider.md (Keycloak split out to keycloak.md in v2.0); got %q", r.ID, r.Command)
+		}
+	}
+
+	// C7 (v2.1 DNS-probe row) must be env-gated on $DNS_PROBE_NAME
+	// with a SKIP-as-pass fallback when unset — a plain forwarding
+	// resolver (no custom zones configured) must not go red just
+	// because this optional row exists.
+	for _, r := range s.Rows {
+		if r.ID != "C7" {
+			continue
+		}
+		if !strings.Contains(r.Command, "DNS_PROBE_NAME") {
+			t.Errorf("C7 must reference $DNS_PROBE_NAME; got %q", r.Command)
+		}
+		if !strings.Contains(r.Command, "SKIP-no-probe") {
+			t.Errorf("C7 must SKIP-as-pass when $DNS_PROBE_NAME is unset; got %q", r.Command)
 		}
 	}
 
