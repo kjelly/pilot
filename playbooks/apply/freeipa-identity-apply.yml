@@ -251,7 +251,7 @@
     - name: "Ensure HBAC rules exist"
       ansible.builtin.command:
         argv: >-
-          {{ ['ipa', 'hbac-rule-add', item.name]
+          {{ ['ipa', 'hbacrule-add', item.name]
              + ([] if (item.hostgroups is defined or item.hosts is defined)
                 else ['--hostcat=' ~ (item.hostcat | default('all'))])
              + ([] if (item.services is defined)
@@ -270,7 +270,7 @@
       ansible.builtin.command:
         argv:
           - ipa
-          - hbac-rule-add-host
+          - hbacrule-add-host
           - "{{ item.0.name }}"
           - "--hostgroups={{ item.1 }}"
       loop: "{{ ipa_hbac_rules | subelements('hostgroups', skip_missing=True) }}"
@@ -287,7 +287,7 @@
       ansible.builtin.command:
         argv:
           - ipa
-          - hbac-rule-add-host
+          - hbacrule-add-host
           - "{{ item.0.name }}"
           - "--hosts={{ item.1 }}"
       loop: "{{ ipa_hbac_rules | subelements('hosts', skip_missing=True) }}"
@@ -304,7 +304,7 @@
       ansible.builtin.command:
         argv:
           - ipa
-          - hbac-rule-add-service
+          - hbacrule-add-service
           - "{{ item.0.name }}"
           - "--hbacsvcs={{ item.1 }}"
       loop: "{{ ipa_hbac_rules | subelements('services', skip_missing=True) }}"
@@ -321,7 +321,7 @@
       ansible.builtin.command:
         argv:
           - ipa
-          - hbac-rule-add-user
+          - hbacrule-add-user
           - "{{ item.0.name }}"
           - "--users={{ item.1 }}"
       loop: "{{ ipa_hbac_rules | subelements('users', skip_missing=True) }}"
@@ -338,7 +338,7 @@
       ansible.builtin.command:
         argv:
           - ipa
-          - hbac-rule-add-user
+          - hbacrule-add-user
           - "{{ item.0.name }}"
           - "--groups={{ item.1 }}"
       loop: "{{ ipa_hbac_rules | subelements('groups', skip_missing=True) }}"
@@ -352,7 +352,7 @@
       tags: [identity, hbac]
 
     - name: "Disable the default allow_all HBAC rule"
-      ansible.builtin.command: ipa hbac-rule-disable allow_all
+      ansible.builtin.command: ipa hbacrule-disable allow_all
       when: ipa_hbac_disable_allow_all | bool
       register: ipa_hbac_disable
       changed_when: "'Disabled HBAC rule' in (ipa_hbac_disable.stdout | default(''))"
@@ -380,21 +380,47 @@
         - "'already exists' not in (ipa_rule_add.stderr | default(''))"
       tags: [identity, sudo]
 
+    # sudorule-add-allow-command requires the command to already exist as a
+    # sudoCommand LDAP object — without this, a rule that *looks* correct
+    # (sudorule-show lists the command) still denies at runtime because
+    # SSSD's sudo provider finds no matching sudoCommand object. Idempotent:
+    # already-exists is not an error. (See freeipa-audit-demo-gotchas.)
+    - name: "Ensure sudo command objects exist"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - sudocmd-add
+          - "{{ item }}"
+      loop: "{{ ipa_sudo_rules | selectattr('allow_commands', 'defined') | map(attribute='allow_commands') | list | flatten | unique }}"
+      loop_control:
+        label: "{{ item }}"
+      register: ipa_sudocmd_add
+      changed_when: "'Added Sudo Command' in (ipa_sudocmd_add.stdout | default(''))"
+      failed_when:
+        - ipa_sudocmd_add.rc != 0
+        - "'already exists' not in (ipa_sudocmd_add.stderr | default(''))"
+      tags: [identity, sudo]
+
     - name: "Attach allowed commands to sudo rules"
       ansible.builtin.command:
         argv:
           - ipa
           - sudorule-add-allow-command
           - "{{ item.0.name }}"
-          - "--command={{ item.1 }}"
+          - "--sudocmds={{ item.1 }}"
       loop: "{{ ipa_sudo_rules | subelements('allow_commands', skip_missing=True) }}"
       loop_control:
         label: "{{ item.0.name }} allow {{ item.1 }}"
       register: ipa_allow_cmd
-      changed_when: "'Added Sudo Command' in (ipa_allow_cmd.stdout | default(''))"
+      changed_when: "'Number of members added 1' in (ipa_allow_cmd.stdout | default(''))"
+      # sudorule-add-allow-command's no-op case is unlike the other
+      # "-add-member"-style attach tasks in this file: it returns rc=1 with
+      # "Number of members added 0" rather than rc=0 + "already a member"
+      # (confirmed 2026-07-03; matches the same quirk in freeipa-audit-demo.yml).
       failed_when:
         - ipa_allow_cmd.rc != 0
-        - "'already a member' not in (ipa_allow_cmd.stderr | default(''))"
+        - "'already a member' not in (ipa_allow_cmd.stdout | default('') + ipa_allow_cmd.stderr | default(''))"
+        - "'Number of members added 0' not in (ipa_allow_cmd.stdout | default(''))"
       tags: [identity, sudo]
 
     - name: "Attach users to sudo rules"
