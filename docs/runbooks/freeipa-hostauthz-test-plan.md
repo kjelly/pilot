@@ -174,6 +174,19 @@ changed，正常）。重點看兩個 assert：
 > `freeipa-client-2` 這兩行**必須帶 `-e target_group=all`**——playbook 的
 > `hosts:` 預設群組名是 `freeipa-client`，不會自動比對到 `freeipa-client-2`。
 
+> 這支 playbook 開頭現在會 import `freeipa-client-fixtures.yml`（標準的
+> IPA 使用者建立入口，`ipa_fixture_manage_sudorule=false` 只建 user）。對
+> client VM 跑時該 play 因 inventory 沒有 `freeipa-server` 群組而自動 skip，
+> 上面四行的行為不變。若 identity-apply 還沒跑（帳號尚不存在），可先對
+> server 補一次：
+>
+> ```bash
+> ./pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-hostauthz-user-setup.yml \
+>     -e fixtures_target_group=all -e hostauthz_user=hz_web -e @~/.vault/freeipa-sandbox.yaml
+> ```
+>
+> （只建裸帳號；群組/HBAC/sudo 的掛載仍由 roster 驅動的 identity-apply 負責。）
+
 **預期結果**：每次 `ok=2 changed=2 failed=0`。
 
 ### 5.2 讓 SSSD 拿到剛設好的 `!authenticate` sudo 選項（快取問題）

@@ -1,6 +1,35 @@
-# Sets up audituser on the FreeIPA client so we can SSH in as that user.
-# Runs as root, sets audituser's local password (chpasswd), then we SSH as audituser.
+# Sets up audituser for the audit demo, in two plays:
+#
+#   Play 1 (imported): ensure the IPA user exists on the SERVER via the
+#     canonical playbooks/fixtures/freeipa-client-fixtures.yml. Sudo-rule
+#     management is disabled — the demo's restrictive audit-demo-ls-only rule
+#     comes from freeipa-audit-demo.yml, and attaching audituser to the
+#     default pilot-all (cmdcat=all, !authenticate) rule would let
+#     `sudo ps aux` succeed, breaking the demo's expected denial.
+#   Play 2: on the CLIENT, generate audituser's SSH key and write it to
+#     authorized_keys so the sim can SSH in as that user (runs as root).
+#
+# vm-target inventories contain ONE VM, so the two plays land in separate
+# invocations — a play whose host group is absent from the inventory is
+# skipped automatically:
+#
+#   # server side (ensure the IPA user; needs the vault; idempotent with
+#   # freeipa-audit-demo.yml, which imports the same fixtures play):
+#   pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-audit-user-setup.yml \
+#       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
+#   # client side (SSH key only — the IPA user must already exist, or the
+#   # chown below fails because SSSD cannot resolve the owner):
+#   pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-audit-user-setup.yml \
+#       -e target_group=all
 ---
+- name: Ensure the audit demo IPA user exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: "{{ audit_demo_user | default('audituser') }}"
+    ipa_fixture_user_first: Audit
+    ipa_fixture_user_last: Demo
+    ipa_fixture_manage_sudorule: false
+
 - name: Set up audituser on client
   hosts: "{{ target_group | default('freeipa-client') }}"
   become: false

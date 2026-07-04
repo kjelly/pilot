@@ -15,6 +15,23 @@
 # playbooks/fixtures/<spec>-fixtures.yml and are applied BEFORE the client
 # apply+verify. See AGENTS.md §4.1.
 #
+# This playbook is ALSO the canonical entry point for creating IPA users in
+# ANY FreeIPA demo/test fixture — do not hand-roll `ipa user-add` elsewhere.
+# Other fixtures import it as their first play and parameterize it:
+#
+#   - name: Ensure the demo IPA user exists
+#     ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+#     vars:
+#       ipa_fixture_user: audituser
+#       ipa_fixture_user_first: Audit
+#       ipa_fixture_user_last: Demo
+#       ipa_fixture_manage_sudorule: false   # user only — demo brings its own rule
+#
+# ipa_fixture_manage_sudorule=false skips every sudo-rule task below (the
+# default pilot-all rule is hostcat=all cmdcat=all !authenticate — attaching a
+# demo user to it would let that user sudo ANYTHING and break demos that
+# assert on sudo denials).
+#
 # Secrets: ipa_admin_password comes from a vault file, NEVER hard-coded (the
 # kinit task is no_log):
 #   -e @~/.vault/freeipa-sandbox.yaml
@@ -34,6 +51,9 @@
     ipa_fixture_user_first: Pilot
     ipa_fixture_user_last: User
     ipa_fixture_sudorule: pilot-all
+    # false = create/ensure the user only; skip all sudo-rule tasks. Used by
+    # importing fixtures that manage their own (more restrictive) rules.
+    ipa_fixture_manage_sudorule: true
 
   pre_tasks:
     - name: "Gate: admin password present (fail before touching the directory)"
@@ -84,6 +104,7 @@
       failed_when:
         - ipa_rule_add.rc != 0
         - "'already exists' not in (ipa_rule_add.stderr | default(''))"
+      when: ipa_fixture_manage_sudorule | bool
       tags: [fixtures]
 
     # sudorule-add-user exits NON-ZERO (rc=1) when the user is already a
@@ -102,6 +123,7 @@
       failed_when:
         - ipa_rule_user.rc != 0
         - "'already a member' not in (ipa_rule_user.stdout | default(''))"
+      when: ipa_fixture_manage_sudorule | bool
       tags: [fixtures]
 
     # `pilot-all` (cmdcategory=all) still requires a password by default.
@@ -120,6 +142,7 @@
       failed_when:
         - ipa_rule_opt.rc != 0
         - "'already exists' not in (ipa_rule_opt.stderr | default(''))"
+      when: ipa_fixture_manage_sudorule | bool
       tags: [fixtures]
 
     - name: "Fixtures — release the Kerberos ticket"

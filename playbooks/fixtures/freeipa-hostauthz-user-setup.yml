@@ -1,15 +1,40 @@
 # Sets up a test IPA user for passwordless SSH loopback login on ONE client
-# host, mirroring freeipa-audit-user-setup.yml. Parameterized by
-# hostauthz_user so it can be run for BOTH hz_web and hz_db on BOTH clients —
-# including the "wrong" host for each user, which is what lets the sim
-# playbook attempt (and expect to fail) a cross-host login.
+# host, mirroring freeipa-audit-user-setup.yml, in two plays:
 #
-# Usage (run once per user x host combination):
+#   Play 1 (imported): ensure the IPA user exists on the SERVER via the
+#     canonical playbooks/fixtures/freeipa-client-fixtures.yml. Sudo-rule
+#     management is disabled — hz_* sudo/HBAC scoping comes from the
+#     freeipa-identity-apply.yml roster (which also reconciles group
+#     membership onto an already-existing bare user), and attaching a test
+#     user to the default pilot-all (hostcat=all, cmdcat=all) rule would
+#     defeat the host-scoping this test exists to prove.
+#   Play 2: on the CLIENT, generate the user's SSH key and write it to
+#     authorized_keys. Parameterized by hostauthz_user so it can be run for
+#     BOTH hz_web and hz_db on BOTH clients — including the "wrong" host for
+#     each user, which is what lets the sim playbook attempt (and expect to
+#     fail) a cross-host login.
+#
+# vm-target inventories contain ONE VM, so the plays land in separate
+# invocations — a play whose host group is absent is skipped automatically.
+#
+# Server side (optional if freeipa-identity-apply.yml already ran; needs vault):
+#   pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-hostauthz-user-setup.yml \
+#       -e fixtures_target_group=all -e hostauthz_user=hz_web -e @~/.vault/freeipa-sandbox.yaml
+#
+# Client side (run once per user x host combination):
 #   pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-hostauthz-user-setup.yml \
 #       -e hostauthz_user=hz_web
 #   pilot vm-target run --name freeipa-client-2 playbooks/fixtures/freeipa-hostauthz-user-setup.yml \
-#       -e hostauthz_user=hz_web   # deliberately the "wrong" host too
+#       -e target_group=all -e hostauthz_user=hz_web   # deliberately the "wrong" host too
 ---
+- name: Ensure the host-authz test IPA user exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: "{{ hostauthz_user | default('hz_web') }}"
+    ipa_fixture_user_first: "{{ hostauthz_user | default('hz_web') }}"
+    ipa_fixture_user_last: Test
+    ipa_fixture_manage_sudorule: false
+
 - name: Set up a test user's SSH key on a client
   hosts: "{{ target_group | default('freeipa-client') }}"
   become: false

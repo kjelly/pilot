@@ -53,8 +53,8 @@ client 是 Ubuntu 24.04 並已 `ipa-client-install` enroll（`klist -k` 有
 
 | 檔案 | 執行對象 | 作用 |
 |---|---|---|
-| `freeipa-audit-demo.yml` | freeipa-server | 建立 IPA user `audituser`；建立 sudo rule `audit-demo-ls-only`（只允許 `/usr/bin/ls`，明確拒絕 `/usr/bin/ps`）；加 `--sudooption='!authenticate'` 讓規則免密碼、可用 `sudo -n` 驗證；設定穩定密碼 |
-| `freeipa-audit-user-setup.yml` | freeipa-client | 幫 `audituser` 產生本機 SSH 金鑰並寫入自己的 `authorized_keys`，讓後續能對 client **真的 SSH 登入**這個帳號（不是 `runuser` 模擬） |
+| `freeipa-audit-demo.yml` | freeipa-server | 建立 IPA user `audituser`（透過 import 標準的 `freeipa-client-fixtures.yml`，`ipa_fixture_manage_sudorule=false` 只建 user）；建立 sudo rule `audit-demo-ls-only`（只允許 `/usr/bin/ls`，明確拒絕 `/usr/bin/ps`）；加 `--sudooption='!authenticate'` 讓規則免密碼、可用 `sudo -n` 驗證；設定穩定密碼 |
+| `freeipa-audit-user-setup.yml` | freeipa-server + freeipa-client | 兩個 play：先 import `freeipa-client-fixtures.yml` 確保 `audituser` 存在（server 側、需 vault），再幫 `audituser` 產生本機 SSH 金鑰並寫入自己的 `authorized_keys`（client 側），讓後續能對 client **真的 SSH 登入**這個帳號（不是 `runuser` 模擬）。vm-target inventory 一次只有一台 VM，比對不到群組的 play 自動 skip，所以照舊各跑各的 |
 | `freeipa-audit-sim.yml` | freeipa-client | 完整模擬：`kinit`（Kerberos 登入驗證）→ SSH 登入 `audituser@localhost`（真登入）→ 分別跑 `sudo -n ls /` 與 `sudo -n ps aux` 並斷言各自的 rc |
 
 > **重要修正（本次跑出來才發現的真 bug，非猜測）**：
@@ -82,6 +82,12 @@ client 是 Ubuntu 24.04 並已 `ipa-client-install` enroll（`klist -k` 有
 ---
 
 ## 3. 實際套用（真跑出來的輸出）
+
+> 註：下面的 PLAY RECAP 是重構前留檔。`freeipa-audit-demo.yml` 與
+> `freeipa-audit-user-setup.yml` 改成 import `freeipa-client-fixtures.yml`
+> 建 user 之後，recap 會多出 imported play 的 task 數與 `skipped=3`
+> （被 `ipa_fixture_manage_sudorule=false` 關掉的 pilot-all 規則任務）,
+> 判讀標準不變：`failed=0`、重跑冪等（僅 kadmin.local 設密碼固定回報 changed）。
 
 ### 3.1 Server fixtures（idempotent 重跑，第二次驗證用）
 

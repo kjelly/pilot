@@ -217,6 +217,28 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 範本：`playbooks/fixtures/freeipa-client-fixtures.yml`（kinit 走 vault、`ipa user-add` /
 `sudorule-add` 用「rc≠0 且 stderr 沒有 already exists 才算失敗」做冪等）。
 
+**FreeIPA 的 demo / 測試建立使用者只准走這一支**——其他 fixtures 不准自己手刻
+`ipa user-add`，一律在檔案開頭用 `import_playbook` 引入並參數化：
+
+```yaml
+- name: Ensure the demo IPA user exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: "{{ audit_demo_user | default('audituser') }}"
+    ipa_fixture_user_first: Audit
+    ipa_fixture_user_last: Demo
+    ipa_fixture_manage_sudorule: false   # 只建 user；demo 自帶（更嚴格的）sudo 規則
+```
+
+- `ipa_fixture_manage_sudorule: false` 很重要：預設的 `pilot-all` 規則是
+  hostcat=all + cmdcat=all + `!authenticate`，把 demo 帳號掛上去會讓「預期 sudo
+  被拒」的斷言直接破功。
+- vm-target 的 inventory 一次只有一台 VM：import 進來的 play 目標是
+  `freeipa-server` 群組，對 client VM 跑時該 play 會因比對不到 host 自動 skip
+  （反之亦然），所以同一支 wrapper 對 server、client 各跑一次即可，不用拆檔。
+  現成範例：`freeipa-audit-user-setup.yml`、`freeipa-hostauthz-user-setup.yml`、
+  `freeipa-audit-demo.yml`。
+
 ---
 
 ## 5. 寫 / 改 Go code 時

@@ -1,7 +1,9 @@
 # Fixtures playbook: FreeIPA audit demonstration
 #
 # Creates:
-#   1. IPA user 'audituser' with password 'AuditDemo123'
+#   1. IPA user 'audituser' with password 'AuditDemo123' — the user itself is
+#      created by importing the canonical freeipa-client-fixtures.yml (user
+#      only, no pilot-all sudo rule); the stable password is set here.
 #   2. Sudo rule 'audit-demo-ls-only' — allows only /usr/bin/ls on all hosts
 #      This means: sudo ls /    → SUCCEEDS  (audited on KDC)
 #                  sudo ps aux  → FAILS     (audited, denied by rule)
@@ -17,6 +19,17 @@
 #   pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-audit-demo.yml \
 #       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
 ---
+# User creation goes through the canonical fixtures playbook (AGENTS.md §4.1):
+# user only — the restrictive audit-demo-ls-only rule below is the point of
+# this demo, so the pilot-all cmdcat=all rule must NOT be attached.
+- name: Ensure the audit demo IPA user exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: "{{ audit_demo_user | default('audituser') }}"
+    ipa_fixture_user_first: Audit
+    ipa_fixture_user_last: Demo
+    ipa_fixture_manage_sudorule: false
+
 - name: FreeIPA audit demonstration fixtures
   hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
   become: false
@@ -50,21 +63,7 @@
       no_log: true
       tags: [fixtures]
 
-    # ── User creation ──────────────────────────────────────────────────
-    - name: "Fixtures — ensure IPA user {{ audit_demo_user }} exists"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - user-add
-          - "{{ audit_demo_user }}"
-          - "--first=Audit"
-          - "--last=Demo"
-      register: ipa_user_add
-      changed_when: "'Added user' in (ipa_user_add.stdout | default(''))"
-      failed_when:
-        - ipa_user_add.rc != 0
-        - "'already exists' not in (ipa_user_add.stderr | default(''))"
-      tags: [fixtures]
+    # ── User creation lives in the imported freeipa-client-fixtures.yml ──
 
     # ── Sudo rule: allow ONLY /usr/bin/ls on ALL hosts ─────────────────
     # This creates a deliberately restrictive rule: audituser can only run
