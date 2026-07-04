@@ -12,6 +12,7 @@ import (
 
 	"github.com/anomalyco/pilot/internal/docs"
 	"github.com/anomalyco/pilot/internal/ollama"
+	"github.com/anomalyco/pilot/internal/vmtarget"
 )
 
 var doctorCmd = &cobra.Command{
@@ -157,6 +158,34 @@ func runDoctor(cmd *cobra.Command, args []string) {
 			fmt.Printf("\033[32mOK\033[0m (built, but metadata unreadable: %v)\n", err)
 		} else {
 			fmt.Printf("\033[32mOK\033[0m (built, contains %d chunks from %d modules)\n", meta.ChunkCount, meta.ModuleCount)
+		}
+	}
+
+	// 9. Check vm-target golden-image prerequisites (optional feature:
+	//    only matters when using 'pilot vm-target'). Without KVM access
+	//    virt-customize falls back to software emulation and appliance
+	//    boots take minutes instead of seconds.
+	fmt.Printf("[9] Checking vm-target prerequisites (virt-customize + KVM + appliance DHCP)... ")
+	vcPath, vcErr := exec.LookPath("virt-customize")
+	var vmHints []string
+	if vcErr != nil {
+		vmHints = append(vmHints,
+			"'virt-customize' was not found in PATH. vm-target will boot uncustomized\n"+
+				"       cloud images (slower first boot). Install it via: 'sudo apt install libguestfs-tools'")
+	} else {
+		if hint := vmtarget.KVMAccessHint(); hint != "" {
+			vmHints = append(vmHints, hint)
+		}
+		if hint := vmtarget.ApplianceDHCPHint(); hint != "" {
+			vmHints = append(vmHints, hint)
+		}
+	}
+	if len(vmHints) == 0 {
+		fmt.Printf("\033[32mOK\033[0m (path: %s)\n", vcPath)
+	} else {
+		fmt.Println("\033[33mWARNING\033[0m")
+		for _, h := range vmHints {
+			fmt.Printf("    -> %s\n", h)
 		}
 	}
 

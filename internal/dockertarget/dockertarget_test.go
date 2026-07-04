@@ -597,7 +597,7 @@ esac`
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	res, err := m.DockerRaw(context.Background(), "commit", "x", "mytag")
+	res, err := m.DockerRaw(context.Background(), EngineDocker, "commit", "x", "mytag")
 	if err != nil {
 		t.Fatalf("DockerRaw: %v", err)
 	}
@@ -763,5 +763,115 @@ esac`
 	}
 	if !strings.Contains(inv, "ansible_host: outer") {
 		t.Errorf("ansible_host should be 'outer' (container name), not hostname:\n%s", inv)
+	}
+}
+
+// newPodmanTestManager mirrors newTestManager but wires a "podman" shim
+// via PILOT_PODMAN_BIN, and points PILOT_DOCKER_BIN at a shim that
+// always fails — so any test using this manager fails loudly if a
+// podman-engine call accidentally falls back to the docker binary.
+func newPodmanTestManager(t *testing.T, shimScript string) *Manager {
+	t.Helper()
+	dir := t.TempDir()
+	podmanShim := filepath.Join(dir, "podman")
+	if err := os.WriteFile(podmanShim, []byte("#!/bin/sh\n"+shimScript), 0o755); err != nil {
+		t.Fatalf("write podman shim: %v", err)
+	}
+	dockerShim := filepath.Join(dir, "docker-should-not-run")
+	if err := os.WriteFile(dockerShim, []byte("#!/bin/sh\necho 'docker binary must not be invoked for podman engine' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write docker-decoy shim: %v", err)
+	}
+	t.Setenv("PILOT_PODMAN_BIN", podmanShim)
+	t.Setenv("PILOT_DOCKER_BIN", dockerShim)
+	m, err := NewManager(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return m
+}
+
+// TestUp_PodmanEngine_UsesPodmanBinaryAndConnectionPlugin is the
+// headline opt-in behaviour: --engine podman must (a) shell out to the
+// podman binary, never docker, and (b) render the containers.podman
+// connection plugin instead of the docker one.
+func TestUp_PodmanEngine_UsesPodmanBinaryAndConnectionPlugin(t *testing.T) {
+	shim := `case "$1" in
+  inspect) exit 1 ;;
+  run)     echo "podman-cid-1" ;;
+  *)       exit 0 ;;
+esac`
+	m := newPodmanTestManager(t, shim)
+	tgt, err := m.Up(context.Background(), Options{Name: "rootless-1", Image: "ubuntu:24.04", Engine: EnginePodman})
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if tgt.Engine != EnginePodman {
+		t.Errorf("Engine = %q, want podman", tgt.Engine)
+	}
+	if tgt.ContainerID != "podman-cid-1" {
+		t.Errorf("ContainerID = %q (podman shim never ran?)", tgt.ContainerID)
+	}
+	inv, err := tgt.RenderInventory()
+	if err != nil {
+		t.Fatalf("RenderInventory: %v", err)
+	}
+	if !strings.Contains(inv, "ansible_connection: containers.podman.podman") {
+		t.Errorf("inventory should use the podman connection plugin:\n%s", inv)
+	}
+	if strings.Contains(inv, "ansible_connection: docker") {
+		t.Errorf("inventory should not reference the docker connection plugin:\n%s", inv)
+	}
+}
+
+// TestUp_RejectsUnknownEngine guards against typos like --engine
+// dcoker silently falling back to some default.
+func TestUp_RejectsUnknownEngine(t *testing.T) {
+	m, _ := newTestManager(t, shimAlwaysFail)
+	_, err := m.Up(context.Background(), Options{Name: "ok", Image: "ubuntu:24.04", Engine: Engine("lxc")})
+	if err == nil || !strings.Contains(err.Error(), "unknown engine") {
+		t.Fatalf("want unknown-engine error, got %v", err)
+	}
+}
+
+// TestDown_RoutesToStoredEngineBinary: a podman target's Down must
+// invoke podman, even though PILOT_DOCKER_BIN is also set (to a shim
+// that would fail) — the stored per-target Engine decides the binary,
+// not a process-wide default.
+func TestDown_RoutesToStoredEngineBinary(t *testing.T) {
+	shim := `case "$1" in
+  inspect) exit 1 ;;
+  run)     echo "podman-cid-2" ;;
+  rm)      exit 0 ;;
+  *)       exit 0 ;;
+esac`
+	m := newPodmanTestManager(t, shim)
+	if _, err := m.Up(context.Background(), Options{Name: "rootless-2", Image: "ubuntu:24.04", Engine: EnginePodman}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if err := m.Down(context.Background(), "rootless-2"); err != nil {
+		t.Fatalf("Down: %v (should route to podman, not the failing docker shim)", err)
+	}
+}
+
+// TestExec_RoutesToStoredEngineBinary mirrors TestDown_RoutesToStoredEngineBinary
+// for Exec: it must look up the target's persisted Engine and invoke
+// the matching binary rather than defaulting to docker.
+func TestExec_RoutesToStoredEngineBinary(t *testing.T) {
+	shim := `case "$1" in
+  inspect) exit 1 ;;
+  run)     echo "podman-cid-3" ;;
+  exec)    shift; echo "ran: $@" ;;
+  *)       exit 0 ;;
+esac`
+	m := newPodmanTestManager(t, shim)
+	if _, err := m.Up(context.Background(), Options{Name: "rootless-3", Image: "ubuntu:24.04", Engine: EnginePodman}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	res, err := m.Exec(context.Background(), "rootless-3", []string{"uname", "-a"})
+	if err != nil {
+		t.Fatalf("Exec: %v (should route to podman, not the failing docker shim)", err)
+	}
+	if strings.TrimSpace(res.Stdout) != "ran: rootless-3 uname -a" {
+		t.Errorf("Stdout = %q", res.Stdout)
 	}
 }

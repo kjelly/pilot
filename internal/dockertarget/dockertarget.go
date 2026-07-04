@@ -40,6 +40,52 @@ const (
 	StatusMissing Status = "missing" // record exists in state but container is gone
 )
 
+// Engine selects which container CLI a target is driven by. Docker
+// remains the default; podman is opt-in via --engine podman (rootless,
+// daemonless — no docker-group root-equivalence). The two engines are
+// CLI-compatible for the subcommands this package uses (run/exec/
+// inspect/commit/rm/build), so the only behavioural fork is the
+// ansible connection plugin name in RenderInventory.
+type Engine string
+
+const (
+	EngineDocker Engine = "docker"
+	EnginePodman Engine = "podman"
+)
+
+// resolveEngine defaults the zero value (unset Options.Engine, or a
+// Target loaded from state written before Engine existed) to docker,
+// and rejects anything else unrecognised.
+func resolveEngine(e Engine) (Engine, error) {
+	switch e {
+	case "":
+		return EngineDocker, nil
+	case EngineDocker, EnginePodman:
+		return e, nil
+	default:
+		return "", fmt.Errorf("dockertarget: unknown engine %q (want %q or %q)", e, EngineDocker, EnginePodman)
+	}
+}
+
+// BinFor returns the CLI binary to invoke for engine, honouring the
+// per-engine override env var (PILOT_DOCKER_BIN / PILOT_PODMAN_BIN) so
+// tests and power users can point at a shim or a non-PATH binary.
+// Exported so cmd/pilot's docker-target subcommands can resolve the
+// same binary for operations (image build, raw exec) that sit outside
+// the Manager's typed API.
+func BinFor(engine Engine) string {
+	if engine == EnginePodman {
+		if b := os.Getenv("PILOT_PODMAN_BIN"); b != "" {
+			return b
+		}
+		return "podman"
+	}
+	if b := os.Getenv("PILOT_DOCKER_BIN"); b != "" {
+		return b
+	}
+	return "docker"
+}
+
 // Target describes one docker container that pilot is using as a target host.
 type Target struct {
 	Name        string    `json:"name"`
@@ -65,6 +111,11 @@ type Target struct {
 	// recreates the target with the same init, and so `list`/`get`
 	// callers can tell whether `systemctl` tasks will work.
 	Systemd bool `json:"systemd,omitempty"`
+	// Engine is the container CLI driving this target: "docker"
+	// (default) or "podman". Targets loaded from state written before
+	// this field existed decode as "" and are treated as docker by
+	// resolveEngine.
+	Engine Engine `json:"engine,omitempty"`
 }
 
 // Options bundles user-facing knobs for Up.
@@ -91,6 +142,9 @@ type Options struct {
 	// container AND an image that actually ships systemd (e.g.
 	// pilot-target:ubuntu-24.04); stock ubuntu:24.04 has no /sbin/init.
 	Systemd *bool
+	// Engine selects the container CLI: "" / "docker" (default) or
+	// "podman" (opt-in, rootless — no docker-group root-equivalence).
+	Engine Engine
 }
 
 // state is the on-disk JSON shape. Versioned so future schema breaks
@@ -153,28 +207,24 @@ type dockerResult struct {
 	ExitCode int
 }
 
-// DockerRaw runs an arbitrary `docker` subcommand and returns the
-// combined (stdout, stderr, exit code) result. Exposed (vs the
-// unexported docker helper) for callers that need ops beyond the
-// Manager's typed API: e.g. `pilot docker-target snapshot` calls
-// `docker commit`, `pilot docker-target rollback` calls `docker rm`
-// + `docker run`.
+// DockerRaw runs an arbitrary docker/podman subcommand (per engine)
+// and returns the combined (stdout, stderr, exit code) result. Exposed
+// (vs the unexported docker helper) for callers that need ops beyond
+// the Manager's typed API: e.g. `pilot docker-target snapshot` calls
+// `commit`, `pilot docker-target rollback` calls `rm` + `run`.
 //
-// Honours the optional PILOT_DOCKER_BIN env override (so tests /
-// power users can pick a different binary). 5 minute timeout is
-// generous for pull / run.
-func (m *Manager) DockerRaw(ctx context.Context, args ...string) (*dockerResult, error) {
-	return m.docker(ctx, args...)
+// Honours the per-engine BinFor override (so tests / power users can
+// pick a different binary). 5 minute timeout is generous for pull /
+// run.
+func (m *Manager) DockerRaw(ctx context.Context, engine Engine, args ...string) (*dockerResult, error) {
+	return m.docker(ctx, engine, args...)
 }
 
-// docker runs the docker CLI with the given args. Honours the optional
-// DOCKER env override (so tests / power users can pick a different
-// binary). 5 minute timeout is generous for pull / run.
-func (m *Manager) docker(ctx context.Context, args ...string) (*dockerResult, error) {
-	bin := os.Getenv("PILOT_DOCKER_BIN")
-	if bin == "" {
-		bin = "docker"
-	}
+// docker runs the docker/podman CLI (per engine) with the given args.
+// Honours the per-engine BinFor override (so tests / power users can
+// pick a different binary). 5 minute timeout is generous for pull / run.
+func (m *Manager) docker(ctx context.Context, engine Engine, args ...string) (*dockerResult, error) {
+	bin := BinFor(engine)
 	c, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(c, bin, args...)
@@ -210,6 +260,10 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if !validName(opt.Name) {
 		return nil, fmt.Errorf("dockertarget: invalid name %q (want [a-zA-Z0-9_.-]+)", opt.Name)
 	}
+	engine, err := resolveEngine(opt.Engine)
+	if err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -223,7 +277,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		}
 	}
 	// Refuse to hijack an unrelated container with the same name.
-	inspectRes, err := m.docker(ctx, "inspect", opt.Name)
+	inspectRes, err := m.docker(ctx, engine, "inspect", opt.Name)
 	if err != nil {
 		return nil, fmt.Errorf("dockertarget: inspect existing: %w", err)
 	}
@@ -284,7 +338,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		args = append(args, "sleep", "infinity")
 	}
 
-	runRes, err := m.docker(ctx, args...)
+	runRes, err := m.docker(ctx, engine, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -321,6 +375,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		Network:     network,
 		Privileged:  privileged,
 		Systemd:     systemd,
+		Engine:      engine,
 		Hosts:       hosts,
 		CreatedAt:   now,
 		StartedAt:   now,
@@ -330,7 +385,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		// Best-effort rollback: try to remove the container we just
 		// started so we don't leave orphans. If this fails too, the
 		// user sees both errors and can `docker rm -f` manually.
-		_, _ = m.docker(ctx, "rm", "-f", opt.Name)
+		_, _ = m.docker(ctx, engine, "rm", "-f", opt.Name)
 		return nil, err
 	}
 	return &t, nil
@@ -366,7 +421,11 @@ func (m *Manager) Down(ctx context.Context, name string) error {
 	}
 	t := s.Targets[idx]
 	if t.Status == StatusRunning {
-		rmRes, err := m.docker(ctx, "rm", "-f", name)
+		engine, err := resolveEngine(t.Engine)
+		if err != nil {
+			return err
+		}
+		rmRes, err := m.docker(ctx, engine, "rm", "-f", name)
 		if err != nil {
 			return err
 		}
@@ -429,7 +488,11 @@ func (m *Manager) List(ctx context.Context) ([]Target, error) {
 // `docker inspect` per target — for the typical "few targets" case
 // this is fine; if a user has hundreds we can batch later.
 func (m *Manager) refreshStatus(ctx context.Context, t Target) Status {
-	res, err := m.docker(ctx, "inspect", "--format", "{{.State.Running}}", t.Name)
+	engine, err := resolveEngine(t.Engine)
+	if err != nil {
+		return StatusMissing
+	}
+	res, err := m.docker(ctx, engine, "inspect", "--format", "{{.State.Running}}", t.Name)
 	if err != nil || res.ExitCode != 0 {
 		return StatusMissing
 	}
@@ -443,9 +506,20 @@ func (m *Manager) refreshStatus(ctx context.Context, t Target) Status {
 	return StatusMissing
 }
 
+// connectionPlugin returns the ansible_connection value for engine:
+// docker's built-in/community.docker `docker` plugin, or podman's
+// `containers.podman.podman` plugin (that collection is a prerequisite
+// for --engine podman targets).
+func connectionPlugin(engine Engine) string {
+	if engine == EnginePodman {
+		return "containers.podman.podman"
+	}
+	return "docker"
+}
+
 // RenderInventory renders a YAML inventory targeting this single
-// docker container via ansible_connection=docker. Suitable for
-// passing to ansible-playbook with -i.
+// container via the ansible connection plugin matching t.Engine.
+// Suitable for passing to ansible-playbook with -i.
 //
 // If the user has a custom InventoryPath on the Target, we read that
 // file instead — this lets power users override connection params
@@ -461,22 +535,27 @@ func (t *Target) RenderInventory() (string, error) {
 		}
 		return string(data), nil
 	}
+	engine, err := resolveEngine(t.Engine)
+	if err != nil {
+		return "", err
+	}
+	conn := connectionPlugin(engine)
 	var sb strings.Builder
 	sb.WriteString("# Generated by pilot docker-target — do not edit by hand.\n")
 	sb.WriteString("all:\n")
 	sb.WriteString("  hosts:\n")
 	// Primary host (always == t.Name)
 	fmt.Fprintf(&sb, "    %s:\n", t.Name)
-	fmt.Fprintf(&sb, "      ansible_connection: docker\n")
+	fmt.Fprintf(&sb, "      ansible_connection: %s\n", conn)
 	fmt.Fprintf(&sb, "      ansible_host: %s\n", t.Name)
 	fmt.Fprintf(&sb, "      ansible_user: root\n")
-	// Alias hosts: same docker container, different inventory key
+	// Alias hosts: same container, different inventory key
 	for _, h := range t.Hosts {
 		if h == t.Name {
 			continue
 		}
 		fmt.Fprintf(&sb, "    %s:\n", h)
-		fmt.Fprintf(&sb, "      ansible_connection: docker\n")
+		fmt.Fprintf(&sb, "      ansible_connection: %s\n", conn)
 		fmt.Fprintf(&sb, "      ansible_host: %s\n", t.Name)
 		fmt.Fprintf(&sb, "      ansible_user: root\n")
 	}
@@ -496,8 +575,24 @@ func (m *Manager) Exec(ctx context.Context, name string, argv []string) (*docker
 	if len(argv) == 0 {
 		return nil, errors.New("dockertarget: argv is required")
 	}
+	m.mu.Lock()
+	s, err := m.load()
+	m.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	var engine Engine
+	for _, t := range s.Targets {
+		if t.Name == name {
+			engine, err = resolveEngine(t.Engine)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
 	args := append([]string{"exec", name}, argv...)
-	return m.docker(ctx, args...)
+	return m.docker(ctx, engine, args...)
 }
 
 // validName keeps docker container names predictable across the

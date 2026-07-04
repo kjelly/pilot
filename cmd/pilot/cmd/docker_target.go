@@ -80,6 +80,7 @@ var (
 	dtSystemd      bool
 	dtExtraArgs    []string
 	dtHosts        []string
+	dtEngine       string
 )
 
 // resolveDataDir returns the active pilot data dir. Centralised so the
@@ -113,10 +114,16 @@ Examples:
   pilot docker-target up --image-pilot ubuntu-24.04 --name infra-test
   pilot docker-target up --image rockylinux:9 --name rocky-1 \
       --hostname rocky-1 --network bridge --no-privileged
+  pilot docker-target up --image-pilot ubuntu-24.04 --name infra-test \
+      --engine podman
 
 The --image-pilot shortcut resolves to pilot-target:<arg>, e.g.
 --image-pilot ubuntu-24.04 -> pilot-target:ubuntu-24.04. Build the
 image first with ./images/build.sh.
+
+--engine podman is opt-in (default remains docker): rootless,
+daemonless, no docker-group root-equivalence. Requires the podman CLI
+and the containers.podman ansible collection on this machine.
 `,
 	RunE: runDtUp,
 }
@@ -131,6 +138,7 @@ func init() {
 	dtUpCmd.Flags().BoolVar(&dtSystemd, "systemd", false, "boot systemd as PID 1 so `systemctl`/`service` tasks and systemd-resolved work (requires an image that ships systemd, e.g. --image-pilot ubuntu-24.04; implies privileged)")
 	dtUpCmd.Flags().StringSliceVar(&dtExtraArgs, "docker-arg", nil, "extra arg for `docker run` (may repeat)")
 	dtUpCmd.Flags().StringSliceVar(&dtHosts, "hosts", nil, "additional ansible host aliases for this target (may repeat). All aliases route to the same container.")
+	dtUpCmd.Flags().StringVar(&dtEngine, "engine", "docker", "container engine: docker (default) or podman (rootless, opt-in)")
 }
 
 func runDtUp(cmd *cobra.Command, args []string) error {
@@ -146,6 +154,10 @@ func runDtUp(cmd *cobra.Command, args []string) error {
 	if dtImage == "" {
 		dtImage = "pilot-target:" + dtImagePilot
 	}
+	engine, err := parseEngine(dtEngine)
+	if err != nil {
+		return err
+	}
 	m, err := dtNewManager()
 	if err != nil {
 		return err
@@ -154,9 +166,9 @@ func runDtUp(cmd *cobra.Command, args []string) error {
 	// locally, so users don't need a separate `./images/build.sh` step.
 	// Only applies to `pilot-target:*` tags (whether reached via
 	// --image-pilot or an explicit --image pilot-target:...); plain
-	// user images are left to docker run to pull/resolve.
+	// user images are left to docker/podman to pull/resolve.
 	if variant, ok := strings.CutPrefix(dtImage, "pilot-target:"); ok {
-		if err := ensurePilotImage(context.Background(), m, variant, dtSystemd, cmd.ErrOrStderr()); err != nil {
+		if err := ensurePilotImage(context.Background(), m, engine, variant, dtSystemd, cmd.ErrOrStderr()); err != nil {
 			return err
 		}
 	}
@@ -167,6 +179,7 @@ func runDtUp(cmd *cobra.Command, args []string) error {
 		Hostname:  dtHostname,
 		Hosts:     dtHosts,
 		ExtraArgs: dtExtraArgs,
+		Engine:    engine,
 	}
 	if !dtNoPrivileged {
 		t := true
@@ -191,6 +204,7 @@ func runDtUp(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "  network      : %s\n", tgt.Network)
 	fmt.Fprintf(out, "  privileged   : %v\n", tgt.Privileged)
 	fmt.Fprintf(out, "  systemd      : %v\n", tgt.Systemd)
+	fmt.Fprintf(out, "  engine       : %s\n", tgt.Engine)
 	fmt.Fprintf(out, "  inventory    : `pilot docker-target show-inventory --name %s`\n", tgt.Name)
 	return nil
 }
@@ -277,9 +291,6 @@ func runDtShowInventory(cmd *cobra.Command, args []string) error {
 	if dtName == "" {
 		return fmt.Errorf("--name is required")
 	}
-	if !validDockerTag(dtSnapshotTag) {
-		return fmt.Errorf("--tag %q must match [a-zA-Z0-9_./-]+ (no '+' or whitespace)", dtSnapshotTag)
-	}
 	m, err := dtNewManager()
 	if err != nil {
 		return err
@@ -324,9 +335,6 @@ func init() {
 func runDtRun(cmd *cobra.Command, args []string) error {
 	if dtName == "" {
 		return fmt.Errorf("--name is required")
-	}
-	if !validDockerTag(dtSnapshotTag) {
-		return fmt.Errorf("--tag %q must match [a-zA-Z0-9_./-]+ (no '+' or whitespace)", dtSnapshotTag)
 	}
 	m, err := dtNewManager()
 	if err != nil {
@@ -488,14 +496,19 @@ func shortCID(s string) string {
 	return s[:12]
 }
 
-// dockerBin returns the docker binary to invoke, honouring the
-// PILOT_DOCKER_BIN override (the same one internal/dockertarget uses)
-// so tests / power users can point at a shim.
-func dockerBin() string {
-	if b := os.Getenv("PILOT_DOCKER_BIN"); b != "" {
-		return b
+// parseEngine validates the --engine flag value, defaulting the empty
+// string to docker so callers that don't set the flag (e.g. rollback,
+// which reads the engine back from the existing target instead) don't
+// need a special case.
+func parseEngine(s string) (dockertarget.Engine, error) {
+	switch s {
+	case "", "docker":
+		return dockertarget.EngineDocker, nil
+	case "podman":
+		return dockertarget.EnginePodman, nil
+	default:
+		return "", fmt.Errorf("--engine %q must be one of: docker, podman", s)
 	}
-	return "docker"
 }
 
 // ensurePilotImage builds the pre-baked pilot-target image on demand
@@ -508,11 +521,11 @@ func dockerBin() string {
 // needed. Build output is streamed so a multi-minute apt install does
 // not look hung; there is no timeout (matches ansible-playbook — the
 // user can Ctrl-C).
-func ensurePilotImage(ctx context.Context, m *dockertarget.Manager, variant string, needInit bool, progress io.Writer) error {
+func ensurePilotImage(ctx context.Context, m *dockertarget.Manager, engine dockertarget.Engine, variant string, needInit bool, progress io.Writer) error {
 	tag := "pilot-target:" + variant
-	// Already present? `docker image inspect` exits 0 iff the tag exists.
+	// Already present? `image inspect` exits 0 iff the tag exists.
 	present := false
-	if res, err := m.DockerRaw(ctx, "image", "inspect", tag); err == nil && res.ExitCode == 0 {
+	if res, err := m.DockerRaw(ctx, engine, "image", "inspect", tag); err == nil && res.ExitCode == 0 {
 		present = true
 	}
 	// When --systemd is requested the image must be able to boot
@@ -520,7 +533,7 @@ func ensurePilotImage(ctx context.Context, m *dockertarget.Manager, variant stri
 	// stale local tag would otherwise fail at `docker run` with a
 	// cryptic OCI "stat /sbin/init: no such file" error. Probe for it
 	// and rebuild instead.
-	if present && needInit && !imageHasInit(ctx, m, tag) {
+	if present && needInit && !imageHasInit(ctx, m, engine, tag) {
 		fmt.Fprintf(progress, "▶ image %s has no /sbin/init (predates --systemd support); rebuilding…\n", tag)
 		present = false
 	}
@@ -541,7 +554,7 @@ func ensurePilotImage(ctx context.Context, m *dockertarget.Manager, variant stri
 		return fmt.Errorf("stage Dockerfile: %w", err)
 	}
 	fmt.Fprintf(progress, "▶ image %s not found locally; building from built-in Dockerfile (one-time, takes a few minutes)…\n", tag)
-	c := newCmd(ctx, dockerBin(), "build", "-t", tag, "-f", filepath.Join(tmpDir, "Dockerfile"), tmpDir)
+	c := newCmd(ctx, dockertarget.BinFor(engine), "build", "-t", tag, "-f", filepath.Join(tmpDir, "Dockerfile"), tmpDir)
 	c.Stdout = progress
 	c.Stderr = os.Stderr
 	if err := c.Run(); err != nil {
@@ -554,8 +567,8 @@ func ensurePilotImage(ctx context.Context, m *dockertarget.Manager, variant stri
 // imageHasInit reports whether the image can boot systemd as PID 1, i.e.
 // whether /sbin/init exists inside it. Runs a throwaway `test -e` with
 // the entrypoint overridden so the image's own CMD/init is not invoked.
-func imageHasInit(ctx context.Context, m *dockertarget.Manager, tag string) bool {
-	res, err := m.DockerRaw(ctx, "run", "--rm", "--entrypoint", "test", tag, "-e", "/sbin/init")
+func imageHasInit(ctx context.Context, m *dockertarget.Manager, engine dockertarget.Engine, tag string) bool {
+	res, err := m.DockerRaw(ctx, engine, "run", "--rm", "--entrypoint", "test", tag, "-e", "/sbin/init")
 	return err == nil && res.ExitCode == 0
 }
 
@@ -644,7 +657,7 @@ func runDtSnapshot(cmd *cobra.Command, args []string) error {
 	if t.Status != dockertarget.StatusRunning {
 		return fmt.Errorf("target %q is not running (status=%s); cannot snapshot", dtName, t.Status)
 	}
-	res, err := m.DockerRaw(context.Background(), "commit", dtName, dtSnapshotTag)
+	res, err := m.DockerRaw(context.Background(), t.Engine, "commit", dtName, dtSnapshotTag)
 	if err != nil {
 		return err
 	}
@@ -716,6 +729,7 @@ func runDtRollback(cmd *cobra.Command, args []string) error {
 		Hostname:  t.Hostname,
 		Hosts:     t.Hosts,
 		ExtraArgs: nil,
+		Engine:    t.Engine,
 	}
 	if t.Privileged {
 		tt := true

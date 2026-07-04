@@ -96,14 +96,30 @@ func (m *Manager) PrepareBaseImage(ctx context.Context, nameOrPath string) (stri
 			// silently falls back to software emulation (TCG) and crawls. Print
 			// an actionable fix before libguestfs buries it under its own noisy
 			// warning.
-			if hint := kvmAccessHint(); hint != "" {
+			if hint := KVMAccessHint(); hint != "" {
 				fmt.Printf("warning: %s\n", hint)
 			}
+			if hint := ApplianceDHCPHint(); hint != "" {
+				fmt.Printf("warning: %s\n", hint)
+			}
+			// Cloud images ship /etc/resolv.conf as a symlink into
+			// /run/systemd/..., which dangles inside the libguestfs
+			// appliance chroot — --install then fails DNS resolution
+			// even though the appliance network is up. Swap in a real
+			// resolver for the duration and restore the original
+			// (file, symlink, or absence) exactly afterwards.
 			cmd := exec.CommandContext(ctx, "virt-customize",
 				"-a", goldenTmp,
+				"--run-command", `if [ -e /etc/resolv.conf ] || [ -L /etc/resolv.conf ]; then mv /etc/resolv.conf /etc/resolv.conf.pilot-saved; fi; printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf`,
 				"--install", "python3,sudo,curl,net-tools,systemd",
 				"--run-command", "systemctl disable apt-daily.timer apt-daily-upgrade.timer || true",
+				"--run-command", `rm -f /etc/resolv.conf; if [ -e /etc/resolv.conf.pilot-saved ] || [ -L /etc/resolv.conf.pilot-saved ]; then mv /etc/resolv.conf.pilot-saved /etc/resolv.conf; fi`,
 			)
+			env, envErr := virtCustomizeEnv(imageDir)
+			if envErr != nil {
+				fmt.Printf("warning: %v (continuing with default appliance network)\n", envErr)
+			}
+			cmd.Env = env
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			fmt.Println("▶ running virt-customize to pre-install dependencies...")
@@ -132,7 +148,81 @@ func (m *Manager) PrepareBaseImage(ctx context.Context, nameOrPath string) (stri
 	return goldenPath, nil
 }
 
-// kvmAccessHint returns an actionable remediation string when the current
+// ApplianceDHCPHint returns an actionable remediation string when the host
+// lacks dhclient (package isc-dhcp-client). The libguestfs appliance is
+// assembled by supermin from packages installed on the host, and its package
+// list requests isc-dhcp-client specifically — on hosts without it (Ubuntu
+// 24.04 replaced it with dhcpcd-base, which supermin does NOT pick up) the
+// appliance boots with no DHCP client at all, eth0 stays down, and every
+// virt-customize --install fails with DNS errors after minutes of booting.
+func ApplianceDHCPHint() string {
+	if _, err := exec.LookPath("dhclient"); err == nil {
+		return ""
+	}
+	// PATH may omit /usr/sbin for non-login shells; check the usual spots
+	// before concluding it is absent.
+	for _, p := range []string{"/usr/sbin/dhclient", "/sbin/dhclient"} {
+		if _, err := os.Stat(p); err == nil {
+			return ""
+		}
+	}
+	return "'dhclient' (package isc-dhcp-client) is not installed on the host — the libguestfs\n" +
+		"         appliance will have no DHCP client, so package installs inside virt-customize\n" +
+		"         will fail with DNS errors. fix: sudo apt install isc-dhcp-client"
+}
+
+// virtCustomizeEnv builds the environment for virt-customize with two
+// adjustments that make the libguestfs appliance network actually work:
+//
+//  1. XDG_RUNTIME_DIR is removed. Ubuntu's AppArmor profile for passt
+//     (the libguestfs network backend since 1.52) only allows writes under
+//     /tmp and $HOME, but libguestfs places passt's socket/pid under
+//     $XDG_RUNTIME_DIR — passt then exits 1 and the whole customize fails.
+//     Without the variable, libguestfs falls back to /tmp, which the
+//     profile permits.
+//
+//  2. A directory containing a stub `passt` that always fails is prepended
+//     to PATH. Even once passt starts, the snapshot Ubuntu 24.04 ships
+//     (0.0~git20240220) never answers the appliance's DHCP requests, so
+//     eth0 gets no address and every download fails with DNS errors.
+//     libguestfs probes `passt --help` to pick the backend; making the
+//     probe fail steers it to qemu's built-in SLIRP (-netdev user), which
+//     works. Delete the stub dir (or fix passt) to re-enable passt.
+func virtCustomizeEnv(stateDir string) ([]string, error) {
+	env := environWithout("XDG_RUNTIME_DIR")
+
+	shimDir := filepath.Join(stateDir, ".no-passt")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		return env, fmt.Errorf("vmtarget: create passt-shim dir: %w", err)
+	}
+	stub := filepath.Join(shimDir, "passt")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 127\n"), 0o755); err != nil {
+		return env, fmt.Errorf("vmtarget: write passt stub: %w", err)
+	}
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			env[i] = "PATH=" + shimDir + string(os.PathListSeparator) + kv[len("PATH="):]
+			return env, nil
+		}
+	}
+	env = append(env, "PATH="+shimDir)
+	return env, nil
+}
+
+// environWithout returns os.Environ() minus the named variable.
+func environWithout(name string) []string {
+	prefix := name + "="
+	env := os.Environ()
+	out := env[:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, prefix) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// KVMAccessHint returns an actionable remediation string when the current
 // process cannot access /dev/kvm, which forces libguestfs/virt-customize into
 // slow software emulation (TCG). It returns "" when /dev/kvm is usable — or
 // when it is simply absent (no VT-x/AMD-V or nested virt off), a case where
@@ -142,7 +232,7 @@ func (m *Manager) PrepareBaseImage(ctx context.Context, nameOrPath string) (stri
 // libguestfs does. This also correctly catches the "just ran usermod -aG kvm
 // but haven't re-logged-in yet" case, where group membership looks fixed on
 // disk but the running process still lacks it.
-func kvmAccessHint() string {
+func KVMAccessHint() string {
 	const dev = "/dev/kvm"
 	if f, err := os.OpenFile(dev, os.O_RDWR, 0); err == nil {
 		_ = f.Close()

@@ -50,7 +50,7 @@ func TestEnsurePilotImage_BuildsWhenMissing(t *testing.T) {
 esac`)
 	m := newImageTestManager(t)
 	var buf bytes.Buffer
-	if err := ensurePilotImage(context.Background(), m, "ubuntu-24.04", false, &buf); err != nil {
+	if err := ensurePilotImage(context.Background(), m, dockertarget.EngineDocker, "ubuntu-24.04", false, &buf); err != nil {
 		t.Fatalf("ensurePilotImage: %v", err)
 	}
 	data, _ := os.ReadFile(log)
@@ -68,7 +68,7 @@ func TestEnsurePilotImage_SkipsWhenPresent(t *testing.T) {
 esac`)
 	m := newImageTestManager(t)
 	var buf bytes.Buffer
-	if err := ensurePilotImage(context.Background(), m, "ubuntu-24.04", false, &buf); err != nil {
+	if err := ensurePilotImage(context.Background(), m, dockertarget.EngineDocker, "ubuntu-24.04", false, &buf); err != nil {
 		t.Fatalf("ensurePilotImage: %v", err)
 	}
 	data, _ := os.ReadFile(log)
@@ -90,7 +90,7 @@ func TestEnsurePilotImage_RebuildsStaleSystemdImage(t *testing.T) {
 esac`)
 	m := newImageTestManager(t)
 	var buf bytes.Buffer
-	if err := ensurePilotImage(context.Background(), m, "ubuntu-24.04", true, &buf); err != nil {
+	if err := ensurePilotImage(context.Background(), m, dockertarget.EngineDocker, "ubuntu-24.04", true, &buf); err != nil {
 		t.Fatalf("ensurePilotImage: %v", err)
 	}
 	data, _ := os.ReadFile(log)
@@ -110,7 +110,7 @@ func TestEnsurePilotImage_PresentWithInitSkips(t *testing.T) {
 esac`)
 	m := newImageTestManager(t)
 	var buf bytes.Buffer
-	if err := ensurePilotImage(context.Background(), m, "ubuntu-24.04", true, &buf); err != nil {
+	if err := ensurePilotImage(context.Background(), m, dockertarget.EngineDocker, "ubuntu-24.04", true, &buf); err != nil {
 		t.Fatalf("ensurePilotImage: %v", err)
 	}
 	data, _ := os.ReadFile(log)
@@ -129,7 +129,7 @@ func TestEnsurePilotImage_UnknownVariantErrors(t *testing.T) {
 esac`)
 	m := newImageTestManager(t)
 	var buf bytes.Buffer
-	err := ensurePilotImage(context.Background(), m, "fedora-99", false, &buf)
+	err := ensurePilotImage(context.Background(), m, dockertarget.EngineDocker, "fedora-99", false, &buf)
 	if err == nil || !strings.Contains(err.Error(), "no built-in Dockerfile") {
 		t.Fatalf("want unknown-variant error, got %v", err)
 	}
@@ -221,6 +221,24 @@ func TestRunDtDown_RequiresName(t *testing.T) {
 	err := rootCmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "--name is required") {
 		t.Fatalf("want --name-required error, got %v", err)
+	}
+}
+
+// TestRunDtUp_RejectsInvalidEngine guards the --engine flag: only
+// "docker" (default) and "podman" are accepted, so a typo doesn't
+// silently fall through to whichever engine parseEngine's zero value
+// happens to resolve to.
+func TestRunDtUp_RejectsInvalidEngine(t *testing.T) {
+	dtName = ""
+	dtImage = ""
+	dtImagePilot = ""
+	defer func() { dtEngine = "docker" }()
+	rootCmd.SetArgs([]string{"docker-target", "up", "--name", "x", "--image", "u", "--engine", "lxc"})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--engine") {
+		t.Fatalf("want --engine validation error, got %v", err)
 	}
 }
 
