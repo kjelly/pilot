@@ -1,0 +1,118 @@
+---
+# ============================================================================
+#  preflight.yml —— 交付前置檢查:「填對了嗎 + 連得到嗎」
+# ============================================================================
+#
+#  用法:
+#    ansible-playbook -i inventory.yml playbooks/preflight.yml
+#
+#  這支對「所有 host」通用,不綁定任何角色。跑真正的 apply playbook 前先跑它,
+#  可以在 2 秒內擋掉最常見的 inventory 填寫錯誤,錯誤訊息都是人話。
+#
+#  做兩件事:
+#    A. 靜態檢查(不連線):必填欄位、殘留 <FILL-ME>、IP 格式、幽靈主機、
+#       重複 IP、沒歸 group 的孤兒主機
+#    B. 連線檢查:對每台 host 做 ping,確認 SSH / 帳號 / 金鑰 正確
+#
+#  想只做靜態檢查(還沒開機、只想檢查填寫)可以:
+#    ansible-playbook -i inventory.yml playbooks/preflight.yml --tags static
+# ============================================================================
+
+- name: "Preflight A — 靜態檢查 inventory 填寫(不連線)"
+  hosts: all
+  gather_facts: false
+  connection: local            # 這一 play 不碰目標機器
+  tags: [static, always]
+  tasks:
+    # ── 每台 host 各自檢查 ────────────────────────────────────────────────
+    - name: "[{{ inventory_hostname }}] 沒有殘留的 <FILL-ME> 佔位符"
+      ansible.builtin.assert:
+        that:
+          - "'FILL-ME' not in (ansible_host | default('') | string)"
+          - "'FILL-ME' not in (ansible_user | default('') | string)"
+          - "'FILL-ME' not in (ansible_ssh_private_key_file | default('') | string)"
+          - "'FILL-ME' not in (ipa_server_ip | default('') | string)"
+        fail_msg: >-
+          ❌ [{{ inventory_hostname }}] 還有沒填完的 <FILL-ME ...> 佔位符。
+          打開你的 inventory,把所有 <FILL-ME ...> 換成真實值。
+        success_msg: "✅ [{{ inventory_hostname }}] 沒有殘留佔位符"
+        quiet: true
+
+    - name: "[{{ inventory_hostname }}] ansible_user 有填"
+      ansible.builtin.assert:
+        that:
+          - ansible_user is defined
+          - (ansible_user | default('') | string | length) > 0
+        fail_msg: >-
+          ❌ [{{ inventory_hostname }}] 缺少 ansible_user。
+          可放在 all.vars 讓所有 host 共用(見 inventory.example.yml)。
+        success_msg: "✅ [{{ inventory_hostname }}] ansible_user 已設"
+        quiet: true
+
+    # IPv4 格式檢查一次擋掉三種錯:(a) 忘填 IP、(b) group 裡打錯 hostname 造成的
+    # 「幽靈主機」(ansible 會把 typo 當成一台真機器、ansible_host 預設成主機名)、
+    # (c) IP 打錯。若你刻意用 DNS 名稱連線,移除這條或改填解析後的 IP。
+    - name: "[{{ inventory_hostname }}] ansible_host 是合法 IPv4"
+      ansible.builtin.assert:
+        that:
+          - (ansible_host | default('')) is match('^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$')
+        fail_msg: >-
+          ❌ [{{ inventory_hostname }}] ansible_host = "{{ ansible_host | default('') }}" 不是合法 IPv4。
+          常見原因:忘了填 IP / group 裡打錯 hostname(幽靈主機)/ IP 打錯。
+          刻意用 DNS 名稱連線的話,移除這條檢查或改填解析後的 IP。
+        success_msg: "✅ [{{ inventory_hostname }}] ansible_host 格式正確"
+        quiet: true
+
+    - name: "[{{ inventory_hostname }}] SSH 私鑰檔找得到(若有指定)"
+      when: ansible_ssh_private_key_file is defined
+      block:
+        - name: "stat 私鑰檔"
+          ansible.builtin.stat:
+            path: "{{ ansible_ssh_private_key_file | regex_replace('^~', lookup('env', 'HOME')) }}"
+          register: _key_stat
+
+        - name: "斷言私鑰檔存在"
+          ansible.builtin.assert:
+            that:
+              - _key_stat.stat.exists
+            fail_msg: >-
+              ❌ [{{ inventory_hostname }}] 私鑰檔不存在:
+              {{ ansible_ssh_private_key_file }} — 檢查 ansible_ssh_private_key_file 路徑。
+            success_msg: "✅ [{{ inventory_hostname }}] 私鑰檔存在"
+            quiet: true
+
+    # ── 跨主機檢查(整份 inventory 只跑一次)──────────────────────────────
+    - name: "沒有兩台 host 填了相同的 ansible_host(重複 IP)"
+      run_once: true
+      vars:
+        _addrs: "{{ groups['all'] | map('extract', hostvars, 'ansible_host') | select('defined') | list }}"
+      ansible.builtin.assert:
+        that:
+          - (_addrs | length) == (_addrs | unique | length)
+        fail_msg: >-
+          ❌ 有兩台以上的 host 填了相同的 ansible_host。
+          目前所有位址:{{ _addrs }} — 找出重複的並改掉。
+        success_msg: "✅ 沒有重複的 ansible_host"
+        quiet: true
+
+    - name: "每台 host 都至少屬於一個 group(沒有孤兒主機)"
+      run_once: true
+      ansible.builtin.assert:
+        that:
+          - (groups['ungrouped'] | default([]) | length) == 0
+        fail_msg: >-
+          ❌ 這些 host 不屬於任何 group,不會被任何 playbook 套用:
+          {{ groups['ungrouped'] | default([]) }} — 把它們列進對應的角色 group。
+        success_msg: "✅ 每台 host 都有歸屬 group"
+        quiet: true
+
+- name: "Preflight B — 連線檢查(SSH 是否通)"
+  hosts: all
+  gather_facts: false
+  tags: [connect]
+  tasks:
+    - name: "[{{ inventory_hostname }}] ping(確認 SSH/帳號/金鑰)"
+      ansible.builtin.ping:
+      # 這一步失敗 = 連不上。逐一檢查:機器有沒有開、ansible_host IP 對不對、
+      # ansible_user 帳號對不對、ansible_ssh_private_key_file 是否為該帳號的金鑰、
+      # 網路 / 防火牆是否放行 22 埠。

@@ -225,7 +225,7 @@ docker rm -f infra-test
 | container 必須先裝 `python3`（ubuntu:24.04 minimal 沒預設） | ansible 跑不動 | 用 `--image-pilot ubuntu-24.04`（已預裝）；或 run 前 `apt install -y python3`；或自己 `docker commit` |
 | 預設 entrypoint 是 `sleep infinity`，PID 1 不是 systemd | `systemctl` / `service` / `systemd-resolved` 任務全炸 | 起 target 時加 `--systemd`（見 §2.1 / §8.5），用 `/sbin/init` 開機 |
 | `show-inventory` 不支援多 host | 一個 target = 一台 host | 多 host 用 `--sandbox-topology` 走 sandbox 那條 |
-| `--privileged` 是 default | 在多租戶環境不適用 | `--no-privileged` + 自己手動 `--cap-add=...` |
+| `--privileged` 是 default | 在多租戶環境不適用 | `--no-privileged` + 自己手動 `--cap-add=...`；或改用 `--engine podman`（見 §8.6）— rootless 消掉「使用者在 docker group = host root」這條路 |
 | inventory 寫到 tmpfile | 失敗時可能留垃圾 | `defer os.Remove(invPath)` 已處理 |
 
 ### 6.1 建議的下一步
@@ -384,12 +384,61 @@ pilot docker-target down --name infra-test
 - 不需要 systemd 的 playbook 就別開 `--systemd`，`sleep infinity` 更輕量、
   也能用任何沒裝 systemd 的 image（含 alpine / distroless）。
 
+### 8.6 Podman engine（`--engine podman`，opt-in）
+
+> Status: **opt-in，docker 仍是預設**。兩邊並存一段時間再決定要不要切預設值。
+
+動機：拿掉「使用者要在 `docker group` 才能跑 docker-target」這個 root-equivalence
+洞（`docker group` 成員等同 host root，`docker run -v /:/host` 就能提權）。
+podman rootless + daemonless，天生不需要這個 group。
+
+```bash
+pilot docker-target up --image-pilot ubuntu-24.04 --name infra-test \
+    --engine podman
+#   engine       : podman
+
+# --systemd 一樣可以疊：rootless podman 對「容器內 systemd」的支援本來就比
+# docker 成熟，這是 podman 的招牌功能之一，不是靠 --privileged 硬撐。
+pilot docker-target up --image-pilot ubuntu-24.04 --engine podman \
+    --systemd --name infra-test
+```
+
+- `--engine` 只在 `up` 指定；`down` / `exec` / `run` / `verify` / `snapshot` /
+  `rollback` 都從 state 讀回該 target 建立時的 engine，不用每次重複帶。
+- 底層走 `containers.podman.podman` ansible connection plugin（`containers.podman`
+  collection 是前置條件，不是 `community.docker` 那個 `docker` plugin）。
+- Binary 覆寫：`PILOT_PODMAN_BIN`（對稱於既有的 `PILOT_DOCKER_BIN`）。
+- **rootless 前置條件**（機器層級，不是這個 repo 能保證的）：
+  - cgroup v2 + systemd user session delegation（Ubuntu 24.04 預設有，但要在
+    實際跑 docker-target 的機器上確認，CI service account 常常沒有）
+  - `/etc/subuid` / `/etc/subgid` 有給該使用者帳號配 range（一般互動式帳號
+    `adduser` 時會自動配，service account 常常沒有，要另外設定）
+- 已知限制：rootless `--privileged` 不是 docker 那種「真 host root」（被 user
+  namespace 關住），但目前 `--systemd` 路徑仍然要求 privileged；拿掉它、改用
+  `--cap-add` 白名單是下一步，不在這次範圍內。
+
+**已在真機 podman 4.9.3（rootless，Ubuntu）跑過 end-to-end**：
+`up`（含 `--image-pilot` 自動 `podman build`）→ `show-inventory` → `ansible -m ping`
+（透過 `containers.podman.podman`）→ `docker-target run`（完整 playbook，
+含 `copy` module）→ `snapshot` → `rollback`（`engine` 欄位正確保留）→ `down`。
+`--systemd` 也驗證過：容器內 `ps -p 1 -o comm=` 回 `systemd`，且即使
+`--privileged`，host 端的 `conmon`/container process owner 仍是一般使用者
+（非 root）——證實 rootless `--privileged` 跟 docker 的 `--privileged` 不是
+同一個風險等級。
+
+過程中順手修了一個**跟這次改動無關的既有 bug**：`docker-target run` 和
+`show-inventory` 兩個子命令一直在檢查 `dtSnapshotTag`（一個屬於 `snapshot`
+子命令的 package-level flag 變數,`run`/`show-inventory` 根本沒有 `--tag`
+flag）,導致這兩個指令在乾淨的 CLI 呼叫下永遠因為空字串驗證失敗而報錯。
+已移除這兩處誤植的檢查（`runDtShowInventory` / `runDtRun`）。
+
 ---
 
 ## 9. 變更紀錄（v1.1+ 增量）
 
 | 日期 | 版本 | 變更 |
 |------|------|------|
+| 2026-07-03 | v1.3 | ＋`--engine podman`（opt-in，docker 仍是預設）：rootless/daemonless，消掉 docker-group root-equivalence；`Target`/`Options` 加 `Engine` 欄位、per-engine binary override（`PILOT_PODMAN_BIN`）、inventory 依 engine 切 `containers.podman.podman` connection plugin；真機 rootless podman 4.9.3 跑過 up/show-inventory/ping/run/snapshot/rollback/down + `--systemd` 全套驗證；順手修 `run`/`show-inventory` 誤檢查 `dtSnapshotTag` 的既有 bug |
 | 2026-06-30 | v1.2 | ＋`--systemd`（以 /sbin/init 開機，systemctl/service/systemd-resolved 可用，rollback 保留設定）；image 補 systemd+systemd-sysv+STOPSIGNAL；`up` 對 `pilot-target:*` image 缺漏時自動 build（Dockerfile embed 進 binary，免先跑 build.sh）；修 `pilot run --target` 的 inventory tmpfile 外洩 |
 | 2026-06-30 | v1.1 | ＋pre-bake image (`--image-pilot`) / ＋multi-host (`--hosts`) / ＋snapshot+rollback / ＋`pilot run --target` |
 | 2026-06-30 | v1.0 | 初版：up/down/list/run/verify/exec/show-inventory |

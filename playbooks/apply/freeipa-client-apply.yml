@@ -55,9 +55,12 @@
     staging_attested_within_hours: 168
 
     # Realm coordinates — MUST match the FreeIPA server (freeipa-server.md §1.5).
-    ipa_domain: ipa.pilot.internal
-    ipa_realm: "{{ ipa_domain | upper }}"
-    ipa_server_fqdn: "ipa1.{{ ipa_domain }}"
+    # Overridable from group_vars/freeipa.yml (freeipa_domain / freeipa_realm /
+    # freeipa_server_fqdn); defaults preserve original behaviour. Keep these in
+    # sync with the server by setting them ONCE in a shared group_vars file.
+    ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+    ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
+    ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
 
     # Enrollment principal — reuses the same admin creds as the server vault.
     ipa_enroll_principal: admin

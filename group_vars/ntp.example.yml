@@ -1,0 +1,15 @@
+---
+# ============================================================================
+#  group_vars/ntp.example.yml —— NTP provider(core-infra-provider)設定
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/ntp.yml
+#    cp group_vars/ntp.example.yml <inventory 目錄>/group_vars/ntp.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名 ntp 才生效。)
+# ============================================================================
+
+# 上游 NTP 來源(空白分隔可多個);預設 ntp.ubuntu.com
+ntp_pool: "ntp.ubuntu.com pool.ntp.org"
+
+# provider 預設 chrony,通常不用改;要改得用 -e ntp_provider=...
+# (寫死在 play vars,group_vars 蓋不過去)。

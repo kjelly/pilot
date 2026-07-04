@@ -61,14 +61,17 @@
     confirm_prod: false
     staging_attested_within_hours: 168
 
-    # Identity / realm
-    ipa_domain: ipa.pilot.internal
-    ipa_realm: "{{ ipa_domain | upper }}"
+    # Identity / realm. Overridable from group_vars (place freeipa_domain etc.
+    # in group_vars/freeipa.yml next to your inventory — see group_vars/
+    # freeipa.example.yml). Defaults preserve the original behaviour, so
+    # unset = unchanged (vm-target / existing flows keep working).
+    ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+    ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
     # FreeIPA HARD-FORBIDS the server FQDN being equal to the domain name
     # ("hostname cannot be the same as the domain name"). The FQDN must be a
     # host *under* the domain — default to ipa1.<domain>. The short alias
     # (ipa1) is derived from this in the /etc/hosts pin below.
-    ipa_server_fqdn: "ipa1.{{ ipa_domain }}"
+    ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
 
     # Native install
     ipa_packages:

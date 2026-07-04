@@ -1,0 +1,104 @@
+---
+# ============================================================================
+#  INVENTORY 範本 —— 這是給「收到 playbook 的人」照抄的 SCHEMA,不是真實資料。
+# ============================================================================
+#
+#  這份檔案被 committed 進 git 只是為了「文件化 inventory 的正確格式」。
+#  你的『真實 inventory』要另外開一份、且不要進 git(見最下方步驟)。
+#
+#  ── 三步上手 ────────────────────────────────────────────────────────────
+#   1. 複製一份給自己:
+#        cp inventory.example.yml inventory.yml
+#   2. 打開 inventory.yml,把每個 "<FILL-ME>" 換成你的真實值(照右邊註解填)。
+#      只有 "<FILL-ME>" 需要動;其它結構(group 名稱)照留即可。
+#   3. 跑前置檢查,確認填對、也連得到:
+#        ansible-playbook -i inventory.yml playbooks/preflight.yml
+#      全綠了再跑真正的 apply playbook(見 DELIVERY.md)。
+#
+#  ── 核心觀念 ────────────────────────────────────────────────────────────
+#   * 每台機器只在 `all.hosts:` 定義「一次」(IP / 連線資訊)。
+#   * `children:` 底下的 group 表達「這台機器是什麼角色」——只要把你的
+#     host 名稱列進對應 group 就好,不要重抄連線資訊。
+#   * playbook 靠 group 找到自己要作用的機器;你不需要維護對應表。
+#   * 用不到的角色 group,整段刪掉即可(例如你沒有 keycloak 就刪 keycloak)。
+#   * 這份檔案「只放主機 + 歸屬」。角色的『設定值』(realm、Keycloak URL、
+#     DNS 位址…)不寫這裡,放到 group_vars/<group>.yml——見 group_vars/
+#     *.example.yml 與 DELIVERY.md。這樣 inventory 保持精簡、更難填錯。
+# ============================================================================
+
+all:
+  # ── 1. 主機清單:每台機器定義一次 ──────────────────────────────────────
+  hosts:
+    # 範例:一台 FreeIPA 身份伺服器。把 key 名稱換成你的主機短名。
+    ipa-1:
+      ansible_host: "<FILL-ME>"        # 這台機器的可路由 IP,例 10.0.0.10
+      # FreeIPA 專用:伺服器 FQDN 必須解析到「這個非 loopback IP」。
+      # 沒有要裝 FreeIPA server 的話,這行刪掉。
+      ipa_server_ip: "<FILL-ME>"       # 同上那個 IP,例 10.0.0.10
+
+    # 範例:兩台一般 Linux server(FreeIPA client / 補丁 / 一般管理)。
+    web-1:
+      ansible_host: "<FILL-ME>"        # IP,例 10.0.0.21
+    web-2:
+      ansible_host: "<FILL-ME>"        # IP,例 10.0.0.22
+
+    # 需要更多機器就照上面格式往下加。key(短名)自己取,全域唯一即可。
+
+  # ── 2. 共用連線設定:填一次,全部主機套用 ──────────────────────────────
+  #    (若某台機器帳號/金鑰不同,把該行搬到那台 host 底下覆寫即可)
+  vars:
+    ansible_user: "<FILL-ME>"                      # SSH 登入帳號,例 ubuntu
+    ansible_ssh_private_key_file: "<FILL-ME>"      # SSH 私鑰路徑,例 ~/.ssh/id_ed25519
+
+  # ── 3. 角色 / 環境 group:把主機貼上「它是什麼」的標籤 ──────────────────
+  #    playbook 各自 target 這些 group(見每支 apply playbook 的 hosts:)。
+  #    用不到的整段刪掉。
+  children:
+
+    # -- 身份 / AAA(FreeIPA)-------------------------------------------------
+    #    server + client 都放進 freeipa 父群組,好讓 realm 設定
+    #    (group_vars/freeipa.yml)兩邊共用「一份」、不會各填一份而不同步。
+    freeipa:
+      children:
+        freeipa-server:        # freeipa-server-apply.yml 的預設目標
+          hosts:
+            ipa-1:
+        freeipa-client:        # freeipa-client-apply.yml 的預設目標(被納管的機器)
+          hosts:
+            web-1:
+            web-2:
+
+    # -- 核心基礎服務(core-infra-provider-apply.yml,以 infra_role 選角色)--
+    dns:                       # 跑 -e infra_role=dns 時作用的機器
+      hosts: {}                # 例:讓 ipa-1 兼當 DNS → 改成  hosts: { ipa-1: }
+    ntp:                       # 跑 -e infra_role=ntp 時作用的機器
+      hosts: {}
+    keycloak:                  # keycloak-apply.yml 的預設目標(IdP)
+      hosts: {}
+    keycloak-db:               # keycloak-db-apply.yml 的預設目標(PostgreSQL)
+      hosts: {}
+    infra-provider:            # 整包基礎服務的聚合 group(方便一次 target)
+      children:
+        dns:
+        ntp:
+        keycloak:
+        keycloak-db:
+
+    # -- 一般 Linux server(pam-oidc-sshd / os-patch 等通用 playbook)--------
+    linux-servers:             # pam-oidc-sshd-apply.yml 的預設目標
+      hosts:
+        web-1:
+        web-2:
+
+    # -- 環境維度(與角色正交;讓你能用 group 交集精準鎖定)------------------
+    #    例:只對「prod 環境的 dns 機器」套用 →  -e target_group='dns:&prod'
+    #        只跑 sandbox                    →  --limit sandbox
+    prod:
+      hosts:
+        ipa-1:
+        web-1:
+    staging:
+      hosts:
+        web-2:
+    sandbox:
+      hosts: {}                # 測試機放這裡 → hosts: { test-vm: }

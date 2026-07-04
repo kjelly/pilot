@@ -1,0 +1,339 @@
+# Fixtures playbook: per-host authorization demo (verifies the hostgroup /
+# HBAC / host-scoped-sudo extension added to freeipa-identity-apply.yml).
+#
+# Prereqs: freeipa-identity-apply.yml has already been applied with a roster
+# defining hz-web/hz-db groups+users, webhosts/dbhosts hostgroups, and the
+# hz-login-web/hz-login-db HBAC rules + hz-web-systemctl/hz-db-systemctl sudo
+# rules scoped to those hostgroups (see ~/.vault/ipa-identity-test.yaml).
+#
+# This fixtures playbook adds what the generic reconciler intentionally does
+# NOT model (sudo options, non-expiring test passwords) and runs the
+# authoritative HBAC decision-engine check (`ipa hbactest`) so host-scoping
+# is proven server-side before the client-side SSH/sudo sim runs.
+#
+# Usage:
+#   pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-hostauthz-demo.yml \
+#       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml \
+#       --tags fixtures,t3,hbactest
+#
+# ALWAYS pass --tags fixtures,t3,hbactest for the verification run above. This
+# file also carries `restore` (re-enable allow_all) and `cleanup` (delete
+# every object this fixture created) task blocks, gated behind their own
+# tags precisely so they run only when explicitly requested (see the
+# `--tags restore` / `--tags cleanup` invocations below). Omitting --tags
+# entirely does NOT scope the run to "just verification" — Ansible's default
+# with no --tags/--skip-tags is to run every task regardless of its tags, so
+# an untagged run also silently executes restore+cleanup at the end,
+# deleting the hostgroups/HBAC rules/sudo rules/users/groups this fixture
+# depends on. The damage is easy to miss because IPA's allow_all rule is
+# still enabled at that point, so login keeps working — only sudo (which has
+# no allow_all-style fallback) fails downstream, in T5.
+---
+- name: FreeIPA per-host authorization demo fixtures
+  hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    ipa_domain: ipa.pilot.internal
+    ipa_realm: "{{ ipa_domain | upper }}"
+    webhost_fqdn: freeipa-client.ipa.pilot.internal
+    dbhost_fqdn: freeipa-client-2.ipa.pilot.internal
+
+  pre_tasks:
+    - name: "Gate: admin credential present"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+        fail_msg: "Pass -e @~/.vault/freeipa-sandbox.yaml with ipa_admin_password"
+      tags: [always]
+
+  tasks:
+    - name: "Fixtures — kinit admin"
+      ansible.builtin.shell:
+        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+      changed_when: false
+      no_log: true
+      tags: [fixtures]
+
+    # ── T3: structure verification ──────────────────────────────────────
+    - name: "T3 — show hostgroups"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-show, "{{ item }}", --all]
+      loop: [webhosts, dbhosts]
+      register: t3_hostgroups
+      changed_when: false
+      tags: [fixtures, t3]
+
+    - name: "T3 — show HBAC rules"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-show, "{{ item }}", --all]
+      loop: [hz-login-web, hz-login-db]
+      register: t3_hbac
+      changed_when: false
+      tags: [fixtures, t3]
+
+    - name: "T3 — show sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-show, "{{ item }}", --all]
+      loop: [hz-web-systemctl, hz-db-systemctl]
+      register: t3_sudo
+      changed_when: false
+      tags: [fixtures, t3]
+
+    - name: "T3 — assert hostgroup membership matches the roster"
+      ansible.builtin.assert:
+        that:
+          - "'freeipa-client.ipa.pilot.internal' in t3_hostgroups.results[0].stdout"
+          - "'freeipa-client-2.ipa.pilot.internal' in t3_hostgroups.results[1].stdout"
+        fail_msg: "hostgroup membership does not match roster: {{ t3_hostgroups.results | map(attribute='stdout') | list }}"
+      tags: [fixtures, t3]
+
+    - name: "T3 — assert HBAC rules reference the right hostgroup/service/group"
+      ansible.builtin.assert:
+        that:
+          - "'webhosts' in t3_hbac.results[0].stdout"
+          - "'hz-web' in t3_hbac.results[0].stdout"
+          - "'sshd' in t3_hbac.results[0].stdout"
+          - "'dbhosts' in t3_hbac.results[1].stdout"
+          - "'hz-db' in t3_hbac.results[1].stdout"
+        fail_msg: "HBAC rule structure mismatch: {{ t3_hbac.results | map(attribute='stdout') | list }}"
+      tags: [fixtures, t3]
+
+    - name: "T3 — assert sudo rules reference the right hostgroup/command/group"
+      ansible.builtin.assert:
+        that:
+          - "'webhosts' in t3_sudo.results[0].stdout"
+          - "'hz-web' in t3_sudo.results[0].stdout"
+          - "'systemctl' in t3_sudo.results[0].stdout"
+          - "'dbhosts' in t3_sudo.results[1].stdout"
+          - "'hz-db' in t3_sudo.results[1].stdout"
+        fail_msg: "Sudo rule structure mismatch: {{ t3_sudo.results | map(attribute='stdout') | list }}"
+      tags: [fixtures, t3]
+
+    # sudorule-add-allow-command registers a sudoCommand object as a side
+    # effect, but central sudo rules still require password auth by default
+    # (see freeipa-audit-demo-gotchas) — set !authenticate so the sim's
+    # `sudo -n systemctl` works non-interactively.
+    - name: "Fixtures — set hz-web-systemctl to not require authentication"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-add-option, hz-web-systemctl, --sudooption=!authenticate]
+      register: web_rule_opt
+      changed_when: "'Added Sudo Option' in (web_rule_opt.stdout | default(''))"
+      failed_when:
+        - web_rule_opt.rc != 0
+        - "'already exists' not in (web_rule_opt.stderr | default(''))"
+      tags: [fixtures]
+
+    - name: "Fixtures — set hz-db-systemctl to not require authentication"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-add-option, hz-db-systemctl, --sudooption=!authenticate]
+      register: db_rule_opt
+      changed_when: "'Added Sudo Option' in (db_rule_opt.stdout | default(''))"
+      failed_when:
+        - db_rule_opt.rc != 0
+        - "'already exists' not in (db_rule_opt.stderr | default(''))"
+      tags: [fixtures]
+
+    # `ipa passwd` (used by freeipa-identity-apply.yml) sets a password that
+    # expires immediately and forces change-on-next-login, which breaks
+    # non-interactive kinit in the sim. Reset via kadmin.local for a stable
+    # password, same fix as freeipa-audit-demo.yml.
+    - name: "Fixtures — set stable password for hz_web via kadmin.local"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          printf "cpw hz_web\n{{ hz_web_password | default('TestWebPass123') }}\n{{ hz_web_password | default('TestWebPass123') }}\n" \
+            | kadmin.local 2>&1 | grep -E "(changed|error|Error)" || true
+      register: hz_web_cpw
+      changed_when: "'changed' in hz_web_cpw.stdout"
+      failed_when: false
+      no_log: true
+      tags: [fixtures]
+
+    - name: "Fixtures — set stable password for hz_db via kadmin.local"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          printf "cpw hz_db\n{{ hz_db_password | default('TestDbPass123') }}\n{{ hz_db_password | default('TestDbPass123') }}\n" \
+            | kadmin.local 2>&1 | grep -E "(changed|error|Error)" || true
+      register: hz_db_cpw
+      changed_when: "'changed' in hz_db_cpw.stdout"
+      failed_when: false
+      no_log: true
+      tags: [fixtures]
+
+    # ── T4: HBAC decision-engine check (authoritative — same evaluation SSSD
+    # uses at login time, no real SSH/PAM session needed) ──────────────────
+    - name: "T4 — hbactest: hz_web -> webhost (expect matched)"
+      ansible.builtin.command:
+        argv: [ipa, hbactest, --user=hz_web, "--host={{ webhost_fqdn }}", --service=sshd]
+      register: hbactest_web_web
+      changed_when: false
+      failed_when: false
+      tags: [fixtures, hbactest]
+
+    - name: "T4 — hbactest: hz_web -> dbhost (expect NOT matched)"
+      ansible.builtin.command:
+        argv: [ipa, hbactest, --user=hz_web, "--host={{ dbhost_fqdn }}", --service=sshd]
+      register: hbactest_web_db
+      changed_when: false
+      failed_when: false
+      tags: [fixtures, hbactest]
+
+    - name: "T4 — hbactest: hz_db -> dbhost (expect matched)"
+      ansible.builtin.command:
+        argv: [ipa, hbactest, --user=hz_db, "--host={{ dbhost_fqdn }}", --service=sshd]
+      register: hbactest_db_db
+      changed_when: false
+      failed_when: false
+      tags: [fixtures, hbactest]
+
+    - name: "T4 — hbactest: hz_db -> webhost (expect NOT matched)"
+      ansible.builtin.command:
+        argv: [ipa, hbactest, --user=hz_db, "--host={{ webhost_fqdn }}", --service=sshd]
+      register: hbactest_db_web
+      changed_when: false
+      failed_when: false
+      tags: [fixtures, hbactest]
+
+    # NOTE: we assert on which SPECIFIC rule matched, not the overall
+    # "Access granted" verdict — the sandbox's default allow_all HBAC rule
+    # is still enabled at this point (see freeipa-hostauthz-sim.yml's
+    # negative phase for the real allow_all-disabled PAM-level proof), so
+    # "Access granted" is True for every combination regardless of host
+    # scoping. hbactest still reports each rule's individual match/no-match
+    # verdict, which is what actually proves host-scoping is correct.
+    - name: "T4 — assert HBAC decisions match expected host-scoping"
+      ansible.builtin.assert:
+        that:
+          - "'Matched rules: hz-login-web' in hbactest_web_web.stdout"
+          - "'Not matched rules: hz-login-web' in hbactest_web_db.stdout"
+          - "'Matched rules: hz-login-db' in hbactest_db_db.stdout"
+          - "'Not matched rules: hz-login-db' in hbactest_db_web.stdout"
+        fail_msg: >-
+          hbactest per-rule verdicts did not match expected host-scoping. web/web={{ hbactest_web_web.stdout }}
+          web/db={{ hbactest_web_db.stdout }} db/db={{ hbactest_db_db.stdout }} db/web={{ hbactest_db_web.stdout }}
+      tags: [fixtures, hbactest]
+
+    - name: "T4 — release the Kerberos ticket"
+      ansible.builtin.command: kdestroy
+      changed_when: false
+      failed_when: false
+      tags: [fixtures]
+
+    - name: "T4 — summary"
+      ansible.builtin.debug:
+        msg: |
+          HBAC decision-engine check (ipa hbactest, T4) — per-rule verdict
+          (overall "Access granted" is True for all combos while allow_all
+          is still enabled; the per-rule match/no-match line is authoritative
+          for host-scoping):
+            hz-login-web rule, hz_web -> {{ webhost_fqdn }} : {{ 'MATCHED' if 'Matched rules: hz-login-web' in hbactest_web_web.stdout else 'NOT MATCHED' }} (expected MATCHED)
+            hz-login-web rule, hz_web -> {{ dbhost_fqdn }}  : {{ 'MATCHED' if 'Matched rules: hz-login-web' in hbactest_web_db.stdout else 'NOT MATCHED' }} (expected NOT MATCHED)
+            hz-login-db rule,  hz_db  -> {{ dbhost_fqdn }}  : {{ 'MATCHED' if 'Matched rules: hz-login-db' in hbactest_db_db.stdout else 'NOT MATCHED' }} (expected MATCHED)
+            hz-login-db rule,  hz_db  -> {{ webhost_fqdn }} : {{ 'MATCHED' if 'Matched rules: hz-login-db' in hbactest_db_web.stdout else 'NOT MATCHED' }} (expected NOT MATCHED)
+      tags: [fixtures]
+
+    # ── Re-enable allow_all (companion to freeipa-identity-apply.yml's
+    # one-directional disable) — run with --tags restore after the sim's
+    # negative phase so the sandbox's other accounts aren't left locked out.
+    - name: "Restore — kinit admin"
+      ansible.builtin.shell:
+        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+      changed_when: false
+      no_log: true
+      tags: [restore]
+
+    - name: "Restore — re-enable the default allow_all HBAC rule"
+      ansible.builtin.command: ipa hbacrule-enable allow_all
+      register: allow_all_enable
+      changed_when: "'Enabled HBAC rule' in (allow_all_enable.stdout | default(''))"
+      failed_when:
+        - allow_all_enable.rc != 0
+        - "'already enabled' not in (allow_all_enable.stderr | default(''))"
+      tags: [restore]
+
+    - name: "Restore — release the Kerberos ticket"
+      ansible.builtin.command: kdestroy
+      changed_when: false
+      failed_when: false
+      tags: [restore]
+
+    # ── T7 cleanup: remove everything this test created server-side ──────
+    - name: "Cleanup — kinit admin"
+      ansible.builtin.shell:
+        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+      changed_when: false
+      no_log: true
+      tags: [cleanup]
+
+    - name: "Cleanup — delete sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-del, "{{ item }}"]
+      loop: [hz-web-systemctl, hz-db-systemctl]
+      register: cleanup_sudorule
+      changed_when: "'Deleted Sudo Rule' in (cleanup_sudorule.stdout | default(''))"
+      failed_when:
+        - cleanup_sudorule.rc != 0
+        - "'not found' not in (cleanup_sudorule.stderr | default(''))"
+      tags: [cleanup]
+
+    - name: "Cleanup — delete sudo command object"
+      ansible.builtin.command:
+        argv: [ipa, sudocmd-del, /usr/bin/systemctl]
+      register: cleanup_sudocmd
+      changed_when: "'Deleted Sudo Command' in (cleanup_sudocmd.stdout | default(''))"
+      failed_when:
+        - cleanup_sudocmd.rc != 0
+        - "'not found' not in (cleanup_sudocmd.stderr | default(''))"
+      tags: [cleanup]
+
+    - name: "Cleanup — delete HBAC rules"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-del, "{{ item }}"]
+      loop: [hz-login-web, hz-login-db]
+      register: cleanup_hbac
+      changed_when: "'Deleted HBAC rule' in (cleanup_hbac.stdout | default(''))"
+      failed_when:
+        - cleanup_hbac.rc != 0
+        - "'not found' not in (cleanup_hbac.stderr | default(''))"
+      tags: [cleanup]
+
+    - name: "Cleanup — delete hostgroups"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-del, "{{ item }}"]
+      loop: [webhosts, dbhosts]
+      register: cleanup_hostgroup
+      changed_when: "'Deleted hostgroup' in (cleanup_hostgroup.stdout | default(''))"
+      failed_when:
+        - cleanup_hostgroup.rc != 0
+        - "'not found' not in (cleanup_hostgroup.stderr | default(''))"
+      tags: [cleanup]
+
+    - name: "Cleanup — delete users"
+      ansible.builtin.command:
+        argv: [ipa, user-del, "{{ item }}"]
+      loop: [hz_web, hz_db]
+      register: cleanup_user
+      changed_when: "'Deleted user' in (cleanup_user.stdout | default(''))"
+      failed_when:
+        - cleanup_user.rc != 0
+        - "'not found' not in (cleanup_user.stderr | default(''))"
+      tags: [cleanup]
+
+    - name: "Cleanup — delete groups"
+      ansible.builtin.command:
+        argv: [ipa, group-del, "{{ item }}"]
+      loop: [hz-web, hz-db]
+      register: cleanup_group
+      changed_when: "'Deleted group' in (cleanup_group.stdout | default(''))"
+      failed_when:
+        - cleanup_group.rc != 0
+        - "'not found' not in (cleanup_group.stderr | default(''))"
+      tags: [cleanup]
+
+    - name: "Cleanup — release the Kerberos ticket"
+      ansible.builtin.command: kdestroy
+      changed_when: false
+      failed_when: false
+      tags: [cleanup]

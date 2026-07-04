@@ -1,0 +1,27 @@
+---
+# ============================================================================
+#  group_vars/linux-servers.example.yml —— PAM-OIDC(SSH 走 Keycloak 登入)設定
+# ============================================================================
+#
+#  把 pam-oidc-sshd-apply.yml 原本要靠一長串 -e 帶入的設定,改成放這裡一次。
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/linux-servers.yml
+#    cp group_vars/linux-servers.example.yml <inventory 目錄>/group_vars/linux-servers.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名 linux-servers 才生效。)
+#
+#  設定好之後,套用就不用再帶那三個 -e:
+#    ansible-playbook -i inventory.yml playbooks/apply/pam-oidc-sshd-apply.yml
+# ============================================================================
+
+# Keycloak 伺服器位址(必須 http:// 或 https:// 開頭)
+keycloak_server_url: https://192.168.100.2:8080
+
+# Keycloak realm 名稱
+keycloak_realm: master
+
+# 這個 SSH 登入用的 client id
+keycloak_client_id: ssh-pam-client
+
+# client secret —— 若你的 client 是 confidential,填在這;否則留空。
+# 機密建議放 ansible-vault 加密檔、用 -e @vault 帶入,不要明文寫這裡。
+# keycloak_client_secret: ""

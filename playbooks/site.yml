@@ -1,0 +1,61 @@
+---
+# ============================================================================
+#  site.yml —— 全站入口:先 preflight,再依序套用各元件
+# ============================================================================
+#
+#  用法(全套):
+#    ansible-playbook -i inventory.yml playbooks/site.yml
+#
+#  用法(只跑某元件,用 tag 篩選;preflight 靜態檢查一律先跑):
+#    ansible-playbook -i inventory.yml playbooks/site.yml --tags freeipa
+#    ansible-playbook -i inventory.yml playbooks/site.yml --tags keycloak
+#
+#  ── 運作方式(重要)────────────────────────────────────────────────────
+#   * 第一步一定先跑 playbooks/preflight.yml。inventory 沒填對 / 連不上,
+#     preflight 會讓所有 host 進入 failed,後面的 apply 自動拿不到 host → 全部跳過。
+#     也就是「preflight 沒過,絕不會亂套用」。
+#   * 每支 apply 各自 `hosts: <某 group>`。你的 inventory 裡『空的 group 會自動跳過』,
+#     所以你只填了哪些角色、就只會跑哪些元件——沒填的元件連 secret 都不用給。
+#   * 需要密碼的元件(Keycloak / FreeIPA identity)才需要額外帶 -e / vault 檔,
+#     且『只有當該 group 有 host 時』才會被要求。見 DELIVERY.md。
+#
+#  ── 相依順序 ────────────────────────────────────────────────────────────
+#     核心服務(dns/ntp)→ FreeIPA server → FreeIPA client
+#                         → Keycloak DB → Keycloak → PAM-OIDC → OS 補丁
+#
+#  注意:FreeIPA 使用者/權限(freeipa-identity-apply.yml)是「資料驅動的 day-2
+#  維運」,需要 vault roster,刻意不放進 site.yml。單獨執行,見 DELIVERY.md。
+# ============================================================================
+
+# ── 0. 前置檢查(一律先跑)───────────────────────────────────────────────
+- import_playbook: preflight.yml
+
+# ── 1. 核心基礎服務(同一支 playbook 以 infra_role 分別套 dns / ntp)──────
+- import_playbook: apply/core-infra-provider-apply.yml
+  vars:
+    infra_role: dns
+  tags: [infra, dns]
+- import_playbook: apply/core-infra-provider-apply.yml
+  vars:
+    infra_role: ntp
+  tags: [infra, ntp]
+
+# ── 2. 身份 / AAA(FreeIPA)server 先於 client ───────────────────────────
+- import_playbook: apply/freeipa-server-apply.yml
+  tags: [freeipa, freeipa-server]
+- import_playbook: apply/freeipa-client-apply.yml
+  tags: [freeipa, freeipa-client]
+
+# ── 3. Keycloak(DB 先於 IdP)────────────────────────────────────────────
+- import_playbook: apply/keycloak-db-apply.yml
+  tags: [keycloak, keycloak-db]
+- import_playbook: apply/keycloak-apply.yml
+  tags: [keycloak]
+
+# ── 4. SSH 走 OIDC 登入(需先有 Keycloak)────────────────────────────────
+- import_playbook: apply/pam-oidc-sshd-apply.yml
+  tags: [pam, oidc]
+
+# ── 5. OS 補丁 SLA(day-2,放最後)──────────────────────────────────────
+- import_playbook: apply/os-patch-sla-apply.yml
+  tags: [patch]

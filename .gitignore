@@ -48,6 +48,9 @@ coverage.txt
 .verification/
 .playbooks/generated/
 inventory*.yaml
+# ...but keep the committed delivery template (the .yml example is the schema
+# recipients copy from). Mirrors the group_vars/dns zones.example pattern below.
+!inventory.example.yml
 
 # DNS zone data is infra topology for a PUBLIC repo — real data lives OUTSIDE
 # the repo tree (in group_vars/ next to an out-of-git inventory). If anyone

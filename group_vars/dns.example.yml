@@ -1,0 +1,21 @@
+---
+# ============================================================================
+#  group_vars/dns.example.yml —— DNS provider(core-infra-provider)設定
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/dns.yml
+#    cp group_vars/dns.example.yml <inventory 目錄>/group_vars/dns.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名 dns 才生效。)
+#
+#  ⚠ 自訂 DNS 區域(dns_zones)不放這裡——它有獨立的 schema 範例,見
+#     group_vars/dns/zones.example.yaml。
+# ============================================================================
+
+# DNS 服務對外監聽的位址(這台 DNS 機器的 IP)
+dns_listen_addr: 10.0.0.53
+
+# 上游遞迴 DNS(解析不到本地區域時往哪送);預設 1.1.1.1
+dns_upstream: 1.1.1.1
+
+# provider 預設 unbound,通常不用改;要改 provider 得用 -e dns_provider=...
+# (它寫死在 playbook 的 play vars,group_vars 蓋不過去——這是刻意的預設)。

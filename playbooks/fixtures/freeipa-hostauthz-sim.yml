@@ -1,0 +1,166 @@
+# Per-host authorization simulation (T5/T6) — mirrors freeipa-audit-sim.yml's
+# kinit + real-SSH-loopback + assert style, applied to the hostgroup / HBAC /
+# host-scoped-sudo extension in freeipa-identity-apply.yml.
+#
+# Run against ONE client at a time. sim_local_user is the account that
+# SHOULD have access to this host (its own hostgroup); sim_foreign_user is
+# the account that belongs to the OTHER host's hostgroup and should NOT.
+# Both users' SSH keys must already be provisioned on this host by
+# freeipa-hostauthz-user-setup.yml (run once per user x host combination,
+# including the "wrong" combinations).
+#
+# Two independently-runnable phases, split by tag because they have
+# different blast-radius requirements:
+#
+#   --tags positive   Safe at any time. Proves: local user can log in +
+#                      sudo the allowed command; foreign user's SUDO is
+#                      denied (sudo rules have no allow_all-style fallback,
+#                      so this is conclusive regardless of HBAC state).
+#
+#   --tags negative    Proves foreign user's LOGIN itself is denied. Only
+#                      meaningful once IPA's default "allow_all" HBAC rule
+#                      is disabled (freeipa-identity-apply.yml
+#                      -e ipa_hbac_disable_allow_all=true) — otherwise
+#                      allow_all lets every enrolled user log in to every
+#                      enrolled host and this assertion will legitimately
+#                      fail. Re-enable allow_all immediately after this
+#                      phase; don't leave the sandbox's other accounts
+#                      (e.g. audituser, pilotuser) locked out.
+#
+# Usage:
+#   pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-hostauthz-sim.yml \
+#       -e sim_local_user=hz_web -e sim_local_password=TestWebPass123 -e sim_foreign_user=hz_db \
+#       --tags positive
+#   # ... disable allow_all on the server, then:
+#   pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-hostauthz-sim.yml \
+#       -e sim_local_user=hz_web -e sim_local_password=TestWebPass123 -e sim_foreign_user=hz_db \
+#       --tags negative
+#   # ... re-enable allow_all on the server.
+---
+- name: FreeIPA per-host authorization simulation
+  hosts: "{{ target_group | default('freeipa-client') }}"
+  become: false
+  gather_facts: false
+  vars:
+    sim_local_user: hz_web
+    sim_local_password: TestWebPass123
+    sim_foreign_user: hz_db
+    ipa_realm: IPA.PILOT.INTERNAL
+    sim_local_key: "/home/{{ sim_local_user }}/.ssh/id_ed25519"
+    sim_foreign_key: "/home/{{ sim_foreign_user }}/.ssh/id_ed25519"
+    # PreferredAuthentications=publickey matters here, not just for speed:
+    # the preceding kinit gives the shell a live Kerberos ticket, so without
+    # this, sshd's GSSAPI negotiation is tried first and can succeed on its
+    # own — masking whether the -i {{ sim_local_key }}/{{ sim_foreign_key }}
+    # pubkey below actually would have been accepted, and adding several
+    # seconds of GSSAPI nego latency per hop (confirmed 2026-07-04: this is
+    # what surfaced as slow/flaky sudo checks in T5.3).
+    sim_ssh_opts: >-
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o BatchMode=yes -o ConnectTimeout=10 -o PreferredAuthentications=publickey
+
+  pre_tasks:
+    - name: "Pre-condition: clear any stale Kerberos tickets"
+      become: true
+      ansible.builtin.shell: kdestroy -A 2>/dev/null || true
+      changed_when: false
+      failed_when: false
+      tags: [sim, positive, negative]
+
+  tasks:
+    # ══ POSITIVE — safe regardless of allow_all state ═══════════════════
+    - name: "Sim[+] — kinit as {{ sim_local_user }}"
+      become: true
+      ansible.builtin.shell:
+        cmd: 'echo "{{ sim_local_password }}" | kinit -r 7d {{ sim_local_user }}'
+      register: kinit_local
+      changed_when: false
+      no_log: true
+      tags: [sim, positive]
+
+    - name: "Sim[+] — assert kinit succeeded"
+      ansible.builtin.assert:
+        that: [kinit_local.rc == 0]
+        fail_msg: "kinit failed for {{ sim_local_user }}"
+      tags: [sim, positive]
+
+    - name: "Sim[+] — SSH login as {{ sim_local_user }} on its own host (expect SUCCEED)"
+      become: true
+      ansible.builtin.shell:
+        cmd: 'ssh -i {{ sim_local_key }} {{ sim_ssh_opts }} {{ sim_local_user }}@localhost -- whoami 2>&1'
+      register: local_login
+      changed_when: false
+      tags: [sim, positive]
+
+    - name: "Sim[+] — assert local login succeeded"
+      ansible.builtin.assert:
+        that:
+          - local_login.rc == 0
+          - sim_local_user in local_login.stdout
+        fail_msg: "{{ sim_local_user }} should be able to log in to {{ inventory_hostname }}: {{ local_login.stdout }} {{ local_login.stderr }}"
+      tags: [sim, positive]
+
+    - name: "Sim[+] — sudo -n systemctl as {{ sim_local_user }} (expect SUCCEED — host-scoped rule matches this host)"
+      become: true
+      ansible.builtin.shell:
+        cmd: 'ssh -i {{ sim_local_key }} {{ sim_ssh_opts }} {{ sim_local_user }}@localhost -- sudo -n systemctl is-active sssd 2>&1'
+      register: local_sudo
+      changed_when: false
+      tags: [sim, positive]
+
+    - name: "Sim[+] — assert local sudo succeeded"
+      ansible.builtin.assert:
+        that: [local_sudo.rc == 0]
+        fail_msg: "{{ sim_local_user }} sudo systemctl should succeed on {{ inventory_hostname }}: {{ local_sudo.stdout }} {{ local_sudo.stderr }}"
+      tags: [sim, positive]
+
+    - name: "Sim[+] — sudo -n systemctl as {{ sim_foreign_user }} (expect FAIL — no rule for this host is scoped to them)"
+      become: true
+      ansible.builtin.shell:
+        cmd: 'ssh -i {{ sim_foreign_key }} {{ sim_ssh_opts }} {{ sim_foreign_user }}@localhost -- sudo -n systemctl is-active sssd 2>&1'
+      register: foreign_sudo
+      changed_when: false
+      failed_when: false
+      tags: [sim, positive]
+
+    - name: "Sim[+] — assert foreign sudo was denied"
+      ansible.builtin.assert:
+        that: [foreign_sudo.rc != 0]
+        fail_msg: >-
+          {{ sim_foreign_user }} should NOT be able to sudo systemctl on {{ inventory_hostname }}
+          (host-scoped sudo rule leak). Got rc={{ foreign_sudo.rc }}: {{ foreign_sudo.stdout }}
+      tags: [sim, positive]
+
+    - name: "Sim[+] — positive-phase summary"
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          {{ sim_local_user }} login    : {{ 'OK' if local_login.rc == 0 else 'FAIL' }} (expected OK)
+          {{ sim_local_user }} sudo     : {{ 'OK' if local_sudo.rc == 0 else 'FAIL' }} (expected OK)
+          {{ sim_foreign_user }} sudo   : {{ 'DENIED' if foreign_sudo.rc != 0 else 'ALLOWED (BUG)' }} (expected DENIED)
+      tags: [sim, positive]
+
+    # ══ NEGATIVE — only meaningful with allow_all disabled ══════════════
+    - name: "Sim[-] — SSH login as {{ sim_foreign_user }} on the WRONG host (expect FAIL — HBAC deny)"
+      become: true
+      ansible.builtin.shell:
+        cmd: 'ssh -i {{ sim_foreign_key }} {{ sim_ssh_opts }} {{ sim_foreign_user }}@localhost -- whoami 2>&1'
+      register: foreign_login
+      changed_when: false
+      failed_when: false
+      tags: [sim, negative]
+
+    - name: "Sim[-] — assert foreign login was denied"
+      ansible.builtin.assert:
+        that: [foreign_login.rc != 0]
+        fail_msg: >-
+          {{ sim_foreign_user }} should NOT be able to log in to {{ inventory_hostname }} once
+          allow_all is disabled (HBAC host-scoping leak). Got rc=0: {{ foreign_login.stdout }}
+      tags: [sim, negative]
+
+    - name: "Sim[-] — negative-phase summary"
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          {{ sim_foreign_user }} login (wrong host) : {{ 'DENIED' if foreign_login.rc != 0 else 'ALLOWED (BUG)' }} (expected DENIED)
+      tags: [sim, negative]

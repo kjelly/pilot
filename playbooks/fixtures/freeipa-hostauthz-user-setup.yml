@@ -1,0 +1,43 @@
+# Sets up a test IPA user for passwordless SSH loopback login on ONE client
+# host, mirroring freeipa-audit-user-setup.yml. Parameterized by
+# hostauthz_user so it can be run for BOTH hz_web and hz_db on BOTH clients —
+# including the "wrong" host for each user, which is what lets the sim
+# playbook attempt (and expect to fail) a cross-host login.
+#
+# Usage (run once per user x host combination):
+#   pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-hostauthz-user-setup.yml \
+#       -e hostauthz_user=hz_web
+#   pilot vm-target run --name freeipa-client-2 playbooks/fixtures/freeipa-hostauthz-user-setup.yml \
+#       -e hostauthz_user=hz_web   # deliberately the "wrong" host too
+---
+- name: Set up a test user's SSH key on a client
+  hosts: "{{ target_group | default('freeipa-client') }}"
+  become: false
+  gather_facts: false
+  vars:
+    hostauthz_user: hz_web
+    hostauthz_key_dest: "/tmp/pilot-vms/{{ hostauthz_user }}-on-{{ inventory_hostname }}-ed25519"
+
+  tasks:
+    - name: "Setup — generate SSH key for {{ hostauthz_user }}"
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          mkdir -p /home/{{ hostauthz_user }}/.ssh
+          ssh-keygen -t ed25519 -f /home/{{ hostauthz_user }}/.ssh/id_ed25519 -N ""
+          cp /home/{{ hostauthz_user }}/.ssh/id_ed25519.pub /home/{{ hostauthz_user }}/.ssh/authorized_keys
+          chown -R {{ hostauthz_user }}:{{ hostauthz_user }} /home/{{ hostauthz_user }}/.ssh
+          chmod 700 /home/{{ hostauthz_user }}/.ssh
+          chmod 600 /home/{{ hostauthz_user }}/.ssh/authorized_keys
+          chmod 600 /home/{{ hostauthz_user }}/.ssh/id_ed25519
+      register: ssh_key_gen
+      changed_when: true
+      tags: [setup]
+
+    - name: "Setup — copy SSH key to local runner"
+      ansible.builtin.fetch:
+        src: "/home/{{ hostauthz_user }}/.ssh/id_ed25519"
+        dest: "{{ hostauthz_key_dest }}"
+        flat: true
+      changed_when: true
+      tags: [setup]
