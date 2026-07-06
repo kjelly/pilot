@@ -1,0 +1,238 @@
+# Apply playbook for docs/verification/thanos-query.md v1.0
+#
+# Central role: runs Thanos Query + Thanos Store Gateway + Thanos Compactor
+# as three Docker containers, giving a single "global query" endpoint over
+# every site's Prometheus data. Unlike every other central+agent pair in
+# this repo (wazuh-manager/wazuh-fim, log-server/audit-log-forwarding),
+# the DISCOVERY DIRECTION IS INVERTED here: this playbook reads the
+# Ansible inventory's `prometheus` group itself and builds the Thanos Query
+# `--store=<host>:<port>` list automatically from `hostvars[h].ansible_host`
+# — no manual IP list variable to maintain. Each site (see
+# playbooks/apply/prometheus-apply.yml) never needs to know this host's
+# address at all.
+#
+# Pre-flight: docs/verification/docker.md PASS (docker.io + docker.service).
+# At least one docs/verification/prometheus.md site SHOULD be applied
+# first, but this playbook works fine (and is idempotent) even with zero
+# sites — see docs/verification/thanos-query.md §1.5 for the "not deployed
+# yet" behavior. Re-apply this playbook any time a new site is added to
+# pick up the new --store entry.
+#
+# Usage (default: SeaweedFS S3 gateway built by seaweedfs-s3-apply.yml;
+# SAME bucket + credentials as every prometheus-apply.yml site):
+#
+#   go run ./cmd/pilot vm-target run --name central \
+#       playbooks/apply/thanos-query-apply.yml \
+#       -e target_group=thanos-query \
+#       -e thanos_s3_target_host=<seaweedfs-s3 IP> \
+#       -e thanos_aws_access_key_id=<key> \
+#       -e thanos_aws_secret_access_key=<secret>
+#
+# Variables: see docs/verification/thanos-query.md §1.5.
+- name: Apply thanos-query (central Thanos Query + Store Gateway + Compactor)
+  hosts: "{{ target_group | default('thanos-query') }}"
+  become: true
+  gather_facts: true
+  vars:
+    thanos_version: "v0.36.1"
+    thanos_store_data_dir: /var/lib/pilot/thanos-store
+    thanos_compact_data_dir: /var/lib/pilot/thanos-compact
+    thanos_config_dir: /etc/pilot/thanos
+    docker_network_name: pilot-metrics
+    thanos_s3_target_host: ""
+    thanos_s3_alias: thanos-s3-backend
+    thanos_s3_port: 8333
+    thanos_s3_bucket: pilot-thanos-metrics
+    thanos_s3_endpoint: "{{ thanos_s3_alias }}:{{ thanos_s3_port }}"
+    thanos_query_store_group: prometheus
+    thanos_query_sidecar_grpc_port: 10901
+
+  pre_tasks:
+    - name: "Gate: required S3 secrets present (fail early, before any mutation)"
+      ansible.builtin.assert:
+        that:
+          - thanos_aws_access_key_id is defined and thanos_aws_access_key_id | length > 0
+          - thanos_aws_secret_access_key is defined and thanos_aws_secret_access_key | length > 0
+        fail_msg: >-
+          Missing required secrets. Pass -e thanos_aws_access_key_id=... -e
+          thanos_aws_secret_access_key=... (vault file recommended over -e
+          in real inventories). Must match the SAME values used by every
+          prometheus-apply.yml site.
+
+    # Same "no reachable destination" trap as restic-backup.md's gate.
+    - name: "Gate: S3 destination must be resolvable"
+      ansible.builtin.assert:
+        that:
+          - (thanos_s3_target_host | length > 0) or (thanos_s3_alias not in thanos_s3_endpoint)
+        fail_msg: >-
+          thanos_s3_target_host is empty AND thanos_s3_endpoint still uses
+          the default thanos-s3-backend alias — Thanos would have no
+          reachable object storage. Either pass -e thanos_s3_target_host=<S3
+          IP/FQDN> (default SeaweedFS S3 gateway target), or override
+          -e thanos_s3_endpoint=... to a fully externally-resolvable
+          host:port.
+
+    - name: "Announce discovered sites (debug)"
+      ansible.builtin.debug:
+        msg: >-
+          thanos_query_store_group={{ thanos_query_store_group }};
+          discovered {{ groups[thanos_query_store_group] | default([]) | length }}
+          site(s): {{ groups[thanos_query_store_group] | default([]) }}
+
+  tasks:
+    - name: "Pin {{ thanos_s3_alias }} -> {{ thanos_s3_target_host }} in /etc/hosts"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ thanos_s3_alias }}$'
+        line: "{{ thanos_s3_target_host }}\t{{ thanos_s3_alias }}"
+        state: present
+      when: thanos_s3_target_host | length > 0
+
+    - block:
+        - name: "Ensure config dir exists"
+          ansible.builtin.file:
+            path: "{{ thanos_config_dir }}"
+            state: directory
+            mode: "0755"
+
+        # thanosio/thanos's official image runs as uid/gid 1001 (user
+        # "thanos"), not root — Store Gateway and Compactor both write a
+        # local meta-syncer index cache under --data-dir at startup and
+        # fail immediately ("mkdir ...: permission denied") against a
+        # root-owned host directory. Sidecar (prometheus-apply.yml) has no
+        # equivalent writable --data-dir, so it doesn't need this fix.
+        - name: "Ensure Thanos data dirs (owned by container's thanos uid 1001)"
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            owner: "1001"
+            group: "1001"
+            mode: "0755"
+          loop:
+            - "{{ thanos_store_data_dir }}"
+            - "{{ thanos_compact_data_dir }}"
+
+        # Same secret-in-mounted-file tradeoff as prometheus-apply.yml —
+        # see that playbook's comment on the equivalent task. Must contain
+        # the exact same bucket/credentials as every site's objstore.yml.
+        - name: "Render Thanos objstore config (S3 backend)"
+          ansible.builtin.copy:
+            dest: "{{ thanos_config_dir }}/objstore.yml"
+            mode: "0644"
+            content: |
+              type: S3
+              config:
+                bucket: "{{ thanos_s3_bucket }}"
+                endpoint: "{{ thanos_s3_endpoint }}"
+                access_key: "{{ thanos_aws_access_key_id }}"
+                secret_key: "{{ thanos_aws_secret_access_key }}"
+                insecure: true
+          no_log: true
+          register: objstore_yml_result
+
+        - name: "Ensure docker network {{ docker_network_name }} exists"
+          community.docker.docker_network:
+            name: "{{ docker_network_name }}"
+            state: present
+
+        # Spec: docs/verification/thanos-query.md C2, C6, C8
+        - name: "Thanos Store Gateway — run pilot-thanos-store container"
+          tags: [C2, C6, C8]
+          community.docker.docker_container:
+            name: pilot-thanos-store
+            image: "thanosio/thanos:{{ thanos_version }}"
+            state: started
+            restart_policy: unless-stopped
+            restart: "{{ objstore_yml_result is changed }}"
+            networks:
+              - name: "{{ docker_network_name }}"
+            command: >-
+              store
+              --data-dir=/var/lib/thanos-store
+              --objstore.config-file=/etc/thanos/objstore.yml
+              --http-address=0.0.0.0:10904
+              --grpc-address=0.0.0.0:10903
+            volumes:
+              - "{{ thanos_store_data_dir }}:/var/lib/thanos-store"
+              - "{{ thanos_config_dir }}/objstore.yml:/etc/thanos/objstore.yml:ro"
+            ports:
+              - "10903:10903"
+              - "10904:10904"
+
+        # Spec: docs/verification/thanos-query.md C3, C7
+        # --wait makes this run continuously (not a one-shot batch job).
+        # Only ONE compactor may ever run against a given bucket at a time
+        # — this role is deliberately single-instance (thanos-query.md §1).
+        - name: "Thanos Compactor — run pilot-thanos-compact container"
+          tags: [C3, C7]
+          community.docker.docker_container:
+            name: pilot-thanos-compact
+            image: "thanosio/thanos:{{ thanos_version }}"
+            state: started
+            restart_policy: unless-stopped
+            restart: "{{ objstore_yml_result is changed }}"
+            networks:
+              - name: "{{ docker_network_name }}"
+            command: >-
+              compact
+              --data-dir=/var/lib/thanos-compact
+              --objstore.config-file=/etc/thanos/objstore.yml
+              --http-address=0.0.0.0:10905
+              --wait
+              --wait-interval=5m
+            volumes:
+              - "{{ thanos_compact_data_dir }}:/var/lib/thanos-compact"
+              - "{{ thanos_config_dir }}/objstore.yml:/etc/thanos/objstore.yml:ro"
+            ports:
+              - "10905:10905"
+
+        # Spec: docs/verification/thanos-query.md C1, C4, C5, C9, C10
+        # --store list is built from the Ansible inventory's
+        # `prometheus` group, not a manually-maintained variable — see the
+        # header comment. docker_container natively diffs its own
+        # `command` parameter against the running container, so a change
+        # here (a site added/removed from inventory) is picked up on
+        # re-apply without needing an extra restart-gate condition.
+        - name: "Thanos Query — run pilot-thanos-query container"
+          tags: [C1, C4, C5, C9, C10]
+          community.docker.docker_container:
+            name: pilot-thanos-query
+            image: "thanosio/thanos:{{ thanos_version }}"
+            state: started
+            restart_policy: unless-stopped
+            networks:
+              - name: "{{ docker_network_name }}"
+            command: >-
+              query
+              --http-address=0.0.0.0:10902
+              --grpc-address=0.0.0.0:10901
+              --store=pilot-thanos-store:10903
+              {% for h in groups[thanos_query_store_group] | default([]) %}
+              --store={{ hostvars[h].ansible_host }}:{{ thanos_query_sidecar_grpc_port }}
+              {% endfor %}
+            ports:
+              - "10901:10901"
+              - "10902:10902"
+
+        - name: "Wait for Thanos Query to become ready"
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:10902/-/ready"
+            status_code: 200
+          register: query_ready
+          until: query_ready.status == 200
+          retries: 30
+          delay: 2
+
+      rescue:
+        - name: "ROLLBACK — remove the objstore config file (contains S3 secret)"
+          ansible.builtin.file:
+            path: "{{ thanos_config_dir }}/objstore.yml"
+            state: absent
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              thanos-query apply FAILED (see task output above); the
+              objstore secret file was removed. Containers (if created) are
+              left in place for inspection via `docker logs
+              pilot-thanos-query` / `pilot-thanos-store` / `pilot-thanos-compact`.
