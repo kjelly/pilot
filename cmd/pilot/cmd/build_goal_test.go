@@ -10,7 +10,7 @@ import (
 // filesystem. This is the fix for "the model ran a bunch of tools but
 // never ran ansible".
 func TestBuildGoal_DirectsRunAnsibleFirst(t *testing.T) {
-	goal := buildGoal(playbookTarget{Playbook: "playbooks/hello-localhost.yaml"}, "")
+	goal := buildGoal(playbookTarget{Playbook: "playbooks/test/hello-localhost.yaml"}, "")
 
 	for _, want := range []string{
 		"VERY FIRST tool call must be run_ansible",

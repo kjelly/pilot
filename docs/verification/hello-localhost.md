@@ -55,7 +55,7 @@
 
 ## 6. Playbook 對齊
 
-對應的 playbook：`playbooks/hello-localhost.yaml`
+對應的 playbook：`playbooks/test/hello-localhost.yaml`
 
 | Spec ID | Playbook task |
 |---------|---------------|

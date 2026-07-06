@@ -2,7 +2,7 @@
 
 > 撰寫日期：2026-07-03 (UTC)
 > 對齊：`playbooks/apply/freeipa-identity-apply.yml`（`ipa_hostgroups`/`ipa_hbac_rules`/
-> host-scoped `ipa_sudo_rules` 擴充）、`playbooks/fixtures/freeipa-hostauthz-{demo,user-setup,sim}.yml`
+> host-scoped `ipa_sudo_rules` 擴充）、`playbooks/test/fixtures/freeipa-hostauthz-{demo,user-setup,sim}.yml`
 > 對照文件：`docs/runbooks/freeipa-identity.md` §5.2
 >
 > 本檔每一步指令都已在真實 sandbox（`freeipa-server` + `freeipa-client` +
@@ -119,7 +119,7 @@ gotcha。**
 ## 4. T3 + T4 — 結構驗證 + HBAC 決策引擎測試
 
 ```bash
-./pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-hostauthz-demo.yml \
+./pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-demo.yml \
     -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml \
     --tags fixtures,t3,hbactest
 ```
@@ -165,10 +165,10 @@ changed，正常）。重點看兩個 assert：
 **四次都要跑**（含刻意的「錯主機」組合，負向測試會用到）：
 
 ```bash
-./pilot vm-target run --name freeipa-client   playbooks/fixtures/freeipa-hostauthz-user-setup.yml -e hostauthz_user=hz_web
-./pilot vm-target run --name freeipa-client   playbooks/fixtures/freeipa-hostauthz-user-setup.yml -e hostauthz_user=hz_db
-./pilot vm-target run --name freeipa-client-2 playbooks/fixtures/freeipa-hostauthz-user-setup.yml -e target_group=all -e hostauthz_user=hz_db
-./pilot vm-target run --name freeipa-client-2 playbooks/fixtures/freeipa-hostauthz-user-setup.yml -e target_group=all -e hostauthz_user=hz_web
+./pilot vm-target run --name freeipa-client   playbooks/test/fixtures/freeipa-hostauthz-user-setup.yml -e hostauthz_user=hz_web
+./pilot vm-target run --name freeipa-client   playbooks/test/fixtures/freeipa-hostauthz-user-setup.yml -e hostauthz_user=hz_db
+./pilot vm-target run --name freeipa-client-2 playbooks/test/fixtures/freeipa-hostauthz-user-setup.yml -e target_group=all -e hostauthz_user=hz_db
+./pilot vm-target run --name freeipa-client-2 playbooks/test/fixtures/freeipa-hostauthz-user-setup.yml -e target_group=all -e hostauthz_user=hz_web
 ```
 
 > `freeipa-client-2` 這兩行**必須帶 `-e target_group=all`**——playbook 的
@@ -181,7 +181,7 @@ changed，正常）。重點看兩個 assert：
 > server 補一次：
 >
 > ```bash
-> ./pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-hostauthz-user-setup.yml \
+> ./pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-user-setup.yml \
 >     -e fixtures_target_group=all -e hostauthz_user=hz_web -e @~/.vault/freeipa-sandbox.yaml
 > ```
 >
@@ -203,11 +203,11 @@ changed，正常）。重點看兩個 assert：
 ### 5.3 正向情境（allow_all 開著也能測，這一段不影響其他帳號）
 
 ```bash
-./pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-hostauthz-sim.yml \
+./pilot vm-target run --name freeipa-client playbooks/test/fixtures/freeipa-hostauthz-sim.yml \
     -e sim_local_user=hz_web -e sim_local_password=TestWebPass123 -e sim_foreign_user=hz_db \
     --tags positive
 
-./pilot vm-target run --name freeipa-client-2 playbooks/fixtures/freeipa-hostauthz-sim.yml \
+./pilot vm-target run --name freeipa-client-2 playbooks/test/fixtures/freeipa-hostauthz-sim.yml \
     -e target_group=all -e sim_local_user=hz_db -e sim_local_password=TestDbPass123 -e sim_foreign_user=hz_web \
     --tags positive
 ```
@@ -252,11 +252,11 @@ hz_db sudo      : DENIED (expected DENIED)
 ### 6.3 負向情境（錯主機登入必須失敗）
 
 ```bash
-./pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-hostauthz-sim.yml \
+./pilot vm-target run --name freeipa-client playbooks/test/fixtures/freeipa-hostauthz-sim.yml \
     -e sim_local_user=hz_web -e sim_local_password=TestWebPass123 -e sim_foreign_user=hz_db \
     --tags negative
 
-./pilot vm-target run --name freeipa-client-2 playbooks/fixtures/freeipa-hostauthz-sim.yml \
+./pilot vm-target run --name freeipa-client-2 playbooks/test/fixtures/freeipa-hostauthz-sim.yml \
     -e target_group=all -e sim_local_user=hz_db -e sim_local_password=TestDbPass123 -e sim_foreign_user=hz_web \
     --tags negative
 ```
@@ -271,7 +271,7 @@ hz_web login (wrong host) : DENIED (expected DENIED)  # 在 freeipa-client-2 上
 ### 6.4 立刻重新啟用 `allow_all`（不要拖）
 
 ```bash
-./pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-hostauthz-demo.yml \
+./pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-demo.yml \
     -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml --tags restore
 ```
 
@@ -284,7 +284,7 @@ allow_all HBAC rule` 顯示 `changed`）。
 
 ```bash
 # server 端：刪掉 hz_web/hz_db、hz-web/hz-db、webhosts/dbhosts、hz-login-*、hz-*-systemctl
-./pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-hostauthz-demo.yml \
+./pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-demo.yml \
     -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml --tags cleanup
 
 # client 端：清掉 §5.1 產生的本機帳號 home 目錄

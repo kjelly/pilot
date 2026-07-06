@@ -12,7 +12,7 @@
 #   * the user is attached to the rule
 #
 # Convention: cross-host preconditions for docs/verification/<spec>.md live in
-# playbooks/fixtures/<spec>-fixtures.yml and are applied BEFORE the client
+# playbooks/test/fixtures/<spec>-fixtures.yml and are applied BEFORE the client
 # apply+verify. See AGENTS.md §4.1.
 #
 # This playbook is ALSO the canonical entry point for creating IPA users in
@@ -37,7 +37,7 @@
 #   -e @~/.vault/freeipa-sandbox.yaml
 #
 # Usage (against the FreeIPA server VM, whose host is in group `all`):
-#   pilot vm-target run --name alma-vm playbooks/fixtures/freeipa-client-fixtures.yml \
+#   pilot vm-target run --name alma-vm playbooks/test/fixtures/freeipa-client-fixtures.yml \
 #       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
 ---
 - name: FreeIPA client verification fixtures (run on the FreeIPA server)

@@ -464,7 +464,7 @@ Playbook 可以 merge / ship 的條件：
 
 - Spec template：`docs/verification-spec-template.md`
 - Verify shell template：`scripts/verify.sh`
-- 範例 playbook：`playbooks/hello-localhost.yml`（smoke test 起點）
+- 範例 playbook：`playbooks/test/hello-localhost.yml`（smoke test 起點）
 - Sandbox 行為：見 `docs/sandbox-notes.md`（若需要可另外建立）
 
 ---

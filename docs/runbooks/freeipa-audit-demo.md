@@ -1,8 +1,8 @@
 # Runbook — FreeIPA 稽核示範：sudo ls 通過 / sudo ps 拒絕
 
 > 撰寫日期：2026-07-02 (UTC)
-> 對齊：`playbooks/fixtures/freeipa-audit-demo.yml`、`playbooks/fixtures/freeipa-audit-user-setup.yml`、
-> `playbooks/fixtures/freeipa-audit-sim.yml`
+> 對齊：`playbooks/test/fixtures/freeipa-audit-demo.yml`、`playbooks/test/fixtures/freeipa-audit-user-setup.yml`、
+> `playbooks/test/fixtures/freeipa-audit-sim.yml`
 > 規格依據：`docs/verification/freeipa-server.md`、`docs/verification/freeipa-client.md`（皆 v1.0）
 
 ---
@@ -93,7 +93,7 @@ client 是 Ubuntu 24.04 並已 `ipa-client-install` enroll（`klist -k` 有
 
 ```
 $ go run ./cmd/pilot vm-target run --name freeipa-server \
-    playbooks/fixtures/freeipa-audit-demo.yml \
+    playbooks/test/fixtures/freeipa-audit-demo.yml \
     -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
 
 PLAY RECAP *********************************************************************
@@ -104,7 +104,7 @@ freeipa-server : ok=12   changed=0    unreachable=0    failed=0    skipped=0    
 
 ```
 $ go run ./cmd/pilot vm-target run --name freeipa-client \
-    playbooks/fixtures/freeipa-audit-user-setup.yml -e target_group=all
+    playbooks/test/fixtures/freeipa-audit-user-setup.yml -e target_group=all
 
 PLAY RECAP *********************************************************************
 freeipa-client : ok=2    changed=2    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
@@ -114,7 +114,7 @@ freeipa-client : ok=2    changed=2    unreachable=0    failed=0    skipped=0    
 
 ```
 $ go run ./cmd/pilot vm-target run --name freeipa-client \
-    playbooks/fixtures/freeipa-audit-sim.yml \
+    playbooks/test/fixtures/freeipa-audit-sim.yml \
     -e sim_target_group=all -e ipa_server_ip=192.168.123.2 \
     -e @~/.vault/freeipa-sandbox.yaml
 

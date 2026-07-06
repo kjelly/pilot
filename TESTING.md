@@ -125,7 +125,7 @@ data_dir: ~/.local/share/pilot
 
 ## 3. Sample Playbook
 
-`playbooks/hello-localhost.yml` 是測試用的最小 playbook：
+`playbooks/test/hello-localhost.yml` 是測試用的最小 playbook：
 
 - **純 read-only**（不動任何檔案 / 服務）
 - `hosts: localhost` + `connection: local`（不依賴 SSH）
@@ -135,7 +135,7 @@ data_dir: ~/.local/share/pilot
 可直接用 raw ansible-playbook 驗證：
 
 ```bash
-ansible-playbook playbooks/hello-localhost.yml
+ansible-playbook playbooks/test/hello-localhost.yml
 ```
 
 預期：10 個 task 全 ok，0 changed，PLAY RECAP 顯示 `ok=10`。
@@ -149,7 +149,7 @@ ansible-playbook playbooks/hello-localhost.yml
 不開 sandbox、不掛 container，pilot 在你的 Ubuntu 上跑。
 
 ```bash
-echo '{"playbook":"'$(pwd)'/playbooks/hello-localhost.yml","connection":"local","check":true}' \
+echo '{"playbook":"'$(pwd)'/playbooks/test/hello-localhost.yml","connection":"local","check":true}' \
   | ./pilot --config /tmp/pilot-cfg.yaml run --from-stdin --skip-syntax-check --no-tui
 ```
 
@@ -163,7 +163,7 @@ echo '{"playbook":"'$(pwd)'/playbooks/hello-localhost.yml","connection":"local",
 PLAY [Pilot smoke test - system info probe] *********
 TASK [1) Greeting] *********
 ok: [localhost]
-  ✓ /workspace/pilot/playbooks/hello-localhost.yml
+  ✓ /workspace/pilot/playbooks/test/hello-localhost.yml
 ```
 
 **成功指標**：
@@ -185,7 +185,7 @@ ansible-galaxy collection install community.docker
 **指令**：
 
 ```bash
-echo '{"playbook":"'$(pwd)'/playbooks/hello-localhost.yml","connection":"local","check":true}' \
+echo '{"playbook":"'$(pwd)'/playbooks/test/hello-localhost.yml","connection":"local","check":true}' \
   | ./pilot --config /tmp/pilot-cfg.yaml run --from-stdin \
       --sandbox --sandbox-image geerlingguy/docker-ubuntu2204-ansible:latest \
       --skip-syntax-check --no-tui
@@ -220,7 +220,7 @@ ERROR! couldn't resolve module/action 'community.docker.docker_connection'
 **指令**：
 
 ```bash
-echo '{"playbook":"'$(pwd)'/playbooks/hello-localhost.yml","connection":"local","check":true}' \
+echo '{"playbook":"'$(pwd)'/playbooks/test/hello-localhost.yml","connection":"local","check":true}' \
   | ./pilot --config /tmp/pilot-cfg.yaml run --from-stdin \
       --sandbox --sandbox-image geerlingguy/docker-ubuntu2204-ansible:latest \
       --sandbox-mode docker-exec \
@@ -260,7 +260,7 @@ docker run -d --rm --name pilot-test \
   geerlingguy/docker-ubuntu2204-ansible:latest sleep infinity
 
 # 跑 playbook
-docker exec pilot-test bash -c "cd $(pwd) && ansible-playbook -i /dev/stdin playbooks/hello-localhost.yml" \
+docker exec pilot-test bash -c "cd $(pwd) && ansible-playbook -i /dev/stdin playbooks/test/hello-localhost.yml" \
   <<'EOF'
 all:
   hosts:
@@ -475,7 +475,7 @@ go vet ./...
 go test -count=1 -short ./...                                  # L1
 go test -count=1 -run "TestDockerExecRunner_RealContainer" \
   ./internal/tools/...                                          # L2
-ansible-playbook playbooks/hello-localhost.yml                 # raw sanity
+ansible-playbook playbooks/test/hello-localhost.yml                 # raw sanity
 docker rm -f $(docker ps -aq --filter name=pilot-)
 echo "ALL CHECKS PASSED"
 ```
@@ -488,7 +488,7 @@ echo "ALL CHECKS PASSED"
 
 | 檔案 | 用途 |
 |------|------|
-| `playbooks/hello-localhost.yml` | 測試用 sample playbook（純 read-only）|
+| `playbooks/test/hello-localhost.yml` | 測試用 sample playbook（純 read-only）|
 | `internal/tools/docker_exec_runner.go` | `docker-exec` 模式的執行邏輯 |
 | `internal/tools/docker_exec_runner_test.go` | resolveSandboxMode / findFlagValue 等 unit test |
 | `internal/tools/docker_exec_runner_integration_test.go` | 真實 container 跑 ansible 的整合測試 |
