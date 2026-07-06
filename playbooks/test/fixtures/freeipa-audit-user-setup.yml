@@ -1,7 +1,7 @@
 # Sets up audituser for the audit demo, in two plays:
 #
 #   Play 1 (imported): ensure the IPA user exists on the SERVER via the
-#     canonical playbooks/fixtures/freeipa-client-fixtures.yml. Sudo-rule
+#     canonical playbooks/test/fixtures/freeipa-client-fixtures.yml. Sudo-rule
 #     management is disabled — the demo's restrictive audit-demo-ls-only rule
 #     comes from freeipa-audit-demo.yml, and attaching audituser to the
 #     default pilot-all (cmdcat=all, !authenticate) rule would let
@@ -15,11 +15,11 @@
 #
 #   # server side (ensure the IPA user; needs the vault; idempotent with
 #   # freeipa-audit-demo.yml, which imports the same fixtures play):
-#   pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-audit-user-setup.yml \
+#   pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-audit-user-setup.yml \
 #       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
 #   # client side (SSH key only — the IPA user must already exist, or the
 #   # chown below fails because SSSD cannot resolve the owner):
-#   pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-audit-user-setup.yml \
+#   pilot vm-target run --name freeipa-client playbooks/test/fixtures/freeipa-audit-user-setup.yml \
 #       -e target_group=all
 ---
 - name: Ensure the audit demo IPA user exists (canonical user fixtures)

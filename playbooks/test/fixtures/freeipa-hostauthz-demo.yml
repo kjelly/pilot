@@ -12,7 +12,7 @@
 # is proven server-side before the client-side SSH/sudo sim runs.
 #
 # Usage:
-#   pilot vm-target run --name freeipa-server playbooks/fixtures/freeipa-hostauthz-demo.yml \
+#   pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-demo.yml \
 #       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml \
 #       --tags fixtures,t3,hbactest
 #

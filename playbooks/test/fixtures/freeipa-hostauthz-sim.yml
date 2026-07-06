@@ -28,11 +28,11 @@
 #                      (e.g. audituser, pilotuser) locked out.
 #
 # Usage:
-#   pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-hostauthz-sim.yml \
+#   pilot vm-target run --name freeipa-client playbooks/test/fixtures/freeipa-hostauthz-sim.yml \
 #       -e sim_local_user=hz_web -e sim_local_password=TestWebPass123 -e sim_foreign_user=hz_db \
 #       --tags positive
 #   # ... disable allow_all on the server, then:
-#   pilot vm-target run --name freeipa-client playbooks/fixtures/freeipa-hostauthz-sim.yml \
+#   pilot vm-target run --name freeipa-client playbooks/test/fixtures/freeipa-hostauthz-sim.yml \
 #       -e sim_local_user=hz_web -e sim_local_password=TestWebPass123 -e sim_foreign_user=hz_db \
 #       --tags negative
 #   # ... re-enable allow_all on the server.

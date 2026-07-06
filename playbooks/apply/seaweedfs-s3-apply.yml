@@ -172,7 +172,7 @@
     # semantics, not create-exclusive) — using its own output for
     # changed_when made every run report changed=1. List first and
     # only create when actually missing, same idempotent shape as
-    # `playbooks/fixtures/*-fixtures.yml`.
+    # `playbooks/test/fixtures/*-fixtures.yml`.
     - name: "SeaweedFS — check S3 smoke-test bucket exists"
       tags: [seaweedfs-s3, s3-C6, s3-C7]
       community.docker.docker_container_exec:

@@ -136,7 +136,7 @@ if [[ $L1_ONLY -eq 0 && $L2_ONLY -eq 0 ]]; then
 
   # Always: raw ansible sanity
   log "L3.0 — raw ansible-playbook sanity"
-  OUT=$(ansible-playbook playbooks/hello-localhost.yml 2>&1) || {
+  OUT=$(ansible-playbook playbooks/test/hello-localhost.yml 2>&1) || {
     err "raw ansible-playbook failed"
     echo "$OUT" | tail -20
     exit 3
@@ -157,7 +157,7 @@ if [[ $L1_ONLY -eq 0 && $L2_ONLY -eq 0 ]]; then
       -v "$ROOT/playbooks:$ROOT/playbooks:ro" \
       geerlingguy/docker-ubuntu2204-ansible:latest sleep infinity >/dev/null
     sleep 1
-    OUT=$(docker exec "$CNAME" bash -c "cd $ROOT && ansible-playbook -i /dev/stdin playbooks/hello-localhost.yml" <<EOF
+    OUT=$(docker exec "$CNAME" bash -c "cd $ROOT && ansible-playbook -i /dev/stdin playbooks/test/hello-localhost.yml" <<EOF
 all:
   hosts:
     localhost:
@@ -191,7 +191,7 @@ EOF
 
     # L3.2 — Localhost mode
     log "L3.2 — pilot run localhost mode (no sandbox)"
-    OUT=$(echo "{\"playbook\":\"$ROOT/playbooks/hello-localhost.yml\",\"connection\":\"local\",\"check\":true}" \
+    OUT=$(echo "{\"playbook\":\"$ROOT/playbooks/test/hello-localhost.yml\",\"connection\":\"local\",\"check\":true}" \
       | timeout 240 /tmp/pilot-smoke --config "$CFG" run --from-stdin --skip-syntax-check --no-tui 2>&1) || true
     if echo "$OUT" | grep -q "📦 sandbox active"; then
       err "localhost mode should not show sandbox banner"
@@ -206,7 +206,7 @@ EOF
 
     # L3.3 — Docker-exec sandbox mode
     log "L3.3 — pilot run --sandbox --sandbox-mode=docker-exec"
-    OUT=$(echo "{\"playbook\":\"$ROOT/playbooks/hello-localhost.yml\",\"connection\":\"local\",\"check\":true}" \
+    OUT=$(echo "{\"playbook\":\"$ROOT/playbooks/test/hello-localhost.yml\",\"connection\":\"local\",\"check\":true}" \
       | timeout 240 /tmp/pilot-smoke --config "$CFG" run --from-stdin \
           --sandbox --sandbox-image geerlingguy/docker-ubuntu2204-ansible:latest \
           --sandbox-mode docker-exec --skip-syntax-check --no-tui 2>&1) || true
