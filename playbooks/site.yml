@@ -23,7 +23,8 @@
 #     核心服務(dns/ntp)→ FreeIPA server → FreeIPA client
 #                         → Keycloak DB → Keycloak → PAM-OIDC
 #                         → log-server → audit-log-forwarding
-#                         → wazuh-manager → wazuh-fim → OS 補丁
+#                         → wazuh-manager → wazuh-fim
+#                         → seaweedfs-s3 → restic-backup → OS 補丁
 #
 #  注意:FreeIPA 使用者/權限(freeipa-identity-apply.yml)是「資料驅動的 day-2
 #  維運」,需要 vault roster,刻意不放進 site.yml。單獨執行,見 DELIVERY.md。
@@ -39,6 +40,15 @@
 #  注意:wazuh-manager 需要較大的資源(4 vCPU/8GB RAM/50GB 磁碟起跳,CVE
 #  弱點掃描 feed 常駐 ~7-9GB)——磁碟不足會讓所有告警靜默停止產生且無明顯
 #  服務層級失敗徵兆,見 docs/runbooks/wazuh-manager.md §5.2。
+#
+#  注意:restic-backup 的目的地(restic_s3_target_host,見
+#  group_vars/restic-backup.example.yml)跟 audit-log-forwarding/wazuh 那組
+#  「選填、沒填就退化成本機功能」不同——沒有目的地整個備份就沒有意義,
+#  apply 會在 pre_tasks 直接 fail,不會靜默裝好排程卻永遠備份失敗。走本專案
+#  自建的 seaweedfs-s3 gateway 時,該 gateway 必須先掛
+#  -e seaweedfs_s3_config_path=<s3.json>(identity 設定)——SeaweedFS 預設的
+#  匿名模式只接受完全不簽章的請求,restic 一律送簽章請求,兩者不相容,見
+#  docs/runbooks/restic-backup.md §5。
 # ============================================================================
 
 # ── 0. 前置檢查(一律先跑)───────────────────────────────────────────────
@@ -81,6 +91,15 @@
   tags: [audit, wazuh, wazuh-manager]
 - import_playbook: apply/wazuh-fim-apply.yml
   tags: [audit, wazuh, wazuh-fim]
+
+# ── 5b. S3 相容物件儲存(SeaweedFS)→ 跨主機通用 restic 備份 ──────────────
+#    restic-backup 需要 seaweedfs-s3 先起來(或 restic_repository 改覆寫成
+#    外部 S3);兩個變數都選填但至少要有一個生效,否則 restic-backup-apply.yml
+#    的 pre_tasks 會直接 fail(見 docs/verification/restic-backup.md §1.5)。
+- import_playbook: apply/seaweedfs-s3-apply.yml
+  tags: [backup, seaweedfs-s3]
+- import_playbook: apply/restic-backup-apply.yml
+  tags: [backup, restic-backup]
 
 # ── 6. OS 補丁 SLA(day-2,放最後)──────────────────────────────────────
 - import_playbook: apply/os-patch-sla-apply.yml

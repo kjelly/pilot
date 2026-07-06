@@ -20,6 +20,9 @@
 | **主機 auditd 稽核規則 + 轉送日誌到 SIEM** | [`runbooks/audit-log-forwarding.md`](./runbooks/audit-log-forwarding.md) |
 | **Wazuh 中央伺服器（FIM/who-data 告警引擎 + CVE 弱點掃描）** | [`runbooks/wazuh-manager.md`](./runbooks/wazuh-manager.md) |
 | **Wazuh agent：檔案完整性監控(FIM) + auditd who-data** | [`runbooks/wazuh-fim.md`](./runbooks/wazuh-fim.md) |
+| **S3 相容物件儲存（SeaweedFS）** | [`runbooks/seaweedfs-s3.md`](./runbooks/seaweedfs-s3.md) |
+| **跨主機通用備份到 S3（restic）** | [`runbooks/restic-backup.md`](./runbooks/restic-backup.md) |
+| **重跑 restic 災難復原(DR)演練（以 FreeIPA 為例）** | [`runbooks/restic-backup-dr-drill-test-plan.md`](./runbooks/restic-backup-dr-drill-test-plan.md) |
 | 開發 ansible playbook 的心法 | [`ansible-playbook-development.md`](./ansible-playbook-development.md) |
 | 跑測試 | [`../TESTING.md`](../TESTING.md) |
 

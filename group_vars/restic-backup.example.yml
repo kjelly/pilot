@@ -1,0 +1,93 @@
+---
+# ============================================================================
+#  group_vars/restic-backup.example.yml —— restic 備份設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/restic-backup.yml
+#    cp group_vars/restic-backup.example.yml <inventory 目錄>/group_vars/restic-backup.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/restic-backup.md
+#  備份目的地(SeaweedFS S3 gateway)的 spec:docs/verification/seaweedfs-s3.md
+#  ——seaweedfs-s3 是另一個獨立角色,要先另外 apply,見 inventory.example.yml
+#    的 `seaweedfs-s3` group。
+# ============================================================================
+
+# 備份目的地(SeaweedFS S3 gateway)的 IP 或 FQDN。
+#
+# 二擇一必填(見 spec §1.5):填這個變數(走預設 repository,指向本專案自建
+# 的 SeaweedFS S3 gateway),或改用下面註解的 restic_repository 完全覆寫成
+# 外部/獨立 S3(有真實 DNS 名稱,不需要靠 /etc/hosts 別名)。兩者都不填,
+# apply 會在任何 mutation 前直接 fail(見 spec §6 的 gate)。
+restic_s3_target_host: ""
+
+# 走外部 S3 時,取消註解並覆寫(此時上面的 restic_s3_target_host 留空即可):
+# restic_repository: "s3:https://s3.amazonaws.com/my-real-bucket"
+
+# S3 credentials 與 repository 加密密碼 —— 全部必填、沒有預設值,一律用
+# ansible-vault 加密檔帶入,不要明文寫在這裡或用 -e 帶(除了拋棄式沙盒測試)。
+# restic_aws_access_key_id: ""
+# restic_aws_secret_access_key: ""
+# restic_password: ""
+#
+# 注意:若 SeaweedFS S3 gateway 是預設的匿名模式(seaweedfs-s3.md 沒帶
+# seaweedfs_s3_config_path),restic 會直接失敗 —— restic 一律送簽章請求,
+# SeaweedFS 的匿名模式只接受完全不簽章的請求,兩者不相容。要接 restic,
+# seaweedfs-s3 那台必須掛 -e seaweedfs_s3_config_path=<s3.json>,且這裡的
+# access/secret key 要跟該 s3.json 裡的 identity 一致。實測見
+# docs/runbooks/restic-backup.md §5。
+#
+# 注意:走本專案自建 SeaweedFS 目的地時,首次套用前要先手動建好
+# restic_s3_bucket(預設 pilot-restic-backup)這個 bucket —— SeaweedFS 不會在
+# PutObject 時自動生出不存在的 bucket,restic 對「bucket 不存在」的重試會拖
+# 很久、看起來像卡死(不是真的 hang,只是 backoff 拖很長)。用跟
+# seaweedfs-s3-apply.yml 建自己 smoke bucket 一樣的手法:
+#   docker exec pilot-seaweedfs sh -c "echo 's3.bucket.create -name pilot-restic-backup' | weed shell"
+# 實測見 docs/runbooks/restic-backup.md §5 Bug 5。
+
+# 這個 group 全部主機共用的備份路徑(選填,預設只有 ["/etc"] —— 通用、對任何
+# 主機都安全的最小範圍,不是針對特定軟體的完整備份)。
+# restic_backup_paths: ["/etc"]
+
+# 想備份「本專案有用到的軟體」的實際資料,不要在這裡改 —— 這個檔案是整個
+# group 共用的,不同軟體的資料位置/備份手法差異很大(尤其資料庫類不能直接
+# 複製執行中的 data 目錄)。改成在 inventory 旁邊建
+# host_vars/<主機短名>.yml,針對該主機的角色覆寫。以下第一組(FreeIPA)已用
+# 真實的 freeipa-server/freeipa-client vm-target 實測整條「備份 → 故障 →
+# 還原」鏈路(見 docs/runbooks/restic-backup.md §6);其餘角色路徑/指令仍未在
+# vm-target 沙盒實測,套用到正式主機前建議先在 staging 跑過一次確認:
+#
+#   # host_vars/ipa-1.yml(FreeIPA server:設定 + 官方 ipa-backup 產生的資料;
+#   # 已實測——刪 /etc/dirsrv/<instance> 整個目錄模擬 server 故障、restic
+#   # restore 救回後 ipactl/client 登入皆恢復正常,見 runbook §6)
+#   restic_backup_paths: ["/etc", "/var/lib/ipa/backup"]
+#   restic_backup_pre_hook: "ipa-backup --data --logs"
+#
+#   # host_vars/keycloak-db-1.yml(Keycloak 的 PostgreSQL:不能直接複製執行
+#   # 中的 data 目錄,先 pg_dump 成靜態檔案再讓 restic 備份那個檔案)
+#   restic_backup_paths: ["/etc", "/var/backups/keycloak-db"]
+#   restic_backup_pre_hook: >-
+#     mkdir -p /var/backups/keycloak-db &&
+#     docker exec pilot-postgres pg_dumpall -U keycloak
+#     > /var/backups/keycloak-db/dump.sql
+#
+#   # host_vars/log-server-1.yml(中央 SIEM 接收端:設定 + 已落地的日誌)
+#   restic_backup_paths: ["/etc/rsyslog.conf", "/etc/rsyslog.d", "/var/log"]
+#
+#   # host_vars/wazuh-manager-1.yml(Wazuh manager:規則/設定;alerts 索引本身
+#   # 資料量大且有自己的 OpenSearch snapshot 機制,不建議整包丟給 restic)
+#   restic_backup_paths: ["/var/ossec/etc", "/var/ossec/rules"]
+#
+# ansible 的 host_vars 優先權高於這份 group_vars,單一主機的覆寫不影響同
+# group 其他主機。驗證時 docs/verification/restic-backup.md 的 C1-C9 都跟
+# 具體路徑無關(只檢查「至少一份快照」「完整性驗證通過」等通用條件),所以
+# 不同主機即使備份範圍不同也都能用同一份 spec 驗證。
+
+# 備份前置指令(選填,預設不執行)。見上面各角色範例。
+# restic_backup_pre_hook: ""
+
+# 排程與保留策略,通常不用改,會沿用 playbook 內建預設:
+# restic_backup_schedule: "*-*-* 02:00:00"
+# restic_retention_daily: 7
+# restic_retention_weekly: 4
+# restic_retention_monthly: 6

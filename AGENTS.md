@@ -259,6 +259,40 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
   現成範例：`freeipa-audit-user-setup.yml`、`freeipa-hostauthz-user-setup.yml`、
   `freeipa-audit-demo.yml`。
 
+### 4.2 新增或移除「會產生資料/設定檔的軟體角色」時 — 同步 restic-backup 備份範圍
+
+新增一支 apply playbook（`playbooks/apply/<role>-apply.yml`）如果那個角色會
+在目標主機上留下**值得復原的資料或設定**（資料庫、目錄服務資料、收到的日誌、
+規則檔、憑證…），或是**移除**一個既有角色，**必須**同步檢查/更新下列位置——
+不要只顧著讓新角色自己的 spec/playbook 過關就收工：
+
+1. **`group_vars/restic-backup.example.yml`** — 這份檔案底部列了「本專案既有
+   角色」的建議 `restic_backup_paths`/`restic_backup_pre_hook` host_vars 範例
+   （目前有 FreeIPA server、Keycloak DB、log-server、Wazuh manager 四組）。
+   新增角色時補一段對應範例；移除角色時刪掉對應範例，不要留下指向已不存在
+   的 playbook/spec 的殘留說明。
+   判斷「值得備份」的粗略標準：這個角色的 apply playbook 有沒有寫入 `/etc`
+   以外、重開機/重裝會遺失的資料（資料庫 data 目錄、收到的日誌、簽出的憑證
+   …）——只裝套件、只改 `/etc` 設定檔的角色通常已被 `restic-backup` 預設的
+   `["/etc"]` 涵蓋，不必特別加範例。
+2. 需要「先 dump 再備份」的軟體（尤其是資料庫類：直接複製執行中的 data 目錄
+   不安全）要在範例裡示範對應的 `restic_backup_pre_hook`（例：`pg_dumpall`、
+   `ipa-backup`），不要只給路徑清單、漏掉這一步。
+3. 若新角色的主機通常也會需要備份，評估是否要把它加進
+   `inventory.example.yml` 的 `restic-backup:` group（比照現有的
+   `wazuh-fim`/`audit-log-forwarding` 疊加型 group 慣例——同一台主機同時屬於
+   多個角色 group 是常態，不衝突）。
+4. `docs/verification/restic-backup.md` 本身**不需要**因為新增/移除軟體而
+   改動——它的 checklist（C1–C10）刻意設計成跟具體備份路徑無關（見該 spec
+   §1.5 的設計說明：路徑是逐主機變數，spec 只驗證「有沒有快照、完整性過不
+   過」這類通用條件）。上面 1–3 點的「範例/文件」才需要同步，**不要**誤以為
+   要改 spec 本身的 row 或 regression test。
+
+範本：`group_vars/restic-backup.example.yml` 現有的四個範例區塊
+（`host_vars/ipa-1.yml`、`host_vars/keycloak-db-1.yml`、
+`host_vars/log-server-1.yml`、`host_vars/wazuh-manager-1.yml`）；設計脈絡見
+`docs/verification/restic-backup.md` §1、`docs/runbooks/restic-backup.md`。
+
 ---
 
 ## 5. 寫 / 改 Go code 時
@@ -345,6 +379,7 @@ pilot 有三種輸出，**不要混用**：
 - ❌ 不要把硬規則繞過（「這次特例」是滑坡的開始）
 - ❌ 不要把密碼 / token 寫進 spec、playbook、runbook — 走 `-e @~/.vault/...yaml`
 - ❌ 不要擅自縮寫、拼錯或發明新變數名稱（例如把 `keycloak_db_password` 寫成 `keyclack_db_passwd`），必須完全依據 Spec 與既有變數命名。
+- ❌ 新增或移除會產生資料/設定檔的軟體角色時，不要漏改 `group_vars/restic-backup.example.yml` 的對應備份範例（見 §4.2）
 
 
 ---
@@ -358,3 +393,4 @@ pilot 有三種輸出，**不要混用**：
 | 2026-07-02 | v1.2 | §5 大幅擴充 Go 架構約定（`-race` gate、target 兩份平行實作、`statefile`/`writeTempInventory` 共用層、per-call option 不寫回欄位、加 tool 步驟 + schema/struct 同步、Interceptor 雙路徑、`handleToolCall` pipeline）| sre |
 | 2026-07-02 | v1.3 | §5.5 三種輸出管道約定（error / `slog` 診斷 / 使用者 UX）；導入 `internal/logx` 結構化 logging，`--log-level`/`$PILOT_LOG_LEVEL`| sre |
 | 2026-07-02 | v1.4 | inventory 規則改為**來源中立**：新增 §0.1「目標 inventory」名詞與讀法對照（vm-target `show-inventory` / 真實主機 `ansible-inventory --graph`）；§1.1/§1.3/§2/§2.1/§3/§4/§6 一併泛化，同一套紀律適用測試 VM 與真實主機 | sre |
+| 2026-07-06 | v1.5 | 新增 §4.2：新增/移除會產生資料的軟體角色時，必須同步更新 `group_vars/restic-backup.example.yml` 的備份範圍範例（起因：`restic-backup` 上線後，既有角色清單容易在新增/移除軟體時漏改）；§6 補一條對應的 ❌ 提醒 | sre |

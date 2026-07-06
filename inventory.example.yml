@@ -121,6 +121,22 @@ all:
         web-1:
         web-2:
 
+    # -- S3 相容物件儲存(SeaweedFS,restic-backup 預設備份目的地)-----------
+    #    seaweedfs-s3-apply.yml 的預設目標;需要先套用 docker(core-infra-provider
+    #    -e infra_role=docker)。
+    seaweedfs-s3:
+      hosts: {}                 # 例:專門一台 → hosts: { s3-1: }
+
+    # -- 跨主機通用 restic 備份到 S3(restic-backup-apply.yml)---------------
+    #    restic_s3_target_host 指向上面的 seaweedfs-s3(或改覆寫成外部 S3,
+    #    見 group_vars/restic-backup.example.yml);逐主機備份路徑用
+    #    host_vars 覆寫,比照 wazuh-fim 的 pattern。
+    restic-backup:
+      hosts:
+        ipa-1:
+        web-1:
+        web-2:
+
     # -- 環境維度(與角色正交;讓你能用 group 交集精準鎖定)------------------
     #    例:只對「prod 環境的 dns 機器」套用 →  -e target_group='dns:&prod'
     #        只跑 sandbox                    →  --limit sandbox

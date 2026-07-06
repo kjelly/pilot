@@ -1,0 +1,280 @@
+# Apply playbook for docs/verification/restic-backup.md v1.0
+#
+# Cross-cutting restic backup role: installs restic, renders a secrets/config
+# env file, a backup script + systemd timer, and triggers one synchronous
+# backup run during apply so verify has at least one snapshot to check
+# against. Designed to be layered onto ANY existing host (like
+# audit-log-forwarding / wazuh-fim) rather than owning a dedicated role of
+# its own.
+#
+# Usage (default: SeaweedFS S3 gateway built by seaweedfs-s3-apply.yml):
+#
+#   go run ./cmd/pilot vm-target run --name restic-backup \
+#       playbooks/apply/restic-backup-apply.yml \
+#       -e restic_s3_target_host=<seaweedfs-s3 IP> \
+#       -e restic_aws_access_key_id=<key> \
+#       -e restic_aws_secret_access_key=<secret> \
+#       -e restic_password=<repo encryption password>
+#
+# Usage (external S3, fully overridden repository — no /etc/hosts pin):
+#
+#   ... -e restic_repository=s3:https://s3.amazonaws.com/my-real-bucket \
+#       -e restic_aws_access_key_id=... -e restic_aws_secret_access_key=... \
+#       -e restic_password=...
+#
+# Per-host custom backup scope (see docs/verification/restic-backup.md §1.5,
+# §7.2 and group_vars/restic-backup.example.yml):
+#
+#   ... -e '{"restic_backup_paths": ["/etc", "/var/lib/ipa/backup"]}' \
+#       -e restic_backup_pre_hook="ipa-backup --data --logs"
+#
+# Variables: see docs/verification/restic-backup.md §1.5.
+- name: Apply restic-backup (restic to S3, per-host configurable scope)
+  hosts: "{{ target_group | default('restic-backup') }}"
+  become: true
+  gather_facts: true
+  vars:
+    restic_s3_target_host: ""
+    restic_s3_alias: s3-backup-server
+    restic_s3_port: 8333
+    restic_s3_bucket: pilot-restic-backup
+    restic_repository: "s3:http://{{ restic_s3_alias }}:{{ restic_s3_port }}/{{ restic_s3_bucket }}"
+    restic_backup_paths: ["/etc"]
+    restic_backup_pre_hook: ""
+    restic_backup_schedule: "*-*-* 02:00:00"
+    restic_retention_daily: 7
+    restic_retention_weekly: 4
+    restic_retention_monthly: 6
+    restic_env_path: /etc/pilot/restic-env
+    restic_script_path: /usr/local/bin/pilot-restic-backup.sh
+
+  pre_tasks:
+    - name: "Gate: supported OS (Debian/Ubuntu apt; EL via EPEL dnf)"
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family in ['Debian', 'RedHat']
+        fail_msg: >-
+          restic-backup-apply supports Debian/Ubuntu (apt restic) and
+          Enterprise Linux (dnf restic via EPEL). Detected
+          {{ ansible_distribution }} {{ ansible_distribution_version }}
+          ({{ ansible_os_family }}).
+      tags: [always]
+
+    - name: "Gate: required secrets present (fail early, before any mutation)"
+      ansible.builtin.assert:
+        that:
+          - restic_aws_access_key_id is defined and restic_aws_access_key_id | length > 0
+          - restic_aws_secret_access_key is defined and restic_aws_secret_access_key | length > 0
+          - restic_password is defined and restic_password | length > 0
+        fail_msg: >-
+          Missing required secrets. Pass -e restic_aws_access_key_id=... -e
+          restic_aws_secret_access_key=... -e restic_password=... (vault
+          file recommended over -e in real inventories).
+
+    # restic_s3_target_host is NOT optional-in-the-usual-sense: unlike
+    # siem_forward_host/wazuh_manager_host, skipping it doesn't leave a
+    # smaller-but-useful local feature — it leaves a backup with nowhere to
+    # go. Only acceptable if restic_repository was explicitly overridden
+    # away from the default (i.e. points at a real, externally-resolvable
+    # S3 endpoint instead of the s3-backup-server alias).
+    - name: "Gate: backup destination must be resolvable"
+      ansible.builtin.assert:
+        that:
+          - (restic_s3_target_host | length > 0) or (restic_s3_alias not in restic_repository)
+        fail_msg: >-
+          restic_s3_target_host is empty AND restic_repository still uses
+          the default s3-backup-server alias — the backup would have no
+          reachable destination. Either pass -e restic_s3_target_host=<S3
+          IP/FQDN> (default SeaweedFS S3 gateway target), or override
+          -e restic_repository=... to a fully externally-resolvable S3
+          endpoint.
+
+  tasks:
+    - name: "Step 1: Install restic (Debian apt)"
+      tags: [C1]
+      ansible.builtin.apt:
+        name: restic
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == 'Debian'
+
+    # restic is not in EL9 BaseOS/AppStream; EPEL carries it.
+    - name: "Step 1: Install EPEL (EL dnf, restic dependency)"
+      tags: [C1]
+      ansible.builtin.dnf:
+        name: epel-release
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: "Step 1: Install restic (EL dnf via EPEL)"
+      tags: [C1]
+      ansible.builtin.dnf:
+        name: restic
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: "Step 2: Pin {{ restic_s3_alias }} -> {{ restic_s3_target_host }} in /etc/hosts (spec C10)"
+      tags: [C10]
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ restic_s3_alias }}$'
+        line: "{{ restic_s3_target_host }}\t{{ restic_s3_alias }}"
+        state: present
+      when: restic_s3_target_host | length > 0
+
+    - block:
+        - name: "Step 3: Ensure /etc/pilot exists"
+          ansible.builtin.file:
+            path: /etc/pilot
+            state: directory
+            mode: "0755"
+
+        # Contains S3 credentials and the repository encryption password —
+        # 0600 + no_log so neither the rendered content nor a diff ever hits
+        # Ansible's output/logs.
+        - name: "Step 4: Render restic env file (spec C2, C3)"
+          tags: [C2, C3]
+          ansible.builtin.copy:
+            dest: "{{ restic_env_path }}"
+            mode: "0600"
+            content: |
+              export AWS_ACCESS_KEY_ID='{{ restic_aws_access_key_id }}'
+              export AWS_SECRET_ACCESS_KEY='{{ restic_aws_secret_access_key }}'
+              export RESTIC_REPOSITORY='{{ restic_repository }}'
+              export RESTIC_PASSWORD='{{ restic_password }}'
+              export RESTIC_BACKUP_PATHS='{{ restic_backup_paths | join(" ") }}'
+              export RESTIC_BACKUP_PRE_HOOK='{{ restic_backup_pre_hook }}'
+              export RESTIC_RETENTION_DAILY='{{ restic_retention_daily }}'
+              export RESTIC_RETENTION_WEEKLY='{{ restic_retention_weekly }}'
+              export RESTIC_RETENTION_MONTHLY='{{ restic_retention_monthly }}'
+          no_log: true
+          register: restic_env_result
+
+        - name: "Step 5: Render backup script (spec C7)"
+          tags: [C7]
+          ansible.builtin.copy:
+            dest: "{{ restic_script_path }}"
+            mode: "0700"
+            content: |
+              #!/bin/bash
+              set -euo pipefail
+              # systemd services run without $HOME set (even for root); restic
+              # needs it to locate its local metadata cache dir.
+              export HOME=/root
+              . {{ restic_env_path }}
+
+              if [ -n "${RESTIC_BACKUP_PRE_HOOK}" ]; then
+                eval "${RESTIC_BACKUP_PRE_HOOK}"
+              fi
+
+              # bounded: against a destination bucket that doesn't exist yet,
+              # restic's S3 backend retries with growing backoff instead of
+              # failing fast (real bug hit against SeaweedFS — see
+              # docs/runbooks/restic-backup.md §5 Bug 3). timeout turns an
+              # effectively-indefinite hang into a clear, fast failure.
+              timeout 60 restic snapshots >/dev/null 2>&1 || timeout 60 restic init
+
+              # shellcheck disable=SC2086
+              restic backup ${RESTIC_BACKUP_PATHS}
+
+              restic forget \
+                --keep-daily "${RESTIC_RETENTION_DAILY}" \
+                --keep-weekly "${RESTIC_RETENTION_WEEKLY}" \
+                --keep-monthly "${RESTIC_RETENTION_MONTHLY}" \
+                --prune
+          register: restic_script_result
+
+        - name: "Step 6: Render restic-backup.service"
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/restic-backup.service
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=pilot restic backup (S3-backed)
+
+              [Service]
+              Type=oneshot
+              ExecStart={{ restic_script_path }}
+          register: restic_service_unit_result
+
+        - name: "Step 7: Render restic-backup.timer"
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/restic-backup.timer
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Scheduled pilot restic backup
+
+              [Timer]
+              OnCalendar={{ restic_backup_schedule }}
+              Persistent=true
+
+              [Install]
+              WantedBy=timers.target
+          register: restic_timer_unit_result
+
+        - name: "Step 8: Reload systemd if any unit file changed"
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when: restic_service_unit_result is changed or restic_timer_unit_result is changed
+
+        - name: "Step 9: Ensure restic-backup.timer enabled+started (spec C8, C9)"
+          tags: [C8, C9]
+          ansible.builtin.systemd:
+            name: restic-backup.timer
+            state: started
+            enabled: true
+
+        # timeout bounds the same non-fast-fail-on-missing-bucket behavior
+        # described in Step 5's script comment — without it this task can
+        # look like a hang (real bug hit against SeaweedFS, see
+        # docs/runbooks/restic-backup.md §5 Bug 3).
+        - name: "Step 10: Check whether a snapshot already exists"
+          ansible.builtin.shell: |
+            . {{ restic_env_path }}
+            export HOME=/root
+            timeout 60 restic snapshots --json
+          register: restic_existing_snapshots
+          changed_when: false
+          failed_when: false
+
+        # restic-backup.service is Type=oneshot: `systemctl start` blocks
+        # until it finishes, so this task IS the "run one backup now" step —
+        # not a fire-and-forget trigger. Only runs when needed (no snapshot
+        # yet, or the env/script just changed) so a genuine no-op rerun
+        # stays changed=0 — `ansible.builtin.systemd: state: started` on a
+        # oneshot service is otherwise never idempotent, same pitfall as
+        # `state: restarted` (see spec-driven-feature-workflow skill §3).
+        - name: "Step 11: Run one backup now if needed (spec C4, C5, C6)"
+          tags: [C4, C5, C6]
+          ansible.builtin.systemd:
+            name: restic-backup.service
+            state: started
+          when: >-
+            restic_existing_snapshots.rc != 0
+            or '"short_id"' not in restic_existing_snapshots.stdout
+            or restic_env_result is changed
+            or restic_script_result is changed
+          register: restic_backup_run_result
+
+      rescue:
+        - name: "ROLLBACK — stop and disable the timer"
+          ansible.builtin.systemd:
+            name: restic-backup.timer
+            state: stopped
+            enabled: false
+          failed_when: false
+
+        - name: "ROLLBACK — remove the env file (contains secrets)"
+          ansible.builtin.file:
+            path: "{{ restic_env_path }}"
+            state: absent
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              restic-backup apply FAILED (see task output above); the timer
+              was stopped/disabled and the secrets env file removed. The
+              backup script and systemd unit files are left in place for
+              inspection but are inert without the env file.

@@ -199,6 +199,7 @@ go run ./cmd/pilot vm-target verify --name s3 \
 | `ansible.builtin.file` 把 data dir 設 `owner=0` 導致**每次 apply 都 changed=1**（idempotency 測試 fail） | image 的 entrypoint 會把執行 `weed` 的使用者降權到 `seaweed`（uid=1000/gid=1000），啟動時把 bind-mount 目錄 chown 回 1000:1000，跟 apply 設的 `owner=0` 互相打架 | 把 `seaweedfs_host_data_dir` 的 owner/group 改成 **1000:1000**（跟 image 裡的 `seaweed` 使用者一致），不要跟 container 搶所有權 |
 | `weed shell s3.bucket.create` 對已存在的 bucket 一樣印 `created bucket`、rc=0（不是 create-exclusive 語意） | filer 端把 bucket 當一般目錄用 `mkdir`-like 語意處理，沒有「已存在就報錯」這條路 | apply 先 `s3.bucket.list` 查一次，只有真的沒有才跑 `s3.bucket.create`，`changed_when` 才會在第二次 apply 正確回報 `false` |
 | C6/C7 若 apply 換成掛 `-s3.config` identity 檔（prod 用）就會全部 fail | 兩條 row 走匿名、無簽章請求，一旦伺服器要求驗證身份，匿名請求直接 403 | 這是**設計上的預期行為**，不是 regression；上 prod 前把這兩條 row 視為「僅適用 sandbox」的已知例外（spec §5 已註記） |
+| **任何會送簽章請求的 S3 client（`restic`、`aws` CLI、boto3…）對預設匿名模式一律失敗**，錯誤是 `Signed request requires setting up SeaweedFS S3 authentication`，跟上一列「匿名 client 對已加身份驗證的伺服器」剛好相反方向 | 匿名模式只接受**完全不帶簽章**的請求；一旦請求帶了 `Authorization: AWS4-HMAC-SHA256...` 表頭，SeaweedFS 會嘗試驗證卻找不到任何 identity 可比對，直接拒絕——跟「允許匿名」和「允許任何簽章」是兩件不同的事，本文件先前只驗證過純 `curl`（真正不簽章）這一種 client | 要接真正的 S3 SDK/CLI（包括 `restic`），必須掛 `-e seaweedfs_s3_config_path=<s3.json>`，且該 identity 的 access/secret key 要跟 client 端設定的一致。完整實測見 `docs/runbooks/restic-backup.md` §5（`restic` 對接這個 S3 gateway 的案例）|
 
 ---
 
