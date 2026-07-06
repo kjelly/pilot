@@ -1,0 +1,32 @@
+---
+# ============================================================================
+#  group_vars/wazuh-manager.example.yml —— Wazuh 中央伺服器設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/wazuh-manager.yml
+#    cp group_vars/wazuh-manager.example.yml <inventory 目錄>/group_vars/wazuh-manager.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/wazuh-manager.md
+#  轉送目標(log-server 角色)的 spec:docs/verification/log-server.md
+#  ——log-server 是另一個獨立角色,要先另外 apply,見 inventory.example.yml
+#    的 `log-server` group。
+#
+#  ⚠️ 資源需求(實測踩過的雷,見 docs/runbooks/wazuh-manager.md §5.2):
+#  CVE 弱點掃描 feed 常駐磁碟用量 ~7-9GB,磁碟不足會讓所有告警(含 FIM)
+#  靜默停止產生、且沒有明顯的服務層級失敗徵兆。目標主機至少要有
+#  4 vCPU / 8GB RAM / 50GB 磁碟(官方建議值,1-25 agents)。
+# ============================================================================
+
+# 中央 SIEM 接收端(log-server 角色)的 IP 或 FQDN。
+#
+# 選填 —— 留白/不填的話,這台主機仍會裝好完整的 Wazuh all-in-one
+# (manager + indexer + dashboard,含 CVE 弱點掃描),只是不會把告警轉送
+# 出去(spec C10-C11 不適用,屬設計如此,見 spec §5 已知偏差)。等
+# log-server 就緒後,把這裡填上它的 IP/FQDN、重新套用即可補上轉送,不需要
+# 重新安裝或重新產生 agent 憑證。
+siem_forward_host: ""
+
+# 以下通常不用填,會沿用 playbook 內建預設:
+# siem_forward_port: "514"
+# wazuh_install_script_version: "4.14"

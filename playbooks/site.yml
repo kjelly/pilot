@@ -21,10 +21,24 @@
 #
 #  ── 相依順序 ────────────────────────────────────────────────────────────
 #     核心服務(dns/ntp)→ FreeIPA server → FreeIPA client
-#                         → Keycloak DB → Keycloak → PAM-OIDC → OS 補丁
+#                         → Keycloak DB → Keycloak → PAM-OIDC
+#                         → log-server → audit-log-forwarding
+#                         → wazuh-manager → wazuh-fim → OS 補丁
 #
 #  注意:FreeIPA 使用者/權限(freeipa-identity-apply.yml)是「資料驅動的 day-2
 #  維運」,需要 vault roster,刻意不放進 site.yml。單獨執行,見 DELIVERY.md。
+#
+#  注意:audit-log-forwarding 的 siem_forward_host、wazuh-manager 的
+#  siem_forward_host、wazuh-fim 的 wazuh_manager_host 都是選填(分別見
+#  group_vars/audit-log-forwarding.example.yml、
+#  group_vars/wazuh-manager.example.yml、group_vars/wazuh-fim.example.yml)。
+#  對應的目標 group(log-server、wazuh-manager)若還沒填機器,這些角色仍會
+#  照常套用本機規則,只是不轉送/不註冊;之後目標就緒、把變數補上,重跑
+#  site.yml(或單獨重跑對應的 apply playbook)即可補齊,不需要重裝任何東西。
+#
+#  注意:wazuh-manager 需要較大的資源(4 vCPU/8GB RAM/50GB 磁碟起跳,CVE
+#  弱點掃描 feed 常駐 ~7-9GB)——磁碟不足會讓所有告警靜默停止產生且無明顯
+#  服務層級失敗徵兆,見 docs/runbooks/wazuh-manager.md §5.2。
 # ============================================================================
 
 # ── 0. 前置檢查(一律先跑)───────────────────────────────────────────────
@@ -56,6 +70,18 @@
 - import_playbook: apply/pam-oidc-sshd-apply.yml
   tags: [pam, oidc]
 
-# ── 5. OS 補丁 SLA(day-2,放最後)──────────────────────────────────────
+# ── 5. 中央稽核日誌接收(log-server)→ 主機稽核 + 轉送 ─────────────────
+- import_playbook: apply/log-server-apply.yml
+  tags: [audit, log-server]
+- import_playbook: apply/audit-log-forwarding-apply.yml
+  tags: [audit, audit-log-forwarding]
+
+# ── 5a. Wazuh(FIM/who-data 告警引擎 + CVE 弱點掃描)→ agent 註冊 ─────────
+- import_playbook: apply/wazuh-manager-apply.yml
+  tags: [audit, wazuh, wazuh-manager]
+- import_playbook: apply/wazuh-fim-apply.yml
+  tags: [audit, wazuh, wazuh-fim]
+
+# ── 6. OS 補丁 SLA(day-2,放最後)──────────────────────────────────────
 - import_playbook: apply/os-patch-sla-apply.yml
   tags: [patch]

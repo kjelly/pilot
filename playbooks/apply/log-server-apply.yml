@@ -1,0 +1,195 @@
+# Apply playbook for docs/verification/log-server.md v1.0
+# rsyslog central receiver (SIEM forward target) for audit-log-forwarding.md
+# client hosts. Additive-only (no existing /etc file is mutated), so rescue
+# just removes the two drop-in files it created and restarts rsyslog back to
+# its pre-apply state.
+#
+# Usage (dry run):
+#   ./pilot vm-target run --name log-server \
+#     playbooks/apply/log-server-apply.yml -e target_group=all --check --diff
+#
+# Real apply:
+#   ./pilot vm-target run --name log-server \
+#     playbooks/apply/log-server-apply.yml -e target_group=all
+#
+# Variables (all optional, see docs/verification/log-server.md §1.5):
+#   siem_receiver_udp_port  default: 514
+#   siem_receiver_tcp_port  default: 514
+#   siem_log_root           default: /var/log/siem
+#   siem_logrotate_rotate   default: 14
+#   siem_logrotate_maxage   default: 90
+- name: Apply log-server (rsyslog central SIEM receiver)
+  hosts: "{{ target_group | default('log-server') }}"
+  become: true
+  gather_facts: true
+  vars:
+    siem_receiver_udp_port: "514"
+    siem_receiver_tcp_port: "514"
+    siem_log_root: /var/log/siem
+    siem_logrotate_rotate: 14
+    siem_logrotate_maxage: 90
+    siem_receiver_conf: /etc/rsyslog.d/10-siem-receiver.conf
+    siem_logrotate_conf: /etc/logrotate.d/siem-incoming
+    # Debian/Ubuntu's rsyslog package creates and runs rsyslogd as the
+    # unprivileged "syslog" user; RHEL/EL historically runs it as root
+    # with no dedicated syslog user. The landing dir must be owned by
+    # whichever user actually creates the per-hostname dynaFile subdirs
+    # (createDirs="on"), or rsyslog gets "Permission denied".
+    siem_log_owner: "{{ 'syslog' if ansible_os_family == 'Debian' else 'root' }}"
+  tasks:
+    - name: "Step 1: Install rsyslog (Debian family)"
+      tags: [C1]
+      ansible.builtin.apt:
+        name: rsyslog
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+      register: apt_rsyslog
+      until: apt_rsyslog is succeeded
+      retries: 2
+
+    - name: "Step 1a: Install rsyslog (RedHat family)"
+      tags: [C1]
+      ansible.builtin.dnf:
+        name: rsyslog
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - block:
+        - name: "Step 2: Ensure {{ siem_log_root }} exists"
+          tags: [C8]
+          ansible.builtin.file:
+            path: "{{ siem_log_root }}"
+            state: directory
+            owner: "{{ siem_log_owner }}"
+            group: "{{ siem_log_owner }}"
+            mode: "0755"
+
+        - name: "Step 3: Render 10-siem-receiver.conf (imudp/imtcp + %HOSTNAME% dynaFile routing)"
+          tags: [C3, C4, C5, C9, C10]
+          ansible.builtin.copy:
+            dest: "{{ siem_receiver_conf }}"
+            owner: root
+            group: root
+            mode: "0644"
+            backup: true
+            content: |
+              # Managed by ansible (log-server-apply.yml) — DO NOT EDIT BY HAND
+              # Central SIEM receiver: accepts rsyslog forwarding from
+              # audit-log-forwarding.md client hosts (auth,authpriv.* + local6.*)
+              # and routes each by source %HOSTNAME% into {{ siem_log_root }}.
+              module(load="imudp")
+              input(type="imudp" port="{{ siem_receiver_udp_port }}")
+
+              module(load="imtcp")
+              input(type="imtcp" port="{{ siem_receiver_tcp_port }}")
+
+              template(name="SiemAuditPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/audit.log")
+              template(name="SiemAuthPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/auth.log")
+
+              if $syslogfacility-text == 'local6' then {
+                  action(type="omfile" dynaFile="SiemAuditPath" createDirs="on")
+              }
+
+              if ($syslogfacility-text == 'auth' or $syslogfacility-text == 'authpriv') then {
+                  action(type="omfile" dynaFile="SiemAuthPath" createDirs="on")
+              }
+          register: siem_receiver_conf_result
+
+        - name: "Step 4: Render /etc/logrotate.d/siem-incoming"
+          tags: [C11, C12]
+          ansible.builtin.copy:
+            dest: "{{ siem_logrotate_conf }}"
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              # Managed by ansible (log-server-apply.yml) — DO NOT EDIT BY HAND
+              {{ siem_log_root }}/*/*.log {
+                  daily
+                  rotate {{ siem_logrotate_rotate }}
+                  maxage {{ siem_logrotate_maxage }}
+                  missingok
+                  notifempty
+                  compress
+                  delaycompress
+                  sharedscripts
+                  postrotate
+                      systemctl kill -s HUP rsyslog.service >/dev/null 2>&1 || true
+                  endscript
+              }
+
+        - name: "Step 5: Validate the effective rsyslog config (rsyslogd -N1)"
+          ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
+          register: rsyslog_syntax
+          changed_when: false
+          failed_when: rsyslog_syntax.rc != 0
+
+        - name: "Step 6: Ensure rsyslog enabled + started (spec C2, C6, C7)"
+          tags: [C2, C6, C7]
+          ansible.builtin.systemd:
+            name: rsyslog
+            state: started
+            enabled: true
+
+        - name: "Step 6a: Restart rsyslog only if the receiver config actually changed"
+          tags: [C2, C6, C7]
+          ansible.builtin.systemd:
+            name: rsyslog
+            state: restarted
+          when: siem_receiver_conf_result is changed
+
+        - name: "Step 6a: Best-effort firewall opening — ufw (Debian)"
+          when: ansible_os_family == "Debian"
+          block:
+            - name: "Check ufw status"
+              ansible.builtin.command: ufw status
+              register: ufw_status
+              changed_when: false
+              failed_when: false
+
+            - name: "Open 514/udp + 514/tcp (only if ufw is active)"
+              ansible.builtin.command: "ufw allow {{ siem_receiver_udp_port }}/{{ item }}"
+              loop: [udp, tcp]
+              when: "'Status: active' in ufw_status.stdout"
+
+        - name: "Step 6b: Best-effort firewall opening — firewalld (RedHat)"
+          when: ansible_os_family == "RedHat"
+          block:
+            - name: "Check firewalld state"
+              ansible.builtin.command: firewall-cmd --state
+              register: firewalld_state
+              changed_when: false
+              failed_when: false
+
+            - name: "Open 514/udp + 514/tcp (only if firewalld is running)"
+              ansible.posix.firewalld:
+                port: "{{ siem_receiver_udp_port }}/{{ item }}"
+                permanent: true
+                immediate: true
+                state: enabled
+              loop: [udp, tcp]
+              when: firewalld_state.stdout == "running"
+
+      rescue:
+        - name: "ROLLBACK — remove siem receiver drop-in config"
+          ansible.builtin.file:
+            path: "{{ siem_receiver_conf }}"
+            state: absent
+
+        - name: "ROLLBACK — remove siem logrotate config"
+          ansible.builtin.file:
+            path: "{{ siem_logrotate_conf }}"
+            state: absent
+
+        - name: "ROLLBACK — restart rsyslog with the drop-ins removed"
+          ansible.builtin.systemd:
+            name: rsyslog
+            state: restarted
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              log-server apply failed (see task output above); the siem
+              receiver drop-in configs were removed and rsyslog restarted
+              back to its pre-apply state. Fix the failing task and re-run.

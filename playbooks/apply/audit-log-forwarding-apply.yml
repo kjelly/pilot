@@ -1,0 +1,219 @@
+# Apply playbook for docs/verification/audit-log-forwarding.md v1.1
+# auditd custom rules (setuid/setgid change+exec, sudo, /etc/passwd,
+# /etc/sudoers) + logrotate + rsyslog forwarding to a central SIEM receiver
+# (docs/verification/log-server.md).
+#
+# Usage (dry run):
+#   ./pilot vm-target run --name audit-log-forwarding \
+#     playbooks/apply/audit-log-forwarding-apply.yml \
+#     -e siem_forward_host=192.168.122.6 --check --diff
+#
+# Real apply:
+#   ./pilot vm-target run --name audit-log-forwarding \
+#     playbooks/apply/audit-log-forwarding-apply.yml \
+#     -e siem_forward_host=192.168.122.6
+#
+# Variables (see docs/verification/audit-log-forwarding.md §1.5):
+#   siem_forward_host        optional — IP/FQDN of the log-server target; if
+#                            omitted (or empty), the host still gets local
+#                            auditd monitoring but the /etc/hosts pin and the
+#                            99-siem-forward.conf are skipped (spec C15-C17
+#                            are then not applicable — see spec §5)
+#   siem_forward_port        default: 514
+#   audit_logrotate_rotate   default: 14
+#   audit_logrotate_maxage   default: 90
+#   syslog_logrotate_rotate  default: 14
+#   syslog_logrotate_maxage  default: 90
+- name: Apply audit-log-forwarding (auditd rules + rsyslog forward to SIEM)
+  hosts: "{{ target_group | default('audit-log-forwarding') }}"
+  become: true
+  gather_facts: true
+  vars:
+    siem_forward_host: ""
+    siem_forward_port: "514"
+    audit_logrotate_rotate: 14
+    audit_logrotate_maxage: 90
+    syslog_logrotate_rotate: 14
+    syslog_logrotate_maxage: 90
+    audit_rules_dest: /etc/audit/rules.d/99-custom.rules
+    siem_forward_conf: /etc/rsyslog.d/99-siem-forward.conf
+    siem_forward_alias: siem-log-server
+    siem_forwarding_enabled: "{{ siem_forward_host | length > 0 }}"
+  tasks:
+    - name: "Step 0: Report whether SIEM forwarding is enabled this run"
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'siem_forward_host=' + siem_forward_host + ' — forwarding will be configured (spec C15-C17).'
+             if siem_forwarding_enabled
+             else 'siem_forward_host not provided — skipping /etc/hosts pin and 99-siem-forward.conf; only local auditd monitoring (C1-C14, C18) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
+
+    - name: "Step 1: Install auditd + audispd-plugins (Debian family)"
+      tags: [C1, C2]
+      ansible.builtin.apt:
+        name: [auditd, audispd-plugins]
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+      register: apt_auditd
+      until: apt_auditd is succeeded
+      retries: 2
+
+    - name: "Step 1a: Install audit (RedHat family — audisp is built into audit on EL8+)"
+      tags: [C1, C2]
+      ansible.builtin.dnf:
+        name: audit
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - block:
+        - name: "Step 2: Render audit.rules.j2 (setuid/setgid, sudo, passwd/sudoers watches)"
+          tags: [C3, C4, C5, C6, C7, C8, C9]
+          ansible.builtin.template:
+            src: ../templates/audit.rules.j2
+            dest: "{{ audit_rules_dest }}"
+            owner: root
+            group: root
+            mode: "0640"
+            backup: true
+          register: audit_rules_result
+
+        - name: "Step 3: Load the custom rules into the running kernel audit list (spec C10)"
+          tags: [C10]
+          ansible.builtin.command: augenrules --load
+          register: augenrules_result
+          changed_when: false
+          failed_when: augenrules_result.rc != 0
+
+        - name: "Step 4: Render /etc/logrotate.d/auditd"
+          tags: [C12, C14]
+          ansible.builtin.copy:
+            dest: /etc/logrotate.d/auditd
+            owner: root
+            group: root
+            mode: "0644"
+            backup: true
+            content: |
+              # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
+              /var/log/audit/audit.log {
+                  daily
+                  rotate {{ audit_logrotate_rotate }}
+                  maxage {{ audit_logrotate_maxage }}
+                  missingok
+                  notifempty
+                  compress
+                  delaycompress
+                  postrotate
+                      /sbin/service auditd rotate >/dev/null 2>&1 || true
+                  endscript
+              }
+
+        - name: "Step 5: Render /etc/logrotate.d/syslog"
+          tags: [C13, C14]
+          ansible.builtin.copy:
+            dest: /etc/logrotate.d/syslog
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
+              /var/log/syslog {
+                  daily
+                  rotate {{ syslog_logrotate_rotate }}
+                  maxage {{ syslog_logrotate_maxage }}
+                  missingok
+                  notifempty
+                  compress
+                  delaycompress
+                  su root syslog
+                  sharedscripts
+                  postrotate
+                      systemctl kill -s HUP rsyslog.service >/dev/null 2>&1 || true
+                  endscript
+              }
+
+        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host }} in /etc/hosts (spec C15)"
+          tags: [C15]
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '\s{{ siem_forward_alias }}$'
+            line: "{{ siem_forward_host }}\t{{ siem_forward_alias }}"
+            state: present
+          when: siem_forwarding_enabled | bool
+
+        - name: "Step 7: Render 99-siem-forward.conf (local6.* + auth,authpriv.* -> siem-log-server)"
+          tags: [C16, C17]
+          ansible.builtin.copy:
+            dest: "{{ siem_forward_conf }}"
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
+              # Forward local6.* (auditd, via audisp-syslog) and auth,authpriv.*
+              # to the central SIEM receiver (docs/verification/log-server.md).
+              local6.*                       @@{{ siem_forward_alias }}:{{ siem_forward_port }}
+              auth,authpriv.*                @@{{ siem_forward_alias }}:{{ siem_forward_port }}
+          register: siem_forward_conf_result
+          when: siem_forwarding_enabled | bool
+
+        - name: "Step 8: Ensure auditd enabled + started (spec C18)"
+          tags: [C18]
+          ansible.builtin.systemd:
+            name: auditd
+            state: started
+            enabled: true
+
+        - name: "Step 9: Ensure rsyslog enabled + started (spec C19)"
+          tags: [C19]
+          ansible.builtin.systemd:
+            name: rsyslog
+            state: started
+            enabled: true
+
+        - name: "Step 9a: Restart rsyslog only if the forward config actually changed"
+          tags: [C19]
+          ansible.builtin.systemd:
+            name: rsyslog
+            state: restarted
+          when: siem_forward_conf_result is changed
+
+      rescue:
+        - name: "ROLLBACK — restore audit.rules.j2 backup (or remove if this was the first apply)"
+          ansible.builtin.copy:
+            src: "{{ audit_rules_result.backup_file }}"
+            dest: "{{ audit_rules_dest }}"
+            remote_src: true
+            force: true
+          when:
+            - audit_rules_result is defined
+            - audit_rules_result.backup_file is defined
+
+        - name: "ROLLBACK — remove audit.rules.j2 if this was the first apply (no backup exists)"
+          ansible.builtin.file:
+            path: "{{ audit_rules_dest }}"
+            state: absent
+          when:
+            - audit_rules_result is defined
+            - audit_rules_result.backup_file is not defined
+
+        - name: "ROLLBACK — reload kernel audit rules back to the restored state"
+          ansible.builtin.command: augenrules --load
+          changed_when: false
+          failed_when: false
+
+        - name: "ROLLBACK — remove siem forward config"
+          ansible.builtin.file:
+            path: "{{ siem_forward_conf }}"
+            state: absent
+
+        - name: "ROLLBACK — restart rsyslog with the forward config removed"
+          ansible.builtin.systemd:
+            name: rsyslog
+            state: restarted
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              audit-log-forwarding apply failed (see task output above); the
+              audit rules and siem forward config were reverted. Fix the
+              failing task and re-run.

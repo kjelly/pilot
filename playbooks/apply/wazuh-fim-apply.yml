@@ -1,0 +1,199 @@
+# Apply playbook for docs/verification/wazuh-fim.md v1.1
+# Wazuh agent with File Integrity Monitoring (FIM/syscheck), whodata mode
+# (backed by auditd) for who-data attribution (who/what process changed a
+# file), and optional enrollment against a central Wazuh manager
+# (docs/verification/wazuh-manager.md).
+#
+# Usage (dry run):
+#   ./pilot vm-target run --name wazuh-fim \
+#     playbooks/apply/wazuh-fim-apply.yml \
+#     -e wazuh_manager_host=192.168.122.4 --check --diff
+#
+# Real apply:
+#   ./pilot vm-target run --name wazuh-fim \
+#     playbooks/apply/wazuh-fim-apply.yml \
+#     -e wazuh_manager_host=192.168.122.4
+#
+# Per-host custom monitored paths (v1.1):
+#   ./pilot vm-target run --name wazuh-fim \
+#     playbooks/apply/wazuh-fim-apply.yml \
+#     -e wazuh_manager_host=192.168.122.4 \
+#     -e '{"wazuh_fim_directories": ["/etc", "/boot", "/var/www"]}'
+#   (in a real inventory, set this in host_vars/<hostname>.yml instead of -e —
+#   see group_vars/wazuh-fim.example.yml)
+#
+# Variables (see docs/verification/wazuh-fim.md §1.5):
+#   wazuh_manager_host      optional — IP/FQDN of the wazuh-manager target; if
+#                           omitted, the agent still installs with local FIM
+#                           whodata rules configured, but enrollment (and the
+#                           /etc/hosts pin + <address> rewrite) is skipped
+#                           (spec C7-C9 not applicable — see spec §5)
+#   wazuh_fim_directories   optional — list of paths to monitor with
+#                           check_all=yes whodata=yes; default: ["/etc",
+#                           "/boot"]. Overridable per-host (host_vars) so
+#                           different hosts can watch different paths.
+#   wazuh_repo_channel      default: "4.x"
+- name: Apply wazuh-fim (Wazuh agent FIM/syscheck whodata + auditd who-data + optional manager enrollment)
+  hosts: "{{ target_group | default('wazuh-fim') }}"
+  become: true
+  gather_facts: true
+  vars:
+    wazuh_manager_host: ""
+    wazuh_fim_directories: ["/etc", "/boot"]
+    wazuh_repo_channel: "4.x"
+    wazuh_manager_alias: wazuh-manager
+    wazuh_ossec_conf: /var/ossec/etc/ossec.conf
+    wazuh_client_keys: /var/ossec/etc/client.keys
+    wazuh_enrollment_enabled: "{{ wazuh_manager_host | length > 0 }}"
+  tasks:
+    - name: "Step 0: Report whether manager enrollment is enabled this run"
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'wazuh_manager_host=' + wazuh_manager_host + ' — enrollment will be configured (spec C7-C9).'
+             if wazuh_enrollment_enabled
+             else 'wazuh_manager_host not provided — skipping /etc/hosts pin, <address> rewrite, and agent-auth; only local FIM whodata rules (C1-C6) will be configured. Re-run with -e wazuh_manager_host=<manager IP/FQDN> once a manager exists to add enrollment.' }}
+
+    - name: "Step 0a: Report which paths this host is monitoring"
+      ansible.builtin.debug:
+        msg: "wazuh_fim_directories={{ wazuh_fim_directories }}"
+
+    - name: "Step 1: Ensure /usr/share/keyrings exists"
+      tags: [C1]
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: "Step 2: Import Wazuh apt GPG key (idempotent via creates:)"
+      tags: [C1]
+      ansible.builtin.shell: |
+        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+        chmod 644 /usr/share/keyrings/wazuh.gpg
+      args:
+        creates: /usr/share/keyrings/wazuh.gpg
+
+    - name: "Step 3: Add Wazuh apt repository"
+      tags: [C1]
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/wazuh.list
+        content: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/{{ wazuh_repo_channel }}/apt/ stable main\n"
+        owner: root
+        group: root
+        mode: "0644"
+      register: wazuh_repo_file
+
+    - name: "Step 4: Install wazuh-agent + auditd (spec C1, C2)"
+      tags: [C1, C2]
+      ansible.builtin.apt:
+        name: [wazuh-agent, auditd]
+        state: present
+        update_cache: "{{ wazuh_repo_file is changed }}"
+      register: apt_wazuh_agent
+      until: apt_wazuh_agent is succeeded
+      retries: 2
+
+    - block:
+        - name: "Step 5: Append FIM whodata syscheck block to ossec.conf (spec C5, C6)"
+          tags: [C5, C6]
+          ansible.builtin.blockinfile:
+            path: "{{ wazuh_ossec_conf }}"
+            marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-fim-apply.yml FIM whodata) -->"
+            block: |
+              <ossec_config>
+                <syscheck>
+              {% for dir in wazuh_fim_directories %}
+                  <directories check_all="yes" whodata="yes">{{ dir }}</directories>
+              {% endfor %}
+                  <whodata>
+                    <provider>audit</provider>
+                  </whodata>
+                </syscheck>
+              </ossec_config>
+          register: wazuh_fim_conf_result
+
+        - name: "Step 6: Pin {{ wazuh_manager_alias }} -> {{ wazuh_manager_host }} in /etc/hosts (spec C7)"
+          tags: [C7]
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '\s{{ wazuh_manager_alias }}$'
+            line: "{{ wazuh_manager_host }}\t{{ wazuh_manager_alias }}"
+            state: present
+          when: wazuh_enrollment_enabled | bool
+
+        # The package ships exactly one <address> tag (default "MANAGER_IP"
+        # placeholder) inside <client><server> — safe to target with a single
+        # regex. Falls back to a loopback placeholder when no manager is
+        # configured yet (agent still starts; it just has nothing to connect
+        # to — see spec §1.5).
+        - name: "Step 7: Point ossec.conf's <address> at the manager alias (or loopback placeholder) (spec C8)"
+          tags: [C8]
+          ansible.builtin.lineinfile:
+            path: "{{ wazuh_ossec_conf }}"
+            regexp: '^\s*<address>.*</address>\s*$'
+            line: "      <address>{{ wazuh_manager_alias if wazuh_enrollment_enabled else '127.0.0.1' }}</address>"
+          register: wazuh_address_result
+
+        - name: "Step 8: Check whether this agent is already enrolled (client.keys populated)"
+          ansible.builtin.stat:
+            path: "{{ wazuh_client_keys }}"
+          register: wazuh_client_keys_stat
+
+        # agent-auth is NOT safe to run unconditionally on every apply — it
+        # would re-request a key each run, which is wasteful and would thrash
+        # the manager's agent list. Guard it exactly like ipa-client-install's
+        # `creates:` idempotency guard (freeipa-client-apply.yml), just
+        # expressed as an explicit `when:` since agent-auth has no native
+        # `creates:` semantics.
+        - name: "Step 9: Register with the manager via agent-auth (only once; spec C9)"
+          tags: [C9]
+          ansible.builtin.command: "/var/ossec/bin/agent-auth -m {{ wazuh_manager_alias }}"
+          when:
+            - wazuh_enrollment_enabled | bool
+            - not wazuh_client_keys_stat.stat.exists or wazuh_client_keys_stat.stat.size == 0
+          register: wazuh_agent_auth_result
+
+        - name: "Step 10: Ensure wazuh-agent + auditd enabled+started (spec C3, C4)"
+          tags: [C3, C4]
+          ansible.builtin.systemd:
+            name: "{{ item }}"
+            state: started
+            enabled: true
+          loop: [wazuh-agent, auditd]
+
+        - name: "Step 11: Restart wazuh-agent if config changed or a new enrollment just happened"
+          tags: [C3]
+          ansible.builtin.systemd:
+            name: wazuh-agent
+            state: restarted
+          when: >-
+            wazuh_fim_conf_result is changed
+            or wazuh_address_result is changed
+            or (wazuh_agent_auth_result is defined and wazuh_agent_auth_result is changed)
+
+      rescue:
+        - name: "ROLLBACK — remove the FIM whodata managed block"
+          ansible.builtin.blockinfile:
+            path: "{{ wazuh_ossec_conf }}"
+            marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-fim-apply.yml FIM whodata) -->"
+            block: ""
+            state: absent
+
+        - name: "ROLLBACK — remove the /etc/hosts pin"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '\s{{ wazuh_manager_alias }}$'
+            state: absent
+
+        - name: "ROLLBACK — restart wazuh-agent with the FIM block removed"
+          ansible.builtin.systemd:
+            name: wazuh-agent
+            state: restarted
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              wazuh-fim apply FAILED (see task output above); the FIM whodata
+              block and /etc/hosts pin were reverted. NOTE: this does not
+              revert the <address> line (Step 7) or a completed enrollment
+              (Step 9) — if agent-auth already succeeded before a later step
+              failed, client.keys remains valid and safe to reuse on retry.

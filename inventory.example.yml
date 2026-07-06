@@ -90,6 +90,37 @@ all:
         web-1:
         web-2:
 
+    # -- 中央稽核日誌接收端(log-server-apply.yml)---------------------------
+    #    收其他主機轉送過來的 auth/authpriv 與 auditd(local6)日誌。
+    log-server:                 # log-server-apply.yml 的預設目標
+      hosts: {}                 # 例:專門一台接收機 → hosts: { siem-1: }
+
+    # -- 主機稽核(auditd)+ 轉送到 log-server(audit-log-forwarding-apply.yml)
+    #    siem_forward_host 選填(見 group_vars/audit-log-forwarding.example.yml)
+    #    ——log-server 還沒建好也能先套用,只是先不轉送,只裝本機稽核規則。
+    audit-log-forwarding:
+      hosts:
+        ipa-1:
+        web-1:
+        web-2:
+
+    # -- Wazuh 中央伺服器(FIM/who-data 告警引擎 + CVE 弱點掃描)-------------
+    #    wazuh-manager-apply.yml;需要至少 4 vCPU/8GB RAM/50GB 磁碟,見
+    #    group_vars/wazuh-manager.example.yml 的資源需求註記。
+    #    siem_forward_host 選填,同上,可跟 log-server 共用同一個 IP。
+    wazuh-manager:              # wazuh-manager-apply.yml 的預設目標
+      hosts: {}                 # 例:專門一台 → hosts: { wazuh-1: }
+
+    # -- Wazuh agent:檔案完整性監控(FIM)+ auditd who-data ------------------
+    #    wazuh-fim-apply.yml;wazuh_manager_host 選填(見
+    #    group_vars/wazuh-fim.example.yml)——wazuh-manager 還沒建好也能先
+    #    套用,只是先不註冊,只裝本機 FIM 規則。
+    wazuh-fim:
+      hosts:
+        ipa-1:
+        web-1:
+        web-2:
+
     # -- 環境維度(與角色正交;讓你能用 group 交集精準鎖定)------------------
     #    例:只對「prod 環境的 dns 機器」套用 →  -e target_group='dns:&prod'
     #        只跑 sandbox                    →  --limit sandbox

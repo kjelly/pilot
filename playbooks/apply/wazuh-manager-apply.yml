@@ -1,0 +1,168 @@
+# Apply playbook for docs/verification/wazuh-manager.md v1.0
+# Wazuh all-in-one (manager + indexer + dashboard) via the official
+# wazuh-install.sh assistant script — CVE (vulnerability-detection) requires
+# the Wazuh indexer to store/correlate scan results in Wazuh 4.8+, so this is
+# NOT a manager-only role; see spec §1 for why we call the official installer
+# rather than hand-rolling indexer certs. Then adds our own additive
+# <syslog_output> block to optionally forward alerts to the central SIEM
+# (docs/verification/log-server.md).
+#
+# IMPORTANT — sizing (see spec §1/§5): this role needs real resources. A VM
+# sized like log-server/audit-log-forwarding (20GB/2048MB) WILL silently fail
+# — the CVE feed alone occupies ~7-9GB, and when the disk fills, wazuh-db and
+# wazuh-analysisd fail to write with NO service-level symptom (systemctl
+# is-active stays "active") while every alert (including FIM) silently stops
+# being generated. Use at least 60GB disk / 8192MB RAM / 4 vCPU.
+#
+# Usage (dry run):
+#   ./pilot vm-target run --name wazuh-manager \
+#     playbooks/apply/wazuh-manager-apply.yml \
+#     -e siem_forward_host=192.168.122.8 --check --diff
+#
+# Real apply:
+#   ./pilot vm-target run --name wazuh-manager \
+#     playbooks/apply/wazuh-manager-apply.yml \
+#     -e siem_forward_host=192.168.122.8
+#
+# Variables (see docs/verification/wazuh-manager.md §1.5):
+#   siem_forward_host              optional — IP/FQDN of the log-server
+#                                   target; if omitted, local alerting + CVE
+#                                   scanning still work, forwarding is skipped
+#                                   (spec C10/C11 not applicable — see spec §5)
+#   siem_forward_port              default: 514
+#   wazuh_install_script_version   default: "4.14" (tested version)
+- name: Apply wazuh-manager (Wazuh all-in-one manager+indexer+dashboard, CVE scanning, optional SIEM forward)
+  hosts: "{{ target_group | default('wazuh-manager') }}"
+  become: true
+  gather_facts: true
+  vars:
+    siem_forward_host: ""
+    siem_forward_port: "514"
+    wazuh_install_script_version: "4.14"
+    wazuh_install_dir: /root
+    wazuh_install_script: "{{ wazuh_install_dir }}/wazuh-install.sh"
+    siem_forward_conf: /var/ossec/etc/ossec.conf
+    siem_forward_alias: siem-log-server
+    siem_forwarding_enabled: "{{ siem_forward_host | length > 0 }}"
+  tasks:
+    - name: "Step 0: Report whether SIEM forwarding is enabled this run"
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'siem_forward_host=' + siem_forward_host + ' — forwarding will be configured (spec C10-C11).'
+             if siem_forwarding_enabled
+             else 'siem_forward_host not provided — skipping /etc/hosts pin and <syslog_output>; only local alerting + CVE scanning (C1-C9) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
+
+    - name: "Step 1: Detect prior install (spec C1)"
+      ansible.builtin.command: dpkg-query -W -f='${Status}' wazuh-manager
+      register: wazuh_manager_dpkg
+      changed_when: false
+      failed_when: false
+
+    - name: "Step 1a: Set install-needed fact"
+      ansible.builtin.set_fact:
+        wazuh_manager_already_installed: "{{ wazuh_manager_dpkg.rc == 0 and 'install ok installed' in wazuh_manager_dpkg.stdout }}"
+
+    - name: "Step 2: Download the official wazuh-install.sh assistant (spec C1, C2)"
+      ansible.builtin.get_url:
+        url: "https://packages.wazuh.com/{{ wazuh_install_script_version }}/wazuh-install.sh"
+        dest: "{{ wazuh_install_script }}"
+        mode: "0750"
+      when: not wazuh_manager_already_installed
+
+    # This is a long-running operation (indexer + manager + dashboard install,
+    # cert generation, security admin bootstrap) — observed several minutes on
+    # a properly-sized VM (spec §1). async/poll instead of a short default
+    # timeout. -a = all-in-one; -i = ignore hardware-minimum check (sandbox
+    # VMs may not match the exact CPU model probe — see spec §5; does NOT
+    # excuse under-provisioning disk, which is a real, previously-hit failure
+    # mode, not a false-positive check).
+    - name: "Step 3: Run wazuh-install.sh -a -i (all-in-one: manager+indexer+dashboard; spec C1, C2)"
+      ansible.builtin.command:
+        cmd: "bash {{ wazuh_install_script }} -a -i"
+        chdir: "{{ wazuh_install_dir }}"
+      register: wazuh_install_job
+      async: 1800
+      poll: 20
+      when: not wazuh_manager_already_installed
+
+    - name: "Step 4: Ensure wazuh-manager enabled+started (spec C3)"
+      tags: [C3]
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: started
+        enabled: true
+
+    - name: "Step 5: Ensure wazuh-indexer enabled+started (spec C4)"
+      tags: [C4]
+      ansible.builtin.systemd:
+        name: wazuh-indexer
+        state: started
+        enabled: true
+
+    - block:
+        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host }} in /etc/hosts (spec C10)"
+          tags: [C10]
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '\s{{ siem_forward_alias }}$'
+            line: "{{ siem_forward_host }}\t{{ siem_forward_alias }}"
+            state: present
+          when: siem_forwarding_enabled | bool
+
+        # Wazuh's ossec.conf parser accepts multiple top-level <ossec_config>
+        # root blocks in one file and merges them — confirmed by the package's
+        # OWN shipped default (it ends with a second <ossec_config> block for
+        # journald/dpkg.log localfile monitoring). We exploit the same,
+        # already-in-use mechanism to append our own managed block instead of
+        # editing inside the vendor defaults (see spec §6, runbook §5).
+        - name: "Step 7: Append <syslog_output> block to ossec.conf (spec C11)"
+          tags: [C11]
+          ansible.builtin.blockinfile:
+            path: "{{ siem_forward_conf }}"
+            marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
+            block: |
+              <ossec_config>
+                <syslog_output>
+                  <server>{{ siem_forward_alias }}</server>
+                  <port>{{ siem_forward_port }}</port>
+                  <format>default</format>
+                </syslog_output>
+              </ossec_config>
+          register: siem_forward_conf_result
+          when: siem_forwarding_enabled | bool
+
+        - name: "Step 8: Restart wazuh-manager only if the forward config actually changed"
+          ansible.builtin.systemd:
+            name: wazuh-manager
+            state: restarted
+          when: siem_forward_conf_result is changed
+
+      rescue:
+        - name: "ROLLBACK — remove the siem forward managed block"
+          ansible.builtin.blockinfile:
+            path: "{{ siem_forward_conf }}"
+            marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
+            block: ""
+            state: absent
+
+        - name: "ROLLBACK — remove the /etc/hosts pin"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '\s{{ siem_forward_alias }}$'
+            state: absent
+
+        - name: "ROLLBACK — restart wazuh-manager with the forward config removed"
+          ansible.builtin.systemd:
+            name: wazuh-manager
+            state: restarted
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              wazuh-manager SIEM-forward configuration failed (see task output
+              above); the /etc/hosts pin and <syslog_output> block were
+              reverted. NOTE: this rescue only covers the additive forwarding
+              step (Step 6-8) — it does NOT attempt to uninstall or repair a
+              partially-completed wazuh-install.sh run (Step 1-5); if that
+              step failed, inspect /var/log/wazuh-install.log on the target
+              and consult docs/runbooks/wazuh-manager.md §5 before retrying.

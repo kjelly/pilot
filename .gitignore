@@ -48,9 +48,18 @@ coverage.txt
 .verification/
 .playbooks/generated/
 inventory*.yaml
+# The canonical DELIVERY.md golden path (`cp inventory.example.yml
+# inventory.yml`) — real hosts/IPs, never the committed schema.
+/inventory.yml
 # ...but keep the committed delivery template (the .yml example is the schema
 # recipients copy from). Mirrors the group_vars/dns zones.example pattern below.
 !inventory.example.yml
+
+# Real group_vars/<group>.yml files (role config for an actual inventory —
+# e.g. `cp group_vars/freeipa.example.yml group_vars/freeipa.yml`, see
+# DELIVERY.md §1.5) never the committed *.example.yml schema files.
+/group_vars/*.yml
+!/group_vars/*.example.yml
 
 # DNS zone data is infra topology for a PUBLIC repo — real data lives OUTSIDE
 # the repo tree (in group_vars/ next to an out-of-git inventory). If anyone
