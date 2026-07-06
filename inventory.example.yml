@@ -137,6 +137,20 @@ all:
         web-1:
         web-2:
 
+    # -- 指標:每站 Prometheus + Thanos Sidecar(prometheus-apply.yml)-------
+    #    每個機房/站台各放一台;thanos_s3_target_host 指向上面的
+    #    seaweedfs-s3、bucket 要跟 thanos-query 那台用同一個(見
+    #    group_vars/prometheus.example.yml)。prometheus_site_label 必填、
+    #    逐主機用 host_vars 覆寫成各站的站名。
+    prometheus:
+      hosts: {}                 # 例:兩站 → hosts: { site-a: , site-b: }
+
+    # -- 指標:中央 Thanos Query + Store Gateway + Compactor(全局查詢)------
+    #    thanos-query-apply.yml 的預設目標;只需一台。套用時會自動讀上面
+    #    `prometheus` group 組出 --store 清單,不用手動維護站台 IP 清單。
+    thanos-query:
+      hosts: {}                 # 例:專門一台 → hosts: { metrics-central-1: }
+
     # -- 環境維度(與角色正交;讓你能用 group 交集精準鎖定)------------------
     #    例:只對「prod 環境的 dns 機器」套用 →  -e target_group='dns:&prod'
     #        只跑 sandbox                    →  --limit sandbox
