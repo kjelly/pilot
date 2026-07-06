@@ -1,0 +1,27 @@
+# Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
+# Generated from: playbooks/templates/audit.rules.j2
+#
+# Rule ORDER matters: the kernel audit filterlist evaluates "exit" rules
+# top-to-bottom and stops at the FIRST match (like iptables) — it does not
+# evaluate every rule and merge results. /usr/bin/sudo is itself a
+# setuid-root binary, so every invocation also matches the generic
+# setuid/setgid execve rules below; if those were listed first, sudo's own
+# execve would always be tagged "setuid_setgid_exec" and the dedicated
+# "privileged-sudo" key would never fire. Putting the specific sudo watch
+# first gives sudo invocations their own key while leaving the generic
+# rules to still catch every OTHER setuid/setgid binary.
+
+# sudo binary execution monitoring.
+-w /usr/bin/sudo -p x -k privileged-sudo
+
+# Critical identity/authorization file monitoring.
+-w /etc/passwd -p wa -k identity
+-w /etc/sudoers -p wa -k sudoers_changes
+
+# setuid/setgid — EXECUTION monitoring: catches the moment a setuid/setgid
+# binary actually triggers a privilege change (real uid/gid != effective).
+-a always,exit -F arch=b64 -S execve -C uid!=euid -F euid=0 -k setuid_setgid_exec
+-a always,exit -F arch=b64 -S execve -C gid!=egid -F egid=0 -k setuid_setgid_exec
+
+# setuid/setgid — CHANGE monitoring: catches someone adding/removing the bit.
+-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -k setuid_setgid_change

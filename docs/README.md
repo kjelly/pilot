@@ -16,6 +16,10 @@
 | **管 FreeIPA 使用者/權限（名冊與機密不進 git）** | [`runbooks/freeipa-identity.md`](./runbooks/freeipa-identity.md) |
 | **開啟 FreeIPA 目錄服務（389-ds）稽核日誌** | [`runbooks/freeipa-389ds-audit-log.md`](./runbooks/freeipa-389ds-audit-log.md) |
 | **DNS 服務自訂內部網域（網域資料不進公開 git）** | [`runbooks/core-infra-provider-dns-zones.md`](./runbooks/core-infra-provider-dns-zones.md) |
+| **部署中央 SIEM 日誌接收端（rsyslog）** | [`runbooks/log-server.md`](./runbooks/log-server.md) |
+| **主機 auditd 稽核規則 + 轉送日誌到 SIEM** | [`runbooks/audit-log-forwarding.md`](./runbooks/audit-log-forwarding.md) |
+| **Wazuh 中央伺服器（FIM/who-data 告警引擎 + CVE 弱點掃描）** | [`runbooks/wazuh-manager.md`](./runbooks/wazuh-manager.md) |
+| **Wazuh agent：檔案完整性監控(FIM) + auditd who-data** | [`runbooks/wazuh-fim.md`](./runbooks/wazuh-fim.md) |
 | 開發 ansible playbook 的心法 | [`ansible-playbook-development.md`](./ansible-playbook-development.md) |
 | 跑測試 | [`../TESTING.md`](../TESTING.md) |
 

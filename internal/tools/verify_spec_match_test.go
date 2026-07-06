@@ -47,6 +47,68 @@ func TestVerifySpec_MatchExpected(t *testing.T) {
 		// Exact-string match expected, with the runner prefix stripped.
 		{"exact match", "OK provider=kc-ssh-pam", "(rc=0) OK provider=kc-ssh-pam", 0, true},
 		{"exact mismatch", "OK provider=kc-ssh-pam", "(rc=0) DIFFERENT", 0, false},
+
+		// Real ansible ad-hoc (`-i inventory -l host`, i.e. every
+		// `pilot vm-target verify` and any `pilot verify -i ...` call)
+		// wraps stdout in its own "--one-line" callback format instead of
+		// returning bare stdout: "<host> | CHANGED | rc=0 | (stdout) <val>".
+		// Before the unwrapAdhocOneline fix, extractRC's isInt() check saw
+		// this whole wrapped string (not a bare integer), returned -1, and
+		// matchExpected fell back to comparing the ANSIBLE PROCESS's own
+		// exit code (rc param, always 0 for the `cmd; echo $?` idiom, since
+		// the trailing echo always succeeds) against expected — meaning a
+		// numeric check using this repo's own recommended idiom ALWAYS
+		// reported PASS under ad-hoc verify, regardless of the real result.
+		// Caught live: `getent hosts siem-log-server >/dev/null 2>&1;
+		// echo $?` on a host with no such alias genuinely printed "2", but
+		// pre-fix verify reported PASS against expected "0".
+		{
+			"ad-hoc oneline real failure (getent rc=2, wrapped)",
+			"0",
+			"(rc=0) audit-log-forwarding | CHANGED | rc=0 | (stdout) 2",
+			0, false,
+		},
+		{
+			"ad-hoc oneline real success (rc=0, wrapped)",
+			"0",
+			"(rc=0) audit-log-forwarding | CHANGED | rc=0 | (stdout) 0",
+			0, true,
+		},
+		// Same, but with the [WARNING]/[DEPRECATION WARNING] lines ansible
+		// actually prepends in this environment (confirmed via `pilot
+		// verify --probe` against a live vm-target) — the result line is
+		// scanned from the end, so leading noise must not defeat it.
+		{
+			"ad-hoc oneline with deprecation warnings ahead of the result line",
+			"0",
+			"(rc=0) [WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.\n[DEPRECATION WARNING]: The '--one-line' argument is deprecated. This feature will be removed from ansible-core version 2.23.\naudit-log-forwarding | CHANGED | rc=0 | (stdout) 2",
+			0, false,
+		},
+		// ~contains against a wrapped oneline result must match the real
+		// stdout tail, not merely happen to find the substring somewhere in
+		// the noisy wrapper text.
+		{
+			"ad-hoc oneline ~contains match",
+			"~PILOT-SELFTEST",
+			"(rc=0) log-server | CHANGED | rc=0 | (stdout) PILOT-SELFTEST-MARKER",
+			0, true,
+		},
+		// When the command also wrote to stderr (e.g. `grep` on a missing
+		// file: "grep: <path>: No such file or directory"), ansible appends
+		// " (stderr) <text>" right after "(stdout) <text>" on the SAME
+		// line with no separator. That tail must not be folded into the
+		// captured stdout value — caught live via `pilot verify --probe`
+		// against docs/verification/audit-log-forwarding.md's C16 with no
+		// forward config present: real stdout was "2", but the unwrapped
+		// value became "2 (stderr) grep: ... No such file or directory"
+		// (not a pure integer) and matchExpected fell back to the always-0
+		// ansible process rc — the exact same false-PASS this fix targets.
+		{
+			"ad-hoc oneline stdout + stderr on one line",
+			"0",
+			"(rc=0) audit-log-forwarding | CHANGED | rc=0 | (stdout) 2 (stderr) grep: /etc/rsyslog.d/99-siem-forward.conf: No such file or directory",
+			0, false,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

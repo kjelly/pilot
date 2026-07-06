@@ -1,0 +1,30 @@
+---
+# ============================================================================
+#  group_vars/audit-log-forwarding.example.yml —— auditd 稽核 + 轉送 SIEM 設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/audit-log-forwarding.yml
+#    cp group_vars/audit-log-forwarding.example.yml <inventory 目錄>/group_vars/audit-log-forwarding.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/audit-log-forwarding.md
+#  轉送目標(log-server 角色)的 spec:docs/verification/log-server.md
+#  ——log-server 是另一個獨立角色,要先另外 apply,見 inventory.example.yml
+#    的 `log-server` group。
+# ============================================================================
+
+# 中央 SIEM 接收端(log-server 角色)的 IP 或 FQDN。
+#
+# 選填 —— 留白/不填的話,這個 group 的機器仍會裝好本機 auditd 規則
+# (setuid/setgid、sudo、/etc/passwd、/etc/sudoers 監控)+ logrotate,只是不會
+# 設定轉送(spec C15-C17 不適用,屬設計如此,見 spec §5 已知偏差)。等
+# log-server 就緒後,把這裡填上它的 IP/FQDN、重新套用即可補上轉送,不需要
+# 重裝 auditd 或重套規則。
+siem_forward_host: ""
+
+# 以下通常不用填,會沿用 playbook 內建預設:
+# siem_forward_port: "514"
+# audit_logrotate_rotate: 14
+# audit_logrotate_maxage: 90
+# syslog_logrotate_rotate: 14
+# syslog_logrotate_maxage: 90

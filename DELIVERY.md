@@ -44,6 +44,10 @@ cp group_vars/freeipa.example.yml        group_vars/freeipa.yml          # FreeI
 cp group_vars/linux-servers.example.yml  group_vars/linux-servers.yml    # PAM-OIDC / Keycloak
 cp group_vars/dns.example.yml            group_vars/dns.yml              # DNS 位址
 cp group_vars/ntp.example.yml            group_vars/ntp.yml             # NTP 來源
+cp group_vars/audit-log-forwarding.example.yml \
+   group_vars/audit-log-forwarding.yml                                  # SIEM 轉送位址(選填)
+cp group_vars/wazuh-manager.example.yml  group_vars/wazuh-manager.yml   # SIEM 轉送位址(選填)
+cp group_vars/wazuh-fim.example.yml      group_vars/wazuh-fim.yml       # Wazuh manager 位址(選填)
 ```
 
 打開複製出來的檔案，照註解填。沒用到的角色不用複製；不填的值會沿用內建預設。
@@ -111,6 +115,10 @@ ansible-playbook -i inventory.yml playbooks/apply/os-patch-sla-apply.yml --limit
 | Keycloak（IdP） | `playbooks/apply/keycloak-apply.yml` | `keycloak` |
 | Keycloak 資料庫 | `playbooks/apply/keycloak-db-apply.yml` | `keycloak-db` |
 | SSH 走 OIDC 登入 | `playbooks/apply/pam-oidc-sshd-apply.yml` | `linux-servers` |
+| 中央稽核日誌接收(SIEM) | `playbooks/apply/log-server-apply.yml` | `log-server` |
+| 主機稽核(auditd)+ 轉送到 log-server | `playbooks/apply/audit-log-forwarding-apply.yml` | `audit-log-forwarding` |
+| Wazuh 中央伺服器(FIM/who-data 告警引擎 + CVE 弱點掃描) | `playbooks/apply/wazuh-manager-apply.yml` | `wazuh-manager`（需至少 4 vCPU/8GB RAM/50GB 磁碟，見 `docs/runbooks/wazuh-manager.md` §5.2） |
+| Wazuh agent(檔案完整性監控 FIM + auditd who-data) | `playbooks/apply/wazuh-fim-apply.yml` | `wazuh-fim` |
 | OS 補丁 SLA | `playbooks/apply/os-patch-sla-apply.yml` | 依 `-e patch_stage=` |
 
 > 每支 apply playbook 的檔頭註解都有完整的參數與範例；`--limit <host>` 可把任何一次

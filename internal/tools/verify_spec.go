@@ -384,9 +384,9 @@ func stripRunnerPrefix(s string) string {
 		return ""
 	}
 	if loc := rcPrefixPattern.FindStringIndex(s); loc != nil {
-		return strings.TrimSpace(s[loc[1]:])
+		return unwrapAdhocOneline(strings.TrimSpace(s[loc[1]:]))
 	}
-	return s
+	return unwrapAdhocOneline(s)
 }
 
 // extractRC pulls a recovered rc from the runner-prefixed detail.
@@ -404,6 +404,17 @@ func extractRC(s string) int {
 	// 3) If the remaining stdout is itself an integer, that's the rc-echo.
 	if isInt(stripped) {
 		return atoi(stripped)
+	}
+	// 4) Ansible ad-hoc (`-i inventory`) wraps the real stdout in its
+	// "--one-line" callback format ("<host> | CHANGED | rc=0 | (stdout) N"),
+	// possibly behind [WARNING]/[DEPRECATION WARNING] lines. Unwrap it and
+	// retry — without this, every ad-hoc-verified numeric check using the
+	// `cmd; echo $?` / `cmd && echo 0 || echo 1` idiom (the very idiom this
+	// repo's spec template recommends to avoid trap 1) would silently
+	// always resolve to the ansible process's own exit code instead — which
+	// is always 0 for that idiom, since the trailing echo always succeeds.
+	if unwrapped := unwrapAdhocOneline(stripped); unwrapped != stripped && isInt(unwrapped) {
+		return atoi(unwrapped)
 	}
 	return -1
 }
@@ -444,7 +455,47 @@ func truncate(s string, n int) string {
 var (
 	rcOnlyPattern   = regexp.MustCompile(`^\(rc=\d+\)$`)
 	rcPrefixPattern = regexp.MustCompile(`^\(rc=\d+\)\s+`)
+
+	// adhocResultLineRe locates the "| rc=N" segment of ansible's
+	// `--one-line` ad-hoc callback output, e.g.
+	// "myhost | CHANGED | rc=0 | (stdout) 2". When the command also wrote
+	// to stderr, ansible appends " (stderr) <text>" right after the
+	// "(stdout) <text>" segment on the SAME line with no separator — that
+	// tail must be cut off, not folded into the captured stdout.
+	adhocResultLineRe = regexp.MustCompile(`\|\s*rc=-?\d+\b`)
 )
+
+// unwrapAdhocOneline extracts the real remote command output from
+// ansible's `--one-line` ad-hoc callback line
+// ("<host> | STATUS | rc=N | (stdout) <text> [(stderr) <text>]"), scanning
+// from the last line backwards so any "[WARNING]"/"[DEPRECATION WARNING]"
+// lines ansible prints ahead of the result line don't interfere. Commands
+// captured outside ad-hoc mode (no such wrapper line present, e.g. --local
+// runs) are returned unchanged — this is a no-op there, not a hazard.
+func unwrapAdhocOneline(s string) string {
+	const stdoutMarker = "(stdout)"
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		loc := adhocResultLineRe.FindStringIndex(line)
+		if loc == nil {
+			continue
+		}
+		rest := line[loc[1]:]
+		idx := strings.Index(rest, stdoutMarker)
+		if idx < 0 {
+			// Recognized ad-hoc result line, but no stdout was captured
+			// (empty stdout, or a stderr-only failure).
+			return ""
+		}
+		out := strings.TrimSpace(rest[idx+len(stdoutMarker):])
+		if j := strings.Index(out, " (stderr)"); j >= 0 {
+			out = strings.TrimSpace(out[:j])
+		}
+		return out
+	}
+	return s
+}
 
 // ProbeResult is the outcome of VerifySpecTool.Probe: one candidate command
 // run through the exact verify pipeline, with every intermediate value the
