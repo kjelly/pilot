@@ -1,0 +1,128 @@
+# Apply playbook for docs/verification/log-shipping.md v1.0
+#
+# Agent role that layers ON TOP of docs/verification/log-server.md (same
+# inventory group, same host) WITHOUT modifying that playbook/spec at all —
+# see log-server.md's own note anticipating exactly this extension. Runs
+# Promtail as a Docker container that tails the log files log-server.md's
+# rsyslog already writes under siem_log_root, and pushes them to the Loki
+# container docs/verification/dashboard.md runs on a separate central host.
+#
+# Uses the same "agent knows the central address" idiom as
+# audit-log-forwarding-apply.yml (siem_forward_host/siem_forward_alias) —
+# NOT the inverted discovery direction thanos-query-apply.yml uses, because
+# Promtail has to actively push; there is no equivalent "central discovers
+# agents via inventory" mechanism for it.
+#
+# Pre-flight: docs/verification/log-server.md PASS (siem_log_root exists
+# and rsyslog is landing files under it), docs/verification/docker.md PASS.
+#
+# Usage:
+#
+#   go run ./cmd/pilot vm-target run --name log-server \
+#       playbooks/apply/log-shipping-apply.yml \
+#       -e target_group=log-server \
+#       -e loki_target_host=<dashboard host IP>
+#
+# Variables: see docs/verification/log-shipping.md §1.5.
+- name: "Apply log-shipping (Promtail: log-server -> dashboard Loki)"
+  hosts: "{{ target_group | default('log-server') }}"
+  become: true
+  gather_facts: true
+  vars:
+    promtail_version: "2.9.8"
+    promtail_config_dir: /etc/pilot/promtail
+    promtail_positions_dir: /var/lib/pilot/promtail
+    docker_network_name: pilot-metrics
+    loki_target_host: ""
+    loki_alias: pilot-loki-backend
+    loki_port: 3100
+    loki_endpoint: "{{ loki_alias }}:{{ loki_port }}"
+    siem_log_root: /var/log/siem
+    promtail_job_label: pilot-siem
+
+  tasks:
+    - name: "Pin {{ loki_alias }} -> {{ loki_target_host }} in /etc/hosts"
+      tags: [C5]
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ loki_alias }}$'
+        line: "{{ loki_target_host }}\t{{ loki_alias }}"
+        state: present
+      when: loki_target_host | length > 0
+
+    - block:
+        - name: "Ensure config + positions dirs exist"
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            mode: "0755"
+          loop:
+            - "{{ promtail_config_dir }}"
+            - "{{ promtail_positions_dir }}"
+
+        # Spec: docs/verification/log-shipping.md C3, C4
+        - name: "Render Promtail config"
+          tags: [C3, C4]
+          ansible.builtin.copy:
+            dest: "{{ promtail_config_dir }}/promtail-config.yml"
+            mode: "0644"
+            content: |
+              server:
+                http_listen_port: 9080
+                grpc_listen_port: 0
+              positions:
+                filename: /var/lib/promtail/positions.yaml
+              clients:
+                - url: "http://{{ loki_endpoint }}/loki/api/v1/push"
+              scrape_configs:
+                - job_name: {{ promtail_job_label }}
+                  static_configs:
+                    - targets: [localhost]
+                      labels:
+                        job: {{ promtail_job_label }}
+                        __path__: {{ siem_log_root }}/**/*.log
+          register: promtail_config_result
+
+        - name: "Ensure docker network {{ docker_network_name }} exists"
+          community.docker.docker_network:
+            name: "{{ docker_network_name }}"
+            state: present
+
+        # Spec: docs/verification/log-shipping.md C1, C2, C6, C7
+        # grafana/promtail's official image runs as root, so it doesn't
+        # need chowned host dirs to read log-server's rsyslog-owned files
+        # under siem_log_root (mounted :ro) or write its own positions dir.
+        - name: "Promtail — run pilot-promtail container"
+          tags: [C1, C2, C6, C7]
+          community.docker.docker_container:
+            name: pilot-promtail
+            image: "grafana/promtail:{{ promtail_version }}"
+            state: started
+            restart_policy: unless-stopped
+            restart: "{{ promtail_config_result is changed }}"
+            command: "-config.file=/etc/promtail/config.yml"
+            networks:
+              - name: "{{ docker_network_name }}"
+            volumes:
+              - "{{ promtail_config_dir }}/promtail-config.yml:/etc/promtail/config.yml:ro"
+              - "{{ siem_log_root }}:{{ siem_log_root }}:ro"
+              - "{{ promtail_positions_dir }}:/var/lib/promtail"
+            ports:
+              - "9080:9080"
+
+        - name: "Wait for Promtail to become ready"
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:9080/ready"
+            status_code: 200
+          register: promtail_ready
+          until: promtail_ready.status == 200
+          retries: 30
+          delay: 2
+
+      rescue:
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              log-shipping apply FAILED (see task output above). Container
+              (if created) is left in place for inspection via `docker logs
+              pilot-promtail`.
