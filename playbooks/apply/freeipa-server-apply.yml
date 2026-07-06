@@ -82,6 +82,15 @@
     # DM password defaults to the admin password unless explicitly given
     ipa_dm_password: "{{ ipa_admin_password }}"
 
+    # 389-ds (Directory Server) audit log — records every LDAP write op (and,
+    # via auditfaillog, denied writes) so directory mutations are attributable.
+    # Off by default in 389-ds; enabled below unless ipa_enable_audit_log=false.
+    # The instance name derives from the realm (IPA.PILOT.INTERNAL ->
+    # slapd-IPA-PILOT-INTERNAL); audit file lands in
+    # /var/log/dirsrv/<instance>/audit. Spec rows C14–C16.
+    ipa_enable_audit_log: true
+    ipa_ds_instance: "slapd-{{ ipa_realm | replace('.', '-') }}"
+
   pre_tasks:
     - name: "Gate: required vars present (fail early, before any mutation)"
       ansible.builtin.assert:
@@ -282,3 +291,43 @@
               has "{{ ipa_server_ip }} {{ ipa_server_fqdn }}" with the FQDN FIRST);
               clock skew (apply ntp role — Kerberos needs < 5 min); a half-finished
               prior install (run `ipa-server-install --uninstall -U` then rerun).
+
+    # 389-ds (Directory Server) audit log — spec C14–C16. Turns on the
+    # directory-service audit log so every LDAP write (user/group/sudo-rule
+    # change) and every DENIED write is recorded to
+    # /var/log/dirsrv/{{ ipa_ds_instance }}/audit, attributable by bind DN.
+    # 389-ds ships this OFF by default. dsconf autobinds as root over the
+    # ldapi socket (we are `become: true`), so NO Directory Manager password
+    # is needed here. The change is DYNAMIC — it takes effect immediately,
+    # no dirsrv restart. Idempotent by construction: we read the current
+    # config first and only `config replace` when a flag is not already `on`.
+    # Skipped in --check mode (needs a live install) and when the operator
+    # opts out with -e ipa_enable_audit_log=false.
+    - name: "FreeIPA — 389-ds audit log: enable directory-service auditing (spec C14–C16)"
+      when: not ansible_check_mode and (ipa_enable_audit_log | bool)
+      tags: [freeipa, freeipa-audit]
+      block:
+        - name: "FreeIPA — 389-ds audit log: read current logging config"
+          ansible.builtin.command:
+            argv:
+              - dsconf
+              - "{{ ipa_ds_instance }}"
+              - config
+              - get
+              - nsslapd-auditlog-logging-enabled
+              - nsslapd-auditfaillog-logging-enabled
+          register: ipa_ds_audit_cfg
+          changed_when: false
+
+        - name: "FreeIPA — 389-ds audit log: turn on write + failed-write auditing (dynamic, no restart)"
+          ansible.builtin.command:
+            argv:
+              - dsconf
+              - "{{ ipa_ds_instance }}"
+              - config
+              - replace
+              - nsslapd-auditlog-logging-enabled=on
+              - nsslapd-auditfaillog-logging-enabled=on
+          when: >-
+            ('nsslapd-auditlog-logging-enabled: on' not in ipa_ds_audit_cfg.stdout) or
+            ('nsslapd-auditfaillog-logging-enabled: on' not in ipa_ds_audit_cfg.stdout)
