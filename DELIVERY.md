@@ -48,6 +48,7 @@ cp group_vars/audit-log-forwarding.example.yml \
    group_vars/audit-log-forwarding.yml                                  # SIEM 轉送位址(選填)
 cp group_vars/wazuh-manager.example.yml  group_vars/wazuh-manager.yml   # SIEM 轉送位址(選填)
 cp group_vars/wazuh-fim.example.yml      group_vars/wazuh-fim.yml       # Wazuh manager 位址(選填)
+cp group_vars/restic-backup.example.yml  group_vars/restic-backup.yml   # 備份目的地 S3 + 機密(必填)
 ```
 
 打開複製出來的檔案，照註解填。沒用到的角色不用複製；不填的值會沿用內建預設。
@@ -119,6 +120,8 @@ ansible-playbook -i inventory.yml playbooks/apply/os-patch-sla-apply.yml --limit
 | 主機稽核(auditd)+ 轉送到 log-server | `playbooks/apply/audit-log-forwarding-apply.yml` | `audit-log-forwarding` |
 | Wazuh 中央伺服器(FIM/who-data 告警引擎 + CVE 弱點掃描) | `playbooks/apply/wazuh-manager-apply.yml` | `wazuh-manager`（需至少 4 vCPU/8GB RAM/50GB 磁碟，見 `docs/runbooks/wazuh-manager.md` §5.2） |
 | Wazuh agent(檔案完整性監控 FIM + auditd who-data) | `playbooks/apply/wazuh-fim-apply.yml` | `wazuh-fim` |
+| S3 相容物件儲存(SeaweedFS) | `playbooks/apply/seaweedfs-s3-apply.yml` | `seaweedfs-s3` |
+| 跨主機通用備份到 S3(restic) | `playbooks/apply/restic-backup-apply.yml` | `restic-backup`（需先有 S3 目的地，見 `docs/runbooks/restic-backup.md` §5 的 SeaweedFS 匿名模式/簽章相容性注意事項） |
 | OS 補丁 SLA | `playbooks/apply/os-patch-sla-apply.yml` | 依 `-e patch_stage=` |
 
 > 每支 apply playbook 的檔頭註解都有完整的參數與範例；`--limit <host>` 可把任何一次
