@@ -8,8 +8,9 @@ import (
 )
 
 // TestRegression_FreeipaServerSpec locks the structural contract of
-// docs/verification/freeipa-server.md: 13 rows C1..C13, lint-clean, and a
-// generated verify playbook that covers every row.
+// docs/verification/freeipa-server.md: 16 rows C1..C16 (C14–C16 = 389-ds
+// directory-service audit log, added in v1.1), lint-clean, and a generated
+// verify playbook that covers every row.
 //
 // Inventory alignment: like freeipa-client.md, §1 declares group
 // `freeipa-server` while the vm-target reference environment puts the host in
@@ -23,11 +24,11 @@ func TestRegression_FreeipaServerSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	if len(s.Rows) != 13 {
-		t.Fatalf("rows=%d want=13 (spec must cover C1..C13 inclusive)", len(s.Rows))
+	if len(s.Rows) != 16 {
+		t.Fatalf("rows=%d want=16 (spec must cover C1..C16 inclusive)", len(s.Rows))
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16"}
 	gotIDs := make([]string, 0, len(s.Rows))
 	seen := map[string]bool{}
 	for _, r := range s.Rows {
@@ -114,6 +115,27 @@ func TestRegression_FreeipaServerSpec_MatcherChoices(t *testing.T) {
 	}
 	if !strings.HasPrefix(exp["C3"], "~") {
 		t.Errorf("C3 expected should be a ~contains match on the FQDN, got %q", exp["C3"])
+	}
+
+	// C14/C15: 389-ds audit-log config read via dsconf (needs root over ldapi),
+	// matched with ~contains on the exact `attr: on` line. Positive logic — we
+	// assert the flag is ON, never a reverse grep for `off`.
+	for _, id := range []string{"C14", "C15"} {
+		if !strings.Contains(cmd[id], "dsconf") || !strings.Contains(cmd[id], "config get") {
+			t.Errorf("%s must read the 389-ds audit flag via `dsconf ... config get`, got %q", id, cmd[id])
+		}
+		if !strings.HasPrefix(exp[id], "~") || !strings.Contains(exp[id], ": on") {
+			t.Errorf("%s expected should be a ~contains match on `<attr>: on`, got %q", id, exp[id])
+		}
+	}
+
+	// C16: audit file present AND non-empty via `test -s` (rc-based), never a
+	// reverse-logic pipe. Expected must be rc `0`.
+	if !strings.Contains(cmd["C16"], "test -s") {
+		t.Errorf("C16 must use `test -s <auditfile>` (exists && non-empty), got %q", cmd["C16"])
+	}
+	if exp["C16"] != "0" {
+		t.Errorf("C16 expected must be rc-based `0`, got %q", exp["C16"])
 	}
 
 	// The whole spec must be lint-warning-free for the matcher traps: no
