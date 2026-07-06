@@ -1,0 +1,28 @@
+---
+# ============================================================================
+#  group_vars/dashboard.example.yml —— Grafana + Loki 觀測入口範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/dashboard.yml
+#    cp group_vars/dashboard.example.yml <inventory 目錄>/group_vars/dashboard.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/dashboard.md
+#  上游 metrics:docs/verification/thanos-query.md(全局查詢中央)
+#  上游 logs:  docs/verification/log-shipping.md(跑在 log-server 主機上的
+#              Promtail agent,把日誌轉送進這台的 Loki)
+# ============================================================================
+
+# thanos-query 中央主機的 IP 或 FQDN(Grafana 的 Prometheus datasource 指向
+# 這裡)。留空也能套用成功——Grafana/Loki 照樣起來,只是 Prometheus
+# datasource 連不到上游(spec C8 預期 fail),等 thanos-query 上線後補填、
+# 重新套用即可(見 spec §1.5)。
+thanos_query_target_host: ""
+
+# Grafana admin 密碼。**必填、沒有預設值**,一律用 ansible-vault 加密檔帶
+# 入,不要明文寫在這裡或用 -e 帶(除了拋棄式沙盒測試)。
+# grafana_admin_password: ""
+
+# 通常不用改,會沿用 playbook 內建預設:
+# thanos_query_alias: thanos-query-backend
+# thanos_query_port: 10902

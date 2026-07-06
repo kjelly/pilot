@@ -92,6 +92,9 @@ all:
 
     # -- 中央稽核日誌接收端(log-server-apply.yml)---------------------------
     #    收其他主機轉送過來的 auth/authpriv 與 auditd(local6)日誌。
+    #    想在這台上加「轉送一份到 dashboard 的 Loki」時,套用
+    #    log-shipping-apply.yml 即可——它預設就是打同一個 log-server
+    #    group,不用另開 inventory group(見 group_vars/log-shipping.example.yml）。
     log-server:                 # log-server-apply.yml 的預設目標
       hosts: {}                 # 例:專門一台接收機 → hosts: { siem-1: }
 
@@ -150,6 +153,13 @@ all:
     #    `prometheus` group 組出 --store 清單,不用手動維護站台 IP 清單。
     thanos-query:
       hosts: {}                 # 例:專門一台 → hosts: { metrics-central-1: }
+
+    # -- 觀測畫面:Grafana + Loki(dashboard-apply.yml)----------------------
+    #    只需一台;thanos_query_target_host 指向上面的 thanos-query,
+    #    見 group_vars/dashboard.example.yml。log-server 主機套用
+    #    log-shipping-apply.yml 後,Promtail 會把日誌轉送進這台的 Loki。
+    dashboard:
+      hosts: {}                 # 例:專門一台 → hosts: { dashboard-1: }
 
     # -- 環境維度(與角色正交;讓你能用 group 交集精準鎖定)------------------
     #    例:只對「prod 環境的 dns 機器」套用 →  -e target_group='dns:&prod'

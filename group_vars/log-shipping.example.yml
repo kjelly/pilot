@@ -1,0 +1,25 @@
+---
+# ============================================================================
+#  group_vars/log-shipping.example.yml —— Promtail 轉送到 dashboard Loki 範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/log-shipping.yml
+#    cp group_vars/log-shipping.example.yml <inventory 目錄>/group_vars/log-shipping.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/log-shipping.md
+#  這是疊在 log-server.md 之上的角色,inventory 用同一個 group/同一批主機
+#  即可(見 inventory.example.yml 的 log-server group),不需要另開新 group。
+# ============================================================================
+
+# dashboard 主機(Loki 所在地)的 IP 或 FQDN。留空也能套用成功——Promtail
+# 照樣起來,只是 push 不到中央(spec C6 預期 fail),等 dashboard.md 上線
+# 後補填、重新套用即可(見 spec §1.5)。
+loki_target_host: ""
+
+# 通常不用改,會沿用 playbook 內建預設(且必須跟 log-server.md 用同一個值,
+# 否則 tail 不到東西):
+# siem_log_root: /var/log/siem
+# loki_alias: pilot-loki-backend
+# loki_port: 3100
+# promtail_job_label: pilot-siem

@@ -24,6 +24,7 @@
 | **跨主機通用備份到 S3（restic）** | [`runbooks/restic-backup.md`](./runbooks/restic-backup.md) |
 | **重跑 restic 災難復原(DR)演練（以 FreeIPA 為例）** | [`runbooks/restic-backup-dr-drill-test-plan.md`](./runbooks/restic-backup-dr-drill-test-plan.md) |
 | **跨機房指標彙總（每站 Prometheus + Thanos 全局查詢）** | [`runbooks/prometheus-thanos.md`](./runbooks/prometheus-thanos.md) |
+| **觀測畫面（Grafana + Loki 看 Prometheus/log-server 資料）** | [`runbooks/dashboard.md`](./runbooks/dashboard.md) |
 | 開發 ansible playbook 的心法 | [`ansible-playbook-development.md`](./ansible-playbook-development.md) |
 | 跑測試 | [`../TESTING.md`](../TESTING.md) |
 

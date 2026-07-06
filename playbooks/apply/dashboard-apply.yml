@@ -1,0 +1,363 @@
+# Apply playbook for docs/verification/dashboard.md v1.1
+#
+# Central role: runs Grafana + Loki as a pair of Docker containers. This is
+# a pure consumer role — it never mutates docs/verification/thanos-query.md
+# or docs/verification/log-server.md, it only reads from them:
+#   - Grafana's "Thanos" datasource (fixed uid pilot-thanos-query) points at
+#     the docs/verification/thanos-query.md host's Prometheus-compatible API
+#     (10902), pinned into /etc/hosts as `thanos-query-backend` (same idiom
+#     as thanos_s3_alias in prometheus-apply.yml).
+#   - Grafana's "Loki" datasource (fixed uid pilot-loki) points at the Loki
+#     container co-located on THIS host, which docs/verification/log-shipping.md
+#     hosts push logs into over the network.
+#
+# Both datasource UIDs are pinned to fixed strings (not Grafana's own
+# randomly-generated UIDs) so the spec's Command/Expected columns can grep
+# for a static string instead of calling the Grafana API to look up a UID
+# first — see docs/verification/dashboard.md §1.5.
+#
+# v1.1 also provisions two built-in dashboards (docs/verification/dashboard.md
+# §1.6): "Pilot - Sites Overview" (Thanos datasource) and "Pilot - Logs
+# Explorer" (Loki datasource). Their JSON is IDENTICAL across every
+# environment — each uses a Grafana native template variable
+# (`label_values(...)`) that queries the live datasource for whatever
+# site/job values currently exist, so a new prometheus site or log-server
+# host automatically shows up in the dropdown with NO re-apply of this
+# playbook needed. This was deliberately chosen over having Ansible render
+# a per-site/per-host panel list from inventory groups (which would need a
+# re-apply on every environment change) — confirmed working end-to-end with
+# real Prometheus/Loki data in a browser (see docs/runbooks/dashboard.md).
+#
+# Pre-flight: docs/verification/docker.md PASS (docker.io + docker.service).
+# thanos_query_target_host may be applied later than this playbook (or left
+# unset) — see docs/verification/dashboard.md §1.5 for the "not connected
+# yet" behavior; this playbook does not gate on it being reachable.
+#
+# Usage:
+#
+#   go run ./cmd/pilot vm-target run --name dashboard \
+#       playbooks/apply/dashboard-apply.yml \
+#       -e target_group=dashboard \
+#       -e thanos_query_target_host=<thanos-query central IP> \
+#       -e grafana_admin_password=<password>
+#
+# Variables: see docs/verification/dashboard.md §1.5.
+- name: Apply dashboard (Grafana + Loki)
+  hosts: "{{ target_group | default('dashboard') }}"
+  become: true
+  gather_facts: true
+  vars:
+    grafana_version: "11.1.0"
+    loki_version: "2.9.8"
+    grafana_host_data_dir: /var/lib/pilot/grafana
+    loki_host_data_dir: /var/lib/pilot/loki
+    dashboard_config_dir: /etc/pilot/dashboard
+    docker_network_name: pilot-metrics
+    thanos_query_target_host: ""
+    thanos_query_alias: thanos-query-backend
+    thanos_query_port: 10902
+    grafana_admin_password: ""
+
+  pre_tasks:
+    - name: "Gate: grafana_admin_password required"
+      ansible.builtin.assert:
+        that:
+          - grafana_admin_password is defined and grafana_admin_password | length > 0
+        fail_msg: >-
+          grafana_admin_password is required (e.g. -e grafana_admin_password=...;
+          vault file recommended over -e in real inventories).
+
+  tasks:
+    - name: "Pin {{ thanos_query_alias }} -> {{ thanos_query_target_host }} in /etc/hosts"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ thanos_query_alias }}$'
+        line: "{{ thanos_query_target_host }}\t{{ thanos_query_alias }}"
+        state: present
+      when: thanos_query_target_host | length > 0
+
+    - block:
+        # grafana/grafana's official image runs as uid/gid 472 ("grafana"),
+        # grafana/loki's runs as uid/gid 10001 ("loki") — neither is root.
+        # Confirmed via `docker run --rm --entrypoint id <image>`.
+        - name: "Ensure Grafana host data dir (owned by container's grafana uid 472)"
+          ansible.builtin.file:
+            path: "{{ grafana_host_data_dir }}"
+            state: directory
+            owner: "472"
+            group: "472"
+            mode: "0755"
+
+        - name: "Ensure Loki host data dir (owned by container's loki uid 10001)"
+          ansible.builtin.file:
+            path: "{{ loki_host_data_dir }}"
+            state: directory
+            owner: "10001"
+            group: "10001"
+            mode: "0755"
+
+        - name: "Ensure config dirs exist"
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            mode: "0755"
+          loop:
+            - "{{ dashboard_config_dir }}/grafana/provisioning/datasources"
+            - "{{ dashboard_config_dir }}/grafana/provisioning/dashboards"
+            - "{{ dashboard_config_dir }}/grafana/dashboards-json"
+            - "{{ dashboard_config_dir }}/loki"
+
+        - name: "Render Loki config"
+          ansible.builtin.copy:
+            dest: "{{ dashboard_config_dir }}/loki/loki-config.yml"
+            mode: "0644"
+            content: |
+              auth_enabled: false
+              server:
+                http_listen_port: 3100
+              common:
+                path_prefix: /loki
+                storage:
+                  filesystem:
+                    chunks_directory: /loki/chunks
+                    rules_directory: /loki/rules
+                replication_factor: 1
+                ring:
+                  kvstore:
+                    store: inmemory
+              schema_config:
+                configs:
+                  - from: 2020-10-24
+                    store: boltdb-shipper
+                    object_store: filesystem
+                    schema: v11
+                    index:
+                      prefix: index_
+                      period: 24h
+          register: loki_config_result
+
+        # Spec: docs/verification/dashboard.md C5, C6 — fixed uids so the
+        # spec can grep for a static string (see header comment).
+        - name: "Render Grafana datasource provisioning (fixed UIDs)"
+          tags: [C5, C6]
+          ansible.builtin.copy:
+            dest: "{{ dashboard_config_dir }}/grafana/provisioning/datasources/datasources.yml"
+            mode: "0644"
+            content: |
+              apiVersion: 1
+              datasources:
+                - name: Loki
+                  type: loki
+                  uid: pilot-loki
+                  access: proxy
+                  url: http://pilot-loki:3100
+                  isDefault: false
+                  editable: false
+                - name: Thanos
+                  type: prometheus
+                  uid: pilot-thanos-query
+                  access: proxy
+                  url: "http://{{ thanos_query_alias }}:{{ thanos_query_port }}"
+                  isDefault: true
+                  editable: false
+          register: datasources_yml_result
+
+        # Spec: docs/verification/dashboard.md C11
+        - name: "Render Grafana dashboard provisioning provider config"
+          tags: [C11]
+          ansible.builtin.copy:
+            dest: "{{ dashboard_config_dir }}/grafana/provisioning/dashboards/dashboards.yml"
+            mode: "0644"
+            content: |
+              apiVersion: 1
+              providers:
+                - name: pilot-dashboards
+                  orgId: 1
+                  folder: ""
+                  type: file
+                  disableDeletion: false
+                  updateIntervalSeconds: 30
+                  allowUiUpdates: false
+                  options:
+                    path: /etc/grafana/dashboards-json
+          register: dashboards_yml_result
+
+        # Spec: docs/verification/dashboard.md C12, C14 — content is
+        # IDENTICAL across every environment (see header comment): the
+        # `site` variable queries `label_values(up, site)` against the
+        # Thanos datasource at view time, so it lists whatever sites are
+        # actually connected without any Ansible-side templating.
+        - name: "Render 'Pilot - Sites Overview' dashboard (fixed uid pilot-sites-overview)"
+          tags: [C12, C14]
+          ansible.builtin.copy:
+            dest: "{{ dashboard_config_dir }}/grafana/dashboards-json/sites-overview.json"
+            mode: "0644"
+            content: |
+              {
+                "uid": "pilot-sites-overview",
+                "title": "Pilot - Sites Overview",
+                "schemaVersion": 39,
+                "version": 1,
+                "time": {"from": "now-1h", "to": "now"},
+                "templating": {
+                  "list": [
+                    {
+                      "name": "site",
+                      "type": "query",
+                      "datasource": {"type": "prometheus", "uid": "pilot-thanos-query"},
+                      "query": {"query": "label_values(up, site)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+                      "refresh": 2,
+                      "multi": true,
+                      "includeAll": true,
+                      "current": {}
+                    }
+                  ]
+                },
+                "panels": [
+                  {
+                    "id": 1,
+                    "type": "stat",
+                    "title": "Sites Up",
+                    "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
+                    "datasource": {"type": "prometheus", "uid": "pilot-thanos-query"},
+                    "targets": [
+                      {"expr": "count(up{site=~\"$site\"} == 1)", "refId": "A"}
+                    ]
+                  },
+                  {
+                    "id": 2,
+                    "type": "timeseries",
+                    "title": "up by site",
+                    "gridPos": {"h": 8, "w": 16, "x": 8, "y": 0},
+                    "datasource": {"type": "prometheus", "uid": "pilot-thanos-query"},
+                    "targets": [
+                      {"expr": "up{site=~\"$site\"}", "legendFormat": "{{ '{{site}}' }}", "refId": "A"}
+                    ]
+                  }
+                ]
+              }
+          register: sites_overview_json_result
+
+        # Spec: docs/verification/dashboard.md C13, C14 — the `job` variable
+        # uses Loki's label-values query type (type: 1), distinct from
+        # Prometheus's string-based label_values() syntax above; both
+        # forms were confirmed rendering correctly against real data in a
+        # browser before being committed here (see the header comment).
+        - name: "Render 'Pilot - Logs Explorer' dashboard (fixed uid pilot-logs-explorer)"
+          tags: [C13, C14]
+          ansible.builtin.copy:
+            dest: "{{ dashboard_config_dir }}/grafana/dashboards-json/logs-explorer.json"
+            mode: "0644"
+            content: |
+              {
+                "uid": "pilot-logs-explorer",
+                "title": "Pilot - Logs Explorer",
+                "schemaVersion": 39,
+                "version": 1,
+                "time": {"from": "now-1h", "to": "now"},
+                "templating": {
+                  "list": [
+                    {
+                      "name": "job",
+                      "type": "query",
+                      "datasource": {"type": "loki", "uid": "pilot-loki"},
+                      "query": {"label": "job", "refId": "LokiVariableQueryEditor-VariableQuery", "type": 1},
+                      "refresh": 2,
+                      "multi": true,
+                      "includeAll": true,
+                      "current": {}
+                    }
+                  ]
+                },
+                "panels": [
+                  {
+                    "id": 1,
+                    "type": "logs",
+                    "title": "Logs",
+                    "gridPos": {"h": 16, "w": 24, "x": 0, "y": 0},
+                    "datasource": {"type": "loki", "uid": "pilot-loki"},
+                    "targets": [
+                      {"expr": "{job=~\"$job\"}", "refId": "A"}
+                    ]
+                  }
+                ]
+              }
+          register: logs_explorer_json_result
+
+        - name: "Ensure docker network {{ docker_network_name }} exists"
+          community.docker.docker_network:
+            name: "{{ docker_network_name }}"
+            state: present
+
+        # Spec: docs/verification/dashboard.md C1, C3, C7, C10
+        - name: "Loki — run pilot-loki container"
+          tags: [C1, C3, C7, C10]
+          community.docker.docker_container:
+            name: pilot-loki
+            image: "grafana/loki:{{ loki_version }}"
+            state: started
+            restart_policy: unless-stopped
+            restart: "{{ loki_config_result is changed }}"
+            command: "-config.file=/etc/loki/local-config.yaml"
+            networks:
+              - name: "{{ docker_network_name }}"
+            volumes:
+              - "{{ dashboard_config_dir }}/loki/loki-config.yml:/etc/loki/local-config.yaml:ro"
+              - "{{ loki_host_data_dir }}:/loki"
+            ports:
+              - "3100:3100"
+
+        - name: "Wait for Loki to become ready"
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:3100/ready"
+            status_code: 200
+          register: loki_ready
+          until: loki_ready.status == 200
+          # Loki takes ~10-15s to complete its ring/compactor join before
+          # /ready starts returning 200 (503 until then) — confirmed via
+          # local smoke test, not a symptom of misconfiguration.
+          retries: 30
+          delay: 2
+
+        # Spec: docs/verification/dashboard.md C2, C4, C5, C6, C8, C9,
+        # C11, C12, C13, C14
+        - name: "Grafana — run pilot-grafana container"
+          tags: [C2, C4, C5, C6, C8, C9, C11, C12, C13, C14]
+          community.docker.docker_container:
+            name: pilot-grafana
+            image: "grafana/grafana:{{ grafana_version }}"
+            state: started
+            restart_policy: unless-stopped
+            restart: >-
+              {{ datasources_yml_result is changed
+                 or dashboards_yml_result is changed
+                 or sites_overview_json_result is changed
+                 or logs_explorer_json_result is changed }}
+            env:
+              GF_SECURITY_ADMIN_PASSWORD: "{{ grafana_admin_password }}"
+            networks:
+              - name: "{{ docker_network_name }}"
+            volumes:
+              - "{{ dashboard_config_dir }}/grafana/provisioning:/etc/grafana/provisioning:ro"
+              - "{{ dashboard_config_dir }}/grafana/dashboards-json:/etc/grafana/dashboards-json:ro"
+              - "{{ grafana_host_data_dir }}:/var/lib/grafana"
+            ports:
+              - "3000:3000"
+          no_log: true
+
+        - name: "Wait for Grafana to become ready"
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:3000/api/health"
+            status_code: 200
+          register: grafana_ready
+          until: grafana_ready.status == 200
+          retries: 30
+          delay: 2
+
+      rescue:
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              dashboard apply FAILED (see task output above). Containers (if
+              created) are left in place for inspection via `docker logs
+              pilot-grafana` / `docker logs pilot-loki`.
