@@ -12,6 +12,18 @@
 // directory and renamed into place, so a crash mid-write can never leave a
 // half-written (corrupt) state file. A version mismatch on load is a hard
 // error rather than a silent misparse.
+//
+// Cross-process safety: every operation takes an advisory flock(2) on a
+// sidecar <file>.lock (the lock file is separate because the rename in
+// Save replaces the data file's inode). Load takes a shared lock, Save and
+// Mutate an exclusive one. Atomic writes alone are NOT enough for
+// concurrent writers: two processes doing load → modify → save each write
+// a complete file, so the last writer silently discards the other's entry
+// (hit for real with two parallel `pilot vm-target up` runs). Any
+// read-modify-write MUST therefore go through Mutate, which holds the
+// exclusive lock across the whole load+apply+save cycle. The kernel
+// releases flocks when the holder dies, so a crashed process can never
+// leave the store wedged.
 package statefile
 
 import (
@@ -20,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // envelope is the on-disk JSON shape.
@@ -57,10 +70,35 @@ func New[T any](dir, filename string, version int, label string) (*Store[T], err
 // Path returns the absolute path of the state file.
 func (s *Store[T]) Path() string { return s.path }
 
-// Load reads and parses the state file. A missing file is NOT an error —
-// it yields an empty slice (the caller simply has no entries yet). A
-// version mismatch is a hard error.
+// lock opens (creating if needed) the sidecar lock file and takes the
+// requested advisory flock (syscall.LOCK_SH or syscall.LOCK_EX), blocking
+// until it is granted. Closing the returned file releases the lock.
+func (s *Store[T]) lock(how int) (*os.File, error) {
+	f, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("%s: open state lock: %w", s.label, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), how); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("%s: lock state: %w", s.label, err)
+	}
+	return f, nil
+}
+
+// Load reads and parses the state file (under a shared lock). A missing
+// file is NOT an error — it yields an empty slice (the caller simply has
+// no entries yet). A version mismatch is a hard error.
 func (s *Store[T]) Load() ([]T, error) {
+	f, err := s.lock(syscall.LOCK_SH)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return s.loadLocked()
+}
+
+// loadLocked is Load without lock acquisition; the caller must hold the lock.
+func (s *Store[T]) loadLocked() ([]T, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -78,8 +116,25 @@ func (s *Store[T]) Load() ([]T, error) {
 	return e.Targets, nil
 }
 
-// Save writes targets to the state file atomically (temp file + rename).
+// Save writes targets to the state file atomically (temp file + rename),
+// under an exclusive lock.
+//
+// Save OVERWRITES the whole file with the caller's snapshot: only use it
+// when the caller's slice is the sole source of truth. For any
+// read-modify-write (append a target, delete one, update a field) use
+// Mutate instead — a load…Save pair spanning other work re-persists a
+// stale snapshot and silently discards concurrent writers' entries.
 func (s *Store[T]) Save(targets []T) error {
+	f, err := s.lock(syscall.LOCK_EX)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return s.saveLocked(targets)
+}
+
+// saveLocked is Save without lock acquisition; the caller must hold the lock.
+func (s *Store[T]) saveLocked(targets []T) error {
 	data, err := json.MarshalIndent(envelope[T]{Version: s.version, Targets: targets}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("%s: marshal state: %w", s.label, err)
@@ -103,4 +158,31 @@ func (s *Store[T]) Save(targets []T) error {
 		return fmt.Errorf("%s: rename temp: %w", s.label, err)
 	}
 	return nil
+}
+
+// Mutate atomically applies fn to the freshly-loaded targets and persists
+// the result, holding the exclusive cross-process lock across the whole
+// load → fn → save cycle. This is the ONLY safe way to do a
+// read-modify-write against a store shared by concurrent processes.
+//
+// fn receives the current targets (nil when the file doesn't exist yet)
+// and returns the full slice to persist. If fn returns an error, nothing
+// is written and the error is returned verbatim. fn runs while the lock is
+// held: keep it a quick in-memory transform — it must not call back into
+// this Store and must not do slow I/O.
+func (s *Store[T]) Mutate(fn func(targets []T) ([]T, error)) error {
+	f, err := s.lock(syscall.LOCK_EX)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	targets, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	next, err := fn(targets)
+	if err != nil {
+		return err
+	}
+	return s.saveLocked(next)
 }

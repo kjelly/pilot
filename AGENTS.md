@@ -317,8 +317,15 @@ interface 是 speculative generality）。因此：
   是不是兩個 backend 都該有**。是的話兩邊一起改，或把共用部分下沉到共用層，
   **不要只改一邊**（`--ssh-timeout` 失效、docker 有 `--check` 而 vm 沒有，都是
   只改一邊造成的漂移）。
-- 狀態持久化**一律**走 `internal/statefile.Store[T]`（版本化 + 原子寫入，已測）。
-  不要再手寫 temp-file+rename。
+- 狀態持久化**一律**走 `internal/statefile.Store[T]`（版本化 + 原子寫入 +
+  跨行程 flock，已測）。不要再手寫 temp-file+rename。
+- **任何 state 的 read-modify-write 一律走 `Store.Mutate(fn)`**，不准
+  `Load()` → 改 → `Save()` 分開做——那正是 2026-07-06 兩個 `vm-target up`
+  並行時 last-writer-wins、一台 VM 的 state 條目消失變孤兒 domain 的事故
+  根因（`Save` 只保證「單次寫入原子」，不保證「讀改寫整段原子」）。長時間
+  操作（建 VM、teardown）放鎖外，只有比對/改 slice 的那一小段放進 Mutate
+  的 fn。回歸測試：`statefile_test.go::TestStore_ConcurrentMutateLosesNoEntries`、
+  `vmtarget_test.go::TestUp_ConcurrentDifferentNames_BothPersist`。
 - CLI 端把 inventory 寫到暫存檔一律用 `writeTempInventory`（`cmd/pilot/cmd`）。
 
 ### 5.2 長生命週期物件不要把 per-call option 寫回自身欄位
@@ -394,3 +401,4 @@ pilot 有三種輸出，**不要混用**：
 | 2026-07-02 | v1.3 | §5.5 三種輸出管道約定（error / `slog` 診斷 / 使用者 UX）；導入 `internal/logx` 結構化 logging，`--log-level`/`$PILOT_LOG_LEVEL`| sre |
 | 2026-07-02 | v1.4 | inventory 規則改為**來源中立**：新增 §0.1「目標 inventory」名詞與讀法對照（vm-target `show-inventory` / 真實主機 `ansible-inventory --graph`）；§1.1/§1.3/§2/§2.1/§3/§4/§6 一併泛化，同一套紀律適用測試 VM 與真實主機 | sre |
 | 2026-07-06 | v1.5 | 新增 §4.2：新增/移除會產生資料的軟體角色時，必須同步更新 `group_vars/restic-backup.example.yml` 的備份範圍範例（起因：`restic-backup` 上線後，既有角色清單容易在新增/移除軟體時漏改）；§6 補一條對應的 ❌ 提醒 | sre |
+| 2026-07-06 | v1.6 | §5.1 新增「state RMW 一律走 `Store.Mutate`」硬規則（起因：兩個 `vm-target up` 並行時 Load→改→Save 的 last-writer-wins 讓一台 VM 的 state 條目消失變孤兒 domain；`statefile` 已加跨行程 flock + `Mutate`，vmtarget `Up` 改名額預約制，dockertarget 同步） | sre |

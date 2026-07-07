@@ -157,9 +157,17 @@ type state struct {
 const stateVersion = 1
 
 // Manager owns the lifecycle of all docker targets. One Manager per
-// data directory; safe for concurrent use by multiple pilot commands
-// because the on-disk state file is rewritten atomically (write to a
-// temp file in the same directory then rename).
+// data directory; safe for concurrent use by multiple pilot commands:
+// every state read-modify-write goes through statefile.Store.Mutate
+// (exclusive flock across the whole load→modify→save cycle). Atomic
+// rewrites alone are not enough — two parallel `up` processes would each
+// re-persist the snapshot they loaded earlier and the last writer would
+// silently drop the other's entry (hit for real on the vmtarget sibling,
+// 2026-07-06; same bug class here, just a shorter race window).
+//
+// Unlike vmtarget, Up needs no "creating" reservation: the docker daemon
+// itself enforces container-name uniqueness at `docker run`, so a
+// same-name loser fails before it could touch the winner's artifacts.
 type Manager struct {
 	mu       sync.Mutex
 	stateDir string
@@ -185,19 +193,20 @@ func NewManager(stateDir string) (*Manager, error) {
 	}, nil
 }
 
-// load/save delegate persistence to the shared, tested statefile.Store
+// load delegates persistence to the shared, tested statefile.Store
 // (atomic write + version check). The local *state shape is kept so the
-// rest of the package is untouched.
+// read paths (Get/List/inventory) are untouched.
+//
+// NOTE: there is deliberately no matching save(*state) helper — re-saving
+// a previously-loaded snapshot is exactly the last-writer-wins bug this
+// package's vmtarget sibling was bitten by. All writes go through
+// m.store.Mutate.
 func (m *Manager) load() (*state, error) {
 	targets, err := m.store.Load()
 	if err != nil {
 		return nil, err
 	}
 	return &state{Version: stateVersion, Targets: targets}, nil
-}
-
-func (m *Manager) save(s *state) error {
-	return m.store.Save(s.Targets)
 }
 
 // dockerResult captures the output of one docker CLI invocation.
@@ -380,8 +389,18 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		CreatedAt:   now,
 		StartedAt:   now,
 	}
-	s.Targets = append(s.Targets, t)
-	if err := m.save(s); err != nil {
+	// Commit under the cross-process lock, re-checking the name against
+	// the FRESH state (the load at the top of Up is advisory only): a
+	// concurrent up of a different name must not be clobbered, and a
+	// concurrent up of the same name must lose cleanly here.
+	if err := m.store.Mutate(func(targets []Target) ([]Target, error) {
+		for _, existing := range targets {
+			if existing.Name == opt.Name {
+				return nil, fmt.Errorf("dockertarget: target %q already in state (status=%s); run `pilot docker-target down --name %s` first", opt.Name, existing.Status, opt.Name)
+			}
+		}
+		return append(targets, t), nil
+	}); err != nil {
 		// Best-effort rollback: try to remove the container we just
 		// started so we don't leave orphans. If this fails too, the
 		// user sees both errors and can `docker rm -f` manually.
@@ -437,8 +456,17 @@ func (m *Manager) Down(ctx context.Context, name string) error {
 			}
 		}
 	}
-	s.Targets = append(s.Targets[:idx], s.Targets[idx+1:]...)
-	return m.save(s)
+	// Drop the record under the cross-process lock (a racing Down's
+	// removal is a no-op) so concurrent writers' entries survive.
+	return m.store.Mutate(func(targets []Target) ([]Target, error) {
+		out := targets[:0]
+		for _, existing := range targets {
+			if existing.Name != name {
+				out = append(out, existing)
+			}
+		}
+		return out, nil
+	})
 }
 
 // Get returns the target record + a live status refresh.
