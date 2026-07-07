@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -803,5 +804,116 @@ func TestResizeDisk_RejectsZeroAndNegative(t *testing.T) {
 	}
 	if err := m.ResizeDisk(context.Background(), "x", -5); err == nil || !strings.Contains(err.Error(), "positive integer") {
 		t.Fatalf("want positive-int error for -5, got %v", err)
+	}
+}
+
+// newSiblingManager returns a second Manager sharing the given manager's
+// state dir and vm dir — the closest in-process model of a second `pilot
+// vm-target` PROCESS: it has its own in-process mutex and its own state
+// lock fd, so only the cross-process flock in statefile arbitrates
+// between the two.
+func newSiblingManager(t *testing.T, m *Manager) *Manager {
+	t.Helper()
+	sib, err := NewManager(m.stateDir, m.vmDir)
+	if err != nil {
+		t.Fatalf("NewManager(sibling): %v", err)
+	}
+	sib.bootTimeout = m.bootTimeout
+	sib.sshTimeout = m.sshTimeout
+	sib.pollInterval = m.pollInterval
+	return sib
+}
+
+// TestUp_ConcurrentDifferentNames_BothPersist is the regression test for
+// the 2026-07-06 incident: two `pilot vm-target up` processes ran in
+// parallel (different names), each loaded the state at the start of Up
+// and re-saved that stale snapshot at the end — last writer wins, the
+// other VM's entry vanished from state and its libvirt domain became an
+// orphan. With the reservation + Mutate design, BOTH entries must
+// survive.
+func TestUp_ConcurrentDifferentNames_BothPersist(t *testing.T) {
+	m1, base := newTestManager(t, happyVirsh)
+	m2 := newSiblingManager(t, m1)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, up := range []struct {
+		m    *Manager
+		name string
+	}{{m1, "alpha"}, {m2, "beta"}} {
+		wg.Add(1)
+		go func(m *Manager, name string) {
+			defer wg.Done()
+			_, err := m.Up(context.Background(), Options{Name: name, BaseImage: base})
+			errs <- err
+		}(up.m, up.name)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Up: %v", err)
+		}
+	}
+
+	// Read through a FRESH manager (fresh state fd) — both entries must
+	// be in the file, not just in either manager's memory.
+	fresh := newSiblingManager(t, m1)
+	all, err := fresh.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("state lost an entry under concurrent Up: got %d targets (%+v), want 2", len(all), all)
+	}
+	if all[0].Name != "alpha" || all[1].Name != "beta" {
+		t.Errorf("unexpected names: %q, %q", all[0].Name, all[1].Name)
+	}
+}
+
+// TestUp_ConcurrentSameName_LoserFailsCleanly: with the same name, exactly
+// one Up must win; the loser must fail with the duplicate error BEFORE
+// creating or tearing down anything (domain name and target dir are
+// derived from the name — a losing teardown would destroy the winner's
+// artifacts). The winner's record and artifacts must survive.
+func TestUp_ConcurrentSameName_LoserFailsCleanly(t *testing.T) {
+	m1, base := newTestManager(t, happyVirsh)
+	m2 := newSiblingManager(t, m1)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, m := range []*Manager{m1, m2} {
+		wg.Add(1)
+		go func(m *Manager) {
+			defer wg.Done()
+			_, err := m.Up(context.Background(), Options{Name: "same", BaseImage: base})
+			errs <- err
+		}(m)
+	}
+	wg.Wait()
+	close(errs)
+	var failures []error
+	for err := range errs {
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if len(failures) != 1 {
+		t.Fatalf("want exactly one loser, got %d failures: %v", len(failures), failures)
+	}
+	if !strings.Contains(failures[0].Error(), "already in state") {
+		t.Errorf("loser must fail the duplicate check, got: %v", failures[0])
+	}
+
+	fresh := newSiblingManager(t, m1)
+	tgt, err := fresh.Get(context.Background(), "same")
+	if err != nil {
+		t.Fatalf("winner's record must survive: %v", err)
+	}
+	if tgt.Status != StatusRunning {
+		t.Errorf("winner status = %q, want running", tgt.Status)
+	}
+	if _, serr := os.Stat(filepath.Join(m1.vmDir, "same")); serr != nil {
+		t.Errorf("winner's target dir must survive: %v", serr)
 	}
 }

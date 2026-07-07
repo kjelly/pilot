@@ -68,6 +68,13 @@ const (
 	StatusRunning Status = "running"
 	StatusStopped Status = "stopped"
 	StatusMissing Status = "missing" // record exists in state but domain is gone
+	// StatusCreating marks a name reserved in state by an in-flight Up,
+	// before the domain exists. The reservation is what makes concurrent
+	// Ups safe: it is inserted under the cross-process state lock, so a
+	// second Up of the same name fails fast instead of racing the first
+	// one's artifacts. A record stuck in "creating" (the Up process
+	// crashed) is cleaned with `pilot vm-target down`.
+	StatusCreating Status = "creating"
 )
 
 const stateVersion = 1
@@ -130,8 +137,13 @@ type state struct {
 }
 
 // Manager owns the lifecycle of all vm targets rooted at a data dir.
-// Safe for concurrent use within a process (mutex) and across processes
-// (atomic state rewrite).
+// Safe for concurrent use within a process (mutex) and across processes:
+// every state read-modify-write goes through statefile.Store.Mutate, which
+// holds an exclusive flock across the whole load→modify→save cycle.
+// Atomic rewrites alone were NOT enough — two parallel `vm-target up`
+// processes each re-persisted the stale snapshot they loaded minutes
+// earlier, and the last writer silently dropped the other's entry
+// (hit for real 2026-07-06, leaving an orphan libvirt domain).
 type Manager struct {
 	mu       sync.Mutex
 	imgMu    sync.Mutex // serializes base-image prepare (download/customize)
@@ -187,9 +199,9 @@ func (m *Manager) load() (*state, error) {
 	return &state{Version: stateVersion, Targets: targets}, nil
 }
 
-func (m *Manager) save(s *state) error {
-	return m.store.Save(s.Targets)
-}
+// NOTE: there is deliberately no matching save(*state) helper anymore —
+// re-saving a previously-loaded snapshot is exactly the last-writer-wins
+// bug this package was bitten by. All writes go through m.store.Mutate.
 
 // ---- external command seams -----------------------------------------------
 
@@ -367,16 +379,21 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	s, err := m.load()
+	// Advisory duplicate check first, for the precise error message when
+	// the name belongs to a pilot-owned target (the authoritative,
+	// race-closing check is the reservation Mutate below).
+	existingTargets, err := m.store.Load()
 	if err != nil {
 		return nil, err
 	}
-	for _, existing := range s.Targets {
+	for _, existing := range existingTargets {
 		if existing.Name == opt.Name {
 			return nil, fmt.Errorf("vmtarget: target %q already in state (status=%s); run `pilot vm-target down --name %s` first", opt.Name, existing.Status, opt.Name)
 		}
 	}
 	// Refuse to hijack an unrelated libvirt domain with the same name.
+	// Must stay BEFORE the reservation: this failure path must not run
+	// any cleanup (a teardown here would destroy the foreign domain).
 	if info, derr := m.virsh(ctx, "dominfo", opt.Name); derr == nil && info.ExitCode == 0 {
 		return nil, fmt.Errorf("vmtarget: a libvirt domain named %q already exists outside pilot state; pick a different --name or remove it first", opt.Name)
 	}
@@ -407,7 +424,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	tg := &Target{
 		Name:        opt.Name,
 		BaseImage:   baseAbs,
-		Status:      StatusStopped,
+		Status:      StatusCreating,
 		MAC:         macFor(opt.Name),
 		SSHUser:     user,
 		SSHPort:     22,
@@ -424,34 +441,62 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		StartedAt:   now,
 	}
 
-	// From here on, any failure must clean up the on-disk artifacts and
-	// any defined domain. The cleanup closure references tg (the local
-	// build target), NOT the return value — `return nil, err` must not
-	// be able to null out what teardown operates on. (err is already in
-	// scope from the load/Abs calls above; the defer captures it.)
+	// Reserve the name in state BEFORE creating any on-disk or libvirt
+	// artifact, under the cross-process lock. This is the authoritative
+	// duplicate check: a second concurrent Up of the same name fails
+	// right here — before it could define a domain or run a teardown
+	// that would destroy the first Up's artifacts (domain name and
+	// target dir are both derived from the name, so they'd be shared).
+	// It also closes the lost-entry race for DIFFERENT names: every
+	// writer re-reads the latest state inside the lock instead of
+	// re-persisting a snapshot loaded minutes earlier.
+	if err = m.store.Mutate(func(targets []Target) ([]Target, error) {
+		for _, existing := range targets {
+			if existing.Name == opt.Name {
+				return nil, fmt.Errorf("vmtarget: target %q already in state (status=%s); run `pilot vm-target down --name %s` first", opt.Name, existing.Status, opt.Name)
+			}
+		}
+		return append(targets, *tg), nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// From here on, any failure must clean up the on-disk artifacts, any
+	// defined domain, AND the reservation above. The cleanup closure
+	// references tg (the local build target), NOT the return value —
+	// `return nil, err` must not be able to null out what teardown
+	// operates on. (err is already in scope from the calls above; the
+	// defer captures it.)
 	defer func() {
 		if err != nil {
 			if opt.KeepOnFailure {
 				fmt.Fprintf(os.Stderr, "  ⚠ --keep-on-failure is set; preserving VM %q and its state/files for investigation.\n", tg.Name)
 				fmt.Fprintf(os.Stderr, "  ⚠ To tear down later, run: pilot vm-target down --name %s\n", tg.Name)
-				s, loadErr := m.load()
-				if loadErr == nil {
-					found := false
-					for _, existing := range s.Targets {
-						if existing.Name == tg.Name {
-							found = true
-							break
+				tg.Status = StatusStopped
+				_ = m.store.Mutate(func(targets []Target) ([]Target, error) {
+					for i := range targets {
+						if targets[i].Name == tg.Name {
+							targets[i] = *tg
+							return targets, nil
 						}
 					}
-					if !found {
-						tg.Status = StatusStopped
-						s.Targets = append(s.Targets, *tg)
-						_ = m.save(s)
-					}
-				}
+					// Reservation vanished (e.g. a concurrent down);
+					// restore the record so the kept artifacts stay
+					// discoverable.
+					return append(targets, *tg), nil
+				})
 				return
 			}
 			m.teardown(ctx, tg)
+			_ = m.store.Mutate(func(targets []Target) ([]Target, error) {
+				out := targets[:0]
+				for _, existing := range targets {
+					if existing.Name != tg.Name {
+						out = append(out, existing)
+					}
+				}
+				return out, nil
+			})
 		}
 	}()
 
@@ -503,8 +548,20 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	}
 	tg.Status = StatusRunning
 
-	s.Targets = append(s.Targets, *tg)
-	if err = m.save(s); err != nil {
+	// Promote the reservation to the final record — again under the
+	// cross-process lock, on the FRESH state (never the snapshot from the
+	// top of Up).
+	if err = m.store.Mutate(func(targets []Target) ([]Target, error) {
+		for i := range targets {
+			if targets[i].Name == tg.Name {
+				targets[i] = *tg
+				return targets, nil
+			}
+		}
+		// Reservation vanished mid-create (concurrent down): re-add
+		// rather than lose a running domain's record.
+		return append(targets, *tg), nil
+	}); err != nil {
 		return nil, err
 	}
 
@@ -875,24 +932,34 @@ func (m *Manager) Down(ctx context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	s, err := m.load()
+	targets, err := m.store.Load()
 	if err != nil {
 		return err
 	}
-	idx := -1
-	for i, t := range s.Targets {
-		if t.Name == name {
-			idx = i
+	var found *Target
+	for i := range targets {
+		if targets[i].Name == name {
+			found = &targets[i]
 			break
 		}
 	}
-	if idx < 0 {
+	if found == nil {
 		return fmt.Errorf("vmtarget: no target named %q in state", name)
 	}
-	t := s.Targets[idx]
-	m.teardown(ctx, &t)
-	s.Targets = append(s.Targets[:idx], s.Targets[idx+1:]...)
-	return m.save(s)
+	// Teardown happens OUTSIDE the state lock (it can take minutes for a
+	// running domain); the record is then dropped under the lock via
+	// Mutate so a concurrent writer's entries are never clobbered. If the
+	// record vanished in between (a racing Down), removal is a no-op.
+	m.teardown(ctx, found)
+	return m.store.Mutate(func(targets []Target) ([]Target, error) {
+		out := targets[:0]
+		for _, t := range targets {
+			if t.Name != name {
+				out = append(out, t)
+			}
+		}
+		return out, nil
+	})
 }
 
 // ---- Get / List -----------------------------------------------------------
@@ -939,6 +1006,12 @@ func (m *Manager) List(ctx context.Context) ([]Target, error) {
 func (m *Manager) refreshStatus(ctx context.Context, t Target) Status {
 	res, err := m.virsh(ctx, "domstate", t.Name)
 	if err != nil || res.ExitCode != 0 {
+		// A reservation's domain legitimately doesn't exist yet — keep
+		// reporting "creating" (an in-flight or crashed Up), not
+		// "missing".
+		if t.Status == StatusCreating {
+			return StatusCreating
+		}
 		return StatusMissing
 	}
 	switch strings.TrimSpace(strings.ToLower(res.Stdout)) {
@@ -1112,9 +1185,18 @@ func (m *Manager) ResizeDisk(ctx context.Context, name string, newGB int) error 
 		}
 	}
 
-	// Persist the new size.
-	t.DiskGB = newGB
-	return m.save(s)
+	// Persist the new size — by name on the FRESH state under the
+	// cross-process lock, not by re-saving the snapshot loaded before the
+	// (possibly slow) resize ran.
+	return m.store.Mutate(func(targets []Target) ([]Target, error) {
+		for i := range targets {
+			if targets[i].Name == name {
+				targets[i].DiskGB = newGB
+				return targets, nil
+			}
+		}
+		return nil, fmt.Errorf("vmtarget: target %q disappeared from state during resize", name)
+	})
 }
 
 // ---- RenderInventory ------------------------------------------------------
