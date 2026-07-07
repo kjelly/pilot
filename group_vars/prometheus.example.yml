@@ -73,3 +73,44 @@ thanos_s3_target_host: ""
 # 本機 TSDB 保留時間、scrape 間隔,通常不用改,會沿用 playbook 內建預設:
 # prometheus_retention_time: "6h"
 # prometheus_scrape_interval: "15s"
+
+# 中央 Alertmanager 的 IP 或 FQDN(對應 docs/verification/alertmanager.md
+# 的中央主機)。二擇一:填這個變數走預設別名 `alertmanager-backend`(在
+# /etc/hosts 自動 pin),或用下面註解的 alertmanager_endpoint 完全覆寫
+# 跳過 /etc/hosts pin。**留空**代表該站台暫時不接中央 Alertmanager:
+# apply playbook 就不會 render `alerting.alertmanagers` 區塊(escape hatch,
+# 見 spec §1.5),Prometheus 仍會評估 seed rules 但告警推不出去——適合
+# 「先起 Prometheus、後再上 Alertmanager」的階段性部署。
+#
+# 留空等於 `prometheus.md` C11 預期 fail,見 spec §5 例外。
+# alertmanager_target_host: ""
+
+# 走外部 Alertmanager(有自己的 DNS 名稱、不靠 /etc/hosts 別名)時,取消
+# 註解並覆寫,此時上面 alertmanager_target_host 留空即可:
+# alertmanager_alias: "alertmanager.internal.example.com"
+# alertmanager_port: 9093
+
+# 站台專屬的 alert rules(選填,預設用 playbook 內建的 seed:
+# Watchdog + PrometheusDown + HostDown)。需要客製化時,在
+# host_vars/<主機短名>.yml 放一份 rules YAML,**用檔案路徑覆寫**預設值:
+#
+#   # host_vars/site-a.yml
+#   prometheus_alert_rules_file: host_vars/site-a-alerts.yml
+#
+# 為什麼是檔案路徑而不是 inline YAML 字串(比照
+# prometheus_scrape_configs):Prometheus rules 的 annotations 內含
+# `{{ $labels.X }}` template 語法,Ansible 的 Jinja 對 inline `content: "{{ ... }}"`
+# 會做二次 template finalization,內部的 `{{ $labels.X }}` 會被當 Jinja 表達式
+# 解析失敗(實測於 `pilot vm-target test --name pt-site-a` 階段,`copy: content`
+# task fail 在 "Syntax error in template: unexpected char '$'")。改用檔案路徑 +
+# `copy: src:` 後,Jinja 永遠不會碰 rules 檔內容。
+#
+# 範例 site-a-alerts.yml 內容(直接放進 host_vars 即可):
+#   groups:
+#     - name: mysite-rules
+#       rules:
+#         - alert: DiskSpaceLow
+#           expr: node_filesystem_avail_bytes{mountpoint="/"} < 5e9
+#           for: 5m
+#           labels: { severity: warning }
+#           annotations: { summary: "Disk space low on {{ $labels.instance }}" }

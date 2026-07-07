@@ -9,6 +9,10 @@
 # ============================================================================
 
 # 上游 NTP 來源(空白分隔可多個);預設 ntp.ubuntu.com
+# 重要:每個 name 各自展開成獨立的 server directive。
+# 例如 "ntp.ubuntu.com pool.ntp.org" 會產生:
+#   server ntp.ubuntu.com iburst maxsources 4
+#   server pool.ntp.org     iburst maxsources 4
 ntp_pool: "ntp.ubuntu.com pool.ntp.org"
 
 # provider 預設 chrony,通常不用改;要改得用 -e ntp_provider=...

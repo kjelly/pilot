@@ -1,0 +1,24 @@
+groups:
+  - name: pilot-seed
+    rules:
+      - alert: Watchdog
+        expr: vector(1)
+        for: 0s
+        labels:
+          severity: info
+        annotations:
+          summary: "Pilot watchdog — always fires to confirm alerting pipeline end-to-end"
+      - alert: PrometheusDown
+        expr: up{job="prometheus"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus {{ $labels.instance }} is down"
+      - alert: HostDown
+        expr: up != 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target {{ $labels.instance }} (job {{ $labels.job }}) down"

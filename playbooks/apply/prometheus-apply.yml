@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/prometheus.md v1.0
+# Apply playbook for docs/verification/prometheus.md v1.1
 #
 # Per-site role: runs Prometheus + a Thanos Sidecar as a pair of Docker
 # containers on the SAME host, sharing Prometheus's TSDB data directory so
@@ -9,6 +9,12 @@
 # docs/verification/thanos-query.md host is; the relationship is inverted,
 # the central Thanos Query reaches OUT to each site's sidecar.
 #
+# v1.1 also wires each site's Prometheus to the central Alertmanager
+# (docs/verification/alertmanager.md) for alerting: seed rules
+# (Watchdog + PrometheusDown + HostDown) are always loaded and evaluated
+# locally, and the `alerting.alertmanagers` block is rendered only when
+# `alertmanager_target_host` is set (escape hatch, see spec §1.5).
+#
 # Pre-flight: docs/verification/docker.md PASS (docker.io + docker.service).
 #
 # Usage (default: SeaweedFS S3 gateway built by seaweedfs-s3-apply.yml):
@@ -18,6 +24,7 @@
 #       -e target_group=prometheus \
 #       -e prometheus_site_label=site-a \
 #       -e thanos_s3_target_host=<seaweedfs-s3 IP> \
+#       -e alertmanager_target_host=<alertmanager central IP> \
 #       -e thanos_aws_access_key_id=<key> \
 #       -e thanos_aws_secret_access_key=<secret>
 #
@@ -30,6 +37,10 @@
 #
 #   -e '{"prometheus_scrape_configs": "- job_name: node\n  static_configs:\n    - targets: [\"localhost:9100\"]\n"}'
 #   (in a real inventory, set this in host_vars/<hostname>.yml instead of -e)
+#
+# Per-host custom alert rules (override the seed; usually leave default):
+#
+#   -e @host_vars/<hostname>.yml  # with prometheus_alert_rules: |
 #
 # Variables: see docs/verification/prometheus.md §1.5.
 - name: Apply prometheus (per-site Prometheus + Thanos Sidecar)
@@ -55,6 +66,20 @@
     thanos_s3_port: 8333
     thanos_s3_bucket: pilot-thanos-metrics
     thanos_s3_endpoint: "{{ thanos_s3_alias }}:{{ thanos_s3_port }}"
+    alertmanager_target_host: ""
+    alertmanager_alias: alertmanager-backend
+    alertmanager_port: 9093
+    # prometheus_alert_rules_file: path (relative to the playbook) to a
+    # Prometheus rules YAML file. The default is the seed file shipped in
+    # playbooks/apply/files/. Operators override by passing
+    # `-e prometheus_alert_rules_file=host_vars/mysite-alerts.yml` (the
+    # path is still relative to the playbook's directory at apply time).
+    # The file content is NOT rendered through Jinja — Prometheus's own
+    # `{{ $labels.X }}` template syntax is preserved verbatim. This is
+    # why the contract is a file path, not an inline string (mirroring
+    # the trade-off taken for `prometheus_scrape_configs` would clash
+    # with Jinja on the `{{ ... }}` inside alert annotations).
+    prometheus_alert_rules_file: files/pilot-alert-rules-seed.yml
 
   pre_tasks:
     # prometheus_site_label has no safe default (see spec §1.5 for why —
@@ -101,6 +126,14 @@
         state: present
       when: thanos_s3_target_host | length > 0
 
+    - name: "Pin {{ alertmanager_alias }} -> {{ alertmanager_target_host }} in /etc/hosts"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ alertmanager_alias }}$'
+        line: "{{ alertmanager_target_host }}\t{{ alertmanager_alias }}"
+        state: present
+      when: alertmanager_target_host | length > 0
+
     - block:
         # prom/prometheus's official image runs as the "nobody" user
         # (uid/gid 65534), not root — the bind-mounted data dir must be
@@ -125,14 +158,36 @@
             - "{{ prometheus_config_dir }}"
             - "{{ thanos_config_dir }}"
 
-        # Spec: docs/verification/prometheus.md C8
+        # Spec: docs/verification/prometheus.md C8, C11
         # --storage.tsdb.min-block-duration/max-block-duration are both
         # pinned to 2h below (not just retention): this disables
         # Prometheus's own local compaction into larger blocks, which is a
         # hard requirement for the Sidecar to be able to ship 2h blocks to
         # object storage — Thanos Compactor (on the thanos-query host) owns
         # compaction/downsampling/retention from that point on.
-        - name: "Render prometheus.yml"
+        - name: "Render prometheus.yml (with alerting.alertmanagers)"
+          tags: [C8, C11]
+          ansible.builtin.copy:
+            dest: "{{ prometheus_config_dir }}/prometheus.yml"
+            mode: "0644"
+            content: |
+              global:
+                scrape_interval: {{ prometheus_scrape_interval }}
+                external_labels:
+                  site: {{ prometheus_site_label }}
+              rule_files:
+                - /etc/prometheus/alert-rules.yml
+              alerting:
+                alertmanagers:
+                  - static_configs:
+                      - targets:
+                          - "{{ alertmanager_alias }}:{{ alertmanager_port }}"
+              scrape_configs:
+              {{ prometheus_scrape_configs }}
+          register: prometheus_yml_with_am
+          when: alertmanager_target_host | length > 0
+
+        - name: "Render prometheus.yml (without alerting — alertmanager_target_host empty)"
           tags: [C8]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
@@ -142,9 +197,32 @@
                 scrape_interval: {{ prometheus_scrape_interval }}
                 external_labels:
                   site: {{ prometheus_site_label }}
+              rule_files:
+                - /etc/prometheus/alert-rules.yml
               scrape_configs:
               {{ prometheus_scrape_configs }}
-          register: prometheus_yml_result
+          register: prometheus_yml_no_am
+          when: alertmanager_target_host | length == 0
+
+        - name: "Consolidate prometheus.yml result (for unified restart-gate below)"
+          ansible.builtin.set_fact:
+            prometheus_yml_result: >-
+              {{ prometheus_yml_with_am
+                 | default({'changed': False})
+                 | combine(prometheus_yml_no_am | default({'changed': False})) }}
+
+        # Spec: docs/verification/prometheus.md C10
+        # Use `copy: src:` (not `content:`) because Prometheus rules files
+        # contain `{{ $labels.X }}` template syntax that would clash with
+        # Ansible's Jinja pass on an inline `content` string (this was a
+        # real apply-time failure before switching to file-path semantics).
+        - name: "Render alert-rules.yml (seed by default, override per host via prometheus_alert_rules_file)"
+          tags: [C10]
+          ansible.builtin.copy:
+            src: "{{ prometheus_alert_rules_file }}"
+            dest: "{{ prometheus_config_dir }}/alert-rules.yml"
+            mode: "0644"
+          register: alert_rules_result
 
         # Contains the S3 secret key — no_log so it never hits Ansible's
         # own output/logs. mode 0644 (not 0600) is a deliberate tradeoff:
@@ -174,15 +252,15 @@
             name: "{{ docker_network_name }}"
             state: present
 
-        # Spec: docs/verification/prometheus.md C1, C3, C4, C7, C8
+        # Spec: docs/verification/prometheus.md C1, C3, C4, C7, C8, C12
         - name: "Prometheus — run pilot-prometheus container"
-          tags: [C1, C3, C4, C7, C8]
+          tags: [C1, C3, C4, C7, C8, C12]
           community.docker.docker_container:
             name: pilot-prometheus
             image: "prom/prometheus:{{ prometheus_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ prometheus_yml_result is changed }}"
+            restart: "{{ prometheus_yml_result is changed or alert_rules_result is changed }}"
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -191,8 +269,10 @@
               --storage.tsdb.retention.time={{ prometheus_retention_time }}
               --storage.tsdb.min-block-duration=2h
               --storage.tsdb.max-block-duration=2h
+              --web.enable-lifecycle
             volumes:
               - "{{ prometheus_config_dir }}/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+              - "{{ prometheus_config_dir }}/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro"
               - "{{ prometheus_host_data_dir }}:/prometheus"
             ports:
               - "9090:9090"

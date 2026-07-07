@@ -48,6 +48,7 @@ coverage.txt
 .verification/
 .playbooks/generated/
 inventory*.yaml
+inventories/*
 # The canonical DELIVERY.md golden path (`cp inventory.example.yml
 # inventory.yml`) — real hosts/IPs, never the committed schema.
 /inventory.yml
