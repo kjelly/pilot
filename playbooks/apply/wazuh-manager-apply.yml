@@ -1,18 +1,28 @@
-# Apply playbook for docs/verification/wazuh-manager.md v1.0
-# Wazuh all-in-one (manager + indexer + dashboard) via the official
-# wazuh-install.sh assistant script — CVE (vulnerability-detection) requires
-# the Wazuh indexer to store/correlate scan results in Wazuh 4.8+, so this is
-# NOT a manager-only role; see spec §1 for why we call the official installer
-# rather than hand-rolling indexer certs. Then adds our own additive
-# <syslog_output> block to optionally forward alerts to the central SIEM
+# Apply playbook for docs/verification/wazuh-manager.md v2.0
+# Wazuh single-node (manager + indexer + dashboard) as three Docker
+# containers, deployed from the OFFICIAL wazuh-docker release bundle — the
+# official generate-indexer-certs.yml one-shot container builds the whole
+# TLS chain (root CA, indexer, filebeat, dashboard certs) and the official
+# docker-compose.yml wires the three services together. CVE
+# (vulnerability-detection) requires the Wazuh indexer to store/correlate
+# scan results in Wazuh 4.8+, and hand-rolling that cert chain is exactly
+# the risk the official bundle exists to remove (see spec §1 — same
+# tradeoff that picked wazuh-install.sh in v1.0). Then adds our own
+# additive <syslog_output> block (via the official /wazuh-config-mount
+# injection mechanism) to optionally forward alerts to the central SIEM
 # (docs/verification/log-server.md).
 #
-# IMPORTANT — sizing (see spec §1/§5): this role needs real resources. A VM
-# sized like log-server/audit-log-forwarding (20GB/2048MB) WILL silently fail
-# — the CVE feed alone occupies ~7-9GB, and when the disk fills, wazuh-db and
-# wazuh-analysisd fail to write with NO service-level symptom (systemctl
-# is-active stays "active") while every alert (including FIM) silently stops
-# being generated. Use at least 60GB disk / 8192MB RAM / 4 vCPU.
+# Pre-flight: docs/verification/docker.md 8/8 PASS (docker.io +
+# docker.service + compose v2 plugin), deployed by
+#   core-infra-provider-apply.yml -e infra_role=docker
+#
+# IMPORTANT — sizing (see spec §1/§5): this role needs real resources. The
+# CVE feed alone occupies ~7-9GB (inside the wazuh_queue named volume —
+# Docker does not change the disk math) plus ~3-4GB of official images;
+# when the disk fills, wazuh-db and wazuh-analysisd fail to write with NO
+# container-level symptom (the container stays "running") while every
+# alert (including FIM) silently stops being generated. Use at least 60GB
+# disk / 8192MB RAM / 4 vCPU.
 #
 # Usage (dry run):
 #   ./pilot vm-target run --name wazuh-manager \
@@ -25,25 +35,42 @@
 #     -e siem_forward_host=192.168.122.8
 #
 # Variables (see docs/verification/wazuh-manager.md §1.5):
-#   siem_forward_host              optional — IP/FQDN of the log-server
-#                                   target; if omitted, local alerting + CVE
-#                                   scanning still work, forwarding is skipped
-#                                   (spec C10/C11 not applicable — see spec §5)
-#   siem_forward_port              default: 514
-#   wazuh_install_script_version   default: "4.14" (tested version)
-- name: Apply wazuh-manager (Wazuh all-in-one manager+indexer+dashboard, CVE scanning, optional SIEM forward)
+#   siem_forward_host      optional — IP/FQDN of the log-server target; if
+#                           omitted, local alerting + CVE scanning still
+#                           work, forwarding is skipped (spec C10/C11 not
+#                           applicable — see spec §5)
+#   siem_forward_port      default: 514
+#   wazuh_docker_version   default: "4.14.1" (official wazuh-docker tag,
+#                           also pins the three official image tags)
+- name: Apply wazuh-manager (Dockerized Wazuh single-node manager+indexer+dashboard, CVE scanning, optional SIEM forward)
   hosts: "{{ target_group | default('wazuh-manager') }}"
   become: true
   gather_facts: true
   vars:
     siem_forward_host: ""
     siem_forward_port: "514"
-    wazuh_install_script_version: "4.14"
-    wazuh_install_dir: /root
-    wazuh_install_script: "{{ wazuh_install_dir }}/wazuh-install.sh"
-    siem_forward_conf: /var/ossec/etc/ossec.conf
+    wazuh_docker_version: "4.14.1"
+    wazuh_docker_root: /opt/pilot/wazuh-docker
+    wazuh_docker_tarball: "{{ wazuh_docker_root }}/wazuh-docker-v{{ wazuh_docker_version }}.tar.gz"
+    # Directory name inside the official tarball; also the compose project
+    # name (pinned explicitly below) — container names are therefore the
+    # deterministic single-node-wazuh.{manager,indexer,dashboard}-1 that
+    # spec C1-C3/C7/C9/C11 hard-code.
+    wazuh_single_node_dir: "{{ wazuh_docker_root }}/wazuh-docker-{{ wazuh_docker_version }}/single-node"
+    wazuh_compose_project: single-node
+    wazuh_manager_conf: "{{ wazuh_single_node_dir }}/config/wazuh_cluster/wazuh_manager.conf"
     siem_forward_alias: siem-log-server
     siem_forwarding_enabled: "{{ siem_forward_host | length > 0 }}"
+  pre_tasks:
+    # Same fail-early gate as keycloak-db-apply.yml — a missing docker
+    # engine should fail here with a clear message, not five tasks later
+    # inside the compose module.
+    - name: "Pre-flight: docker engine is up (spec docs/verification/docker.md)"
+      ansible.builtin.command: docker info
+      register: docker_pre
+      changed_when: false
+      failed_when: docker_pre.rc != 0
+      check_mode: false
   tasks:
     - name: "Step 0: Report whether SIEM forwarding is enabled this run"
       ansible.builtin.debug:
@@ -52,52 +79,46 @@
              if siem_forwarding_enabled
              else 'siem_forward_host not provided — skipping /etc/hosts pin and <syslog_output>; only local alerting + CVE scanning (C1-C9) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
 
-    - name: "Step 1: Detect prior install (spec C1)"
-      ansible.builtin.command: dpkg-query -W -f='${Status}' wazuh-manager
-      register: wazuh_manager_dpkg
-      changed_when: false
-      failed_when: false
+    # Official hard requirement of the wazuh-indexer (OpenSearch) image —
+    # the one host-level knob this role cannot containerize (spec §5).
+    - name: "Step 1: Set vm.max_map_count=262144 (indexer requirement, persistent)"
+      ansible.posix.sysctl:
+        name: vm.max_map_count
+        value: "262144"
+        sysctl_set: true
+        state: present
 
-    - name: "Step 1a: Set install-needed fact"
-      ansible.builtin.set_fact:
-        wazuh_manager_already_installed: "{{ wazuh_manager_dpkg.rc == 0 and 'install ok installed' in wazuh_manager_dpkg.stdout }}"
+    - name: "Step 2: Ensure {{ wazuh_docker_root }} exists"
+      ansible.builtin.file:
+        path: "{{ wazuh_docker_root }}"
+        state: directory
+        mode: "0755"
 
-    - name: "Step 2: Download the official wazuh-install.sh assistant (spec C1, C2)"
+    - name: "Step 3: Download the official wazuh-docker release bundle (spec C1-C3)"
+      tags: [C1, C2, C3]
       ansible.builtin.get_url:
-        url: "https://packages.wazuh.com/{{ wazuh_install_script_version }}/wazuh-install.sh"
-        dest: "{{ wazuh_install_script }}"
-        mode: "0750"
-      when: not wazuh_manager_already_installed
+        url: "https://github.com/wazuh/wazuh-docker/archive/refs/tags/v{{ wazuh_docker_version }}.tar.gz"
+        dest: "{{ wazuh_docker_tarball }}"
+        mode: "0644"
 
-    # This is a long-running operation (indexer + manager + dashboard install,
-    # cert generation, security admin bootstrap) — observed several minutes on
-    # a properly-sized VM (spec §1). async/poll instead of a short default
-    # timeout. -a = all-in-one; -i = ignore hardware-minimum check (sandbox
-    # VMs may not match the exact CPU model probe — see spec §5; does NOT
-    # excuse under-provisioning disk, which is a real, previously-hit failure
-    # mode, not a false-positive check).
-    - name: "Step 3: Run wazuh-install.sh -a -i (all-in-one: manager+indexer+dashboard; spec C1, C2)"
+    - name: "Step 4: Unpack the release bundle (spec C1-C3)"
+      tags: [C1, C2, C3]
+      ansible.builtin.unarchive:
+        src: "{{ wazuh_docker_tarball }}"
+        dest: "{{ wazuh_docker_root }}"
+        remote_src: true
+        creates: "{{ wazuh_single_node_dir }}/docker-compose.yml"
+
+    # One-shot official cert generator (wazuh/wazuh-certs-generator) —
+    # builds the full TLS chain into config/wazuh_indexer_ssl_certs/.
+    # Idempotent via `creates` on the root CA it emits. Long-ish on first
+    # run (pulls the generator image).
+    - name: "Step 5: Generate the indexer TLS cert chain (official generator; spec C1-C3)"
+      tags: [C1, C2, C3]
       ansible.builtin.command:
-        cmd: "bash {{ wazuh_install_script }} -a -i"
-        chdir: "{{ wazuh_install_dir }}"
-      register: wazuh_install_job
-      async: 1800
-      poll: 20
-      when: not wazuh_manager_already_installed
-
-    - name: "Step 4: Ensure wazuh-manager enabled+started (spec C3)"
-      tags: [C3]
-      ansible.builtin.systemd:
-        name: wazuh-manager
-        state: started
-        enabled: true
-
-    - name: "Step 5: Ensure wazuh-indexer enabled+started (spec C4)"
-      tags: [C4]
-      ansible.builtin.systemd:
-        name: wazuh-indexer
-        state: started
-        enabled: true
+        cmd: docker compose -f generate-indexer-certs.yml run --rm generator
+        chdir: "{{ wazuh_single_node_dir }}"
+        creates: "{{ wazuh_single_node_dir }}/config/wazuh_indexer_ssl_certs/root-ca.pem"
 
     - block:
         - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host }} in /etc/hosts (spec C10)"
@@ -109,16 +130,18 @@
             state: present
           when: siem_forwarding_enabled | bool
 
-        # Wazuh's ossec.conf parser accepts multiple top-level <ossec_config>
-        # root blocks in one file and merges them — confirmed by the package's
-        # OWN shipped default (it ends with a second <ossec_config> block for
-        # journald/dpkg.log localfile monitoring). We exploit the same,
-        # already-in-use mechanism to append our own managed block instead of
-        # editing inside the vendor defaults (see spec §6, runbook §5).
-        - name: "Step 7: Append <syslog_output> block to ossec.conf (spec C11)"
+        # Wazuh's ossec.conf parser accepts multiple top-level
+        # <ossec_config> root blocks in one file and merges them —
+        # verified live in v1.0 (see runbook §5). We append our managed
+        # block to the HOST-side wazuh_manager.conf; the official manager
+        # image copies /wazuh-config-mount/etc/ossec.conf over
+        # /var/ossec/etc/ossec.conf on every container start, so the
+        # change reaches the live config on the next (re)start — Step 9
+        # restarts the manager service if the stack was already up.
+        - name: "Step 7: Append <syslog_output> block to wazuh_manager.conf (spec C11)"
           tags: [C11]
           ansible.builtin.blockinfile:
-            path: "{{ siem_forward_conf }}"
+            path: "{{ wazuh_manager_conf }}"
             marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
             block: |
               <ossec_config>
@@ -131,16 +154,99 @@
           register: siem_forward_conf_result
           when: siem_forwarding_enabled | bool
 
-        - name: "Step 8: Restart wazuh-manager only if the forward config actually changed"
-          ansible.builtin.systemd:
-            name: wazuh-manager
-            state: restarted
-          when: siem_forward_conf_result is changed
+        # Spec: docs/verification/wazuh-manager.md C1, C2, C3
+        # First run pulls ~3-4GB of official images and boots the indexer
+        # for the first time (index bootstrap ~1 minute) — the waits below
+        # absorb that.
+        - name: "Step 8: Compose up the official single-node project (spec C1-C3)"
+          tags: [C1, C2, C3]
+          community.docker.docker_compose_v2:
+            project_src: "{{ wazuh_single_node_dir }}"
+            project_name: "{{ wazuh_compose_project }}"
+            state: present
+          register: wazuh_compose_result
+
+        # Drift probe: is the forward block present in the LIVE config the
+        # manager actually loaded (inside the container), not just in the
+        # host-side source file? Gating a restart on "the host file changed
+        # this run" is NOT convergent — a previous run whose injection
+        # failed would never be repaired. The until-loop absorbs the
+        # first-boot race where cont-init is still copying the config.
+        - name: "Step 9: Probe the live in-container forward config (drift check; spec C11)"
+          tags: [C11]
+          ansible.builtin.command: >-
+            docker exec single-node-wazuh.manager-1
+            grep -q "<server>{{ siem_forward_alias }}</server>" /var/ossec/etc/ossec.conf
+          register: live_forward_probe
+          changed_when: false
+          failed_when: false
+          retries: 6
+          delay: 5
+          until: live_forward_probe.rc == 0
+          when: siem_forwarding_enabled | bool
+
+        # RECREATE, not restart — hit for real on vm-target (runbook §5):
+        # the official image's 0-wazuh-init deletes /var/ossec/data_tmp at
+        # the end of the FIRST boot; on a mere `docker restart` the script
+        # sees the (legitimately empty) multigroups permanent dir, tries to
+        # re-install it from the now-deleted data_tmp, exits 1 — and never
+        # reaches mount_files, so /wazuh-config-mount is NOT re-injected.
+        # A recreated container starts from a fresh image filesystem
+        # (data_tmp present) and runs the init to completion.
+        - name: "Step 9a: Recreate wazuh.manager so /wazuh-config-mount re-injects the config (spec C11)"
+          tags: [C11]
+          community.docker.docker_compose_v2:
+            project_src: "{{ wazuh_single_node_dir }}"
+            project_name: "{{ wazuh_compose_project }}"
+            state: present
+            recreate: always
+            services: [wazuh.manager]
+          when:
+            - siem_forwarding_enabled | bool
+            - live_forward_probe.rc != 0
+
+        # Convergence assertion: after a drift-triggered recreate the live
+        # config MUST contain the block — fail loudly (into the rescue)
+        # instead of leaving silent drift behind.
+        - name: "Step 9b: Assert the live forward config converged after recreate (spec C11)"
+          tags: [C11]
+          ansible.builtin.command: >-
+            docker exec single-node-wazuh.manager-1
+            grep -q "<server>{{ siem_forward_alias }}</server>" /var/ossec/etc/ossec.conf
+          register: live_forward_recheck
+          changed_when: false
+          retries: 12
+          delay: 5
+          until: live_forward_recheck.rc == 0
+          when:
+            - siem_forwarding_enabled | bool
+            - live_forward_probe.rc != 0
+
+        - name: "Step 10: Wait for agent port 1514/tcp (wazuh-remoted; spec C5)"
+          tags: [C5, C6]
+          ansible.builtin.wait_for:
+            port: 1514
+            host: 127.0.0.1
+            timeout: 300
+
+        # 401-without-credentials proves OpenSearch + the security plugin
+        # finished bootstrapping, not merely that the container exists
+        # (spec C4). First boot takes ~1 minute.
+        - name: "Step 11: Wait for the indexer HTTPS API to answer 401 (spec C4)"
+          tags: [C4]
+          ansible.builtin.uri:
+            url: "https://127.0.0.1:9200"
+            validate_certs: false
+            status_code: 401
+          register: wazuh_indexer_ready
+          until: wazuh_indexer_ready.status == 401
+          retries: 60
+          delay: 5
 
       rescue:
         - name: "ROLLBACK — remove the siem forward managed block"
           ansible.builtin.blockinfile:
-            path: "{{ siem_forward_conf }}"
+            path: "{{ wazuh_manager_conf }}"
             marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
             block: ""
             state: absent
@@ -151,18 +257,14 @@
             regexp: '\s{{ siem_forward_alias }}$'
             state: absent
 
-        - name: "ROLLBACK — restart wazuh-manager with the forward config removed"
-          ansible.builtin.systemd:
-            name: wazuh-manager
-            state: restarted
-
         - name: "ROLLBACK — surface the original failure"
           ansible.builtin.fail:
             msg: >-
-              wazuh-manager SIEM-forward configuration failed (see task output
-              above); the /etc/hosts pin and <syslog_output> block were
-              reverted. NOTE: this rescue only covers the additive forwarding
-              step (Step 6-8) — it does NOT attempt to uninstall or repair a
-              partially-completed wazuh-install.sh run (Step 1-5); if that
-              step failed, inspect /var/log/wazuh-install.log on the target
-              and consult docs/runbooks/wazuh-manager.md §5 before retrying.
+              wazuh-manager apply FAILED (see task output above); the
+              /etc/hosts pin and <syslog_output> block were reverted.
+              Containers (if created) are left in place for inspection via
+              `docker logs single-node-wazuh.manager-1` /
+              `docker logs single-node-wazuh.indexer-1` — this rescue does
+              NOT tear down the compose project or the cert chain (Step
+              1-5); consult docs/runbooks/wazuh-manager.md §5 before
+              retrying.

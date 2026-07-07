@@ -108,7 +108,9 @@ all:
         web-2:
 
     # -- Wazuh 中央伺服器(FIM/who-data 告警引擎 + CVE 弱點掃描)-------------
-    #    wazuh-manager-apply.yml;需要至少 4 vCPU/8GB RAM/50GB 磁碟,見
+    #    wazuh-manager-apply.yml;Docker 部署(官方 wazuh-docker single-node
+    #    三容器),主機要先過 docker preflight(core-infra-provider-apply.yml
+    #    -e infra_role=docker)。需要至少 4 vCPU/8GB RAM/50GB 磁碟,見
     #    group_vars/wazuh-manager.example.yml 的資源需求註記。
     #    siem_forward_host 選填,同上,可跟 log-server 共用同一個 IP。
     wazuh-manager:              # wazuh-manager-apply.yml 的預設目標

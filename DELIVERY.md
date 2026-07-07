@@ -118,7 +118,7 @@ ansible-playbook -i inventory.yml playbooks/apply/os-patch-sla-apply.yml --limit
 | SSH 走 OIDC 登入 | `playbooks/apply/pam-oidc-sshd-apply.yml` | `linux-servers` |
 | 中央稽核日誌接收(SIEM) | `playbooks/apply/log-server-apply.yml` | `log-server` |
 | 主機稽核(auditd)+ 轉送到 log-server | `playbooks/apply/audit-log-forwarding-apply.yml` | `audit-log-forwarding` |
-| Wazuh 中央伺服器(FIM/who-data 告警引擎 + CVE 弱點掃描) | `playbooks/apply/wazuh-manager-apply.yml` | `wazuh-manager`（需至少 4 vCPU/8GB RAM/50GB 磁碟，見 `docs/runbooks/wazuh-manager.md` §5.2） |
+| Wazuh 中央伺服器(FIM/who-data 告警引擎 + CVE 弱點掃描；Docker 部署，主機需先過 docker preflight) | `playbooks/apply/wazuh-manager-apply.yml` | `wazuh-manager`（需至少 4 vCPU/8GB RAM/50GB 磁碟，見 `docs/runbooks/wazuh-manager.md` §5） |
 | Wazuh agent(檔案完整性監控 FIM + auditd who-data) | `playbooks/apply/wazuh-fim-apply.yml` | `wazuh-fim` |
 | S3 相容物件儲存(SeaweedFS) | `playbooks/apply/seaweedfs-s3-apply.yml` | `seaweedfs-s3` |
 | 跨主機通用備份到 S3(restic) | `playbooks/apply/restic-backup-apply.yml` | `restic-backup`（需先有 S3 目的地，見 `docs/runbooks/restic-backup.md` §5 的 SeaweedFS 匿名模式/簽章相容性注意事項） |

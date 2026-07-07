@@ -18,7 +18,7 @@
 | **DNS 服務自訂內部網域（網域資料不進公開 git）** | [`runbooks/core-infra-provider-dns-zones.md`](./runbooks/core-infra-provider-dns-zones.md) |
 | **部署中央 SIEM 日誌接收端（rsyslog）** | [`runbooks/log-server.md`](./runbooks/log-server.md) |
 | **主機 auditd 稽核規則 + 轉送日誌到 SIEM** | [`runbooks/audit-log-forwarding.md`](./runbooks/audit-log-forwarding.md) |
-| **Wazuh 中央伺服器（FIM/who-data 告警引擎 + CVE 弱點掃描）** | [`runbooks/wazuh-manager.md`](./runbooks/wazuh-manager.md) |
+| **Wazuh 中央伺服器（FIM/who-data 告警引擎 + CVE 弱點掃描；Docker 部署）** | [`runbooks/wazuh-manager.md`](./runbooks/wazuh-manager.md) |
 | **Wazuh agent：檔案完整性監控(FIM) + auditd who-data** | [`runbooks/wazuh-fim.md`](./runbooks/wazuh-fim.md) |
 | **S3 相容物件儲存（SeaweedFS）** | [`runbooks/seaweedfs-s3.md`](./runbooks/seaweedfs-s3.md) |
 | **跨主機通用備份到 S3（restic）** | [`runbooks/restic-backup.md`](./runbooks/restic-backup.md) |
