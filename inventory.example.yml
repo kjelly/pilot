@@ -156,6 +156,17 @@ all:
     thanos-query:
       hosts: {}                 # 例:專門一台 → hosts: { metrics-central-1: }
 
+    # -- 告警:中央 Alertmanager(收各站 Prometheus 推送的告警)----------
+    #    alertmanager-apply.yml 的預設目標;只需一台(典型部署跟上面
+    #    thanos-query 共置同一台主機:同一 host 同時屬於 thanos-query +
+    #    alertmanager 兩個 group,共用 pilot-metrics docker network)。
+    #    各站 prometheus.example.yml 的 alertmanager_target_host 指向這台
+    #    主機的 IP;prometheus.yml 的 alerting.alertmanagers 透過
+    #    /etc/hosts 的 `alertmanager-backend` 別名打進來,跟 thanos-query
+    #    / dashboard 的同樣 alias 慣例。
+    alertmanager:
+      hosts: {}                 # 例:跟 thanos-query 同台 → hosts: { metrics-central-1: }
+
     # -- 觀測畫面:Grafana + Loki(dashboard-apply.yml)----------------------
     #    只需一台;thanos_query_target_host 指向上面的 thanos-query,
     #    見 group_vars/dashboard.example.yml。log-server 主機套用

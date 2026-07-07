@@ -280,7 +280,9 @@
         group: root
         mode: '0644'
         content: |
-          pool {{ ntp_pool | default('ntp.ubuntu.com') }} iburst maxsources 4
+          {% for srv in (ntp_pool | default('ntp.ubuntu.com')).split() %}
+          server {{ srv }} iburst maxsources 4
+          {% endfor %}
           sourcedir /run/chrony-dhcp
           driftfile /var/lib/chrony/chrony.drift
           makestep 1.0 3

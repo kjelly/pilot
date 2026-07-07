@@ -1,0 +1,130 @@
+# Apply playbook for docs/verification/alertmanager.md v1.0
+#
+# Central role: runs Alertmanager as a Docker container, joining the same
+# pilot-metrics docker network as docs/verification/thanos-query.md so
+# per-site Prometheus containers can reach it through the
+# alertmanager-backend /etc/hosts alias (or, on the same host, the
+# `pilot-alertmanager` container name over the shared network).
+#
+# Co-location with thanos-query is RECOMMENDED but not required — both
+# apply playbooks default to the `pilot-metrics` docker network and the
+# `alertmanager_target_host` variable on each per-site prometheus host
+# can be set to whichever physical machine runs this role. The simplest
+# production layout is one host in BOTH the `thanos-query` and
+# `alertmanager` inventory groups.
+#
+# Pre-flight: docs/verification/docker.md PASS (docker.io + docker.service).
+#
+# Usage:
+#
+#   go run ./cmd/pilot vm-target run --name alert \
+#       playbooks/apply/alertmanager-apply.yml \
+#       -e target_group=alertmanager
+#
+# For real receivers (slack, email, etc.) pass a full alertmanager.yml
+# via vault, e.g.
+#
+#   -e @~/.vault/alertmanager-config.yaml
+#   with alertmanager_config: |
+#     route:
+#       receiver: 'slack'
+#       ...
+#
+# Variables: see docs/verification/alertmanager.md §1.5.
+- name: Apply alertmanager (central Alertmanager)
+  hosts: "{{ target_group | default('alertmanager') }}"
+  become: true
+  gather_facts: true
+  vars:
+    alertmanager_version: "v0.27.0"
+    alertmanager_host_data_dir: /var/lib/pilot/alertmanager
+    alertmanager_config_dir: /etc/pilot/alertmanager
+    docker_network_name: pilot-metrics
+    alertmanager_config: |
+      route:
+        receiver: 'null'
+        group_by: ['alertname']
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+      receivers:
+        - name: 'null'
+
+  pre_tasks:
+    - name: "Gate: alertmanager_config non-empty"
+      ansible.builtin.assert:
+        that:
+          - alertmanager_config is defined and alertmanager_config | length > 0
+        fail_msg: >-
+          alertmanager_config is required (provide a full alertmanager.yml
+          string, e.g. via -e @~/.vault/alertmanager-config.yaml).
+
+  tasks:
+    - block:
+        - name: "Ensure config + data dirs exist"
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            owner: "65534"
+            group: "65534"
+            mode: "0755"
+          loop:
+            - "{{ alertmanager_config_dir }}"
+            - "{{ alertmanager_host_data_dir }}"
+
+        - name: "Render alertmanager.yml"
+          tags: [C4, C5]
+          ansible.builtin.copy:
+            dest: "{{ alertmanager_config_dir }}/alertmanager.yml"
+            mode: "0644"
+            content: "{{ alertmanager_config }}"
+          register: alertmanager_yml_result
+
+        - name: "Ensure docker network {{ docker_network_name }} exists"
+          community.docker.docker_network:
+            name: "{{ docker_network_name }}"
+            state: present
+
+        # Spec: docs/verification/alertmanager.md C1, C2, C3, C6, C7
+        - name: "Alertmanager — run pilot-alertmanager container"
+          tags: [C1, C2, C3, C6, C7]
+          community.docker.docker_container:
+            name: pilot-alertmanager
+            image: "prom/alertmanager:{{ alertmanager_version }}"
+            state: started
+            restart_policy: unless-stopped
+            restart: "{{ alertmanager_yml_result is changed }}"
+            user: "65534:65534"
+            networks:
+              - name: "{{ docker_network_name }}"
+            command:
+              - "--config.file=/etc/alertmanager/alertmanager.yml"
+              - "--storage.path=/alertmanager"
+              - "--web.listen-address=:9093"
+            volumes:
+              - "{{ alertmanager_config_dir }}/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"
+              - "{{ alertmanager_host_data_dir }}:/alertmanager"
+            ports:
+              - "9093:9093"
+
+        - name: "Wait for Alertmanager to become ready"
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:9093/-/ready"
+            status_code: 200
+          register: am_ready
+          until: am_ready.status == 200
+          retries: 30
+          delay: 2
+
+      rescue:
+        - name: "ROLLBACK — remove alertmanager config file"
+          ansible.builtin.file:
+            path: "{{ alertmanager_config_dir }}/alertmanager.yml"
+            state: absent
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              alertmanager apply FAILED (see task output above); the
+              config file was removed. Container (if created) is left in
+              place for inspection via `docker logs pilot-alertmanager`.

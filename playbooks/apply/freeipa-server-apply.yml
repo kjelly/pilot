@@ -73,9 +73,16 @@
     # (ipa1) is derived from this in the /etc/hosts pin below.
     ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
 
+    # DNS / NTP options (overridable)
+    ipa_setup_dns: "{{ freeipa_setup_dns | default(false) }}"
+    ipa_dns_forwarders: "{{ freeipa_dns_forwarders | default([]) }}"
+    ipa_setup_ntp: "{{ freeipa_setup_ntp | default(false) }}"
+
     # Native install
     ipa_packages:
-      - ipa-server
+      {{
+        ['ipa-server'] + (['ipa-server-dns'] if ipa_setup_dns | bool else [])
+      }}
     ipa_config_marker: /etc/ipa/default.conf        # created iff already configured
     ipa_install_timeout_s: 900                       # first install runs 8–12 min
 
@@ -138,13 +145,21 @@
       failed_when: false
       tags: [always]
 
+    - name: "Gate: if ipa_setup_dns=true, ensure port 53 is not in use by other services"
+      ansible.builtin.wait_for:
+        port: 53
+        state: stopped
+        timeout: 3
+      when: ipa_setup_dns | bool
+      tags: [always]
+
     - name: "Warn if no active time sync (FreeIPA runs with --no-ntp; ntp role must cover this)"
       ansible.builtin.debug:
         msg: >-
           WARNING: no active chronyd/ntpd on this host ({{ ipa_ntp_check.stdout | default('') }}).
           FreeIPA is installed with --no-ntp; apply the `ntp`(chrony) role first or Kerberos
           auth will fail on clock skew.
-      when: "'active' not in (ipa_ntp_check.stdout | default(''))"
+      when: (not ipa_setup_ntp | bool) and ('active' not in (ipa_ntp_check.stdout | default('')))
       tags: [always]
 
   tasks:
@@ -193,22 +208,33 @@
     # out of Ansible's logs (they are still only ever supplied from vault).
     - name: "FreeIPA — run ipa-server-install (native; first run is 8–12 min)"
       ansible.builtin.command:
-        argv:
+        argv: "{{ ipa_install_args }}"
+        creates: "{{ ipa_config_marker }}"
+      vars:
+        ipa_install_base_args:
           - ipa-server-install
-          - "-U"                                # unattended
+          - "-U"
           - "-r"
           - "{{ ipa_realm }}"
           - "-n"
           - "{{ ipa_domain }}"
           - "-p"
-          - "{{ ipa_dm_password }}"             # Directory Manager
+          - "{{ ipa_dm_password }}"
           - "-a"
-          - "{{ ipa_admin_password }}"          # IPA admin
-          - "--ip-address={{ ipa_server_ip }}"  # deterministic; FQDN is canonical in /etc/hosts
-          - "--no-host-dns"                     # skip DNS precheck (we resolve via /etc/hosts)
-          - "--no-ntp"                          # do NOT run chrony (ntp role owns time)
+          - "{{ ipa_admin_password }}"
+          - "--ip-address={{ ipa_server_ip }}"
           - "--hostname={{ ipa_server_fqdn }}"
-        creates: "{{ ipa_config_marker }}"
+        ipa_install_dns_args: >-
+          {{
+            ['--setup-dns'] + (
+              ['--no-forwarders'] if (ipa_dns_forwarders | length == 0)
+              else (ipa_dns_forwarders | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
+            )
+            if ipa_setup_dns | bool
+            else ['--no-host-dns']
+          }}
+        ipa_install_ntp_args: "{{ [] if ipa_setup_ntp | bool else ['--no-ntp'] }}"
+        ipa_install_args: "{{ ipa_install_base_args + ipa_install_dns_args + ipa_install_ntp_args }}"
       register: ipa_install
       no_log: true
       when: not ansible_check_mode

@@ -24,11 +24,11 @@ func TestRegression_FreeipaServerSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	if len(s.Rows) != 16 {
-		t.Fatalf("rows=%d want=16 (spec must cover C1..C16 inclusive)", len(s.Rows))
+	if len(s.Rows) != 18 {
+		t.Fatalf("rows=%d want=18 (spec must cover C1..C18 inclusive)", len(s.Rows))
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18"}
 	gotIDs := make([]string, 0, len(s.Rows))
 	seen := map[string]bool{}
 	for _, r := range s.Rows {

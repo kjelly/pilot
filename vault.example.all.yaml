@@ -1,0 +1,77 @@
+# =============================================================================
+#  Ansible Vault 範例檔 — 所有 pilot playbook 需要的變數
+# =============================================================================
+#
+# 使用方式：
+#   1. 複製到 ~/.vault/freeipa-sandbox.yaml 或你想放的路徑
+#   2. 修改密碼為真實值（>= 8 字元 for FreeIPA admin）
+#   3. 用 ansible-vault 加密，或讓 .vault/ 目錄 chmod 700（只你自己能讀）
+#   4. 帶入 playbook：-e @~/.vault/freeipa-sandbox.yaml
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# FreeIPA 相關（核心用途）
+# -----------------------------------------------------------------------------
+# FreeIPA admin 密碼（>= 8 字元），所有 FreeIPA playbook 都靠它：
+#   - freeipa-server-apply.yml       → kinit admin / ipa-server-install
+#   - freeipa-client-apply.yml       → 機器 enrollment 密碼
+#   - freeipa-client-fixtures.yml    → 在 server 上建 IPA user / sudorule
+#   - freeipa-audit-*.yml / freeipa-hostauthz-*.yml → 全部用它
+ipa_admin_password: "ChangeMe123!"
+
+# Optional: Directory Manager 密碼（若 playbook 需要）
+# ipa_dm_password: "ChangeMe123!"
+
+# -----------------------------------------------------------------------------
+# Grafana Dashboard 相關
+# -----------------------------------------------------------------------------
+# Grafana admin 密碼
+grafana_admin_password: "ChangeMe456!"
+
+# -----------------------------------------------------------------------------
+# Restic 備份相關
+# -----------------------------------------------------------------------------
+# S3 Access Key（若用 SeaweedFS S3 gateway，需與 s3.json 裡的 identity 一致）
+restic_aws_access_key_id: "your-access-key-id"
+# S3 Secret Key
+restic_aws_secret_access_key: "your-secret-access-key"
+# Restic repository 加密密碼
+restic_password: "ChangeMe789!"
+
+# -----------------------------------------------------------------------------
+# Keycloak 相關
+# -----------------------------------------------------------------------------
+# Keycloak admin 密碼
+keycloak_admin_password: "ChangeMeKeycloak!"
+
+# PostgreSQL 密碼（Keycloak 資料庫）
+pg_keycloak_user: keycloak
+pg_keycloak_db_password: "ChangeMeDbPass!"
+
+# -----------------------------------------------------------------------------
+# Alertmanager 相關（可選，若需要真實 receiver）
+# -----------------------------------------------------------------------------
+# 完整 alertmanager.yml 內容，視需求填入：
+# alertmanager_config: |
+#   route:
+#     receiver: 'slack'
+#     group_by: ['alertname', 'severity']
+#   receivers:
+#     - name: 'slack'
+#       slack_configs:
+#         - api_url: 'https://hooks.slack.com/services/...'
+#           channel: '#alerts'
+
+# -----------------------------------------------------------------------------
+# Wazuh 相關（若有使用）
+# -----------------------------------------------------------------------------
+# Wazuh admin 密碼（若需要）
+# wazuh_admin_password: "ChangeMeWazuh!"
+
+# -----------------------------------------------------------------------------
+# Thanos 相關（若需要 AWS S3 作為 long-term storage）
+# -----------------------------------------------------------------------------
+# thanos_aws_access_key_id: "your-thanos-access-key"
+# thanos_aws_secret_access_key: "your-thanos-secret-key"
+

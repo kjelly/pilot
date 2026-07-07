@@ -40,6 +40,10 @@
 | `prometheus_scrape_interval` | 全域 scrape 間隔 | 否 | `15s` |
 | `prometheus_retention_time` | 本機 TSDB 保留時間（上傳到 S3 之後，本機這份可以被裁掉；保留時間只是給 Thanos Sidecar 上傳留緩衝） | 否 | `6h` |
 | `prometheus_scrape_configs` | 完整覆寫 `scrape_configs:` 區塊內容（多行字串，可依主機覆寫成不同的 scrape job） | 否 | 只 scrape 自己（`localhost:9090`） |
+| `alertmanager_target_host` | 中央 Alertmanager 主機的 IP/FQDN；套用時 pin 進 `/etc/hosts` 的 `alertmanager_alias` 別名，並把 `alerting.alertmanagers` 區塊寫進 `prometheus.yml` | 否（見下方 escape hatch） | 空字串 |
+| `alertmanager_alias` | 上面那個 IP 對應的 `/etc/hosts` 別名；`prometheus.yml` 的 `alerting.alertmanagers` 指向這個固定別名 | 否 | `alertmanager-backend` |
+| `alertmanager_port` | Alertmanager API port | 否 | `9093` |
+| `prometheus_alert_rules_file` | 站台 alert rules YAML 檔案路徑（相對於 `playbooks/apply/`）；檔案內容**不會**經過 Jinja 處理，所以 Prometheus 的 `{{ $labels.X }}` template 語法會原封不動保留。覆寫方式：`-e prometheus_alert_rules_file=host_vars/mysite-alerts.yml` | 否 | `files/pilot-alert-rules-seed.yml`（Watchdog canary + PrometheusDown + HostDown） |
 
 > **為何 `prometheus_site_label` 是必填、跟 `wazuh_manager_host` 不一樣**：
 > `wazuh_manager_host`/`siem_forward_host` 空著時還有「純本機」意義（本機
@@ -55,6 +59,17 @@
 > 值一樣），會在 `thanos-query.md` C9/C10（發現 StoreAPI + 全局查詢帶
 > site label）間接曝露出來——如果兩邊 bucket 不同，中央的 Store Gateway
 > 永遠讀不到這一站上傳的歷史資料。
+>
+> **為何 `alertmanager_target_host` 是 escape hatch 而非必填**：本專案
+> 的 alerting 採用「站台 Prometheus 自己 eval rules → push 到中央
+> Alertmanager」的分層，跟 `dashboard.md` 的 `thanos_query_target_host`
+> 是同一種模式——每站 Prometheus 必須知道中央 Alertmanager 在哪裡才能
+> 把 firing 的告警推過去。`alertmanager_target_host` 留空（`alertmanager.md`
+> 還沒部署、或刻意只做本機規則評估不外送）時，apply playbook 不會加
+> `alerting.alertmanagers` 區塊，Prometheus 仍會在內部評估 rules（C10
+> 跟 C12 仍然 pass），但告警推不出去——C11 會如預期 fail，記在 §5
+> 例外。這跟「先上 Prometheus、後上 Alertmanager」逐步部署的順序相容，
+> 不會因為「Alertmanager 還沒準備好」就把站台 Prometheus 套用 block 起來。
 
 ## 2. Checklist
 
@@ -69,6 +84,9 @@
 | C7  | metrics       | Prometheus 自我 scrape 成功（`up{job="prometheus"}==1`）       | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up' | grep -o '"value":\[[0-9.]*,"1"\]' |
 | C8  | config        | `prometheus.yml` 已設定 `external_labels.site`               | 0 | sh -c 'grep -qE "^\s*site:" /etc/pilot/prometheus/prometheus.yml' |
 | C9  | object-storage | Thanos Sidecar 可讀取 object storage bucket（`thanos tools bucket ls`） | 0 | sh -c 'docker exec pilot-thanos-sidecar thanos tools bucket ls --objstore.config-file=/etc/thanos/objstore.yml >/dev/null 2>&1' |
+| C10 | config        | `alert-rules.yml` 存在且語法有效（`promtool check rules`）       | 0 | sh -c 'docker exec pilot-prometheus promtool check rules /etc/prometheus/alert-rules.yml >/dev/null 2>&1' |
+| C11 | config        | `prometheus.yml` 含 `alerting.alertmanagers` 區塊（僅在 `alertmanager_target_host` 有設時 render） | 0 | sh -c 'grep -qE "^[[:space:]]*alerting:" /etc/pilot/prometheus/prometheus.yml' |
+| C12 | http          | Prometheus 已載入 rules（`/api/v1/rules` 回含 `"name":` 的 group/rules 列表） | 0 | sh -c 'curl -fsS http://127.0.0.1:9090/api/v1/rules | grep -q "\"name\":"' |
 
 > C7 只驗證「Prometheus 有沒有成功 scrape 到至少一個 target」，不綁定
 > 特定 job 名稱字面值以外的東西——`up` 查詢不加 label matcher，因為
@@ -85,11 +103,11 @@
 
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
-- 預期 row 數：9
+- 預期 row 數：12
 
 ## 4. PASS / FAIL 規則
 
-- C1–C9 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控 + 上傳鏈路都通
+- C1–C12 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路都通
 - 任一 fail → **FAIL**，常見修法：
   - C1/C2 fail → container 沒起；`docker ps -a` / `docker logs pilot-prometheus` / `docker logs pilot-thanos-sidecar`
   - C3/C4 fail → Prometheus 還沒 ready 或設定檔有誤；`docker logs pilot-prometheus`
@@ -97,15 +115,20 @@
   - C7 fail → scrape 設定有誤或 target 打不到；檢查 `prometheus_scrape_configs`
   - C8 fail → `prometheus_site_label` 沒有正確渲染進設定檔
   - C9 fail → S3 憑證/bucket 有誤，或 bucket 尚未預先建立（見 §5）
+  - C10 fail → `prometheus_alert_rules` 語法有誤；`docker exec pilot-prometheus cat /etc/prometheus/alert-rules.yml` 看內容
+  - C11 fail → 預期 fail 見 §5（Alertmanager 尚未部署）；若非預期則檢查 `alertmanager_target_host` 是否帶入
+  - C12 fail → Prometheus 還沒完成 rules reload；`docker logs pilot-prometheus | grep -i rule`
 
 ## 5. 例外與已知偏差
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
 | C9 | SeaweedFS 不會自動生出不存在的 bucket，套用前需手動 `weed shell` 建好 `thanos_s3_bucket`（跟 `restic-backup.md` §5 Bug 5 同一個坑），否則本行 fail 且 sidecar log 會顯示 retry | SeaweedFS 目的地 | 無（預建 bucket 是常態操作） |
+| C11 | `alertmanager_target_host` 未填或中央 Alertmanager 尚未套用完成時，本行預期 fail（apply playbook 不會 render `alerting.alertmanagers` 區塊） | Alertmanager 尚未部署的環境 | 直到 `alertmanager.md` PASS 為止 |
 
 ## 6. 變更紀錄
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
 | 2026-07-06 | v1.0 | 初版 | sre |
+| 2026-07-07 | v1.1 | 新增 C10–C12：seed alert rules + alerting.alertmanagers 區塊（escape hatch 跟 `alertmanager_target_host` 連動） | sre |
