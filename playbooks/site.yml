@@ -37,9 +37,12 @@
 #  照常套用本機規則,只是不轉送/不註冊;之後目標就緒、把變數補上,重跑
 #  site.yml(或單獨重跑對應的 apply playbook)即可補齊,不需要重裝任何東西。
 #
-#  注意:wazuh-manager 需要較大的資源(4 vCPU/8GB RAM/50GB 磁碟起跳,CVE
+#  注意:wazuh-manager 是 Docker 部署(官方 wazuh-docker single-node 三容器),
+#  該主機要先過 docker preflight(core-infra-provider-apply.yml
+#  -e infra_role=docker,同 keycloak-db 的前置;playbook 內建 docker info
+#  fail-early gate)。且需要較大的資源(4 vCPU/8GB RAM/50GB 磁碟起跳,CVE
 #  弱點掃描 feed 常駐 ~7-9GB)——磁碟不足會讓所有告警靜默停止產生且無明顯
-#  服務層級失敗徵兆,見 docs/runbooks/wazuh-manager.md §5.2。
+#  服務層級失敗徵兆(容器仍顯示 running),見 docs/runbooks/wazuh-manager.md §5。
 #
 #  注意:restic-backup 的目的地(restic_s3_target_host,見
 #  group_vars/restic-backup.example.yml)跟 audit-log-forwarding/wazuh 那組

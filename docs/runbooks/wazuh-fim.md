@@ -201,15 +201,20 @@ go run ./cmd/pilot vm-target exec --name wazuh-fim -- \
     sudo sh -c 'echo "# PILOT-WAZUH-CHAIN-TEST $(date)" >> /etc/pilot-fim-chaintest.conf'
 
 # 2. manager 端：確認 agent_control 顯示這台是 Active
+#    （wazuh-manager v2.0 起是 Docker 部署,manager 端指令一律走 docker exec,
+#      容器名見 wazuh-manager.md;agent 端本身完全不受影響）
 go run ./cmd/pilot vm-target exec --name wazuh-manager -- \
-    sudo /var/ossec/bin/agent_control -l
+    sudo docker exec single-node-wazuh.manager-1 /var/ossec/bin/agent_control -l
 
 # 3. manager 端：確認告警含完整 who-data（見 wazuh-manager.md §4 的完整輸出）
 go run ./cmd/pilot vm-target exec --name wazuh-manager -- \
-    sudo grep "pilot-fim-chaintest" /var/ossec/logs/alerts/alerts.json
+    sudo docker exec single-node-wazuh.manager-1 sh -c \
+    'grep "pilot-fim-chaintest" /var/ossec/logs/alerts/alerts.json'
 ```
 
-**真實輸出（agent_control -l）**：
+**真實輸出（agent_control -l；agent 註冊狀態出自 v1.0 鏈路實測，
+`docker exec` 指令形式已在 wazuh-manager v2.0 Docker 部署上重新實測——
+無 agent 時只會列出 `ID: 000 ... (server)` 那行）**：
 
 ```
 Wazuh agent_control. List of available agents:

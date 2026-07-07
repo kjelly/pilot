@@ -23,12 +23,18 @@
 | C3  | cli         | `docker --version` 印出 `Docker version ...` 字串                                    | ~Docker | docker --version 2>&1 | head -n1 |
 | C4  | socket      | `/var/run/docker.sock` 存在且 group=docker                                             | ~docker  | stat -c '%a %U %G %n' /var/run/docker.sock 2>/dev/null | head -n1 |
 | C5  | hello-world | `docker run --rm hello-world` 至少能跑完一次（證明 pull + run + cleanup 全鏈通）           | ~Hello   | docker run --rm hello-world 2>&1 | grep -m1 -oE 'Hello from Docker' | head -n1 |
-| C6  | network     | `docker network ls` 至少包含預設三個（bridge / host / none）                              | ~bridge  | docker network ls --format '{{.Name}}' 2>/dev/null | grep -m1 -oE '^bridge$' | head -n1 |
+| C6  | network     | `docker network ls` 至少包含預設三個（bridge / host / none）                              | ~bridge  | docker network ls 2>/dev/null | awk '$2 == "bridge" {print $2; exit}' |
 | C7  | compose     | `docker compose version` 有印出來（v2 plugin；apt 裝 `docker-compose-v2` 給）             | ~Docker  | docker compose version 2>&1 | head -n1 |
 | C8  | cgroup      | docker info 顯示 cgroup driver 為 systemd 或 cgroupfs（host 跟 container driver 一致）   | ~Cgroup  | docker info 2>/dev/null | grep -m1 -E 'Cgroup (Driver|Version)' | head -n1 |
 
 > C5 hello-world 第一次跑會 pull image（~10s）；後續跑 < 1s。
 > C4 `~docker` 是 substring 比對，捕到 `/var/run/docker.sock` 那一行（含 group 名 `docker`）。
+> C6 **不可**用 `docker network ls --format '{{.Name}}'`——`{{ }}` 會被
+> ansible ad-hoc 的 Jinja 模板引擎吃掉（`Syntax error in template:
+> unexpected '.'`，task 直接 FAILED、rc=2），這是 2026-07-06 對真實 vm-target
+> 跑 `pilot verify` 撞到的實例（wazuh-manager v2.0 的 docker preflight），
+> 不是理論風險；改用 `awk '$2 == "bridge"'` 比對 NETWORK NAME 欄。所有 spec
+> Command 欄一律不准出現 docker Go template 的 `{{ }}` 語法。
 > C7 預期 `Docker Compose version v2.x.x` 之類 — substring `Docker` 即可。
 > C8 預期 `Cgroup Driver: systemd` 或 `Cgroup Version: 2` — substring `Cgroup` 即可。
 
@@ -116,3 +122,4 @@ go run ./cmd/pilot vm-target verify --name core \
 | 日期       | 版本 | 變更                                       | 變更者 |
 |------------|------|-------------------------------------------|--------|
 | 2026-07-01 | v1.0 | 初版（C1–C8：docker engine 端到端健康）     | sre    |
+| 2026-07-06 | v1.1 | C6 移除 docker Go template `{{.Name}}`（被 ansible ad-hoc 的 Jinja 吃掉、task FAILED rc=2，`pilot verify` 下 C6 永遠 fail——wazuh-manager v2.0 docker preflight 實測撞到），改用 `awk` 欄位比對；§2 註記 + regression test 加「Command 欄禁用 `{{`」invariant | sre    |

@@ -74,9 +74,13 @@ restic_s3_target_host: ""
 #   # host_vars/log-server-1.yml(中央 SIEM 接收端:設定 + 已落地的日誌)
 #   restic_backup_paths: ["/etc/rsyslog.conf", "/etc/rsyslog.d", "/var/log"]
 #
-#   # host_vars/wazuh-manager-1.yml(Wazuh manager:規則/設定;alerts 索引本身
-#   # 資料量大且有自己的 OpenSearch snapshot 機制,不建議整包丟給 restic)
-#   restic_backup_paths: ["/var/ossec/etc", "/var/ossec/rules"]
+#   # host_vars/wazuh-manager-1.yml(Wazuh manager,Docker 部署:官方發行包
+#   # + 憑證 + wazuh_manager.conf 在 /opt/pilot/wazuh-docker,容器的 etc 在
+#   # named volume;alerts 索引本身資料量大且有自己的 OpenSearch snapshot
+#   # 機制,不建議整包丟給 restic)
+#   restic_backup_paths:
+#     - "/opt/pilot/wazuh-docker"
+#     - "/var/lib/docker/volumes/single-node_wazuh_etc/_data"
 #
 # ansible 的 host_vars 優先權高於這份 group_vars,單一主機的覆寫不影響同
 # group 其他主機。驗證時 docs/verification/restic-backup.md 的 C1-C9 都跟

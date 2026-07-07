@@ -89,7 +89,20 @@ func TestRegression_DockerSpec(t *testing.T) {
 		}
 	}
 
-	// 7. Lint must not produce errors.
+	// 7. No row may use docker's Go-template syntax (`{{ ... }}`): ansible
+	//    ad-hoc runs the Command cell through Jinja, which chokes on it
+	//    ("Syntax error in template: unexpected '.'", task FAILED rc=2).
+	//    Hit for real on 2026-07-06: C6's original
+	//    `docker network ls --format '{{.Name}}'` made C6 unverifiable via
+	//    `pilot verify` (found during the wazuh-manager v2.0 docker
+	//    preflight). Use `docker ps --filter` / awk column matching instead.
+	for _, r := range s.Rows {
+		if strings.Contains(r.Command, "{{") {
+			t.Errorf("row %s uses `{{` (Jinja eats docker Go templates in ansible ad-hoc); got %q", r.ID, r.Command)
+		}
+	}
+
+	// 8. Lint must not produce errors.
 	fs := Lint(s)
 	if HasErrors(fs) {
 		t.Errorf("Lint produced errors:\n%s", joinFindings(fs))
