@@ -35,7 +35,7 @@ $ go run ./cmd/pilot vm-target show-inventory --name freeipa-server
 #   slapd-IPA-PILOT-INTERNAL
 # 稽核檔：/var/log/dirsrv/slapd-IPA-PILOT-INTERNAL/audit  (mode 600 dirsrv:dirsrv → 需 root/sudo)
 
-# ~/.vault/freeipa-sandbox.yaml keys: ipa_admin_password, ipa_dm_password, audit_demo_user_password
+# ~/.vault/main.yaml keys: ipa_admin_password, ipa_dm_password, audit_demo_user_password
 ```
 
 **Alignment decision**：vm-target host 在 group `all`（非 `freeipa-server`），
@@ -53,7 +53,7 @@ $ go run ./cmd/pilot vm-target show-inventory --name freeipa-server
 go run ./cmd/pilot vm-target run --name freeipa-server \
     playbooks/apply/freeipa-server-apply.yml \
     -e target_group=all -e ipa_server_ip=192.168.122.3 \
-    -e @~/.vault/freeipa-sandbox.yaml
+    -e @~/.vault/main.yaml
 ```
 
 **真實輸出**（2026-07-06；`off`→`on` 首次開啟）：

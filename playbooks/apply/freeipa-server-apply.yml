@@ -32,19 +32,19 @@
 #
 # Secrets: ipa_admin_password (and optional ipa_dm_password) come from a
 # vault file, NEVER hard-coded (and the install task is no_log):
-#   -e @~/.vault/freeipa-sandbox.yaml
+#   -e @~/.vault/main.yaml
 #
 # Usage:
 #
 #   ansible-playbook -i inventory-freeipa.yaml \
 #       playbooks/apply/freeipa-server-apply.yml \
 #       -e ipa_server_ip=10.0.0.10 \
-#       -e @~/.vault/freeipa-sandbox.yaml \
+#       -e @~/.vault/main.yaml \
 #       --check --diff
 #
 #   # against a pilot vm-target (host lives in group `all`, not freeipa-server):
 #   pilot vm-target run --name alma-vm playbooks/apply/freeipa-server-apply.yml \
-#       -e target_group=all -e ipa_server_ip=<vm-ip> -e @~/.vault/freeipa-sandbox.yaml
+#       -e target_group=all -e ipa_server_ip=<vm-ip> -e @~/.vault/main.yaml
 #
 # Stage gating (same convention as core-infra-provider-apply.yml):
 #   sandbox  default; runs immediately
@@ -66,6 +66,7 @@
     # freeipa.example.yml). Defaults preserve the original behaviour, so
     # unset = unchanged (vm-target / existing flows keep working).
     ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+    ipa_server_ip: "{{ freeipa_server_ip | default(ansible_host) }}"
     ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
     # FreeIPA HARD-FORBIDS the server FQDN being equal to the domain name
     # ("hostname cannot be the same as the domain name"). The FQDN must be a
@@ -79,10 +80,7 @@
     ipa_setup_ntp: "{{ freeipa_setup_ntp | default(false) }}"
 
     # Native install
-    ipa_packages:
-      {{
-        ['ipa-server'] + (['ipa-server-dns'] if ipa_setup_dns | bool else [])
-      }}
+    ipa_packages: "{{ ['ipa-server'] + (['ipa-server-dns'] if ipa_setup_dns | bool else []) }}"
     ipa_config_marker: /etc/ipa/default.conf        # created iff already configured
     ipa_install_timeout_s: 900                       # first install runs 8–12 min
 
@@ -106,7 +104,7 @@
           - ipa_server_ip is defined and ipa_server_ip | length > 0
         fail_msg: >-
           Missing required vars. Pass -e ipa_server_ip=<LAN IP> and a vault file
-          with ipa_admin_password (>=8 chars), e.g. -e @~/.vault/freeipa-sandbox.yaml
+          with ipa_admin_password (>=8 chars), e.g. -e @~/.vault/main.yaml
       tags: [always]
 
     - name: "Gate: this playbook installs FreeIPA NATIVELY — require EL9 host"
@@ -357,3 +355,18 @@
           when: >-
             ('nsslapd-auditlog-logging-enabled: on' not in ipa_ds_audit_cfg.stdout) or
             ('nsslapd-auditfaillog-logging-enabled: on' not in ipa_ds_audit_cfg.stdout)
+
+        - name: "FreeIPA — 389-ds audit log: write dummy description to trigger audit log (spec C16)"
+          ansible.builtin.shell: |
+            if [ ! -s /var/log/dirsrv/{{ ipa_ds_instance }}/audit ]; then
+            ldapmodify -x -H ldap://localhost -D "cn=Directory Manager" -w "{{ ipa_dm_password }}" <<EOF
+            dn: dc={{ ipa_domain.replace('.', ',dc=') }}
+            changetype: modify
+            replace: description
+            description: FreeIPA Directory Server for pilot.internal (initialized at {{ ansible_date_time.iso8601 }})
+            EOF
+              echo "INITIALIZED"
+            fi
+          register: audit_init
+          changed_when: "'INITIALIZED' in audit_init.stdout"
+          no_log: true

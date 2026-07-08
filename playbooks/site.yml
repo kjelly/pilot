@@ -66,6 +66,10 @@
   vars:
     infra_role: ntp
   tags: [infra, ntp]
+- import_playbook: apply/core-infra-provider-apply.yml
+  vars:
+    infra_role: docker
+  tags: [infra, docker]
 
 # ── 2. 身份 / AAA(FreeIPA)server 先於 client ───────────────────────────
 - import_playbook: apply/freeipa-server-apply.yml

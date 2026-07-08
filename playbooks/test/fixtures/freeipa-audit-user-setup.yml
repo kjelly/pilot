@@ -16,7 +16,7 @@
 #   # server side (ensure the IPA user; needs the vault; idempotent with
 #   # freeipa-audit-demo.yml, which imports the same fixtures play):
 #   pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-audit-user-setup.yml \
-#       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
+#       -e fixtures_target_group=all -e @~/.vault/main.yaml
 #   # client side (SSH key only — the IPA user must already exist, or the
 #   # chown below fails because SSSD cannot resolve the owner):
 #   pilot vm-target run --name freeipa-client playbooks/test/fixtures/freeipa-audit-user-setup.yml \

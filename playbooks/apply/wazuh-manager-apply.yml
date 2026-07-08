@@ -47,7 +47,6 @@
   become: true
   gather_facts: true
   vars:
-    siem_forward_host: ""
     siem_forward_port: "514"
     wazuh_docker_version: "4.14.1"
     wazuh_docker_root: /opt/pilot/wazuh-docker
@@ -60,7 +59,7 @@
     wazuh_compose_project: single-node
     wazuh_manager_conf: "{{ wazuh_single_node_dir }}/config/wazuh_cluster/wazuh_manager.conf"
     siem_forward_alias: siem-log-server
-    siem_forwarding_enabled: "{{ siem_forward_host | length > 0 }}"
+    siem_forwarding_enabled: "{{ (siem_forward_host | default('')) | length > 0 }}"
   pre_tasks:
     # Same fail-early gate as keycloak-db-apply.yml — a missing docker
     # engine should fail here with a clear message, not five tasks later
@@ -120,13 +119,14 @@
         chdir: "{{ wazuh_single_node_dir }}"
         creates: "{{ wazuh_single_node_dir }}/config/wazuh_indexer_ssl_certs/root-ca.pem"
 
+
     - block:
-        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host }} in /etc/hosts (spec C10)"
+        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C10)"
           tags: [C10]
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '\s{{ siem_forward_alias }}$'
-            line: "{{ siem_forward_host }}\t{{ siem_forward_alias }}"
+            line: "{{ siem_forward_host | default('') }}\t{{ siem_forward_alias }}"
             state: present
           when: siem_forwarding_enabled | bool
 

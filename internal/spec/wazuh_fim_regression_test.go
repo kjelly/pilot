@@ -118,8 +118,8 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 	if strings.Contains(applyRaw, "Missing required var") || strings.Contains(applyRaw, "Assert required variables") {
 		t.Errorf("wazuh-fim-apply.yml must not hard-require wazuh_manager_host; enrollment must be optional")
 	}
-	if !strings.Contains(applyRaw, `wazuh_manager_host: ""`) {
-		t.Errorf("wazuh-fim-apply.yml must default wazuh_manager_host to an empty string (optional var)")
+	if !strings.Contains(applyRaw, "wazuh_manager_host | default(") {
+		t.Errorf("wazuh-fim-apply.yml must use default() filter for wazuh_manager_host so group_vars can override")
 	}
 	if !strings.Contains(applyRaw, "wazuh_enrollment_enabled") {
 		t.Errorf("wazuh-fim-apply.yml must derive a wazuh_enrollment_enabled gate from wazuh_manager_host")

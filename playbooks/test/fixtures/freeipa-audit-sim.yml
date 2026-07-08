@@ -15,7 +15,7 @@
 #       playbooks/test/fixtures/freeipa-audit-sim.yml \
 #       -e sim_target_group=all \
 #       -e ipa_server_ip=192.168.123.2 \
-#       -e @~/.vault/freeipa-sandbox.yaml
+#       -e @~/.vault/main.yaml
 ---
 - name: FreeIPA audit simulation
   hosts: "{{ sim_target_group | default('freeipa-client') }}"

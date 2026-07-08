@@ -19,9 +19,16 @@
 # 你的 realm/domain。server 與 client 必須一致——放這裡設定「一次」即可。
 freeipa_domain: ipa.pilot.internal
 
-# 以下兩個通常「不用填」,會自動從 freeipa_domain 推導:
-#   realm      = 大寫的 domain          → IPA.PILOT.INTERNAL
-#   server_fqdn= ipa1.<domain>          → ipa1.ipa.pilot.internal
-# 只有當你的 realm 名稱或伺服器主機名不照這個慣例時才覆寫:
+# FreeIPA server 的 LAN IP。
+# freeipa-server-apply.yml 需要它來執行 --ip-address=... (ipa-server-install)，
+# freeipa-client-apply.yml 需要它來寫入 client 的 /etc/hosts (pin server FQDN → 此 IP)。
+# 【必填】不可省略。請填入與 inventory 裡 freeipa-server host 的 ansible_host 相同 IP。
+freeipa_server_ip: "10.1.56.101"
+
+# 以下三個通常「不用填」,會自動從 freeipa_domain 推導:
+#   realm         = 大寫的 domain             → IPA.PILOT.INTERNAL
+#   server_fqdn   = ipa1.<domain>             → ipa1.ipa.pilot.internal
+#   server_ip     = 預設等於 freeipa_server_ip
+# 只有當你的 realm 名稱、伺服器主機名或 IP 不照這個慣例時才覆寫:
 # freeipa_realm: IPA.PILOT.INTERNAL
 # freeipa_server_fqdn: ipa1.ipa.pilot.internal

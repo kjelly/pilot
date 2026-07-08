@@ -34,11 +34,11 @@
 #
 # Secrets: ipa_admin_password comes from a vault file, NEVER hard-coded (the
 # kinit task is no_log):
-#   -e @~/.vault/freeipa-sandbox.yaml
+#   -e @~/.vault/main.yaml
 #
 # Usage (against the FreeIPA server VM, whose host is in group `all`):
 #   pilot vm-target run --name alma-vm playbooks/test/fixtures/freeipa-client-fixtures.yml \
-#       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
+#       -e fixtures_target_group=all -e @~/.vault/main.yaml
 ---
 - name: FreeIPA client verification fixtures (run on the FreeIPA server)
   hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
@@ -62,7 +62,7 @@
           - ipa_admin_password is defined and ipa_admin_password | length >= 8
         fail_msg: >-
           Missing ipa_admin_password. Pass a vault file, e.g.
-          -e @~/.vault/freeipa-sandbox.yaml
+          -e @~/.vault/main.yaml
       tags: [always]
 
   tasks:

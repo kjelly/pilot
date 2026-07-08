@@ -29,7 +29,6 @@
   become: true
   gather_facts: true
   vars:
-    siem_forward_host: ""
     siem_forward_port: "514"
     audit_logrotate_rotate: 14
     audit_logrotate_maxage: 90
@@ -38,7 +37,7 @@
     audit_rules_dest: /etc/audit/rules.d/99-custom.rules
     siem_forward_conf: /etc/rsyslog.d/99-siem-forward.conf
     siem_forward_alias: siem-log-server
-    siem_forwarding_enabled: "{{ siem_forward_host | length > 0 }}"
+    siem_forwarding_enabled: "{{ (siem_forward_host | default('')) | length > 0 }}"
   tasks:
     - name: "Step 0: Report whether SIEM forwarding is enabled this run"
       ansible.builtin.debug:
@@ -131,12 +130,12 @@
                   endscript
               }
 
-        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host }} in /etc/hosts (spec C15)"
+        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C15)"
           tags: [C15]
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '\s{{ siem_forward_alias }}$'
-            line: "{{ siem_forward_host }}\t{{ siem_forward_alias }}"
+            line: "{{ siem_forward_host | default('') }}\t{{ siem_forward_alias }}"
             state: present
           when: siem_forwarding_enabled | bool
 

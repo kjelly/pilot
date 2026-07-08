@@ -205,7 +205,7 @@ httpd 的 mod_auth_gssapi 取不到自己的 `HTTP/…` acceptor 憑證（SPNEGO
 | Spec ID | Apply task（示例） | 備註 |
 |---------|-------------------|------|
 | C3      | `ansible.builtin.hostname name=ipa1.ipa.pilot.internal` + `/etc/hosts` pin（FQDN 為 canonical）| FQDN 必須是該 IP 的第一個名字，否則 `get_server_ip_address` 中止 |
-| C1      | `ansible.builtin.dnf name=ipa-server` + `command: ipa-server-install -U … creates=/etc/ipa/default.conf` | `creates:` 讓重跑冪等；`no_log: true`；admin/DM 密碼由 vault 注入 `-e @~/.vault/freeipa-sandbox.yaml` |
+| C1      | `ansible.builtin.dnf name=ipa-server` + `command: ipa-server-install -U … creates=/etc/ipa/default.conf` | `creates:` 讓重跑冪等；`no_log: true`；admin/DM 密碼由 vault 注入 `-e @~/.vault/main.yaml` |
 | C2      | 安裝後 `until ipactl status` 沒有 STOPPED/FAILED 的 wait task | 首裝 8–12 分鐘，retries 拉長 |
 | C4–C10  | 由 `ipa-server-install` 一次帶起（LDAP/Kerberos/HTTP/CA）；host-native 直接曝在主機 | firewall 放行由 host 層負責 |
 | C11–C13 | `ipa-server-install -r IPA.PILOT.INTERNAL -n ipa.pilot.internal` 建立後綴、sudo compat 子樹 | — |
@@ -227,12 +227,12 @@ pilot vm-target show-inventory --name <el9-vm>              # 拋棄式 VM
 # 2. dry-run（sandbox 預設；secret 走 vault file，不落地）
 pilot vm-target run --name <el9-vm> playbooks/apply/freeipa-server-apply.yml \
     -e target_group=all -e ipa_server_ip=<vm-ip> \
-    -e @~/.vault/freeipa-sandbox.yaml --check --diff
+    -e @~/.vault/main.yaml --check --diff
 
 # 3. 正式套（拿掉 --check）；首裝約 8–12 分鐘
 pilot vm-target run --name <el9-vm> playbooks/apply/freeipa-server-apply.yml \
     -e target_group=all -e ipa_server_ip=<vm-ip> \
-    -e @~/.vault/freeipa-sandbox.yaml
+    -e @~/.vault/main.yaml
 
 # 4. 驗證
 pilot vm-target verify --name <el9-vm> docs/verification/freeipa-server.md

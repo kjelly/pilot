@@ -211,7 +211,7 @@
               --store={{ hostvars[h].ansible_host }}:{{ thanos_query_sidecar_grpc_port }}
               {% endfor %}
             ports:
-              - "10901:10901"
+              - "10911:10901"
               - "10902:10902"
 
         - name: "Wait for Thanos Query to become ready"

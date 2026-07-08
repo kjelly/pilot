@@ -34,7 +34,6 @@
   become: true
   gather_facts: true
   vars:
-    restic_s3_target_host: ""
     restic_s3_alias: s3-backup-server
     restic_s3_port: 8333
     restic_s3_bucket: pilot-restic-backup
@@ -80,7 +79,7 @@
     - name: "Gate: backup destination must be resolvable"
       ansible.builtin.assert:
         that:
-          - (restic_s3_target_host | length > 0) or (restic_s3_alias not in restic_repository)
+          - (restic_s3_target_host | default('') | length > 0) or (restic_s3_alias not in restic_repository)
         fail_msg: >-
           restic_s3_target_host is empty AND restic_repository still uses
           the default s3-backup-server alias — the backup would have no
@@ -114,14 +113,14 @@
         state: present
       when: ansible_os_family == 'RedHat'
 
-    - name: "Step 2: Pin {{ restic_s3_alias }} -> {{ restic_s3_target_host }} in /etc/hosts (spec C10)"
+    - name: "Step 2: Pin {{ restic_s3_alias }} -> {{ restic_s3_target_host | default('') }} in /etc/hosts (spec C10)"
       tags: [C10]
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ restic_s3_alias }}$'
-        line: "{{ restic_s3_target_host }}\t{{ restic_s3_alias }}"
+        line: "{{ restic_s3_target_host | default('') }}\t{{ restic_s3_alias }}"
         state: present
-      when: restic_s3_target_host | length > 0
+      when: restic_s3_target_host | default('') | length > 0
 
     - block:
         - name: "Step 3: Ensure /etc/pilot exists"
