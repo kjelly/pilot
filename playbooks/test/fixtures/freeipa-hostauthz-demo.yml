@@ -13,7 +13,7 @@
 #
 # Usage:
 #   pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-demo.yml \
-#       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml \
+#       -e fixtures_target_group=all -e @~/.vault/main.yaml \
 #       --tags fixtures,t3,hbactest
 #
 # ALWAYS pass --tags fixtures,t3,hbactest for the verification run above. This
@@ -44,7 +44,7 @@
       ansible.builtin.assert:
         that:
           - ipa_admin_password is defined and ipa_admin_password | length >= 8
-        fail_msg: "Pass -e @~/.vault/freeipa-sandbox.yaml with ipa_admin_password"
+        fail_msg: "Pass -e @~/.vault/main.yaml with ipa_admin_password"
       tags: [always]
 
   tasks:

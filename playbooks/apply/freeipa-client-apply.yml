@@ -24,20 +24,20 @@
 #
 # Secrets: ipa_admin_password (the enrollment principal's password) comes from
 # a vault file, NEVER hard-coded (and the enroll task is no_log):
-#   -e @~/.vault/freeipa-sandbox.yaml
+#   -e @~/.vault/main.yaml
 #
 # Usage:
 #
 #   ansible-playbook -i inventory-freeipa.yaml \
 #       playbooks/apply/freeipa-client-apply.yml \
 #       -e ipa_server_ip=10.0.0.10 \
-#       -e @~/.vault/freeipa-sandbox.yaml \
+#       -e @~/.vault/main.yaml \
 #       --check --diff
 #
 #   # against a pilot vm-target (host lives in group `all`, not freeipa-client):
 #   pilot vm-target run --name freeipa-client playbooks/apply/freeipa-client-apply.yml \
 #       -e target_group=all -e ipa_server_ip=<server-vm-ip> \
-#       -e @~/.vault/freeipa-sandbox.yaml
+#       -e @~/.vault/main.yaml
 #
 # Stage gating (same convention as freeipa-server-apply.yml):
 #   sandbox  default; runs immediately
@@ -59,6 +59,7 @@
     # freeipa_server_fqdn); defaults preserve original behaviour. Keep these in
     # sync with the server by setting them ONCE in a shared group_vars file.
     ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+    ipa_server_ip: "{{ freeipa_server_ip | default(ansible_host) }}"
     ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
     ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
 
@@ -68,7 +69,7 @@
 
     # This client's own FQDN (must be a resolvable, non-loopback name). Default
     # derives from the host's short name under the realm domain.
-    ipa_client_fqdn: "{{ ansible_hostname }}.{{ ipa_domain }}"
+    ipa_client_fqdn: "{{ ansible_hostname | lower }}.{{ ipa_domain }}"
 
     ipa_config_marker: /etc/ipa/default.conf   # created iff already enrolled
     ipa_enroll_timeout_s: 300
@@ -87,7 +88,7 @@
           - ipa_server_ip is defined and ipa_server_ip | length > 0
         fail_msg: >-
           Missing required vars. Pass -e ipa_server_ip=<FreeIPA server IP> and a
-          vault file with ipa_admin_password (>=8 chars), e.g. -e @~/.vault/freeipa-sandbox.yaml
+          vault file with ipa_admin_password (>=8 chars), e.g. -e @~/.vault/main.yaml
       tags: [always]
 
     - name: "Gate: supported client OS (Debian/Ubuntu primary; EL also handled)"
@@ -145,7 +146,7 @@
     - name: "FreeIPA client — pin this host {{ ipa_client_fqdn }} to its own IP in /etc/hosts (FQDN canonical)"
       ansible.builtin.lineinfile:
         path: /etc/hosts
-        regexp: '\s{{ ipa_client_fqdn | regex_escape }}(\s|$)'
+        regexp: '(?i)\s{{ ipa_client_fqdn | regex_escape }}(\s|$)'
         line: "{{ ansible_default_ipv4.address }} {{ ipa_client_fqdn }} {{ ipa_client_fqdn.split('.')[0] }}"
         state: present
         create: false

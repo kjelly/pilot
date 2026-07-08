@@ -37,6 +37,10 @@
     # (createDirs="on"), or rsyslog gets "Permission denied".
     siem_log_owner: "{{ 'syslog' if ansible_os_family == 'Debian' else 'root' }}"
   tasks:
+    - name: "Skip log-server if wazuh-manager is enabled"
+      meta: end_play
+      when: groups['wazuh-manager'] | default([]) | length > 0
+
     - name: "Step 1: Install rsyslog (Debian family)"
       tags: [C1]
       ansible.builtin.apt:

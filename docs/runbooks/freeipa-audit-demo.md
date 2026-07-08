@@ -34,7 +34,7 @@ $ go run ./cmd/pilot vm-target show-inventory --name freeipa-server
 $ go run ./cmd/pilot vm-target show-inventory --name freeipa-client
 # ansible_user: root, key /tmp/pilot-vms/freeipa-client/id_ed25519
 
-# ~/.vault/freeipa-sandbox.yaml keys:
+# ~/.vault/main.yaml keys:
 #   ipa_admin_password, ipa_dm_password, audit_demo_user_password
 ```
 
@@ -94,7 +94,7 @@ client 是 Ubuntu 24.04 並已 `ipa-client-install` enroll（`klist -k` 有
 ```
 $ go run ./cmd/pilot vm-target run --name freeipa-server \
     playbooks/test/fixtures/freeipa-audit-demo.yml \
-    -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
+    -e fixtures_target_group=all -e @~/.vault/main.yaml
 
 PLAY RECAP *********************************************************************
 freeipa-server : ok=12   changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
@@ -116,7 +116,7 @@ freeipa-client : ok=2    changed=2    unreachable=0    failed=0    skipped=0    
 $ go run ./cmd/pilot vm-target run --name freeipa-client \
     playbooks/test/fixtures/freeipa-audit-sim.yml \
     -e sim_target_group=all -e ipa_server_ip=192.168.123.2 \
-    -e @~/.vault/freeipa-sandbox.yaml
+    -e @~/.vault/main.yaml
 
 TASK [Sim — SSH login result] **************************************************
 ok: [freeipa-client] => {

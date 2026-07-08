@@ -19,7 +19,7 @@
 #
 # Server side (optional if freeipa-identity-apply.yml already ran; needs vault):
 #   pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-user-setup.yml \
-#       -e fixtures_target_group=all -e hostauthz_user=hz_web -e @~/.vault/freeipa-sandbox.yaml
+#       -e fixtures_target_group=all -e hostauthz_user=hz_web -e @~/.vault/main.yaml
 #
 # Client side (run once per user x host combination):
 #   pilot vm-target run --name freeipa-client playbooks/test/fixtures/freeipa-hostauthz-user-setup.yml \

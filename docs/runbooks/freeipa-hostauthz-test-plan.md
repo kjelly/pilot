@@ -77,7 +77,7 @@ chmod 600 ~/.vault/ipa-identity-test.yaml
 
 ```bash
 ./pilot vm-target run --name freeipa-server playbooks/apply/freeipa-identity-apply.yml \
-    -e @~/.vault/freeipa-sandbox.yaml \
+    -e @~/.vault/main.yaml \
     -e @~/.vault/ipa-identity-test.yaml \
     --check --diff
 ```
@@ -93,7 +93,7 @@ chmod 600 ~/.vault/ipa-identity-test.yaml
 
 ```bash
 ./pilot vm-target run --name freeipa-server playbooks/apply/freeipa-identity-apply.yml \
-    -e @~/.vault/freeipa-sandbox.yaml \
+    -e @~/.vault/main.yaml \
     -e @~/.vault/ipa-identity-test.yaml
 ```
 
@@ -104,7 +104,7 @@ task + 4 個新增物件的首次建立）。
 
 ```bash
 ./pilot vm-target run --name freeipa-server playbooks/apply/freeipa-identity-apply.yml \
-    -e @~/.vault/freeipa-sandbox.yaml \
+    -e @~/.vault/main.yaml \
     -e @~/.vault/ipa-identity-test.yaml
 ```
 
@@ -120,7 +120,7 @@ gotcha。**
 
 ```bash
 ./pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-demo.yml \
-    -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml \
+    -e fixtures_target_group=all -e @~/.vault/main.yaml \
     --tags fixtures,t3,hbactest
 ```
 
@@ -182,7 +182,7 @@ changed，正常）。重點看兩個 assert：
 >
 > ```bash
 > ./pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-user-setup.yml \
->     -e fixtures_target_group=all -e hostauthz_user=hz_web -e @~/.vault/freeipa-sandbox.yaml
+>     -e fixtures_target_group=all -e hostauthz_user=hz_web -e @~/.vault/main.yaml
 > ```
 >
 > （只建裸帳號；群組/HBAC/sudo 的掛載仍由 roster 驅動的 identity-apply 負責。）
@@ -230,7 +230,7 @@ hz_db sudo      : DENIED (expected DENIED)
 
 ```bash
 ./pilot vm-target run --name freeipa-server playbooks/apply/freeipa-identity-apply.yml \
-    -e @~/.vault/freeipa-sandbox.yaml \
+    -e @~/.vault/main.yaml \
     -e @~/.vault/ipa-identity-test.yaml \
     -e ipa_hbac_disable_allow_all=true
 ```
@@ -272,7 +272,7 @@ hz_web login (wrong host) : DENIED (expected DENIED)  # 在 freeipa-client-2 上
 
 ```bash
 ./pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-demo.yml \
-    -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml --tags restore
+    -e fixtures_target_group=all -e @~/.vault/main.yaml --tags restore
 ```
 
 **預期結果**：`ok=4 changed=1 failed=0`（`Restore — re-enable the default
@@ -285,7 +285,7 @@ allow_all HBAC rule` 顯示 `changed`）。
 ```bash
 # server 端：刪掉 hz_web/hz_db、hz-web/hz-db、webhosts/dbhosts、hz-login-*、hz-*-systemctl
 ./pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-hostauthz-demo.yml \
-    -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml --tags cleanup
+    -e fixtures_target_group=all -e @~/.vault/main.yaml --tags cleanup
 
 # client 端：清掉 §5.1 產生的本機帳號 home 目錄
 ./pilot vm-target exec --name freeipa-client   -- sudo rm -rf /home/hz_web /home/hz_db

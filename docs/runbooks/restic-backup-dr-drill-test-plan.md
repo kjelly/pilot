@@ -36,22 +36,19 @@ go run ./cmd/pilot vm-target list
 **預期結果**：乾淨環境應該是空的（`no targets`）。若上次測試留了同名 VM，先
 `vm-target down` 清掉再重來，避免 IP/狀態殘留。
 
-確認 FreeIPA 沙盒密碼檔存在：
+確認 vault 密碼檔存在（從 `vault.example.all.yaml` 建立的一份）：
 
 ```bash
-ls -la ~/.vault/freeipa-sandbox.yaml
+ls -la ~/.vault/main.yaml
 ```
 
 沒有就建立（假密碼、repo 外）：
 
 ```bash
 mkdir -p ~/.vault && chmod 700 ~/.vault
-cat > ~/.vault/freeipa-sandbox.yaml <<'EOF'
----
-ipa_admin_password: SandboxAdm1n!Pass
-ipa_dm_password: SandboxDm1n!Pass
-EOF
-chmod 600 ~/.vault/freeipa-sandbox.yaml
+cp vault.example.all.yaml ~/.vault/main.yaml
+# 編輯 ~/.vault/main.yaml，把 ipa_admin_password 改成你自己的密碼（>= 8 字元）
+chmod 600 ~/.vault/main.yaml
 ```
 
 > ⚠️ 三台 VM 依序 `up`，不要平行——已知 `vm-target up` 平行呼叫有 state file
@@ -138,7 +135,7 @@ go run ./cmd/pilot vm-target list
 go run ./cmd/pilot vm-target run --name freeipa-server \
     playbooks/apply/freeipa-server-apply.yml \
     -e target_group=all -e ipa_server_ip=<freeipa-server IP> \
-    -e @~/.vault/freeipa-sandbox.yaml
+    -e @~/.vault/main.yaml
 
 go run ./cmd/pilot vm-target verify --name freeipa-server \
     docs/verification/freeipa-server.md --timeout 40
@@ -150,7 +147,7 @@ go run ./cmd/pilot vm-target verify --name freeipa-server \
 # server 端建立測試帳號 pilotuser + sudo 規則 pilot-all（跨 host 前置 fixture）
 go run ./cmd/pilot vm-target run --name freeipa-server \
     playbooks/test/fixtures/freeipa-client-fixtures.yml \
-    -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
+    -e fixtures_target_group=all -e @~/.vault/main.yaml
 ```
 
 ```bash
@@ -158,7 +155,7 @@ go run ./cmd/pilot vm-target run --name freeipa-server \
 go run ./cmd/pilot vm-target run --name freeipa-client \
     playbooks/apply/freeipa-client-apply.yml \
     -e target_group=all -e ipa_server_ip=<freeipa-server IP> \
-    -e ipa_verify_user=pilotuser -e @~/.vault/freeipa-sandbox.yaml
+    -e ipa_verify_user=pilotuser -e @~/.vault/main.yaml
 
 go run ./cmd/pilot vm-target exec --name freeipa-client -- true   # 暖 SSH 連線
 go run ./cmd/pilot vm-target verify --name freeipa-client \

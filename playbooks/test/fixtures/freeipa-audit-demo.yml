@@ -17,7 +17,7 @@
 #
 # Usage:
 #   pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-audit-demo.yml \
-#       -e fixtures_target_group=all -e @~/.vault/freeipa-sandbox.yaml
+#       -e fixtures_target_group=all -e @~/.vault/main.yaml
 ---
 # User creation goes through the canonical fixtures playbook (AGENTS.md §4.1):
 # user only — the restrictive audit-demo-ls-only rule below is the point of
@@ -49,7 +49,7 @@
           - ipa_admin_password is defined and ipa_admin_password | length >= 8
           - audit_demo_user_pass | length >= 8
         fail_msg: >-
-          Pass -e @~/.vault/freeipa-sandbox.yaml with ipa_admin_password
+          Pass -e @~/.vault/main.yaml with ipa_admin_password
           and -e audit_demo_user_password=<pass> (>=8 chars)
       tags: [always]
 

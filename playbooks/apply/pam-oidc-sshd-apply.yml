@@ -85,7 +85,7 @@
 
         - name: "Step 3: Clone kha7iq/kc-ssh-pam source on remote"
           ansible.builtin.git:
-            repo: https://github.com/kha7iq/kc-ssh-pam.git
+            repo: https://github.com/omidiyanto/keycloak-ssh-pam-module.git
             dest: "{{ remote_src_dir }}"
             version: main
             force: false
@@ -94,7 +94,6 @@
         - name: "Step 3a: Build PAM module and monitor daemon on remote"
           ansible.builtin.shell:
             cmd: "cd {{ remote_src_dir }} && make build"
-          become: false
           register: make_build
           changed_when: "'Build complete' in make_build.stdout or 'pam_keycloak_device.so' in make_build.stdout"
 

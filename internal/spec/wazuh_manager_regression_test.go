@@ -171,8 +171,8 @@ func TestRegression_WazuhManagerSpec(t *testing.T) {
 	if strings.Contains(applyRaw, "Missing required var") || strings.Contains(applyRaw, "Assert required variables") {
 		t.Errorf("wazuh-manager-apply.yml must not hard-require siem_forward_host; forwarding must be optional")
 	}
-	if !strings.Contains(applyRaw, `siem_forward_host: ""`) {
-		t.Errorf("wazuh-manager-apply.yml must default siem_forward_host to an empty string (optional var)")
+	if !strings.Contains(applyRaw, "siem_forward_host | default(") {
+		t.Errorf("wazuh-manager-apply.yml must use default() filter for siem_forward_host so group_vars can override")
 	}
 	if !strings.Contains(applyRaw, "siem_forwarding_enabled") {
 		t.Errorf("wazuh-manager-apply.yml must derive a siem_forwarding_enabled gate from siem_forward_host")

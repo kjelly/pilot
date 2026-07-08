@@ -33,13 +33,14 @@
     seaweedfs_check_file: /etc/pilot/seaweedfs-s3-check.txt
     seaweedfs_check_content: "pilot-s3-smoke-check"
     seaweedfs_test_bucket: pilot-s3-smoke
+    seaweedfs_extra_buckets: ["pilot-restic-backup"]
     # Optional path (on the target host) to a SeaweedFS S3 identity
     # config (s3.json) for production use. Left unset by default:
     # with no -s3.config, the S3 API allows anonymous access to any
     # bucket (SeaweedFS's documented default), which is what lets
     # spec rows C6/C7 probe the API without a secret in the spec
     # (see docs/verification/seaweedfs-s3.md §5).
-    seaweedfs_s3_config_path: ""
+    seaweedfs_s3_config_path: "{{ hostvars[inventory_hostname]['seaweedfs_s3_config_path'] | default('') }}"
     target_group: seaweedfs-s3
 
   pre_tasks:
@@ -82,6 +83,48 @@
         owner: 1000
         group: 1000
         mode: '0755'
+
+    - name: "SeaweedFS — ensure s3.json directory exists"
+      tags: [seaweedfs-s3]
+      ansible.builtin.file:
+        path: "{{ seaweedfs_s3_config_path | dirname }}"
+        state: directory
+        owner: 0
+        group: 0
+        mode: '0755'
+      when: seaweedfs_s3_config_path | default('') | length > 0
+
+    - name: "SeaweedFS — render s3.json credentials (spec C6, C7)"
+      tags: [seaweedfs-s3]
+      ansible.builtin.copy:
+        dest: "{{ seaweedfs_s3_config_path }}"
+        owner: 1000
+        group: 1000
+        mode: '0600'
+        content: |
+          {
+            "identities": [
+              {
+                "name": "pilot",
+                "credentials": [
+                  {
+                    "accessKey": "{{ restic_aws_access_key_id }}",
+                    "secretKey": "{{ restic_aws_secret_access_key }}"
+                  }
+                ],
+                "actions": [
+                  "Admin",
+                  "Read",
+                  "Write"
+                ]
+              }
+            ]
+          }
+      no_log: true
+      when: >-
+        seaweedfs_s3_config_path | default('') | length > 0
+        and restic_aws_access_key_id is defined
+        and restic_aws_secret_access_key is defined
 
     # Spec: docs/verification/seaweedfs-s3.md C6 (S3 PUT)
     # Fixed-content file the C6/C7 smoke-test rows read from / compare
@@ -187,4 +230,13 @@
         container: pilot-seaweedfs
         command: "sh -c \"echo 's3.bucket.create -name {{ seaweedfs_test_bucket }}' | weed shell\""
       when: seaweedfs_test_bucket not in seaweedfs_bucket_list.stdout
+      changed_when: true
+
+    - name: "SeaweedFS — create extra S3 buckets (idempotent)"
+      tags: [seaweedfs-s3]
+      community.docker.docker_container_exec:
+        container: pilot-seaweedfs
+        command: "sh -c \"echo 's3.bucket.create -name {{ item }}' | weed shell\""
+      loop: "{{ seaweedfs_extra_buckets | default([]) }}"
+      when: item not in seaweedfs_bucket_list.stdout
       changed_when: true
