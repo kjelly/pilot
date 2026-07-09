@@ -1,0 +1,16 @@
+---
+- name: Verification Spec — freeipa-server-replica (native EL9, HA 第二/後續台)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — FreeIPA 已設定完成（安裝產物存在）"
+      ansible.builtin.stat:
+        path: "/etc/ipa/default.conf"
+      become: true
+      tags: [C1]
+    - name: "C2 — 所有 IPA 服務健康（`ipactl status` 全 RUNNING → \xe8…"
+      ansible.builtin.command: "sudo ipactl status"
+      changed_when: false
+      tags: [C10, C11, C12, C13, C14, C15, C2, C3, C4, C5, C6, C7, C8, C9]
