@@ -32,11 +32,20 @@
 #   pam_d_path             default: /etc/pam.d/sshd
 #   config_dir             default: /etc/keycloak-ssh
 #   remote_src_dir         default: /tmp/kc-ssh-pam-src
+#
+# Stage gating (same convention as freeipa-server-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
 - name: Apply PAM OIDC for sshd (kha7iq/kc-ssh-pam)
   hosts: "{{ target_group | default('linux-servers') }}"
   become: true
   gather_facts: true
   vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
     backup_suffix: .kcsssh.bak
     pam_d_path: /etc/pam.d/sshd
     config_dir: /etc/keycloak-ssh
@@ -44,6 +53,36 @@
     kc_monitor_port: "7291"
     kc_pam_module: pam_keycloak_device.so
     kc_monitor_binary: keycloak-ssh-monitor
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
+          target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
+          且要跟這台機器所屬的環境 group 一致。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
   tasks:
     - name: "Step 0: Assert required variables"
       ansible.builtin.assert:

@@ -293,6 +293,68 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 `host_vars/log-server-1.yml`、`host_vars/wazuh-manager-1.yml`）；設計脈絡見
 `docs/verification/restic-backup.md` §1、`docs/runbooks/restic-backup.md`。
 
+### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
+
+`playbooks/apply/*.yml` 現在**全部 20 支**都有 `stage`/`confirm_staging`/
+`confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、
+`freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-server-replica`、
+`keycloak`、`keycloak-db`、`seaweedfs-s3`、`pam-oidc-sshd`、`log-server`、
+`audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
+`os-patch-sla`(用 `patch_stage`)、`prometheus`、`thanos-query`、
+`alertmanager`、`dashboard`、`log-shipping`)。`freeipa-server-replica` 與後五支
+可觀測性堆疊一樣是**還沒接進 `site.yml`**(前者是刻意的:加 HA replica 是
+day-2、opt-in 操作,不是每個部署都要的穩態角色,比照 `freeipa-identity` 的
+待遇;後五支則是一開始清點時漏掉,2026-07-09 一併補齊)——**不要因為一支
+playbook「還沒接進 site.yml」或「角色感覺不重要」就假設它可以不用 gate**,
+新增任何 apply playbook 一律要帶。
+
+寫或改任何一支 apply playbook,`pre_tasks` 除了既有的「staging/prod 需要
+confirm 旗標」assert,**必須**同時帶這一道 cross-check(新增同類 playbook 照抄,
+變數名依 playbook 自身命名替換):
+
+```yaml
+- name: "Gate: stage must match this host's inventory environment group"
+  ansible.builtin.assert:
+    that:
+      - not ('prod' in group_names and stage != 'prod')
+      - not ('staging' in group_names and stage != 'staging')
+      - not (stage in ['staging', 'prod'] and stage not in group_names)
+    fail_msg: >-
+      stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+      (group_names: {{ group_names }})。
+```
+
+背景:2026-07-09 發現 `-e stage=` 跟 inventory 的 `staging`/`prod` 環境 group
+(純粹給 `target_group` 篩選用的標籤)完全沒有連動——整個 repo 沒有任何
+playbook 讀 `group_names` 去反推 `stage`,導致「機器已經歸進 `staging` group,
+但指令沒帶 `-e stage=staging`」會靜默用 `sandbox` 的寬鬆門檻套用,沒有任何
+警告(等同繞過 confirm gate)。
+
+**寫 runbook / spec / 對外文件描述 stage 行為時,一律照下面這個講,不要簡化成
+「要套用就要指定 stage」——那是錯的**:
+
+1. 服務角色 group 有填這台機器,是永遠必要的條件,跟 stage 無關。
+2. 這台機器**沒**被歸進 `staging`/`prod` 環境 group → 不用帶 `-e stage=`,
+   預設 `sandbox` 直接套用。
+3. 這台機器被歸進 `staging`/`prod` → 必須帶對應的 `-e stage=` + confirm 旗標,
+   帶錯或漏帶都被上面的 assert 擋下來,不會套用。
+4. 新增一支全新的 apply playbook 時,**一律要帶這套 gate,沒有預設豁免**
+   (vars 區塊加 `stage: sandbox` / `confirm_staging: false` /
+   `confirm_prod: false` / `staging_attested_within_hours: 168`,pre_tasks
+   加上面三道 assert,放在該 playbook 既有的其他 gate/pre-flight 檢查**之
+   前**)。2026-07-09 之前先漏了 6 支、又漏了另外 5 支尚未接進 `site.yml`
+   的可觀測性角色,兩輪才補齊——教訓是「規則要對所有 `playbooks/apply/*.yml`
+   一致套用,不要因為某支還沒接進 site.yml、或角色看起來次要,就假設它可以
+   例外」。真的有理由不需要 gate 的 playbook(例如 `playbooks/verify/*.yml`
+   這種純驗證、不 mutate 任何東西的),在檔頭註解寫清楚原因,不要沉默省略。
+
+另外,`playbooks/site.yml` 開頭有一道獨立的安全閥(`hosts: localhost` 的
+`assert target_group is not defined`),擋下「全站入口誤帶 `-e target_group=`
+同時覆寫全部子 playbook 目標,讓『空 group 自動跳過』的保護失效」的事故——
+這道閥**不要**移除或繞過。新增 import 進 `site.yml` 的 playbook,若它的
+`hosts:` 也走 `target_group` 覆寫慣例,要確保它只在「單獨執行」時被 override,
+不依賴 site.yml 幫忙擋。
+
 ---
 
 ## 5. 寫 / 改 Go code 時
@@ -387,6 +449,8 @@ pilot 有三種輸出，**不要混用**：
 - ❌ 不要把密碼 / token 寫進 spec、playbook、runbook — 走 `-e @~/.vault/...yaml`
 - ❌ 不要擅自縮寫、拼錯或發明新變數名稱（例如把 `keycloak_db_password` 寫成 `keyclack_db_passwd`），必須完全依據 Spec 與既有變數命名。
 - ❌ 新增或移除會產生資料/設定檔的軟體角色時，不要漏改 `group_vars/restic-backup.example.yml` 的對應備份範例（見 §4.2）
+- ❌ 新增/改 stage gate 時，不要只做「confirm 旗標」檢查而漏掉「host 的環境 group 是否與 stage 一致」的 cross-check（見 §4.3）——否則機器已歸類進 `staging`/`prod`，但指令忘了帶 `-e stage=`，會靜默用 `sandbox` 門檻套用
+- ❌ 不要移除或繞過 `playbooks/site.yml` 開頭的 `target_group` 安全閥（見 §4.3）——它擋的是「全站入口誤帶 `-e target_group=` 同時覆寫全部子 playbook 目標」的事故
 
 
 ---
@@ -402,3 +466,7 @@ pilot 有三種輸出，**不要混用**：
 | 2026-07-02 | v1.4 | inventory 規則改為**來源中立**：新增 §0.1「目標 inventory」名詞與讀法對照（vm-target `show-inventory` / 真實主機 `ansible-inventory --graph`）；§1.1/§1.3/§2/§2.1/§3/§4/§6 一併泛化，同一套紀律適用測試 VM 與真實主機 | sre |
 | 2026-07-06 | v1.5 | 新增 §4.2：新增/移除會產生資料的軟體角色時，必須同步更新 `group_vars/restic-backup.example.yml` 的備份範圍範例（起因：`restic-backup` 上線後，既有角色清單容易在新增/移除軟體時漏改）；§6 補一條對應的 ❌ 提醒 | sre |
 | 2026-07-06 | v1.6 | §5.1 新增「state RMW 一律走 `Store.Mutate`」硬規則（起因：兩個 `vm-target up` 並行時 Load→改→Save 的 last-writer-wins 讓一台 VM 的 state 條目消失變孤兒 domain；`statefile` 已加跨行程 flock + `Mutate`，vmtarget `Up` 改名額預約制，dockertarget 同步） | sre |
+| 2026-07-09 | v1.7 | 新增 §4.3:stage gate 必須跟 inventory 的環境 group 對齊(起因:`-e stage=` 跟 `staging`/`prod` 環境 group 完全沒有連動,機器已歸類進 `staging` 卻沒帶 `-e stage=staging` 會靜默用 sandbox 門檻套用;8 支 apply playbook 已補上 `group_names` cross-check assert,`site.yml` 也加了 `target_group` 安全閥擋全站入口誤用);§6 補兩條對應的 ❌ 提醒 | sre |
+| 2026-07-09 | v1.8 | 補齊 v1.7 遺留的 6 支缺 gate playbook(`pam-oidc-sshd`、`log-server`、`audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`);同時發現另有 5 支尚未接進 `site.yml` 的可觀測性 playbook(`prometheus`/`thanos-query`/`alertmanager`/`dashboard`/`log-shipping`)也沒有 gate,記錄在 §4.3 留待下一輪 | sre |
+| 2026-07-09 | v1.9 | 補齊 v1.8 記錄的 5 支可觀測性 playbook——`playbooks/apply/*.yml` 現在**全部 19 支**都有 stage/confirm/cross-check gate,規則一致無例外;§4.3 第 4 點改寫為「新增 playbook 一律要帶,沒有預設豁免」 | sre |
+| 2026-07-09 | v1.10 | 新增第 20 支 apply playbook `freeipa-server-replica-apply.yml`(FreeIPA multi-master HA replica,對應 spec `docs/verification/freeipa-server-replica.md` v0.1 草稿、尚未實跑);§4.3 playbook 清點更新為 20 支,並記錄它刻意不接進 `site.yml`(day-2/opt-in,比照 `freeipa-identity`) | pilot |

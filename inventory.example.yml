@@ -6,7 +6,15 @@
 #  這份檔案被 committed 進 git 只是為了「文件化 inventory 的正確格式」。
 #  你的『真實 inventory』要另外開一份、且不要進 git(見最下方步驟)。
 #
-#  ── 三步上手 ────────────────────────────────────────────────────────────
+#  ── 想少手動同步一堆 group?有更簡單的路徑 ──────────────────────────────
+#   這份檔案要求你手動把每台機器塞進下面每個相關的 children: group——
+#   漏一個就是一次事故(見 AGENTS.md §0)。若不想手改這棵樹,改寫
+#   hosts.example.yml(host → roles 簡表),再用
+#     go run ./cmd/pilot inventory generate --in hosts.yml --out inventory.yml
+#   展開成這份檔案的格式;產生前會先檢查角色名稱合法、欄位沒漏填。
+#   兩種路徑產出的 inventory.yml 格式相容,選一種維護即可。
+#
+#  ── 手改這份檔案的三步上手 ──────────────────────────────────────────────
 #   1. 複製一份給自己:
 #        cp inventory.example.yml inventory.yml
 #   2. 打開 inventory.yml,把每個 "<FILL-ME>" 換成你的真實值(照右邊註解填)。
@@ -24,6 +32,8 @@
 #   * 這份檔案「只放主機 + 歸屬」。角色的『設定值』(realm、Keycloak URL、
 #     DNS 位址…)不寫這裡,放到 group_vars/<group>.yml——見 group_vars/
 #     *.example.yml 與 DELIVERY.md。這樣 inventory 保持精簡、更難填錯。
+#   * 每個 group 對應哪支 playbook、有什麼前置條件,見 DELIVERY.md 的
+#     「Playbook 對照表」——這裡的註解只留最短的一行提示,不重複寫一次。
 # ============================================================================
 
 all:
@@ -55,9 +65,7 @@ all:
   #    用不到的整段刪掉。
   children:
 
-    # -- 身份 / AAA(FreeIPA)-------------------------------------------------
-    #    server + client 都放進 freeipa 父群組,好讓 realm 設定
-    #    (group_vars/freeipa.yml)兩邊共用「一份」、不會各填一份而不同步。
+    # -- 身份 / AAA(FreeIPA)。server/client/replica 差異見 DELIVERY.md ------
     freeipa:
       children:
         freeipa-server:        # freeipa-server-apply.yml 的預設目標
@@ -67,26 +75,21 @@ all:
           hosts:
             web-1:
             web-2:
+        freeipa-server-replica:  # v0.1 草稿未實跑,見 docs/verification/freeipa-server-replica.md §5
+          hosts: {}              # 例:第二台 → hosts: { ipa-2: }
 
     # -- 核心基礎服務(core-infra-provider-apply.yml,以 infra_role 選角色)--
     dns:                       # 跑 -e infra_role=dns 時作用的機器
       hosts: {}                # 例:讓 ipa-1 兼當 DNS → 改成  hosts: { ipa-1: }
     ntp:                       # 跑 -e infra_role=ntp 時作用的機器
       hosts: {}
-    docker:                  # docker 引擎(standalone)；core-infra-provider-apply.yml -e infra_role=docker
+    docker:                  # docker 引擎(standalone)；-e infra_role=docker
       hosts: {}              # 例:讓 web-1 兼當 docker host → 改成  hosts: { web-1: }
     keycloak:                  # keycloak-apply.yml 的預設目標(IdP)
       hosts: {}
     keycloak-db:               # keycloak-db-apply.yml 的預設目標(PostgreSQL)
       hosts: {}
-    infra-provider:            # 整包基礎服務的聚合 group(方便一次 target)
-      # 把主機直接放這裡(而非分散到 dns/ntp/docker),再用 target_group 一次 target 全部:
-      #   ansible-playbook -i inventory.yml playbooks/apply/core-infra-provider-apply.yml       #       -e infra_role=dns  -e target_group=infra-provider   # 所有 infra 主機跑 dns
-      #   ansible-playbook -i inventory.yml playbooks/apply/core-infra-provider-apply.yml       #       -e infra_role=ntp  -e target_group=infra-provider   # 所有 infra 主機跑 ntp
-      #   ansible-playbook -i inventory.yml playbooks/apply/core-infra-provider-apply.yml       #       -e infra_role=docker -e target_group=infra-provider # 所有 infra 主機跑 docker
-      # 也可以只 target 單一 group(不需要 target_group override):
-      #   ansible-playbook -i inventory.yml playbooks/apply/core-infra-provider-apply.yml -e infra_role=dns
-      #   (預設 target = infra_role 名稱的 group,即 dns)
+    infra-provider:            # 上面 5 個的聚合 group,方便 -e target_group=infra-provider 一次 target 全部
       children:
         dns:
         ntp:
@@ -101,16 +104,10 @@ all:
         web-2:
 
     # -- 中央稽核日誌接收端(log-server-apply.yml)---------------------------
-    #    收其他主機轉送過來的 auth/authpriv 與 auditd(local6)日誌。
-    #    想在這台上加「轉送一份到 dashboard 的 Loki」時,套用
-    #    log-shipping-apply.yml 即可——它預設就是打同一個 log-server
-    #    group,不用另開 inventory group(見 group_vars/log-shipping.example.yml）。
     log-server:                 # log-server-apply.yml 的預設目標
       hosts: {}                 # 例:專門一台接收機 → hosts: { siem-1: }
 
     # -- 主機稽核(auditd)+ 轉送到 log-server(audit-log-forwarding-apply.yml)
-    #    siem_forward_host 選填(見 group_vars/audit-log-forwarding.example.yml)
-    #    ——log-server 還沒建好也能先套用,只是先不轉送,只裝本機稽核規則。
     audit-log-forwarding:
       hosts:
         ipa-1:
@@ -118,18 +115,11 @@ all:
         web-2:
 
     # -- Wazuh 中央伺服器(FIM/who-data 告警引擎 + CVE 弱點掃描)-------------
-    #    wazuh-manager-apply.yml;Docker 部署(官方 wazuh-docker single-node
-    #    三容器),主機要先過 docker preflight(core-infra-provider-apply.yml
-    #    -e infra_role=docker)。需要至少 4 vCPU/8GB RAM/50GB 磁碟,見
-    #    group_vars/wazuh-manager.example.yml 的資源需求註記。
-    #    siem_forward_host 選填,同上,可跟 log-server 共用同一個 IP。
+    #    需先過 docker preflight,資源需求見 docs/runbooks/wazuh-manager.md §5。
     wazuh-manager:              # wazuh-manager-apply.yml 的預設目標
       hosts: {}                 # 例:專門一台 → hosts: { wazuh-1: }
 
     # -- Wazuh agent:檔案完整性監控(FIM)+ auditd who-data ------------------
-    #    wazuh-fim-apply.yml;wazuh_manager_host 選填(見
-    #    group_vars/wazuh-fim.example.yml)——wazuh-manager 還沒建好也能先
-    #    套用,只是先不註冊,只裝本機 FIM 規則。
     wazuh-fim:
       hosts:
         ipa-1:
@@ -137,15 +127,11 @@ all:
         web-2:
 
     # -- S3 相容物件儲存(SeaweedFS,restic-backup 預設備份目的地)-----------
-    #    seaweedfs-s3-apply.yml 的預設目標;需要先套用 docker(core-infra-provider
-    #    -e infra_role=docker)。
     seaweedfs-s3:
       hosts: {}                 # 例:專門一台 → hosts: { s3-1: }
 
     # -- 跨主機通用 restic 備份到 S3(restic-backup-apply.yml)---------------
-    #    restic_s3_target_host 指向上面的 seaweedfs-s3(或改覆寫成外部 S3,
-    #    見 group_vars/restic-backup.example.yml);逐主機備份路徑用
-    #    host_vars 覆寫,比照 wazuh-fim 的 pattern。
+    #    見 docs/runbooks/restic-backup.md §5(SeaweedFS 相容性注意事項)。
     restic-backup:
       hosts:
         ipa-1:
@@ -153,34 +139,18 @@ all:
         web-2:
 
     # -- 指標:每站 Prometheus + Thanos Sidecar(prometheus-apply.yml)-------
-    #    每個機房/站台各放一台;thanos_s3_target_host 指向上面的
-    #    seaweedfs-s3、bucket 要跟 thanos-query 那台用同一個(見
-    #    group_vars/prometheus.example.yml)。prometheus_site_label 必填、
-    #    逐主機用 host_vars 覆寫成各站的站名。
     prometheus:
       hosts: {}                 # 例:兩站 → hosts: { site-a: , site-b: }
 
-    # -- 指標:中央 Thanos Query + Store Gateway + Compactor(全局查詢)------
-    #    thanos-query-apply.yml 的預設目標;只需一台。套用時會自動讀上面
-    #    `prometheus` group 組出 --store 清單,不用手動維護站台 IP 清單。
+    # -- 指標:中央 Thanos Query + Store Gateway + Compactor,只需一台 ------
     thanos-query:
       hosts: {}                 # 例:專門一台 → hosts: { metrics-central-1: }
 
-    # -- 告警:中央 Alertmanager(收各站 Prometheus 推送的告警)----------
-    #    alertmanager-apply.yml 的預設目標;只需一台(典型部署跟上面
-    #    thanos-query 共置同一台主機:同一 host 同時屬於 thanos-query +
-    #    alertmanager 兩個 group,共用 pilot-metrics docker network)。
-    #    各站 prometheus.example.yml 的 alertmanager_target_host 指向這台
-    #    主機的 IP;prometheus.yml 的 alerting.alertmanagers 透過
-    #    /etc/hosts 的 `alertmanager-backend` 別名打進來,跟 thanos-query
-    #    / dashboard 的同樣 alias 慣例。
+    # -- 告警:中央 Alertmanager,只需一台(典型跟 thanos-query 共置)--------
     alertmanager:
       hosts: {}                 # 例:跟 thanos-query 同台 → hosts: { metrics-central-1: }
 
-    # -- 觀測畫面:Grafana + Loki(dashboard-apply.yml)----------------------
-    #    只需一台;thanos_query_target_host 指向上面的 thanos-query,
-    #    見 group_vars/dashboard.example.yml。log-server 主機套用
-    #    log-shipping-apply.yml 後,Promtail 會把日誌轉送進這台的 Loki。
+    # -- 觀測畫面:Grafana + Loki(dashboard-apply.yml),只需一台 -----------
     dashboard:
       hosts: {}                 # 例:專門一台 → hosts: { dashboard-1: }
 

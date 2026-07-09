@@ -110,6 +110,19 @@
         fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
       tags: [always]
 
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
+          target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
+          且要跟這台機器所屬的環境 group 一致。
+      tags: [always]
+
     - name: "Gate: prod requires recent staging attestation"
       ansible.builtin.assert:
         that:
@@ -264,11 +277,21 @@
       when: not ansible_check_mode
       tags: [freeipa-client, C7]
 
-    - name: "FreeIPA client — ensure SSSD offers the sudo service"
+    # Deliberately does NOT list "sudo" here. SSSD >= 2.3 socket-activates the
+    # sudo responder (sssd-sudo.socket, enabled by the package by default) —
+    # putting "sudo" in `services=` too is a documented misconfiguration:
+    # `sssd_check_socket_activated_responders` refuses to start the socket
+    # ("Misconfiguration found for the sudo responder ... still mentioned in
+    # the services' line"), the responder never comes up, and `sudo -l`
+    # silently reports "not allowed" for every user — no error, just a wrong
+    # answer. Confirmed live on Ubuntu 24.04 (sssd 2.9.4): adding "sudo" here
+    # broke C8 end-to-end; removing it (socket activation handles the rest)
+    # fixed it with no other change. Only nss/pam/ssh need to be explicit.
+    - name: "FreeIPA client — ensure SSSD's services line does not fight socket-activated sudo"
       ansible.builtin.lineinfile:
         path: /etc/sssd/sssd.conf
         regexp: '^services\s*='
-        line: "services = nss, pam, ssh, sudo"
+        line: "services = nss, pam, ssh"
         state: present
         create: false
       register: ipa_sssd_services
