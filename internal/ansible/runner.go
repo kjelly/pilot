@@ -26,6 +26,7 @@ type Runner struct {
 	Timeout      time.Duration // per-run timeout
 	StdoutWriter io.Writer     // if set, stdout is streamed in real-time here
 	StderrWriter io.Writer     // if set, stderr is streamed in real-time here
+	Stdin        io.Reader     // if set, connects to ansible-playbook's stdin (needed for --ask-vault-pass / --ask-become-pass)
 }
 
 func NewRunner(defaults ...string) *Runner {
@@ -46,6 +47,9 @@ func (r *Runner) Run(ctx context.Context, args ...string) (*Result, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(c, r.Binary, allArgs...)
+	if r.Stdin != nil {
+		cmd.Stdin = r.Stdin
+	}
 	var stdout, stderr bytes.Buffer
 	if r.StdoutWriter != nil {
 		cmd.Stdout = io.MultiWriter(&stdout, r.StdoutWriter)
