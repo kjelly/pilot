@@ -1,0 +1,20 @@
+# Keep build context small and never bake a dev checkout's real,
+# gitignored secrets/state into an image (mirrors .gitignore).
+.git/
+dist/
+.crush/
+.claude/
+.verification/
+*.vault
+*vault-password*
+.ansible/
+inventory.yml
+inventory*.yaml
+inventories/
+group_vars/*.yml
+!group_vars/*.example.yml
+group_vars/dns/*.yaml
+!group_vars/dns/zones.example.yaml
+*.db
+*.db-shm
+*.db-wal

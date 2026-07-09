@@ -1,0 +1,56 @@
+---
+# ============================================================================
+#  hosts.example.yml —— inventory.yml 的「簡表」來源(可選,取代手改 inventory）
+# ============================================================================
+#
+#  這份檔案不是 inventory,是拿來產生 inventory 的簡表。你只維護「每台機器
+#  是什麼」(roles),不用手動同步 all.hosts 跟一堆 children: group ——
+#  少填一個 group 曾經是一次事故的根因(見 AGENTS.md §0)。
+#
+#  ── 三步上手 ────────────────────────────────────────────────────────────
+#   1. 複製一份給自己:
+#        cp hosts.example.yml hosts.yml
+#   2. 打開 hosts.yml,把每個 "<FILL-ME>" 換成真實值,`roles:` 填這台機器
+#      要跑的角色(合法值看 `go run ./cmd/pilot inventory roles`)。
+#   3. 展開成正式 inventory,展開前會先做跟這裡一樣的檢查(角色名稱合法、
+#      ansible_host 沒漏填、FILL-ME 沒殘留):
+#        go run ./cmd/pilot inventory generate --in hosts.yml --out inventory.yml
+#      只想先檢查、不產生檔案:
+#        go run ./cmd/pilot inventory lint --in hosts.yml
+#
+#  ── 跟手改 inventory.yml 的關係 ────────────────────────────────────────
+#   * 這是可選的替代路徑。仍然想手改 inventory.yml(不經過這份簡表)完全
+#     可以 —— 見 inventory.example.yml。兩者產出的檔案格式相容。
+#   * 每個角色 group 實際對應哪支 playbook、有什麼前置條件,見 DELIVERY.md
+#     的「Playbook 對照表」,這裡不重複寫一次。
+#   * 角色的『設定值』(realm、Keycloak URL…)不寫在這裡,一樣放
+#     group_vars/<group>.yml —— 見 DELIVERY.md 步驟 1.5。
+#   * 環境標籤(`env:`)對應 inventory 的 `prod`/`staging`/`sandbox` group,
+#     純粹給 `-e target_group='dns:&prod'` 這種交集查詢用,不填就都不歸類
+#     (預設 sandbox 行為,見 DELIVERY.md「上 staging / production 前」)。
+# ============================================================================
+
+vars:
+  ansible_user: "<FILL-ME>"                      # SSH 登入帳號,例 ubuntu
+  ansible_ssh_private_key_file: "<FILL-ME>"      # SSH 私鑰路徑,例 ~/.ssh/id_ed25519
+
+hosts:
+  # 範例:一台 FreeIPA 身份伺服器,兼 DNS/NTP。
+  ipa-1:
+    ansible_host: "<FILL-ME>"        # 可路由 IP,例 10.0.0.10
+    ipa_server_ip: "<FILL-ME>"       # FreeIPA 專用:同上那個 IP;沒裝 freeipa-server 就刪這行
+    roles: [freeipa-server, dns, ntp, audit-log-forwarding, wazuh-fim, restic-backup]
+    env: prod
+
+  # 範例:兩台一般 Linux server。
+  web-1:
+    ansible_host: "<FILL-ME>"        # 例 10.0.0.21
+    roles: [freeipa-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]
+    env: prod
+  web-2:
+    ansible_host: "<FILL-ME>"        # 例 10.0.0.22
+    roles: [freeipa-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]
+    env: staging
+
+  # 需要更多機器就照上面格式往下加;key(短名)自己取,全域唯一即可。
+  # 用不到某個角色就別把它列進 roles —— 不用像 inventory.yml 那樣整段刪。

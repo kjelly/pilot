@@ -1,0 +1,109 @@
+# Control-node image for `pilot` — bundles the compiled `pilot` binary
+# together with ansible-core, the Galaxy collections the playbooks in this
+# repo depend on, and the playbook/inventory templates themselves.
+#
+# Why this exists:
+#   `pilot` is a thin Go wrapper: apply/verify ultimately shell out to
+#   `ansible-playbook`/`ansible`/`ansible-inventory` (see
+#   internal/ansible/runner.go), and the playbooks under playbooks/ use
+#   ansible.posix / community.docker / community.postgresql modules.
+#   Ansible-core does not run as a controller on native Windows, so a
+#   plain cross-compiled `pilot.exe` still leaves the user to install
+#   Python + ansible-core + collections by hand. This image collapses
+#   all of that into one artifact that runs identically via
+#   `docker run` on Windows (Docker Desktop) and Linux.
+#
+# What this image is FOR:
+#   Running `pilot`/`ansible-playbook` against real hosts or an
+#   already-provisioned target over SSH — i.e. playbooks/apply/*.yml,
+#   playbooks/verify/*.yml, playbooks/site.yml.
+#
+# What this image is NOT for:
+#   `pilot vm-target` (needs libvirt/KVM on the host) and
+#   `pilot docker-target` (needs a Docker daemon) are disposable-VM/
+#   -container test tooling for developing *this repo* — they are out
+#   of scope here. Use pilot compiled natively for that, on a Linux dev
+#   box. See images/Dockerfile.pilot-target-ubuntu for the *target*
+#   side of that workflow.
+#
+# Build:
+#   docker build -t pilot-cli:latest -f images/Dockerfile.pilot-cli .
+#
+# Use (mount your own inventory/vault/SSH key — none of that is baked
+# into the image). No ENTRYPOINT is set, so the first argument after the
+# image name is run directly — either `ansible-playbook`/`ansible-inventory`/
+# `ansible-vault` (from ansible-core) or `pilot` itself:
+#   docker run --rm -it \
+#       -v "$HOME/.ssh:/root/.ssh:ro" \
+#       -v "$(pwd)/inventory.yml:/pilot/inventory.yml:ro" \
+#       -v "$HOME/.vault:/root/.vault:ro" \
+#       pilot-cli:latest \
+#       ansible-playbook -i inventory.yml playbooks/apply/<role>-apply.yml \
+#           -e target_group=<group> -e @/root/.vault/<secrets>.yaml --check --diff
+#
+#   # or drive it through the pilot CLI itself:
+#   docker run --rm -it -v "$HOME/.ssh:/root/.ssh:ro" pilot-cli:latest \
+#       pilot spec docs/verification/<role>.md --lint
+
+# ---------------------------------------------------------------------------
+# Stage 1: build the pilot binary (static, no CGO, stripped).
+# ---------------------------------------------------------------------------
+FROM golang:1.26-bookworm AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY images/ images/
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/pilot ./cmd/pilot
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime — Python + ansible-core + the collections the playbooks
+# in this repo use (ansible.posix, community.docker, community.postgresql),
+# plus the pilot binary and the playbook/inventory templates.
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim-bookworm AS runtime
+
+# openssh-client / sshpass: reaching real hosts over SSH.
+# git: ansible.builtin.git tasks (e.g. FreeIPA/Keycloak fetch steps).
+# ca-certificates: HTTPS (get_url/uri tasks, pip, ansible-galaxy).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-client \
+        sshpass \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# docker: python SDK backing community.docker.*.
+# psycopg2-binary: backing community.postgresql.*.
+RUN pip install --no-cache-dir \
+        ansible-core \
+        docker \
+        psycopg2-binary \
+    && ansible-galaxy collection install \
+        ansible.posix \
+        community.docker \
+        community.postgresql
+
+COPY --from=builder /out/pilot /usr/local/bin/pilot
+
+WORKDIR /pilot
+COPY playbooks/ playbooks/
+COPY group_vars/ group_vars/
+COPY ansible.cfg ansible.cfg
+COPY inventory.example.yml inventory.example.yml
+COPY hosts.example.yml hosts.example.yml
+
+# No ENTRYPOINT: this image bundles two toolchains callers need to invoke
+# directly — `pilot ...` (Go binary) and `ansible-playbook`/`ansible-inventory`/
+# `ansible-vault` (from ansible-core, on PATH). An `ENTRYPOINT ["pilot"]` would
+# swallow the first argument of any `docker run <image> ansible-playbook ...`
+# invocation and turn it into `pilot ansible-playbook ...`, which pilot doesn't
+# recognize. Leaving ENTRYPOINT unset lets `docker run <image> <anything on
+# PATH> [args...]` work as-is; CMD only supplies a default when no command is
+# given.
+CMD ["pilot", "--help"]
