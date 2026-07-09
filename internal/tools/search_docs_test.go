@@ -70,7 +70,7 @@ func TestSearchDocsTool_ReturnsJSONWithStructuredFields(t *testing.T) {
 	if err := idx.Build(llmTestSampleChunks()); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	tool := NewSearchDocsTool(idx, nil, nil)
+	tool := NewSearchDocsTool(idx)
 
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"enabled service","source":"modules","limit":3}`))
 	if err != nil {
@@ -113,7 +113,7 @@ func TestSearchDocsTool_PrefixMatchOnModule(t *testing.T) {
 	if err := idx.Build(llmTestSampleChunks()); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	tool := NewSearchDocsTool(idx, nil, nil)
+	tool := NewSearchDocsTool(idx)
 
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"servic","source":"modules","limit":2}`))
 	if err != nil {
@@ -139,7 +139,7 @@ func TestSearchDocsTool_ModuleFilter(t *testing.T) {
 	if err := idx.Build(llmTestSampleChunks()); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	tool := NewSearchDocsTool(idx, nil, nil)
+	tool := NewSearchDocsTool(idx)
 
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"anything","module":"ansible.builtin.copy","source":"modules","limit":3}`))
 	if err != nil {
@@ -176,7 +176,7 @@ func TestSearchDocsTool_BodyTruncated(t *testing.T) {
 	if err := idx.Build(chunks); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	tool := NewSearchDocsTool(idx, nil, nil)
+	tool := NewSearchDocsTool(idx)
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"dest","source":"modules","limit":1}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -194,7 +194,7 @@ func TestSearchDocsTool_BodyTruncated(t *testing.T) {
 }
 
 func TestSearchDocsTool_NoIndexBuilt_Graceful(t *testing.T) {
-	tool := NewSearchDocsTool(nil, nil, nil)
+	tool := NewSearchDocsTool(nil)
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"x","source":"modules"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -212,7 +212,7 @@ func TestSearchDocsTool_EmptyQuery_Rejected(t *testing.T) {
 	if err := idx.Build(llmTestSampleChunks()); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	tool := NewSearchDocsTool(idx, nil, nil)
+	tool := NewSearchDocsTool(idx)
 	_, err := tool.Execute(context.Background(), json.RawMessage(`{"query":""}`))
 	if err == nil {
 		t.Fatal("expected error for empty query")
@@ -241,7 +241,7 @@ func TestSearchDocsTool_StripsSearchTextTail(t *testing.T) {
 	if err := idx.Build(chunks); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	tool := NewSearchDocsTool(idx, nil, nil)
+	tool := NewSearchDocsTool(idx)
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"dest","source":"modules","limit":1}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -282,7 +282,7 @@ func TestSearchDocsTool_PopulatesRelatedExampleAndSuggestedNext(t *testing.T) {
 	if err := idx.Build(chunks); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	tool := NewSearchDocsTool(idx, nil, nil)
+	tool := NewSearchDocsTool(idx)
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"restart service","source":"modules","limit":3}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -320,7 +320,7 @@ func TestSearchDocsTool_LimitClamped(t *testing.T) {
 	if err := idx.Build(llmTestSampleChunks()); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	tool := NewSearchDocsTool(idx, nil, nil)
+	tool := NewSearchDocsTool(idx)
 	// Ask for 100 — should be clamped to 20.
 	res, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"service","source":"modules","limit":100}`))
 	if err != nil {

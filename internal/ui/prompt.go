@@ -8,36 +8,23 @@ import (
 	"sync"
 
 	"github.com/anomalyco/pilot/internal/agent"
-	"github.com/anomalyco/pilot/internal/ui/tui"
 	"github.com/manifoldco/promptui"
 )
 
 type Approver = agent.Approver
 type Decision = agent.Decision
 
-// TUIProgram is the subset of tui.Program the agent loop interacts with.
-// It's re-aliased here so callers can use ui.TUIProgram without importing tui.
-type TUIProgram = tui.Program
-
-// ConsoleApprover is the default human-in-the-loop approver. It picks
-// between the TUI (when a TTY is attached) and promptui (fallback).
+// ConsoleApprover is the default human-in-the-loop approver, backed by
+// promptui.
 type ConsoleApprover struct {
 	AutoApprove string // "never" | "low" | "medium" | "high"
 	NoInput     bool   // when true, never prompt (used by --check / --dry-run)
-	TUI         *tui.Program
 	mu          sync.Mutex
 	approveAll  bool
 }
 
 func NewConsoleApprover(autoApprove string) *ConsoleApprover {
 	return &ConsoleApprover{AutoApprove: autoApprove}
-}
-
-// WithTUI attaches a TUI Program to this approver. When set, Ask() will
-// route proposals through the TUI modal instead of the promptui dialog.
-func (c *ConsoleApprover) WithTUI(p *tui.Program) *ConsoleApprover {
-	c.TUI = p
-	return c
 }
 
 func (c *ConsoleApprover) Ask(p *agent.Proposal) Decision {
@@ -65,16 +52,6 @@ func (c *ConsoleApprover) Ask(p *agent.Proposal) Decision {
 	if c.approveAll {
 		fmt.Fprintf(os.Stderr, "[batch-approve] %s on %s\n", p.Tool, p.Host)
 		return agent.DecisionApproved
-	}
-
-	// Route to TUI if attached
-	if c.TUI != nil {
-		d := c.TUI.RequestApproval(p)
-		if d == agent.DecisionApprovedAll {
-			c.approveAll = true
-			return agent.DecisionApproved
-		}
-		return d
 	}
 
 	for {
@@ -289,10 +266,6 @@ func wrap(s string, w int) []string {
 func (c *ConsoleApprover) AskRollback(question string) bool {
 	if c.NoInput {
 		return false
-	}
-	if c.TUI != nil {
-		ans := c.TUI.AskUser(question, []string{"yes", "no"})
-		return ans == "yes"
 	}
 
 	prompt := promptui.Prompt{

@@ -185,12 +185,11 @@ func runApplyGenerated(playbook, inventory, limit string) error {
 		return fmt.Errorf("--apply requires --inventory/-i")
 	}
 	ctx := context.Background()
-	res, err := setupRunWithOpts(ctx, app.Options{NoTUI: true, Banner: false})
+	res, err := setupRunWithOpts(ctx, app.Options{Banner: false})
 	if err != nil {
 		return err
 	}
 	defer res.Store.Close()
-	defer shutdownTUI(res.TUI)
 
 	args := []string{playbook, "-i", inventory}
 	if limit != "" {

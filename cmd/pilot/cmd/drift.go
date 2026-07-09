@@ -45,7 +45,6 @@ func runDrift(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 	appOpts := app.Options{
-		NoTUI:  true,
 		Banner: false,
 	}
 

@@ -17,7 +17,6 @@ import (
 	"github.com/anomalyco/pilot/internal/dockertarget"
 	"github.com/anomalyco/pilot/internal/logx"
 	"github.com/anomalyco/pilot/internal/store"
-	"github.com/anomalyco/pilot/internal/ui/tui"
 )
 
 var (
@@ -28,8 +27,6 @@ var (
 	autoOK    string
 	dataDir   string
 	logLevel  string // --log-level (persistent); default from $PILOT_LOG_LEVEL or "warn"
-	noTUI     bool   // deprecated
-	useTUI    bool   // --tui (persistent flag, default false)
 
 	// index management
 	runNoIndex        bool
@@ -73,18 +70,6 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&autoOK, "auto-approve", "", "auto-approve proposals by risk: low|medium|never")
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "data directory for proposals, db, generated playbooks")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "diagnostic log level: debug|info|warn|error (default warn; also $PILOT_LOG_LEVEL)")
-	// TUI defaults to OFF. Use --tui to opt in. The flag respects TTY:
-	//   --tui + TTY       → Bubbletea TUI
-	//   --tui + no TTY    → falls back to promptui (with a one-line notice)
-	//   (no --tui)        → promptui directly, no notice
-	// --no-tui is kept as a deprecated alias for one release.
-	rootCmd.PersistentFlags().BoolVar(&useTUI, "tui", false, "enable the interactive TUI (default: off; requires a TTY)")
-	rootCmd.PersistentFlags().BoolVar(&noTUI, "no-tui", false, "DEPRECATED alias for omitting --tui (kept for backward compat)")
-	if noTUI {
-		// backward compat: --no-tui=true suppresses --tui.
-		// We just leave useTUI=false so this branch is a no-op.
-		_ = noTUI
-	}
 
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(chatCmd)
@@ -92,7 +77,6 @@ func init() {
 	rootCmd.AddCommand(modelsCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(indexDocsCmd)
-	rootCmd.AddCommand(indexPlaybooksCmd)
 	rootCmd.AddCommand(searchDocsCmd)
 	rootCmd.AddCommand(listRunsCmd)
 	rootCmd.AddCommand(showPlanCmd)
@@ -156,7 +140,6 @@ type setupResult = app.App
 // that need to override the default environment policy.
 func setupRunWithOpts(ctx context.Context, opt app.Options) (*setupResult, error) {
 	cfg := loadConfig()
-	opt.NoTUI = !useTUI
 	opt.Banner = true
 	return app.New(ctx, cfg, opt)
 }
@@ -280,11 +263,4 @@ func newAgentLoopWithDefaults(
 	// System prompt override: App.NewLoop reads from Cfg.SystemPrompt
 	// which we mutated via appendSessionDefaults in chat.go.
 	return res.NewLoopWithDefaults("", streamWriter, defaultInventory, defaultLimit)
-}
-
-// shutdownTUI is a helper to call from main cleanup.
-func shutdownTUI(tp *tui.Program) {
-	if tp != nil {
-		tp.Shutdown()
-	}
 }

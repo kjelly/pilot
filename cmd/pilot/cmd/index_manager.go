@@ -3,29 +3,16 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/app"
 	"github.com/anomalyco/pilot/internal/docs"
-	"github.com/anomalyco/pilot/internal/ollama"
-	"github.com/anomalyco/pilot/internal/store"
 )
-
-// playbookEmbedMod is the embedding model used for the playbook index
-// (vector cosine similarity). The docs index no longer uses embeddings.
-var playbookEmbedMod = "nomic-embed-text"
 
 // ensureDocsIndex makes sure the module index is fresh. If the
 // installed ansible-core version (or the module list) has changed,
 // rebuild. Returns true if a rebuild was performed.
 func ensureDocsIndex(ctx context.Context, dataDir string) (rebuilt bool, err error) {
-	if err := ensurePlaybooksIndex(ctx, dataDir); err != nil {
-		slog.Warn("ensurePlaybooksIndex failed", "err", err)
-	}
-
 	ver, err := docs.AnsibleVersion(ctx)
 	if err != nil {
 		// ansible not on PATH — skip silently
@@ -86,125 +73,5 @@ func runIndexDocsSubcommand(ctx context.Context, dataDir, ansibleVersion string,
 		_ = os.Remove(legacy)
 	}
 	fmt.Fprintf(os.Stderr, "  ✓ Index rebuilt in %s\n", time.Since(start).Round(time.Second))
-	return nil
-}
-
-// mustEmbedClient returns an Ollama client configured for embedding
-// (used only by the playbook index path).
-func mustEmbedClient(ctx context.Context, dataDir string) docs.Embedder {
-	cfg := loadConfig()
-	client := newEmbedderClient(cfg.OllamaURL, cfg.Model, playbookEmbedMod)
-	st, err := store.Open(filepath.Join(dataDir, "history.db"))
-	if err == nil {
-		return app.NewCachedEmbedder(client, st)
-	}
-	return client
-}
-
-// newEmbedderClient is a small constructor used by the playbook path.
-func newEmbedderClient(baseURL, model, embedModel string) *ollama.Client {
-	c := ollama.NewClient(baseURL, model)
-	c.SetEmbeddingModel(embedModel)
-	return c
-}
-
-// ensurePlaybooksIndex performs incremental RAG updates for playbooks.
-// It discovers all playbooks in `./playbooks` and `~/.local/share/pilot/playbooks`,
-// parses and embeds any playbooks that are new or have modified mtime or size.
-func ensurePlaybooksIndex(ctx context.Context, dataDir string) error {
-	dirs := []string{"./playbooks", filepath.Join(dataDir, "playbooks")}
-	files, err := docs.DiscoverPlaybooks(dirs, true)
-	if err != nil {
-		return err
-	}
-	if len(files) == 0 {
-		return nil
-	}
-
-	indexPath := docs.PathFor(dataDir, docs.SourcePlaybook)
-	idx := docs.NewIndex()
-	_ = idx.Load(indexPath) // Load existing index if present
-
-	// Create a map of existing indexed file path -> metadata for quick checks.
-	indexedFiles := make(map[string]struct {
-		size  int64
-		mtime int64
-	})
-
-	for _, c := range idx.Chunks() {
-		if c.Source == docs.SourcePlaybook {
-			var sizeVal, mtimeVal int64
-			if sz, ok := c.Metadata["size"].(int); ok {
-				sizeVal = int64(sz)
-			} else if sz, ok := c.Metadata["size"].(float64); ok {
-				sizeVal = int64(sz)
-			}
-			if mt, ok := c.Metadata["mtime"].(int); ok {
-				mtimeVal = int64(mt)
-			} else if mt, ok := c.Metadata["mtime"].(float64); ok {
-				mtimeVal = int64(mt)
-			}
-			indexedFiles[c.Ref] = struct {
-				size  int64
-				mtime int64
-			}{size: sizeVal, mtime: mtimeVal}
-		}
-	}
-
-	client := mustEmbedClient(ctx, dataDir)
-
-	var playbooksToEmbed []string
-	for _, f := range files {
-		stat, err := os.Stat(f)
-		if err != nil {
-			continue
-		}
-		info, ok := indexedFiles[f]
-		if !ok || info.size != stat.Size() || info.mtime != stat.ModTime().Unix() {
-			playbooksToEmbed = append(playbooksToEmbed, f)
-		}
-	}
-
-	if len(playbooksToEmbed) == 0 {
-		return nil
-	}
-
-	fmt.Fprintf(os.Stderr, "🔄 Auto-indexing %d modified or new playbooks...\n", len(playbooksToEmbed))
-
-	var chunks []docs.Chunk
-	for _, f := range playbooksToEmbed {
-		stat, err := os.Stat(f)
-		if err != nil {
-			continue
-		}
-		pb, err := docs.ParsePlaybook(f)
-		if err != nil {
-			continue
-		}
-		// Create new chunks and add size + mtime metadata
-		pbChunks := docs.ChunkPlaybook(pb)
-		for i := range pbChunks {
-			if pbChunks[i].Metadata == nil {
-				pbChunks[i].Metadata = make(map[string]any)
-			}
-			pbChunks[i].Metadata["size"] = stat.Size()
-			pbChunks[i].Metadata["mtime"] = stat.ModTime().Unix()
-		}
-		chunks = append(chunks, pbChunks...)
-	}
-
-	if len(chunks) == 0 {
-		return nil
-	}
-
-	// Incrementally build embeddings and append
-	if err := idx.BuildIncremental(ctx, client, chunks); err != nil {
-		return err
-	}
-
-	if err := idx.Save(indexPath); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "✓ Auto-indexed playbooks. Total playbooks chunks: %d\n", idx.Size())
 	return nil
 }

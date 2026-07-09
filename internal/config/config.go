@@ -22,7 +22,6 @@ type Config struct {
 	Model             string    `yaml:"model"`
 	MaxIter           int       `yaml:"max_iterations"`
 	AutoApprove       string    `yaml:"auto_approve"` // "never" | "low" | "medium"
-	MaxConc           int       `yaml:"max_concurrent"`
 	DataDir           string    `yaml:"data_dir"`
 	SystemPrompt      string    `yaml:"system_prompt"`
 	AllowedTools      []string  `yaml:"allowed_tools"`
@@ -87,7 +86,6 @@ func Default() *Config {
 		Model:                "qwen3.5:cloud",
 		MaxIter:              20,
 		AutoApprove:          "never",
-		MaxConc:              5,
 		DataDir:              filepath.Join(home, ".local", "share", "pilot"),
 		SystemPrompt:         defaultSystemPrompt,
 		AllowedTools:         []string{},

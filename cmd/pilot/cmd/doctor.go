@@ -62,25 +62,8 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 3. Check Embedding model (used only for the playbook index; the
-	//    module docs index uses bleve BM25 and needs no embedder).
-	fmt.Printf("[3] Checking Embedding model %q (for playbook index)... ", playbookEmbedMod)
-	foundEmb := false
-	for _, m := range models {
-		if m == playbookEmbedMod {
-			foundEmb = true
-			break
-		}
-	}
-	if foundEmb {
-		fmt.Println("\033[32mOK\033[0m")
-	} else {
-		fmt.Printf("\033[33mWARNING\033[0m (embedding model %q not pulled)\n", playbookEmbedMod)
-		fmt.Printf("    -> Only needed if you index user playbooks. Run: 'ollama pull %s'\n", playbookEmbedMod)
-	}
-
-	// 4. Check Ansible installation
-	fmt.Printf("[4] Checking Ansible installation... ")
+	// 3. Check Ansible installation
+	fmt.Printf("[3] Checking Ansible installation... ")
 	ansiblePath, err := exec.LookPath("ansible")
 	if err != nil {
 		fmt.Println("\033[31mFAILED\033[0m")
@@ -95,8 +78,8 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 5. Check Ansible-lint installation (optional but recommended)
-	fmt.Printf("[5] Checking 'ansible-lint' installation... ")
+	// 4. Check Ansible-lint installation (optional but recommended)
+	fmt.Printf("[4] Checking 'ansible-lint' installation... ")
 	lintPath, err := exec.LookPath("ansible-lint")
 	if err != nil {
 		fmt.Println("\033[33mWARNING\033[0m")
@@ -115,8 +98,8 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 6. Check Ansible playbook syntax-checker
-	fmt.Printf("[6] Checking 'ansible-playbook' executable... ")
+	// 5. Check Ansible playbook syntax-checker
+	fmt.Printf("[5] Checking 'ansible-playbook' executable... ")
 	apPath, err := exec.LookPath("ansible-playbook")
 	if err != nil {
 		fmt.Println("\033[31mFAILED\033[0m")
@@ -126,9 +109,9 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		fmt.Printf("\033[32mOK\033[0m (path: %s)\n", apPath)
 	}
 
-	// 7. Check SQLite history database
+	// 6. Check SQLite history database
 	dbPath := filepath.Join(cfg.DataDir, "history.db")
-	fmt.Printf("[7] Checking SQLite database at %s... ", dbPath)
+	fmt.Printf("[6] Checking SQLite database at %s... ", dbPath)
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		fmt.Printf("\033[31mFAILED to create data dir\033[0m (%v)\n", err)
 		allPassed = false
@@ -146,9 +129,9 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 8. Check RAG Docs index status (bleve-backed BM25)
+	// 7. Check RAG Docs index status (bleve-backed BM25)
 	blevePath := moduleBlevePath(cfg.DataDir)
-	fmt.Printf("[8] Checking RAG docs index at %s... ", blevePath)
+	fmt.Printf("[7] Checking RAG docs index at %s... ", blevePath)
 	if _, err := os.Stat(blevePath); err != nil {
 		fmt.Printf("\033[33mWARNING\033[0m (not built yet)\n")
 		fmt.Println("    -> Local Ansible module index is missing. Run: 'pilot index-docs' to build it.")
@@ -161,11 +144,11 @@ func runDoctor(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 9. Check vm-target golden-image prerequisites (optional feature:
+	// 8. Check vm-target golden-image prerequisites (optional feature:
 	//    only matters when using 'pilot vm-target'). Without KVM access
 	//    virt-customize falls back to software emulation and appliance
 	//    boots take minutes instead of seconds.
-	fmt.Printf("[9] Checking vm-target prerequisites (virt-customize + KVM + appliance DHCP)... ")
+	fmt.Printf("[8] Checking vm-target prerequisites (virt-customize + KVM + appliance DHCP)... ")
 	vcPath, vcErr := exec.LookPath("virt-customize")
 	var vmHints []string
 	if vcErr != nil {

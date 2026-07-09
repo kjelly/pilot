@@ -10,15 +10,14 @@ import (
 type Source string
 
 const (
-	SourceModule   Source = "modules"
-	SourcePlaybook Source = "playbooks"
+	SourceModule Source = "modules"
 )
 
 // Chunk is a single indexed piece of text plus its metadata.
 type Chunk struct {
 	ID       string         `json:"id"`       // unique: "<source>:<ref>:<section>"
-	Source   Source         `json:"source"`   // modules | playbooks
-	Ref      string         `json:"ref"`      // module name | playbook path
+	Source   Source         `json:"source"`   // modules
+	Ref      string         `json:"ref"`      // module name
 	Section  string         `json:"section"`  // description | options | examples | ...
 	Text     string         `json:"text"`     // the text content
 	Metadata map[string]any `json:"metadata"` // extra: filename, version, etc.

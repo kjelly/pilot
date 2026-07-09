@@ -33,38 +33,26 @@ var searchDocsArgs = json.RawMessage(`{
     "limit": {
       "type": "integer",
       "description": "Max results to return (default 5)."
-    },
-    "source": {
-      "type": "string",
-      "enum": ["modules", "playbooks", "all"],
-      "description": "Restrict to a source. Default 'all'."
     }
   },
   "required": ["query"]
 }`)
 
-// SearchDocsTool searches the local index of Ansible documentation
-// and user playbooks. The LLM is expected to call this when it needs
-// to verify module syntax, options, or how a previous playbook did X.
-//
-// Module docs use the LLM-friendly BM25 retriever (chunker per-param
-// + param-preferring rank + prefix ref match). Playbook docs use the
-// legacy vector index. Both are returned as a compact JSON array so
-// the LLM can parse the fields directly without parsing prose.
+// SearchDocsTool searches the local BM25 index of Ansible module
+// documentation. The LLM is expected to call this when it needs to
+// verify module syntax, options, or allowed values.
 type SearchDocsTool struct {
 	modIdx *docs.ModuleIndex
-	pbIdx  *docs.Index
-	pbEmb  docs.Embedder
 }
 
-func NewSearchDocsTool(modIdx *docs.ModuleIndex, pbIdx *docs.Index, pbEmb docs.Embedder) *SearchDocsTool {
-	return &SearchDocsTool{modIdx: modIdx, pbIdx: pbIdx, pbEmb: pbEmb}
+func NewSearchDocsTool(modIdx *docs.ModuleIndex) *SearchDocsTool {
+	return &SearchDocsTool{modIdx: modIdx}
 }
 
 func (t *SearchDocsTool) Spec() *Spec {
 	return &Spec{
 		Name:        "search_docs",
-		Description: "Search the local index of Ansible module documentation and previously-seen playbooks. Use this BEFORE writing a task to verify the correct module name, parameter names, types, and allowed values. The module index is built locally from `ansible-doc` (BM25, no embeddings). Returns compact JSON with one record per result; each record has 'ref' (module FQCN), 'section' (param/example/etc.), structured 'param' fields when the section is 'param', the body text, a normalised confidence score in [0,1], plus 'related_example_id' pointing at the example block for the same module and 'suggested_next' listing plausible follow-up tools.",
+		Description: "Search the local index of Ansible module documentation. Use this BEFORE writing a task to verify the correct module name, parameter names, types, and allowed values. The index is built locally from `ansible-doc` (BM25, no embeddings). Returns compact JSON with one record per result; each record has 'ref' (module FQCN), 'section' (param/example/etc.), structured 'param' fields when the section is 'param', the body text, a normalised confidence score in [0,1], plus 'related_example_id' pointing at the example block for the same module and 'suggested_next' listing plausible follow-up tools.",
 		RiskLevel:   "low",
 		Reversible:  true,
 		DryRunSafe:  true,
@@ -79,19 +67,18 @@ func (t *SearchDocsTool) Spec() *Spec {
 // the same module so the LLM can chain a follow-up call. SuggestedNext
 // is a tiny workflow hint the LLM can echo back to the user.
 type SearchHit struct {
-	ID           string   `json:"id"`
-	Ref          string   `json:"ref"`
-	Section      string   `json:"section"`
-	Score        float64  `json:"score"`
-	Confidence   float64  `json:"confidence"`
-	Text         string   `json:"text"`
-	ParamName    string   `json:"param_name,omitempty"`
-	ParamType    string   `json:"param_type,omitempty"`
-	Required     bool     `json:"required,omitempty"`
-	Default      any      `json:"default,omitempty"`
-	Choices      []string `json:"choices,omitempty"`
-	Aliases      []string `json:"aliases,omitempty"`
-	FromPlaybook bool     `json:"from_playbook,omitempty"`
+	ID         string   `json:"id"`
+	Ref        string   `json:"ref"`
+	Section    string   `json:"section"`
+	Score      float64  `json:"score"`
+	Confidence float64  `json:"confidence"`
+	Text       string   `json:"text"`
+	ParamName  string   `json:"param_name,omitempty"`
+	ParamType  string   `json:"param_type,omitempty"`
+	Required   bool     `json:"required,omitempty"`
+	Default    any      `json:"default,omitempty"`
+	Choices    []string `json:"choices,omitempty"`
+	Aliases    []string `json:"aliases,omitempty"`
 
 	// RelatedExampleID is the chunk ID of the example block for the
 	// same module, if one exists in the index. The LLM can either
@@ -110,7 +97,6 @@ func (t *SearchDocsTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		Module  string `json:"module"`
 		Section string `json:"section"`
 		Limit   int    `json:"limit"`
-		Source  string `json:"source"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, fmt.Errorf("search_docs: invalid args: %w", err)
@@ -124,48 +110,14 @@ func (t *SearchDocsTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 	if a.Limit > 20 {
 		a.Limit = 20
 	}
-	source := a.Source
-	if source == "" {
-		source = "modules"
-	}
 
 	// Enforce a per-result text budget so the LLM context doesn't blow up.
 	const maxBodyChars = 800
 
-	var hits []SearchHit
-	var notes []string
-
-	switch source {
-	case "modules":
-		if t.modIdx == nil || t.modIdx.Size() == 0 {
-			return &Result{Content: "search_docs: module index not built. Run `pilot index-docs`.", IsError: true}, nil
-		}
-		hits = t.searchModules(a.Query, a.Module, a.Section, a.Limit, maxBodyChars)
-	case "playbooks":
-		if t.pbIdx == nil || t.pbIdx.Size() == 0 {
-			return &Result{Content: "search_docs: no playbooks indexed yet.", IsError: true}, nil
-		}
-		if t.pbEmb == nil {
-			return &Result{Content: "search_docs: playbook index requires an embedder.", IsError: true}, nil
-		}
-		h, err := t.searchPlaybooks(ctx, a.Query, a.Limit, maxBodyChars)
-		if err != nil {
-			return &Result{Content: fmt.Sprintf("ERROR: %v", err), IsError: true}, nil
-		}
-		hits = h
-	default: // "all"
-		if t.modIdx != nil && t.modIdx.Size() > 0 {
-			hits = append(hits, t.searchModules(a.Query, a.Module, a.Section, a.Limit, maxBodyChars)...)
-		}
-		if t.pbIdx != nil && t.pbIdx.Size() > 0 && t.pbEmb != nil {
-			h, err := t.searchPlaybooks(ctx, a.Query, a.Limit, maxBodyChars)
-			if err == nil {
-				hits = append(hits, h...)
-			} else {
-				notes = append(notes, fmt.Sprintf("playbook search failed: %v", err))
-			}
-		}
+	if t.modIdx == nil || t.modIdx.Size() == 0 {
+		return &Result{Content: "search_docs: module index not built. Run `pilot index-docs`.", IsError: true}, nil
 	}
+	hits := t.searchModules(a.Query, a.Module, a.Section, a.Limit, maxBodyChars)
 
 	if len(hits) == 0 {
 		return &Result{Content: fmt.Sprintf("search_docs: no matches for %q.", a.Query)}, nil
@@ -185,9 +137,6 @@ func (t *SearchDocsTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		"query":   a.Query,
 		"count":   len(hits),
 		"results": hits,
-	}
-	if len(notes) > 0 {
-		payload["notes"] = notes
 	}
 	out, err := json.Marshal(payload)
 	if err != nil {
@@ -271,9 +220,6 @@ func attachRelatedExamples(idx *docs.ModuleIndex, hits []SearchHit) {
 		}
 	}
 	for i := range hits {
-		if hits[i].FromPlaybook {
-			continue
-		}
 		if hits[i].Section == "example" {
 			continue
 		}
@@ -288,9 +234,6 @@ func attachRelatedExamples(idx *docs.ModuleIndex, hits []SearchHit) {
 // generate_playbook, search for examples, or stop.
 func attachSuggestedNext(hits []SearchHit) {
 	for i := range hits {
-		if hits[i].FromPlaybook {
-			continue
-		}
 		switch hits[i].Section {
 		case "param":
 			hits[i].SuggestedNext = []ToolSuggestion{
@@ -314,32 +257,6 @@ func attachSuggestedNext(hits []SearchHit) {
 			hits[i].SuggestedNext = hits[i].SuggestedNext[:3]
 		}
 	}
-}
-
-func (t *SearchDocsTool) searchPlaybooks(ctx context.Context, query string, limit, maxBodyChars int) ([]SearchHit, error) {
-	matches, err := t.pbIdx.Search(ctx, t.pbEmb, query, limit, docs.SourcePlaybook)
-	if err != nil {
-		return nil, err
-	}
-	if len(matches) == 0 {
-		return nil, nil
-	}
-	confidences := docs.ScoreSummary(matches)
-	hits := make([]SearchHit, 0, len(matches))
-	for i, m := range matches {
-		c := t.pbIdx.ChunkByIndex(m.Index)
-		hit := SearchHit{
-			ID:           c.ID,
-			Ref:          c.Ref,
-			Section:      sectionOf(c),
-			Score:        m.Score,
-			Confidence:   confidences[i],
-			Text:         truncateBody(c.Text, maxBodyChars),
-			FromPlaybook: true,
-		}
-		hits = append(hits, hit)
-	}
-	return hits, nil
 }
 
 // sectionOf extracts the chunk's section from metadata, falling back
@@ -366,17 +283,14 @@ func truncateBody(text string, maxChars int) string {
 	return text[:maxChars] + "..."
 }
 
-// dedupeHits removes duplicates by (ref, param_name, from_playbook).
-// Two hits with the same key almost always mean the LLM is seeing
-// the same fact twice.
+// dedupeHits removes duplicates by (ref, section, param_name). Two
+// hits with the same key almost always mean the LLM is seeing the
+// same fact twice.
 func dedupeHits(hits []SearchHit) []SearchHit {
 	seen := make(map[string]bool, len(hits))
 	out := make([]SearchHit, 0, len(hits))
 	for _, h := range hits {
 		key := h.Ref + "|" + h.Section + "|" + h.ParamName
-		if h.FromPlaybook {
-			key = "pb|" + key
-		}
 		if seen[key] {
 			continue
 		}

@@ -34,24 +34,9 @@ func TestNewSurvivesOllamaUnreachable(t *testing.T) {
 	}
 }
 
-// TestNewHonoursNoTUI confirms the NoTUI flag disables the TUI even
-// when stderr is a TTY. We can't simulate a TTY in tests, so we
-// verify the negative: with NoTUI=true and no TTY, the returned
-// App has a nil TUI.
-func TestNewHonoursNoTUI(t *testing.T) {
-	cfg := config.Default()
-	cfg.DataDir = t.TempDir()
-	cfg.OllamaURL = "http://127.0.0.1:1"
-	_, err := New(context.Background(), cfg, Options{NoTUI: true, Banner: false})
-	if err == nil {
-		t.Skip("Ollama happened to be reachable; skipping")
-	}
-}
-
 // TestCloseIsIdempotent ensures double-close doesn't crash. This is
 // the property the three command paths (run, chat, diagnose) all
-// rely on because they defer res.Store.Close() and res.TUI.Shutdown
-// independently.
+// rely on because they defer res.Store.Close() independently.
 func TestCloseIsIdempotent(t *testing.T) {
 	a := &App{}
 	a.Close()
@@ -63,7 +48,7 @@ func TestCloseIsIdempotent(t *testing.T) {
 func TestDefaultRegistryConservativeDefaults(t *testing.T) {
 	cfg := config.Default()
 	cfg.DataDir = filepath.Join(t.TempDir(), "pilot-data")
-	reg := defaultRegistry(cfg, nil, nil, nil, nil, nil)
+	reg := defaultRegistry(cfg, nil, nil, nil, nil)
 	if reg == nil {
 		t.Fatal("defaultRegistry returned nil")
 	}

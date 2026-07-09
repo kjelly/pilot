@@ -13,15 +13,13 @@ import (
 	"time"
 )
 
-// fakeOllama is a minimal /api/chat + /api/embeddings + /api/tags stub
-// for use in tests. It records every request and dispatches scripted
-// responses based on the most recent user message.
+// fakeOllama is a minimal /api/chat + /api/tags stub for use in
+// tests. It records every request and dispatches scripted responses
+// based on the most recent user message.
 type fakeOllama struct {
 	mu              sync.Mutex
 	requests        []recordedRequest
 	chatScript      []ChatResponse // returned one per call to /api/chat
-	embedDim        int            // dimension of returned embeddings
-	embedErr        error          // if set, /api/embeddings returns 500
 	streamNDJSON    bool           // emit streaming NDJSON instead of single response
 	blockAfterChunk bool           // when true, block after first chunk to test cancellation
 }
@@ -33,7 +31,7 @@ type recordedRequest struct {
 }
 
 func newFakeOllama() *fakeOllama {
-	return &fakeOllama{embedDim: 4}
+	return &fakeOllama{}
 }
 
 func (f *fakeOllama) handler() http.Handler {
@@ -41,22 +39,6 @@ func (f *fakeOllama) handler() http.Handler {
 	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r)
 		fmt.Fprint(w, `{"models":[{"name":"qwen2.5:3b"},{"name":"qwen3-embedding:4b"}]}`)
-	})
-	mux.HandleFunc("/api/embeddings", func(w http.ResponseWriter, r *http.Request) {
-		f.record(r)
-		if f.embedErr != nil {
-			http.Error(w, f.embedErr.Error(), http.StatusInternalServerError)
-			return
-		}
-		vec := make([]float32, f.embedDim)
-		for i := range vec {
-			vec[i] = float32(i+1) * 0.1
-		}
-		resp := struct {
-			Embedding []float32 `json:"embedding"`
-		}{Embedding: vec}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r)
@@ -174,42 +156,6 @@ func TestFakeOllamaStreamReassembles(t *testing.T) {
 	joined := strings.Join(chunks, "")
 	if joined != "world" {
 		t.Errorf("streamed content = %q, want %q", joined, "world")
-	}
-}
-
-// TestFakeOllamaEmbeddingsReturnsVector exercises the /api/embeddings
-// path: the Client decodes the embedding into the right dimension.
-func TestFakeOllamaEmbeddingsReturnsVector(t *testing.T) {
-	fo := newFakeOllama()
-	srv := httptest.NewServer(fo.handler())
-	defer srv.Close()
-
-	c := NewClient(srv.URL, "qwen2.5:3b")
-	c.SetEmbeddingModel("qwen3-embedding:4b")
-	vec, err := c.Embeddings(context.Background(), "query")
-	if err != nil {
-		t.Fatalf("Embeddings: %v", err)
-	}
-	if len(vec) != 4 {
-		t.Errorf("got dim %d, want 4", len(vec))
-	}
-}
-
-// TestFakeOllamaEmbeddingsPropagatesError verifies that a 500 from
-// /api/embeddings surfaces as a Go error, not silent zeros.
-func TestFakeOllamaEmbeddingsPropagatesError(t *testing.T) {
-	fo := newFakeOllama()
-	fo.embedErr = fmt.Errorf("upstream on fire")
-	srv := httptest.NewServer(fo.handler())
-	defer srv.Close()
-
-	c := NewClient(srv.URL, "qwen2.5:3b")
-	_, err := c.Embeddings(context.Background(), "query")
-	if err == nil {
-		t.Fatal("expected error when /api/embeddings returns 500")
-	}
-	if !strings.Contains(err.Error(), "upstream on fire") {
-		t.Errorf("error should wrap the upstream message, got: %v", err)
 	}
 }
 

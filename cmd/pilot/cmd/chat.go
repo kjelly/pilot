@@ -101,7 +101,6 @@ func runChat(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer res.Store.Close()
-	defer shutdownTUI(res.TUI)
 
 	// Inject chat-session defaults into the system prompt + the
 	// run_ansible tool defaults. The system prompt is the visible
@@ -109,11 +108,9 @@ func runChat(cmd *cobra.Command, args []string) error {
 	// net (see internal/tools/defaults.go).
 	if chatInventory != "" || chatLimit != "" {
 		res.Cfg.SystemPrompt = appendSessionDefaults(res.Cfg.SystemPrompt, chatInventory, chatLimit)
-		if res.TUI == nil {
-			fmt.Fprintf(os.Stderr, "💬 pilot chat (type 'exit' to quit) — defaults: inventory=%q limit=%q\n",
-				chatInventory, chatLimit)
-		}
-	} else if res.TUI == nil {
+		fmt.Fprintf(os.Stderr, "💬 pilot chat (type 'exit' to quit) — defaults: inventory=%q limit=%q\n",
+			chatInventory, chatLimit)
+	} else {
 		fmt.Fprintln(os.Stderr, "💬 pilot chat (type 'exit' to quit)")
 	}
 
@@ -136,16 +133,10 @@ func runChat(cmd *cobra.Command, args []string) error {
 		signal.Stop(sigChan)
 	}()
 
-	if res.TUI != nil {
-		res.TUI.SendRunStart(run.ID, "Interactive chat session")
-	}
-
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for {
-		if res.TUI == nil {
-			fmt.Fprint(os.Stderr, "\n> ")
-		}
+		fmt.Fprint(os.Stderr, "\n> ")
 		if !scanner.Scan() {
 			break
 		}
@@ -158,15 +149,9 @@ func runChat(cmd *cobra.Command, args []string) error {
 		}
 		if err := loop.RunOnce(ctx, line); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			if res.TUI != nil {
-				res.TUI.SendError(err.Error())
-			}
 		}
 	}
 
-	if res.TUI != nil {
-		res.TUI.SendRunFinish(run.ID, "completed")
-	}
 	_ = res.Store.FinishRun(run.ID, "success")
 	return nil
 }

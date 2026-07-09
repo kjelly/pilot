@@ -43,7 +43,6 @@ Use one of these to specify which playbook(s) to run:
 var (
 	runInventory           string
 	runLimit               string
-	runMode                string
 	runFromStdin           bool
 	runDiscover            string
 	runDryRunAll           bool
@@ -71,7 +70,6 @@ var (
 func init() {
 	runCmd.Flags().StringVarP(&runInventory, "inventory", "i", "", "Ansible inventory file")
 	runCmd.Flags().StringVar(&runLimit, "limit", "", "limit execution to a host pattern")
-	runCmd.Flags().StringVar(&runMode, "execution-mode", "serial", "execution mode: serial|parallel")
 
 	// New flags
 	runCmd.Flags().BoolVar(&runFromStdin, "from-stdin", false, "read playbook paths from stdin (one per line, or JSON Lines)")
@@ -148,12 +146,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no playbooks specified; pass a positional arg, --from-stdin, or --discover")
 	}
 
-	// ----- 2. Mode parsing ---------------------------------------------
-	// mode is "serial" (default) or "parallel". When "parallel",
-	// multiple playbooks run concurrently up to cfg.MaxConc
-	// (default 5). Fail-fast cancels remaining work on first
-	// failure and waits for in-flight goroutines to drain.
-	mode := runMode
+	const mode = "serial"
 
 	// ----- 3. Setup stack ----------------------------------------------
 	ctx := context.Background()
@@ -162,7 +155,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// LLM would propose without any real execution", so spinning up
 	// a Docker container that no tool will mutate is pure waste.
 	appOpts := app.Options{
-		NoTUI:  noTUI,
 		Banner: true,
 	}
 	if runDryRunAll {
@@ -201,118 +193,54 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	defer res.Store.Close()
-	defer shutdownTUI(res.TUI)
 
 	// ----- 3a. Ensure docs index is fresh ------------------------------
 	if !runNoIndex {
 		if _, err := ensureDocsIndex(ctx, res.Cfg.DataDir); err != nil {
-			if res.TUI == nil {
-				slog.Warn("ensureDocsIndex failed", "err", err)
-			}
+			slog.Warn("ensureDocsIndex failed", "err", err)
 		}
 	}
 
 	// ----- 4. Banner for dry-run / batch -------------------------------
 	if runDryRunAll {
-		if res.TUI == nil {
-			fmt.Fprintln(os.Stderr, "🔍 DRY-RUN MODE: no system changes will be made")
-		} else {
-			res.TUI.SendRunStart("dryrun-banner", "DRY-RUN MODE: no system changes will be made")
-		}
+		fmt.Fprintln(os.Stderr, "🔍 DRY-RUN MODE: no system changes will be made")
 	}
 
 	// ----- 5. Batch loop -----------------------------------------------
 	batchID := ""
 	if len(targets) > 1 {
 		batchID = newBatchID()
-		if res.TUI == nil {
-			fmt.Fprintf(os.Stderr, "▶ Batch %s — %d playbooks\n", shortIDOf(batchID), len(targets))
-		}
+		fmt.Fprintf(os.Stderr, "▶ Batch %s — %d playbooks\n", shortIDOf(batchID), len(targets))
 	}
 
 	results := make([]batchResult, len(targets))
-	if mode == "parallel" {
-		maxConc := res.Cfg.MaxConc
-		if maxConc <= 0 {
-			maxConc = 5
+	for i, tgt := range targets {
+		prefix := ""
+		if len(targets) > 1 {
+			prefix = fmt.Sprintf("[%d/%d] ", i+1, len(targets))
 		}
-		sem := make(chan struct{}, maxConc)
-		type indexedResult struct {
-			idx int
-			br  batchResult
-		}
-		resChan := make(chan indexedResult, len(targets))
-		// failFastCtx is cancelled the moment any worker reports
-		// failure (when --fail-fast is set). runOneTarget checks
-		// ctx.Err() between stages so an in-flight ansible run
-		// still gets to finish its current call before yielding,
-		// instead of leaving zombie subprocesses behind.
-		failFastCtx, cancelFailFast := context.WithCancel(ctx)
-		defer cancelFailFast()
+		br := runOneTarget(ctx, res, batchID, prefix, tgt, mode)
+		results[i] = br
 
-		for i, tgt := range targets {
-			go func(index int, target playbookTarget) {
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				prefix := fmt.Sprintf("[%d/%d] ", index+1, len(targets))
-				br := runOneTarget(failFastCtx, res, batchID, prefix, target, mode)
-				resChan <- indexedResult{idx: index, br: br}
-			}(i, tgt)
+		// Print progress to stderr
+		if !br.failedAtSyntaxCheck {
+			mark := "✓"
+			if !br.OK {
+				mark = "✗"
+			}
+			fmt.Fprintf(os.Stderr, "  %s%s %s\n", prefix, mark, tgt.Playbook)
 		}
 
-		for i := 0; i < len(targets); i++ {
-			ir := <-resChan
-			results[ir.idx] = ir.br
-
-			// Print progress to non-TUI stderr
-			if res.TUI == nil && !ir.br.failedAtSyntaxCheck {
-				mark := "✓"
-				if !ir.br.OK {
-					mark = "✗"
-				}
-				prefix := fmt.Sprintf("[%d/%d] ", ir.idx+1, len(targets))
-				fmt.Fprintf(os.Stderr, "  %s%s %s\n", prefix, mark, ir.br.Playbook)
-			}
-
-			if runFailFast && !ir.br.OK {
-				if res.TUI == nil {
-					fmt.Fprintln(os.Stderr, "  --fail-fast: cancelling remaining workers")
-				}
-				cancelFailFast()
-			}
-		}
-	} else {
-		// Serial execution
-		for i, tgt := range targets {
-			prefix := ""
-			if len(targets) > 1 {
-				prefix = fmt.Sprintf("[%d/%d] ", i+1, len(targets))
-			}
-			br := runOneTarget(ctx, res, batchID, prefix, tgt, mode)
-			results[i] = br
-
-			// Print progress to non-TUI stderr
-			if res.TUI == nil && !br.failedAtSyntaxCheck {
-				mark := "✓"
-				if !br.OK {
-					mark = "✗"
-				}
-				fmt.Fprintf(os.Stderr, "  %s%s %s\n", prefix, mark, tgt.Playbook)
-			}
-
-			// Fail-fast
-			if runFailFast && !br.OK {
-				if res.TUI == nil {
-					fmt.Fprintln(os.Stderr, "  --fail-fast: stopping on first failure")
-				}
-				results = results[:i+1]
-				break
-			}
+		// Fail-fast
+		if runFailFast && !br.OK {
+			fmt.Fprintln(os.Stderr, "  --fail-fast: stopping on first failure")
+			results = results[:i+1]
+			break
 		}
 	}
 
 	// ----- 6. Summary --------------------------------------------------
-	if len(targets) > 1 && res.TUI == nil {
+	if len(targets) > 1 {
 		printBatchSummary(batchID, results)
 	}
 
@@ -401,10 +329,8 @@ func runOneTarget(ctx context.Context, res *setupResult, batchID, prefix string,
 		if sres.ExitCode != 0 {
 			br.Err = fmt.Sprintf("syntax check failed (exit=%d): %s", sres.ExitCode, trimForErr(sres.Stderr))
 			br.failedAtSyntaxCheck = true
-			if res.TUI == nil {
-				fmt.Fprintf(os.Stderr, "  %s✗ %s\n", prefix, tgt.Playbook)
-				fmt.Fprintf(os.Stderr, "    %s\n", trimForErr(sres.Stderr))
-			}
+			fmt.Fprintf(os.Stderr, "  %s✗ %s\n", prefix, tgt.Playbook)
+			fmt.Fprintf(os.Stderr, "    %s\n", trimForErr(sres.Stderr))
 			return br
 		}
 	}
@@ -417,14 +343,10 @@ func runOneTarget(ctx context.Context, res *setupResult, batchID, prefix string,
 			out, _ := cmd.CombinedOutput()
 			if len(out) > 0 && cmd.ProcessState != nil && !cmd.ProcessState.Success() {
 				lintIssues = string(out)
-				if res.TUI == nil {
-					fmt.Fprintf(os.Stderr, "  ⚠️  ansible-lint found issues in %s:\n%s\n", tgt.Playbook, indentString(lintIssues, 4))
-				}
+				fmt.Fprintf(os.Stderr, "  ⚠️  ansible-lint found issues in %s:\n%s\n", tgt.Playbook, indentString(lintIssues, 4))
 			}
 		} else {
-			if res.TUI == nil {
-				fmt.Fprintln(os.Stderr, "  ⚠️  ansible-lint not found in PATH; skipping pre-flight lint check.")
-			}
+			fmt.Fprintln(os.Stderr, "  ⚠️  ansible-lint not found in PATH; skipping pre-flight lint check.")
 		}
 	}
 
@@ -465,9 +387,7 @@ func runOneTarget(ctx context.Context, res *setupResult, batchID, prefix string,
 		// have to read the file itself.
 		fmt.Fprintf(os.Stderr, "⚠️  preflight read of playbook failed: %v\n", preflightErr)
 	}
-	if res.TUI != nil {
-		res.TUI.SendRunStart(run.ID, goal)
-	} else if prefix == "" {
+	if prefix == "" {
 		fmt.Fprintf(os.Stderr, "▶ Starting run %s\n", run.ID)
 	}
 
@@ -499,15 +419,9 @@ func runOneTarget(ctx context.Context, res *setupResult, batchID, prefix string,
 		_ = res.Store.FinishRun(run.ID, "failed")
 		_ = res.Store.SetRunError(run.ID, err.Error())
 		br.Err = err.Error()
-		if res.TUI != nil {
-			res.TUI.SendError(err.Error())
-		}
 		return br
 	}
 	_ = res.Store.FinishRun(run.ID, "success")
-	if res.TUI != nil {
-		res.TUI.SendRunFinish(run.ID, "success")
-	}
 
 	// Tally proposals for the summary
 	props, _ := res.Store.ListProposals(run.ID)
