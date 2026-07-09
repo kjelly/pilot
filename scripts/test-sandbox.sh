@@ -192,7 +192,7 @@ EOF
     # L3.2 — Localhost mode
     log "L3.2 — pilot run localhost mode (no sandbox)"
     OUT=$(echo "{\"playbook\":\"$ROOT/playbooks/test/hello-localhost.yml\",\"connection\":\"local\",\"check\":true}" \
-      | timeout 240 /tmp/pilot-smoke --config "$CFG" run --from-stdin --skip-syntax-check --no-tui 2>&1) || true
+      | timeout 240 /tmp/pilot-smoke --config "$CFG" run --from-stdin --skip-syntax-check 2>&1) || true
     if echo "$OUT" | grep -q "📦 sandbox active"; then
       err "localhost mode should not show sandbox banner"
       exit 3
@@ -209,7 +209,7 @@ EOF
     OUT=$(echo "{\"playbook\":\"$ROOT/playbooks/test/hello-localhost.yml\",\"connection\":\"local\",\"check\":true}" \
       | timeout 240 /tmp/pilot-smoke --config "$CFG" run --from-stdin \
           --sandbox --sandbox-image geerlingguy/docker-ubuntu2204-ansible:latest \
-          --sandbox-mode docker-exec --skip-syntax-check --no-tui 2>&1) || true
+          --sandbox-mode docker-exec --skip-syntax-check 2>&1) || true
     if ! echo "$OUT" | grep -q "📦 sandbox active: docker:geerlingguy"; then
       err "docker-exec mode: expected sandbox banner, got first 30 lines:"
       echo "$OUT" | head -30

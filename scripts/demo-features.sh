@@ -31,38 +31,38 @@ cat > /tmp/harden-demo/sudo.yml <<'EOF'
 EOF
 
 echo "=== 1. Single playbook (existing) ==="
-$BIN run /tmp/harden-demo/ssh.yml --skip-syntax-check --dry-run-all --no-tui --model "$DEMO_MODEL" 2>&1 | head -3
+$BIN run /tmp/harden-demo/ssh.yml --skip-syntax-check --dry-run-all --model "$DEMO_MODEL" 2>&1 | head -3
 
 echo ""
 echo "=== 2. --discover directory ==="
-$BIN run --discover /tmp/harden-demo --skip-syntax-check --dry-run-all --no-tui --model "$DEMO_MODEL" 2>&1 | head -5
+$BIN run --discover /tmp/harden-demo --skip-syntax-check --dry-run-all --model "$DEMO_MODEL" 2>&1 | head -5
 
 echo ""
 echo "=== 3. --from-stdin (plain paths) ==="
-ls /tmp/harden-demo/*.yml | $BIN run --from-stdin --skip-syntax-check --dry-run-all --no-tui --model "$DEMO_MODEL" 2>&1 | head -5
+ls /tmp/harden-demo/*.yml | $BIN run --from-stdin --skip-syntax-check --dry-run-all --model "$DEMO_MODEL" 2>&1 | head -5
 
 echo ""
 echo "=== 4. --from-stdin (JSON Lines) ==="
 ( echo '{"playbook":"/tmp/harden-demo/ssh.yml","limit":"webservers"}'
   echo '{"playbook":"/tmp/harden-demo/sudo.yml"}'
-) | $BIN run --from-stdin --skip-syntax-check --dry-run-all --no-tui --model "$DEMO_MODEL" 2>&1 | head -5
+) | $BIN run --from-stdin --skip-syntax-check --dry-run-all --model "$DEMO_MODEL" 2>&1 | head -5
 
 echo ""
 echo "=== 5. --discover glob pattern ==="
-$BIN run --discover '/tmp/harden-demo/*.yml' --skip-syntax-check --dry-run-all --no-tui --model "$DEMO_MODEL" 2>&1 | head -3
+$BIN run --discover '/tmp/harden-demo/*.yml' --skip-syntax-check --dry-run-all --model "$DEMO_MODEL" 2>&1 | head -3
 
 echo ""
 echo "=== 6. Mutual exclusion: positional + --from-stdin (should error) ==="
-$BIN run /tmp/harden-demo/ssh.yml --from-stdin --no-tui 2>&1 | head -3 || true
+$BIN run /tmp/harden-demo/ssh.yml --from-stdin 2>&1 | head -3 || true
 
 echo ""
 echo "=== 7. Syntax-check pre-flight (broken playbook) ==="
 echo 'this is not: [valid' > /tmp/harden-demo/bad.yml
-$BIN run --discover /tmp/harden-demo --dry-run-all --no-tui --model "$DEMO_MODEL" 2>&1 | head -8
+$BIN run --discover /tmp/harden-demo --dry-run-all --model "$DEMO_MODEL" 2>&1 | head -8
 
 echo ""
 echo "=== 8. --skip-syntax-check + broken playbook (LLM sees the error) ==="
-$BIN run /tmp/harden-demo/bad.yml --skip-syntax-check --dry-run-all --no-tui --model "$DEMO_MODEL" 2>&1 | head -3
+$BIN run /tmp/harden-demo/bad.yml --skip-syntax-check --dry-run-all --model "$DEMO_MODEL" 2>&1 | head -3
 
 rm -rf /tmp/harden-demo
 echo ""

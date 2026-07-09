@@ -41,10 +41,6 @@ type Config struct {
 	MaxIter      int
 	SystemPrompt string
 	StreamWriter io.Writer // usually os.Stderr
-	// TUI is an optional TUI bridge. When non-nil, LLM streaming chunks
-	// and tool events are sent to the TUI in addition to (or instead of)
-	// StreamWriter. Approver is still the source of truth for decisions.
-	TUI TUIEmitter
 	// Runner is the ansible runner used by tools and by the pre-flight
 	// dry-run preview before approval. May be nil in tests that
 	// don't exercise ansible.
@@ -59,20 +55,6 @@ type Config struct {
 	DryRun bool
 	// AllowDisposableApply bypasses high risk escalation on VM/sandbox targets
 	AllowDisposableApply bool
-}
-
-// TUIEmitter is the subset of the TUI Program API used by the agent loop.
-// Defining it here as an interface avoids an import cycle between
-// internal/agent and internal/ui/tui.
-type TUIEmitter interface {
-	SendLLMChunk(content, thinking string)
-	SendLLMDone()
-	SendToolCall(tool, args string)
-	SendToolResult(tool, summary string, isErr bool)
-	SendStatus(iter, maxIter, proposalCount, pendingCount int, tool, host string)
-	SendRunStart(runID, goal string)
-	SendRunFinish(runID, status string)
-	SendError(msg string)
 }
 
 // Loop is the ReAct-style agent loop.
@@ -178,8 +160,7 @@ func (l *Loop) systemPromptSeeded() bool {
 
 // runSession is the single iteration engine shared by Run and RunOnce.
 // emitAssistantText controls whether the assistant's text response is
-// echoed to the stream writer (it is, except when the TUI is doing
-// its own rendering of the same content).
+// echoed to the stream writer.
 func (l *Loop) runSession(ctx context.Context, userGoal string, emitAssistantText bool) error {
 	l.history = append(l.history,
 		ollama.Message{Role: "user", Content: userGoal},
@@ -196,11 +177,8 @@ func (l *Loop) runSession(ctx context.Context, userGoal string, emitAssistantTex
 		l.history = append(l.history, resp.Message)
 		l.persistMessage("assistant", sanitized, marshalToolCalls(resp.Message.ToolCalls))
 
-		if emitAssistantText && resp.Message.Content != "" && l.cfg.TUI == nil {
+		if emitAssistantText && resp.Message.Content != "" {
 			fmt.Fprintf(l.cfg.StreamWriter, "\n🤖 %s\n", resp.Message.Content)
-		}
-		if l.cfg.TUI != nil {
-			l.cfg.TUI.SendLLMDone()
 		}
 
 		if len(resp.Message.ToolCalls) == 0 {
@@ -237,10 +215,6 @@ func (l *Loop) callModel(ctx context.Context) (*ollama.ChatResponse, error) {
 }
 
 func (l *Loop) onChunk(content, thinking string) {
-	if l.cfg.TUI != nil {
-		l.cfg.TUI.SendLLMChunk(content, thinking)
-		return
-	}
 	if content != "" {
 		fmt.Fprint(l.cfg.StreamWriter, content)
 	}
@@ -270,7 +244,7 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 	sanitizedArgs := l.cfg.Sanitizer.Sanitize(string(tc.Function.Arguments))
 
 	// Build the proposal (metadata extraction, rationale fallback, risk
-	// upgrade, TUI notification, and the run_ansible --check preview).
+	// upgrade, and the run_ansible --check preview).
 	p, host := l.buildProposal(ctx, tc, sanitizedArgs, toolSpec.Reversible)
 
 	// Ask the human
@@ -280,16 +254,10 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 		p.Status = StatusRejected
 		l.saveProposal(p)
 		l.appendToolResult(tc, "Skipped by user")
-		if l.cfg.TUI != nil {
-			l.cfg.TUI.SendToolResult(tc.Function.Name, "rejected by user", false)
-		}
 		return decision, nil
 	case DecisionAbort:
 		p.Status = StatusRejected
 		l.saveProposal(p)
-		if l.cfg.TUI != nil {
-			l.cfg.TUI.SendToolResult(tc.Function.Name, "aborted by user", true)
-		}
 		return decision, nil
 	}
 
@@ -314,12 +282,10 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 
 	l.saveProposal(p)
 
-	if l.cfg.TUI == nil {
-		if l.cfg.DryRun {
-			fmt.Fprintf(l.cfg.StreamWriter, "\n🔍 [DRY-RUN] would call: %s ...\n", tc.Function.Name)
-		} else {
-			fmt.Fprintf(l.cfg.StreamWriter, "\n▶ 執行中: %s ...\n", tc.Function.Name)
-		}
+	if l.cfg.DryRun {
+		fmt.Fprintf(l.cfg.StreamWriter, "\n🔍 [DRY-RUN] would call: %s ...\n", tc.Function.Name)
+	} else {
+		fmt.Fprintf(l.cfg.StreamWriter, "\n▶ 執行中: %s ...\n", tc.Function.Name)
 	}
 
 	// Docker snapshot pre-execution: if the sandbox is Snapshotable and
@@ -378,16 +344,6 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 		return DecisionAbort, nil
 	}
 
-	// Send tool result to TUI activity log
-	if l.cfg.TUI != nil {
-		isErr := result != nil && result.IsError
-		sum := summary
-		if len(sum) > 200 {
-			sum = sum[:200] + "…"
-		}
-		l.cfg.TUI.SendToolResult(tc.Function.Name, sum, isErr)
-	}
-
 	// One-click rollback / recovery if a playbook run fails.
 	l.recoverFromFailedApply(ctx, tc, p, result, snapshotable, snapshotID)
 
@@ -395,9 +351,7 @@ func (l *Loop) handleToolCall(ctx context.Context, tc ollama.ToolCall) (Decision
 	// but only for the first failure per host per run.
 	if result != nil && result.IsError && host != "" {
 		if l.dedup.ShouldDiagnose(l.cfg.RunID, host) {
-			if l.cfg.TUI == nil {
-				fmt.Fprintf(l.cfg.StreamWriter, "🔍 First failure for host %s — agent will consider diagnosis in next iteration.\n", host)
-			}
+			fmt.Fprintf(l.cfg.StreamWriter, "🔍 First failure for host %s — agent will consider diagnosis in next iteration.\n", host)
 		}
 	}
 	if snapshotable != nil && snapshotID != "" && (result == nil || !result.IsError) {
@@ -424,23 +378,13 @@ func (l *Loop) recoverFromFailedApply(ctx context.Context, tc ollama.ToolCall, p
 	if snapshotable != nil && snapshotID != "" {
 		if rollbacker, ok := l.cfg.Approver.(interface{ AskRollback(string) bool }); ok {
 			if rollbacker.AskRollback("⚠️  Playbook 執行失敗！是否直接還原 Docker 沙箱至執行前快照狀態？（注意：外部掛載卷 Volume 的修改將不會被還原）") {
-				if l.cfg.TUI == nil {
-					fmt.Fprintln(l.cfg.StreamWriter, "🔄 正在還原 Docker 沙箱狀態（注意：外部掛載卷 Volume 的修改無法還原）...")
-				}
+				fmt.Fprintln(l.cfg.StreamWriter, "🔄 正在還原 Docker 沙箱狀態（注意：外部掛載卷 Volume 的修改無法還原）...")
 				if rerr := snapshotable.RestoreSnapshot(ctx, snapshotID); rerr == nil {
-					if l.cfg.TUI == nil {
-						fmt.Fprintln(l.cfg.StreamWriter, "✓ 沙箱狀態還原成功。")
-					} else {
-						l.cfg.TUI.SendToolResult("run_ansible", "Docker sandbox restored to pre-apply snapshot", false)
-					}
+					fmt.Fprintln(l.cfg.StreamWriter, "✓ 沙箱狀態還原成功。")
 					_ = snapshotable.DeleteSnapshot(ctx, snapshotID)
 					restored = true
 				} else {
-					if l.cfg.TUI == nil {
-						fmt.Fprintf(l.cfg.StreamWriter, "❌ 還原沙箱狀態失敗: %v\n", rerr)
-					} else {
-						l.cfg.TUI.SendToolResult("run_ansible", "Failed to restore Docker snapshot: "+rerr.Error(), true)
-					}
+					fmt.Fprintf(l.cfg.StreamWriter, "❌ 還原沙箱狀態失敗: %v\n", rerr)
 				}
 			}
 		}
@@ -452,9 +396,7 @@ func (l *Loop) recoverFromFailedApply(ctx context.Context, tc ollama.ToolCall, p
 	if !ok || !rollbacker.AskRollback("⚠️  Playbook 執行失敗！是否要一鍵還原 (Generate & Run Rollback)？") {
 		return
 	}
-	if l.cfg.TUI == nil {
-		fmt.Fprintln(l.cfg.StreamWriter, "🔄 正在生成還原 Playbook...")
-	}
+	fmt.Fprintln(l.cfg.StreamWriter, "🔄 正在生成還原 Playbook...")
 	rollbackTool, okGen := l.cfg.Tools.Get("generate_rollback")
 	runAnsibleTool, okRun := l.cfg.Tools.Get("run_ansible")
 	if !okGen || !okRun {
@@ -495,9 +437,7 @@ func (l *Loop) recoverFromFailedApply(ctx context.Context, tc ollama.ToolCall, p
 	if path == "" {
 		return
 	}
-	if l.cfg.TUI == nil {
-		fmt.Fprintf(l.cfg.StreamWriter, "▶ 正在套用還原 Playbook: %s...\n", path)
-	}
+	fmt.Fprintf(l.cfg.StreamWriter, "▶ 正在套用還原 Playbook: %s...\n", path)
 	var orig struct {
 		Inventory string `json:"inventory"`
 		Limit     string `json:"limit"`
@@ -512,11 +452,7 @@ func (l *Loop) recoverFromFailedApply(ctx context.Context, tc ollama.ToolCall, p
 	})
 	runRes, runErr := runAnsibleTool.Execute(ctx, runArgs)
 	if runErr == nil && runRes != nil && !runRes.IsError {
-		if l.cfg.TUI == nil {
-			fmt.Fprintln(l.cfg.StreamWriter, "✓ 一鍵還原執行成功！系統已復原。")
-		} else {
-			l.cfg.TUI.SendToolResult("run_ansible", "Rollback applied successfully", false)
-		}
+		fmt.Fprintln(l.cfg.StreamWriter, "✓ 一鍵還原執行成功！系統已復原。")
 		return
 	}
 	errMsg := ""
@@ -525,11 +461,7 @@ func (l *Loop) recoverFromFailedApply(ctx context.Context, tc ollama.ToolCall, p
 	} else if runErr != nil {
 		errMsg = runErr.Error()
 	}
-	if l.cfg.TUI == nil {
-		fmt.Fprintf(l.cfg.StreamWriter, "❌ 一鍵還原執行失敗: %s\n", errMsg)
-	} else {
-		l.cfg.TUI.SendToolResult("run_ansible", "Rollback failed: "+errMsg, true)
-	}
+	fmt.Fprintf(l.cfg.StreamWriter, "❌ 一鍵還原執行失敗: %s\n", errMsg)
 }
 
 func (l *Loop) rejectOversizedArgs(tc ollama.ToolCall) bool {
@@ -542,16 +474,13 @@ func (l *Loop) rejectOversizedArgs(tc ollama.ToolCall) bool {
 	p.Status = StatusRejected
 	l.saveProposal(p)
 	l.appendToolResult(tc, "ERROR: "+errMsg)
-	if l.cfg.TUI != nil {
-		l.cfg.TUI.SendToolResult(tc.Function.Name, errMsg, true)
-	}
 	return true
 }
 
 // buildProposal assembles the Proposal shown to the human: it extracts
 // metadata from the args, falls back to this turn's narration for a blank
-// rationale, upgrades the risk for apply-mode runs, notifies the TUI, and
-// runs the run_ansible/apply_playbook --check preview. It returns the
+// rationale, upgrades the risk for apply-mode runs, and runs the
+// run_ansible/apply_playbook --check preview. It returns the
 // proposal and the resolved host (needed later for per-host dedup).
 func (l *Loop) buildProposal(ctx context.Context, tc ollama.ToolCall, sanitizedArgs string, reversible bool) (*Proposal, string) {
 	host, rationale, risk, cis := extractProposalMeta(tc.Function.Arguments)
@@ -572,11 +501,6 @@ func (l *Loop) buildProposal(ctx context.Context, tc ollama.ToolCall, sanitizedA
 		cis,
 		reversible,
 	)
-
-	// Notify the TUI that a tool is about to be called (before approval).
-	if l.cfg.TUI != nil {
-		l.cfg.TUI.SendToolCall(tc.Function.Name, truncateArgs(string(sanitizedArgs), 200))
-	}
 
 	// For run_ansible / apply_playbook, run a real --check --diff pre-flight
 	// so the human sees the actual proposed changes before approving. Even
@@ -647,19 +571,13 @@ func (l *Loop) preExecSnapshot(ctx context.Context, tc ollama.ToolCall, sanitize
 	if !ok {
 		return nil, ""
 	}
-	if l.cfg.TUI == nil {
-		fmt.Fprintln(l.cfg.StreamWriter, "📸 正在建立 Docker 沙箱狀態快照...")
-	}
+	fmt.Fprintln(l.cfg.StreamWriter, "📸 正在建立 Docker 沙箱狀態快照...")
 	snapshotID, snapErr := snap.CreateSnapshot(ctx)
 	if snapErr != nil {
-		if l.cfg.TUI == nil {
-			fmt.Fprintf(l.cfg.StreamWriter, "⚠️  建立快照失敗: %v\n", snapErr)
-		}
+		fmt.Fprintf(l.cfg.StreamWriter, "⚠️  建立快照失敗: %v\n", snapErr)
 		return snap, ""
 	}
-	if l.cfg.TUI == nil {
-		fmt.Fprintf(l.cfg.StreamWriter, "✓ 快照建立成功: %s\n", snapshotID)
-	}
+	fmt.Fprintf(l.cfg.StreamWriter, "✓ 快照建立成功: %s\n", snapshotID)
 	return snap, snapshotID
 }
 
@@ -894,13 +812,6 @@ func truncate(s string, n int) string {
 	return s[:n] + "\n... [truncated]"
 }
 
-func truncateArgs(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
-
 // applySyntheticResult is called when a tool's Interceptor short-circuits
 // the actual execution (e.g. to surface a synthetic dry-run preview).
 // We mark the proposal as applied, persist the synthetic content, and
@@ -912,14 +823,6 @@ func (l *Loop) applySyntheticResult(tc ollama.ToolCall, p *Proposal, toolSpec *t
 	p.AppliedAt = &applied
 	l.saveProposal(p)
 	l.appendToolResult(tc, synth.Content)
-	if l.cfg.TUI != nil {
-		isErr := synth.IsError
-		sum := synth.Content
-		if len(sum) > 200 {
-			sum = sum[:200] + "…"
-		}
-		l.cfg.TUI.SendToolResult(tc.Function.Name, sum, isErr)
-	}
 	return DecisionApproved, nil
 }
 
@@ -941,9 +844,6 @@ func (l *Loop) recordDryRunSkip(tc ollama.ToolCall, p *Proposal, reason string) 
 		summary = summary[:200] + "…"
 	}
 	l.appendToolResult(tc, summary)
-	if l.cfg.TUI != nil {
-		l.cfg.TUI.SendToolResult(tc.Function.Name, summary, false)
-	}
 	return DecisionApproved, nil
 }
 

@@ -150,13 +150,12 @@ ansible-playbook playbooks/test/hello-localhost.yml
 
 ```bash
 echo '{"playbook":"'$(pwd)'/playbooks/test/hello-localhost.yml","connection":"local","check":true}' \
-  | ./pilot --config /tmp/pilot-cfg.yaml run --from-stdin --skip-syntax-check --no-tui
+  | ./pilot --config /tmp/pilot-cfg.yaml run --from-stdin --skip-syntax-check
 ```
 
 **預期輸出片段：**
 
 ```
-💡 TUI not available (no TTY), using promptui
 ▶ Starting run <UUID>
 [auto-approve medium] run_ansible on 
 ▶ 執行中: run_ansible ...
@@ -188,7 +187,7 @@ ansible-galaxy collection install community.docker
 echo '{"playbook":"'$(pwd)'/playbooks/test/hello-localhost.yml","connection":"local","check":true}' \
   | ./pilot --config /tmp/pilot-cfg.yaml run --from-stdin \
       --sandbox --sandbox-image geerlingguy/docker-ubuntu2204-ansible:latest \
-      --skip-syntax-check --no-tui
+      --skip-syntax-check
 ```
 
 **預期開頭**：
@@ -224,7 +223,7 @@ echo '{"playbook":"'$(pwd)'/playbooks/test/hello-localhost.yml","connection":"lo
   | ./pilot --config /tmp/pilot-cfg.yaml run --from-stdin \
       --sandbox --sandbox-image geerlingguy/docker-ubuntu2204-ansible:latest \
       --sandbox-mode docker-exec \
-      --skip-syntax-check --no-tui
+      --skip-syntax-check
 ```
 
 **底層差異**：

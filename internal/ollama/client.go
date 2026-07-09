@@ -9,15 +9,13 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
 type Client struct {
-	baseURL    string
-	model      string
-	embedModel string
-	http       *http.Client
+	baseURL string
+	model   string
+	http    *http.Client
 }
 
 // defaultHTTPTimeout caps any single Ollama HTTP call when the
@@ -32,19 +30,11 @@ const defaultHTTPTimeout = 2 * time.Minute
 
 func NewClient(baseURL, model string) *Client {
 	return &Client{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		model:      model,
-		embedModel: "nomic-embed-text", // sensible default
-		http:       &http.Client{Timeout: defaultHTTPTimeout},
+		baseURL: strings.TrimRight(baseURL, "/"),
+		model:   model,
+		http:    &http.Client{Timeout: defaultHTTPTimeout},
 	}
 }
-
-// SetEmbeddingModel overrides the embedding model used by Embeddings
-// and BatchEmbeddings. The default is "nomic-embed-text".
-func (c *Client) SetEmbeddingModel(m string) { c.embedModel = m }
-
-// EmbeddingModel returns the model currently used for embeddings.
-func (c *Client) EmbeddingModel() string { return c.embedModel }
 
 type Message struct {
 	Role       string     `json:"role"`
@@ -237,87 +227,6 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 		names = append(names, m.Name)
 	}
 	return names, nil
-}
-
-// EmbeddingRequest is the body of POST /api/embeddings.
-type EmbeddingRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-}
-
-// EmbeddingResponse is the response from /api/embeddings.
-type EmbeddingResponse struct {
-	Embedding []float32 `json:"embedding"`
-}
-
-// Embeddings returns the vector embedding of a single text using the
-// configured Ollama model. For batched embedding, use BatchEmbeddings.
-func (c *Client) Embeddings(ctx context.Context, text string) ([]float32, error) {
-	req := EmbeddingRequest{Model: c.embedModel, Prompt: text}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("ollama embeddings request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama embeddings returned %d: %s", resp.StatusCode, string(errBody))
-	}
-	var out EmbeddingResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	if len(out.Embedding) == 0 {
-		return nil, fmt.Errorf("ollama returned empty embedding (model=%s)", c.embedModel)
-	}
-	return out.Embedding, nil
-}
-
-// BatchEmbeddings calls Embeddings in parallel for each text. The
-// concurrency is capped at 4 to avoid overwhelming the Ollama server.
-// Results preserve the input order; if any single call fails the
-// error is returned and remaining results are discarded.
-func (c *Client) BatchEmbeddings(ctx context.Context, texts []string) ([][]float32, error) {
-	if len(texts) == 0 {
-		return nil, nil
-	}
-	const maxConc = 2
-	sem := make(chan struct{}, maxConc)
-	results := make([][]float32, len(texts))
-	errs := make([]error, len(texts))
-
-	var wg sync.WaitGroup
-	for i, t := range texts {
-		wg.Add(1)
-		go func(i int, text string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			vec, err := c.Embeddings(ctx, text)
-			if err != nil {
-				errs[i] = err
-				return
-			}
-			results[i] = vec
-		}(i, t)
-	}
-	wg.Wait()
-
-	for _, e := range errs {
-		if e != nil {
-			return nil, e
-		}
-	}
-	return results, nil
 }
 
 // Ping checks if the Ollama server is reachable

@@ -17,22 +17,19 @@ var AllowedCatPaths = append([]string{}, DefaultAllowedReadPrefixes...)
 // Pass nil for any dependency you don't want enabled — the corresponding tool
 // will still register but will return an error when invoked.
 func DefaultRegistry(ollamaClient *ollama.Client, runner *ansible.Runner, generatedDir, systemPrompt string) *Registry {
-	return DefaultRegistryWithDocs(ollamaClient, runner, generatedDir, systemPrompt, nil, nil, nil)
+	return DefaultRegistryWithDocs(ollamaClient, runner, generatedDir, systemPrompt, nil)
 }
 
 // DefaultRegistryWithDocs is like DefaultRegistry but additionally
-// registers a search_docs tool backed by the given module index,
-// playbook index, and playbook embedder. Any may be nil; the tool will
-// then return a helpful error for the side that wasn't built.
+// registers a search_docs tool backed by the given module index. It
+// may be nil; the tool will then return a helpful error when invoked.
 func DefaultRegistryWithDocs(
 	ollamaClient *ollama.Client,
 	runner *ansible.Runner,
 	generatedDir, systemPrompt string,
 	modIdx *docs.ModuleIndex,
-	pbIdx *docs.Index,
-	pbEmb docs.Embedder,
 ) *Registry {
-	return DefaultRegistryWithConfig(ollamaClient, runner, generatedDir, systemPrompt, modIdx, pbIdx, pbEmb, RegistryConfig{})
+	return DefaultRegistryWithConfig(ollamaClient, runner, generatedDir, systemPrompt, modIdx, RegistryConfig{})
 }
 
 // RegistryConfig allows callers to override default per-tool policies
@@ -87,8 +84,6 @@ func DefaultRegistryWithConfig(
 	runner *ansible.Runner,
 	generatedDir, systemPrompt string,
 	modIdx *docs.ModuleIndex,
-	pbIdx *docs.Index,
-	pbEmb docs.Embedder,
 	cfg RegistryConfig,
 ) *Registry {
 	r := NewRegistry()
@@ -214,7 +209,7 @@ func DefaultRegistryWithConfig(
 
 	// search_docs
 	{
-		t := NewSearchDocsTool(modIdx, pbIdx, pbEmb)
+		t := NewSearchDocsTool(modIdx)
 		spec := t.Spec()
 		spec.Execute = t.Execute
 		r.MustRegister(spec)

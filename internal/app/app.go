@@ -22,14 +22,12 @@ import (
 	"github.com/anomalyco/pilot/internal/config"
 	"github.com/anomalyco/pilot/internal/dockertarget"
 	"github.com/anomalyco/pilot/internal/docs"
-	"github.com/anomalyco/pilot/internal/logx"
 	"github.com/anomalyco/pilot/internal/ollama"
 	"github.com/anomalyco/pilot/internal/sandbox"
 	"github.com/anomalyco/pilot/internal/sanitizer"
 	"github.com/anomalyco/pilot/internal/store"
 	"github.com/anomalyco/pilot/internal/tools"
 	"github.com/anomalyco/pilot/internal/ui"
-	"github.com/anomalyco/pilot/internal/ui/tui"
 )
 
 // App holds the wired-up runtime stack. Methods are safe to call
@@ -41,7 +39,6 @@ type App struct {
 	Store     *store.Store
 	Sanitizer *sanitizer.Redactor
 	Approver  *ui.ConsoleApprover
-	TUI       *tui.Program
 	Runner    *ansible.Runner
 	// Env is the execution environment tools target. Always set
 	// (defaults to LocalEnvironment when sandbox is disabled).
@@ -50,20 +47,14 @@ type App struct {
 	// the docker CLI invocation honours the same cancellation as
 	// the rest of the app.
 	ctx context.Context
-	// logFile, when non-nil, is the diagnostic log slog was redirected to
-	// while the TUI owns the terminal (so warnings don't smear the UI).
-	// Closed and un-redirected in Close().
-	logFile *os.File
 }
 
 // Options controls how App is built. The zero value is usable and
-// means: build a stack with default Conservative registry wiring,
-// start the TUI if a TTY is attached, and surface the stderr banner.
+// means: build a stack with default Conservative registry wiring and
+// surface the stderr banner.
 type Options struct {
-	// NoTUI disables the TUI even on a TTY.
-	NoTUI bool
-	// Banner controls whether the "💡 TUI …" line is written to
-	// stderr on startup.
+	// Banner controls whether informational lines (e.g. sandbox
+	// status) are written to stderr on startup.
 	Banner bool
 	// Registry, if non-nil, is used as the tool registry verbatim
 	// instead of building one from cfg + AllowList defaults. This is
@@ -118,7 +109,7 @@ type Options struct {
 	SandboxMode string
 }
 
-// New constructs an App and starts the TUI (if applicable).
+// New constructs an App.
 // Close MUST be called when done.
 func New(ctx context.Context, cfg *config.Config, opt Options) (*App, error) {
 	if cfg == nil {
@@ -153,10 +144,8 @@ func New(ctx context.Context, cfg *config.Config, opt Options) (*App, error) {
 	}
 	redactor := sanitizer.NewWith(extraRules...)
 	runner := ansible.NewRunner()
-	if opt.NoTUI {
-		runner.StdoutWriter = os.Stdout
-		runner.StderrWriter = os.Stderr
-	}
+	runner.StdoutWriter = os.Stdout
+	runner.StderrWriter = os.Stderr
 
 	app := &App{
 		Cfg:       cfg,
@@ -183,39 +172,13 @@ func New(ctx context.Context, cfg *config.Config, opt Options) (*App, error) {
 		fmt.Fprintf(os.Stderr, "📦 sandbox active: %s\n", env.Name())
 	}
 
-	// TUI opt-in. --tui was not passed → NoTUI=true → skip the check entirely
-	// (no notice, no fallback message). --tui + TTY → Bubbletea. --tui + no
-	// TTY → fall back to promptui with the explanatory notice.
-	if opt.NoTUI {
-		// TUI explicitly disabled; stay silent.
-	} else if tui.IsSupported(uintptr(os.Stderr.Fd())) {
-		app.TUI = tui.New(st)
-		app.TUI.Start()
-		// The TUI owns the terminal now; slog diagnostics on stderr would
-		// smear the rendered UI. Redirect them to a logfile for the TUI's
-		// lifetime (restored in Close()).
-		if lf, err := os.OpenFile(filepath.Join(cfg.DataDir, "pilot.log"),
-			os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
-			app.logFile = lf
-			logx.Redirect(lf)
-		}
-		if opt.Banner {
-			fmt.Fprintln(os.Stderr, "💡 TUI active (Ctrl-C to quit, ? for help)")
-		}
-	} else if opt.Banner {
-		fmt.Fprintln(os.Stderr, "💡 TUI requested but no TTY available; using promptui")
-	}
-
 	app.Approver = ui.NewConsoleApprover(cfg.AutoApprove)
-	if app.TUI != nil {
-		app.Approver.WithTUI(app.TUI)
-	}
 
 	// Tool registry
 	if opt.Registry != nil {
 		app.Tools = opt.Registry
 	} else {
-		app.Tools = defaultRegistry(cfg, app.TUI, ollamaClient, runner, st, env)
+		app.Tools = defaultRegistry(cfg, ollamaClient, runner, st, env)
 	}
 	return app, nil
 }
@@ -353,7 +316,7 @@ func (a *App) SandboxImage() string {
 	return strings.TrimPrefix(name, prefix)
 }
 
-// Close releases owned resources (Env, Store, TUI). It is safe to
+// Close releases owned resources (Env, Store). It is safe to
 // call multiple times.
 
 // ResolveDockerTarget looks up a docker target by name and returns a
@@ -396,16 +359,6 @@ func (a *App) Close() {
 	if a == nil {
 		return
 	}
-	if a.TUI != nil {
-		a.TUI.Shutdown()
-		a.TUI = nil
-	}
-	if a.logFile != nil {
-		// TUI is down; send diagnostics back to stderr and close the file.
-		logx.Redirect(os.Stderr)
-		_ = a.logFile.Close()
-		a.logFile = nil
-	}
 	if a.Env != nil {
 		_ = a.Env.Stop(context.Background())
 		a.Env = nil
@@ -435,8 +388,7 @@ func mapAllowedCommands(cmds []config.CmdSpec) []tools.CmdSpec {
 }
 
 // NewLoop constructs an agent.Loop using the App's collaborators plus
-// the given runID and stream writer. The TUI is wired through both the
-// asker callback (RegistryConfig.Asker) and the TUIEmitter interface.
+// the given runID and stream writer.
 func (a *App) NewLoop(runID string, streamWriter io.Writer) *agent.Loop {
 	return a.NewLoopWithDefaults(runID, streamWriter, "", "")
 }
@@ -451,11 +403,6 @@ func (a *App) BuildRegistry(defaultInventory, defaultLimit string) *tools.Regist
 		DefaultLimit:     defaultLimit,
 		Env:              a.Env,
 		SandboxMode:      sandbox.ParseOrDefault(a.Cfg.Sandbox.Mode),
-	}
-	if a.TUI != nil {
-		cfgForTools.Asker = func(q string, opts []string) string {
-			return a.TUI.AskUser(q, opts)
-		}
 	}
 	if len(a.Cfg.AllowedReadPaths) > 0 {
 		cfgForTools.AllowedReadPaths = a.Cfg.AllowedReadPaths
@@ -492,19 +439,11 @@ func (a *App) BuildRegistry(defaultInventory, defaultLimit string) *tools.Regist
 			modIdx = nil
 		}
 	}
-	var pbIdx *docs.Index
-	pbIndexPath := docs.PathFor(a.Cfg.DataDir, docs.SourcePlaybook)
-	if _, err := os.Stat(pbIndexPath); err == nil {
-		pbIdx = docs.NewIndex()
-		_ = pbIdx.Load(pbIndexPath)
-	}
-	cachedEmb := NewCachedEmbedder(a.Ollama, a.Store)
-
 	return tools.DefaultRegistryWithConfig(
 		a.Ollama, a.Runner,
 		filepath.Join(a.Cfg.DataDir, "generated-playbooks"),
 		a.Cfg.SystemPrompt,
-		modIdx, pbIdx, cachedEmb,
+		modIdx,
 		cfgForTools,
 	)
 }
@@ -525,10 +464,6 @@ func (a *App) NewLoopWithDefaults(runID string, streamWriter io.Writer, defaultI
 		registry = a.BuildRegistry(defaultInventory, defaultLimit)
 	}
 
-	var tuiEmitter agent.TUIEmitter
-	if a.TUI != nil {
-		tuiEmitter = a.TUI
-	}
 	if streamWriter == nil {
 		streamWriter = os.Stderr
 	}
@@ -544,7 +479,6 @@ func (a *App) NewLoopWithDefaults(runID string, streamWriter io.Writer, defaultI
 		MaxIter:              a.Cfg.MaxIter,
 		SystemPrompt:         a.Cfg.SystemPrompt,
 		StreamWriter:         streamWriter,
-		TUI:                  tuiEmitter,
 		Runner:               a.Runner,
 		Env:                  a.Env,
 		AllowDisposableApply: a.Cfg.AllowDisposableApply,
@@ -554,7 +488,7 @@ func (a *App) NewLoopWithDefaults(runID string, streamWriter io.Writer, defaultI
 // defaultRegistry builds the conservative-default registry used by
 // the CLI. It mirrors what the previous setupRun/newAgentLoop pair
 // built; tests that need different behaviour should pass opt.Registry.
-func defaultRegistry(cfg *config.Config, tp *tui.Program, oc *ollama.Client, runner *ansible.Runner, st *store.Store, env sandbox.Environment) *tools.Registry {
+func defaultRegistry(cfg *config.Config, oc *ollama.Client, runner *ansible.Runner, st *store.Store, env sandbox.Environment) *tools.Registry {
 	regCfg := tools.RegistryConfig{Store: st, Env: env, SandboxMode: sandbox.ParseOrDefault(cfg.Sandbox.Mode)}
 	if len(cfg.AllowedReadPaths) > 0 {
 		regCfg.AllowedReadPaths = cfg.AllowedReadPaths
@@ -583,12 +517,6 @@ func defaultRegistry(cfg *config.Config, tp *tui.Program, oc *ollama.Client, run
 	}
 	regCfg.AllowedCommands = mapAllowedCommands(cfg.AllowedCommands)
 
-	if tp != nil {
-		regCfg.Asker = func(q string, opts []string) string {
-			return tp.AskUser(q, opts)
-		}
-	}
-
 	var modIdx *docs.ModuleIndex
 	blevePath := filepath.Join(cfg.DataDir, "docs.bleve")
 	if _, err := os.Stat(blevePath); err == nil {
@@ -597,19 +525,11 @@ func defaultRegistry(cfg *config.Config, tp *tui.Program, oc *ollama.Client, run
 			modIdx = nil
 		}
 	}
-	var pbIdx *docs.Index
-	pbIndexPath := docs.PathFor(cfg.DataDir, docs.SourcePlaybook)
-	if _, err := os.Stat(pbIndexPath); err == nil {
-		pbIdx = docs.NewIndex()
-		_ = pbIdx.Load(pbIndexPath)
-	}
-	cachedEmb := NewCachedEmbedder(oc, st)
-
 	return tools.DefaultRegistryWithConfig(
 		oc, runner,
 		filepath.Join(cfg.DataDir, "generated-playbooks"),
 		cfg.SystemPrompt,
-		modIdx, pbIdx, cachedEmb,
+		modIdx,
 		regCfg,
 	)
 }

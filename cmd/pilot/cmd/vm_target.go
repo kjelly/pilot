@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/anomalyco/pilot/internal/ansible"
 	"github.com/anomalyco/pilot/internal/sandbox"
 	"github.com/anomalyco/pilot/internal/vmtarget"
 )
@@ -85,6 +86,13 @@ var (
 	vtSSHTimeout    time.Duration
 	vtBootTimeout   time.Duration
 	vtKeepOnFailure bool
+
+	// run batch/preflight flags (see runVtRun)
+	vtDiscover        string
+	vtFromStdin       bool
+	vtFailFast        bool
+	vtSkipSyntaxCheck bool
+	vtSkipLint        bool
 )
 
 // resolveVMDir returns the directory where per-target qcow2/seed live.
@@ -281,13 +289,28 @@ Use --sandbox to run ansible-playbook inside a Docker container instead of
 on the host. The container image comes from the config (sandbox.image) or
 can be overridden with --sandbox-image. The VM's SSH key is automatically
 mounted into the container, so ansible can reach the VM over SSH without
-any host-side ansible installation.`,
-	Args:               cobra.MinimumNArgs(1),
+any host-side ansible installation.
+
+Batch / preflight (no LLM agent involved — plain ansible-playbook, run
+directly by whatever is driving pilot):
+  --discover 'playbooks/*.yml'   glob pattern or directory of playbooks
+  --from-stdin                   read playbook paths from stdin (one per line)
+  --fail-fast                    with --from-stdin/--discover, stop on first failure
+  --skip-syntax-check            skip the ansible-playbook --syntax-check preflight
+  --skip-lint                    skip the ansible-lint preflight`,
+	Args:               cobra.ArbitraryArgs,
 	DisableFlagParsing: true,
 	RunE:               runVtRun,
 }
 
-func init() { vtRunCmd.Flags().StringVar(&vtName, "name", "", "target name") }
+func init() {
+	vtRunCmd.Flags().StringVar(&vtName, "name", "", "target name")
+	vtRunCmd.Flags().StringVar(&vtDiscover, "discover", "", "glob pattern or directory to discover playbooks")
+	vtRunCmd.Flags().BoolVar(&vtFromStdin, "from-stdin", false, "read playbook paths from stdin (one per line)")
+	vtRunCmd.Flags().BoolVar(&vtFailFast, "fail-fast", false, "with --from-stdin/--discover, stop on first failure")
+	vtRunCmd.Flags().BoolVar(&vtSkipSyntaxCheck, "skip-syntax-check", false, "skip ansible-playbook --syntax-check preflight")
+	vtRunCmd.Flags().BoolVar(&vtSkipLint, "skip-lint", false, "skip ansible-lint preflight")
+}
 
 // extractBoolFlag scans args for a boolean flag (e.g. "--sandbox"),
 // removes it from the slice and returns whether it was found.
@@ -345,26 +368,118 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 		useSandbox = true
 	}
 
+	// Parse batch/preflight flags before forwarding the rest to ansible.
+	var fromStdin, failFast, skipSyntax, skipLint bool
+	var discover string
+	args, fromStdin = extractBoolFlag(args, "--from-stdin")
+	args, failFast = extractBoolFlag(args, "--fail-fast")
+	args, skipSyntax = extractBoolFlag(args, "--skip-syntax-check")
+	args, skipLint = extractBoolFlag(args, "--skip-lint")
+	args, discover = extractValueFlag(args, "--discover")
+
+	// Resolve the playbook(s) to run and the extra args shared across
+	// the whole batch (e.g. -e foo=bar, --tags ...). No LLM/agent
+	// involved here — this mirrors `pilot run`'s --discover/--from-stdin
+	// resolution (see resolveTargets in run.go) but skips everything
+	// that only makes sense for the agent loop (proposals, audit log,
+	// dry-run).
+	var playbooks []string
+	var extra []string
+	switch {
+	case fromStdin:
+		targets, err := readTargetsFromStdin("", "")
+		if err != nil {
+			return err
+		}
+		for _, tg := range targets {
+			playbooks = append(playbooks, tg.Playbook)
+		}
+		extra = args
+	case discover != "":
+		targets, err := discoverTargets(discover, "", "")
+		if err != nil {
+			return err
+		}
+		for _, tg := range targets {
+			playbooks = append(playbooks, tg.Playbook)
+		}
+		extra = args
+	default:
+		if len(args) < 1 {
+			return fmt.Errorf("no playbook specified; pass a positional arg, --from-stdin, or --discover")
+		}
+		playbooks = []string{args[0]}
+		extra = args[1:]
+	}
+
 	t, cleanup, invPath, err := vtStageInventory()
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	playbook := args[0]
-	extra := args[1:]
-	ansibleArgs := []string{playbook, "-i", invPath}
-	if !extraHasTargetGroup(extra) {
-		ansibleArgs = append(ansibleArgs, "-l", t.Name)
-	}
-	ansibleArgs = append(ansibleArgs, extra...)
+	runner := ansible.NewRunner()
+	ctx := context.Background()
+	batch := len(playbooks) > 1
+	failed := 0
+	for i, playbook := range playbooks {
+		prefix := ""
+		if batch {
+			prefix = fmt.Sprintf("[%d/%d] ", i+1, len(playbooks))
+		}
 
-	if useSandbox {
-		return vtRunViaContainer(cmd, t, playbook, invPath, ansibleArgs, sandboxImage)
+		ansibleArgs := []string{playbook, "-i", invPath}
+		if !extraHasTargetGroup(extra) {
+			ansibleArgs = append(ansibleArgs, "-l", t.Name)
+		}
+		ansibleArgs = append(ansibleArgs, extra...)
+
+		lintIssues, perr := syntaxCheckAndLint(ctx, runner, playbook, ansibleArgs, skipSyntax, skipLint)
+		if lintIssues != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠️  ansible-lint found issues in %s:\n%s\n", playbook, indentString(lintIssues, 4))
+		}
+		if perr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %s✗ %s (%v)\n", prefix, playbook, perr)
+			failed++
+			if !batch {
+				return perr
+			}
+			if failFast {
+				break
+			}
+			continue
+		}
+
+		fmt.Fprintf(cmd.ErrOrStderr(), "▶ %sansible-playbook %s\n", prefix, strings.Join(ansibleArgs, " "))
+		var runErr error
+		if useSandbox {
+			runErr = vtRunViaContainer(cmd, t, playbook, invPath, ansibleArgs, sandboxImage)
+		} else {
+			runErr = execAnsiblePlaybook(cmd.OutOrStdout(), ansibleArgs...)
+		}
+		if runErr != nil {
+			failed++
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %s✗ %s\n", prefix, playbook)
+			if !batch {
+				return runErr
+			}
+			if failFast {
+				break
+			}
+			continue
+		}
+		if batch {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %s✓ %s\n", prefix, playbook)
+		}
 	}
 
-	fmt.Fprintf(cmd.ErrOrStderr(), "▶ ansible-playbook %s\n", strings.Join(ansibleArgs, " "))
-	return execAnsiblePlaybook(cmd.OutOrStdout(), ansibleArgs...)
+	if batch {
+		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Batch complete: %d/%d succeeded\n", len(playbooks)-failed, len(playbooks))
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d/%d playbook runs failed", failed, len(playbooks))
+	}
+	return nil
 }
 
 // containerFixPermsScript builds the /bin/sh script run inside the sandbox

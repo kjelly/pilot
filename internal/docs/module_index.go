@@ -14,6 +14,35 @@ import (
 	"github.com/blevesearch/bleve/v2/mapping"
 )
 
+// Match is a search hit: the index of the matched chunk plus its score.
+type Match struct {
+	Index int
+	Score float64
+}
+
+// Meta is the metadata stored alongside the module docs index. Used
+// to detect whether the index needs rebuilding (e.g. ansible-core
+// version changed).
+type Meta struct {
+	AnsibleVersion string `json:"ansible_version"`
+	ModuleCount    int    `json:"module_count"`
+	ChunkCount     int    `json:"chunk_count"`
+	// VersionHash is a content-derived identifier we compare against
+	// a freshly-computed hash to decide whether to rebuild.
+	VersionHash string `json:"version_hash"`
+	BuiltAt     string `json:"built_at"`
+}
+
+// PathFor returns the canonical on-disk path for the legacy
+// (pre-bleve) module docs index file, kept around only so
+// `pilot index-docs` can detect and delete it on upgrade.
+func PathFor(dataDir string, source Source) string {
+	if source == SourceModule {
+		return filepath.Join(dataDir, "docs-index.json")
+	}
+	return filepath.Join(dataDir, "index-"+string(source)+".json")
+}
+
 // ModuleIndex is a BM25-backed index over Ansible module chunks.
 // Backed by bleve; one bleve document per Chunk (per module-section).
 // Pure text — no embedding model required.

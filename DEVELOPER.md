@@ -135,7 +135,6 @@ The check uses the same inventory and limit as the actual run, so role-level err
 | `pilot chat` | Interactive REPL — multi-turn conversation with the agent |
 | `pilot diagnose <log-file>` | One-shot LLM analysis of an Ansible log file |
 | `pilot index-docs` | Build the local Ansible module documentation RAG index |
-| `pilot index-playbooks [dir...]` | Index user playbooks for RAG search |
 | `pilot search-docs <query>` | Search the local RAG index |
 | `pilot models` | List available Ollama models |
 | `pilot version` | Print version |
@@ -150,7 +149,6 @@ The check uses the same inventory and limit as the actual run, so role-level err
 | `--auto-approve` | `never` | `low` / `medium` / `never` — auto-approve by risk level. **Caution**: `medium` will auto-approve any proposal whose risk is low OR medium, including write-class tool calls. Apply-mode playbooks are always escalated to `high` regardless. |
 | `--data-dir` | `~/.local/share/pilot` | Where proposals, db, generated playbooks live |
 | `--config` | (none) | Path to YAML config file |
-| `--no-tui` | `false` | Force-disable the TUI (use promptui fallback) |
 
 ### `run` subcommand flags
 
@@ -158,7 +156,6 @@ The check uses the same inventory and limit as the actual run, so role-level err
 |------|---------|-------------|
 | `-i, --inventory` | (none) | Ansible inventory file |
 | `--limit` | (none) | Limit to host pattern |
-| `--execution-mode` | `serial` | Reserved for future use; pilot currently always runs serially. |
 | `--from-stdin` | `false` | Read playbook paths from stdin (auto-detects JSON Lines) |
 | `--discover` | (none) | Glob pattern or directory to discover playbooks |
 | `--dry-run-all` | `false` | Run full agent loop, no system changes |
@@ -174,15 +171,15 @@ The check uses the same inventory and limit as the actual run, so role-level err
 cmd/pilot/             CLI entry + cobra subcommands
 internal/
   config/              YAML config + defaults + system prompt
-  ollama/              HTTP client for /api/chat, /api/embeddings, streaming, function calling
+  ollama/              HTTP client for /api/chat, streaming, function calling
   sanitizer/           Pre-LLM secret redaction (passwords, keys, shadow, IPs, email)
   store/               SQLite (modernc.org/sqlite, pure Go, no CGO)
                         - runs, proposals, host_failure_seen, agent_messages
   tools/               Tool registry + 7 default tools (incl. search_docs)
   ansible/             Thin wrapper around ansible-playbook subprocess
   agent/               ReAct loop, Proposal type, per-host failure dedup, dry-run
-  ui/                  Terminal approver (promptui) + bubbletea TUI
-  docs/                RAG: ansible-doc source, chunker, bleve (BM25) module index, vector playbook index, LRU cache
+  ui/                  Terminal approver (promptui)
+  docs/                RAG: ansible-doc source, chunker, bleve (BM25) module index
 ansible_callback/
   pilot_diagnose.py    Ansible callback plugin
 ```
@@ -197,40 +194,28 @@ ansible_callback/
 | `generate_playbook` | low | LLM generates a single Ansible task YAML, written to disk |
 | `ask_user` | none | Asks you a question and waits for an answer |
 | `run_inspec` | low | Runs `inspec exec` and summarizes failed controls |
-| `search_docs` | low | Searches the local RAG index of Ansible docs + user playbooks |
+| `search_docs` | low | Searches the local bleve (BM25) index of Ansible module docs |
 
 ## RAG: local Ansible documentation
 
 `pilot` can answer "what's the right module / syntax for X" without
-ever hitting the network. The RAG pipeline has two backends, kept
-deliberately separate:
+ever hitting the network. Ansible module docs are indexed into a
+bleve (BM25) index. One bleve document per module-section chunk.
+English analyzer (Porter stemming + English stopwords). **No
+embedding model is required.** Lives at `~/.local/share/pilot/docs.bleve`.
 
-1. **Ansible module docs** → bleve (BM25) index. One bleve document per
-   module-section chunk. English analyzer (Porter stemming + English
-   stopwords). **No embedding model is required.** Lives at
-   `~/.local/share/pilot/docs.bleve`.
-2. **User playbooks** → legacy vector index (cosine similarity over
-   Ollama embeddings). Lives at `~/.local/share/pilot/playbooks-index.json`.
-   Requires an Ollama embedding model (default `nomic-embed-text`).
-
-The two are merged by score when `search_docs` is called with
-`source="all"`. The tool returns `{ref, section, score, snippet}` per
-hit — enough for the LLM to decide whether to fetch more context.
+The tool returns `{ref, section, score, snippet}` per hit — enough
+for the LLM to decide whether to fetch more context.
 
 ### First-time setup
 
 ```bash
-# 1. Build the module docs index (bleve BM25, 30-90 sec; no embedding)
+# Build the module docs index (bleve BM25, 30-90 sec; no embedding)
 pilot index-docs
-
-# 2. (Optional) Index your own playbooks
-ollama pull nomic-embed-text    # only if you want playbook RAG
-pilot index-playbooks ./playbooks/
 ```
 
 The module index lives at `~/.local/share/pilot/docs.bleve` and is
-~40 MB for the full Ansible module set. The playbook index is
-`playbooks-index.json` and grows with your content.
+~40 MB for the full Ansible module set.
 
 ### Auto-rebuild
 
@@ -243,25 +228,20 @@ or `--strict-index`.
 ```bash
 # CLI: ad-hoc lookup
 pilot search-docs "disable root ssh login"
-pilot search-docs "auditd rule syntax" --k 3 --source modules
+pilot search-docs "auditd rule syntax" --k 3
 
 # From the agent: the LLM calls search_docs as a tool
-# when it needs module syntax or to recall prior playbooks.
+# when it needs module syntax.
 ```
 
 ### Hybrid search note
 
 The module index is pure BM25 — no vector similarity, no hybrid scoring.
-This was a deliberate trade-off:
-
-- BM25 is **fast and offline** (no embedding calls, no Ollama round-trip).
-- For the kinds of queries the LLM makes against Ansible docs
-  ("`lineinfile` regexp syntax", "`service` state values"), BM25 with
-  English stemming actually outperforms dense retrieval because the
-  vocabulary is precise.
-- Vector retrieval remains in use for the **playbook** index, where
-  descriptions can be paraphrased and free-form Chinese-English mixes
-  benefit from semantic matching.
+This was a deliberate trade-off: BM25 is **fast and offline** (no
+embedding calls, no Ollama round-trip), and for the kinds of queries
+the LLM makes against Ansible docs ("`lineinfile` regexp syntax",
+"`service` state values"), BM25 with English stemming actually
+outperforms dense retrieval because the vocabulary is precise.
 
 If you want to experiment with vector + BM25 fusion for the module
 index, the `ModuleIndex` struct in `internal/docs/module_index.go` is
