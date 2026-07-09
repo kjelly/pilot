@@ -33,17 +33,56 @@
 #                           "/boot"]. Overridable per-host (host_vars) so
 #                           different hosts can watch different paths.
 #   wazuh_repo_channel      default: "4.x"
+#
+# Stage gating (same convention as freeipa-server-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
 - name: Apply wazuh-fim (Wazuh agent FIM/syscheck whodata + auditd who-data + optional manager enrollment)
   hosts: "{{ target_group | default('wazuh-fim') }}"
   become: true
   gather_facts: true
   vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
     wazuh_fim_directories: ["/etc", "/boot"]
     wazuh_repo_channel: "4.x"
     wazuh_manager_alias: wazuh-manager
     wazuh_ossec_conf: /var/ossec/etc/ossec.conf
     wazuh_client_keys: /var/ossec/etc/client.keys
     wazuh_enrollment_enabled: "{{ (wazuh_manager_host | default('')) | length > 0 }}"
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
+          target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
+          且要跟這台機器所屬的環境 group 一致。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
   tasks:
     - name: "Step 0: Report whether manager enrollment is enabled this run"
       ansible.builtin.debug:

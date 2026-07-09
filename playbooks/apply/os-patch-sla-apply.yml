@@ -41,6 +41,17 @@
             (patch_stage == 'staging' and confirm_staging | bool) or
             (patch_stage == 'prod' and confirm_prod | bool)
         fail_msg: "patch_stage={{ patch_stage }} but confirm flag is false. Pass -e confirm_staging=true / confirm_prod=true to actually patch."
+    - name: "Gate: patch_stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and patch_stage != 'prod')
+          - not ('staging' in group_names and patch_stage != 'staging')
+          - not (patch_stage in ['staging', 'prod'] and patch_stage not in group_names)
+        fail_msg: >-
+          patch_stage={{ patch_stage }} 與 {{ inventory_hostname }} 的 inventory 環境
+          group 不一致(group_names: {{ group_names }})。inventory 的 staging/prod
+          group 只是給 target_group 篩選用的標籤,不會自動決定 patch_stage——必須自己
+          帶對的 -e patch_stage=,且要跟這台機器所屬的環境 group 一致。
     - name: "Gate: prod requires recent staging attestation"
       ansible.builtin.assert:
         that:

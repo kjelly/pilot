@@ -63,6 +63,15 @@ restic_s3_target_host: ""
 #   restic_backup_paths: ["/etc", "/var/lib/ipa/backup"]
 #   restic_backup_pre_hook: "ipa-backup --data --logs"
 #
+#   # host_vars/ipa-2.yml(FreeIPA replica,見
+#   # docs/verification/freeipa-server-replica.md;同一個角色的第二台,備份
+#   # 手法與 ipa-1 相同——每台 replica 各自有自己的 389-ds data 目錄,
+#   # `ipa-backup` 是本機操作,不會因為是 replica 就少做這一步。此組合
+#   # 尚未在 vm-target 沙盒實測「備份 → 故障 → 還原」,套用到正式 replica
+#   # 前建議先跑一次確認,跟 apply playbook 本身一樣是 v0.1 未實跑狀態)
+#   restic_backup_paths: ["/etc", "/var/lib/ipa/backup"]
+#   restic_backup_pre_hook: "ipa-backup --data --logs"
+#
 #   # host_vars/keycloak-db-1.yml(Keycloak 的 PostgreSQL:不能直接複製執行
 #   # 中的 data 目錄,先 pg_dump 成靜態檔案再讓 restic 備份那個檔案)
 #   restic_backup_paths: ["/etc", "/var/backups/keycloak-db"]
