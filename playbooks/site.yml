@@ -85,7 +85,7 @@
 
 # ── 4. SSH 走 OIDC 登入(需先有 Keycloak)────────────────────────────────
 - import_playbook: apply/pam-oidc-sshd-apply.yml
-  tags: [pam, oidc]
+  tags: [pam, oidc, pam-oidc-sshd]
 
 # ── 5. 中央稽核日誌接收(log-server)→ 主機稽核 + 轉送 ─────────────────
 - import_playbook: apply/log-server-apply.yml

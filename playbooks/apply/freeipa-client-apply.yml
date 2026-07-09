@@ -194,6 +194,25 @@
       when: not ansible_check_mode
       tags: [freeipa-client, C9]
 
+    - name: "FreeIPA client — install SSSD cache tools (Debian)"
+      ansible.builtin.apt:
+        name: sssd-tools
+        state: present
+        update_cache: true
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
+      tags: [freeipa-client, C8]
+
+    - name: "FreeIPA client — install SSSD cache tools (RedHat)"
+      ansible.builtin.dnf:
+        name: sssd-tools
+        state: present
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'RedHat'
+      tags: [freeipa-client, C8]
+
     - name: "FreeIPA client — detect prior enrollment ({{ ipa_config_marker }})"
       ansible.builtin.stat:
         path: "{{ ipa_config_marker }}"
@@ -256,13 +275,25 @@
       when: not ansible_check_mode
       tags: [freeipa-client, C8]
 
+    - name: "FreeIPA client — ensure SSSD uses IPA as the sudo provider"
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: '^sudo_provider\s*='
+        line: "sudo_provider = ipa"
+        insertafter: '^ipa_domain\s*='
+        state: present
+        create: false
+      register: ipa_sssd_sudo_provider
+      when: not ansible_check_mode
+      tags: [freeipa-client, C8]
+
     - name: "FreeIPA client — restart SSSD after wiring sudo (only if sssd.conf changed)"
       ansible.builtin.systemd:
         name: sssd
         state: restarted
       when:
         - not ansible_check_mode
-        - ipa_sssd_services is changed
+        - ipa_sssd_services is changed or ipa_sssd_sudo_provider is changed
       tags: [freeipa-client, C8]
 
     - name: "FreeIPA client — enable + start SSSD (survives reboot)"
