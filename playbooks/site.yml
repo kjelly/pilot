@@ -52,7 +52,33 @@
 #  -e seaweedfs_s3_config_path=<s3.json>(identity 設定)——SeaweedFS 預設的
 #  匿名模式只接受完全不簽章的請求,restic 一律送簽章請求,兩者不相容,見
 #  docs/runbooks/restic-backup.md §5。
+#
+#  注意:`target_group` 是每支 apply playbook「單獨」執行時的覆寫用途(例如對
+#  vm-target 單機測試 -e target_group=all),所有 apply playbook 共用同一個
+#  變數名稱。全站入口(這支 site.yml)因此**禁止**帶 -e target_group=——
+#  它會同時覆寫下面每一支子 playbook 的目標 group,讓「沒填 hosts 的角色不會
+#  被套用」這條保護整個失效(見下方安全閥)。要限定機器,改用 --limit <host>。
 # ============================================================================
+
+# ── -1. 安全閥:全站入口禁止帶 target_group(見上方說明)───────────────────
+- name: "site.yml 安全閥:target_group 不能在全站入口使用"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Gate: target_group must not be set when running the aggregate site.yml"
+      ansible.builtin.assert:
+        that:
+          - target_group is not defined
+        fail_msg: >-
+          偵測到 -e target_group={{ target_group | default('') }}。target_group 是
+          「單支 apply playbook」的覆寫用途,site.yml 全站套用時不能帶這個變數——
+          它會同時覆寫全部子 playbook 的目標 group,讓「沒填 hosts 的角色不會被
+          套用」這條保護整個失效(未填的角色也會被套用到不該套用的機器上)。要
+          限定機器,改用 --limit <host>,或直接調整 inventory.yml 的角色 group
+          成員;要單獨測試某支 playbook,直接執行該支 apply playbook 並在那裡
+          帶 -e target_group=。
+      tags: [always]
 
 # ── 0. 前置檢查(一律先跑)───────────────────────────────────────────────
 - import_playbook: preflight.yml
