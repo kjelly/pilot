@@ -56,12 +56,13 @@
       ansible.builtin.debug:
         msg: "wazuh_fim_directories={{ wazuh_fim_directories }}"
 
-    - name: "Step 1: Ensure /usr/share/keyrings exists"
+    - name: "Step 1: Ensure /usr/share/keyrings exists (Debian apt)"
       tags: [C1]
       ansible.builtin.file:
         path: /usr/share/keyrings
         state: directory
         mode: "0755"
+      when: ansible_os_family == 'Debian'
 
     - name: "Step 2: Import Wazuh apt GPG key (idempotent via creates:)"
       tags: [C1]
@@ -70,6 +71,7 @@
         chmod 644 /usr/share/keyrings/wazuh.gpg
       args:
         creates: /usr/share/keyrings/wazuh.gpg
+      when: ansible_os_family == 'Debian'
 
     - name: "Step 3: Add Wazuh apt repository"
       tags: [C1]
@@ -80,8 +82,22 @@
         group: root
         mode: "0644"
       register: wazuh_repo_file
+      when: ansible_os_family == 'Debian'
 
-    - name: "Step 4: Install wazuh-agent + auditd (spec C1, C2)"
+    - name: "Step 3: Add Wazuh yum repository"
+      tags: [C1]
+      ansible.builtin.yum_repository:
+        name: wazuh
+        description: "EL-$releasever - Wazuh"
+        baseurl: "https://packages.wazuh.com/{{ wazuh_repo_channel }}/yum/"
+        enabled: true
+        gpgcheck: true
+        gpgkey: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+        protect: true
+      register: wazuh_yum_repo
+      when: ansible_os_family == 'RedHat'
+
+    - name: "Step 4: Install wazuh-agent + auditd (Debian apt; spec C1, C2)"
       tags: [C1, C2]
       ansible.builtin.apt:
         name: [wazuh-agent, auditd]
@@ -90,6 +106,18 @@
       register: apt_wazuh_agent
       until: apt_wazuh_agent is succeeded
       retries: 2
+      when: ansible_os_family == 'Debian'
+
+    - name: "Step 4: Install wazuh-agent + auditd (RedHat yum; spec C1, C2)"
+      tags: [C1, C2]
+      ansible.builtin.dnf:
+        name: [wazuh-agent, audit]
+        state: present
+        update_cache: "{{ wazuh_yum_repo is changed }}"
+      register: dnf_wazuh_agent
+      until: dnf_wazuh_agent is succeeded
+      retries: 2
+      when: ansible_os_family == 'RedHat'
 
     - block:
         - name: "Step 5: Append FIM whodata syscheck block to ossec.conf (spec C5, C6)"

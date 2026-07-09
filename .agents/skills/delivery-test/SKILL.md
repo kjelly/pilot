@@ -68,72 +68,103 @@ ls /var/lib/libvirt/images/pilot/
 
 ## 2. Configure Inventory, Group Vars, and Vault
 
-### 2.1 Inventory Setup (`inventory.yml`)
+### 2.1 Inventory Setup (`/tmp/pilot-delivery-test/inventory.yml`)
 
-> **CRITICAL**: Use the **actual IPs** from `vm-target list` output. Static IPs like `192.168.122.2/3/4` may not match your actual VM assignments.
+> **CRITICAL**: Use the **actual IPs** from `vm-target list` output. Static IPs like `192.168.122.2/3/4` may not match your actual VM assignments. Do not overwrite an existing repo `inventory.yml`; generate a temporary delivery inventory from the current VM facts.
 
-Create the target inventory:
+Capture the actual IPs and create the target inventory:
 ```bash
-cp inventory.example.yml inventory.yml
+mkdir -p /tmp/pilot-delivery-test
+IPA_IP=$(go run ./cmd/pilot vm-target list | awk '$1 == "ipa-1" {print $3}')
+WEB1_IP=$(go run ./cmd/pilot vm-target list | awk '$1 == "web-1" {print $3}')
+WEB2_IP=$(go run ./cmd/pilot vm-target list | awk '$1 == "web-2" {print $3}')
+
+cat > /tmp/pilot-delivery-test/inventory.yml <<EOF
+---
+all:
+  hosts:
+    ipa-1:
+      ansible_host: ${IPA_IP}
+      ansible_user: root
+      ansible_ssh_private_key_file: /var/lib/libvirt/images/pilot/ipa-1/id_ed25519
+      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      ipa_server_ip: ${IPA_IP}
+    web-1:
+      ansible_host: ${WEB1_IP}
+      ansible_user: ubuntu
+      ansible_ssh_private_key_file: /var/lib/libvirt/images/pilot/web-1/id_ed25519
+      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    web-2:
+      ansible_host: ${WEB2_IP}
+      ansible_user: ubuntu
+      ansible_ssh_private_key_file: /var/lib/libvirt/images/pilot/web-2/id_ed25519
+      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  children:
+    freeipa:
+      children:
+        freeipa-server:
+          hosts:
+            ipa-1:
+        freeipa-client:
+          hosts:
+            web-2:
+    docker:
+      hosts:
+        web-1:
+    wazuh-manager:
+      hosts:
+        web-1:
+    wazuh-fim:
+      hosts:
+        ipa-1:
+        web-1:
+        web-2:
+    seaweedfs-s3:
+      hosts:
+        web-1:
+    restic-backup:
+      hosts:
+        web-1:
+        web-2:
+        ipa-1:
+    prometheus:
+      hosts:
+        web-1:
+    audit-log-forwarding:
+      hosts:
+        ipa-1:
+        web-1:
+        web-2:
+    linux-servers:
+      hosts:
+        web-1:
+        web-2:
+EOF
+
+ansible-inventory -i /tmp/pilot-delivery-test/inventory.yml --graph
 ```
-
-Edit `inventory.yml` to reflect the **actual VM IPs and SSH configs**:
-- Replace IPs with the actual IPs from `vm-target list`.
-- Use the **pilot VM-specific keys** from `/var/lib/libvirt/images/pilot/<name>/id_ed25519` — NOT your personal `~/.ssh/id_rsa` or `~/.ssh/id_ed25519`.
-- The example below shows placeholder IPs — **replace with your actual IPs**:
-
-  ```yaml
-  ipa-1:
-    ansible_host: "<ACTUAL-IPA-1-IP>"    # e.g. 192.168.122.2
-    ansible_user: root
-    ansible_ssh_private_key_file: /var/lib/libvirt/images/pilot/ipa-1/id_ed25519
-    ansible_ssh_common_args: -o StrictHostKeyChecking=no
-    ipa_server_ip: "<ACTUAL-IPA-1-IP>"
-  web-1:
-    ansible_host: "<ACTUAL-WEB-1-IP>"     # e.g. 192.168.122.3
-    ansible_user: ubuntu
-    ansible_ssh_private_key_file: /var/lib/libvirt/images/pilot/web-1/id_ed25519
-    ansible_ssh_common_args: -o StrictHostKeyChecking=no
-  web-2:
-    ansible_host: "<ACTUAL-WEB-2-IP>"     # e.g. 192.168.122.4
-    ansible_user: ubuntu
-    ansible_ssh_private_key_file: /var/lib/libvirt/images/pilot/web-2/id_ed25519
-    ansible_ssh_common_args: -o StrictHostKeyChecking=no
-  ```
-
-- Assign hosts to children groups according to roles:
-  - `freeipa-server`: `ipa-1`
-  - `freeipa-client`: `web-2`
-  - `dns`: (Leave empty; Native FreeIPA installs its own DNS/bind)
-  - `ntp`: (Leave empty; Native IPA manages its own time sync)
-  - `docker`: `web-1`
-  - `wazuh-manager`: `web-1`
-  - `wazuh-fim`: `ipa-1`, `web-1`, `web-2`
-  - `seaweedfs-s3`: `web-1`
-  - `restic-backup`: `web-1`, `web-2`, `ipa-1` (backup all nodes to S3 on web-1)
-  - `prometheus`: `web-1`
-  - `audit-log-forwarding`: `ipa-1`, `web-1`, `web-2`
 
 > [!NOTE]
-> Since `wazuh-manager` is enabled, the `log-server` (rsyslog SIEM receiver) is automatically disabled to prevent port 514/udp binding conflicts. Wazuh Manager serves as the primary syslog receiver instead.
-> Also, Keycloak and PAM OIDC are excluded from delivery verification.
+> Since `wazuh-manager` is enabled, the `log-server` (rsyslog SIEM receiver) is omitted to prevent port 514/udp binding conflicts. Wazuh Manager serves as the primary syslog receiver instead.
+> Keycloak and PAM OIDC are excluded from delivery verification.
 
-### 2.2 Group Vars Setup
+### 2.2 Runtime Vars
 
-Prepare the configuration files:
+For this disposable delivery test, pass the VM-specific values as `-e` flags instead of modifying repo `group_vars/*.yml`:
+
 ```bash
-cp group_vars/freeipa.example.yml group_vars/freeipa.yml
-cp group_vars/audit-log-forwarding.example.yml group_vars/audit-log-forwarding.yml
-cp group_vars/wazuh-fim.example.yml group_vars/wazuh-fim.yml
-cp group_vars/restic-backup.example.yml group_vars/restic-backup.yml
-cp group_vars/prometheus.example.yml group_vars/prometheus.yml
+-e freeipa_server_ip=${IPA_IP} \
+-e siem_forward_host=${WEB1_IP} \
+-e wazuh_manager_host=${WEB1_IP} \
+-e restic_s3_target_host=${WEB1_IP} \
+-e seaweedfs_s3_config_path=/etc/seaweedfs/s3.json \
+-e prometheus_site_label=site-test \
+-e thanos_s3_target_host=${WEB1_IP}
 ```
 
-Fill in correct configurations using **actual VM IPs**:
-- **`freeipa.yml`**: Set `freeipa_server_ip` to the actual IP of `ipa-1`.
-- **`audit-log-forwarding.yml`**: Set `siem_forward_host` to the actual IP of `web-1`.
-- **`wazuh-fim.yml`**: Set `wazuh_manager_host` to the actual IP of `web-1`.
-- **`restic-backup.yml`**: Set `restic_s3_target_host` to the actual IP of `web-1` (where SeaweedFS S3 runs).
+This keeps the working tree clean and prevents stale `group_vars` IPs from accidentally targeting the wrong VM.
 
 ### 2.3 Vault Setup
 
@@ -159,47 +190,11 @@ ansible-vault encrypt ~/.vault/vault.yaml --vault-password-file ~/.vault/vault-p
 
 ## 3. Apply the Site Playbook
 
-### 3.1 Pre-configuration: S3 Credentials File
+### 3.1 S3 Credentials Handling
 
-> **CRITICAL**: Before running `site.yml`, you **MUST** deploy the S3 credentials file (`s3.json`) to `web-1`. Without this, SeaweedFS starts in anonymous mode, which rejects restic's signed requests, causing all restic backup tasks to fail with `Signed request requires setting up SeaweedFS S3 authentication` or `ciphertext verification failed`.
+Do **not** manually create or scp `s3.json`. `playbooks/apply/seaweedfs-s3-apply.yml` creates `/etc/seaweedfs`, renders `s3.json` from the vaulted `restic_aws_access_key_id` / `restic_aws_secret_access_key`, and mounts it into SeaweedFS when `-e seaweedfs_s3_config_path=/etc/seaweedfs/s3.json` is passed.
 
-The `s3.json` credentials **must match** the `restic_aws_access_key_id` and `restic_aws_secret_access_key` in your vault file.
-
-Create and deploy the credentials file:
-```bash
-# Get actual IPs first
-IPA_IP=$(go run ./cmd/pilot vm-target list | grep ipa-1 | awk '{print $3}')
-WEB1_IP=$(go run ./cmd/pilot vm-target list | grep 'web-1 ' | awk '{print $3}')
-WEB2_IP=$(go run ./cmd/pilot vm-target list | grep 'web-2 ' | awk '{print $3}')
-
-# Create s3.json with credentials matching vault.yaml
-# Replace "your-access-key" and "your-secret-key" with the actual values from vault.yaml
-cat > /tmp/s3.json << EOF
-{
-  "identities": [
-    {
-      "name": "pilot-user",
-      "credentials": [
-        {
-          "accessKey": "your-access-key",
-          "secretKey": "your-secret-key"
-        }
-      ],
-      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
-    }
-  ]
-}
-EOF
-
-# Deploy to web-1 (use pilot VM key for SSH)
-scp -i /var/lib/libvirt/images/pilot/web-1/id_ed25519 \
-    -o StrictHostKeyChecking=no \
-    /tmp/s3.json ubuntu@${WEB1_IP}:/tmp/
-
-# Move to final location with sudo
-go run ./cmd/pilot vm-target exec --name web-1 -- sudo mv /tmp/s3.json /etc/seaweedfs/s3.json
-go run ./cmd/pilot vm-target exec --name web-1 -- sudo chmod 644 /etc/seaweedfs/s3.json
-```
+Manual `/tmp/s3.json` handling leaks secrets into shell history/temp files and fails on fresh hosts before `/etc/seaweedfs` exists.
 
 ### 3.2 Execute complete site rollout
 
@@ -207,13 +202,19 @@ Deploy the core code while skipping `keycloak` and `pam-oidc-sshd`:
 
 ```bash
 ansible-playbook -e "ansible_python_interpreter=/usr/bin/python3" \
-  playbooks/site.yml -i inventory.yml \
+  playbooks/site.yml -i /tmp/pilot-delivery-test/inventory.yml \
   -e @~/.vault/vault.yaml --vault-password-file ~/.vault/vault-pass \
+  -e freeipa_server_ip=${IPA_IP} \
+  -e siem_forward_host=${WEB1_IP} \
+  -e wazuh_manager_host=${WEB1_IP} \
+  -e restic_s3_target_host=${WEB1_IP} \
   -e seaweedfs_s3_config_path=/etc/seaweedfs/s3.json \
-  --skip-tags "keycloak,keycloak-db,keycloak-idp,pam-oidc-sshd"
+  -e prometheus_site_label=site-test \
+  -e thanos_s3_target_host=${WEB1_IP} \
+  --skip-tags "keycloak,keycloak-db,keycloak-idp,pam,oidc,pam-oidc-sshd"
 ```
 
-> **NOTE**: The `seaweedfs_s3_config_path` parameter tells `seaweedfs-s3-apply.yml` to start SeaweedFS with the credentials file, enabling signed S3 requests that restic requires. This must be deployed **before** `site.yml` runs (Step 3.1), otherwise SeaweedFS starts anonymous and restic will fail.
+> **NOTE**: The `seaweedfs_s3_config_path` parameter tells `seaweedfs-s3-apply.yml` to render and start SeaweedFS with the credentials file, enabling signed S3 requests that restic requires. Do not omit it when `restic-backup` is in the inventory.
 
 ---
 
@@ -225,7 +226,7 @@ ansible-playbook -e "ansible_python_interpreter=/usr/bin/python3" \
    ```bash
    ansible-playbook -e "ansible_python_interpreter=/usr/bin/python3" \
      playbooks/test/fixtures/freeipa-client-fixtures.yml \
-     -i inventory.yml \
+     -i /tmp/pilot-delivery-test/inventory.yml \
      -e @~/.vault/vault.yaml --vault-password-file ~/.vault/vault-pass
    ```
 
@@ -259,11 +260,11 @@ ansible-playbook -e "ansible_python_interpreter=/usr/bin/python3" \
 1. **Prometheus Deployment**: Prometheus requires `prometheus_site_label` to be set. To deploy Prometheus:
    ```bash
    ansible-playbook -e "ansible_python_interpreter=/usr/bin/python3" \
-     playbooks/apply/prometheus-apply.yml -i inventory.yml \
+     playbooks/apply/prometheus-apply.yml -i /tmp/pilot-delivery-test/inventory.yml \
      -e @~/.vault/vault.yaml --vault-password-file ~/.vault/vault-pass \
      -e seaweedfs_s3_config_path=/etc/seaweedfs/s3.json \
      -e prometheus_site_label=site-test \
-  -e thanos_s3_target_host=<web-1-IP>
+     -e thanos_s3_target_host=${WEB1_IP}
    ```
 
 2. **Query Prometheus** (after deployment):
@@ -281,9 +282,7 @@ go run ./cmd/pilot vm-target exec --name web-2 -- bash -c "sudo sh -c '. /etc/pi
 # Expected Output: lists at least 1 backup snapshot of path `/etc`
 ```
 
-> **If restic fails with `ciphertext verification failed`**: This means the S3 bucket was previously initialized with a different password. To fix, you must either:
-> 1. Delete the `pilot-restic-backup` S3 bucket on web-1 and re-run `site.yml`, OR
-> 2. Ensure the `restic_password` in vault.yaml matches the password used in any previous initialization.
+> **If restic fails with `ciphertext verification failed`**: This means the S3 bucket was previously initialized with a different password, or an older playbook allowed multiple hosts to race through `restic init` on the same fresh repository. Fix the playbook to initialize the repository once, then delete the disposable test bucket and re-run `site.yml`.
 >
 > To delete and recreate the bucket:
 > ```bash
@@ -326,8 +325,9 @@ go run ./cmd/pilot vm-target down --name ipa-1
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `rest ic-backup` fails with `Signed request requires setting up SeaweedFS S3 authentication` | `s3.json` not deployed before `site.yml` | Follow §3.1 to deploy credentials, then re-run `site.yml` |
-| `restic-backup` fails with `ciphertext verification failed` | S3 bucket was initialized with a different `restic_password` | Delete `pilot-restic-backup` bucket and re-run `site.yml` |
+| `restic-backup` fails with `Signed request requires setting up SeaweedFS S3 authentication` | `seaweedfs_s3_config_path` was omitted or SeaweedFS started without the rendered identity config | Pass `-e seaweedfs_s3_config_path=/etc/seaweedfs/s3.json` so `seaweedfs-s3-apply.yml` renders and mounts `s3.json`, then re-run `site.yml` |
+| `restic-backup` fails with `ciphertext verification failed` | Either the bucket was initialized with a different `restic_password`, or multiple hosts raced to initialize the same fresh repository | Ensure `restic-backup-apply.yml` has single-host repository initialization, then delete/recreate the test bucket and re-run `site.yml` |
 | `preflight` fails with `Permission denied (publickey)` | Wrong SSH key used | Use pilot VM-specific key: `/var/lib/libvirt/images/pilot/<name>/id_ed25519` |
 | `prometheus-apply.yml` fails with `prometheus_site_label is required` | Missing required variable | Add `-e prometheus_site_label=site-test` to the command |
 | FreeIPA sudo test fails with `user does not exist` | Wrong shell used to run `sudo runuser` | Use `bash -c "sudo runuser -u pilotuser -- sudo -n id"` (SSH escape issue with `sudo runuser` via `pilot exec`) |
+| FreeIPA sudo test says `User pilotuser is not allowed` | Client sudo policy cache or SSSD sudo provider did not converge | Confirm `/etc/nsswitch.conf` has `sudoers: files sss`, `/etc/sssd/sssd.conf` has `services = nss, pam, ssh, sudo` and `sudo_provider = ipa`, then restart SSSD / run `sss_cache -E` if available |

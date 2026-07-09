@@ -238,6 +238,21 @@
           changed_when: false
           failed_when: false
 
+        # On a fresh shared S3 repository, every host sees "no repository"
+        # at the same time. Let exactly one host run `restic init` before the
+        # parallel backup step, otherwise simultaneous init corrupts the
+        # repository metadata and later commands fail with ciphertext
+        # verification errors.
+        - name: "Step 10a: Initialize the shared restic repository once if needed"
+          ansible.builtin.shell: |
+            . {{ restic_env_path }}
+            export HOME=/root
+            timeout 60 restic snapshots >/dev/null 2>&1 || timeout 60 restic init
+          register: restic_repository_init_result
+          changed_when: "'created restic repository' in (restic_repository_init_result.stdout + restic_repository_init_result.stderr)"
+          run_once: true
+          delegate_to: "{{ ansible_play_hosts_all | first }}"
+
         # restic-backup.service is Type=oneshot: `systemctl start` blocks
         # until it finishes, so this task IS the "run one backup now" step —
         # not a fire-and-forget trigger. Only runs when needed (no snapshot
@@ -250,6 +265,7 @@
           ansible.builtin.systemd:
             name: restic-backup.service
             state: started
+          throttle: 1
           when: >-
             restic_existing_snapshots.rc != 0
             or '"short_id"' not in restic_existing_snapshots.stdout
