@@ -1,0 +1,415 @@
+# Apply playbook for docs/verification/freeipa-server-replica.md
+#
+# Joins a SECOND (or Nth) native EL9 host to an EXISTING FreeIPA realm as a
+# multi-master replica, so account/Kerberos/sudo directory service survives
+# the loss of any single node (see freeipa-server-apply.yml for the primary).
+#
+# FreeIPA replication is MULTI-MASTER, not primary/secondary: once promoted,
+# this host is a fully read-write peer of the existing server — there is no
+# "standby" role. That is the whole point of running this playbook.
+#
+# FLOW (the modern "client-then-promote" path, not the legacy
+# ipa-replica-prepare/--replica-file bundle path):
+#   1. ipa-client-install  — enroll this host as an ORDINARY client of the
+#      existing realm (identical mechanics to freeipa-client-apply.yml).
+#   2. ipa-replica-install — promote the now-enrolled client into a replica.
+#      Authenticates with --principal/--admin-password (no manual `kinit`
+#      step, no Directory Manager password needed in this mode).
+#
+# WHY client-then-promote: it is the flow FreeIPA upstream has recommended
+# since domain level 1 (4.4+) — no replica-file bundle to generate on the
+# primary and copy over, no separate DM password plumbing. `ipa-server`
+# already pulls in the client bits, so one package install covers both
+# steps.
+#
+# ⚠ REQUIRED MANUAL PRE-STEP (no built-in DNS in this pilot): before running
+# this playbook, pin THIS host's FQDN/IP into /etc/hosts on the PRIMARY (and
+# every other existing replica). `ipa-replica-install` makes the primary
+# connect BACK to this host during its own conncheck; without DNS, the
+# primary cannot resolve this host's FQDN and the install fails with
+# `ERROR: Port check failed! Unable to resolve host name '<this-host-fqdn>'`.
+# This playbook only touches ITS OWN /etc/hosts — it has no connection to the
+# primary to edit that host's files (a vm-target's generated inventory only
+# ever contains the one target it was invoked against). Confirmed by an
+# actual failed run; see docs/verification/freeipa-server-replica.md §0/§5.
+#
+# NOT in scope of this playbook (see docs/verification/freeipa-server-replica.md
+# §5 for the full list — read it before treating a replica as "done"):
+#   * CA renewal-master handoff — a replica with --setup-ca becomes a CA
+#     replica, but the CA RENEWAL role stays on whichever server had it
+#     (initially the primary) until an operator explicitly moves it
+#     (`ipa config-mod --ca-renewal-master-server=...`). This playbook does
+#     NOT move it, ever — that is a deliberate, occasional operator action,
+#     not something to automate silently.
+#   * DNS / NTP consistency across nodes — `ipa_setup_dns`/`ipa_setup_ntp`
+#     here mirror the SAME two knobs on the primary (freeipa-server-apply.yml)
+#     but are NOT read from the primary automatically. If the primary runs
+#     built-in DNS and this replica doesn't (or vice versa), SRV-based
+#     discovery breaks silently for clients that rely on it. Keeping them in
+#     sync across every node in the topology is the operator's job.
+#   * Client-side failover — SSSD on enrolled clients needs to know about
+#     every server (either via DNS SRV, if `ipa_setup_dns` is on everywhere,
+#     or an explicit multi-value `ipa_server` list in sssd.conf). Adding a
+#     replica here does NOT retrofit existing clients' sssd.conf.
+#   * Removing/decommissioning a replica — requires `ipa-replica-manage del`
+#     (or `ipa server-del` in modern releases) run from a SURVIVING node to
+#     clean up replication agreements; a replica that is simply powered off
+#     leaves a stale topology entry. Not automated here.
+#   * 389-ds directory-service audit log parity (see freeipa-server-apply.yml's
+#     `freeipa-audit` task) — not wired into this playbook yet.
+#
+# Secrets: ipa_admin_password comes from a vault file, NEVER hard-coded (the
+# enroll and promote tasks are no_log):
+#   -e @~/.vault/main.yaml
+#
+# Usage:
+#
+#   ansible-playbook -i inventory-freeipa.yaml \
+#       playbooks/apply/freeipa-server-replica-apply.yml \
+#       -e ipa_server_ip=<PRIMARY LAN IP> \
+#       -e ipa_replica_ip=<THIS HOST'S LAN IP> \
+#       -e @~/.vault/main.yaml \
+#       --check --diff
+#
+#   # against a pilot vm-target (host lives in group `all`, not
+#   # freeipa-server-replica):
+#   pilot vm-target run --name alma-vm-2 playbooks/apply/freeipa-server-replica-apply.yml \
+#       -e target_group=all -e ipa_server_ip=<primary-vm-ip> \
+#       -e ipa_replica_ip=<this-vm-ip> -e @~/.vault/main.yaml
+#
+# Stage gating (same convention as freeipa-server-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: FreeIPA server replica join (multi-master HA)
+  hosts: "{{ target_group | default('freeipa-server-replica') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    # Realm coordinates — MUST match the existing primary exactly (see
+    # freeipa-server.md §1.5). Reuses the SAME variable names/meaning as
+    # freeipa-client-apply.yml: ipa_server_ip/ipa_server_fqdn point at the
+    # EXISTING server this host enrolls against, not at itself.
+    ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+    ipa_server_ip: "{{ freeipa_server_ip | default(ansible_host) }}"
+    ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
+    ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
+
+    # This host's OWN identity (the replica being created). Named
+    # analogously to ipa_server_ip/ipa_server_fqdn on freeipa-server-apply.yml,
+    # but for "this" host instead of "the server we enroll against".
+    ipa_replica_ip: "{{ freeipa_replica_ip | default(ansible_host) }}"
+    ipa_replica_fqdn: "{{ freeipa_replica_fqdn | default('ipa2.' ~ ipa_domain) }}"
+
+    # Enrollment principal — reuses the same admin creds as the server vault.
+    ipa_enroll_principal: admin
+    ipa_enroll_password: "{{ ipa_admin_password }}"
+
+    # Replica-side options. ipa_setup_dns/ipa_setup_ntp reuse the EXACT same
+    # names as freeipa-server-apply.yml (same meaning: "does THIS node run
+    # it"); they do NOT auto-inherit the primary's setting — see header note.
+    ipa_replica_setup_ca: "{{ freeipa_replica_setup_ca | default(true) }}"
+    ipa_setup_dns: "{{ freeipa_setup_dns | default(false) }}"
+    ipa_dns_forwarders: "{{ freeipa_dns_forwarders | default([]) }}"
+    ipa_setup_ntp: "{{ freeipa_setup_ntp | default(false) }}"
+
+    # Native install — same package as the primary; ipa-server already
+    # depends on the client bits needed for step 1 (ipa-client-install).
+    ipa_packages: "{{ ['ipa-server'] + (['ipa-server-dns'] if ipa_setup_dns | bool else []) }}"
+
+    # Distinct marker files per step (see the two `creates:` tasks below for
+    # why /etc/ipa/default.conf alone can't distinguish "enrolled as plain
+    # client" from "promoted to replica" — both leave that file behind).
+    ipa_client_log_marker: /var/log/ipaclient-install.log
+    # NOT the install LOG (that file is written the instant ipa-replica-install
+    # STARTS, success or failure — using it as `creates:` would make a failed
+    # run look "already done" and silently skip every retry, which is exactly
+    # what happened on the first live run of this playbook, see
+    # docs/verification/freeipa-server-replica.md §0). The 389-ds instance
+    # directory only exists once the Directory Server component has actually
+    # been set up (by either ipa-server-install OR a SUCCESSFUL
+    # ipa-replica-install) — a plain `ipa-client-install` never creates it.
+    ipa_ds_instance: "slapd-{{ ipa_realm | replace('.', '-') }}"
+    ipa_replica_config_marker: "/etc/dirsrv/{{ ipa_ds_instance }}"
+    ipa_replica_log_marker: /var/log/ipareplica-install.log
+    ipa_config_marker: /etc/ipa/default.conf
+
+    ipa_enroll_timeout_s: 300
+    ipa_replica_install_timeout_s: 900   # first promotion runs 8-12 min, same order as ipa-server-install
+
+  pre_tasks:
+    - name: "Gate: required vars present (fail early, before any mutation)"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+          - ipa_server_ip is defined and ipa_server_ip | length > 0
+          - ipa_replica_ip is defined and ipa_replica_ip | length > 0
+        fail_msg: >-
+          Missing required vars. Pass -e ipa_server_ip=<PRIMARY LAN IP>,
+          -e ipa_replica_ip=<THIS HOST'S LAN IP>, and a vault file with
+          ipa_admin_password (>=8 chars), e.g. -e @~/.vault/main.yaml
+      tags: [always]
+
+    - name: "Gate: this playbook installs FreeIPA NATIVELY — require EL9 host"
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'RedHat'
+          - (ansible_distribution_major_version | int) >= 9
+        fail_msg: >-
+          freeipa-server-replica-apply installs ipa-server natively and REQUIRES
+          an Enterprise-Linux 9 host (AlmaLinux / Rocky / RHEL 9). Detected
+          {{ ansible_distribution }} {{ ansible_distribution_version }}.
+          Bring up an EL9 target, e.g. `pilot vm-target up --base-image almalinux-9`.
+      tags: [always]
+
+    - name: "Gate: this host must not be the primary itself"
+      ansible.builtin.assert:
+        that:
+          - ipa_replica_fqdn != ipa_server_fqdn
+          - ipa_replica_ip != ipa_server_ip
+        fail_msg: >-
+          ipa_replica_fqdn/ipa_replica_ip must differ from ipa_server_fqdn/
+          ipa_server_ip — this playbook joins a NEW node to an EXISTING
+          server, it does not re-run against the primary itself.
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
+          target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
+          且要跟這台機器所屬的環境 group 一致。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)"
+      ansible.builtin.command: systemctl is-active chronyd ntpd
+      register: ipa_ntp_check
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: "Warn if no active time sync (joins with --no-ntp; ntp role must cover this)"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: no active chronyd/ntpd on this host ({{ ipa_ntp_check.stdout | default('') }}).
+          Apply the `ntp`(chrony) role first, and make sure it agrees with the
+          PRIMARY's clock — Kerberos auth fails on skew > 5 min across the
+          whole realm, not just this node.
+      when: (not ipa_setup_ntp | bool) and ('active' not in (ipa_ntp_check.stdout | default('')))
+      tags: [always]
+
+  tasks:
+    # Both this host's own FQDN and the PRIMARY's FQDN must resolve to
+    # non-loopback addresses (no built-in DNS by default — same constraint as
+    # freeipa-client-apply.yml). Pin BOTH before changing the hostname so
+    # `sudo` doesn't stall on a broken reverse lookup mid-play.
+    - name: "FreeIPA replica — pin this host {{ ipa_replica_fqdn }} to {{ ipa_replica_ip }} in /etc/hosts (FQDN canonical)"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ ipa_replica_fqdn | regex_escape }}(\s|$)'
+        line: "{{ ipa_replica_ip }} {{ ipa_replica_fqdn }} {{ ipa_replica_fqdn.split('.')[0] }}"
+        state: present
+        create: false
+      tags: [freeipa-replica, R1]
+
+    - name: "FreeIPA replica — pin the PRIMARY {{ ipa_server_fqdn }} to {{ ipa_server_ip }} in /etc/hosts"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ ipa_server_fqdn | regex_escape }}(\s|$)'
+        line: "{{ ipa_server_ip }} {{ ipa_server_fqdn }} {{ ipa_server_fqdn.split('.')[0] }}"
+        state: present
+        create: false
+      tags: [freeipa-replica, R1]
+
+    - name: "FreeIPA replica — set system hostname to {{ ipa_replica_fqdn }} (after /etc/hosts pin so sudo stays fast)"
+      ansible.builtin.hostname:
+        name: "{{ ipa_replica_fqdn }}"
+      tags: [freeipa-replica, R1]
+
+    - name: "FreeIPA replica — install ipa-server package (also provides ipa-client-install for step 1)"
+      ansible.builtin.dnf:
+        name: "{{ ipa_packages }}"
+        state: present
+      when: not ansible_check_mode
+      tags: [freeipa-replica, R1]
+
+    # Step 1/2 — enroll as an ORDINARY client of the existing realm. Gated on
+    # its OWN log marker (not /etc/ipa/default.conf, which a later replica
+    # promotion also creates/keeps — see ipa_client_log_marker comment above).
+    - name: "FreeIPA replica — step 1/2: ipa-client-install (enroll into {{ ipa_realm }})"
+      ansible.builtin.command:
+        argv:
+          - ipa-client-install
+          - "-U"
+          - "--server={{ ipa_server_fqdn }}"
+          - "--domain={{ ipa_domain }}"
+          - "--realm={{ ipa_realm }}"
+          - "--principal={{ ipa_enroll_principal }}"
+          - "--password={{ ipa_enroll_password }}"
+          - "--hostname={{ ipa_replica_fqdn }}"
+          - "--no-ntp"
+          - "--no-dns-sshfp"
+          - "--force-join"
+        creates: "{{ ipa_client_log_marker }}"
+      register: ipa_replica_enroll
+      no_log: true
+      when: not ansible_check_mode
+      tags: [freeipa-replica, R1]
+
+    # Step 2/2 — promote the enrolled client to a full multi-master replica.
+    # `-w/--admin-password` authenticates the promotion itself (creating the
+    # replication agreement needs more than the host's own machine keytab);
+    # no Directory Manager password is needed in this client-then-promote
+    # flow. Gated on ipa_replica_config_marker (the local 389-ds instance
+    # dir) so a rerun after a successful promotion is a clean no-op — see
+    # that var's own comment for why the install LOG is the wrong marker.
+    # NOTE — no NTP flags here: `ipa-replica-install` REJECTS `--no-ntp`/
+    # `--ntp-server`/etc with "NTP configuration cannot be updated during
+    # promotion" whenever the host is ALREADY an enrolled client (our
+    # client-then-promote flow always hits this branch, since step 1/2 just
+    # enrolled it). NTP was already decided by ipa-client-install's own
+    # `--no-ntp` above; promotion mode has no separate NTP knob. Confirmed by
+    # an actual failed run against a live primary+replica pair — see
+    # docs/verification/freeipa-server-replica.md §0 for the real log.
+    - name: "FreeIPA replica — step 2/2: ipa-replica-install (promote; first run 8-12 min)"
+      ansible.builtin.command:
+        argv: "{{ ipa_replica_install_args }}"
+        creates: "{{ ipa_replica_config_marker }}"
+      vars:
+        ipa_replica_install_base_args:
+          - ipa-replica-install
+          - "-U"
+          - "--principal={{ ipa_enroll_principal }}"
+          - "--admin-password={{ ipa_admin_password }}"
+        ipa_replica_install_ca_args: "{{ ['--setup-ca'] if ipa_replica_setup_ca | bool else [] }}"
+        ipa_replica_install_dns_args: >-
+          {{
+            ['--setup-dns'] + (
+              ['--no-forwarders'] if (ipa_dns_forwarders | length == 0)
+              else (ipa_dns_forwarders | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
+            )
+            if ipa_setup_dns | bool
+            else []
+          }}
+        ipa_replica_install_args: >-
+          {{ ipa_replica_install_base_args + ipa_replica_install_ca_args
+             + ipa_replica_install_dns_args }}
+      register: ipa_replica_install
+      no_log: true
+      when: not ansible_check_mode
+      tags: [freeipa-replica, R2]
+
+    - name: "FreeIPA replica — enable + start ipa.service (survives reboot)"
+      ansible.builtin.systemd:
+        name: ipa
+        state: started
+        enabled: true
+      when: not ansible_check_mode
+      tags: [freeipa-replica, R2]
+
+    - name: "FreeIPA replica — bring-up health + replication checks"
+      when: not ansible_check_mode
+      tags: [freeipa-replica, freeipa-replica-verify]
+      block:
+        - name: "FreeIPA replica — wait until all IPA services RUNNING"
+          ansible.builtin.command: ipactl status
+          register: ipa_replica_health
+          changed_when: false
+          until: >-
+            ipa_replica_health.rc == 0 and
+            'STOPPED' not in ipa_replica_health.stdout and
+            'FAILED' not in ipa_replica_health.stdout
+          retries: "{{ (ipa_replica_install_timeout_s | int) // 15 }}"
+          delay: 15
+          failed_when: false
+
+        - name: "FreeIPA replica — show last ipactl status when still not healthy"
+          ansible.builtin.debug:
+            var: ipa_replica_health.stdout_lines
+          when: (ipa_replica_health.rc | default(1)) != 0
+
+        - name: "FreeIPA replica — fail loudly if services never came up"
+          ansible.builtin.assert:
+            that:
+              - ipa_replica_health.rc == 0
+              - "'STOPPED' not in ipa_replica_health.stdout"
+              - "'FAILED' not in ipa_replica_health.stdout"
+            fail_msg: >-
+              ipactl status never reported healthy within
+              {{ ipa_replica_install_timeout_s }}s. Last output:
+              {{ ipa_replica_health.stdout | default('(none)') }}
+
+        # cn=masters,cn=ipa,cn=etc is NOT anonymously readable (unlike the
+        # sudoers compat tree) — confirmed live: anonymous `-x` returns
+        # "result: 0 Success" with ZERO entries even when the data is
+        # present. Needs a root bind; `become: true` at the play level
+        # already makes this task run as root, so SASL/EXTERNAL over the
+        # local ldapi socket autobinds without any password (same technique
+        # freeipa-server-apply.yml's `dsconf` audit-log tasks rely on).
+        - name: "FreeIPA replica — final check: topology synced both ways (this replica + the PRIMARY both in cn=masters)"
+          ansible.builtin.command: >-
+            ldapsearch -Y EXTERNAL -H ldapi://%2Frun%2F{{ ipa_ds_instance }}.socket
+            -b "cn=masters,cn=ipa,cn=etc,{{ 'dc=' + ipa_domain.replace('.', ',dc=') }}"
+            -s sub dn
+          register: ipa_replica_masters
+          changed_when: false
+          failed_when: >-
+            ("cn=" + ipa_server_fqdn) not in (ipa_replica_masters.stdout | default('')) or
+            ("cn=" + ipa_replica_fqdn) not in (ipa_replica_masters.stdout | default(''))
+
+      rescue:
+        - name: "FreeIPA replica — rescue: dump ipactl status"
+          ansible.builtin.command: ipactl status
+          register: ipa_replica_rescue_status
+          changed_when: false
+          failed_when: false
+
+        - name: "FreeIPA replica — rescue: tail replica-install log"
+          ansible.builtin.command: tail -n 60 "{{ ipa_replica_log_marker }}"
+          register: ipa_replica_rescue_log
+          changed_when: false
+          failed_when: false
+
+        - name: "FreeIPA replica — rescue: surface diagnostics + fail"
+          ansible.builtin.fail:
+            msg: |
+              FreeIPA replica join FAILED. Diagnostics:
+              --- ipactl status ---
+              {{ ipa_replica_rescue_status.stdout | default('(unavailable)') }}
+              {{ ipa_replica_rescue_status.stderr | default('') }}
+              --- {{ ipa_replica_log_marker }} (tail 60) ---
+              {{ ipa_replica_rescue_log.stdout | default('(unavailable)') }}
+              Common causes: PRIMARY {{ ipa_server_fqdn }} unreachable from this
+              host (check /etc/hosts + network path to {{ ipa_server_ip }});
+              clock skew between this host and the primary (Kerberos needs
+              < 5 min across the WHOLE realm); a half-finished prior enroll/
+              promote (run `ipa-server-install --uninstall -U` then rerun this
+              playbook from scratch).
