@@ -179,6 +179,9 @@ pilot vm-target topology up        --spec ha-topology.yaml
 pilot vm-target topology status    --spec ha-topology.yaml
 pilot vm-target topology inventory --spec ha-topology.yaml
 pilot vm-target topology down      --spec ha-topology.yaml
+pilot vm-target topology snapshot  --spec ha-topology.yaml --tag pre-drill
+pilot vm-target topology rollback  --spec ha-topology.yaml --tag pre-drill
+pilot vm-target topology reset     --spec ha-topology.yaml
 ```
 
 - `up` provisions every not-yet-running node **concurrently** -- one
@@ -204,6 +207,14 @@ pilot vm-target topology down      --spec ha-topology.yaml
   requires every node to already be `running`.
 - `status` prints a name/status/ip/groups/wire table for just this
   spec's nodes, without needing to grep `vm-target list`.
+- `snapshot`/`rollback`/`reset` apply the single-VM operation of the same
+  name to every node in the spec concurrently -- for checkpointing or
+  restoring an entire scenario at once (e.g. "can replica-install rerun
+  from a clean cluster?") instead of resetting each VM by hand and
+  re-running `wire` yourself. Because the "clean" snapshot `up` captures
+  automatically predates wiring, `rollback`/`reset` re-apply every node's
+  declared `wire:` peers afterward; `snapshot` doesn't need to, since it
+  never touches disk state.
 
 ## Disk sizing
 

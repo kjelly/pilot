@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -50,6 +51,9 @@ peers to pin into its /etc/hosts:
   pilot vm-target topology inventory --spec ha.yaml
   pilot vm-target topology status    --spec ha.yaml
   pilot vm-target topology down      --spec ha.yaml
+  pilot vm-target topology snapshot  --spec ha.yaml --tag pre-drill
+  pilot vm-target topology rollback  --spec ha.yaml --tag pre-drill
+  pilot vm-target topology reset     --spec ha.yaml
 
 'up' provisions every not-yet-running node CONCURRENTLY (one goroutine +
 one *vmtarget.Manager per node — Manager.Up holds its own in-process
@@ -62,12 +66,21 @@ TestUp_ConcurrentDifferentNames_BothPersist). An already-running node
 (matching name) is left alone (idempotent — safe to re-run 'up' after
 adding a node to the spec). Wiring runs after every node is up, since
 it needs every peer's final IP.
+
+'snapshot'/'rollback'/'reset' apply the equivalent single-VM operation to
+every node in the spec concurrently, so you can checkpoint or restore an
+entire multi-VM scenario (e.g. "can replica-install rerun cleanly?")
+without hand-tracking each node's snapshot state. Because the "clean"
+snapshot 'up' takes automatically predates wiring, 'rollback' and 'reset'
+re-apply every node's declared 'wire:' peers afterward — 'snapshot' does
+not, since it doesn't touch disk state.
 `,
 }
 
 var (
 	vtTopoSpecPath string
 	vtTopoOut      string
+	vtTopoTag      string
 )
 
 func init() {
@@ -76,12 +89,74 @@ func init() {
 	vtTopologyCmd.AddCommand(vtTopologyDownCmd)
 	vtTopologyCmd.AddCommand(vtTopologyInventoryCmd)
 	vtTopologyCmd.AddCommand(vtTopologyStatusCmd)
+	vtTopologyCmd.AddCommand(vtTopologySnapshotCmd)
+	vtTopologyCmd.AddCommand(vtTopologyRollbackCmd)
+	vtTopologyCmd.AddCommand(vtTopologyResetCmd)
 
-	for _, c := range []*cobra.Command{vtTopologyUpCmd, vtTopologyDownCmd, vtTopologyInventoryCmd, vtTopologyStatusCmd} {
+	allTopoCmds := []*cobra.Command{
+		vtTopologyUpCmd, vtTopologyDownCmd, vtTopologyInventoryCmd, vtTopologyStatusCmd,
+		vtTopologySnapshotCmd, vtTopologyRollbackCmd, vtTopologyResetCmd,
+	}
+	for _, c := range allTopoCmds {
 		c.Flags().StringVar(&vtTopoSpecPath, "spec", "", "path to the topology YAML spec (required)")
 		_ = c.MarkFlagRequired("spec")
 	}
 	vtTopologyInventoryCmd.Flags().StringVar(&vtTopoOut, "out", "", "write the rendered inventory here instead of stdout")
+	vtTopologySnapshotCmd.Flags().StringVar(&vtTopoTag, "tag", "", "snapshot tag to create on every node (required)")
+	_ = vtTopologySnapshotCmd.MarkFlagRequired("tag")
+	vtTopologyRollbackCmd.Flags().StringVar(&vtTopoTag, "tag", "", "snapshot tag to revert every node to (required)")
+	_ = vtTopologyRollbackCmd.MarkFlagRequired("tag")
+}
+
+// runTopologyNodesConcurrently runs fn once per spec node, each on its own
+// *vmtarget.Manager (mirrors runVtTopologyUp: Snapshot/Rollback/Reset don't
+// hold Manager's long in-process lock the way Up does, but a fresh Manager
+// per goroutine keeps the pattern consistent and costs nothing). Returns
+// the first error encountered, if any.
+func runTopologyNodesConcurrently(spec *vmtarget.TopologySpec, fn func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error) error {
+	var wg sync.WaitGroup
+	errs := make([]error, len(spec.Nodes))
+	for i, n := range spec.Nodes {
+		wg.Add(1)
+		go func(i int, n vmtarget.TopologyNode) {
+			defer wg.Done()
+			nm, merr := vtNewManager()
+			if merr != nil {
+				errs[i] = merr
+				return
+			}
+			errs[i] = fn(nm, n)
+		}(i, n)
+	}
+	wg.Wait()
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// rewireTopology re-applies every node's declared 'wire:' peers. Needed
+// after a cluster-wide rollback/reset: the "clean" snapshot 'up' takes
+// automatically (vmtarget.go, right after boot) predates topology 'up's
+// wiring loop, so reverting a node's disk to that snapshot drops its
+// /etc/hosts entries.
+func rewireTopology(spec *vmtarget.TopologySpec, out io.Writer) error {
+	m, err := vtNewManager()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	for _, n := range spec.Nodes {
+		if len(n.Wire) == 0 {
+			continue
+		}
+		if err := wireTargetToPeers(ctx, m, out, n.Name, n.Wire); err != nil {
+			return fmt.Errorf("wire %q: %w", n.Name, err)
+		}
+	}
+	return nil
 }
 
 // ---- up ---------------------------------------------------------------
@@ -297,4 +372,99 @@ func runVtTopologyStatus(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", n.Name, status, ip, groups, wire)
 	}
 	return tw.Flush()
+}
+
+// ---- snapshot ---------------------------------------------------------
+
+var vtTopologySnapshotCmd = &cobra.Command{
+	Use:   "snapshot",
+	Short: "Snapshot every node in a topology spec under one tag (concurrent)",
+	RunE:  runVtTopologySnapshot,
+}
+
+func runVtTopologySnapshot(cmd *cobra.Command, args []string) error {
+	spec, err := vmtarget.LoadTopologySpec(vtTopoSpecPath)
+	if err != nil {
+		return err
+	}
+	if err := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
+		if err := nm.Snapshot(context.Background(), n.Name, vtTopoTag); err != nil {
+			return fmt.Errorf("node %q: %w", n.Name, err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ snapshotted %d node(s) as %q\n", len(spec.Nodes), vtTopoTag)
+	return nil
+}
+
+// ---- rollback -------------------------------------------------------------
+
+var vtTopologyRollbackCmd = &cobra.Command{
+	Use:   "rollback",
+	Short: "Revert every node in a topology spec to a snapshot tag (concurrent), then re-wire /etc/hosts",
+	Long: `Reverts every node's disk to the given snapshot tag concurrently.
+
+Because /etc/hosts wiring is written post-boot (after 'up' already
+snapshots "clean"), any tag taken before wiring loses it on rollback --
+this command re-applies each node's declared 'wire:' peers after every
+node has reverted, mirroring 'topology up'.
+`,
+	RunE: runVtTopologyRollback,
+}
+
+func runVtTopologyRollback(cmd *cobra.Command, args []string) error {
+	spec, err := vmtarget.LoadTopologySpec(vtTopoSpecPath)
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	if err := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
+		if err := nm.Rollback(context.Background(), n.Name, vtTopoTag); err != nil {
+			return fmt.Errorf("node %q: %w", n.Name, err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "✓ rolled back %d node(s) to %q\n", len(spec.Nodes), vtTopoTag)
+	return rewireTopology(spec, out)
+}
+
+// ---- reset ------------------------------------------------------------
+
+var vtTopologyResetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Revert every node in a topology spec to its pristine post-up state (concurrent), then re-wire /etc/hosts",
+	Long: `Revert every node to the automatic "clean" checkpoint 'up' captures,
+concurrently, then re-apply every node's declared 'wire:' peers (the
+"clean" snapshot predates wiring, so it would otherwise be lost).
+
+This is the fast path for re-testing "does replica-install work from a
+clean cluster?" without a full 'topology down' + 'topology up':
+
+  pilot vm-target topology reset --spec ha.yaml
+  pilot vm-target run --group masters=ipa-primary --group replicas=ipa-replica ... \
+    playbooks/apply/freeipa-server-replica-apply.yml -e ...
+`,
+	RunE: runVtTopologyReset,
+}
+
+func runVtTopologyReset(cmd *cobra.Command, args []string) error {
+	spec, err := vmtarget.LoadTopologySpec(vtTopoSpecPath)
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	if err := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
+		if err := nm.Reset(context.Background(), n.Name); err != nil {
+			return fmt.Errorf("node %q: %w", n.Name, err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "✓ reset %d node(s) to %q (pristine post-boot state)\n", len(spec.Nodes), vmtarget.CleanSnapshotTag)
+	return rewireTopology(spec, out)
 }
