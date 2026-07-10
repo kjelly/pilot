@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -60,6 +61,7 @@ func init() {
 	vmTargetCmd.AddCommand(vtRunCmd)
 	vmTargetCmd.AddCommand(vtVerifyCmd)
 	vmTargetCmd.AddCommand(vtExecCmd)
+	vmTargetCmd.AddCommand(vtWireCmd)
 	vmTargetCmd.AddCommand(vtSnapshotCmd)
 	vmTargetCmd.AddCommand(vtRollbackCmd)
 	vmTargetCmd.AddCommand(vtResetCmd)
@@ -93,6 +95,7 @@ var (
 	vtFailFast        bool
 	vtSkipSyntaxCheck bool
 	vtSkipLint        bool
+	vtJSON            bool
 )
 
 // resolveVMDir returns the directory where per-target qcow2/seed live.
@@ -297,7 +300,30 @@ directly by whatever is driving pilot):
   --from-stdin                   read playbook paths from stdin (one per line)
   --fail-fast                    with --from-stdin/--discover, stop on first failure
   --skip-syntax-check            skip the ansible-playbook --syntax-check preflight
-  --skip-lint                    skip the ansible-lint preflight`,
+  --skip-lint                    skip the ansible-lint preflight
+  --json                         parse ansible's json callback into an ok/changed/
+                                  failed/unreachable summary instead of raw scrollback
+                                  (not supported together with --sandbox)
+
+Multi-node topology (e.g. FreeIPA primary+replica, which need to reach
+each other over real ansible groups, not just one VM's single-host
+inventory):
+  --group masters=ipa-primary --group replicas=ipa-replica,ipa-replica2
+                                  combine several already-up vm-targets into
+                                  one inventory with real [masters]/[replicas]
+                                  ansible groups (repeatable; each value is
+                                  group=target1,target2). --name then only
+                                  picks which target's directory gets the run
+                                  transcript, and no -l limit is auto-added —
+                                  use the playbook's own hosts: pattern (e.g.
+                                  -e target_group=masters) to pick a subset.
+                                  --sandbox mounts every referenced target's
+                                  own SSH key. See also 'vm-target wire' for
+                                  pinning peer IPs into /etc/hosts.
+
+Every run also writes a full transcript under <vm-dir>/<name>/runs/, with
+the path printed after the run — useful once terminal scrollback has
+been truncated or you want to diff two attempts.`,
 	Args:               cobra.ArbitraryArgs,
 	DisableFlagParsing: true,
 	RunE:               runVtRun,
@@ -310,6 +336,8 @@ func init() {
 	vtRunCmd.Flags().BoolVar(&vtFailFast, "fail-fast", false, "with --from-stdin/--discover, stop on first failure")
 	vtRunCmd.Flags().BoolVar(&vtSkipSyntaxCheck, "skip-syntax-check", false, "skip ansible-playbook --syntax-check preflight")
 	vtRunCmd.Flags().BoolVar(&vtSkipLint, "skip-lint", false, "skip ansible-lint preflight")
+	vtRunCmd.Flags().BoolVar(&vtJSON, "json", false, "parse ansible's json callback into a structured ok/changed/failed/unreachable summary (not supported with --sandbox)")
+	vtRunCmd.Flags().StringArray("group", nil, "combine multiple already-up vm-targets into one grouped inventory: group=target1,target2 (repeatable)")
 }
 
 // extractBoolFlag scans args for a boolean flag (e.g. "--sandbox"),
@@ -338,6 +366,78 @@ func extractValueFlag(args []string, flag string) ([]string, string) {
 		}
 	}
 	return args, ""
+}
+
+// extraVarsFileArg recognizes ansible's "@file" extra-vars-file syntax
+// in its three accepted forms — bare "@path" (as a separate arg after
+// "-e"/"--extra-vars"), glued "-e@path", and "--extra-vars=@path" — and
+// returns the literal prefix to preserve plus the host path referenced.
+// ok is false for anything else (a plain key=value extra-var, a flag,
+// etc.), so callers can skip those without a false-positive file lookup.
+func extraVarsFileArg(a string) (glue, path string, ok bool) {
+	switch {
+	case strings.HasPrefix(a, "--extra-vars=@"):
+		return "--extra-vars=@", strings.TrimPrefix(a, "--extra-vars=@"), true
+	case strings.HasPrefix(a, "-e@"):
+		return "-e@", strings.TrimPrefix(a, "-e@"), true
+	case strings.HasPrefix(a, "@"):
+		return "@", strings.TrimPrefix(a, "@"), true
+	default:
+		return "", "", false
+	}
+}
+
+// extractRepeatedValueFlag scans args for every occurrence of a
+// repeatable key-value flag (e.g. "--group masters=a,b"), removing all
+// of them and returning their values in encounter order. Supports both
+// "--flag value" and "--flag=value" forms.
+func extractRepeatedValueFlag(args []string, flag string) ([]string, []string) {
+	var vals []string
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == flag && i+1 < len(args) {
+			vals = append(vals, args[i+1])
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, flag+"=") {
+			vals = append(vals, strings.TrimPrefix(a, flag+"="))
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, vals
+}
+
+// parseVtGroups parses repeated "--group name=target1,target2" values
+// into an ordered group-name list (preserved for deterministic inventory
+// output) plus a name -> member-target-names map. A group name repeated
+// across multiple --group flags accumulates members rather than
+// overwriting them.
+func parseVtGroups(vals []string) (order []string, groups map[string][]string, err error) {
+	groups = make(map[string][]string)
+	for _, v := range vals {
+		i := strings.IndexByte(v, '=')
+		if i <= 0 || i == len(v)-1 {
+			return nil, nil, fmt.Errorf("invalid --group %q; want group=target1,target2", v)
+		}
+		name := v[:i]
+		var members []string
+		for _, m := range strings.Split(v[i+1:], ",") {
+			if m = strings.TrimSpace(m); m != "" {
+				members = append(members, m)
+			}
+		}
+		if len(members) == 0 {
+			return nil, nil, fmt.Errorf("invalid --group %q: no members", v)
+		}
+		if _, exists := groups[name]; !exists {
+			order = append(order, name)
+		}
+		groups[name] = append(groups[name], members...)
+	}
+	return order, groups, nil
 }
 
 func runVtRun(cmd *cobra.Command, args []string) error {
@@ -369,13 +469,23 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Parse batch/preflight flags before forwarding the rest to ansible.
-	var fromStdin, failFast, skipSyntax, skipLint bool
+	var fromStdin, failFast, skipSyntax, skipLint, wantJSON bool
 	var discover string
 	args, fromStdin = extractBoolFlag(args, "--from-stdin")
 	args, failFast = extractBoolFlag(args, "--fail-fast")
 	args, skipSyntax = extractBoolFlag(args, "--skip-syntax-check")
 	args, skipLint = extractBoolFlag(args, "--skip-lint")
+	args, wantJSON = extractBoolFlag(args, "--json")
 	args, discover = extractValueFlag(args, "--discover")
+	var groupVals []string
+	args, groupVals = extractRepeatedValueFlag(args, "--group")
+	if wantJSON && useSandbox {
+		return fmt.Errorf("--json is not supported together with --sandbox")
+	}
+	groupOrder, groups, gerr := parseVtGroups(groupVals)
+	if gerr != nil {
+		return gerr
+	}
 
 	// Resolve the playbook(s) to run and the extra args shared across
 	// the whole batch (e.g. -e foo=bar, --tags ...). No LLM/agent
@@ -412,7 +522,20 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 		extra = args[1:]
 	}
 
-	t, cleanup, invPath, err := vtStageInventory()
+	var (
+		t          *vmtarget.Target
+		keyTargets []*vmtarget.Target
+		cleanup    func()
+		invPath    string
+		err        error
+		groupMode  = len(groupOrder) > 0
+	)
+	if groupMode {
+		t, keyTargets, cleanup, invPath, err = vtStageGroupInventory(groupOrder, groups)
+	} else {
+		t, cleanup, invPath, err = vtStageInventory()
+		keyTargets = []*vmtarget.Target{t}
+	}
 	if err != nil {
 		return err
 	}
@@ -429,7 +552,7 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 		}
 
 		ansibleArgs := []string{playbook, "-i", invPath}
-		if !extraHasTargetGroup(extra) {
+		if !groupMode && !extraHasTargetGroup(extra) {
 			ansibleArgs = append(ansibleArgs, "-l", t.Name)
 		}
 		ansibleArgs = append(ansibleArgs, extra...)
@@ -450,12 +573,24 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		logPath, logErr := vtRunLogPath(t, playbook)
+		if logErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠️  could not create run transcript (%v); continuing without one\n", logErr)
+			logPath = ""
+		}
+
 		fmt.Fprintf(cmd.ErrOrStderr(), "▶ %sansible-playbook %s\n", prefix, strings.Join(ansibleArgs, " "))
 		var runErr error
-		if useSandbox {
-			runErr = vtRunViaContainer(cmd, t, playbook, invPath, ansibleArgs, sandboxImage)
-		} else {
-			runErr = execAnsiblePlaybook(cmd.OutOrStdout(), ansibleArgs...)
+		switch {
+		case useSandbox:
+			runErr = vtRunViaContainer(cmd, keyTargets, playbook, invPath, ansibleArgs, sandboxImage, logPath)
+		case wantJSON:
+			runErr = runVtPlaybookJSON(cmd, playbook, ansibleArgs, logPath)
+		default:
+			runErr = runVtPlaybookPlain(cmd, ansibleArgs, logPath)
+		}
+		if logPath != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %stranscript: %s\n", prefix, logPath)
 		}
 		if runErr != nil {
 			failed++
@@ -482,30 +617,99 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// vtRunLogPath returns where to write a transcript of one playbook
+// invocation against target t, creating <t.Dir>/runs if needed. Every
+// `vm-target run` writes one of these regardless of --json, so a run's
+// full output survives even after terminal scrollback (or a truncated
+// tool-call result) is gone.
+func vtRunLogPath(t *vmtarget.Target, playbook string) (string, error) {
+	dir := filepath.Join(t.Dir, "runs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create run transcript dir: %w", err)
+	}
+	base := strings.TrimSuffix(filepath.Base(playbook), filepath.Ext(playbook))
+	ts := time.Now().UTC().Format("20060102T150405Z")
+	return filepath.Join(dir, fmt.Sprintf("%s-%s.log", ts, base)), nil
+}
+
+// runVtPlaybookPlain runs ansible-playbook streaming to the terminal as
+// before, additionally teeing the same bytes to logPath (skipped if
+// logPath is empty, e.g. the transcript dir could not be created).
+func runVtPlaybookPlain(cmd *cobra.Command, ansibleArgs []string, logPath string) error {
+	out := cmd.OutOrStdout()
+	if logPath != "" {
+		if f, err := os.Create(logPath); err == nil {
+			defer f.Close()
+			out = io.MultiWriter(out, f)
+		}
+	}
+	return execAnsiblePlaybook(out, ansibleArgs...)
+}
+
+// runVtPlaybookJSON runs ansible-playbook with the built-in `json`
+// stdout callback and prints a parsed ok/changed/failed/unreachable
+// summary instead of raw scrollback. The raw JSON document isn't meant
+// for humans to read live, so it goes to logPath (if available) rather
+// than the terminal.
+func runVtPlaybookJSON(cmd *cobra.Command, playbook string, ansibleArgs []string, logPath string) error {
+	var logFile io.Writer
+	if logPath != "" {
+		if f, err := os.Create(logPath); err == nil {
+			defer f.Close()
+			logFile = f
+		}
+	}
+	raw, runErr := execAnsiblePlaybookCaptured(context.Background(), logFile, []string{"ANSIBLE_STDOUT_CALLBACK=json"}, ansibleArgs...)
+	if res, perr := parseAnsibleJSONResult(raw); perr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠️  could not parse --json output for %s: %v\n", playbook, perr)
+	} else {
+		fmt.Fprint(cmd.OutOrStdout(), summarizeAnsibleJSONResult(res))
+	}
+	return runErr
+}
+
 // containerFixPermsScript builds the /bin/sh script run inside the sandbox
-// container before ansible: it copies the bind-mounted key to a path it can
-// chmod 600 (the mount may carry a foreign uid/perms), and pre-creates the
-// two directories the generated inventory relies on — ~/.ssh (for
-// known_hosts) and ~/.ansible/cp (the SSH ControlPath parent). Without the
-// latter, ssh's ControlMaster socket creation fails inside the container
-// because its parent dir does not exist, breaking every task.
-func containerFixPermsScript(cntKeyPath string) string {
-	return "cp " + cntKeyPath + " /tmp/pilot-ssh-key" +
-		" && chmod 600 /tmp/pilot-ssh-key" +
-		" && mkdir -p ~/.ssh ~/.ansible/cp" +
-		" && touch ~/.ssh/known_hosts"
+// container before ansible: for each bind-mounted key path in
+// cntKeyPaths, it copies to an indexed path it can chmod 600 (the mount
+// may carry a foreign uid/perms), and pre-creates the two directories
+// the generated inventory relies on — ~/.ssh (for known_hosts) and
+// ~/.ansible/cp (the SSH ControlPath parent). Without the latter, ssh's
+// ControlMaster socket creation fails inside the container because its
+// parent dir does not exist, breaking every task.
+//
+// Multiple key paths are supported because a --group multi-host
+// inventory spans several vm-target VMs, each with its own generated
+// SSH keypair — every one needs its own mount and fixed-permission copy.
+func containerFixPermsScript(cntKeyPaths ...string) string {
+	parts := []string{"mkdir -p ~/.ssh ~/.ansible/cp", "touch ~/.ssh/known_hosts"}
+	for i, cntKeyPath := range cntKeyPaths {
+		fixed := containerFixedKeyPath(i)
+		parts = append(parts, fmt.Sprintf("cp %s %s", cntKeyPath, fixed), fmt.Sprintf("chmod 600 %s", fixed))
+	}
+	return strings.Join(parts, " && ")
+}
+
+// containerFixedKeyPath is the in-container path key index i's SSH key
+// lives at once containerFixPermsScript has copied it out of its
+// (possibly wrong-permission) bind mount.
+func containerFixedKeyPath(i int) string {
+	return fmt.Sprintf("/tmp/pilot-ssh-key-%d", i)
 }
 
 // vtRunViaContainer runs ansible-playbook inside a Docker container
-// while targeting the VM over SSH. It:
+// while targeting keyTargets over SSH. In the common case keyTargets is
+// a single VM; with `run --group`, it is every VM referenced by the
+// combined inventory, since each vm-target VM has its own generated SSH
+// keypair and all of them need mounting for ansible inside the
+// container to reach every host. It:
 //  1. Resolves the sandbox image from the explicit flag or config.
-//  2. Starts a sandbox container with --network host and the SSH key
-//     bind-mounted read-only.
+//  2. Starts a sandbox container with --network host and every target's
+//     SSH key bind-mounted read-only at a distinct path.
 //  3. docker-cp's the playbook and inventory into the container,
-//     rewriting ansible_ssh_private_key_file to the container path.
+//     rewriting each ansible_ssh_private_key_file to its container path.
 //  4. docker exec ansible-playbook inside the container.
 //  5. Tears down the container.
-func vtRunViaContainer(cmd *cobra.Command, t *vmtarget.Target, playbookPath, invPath string, ansibleArgs []string, imageOverride string) error {
+func vtRunViaContainer(cmd *cobra.Command, keyTargets []*vmtarget.Target, playbookPath, invPath string, ansibleArgs []string, imageOverride, logPath string) error {
 	ctx := context.Background()
 
 	// 1. Resolve image: explicit flag > config > error
@@ -518,16 +722,22 @@ func vtRunViaContainer(cmd *cobra.Command, t *vmtarget.Target, playbookPath, inv
 		return fmt.Errorf("--sandbox requires a container image; set sandbox.image in config or pass --sandbox-image")
 	}
 
-	// 2. Determine container-side SSH key path
-	const cntKeyPath = "/tmp/pilot-ssh/id_ed25519"
+	// 2. Determine container-side (bind-mount) key paths, one per target.
+	mountPaths := make([]string, len(keyTargets))
+	for i := range keyTargets {
+		mountPaths[i] = fmt.Sprintf("/tmp/pilot-ssh/%d/id_ed25519", i)
+	}
 
-	// 3. Rewrite the inventory: replace the host-side SSH key path
-	//    with the container-side mount path. Write to a new temp file.
+	// 3. Rewrite the inventory: replace each host-side SSH key path
+	//    with its container-side mount path. Write to a new temp file.
 	invData, err := os.ReadFile(invPath)
 	if err != nil {
 		return fmt.Errorf("read inventory: %w", err)
 	}
-	rewrittenInv := strings.ReplaceAll(string(invData), t.KeyPath, cntKeyPath)
+	rewrittenInv := string(invData)
+	for i, kt := range keyTargets {
+		rewrittenInv = strings.ReplaceAll(rewrittenInv, kt.KeyPath, mountPaths[i])
+	}
 	cntInvFile, err := os.CreateTemp("", "pilot-vt-sandbox-inv-*.yaml")
 	if err != nil {
 		return fmt.Errorf("create rewritten inventory: %w", err)
@@ -540,16 +750,14 @@ func vtRunViaContainer(cmd *cobra.Command, t *vmtarget.Target, playbookPath, inv
 	}
 	cntInvFile.Close()
 
-	// 4. Start the container with SSH key mounted using the core DockerEnvironment backend.
+	// 4. Start the container with every target's SSH key mounted using the core DockerEnvironment backend.
+	mounts := make([]sandbox.SandboxMount, len(keyTargets))
+	for i, kt := range keyTargets {
+		mounts[i] = sandbox.SandboxMount{HostPath: kt.KeyPath, ContainerPath: mountPaths[i], RO: true}
+	}
 	de := sandbox.NewDockerEnvironment(image)
 	de.Network = "host"
-	de.Mounts = []sandbox.SandboxMount{
-		{
-			HostPath:      t.KeyPath,
-			ContainerPath: cntKeyPath,
-			RO:            true,
-		},
-	}
+	de.Mounts = mounts
 	cfg := loadConfig()
 	if cfg.Sandbox.Pull != "" {
 		de.Pull = cfg.Sandbox.Pull
@@ -565,16 +773,18 @@ func vtRunViaContainer(cmd *cobra.Command, t *vmtarget.Target, playbookPath, inv
 		_ = de.Stop(context.Background())
 	}()
 
-	// 6. Fix SSH key permissions inside the container (bind mount
-	//    may have different uid). Also create ~/.ssh/known_hosts and the
+	// 6. Fix SSH key permissions inside the container (bind mounts may
+	//    carry a foreign uid). Also create ~/.ssh/known_hosts and the
 	//    ControlPath parent dir the generated inventory expects.
 	fixPerms := newCmd(ctx, "docker", "exec", containerID,
-		"/bin/sh", "-c", containerFixPermsScript(cntKeyPath))
+		"/bin/sh", "-c", containerFixPermsScript(mountPaths...))
 	if out, err := fixPerms.CombinedOutput(); err != nil {
 		return fmt.Errorf("fix SSH key permissions: %w\n%s", err, string(out))
 	}
-	// Rewrite inventory to use the copied key with correct perms
-	rewrittenInv = strings.ReplaceAll(rewrittenInv, cntKeyPath, "/tmp/pilot-ssh-key")
+	// Rewrite inventory to use the copied keys with correct perms
+	for i, mp := range mountPaths {
+		rewrittenInv = strings.ReplaceAll(rewrittenInv, mp, containerFixedKeyPath(i))
+	}
 	if err := os.WriteFile(cntInvPath, []byte(rewrittenInv), 0o644); err != nil {
 		return fmt.Errorf("rewrite inventory for copied key: %w", err)
 	}
@@ -604,6 +814,28 @@ func vtRunViaContainer(cmd *cobra.Command, t *vmtarget.Target, playbookPath, inv
 		}
 	}
 
+	// 8b. `-e @vars.yaml` / `-e@vars.yaml` / `--extra-vars=@vars.yaml`
+	// extra-vars-file references (vault files, group_vars, etc.) name a
+	// HOST path. The container has no access to the host filesystem
+	// beyond what we've explicitly mounted/copied, so ansible-playbook
+	// inside it would fail with "Could not find or access" on any of
+	// these unless we cp each one in and rewrite the arg to match.
+	for i, a := range cntAnsibleArgs {
+		glue, hostPath, ok := extraVarsFileArg(a)
+		if !ok {
+			continue
+		}
+		if info, statErr := os.Stat(hostPath); statErr != nil || info.IsDir() {
+			continue
+		}
+		cntVarsPath := fmt.Sprintf("/tmp/pilot-extra-vars-%d%s", i, filepath.Ext(hostPath))
+		cp := newCmd(ctx, "docker", "cp", hostPath, containerID+":"+cntVarsPath)
+		if out, err := cp.CombinedOutput(); err != nil {
+			return fmt.Errorf("docker cp extra-vars file %s: %w\n%s", hostPath, err, string(out))
+		}
+		cntAnsibleArgs[i] = glue + cntVarsPath
+	}
+
 	// 9. docker exec ansible-playbook
 	execArgs := []string{"exec", "-t", containerID, "ansible-playbook"}
 	execArgs = append(execArgs, cntAnsibleArgs...)
@@ -611,7 +843,14 @@ func vtRunViaContainer(cmd *cobra.Command, t *vmtarget.Target, playbookPath, inv
 		containerID, strings.Join(cntAnsibleArgs, " "))
 
 	runCmd := newCmd(ctx, "docker", execArgs...)
-	runCmd.Stdout = cmd.OutOrStdout()
+	out := cmd.OutOrStdout()
+	if logPath != "" {
+		if f, err := os.Create(logPath); err == nil {
+			defer f.Close()
+			out = io.MultiWriter(out, f)
+		}
+	}
+	runCmd.Stdout = out
 	runCmd.Stderr = os.Stderr
 	return runCmd.Run()
 }
@@ -692,6 +931,66 @@ func vtStageInventory() (*vmtarget.Target, func(), string, error) {
 	return t, cleanup, path, nil
 }
 
+// vtStageGroupInventory resolves every target referenced by --group,
+// renders a combined multi-host inventory with real ansible groups
+// (via vmtarget.RenderGroupedInventory), and writes it to a temp file.
+// It returns the "primary" target (--name if given and a member,
+// otherwise the first member encountered) — used only for picking
+// where to write the run transcript — plus every resolved target (for
+// --sandbox, which needs to mount each one's own SSH key).
+func vtStageGroupInventory(groupOrder []string, groups map[string][]string) (primary *vmtarget.Target, all []*vmtarget.Target, cleanup func(), invPath string, err error) {
+	noop := func() {}
+	m, err := vtNewManager()
+	if err != nil {
+		return nil, nil, noop, "", err
+	}
+	ctx := context.Background()
+
+	var memberNames []string
+	seen := map[string]bool{}
+	for _, g := range groupOrder {
+		for _, name := range groups[g] {
+			if !seen[name] {
+				seen[name] = true
+				memberNames = append(memberNames, name)
+			}
+		}
+	}
+
+	targetsByName := make(map[string]*vmtarget.Target, len(memberNames))
+	for _, name := range memberNames {
+		gt, gerr := m.Get(ctx, name)
+		if gerr != nil {
+			return nil, nil, noop, "", fmt.Errorf("resolve --group member %q: %w", name, gerr)
+		}
+		if gt.Status != vmtarget.StatusRunning {
+			return nil, nil, noop, "", fmt.Errorf("target %q (referenced by --group) is not running (status=%s); bring it up first", name, gt.Status)
+		}
+		targetsByName[name] = gt
+		all = append(all, gt)
+	}
+
+	if vtName != "" {
+		p, ok := targetsByName[vtName]
+		if !ok {
+			return nil, nil, noop, "", fmt.Errorf("--name %q is not one of the --group members", vtName)
+		}
+		primary = p
+	} else {
+		primary = targetsByName[memberNames[0]]
+	}
+
+	inv, err := vmtarget.RenderGroupedInventory(targetsByName, groupOrder, groups)
+	if err != nil {
+		return nil, nil, noop, "", err
+	}
+	invPath, cleanup, err = writeTempInventory(inv)
+	if err != nil {
+		return nil, nil, noop, "", err
+	}
+	return primary, all, cleanup, invPath, nil
+}
+
 // ---- exec -----------------------------------------------------------------
 
 var vtExecCmd = &cobra.Command{
@@ -730,6 +1029,109 @@ func runVtExec(cmd *cobra.Command, args []string) error {
 	}
 	// Do NOT fail on non-zero exit (matches docker-target exec): many
 	// legitimate checks (grep -q, test -f) exit non-zero by design.
+	return nil
+}
+
+// ---- wire -----------------------------------------------------------------
+
+var vtWirePeers []string
+
+var vtWireCmd = &cobra.Command{
+	Use:   "wire --name <target> --peer <other-target>[=<alias>] [--peer ...]",
+	Short: "Idempotently pin peer vm-targets' IPs into /etc/hosts (for multi-node playbooks like FreeIPA replication)",
+	Long: `Some playbooks need real cross-host DNS/hosts resolution between
+several vm-target VMs — e.g. FreeIPA server/replica install, which
+writes the peer's hostname into its OWN /etc/hosts but has no path to
+the OTHER host's /etc/hosts (each vm-target VM only ever sees its own
+generated inventory).
+
+wire resolves each --peer by vm-target name, then writes ONE marked
+block into --name's /etc/hosts mapping every peer's current IP to its
+name (or an explicit alias via name=alias). Re-running replaces the
+block instead of appending, so it is safe to call again after a
+'vm-target reset' wiped it, or after a peer was re-provisioned and got
+a new IP.
+
+Example (a FreeIPA primary + replica that must resolve each other):
+  pilot vm-target wire --name ipa-primary --peer ipa-replica
+  pilot vm-target wire --name ipa-replica --peer ipa-primary
+`,
+	RunE: runVtWire,
+}
+
+func init() {
+	vtWireCmd.Flags().StringVar(&vtName, "name", "", "target VM whose /etc/hosts to update (required)")
+	vtWireCmd.Flags().StringArrayVar(&vtWirePeers, "peer", nil, "peer vm-target name to pin (repeatable); name=alias to use a different /etc/hosts hostname")
+	_ = vtWireCmd.MarkFlagRequired("name")
+	_ = vtWireCmd.MarkFlagRequired("peer")
+}
+
+const (
+	vtWireMarkerBegin = "# BEGIN pilot vm-target wire"
+	vtWireMarkerEnd   = "# END pilot vm-target wire"
+)
+
+// buildVtWireBlock renders the marked /etc/hosts block for the given
+// (ip, hostname) pairs. Pulled out as a pure function so the format is
+// unit-testable without a live target or SSH connection.
+func buildVtWireBlock(lines [][2]string) string {
+	var b strings.Builder
+	b.WriteString(vtWireMarkerBegin + "\n")
+	for _, l := range lines {
+		fmt.Fprintf(&b, "%s\t%s\n", l[0], l[1])
+	}
+	b.WriteString(vtWireMarkerEnd + "\n")
+	return b.String()
+}
+
+// vtWireScript is the idempotent remote shell command: delete any prior
+// marked block, then append the new one (piped via stdin). Safe to run
+// repeatedly — e.g. after every `vm-target reset` — since it never
+// leaves duplicate entries the way a plain `>> /etc/hosts` would.
+func vtWireScript() string {
+	return fmt.Sprintf(`sed -i '/^%s$/,/^%s$/d' /etc/hosts && cat >> /etc/hosts`,
+		regexp.QuoteMeta(vtWireMarkerBegin), regexp.QuoteMeta(vtWireMarkerEnd))
+}
+
+func runVtWire(cmd *cobra.Command, args []string) error {
+	if vtName == "" {
+		return fmt.Errorf("--name is required")
+	}
+	if len(vtWirePeers) == 0 {
+		return fmt.Errorf("at least one --peer is required")
+	}
+	m, err := vtNewManager()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+
+	var lines [][2]string
+	for _, p := range vtWirePeers {
+		peerName, alias := p, p
+		if i := strings.IndexByte(p, '='); i >= 0 {
+			peerName, alias = p[:i], p[i+1:]
+		}
+		peer, err := m.Get(ctx, peerName)
+		if err != nil {
+			return fmt.Errorf("resolve peer %q: %w", peerName, err)
+		}
+		if peer.IP == "" {
+			return fmt.Errorf("peer %q has no IP yet; bring it up first", peerName)
+		}
+		lines = append(lines, [2]string{peer.IP, alias})
+	}
+
+	res, err := m.ExecStdin(ctx, vtName, []string{"sh", "-c", vtWireScript()}, strings.NewReader(buildVtWireBlock(lines)))
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("wiring %s's /etc/hosts failed (exit=%d): %s", vtName, res.ExitCode, res.Stderr)
+	}
+	for _, l := range lines {
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ wired %s -> %s (%s)\n", l[1], vtName, l[0])
+	}
 	return nil
 }
 

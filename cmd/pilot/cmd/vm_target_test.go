@@ -180,11 +180,29 @@ func TestBuildVtSSHArgv_NoRemoteArgv(t *testing.T) {
 func TestContainerFixPermsScript_CreatesControlPathDir(t *testing.T) {
 	s := containerFixPermsScript("/tmp/pilot-ssh/id_ed25519")
 	for _, want := range []string{
-		"cp /tmp/pilot-ssh/id_ed25519 /tmp/pilot-ssh-key",
-		"chmod 600 /tmp/pilot-ssh-key",
+		"cp /tmp/pilot-ssh/id_ed25519 /tmp/pilot-ssh-key-0",
+		"chmod 600 /tmp/pilot-ssh-key-0",
 		"~/.ansible/cp", // the ControlPath parent dir the inventory requires
 		"~/.ssh",
 		"touch ~/.ssh/known_hosts",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("fix-perms script missing %q\ngot: %s", want, s)
+		}
+	}
+}
+
+// TestContainerFixPermsScript_MultipleKeys guards --group + --sandbox:
+// every target referenced by a combined multi-host inventory has its own
+// SSH keypair, so the in-container prep must copy+chmod each mount
+// individually rather than assuming a single key.
+func TestContainerFixPermsScript_MultipleKeys(t *testing.T) {
+	s := containerFixPermsScript("/tmp/pilot-ssh/0/id_ed25519", "/tmp/pilot-ssh/1/id_ed25519")
+	for _, want := range []string{
+		"cp /tmp/pilot-ssh/0/id_ed25519 /tmp/pilot-ssh-key-0",
+		"chmod 600 /tmp/pilot-ssh-key-0",
+		"cp /tmp/pilot-ssh/1/id_ed25519 /tmp/pilot-ssh-key-1",
+		"chmod 600 /tmp/pilot-ssh-key-1",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("fix-perms script missing %q\ngot: %s", want, s)
