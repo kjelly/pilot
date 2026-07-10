@@ -87,6 +87,68 @@ single-target inventory is not enough. Use
 example. Pair it with `wire` above when the playbook also needs
 `/etc/hosts` entries rather than just inventory group membership.
 
+## Declarative topology (`vm-target topology`)
+
+`--group` and `wire` above are composable building blocks, but for a
+scenario with 3+ named roles (primary/replica/client), assembling the
+right sequence of `up`/`wire`/`--group` calls by hand means the agent
+has to parse each step's printed IP to build the next command, and
+re-derive the same sequence every time the scenario is reset or
+extended. `vm-target topology` makes the scenario itself a file:
+
+```yaml
+# ha-topology.yaml
+nodes:
+  - name: ipa-primary
+    base_image: rocky9
+    groups: [ipa_masters]
+    wire: [ipa-replica, ipa-ha-client]
+  - name: ipa-replica
+    base_image: rocky9
+    groups: [ipa_replicas]
+    wire: ["ipa-primary=ipa1.ipa.pilot.internal"]
+  - name: ipa-ha-client
+    base_image: rocky9
+    groups: [ipa_clients]
+    wire: [ipa-primary, ipa-replica]
+```
+
+```bash
+pilot vm-target topology up        --spec ha-topology.yaml   # concurrent, idempotent
+pilot vm-target topology status    --spec ha-topology.yaml   # name/status/ip/groups/wire table
+pilot vm-target topology inventory --spec ha-topology.yaml   # real ansible groups, no target_group=all hack
+pilot vm-target topology down      --spec ha-topology.yaml
+```
+
+`up` provisions every not-yet-running node **concurrently** (one
+`*vmtarget.Manager` per node, all pointed at the same state dir). This
+used to be sequential-only out of caution, but the 2026-07-06 state-race
+fix (see `pilot-vm-target-up-concurrency-race` memory and AGENTS.md
+§5.1) closed the lost-state-entry bug for good — `Manager.Up` reserves
+its name via `Store.Mutate` (cross-process flock) before touching disk
+or libvirt, so concurrent `Up` calls for different names are safe
+(regression test: `TestUp_ConcurrentDifferentNames_BothPersist`).
+Concurrency is per-Manager-instance, not per-goroutine-on-one-Manager:
+`Manager.Up` holds an in-process lock for its whole call (including the
+multi-minute boot/SSH wait), so goroutines sharing one `Manager` would
+just queue — `topology up` gives each node its own `Manager` instead.
+An already-running node (same name) is left alone, so re-running `up`
+after adding a node to the spec only provisions the new one. Wiring
+happens after every node is up (it needs every peer's final IP), so it
+still runs as a separate, sequential pass — no IP copy-paste between
+steps either way.
+
+`topology inventory`'s `groups:` list feeds the same
+`RenderGroupedInventory` machinery as `run --group`, so a playbook
+whose `hosts:` pattern matches a real group name (e.g. `ipa_masters`)
+needs no `-e target_group=...` workaround — pass
+`--inventory $(...) topology inventory --spec ... --out /tmp/inv.yaml)`
+or `-e target_group=ipa_masters` against the rendered file.
+
+Reach for `--group`/`wire` directly for a one-off/ad-hoc combination of
+already-up targets; reach for `topology` when the same named scenario
+gets brought up, reset, or extended more than once.
+
 ## Time sync (Kerberos, TLS, any cert validation)
 
 Kerberos rejects tickets if the clock skew between client and KDC

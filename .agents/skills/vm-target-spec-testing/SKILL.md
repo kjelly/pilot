@@ -117,6 +117,18 @@ pilot vm-target run --group masters=<server-vm> --group replicas=<client-vm> \
 
 See `references/vm-target-basics.md`'s `--group` section.
 
+**3+ named roles, or a scenario you'll bring up/reset more than once**
+(e.g. FreeIPA primary+replica+client): don't hand-assemble the `up`/
+`wire`/`--group` sequence above — declare it once as a
+`vm-target topology` spec instead. See
+`references/multi-vm-networking.md`'s "Declarative topology" section.
+
+```bash
+pilot vm-target topology up        --spec <scenario>.yaml   # concurrent, idempotent
+pilot vm-target topology inventory --spec <scenario>.yaml   # real ansible groups
+pilot vm-target topology down      --spec <scenario>.yaml
+```
+
 ## 2. Before every run: fact snapshot (AGENTS.md §2)
 
 ```bash
@@ -315,6 +327,14 @@ for every spec.
   one vm-target VM in the same play (e.g. a primary+replica install);
   independent per-node applies (plain client/server enrollment) don't
   need it.
+- **A named multi-VM scenario you'll bring up more than once → a
+  `vm-target topology` spec, not a hand-typed `up`/`wire`/`--group`
+  sequence.** One YAML file lists every node's image, ansible groups,
+  and wire peers; `topology up` is idempotent and provisions every
+  not-yet-running node **concurrently** (safe since the 2026-07-06
+  state-race fix — see the `pilot-vm-target-up-concurrency-race`
+  memory and AGENTS.md §5.1), and `topology inventory` gives real
+  ansible groups without a `target_group=all` workaround.
 - **Prefer `reset` over `down`+`up` while iterating** on a playbook
   that isn't green yet (§8) — seconds instead of a full reprovision +
   boot wait.
@@ -346,6 +366,8 @@ for every spec.
    Not to be confused with `--sandbox` (see file 1).
 5. `references/multi-vm-networking.md` -- cross-VM `/etc/hosts` via
    **`vm-target wire`** (recommended) or a `delegate_to` playbook task,
-   `--group` for combined multi-node inventories, time
-   sync for Kerberos, libvirt `default` network pool, hostname
+   `--group` for combined multi-node inventories, **`vm-target
+   topology` for declarative multi-node scenarios** (one YAML spec ->
+   concurrent idempotent bring-up + auto-wire + grouped inventory),
+   time sync for Kerberos, libvirt `default` network pool, hostname
    resolution in a two-node setup.

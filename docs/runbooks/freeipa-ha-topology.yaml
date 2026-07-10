@@ -1,0 +1,36 @@
+# Declarative multi-VM scenario for docs/runbooks/freeipa-server-replica-ha-drill.md.
+# See `pilot vm-target topology --help` and
+# .agents/skills/vm-target-spec-testing/references/vm-target-basics.md.
+#
+#   pilot vm-target topology up        --spec docs/runbooks/freeipa-ha-topology.yaml
+#   pilot vm-target topology status    --spec docs/runbooks/freeipa-ha-topology.yaml
+#   pilot vm-target topology inventory --spec docs/runbooks/freeipa-ha-topology.yaml
+#   pilot vm-target topology down      --spec docs/runbooks/freeipa-ha-topology.yaml
+nodes:
+  - name: ipa-primary
+    base_image: almalinux-9
+    memory: 3072
+    vcpus: 2
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [ipa_masters]
+    # ipa-replica-install makes the primary conncheck back to the new
+    # replica; without this it can't resolve the replica's FQDN.
+    wire: ["ipa-replica=ipa2.ipa.pilot.internal"]
+  - name: ipa-replica
+    base_image: almalinux-9
+    memory: 3072
+    vcpus: 2
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [ipa_replicas]
+  - name: ipa-ha-client
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [ipa_clients]
+    # so the client can resolve the replica's FQDN once krb5/sssd are
+    # patched (manually — wire only pins /etc/hosts, see the runbook §6).
+    wire: ["ipa-replica=ipa2.ipa.pilot.internal"]
