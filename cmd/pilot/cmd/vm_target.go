@@ -1104,10 +1104,16 @@ func runVtWire(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
+	return wireTargetToPeers(context.Background(), m, cmd.OutOrStdout(), vtName, vtWirePeers)
+}
 
+// wireTargetToPeers resolves each peer spec ("name" or "name=alias") to
+// its current IP and idempotently pins it into name's /etc/hosts. Pulled
+// out of runVtWire so `vm-target topology up` can wire every declared
+// node without shelling back out to `pilot vm-target wire`.
+func wireTargetToPeers(ctx context.Context, m *vmtarget.Manager, out io.Writer, name string, peerSpecs []string) error {
 	var lines [][2]string
-	for _, p := range vtWirePeers {
+	for _, p := range peerSpecs {
 		peerName, alias := p, p
 		if i := strings.IndexByte(p, '='); i >= 0 {
 			peerName, alias = p[:i], p[i+1:]
@@ -1122,15 +1128,15 @@ func runVtWire(cmd *cobra.Command, args []string) error {
 		lines = append(lines, [2]string{peer.IP, alias})
 	}
 
-	res, err := m.ExecStdin(ctx, vtName, []string{"sh", "-c", vtWireScript()}, strings.NewReader(buildVtWireBlock(lines)))
+	res, err := m.ExecStdin(ctx, name, []string{"sh", "-c", vtWireScript()}, strings.NewReader(buildVtWireBlock(lines)))
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("wiring %s's /etc/hosts failed (exit=%d): %s", vtName, res.ExitCode, res.Stderr)
+		return fmt.Errorf("wiring %s's /etc/hosts failed (exit=%d): %s", name, res.ExitCode, res.Stderr)
 	}
 	for _, l := range lines {
-		fmt.Fprintf(cmd.OutOrStdout(), "✓ wired %s -> %s (%s)\n", l[1], vtName, l[0])
+		fmt.Fprintf(out, "✓ wired %s -> %s (%s)\n", l[1], name, l[0])
 	}
 	return nil
 }

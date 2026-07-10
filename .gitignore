@@ -68,3 +68,4 @@ inventories/*
 # committed schema example. See docs/runbooks/core-infra-provider-dns-zones.md
 /group_vars/dns/*.yaml
 !/group_vars/dns/zones.example.yaml
+workspace

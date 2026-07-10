@@ -12,6 +12,7 @@ about cost, failure modes, and the inventory contract.
 | `show-inventory` | Print the SSH inventory vm-target would pass to ansible | Read-only |
 | `run`   | Execute an ansible playbook against a running target | Yes (ansible idempotency) |
 | `wire`  | Idempotently pin a peer target's IP into this target's `/etc/hosts` | Yes (marker-block replace) |
+| `topology up/down/inventory/status` | Bring up/tear down/inventory/inspect an entire named multi-VM scenario from one YAML spec | `up` yes (skips already-running nodes) |
 | `exec`  | Run a single command via SSH on the target | No |
 | `verify`| Run `pilot verify` against a spec file | Yes for spec checks |
 | `snapshot` | Snapshot the VM's qcow2 under a tag | No (additive) |
@@ -148,6 +149,61 @@ pilot vm-target run \
 - See `references/multi-vm-networking.md` for pairing `--group` with
   `vm-target wire` when the playbook also needs hostname resolution
   between the nodes.
+- `--group` is for combining VMs you already brought up ad hoc. If the
+  same named scenario (which nodes, which groups, which wire pairs)
+  gets reused across resets or CI runs, declare it once instead as a
+  `vm-target topology` spec -- see below.
+
+## `vm-target topology`: one spec file for an entire multi-VM scenario
+
+`up`/`wire`/`--group` compose, but hand-assembling their sequence means
+parsing each step's printed IP to build the next command, and
+re-deriving the same sequence by hand every time the scenario resets.
+`vm-target topology` makes the scenario declarative:
+
+```yaml
+# ha-topology.yaml
+nodes:
+  - name: ipa-primary
+    base_image: rocky9
+    groups: [ipa_masters]
+    wire: [ipa-replica, ipa-ha-client]
+  - name: ipa-replica
+    base_image: rocky9
+    groups: [ipa_replicas]
+    wire: ["ipa-primary=ipa1.ipa.pilot.internal"]
+```
+
+```bash
+pilot vm-target topology up        --spec ha-topology.yaml
+pilot vm-target topology status    --spec ha-topology.yaml
+pilot vm-target topology inventory --spec ha-topology.yaml
+pilot vm-target topology down      --spec ha-topology.yaml
+```
+
+- `up` provisions every not-yet-running node **concurrently** -- one
+  `*vmtarget.Manager` per node, all pointed at the same state dir.
+  Concurrent `vm-target up` calls used to race and lose a VM's state;
+  the 2026-07-06 fix (see the `pilot-vm-target-up-concurrency-race`
+  memory, AGENTS.md §5.1) closed that for good -- `Manager.Up` reserves
+  its name via `Store.Mutate` (cross-process flock) before touching
+  disk/libvirt, so concurrent `Up` for different names is safe
+  (`TestUp_ConcurrentDifferentNames_BothPersist`). It's one `Manager`
+  per goroutine, not several goroutines sharing one `Manager` --
+  `Manager.Up` holds an in-process lock for its entire call (including
+  the multi-minute boot/SSH wait), so goroutines on a shared `Manager`
+  would just queue instead of overlapping.
+- `up` is idempotent at the node level: an already-running node (same
+  name) is skipped, so re-running `up` after adding a node to the spec
+  only provisions the new one.
+- After bring-up, `up` wires every node's declared `wire:` peers
+  automatically (same mechanism as `vm-target wire --peer`) -- no
+  manual IP copy-paste between steps.
+- `inventory` renders the same grouped inventory `run --group` does
+  (`RenderGroupedInventory`), from the `groups:` each node declares --
+  requires every node to already be `running`.
+- `status` prints a name/status/ip/groups/wire table for just this
+  spec's nodes, without needing to grep `vm-target list`.
 
 ## Disk sizing
 
