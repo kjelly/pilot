@@ -4,6 +4,15 @@ This is a worked example of `SKILL.md` Shape 3 (multi-VM). It shows the
 exact sequence that was attempted for the freeipa-server spec. Whenever a
 new multi-VM spec is written, follow this pattern.
 
+> **Superseded steps, kept for historical record**: this run predates
+> `vm-target wire` and `vm-target run --group`. Lesson 2 below ("the
+> server's IP must be resolvable from the client... there is no task
+> that pushes it to the client") is now a solved problem -- see
+> `references/multi-vm-networking.md`. `docs/runbooks/freeipa-server-replica-ha-drill.md`
+> is the current, `wire`-based multi-VM FreeIPA drill; read that one for
+> a fresh multi-node spec, and treat this file as "why the pattern
+> exists" rather than "the exact commands to copy."
+
 ## What was tested
 
 - **Server spec**: `docs/verification/freeipa-server.md` (v0.1 DRAFT)

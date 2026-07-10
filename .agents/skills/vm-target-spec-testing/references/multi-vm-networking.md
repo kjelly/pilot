@@ -31,11 +31,33 @@ The VMs do **not** have a shared DNS. For any service whose TLS cert
 or Kerberos principal includes a hostname (e.g. `ipa.pilot.internal`),
 **every VM that needs to reach that service** must have the hostname
 in its `/etc/hosts`. The server's apply playbook writes the server's own
-`/etc/hosts` entry, but the **client needs it too**.
+`/etc/hosts` entry, but the **client needs it too** -- and a vm-target
+VM's own inventory has no path to edit a *different* VM's `/etc/hosts`
+(`references/vm-target-basics.md`'s "inventory contract": each `run`
+only ever sees the one target it was invoked against).
 
-**Pattern**: add a task in the server apply playbook (or a separate
-client prep playbook) that pushes the server's FQDN to the client's
-`/etc/hosts`:
+**Recommended: `pilot vm-target wire`** -- no playbook change needed,
+works from the CLI, and is idempotent (safe to re-run after a
+`vm-target reset` wiped the target's `/etc/hosts`):
+
+```bash
+pilot vm-target wire --name <server> --peer <client>
+pilot vm-target wire --name <client> --peer <server>
+# --peer <other-name>=<alias> if the /etc/hosts entry needs a different
+# hostname than the target's own name (e.g. the FQDN a cert expects)
+pilot vm-target wire --name ipa-client --peer ipa-primary=ipa.pilot.internal
+```
+
+Under the hood this resolves `--peer`'s current IP via vm-target's own
+state (never hand-typed / never goes stale across a re-`up`) and writes
+a single marked block to `/etc/hosts`, replacing it wholesale on every
+call -- so re-running never leaves duplicate lines the way a manual
+`>> /etc/hosts` append would.
+
+**Alternative: bake it into the playbook itself**, if you want the
+apply to be self-contained even outside of vm-target (e.g. also runs
+against real hosts with real DNS already resolving, where `wire` is a
+no-op you'd skip):
 
 ```yaml
 - name: "Pin server FQDN on client"
@@ -47,8 +69,23 @@ client prep playbook) that pushes the server's FQDN to the client's
   delegate_to: "{{ client_host }}"
 ```
 
-The server IP and client host must be passed as `-e` vars (never
-hard-coded -- AGENTS.md §4).
+This requires `client_host` to already be a resolvable inventory host
+in the SAME play (i.e. combined via `vm-target run --group`, since a
+plain single-target inventory has no other host to `delegate_to`). The
+server IP and client host must be passed as `-e` vars (never
+hard-coded -- AGENTS.md §4). Prefer `wire` unless the playbook must
+also work unchanged against real, already-networked hosts.
+
+## Combining nodes into one inventory (`--group`)
+
+When the playbook's own `hosts:` pattern needs to see more than one
+vm-target VM in a single play (not just resolve hostnames, but actually
+run tasks against both, e.g. a primary+replica FreeIPA install), a
+single-target inventory is not enough. Use
+`vm-target run --group <groupname>=<target1>,<target2> ...` -- see
+`references/vm-target-basics.md`'s `--group` section for the full
+example. Pair it with `wire` above when the playbook also needs
+`/etc/hosts` entries rather than just inventory group membership.
 
 ## Time sync (Kerberos, TLS, any cert validation)
 

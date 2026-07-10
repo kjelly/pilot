@@ -1,5 +1,14 @@
 # container-in-vmtesting.md -- docker/podman inside a vm-target
 
+> **Not to be confused with `vm-target run --sandbox`.** This file is
+> about containers your *playbook* starts **inside the VM under test**
+> (e.g. a FreeIPA server container). `--sandbox` is a different thing:
+> it runs `ansible-playbook` itself inside a throwaway container **on
+> the host**, targeting the VM over SSH -- see
+> `references/vm-target-basics.md`'s "Sandbox mode" section. The traps
+> below apply regardless of whether the *outer* ansible-playbook run
+> used `--sandbox` or not.
+
 When your apply playbook runs `community.docker.docker_container`
 inside a `pilot vm-target` host, you add an extra layer of indirection
 that breaks several assumptions. This file documents the traps and the

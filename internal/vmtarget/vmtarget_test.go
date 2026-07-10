@@ -465,6 +465,53 @@ func TestRenderInventory_RequiresIP(t *testing.T) {
 	}
 }
 
+func TestRenderGroupedInventory_MultipleHostsAndGroups(t *testing.T) {
+	targets := map[string]*Target{
+		"ipa-primary": {Name: "ipa-primary", IP: "192.168.122.10", SSHUser: "root", SSHPort: 22, KeyPath: "/keys/primary"},
+		"ipa-replica": {Name: "ipa-replica", IP: "192.168.122.11", SSHUser: "root", SSHPort: 22, KeyPath: "/keys/replica"},
+	}
+	order := []string{"ipa_masters", "ipa_replicas"}
+	groups := map[string][]string{
+		"ipa_masters":  {"ipa-primary"},
+		"ipa_replicas": {"ipa-replica"},
+	}
+	inv, err := RenderGroupedInventory(targets, order, groups)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"    ipa-primary:", "ansible_host: 192.168.122.10", "ansible_ssh_private_key_file: /keys/primary",
+		"    ipa-replica:", "ansible_host: 192.168.122.11", "ansible_ssh_private_key_file: /keys/replica",
+		"  children:", "    ipa_masters:", "        ipa-primary: {}", "    ipa_replicas:", "        ipa-replica: {}",
+	} {
+		if !strings.Contains(inv, want) {
+			t.Errorf("expected inventory to contain %q, got:\n%s", want, inv)
+		}
+	}
+}
+
+func TestRenderGroupedInventory_RequiresIP(t *testing.T) {
+	targets := map[string]*Target{"x": {Name: "x"}}
+	_, err := RenderGroupedInventory(targets, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "no IP yet") {
+		t.Fatalf("want no-IP error, got %v", err)
+	}
+}
+
+func TestRenderGroupedInventory_UnknownGroupMemberErrors(t *testing.T) {
+	targets := map[string]*Target{"x": {Name: "x", IP: "192.168.122.10"}}
+	_, err := RenderGroupedInventory(targets, []string{"g"}, map[string][]string{"g": {"not-resolved"}})
+	if err == nil || !strings.Contains(err.Error(), "not-resolved") {
+		t.Fatalf("want unknown-member error, got %v", err)
+	}
+}
+
+func TestRenderGroupedInventory_NoTargetsErrors(t *testing.T) {
+	if _, err := RenderGroupedInventory(nil, nil, nil); err == nil {
+		t.Fatal("expected an error for an empty target set")
+	}
+}
+
 func TestRenderDomainXML_HasKeyBits(t *testing.T) {
 	tgt := &Target{Name: "vm1", MemoryMB: 2048, VCPUs: 2, MAC: "52:54:00:aa:bb:cc",
 		OverlayPath: "/x/overlay.qcow2", SeedPath: "/x/seed.iso", Network: "default"}
