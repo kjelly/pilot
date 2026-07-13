@@ -310,7 +310,7 @@ go run ./cmd/pilot vm-target exec --name ipa-ha-client -- cat /etc/hosts
 192.168.122.4 ipa1.ipa.pilot.internal ipa1
 ```
 
-⚠ **仍然必要的手動步驟（`wire` 只處理 `/etc/hosts`，見 §12 gotcha）**：
+⚠ **仍然必要的手動步驟（`wire` 只處理 `/etc/hosts`，見 §14 gotcha）**：
 `freeipa-client-apply.yml` enroll 時 `/etc/krb5.conf`/`sssd.conf` 都只認
 primary 單一伺服器。要讓這台真的能在 primary 掛掉時 failover 到 replica，還是
 得手動補上 replica 的 KDC/admin/kpasswd/ipa_server 設定：
@@ -452,7 +452,7 @@ rc=1
 
 ---
 
-## 11. 復原、確認恢復正常、收尾 Teardown
+## 11. 復原、確認恢復正常
 
 ```bash
 go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo systemctl start ipa
@@ -467,6 +467,78 @@ go run ./cmd/pilot vm-target verify --name ipa-replica docs/verification/freeipa
 **本輪實測結果**：`KINIT_OK`（primary 一恢復立刻可登入）；兩份 verify 都回到
 **PASS**（`freeipa-server.md` pass=18、`freeipa-server-replica.md` pass=15），
 確認整場演練沒有把任何東西跑壞。
+
+---
+
+## 12. Cluster reset：驗證整台叢集能回到乾淨狀態重跑
+
+> 這一步會把 3 台 VM 的 disk **全部**復原回 `up` 剛開完機、FreeIPA 都還沒裝
+> 的狀態——包含上面 §11 剛裝回去、驗過 PASS 的 FreeIPA 安裝本身。所以必須
+> 放在 §11 確認完「演練沒把東西跑壞」**之後**、真正 `topology down` 銷毀
+> VM **之前**：這裡只是示範/驗證「叢集能不能整批回到乾淨狀態」這個能力本
+> 身，不是接著要再重跑一次完整部署（真的要重跑，直接接 §3 就好，本輪不
+> 需要）。
+
+`snapshot`/`rollback`/`reset` 原本都是單一 VM 的操作——要測「
+`ipa-replica-install` 從乾淨狀態能不能重跑」，得對 3 台 VM 各自
+`reset`/`rollback`，還要記得每次重做 §2 的 `wire`（`reset` 用的 `clean`
+快照是 `up` 剛開完機、`wire` 跑之前拍的，所以單機 `reset` 會連帶把
+`/etc/hosts` 的 wiring 也一起復原掉）。`vm-target topology
+snapshot/rollback/reset`（見 `cmd/pilot/cmd/vm_target_topology.go`）把這件事
+變成一個指令：對 spec 裡每台 node 平行做同一個操作，`rollback`/`reset`
+完成後再自動對每個宣告了 `wire:` 的 node 重跑一次 wiring（`snapshot`
+不需要，因為它不動 disk 狀態）。
+
+```bash
+# 印證：先確認目前的 wiring、埋一個 marker 檔證明 disk 真的會被復原
+go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo cat /etc/hosts
+go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo touch /root/pre-reset-marker
+
+go run ./cmd/pilot vm-target topology reset --spec docs/runbooks/freeipa-ha-topology.yaml
+
+# 驗證：marker 檔應該消失（disk 真的回到乾淨開機狀態），wiring 應該自動補回來
+go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo ls -la /root/pre-reset-marker
+go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo cat /etc/hosts
+```
+
+**本輪實測輸出**：
+```
+✓ reset 3 node(s) to "clean" (pristine post-boot state)
+✓ wired ipa2.ipa.pilot.internal -> ipa-primary (192.168.122.4)
+✓ wired ipa2.ipa.pilot.internal -> ipa-ha-client (192.168.122.4)
+```
+```
+ls: cannot access '/root/pre-reset-marker': No such file or directory
+```
+```
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+# BEGIN pilot vm-target wire
+192.168.122.4	ipa2.ipa.pilot.internal
+# END pilot vm-target wire
+```
+
+Marker 檔消失，證明 `reset` 是真的把 disk 復原到 `up` 剛開完機的那一刻——連
+FreeIPA server/replica 安裝過程寫進系統的東西（例如這台先前跑過安裝時，
+`ipa-server-install` 自己在 `/etc/hosts` 加的 `ipa1.ipa.pilot.internal`
+自身主機名那一行，以及 §11 剛驗證 PASS 的整個 FreeIPA 安裝）都一併復原
+掉了，不是只清 vm-target 自己寫的東西。`wire` 區塊在 reset 後自動重新
+出現，因為 `topology reset` 在每個 node 都 `Reset` 完之後，會自動對宣告
+了 `wire:` 的 node 重跑一次 `wireTargetToPeers`（跟 `topology up` 收尾那段
+完全同一支函式）。
+
+**下一輪要重測 `ipa-replica-install` 從乾淨狀態能不能重跑，就是這一步**：
+```bash
+go run ./cmd/pilot vm-target topology reset --spec docs/runbooks/freeipa-ha-topology.yaml
+# 3 台都回到剛開完機、wiring 也已補回的狀態 -> 直接從 §3 重新走一次部署
+```
+不用再手動對 3 台個別 `reset` + 重跑 `wire` 兩次（primary→client、
+client→replica）。因為這一步已經把 FreeIPA 清掉了，本輪不再重跑 §3-§10，
+直接接 §13 teardown 收尾。
+
+---
+
+## 13. 收尾 Teardown
 
 ```bash
 go run ./cmd/pilot vm-target topology down --spec docs/runbooks/freeipa-ha-topology.yaml
@@ -487,7 +559,7 @@ rm -f /tmp/ha-test-vault.yaml
 
 ---
 
-## 12. 已知 gotcha 一覽（跑之前先知道，少走冤枉路）
+## 14. 已知 gotcha 一覽（跑之前先知道，少走冤枉路）
 
 | 症狀 | 原因 | 解法 |
 |---|---|---|

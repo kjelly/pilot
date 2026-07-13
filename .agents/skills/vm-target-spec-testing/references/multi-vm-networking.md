@@ -118,6 +118,9 @@ pilot vm-target topology up        --spec ha-topology.yaml   # concurrent, idemp
 pilot vm-target topology status    --spec ha-topology.yaml   # name/status/ip/groups/wire table
 pilot vm-target topology inventory --spec ha-topology.yaml   # real ansible groups, no target_group=all hack
 pilot vm-target topology down      --spec ha-topology.yaml
+pilot vm-target topology snapshot  --spec ha-topology.yaml --tag pre-drill
+pilot vm-target topology rollback  --spec ha-topology.yaml --tag pre-drill
+pilot vm-target topology reset     --spec ha-topology.yaml
 ```
 
 `up` provisions every not-yet-running node **concurrently** (one
@@ -144,6 +147,20 @@ whose `hosts:` pattern matches a real group name (e.g. `ipa_masters`)
 needs no `-e target_group=...` workaround — pass
 `--inventory $(...) topology inventory --spec ... --out /tmp/inv.yaml)`
 or `-e target_group=ipa_masters` against the rendered file.
+
+`snapshot`/`rollback`/`reset` apply the equivalent single-VM operation to
+every node in the spec **concurrently**, so a whole multi-VM scenario can
+be checkpointed or restored to a known state in one call (e.g. "does
+`ipa-replica-install` rerun cleanly from scratch?") instead of resetting
+each VM by hand and re-running `wire` yourself for every peer pair.
+`rollback`/`reset` re-apply every node's declared `wire:` peers
+afterward — the auto-`clean` snapshot `up` takes predates wiring, so a
+plain single-VM `reset` would otherwise silently drop `/etc/hosts`
+wiring on every node it touches. `snapshot` skips the re-wire step since
+it never touches disk state. See
+`docs/runbooks/freeipa-server-replica-ha-drill.md` §11 for real captured
+output of `topology reset` reverting a node's disk (a planted marker
+file disappears) and then automatically restoring its wiring.
 
 Reach for `--group`/`wire` directly for a one-off/ad-hoc combination of
 already-up targets; reach for `topology` when the same named scenario
