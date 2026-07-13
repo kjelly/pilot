@@ -127,7 +127,14 @@ See `references/vm-target-basics.md`'s `--group` section.
 pilot vm-target topology up        --spec <scenario>.yaml   # concurrent, idempotent
 pilot vm-target topology inventory --spec <scenario>.yaml   # real ansible groups
 pilot vm-target topology down      --spec <scenario>.yaml
+pilot vm-target topology reset     --spec <scenario>.yaml   # every node back to clean + re-wired, in one call
 ```
+
+`snapshot`/`rollback`/`reset` also work at the topology level — every
+node concurrently, with `rollback`/`reset` auto-re-wiring afterward
+(the `clean` snapshot predates wiring). Don't `vm-target reset --name`
+each node by hand and re-run `wire` yourself to test "does this rerun
+cleanly from scratch" — that's exactly what `topology reset` automates.
 
 ## 2. Before every run: fact snapshot (AGENTS.md §2)
 
@@ -335,6 +342,13 @@ for every spec.
   state-race fix — see the `pilot-vm-target-up-concurrency-race`
   memory and AGENTS.md §5.1), and `topology inventory` gives real
   ansible groups without a `target_group=all` workaround.
+- **Testing "does this reinstall cleanly from scratch?" on a multi-VM
+  scenario → `topology reset`, not per-VM `reset` + manual re-`wire`.**
+  `reset`/`rollback` at the topology level revert every node concurrently
+  and automatically re-apply each node's `wire:` peers afterward (the
+  `clean` snapshot predates wiring, so a bare per-VM `reset` silently
+  drops it). See `docs/runbooks/freeipa-server-replica-ha-drill.md` §11
+  for real captured output.
 - **Prefer `reset` over `down`+`up` while iterating** on a playbook
   that isn't green yet (§8) — seconds instead of a full reprovision +
   boot wait.
