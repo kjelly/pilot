@@ -36,7 +36,16 @@ var (
 	// have this persist to the host under Docker; running via
 	// `go run ./cmd/pilot` locally needs no such caveat.
 	invGenNoGroupVars bool
-	invLintIn         string
+	// invGenNoVault opts OUT of generating a plaintext vault skeleton
+	// next to the generated inventory bundle. Like group_vars backfill,
+	// the skeleton is only created when missing and never overwrites an
+	// existing file.
+	invGenNoVault bool
+	// invGenVaultOut is the vault skeleton path. When not set
+	// explicitly, it follows --dir just like the default inventory/group_vars
+	// bundle, landing under <dir>/.vault/main.yaml.
+	invGenVaultOut string
+	invLintIn      string
 )
 
 var inventoryCmd = &cobra.Command{
@@ -54,6 +63,7 @@ var inventoryGenerateCmd = &cobra.Command{
 	Short: "Render a simple hosts source file into a full Ansible inventory.yml",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		in, out := resolveGenPaths(invGenDir, invGenIn, invGenOut, cmd.Flags().Changed("in"), cmd.Flags().Changed("out"))
+		vaultOut := resolveGenVaultPath(out, invGenVaultOut, cmd.Flags().Changed("vault-out"))
 
 		data, err := os.ReadFile(in)
 		if err != nil {
@@ -74,6 +84,9 @@ var inventoryGenerateCmd = &cobra.Command{
 			// also means a group_vars write failure surfaces before we've
 			// claimed success on the inventory itself.
 			copyMissingGroupVars(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.GroupVarsStems(hf))
+		}
+		if !invGenNoVault {
+			writeMissingVaultSkeleton(cmd.ErrOrStderr(), vaultOut, hf)
 		}
 		if out == "" || out == "-" {
 			fmt.Print(rendered)
@@ -105,6 +118,20 @@ func resolveGenPaths(dir, in, out string, inChanged, outChanged bool) (string, s
 		out = filepath.Join(dir, out)
 	}
 	return in, out
+}
+
+// resolveGenArtifactPath follows the generated inventory bundle by default:
+// unless explicitly overridden, sidecars like .vault/main.yaml land next to
+// the generated inventory (same base dir as group_varsBaseDir).
+func resolveGenArtifactPath(out, path string, changed bool) string {
+	if changed {
+		return path
+	}
+	return filepath.Join(groupVarsBaseDir(out), path)
+}
+
+func resolveGenVaultPath(out, path string, changed bool) string {
+	return resolveGenArtifactPath(out, path, changed)
 }
 
 // groupVarsBaseDir picks where copyMissingGroupVars's group_vars/
@@ -175,6 +202,31 @@ func copyMissingGroupVars(w io.Writer, baseDir string, stems []string) {
 	}
 }
 
+func writeMissingVaultSkeleton(w io.Writer, dst string, hf *inventory.HostsFile) {
+	rendered := inventory.GenerateVaultSkeleton(hf)
+	if rendered == "" {
+		return
+	}
+
+	if _, err := os.Stat(dst); err == nil {
+		fmt.Fprintf(w, "vault: %s already exists, left untouched\n", dst)
+		return
+	} else if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(w, "vault: skip %s (%v)\n", dst, err)
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		fmt.Fprintf(w, "vault: skip %s (%v)\n", dst, err)
+		return
+	}
+	if err := os.WriteFile(dst, []byte(rendered), 0o600); err != nil {
+		fmt.Fprintf(w, "vault: skip %s (%v)\n", dst, err)
+		return
+	}
+	fmt.Fprintf(w, "vault: wrote %s\n", dst)
+}
+
 var inventoryLintCmd = &cobra.Command{
 	Use:   "lint",
 	Short: "Validate a simple hosts source file without generating anything",
@@ -217,6 +269,8 @@ func init() {
 	inventoryGenerateCmd.Flags().StringVar(&invGenIn, "in", "hosts.yml", "path to the simple hosts source file (relative to --dir unless this flag is set explicitly)")
 	inventoryGenerateCmd.Flags().StringVar(&invGenOut, "out", "inventory.yml", "path to write the generated inventory (relative to --dir unless this flag is set explicitly; - for stdout)")
 	inventoryGenerateCmd.Flags().BoolVar(&invGenNoGroupVars, "no-group-vars", false, "skip backfilling group_vars/<role>.yml from group_vars/<role>.example.yml for roles actually used (default: backfill missing files, never overwrite existing ones)")
+	inventoryGenerateCmd.Flags().BoolVar(&invGenNoVault, "no-vault", false, "skip generating .vault/main.yaml from the roles actually used (default: write only when missing, never overwrite existing files)")
+	inventoryGenerateCmd.Flags().StringVar(&invGenVaultOut, "vault-out", ".vault/main.yaml", "path to write the generated plaintext vault skeleton (relative to --dir unless this flag is set explicitly)")
 	inventoryLintCmd.Flags().StringVar(&invLintIn, "in", "hosts.yml", "path to the simple hosts source file")
 
 	inventoryCmd.AddCommand(inventoryGenerateCmd)

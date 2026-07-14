@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/anomalyco/pilot/internal/inventory"
 )
 
 func TestCopyMissingGroupVars_CopiesExampleForUsedStemOnly(t *testing.T) {
@@ -132,5 +134,91 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 	if string(got) != want {
 		t.Fatalf("%s content = %q, want %q", path, string(got), want)
+	}
+}
+
+func TestResolveGenArtifactPath(t *testing.T) {
+	cases := []struct {
+		name    string
+		out     string
+		path    string
+		changed bool
+		want    string
+	}{
+		{name: "stdout bundle falls back to cwd", out: "-", path: ".vault/main.yaml", want: filepath.Join(".", ".vault", "main.yaml")},
+		{name: "inventory bundle relocates default", out: filepath.Join("envs", "staging", "inventory.yml"), path: ".vault/main.yaml", want: filepath.Join("envs", "staging", ".vault", "main.yaml")},
+		{name: "explicit path wins", out: filepath.Join("envs", "staging", "inventory.yml"), path: "custom/vault.yaml", changed: true, want: "custom/vault.yaml"},
+	}
+	for _, tc := range cases {
+		if got := resolveGenArtifactPath(tc.out, tc.path, tc.changed); got != tc.want {
+			t.Fatalf("%s: resolveGenArtifactPath(%q, %q, %v) = %q, want %q", tc.name, tc.out, tc.path, tc.changed, got, tc.want)
+		}
+	}
+}
+
+func TestWriteMissingVaultSkeleton_WritesOnlyForVaultRoles(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{
+		{Name: "ipa-1", Roles: []string{"freeipa-server", "restic-backup"}},
+	}}
+
+	var buf bytes.Buffer
+	writeMissingVaultSkeleton(&buf, filepath.Join("envs", "staging", ".vault", "main.yaml"), hf)
+
+	path := filepath.Join("envs", "staging", ".vault", "main.yaml")
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	content := string(got)
+	for _, want := range []string{"ipa_admin_password:", "restic_password:"} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Fatalf("vault skeleton missing %q:\n%s", want, content)
+		}
+	}
+	if bytes.Contains(got, []byte("grafana_admin_password:")) {
+		t.Fatalf("vault skeleton unexpectedly included unrelated key:\n%s", content)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("vault file mode = %o, want 600", perm)
+	}
+	if got := buf.String(); !bytes.Contains([]byte(got), []byte("vault: wrote")) {
+		t.Fatalf("expected a write message, got %q", got)
+	}
+}
+
+func TestWriteMissingVaultSkeleton_NeverOverwritesExistingFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	mustWriteFile(t, filepath.Join(".vault", "main.yaml"), "keep: true\n")
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "dash-1", Roles: []string{"dashboard"}}}}
+
+	var buf bytes.Buffer
+	writeMissingVaultSkeleton(&buf, filepath.Join(".vault", "main.yaml"), hf)
+
+	assertFileContent(t, filepath.Join(".vault", "main.yaml"), "keep: true\n")
+	if got := buf.String(); !bytes.Contains([]byte(got), []byte("already exists")) {
+		t.Fatalf("expected an already exists message, got %q", got)
+	}
+}
+
+func TestWriteMissingVaultSkeleton_NoApplicableRolesIsSilent(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "web-1", Roles: []string{"linux-servers"}}}}
+
+	var buf bytes.Buffer
+	writeMissingVaultSkeleton(&buf, filepath.Join(".vault", "main.yaml"), hf)
+
+	if _, err := os.Stat(filepath.Join(".vault", "main.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("vault skeleton should not have been created, stat err=%v", err)
+	}
+	if got := buf.String(); got != "" {
+		t.Fatalf("expected no output, got %q", got)
 	}
 }
