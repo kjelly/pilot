@@ -11,10 +11,12 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -301,6 +303,135 @@ func promptStageDecision(out io.Writer, context string) (stageDecision, error) {
 	return stageDecision{}, fmt.Errorf("unreachable")
 }
 
+// ---- seaweedfs-s3 signed-mode config -----------------------------------------
+
+// defaultSeaweedfsS3ConfigPath is the target-host path seaweedfs-s3-apply.yml
+// renders s3.json to (the container-side path is fixed; only this host-side
+// bind-mount path is configurable). Matches the convention already used in
+// inventories/jelly/group_vars/seaweedfs-s3.yml.
+const defaultSeaweedfsS3ConfigPath = "/etc/seaweedfs/s3.json"
+
+// promptSeaweedfsS3Config asks whether to enable SeaweedFS's signed-mode S3
+// identity (vs. the sandbox-default anonymous access) and, if so, returns the
+// -e seaweedfs_s3_config_path=<path> var — the playbook renders s3.json
+// itself from restic_aws_access_key_id/secret (vault), so this is just the
+// host-side path, never a locally-authored file. stage=prod already refuses
+// anonymous access (see seaweedfs-s3-apply.yml's prod gate), so that case
+// skips straight to asking for the path instead of offering to opt out.
+func promptSeaweedfsS3Config(out io.Writer, stage string) ([]string, error) {
+	defaultPath := defaultSeaweedfsS3ConfigPath
+	if stage == "prod" {
+		fmt.Fprintln(out, "ℹ️  stage=prod 不允許匿名 S3 存取，一定要設定簽章模式(seaweedfs_s3_config_path)。")
+		path, err := promptText("s3.json 在目標主機上的路徑", defaultPath, nil)
+		if err != nil {
+			return nil, err
+		}
+		return []string{"seaweedfs_s3_config_path=" + path}, nil
+	}
+
+	idx, err := promptSelectIndex("要不要啟用簽章模式 S3 存取？(sandbox 預設可以先跳過，用匿名存取)", []string{
+		"不要 — 先用匿名存取(僅適合 sandbox，不建議正式環境)",
+		"要 — 啟用簽章模式(identity 憑證沿用 restic_aws_access_key_id / restic_aws_secret_access_key，走 vault)",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if idx == 0 {
+		return nil, nil
+	}
+	path, err := promptText("s3.json 在目標主機上的路徑", defaultPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	return []string{"seaweedfs_s3_config_path=" + path}, nil
+}
+
+// ---- cross-role host address auto-detect --------------------------------------
+//
+// Several apply playbooks take an "IP/FQDN of some other role's host"
+// variable (restic_s3_target_host, siem_forward_host, wazuh_manager_host,
+// loki_target_host, thanos_s3_target_host, alertmanager_target_host,
+// thanos_query_target_host, …), each following the same "that role lives in
+// exactly one inventory group" convention. resolveGroupHost/promptAutoHostVar
+// below is the one mechanism deployCatalog's autoHostVar entries drive,
+// rather than one bespoke resolver per role.
+
+// resolveGroupHost asks ansible-inventory for the first host in inv's named
+// group and its ansible_host, so `pilot deploy` can default a variable like
+// restic_s3_target_host to it instead of making the user look the address
+// up themselves. Returns ok=false for anything that stops it from resolving
+// cleanly — missing ansible-inventory, an empty/absent group, unparseable
+// JSON — since the caller's fallback (ask the user directly) covers all of
+// those.
+func resolveGroupHost(ctx context.Context, inv, group string) (host string, ok bool) {
+	r := ansible.NewRunner()
+	r.Binary = "ansible-inventory"
+	res, err := r.Run(ctx, "-i", inv, "--list")
+	if err != nil || res.ExitCode != 0 {
+		return "", false
+	}
+	return parseGroupHostFromInventoryList(res.Stdout, group)
+}
+
+// parseGroupHostFromInventoryList pulls the first host of the named group
+// (and its ansible_host, if set) out of `ansible-inventory --list`'s JSON.
+// Split out from resolveGroupHost so the parsing logic is testable without
+// shelling out to ansible-inventory.
+func parseGroupHostFromInventoryList(listJSON, group string) (host string, ok bool) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(listJSON), &raw); err != nil {
+		return "", false
+	}
+
+	var groupData struct {
+		Hosts []string `json:"hosts"`
+	}
+	groupJSON, present := raw[group]
+	if !present {
+		return "", false
+	}
+	if err := json.Unmarshal(groupJSON, &groupData); err != nil || len(groupData.Hosts) == 0 {
+		return "", false
+	}
+
+	var meta struct {
+		HostVars map[string]map[string]any `json:"hostvars"`
+	}
+	if err := json.Unmarshal(raw["_meta"], &meta); err == nil {
+		if hv, ok := meta.HostVars[groupData.Hosts[0]]; ok {
+			if ah, ok := hv["ansible_host"].(string); ok && ah != "" {
+				return ah, true
+			}
+		}
+	}
+	return groupData.Hosts[0], true
+}
+
+// promptAutoHostVar fills in -e <av.Var>=<ip> automatically when it can
+// resolve av.Group's host from inv, falling back to a manual prompt (blank
+// = skip; the target playbook treats an unset value however it already
+// does today — a hard gate failure for a required destination, or a silent
+// feature-skip for an optional one).
+func promptAutoHostVar(ctx context.Context, out io.Writer, inv string, av autoHostVar) ([]string, error) {
+	if host, ok := resolveGroupHost(ctx, inv, av.Group); ok {
+		q := fmt.Sprintf("偵測到這份 inventory 的 %s：%s，這次要用它嗎？(-e %s=%s)", av.Label, host, av.Var, host)
+		if promptConfirm(q, true) {
+			return []string{av.Var + "=" + host}, nil
+		}
+	}
+	path, err := promptText(
+		fmt.Sprintf("%s 的 IP/FQDN(-e %s；留空 = 跳過)", av.Label, av.Var),
+		"", nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		return nil, nil
+	}
+	return []string{av.Var + "=" + path}, nil
+}
+
 // ---- vault / secrets --------------------------------------------------------
 
 type vaultInput struct {
@@ -309,25 +440,75 @@ type vaultInput struct {
 	AskVaultPass      bool   // --ask-vault-pass (needs stdin wired to the terminal)
 }
 
-func promptVault(out io.Writer, hint string) (vaultInput, error) {
-	label := "這次佈署需要密碼變數嗎？(例如 FreeIPA/Keycloak 的管理密碼，走 ansible-vault 加密檔)"
+// defaultVaultFile returns the conventional vault vars file path next to an
+// inventory (<inventory 目錄>/.vault/main.yaml — see `pilot inventory
+// generate`'s skeleton output), or "" if no file exists there.
+func defaultVaultFile(inv string) string {
+	candidate := filepath.Join(filepath.Dir(inv), ".vault", "main.yaml")
+	if _, err := os.Stat(candidate); err != nil {
+		return ""
+	}
+	return candidate
+}
+
+// ansibleVaultHeaderPrefix is the fixed literal ansible-vault writes as the
+// first bytes of any file it encrypts (e.g. "$ANSIBLE_VAULT;1.1;AES256\n").
+// ansible-vault always encrypts the whole file, never just a value inside
+// it, so checking this prefix is a reliable way to tell an encrypted vars
+// file from a plaintext one without needing the password.
+const ansibleVaultHeaderPrefix = "$ANSIBLE_VAULT;"
+
+// isVaultEncrypted reports whether path looks like an ansible-vault
+// encrypted file. A read failure (missing/unreadable file) is treated as
+// "not encrypted" — validateFileExists already guarantees the path exists
+// by the time this is called, and the ansible-playbook run itself is the
+// real gate on the file actually being readable.
+func isVaultEncrypted(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, len(ansibleVaultHeaderPrefix))
+	n, _ := io.ReadFull(f, buf)
+	return n == len(buf) && string(buf) == ansibleVaultHeaderPrefix
+}
+
+func promptVault(out io.Writer, inv, hint string) (vaultInput, error) {
 	if hint != "" {
 		fmt.Fprintf(out, "ℹ️  這個元件通常需要：%s\n", hint)
 	}
-	idx, err := promptSelectIndex(label, []string{
-		"不需要",
-		"需要 — 我有一份 ansible-vault 加密的 vars 檔",
-	})
-	if err != nil {
-		return vaultInput{}, err
+
+	varsFile := ""
+	autoFile := defaultVaultFile(inv)
+	if autoFile != "" {
+		if promptConfirm(fmt.Sprintf("偵測到 %s，這次佈署要用它當密碼變數檔嗎？", autoFile), true) {
+			varsFile = autoFile
+		}
 	}
-	if idx == 0 {
-		return vaultInput{}, nil
+
+	if varsFile == "" {
+		idx, err := promptSelectIndex("這次佈署需要密碼變數嗎？(例如 FreeIPA/Keycloak 的管理密碼，走 ansible-vault 加密檔)", []string{
+			"不需要",
+			"需要 — 我有一份 ansible-vault 加密的 vars 檔",
+		})
+		if err != nil {
+			return vaultInput{}, err
+		}
+		if idx == 0 {
+			return vaultInput{}, nil
+		}
+		varsFile, err = promptText("vars 檔路徑(ansible-vault 加密過的 yaml)", "", validateFileExists)
+		if err != nil {
+			return vaultInput{}, err
+		}
 	}
-	varsFile, err := promptText("vars 檔路徑(ansible-vault 加密過的 yaml)", "", validateFileExists)
-	if err != nil {
-		return vaultInput{}, err
+
+	if !isVaultEncrypted(varsFile) {
+		fmt.Fprintf(out, "ℹ️  %s 沒有加密(不是 ansible-vault 格式)，略過密碼詢問。\n", varsFile)
+		return vaultInput{ExtraVarsFile: varsFile}, nil
 	}
+
 	decryptIdx, err := promptSelectIndex("怎麼解密？", []string{
 		"用密碼檔(--vault-password-file)",
 		"執行時手動輸入密碼(--ask-vault-pass)",
@@ -457,7 +638,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 		return err
 	}
 
-	vault, err := promptVault(out, "只有你的 inventory 實際填了 freeipa-server/keycloak/keycloak-db 機器時才需要")
+	vault, err := promptVault(out, inv, "只有你的 inventory 實際填了 freeipa-server/keycloak/keycloak-db 機器時才需要")
 	if err != nil {
 		return err
 	}
@@ -524,6 +705,22 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	extraVars = append(extraVars, entry.StageVar+"="+decision.Stage)
 	extraVars = append(extraVars, decision.ConfirmVars...)
 
+	if entry.PromptS3Config {
+		s3Vars, err := promptSeaweedfsS3Config(out, decision.Stage)
+		if err != nil {
+			return err
+		}
+		extraVars = append(extraVars, s3Vars...)
+	}
+
+	for _, av := range entry.AutoHostVars {
+		hostVars, err := promptAutoHostVar(ctx, out, inv, av)
+		if err != nil {
+			return err
+		}
+		extraVars = append(extraVars, hostVars...)
+	}
+
 	limit, err := promptText("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
 	if err != nil {
 		return err
@@ -533,7 +730,7 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 		return err
 	}
 
-	vault, err := promptVault(out, entry.VaultHint)
+	vault, err := promptVault(out, inv, entry.VaultHint)
 	if err != nil {
 		return err
 	}

@@ -55,6 +55,15 @@
     thanos_s3_endpoint: "{{ thanos_s3_alias }}:{{ thanos_s3_port }}"
     thanos_query_store_group: prometheus
     thanos_query_sidecar_grpc_port: 10901
+    # Host-published port for Thanos Query's own HTTP API (what
+    # dashboard-apply.yml's thanos_query_port talks to). Overridable
+    # because a per-site Prometheus's Thanos Sidecar (prometheus-apply.yml)
+    # also hardcodes host port 10902 for its own http-address — normally a
+    # different host so it never matters, but the two collide when a
+    # single-VM demo co-locates prometheus and thanos-query on the same
+    # machine. The container's internal listen port stays 10902; only the
+    # host-side publish is remapped.
+    thanos_query_http_port: 10902
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -251,11 +260,11 @@
               {% endfor %}
             ports:
               - "10911:10901"
-              - "10902:10902"
+              - "{{ thanos_query_http_port }}:10902"
 
         - name: "Wait for Thanos Query to become ready"
           ansible.builtin.uri:
-            url: "http://127.0.0.1:10902/-/ready"
+            url: "http://127.0.0.1:{{ thanos_query_http_port }}/-/ready"
             status_code: 200
           register: query_ready
           until: query_ready.status == 200

@@ -8,14 +8,30 @@ package cmd
 // command. This mirrors DELIVERY.md's "Playbook 對照表" — update both
 // together when a playbook is added, renamed, or removed.
 type deployPlaybook struct {
-	Key          string   // stable id, unique across the catalog
-	Label        string   // shown in the menu
-	Playbook     string   // path relative to the ansible.cfg working directory
-	DefaultGroup string   // informational only — the playbook already defaults to this
-	StageVar     string   // "stage" or "patch_stage"
-	InfraRoles   []string // non-empty => prompt a role select, sets -e infra_role=<choice>
-	Note         string   // shown before running: prerequisites, resource sizing, draft status…
-	VaultHint    string   // shown when offering the vault-file prompt; "" skips extra context
+	Key            string        // stable id, unique across the catalog
+	Label          string        // shown in the menu
+	Playbook       string        // path relative to the ansible.cfg working directory
+	DefaultGroup   string        // informational only — the playbook already defaults to this
+	StageVar       string        // "stage" or "patch_stage"
+	InfraRoles     []string      // non-empty => prompt a role select, sets -e infra_role=<choice>
+	Note           string        // shown before running: prerequisites, resource sizing, draft status…
+	VaultHint      string        // shown when offering the vault-file prompt; "" skips extra context
+	PromptS3Config bool          // true => ask about signed-mode S3 identity, sets -e seaweedfs_s3_config_path=<path>
+	AutoHostVars   []autoHostVar // each => auto-detect a cross-role host address from inventory, sets -e <Var>=<ip>
+}
+
+// autoHostVar describes one "-e <Var>=<ip>" pilot deploy can offer to fill
+// in automatically by resolving Group's first host from the same
+// inventory (see resolveGroupHost), instead of making the user look the
+// address up by hand and paste it into the free-form extra-vars prompt.
+// This is the generic form of the "core service lives in exactly one
+// group" convention several apply playbooks already assume — e.g.
+// restic-backup's restic_s3_target_host wants the seaweedfs-s3 group's
+// host, wazuh-fim's wazuh_manager_host wants the wazuh-manager group's.
+type autoHostVar struct {
+	Var   string // the -e variable name, e.g. "restic_s3_target_host"
+	Group string // the inventory group whose first host's ansible_host to use
+	Label string // human description shown in the prompt, e.g. "SeaweedFS S3 gateway(備份目的地)"
 }
 
 // deployCatalog is every playbooks/apply/*.yml entry `pilot deploy` can
@@ -69,28 +85,36 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "audit-log-forwarding", Label: "主機稽核(auditd)+ 轉送到 log-server",
 		Playbook: "playbooks/apply/audit-log-forwarding-apply.yml", DefaultGroup: "audit-log-forwarding", StageVar: "stage",
+		AutoHostVars: []autoHostVar{{Var: "siem_forward_host", Group: "log-server", Label: "log-server(SIEM 轉送目的地)"}},
 	},
 	{
 		Key: "wazuh-manager", Label: "Wazuh 中央伺服器(FIM/告警引擎 + CVE 掃描)",
 		Playbook: "playbooks/apply/wazuh-manager-apply.yml", DefaultGroup: "wazuh-manager", StageVar: "stage",
-		Note: "Docker 部署，目標主機需先過 docker preflight，且至少 4 vCPU/8GB RAM/50GB 磁碟(見 docs/runbooks/wazuh-manager.md §5)。",
+		Note:         "Docker 部署，目標主機需先過 docker preflight，且至少 4 vCPU/8GB RAM/50GB 磁碟(見 docs/runbooks/wazuh-manager.md §5)。",
+		AutoHostVars: []autoHostVar{{Var: "siem_forward_host", Group: "log-server", Label: "log-server(SIEM 轉送目的地)"}},
 	},
 	{
 		Key: "wazuh-fim", Label: "Wazuh agent(檔案完整性監控 + auditd)",
 		Playbook: "playbooks/apply/wazuh-fim-apply.yml", DefaultGroup: "wazuh-fim", StageVar: "stage",
+		AutoHostVars: []autoHostVar{{Var: "wazuh_manager_host", Group: "wazuh-manager", Label: "Wazuh manager(enrollment 目的地)"}},
 	},
 	{
 		Key: "seaweedfs-s3", Label: "S3 相容物件儲存(SeaweedFS)",
 		Playbook: "playbooks/apply/seaweedfs-s3-apply.yml", DefaultGroup: "seaweedfs-s3", StageVar: "stage",
+		PromptS3Config: true,
+		VaultHint:      "簽章模式 S3 存取用的 identity(沿用 restic_aws_access_key_id / restic_aws_secret_access_key)",
 	},
 	{
 		Key: "restic-backup", Label: "跨主機通用備份到 S3(restic)",
 		Playbook: "playbooks/apply/restic-backup-apply.yml", DefaultGroup: "restic-backup", StageVar: "stage",
-		Note: "需要先有 S3 目的地(seaweedfs-s3 或外部 S3)，見 docs/runbooks/restic-backup.md §5。",
+		Note:         "需要先有 S3 目的地(seaweedfs-s3 或外部 S3)，見 docs/runbooks/restic-backup.md §5。",
+		VaultHint:    "S3 credentials 與 repository 加密密碼(restic_aws_access_key_id / restic_aws_secret_access_key / restic_password)",
+		AutoHostVars: []autoHostVar{{Var: "restic_s3_target_host", Group: "seaweedfs-s3", Label: "SeaweedFS S3 gateway(備份目的地)"}},
 	},
 	{
 		Key: "log-shipping", Label: "把 log-server 的日誌轉送到 Loki",
 		Playbook: "playbooks/apply/log-shipping-apply.yml", DefaultGroup: "log-server", StageVar: "stage",
+		AutoHostVars: []autoHostVar{{Var: "loki_target_host", Group: "dashboard", Label: "Loki(dashboard 主機)"}},
 	},
 	{
 		Key: "os-patch-sla", Label: "OS 補丁 SLA",
@@ -100,10 +124,15 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "prometheus", Label: "Prometheus + Thanos Sidecar",
 		Playbook: "playbooks/apply/prometheus-apply.yml", DefaultGroup: "prometheus", StageVar: "stage",
+		AutoHostVars: []autoHostVar{
+			{Var: "thanos_s3_target_host", Group: "seaweedfs-s3", Label: "SeaweedFS S3 gateway(Thanos 物件儲存)"},
+			{Var: "alertmanager_target_host", Group: "alertmanager", Label: "中央 Alertmanager"},
+		},
 	},
 	{
 		Key: "thanos-query", Label: "中央 Thanos Query",
 		Playbook: "playbooks/apply/thanos-query-apply.yml", DefaultGroup: "thanos-query", StageVar: "stage",
+		AutoHostVars: []autoHostVar{{Var: "thanos_s3_target_host", Group: "seaweedfs-s3", Label: "SeaweedFS S3 gateway(Thanos 物件儲存)"}},
 	},
 	{
 		Key: "alertmanager", Label: "中央 Alertmanager",
@@ -112,5 +141,6 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "dashboard", Label: "觀測畫面(Grafana + Loki)",
 		Playbook: "playbooks/apply/dashboard-apply.yml", DefaultGroup: "dashboard", StageVar: "stage",
+		AutoHostVars: []autoHostVar{{Var: "thanos_query_target_host", Group: "thanos-query", Label: "中央 Thanos Query"}},
 	},
 }

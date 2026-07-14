@@ -34,13 +34,25 @@
     seaweedfs_check_content: "pilot-s3-smoke-check"
     seaweedfs_test_bucket: pilot-s3-smoke
     seaweedfs_extra_buckets: ["pilot-restic-backup"]
-    # Optional path (on the target host) to a SeaweedFS S3 identity
-    # config (s3.json) for production use. Left unset by default:
-    # with no -s3.config, the S3 API allows anonymous access to any
-    # bucket (SeaweedFS's documented default), which is what lets
-    # spec rows C6/C7 probe the API without a secret in the spec
-    # (see docs/verification/seaweedfs-s3.md §5).
-    seaweedfs_s3_config_path: "{{ hostvars[inventory_hostname]['seaweedfs_s3_config_path'] | default('') }}"
+    # Path (on the target host) to a SeaweedFS S3 identity config
+    # (s3.json). An explicit host_vars/group_vars/-e value always wins
+    # (including explicitly setting it to "" to force anonymous mode).
+    # Otherwise, this defaults ON (signed mode) the moment restic's vault
+    # credentials are available — restic always sends signed requests, so
+    # the two normally have to be turned on together anyway (see "Bug 1" /
+    # docs/runbooks/restic-backup.md §5), and there's no reason to make
+    # every caller remember an extra -e seaweedfs_s3_config_path=... once
+    # it's already supplying restic_aws_access_key_id/secret. Falls back to
+    # "" (anonymous) only when neither credential is supplied at all, which
+    # is what lets spec rows C6/C7 probe the API without a secret in the
+    # spec when seaweedfs-s3 is smoke-tested on its own (see
+    # docs/verification/seaweedfs-s3.md §5).
+    seaweedfs_s3_config_path: >-
+      {{ hostvars[inventory_hostname]['seaweedfs_s3_config_path']
+         | default(('/etc/seaweedfs/s3.json'
+                     if (restic_aws_access_key_id | default('') | length > 0
+                         and restic_aws_secret_access_key | default('') | length > 0)
+                     else ''), true) }}
     target_group: seaweedfs-s3
 
   pre_tasks:

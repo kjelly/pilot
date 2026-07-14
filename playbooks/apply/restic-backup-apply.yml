@@ -109,12 +109,33 @@
           restic_aws_secret_access_key=... -e restic_password=... (vault
           file recommended over -e in real inventories).
 
+    # Auto-fallback for the common single-inventory case: if the caller left
+    # restic_s3_target_host genuinely unset (no -e/group_vars/host_vars) and
+    # this inventory happens to define a seaweedfs-s3 group, use that host's
+    # own connection address instead of failing the gate below. `pilot
+    # deploy` already offers this as an interactive prompt (deploy.go's
+    # promptResticS3Target); this makes `ansible-playbook ...
+    # restic-backup-apply.yml` run directly get the same default. Only
+    # applies to the self-hosted default repository — an externally
+    # overridden restic_repository has no SeaweedFS group to borrow from and
+    # must set restic_s3_target_host itself if it needs the /etc/hosts pin.
+    - name: "Auto-detect backup destination host from this inventory's seaweedfs-s3 group"
+      ansible.builtin.set_fact:
+        restic_s3_target_host: >-
+          {{ hostvars[groups['seaweedfs-s3'] | first]['ansible_host']
+             | default(groups['seaweedfs-s3'] | first, true) }}
+      when: >-
+        (restic_s3_target_host | default('') | length == 0)
+        and (restic_s3_alias in restic_repository)
+        and (groups['seaweedfs-s3'] | default([]) | length > 0)
+
     # restic_s3_target_host is NOT optional-in-the-usual-sense: unlike
     # siem_forward_host/wazuh_manager_host, skipping it doesn't leave a
     # smaller-but-useful local feature — it leaves a backup with nowhere to
     # go. Only acceptable if restic_repository was explicitly overridden
     # away from the default (i.e. points at a real, externally-resolvable
-    # S3 endpoint instead of the s3-backup-server alias).
+    # S3 endpoint instead of the s3-backup-server alias), or this inventory's
+    # seaweedfs-s3 group just auto-filled it above.
     - name: "Gate: backup destination must be resolvable"
       ansible.builtin.assert:
         that:
@@ -160,6 +181,44 @@
         line: "{{ restic_s3_target_host | default('') }}\t{{ restic_s3_alias }}"
         state: present
       when: restic_s3_target_host | default('') | length > 0
+
+    # Bug 5 (docs/runbooks/restic-backup.md §5): SeaweedFS never implicitly
+    # creates a bucket on PutObject, so a fresh destination makes restic's S3
+    # backend retry with growing backoff instead of failing fast — this used
+    # to require a manual `docker exec pilot-seaweedfs ... weed shell` before
+    # the first apply. This block automates that, delegated to the actual
+    # seaweedfs-s3 inventory host (not restic_s3_target_host's raw IP/FQDN,
+    # which may not even be an Ansible-managed connection) so it works
+    # whether or not seaweedfs-s3 is colocated with this restic-backup host.
+    # Only runs against the self-hosted default destination — an externally
+    # overridden restic_repository has no SeaweedFS container to delegate to.
+    - name: "Step 2b: Ensure destination bucket exists on the SeaweedFS host (idempotent)"
+      when: >-
+        restic_s3_alias in restic_repository
+        and (groups['seaweedfs-s3'] | default([]) | length > 0)
+      run_once: true
+      delegate_to: "{{ groups['seaweedfs-s3'] | first }}"
+      block:
+        - name: "Step 2b: check destination bucket exists"
+          community.docker.docker_container_exec:
+            container: pilot-seaweedfs
+            command: sh -c "echo 's3.bucket.list' | weed shell"
+          register: restic_seaweedfs_bucket_list
+          changed_when: false
+          # docker_container_exec doesn't support check_mode and is skipped
+          # under --check by default, which would leave restic_seaweedfs_bucket_list
+          # without a .stdout and crash the next task's `when`. This is
+          # read-only (changed_when: false above), so forcing it to actually
+          # run under --check is safe — same idiom as keycloak-apply.yml's
+          # "pilot-infra docker network exists" pre-flight check.
+          check_mode: false
+
+        - name: "Step 2b: create destination bucket if missing"
+          community.docker.docker_container_exec:
+            container: pilot-seaweedfs
+            command: "sh -c \"echo 's3.bucket.create -name {{ restic_s3_bucket }}' | weed shell\""
+          when: restic_s3_bucket not in restic_seaweedfs_bucket_list.stdout
+          changed_when: true
 
     - block:
         - name: "Step 3: Ensure /etc/pilot exists"
