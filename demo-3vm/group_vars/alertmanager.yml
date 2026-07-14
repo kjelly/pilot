@@ -1,0 +1,33 @@
+---
+# ============================================================================
+#  group_vars/alertmanager.example.yml —— 中央 Alertmanager 設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/alertmanager.yml
+#    cp group_vars/alertmanager.example.yml <inventory 目錄>/group_vars/alertmanager.yml
+#
+#  對應 spec:docs/verification/alertmanager.md
+#  站台 prometheus 角色:docs/verification/prometheus.md(會用
+#  alertmanager_target_host 指向本主機)
+# ============================================================================
+
+# 完整 alertmanager.yml 內容。預設僅有 stub `null` receiver
+# (drop 告警);正式環境建議用 vault 帶入完整 receiver 設定。
+# 範例(slack):
+#   route:
+#     receiver: 'slack'
+#     group_by: ['alertname', 'severity']
+#   receivers:
+#     - name: 'slack'
+#       slack_configs:
+#         - api_url: 'https://hooks.slack.com/services/...'
+#           channel: '#alerts'
+alertmanager_config: |
+  route:
+    receiver: 'null'
+    group_by: ['alertname']
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+  receivers:
+    - name: 'null'

@@ -1,0 +1,81 @@
+---
+all:
+  hosts:
+    client-vm:
+      ansible_host: "192.168.122.4"
+      ansible_user: "root"
+      ansible_ssh_private_key_file: "/var/lib/libvirt/images/pilot/client-vm/id_ed25519"
+    freeipa-server:
+      ansible_host: "192.168.122.2"
+      ansible_user: "root"
+      ansible_ssh_private_key_file: "/var/lib/libvirt/images/pilot/freeipa-server/id_ed25519"
+    monitor-vm:
+      ansible_host: "192.168.122.3"
+      ansible_user: "root"
+      ansible_ssh_private_key_file: "/var/lib/libvirt/images/pilot/monitor-vm/id_ed25519"
+  children:
+    freeipa:
+      children:
+        freeipa-server:
+          hosts:
+            freeipa-server:
+        freeipa-client:
+          hosts:
+            client-vm:
+        freeipa-server-replica:
+          hosts: {}
+    dns:
+      hosts: {}
+    ntp:
+      hosts: {}
+    docker:
+      hosts:
+        client-vm:
+        monitor-vm:
+    keycloak:
+      hosts: {}
+    keycloak-db:
+      hosts: {}
+    infra-provider:
+      children:
+        dns:
+        ntp:
+        docker:
+        keycloak:
+        keycloak-db:
+    linux-servers:
+      hosts: {}
+    log-server:
+      hosts: {}
+    audit-log-forwarding:
+      hosts:
+        client-vm:
+    wazuh-manager:
+      hosts:
+        monitor-vm:
+    wazuh-fim:
+      hosts:
+        client-vm:
+    seaweedfs-s3:
+      hosts:
+        monitor-vm:
+    restic-backup:
+      hosts: {}
+    prometheus:
+      hosts:
+        monitor-vm:
+    thanos-query:
+      hosts:
+        monitor-vm:
+    alertmanager:
+      hosts:
+        monitor-vm:
+    dashboard:
+      hosts:
+        monitor-vm:
+    prod:
+      hosts: {}
+    staging:
+      hosts: {}
+    sandbox:
+      hosts: {}

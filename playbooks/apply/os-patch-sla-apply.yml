@@ -29,6 +29,29 @@
     confirm_prod: false
     staging_attested_within_hours: 168
   tasks:
+    # docs/verification/os-patch-sla.md is explicitly Debian/Ubuntu-only
+    # (title + §5 exception row C6: RHEL/CentOS uses dnf-automatic instead
+    # of unattended-upgrades, "暫停支援" — paused, not yet implemented).
+    # Every task below is apt/unattended-upgrades-specific, so without this
+    # gate an EL host in target_group (e.g. a FreeIPA server sharing the
+    # sandbox/staging/prod group with Debian hosts) would blow up on Step 1
+    # with a confusing apt error instead of a clear "not supported" message.
+    - name: "Gate: os-patch-sla only supports Debian/Ubuntu (RHEL/EL not yet implemented)"
+      ansible.builtin.debug:
+        msg: >-
+          Skipping {{ inventory_hostname }}: os-patch-sla-apply.yml only
+          supports Debian/Ubuntu (apt + unattended-upgrades).
+          {{ ansible_distribution }} {{ ansible_distribution_version }}
+          ({{ ansible_os_family }}) is RHEL/EL family, which
+          docs/verification/os-patch-sla.md §5 documents as paused/not yet
+          supported (needs dnf-automatic instead of unattended-upgrades).
+          No changes made on this host.
+      when: ansible_os_family != 'Debian'
+
+    - name: "Gate: end play here for non-Debian hosts"
+      ansible.builtin.meta: end_host
+      when: ansible_os_family != 'Debian'
+
     - name: "Gate: patch_stage must be sandbox|staging|prod"
       ansible.builtin.assert:
         that:
@@ -108,9 +131,20 @@
 
   post_tasks:
     - name: "Step 6: Spec verification (read-only check)"
-      ansible.builtin.command: "apt list --upgradable 2>/dev/null | wc -l | tr -d ' '"
+      # needs shell, not command: the pipe/redirect below aren't argv tokens
+      # to apt itself — command execs argv directly with no shell involved,
+      # so `| wc -l | tr -d ' '` would get passed straight to apt as literal
+      # arguments (that's what produced "Command line option 'l' ... is not
+      # understood").
+      ansible.builtin.shell: "apt list --upgradable 2>/dev/null | wc -l | tr -d ' '"
       register: post_upgrade_count_run
       changed_when: false
+      # shell doesn't support check_mode and is skipped under --check by
+      # default, leaving post_upgrade_count_run.stdout blank; this is
+      # read-only so forcing it to actually run under --check is safe (same
+      # idiom as keycloak-apply.yml's "pilot-infra docker network exists"
+      # pre-flight check).
+      check_mode: false
     - ansible.builtin.debug:
         msg: "post-upgrade upgradeable count = {{ post_upgrade_count_run.stdout }}"
 
