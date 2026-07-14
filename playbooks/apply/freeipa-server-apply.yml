@@ -81,7 +81,10 @@
 
     # Native install
     ipa_packages: "{{ ['ipa-server'] + (['ipa-server-dns'] if ipa_setup_dns | bool else []) }}"
-    ipa_config_marker: /etc/ipa/default.conf        # created iff already configured
+    # Use a repo-owned completion marker instead of any FreeIPA internal file.
+    # ipa-server-install writes several state files before the server is truly
+    # usable, so they are not safe idempotency sentinels on their own.
+    ipa_config_marker: /var/lib/ipa/.pilot-freeipa-installed
     ipa_install_timeout_s: 900                       # first install runs 8–12 min
 
     # DM password defaults to the admin password unless explicitly given
@@ -95,6 +98,13 @@
     # /var/log/dirsrv/<instance>/audit. Spec rows C14–C16.
     ipa_enable_audit_log: true
     ipa_ds_instance: "slapd-{{ ipa_realm | replace('.', '-') }}"
+    # systemd's dirsrv@<instance>.service does NOT take the "slapd-" prefix
+    # (that prefix only applies to filesystem paths under /etc|var/lib|var/log
+    # /dirsrv/). Using ipa_ds_instance (with the prefix) as the systemd
+    # instance name silently targets a unit that doesn't exist, so
+    # stop/reset-failed below become no-ops and a stale dirsrv from a prior
+    # failed install keeps holding port 389/636 across retries.
+    ipa_ds_service_instance: "{{ ipa_realm | replace('.', '-') }}"
 
   pre_tasks:
     - name: "Gate: required vars present (fail early, before any mutation)"
@@ -212,9 +222,181 @@
       register: ipa_cfg
       tags: [freeipa, freeipa-install]
 
+    # Partial installs can leave Dogtag / Kerberos / Custodia units running and
+    # holding ports or config state across retries. Stop them before rerunning
+    # ipa-server-install so a failed attempt is actually recoverable in-place.
+    - name: "FreeIPA — stop stale IPA/Dogtag services before install retry"
+      ansible.builtin.command: "systemctl stop {{ item }}"
+      loop:
+        - pki-tomcatd@pki-tomcat.service
+        - ipa-custodia.service
+        - krb5kdc.service
+        - ipa.service
+        - "dirsrv@{{ ipa_ds_service_instance }}.service"
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode and not ipa_cfg.stat.exists
+      tags: [freeipa, freeipa-install]
+
+    - name: "FreeIPA — reset failed state for stale IPA/Dogtag services"
+      ansible.builtin.command: "systemctl reset-failed {{ item }}"
+      loop:
+        - pki-tomcatd@pki-tomcat.service
+        - ipa-custodia.service
+        - krb5kdc.service
+        - ipa.service
+        - "dirsrv@{{ ipa_ds_service_instance }}.service"
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode and not ipa_cfg.stat.exists
+      tags: [freeipa, freeipa-install]
+
+    # Stopping the stale dirsrv unit above is NOT enough to make a retry
+    # succeed: ipa-server-install's own pre-flight check
+    # (lib389 _prepare_ds -> assert_c) refuses to proceed if a DS instance
+    # directory / systemd registration for this instance name is still on
+    # disk from an earlier partial attempt, and fails with "Another instance
+    # named '<X>' may already exist" — even though nothing is running. Since
+    # ipa_cfg.stat.exists is only ever true after a FULLY successful install
+    # (the marker is touched at the very end, post health-check), anything
+    # found here when it's false is guaranteed leftover from a failed/partial
+    # attempt and is safe to purge before retrying.
+    - name: "FreeIPA — remove dirsrv systemd registration for a stale instance before retry"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/etc/systemd/system/dirsrv@{{ ipa_ds_service_instance }}.service.d"
+        - "/etc/systemd/system/multi-user.target.wants/dirsrv@{{ ipa_ds_service_instance }}.service"
+      register: ipa_dirsrv_unit_cleanup
+      when: not ansible_check_mode and not ipa_cfg.stat.exists
+      tags: [freeipa, freeipa-install]
+
+    - name: "FreeIPA — reload systemd after removing stale dirsrv unit registration"
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: not ansible_check_mode and not ipa_cfg.stat.exists and (ipa_dirsrv_unit_cleanup.changed | default(false))
+      tags: [freeipa, freeipa-install]
+
+    # certmonger is a persistent system daemon untouched by the service
+    # stop/reset above, so tracking requests from a prior failed attempt
+    # (for cert/key files and NSS databases we're about to wipe below)
+    # survive across retries. The next install then fails registering new
+    # tracking for the same file location with "certmonger.duplicate:
+    # Certificate at same location is already used by request with nickname
+    # '<X>'". A genuinely fresh host has zero tracked requests anyway, so
+    # it's safe to just clear everything certmonger knows about.
+    - name: "FreeIPA — list stale certmonger tracking requests before install retry"
+      ansible.builtin.shell: |
+        set -o pipefail
+        getcert list | sed -n "s/^Request ID '\(.*\)':$/\1/p"
+      register: ipa_certmonger_requests
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode and not ipa_cfg.stat.exists
+      tags: [freeipa, freeipa-install]
+
+    - name: "FreeIPA — stop stale certmonger tracking requests before install retry"
+      ansible.builtin.command: "getcert stop-tracking -i {{ item }}"
+      loop: "{{ ipa_certmonger_requests.stdout_lines | default([]) }}"
+      changed_when: true
+      failed_when: false
+      when: not ansible_check_mode and not ipa_cfg.stat.exists
+      tags: [freeipa, freeipa-install]
+
+    - name: "FreeIPA — remove residual DS/PKI state from a prior failed/partial install before retry"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/ipa/default.conf
+        - /etc/ipa/default.conf.ipabkp
+        - /etc/ipa/ca.crt
+        - /etc/ipa/custodia
+        - /var/lib/ipa/ra-agent.key
+        - /var/lib/ipa/ra-agent.pem
+        - /var/lib/ipa/pki-ca
+        - /var/lib/ipa-client/pki
+        - /var/lib/ipa-client/sysrestore
+        - /var/lib/ipa/sysrestore
+        - /var/lib/ipa/sysupgrade
+        - "/etc/dirsrv/{{ ipa_ds_instance }}"
+        - "/var/lib/dirsrv/{{ ipa_ds_instance }}"
+        - "/var/log/dirsrv/{{ ipa_ds_instance }}"
+        # 389-ds's BDB backend maps its environment region into /dev/shm.
+        # Deleting /var/lib/dirsrv/<instance> without also clearing this
+        # leaves a stale shared-memory region that doesn't match the freshly
+        # recreated on-disk DB files, and the next dirsrv start PANICs with
+        # "BDB0060 fatal region error detected; run recovery" instead of
+        # creating a fresh environment.
+        - "/dev/shm/{{ ipa_ds_instance }}"
+        - /var/lib/pki/pki-tomcat
+        - /etc/pki/pki-tomcat
+        - /etc/sysconfig/pki/tomcat/pki-tomcat
+        # /var/lib/pki/pki-tomcat/logs is a symlink into this separate log
+        # tree, which we never otherwise touch. `pki-server acme-create`
+        # calls create_logs() without exist_ok, so a stale logs/acme
+        # subdirectory left by a prior attempt makes it fail with
+        # "FileExistsError: [Errno 17] File exists: '.../logs/acme'".
+        - /var/log/pki/pki-tomcat
+        # The CA install step exports the CA admin cert via `pki
+        # pkcs12-cert-export`, checked against the NSS db under
+        # /root/.dogtag. A stale nssdb/p12 from a prior attempt holds cert
+        # material for a CA that no longer exists once we've wiped
+        # /var/lib/pki/pki-tomcat above, so the export fails with "Digests
+        # do not match" instead of regenerating fresh credentials.
+        - /root/.dogtag
+        - /root/ca-agent.p12
+        - /root/cacert.p12
+      when: not ansible_check_mode and not ipa_cfg.stat.exists
+      tags: [freeipa, freeipa-install]
+
+    - name: "FreeIPA — ensure installer state directories exist"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /etc/ipa, mode: "0755" }
+        - { path: /etc/ipa/custodia, mode: "0755" }
+        - { path: /var/lib/ipa, mode: "0755" }
+        - { path: /var/lib/ipa-client, mode: "0755" }
+        - { path: /var/lib/ipa-client/pki, mode: "0755" }
+        # ipa-server-install's embedded `ipa-client-install --on-master` step
+        # writes its sysrestore.state here via a raw open(path, "w") that
+        # never mkdir's the parent, so on a host that's never had it,
+        # ipa-client-install fails with "FileNotFoundError: ... No such file
+        # or directory: '/var/lib/ipa-client/sysrestore/sysrestore.state'",
+        # which ipa-server-install then reports as "Configuration of client
+        # side components failed!" after LDAP/CA/dirsrv are already set up.
+        - { path: /var/lib/ipa-client/sysrestore, mode: "0700" }
+        - { path: /var/lib/ipa/pki-ca, mode: "0755" }
+        - { path: /var/lib/ipa/pki-ca/publish, mode: "0755" }
+        - { path: /var/lib/ipa/sysrestore, mode: "0700" }
+        - { path: /var/lib/ipa/sysupgrade, mode: "0700" }
+        # ipa-getkeytab writes the HTTP service keytab straight into this
+        # directory during HTTPInstance creation; nothing earlier in the
+        # install flow creates it first (it only checks whether a keytab
+        # file already exists there to decide on a backup, never mkdir's the
+        # parent), so on a host that's never had it, ipa-getkeytab fails with
+        # "Failed to add key to the keytab" (ENOENT on the parent dir).
+        - { path: /var/lib/ipa/gssproxy, mode: "0700" }
+        # systemd auto-prunes a unit's ".wants" directory once the last
+        # symlink in it is removed. Our own "stop stale services" step above
+        # runs `systemctl disable pki-tomcatd@...` on every retry, which
+        # empties (and thus deletes) this directory; dogtag's CA installer
+        # then recreates its enablement symlink with a raw os.symlink() call
+        # rather than `systemctl enable`, so it assumes the directory already
+        # exists and crashes with FileNotFoundError if it doesn't.
+        - { path: /etc/systemd/system/pki-tomcatd.target.wants, mode: "0755" }
+      when: not ansible_check_mode
+      tags: [freeipa, freeipa-install]
+
     # ipa-server-install is NOT idempotent (re-running on a configured host
     # errors with "IPA server is already configured"). `creates:` makes this
-    # task a no-op once /etc/ipa/default.conf exists, so the playbook is
+    # task a no-op once the sysrestore state file exists, so the playbook is
     # idempotent by construction. no_log: true keeps the admin/DM passwords
     # out of Ansible's logs (they are still only ever supplied from vault).
     - name: "FreeIPA — run ipa-server-install (native; first run is 8–12 min)"
@@ -301,6 +483,14 @@
           changed_when: false
           failed_when: >-
             ('dc=' + ipa_domain.replace('.', ',dc=')) not in (ipa_ldap.stdout | default(''))
+
+        - name: "FreeIPA — mark installation complete"
+          ansible.builtin.file:
+            path: "{{ ipa_config_marker }}"
+            state: touch
+            owner: root
+            group: root
+            mode: "0644"
 
       rescue:
         - name: "FreeIPA — rescue: dump ipactl status"
