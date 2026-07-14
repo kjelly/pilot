@@ -202,6 +202,64 @@ func TestRoleChecklist_EscCancels(t *testing.T) {
 	}
 }
 
+func TestRoleChecklist_CtrlCCancels(t *testing.T) {
+	m := newTestChecklist()
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = next.(roleChecklistModel)
+	if !m.canceled {
+		t.Fatal("ctrl+c should set canceled")
+	}
+	if cmd == nil {
+		t.Fatal("expected ctrl+c to return tea.Quit")
+	}
+}
+
+func TestRoleChecklist_InitialViewShowsTitleAndHelp(t *testing.T) {
+	m := newTestChecklist()
+	m.title = "主機 \"web-1\" 的角色"
+	view := m.View()
+
+	for _, want := range []string{
+		"主機 \"web-1\" 的角色",
+		"↑/↓ 移動",
+		"space 勾選/取消",
+		"enter 完成",
+		"esc 取消",
+		"dns",
+		"ntp",
+		"docker",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view does not contain %q\nview:\n%s", want, view)
+		}
+	}
+	if !strings.Contains(view, "[x]") || !strings.Contains(view, "[ ]") {
+		t.Fatalf("expected both checked and unchecked marks in view:\n%s", view)
+	}
+}
+
+func TestRoleChecklist_EmptyItemListDoesNotPanic(t *testing.T) {
+	m := roleChecklistModel{title: "empty"}
+
+	view := m.View()
+	if !strings.Contains(view, "empty") {
+		t.Fatalf("expected title in view even with no items, got:\n%s", view)
+	}
+
+	for _, msg := range []tea.Msg{
+		tea.KeyMsg{Type: tea.KeyDown},
+		tea.KeyMsg{Type: tea.KeyUp},
+		tea.KeyMsg{Type: tea.KeySpace},
+		tea.WindowSizeMsg{Height: 24, Width: 80},
+	} {
+		next, _ := m.Update(msg)
+		m = next.(roleChecklistModel)
+	}
+	if m.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0 for an empty list", m.cursor)
+	}
+}
+
 func TestRoleChecklist_NonKeyMsgIsIgnored(t *testing.T) {
 	m := newTestChecklist()
 	next, cmd := m.Update(struct{}{})

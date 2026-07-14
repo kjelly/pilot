@@ -226,3 +226,116 @@ func TestSaveHosts_ReportsLintIssuesWithoutBlockingSave(t *testing.T) {
 		t.Errorf("expected the lint error to be reported, got: %q", buf.String())
 	}
 }
+
+func TestScanVaultFiles_ListsOnlyYAMLFiles(t *testing.T) {
+	t.Chdir(t.TempDir())
+	mustWriteFile(t, ".vault/main.yaml", "---\n")
+	mustWriteFile(t, ".vault/ipa-identity.yml", "---\n")
+	mustWriteFile(t, ".vault/notes.txt", "ignore\n")
+	if err := os.MkdirAll(".vault/subdir", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := scanVaultFiles(".vault")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ipa-identity.yml", "main.yaml"}
+	if len(got) != len(want) {
+		t.Fatalf("scanVaultFiles = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("scanVaultFiles = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestScanVaultFiles_MissingDirIsNotAnError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	got, err := scanVaultFiles(".vault")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("scanVaultFiles = %v, want empty", got)
+	}
+}
+
+func TestIsAnsibleVaultEncrypted(t *testing.T) {
+	if !isAnsibleVaultEncrypted([]byte("$ANSIBLE_VAULT;1.1;AES256\nabcdef\n")) {
+		t.Fatal("expected ansible-vault header to be detected")
+	}
+	if isAnsibleVaultEncrypted([]byte("---\nipa_admin_password: x\n")) {
+		t.Fatal("plaintext yaml should not be detected as ansible-vault")
+	}
+}
+
+func TestParseVaultYAML_EditableTopLevelScalars(t *testing.T) {
+	doc, err := parseVaultYAML([]byte("---\nipa_admin_password: \"x\"\nalertmanager_config: |\n  route:\n    receiver: \"null\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doc.Editable() {
+		t.Fatal("expected top-level scalar/block-scalar vault doc to be editable")
+	}
+	if len(doc.entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(doc.entries))
+	}
+	if doc.entries[1].DisplayValue() != "route:\\n  receiver: \"null\"\\n" {
+		t.Fatalf("unexpected display value: %q", doc.entries[1].DisplayValue())
+	}
+}
+
+func TestParseVaultYAML_ComplexStructureIsNotEditable(t *testing.T) {
+	doc, err := parseVaultYAML([]byte("---\nipa_users:\n  - name: alice\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Editable() {
+		t.Fatal("expected sequence-based vault yaml to be treated as non-editable")
+	}
+}
+
+func TestVaultYAMLDoc_SetAddDeleteAndBytes(t *testing.T) {
+	doc, err := parseVaultYAML([]byte("---\nipa_admin_password: \"x\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Set("ipa_admin_password", "updated")
+	doc.Add("restic_password", "line1\nline2")
+	doc.Delete("missing")
+	doc.Delete("ipa_admin_password")
+
+	got := string(doc.Bytes())
+	if bytes.Contains([]byte(got), []byte("ipa_admin_password")) {
+		t.Fatalf("deleted key still present:\n%s", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("restic_password: |")) {
+		t.Fatalf("multiline key should render as literal block:\n%s", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("  line1\n  line2\n")) {
+		t.Fatalf("multiline content missing:\n%s", got)
+	}
+}
+
+// TestVaultYAMLDoc_EmptySkeletonIsEditable covers the exact bytes
+// editVaultFile writes for a brand-new vault file ("---\n" with nothing
+// after it, i.e. yaml.v3's representation of an empty document is one
+// ScalarNode tagged !!null, not zero content) — Editable() must accept
+// it and Add must work, or `pilot edit`'s "create new plaintext vault
+// file" flow fails before a single key can ever be added.
+func TestVaultYAMLDoc_EmptySkeletonIsEditable(t *testing.T) {
+	doc, err := parseVaultYAML([]byte("---\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doc.Editable() {
+		t.Fatal("empty --- skeleton should be Editable()")
+	}
+	doc.Add("ipa_admin_password", "x")
+	got := string(doc.Bytes())
+	if !bytes.Contains([]byte(got), []byte(`ipa_admin_password: "x"`)) {
+		t.Fatalf("added key missing:\n%s", got)
+	}
+}
