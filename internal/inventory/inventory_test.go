@@ -1,6 +1,9 @@
 package inventory
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -279,13 +282,13 @@ func TestGroupVarsStems_DedupesSharedFreeipaStem(t *testing.T) {
 	}
 }
 
-func TestGroupVarsStems_UnmappedRoleUsesOwnName(t *testing.T) {
+func TestGroupVarsStems_RoleWithoutGroupVarsContractContributesNothing(t *testing.T) {
 	hf := &HostsFile{Hosts: []Host{
 		{Name: "d-1", Roles: []string{"docker"}},
 	}}
 	got := GroupVarsStems(hf)
-	if len(got) != 1 || got[0] != "docker" {
-		t.Fatalf("GroupVarsStems() = %v, want [docker]", got)
+	if len(got) != 0 {
+		t.Fatalf("GroupVarsStems() = %v, want empty", got)
 	}
 }
 
@@ -338,5 +341,47 @@ func TestRender_EmptyRolesRendersAsEmptyList(t *testing.T) {
 func TestRender_NilHostsFileErrors(t *testing.T) {
 	if _, err := Render(nil); err == nil {
 		t.Fatal("expected an error for a nil HostsFile")
+	}
+}
+
+func TestRoleContracts_GroupVarsExamplesExistForDeclaredStems(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	for _, c := range roleContracts {
+		if c.GroupVarsStem == "" {
+			continue
+		}
+		path := filepath.Join(repoRoot, "group_vars", c.GroupVarsStem+".example.yml")
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("role %q declares group_vars stem %q but %s is missing: %v", c.Name, c.GroupVarsStem, path, err)
+		}
+	}
+}
+
+func TestRoleContracts_VaultSectionsExist(t *testing.T) {
+	for _, c := range roleContracts {
+		for _, sectionID := range c.VaultSections {
+			if _, ok := vaultSections[sectionID]; !ok {
+				t.Fatalf("role %q references unknown vault section %q", c.Name, sectionID)
+			}
+			if len(VaultSectionExpectedKeys(sectionID)) == 0 {
+				t.Fatalf("role %q references vault section %q but it exposes no expected keys", c.Name, sectionID)
+			}
+		}
+	}
+}
+
+func TestTopLevelOrder_LeafEntriesComeFromRoleContracts(t *testing.T) {
+	valid := validRoleNames()
+	for _, name := range topLevelOrder {
+		if aggregateChildren(name) != nil {
+			continue
+		}
+		if !valid[name] {
+			t.Fatalf("topLevelOrder contains %q but no role contract defines it", name)
+		}
 	}
 }
