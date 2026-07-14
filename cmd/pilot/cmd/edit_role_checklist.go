@@ -88,7 +88,9 @@ func (m roleChecklistModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.clampWindow()
 		case " ":
-			m.items[m.cursor].Checked = !m.items[m.cursor].Checked
+			if len(m.items) > 0 {
+				m.items[m.cursor].Checked = !m.items[m.cursor].Checked
+			}
 		case "enter":
 			return m, tea.Quit
 		case "esc", "ctrl+c":
