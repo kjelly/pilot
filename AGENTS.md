@@ -443,6 +443,8 @@ pilot 有三種輸出，**不要混用**：
 
 ## 6. 不要做的事
 
+- ❌ 不要把任何中間產物、測試輸出、臨時檔或 scratch data 放到 repo 其他路徑；
+  只准用 `./tmp`、`/tmp` 或系統暫存目錄（例如 `mktemp` 產生的路徑）
 - ❌ 不要從「spec 設計意圖」推「inventory 應該有的 host」 — 從**你實際要執行的那份 inventory** 讀事實（vm-target：`show-inventory`；真實主機：`ansible-inventory -i <inv> --graph`，見 §0.1）
 - ❌ 不要在 runbook 寫「預期 PASS 11/11」沒實際跑過 — 寫「這次跑 PASS 11/11，截錄如下」
 - ❌ 不要把硬規則繞過（「這次特例」是滑坡的開始）

@@ -69,3 +69,4 @@ inventories/*
 /group_vars/dns/*.yaml
 !/group_vars/dns/zones.example.yaml
 workspace
+tmp/
