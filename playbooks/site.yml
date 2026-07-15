@@ -24,7 +24,10 @@
 #                         → Keycloak DB → Keycloak → PAM-OIDC
 #                         → log-server → audit-log-forwarding
 #                         → wazuh-manager → wazuh-fim
-#                         → seaweedfs-s3 → restic-backup → OS 補丁
+#                         → seaweedfs-s3 → restic-backup
+#                         → alertmanager → prometheus → thanos-query → dashboard
+#                         → log-shipping (log-server/Wazuh logs → Loki)
+#                         → OS 補丁
 #
 #  注意:FreeIPA 使用者/權限(freeipa-identity-apply.yml)是「資料驅動的 day-2
 #  維運」,需要 vault roster,刻意不放進 site.yml。單獨執行,見 DELIVERY.md。
@@ -43,6 +46,16 @@
 #  fail-early gate)。且需要較大的資源(4 vCPU/8GB RAM/50GB 磁碟起跳,CVE
 #  弱點掃描 feed 常駐 ~7-9GB)——磁碟不足會讓所有告警靜默停止產生且無明顯
 #  服務層級失敗徵兆(容器仍顯示 running),見 docs/runbooks/wazuh-manager.md §5。
+#
+#  注意:log-shipping 會在 dashboard 之後執行，把 Promtail 裝到 log-server
+#  group(有機器的話)或自動 fallback 到 wazuh-manager group(log-server 空
+#  時),把日誌送到 dashboard 的 Loki。實際要 tail 哪個 host 路徑
+#  (log-server 的 /var/log/siem,或 Wazuh manager 那個 docker named volume
+#  底下的真實 alerts.log)由 log-shipping-apply.yml 自己在套用當下用
+#  `docker inspect` 動態解析(siem_log_root_effective),不假設固定的
+#  compose volume 名稱。全站執行時請提供 -e loki_target_host=<dashboard
+#  IP/FQDN>，或在實際 inventory 的 log-server/wazuh-manager host/group vars
+#  中設定它。
 #
 #  注意:restic-backup 的目的地(restic_s3_target_host,見
 #  group_vars/restic-backup.example.yml)跟 audit-log-forwarding/wazuh 那組
@@ -133,6 +146,38 @@
   tags: [backup, seaweedfs-s3]
 - import_playbook: apply/restic-backup-apply.yml
   tags: [backup, restic-backup]
+
+# ── 5c. 觀測(Alertmanager → Prometheus+Thanos Sidecar → 中央 Thanos Query
+#         → Grafana+Loki 儀表板)── 各自 hosts: <group>,沒填機器的 group 照樣自動跳過
+- import_playbook: apply/alertmanager-apply.yml
+  tags: [observability, alertmanager]
+- import_playbook: apply/prometheus-apply.yml
+  tags: [observability, prometheus]
+- import_playbook: apply/thanos-query-apply.yml
+  tags: [observability, thanos-query]
+- import_playbook: apply/dashboard-apply.yml
+  tags: [observability, dashboard]
+
+# ── 5d. 日誌收集(log-server/Wazuh → Promtail → dashboard Loki)──────────
+#     log-shipping 與 log-server 是同一台主機上的疊加角色；Wazuh manager
+#     的 syslog_output 若指向 log-server，亦會被這裡的 Promtail 收集。
+#     這個 import 明確算出目標 group(見下方 target_group 運算式),避免
+#     site.yml 的 target_group 全域覆寫安全閥被繞過(這裡設的是「這一支
+#     子 playbook 專用」的 vars,不是全站的 -e target_group=)。
+#
+#     target_group 預設值:log-server group 有機器就用它;沒有的話(這個
+#     demo 拓樸常見——log-server 的 rsyslog 沒監聽 514,實際收 syslog 的是
+#     Wazuh manager 自己)自動 fallback 到 wazuh-manager group。真正該讀
+#     哪個 host 路徑(log-server 的 /var/log/siem,還是 Wazuh manager 那個
+#     docker named volume 底下的 alerts.log)由 log-shipping-apply.yml 自己
+#     用 `docker inspect` 動態解析(siem_log_root_effective),這裡只需要
+#     選對「該去哪台機器裝 Promtail」。兩個 group 都沒機器時,target_group
+#     仍照舊指向(空的)log-server,跟 site.yml 其他角色一樣自動跳過不套用。
+- import_playbook: apply/log-shipping-apply.yml
+  vars:
+    target_group: >-
+      {{ 'log-server' if (groups['log-server'] | default([]) | length > 0) else 'wazuh-manager' }}
+  tags: [observability, log-shipping]
 
 # ── 6. OS 補丁 SLA(day-2,放最後)──────────────────────────────────────
 - import_playbook: apply/os-patch-sla-apply.yml

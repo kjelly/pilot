@@ -62,9 +62,20 @@
     loki_host_data_dir: /var/lib/pilot/loki
     dashboard_config_dir: /etc/pilot/dashboard
     docker_network_name: pilot-metrics
-    thanos_query_target_host: ""
+    # thanos_query_target_host is DELIBERATELY NOT declared here (not even
+    # as `default('')`) — a play-level `vars:` entry outranks group_vars/
+    # host_vars, so a hardcoded "" would silently shadow any value set via
+    # `pilot edit`'s group_vars editor and force `-e` on every deploy (see
+    # docs/runbooks/minimal-poc-architecture.md § Real bugs #1). The one
+    # task below that references it uses `| default('', true)` at the
+    # point of use instead, so an unset value still resolves to "" rather
+    # than an undefined-variable error.
     thanos_query_alias: thanos-query-backend
-    thanos_query_port: 10902
+    # Must match thanos-query-apply.yml's thanos_query_http_port default
+    # (10912, not the container-internal 10902) — see that playbook's
+    # comment for why the central Thanos Query defaults its host-published
+    # HTTP port off of 10902 in the first place.
+    thanos_query_port: 10912
     grafana_admin_password: ""
 
   pre_tasks:
@@ -107,13 +118,13 @@
           vault file recommended over -e in real inventories).
 
   tasks:
-    - name: "Pin {{ thanos_query_alias }} -> {{ thanos_query_target_host }} in /etc/hosts"
+    - name: "Pin {{ thanos_query_alias }} -> {{ thanos_query_target_host | default('', true) }} in /etc/hosts"
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ thanos_query_alias }}$'
-        line: "{{ thanos_query_target_host }}\t{{ thanos_query_alias }}"
+        line: "{{ thanos_query_target_host | default('', true) }}\t{{ thanos_query_alias }}"
         state: present
-      when: thanos_query_target_host | length > 0
+      when: thanos_query_target_host | default('', true) | length > 0
 
     - block:
         # grafana/grafana's official image runs as uid/gid 472 ("grafana"),

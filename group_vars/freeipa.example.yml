@@ -34,3 +34,18 @@ freeipa_domain: ipa.pilot.internal
 # 只有當你的 realm 名稱、伺服器主機名或 IP 不照這個慣例時才覆寫:
 # freeipa_realm: IPA.PILOT.INTERNAL
 # freeipa_server_fqdn: ipa1.ipa.pilot.internal
+
+# 原生 FreeIPA DNS/NTP(--setup-dns/--ntp-server),EL9 host 一律用這個,
+# 已經預設 true,通常不用填。只有主機已經有外部管理的 DNS/NTP、不想讓
+# FreeIPA 自己再起 named/chronyd 時才需要覆寫成 false:
+# freeipa_setup_dns: true
+# freeipa_setup_ntp: true
+
+# FreeIPA 自己的 named 用的上游 DNS forwarder(--forwarder=...),讓 FreeIPA
+# host 的 DNS 仍能解析公網(例如自己 yum/dnf 裝套件用)。預設 8.8.8.8;
+# 不想要任何 forwarder(改用 --no-forwarders)才需要覆寫成空字串或空陣列。
+# freeipa_dns_forwarders: 8.8.8.8
+
+# ipa-server-install 用的 --ntp-server 清單。預設是台灣的公開時間伺服器;
+# 其他地區請覆寫成該地區慣用的 NTP server。
+# freeipa_ntp_servers: [tock.stdtime.gov.tw, watch.stdtime.gov.tw]

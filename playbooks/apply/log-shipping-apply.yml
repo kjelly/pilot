@@ -43,10 +43,28 @@
     promtail_positions_dir: /var/lib/pilot/promtail
     docker_network_name: pilot-metrics
     loki_target_host: ""
+    # Prefer an explicit value; otherwise resolve the first dashboard host from the
+    # actual inventory. Use ansible_host when present, then inventory hostname.
+    loki_inventory_target_host: >-
+      {{ hostvars[groups["dashboard"][0]].ansible_host | default(groups["dashboard"][0], true)
+         if (groups["dashboard"] | default([]) | length > 0) else "" }}
+    loki_effective_target_host: >-
+      {{ loki_target_host | default("", true) or loki_inventory_target_host }}
     loki_alias: pilot-loki-backend
     loki_port: 3100
     loki_endpoint: "{{ loki_alias }}:{{ loki_port }}"
-    siem_log_root: /var/log/siem
+    # Explicit override always wins. Otherwise: if a wazuh-manager container
+    # is running on THIS host, resolve its real alerts-log host path via
+    # `docker inspect` (community.docker.docker_container_info below) rather
+    # than assuming the docker-compose-project-derived volume name — this
+    # is what lets log-shipping run co-located with wazuh-manager (e.g. when
+    # log-server is empty and wazuh-manager is the de facto SIEM receiver)
+    # and actually tail real alerts.log content, instead of the log-server
+    # default (/var/log/siem) which is empty unless log-server's own rsyslog
+    # is also running on this same host. See siem_log_root_effective below.
+    siem_log_root: ""
+    siem_log_root_default: /var/log/siem
+    siem_wazuh_manager_container: single-node-wazuh.manager-1
     promtail_job_label: pilot-siem
 
   pre_tasks:
@@ -81,14 +99,37 @@
       tags: [always]
 
   tasks:
-    - name: "Pin {{ loki_alias }} -> {{ loki_target_host }} in /etc/hosts"
+    # Read-only `docker inspect` — safe to run even when no wazuh-manager
+    # container exists on this host (exists: false, container: none).
+    - name: "Detect a co-located wazuh-manager container (for real alerts-log path resolution)"
+      community.docker.docker_container_info:
+        name: "{{ siem_wazuh_manager_container }}"
+      register: siem_wazuh_container_info
+      changed_when: false
+
+    - name: "Resolve effective siem_log_root (explicit > wazuh-manager's real alerts-log volume > log-server default)"
+      ansible.builtin.set_fact:
+        siem_log_root_effective: >-
+          {{ siem_log_root | default('', true)
+             or siem_log_root_wazuh_detected
+             or siem_log_root_default }}
+      vars:
+        siem_wazuh_logs_mount: >-
+          {{ (siem_wazuh_container_info.container.Mounts | default([]))
+             | selectattr('Destination', 'equalto', '/var/ossec/logs') | list }}
+        siem_log_root_wazuh_detected: >-
+          {{ (siem_wazuh_logs_mount | map(attribute='Source') | first)
+             if (siem_wazuh_container_info.exists | default(false) and siem_wazuh_logs_mount | length > 0)
+             else '' }}
+
+    - name: "Pin {{ loki_alias }} -> {{ loki_effective_target_host }} in /etc/hosts"
       tags: [C5]
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ loki_alias }}$'
-        line: "{{ loki_target_host }}\t{{ loki_alias }}"
+        line: "{{ loki_effective_target_host }}\t{{ loki_alias }}"
         state: present
-      when: loki_target_host | length > 0
+      when: loki_effective_target_host | length > 0
 
     - block:
         - name: "Ensure config + positions dirs exist"
@@ -120,7 +161,7 @@
                     - targets: [localhost]
                       labels:
                         job: {{ promtail_job_label }}
-                        __path__: {{ siem_log_root }}/**/*.log
+                        __path__: {{ siem_log_root_effective }}/**/*.log
           register: promtail_config_result
 
         - name: "Ensure docker network {{ docker_network_name }} exists"
@@ -145,7 +186,7 @@
               - name: "{{ docker_network_name }}"
             volumes:
               - "{{ promtail_config_dir }}/promtail-config.yml:/etc/promtail/config.yml:ro"
-              - "{{ siem_log_root }}:{{ siem_log_root }}:ro"
+              - "{{ siem_log_root_effective }}:{{ siem_log_root_effective }}:ro"
               - "{{ promtail_positions_dir }}:/var/lib/promtail"
             ports:
               - "9080:9080"

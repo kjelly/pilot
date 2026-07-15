@@ -74,10 +74,30 @@
     # (ipa1) is derived from this in the /etc/hosts pin below.
     ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
 
-    # DNS / NTP options (overridable)
-    ipa_setup_dns: "{{ freeipa_setup_dns | default(false) }}"
-    ipa_dns_forwarders_raw: "{{ ipa_dns_forwarders | default(freeipa_dns_forwarders | default([]), true) }}"
-    ipa_setup_ntp: "{{ freeipa_setup_ntp | default(false) }}"
+    # DNS / NTP options (overridable, group_vars/freeipa.yml — see
+    # group_vars/freeipa.example.yml). Default to native FreeIPA DNS/NTP
+    # (true): this play already hard-gates on EL9 (see the "require EL9
+    # host" assert below), and the generic core-infra-provider dns/ntp
+    # roles are Debian/Ubuntu-only (ansible.builtin.apt,
+    # /etc/systemd/resolved.conf) — there is no working non-native path
+    # for this playbook's one supported host family, so `false` was never
+    # a safe default here. Set freeipa_setup_dns/ntp: false in group_vars
+    # (or -e) to opt back out (e.g. the host already has
+    # externally-managed DNS/NTP and should not run its own named/chronyd
+    # at all).
+    ipa_setup_dns: "{{ freeipa_setup_dns | default(true) }}"
+    # Forwarders for the native named FreeIPA installs (--forwarder=...),
+    # so the FreeIPA host's own DNS can still resolve the public internet
+    # for its own package installs. Defaults to a public resolver rather
+    # than --no-forwarders — an unconfigured deploy should still get
+    # working DNS, not silently lose internet resolution on its identity
+    # server.
+    ipa_dns_forwarders_raw: "{{ ipa_dns_forwarders | default(freeipa_dns_forwarders | default(['8.8.8.8'], true), true) }}"
+    ipa_setup_ntp: "{{ freeipa_setup_ntp | default(true) }}"
+    # NTP servers passed to ipa-server-install as --ntp-server=... when
+    # ipa_setup_ntp is true. Defaults to Taiwan's public stratum servers;
+    # override in group_vars/freeipa.yml for other regions.
+    ipa_ntp_servers: "{{ freeipa_ntp_servers | default(['tock.stdtime.gov.tw', 'watch.stdtime.gov.tw'], true) }}"
 
     # Native install
     ipa_packages: "{{ ['ipa-server'] + (['ipa-server-dns'] if ipa_setup_dns | bool else []) }}"
@@ -442,7 +462,12 @@
             if ipa_setup_dns | bool
             else ['--no-host-dns']
           }}
-        ipa_install_ntp_args: "{{ [] if ipa_setup_ntp | bool else ['--no-ntp'] }}"
+        ipa_install_ntp_args: >-
+          {{
+            (ipa_ntp_servers | map('regex_replace', '^(.*)$', '--ntp-server=\1') | list)
+            if ipa_setup_ntp | bool
+            else ['--no-ntp']
+          }}
         ipa_install_args: "{{ ipa_install_base_args + ipa_install_dns_args + ipa_install_ntp_args }}"
       register: ipa_install
       no_log: true

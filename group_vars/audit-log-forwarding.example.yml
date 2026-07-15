@@ -1,0 +1,25 @@
+---
+# ============================================================================
+#  group_vars/audit-log-forwarding.example.yml —— 主機稽核(auditd)+ 轉送設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/audit-log-forwarding.yml
+#    cp group_vars/audit-log-forwarding.example.yml <inventory 目錄>/group_vars/audit-log-forwarding.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/audit-log-forwarding.md
+#  轉送目標(log-server 角色)的 spec:docs/verification/log-server.md
+# ============================================================================
+
+# 中央 SIEM 接收端(log-server 角色,或頂替它的 wazuh-manager 角色)的 IP 或
+# FQDN。
+#
+# 選填 —— 留白/不填的話,會自動從 inventory 偵測:優先抓 log-server group
+# 的機器,沒有的話改抓 wazuh-manager group 的機器(wazuh-manager 有自己的
+# 集中式 syslog 接收,設計上會頂替 log-server 角色)。兩個 group 都是空的
+# 話,這個 group 的機器仍會裝好本機 auditd 規則(spec C1-C14、C18),只是
+# 不會轉送(spec C15-C17 不適用,屬設計如此,見 spec §5)。
+#
+# 只有在你想覆寫自動偵測到的目標(例如轉去一台不在這份 inventory 裡的外部
+# SIEM)時才需要手動填這裡:
+siem_forward_host: ""
