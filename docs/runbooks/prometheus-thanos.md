@@ -54,7 +54,11 @@ $ go test ./internal/spec/ -run 'TestRegression_PrometheusSpec|TestRegression_Th
 
 ---
 
-## 1. 起 3 台 VM（依序，不平行——已知的 state-file race bug）
+## 1. 起 3 台 VM（本次證據為依序建立）
+
+不同名稱的 `vm-target up` 現在可平行執行：state 已改用跨程序鎖定的
+`Store.Mutate`，避免舊版的 last-writer-wins state-file race。以下保留依序命令與
+原始輸出，作為本次實測的歷史證據；在資源充足且 VM 名稱互異時，可自行平行建立。
 
 ```bash
 $ go run ./cmd/pilot vm-target up --name pt-s3 --ssh-user ubuntu \
@@ -328,4 +332,5 @@ $ sudo rm -rf /var/lib/libvirt/images/pilot/pt-central \
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-07-14 | v1.1 | 更正舊版 `vm-target up` state-file race 說明：不同名稱 VM 現可平行建立；保留循序命令作為原始實測證據 | Codex |
 | 2026-07-06 | v1.0 | 初版：`prometheus`/`thanos-query` 設計、apply playbook、spec、regression test、vm-target 三台 VM 實測（3 個真事故修好，見 §6），全局跨站查詢驗證成功 | sre |
