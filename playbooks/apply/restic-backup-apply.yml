@@ -122,12 +122,12 @@
     - name: "Auto-detect backup destination host from this inventory's seaweedfs-s3 group"
       ansible.builtin.set_fact:
         restic_s3_target_host: >-
-          {{ hostvars[groups['seaweedfs-s3'] | first]['ansible_host']
-             | default(groups['seaweedfs-s3'] | first, true) }}
+          {{ hostvars[(groups.get('seaweedfs-s3', []) | first)]['ansible_host']
+             | default(groups.get('seaweedfs-s3', []) | first, true) }}
       when: >-
         (restic_s3_target_host | default('') | length == 0)
         and (restic_s3_alias in restic_repository)
-        and (groups['seaweedfs-s3'] | default([]) | length > 0)
+        and (groups.get('seaweedfs-s3', []) | length > 0)
 
     # restic_s3_target_host is NOT optional-in-the-usual-sense: unlike
     # siem_forward_host/wazuh_manager_host, skipping it doesn't leave a
@@ -173,7 +173,7 @@
         state: present
       when: ansible_os_family == 'RedHat'
 
-    - name: "Step 2: Pin {{ restic_s3_alias }} -> {{ restic_s3_target_host | default('') }} in /etc/hosts (spec C10)"
+    - name: "Step 2: Pin S3 destination alias in /etc/hosts (spec C10)"
       tags: [C10]
       ansible.builtin.lineinfile:
         path: /etc/hosts
@@ -192,12 +192,14 @@
     # whether or not seaweedfs-s3 is colocated with this restic-backup host.
     # Only runs against the self-hosted default destination — an externally
     # overridden restic_repository has no SeaweedFS container to delegate to.
-    - name: "Step 2b: Ensure destination bucket exists on the SeaweedFS host (idempotent)"
+    - name: "Step 2b: Ensure destination bucket exists on the SeaweedFS host (idempotent)"  # noqa run-once[task]
       when: >-
         restic_s3_alias in restic_repository
-        and (groups['seaweedfs-s3'] | default([]) | length > 0)
+        and (groups.get('seaweedfs-s3', []) | length > 0)
       run_once: true
-      delegate_to: "{{ groups['seaweedfs-s3'] | first }}"
+      # Use the current host as a valid delegate even when the optional group
+      # is absent; the block-level `when` then skips the bucket probe cleanly.
+      delegate_to: "{{ groups.get('seaweedfs-s3', [inventory_hostname]) | first }}"
       block:
         - name: "Step 2b: check destination bucket exists"
           community.docker.docker_container_exec:
@@ -220,7 +222,8 @@
           when: restic_s3_bucket not in restic_seaweedfs_bucket_list.stdout
           changed_when: true
 
-    - block:
+    - name: "Restic backup configuration and service"
+      block:
         - name: "Step 3: Ensure /etc/pilot exists"
           ansible.builtin.file:
             path: /etc/pilot
@@ -271,6 +274,15 @@
               # docs/runbooks/restic-backup.md §5 Bug 3). timeout turns an
               # effectively-indefinite hang into a clear, fast failure.
               timeout 60 restic snapshots >/dev/null 2>&1 || timeout 60 restic init
+
+              # A prior run killed mid-operation (ansible timeout, host
+              # reboot, `systemctl stop` racing a still-running oneshot)
+              # leaves its lock behind in the repo forever — restic never
+              # expires it on its own. Plain `unlock` (no --remove-all) only
+              # clears locks restic's own heuristic judges stale, so a
+              # genuinely-active concurrent backup from another host is left
+              # alone — safe with multiple hosts sharing one repo.
+              timeout 60 restic unlock || true
 
               # shellcheck disable=SC2086
               restic backup ${RESTIC_BACKUP_PATHS}
@@ -341,7 +353,7 @@
         # parallel backup step, otherwise simultaneous init corrupts the
         # repository metadata and later commands fail with ciphertext
         # verification errors.
-        - name: "Step 10a: Initialize the shared restic repository once if needed"
+        - name: "Step 10a: Initialize the shared restic repository once if needed"  # noqa run-once[task]
           ansible.builtin.shell: |
             . {{ restic_env_path }}
             export HOME=/root
