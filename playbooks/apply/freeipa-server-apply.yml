@@ -76,13 +76,7 @@
 
     # DNS / NTP options (overridable)
     ipa_setup_dns: "{{ freeipa_setup_dns | default(false) }}"
-    # `ipa_dns_forwarders` is the canonical spec variable (a list).  Keep the
-    # historical group_vars spelling as a fallback, and normalize the common
-    # `-e key=value` string form so a string is not iterated character-by-
-    # character by the argument-building map below.
-    ipa_dns_forwarders_normalized: >-
-      {% set raw = ipa_dns_forwarders | default(freeipa_dns_forwarders | default([]), true) %}
-      {{ raw.split() if raw is string else raw }}
+    ipa_dns_forwarders_raw: "{{ ipa_dns_forwarders | default(freeipa_dns_forwarders | default([]), true) }}"
     ipa_setup_ntp: "{{ freeipa_setup_ntp | default(false) }}"
 
     # Native install
@@ -177,6 +171,11 @@
       ansible.builtin.stat:
         path: "{{ ipa_config_marker }}"
       register: ipa_precheck_cfg
+      tags: [always]
+
+    - name: "Normalize DNS forwarders to a list"
+      ansible.builtin.set_fact:
+        ipa_dns_forwarders_normalized: "{{ (ipa_dns_forwarders_raw | from_yaml) if (ipa_dns_forwarders_raw is string and (ipa_dns_forwarders_raw | trim).startswith('[')) else (ipa_dns_forwarders_raw.split() if ipa_dns_forwarders_raw is string else ipa_dns_forwarders_raw) }}"  # noqa yaml[line-length]
       tags: [always]
 
     # Only meaningful before the first install: once ipa-server-install has
@@ -521,9 +520,10 @@
         - name: "FreeIPA DNS — configure upstream forwarders (external resolution)"
           when: ipa_setup_dns | bool and (ipa_dns_forwarders_normalized | length > 0)
           block:
-            - name: "Kinit admin (for dnsconfig-mod)"
+            - name: "Kinit admin (for dnsconfig-mod)"  # noqa risky-shell-pipe
               ansible.builtin.shell:
-                cmd: 'set -o pipefail; printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+                cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+                executable: /bin/bash
               changed_when: false
               no_log: true
 
