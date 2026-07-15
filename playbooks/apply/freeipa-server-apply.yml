@@ -76,7 +76,13 @@
 
     # DNS / NTP options (overridable)
     ipa_setup_dns: "{{ freeipa_setup_dns | default(false) }}"
-    ipa_dns_forwarders: "{{ freeipa_dns_forwarders | default([]) }}"
+    # `ipa_dns_forwarders` is the canonical spec variable (a list).  Keep the
+    # historical group_vars spelling as a fallback, and normalize the common
+    # `-e key=value` string form so a string is not iterated character-by-
+    # character by the argument-building map below.
+    ipa_dns_forwarders_normalized: >-
+      {% set raw = ipa_dns_forwarders | default(freeipa_dns_forwarders | default([]), true) %}
+      {{ raw.split() if raw is string else raw }}
     ipa_setup_ntp: "{{ freeipa_setup_ntp | default(false) }}"
 
     # Native install
@@ -159,6 +165,7 @@
       when: stage == 'prod'
       tags: [always]
 
+    # noqa command-instead-of-module - systemctl is used only for a read-only health probe
     - name: "Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)"
       ansible.builtin.command: systemctl is-active chronyd ntpd
       register: ipa_ntp_check
@@ -166,12 +173,21 @@
       failed_when: false
       tags: [always]
 
+    - name: "Detect prior configuration (pre_tasks copy, for the port-53 gate below)"
+      ansible.builtin.stat:
+        path: "{{ ipa_config_marker }}"
+      register: ipa_precheck_cfg
+      tags: [always]
+
+    # Only meaningful before the first install: once ipa-server-install has
+    # run, its own named/bind9-dns keeps port 53 held forever, so this would
+    # otherwise fail every idempotent re-apply (e.g. to change forwarders).
     - name: "Gate: if ipa_setup_dns=true, ensure port 53 is not in use by other services"
       ansible.builtin.wait_for:
         port: 53
         state: stopped
         timeout: 3
-      when: ipa_setup_dns | bool
+      when: ipa_setup_dns | bool and not ipa_precheck_cfg.stat.exists
       tags: [always]
 
     - name: "Warn if no active time sync (FreeIPA runs with --no-ntp; ntp role must cover this)"
@@ -200,7 +216,7 @@
     # already correct is a clean no-op. The FQDN must be the FIRST
     # (canonical) name for the IP or get_server_ip_address aborts with "does
     # not match configured canonical hostname".
-    - name: "FreeIPA — pin {{ ipa_server_fqdn }} to {{ ipa_server_ip }} (FQDN canonical) in /etc/hosts"
+    - name: "FreeIPA — pin server FQDN to its LAN IP (FQDN canonical) in /etc/hosts"
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ ipa_server_fqdn | regex_escape }}(\s|$)'
@@ -225,6 +241,7 @@
     # Partial installs can leave Dogtag / Kerberos / Custodia units running and
     # holding ports or config state across retries. Stop them before rerunning
     # ipa-server-install so a failed attempt is actually recoverable in-place.
+    # noqa command-instead-of-module - the service list is dynamic and only runs during recovery
     - name: "FreeIPA — stop stale IPA/Dogtag services before install retry"
       ansible.builtin.command: "systemctl stop {{ item }}"
       loop:
@@ -420,8 +437,8 @@
         ipa_install_dns_args: >-
           {{
             ['--setup-dns'] + (
-              ['--no-forwarders'] if (ipa_dns_forwarders | length == 0)
-              else (ipa_dns_forwarders | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
+              ['--no-forwarders'] if (ipa_dns_forwarders_normalized | length == 0)
+              else (ipa_dns_forwarders_normalized | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
             )
             if ipa_setup_dns | bool
             else ['--no-host-dns']
@@ -485,12 +502,42 @@
             ('dc=' + ipa_domain.replace('.', ',dc=')) not in (ipa_ldap.stdout | default(''))
 
         - name: "FreeIPA — mark installation complete"
-          ansible.builtin.file:
-            path: "{{ ipa_config_marker }}"
-            state: touch
+          ansible.builtin.copy:
+            dest: "{{ ipa_config_marker }}"
+            content: ""
+            force: false
             owner: root
             group: root
             mode: "0644"
+
+        # --setup-dns with no forwarders (the default when
+        # freeipa_dns_forwarders is unset) installs named with
+        # --no-forwarders: it only ever answers queries for ipa_domain, so
+        # every other lookup — including this host's own dnf/apt package
+        # installs — NXDOMAINs once /etc/resolv.conf points at 127.0.0.1.
+        # ipa-server-install itself has no forwarders flag to change after
+        # the fact, so this is applied post-install via the same `ipa`
+        # CLI freeipa-identity-apply.yml already uses for HBAC/sudo data.
+        - name: "FreeIPA DNS — configure upstream forwarders (external resolution)"
+          when: ipa_setup_dns | bool and (ipa_dns_forwarders_normalized | length > 0)
+          block:
+            - name: "Kinit admin (for dnsconfig-mod)"
+              ansible.builtin.shell:
+                cmd: 'set -o pipefail; printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+              changed_when: false
+              no_log: true
+
+            - name: "FreeIPA DNS — set global forwarders"
+              ansible.builtin.command:
+                argv: "{{ ['ipa', 'dnsconfig-mod'] + (ipa_dns_forwarders_normalized | map('regex_replace', '^(.*)$', '--forwarder=\\1') | list) }}"
+              register: ipa_dnsconfig
+              changed_when: >-
+                ipa_dnsconfig.rc == 0 and
+                'no modifications to be performed' not in
+                (ipa_dnsconfig.stderr | default('') ~ ipa_dnsconfig.stdout | default(''))
+              failed_when: >-
+                ipa_dnsconfig.rc != 0 and
+                'no modifications to be performed' not in (ipa_dnsconfig.stderr | default('') ~ ipa_dnsconfig.stdout | default(''))
 
       rescue:
         - name: "FreeIPA — rescue: dump ipactl status"
@@ -558,6 +605,7 @@
           when: >-
             ('nsslapd-auditlog-logging-enabled: on' not in ipa_ds_audit_cfg.stdout) or
             ('nsslapd-auditfaillog-logging-enabled: on' not in ipa_ds_audit_cfg.stdout)
+          changed_when: true
 
         - name: "FreeIPA — 389-ds audit log: write dummy description to trigger audit log (spec C16)"
           ansible.builtin.shell: |
