@@ -25,4 +25,4 @@ thanos_query_target_host: ""
 
 # 通常不用改,會沿用 playbook 內建預設:
 # thanos_query_alias: thanos-query-backend
-# thanos_query_port: 10902
+# thanos_query_port: 10912

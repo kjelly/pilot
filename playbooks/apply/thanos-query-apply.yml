@@ -48,7 +48,14 @@
     thanos_compact_data_dir: /var/lib/pilot/thanos-compact
     thanos_config_dir: /etc/pilot/thanos
     docker_network_name: pilot-metrics
-    thanos_s3_target_host: ""
+    # thanos_s3_target_host is DELIBERATELY NOT declared here (not even as
+    # `default('')`) — a play-level `vars:` entry outranks group_vars/
+    # host_vars, so a hardcoded "" would silently shadow any value set via
+    # `pilot edit`'s group_vars editor and force `-e` on every deploy (see
+    # docs/runbooks/minimal-poc-architecture.md § Real bugs #1). Every task
+    # below that references it uses `| default('', true)` at the point of
+    # use instead, so an unset value still resolves to "" rather than an
+    # undefined-variable error.
     thanos_s3_alias: thanos-s3-backend
     thanos_s3_port: 8333
     thanos_s3_bucket: pilot-thanos-metrics
@@ -56,14 +63,18 @@
     thanos_query_store_group: prometheus
     thanos_query_sidecar_grpc_port: 10901
     # Host-published port for Thanos Query's own HTTP API (what
-    # dashboard-apply.yml's thanos_query_port talks to). Overridable
-    # because a per-site Prometheus's Thanos Sidecar (prometheus-apply.yml)
-    # also hardcodes host port 10902 for its own http-address — normally a
-    # different host so it never matters, but the two collide when a
-    # single-VM demo co-locates prometheus and thanos-query on the same
-    # machine. The container's internal listen port stays 10902; only the
-    # host-side publish is remapped.
-    thanos_query_http_port: 10902
+    # dashboard-apply.yml's thanos_query_port talks to). Defaults to 10912,
+    # NOT the container's internal 10902 listen port: a per-site
+    # Prometheus's Thanos Sidecar (prometheus-apply.yml) hardcodes host
+    # port 10902 for its own http-address, which collides on the host's
+    # port namespace whenever a Prometheus site and the central Thanos
+    # Query happen to be co-located on the same machine (e.g. a compact
+    # single-VM demo) — that used to require callers to remember
+    # `-e thanos_query_http_port=10912 -e thanos_query_port=10912` (the
+    # latter is dashboard-apply.yml's matching var) every time. Defaulting
+    # to a permanently non-colliding port here means the common case needs
+    # no override at all; still overridable via -e for other port schemes.
+    thanos_query_http_port: 10912
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -111,7 +122,7 @@
     - name: "Gate: S3 destination must be resolvable"
       ansible.builtin.assert:
         that:
-          - (thanos_s3_target_host | length > 0) or (thanos_s3_alias not in thanos_s3_endpoint)
+          - (thanos_s3_target_host | default('', true) | length > 0) or (thanos_s3_alias not in thanos_s3_endpoint)
         fail_msg: >-
           thanos_s3_target_host is empty AND thanos_s3_endpoint still uses
           the default thanos-s3-backend alias — Thanos would have no
@@ -128,13 +139,13 @@
           site(s): {{ groups[thanos_query_store_group] | default([]) }}
 
   tasks:
-    - name: "Pin {{ thanos_s3_alias }} -> {{ thanos_s3_target_host }} in /etc/hosts"
+    - name: "Pin {{ thanos_s3_alias }} -> {{ thanos_s3_target_host | default('', true) }} in /etc/hosts"
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ thanos_s3_alias }}$'
-        line: "{{ thanos_s3_target_host }}\t{{ thanos_s3_alias }}"
+        line: "{{ thanos_s3_target_host | default('', true) }}\t{{ thanos_s3_alias }}"
         state: present
-      when: thanos_s3_target_host | length > 0
+      when: thanos_s3_target_host | default('', true) | length > 0
 
     - block:
         - name: "Ensure config dir exists"
@@ -159,6 +170,33 @@
           loop:
             - "{{ thanos_store_data_dir }}"
             - "{{ thanos_compact_data_dir }}"
+
+        # SeaweedFS never implicitly creates a bucket on PutObject — Store
+        # Gateway/Compactor would otherwise crash-loop with "The specified
+        # bucket does not exist" (docker logs pilot-thanos-store). Mirrors
+        # restic-backup-apply.yml's "Step 2b" / prometheus-apply.yml's
+        # equivalent block; harmless/idempotent if that one already ran.
+        - name: "Step: Ensure Thanos S3 bucket exists on the SeaweedFS host (idempotent)"  # noqa run-once[task]
+          when: >-
+            thanos_s3_alias in thanos_s3_endpoint
+            and (groups.get('seaweedfs-s3', []) | length > 0)
+          run_once: true
+          delegate_to: "{{ groups.get('seaweedfs-s3', [inventory_hostname]) | first }}"
+          block:
+            - name: "Step: check Thanos S3 bucket exists"
+              community.docker.docker_container_exec:
+                container: pilot-seaweedfs
+                command: sh -c "echo 's3.bucket.list' | weed shell"
+              register: thanos_seaweedfs_bucket_list
+              changed_when: false
+              check_mode: false
+
+            - name: "Step: create Thanos S3 bucket if missing"
+              community.docker.docker_container_exec:
+                container: pilot-seaweedfs
+                command: "sh -c \"echo 's3.bucket.create -name {{ thanos_s3_bucket }}' | weed shell\""
+              when: thanos_s3_bucket not in thanos_seaweedfs_bucket_list.stdout
+              changed_when: true
 
         # Same secret-in-mounted-file tradeoff as prometheus-apply.yml —
         # see that playbook's comment on the equivalent task. Must contain

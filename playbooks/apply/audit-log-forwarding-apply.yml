@@ -14,11 +14,15 @@
 #     -e siem_forward_host=192.168.122.6
 #
 # Variables (see docs/verification/audit-log-forwarding.md §1.5):
-#   siem_forward_host        optional — IP/FQDN of the log-server target; if
-#                            omitted (or empty), the host still gets local
-#                            auditd monitoring but the /etc/hosts pin and the
-#                            99-siem-forward.conf are skipped (spec C15-C17
-#                            are then not applicable — see spec §5)
+#   siem_forward_host        optional — IP/FQDN of the log-server target. If
+#                            omitted, auto-resolved from inventory (the
+#                            log-server group's host, else wazuh-manager's,
+#                            since it supersedes log-server as SIEM receiver
+#                            when both are wired) — no group_vars/-e needed
+#                            in the common case. If neither is wired either,
+#                            the host still gets local auditd monitoring but
+#                            the /etc/hosts pin and 99-siem-forward.conf are
+#                            skipped (spec C15-C17 not applicable — spec §5)
 #   siem_forward_port        default: 514
 #   audit_logrotate_rotate   default: 14
 #   audit_logrotate_maxage   default: 90
@@ -46,7 +50,20 @@
     audit_rules_dest: /etc/audit/rules.d/99-custom.rules
     siem_forward_conf: /etc/rsyslog.d/99-siem-forward.conf
     siem_forward_alias: siem-log-server
-    siem_forwarding_enabled: "{{ (siem_forward_host | default('')) | length > 0 }}"
+    # Prefer an explicit -e/group_vars/host_vars value; otherwise resolve the
+    # central SIEM receiver from the actual inventory: the log-server group
+    # if it has a host, else wazuh-manager (which supersedes log-server as
+    # the syslog receiver when both are wired, see site.yml's own note on
+    # this). Same "explicit overrides inventory-derived" pattern as
+    # log-shipping-apply.yml's loki_target_host/loki_inventory_target_host.
+    siem_forward_inventory_host: >-
+      {{ (hostvars[groups['log-server'][0]].ansible_host | default(groups['log-server'][0], true))
+         if (groups['log-server'] | default([]) | length > 0)
+         else ((hostvars[groups['wazuh-manager'][0]].ansible_host | default(groups['wazuh-manager'][0], true))
+               if (groups['wazuh-manager'] | default([]) | length > 0) else '') }}
+    siem_forward_effective_host: >-
+      {{ siem_forward_host | default('', true) or siem_forward_inventory_host }}
+    siem_forwarding_enabled: "{{ siem_forward_effective_host | length > 0 }}"
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
@@ -81,9 +98,9 @@
     - name: "Step 0: Report whether SIEM forwarding is enabled this run"
       ansible.builtin.debug:
         msg: >-
-          {{ 'siem_forward_host=' + siem_forward_host + ' — forwarding will be configured (spec C15-C17).'
+          {{ 'siem_forward_host=' + siem_forward_effective_host + ' — forwarding will be configured (spec C15-C17).'
              if siem_forwarding_enabled
-             else 'siem_forward_host not provided — skipping /etc/hosts pin and 99-siem-forward.conf; only local auditd monitoring (C1-C14, C18) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
+             else 'siem_forward_host not provided and no log-server/wazuh-manager host in inventory — skipping /etc/hosts pin and 99-siem-forward.conf; only local auditd monitoring (C1-C14, C18) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN>, or add a log-server/wazuh-manager host to inventory, once a SIEM receiver exists to add forwarding.' }}
 
     - name: "Step 1: Install auditd + audispd-plugins (Debian family)"
       tags: [C1, C2]
@@ -169,12 +186,12 @@
                   endscript
               }
 
-        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C15)"
+        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_effective_host }} in /etc/hosts (spec C15)"
           tags: [C15]
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '\s{{ siem_forward_alias }}$'
-            line: "{{ siem_forward_host | default('') }}\t{{ siem_forward_alias }}"
+            line: "{{ siem_forward_effective_host }}\t{{ siem_forward_alias }}"
             state: present
           when: siem_forwarding_enabled | bool
 

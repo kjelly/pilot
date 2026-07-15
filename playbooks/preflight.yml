@@ -21,7 +21,6 @@
 - name: "Preflight A — 靜態檢查 inventory 填寫(不連線)"
   hosts: all
   gather_facts: false
-  connection: local            # 這一 play 不碰目標機器
   tags: [static, always]
   tasks:
     # ── 每台 host 各自檢查 ────────────────────────────────────────────────
@@ -66,9 +65,18 @@
     - name: "[{{ inventory_hostname }}] SSH 私鑰檔找得到(若有指定)"
       when: ansible_ssh_private_key_file is defined
       block:
+        # delegate_to: localhost (not a play-level `connection: local`) --
+        # delegating switches the interpreter-discovery/fact-cache key to
+        # the special 'localhost' host. A play-level connection: local
+        # still dispatches this module "as" inventory_hostname, so with
+        # fact_caching enabled it poisons that hostname's cached
+        # discovered_interpreter_python with the controller's own path --
+        # which then gets reused (and fails) by Preflight B's real SSH play.
         - name: "stat 私鑰檔"
           ansible.builtin.stat:
             path: "{{ ansible_ssh_private_key_file | regex_replace('^~', lookup('env', 'HOME')) }}"
+          delegate_to: localhost
+          become: false
           register: _key_stat
 
         - name: "斷言私鑰檔存在"

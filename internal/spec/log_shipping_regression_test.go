@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -167,5 +168,27 @@ func TestRegression_LogShippingSpec(t *testing.T) {
 		if !covered[id] {
 			t.Errorf("spec row %s is not covered by any generated task", id)
 		}
+	}
+}
+
+func TestRegression_LogShippingPlaybookAutoDetectsDashboardHost(t *testing.T) {
+	playbookPath := "../../playbooks/apply/log-shipping-apply.yml"
+	b, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	s := string(b)
+	for _, required := range []string{
+		`groups["dashboard"]`,
+		`ansible_host`,
+		`loki_effective_target_host`,
+		`loki_target_host | default("", true) or loki_inventory_target_host`,
+	} {
+		if !strings.Contains(s, required) {
+			t.Errorf("log-shipping playbook must contain inventory auto-detection fragment %q", required)
+		}
+	}
+	if !strings.Contains(s, `line: "{{ loki_effective_target_host }}\t{{ loki_alias }}"`) {
+		t.Error("/etc/hosts pin must use the effective Loki target")
 	}
 }

@@ -63,19 +63,28 @@
     prometheus_config_dir: /etc/pilot/prometheus
     thanos_config_dir: /etc/pilot/thanos
     docker_network_name: pilot-metrics
-    prometheus_site_label: ""
+    # prometheus_site_label / thanos_s3_target_host / alertmanager_target_host
+    # are DELIBERATELY NOT declared here (not even as `default('')`). Ansible
+    # play-level `vars:` outrank both group_vars and host_vars, so declaring
+    # them with a hardcoded "" here would silently shadow any value a caller
+    # sets via `pilot edit`'s group_vars editor, forcing `-e` for every
+    # deploy (real bug, found + fixed post-hoc — see
+    # docs/runbooks/minimal-poc-architecture.md § Real bugs #1). Leaving
+    # them undeclared lets normal precedence apply: group_vars/host_vars
+    # values now win with no `-e` needed, while `-e` still overrides on top.
+    # Every task below that references one of these three uses
+    # `| default('', true)` at the point of use instead, so an unset value
+    # still resolves to an empty string (never an undefined-variable error).
     prometheus_scrape_interval: "15s"
     prometheus_retention_time: "6h"
     prometheus_scrape_configs: |
       - job_name: prometheus
         static_configs:
           - targets: ["localhost:9090"]
-    thanos_s3_target_host: ""
     thanos_s3_alias: thanos-s3-backend
     thanos_s3_port: 8333
     thanos_s3_bucket: pilot-thanos-metrics
     thanos_s3_endpoint: "{{ thanos_s3_alias }}:{{ thanos_s3_port }}"
-    alertmanager_target_host: ""
     alertmanager_alias: alertmanager-backend
     alertmanager_port: 9093
     # prometheus_alert_rules_file: path (relative to the playbook) to a
@@ -147,7 +156,7 @@
     - name: "Gate: S3 destination must be resolvable"
       ansible.builtin.assert:
         that:
-          - (thanos_s3_target_host | length > 0) or (thanos_s3_alias not in thanos_s3_endpoint)
+          - (thanos_s3_target_host | default('', true) | length > 0) or (thanos_s3_alias not in thanos_s3_endpoint)
         fail_msg: >-
           thanos_s3_target_host is empty AND thanos_s3_endpoint still uses
           the default thanos-s3-backend alias — Thanos would have no
@@ -157,21 +166,21 @@
           host:port.
 
   tasks:
-    - name: "Pin {{ thanos_s3_alias }} -> {{ thanos_s3_target_host }} in /etc/hosts"
+    - name: "Pin {{ thanos_s3_alias }} -> {{ thanos_s3_target_host | default('', true) }} in /etc/hosts"
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ thanos_s3_alias }}$'
-        line: "{{ thanos_s3_target_host }}\t{{ thanos_s3_alias }}"
+        line: "{{ thanos_s3_target_host | default('', true) }}\t{{ thanos_s3_alias }}"
         state: present
-      when: thanos_s3_target_host | length > 0
+      when: thanos_s3_target_host | default('', true) | length > 0
 
-    - name: "Pin {{ alertmanager_alias }} -> {{ alertmanager_target_host }} in /etc/hosts"
+    - name: "Pin {{ alertmanager_alias }} -> {{ alertmanager_target_host | default('', true) }} in /etc/hosts"
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ alertmanager_alias }}$'
-        line: "{{ alertmanager_target_host }}\t{{ alertmanager_alias }}"
+        line: "{{ alertmanager_target_host | default('', true) }}\t{{ alertmanager_alias }}"
         state: present
-      when: alertmanager_target_host | length > 0
+      when: alertmanager_target_host | default('', true) | length > 0
 
     - block:
         # prom/prometheus's official image runs as the "nobody" user
@@ -224,7 +233,7 @@
               scrape_configs:
               {{ prometheus_scrape_configs }}
           register: prometheus_yml_with_am
-          when: alertmanager_target_host | length > 0
+          when: alertmanager_target_host | default('', true) | length > 0
 
         - name: "Render prometheus.yml (without alerting — alertmanager_target_host empty)"
           tags: [C8]
@@ -241,7 +250,7 @@
               scrape_configs:
               {{ prometheus_scrape_configs }}
           register: prometheus_yml_no_am
-          when: alertmanager_target_host | length == 0
+          when: alertmanager_target_host | default('', true) | length == 0
 
         - name: "Consolidate prometheus.yml result (for unified restart-gate below)"
           ansible.builtin.set_fact:
@@ -262,6 +271,39 @@
             dest: "{{ prometheus_config_dir }}/alert-rules.yml"
             mode: "0644"
           register: alert_rules_result
+
+        # SeaweedFS never implicitly creates a bucket on PutObject, so a
+        # fresh destination makes the Thanos sidecar's upload (and, once
+        # thanos-query-apply.yml also runs, Store Gateway/Compactor) crash
+        # or retry forever instead of failing fast (docker logs
+        # pilot-thanos-sidecar / pilot-thanos-store would show "The
+        # specified bucket does not exist"). This used to require a manual
+        # `docker exec pilot-seaweedfs ... weed shell` before the first
+        # apply — same idea as restic-backup-apply.yml's "Step 2b", which
+        # this mirrors. thanos-query-apply.yml has the identical block for
+        # its own bucket_use, so this bucket ends up ensured regardless of
+        # whether prometheus or thanos-query happens to run first.
+        - name: "Step: Ensure Thanos S3 bucket exists on the SeaweedFS host (idempotent)"  # noqa run-once[task]
+          when: >-
+            thanos_s3_alias in thanos_s3_endpoint
+            and (groups.get('seaweedfs-s3', []) | length > 0)
+          run_once: true
+          delegate_to: "{{ groups.get('seaweedfs-s3', [inventory_hostname]) | first }}"
+          block:
+            - name: "Step: check Thanos S3 bucket exists"
+              community.docker.docker_container_exec:
+                container: pilot-seaweedfs
+                command: sh -c "echo 's3.bucket.list' | weed shell"
+              register: thanos_seaweedfs_bucket_list
+              changed_when: false
+              check_mode: false
+
+            - name: "Step: create Thanos S3 bucket if missing"
+              community.docker.docker_container_exec:
+                container: pilot-seaweedfs
+                command: "sh -c \"echo 's3.bucket.create -name {{ thanos_s3_bucket }}' | weed shell\""
+              when: thanos_s3_bucket not in thanos_seaweedfs_bucket_list.stdout
+              changed_when: true
 
         # Contains the S3 secret key — no_log so it never hits Ansible's
         # own output/logs. mode 0644 (not 0600) is a deliberate tradeoff:

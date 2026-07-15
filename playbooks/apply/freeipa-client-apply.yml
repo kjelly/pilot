@@ -327,6 +327,47 @@
       when: not ansible_check_mode
       tags: [freeipa-client, C2]
 
+    # ipa-client-install's own sshd drop-in (04-ipa.conf) only sets
+    # ChallengeResponseAuthentication (the deprecated alias for
+    # KbdInteractiveAuthentication) — it never touches PasswordAuthentication.
+    # On Ubuntu (cloud image) sshd_config.d/ also ships a
+    # 50-cloud-init.conf/60-cloudimg-settings.conf pair forcing
+    # "PasswordAuthentication no". sshd's Include splices every matched file
+    # in at the Include line, in glob (lexical) order, and then keeps only
+    # the FIRST value seen for each directive across the whole expanded
+    # config — so whichever of these sorts first wins, NOT whichever sorts
+    # last. A drop-in name that sorts *after* 50-/60- (e.g. "99-...") is
+    # silently ignored; ours must sort *before* them (but after 04-ipa.conf,
+    # so it doesn't fight ipa-client-install's own file) to actually take
+    # effect. Without this, a FreeIPA account with no SSH key yet (the
+    # common case for a brand-new user) can never log in with a password at
+    # all, regardless of HBAC.
+    - name: "FreeIPA client — allow password/keyboard-interactive SSH (FreeIPA users may have no key yet)"
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+        content: |
+          # Managed by freeipa-client-apply.yml — do not edit by hand.
+          # Cloud-image defaults (50-cloud-init.conf / 60-cloudimg-settings.conf)
+          # and the base sshd_config both disable password/keyboard-interactive
+          # auth; FreeIPA accounts with no SSH key need it to log in at all.
+          PasswordAuthentication yes
+          KbdInteractiveAuthentication yes
+        owner: root
+        group: root
+        mode: "0644"
+      register: ipa_sshd_password_auth
+      when: not ansible_check_mode
+      tags: [freeipa-client, C8]
+
+    - name: "FreeIPA client — restart sshd after enabling password auth"
+      ansible.builtin.systemd:
+        name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+        state: restarted
+      when:
+        - not ansible_check_mode
+        - ipa_sshd_password_auth is changed
+      tags: [freeipa-client, C8]
+
     - name: "FreeIPA client — enable + start auditd (survives reboot)"
       ansible.builtin.systemd:
         name: auditd
