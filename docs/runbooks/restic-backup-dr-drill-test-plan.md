@@ -51,8 +51,10 @@ cp vault.example.all.yaml ~/.vault/main.yaml
 chmod 600 ~/.vault/main.yaml
 ```
 
-> ⚠️ 三台 VM 依序 `up`，不要平行——已知 `vm-target up` 平行呼叫有 state file
-> race bug。
+> 不同名稱的 `vm-target up` 現在可平行執行：state 已改用跨程序鎖定的
+> `Store.Mutate`，修正舊版 state-file race。以下維持依序命令，因為它們是本次
+> DR 演練的原始實測證據；資源足夠時可平行建立三台 VM，但後續 FreeIPA、S3 與
+> DR 步驟仍須依本計畫的相依順序執行。
 
 ---
 

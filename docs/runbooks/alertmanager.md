@@ -51,7 +51,11 @@ $ go test ./internal/spec/ -run 'TestRegression_AlertmanagerSpec|TestRegression_
 
 ---
 
-## 1. 起 VM（依序）
+## 1. 起 VM（本次證據為依序建立）
+
+不同名稱的 `vm-target up` 可平行執行；state 的跨程序 `Store.Mutate` 已修正舊版
+state-file race。以下維持依序命令與原始輸出，作為本次實測證據；資源足夠時可改為
+平行建立這三台不同名稱的 VM。
 
 ```bash
 # pt-alert: Alertmanager 主機（跟 thanos-query 可同機，這裡獨立）
@@ -224,5 +228,6 @@ go run ./cmd/pilot vm-target down --name pt-alert
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-07-14 | v1.1 | 補充不同名稱 VM 現可平行建立；保留循序命令作為原始實測證據 | Codex |
 | 2026-07-07 | v0.1 | 初版骨架 | sre |
 | 2026-07-07 | v1.0 | 實跑補完：7/7 PASS alertmanager、12/12 PASS prometheus、端對端 Watchdog 確認推送成功 | sre |

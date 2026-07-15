@@ -84,7 +84,11 @@ Prometheus-compatible 上游）、`ds-dash`（`dashboard` 角色）、`ds-log`
 
 ---
 
-## 1. 起 4 台 VM + 裝 Docker（依序）
+## 1. 起 4 台 VM + 裝 Docker（本次證據為依序建立）
+
+不同名稱的 `vm-target up` 可平行執行；state 的跨程序 `Store.Mutate` 已修正舊版
+state-file race。以下維持依序命令與原始輸出，作為本次實測證據；資源足夠時可改為
+平行建立這四台不同名稱的 VM。Docker apply 仍依各角色的後續依賴順序執行。
 
 ```bash
 $ go run ./cmd/pilot vm-target up --name ds-s3   --ssh-user ubuntu --disk 20 --memory 2048 --vcpus 2 --ssh-timeout 8m --boot-timeout 8m
@@ -529,5 +533,6 @@ $ go run ./cmd/pilot vm-target list
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-07-14 | v1.2 | 補充不同名稱 VM 現可平行建立；保留循序命令作為原始實測證據 | Codex |
 | 2026-07-06 | v1.0 | 初版:`dashboard`（Grafana+Loki）+ `log-shipping`（Promtail）,4 台 vm-target 實測含正負向路徑,發現並修好 4 個真 bug | sre |
 | 2026-07-06 | v1.1 | `dashboard.md` 新增 C11-C14:內建兩份 dashboard(Sites Overview、Logs Explorer),用 Grafana 原生 template variable 依環境自動列出 site/job；本機瀏覽器（Playwright）+ vm-target 正負向路徑實測,發現並修好 3 個真 bug（含一個波及 `docker.md` 既有 spec 的 ansible ad-hoc Jinja finalization 陷阱） | sre |
