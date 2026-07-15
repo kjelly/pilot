@@ -41,9 +41,7 @@ for role in docker db dns ntp keycloak; do
     go run ./cmd/pilot vm-target run --name core \
         playbooks/apply/keycloak-apply.yml \
         -e target_group=core -e infra_role=$role \
-        -e pg_keycloak_db_password=sandbox-db-password-123 \
-        -e kc_admin_password=sandbox-admin-password-123 \
-        -e kc_db_password=sandbox-db-password-123
+        -e @~/.vault/keycloak-sandbox.yaml
 done
 
 # 3 個 spec 全部 verify
@@ -116,7 +114,7 @@ go run ./cmd/pilot vm-target verify --name core \
 go run ./cmd/pilot vm-target run --name core \
     playbooks/apply/keycloak-db-apply.yml \
     -e target_group=keycloak-db \
-    -e pg_keycloak_db_password=sandbox-db-password-123
+    -e @~/.vault/keycloak-sandbox.yaml
 # PLAY RECAP: ok=7 changed=1 failed=0
 #   - mkdir /var/lib/pilot/postgres
 #   - docker pull postgres:16
@@ -132,8 +130,7 @@ go run ./cmd/pilot vm-target verify --name core \
 ```
 
 > DB 用 docker container、bind-mount 到 host 的 `/var/lib/pilot/postgres`。
-> 密碼從 `-e pg_keycloak_db_password=...` 帶入（不要放 CLI argv，用
-> `-e @/path/to/vault.yaml` 也行）。
+> 密碼只從 `-e @~/.vault/keycloak-sandbox.yaml` 帶入，絕不放 CLI argv。
 
 ### 2.4 套 dns role
 
@@ -166,9 +163,8 @@ go run ./cmd/pilot vm-target run --name core \
 ```bash
 go run ./cmd/pilot vm-target run --name core \
     playbooks/apply/keycloak-apply.yml \
-    -e target_group=core -e kc_admin_password=sandbox-admin-password-123 \
-    -e kc_admin_password=sandbox-admin-password-123 \
-    -e kc_db_password=sandbox-db-password-123
+    -e target_group=core \
+    -e @~/.vault/keycloak-sandbox.yaml
 # PLAY RECAP: ok=8 changed=3 failed=0
 #   - mkdir /var/lib/pilot/keycloak (chown 0:0 — keycloak runs as root in container)
 #   - lineinfile /etc/hosts (idp.infra.internal → 127.0.0.1)  ← spec C9 needs this
@@ -213,19 +209,9 @@ go run ./cmd/pilot vm-target exec --name core -- \
     http://idp.infra.internal:8080/realms/master/.well-known/openid-configuration
 # code=200
 
-# PostgreSQL 從 host 用 keycloak role 登入
-go run ./cmd/pilot vm-target exec --name core -- \
-    PGPASSWORD=sandbox-db-password-123 psql -h 127.0.0.1 -U keycloak -d keycloak -c "SELECT 1"
-# ?column?
-# ----------
-#         1
-
-# Keycloak admin login
-go run ./cmd/pilot vm-target exec --name core -- \
-    curl -fsS -X POST -d "username=admin&password=sandbox-admin-password-123&grant_type=password" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    http://idp.infra.internal:8080/realms/master/protocol/openid-connect/token
-# {"access_token":"...","token_type":"Bearer","refresh_token":"...","expires_in":300,...}
+# PostgreSQL 與管理員登入的密碼驗證需在受控終端以 vault 值執行；不要把
+# 密碼以環境變數、CLI 參數或文件內容傳遞。上面的 container health check 與
+# OIDC discovery 已涵蓋本 runbook 的非敏感端到端可用性確認。
 ```
 
 ---
@@ -246,16 +232,17 @@ go run ./cmd/pilot vm-target rollback --name core --tag post-keycloak-prod-insta
 
 ## 5. Vault 文件範本
 
-```bash
-# ~/.vault/keycloak-db-sandbox.yaml (chmod 600)
-pg_keycloak_db_password: sandbox-db-password-123
-keycloak_admin_password: sandbox-admin-password-123
+```yaml
+# ~/.vault/keycloak-sandbox.yaml (chmod 600)
+# 將下列 placeholder 換成唯一的實際值；此檔案不得提交到 git。
+pg_keycloak_db_password: <postgres-password>
+kc_admin_password: <keycloak-admin-password>
 keycloak_db_user: keycloak
-keycloak_db_password: sandbox-db-password-123
+kc_db_password: <postgres-password>
 ```
 
-Production 時換成 vault 來源（`-e @~/.vault/keycloak-prod.yaml`），
-**絕不**把密碼塞 CLI argv。
+Production 時改用對應的 vault 檔（`-e @~/.vault/keycloak-prod.yaml`），
+**絕不**把密碼塞 CLI argv、環境變數或文件內容。
 
 ---
 
@@ -263,4 +250,5 @@ Production 時換成 vault 來源（`-e @~/.vault/keycloak-prod.yaml`），
 
 | 日期       | 版本 | 變更                                                                          | 變更者 |
 |------------|------|------------------------------------------------------------------------------|--------|
+| 2026-07-14 | v1.1 | 移除文件與命令中的明文 Keycloak/PostgreSQL 密碼，統一改由 vault 檔注入 | Codex |
 | 2026-07-01 | v1.0 | 初版（5 role end-to-end PASS；Keycloak production mode；PG docker container）   | sre    |
