@@ -100,6 +100,26 @@
       when: stage == 'prod'
       tags: [always]
 
+    # Auto-fallback for the common single-inventory case: if the caller left
+    # siem_forward_host genuinely unset (no -e/group_vars/host_vars) and
+    # this inventory happens to define a log-server group, use that host's
+    # own connection address instead of silently leaving forwarding
+    # disabled. `pilot deploy`'s single-component wizard already offers
+    # this as an interactive prompt (deploy_catalog.go's wazuh-manager
+    # AutoHostVars); this makes a site-wide `playbooks/site.yml` run (which
+    # does not carry that wizard-level convenience) get the same default,
+    # mirroring restic-backup-apply.yml's own "Auto-detect backup
+    # destination host from this inventory's seaweedfs-s3 group" task.
+    - name: "Auto-detect SIEM forward host from this inventory's log-server group"
+      ansible.builtin.set_fact:
+        siem_forward_host: >-
+          {{ hostvars[(groups.get('log-server', []) | first)]['ansible_host']
+             | default(groups.get('log-server', []) | first, true) }}
+      when: >-
+        (siem_forward_host | default('') | length == 0)
+        and (groups.get('log-server', []) | length > 0)
+      tags: [always]
+
     # Same fail-early gate as keycloak-db-apply.yml — a missing docker
     # engine should fail here with a clear message, not five tasks later
     # inside the compose module.

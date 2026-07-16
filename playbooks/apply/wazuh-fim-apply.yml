@@ -83,6 +83,28 @@
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
       tags: [always]
+
+    # Auto-fallback for the common single-inventory case: if the caller left
+    # wazuh_manager_host genuinely unset (no -e/group_vars/host_vars) and
+    # this inventory happens to define a wazuh-manager group, use that
+    # host's own connection address instead of silently leaving enrollment
+    # disabled. `pilot deploy`'s single-component wizard already offers
+    # this as an interactive prompt (deploy_catalog.go's wazuh-fim
+    # AutoHostVars); this makes a site-wide `playbooks/site.yml` run (which
+    # does not carry that wizard-level convenience — site.yml's own
+    # `import_playbook: apply/wazuh-fim-apply.yml` has no vars: override)
+    # get the same default, mirroring restic-backup-apply.yml's own
+    # "Auto-detect backup destination host from this inventory's
+    # seaweedfs-s3 group" task exactly.
+    - name: "Auto-detect Wazuh manager host from this inventory's wazuh-manager group"
+      ansible.builtin.set_fact:
+        wazuh_manager_host: >-
+          {{ hostvars[(groups.get('wazuh-manager', []) | first)]['ansible_host']
+             | default(groups.get('wazuh-manager', []) | first, true) }}
+      when: >-
+        (wazuh_manager_host | default('') | length == 0)
+        and (groups.get('wazuh-manager', []) | length > 0)
+      tags: [always]
   tasks:
     - name: "Step 0: Report whether manager enrollment is enabled this run"
       ansible.builtin.debug:

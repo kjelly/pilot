@@ -109,6 +109,26 @@
       when: stage == 'prod'
       tags: [always]
 
+    # Auto-fallback for the common single-inventory case: if the caller left
+    # thanos_query_target_host genuinely unset (no -e/group_vars/host_vars)
+    # and this inventory happens to define a thanos-query group, use that
+    # host's own connection address instead of silently leaving Grafana's
+    # Thanos Query datasource unconfigured. `pilot deploy`'s single-
+    # component wizard already offers this as an interactive prompt
+    # (deploy_catalog.go's dashboard AutoHostVars); this makes a site-wide
+    # `playbooks/site.yml` run get the same default, mirroring
+    # restic-backup-apply.yml's own "Auto-detect backup destination host
+    # from this inventory's seaweedfs-s3 group" task.
+    - name: "Auto-detect Thanos Query host from this inventory's thanos-query group"
+      ansible.builtin.set_fact:
+        thanos_query_target_host: >-
+          {{ hostvars[(groups.get('thanos-query', []) | first)]['ansible_host']
+             | default(groups.get('thanos-query', []) | first, true) }}
+      when: >-
+        (thanos_query_target_host | default('') | length == 0)
+        and (groups.get('thanos-query', []) | length > 0)
+      tags: [always]
+
     - name: "Gate: grafana_admin_password required"
       ansible.builtin.assert:
         that:

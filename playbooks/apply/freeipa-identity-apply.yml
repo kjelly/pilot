@@ -233,13 +233,18 @@
     # password policy maxlife) — a real future gap only exists once the
     # change was genuinely the user's own. Both are fixed-width
     # `YYYYMMDDHHMMSSZ`, so plain string `<=`/`==` comparison is valid.
-    - name: "Look up password-expiry state for force_password: true users"
+    # Looked up for every user with a password declared, not just
+    # force_password: true ones — a brand-new roster entry that ships
+    # with force_password: false (e.g. copied from an already-onboarded
+    # steady-state roster) still needs this to detect "no Kerberos key
+    # yet at all" below, otherwise a first-time-ever apply silently
+    # creates the account with no usable password (see Real bugs table).
+    - name: "Look up password-expiry state for users with a declared password"
       ansible.builtin.command:
         argv: [ipa, user-show, "{{ item.name }}", --all, --raw]
       loop: "{{ ipa_users | selectattr('password', 'defined') | list }}"
       loop_control:
         label: "{{ item.name }}"
-      when: item.force_password | default(false) | bool
       register: ipa_pwd_state
       changed_when: false
       failed_when: false
@@ -262,7 +267,14 @@
       when: not (item.skipped | default(false))
       tags: [identity, users, passwords]
 
-    - name: "Set password for users with force_password: true"
+    # Runs when the roster explicitly asks for it (force_password: true)
+    # OR when the account genuinely has no Kerberos key yet at all (a
+    # first-time onboard, regardless of what force_password says) — the
+    # latter closes the gap where a steady-state roster's
+    # force_password: false on a user being created for the very first
+    # time would otherwise leave them with no usable password (see Real
+    # bugs table).
+    - name: "Set password for users that need one (forced, or first-time onboard)"
       ansible.builtin.shell:
         cmd: |
           printf '%s\n%s\n' "{{ item.password }}" "{{ item.password }}" \
@@ -271,8 +283,8 @@
       loop_control:
         label: "{{ item.name }}"
       when: >-
-        item.force_password | default(false) | bool
-        and ((ipa_pwd_needs_reset | default({})).get(item.name, true))
+        (item.force_password | default(false) | bool)
+        or ((ipa_pwd_needs_reset | default({})).get(item.name, true))
       register: ipa_passwd
       changed_when: ipa_passwd.rc == 0
       failed_when: false

@@ -130,6 +130,26 @@
       when: stage == 'prod'
       tags: [always]
 
+    # Auto-fallback for the common single-inventory case: if the caller left
+    # alertmanager_target_host genuinely unset (no -e/group_vars/host_vars)
+    # and this inventory happens to define an alertmanager group, use that
+    # host's own connection address instead of silently leaving alerting
+    # disabled. `pilot deploy`'s single-component wizard already offers
+    # this as an interactive prompt (deploy_catalog.go's prometheus
+    # AutoHostVars); this makes a site-wide `playbooks/site.yml` run get
+    # the same default, mirroring restic-backup-apply.yml's own
+    # "Auto-detect backup destination host from this inventory's
+    # seaweedfs-s3 group" task.
+    - name: "Auto-detect Alertmanager host from this inventory's alertmanager group"
+      ansible.builtin.set_fact:
+        alertmanager_target_host: >-
+          {{ hostvars[(groups.get('alertmanager', []) | first)]['ansible_host']
+             | default(groups.get('alertmanager', []) | first, true) }}
+      when: >-
+        (alertmanager_target_host | default('') | length == 0)
+        and (groups.get('alertmanager', []) | length > 0)
+      tags: [always]
+
     # prometheus_site_label has no safe default (see spec §1.5 for why —
     # unlike wazuh_manager_host/siem_forward_host, a blank/placeholder
     # default would silently collide across sites once a second one is
