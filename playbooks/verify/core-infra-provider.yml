@@ -9,7 +9,22 @@
       ansible.builtin.command: "sh -c 'dpkg-query -l bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | awk \"/^ii/ && /unbound|bind9|dnsmasq/{f=1} END{print f+0}\" '"
       become: true
       changed_when: false
-      tags: [C1, C2, C3, C4, C6]
+      tags: [C1]
+    - name: "C2 — DNS 服務在本機 listening，且不是 systemd-resolved …"
+      ansible.builtin.command: "sh -c 'ss -tulnH \\| grep \":53 \" \\| grep -v \"127.0.0.53\" \\| head -n1'"
+      become: true
+      changed_when: false
+      tags: [C2]
+    - name: "C3 — 本機是 authoritive（本機 resolv.conf 第一個 namese…"
+      ansible.builtin.command: "sh -c 'grep -qE \"^nameserver[[:space:]]+(127\\.[0-9]+\\.[0-9]+\\.[0-9]+|::1)$\" /etc/resolv.conf'"
+      become: true
+      changed_when: false
+      tags: [C3]
+    - name: "C4 — NTP daemon 已安裝（chrony / ntp / ntpsec 三擇一；\xe8\x87…"
+      ansible.builtin.command: "sh -c 'dpkg-query -l chrony ntp ntpsec 2>/dev/null | awk \"/^ii/ && /chrony|ntp|ntpsec/{f=1} END{print f+0}\" '"
+      become: true
+      changed_when: false
+      tags: [C4]
     - name: "C5 — chronyd 或 ntpd active"
       ansible.builtin.systemd:
         name: "chronyd ntpd 2>&1 \\| head -n1"
@@ -17,3 +32,11 @@
         enabled: true
       become: true
       tags: [C5]
+    - name: "C6 — Stratum ≤ 5（本機沒被上上游設成 leaf-of-leaf）"
+      ansible.builtin.command: "timedatectl show-timesync 2>&1 \\| grep -oE 'Stratum=[0-5]'"
+      changed_when: false
+      tags: [C6]
+    - name: "C7 — 自訂內部網域可解析（**選用**；只在設 `$DNS_…"
+      ansible.builtin.command: "sh -c 'if [ -z \"${DNS_PROBE_NAME:-}\" ]; then echo SKIP-no-probe; else dig +short \"$DNS_PROBE_NAME\" @127.0.0.1; fi'"
+      changed_when: false
+      tags: [C7]

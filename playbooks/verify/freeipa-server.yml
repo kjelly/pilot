@@ -13,4 +13,79 @@
     - name: "C2 — 所有 IPA 服務健康（`ipactl status` 全 RUNNING → \xe8…"
       ansible.builtin.command: "sudo ipactl status"
       changed_when: false
-      tags: [C10, C11, C12, C13, C14, C15, C16, C17, C18, C2, C3, C4, C5, C6, C7, C8, C9]
+      tags: [C2]
+    - name: "C3 — 主機 FQDN 正確"
+      ansible.builtin.command: "hostname -f"
+      changed_when: false
+      tags: [C3]
+    - name: "C4 — LDAP 389/tcp 在 host listening"
+      ansible.builtin.command: "ss -tlnH | grep -q \":389 \""
+      become: true
+      changed_when: false
+      tags: [C4]
+    - name: "C5 — LDAPS 636/tcp 在 host listening"
+      ansible.builtin.command: "ss -tlnH | grep -q \":636 \""
+      become: true
+      changed_when: false
+      tags: [C5]
+    - name: "C6 — Kerberos 88/tcp 在 host listening"
+      ansible.builtin.command: "ss -tlnH | grep -q \":88 \""
+      become: true
+      changed_when: false
+      tags: [C6]
+    - name: "C7 — Kerberos 88/udp 在 host listening"
+      ansible.builtin.command: "ss -ulnH | grep -q \":88 \""
+      become: true
+      changed_when: false
+      tags: [C7]
+    - name: "C8 — kpasswd 464/udp 在 host listening"
+      ansible.builtin.command: "ss -ulnH | grep -q \":464 \""
+      become: true
+      changed_when: false
+      tags: [C8]
+    - name: "C9 — HTTP 80/tcp 在 host listening（enrollment 取 CA cert）"
+      ansible.builtin.command: "ss -tlnH | grep -q \":80 \""
+      become: true
+      changed_when: false
+      tags: [C9]
+    - name: "C10 — HTTPS 443/tcp 在 host listening（IPA API / Web UI）"
+      ansible.builtin.command: "ss -tlnH | grep -q \":443 \""
+      become: true
+      changed_when: false
+      tags: [C10]
+    - name: "C11 — LDAP rootDSE 廣告的 namingContext = realm 後綴"
+      ansible.builtin.command: "ldapsearch -x -H ldap://localhost -b \"\" -s base namingContexts"
+      changed_when: false
+      tags: [C11]
+    - name: "C12 — CA 憑證 endpoint 可被抓（client enroll 會走這條）"
+      ansible.builtin.command: "curl -fsS -o /dev/null -w \"%{http_code}\" http://ipa1.ipa.pilot.internal/ipa/config/ca.crt"
+      become: true
+      changed_when: false
+      tags: [C12]
+    - name: "C13 — sudo 規則 LDAP 子樹存在（SSSD sudo provider 的來\xe6\xba…"
+      ansible.builtin.command: "ldapsearch -x -H ldap://localhost -b \"ou=sudoers,dc=ipa,dc=pilot,dc=internal\" -s base dn"
+      changed_when: false
+      tags: [C13]
+    - name: "C14 — 389-ds 目錄服務稽核日誌（寫入操作）已啟用"
+      ansible.builtin.command: "sudo dsconf slapd-IPA-PILOT-INTERNAL config get nsslapd-auditlog-logging-enabled"
+      changed_when: false
+      tags: [C14]
+    - name: "C15 — 389-ds 失敗寫入操作稽核日誌（auditfail）已啟\xe7…"
+      ansible.builtin.command: "sudo dsconf slapd-IPA-PILOT-INTERNAL config get nsslapd-auditfaillog-logging-enabled"
+      changed_when: false
+      tags: [C15]
+    - name: "C16 — 稽核日誌檔存在且已寫入（啟用後 389-ds 會寫…"
+      ansible.builtin.command: "sudo test -s /var/log/dirsrv/slapd-IPA-PILOT-INTERNAL/audit"
+      become: true
+      changed_when: false
+      tags: [C16]
+    - name: "C17 — DNS 53/tcp 在 host listening（僅在啟用 DNS 時強驗\xef…"
+      ansible.builtin.command: "if ! ss -tlnH | grep -q \":53 \"; then ! systemctl is-active --quiet named-pkcs11 && ! systemctl is-active --quiet named; fi"
+      become: true
+      changed_when: false
+      tags: [C17]
+    - name: "C18 — DNS 53/udp 在 host listening（僅在啟用 DNS 時強驗\xef…"
+      ansible.builtin.command: "if ! ss -ulnH | grep -q \":53 \"; then ! systemctl is-active --quiet named-pkcs11 && ! systemctl is-active --quiet named; fi"
+      become: true
+      changed_when: false
+      tags: [C18]

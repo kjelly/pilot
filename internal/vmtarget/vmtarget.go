@@ -48,6 +48,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,6 +153,15 @@ type Manager struct {
 	vmDir    string // where per-target qcow2/seed live (libvirt-accessible)
 	now      func() time.Time
 
+	// dialReachable reports whether a real TCP connection to addr succeeds
+	// within timeout — waitForIP's last-resort check that a VM is actually
+	// up and using its static DHCP reservation (Real bug #12) when neither
+	// domifaddr nor net-dhcp-leases has caught up yet. A field (not a
+	// package function) so tests can stub it out deterministically instead
+	// of depending on the sandbox's real network stack/routing, matching
+	// how virsh/ssh are shimmed at the process level rather than in Go.
+	dialReachable func(ctx context.Context, addr string, timeout time.Duration) bool
+
 	// Tunables — real defaults in NewManager; tests shrink them so the
 	// boot/ssh polling loops return immediately against shims.
 	bootTimeout  time.Duration
@@ -176,13 +186,14 @@ func NewManager(stateDir, vmDir string) (*Manager, error) {
 		return nil, err
 	}
 	return &Manager{
-		stateDir:     stateDir,
-		store:        store,
-		vmDir:        vmDir,
-		now:          time.Now,
-		bootTimeout:  3 * time.Minute,
-		sshTimeout:   2 * time.Minute,
-		pollInterval: 2 * time.Second,
+		stateDir:      stateDir,
+		store:         store,
+		vmDir:         vmDir,
+		now:           time.Now,
+		dialReachable: realDialReachable,
+		bootTimeout:   3 * time.Minute,
+		sshTimeout:    2 * time.Minute,
+		pollInterval:  2 * time.Second,
 	}, nil
 }
 
@@ -516,7 +527,8 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if err = m.createOverlay(ctx, tg); err != nil {
 		return nil, err
 	}
-	if _, err = m.allocateStaticIP(ctx, tg); err != nil {
+	reservedIP, err := m.allocateStaticIP(ctx, tg)
+	if err != nil {
 		return nil, fmt.Errorf("vmtarget: static IP allocation: %w", err)
 	}
 
@@ -540,7 +552,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if opt.SSHTimeout > 0 {
 		sshTimeout = opt.SSHTimeout
 	}
-	if err = m.waitForIP(ctx, tg, preExistingLeases, bootTimeout); err != nil {
+	if err = m.waitForIP(ctx, tg, preExistingLeases, bootTimeout, reservedIP); err != nil {
 		return nil, err
 	}
 	if err = m.waitForSSH(ctx, tg, sshTimeout); err != nil {
@@ -715,9 +727,23 @@ func (m *Manager) defineAndStart(ctx context.Context, t *Target) error {
 // - domifaddr always shows the current IP from the kernel ARP table
 // - net-dhcp-leases may show stale leases from previous VM runs
 //
+// reservedIP is the static DHCP host reservation Up already made for this
+// exact MAC (allocateStaticIP) — a real bug (minimal-poc-architecture.md
+// runbook, "Real bug #12"): a static-host reservation does not always
+// produce a dynamic net-dhcp-leases entry, and domifaddr's ARP-table
+// source can also lag, so a VM that has genuinely booted and is reachable
+// could still stall here for the full bootTimeout with both sources
+// silent. When both come up empty on an iteration, we additionally try a
+// short, bounded TCP dial to reservedIP:t.SSHPort as independent evidence
+// the VM is actually up and using that address (not merely "we configured
+// a reservation") — this is the same signal waitForSSH itself relies on
+// next, just checked earlier and without shelling out to the (in tests,
+// unconditionally-succeeding) ssh binary. A genuinely stuck VM still times
+// out normally: nothing is listening on reservedIP, so the dial fails too.
+//
 // Bounded by bootTimeout (passed in so a per-Up override does not have to
 // mutate shared Manager state). Progress is reported to stderr.
-func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[string]time.Time, bootTimeout time.Duration) error {
+func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[string]time.Time, bootTimeout time.Duration, reservedIP string) error {
 	deadline := m.now().Add(bootTimeout)
 	var lastDetail string
 	lastReport := m.now()
@@ -786,6 +812,19 @@ func (m *Manager) waitForIP(ctx context.Context, t *Target, preExisting map[stri
 			}
 		}
 
+		// Last resort: neither domifaddr nor net-dhcp-leases has any
+		// evidence for our MAC this iteration. reservedIP is the static
+		// DHCP host reservation Up already made for this exact MAC, so it
+		// is the only address dnsmasq will ever hand this VM — but we
+		// still require real, independent proof the VM is up and using it
+		// (a short TCP dial to its SSH port) rather than trusting the
+		// reservation alone, so a genuinely stuck/dead VM still times out
+		// below exactly as before.
+		if reservedIP != "" && m.dialReachable(ctx, net.JoinHostPort(reservedIP, fmt.Sprintf("%d", t.SSHPort)), 500*time.Millisecond) {
+			t.IP = reservedIP
+			return nil
+		}
+
 		if m.now().After(deadline) {
 			tail := ""
 			if lastDetail != "" {
@@ -833,6 +872,19 @@ func (m *Manager) getIPsFromDomifaddr(ctx context.Context, name string) ([]strin
 		ips = append(ips, ip)
 	}
 	return ips, nil
+}
+
+// realDialReachable is the production implementation of Manager.dialReachable.
+func realDialReachable(ctx context.Context, addr string, timeout time.Duration) bool {
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	d := net.Dialer{}
+	conn, err := d.DialContext(dialCtx, "tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // ipLeaseExpiry parses net-dhcp-leases output and returns the lease expiry time for a specific MAC and IP.

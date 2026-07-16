@@ -93,6 +93,8 @@ playbook-lint: ## L1 syntax (blocking) + L2 lint (advisory) over ALL playbooks �
 	done; \
 	if [ $$fail -ne 0 ]; then echo "✗ syntax check failed (blocking)"; exit 1; fi; \
 	echo "✓ syntax clean"; \
+	echo "── duplicate YAML key check (repo-wide — .yml AND .yaml, so roster/vars files count too)"; \
+	python3 scripts/check-yaml-duplicate-keys.py || exit 1; \
 	if command -v ansible-lint >/dev/null 2>&1; then \
 	  echo "── ansible-lint playbooks/ (advisory — does not block)"; \
 	  ansible-lint playbooks/ || echo "⚠ ansible-lint reported findings (advisory; run 'ansible-lint playbooks/' to review)"; \

@@ -8,4 +8,14 @@
     - name: "C7 — keycloak process 可見（容器或 binary；容忍任何\xe5\x95…"
       ansible.builtin.command: "sh -c 'pidof java >/dev/null 2>&1 || pidof kc.sh >/dev/null 2>&1; echo $?'"
       changed_when: false
-      tags: [C7, C8, C9]
+      tags: [C7]
+    - name: "C8 — HTTP listener 8080 / 8443 至少一個在 LISTEN"
+      ansible.builtin.command: "sh -c 'ss -tulnH | awk \"/:8080/ \\|\\| /:8443/ {f=1} END{print f+0}\" '"
+      become: true
+      changed_when: false
+      tags: [C8]
+    - name: "C9 — OIDC discovery endpoint 回 200"
+      ansible.builtin.command: "sh -c 'curl -fsS -o /dev/null -w \"%{http_code}\" \"${KEYCLOAK_ISSUER:-http://idp.infra.internal:8080/realms/master}/.well-known/openid-configuration\"'"
+      become: true
+      changed_when: false
+      tags: [C9]

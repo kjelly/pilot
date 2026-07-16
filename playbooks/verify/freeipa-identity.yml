@@ -1,0 +1,39 @@
+---
+- name: Verification Spec — freeipa-identity（FreeIPA 使用者/群組/HBAC/sudo 資料驅動 reconciler）
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "C1 — `fixture-user-a` 是 `fixture-group-a` 成員（roster 宣\xe5…"
+      ansible.builtin.command: "ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b \"cn=fixture-group-a,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal\" member 2>/dev/null | grep -q \"uid=fixture-user-a,\""
+      changed_when: false
+      tags: [C1]
+    - name: "C2 — `fixture-user-b` **不是** `fixture-group-a` 成員（負\xe5…"
+      ansible.builtin.command: "! ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b \"cn=fixture-group-a,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal\" member 2>/dev/null | grep -q \"uid=fixture-user-b,\""
+      changed_when: false
+      tags: [C2]
+    - name: "C3 — `fixture-hbac-a` 的 host category 正確套用 roster `hos…"
+      ansible.builtin.command: "ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b \"cn=hbac,dc=ipa,dc=pilot,dc=internal\" \"(cn=fixture-hbac-a)\" hostCategory 2>/dev/null"
+      changed_when: false
+      tags: [C3]
+    - name: "C4 — `fixture-hbac-a` 掛載了 roster 宣告的 `groups: [fixtu…"
+      ansible.builtin.command: "ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b \"cn=hbac,dc=ipa,dc=pilot,dc=internal\" \"(cn=fixture-hbac-a)\" memberuser 2>/dev/null"
+      changed_when: false
+      tags: [C4]
+    - name: "C5 — `fixture-sudo-a` 沒有 `cmdCategory: all`（roster 給 `al…"
+      ansible.builtin.command: "! ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b \"cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal\" \"(cn=fixture-sudo-a)\" cmdCategory 2>/dev/null | grep -q \"cmdCategory: all\""
+      changed_when: false
+      tags: [C5]
+    - name: "C6 — `fixture-sudo-a` 掛載了 roster 宣告的 `groups: [fixtu…"
+      ansible.builtin.command: "ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b \"cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal\" \"(cn=fixture-sudo-a)\" memberuser 2>/dev/null"
+      changed_when: false
+      tags: [C6]
+    - name: "C7 — `fixture-hostgroup-a` 的 `desc` 與 roster 完全一致（…"
+      ansible.builtin.command: "ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b \"cn=fixture-hostgroup-a,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal\" description 2>/dev/null"
+      changed_when: false
+      tags: [C7]
+    - name: "C8 — `fixture-user-a` 的姓名（`sn`）與 roster 完全一致…"
+      ansible.builtin.command: "ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b \"uid=fixture-user-a,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal\" sn 2>/dev/null"
+      changed_when: false
+      tags: [C8]

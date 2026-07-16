@@ -126,7 +126,11 @@
         state: present
       when: thanos_query_target_host | default('', true) | length > 0
 
-    - block:
+    # docker_container needs a live daemon to compute its diff even under
+    # --check; deferred entirely to the real apply on a from-scratch host,
+    # same convention as wazuh-manager-apply.yml/alertmanager-apply.yml.
+    - when: not ansible_check_mode
+      block:
         # grafana/grafana's official image runs as uid/gid 472 ("grafana"),
         # grafana/loki's runs as uid/gid 10001 ("loki") — neither is root.
         # Confirmed via `docker run --rm --entrypoint id <image>`.

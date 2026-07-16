@@ -107,7 +107,14 @@
       ansible.builtin.command: docker info
       register: docker_pre
       changed_when: false
-      failed_when: docker_pre.rc != 0
+      # check_mode: false makes this run for real even under --check, so a
+      # missing engine fails here with a clear message instead of five tasks
+      # later inside the compose module — but on a from-scratch host being
+      # site-wide-previewed before its first real apply, docker itself was
+      # never actually installed (core-infra-provider-apply.yml defers the
+      # install to the real apply too), so rc!=0 here is expected and must
+      # not fail the mandatory check-mode gate.
+      failed_when: docker_pre.rc != 0 and not ansible_check_mode
       check_mode: false
   tasks:
     - name: "Step 0: Report whether SIEM forwarding is enabled this run"
@@ -126,11 +133,17 @@
         sysctl_set: true
         state: present
 
+    # Steps 2-5 build the real on-disk docker-compose project (download,
+    # unpack, generate certs); state directory created in Step 2 doesn't
+    # really exist under check mode, so get_url/unarchive/command fail
+    # outright on a from-scratch host rather than merely simulating. Deferred
+    # to the real apply, same pattern as the docker preflight above.
     - name: "Step 2: Ensure {{ wazuh_docker_root }} exists"
       ansible.builtin.file:
         path: "{{ wazuh_docker_root }}"
         state: directory
         mode: "0755"
+      when: not ansible_check_mode
 
     - name: "Step 3: Download the official wazuh-docker release bundle (spec C1-C3)"
       tags: [C1, C2, C3]
@@ -138,6 +151,7 @@
         url: "https://github.com/wazuh/wazuh-docker/archive/refs/tags/v{{ wazuh_docker_version }}.tar.gz"
         dest: "{{ wazuh_docker_tarball }}"
         mode: "0644"
+      when: not ansible_check_mode
 
     - name: "Step 4: Unpack the release bundle (spec C1-C3)"
       tags: [C1, C2, C3]
@@ -146,6 +160,7 @@
         dest: "{{ wazuh_docker_root }}"
         remote_src: true
         creates: "{{ wazuh_single_node_dir }}/docker-compose.yml"
+      when: not ansible_check_mode
 
     # One-shot official cert generator (wazuh/wazuh-certs-generator) —
     # builds the full TLS chain into config/wazuh_indexer_ssl_certs/.
@@ -157,9 +172,15 @@
         cmd: docker compose -f generate-indexer-certs.yml run --rm generator
         chdir: "{{ wazuh_single_node_dir }}"
         creates: "{{ wazuh_single_node_dir }}/config/wazuh_indexer_ssl_certs/root-ca.pem"
+      when: not ansible_check_mode
 
 
-    - block:
+    # Steps 6-11 configure/compose-up/health-check the project built above;
+    # none of that exists on a fresh host when Steps 2-5 were skipped in
+    # check mode, so the whole block (and its rescue) is deferred too — same
+    # convention as wazuh-fim-apply.yml's post-install config block.
+    - when: not ansible_check_mode
+      block:
         - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C10)"
           tags: [C10]
           ansible.builtin.lineinfile:

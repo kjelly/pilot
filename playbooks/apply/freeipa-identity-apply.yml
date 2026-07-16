@@ -28,8 +28,12 @@
 #
 # Idempotency: every task treats "already exists / already a member" as a
 # no-op (changed_when/failed_when mirror freeipa-server-apply.yml). Passwords
-# are set unconditionally (IPA has no "read" to diff against) but no_log keeps
-# them out of Ansible output; set force_password: false on a user to skip.
+# are set unconditionally when set at all (IPA has no "read" to diff
+# against) but no_log keeps them out of Ansible output. `force_password`
+# defaults to false — a user's `password:` is only applied when that user
+# also has `force_password: true` — so a routine rerun never silently resets
+# an already-onboarded user's password back to a forced-change state. Set
+# force_password: true for a first-time onboard, or for a deliberate reset.
 #
 # Usage (against a pilot vm-target that hosts the IPA server in group `all`):
 #
@@ -144,6 +148,27 @@
         - "'already exists' not in (ipa_group_add.stderr | default(''))"
       tags: [identity, groups]
 
+    # `group-add` above no-ops on "already exists" — an already-created
+    # group's own `desc` never gets corrected by editing the roster and
+    # rerunning without this. Unconditional declarative reconcile, same
+    # idiom as the SSH-key task below.
+    - name: "Reconcile IPA group descriptions"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - group-mod
+          - "{{ item.name }}"
+          - "--desc={{ item.desc | default(item.name) }}"
+      loop: "{{ ipa_groups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_group_mod
+      changed_when: "'Modified group' in (ipa_group_mod.stdout | default(''))"
+      failed_when:
+        - ipa_group_mod.rc != 0
+        - "'no modifications to be performed' not in (ipa_group_mod.stderr | default(''))"
+      tags: [identity, groups]
+
     # ── Users ──────────────────────────────────────────────────────────
     - name: "Ensure IPA users exist"
       ansible.builtin.command:
@@ -163,10 +188,81 @@
         - "'already exists' not in (ipa_user_add.stderr | default(''))"
       tags: [identity, users]
 
-    # Passwords are set unconditionally (no read-back to diff against). Skip a
-    # user by setting force_password: false — e.g. after first login the user
-    # owns their own password and you don't want to reset it every run.
-    - name: "Set initial password for users (force_password not false)"
+    # `user-add` above no-ops on "already exists" — an already-created
+    # user's own `first`/`last` never gets corrected by editing the roster
+    # and rerunning without this. Unconditional declarative reconcile, same
+    # idiom as the SSH-key task below.
+    - name: "Reconcile user first/last names"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - user-mod
+          - "{{ item.name }}"
+          - "--first={{ item.first | default(item.name) }}"
+          - "--last={{ item.last | default(item.name) }}"
+      loop: "{{ ipa_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_user_mod
+      changed_when: "'Modified user' in (ipa_user_mod.stdout | default(''))"
+      failed_when:
+        - ipa_user_mod.rc != 0
+        - "'no modifications to be performed' not in (ipa_user_mod.stderr | default(''))"
+      tags: [identity, users]
+
+    # Passwords are set unconditionally when run (no read-back to diff
+    # against), and `ipa passwd` is an admin reset — it always re-arms
+    # FreeIPA's forced-password-change flag regardless of whether the value
+    # is unchanged. `force_password` therefore defaults to false: a user's
+    # `password:` only actually gets applied when that user ALSO sets
+    # `force_password: true` (first-time onboard, or a deliberate reset) —
+    # a routine rerun of an already-onboarded roster no longer silently
+    # resets everyone's password back to a forced-change state.
+    #
+    # That default flip alone still isn't enough for a roster entry that
+    # deliberately KEEPS `force_password: true` set (e.g. to re-arm a test
+    # scenario, or someone forgetting to flip it back after onboarding) —
+    # every rerun would still stomp a password the user has since
+    # personalized. FreeIPA exposes a reliable signal for "has this
+    # account's password been changed by the user since the last admin
+    # reset?": `krbLastPwdChange` vs `krbPasswordExpiration` (confirmed
+    # live, 2026-07-16). Right after `ipa passwd` (admin reset) the two are
+    # IDENTICAL — "must change immediately". Once the user completes their
+    # own change (a real `kinit` + interactive forced-change prompt),
+    # `krbPasswordExpiration` jumps ~90 days past `krbLastPwdChange` (per
+    # password policy maxlife) — a real future gap only exists once the
+    # change was genuinely the user's own. Both are fixed-width
+    # `YYYYMMDDHHMMSSZ`, so plain string `<=`/`==` comparison is valid.
+    - name: "Look up password-expiry state for force_password: true users"
+      ansible.builtin.command:
+        argv: [ipa, user-show, "{{ item.name }}", --all, --raw]
+      loop: "{{ ipa_users | selectattr('password', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.force_password | default(false) | bool
+      register: ipa_pwd_state
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [identity, users, passwords]
+
+    # A brand-new user (first-time onboard) has no Kerberos key yet, so
+    # neither attribute exists — that must mean "proceed," not "skip".
+    - name: "Compute whether each force_password user still needs a reset"
+      ansible.builtin.set_fact:
+        ipa_pwd_needs_reset: "{{ ipa_pwd_needs_reset | default({}) | combine({item.item.name: item_needs_reset}) }}"
+      vars:
+        item_stdout: "{{ item.stdout | default('') }}"
+        item_last_change: "{{ (item_stdout | regex_findall('krbLastPwdChange: (\\S+)') + ['']) | first }}"
+        item_expiration: "{{ (item_stdout | regex_findall('krbPasswordExpiration: (\\S+)') + ['']) | first }}"
+        item_needs_reset: "{{ item_last_change == '' or item_expiration <= item_last_change }}"
+      loop: "{{ ipa_pwd_state.results }}"
+      loop_control:
+        label: "{{ item.item.name | default('n/a') }}"
+      when: not (item.skipped | default(false))
+      tags: [identity, users, passwords]
+
+    - name: "Set password for users with force_password: true"
       ansible.builtin.shell:
         cmd: |
           printf '%s\n%s\n' "{{ item.password }}" "{{ item.password }}" \
@@ -174,7 +270,9 @@
       loop: "{{ ipa_users | selectattr('password', 'defined') | list }}"
       loop_control:
         label: "{{ item.name }}"
-      when: item.force_password | default(true) | bool
+      when: >-
+        item.force_password | default(false) | bool
+        and ((ipa_pwd_needs_reset | default({})).get(item.name, true))
       register: ipa_passwd
       changed_when: ipa_passwd.rc == 0
       failed_when: false
@@ -219,6 +317,53 @@
         - "'already a member' not in (ipa_grp_member.stdout | default('') + ipa_grp_member.stderr | default(''))"
       tags: [identity, users, groups]
 
+    # `group-add-member` above only ever adds — a user removed from their
+    # roster `groups:` list keeps stale membership forever without this.
+    # Scoped ONLY to groups this roster itself declares (`ipa_groups`) —
+    # `ipa user-show`'s "Member of groups:" line also lists IPA's own
+    # `ipausers` (every user is auto-added to it), which must never be
+    # touched since it isn't something any roster manages.
+    - name: "Look up current user group memberships"
+      ansible.builtin.command:
+        argv: [ipa, user-show, "{{ item.name }}", --all]
+      loop: "{{ ipa_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_user_show
+      changed_when: false
+      failed_when: false
+      tags: [identity, users, groups]
+
+    - name: "Compute stale group memberships to remove"
+      ansible.builtin.set_fact:
+        ipa_group_membership_removals: "{{ (ipa_group_membership_removals | default([])) + [{'name': item.item.name, 'groups': stale_groups}] }}"
+      vars:
+        managed_groups: "{{ ipa_groups | map(attribute='name') | list }}"
+        live_line: "{{ ((item.stdout | default('') | regex_findall('^  Member of groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        live_groups: "{{ [] if live_line == '' else live_line.split(', ') }}"
+        stale_groups: "{{ live_groups | intersect(managed_groups) | difference(item.item.groups | default([])) }}"
+      loop: "{{ ipa_user_show.results }}"
+      loop_control:
+        label: "{{ item.item.name | default('n/a') }}"
+      when: not (item.skipped | default(false))
+      tags: [identity, users, groups]
+
+    - name: "Remove stale group memberships"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - group-remove-member
+          - "{{ item.1 }}"
+          - "--users={{ item.0.name }}"
+      loop: "{{ ipa_group_membership_removals | default([]) | subelements('groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> {{ item.1 }}"
+      register: ipa_grp_removal
+      changed_when: "'Number of members removed 1' in (ipa_grp_removal.stdout | default(''))"
+      failed_when:
+        - ipa_grp_removal.rc != 0
+      tags: [identity, users, groups]
+
     # ── Host groups ────────────────────────────────────────────────────
     # Groups of enrolled hosts (e.g. web-hosts, db-hosts) that HBAC rules and
     # sudo rules below can target instead of naming individual hosts.
@@ -239,6 +384,27 @@
         - "'already exists' not in (ipa_hostgroup_add.stderr | default(''))"
       tags: [identity, hostgroups]
 
+    # `hostgroup-add` above no-ops on "already exists" — an already-created
+    # hostgroup's own `desc` never gets corrected by editing the roster and
+    # rerunning without this. Unconditional declarative reconcile, same
+    # idiom as the SSH-key task below.
+    - name: "Reconcile IPA hostgroup descriptions"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hostgroup-mod
+          - "{{ item.name }}"
+          - "--desc={{ item.desc | default(item.name) }}"
+      loop: "{{ ipa_hostgroups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_hostgroup_mod
+      changed_when: "'Modified hostgroup' in (ipa_hostgroup_mod.stdout | default(''))"
+      failed_when:
+        - ipa_hostgroup_mod.rc != 0
+        - "'no modifications to be performed' not in (ipa_hostgroup_mod.stderr | default(''))"
+      tags: [identity, hostgroups]
+
     - name: "Ensure hostgroup membership"
       ansible.builtin.command:
         argv:
@@ -254,6 +420,57 @@
       failed_when:
         - ipa_hostgroup_member.rc != 0
         - "'already a member' not in (ipa_hostgroup_member.stdout | default('') + ipa_hostgroup_member.stderr | default(''))"
+      tags: [identity, hostgroups]
+
+    # `hostgroup-add-member` above only ever adds — a host removed from the
+    # roster's `hosts:` list keeps stale membership forever without this.
+    # `hostgroup-show` always reports hosts as FQDNs even when the roster
+    # (and the add task above) used a short name that IPA itself resolved —
+    # normalize both sides to the short name before diffing, or every
+    # single rerun would see "client-vm.ipa.pilot.internal" (live) as
+    # absent from a roster that says "client-vm", remove it, then the
+    # existing add task immediately re-adds it — permanent flip-flop
+    # instead of a settled `changed=0` idempotent rerun.
+    - name: "Look up current hostgroup host memberships"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-show, "{{ item.name }}", --all]
+      loop: "{{ ipa_hostgroups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_hostgroup_show
+      changed_when: false
+      failed_when: false
+      tags: [identity, hostgroups]
+
+    - name: "Compute stale hostgroup host memberships to remove"
+      ansible.builtin.set_fact:
+        ipa_hostgroup_membership_removals: "{{ (ipa_hostgroup_membership_removals | default([])) + [{'name': item.item.name, 'hosts': stale_hosts}] }}"
+      vars:
+        live_line: "{{ ((item.stdout | default('') | regex_findall('^  Member hosts: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        live_hosts_fqdn: "{{ [] if live_line == '' else live_line.split(', ') }}"
+        live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | list }}"
+        roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | list }}"
+        stale_hosts: "{{ live_hosts | difference(roster_hosts) }}"
+      loop: "{{ ipa_hostgroup_show.results }}"
+      loop_control:
+        label: "{{ item.item.name | default('n/a') }}"
+      when: not (item.skipped | default(false))
+      tags: [identity, hostgroups]
+
+    - name: "Remove stale hostgroup host memberships"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hostgroup-remove-member
+          - "{{ item.0.name }}"
+          - "--hosts={{ item.1 }}"
+      loop: "{{ ipa_hostgroup_membership_removals | default([]) | subelements('hosts', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> {{ item.1 }}"
+      register: ipa_hostgroup_removal
+      changed_when: "'Number of members removed 1' in (ipa_hostgroup_removal.stdout | default(''))"
+      failed_when:
+        - ipa_hostgroup_removal.rc != 0
       tags: [identity, hostgroups]
 
     # ── HBAC rules (who may LOG IN, and where) ──────────────────────────
@@ -277,6 +494,143 @@
       failed_when:
         - ipa_hbac_add.rc != 0
         - "'already exists' not in (ipa_hbac_add.stderr | default(''))"
+      tags: [identity, hbac]
+
+    # `hbacrule-add` above no-ops on "already exists" — none of hostcat,
+    # servicecat, or attached hosts/hostgroups/services/users/groups ever
+    # gets corrected by editing the roster and rerunning without the
+    # lookup/remove/reconcile trio below. Same FQDN-vs-short-name
+    # normalization concern as the hostgroup membership task above.
+    - name: "Look up current HBAC rule attachments"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-show, "{{ item.name }}", --all]
+      loop: "{{ ipa_hbac_rules }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_hbacrule_show
+      changed_when: false
+      failed_when: false
+      tags: [identity, hbac]
+
+    # Scoped removal: only ever removes a host/hostgroup/service/user/group
+    # that is BOTH currently attached to THIS rule AND absent from THIS
+    # same rule's own roster lists — never a blind sweep across rules.
+    - name: "Compute HBAC rule attachments to remove"
+      ansible.builtin.set_fact:
+        ipa_hbac_removals: >-
+          {{ (ipa_hbac_removals | default([])) + [{
+               'name': item.item.name,
+               'hosts': (live_hosts | difference(roster_hosts)),
+               'hostgroups': (live_hostgroups | difference(item.item.hostgroups | default([]))),
+               'services': (live_services | difference(item.item.services | default([]))),
+               'users': (live_users | difference(item.item.users | default([]))),
+               'groups': (live_groups | difference(item.item.groups | default([]))),
+          }] }}
+      vars:
+        stdout: "{{ item.stdout | default('') }}"
+        hosts_line: "{{ ((stdout | regex_findall('^  Hosts: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        hostgroups_line: "{{ ((stdout | regex_findall('^  Host Groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        services_line: "{{ ((stdout | regex_findall('^  HBAC Services: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        users_line: "{{ ((stdout | regex_findall('^  Users: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        groups_line: "{{ ((stdout | regex_findall('^  User Groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        live_hosts_fqdn: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
+        live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | list }}"
+        roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | list }}"
+        live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') }}"
+        live_services: "{{ [] if services_line == '' else services_line.split(', ') }}"
+        live_users: "{{ [] if users_line == '' else users_line.split(', ') }}"
+        live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') }}"
+      loop: "{{ ipa_hbacrule_show.results }}"
+      loop_control:
+        label: "{{ item.item.name | default('n/a') }}"
+      when: not (item.skipped | default(false))
+      tags: [identity, hbac]
+
+    - name: "Remove stale hosts from HBAC rules"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-remove-host, "{{ item.0.name }}", "--hosts={{ item.1 }}"]
+      loop: "{{ ipa_hbac_removals | default([]) | subelements('hosts', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> host {{ item.1 }}"
+      register: ipa_hbac_rm_host
+      changed_when: "'Number of members removed 1' in (ipa_hbac_rm_host.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_rm_host.rc != 0
+      tags: [identity, hbac]
+
+    - name: "Remove stale hostgroups from HBAC rules"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-remove-host, "{{ item.0.name }}", "--hostgroups={{ item.1 }}"]
+      loop: "{{ ipa_hbac_removals | default([]) | subelements('hostgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> hostgroup {{ item.1 }}"
+      register: ipa_hbac_rm_hostgroup
+      changed_when: "'Number of members removed 1' in (ipa_hbac_rm_hostgroup.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_rm_hostgroup.rc != 0
+      tags: [identity, hbac]
+
+    - name: "Remove stale services from HBAC rules"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-remove-service, "{{ item.0.name }}", "--hbacsvcs={{ item.1 }}"]
+      loop: "{{ ipa_hbac_removals | default([]) | subelements('services', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> service {{ item.1 }}"
+      register: ipa_hbac_rm_service
+      changed_when: "'Number of members removed 1' in (ipa_hbac_rm_service.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_rm_service.rc != 0
+      tags: [identity, hbac]
+
+    - name: "Remove stale users from HBAC rules"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-remove-user, "{{ item.0.name }}", "--users={{ item.1 }}"]
+      loop: "{{ ipa_hbac_removals | default([]) | subelements('users', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> user {{ item.1 }}"
+      register: ipa_hbac_rm_user
+      changed_when: "'Number of members removed 1' in (ipa_hbac_rm_user.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_rm_user.rc != 0
+      tags: [identity, hbac]
+
+    - name: "Remove stale groups from HBAC rules"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-remove-user, "{{ item.0.name }}", "--groups={{ item.1 }}"]
+      loop: "{{ ipa_hbac_removals | default([]) | subelements('groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> group {{ item.1 }}"
+      register: ipa_hbac_rm_group
+      changed_when: "'Number of members removed 1' in (ipa_hbac_rm_group.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_rm_group.rc != 0
+      tags: [identity, hbac]
+
+    # Category flags are mutually exclusive with specific members at the
+    # IPA API level (confirmed live: "host category cannot be set to 'all'
+    # while there are allowed hosts") — this MUST run after the removals
+    # above (so a rule moving from hosts:[...] to hostcat:all has nothing
+    # left attached) and before the "Attach ..." tasks below (so a rule
+    # moving the other way has its category cleared before a specific
+    # host/service can be attached). Always sends an explicit value
+    # (category, or empty string to clear) rather than omitting the flag —
+    # unlike "Ensure HBAC rules exist" above, which only needs to set it
+    # once at creation, this task's whole job is correcting drift on an
+    # already-existing rule.
+    - name: "Reconcile HBAC rule category attributes"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'hbacrule-mod', item.name,
+              '--hostcat=' ~ ('' if (item.hostgroups is defined or item.hosts is defined) else (item.hostcat | default('all'))),
+              '--servicecat=' ~ ('' if item.services is defined else (item.servicecat | default('all')))] }}
+      loop: "{{ ipa_hbac_rules }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_hbacrule_mod
+      changed_when: "'Modified HBAC rule' in (ipa_hbacrule_mod.stdout | default(''))"
+      failed_when:
+        - ipa_hbacrule_mod.rc != 0
+        - "'no modifications to be performed' not in (ipa_hbacrule_mod.stderr | default(''))"
       tags: [identity, hbac]
 
     - name: "Attach hostgroups to HBAC rules"
@@ -375,14 +729,65 @@
       tags: [identity, hbac]
 
     # ── Sudo rules (what a logged-in user may run, and where) ───────────
+    # Catch the mutual-exclusivity mistake before it can silently happen
+    # again: "Ensure sudo rules exist" below always prefers hosts/hostgroups
+    # over hostcat, and allow_commands over cmdcat, with no warning if a
+    # roster sets both — exactly how runbook Real bug #15 (cmdcat silently
+    # ignored) went unnoticed.
+    - name: "Gate: sudo rule category vs specific-list fields are mutually exclusive"
+      ansible.builtin.assert:
+        that:
+          - not (item.hostcat is defined and (item.hosts is defined or item.hostgroups is defined))
+          - not (item.cmdcat is defined and item.allow_commands is defined)
+        fail_msg: >-
+          Sudo rule "{{ item.name }}" sets both a category field and a
+          specific-list field for the same axis — pick one. Either
+          `hostcat: all` alone or `hosts:`/`hostgroups:` alone; either
+          `cmdcat: all` alone or `allow_commands:` alone. Whichever one this
+          task ignores is silent, not an error.
+      loop: "{{ ipa_sudo_rules }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [always, identity, sudo]
+
     # A rule with no hosts/hostgroups defaults to hostcat=all (applies
     # everywhere); give it `hosts:`/`hostgroups:` to scope it to a subset.
+    #
+    # Commands follow the identical convention: a rule with no
+    # `allow_commands:` defaults to cmdcat=all (matches ANY command) — give
+    # it `allow_commands:` to scope it to a specific set instead. `--cmdcat`
+    # and individual sudoCmd members are mutually exclusive in FreeIPA
+    # itself (same as hostcat vs. hosts/hostgroups), so this is only sent
+    # when `allow_commands` is absent. `cmdcat: all` is accepted as an
+    # explicit synonym for the same default, for rosters that prefer to say
+    # so out loud. Before this, a roster that set `cmdcat: all` (expecting
+    # hostcat-like behavior) was silently ignored — the rule ended up with
+    # NO command grant at all (deny-everything), since only `allow_commands`
+    # was ever read (runbook Real bug #15).
+    #
+    # `runas_user`/`runasgroup` are the same "cat" convention again, but for
+    # WHO the command may be run as: with neither set, FreeIPA's own default
+    # is "root only". Give `runas_user: all` / `runasgroup: all` to allow
+    # `sudo -u <anyone>` / `sudo -g <anygroup>` instead. Only the `all`
+    # category value is handled — a roster listing specific runas
+    # users/groups is not yet supported (no roster here has needed it; add
+    # `sudorule-add-runasuser`/`-add-runasgroup` tasks, mirroring "Attach
+    # users to sudo rules" below, if that's ever needed). Before this, these
+    # two fields were silently ignored entirely — a roster author writing
+    # `runas_user: all` got the unchanged "root only" default with no
+    # indication the field did nothing (runbook Real bug #16).
     - name: "Ensure sudo rules exist"
       ansible.builtin.command:
         argv: >-
           {{ ['ipa', 'sudorule-add', item.name]
              + ([] if (item.hostgroups is defined or item.hosts is defined)
-                else ['--hostcat=' ~ (item.hostcat | default('all'))]) }}
+                else ['--hostcat=' ~ (item.hostcat | default('all'))])
+             + ([] if item.allow_commands is defined
+                else ['--cmdcat=' ~ (item.cmdcat | default('all'))])
+             + ([] if (item.runas_user | default('') | string | lower != 'all')
+                else ['--runasusercat=all'])
+             + ([] if (item.runasgroup | default('') | string | lower != 'all')
+                else ['--runasgroupcat=all']) }}
       loop: "{{ ipa_sudo_rules }}"
       loop_control:
         label: "{{ item.name }}"
@@ -391,6 +796,148 @@
       failed_when:
         - ipa_rule_add.rc != 0
         - "'already exists' not in (ipa_rule_add.stderr | default(''))"
+      tags: [identity, sudo]
+
+    # `sudorule-add` above no-ops on "already exists" — none of hostcat,
+    # cmdcat, runasusercat/runasgroupcat, or attached
+    # hosts/hostgroups/allow_commands/users/groups ever gets corrected by
+    # editing the roster and rerunning without the lookup/remove/reconcile
+    # trio below. Same FQDN-vs-short-name normalization concern as the
+    # hostgroup membership task above.
+    - name: "Look up current sudo rule attachments"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-show, "{{ item.name }}", --all]
+      loop: "{{ ipa_sudo_rules }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_sudorule_show
+      changed_when: false
+      failed_when: false
+      tags: [identity, sudo]
+
+    # Scoped removal: only ever removes a host/hostgroup/command/user/group
+    # that is BOTH currently attached to THIS rule AND absent from THIS
+    # same rule's own roster lists — never a blind sweep across rules.
+    - name: "Compute sudo rule attachments to remove"
+      ansible.builtin.set_fact:
+        ipa_sudo_removals: >-
+          {{ (ipa_sudo_removals | default([])) + [{
+               'name': item.item.name,
+               'hosts': (live_hosts | difference(roster_hosts)),
+               'hostgroups': (live_hostgroups | difference(item.item.hostgroups | default([]))),
+               'allow_commands': (live_cmds | difference(item.item.allow_commands | default([]))),
+               'users': (live_users | difference(item.item.users | default([]))),
+               'groups': (live_groups | difference(item.item.groups | default([]))),
+          }] }}
+      vars:
+        stdout: "{{ item.stdout | default('') }}"
+        hosts_line: "{{ ((stdout | regex_findall('^  Hosts: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        hostgroups_line: "{{ ((stdout | regex_findall('^  Host Groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        cmds_line: "{{ ((stdout | regex_findall('^  Sudo Allow Commands: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        users_line: "{{ ((stdout | regex_findall('^  Users: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        groups_line: "{{ ((stdout | regex_findall('^  User Groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        live_hosts_fqdn: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
+        live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | list }}"
+        roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | list }}"
+        live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') }}"
+        live_cmds: "{{ [] if cmds_line == '' else cmds_line.split(', ') }}"
+        live_users: "{{ [] if users_line == '' else users_line.split(', ') }}"
+        live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') }}"
+      loop: "{{ ipa_sudorule_show.results }}"
+      loop_control:
+        label: "{{ item.item.name | default('n/a') }}"
+      when: not (item.skipped | default(false))
+      tags: [identity, sudo]
+
+    - name: "Remove stale hosts from sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-remove-host, "{{ item.0.name }}", "--hosts={{ item.1 }}"]
+      loop: "{{ ipa_sudo_removals | default([]) | subelements('hosts', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> host {{ item.1 }}"
+      register: ipa_sudo_rm_host
+      changed_when: "'Number of members removed 1' in (ipa_sudo_rm_host.stdout | default(''))"
+      failed_when:
+        - ipa_sudo_rm_host.rc != 0
+      tags: [identity, sudo]
+
+    - name: "Remove stale hostgroups from sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-remove-host, "{{ item.0.name }}", "--hostgroups={{ item.1 }}"]
+      loop: "{{ ipa_sudo_removals | default([]) | subelements('hostgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> hostgroup {{ item.1 }}"
+      register: ipa_sudo_rm_hostgroup
+      changed_when: "'Number of members removed 1' in (ipa_sudo_rm_hostgroup.stdout | default(''))"
+      failed_when:
+        - ipa_sudo_rm_hostgroup.rc != 0
+      tags: [identity, sudo]
+
+    - name: "Remove stale allow_commands from sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-remove-allow-command, "{{ item.0.name }}", "--sudocmds={{ item.1 }}"]
+      loop: "{{ ipa_sudo_removals | default([]) | subelements('allow_commands', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> command {{ item.1 }}"
+      register: ipa_sudo_rm_cmd
+      changed_when: "'Number of members removed 1' in (ipa_sudo_rm_cmd.stdout | default(''))"
+      failed_when:
+        - ipa_sudo_rm_cmd.rc != 0
+      tags: [identity, sudo]
+
+    - name: "Remove stale users from sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-remove-user, "{{ item.0.name }}", "--users={{ item.1 }}"]
+      loop: "{{ ipa_sudo_removals | default([]) | subelements('users', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> user {{ item.1 }}"
+      register: ipa_sudo_rm_user
+      changed_when: "'Number of members removed 1' in (ipa_sudo_rm_user.stdout | default(''))"
+      failed_when:
+        - ipa_sudo_rm_user.rc != 0
+      tags: [identity, sudo]
+
+    - name: "Remove stale groups from sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-remove-user, "{{ item.0.name }}", "--groups={{ item.1 }}"]
+      loop: "{{ ipa_sudo_removals | default([]) | subelements('groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> group {{ item.1 }}"
+      register: ipa_sudo_rm_group
+      changed_when: "'Number of members removed 1' in (ipa_sudo_rm_group.stdout | default(''))"
+      failed_when:
+        - ipa_sudo_rm_group.rc != 0
+      tags: [identity, sudo]
+
+    # Category flags are mutually exclusive with specific members at the
+    # IPA API level (confirmed live: "host category cannot be set to 'all'
+    # while there are allowed hosts") — this MUST run after the removals
+    # above (so a rule moving from hosts:[...] to hostcat:all has nothing
+    # left attached) and before the "Attach ..." tasks below (so a rule
+    # moving the other way has its category cleared before a specific
+    # host/command can be attached). Always sends an explicit value
+    # (category, or empty string to clear) rather than omitting the flag —
+    # unlike "Ensure sudo rules exist" above, which only needs to set it
+    # once at creation, this task's whole job is correcting drift on an
+    # already-existing rule. `runas_user`/`runasgroup` only ever support
+    # the `all` category (see the comment above "Ensure sudo rules exist")
+    # so reconciling them is simpler: `all` or clear, never a specific list.
+    - name: "Reconcile sudo rule category attributes"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'sudorule-mod', item.name,
+              '--hostcat=' ~ ('' if (item.hostgroups is defined or item.hosts is defined) else (item.hostcat | default('all'))),
+              '--cmdcat=' ~ ('' if item.allow_commands is defined else (item.cmdcat | default('all'))),
+              '--runasusercat=' ~ ('all' if (item.runas_user | default('') | string | lower == 'all') else ''),
+              '--runasgroupcat=' ~ ('all' if (item.runasgroup | default('') | string | lower == 'all') else '')] }}
+      loop: "{{ ipa_sudo_rules }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_sudorule_mod
+      changed_when: "'Modified Sudo Rule' in (ipa_sudorule_mod.stdout | default(''))"
+      failed_when:
+        - ipa_sudorule_mod.rc != 0
+        - "'no modifications to be performed' not in (ipa_sudorule_mod.stderr | default(''))"
       tags: [identity, sudo]
 
     # sudorule-add-allow-command requires the command to already exist as a

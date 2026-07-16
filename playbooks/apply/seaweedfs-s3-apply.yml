@@ -173,11 +173,15 @@
         group: 0
         mode: '0644'
 
+    # docker_image/docker_container need a live daemon to compute their diff
+    # even under --check; deferred to the real apply on a from-scratch host,
+    # same convention as wazuh-manager-apply.yml.
     - name: "SeaweedFS — pull chrislusf/seaweedfs:{{ seaweedfs_version }} image"
       tags: [seaweedfs-s3]
       community.docker.docker_image:
         name: "chrislusf/seaweedfs:{{ seaweedfs_version }}"
         source: pull
+      when: not ansible_check_mode
 
     # Spec: docs/verification/seaweedfs-s3.md C1-C5
     # `weed server -s3` starts master (9333) + volume (8080) +
@@ -213,6 +217,7 @@
           timeout: 5s
           retries: 12
           start_period: 20s
+      when: not ansible_check_mode
 
     # Spec: docs/verification/seaweedfs-s3.md C5
     # Poll the S3 gateway from inside the container's network namespace
@@ -232,6 +237,11 @@
       retries: 30
       delay: 2
       changed_when: false
+      # docker_container_exec is skipped by the collection in check mode and
+      # therefore registers no stdout. Waiting on that missing field makes a
+      # site-wide --check --diff fail before the real deployment is reviewed.
+      # This readiness wait is deferred to the real apply.
+      when: not ansible_check_mode
 
     # Spec: docs/verification/seaweedfs-s3.md C6/C7
     # `s3.bucket.create` (weed shell) always reports "created bucket"
@@ -247,13 +257,16 @@
         command: sh -c "echo 's3.bucket.list' | weed shell"
       register: seaweedfs_bucket_list
       changed_when: false
+      when: not ansible_check_mode
 
     - name: "SeaweedFS — create S3 smoke-test bucket (idempotent)"
       tags: [seaweedfs-s3, s3-C6, s3-C7]
       community.docker.docker_container_exec:
         container: pilot-seaweedfs
         command: "sh -c \"echo 's3.bucket.create -name {{ seaweedfs_test_bucket }}' | weed shell\""
-      when: seaweedfs_test_bucket not in seaweedfs_bucket_list.stdout
+      when:
+        - not ansible_check_mode
+        - seaweedfs_test_bucket not in seaweedfs_bucket_list.stdout
       changed_when: true
 
     - name: "SeaweedFS — create extra S3 buckets (idempotent)"
@@ -262,5 +275,7 @@
         container: pilot-seaweedfs
         command: "sh -c \"echo 's3.bucket.create -name {{ item }}' | weed shell\""
       loop: "{{ seaweedfs_extra_buckets | default([]) }}"
-      when: item not in seaweedfs_bucket_list.stdout
+      when:
+        - not ansible_check_mode
+        - item not in seaweedfs_bucket_list.stdout
       changed_when: true

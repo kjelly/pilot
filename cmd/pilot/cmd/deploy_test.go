@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // repoRootForTest walks up from the current package directory until it
@@ -106,6 +107,30 @@ func TestValidateFileExists(t *testing.T) {
 	}
 	if err := validateFileExists("/does/not/exist/nope"); err == nil {
 		t.Error("expected error for missing file")
+	}
+}
+
+func TestParseDeployTimeout(t *testing.T) {
+	got, err := parseDeployTimeout("30m")
+	if err != nil {
+		t.Fatalf("unexpected error for default value: %v", err)
+	}
+	if got != 30*time.Minute {
+		t.Errorf("got %v, want 30m", got)
+	}
+
+	got, err = parseDeployTimeout("1h30m")
+	if err != nil {
+		t.Fatalf("unexpected error for 1h30m: %v", err)
+	}
+	if got != 90*time.Minute {
+		t.Errorf("got %v, want 1h30m", got)
+	}
+
+	for _, bad := range []string{"", "notaduration", "30", "-30m", "0m", "0"} {
+		if _, err := parseDeployTimeout(bad); err == nil {
+			t.Errorf("parseDeployTimeout(%q): expected error, got nil", bad)
+		}
 	}
 }
 

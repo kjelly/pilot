@@ -96,6 +96,46 @@ func TestGenerate_Dedup(t *testing.T) {
 	}
 }
 
+// TestGenerate_RawFallbackDoesNotCollapseDistinctCommands is a regression
+// test for a real bug found while writing docs/verification/freeipa-identity.md:
+// classifyRow's includeRaw fallback returned params="" for every row
+// regardless of the row's actual command, so dedupKey (which hashes
+// mod+params) treated every raw-fallback row as identical — a spec with N
+// rows whose commands all fall through to this path (no Pattern A-F match)
+// silently collapsed into ONE task running only the FIRST row's command,
+// tagged with every other row's ID too. Confirmed live: this is exactly
+// why the committed playbooks/verify/freeipa-server.yml has only 2 tasks
+// for its 18-row spec (C2's `sudo ipactl status` task carries tags
+// [C2..C18] — C3 through C18 were never actually being checked).
+func TestGenerate_RawFallbackDoesNotCollapseDistinctCommands(t *testing.T) {
+	body := `# Verification Spec — raw fallback
+
+## 2. Checklist
+
+| ID | Category | Check | Expected | Command |
+|----|----------|-------|----------|---------|
+| C1 | port | ldap | 0 | ` + "`ldapsearch -x -b dc=example,dc=com`" + ` |
+| C2 | port | https | ~200 | ` + "`curl -o /dev/null -w \"%{http_code}\" http://example.com`" + ` |
+| C3 | audit | log | ~on | ` + "`dsconf slapd-EXAMPLE config get nsslapd-auditlog-logging-enabled`" + ` |
+`
+	s, err := ParseReader(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := Generate(s, GenerateOptions{IncludeRaw: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pb.Tasks) != 3 {
+		t.Fatalf("distinct raw commands must not dedup: got %d tasks want=3", len(pb.Tasks))
+	}
+	for i, id := range []string{"C1", "C2", "C3"} {
+		if got := pb.Tasks[i].SourceIDs; len(got) != 1 || got[0] != id {
+			t.Errorf("task[%d] SourceIDs=%v want=[%s]", i, got, id)
+		}
+	}
+}
+
 func TestGenerate_ModuleSelection(t *testing.T) {
 	body := `# Verification Spec — mods
 

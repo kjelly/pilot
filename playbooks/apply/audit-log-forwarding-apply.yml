@@ -217,6 +217,13 @@
             name: auditd
             state: started
             enabled: true
+          # Steps 1/1a simulate the install in check mode without actually
+          # installing the package, so on a host that doesn't already have
+          # auditd, the unit file doesn't exist yet and this task fails with
+          # "Could not find the requested service auditd". Deferred to the
+          # real apply, same pattern as seaweedfs-s3-apply.yml's C5/C6/C7
+          # guards and freeipa-server-apply.yml's ipa.service start.
+          when: not ansible_check_mode
 
         - name: "Step 9: Ensure rsyslog enabled + started (spec C19)"
           tags: [C19]

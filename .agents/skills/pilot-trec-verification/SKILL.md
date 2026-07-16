@@ -18,7 +18,13 @@ description: |
   a disposable inventory workspace under the repo's gitignored `./tmp`
   directory, choosing between a one-shot site-wide deploy vs
   per-component deploy, and the concrete trec/promptui gotchas that
-  make scripted TUI runs silently derail.
+  make scripted TUI runs silently derail. Also covers driving `pilot`
+  through `trec`'s stdio MCP server (`trec mcp`) — the `run` /
+  `terminal_start` / `terminal_write` / `terminal_read` / `terminal_close`
+  tool contract — for the exploratory, stateful steps of this workflow
+  when the calling agent's shell tool spawns a one-shot subprocess per
+  call and cannot keep a `trec drive --interactive` PTY's stdin open
+  across turns.
 ---
 
 # pilot-trec-verification
@@ -57,7 +63,19 @@ sessions: `cmd/pilot/cmd/deploy_catalog.go` and
 - Confirm `trec` is installed (`which trec`); it is the recorder +
   keystroke driver for every interactive step. `trec drive --help` /
   `trec --help` for the current flag set — don't assume flags from
-  memory.
+  memory. `trec --help` also lists an `mcp` subcommand (stdio MCP
+  server) — see §4a for when to use it instead of a plain shell call.
+- Decide up front whether the calling agent has a genuinely persistent
+  PTY/shell available for `trec drive --interactive`, or whether every
+  shell tool call is an independent one-shot subprocess (true for this
+  session's `Bash` tool, and for most agent harnesses). One-shot
+  `trec drive --script <file>` runs are unaffected either way — but any
+  exploratory or diagnostic step that needs to look at the screen and
+  react (confirming a menu's real item list, debugging a stuck wizard)
+  needs a stateful session. If `mcp__trec__*` tools (e.g.
+  `terminal_start`) aren't already available via `ToolSearch`, and the
+  task needs one, register `trec mcp` as an MCP server rather than
+  trying to fake a persistent PTY with one-shot Bash calls. See §4a.
 - Test artifacts (the disposable inventory workspace, `trec` scripts,
   `.cast` recordings) go under the repo's own `./tmp/` directory
   (gitignored — see `.gitignore`), **never** loose inside the tracked
@@ -102,9 +120,14 @@ grep -n 'Name:' internal/inventory/contracts.go       # pilot edit's role checkl
   into the wrong menu silently. Before writing `DOWN <n>` to reach a
   save/exit item, count the **actual current item list**, not what you
   remember from the runbook prose.
-- When in doubt, run the wizard once by hand (or with a short throwaway
-  `trec` script) and read the transcript to confirm the item list
-  before writing the full script.
+- When in doubt, step through the wizard once yourself before writing
+  the full script and read the screen to confirm the item list. If you
+  have a real interactive terminal, do this by hand. If you're an agent
+  whose shell tool only spawns one-shot subprocesses (this session's
+  `Bash` tool included), you cannot hold `trec drive --interactive`'s
+  stdin open across calls to do this — use `trec mcp`'s stateful tools
+  instead (§4a) rather than guessing from a short throwaway script and
+  hoping it matches.
 
 See `references/index-computation.md` for a worked walkthrough.
 
@@ -225,6 +248,67 @@ bubbletea checklist screen (role checkboxes) — that usage has been
 reliable — and verify with a short throwaway script before committing to
 `SELECT` anywhere else in a long script.
 
+This finding predates this skill's §4a: the `mcp` subcommand and the
+richer `SELECT`/`EXPECT`/`ASSERT`/`WAIT_CHILD_EXIT`/`ASSERT_EXIT` DSL
+documented in the global `trec-tui-drive` skill were added to `trec`
+afterward, and that skill now recommends `SELECT` by default. Don't
+assume either this section's stale-pointer bug or that skill's
+"SELECT is fine" default is still accurate against whatever `trec`
+build is on `$PATH` today — re-verify with a throwaway `terminal_start`
+session (§4a) against a menu right after a role-checklist screen before
+trusting `SELECT` there in a real recorded run. If the stale-pointer
+symptom reproduces, fall back to `DOWN <n>`; if it doesn't, prefer
+`SELECT` and drop the index-counting overhead for that menu.
+
+---
+
+## 4a. Driving trec via MCP server mode (stateful sessions)
+
+Every `trec drive --script <file>` invocation in this skill (§4, §5) is
+a single one-shot command — it works identically whether you run it as
+a plain shell command or as one call to `trec mcp`'s `run` tool,
+because script mode owns its own stdin/child lifecycle and needs no
+follow-up call. Nothing above requires MCP mode.
+
+MCP mode matters for the steps that are inherently a back-and-forth
+with a live screen: confirming a menu's real item list before writing
+`DOWN <n>`/`SELECT` into a script (§2), or diagnosing a run that
+derailed, or re-verifying whether `SELECT` is safe against the current
+`trec` build (the note above). Those need `trec drive --interactive`'s
+live PTY, which in turn needs *something* to hold its stdin open across
+multiple send-then-read turns. An agent whose shell tool spawns an
+independent subprocess per call — this session's `Bash` tool included —
+cannot do that directly: a command sent via one `Bash` call cannot see
+the screen state and send a follow-up keystroke in a later `Bash` call
+to the *same* process.
+
+Use `trec mcp`'s session tools instead (full contract: the global
+`trec-mcp` skill; DSL syntax and reliability rules: the global
+`trec-tui-drive` skill — this skill doesn't duplicate either):
+
+- `terminal_start` — launch the wizard (e.g. `pilot edit --dir
+  "$SCRATCH/demo"`, with `CI=1` if the role checklist is involved) and
+  keep the returned `session_id`.
+- `terminal_write` — send one DSL line at a time to that session
+  (`TEXT`, `ENTER`, `SNAPSHOT`, `EXPECT ...`, `SELECT <label>`, …) —
+  same vocabulary as a `--script` file, one step per call.
+- `terminal_read` — pull the accumulated `OK|ERR` / `CURSOR` / `SCREEN`
+  reply and decide the next step from the actual rendered screen,
+  instead of a remembered or assumed item order.
+- `terminal_close` — call this once the exploration is done, every
+  time. An unclosed session leaks the child process; `session_list`
+  can audit for ones you forgot.
+
+Treat the resulting MCP-driven walkthrough as throwaway reconnaissance,
+not the recorded evidence: once you've confirmed the real item
+list/order from the screen, write (or fix) the final `trec drive
+--script <file>` run per §4/§5 and record *that* as the evidence cast.
+If `trec`'s MCP server isn't already connected in this session (check
+via `ToolSearch` for `mcp__trec__*`), register it (e.g. `claude mcp add
+trec -- trec mcp`) rather than approximating a persistent PTY with
+repeated one-shot `Bash` calls — those cannot share process state
+between calls no matter how they're sequenced.
+
 ---
 
 ## 5. Choose the deploy strategy: one-shot vs per-component
@@ -291,6 +375,11 @@ runbook using `verified-runbook`'s rules (real output only, no
 - **Stale `pilot` binary**: a `pilot` binary at a fixed path
   (`$(which pilot)` may be a symlink into the repo) can predate a
   feature added to source — rebuild before trusting wizard menu shape.
+- **Leaked `trec mcp` sessions**: forgetting `terminal_close` after an
+  §4a exploration leaves the wizard's child process (and, if it got as
+  far as a save/apply step, potentially unflushed state) running
+  unattended. Call `session_list` before ending a task that used MCP
+  mode to check for anything you forgot to close.
 - **Ansible fact-cache poisoning across VM rebuilds**: if
   `ansible.cfg` has `fact_caching = jsonfile` keyed by
   `inventory_hostname`, and a preflight/check play runs any module
@@ -336,3 +425,11 @@ runbook using `verified-runbook`'s rules (real output only, no
 - The sibling `vm-target-spec-testing` skill (this repo) — use it when
   the task is testing a *single* spec/playbook pair on disposable VMs,
   rather than re-verifying an existing multi-component runbook.
+- The sibling `trec-mcp` skill (global) — the full `trec mcp` tool
+  contract (`run`/`terminal_start`/`terminal_write`/`terminal_read`/
+  `terminal_close`/`session_list`) referenced by §4a.
+- The sibling `trec-tui-drive` skill (global) — the current `trec
+  drive` DSL reference (`SELECT`/`EXPECT`/`ASSERT`/`WAIT_CHILD_EXIT`/
+  `ASSERT_EXIT`/…) and its own reliability rules; read it alongside
+  this skill's §4/§4a stale-pointer note rather than trusting either
+  one alone.

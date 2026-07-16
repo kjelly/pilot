@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
@@ -28,6 +29,7 @@ import (
 )
 
 var deployInventoryFlag string
+var deployTimeoutFlag string
 
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
@@ -43,6 +45,7 @@ gate、同一份 Playbook 對照表)——熟悉 Ansible 的人仍可以照 DELI
 
 func init() {
 	deployCmd.Flags().StringVarP(&deployInventoryFlag, "inventory", "i", "inventory.yml", "預先填入的 inventory 路徑(精靈仍會再問一次，可直接按 Enter 採用)")
+	deployCmd.Flags().StringVar(&deployTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限，Go duration 格式(例如 45m、1h30m)；跑得比這個久會被強制中止")
 	rootCmd.AddCommand(deployCmd)
 }
 
@@ -58,7 +61,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pilot deploy 需要互動式終端機(TTY)才能問問題；非互動場景請直接用 ansible-playbook（見 DELIVERY.md）")
 	}
 
+	timeout, err := parseDeployTimeout(deployTimeoutFlag)
+	if err != nil {
+		return err
+	}
+
 	runner := ansible.NewRunner()
+	runner.Timeout = timeout
 	runner.StdoutWriter = out
 	runner.StderrWriter = cmd.ErrOrStderr()
 
@@ -98,6 +107,26 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		err = runSinglePlaybookDeploy(cmd.Context(), runner, out, inv)
 	}
 	return abortOrErr(err)
+}
+
+// parseDeployTimeout validates the --timeout flag value used as
+// ansible.Runner's per-invocation (preflight/preview/apply, each
+// timed independently) wall-clock ceiling. ansible.NewRunner defaults
+// this to 30 minutes with no override anywhere in the call chain
+// (see internal/ansible/runner.go) — a real apply that runs longer
+// than that on a slower host or heavier topology gets silently
+// SIGKILLed mid-run with no warning. This flag lets a caller raise
+// (or lower) it instead of falling back to a manual ansible-playbook
+// invocation outside pilot deploy.
+func parseDeployTimeout(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("--timeout 不是合法的 duration(例如 45m、1h30m)：%q: %w", s, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("--timeout 必須是正數：%q", s)
+	}
+	return d, nil
 }
 
 // abortOrErr swallows errDeployAborted (and errors wrapping it) so a

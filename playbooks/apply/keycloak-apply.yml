@@ -108,14 +108,22 @@
       ansible.builtin.command: docker network inspect pilot-infra
       register: pilot_infra_pre
       changed_when: false
-      failed_when: pilot_infra_pre.rc != 0
+      # See wazuh-manager-apply.yml's docker preflight for why rc!=0 must
+      # not fail the mandatory check-mode gate on a from-scratch host (the
+      # network is created by keycloak-db-apply.yml's own container run,
+      # which is itself deferred to the real apply under check mode).
+      failed_when: pilot_infra_pre.rc != 0 and not ansible_check_mode
       check_mode: false
 
+    # docker_image/docker_container need a live daemon to compute their diff
+    # even under --check; deferred to the real apply on a from-scratch host,
+    # same convention as wazuh-manager-apply.yml.
     - name: "Keycloak — pull quay.io/keycloak/keycloak:{{ kc_version }} image"
       tags: [keycloak]
       community.docker.docker_image:
         name: "quay.io/keycloak/keycloak:{{ kc_version }}"
         source: pull
+      when: not ansible_check_mode
 
     # Spec: docs/verification/keycloak.md C7, C8, C9
     # Keycloak runs as root (uid=0) inside the container because the
@@ -163,6 +171,7 @@
           timeout: 5s
           retries: 12
           start_period: 60s
+      when: not ansible_check_mode
 
     # Spec: docs/verification/keycloak.md C8
     # Poll the container-internal 8080 (network namespace share via
@@ -177,5 +186,6 @@
       until: "'OK' in kc_health.stdout"
       retries: 60
       delay: 5
+      when: not ansible_check_mode
       changed_when: false
 

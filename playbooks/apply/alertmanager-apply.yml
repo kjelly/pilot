@@ -99,7 +99,14 @@
           string, e.g. via -e @~/.vault/alertmanager-config.yaml).
 
   tasks:
-    - block:
+    # docker_container needs a live daemon to compute its diff even under
+    # --check; on a from-scratch host where core-infra-provider-apply.yml's
+    # docker install itself was deferred to the real apply, the daemon
+    # doesn't exist yet, so this whole block (config render through
+    # container run + readiness wait) is deferred too — same convention as
+    # wazuh-manager-apply.yml's docker-dependent build block.
+    - when: not ansible_check_mode
+      block:
         - name: "Ensure config + data dirs exist"
           ansible.builtin.file:
             path: "{{ item }}"

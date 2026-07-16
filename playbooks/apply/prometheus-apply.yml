@@ -182,7 +182,14 @@
         state: present
       when: alertmanager_target_host | default('', true) | length > 0
 
-    - block:
+    # docker_container/docker_container_exec need a live daemon (and, for
+    # the nested Thanos S3 bucket step, a real pilot-seaweedfs container) to
+    # compute their diff even under --check; deferred to the real apply on a
+    # from-scratch host, same convention as wazuh-manager-apply.yml. A
+    # block's `when` applies to every task at every nesting level, so this
+    # also covers the nested "Ensure Thanos S3 bucket exists" block below.
+    - when: not ansible_check_mode
+      block:
         # prom/prometheus's official image runs as the "nobody" user
         # (uid/gid 65534), not root — the bind-mounted data dir must be
         # owned by that uid or Prometheus fails to write its TSDB at

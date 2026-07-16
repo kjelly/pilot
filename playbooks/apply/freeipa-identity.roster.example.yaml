@@ -41,6 +41,11 @@ ipa_users:
     first: Alice
     last: Wang
     password: "CHANGE-ME-alice-initial"   # initial password; user resets on first login
+    # force_password defaults to false — a `password:` is only actually
+    # applied when force_password: true is ALSO set (first-time onboard, or
+    # a deliberate reset). Drop this line after alice has her own password
+    # so future reruns don't reset it back to a forced-change state.
+    force_password: true
     groups: [developers, sysops]
     # SSH public keys are DECLARATIVE: the list here is the complete set of keys
     # on the account. Drop a key from this list + rerun to revoke it. Enrolled
@@ -53,6 +58,7 @@ ipa_users:
     first: Bob
     last: Lee
     password: "CHANGE-ME-bob-initial"
+    force_password: true   # same first-time-onboard reasoning as alice above
     groups: [developers]
   - name: carol
     first: Carol
@@ -60,7 +66,6 @@ ipa_users:
     # No password key => account created without a password set here
     # (e.g. you'll set an OTP/enrollment token out-of-band).
     groups: [sysops]
-    # Set force_password: false to leave an existing password untouched on rerun.
     # Key-ONLY account: no password key above, only SSH keys => passwordless,
     # key-based login exactly as in the FreeIPA SSH key-management workshop.
     ssh_keys:
@@ -87,7 +92,15 @@ ipa_sudo_rules:
     hostgroups: [webhosts]
     allow_commands:
       - /usr/bin/systemctl
-    groups: [developers]
+
+  # FULL ADMIN: sysops may run ANY command, same "cat"-suffixed convention
+  # as hostcat. Omit `allow_commands:` and give `cmdcat: all` (or omit both
+  # — a rule with neither defaults to cmdcat=all too, exactly like hostcat)
+  # instead of listing individual commands.
+  - name: devops-sudo
+    hostcat: all
+    cmdcat: all
+    groups: [sysops, developers]
 
 # ── Per-host access control ───────────────────────────────────────────────
 # Two things are needed to make "not everyone can touch every host" real:
@@ -115,9 +128,21 @@ ipa_hbac_rules:
     groups: [developers]
 
   # sysops may SSH into every host (hostcat defaults to 'all' since no
-  # hosts/hostgroups given)
+  # hosts/hostgroups given). IMPORTANT: `services` must ALSO list `sudo`
+  # (and `sudo-i` if anyone uses `sudo -i`) once `ipa_hbac_disable_allow_all`
+  # is set — SSSD's `access_provider = ipa` runs a fresh HBAC check for
+  # EVERY PAM service, not just the login one. `allow_all` (or
+  # `allow_systemd-user`, which also lists `sshd`) used to mask this: with
+  # either default rule active, `sudo`'s own PAM account phase quietly rode
+  # on that blanket grant. Once you disable `allow_all` for real hardening,
+  # a rule that only lists `sshd` still lets the user log in, but every
+  # `sudo` invocation on that host fails with `sudo: PAM account management
+  # error: Permission denied` even though `ipa sudorule-show` and
+  # `ipa hbactest --service=sshd` both look correct — confirmed live,
+  # 2026-07-16: `ipa hbactest --service=sudo` for the same user/host
+  # returned `Access granted: False` until `sudo`/`sudo-i` were added here.
   - name: sysops-login-all
-    services: [sshd]
+    services: [sshd, sudo, sudo-i]
     groups: [sysops]
 
 # Set true only once ipa_hbac_rules above cover all the login paths you

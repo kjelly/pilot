@@ -9,3 +9,53 @@
       ansible.builtin.command: "/usr/bin/docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'pilot-postgres' | head -n1"
       become: true
       changed_when: false
+      tags: [C1]
+    - name: "C2 — postgres container image 是 `postgres:16`（或 `pg_versio…"
+      ansible.builtin.command: "/usr/bin/docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'postgres:[0-9]+' | head -n1"
+      become: true
+      changed_when: false
+      tags: [C2]
+    - name: "C3 — 5432/tcp 在 host 上 LISTEN（container port mapping `127.…"
+      ansible.builtin.command: "ss -tulnH | grep \":5432 \" | grep -vE \"127\\.0\\.0\\.(1|53|54)\" | head -n1"
+      become: true
+      changed_when: false
+      tags: [C3]
+    - name: "C4 — `keycloak` database 已建立（在 container 內 query）"
+      ansible.builtin.command: "/usr/bin/docker exec pilot-postgres psql -U keycloak -d keycloak -tAc \"SELECT 1 FROM pg_database WHERE datname='keycloak'\" 2>/dev/null | head -n1"
+      become: true
+      changed_when: false
+      tags: [C4]
+    - name: "C5 — `keycloak` role 已建立（具備 LOGIN）"
+      ansible.builtin.command: "/usr/bin/docker exec pilot-postgres psql -U keycloak -tAc \"SELECT 1 FROM pg_roles WHERE rolname='keycloak' AND rolcanlogin\" 2>/dev/null | head -n1"
+      become: true
+      changed_when: false
+      tags: [C5]
+    - name: "C6 — `keycloak` database 的 owner 是 `keycloak` role"
+      ansible.builtin.command: "/usr/bin/docker exec pilot-postgres psql -U keycloak -tAc \"SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname='keycloak'\" 2>/dev/null | head -n1"
+      become: true
+      changed_when: false
+      tags: [C6]
+    - name: "C7 — 用 `keycloak` role 從 host 透過 TCP 連 DB，能 SELECT…"
+      ansible.builtin.command: "PGPASSWORD=${KEYCLOAK_DB_PASSWORD} psql -h 127.0.0.1 -U keycloak -d keycloak -tAc \"SELECT 1\" 2>/dev/null; echo \"rc=$?\""
+      changed_when: false
+      tags: [C7]
+    - name: "C8 — host 的 `/var/lib/pilot/postgres` 有 bind-mount 到 conta…"
+      ansible.builtin.command: "/usr/bin/docker inspect pilot-postgres 2>/dev/null | grep -m1 -oE '/var/lib/pilot/postgres' | head -n1"
+      become: true
+      changed_when: false
+      tags: [C8]
+    - name: "C9 — postgres container healthcheck 為 `healthy`"
+      ansible.builtin.command: "/usr/bin/docker ps --no-trunc 2>/dev/null | grep -m1 -oE '\\(healthy\\)' | head -n1"
+      become: true
+      changed_when: false
+      tags: [C9]
+    - name: "C10 — `pg_isready` 回 `accepting connections`（host 上透過 `…"
+      ansible.builtin.command: "/usr/bin/docker exec pilot-postgres pg_isready -h 127.0.0.1 -p 5432 2>&1 | head -n1"
+      become: true
+      changed_when: false
+      tags: [C10]
+    - name: "C11 — DB size `< 10 GiB`（防 Keycloak 寫爆磁碟沒人發現\xef…"
+      ansible.builtin.command: "/usr/bin/docker exec pilot-postgres psql -U keycloak -tAc \"SELECT CASE WHEN pg_database_size(datname) < 10737418240::bigint THEN 0 ELSE 1 END FROM pg_database WHERE datname='keycloak'\" 2>/dev/null"
+      become: true
+      changed_when: false
+      tags: [C11]

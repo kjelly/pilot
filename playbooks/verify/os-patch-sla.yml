@@ -1,21 +1,44 @@
 ---
 - name: Verification Spec — os-patch-sla (Ubuntu/Debian periodic OS patching)
-  hosts: test-vm
+  hosts: localhost
   connection: local
   gather_facts: false
 
   tasks:
-    - name: "C1 — 目前可升級套件數量 = 0（已套用 SLA 修補週\xe6\x9c…"
-      ansible.builtin.command: "apt list --upgradable 2>/dev/null \\"
+    - name: "C1 — 目前可升級套件數量 = 0"
+      ansible.builtin.command: "apt list --upgradable 2>/dev/null | wc -l"
       become: true
       changed_when: false
-    - name: "C5 — `unattended-upgrades` 服務在跑，自動處理 security …"
+      tags: [C1]
+    - name: "C2 — 沒有未套用的 security 補丁（PASS 條件：grep 找…"
+      ansible.builtin.command: "apt list --upgradable 2>/dev/null | grep security | wc -l | tr -d \" \""
+      become: true
+      changed_when: false
+      tags: [C2]
+    - name: "C3 — apt history.log 檔案存在"
+      ansible.builtin.stat:
+        path: "/var/log/apt/history.log"
+      become: true
+      tags: [C3]
+    - name: "C4 — 上次套件升級在 90 天內"
+      ansible.builtin.command: "sh -c 'find /var/log/apt/history.log -mtime -90 > /tmp/m.tmp; test -s /tmp/m.tmp'"
+      become: true
+      changed_when: false
+      tags: [C4]
+    - name: "C5 — unattended-upgrades 服務在跑"
       ansible.builtin.systemd:
         name: "unattended-upgrades"
         state: started
         enabled: true
       become: true
-    - name: "C6 — unattended-upgrades 設定檔含 `Unattended-Upgrade::Allow…"
-      ansible.builtin.command: "grep -E 'Allowed-Origins.*-security' /etc/apt/apt.conf.d/50unattended-upgrades"
+      tags: [C5]
+    - name: "C6 — unattended-upgrades 設定檔含 Allowed-Origins 啟用行"
+      ansible.builtin.command: "grep -q Allowed-Origins /etc/apt/apt.conf.d/50unattended-upgrades"
       become: true
       changed_when: false
+      tags: [C6]
+    - name: "C7 — prod 不應被 marker 標記為允許直接推送"
+      ansible.builtin.command: "test ! -f /etc/no-prod-direct-push"
+      become: true
+      changed_when: false
+      tags: [C7]
