@@ -411,6 +411,19 @@ runbook using `verified-runbook`'s rules (real output only, no
   built — a prior approval for this class of action does not carry
   over to a new session/rebuild. Expect to ask again via
   `AskUserQuestion`, scoped to the specific action.
+- **A local `ControlMaster`/`ControlPersist` SSH config silently reuses
+  an already-authenticated multiplexed connection** for a later "fresh"
+  `ssh`/`sshpass` call to the same `user@host` — this can mask a real
+  auth-layer change (password rotation, a forced-password-change state,
+  an HBAC/sudo deny) with a stale "it still works" result, since the new
+  invocation never actually re-authenticates. Confirmed live,
+  2026-07-16: an account genuinely in FreeIPA's "must change" state
+  still let a second `sshpass` call straight through with no error,
+  purely by reusing the first call's multiplexed session; adding
+  `-o ControlMaster=no` (or running `ssh -O exit <user>@<host>` first)
+  correctly surfaced the real block on the next attempt. Always add
+  `-o ControlMaster=no` to any live-SSH re-auth check meant to prove a
+  credential/policy state actually changed.
 
 ---
 

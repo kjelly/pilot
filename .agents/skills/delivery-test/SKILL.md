@@ -278,12 +278,14 @@ stale SSSD cache) and a `hbactest`-only check can miss a real SSSD/PAM
 misconfiguration:
 
 ```bash
-# Live: allowed sudo command
-ssh alice@<web-2-ip> "echo '<password>' | sudo -S systemctl is-active ssh"
+# Live: allowed sudo command (-o ControlMaster=no — see note below)
+sshpass -p '<password>' ssh -o ControlMaster=no -o PreferredAuthentications=password alice@<web-2-ip> \
+  "echo '<password>' | sudo -S systemctl is-active ssh"
 # Live: denied sudo command
-ssh alice@<web-2-ip> "echo '<password>' | sudo -S cat /etc/shadow"
+sshpass -p '<password>' ssh -o ControlMaster=no -o PreferredAuthentications=password alice@<web-2-ip> \
+  "echo '<password>' | sudo -S cat /etc/shadow"
 # Live: login denied entirely for an out-of-policy user
-ssh -o PreferredAuthentications=password bob@<web-2-ip> 'echo should-not-reach-here'
+ssh -o ControlMaster=no -o PreferredAuthentications=password bob@<web-2-ip> 'echo should-not-reach-here'
 
 # FreeIPA's own authoritative check (run on ipa-1, after kinit admin)
 ipa hbactest --user=alice --host=<web-2-fqdn> --service=sshd   # Access granted: True
@@ -294,6 +296,63 @@ Both layers must agree: `hbactest`'s verdict for alice/bob should match what
 the live SSH/sudo test actually did. A mismatch means either the HBAC/sudo
 rule data is wrong (fix in `.vault/ipa-identity.yaml`) or the client's own
 SSSD/PAM config isn't honoring FreeIPA's policy (see Troubleshooting).
+
+**Always pass `-o ControlMaster=no`** (or `ssh -O exit <host>` any stale
+control socket first) for these two commands specifically. If your local
+`~/.ssh/config` has `ControlMaster auto`/`ControlPersist` (common), a
+"fresh" `sshpass ssh ...` call silently reuses whatever connection was
+already authenticated and multiplexed for that `user@host` — including one
+from an earlier, unrelated test run — which can mask a real auth-layer
+change (a password rotation, an account entering FreeIPA's forced-change
+state, an HBAC deny) with a stale "it still works" result. Confirmed live,
+2026-07-16: a second `sshpass` call to an account genuinely in the
+"password expired, must change now" state (see the `alice` allow/deny
+procedure below) returned a clean login with no error, purely because it
+reused the first call's multiplexed session — `-o ControlMaster=no` on a
+third, truly independent attempt correctly surfaced `Password change
+required but no TTY available`.
+
+**If `alice`'s account is in FreeIPA's "must change" state** (right after
+an admin `ipa passwd` reset — either a first-time onboard with
+`force_password: true`, or a genuine out-of-band reset done directly on
+the FreeIPA server, outside the roster/reconciler — see Real bug #14 in
+`docs/runbooks/minimal-poc-architecture.md`), the two `sshpass` commands
+above fail outright (no TTY available for the forced password-change
+prompt). Personalize the password first with a scripted `kinit` — this is
+the FreeIPA-native way to consume the forced-change flow, is fully
+`trec`-scriptable (secrets redacted via `--secret-env`), and needs no code
+change:
+
+```
+# trec drive script (kinit's forced-change flow is always exactly 3 lines)
+EXPECT Password for alice@<REALM>
+TEXT_ENV ALICE_TEMP_PW
+ENTER
+EXPECT Password expired
+EXPECT Enter new password
+TEXT_ENV ALICE_NEW_PW
+ENTER
+EXPECT Enter it again
+TEXT_ENV ALICE_NEW_PW
+ENTER
+WAIT_CHILD_EXIT
+ASSERT_EXIT 0
+```
+```bash
+trec drive --script kinit-alice.txt --secret-env ALICE_TEMP_PW --secret-env ALICE_NEW_PW \
+  -o kinit-alice.cast -- ssh -t -o StrictHostKeyChecking=accept-new -i <client-vm-key> root@<web-2-ip> kinit alice
+```
+
+Once this completes, `ipa user-show alice --all --raw`'s
+`krbLastPwdChange`/`krbPasswordExpiration` diverge (proving the change was
+genuinely personalized, not another admin reset) and the two `sshpass`
+commands above work normally with the new password — no TTY/forced-change
+handling needed for them. Note the roster's own `password:`/
+`force_password:` fields no longer match live reality after this — either
+leave `force_password: false` (so a future redeploy doesn't re-clobber the
+personalized password, see §4.6) or update `password:` to match, purely
+for the roster's own record-keeping (the playbook itself won't re-apply it
+either way once `force_password` is false).
 
 ### 4.2 Metric chain: Grafana -> Thanos Query -> Prometheus
 
@@ -418,6 +477,8 @@ VM you didn't create or that the user didn't explicitly name for deletion.
 | `prometheus-apply.yml` fails with `prometheus_site_label is required` even after setting it in `group_vars/prometheus.yml` (should no longer occur — see §3.2) | On an older checkout: `prometheus_site_label`/`thanos_s3_target_host`/`thanos_query_target_host` were declared as play-level `vars:` with a hardcoded `""`, which outranks group_vars/host_vars, silently shadowing what you set | Fixed at the source (see §3.2) — upgrade the checkout. If stuck on an old one, pass it as `-e prometheus_site_label=...` instead as a one-off workaround |
 | Thanos Query container fails to start: `Bind for 0.0.0.0:10902 failed: port is already allocated` (should no longer occur by default — see §3.2) | Prometheus's own Thanos sidecar hardcodes host port 10902; the central Thanos Query used to default its own host-published HTTP port to the same 10902, colliding whenever the two are co-located on one host (e.g. `web-1` in this scenario's own role table) | Fixed at the source: `thanos-query-apply.yml`'s `thanos_query_http_port` (and `dashboard-apply.yml`'s matching `thanos_query_port`) now default to **10912**, not 10902 — no override needed for this topology. Only pass `-e thanos_query_http_port=... -e thanos_query_port=...` if you need some other port scheme |
 | FreeIPA sudo test fails with `user does not exist` | Wrong shell used to run `sudo runuser` | Use `bash -c "sudo runuser -u <user> -- sudo -n id"` |
+| §4.1 live-SSH allow/deny test for `alice` fails with `Password change required but no TTY available` (or the login just hangs) | Her account is in FreeIPA's "must change" state — a first-time onboard with `force_password: true`, or a genuine out-of-band `ipa passwd` reset done directly on the server, outside the roster/reconciler | Confirmed live, 2026-07-16: personalize the password with a scripted `kinit` (3-line forced-change flow — old password / new password / retype), fully `trec`-scriptable with `TEXT_ENV`/`--secret-env`. See the worked example above §4.1's live-SSH commands. A routine roster-driven `freeipa-identity` redeploy no longer reproduces this on its own (v4.8's Phase 0 password self-change protection correctly declines to re-reset an already-personalized password) — this only bites first-time onboarding or a genuinely out-of-band reset |
+| §4.1 live-SSH test "passes" (or "fails" the deny case) in a way that contradicts `ipa hbactest`'s verdict, right after a password/HBAC/sudo-rule change | A local `ControlMaster auto`/`ControlPersist` SSH config (common) silently reused an already-authenticated multiplexed connection from an earlier test instead of actually re-authenticating | Always add `-o ControlMaster=no` to these specific commands (or `ssh -O exit <host>` first) — confirmed live, 2026-07-16, that a stale multiplexed session hid a genuine "password expired" block |
 | FreeIPA sudo test says `not allowed` when `hbactest` says `Access granted: True` | Client sudo policy cache or SSSD sudo provider did not converge | Confirm `/etc/nsswitch.conf` has `sudoers: files sss`, `/etc/sssd/sssd.conf` has `services = nss, pam, ssh, sudo` and `sudo_provider = ipa`, then `sss_cache -E` / restart SSSD |
 | `sudo -S <cmd>` fails with `sudo: PAM account management error: Permission denied` for a user whose SSH login and `ipa hbactest --service=sshd` both succeed, once `ipa_hbac_disable_allow_all: true` is set | SSSD's `access_provider = ipa` HBAC-checks every PAM service separately, not just login — `allow_all`/`allow_systemd-user` (both list `sshd` and used to mask this) no longer cover `sudo`'s own PAM account phase once disabled, and an HBAC rule with only `services: [sshd]` never granted it either. Confirmed live 2026-07-16: `ipa hbactest --service=sudo` for the same user/host returned `Access granted: False` | Add `sudo` (and `sudo-i` if `sudo -i` is used) to the HBAC rule's `services:` list, redeploy `freeipa-identity`, `sss_cache -E && systemctl restart sssd` on the client — see `docs/runbooks/freeipa-identity.md` §5.2.2 for the full writeup and `playbooks/apply/freeipa-identity.roster.example.yaml`'s updated example |
 | `freeipa-server-apply.yml` fails with `Source /etc/systemd/resolved.conf not found` | `dns`/`ntp` roles (Debian/Ubuntu-only) were assigned to the AlmaLinux FreeIPA host instead of using its native flags | Remove `dns`/`ntp` from that host's role list; use `freeipa_setup_dns=true freeipa_setup_ntp=true` instead (§3.3) |
