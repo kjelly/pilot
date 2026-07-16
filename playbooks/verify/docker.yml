@@ -9,9 +9,41 @@
       ansible.builtin.command: "dpkg-query -W -f='${Package}\\n' docker.io 2>/dev/null | awk \"/^docker\\\\.io$/ {f=1} END{print f+0}\""
       become: true
       changed_when: false
+      tags: [C1]
     - name: "C2 — docker 服務 active（systemd unit 為 `docker.service`）"
       ansible.builtin.systemd:
         name: "docker 2>&1 | head -n1"
         state: started
         enabled: true
       become: true
+      tags: [C2]
+    - name: "C3 — `docker --version` 印出 `Docker version ...` 字串"
+      ansible.builtin.command: "docker --version 2>&1 | head -n1"
+      become: true
+      changed_when: false
+      tags: [C3]
+    - name: "C4 — `/var/run/docker.sock` 存在且 group=docker"
+      ansible.builtin.command: "stat -c '%a %U %G %n' /var/run/docker.sock 2>/dev/null | head -n1"
+      become: true
+      changed_when: false
+      tags: [C4]
+    - name: "C5 — `docker run --rm hello-world` 至少能跑完一次（證\xe6\x98…"
+      ansible.builtin.command: "docker run --rm hello-world 2>&1 | grep -m1 -oE 'Hello from Docker' | head -n1"
+      become: true
+      changed_when: false
+      tags: [C5]
+    - name: "C6 — `docker network ls` 至少包含預設三個（bridge / hos…"
+      ansible.builtin.command: "docker network ls 2>/dev/null | awk '$2 == \"bridge\" {print $2; exit}'"
+      become: true
+      changed_when: false
+      tags: [C6]
+    - name: "C7 — `docker compose version` 有印出來（v2 plugin；apt 裝…"
+      ansible.builtin.command: "docker compose version 2>&1 | head -n1"
+      become: true
+      changed_when: false
+      tags: [C7]
+    - name: "C8 — docker info 顯示 cgroup driver 為 systemd 或 cgroupfs\xef\xbc…"
+      ansible.builtin.command: "docker info 2>/dev/null | grep -m1 -E 'Cgroup (Driver|Version)' | head -n1"
+      become: true
+      changed_when: false
+      tags: [C8]

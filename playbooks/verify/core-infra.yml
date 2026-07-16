@@ -1,6 +1,6 @@
 ---
 - name: Verification Spec — core-infra (Internal DNS + Time Sync + Identity Provider)
-  hosts: test-vm
+  hosts: localhost
   connection: local
   gather_facts: false
 
@@ -9,18 +9,41 @@
       ansible.builtin.debug:
         msg: "Spec C1 needs custom monitoring task — see verify script"
       become: true
+      tags: [C1]
     - name: "C2 — `systemd-resolved` 服務在跑"
       ansible.builtin.systemd:
         name: "systemd-resolved"
         state: started
         enabled: true
       become: true
+      tags: [C2]
     - name: "C3 — 本機至少能解析 `infra.internal` 與 `keycloak.infra.…"
       ansible.builtin.command: "sh -c 'getent hosts infra.internal; getent hosts keycloak.infra.internal'"
       changed_when: false
+      tags: [C3]
     - name: "C4 — `systemd-timesyncd` 服務在跑"
       ansible.builtin.systemd:
         name: "systemd-timesyncd"
         state: started
         enabled: true
       become: true
+      tags: [C4]
+    - name: "C5 — NTP 同步有 source server 且 offset ≤ 100ms"
+      ansible.builtin.command: "sh -c 'timedatectl timesync-status 2>&1 \\| grep -E \"Server:|Offset:\"'"
+      changed_when: false
+      tags: [C5]
+    - name: "C6 — Keycloak OIDC discovery endpoint 可達，回 200 OK"
+      ansible.builtin.command: "sh -c 'curl -fsS -o /dev/null -w \"%{http_code}\" $KEYCLOAK_ISSUER/.well-known/openid-configuration'"
+      become: true
+      changed_when: false
+      tags: [C6]
+    - name: "C7 — Keycloak discovery JSON 含 `issuer` 欄位且值跟 `$KEYC…"
+      ansible.builtin.command: "sh -c 'curl -fsS $KEYCLOAK_ISSUER/.well-known/openid-configuration \\| grep -q \"\\\"issuer\\\": \\\"$KEYCLOAK_ISSUER\\\"\"'"
+      become: true
+      changed_when: false
+      tags: [C7]
+    - name: "C8 — realm `master` 為 `enabled=true`、`accessTokenLifespan` \xe2…"
+      ansible.builtin.command: "sh -c 'curl -fsS -H \"Authorization: Bearer $KEYCLOAK_TOKEN\" $KEYCLOAK_ISSUER/realms/master \\| grep -E \"\\\"enabled\\\": true\"'"
+      become: true
+      changed_when: false
+      tags: [C8]

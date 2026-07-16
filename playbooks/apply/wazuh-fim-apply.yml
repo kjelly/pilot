@@ -136,6 +136,12 @@
       register: wazuh_yum_repo
       when: ansible_os_family == 'RedHat'
 
+    # Steps 1-3 render the third-party Wazuh apt/yum repo but don't really
+    # write it to disk in check mode, so the package manager has no metadata
+    # for wazuh-agent yet and this task fails outright ("No package
+    # wazuh-agent available") rather than merely simulating the install.
+    # Deferred to the real apply, same pattern as seaweedfs-s3-apply.yml's
+    # C5/C6/C7 guards.
     - name: "Step 4: Install wazuh-agent + auditd (Debian apt; spec C1, C2)"
       tags: [C1, C2]
       ansible.builtin.apt:
@@ -145,7 +151,9 @@
       register: apt_wazuh_agent
       until: apt_wazuh_agent is succeeded
       retries: 2
-      when: ansible_os_family == 'Debian'
+      when:
+        - ansible_os_family == 'Debian'
+        - not ansible_check_mode
 
     - name: "Step 4: Install wazuh-agent + auditd (RedHat yum; spec C1, C2)"
       tags: [C1, C2]
@@ -156,9 +164,16 @@
       register: dnf_wazuh_agent
       until: dnf_wazuh_agent is succeeded
       retries: 2
-      when: ansible_os_family == 'RedHat'
+      when:
+        - ansible_os_family == 'RedHat'
+        - not ansible_check_mode
 
-    - block:
+    # Steps 5-11 configure/enroll/start the agent installed above; none of
+    # that state exists on a fresh host when Step 4 was skipped in check
+    # mode, so the whole block is deferred to the real apply too (same
+    # convention as freeipa-server-apply.yml's post-install bring-up block).
+    - when: not ansible_check_mode
+      block:
         - name: "Step 5: Append FIM whodata syscheck block to ossec.conf (spec C5, C6)"
           tags: [C5, C6]
           ansible.builtin.blockinfile:

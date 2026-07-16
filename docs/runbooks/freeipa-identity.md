@@ -74,7 +74,8 @@ ipa_users:
     first: Alice
     last: Wang
     password: "initial-pw"          # 初始密碼；可省略（改用 OTP 帶外設定）
-    groups: [developers]            # 省略 force_password: false 可保留既有密碼不覆寫
+    force_password: true            # 預設 false；首次 onboard 或刻意重設才要加這行
+    groups: [developers]
     ssh_keys:                       # 選填；宣告式（見 §5.1）。密碼＋金鑰可並存
       - "ssh-ed25519 AAAA... alice@laptop"
   - name: carol                     # 純金鑰、無密碼帳號（省略 password:）
@@ -92,6 +93,10 @@ ipa_sudo_rules:
     hostgroups: [webhosts]
     allow_commands: [/usr/bin/systemctl]
     groups: [developers]
+  - name: devops-sudo               # 全指令：省略 allow_commands，改用 cmdcat: all
+    hostcat: all
+    cmdcat: all
+    groups: [sysops]
 
 ipa_hostgroups:
   - name: webhosts
@@ -172,9 +177,13 @@ ansible-playbook -i inventory-freeipa.yaml \
 `failed_when` 對齊 `freeipa-server-apply.yml`）。重跑同一份名冊 → `PLAY RECAP`
 的 `changed=0`。
 
-例外：**密碼是無條件設定**的（IPA 沒有可 diff 的 read-back），所以帶 `password:`
-的 user 每次都會 `changed`。若要保留使用者自己改過的密碼、重跑時不覆寫，在該 user
-設 `force_password: false`。
+例外：**密碼是設定就無條件套用**的（IPA 沒有可 diff 的 read-back），且 `ipa
+passwd` 是 admin reset，不管密碼值有沒有變都會把帳號重新標成「下次登入強制改密
+碼」。所以 `force_password` 預設 **false**：帶 `password:` 的 user 只有同時明講
+`force_password: true` 時，這次 apply 才會真的執行 `ipa passwd`（並因此
+`changed`）。首次幫某個 user 設密碼（onboard）或要刻意重設時才加這行；一旦
+onboard 完成，把這行拿掉（或設 `false`），之後重跑同一份名冊就不會再動到他的密
+碼／forced-change 狀態。
 
 ---
 
@@ -217,7 +226,7 @@ pilot vm-target run --name alma-vm \
 | 層 | 管什麼 | 預設行為（不設規則時） |
 |----|--------|----|
 | **HBAC**（`ipa_hbac_rules`） | 能不能**登入**某台主機（SSH/PAM） | IPA 內建 `allow_all` 規則放行**所有已 enroll 使用者登入所有已 enroll 主機** |
-| **sudo**（`ipa_sudo_rules`） | 登入後**能執行什麼** | 每條 rule 若沒給 `hosts:`/`hostgroups:`，預設 `hostcat: all`（套用到所有主機） |
+| **sudo**（`ipa_sudo_rules`） | 登入後**能執行什麼** | 每條 rule 若沒給 `hosts:`/`hostgroups:`，預設 `hostcat: all`（套用到所有主機）；同理，沒給 `allow_commands:` 時預設 `cmdcat: all`（套用到所有指令） |
 
 也就是說：只把 sudo rule 改成 host-scoped 是不夠的——沒關掉 `allow_all`，任何
 enrolled 帳號還是能直接 SSH 到不該碰的主機（雖然到了那台可能沒有 sudo 權限，
@@ -266,6 +275,20 @@ ipa_hbac_rules:
   > 測試沒問題，**最後一步**才把 `ipa_hbac_disable_allow_all` 設 `true` 套用，
   > 避免中途把自己鎖在門外。
 
+  > **`services:` 只給 `sshd` 是不夠的，一旦真的關掉 `allow_all`。** SSSD 的
+  > `access_provider = ipa` 對**每一個** PAM service 都各自做一次 HBAC 檢查，
+  > 不是只在登入時檢查一次。內建的 `allow_all`（以及 `allow_systemd-user`，
+  > 它自己的 `HBAC Services` 也含 `sshd`）平常會順便涵蓋 `sudo` 這個 PAM
+  > service，讓人誤以為「登入規則對了、sudo 就會對」。實際關掉 `allow_all`
+  > 後，只列 `services: [sshd]` 的規則仍然讓使用者登入成功，但主機上任何
+  > `sudo` 呼叫都會失敗：`sudo: PAM account management error: Permission
+  > denied`，即使 `ipa sudorule-show`/`ipa hbactest --service=sshd` 都顯示
+  > 正常（2026-07-16 全新 3-VM 環境實測重現；`ipa hbactest --service=sudo`
+  > 對同一個使用者/主機回報 `Access granted: False`，加上 `sudo`/`sudo-i`
+  > 到 `services:` 後才變成 `True`，即時生效不需要重開機）。**只要規則需要
+  > 讓使用者在該主機上執行 `sudo`，就把 `sudo`（用 `sudo -i` 就再加
+  > `sudo-i`）一起列進 `services:`**，不要只靠 `sshd`。
+
 ### 5.2.3 控制主機上的權限：host-scoped `ipa_sudo_rules`
 
 ```yaml
@@ -288,7 +311,7 @@ ipa_sudo_rules:
 # 在 server 上（或透過 vm-target exec）
 kinit admin
 ipa user-find --all | grep -E 'User login|Member of groups'
-ipa sudorule-show sysops-systemctl
+ipa sudorule-show sysops-systemctl --all   # --all 才會列出 Command/Host/RunAs category
 # 確認金鑰已寫進帳號（SSH public key: / fingerprint 應列出）
 ipa user-show alice --all | grep -iE 'sshpub|fingerprint'
 kdestroy
@@ -299,6 +322,22 @@ kdestroy
 ```bash
 sss_ssh_authorizedkeys alice     # 應印出 alice 的公鑰行
 ssh alice@<enrolled-host>        # 無需該主機上有 authorized_keys 即可登入
+```
+
+**手動在 server 上下 `ipa` 指令一定要先 `kinit admin`**——任何 `ipa` CLI 呼叫都需要一個
+有權限的 Kerberos ticket；沒有 ticket 會報 `did not receive Kerberos credentials`，
+有 ticket 但權限不夠（例如剛好還留著一般使用者的 ticket）會報
+`Insufficient access: Insufficient 'add' privilege ...`——這是 FreeIPA RBAC 本身的
+正常行為，不是 playbook 的 bug（apply playbook 自己開頭就有一個 `Kinit admin` task，
+同一次 play 內所有後續 `ipa` 指令都用這個 ticket，不受影響）。
+
+**改完 sudo rule 的屬性（host/cmd/runas category、attach 的 host/command/使用者）後，
+已經 enroll 過的 client 不會馬上反映**——SSSD 的 sudo provider 有自己的快取
+TTL，即使 server 端 LDAP 已經是新值，client 上跑 `sudo` 可能還是照舊規則判斷，
+在快取過期前一直看到（錯誤的）結果。要立刻驗證，在該 client 上執行：
+
+```bash
+sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server 拉 sudo 規則
 ```
 
 ---

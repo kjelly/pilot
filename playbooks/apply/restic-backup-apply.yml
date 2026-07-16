@@ -166,12 +166,18 @@
         state: present
       when: ansible_os_family == 'RedHat'
 
+    # The EPEL install above only simulates adding the repo in check mode,
+    # so dnf has no metadata for restic yet ("No package restic available")
+    # rather than merely simulating the install. Deferred to the real apply,
+    # same pattern as wazuh-fim-apply.yml's check-mode guard.
     - name: "Step 1: Install restic (EL dnf via EPEL)"
       tags: [C1]
       ansible.builtin.dnf:
         name: restic
         state: present
-      when: ansible_os_family == 'RedHat'
+      when:
+        - ansible_os_family == 'RedHat'
+        - not ansible_check_mode
 
     - name: "Step 2: Pin S3 destination alias in /etc/hosts (spec C10)"
       tags: [C10]
@@ -192,10 +198,16 @@
     # whether or not seaweedfs-s3 is colocated with this restic-backup host.
     # Only runs against the self-hosted default destination — an externally
     # overridden restic_repository has no SeaweedFS container to delegate to.
+    # docker_container_exec is forced to run for real under --check (below)
+    # to avoid the missing-.stdout crash noted there, but that only works
+    # when pilot-seaweedfs is a real running container — on a from-scratch
+    # host where seaweedfs-s3-apply.yml's own container run was deferred to
+    # the real apply, it isn't yet, so this whole step is deferred too.
     - name: "Step 2b: Ensure destination bucket exists on the SeaweedFS host (idempotent)"  # noqa run-once[task]
       when: >-
         restic_s3_alias in restic_repository
         and (groups.get('seaweedfs-s3', []) | length > 0)
+        and not ansible_check_mode
       run_once: true
       # Use the current host as a valid delegate even when the optional group
       # is absent; the block-level `when` then skips the bucket probe cleanly.
@@ -328,12 +340,17 @@
             daemon_reload: true
           when: restic_service_unit_result is changed or restic_timer_unit_result is changed
 
+        # Steps 6/7's copy tasks only simulate writing the unit files under
+        # check mode, so they don't really exist yet on a from-scratch host;
+        # deferred to the real apply, same pattern as
+        # audit-log-forwarding-apply.yml's auditd systemd guard.
         - name: "Step 9: Ensure restic-backup.timer enabled+started (spec C8, C9)"
           tags: [C8, C9]
           ansible.builtin.systemd:
             name: restic-backup.timer
             state: started
             enabled: true
+          when: not ansible_check_mode
 
         # timeout bounds the same non-fast-fail-on-missing-bucket behavior
         # described in Step 5's script comment — without it this task can
@@ -362,6 +379,7 @@
           changed_when: "'created restic repository' in (restic_repository_init_result.stdout + restic_repository_init_result.stderr)"
           run_once: true
           delegate_to: "{{ ansible_play_hosts_all | first }}"
+          when: not ansible_check_mode
 
         # restic-backup.service is Type=oneshot: `systemctl start` blocks
         # until it finishes, so this task IS the "run one backup now" step —
@@ -376,11 +394,13 @@
             name: restic-backup.service
             state: started
           throttle: 1
-          when: >-
-            restic_existing_snapshots.rc != 0
-            or '"short_id"' not in restic_existing_snapshots.stdout
-            or restic_env_result is changed
-            or restic_script_result is changed
+          when:
+            - not ansible_check_mode
+            - >-
+                restic_existing_snapshots.rc != 0
+                or '"short_id"' not in restic_existing_snapshots.stdout
+                or restic_env_result is changed
+                or restic_script_result is changed
           register: restic_backup_run_result
 
       rescue:

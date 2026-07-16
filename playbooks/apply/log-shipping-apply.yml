@@ -100,12 +100,17 @@
 
   tasks:
     # Read-only `docker inspect` — safe to run even when no wazuh-manager
-    # container exists on this host (exists: false, container: none).
+    # container exists on this host (exists: false, container: none). It
+    # still needs a live daemon to connect to though, which doesn't exist
+    # yet on a from-scratch host under check mode (docker's own install is
+    # deferred to the real apply) — deferred here too, same convention as
+    # wazuh-manager-apply.yml.
     - name: "Detect a co-located wazuh-manager container (for real alerts-log path resolution)"
       community.docker.docker_container_info:
         name: "{{ siem_wazuh_manager_container }}"
       register: siem_wazuh_container_info
       changed_when: false
+      when: not ansible_check_mode
 
     - name: "Resolve effective siem_log_root (explicit > wazuh-manager's real alerts-log volume > log-server default)"
       ansible.builtin.set_fact:
@@ -116,10 +121,14 @@
       vars:
         siem_wazuh_logs_mount: >-
           {{ (siem_wazuh_container_info.container.Mounts | default([]))
-             | selectattr('Destination', 'equalto', '/var/ossec/logs') | list }}
+             | selectattr('Destination', 'equalto', '/var/ossec/logs') | list
+             if siem_wazuh_container_info is not skipped
+             else [] }}
         siem_log_root_wazuh_detected: >-
           {{ (siem_wazuh_logs_mount | map(attribute='Source') | first)
-             if (siem_wazuh_container_info.exists | default(false) and siem_wazuh_logs_mount | length > 0)
+             if (siem_wazuh_container_info is not skipped
+                 and siem_wazuh_container_info.exists | default(false)
+                 and siem_wazuh_logs_mount | length > 0)
              else '' }}
 
     - name: "Pin {{ loki_alias }} -> {{ loki_effective_target_host }} in /etc/hosts"
@@ -131,7 +140,11 @@
         state: present
       when: loki_effective_target_host | length > 0
 
-    - block:
+    # docker_container needs a live daemon to compute its diff even under
+    # --check; deferred to the real apply on a from-scratch host, same
+    # convention as wazuh-manager-apply.yml.
+    - when: not ansible_check_mode
+      block:
         - name: "Ensure config + positions dirs exist"
           ansible.builtin.file:
             path: "{{ item }}"

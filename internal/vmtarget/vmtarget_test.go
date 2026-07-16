@@ -66,6 +66,10 @@ func newTestManager(t *testing.T, virshBody string) (*Manager, string) {
 	m.bootTimeout = 300 * time.Millisecond
 	m.sshTimeout = 300 * time.Millisecond
 	m.pollInterval = 5 * time.Millisecond
+	// Deterministic by default: no real network I/O in tests. Tests that
+	// specifically exercise the reservedIP dial fallback (Real bug #12)
+	// override this explicitly.
+	m.dialReachable = func(ctx context.Context, addr string, timeout time.Duration) bool { return false }
 	return m, base
 }
 
@@ -450,11 +454,78 @@ esac`, countFile, mac)
 	m.pollInterval = 5 * time.Millisecond
 
 	tg := &Target{Name: "vm2", MAC: mac, Network: "default"}
-	if err := m.waitForIP(context.Background(), tg, nil, m.bootTimeout); err != nil {
+	if err := m.waitForIP(context.Background(), tg, nil, m.bootTimeout, ""); err != nil {
 		t.Fatalf("waitForIP: %v", err)
 	}
 	if tg.IP != "192.168.122.51" {
 		t.Errorf("vm2 IP = %q, want 192.168.122.51 (its own lease, not vm1's .50)", tg.IP)
+	}
+}
+
+// TestWaitForIP_FallsBackToReservedIPWhenReachable is the regression test
+// for Real bug #12 (docs/runbooks/minimal-poc-architecture.md): a
+// static-host DHCP reservation does not always produce a net-dhcp-leases
+// entry, and domifaddr's ARP-table source can lag too, so a VM that has
+// genuinely booted and is reachable could stall for the full bootTimeout
+// with both sources silent. waitForIP must accept the reservation's own
+// IP once independent reachability evidence (the dial) confirms it.
+func TestWaitForIP_FallsBackToReservedIPWhenReachable(t *testing.T) {
+	dir := t.TempDir()
+	mac := macFor("vm3")
+	// Both domifaddr and net-dhcp-leases stay silent for our MAC forever —
+	// simulating this exact environment's static-reservation gap.
+	body := `case "$1" in
+  domifaddr) exit 0 ;;
+  net-dhcp-leases) echo " Expiry Time  MAC address  Protocol  IP address  Hostname" ; exit 0 ;;
+  *) exit 0 ;;
+esac`
+	writeShim(t, dir, "virsh", "PILOT_VIRSH_BIN", body)
+
+	m, err := NewManager(filepath.Join(dir, "state"), filepath.Join(dir, "vmdir"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	m.bootTimeout = 2 * time.Second
+	m.pollInterval = 5 * time.Millisecond
+	m.dialReachable = func(ctx context.Context, addr string, timeout time.Duration) bool {
+		return addr == "192.168.122.99:22"
+	}
+
+	tg := &Target{Name: "vm3", MAC: mac, Network: "default", SSHPort: 22}
+	if err := m.waitForIP(context.Background(), tg, nil, m.bootTimeout, "192.168.122.99"); err != nil {
+		t.Fatalf("waitForIP: %v", err)
+	}
+	if tg.IP != "192.168.122.99" {
+		t.Errorf("vm3 IP = %q, want 192.168.122.99 (the reservation, confirmed reachable)", tg.IP)
+	}
+}
+
+// TestWaitForIP_ReservedIPUnreachableStillTimesOut guards against the fix
+// above silently trusting the reservation alone: a genuinely stuck/dead VM
+// (nothing answers on the reserved IP either) must still time out, exactly
+// as before Real bug #12's fix.
+func TestWaitForIP_ReservedIPUnreachableStillTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	mac := macFor("vm4")
+	body := `case "$1" in
+  domifaddr) exit 0 ;;
+  net-dhcp-leases) echo " Expiry Time  MAC address  Protocol  IP address  Hostname" ; exit 0 ;;
+  *) exit 0 ;;
+esac`
+	writeShim(t, dir, "virsh", "PILOT_VIRSH_BIN", body)
+
+	m, err := NewManager(filepath.Join(dir, "state"), filepath.Join(dir, "vmdir"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	m.bootTimeout = 50 * time.Millisecond
+	m.pollInterval = 5 * time.Millisecond
+	m.dialReachable = func(ctx context.Context, addr string, timeout time.Duration) bool { return false }
+
+	tg := &Target{Name: "vm4", MAC: mac, Network: "default", SSHPort: 22}
+	err = m.waitForIP(context.Background(), tg, nil, m.bootTimeout, "192.168.122.100")
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
+		t.Fatalf("want timeout error, got %v", err)
 	}
 }
 

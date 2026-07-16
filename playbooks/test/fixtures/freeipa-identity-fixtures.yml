@@ -1,0 +1,54 @@
+# Fixtures for docs/verification/freeipa-identity.md
+#
+# freeipa-identity-apply.yml is itself a generic, data-driven reconciler (no
+# users/groups/rules of its own — see its own header comment) — so its own
+# spec's fixture is simply "apply it with a small, fixed, known roster,"
+# not a hand-rolled set of raw `ipa` commands duplicating what the playbook
+# under test already does.
+#
+# The roster below is deliberately small but exercises every relation kind
+# the reconciler manages: a group two users share (fixture-group-a), a user
+# NOT in it (fixture-user-b — the checklist's negative case), a hostgroup, an
+# HBAC rule, and a sudo rule scoped to a specific command (not `cmdcat: all`,
+# so a real sudo-allow-command attachment gets exercised too).
+#
+# Convention: cross-host preconditions for docs/verification/<spec>.md live in
+# playbooks/test/fixtures/<spec>-fixtures.yml (see AGENTS.md §4.1, and the
+# sibling freeipa-client-fixtures.yml).
+#
+# Usage (against the FreeIPA server VM, whose host is in group `all`):
+#   pilot vm-target run --name alma-vm playbooks/test/fixtures/freeipa-identity-fixtures.yml \
+#       -e fixtures_target_group=all -e @~/.vault/main.yaml
+---
+- name: FreeIPA identity verification fixtures (run on the FreeIPA server)
+  ansible.builtin.import_playbook: ../../apply/freeipa-identity-apply.yml
+  vars:
+    target_group: "{{ fixtures_target_group | default('freeipa-server') }}"
+    ipa_groups:
+      - name: fixture-group-a
+        desc: "freeipa-identity spec fixture group"
+    ipa_users:
+      - name: fixture-user-a
+        first: Fixture
+        last: A
+        groups: [fixture-group-a]
+      - name: fixture-user-b
+        first: Fixture
+        last: B
+        # Deliberately NOT in fixture-group-a — the checklist's negative case.
+    ipa_hostgroups:
+      - name: fixture-hostgroup-a
+        desc: "freeipa-identity spec fixture hostgroup"
+        hosts: []
+    ipa_hbac_rules:
+      - name: fixture-hbac-a
+        desc: "freeipa-identity spec fixture HBAC rule"
+        hostcat: all
+        services: [sshd]
+        groups: [fixture-group-a]
+    ipa_sudo_rules:
+      - name: fixture-sudo-a
+        desc: "freeipa-identity spec fixture sudo rule"
+        hostcat: all
+        allow_commands: [/usr/bin/systemctl]
+        groups: [fixture-group-a]

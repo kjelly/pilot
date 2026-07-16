@@ -238,8 +238,21 @@ func classifyRow(r Row, includeRaw bool) (mod string, params string, raw string)
 			""
 	}
 	// Fallback: use the raw command (only if includeRaw).
+	//
+	// params must carry the raw command too, not just "" — dedupKey hashes
+	// (mod, params), and RenderYAML never emits params for a RawCommand
+	// task (it renders RawCommand instead, see the branch above), so this
+	// has no effect on output. But leaving params empty here meant EVERY
+	// row that fell through to this fallback hashed to the exact same
+	// dedup key (mod="ansible.builtin.command", params="") regardless of
+	// how different their actual commands were — silently collapsing
+	// unrelated checks into one task that only ever tested the FIRST row's
+	// command, tagged with every other row's ID too. Confirmed live: this
+	// is why the committed playbooks/verify/freeipa-server.yml has only 2
+	// tasks for an 18-row spec — C2's task (`sudo ipactl status`) carries
+	// tags [C2..C18], so C3-C18 were never actually being checked at all.
 	if includeRaw {
-		return "ansible.builtin.command", "", cmd
+		return "ansible.builtin.command", cmd, cmd
 	}
 	return "ansible.builtin.debug",
 		fmt.Sprintf("msg: %s", quoteScalar(fmt.Sprintf("Spec %s: no module matched, manual playbook task needed (cmd=%s exp=%s)", r.ID, truncate(cmd, 40), exp))),

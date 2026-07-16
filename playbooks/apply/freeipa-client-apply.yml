@@ -59,7 +59,20 @@
     # freeipa_server_fqdn); defaults preserve original behaviour. Keep these in
     # sync with the server by setting them ONCE in a shared group_vars file.
     ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
-    ipa_server_ip: "{{ freeipa_server_ip | default(ansible_host) }}"
+    # Auto-resolve the FreeIPA server's IP from this inventory's
+    # freeipa-server group when not explicitly passed via -e/group_vars —
+    # same "explicit overrides inventory-derived, else empty" idiom as
+    # audit-log-forwarding-apply.yml's siem_forward_inventory_host. The old
+    # `default(ansible_host)` fallback silently resolved to THIS (client)
+    # host's own IP instead of the server's, pinning the server FQDN to the
+    # wrong address in /etc/hosts and failing ipa-client-install — the
+    # required-vars gate below never caught it because ansible_host is
+    # always defined and non-empty (runbook v4.2 real bug #13).
+    ipa_server_inventory_ip: >-
+      {{ (hostvars[groups['freeipa-server'][0]].ansible_host | default('', true))
+         if (groups['freeipa-server'] | default([]) | length > 0)
+         else '' }}
+    ipa_server_ip: "{{ freeipa_server_ip | default('', true) or ipa_server_inventory_ip }}"
     ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
     ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
 

@@ -47,6 +47,9 @@ jobs:
         working-directory: ansible_callback
         run: python3 -m unittest test_pilot_diagnose.py -v
 
+      - name: Duplicate YAML key check (repo-wide)
+        run: python3 scripts/check-yaml-duplicate-keys.py
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest

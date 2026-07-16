@@ -26,12 +26,25 @@
       ansible.builtin.command: "sudo klist -k /etc/krb5.keytab"
       become: true
       changed_when: false
-      tags: [C10, C4, C5, C6, C8]
+      tags: [C4]
+    - name: "C5 — SSSD 能解析 FreeIPA 帳號（帳號認證後端已接上…"
+      ansible.builtin.command: "id pilotuser@ipa.pilot.internal"
+      changed_when: false
+      tags: [C5]
+    - name: "C6 — 登入准駁委由 FreeIPA HBAC（SSSD access_provider = ip…"
+      ansible.builtin.command: "sudo grep -qE \"^access_provider *= *ipa\" /etc/sssd/sssd.conf"
+      become: true
+      changed_when: false
+      tags: [C6]
     - name: "C7 — sudoers 查詢路由到 SSSD（nsswitch）"
       ansible.builtin.command: "grep -qE \"^sudoers:.*sss\" /etc/nsswitch.conf"
       become: true
       changed_when: false
       tags: [C7]
+    - name: "C8 — 中央 sudo 規則對 IPA 帳號生效（`pilot-all` → pi…"
+      ansible.builtin.command: "sudo runuser -u pilotuser -- sudo -l"
+      changed_when: false
+      tags: [C8]
     - name: "C9 — 稽核守護程序 auditd active"
       ansible.builtin.systemd:
         name: "auditd"
@@ -39,3 +52,7 @@
         enabled: true
       become: true
       tags: [C9]
+    - name: "C10 — kernel auditing 已啟用（稽核事件實際被捕捉）"
+      ansible.builtin.command: "sudo auditctl -s"
+      changed_when: false
+      tags: [C10]

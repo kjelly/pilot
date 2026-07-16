@@ -74,7 +74,9 @@
       ansible.builtin.command: docker info
       register: docker_pre
       changed_when: false
-      failed_when: docker_pre.rc != 0
+      # See wazuh-manager-apply.yml's matching preflight for why rc!=0 must
+      # not fail the mandatory check-mode gate on a from-scratch host.
+      failed_when: docker_pre.rc != 0 and not ansible_check_mode
       check_mode: false
 
   tasks:
@@ -88,12 +90,16 @@
         group: 999
         mode: '0700'
 
+    # docker_image/docker_network/docker_container need a live daemon to
+    # compute their diff even under --check; deferred to the real apply on
+    # a from-scratch host, same convention as wazuh-manager-apply.yml.
     # Spec: docs/verification/core-infra-provider-db.md C2
     - name: "DB — pull postgres:{{ pg_version }} image"
       tags: [db, db-C2]
       community.docker.docker_image:
         name: "postgres:{{ pg_version }}"
         source: pull
+      when: not ansible_check_mode
 
     # pilot-infra is the bridge network shared with the Keycloak
     # container; created here (idempotent — re-creating an existing
@@ -103,6 +109,7 @@
       community.docker.docker_network:
         name: pilot-infra
         state: present
+      when: not ansible_check_mode
 
     # Spec: docs/verification/core-infra-provider-db.md C1, C2, C3, C8, C9
     - name: "DB — run pilot-postgres container"
@@ -130,6 +137,7 @@
           interval: 10s
           timeout: 5s
           retries: 6
+      when: not ansible_check_mode
 
     # Spec: docs/verification/core-infra-provider-db.md C7, C10
     - name: "DB — final check: postgres reachable on docker network"
@@ -142,5 +150,6 @@
       changed_when: false
       until: pg_ready.rc == 0
       retries: 12
+      when: not ansible_check_mode
       delay: 5
 

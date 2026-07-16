@@ -8,4 +8,39 @@
     - name: "C1 — `weed server` process 可見"
       ansible.builtin.command: "sh -c 'pidof weed >/dev/null 2>&1; echo $?'"
       changed_when: false
-      tags: [C1, C2, C3, C4, C5, C6, C7]
+      tags: [C1]
+    - name: "C2 — Master HTTP `/healthz`（9333）回 200"
+      ansible.builtin.command: "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9333/healthz"
+      become: true
+      changed_when: false
+      tags: [C2]
+    - name: "C3 — Volume HTTP `/healthz`（8080）回 200"
+      ansible.builtin.command: "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz"
+      become: true
+      changed_when: false
+      tags: [C3]
+    - name: "C4 — Filer HTTP `/healthz`（8888）回 200"
+      ansible.builtin.command: "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8888/healthz"
+      become: true
+      changed_when: false
+      tags: [C4]
+    - name: "C5 — S3 gateway HTTP `/healthz`（8333）回 200"
+      ansible.builtin.command: "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8333/healthz"
+      become: true
+      changed_when: false
+      tags: [C5]
+    - name: "C6 — S3 API 可匿名 PUT object 到預建 bucket（path-style `…"
+      ansible.builtin.command: "curl -fsS -X PUT --data-binary @/etc/pilot/seaweedfs-s3-check.txt -o /dev/null -w '%{http_code}' http://127.0.0.1:8333/pilot-s3-smoke/healthcheck.txt"
+      become: true
+      changed_when: false
+      tags: [C6]
+    - name: "C7 — S3 API 可匿名 GET 回同一個 object，內容吻合"
+      ansible.builtin.command: "curl -fsS http://127.0.0.1:8333/pilot-s3-smoke/healthcheck.txt"
+      become: true
+      changed_when: false
+      tags: [C7]
+    - name: "C8 — S3 API 可匿名 DELETE object，刪後 GET 回 404"
+      ansible.builtin.command: "sh -c 'curl -fsS -X DELETE -o /dev/null -w \"%{http_code}\" http://127.0.0.1:8333/pilot-s3-smoke/healthcheck.txt && curl -fsS -o /dev/null -w \"%{http_code}\" http://127.0.0.1:8333/pilot-s3-smoke/healthcheck.txt'"
+      become: true
+      changed_when: false
+      tags: [C8]
