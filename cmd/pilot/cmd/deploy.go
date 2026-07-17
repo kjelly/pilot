@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -75,12 +74,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
 	fmt.Fprintln(out)
 
-	inv, err := promptText("Inventory 檔路徑", deployInventoryFlag, validateFileExists)
+	inv, err := runTextProgram("Inventory 檔路徑", deployInventoryFlag, validateFileExists)
 	if err != nil {
 		return abortOrErr(err)
 	}
 
-	if promptConfirm("要不要先看一下這份 inventory 的 host/group 結構？(ansible-inventory --graph)", true) {
+	if runConfirmProgram("要不要先看一下這份 inventory 的 host/group 結構？(ansible-inventory --graph)", true) {
 		previewInventoryGraph(cmd.Context(), out, inv)
 		fmt.Fprintln(out)
 	}
@@ -93,7 +92,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	scopeIdx, err := promptSelectIndex("要佈署什麼？", []string{
+	scopeIdx, err := runSelectProgram("要佈署什麼？", []string{
 		"全站部署(site.yml) — 一次套用 inventory 裡已經填好機器的所有元件",
 		"單一元件 — 從清單挑一支 apply playbook",
 	})
@@ -139,60 +138,29 @@ func abortOrErr(err error) error {
 }
 
 // ---- shared prompt helpers -------------------------------------------------
+//
+// The actual prompt/select/confirm screens live in deploy_tui.go now
+// (runSelectProgram/runTextProgram/runConfirmProgram, on top of the
+// shared Bubble Tea primitives in tui_select.go/tui_textinput.go/
+// tui_confirm.go) — what's left here is dumpMenuDebug (called from
+// newSelectModel, tui_select.go) and the validators every prompt call
+// site still uses.
 
-// maxSelectSize caps how many rows promptui.Select tries to show at
-// once. promptui's own doc comment on Size is "the number of items
-// that should appear on the select before scrolling is necessary" —
-// passing len(items) (the previous behavior here) means "never
-// scroll", which pushes any menu longer than the terminal's height
-// off-screen with no way to reach the rest. Capping it lets promptui's
-// built-in scroll indicators (▲/▼) take over once a menu grows past
-// this many rows.
-const maxSelectSize = 12
-
-func promptSelectIndex(label string, items []string) (int, error) {
-	size := len(items)
-	if size > maxSelectSize {
-		size = maxSelectSize
+// dumpMenuDebug prints label's live item list, one per line with its
+// 0-based DOWN-arrow index, to stderr. It exists for scripted/`trec`-
+// driven runs: several of this wizard's menus (group_vars keys, vault
+// keys, host lists) have an item count that depends on file contents
+// rather than fixed source order, so a script computing `DOWN <n>`
+// from a source-code read (or a remembered prior session) can silently
+// miscount. Setting PILOT_DEBUG_MENU=1 lets a driving script/agent read
+// the real item list straight from the recorded terminal output instead
+// of recomputing or eyeballing it. Gated behind the env var so normal
+// interactive use (and the rendered menu itself) is unaffected.
+func dumpMenuDebug(label string, items []string) {
+	fmt.Fprintf(os.Stderr, "[pilot:menu] %s (%d 項，DOWN <n> 從 0 起算)\n", label, len(items))
+	for i, item := range items {
+		fmt.Fprintf(os.Stderr, "[pilot:menu]   %d: %s\n", i, item)
 	}
-	p := promptui.Select{Label: label, Items: items, Size: size}
-	idx, _, err := p.Run()
-	if err != nil {
-		return 0, fmt.Errorf("%w: %v", errDeployAborted, err)
-	}
-	return idx, nil
-}
-
-func promptText(label, def string, validate func(string) error) (string, error) {
-	p := promptui.Prompt{Label: label, Default: def, Validate: validate, AllowEdit: true}
-	v, err := p.Run()
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", errDeployAborted, err)
-	}
-	return v, nil
-}
-
-// promptConfirm asks a yes/no question and returns defaultYes when the
-// user just presses Enter. promptui's IsConfirm only distinguishes
-// "typed y" (nil error) from everything else, so we special-case an
-// empty answer ourselves instead of relying on its default handling.
-func promptConfirm(question string, defaultYes bool) bool {
-	suffix := " [Y/n]"
-	if !defaultYes {
-		suffix = " [y/N]"
-	}
-	p := promptui.Prompt{Label: question + suffix}
-	ans, err := p.Run()
-	if err != nil {
-		// Ctrl-C/Ctrl-D: treat as "no" (safest default for a
-		// question the user didn't actually answer).
-		return false
-	}
-	ans = strings.ToLower(strings.TrimSpace(ans))
-	if ans == "" {
-		return defaultYes
-	}
-	return ans == "y" || ans == "yes"
 }
 
 func validateFileExists(p string) error {
@@ -250,7 +218,7 @@ func previewInventoryGraph(ctx context.Context, out io.Writer, inv string) {
 // else is applied. Returns ok=false when the user chose to stop
 // instead of continuing past a failed (or skipped) preflight.
 func runPreflight(ctx context.Context, runner *ansible.Runner, out io.Writer, inv string) (bool, error) {
-	idx, err := promptSelectIndex("要先跑前置檢查(preflight)嗎？", []string{
+	idx, err := runSelectProgram("要先跑前置檢查(preflight)嗎？", []string{
 		"完整前置檢查(含 SSH 連線測試)",
 		"只做靜態檢查(機器還沒開機/還連不上時用；不連線)",
 		"跳過前置檢查",
@@ -276,7 +244,7 @@ func runPreflight(ctx context.Context, runner *ansible.Runner, out io.Writer, in
 		return true, nil
 	}
 	fmt.Fprintf(out, "❌ 前置檢查沒有全過(結束碼 %d)\n", res.ExitCode)
-	return promptConfirm("仍要繼續佈署嗎？(不建議 — 上面的錯誤通常代表 inventory 填錯或連不上機器)", false), nil
+	return runConfirmProgram("仍要繼續佈署嗎？(不建議 — 上面的錯誤通常代表 inventory 填錯或連不上機器)", false), nil
 }
 
 // ---- stage gate -------------------------------------------------------------
@@ -292,7 +260,7 @@ type stageDecision struct {
 }
 
 func promptStageDecision(out io.Writer, context string) (stageDecision, error) {
-	idx, err := promptSelectIndex(fmt.Sprintf("[%s] 要套用到哪個 stage？", context), []string{
+	idx, err := runSelectProgram(fmt.Sprintf("[%s] 要套用到哪個 stage？", context), []string{
 		"sandbox（預設；沙盒/測試機，不需要額外確認）",
 		"staging（測試環境，需要額外確認）",
 		"prod（正式環境，需要額外確認 + 近 7 天內的 staging 驗證證明）",
@@ -305,17 +273,17 @@ func promptStageDecision(out io.Writer, context string) (stageDecision, error) {
 		return stageDecision{Stage: "sandbox"}, nil
 	case 1:
 		fmt.Fprintln(out, "⚠️  即將對已歸類進 staging 的機器套用真正的變更。")
-		if !promptConfirm("確定要繼續嗎？", false) {
+		if !runConfirmProgram("確定要繼續嗎？", false) {
 			return stageDecision{}, errDeployAborted
 		}
 		return stageDecision{Stage: "staging", ConfirmVars: []string{"confirm_staging=true"}}, nil
 	case 2:
 		fmt.Fprintln(out, "⚠️  即將對已歸類進 prod 的機器套用真正的變更。")
-		hours, err := promptText("上次 staging 驗證距今幾小時？(0-168，即 7 天內)", "24", validateHoursWithinWeek)
+		hours, err := runTextProgram("上次 staging 驗證距今幾小時？(0-168，即 7 天內)", "24", validateHoursWithinWeek)
 		if err != nil {
 			return stageDecision{}, err
 		}
-		_, err = promptText(`為避免手滑，請輸入大寫 "PROD" 以確認要套用到正式環境`, "", func(s string) error {
+		_, err = runTextProgram(`為避免手滑，請輸入大寫 "PROD" 以確認要套用到正式環境`, "", func(s string) error {
 			if s != "PROD" {
 				return fmt.Errorf(`必須完全輸入 "PROD"`)
 			}
@@ -351,14 +319,14 @@ func promptSeaweedfsS3Config(out io.Writer, stage string) ([]string, error) {
 	defaultPath := defaultSeaweedfsS3ConfigPath
 	if stage == "prod" {
 		fmt.Fprintln(out, "ℹ️  stage=prod 不允許匿名 S3 存取，一定要設定簽章模式(seaweedfs_s3_config_path)。")
-		path, err := promptText("s3.json 在目標主機上的路徑", defaultPath, nil)
+		path, err := runTextProgram("s3.json 在目標主機上的路徑", defaultPath, nil)
 		if err != nil {
 			return nil, err
 		}
 		return []string{"seaweedfs_s3_config_path=" + path}, nil
 	}
 
-	idx, err := promptSelectIndex("要不要啟用簽章模式 S3 存取？(sandbox 預設可以先跳過，用匿名存取)", []string{
+	idx, err := runSelectProgram("要不要啟用簽章模式 S3 存取？(sandbox 預設可以先跳過，用匿名存取)", []string{
 		"不要 — 先用匿名存取(僅適合 sandbox，不建議正式環境)",
 		"要 — 啟用簽章模式(identity 憑證沿用 restic_aws_access_key_id / restic_aws_secret_access_key，走 vault)",
 	})
@@ -368,7 +336,7 @@ func promptSeaweedfsS3Config(out io.Writer, stage string) ([]string, error) {
 	if idx == 0 {
 		return nil, nil
 	}
-	path, err := promptText("s3.json 在目標主機上的路徑", defaultPath, nil)
+	path, err := runTextProgram("s3.json 在目標主機上的路徑", defaultPath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -444,11 +412,11 @@ func parseGroupHostFromInventoryList(listJSON, group string) (host string, ok bo
 func promptAutoHostVar(ctx context.Context, out io.Writer, inv string, av autoHostVar) ([]string, error) {
 	if host, ok := resolveGroupHost(ctx, inv, av.Group); ok {
 		q := fmt.Sprintf("偵測到這份 inventory 的 %s：%s，這次要用它嗎？(-e %s=%s)", av.Label, host, av.Var, host)
-		if promptConfirm(q, true) {
+		if runConfirmProgram(q, true) {
 			return []string{av.Var + "=" + host}, nil
 		}
 	}
-	path, err := promptText(
+	path, err := runTextProgram(
 		fmt.Sprintf("%s 的 IP/FQDN(-e %s；留空 = 跳過)", av.Label, av.Var),
 		"", nil,
 	)
@@ -511,13 +479,13 @@ func promptVault(out io.Writer, inv, hint string) (vaultInput, error) {
 	varsFile := ""
 	autoFile := defaultVaultFile(inv)
 	if autoFile != "" {
-		if promptConfirm(fmt.Sprintf("偵測到 %s，這次佈署要用它當密碼變數檔嗎？", autoFile), true) {
+		if runConfirmProgram(fmt.Sprintf("偵測到 %s，這次佈署要用它當密碼變數檔嗎？", autoFile), true) {
 			varsFile = autoFile
 		}
 	}
 
 	if varsFile == "" {
-		idx, err := promptSelectIndex("這次佈署需要密碼變數嗎？(例如 FreeIPA/Keycloak 的管理密碼，走 ansible-vault 加密檔)", []string{
+		idx, err := runSelectProgram("這次佈署需要密碼變數嗎？(例如 FreeIPA/Keycloak 的管理密碼，走 ansible-vault 加密檔)", []string{
 			"不需要",
 			"需要 — 我有一份 ansible-vault 加密的 vars 檔",
 		})
@@ -527,7 +495,7 @@ func promptVault(out io.Writer, inv, hint string) (vaultInput, error) {
 		if idx == 0 {
 			return vaultInput{}, nil
 		}
-		varsFile, err = promptText("vars 檔路徑(ansible-vault 加密過的 yaml)", "", validateFileExists)
+		varsFile, err = runTextProgram("vars 檔路徑(ansible-vault 加密過的 yaml)", "", validateFileExists)
 		if err != nil {
 			return vaultInput{}, err
 		}
@@ -538,7 +506,7 @@ func promptVault(out io.Writer, inv, hint string) (vaultInput, error) {
 		return vaultInput{ExtraVarsFile: varsFile}, nil
 	}
 
-	decryptIdx, err := promptSelectIndex("怎麼解密？", []string{
+	decryptIdx, err := runSelectProgram("怎麼解密？", []string{
 		"用密碼檔(--vault-password-file)",
 		"執行時手動輸入密碼(--ask-vault-pass)",
 	})
@@ -548,7 +516,7 @@ func promptVault(out io.Writer, inv, hint string) (vaultInput, error) {
 	if decryptIdx == 1 {
 		return vaultInput{ExtraVarsFile: varsFile, AskVaultPass: true}, nil
 	}
-	passFile, err := promptText("vault 密碼檔路徑", "", validateFileExists)
+	passFile, err := runTextProgram("vault 密碼檔路徑", "", validateFileExists)
 	if err != nil {
 		return vaultInput{}, err
 	}
@@ -595,7 +563,7 @@ func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Write
 		runner.Stdin = os.Stdin
 	}
 
-	dryRunFirst := promptConfirm("要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
+	dryRunFirst := runConfirmProgram("要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
 
 	runOnce := func(check bool) (*ansible.Result, error) {
 		mode := "套用"
@@ -605,7 +573,7 @@ func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Write
 			args = append([]string{"--check", "--diff"}, baseArgs...)
 		}
 		fmt.Fprintf(out, "\n▶ %s：ansible-playbook %s\n\n", mode, strings.Join(args, " "))
-		if !promptConfirm("確定要執行以上指令嗎？", true) {
+		if !runConfirmProgram("確定要執行以上指令嗎？", true) {
 			return nil, errDeployAborted
 		}
 		return runner.Run(ctx, args...)
@@ -622,7 +590,7 @@ func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Write
 			return nil
 		}
 		fmt.Fprintln(out, "✅ 預覽完成，沒有錯誤。")
-		if !promptConfirm("預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
+		if !runConfirmProgram("預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
 			fmt.Fprintln(out, "先在這裡停下來，沒有套用任何變更。")
 			return nil
 		}
@@ -658,11 +626,11 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	extraVars := []string{"stage=" + decision.Stage, "patch_stage=" + decision.Stage}
 	extraVars = append(extraVars, decision.ConfirmVars...)
 
-	limit, err := promptText("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+	limit, err := runTextProgram("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
 	if err != nil {
 		return err
 	}
-	tags, err := promptText("要只跑某幾類元件嗎？(--tags，例如 freeipa,keycloak；留空 = 全部)", "", validateOptionalKV)
+	tags, err := runTextProgram("要只跑某幾類元件嗎？(--tags，例如 freeipa,keycloak；留空 = 全部)", "", validateOptionalKV)
 	if err != nil {
 		return err
 	}
@@ -672,7 +640,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 		return err
 	}
 
-	extra, err := promptText("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
+	extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
 	if err != nil {
 		return err
 	}
@@ -688,7 +656,7 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	for i, p := range deployCatalog {
 		labels[i] = p.Label
 	}
-	idx, err := promptSelectIndex("挑一個要佈署的元件", labels)
+	idx, err := runSelectProgram("挑一個要佈署的元件", labels)
 	if err != nil {
 		return err
 	}
@@ -700,7 +668,7 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 
 	var extraVars []string
 	if len(entry.InfraRoles) > 0 {
-		roleIdx, err := promptSelectIndex("選擇角色(infra_role)", entry.InfraRoles)
+		roleIdx, err := runSelectProgram("選擇角色(infra_role)", entry.InfraRoles)
 		if err != nil {
 			return err
 		}
@@ -716,7 +684,7 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	default:
 		defaultGroup = "(見上方提示)"
 	}
-	targetGroup, err := promptText(
+	targetGroup, err := runTextProgram(
 		fmt.Sprintf("要限定只套用到哪個 group/host 嗎？(-e target_group=...；留空 = 用預設 group %q；可用交集語法如 'dns:&prod')", defaultGroup),
 		"", nil,
 	)
@@ -750,11 +718,11 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 		extraVars = append(extraVars, hostVars...)
 	}
 
-	limit, err := promptText("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+	limit, err := runTextProgram("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
 	if err != nil {
 		return err
 	}
-	tags, err := promptText("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", validateOptionalKV)
+	tags, err := runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", validateOptionalKV)
 	if err != nil {
 		return err
 	}
@@ -764,7 +732,7 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 		return err
 	}
 
-	extra, err := promptText("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
+	extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
 	if err != nil {
 		return err
 	}
