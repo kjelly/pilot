@@ -174,14 +174,19 @@ that same identity, not a separate one.
 
 ## 3. Apply — one-shot `pilot deploy`, not role-by-role
 
-### 3.1 S3 signed-mode identity
+### 3.1 S3 signed-mode identity — automatic (no `-e` needed)
 
-`seaweedfs-s3-apply.yml` needs `-e seaweedfs_s3_config_path=/etc/seaweedfs/s3.json`
-to render and mount the signed-mode identity file — SeaweedFS's default
-anonymous mode rejects restic's and Thanos's always-signed requests. Add
-this in `pilot deploy`'s site-wide flow via its final "還有其他 -e 變數要帶嗎？"
-prompt (the site-wide flow doesn't have `runSinglePlaybookDeploy`'s dedicated
-S3-signed-mode prompt, so it must be passed here explicitly).
+`seaweedfs_s3_config_path` now defaults to `/etc/seaweedfs/s3.json`
+**automatically** whenever restic vault credentials are available
+(`seaweedfs-s3-apply.yml:50-55` — the play-level `vars:` block checks
+`restic_aws_access_key_id`/`restic_aws_secret_access_key` and sets the
+path only when both are non-empty). Since this delivery-test topology
+always supplies those vault entries (§2.3), no `-e`
+`seaweedfs_s3_config_path=` is needed at all — the `pilot deploy`
+site-wide "還有其他 -e 變數要帶嗎？" prompt can be answered empty for
+this variable. Falls back to `""` (anonymous) only when no S3
+credentials are supplied at all, which is the dev/smoke-test-only
+path.
 
 SeaweedFS does not auto-create a missing bucket on first `PutObject`, and
 treats every retry against a missing bucket as slow backoff rather than a
@@ -210,28 +215,29 @@ If you're on an older checkout where this isn't fixed yet, the symptom is
 `prometheus_site_label is required` even after setting it in
 group_vars — see Troubleshooting.
 
-### 3.3 Deploy everything via `pilot deploy`'s "全站部署(site.yml)"
+### 3.3 Deploy everything via `pilot deploy`'s "全站部署(site.yml)" — zero extra `-e`
 
 Select "全站部署(site.yml)" **once** — do not loop "單一元件" once per role.
 Inventory group membership (§2.1) decides what actually runs; an empty
-group is skipped automatically. Pass, at the one "-e 變數" prompt:
+group is skipped automatically. **No extra `-e` variables are required**
+at the site-wide deploy step — every value that previously needed a
+command-line override now has a sensible playbook-level default:
 
-```
-freeipa_setup_dns=true freeipa_setup_ntp=true freeipa_dns_forwarders=<libvirt-gateway-ip>
-seaweedfs_s3_config_path=/etc/seaweedfs/s3.json
-```
+| Variable | Default | Source |
+|----------|---------|--------|
+| `freeipa_setup_dns` | `true` | `freeipa-server-apply.yml:88` — native `--setup-dns` is on by default for the AlmaLinux FreeIPA host |
+| `freeipa_setup_ntp` | `true` | `freeipa-server-apply.yml:96` — native `--setup-ntp` is on by default |
+| `freeipa_dns_forwarders` | `['8.8.8.8']` | `freeipa-server-apply.yml:95` — public resolver fallback instead of no-forwarders |
+| `seaweedfs_s3_config_path` | `/etc/seaweedfs/s3.json` (auto) | `seaweedfs-s3-apply.yml:50-55` — auto-enabled when restic vault creds exist |
 
-`freeipa_setup_dns=true`/`freeipa_setup_ntp=true` make `freeipa-server-apply.yml`
-use FreeIPA's own native `--setup-dns`/`--setup-ntp` install flags instead of
-the generic `core-infra-provider` dns/ntp roles — those are Debian/Ubuntu-only
-(`ansible.builtin.apt`, `/etc/systemd/resolved.conf`) and fail outright on the
-AlmaLinux FreeIPA host. Do **not** put `dns`/`ntp` in `ipa-1`'s role list in
-§2.1; those roles are superseded by FreeIPA's native flags here.
-`freeipa_dns_forwarders` (a space-separated string, not a YAML/JSON list —
-`-e key=value` does not JSON-decode) is needed so the FreeIPA host's own
-`named` can still resolve the public internet for its own package installs;
-the libvirt `default` network's gateway (`virsh net-dumpxml default`) is the
-usual value.
+All four can still be overridden via `-e` at deploy time or via
+`group_vars/freeipa.yml` if needed, but none require it. The "還有其他
+-e 變數要帶嗎？" prompt during `pilot deploy` can be answered **empty**.
+
+Do **not** put `dns`/`ntp` in `ipa-1`'s role list — those are
+Debian/Ubuntu-only roles (`ansible.builtin.apt`,
+`/etc/systemd/resolved.conf`) and will fail on AlmaLinux. FreeIPA's
+native flags supersede them.
 
 `site.yml`'s own safety valve forbids a top-level `-e target_group=` — don't
 pass one; scope with inventory group membership or `--limit` instead.
@@ -471,7 +477,7 @@ VM you didn't create or that the user didn't explicitly name for deletion.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `restic-backup` fails with `Signed request requires setting up SeaweedFS S3 authentication` | `seaweedfs_s3_config_path` was omitted or SeaweedFS started without the rendered identity config | Pass `seaweedfs_s3_config_path=/etc/seaweedfs/s3.json` at the site-wide deploy's extra-vars prompt |
+| `restic-backup` fails with `Signed request requires setting up SeaweedFS S3 authentication` | `restic_aws_access_key_id`/`secret` vault entries are missing or empty — `seaweedfs_s3_config_path` auto-enables only when both are non-empty (§3.1) | Ensure `.vault/main.yaml` has non-empty `restic_aws_access_key_id` and `restic_aws_secret_access_key` values (§2.3); no separate `-e seaweedfs_s3_config_path=` needed |
 | `restic-backup` fails with `ciphertext verification failed` | Either the bucket was initialized with a different `restic_password`, or multiple hosts raced to initialize the same fresh repository | Ensure single-host repository initialization, then delete/recreate the test bucket and re-run |
 | `preflight` fails with `Permission denied (publickey)` | Wrong SSH key used | Use the pilot VM-specific key: `/var/lib/libvirt/images/pilot/<name>/id_ed25519` |
 | `prometheus-apply.yml` fails with `prometheus_site_label is required` even after setting it in `group_vars/prometheus.yml` (should no longer occur — see §3.2) | On an older checkout: `prometheus_site_label`/`thanos_s3_target_host`/`thanos_query_target_host` were declared as play-level `vars:` with a hardcoded `""`, which outranks group_vars/host_vars, silently shadowing what you set | Fixed at the source (see §3.2) — upgrade the checkout. If stuck on an old one, pass it as `-e prometheus_site_label=...` instead as a one-off workaround |
@@ -481,7 +487,7 @@ VM you didn't create or that the user didn't explicitly name for deletion.
 | §4.1 live-SSH test "passes" (or "fails" the deny case) in a way that contradicts `ipa hbactest`'s verdict, right after a password/HBAC/sudo-rule change | A local `ControlMaster auto`/`ControlPersist` SSH config (common) silently reused an already-authenticated multiplexed connection from an earlier test instead of actually re-authenticating | Always add `-o ControlMaster=no` to these specific commands (or `ssh -O exit <host>` first) — confirmed live, 2026-07-16, that a stale multiplexed session hid a genuine "password expired" block |
 | FreeIPA sudo test says `not allowed` when `hbactest` says `Access granted: True` | Client sudo policy cache or SSSD sudo provider did not converge | Confirm `/etc/nsswitch.conf` has `sudoers: files sss`, `/etc/sssd/sssd.conf` has `services = nss, pam, ssh, sudo` and `sudo_provider = ipa`, then `sss_cache -E` / restart SSSD |
 | `sudo -S <cmd>` fails with `sudo: PAM account management error: Permission denied` for a user whose SSH login and `ipa hbactest --service=sshd` both succeed, once `ipa_hbac_disable_allow_all: true` is set | SSSD's `access_provider = ipa` HBAC-checks every PAM service separately, not just login — `allow_all`/`allow_systemd-user` (both list `sshd` and used to mask this) no longer cover `sudo`'s own PAM account phase once disabled, and an HBAC rule with only `services: [sshd]` never granted it either. Confirmed live 2026-07-16: `ipa hbactest --service=sudo` for the same user/host returned `Access granted: False` | Add `sudo` (and `sudo-i` if `sudo -i` is used) to the HBAC rule's `services:` list, redeploy `freeipa-identity`, `sss_cache -E && systemctl restart sssd` on the client — see `docs/runbooks/freeipa-identity.md` §5.2.2 for the full writeup and `playbooks/apply/freeipa-identity.roster.example.yaml`'s updated example |
-| `freeipa-server-apply.yml` fails with `Source /etc/systemd/resolved.conf not found` | `dns`/`ntp` roles (Debian/Ubuntu-only) were assigned to the AlmaLinux FreeIPA host instead of using its native flags | Remove `dns`/`ntp` from that host's role list; use `freeipa_setup_dns=true freeipa_setup_ntp=true` instead (§3.3) |
+| `freeipa-server-apply.yml` fails with `Source /etc/systemd/resolved.conf not found` | `dns`/`ntp` roles (Debian/Ubuntu-only) were assigned to the AlmaLinux FreeIPA host instead of using its native flags | Remove `dns`/`ntp` from that host's role list; `freeipa_setup_dns` and `freeipa_setup_ntp` both default to `true` (§3.3) — no `-e` override needed |
 | Grafana's Thanos Query datasource returns no data even though Prometheus itself has metrics | Checked Prometheus directly instead of through Thanos Query, or `thanos_s3_target_host`/bucket mismatch between `prometheus.yml` and `thanos-query.yml` | Always verify via the Thanos Query port (§4.2), and confirm both group_vars files point at the same S3 host + bucket |
 | Loki has no log data | `log-shipping` didn't reach a host with real logs — either `site.yml` still hardcodes `target_group: log-server` (older checkout) and that group is empty, or `wazuh-manager`/`log-server` are both empty in this inventory | On current `site.yml`, check the resolved host with `--list-hosts --tags log-shipping`; on an older checkout, run `log-shipping` as its own `pilot deploy` single-component invocation with `-e target_group=<host with real logs>` |
 | §4.6: removed a roster group/rule membership, redeployed `freeipa-identity`, but `hbactest`/live sudo still shows the old (granted) state | On an older checkout, `freeipa-identity-apply.yml`'s "Ensure X exists" tasks were create-only — removing a roster entry and rerunning did nothing, since `ipa *-add`/`*-add-member` no-op on "already exists"/"already a member" and there was no matching `*-remove-*` step | Upgrade to a checkout with the 2026-07-16 reconciler redesign (adds lookup + diff + `*-remove-*` tasks — see `docs/runbooks/minimal-poc-architecture.md` v4.8). On an older checkout, the only workaround is to manually `ipa group-remove-member`/`sudorule-remove-*`/`hbacrule-remove-*` on `ipa-1` for the specific stale entry — exactly the manual-edit anti-pattern §3.4 says this playbook should make unnecessary |

@@ -1,6 +1,6 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
-> Date: 2026-07-15 (UTC)
+> Date: 2026-07-17 (UTC), latest pass: round 7 / v7.0
 > Aligned spec: `docs/verification/freeipa-server.md`, `freeipa-client.md`,
 > `docker.md` (`core-infra-provider.md` `infra_role=docker`),
 > `seaweedfs-s3.md`, `prometheus.md`, `thanos-query.md`,
@@ -18,13 +18,37 @@
 > Publication: internal only — contains plaintext sandbox secrets
 > (`tmp/pilot-verify-minimal-poc/.vault/*.yaml`) and lab-only IPs; do not
 > publish without running the redaction gate first
-> **v3.0 note**: this pass is a genuine ground-up rebuild — all 3 VMs torn
-> down and recreated (not reused), the entire `tmp/pilot-verify-minimal-poc/`
-> workspace deleted and rebuilt from nothing, every wizard step driven via
-> `trec drive --interactive` (not a static `--script`) per user request. The
-> site-wide `pilot deploy` invocation needed **zero** extra `-e` variables
-> beyond `stage`/`patch_stage`/the vault file — see § Real bugs #1/#2 (v2.5)
-> and #7 (v3.0) for the source-level fixes that made this possible.
+> **v7.0 note (2026-07-17, round 7)**: genuine ground-up rebuild per explicit
+> request — all 3 VMs torn down and recreated fresh (`freeipa-server .3`,
+> `nexus .5`, `client-vm .6`), the entire `tmp/pilot-verify-minimal-poc/`
+> workspace deleted and rebuilt from nothing, every `pilot edit`/`pilot
+> deploy` wizard step driven and recorded via `trec drive --script`
+> (`CI=1`, this repo's 2026-07-17 Bubble Tea rewrite of both commands).
+> This session's `mcp__trec__terminal_start`/`terminal_write` tools could
+> launch a persistent PTY but could not deliver a real carriage-return
+> byte through the MCP text channel (raw `\r`/`\n` arrived as literal
+> 2-character escape sequences or a bare LF, neither of which the
+> Bubble Tea screens treat as Enter) — confirmed by first launching
+> `pilot edit` directly under the MCP session (stuck) and only working
+> once `trec drive --interactive` itself was the launched command, so
+> `trec`'s own DSL parser (not the raw PTY) consumed the keystrokes; the
+> **final recorded evidence** for every wizard step still went through
+> one-shot `trec drive --script <file>` per the skill's own guidance,
+> not the MCP session. `PILOT_DEBUG_MENU=1` also turned out to actively
+> break `SELECT` for the very first row of a menu (its stderr dump line
+> repeats the row's own label text one line above the live list,
+> confusing `SELECT`'s direction heuristic into pressing DOWN off a list
+> that doesn't wrap) — omitted for the recorded runs once identified.
+> Both `pilot deploy` invocations (site-wide, then `freeipa-identity`)
+> needed **zero** extra `-e` variables — the explicit "stop and explain
+> if `-e` is needed" gate was never triggered. One real, reproducible
+> operational finding this round — see § Real bugs #25 — extends the
+> already-documented SSSD sudo-cache-staleness gotcha (Real bugs #15/#20)
+> to a case those didn't cover: it also blocks the **very first** sudo
+> attempt after a genuinely fresh site-wide + `freeipa-identity` deploy,
+> not only after a later rule change; `sss_cache -E && systemctl restart
+> sssd` on the client is the fix, but the runbook's own §4.1 procedure
+> previously only mentioned it for the §4.6 rule-change scenario.
 
 ---
 
@@ -58,38 +82,46 @@ to drive.
 
 ---
 
-## 0.5 Fact snapshot (2026-07-15T20:33:00Z, v3.0 ground-up rebuild)
+## 0.5 Fact snapshot (2026-07-17T04:49:29Z, v7.0 ground-up rebuild, round 7)
 
 > All output below is captured from actual execution on the rebuilt
-> environment, not predicted.
+> environment, not predicted. Earlier rounds' snapshots (v3.0 etc.) are
+> superseded by this section; see §8 Changelog for the full history.
 
 ### Environment state — VM list
 
 ```bash
-$ pilot vm-target down --name client-vm && pilot vm-target down --name nexus && pilot vm-target down --name freeipa-server
+$ pilot vm-target down --name client-vm && pilot vm-target down --name monitor-vm && pilot vm-target down --name freeipa-server
 ✓ target client-vm down
-✓ target nexus down
+✓ target monitor-vm down
 ✓ target freeipa-server down
 $ rm -rf tmp/pilot-verify-minimal-poc   # entire disposable workspace, no leftover files reused
+$ go build -o ./pilot ./cmd/pilot       # fresh binary before driving any wizard
 $ pilot vm-target up --name freeipa-server --base-image almalinux-9 --memory 4096 --vcpus 2 --disk 30 --ssh-user root --boot-timeout 6m --ssh-timeout 3m
 $ pilot vm-target up --name nexus --base-image ubuntu-24.04 --memory 12288 --vcpus 6 --disk 80 --ssh-user root --boot-timeout 6m --ssh-timeout 3m
 $ pilot vm-target up --name client-vm --base-image ubuntu-24.04 --memory 2048 --vcpus 2 --disk 20 --ssh-user root --boot-timeout 6m --ssh-timeout 3m
 $ pilot vm-target list
 NAME            STATUS   IP             VCPU  MEM(MiB)  DISK(GiB)  CREATED
-client-vm       running  192.168.122.6  2     2048      20         2026-07-15 19:24:57
-freeipa-server  running  192.168.122.4  2     4096      30         2026-07-15 19:24:38
-nexus           running  192.168.122.5  6     12288     80         2026-07-15 19:24:54
+client-vm       running  192.168.122.6  2     2048      20         2026-07-17 11:35:27
+freeipa-server  running  192.168.122.3  2     4096      30         2026-07-17 11:35:18
+nexus           running  192.168.122.5  6     12288     80         2026-07-17 11:35:26
 ```
 
-All three VMs were torn down and recreated fresh for this pass (not
-reused) — libvirt DHCP reassigned every IP (`freeipa-server` .2→.4,
-`nexus` .3→.5 vs. the prior v2.5 pass). Running all 3 `up` commands as
-background jobs in parallel worked cleanly this time; a prior session hit
-the orchestration tool's own foreground command timeout (unrelated to
-`pilot` itself) when it tried to `wait` on all 3 in one blocking shell
-call — running each as its own independent background job avoids that.
-Do not assume `nexus`/`.4`/`.5`/`.6` are stable values across future
-rebuilds — always take IPs fresh from `pilot vm-target list`.
+All three VMs were torn down and recreated fresh for this pass (the prior
+session's leftover VMs were named `client-vm`/`monitor-vm`/`freeipa-server`
+— this pass renamed the monitoring host back to `nexus`, matching this
+runbook's own established convention; node names are illustrative per the
+`delivery-test` skill, not a functional requirement). libvirt DHCP
+reassigned every IP (`freeipa-server` now `.3`, `nexus` `.5`, `client-vm`
+`.6`). `pilot vm-target list`'s IP column was transiently blank for
+`freeipa-server` on the very first `list` call right after `up` returned,
+then populated correctly on a second call a few seconds later — the VM
+was already genuinely reachable via `vm-target exec` the whole time, so
+this looks like `list`'s own IP-column read racing slightly behind the
+already-fixed `waitForIP` reserved-IP fallback (§ Real bugs of prior
+rounds), not a functional regression; not chased further since it never
+blocked anything. Do not assume `.3`/`.5`/`.6` are stable values across
+future rebuilds — always take IPs fresh from `pilot vm-target list`.
 
 ### Target / resource set — inventory tree
 
@@ -164,7 +196,7 @@ $ ansible-inventory -i tmp/pilot-verify-minimal-poc/demo/inventory.yml --graph
 ### Secrets — key names only (never values)
 
 ```bash
-$ grep -oE '^[a-z_0-9]+:' tmp/pilot-verify-minimal-poc/.vault/main.yaml
+$ grep -oE '^[a-z_0-9]+:' tmp/pilot-verify-minimal-poc/demo/.vault/main.yaml
 ipa_admin_password:
 grafana_admin_password:
 restic_aws_access_key_id:
@@ -174,25 +206,33 @@ thanos_aws_access_key_id:
 thanos_aws_secret_access_key:
 alertmanager_config:
 
-$ grep -oE '^[a-z_0-9]+:' tmp/pilot-verify-minimal-poc/.vault/ipa-identity.yaml
+$ grep -oE '^[a-z_0-9]+:' tmp/pilot-verify-minimal-poc/demo/.vault/ipa-identity.yaml
 ipa_admin_password:
 ipa_groups:
 ipa_users:
-ipa_hostgroups:
 ipa_sudo_rules:
 ipa_hbac_rules:
 ipa_hbac_disable_allow_all:
 ```
 
+This round's roster deliberately kept scope minimal (no `ipa_hostgroups`,
+one group `sysops`, two users `alice`/`bob`, one sudo rule, one HBAC
+rule) — enough to exercise allow+deny+§4.6's reconciler cycle without
+extra unused surface.
+
 ### Alignment decision
 
 Spec targets and environment state are consistent after this pass — the
 site-wide deploy applied `failed=0` on all 3 hosts with **zero extra `-e`
-variables**, and `freeipa-identity` also applied `failed=0` once the
-hand-authored roster's field names were corrected (see § Real bugs #8).
-`dns`/`ntp`/`log-server` groups intentionally empty per the
-already-corrected architecture; `wazuh-fim`/`audit-log-forwarding` scope
-covers all three hosts.
+variables** (the "還有其他 -e 變數要帶嗎？" gate was answered empty both
+times and never needed to be revisited), and `freeipa-identity` applied
+`failed=0` on the first attempt (no roster field-name mistakes this
+round). `dns`/`ntp`/`log-server`/`keycloak`/`keycloak-db`/`linux-servers`
+groups intentionally empty per the already-corrected architecture;
+`wazuh-fim`/`audit-log-forwarding`/`restic-backup` scope covers all three
+hosts. One operational finding (§ Real bugs #25, SSSD sudo-cache
+staleness on the very first sudo attempt) required a documented
+workaround during §4.1 verification, not a code fix — see below.
 
 ---
 
@@ -538,27 +578,82 @@ Recordings: `04-deploy-site.cast`, `05-deploy-freeipa-identity.cast`,
 `12-reverify-deploy-freeipa-identity.cast`, `14-reverify-deploy-freeipa-identity-force-password-false.cast`
 (v2.4 re-verification pass — see Changelog).
 
----
+### 3.4 v7.0 — round 7 deploy results (2026-07-17, current)
 
-## 4. Verify (v3.0, fresh ground-up rebuild)
-
-Set a working password for `alice` (roster only creates key-less FreeIPA
-accounts) via direct `kinit`'s forced-password-change flow (a genuine
-mutating remote-shell action, approved fresh this session per the
-per-session-approval convention — a prior approval never carries over to
-a new rebuild), then discovered mid-verification that live SSH couldn't
-even offer a password method at all (see § Real bugs #9), fixed that at
-the source, then ran the real SSH + sudo commands, `ipa hbactest`, and
-Grafana/Thanos/Loki queries. Recorded across `06-verify-hbac-grafana-loki.cast`
-(first pass — hbactest/Grafana/Thanos/Loki all PASS, but the live-SSH
-lines in this cast are the ones that surfaced § Real bugs #9),
-`07-fix-sshd-password-auth.cast`/`07b-fix-sshd-password-auth-order.cast`
-(the corrective `freeipa-client` re-apply), and `06d-reverify-hbac-ssh.cast`
-(the final, passing live-SSH re-run).
+Built via `trec drive --script` (not `--interactive` — see the v7.0 top
+banner note) against the fresh `.3`/`.5`/`.6` environment: `pilot edit`
+for `hosts.yml` (3 hosts, 19-role checklist per host, cast
+`01-edit-hosts.cast`), `pilot inventory generate` (cast
+`02-inventory-generate.cast`), `pilot edit` for `group_vars/`
+(`freeipa_server_ip`, `prometheus_site_label`, `thanos_s3_target_host`
+×2, `thanos_query_target_host`, `restic_s3_target_host`,
+`wazuh_manager_host` — cast `03-edit-groupvars.cast`) and `.vault/main.yaml`
+(cast `04-edit-vault.cast`, secrets via `TEXT_ENV`/`--secret-env`, never
+in the recording). `.vault/ipa-identity.yaml` was hand-authored per the
+one tool-endorsed exception.
 
 ```bash
-$ ssh -i /var/lib/libvirt/images/pilot/freeipa-server/id_ed25519 root@192.168.122.4 \
-    "printf 'AlicePerm2026!\nAlicePerm2026!\nAlicePerm2026!\n' | kinit alice"
+$ ansible-inventory -i tmp/pilot-verify-minimal-poc/demo/inventory.yml --graph
+# see §0.5 for the full graph — same shape as prior rounds
+```
+
+Site-wide `pilot deploy` (scope: 全站部署(site.yml); stage: sandbox;
+`--limit`/`--tags` empty; vault: auto-detected `.vault/main.yaml`; **zero**
+extra `-e` variables):
+
+| Phase | client-vm | freeipa-server | nexus |
+|---|---|---|---|
+| Preflight (full, incl. SSH) | ok=8 changed=0 failed=0 | ok=6 changed=0 failed=0 | ok=6 changed=0 failed=0 |
+| Preview (`--check --diff`) | ok=52 changed=19 failed=0 | ok=45 changed=16 failed=0 | ok=78 changed=27 failed=0 |
+| Real apply | ok=84 changed=41 failed=0 | ok=78 changed=34 failed=0 | ok=152 changed=74 failed=0 |
+
+Cast: `05-deploy-site.cast`. Wall clock: ~17.5 min (preflight+preview+apply
+combined, one `pilot deploy` session).
+
+`freeipa-identity` (single component, target group default `freeipa-server`,
+vault: explicit `.vault/ipa-identity.yaml`, **zero** extra `-e`):
+
+| Phase | freeipa-server |
+|---|---|
+| Preview | ok=4 changed=0 failed=0 |
+| Real apply | ok=30 changed=12 failed=0 |
+
+Cast: `06-deploy-freeipa-identity.cast`. Both `alice` and `bob` (first-time
+onboard, `force_password: true`) got real passwords set (`changed` ×2 on
+the "Set password for users that need one" task) — confirms the v6.0
+Real bug #24 fix holds on an independent fresh rebuild.
+
+**Idempotency — full site-wide re-run, no roster/group_vars changes**
+(cast `13-deploy-site-idempotent-rerun.cast`):
+
+| Phase | client-vm | freeipa-server | nexus |
+|---|---|---|---|
+| Preview | ok=49 changed=0 failed=0 | ok=42 changed=0 failed=0 | ok=75 changed=0 failed=0 |
+| Real apply | ok=77 changed=0 failed=0 | ok=66 **changed=1** failed=0 | ok=143 changed=0 failed=0 |
+
+The one `freeipa-server` change is `ansible.builtin.file` correcting the
+mode of `/var/lib/ipa/pki-ca/publish` back to `0755` — Dogtag PKI's own
+process appears to reset this directory's mode as a side effect of
+normal `ipactl`/CA operation between runs; not a `pilot`/playbook bug,
+and not chased further since it's cosmetic and outside any of this
+runbook's verification goals. Every other one of the site's ~74 changed
+tasks from the first apply settled to `changed=false`.
+
+## 4. Verify (v7.0, round 7 — 2026-07-17, current)
+
+`alice` and `bob` were both first-time onboards this round
+(`force_password: true`), so both landed in FreeIPA's fresh-admin-reset
+"must change" state after `freeipa-identity`'s real apply — confirmed via
+`ipa user-show alice --all --raw` showing `krbLastPwdChange` ==
+`krbPasswordExpiration` (`20260717043700Z` for both). Personalized
+`alice`'s password with the documented scripted `kinit` forced-change
+flow (cast `07-kinit-alice.cast`, secrets via `TEXT_ENV`/`--secret-env`,
+never in the recording):
+
+```bash
+$ trec drive --script kinit-alice.txt --secret-env ALICE_TEMP_PW --secret-env ALICE_NEW_PW \
+    -o 07-kinit-alice.cast -- ssh -t -o StrictHostKeyChecking=accept-new \
+    -i /var/lib/libvirt/images/pilot/client-vm/id_ed25519 root@192.168.122.6 kinit alice
 Password for alice@IPA.PILOT.INTERNAL:
 Password expired.  You must change it now.
 Enter new password:
@@ -567,43 +662,62 @@ $ echo EXIT=$?
 EXIT=0
 ```
 
+Confirmed via `ipa user-show alice --all --raw` that `krbLastPwdChange`
+(`20260717043844Z`) and `krbPasswordExpiration` (`20261015043844Z`, ~90
+days later) diverged — genuinely personalized, not another admin reset.
+
 ### 4.1 Permission management (FreeIPA HBAC/sudo) — allow + deny, both real, cross-checked with `ipa hbactest`
 
+First attempt (cast `08-verify-4.1-4.5.cast`) surfaced § Real bugs #25 —
+both of `alice`'s live-SSH sudo commands failed with `alice is not
+allowed to run sudo on client-vm` despite `ipa hbactest --service=sudo`
+already reporting `Access granted: True`. `sss_cache -E && systemctl
+restart sssd` on `client-vm` (the already-documented Real bug #15/#20
+workaround) fixed it; re-ran clean (cast
+`09-verify-4.1-retry-alice-sudo.cast`):
+
 ```bash
-$ sshpass -p 'AlicePerm2026!' ssh -o PreferredAuthentications=password alice@192.168.122.6 "echo 'AlicePerm2026!' | sudo -S systemctl is-active ssh"
+$ sshpass -p '***' ssh -o ControlMaster=no -o PreferredAuthentications=password alice@192.168.122.6 \
+    "echo '***' | sudo -S systemctl is-active ssh"
 [sudo] password for alice: active
 
-$ sshpass -p 'AlicePerm2026!' ssh -o PreferredAuthentications=password alice@192.168.122.6 "echo 'AlicePerm2026!' | sudo -S cat /etc/shadow"
+$ sshpass -p '***' ssh -o ControlMaster=no -o PreferredAuthentications=password alice@192.168.122.6 \
+    "echo '***' | sudo -S cat /etc/shadow"
 [sudo] password for alice: Sorry, user alice is not allowed to execute '/usr/bin/cat /etc/shadow' as root on client-vm.ipa.pilot.internal.
 
-$ ssh -o PreferredAuthentications=password -o BatchMode=yes bob@192.168.122.6 'echo should-not-reach-here'
-bob@192.168.122.6: Permission denied (publickey,gssapi-keyex,gssapi-with-mic,password,keyboard-interactive).
+$ sshpass -p '***' ssh -o ControlMaster=no -o PreferredAuthentications=password bob@192.168.122.6 'echo should-not-reach-here'
+Connection closed by 192.168.122.6 port 22
 ```
 
-FreeIPA's own authoritative check (not just live SSH behavior — both
-layers must agree):
+FreeIPA's own authoritative check (both layers agree):
 
 ```bash
 $ ipa hbactest --user=alice --host=client-vm.ipa.pilot.internal --service=sshd
 --------------------
 Access granted: True
 --------------------
-  Matched rules: allow-sysops-ssh
+  Matched rules: sysops-login-all
+  Not matched rules: allow_systemd-user
+
+$ ipa hbactest --user=alice --host=client-vm.ipa.pilot.internal --service=sudo
+--------------------
+Access granted: True
+--------------------
+  Matched rules: sysops-login-all
   Not matched rules: allow_systemd-user
 
 $ ipa hbactest --user=bob --host=client-vm.ipa.pilot.internal --service=sshd
 ---------------------
 Access granted: False
 ---------------------
-  Not matched rules: allow-sysops-ssh
   Not matched rules: allow_systemd-user
+  Not matched rules: sysops-login-all
 ```
 
-Verdict: **PASS** — allow and deny both real-tested at the live
-SSH/sudo layer and FreeIPA's own policy-evaluation layer, and both
-layers agree. Note `bob`'s live-SSH denial now correctly lists `password`
-as an offered-but-failed method (compare § Real bugs #9's before state,
-where `password` wasn't even in the offered-methods list).
+Verdict: **PASS** (after the documented `sss_cache`/`sssd` refresh — see
+§ Real bugs #25) — allow and deny both real-tested at the live SSH/sudo
+layer and FreeIPA's own policy-evaluation layer for both `sshd` and
+`sudo` services, and all four agree.
 
 ### 4.2 Metric queryable from Grafana (Grafana → Thanos Query → Prometheus)
 
@@ -612,25 +726,15 @@ $ curl -s http://192.168.122.5:3000/api/health
 {"commit":"5b85c4c2fcf5d32d4f68aaef345c53096359b2f1","database":"ok","version":"11.1.0"}
 
 $ curl -s "http://192.168.122.5:10912/api/v1/query?query=up"
-{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"up","instance":"localhost:9090","job":"prometheus","site":"site-nexus"},"value":[1784119760.958,"1"]}],"analysis":{}}}
+{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"up","instance":"localhost:9090","job":"prometheus","site":"site-nexus"},"value":[1784263187.335,"1"]}],"analysis":{}}}
 ```
 
-`prometheus_site_label=site-nexus` came entirely from `group_vars/prometheus.yml`
-this pass — no `-e prometheus_site_label=...` anywhere in the deploy
-command (§3.3). Thanos Query port is still **10912** (the v2.5 fix's
-default), also with zero `-e` override.
+`prometheus_site_label=site-nexus` and `thanos_s3_target_host`/
+`thanos_query_target_host` all came entirely from `group_vars/*.yml` this
+round — zero `-e` override anywhere in either deploy invocation.
 
-Verdict: **PASS** — the same Thanos Query datasource Grafana's dashboard
-panel reads from returns real, live data, proving Prometheus → sidecar →
-Thanos Query federation all work end-to-end, entirely from group_vars.
-
-```bash
-$ docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -i thanos   # on nexus
-pilot-thanos-query    Up 41 minutes   0.0.0.0:10911->10901/tcp, 0.0.0.0:10912->10902/tcp
-pilot-thanos-compact  Up 41 minutes   0.0.0.0:10905->10905/tcp
-pilot-thanos-store    Up 41 minutes   0.0.0.0:10903-10904->10903-10904/tcp
-pilot-thanos-sidecar  Up 41 minutes   0.0.0.0:10901-10902->10901-10902/tcp
-```
+Verdict: **PASS** — Prometheus → sidecar → Thanos Query federation works
+end-to-end, entirely from group_vars, cast `08-verify-4.1-4.5.cast`.
 
 ### 4.3 Log queryable from Grafana (Grafana → Loki ← Promtail on nexus)
 
@@ -639,18 +743,18 @@ $ curl -s "http://192.168.122.5:3100/loki/api/v1/label/job/values"
 {"status":"success","data":["pilot-siem"]}
 
 $ curl -s -G "http://192.168.122.5:3100/loki/api/v1/query_range" --data-urlencode 'query={job=~".+"}' --data-urlencode 'limit=5'
-{"status":"success","data":{"resultType":"streams","result":[{"stream":{"filename":"/var/lib/docker/volumes/single-node_wazuh_logs/_data/alerts/alerts.log","job":"pilot-siem"},"values":[
-  ["1784119689503021892",""],
-  ["1784119689503018454","uid: 0"],
-  ["1784119689502958429","Jul 15 12:48:07 ipa1.ipa.pilot.internal sshd-session[30398]: pam_unix(sshd:session): session opened for user root(uid=0) by root(uid=0)"],
-  ["1784119689502954649","User: root"],
-  ["1784119689502818525","Rule: 5501 (level 3) -> 'PAM: Login session opened.'"]
+{"status":"success","data":{"resultType":"streams","result":[{"stream":{"filename":"/var/lib/docker/volumes/single-node_wazuh_logs/_data/alerts/2026/Jul/ossec-alerts-17.log","job":"pilot-siem"},"values":[
+  ["1784263184980799066",""],
+  ["1784263184980795793","tty: ssh"],
+  ["1784263184980793433","euid: 0"],
+  ["1784263184980791239","uid: 0"],
+  ["1784263184980788797","Jul 17 04:39:43 client-vm.ipa.pilot.internal sshd[13693]: pam_unix(sshd:auth): authentication failure; ... user=bob"]
 ]}]}}
 ```
 
-Verdict: **PASS** — real Wazuh alert lines present in Loki via
-`log-shipping` auto-detecting the co-located `wazuh-manager` container's
-alerts volume, with zero `-e siem_log_root=`/`-e target_group=` override.
+Verdict: **PASS** — real Wazuh alert lines present in Loki (this round
+even captured `bob`'s own real denied-login attempt from §4.1 as a live
+log line), zero `-e siem_log_root=`/`-e target_group=` override.
 
 ### 4.4 Restic backup timers
 
@@ -658,9 +762,65 @@ alerts volume, with zero `-e siem_log_root=`/`-e target_group=` override.
 $ systemctl is-active restic-backup.timer; systemctl is-enabled restic-backup.timer   # (all 3 hosts)
 active
 enabled
+
+$ restic snapshots   # after `source /etc/pilot/restic-env` (env vars, not on-path by default)
+ID        Time                 Host                          Tags        Paths
+------------------------------------------------------------------------------
+39f4c99b  2026-07-17 04:33:41  client-vm.ipa.pilot.internal              /etc
+742693a6  2026-07-17 04:33:44  ipa1.ipa.pilot.internal                   /etc
+df603010  2026-07-17 04:33:47  nexus                                     /etc
 ```
 
-Verdict: **PASS** on `freeipa-server`, `nexus`, and `client-vm`.
+Verdict: **PASS** on `freeipa-server`, `nexus`, and `client-vm` — timers
+active/enabled on all three, real shared-repo snapshots from all three
+hostnames, and a manually-triggered `systemctl start restic-backup.service`
+produced a fresh 4th snapshot immediately.
+
+### 4.5 Wazuh File Integrity Monitoring (FIM)
+
+```bash
+$ ssh root@192.168.122.6 "touch /etc/wazuh_test_fim_trigger_v7"
+$ ssh root@192.168.122.5 "docker exec pilot-wazuh.manager-1 tail -n 300 /var/ossec/logs/alerts/alerts.log | grep -A5 -B5 wazuh_test_fim_trigger_v7"
+** Alert 1784263187.3904940: - ossec,syscheck,syscheck_entry_added,syscheck_file,...
+2026 Jul 17 04:39:47 (client-vm.ipa.pilot.internal) any->syscheck
+Rule: 554 (level 5) -> 'File added to the system.'
+File '/etc/wazuh_test_fim_trigger_v7' added
+Mode: whodata
+```
+
+Verdict: **PASS** — real-time whodata FIM alert within seconds of the
+trigger, cast `08-verify-4.1-4.5.cast`.
+
+### 4.6 FreeIPA identity reconciler — remove / restore+drift / idempotency
+
+Full cycle re-verified live on this round's fresh roster, per the
+`delivery-test` skill §4.6 (casts `10-deploy-freeipa-identity-remove-alice.cast`,
+`11-deploy-freeipa-identity-restore-and-drift.cast`,
+`12-deploy-freeipa-identity-idempotent-rerun.cast`):
+
+1. **Removal**: dropped `sysops` from `alice`'s `groups:` in
+   `.vault/ipa-identity.yaml`, redeployed (`ok=30 changed=3 failed=0`).
+   Both `ipa hbactest --service=sshd` and live SSH flipped to denied
+   (`Connection closed by 192.168.122.6 port 22`); `alice`'s
+   `krbLastPwdChange`/`krbPasswordExpiration` unchanged throughout
+   (password provably undisturbed).
+2. **Restore + drift-correction in the same edit**: restored `sysops` to
+   `alice`'s `groups:` **and** added `/usr/bin/journalctl` to
+   `sysops-systemctl`'s `allow_commands:`, redeployed
+   (`ok=30 changed=5 failed=0`). Both flipped back live: `ipa hbactest`
+   → `Access granted: True`, `sudo systemctl is-active ssh` → `active`,
+   and the **new** `sudo journalctl -n 3 --no-pager` command worked
+   immediately (drift-correction confirmed, not just membership).
+   Password still provably undisturbed.
+3. **Idempotency**: a final no-op rerun (no roster changes) settled to
+   `ok=30 changed=2 failed=0` — exactly the two already-documented,
+   pre-existing non-idempotent items (`bob`'s still-`force_password: true`
+   test password, and `hbacrule-disable allow_all`'s own non-idempotent
+   quirk). No new drift, no regression.
+
+Verdict: **PASS** — the reconciler design (password self-change
+protection, attribute-drift `*-mod` reconciliation, membership/attachment
+diffing) holds on a completely independent, from-scratch round 7 rebuild.
 
 ---
 
@@ -693,6 +853,8 @@ Verdict: **PASS** on `freeipa-server`, `nexus`, and `client-vm`.
 | 23 | (follow-up to #22, same day) Surveying `deploy_catalog.go`'s remaining `AutoHostVars` entries turned up the identical asymmetry in 3 more places (confirmed each one is genuinely missing, not just missed by a shallow `grep` — the earlier survey's first pass wrongly credited `prometheus-apply.yml`/`thanos-query-apply.yml` with already having a `thanos_s3_target_host` fallback because of an unrelated `groups.get('seaweedfs-s3', ...)` match used only for a bucket-creation `delegate_to`, not an auto-detect): `wazuh-manager-apply.yml`'s `siem_forward_host` (from the `log-server` group), `prometheus-apply.yml`'s `alertmanager_target_host` (from the `alertmanager` group), and `dashboard-apply.yml`'s `thanos_query_target_host` (from the `thanos-query` group) each degrade the same way #22 did on a site-wide deploy — silently left at their documented empty/skip default, correctly in `prometheus`/`dashboard`'s case (their own gates fail loudly if the destination is genuinely unresolvable, so no silent-and-wrong config resulted) but still a real gap versus what the single-component wizard would have auto-filled. Confirmed live in this pass's own environment: `alertmanager_target_host` was left commented-out in `group_vars/prometheus.yml` the entire session (Prometheus's alerting integration was never actually wired to the real Alertmanager, despite one existing in the same inventory) — not caught by the §4 verify suite because nothing in §4.1-4.6 exercises Alertmanager routing specifically. `thanos_query_target_host` happened not to bite this pass only because it was one of the 3 fields manually filled during the group_vars-editing step (§2.2) — an operator who skipped that field, same as `wazuh_manager_host` before #22, would have hit it too. **`wazuh-fim-apply.yml`'s own remaining `thanos_s3_target_host`-shaped variable does NOT have this gap** — that one really does already have the fallback (`restic-backup-apply.yml`'s original, correctly-identified case). | **Fixed at the source, all 3**: added the identical `pre_tasks` `set_fact` auto-detect pattern to each (`wazuh-manager-apply.yml` from `groups.get('log-server', [])`, `prometheus-apply.yml` from `groups.get('alertmanager', [])`, `dashboard-apply.yml` from `groups.get('thanos-query', [])`), same idiom as #22. `ansible-playbook --syntax-check` clean on all 3; `scripts/check-yaml-duplicate-keys.py` clean across the repo. Verified live, each in isolation (temporarily blanking the relevant `group_vars` value, or omitting the `-e` override entirely, then restoring it): `prometheus-apply.yml --check --diff` against `nexus` with no `-e alertmanager_target_host` now shows `Auto-detect Alertmanager host ...` → `ok`, `Pin alertmanager-backend -> 192.168.122.6 in /etc/hosts` → `ok` (previously `skipping`); `dashboard-apply.yml` the same for `thanos_query_target_host`; `wazuh-manager-apply.yml`'s equivalent task correctly `skipping` (not erroring) in this topology, since it has no `log-server` group to detect. Left un-fixed, flagged only: this topology's own `group_vars/prometheus.yml` still had `alertmanager_target_host` commented out at the time of writing — a genuine gap in this pass's own workspace completeness (§2.2), not re-applied as part of this fix since the point was to verify the playbook-level fallback works, not to change this session's already-passing §4 verification state. |
 
 | 24 | (round-6/v6.0 ground-up rebuild, 2026-07-17) `freeipa-identity-apply.yml`'s password-set logic never actually gives a **brand-new** user a Kerberos key unless the roster entry has `force_password: true`. This session's disposable roster followed the *steady-state* convention documented in v4.5/the header comment (`force_password: false` for an already-onboarded user whose password is meant to be protected from re-clobbering) for `alice` — correct for a roster being reapplied to an *already-provisioned* environment, but wrong for a genuinely first-time-ever apply, which is exactly what a ground-up rebuild always is. The "Look up password-expiry state" task (which decides whether an account still needs a reset, including the documented "no key yet ⇒ proceed" fallback) was itself gated `when: item.force_password \| default(false) \| bool` — so for `force_password: false` it never ran at all, and the final "Set password" task's own gate required the same flag, so `alice` was created via `ipa user-add` (which never sets a password) and then **never got a password set by any task**, leaving her with zero Kerberos key material. Confirmed live: `ipa user-show alice --all --raw` had no `krbLastPwdChange`/`krbPasswordExpiration` attributes at all (not even the "just admin-reset" identical-timestamps state), and `kinit alice` failed with a confusing `Pre-authentication failed: Invalid argument` — not a recognizable "wrong password" or "no such user" error, so this would be a genuinely confusing failure for a real operator to diagnose blind. | **Fixed at the source**: the password-expiry lookup now runs for every user with a `password` declared, regardless of `force_password` (comment updated to explain why). The final "Set password" task's `when` now fires on `(force_password: true) OR (the account genuinely has no working password yet, per the existing `ipa_pwd_needs_reset` signal)` — so a brand-new account always gets its initial password set on first apply, while an already-personalized `force_password: false` user's password remains protected from being clobbered on a routine rerun (the v4.8/v5.x design intent is fully preserved, just no longer gated on a flag that a steady-state roster legitimately sets to `false` from day one). `ansible-playbook --syntax-check` and `scripts/check-yaml-duplicate-keys.py` both clean. Verified live end-to-end: redeployed `freeipa-identity` with the unmodified disposable roster (`force_password: false` still on `alice`), confirmed `ipa user-show alice --all --raw` now shows `krbLastPwdChange`==`krbPasswordExpiration` (fresh admin-reset "must change" state), then completed the real `kinit alice` forced-password-change flow successfully — unblocking the rest of this pass's §4.1 HBAC/sudo live-SSH verification. |
+
+| 25 | (round-7/v7.0 ground-up rebuild, 2026-07-17) §4.1's live-SSH sudo tests for `alice` both failed on the **very first attempt** right after a genuinely fresh site-wide + `freeipa-identity` deploy — `sudo -S systemctl is-active ssh`/`sudo -S cat /etc/shadow` both returned `alice is not allowed to run sudo on client-vm`, and `sudo -l -U alice` on the client agreed ("not allowed"), even though `ipa hbactest --user=alice --service=sudo` on the server already reported `Access granted: True` and `client-vm`'s `sssd.conf`/`nsswitch.conf` were both correctly configured (`sudoers: files sss`, `sudo_provider = ipa`, `sssd-sudo.socket` active and listening — `freeipa-client-apply.yml` deliberately does **not** list `sudo` in `services=`, since doing so breaks SSSD's socket-activated sudo responder on Ubuntu 24.04/sssd 2.9.4, a different, already-correct design documented inline in that playbook). This is the same underlying mechanism as the already-documented Real bugs #15/#20 (SSSD's sudo responder not immediately reflecting server-side rule state), but those were documented specifically for *"a rule was just changed on an already-enrolled client"* — this round reproduced it on a client that had **never** attempted a sudo lookup before at all, i.e. the golden-path first-ever verification pass, which the runbook's own §4.1 procedure didn't previously flag as needing the same refresh. | **Not a code bug — confirmed as expected SSSD behavior, same fix as #15/#20**: `sss_cache -E && systemctl restart sssd` on the client immediately unblocked it — `sudo -l -U alice` then correctly listed `(root) /usr/bin/systemctl`, and both the live-SSH allow (`active`) and deny (`Sorry, user alice is not allowed to execute '/usr/bin/cat /etc/shadow' ...`) commands passed cleanly (cast `09-verify-4.1-retry-alice-sudo.cast`). **Documentation fix applied here**: §4.1 above and this runbook's top banner now call out that this refresh may be needed on the *first* sudo attempt after a fresh rebuild, not only after a later rule edit — closing the gap between what #15/#20 already knew and what a first-time reader of this runbook's own §4.1 steps would have hit blind. No `pilot`/Ansible source change proposed — the client-side socket-activation behavior that makes `services=` deliberately exclude `sudo` is correct and already explained in `freeipa-client-apply.yml`'s own comment; a source-level auto-refresh would require the `freeipa-identity` playbook (which only targets the `freeipa-server` group by design) to also reach into every enrolled client host, a real architecture change worth its own scoping decision if this bites often enough in practice to justify it. |
 
 **Also observed, not fixed this round**: the "Ensure X exists" tasks in `freeipa-identity-apply.yml` (groups, users, sudo/HBAC rules) are create-only — `ipa sudorule-add`/etc. treat "already exists" as a benign no-op, so once a rule/group/user exists, later roster edits to its attributes (scope, category, membership) are **not** reconciled on rerun; the live object only catches up if it's deleted first. This is why re-verifying #15/#16 required deleting `devops-sudo` before rerunning — a rule created under an older, buggier roster/playbook combination silently keeps its stale attributes forever otherwise. Not fixed here: converting to a true reconcile-on-diff model (`sudorule-mod` for existing rules, handling category↔list transitions, membership removal) is a materially larger change than a single-field fix and deserves its own scoping decision.
 
@@ -763,6 +925,7 @@ generate`, not reuse stale IPs from this document.
 | 2026-07-16 | v5.3 | Follow-up to v5.2's Real bug #22, per explicit user request to fix the same class of gap wherever else it exists. Surveying the rest of `deploy_catalog.go`'s `AutoHostVars` entries (site-wide-vs-single-component wizard convenience) found 3 more genuinely missing inventory auto-detect fallbacks — see § Real bugs #23 for the full write-up, including a correction to v5.2's own scoping (an earlier shallow `grep` had wrongly credited `prometheus-apply.yml`/`thanos-query-apply.yml` with already having a `thanos_s3_target_host` fallback; they don't, but that one wasn't part of this fix batch and is left as a known remaining gap). Fixed at the source in `wazuh-manager-apply.yml` (`siem_forward_host` ← `log-server` group), `prometheus-apply.yml` (`alertmanager_target_host` ← `alertmanager` group), and `dashboard-apply.yml` (`thanos_query_target_host` ← `thanos-query` group), same `pre_tasks` `set_fact` idiom as #22. All 3 syntax-checked clean and verified live in isolation against the still-running demo VMs (temporarily blanking the relevant `group_vars` value or omitting the wizard's own `-e` override, confirming the playbook's own fallback — not the wizard convenience — supplies the value; `wazuh-manager`'s correctly no-ops in this topology, which has no `log-server` group). No re-verification of the full §4 suite was needed — none of these 3 variables are exercised by v5.2's already-passing checks (Alertmanager routing and SIEM forwarding aren't part of §4.1-4.6), and the isolated live checks are sufficient evidence the fix works. | sre |
 | 2026-07-16 | v5.1 | Completed the two §4.1 live-SSH `alice` allow/deny checks that Real bug #14 had left as a documented (not reproduced-and-fixed) known limitation, per explicit user request to evaluate and execute a real method. Deliberately reproduced the blocked "must change" state via a direct out-of-box `ipa passwd alice` on the FreeIPA server (confirming a routine `freeipa-identity` redeploy with `force_password: true` on an already-personalized user does **not** reproduce it — v4.8's Phase 0 protection correctly declined the reset, `changed=1` only for an unrelated sudo-rule add), then unblocked it with a scripted, repeatable `trec drive` session driving `kinit alice`'s 3-line forced-change flow (secrets via `TEXT_ENV`/`--secret-env`, never in the recording) — cast `09-kinit-alice-personalize.cast`. Confirmed via `ipa user-show alice --all --raw` that `krbLastPwdChange`/`krbPasswordExpiration` diverged (genuinely personalized, not another admin reset). First verify attempt (cast `10-verify-4.1-alice-live-ssh.cast`) surfaced an unrelated, this-session-only roster mistake: the disposable `.vault/ipa-identity.yaml`'s sudo rule used `cmdcat: all` (unrestricted — grants `cat /etc/shadow` too), not the documented narrow `allow_commands: [/usr/bin/systemctl]` from `freeipa-identity.roster.example.yaml`, making the deny case meaningless. Not a `pilot` bug — a roster-authoring mistake in this session's own test fixture. Fixed by deleting the live `devops-sudo` rule and redeploying with a corrected `sysops-systemctl` rule (`allow_commands: [/usr/bin/systemctl]`, cast `11-redeploy-identity-narrow-sudo.cast`, `ok=27 changed=5 failed=0`, password task correctly `skipping` since `force_password` was left `false`). Final clean re-verification (cast `12-verify-4.1-alice-live-ssh-final.cast`, run with `-o ControlMaster=no` on every call — see below): `alice` allow → `sudo systemctl is-active ssh` = `active` (exit 0); `alice` deny → `sudo cat /etc/shadow` = `Sorry, user alice is not allowed to execute '/usr/bin/cat /etc/shadow' as root on client-vm.ipa.pilot.internal.` (exit 1). **New testing gotcha found and documented** (not a `pilot` bug — a local SSH client config interaction): this session's `~/.ssh/config` has `ControlMaster auto`/`ControlPersist 600`, which silently reuses an already-authenticated multiplexed connection for a later "fresh" `sshpass`/`ssh` call to the same `user@host` — a first check right after the deliberate block was created returned a clean login with no error purely because it reused an earlier session's multiplexed connection, masking the genuine block; a subsequent attempt with `-o ControlMaster=no` correctly surfaced `Password change required but no TTY available`. Documented in `.agents/skills/delivery-test/SKILL.md` (§4.1 rewrite + two new troubleshooting rows) so this doesn't cost a future session the same false-negative. See Real bug #14's v5.1 note for the full write-up. | sre |
 | 2026-07-17 | v6.0 | **Genuine ground-up rebuild (round 6)**, independent re-verification per explicit request. All 3 VMs torn down and recreated fresh (`freeipa-server .4`, `nexus .3`, `client-vm .6` — a new lease assignment, different from every prior round's IPs), the entire `tmp/pilot-verify-minimal-poc/` workspace deleted and rebuilt from nothing via scripted `trec drive` sessions (`trec mcp` server showed as connected via `claude mcp list` but surfaced no callable `mcp__trec__*` tools this session either, same as prior rounds — flagged transparently, CLI scripting used throughout per the skill's documented fallback). Indices recomputed fresh from `internal/inventory/contracts.go`/`cmd/pilot/cmd/deploy_catalog.go` (role checklist and catalog order unchanged from v5.x, but recomputed rather than assumed). `hosts.yml`'s 3-host, 19-role build succeeded correctly on the first `trec drive` attempt with no index mistakes this round. Filling in `group_vars`/vault values via the wizard required discovering that `pilot edit`'s group_vars entries menu surfaces **every** `key: value`-shaped line in a file — including commented-out example blocks nested deep in prose comments (e.g. `prometheus.yml` has 19 such entries, `restic-backup.yml` has 18) — not just the one active setting; an initial `restic-backup.yml` edit miscounted this by one and had to be corrected mid-script (caught before any bad save, via the file's actual on-disk content, not the wizard's exit code). Both `pilot deploy` invocations (site-wide, then `freeipa-identity`) needed **zero** extra `-e` variables — the user's explicit "stop and explain if `-e` is needed" gate was never triggered. `PLAY RECAP`: site-wide preview `client-vm: ok=52 changed=19 failed=0`, `freeipa-server: ok=45 changed=16 failed=0`, `nexus: ok=77 changed=27 failed=0`; site-wide real apply `client-vm: ok=84 changed=41 failed=0`, `freeipa-server: ok=78 changed=34 failed=0`, `nexus: ok=152 changed=74 failed=0`; `freeipa-identity: ok=30 changed=12 failed=0` (first pass, before Real bug #24's fix — password-set silently no-opped for `alice`) then `ok=30 changed=2 failed=0` (redeploy after the fix, `alice`'s password now genuinely set). **One new real bug found and fixed at the source** — see § Real bugs #24: this pass's disposable roster carried forward the *steady-state* `force_password: false` convention for `alice` (correct for a roster being reapplied to an already-onboarded environment) into a genuinely first-time-ever apply, and `freeipa-identity-apply.yml`'s password-set logic turned out to be entirely gated on that flag with no "this account has never had a password at all" fallback actually reachable — `alice` was created via `ipa user-add` (which never sets a password) and then never got one set by any task, leaving her with zero Kerberos key material and a confusing `kinit: Pre-authentication failed: Invalid argument` instead of a recognizable error. Fixed by running the password-expiry lookup for every user with a declared password (not just `force_password: true` ones) and gating the actual `ipa passwd` call on `force_password: true` **OR** "this account genuinely has no working password yet" — preserving the original protect-a-personalized-password intent while closing the first-time-onboard gap. Verified live end-to-end: redeployed `freeipa-identity` unmodified otherwise, confirmed `alice` now reaches the fresh-admin-reset "must change" state, completed the real `kinit alice` forced-password-change flow, then ran the full §4.1 HBAC/sudo live-SSH suite successfully. Full §4.1–§4.4 suite **PASS**: live-SSH `alice` sudo allow (`systemctl is-active ssh` → `active`) + deny (`cat /etc/shadow` → denied) + `bob` SSH denied at the auth layer, all cross-checked against `ipa hbactest` for both `sshd` and `sudo` services (all four agree); Grafana→Thanos Query→Prometheus (`up{site="site-nexus"}`, zero `-e` override); Grafana→Loki←Promtail (captured `alice`'s real sudo-denial event as a live log line within the same verification pass — `USER=root COMMAND=/usr/bin/cat /etc/shadow`); restic-backup timers `active`/`enabled` on all 3 hosts. | sre |
+| 2026-07-17 | v7.0 | **Genuine ground-up rebuild (round 7)**, independent re-verification per explicit request. All 3 VMs torn down and recreated fresh (`freeipa-server .3`, `nexus .5`, `client-vm .6`), the entire `tmp/pilot-verify-minimal-poc/` workspace deleted and rebuilt from nothing. Every `pilot edit`/`pilot inventory generate`/`pilot deploy` wizard step driven and recorded via `trec drive --script` (this session's `mcp__trec__terminal_start`/`terminal_write` MCP tools could hold a persistent PTY but could not deliver a real carriage-return byte through the MCP text channel when launching `pilot edit` directly — confirmed by then launching `trec drive --interactive` itself as the MCP session's command instead, whose own DSL parser consumed the keystrokes fine; the **recorded evidence** for every step still used one-shot `trec drive --script`, per the skill's own MCP-is-reconnaissance-only guidance). Also found `PILOT_DEBUG_MENU=1`'s stderr dump actively breaks `SELECT` on the very first row of a fresh non-wrapping list (the dump line repeats that row's label one line above the live list, confusing the direction heuristic into pressing DOWN forever) — omitted for all recorded runs once identified. Both `pilot deploy` invocations (site-wide, then `freeipa-identity`) needed **zero** extra `-e` variables — the user's explicit "stop and explain if `-e` is needed" gate was never triggered at any point across 4 separate `pilot deploy` invocations this round (site-wide ×2 including the idempotent re-run, `freeipa-identity` ×4 including remove/restore/idempotent-rerun). `PLAY RECAP`: site-wide preview `client-vm: ok=52 changed=19 failed=0`, `freeipa-server: ok=45 changed=16 failed=0`, `nexus: ok=78 changed=27 failed=0`; site-wide real apply `client-vm: ok=84 changed=41 failed=0`, `freeipa-server: ok=78 changed=34 failed=0`, `nexus: ok=152 changed=74 failed=0`; `freeipa-identity: ok=30 changed=12 failed=0` (first apply — both `alice`/`bob` first-time password set correctly, confirming v6.0's Real bug #24 fix holds independently). Full §4.1–§4.6 suite **PASS**: HBAC/sudo allow+deny for both `sshd` and `sudo` services (all four `ipa hbactest`/live-SSH combinations agree); Grafana→Thanos Query→Prometheus and Grafana→Loki←Promtail both real (Loki captured `bob`'s own denied-login attempt as a live line); restic-backup timers + real shared-repo snapshots on all 3 hosts; Wazuh FIM real-time whodata alert; the full §4.6 reconciler cycle (remove `alice` from `sysops` → denied both layers, password undisturbed → restore **and** add `/usr/bin/journalctl` to the sudo rule in the same edit → both drift-correct live → idempotent no-op rerun settles to `changed=2`, exactly the two pre-documented non-idempotent items). A separate **full site-wide idempotent re-run** (not just `freeipa-identity`'s) also confirmed: preview `changed=0` on all 3 hosts, real apply `changed=0`/`0`/`1` (`client-vm`/`nexus`/`freeipa-server`; the lone `freeipa-server` change is a cosmetic Dogtag-PKI-owned directory-mode reset, not a `pilot`/playbook bug). **One real, reproducible operational finding** — see § Real bugs #25: the already-documented SSSD sudo-cache-staleness gotcha (#15/#20, previously scoped to "after a rule was changed on an already-enrolled client") also blocks the **very first** sudo attempt after a genuinely fresh deploy, which this runbook's own §4.1 procedure didn't previously call out; fixed here as a documentation gap (this changelog entry + the top banner + §4.1's write-up), not a source code change — the underlying `sudo` responder socket-activation design in `freeipa-client-apply.yml` is already correct and documented. | sre |
 
 
 ---
@@ -778,6 +941,6 @@ generate`, not reuse stale IPs from this document.
 - [x] Secrets go through `tmp/pilot-verify-minimal-poc/.vault/*.yaml`, never inline in this doc (key names only)
 - [x] Variable names match spec exactly
 - [x] Alignment decision (B — fix spec/plan, not environment) recorded in §0.5
-- [x] Timestamp on fact snapshot (2026-07-15T20:33:00Z) matches when the run happened
+- [x] Timestamp on fact snapshot (2026-07-17T04:49:29Z) matches when the run happened
 - [ ] Public version / redaction gate — **not yet applied**; this document is internal-only (plaintext vault values are referenced by key name only, but lab IPs and internal FQDNs are not yet redacted)
 - [ ] Secret scan / `git diff --check` — not yet run against this file
