@@ -377,7 +377,7 @@ docker run --rm -v "$(pwd)/hosts.yml:/pilot/hosts.yml:ro" pilot-cli:latest pilot
 ### `pilot edit` — 選單式編輯 hosts.yml / group_vars（免文字編輯器）
 
 不想／不熟悉直接改 YAML 檔的話，`pilot edit` 提供跟 `pilot deploy` 同一套
-promptui 問答選單，把「打開檔案、找到那一行、改值、存檔」變成「選主機→選欄位
+選單式問答介面，把「打開檔案、找到那一行、改值、存檔」變成「選主機→選欄位
 →輸入新值」：
 
 - **hosts.yml**：新增/刪除主機、逐欄編輯 `ansible_host`／`ansible_user`／SSH

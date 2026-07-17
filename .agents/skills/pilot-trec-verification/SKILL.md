@@ -120,14 +120,42 @@ grep -n 'Name:' internal/inventory/contracts.go       # pilot edit's role checkl
   into the wrong menu silently. Before writing `DOWN <n>` to reach a
   save/exit item, count the **actual current item list**, not what you
   remember from the runbook prose.
-- When in doubt, step through the wizard once yourself before writing
-  the full script and read the screen to confirm the item list. If you
-  have a real interactive terminal, do this by hand. If you're an agent
-  whose shell tool only spawns one-shot subprocesses (this session's
-  `Bash` tool included), you cannot hold `trec drive --interactive`'s
-  stdin open across calls to do this — use `trec mcp`'s stateful tools
-  instead (§4a) rather than guessing from a short throwaway script and
-  hoping it matches.
+- **`hosts.yml`/`group_vars`/`.vault` menus are data-dependent, not
+  source-order-fixed** — unlike `deploy_catalog.go`/`contracts.go`,
+  their item count depends on the *current contents* of the files being
+  edited (existing hosts, existing group_vars keys including ones
+  buried in commented-out example prose, existing vault keys). A static
+  `grep` on source can't tell you this; you need the live menu.
+- **Set `PILOT_DEBUG_MENU=1` to get the live item list for free**, for
+  *every* `promptSelectIndex` menu in `pilot edit`/`pilot deploy`
+  (shared helper, `cmd/pilot/cmd/deploy.go`): it prints each menu's full
+  item list to stderr, one line per item, 0-based and in the exact
+  order `DOWN <n>` counts from (cursor always starts at row 0 on a
+  fresh menu) — e.g. `[pilot:menu]   3: 離開`. Stderr is captured into
+  the same PTY stream `trec` records, so it shows up in the `.cast`
+  and in `trec transcript` output right before that menu renders — no
+  extra step needed beyond adding the env var to the driven command.
+  This is strictly better than eyeballing the rendered screen or
+  recomputing from source: it reflects the *actual* live item list at
+  the moment the menu is shown, including any file-content drift.
+  Prepend it to every driving invocation in this skill, e.g.:
+  ```bash
+  PILOT_DEBUG_MENU=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
+    --key-delay 150 --settle-delay 400 --timeout <generous> \
+    -o "$SCRATCH/casts/01-edit-hosts.cast" -- pilot edit --dir "$SCRATCH/demo"
+  ```
+  It's a no-op for normal human interactive use (gated behind the env
+  var; doesn't touch the rendered menu itself).
+- This still doesn't remove the need to *reach* the menu you want to
+  count — you still have to drive the wizard forward to it. When in
+  doubt, step through the wizard once yourself before writing the full
+  script. If you have a real interactive terminal, do this by hand. If
+  you're an agent whose shell tool only spawns one-shot subprocesses
+  (this session's `Bash` tool included), you cannot hold `trec drive
+  --interactive`'s stdin open across calls to do this — use `trec
+  mcp`'s stateful tools instead (§4a), with `PILOT_DEBUG_MENU=1` set on
+  the driven process, rather than guessing from a short throwaway
+  script and hoping it matches.
 
 See `references/index-computation.md` for a worked walkthrough.
 
@@ -166,15 +194,34 @@ CI=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   -- pilot edit --dir "$SCRATCH/demo"
 ```
 
-- `CI=1` is required whenever the script touches the role checklist —
-  it's the one Bubble Tea screen in this codebase, and without `CI=1`
-  it hangs ~5s per invocation on an OSC background-color query under a
-  bare PTY.
-- `promptui.Prompt{AllowEdit:true}` fields (ansible_host, ansible_user,
-  ssh key path, vault entry values, …) **pre-fill the current/default
-  value with the cursor at the end** — plain `TEXT` appends instead of
-  replacing. Always `BACKSPACE <n>` (n ≥ the current value's length;
+- **`CI=1` is now required for every `pilot edit`/`pilot deploy`
+  invocation, full stop** — as of the 2026-07-17 Bubble Tea rewrite
+  (see `cmd/pilot/cmd/edit_tui.go`/`deploy_tui.go`), both commands are
+  100% Bubble Tea, not just the one role-checklist screen from before.
+  Every screen triggers bubbletea's package-init OSC background-color
+  query the first time any `tea.Program` runs in the process; without
+  `CI=1` it hangs ~5s on that query under a bare PTY with nothing to
+  answer it. Don't special-case this to "only when the role checklist
+  is involved" anymore — always set it.
+- Text-entry fields (ansible_host, ansible_user, ssh key path, vault
+  entry values, …) still **pre-fill the current/default value with the
+  cursor at the end** — plain `TEXT` appends instead of replacing, same
+  as before the rewrite (now `bubbles/textinput` under the hood instead
+  of promptui's readline, deliberately kept identical — see
+  `tui_textinput.go`'s `TestTextInputModel_TypingReplacesRatherThanAppending`).
+  Always `BACKSPACE <n>` (n ≥ the current value's length;
   over-backspacing is harmless) before typing a new value.
+- **`pilot deploy`'s yes/no prompts now finalize on a single `y`/`n`
+  keypress — do not send a trailing `ENTER` after it.** Before the
+  rewrite, promptui's confirm was a line-editor requiring Enter to
+  submit; the new `confirmModel` (`tui_confirm.go`) answers immediately
+  on `y`/`Y`/`n`/`N` (Enter still works too, using the shown default,
+  but only when no y/n was typed first). Sending `TEXT n` then `ENTER`
+  the old way sends that stray `ENTER` on to whatever screen comes
+  *next*, silently submitting its default choice before your script's
+  own steps for that screen ever run — confirmed live 2026-07-17,
+  it derailed a `pilot deploy` preflight-mode select this way. Send
+  just `n` (or `y`) and move on to the next `EXPECT`.
 - `pilot edit`'s vault editor explicitly refuses nested-structure YAML
   ("複雜 YAML（例如 roster/list/nested map）") and tells you to use a
   text editor instead. That is a legitimate, tool-endorsed exception to
@@ -217,48 +264,123 @@ CI=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   global default in every build. Set `--timeout` to at least as large as
   your longest `EXPECT@` value; don't rely on the per-step value alone.
 
-### SELECT can be unreliable — verify before trusting it, fall back to DOWN <n>
+### SELECT is now reliable for `pilot edit` — re-verified live 2026-07-17
 
-If your `trec` build supports the closed-loop `SELECT`/`EXPECT`/`ASSERT`
-DSL (check with `trec drive --help`; not every checkout has it), it is
-strictly better than blind `DOWN <n>` counting *when it works* — but it
-has been observed to fail in two ways in practice:
+The previous version of this section documented `SELECT` failing with a
+stale-pointer bug specifically when a menu came right after (or later
+in the same script than) the one bubbletea screen that used to exist
+(the role checklist), while the rest of `pilot edit` was still
+promptui. The root cause was never `SELECT` itself — it was **switching
+between two different rendering libraries mid-session** (promptui's
+inline scrolling vs. bubbletea's screen model), which left trec's
+screen-tracking confused across that boundary.
 
-- **Stale pointer after a bubbletea full-screen program** (this repo's
-  role checklist is the one bubbletea screen): once any checklist has
-  run, `SELECT` on later promptui menus can report "not reached after
-  150 presses" while stuck matching a pointer line left over from the
-  checklist, even though the live screen has clearly moved on. This
-  contamination was observed to persist across *multiple* subsequent
-  menus and even into a *later, brand-new* checklist instance later in
-  the same script — it is not a one-hop effect.
-- **Failure on a completely fresh screen**, with no checklist involved
-  at all (observed on the very first `promptSelectIndex` menu of a
-  freshly-started process) — so "only avoid SELECT right after a
-  checklist" is not a fully safe mitigation either.
+As of the 2026-07-17 rewrite, `pilot edit` is **one continuous Bubble
+Tea `tea.Program` for the whole invocation** (see `edit_tui.go`'s
+router) — every screen, including the role checklist, is now the same
+rendering model throughout, so that boundary no longer exists. Re-ran
+a full `trec drive --script` walkthrough (`CI=1`, default `--pointer`)
+covering: top menu → hosts.yml → add host → host menu → roles menu →
+role checklist (toggle + confirm) → **back to roles menu, then host
+menu, then host list, all via `SELECT` immediately after the
+checklist** → save → top menu → quit. Every `SELECT` matched correctly
+on the first try; the process exited 0 with the expected file written.
+**`SELECT` is the recommended default for `pilot edit` now** — prefer
+it over `DOWN <n>` counting, since it survives a menu's item count
+drifting (see §2) without needing to recompute an index.
 
-Given this, the reliable approach in this codebase is **plain `DOWN <n>`
-index counting for every promptui.Select menu** (`pilot edit`'s
-hosts/group_vars/vault menus, `pilot deploy`'s scope/stage/catalog
-menus), computed fresh per §2/`references/index-computation.md` — cursor
-reliably resets to 0 on every fresh `promptSelectIndex` call, which is
-what makes absolute (not delta) `DOWN <n>` counts dependable run after
-run. Reserve `SELECT` (if available) for rows *inside* a single
-bubbletea checklist screen (role checkboxes) — that usage has been
-reliable — and verify with a short throwaway script before committing to
-`SELECT` anywhere else in a long script.
+One real gotcha hit during that same re-verification, worth carrying
+forward: **pick a label substring unique to one row.** A first attempt
+used `SELECT 完成` intending to match the roles menu's "✅ 完成" row, but
+the checklist's own row also contains "完成" in its hint text ("space
+勾選/取消、enter 完成") — `SELECT` matched that row instead and
+re-entered the checklist. Using `SELECT ✅ 完成` (the emoji prefix is
+part of the rendered row and unique) fixed it immediately. This is the
+`trec-tui-drive` skill's own rule #1 ("label 選畫面上該行獨有的子字串"),
+restated here because it's easy to reach for the shortest label that
+merely *looks* unique and be wrong. Also remember `SELECT` only moves
+the pointer — it does **not** submit; every `SELECT` still needs its
+own following `ENTER`.
 
-This finding predates this skill's §4a: the `mcp` subcommand and the
-richer `SELECT`/`EXPECT`/`ASSERT`/`WAIT_CHILD_EXIT`/`ASSERT_EXIT` DSL
-documented in the global `trec-tui-drive` skill were added to `trec`
-afterward, and that skill now recommends `SELECT` by default. Don't
-assume either this section's stale-pointer bug or that skill's
-"SELECT is fine" default is still accurate against whatever `trec`
-build is on `$PATH` today — re-verify with a throwaway `terminal_start`
-session (§4a) against a menu right after a role-checklist screen before
-trusting `SELECT` there in a real recorded run. If the stale-pointer
-symptom reproduces, fall back to `DOWN <n>`; if it doesn't, prefer
-`SELECT` and drop the index-counting overhead for that menu.
+`DOWN <n>` index counting still works identically to before (cursor
+resets to 0 on every fresh menu) and remains a fine fallback if you
+ever hit a `SELECT` mismatch — but there is no longer a known reason to
+reach for it by default in `pilot edit`.
+
+A second, subtler gotcha found in that same re-verification, worth
+knowing about explicitly: **`runEdit`'s own static banner — printed
+once via plain `fmt.Fprintln` *before* the router's `tea.Program` ever
+starts, so it's never cleared (neither `pilot edit` nor `pilot deploy`
+uses the alternate screen buffer) — stays visible in scrollback for the
+rest of the session and can collide with a `SELECT` label.** The banner
+line is literally `"═══ pilot edit — hosts.yml / group_vars / .vault
+編輯精靈 ═══"`, which contains both `hosts.yml` and `group_vars` as
+substrings. `SELECT group_vars` failed 150/150 presses, pointer
+permanently stuck at row 0, in a script otherwise identical to a
+working one — because trec's direction heuristic (walk the screen for
+another line containing the label to decide up-vs-down) found the
+label in the banner line *above* the already-topmost menu row and
+picked "up" forever, a no-op once already at row 0. The fix was a more
+specific label that isn't also a substring of the banner — `SELECT
+group_vars/` (the trailing slash, part of the real menu row's text,
+isn't in the banner) matched correctly and the run completed exit 0.
+This is the same "unique substring" rule as above, just against a
+*different, easy-to-forget* source of false matches — the static
+preamble text isn't a screen you're navigating, but `SELECT` doesn't
+know that, and it never scrolls out of the buffer since there's no
+alt-screen. When a `SELECT` mismatches with the pointer "stuck at the
+very first (or very last) row" symptom, check whether the label
+appears anywhere in `runEdit`/`runDeploy`'s own startup banner text
+before assuming it's a wizard bug.
+
+### `pilot deploy` is architecturally different — many short Programs, not one
+
+Unlike `pilot edit`, `pilot deploy`'s wizard is a long, strictly linear
+sequence with no revisitable menus (see `deploy_tui.go`'s package doc
+comment for why), so its rewrite kept the pre-existing shape of **one
+brand-new `tea.Program` per individual prompt**, run one after another
+in plain Go code — the same shape promptui's blocking `Run()` calls
+already had, just bubbletea underneath. This has its own timing
+consequence `pilot edit` doesn't: **there is a real gap, between one
+prompt's Program exiting and the next one's Program starting, where the
+terminal briefly reverts to cooked/echoed mode.** A keystroke sent into
+that gap gets swallowed into the kernel's line-buffered input instead
+of delivered to the new screen, and can resurface much later as garbled
+echoed text once some later reader (even a spawned `ansible-playbook`
+subprocess) finally drains it — confirmed live 2026-07-17: navigation
+keys meant for the preflight-mode select arrived after that screen had
+already defaulted, then echoed out verbatim once `ansible-playbook`
+started running with no raw-mode reader active.
+
+Mitigation: after every `EXPECT` for a new `pilot deploy` screen, add a
+short settle pause (~150ms was reliable) *before* sending that screen's
+first keystroke — don't rely on `EXPECT` succeeding as proof the new
+Program is already reading input.
+
+**Prefer `DOWN <n>` over `SELECT` for `pilot deploy`'s menus specifically**
+— revised after a second, distinct finding during the
+2026-07-17 3-VM-demo re-verification
+(`docs/runbooks/archived/3vm-freeipa-wazuh-grafana-demo.md` §7 — archived
+2026-07-17 as a strict subset of `docs/runbooks/minimal-poc-architecture.md`,
+which covers the same topology plus more; the finding itself still stands):
+right after the
+scope-select screen ("單一元件") transitioned into the 20-item catalog
+select, `SELECT <first catalog label>` immediately mismatched and drove
+the pointer to the *last* row instead, then reported "not reached after
+150 presses" stuck at the bottom — even though the catalog screen's own
+cursor genuinely starts at row 0 (confirmed by removing `SELECT`
+entirely and using a bare `ENTER`, which worked). The apparent cause:
+`SELECT`'s row-scan can lock onto a stale pointer marker left in
+scrollback by the *just-exited* scope-select Program (still visible
+above the new screen, since neither Program uses the alt-screen buffer)
+and compute the wrong direction from that stale position — a different
+mechanism than the keystroke-swallowing gap above, but the same root
+cause (many short-lived Programs, not one). `DOWN <n>` (absolute count
+from `deploy_catalog.go`'s `Key:` order, per §2) does not have this
+failure mode — it doesn't do a screen row-scan, so a stale pointer
+elsewhere in scrollback can't mislead it. Use `SELECT` for `pilot
+deploy` only if you've verified it against the current build for that
+specific screen transition; default to `DOWN <n>`.
 
 ---
 
@@ -287,8 +409,9 @@ Use `trec mcp`'s session tools instead (full contract: the global
 `trec-tui-drive` skill — this skill doesn't duplicate either):
 
 - `terminal_start` — launch the wizard (e.g. `pilot edit --dir
-  "$SCRATCH/demo"`, with `CI=1` if the role checklist is involved) and
-  keep the returned `session_id`.
+  "$SCRATCH/demo"`, always with `CI=1` — see §4 — and
+  `PILOT_DEBUG_MENU=1` to get each menu's live item list for free — see
+  §2) and keep the returned `session_id`.
 - `terminal_write` — send one DSL line at a time to that session
   (`TEXT`, `ENTER`, `SNAPSHOT`, `EXPECT ...`, `SELECT <label>`, …) —
   same vocabulary as a `--script` file, one step per call.
@@ -444,5 +567,6 @@ runbook using `verified-runbook`'s rules (real output only, no
 - The sibling `trec-tui-drive` skill (global) — the current `trec
   drive` DSL reference (`SELECT`/`EXPECT`/`ASSERT`/`WAIT_CHILD_EXIT`/
   `ASSERT_EXIT`/…) and its own reliability rules; read it alongside
-  this skill's §4/§4a stale-pointer note rather than trusting either
-  one alone.
+  this skill's §4 `SELECT`/timing findings (pilot-specific: reliable
+  for `pilot edit`, needs a settle pause between screens for `pilot
+  deploy`) rather than trusting either source alone.
