@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -26,6 +28,34 @@ func repoRootForTest(t *testing.T) string {
 			t.Fatal("could not find repo root (go.mod) above " + dir)
 		}
 		dir = parent
+	}
+}
+
+// TestDumpMenuDebug covers the PILOT_DEBUG_MENU=1 escape hatch used by
+// trec-scripted runs to read a promptui.Select menu's real, live item
+// list (and 0-based DOWN <n> index) from the recorded terminal output,
+// instead of recomputing it from source or eyeballing the rendered
+// screen — see .agents/skills/pilot-trec-verification/SKILL.md §2.
+func TestDumpMenuDebug(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	dumpMenuDebug("測試選單", []string{"item-a", "item-b"})
+	w.Close()
+	os.Stderr = orig
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	for _, want := range []string{"測試選單", "2 項", "0: item-a", "1: item-b"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dumpMenuDebug output missing %q; got:\n%s", want, got)
+		}
 	}
 }
 
