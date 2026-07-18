@@ -118,8 +118,8 @@ nodes:
 ```
 
 ```bash
-pilot vm-target topology up   --spec topo-smoke.yaml
-pilot vm-target topology test --spec topo-smoke.yaml \
+pilot vm-target topology up   --topology topo-smoke.yaml
+pilot vm-target topology test --topology topo-smoke.yaml \
     --playbook playbooks/site.yml \
     --verify docs/verification/docker.md=docker \
     --verify docs/verification/log-server.md=log-server \

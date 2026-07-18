@@ -51,7 +51,21 @@ apply playbook；不准為了讓既有實作過關而靜默放寬 Expected。格
 
 每一份是「**真實跑過**一遍 SOP」的文檔：每一條命令、每一個截錄的 `PLAY RECAP`、
 SQLite 寫入、恢復 SOP 都進來。**讀 runbook 比看範例更有教學價值** — 你會看到
-實際碰撞的 bug 與解法。
+實際碰撞的 bug 與解法。純散文，不會被任何 `pilot` 指令解析執行。
+
+### `topologies/` — `vm-target topology` 用的宣告式多 VM spec（`.yaml`）
+
+跟 `verification/*.md` 一樣是機器可讀的輸入，但格式是 `TopologySpec`
+（`internal/vmtarget/topology.go`）：宣告一個多 VM 情境裡每個 node 的
+provisioning 參數、`groups:`（給 `RenderGroupedInventory` 用，也是
+`topology test --verify <spec>.md=<group>` 的 limit 值來源）、`wire:`
+（互相寫 `/etc/hosts` 的對象）。由 `pilot vm-target topology
+up/down/status/inventory/snapshot/rollback/reset/test` 直接讀取執行，
+不是給人讀的文件——每份通常對應一份 `runbooks/*.md`（描述同一場景的
+prose SOP），但兩者是分開維護的機器輸入 vs 人類文件。
+
+- `minimal-poc-topology.yaml` ↔ `runbooks/minimal-poc-architecture.md`
+- `freeipa-ha-topology.yaml` ↔ `runbooks/freeipa-server-replica-ha-drill.md`
 
 ### `ansible-playbook-development.md`
 
@@ -67,6 +81,8 @@ SQLite 寫入、恢復 SOP 都進來。**讀 runbook 比看範例更有教學價
 - inspect：不再有獨立 playbook——`pilot verify docs/verification/<name>.md` 直接吃 spec 執行
   （`playbooks/verify/` 已於 2026-07-17 棄用，見該目錄 README.md）
 - runbook：`docs/runbooks/<name>.md`（每份 spec 對應一份 runbook 是合理 expectation）
+- topology spec：`docs/topologies/<name>-topology.yaml`（多 VM 情境才需要；單機
+  spec 不用）
 
 ## 跟 `.gitignore` 的協作
 

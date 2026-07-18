@@ -114,13 +114,13 @@ nodes:
 ```
 
 ```bash
-pilot vm-target topology up        --spec ha-topology.yaml   # concurrent, idempotent
-pilot vm-target topology status    --spec ha-topology.yaml   # name/status/ip/groups/wire table
-pilot vm-target topology inventory --spec ha-topology.yaml   # real ansible groups, no target_group=all hack
-pilot vm-target topology down      --spec ha-topology.yaml
-pilot vm-target topology snapshot  --spec ha-topology.yaml --tag pre-drill
-pilot vm-target topology rollback  --spec ha-topology.yaml --tag pre-drill
-pilot vm-target topology reset     --spec ha-topology.yaml
+pilot vm-target topology up        --topology ha-topology.yaml   # concurrent, idempotent
+pilot vm-target topology status    --topology ha-topology.yaml   # name/status/ip/groups/wire table
+pilot vm-target topology inventory --topology ha-topology.yaml   # real ansible groups, no target_group=all hack
+pilot vm-target topology down      --topology ha-topology.yaml
+pilot vm-target topology snapshot  --topology ha-topology.yaml --tag pre-drill
+pilot vm-target topology rollback  --topology ha-topology.yaml --tag pre-drill
+pilot vm-target topology reset     --topology ha-topology.yaml
 ```
 
 `up` provisions every not-yet-running node **concurrently** (one
@@ -145,7 +145,7 @@ steps either way.
 `RenderGroupedInventory` machinery as `run --group`, so a playbook
 whose `hosts:` pattern matches a real group name (e.g. `ipa_masters`)
 needs no `-e target_group=...` workaround — pass
-`--inventory $(...) topology inventory --spec ... --out /tmp/inv.yaml)`
+`--inventory $(...) topology inventory --topology ... --out /tmp/inv.yaml)`
 or `-e target_group=ipa_masters` against the rendered file.
 
 `snapshot`/`rollback`/`reset` apply the equivalent single-VM operation to

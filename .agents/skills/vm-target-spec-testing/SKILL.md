@@ -124,10 +124,10 @@ See `references/vm-target-basics.md`'s `--group` section.
 `references/multi-vm-networking.md`'s "Declarative topology" section.
 
 ```bash
-pilot vm-target topology up        --spec <scenario>.yaml   # concurrent, idempotent
-pilot vm-target topology inventory --spec <scenario>.yaml   # real ansible groups
-pilot vm-target topology down      --spec <scenario>.yaml
-pilot vm-target topology reset     --spec <scenario>.yaml   # every node back to clean + re-wired, in one call
+pilot vm-target topology up        --topology <scenario>.yaml   # concurrent, idempotent
+pilot vm-target topology inventory --topology <scenario>.yaml   # real ansible groups
+pilot vm-target topology down      --topology <scenario>.yaml
+pilot vm-target topology reset     --topology <scenario>.yaml   # every node back to clean + re-wired, in one call
 ```
 
 `snapshot`/`rollback`/`reset` also work at the topology level — every
