@@ -28,8 +28,8 @@ Codex/Claude 直接產生 verification spec、apply playbook 與 regression test
 | Append-only evidence | **已實作並驗證** | schema v14、operation/evidence idempotency、heartbeat/finalization、hash-verified archive/prune 與獨立 admin event stream |
 | ComponentContract | **22-component catalog/lint/preflight 已實作** | strict loader、row/tag traceability、dependency endpoint、apply/deploy catalog drift、cardinality/input/provider/OS/resource preflight；已接 deploy scope resolver 與 TUI plan |
 | M0.3/M0.4 | **已實作並驗證** | deploy transaction 記錄 preview/apply/verify/idempotency/rollback evidence；staging/prod 第二次 apply 必須 changed=0 |
-| Spec v2（M2.1–M2.3） | **M2.1/M2.2 已實作；M2.3 migration CLI 已實作** | strict v2 parser/runtime、review-gated migrate draft/sidecar；local/docker/vm/general-inventory backend 同 fixture 均 PASS；正式 spec 遷移與 staging／真實主機 acceptance 待完成 |
-| P3/P4/P5 | **核心路徑已實作並驗證** | P3 contract plan/action gate、P4 五題 model-independent corpus + deterministic gate、P5 run queries/archive/prune/admin audit；正式 v1 spec 的 target acceptance 遷移仍待另行授權 |
+| Spec v2（M2.1–M2.3） | **M2.1/M2.2 已實作；M2.3 migration CLI 已實作** | strict parser/runtime、review-gated migrate draft/sidecar；Docker 已以 disposable VM 實跑 v2 8/8 PASS（含 cleanup）；其餘正式 v1 spec 仍待逐份 target acceptance |
+| P3/P4/P5 | **已實作並驗證** | P3 dependency-first contract plan、experimental/lifecycle gate；P4 五題 corpus + 100/100 target-backed scorecard；P5 queries/archive/prune/admin audit/supply-chain metadata |
 
 ## 產品北極星
 
@@ -212,10 +212,11 @@ P3 完成定義：
 
 ## P4：建立 coding-agent authoring eval
 
-> **實作狀態（2026-07-18）：已實作 deterministic baseline。** `eval/briefs/` 有五份
-> 版本化 brief；`eval/run.sh` 跑 contract/spec/tag/shell/secret-host guard。它只在
-> 呼叫端明確提供 `PILOT_EVAL_TARGET_TEST` 時執行 disposable target test，不會自行
-> provision 或 mutate 環境。
+> **實作狀態（2026-07-18）：已實作並以 target 驗證。** `eval/briefs/` 有五份
+> 版本化 brief；`eval/run.sh` 產生 JSON scorecard，跑 contract/spec/tag/shell/
+> secret-host guard。以 Docker disposable VM 的 apply→verify→idempotency 實跑，
+> `PILOT_EVAL_REQUIRE_TARGET=1` scorecard 為 100/100 PASS；harness 本身不自行
+> provision target。
 
 既然 Codex/Claude 是主要 authoring 介面，就應測量產出的 Delivery Bundle，而不是
 把 model 放回 pilot runtime。

@@ -36,7 +36,8 @@
 > vault/授權前顯示 contract action/dependency plan 並對未宣告 day-2 action fail closed；
 > P4 有五題 brief corpus 與 model-independent deterministic gate；P5 已有 read-only
 > run projections、hash-verified archive/prune 與獨立 `evidence_admin_events`。既有
-> 正式 v1 spec 尚未取得 target acceptance，因此 auto-verify 仍僅為 contract opt-in v2。
+> Docker 已完成 target-backed Spec v2 migration；其餘正式 v1 spec 尚未逐份取得
+> target acceptance，因此 auto-verify 仍僅為 contract opt-in v2。
 >
 > 上述修訂 1–5／實作進度 1–2 是決策歷史，包含當時的 Proposed／NO-GO
 > 狀態與已被更正的 1—1 假設；目前 gate 只看修訂 6、下方狀態快照與各
@@ -73,12 +74,12 @@
 | M0.2 | **✅ 已實作並驗證** | JSON decoder、status、expected-host resolver、Ansible scope adapter、single-host bounded runner | 無 |
 | M1.1/M1.2 | **✅ 已實作並驗證** | strict loader/Catalog、22 份 canonical contracts、bundle/traceability/dependency/endpoint/apply/deploy catalog lint | DELIVERY table 改為生成 view |
 | M0.3 | **✅ 已實作並驗證** | schema v14、append-only event/evidence stream、serialized RunWriter、heartbeat/finalization、standalone/deploy evidence | 無 |
-| M0.4 | **✅ 已實作並驗證** | deploy transaction、contract scope/preflight、preview/apply/auto-v2-verify/idempotency/rollback、finalization | formal v1→v2 target acceptance |
+| M0.4 | **✅ 已實作並驗證** | deploy transaction、contract scope/preflight、preview/apply/auto-v2-verify/idempotency/rollback、finalization、supply-chain metadata | other formal v1→v2 target acceptance |
 | M1.3 | **✅ 已實作並驗證** | cardinality、required inputs、inputRules、sameHosts、provider selection、OS/resource/facts warning、deploy inventory resolver | full site execution projection remains lint-only |
 | M2.1 | **✅ 已實作並驗證** | typed `Expect`、v1 Expected compiler、legacy output compatibility evaluator | migration |
 | M2.2 | **✅ 已實作並驗證** | strict v2 parser、typed execution、applicability/action/secretRef boundary、input precedence；local/docker/vm/general-inventory backend 同一 fixture 均 PASS | staging／真實主機 acceptance、migration |
 | M2.3 | **🟡 部分已實作** | `pilot spec migrate`、v1 prose preservation、needsReview/sidecar/非零 fail-closed | template/document migration、正式 spec target-test |
-| P3/P4/P5 | **✅ 核心路徑已實作並驗證** | contract TUI plan/action gate、brief corpus/deterministic eval、runs query/archive/prune/admin audit | full capability composer/scale and formal target evidence remain future work |
+| P3/P4/P5 | **✅ 已實作並驗證** | dependency-first contract plan/lifecycle action gate、brief corpus + target-backed 100/100 eval scorecard、runs query/archive/prune/admin audit/supply-chain metadata | other formal spec target migrations are rollout work |
 
 ## 0. 現況與差距總覽
 
