@@ -26,7 +26,7 @@ Codex/Claude 直接產生 verification spec、apply playbook 與 regression test
 | M0.2 per-host verify | **已實作並驗證** | single-host invocation、bounded workers、Ansible scope adapter、callback runner 已接正式 verify |
 | Verification safety | **部分已實作** | v2 readOnly/isolatedMutation 與 secretRef fail-closed；secret-aware transport/deploy wiring 待 M0.4 |
 | Append-only evidence | **已實作並驗證** | schema v13、operation/evidence idempotency、heartbeat/finalization；rotation 移 P5 |
-| ComponentContract | **loader baseline 已實作／runtime wiring 待完成** | strict loader、role 1:N、dependency placement、provider selection、autoDeploy eligibility；尚未接 deploy/TUI |
+| ComponentContract | **22-component catalog/lint 已實作；preflight engine 已實作** | strict loader、row/tag traceability、dependency endpoint、apply/deploy catalog drift、cardinality/input/provider/OS/resource preflight；尚未接 deploy/TUI resolver |
 | M0.3/M0.4 | **M0.3 已實作；M0.4 尚未實作** | append-only evidence 已接 standalone verify；deploy transaction 尚待整合 |
 | Spec v2（M2.1–M2.3） | **M2.1/M2.2 已實作；M2.3 migration CLI 已實作** | strict v2 parser/runtime、review-gated migrate draft/sidecar；local/docker/vm/general-inventory backend 同 fixture 均 PASS；正式 spec 遷移與 staging／真實主機 acceptance 待完成 |
 | P3/P4/P5 | **尚未實作** | 仍是 roadmap |
