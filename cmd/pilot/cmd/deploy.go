@@ -16,15 +16,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	"gopkg.in/yaml.v3"
 
 	"github.com/anomalyco/pilot/internal/ansible"
+	"github.com/anomalyco/pilot/internal/contract"
+	"github.com/anomalyco/pilot/internal/delivery"
+	"github.com/anomalyco/pilot/internal/store"
+	"github.com/anomalyco/pilot/internal/tools"
 )
 
 var deployInventoryFlag string
@@ -574,6 +581,25 @@ var confirmDeployment = runConfirmProgram
 // an error so pilot deploy exits non-zero; a clean user cancellation
 // before a failed step remains a successful exit.
 func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput) error {
+	return executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{})
+}
+
+type deploymentTransactionOptions struct {
+	Writer         delivery.EventWriter
+	Preflight      delivery.StepFunc
+	PrepareApply   delivery.StepFunc
+	Verify         delivery.StepFunc
+	Rollback       delivery.StepFunc
+	Stage          string
+	Idempotency    delivery.IdempotencyPolicy
+	RollbackPolicy delivery.RollbackPolicy
+}
+
+// executeDeploymentTransaction is the single preview→apply→verify path for
+// interactive deploy. Keeping prompt cancellation as a typed transaction
+// outcome preserves the historical exit-0 cancellation contract while still
+// finalizing an evidence run when one was started.
+func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, options deploymentTransactionOptions) error {
 	baseArgs := []string{playbook, "-i", inv}
 	if limit != "" {
 		baseArgs = append(baseArgs, "--limit", limit)
@@ -592,7 +618,7 @@ func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Write
 
 	dryRunFirst := confirmDeployment("要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
 
-	runOnce := func(check bool) (*ansible.Result, error) {
+	runOnce := func(check, confirm bool) (*ansible.Result, error) {
 		mode := "套用"
 		args := baseArgs
 		if check {
@@ -600,39 +626,621 @@ func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Write
 			args = append([]string{"--check", "--diff"}, baseArgs...)
 		}
 		fmt.Fprintf(out, "\n▶ %s：ansible-playbook %s\n\n", mode, strings.Join(args, " "))
-		if !confirmDeployment("確定要執行以上指令嗎？", true) {
-			return nil, errDeployAborted
+		if confirm && !confirmDeployment("確定要執行以上指令嗎？", true) {
+			return nil, delivery.ErrCancelled
 		}
 		return runner.Run(ctx, args...)
 	}
 
+	preview := delivery.StepFunc(nil)
 	if dryRunFirst {
-		res, err := runOnce(true)
+		preview = func(ctx context.Context) error {
+			res, err := runOnce(true, true)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(out)
+			if res.ExitCode != 0 {
+				return fmt.Errorf("❌ 預覽失敗(結束碼 %d)，請看上面的輸出修正後再重新執行 pilot deploy", res.ExitCode)
+			}
+			fmt.Fprintln(out, "✅ 預覽完成，沒有錯誤。")
+			return nil
+		}
+	}
+	apply := func(ctx context.Context) error {
+		if dryRunFirst {
+			if !confirmDeployment("預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
+				fmt.Fprintln(out, "先在這裡停下來，沒有套用任何變更。")
+				return delivery.ErrCancelled
+			}
+		} else if !confirmDeployment("確定要執行以上指令嗎？", true) {
+			return delivery.ErrCancelled
+		}
+		if options.PrepareApply != nil {
+			if err := options.PrepareApply(ctx); err != nil {
+				return err
+			}
+		}
+		res, err := runOnce(false, dryRunFirst)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintln(out)
 		if res.ExitCode != 0 {
-			return fmt.Errorf("❌ 預覽失敗(結束碼 %d)，請看上面的輸出修正後再重新執行 pilot deploy", res.ExitCode)
+			return fmt.Errorf("❌ 套用失敗(結束碼 %d)，請看上面的輸出", res.ExitCode)
 		}
-		fmt.Fprintln(out, "✅ 預覽完成，沒有錯誤。")
-		if !confirmDeployment("預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
-			fmt.Fprintln(out, "先在這裡停下來，沒有套用任何變更。")
+		fmt.Fprintln(out, "✅ 套用完成。")
+		return nil
+	}
+	idempotency := delivery.StepFunc(nil)
+	if options.Idempotency == delivery.IdempotencyAlways || options.Idempotency == delivery.IdempotencyStageGTEStaging {
+		idempotency = func(ctx context.Context) error {
+			fmt.Fprintln(out, "▶ 冪等性檢查：重新套用相同 playbook")
+			res, err := runner.Run(ctx, baseArgs...)
+			if err != nil {
+				return fmt.Errorf("執行冪等性檢查失敗: %w", err)
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("冪等性檢查失敗(結束碼 %d)", res.ExitCode)
+			}
+			changed, ok := idempotencyChangedCount(res.Stdout)
+			if !ok {
+				return fmt.Errorf("冪等性檢查無 PLAY RECAP，無法確認 changed=0")
+			}
+			if changed != 0 {
+				return fmt.Errorf("冪等性檢查失敗：第二次套用仍有 %d 個變更", changed)
+			}
+			fmt.Fprintln(out, "✓ 冪等性檢查通過 (changed=0)")
 			return nil
 		}
 	}
+	txn := delivery.Transaction{
+		Preflight: options.Preflight, Preview: preview, Apply: apply, Verify: options.Verify,
+		Idempotency: idempotency, Rollback: options.Rollback,
+		Stage: options.Stage, IdempotencyPolicy: options.Idempotency, RollbackPolicy: options.RollbackPolicy,
+	}
+	if options.Writer != nil {
+		txn.Writer = options.Writer
+	}
+	outcome, err := txn.Run(ctx)
+	if errors.Is(err, delivery.ErrCancelled) {
+		return errDeployAborted
+	}
+	if err != nil {
+		return fmt.Errorf("delivery transaction %s: %w", outcome, err)
+	}
+	return nil
+}
 
-	res, err := runOnce(false)
+// executeRecordedDeployment starts the append-only run before transaction
+// preflight. Its evidence scope is the exact contract role/limit selected for
+// apply, not every host that happens to exist in the inventory.
+func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) error {
+	root, err := resolveContractRoot("")
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(out)
-	if res.ExitCode == 0 {
-		fmt.Fprintln(out, "✅ 套用完成。")
-	} else {
-		return fmt.Errorf("❌ 套用失敗(結束碼 %d)，請看上面的輸出", res.ExitCode)
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		return err
 	}
-	return nil
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		return fmt.Errorf("load contract catalog before deployment: %w", err)
+	}
+	components, err := componentsForPlaybook(catalog, playbook, tags, componentHints)
+	if err != nil {
+		return err
+	}
+	applied, selected, scope, hosts, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, playbook == "playbooks/site.yml")
+	if err != nil {
+		return err
+	}
+	components = contractIDs(applied)
+	inputs, err := resolveDeploymentInputs(ctx, selected, scope, inv, extraVars, vault)
+	if err != nil {
+		return err
+	}
+
+	st, err := openSpecStore()
+	if err != nil {
+		return fmt.Errorf("open deployment evidence store: %w", err)
+	}
+	writer, err := store.StartRun(ctx, st, store.RunStarted{
+		Stage: stage, Component: components[0], Components: components, Playbook: playbook,
+		Inventory: inv, Hosts: hosts, Metadata: deploymentMetadata(extraVars, vault, tags),
+	})
+	if err != nil {
+		_ = st.Close()
+		return fmt.Errorf("start deployment evidence run: %w", err)
+	}
+	writer.StartHeartbeat(ctx, 10*time.Second)
+	fmt.Fprintf(out, "ℹ️  deployment run: %s\n", writer.RunID())
+
+	preflight := func(context.Context) error {
+		result, err := delivery.ValidateContractPreflight(delivery.PreflightRequest{
+			Selected: selected, Scope: scope, Inputs: inputs,
+		})
+		for _, warning := range result.Warnings {
+			fmt.Fprintf(out, "⚠️  %s\n", warning)
+		}
+		return err
+	}
+	verify := autoDeployVerify(root, catalog, components, inv, limit, stage, writer)
+	rollback, rollbackPolicy := deploymentRollbackStep(runner, out, applied, inv, limit, extraVars, vault)
+	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{
+		Writer: writer, Preflight: preflight, Verify: verify, Rollback: rollback,
+		Stage: stage, Idempotency: delivery.IdempotencyStageGTEStaging, RollbackPolicy: rollbackPolicy,
+	})
+	closeErr := st.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+
+func componentsForPlaybook(catalog contract.Catalog, playbook, requestedTags string, hints []string) ([]string, error) {
+	if len(hints) > 0 {
+		components := append([]string(nil), hints...)
+		sort.Strings(components)
+		for _, id := range components {
+			component, ok := catalog.Component(id)
+			if !ok {
+				return nil, fmt.Errorf("deployment component %q is not in the contract catalog", id)
+			}
+			if component.Playbooks.Apply != playbook {
+				return nil, fmt.Errorf("component %q apply playbook is %s, not %s", id, component.Playbooks.Apply, playbook)
+			}
+		}
+		return components, nil
+	}
+	requested := csvSet(requestedTags)
+	components := make([]string, 0)
+	for _, component := range catalog.Components() {
+		if playbook == "playbooks/site.yml" && component.Site.Include {
+			if len(requested) > 0 && !componentMatchesTags(component, requested) {
+				continue
+			}
+			components = append(components, component.ID)
+			continue
+		}
+		if component.Playbooks.Apply == playbook {
+			components = append(components, component.ID)
+		}
+	}
+	sort.Strings(components)
+	if len(components) == 0 {
+		return nil, fmt.Errorf("deployment playbook %s and tags %q resolve no component contract", playbook, requestedTags)
+	}
+	return components, nil
+}
+
+func csvSet(value string) map[string]bool {
+	set := make(map[string]bool)
+	for _, item := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if item = strings.TrimSpace(item); item != "" {
+			set[item] = true
+		}
+	}
+	return set
+}
+
+func componentMatchesTags(component contract.Contract, requested map[string]bool) bool {
+	if requested[component.ID] || requested[component.Role] {
+		return true
+	}
+	for _, tag := range component.Site.Tags {
+		if requested[tag] {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, componentIDs []string, inventory, limit string, extraVars []string, allowEmpty bool) ([]contract.Contract, []contract.Contract, delivery.Scope, []string, error) {
+	targetOverride := extraVarValue(extraVars, "target_group")
+	scope := delivery.Scope{HostsByRole: make(map[string][]string)}
+	applied := make([]contract.Contract, 0, len(componentIDs))
+	byID := make(map[string]contract.Contract)
+	allHosts := make(map[string]struct{})
+	inventoryGroups, err := resolveInventoryGroups(ctx, inventory)
+	if err != nil {
+		return nil, nil, scope, nil, err
+	}
+
+	resolve := func(component contract.Contract, override string) ([]string, error) {
+		if hosts, ok := scope.HostsByRole[component.Role]; ok && override == "" {
+			return hosts, nil
+		}
+		if override == "" && limit == "" {
+			hosts := append([]string(nil), inventoryGroups[component.Role]...)
+			scope.HostsByRole[component.Role] = hosts
+			return hosts, nil
+		}
+		pattern := component.Role
+		if override != "" {
+			pattern = override
+		}
+		hosts, err := resolvePatternHosts(ctx, inventory, pattern, limit)
+		if err != nil {
+			return nil, fmt.Errorf("resolve component %q role %q: %w", component.ID, pattern, err)
+		}
+		if override == "" {
+			scope.HostsByRole[component.Role] = hosts
+		}
+		return hosts, nil
+	}
+
+	for _, id := range componentIDs {
+		component, ok := catalog.Component(id)
+		if !ok {
+			return nil, nil, scope, nil, fmt.Errorf("component %q is absent from contract catalog", id)
+		}
+		hosts, err := resolve(component, targetOverride)
+		if err != nil {
+			return nil, nil, scope, nil, err
+		}
+		if len(hosts) == 0 && allowEmpty {
+			continue
+		}
+		if len(hosts) == 0 {
+			return nil, nil, scope, nil, fmt.Errorf("component %q role %q resolves no hosts", component.ID, component.Role)
+		}
+		scope.HostsByRole[component.Role] = hosts
+		applied = append(applied, component)
+		byID[component.ID] = component
+		for _, host := range hosts {
+			allHosts[host] = struct{}{}
+		}
+	}
+	if len(applied) == 0 {
+		return nil, nil, scope, nil, fmt.Errorf("selected deployment resolves no active component hosts")
+	}
+
+	var addDependencies func(contract.Contract) error
+	addDependencies = func(component contract.Contract) error {
+		for _, dependency := range component.Dependencies {
+			if !dependency.Required {
+				continue
+			}
+			if _, present := byID[dependency.Component]; present {
+				continue
+			}
+			provider, ok := catalog.Component(dependency.Component)
+			if !ok {
+				return fmt.Errorf("component %q dependency %q is absent from catalog", component.ID, dependency.Component)
+			}
+			hosts, err := resolve(provider, "")
+			if err != nil {
+				return err
+			}
+			if len(hosts) == 0 {
+				return fmt.Errorf("component %q requires dependency %q but role %q resolves no hosts", component.ID, provider.ID, provider.Role)
+			}
+			byID[provider.ID] = provider
+			if err := addDependencies(provider); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, component := range applied {
+		if err := addDependencies(component); err != nil {
+			return nil, nil, scope, nil, err
+		}
+	}
+
+	selected := make([]contract.Contract, 0, len(byID))
+	for _, component := range byID {
+		selected = append(selected, component)
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].ID < selected[j].ID })
+	hosts := make([]string, 0, len(allHosts))
+	for host := range allHosts {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return applied, selected, scope, hosts, nil
+}
+
+func resolveInventoryGroups(ctx context.Context, inventory string) (map[string][]string, error) {
+	command := exec.CommandContext(ctx, "ansible-inventory", "-i", inventory, "--list")
+	var stdout, stderr strings.Builder
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return nil, fmt.Errorf("ansible-inventory --list: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var raw map[string]struct {
+		Hosts    []string `json:"hosts"`
+		Children []string `json:"children"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &raw); err != nil {
+		return nil, fmt.Errorf("parse ansible-inventory output: %w", err)
+	}
+	resolved := make(map[string][]string, len(raw))
+	visiting := make(map[string]bool)
+	var expand func(string) ([]string, error)
+	expand = func(group string) ([]string, error) {
+		if hosts, ok := resolved[group]; ok {
+			return hosts, nil
+		}
+		if visiting[group] {
+			return nil, fmt.Errorf("inventory group cycle at %q", group)
+		}
+		visiting[group] = true
+		set := make(map[string]struct{})
+		entry := raw[group]
+		for _, host := range entry.Hosts {
+			set[host] = struct{}{}
+		}
+		for _, child := range entry.Children {
+			hosts, err := expand(child)
+			if err != nil {
+				return nil, err
+			}
+			for _, host := range hosts {
+				set[host] = struct{}{}
+			}
+		}
+		delete(visiting, group)
+		hosts := make([]string, 0, len(set))
+		for host := range set {
+			hosts = append(hosts, host)
+		}
+		sort.Strings(hosts)
+		resolved[group] = hosts
+		return hosts, nil
+	}
+	for group := range raw {
+		if group == "_meta" {
+			continue
+		}
+		if _, err := expand(group); err != nil {
+			return nil, err
+		}
+	}
+	return resolved, nil
+}
+
+func resolvePatternHosts(ctx context.Context, inventory, pattern, limit string) ([]string, error) {
+	args := []string{pattern, "-i", inventory, "--list-hosts"}
+	if limit != "" {
+		args = append(args, "--limit", limit)
+	}
+	command := exec.CommandContext(ctx, "ansible", args...)
+	var stdout, stderr strings.Builder
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return nil, fmt.Errorf("ansible %s --list-hosts: %w: %s", pattern, err, strings.TrimSpace(stderr.String()))
+	}
+	hosts := make([]string, 0)
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "hosts (") {
+			continue
+		}
+		hosts = append(hosts, line)
+	}
+	sort.Strings(hosts)
+	return hosts, nil
+}
+
+func extraVarValue(extraVars []string, wanted string) string {
+	for i := len(extraVars) - 1; i >= 0; i-- {
+		key, value, ok := strings.Cut(extraVars[i], "=")
+		if ok && key == wanted {
+			return value
+		}
+	}
+	return ""
+}
+
+func resolveDeploymentInputs(ctx context.Context, selected []contract.Contract, scope delivery.Scope, inventory string, extraVars []string, vault vaultInput) (map[string]map[string]any, error) {
+	values := make(map[string]any)
+	hostVars, err := resolveInventoryVariables(ctx, inventory, extraVars, vault)
+	if err != nil {
+		return nil, err
+	}
+	for _, raw := range extraVars {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok || key == "" {
+			continue
+		}
+		var typed any
+		if err := yaml.Unmarshal([]byte(value), &typed); err != nil {
+			return nil, fmt.Errorf("decode extra var %q: %w", key, err)
+		}
+		values[key] = typed
+	}
+	resolved := make(map[string]map[string]any, len(selected))
+	for _, component := range selected {
+		componentValues := make(map[string]any)
+		for _, input := range component.GroupVars {
+			if value, ok := values[input.Name]; ok {
+				componentValues[input.Name] = value
+				continue
+			}
+			for _, host := range scope.HostsByRole[component.Role] {
+				if value, ok := hostVars[host][input.Name]; ok {
+					componentValues[input.Name] = value
+					break
+				}
+			}
+		}
+		resolved[component.ID] = componentValues
+	}
+	return resolved, nil
+}
+
+func resolveInventoryVariables(ctx context.Context, inventory string, extraVars []string, vault vaultInput) (map[string]map[string]any, error) {
+	args := []string{"-i", inventory, "--list"}
+	for _, value := range extraVars {
+		args = append(args, "-e", value)
+	}
+	args = append(args, vault.args()...)
+	command := exec.CommandContext(ctx, "ansible-inventory", args...)
+	command.Stdin = os.Stdin
+	var stdout, stderr strings.Builder
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return nil, fmt.Errorf("resolve inventory variables: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var raw struct {
+		Meta struct {
+			Hostvars map[string]map[string]any `json:"hostvars"`
+		} `json:"_meta"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &raw); err != nil {
+		return nil, fmt.Errorf("parse inventory variables: %w", err)
+	}
+	if raw.Meta.Hostvars == nil {
+		raw.Meta.Hostvars = make(map[string]map[string]any)
+	}
+	return raw.Meta.Hostvars, nil
+}
+
+func deploymentRollbackStep(runner *ansible.Runner, out io.Writer, selected []contract.Contract, inventory, limit string, extraVars []string, vault vaultInput) (delivery.StepFunc, delivery.RollbackPolicy) {
+	rollbackPlaybooks := make([]string, 0)
+	for i := len(selected) - 1; i >= 0; i-- {
+		if selected[i].Playbooks.Rollback != nil {
+			rollbackPlaybooks = append(rollbackPlaybooks, *selected[i].Playbooks.Rollback)
+		}
+	}
+	if len(rollbackPlaybooks) == 0 {
+		return nil, delivery.RollbackNone
+	}
+	return func(ctx context.Context) error {
+		for _, playbook := range rollbackPlaybooks {
+			args := []string{playbook, "-i", inventory}
+			if limit != "" {
+				args = append(args, "--limit", limit)
+			}
+			for _, value := range extraVars {
+				args = append(args, "-e", value)
+			}
+			args = append(args, vault.args()...)
+			fmt.Fprintf(out, "▶ 回滾：ansible-playbook %s\n", strings.Join(args, " "))
+			result, err := runner.Run(ctx, args...)
+			if err != nil {
+				return err
+			}
+			if result.ExitCode != 0 {
+				return fmt.Errorf("rollback playbook %s failed with exit code %d", playbook, result.ExitCode)
+			}
+		}
+		return nil
+	}, delivery.RollbackPlaybook
+}
+
+func contractIDs(contracts []contract.Contract) []string {
+	ids := make([]string, 0, len(contracts))
+	for _, component := range contracts {
+		ids = append(ids, component.ID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func deploymentMetadata(extraVars []string, vault vaultInput, tags string) map[string]any {
+	keys := make([]string, 0, len(extraVars))
+	for _, extra := range extraVars {
+		key, _, found := strings.Cut(extra, "=")
+		if found && key != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	metadata := map[string]any{"extra_var_keys": keys, "tags": tags, "authorization": "interactive-stage-confirmed"}
+	if vault.ExtraVarsFile != "" {
+		metadata["vault_reference"] = filepath.Base(vault.ExtraVarsFile)
+	}
+	if vault.AskVaultPass {
+		metadata["vault_password_prompted"] = true
+	}
+	return metadata
+}
+
+func resolveInventoryHosts(ctx context.Context, inventory string) ([]string, error) {
+	command := exec.CommandContext(ctx, "ansible-inventory", "-i", inventory, "--list")
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ansible-inventory --list: %w", err)
+	}
+	var raw struct {
+		Meta struct {
+			Hostvars map[string]json.RawMessage `json:"hostvars"`
+		} `json:"_meta"`
+	}
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return nil, fmt.Errorf("parse ansible-inventory output: %w", err)
+	}
+	hosts := make([]string, 0, len(raw.Meta.Hostvars))
+	for host := range raw.Meta.Hostvars {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	if len(hosts) == 0 {
+		return nil, fmt.Errorf("inventory resolved no hosts")
+	}
+	return hosts, nil
+}
+
+func autoDeployVerify(root string, catalog contract.Catalog, components []string, inventory, limit, stage string, writer *store.RunWriter) delivery.StepFunc {
+	auto := make([]string, 0, len(components))
+	for _, id := range components {
+		component, ok := catalog.Component(id)
+		if !ok {
+			return func(context.Context) error {
+				return fmt.Errorf("selected component %q disappeared from contract catalog", id)
+			}
+		}
+		if component.Verification.AutoDeploy != nil && *component.Verification.AutoDeploy {
+			auto = append(auto, id)
+		}
+	}
+	if len(auto) == 0 {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		plans, err := delivery.PlanVerification(root, catalog, auto)
+		if err != nil {
+			return err
+		}
+		selectedComponents := make(map[string]bool, len(components))
+		for _, id := range components {
+			selectedComponents[id] = true
+		}
+		for _, plan := range plans {
+			selectedRows := make(map[string]bool, len(plan.Rows))
+			for _, row := range plan.Rows {
+				selectedRows[row.ID] = true
+			}
+			tool := &tools.VerifySpecTool{
+				Inventory: inventory, Limit: limit, Host: plan.Role, EvidenceWriter: writer,
+				Stage: stage, SelectedComponents: selectedComponents, SelectedRowIDs: selectedRows,
+			}
+			result, err := tool.Execute(ctx, json.RawMessage(fmt.Sprintf(`{"spec_path":%q}`, filepath.Join(root, plan.SpecPath))))
+			if err != nil {
+				return fmt.Errorf("execute auto verification %s: %w", plan.SpecPath, err)
+			}
+			if result.IsError {
+				return fmt.Errorf("auto verification %s: %s", plan.SpecPath, strings.TrimSpace(result.Content))
+			}
+			rows, err := tools.ReadNDJSON(result.Content)
+			if err != nil {
+				return fmt.Errorf("decode auto verification %s: %w", plan.SpecPath, err)
+			}
+			for _, row := range rows {
+				if row.Status == "fail" {
+					return fmt.Errorf("auto verification %s %s on %s failed: %s", plan.SpecPath, row.ID, row.Host, row.Detail)
+				}
+			}
+		}
+		return nil
+	}
 }
 
 // ---- full-site flow ---------------------------------------------------------
@@ -688,7 +1296,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	}
 	extraVars = append(extraVars, strings.Fields(extra)...)
 
-	return executeDeployment(ctx, runner, out, "playbooks/site.yml", inv, limit, tags, extraVars, vault)
+	return executeRecordedDeployment(ctx, runner, out, "playbooks/site.yml", inv, limit, tags, extraVars, vault, decision.Stage, nil)
 }
 
 // ---- single-playbook flow ---------------------------------------------------
@@ -709,12 +1317,15 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	}
 
 	var extraVars []string
+	componentHints := []string{entry.Key}
 	if len(entry.InfraRoles) > 0 {
 		roleIdx, err := runSelectProgram("選擇角色(infra_role)", entry.InfraRoles)
 		if err != nil {
 			return err
 		}
-		extraVars = append(extraVars, "infra_role="+entry.InfraRoles[roleIdx])
+		role := entry.InfraRoles[roleIdx]
+		extraVars = append(extraVars, "infra_role="+role)
+		componentHints = []string{role}
 	}
 
 	defaultGroup := entry.DefaultGroup
@@ -780,5 +1391,5 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	}
 	extraVars = append(extraVars, strings.Fields(extra)...)
 
-	return executeDeployment(ctx, runner, out, entry.Playbook, inv, limit, tags, extraVars, vault)
+	return executeRecordedDeployment(ctx, runner, out, entry.Playbook, inv, limit, tags, extraVars, vault, decision.Stage, componentHints)
 }

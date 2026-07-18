@@ -58,6 +58,26 @@ func TestVerifySpecV2LocalAndAggregate(t *testing.T) {
 	}
 }
 
+func TestVerifySpecV2SelectedRowsFailClosedAndNarrowExecution(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2.md")
+	if err := writeFile(path, verifyV2Fixture); err != nil {
+		t.Fatal(err)
+	}
+	tool := &VerifySpecTool{LocalOnly: true, SelectedRowIDs: map[string]bool{"C1": true}}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"spec_path": path}))
+	if err != nil || res.IsError {
+		t.Fatalf("Execute err=%v result=%+v", err, res)
+	}
+	rows, err := ReadNDJSON(res.Content)
+	if err != nil || len(rows) != 1 || rows[0].ID != "C1" {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	res, err = (&VerifySpecTool{LocalOnly: true, SelectedRowIDs: map[string]bool{"missing": true}}).Execute(context.Background(), mustJSON(t, map[string]any{"spec_path": path}))
+	if err != nil || !res.IsError || !strings.Contains(res.Content, "does not exist") {
+		t.Fatalf("err=%v result=%+v", err, res)
+	}
+}
+
 func TestVerifySpecV2RejectsNeedsReviewAndSecretRef(t *testing.T) {
 	for name, replacement := range map[string]struct{ replace, want string }{
 		"needs review": {"  expect: {stdout: {equals: controller}}", "  needsReview: [action-unknown]\n  expect: {stdout: {equals: controller}}"},

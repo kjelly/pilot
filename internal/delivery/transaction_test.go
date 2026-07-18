@@ -65,3 +65,53 @@ func TestTransactionEvidenceFailureFailsClosed(t *testing.T) {
 		t.Fatalf("outcome=%s err=%v", outcome, err)
 	}
 }
+
+func TestTransactionCancellationAndAuthorizationHaveDistinctOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want Outcome
+	}{
+		{name: "cancelled", err: ErrCancelled, want: OutcomeCancelled},
+		{name: "authorization", err: ErrAuthorizationRequired, want: OutcomeAuthorizationRequired},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writer := &fakeWriter{}
+			outcome, err := (Transaction{Writer: writer, Preflight: func(context.Context) error { return test.err }}).Run(context.Background())
+			if outcome != test.want || !errors.Is(err, test.err) {
+				t.Fatalf("outcome=%s err=%v", outcome, err)
+			}
+			if writer.finish.Outcome != string(test.want) {
+				t.Fatalf("finish=%+v", writer.finish)
+			}
+		})
+	}
+}
+
+func TestTransactionStageIdempotencyPolicy(t *testing.T) {
+	for _, stage := range []string{"sandbox", "staging", "prod"} {
+		t.Run(stage, func(t *testing.T) {
+			calls := 0
+			_, err := (Transaction{Stage: stage, IdempotencyPolicy: IdempotencyStageGTEStaging, Idempotency: func(context.Context) error { calls++; return nil }}).Run(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if stage != "sandbox" {
+				want = 1
+			}
+			if calls != want {
+				t.Fatalf("calls=%d want=%d", calls, want)
+			}
+		})
+	}
+}
+
+func TestOutcomeExitCodeTreatsRollbackAsFailedTransaction(t *testing.T) {
+	if got := outcomeExitCode(OutcomeRolledBack); got != 1 {
+		t.Fatalf("rolled_back exit=%d want 1", got)
+	}
+	if got := outcomeExitCode(OutcomeCancelled); got != 0 {
+		t.Fatalf("cancelled exit=%d want 0", got)
+	}
+}

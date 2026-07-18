@@ -93,7 +93,14 @@ func waitForNewDeployScreen(t *testing.T, proc *ptyProc, want string) {
 
 func TestPilotDeployPTY_DeclineAtFinalConfirmNeverRunsAnsible(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "inventory.yml"), []byte("all:\n  hosts: {}\n"), 0o644); err != nil {
+	t.Setenv("PILOT_ROOT", repoRootForTest(t))
+	t.Setenv("PILOT_DATA_DIR", filepath.Join(dir, "data"))
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte("#!/bin/sh\nif [ \"$1\" = docker ]; then printf '%s\\n' '  hosts (1):' '    host-a'; else printf '%s\\n' '  hosts (0):'; fi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(dir, "inventory.yml"), []byte("all:\n  children:\n    docker:\n      hosts:\n        host-a:\n          ansible_connection: local\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	proc := startDeployPTY(t, dir, 40, 100)

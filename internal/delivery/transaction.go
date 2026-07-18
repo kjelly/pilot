@@ -30,8 +30,9 @@ const (
 type IdempotencyPolicy string
 
 const (
-	IdempotencyAlways IdempotencyPolicy = "always"
-	IdempotencyNever  IdempotencyPolicy = "never"
+	IdempotencyAlways          IdempotencyPolicy = "always"
+	IdempotencyStageGTEStaging IdempotencyPolicy = "stage>=staging"
+	IdempotencyNever           IdempotencyPolicy = "never"
 )
 
 // RollbackPolicy names the recovery mechanism available to this transaction.
@@ -67,6 +68,7 @@ type Transaction struct {
 
 	IdempotencyPolicy IdempotencyPolicy
 	RollbackPolicy    RollbackPolicy
+	Stage             string
 }
 
 // Run executes the transaction in order and always attempts terminal evidence
@@ -84,31 +86,49 @@ func (t Transaction) Run(ctx context.Context) (outcome Outcome, err error) {
 		}
 	}()
 	if err := t.runStep(ctx, "preflight", t.Preflight); err != nil {
+		if errors.Is(err, ErrCancelled) {
+			return OutcomeCancelled, err
+		}
+		if errors.Is(err, ErrAuthorizationRequired) {
+			return OutcomeAuthorizationRequired, err
+		}
 		if errors.Is(err, errEvidencePersistence) {
 			return OutcomeEvidenceFailed, err
 		}
 		return OutcomeFailed, err
 	}
 	if err := t.runStep(ctx, "preview", t.Preview); err != nil {
+		if errors.Is(err, ErrCancelled) {
+			return OutcomeCancelled, err
+		}
 		if errors.Is(err, errEvidencePersistence) {
 			return OutcomeEvidenceFailed, err
 		}
 		return OutcomeFailed, err
 	}
 	if err := t.runStep(ctx, "apply", t.Apply); err != nil {
+		if errors.Is(err, ErrCancelled) {
+			return OutcomeCancelled, err
+		}
 		if errors.Is(err, errEvidencePersistence) {
 			return OutcomeEvidenceFailed, err
 		}
 		return t.failWithRollback(ctx, "apply", err)
 	}
 	if err := t.runStep(ctx, "verify", t.Verify); err != nil {
+		if errors.Is(err, ErrCancelled) {
+			return OutcomeCancelled, err
+		}
 		if errors.Is(err, errEvidencePersistence) {
 			return OutcomeEvidenceFailed, err
 		}
 		return t.failWithRollback(ctx, "verify", err)
 	}
-	if t.IdempotencyPolicy == IdempotencyAlways {
+	if t.shouldRunIdempotency() {
 		if err := t.runStep(ctx, "idempotency", t.Idempotency); err != nil {
+			if errors.Is(err, ErrCancelled) {
+				return OutcomeCancelled, err
+			}
 			if errors.Is(err, errEvidencePersistence) {
 				return OutcomeEvidenceFailed, err
 			}
@@ -116,6 +136,17 @@ func (t Transaction) Run(ctx context.Context) (outcome Outcome, err error) {
 		}
 	}
 	return OutcomeSuccess, nil
+}
+
+func (t Transaction) shouldRunIdempotency() bool {
+	switch t.IdempotencyPolicy {
+	case IdempotencyAlways:
+		return true
+	case IdempotencyStageGTEStaging:
+		return t.Stage == "staging" || t.Stage == "prod"
+	default:
+		return false
+	}
 }
 
 func (t Transaction) failWithRollback(ctx context.Context, step string, cause error) (Outcome, error) {
@@ -153,7 +184,7 @@ func stepStatus(err error) string {
 }
 
 func outcomeExitCode(outcome Outcome) int {
-	if outcome == OutcomeSuccess || outcome == OutcomePartialSuccess || outcome == OutcomeRolledBack {
+	if outcome == OutcomeSuccess || outcome == OutcomePartialSuccess || outcome == OutcomeCancelled {
 		return 0
 	}
 	return 1
@@ -162,5 +193,9 @@ func outcomeExitCode(outcome Outcome) int {
 // ErrAuthorizationRequired lets a frontend stop before mutations while still
 // recording a semantically distinct terminal outcome.
 var ErrAuthorizationRequired = errors.New("delivery authorization required")
+
+// ErrCancelled lets interactive frontends finish an auditable transaction as
+// cancelled without relabelling an intentional refusal as a failed mutation.
+var ErrCancelled = errors.New("delivery cancelled")
 
 var errEvidencePersistence = errors.New("delivery evidence persistence failed")
