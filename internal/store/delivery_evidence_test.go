@@ -104,3 +104,49 @@ func TestDeliveryEvidenceTriggersAndHeartbeat(t *testing.T) {
 		t.Fatal("verification evidence DELETE unexpectedly succeeded")
 	}
 }
+
+func TestArchiveThenHashVerifiedPrune(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	w, err := StartRun(ctx, s, RunStarted{RunID: "old-run", Hosts: []string{"host-a"}, StartedAt: old})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.AppendEvidence(ctx, []VerifyEvidence{{SpecPath: "x.md", RowID: "C1", Host: "host-a", Attempt: 1, OperationID: "evidence", Command: "true", Expected: "exitCode=0", ProbeStatus: "ok", Verdict: "pass"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Finish(ctx, RunFinished{Outcome: "success", ExitCode: 0, FinishedAt: old.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "evidence.json")
+	archive, err := s.ArchiveEvidenceBefore(ctx, time.Now().UTC().Add(-time.Hour), archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archive.RunIDs) != 1 || archive.RunIDs[0] != "old-run" || archive.SHA256 == "" {
+		t.Fatalf("unexpected archive: %#v", archive)
+	}
+	if _, err := s.db.Exec(`DELETE FROM delivery_events WHERE run_id='old-run'`); err == nil {
+		t.Fatal("ordinary delete unexpectedly bypassed append-only guard")
+	}
+	count, err := s.PruneEvidenceArchive(ctx, archive.ArchiveID)
+	if err != nil || count != 1 {
+		t.Fatalf("prune count=%d err=%v", count, err)
+	}
+	var runs int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM delivery_events WHERE run_id='old-run'`).Scan(&runs); err != nil || runs != 0 {
+		t.Fatalf("remaining delivery events=%d err=%v", runs, err)
+	}
+	var admin int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM evidence_admin_events`).Scan(&admin); err != nil || admin < 4 {
+		t.Fatalf("admin events=%d err=%v", admin, err)
+	}
+	if _, err := s.PruneEvidenceArchive(ctx, archive.ArchiveID); err == nil {
+		t.Fatal("a completed archive must not be pruned twice")
+	}
+}

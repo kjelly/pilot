@@ -16,7 +16,7 @@ type Store struct {
 // migration is added to migrateSteps. PRAGMA user_version is used to
 // record the installed version on disk so that startup is idempotent
 // and free of swallowed errors.
-const SchemaVersion = 13
+const SchemaVersion = 14
 
 const schema = `
 -- The base schema is the FINAL shape only. The agent-loop tables that
@@ -90,6 +90,17 @@ CREATE TABLE IF NOT EXISTS verify_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_verify_evidence_run ON verify_evidence(run_id, spec_path, row_id, host);
 
+CREATE TABLE IF NOT EXISTS evidence_admin_events (
+    event_id     TEXT PRIMARY KEY,
+    type         TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_admin_events_type ON evidence_admin_events(type, created_at);
+-- This one-row gate is only set within Store.PruneEvidenceArchive's database
+-- transaction after a completed archive has been hash-verified.
+CREATE TABLE IF NOT EXISTS evidence_admin_mode (enabled INTEGER NOT NULL);
+
 CREATE VIEW IF NOT EXISTS delivery_runs AS
 SELECT s.run_id,
        s.created_at AS started_at,
@@ -102,11 +113,19 @@ FROM delivery_events s WHERE s.type='run_started';
 CREATE TRIGGER IF NOT EXISTS delivery_events_no_update
 BEFORE UPDATE ON delivery_events BEGIN SELECT RAISE(ABORT, 'delivery_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS delivery_events_no_delete
-BEFORE DELETE ON delivery_events BEGIN SELECT RAISE(ABORT, 'delivery_events is append-only'); END;
+BEFORE DELETE ON delivery_events
+WHEN NOT EXISTS (SELECT 1 FROM evidence_admin_mode WHERE enabled=1)
+BEGIN SELECT RAISE(ABORT, 'delivery_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS verify_evidence_no_update
 BEFORE UPDATE ON verify_evidence BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS verify_evidence_no_delete
-BEFORE DELETE ON verify_evidence BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;
+BEFORE DELETE ON verify_evidence
+WHEN NOT EXISTS (SELECT 1 FROM evidence_admin_mode WHERE enabled=1)
+BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS evidence_admin_events_no_update
+BEFORE UPDATE ON evidence_admin_events BEGIN SELECT RAISE(ABORT, 'evidence_admin_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS evidence_admin_events_no_delete
+BEFORE DELETE ON evidence_admin_events BEGIN SELECT RAISE(ABORT, 'evidence_admin_events is append-only'); END;
 `
 
 // migration is one ALTER TABLE statement. Bump SchemaVersion when
@@ -322,6 +341,23 @@ var migrateSteps = []migration{
 			CREATE TRIGGER IF NOT EXISTS delivery_events_no_delete BEFORE DELETE ON delivery_events BEGIN SELECT RAISE(ABORT, 'delivery_events is append-only'); END;
 			CREATE TRIGGER IF NOT EXISTS verify_evidence_no_update BEFORE UPDATE ON verify_evidence BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;
 			CREATE TRIGGER IF NOT EXISTS verify_evidence_no_delete BEFORE DELETE ON verify_evidence BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;`,
+	},
+	{
+		Description: "add archived-evidence administration stream",
+		SQL: `CREATE TABLE IF NOT EXISTS evidence_admin_events (
+				event_id TEXT PRIMARY KEY, type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
+			CREATE INDEX IF NOT EXISTS idx_evidence_admin_events_type ON evidence_admin_events(type, created_at);
+			CREATE TABLE IF NOT EXISTS evidence_admin_mode (enabled INTEGER NOT NULL);
+			DROP TRIGGER IF EXISTS delivery_events_no_delete;
+			DROP TRIGGER IF EXISTS verify_evidence_no_delete;
+			CREATE TRIGGER IF NOT EXISTS delivery_events_no_delete BEFORE DELETE ON delivery_events
+				WHEN NOT EXISTS (SELECT 1 FROM evidence_admin_mode WHERE enabled=1)
+				BEGIN SELECT RAISE(ABORT, 'delivery_events is append-only'); END;
+			CREATE TRIGGER IF NOT EXISTS verify_evidence_no_delete BEFORE DELETE ON verify_evidence
+				WHEN NOT EXISTS (SELECT 1 FROM evidence_admin_mode WHERE enabled=1)
+				BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;
+			CREATE TRIGGER IF NOT EXISTS evidence_admin_events_no_update BEFORE UPDATE ON evidence_admin_events BEGIN SELECT RAISE(ABORT, 'evidence_admin_events is append-only'); END;
+			CREATE TRIGGER IF NOT EXISTS evidence_admin_events_no_delete BEFORE DELETE ON evidence_admin_events BEGIN SELECT RAISE(ABORT, 'evidence_admin_events is append-only'); END;`,
 	},
 }
 
