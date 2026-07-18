@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,6 +68,16 @@ printf '{"plays":[{"tasks":[{"hosts":{"host-a":{"stdout":"%s","rc":0}}}]}]}\n' "
 	}
 	if runs[0].Stage != "sandbox" || len(runs[0].Hosts) != 1 || runs[0].Hosts[0] != "host-a" {
 		t.Fatalf("run=%+v", runs[0])
+	}
+	encoded, err := json.Marshal(runs[0].Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("value")) {
+		t.Fatalf("metadata leaked extra-var value: %s", encoded)
+	}
+	if runs[0].Metadata["source_revision"] == "" || runs[0].Metadata["artifact_sha256"] == nil {
+		t.Fatalf("supply-chain metadata missing: %s", encoded)
 	}
 }
 

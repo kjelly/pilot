@@ -66,6 +66,9 @@ type VerifySpecTool struct {
 	// transaction. The runner always executes and verifies the declared cleanup
 	// probe before returning a verdict.
 	AllowIsolatedMutation bool
+	// VaultArgs contains references such as -e @vault.yml and
+	// --vault-password-file. Plaintext secret values are forbidden.
+	VaultArgs []string
 	// SelectedRowIDs narrows execution to contract-resolved rows for a partial
 	// deploy. An empty set means every row; unknown IDs are rejected before any
 	// probe runs so a tag mapping can never silently broaden verification.
@@ -177,11 +180,6 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 				return &Result{Content: fmt.Sprintf("ERROR: Spec v2 secret input %q cannot be supplied as plaintext", name), IsError: true}, nil
 			}
 		}
-		for _, input := range parsed.Inputs {
-			if input.SecretRef != nil {
-				return &Result{Content: "ERROR: Spec v2 secretRef verification requires the secret-aware runner", IsError: true}, nil
-			}
-		}
 		for _, row := range parsed.Rows {
 			if len(t.SelectedRowIDs) > 0 && !t.SelectedRowIDs[row.ID] {
 				continue
@@ -223,6 +221,11 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		remoteHosts = resolution.Hosts
 		for _, finding := range resolution.Findings {
 			slog.Warn("verify host-scope finding", "finding", finding)
+		}
+	}
+	if parsed.SchemaVersion == 2 {
+		if err := t.validateSecretRefs(ctx, parsed, remoteHosts); err != nil {
+			return &Result{Content: "ERROR: " + err.Error(), IsError: true}, nil
 		}
 	}
 	localInputs := copyStringMap(t.EnvironmentInputs)
@@ -326,6 +329,71 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		sb.WriteByte('\n')
 	}
 	return &Result{Content: sb.String()}, nil
+}
+
+func (t *VerifySpecTool) validateSecretRefs(ctx context.Context, parsed *spec.Spec, hosts []string) error {
+	secrets := make([]spec.Input, 0)
+	for _, input := range parsed.Inputs {
+		if input.SecretRef != nil {
+			secrets = append(secrets, input)
+		}
+	}
+	if len(secrets) == 0 {
+		return nil
+	}
+	if t.Inventory == "" || len(hosts) == 0 {
+		return fmt.Errorf("Spec v2 secretRef verification requires an inventory-backed secret-aware runner")
+	}
+	if len(t.VaultArgs) == 0 {
+		return fmt.Errorf("Spec v2 secretRef verification requires a vault variable reference")
+	}
+	for _, input := range secrets {
+		for _, host := range hosts {
+			if err := t.assertSecretRef(ctx, host, input.SecretRef.Name); err != nil {
+				return fmt.Errorf("secretRef %q is unavailable on host %q", input.Name, host)
+			}
+		}
+	}
+	return nil
+}
+
+func (t *VerifySpecTool) assertSecretRef(ctx context.Context, host, variable string) error {
+	playbook := fmt.Sprintf(`---
+- name: Validate one secret reference without exposing its value
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Secret reference is defined and non-empty
+      ansible.builtin.assert:
+        that:
+          - %s is defined
+          - (%s | string | length) > 0
+      no_log: true
+`, variable, variable)
+	file, err := os.CreateTemp("", "pilot-secret-ref-*.yml")
+	if err != nil {
+		return err
+	}
+	path := file.Name()
+	defer os.Remove(path)
+	if _, err := file.WriteString(playbook); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	args := []string{path, "-i", t.Inventory, "--limit", host}
+	args = append(args, t.VaultArgs...)
+	command := exec.CommandContext(ctx, "ansible-playbook", args...)
+	command.Stdin = os.Stdin
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (t *VerifySpecTool) cleanupLocal(ctx context.Context, row spec.Row, result VerifyRow, timeoutSec int, inputs map[string]string) VerifyRow {
