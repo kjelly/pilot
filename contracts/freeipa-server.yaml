@@ -1,4 +1,4 @@
-# REVIEW MIRROR of contracts/freeipa-server.yaml — exact content is regression-checked.
+# ComponentContract v1 — canonical production source; deploy/TUI wiring pending.
 schemaVersion: 1
 id: freeipa-server
 role: freeipa-server

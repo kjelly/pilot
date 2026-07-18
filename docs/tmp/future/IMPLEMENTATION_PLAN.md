@@ -52,7 +52,7 @@
 | Safety RFC | **🟢 Final design／runtime 待實作** | canonical action、v2-only auto deploy、secret-aware playbook/module transport | action runtime、secret-aware module |
 | Evidence RFC | **🟢 Final design／runtime 待實作** | event/evidence idempotency、RunWriter、heartbeat/finalization；rotation 移 P5 | schema v13、store API、runs CLI |
 | M0.2 | **🧪 Spike 已驗證／design Final** | JSON decoder、status、expected-host resolver、single-host invocation timeout/scope 決策 | Ansible inventory/scope adapter、bounded runner 正式接線 |
-| M1.1 | **🟡 Loader baseline 已實作** | strict production loader、六份 fixtures、role cardinality、placement/provider selection、strict tests | production contracts directory、全量 contract lint、catalog/site integration |
+| M1.1 | **🟡 Loader baseline + 六份 production contracts 已實作** | strict loader/Catalog、canonical `contracts/`、`pilot contract lint`、role cardinality、placement/provider selection、strict tests | 全量 contract lint、catalog/site integration |
 | M0.3/M0.4 | **⏸ 尚未實作** | 無 | delivery events、transaction、rollback/idempotency policy |
 | M1.2/M1.3 | **⏸ 尚未實作** | 無 | 全量 contracts、DAG/preflight |
 | M2.1–M2.3 | **🟢 Design Final／尚未實作** | applicability/action/secretRef/normalization/migration contract 已定案 | typed matcher、v2 parser、migration |
@@ -279,13 +279,14 @@ bounded cancel finalization。M0.3 retain-all；generation rotation 移至 P5。
 ### M1.1 — schema 與載入器
 
 **RFC／fixtures 狀態：Final／production loader implementation GO**，見
-`docs/tmp/future/COMPONENT_CONTRACT_RFC.md` 與
-`docs/tmp/future/contracts/*.yaml`。六份 fixtures 已通過 test-only strict decode、
+`docs/tmp/future/COMPONENT_CONTRACT_RFC.md`、canonical `contracts/*.yaml` 與
+`docs/tmp/future/contracts/*.yaml` review mirrors。六份 contracts 已通過 test-only strict decode、
 selector、traceability、binding、實際 tag 與 duplicate-owner 驗證；測試位於
 `internal/contract/fixture_schema_test.go`。`internal/contract/contract.go` 已提供
 strict YAML decode、local schema validation、stable directory loading 與 root-path
-containment；它尚未接入 deploy/TUI，也尚未把 fixtures 遷入 production contracts
-directory。
+containment、`LoadDefaultCatalog` 與 role/component lookup；canonical contracts 已在
+`contracts/`，並由唯讀 `pilot contract lint` 顯示載入結果。它尚未接入 deploy/TUI，
+也尚未完成全量 contract lint。
 
 **改動**
 - 新套件 `internal/contract`:`ComponentContract` Go struct + YAML 檔 `contracts/<component>.yaml`(一元件一檔,可 review、可版本化;**不是 LLM tool schema**)。欄位對齊 roadmap P1 清單:
@@ -321,8 +322,8 @@ directory。
   opt-in 與不可覆寫的 safety prelude，M1 不生成 site.yml。
 
 六份試點為 **docker、freeipa-server、restic-backup、dns、ntp、log-shipping**。
-Final schema 已定稿，loader/API 立即開工；fixtures 改走正式 loader 且 lint 全綠後
-啟動 M1.2。
+Final schema 已定稿；六份 canonical contracts 已走正式 loader，並由 review mirror
+semantic-equality test 鎖住。M1.2 可開始擴充全量 lint。
 
 ### M1.2 — lint 收斂五處事實來源
 

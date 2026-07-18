@@ -17,6 +17,9 @@ import (
 // SchemaVersion is the ComponentContract schema version supported by this loader.
 const SchemaVersion = 1
 
+// DefaultDirectory is the repository-relative directory for canonical contracts.
+const DefaultDirectory = "contracts"
+
 // Contract is the versioned, machine-readable description of one delivery component.
 type Contract struct {
 	SchemaVersion       int          `yaml:"schemaVersion"`
@@ -297,6 +300,11 @@ func (l Loader) LoadCatalog(dir string) (Catalog, error) {
 	return NewCatalog(contracts)
 }
 
+// LoadDefaultCatalog loads the repository's canonical contracts directory.
+func (l Loader) LoadDefaultCatalog() (Catalog, error) {
+	return l.LoadCatalog(DefaultDirectory)
+}
+
 // NewCatalog validates unique component IDs and builds lookup indexes.
 func NewCatalog(contracts []Contract) (Catalog, error) {
 	if len(contracts) == 0 {
@@ -320,6 +328,11 @@ func (c Catalog) Component(id string) (Contract, bool) {
 		return Contract{}, false
 	}
 	return c.contracts[index], true
+}
+
+// Components returns every contract in the stable order loaded by the catalog.
+func (c Catalog) Components() []Contract {
+	return append([]Contract(nil), c.contracts...)
 }
 
 // ComponentsForRole returns every component whose primary role matches role.

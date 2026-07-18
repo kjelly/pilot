@@ -190,7 +190,7 @@ func TestFinalContractFixturesStrictAndSemanticallyValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := loader.LoadDir("docs/tmp/future/contracts")
+	loaded, err := loader.LoadDir(DefaultDirectory)
 	if err != nil {
 		t.Fatalf("production loader rejected final fixtures: %v", err)
 	}

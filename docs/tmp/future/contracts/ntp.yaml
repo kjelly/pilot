@@ -1,4 +1,4 @@
-# STATUS: FINAL SCHEMA FIXTURE — loader validates this shape; runtime wiring pending.
+# REVIEW MIRROR of contracts/ntp.yaml — exact content is regression-checked.
 schemaVersion: 1
 id: ntp
 role: ntp

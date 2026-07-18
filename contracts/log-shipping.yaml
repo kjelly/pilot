@@ -1,4 +1,4 @@
-# REVIEW MIRROR of contracts/log-shipping.yaml — exact content is regression-checked.
+# ComponentContract v1 — canonical production source; deploy/TUI wiring pending.
 schemaVersion: 1
 id: log-shipping
 role: log-server

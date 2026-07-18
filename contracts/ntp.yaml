@@ -1,10 +1,10 @@
-# REVIEW MIRROR of contracts/dns.yaml — exact content is regression-checked.
+# ComponentContract v1 — canonical production source; deploy/TUI wiring pending.
 schemaVersion: 1
-id: dns
-role: dns
+id: ntp
+role: ntp
 specs:
   - path: docs/verification/core-infra-provider.md
-    rows: {categories: [dns]}
+    rows: {categories: [ntp]}
 playbooks:
   apply: playbooks/apply/core-infra-provider-apply.yml
   rollback: null
@@ -21,27 +21,23 @@ os:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
-  - {name: dns_listen_addr, type: string, required: true, secret: false}
-  - {name: dns_upstream, type: string, required: false, default: 1.1.1.1, secret: false}
-  - {name: dns_zones, type: stringList, required: false, default: [], secret: false}
+  - {name: ntp_pool, type: string, required: false, default: "ntp.ubuntu.com pool.ntp.org", secret: false}
 inputRules: []
 endpoints:
-  - {name: dnsTcp, scheme: tcp, port: 53}
-  - {name: dnsUdp, scheme: udp, port: 53}
+  - {name: ntp, scheme: udp, port: 123}
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false
 evidenceRequirement: {targetTest: vm, idempotency: required}
 lifecycle: {backup: null, upgrade: null, decommission: null}
 traceability:
   mode: rowTags
-  tag: {kind: rolePrefixed, prefix: dns}
-  exemptions:
-    "docs/verification/core-infra-provider.md#C7": {kind: verifyOnly, reason: optional DNS functional probe}
+  tag: {kind: rolePrefixed, prefix: ntp}
+  exemptions: {}
 verification: {autoDeploy: false}
 site:
   include: true
-  order: 10
-  vars: {infra_role: dns}
-  tags: [infra, dns]
+  order: 20
+  vars: {infra_role: ntp}
+  tags: [infra, ntp]
   optIn: false
   targetGroupExpression: null

@@ -15,7 +15,7 @@ func TestLoaderLoadsFinalFixtureDirectoryInStableOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contracts, err := loader.LoadDir("docs/tmp/future/contracts")
+	contracts, err := loader.LoadDir(DefaultDirectory)
 	if err != nil {
 		t.Fatalf("LoadDir: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestCatalogLooksUpComponentAndRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := loader.LoadCatalog("docs/tmp/future/contracts")
+	catalog, err := loader.LoadDefaultCatalog()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +50,26 @@ func TestCatalogLooksUpComponentAndRole(t *testing.T) {
 	}
 	if _, ok := catalog.Component("missing"); ok {
 		t.Fatal("missing component unexpectedly resolved")
+	}
+}
+
+func TestReviewFixturesMirrorCanonicalContracts(t *testing.T) {
+	t.Parallel()
+
+	loader, err := NewLoader(contractRepoRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := loader.LoadDir(DefaultDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirrors, err := loader.LoadDir("docs/tmp/future/contracts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(canonical, mirrors) {
+		t.Fatal("review fixtures differ semantically from canonical contracts")
 	}
 }
 
