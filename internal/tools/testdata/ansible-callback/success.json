@@ -1,0 +1,19 @@
+{
+  "plays": [{
+    "tasks": [{
+      "hosts": {
+        "localhost": {
+          "changed": true,
+          "rc": 0,
+          "stdout": "line1\nline2",
+          "stderr": "warn",
+          "start": "2026-07-18 13:52:53.834045",
+          "end": "2026-07-18 13:52:53.837299"
+        }
+      }
+    }]
+  }],
+  "stats": {
+    "localhost": {"ok": 1, "failures": 0, "unreachable": 0}
+  }
+}

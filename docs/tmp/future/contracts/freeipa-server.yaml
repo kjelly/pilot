@@ -1,0 +1,70 @@
+schemaVersion: 1
+id: freeipa-server
+role: freeipa-server
+specs:
+  - path: docs/verification/freeipa-server.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/freeipa-server-apply.yml
+  rollback: null
+  upgrade: null
+  decommission: null
+regressionTests:
+  - internal/spec/freeipa_server_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies: []
+conflicts: []
+bindings: []
+os:
+  - distro: almalinux
+    versions: ["9"]
+  - distro: rocky
+    versions: ["9"]
+  - distro: rhel
+    versions: ["9"]
+hostCardinality: exactly-one
+resources: {minCPU: 2, minRAMMiB: 4096, minDiskGiB: 20}
+groupVars:
+  - {name: freeipa_domain, required: false, default: ipa.pilot.internal, secret: false}
+  - {name: freeipa_server_ip, required: true, secret: false, validation: "^[0-9a-fA-F:.]+$"}
+  - {name: ipa_admin_password, required: true, secret: true, validation: "^.{8,}$"}
+endpoints:
+  - {name: ldap, scheme: ldap, port: 389}
+  - {name: ldaps, scheme: ldaps, port: 636}
+  - {name: kerberosTcp, scheme: tcp, port: 88}
+  - {name: https, scheme: https, port: 443}
+stagePolicy: {variable: stage, default: sandbox}
+experimental: false
+evidenceRequirement: {targetTest: vm, idempotency: required}
+lifecycle:
+  backup: {provider: restic, preHook: ipa-backup}
+  upgrade: null
+  decommission: null
+traceability:
+  mode: mapped
+  rows:
+    C1: {tags: [freeipa-install], reason: installer completion}
+    C2: {tags: [freeipa-service], reason: post-install service health}
+    C3: {tags: [freeipa-hostname], reason: canonical FQDN setup}
+    C4: {tags: [freeipa-install], reason: LDAP listener from installer}
+    C5: {tags: [freeipa-install], reason: LDAPS listener from installer}
+    C6: {tags: [freeipa-install], reason: Kerberos TCP listener from installer}
+    C7: {tags: [freeipa-install], reason: Kerberos UDP listener from installer}
+    C8: {tags: [freeipa-install], reason: kpasswd listener from installer}
+    C9: {tags: [freeipa-install], reason: HTTP endpoint from installer}
+    C10: {tags: [freeipa-install], reason: HTTPS endpoint from installer}
+    C11: {tags: [freeipa-install], reason: directory suffix from installer}
+    C12: {tags: [freeipa-install], reason: CA endpoint from installer}
+    C13: {tags: [freeipa-install], reason: sudo subtree from installer}
+    C14: {tags: [freeipa-audit], reason: directory audit configuration}
+    C15: {tags: [freeipa-audit], reason: directory audit-failure configuration}
+    C16: {tags: [freeipa-audit], reason: directory audit file}
+    C17: {tags: [freeipa-install], reason: optional native DNS TCP listener}
+    C18: {tags: [freeipa-install], reason: optional native DNS UDP listener}
+site:
+  include: true
+  order: 40
+  vars: {}
+  tags: [freeipa, freeipa-server]
+  optIn: false
+  targetGroupExpression: null

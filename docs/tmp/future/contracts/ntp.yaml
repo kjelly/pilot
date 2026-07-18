@@ -1,0 +1,40 @@
+schemaVersion: 1
+id: ntp
+role: ntp
+specs:
+  - path: docs/verification/core-infra-provider.md
+    rows: {categories: [ntp]}
+playbooks:
+  apply: playbooks/apply/core-infra-provider-apply.yml
+  rollback: null
+  upgrade: null
+  decommission: null
+regressionTests:
+  - internal/spec/core_infra_provider_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies: []
+conflicts: []
+bindings: []
+os:
+  - {distro: ubuntu, versions: ["22.04", "24.04"]}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
+groupVars:
+  - {name: ntp_pool, required: false, default: "ntp.ubuntu.com pool.ntp.org", secret: false}
+endpoints:
+  - {name: ntp, scheme: udp, port: 123}
+stagePolicy: {variable: stage, default: sandbox}
+experimental: false
+evidenceRequirement: {targetTest: vm, idempotency: required}
+lifecycle: {backup: null, upgrade: null, decommission: null}
+traceability:
+  mode: rowTags
+  tag: {kind: rolePrefixed, prefix: ntp}
+  exemptions: {}
+site:
+  include: true
+  order: 20
+  vars: {infra_role: ntp}
+  tags: [infra, ntp]
+  optIn: false
+  targetGroupExpression: null

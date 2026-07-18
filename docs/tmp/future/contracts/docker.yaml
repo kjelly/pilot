@@ -1,0 +1,45 @@
+schemaVersion: 1
+id: docker
+role: docker
+specs:
+  - path: docs/verification/docker.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/docker-apply.yml
+  rollback: null
+  upgrade: null
+  decommission: null
+regressionTests:
+  - internal/spec/docker_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies: []
+conflicts: []
+bindings: []
+os:
+  - distro: ubuntu
+    versions: ["22.04", "24.04"]
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 10}
+groupVars: []
+endpoints:
+  - {name: dockerSocket, scheme: unix, path: /var/run/docker.sock}
+stagePolicy: {variable: stage, default: sandbox}
+experimental: false
+evidenceRequirement: {targetTest: vm-or-docker, idempotency: required}
+lifecycle: {backup: null, upgrade: null, decommission: null}
+traceability:
+  mode: rowTags
+  tag: {kind: rolePrefixed, prefix: docker}
+  exemptions:
+    C3: {kind: derived, tags: [docker-C1], reason: CLI comes from the engine package}
+    C5: {kind: verifyOnly, reason: whole-chain pull/run/cleanup probe}
+    C6: {kind: derived, tags: [docker-C1], reason: default networks come from engine installation}
+    C7: {kind: derived, tags: [docker-C1], reason: compose plugin comes from the package set}
+    C8: {kind: derived, tags: [docker-C1], reason: cgroup mode is an engine property}
+site:
+  include: true
+  order: 30
+  vars: {}
+  tags: [infra, docker]
+  optIn: false
+  targetGroupExpression: null

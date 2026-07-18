@@ -53,6 +53,9 @@ func init() {
 // treats it as a clean, silent exit rather than a real failure.
 var errDeployAborted = errors.New("已取消")
 
+// errPreflightRejected distinguishes stopping after a failed preflight from a clean cancellation.
+var errPreflightRejected = errors.New("前置檢查失敗，已停止部署")
+
 func runDeploy(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
@@ -89,7 +92,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return abortOrErr(err)
 	}
 	if !ok {
-		return nil
+		return errPreflightRejected
 	}
 
 	scopeIdx, err := runSelectProgram("要佈署什麼？", []string{
@@ -562,13 +565,14 @@ func (v vaultInput) args() []string {
 
 // ---- execution: dry-run first, then optionally apply -----------------------
 
+var confirmDeployment = runConfirmProgram
+
 // executeDeployment builds the final ansible-playbook argv from the
 // choices gathered by the caller, offers a --check --diff preview
 // first, and — only if that preview succeeds and the user asks for it
-// — re-runs the same command for real. Returns an error only for
-// infrastructure failures or user cancellation; a failed ansible run
-// is reported to the user but does not make pilot deploy itself error
-// (the streamed output already told them what went wrong).
+// — re-runs the same command for real. A failed preview or apply returns
+// an error so pilot deploy exits non-zero; a clean user cancellation
+// before a failed step remains a successful exit.
 func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput) error {
 	baseArgs := []string{playbook, "-i", inv}
 	if limit != "" {
@@ -586,7 +590,7 @@ func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Write
 		runner.Stdin = os.Stdin
 	}
 
-	dryRunFirst := runConfirmProgram("要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
+	dryRunFirst := confirmDeployment("要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
 
 	runOnce := func(check bool) (*ansible.Result, error) {
 		mode := "套用"
@@ -596,7 +600,7 @@ func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Write
 			args = append([]string{"--check", "--diff"}, baseArgs...)
 		}
 		fmt.Fprintf(out, "\n▶ %s：ansible-playbook %s\n\n", mode, strings.Join(args, " "))
-		if !runConfirmProgram("確定要執行以上指令嗎？", true) {
+		if !confirmDeployment("確定要執行以上指令嗎？", true) {
 			return nil, errDeployAborted
 		}
 		return runner.Run(ctx, args...)
@@ -609,11 +613,10 @@ func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Write
 		}
 		fmt.Fprintln(out)
 		if res.ExitCode != 0 {
-			fmt.Fprintf(out, "❌ 預覽失敗(結束碼 %d)，請看上面的輸出修正後再重新執行 pilot deploy。\n", res.ExitCode)
-			return nil
+			return fmt.Errorf("❌ 預覽失敗(結束碼 %d)，請看上面的輸出修正後再重新執行 pilot deploy", res.ExitCode)
 		}
 		fmt.Fprintln(out, "✅ 預覽完成，沒有錯誤。")
-		if !runConfirmProgram("預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
+		if !confirmDeployment("預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
 			fmt.Fprintln(out, "先在這裡停下來，沒有套用任何變更。")
 			return nil
 		}
@@ -627,7 +630,7 @@ func executeDeployment(ctx context.Context, runner *ansible.Runner, out io.Write
 	if res.ExitCode == 0 {
 		fmt.Fprintln(out, "✅ 套用完成。")
 	} else {
-		fmt.Fprintf(out, "❌ 套用失敗(結束碼 %d)，請看上面的輸出。\n", res.ExitCode)
+		return fmt.Errorf("❌ 套用失敗(結束碼 %d)，請看上面的輸出", res.ExitCode)
 	}
 	return nil
 }

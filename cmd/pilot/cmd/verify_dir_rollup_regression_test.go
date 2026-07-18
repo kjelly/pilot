@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // TestPilotVerify_--dirRollup is the regression lock for the
@@ -125,5 +127,36 @@ func itoa(n int) string {
 func TestVerifyDir_GlobStemAnchor(t *testing.T) {
 	if !strings.Contains("-YYYYMMDD-HHMMSS", "-????????-??????") {
 		t.Skip("internal anchor shape changed; update the regex test too")
+	}
+}
+
+func TestVerifyDir_PreservesPerSpecParseError(t *testing.T) {
+	tmp := t.TempDir()
+	specDir := filepath.Join(tmp, "verification")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(specDir, "broken.md"), []byte("not a verification spec\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	savedReportDir := verifyReportDir
+	savedRoot := verifyRoot
+	defer func() {
+		verifyReportDir = savedReportDir
+		verifyRoot = savedRoot
+	}()
+	verifyReportDir = filepath.Join(tmp, ".verification")
+	verifyRoot = tmp
+
+	err := runVerifyMulti(&cobra.Command{}, specDir)
+	if err == nil {
+		t.Fatal("runVerifyMulti() error = nil, want parse failure")
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("runVerifyMulti() error = %q, want spec name", err)
+	}
+	if !strings.Contains(err.Error(), "missing top-level") {
+		t.Fatalf("runVerifyMulti() error = %q, want original parser error", err)
 	}
 }

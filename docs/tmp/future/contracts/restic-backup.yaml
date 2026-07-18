@@ -1,0 +1,53 @@
+schemaVersion: 1
+id: restic-backup
+role: restic-backup
+specs:
+  - path: docs/verification/restic-backup.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/restic-backup-apply.yml
+  rollback: null
+  upgrade: null
+  decommission: null
+regressionTests:
+  - internal/spec/restic_backup_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: seaweedfs-s3, required: false}
+conflicts: []
+bindings:
+  - input: restic_s3_target_host
+    requiredWhenDependencySelected: true
+    from: {component: seaweedfs-s3, endpoint: s3}
+os:
+  - {distro: ubuntu, versions: ["22.04", "24.04"]}
+  - {distro: almalinux, versions: ["9"]}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
+groupVars:
+  - {name: restic_s3_target_host, required: false, secret: false}
+  - {name: restic_repository, required: false, secret: false}
+  - {name: restic_aws_access_key_id, required: true, secret: true}
+  - {name: restic_aws_secret_access_key, required: true, secret: true}
+  - {name: restic_password, required: true, secret: true}
+  - {name: restic_backup_paths, required: false, default: ["/etc"], secret: false}
+  - {name: restic_backup_pre_hook, required: false, default: "", secret: false}
+endpoints: []
+stagePolicy: {variable: stage, default: sandbox}
+experimental: false
+evidenceRequirement: {targetTest: vm, idempotency: required}
+lifecycle:
+  backup: {provider: self}
+  upgrade: null
+  decommission: null
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions: {}
+site:
+  include: true
+  order: 130
+  vars: {}
+  tags: [backup, restic-backup]
+  optIn: false
+  targetGroupExpression: null
