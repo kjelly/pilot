@@ -724,7 +724,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 		Verify: func(context.Context) error {
 			fmt.Fprintf(out, "=== [Step 4/5] L5 Verification Specs (%d) ===\n", len(verifies))
 			for _, v := range verifies {
-				pilotArgs := []string{"verify", v.spec, "-i", invPath}
+				pilotArgs := []string{"verify", v.spec, "-i", invPath, "--allow-isolated-mutation"}
 				if v.limit != "" {
 					pilotArgs = append(pilotArgs, "-l", v.limit)
 				}

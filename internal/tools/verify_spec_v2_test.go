@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -142,6 +143,27 @@ func TestVerifySpecV2SeparatesStderr(t *testing.T) {
 	}
 	if rows[1].Status != "pass" || rows[1].Stdout != "" || rows[1].Stderr != "warning" {
 		t.Fatalf("row=%+v", rows[1])
+	}
+}
+
+func TestVerifySpecV2AuthorizedIsolatedMutationAlwaysCleansUp(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "marker")
+	raw := strings.Replace(verifyV2Fixture, "probe: \"printf ' x  \\\\n\\\\n'\"", "probe: \"touch "+marker+" && printf ' x  \\\\n\\\\n'\"", 1)
+	raw = strings.Replace(raw, "  expect: {stdout: {equals: \" x  \\n\"}}", "  action:\n    mode: isolatedMutation\n    authorization: explicit\n    residualRisk: temporary test marker\n    cleanup:\n      required: true\n      probe: \"rm -f "+marker+"\"\n      expect: {exitCode: 0}\n  expect: {stdout: {equals: \" x  \\n\"}}", 1)
+	path := filepath.Join(t.TempDir(), "isolated.md")
+	if err := writeFile(path, raw); err != nil {
+		t.Fatal(err)
+	}
+	res, err := (&VerifySpecTool{LocalOnly: true}).Execute(context.Background(), mustJSON(t, map[string]any{"spec_path": path}))
+	if err != nil || !res.IsError {
+		t.Fatalf("unauthorized err=%v result=%+v", err, res)
+	}
+	res, err = (&VerifySpecTool{LocalOnly: true, AllowIsolatedMutation: true}).Execute(context.Background(), mustJSON(t, map[string]any{"spec_path": path}))
+	if err != nil || res.IsError {
+		t.Fatalf("authorized err=%v result=%+v", err, res)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("cleanup did not remove marker: %v", err)
 	}
 }
 

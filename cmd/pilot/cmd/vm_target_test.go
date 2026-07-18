@@ -22,6 +22,19 @@ func TestVMTargetCmdRegistered(t *testing.T) {
 	}
 }
 
+func TestVerifyExtraHasLimit(t *testing.T) {
+	for _, args := range [][]string{{"-l", "docker"}, {"--limit=docker"}, {"--limit", "docker"}} {
+		if !verifyExtraHasLimit(args) {
+			t.Fatalf("limit not detected in %v", args)
+		}
+	}
+	for _, args := range [][]string{{}, {"-l"}, {"--limit="}} {
+		if verifyExtraHasLimit(args) {
+			t.Fatalf("invalid limit detected in %v", args)
+		}
+	}
+}
+
 // TestVMTargetSubCommandsAllRegistered walks the promised subcommands.
 func TestVMTargetSubCommandsAllRegistered(t *testing.T) {
 	want := []string{"up", "down", "list", "show-inventory", "run", "verify", "exec", "snapshot", "rollback", "ssh", "shell", "resize-disk"}
