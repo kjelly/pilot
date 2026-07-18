@@ -21,7 +21,7 @@
 #   go run ./cmd/pilot vm-target run --name core \
 #       playbooks/apply/keycloak-db-apply.yml \
 #       -e target_group=keycloak-db \
-#       -e pg_keycloak_db_password=sandbox-db-password-123
+#       -e @~/.vault/keycloak-sandbox.yaml
 #
 # Stage gating:
 #   sandbox  default; runs immediately
@@ -152,4 +152,3 @@
       retries: 12
       when: not ansible_check_mode
       delay: 5
-

@@ -35,8 +35,9 @@ func repoRootForTest(t *testing.T) string {
 }
 
 func TestContractMenuAndActionPlanFailClosed(t *testing.T) {
+	upgrade := "playbooks/apply/worker-upgrade.yml"
 	catalog, err := contract.NewCatalog([]contract.Contract{{
-		ID: "worker", Role: "workers", Playbooks: contract.Playbooks{Apply: "playbooks/apply/worker.yml"},
+		ID: "worker", Role: "workers", Playbooks: contract.Playbooks{Apply: "playbooks/apply/worker.yml", Upgrade: &upgrade},
 		Dependencies: []contract.Dependency{{Component: "provider", Required: true, Relation: "providerEndpoint"}},
 	}, {ID: "provider", Role: "providers", Playbooks: contract.Playbooks{Apply: "playbooks/apply/provider.yml"}}})
 	if err != nil {
@@ -55,7 +56,13 @@ func TestContractMenuAndActionPlanFailClosed(t *testing.T) {
 			t.Fatalf("plan missing %q: %s", want, out.String())
 		}
 	}
-	if err := showContractActionPlan(&out, catalog, []string{"worker"}, "upgrade"); err == nil {
+	if err := showContractActionPlan(&out, catalog, []string{"provider"}, "upgrade"); err == nil {
+		t.Fatal("provider upgrade without a declared playbook must fail closed")
+	}
+	if got, err := selectedActionPlaybook(catalog, []string{"worker"}, "upgrade"); err != nil || got != upgrade {
+		t.Fatalf("upgrade playbook=%q err=%v", got, err)
+	}
+	if _, err := selectedActionPlaybook(catalog, []string{"provider"}, "upgrade"); err == nil {
 		t.Fatal("upgrade without a declared playbook must fail closed")
 	}
 }

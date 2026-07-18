@@ -769,11 +769,14 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 		}
 		return err
 	}
-	verify, err := autoDeployVerify(root, catalog, components, inv, limit, tags, stage, writer)
-	if err != nil {
-		_ = writer.Finish(ctx, store.RunFinished{Outcome: string(delivery.OutcomeFailed), ExitCode: 1})
-		_ = st.Close()
-		return err
+	var verify delivery.StepFunc
+	if !isDecommissionPlaybook(applied, playbook) {
+		verify, err = autoDeployVerify(root, catalog, components, inv, limit, tags, stage, writer)
+		if err != nil {
+			_ = writer.Finish(ctx, store.RunFinished{Outcome: string(delivery.OutcomeFailed), ExitCode: 1})
+			_ = st.Close()
+			return err
+		}
 	}
 	rollback, rollbackPolicy := deploymentRollbackStep(runner, out, applied, inv, limit, extraVars, vault)
 	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{
@@ -787,6 +790,15 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	return closeErr
 }
 
+func isDecommissionPlaybook(components []contract.Contract, playbook string) bool {
+	for _, component := range components {
+		if component.Playbooks.Decommission != nil && *component.Playbooks.Decommission == playbook {
+			return true
+		}
+	}
+	return false
+}
+
 func componentsForPlaybook(catalog contract.Catalog, playbook, requestedTags string, hints []string) ([]string, error) {
 	if len(hints) > 0 {
 		components := append([]string(nil), hints...)
@@ -796,8 +808,8 @@ func componentsForPlaybook(catalog contract.Catalog, playbook, requestedTags str
 			if !ok {
 				return nil, fmt.Errorf("deployment component %q is not in the contract catalog", id)
 			}
-			if component.Playbooks.Apply != playbook {
-				return nil, fmt.Errorf("component %q apply playbook is %s, not %s", id, component.Playbooks.Apply, playbook)
+			if !contractOwnsPlaybook(component, playbook) {
+				return nil, fmt.Errorf("component %q contract does not declare lifecycle playbook %s", id, playbook)
 			}
 		}
 		return components, nil
@@ -821,6 +833,18 @@ func componentsForPlaybook(catalog contract.Catalog, playbook, requestedTags str
 		return nil, fmt.Errorf("deployment playbook %s and tags %q resolve no component contract", playbook, requestedTags)
 	}
 	return components, nil
+}
+
+func contractOwnsPlaybook(component contract.Contract, playbook string) bool {
+	if component.Playbooks.Apply == playbook {
+		return true
+	}
+	for _, candidate := range []*string{component.Playbooks.Rollback, component.Playbooks.Upgrade, component.Playbooks.Decommission} {
+		if candidate != nil && *candidate == playbook {
+			return true
+		}
+	}
+	return false
 }
 
 func csvSet(value string) map[string]bool {
@@ -1447,8 +1471,20 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	if err := showContractActionPlan(out, catalog, componentHints, deployActionFlag); err != nil {
 		return err
 	}
-	if deployActionFlag != "apply" {
-		return fmt.Errorf("selected contract action %q is declared but no interactive execution adapter is available; use its reviewed playbook through the approved day-2 procedure", deployActionFlag)
+	actionPlaybook, err := selectedActionPlaybook(catalog, componentHints, deployActionFlag)
+	if err != nil {
+		return err
+	}
+	if deployActionFlag == "decommission" {
+		for _, id := range componentHints {
+			component, _ := catalog.Component(id)
+			if component.Lifecycle.Decommission == nil {
+				return fmt.Errorf("component %q has no declared data-retention/decommission policy", id)
+			}
+		}
+		if !runConfirmProgram("decommission 會移除服務；已確認 contract 的資料保留／匯出政策並授權執行嗎？", false) {
+			return errDeployAborted
+		}
 	}
 
 	defaultGroup := entry.DefaultGroup
@@ -1514,7 +1550,7 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	}
 	extraVars = append(extraVars, strings.Fields(extra)...)
 
-	return executeRecordedDeployment(ctx, runner, out, entry.Playbook, inv, limit, tags, extraVars, vault, decision.Stage, componentHints)
+	return executeRecordedDeployment(ctx, runner, out, actionPlaybook, inv, limit, tags, extraVars, vault, decision.Stage, componentHints)
 }
 
 // deployMenuLabel keeps catalog-only copywriting as a presentation projection,
@@ -1577,4 +1613,37 @@ func showContractActionPlan(out io.Writer, catalog contract.Catalog, ids []strin
 		}
 	}
 	return nil
+}
+
+func selectedActionPlaybook(catalog contract.Catalog, ids []string, action string) (string, error) {
+	var selected string
+	for _, id := range ids {
+		component, ok := catalog.Component(id)
+		if !ok {
+			return "", fmt.Errorf("deploy catalog component %q has no contract", id)
+		}
+		var playbook string
+		switch action {
+		case "apply":
+			playbook = component.Playbooks.Apply
+		case "upgrade":
+			if component.Playbooks.Upgrade != nil {
+				playbook = *component.Playbooks.Upgrade
+			}
+		case "decommission":
+			if component.Playbooks.Decommission != nil {
+				playbook = *component.Playbooks.Decommission
+			}
+		default:
+			return "", fmt.Errorf("unsupported contract action %q", action)
+		}
+		if playbook == "" {
+			return "", fmt.Errorf("component %q does not declare a %s playbook", id, action)
+		}
+		if selected != "" && selected != playbook {
+			return "", fmt.Errorf("selected components require different %s playbooks; run them as separate audited transactions", action)
+		}
+		selected = playbook
+	}
+	return selected, nil
 }
