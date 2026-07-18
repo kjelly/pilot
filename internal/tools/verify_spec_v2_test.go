@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -95,6 +96,42 @@ func TestVerifySpecV2RejectsNeedsReviewAndSecretRef(t *testing.T) {
 				t.Fatalf("err=%v result=%+v", err, res)
 			}
 		})
+	}
+}
+
+func TestVerifySpecV2SecretRefUsesNoLogVaultReferenceRunner(t *testing.T) {
+	raw := strings.Replace(verifyV2Fixture, "inputs: []", "inputs: [{name: token, required: true, secretRef: {provider: ansibleVar, name: webhook_token}}]", 1)
+	path := filepath.Join(t.TempDir(), "secret.md")
+	if err := writeFile(path, raw); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	runner := filepath.Join(binDir, "ansible-playbook")
+	if err := os.WriteFile(runner, []byte("#!/bin/sh\ncase \"$*\" in *'@vault.yml'*) exit 0;; *) exit 9;; esac\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	tool := &VerifySpecTool{
+		Inventory: "inventory.yml",
+		VaultArgs: []string{"-e", "@vault.yml"},
+		listHosts: func(context.Context, string, string) ([]string, error) {
+			return []string{"host-a"}, nil
+		},
+		hostInputs: func(context.Context, string) (map[string]string, error) {
+			return map[string]string{}, nil
+		},
+		runJSON: func(_ context.Context, args []string, _ int) ansibleJSONInvocation {
+			host := args[0]
+			stdout := " x  \n\n"
+			if strings.Contains(strings.Join(args, " "), "printf controller") {
+				stdout = "controller"
+			}
+			return ansibleJSONInvocation{Stdout: `{"plays":[{"tasks":[{"hosts":{"` + host + `":{"stdout":` + strconv.Quote(stdout) + `,"rc":0}}}]}]}`}
+		},
+	}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"spec_path": path}))
+	if err != nil || res.IsError {
+		t.Fatalf("err=%v result=%+v", err, res)
 	}
 }
 

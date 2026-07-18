@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,6 +21,17 @@ func TestVMTargetCmdRegistered(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("vm-target subcommand not registered on rootCmd")
+	}
+}
+
+func TestVMTargetVerificationLimitUsesV2Roles(t *testing.T) {
+	dir := t.TempDir()
+	v2 := filepath.Join(dir, "v2.md")
+	if err := os.WriteFile(v2, []byte("---\nschemaVersion: 2\ncompatibility: {minPilotVersion: '0.9'}\nintent: {summary: x, source: x, maintainer: x}\ntargets: {roles: [docker, worker]}\ninputs: []\ntraceability: {components: [docker]}\ndefaults: {become: false, action: {mode: readOnly}}\n---\n# Verification Spec — x\n\n## Checks\n```yaml\n- id: C1\n  category: x\n  check: x\n  probe: 'true'\n  expect: {exitCode: 0}\n```\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := vmTargetVerificationLimit(v2, "generated"); err != nil || got != "docker:worker" {
+		t.Fatalf("limit=%q err=%v", got, err)
 	}
 }
 

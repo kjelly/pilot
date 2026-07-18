@@ -37,6 +37,9 @@ var (
 	verifyStage                 string
 	verifyComponents            []string
 	verifyAllowIsolatedMutation bool
+	verifyVaultVarsFile         string
+	verifyVaultPasswordFile     string
+	verifyAskVaultPass          bool
 )
 
 var verifyCmd = &cobra.Command{
@@ -80,6 +83,9 @@ func init() {
 	verifyCmd.Flags().StringVar(&verifyStage, "stage", "", "Spec v2 applicability stage: sandbox, staging, or prod (default: PILOT_STAGE or sandbox)")
 	verifyCmd.Flags().StringArrayVar(&verifyComponents, "selected-component", nil, "component selected in the current plan for Spec v2 applicability; repeatable")
 	verifyCmd.Flags().BoolVar(&verifyAllowIsolatedMutation, "allow-isolated-mutation", false, "explicitly authorize v2 isolatedMutation checks and their mandatory cleanup")
+	verifyCmd.Flags().StringVar(&verifyVaultVarsFile, "vault-vars-file", "", "ansible-vault vars file used only through Ansible's secret-aware runner")
+	verifyCmd.Flags().StringVar(&verifyVaultPasswordFile, "vault-password-file", "", "file supplying the password for --vault-vars-file")
+	verifyCmd.Flags().BoolVar(&verifyAskVaultPass, "ask-vault-pass", false, "ask Ansible for the vault password; never materialize secret values in pilot")
 	rootCmd.AddCommand(verifyCmd)
 }
 
@@ -175,6 +181,10 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	if stage != "sandbox" && stage != "staging" && stage != "prod" {
 		return fmt.Errorf("--stage must be sandbox, staging, or prod")
 	}
+	vaultArgs, err := verifyVaultArguments()
+	if err != nil {
+		return err
+	}
 	tool := &tools.VerifySpecTool{
 		Inventory:             verifyInventory,
 		Limit:                 verifyLimit,
@@ -186,6 +196,7 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 		Stage:                 stage,
 		SelectedComponents:    components,
 		AllowIsolatedMutation: verifyAllowIsolatedMutation,
+		VaultArgs:             vaultArgs,
 	}
 	res, err := tool.Execute(ctx, mustJSONVerify(map[string]any{
 		"spec_path":   specPath,
@@ -286,6 +297,28 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	}
 	finalized = true
 	return nil
+}
+
+func verifyVaultArguments() ([]string, error) {
+	if verifyVaultVarsFile == "" {
+		if verifyVaultPasswordFile != "" || verifyAskVaultPass {
+			return nil, fmt.Errorf("--vault-password-file/--ask-vault-pass requires --vault-vars-file")
+		}
+		return nil, nil
+	}
+	if err := validateFileExists(verifyVaultVarsFile); err != nil {
+		return nil, fmt.Errorf("--vault-vars-file: %w", err)
+	}
+	args := []string{"-e", "@" + verifyVaultVarsFile}
+	if verifyVaultPasswordFile != "" {
+		if err := validateFileExists(verifyVaultPasswordFile); err != nil {
+			return nil, fmt.Errorf("--vault-password-file: %w", err)
+		}
+		args = append(args, "--vault-password-file", verifyVaultPasswordFile)
+	} else if verifyAskVaultPass {
+		args = append(args, "--ask-vault-pass")
+	}
+	return args, nil
 }
 
 type verifyInputLayers struct {

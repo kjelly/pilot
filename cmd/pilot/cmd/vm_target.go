@@ -19,6 +19,7 @@ import (
 	"github.com/anomalyco/pilot/internal/ansible"
 	"github.com/anomalyco/pilot/internal/delivery"
 	"github.com/anomalyco/pilot/internal/sandbox"
+	"github.com/anomalyco/pilot/internal/spec"
 	"github.com/anomalyco/pilot/internal/vmtarget"
 )
 
@@ -1576,7 +1577,11 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 		},
 		Verify: func(context.Context) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 4/5] L5 Verification Spec ===")
-			pilotArgs := []string{"verify", vtTestSpec, "-i", invPath, "-l", t.Name, "--allow-isolated-mutation"}
+			limit, err := vmTargetVerificationLimit(vtTestSpec, t.Name)
+			if err != nil {
+				return err
+			}
+			pilotArgs := []string{"verify", vtTestSpec, "-i", invPath, "-l", limit, "--allow-isolated-mutation"}
 			if vtTestVerifyTimeout > 0 {
 				pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTestVerifyTimeout))
 			}
@@ -1612,6 +1617,21 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "🎉 ALL TESTS PASSED SUCCESSFULLY!")
 	return nil
+}
+
+// vmTargetVerificationLimit keeps legacy specs on the generated target name,
+// but uses a v2 contract's declared roles. A disposable VM inventory contains
+// both names as sibling aliases; using the generated name for v2 would violate
+// expected-host scope before a single probe can run.
+func vmTargetVerificationLimit(specPath, targetName string) (string, error) {
+	parsed, err := spec.Parse(specPath)
+	if err != nil {
+		return "", fmt.Errorf("parse verification spec for target scope: %w", err)
+	}
+	if parsed.SchemaVersion != 2 || len(parsed.Roles) == 0 {
+		return targetName, nil
+	}
+	return strings.Join(parsed.Roles, ":"), nil
 }
 
 // recapChangedRe matches a single ansible PLAY RECAP host line and captures

@@ -11,6 +11,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -753,7 +754,7 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	}
 	writer, err := store.StartRun(ctx, st, store.RunStarted{
 		Stage: stage, Component: components[0], Components: components, Playbook: playbook,
-		Inventory: inv, Hosts: hosts, Metadata: deploymentMetadata(extraVars, vault, tags),
+		Inventory: inv, Hosts: hosts, Metadata: deploymentMetadata(root, playbook, components, extraVars, vault, tags),
 	})
 	if err != nil {
 		_ = st.Close()
@@ -773,7 +774,7 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	}
 	var verify delivery.StepFunc
 	if !isDecommissionPlaybook(applied, playbook) {
-		verify, err = autoDeployVerify(root, catalog, components, inv, limit, tags, stage, writer)
+		verify, err = autoDeployVerify(root, catalog, components, inv, limit, tags, stage, vault, writer)
 		if err != nil {
 			_ = writer.Finish(ctx, store.RunFinished{Outcome: string(delivery.OutcomeFailed), ExitCode: 1})
 			_ = st.Close()
@@ -1178,7 +1179,7 @@ func contractIDs(contracts []contract.Contract) []string {
 	return ids
 }
 
-func deploymentMetadata(extraVars []string, vault vaultInput, tags string) map[string]any {
+func deploymentMetadata(root, playbook string, components, extraVars []string, vault vaultInput, tags string) map[string]any {
 	keys := make([]string, 0, len(extraVars))
 	for _, extra := range extraVars {
 		key, _, found := strings.Cut(extra, "=")
@@ -1187,14 +1188,45 @@ func deploymentMetadata(extraVars []string, vault vaultInput, tags string) map[s
 		}
 	}
 	sort.Strings(keys)
-	metadata := map[string]any{"extra_var_keys": keys, "tags": tags, "authorization": "interactive-stage-confirmed"}
+	metadata := map[string]any{
+		"extra_var_keys": keys,
+		"tags":           tags,
+		"authorization":  "interactive-stage-confirmed",
+		"authorized_at":  time.Now().UTC().Format(time.RFC3339Nano),
+	}
 	if vault.ExtraVarsFile != "" {
 		metadata["vault_reference"] = filepath.Base(vault.ExtraVarsFile)
 	}
 	if vault.AskVaultPass {
 		metadata["vault_password_prompted"] = true
 	}
+	digests := make(map[string]string)
+	if digest, err := fileSHA256(filepath.Join(root, playbook)); err == nil {
+		digests[playbook] = digest
+	}
+	for _, component := range components {
+		path := filepath.Join(contract.DefaultDirectory, component+".yaml")
+		if digest, err := fileSHA256(filepath.Join(root, path)); err == nil {
+			digests[path] = digest
+		}
+	}
+	if len(digests) > 0 {
+		metadata["artifact_sha256"] = digests
+	}
+	command := exec.Command("git", "-C", root, "rev-parse", "HEAD")
+	if output, err := command.Output(); err == nil {
+		metadata["source_revision"] = strings.TrimSpace(string(output))
+	}
 	return metadata
+}
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("%x", digest[:]), nil
 }
 
 func resolveInventoryHosts(ctx context.Context, inventory string) ([]string, error) {
@@ -1222,7 +1254,7 @@ func resolveInventoryHosts(ctx context.Context, inventory string) ([]string, err
 	return hosts, nil
 }
 
-func autoDeployVerify(root string, catalog contract.Catalog, components []string, inventory, limit, tags, stage string, writer *store.RunWriter) (delivery.StepFunc, error) {
+func autoDeployVerify(root string, catalog contract.Catalog, components []string, inventory, limit, tags, stage string, vault vaultInput, writer *store.RunWriter) (delivery.StepFunc, error) {
 	auto := make([]string, 0, len(components))
 	for _, id := range components {
 		component, ok := catalog.Component(id)
@@ -1257,7 +1289,7 @@ func autoDeployVerify(root string, catalog contract.Catalog, components []string
 			tool := &tools.VerifySpecTool{
 				Inventory: inventory, Limit: limit, Host: plan.Role, EvidenceWriter: writer,
 				Stage: stage, SelectedComponents: selectedComponents, SelectedRowIDs: selectedRows,
-				AllowIsolatedMutation: true,
+				AllowIsolatedMutation: true, VaultArgs: vault.args(),
 			}
 			result, err := tool.Execute(ctx, json.RawMessage(fmt.Sprintf(`{"spec_path":%q}`, filepath.Join(root, plan.SpecPath))))
 			if err != nil {
@@ -1512,12 +1544,31 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	default:
 		defaultGroup = "(見上方提示)"
 	}
-	targetGroup, err := runTextProgram(
-		fmt.Sprintf("要限定只套用到哪個 group/host 嗎？(-e target_group=...；留空 = 用預設 group %q；可用交集語法如 'dns:&prod')", defaultGroup),
-		"", nil,
-	)
-	if err != nil {
-		return err
+	targetGroup := ""
+	selectedContract, _ := catalog.Component(componentHints[0])
+	if selectedContract.HostCardinality == "exactly-one" {
+		groups, groupErr := resolveInventoryGroups(ctx, inv)
+		if groupErr != nil {
+			return groupErr
+		}
+		candidates := groups[selectedContract.Role]
+		if len(candidates) > 1 {
+			hostIndex, selectErr := runSelectProgram("此元件要求 exactly-one；請明確選擇目標主機", candidates)
+			if selectErr != nil {
+				return selectErr
+			}
+			targetGroup = candidates[hostIndex]
+			fmt.Fprintf(out, "Contract cardinality selection: %s\n", targetGroup)
+		}
+	}
+	if targetGroup == "" {
+		targetGroup, err = runTextProgram(
+			fmt.Sprintf("要限定只套用到哪個 group/host 嗎？(-e target_group=...；留空 = 用預設 group %q；可用交集語法如 'dns:&prod')", defaultGroup),
+			"", nil,
+		)
+		if err != nil {
+			return err
+		}
 	}
 	if targetGroup != "" {
 		extraVars = append(extraVars, "target_group="+targetGroup)

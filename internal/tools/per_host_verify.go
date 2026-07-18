@@ -309,6 +309,11 @@ func (t *VerifySpecTool) invokeAnsibleJSON(ctx context.Context, host string, row
 	if spec.NeedsBecome(row) {
 		args = append(args, "-b")
 	}
+	// VaultArgs contains only Ansible vault references/password mechanisms,
+	// never plaintext. Passing it through the normal Ansible vars pipeline is
+	// what makes a validated secretRef available to the probe without exposing
+	// it in an environment prefix, evidence payload, or command output.
+	args = append(args, t.VaultArgs...)
 	run := t.runJSON
 	if run == nil {
 		run = t.execAnsibleJSON
