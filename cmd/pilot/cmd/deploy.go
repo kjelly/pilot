@@ -40,6 +40,7 @@ var deployInventoryFlag string
 var deployTimeoutFlag string
 var deployActionFlag string
 var deployShowExperimental bool
+var deployPlanComponents []string
 
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
@@ -58,7 +59,40 @@ func init() {
 	deployCmd.Flags().StringVar(&deployTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限，Go duration 格式(例如 45m、1h30m)；跑得比這個久會被強制中止")
 	deployCmd.Flags().StringVar(&deployActionFlag, "action", "apply", "contract lifecycle action: apply, upgrade, or decommission (only declared actions may run)")
 	deployCmd.Flags().BoolVar(&deployShowExperimental, "show-experimental", false, "include experimental contract components after their evidence requirement is reviewed")
+	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
+	deployCmd.AddCommand(deployPlanCmd)
 	rootCmd.AddCommand(deployCmd)
+}
+
+var deployPlanCmd = &cobra.Command{
+	Use:   "plan --component <id> [--component <id>...]",
+	Short: "Show the contract-derived dependency plan without mutating hosts",
+	Args:  cobra.NoArgs,
+	RunE:  runDeployPlan,
+}
+
+func runDeployPlan(cmd *cobra.Command, _ []string) error {
+	if len(deployPlanComponents) == 0 {
+		return fmt.Errorf("at least one --component is required")
+	}
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return err
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		return err
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		return err
+	}
+	plan, err := delivery.PlanComponents(catalog, deployPlanComponents, deployShowExperimental)
+	if err != nil {
+		return err
+	}
+	showComponentDeploymentOrder(cmd.OutOrStdout(), plan)
+	return nil
 }
 
 // errDeployAborted marks a wizard step the user explicitly cancelled
