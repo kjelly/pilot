@@ -30,12 +30,14 @@ import (
 	"github.com/anomalyco/pilot/internal/ansible"
 	"github.com/anomalyco/pilot/internal/contract"
 	"github.com/anomalyco/pilot/internal/delivery"
+	"github.com/anomalyco/pilot/internal/spec"
 	"github.com/anomalyco/pilot/internal/store"
 	"github.com/anomalyco/pilot/internal/tools"
 )
 
 var deployInventoryFlag string
 var deployTimeoutFlag string
+var deployActionFlag string
 
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
@@ -52,6 +54,7 @@ gate、同一份 Playbook 對照表)——熟悉 Ansible 的人仍可以照 DELI
 func init() {
 	deployCmd.Flags().StringVarP(&deployInventoryFlag, "inventory", "i", "inventory.yml", "預先填入的 inventory 路徑(精靈仍會再問一次，可直接按 Enter 採用)")
 	deployCmd.Flags().StringVar(&deployTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限，Go duration 格式(例如 45m、1h30m)；跑得比這個久會被強制中止")
+	deployCmd.Flags().StringVar(&deployActionFlag, "action", "apply", "contract lifecycle action: apply, upgrade, or decommission (only declared actions may run)")
 	rootCmd.AddCommand(deployCmd)
 }
 
@@ -766,7 +769,12 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 		}
 		return err
 	}
-	verify := autoDeployVerify(root, catalog, components, inv, limit, stage, writer)
+	verify, err := autoDeployVerify(root, catalog, components, inv, limit, tags, stage, writer)
+	if err != nil {
+		_ = writer.Finish(ctx, store.RunFinished{Outcome: string(delivery.OutcomeFailed), ExitCode: 1})
+		_ = st.Close()
+		return err
+	}
 	rollback, rollbackPolicy := deploymentRollbackStep(runner, out, applied, inv, limit, extraVars, vault)
 	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{
 		Writer: writer, Preflight: preflight, Verify: verify, Rollback: rollback,
@@ -1188,27 +1196,29 @@ func resolveInventoryHosts(ctx context.Context, inventory string) ([]string, err
 	return hosts, nil
 }
 
-func autoDeployVerify(root string, catalog contract.Catalog, components []string, inventory, limit, stage string, writer *store.RunWriter) delivery.StepFunc {
+func autoDeployVerify(root string, catalog contract.Catalog, components []string, inventory, limit, tags, stage string, writer *store.RunWriter) (delivery.StepFunc, error) {
 	auto := make([]string, 0, len(components))
 	for _, id := range components {
 		component, ok := catalog.Component(id)
 		if !ok {
-			return func(context.Context) error {
-				return fmt.Errorf("selected component %q disappeared from contract catalog", id)
-			}
+			return nil, fmt.Errorf("selected component %q disappeared from contract catalog", id)
 		}
 		if component.Verification.AutoDeploy != nil && *component.Verification.AutoDeploy {
 			auto = append(auto, id)
 		}
 	}
 	if len(auto) == 0 {
-		return nil
+		return nil, nil
+	}
+	plans, err := delivery.PlanVerification(root, catalog, auto)
+	if err != nil {
+		return nil, err
+	}
+	plans, err = scopeVerificationPlans(catalog, plans, tags)
+	if err != nil {
+		return nil, err
 	}
 	return func(ctx context.Context) error {
-		plans, err := delivery.PlanVerification(root, catalog, auto)
-		if err != nil {
-			return err
-		}
 		selectedComponents := make(map[string]bool, len(components))
 		for _, id := range components {
 			selectedComponents[id] = true
@@ -1240,6 +1250,98 @@ func autoDeployVerify(root string, catalog contract.Catalog, components []string
 			}
 		}
 		return nil
+	}, nil
+}
+
+func scopeVerificationPlans(catalog contract.Catalog, plans []delivery.VerificationPlan, requestedTags string) ([]delivery.VerificationPlan, error) {
+	requested := csvSet(requestedTags)
+	if len(requested) == 0 {
+		return plans, nil
+	}
+	if requested["never"] {
+		return nil, fmt.Errorf("--tags never cannot produce a verifiable deployment scope")
+	}
+	known := map[string]bool{"always": true}
+	selected := make([]delivery.VerificationPlan, 0, len(plans))
+	for _, plan := range plans {
+		component, ok := catalog.Component(plan.Component)
+		if !ok {
+			return nil, fmt.Errorf("verification plan component %q disappeared", plan.Component)
+		}
+		coarse := map[string]bool{component.ID: true, component.Role: true}
+		for _, tag := range component.Site.Tags {
+			coarse[tag] = true
+		}
+		for tag := range coarse {
+			known[tag] = true
+		}
+		allRows := false
+		for tag := range requested {
+			if coarse[tag] {
+				allRows = true
+			}
+		}
+		rows := make([]spec.Row, 0, len(plan.Rows))
+		for _, row := range plan.Rows {
+			rowTags, err := contractRowTags(component, plan.SpecPath, row.ID)
+			if err != nil {
+				return nil, err
+			}
+			matched := allRows
+			for _, tag := range rowTags {
+				known[tag] = true
+				if requested[tag] {
+					matched = true
+				}
+			}
+			if matched {
+				rows = append(rows, row)
+			}
+		}
+		if len(rows) > 0 {
+			plan.Rows = rows
+			selected = append(selected, plan)
+		}
+	}
+	for tag := range requested {
+		if !known[tag] {
+			return nil, fmt.Errorf("--tags %q cannot be mapped unambiguously to contract verification rows", tag)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("--tags %q selected no auto-deploy verification rows", requestedTags)
+	}
+	return selected, nil
+}
+
+func contractRowTags(component contract.Contract, specPath, rowID string) ([]string, error) {
+	ref := specPath + "#" + rowID
+	switch component.Traceability.Mode {
+	case "rowTags":
+		if exemption, ok := component.Traceability.Exemptions[ref]; ok {
+			return append([]string(nil), exemption.Tags...), nil
+		}
+		if component.Traceability.Tag == nil {
+			return nil, fmt.Errorf("component %q rowTags traceability has no strategy", component.ID)
+		}
+		switch component.Traceability.Tag.Kind {
+		case "bare":
+			return []string{rowID}, nil
+		case "rolePrefixed":
+			return []string{component.Traceability.Tag.Prefix + "-" + rowID}, nil
+		default:
+			return nil, fmt.Errorf("component %q has unsupported row tag strategy %q", component.ID, component.Traceability.Tag.Kind)
+		}
+	case "mapped":
+		if trace, ok := component.Traceability.Rows[ref]; ok {
+			return append([]string(nil), trace.Tags...), nil
+		}
+		if exemption, ok := component.Traceability.Exemptions[ref]; ok {
+			return append([]string(nil), exemption.Tags...), nil
+		}
+		return nil, fmt.Errorf("component %q row %s has no traceability mapping", component.ID, ref)
+	default:
+		return nil, fmt.Errorf("component %q has unsupported traceability mode %q", component.ID, component.Traceability.Mode)
 	}
 }
 
@@ -1302,11 +1404,26 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 // ---- single-playbook flow ---------------------------------------------------
 
 func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv string) error {
+	if deployActionFlag != "apply" && deployActionFlag != "upgrade" && deployActionFlag != "decommission" {
+		return fmt.Errorf("--action must be apply, upgrade, or decommission")
+	}
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return err
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		return err
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		return err
+	}
 	labels := make([]string, len(deployCatalog))
 	for i, p := range deployCatalog {
-		labels[i] = p.Label
+		labels[i] = deployMenuLabel(p, catalog)
 	}
-	idx, err := runSelectProgram("挑一個要佈署的元件", labels)
+	idx, err := runSelectProgram("挑一個要佈署的元件 (contract 驅動)", labels)
 	if err != nil {
 		return err
 	}
@@ -1326,6 +1443,12 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 		role := entry.InfraRoles[roleIdx]
 		extraVars = append(extraVars, "infra_role="+role)
 		componentHints = []string{role}
+	}
+	if err := showContractActionPlan(out, catalog, componentHints, deployActionFlag); err != nil {
+		return err
+	}
+	if deployActionFlag != "apply" {
+		return fmt.Errorf("selected contract action %q is declared but no interactive execution adapter is available; use its reviewed playbook through the approved day-2 procedure", deployActionFlag)
 	}
 
 	defaultGroup := entry.DefaultGroup
@@ -1392,4 +1515,66 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	extraVars = append(extraVars, strings.Fields(extra)...)
 
 	return executeRecordedDeployment(ctx, runner, out, entry.Playbook, inv, limit, tags, extraVars, vault, decision.Stage, componentHints)
+}
+
+// deployMenuLabel keeps catalog-only copywriting as a presentation projection,
+// while contract id and role remain the source of truth for what is selected.
+func deployMenuLabel(entry deployPlaybook, catalog contract.Catalog) string {
+	ids := entryComponentIDs(entry)
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		component, ok := catalog.Component(id)
+		if !ok {
+			continue
+		}
+		parts = append(parts, component.ID+" (role="+component.Role+")")
+	}
+	if len(parts) == 0 {
+		return entry.Label
+	}
+	return entry.Label + " — " + strings.Join(parts, ", ")
+}
+
+func entryComponentIDs(entry deployPlaybook) []string {
+	if len(entry.InfraRoles) > 0 {
+		return append([]string(nil), entry.InfraRoles...)
+	}
+	return []string{entry.Key}
+}
+
+// showContractActionPlan exposes the contract dependency graph and lifecycle
+// availability before the wizard asks for secrets or authorizes a mutation.
+func showContractActionPlan(out io.Writer, catalog contract.Catalog, ids []string, action string) error {
+	for _, id := range ids {
+		component, ok := catalog.Component(id)
+		if !ok {
+			return fmt.Errorf("deploy catalog component %q has no contract", id)
+		}
+		var playbook *string
+		switch action {
+		case "apply":
+			playbook = &component.Playbooks.Apply
+		case "upgrade":
+			playbook = component.Playbooks.Upgrade
+		case "decommission":
+			playbook = component.Playbooks.Decommission
+		}
+		if playbook == nil || strings.TrimSpace(*playbook) == "" {
+			return fmt.Errorf("component %q does not declare a %s playbook", component.ID, action)
+		}
+		dependencies := make([]string, 0, len(component.Dependencies))
+		for _, dependency := range component.Dependencies {
+			if dependency.Required {
+				dependencies = append(dependencies, dependency.Component+" ("+dependency.Relation+")")
+			}
+		}
+		sort.Strings(dependencies)
+		fmt.Fprintf(out, "\nContract plan: %s\n  action: %s\n  playbook: %s\n", component.ID, action, *playbook)
+		if len(dependencies) == 0 {
+			fmt.Fprintln(out, "  required dependencies: none")
+		} else {
+			fmt.Fprintf(out, "  required dependencies: %s\n", strings.Join(dependencies, ", "))
+		}
+	}
+	return nil
 }
