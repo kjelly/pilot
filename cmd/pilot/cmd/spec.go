@@ -91,6 +91,9 @@ func runSpec(cmd *cobra.Command, args []string) error {
 		fmt.Println("Use --lint / --generate to take action.")
 		return nil
 	}
+	if parsed.SchemaVersion == 2 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "⚠ Spec v2 --generate output is diagnostic only; production apply must use the reviewed playbooks/apply contract")
+	}
 
 	pb, err := spec.Generate(parsed, spec.GenerateOptions{
 		IncludeRaw: true,

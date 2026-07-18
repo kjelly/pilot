@@ -320,6 +320,9 @@ func unquote(s string) string {
 // a read-only check, which is harmless on passwordless-sudo systems
 // (the vm-target's ubuntu user is one).
 func NeedsBecome(r Row) bool {
+	if r.Become != nil {
+		return *r.Become
+	}
 	cmd := strings.ToLower(r.Command)
 	exp := strings.ToLower(r.Expected)
 	markers := []string{

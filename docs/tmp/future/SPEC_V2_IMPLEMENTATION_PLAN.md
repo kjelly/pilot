@@ -12,20 +12,20 @@
 > Verification Safety Boundary RFC 與 ComponentContract RFC 已 Final，可依序
 > 開始 M2.2 implementation。
 
-> **實作狀態：DESIGN FINAL／PRODUCTION IMPLEMENTATION READY；SPEC V2 runtime 尚未實作**
+> **實作狀態：M2.2 parser/runtime 已實作；production deploy wiring 與 migration 尚待後續里程碑。**
 >
-> 本文件是 schema／migration 設計，不代表 pilot 已接受 `schemaVersion: 2`。
-> 目前 parser、verifier 與正式 `docs/verification/*.md` 仍使用 v1。
+> `pilot verify` 已接受嚴格的 `schemaVersion: 2` front-matter + `## Checks`
+> YAML block；正式 `docs/verification/*.md` 尚未遷移，仍使用 v1。
 
 ## 0. 實作邊界（2026-07-18）
 
 | 項目 | 狀態 | 說明 |
 |---|---|---|
-| M0.2 callback／host resolver | **Spike + pure resolver 已驗證** | decoder 與 expected-host truth table 已測；Ansible scope adapter／runner 未接正式 verify |
-| Safety RFC | **Final／待實作** | canonical action、secret reference/transport 與 v1 自動化邊界已定案 |
-| ComponentContract | **Final／loader 待實作** | traceability、placement、provider selection 與六份 fixtures 已固定 |
+| M0.2 callback／host resolver | **✅ 已實作並驗證** | Ansible scope adapter、isolated bounded runner 與 JSON callback 已接正式 verify |
+| Safety RFC | **🟡 v2 boundary 已實作** | readOnly/isolatedMutation gate、secretRef fail-closed；secret-aware runner 仍待 M0.4 |
+| ComponentContract | **🟡 loader 已實作** | strict loader、placement/provider selection、v2 autoDeploy schema gate；deploy wiring 尚待 M0.4 |
 | M2.1 typed matcher | **✅ 已實作並驗證** | `Expect`/`StringMatcher`、v1 compiler、legacy replay compatibility evaluator 已完成 |
-| M2.2 v2 parser | **尚未實作** | 不得新增正式 v2 spec |
+| M2.2 v2 parser | **✅ 已實作並驗證** | strict parser、typed execution、per-host applicability/input resolution、action/secret safety gate、v2 fixture；真實 inventory acceptance 尚未執行 |
 | M2.3 migrate | **尚未實作** | CLI、sidecar report、模板更新皆不存在 |
 
 ## 1. v1 現況精確描述(遷移的地基)
@@ -346,6 +346,12 @@ type Condition struct {
 **規模**:3-4 天。**必須排在 M0.2 合併之後依序進行**——兩者都改 verifier 執行層,平行實作必然互踩(review 建議開工順序 #4;本文件先前「可並行」的說法與自己的風險表矛盾,以此為準)。
 
 ### M2.2 — v2 parser 並存
+
+**完成（2026-07-18）**：`internal/spec/v2.go` 已以 strict YAML parser 實作
+front-matter/checks；`pilot verify` 已執行 typed matcher、aggregate/per-host scope、
+`appliesWhen`、CLI/file/env/inventory `pilot_inputs` precedence 與 fail-closed
+secret/action gate。local fixture 已透過實際 CLI PASS；docker/vm-target/一般 inventory
+的整合驗收仍列為後續 target-test 工作，未在此宣稱完成。
 
 **改動**
 1. `internal/spec/v2.go`:front-matter 偵測 + `yaml.v3` 嚴格解碼(`KnownFields(true)`);`## Checks` 下抓第一個 ```yaml fenced block 解 checks。schemaVersion ≠ 2、缺 front-matter 必填欄位、未知欄位、StringMatcher 多欄位/零欄位、scalar/缺失 action、boolean secretRef、非法 applicability union → 具體行號的錯誤。

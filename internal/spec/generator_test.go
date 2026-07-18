@@ -265,3 +265,14 @@ func TestNeedsBecome(t *testing.T) {
 		}
 	}
 }
+
+func TestNeedsBecomeHonorsV2ExplicitDeclaration(t *testing.T) {
+	no := false
+	if NeedsBecome(Row{Command: "systemctl is-active docker", Become: &no}) {
+		t.Fatal("explicit become=false was overridden by v1 heuristic")
+	}
+	yes := true
+	if !NeedsBecome(Row{Command: "printf ready", Become: &yes}) {
+		t.Fatal("explicit become=true was ignored")
+	}
+}

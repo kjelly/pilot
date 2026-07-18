@@ -147,8 +147,7 @@ func callbackRunnerErrorResults(expectedHosts []string, cause error) []callbackP
 }
 
 func normalizeCallbackText(value string) string {
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	return strings.TrimSuffix(value, "\n")
+	return strings.ReplaceAll(value, "\r\n", "\n")
 }
 
 func firstNonEmpty(values ...string) string {

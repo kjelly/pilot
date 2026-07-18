@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	verification "github.com/anomalyco/pilot/internal/spec"
 )
 
 // SchemaVersion is the ComponentContract schema version supported by this loader.
@@ -377,35 +379,25 @@ func (l Loader) validateAutoDeploySpecs(contract Contract) error {
 		if err != nil {
 			return fmt.Errorf("autoDeploy spec %s: %w", entry.Path, err)
 		}
-		if !isSpecV2(data) {
+		if !hasV2FrontMatter(data) {
 			return fmt.Errorf("verification.autoDeploy requires Spec v2: %s", entry.Path)
+		}
+		parsed, err := verification.Parse(path)
+		if err != nil {
+			return fmt.Errorf("autoDeploy spec %s: %w", entry.Path, err)
+		}
+		if parsed.SchemaVersion != 2 {
+			return fmt.Errorf("verification.autoDeploy requires Spec v2: %s", entry.Path)
+		}
+		if len(parsed.Rows) == 0 {
+			return fmt.Errorf("verification.autoDeploy spec %s has no checks", entry.Path)
 		}
 	}
 	return nil
 }
 
-func isSpecV2(data []byte) bool {
-	lines := strings.Split(string(data), "\n")
-	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
-		return false
-	}
-	end := -1
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			end = i
-			break
-		}
-	}
-	if end == -1 {
-		return false
-	}
-	var frontMatter struct {
-		SchemaVersion int `yaml:"schemaVersion"`
-	}
-	if err := yaml.Unmarshal([]byte(strings.Join(lines[1:end], "\n")), &frontMatter); err != nil {
-		return false
-	}
-	return frontMatter.SchemaVersion == 2
+func hasV2FrontMatter(data []byte) bool {
+	return bytes.HasPrefix(data, []byte("---\n")) || bytes.HasPrefix(data, []byte("---\r\n"))
 }
 
 func validateLocal(contract Contract) error {
