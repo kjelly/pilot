@@ -21,7 +21,8 @@
 > 實作進度 3:2026-07-18——M2.2 已完成 strict v2 parser、typed runtime、
 > applicability/not_applicable evidence、aggregate scope、CLI/file/env/inventory
 > `pilot_inputs` precedence，以及 secretRef/isolatedMutation fail-closed gate。local
-> CLI fixture 已實跑 PASS；docker/vm-target/一般 inventory target acceptance 尚未執行。
+> CLI fixture 已實跑 PASS；M2.3 migration CLI 也已可產出 review-gated draft +
+> JSON sidecar。docker/vm-target/一般 inventory target acceptance 尚未執行。
 >
 > 上述修訂 1–5／實作進度 1–2 是決策歷史，包含當時的 Proposed／NO-GO
 > 狀態與已被更正的 1—1 假設；目前 gate 只看修訂 6、下方狀態快照與各
@@ -62,7 +63,7 @@
 | M1.2/M1.3 | **⏸ 尚未實作** | 無 | 全量 contracts、DAG/preflight |
 | M2.1 | **✅ 已實作並驗證** | typed `Expect`、v1 Expected compiler、legacy output compatibility evaluator | migration |
 | M2.2 | **✅ 已實作並驗證** | strict v2 parser、typed execution、applicability/action/secretRef boundary、input precedence、local CLI fixture | docker/vm/general-inventory target acceptance、migration |
-| M2.3 | **⏸ 尚未實作** | 無 | migration CLI、template/document migration |
+| M2.3 | **🟡 部分已實作** | `pilot spec migrate`、v1 prose preservation、needsReview/sidecar/非零 fail-closed | template/document migration、正式 spec target-test |
 | P3/P4/P5 | **⏸ 尚未實作** | 無 | TUI/eval/query |
 
 ## 0. 現況與差距總覽
@@ -386,6 +387,8 @@ contract lint。這是 code dependency，不是未決 schema blocker。
 - v1 manual verify 照常運作；production deploy auto-verify 只接受 v2。
 
 ### M2.3 — 遷移工具與 lint
+
+**狀態（2026-07-18）：🟡 migration CLI 已實作；正式 spec 的逐份 target-test 遷移待 feature 變更時進行。**
 
 - `pilot spec migrate <v1.md>`:輸出 v2 草稿；matcher、action 或 applicability
   無法安全推導時寫 `needsReview`，尤其 known-deviation/optional prose 一律
