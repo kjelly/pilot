@@ -1,4 +1,4 @@
-# REVIEW MIRROR of contracts/dns.yaml — exact content is regression-checked.
+# ComponentContract v1 — canonical production source; deploy/TUI wiring pending.
 schemaVersion: 1
 id: dns
 role: dns

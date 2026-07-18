@@ -333,8 +333,9 @@ lifecycle:
 | ntp | shared playbook/spec、category selector、site vars |
 | log-shipping | dependency binding、dynamic target group、bare row tags |
 
-Fixtures 位於 `docs/tmp/future/contracts/`；它們現在是 loader/schema regression input，
-但尚未是 deploy runtime 的 production contracts directory。
+六份 canonical contract 位於 `contracts/`；`docs/tmp/future/contracts/` 是 review
+mirror，loader 解碼後的 semantic-equality regression test 會阻止兩者漂移。它們尚未
+接入 deploy runtime。
 
 ## 10. Loader 開工 gate
 
@@ -351,9 +352,9 @@ Fixtures 位於 `docs/tmp/future/contracts/`；它們現在是 loader/schema reg
 | role cardinality／dependency placement／provider selection | **完成** |
 | auto-deploy v2-only 與 applicability ownership | **完成** |
 
-因此 production loader/API 可開始實作。實作完成仍需把 test-only types 搬成
-production types、讓 fixtures 改走正式 loader，並通過相同正負案例；Final 不代表
-這些 runtime 工作已完成。
+production loader/API baseline 已實作：canonical `contracts/` 由 strict loader 載入，
+並提供 component／role lookup 與唯讀 `pilot contract lint`。M1.2 仍需收斂全量
+lint；deploy catalog view、site lint 與 TUI integration 也尚未實作。
 
 ## 11. 非目標
 
