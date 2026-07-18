@@ -22,7 +22,9 @@
 > applicability/not_applicable evidence、aggregate scope、CLI/file/env/inventory
 > `pilot_inputs` precedence，以及 secretRef/isolatedMutation fail-closed gate。local
 > CLI fixture 已實跑 PASS；M2.3 migration CLI 也已可產出 review-gated draft +
-> JSON sidecar。docker/vm-target/一般 inventory target acceptance 尚未執行。
+> JSON sidecar。同一份 read-only v2 fixture 已在 local、docker-target、
+> vm-target 與一般 inventory backend 實跑，四者均為 1/1 PASS；一般 inventory
+> 使用 localhost connection fixture，未宣稱已在 staging／真實主機驗證。
 >
 > 上述修訂 1–5／實作進度 1–2 是決策歷史，包含當時的 Proposed／NO-GO
 > 狀態與已被更正的 1—1 假設；目前 gate 只看修訂 6、下方狀態快照與各
@@ -62,7 +64,7 @@
 | M0.4 | **⏸ 尚未實作** | 無 | deploy transaction、rollback/idempotency policy |
 | M1.2/M1.3 | **⏸ 尚未實作** | 無 | 全量 contracts、DAG/preflight |
 | M2.1 | **✅ 已實作並驗證** | typed `Expect`、v1 Expected compiler、legacy output compatibility evaluator | migration |
-| M2.2 | **✅ 已實作並驗證** | strict v2 parser、typed execution、applicability/action/secretRef boundary、input precedence、local CLI fixture | docker/vm/general-inventory target acceptance、migration |
+| M2.2 | **✅ 已實作並驗證** | strict v2 parser、typed execution、applicability/action/secretRef boundary、input precedence；local/docker/vm/general-inventory backend 同一 fixture 均 PASS | staging／真實主機 acceptance、migration |
 | M2.3 | **🟡 部分已實作** | `pilot spec migrate`、v1 prose preservation、needsReview/sidecar/非零 fail-closed | template/document migration、正式 spec target-test |
 | P3/P4/P5 | **⏸ 尚未實作** | 無 | TUI/eval/query |
 
@@ -377,7 +379,7 @@ contract lint。這是 code dependency，不是未決 schema blocker。
 
 ### M2.2 — v2 parser 並存
 
-**狀態（2026-07-18）：✅ 已實作並驗證（local + unit）；跨 target integration acceptance 待執行。**
+**狀態（2026-07-18）：✅ 已實作並驗證（unit + local/docker/vm/general-inventory backend）；尚未宣稱 staging／真實主機 acceptance。**
 
 - v2 spec 用 front-matter + fenced YAML checks；包含 typed matcher、
   `appliesWhen`、`scope`、canonical object action 與

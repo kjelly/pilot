@@ -48,6 +48,9 @@ func lintContracts(root string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := contract.ValidateBundleReferences(root, catalog); err != nil {
+		return err
+	}
 	components := catalog.Components()
 	for _, component := range components {
 		fmt.Fprintf(out, "✓ %s\trole=%s\n", component.ID, component.Role)
