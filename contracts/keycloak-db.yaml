@@ -1,0 +1,26 @@
+schemaVersion: 1
+id: keycloak-db
+role: keycloak-db
+specs:
+  - path: docs/verification/core-infra-provider-db.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/keycloak-db-apply.yml
+regressionTests:
+  - internal/spec/core_infra_provider_db_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: docker, required: true, relation: sameHosts}
+hostCardinality: exactly-one
+resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
+groupVars:
+  - {name: keycloak_db_password, type: string, required: true, secret: true}
+endpoints:
+  - {name: postgres, scheme: tcp, port: 5432}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: vm, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: rolePrefixed, prefix: db}
+verification: {autoDeploy: false}
+site: {include: true, order: 60, vars: {}, tags: [keycloak, db], optIn: false}

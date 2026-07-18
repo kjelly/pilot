@@ -1,0 +1,33 @@
+schemaVersion: 1
+id: dashboard
+role: dashboard
+specs:
+  - path: docs/verification/dashboard.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/dashboard-apply.yml
+regressionTests:
+  - internal/spec/dashboard_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: docker, required: true, relation: sameHosts}
+  - {component: thanos-query, required: true, relation: providerEndpoint}
+bindings:
+  - input: thanos_query_target_host
+    requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
+    from: {component: thanos-query, endpoint: query}
+hostCardinality: exactly-one
+resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 10}
+groupVars:
+  - {name: thanos_query_target_host, type: string, required: true, secret: false}
+endpoints:
+  - {name: grafana, scheme: http, port: 3000}
+  - {name: loki, scheme: http, port: 3100}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

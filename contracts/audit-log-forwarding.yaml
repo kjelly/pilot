@@ -1,0 +1,31 @@
+schemaVersion: 1
+id: audit-log-forwarding
+role: audit-log-forwarding
+specs:
+  - path: docs/verification/audit-log-forwarding.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/audit-log-forwarding-apply.yml
+regressionTests:
+  - internal/spec/audit_log_forwarding_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: log-server, required: true, relation: providerEndpoint}
+bindings:
+  - input: siem_forward_host
+    requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
+    from: {component: log-server, endpoint: syslog}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
+groupVars:
+  - {name: siem_forward_host, type: string, required: true, secret: false}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions:
+    "docs/verification/audit-log-forwarding.md#C11": {kind: verifyOnly, reason: functional audit probe}
+verification: {autoDeploy: false}
+site: {include: true, order: 90, vars: {}, tags: [security, audit-log-forwarding], optIn: false}

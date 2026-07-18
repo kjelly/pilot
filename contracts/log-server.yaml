@@ -1,0 +1,24 @@
+schemaVersion: 1
+id: log-server
+role: log-server
+specs:
+  - path: docs/verification/log-server.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/log-server-apply.yml
+regressionTests:
+  - internal/spec/log_server_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+hostCardinality: exactly-one
+resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
+endpoints:
+  - {name: syslog, scheme: tcp, port: 6514}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+lifecycle:
+  backup: {provider: restic, paths: [/var/log/siem]}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+verification: {autoDeploy: false}
+site: {include: true, order: 80, vars: {}, tags: [security, log-server], optIn: false}

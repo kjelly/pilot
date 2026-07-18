@@ -1,0 +1,22 @@
+schemaVersion: 1
+id: freeipa-identity
+role: freeipa-server
+specs:
+  - path: docs/verification/freeipa-identity.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/freeipa-identity-apply.yml
+regressionTests:
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: freeipa-server, required: true, relation: sameHosts}
+hostCardinality: exactly-one
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 1}
+groupVars:
+  - {name: ipa_admin_password, type: string, required: true, secret: true}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: mapped
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

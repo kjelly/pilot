@@ -1,0 +1,29 @@
+schemaVersion: 1
+id: freeipa-server-replica
+role: freeipa-server-replica
+specs:
+  - path: docs/verification/freeipa-server-replica.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/freeipa-server-replica-apply.yml
+regressionTests:
+  - internal/spec/freeipa_server_replica_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: freeipa-server, required: true, relation: providerEndpoint}
+bindings:
+  - input: freeipa_server_ip
+    requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
+    from: {component: freeipa-server, endpoint: https}
+hostCardinality: one-or-more
+resources: {minCPU: 2, minRAMMiB: 4096, minDiskGiB: 20}
+groupVars:
+  - {name: freeipa_server_ip, type: string, required: true, secret: false}
+  - {name: ipa_admin_password, type: string, required: true, secret: true}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: mapped
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

@@ -1,0 +1,24 @@
+schemaVersion: 1
+id: alertmanager
+role: alertmanager
+specs:
+  - path: docs/verification/alertmanager.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/alertmanager-apply.yml
+regressionTests:
+  - internal/spec/alertmanager_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: docker, required: true, relation: sameHosts}
+hostCardinality: exactly-one
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
+endpoints:
+  - {name: api, scheme: http, port: 9093}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: vm, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}
