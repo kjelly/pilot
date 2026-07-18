@@ -38,7 +38,7 @@ traceability:
     "docs/verification/docker.md#C6": {kind: derived, tags: [docker-C1], reason: default networks come from engine installation}
     "docs/verification/docker.md#C7": {kind: derived, tags: [docker-C1], reason: compose plugin comes from the package set}
     "docs/verification/docker.md#C8": {kind: derived, tags: [docker-C1], reason: cgroup mode is an engine property}
-verification: {autoDeploy: false}
+verification: {autoDeploy: true}
 site:
   include: true
   order: 30

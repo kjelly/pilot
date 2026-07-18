@@ -326,7 +326,7 @@ func TestFixtureSemanticValidationRejectsInvalidContracts(t *testing.T) {
 		},
 		{
 			name: "v1 fixture cannot enable auto deploy",
-			base: docker,
+			base: freeIPA,
 			mutate: func(c *fixtureContract) {
 				enabled := true
 				c.Verification.AutoDeploy = &enabled
@@ -485,13 +485,13 @@ func validateFixtureContract(root string, contract fixtureContract) error {
 	if err := validateTraceability(contract.Traceability, selectedSpecs, tags); err != nil {
 		return err
 	}
-	if err := validateFixtureFields(contract); err != nil {
+	if err := validateFixtureFields(root, contract); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validateFixtureFields(contract fixtureContract) error {
+func validateFixtureFields(root string, contract fixtureContract) error {
 	switch contract.HostCardinality {
 	case "exactly-one", "one-or-more", "zero-or-more":
 	default:
@@ -664,7 +664,15 @@ func validateFixtureFields(contract fixtureContract) error {
 		return fmt.Errorf("verification.autoDeploy is required")
 	}
 	if *contract.Verification.AutoDeploy {
-		return fmt.Errorf("verification.autoDeploy requires Spec v2; final schema fixtures still reference v1 specs")
+		for _, entry := range contract.Specs {
+			parsed, err := spec.Parse(filepath.Join(root, entry.Path))
+			if err != nil {
+				return fmt.Errorf("verification.autoDeploy spec %s: %w", entry.Path, err)
+			}
+			if parsed.SchemaVersion != 2 {
+				return fmt.Errorf("verification.autoDeploy requires Spec v2: %s", entry.Path)
+			}
+		}
 	}
 	return nil
 }

@@ -24,7 +24,23 @@ func TestExecuteRecordedDeploymentPersistsTransactionAfterAuthorization(t *testi
 	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"_meta\": {\"hostvars\": {\"host-a\": {}}}, \"docker\": {\"hosts\": [\"host-a\"]}}'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte("#!/bin/sh\nprintf '%s\\n' '  hosts (1):' '    host-a'\n"), 0o755); err != nil {
+	ansibleFixture := `#!/bin/sh
+case "$*" in
+  *--list-hosts*) printf '%s\n' '  hosts (1):' '    host-a'; exit 0 ;;
+  *dpkg-query*) out=1 ;;
+  *'systemctl is-active'*) out=active ;;
+  *'docker --version'*) out='Docker version 1.0' ;;
+  *'stat -c'*) out='660 root docker /var/run/docker.sock' ;;
+  *'docker run --rm'*) out='Hello from Docker' ;;
+  *'docker ps -aq'*) out='' ;;
+  *'docker network ls'*) out=bridge ;;
+  *'docker compose version'*) out='Docker Compose version v2' ;;
+  *'docker info'*) out=' Cgroup Driver: cgroupfs' ;;
+  *) out=unknown ;;
+esac
+printf '{"plays":[{"tasks":[{"hosts":{"host-a":{"stdout":"%s","rc":0}}}]}]}\n' "$out"
+`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))

@@ -38,6 +38,7 @@ import (
 var deployInventoryFlag string
 var deployTimeoutFlag string
 var deployActionFlag string
+var deployShowExperimental bool
 
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
@@ -55,6 +56,7 @@ func init() {
 	deployCmd.Flags().StringVarP(&deployInventoryFlag, "inventory", "i", "inventory.yml", "預先填入的 inventory 路徑(精靈仍會再問一次，可直接按 Enter 採用)")
 	deployCmd.Flags().StringVar(&deployTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限，Go duration 格式(例如 45m、1h30m)；跑得比這個久會被強制中止")
 	deployCmd.Flags().StringVar(&deployActionFlag, "action", "apply", "contract lifecycle action: apply, upgrade, or decommission (only declared actions may run)")
+	deployCmd.Flags().BoolVar(&deployShowExperimental, "show-experimental", false, "include experimental contract components after their evidence requirement is reviewed")
 	rootCmd.AddCommand(deployCmd)
 }
 
@@ -1255,6 +1257,7 @@ func autoDeployVerify(root string, catalog contract.Catalog, components []string
 			tool := &tools.VerifySpecTool{
 				Inventory: inventory, Limit: limit, Host: plan.Role, EvidenceWriter: writer,
 				Stage: stage, SelectedComponents: selectedComponents, SelectedRowIDs: selectedRows,
+				AllowIsolatedMutation: true,
 			}
 			result, err := tool.Execute(ctx, json.RawMessage(fmt.Sprintf(`{"spec_path":%q}`, filepath.Join(root, plan.SpecPath))))
 			if err != nil {
@@ -1443,15 +1446,23 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	if err != nil {
 		return err
 	}
-	labels := make([]string, len(deployCatalog))
-	for i, p := range deployCatalog {
-		labels[i] = deployMenuLabel(p, catalog)
+	entries := make([]deployPlaybook, 0, len(deployCatalog))
+	labels := make([]string, 0, len(deployCatalog))
+	for _, p := range deployCatalog {
+		if !deployShowExperimental && deployEntryExperimental(p, catalog) {
+			continue
+		}
+		entries = append(entries, p)
+		labels = append(labels, deployMenuLabel(p, catalog))
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("no contract components are available; use --show-experimental only after reviewing their evidence requirements")
 	}
 	idx, err := runSelectProgram("挑一個要佈署的元件 (contract 驅動)", labels)
 	if err != nil {
 		return err
 	}
-	entry := deployCatalog[idx]
+	entry := entries[idx]
 
 	if entry.Note != "" {
 		fmt.Fprintf(out, "ℹ️  %s\n", entry.Note)
@@ -1471,6 +1482,11 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	if err := showContractActionPlan(out, catalog, componentHints, deployActionFlag); err != nil {
 		return err
 	}
+	plan, err := delivery.PlanComponents(catalog, componentHints, deployShowExperimental)
+	if err != nil {
+		return err
+	}
+	showComponentDeploymentOrder(out, plan)
 	actionPlaybook, err := selectedActionPlaybook(catalog, componentHints, deployActionFlag)
 	if err != nil {
 		return err
@@ -1576,6 +1592,33 @@ func entryComponentIDs(entry deployPlaybook) []string {
 		return append([]string(nil), entry.InfraRoles...)
 	}
 	return []string{entry.Key}
+}
+
+func deployEntryExperimental(entry deployPlaybook, catalog contract.Catalog) bool {
+	for _, id := range entryComponentIDs(entry) {
+		component, ok := catalog.Component(id)
+		if ok && component.Experimental {
+			return true
+		}
+	}
+	return false
+}
+
+func showComponentDeploymentOrder(out io.Writer, plan delivery.ComponentPlan) {
+	parts := make([]string, 0, len(plan.Ordered))
+	for _, component := range plan.Ordered {
+		label := component.ID + "[" + component.Role + "]"
+		if component.Experimental {
+			label += "(EXPERIMENTAL)"
+		}
+		parts = append(parts, label)
+	}
+	fmt.Fprintf(out, "  dependency-first order: %s\n", strings.Join(parts, " → "))
+	for _, component := range plan.Ordered {
+		if component.Lifecycle.Backup != nil {
+			fmt.Fprintf(out, "  backup policy %s: %s (%s)\n", component.ID, component.Lifecycle.Backup.Provider, strings.Join(component.Lifecycle.Backup.Paths, ","))
+		}
+	}
 }
 
 // showContractActionPlan exposes the contract dependency graph and lifecycle
