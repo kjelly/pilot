@@ -31,6 +31,12 @@
 > `internal/delivery` contract preflight 已實作 cardinality、required input、
 > inputRules、sameHosts、provider selection、OS/resource 與 facts-unavailable
 > warning；接入 deploy/TUI 仍屬 M0.4/P3 wiring。
+> 實作進度 5:2026-07-18——M0.4 deploy transaction 已接 contract scope/preflight、
+> append-only run evidence、preview/apply/auto-v2-verify/idempotency/rollback；P3 在
+> vault/授權前顯示 contract action/dependency plan 並對未宣告 day-2 action fail closed；
+> P4 有五題 brief corpus 與 model-independent deterministic gate；P5 已有 read-only
+> run projections、hash-verified archive/prune 與獨立 `evidence_admin_events`。既有
+> 正式 v1 spec 尚未取得 target acceptance，因此 auto-verify 仍僅為 contract opt-in v2。
 >
 > 上述修訂 1–5／實作進度 1–2 是決策歷史，包含當時的 Proposed／NO-GO
 > 狀態與已被更正的 1—1 假設；目前 gate 只看修訂 6、下方狀態快照與各
@@ -63,29 +69,29 @@
 |---|---|---|---|
 | M0.1 | **✅ 已實作並驗證** | deploy exit-code、preflight rejection、`verify --dir` 原始錯誤、regression tests | deploy 後自動 verify/evidence |
 | Safety RFC | **🟡 部分已實作** | v2 action gate、secretRef fail-closed、v2-only autoDeploy schema gate | secret-aware module、deploy authorization wiring |
-| Evidence RFC | **✅ 已實作並驗證** | schema v13、RunWriter、heartbeat/finalization、standalone verify evidence；rotation 移 P5 | deploy transaction usage（M0.4） |
-| M0.2 | **✅ 已實作並驗證** | JSON decoder、status、expected-host resolver、Ansible scope adapter、single-host bounded runner | deploy transaction wiring（M0.4） |
+| Evidence RFC | **✅ 已實作並驗證** | schema v14、RunWriter、heartbeat/finalization、archive/prune/admin audit | artifact/image-digest 自動擷取仍待擴充 |
+| M0.2 | **✅ 已實作並驗證** | JSON decoder、status、expected-host resolver、Ansible scope adapter、single-host bounded runner | 無 |
 | M1.1/M1.2 | **✅ 已實作並驗證** | strict loader/Catalog、22 份 canonical contracts、bundle/traceability/dependency/endpoint/apply/deploy catalog lint | DELIVERY table 改為生成 view |
-| M0.3 | **✅ 已實作並驗證** | schema v13、append-only event/evidence stream、serialized RunWriter、heartbeat/finalization、standalone verify evidence | deploy transaction 對 writer 的使用（M0.4） |
-| M0.4 | **⏸ 尚未實作** | 無 | deploy transaction、rollback/idempotency policy |
-| M1.3 | **🟡 preflight engine 已實作** | cardinality、required inputs、inputRules、sameHosts、provider selection、OS/resource/facts warning | 接入 deploy/TUI inventory resolver |
+| M0.3 | **✅ 已實作並驗證** | schema v14、append-only event/evidence stream、serialized RunWriter、heartbeat/finalization、standalone/deploy evidence | 無 |
+| M0.4 | **✅ 已實作並驗證** | deploy transaction、contract scope/preflight、preview/apply/auto-v2-verify/idempotency/rollback、finalization | formal v1→v2 target acceptance |
+| M1.3 | **✅ 已實作並驗證** | cardinality、required inputs、inputRules、sameHosts、provider selection、OS/resource/facts warning、deploy inventory resolver | full site execution projection remains lint-only |
 | M2.1 | **✅ 已實作並驗證** | typed `Expect`、v1 Expected compiler、legacy output compatibility evaluator | migration |
 | M2.2 | **✅ 已實作並驗證** | strict v2 parser、typed execution、applicability/action/secretRef boundary、input precedence；local/docker/vm/general-inventory backend 同一 fixture 均 PASS | staging／真實主機 acceptance、migration |
 | M2.3 | **🟡 部分已實作** | `pilot spec migrate`、v1 prose preservation、needsReview/sidecar/非零 fail-closed | template/document migration、正式 spec target-test |
-| P3/P4/P5 | **⏸ 尚未實作** | 無 | TUI/eval/query |
+| P3/P4/P5 | **✅ 核心路徑已實作並驗證** | contract TUI plan/action gate、brief corpus/deterministic eval、runs query/archive/prune/admin audit | full capability composer/scale and formal target evidence remain future work |
 
 ## 0. 現況與差距總覽
 
 | 支柱 | 現況 | 關鍵差距 |
 |---|---|---|
-| P0 交付交易 | 交易鏈(syntax→snapshot→apply→verify→idempotency→rollback)**已存在但只在 `vm-target test` / `topology test`**(`vm_target.go:1488`、`vm_target_topology.go:677`);`pilot deploy` 只有 preflight+preview+stage gate+apply，M0.1 已使 preview/apply/preflight failure 正確回傳非零 | deploy 後不跑 verify；無 run ID；不寫 evidence；無 rollback policy |
-| P1 ComponentContract | 元件事實分散在 `deployCatalog`(deploy_catalog.go:39)、`roleContracts`(inventory/contracts.go:17)、`specTagMap`(tag_coverage_test.go:50)、group_vars example、DELIVERY.md 五處 | 無單一可 lint 資料模型;cardinality、依賴、必要 vault key、stage policy 都不是結構化資料 |
-| P2 Spec v2 | matcher 是魔法前綴(verify_spec.go:321:`^`=regex、`~`=substring、整數=rc、`present`);parser 單版本,`版本:` 欄位只是資訊 | 無 typed matcher、無版本化 parser、無 v1→v2 遷移工具 |
-| P3 Contract TUI | deploy 選單來自 `deployCatalog` label;host 靠自由輸入 `target_group`/`--limit` | 選單、依賴提示、host 選擇未由 contract 驅動 |
-| P4 authoring eval | 無 | 需先有 P1 lint 與 P0 deterministic gate 才有可量測的東西 |
-| P5 evidence | 只有一張 **upsert**(非 append-only)的 `spec_checkpoints` 表(sqlite.go:29,`UNIQUE(spec_path,row_id)`);verify 輸出 NDJSON 檔在 `.verification/` | 無 deployment run 紀錄、無 host×row evidence 表、無查詢面 |
+| P0 交付交易 | `pilot deploy` 已經 contract scope/preflight、preview、apply、v2 opt-in verify、evidence、stage idempotency 與 rollback 串成 transaction | v1 spec 仍只允許 manual verify，正式 v2 acceptance 需 target evidence |
+| P1 ComponentContract | `contracts/*.yaml` 是 22 個 component 的 strict、可 lint canonical contract；catalog 只保留 presentation projection | DELIVERY 自動生成 view 仍未實作 |
+| P2 Spec v2 | typed matcher、嚴格 v2 parser/runtime 及 review-gated migration CLI 均已存在；v1 compatibility 仍保留 | formal documents/templates 尚未逐份完成 actual-run migration |
+| P3 Contract TUI | menu presentation 保留 catalog copywriting；selection 前讀 contract 顯示 action/playbook/required dependency，未宣告 lifecycle action fail closed | full multi-capability DAG composer/scale UX |
+| P4 authoring eval | `eval/briefs/*.md` 五題 corpus、`eval/run.sh` deterministic lint/tag/shell/secret-host gate；target test opt-in | model benchmark dashboard/iteration metric aggregation |
+| P5 evidence | append-only delivery event/evidence tables、`pilot runs` read projections、archive/prune hash proof、admin event table | artifact/image digest automatic collection |
 
-另一個橫切差距(P0 與 P2 都踩到):**verify 結果不是 per-host**。`runAnsibleAdHoc`(verify_spec.go:192)對 `all` 跑 ad-hoc 後把整個 process 的輸出壓成單一 `VerifyRow`;`VerifyRow.Host` 欄位存在但從未填。這必須最先修,否則 P0 的「host × row 判定」與 P5 的 evidence 粒度都是空談。
+P0/P2 的 per-host gap 已由 isolated bounded runner、expected-host resolver 與 host×row evidence 解決；本文後面的「現況」段落若描述舊行為，均是開工前的設計歷史，不是目前 runtime 宣稱。
 
 ## 1. 執行順序與里程碑
 
