@@ -26,5 +26,10 @@ evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:
   mode: rowTags
   tag: {kind: bare}
+  exemptions:
+    "docs/verification/freeipa-client.md#C4": {kind: derived, tags: [C1], reason: host keytab is produced by ipa-client-install}
+    "docs/verification/freeipa-client.md#C5": {kind: derived, tags: [C1], reason: SSSD account resolution is configured by ipa-client-install}
+    "docs/verification/freeipa-client.md#C6": {kind: derived, tags: [C1], reason: SSSD access provider is configured by ipa-client-install}
+    "docs/verification/freeipa-client.md#C10": {kind: verifyOnly, reason: kernel auditing functional probe}
 verification: {autoDeploy: false}
 site: {include: true, order: 50, vars: {}, tags: [freeipa, freeipa-client], optIn: false}

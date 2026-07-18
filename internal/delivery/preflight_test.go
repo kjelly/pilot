@@ -27,3 +27,64 @@ func TestValidatePreflightRequiresDependencySelection(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestValidateContractPreflightRequiresInputsAndEvaluatesRules(t *testing.T) {
+	component := contract.Contract{
+		ID: "backup", Role: "backup", HostCardinality: "one-or-more",
+		GroupVars: []contract.GroupVar{
+			{Name: "password", Type: "string", Required: true},
+			{Name: "endpoint", Type: "string"},
+		},
+		InputRules: []contract.InputRule{{
+			Any:    []contract.InputCondition{{Input: "endpoint", Operator: "nonEmpty"}},
+			Reason: "endpoint required",
+		}},
+	}
+	request := PreflightRequest{Selected: []contract.Contract{component}, Scope: Scope{HostsByRole: map[string][]string{"backup": {"a"}}}}
+	if _, err := ValidateContractPreflight(request); err == nil || !strings.Contains(err.Error(), "password") {
+		t.Fatalf("err=%v", err)
+	}
+	request.Inputs = map[string]map[string]any{"backup": {"password": "secret"}}
+	if _, err := ValidateContractPreflight(request); err == nil || !strings.Contains(err.Error(), "endpoint required") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateContractPreflightRejectsAmbiguousProviderAndLowResources(t *testing.T) {
+	provider := contract.Contract{ID: "provider", Role: "provider", HostCardinality: "one-or-more"}
+	client := contract.Contract{
+		ID: "client", Role: "client", HostCardinality: "one-or-more",
+		Dependencies: []contract.Dependency{{Component: "provider", Required: true, Relation: "providerEndpoint"}},
+		Bindings:     []contract.Binding{{Input: "endpoint", SourceSelection: "exactlyOne", From: contract.BindingFrom{Component: "provider", Endpoint: "api"}}},
+		Resources:    contract.Resources{MinCPU: 2},
+	}
+	request := PreflightRequest{
+		Selected: []contract.Contract{provider, client},
+		Scope: Scope{HostsByRole: map[string][]string{
+			"provider": {"p1", "p2"}, "client": {"c1"},
+		}},
+		Facts: map[string]HostFacts{"c1": {Available: true, CPU: 1}},
+	}
+	if _, err := ValidateContractPreflight(request); err == nil || !strings.Contains(err.Error(), "below minimum") {
+		t.Fatalf("err=%v", err)
+	}
+	request.Facts["c1"] = HostFacts{Available: true, CPU: 2}
+	if _, err := ValidateContractPreflight(request); err == nil || !strings.Contains(err.Error(), "exactly one explicit") {
+		t.Fatalf("err=%v", err)
+	}
+	request.ProviderSelection = map[string][]string{"client.endpoint": {"p1"}}
+	if _, err := ValidateContractPreflight(request); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateContractPreflightWarnsWhenFactsUnavailable(t *testing.T) {
+	component := contract.Contract{ID: "a", Role: "a", HostCardinality: "one-or-more", Resources: contract.Resources{MinCPU: 8}}
+	result, err := ValidateContractPreflight(PreflightRequest{
+		Selected: []contract.Contract{component},
+		Scope:    Scope{HostsByRole: map[string][]string{"a": {"host-a"}}},
+	})
+	if err != nil || len(result.Warnings) != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}

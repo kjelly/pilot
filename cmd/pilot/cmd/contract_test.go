@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/anomalyco/pilot/internal/contract"
 )
 
 func TestLintContractsLoadsCanonicalDirectory(t *testing.T) {
@@ -28,5 +30,19 @@ func TestLintContractsLoadsCanonicalDirectory(t *testing.T) {
 	}
 	if !strings.Contains(got, "contracts: 22 component(s) loaded from") {
 		t.Fatalf("output missing summary:\n%s", got)
+	}
+}
+
+func TestValidateDeployCatalogProjectionRejectsStageDrift(t *testing.T) {
+	catalog, err := contract.NewCatalog([]contract.Contract{{
+		ID: "docker", Playbooks: contract.Playbooks{Apply: "playbooks/apply/docker-apply.yml"},
+		StagePolicy: contract.StagePolicy{Variable: "patch_stage"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []deployPlaybook{{Key: "docker", Playbook: "playbooks/apply/docker-apply.yml", StageVar: "stage"}}
+	if err := validateDeployCatalogEntries(catalog, entries); err == nil || !strings.Contains(err.Error(), "stage variable") {
+		t.Fatalf("err=%v", err)
 	}
 }

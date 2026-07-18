@@ -22,5 +22,10 @@ evidenceRequirement: {targetTest: vm, idempotency: required}
 traceability:
   mode: rowTags
   tag: {kind: rolePrefixed, prefix: db}
+  exemptions:
+    "docs/verification/core-infra-provider-db.md#C4": {kind: derived, tags: [db-C1], reason: database is created by the container bootstrap}
+    "docs/verification/core-infra-provider-db.md#C5": {kind: derived, tags: [db-C1], reason: role is created by the container bootstrap}
+    "docs/verification/core-infra-provider-db.md#C6": {kind: derived, tags: [db-C1], reason: ownership follows container bootstrap variables}
+    "docs/verification/core-infra-provider-db.md#C11": {kind: verifyOnly, reason: database capacity guard}
 verification: {autoDeploy: false}
 site: {include: true, order: 60, vars: {}, tags: [keycloak, db], optIn: false}

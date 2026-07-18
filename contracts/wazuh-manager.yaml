@@ -30,5 +30,9 @@ lifecycle:
 traceability:
   mode: rowTags
   tag: {kind: bare}
+  exemptions:
+    "docs/verification/wazuh-manager.md#C7": {kind: derived, tags: [C4], reason: effective configuration from compose injection}
+    "docs/verification/wazuh-manager.md#C8": {kind: verifyOnly, reason: disk capacity guard}
+    "docs/verification/wazuh-manager.md#C9": {kind: verifyOnly, reason: rule-engine functional probe}
 verification: {autoDeploy: false}
 site: {include: true, order: 100, vars: {}, tags: [security, wazuh-manager], optIn: false}

@@ -18,5 +18,14 @@ stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:
   mode: mapped
+  rows:
+    "docs/verification/freeipa-identity.md#C1": {tags: [users, groups], reason: reconcile declared membership}
+    "docs/verification/freeipa-identity.md#C2": {tags: [users, groups], reason: revoke stale membership}
+    "docs/verification/freeipa-identity.md#C3": {tags: [hbac], reason: reconcile HBAC categories}
+    "docs/verification/freeipa-identity.md#C4": {tags: [hbac], reason: reconcile HBAC group membership}
+    "docs/verification/freeipa-identity.md#C5": {tags: [sudo], reason: reconcile sudo command category}
+    "docs/verification/freeipa-identity.md#C6": {tags: [sudo], reason: reconcile sudo group membership}
+    "docs/verification/freeipa-identity.md#C7": {tags: [hostgroups], reason: reconcile hostgroup attributes}
+    "docs/verification/freeipa-identity.md#C8": {tags: [users], reason: reconcile user attributes}
 verification: {autoDeploy: false}
 site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

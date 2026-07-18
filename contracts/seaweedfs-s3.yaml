@@ -22,5 +22,7 @@ lifecycle:
 traceability:
   mode: rowTags
   tag: {kind: rolePrefixed, prefix: s3}
+  exemptions:
+    "docs/verification/seaweedfs-s3.md#C8": {kind: verifyOnly, reason: anonymous delete and 404 functional probe}
 verification: {autoDeploy: false}
 site: {include: true, order: 120, vars: {}, tags: [storage, seaweedfs-s3], optIn: false}

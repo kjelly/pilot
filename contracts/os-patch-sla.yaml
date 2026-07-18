@@ -15,5 +15,13 @@ stagePolicy: {variable: patch_stage, default: sandbox}
 evidenceRequirement: {targetTest: vm, idempotency: required}
 traceability:
   mode: mapped
+  exemptions:
+    "docs/verification/os-patch-sla.md#C1": {kind: derived, reason: stage-gated patch pipeline outcome}
+    "docs/verification/os-patch-sla.md#C2": {kind: derived, reason: stage-gated patch pipeline outcome}
+    "docs/verification/os-patch-sla.md#C3": {kind: derived, reason: package manager history outcome}
+    "docs/verification/os-patch-sla.md#C4": {kind: derived, reason: package manager history outcome}
+    "docs/verification/os-patch-sla.md#C5": {kind: derived, reason: unattended-upgrades configuration outcome}
+    "docs/verification/os-patch-sla.md#C6": {kind: derived, reason: unattended-upgrades configuration outcome}
+    "docs/verification/os-patch-sla.md#C7": {kind: derived, reason: production safety policy outcome}
 verification: {autoDeploy: false}
 site: {include: true, order: 140, vars: {}, tags: [maintenance, os-patch-sla], optIn: false}
