@@ -169,7 +169,7 @@ pilot vm-target test --name <vm> \
 **每個 node** 自動 rollback + re-wire：
 
 ```bash
-pilot vm-target topology test --spec docs/runbooks/freeipa-ha-topology.yaml \
+pilot vm-target topology test --topology docs/topologies/freeipa-ha-topology.yaml \
     --playbook playbooks/site.yml \
     --verify docs/verification/freeipa-server.md=ipa_masters \
     --verify docs/verification/freeipa-client.md=ipa_clients \

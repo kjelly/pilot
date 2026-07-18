@@ -50,14 +50,14 @@ peers to pin into its /etc/hosts:
 'hosts:' pattern matches a real group name (e.g. ipa_masters) needs no
 -e target_group=... workaround.
 
-  pilot vm-target topology up        --spec ha.yaml
-  pilot vm-target topology inventory --spec ha.yaml
-  pilot vm-target topology status    --spec ha.yaml
-  pilot vm-target topology down      --spec ha.yaml
-  pilot vm-target topology snapshot  --spec ha.yaml --tag pre-drill
-  pilot vm-target topology rollback  --spec ha.yaml --tag pre-drill
-  pilot vm-target topology reset     --spec ha.yaml
-  pilot vm-target topology test      --spec ha.yaml --playbook ... --verify ...
+  pilot vm-target topology up        --topology ha.yaml
+  pilot vm-target topology inventory --topology ha.yaml
+  pilot vm-target topology status    --topology ha.yaml
+  pilot vm-target topology down      --topology ha.yaml
+  pilot vm-target topology snapshot  --topology ha.yaml --tag pre-drill
+  pilot vm-target topology rollback  --topology ha.yaml --tag pre-drill
+  pilot vm-target topology reset     --topology ha.yaml
+  pilot vm-target topology test      --topology ha.yaml --playbook ... --verify ...
 
 'up' provisions every not-yet-running node CONCURRENTLY (one goroutine +
 one *vmtarget.Manager per node — Manager.Up holds its own in-process
@@ -103,8 +103,8 @@ func init() {
 		vtTopologySnapshotCmd, vtTopologyRollbackCmd, vtTopologyResetCmd, vtTopologyTestCmd,
 	}
 	for _, c := range allTopoCmds {
-		c.Flags().StringVar(&vtTopoSpecPath, "spec", "", "path to the topology YAML spec (required)")
-		_ = c.MarkFlagRequired("spec")
+		c.Flags().StringVar(&vtTopoSpecPath, "topology", "", "path to the topology YAML spec (required)")
+		_ = c.MarkFlagRequired("topology")
 	}
 	vtTopologyInventoryCmd.Flags().StringVar(&vtTopoOut, "out", "", "write the rendered inventory here instead of stdout")
 	vtTopologySnapshotCmd.Flags().StringVar(&vtTopoTag, "tag", "", "snapshot tag to create on every node (required)")
@@ -256,7 +256,7 @@ func runVtTopologyUp(cmd *cobra.Command, args []string) error {
 	}
 
 	if order, _ := spec.Groups(); len(order) > 0 {
-		fmt.Fprintf(out, "\ninventory : `pilot vm-target topology inventory --spec %s`\n", vtTopoSpecPath)
+		fmt.Fprintf(out, "\ninventory : `pilot vm-target topology inventory --topology %s`\n", vtTopoSpecPath)
 	}
 	return nil
 }
@@ -320,7 +320,7 @@ func renderTopologyInventory(ctx context.Context, m *vmtarget.Manager, spec *vmt
 			return "", fmt.Errorf("resolve node %q: %w", n.Name, gerr)
 		}
 		if t.Status != vmtarget.StatusRunning {
-			return "", fmt.Errorf("node %q is not running (status=%s); run `pilot vm-target topology up --spec %s` first", n.Name, t.Status, specPath)
+			return "", fmt.Errorf("node %q is not running (status=%s); run `pilot vm-target topology up --topology %s` first", n.Name, t.Status, specPath)
 		}
 		targetsByName[n.Name] = t
 	}
@@ -463,7 +463,7 @@ concurrently, then re-apply every node's declared 'wire:' peers (the
 This is the fast path for re-testing "does replica-install work from a
 clean cluster?" without a full 'topology down' + 'topology up':
 
-  pilot vm-target topology reset --spec ha.yaml
+  pilot vm-target topology reset --topology ha.yaml
   pilot vm-target run --group masters=ipa-primary --group replicas=ipa-replica ... \
     playbooks/apply/freeipa-server-replica-apply.yml -e ...
 `,
@@ -518,7 +518,7 @@ Steps executed:
 --verify is repeatable and takes 'spec.md' or 'spec.md=<ansible-limit>',
 so each spec is verified only against the group it applies to:
 
-  pilot vm-target topology test --spec ha.yaml \
+  pilot vm-target topology test --topology ha.yaml \
       --playbook playbooks/site.yml \
       --verify docs/verification/freeipa-server.md=ipa_masters \
       --verify docs/verification/freeipa-client.md=ipa_clients \

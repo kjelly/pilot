@@ -2,10 +2,10 @@
 # See `pilot vm-target topology --help` and
 # .agents/skills/vm-target-spec-testing/references/vm-target-basics.md.
 #
-#   pilot vm-target topology up        --spec docs/runbooks/freeipa-ha-topology.yaml
-#   pilot vm-target topology status    --spec docs/runbooks/freeipa-ha-topology.yaml
-#   pilot vm-target topology inventory --spec docs/runbooks/freeipa-ha-topology.yaml
-#   pilot vm-target topology down      --spec docs/runbooks/freeipa-ha-topology.yaml
+#   pilot vm-target topology up        --topology docs/topologies/freeipa-ha-topology.yaml
+#   pilot vm-target topology status    --topology docs/topologies/freeipa-ha-topology.yaml
+#   pilot vm-target topology inventory --topology docs/topologies/freeipa-ha-topology.yaml
+#   pilot vm-target topology down      --topology docs/topologies/freeipa-ha-topology.yaml
 nodes:
   - name: ipa-primary
     base_image: almalinux-9

@@ -7,7 +7,7 @@ import (
 )
 
 func TestMinimalPoCTopologyMatchesRunbook(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "runbooks", "minimal-poc-topology.yaml")
+	path := filepath.Join("..", "..", "docs", "topologies", "minimal-poc-topology.yaml")
 	spec, err := LoadTopologySpec(path)
 	if err != nil {
 		t.Fatal(err)

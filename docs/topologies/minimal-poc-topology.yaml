@@ -3,8 +3,8 @@
 # actual inventory snapshot; an empty role group is intentionally omitted.
 #
 # Bring up/render the same three hosts with:
-#   pilot vm-target topology up --spec docs/runbooks/minimal-poc-topology.yaml
-#   pilot vm-target topology inventory --spec docs/runbooks/minimal-poc-topology.yaml
+#   pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml
+#   pilot vm-target topology inventory --topology docs/topologies/minimal-poc-topology.yaml
 #
 # The site-wide verification set is passed repeatably to `topology test` (the
 # YAML format deliberately stays limited to VM topology and group membership):

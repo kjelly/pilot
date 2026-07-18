@@ -46,14 +46,14 @@ func TestRunVtTopologyUp_RequiresSpecFlag(t *testing.T) {
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
 	err := rootCmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "spec") {
-		t.Fatalf("want a missing --spec error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "topology") {
+		t.Fatalf("want a missing --topology error, got %v", err)
 	}
 }
 
 func TestRunVtTopologyUp_MissingSpecFileErrors(t *testing.T) {
 	vtTopoSpecPath = "/nonexistent/topology.yaml"
-	rootCmd.SetArgs([]string{"vm-target", "topology", "up", "--spec", vtTopoSpecPath})
+	rootCmd.SetArgs([]string{"vm-target", "topology", "up", "--topology", vtTopoSpecPath})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
 	err := rootCmd.Execute()
@@ -68,7 +68,7 @@ func TestRunVtTopologySnapshot_RequiresTagFlag(t *testing.T) {
 	if err := os.WriteFile(path, []byte("nodes:\n  - name: a\n"), 0o644); err != nil {
 		t.Fatalf("write spec: %v", err)
 	}
-	rootCmd.SetArgs([]string{"vm-target", "topology", "snapshot", "--spec", path})
+	rootCmd.SetArgs([]string{"vm-target", "topology", "snapshot", "--topology", path})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
 	err := rootCmd.Execute()
@@ -83,7 +83,7 @@ func TestRunVtTopologyRollback_RequiresTagFlag(t *testing.T) {
 	if err := os.WriteFile(path, []byte("nodes:\n  - name: a\n"), 0o644); err != nil {
 		t.Fatalf("write spec: %v", err)
 	}
-	rootCmd.SetArgs([]string{"vm-target", "topology", "rollback", "--spec", path})
+	rootCmd.SetArgs([]string{"vm-target", "topology", "rollback", "--topology", path})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
 	err := rootCmd.Execute()
@@ -94,7 +94,7 @@ func TestRunVtTopologyRollback_RequiresTagFlag(t *testing.T) {
 
 func TestRunVtTopologyReset_MissingSpecFileErrors(t *testing.T) {
 	vtTopoSpecPath = "/nonexistent/topology.yaml"
-	rootCmd.SetArgs([]string{"vm-target", "topology", "reset", "--spec", vtTopoSpecPath})
+	rootCmd.SetArgs([]string{"vm-target", "topology", "reset", "--topology", vtTopoSpecPath})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
 	err := rootCmd.Execute()
@@ -111,7 +111,7 @@ func TestRunVtTopologyInventory_RequiresGroups(t *testing.T) {
 	}
 	vtTopoSpecPath = path
 	vtTopoOut = ""
-	rootCmd.SetArgs([]string{"vm-target", "topology", "inventory", "--spec", path})
+	rootCmd.SetArgs([]string{"vm-target", "topology", "inventory", "--topology", path})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
 	err := rootCmd.Execute()
