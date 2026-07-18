@@ -1,12 +1,16 @@
 # RFC：Verification Safety Boundary
 
-> 狀態：Proposed
+> 狀態：Proposed — technical review complete，等待接受
 > 日期：2026-07-18
 > 前置：`docs/tmp/future/IMPLEMENTATION_PLAN.md` M0.4、M2.2
 >
 > **實作標示：設計已完成，runtime 尚未實作。**
 > 目前不存在 per-check action executor 或 secret-aware Ansible module；
 > `stageVerifyEnv` 也尚未退役。本 RFC final 前不得宣稱 verify 已符合此邊界。
+>
+> Technical review 已確認 per-check action、production authorization、cleanup、
+> secret transport 與 evidence sink 邊界彼此一致；狀態仍由人接受後才可改為
+> Final，本標示不解鎖 M0.4／M2.2。
 
 ## 1. 決策摘要
 

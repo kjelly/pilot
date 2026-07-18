@@ -1,13 +1,18 @@
 # pilot 產品路線圖實作計畫
 
 > 依據:`docs/tmp/future/PRODUCT_ROADMAP.md`(2026-07-18)
-> 基準線:codebase 現況調查(見附錄 A),schema v12、22 個 deploy catalog 項目、24 份 verification spec。
+> 基準線:codebase 現況調查(見附錄 A),schema v12、21 個 deploy catalog 項目、24 份 verification spec。
 > 修訂:2026-07-18 依 `docs/tmp/future/review.md` 審查修正——exit-code 契約表、verify 唯讀邊界前置 RFC、evidence 改 immutable event stream、M0.4 mapping 前置、contract 邊界決策、開工順序。review 的事實宣稱已逐一對 code 核實(runner 為具體 struct、`stageVerifyEnv` 確實寫遠端 env 檔、`runVerifyMulti` 失敗確實非零退出)。
 > 修訂 2:2026-07-18 依 review 第二輪(條件式 GO)修正——json callback 需 `ANSIBLE_LOAD_CALLBACK_PLUGINS=1` + `ansible.posix.json`(已實測重現)、expected host set 對帳、全 sink 共用 redaction pipeline(`--ask-vault-pass` 下 pilot 不知 plaintext)、active-run/唯一性語意、partial deploy verify scope、contract 複數 schema + bindings。
 > 修訂 3:2026-07-18 依 review 第三輪(準備度 82%)修正——`--one-line` 降級僅限 diagnostic(正式 evidence fail closed)、event stream 增 `run_heartbeat`、partial deploy 的 tag→row scope resolver 與完整 outcome enum、清理摘要殘留的舊 schema 名稱。**各里程碑的詳細 schema 章節(M0.3、M1.1、SPEC_V2 §3)為唯一 source of truth,其他章節摘要與之出入時以詳細章節為準。**
 > 修訂 4:2026-07-18 依 review 第四輪(準備度 88%)修正——M0.2 spike 增 timeout 歸因契約與 `ProbeStatus` `runner_error`/`missing`、expected-host resolver 補來源優先序/集合語意(含 AGENTS.md `target_group` 例外)、M0.3 補 append 併發契約與 append-only enforcement、M1.1 補 site execution projection 決策(傾向 site.yml 先維持手寫 + lint)與試點 fixtures 3→5、M2.2 摘要「front-matter 或 fenced YAML」改為兩者皆需。
 > 修訂 5:2026-07-18 依 review 第五輪(準備度 92%)修正——M1.1 試點 contract 清單統一為**六份**:component↔role 1—1 下 core-infra-provider 不是一份 contract,而是 dns、ntp 兩份(共用同一支 apply playbook),清單定為 docker、freeipa-server、restic-backup、dns、ntp、log-shipping;M1.2 前置與 §9 的「三試點」同步修正。其餘三項(兩份 RFC 尚未撰寫、M0.2 全面實作待 spike、M0.3 writer/enforcement 選項交 evidence RFC 定案)為既有 gate 狀態,無需改文。
 > 實作進度 1:2026-07-18——M0.1 exit-code 修正與 regression tests 已完成；兩份 hard-gate RFC 已建立為 Proposed；M0.2 callback spike 已以 ansible-core 2.19.2 實跑並加入 decoder fixtures/tests；M1.1 ComponentContract RFC 與六份 YAML fixtures 已建立。Proposed RFC 尚待 review/final，因此 M0.3/M0.4/M2.2 仍未解鎖；M0.2 decoder 也尚未接入正式 verify。
+> 實作進度 2:2026-07-18——M0.2 expected-host pure resolver 與 table-driven
+> truth table 已加入 `internal/tools/expected_hosts*`；六份 ComponentContract
+> fixtures 已由 test-only strict decoder 與 selector／traceability／binding／
+> duplicate-owner 負向測試驗證。正式 Ansible scope adapter、per-host runner、
+> production contract loader 與 RFC Final 仍未完成。
 
 > **文件狀態：IMPLEMENTATION PLAN — NOT AN EXECUTABLE RUNBOOK**
 >
@@ -18,7 +23,8 @@
 
 - **✅ 已實作並驗證**：正式 code path 已修改，test/build/race gate 通過。
 - **🧪 Spike 已驗證**：實驗 code／fixture 有測試，但未接入正式 runtime。
-- **📄 Proposed**：設計文件已建立，尚未 review/final，也沒有完整 runtime。
+- **📄 Proposed**：設計文件已建立；即使 technical review 完成，仍須由人接受／
+  final，且不代表已有完整 runtime。
 - **⏸ 尚未實作**：不得從計畫文字推論產品已支援。
 
 ### 實作狀態快照（2026-07-18）
@@ -26,10 +32,10 @@
 | 里程碑／產物 | 狀態 | 實作內容 | 明確未實作 |
 |---|---|---|---|
 | M0.1 | **✅ 已實作並驗證** | deploy exit-code、preflight rejection、`verify --dir` 原始錯誤、regression tests | deploy 後自動 verify/evidence |
-| Safety RFC | **📄 Proposed** | per-check action、secret-aware runner contract | action runtime、secret-aware module |
-| Evidence RFC | **📄 Proposed** | event schema、RunWriter、heartbeat、retention 決策 | schema v13、store API、runs CLI |
-| M0.2 | **🧪 Spike 已驗證** | ansible JSON callback decoder、status normalization、fixtures/tests | expected-host resolver、正式 `runAnsibleAdHoc` 接線 |
-| M1.1 | **📄 RFC + fixtures** | ComponentContract schema proposal、六份 fixtures | strict loader、contract lint、catalog/site integration |
+| Safety RFC | **📄 Proposed，等待接受** | technical review 完成；per-check action、secret-aware runner contract | action runtime、secret-aware module |
+| Evidence RFC | **📄 Proposed，等待接受** | technical review 完成；event schema、RunWriter、heartbeat、retention 決策 | schema v13、store API、runs CLI |
+| M0.2 | **🧪 Spike + pure resolver 已驗證** | ansible JSON callback decoder、status normalization、expected-host truth table／pure resolver | Ansible inventory/scope adapter、per-host timeout、正式 `runAnsibleAdHoc` 接線 |
+| M1.1 | **📄 RFC + fixtures + schema gate** | 六份 fixtures、test-only strict decode 與語意／負向測試 | production loader/API、全量 contract lint、catalog/site integration |
 | M0.3/M0.4 | **⏸ 尚未實作** | 無 | delivery events、transaction、rollback/idempotency policy |
 | M1.2/M1.3 | **⏸ 尚未實作** | 無 | 全量 contracts、DAG/preflight |
 | M2.1–M2.3 | **⏸ 尚未實作** | 文件已同步設計決策 | typed matcher、v2 parser、migration |
@@ -39,7 +45,7 @@
 
 | 支柱 | 現況 | 關鍵差距 |
 |---|---|---|
-| P0 交付交易 | 交易鏈(syntax→snapshot→apply→verify→idempotency→rollback)**已存在但只在 `vm-target test` / `topology test`**(`vm_target.go:1488`、`vm_target_topology.go:558`);`pilot deploy` 只有 preflight+preview+stage gate+apply | `executeDeployment` 在 apply 失敗時回傳 `nil`(deploy.go:611-632,**exit 0**);deploy 後不跑 verify;無 run ID;不寫 evidence;無 rollback policy |
+| P0 交付交易 | 交易鏈(syntax→snapshot→apply→verify→idempotency→rollback)**已存在但只在 `vm-target test` / `topology test`**(`vm_target.go:1488`、`vm_target_topology.go:677`);`pilot deploy` 只有 preflight+preview+stage gate+apply，M0.1 已使 preview/apply/preflight failure 正確回傳非零 | deploy 後不跑 verify；無 run ID；不寫 evidence；無 rollback policy |
 | P1 ComponentContract | 元件事實分散在 `deployCatalog`(deploy_catalog.go:39)、`roleContracts`(inventory/contracts.go:17)、`specTagMap`(tag_coverage_test.go:50)、group_vars example、DELIVERY.md 五處 | 無單一可 lint 資料模型;cardinality、依賴、必要 vault key、stage policy 都不是結構化資料 |
 | P2 Spec v2 | matcher 是魔法前綴(verify_spec.go:321:`^`=regex、`~`=substring、整數=rc、`present`);parser 單版本,`版本:` 欄位只是資訊 | 無 typed matcher、無版本化 parser、無 v1→v2 遷移工具 |
 | P3 Contract TUI | deploy 選單來自 `deployCatalog` label;host 靠自由輸入 `target_group`/`--limit` | 選單、依賴提示、host 選擇未由 contract 驅動 |
@@ -103,10 +109,12 @@ preflight failure 後拒絕繼續都回傳 error；乾淨取消維持 exit 0；`
 
 ### M0.2 — per-host verify
 
-**Spike 狀態：已完成（2026-07-18）**。實跑與資料契約見
+**Spike／pure resolver 狀態：已完成（2026-07-18）**。實跑與資料契約見
 `docs/tmp/future/M0_2_PER_HOST_VERIFY_SPIKE.md`；decoder、fixtures 與測試位於
-`internal/tools/ansible_callback_spike*`。完整 runner／expected-host resolver
-尚未接入正式 verify，仍維持暫緩。
+`internal/tools/ansible_callback_spike*`；expected-host 的純集合 resolver 與
+table-driven truth table 位於 `internal/tools/expected_hosts*`。Ansible
+inventory／pattern／limit adapter、per-host timeout 與完整 runner 尚未接入正式
+verify，仍維持暫緩。
 
 **前置 spike(review 建議 #3:先驗證資料契約,不直接全面重寫)**
 - **callback 環境變數已實測定案**(2026-07-18,ansible-core 2.19.2):ad-hoc CLI 只設 `ANSIBLE_STDOUT_CALLBACK=json` **不生效**(輸出仍是 one-line);必須同時 `ANSIBLE_LOAD_CALLBACK_PLUGINS=1` + `ANSIBLE_STDOUT_CALLBACK=ansible.posix.json` 才有含 `hosts.<name>.stdout/stderr/rc` 的 JSON。`ansible.posix` collection 列為 per-host verify 的**必要 preflight,缺席即 fail closed**——不做 `--one-line` fallback 寫正式 evidence(review 第三輪 #1:one-line 逐行解析是有損的——多行 stdout/stderr、probe 輸出撞 marker、timeout/unreachable 欄位形態不穩定,無法證明 host×row evidence 與原始執行結果等價)。`--one-line` 僅保留為 **diagnostic degraded mode**:報告明標降級、不寫入 delivery evidence、不得讓 deploy transaction 判定成功。若 preflight 依賴負擔過高,備案是在 repo 內提供受測且版本化的 callback plugin(spike 一併評估兩案)。
@@ -120,6 +128,12 @@ preflight failure 後拒絕繼續都回傳 error；乾淨取消維持 exit 0；`
 - matcher(`matchExpected` :321)逐 host 判定;row verdict = 所有 host 皆 pass。
 - **expected host set 對帳**(review 第二輪 #2:callback 只回報「有回應的 host」,證明不了沒漏):跑 probe 前由**單一權威函式**解出 expected host set——輸入為實際 inventory + spec Targets 表 + CLI `--host`/host pattern + `--limit` + stage/target selection(這幾個來源今天並不一致,此函式即統一點)。
   - **來源優先序與集合語意**(review 第四輪 #2:只列來源不定關係,resolver 實作時會亂選):**實際 inventory + CLI host pattern/`--limit` 是執行 host set 的權威來源**;spec Targets 表是 acceptance scope constraint 與 lint 對齊來源——不得憑文字加入 inventory 不存在的 host,也**不與權威來源直接取交集**。AGENTS.md 明列的例外是關鍵反例:單一 host + `target_group` 型 spec 的宣告 group 可以刻意 ≠ vm-target inventory group(靠 `-e target_group=all`/CLI scope 對齊),交集語意會解出空集合、把合法測試誤判 FAIL。`target_group` override 如何替代或驗證 spec 宣告 group 由 resolver 契約明定;每一種衝突輸出具體 finding,不靜默取其中一邊。
+  - **pure resolver 已完成**：inventory host universe 為權威；已明確提供的
+    execution selectors 依序取交集；spec target 在沒有 override 時約束 execution
+    scope；明確 `target_group` override 可替代不相等／不存在的 spec group，但
+    必須留下 finding；任何 selector 空集合、未知 host 或 scope 衝突皆 fail closed。
+    尚待 adapter 把 Ansible inventory、host pattern、`--limit` 與 stage/component
+    selection 解析成此 pure input。
   - 再與 callback observed set 做集合比對:
   - expected 為空 → 整份 spec FAIL(不是 skip)。
   - expected − observed 非空 → 每個遺漏 host 各產生一筆 FAIL evidence。
@@ -204,10 +218,12 @@ review/final 前不開始 schema v13。
 
 ### M1.1 — schema 與載入器
 
-**RFC／fixtures 狀態：已建立、待 review**，見
+**RFC／fixtures 狀態：已建立、待接受**，見
 `docs/tmp/future/COMPONENT_CONTRACT_RFC.md` 與
-`docs/tmp/future/contracts/*.yaml`。六份 fixtures 已通過 YAML parse；loader/API
-仍依本節 gate 暫緩。
+`docs/tmp/future/contracts/*.yaml`。六份 fixtures 已通過 test-only strict decode、
+selector、traceability、binding、實際 tag 與 duplicate-owner 驗證；測試位於
+`internal/contract/fixture_schema_test.go`。這不是 production loader/API，正式
+runtime 仍依本節 gate 暫緩。
 
 **改動**
 - 新套件 `internal/contract`:`ComponentContract` Go struct + YAML 檔 `contracts/<component>.yaml`(一元件一檔,可 review、可版本化;**不是 LLM tool schema**)。欄位對齊 roadmap P1 清單:
@@ -217,7 +233,7 @@ review/final 前不開始 schema v13。
   - `groupVars`(每項 `{name, required, default, secret, validation}`;`secret: true` 的項**即為** vault key 的單一宣告處,不另設獨立 `vaultKeys` 清單——同一事實不兩處宣告)、`endpoints`(輸出 endpoint 名與 port,`bindings.from` 的引用對象)
   - `stagePolicy`、`experimental`、`evidenceRequirement`(**宣告離開 experimental 需要哪種 actual-run evidence,不保存「目前是否已有」這種會過期的靜態事實**——實際狀態由 append-only run 查詢得出)
   - `lifecycle`:`backup`、`upgrade`、`decommission` 契約(rollback 已在 `playbooks.rollback`;先允許 `null` 並 lint 警示,不假造)
-  - `traceability.mode`:`rowTags` | `mapped`；rowTags 再選 `bare`／`rolePrefixed(<prefix>)`，mapped 必須逐 row 對應 feature/stage tag。`noRowTags` 不進新 schema；verify-only／derived row 逐列宣告 exemption。細節見 ComponentContract RFC。
+  - `traceability.mode`:`rowTags` | `mapped`；rowTags 再選 `bare`／`rolePrefixed(<prefix>)`，mapped 必須逐 qualified row ref (`<spec-path>#<row-id>`) 對應 feature/stage tag。`noRowTags` 不進新 schema；verify-only／derived row 也以 qualified row ref 逐列宣告 exemption，避免 1—N specs 的 `C1` 碰撞。細節見 ComponentContract RFC。
 - Loader + 嚴格解析(未知欄位報錯,呼應「不提前加入 parser 不認識的欄位」);contract 檔自帶 `schemaVersion: 1`,未知版本拒絕(與 Spec v2 同紀律)。
 
 **邊界決策(review 阻塞項 5;M1.2 全量遷移的前提,先在 RFC 定稿)**
@@ -331,11 +347,22 @@ review/final 前不開始 schema v13。
 
 1. **M0.1(修訂版)**:preview/apply 非零退出 + exit-code 契約表 + runner 測試 seam;`verify --dir` 只補「保留 per-spec 原始錯誤」。
 2. **兩份短 RFC（已建立為 Proposed，待 review/final）**：Verification safety boundary（涵蓋 per-check verification action、secret transport、所有 sink）、Append-only delivery evidence data model（event stream、heartbeat、lease、terminal matrix、prune/DELETE）。
-3. **M0.2 JSON callback spike（已完成）**：已實跑 success/module-error/unreachable/controller-timeout，並固化 decoder fixtures/tests；下一切片是 expected-host resolver table tests 與正式 runner 接線，仍不得使用有損 `--one-line` evidence。
-4. **M1.1 六份試點 contract（RFC + YAML fixtures 已建立，不含 loader）**：loader/API 與全量遷移(M1.2)待 fixtures/schema review 定稿。
+3. **M0.2 JSON callback spike + pure resolver（已完成）**：已實跑
+   success/module-error/unreachable/controller-timeout，並固化 decoder fixtures、
+   expected-host truth table 與 pure resolver；下一切片是 Ansible scope adapter
+   與 per-host timeout 決策，仍不得使用有損 `--one-line` evidence。
+4. **M1.1 六份試點 contract（RFC + YAML fixtures + test-only schema gate 已建立，
+   不含 production loader）**：fixtures 已 strict decode 並對實際 spec rows／
+   playbook tags 做語意驗證；loader/API 與全量遷移(M1.2)仍待 RFC 接受。
 5. M0.2 完成後依序 → M2.1(不可平行);M0.3/M0.4、M1.2+、M2.2 待各自前置關閉後開工。
 
-目前狀態：**已完成／已產出**——M0.1、兩份 Proposed RFC、M0.2 callback spike、M1.1 RFC/fixtures；**下一個可做**——review/final 三份 RFC、expected-host resolver table tests；**暫緩**——M0.2 正式 runner 接線(待 resolver contract)、M1.1 loader 與 M1.2/M1.3(待六份試點 schema 定稿)、M0.3/M0.4(待 RFC final + M0.2 + contract mapping)、M2.1(待 M0.2 合併)、M2.2/M2.3(待 M2.1 + safety RFC final)。
+目前狀態：**已完成／已產出**——M0.1、兩份 Proposed hard-gate RFC、M0.2
+callback spike + pure resolver、M1.1 RFC/fixtures + test-only schema gate；
+**下一個可做**——review/accept 三份 RFC、M0.2 Ansible scope adapter 與 timeout
+決策；**暫緩**——M0.2 正式 runner 接線(待 adapter/timeout contract)、M1.1
+production loader 與 M1.2/M1.3(待 ComponentContract RFC 接受)、M0.3/M0.4
+(待 RFC final + M0.2 + contract mapping)、M2.1(待 M0.2 合併)、
+M2.2/M2.3(待 M2.1 + safety RFC final)。
 
 設計文件對應:ADR-authoring 邊界(隨 M1.1)、RFC-ComponentContract(M1.1)、RFC-Spec v2(M2.2 前)、ADR-evidence data model(M0.3 前)、**RFC-Verification safety boundary(M0.4/M2.2 前)**、Test Strategy-eval(M4.1)。
 
@@ -343,11 +370,13 @@ review/final 前不開始 schema v13。
 
 ## 附錄 A:現況調查關鍵座標
 
-- deploy 流程:`cmd/pilot/cmd/deploy.go`(runDeploy :56、runPreflight :220、promptStageDecision :262、executeDeployment :572;**失敗回 nil 在 :611-632**)
+- deploy 流程:`cmd/pilot/cmd/deploy.go`(runDeploy :56、runPreflight :220、promptStageDecision :262、executeDeployment :576；preview/apply failure 已在 :609-635 fail closed)
 - verify:`cmd/pilot/cmd/verify.go`、`internal/tools/verify_spec.go`(matchExpected :321 魔法前綴;runAnsibleAdHoc :192 壓扁 per-host)
+- M0.2 expected-host pure resolver：`internal/tools/expected_hosts.go` +
+  `expected_hosts_test.go`；尚未接 Ansible scope adapter。
 - spec parser:`internal/spec/parser.go`(5 欄 checklist 表;Version 欄位僅資訊)
 - store:`internal/store/sqlite.go`(SchemaVersion=12;唯一活表 `spec_checkpoints`,upsert 非 append-only)
 - 元件事實五處:`deploy_catalog.go:39`、`inventory/contracts.go:17`、`tag_coverage_test.go:50`、`group_vars/*.example.yml`、DELIVERY.md
-- P0 參考實作:`vm_target.go:1488`(runVtTest 5 步機)、`vm_target_topology.go:558`(cluster 版,含 snapshot/rollback/rewire)
+- P0 參考實作:`vm_target.go:1488`(runVtTest 5 步機)、`vm_target_topology.go:677`(cluster pipeline,含 snapshot/rollback/rewire)
 - TUI:`deploy_tui.go` + `tui_*.go` 原語 + teatest/PTY 測試
 - CI:`.github/workflows/ci.yml`(go test -race、playbook-lint、golangci-lint)

@@ -1,12 +1,13 @@
 # M0.2 Per-host Verify Spike
 
-> 狀態：callback data contract 已驗證；尚未接入正式 verify
+> 狀態：callback data contract + expected-host pure resolver 已驗證；尚未接入正式 verify
 > 日期：2026-07-18
 > 環境：ansible-core 2.19.2、ansible package 12.0.0
 >
 > **實作標示：這是可測試的 spike，不是 production per-host verify。**
-> 已實作 decoder／fixtures／tests；尚未實作 expected-host resolver、正式 runner
-> 接線、per-host timeout 與 delivery evidence persistence。
+> 已實作 decoder／fixtures／tests 與 expected-host pure resolver／truth table；
+> 尚未實作 Ansible inventory/scope adapter、正式 runner 接線、per-host timeout
+> 與 delivery evidence persistence。
 
 ## 1. 結論
 
@@ -124,8 +125,9 @@ host-level timeout，歸類為 invocation `runner_error`。
 - truncated JSON → decoder error，再轉 `runner_error`；
 - CRLF normalization 與只移除一個 trailing newline。
 
-這份 decoder 刻意尚未接到 `runAnsibleAdHoc`。正式接線前仍需完成 expected-host
-resolver truth table。
+這份 decoder 刻意尚未接到 `runAnsibleAdHoc`。expected-host 的純集合 resolver
+與 truth table 已完成；正式接線前仍需把 Ansible inventory、host pattern、
+`--limit`、stage/component selection 解析成 resolver input。
 
 ## 4. Expected-host resolver contract
 
@@ -144,18 +146,33 @@ resolver truth table。
 - expected − observed → 每台一筆 `missing`；
 - observed − expected → runner contract error；
 - inventory 不存在 spec role，但有合法 `target_group` override → 使用 override
-  scope並產生 trace finding；
+  scope 並產生 trace finding；
 - inventory 不存在 spec role且無 override → FAIL；
 - pattern／limit 指向零 host → FAIL。
 
-正式實作應把上述案例寫成 table-driven resolver tests，再替換現行
-`runAnsibleAdHoc`。
+已加入：
+
+- `internal/tools/expected_hosts.go`
+- `internal/tools/expected_hosts_test.go`
+
+table-driven tests 鎖定：
+
+- inventory universe 去重、排序且為唯一 host 事實；
+- host pattern／`--limit`／stage/component selection 逐層取交集；
+- selector 空集合、未知 inventory host、交集為空皆 fail closed；
+- 沒有 override 時，execution scope 不得超出 spec target；
+- 明確 `target_group` override 可處理 AGENTS.md 的單 host 例外，但必須產生
+  trace finding，且仍不得選到零 host。
+
+pure resolver 不自行執行或解析 `ansible-inventory`；正式接線前要由 adapter
+提供已對實際 inventory 解析完成的各個 host set。
 
 ## 5. 尚未解鎖
 
-- 尚未把 decoder 接入正式 verify。
+- 尚未完成 Ansible inventory／pattern／limit adapter，也尚未把 decoder 接入正式 verify。
 - 尚未選擇真正 per-host timeout 的執行機制。
 - 尚未寫 delivery evidence。
 - 尚未讓 M2.1 typed matcher 開工。
 
-上述工作等待 resolver tests 與 M0.2 完整實作切片，不在本 spike 偷跑。
+上述工作等待 adapter／timeout 決策與 M0.2 完整實作切片，不在 pure resolver
+切片偷跑。

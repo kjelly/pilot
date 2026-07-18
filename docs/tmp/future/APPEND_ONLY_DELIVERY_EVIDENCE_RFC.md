@@ -1,12 +1,16 @@
 # RFC：Append-only Delivery Evidence Data Model
 
-> 狀態：Proposed
+> 狀態：Proposed — technical review complete，等待接受
 > 日期：2026-07-18
 > 前置：`docs/tmp/future/IMPLEMENTATION_PLAN.md` M0.3
 >
 > **實作標示：資料模型已決策，schema/store/runtime 尚未實作。**
 > 現行 schema 仍是 v12，尚無 `delivery_events`、`verify_evidence`、
 > `RunWriter`、heartbeat 或 generation rotation。
+>
+> Technical review 已確認 event stream、serialized writer、heartbeat/terminal、
+> append-only enforcement、redaction 與 generation rotation 的不變式互相一致；
+> 狀態仍由人接受後才可改為 Final，本標示不解鎖 schema v13。
 
 ## 1. 決策摘要
 

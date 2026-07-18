@@ -16,9 +16,9 @@
 
 | 項目 | 狀態 | 說明 |
 |---|---|---|
-| M0.2 callback decoder | **Spike 已驗證** | 只在 `internal/tools/ansible_callback_spike.go`；未接正式 verify |
-| Safety RFC | **Proposed** | per-check action/secret transport 已選方向，尚未 final/implement |
-| ComponentContract | **RFC + fixtures** | traceability plural/mapped 設計已產出，loader 未實作 |
+| M0.2 callback／host resolver | **Spike + pure resolver 已驗證** | decoder 與 expected-host truth table 已測；Ansible scope adapter／runner 未接正式 verify |
+| Safety RFC | **Proposed，等待接受** | technical review 完成；per-check action/secret transport 尚未 final/implement |
+| ComponentContract | **RFC + fixtures + test-only schema gate** | traceability plural/mapped 與六份 fixtures 已 strict 驗證；production loader 未實作 |
 | M2.1 typed matcher | **尚未實作** | 必須等待完整 M0.2 合併 |
 | M2.2 v2 parser | **尚未實作** | 不得新增正式 v2 spec |
 | M2.3 migrate | **尚未實作** | CLI、sidecar report、模板更新皆不存在 |
@@ -153,7 +153,7 @@ evidencePolicy:
 
 **tag 推導**(review 第二輪 #7 更正:前版「tag coverage 同時接受 bare 與 prefixed 兩型」**不正確**——`tag_coverage_test.go` 每個 mapping 由 `prefixes` 決定唯一形式(`empty = bare row IDs`),AGENTS.md 規則是 single-spec playbook 用裸 `C3`、multi-spec/multi-role 才用 `<role>-C3`):
 
-- check 未寫 `tags` 時**不做全域預設**；resolved tag 由 ComponentContract traceability 推導——rowTags/bare → `C3`，rowTags/rolePrefixed → `<prefix>-C3`，mapped → contract 的 row→feature/stage tags，verifyOnly → 不產生 apply tag。新 schema 不接受只有 component-level reason 的 `noRowTags`。
+- check 未寫 `tags` 時**不做全域預設**；resolved tag 由 ComponentContract traceability 推導——rowTags/bare → `C3`，rowTags/rolePrefixed → `<prefix>-C3`，mapped → contract 的 qualified row ref (`<spec-path>#<row-id>`)→feature/stage tags，verifyOnly → 不產生 apply tag。新 schema 不接受只有 component-level reason 的 `noRowTags`。
 - 無 contract 的 standalone spec:必須逐 check 顯式 `tags:` 或標 `verifyOnly`,parser 不猜。
 - 此例 docker 的 contract 是 `rolePrefixed(docker)`(現行 specTagMap 即 `prefixes: ["docker"]`),resolved 為 `docker-C1`…`docker-C5`;顯式 `tags:` 保留給一列多 tag 的少數情況。
 
