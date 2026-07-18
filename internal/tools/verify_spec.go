@@ -112,15 +112,17 @@ type verifySpecArgsStruct struct {
 // applicability outcome and deliberately does not represent a successful
 // probe.
 type VerifyRow struct {
-	ID          string `json:"id"`
-	Status      string `json:"status"` // pass | fail | skip | not_applicable
-	Detail      string `json:"detail"`
-	Host        string `json:"host,omitempty"`
-	ExitCode    int    `json:"exit_code,omitempty"`
-	ProbeStatus string `json:"probe_status,omitempty"`
-	Stdout      string `json:"stdout,omitempty"`
-	Stderr      string `json:"stderr,omitempty"`
-	Message     string `json:"message,omitempty"`
+	ID            string `json:"id"`
+	Status        string `json:"status"` // pass | fail | skip | not_applicable
+	Detail        string `json:"detail"`
+	Host          string `json:"host,omitempty"`
+	ExitCode      int    `json:"exit_code,omitempty"`
+	ProbeStatus   string `json:"probe_status,omitempty"`
+	Stdout        string `json:"stdout,omitempty"`
+	Stderr        string `json:"stderr,omitempty"`
+	Message       string `json:"message,omitempty"`
+	CleanupStatus string `json:"cleanup_status,omitempty"`
+	CleanupDetail string `json:"cleanup_detail,omitempty"`
 }
 
 // stageVerifyEnv writes /etc/pilot-verify.env on every host reachable
@@ -332,6 +334,8 @@ func (t *VerifySpecTool) cleanupLocal(ctx context.Context, row spec.Row, result 
 	}
 	cleanup := spec.Row{ID: row.ID, Command: row.Action.Cleanup.Probe, Expect: *row.Action.Cleanup.Expect, Action: &spec.Action{Mode: "readOnly"}}
 	cleanupResult := t.runLocal(ctx, cleanup, timeoutSec, 2, inputs)
+	result.CleanupStatus = cleanupResult.Status
+	result.CleanupDetail = cleanupResult.Detail
 	if cleanupResult.Status != "pass" {
 		result.Status = "fail"
 		result.Detail = strings.TrimSpace(result.Detail + "; cleanup failed: " + cleanupResult.Detail)
@@ -356,6 +360,11 @@ func (t *VerifySpecTool) cleanupRemote(ctx context.Context, row spec.Row, result
 			results[i].Status = "fail"
 			results[i].Detail = strings.TrimSpace(results[i].Detail + "; cleanup failed: " + detail)
 			results[i].Message = "isolatedMutation cleanup failed"
+			results[i].CleanupStatus = "fail"
+			results[i].CleanupDetail = detail
+		} else {
+			results[i].CleanupStatus = "pass"
+			results[i].CleanupDetail = detail
 		}
 	}
 	return results
@@ -394,6 +403,21 @@ func (t *VerifySpecTool) appendEvidence(ctx context.Context, parsed *spec.Spec, 
 		host := result.Host
 		if host == "" {
 			host = "localhost"
+		}
+		if result.CleanupStatus != "" {
+			exit := 0
+			if result.CleanupStatus != "pass" {
+				exit = 1
+			}
+			if err := t.EvidenceWriter.AppendEvent(ctx, store.Event{
+				OperationID: fmt.Sprintf("cleanup:%s:%s:%s:%d", parsed.Path, result.ID, host, i),
+				Type:        store.EventStepFinished,
+				Step:        "cleanup",
+				Payload:     map[string]any{"spec": parsed.Path, "row": result.ID, "host": host, "status": result.CleanupStatus, "detail": result.CleanupDetail},
+				ExitCode:    &exit,
+			}); err != nil {
+				return fmt.Errorf("append cleanup evidence: %w", err)
+			}
 		}
 		verdict := result.Status
 		evidence = append(evidence, store.VerifyEvidence{
