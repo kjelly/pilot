@@ -24,12 +24,12 @@ Codex/Claude 直接產生 verification spec、apply playbook 與 regression test
 | M0.1 deploy exit-code | **已實作並驗證** | preview/apply 非零、binary 啟動失敗、preflight failure 後停止皆回 error；乾淨取消維持 exit 0 |
 | `verify --dir` 原始錯誤 | **已實作並驗證** | no-report 時保留 per-spec parse/runner error |
 | M0.2 per-host verify | **已實作並驗證** | single-host invocation、bounded workers、Ansible scope adapter、callback runner 已接正式 verify |
-| Verification safety | **部分已實作** | v2 readOnly/isolatedMutation 與 secretRef fail-closed；deploy 僅 auto-verify contract opt-in 的 v2 spec，既有 v1 不會被自動執行 |
+| Verification safety | **已實作並驗證** | readOnly fail-closed；isolatedMutation 需顯式授權、強制 cleanup 並寫獨立事件；secretRef 只經 vault reference + runner-owned `no_log` assert 驗證，不進 probe argv/env/evidence |
 | Append-only evidence | **已實作並驗證** | schema v14、operation/evidence idempotency、heartbeat/finalization、hash-verified archive/prune 與獨立 admin event stream |
 | ComponentContract | **22-component catalog/lint/preflight 已實作** | strict loader、row/tag traceability、dependency endpoint、apply/deploy catalog drift、cardinality/input/provider/OS/resource preflight；已接 deploy scope resolver 與 TUI plan |
 | M0.3/M0.4 | **已實作並驗證** | deploy transaction 記錄 preview/apply/verify/idempotency/rollback evidence；staging/prod 第二次 apply 必須 changed=0 |
 | Spec v2（M2.1–M2.3） | **M2.1/M2.2 已實作；M2.3 migration CLI 已實作** | strict parser/runtime、review-gated migrate draft/sidecar；Docker 已以 disposable VM 實跑 v2 8/8 PASS（含 cleanup）；其餘正式 v1 spec 仍待逐份 target acceptance |
-| P3/P4/P5 | **已實作並驗證** | P3 dependency-first contract plan、experimental/lifecycle gate；P4 五題 corpus + 100/100 target-backed scorecard；P5 queries/archive/prune/admin audit/supply-chain metadata |
+| P3/P4/P5 | **已實作並驗證** | P3 TUI 與 `deploy plan` 共用 dependency-first contract plan、experimental/lifecycle gate；P4 五題 corpus + 100/100 target-backed scorecard；P5 queries/archive/prune/admin audit/supply-chain metadata |
 
 ## 產品北極星
 
