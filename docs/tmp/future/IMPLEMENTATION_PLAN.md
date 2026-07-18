@@ -13,15 +13,32 @@
 > fixtures 已由 test-only strict decoder 與 selector／traceability／binding／
 > duplicate-owner 負向測試驗證。正式 Ansible scope adapter、per-host runner、
 > production contract loader 與 RFC Final 仍未完成。
+> 修訂 6:2026-07-18 關閉 production-readiness review——三份 RFC 已 Final；
+> M0.2 固定 single-host isolated invocation + bounded workers 與 standalone scope；
+> Spec v2 新增 `appliesWhen`/`not_applicable`、canonical action 與 secretRef；
+> ComponentContract 固定 role 1:N、dependency placement/provider selection；
+> Evidence 固定 idempotency/finalization 並把 rotation 移至 P5。
+>
+> 上述修訂 1–5／實作進度 1–2 是決策歷史，包含當時的 Proposed／NO-GO
+> 狀態與已被更正的 1—1 假設；目前 gate 只看修訂 6、下方狀態快照與各
+> Final RFC。
 
 > **文件狀態：IMPLEMENTATION PLAN — NOT AN EXECUTABLE RUNBOOK**
 >
 > 本文件中的未來命令、schema 與 API 是設計內容，不是已驗證操作程序。狀態以
 > 下表與各里程碑開頭的 status block 為準。
+>
+> **Production implementation 判定：GO（2026-07-18）**。表示所有架構決策
+> blocker 已關閉，可依依賴圖開始實作；不表示所有 milestone 可忽略前置而平行，
+> 也不表示尚未寫出的 runtime 已驗證。
 
 ### 狀態圖例
 
 - **✅ 已實作並驗證**：正式 code path 已修改，test/build/race gate 通過。
+- **🟡 部分已實作**：已有可呼叫的正式 code path，但尚未完成 runtime wiring 或
+  該 milestone 的所有 acceptance criteria。
+- **🟢 Final design／可開工**：implementation contract 已接受，runtime 仍須實作
+  與 actual-run 驗證。
 - **🧪 Spike 已驗證**：實驗 code／fixture 有測試，但未接入正式 runtime。
 - **📄 Proposed**：設計文件已建立；即使 technical review 完成，仍須由人接受／
   final，且不代表已有完整 runtime。
@@ -32,13 +49,13 @@
 | 里程碑／產物 | 狀態 | 實作內容 | 明確未實作 |
 |---|---|---|---|
 | M0.1 | **✅ 已實作並驗證** | deploy exit-code、preflight rejection、`verify --dir` 原始錯誤、regression tests | deploy 後自動 verify/evidence |
-| Safety RFC | **📄 Proposed，等待接受** | technical review 完成；per-check action、secret-aware runner contract | action runtime、secret-aware module |
-| Evidence RFC | **📄 Proposed，等待接受** | technical review 完成；event schema、RunWriter、heartbeat、retention 決策 | schema v13、store API、runs CLI |
-| M0.2 | **🧪 Spike + pure resolver 已驗證** | ansible JSON callback decoder、status normalization、expected-host truth table／pure resolver | Ansible inventory/scope adapter、per-host timeout、正式 `runAnsibleAdHoc` 接線 |
-| M1.1 | **📄 RFC + fixtures + schema gate** | 六份 fixtures、test-only strict decode 與語意／負向測試 | production loader/API、全量 contract lint、catalog/site integration |
+| Safety RFC | **🟢 Final design／runtime 待實作** | canonical action、v2-only auto deploy、secret-aware playbook/module transport | action runtime、secret-aware module |
+| Evidence RFC | **🟢 Final design／runtime 待實作** | event/evidence idempotency、RunWriter、heartbeat/finalization；rotation 移 P5 | schema v13、store API、runs CLI |
+| M0.2 | **🧪 Spike 已驗證／design Final** | JSON decoder、status、expected-host resolver、single-host invocation timeout/scope 決策 | Ansible inventory/scope adapter、bounded runner 正式接線 |
+| M1.1 | **🟡 Loader baseline 已實作** | strict production loader、六份 fixtures、role cardinality、placement/provider selection、strict tests | production contracts directory、全量 contract lint、catalog/site integration |
 | M0.3/M0.4 | **⏸ 尚未實作** | 無 | delivery events、transaction、rollback/idempotency policy |
 | M1.2/M1.3 | **⏸ 尚未實作** | 無 | 全量 contracts、DAG/preflight |
-| M2.1–M2.3 | **⏸ 尚未實作** | 文件已同步設計決策 | typed matcher、v2 parser、migration |
+| M2.1–M2.3 | **🟢 Design Final／尚未實作** | applicability/action/secretRef/normalization/migration contract 已定案 | typed matcher、v2 parser、migration |
 | P3/P4/P5 | **⏸ 尚未實作** | 無 | TUI/eval/query |
 
 ## 0. 現況與差距總覽
@@ -68,9 +85,14 @@ M2.1 typed matcher(v1 內部重構)──► M2.2 v2 parser 並存 ──► M2.
 M3.1 contract-driven TUI          M5.1 evidence query    M4.1 brief corpus + eval gate
 ```
 
-依賴關係:M0.3 需要 M0.2 的 per-host 結果;**M0.4 需要 Verification safety boundary RFC 定稿 + M1.1 的 component↔spec mapping**;M1.3 需要 M1.1/M1.2;**M2.1 必須排在 M0.2 之後依序進行**(同動 verifier 執行層,不可平行);M2.2 的 `traceability` 欄位引用 M1.1 的 component ID;M3.1 需要 M1.3;M5.1 需要 M0.3 的表;M4.1 需要 M1.2 的 lint 與 M0.4 的 gate。
+依賴關係:M0.3 需要 M0.2 的 per-host 結果;M0.4 需要 M0.2、M0.3、
+M1.1 production mapping 與 **M2.2 v2 applicability/action runtime**；M1.3 需要
+M1.1/M1.2；M2.1 必須排在 M0.2 之後；M2.2 引用 M1.1 component ID；M3.1 需要
+M1.3；M5.1 需要 M0.3；M4.1 需要 M1.2 與 M0.4。
 
-兩份短 RFC 是硬性門檻:**Verification safety boundary**(M0.4 與 M2.2 的前置)與 **Append-only delivery evidence data model**(M0.3 的前置;本計畫已選 immutable event stream,RFC 定稿確認)。
+三份 RFC 均已 Final，architecture gate 已關閉。里程碑間的 code dependency 仍
+照圖執行；「可全面開始」是整份計畫可進入 production implementation，不是把
+相依的 verifier/store/parser 改動同時寫進同一 branch。
 
 ---
 
@@ -109,17 +131,21 @@ preflight failure 後拒絕繼續都回傳 error；乾淨取消維持 exit 0；`
 
 ### M0.2 — per-host verify
 
-**Spike／pure resolver 狀態：已完成（2026-07-18）**。實跑與資料契約見
+**Spike 已驗證／production design Final（2026-07-18）**。實跑與資料契約見
 `docs/tmp/future/M0_2_PER_HOST_VERIFY_SPIKE.md`；decoder、fixtures 與測試位於
 `internal/tools/ansible_callback_spike*`；expected-host 的純集合 resolver 與
 table-driven truth table 位於 `internal/tools/expected_hosts*`。Ansible
-inventory／pattern／limit adapter、per-host timeout 與完整 runner 尚未接入正式
-verify，仍維持暫緩。
+inventory／pattern／limit adapter、bounded per-host runner 尚未接入正式 verify，
+但 design gate 已關閉，可開始 production implementation。
 
 **前置 spike(review 建議 #3:先驗證資料契約,不直接全面重寫)**
 - **callback 環境變數已實測定案**(2026-07-18,ansible-core 2.19.2):ad-hoc CLI 只設 `ANSIBLE_STDOUT_CALLBACK=json` **不生效**(輸出仍是 one-line);必須同時 `ANSIBLE_LOAD_CALLBACK_PLUGINS=1` + `ANSIBLE_STDOUT_CALLBACK=ansible.posix.json` 才有含 `hosts.<name>.stdout/stderr/rc` 的 JSON。`ansible.posix` collection 列為 per-host verify 的**必要 preflight,缺席即 fail closed**——不做 `--one-line` fallback 寫正式 evidence(review 第三輪 #1:one-line 逐行解析是有損的——多行 stdout/stderr、probe 輸出撞 marker、timeout/unreachable 欄位形態不穩定,無法證明 host×row evidence 與原始執行結果等價)。`--one-line` 僅保留為 **diagnostic degraded mode**:報告明標降級、不寫入 delivery evidence、不得讓 deploy transaction 判定成功。若 preflight 依賴負擔過高,備案是在 repo 內提供受測且版本化的 callback plugin(spike 一併評估兩案)。
 - 以兩台主機實測:一台正常、一台故意 fail,再各補 unreachable 與 timeout 一輪,確認 per-host 欄位形態與邊角(msg-only 失敗、module_stderr 等)。
-- **timeout 歸因契約**(review 第四輪 #1:現行一列一個 ansible ad-hoc process,controller 端 `exec.CommandContext`(verify_spec.go:277)逾時殺掉**整個 process**——callback JSON 可能不完整、已完成與未完成 host 混在同一 invocation、expected−observed 只能證明 host 未出現不能證明原因):spike 必須定案 (1) timeout 是 invocation-level 還是 host-level;(2) JSON 不完整時已觀察 host 的結果是否可信;(3) 未觀察 host 記 `timeout`、`missing` 還是 `runner_error`;(4) 若要真 per-host timeout,走每 host 分開執行、remote `timeout` wrapper,還是可回報 task timeout 的 playbook/callback 路徑。**不把所有非 observed 情況壓成 timeout。**
+- **timeout 執行模型已定案**：每個 host × row 是獨立 single-host Ansible
+  invocation，以最多 8 個 bounded workers 平行。該 invocation 的 controller
+  timeout 可歸因唯一 host，記 `timeout`；啟動失敗／callback 不完整記
+  `runner_error`；完整 callback 缺 host 記 `missing`。outer cancel 才取消整列，
+  未完成 host 記 `runner_error: parent_cancelled`，不把其他 host 誤標 timeout。
 - spike 產出:鎖定 `ProbeResult{Stdout, Stderr string; ExitCode int; Status: ok|timeout|unreachable|module_error|runner_error|missing}`(後兩者依 #1 增補:`runner_error` = invocation 層失敗/callback 不完整,`missing` = host 未出現於 callback 且原因未明)與正規化規則——這也是 Spec v2 typed matcher 的輸入契約(見 SPEC_V2 計畫 §3.3)。
 
 **改動**
@@ -134,6 +160,10 @@ verify，仍維持暫緩。
     必須留下 finding；任何 selector 空集合、未知 host 或 scope 衝突皆 fail closed。
     尚待 adapter 把 Ansible inventory、host pattern、`--limit` 與 stage/component
     selection 解析成此 pure input。
+  - **standalone default 已定案**：有 spec Targets 且沒有 selector時直接以
+    resolved spec target hosts 為 scope；無 Targets 的 remote verify 必須明確
+    `--host`／`--limit`，或使用 `--local`，不再隱式遠端 `all`。deploy mode 永遠
+    由 component plan 提供 scope。
   - 再與 callback observed set 做集合比對:
   - expected 為空 → 整份 spec FAIL(不是 skip)。
   - expected − observed 非空 → 每個遺漏 host 各產生一筆 FAIL evidence。
@@ -145,64 +175,94 @@ verify，仍維持暫緩。
 - docker-target 起 2 容器同 group,spec 一列在 A 過 B 掛,斷言:整體 FAIL、報告含兩台各自的 stdout/rc、exit code 非零。
 - 既有 24 份 spec 在單 host 情境輸出不回歸(golden 檔更新一次)。
 
-**規模**:中(3-5 天)。roadmap P0 必要能力第 4 點。
+**規模**:中(4-6 天，含 adapter、bounded runner、deterministic ordering 與
+regression tests)。roadmap P0 必要能力第 4 點。
 
 ### M0.3 — deployment run ID 與 append-only evidence
 
-**RFC 狀態：Proposed**，見
+**RFC 狀態：Final／production implementation GO**，見
 `docs/tmp/future/APPEND_ONLY_DELIVERY_EVIDENCE_RFC.md`。RFC 已選定 serialized
-RunWriter + SQLite transaction、trigger enforcement 與 generation rotation；
-review/final 前不開始 schema v13。
+RunWriter + SQLite transaction、operation idempotency、trigger enforcement 與
+bounded cancel finalization。M0.3 retain-all；generation rotation 移至 P5。
 
 **資料模型定案:immutable event stream**(review 阻塞項 3 要求二選一——原稿「開頭取 ID + 表上有 finished_at/outcome + 不可 UPDATE」自相矛盾,已選定事件流)
 
 **改動**
 - `internal/store/sqlite.go`:schema v13(依 v12 教訓,**base schema 與 migration 同步改**):
-  - `delivery_events`(唯一可寫的交易表,只 INSERT):event_id、run_id(uuid)、seq、type(`run_started`/`run_heartbeat`/`step_finished`/`run_finished`)、step(preflight/preview/apply/verify/idempotency/rollback)、payload(json)、exit_code、created_at。`run_started` 的 payload 含 pilot_version、git_commit、inventory_path/hash、playbook、stage、host_set、extra_vars_summary(非敏感;secret 只存 reference 名)、operator;`run_finished` 含 outcome 與 final_exit_code。
-  - `verify_evidence`(只 INSERT):run_id、spec_path、row_id、host、command、expected、stdout、stderr、exit_code、probe_status、verdict、started_at/finished_at。
+  - `delivery_events`(唯一可寫的交易表,只 INSERT):event_id、run_id(uuid)、seq、
+    operation_id、type、step、payload(json)、exit_code、created_at；
+    `UNIQUE(run_id,operation_id)` 讓 uncertain-commit retry 可安全去重。
+  - `verify_evidence`(只 INSERT):run_id、spec_path、row_id、host、attempt、
+    operation_id、content_hash、command、expected、stdout、stderr、exit_code、
+    probe_status、verdict、started_at/finished_at；同 key 重試 hash 相同視為成功，
+    hash 不同 fail closed。
   - `delivery_runs` 改為 **SQL VIEW**(由 events 聚合 started/finished/outcome),不是可寫表——**無任何 UPDATE**。
-  - **active-run 語意**(review 第二輪 #4 + 第三輪 #2:event stream 不可 UPDATE,單靠 `run_started` 帶一次性 lease 會把超過最初 lease 的長時間執行誤判成 `abandoned`):交易執行中定期 INSERT `run_heartbeat` event(payload 含 pid、`expires_at`);view 以**最新一筆 heartbeat 的 `expires_at`** 判定 open run——未逾期 `running`、逾期 `abandoned`。heartbeat 間隔、lease 長度、grace period、heartbeat 寫入失敗時交易是否繼續與 evidence 健康標記,以及 SIGTERM/SIGINT、panic、正常 return、SIGKILL/斷電各自的 terminal 行為矩陣,由 evidence RFC 定稿——**此模型定案前不開始 schema v13 migration**。
+  - **active-run 語意已定案**：heartbeat interval 10s、lease 45s、grace 15s；
+    最新 heartbeat 未過期為 running，逾期且無 terminal 為 abandoned。terminal
+    前 stop-and-join heartbeat。
   - **唯一性約束**:`UNIQUE(run_id, seq)`;每個 run 至多一筆 terminal event(`type='run_finished'` 的 partial unique index)。
   - **append 併發契約**(review 第四輪 #3:`UNIQUE(run_id, seq)` 只會**偵測**衝突,不會安全**分配**下一個 seq——heartbeat goroutine、主交易 step writer 與 defer 中的 `run_finished` 會並行 append,兩個 writer 可能讀到同一個 `MAX(seq)+1`,或 terminal 後仍有晚到 heartbeat):evidence RFC 定義**單一 append API**——每 run 一個 serialized writer,或 SQLite transaction 內原子配置 seq 並寫入。invariant 一併鎖定:`run_started` 必為 seq 1;terminal event 唯一且必為最後一筆;terminal 後任何 append 拒絕;**heartbeat goroutine 停止並 join 之後才寫 terminal event**(建立 happens-before);heartbeat append 失敗時交易是否繼續與 evidence health 標記。以並行 heartbeat+step+finish 的 `go test -race` regression 鎖住。
   - **append-only enforcement**(review 第四輪 #4:「只 INSERT」若只是 coding convention,不構成資料模型保證;`verify_evidence.run_id` 也無法對 SQL VIEW `delivery_runs` 建一般 FK):RFC 選定**可測**的 enforcement——store 層不暴露任何 update/delete API、所有寫入只走 append transaction,及/或 SQLite trigger 直接拒絕 UPDATE/DELETE;evidence append 前檢查 run 已存在且尚未 terminal(替代 FK);測試直接嘗試 UPDATE/DELETE 舊 event/evidence,必須失敗。
-  - **terminal event 保證**:交易主流程以 defer/recover 確保每條 return/cancel/panic 路徑都 INSERT `run_finished`(panic 記 outcome=`panic`);真正的 SIGKILL/斷電留下 open run,由 lease 規則辨識,不需要修復性寫入。
+  - **terminal event 保證**:交易主流程以 defer/recover 確保每條 return/cancel/panic 路徑都 INSERT `run_finished`；context cancel 後使用
+    `context.WithoutCancel` + 5s timeout 的 finalization context。terminal persist
+    失敗則 CLI 非零 evidence_failed；SIGKILL/斷電由 lease 投影 abandoned。
   - **standalone `pilot verify` 同樣寫 `run_started`/`run_finished`**(step 只有 verify)——否則 `verify_evidence.run_id` 在 `delivery_runs` view 查不到。
 - **run ID 規則**:deploy 於 `runDeploy` 開頭產生 uuid;standalone `pilot verify` 改用 `verify-<uuid>`(現行秒級 timestamp 可碰撞,棄用);run_id 即去重 key,rerun 一律開新 run,不存在覆寫路徑。
-- **redaction / 大小 / retention**(review 第二輪 #3 重寫:原稿「以 vault 解出的值刷除」在 `--ask-vault-pass` 路徑不成立——`vaultInput` 只轉交 vars 檔/password file/密碼提示給 ansible,pilot 從不知道解密後的 plaintext;且 `.verification/` NDJSON/報告是另一個未遮罩的持久化 sink,現行以 `0644` 建立):
+- **redaction / 大小 / retention**（以 Final Safety RFC 為唯一邊界）：
   - matcher 一律在**記憶體中的原始結果**上評估;**所有持久化 sink(SQLite、NDJSON、`.md` 報告、event payload)共用同一個 redaction pipeline**,不存在「DB 有刷、檔案沒刷」的旁路。
-  - pilot 可取得 secret plaintext 時(vars 檔/password file 路徑)做 exact-string 刷除;**無法取得時(`--ask-vault-pass` 等)**,secret-bearing probe 的 stdout/stderr **預設不持久化**(evidence 只記 verdict + `redacted` 標記),或依 RFC 引入受控 secret resolver——不得宣稱已完成 exact-value redaction。
+  - pilot **永遠不解析或取得 secret plaintext**；只轉交 vault file／password
+    mechanism 與 `ansibleVar` reference。secret-aware module 在 Ansible vars
+    pipeline 內取得值、以 child stdin 傳遞並在回傳前 redaction。
+  - secret-bearing probe 的 stdout/stderr 預設不持久化；evidence 只記
+    status、verdict、`redacted` 標記與 secret reference 名稱。安全 module、
+    callback leakage 與 fake-recorder 驗收未完成前直接拒跑，不提供弱化旁路。
   - evidence 的 `command` 欄保存原始 probe 與變數 reference,**不保存**展開 secret 後的 materialized shell command。
   - 保留 raw evidence 檔時:改 `0600`(現行 `0644`),授權、加密與 retention 由 evidence RFC 定——不沿用公開可讀的一般 report。
   - stdout/stderr 落庫各截斷至 64 KB 並帶 truncated flag(順序:記憶體判定 → redaction → 截斷 → persist)。
-  - retention 預設全留;`pilot runs prune --before <t>` 排入 P5。
-  - 轉換過的 secret(base64、截斷、hash)任何 exact-string 刷除都抓不到——殘餘風險記入 safety RFC,並以 lint 警告 secret×stdout-match 組合。
+  - M0.3 retention 固定全留；generation rotation／archive/prune 與獨立
+    `evidence_admin_events` 排入 P5。
+  - transformed secret（base64、截斷、hash）不能靠 exact-string masking 保證；
+    以「不持久化 secret-bearing output」與 lint 禁止 secret×stdout-match 作主要
+    防線，redaction 只作縱深防禦。
 - `spec_checkpoints` 保留為「最新狀態」快取,事實來源改為 evidence 表。
 
 **驗收 / 測試**
 - store 層測試:同 run 重複 INSERT 不覆蓋;migration v12→v13 replay 測試(比照 v12 replay-drop 測試模式)。
 - 跑兩次 verify,`verify_evidence` 有兩批紀錄、`spec_checkpoints` 只反映最新——斷言前次不被改寫。
 
-**規模**:中(3-5 天)。roadmap「最先三件事」#2。
+**規模**:中偏大(5-8 天，不含 P5 rotation/prune)。roadmap「最先三件事」#2。
 
 ### M0.4 — deploy 交易閉環(verify 進 deploy、policy 化 rollback/idempotency)
 
-**前置(缺一不可,review 阻塞項 2、4)**
-1. **Verification safety boundary RFC 定稿**:verify 現況並非唯讀——`stageVerifyEnv`(verify_spec.go:88)在 `KEYCLOAK_ISSUER` 存在時對所有可達 host 寫 `/etc/pilot-verify.env`,部分既有 check 亦有 POST/PUT/DELETE 型 self-test。RFC 二選一:嚴格唯讀(寫入型 self-test 移至 apply/fixture)或明確隔離、可清理、需人授權的 verification-action 類型。**定案前 verify 不自動接入 production deploy 交易**。
-2. **component↔role↔playbook↔spec mapping 先於 `internal/delivery` 抽取**:由 M1.1 contract 定義(component 1—1 primary role、1—N spec、playbook 依用途各至多一支)。原稿「`deployCatalog.SpecPath` 一對一暫接」**取消**——一對一表達不了多 spec、site deploy 與 day-2,只是把手工關聯搬進新套件、固化 drift。
-3. **partial deploy 的 verify scope 契約**(review 第二輪 #5:`pilot deploy` 允許 `--tags`/`--limit`/`target_group`,不定義 scope mapping 會兩頭錯——無條件全 spec 驗證讓 scope 外的 row/host 弄失敗交易,只驗 selected tags 又會把 component 整體健康誤報成功):
+**前置(implementation dependency；design 均已 Final)**
+1. M0.2 per-host runner 與 M0.3 evidence store 已合併。
+2. M1.1 production contract mapping 已合併：每 component 恰有一個 target role，
+   role 可有多個 components；dependency placement/provider selection 已解析。
+3. M2.2 v2 parser/action/applicability 已合併。`verification.autoDeploy: true`
+   contract 只可引用 v2；v1 不存在 auto-run fallback。
+4. **partial deploy 的 verify scope 契約**:
    - apply scope → verify scope 的 mapping:`--limit`/host pattern 直接餵 M0.2 的 expected host set;`--tags` 部分套用時只驗證 selected rows。
    - **tag→row scope resolver**(review 第三輪 #5:Ansible tag 不只 row tag——單 spec 裸 `C3`、多 role 粗 tag `db` 與細 tag `db-C3`、一 task 多 tag、`always`/`never` 特殊 tag):requested tags + contract `traceability`(rowTags bare/rolePrefixed、mapped;ComponentContract RFC 已以此取代早前的 `tagMode`)+ playbook tag coverage → selected spec rows。**無法無歧義解析時 fail closed**,或要求使用者明確給 `--verify-rows`——不猜測。
-   - outcome enum 完整定義,不只定成功態:`partial_success` / `partial_failed` / `cancelled` / rollback 後狀態(如 `rolled_back`);partial outcome 明示只對 selected rows×hosts 成立,不冒充 component 整體健康。
+   - 先以 tag→row 選 ownership rows，再逐 host 評估 v2 `appliesWhen`；false
+     產生 `not_applicable` evidence，不執行 probe且不算 PASS。condition error
+     fail closed。
+   - outcome enum 完整定義:`success`/`failed`/`partial_success`/
+     `partial_failed`/`cancelled`/`rolled_back`/`rollback_failed`/
+     `evidence_failed`/`authorization_required`；partial outcome 明示只對 selected
+     applicable rows×hosts 成立。
    - idempotency rerun 使用與 apply **完全相同**的 tags/limit/extra-vars。
    - 此契約定案後才抽取 `internal/delivery.Transaction`。
 
 **改動**
-- `cmd/pilot/cmd/deploy.go`:apply 成功後自動接 per-host verify;spec 集合來自 contract mapping;full-site deploy 對每個非空 group 跑該 component 宣告的全部 spec(等同 `topology test --verify spec=<limit>` 的邏輯搬進 deploy)。
+- `cmd/pilot/cmd/deploy.go`:apply 成功後自動接 per-host verify；spec 集合來自
+  `verification.autoDeploy: true` contract mapping；full-site deploy 對每個非空
+  component scope 跑 selected v2 specs 的 applicable rows。
 - **apply 成功 + verify 失敗 = 交易失敗**(non-zero),outcome=`verify_failed`。
 - 交易步驟機:把 `runVtTest` 的 5 步機(vm_target.go:1488)抽成 `internal/delivery` 套件的 `Transaction`(steps: preflight→preview→apply→verify→idempotency→rollback-on-failure),`deploy`、`vm-target test`、`topology test` 三處共用,行為差異用 policy 表達:
   - `idempotency: always|stage>=staging|never`(第二次 check-mode 或 apply 斷言 changed=0)
   - `rollback: none|snapshot|playbook`——真實主機沒有 VM snapshot,先支援 `none`(預設,只標記 outcome)與 `playbook`(component 宣告 rollback playbook 才可用;無宣告時明說「無自動 rollback」而非假裝有)。
-  - verify 邊界依 safety RFC 執行。module allowlist 只是縱深防禦,**不構成唯讀保證**(review 指正:`command`/`shell` probe 本身就能寫入)——唯讀保證來自 RFC 定案的規範 + lint + review,寫入型檢查一律走 RFC 定義的去向。
+  - verify 邊界依 Final Safety RFC 執行；scalar/缺 action 拒絕，
+    isolatedMutation 走 authorization+cleanup；secretRef 走受控 playbook/module。
 - 每步 INSERT `delivery_events`;結束 INSERT `run_finished` event(outcome、final_exit_code)。
 
 **驗收 / 測試(P0 完成定義)**
@@ -218,37 +278,56 @@ review/final 前不開始 schema v13。
 
 ### M1.1 — schema 與載入器
 
-**RFC／fixtures 狀態：已建立、待接受**，見
+**RFC／fixtures 狀態：Final／production loader implementation GO**，見
 `docs/tmp/future/COMPONENT_CONTRACT_RFC.md` 與
 `docs/tmp/future/contracts/*.yaml`。六份 fixtures 已通過 test-only strict decode、
 selector、traceability、binding、實際 tag 與 duplicate-owner 驗證；測試位於
-`internal/contract/fixture_schema_test.go`。這不是 production loader/API，正式
-runtime 仍依本節 gate 暫緩。
+`internal/contract/fixture_schema_test.go`。`internal/contract/contract.go` 已提供
+strict YAML decode、local schema validation、stable directory loading 與 root-path
+containment；它尚未接入 deploy/TUI，也尚未把 fixtures 遷入 production contracts
+directory。
 
 **改動**
 - 新套件 `internal/contract`:`ComponentContract` Go struct + YAML 檔 `contracts/<component>.yaml`(一元件一檔,可 review、可版本化;**不是 LLM tool schema**)。欄位對齊 roadmap P1 清單:
   - `id`、`role`、`specs: [{path, rows}]`(1—N；rows 可為 all/ids/categories，支援 dns/ntp 共用 spec 的 row ownership)、`playbooks: {apply, rollback, upgrade, decommission}`(依用途各至多一支;**欄位形狀直接對齊已定的 cardinality,不再用單數 `spec`/`playbook`**,review 第二輪 #6)、`regressionTests`
-  - `dependencies` / `conflicts`,加上結構化 **`bindings`**——宣告「依賴元件的哪個 endpoint 綁到本元件哪個 input/group var」,如 `{input: restic_s3_target_host, from: {component: seaweedfs-s3, endpoint: s3}}`。沒有 binding,TUI 推導不出 `restic_s3_target_host`/`wazuh_manager_host`,`autoHostVar` 就退役不掉
+  - `dependencies` 每項加 `relation: sameHosts|providerEndpoint|planOnly`；
+    `bindings` 加 `sourceSelection: exactlyOne|all|explicit`，宣告 provider endpoint
+    如何綁 input。多台 provider 不得默取第一台
   - `os`(distro+version 支援矩陣)、`hostCardinality`(`exactly-one|one-or-more|zero-or-more`;**套用在本次 stage/limit/host-pattern 解出的 deployment scope**,不是整份 inventory 的全域 host 數)、`resources`(minCPU/minRAM/minDisk)
-  - `groupVars`(每項 `{name, required, default, secret, validation}`;`secret: true` 的項**即為** vault key 的單一宣告處,不另設獨立 `vaultKeys` 清單——同一事實不兩處宣告)、`endpoints`(輸出 endpoint 名與 port,`bindings.from` 的引用對象)
+  - `groupVars`(每項 `{name,type,required,default,secret,validation}`；type =
+    string/stringList/integer/boolean/duration；secret 是 vault key 唯一宣告處)、
+    `inputRules`（strict all/any + typed condition，表達跨欄位 preflight）、
+    `endpoints`
   - `stagePolicy`、`experimental`、`evidenceRequirement`(**宣告離開 experimental 需要哪種 actual-run evidence,不保存「目前是否已有」這種會過期的靜態事實**——實際狀態由 append-only run 查詢得出)
   - `lifecycle`:`backup`、`upgrade`、`decommission` 契約(rollback 已在 `playbooks.rollback`;先允許 `null` 並 lint 警示,不假造)
   - `traceability.mode`:`rowTags` | `mapped`；rowTags 再選 `bare`／`rolePrefixed(<prefix>)`，mapped 必須逐 qualified row ref (`<spec-path>#<row-id>`) 對應 feature/stage tag。`noRowTags` 不進新 schema；verify-only／derived row 也以 qualified row ref 逐列宣告 exemption，避免 1—N specs 的 `C1` 碰撞。細節見 ComponentContract RFC。
+  - `verification.autoDeploy`：true 時 selected specs 必須全為 v2；applicability
+    由 spec 的 `appliesWhen` 唯一定義，contract 不得覆寫。
 - Loader + 嚴格解析(未知欄位報錯,呼應「不提前加入 parser 不認識的欄位」);contract 檔自帶 `schemaVersion: 1`,未知版本拒絕(與 Spec v2 同紀律)。
 
 **邊界決策(review 阻塞項 5;M1.2 全量遷移的前提,先在 RFC 定稿)**
-- component↔role:**1—1**(component 恰對應一個 primary role);一個 component 可宣告 **1—N 份 spec**、多支 playbook(依用途 apply/rollback/upgrade/decommission 各至多一支)。這份 mapping 同時是 M0.4 `internal/delivery` 的 spec 來源。
+- role cardinality：component → exactly one primary target role；role →
+  zero-or-more components。`log-server`/`log-shipping` overlay 是合法案例。
+  一個 component 可宣告 1—N specs 與各用途 playbook。
 - 既有例外先明處理(review 第二輪 #6):`core-infra-provider` 一支 playbook 涵蓋 dns/ntp 兩個 role(specTagMap `prefixes: ["dns","ntp"]`)——遷移方案定為**拆成兩個 component 共用同一支 apply playbook**(playbook 可被多個 contract 引用,tag namespace 天然分開);試點期若發現不可行再調整模型,不默默留例外。
-- `groupVars` 每項 = `{name, required, default, secret, validation}`;`required` 且無 default 且未提供 ⇒ deploy 前擋下。
+- `groupVars` 每項 = `{name,type,required,default,secret,validation}`；`required`
+  且無 default 且未提供 ⇒ deploy 前擋下。
+- 跨欄位要求只用 `inputRules`；rule 的 `all`／`any` 恰選一，condition operator
+  固定為 `nonEmpty|equals|notEquals|contains|notContains`。dependency binding、
+  使用者 input 與 defaults resolve 後、apply 前評估；false fail closed。
 - 資源檢查:facts 可取得且低於 minimum ⇒ **fail**;facts 不可取得 ⇒ **warning + evidence 註記**(不假裝檢查過)。
 - lifecycle null 規則:`backup`/`upgrade`/`decommission` 可為 null(lint warning);`playbooks.rollback: null` ⇒ 該 component 的 rollback policy 只能是 `none`。
-- **site.yml 生成範圍決策**(review 第四輪 #5:現行 site.yml 含 contract schema 表達不了的特殊執行語意——`target_group is not defined` + `tags: [always]` 安全閥、`preflight.yml` 固定先跑、`core-infra-provider-apply.yml` 以 `infra_role: dns/ntp` 匯入兩次、每個 import 的 site-level 粗 tags、log-shipping 的動態 `target_group` fallback 運算式、freeipa-identity/replica 等 day-2/opt-in 元件刻意不進 site——僅靠 `playbooks.apply` + dependency DAG 無法無損重建):M1.1 RFC 二選一——(1) 新增 **site execution projection**(`site.include`、`site.vars`、`site.tags`、`site.optIn`,安全 prelude 定為不可由 component 覆寫的模板)後才宣稱生成;(2) **site.yml 維持手寫,contract 只 lint 順序與 coverage**。**傾向先採 (2)**——在 projection 被證明能無損重建上述全部行為之前,不切換自動生成。
+- **site.yml 決策已定案**：維持手寫；contract 只 lint order/coverage/vars/tags/
+  opt-in 與不可覆寫的 safety prelude，M1 不生成 site.yml。
 
-**先寫 6 份試點 contract**(review 第四輪 #5 + 第五輪 #1:原 3 份——docker、freeipa-server、restic-backup,涵蓋無依賴/exactly-one/有依賴(binding)三型——涵蓋不了共用 playbook 與動態 target_group;且 component↔role 1—1 下 core-infra-provider 不是一份 contract,而是 **dns、ntp 兩份**(共用同一支 apply playbook,見上);試點清單定為 **docker、freeipa-server、restic-backup、dns、ntp、log-shipping**,後三份是最難的例外,不留到 M1.2 全量遷移才爆),以 RFC + YAML fixtures 形式 review;**loader 與 API 在試點 schema/lint 定稿後才動工**(review 第二輪:schema 未定前不固化 loader),通過後才啟動 M1.2;不要一次搬 22 個。
+六份試點為 **docker、freeipa-server、restic-backup、dns、ntp、log-shipping**。
+Final schema 已定稿，loader/API 立即開工；fixtures 改走正式 loader 且 lint 全綠後
+啟動 M1.2。
 
 ### M1.2 — lint 收斂五處事實來源
 
-**前置**:M1.1 邊界決策定稿且六份試點(docker、freeipa-server、restic-backup、dns、ntp、log-shipping)通過 contract lint;在此之前全量遷移暫緩(review 阻塞項 5)。
+**前置**:M1.1 production loader/API 合併，六份試點改走正式 loader 並通過
+contract lint。這是 code dependency，不是未決 schema blocker。
 
 **改動**
 - `pilot contract lint`(或併入 `make playbook-lint` 的 Go 檢查):
@@ -266,7 +345,10 @@ runtime 仍依本節 gate 暫緩。
 ### M1.3 — deploy 前置檢查與 DAG
 
 **改動**
-- `internal/delivery` preflight 步驟擴充:依 contract 檢查目標 inventory 的 host cardinality、必要 group vars/vault key 是否已填、依賴元件是否在 site 部署範圍內、(可取得時)host 資源;任一不符 → deploy 前擋下,清楚列出缺什麼。
+- `internal/delivery` preflight 步驟擴充:依 contract 檢查 host cardinality、必要
+  vars/vault key、inputRules、dependency relation、sameHosts coverage、provider
+  endpoint selection 與 host 資源；多台 provider 若不是 `all` 必須明確選擇，
+  不取第一台。
 - site.yml:依 M1.1 RFC 的生成範圍決策執行(傾向 lint-only)——contract 依賴拓撲先只用來 **lint** 現有手寫 site.yml 的順序與 coverage;僅當 site execution projection 定稿並涵蓋全部特殊匯入語意(安全閥、preflight、infra_role 雙匯入、動態 target_group、opt-in 排除)後才切換自動生成。core-infra-provider 與 log-shipping 的 contract fixture 是 M1.3 開工前的必要 contract test。
 
 **規模**:M1.1 中、M1.2 大(22 元件的資料搬遷)、M1.3 中。合計 2-3 週。
@@ -281,21 +363,28 @@ runtime 仍依本節 gate 暫緩。
 
 - `internal/spec` 新增 `Matcher` 型別(`exitCode`、`stdout.equals/contains/regex`、`timeout`),`matchExpected` 的五種魔法前綴各自對應到一個 typed matcher —— v1 字串在 parse 時**轉譯**成 typed matcher,執行層(verify_spec.go)只認 typed matcher。
 - 好處:v2 來臨前,執行語意已單一化;v1/v2 只是兩個前端。
-- 測試:魔法前綴→typed matcher 的轉譯表逐案測試;24 份 spec 判定結果零回歸。
+- 測試:魔法前綴→typed matcher 的轉譯表逐案測試；v1 保留 legacy TrimSpace、
+  v2 使用 one-trailing-newline normalization；24 份 spec verdict 零回歸。
 
 ### M2.2 — v2 parser 並存
 
-- v2 spec 用 markdown front-matter(metadata)**加** `## Checks` 下的 fenced YAML 區塊(checks)承載結構化欄位——兩者皆需,見 SPEC_V2 D1(維持人可讀的 markdown 主體):`schemaVersion: 2`、`intent`、`targets`(含 hostScope/平台)、`inputs`(必填+validation+secret ref)、`checks`(穩定 row ID、probe、typed matcher、timeout、`scope: per-host|aggregate`)、`traceability`(`components` 引用 1—N 個 M1.1 contract ID,resolved tag/row mapping 由 contract traceability 推導、regression invariant)、per-check `action`、`evidencePolicy`、`compatibility`(最低 pilot 版本)。
+- v2 spec 用 front-matter + fenced YAML checks；包含 typed matcher、
+  `appliesWhen`、`scope`、canonical object action 與
+  `secretRef:{provider:ansibleVar,name}`。applicability false 記
+  `not_applicable`，不執行 probe、不算 PASS。
 - `spec.Parse` 依 `schemaVersion` 分派;**未知版本、未知欄位明確拒絕**。
-- v1 照常運作;`pilot verify` 對兩版行為一致(同一 typed matcher 執行層)。
+- v1 manual verify 照常運作；production deploy auto-verify 只接受 v2。
 
 ### M2.3 — 遷移工具與 lint
 
-- `pilot spec migrate <v1.md>`:輸出 v2 草稿;無法安全轉換的 matcher(如語意模糊的 `~` 子字串)標 `needsReview: [<finding>]`(機器可辨識的 `[]string` 欄位,非空 ⇒ verify 整份拒跑),不做靜默轉換。
+- `pilot spec migrate <v1.md>`:輸出 v2 草稿；matcher、action 或 applicability
+  無法安全推導時寫 `needsReview`，尤其 known-deviation/optional prose 一律
+  `applicability-unknown`，不猜條件。
 - `spec.Lint` 擴充 v2 規則;`spec --generate` 維持診斷定位(繼續擋 `--generate` 到 playbooks/verify,不恢復 heuristic→apply)。
 - 驗收(P2 完成定義):同一份 v2 spec 在 local、docker-target、vm-target、真實 inventory 判定一致——用一份 fixture spec 在三種 target 實跑斷言。
 
-**規模**:M2.1 中、M2.2 大、M2.3 中。合計 2-3 週。遷移 24 份既有 spec 不搶進度,v1 長期可用,逐份隨修改順手遷。
+**規模**:合計約 3.5-4.5 週。v1 長期可 manual 使用；要設
+`verification.autoDeploy: true` 的 component 必須先遷移其 specs。
 
 ---
 
@@ -330,6 +419,8 @@ runtime 仍依本節 gate 暫緩。
   - `pilot runs diff <run-a> <run-b>`(evidence diff)
 - CVE/元件影響面:`pilot runs affected --component C`(靠 contract 的 component↔run 關聯)。
 - 全部唯讀查詢,append-only 不變式由 store 層測試鎖住。
+- 實作 generation rotation、archive/prune 與獨立
+  `evidence_admin_events`；requested/finished/failed 三態不混入 delivery run。
 
 **規模**:1-2 週。
 
@@ -340,29 +431,25 @@ runtime 仍依本節 gate 暫緩。
 1. 不加回 LLM provider/agent loop——所有新套件(`internal/contract`、`internal/delivery`)零 model 依賴。
 2. 不把 probe heuristic 編成 mutation——`spec --generate` 維持診斷,M2.3 遷移工具只轉格式不轉語意。
 3. v2 parser 落地(M2.2)前,任何文件不得宣稱支援 Spec v2 檔案格式;M1.1 contract 檔案在 loader 合併前同理。
-4. 不以總體 PASS 掩蓋局部失敗——M0.2 起所有 rollup 皆由 host×row 明細聚合,聚合層測試鎖住「任一 FAIL ⇒ 整體 FAIL」。
+4. 不以總體 PASS 掩蓋局部失敗——所有 applicable host×row 中任一 FAIL ⇒
+   整體 FAIL；`not_applicable` 有明細與理由但不算 PASS。
 5. destructive boundary 仍由人確認——stage gate(`promptStageDecision`)保留,M0.4 只是把「人已授權」記進 evidence。
 
 ## 9. 開工順序(依 review 修訂)
 
-1. **M0.1(修訂版)**:preview/apply 非零退出 + exit-code 契約表 + runner 測試 seam;`verify --dir` 只補「保留 per-spec 原始錯誤」。
-2. **兩份短 RFC（已建立為 Proposed，待 review/final）**：Verification safety boundary（涵蓋 per-check verification action、secret transport、所有 sink）、Append-only delivery evidence data model（event stream、heartbeat、lease、terminal matrix、prune/DELETE）。
-3. **M0.2 JSON callback spike + pure resolver（已完成）**：已實跑
-   success/module-error/unreachable/controller-timeout，並固化 decoder fixtures、
-   expected-host truth table 與 pure resolver；下一切片是 Ansible scope adapter
-   與 per-host timeout 決策，仍不得使用有損 `--one-line` evidence。
-4. **M1.1 六份試點 contract（RFC + YAML fixtures + test-only schema gate 已建立，
-   不含 production loader）**：fixtures 已 strict decode 並對實際 spec rows／
-   playbook tags 做語意驗證；loader/API 與全量遷移(M1.2)仍待 RFC 接受。
-5. M0.2 完成後依序 → M2.1(不可平行);M0.3/M0.4、M1.2+、M2.2 待各自前置關閉後開工。
+1. M0.2 production slice：Ansible scope adapter → single-host bounded runner →
+   decoder/report integration。timeout/scope design 已 Final。
+2. M1.1 production loader/API 可與 M0.2 平行；先讓六 fixtures 改走正式 loader。
+3. M0.2 合併後依序做 M2.1 → M2.2 → M2.3；M2.2 可使用已 Final 的 Safety 與
+   ComponentContract schema。
+4. M0.3 store 可與 M2 branch 平行；Final Evidence RFC 已關閉 schema blocker。
+5. M1.2/M1.3 在 loader 合併後開始。
+6. M0.4 最後整合 M0.2 + M0.3 + M1 mapping + M2.2 applicability/action；
+   先遷移要自動驗證的 component specs，再設 `verification.autoDeploy: true`。
 
-目前狀態：**已完成／已產出**——M0.1、兩份 Proposed hard-gate RFC、M0.2
-callback spike + pure resolver、M1.1 RFC/fixtures + test-only schema gate；
-**下一個可做**——review/accept 三份 RFC、M0.2 Ansible scope adapter 與 timeout
-決策；**暫緩**——M0.2 正式 runner 接線(待 adapter/timeout contract)、M1.1
-production loader 與 M1.2/M1.3(待 ComponentContract RFC 接受)、M0.3/M0.4
-(待 RFC final + M0.2 + contract mapping)、M2.1(待 M0.2 合併)、
-M2.2/M2.3(待 M2.1 + safety RFC final)。
+目前狀態：**Production implementation GO**。可立即並行啟動三條互不踩檔的
+production workstream：M0.2 runner、M0.3 store、M1.1 loader；M2.1 等 M0.2
+合併後開始。這些是實作依賴，不是等待額外產品決策。
 
 設計文件對應:ADR-authoring 邊界(隨 M1.1)、RFC-ComponentContract(M1.1)、RFC-Spec v2(M2.2 前)、ADR-evidence data model(M0.3 前)、**RFC-Verification safety boundary(M0.4/M2.2 前)**、Test Strategy-eval(M4.1)。
 

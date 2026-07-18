@@ -1,16 +1,18 @@
 # RFC：Verification Safety Boundary
 
-> 狀態：Proposed — technical review complete，等待接受
+> 狀態：Final — accepted for production implementation
 > 日期：2026-07-18
 > 前置：`docs/tmp/future/IMPLEMENTATION_PLAN.md` M0.4、M2.2
+> 接受依據：2026-07-18 使用者要求關閉 review findings 並全面開始 production
+> implementation；本版已固定 canonical action schema、v1 自動化邊界與
+> Ansible secret transport。
 >
 > **實作標示：設計已完成，runtime 尚未實作。**
 > 目前不存在 per-check action executor 或 secret-aware Ansible module；
 > `stageVerifyEnv` 也尚未退役。本 RFC final 前不得宣稱 verify 已符合此邊界。
 >
-> Technical review 已確認 per-check action、production authorization、cleanup、
-> secret transport 與 evidence sink 邊界彼此一致；狀態仍由人接受後才可改為
-> Final，本標示不解鎖 M0.4／M2.2。
+> Final 代表 implementation contract 已定案，不代表 runtime 已存在。M0.4／M2.2
+> 可依本 RFC 開工；完成仍須通過 §9 的 executable acceptance tests。
 
 ## 1. 決策摘要
 
@@ -20,11 +22,14 @@
 3. 需要寫入 target／外部系統的 self-test 必須宣告為 `isolatedMutation`，具備
    額外授權、cleanup 與 evidence contract；未宣告一律視為違規。
 4. v1 既有寫入型 check 在完成盤點與遷移前，不會自動接入 production deploy。
-5. `secretRef` 不得進 CLI、process argv、一般環境變數或未遮罩的 Ansible module
-   args。安全 runner 未完成前，含 `secretRef` 的 spec 可以 parse/lint，但 verify
-   必須 fail closed。
+5. secret reference 不得把 plaintext 放進 CLI、process argv、一般環境變數或
+   未遮罩的 Ansible callback。Remote／controller secret check 統一走受控的
+   `ansible-playbook` task + secret-aware module；pilot 只傳 vault file／variable
+   reference，不自行 materialize plaintext。
 6. 現行 `stageVerifyEnv` 寫 `/etc/pilot-verify.env` 的機制退役，不是 v2 input
    transport。
+7. production deploy transaction 只自動執行 Spec v2。v1 保留 manual verify；
+   未完成 action/applicability 遷移的 v1 不存在自動執行旁路。
 
 ## 2. 問題
 
@@ -43,7 +48,19 @@
 
 ## 3. Check safety schema
 
-Spec v2 每個 check 使用：
+Spec v2 的 canonical schema 是 object，不接受 scalar action。每份 v2 spec 必須在
+`defaults.action` 或每個 check 顯式提供 action；parser 不提供隱式 read-only
+default。
+
+全 spec 明確宣告：
+
+```yaml
+defaults:
+  action:
+    mode: readOnly
+```
+
+或 check 覆寫：
 
 ```yaml
 action:
@@ -66,7 +83,9 @@ action:
 
 規則：
 
-- `action.mode` 預設 `readOnly`。
+- `action.mode` 只接受 `readOnly`／`isolatedMutation`。
+- 缺少 `defaults.action` 且 check 也沒 action是 parser error；省略不能被解讀成
+  read-only。
 - `isolatedMutation` 必須有 `authorization`、`cleanup.required: true` 與
   `residualRisk`。
 - parser 負責 enum、必填欄位與結構有效性。
@@ -125,19 +144,49 @@ Secret plaintext 不得出現在：
 - report、NDJSON、SQLite event payload；
 - 未受 `no_log`／redaction 保護的 Ansible callback。
 
-### 6.2 選定方向
+### 6.2 Secret reference schema
 
-Remote secret probe 使用 repo 內版本化的 **secret-aware Ansible module**：
+Spec v2 不再用意義不足的 `secretRef: true` boolean。Canonical input：
 
-1. pilot 在 controller 記憶體解析 secret reference。
-2. plaintext 透過 subprocess stdin 交給 Ansible runner，不進 argv。
-3. module 的 secret 欄位標記 `no_log`，透過 Ansible transport 傳送。
-4. module 啟動 probe child 時，以 stdin JSON 提供 secret，不放 argv／environment。
-5. module 在回傳前先做 exact-string redaction；pilot persist pipeline 再做第二次
-   redaction。
-6. callback 只接受 module 定義的 structured result。
+```yaml
+inputs:
+  - name: ipa_admin_password
+    required: true
+    secretRef:
+      provider: ansibleVar
+      name: ipa_admin_password
+```
 
-Local／controller probe 同樣只以 stdin JSON 接收 secret。
+- `provider` v2 首版只接受 `ansibleVar`。
+- `name` 是 Ansible variable name，不是 plaintext；必須符合
+  `^[A-Za-z_][A-Za-z0-9_]*$`。
+- 實際來源只接受既有 vault file／vault password flow。CLI 可以帶 vault file
+  reference，不接受 `--input ipa_admin_password=<plaintext>` 或環境變數明文。
+- inventory／group vars 若只保存 Ansible Vault encrypted scalar 也視為
+  `ansibleVar`；pilot 不解密、不持久化。
+
+### 6.3 選定 transport
+
+Remote 與 controller secret probe 統一使用 repo 內版本化的
+**secret-aware Ansible module**，由受控的暫存 playbook 呼叫：
+
+1. pilot 建立 `0600` 暫存 playbook；內容只引用
+   `{{ <secretRef.name> }}`，不含 plaintext。
+2. pilot 呼叫 `ansible-playbook`，只轉交 inventory、vault file reference 與
+   vault password mechanism；不把 secret 放進 argv 或 process environment。
+3. task 與 module secret parameter 都標記 `no_log`。Ansible 在自身受控的 vars
+   pipeline 解析 vault，再經既有加密 transport 傳給 module。
+4. module 不以 shell argv／environment 啟動 probe；它把非 secret probe
+   descriptor 放 argv，把 secret JSON 寫入 child stdin。
+5. module 回傳前做 exact-string redaction；pilot 的 shared persist pipeline 再做
+   第二次 redaction。
+6. controller／aggregate check 使用相同 playbook，目標為 controller 的
+   `connection: local`，不另開較弱的 secret path。
+7. 暫存 playbook 只含 reference，仍在正常 return、error、SIGINT/SIGTERM 清除；
+   crash recovery 依 pilot-owned filename prefix 清理。
+
+這個設計不假設標準 `ansible` ad-hoc CLI 有 controller→module stdin secret
+channel；secret-bearing check 明確切換到 `ansible-playbook` task path。
 
 安全 module、crash cleanup、callback redaction 與 recorder leakage 測試未完成前：
 
@@ -159,12 +208,16 @@ Local／controller probe 同樣只以 stdin JSON 接收 secret。
 
 ## 8. v1 遷移
 
-在 M0.4 前建立既有 24 份 spec 的 action inventory：
+在 M0.4 前建立既有 24 份 spec 的 action/applicability inventory：
 
 - 明確唯讀 → `readOnly`。
 - 寫入型 self-test 可移至 apply／fixture → 移出 verify。
 - 必須保留的建立／撤銷測試 → `isolatedMutation`。
-- 無法判定 → `needsReview`，自動 deploy verify 拒跑。
+- 無法判定 → `needsReview`。
+
+v1 spec 永遠只允許 manual verify。需要接入 deploy transaction 的 component 必須
+先把對應 spec 遷到 v2，顯式 action 與 applicability；因此不存在「靠外部清單把
+v1 當安全」的永久雙重 source of truth。
 
 `stageVerifyEnv` 使用者改為明確 non-secret input；secret input 等安全 module。
 
@@ -178,6 +231,10 @@ Local／controller probe 同樣只以 stdin JSON 接收 secret。
 - secret plaintext 不出現在 argv、environment、stdout/stderr persistence、
   process recorder 與 SQLite。
 - 安全 module 未完成前，含 `secretRef` spec 的 verify 必須拒跑。
+- parser 拒絕 scalar action、缺 action 與 boolean `secretRef`。
+- 以 fake process recorder 驗證 argv/environment 無 secret；再以 localhost
+  Ansible Vault fixture 驗證 module child 只從 stdin 收到 secret、callback 與
+  report 無 plaintext。
 
 ## 10. 非目標
 

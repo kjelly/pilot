@@ -1,5 +1,4 @@
-# STATUS: PROPOSED FIXTURE ONLY — pilot runtime does not load this file yet.
-# The schema may change before the M1.1 loader and lint implementation.
+# STATUS: FINAL SCHEMA FIXTURE — loader validates this shape; runtime wiring pending.
 schemaVersion: 1
 id: freeipa-server
 role: freeipa-server
@@ -27,9 +26,10 @@ os:
 hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 4096, minDiskGiB: 20}
 groupVars:
-  - {name: freeipa_domain, required: false, default: ipa.pilot.internal, secret: false}
-  - {name: freeipa_server_ip, required: true, secret: false, validation: "^[0-9a-fA-F:.]+$"}
-  - {name: ipa_admin_password, required: true, secret: true, validation: "^.{8,}$"}
+  - {name: freeipa_domain, type: string, required: false, default: ipa.pilot.internal, secret: false}
+  - {name: freeipa_server_ip, type: string, required: true, secret: false, validation: "^[0-9a-fA-F:.]+$"}
+  - {name: ipa_admin_password, type: string, required: true, secret: true, validation: "^.{8,}$"}
+inputRules: []
 endpoints:
   - {name: ldap, scheme: ldap, port: 389}
   - {name: ldaps, scheme: ldaps, port: 636}
@@ -63,6 +63,7 @@ traceability:
     "docs/verification/freeipa-server.md#C16": {tags: [freeipa-audit], reason: directory audit file}
     "docs/verification/freeipa-server.md#C17": {tags: [freeipa-install], reason: optional native DNS TCP listener}
     "docs/verification/freeipa-server.md#C18": {tags: [freeipa-install], reason: optional native DNS UDP listener}
+verification: {autoDeploy: false}
 site:
   include: true
   order: 40

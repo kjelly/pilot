@@ -1,5 +1,4 @@
-# STATUS: PROPOSED FIXTURE ONLY — pilot runtime does not load this file yet.
-# The schema may change before the M1.1 loader and lint implementation.
+# STATUS: FINAL SCHEMA FIXTURE — loader validates this shape; runtime wiring pending.
 schemaVersion: 1
 id: dns
 role: dns
@@ -22,9 +21,10 @@ os:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
-  - {name: dns_listen_addr, required: true, secret: false}
-  - {name: dns_upstream, required: false, default: 1.1.1.1, secret: false}
-  - {name: dns_zones, required: false, default: [], secret: false}
+  - {name: dns_listen_addr, type: string, required: true, secret: false}
+  - {name: dns_upstream, type: string, required: false, default: 1.1.1.1, secret: false}
+  - {name: dns_zones, type: stringList, required: false, default: [], secret: false}
+inputRules: []
 endpoints:
   - {name: dnsTcp, scheme: tcp, port: 53}
   - {name: dnsUdp, scheme: udp, port: 53}
@@ -37,6 +37,7 @@ traceability:
   tag: {kind: rolePrefixed, prefix: dns}
   exemptions:
     "docs/verification/core-infra-provider.md#C7": {kind: verifyOnly, reason: optional DNS functional probe}
+verification: {autoDeploy: false}
 site:
   include: true
   order: 10

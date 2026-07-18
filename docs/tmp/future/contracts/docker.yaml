@@ -1,5 +1,4 @@
-# STATUS: PROPOSED FIXTURE ONLY — pilot runtime does not load this file yet.
-# The schema may change before the M1.1 loader and lint implementation.
+# STATUS: FINAL SCHEMA FIXTURE — loader validates this shape; runtime wiring pending.
 schemaVersion: 1
 id: docker
 role: docker
@@ -23,6 +22,7 @@ os:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 10}
 groupVars: []
+inputRules: []
 endpoints:
   - {name: dockerSocket, scheme: unix, path: /var/run/docker.sock}
 stagePolicy: {variable: stage, default: sandbox}
@@ -38,6 +38,7 @@ traceability:
     "docs/verification/docker.md#C6": {kind: derived, tags: [docker-C1], reason: default networks come from engine installation}
     "docs/verification/docker.md#C7": {kind: derived, tags: [docker-C1], reason: compose plugin comes from the package set}
     "docs/verification/docker.md#C8": {kind: derived, tags: [docker-C1], reason: cgroup mode is an engine property}
+verification: {autoDeploy: false}
 site:
   include: true
   order: 30

@@ -10,7 +10,12 @@ Codex/Claude 直接產生 verification spec、apply playbook 與 regression test
 > **文件狀態：產品規劃，不是可執行 runbook**
 >
 > 本文件描述目標與里程碑；只有下表標成「已實作並驗證」的項目可視為目前產品
-> 行為。Proposed RFC、spike 與 fixture 不代表 runtime 已支援。
+> 行為。Final design 代表 production implementation 可開工，不代表 runtime 已
+> 支援；spike 與 fixture 也不等於正式功能。
+>
+> **Production implementation：GO（2026-07-18）**。三份 blocking RFC 已
+> Final，conditional acceptance、component placement、secret transport、
+> evidence idempotency 與 M0.2 timeout/scope 均已有 canonical contract。
 
 ## 目前實作狀態（2026-07-18）
 
@@ -18,12 +23,12 @@ Codex/Claude 直接產生 verification spec、apply playbook 與 regression test
 |---|---|---|
 | M0.1 deploy exit-code | **已實作並驗證** | preview/apply 非零、binary 啟動失敗、preflight failure 後停止皆回 error；乾淨取消維持 exit 0 |
 | `verify --dir` 原始錯誤 | **已實作並驗證** | no-report 時保留 per-spec parse/runner error |
-| M0.2 per-host verify | **spike + pure resolver** | callback decoder、status contract、expected-host truth table／pure resolver；Ansible scope adapter、per-host runner 尚未接入正式 verify |
-| Verification safety | **Proposed RFC，等待接受** | technical review 完成；已選 per-check action 與 secret transport；runtime 未實作 |
-| Append-only evidence | **Proposed RFC，等待接受** | technical review 完成；已選 event stream/RunWriter/retention；schema v13 未實作 |
-| ComponentContract | **Proposed RFC + fixtures + test-only schema gate** | 六份 fixtures 已 strict decode 並核對 selector／traceability／binding／實際 tag；等待接受，production loader、lint、deploy integration 未實作 |
-| M0.3/M0.4 | **尚未實作** | 等 RFC final、M0.2 與 contract mapping |
-| Spec v2（M2.1–M2.3） | **尚未實作** | 現行 parser/runtime 仍是 v1 |
+| M0.2 per-host verify | **spike verified／design Final** | single-host invocation、bounded workers、standalone scope 已定；adapter/runner 待實作 |
+| Verification safety | **Final design／runtime 待實作** | canonical action、v2-only auto deploy、secret-aware playbook/module transport |
+| Append-only evidence | **Final design／schema v13 待實作** | operation/evidence idempotency、heartbeat/finalization 已定；rotation 移 P5 |
+| ComponentContract | **loader baseline 已實作／runtime wiring 待完成** | strict loader、role 1:N、dependency placement、provider selection、autoDeploy eligibility；尚未接 deploy/TUI |
+| M0.3/M0.4 | **design ready／尚未實作** | 按 M0.2→M2.2/M0.3/M1 mapping dependency 實作 |
+| Spec v2（M2.1–M2.3） | **design Final／尚未實作** | applicability/action/secretRef/normalization/migration 已定 |
 | P3/P4/P5 | **尚未實作** | 仍是 roadmap |
 
 ## 產品北極星
@@ -59,10 +64,12 @@ Requirement Brief
 3. **Fail closed**：啟動外部程式失敗、host 缺漏、matcher 不明確、依賴不完整，
    都不能被當成成功或自動跳過。
 4. **Per-host 判定**：多主機部署的最小結果單位是 `(deployment, host, spec row)`。
-5. **Evidence append-only**：後一次執行不能覆蓋前一次交付事實。
-6. **人保留授權**：agent 可以產生 bundle，但 destructive boundary、風險接受與
+5. **Applicability 先於 verdict**：條件不成立的 row 記
+   `not_applicable` + 原因，不執行 probe、不冒充 PASS；條件解析失敗 fail closed。
+6. **Evidence append-only**：後一次執行不能覆蓋前一次交付事實。
+7. **人保留授權**：agent 可以產生 bundle，但 destructive boundary、風險接受與
    staging/prod 上線授權仍由人確認。
-7. **格式與 authoring model 分開演進**：Spec v2 在 schema 尚未實作前，只代表
+8. **格式與 authoring model 分開演進**：Spec v2 在 schema 尚未實作前，只代表
    authoring contract；不提前加入 parser 不認識的欄位。
 
 ## P0：先完成可信任的交付交易
@@ -83,18 +90,18 @@ Requirement Brief
 - 外部程式無法啟動不得留下成功的 exit code。
 - verify 必須維持唯讀；需要傳入 probe 變數時，不得先改 target 主機狀態。
   注意：現況並非唯讀（存在寫入遠端 env 檔與 POST/PUT/DELETE 型 self-test
-  check），必須先以 RFC 定案 verification safety boundary——嚴格唯讀（寫入型
-  self-test 移至 apply／fixture），或引入明確隔離、可清理、需人授權的
-  verification-action 類型，不得假稱唯讀。此決定定案前，verify 不自動接入
-  production deploy 交易。
+  check）；Final Safety RFC 已定案 readOnly/isolatedMutation、授權/cleanup 與
+  secret-aware playbook/module transport。runtime 必須照 RFC 實作後才可自動執行。
 - 多台主機不得共用一個被壓扁的 row verdict；必須保存每台主機的 stdout、stderr、
   exit code、matcher verdict 與時間。
+- production deploy auto-verify 只執行 Spec v2；v1 保留 manual verify。optional
+  row 必須以 declarative applicability 表達，不能靠 prose 說「預期 fail」。
 - apply 成功但 verify 失敗，部署仍然是失敗；是否 rollback 由明確 policy 決定。
 
 P0 完成定義：
 
 - 每次 deploy 都有唯一 run ID。
-- 任一 host × row 失敗都能讓整次交易失敗。
+- 任一 applicable host × row 失敗都能讓整次交易失敗；not_applicable 不算 PASS。
 - 使用者能從 run ID 回答「哪個版本，以什麼輸入，部署到哪些主機，哪一列驗證
   成功或失敗」。
 
@@ -131,7 +138,11 @@ P1 完成定義：
 
 - 新增 component 時，不必手動在多處重複宣告相同事實。
 - deploy 前即可擋下缺少依賴、主機數量錯誤、資源不足與未提供必要變數。
+- 跨欄位必要條件使用 machine-readable input rules，不依賴 apply playbook
+  執行到 pre_tasks 才發現。
 - 每份 spec row 都能追到負責實作它的 apply tag 或明確標示為 verify-only。
+- 每個 dependency 都能回答是 same-host、provider endpoint 或純 plan ordering；
+  provider 多台時必須明確選擇，不取 group 第一台。
 
 ## P2：Spec v2 成為明確、可遷移的驗收 schema
 
@@ -143,7 +154,9 @@ playbook 維持不同責任：spec 定義可觀察結果，apply 由 coding agen
 - `intent`：需求目標、來源與決策背景
 - `targets`：role、拓撲、host scope、支援平台
 - `inputs`：一般變數、secret reference、必填與 validation
-- `checks`：穩定 row ID、probe、typed matcher、timeout、per-host / aggregate scope
+- `checks`：穩定 row ID、probe、typed matcher、timeout、per-host / aggregate
+  scope、declarative `appliesWhen` 與 canonical action object；false 產生
+  `not_applicable` evidence
 - `traceability`：對應 apply tags、regression invariant
 - `safety`：destructive boundary、stage gate、rollback requirement
 - `evidencePolicy`：需要保存的輸出、idempotency 與 retention
@@ -172,6 +185,7 @@ P2 完成定義：
 - parser 能明確拒絕未知版本與未支援欄位。
 - 同一份 v2 spec 在 local、docker-target、vm-target 與真實 inventory 上具有一致
   的判定語意。
+- v1 legacy whitespace/matcher verdict 零回歸；v2 使用明確的新 normalization。
 
 ## P3：讓 TUI 從「填 YAML」提升成「組合架構」
 

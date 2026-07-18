@@ -86,6 +86,15 @@ func TestResolveExpectedHosts(t *testing.T) {
 			wantHosts: []string{"server"},
 		},
 		{
+			name: "spec targets become default scope without explicit selector",
+			input: expectedHostInput{
+				InventoryHosts:      []string{"client", "server"},
+				SpecTargetsDeclared: true,
+				SpecTargetHosts:     []string{"server"},
+			},
+			wantHosts: []string{"server"},
+		},
+		{
 			name: "execution outside spec targets fails without override",
 			input: expectedHostInput{
 				InventoryHosts:      []string{"client", "server"},
