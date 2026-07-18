@@ -1,14 +1,15 @@
 # M0.2 Per-host Verify Spike
 
-> 狀態：production runner contract finalized；callback data contract + expected-host
-> pure resolver 已驗證，正式 runner 待實作
+> 狀態：production runner implemented；callback data contract、expected-host
+> resolver、Ansible scope adapter 與 bounded per-host runner 已驗證
 > 日期：2026-07-18
 > 環境：ansible-core 2.19.2、ansible package 12.0.0
 >
-> **實作標示：這是可測試的 spike，不是 production per-host verify。**
-> 已實作 decoder／fixtures／tests 與 expected-host pure resolver／truth table；
-> 尚未實作 Ansible inventory/scope adapter、正式 runner 接線與 delivery
-> evidence persistence；本版已定案 per-host isolated invocation timeout。
+> **實作標示：M0.2 production runner 已完成；delivery evidence persistence 屬 M0.3。**
+> `VerifySpecTool` 現在先以 Ansible `--list-hosts` 解析實際 inventory 與
+> CLI selector，再對每個 host × checklist row 啟動獨立的 JSON-callback
+> invocation（最多八個 worker）。scope 沒有 spec Targets 也沒有 `--host`/`--limit`
+> 時 fail closed；不再以遠端 `all` 當隱性預設。
 
 ## 1. 結論
 

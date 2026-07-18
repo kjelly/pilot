@@ -49,10 +49,10 @@ type callbackHostPayload struct {
 	Unreachable  bool   `json:"unreachable"`
 }
 
-// decodeAnsibleCallbackSpike is the M0.2 spike decoder for the complete
-// ansible.posix.json document emitted by one ad-hoc task. It is deliberately
-// not wired into verify yet: the spike must lock timeout and expected-host
-// behavior before replacing the current runner.
+// decodeAnsibleCallbackSpike decodes the complete ansible.posix.json document
+// emitted by one isolated ad-hoc task. Its historical name is retained so the
+// M0.2 fixture tests remain traceable; it is now the production per-host
+// callback decoder.
 func decodeAnsibleCallbackSpike(raw []byte, expectedHosts []string) ([]callbackProbeResult, error) {
 	var doc callbackDocument
 	if err := json.Unmarshal(raw, &doc); err != nil {

@@ -42,8 +42,17 @@ type VerifySpecTool struct {
 	// host that pilot itself is running on (the smoke-test case).
 	LocalOnly bool
 	// Host, when non-empty, overrides the default target for
-	// ansible ad-hoc (default: "all").
+	// ansible ad-hoc. With an inventory, no implicit remote "all" scope
+	// exists: a spec target table or an explicit --host/--limit is required.
 	Host string
+	// PerHostWorkers bounds concurrent isolated host×row invocations. Zero
+	// selects the production default (8); larger values are capped at 8.
+	PerHostWorkers int
+
+	// Test seams: production uses Ansible for both operations. Kept private so
+	// callers cannot accidentally replace the evidence path.
+	listHosts ansibleHostLister
+	runJSON   ansibleJSONRunner
 }
 
 // Spec describes the tool for its caller (`pilot verify`).
@@ -78,11 +87,15 @@ type verifySpecArgsStruct struct {
 // Mirrors what the (removed 2026-07-17) scripts/spec-runner.py
 // produced, so old reports stay diffable against new ones.
 type VerifyRow struct {
-	ID       string `json:"id"`
-	Status   string `json:"status"` // pass | fail | skip
-	Detail   string `json:"detail"`
-	Host     string `json:"host,omitempty"`
-	ExitCode int    `json:"exit_code,omitempty"`
+	ID          string `json:"id"`
+	Status      string `json:"status"` // pass | fail | skip
+	Detail      string `json:"detail"`
+	Host        string `json:"host,omitempty"`
+	ExitCode    int    `json:"exit_code,omitempty"`
+	ProbeStatus string `json:"probe_status,omitempty"`
+	Stdout      string `json:"stdout,omitempty"`
+	Stderr      string `json:"stderr,omitempty"`
+	Message     string `json:"message,omitempty"`
 }
 
 // stageVerifyEnv writes /etc/pilot-verify.env on every host reachable
@@ -133,17 +146,30 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		host = t.Host
 	}
 	stageVerifyEnv(t.Inventory)
-	// Warm the SSH master ONCE before the per-row loop (ad-hoc mode only).
-	// Otherwise the first row pays the full cold TCP+SSH+auth handshake
-	// inside its own per-row timeout and intermittently trips the 15s
-	// deadline, reporting a spurious rc=-1 on an otherwise-healthy target.
+	var remoteHosts []string
 	if !t.LocalOnly && t.Inventory != "" {
-		t.warmConnection(ctx, host)
+		resolution, err := t.resolveRemoteHosts(ctx, parsed, host)
+		if err != nil {
+			return &Result{Content: fmt.Sprintf("ERROR: resolve verification hosts: %v", err), IsError: true}, nil
+		}
+		remoteHosts = resolution.Hosts
+		for _, finding := range resolution.Findings {
+			slog.Warn("verify host-scope finding", "finding", finding)
+		}
 	}
-	rows := make([]VerifyRow, 0, len(parsed.Rows))
+	rows := make([]VerifyRow, 0, len(parsed.Rows)*max(1, len(remoteHosts)))
 	for _, r := range parsed.Rows {
-		vr := t.runRow(ctx, r, host, timeoutSec)
-		rows = append(rows, vr)
+		if !t.LocalOnly && t.Inventory != "" {
+			if r.Command == "" {
+				for _, remoteHost := range remoteHosts {
+					rows = append(rows, VerifyRow{ID: r.ID, Status: "skip", Detail: "no command", Host: remoteHost})
+				}
+				continue
+			}
+			rows = append(rows, t.runAnsiblePerHost(ctx, r, remoteHosts, timeoutSec)...)
+			continue
+		}
+		rows = append(rows, t.runRow(ctx, r, host, timeoutSec))
 	}
 
 	var sb strings.Builder
