@@ -9,6 +9,20 @@
 
 # 報告內文
 
+> **文件狀態：歷史 review 與目前實作狀態的合併快照。**
+> 本文件不是可執行 runbook；實作範圍以各計畫與 RFC 的狀態標示為準。
+
+## 目前實作範圍（2026-07-18）
+
+| 項目 | 狀態 | 已實作邊界 |
+|---|---|---|
+| M0.1 | **已實作並驗證** | deploy exit code、verify directory error preservation 與 regression tests |
+| M0.2 | **僅完成 spike** | Ansible JSON callback decoder、fixtures 與 decoder tests；尚未接入 production verify |
+| Verification safety boundary | **Proposed RFC** | 設計完成；runtime safety executor 尚未實作 |
+| Append-only delivery evidence | **Proposed RFC** | 資料模型完成；schema v13、store 與 writer 尚未實作 |
+| M1.1 ComponentContract | **RFC + fixture only** | 六份 YAML fixtures 已建立；loader、lint、catalog/TUI 整合尚未實作 |
+| M0.3、M0.4、M1.2、M1.3、M2、P3–P5 | **尚未實作** | 仍受 implementation plan 的依賴與 hard gate 約束 |
+
 ## 結論
 
 **條件式 GO：第一批工作可以開始，但整份計畫仍不能全面開工。**

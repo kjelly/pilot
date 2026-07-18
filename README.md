@@ -132,7 +132,7 @@ cluster-level apply/verify/idempotency testing.
 | `pilot vm-target topology up` | Provision all declared nodes concurrently and apply their peer wiring. Re-running is safe for nodes already up. |
 | `pilot vm-target topology status` | Show each declared node's live status, IP, and groups. |
 | `pilot vm-target topology inventory` | Render grouped inventory for the running topology; use it to verify actual group-to-host facts. |
-| `pilot vm-target topology test` | Preferred cluster test: snapshot all nodes, apply, verify each mapped spec, then assert idempotency; failures roll the topology back. |
+| `pilot vm-target topology test` | Preferred cluster test: snapshot all nodes, apply, verify each mapped spec, then assert idempotency. Add `--ephemeral` to create a fresh disposable topology and remove it afterwards; add `--keep-on-failure` to retain a failed ephemeral topology for SSH debugging. |
 | `pilot vm-target topology snapshot` | Snapshot every node under one tag before a drill. |
 | `pilot vm-target topology rollback` | Restore all nodes to a tag and reapply declared peer wiring. |
 | `pilot vm-target topology reset` | Reset all nodes to their clean post-up state and rewire them. |

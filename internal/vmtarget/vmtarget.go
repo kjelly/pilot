@@ -51,6 +51,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -162,6 +163,11 @@ type Manager struct {
 	// how virsh/ssh are shimmed at the process level rather than in Go.
 	dialReachable func(ctx context.Context, addr string, timeout time.Duration) bool
 
+	// grantLibvirtQEMUOverlayAccess gives libvirt's QEMU account access to the
+	// private VM directory, overlay, and cloud-init ISO before virsh starts it.
+	// It is a field so unit tests can replace the host ACL operation deterministically.
+	grantLibvirtQEMUOverlayAccess func(ctx context.Context, path string) error
+
 	// Tunables — real defaults in NewManager; tests shrink them so the
 	// boot/ssh polling loops return immediately against shims.
 	bootTimeout  time.Duration
@@ -186,14 +192,15 @@ func NewManager(stateDir, vmDir string) (*Manager, error) {
 		return nil, err
 	}
 	return &Manager{
-		stateDir:      stateDir,
-		store:         store,
-		vmDir:         vmDir,
-		now:           time.Now,
-		dialReachable: realDialReachable,
-		bootTimeout:   3 * time.Minute,
-		sshTimeout:    2 * time.Minute,
-		pollInterval:  2 * time.Second,
+		stateDir:                      stateDir,
+		store:                         store,
+		vmDir:                         vmDir,
+		now:                           time.Now,
+		dialReachable:                 realDialReachable,
+		grantLibvirtQEMUOverlayAccess: grantLibvirtQEMUOverlayAccess,
+		bootTimeout:                   3 * time.Minute,
+		sshTimeout:                    2 * time.Minute,
+		pollInterval:                  2 * time.Second,
 	}, nil
 }
 
@@ -283,6 +290,40 @@ func (m *Manager) qemuImg(ctx context.Context, args ...string) (*cmdResult, erro
 
 func (m *Manager) cloudLocalds(ctx context.Context, args ...string) (*cmdResult, error) {
 	return run(ctx, "PILOT_CLOUD_LOCALDS_BIN", "cloud-localds", 60*time.Second, args...)
+}
+
+// grantLibvirtQEMUOverlayAccess grants the local libvirt QEMU service account
+// only the access a freshly created domain needs: traverse its private
+// directory, write its overlay, and read its cloud-init ISO. Ubuntu commonly
+// uses libvirt-qemu; Fedora-family systems commonly use qemu. The caller owns
+// these artifacts, so setting POSIX ACLs needs no privileged helper.
+func grantLibvirtQEMUOverlayAccess(ctx context.Context, overlayPath string) error {
+	dir := filepath.Dir(overlayPath)
+	seedPath := filepath.Join(dir, "seed.iso")
+	for _, account := range []string{"libvirt-qemu", "qemu"} {
+		if _, err := user.Lookup(account); err != nil {
+			continue
+		}
+		for _, acl := range []struct {
+			path string
+			rule string
+			what string
+		}{
+			{dir, "u:" + account + ":x", "VM directory"},
+			{overlayPath, "u:" + account + ":rw", "overlay"},
+			{seedPath, "u:" + account + ":r", "cloud-init ISO"},
+		} {
+			res, err := run(ctx, "PILOT_SETFACL_BIN", "setfacl", 60*time.Second, "-m", acl.rule, acl.path)
+			if err != nil {
+				return fmt.Errorf("vmtarget: grant QEMU %s ACL: %w", acl.what, err)
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("vmtarget: grant QEMU %s ACL: %s", acl.what, res.Stderr)
+			}
+		}
+		return nil
+	}
+	return errors.New("vmtarget: cannot find a local libvirt QEMU account (tried libvirt-qemu, qemu)")
 }
 
 func (m *Manager) sshKeygen(ctx context.Context, args ...string) (*cmdResult, error) {
@@ -526,6 +567,11 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	}
 	if err = m.createOverlay(ctx, tg); err != nil {
 		return nil, err
+	}
+	if m.grantLibvirtQEMUOverlayAccess != nil {
+		if err = m.grantLibvirtQEMUOverlayAccess(ctx, tg.OverlayPath); err != nil {
+			return nil, err
+		}
 	}
 	reservedIP, err := m.allocateStaticIP(ctx, tg)
 	if err != nil {

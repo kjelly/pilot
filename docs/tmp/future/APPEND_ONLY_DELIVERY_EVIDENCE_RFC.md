@@ -3,6 +3,10 @@
 > 狀態：Proposed
 > 日期：2026-07-18
 > 前置：`docs/tmp/future/IMPLEMENTATION_PLAN.md` M0.3
+>
+> **實作標示：資料模型已決策，schema/store/runtime 尚未實作。**
+> 現行 schema 仍是 v12，尚無 `delivery_events`、`verify_evidence`、
+> `RunWriter`、heartbeat 或 generation rotation。
 
 ## 1. 決策摘要
 

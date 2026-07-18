@@ -9,6 +9,32 @@
 > 修訂 5:2026-07-18 依 review 第五輪(準備度 92%)修正——M1.1 試點 contract 清單統一為**六份**:component↔role 1—1 下 core-infra-provider 不是一份 contract,而是 dns、ntp 兩份(共用同一支 apply playbook),清單定為 docker、freeipa-server、restic-backup、dns、ntp、log-shipping;M1.2 前置與 §9 的「三試點」同步修正。其餘三項(兩份 RFC 尚未撰寫、M0.2 全面實作待 spike、M0.3 writer/enforcement 選項交 evidence RFC 定案)為既有 gate 狀態,無需改文。
 > 實作進度 1:2026-07-18——M0.1 exit-code 修正與 regression tests 已完成；兩份 hard-gate RFC 已建立為 Proposed；M0.2 callback spike 已以 ansible-core 2.19.2 實跑並加入 decoder fixtures/tests；M1.1 ComponentContract RFC 與六份 YAML fixtures 已建立。Proposed RFC 尚待 review/final，因此 M0.3/M0.4/M2.2 仍未解鎖；M0.2 decoder 也尚未接入正式 verify。
 
+> **文件狀態：IMPLEMENTATION PLAN — NOT AN EXECUTABLE RUNBOOK**
+>
+> 本文件中的未來命令、schema 與 API 是設計內容，不是已驗證操作程序。狀態以
+> 下表與各里程碑開頭的 status block 為準。
+
+### 狀態圖例
+
+- **✅ 已實作並驗證**：正式 code path 已修改，test/build/race gate 通過。
+- **🧪 Spike 已驗證**：實驗 code／fixture 有測試，但未接入正式 runtime。
+- **📄 Proposed**：設計文件已建立，尚未 review/final，也沒有完整 runtime。
+- **⏸ 尚未實作**：不得從計畫文字推論產品已支援。
+
+### 實作狀態快照（2026-07-18）
+
+| 里程碑／產物 | 狀態 | 實作內容 | 明確未實作 |
+|---|---|---|---|
+| M0.1 | **✅ 已實作並驗證** | deploy exit-code、preflight rejection、`verify --dir` 原始錯誤、regression tests | deploy 後自動 verify/evidence |
+| Safety RFC | **📄 Proposed** | per-check action、secret-aware runner contract | action runtime、secret-aware module |
+| Evidence RFC | **📄 Proposed** | event schema、RunWriter、heartbeat、retention 決策 | schema v13、store API、runs CLI |
+| M0.2 | **🧪 Spike 已驗證** | ansible JSON callback decoder、status normalization、fixtures/tests | expected-host resolver、正式 `runAnsibleAdHoc` 接線 |
+| M1.1 | **📄 RFC + fixtures** | ComponentContract schema proposal、六份 fixtures | strict loader、contract lint、catalog/site integration |
+| M0.3/M0.4 | **⏸ 尚未實作** | 無 | delivery events、transaction、rollback/idempotency policy |
+| M1.2/M1.3 | **⏸ 尚未實作** | 無 | 全量 contracts、DAG/preflight |
+| M2.1–M2.3 | **⏸ 尚未實作** | 文件已同步設計決策 | typed matcher、v2 parser、migration |
+| P3/P4/P5 | **⏸ 尚未實作** | 無 | TUI/eval/query |
+
 ## 0. 現況與差距總覽
 
 | 支柱 | 現況 | 關鍵差距 |
@@ -151,7 +177,7 @@ review/final 前不開始 schema v13。
 2. **component↔role↔playbook↔spec mapping 先於 `internal/delivery` 抽取**:由 M1.1 contract 定義(component 1—1 primary role、1—N spec、playbook 依用途各至多一支)。原稿「`deployCatalog.SpecPath` 一對一暫接」**取消**——一對一表達不了多 spec、site deploy 與 day-2,只是把手工關聯搬進新套件、固化 drift。
 3. **partial deploy 的 verify scope 契約**(review 第二輪 #5:`pilot deploy` 允許 `--tags`/`--limit`/`target_group`,不定義 scope mapping 會兩頭錯——無條件全 spec 驗證讓 scope 外的 row/host 弄失敗交易,只驗 selected tags 又會把 component 整體健康誤報成功):
    - apply scope → verify scope 的 mapping:`--limit`/host pattern 直接餵 M0.2 的 expected host set;`--tags` 部分套用時只驗證 selected rows。
-   - **tag→row scope resolver**(review 第三輪 #5:Ansible tag 不只 row tag——單 spec 裸 `C3`、多 role 粗 tag `db` 與細 tag `db-C3`、一 task 多 tag、`always`/`never` 特殊 tag):requested tags + contract `tagMode`/prefix + playbook tag coverage → selected spec rows。**無法無歧義解析時 fail closed**,或要求使用者明確給 `--verify-rows`——不猜測。
+   - **tag→row scope resolver**(review 第三輪 #5:Ansible tag 不只 row tag——單 spec 裸 `C3`、多 role 粗 tag `db` 與細 tag `db-C3`、一 task 多 tag、`always`/`never` 特殊 tag):requested tags + contract `traceability`(rowTags bare/rolePrefixed、mapped;ComponentContract RFC 已以此取代早前的 `tagMode`)+ playbook tag coverage → selected spec rows。**無法無歧義解析時 fail closed**,或要求使用者明確給 `--verify-rows`——不猜測。
    - outcome enum 完整定義,不只定成功態:`partial_success` / `partial_failed` / `cancelled` / rollback 後狀態(如 `rolled_back`);partial outcome 明示只對 selected rows×hosts 成立,不冒充 component 整體健康。
    - idempotency rerun 使用與 apply **完全相同**的 tags/limit/extra-vars。
    - 此契約定案後才抽取 `internal/delivery.Transaction`。

@@ -7,6 +7,25 @@ Codex/Claude 直接產生 verification spec、apply playbook 與 regression test
 
 # 報告內文
 
+> **文件狀態：產品規劃，不是可執行 runbook**
+>
+> 本文件描述目標與里程碑；只有下表標成「已實作並驗證」的項目可視為目前產品
+> 行為。Proposed RFC、spike 與 fixture 不代表 runtime 已支援。
+
+## 目前實作狀態（2026-07-18）
+
+| 項目 | 狀態 | 已完成邊界 |
+|---|---|---|
+| M0.1 deploy exit-code | **已實作並驗證** | preview/apply 非零、binary 啟動失敗、preflight failure 後停止皆回 error；乾淨取消維持 exit 0 |
+| `verify --dir` 原始錯誤 | **已實作並驗證** | no-report 時保留 per-spec parse/runner error |
+| M0.2 per-host verify | **僅完成 spike** | callback decoder、status contract、fixtures/tests；尚未接入正式 verify |
+| Verification safety | **Proposed RFC** | 已選 per-check action 與 secret transport 方向；runtime 未實作 |
+| Append-only evidence | **Proposed RFC** | 已選 event stream/RunWriter/retention 模型；schema v13 未實作 |
+| ComponentContract | **RFC + fixtures** | 六份 YAML fixtures 已建立；loader、lint、deploy integration 未實作 |
+| M0.3/M0.4 | **尚未實作** | 等 RFC final、M0.2 與 contract mapping |
+| Spec v2（M2.1–M2.3） | **尚未實作** | 現行 parser/runtime 仍是 v1 |
+| P3/P4/P5 | **尚未實作** | 仍是 roadmap |
+
 ## 產品北極星
 
 pilot 的目標流程應是：

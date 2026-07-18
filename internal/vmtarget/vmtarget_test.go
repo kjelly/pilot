@@ -70,6 +70,9 @@ func newTestManager(t *testing.T, virshBody string) (*Manager, string) {
 	// specifically exercise the reservedIP dial fallback (Real bug #12)
 	// override this explicitly.
 	m.dialReachable = func(ctx context.Context, addr string, timeout time.Duration) bool { return false }
+	// The qemu-img shim deliberately does not create an overlay. Production
+	// ACL behavior is asserted by TestUp_GrantsQEMUOverlayAccessBeforeStart.
+	m.grantLibvirtQEMUOverlayAccess = func(ctx context.Context, path string) error { return nil }
 	return m, base
 }
 
@@ -762,6 +765,7 @@ func TestUp_DiskGBPassedToQemuImg(t *testing.T) {
 	m.bootTimeout = 300 * time.Millisecond
 	m.sshTimeout = 300 * time.Millisecond
 	m.pollInterval = 5 * time.Millisecond
+	m.grantLibvirtQEMUOverlayAccess = func(context.Context, string) error { return nil }
 
 	if _, err := m.Up(context.Background(), Options{Name: "imgtest", BaseImage: base, DiskGB: 42}); err != nil {
 		t.Fatalf("Up: %v", err)
@@ -829,6 +833,7 @@ func newResizeManager(t *testing.T, domState string) (m *Manager, base, virshLog
 	m.bootTimeout = 300 * time.Millisecond
 	m.sshTimeout = 300 * time.Millisecond
 	m.pollInterval = 5 * time.Millisecond
+	m.grantLibvirtQEMUOverlayAccess = func(context.Context, string) error { return nil }
 	return m, base, virshLog, qemuLog
 }
 
@@ -939,6 +944,7 @@ func newSiblingManager(t *testing.T, m *Manager) *Manager {
 	sib.bootTimeout = m.bootTimeout
 	sib.sshTimeout = m.sshTimeout
 	sib.pollInterval = m.pollInterval
+	sib.grantLibvirtQEMUOverlayAccess = m.grantLibvirtQEMUOverlayAccess
 	return sib
 }
 
@@ -1033,5 +1039,22 @@ func TestUp_ConcurrentSameName_LoserFailsCleanly(t *testing.T) {
 	}
 	if _, serr := os.Stat(filepath.Join(m1.vmDir, "same")); serr != nil {
 		t.Errorf("winner's target dir must survive: %v", serr)
+	}
+}
+
+func TestUp_GrantsQEMUOverlayAccessBeforeStart(t *testing.T) {
+	m, base := newTestManager(t, happyVirsh)
+	var got string
+	m.grantLibvirtQEMUOverlayAccess = func(_ context.Context, path string) error {
+		got = path
+		return nil
+	}
+
+	if _, err := m.Up(context.Background(), Options{Name: "acl", BaseImage: base}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	want := filepath.Join(m.vmDir, "acl", "overlay.qcow2")
+	if got != want {
+		t.Errorf("ACL path = %q, want %q", got, want)
 	}
 }

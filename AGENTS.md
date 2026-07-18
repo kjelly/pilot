@@ -519,10 +519,51 @@ pilot 有三種輸出，**不要混用**：
 - ❌ 新增/改 stage gate 時，不要只做「confirm 旗標」檢查而漏掉「host 的環境 group 是否與 stage 一致」的 cross-check（見 §4.3）——否則機器已歸類進 `staging`/`prod`，但指令忘了帶 `-e stage=`，會靜默用 `sandbox` 門檻套用
 - ❌ 不要移除或繞過 `playbooks/site.yml` 開頭的 `target_group` 安全閥（見 §4.3）——它擋的是「全站入口誤帶 `-e target_group=` 同時覆寫全部子 playbook 目標」的事故
 
+---
+
+## 7. Patch and workspace rules
+
+在套用任何 patch 前，先確認 shell 所在 workspace 與 Git root 一致：
+
+```bash
+pwd
+pwd -P
+git rev-parse --show-toplevel
+git status --short
+```
+
+後續檔案路徑一律相對於 `git rev-parse --show-toplevel` 的 repo root。
+
+若 `apply_patch` 回報檔案不存在：
+
+1. 先以 repo-root 相對路徑重試一次。
+2. 再執行下列唯讀確認，不能只靠猜測路徑：
+
+   ```bash
+   git ls-files | rg -i '<basename>'
+   ls -la <parent-directory>
+   pwd -P
+   git rev-parse --show-toplevel
+   ```
+
+3. 若 shell 能讀到精確檔案、`apply_patch` 仍回報不存在，視為 patch backend 與
+   workspace 的檔案系統 namespace 不一致；要明確回報此限制。
+
+只有在上述確認完成後，才可用直接內容替換作 fallback。替換必須：
+
+- 只針對一個明確檔案；
+- 使用一個精確錨點，且在錨點出現零次或多次時失敗；
+- 禁止 broad replacement、`cat` 或未驗證的 base64 覆寫；
+- 立即執行：
+
+  ```bash
+  git diff --check
+  git diff -- <path>
+  ```
 
 ---
 
-## 7. 變更紀錄
+## 8. 變更紀錄
 
 | 日期       | 版本 | 變更 | 變更者 |
 |------------|------|------|--------|
@@ -539,3 +580,4 @@ pilot 有三種輸出，**不要混用**：
 | 2026-07-09 | v1.10 | 新增第 20 支 apply playbook `freeipa-server-replica-apply.yml`(FreeIPA multi-master HA replica,對應 spec `docs/verification/freeipa-server-replica.md` v0.1 草稿、尚未實跑);§4.3 playbook 清點更新為 20 支,並記錄它刻意不接進 `site.yml`(day-2/opt-in,比照 `freeipa-identity`) | pilot |
 | 2026-07-17 | v1.11 | 把 `docker` 角色從 `core-infra-provider-apply.yml`(`-e infra_role=docker`)拆成獨立的第 21 支 apply playbook `playbooks/apply/docker-apply.yml`,理由與 2026-07-01 拆 `keycloak-db` 相同(見 `docs/runbooks/docker.md`);`core-infra-provider-apply.yml` 現在只剩 `dns`/`ntp` 兩個 `infra_role`;`site.yml`、`deployCatalog`、`inventory` role contract、`DELIVERY.md` playbook 對照表一併更新;§4.3 playbook 清點更新為 21 支 | pilot |
 | 2026-07-18 | v1.12 | 對齊實際 authoring model：使用者寫自然語言需求，外部 Codex/Claude 先確定 spec、再直接撰寫 apply playbook/regression test，pilot runtime 專注確定性 lint/test/deploy/verify/evidence；明定 generator 非正式 apply 來源，移除已退役 LLM tool/agent loop 規則 | pilot |
+| 2026-07-18 | v1.13 | 新增 §7 patch/workspace 規則：套用 patch 前確認 Git root；patch backend 找不到檔案時先重試相對路徑並驗證追蹤檔與父目錄，fallback 必須採精確錨點與 diff 驗證 | pilot |

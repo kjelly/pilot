@@ -147,3 +147,46 @@ func TestParseTopoVerifyArgs(t *testing.T) {
 		t.Error("empty spec path must be rejected")
 	}
 }
+
+func TestTopologyTestEphemeralFlagsRegistered(t *testing.T) {
+	for _, name := range []string{"ephemeral", "keep-on-failure"} {
+		flag := vtTopologyTestCmd.Flags().Lookup(name)
+		if flag == nil {
+			t.Fatalf("topology test flag %q is not registered", name)
+		}
+		if flag.Value.Type() != "bool" {
+			t.Errorf("topology test flag %q type = %s, want bool", name, flag.Value.Type())
+		}
+	}
+}
+
+func TestValidateTopologyTestMode(t *testing.T) {
+	if err := validateTopologyTestMode(false, false); err != nil {
+		t.Fatalf("normal topology test rejected: %v", err)
+	}
+	if err := validateTopologyTestMode(true, false); err != nil {
+		t.Fatalf("ephemeral default cleanup rejected: %v", err)
+	}
+	if err := validateTopologyTestMode(true, true); err != nil {
+		t.Fatalf("ephemeral keep-on-failure rejected: %v", err)
+	}
+	err := validateTopologyTestMode(false, true)
+	if err == nil || !strings.Contains(err.Error(), "--keep-on-failure requires --ephemeral") {
+		t.Fatalf("want keep-on-failure mode error, got %v", err)
+	}
+}
+
+func TestPrintEphemeralDebugHints(t *testing.T) {
+	var got bytes.Buffer
+	printEphemeralDebugHints(&got, "tmp/topology.yaml")
+	for _, want := range []string{
+		"--keep-on-failure preserved",
+		"topology status --topology tmp/topology.yaml",
+		"topology inventory --topology tmp/topology.yaml",
+		"topology down --topology tmp/topology.yaml",
+	} {
+		if !strings.Contains(got.String(), want) {
+			t.Errorf("debug hints missing %q:\n%s", want, got.String())
+		}
+	}
+}
