@@ -1,6 +1,6 @@
 # Verification Spec — core-infra-provider (Internal DNS + NTP server)
 
-> 版本：v2.1
+> 版本：v2.2
 > 對齊規範：pilot 通用基礎設施**服務端**規範（這份 host 是要提供 internal DNS / NTP 的那台，而不是使用端）
 > 維護者：sre
 
@@ -33,7 +33,7 @@
 | C3 | dns       | 本機是 authoritive（本機 resolv.conf 第一個 nameserver 不是 127.0.0.1）                     | 0           | sh -c 'grep -qE "^nameserver[[:space:]]+(127\.[0-9]+\.[0-9]+\.[0-9]+|::1)$" /etc/resolv.conf' |
 | C4 | ntp       | NTP daemon 已安裝（chrony / ntp / ntpsec 三擇一；至少一個）                              | ~1          | sh -c 'dpkg-query -l chrony ntp ntpsec 2>/dev/null | awk "/^ii/ && /chrony|ntp|ntpsec/{f=1} END{print f+0}" ' |
 | C5 | ntp       | chronyd 或 ntpd active                                                            | ~active     | systemctl is-active chronyd ntpd 2>&1 \| head -n1 |
-| C6 | ntp       | Stratum ≤ 5（本機沒被上上游設成 leaf-of-leaf）                                          | ~Stratum    | timedatectl show-timesync 2>&1 \| grep -oE 'Stratum=[0-5]' |
+| C6 | ntp       | Stratum ≤ 5（本機沒被上上游設成 leaf-of-leaf；chrony 用 `chronyc tracking`，ntpd/ntpsec 用 `timedatectl show-timesync` 三擇一） | ~Stratum    | sh -c 'chronyc tracking 2>/dev/null \| grep -oE "Stratum[[:space:]]*:[[:space:]]*[0-5]" \|\| timedatectl show-timesync 2>&1 \| grep -oE "Stratum=[0-5]"' |
 | C7 | dns       | 自訂內部網域可解析（**選用**；只在設 `$DNS_PROBE_NAME` 時真的探測，否則 SKIP-as-pass）           | present     | sh -c 'if [ -z "${DNS_PROBE_NAME:-}" ]; then echo SKIP-no-probe; else dig +short "$DNS_PROBE_NAME" @127.0.0.1; fi' |
 
 > Keycloak provider 健康（process / HTTP listener / OIDC discovery）已
@@ -86,7 +86,7 @@
 
 ## 6. Playbook 對應
 
-對應產生的 **verify** playbook：`playbooks/verify/core-infra-provider.yml`（spec generator）
+對應的 verify playbook（`playbooks/verify/core-infra-provider.yml`）**已於 2026-07-17 棄用**（僅存檔參考，見該目錄 README.md）；驗收直接 `pilot verify` 吃本 spec 執行。
 
 對應手寫的 **apply** playbook：`playbooks/apply/core-infra-provider-apply.yml`
 
@@ -138,3 +138,4 @@ ansible-playbook -i inventory.yaml \
 | 2026-06-30 | v1.0 | 初版（C1–C9；DNS / NTP / Keycloak 三個 provider 混一份）                                                  | pilot  |
 | 2026-07-02 | v2.0 | 拆出 Keycloak C7–C9 到 `keycloak.md`；spec §1 對齊 inventory `infra-provider` aggregate；本 spec 縮為 6 row | sre    |
 | 2026-07-02 | v2.1 | 新增 C7（選用）自訂內部網域探測；apply 改為資料驅動 `dns_zones`（`group_vars/dns/`）；見 `core-infra-provider-dns-zones.md` runbook | sre    |
+| 2026-07-17 | v2.2 | 修正 C6：`timedatectl show-timesync` 需要 `systemd-timesyncd` 提供的 dbus 介面，但 apply playbook 的 NTP 預設 provider 是 chrony（`ntp_provider: chrony`）——chrony 啟用時 `systemd-timesyncd` 是 inactive,`show-timesync` 回 `Failed to parse bus message: No route to host`,C6 在任何一台照預設值跑過 apply 的全新主機上必 fail。改成 `chronyc tracking` 優先、`timedatectl show-timesync` 為 ntpd/ntpsec 主機的 fallback。docker 從 `core-infra-provider-apply.yml` 拆出後重新對 vm-target 全面 re-verify 時發現（與 docker 拆分本身無關的既有 bug，見 `docs/runbooks/core-infra-provider-end-to-end.md`） | pilot  |

@@ -14,7 +14,8 @@
 #
 # Pre-flight: docs/verification/docker.md 8/8 PASS (docker.io +
 # docker.service + compose v2 plugin), deployed by
-#   core-infra-provider-apply.yml -e infra_role=docker
+#   playbooks/apply/docker-apply.yml (standalone playbook since 2026-07-17;
+#   was core-infra-provider-apply.yml -e infra_role=docker before the split)
 #
 # IMPORTANT — sizing (see spec §1/§5): this role needs real resources. The
 # CVE feed alone occupies ~7-9GB (inside the wazuh_queue named volume —
@@ -131,9 +132,9 @@
       # missing engine fails here with a clear message instead of five tasks
       # later inside the compose module — but on a from-scratch host being
       # site-wide-previewed before its first real apply, docker itself was
-      # never actually installed (core-infra-provider-apply.yml defers the
-      # install to the real apply too), so rc!=0 here is expected and must
-      # not fail the mandatory check-mode gate.
+      # never actually installed (docker-apply.yml defers the install to the
+      # real apply too), so rc!=0 here is expected and must not fail the
+      # mandatory check-mode gate.
       failed_when: docker_pre.rc != 0 and not ansible_check_mode
       check_mode: false
   tasks:

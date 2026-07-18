@@ -404,6 +404,29 @@ func parseGroupHostFromInventoryList(listJSON, group string) (host string, ok bo
 	return groupData.Hosts[0], true
 }
 
+// siteAutoHostVars returns every distinct cross-role host variable the
+// deploy catalog knows how to auto-detect, deduped by Var in catalog order
+// (siem_forward_host and thanos_s3_target_host each appear under two
+// components, always with the same source group). The site-wide flow walks
+// this list so site.yml runs get the same auto-detection the
+// single-component wizard has — before 2026-07-17 only the latter offered
+// it, and a site-wide deploy silently relied on the user hand-typing every
+// cross-role -e.
+func siteAutoHostVars() []autoHostVar {
+	seen := make(map[string]bool)
+	var out []autoHostVar
+	for _, p := range deployCatalog {
+		for _, av := range p.AutoHostVars {
+			if seen[av.Var] {
+				continue
+			}
+			seen[av.Var] = true
+			out = append(out, av)
+		}
+	}
+	return out
+}
+
 // promptAutoHostVar fills in -e <av.Var>=<ip> automatically when it can
 // resolve av.Group's host from inv, falling back to a manual prompt (blank
 // = skip; the target playbook treats an unset value however it already
@@ -638,6 +661,22 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	vault, err := promptVault(out, inv, "只有你的 inventory 實際填了 freeipa-server/keycloak/keycloak-db 機器時才需要")
 	if err != nil {
 		return err
+	}
+
+	// Cross-role host addresses (thanos_s3_target_host, siem_forward_host,
+	// wazuh_manager_host, …): auto-detect from the inventory exactly like the
+	// single-component flow. Only vars whose source group actually resolves
+	// are offered — a role group with no hosts is skipped by site.yml anyway,
+	// and its consumers fall back to their own default/gate behavior.
+	for _, av := range siteAutoHostVars() {
+		host, ok := resolveGroupHost(ctx, inv, av.Group)
+		if !ok {
+			continue
+		}
+		q := fmt.Sprintf("偵測到這份 inventory 的 %s：%s，這次要用它嗎？(-e %s=%s)", av.Label, host, av.Var, host)
+		if runConfirmProgram(q, true) {
+			extraVars = append(extraVars, av.Var+"="+host)
+		}
 	}
 
 	extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)

@@ -23,7 +23,6 @@ var (
 	verifyLimit      string
 	verifyHost       string
 	verifyLocal      bool
-	verifyProposalID string
 	verifyReportDir  string
 	verifyTimeoutSec int
 	verifyRoot       string
@@ -43,7 +42,6 @@ or against the inventory via ansible ad-hoc), and writes:
   - .verification/<spec-stem>-<UTC-timestamp>.ndjson  raw NDJSON
   - .verification/<spec-stem>-<UTC-timestamp>.md      rendered PASS/FAIL report
   - spec_checkpoints                                  status flipped to verified-pass / verified-fail
-  - proposal_results (when --proposal-id is set)      per-check row
 
 Use --local for the smoke-test case where the spec tests the host pilot
 itself is running on. Use --inventory + --limit for fleet verification.
@@ -63,7 +61,6 @@ func init() {
 	// back to local automatically (see VerifySpecTool.runRow). Defaulting
 	// to true silently ignored -i and made fleet verification unreachable.
 	verifyCmd.Flags().BoolVar(&verifyLocal, "local", false, "force-run commands on the control node, even if --inventory is set")
-	verifyCmd.Flags().StringVar(&verifyProposalID, "proposal-id", "", "record results against this proposal in proposal_results")
 	verifyCmd.Flags().StringVar(&verifyReportDir, "report-dir", ".verification", "where to write NDJSON + markdown reports")
 	verifyCmd.Flags().IntVar(&verifyTimeoutSec, "timeout", 15, "per-row command timeout (seconds)")
 	verifyCmd.Flags().StringVar(&verifyRoot, "root", "", "project root for spec/playbook layout (default: $PILOT_ROOT or cwd). Lets verify reuse --root from `pilot spec`.")
@@ -128,11 +125,10 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 
 	ctx := context.Background()
 	tool := &tools.VerifySpecTool{
-		Inventory:  verifyInventory,
-		Limit:      verifyLimit,
-		LocalOnly:  verifyLocal,
-		Host:       verifyHost,
-		ProposalID: verifyProposalID,
+		Inventory: verifyInventory,
+		Limit:     verifyLimit,
+		LocalOnly: verifyLocal,
+		Host:      verifyHost,
 	}
 	res, err := tool.Execute(ctx, mustJSONVerify(map[string]any{
 		"spec_path":   specPath,
@@ -180,7 +176,7 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	}
 	fmt.Printf("✔ NDJSON:   %s\n✔ Report:   %s\n", ndPath, mdPath)
 
-	// Flip spec_checkpoints and optionally insert proposal_results.
+	// Flip spec_checkpoints.
 	if st, err := openSpecStore(); err == nil {
 		defer st.Close()
 		for _, vr := range rows {
@@ -199,15 +195,6 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 				VerifyDetail: vr.Detail,
 			}
 			_ = st.UpsertCheckpoint(cp)
-			if verifyProposalID != "" {
-				_ = st.RecordProposalResult(&store.ProposalResult{
-					ProposalID: verifyProposalID,
-					CheckID:    vr.ID,
-					Host:       vr.Host,
-					Status:     vr.Status,
-					Detail:     vr.Detail,
-				})
-			}
 		}
 	}
 
@@ -265,8 +252,8 @@ func runVerifyProbe(cmd *cobra.Command) error {
 
 // renderVerifyReport produces the markdown summary used for both
 // human reading and `diff` against previous baselines. The format
-// matches what scripts/render-report.py emits so existing diff
-// tooling keeps working.
+// matches what the (removed 2026-07-17) scripts/render-report.py
+// emitted, so reports stay diffable against old baselines.
 func renderVerifyReport(s *spec.Spec, rows []tools.VerifyRow) string {
 	pass, fail, skip := 0, 0, 0
 	for _, r := range rows {
@@ -290,7 +277,7 @@ func renderVerifyReport(s *spec.Spec, rows []tools.VerifyRow) string {
 	fmt.Fprintf(&sb, "- total:     %d  pass: %d  fail: %d  skip: %d\n", len(rows), pass, fail, skip)
 	fmt.Fprintf(&sb, "- verdict:   **%s**\n\n", verdict)
 	fmt.Fprintf(&sb, "| ID | Status | Detail |\n|----|--------|--------|\n")
-	// Failures first (matches render-report.py).
+	// Failures first (matches the historical render-report.py layout).
 	var fails []tools.VerifyRow
 	var rest []tools.VerifyRow
 	for _, r := range rows {

@@ -96,6 +96,64 @@ pilot vm-target down --name infra-vm
 
 預設值：`--ssh-user root`、`--vcpus 2`、`--memory 2048`、`--network default`。
 
+### 3.7 多機一鍵鏈：`topology test`（2026-07-18 實跑過）
+
+多機情境(site.yml、跨 host 角色)用 `vm-target topology test` 一條命令跑完
+「全 cluster snapshot → apply → 逐 spec verify → 冪等 → 失敗全 node
+rollback」。首次實跑用的 smoke 拓樸(2 台 ubuntu-24.04,各 2GB/2vcpu):
+
+```yaml
+# topo-smoke.yaml
+nodes:
+  - name: topo-docker
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    groups: [docker]
+  - name: topo-log
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    groups: [log-server]
+```
+
+```bash
+pilot vm-target topology up   --spec topo-smoke.yaml
+pilot vm-target topology test --spec topo-smoke.yaml \
+    --playbook playbooks/site.yml \
+    --verify docs/verification/docker.md=docker \
+    --verify docs/verification/log-server.md=log-server \
+    --verify-timeout 90
+```
+
+這次(2026-07-18)實跑的輸出摘要——site.yml 對 topology inventory 全站套用,
+空 group 自動跳過,只有填了機器的 docker/log-server 真的套:
+
+```
+=== [Step 1/5] L1 Syntax Check ===
+✓ Syntax check passed
+=== [Step 2/5] Cluster snapshot: 2 node(s) (tag: pre-test-1784332883) ===
+✓ Cluster snapshot created
+=== [Step 3/5] L4 Apply Playbook (topology inventory) ===
+✓ Playbook apply completed
+=== [Step 4/5] L5 Verification Specs (2) ===
+verdict: **PASS**  (pass=8 fail=0 skip=0)     # docker.md @ docker group
+verdict: **PASS**  (pass=12 fail=0 skip=0)    # log-server.md @ log-server group
+=== [Step 5/5] L6 Idempotency Check ===
+PLAY RECAP *********************************************************************
+topo-docker                : ok=13   changed=0    ...
+topo-log                   : ok=18   changed=0    ...
+✓ Idempotency check passed (changed=0)
+🎉 ALL TESTS PASSED SUCCESSFULLY!
+```
+
+同一天的第一輪跑就真的抓到一個 site.yml 組合 bug 並實測了 auto-rollback:
+log-shipping-apply.yml 在「純 rsyslog、沒裝 docker」的 log-server 上無條件跑
+`docker_container_info`,整個全站 apply 炸掉 → topology test 自動把兩台 node
+全部 rollback 回 pre-test snapshot(✓ Rollback successful)。修法:log-shipping
+加「無 Loki 目標就 end_host 乾淨跳過」+「docker info fail-early gate」兩道
+pre_tasks(見該 playbook 檔頭與 site.yml 註解)。
+
 ---
 
 ## 4. correct-by-construction 設計（為什麼這條路寫得出正確的程式）
@@ -161,7 +219,7 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
 | 開機 ~30–60s | 比 docker exec 慢很多 | 對需要 kernel 保真才用；batch 注意資源 |
 | base image 要自備 + qcow2 | minimal image 的 cloud-init 行為有雷 | 建議用 **standard** server cloudimg（非 minimal） |
 | 沒有 pre-bake/golden image 流程 | 每次靠 cloud-init 裝東西 | 後續可加 `vm-target build`（packer / virt-customize 烤 golden image），對齊 docker 的 `--image-pilot` |
-| 單 host | 一個 target = 一台 VM | `--hosts` alias 已支援（多 inventory key 指同一台）；真多機拓樸後續做 |
+| 單 host | 一個 target = 一台 VM | `--hosts` alias 已支援（多 inventory key 指同一台）；真多機拓樸走 `vm-target topology`（宣告式 spec，up/inventory/snapshot/rollback/reset/test 全套，實跑範例見 `docs/runbooks/freeipa-server-replica-ha-drill.md`） |
 
 ---
 

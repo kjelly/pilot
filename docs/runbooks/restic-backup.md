@@ -4,9 +4,11 @@
 > 對齊：`docs/verification/restic-backup.md`（v1.1）、`playbooks/apply/restic-backup-apply.yml`
 > 維護者：sre
 >
-> 想**重跑**§6 的 FreeIPA 災難復原演練？照抄步驟清單見
-> `docs/runbooks/restic-backup-dr-drill-test-plan.md`——本檔 §6 是帶完整真實
-> 輸出的紀錄，那份是抽掉逐字輸出、方便直接複製貼上的可重複測試計畫。
+> v1.2 (2026-07-17)：原本獨立的可重複步驟清單
+> `docs/runbooks/restic-backup-dr-drill-test-plan.md` 已整併進本檔 §6（含
+> VM 建立、S3 identity、bucket、teardown 與統一 gotcha 表），該檔已歸檔到
+> `docs/runbooks/archived/`。§6 現在**同時是**帶真實輸出的紀錄**及**可直接
+> 複製貼上重跑的步驟清單，不需要再對照兩份文件。
 
 ---
 
@@ -56,15 +58,19 @@ go run ./cmd/pilot vm-target up --name s3-dest \
     --ssh-timeout 5m --boot-timeout 5m
 
 go run ./cmd/pilot vm-target run --name s3-dest \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=all -e infra_role=docker
+    playbooks/apply/docker-apply.yml \
+    -e target_group=all
 ```
 
-實際輸出：
+> 2026-07-17：docker preflight 改用獨立的 `playbooks/apply/docker-apply.yml`
+> （原本是 `core-infra-provider-apply.yml -e infra_role=docker`），見
+> `docs/runbooks/docker.md`。
+
+實際輸出（`docker-apply.yml` 拆分後在 vm-target 上重測，見 `docs/runbooks/docker.md` §2）：
 
 ```
 PLAY RECAP *********************************************************************
-s3-dest                    : ok=6    changed=2    unreachable=0    failed=0    skipped=13   rescued=0    ignored=0
+s3-dest                    : ok=5    changed=2    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0
 ```
 
 ```bash
@@ -277,50 +283,186 @@ restic 的快照是累加的，不是覆寫的，這也是選它而非單純 `ta
 
 ---
 
-## 6. FreeIPA server + client 災難復原演練（實測，2026-07-06）
+## 6. FreeIPA server + client 災難復原演練（實測；建置沿用 2026-07-06，
+故障/復原重測於 2026-07-17）
 
 > 目的：用本專案既有的 `freeipa-server`/`freeipa-client` 當「有實際資料/設定檔
 > 的軟體」範例，驗證 `restic-backup` 真的能保護到這些資料——不只是「有跑
 > `restic backup` 沒報錯」，而是**故意打斷 server、讓 client 登入失敗，再從
-> 備份救回來、確認整條認證/授權鏈路恢復**。三台 vm-target：`freeipa-server`
-> （AlmaLinux 9，192.168.122.2）、`freeipa-client`（Ubuntu 24.04，
-> 192.168.122.6）、`s3-dest`（Ubuntu 24.04 上的 SeaweedFS S3 gateway，
-> 192.168.122.7）。
+> 備份救回來、確認整條認證/授權鏈路恢復**。
+>
+> 本節原本分散在本檔與已歸檔的 `restic-backup-dr-drill-test-plan.md`
+> 兩份文件；2026-07-17 整併時，§6.1–§6.2（VM 建立、S3 signed identity）
+> 的指令沿用 2026-07-06 原始真實輸出（未重跑，因指令本身未變更）；
+> §6.3 起（FreeIPA 部署、restic apply、故障注入、還原、三份 spec 重驗）
+> 於 2026-07-17（Git SHA `b80ca43`）用本次整併驗證的環境**重新實跑**，
+> 下方輸出為當次真實結果，取代舊有的 2026-07-06 DR 段輸出。
 
-### 6.1 基線：server + client 都健康，登入正常
+### 6.0 拓撲與角色
 
-依 `docs/verification/freeipa-server.md` §7.1、`docs/verification/freeipa-client.md`
-§7 的 SOP 部署（server apply → `freeipa-client-fixtures.yml` 建 `pilotuser`/
-`pilot-all` sudo 規則 → client enroll），兩份 spec 皆 PASS：
+三台 vm-target，角色名稱可自訂（`--name` 只是 label，不影響 playbook 判斷）：
+
+| 角色 | 本次重測使用的 target 名稱 | OS | IP（本次） |
+|---|---|---|---|
+| FreeIPA server（被破壞/被備份對象） | `freeipa-server` | AlmaLinux 9.8 | 192.168.122.3 |
+| FreeIPA client（觀察登入/授權是否恢復） | `client-vm`（即 `freeipa-client` 角色） | Ubuntu 24.04 | 192.168.122.6 |
+| S3 備份目的地（SeaweedFS S3 gateway） | `nexus`（即 `s3-dest` 角色） | Ubuntu 24.04 | 192.168.122.5 |
+
+vault 至少需要 `ipa_admin_password`（`ipa_dm_password` 未設時自動沿用同一組密碼，
+見 `freeipa-server-apply.yml` 的 `ipa_dm_password: "{{ ipa_admin_password }}"`
+預設）；restic 側機密本節沿用 `-e` 直接帶入方便重現，正式環境建議改
+`-e @<vault 檔>` 附加同名 key（`restic_password`/`restic_aws_access_key_id`/
+`restic_aws_secret_access_key`，見 `vault.example.all.yaml`）。
+
+### 6.1 起 3 台 VM（沿用 2026-07-06 原始真實輸出，指令未變更故未重跑）
+
+```bash
+go run ./cmd/pilot vm-target up --name freeipa-server --base-image almalinux-9 \
+    --ssh-user ubuntu --vcpus 2 --memory 4096 --disk 30 \
+    --ssh-timeout 8m --boot-timeout 8m
+
+go run ./cmd/pilot vm-target up --name freeipa-client \
+    --ssh-user ubuntu --vcpus 2 --memory 2048 --disk 20 \
+    --ssh-timeout 8m --boot-timeout 8m
+
+go run ./cmd/pilot vm-target up --name s3-dest \
+    --ssh-user ubuntu --vcpus 2 --memory 1536 --disk 15 \
+    --ssh-timeout 5m --boot-timeout 5m
+```
+
+**預期結果**：三台都印出 `✓ target <name> up`，各自拿到一個
+`192.168.122.x` 靜態 IP。`virt-customize ... supermin exited` 警告是已知
+無害訊息（見 `vm-target-spec-testing` skill），忽略即可。
+
+> 本次（2026-07-17）整併驗證重用既有 vm-target pool 中已存在、角色相符的
+> 三台 VM，改用 `go run ./cmd/pilot vm-target reset --name <target>`
+> （revert 回 pristine post-boot state，跟全新 `up` 是同一份 base image
+> 的乾淨起點，效果等價）取代重新 `up`，省下建置時間；`up` 指令本身仍是
+> 未來從零建置時的正確做法，維持不變。
+
+驗證就緒 + 互通：
+
+```bash
+go run ./cmd/pilot vm-target exec --name freeipa-server -- sudo -n id
+go run ./cmd/pilot vm-target exec --name freeipa-client -- sudo -n id
+go run ./cmd/pilot vm-target exec --name s3-dest -- sudo -n id
+```
+
+### 6.2 部署備份目的地（SeaweedFS S3，掛簽章 identity）
+
+**必須先掛 identity 設定再啟動**——SeaweedFS 預設匿名模式會拒絕 `restic`
+（簽章 client），見 §6.9 gotcha 表第 1 條、§5 Bug 1。
+
+```bash
+go run ./cmd/pilot vm-target run --name s3-dest \
+    playbooks/apply/docker-apply.yml \
+    -e target_group=all
+
+go run ./cmd/pilot vm-target exec --name s3-dest -- sudo mkdir -p /etc/seaweedfs
+go run ./cmd/pilot vm-target exec --name s3-dest -- sudo tee /etc/seaweedfs/s3.json <<'EOF'
+{"identities":[{"name":"restic-backup","credentials":[{"accessKey":"sandbox-access-key","secretKey":"sandbox-secret-key"}],"actions":["Admin","Read","Write"]}]}
+EOF
+
+go run ./cmd/pilot vm-target run --name s3-dest \
+    playbooks/apply/seaweedfs-s3-apply.yml \
+    -e target_group=all -e seaweedfs_s3_config_path=/etc/seaweedfs/s3.json
+```
+
+**預期結果**：`PLAY RECAP ... failed=0`。
+
+> **2026-07-17 重測發現：手動建 bucket 這步現在已經是防禦性動作，不再是
+> 必要條件**——`seaweedfs-s3-apply.yml` 目前預設
+> `seaweedfs_extra_buckets: ["pilot-restic-backup"]`，apply 本身就會
+> 自動建好 restic 要用的 bucket（本次重測的真實 PLAY RECAP：
+> `TASK [SeaweedFS — create extra S3 buckets (idempotent)] changed: [nexus] => (item=pilot-restic-backup)`）。
+> §5 Bug 5 記載的手動 `weed shell` 建 bucket 步驟現在是**歷史包袱**，
+> 保留下方指令純粹當作「萬一 `seaweedfs_extra_buckets` 被覆寫成不含這個
+> bucket 名稱」時的手動備援：
+
+```bash
+go run ./cmd/pilot vm-target exec --name s3-dest -- \
+    sudo docker exec pilot-seaweedfs sh -c "echo 's3.bucket.create -name pilot-restic-backup' | weed shell"
+```
+
+記下 `s3-dest` 的 IP（後面步驟要用）：
+
+```bash
+go run ./cmd/pilot vm-target list
+```
+
+### 6.3 部署 FreeIPA server + client，建立登入基線（2026-07-17 真實輸出）
+
+```bash
+go run ./cmd/pilot vm-target run --name freeipa-server \
+    playbooks/apply/freeipa-server-apply.yml \
+    -e target_group=all -e ipa_server_ip=192.168.122.3 \
+    -e @~/.vault/main.yaml
+```
+
+真實 PLAY RECAP：
 
 ```
-freeipa-server : verdict PASS (pass=16 fail=0 skip=0)
-freeipa-client : verdict PASS (pass=10 fail=0 skip=0)
+PLAY RECAP *********************************************************************
+freeipa-server             : ok=30   changed=10   unreachable=0    failed=0    skipped=5    rescued=0    ignored=0
 ```
+
+```bash
+go run ./cmd/pilot vm-target verify --name freeipa-server docs/verification/freeipa-server.md --timeout 40
+```
+
+**第一次 verify 真實輸出**：`FAIL total=18 pass=17 fail=1`——`C16`（389-ds
+稽核日誌檔已寫入）回 `rc=2`。這是 apply 最後一步「寫入 dummy 描述觸發稽核
+寫入」跟 verify 之間的短暫 race（稽核檔剛觸發寫入、尚未真正落盤），不是稽核
+功能沒開；**立即重跑 verify 兩次都乾淨 PASS**：
+
+```
+verdict: **PASS**  (pass=18 fail=0 skip=0)
+```
+
+（新 gotcha，見 §6.9 表最後一列。）
+
+```bash
+go run ./cmd/pilot vm-target run --name freeipa-server \
+    playbooks/test/fixtures/freeipa-client-fixtures.yml \
+    -e fixtures_target_group=all -e @~/.vault/main.yaml
+```
+
+真實 PLAY RECAP：`ok=7 changed=4 failed=0`（建立 `pilotuser` + sudo 規則
+`pilot-all`）。
+
+```bash
+go run ./cmd/pilot vm-target run --name freeipa-client \
+    playbooks/apply/freeipa-client-apply.yml \
+    -e target_group=all -e ipa_server_ip=192.168.122.3 \
+    -e ipa_verify_user=pilotuser -e @~/.vault/main.yaml
+
+go run ./cmd/pilot vm-target verify --name freeipa-client docs/verification/freeipa-client.md --timeout 40
+```
+
+真實輸出：`ok=25 changed=13 failed=0`；verify **PASS pass=10 fail=0 skip=0**
+（一次就過，未踩到 C8 sudo 快取冷啟動 gotcha）。
 
 端到端登入基線（真實輸出）：
 
 ```
 $ id pilotuser@ipa.pilot.internal
-uid=552800003(pilotuser) gid=552800003(pilotuser) groups=552800003(pilotuser)
+uid=275400003(pilotuser) gid=275400003(pilotuser) groups=275400003(pilotuser)
 
-$ sudo runuser -u pilotuser -- sudo -l
-User pilotuser may run the following commands on freeipa-client:
+$ sudo runuser -u pilotuser -- sudo -n -l
+User pilotuser may run the following commands on client-vm:
     (root) NOPASSWD: ALL
 ```
 
-### 6.2 在 FreeIPA server 上套用 restic-backup（FreeIPA 專用範圍）
+（uid 跟 2026-07-06 的 552800003 不同，是 IPA 幫每個 realm 生命週期分配的
+uidNumber 範圍不同，非異常。）
 
-依 `group_vars/restic-backup.example.yml` 針對 FreeIPA server 的建議範例
-（`restic_backup_paths: ["/etc", "/var/lib/ipa/backup"]`、
-`restic_backup_pre_hook: "ipa-backup --data --logs"`），目的地指向本專案
-`s3-dest` 上的 SeaweedFS：
+### 6.4 在 FreeIPA server 上套用 restic-backup（FreeIPA 專用範圍）
 
 ```bash
 go run ./cmd/pilot vm-target run --name freeipa-server \
     playbooks/apply/restic-backup-apply.yml \
     -e target_group=all \
-    -e restic_s3_target_host=192.168.122.7 \
+    -e restic_s3_target_host=192.168.122.5 \
     -e restic_aws_access_key_id=sandbox-access-key \
     -e restic_aws_secret_access_key=sandbox-secret-key \
     -e restic_password=sandbox-repo-password-123 \
@@ -328,14 +470,11 @@ go run ./cmd/pilot vm-target run --name freeipa-server \
     -e restic_backup_pre_hook="ipa-backup --data --logs"
 ```
 
-第一次套用依序踩到 §5 的 **Bug 3**（`dnf`/EPEL 支援缺失，已修 playbook）、
-**Bug 5**（bucket 不存在的 retry storm，手動 `weed shell` 建 bucket 排除）、
-**Bug 4**（`$HOME` 未設，已修腳本）——三個都是修 playbook/腳本本身、從頭重跑，
-不是繞過或標記例外。修完後乾淨的 PLAY RECAP：
+本次乾淨一次過（§5 Bug 3–5 對應的修法都已經在 playbook 裡，未再踩到）：
 
 ```
 PLAY RECAP *********************************************************************
-freeipa-server             : ok=14   changed=2    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0
+freeipa-server             : ok=18   changed=11   unreachable=0    failed=0    skipped=5    rescued=0    ignored=0
 ```
 
 `pilot vm-target verify --name freeipa-server docs/verification/restic-backup.md`
@@ -343,16 +482,36 @@ freeipa-server             : ok=14   changed=2    unreachable=0    failed=0    s
 
 ```json
 {"paths":["/etc","/var/lib/ipa/backup"],"hostname":"ipa1.ipa.pilot.internal",
- "summary":{"files_new":980,"data_added":32292780},"short_id":"977f31ae"}
+ "summary":{"files_new":1006,"data_added":30335702},"short_id":"0927137b"}
 ```
 
-（`ipa-backup --data --logs` 的輸出落在 `/var/lib/ipa/backup/ipa-full-<時間戳>`，
-連同 `/etc` 一起被這份快照涵蓋——這正是 spec §1.5 設計「pre-hook 先把即時資料
-轉成靜態檔案，再讓 restic 一起備份」的用意。）
+冪等重跑（同樣變數）：`changed=0`（Step 11 因「已有快照且 env/腳本沒變」
+被跳過）：
 
-冪等重跑 `changed=0`（Step 11 因「已有快照且 env/腳本沒變」被跳過）。
+```
+PLAY RECAP *********************************************************************
+freeipa-server             : ok=16   changed=0    unreachable=0    failed=0    skipped=7    rescued=0    ignored=0
+```
 
-### 6.3 打斷 server：刪除 389-ds 設定檔
+**建立可辨識測試資料，證明「最新快照真的包含它」**（2026-07-17 新增的重測
+步驟，原 2026-07-06 演練沒做這步，直接沿用既有快照）：
+
+```bash
+go run ./cmd/pilot vm-target exec --name freeipa-server -- \
+    sudo bash -c 'echo "dr-drill-marker-20260717-restic-consolidation" > /etc/dr-drill-marker.txt'
+go run ./cmd/pilot vm-target exec --name freeipa-server -- sudo systemctl start restic-backup.service
+go run ./cmd/pilot vm-target exec --name freeipa-server -- \
+    sudo bash -c '. /etc/pilot/restic-env && export HOME=/root && restic ls latest /etc/dr-drill-marker.txt'
+```
+
+真實輸出（確認新快照 `e8123314` 真的收錄了這個檔案）：
+
+```
+snapshot e8123314 of [/etc /var/lib/ipa/backup] at 2026-07-17 06:34:03... by root@ipa1.ipa.pilot.internal filtered by [/etc/dr-drill-marker.txt]:
+/etc/dr-drill-marker.txt
+```
+
+### 6.5 打斷 server：刪除 389-ds 設定檔
 
 第一次嘗試只刪單一檔 `/etc/dirsrv/slapd-IPA-PILOT-INTERNAL/dse.ldif`
 **不夠**——389-ds 自己在同一個目錄留了 `dse.ldif.bak`/`dse.ldif.startOK`，
@@ -376,14 +535,14 @@ Directory Service: STOPPED
 Directory Service must be running in order to obtain status of other services
 ```
 
-LDAP（389）/ Kerberos（88）埠確認不再 listening。
+LDAP（389）/ Kerberos（88）埠確認不再 listening（`ss -tln` 對 `:389 `/`:88 `
+均無命中）。
 
-### 6.4 確認 client 端登入真的失敗
+### 6.6 確認 client 端登入真的失敗
 
 清掉 client 的 SSSD 快取、重啟 SSSD，強制走「即時查 server」而非吃舊快取
 （不清快取的話，短時間內 `id`/`sudo -l` 會因為快取命中而看起來「還是通的」，
-掩蓋了 server 其實已經掛掉的事實——這是演練過程中第一次嘗試時真的踩到的
-誤判，記錄在此避免下次重蹈覆轍）：
+掩蓋了 server 其實已經掛掉的事實）：
 
 ```bash
 sudo rm -f /var/lib/sss/db/cache_ipa.pilot.internal.ldb \
@@ -404,7 +563,7 @@ runuser: user pilotuser does not exist or the user entry does not contain all th
 **故障因果鏈完整成立**：server 設定檔遺失 → 389-ds 起不來 → LDAP/Kerberos 埠
 關閉 → client 端 SSSD 查不到帳號 → 認證與 sudo 授權雙雙失效。
 
-### 6.5 從 restic 備份還原、確認系統恢復正常
+### 6.7 從 restic 備份還原、確認系統恢復正常
 
 在 server 上用 restic 把 `/etc/dirsrv` 從最新快照救回來：
 
@@ -416,8 +575,8 @@ restic restore latest --target / --include /etc/dirsrv -v
 真實輸出：
 
 ```
-restoring snapshot 977f31ae of [/etc /var/lib/ipa/backup] at 2026-07-06 09:10:17... to /
-Summary: Restored 44 / 43 files/dirs (992.147 KiB / 992.147 KiB) in 0:00, skipped 4 files/dirs 17.284 KiB
+restoring snapshot e8123314 of [/etc /var/lib/ipa/backup] at 2026-07-17 06:34:03... to /
+Summary: Restored 44 / 43 files/dirs (992.978 KiB / 992.978 KiB) in 0:00, skipped 4 files/dirs 17.284 KiB
 ```
 
 （還原回來的檔案 owner/權限跟原本一致——`dirsrv:dirsrv`，restic 以 root 執行
@@ -430,33 +589,45 @@ $ sudo ipactl start
 Starting Directory Service
 Starting krb5kdc Service
 Starting kadmin Service
+Starting named Service
 Starting httpd Service
 Starting ipa-custodia Service
 Starting pki-tomcatd Service
 Starting ipa-otpd Service
+Starting ipa-dnskeysyncd Service
 ipa: INFO: The ipactl command was successful
 
 $ sudo ipactl status
 Directory Service: RUNNING
 krb5kdc Service: RUNNING
 kadmin Service: RUNNING
+named Service: RUNNING
 httpd Service: RUNNING
 ipa-custodia Service: RUNNING
 pki-tomcatd Service: RUNNING
 ipa-otpd Service: RUNNING
+ipa-dnskeysyncd Service: RUNNING
 ```
 
+> 本次重測服務清單多了 `named`/`ipa-dnskeysyncd`（2026-07-06 演練只有 7 個
+> 服務）——`freeipa-server-apply.yml` 的 `ipa_setup_dns` 實際預設是 `true`
+> （`ipa_setup_dns: "{{ freeipa_setup_dns | default(true) }}"`）。這是本次
+> 整併重測發現的真實文件/程式落差：`docs/verification/freeipa-server.md`
+> §1 當時記載「預設 `false`」，已於同一次整併作業更正為 `true`（見該檔
+> v1.3 變更紀錄）；不影響本次 DR 演練的通過條件（C17/C18 兩種狀態都設計
+> 成能乾淨過）。
+
 `pilot vm-target verify --name freeipa-server docs/verification/freeipa-server.md`
-→ **PASS pass=16 fail=0 skip=0**（跟 §6.1 基線一致）。
+→ **PASS pass=18 fail=0 skip=0**（跟 §6.3 基線一致）。
 
 清掉 client 快取、重啟 SSSD 後，登入/授權雙雙恢復：
 
 ```
 $ id pilotuser@ipa.pilot.internal
-uid=552800003(pilotuser) gid=552800003(pilotuser) groups=552800003(pilotuser)
+uid=275400003(pilotuser) gid=275400003(pilotuser) groups=275400003(pilotuser)
 
 $ sudo runuser -u pilotuser -- sudo -n -l
-User pilotuser may run the following commands on freeipa-client:
+User pilotuser may run the following commands on client-vm:
     (root) NOPASSWD: ALL
 ```
 
@@ -464,19 +635,45 @@ User pilotuser may run the following commands on freeipa-client:
 → **PASS pass=10 fail=0 skip=0**。`restic-backup` 本身的 spec 也重新
 verify 一次確認未受影響 → **PASS pass=10 fail=0 skip=0**。
 
-### 6.6 演練結論
+**這步過了，DR 演練就算成功。**
+
+### 6.8 收尾：Teardown
+
+```bash
+go run ./cmd/pilot vm-target down --name freeipa-client
+go run ./cmd/pilot vm-target down --name freeipa-server
+go run ./cmd/pilot vm-target down --name s3-dest
+go run ./cmd/pilot vm-target list   # 確認為空
+```
+
+> 本次整併重測選擇**保留**三台 VM（`vm-target snapshot --tag
+> post-workstream-a`）供同一次整併作業後續 workstream 沿用，未執行上方
+> `down`；下次要做乾淨的 DR 演練、且不需要保留環境給後續工作時，才需要跑
+> 完整 teardown。
+
+### 6.9 演練結論 + 統一 gotcha 表
 
 - **restic-backup 對 FreeIPA server 的保護鏈路是真的**：從「刪設定檔 → 服務
   掛掉 → client 認證/授權失效」到「restic restore → 服務恢復 → client
   認證/授權恢復」，每一步都是真實指令、真實輸出，不是紙上談兵。
-- 演練過程中發現並修好 3 個真事故（Bug 3–5，見 §5），全部是**先在其他
-  Ubuntu vm-target 測 restic-backup 骨架時不會踩到、只有換成真實的
-  FreeIPA server（EL9 + 有實際 ipa-backup 資料）才會踩到**的組合——印證了
-  `spec-driven-feature-workflow` skill 強調的「用真實軟體當範例跑一輪，
-  比單測骨架本身更容易挖出根因」。
-- 演練也證實了 389-ds 自己的 `dse.ldif.bak`/`.startOK` 自我修復機制、以及
-  SSSD 本機快取，都可能讓「看起來系統正常」掩蓋「其實 server 已經掛了」的
-  事實——驗證故障/復原時要注意繞過這兩層快取，才是量測真實狀態。
+- 2026-07-06 首次演練發現並修好 3 個真事故（Bug 3–5，見 §5）；2026-07-17
+  整併重測**未再踩到**這三個舊 bug（已在 playbook 修好），但發現了下方表格
+  最後兩列的新事項。
+- 389-ds 自己的 `dse.ldif.bak`/`.startOK` 自我修復機制、SSSD 本機快取，都
+  可能讓「看起來系統正常」掩蓋「其實 server 已經掛了」的事實——驗證故障/
+  復原時要注意繞過這兩層快取，才是量測真實狀態。
+
+本表是 DR 演練專屬 gotcha（跟通用 restic-backup 的 §5 Bug 表不同層次，
+兩份都要看）：
+
+| 症狀 | 原因 | 解法 |
+|---|---|---|
+| 刪了 `dse.ldif`，`ipactl start` 卻還是正常起來 | 389-ds 自己在同目錄留了 `dse.ldif.bak`/`.startOK`，`ipactl start` 會自動從中復原 | 要模擬「真的救不回來」的故障，得刪整個 `/etc/dirsrv/slapd-<instance>` 目錄，不能只刪一個檔（見 §6.5） |
+| server 明明已經掛了，client 的 `id`/`sudo -l` 卻還是成功 | SSSD 本機快取還沒過期，命中舊快取而非即時查 LDAP | 清 `/var/lib/sss/db/cache_*.ldb`/`timestamps_*.ldb` 並 `systemctl restart sssd` 再測（見 §6.6） |
+| `freeipa-client-apply.yml` 的 C8 verify 第一次 fail：`sudo: a terminal is required to read the password` | 剛 enroll 完，SSSD 的 sudo 快取還沒刷新 | `sudo rm -f /var/lib/sss/db/*.ldb && sudo systemctl restart sssd` 後重跑 verify（2026-07-17 本次重測未踩到，一次就過，但仍是已知可能出現的偏差） |
+| `pilot vm-target run --name <某台> ...` 顯示 `skipping: no hosts matched` | apply playbook 的 `hosts:` 預設是角色 group 名，vm-target 單機 inventory 只有同名的 **host**、沒有這個 **group** | 一律加 `-e target_group=all` |
+| `pilot vm-target verify` 對 C16（389-ds 稽核日誌檔已寫入）第一次回 `rc=2`，緊接著重跑就 PASS | apply 最後一步「寫入 dummy 描述觸發稽核寫入」跟稽核檔實際落盤之間有短暫 race；verify 若緊接在 apply 完成後立刻執行可能撞到 | 重跑一次 verify（2026-07-17 本次重測實測：第一次 FAIL pass=17 fail=1，間隔數秒後連續兩次重跑皆 PASS pass=18 fail=0） |
+| `ipactl start` 印出 `named`/`ipa-dnskeysyncd`（DNS 相關服務），比 2026-07-06 首次演練多兩個服務 | `playbooks/apply/freeipa-server-apply.yml` 的 `ipa_setup_dns`/`ipa_setup_ntp` 實際預設都是 `true`（由 FreeIPA 自己管理 DNS/NTP），2026-07-17 整併重測發現時 `docs/verification/freeipa-server.md` 文件記載跟程式碼不一致 | 已修：`docs/verification/freeipa-server.md` v1.3 更正文件描述以符合程式碼；要精確重現「DNS/NTP 由既有 role 管理、FreeIPA 不管」則顯式 `-e ipa_setup_dns=false -e ipa_setup_ntp=false` |
 
 ---
 
@@ -486,3 +683,4 @@ verify 一次確認未受影響 → **PASS pass=10 fail=0 skip=0**。
 |------|------|------|--------|
 | 2026-07-06 | v1.0 | 初版：restic 備份到 S3（預設本專案自建 SeaweedFS S3 gateway），實測踩到「匿名 S3 gateway 對簽章 client 拒絕」的真事故，修法為掛 SeaweedFS identity 設定；驗證通過 10/10、冪等重跑 changed=0、逐主機自訂路徑正確累加快照、負向測試（無目的地）在任何 mutation 前乾淨失敗 | sre |
 | 2026-07-06 | v1.1 | 新增 §6：用 FreeIPA server/client 做完整的備份/故障/還原演練，實測踩到並修好 3 個真事故（EL9 不支援、systemd oneshot 缺 `$HOME`、SeaweedFS bucket 不存在時的 retry storm，見 §5 Bug 3–5），演練最終 PASS：server/client/restic-backup 三份 spec 故障前後皆綠燈 | sre |
+| 2026-07-17 | v1.2 | 文件整併：`restic-backup-dr-drill-test-plan.md` 併入 §6（該檔已歸檔），§6 從「證據記錄」升級為「證據記錄+可重跑步驟清單」二合一。§6.3 起（FreeIPA 部署、restic apply、故障注入、還原、三份 spec 重驗）於本次整併時重新實跑，全部 PASS；發現並記錄 2 個新事項：(1) C16 verify 緊接 apply 之後有短暫 race，重跑即過；(2) `ipa_setup_dns`/`ipa_setup_ntp` 實際預設 `true`，跟 `freeipa-server.md` 文件記載的 `false` 不一致——已在同一次整併作業修好 `freeipa-server.md`（v1.3）。新增建立可辨識標記檔、確認其被最新快照收錄的步驟，加強 DR 證據力；新增 §6.9 統一 DR 專屬 gotcha 表 | sre |

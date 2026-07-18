@@ -34,8 +34,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/spf13/cobra"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/anomalyco/pilot/internal/inventory"
@@ -708,4 +708,3 @@ func pushEditExtraVarValue(r *editRouterModel, dir, path string, hf *inventory.H
 		return pushExtraVarsMenu(r, dir, path, hf, name, "")
 	})
 }
-

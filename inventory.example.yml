@@ -83,7 +83,7 @@ all:
       hosts: {}                # 例:讓 ipa-1 兼當 DNS → 改成  hosts: { ipa-1: }
     ntp:                       # 跑 -e infra_role=ntp 時作用的機器
       hosts: {}
-    docker:                  # docker 引擎(standalone)；-e infra_role=docker
+    docker:                  # docker 引擎(standalone)；playbooks/apply/docker-apply.yml
       hosts: {}              # 例:讓 web-1 兼當 docker host → 改成  hosts: { web-1: }
     keycloak:                  # keycloak-apply.yml 的預設目標(IdP)
       hosts: {}

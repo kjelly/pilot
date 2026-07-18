@@ -27,9 +27,8 @@ cat > /tmp/inv-docker.yaml ...
 ansible-playbook -i /tmp/inv-docker.yaml ...
 docker rm -f infra-test
 
-# 痛點 2：`pilot run --sandbox` 跟「對 docker 套 playbook」是兩件事
-# 你按 Tab 補完 `--sandbox` 跑下去，會以為能直接驗證，結果是「agent 工具跑容器」
-# 而不是「playbook 操作容器」
+# 痛點 2（歷史）：舊 LLM agent 的 `pilot run --sandbox`（agent 工具跑容器）
+# 常被誤當成「對 docker 套 playbook」；該 agent 面已於 2026-07-17 退役
 ```
 
 新機制把這條鏈包成一個子命令群，每一步都自動：
@@ -157,16 +156,8 @@ docker rm -f infra-test
 | inventory 產生 | agent 內部自動 | CLI 自動 + 寫到 tmpfile |
 | 跟 inventory.yaml 互動 | 不互動（容器是透明的） | 完全取代 — 你不需要寫 inventory-*.yaml |
 
-**可以疊加**：
-
-```bash
-# 在 docker target 跑 playbook，同時 pilot agent 本身跑在另一台 sandbox container
-/tmp/pilot run --sandbox --sandbox-image rockylinux:9 \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -i /tmp/inv-from-docker-target.yaml
-```
-
-但 99% 情境下你只會用 `docker-target`，因為它**更直接**。
+（舊 LLM agent 的 `pilot run --sandbox` 疊加用法已隨 agent 面於 2026-07-17 退役；
+對 docker 套 playbook 一律走 `docker-target`。）
 
 ---
 
@@ -232,8 +223,8 @@ docker rm -f infra-test
 
 1. **pre-bake image**：寫一個 `Dockerfile.pilot-target-ubuntu` 把 `python3` + `systemd-resolved` 預裝好
 2. **multi-host 支援**：把 `Target` struct 加 `[]string peers` 欄位，RenderInventory 出 group 形式
-3. **`pilot docker-target snapshot <name> --tag <image>`** 跟 `pilot sandbox snapshot` 對齊
-4. **整合進 run loop**：`pilot run --target <docker-target-name> <playbook>` 跟 LLM agent loop 接軌
+3. **`pilot docker-target snapshot <name> --tag <image>`**
+（原第 4 點「整合進 LLM agent run loop」已隨 agent 面於 2026-07-17 退役）
 
 ---
 
@@ -317,27 +308,11 @@ pilot docker-target rollback --name core --image my-baseline
 # 換 image + 換 container_id，其他設定不動
 ```
 
-### 8.4 整合進 `pilot run`（`--target`）
+### 8.4 整合進 `pilot run`（`--target`）——已退役
 
-新 flag：`pilot run --target <docker-target-name> <playbook>...`。
-LLM agent loop 的 `run_ansible` tool 會自動拿該 target 的 generated
-inventory + limit 當 default，使用者不用手動帶 `-i /tmp/... -l core`：
-
-```bash
-pilot docker-target up --image-pilot ubuntu-24.04 --name core
-pilot run --target core playbooks/apply/core-infra-provider-apply.yml \
-    -e infra_role=dns
-# agent loop 看到 playbook 給 LLM 時，run_ansible 預設就會用
-# /tmp/pilot-run-target-XXX.yaml + --limit core
-```
-
-跟 `--sandbox` 是正交：
-- `--target core` → LLM 的 `run_ansible` 跑在 host，把 inventory 指到 container
-- `--sandbox`     → LLM 自己整套跑在一個 disposable container
-
-兩個可以疊：`pilot run --sandbox --sandbox-image ubuntu:24.04 --target core`
-讓 LLM 跑在 sandbox container A，但 `run_ansible` 對 sandbox container B 操作。
-實務上 99% 不會這樣搞。
+`pilot run --target` 是舊 LLM agent loop 的整合點，已隨 agent 面於
+2026-07-17 退役。對 docker target 跑 playbook 直接用
+`pilot docker-target run --name <n> <playbook> …`。
 
 ### 8.5 systemd target（`--systemd`）
 

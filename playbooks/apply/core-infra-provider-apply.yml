@@ -1,18 +1,18 @@
 ---
 # Apply playbook for docs/verification/core-infra-provider.md
 #
-# Three roles in one playbook, gated by `-e infra_role=...`:
+# Two roles in one playbook, gated by `-e infra_role=...`:
 #
-#   docker   install + start Docker engine (apt install docker.io);
-#            prerequisite for the `keycloak` and `keycloak-db` roles
-#            that now live in their own playbooks
 #   dns      install + configure unbound (or bind9 / dnsmasq per host)
 #   ntp      install + configure chrony (or ntpd / ntpsec) with a sane
 #            pool so this host itself becomes a stratum source
 #
-# Keycloak (server) and Keycloak PostgreSQL backing store have been
-# moved to their own apply playbooks:
+# Docker, Keycloak (server), and Keycloak's PostgreSQL backing store
+# have all been moved to their own apply playbooks:
 #
+#   playbooks/apply/docker-apply.yml
+#       (container engine; prerequisite for keycloak-db, keycloak,
+#        seaweedfs-s3, wazuh-manager, and the observability stack)
 #   playbooks/apply/keycloak-apply.yml
 #       (-e infra_role equivalent: just run; pre-flight: docker +
 #        core-infra-provider-db PASS)
@@ -45,7 +45,7 @@
 #   sandbox  default; runs immediately
 #   staging  requires -e confirm_staging=true
 #   prod     requires -e confirm_prod=true AND -e staging_attested_within_hours<=168
-- name: Core infra provider apply (dns / ntp / docker)
+- name: Core infra provider apply (dns / ntp)
   hosts: "{{ target_group | default(infra_role) | default('dns') }}"
   become: true
   gather_facts: true
@@ -75,11 +75,11 @@
     dns_zones: []
 
   pre_tasks:
-    - name: "Gate: infra_role must be docker, dns, or ntp"
+    - name: "Gate: infra_role must be dns or ntp"
       ansible.builtin.assert:
         that:
-          - infra_role in ['docker', 'dns', 'ntp']
-        fail_msg: "infra_role={{ infra_role }} invalid. Pass -e infra_role=dns|ntp|docker. (keycloak + db moved to their own playbooks.)"
+          - infra_role in ['dns', 'ntp']
+        fail_msg: "infra_role={{ infra_role }} invalid. Pass -e infra_role=dns|ntp. (docker, keycloak, and db moved to their own playbooks.)"
 
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
@@ -110,53 +110,6 @@
       when: stage == 'prod'
 
   tasks:
-    ### Docker role (engine — prerequisite for keycloak + keycloak-db)
-    # Spec: docs/verification/docker.md C1..C8
-    - name: "Docker — install docker.io (Debian family)"
-      tags: [docker, docker-C1]
-      ansible.builtin.apt:
-        name:
-          - docker.io
-          - docker-compose-v2
-        state: present
-        update_cache: true
-      when:
-        - infra_role == 'docker'
-        - ansible_os_family == 'Debian'
-        - not ansible_check_mode
-
-    - name: "Docker — install docker (RHEL family)"
-      tags: [docker, docker-C1]
-      ansible.builtin.dnf:
-        name:
-          - docker
-          - docker-compose
-        state: present
-      when:
-        - infra_role == 'docker'
-        - ansible_os_family == 'RedHat'
-        - not ansible_check_mode
-
-    - name: "Docker — enable + start docker.service"
-      tags: [docker, docker-C2]
-      ansible.builtin.systemd:
-        name: docker
-        state: started
-        enabled: true
-      when:
-        - infra_role == 'docker'
-        - not ansible_check_mode
-
-    - name: "Docker — ensure docker CLI usable by current user (group add)"
-      tags: [docker, docker-C4]
-      ansible.builtin.user:
-        name: "{{ ansible_user_id | default('root') }}"
-        groups: docker
-        append: true
-      when:
-        - infra_role == 'docker'
-        - not ansible_check_mode
-
     ### DNS role
     - name: "DNS — snapshot /etc/systemd/resolved.conf before mutation"
       tags: [dns]

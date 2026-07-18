@@ -57,6 +57,10 @@ def main():
             with open(path, encoding="utf-8") as f:
                 for doc in yaml.load_all(f, Loader=DuplicateKeyLoader):
                     pass
+        except FileNotFoundError:
+            # Tracked in the index but gone from disk — a deleted-but-unstaged
+            # file, a normal dev state. Nothing on disk to check.
+            continue
         except DuplicateKeyError as e:
             failures.append(f"{path}: {e}")
         except yaml.YAMLError:

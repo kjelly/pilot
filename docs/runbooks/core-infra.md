@@ -45,13 +45,10 @@
 # spec core-infra-provider: 9 rows, 0 findings (0 errors)
 ```
 
-### 2.2 Generate verify playbooks（兩條都產）
+### 2.2 Generate verify playbooks（已棄用 2026-07-17）
 
-```bash
-/tmp/pilot spec docs/verification/core-infra.md           --generate playbooks/verify/core-infra.yml
-/tmp/pilot spec docs/verification/core-infra-provider.md --generate playbooks/verify/core-infra-provider.yml
-# 兩份都被 generator 1-to-1 產出，inspect-only
-```
+此步驟不再執行：`playbooks/verify/` 已棄用（generator 產物不比對 Expected，
+見 `playbooks/verify/README.md`），驗收直接走 §2.3 的 `pilot verify`。
 
 ### 2.3 跑 consumer-side verify
 
@@ -177,8 +174,8 @@ C9 idp-srv      FAIL  (provider) — keycloak 完全不通
 
 | 檔 | 用途 | 該誰寫 |
 |----|------|--------|
-| `playbooks/verify/core-infra.yml` | inspect-only — generator 產 | 不要手寫 |
-| `playbooks/verify/core-infra-provider.yml` | inspect-only — generator 產 | 不要手寫 |
+| `playbooks/verify/core-infra.yml` | **已棄用（2026-07-17）**，僅存檔參考 | 不要更新或執行 |
+| `playbooks/verify/core-infra-provider.yml` | **已棄用（2026-07-17）**，僅存檔參考 | 不要更新或執行 |
 | `playbooks/apply/core-infra-provider-apply.yml` | **手寫、含 -e params + block/rescue** | sre |
 
 ---

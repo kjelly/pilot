@@ -161,7 +161,7 @@ enroll 完成後 10/10 pass。（enroll 前、乾淨 Ubuntu → C1/C4/C5/C6/… 
 
 ## 6. Playbook 對應
 
-對應產生的 **verify** playbook：`playbooks/verify/freeipa-client.yml`（由 `pilot spec --generate` 產，**勿手寫**）
+對應的 verify playbook（`playbooks/verify/freeipa-client.yml`）**已於 2026-07-17 棄用**（僅存檔參考，見該目錄 README.md）；驗收直接 `pilot verify` 吃本 spec 執行。
 
 對應手寫的 **apply** playbook：`playbooks/apply/freeipa-client-apply.yml`
 

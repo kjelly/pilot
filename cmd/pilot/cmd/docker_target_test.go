@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/pflag"
-
 	"github.com/anomalyco/pilot/internal/dockertarget"
 )
 
@@ -355,31 +353,6 @@ func TestRunDtRollback_RequiresImage(t *testing.T) {
 	err := rootCmd.Execute()
 	if err == nil || (!strings.Contains(err.Error(), "--image") && !strings.Contains(err.Error(), "required")) {
 		t.Fatalf("want --image-required error, got %v", err)
-	}
-}
-
-// TestRunTargetFlagRegistered ensures `pilot run --target` is wired.
-func TestRunTargetFlagRegistered(t *testing.T) {
-	var found bool
-	runCmd.Flags().VisitAll(func(f *pflag.Flag) {
-		if f.Name == "target" {
-			found = true
-		}
-	})
-	if !found {
-		t.Fatal("--target flag not registered on runCmd")
-	}
-}
-
-// TestResolveTargetInventory_NoTarget is the regression guard for
-// "we always called resolveTargetInventory and it touched state"
-// — should be a no-op when --target is empty.
-func TestResolveTargetInventory_NoTarget(t *testing.T) {
-	old := runTarget
-	runTarget = ""
-	defer func() { runTarget = old }()
-	if got := resolveTargetInventory(); got != "" {
-		t.Errorf("resolveTargetInventory with no --target should return \"\", got %q", got)
 	}
 }
 

@@ -217,7 +217,7 @@ pass=15 fail=0 skip=0**(2026-07-09T09:41Z)。
 
 ## 6. Playbook 對應
 
-對應產生的 **verify** playbook：`playbooks/verify/freeipa-server-replica.yml`（由 `pilot spec --generate` 產，**勿手寫**）
+對應的 verify playbook（`playbooks/verify/freeipa-server-replica.yml`）**已於 2026-07-17 棄用**（僅存檔參考，見該目錄 README.md）；驗收直接 `pilot verify` 吃本 spec 執行。
 
 對應手寫的 **apply** playbook：`playbooks/apply/freeipa-server-replica-apply.yml`
 

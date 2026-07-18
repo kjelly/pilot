@@ -2,7 +2,7 @@
 
 > Date: 2026-07-17 (UTC), latest pass: round 7 / v7.0
 > Aligned spec: `docs/verification/freeipa-server.md`, `freeipa-client.md`,
-> `docker.md` (`core-infra-provider.md` `infra_role=docker`),
+> `docker.md` (`playbooks/apply/docker-apply.yml`，2026-07-17 起獨立 playbook),
 > `seaweedfs-s3.md`, `prometheus.md`, `thanos-query.md`,
 > `alertmanager.md`, `dashboard.md`, `log-shipping.md`,
 > `wazuh-manager.md`, `wazuh-fim.md`, `audit-log-forwarding.md`,
@@ -49,6 +49,20 @@
 > not only after a later rule change; `sss_cache -E && systemctl restart
 > sssd` on the client is the fix, but the runbook's own §4.1 procedure
 > previously only mentioned it for the §4.6 rule-change scenario.
+> **`sss_cache -E && systemctl restart sssd` is the ONLY sanctioned fix
+> for a first-sudo denial — never add `sudo` to `sssd.conf`'s
+> `services=` line.** The v8 re-verification round (2026-07-17)
+> misdiagnosed this exact symptom as "the playbook's sssd.conf template
+> is missing sudo" and sed-patched `services=` live; post-hoc review
+> showed the cache flush (applied in the same step) was the actual fix,
+> and the sed left `sssd-sudo.socket` permanently `failed` (the
+> responder only survived via monitor mode). `freeipa-client-apply.yml`
+> C8 deliberately writes `services = nss, pam, ssh` — SSSD ≥ 2.3
+> socket-activates the sudo responder, and the task's comment documents
+> that listing `sudo` there breaks the socket (confirmed live twice, in
+> both directions). Also note `sssd_sudo` absent from `ps` is NOT
+> evidence of a problem: a socket-activated responder only appears
+> after the first sudo lookup.
 
 ---
 
@@ -351,6 +365,25 @@ and fixed with a few corrective `UP`/`DOWN`/`SPACE` ops before saving.
 (an SSH key path once, `ansible_user` once) — same fix each time,
 `BACKSPACE <n>` before retyping.
 
+Two hard rules for the vault/group_vars key-list screens, added after
+the v8 round (2026-07-17) silently typed seven values into the same
+field:
+
+- **The key list rebuilds with the cursor at the TOP after every field
+  edit — there is no auto-advance.** A fill script must send
+  `DOWN <index>` (recomputed from the top) before the `ENTER` for
+  every entry. A script that omits this edits entry 0 over and over,
+  saves cleanly, and produces an all-green cast while every other key
+  keeps its `CHANGE-ME` placeholder.
+- **After every save, `grep` the file on disk and compare each
+  intended key's value before proceeding to the next wizard step.**
+  「✅ 已存檔」 in the cast proves a save happened, not that the right
+  keys got the right values. In v8 this check was skipped; the deploy
+  then ran with `ipa_admin_password` set to a value meant for an S3
+  secret and `grafana_admin_password` still at its placeholder, and
+  the discrepancy was only noticed after IPA was already installed
+  with the wrong password.
+
 Recordings: `01-edit-hosts.cast`, `02-inventory-generate.cast`,
 `03-edit-group-vars.cast` (includes the `.vault/main.yaml` fill-in — one
 continuous `pilot edit` session covers both group_vars/ and .vault/).
@@ -413,6 +446,20 @@ localhost                  : ok=1    changed=0    unreachable=0    failed=0    s
 nexus                      : ok=93   changed=31   unreachable=0    failed=0    skipped=137  rescued=0    ignored=0
 ```
 ### 3.3 v3.0 — Deploy with ZERO extra `-e` variables
+
+> **How the wizard passes the roster for `freeipa-identity`** (added
+> after the v8 round misread this as "wizard can't do
+> freeipa-identity" and fell back to bare `ansible-playbook`): the
+> roster file goes through the **vault vars-file prompt**, not the
+> `-e` prompt. At 「偵測到 …/.vault/main.yaml，這次佈署要用它當密碼
+> 變數檔嗎？」 answer **`n`**, then enter the roster path
+> (`…/.vault/ipa-identity.yaml`) at the vars-file prompt — the roster
+> schema includes `ipa_admin_password`, so no second file is needed.
+> The 「還有其他 -e 變數要帶嗎？」 prompt only accepts `key=value` by
+> design. Answering `y` (using main.yaml) still ends in 「✅ 套用完成」
+> `failed=0` — but with every reconcile task skipped
+> (`changed=0`, `skipped=` in the dozens). **Treat that recap as a
+> failed deploy: the roster never loaded.**
 
 This is the pass's headline result. Both invocations below were driven
 via `pilot deploy`'s wizard under `trec drive --interactive`; the "還有

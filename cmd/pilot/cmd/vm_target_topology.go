@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -54,6 +57,7 @@ peers to pin into its /etc/hosts:
   pilot vm-target topology snapshot  --spec ha.yaml --tag pre-drill
   pilot vm-target topology rollback  --spec ha.yaml --tag pre-drill
   pilot vm-target topology reset     --spec ha.yaml
+  pilot vm-target topology test      --spec ha.yaml --playbook ... --verify ...
 
 'up' provisions every not-yet-running node CONCURRENTLY (one goroutine +
 one *vmtarget.Manager per node — Manager.Up holds its own in-process
@@ -92,10 +96,11 @@ func init() {
 	vtTopologyCmd.AddCommand(vtTopologySnapshotCmd)
 	vtTopologyCmd.AddCommand(vtTopologyRollbackCmd)
 	vtTopologyCmd.AddCommand(vtTopologyResetCmd)
+	vtTopologyCmd.AddCommand(vtTopologyTestCmd)
 
 	allTopoCmds := []*cobra.Command{
 		vtTopologyUpCmd, vtTopologyDownCmd, vtTopologyInventoryCmd, vtTopologyStatusCmd,
-		vtTopologySnapshotCmd, vtTopologyRollbackCmd, vtTopologyResetCmd,
+		vtTopologySnapshotCmd, vtTopologyRollbackCmd, vtTopologyResetCmd, vtTopologyTestCmd,
 	}
 	for _, c := range allTopoCmds {
 		c.Flags().StringVar(&vtTopoSpecPath, "spec", "", "path to the topology YAML spec (required)")
@@ -106,6 +111,14 @@ func init() {
 	_ = vtTopologySnapshotCmd.MarkFlagRequired("tag")
 	vtTopologyRollbackCmd.Flags().StringVar(&vtTopoTag, "tag", "", "snapshot tag to revert every node to (required)")
 	_ = vtTopologyRollbackCmd.MarkFlagRequired("tag")
+
+	vtTopologyTestCmd.Flags().StringVar(&vtTopoTestPlaybook, "playbook", "", "path to the playbook to run against the topology (required; e.g. playbooks/site.yml)")
+	vtTopologyTestCmd.Flags().StringArrayVar(&vtTopoTestVerify, "verify", nil, "verification spec to run after apply, as 'docs/verification/<x>.md' or 'docs/verification/<x>.md=<ansible-limit>'; repeatable, at least one required")
+	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestSkipLint, "skip-lint", false, "skip syntax check pre-flight")
+	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestNoRollback, "no-rollback", false, "disable automatic cluster rollback on failure")
+	vtTopologyTestCmd.Flags().IntVar(&vtTopoTestVerifyTimeout, "verify-timeout", 0, "per-row timeout (seconds) forwarded to `pilot verify` (0 = verify's own default)")
+	_ = vtTopologyTestCmd.MarkFlagRequired("playbook")
+	_ = vtTopologyTestCmd.MarkFlagRequired("verify")
 }
 
 // runTopologyNodesConcurrently runs fn once per spec node, each on its own
@@ -290,34 +303,40 @@ var vtTopologyInventoryCmd = &cobra.Command{
 	RunE:  runVtTopologyInventory,
 }
 
+// renderTopologyInventory resolves every node in the spec (each must be
+// running — the inventory needs final IPs) and renders the grouped
+// ansible inventory its 'groups:' declarations describe. Shared by
+// 'topology inventory' (prints/writes it) and 'topology test' (stages it
+// to a temp file for the apply/verify/idempotency runs).
+func renderTopologyInventory(ctx context.Context, m *vmtarget.Manager, spec *vmtarget.TopologySpec, specPath string) (string, error) {
+	order, groups := spec.Groups()
+	if len(order) == 0 {
+		return "", fmt.Errorf("topology spec %s declares no node 'groups:' — nothing to render", specPath)
+	}
+	targetsByName := make(map[string]*vmtarget.Target, len(spec.Nodes))
+	for _, n := range spec.Nodes {
+		t, gerr := m.Get(ctx, n.Name)
+		if gerr != nil {
+			return "", fmt.Errorf("resolve node %q: %w", n.Name, gerr)
+		}
+		if t.Status != vmtarget.StatusRunning {
+			return "", fmt.Errorf("node %q is not running (status=%s); run `pilot vm-target topology up --spec %s` first", n.Name, t.Status, specPath)
+		}
+		targetsByName[n.Name] = t
+	}
+	return vmtarget.RenderGroupedInventory(targetsByName, order, groups)
+}
+
 func runVtTopologyInventory(cmd *cobra.Command, args []string) error {
 	spec, err := vmtarget.LoadTopologySpec(vtTopoSpecPath)
 	if err != nil {
 		return err
 	}
-	order, groups := spec.Groups()
-	if len(order) == 0 {
-		return fmt.Errorf("topology spec %s declares no node 'groups:' — nothing to render", vtTopoSpecPath)
-	}
 	m, err := vtNewManager()
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
-
-	targetsByName := make(map[string]*vmtarget.Target, len(spec.Nodes))
-	for _, n := range spec.Nodes {
-		t, gerr := m.Get(ctx, n.Name)
-		if gerr != nil {
-			return fmt.Errorf("resolve node %q: %w", n.Name, gerr)
-		}
-		if t.Status != vmtarget.StatusRunning {
-			return fmt.Errorf("node %q is not running (status=%s); run `pilot vm-target topology up --spec %s` first", n.Name, t.Status, vtTopoSpecPath)
-		}
-		targetsByName[n.Name] = t
-	}
-
-	inv, err := vmtarget.RenderGroupedInventory(targetsByName, order, groups)
+	inv, err := renderTopologyInventory(context.Background(), m, spec, vtTopoSpecPath)
 	if err != nil {
 		return err
 	}
@@ -467,4 +486,189 @@ func runVtTopologyReset(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(out, "✓ reset %d node(s) to %q (pristine post-boot state)\n", len(spec.Nodes), vmtarget.CleanSnapshotTag)
 	return rewireTopology(spec, out)
+}
+
+// ---- test -------------------------------------------------------------
+
+var (
+	vtTopoTestPlaybook      string
+	vtTopoTestVerify        []string
+	vtTopoTestSkipLint      bool
+	vtTopoTestNoRollback    bool
+	vtTopoTestVerifyTimeout int
+)
+
+var vtTopologyTestCmd = &cobra.Command{
+	Use:   "test [-- <ansible extra-vars>...]",
+	Short: "Run syntax, apply, verify, and idempotency against a whole topology (cluster snapshot/rollback)",
+	Long: `The multi-VM equivalent of 'vm-target test': one command produces the
+full actual-run evidence chain (AGENTS.md §1.2/§1.4) for a scenario that
+spans several nodes — e.g. site.yml against a rendered topology inventory,
+or a replica-install playbook that needs primary+replica+client at once.
+
+Steps executed:
+  1. L1 syntax check: 'ansible-playbook --syntax-check'
+  2. Cluster snapshot: every node under one 'pre-test-<ts>' tag (concurrent)
+  3. L4 apply: the playbook against the rendered grouped inventory
+  4. L5 verify: 'pilot verify' once per --verify entry
+  5. L6 idempotency: apply again, assert changed=0 across ALL hosts
+  6. Auto-rollback: any failure reverts EVERY node to the pre-test tag and
+     re-wires /etc/hosts (mirroring 'topology rollback')
+
+--verify is repeatable and takes 'spec.md' or 'spec.md=<ansible-limit>',
+so each spec is verified only against the group it applies to:
+
+  pilot vm-target topology test --spec ha.yaml \
+      --playbook playbooks/site.yml \
+      --verify docs/verification/freeipa-server.md=ipa_masters \
+      --verify docs/verification/freeipa-client.md=ipa_clients \
+      -- -e stage=sandbox
+
+Everything after '--' is forwarded VERBATIM to the apply AND idempotency
+runs. Unlike single-VM 'test', no '-l <name>' limit is ever added: the
+rendered topology inventory's groups own targeting (that is the point of
+'groups:' in the topology spec).
+`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runVtTopologyTest,
+}
+
+// topoVerify is one parsed --verify entry: a spec path plus the optional
+// ansible limit pattern scoping which topology group it verifies.
+type topoVerify struct {
+	spec  string
+	limit string
+}
+
+// parseTopoVerifyArgs splits each --verify value on the first '=' into
+// spec path and limit. Spec paths never contain '='; limits are plain
+// ansible patterns (group, host, union).
+func parseTopoVerifyArgs(raw []string) ([]topoVerify, error) {
+	out := make([]topoVerify, 0, len(raw))
+	for _, r := range raw {
+		specPath, limit, _ := strings.Cut(r, "=")
+		if specPath == "" {
+			return nil, fmt.Errorf("--verify %q: empty spec path", r)
+		}
+		out = append(out, topoVerify{spec: specPath, limit: limit})
+	}
+	return out, nil
+}
+
+func runVtTopologyTest(cmd *cobra.Command, args []string) error {
+	spec, err := vmtarget.LoadTopologySpec(vtTopoSpecPath)
+	if err != nil {
+		return err
+	}
+	verifies, err := parseTopoVerifyArgs(vtTopoTestVerify)
+	if err != nil {
+		return err
+	}
+	m, err := vtNewManager()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	out := cmd.OutOrStdout()
+
+	// Rendering the inventory up front doubles as the "every node is
+	// running" pre-flight — fail before snapshotting anything.
+	inv, err := renderTopologyInventory(ctx, m, spec, vtTopoSpecPath)
+	if err != nil {
+		return err
+	}
+	invPath, cleanup, err := writeTempInventory(inv)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	// Step 1: L1 syntax check.
+	if !vtTopoTestSkipLint {
+		fmt.Fprintln(out, "=== [Step 1/5] L1 Syntax Check ===")
+		if err := execAnsiblePlaybook(out, vtTopoTestPlaybook, "--syntax-check"); err != nil {
+			return fmt.Errorf("syntax check failed: %w", err)
+		}
+		fmt.Fprintln(out, "✓ Syntax check passed")
+	}
+
+	// Step 2: cluster-wide snapshot under one tag.
+	snapTag := fmt.Sprintf("pre-test-%d", time.Now().Unix())
+	fmt.Fprintf(out, "=== [Step 2/5] Cluster snapshot: %d node(s) (tag: %s) ===\n", len(spec.Nodes), snapTag)
+	if err := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
+		if serr := nm.Snapshot(context.Background(), n.Name, snapTag); serr != nil {
+			return fmt.Errorf("node %q: %w", n.Name, serr)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to snapshot cluster: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Cluster snapshot created")
+
+	rollbackOnFailure := func(origErr error) error {
+		if vtTopoTestNoRollback {
+			fmt.Fprintln(cmd.ErrOrStderr(), "⚠️ Auto-rollback is disabled via --no-rollback")
+			return origErr
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed: %v. Rolling back every node to %s...\n", origErr, snapTag)
+		if rerr := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
+			if e := nm.Rollback(context.Background(), n.Name, snapTag); e != nil {
+				return fmt.Errorf("node %q: %w", n.Name, e)
+			}
+			return nil
+		}); rerr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 Double fault: cluster rollback failed: %v\n", rerr)
+			return fmt.Errorf("%w (cluster rollback also failed: %v)", origErr, rerr)
+		}
+		// The pre-test tag postdates wiring, but Rollback restores the
+		// disk verbatim — rewire anyway to mirror 'topology rollback'
+		// and stay correct if wiring changed since the snapshot.
+		if werr := rewireTopology(spec, out); werr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 rollback OK but re-wiring failed: %v\n", werr)
+			return fmt.Errorf("%w (re-wire after rollback failed: %v)", origErr, werr)
+		}
+		fmt.Fprintln(out, "✓ Rollback successful. Every node restored to pre-test state.")
+		return origErr
+	}
+
+	// Step 3: L4 apply. No -l limit — the grouped inventory owns targeting.
+	fmt.Fprintln(out, "=== [Step 3/5] L4 Apply Playbook (topology inventory) ===")
+	ansibleArgs := append([]string{vtTopoTestPlaybook, "-i", invPath}, args...)
+	if err := execExternal(out, "ansible-playbook", ansibleArgs...); err != nil {
+		return rollbackOnFailure(fmt.Errorf("playbook apply failed: %w", err))
+	}
+	fmt.Fprintln(out, "✓ Playbook apply completed")
+
+	// Step 4: L5 verify, one run per --verify entry.
+	fmt.Fprintf(out, "=== [Step 4/5] L5 Verification Specs (%d) ===\n", len(verifies))
+	for _, v := range verifies {
+		pilotArgs := []string{"verify", v.spec, "-i", invPath}
+		if v.limit != "" {
+			pilotArgs = append(pilotArgs, "-l", v.limit)
+		}
+		if vtTopoTestVerifyTimeout > 0 {
+			pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
+		}
+		if err := execPilot(out, pilotArgs...); err != nil {
+			return rollbackOnFailure(fmt.Errorf("verification failed (%s): %w", v.spec, err))
+		}
+	}
+	fmt.Fprintln(out, "✓ Verification checks passed")
+
+	// Step 5: L6 idempotency across the whole cluster.
+	fmt.Fprintln(out, "=== [Step 5/5] L6 Idempotency Check ===")
+	var idemBuf bytes.Buffer
+	if err := execExternal(io.MultiWriter(out, &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
+		return rollbackOnFailure(fmt.Errorf("idempotency run failed: %w", err))
+	}
+	changed, ok := idempotencyChangedCount(idemBuf.String())
+	if !ok {
+		return rollbackOnFailure(fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)"))
+	}
+	if changed > 0 {
+		return rollbackOnFailure(fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed))
+	}
+	fmt.Fprintln(out, "✓ Idempotency check passed (changed=0)")
+	fmt.Fprintln(out, "🎉 ALL TESTS PASSED SUCCESSFULLY!")
+	return nil
 }

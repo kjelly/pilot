@@ -109,11 +109,8 @@ verdict: **PASS**  (pass=11 fail=0 skip=0)
 go run ./cmd/pilot spec docs/verification/core-infra-provider-db.md --lint
 # spec Verification Spec — core-infra-provider-db (PostgreSQL backing store for Keycloak): 11 rows, 0 findings (0 errors)
 
-# 1. Generate verify playbook
-go run ./cmd/pilot spec docs/verification/core-infra-provider-db.md \
-    --generate playbooks/verify/core-infra-provider-db.yml
-# ✔ generated playbook: ... (2 tasks, 11 rows → 9 deduped)
-# ✔ recorded 11 checkpoints (run_id=spec-core-infra-provider-db)
+# 1. （此步驟已棄用 2026-07-17）不再產生 playbooks/verify/core-infra-provider-db.yml——
+#    驗收由後面的 `pilot verify`/`vm-target test` 直接吃 spec 執行
 
 # 2. 確認 VM inventory 跟 spec 對齊（regression test 已擋，但實際跑前手動 check 一次）
 go run ./cmd/pilot vm-target show-inventory --name core | grep "^    [a-z]"
@@ -207,10 +204,10 @@ go run ./cmd/pilot vm-target verify --name core \
 | `docs/verification/docker.md` | 新 spec（C1–C8：docker engine 端到端健康） | 對應 `infra_role=docker` apply 段 |
 | `docs/verification/core-infra-provider-db.md` | v2.0：PG 從 host 換 docker container；C1/C2/C8/C9 改查 docker 物件；C5/C6/C11 從 `-U postgres` 改 `-U keycloak`（container 只有 `keycloak` superuser） | 對齊新的 docker-based apply 段 |
 | `docs/verification/core-infra-provider.md` | **未改**（user 指定固定） | 是測試目標 |
-| `playbooks/apply/core-infra-provider-apply.yml` | v2.0：移除了 `db` 與 `keycloak` 段（已拆分）；gate 改為 3 個 role（docker / dns / ntp） | 只負責 docker engine / DNS / NTP；三個 role 之後的 keycloak + db 各自走獨立 playbook |
+| `playbooks/apply/core-infra-provider-apply.yml` | v2.0：移除了 `db` 與 `keycloak` 段（已拆分）；gate 改為 3 個 role（docker / dns / ntp）。**2026-07-17 更新**：`docker` 也拆出到 `playbooks/apply/docker-apply.yml`（獨立 playbook），本檔的 gate 縮成 `dns`/`ntp` 兩個 role，見 `docs/runbooks/docker.md` | 只負責 DNS / NTP；docker engine、keycloak + db 各自走獨立 playbook |
 | `playbooks/apply/keycloak-db-apply.yml` | **新增**（從 `core-infra-provider-apply.yml` db 段拆分）；`community.docker.docker_container` 起 `pilot-postgres`，`POSTGRES_DB=keycloak`，bind-mount `/var/lib/pilot/postgres` | 為 `keycloak-apply.yml` 提供 PostgreSQL backing store |
 | `playbooks/apply/keycloak-apply.yml` | **新增**（從 `core-infra-provider-apply.yml` keycloak 段拆分）；`quay.io/keycloak/keycloak:25.0` 容器，`KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak`，`/etc/hosts` 加 `idp.infra.internal` | C7 / C8 / C9 對應 keycloak.md spec |
-| `playbooks/verify/keycloak.yml` | spec generator 產 | 不手寫 |
+| `playbooks/verify/keycloak.yml` | **已棄用（2026-07-17）**，僅存檔參考 | 不要更新或執行 |
 | `internal/spec/keycloak_regression_test.go` | **新增**；鎖 C7 (pidof) / C8 (ss) / C9 ($KEYCLOAK_ISSUER) / .well-known/openid-configuration | 防止 Keycloak spec 退化 |
 | `docs/verification/keycloak.md` | **新增**（從 `core-infra-provider.md` v1.0 C7–C9 拆分）| 只含 Keycloak server 健康三條；DNS/NTP 留在 `core-infra-provider.md` v2.0 |
 | `docs/verification/core-infra-provider.md` | v2.0：移除 C7–C9；從 9 row 縮為 6 row（C1–C6：DNS/NTP）| spec 責任單一化 |

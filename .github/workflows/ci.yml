@@ -50,6 +50,31 @@ jobs:
       - name: Duplicate YAML key check (repo-wide)
         run: python3 scripts/check-yaml-duplicate-keys.py
 
+  playbook-lint:
+    # L1 syntax (blocking) + duplicate-key check + L2 ansible-lint (advisory)
+    # over every playbook — mirrors `make playbook-lint`, which local dev only
+    # runs via the opt-in pre-commit hook (make install-hooks). Same
+    # ansible-core + collections set Dockerfile.pilot-cli bakes into the
+    # delivery image.
+    name: Playbook lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ansible toolchain
+        run: |
+          python3 -m pip install ansible-core ansible-lint pyyaml
+          ansible-galaxy collection install ansible.posix community.docker community.postgresql
+
+      - name: make playbook-lint
+        run: make playbook-lint
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest

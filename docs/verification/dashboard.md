@@ -1,6 +1,6 @@
 # Verification Spec — dashboard (Grafana + Loki，跨機房 Metrics/Log 觀測入口)
 
-> 版本：v1.1
+> 版本：v1.2（2026-07-17：C8/`thanos_query_port` 的 port 從 10902 改成 10912，見 §6）
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `thanos-query.md`/
 > `seaweedfs-s3.md` 的 docker container 模式）
 > 維護者：sre
@@ -9,7 +9,8 @@
 > `thanos-query.md`（跨站 metrics 全局查詢）+ `log-server.md`（中央日誌
 > 落地）已經分別把資料生出來、集中起來，但都只有各自的 CLI/HTTP API，
 > 沒有一個給人看的畫面。本角色是**純消費端**：Grafana 對 `thanos-query`
-> 的 Prometheus-compatible API（10902）跟本機 Loki 開兩個唯讀
+> 的 Prometheus-compatible API（host-published port 預設 10912，見
+> `thanos_query_port` 說明）跟本機 Loki 開兩個唯讀
 > datasource，Loki 則負責接 `log-shipping.md`（跑在 `log-server` 主機上
 > 的 Promtail agent）轉送過來的日誌。跟 `thanos-query` 一樣是本專案的
 > 中央單例角色（比照 `wazuh-manager`/`log-server`）。
@@ -48,7 +49,7 @@
 |---------|----------|---------|--------|
 | `thanos_query_target_host` | `thanos-query.md` 中央主機的 IP/FQDN，套用時會被 pin 進 `/etc/hosts`（比照 `thanos_s3_target_host`/`restic_s3_target_host` 的既有慣例） | 否（見下方 escape hatch） | 空字串 |
 | `thanos_query_alias` | 上面那個 IP 對應的 `/etc/hosts` 別名；Grafana 的 Prometheus datasource URL 與 C8 都指向這個固定別名，不是變數內插的 IP | 否 | `thanos-query-backend` |
-| `thanos_query_port` | Thanos Query 的 Prometheus-compatible API port | 否 | `10902` |
+| `thanos_query_port` | Thanos Query 的 Prometheus-compatible API port（**不是**容器內部的 10902，是 `thanos-query-apply.yml`/`dashboard-apply.yml` 一致改用的 host-published port，見該檔 `thanos_query_http_port` 的說明：刻意避開跟站台 Prometheus 自己的 Thanos Sidecar 固定佔用的 10902 collide） | 否 | `10912` |
 | `grafana_admin_password` | Grafana admin 密碼（`GF_SECURITY_ADMIN_PASSWORD`） | 是 | 無 |
 | `grafana_host_data_dir` | Grafana 資料目錄（dashboards/session 等） | 否 | `/var/lib/pilot/grafana` |
 | `loki_host_data_dir` | Loki 資料目錄（chunks/index） | 否 | `/var/lib/pilot/loki` |
@@ -90,7 +91,7 @@
 | C5  | config   | Grafana provisioning 檔含 Loki datasource（固定 uid `pilot-loki`）       | 0 | grep -qE 'uid:\s*pilot-loki' /etc/pilot/dashboard/grafana/provisioning/datasources/datasources.yml; echo $? |
 | C6  | config   | Grafana provisioning 檔含 Prometheus datasource（固定 uid `pilot-thanos-query`） | 0 | grep -qE 'uid:\s*pilot-thanos-query' /etc/pilot/dashboard/grafana/provisioning/datasources/datasources.yml; echo $? |
 | C7  | functional | Loki 本機注入一筆帶唯一 job label 的測試日誌，query 回同一筆              | ~PILOT-DASHBOARD-SELFTEST | sh -c 'curl -fsS -X POST http://127.0.0.1:3100/loki/api/v1/push -H "Content-Type: application/json" -d "{\"streams\":[{\"stream\":{\"job\":\"pilot-dashboard-selftest\"},\"values\":[[\"$(date +%s%N)\",\"PILOT-DASHBOARD-SELFTEST\"]]}]}"; sleep 2; curl -fsS -G http://127.0.0.1:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-dashboard-selftest\"}"' |
-| C8  | network  | `thanos-query-backend`別名（Prometheus datasource 上游）連通性           | ~200 | curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 http://thanos-query-backend:10902/-/healthy |
+| C8  | network  | `thanos-query-backend`別名（Prometheus datasource 上游）連通性           | ~200 | curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 http://thanos-query-backend:10912/-/healthy |
 | C9  | dir      | Grafana 資料目錄存在（dashboards/session 持久化）                        | present | test -d /var/lib/pilot/grafana |
 | C10 | dir      | Loki 資料目錄存在（chunks/index 持久化）                                 | present | test -d /var/lib/pilot/loki |
 | C11 | file     | Grafana dashboard provisioning provider 設定檔存在                     | present | test -f /etc/pilot/dashboard/grafana/provisioning/dashboards/dashboards.yml |
@@ -157,7 +158,7 @@
   - C4 fail → Grafana 啟動失敗；常見原因是 `grafana_admin_password` 未設定
   - C5/C6 fail → provisioning 檔沒 render 成功或路徑不對；檢查 apply playbook 的 template task
   - C7 fail → Loki push/query API 本身有問題，跟轉送鏈路無關
-  - C8 fail → `thanos_query_target_host` 沒填、填錯，或該主機的 `thanos-query.md` 尚未套用/防火牆擋住 10902
+  - C8 fail → `thanos_query_target_host` 沒填、填錯，或該主機的 `thanos-query.md` 尚未套用/防火牆擋住 10912；若對方是套用了非預設 `-e thanos_query_http_port=<值>` 的舊環境，`thanos_query_port` 也要跟著改成同一個值
   - C9/C10 fail → 目錄沒建立或權限有誤導致 container 啟動失敗（見 §5 uid 備註）
   - C11 fail → dashboard provisioning provider 設定檔沒 render 成功；檢查 apply playbook 的 template task
   - C12/C13 fail → 對應的 dashboard JSON 檔沒 render 成功，或 uid 被意外改掉
@@ -178,3 +179,4 @@
 |------|------|------|--------|
 | 2026-07-06 | v1.0 | 初版 | sre |
 | 2026-07-06 | v1.1 | 新增 C11–C14:內建兩份 dashboard(Sites Overview、Logs Explorer),用 Grafana 原生 template variable 依環境自動列出 site/job,不需要重新套用 playbook | sre |
+| 2026-07-17 | v1.2 | 修正 C8 與 `thanos_query_port` 說明：`dashboard-apply.yml` 的 `thanos_query_port` 早已跟 `thanos-query-apply.yml` 的 `thanos_query_http_port` 一致改為預設 `10912`（避開跟站台 Prometheus 自己的 Thanos Sidecar 固定佔用的host port 10902 collide），本檔原本仍記載/寫死 `10902`，跟現行程式碼不符——`docs/runbooks/metrics-alerting.md` 整併重測發現 `thanos-query.md` 的同一種落差後，比對 `dashboard-apply.yml` 源碼與 `minimal-poc-architecture.md` v2.1 變更紀錄確認 dashboard 這邊也有同一個問題，一併修正 | sre |

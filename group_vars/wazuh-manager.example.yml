@@ -13,7 +13,8 @@
 #    的 `log-server` group。
 #
 #  ⚠️ 前置依賴:目標主機要先過 docker preflight(docker.io + docker.service
-#  + compose v2 plugin),即 core-infra-provider-apply.yml -e infra_role=docker
+#  + compose v2 plugin),即 playbooks/apply/docker-apply.yml(2026-07-17 起
+#  獨立 playbook,原本是 core-infra-provider-apply.yml -e infra_role=docker)
 #  ——見 docs/verification/docker.md。
 #
 #  ⚠️ 資源需求(v1.0 實測踩過的雷,見 docs/runbooks/wazuh-manager.md §5):

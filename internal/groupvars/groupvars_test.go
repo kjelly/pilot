@@ -45,6 +45,87 @@ func TestEntries(t *testing.T) {
 	}
 }
 
+// Mirrors group_vars/prometheus.example.yml, whose prose comments embed
+// indented YAML illustrations (host_vars snippets, an alert-rule body).
+// Those must not become editable rows: the real pilot-edit wizard showed
+// three prometheus_site_label entries and "setting" the site-b one
+// rewrote a documentation line (found 2026-07-17 during the minimal-poc
+// re-verification).
+const illustratedDoc = `# 建議直接放進 host_vars/<主機短名>.yml:
+#
+#   # host_vars/site-a.yml
+#   prometheus_site_label: site-a
+#
+#   # host_vars/site-b.yml
+#   prometheus_site_label: site-b
+prometheus_site_label: ""
+
+# 備份目的地(SeaweedFS S3 gateway)的 IP 或 FQDN。
+thanos_s3_target_host: ""
+
+# 走外部 S3 時,取消註解並覆寫:
+# thanos_s3_endpoint: "s3.internal.example.com:443"
+
+# 範例 rules 檔內容:
+#   groups:
+#     - name: mysite-rules
+#       rules:
+#         - alert: DiskSpaceLow
+#           expr: node_filesystem_avail_bytes{mountpoint="/"} < 5e9
+#           for: 5m
+#           labels: { severity: warning }
+`
+
+func TestEntries_SkipsIndentedCommentIllustrations(t *testing.T) {
+	doc := Parse([]byte(illustratedDoc))
+	entries := doc.Entries()
+
+	var keys []string
+	for _, e := range entries {
+		keys = append(keys, e.Key)
+	}
+	want := []string{"prometheus_site_label", "thanos_s3_target_host", "thanos_s3_endpoint"}
+	if len(entries) != len(want) {
+		t.Fatalf("got keys %v, want %v", keys, want)
+	}
+	for i, k := range want {
+		if entries[i].Key != k {
+			t.Fatalf("got keys %v, want %v", keys, want)
+		}
+	}
+
+	// The one prometheus_site_label offered must be the real (active)
+	// line, not one of the commented host_vars illustrations.
+	if !entries[0].Active {
+		t.Errorf("prometheus_site_label entry should be the active line: %+v", entries[0])
+	}
+	// thanos_s3_endpoint is a genuine top-level commented default.
+	if entries[2].Active || entries[2].Value != "s3.internal.example.com:443" {
+		t.Errorf("thanos_s3_endpoint entry = %+v", entries[2])
+	}
+}
+
+func TestEntries_SkipsBlockScalarBody(t *testing.T) {
+	// alertmanager.example.yml embeds the whole Alertmanager YAML as a
+	// block scalar; its indented body lines are text, not vars.
+	doc := Parse([]byte("alertmanager_config: |\n  route:\n    receiver: 'null'\n    group_wait: 30s\n"))
+	entries := doc.Entries()
+	if len(entries) != 1 || entries[0].Key != "alertmanager_config" {
+		t.Fatalf("got %+v, want only alertmanager_config", entries)
+	}
+}
+
+func TestEntries_DeduplicatesRepeatedCommentedKey(t *testing.T) {
+	doc := Parse([]byte("# retention: 6h\n\n# retention: 12h\n"))
+	entries := doc.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Key != "retention" || entries[0].Value != "6h" || entries[0].Active {
+		t.Errorf("entries[0] = %+v", entries[0])
+	}
+}
+
 func TestSetValue_ActivatesAndRewritesInPlace(t *testing.T) {
 	doc := Parse([]byte(sampleDoc))
 	entries := doc.Entries()

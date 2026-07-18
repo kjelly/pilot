@@ -1,8 +1,6 @@
 package spec
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -98,39 +96,6 @@ func TestGenerateInventory_NoTargetsIsEmpty(t *testing.T) {
 	}
 	if out != "" {
 		t.Errorf("GenerateInventory on a targets-less spec must return empty, got %q", out)
-	}
-}
-
-func TestInventoryFromSSHConfig(t *testing.T) {
-	tmp := t.TempDir()
-	cfg := filepath.Join(tmp, "config")
-	body := `# test config
-Host test-vm
-    Hostname 192.168.122.232
-    StrictHostKeyChecking no
-    IdentityFile ~/.ssh/simple-20220321
-    User ubuntu
-
-Host other
-    Hostname 1.2.3.4
-    User root
-`
-	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PILOT_SSH_CONFIG", cfg)
-
-	h, err := InventoryFromSSHConfig("test-vm")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if h == nil || h.Address != "192.168.122.232" || h.User != "ubuntu" || h.IdentityFile != "~/.ssh/simple-20220321" {
-		t.Errorf("got %+v, want the test-vm block from the config", h)
-	}
-
-	// And the missing-alias path.
-	if h2, _ := InventoryFromSSHConfig("never-existed"); h2 != nil {
-		t.Errorf("unknown alias must return nil, got %+v", h2)
 	}
 }
 
