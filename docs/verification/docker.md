@@ -1,131 +1,175 @@
-# Verification Spec — docker (container engine)
+---
+schemaVersion: 2
+compatibility: {minPilotVersion: "0.9"}
+intent:
+  summary: docker container engine
+  source: production container runtime acceptance contract
+  maintainer: sre
+targets:
+  roles: [docker]
+  hostScope: per-host
+  platforms:
+    - {os: ubuntu, versions: ["22.04", "24.04"]}
+inputs: []
+traceability: {components: [docker]}
+defaults:
+  become: true
+  timeout: 60s
+  action: {mode: readOnly}
+evidencePolicy: {captureStdout: true, retention: retain-all}
+---
 
-> 版本：v1.2
-> 對齊規範：pilot 通用 container engine 規範（`docker.io` 提供 container runtime；`db` 跟 `keycloak` 兩個 infra role 都跑在它上面）
-> 維護者：sre
+# Verification Spec — docker container engine
 
-## 1. 目標系統
+This v2 acceptance contract verifies effective package, service, socket,
+runtime, network, Compose, and cgroup behavior. C5 is the only mutating probe:
+it creates an automatically removed test container and then verifies cleanup.
 
-| Hostname     | Group          | Address          | User   | Port | IdentityFile  |
-|--------------|----------------|------------------|--------|------|---------------|
-| docker-host  | docker         |                  |        |      |               |
-| core         | core           |                  |        |      |               |
+## Checks
 
-> 同一台 host 可同時是 `docker` + `core`（sibling-of-vm-target pattern）。`docker`
-> group 是本檔預設目標。
-
-## 2. Checklist
-
-| ID  | Category    | Check                                                                                | Expected | Command |
-|-----|-------------|--------------------------------------------------------------------------------------|----------|---------|
-| C1  | pkg         | docker server 已安裝（`docker.io` 套件；dev box 沒裝會 fail）                            | ~1       | dpkg-query -W -f='${Package}\n' docker.io 2>/dev/null | awk "/^docker\\.io$/ {f=1} END{print f+0}" |
-| C2  | service     | docker 服務 active（systemd unit 為 `docker.service`）                                  | ~active  | systemctl is-active docker 2>&1 | head -n1 |
-| C3  | cli         | `docker --version` 印出 `Docker version ...` 字串                                    | ~Docker | docker --version 2>&1 | head -n1 |
-| C4  | socket      | `/var/run/docker.sock` 存在且 group=docker                                             | ~docker  | stat -c '%a %U %G %n' /var/run/docker.sock 2>/dev/null | head -n1 |
-| C5  | hello-world | `docker run --rm hello-world` 至少能跑完一次（證明 pull + run + cleanup 全鏈通）           | ~Hello   | docker run --rm hello-world 2>&1 | grep -m1 -oE 'Hello from Docker' | head -n1 |
-| C6  | network     | `docker network ls` 至少包含預設三個（bridge / host / none）                              | ~bridge  | docker network ls 2>/dev/null | awk '$2 == "bridge" {print $2; exit}' |
-| C7  | compose     | `docker compose version` 有印出來（v2 plugin；apt 裝 `docker-compose-v2` 給）             | ~Docker  | docker compose version 2>&1 | head -n1 |
-| C8  | cgroup      | docker info 顯示 cgroup driver 為 systemd 或 cgroupfs（host 跟 container driver 一致）   | ~Cgroup  | docker info 2>/dev/null | grep -m1 -E 'Cgroup (Driver|Version)' | head -n1 |
-
-> C5 hello-world 第一次跑會 pull image（~10s）；後續跑 < 1s。
-> C4 `~docker` 是 substring 比對，捕到 `/var/run/docker.sock` 那一行（含 group 名 `docker`）。
-> C6 **不可**用 `docker network ls --format '{{.Name}}'`——`{{ }}` 會被
-> ansible ad-hoc 的 Jinja 模板引擎吃掉（`Syntax error in template:
-> unexpected '.'`，task 直接 FAILED、rc=2），這是 2026-07-06 對真實 vm-target
-> 跑 `pilot verify` 撞到的實例（wazuh-manager v2.0 的 docker preflight），
-> 不是理論風險；改用 `awk '$2 == "bridge"'` 比對 NETWORK NAME 欄。所有 spec
-> Command 欄一律不准出現 docker Go template 的 `{{ }}` 語法。
-> C7 預期 `Docker Compose version v2.x.x` 之類 — substring `Docker` 即可。
-> C8 預期 `Cgroup Driver: systemd` 或 `Cgroup Version: 2` — substring `Cgroup` 即可。
-
-## 3. 證據收集
-
-- 工具：`pilot verify docs/verification/docker.md -i inventory-core-infra.yaml -l docker`
-- 格式：`.verification/docker-<UTC>.{ndjson,md}`
-- Row 數：8
-
-範例輸出（dev box 沒裝 docker → 大部分 fail）：
-
-```json
-{"id":"C1","status":"fail","detail":"rc=0, expected 1 (stdout 0)"}
-{"id":"C2","status":"fail","detail":"inactive"}
-{"id":"C5","status":"fail","detail":"docker not found"}
+```yaml
+- id: C1
+  category: pkg
+  check: docker.io package is installed
+  probe: |
+    dpkg-query -W -f='${Package}\n' docker.io 2>/dev/null | awk "/^docker\\.io$/ {f=1} END{print f+0}"
+  expect: {stdout: {equals: "1"}}
+  tags: [docker-C1]
+- id: C2
+  category: service
+  check: docker.service is active
+  probe: |
+    systemctl is-active docker 2>&1 | head -n1
+  expect: {stdout: {equals: active}}
+  tags: [docker-C2]
+- id: C3
+  category: cli
+  check: docker CLI reports its version
+  probe: |
+    docker --version 2>&1 | head -n1
+  expect: {stdout: {contains: "Docker version"}}
+  verifyOnly: true
+- id: C4
+  category: socket
+  check: docker socket exists and belongs to the docker group
+  probe: |
+    stat -c '%a %U %G %n' /var/run/docker.sock 2>/dev/null | head -n1
+  expect: {stdout: {regex: '^[0-7]+ [^ ]+ docker /var/run/docker\.sock$'}}
+  tags: [docker-C4]
+- id: C5
+  category: hello-world
+  check: docker can pull, run, and automatically remove a test container
+  probe: |
+    docker run --rm hello-world 2>&1 | grep -m1 -oE 'Hello from Docker' | head -n1
+  expect: {stdout: {equals: "Hello from Docker"}}
+  timeout: 120s
+  action:
+    mode: isolatedMutation
+    authorization: explicit
+    residualRisk: hello-world image remains in the local image cache
+    cleanup:
+      required: true
+      probe: |
+        test "$(docker ps -aq --filter ancestor=hello-world | wc -l)" -eq 0
+      expect: {exitCode: 0}
+  verifyOnly: true
+- id: C6
+  category: network
+  check: the default bridge network exists
+  probe: |
+    docker network ls 2>/dev/null | awk '$2 == "bridge" {print $2; exit}'
+  expect: {stdout: {equals: bridge}}
+  verifyOnly: true
+- id: C7
+  category: compose
+  check: Docker Compose v2 is installed
+  probe: |
+    docker compose version 2>&1 | head -n1
+  expect: {stdout: {contains: "Docker Compose"}}
+  verifyOnly: true
+- id: C8
+  category: cgroup
+  check: docker reports an effective cgroup driver or version
+  probe: |
+    docker info 2>/dev/null | grep -m1 -E 'Cgroup (Driver|Version)' | head -n1
+  expect: {stdout: {regex: '^ Cgroup (Driver|Version): .+'}}
+  verifyOnly: true
 ```
 
-## 4. PASS / FAIL 規則
+## PASS / FAIL
 
-- C1–C8 全部 `status=pass` → **PASS**：本機已準備好跑 `db` 跟 `keycloak` 兩個 Docker-backed role
-- 任一 fail → **FAIL**；常見修法：
-  - C1 fail → `apt install docker.io docker-compose-v2`（Debian）；`dnf install docker docker-compose`（RHEL）
-  - C2 fail → `systemctl enable --now docker`
-  - C3 fail → docker CLI 不在 `$PATH`；檢查 `/usr/bin/docker` 是否被 strip 掉（v29 的 `docker --version` 是 `Docker version X.Y.Z, build ...`，沒 Server/Client 分行）
-  - C4 fail → `/var/run/docker.sock` 不在；dockerd 沒啟動（先解決 C2）
-  - C5 fail → hello-world pull 失敗（網路 / DNS）；先試 `docker pull hello-world` 看錯誤
-  - C6 fail → dockerd 沒建預設 network（罕見；多半是 dockerd crash → 看 `journalctl -u docker`）
-  - C7 fail → 沒裝 `docker-compose-v2` plugin；apt 補
-  - C8 fail → cgroup driver 不一致（混 systemd + cgroupfs）；看 kernel 是不是 cgroup v2（Ubuntu 22.04+ 預設 v2）
+All applicable C1–C8 rows must pass. An unresolved host, runner error,
+timeout, failed cleanup, or matcher failure makes the deployment transaction
+fail. `not_applicable` is not used by this contract.
 
-## 5. 例外與已知偏差
+## Traceability
 
-| ID  | 例外內容                                                              | 適用環境       | 期限     |
-|-----|----------------------------------------------------------------------|---------------|----------|
-| C5  | 在 air-gapped / 嚴格 firewall 環境下 pull 失敗                            | 任何          | 至 network 修好 |
-| C8  | 某些 cloud image 預設 cgroupfs；`docker info` 顯示 `Cgroup Version: 1` | 舊版 image    | 無       |
+- C1, C2, and C4 map directly to `docker-C1`, `docker-C2`, and `docker-C4`.
+- C3, C5, C6, C7, and C8 verify effective behavior derived from installation
+  and are intentionally verification-only.
 
-## 6. Playbook 對應
+## Actual-run evidence
 
-對應的 verify playbook（`playbooks/verify/docker.yml`）**已於 2026-07-17 棄用**（僅存檔參考，見該目錄 README.md）；驗收直接 `pilot verify` 吃本 spec 執行。
-
-對應手寫的 **apply** playbook：`playbooks/apply/docker-apply.yml`（獨立 playbook，
-2026-07-17 從 `core-infra-provider-apply.yml` 的 `infra_role=docker` 段拆出，理由
-與同日拆 `keycloak-db` 相同——machine 級的 docker 引擎安裝跟 dns/ntp provider
-設定沒有共通的 stage/confirm 生命週期）
-
-| Spec ID | Apply task (示例)                              | 備註 |
-|---------|-----------------------------------------------|------|
-| C1      | `apt install docker.io docker-compose-v2`       | apt + become |
-| C2      | `systemd enable --now docker`                   | idempotent |
-| C3-C8   | （無對應 task；`docker` 套件裝好後自動能用）         | 驗證端檢查 |
-
-> Apply playbook 必須 `block/rescue` 保護：apt 失敗（網路問題）不要 lockout host。
-
-## 7. 把 FAIL 變 PASS 的 SOP
+2026-07-18T10:27Z, the disposable VM inventory exposed one `docker` role
+alias. The following command was executed against that role; the VM name is
+redacted for publication. `--allow-isolated-mutation` authorized C5 and its
+mandatory cleanup probe.
 
 ```bash
-# 1. 套前先看這台 host 是哪一個 group
-ansible docker-host -i inventory-core-infra.yaml -m shell -a "id; hostname"
-
-# 2. 跑 dry-run
-go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/docker-apply.yml \
-    -e target_group=docker \
-    --check --diff
-
-# 3. 真套用
-go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/docker-apply.yml \
-    -e target_group=docker
-# PLAY RECAP: changed=4..6 failed=0
-#   - apt install docker.io docker-compose-v2
-#   - apt cache update
-#   - systemd docker enable/start
-#   - user group add (root → docker)
-
-# 4. 立即 verify
-go run ./cmd/pilot vm-target verify --name core \
-    docs/verification/docker.md
-# verdict: **PASS**  (pass=8 fail=0 skip=0)
+go run ./cmd/pilot vm-target verify --name <redacted-vm> \
+  docs/verification/docker.md -l docker --allow-isolated-mutation
 ```
 
-> **順序很重要**：`docker` 必須在 `db` 跟 `keycloak` 之前（後兩者用 docker）。
-> 跑同一台 VM 場景（sibling-of-vm-target）：同一 IP 跑 3 個 role 就好，只是
-> 現在是 3 支各自獨立的 playbook（`docker-apply.yml` → `keycloak-db-apply.yml`
-> → `keycloak-apply.yml`），不再是同一支 playbook 換 `infra_role`。
+Actual output (exit 0):
 
-## 8. 變更紀錄
+```text
+▶ pilot verify docs/verification/docker.md -i /tmp/pilot-inv-<redacted>.yaml -l docker --allow-isolated-mutation
+✔ NDJSON:   <redacted-report-dir>/docker-20260718-102728.ndjson
+✔ Report:   <redacted-report-dir>/docker-20260718-102728.md
 
-| 日期       | 版本 | 變更                                       | 變更者 |
-|------------|------|-------------------------------------------|--------|
-| 2026-07-01 | v1.0 | 初版（C1–C8：docker engine 端到端健康）     | sre    |
-| 2026-07-06 | v1.1 | C6 移除 docker Go template `{{.Name}}`（被 ansible ad-hoc 的 Jinja 吃掉、task FAILED rc=2，`pilot verify` 下 C6 永遠 fail——wazuh-manager v2.0 docker preflight 實測撞到），改用 `awk` 欄位比對；§2 註記 + regression test 加「Command 欄禁用 `{{`」invariant | sre    |
-| 2026-07-17 | v1.2 | Apply playbook 從 `core-infra-provider-apply.yml` 的 `infra_role=docker` 段拆成獨立的 `playbooks/apply/docker-apply.yml`；§6/§7 更新指令；spec checklist（C1–C8）本身不變 | pilot  |
+verdict: **PASS**  (pass=8 fail=0 skip=0)
+```
+
+## Actual-run evidence
+
+Target inventory was rendered from `tmp/docker-v2-topology.yaml`; its `docker`
+group contained only the disposable Ubuntu 24.04 VM `pilot-docker-v2`
+(`192.168.122.5`). The following command was run on 2026-07-18:
+
+```bash
+go run ./cmd/pilot vm-target topology test \
+  --topology tmp/docker-v2-topology.yaml \
+  --playbook playbooks/apply/docker-apply.yml \
+  --verify docs/verification/docker.md=docker \
+  --verify-timeout 150 \
+  -- -e stage=sandbox
+```
+
+The first run stopped before C5 because the topology frontend had not
+propagated explicit isolated-mutation authorization. The shared transaction
+rolled the VM back to `pre-test-1784370128`. After adding the explicit
+authorization flag, the same command completed:
+
+```text
+PLAY RECAP *********************************************************************
+pilot-docker-v2 : ok=5 changed=2 unreachable=0 failed=0 skipped=2 rescued=0 ignored=0
+
+verdict: **PASS**  (pass=8 fail=0 skip=0)
+
+PLAY RECAP *********************************************************************
+pilot-docker-v2 : ok=5 changed=0 unreachable=0 failed=0 skipped=2 rescued=0 ignored=0
+
+✓ Idempotency check passed (changed=0)
+🎉 ALL TESTS PASSED SUCCESSFULLY!
+```
+
+The C5 observation was `Hello from Docker`; its declared cleanup probe also
+passed. Cleanup status is persisted as a separate append-only `cleanup`
+delivery event, so an isolated mutation cannot be audited as successful
+without cleanup evidence.
+
+## Change record
+
+| Date | Version | Change |
+|---|---|---|
+| 2026-07-18 | v2.0 | Migrated to strict Spec v2, strengthened C1/C2/C4/C5 matchers, and declared C5 isolated-mutation cleanup. |

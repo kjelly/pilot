@@ -896,10 +896,28 @@ func runVtVerify(cmd *cobra.Command, args []string) error {
 
 	spec := args[0]
 	extra := args[1:]
-	pilotArgs := []string{"verify", spec, "-i", invPath, "-l", t.Name}
+	pilotArgs := []string{"verify", spec, "-i", invPath}
+	// A v2 spec's contract role can be an alias of the disposable VM rather
+	// than its generated target name. Honour an explicit child --limit so the
+	// expected-host resolver sees the contract role, not a duplicate VM alias.
+	if !verifyExtraHasLimit(extra) {
+		pilotArgs = append(pilotArgs, "-l", t.Name)
+	}
 	pilotArgs = append(pilotArgs, extra...)
 	fmt.Fprintf(cmd.ErrOrStderr(), "▶ pilot %s\n", strings.Join(pilotArgs, " "))
 	return execPilot(cmd.OutOrStdout(), pilotArgs...)
+}
+
+func verifyExtraHasLimit(args []string) bool {
+	for i, arg := range args {
+		if arg == "-l" || arg == "--limit" {
+			return i+1 < len(args)
+		}
+		if strings.HasPrefix(arg, "--limit=") {
+			return strings.TrimPrefix(arg, "--limit=") != ""
+		}
+	}
+	return false
 }
 
 // vtStageInventory loads the (running) target and writes its generated
@@ -1558,7 +1576,7 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 		},
 		Verify: func(context.Context) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 4/5] L5 Verification Spec ===")
-			pilotArgs := []string{"verify", vtTestSpec, "-i", invPath, "-l", t.Name}
+			pilotArgs := []string{"verify", vtTestSpec, "-i", invPath, "-l", t.Name, "--allow-isolated-mutation"}
 			if vtTestVerifyTimeout > 0 {
 				pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTestVerifyTimeout))
 			}

@@ -22,20 +22,21 @@ import (
 )
 
 var (
-	verifyInventory  string
-	verifyLimit      string
-	verifyHost       string
-	verifyLocal      bool
-	verifyReportDir  string
-	verifyTimeoutSec int
-	verifyRoot       string
-	verifyDir        string
-	verifyProbe      string
-	verifyProbeExp   string
-	verifyInputs     []string
-	verifyInputsFile string
-	verifyStage      string
-	verifyComponents []string
+	verifyInventory             string
+	verifyLimit                 string
+	verifyHost                  string
+	verifyLocal                 bool
+	verifyReportDir             string
+	verifyTimeoutSec            int
+	verifyRoot                  string
+	verifyDir                   string
+	verifyProbe                 string
+	verifyProbeExp              string
+	verifyInputs                []string
+	verifyInputsFile            string
+	verifyStage                 string
+	verifyComponents            []string
+	verifyAllowIsolatedMutation bool
 )
 
 var verifyCmd = &cobra.Command{
@@ -78,6 +79,7 @@ func init() {
 	verifyCmd.Flags().StringVar(&verifyInputsFile, "inputs-file", "", "YAML map supplying non-secret Spec v2 inputs")
 	verifyCmd.Flags().StringVar(&verifyStage, "stage", "", "Spec v2 applicability stage: sandbox, staging, or prod (default: PILOT_STAGE or sandbox)")
 	verifyCmd.Flags().StringArrayVar(&verifyComponents, "selected-component", nil, "component selected in the current plan for Spec v2 applicability; repeatable")
+	verifyCmd.Flags().BoolVar(&verifyAllowIsolatedMutation, "allow-isolated-mutation", false, "explicitly authorize v2 isolatedMutation checks and their mandatory cleanup")
 	rootCmd.AddCommand(verifyCmd)
 }
 
@@ -174,15 +176,16 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 		return fmt.Errorf("--stage must be sandbox, staging, or prod")
 	}
 	tool := &tools.VerifySpecTool{
-		Inventory:          verifyInventory,
-		Limit:              verifyLimit,
-		LocalOnly:          verifyLocal,
-		Host:               verifyHost,
-		EvidenceWriter:     writer,
-		Inputs:             inputs.Overrides,
-		EnvironmentInputs:  inputs.Environment,
-		Stage:              stage,
-		SelectedComponents: components,
+		Inventory:             verifyInventory,
+		Limit:                 verifyLimit,
+		LocalOnly:             verifyLocal,
+		Host:                  verifyHost,
+		EvidenceWriter:        writer,
+		Inputs:                inputs.Overrides,
+		EnvironmentInputs:     inputs.Environment,
+		Stage:                 stage,
+		SelectedComponents:    components,
+		AllowIsolatedMutation: verifyAllowIsolatedMutation,
 	}
 	res, err := tool.Execute(ctx, mustJSONVerify(map[string]any{
 		"spec_path":   specPath,
