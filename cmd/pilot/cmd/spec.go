@@ -15,12 +15,16 @@ import (
 )
 
 var (
-	specLintOnly    bool
-	specGenerateOut string
-	specRunIDFlag   string
-	specHosts       string
-	specConnection  string
-	specRoot        string
+	specLintOnly         bool
+	specGenerateOut      string
+	specRunIDFlag        string
+	specHosts            string
+	specConnection       string
+	specRoot             string
+	specMigrateOut       string
+	specMigrateAction    string
+	specMigrateTagPrefix string
+	specMigrateForce     bool
 )
 
 var specCmd = &cobra.Command{
@@ -59,6 +63,78 @@ func init() {
 	specCmd.Flags().StringVar(&specConnection, "connection", "", "override play connection (default: local). Use a real SSH-style value to disable local connection.")
 	specCmd.Flags().StringVar(&specRoot, "root", "", "project root (where docs/ and playbooks/ live). Default: $PILOT_ROOT or current working directory. Lets specs and generated playbooks live outside this tool repo.")
 	rootCmd.AddCommand(specCmd)
+	specCmd.AddCommand(specMigrateCmd)
+}
+
+var specMigrateCmd = &cobra.Command{
+	Use:   "migrate <v1-spec.md>",
+	Short: "Create a review-gated Spec v2 draft and migration sidecar report",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runSpecMigrate,
+}
+
+func init() {
+	specMigrateCmd.Flags().StringVarP(&specMigrateOut, "output", "o", "", "destination v2 markdown path (default: <input>.v2.md)")
+	specMigrateCmd.Flags().StringVar(&specMigrateAction, "default-action", "", "explicit reviewed default action (only readOnly is currently supported)")
+	specMigrateCmd.Flags().StringVar(&specMigrateTagPrefix, "tag-prefix", "", "explicit reviewed apply-tag prefix, for example docker")
+	specMigrateCmd.Flags().BoolVar(&specMigrateForce, "force", false, "overwrite an existing output or sidecar report")
+}
+
+func runSpecMigrate(cmd *cobra.Command, args []string) error {
+	source := args[0]
+	if !filepath.IsAbs(source) && specRoot != "" {
+		source = filepath.Join(specRoot, source)
+	}
+	raw, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("read v1 spec: %w", err)
+	}
+	legacy, err := spec.Parse(source)
+	if err != nil {
+		return fmt.Errorf("parse v1 spec: %w", err)
+	}
+	if legacy.SchemaVersion != 1 {
+		return fmt.Errorf("spec migrate only accepts v1 specs")
+	}
+	out := specMigrateOut
+	if out == "" {
+		out = strings.TrimSuffix(source, filepath.Ext(source)) + ".v2.md"
+	}
+	if !filepath.IsAbs(out) && specRoot != "" {
+		out = filepath.Join(specRoot, out)
+	}
+	reportPath := out + ".migration.json"
+	if !specMigrateForce {
+		for _, path := range []string{out, reportPath} {
+			if _, err := os.Stat(path); err == nil {
+				return fmt.Errorf("refusing to overwrite %s; pass --force", path)
+			} else if !os.IsNotExist(err) {
+				return fmt.Errorf("stat migration output: %w", err)
+			}
+		}
+	}
+	draft, report, err := spec.MigrateV1(source, raw, legacy, spec.MigrationOptions{DefaultAction: specMigrateAction, TagPrefix: specMigrateTagPrefix})
+	if err != nil {
+		return err
+	}
+	encodedReport, err := spec.MarshalMigrationReport(report)
+	if err != nil {
+		return fmt.Errorf("encode migration report: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return fmt.Errorf("mkdir migration output: %w", err)
+	}
+	if err := os.WriteFile(out, draft, 0o644); err != nil {
+		return fmt.Errorf("write v2 draft: %w", err)
+	}
+	if err := os.WriteFile(reportPath, encodedReport, 0o600); err != nil {
+		return fmt.Errorf("write migration report: %w", err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "✔ migrated draft: %s\n✔ migration report: %s\n", out, reportPath)
+	if report.HasFindings() {
+		return fmt.Errorf("migration produced %d review findings; v2 draft is intentionally not runnable", len(report.Findings))
+	}
+	return nil
 }
 
 func runSpec(cmd *cobra.Command, args []string) error {

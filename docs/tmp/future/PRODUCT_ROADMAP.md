@@ -28,7 +28,7 @@ Codex/Claude 直接產生 verification spec、apply playbook 與 regression test
 | Append-only evidence | **已實作並驗證** | schema v13、operation/evidence idempotency、heartbeat/finalization；rotation 移 P5 |
 | ComponentContract | **loader baseline 已實作／runtime wiring 待完成** | strict loader、role 1:N、dependency placement、provider selection、autoDeploy eligibility；尚未接 deploy/TUI |
 | M0.3/M0.4 | **M0.3 已實作；M0.4 尚未實作** | append-only evidence 已接 standalone verify；deploy transaction 尚待整合 |
-| Spec v2（M2.1–M2.3） | **M2.1/M2.2 已實作；M2.3 尚未實作** | strict v2 parser/runtime 已有 local CLI evidence；migration 與跨 target acceptance 待完成 |
+| Spec v2（M2.1–M2.3） | **M2.1/M2.2 已實作；M2.3 migration CLI 已實作** | strict v2 parser/runtime、review-gated migrate draft/sidecar 已有 CLI evidence；正式遷移與跨 target acceptance 待完成 |
 | P3/P4/P5 | **尚未實作** | 仍是 roadmap |
 
 ## 產品北極星
