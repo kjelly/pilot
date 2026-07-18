@@ -125,11 +125,32 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	}
 
 	ctx := context.Background()
-	tool := &tools.VerifySpecTool{
+	st, err := openSpecStore()
+	if err != nil {
+		return fmt.Errorf("open evidence store: %w", err)
+	}
+	defer st.Close()
+	writer, err := store.StartRun(ctx, st, store.RunStarted{
+		Stage:     "verify",
+		Component: stemForVerify(specPath),
 		Inventory: verifyInventory,
-		Limit:     verifyLimit,
-		LocalOnly: verifyLocal,
-		Host:      verifyHost,
+	})
+	if err != nil {
+		return fmt.Errorf("start verification evidence run: %w", err)
+	}
+	writer.StartHeartbeat(ctx, 10*time.Second)
+	finalized := false
+	defer func() {
+		if !finalized {
+			_ = writer.Finish(context.Background(), store.RunFinished{Outcome: "failure", ExitCode: 1})
+		}
+	}()
+	tool := &tools.VerifySpecTool{
+		Inventory:      verifyInventory,
+		Limit:          verifyLimit,
+		LocalOnly:      verifyLocal,
+		Host:           verifyHost,
+		EvidenceWriter: writer,
 	}
 	res, err := tool.Execute(ctx, mustJSONVerify(map[string]any{
 		"spec_path":   specPath,
@@ -137,13 +158,16 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 		"timeout_sec": verifyTimeoutSec,
 	}))
 	if err != nil {
+		_ = writer.Finish(ctx, store.RunFinished{Outcome: "failure", ExitCode: 1})
 		return err
 	}
 	if res.IsError {
+		_ = writer.Finish(ctx, store.RunFinished{Outcome: "evidence_failed", ExitCode: 1})
 		return fmt.Errorf("verify_spec: %s", res.Content)
 	}
 	rows, err := tools.ReadNDJSON(res.Content)
 	if err != nil {
+		_ = writer.Finish(ctx, store.RunFinished{Outcome: "evidence_failed", ExitCode: 1})
 		return fmt.Errorf("read NDJSON: %w", err)
 	}
 
@@ -168,35 +192,32 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	}
 	ndPath := filepath.Join(verifyReportDir, fmt.Sprintf("%s-%s.ndjson", stem, ts))
 	mdPath := filepath.Join(verifyReportDir, fmt.Sprintf("%s-%s.md", stem, ts))
-	if err := os.WriteFile(ndPath, []byte(res.Content), 0o644); err != nil {
+	if err := os.WriteFile(ndPath, []byte(res.Content), 0o600); err != nil {
 		return fmt.Errorf("write NDJSON: %w", err)
 	}
 	md := renderVerifyReport(parsed, rows)
-	if err := os.WriteFile(mdPath, []byte(md), 0o644); err != nil {
+	if err := os.WriteFile(mdPath, []byte(md), 0o600); err != nil {
 		return fmt.Errorf("write markdown: %w", err)
 	}
 	fmt.Printf("✔ NDJSON:   %s\n✔ Report:   %s\n", ndPath, mdPath)
 
 	// Flip spec_checkpoints.
-	if st, err := openSpecStore(); err == nil {
-		defer st.Close()
-		for _, vr := range rows {
-			stMap := "verified-fail"
-			if vr.Status == "pass" {
-				stMap = "verified-pass"
-			}
-			if vr.Status == "skip" {
-				continue
-			}
-			cp := &store.Checkpoint{
-				SpecPath:     relOrAbs(specPath),
-				RowID:        vr.ID,
-				RunID:        "verify-" + ts,
-				Status:       stMap,
-				VerifyDetail: vr.Detail,
-			}
-			_ = st.UpsertCheckpoint(cp)
+	for _, vr := range rows {
+		stMap := "verified-fail"
+		if vr.Status == "pass" {
+			stMap = "verified-pass"
 		}
+		if vr.Status == "skip" {
+			continue
+		}
+		cp := &store.Checkpoint{
+			SpecPath:     relOrAbs(specPath),
+			RowID:        vr.ID,
+			RunID:        writer.RunID(),
+			Status:       stMap,
+			VerifyDetail: vr.Detail,
+		}
+		_ = st.UpsertCheckpoint(cp)
 	}
 
 	// Verdict line.
@@ -217,9 +238,21 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	}
 	fmt.Printf("\nverdict: **%s**  (pass=%d fail=%d skip=%d)\n", verdict, pass, fail, skip)
 	if fail > 0 {
+		if err := writer.Finish(ctx, store.RunFinished{Outcome: "failure", ExitCode: 1}); err != nil {
+			return fmt.Errorf("finalize verification evidence: %w", err)
+		}
+		finalized = true
 		return fmt.Errorf("verification failed: %d rows", fail)
 	}
+	if err := writer.Finish(ctx, store.RunFinished{Outcome: "success", ExitCode: 0}); err != nil {
+		return fmt.Errorf("finalize verification evidence: %w", err)
+	}
+	finalized = true
 	return nil
+}
+
+func stemForVerify(path string) string {
+	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 }
 
 // runVerifyProbe runs one command through the verify pipeline and prints

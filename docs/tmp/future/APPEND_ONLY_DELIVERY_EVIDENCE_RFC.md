@@ -7,9 +7,10 @@
 > implementation；本版已固定 event/evidence idempotency、cancel finalization
 > 與 maintenance audit identity。
 >
-> **實作標示：資料模型已決策，schema/store/runtime 尚未實作。**
-> 現行 schema 仍是 v12，尚無 `delivery_events`、`verify_evidence`、
-> `RunWriter`、heartbeat 或 generation rotation。
+> **實作標示：M0.3 schema/store 與 standalone `pilot verify` runtime 已實作。**
+> schema v13 現已提供 `delivery_events`、`verify_evidence`、`RunWriter`、
+> heartbeat、append-only trigger 與 v12→v13 migration。generation rotation 仍屬 P5；
+> deploy transaction 對 writer 的使用由 M0.4 實作。
 >
 > Final 代表 schema/store implementation contract 已定案，不代表 schema v13 已
 > 存在。M0.3 可依本 RFC 開工；完成仍須通過 §10 的 executable acceptance tests。

@@ -53,7 +53,8 @@
 | Evidence RFC | **🟢 Final design／runtime 待實作** | event/evidence idempotency、RunWriter、heartbeat/finalization；rotation 移 P5 | schema v13、store API、runs CLI |
 | M0.2 | **🧪 Spike 已驗證／design Final** | JSON decoder、status、expected-host resolver、single-host invocation timeout/scope 決策 | Ansible inventory/scope adapter、bounded runner 正式接線 |
 | M1.1 | **🟡 Loader baseline + 六份 production contracts 已實作** | strict loader/Catalog、canonical `contracts/`、`pilot contract lint`、role cardinality、placement/provider selection、strict tests | 全量 contract lint、catalog/site integration |
-| M0.3/M0.4 | **⏸ 尚未實作** | 無 | delivery events、transaction、rollback/idempotency policy |
+| M0.3 | **✅ 已實作並驗證** | schema v13、append-only event/evidence stream、serialized RunWriter、heartbeat/finalization、standalone verify evidence | deploy transaction 對 writer 的使用（M0.4） |
+| M0.4 | **⏸ 尚未實作** | 無 | deploy transaction、rollback/idempotency policy |
 | M1.2/M1.3 | **⏸ 尚未實作** | 無 | 全量 contracts、DAG/preflight |
 | M2.1–M2.3 | **🟢 Design Final／尚未實作** | applicability/action/secretRef/normalization/migration contract 已定案 | typed matcher、v2 parser、migration |
 | P3/P4/P5 | **⏸ 尚未實作** | 無 | TUI/eval/query |
