@@ -56,7 +56,8 @@
 | M0.3 | **✅ 已實作並驗證** | schema v13、append-only event/evidence stream、serialized RunWriter、heartbeat/finalization、standalone verify evidence | deploy transaction 對 writer 的使用（M0.4） |
 | M0.4 | **⏸ 尚未實作** | 無 | deploy transaction、rollback/idempotency policy |
 | M1.2/M1.3 | **⏸ 尚未實作** | 無 | 全量 contracts、DAG/preflight |
-| M2.1–M2.3 | **🟢 Design Final／尚未實作** | applicability/action/secretRef/normalization/migration contract 已定案 | typed matcher、v2 parser、migration |
+| M2.1 | **✅ 已實作並驗證** | typed `Expect`、v1 Expected compiler、legacy output compatibility evaluator | v2 parser、migration |
+| M2.2–M2.3 | **🟢 Design Final／尚未實作** | applicability/action/secretRef/normalization/migration contract 已定案 | v2 parser、migration |
 | P3/P4/P5 | **⏸ 尚未實作** | 無 | TUI/eval/query |
 
 ## 0. 現況與差距總覽

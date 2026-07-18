@@ -24,7 +24,7 @@
 | M0.2 callback／host resolver | **Spike + pure resolver 已驗證** | decoder 與 expected-host truth table 已測；Ansible scope adapter／runner 未接正式 verify |
 | Safety RFC | **Final／待實作** | canonical action、secret reference/transport 與 v1 自動化邊界已定案 |
 | ComponentContract | **Final／loader 待實作** | traceability、placement、provider selection 與六份 fixtures 已固定 |
-| M2.1 typed matcher | **尚未實作** | 必須等待完整 M0.2 合併 |
+| M2.1 typed matcher | **✅ 已實作並驗證** | `Expect`/`StringMatcher`、v1 compiler、legacy replay compatibility evaluator 已完成 |
 | M2.2 v2 parser | **尚未實作** | 不得新增正式 v2 spec |
 | M2.3 migrate | **尚未實作** | CLI、sidecar report、模板更新皆不存在 |
 

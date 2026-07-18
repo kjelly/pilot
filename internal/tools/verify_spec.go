@@ -253,7 +253,7 @@ func (t *VerifySpecTool) runLocal(ctx context.Context, r spec.Row, timeoutSec in
 		}
 	}
 	detail := fmt.Sprintf("(rc=%d) %s", rc, rawOut)
-	ok, mismatch := matchExpected(r.Expected, detail, rc)
+	ok, mismatch := evaluateV1Expected(r.Expected, detail, rc)
 	status := "pass"
 	if !ok {
 		status = "fail"
@@ -298,7 +298,7 @@ func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host s
 	}
 
 	detail := fmt.Sprintf("(rc=%d) %s", rc, rawOut)
-	ok, mismatch := matchExpected(r.Expected, detail, rc)
+	ok, mismatch := evaluateV1Expected(r.Expected, detail, rc)
 	status := "pass"
 	if !ok {
 		status = "fail"
@@ -376,64 +376,21 @@ func looksLikePermissionError(out string) bool {
 	return permissionErrorRe.MatchString(out)
 }
 
-// matchExpected decides whether captured stdout (or, for rc-equality,
-// the captured rc) satisfies the spec row's Expected value. The
-// previous implementation only checked exit code, which made rows
-// like C1 in pam-oidc-sshd report pass when the command explicitly
-// printed `1` (the rc-echo trick). The matrix this implements:
-//
-//	expected == ""          → rc == 0
-//	expected starts with "^" → anchored regex on stripped stdout
-//	expected is a pure int   → rc (taken from stdout `(rc=N)` first)
-//	expected == "present"    → rc == 0
-//	otherwise                → exact equality after trim
-//
-// The second case is what unblocks the verify-passes-when-it-shouldn't
-// regression in the pam-oidc-sshd spec.
-func matchExpected(expected, detail string, rc int) (bool, string) {
-
-	expected = strings.TrimSpace(expected)
-	clean := stripRunnerPrefix(detail)
-	rcOnly := extractRC(detail)
-
-	switch {
-	case expected == "":
-		return rc == 0, "expected: rc=0 (default)"
-	case strings.HasPrefix(expected, "^"):
-		re, err := regexp.Compile(expected)
-		if err != nil {
-			return false, fmt.Sprintf("invalid regex %q: %v", expected, err)
-		}
-		if re.MatchString(clean) {
-			return true, fmt.Sprintf("regex %q matched %q", expected, truncate(clean, 80))
-		}
-		return false, fmt.Sprintf("regex %q did not match stdout %q", expected, truncate(clean, 80))
-	case isInt(expected):
-		want := atoi(expected)
-		if rcOnly >= 0 {
-			if rcOnly == want {
-				return true, fmt.Sprintf("rc-from-stdout=%d matches expected %d", rcOnly, want)
-			}
-			return false, fmt.Sprintf("rc-from-stdout=%d, expected %d", rcOnly, want)
-		}
-		if rc == want {
-			return true, fmt.Sprintf("rc=%d matches expected %d", rc, want)
-		}
-		return false, fmt.Sprintf("rc=%d, expected %d (detail: %q)", rc, want, truncate(detail, 80))
-	case expected == "present":
-		return rc == 0, "expected: present (rc=0)"
-	case strings.HasPrefix(expected, "~"):
-		want := strings.TrimPrefix(expected, "~")
-		if strings.Contains(clean, want) {
-			return true, fmt.Sprintf("stdout contains %q", want)
-		}
-		return false, fmt.Sprintf("stdout=%q, expected substring ~%q", truncate(clean, 80), want)
-	default:
-		if clean == expected {
-			return true, fmt.Sprintf("stdout matched %q", expected)
-		}
-		return false, fmt.Sprintf("stdout=%q, expected %q", truncate(clean, 80), expected)
+// evaluateV1Expected is the v1 compatibility boundary. It adapts historical
+// detail output to a normalized ProbeResult, then delegates all comparison to
+// spec.Expect.Eval. New formats must construct ProbeResult directly instead.
+func evaluateV1Expected(expected, detail string, rc int) (bool, string) {
+	matcher, err := spec.CompileV1Expected(expected)
+	if err != nil {
+		return false, err.Error()
 	}
+	clean := stripRunnerPrefix(detail)
+	var legacyRC *int
+	if recovered := extractRC(detail); recovered >= 0 {
+		legacyRC = &recovered
+	}
+	verdict := matcher.Eval(spec.ProbeResult{Stdout: clean, ExitCode: rc, LegacyExitCode: legacyRC})
+	return verdict.Pass, verdict.Detail
 }
 
 // stripRunnerPrefix removes a leading rc-only or "(rc=N)" marker from
@@ -507,13 +464,6 @@ func atoi(s string) int {
 		n = n*10 + int(c-'0')
 	}
 	return n
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
 }
 
 var (
@@ -624,7 +574,7 @@ func (t *VerifySpecTool) Probe(ctx context.Context, command, expected, host stri
 		rc, rawOut = t.execAnsible(ctx, args, timeoutSec)
 	}
 	detail := fmt.Sprintf("(rc=%d) %s", rc, rawOut)
-	pass, verdict := matchExpected(expected, detail, rc)
+	pass, verdict := evaluateV1Expected(expected, detail, rc)
 	return ProbeResult{
 		Command:  command,
 		Expected: expected,
