@@ -1,5 +1,4 @@
-# STATUS: PROPOSED FIXTURE ONLY — pilot runtime does not load this file yet.
-# The schema may change before the M1.1 loader and lint implementation.
+# STATUS: FINAL SCHEMA FIXTURE — loader validates this shape; runtime wiring pending.
 schemaVersion: 1
 id: restic-backup
 role: restic-backup
@@ -15,11 +14,12 @@ regressionTests:
   - internal/spec/restic_backup_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
-  - {component: seaweedfs-s3, required: false}
+  - {component: seaweedfs-s3, required: false, relation: providerEndpoint}
 conflicts: []
 bindings:
   - input: restic_s3_target_host
     requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
     from: {component: seaweedfs-s3, endpoint: s3}
 os:
   - {distro: ubuntu, versions: ["22.04", "24.04"]}
@@ -27,13 +27,24 @@ os:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
-  - {name: restic_s3_target_host, required: false, secret: false}
-  - {name: restic_repository, required: false, secret: false}
-  - {name: restic_aws_access_key_id, required: true, secret: true}
-  - {name: restic_aws_secret_access_key, required: true, secret: true}
-  - {name: restic_password, required: true, secret: true}
-  - {name: restic_backup_paths, required: false, default: ["/etc"], secret: false}
-  - {name: restic_backup_pre_hook, required: false, default: "", secret: false}
+  - {name: restic_s3_target_host, type: string, required: false, default: "", secret: false}
+  - {name: restic_repository, type: string, required: false, default: "s3:http://s3-backup-server:8333/pilot-restic-backup", secret: false}
+  - {name: restic_s3_port, type: integer, required: false, default: 8333, secret: false}
+  - {name: restic_s3_bucket, type: string, required: false, default: pilot-restic-backup, secret: false}
+  - {name: restic_aws_access_key_id, type: string, required: true, secret: true}
+  - {name: restic_aws_secret_access_key, type: string, required: true, secret: true}
+  - {name: restic_password, type: string, required: true, secret: true}
+  - {name: restic_backup_paths, type: stringList, required: false, default: ["/etc"], secret: false}
+  - {name: restic_backup_pre_hook, type: string, required: false, default: "", secret: false}
+  - {name: restic_backup_schedule, type: string, required: false, default: "*-*-* 02:00:00", secret: false}
+  - {name: restic_retention_daily, type: integer, required: false, default: 7, secret: false}
+  - {name: restic_retention_weekly, type: integer, required: false, default: 4, secret: false}
+  - {name: restic_retention_monthly, type: integer, required: false, default: 6, secret: false}
+inputRules:
+  - any:
+      - {input: restic_s3_target_host, operator: nonEmpty}
+      - {input: restic_repository, operator: notContains, value: s3-backup-server}
+    reason: self-hosted S3 needs an explicit target; external S3 must override the default repository
 endpoints: []
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false
@@ -46,6 +57,7 @@ traceability:
   mode: rowTags
   tag: {kind: bare}
   exemptions: {}
+verification: {autoDeploy: false}
 site:
   include: true
   order: 130

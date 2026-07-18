@@ -1,16 +1,18 @@
 # RFC：Append-only Delivery Evidence Data Model
 
-> 狀態：Proposed — technical review complete，等待接受
+> 狀態：Final — accepted for production implementation
 > 日期：2026-07-18
 > 前置：`docs/tmp/future/IMPLEMENTATION_PLAN.md` M0.3
+> 接受依據：2026-07-18 使用者要求關閉 review findings 並全面開始 production
+> implementation；本版已固定 event/evidence idempotency、cancel finalization
+> 與 maintenance audit identity。
 >
 > **實作標示：資料模型已決策，schema/store/runtime 尚未實作。**
 > 現行 schema 仍是 v12，尚無 `delivery_events`、`verify_evidence`、
 > `RunWriter`、heartbeat 或 generation rotation。
 >
-> Technical review 已確認 event stream、serialized writer、heartbeat/terminal、
-> append-only enforcement、redaction 與 generation rotation 的不變式互相一致；
-> 狀態仍由人接受後才可改為 Final，本標示不解鎖 schema v13。
+> Final 代表 schema/store implementation contract 已定案，不代表 schema v13 已
+> 存在。M0.3 可依本 RFC 開工；完成仍須通過 §10 的 executable acceptance tests。
 
 ## 1. 決策摘要
 
@@ -22,9 +24,11 @@
 5. `run_finished` 唯一且必須是最後一筆；heartbeat goroutine stop-and-join 後才能
    append terminal。
 6. schema 以 trigger 拒絕 event／evidence 的 UPDATE／DELETE。
-7. retention 不對 active database 做 row DELETE；採 database generation rotation。
-   `runs prune` 只刪除已封存且經確認的 archive file，並在 active generation 留下
-   audit event。
+7. event 與 evidence append 都有 caller-stable operation/idempotency key；不確定
+   commit 後重試不會產生重複事實。
+8. M0.3 的 retention 是 retain-all。database generation rotation／archive prune
+   屬 P5，使用獨立 `evidence_admin_events` stream，不把 maintenance event 塞進
+   delivery run。
 
 ## 2. Schema v13
 
@@ -35,6 +39,7 @@
 - `event_id INTEGER PRIMARY KEY`
 - `run_id TEXT NOT NULL`
 - `seq INTEGER NOT NULL`
+- `operation_id TEXT NOT NULL`
 - `type TEXT NOT NULL`
 - `step TEXT`
 - `payload_json TEXT NOT NULL`
@@ -44,6 +49,7 @@
 約束：
 
 - `UNIQUE(run_id, seq)`
+- `UNIQUE(run_id, operation_id)`
 - 每 run 至多一筆 `run_started`
 - 每 run 至多一筆 `run_finished`
 - `run_started` 必須是 seq 1
@@ -57,8 +63,6 @@ Event types：
 - `step_finished`
 - `evidence_health_changed`
 - `run_finished`
-- `archive_created`
-- `archive_pruned`
 
 ### 2.2 `verify_evidence`
 
@@ -69,6 +73,9 @@ Event types：
 - `spec_path TEXT NOT NULL`
 - `row_id TEXT NOT NULL`
 - `host TEXT NOT NULL`
+- `attempt INTEGER NOT NULL`
+- `operation_id TEXT NOT NULL`
+- `content_hash TEXT NOT NULL`
 - `command TEXT NOT NULL`
 - `expected TEXT NOT NULL`
 - `stdout TEXT`
@@ -87,6 +94,18 @@ Evidence append 前必須確認：
 - run 已有 `run_started`；
 - run 尚未 terminal；
 - `(spec_path, row_id, host)` 屬於本次 resolved verify scope。
+
+約束：
+
+- `UNIQUE(run_id, spec_path, row_id, host, attempt)`
+- `UNIQUE(run_id, operation_id)`
+
+`AppendEvidence` 重試命中同一 unique key 時讀回既有 row：
+
+- `content_hash` 相同 → 視為同一 append 已成功，回 nil。
+- `content_hash` 不同 → `ErrEvidenceConflict`，整個 run 不得成功。
+
+同一次 run 重跑同一 probe 必須增加 `attempt`；不同 run 永遠有新的 run ID。
 
 不對 SQL view 建 FK；上述 invariant 由同一 SQLite transaction 驗證。
 
@@ -124,10 +143,12 @@ func (w *RunWriter) Finish(ctx context.Context, finish RunFinished) error
 1. 取得 writer mutex。
 2. `BEGIN IMMEDIATE`。
 3. 確認 run 存在且未 terminal。
-4. 讀取當前最大 seq 並配置 `next = max + 1`。
-5. INSERT event。
-6. COMMIT。
-7. 釋放 mutex。
+4. 先以 `(run_id, operation_id)` 查重；存在且 payload hash 相同就回傳已成功，
+   不同則回 conflict。
+5. 讀取當前最大 seq 並配置 `next = max + 1`。
+6. INSERT event。
+7. COMMIT。
+8. 釋放 mutex。
 
 mutex 建立同 process happens-before；SQLite write transaction 防止意外的跨 writer
 seq collision。`UNIQUE(run_id, seq)` 是最後防線，不是 allocator。
@@ -147,9 +168,15 @@ Finish sequence：
 
 1. cancel heartbeat context；
 2. wait goroutine join；
-3. append 唯一 terminal event；
-4. close writer；
-5. 後續 append 回 `ErrRunFinished`。
+3. 使用 `context.WithoutCancel(parent)` 衍生獨立 finalization context，再加 5 秒
+   timeout；不沿用已取消的 request context；
+4. append 唯一 terminal event；
+5. close writer；
+6. 後續 append 回 `ErrRunFinished`。
+
+terminal persist 失敗時 CLI 必須回 non-zero `evidence_failed`，不得顯示 success。
+資料庫內沒有 terminal 的 run 由 heartbeat lease 投影為 abandoned；不捏造補寫
+成功 terminal。
 
 Heartbeat append 失敗：
 
@@ -185,9 +212,21 @@ append-only trigger。
 
 測試必須以 raw SQL 直接嘗試 UPDATE／DELETE，不能只測 store API 不提供方法。
 
-## 7. Retention 與 prune
+## 7. Retention 與 prune（P5，不在 M0.3 critical path）
 
-為避免 DELETE trigger 與 retention 衝突，採 generation rotation：
+M0.3 固定 retain-all，不實作 prune。P5 採 generation rotation，並新增獨立的
+append-only `evidence_admin_events`：
+
+- `admin_event_id INTEGER PRIMARY KEY`
+- `seq INTEGER NOT NULL UNIQUE`
+- `operation_id TEXT NOT NULL UNIQUE`
+- `type TEXT NOT NULL`（`archive_created`／`archive_prune_requested`／
+  `archive_prune_finished`／`archive_prune_failed`）
+- `payload_json TEXT NOT NULL`
+- `created_at TEXT NOT NULL`
+
+它不帶 delivery `run_id`，因此不違反每個 delivery run 必須以 `run_started`
+開始的 invariant。P5 generation rotation：
 
 1. 暫停新的 run start；既有 active run 完成或明確拒絕 rotation。
 2. 建立新 SQLite generation。
@@ -195,15 +234,17 @@ append-only trigger。
 4. 驗證 row count、run hash 與 terminal invariant。
 5. 原子切換 active database pointer。
 6. 舊 generation 改為 `0600` read-only archive。
-7. 新 generation append `archive_created`，保存 archive hash、範圍與路徑。
+7. 新 generation 的 admin stream append `archive_created`，保存 archive hash、
+   範圍與路徑。
 
 `pilot runs prune --before <t>` 的語意是刪除符合 policy 的 **archive files**，不是
 對 active tables DELETE rows。刪除前：
 
 - 顯示 archive run/time range；
 - 要求明確確認；
-- active DB 先 append `archive_pruned` audit event；
-- 刪除失敗同樣保存 outcome。
+- active DB 先 append `archive_prune_requested`；
+- 成功後 append `archive_prune_finished`；刪除失敗 append
+  `archive_prune_failed`，不使用會誤稱已成功的單一事件。
 
 因此 active/archived database 內部仍維持 immutable。
 
@@ -219,7 +260,8 @@ append-only trigger。
 
 ## 9. Migration
 
-- base schema 與 v12→v13 migration 同一變更完成。
+- base schema 與 v12→v13 migration 同一變更完成；v12→v13 只新增 active
+  delivery tables/view/triggers，不做 generation rotation。
 - `spec_checkpoints` 保留為最新狀態 cache，不搬成歷史 evidence。
 - 舊 NDJSON 不自動匯入；需要 replay 時透過 historical adapter 明確標記來源。
 - standalone `pilot verify` 也建立 run start／heartbeat／finish。
@@ -229,12 +271,18 @@ append-only trigger。
 - 並行 heartbeat、step、evidence、finish 在 `go test -race` 下無 race。
 - seq 連續且唯一，terminal 唯一且最後。
 - terminal 後 append 一律失敗。
+- 同 operation 重試且 hash 相同不重複；hash 不同 fail closed。
+- 同 host × row × attempt 不可產生兩筆不同 evidence。
 - raw SQL UPDATE／DELETE 一律被 trigger 拒絕。
 - v12→v13 migration replay 可重複驗證。
 - 兩次 verify 產生兩個 run，前次 evidence 未改寫。
 - heartbeat lease 可正確投影 running／abandoned。
-- generation rotation hash／count 一致；active DB 無 row DELETE。
 - redaction corpus 不在任何持久化 sink 找到 secret。
+- cancelled context 下仍用 bounded finalization context 寫 terminal；若 store
+  故障則 CLI 非零且 run 最終投影 abandoned。
+
+P5 另驗收 generation rotation hash／count、admin event 三態與 active DB 無 row
+DELETE；不阻擋 M0.3。
 
 ## 11. 非目標
 

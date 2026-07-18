@@ -1,13 +1,14 @@
 # M0.2 Per-host Verify Spike
 
-> 狀態：callback data contract + expected-host pure resolver 已驗證；尚未接入正式 verify
+> 狀態：production runner contract finalized；callback data contract + expected-host
+> pure resolver 已驗證，正式 runner 待實作
 > 日期：2026-07-18
 > 環境：ansible-core 2.19.2、ansible package 12.0.0
 >
 > **實作標示：這是可測試的 spike，不是 production per-host verify。**
 > 已實作 decoder／fixtures／tests 與 expected-host pure resolver／truth table；
-> 尚未實作 Ansible inventory/scope adapter、正式 runner 接線、per-host timeout
-> 與 delivery evidence persistence。
+> 尚未實作 Ansible inventory/scope adapter、正式 runner 接線與 delivery
+> evidence persistence；本版已定案 per-host isolated invocation timeout。
 
 ## 1. 結論
 
@@ -32,9 +33,10 @@ Status contract：
 | `runner_error` | invocation 啟動失敗、controller timeout、JSON 缺失／truncated |
 | `missing` | callback 完整，但 expected host 沒出現在 document |
 
-Controller `CommandContext` timeout 殺掉整個 Ansible process，不等於每台 host 都
-timeout。若 callback 不完整，所有 expected hosts 記 `runner_error`，message 保存
-`invocation_timeout`；`timeout` 保留給可證明的 host-level timeout。
+Production runner 不再讓多台 host 共用同一個 timeout process。每個
+host × row 使用獨立 Ansible invocation，並以 bounded worker pool 執行；因此
+該 process 的 `CommandContext` timeout 可歸因到唯一 host，記 `timeout`。啟動失敗、
+callback 缺失／truncated 仍記該 host 的 `runner_error`。
 
 ## 2. Actual-run evidence
 
@@ -140,6 +142,15 @@ host-level timeout，歸類為 invocation `runner_error`。
 4. 單 host + `target_group` 型 spec 明確允許 CLI override 把 spec role 對齊到
    inventory 的 `all`／其他實際 group。
 
+Standalone default：
+
+- 有 spec Targets 且未提供 execution selector → 以解析後的 spec target hosts
+  作 expected scope，不先展開成整份 inventory。
+- 沒有 spec Targets → 必須明確提供 `--host`／`--limit`，或使用 `--local`；
+  不再默認遠端 `all`。
+- deploy transaction → component planner 必須提供 resolved component scope，
+  不使用 standalone default。
+
 集合結果：
 
 - expected 空集合 → FAIL；
@@ -167,12 +178,30 @@ table-driven tests 鎖定：
 pure resolver 不自行執行或解析 `ansible-inventory`；正式接線前要由 adapter
 提供已對實際 inventory 解析完成的各個 host set。
 
-## 5. 尚未解鎖
+Adapter 的權威來源固定為 Ansible 自己的 inventory/pattern resolver，支援 static
+inventory、dynamic inventory 與 inventory plugin；Go adapter 不自行重寫 Ansible
+pattern grammar。adapter 回傳 canonical sorted host names、來源與 finding，再交
+pure resolver。
 
-- 尚未完成 Ansible inventory／pattern／limit adapter，也尚未把 decoder 接入正式 verify。
-- 尚未選擇真正 per-host timeout 的執行機制。
-- 尚未寫 delivery evidence。
-- 尚未讓 M2.1 typed matcher 開工。
+## 5. Production runner 決策
 
-上述工作等待 adapter／timeout 決策與 M0.2 完整實作切片，不在 pure resolver
-切片偷跑。
+1. 每個 row 先解析一次 expected hosts。
+2. 以最多 8 個 worker（可設定但有上限）逐 host 執行單-host Ansible invocation。
+3. 每個 invocation 啟用 `ansible.posix.json` callback；callback observed set
+   必須恰為該 host。
+4. per-host timeout 只終止該 host invocation，不取消其他已完成 host。
+5. outer context cancel 才取消整列所有 workers；已完成結果保留，未完成 host
+   記 `runner_error` + `parent_cancelled`，整列 FAIL。
+6. 結果依 canonical host name 排序後才聚合與 persist，避免 concurrency 造成
+   report/evidence 非 deterministic。
+7. 一台 FAIL 不 short-circuit 其他 host；必須收齊可取得 evidence。
+
+## 6. Production implementation 開工狀態
+
+- scope adapter、single-host runner、bounded worker pool 與正式 decoder 接線可
+  立即開始 production implementation。
+- delivery evidence 依 Final Evidence RFC 接續實作。
+- M2.1 仍在 M0.2 runner 合併後開始，避免同時重寫 verifier core。
+
+本文件的 design gate 已關閉；未實作項是 implementation backlog，不再是
+architecture blocker。

@@ -5,9 +5,14 @@
 > 修訂 2:2026-07-18 依 review 第二輪修正——tag 改依 contract `tagMode` 推導(前版「tag coverage 同時接受兩型」的宣稱經對 `tag_coverage_test.go` 與 AGENTS.md 查證**不正確**,已更正)、移除 `traceability.applyPlaybook`、inputs 補值來源優先序、`needsReview` 改 `[]string`、「真實 inventory」驗收明確化。
 > 修訂 3:2026-07-18 依 review 第三輪修正——`secretRef` input 不得 materialize 進 CLI/module argv(受控 transport 由 safety RFC 選定,定稿前 verify 對含 secretRef 的 spec 拒跑)、M2.1 v1 相容層拆成 compile / compatibility evaluator / replay adapter 三塊、DoD 清除殘留的「預設 tag `<component>-<id>`」舊規則。
 > 修訂 4:2026-07-18 依 review 第四輪修正——`probeStatus` 增 `runner_error`/`missing`(timeout 歸因由 M0.2 spike 定案,不把未觀察 host 壓成 timeout)、M2.3 migration 表的 `needsReview` 範例改 YAML list 語法(欄位型別本就是 `[]string`)、`safety.destructive` 的粒度(spec 層 vs per-check)交 safety RFC 定案。
-> 前置依賴(硬性):**M0.2 先合併,M2.1 才開工**(同動 verifier 執行層,不可平行);**Verification safety boundary RFC 定稿是 M2.2 的門檻**(目前已建立 Proposed，尚未 final；inputs 的 secret transport 與 safety 語意依 RFC)。M1.1 ComponentContract RFC 已建立六份 fixtures；shared spec 的 `traceability` 引用已改為複數 `components`(§3.1 schema 已同步)。
+> 修訂 5:2026-07-18 關閉 production-readiness findings——新增 declarative
+> `appliesWhen` 與 `not_applicable` evidence、canonical object action、結構化
+> `secretRef`、v1/v2 normalization 分流；production deploy auto-verify 限 v2。
+> 前置依賴(硬性):**M0.2 先合併,M2.1 才開工**(同動 verifier 執行層,不可平行);
+> Verification Safety Boundary RFC 與 ComponentContract RFC 已 Final，可依序
+> 開始 M2.2 implementation。
 
-> **實作狀態：SPEC V2 尚未實作**
+> **實作狀態：DESIGN FINAL／PRODUCTION IMPLEMENTATION READY；SPEC V2 runtime 尚未實作**
 >
 > 本文件是 schema／migration 設計，不代表 pilot 已接受 `schemaVersion: 2`。
 > 目前 parser、verifier 與正式 `docs/verification/*.md` 仍使用 v1。
@@ -17,8 +22,8 @@
 | 項目 | 狀態 | 說明 |
 |---|---|---|
 | M0.2 callback／host resolver | **Spike + pure resolver 已驗證** | decoder 與 expected-host truth table 已測；Ansible scope adapter／runner 未接正式 verify |
-| Safety RFC | **Proposed，等待接受** | technical review 完成；per-check action/secret transport 尚未 final/implement |
-| ComponentContract | **RFC + fixtures + test-only schema gate** | traceability plural/mapped 與六份 fixtures 已 strict 驗證；production loader 未實作 |
+| Safety RFC | **Final／待實作** | canonical action、secret reference/transport 與 v1 自動化邊界已定案 |
+| ComponentContract | **Final／loader 待實作** | traceability、placement、provider selection 與六份 fixtures 已固定 |
 | M2.1 typed matcher | **尚未實作** | 必須等待完整 M0.2 合併 |
 | M2.2 v2 parser | **尚未實作** | 不得新增正式 v2 spec |
 | M2.3 migrate | **尚未實作** | CLI、sidecar report、模板更新皆不存在 |
@@ -39,6 +44,9 @@
 3. **rc-echo trick**:因為壓扁的 ad-hoc 輸出拿不到可靠 rc,v1 慣用 `cmd; echo $?` 把 rc 印進 stdout,配 `Expected: <int>`。
 4. **become 靠 heuristic**:`spec.NeedsBecome`(generator.go:322)猜命令要不要 sudo,不是宣告式。
 5. **verify 並非唯讀**:`stageVerifyEnv`(verify_spec.go:88)在 `KEYCLOAK_ISSUER` 存在時對所有可達 host 寫 `/etc/pilot-verify.env`;部分既有 check 有 POST/PUT/DELETE 型 self-test。v2 的 `inputs` 與 `safety` 設計以 Verification safety boundary RFC 定案為準,且 `inputs` 注入機制(§3.3)明確取代寫 env 檔的做法。
+6. **條件式 row 只存在 prose**：多份 spec 在 optional dependency/input 未提供時
+   明寫某些 row「預期 fail／不適用」，runner 無法安全聚合。v2 必須將條件變成
+   `appliesWhen`；production deploy 不自動執行 v1。
 
 ### 1.3 matcher 實際語意(verify_spec.go:321 `matchExpected`)
 
@@ -82,6 +90,16 @@ v1 的五種魔法前綴在 **parse 時轉譯**成 typed matcher(M2.1);`matchExp
 - 不強迫既有 24 份 v1 遷移;v1 parser 長期並存,逐份隨修改順手遷。
 - front-matter 不放 ComponentContract 該管的事(依賴、cardinality、資源)——spec 只透過 `traceability.components` 引用 1—N 個 contract ID；shared spec 的 row ownership 由 contract selector 決定，避免兩處宣告同一事實。
 
+### D5:Production deploy auto-verify 只接受 v2
+
+- v1 parser/manual verify 長期保留。
+- ComponentContract 可引用 v1 做 lint/traceability，但
+  `verification.autoDeploy: true` 時 loader 必須確認 selected specs 全是 v2。
+- 需要進 deploy transaction 的既有 component 先用 M2.3 migrate，再人工關閉
+  `needsReview`、補 action/applicability 並 target-test。
+- 不建立 v1 action/applicability sidecar，避免 spec 以外再出現第二份 acceptance
+  source of truth。
+
 ## 3. v2 schema 定義
 
 ### 3.1 檔案範例(docker.md 節錄遷移後)
@@ -103,7 +121,7 @@ targets:
 inputs: []                       # 本 spec 無 probe 變數;有的話:
   # - name: s3_endpoint
   #   required: true
-  #   secretRef: false
+  #   secretRef: null
   #   validation: "^https?://"
 traceability:
   components: [docker]           # M1.1 ComponentContract IDs——mapping 唯一來源(D4);
@@ -111,7 +129,8 @@ traceability:
 defaults:
   become: false                  # 必填:v2 全宣告式,無 NeedsBecome heuristic;check 可逐列覆寫
   timeout: 30s
-  action: readOnly               # check 可覆寫為 isolatedMutation；需額外授權/cleanup
+  action:                        # 必填 object；沒有隱式 readOnly default
+    mode: readOnly               # check 可覆寫為 isolatedMutation；需額外授權/cleanup
 evidencePolicy:
   captureStdout: true
   retention: default
@@ -146,6 +165,7 @@ evidencePolicy:
   expect:
     stdout: {contains: "Hello from Docker"}
   timeout: 60s
+  appliesWhen: {always: true}
 ```
 ```
 
@@ -189,7 +209,8 @@ type CheckV2 struct {
     Timeout  time.Duration `yaml:"timeout,omitempty"`  // 預設沿用全域
     Scope    string        `yaml:"scope,omitempty"`    // per-host(預設)| aggregate
     Become   *bool         `yaml:"become,omitempty"`   // nil ⇒ 繼承 defaults.become;v2 全宣告式,無 NeedsBecome heuristic
-    Action   Action        `yaml:"action,omitempty"`   // readOnly(預設)|isolatedMutation
+    Action   *Action       `yaml:"action,omitempty"`   // nil ⇒ 繼承必填 defaults.action object
+    AppliesWhen *Applicability `yaml:"appliesWhen,omitempty"` // nil/always ⇒ always applicable
     Tags     []string      `yaml:"tags,omitempty"`     // 未寫時依 contract traceability 推導(§3.1);standalone spec 必須顯式
     VerifyOnly bool        `yaml:"verifyOnly,omitempty"` // 無對應 apply tag 時必須明寫
     NeedsReview []string   `yaml:"needsReview,omitempty"` // migrate 未決標記,可累積多個 finding(如 v1-int-ambiguous + jinja-template-risk);非空 ⇒ verify 拒跑整份 spec
@@ -202,6 +223,42 @@ type SpecV2 struct {
 }
 ```
 
+`InputV2.SecretRef` 不是 boolean：
+
+```go
+type SecretRef struct {
+    Provider string `yaml:"provider"` // v2: ansibleVar
+    Name     string `yaml:"name"`     // Ansible variable name, never plaintext
+}
+```
+
+`Applicability` 是 declarative、strict union，不執行 shell/Jinja：
+
+```go
+type Applicability struct {
+    Always *bool       `yaml:"always,omitempty"`
+    All    []Condition `yaml:"all,omitempty"`
+    Any    []Condition `yaml:"any,omitempty"`
+}
+type Condition struct {
+    Input      *InputCondition      `yaml:"input,omitempty"`
+    Dependency *DependencyCondition `yaml:"dependency,omitempty"`
+    Stage      *StageCondition      `yaml:"stage,omitempty"`
+}
+```
+
+- `Applicability` 恰選 `always`／`all`／`any`；`all`/`any` 不得為空。
+- `Condition` 恰選 input／dependency／stage。
+- input operator 首版只接受 `set|notSet|equals|notEquals`，只能引用本 spec
+  `inputs`。
+- dependency state 首版只接受 `selected|notSelected`，只能引用
+  `traceability.components` 對應 contract 已宣告的 dependency。
+- stage condition 只接受 enum list `sandbox|staging|prod`。
+- 無 `appliesWhen` 等同 `always: true`。
+- evaluation false 產生 `probeStatus=not_applicable`，保存 machine-readable
+  reason，不執行 probe；rollup 排除但不算 PASS。
+- condition 無法解析、引用不存在或來源缺失 → spec/plan error，fail closed。
+
 **內部統一表示**:`SpecV2` 與 v1 `Spec` 都降到共同的 `ResolvedSpec`(rows 帶 `Expect`、probe、become、timeout、scope、tags),`verify_spec.go`、報告、store 只認 `ResolvedSpec`。v1 的 `Row.Expected` 字串保留在 `ResolvedRow.RawExpected` 供報告顯示原文。
 
 ### 3.3 v2 專屬語意(review 阻塞項 6 逐項閉合)
@@ -209,8 +266,11 @@ type SpecV2 struct {
 **ProbeResult 正規化(typed matcher 的輸入契約;細節由 M0.2 spike 定案)**
 
 - 來源:remote probe 取 json callback 的 per-host stdout/stderr/rc 欄位(需 `ANSIBLE_LOAD_CALLBACK_PLUGINS=1` + `ANSIBLE_STDOUT_CALLBACK=ansible.posix.json`,已實測;availability preflight 與 fallback 見總計畫 M0.2);local probe 直接取程序輸出。
-- 正規化:`\r\n` → `\n`;剝除**恰一個** trailing newline;非法 UTF-8 byte 以 U+FFFD 取代。matcher 對正規化後全文評估;evidence 落庫時才截斷(64 KB + truncated flag),截斷不影響判定。
-- `probeStatus: ok | timeout | unreachable | module_error | runner_error | missing`(review 第四輪 #1 增補後兩者:現行一列一個 ansible process、controller 逾時殺整個 process,callback JSON 可能不完整——`runner_error` = invocation 層失敗/JSON 不完整,`missing` = host 未出現於 callback 且原因未明;**不把所有非 observed 情況壓成 timeout**,歸因規則與是否採 host-level timeout 由 M0.2 spike 定案):matcher **只在 `ok` 時評估**;其餘一律 FAIL 並記 status 與 ansible 原始錯誤——非 `ok` 不可能被 matcher 誤判成 pass(fail closed)。
+- v2 正規化:`\r\n` → `\n`;剝除**恰一個** trailing newline;非法 UTF-8 byte 以 U+FFFD 取代。matcher 對正規化後全文評估;evidence 落庫時才截斷(64 KB + truncated flag),截斷不影響判定。
+- v1 compatibility 正規化獨立保留現行 `strings.TrimSpace`，再做 legacy rc-echo
+  evaluator；不把 v2 whitespace semantics 套回 v1。`ResolvedRow` 帶
+  `Normalization: legacyV1|v2`，execution core 明確分派。
+- `probeStatus: ok | not_applicable | timeout | unreachable | module_error | runner_error | missing`。M0.2 已定案每個 host × row 用獨立 invocation，因此該 invocation 的 controller timeout 可記該 host `timeout`；啟動失敗/JSON 不完整是 `runner_error`，完整 callback 缺 host 是 `missing`。matcher **只在 `ok` 時評估**；`not_applicable` 不執行 matcher且不參與 pass/fail 分母，其餘一律 FAIL。
 
 **`scope: aggregate`**
 
@@ -218,23 +278,43 @@ type SpecV2 struct {
 - evidence:host 欄記字面值 `controller`,語意獨立於 inventory;與 M0.2 的 host×row 表相容。
 - 「在某台成員主機上跑一次」的檢查**不是** aggregate——那是 per-host check 搭配 contract 層把該 role 的 cardinality 設為 exactly-one。
 
+**`appliesWhen`**
+
+- 在任何 probe／secret resolution 前、以 resolved per-host inputs + component plan
+  評估。
+- false → `not_applicable` evidence，包含 condition path 與 resolved boolean，
+  不保存 secret value。
+- optional capability 的 row 必須顯式條件化或拆到獨立 spec；不再允許 prose
+  「這幾列預期 fail」作為 production transaction 例外。
+- migration 遇到既有 spec 的 known-deviation／optional prose 無法安全推導條件時，
+  加 `needsReview: [applicability-unknown]`，不得自動猜。
+
 **`inputs`**
 
-- 宣告:`{name, required, secretRef, validation(RE2)}`;verify 開始前先 validate,`required` 未提供或 validation 不過 ⇒ 整份 spec 拒跑(fail closed)。
-- **值來源與優先序**(review 第二輪 #8;高 → 低,隨 safety/evidence RFC 定稿):(1) CLI `--input name=value`(可重複);(2) `--inputs-file <yaml>`;(3) inventory/group var `pilot_inputs.<name>`;(4) 程序環境 `PILOT_INPUT_<NAME>`。同名以高優先者為準,報告註明每個 input 的實際來源。`secretRef: true` 的值**不接受** (1)/(4) 明文(會進 shell history/環境),只接受 vault reference 經 resolver 解出;resolver 拿不到 plaintext 時依 evidence RFC 的「不持久化 stdout/stderr」規則處理。
+- 宣告:`{name, required, secretRef: {provider, name}|null, validation(RE2)}`;verify 開始前先 validate,`required` 未提供或 validation 不過 ⇒ 整份 spec 拒跑(fail closed)。
+- **非 secret 值來源與優先序**(高 → 低):(1) CLI `--input name=value`;(2) `--inputs-file <yaml>`;(3) inventory/group var `pilot_inputs.<name>`;(4) 程序環境 `PILOT_INPUT_<NAME>`。同名以高優先者為準,報告註明來源。
+- **secret 值來源**：只接受 `secretRef.provider=ansibleVar`，由受控
+  `ansible-playbook` task 解析既有 vault/inventory variable；pilot 不取得
+  plaintext，也不接受 CLI/environment 明文。
 - 注入(**取代現行 `stageVerifyEnv` 寫 `/etc/pilot-verify.env` 的機制**,該機制隨 safety RFC 退役):
   - local / aggregate(controller)probe:直接以程序環境變數 `PILOT_VAR_<name>` 注入。
   - remote per-host probe(**僅限非 secret input**):pilot 在 module args 前綴 `PILOT_VAR_<name>='<value>' `,value 以 POSIX 單引號安全編碼(`'` → `'\''`;編碼函式獨立單元測試,涵蓋引號、空白、newline、UTF-8);僅支援 `shell` module(`command` module 無環境變數展開,lint 擋)。
-  - **`secretRef: true` 的值不得 materialize 進 CLI/module argv**(review 第三輪 #3:即使 quoting 正確,plaintext 仍出現在 pilot 啟動的 `ansible` process argv、`ps`、診斷輸出與 subprocess recorder;persist 前刷 stdout/stderr 修補不了 transport 階段已發生的洩漏)。secret 的受控 transport 由 safety RFC 選定,候選:controller 端 `0600` 暫存資料配合受控 playbook/module;stdin/file-descriptor 傳遞、不進使用者可見 command;Ansible task 層 `no_log` + temp artifact 的明確清除與 crash recovery。**該契約定稿前:M2.2 的 parser 照常收下 `secretRef` 宣告,但 `pilot verify` 對含 secretRef input 的 spec 拒絕執行——不實作、不宣稱 secret input 可安全執行。**
+  - secret input 走 Final Safety RFC 的暫存 playbook + secret-aware module；
+    `no_log` task 引用 `{{ <secretRef.name> }}`，module 以 child stdin 傳入，不進
+    pilot/ansible argv/environment。
   - probe 落地前不經任何模板引擎——禁止以 Jinja `{{ var }}` 引用 input。
-- secret masking(persist 層的第二道防線;transport 層防護見上):`secretRef: true` 的值 (a) 不寫入 evidence 的 inputs 摘要(只記 reference 名);(b) persist 前對 stdout/stderr 做 exact-string 刷除。誠實限制:probe 若輸出轉換過的 secret(base64、截斷、hash)刷不到——殘餘風險記入 safety RFC,並以 lint 警告「probe 引用 secret input 且 expect 比對 stdout」的組合。
+- secret masking：evidence 只記 provider/reference name；secret-bearing probe
+  預設不持久化 stdout/stderr。module redaction + pilot shared persist pipeline 是
+  縱深防禦，不以 exact-string masking 宣稱能抓到 transformed secret。
 
 **`action`／verification safety**
 
-- Proposed safety RFC 已選 per-check `action.mode: readOnly|isolatedMutation`，不是 spec-level `safety.destructive` boolean。
+- Final safety RFC 已選 canonical object
+  `action.mode: readOnly|isolatedMutation`，不是 scalar 或 spec-level boolean。
 - 自動 deploy verify 只執行 `readOnly`；`isolatedMutation` 必須有額外授權、cleanup 與 residual-risk evidence，production 預設拒絕。
 - 既有寫入型 self-test 要移至 apply/fixture，或明確遷移成 isolatedMutation；無法判定時 `needsReview`、fail closed。
-- secret-aware runner 未完成前，含 `secretRef` 的 spec 仍拒跑。最終 schema 以 `VERIFICATION_SAFETY_BOUNDARY_RFC.md` review/final 為 M2.2 gate。
+- secret-aware runner 未完成前，含 `secretRef` 的 spec 仍拒跑；runner 完成後按
+  Final Safety RFC acceptance tests 解鎖，不再等待 schema 決策。
 
 ## 4. 里程碑
 
@@ -252,10 +332,15 @@ type SpecV2 struct {
    - **parse/compile**:`CompileV1Expected` 只負責把 v1 Expected 字串編成 matcher,不碰執行輸出。
    - **v1 compatibility evaluator**:在 structured stdout/rc(`ProbeResult`)上重現舊判定——`legacyRC` 的 extractRC rc-echo 優先邏輯住在這裡。
    - **historical replay adapter**:`stripRunnerPrefix`/`unwrapAdhocOneline` 只在重放舊 NDJSON detail 的對照測試中使用;M0.2 之後的新執行路徑**不再製造也不再解析** one-line 包裝。
-4. `matchExpected` 改為薄殼:`CompileV1Expected` + `Eval`,跑穩一版後刪除。
+4. `ResolvedRow.Normalization` 明確區分 `legacyV1`/`v2`；legacyV1 先做現行
+   `strings.TrimSpace`，v2 只移除一個 trailing newline。這是 zero-regression
+   contract，不由 caller 猜。
+5. `matchExpected` 改為薄殼:`CompileV1Expected` + `Eval`,跑穩一版後刪除。
 
 **測試**
 - 轉譯表逐案 unit test(含 rc-echo、`(rc=N)` 前綴、ad-hoc one-line 包裝三種 detail 形態 × 六種 Expected)。
+- normalization parity corpus：leading/trailing spaces、兩個 trailing newline、
+  CRLF、多行、stderr-only、invalid UTF-8、timeout。
 - **零回歸關卡**:24 份 spec 的既有 regression test 全綠;另寫一個 fuzz-ish 對照測試——對歷史 NDJSON 報告裡的 (expected, detail, rc) 三元組重放,新舊實作 verdict 必須全等。
 
 **規模**:3-4 天。**必須排在 M0.2 合併之後依序進行**——兩者都改 verifier 執行層,平行實作必然互踩(review 建議開工順序 #4;本文件先前「可並行」的說法與自己的風險表矛盾,以此為準)。
@@ -263,7 +348,7 @@ type SpecV2 struct {
 ### M2.2 — v2 parser 並存
 
 **改動**
-1. `internal/spec/v2.go`:front-matter 偵測 + `yaml.v3` 嚴格解碼(`KnownFields(true)`);`## Checks` 下抓第一個 ```yaml fenced block 解 checks。schemaVersion ≠ 2、缺 front-matter 必填欄位、未知欄位、StringMatcher 多欄位/零欄位 → 具體行號的錯誤。
+1. `internal/spec/v2.go`:front-matter 偵測 + `yaml.v3` 嚴格解碼(`KnownFields(true)`);`## Checks` 下抓第一個 ```yaml fenced block 解 checks。schemaVersion ≠ 2、缺 front-matter 必填欄位、未知欄位、StringMatcher 多欄位/零欄位、scalar/缺失 action、boolean secretRef、非法 applicability union → 具體行號的錯誤。
 2. `spec.Parse` 分派(D2);`ResolvedSpec` 統一層,下游全部改吃它:
    - `internal/tools/verify_spec.go`(執行;v2 的 timeout/scope/become 生效)
    - `cmd/pilot/cmd/verify.go`(報告照舊;報告 header 註明 schema 版本)
@@ -271,11 +356,22 @@ type SpecV2 struct {
    - `internal/spec/traceability.go` + `tag_coverage_test.go`(v2 的 resolved tags 由 contract traceability 推導或 check 顯式宣告；bare ↔ 空 prefixes、rolePrefixed ↔ 有 prefixes、mapped ↔ 逐 row feature/stage mapping、verifyOnly/derived ↔ 逐 row exemption；`specTagMap` 對 v2 檔改為自動)
    - `GenerateInventory`:v2 的 `targets.roles` + 現行 Hosts 表並存期——v2 front-matter 加選配 `targets.hosts`(同 v1 Hosts 表欄位)
    - `spec --generate`:對 v2 維持可用但輸出加「diagnostic only」註記,行為與 v1 相同
-3. v2 lint 規則(結構有效性歸 parser,見 D2 邊界;`expect` 全空、StringMatcher 非恰一欄位是 parser error 不在此列):probe 含 `{{`(Jinja/Go template 風險)→ error;`contains` 值長度 < 3 或落在 `isVagueExpected` 清單 → warning;check 無 tag 對應且未標 `verifyOnly` → error(接 M1.2 的 contract lint);`inputs` 宣告了但 probe 未引用 → warning;probe 引用 `secretRef` input 且 expect 比對 stdout → warning(masking 殘餘風險);input 用於 remote probe 但 module 非 `shell` → error;含 `needsReview` → finding,且 `pilot verify` 對整份 spec 拒跑。
+3. v2 lint 規則(結構有效性歸 parser):probe 含 `{{`(使用者 probe
+   template 風險；runner-owned secret task 不在此欄)→ error;`contains` 值長度
+   < 3 或 vague → warning;check 無 tag 對應且未 `verifyOnly` → error;
+   `appliesWhen` 引用未宣告 input/dependency/stage → error;optional input 被 probe
+   使用但 row 沒有相應 applicability → error;secretRef + stdout matcher → error
+   (secret-bearing output 預設不持久化，也不作內容 matcher);含 `needsReview` →
+   finding，verify 整份拒跑。
 4. 寫**一份真的 v2 spec 進 repo**(建議新元件或最簡單的 docker.md 複本 `docker-v2.md` 放 fixtures,不是正式目錄),避免「宣稱支援 v2 但 repo 裡零實例」。
+5. ComponentContract loader 對 `verification.autoDeploy: true` 強制 selected
+   specs schemaVersion=2；M0.4 不存在 v1 auto-run fallback。
 
 **測試**
-- v2 parser 正反向:合法檔、未知欄位、未知版本、壞 fenced block、front-matter 缺 schemaVersion。
+- v2 parser 正反向:合法檔、未知欄位、未知版本、壞 fenced block、front-matter 缺 schemaVersion、scalar/缺 action、boolean secretRef、condition 非 strict union。
+- applicability truth table：always、input set/notSet/equals、dependency selected、
+  stage、all/any、unknown reference、per-host input 差異；false 必須產生
+  `not_applicable` 且 probe executor 未被呼叫。
 - **跨 target 一致性驗收(P2 完成定義)**:同一份 v2 fixture spec 在 (a) local、(b) docker-target、(c) vm-target、(d) **使用者提供的一般 inventory 檔**(非 spec 生成、非 vm-target 管理)各跑一次 `pilot verify`,斷言 host×row verdict 一致。(a)(b) 進 CI;(c) 進 `vm-target topology test`;(d) 是 M2.2 驗收的人工步驟——實務上用 delivery-test 環境的 staging 主機實跑並留 evidence(走 `pilot-trec-verification` 流程);若驗收時無 staging 主機可用,DoD 措辭降級為「一般 inventory backend 一致」,**不宣稱已在真實主機驗證**(review 第二輪 #9)。
 - teatest/PTY 不受影響(verify 非互動),但 `verify --dir` rollup 混合 v1/v2 目錄要有測試。
 
@@ -298,6 +394,12 @@ type SpecV2 struct {
    - **`needsReview` 是機器可辨識的 schema 欄位(§3.2),不是 comment**:parser 接受、lint 列 finding、`pilot verify` 對含任何 needsReview 的 spec 整份拒跑——未確認的檔案**不可能**被當作可驗證的 v2 spec 使用,「不做靜默語意轉換」由機器保證。migrate 另輸出 sidecar report `<out>.migration.json`(逐列 finding、原 v1 語意、建議選項)。
    - become:v2 全宣告式(defaults.become + 逐 check 覆寫)。migrate 以 `NeedsBecome` heuristic 結果顯式寫入,並在 sidecar report 列出「值來自 heuristic」的列供人確認;此項確認不擋 verify——become 給錯只會權限失敗 → FAIL(fail closed),不會誤 pass。
    - probe 含 `{{` → 輸出並寫入 `needsReview: [jinja-template-risk]`(v1 靠口頭禁令,v2 逼人處理;欄位是 `[]string`,與既有 finding 並存時累加,如 `[v1-int-ambiguous, jinja-template-risk]`——golden test 依 list 語法固化,review 第四輪 #6)。
+   - spec prose／known-deviation 表命中「預期 fail／不適用／選填」時不猜條件，
+     對相關 rows 寫 `needsReview: [applicability-unknown]`；sidecar 列出候選
+     input/dependency，必須由人補 `appliesWhen` 或拆 spec。
+   - action migration：只有經 action inventory 明確標 read-only 的 spec 才可寫
+     `defaults.action.mode: readOnly`；未盤點或 mutation row 寫
+     `needsReview: [action-unknown]`，isolatedMutation 需人工補 cleanup contract。
    - 任何 finding → migrate exit code 非零 + sidecar report(CI 可擋「假裝遷移完成」)。
 2. 文件:`verification-spec-template.md` 出 v2 版(v1 模板保留、標 legacy);AGENTS.md §1/§2 增補 v2 authoring 規範;`vm-target-spec-testing` skill 的 references 更新。
 3. 24 份既有 spec **不批次遷移**;訂規則:任何 spec 下次實質修改時順手 `spec migrate` + vm-target 重驗(走既有 `pilot-trec-verification` 流程留 evidence)。
@@ -319,8 +421,9 @@ type SpecV2 struct {
 | aggregate scope 與 per-host evidence 表(M0.3)粒度衝突 | aggregate 在 controller 執行、記 host=`controller` 單列,store schema 不需改 |
 | `inputs` remote 注入的 shell quoting 出錯(值含引號、空白、newline) | 單引號編碼函式獨立單元測試;僅允許 `shell` module(lint 擋);不經任何模板引擎 |
 | secret masking 刷不到轉換過的 secret(base64/截斷/hash) | 誠實記為殘餘風險:lint 警告 secret×stdout-match 組合 + 文件警語;長期解法歸 safety RFC |
-| secret input plaintext 經 process argv/`ps`/診斷輸出洩漏(transport 階段,persist 刷除救不回) | `secretRef` 值不進 CLI/module argv;受控 transport(0600 暫存/stdin-fd/`no_log`)由 safety RFC 定;定稿前 verify 對含 secretRef 的 spec 拒跑 |
+| secret input plaintext 經 process argv/`ps`/診斷輸出洩漏 | Final Safety RFC 固定 vault variable reference + runner-owned `ansible-playbook` task + `no_log` module + child stdin；recorder corpus 驗收 |
 | verify 唯讀邊界未定就把 v2 接進 deploy 交易 | M2.2 開工門檻 = Verification safety boundary RFC 定稿;v2 schema 只承載宣告,不自行發明豁免 |
+| optional row 合法 fail 被 M0.4 當 transaction failure | `appliesWhen` 是唯一 applicability source；false 記 `not_applicable`；auto deploy 限 v2 |
 
 ## 6. 完成定義(對照 roadmap P2)
 
@@ -330,14 +433,19 @@ type SpecV2 struct {
 - [ ] v1 全部 24 份 spec 在整個過程零判定回歸 —— regression suite + NDJSON 重放。
 - [ ] `pilot spec migrate` 可用:needsReview 為機器可辨識 schema 欄位 + sidecar report,含未決標記的檔案 verify 一律拒跑,無靜默語意轉換路徑。
 - [ ] v2 全宣告式:become/timeout 無任何 heuristic 回退；resolved tag 依 contract traceability 推導(rowTags bare/prefixed 或 mapped row tags；verifyOnly/derived 逐 row exemption；standalone spec 逐 check 顯式宣告——見 §3.1)，tag coverage 對 v1/v2 混合 repo 全綠。
-- [ ] RFC 文件(roadmap 建議產出 #3)隨 M2.2 合併定稿;Verification safety boundary RFC 先於 M2.2 定稿。
+- [ ] conditional row 由 `appliesWhen` 決定，false 產生
+  `not_applicable` evidence；production deploy 不執行 v1。
+- [ ] v1 使用 legacy TrimSpace normalization，v2 使用 one-trailing-newline
+  normalization；parity corpus 全綠。
+- [x] Verification Safety Boundary 與 ComponentContract RFC 已在 M2.2 前 Final。
 
 ## 7. 時程總覽
 
 | 里程碑 | 內容 | 規模 | 前置 |
 |---|---|---|---|
 | M2.1 | typed matcher 內部重構 | 3-4 天 | M0.2 合併(硬性,不可平行) |
-| M2.2 | v2 parser 並存 + lint + 跨 target 驗收 | 1.5-2 週 | M2.1 + Verification safety boundary RFC 定稿 |
+| M2.2 | v2 parser 並存 + applicability/action/secretRef lint + 跨 target 驗收 | 2-2.5 週 | M2.1；Safety/Component RFC 已 Final |
 | M2.3 | migrate 工具 + 模板/文件 + 遷移規則 | 1 週 | M2.2 |
 
-合計約 3-4 週,與總計畫 §4 的估計一致;M2.1 排在 M0.2 之後依序進行,不與 P0 的 verifier 改動平行。
+合計約 3.5-4.5 週；M2.1 排在 M0.2 之後依序進行。這是可開工估算，
+不是已完成證據。

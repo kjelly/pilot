@@ -9,15 +9,15 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/anomalyco/pilot/internal/spec"
 )
 
-// These private types intentionally validate the Proposed fixtures without
-// creating a production loader API. They are the executable schema review gate
-// required before ComponentContract v1 can be accepted and exposed at runtime.
+// These private types retain repository/spec/tag traceability checks while the
+// production loader owns strict YAML decoding and local schema validation.
 type fixtureContract struct {
 	SchemaVersion       int                 `yaml:"schemaVersion"`
 	ID                  string              `yaml:"id"`
@@ -32,12 +32,14 @@ type fixtureContract struct {
 	HostCardinality     string              `yaml:"hostCardinality"`
 	Resources           fixtureResources    `yaml:"resources"`
 	GroupVars           []fixtureGroupVar   `yaml:"groupVars"`
+	InputRules          []fixtureInputRule  `yaml:"inputRules"`
 	Endpoints           []fixtureEndpoint   `yaml:"endpoints"`
 	StagePolicy         fixtureStagePolicy  `yaml:"stagePolicy"`
 	Experimental        bool                `yaml:"experimental"`
 	EvidenceRequirement fixtureEvidence     `yaml:"evidenceRequirement"`
 	Lifecycle           fixtureLifecycle    `yaml:"lifecycle"`
 	Traceability        fixtureTraceability `yaml:"traceability"`
+	Verification        fixtureVerification `yaml:"verification"`
 	Site                fixtureSite         `yaml:"site"`
 }
 
@@ -62,11 +64,14 @@ type fixturePlaybooks struct {
 type fixtureDependency struct {
 	Component string `yaml:"component"`
 	Required  bool   `yaml:"required"`
+	Relation  string `yaml:"relation"`
+	Reason    string `yaml:"reason"`
 }
 
 type fixtureBinding struct {
 	Input                          string             `yaml:"input"`
 	RequiredWhenDependencySelected bool               `yaml:"requiredWhenDependencySelected"`
+	SourceSelection                string             `yaml:"sourceSelection"`
 	From                           fixtureBindingFrom `yaml:"from"`
 }
 
@@ -88,10 +93,23 @@ type fixtureResources struct {
 
 type fixtureGroupVar struct {
 	Name       string `yaml:"name"`
+	Type       string `yaml:"type"`
 	Required   bool   `yaml:"required"`
 	Default    any    `yaml:"default"`
 	Secret     bool   `yaml:"secret"`
 	Validation string `yaml:"validation"`
+}
+
+type fixtureInputRule struct {
+	All    []fixtureInputCondition `yaml:"all"`
+	Any    []fixtureInputCondition `yaml:"any"`
+	Reason string                  `yaml:"reason"`
+}
+
+type fixtureInputCondition struct {
+	Input    string `yaml:"input"`
+	Operator string `yaml:"operator"`
+	Value    any    `yaml:"value"`
 }
 
 type fixtureEndpoint struct {
@@ -130,6 +148,10 @@ type fixtureTraceability struct {
 	Exemptions map[string]fixtureExemption `yaml:"exemptions"`
 }
 
+type fixtureVerification struct {
+	AutoDeploy *bool `yaml:"autoDeploy"`
+}
+
 type fixtureTagStrategy struct {
 	Kind   string `yaml:"kind"`
 	Prefix string `yaml:"prefix"`
@@ -160,10 +182,21 @@ type selectedFixtureSpec struct {
 	Rows []spec.Row
 }
 
-func TestProposedContractFixturesStrictAndSemanticallyValid(t *testing.T) {
+func TestFinalContractFixturesStrictAndSemanticallyValid(t *testing.T) {
 	t.Parallel()
 
 	root := repoRoot(t)
+	loader, err := NewLoader(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loader.LoadDir("docs/tmp/future/contracts")
+	if err != nil {
+		t.Fatalf("production loader rejected final fixtures: %v", err)
+	}
+	if len(loaded) != 6 {
+		t.Fatalf("production loader contract count = %d, want 6", len(loaded))
+	}
 	paths, err := filepath.Glob(filepath.Join(root, "docs", "tmp", "future", "contracts", "*.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -274,6 +307,67 @@ func TestFixtureSemanticValidationRejectsInvalidContracts(t *testing.T) {
 				c.Bindings[0].From.Component = "dashboard"
 			},
 			wantErr: `binding source component "dashboard" is not a declared dependency`,
+		},
+		{
+			name: "dependency relation is required",
+			base: restic,
+			mutate: func(c *fixtureContract) {
+				c.Dependencies[0].Relation = ""
+			},
+			wantErr: `invalid dependency relation ""`,
+		},
+		{
+			name: "binding source selection is required",
+			base: restic,
+			mutate: func(c *fixtureContract) {
+				c.Bindings[0].SourceSelection = ""
+			},
+			wantErr: `invalid binding sourceSelection ""`,
+		},
+		{
+			name: "v1 fixture cannot enable auto deploy",
+			base: docker,
+			mutate: func(c *fixtureContract) {
+				enabled := true
+				c.Verification.AutoDeploy = &enabled
+			},
+			wantErr: "verification.autoDeploy requires Spec v2",
+		},
+		{
+			name: "verification eligibility is required",
+			base: docker,
+			mutate: func(c *fixtureContract) {
+				c.Verification = fixtureVerification{}
+			},
+			wantErr: "verification.autoDeploy is required",
+		},
+		{
+			name: "input rule cannot reference unknown input",
+			base: restic,
+			mutate: func(c *fixtureContract) {
+				c.InputRules[0].Any[0].Input = "missing"
+			},
+			wantErr: `input rule references unknown group var "missing"`,
+		},
+		{
+			name: "input rule is a strict union",
+			base: restic,
+			mutate: func(c *fixtureContract) {
+				c.InputRules[0].All = c.InputRules[0].Any
+			},
+			wantErr: "input rule must select exactly one of all or any",
+		},
+		{
+			name: "group var default must match declared type",
+			base: restic,
+			mutate: func(c *fixtureContract) {
+				for i := range c.GroupVars {
+					if c.GroupVars[i].Name == "restic_s3_port" {
+						c.GroupVars[i].Default = "8333"
+					}
+				}
+			},
+			wantErr: `group var restic_s3_port default must be integer`,
 		},
 		{
 			name: "derived exemption references absent tag",
@@ -407,7 +501,7 @@ func validateFixtureFields(contract fixtureContract) error {
 		return fmt.Errorf("resource minimums cannot be negative")
 	}
 
-	groupVars := make(map[string]struct{}, len(contract.GroupVars))
+	groupVars := make(map[string]fixtureGroupVar, len(contract.GroupVars))
 	for _, groupVar := range contract.GroupVars {
 		if groupVar.Name == "" {
 			return fmt.Errorf("group var name is required")
@@ -415,15 +509,63 @@ func validateFixtureFields(contract fixtureContract) error {
 		if _, duplicate := groupVars[groupVar.Name]; duplicate {
 			return fmt.Errorf("duplicate group var %q", groupVar.Name)
 		}
-		groupVars[groupVar.Name] = struct{}{}
+		switch groupVar.Type {
+		case "string", "stringList", "integer", "boolean", "duration":
+		default:
+			return fmt.Errorf("group var %s has invalid type %q", groupVar.Name, groupVar.Type)
+		}
+		if err := validateFixtureGroupVarDefault(groupVar); err != nil {
+			return err
+		}
+		groupVars[groupVar.Name] = groupVar
 		if groupVar.Validation != "" {
 			if _, err := regexp.Compile(groupVar.Validation); err != nil {
 				return fmt.Errorf("group var %s validation: %w", groupVar.Name, err)
 			}
 		}
 	}
+	for _, rule := range contract.InputRules {
+		if rule.Reason == "" {
+			return fmt.Errorf("input rule reason is required")
+		}
+		if (len(rule.All) > 0) == (len(rule.Any) > 0) {
+			return fmt.Errorf("input rule must select exactly one of all or any")
+		}
+		conditions := rule.All
+		if len(rule.Any) > 0 {
+			conditions = rule.Any
+		}
+		for _, condition := range conditions {
+			groupVar, ok := groupVars[condition.Input]
+			if !ok {
+				return fmt.Errorf("input rule references unknown group var %q", condition.Input)
+			}
+			switch condition.Operator {
+			case "nonEmpty":
+				if condition.Value != nil {
+					return fmt.Errorf("input rule operator nonEmpty cannot have value")
+				}
+				if groupVar.Type != "string" && groupVar.Type != "stringList" {
+					return fmt.Errorf("input rule operator nonEmpty requires string or stringList input")
+				}
+			case "equals", "notEquals":
+				if condition.Value == nil {
+					return fmt.Errorf("input rule operator %s requires value", condition.Operator)
+				}
+			case "contains", "notContains":
+				if groupVar.Type != "string" {
+					return fmt.Errorf("input rule operator %s requires string input", condition.Operator)
+				}
+				if _, ok := condition.Value.(string); !ok {
+					return fmt.Errorf("input rule operator %s requires string value", condition.Operator)
+				}
+			default:
+				return fmt.Errorf("input rule has invalid operator %q", condition.Operator)
+			}
+		}
+	}
 
-	dependencies := make(map[string]struct{}, len(contract.Dependencies))
+	dependencies := make(map[string]fixtureDependency, len(contract.Dependencies))
 	for _, dependency := range contract.Dependencies {
 		if dependency.Component == "" {
 			return fmt.Errorf("dependency component is required")
@@ -431,17 +573,58 @@ func validateFixtureFields(contract fixtureContract) error {
 		if _, duplicate := dependencies[dependency.Component]; duplicate {
 			return fmt.Errorf("duplicate dependency %q", dependency.Component)
 		}
-		dependencies[dependency.Component] = struct{}{}
+		switch dependency.Relation {
+		case "sameHosts", "providerEndpoint":
+		case "planOnly":
+			if dependency.Reason == "" {
+				return fmt.Errorf("planOnly dependency %q requires reason", dependency.Component)
+			}
+		default:
+			return fmt.Errorf("invalid dependency relation %q", dependency.Relation)
+		}
+		dependencies[dependency.Component] = dependency
 	}
 	for _, binding := range contract.Bindings {
-		if _, ok := groupVars[binding.Input]; !ok {
+		input, ok := groupVars[binding.Input]
+		if !ok {
 			return fmt.Errorf("binding input %q is not declared in groupVars", binding.Input)
 		}
-		if _, ok := dependencies[binding.From.Component]; !ok {
+		dependency, ok := dependencies[binding.From.Component]
+		if !ok {
 			return fmt.Errorf("binding source component %q is not a declared dependency", binding.From.Component)
+		}
+		if dependency.Relation != "providerEndpoint" {
+			return fmt.Errorf("binding source component %q must use providerEndpoint relation", binding.From.Component)
 		}
 		if binding.From.Endpoint == "" {
 			return fmt.Errorf("binding source endpoint is required")
+		}
+		switch binding.SourceSelection {
+		case "exactlyOne", "explicit":
+			if input.Type != "string" {
+				return fmt.Errorf("binding input %q must be string for %s selection", binding.Input, binding.SourceSelection)
+			}
+		case "all":
+			if input.Type != "stringList" {
+				return fmt.Errorf("binding input %q must be stringList for all selection", binding.Input)
+			}
+		default:
+			return fmt.Errorf("invalid binding sourceSelection %q", binding.SourceSelection)
+		}
+	}
+	for _, dependency := range dependencies {
+		if dependency.Relation != "providerEndpoint" {
+			continue
+		}
+		found := false
+		for _, binding := range contract.Bindings {
+			if binding.From.Component == dependency.Component {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("providerEndpoint dependency %q requires a binding", dependency.Component)
 		}
 	}
 
@@ -476,6 +659,51 @@ func validateFixtureFields(contract fixtureContract) error {
 	}
 	if contract.Site.Include && contract.Site.Order <= 0 {
 		return fmt.Errorf("included site projection must have a positive order")
+	}
+	if contract.Verification.AutoDeploy == nil {
+		return fmt.Errorf("verification.autoDeploy is required")
+	}
+	if *contract.Verification.AutoDeploy {
+		return fmt.Errorf("verification.autoDeploy requires Spec v2; final schema fixtures still reference v1 specs")
+	}
+	return nil
+}
+
+func validateFixtureGroupVarDefault(groupVar fixtureGroupVar) error {
+	if groupVar.Default == nil {
+		return nil
+	}
+	switch groupVar.Type {
+	case "string":
+		if _, ok := groupVar.Default.(string); !ok {
+			return fmt.Errorf("group var %s default must be string", groupVar.Name)
+		}
+	case "stringList":
+		values, ok := groupVar.Default.([]any)
+		if !ok {
+			return fmt.Errorf("group var %s default must be stringList", groupVar.Name)
+		}
+		for _, value := range values {
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("group var %s default must be stringList", groupVar.Name)
+			}
+		}
+	case "integer":
+		if _, ok := groupVar.Default.(int); !ok {
+			return fmt.Errorf("group var %s default must be integer", groupVar.Name)
+		}
+	case "boolean":
+		if _, ok := groupVar.Default.(bool); !ok {
+			return fmt.Errorf("group var %s default must be boolean", groupVar.Name)
+		}
+	case "duration":
+		value, ok := groupVar.Default.(string)
+		if !ok {
+			return fmt.Errorf("group var %s default must be duration string", groupVar.Name)
+		}
+		if _, err := time.ParseDuration(value); err != nil {
+			return fmt.Errorf("group var %s default must be Go duration: %w", groupVar.Name, err)
+		}
 	}
 	return nil
 }
@@ -770,11 +998,13 @@ os: []
 hostCardinality: one-or-more
 resources: {}
 groupVars: []
+inputRules: []
 endpoints: []
 stagePolicy: {}
 experimental: false
 evidenceRequirement: {}
 lifecycle: {}
 traceability: {}
+verification: {autoDeploy: false}
 site: {}`
 }

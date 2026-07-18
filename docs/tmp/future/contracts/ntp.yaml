@@ -1,5 +1,4 @@
-# STATUS: PROPOSED FIXTURE ONLY — pilot runtime does not load this file yet.
-# The schema may change before the M1.1 loader and lint implementation.
+# STATUS: FINAL SCHEMA FIXTURE — loader validates this shape; runtime wiring pending.
 schemaVersion: 1
 id: ntp
 role: ntp
@@ -22,7 +21,8 @@ os:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
-  - {name: ntp_pool, required: false, default: "ntp.ubuntu.com pool.ntp.org", secret: false}
+  - {name: ntp_pool, type: string, required: false, default: "ntp.ubuntu.com pool.ntp.org", secret: false}
+inputRules: []
 endpoints:
   - {name: ntp, scheme: udp, port: 123}
 stagePolicy: {variable: stage, default: sandbox}
@@ -33,6 +33,7 @@ traceability:
   mode: rowTags
   tag: {kind: rolePrefixed, prefix: ntp}
   exemptions: {}
+verification: {autoDeploy: false}
 site:
   include: true
   order: 20

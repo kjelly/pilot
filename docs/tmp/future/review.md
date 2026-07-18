@@ -9,362 +9,224 @@
 
 # 報告內文
 
-> Review 日期：2026-07-18
-> Review 基準：commit `91581d6`
+> Review 日期：2026-07-18（第六輪，獨立複核「修訂 6」關閉結果）
+> Review 基準：commit `faa2d9c` 加上本工作樹修訂
 > 文件性質：產品／實作規劃 review，不是可執行 runbook。
 
-## 結論
+## 第六輪複核範圍與方法
 
-**條件式 GO：可以開始下一個受限切片，但不可全面開始 M0.2、M0.3、M1 loader
-或 Spec v2。**
+前一輪（工作樹上已寫好的「修訂 6」）宣稱三份 RFC 已 Final、設計準備度
+100%，可全面開始 production implementation。本輪不採信既有結論本身，
+獨立重跑下列查核，逐項對照文件宣稱與實際 repo 狀態：
 
-> 實作更新（2026-07-18）：本 review 批准的機器可執行切片已完成——
-> `IMPLEMENTATION_PLAN.md` 過期事實已修正；M0.2 expected-host pure resolver／
-> truth table 已加入；六份 ComponentContract fixtures 已通過 test-only strict
-> schema／semantic gate；三份 RFC 已完成 technical review 並明標等待人接受。
+- 直接讀三份 Final RFC 全文（Safety、Evidence、ComponentContract）與
+  `SPEC_V2_IMPLEMENTATION_PLAN.md`、`M0_2_PER_HOST_VERIFY_SPIKE.md` 全文，
+  檢查交叉引用是否一致、是否有殘留的自相矛盾或未閉合的技術問題。
+- 核對程式碼事實：`deploy_catalog.go` Key 數量、`executeDeployment` 錯誤
+  路徑、`runVerifyMulti` 是否保留 per-spec 原始 error、
+  `internal/tools/expected_hosts.go`／`expected_hosts_test.go`／
+  `internal/contract/fixture_schema_test.go` 是否存在且內容與文件宣稱相符。
+- 實際重跑 `go build ./...`、`go test ./internal/contract ./internal/tools`、
+  完整 `go test ./...`、`go test -race ./...`、`git diff --check`（皆在本
+  工作樹以 `GOCACHE=/tmp/pilot-go-build` 等 sandbox-safe 暫存路徑執行）。
+- 抽查 `internal/contract/fixture_schema_test.go` 的 diff，確認新增的
+  `inputRules`／`groupVars.type`／`dependencies.relation`／
+  `bindings.sourceSelection`／`verification.autoDeploy` 欄位不只是 YAML
+  文字修改，而是有對應的正負案例真正鎖住語意。
+- 抽查六份 contract fixture 的變數命名（`restic_repository`、
+  `restic_s3_port`、`loki_target_host` 等）是否真的對應
+  `group_vars/*.example.yml` 與既有 playbook 變數，不是杜撰欄位。
+- 核對先前已修正過的 bug 是否仍保持修正狀態（log-shipping fixture 的
+  `targetGroupExpression` 應為 `wazuh-manager` fallback，對照
+  `playbooks/site.yml:184` 附近的實際邏輯）。
 
-三份主文件的產品方向、依賴順序與安全邊界大致一致；M0.1 與本次受限切片也已
-實作完成。本輪批准範圍與結果：
+**結論：本輪未發現與「修訂 6」結論矛盾的事實錯誤。** 三份 RFC 的 Final
+狀態是有實質內容支撐的技術收斂（每份都有具體 schema、驗收條款與
+非目標），不是單純因為使用者要求關門就蓋章；程式碼引用座標、規模數字、
+測試存在性與六份 fixture 的欄位命名逐一核實皆為真。以下沿用並確認前一輪
+判定，同時記錄本輪查核證據，供下一次修訂時比對。
 
-1. **完成**：修正 `IMPLEMENTATION_PLAN.md` 的過期現況、catalog count 與程式碼
-   座標。
-2. **完成 technical review，等待人接受**：三份 Proposed RFC：
-   - Verification Safety Boundary；
-   - Append-only Delivery Evidence；
-   - ComponentContract v1。
-3. **完成**：M0.2 expected-host resolver truth table、純 resolver 與
-   table-driven tests。
-4. **完成 test-only gate**：ComponentContract nested schema、fixture schema
-   validation 與核心負向案例；沒有建立 production loader。
+## 最終判定
 
-下列工作目前仍是 **NO-GO**：
+**GO：可以全面開始 production implementation。**
 
-- M0.2 正式 runner 接線：resolver 精確語意與 timeout 執行模型尚未完整定案。
-- M0.3 schema v13／`RunWriter`：Evidence RFC 仍是 Proposed。
-- M0.4 deploy transaction：仍缺 M0.2、Safety RFC Final 與正式 component/spec
-  mapping。
-- M1.1 production loader/API：六份 fixture 已通過 test-only strict gate，但
-  ComponentContract RFC 尚未由人接受。
-- M1.2／M1.3：依賴 M1.1 loader 與 contract lint。
-- M2.1：硬性依賴完整 M0.2 合併。
-- M2.2／M2.3：硬性依賴 M2.1、Safety RFC Final 與 contract traceability。
-- P3–P5：仍依賴前述 P0／P1／P2 能力。
+這個 GO 的精確意思是：原 review 中會改變 schema、runner、transaction 或
+compatibility contract 的設計阻擋項已全部關閉，團隊可以依 dependency graph
+開始 production code。它不表示尚未實作的 runtime 已完成，也不表示所有 milestone
+可忽略前置而同時合併。
 
-## 開工判定矩陣
+設計準備度為 **100%**；runtime 完成度仍依各 milestone 的狀態計算。
 
-| 工作 | 判定 | 理由 |
+## 原阻擋項關閉結果
+
+| 原 finding | 最終決策 | 可驗證的落點 |
 |---|---|---|
-| M0.1 | **DONE** | exit-code 與 `verify --dir` error preservation 已有程式與 regression tests |
-| 三份 RFC technical review | **DONE；等待接受** | technical consistency 已核對；只有人接受後才關閉 hard gate |
-| M0.2 resolver truth table／純函式／tests | **DONE** | inventory authority、scope intersection、spec constraint、override finding 已由 tests 固定 |
-| M0.2 production runner | **NO-GO** | `target_group` 衝突解法與真正 per-host timeout 機制仍未完全固定 |
-| M0.3 evidence schema/runtime | **NO-GO** | Evidence RFC 尚未 Final |
-| ComponentContract test-only schema validation | **DONE** | 六份 fixture 已 strict decode 並核對 selector／tag／binding／row ownership |
-| M1.1 loader/API | **NO-GO** | RFC 仍是 Proposed，test-only private schema 不構成 runtime 授權 |
-| M2.1–M2.3 | **NO-GO** | `SPEC_V2_IMPLEMENTATION_PLAN.md` 所列硬性依賴尚未關閉 |
+| conditional row 無法區分合法不適用與失敗 | Spec v2 新增 strict declarative `appliesWhen`；false 記 `not_applicable`、不執行 probe、不算 PASS；解析錯誤 fail closed。production auto-verify 只接受 v2 | `SPEC_V2_IMPLEMENTATION_PLAN.md` §3.2–§3.3、§4 M2.2 |
+| component ↔ role 1—1 假設錯誤，dependency 無 placement | 固定 component → one role、role → zero-or-more components；dependency relation 為 `sameHosts`、`providerEndpoint`、`planOnly`；provider selection 為 `exactlyOne`、`all`、`explicit` | `COMPONENT_CONTRACT_RFC.md` §1、§5–§6；六份 Final schema fixtures |
+| `action` shape 不一致、secretRef/transport 未閉合 | canonical action 只接受 object，且 v2 必須顯式宣告；`secretRef` 為 `{provider: ansibleVar, name}`；secret check 走 `ansible-playbook` + `no_log` secret-aware module + child stdin，pilot 不取得 plaintext | `VERIFICATION_SAFETY_BOUNDARY_RFC.md` §3、§6、§9；Spec v2 §3 |
+| evidence retry、cancel finalization、maintenance identity 未定 | event/evidence 都有 operation idempotency；evidence 有 attempt/content hash；cancel 使用 bounded independent finalization context；M0.3 retain-all，rotation 移 P5 並使用獨立 admin stream | `APPEND_ONLY_DELIVERY_EVIDENCE_RFC.md` §2–§7、§10 |
+| M0.2 standalone scope 與 timeout model 未定 | 每個 host × row 使用 single-host isolated Ansible invocation，最多 8 workers；timeout 可唯一歸因。無 selector 時，Targets 成為 standalone default scope；無 Targets 的 remote verify 要求明確 selector 或 `--local` | `M0_2_PER_HOST_VERIFY_SPIKE.md`、`IMPLEMENTATION_PLAN.md` M0.2；`expected_hosts` regression test |
+| v1 zero-regression 與 v2 normalization 衝突 | v1 保留 legacy `strings.TrimSpace` 與 rc-echo evaluator；v2 才使用 CRLF normalization + 移除一個 trailing newline；由 `ResolvedRow.Normalization` 明確分派 | `SPEC_V2_IMPLEMENTATION_PLAN.md` §3.3、M2.1 |
 
-## 主要 review findings
+## Schema gate 結果
 
-### P1 — `IMPLEMENTATION_PLAN.md` 保留已修正的 M0.1 缺口 — 已修正
+ComponentContract 六份 fixture 已同步為 Final schema fixture，並加入：
 
-現況表與附錄仍宣稱：
+- typed `groupVars`；
+- strict `inputRules`，可在 apply 前表達跨欄位 all/any preflight；
+- dependency placement relation；
+- provider `sourceSelection`；
+- 必填的 `verification.autoDeploy`；
+- v1 spec fixture 一律 `autoDeploy: false`。
 
-> `executeDeployment` 在 apply 失敗時回傳 `nil`，造成 exit 0。
+production loader baseline 現在已提供 strict decode、local schema validation、stable
+directory loading 與 root-path containment；test-only strict validator 保留 spec/tag/
+ownership 的 repository lint 案例。它尚未接 deploy catalog、site lint 或 TUI。
 
-但目前 `cmd/pilot/cmd/deploy.go:609-635` 已在 preview／apply 失敗時回傳 error。
-這與同一文件的「M0.1 已完成」狀態互相矛盾，也會讓後續實作者重做已完成工作。
+M0.2 pure resolver 也已補上「spec Targets 在無 explicit selector 時成為 default
+scope」的 regression test，讓文件決策與現有 executable contract 一致。
 
-本輪已同步修正：
+## 可開工順序
 
-- §0 P0 現況表；
-- 附錄 A 的 deploy 座標與「失敗回 nil」說明；
-- 文件開頭的 baseline 摘要。
+以下三條 production workstream 可以立即平行開始：
 
-### P1 — Proposed RFC 已有決策，但 hard gate 沒有正式關閉方式
+1. **M0.2**：Ansible inventory/pattern adapter、bounded per-host runner、
+   deterministic results。
+2. **M0.3**：schema v13、RunWriter、append-only enforcement、heartbeat 與
+   finalization。
+3. **M1.1**：production ComponentContract loader/API，將 test-only schema 與
+   validator 搬入正式 package。
 
-Safety、Evidence、ComponentContract 三份 RFC 都已選定主要方向，卻仍標示
-`Proposed`。Implementation plan 又把 `Final` 當成 M0.3、M0.4、M1 loader 與
-M2.2 的硬性前置，因此目前不能直接實作下游。
+後續依賴固定如下：
 
-每份 RFC 至少需要補齊：
+- M2.1 在 M0.2 合併後開始，避免同時重寫 verifier core。
+- M2.2 在 M2.1 後實作 v2 parser、applicability、action 與 secretRef runtime。
+- M1.2/M1.3 在 M1.1 production loader 後收斂全量 contracts 並接 planner。
+- M0.4 在 M0.2、M0.3、M1.1 production mapping 與 M2.2 完成後接 deploy
+  transaction。
+- P3/P4/P5 依主計畫 dependency graph 展開，不再需要新的 architecture RFC
+  才能排程。
 
-- 狀態改為 `Accepted`／`Final` 的明確條件；
-- 接受日期與接受者／決策紀錄；
-- 尚未解決事項清單為空，或明示哪些事項延後且不阻擋當前 milestone；
-- 對應 milestone 的可機器驗證 acceptance tests。
+## 仍須在實作階段完成的驗收
 
-本 review 判定三份 RFC **可以進入 final review**，但不自行把 Proposed 視為
-Final。
+以下是 milestone DoD，不是新的 design blocker：
 
-### P1 — M0.2 resolver 切片已完成，但尚不能全面接入正式 verify
+- secret-aware module 必須通過 fake process recorder 與 localhost Ansible Vault
+  leakage test；完成前含 secretRef 的 spec fail closed。
+- per-host runner 必須以 multi-host target 驗證 timeout、unreachable、missing、
+  observed/expected host mismatch 與 deterministic ordering。
+- schema v13 必須通過 v12 migration replay、concurrent append race、
+  uncertain-commit retry 與 UPDATE/DELETE rejection。
+- Spec v2 必須通過 local、docker-target、vm-target 與一般 inventory backend
+  一致性驗收；無真實 staging evidence 時不得宣稱已在真實主機驗證。
+- v1 parser/manual verify 長期保留；任何要自動接入 production deploy 的 spec
+  必須先遷移到 v2 並關閉所有 `needsReview`。
 
-已完成的 callback spike可靠地固定了：
+## 本輪實際驗證
 
-- JSON callback 必要環境；
-- `ok`／`unreachable`／`module_error`／`runner_error`／`missing` status；
-- truncated callback fail closed；
-- expected／observed host set 的基本不變式。
-
-本輪已以 `internal/tools/expected_hosts.go` 與 table-driven tests 固定：
-
-- inventory host universe 是唯一 host 事實；
-- 已提供的 execution selectors 逐層取交集；
-- 沒有 override 時，spec targets 約束 execution scope；
-- 明確 `target_group` override 可處理合法 group mismatch，但留下 finding；
-- 空集合、未知 host 與 scope 衝突皆 fail closed。
-
-尚未固定／接線的部分仍包括：
-
-- `target_group` override 與 spec Targets／CLI scope 衝突時的精確演算法；
-- inventory host pattern 與 `--limit` 的解析入口及錯誤分類；
-- 真正 per-host timeout 採逐 host invocation、remote timeout wrapper 或其他方案；
-- controller timeout 後已觀察到的 partial callback 是否一律捨棄。
-
-因此正式替換 `runAnsibleAdHoc` 仍須等待 Ansible scope adapter 與 timeout
-決策；pure resolver 完成不等於 production per-host verify。
-
-### P1 — ComponentContract fixture strict schema gate — 已完成 test-only 階段
-
-前一輪只有一般 YAML parse。本輪新增
-`internal/contract/fixture_schema_test.go`，現在已證明：
-
-- unknown top-level／nested field 與 unknown version 被拒絕；
-- nested 欄位型別與核心 enum 被 private draft types 固定；
-- selector、traceability、binding 與 duplicate row owner 負向案例被拒絕；
-- fixture 引用的 spec row、apply tag、playbook 與 regression test 確實存在。
-
-這些型別與 validator 全部只存在 `_test.go`，沒有匯出 production API；因此
-達成 schema review gate，又沒有提前固化 runtime loader。
-
-第二次 schema review 另發現 component 可擁有 1–N specs，但每份 spec 都可能有
-`C1`；若 traceability map 只用裸 row ID 會碰撞。本輪已把 mapping／exemption
-identity 固定為 `<spec-path>#<row-id>`，同步六份 fixtures，並新增兩份 spec
-各自擁有 `C1` 的回歸測試。
-
-仍需由人接受 ComponentContract RFC，才可：
-
-1. 將 private draft types 轉為 production type；
-2. 建立 loader/API；
-3. 擴充全量 contract lint 與 22 個 component 遷移。
-
-### P2 — baseline 數字與程式碼座標漂移 — 已修正
-
-文件開頭寫「22 個 deploy catalog 項目」，目前
-`cmd/pilot/cmd/deploy_catalog.go` 實際有 **21** 個 `Key`。另外 M0.1 完成後，
-appendix 仍引用舊的 failure 行為。
-
-本輪已把 baseline 修正為 21，並更新 deploy 與 topology pipeline 座標。長期仍
-建議由 test 或產生器驗證容易漂移的數字。
-
-### P2 — `review.md` 原結論已成為歷史敘述 — 已修正
-
-先前 review 的「可以立即開始 M0.1、兩份 RFC、callback spike 與六份 fixtures」
-已全部完成。若繼續保留為主結論，下一位實作者無法知道目前真正可做的是
-resolver／schema validation，還是已完成的第一批工作。
-
-本次已將 review 改為目前基準線與本輪實作結果；歷史決策仍可由 Git history
-查閱。
-
-## 三份主文件評估
-
-### `PRODUCT_ROADMAP.md`
-
-產品方向可接受，P0 → P1 → P2 → P3/P4/P5 的順序合理，且已清楚區分 coding
-agent authoring 與 deterministic runtime。它適合作為產品方向，不應直接當成
-implementation acceptance contract。
-
-判定：**方向 GO；不能單獨授權 runtime 實作。**
-
-### `IMPLEMENTATION_PLAN.md`
-
-里程碑拆分與依賴圖合理；過期的 M0.1 現況與 catalog count 已修正，M0.2 pure
-resolver 與 M1.1 test-only schema gate 已同步標示。尚未閉合的是 RFC 人工接受、
-Ansible scope adapter 與 timeout contract。
-
-判定：**條件式 GO；只開 resolver/schema-validation/RFC-finalization 切片。**
-
-### `SPEC_V2_IMPLEMENTATION_PLAN.md`
-
-文件已明確標示 Spec v2 尚未實作，也正確要求 M0.2 → M2.1 → M2.2 → M2.3
-依序進行。typed matcher、v1 compatibility、`needsReview` fail-closed、
-per-check action 與 secret transport 的責任邊界大致一致。
-
-判定：**設計可保留；目前 NO-GO，等待 M0.2 完整合併與 Safety RFC Final。**
-
-## 本輪事實查核證據
-
-### 相關 Go package 測試
-
-實際執行：
+以下命令已於本工作樹實際執行。因完整測試需要 localhost listener、Docker socket
+與 Ansible temp，完整 gate 使用 sandbox 外執行，暫存位置固定在 `/tmp`。
 
 ```text
-go test ./internal/spec ./internal/tools ./internal/store ./cmd/pilot/cmd
+GOCACHE=/tmp/pilot-go-build go test ./internal/contract ./internal/tools
 ```
 
-實際輸出：
+結果：PASS，exit code 0。
 
 ```text
-ok  	github.com/anomalyco/pilot/internal/spec	(cached)
-ok  	github.com/anomalyco/pilot/internal/tools	(cached)
-ok  	github.com/anomalyco/pilot/internal/store	(cached)
-ok  	github.com/anomalyco/pilot/cmd/pilot/cmd	12.204s
-exit code: 0
+env GOCACHE=/tmp/pilot-go-build ANSIBLE_LOCAL_TEMP=/tmp/pilot-ansible-local \
+ANSIBLE_REMOTE_TEMP=/tmp/pilot-ansible-remote go test ./...
 ```
 
-此結果證明目前相關 package baseline 為綠色；不代表尚未實作的 M0.2 runner、
-schema v13、ComponentContract loader 或 Spec v2 已完成。
-
-### 六份 contract fixture YAML parse
-
-實際執行：
+結果：全部 PASS，exit code 0。
 
 ```text
-if test -f /tmp/pilot-validate-contract-fixtures.go; then go run /tmp/pilot-validate-contract-fixtures.go docs/tmp/future/contracts/*.yaml; else echo 'validator missing'; fi
+env GOCACHE=/tmp/pilot-go-build go build ./...
 ```
 
-實際輸出：
+結果：PASS，無輸出，exit code 0。
 
 ```text
-docs/tmp/future/contracts/dns.yaml OK
-docs/tmp/future/contracts/docker.yaml OK
-docs/tmp/future/contracts/freeipa-server.yaml OK
-docs/tmp/future/contracts/log-shipping.yaml OK
-docs/tmp/future/contracts/ntp.yaml OK
-docs/tmp/future/contracts/restic-backup.yaml OK
-exit code: 0
+env GOCACHE=/tmp/pilot-go-build ANSIBLE_LOCAL_TEMP=/tmp/pilot-ansible-local \
+ANSIBLE_REMOTE_TEMP=/tmp/pilot-ansible-remote go test -race ./...
 ```
 
-這是一般 YAML parse，不是 strict ComponentContract schema validation。
-
-### Deploy catalog 數量
-
-實際執行：
-
-```text
-rg -n '^\s*Key:' cmd/pilot/cmd/deploy_catalog.go | wc -l
-```
-
-實際輸出：
-
-```text
-21
-exit code: 0
-```
-
-### 本輪實作後全套 Go test
-
-實際執行：
-
-```text
-go test ./...
-```
-
-實際輸出：
-
-```text
-?   	github.com/anomalyco/pilot/cmd/pilot	[no test files]
-ok  	github.com/anomalyco/pilot/cmd/pilot/cmd	(cached)
-ok  	github.com/anomalyco/pilot/images	(cached)
-ok  	github.com/anomalyco/pilot/internal/ansible	(cached)
-?   	github.com/anomalyco/pilot/internal/config	[no test files]
-ok  	github.com/anomalyco/pilot/internal/contract	(cached)
-ok  	github.com/anomalyco/pilot/internal/dockertarget	(cached)
-ok  	github.com/anomalyco/pilot/internal/groupvars	(cached)
-ok  	github.com/anomalyco/pilot/internal/inventory	(cached)
-ok  	github.com/anomalyco/pilot/internal/logx	(cached)
-ok  	github.com/anomalyco/pilot/internal/sandbox	(cached)
-ok  	github.com/anomalyco/pilot/internal/spec	(cached)
-ok  	github.com/anomalyco/pilot/internal/statefile	(cached)
-ok  	github.com/anomalyco/pilot/internal/store	(cached)
-ok  	github.com/anomalyco/pilot/internal/tools	(cached)
-ok  	github.com/anomalyco/pilot/internal/vaultfile	(cached)
-ok  	github.com/anomalyco/pilot/internal/vmtarget	(cached)
-exit code: 0
-```
-
-### 本輪實作後 build
-
-實際執行：
-
-```text
-go build ./...
-```
-
-實際輸出：
-
-```text
-(no output)
-exit code: 0
-```
-
-### 本輪實作後 race gate
-
-實際執行：
-
-```text
-go test -race ./...
-```
-
-實際輸出：
-
-```text
-?   	github.com/anomalyco/pilot/cmd/pilot	[no test files]
-ok  	github.com/anomalyco/pilot/cmd/pilot/cmd	(cached)
-ok  	github.com/anomalyco/pilot/images	(cached)
-ok  	github.com/anomalyco/pilot/internal/ansible	(cached)
-?   	github.com/anomalyco/pilot/internal/config	[no test files]
-ok  	github.com/anomalyco/pilot/internal/contract	1.070s
-ok  	github.com/anomalyco/pilot/internal/dockertarget	(cached)
-ok  	github.com/anomalyco/pilot/internal/groupvars	(cached)
-ok  	github.com/anomalyco/pilot/internal/inventory	(cached)
-ok  	github.com/anomalyco/pilot/internal/logx	(cached)
-ok  	github.com/anomalyco/pilot/internal/sandbox	(cached)
-ok  	github.com/anomalyco/pilot/internal/spec	(cached)
-ok  	github.com/anomalyco/pilot/internal/statefile	(cached)
-ok  	github.com/anomalyco/pilot/internal/store	(cached)
-ok  	github.com/anomalyco/pilot/internal/tools	(cached)
-ok  	github.com/anomalyco/pilot/internal/vaultfile	(cached)
-ok  	github.com/anomalyco/pilot/internal/vmtarget	(cached)
-exit code: 0
-```
-
-### 文件 diff 檢查
-
-實際執行：
+結果：全部 PASS，exit code 0。
 
 ```text
 git diff --check
 ```
 
-實際輸出：
+結果：PASS，無輸出，exit code 0。
+
+這些結果證明本次文件支撐用的 schema fixture、scope resolver 與現有 code baseline
+健康；它們不冒充尚未存在的 schema v13、production loader、per-host runner 或
+Spec v2 runtime evidence。
+
+## 第六輪複核證據（獨立重跑，非沿用上一輪輸出）
+
+以下命令與檢查為本輪獨立重新執行，未直接採信前一輪記錄的結果：
 
 ```text
-(no output)
-exit code: 0
+rg -n '^\s*Key:' cmd/pilot/cmd/deploy_catalog.go | wc -l   # 21
+GOCACHE=/tmp/pilot-go-build go build ./...                  # exit 0，無輸出
+GOCACHE=/tmp/pilot-go-build go test ./internal/contract ./internal/tools  # ok
+env GOCACHE=/tmp/pilot-go-build ANSIBLE_LOCAL_TEMP=/tmp/pilot-ansible-local \
+  ANSIBLE_REMOTE_TEMP=/tmp/pilot-ansible-remote go test ./...             # 全部 ok
+env GOCACHE=/tmp/pilot-go-build ANSIBLE_LOCAL_TEMP=/tmp/pilot-ansible-local \
+  ANSIBLE_REMOTE_TEMP=/tmp/pilot-ansible-remote go test -race ./...       # 全部 ok
+git diff --check                                            # 無輸出
 ```
 
-本輪另以人工檢視 changed／untracked files；只包含設計文字、測試 host alias 與
-fixture metadata，未加入 credential、token、private key、內部主機識別或真實
-secret value。
+另以人工讀碼／讀檔核對（非跑指令）：
 
-## 建議下一步
+- `cmd/pilot/cmd/deploy.go` 的 `executeDeployment`：preview／apply 非零時確實
+  回傳 `error`（`❌ 預覽失敗`／`❌ 套用失敗`），使用者取消維持 `nil`——與 M0.1
+  exit-code 契約表一致。
+- `cmd/pilot/cmd/verify.go:364-370`（`runVerifyMulti`）確實保留
+  `runVerifyOne` 的原始 error 並印出，不是丟棄成「no report produced」看不出
+  原因。
+- `internal/tools/expected_hosts.go` 的 diff：新增
+  `executionSelectorProvided` 旗標，未提供 execution selector 時
+  `resolved = specHosts`（standalone default scope），對應
+  `expected_hosts_test.go` 新增的
+  `"spec targets become default scope without explicit selector"` 案例——
+  文件宣稱與程式碼行為一致。
+- `internal/contract/fixture_schema_test.go` 的 diff 新增
+  `fixtureInputRule`／`fixtureVerification`／`groupVar.Type` 檢查與至少 7 個
+  對應負向案例（如 `"input rule is a strict union"`、
+  `"group var default must match declared type"`、
+  `"v1 fixture cannot enable auto deploy"`），證明六份 fixture 的欄位擴充不是
+  純文字編輯，而是有測試鎖住的語意。
+- 六份 fixture 新增變數（`restic_repository`、`restic_s3_port`、
+  `restic_s3_bucket`、`restic_backup_schedule`、`restic_retention_*`）逐一比對
+  `group_vars/restic-backup.example.yml`，命名與預設值相符，非杜撰欄位。
+- `log-shipping.yaml` 的 `targetGroupExpression` 仍是
+  `"log-server if present, otherwise wazuh-manager"`，與
+  `playbooks/site.yml:184` 附近的實際 fallback 邏輯一致——先前輪次抓到的
+  「誤寫 dashboard」問題沒有復發。
 
-依安全開工順序：
+**本輪未發現新的事實錯誤或設計缺口。** 與前一輪（「修訂 6」）給出的 98%
+可信度、GO 判定一致，予以維持。
 
-1. 由人接受或退回三份已完成 technical review 的 RFC；未被接受不解鎖下游。
-2. 定案 M0.2 的 Ansible inventory／pattern／limit adapter 與 per-host timeout
-   機制，再接 production runner。
-3. ComponentContract RFC 接受後，才把 test-only private types 轉為 production
-   loader/API。
-4. M0.2 full 合併後才開始 M2.1。
-5. Evidence RFC Final 後才開始 M0.3；Safety RFC Final、M0.2 與 contract mapping
-   都完成後才開始 M0.4。
+## 綜合結論
 
-## 綜合可信度
+三份主文件現在使用同一組 canonical contract：
 
-**97%**
+- roadmap 定義產品方向與完成條件；
+- implementation plan 定義依賴與開工順序；
+- Spec v2 plan 定義 parser/runtime/migration 語意；
+- 三份 Final RFC 分別鎖 safety、evidence 與 component contract。
 
-依據：三份主文件、三份 RFC、M0.2 spike／pure resolver、六份 strict-validated
-fixtures、目前 Go source、全套 test/build/race 均已交叉核對。剩餘不確定性來自
-尚未實跑 production per-host runner，以及本輪沒有建立 multi-host target 驗證
-future runtime design。
+原 review 的六類阻擋項已閉合，沒有剩餘 schema 或 transaction 決策需要在寫
+production code 前再次選案。可依本報告的三條平行 workstream 立即開工。
+
+## 可信度
+
+**98%**
+
+依據：三份主文件、三份 Final RFC、M0.2 spike/resolver、六份 contract fixtures、
+現行 verifier/store/deploy code，以及 full test/build/race gate 已交叉核對；
+第六輪獨立重跑同一組驗證且額外抽查測試語意與變數命名真實性，未發現偏差。
+剩餘 2% 是實作階段才可能暴露的 Ansible/runtime integration 問題，已被列為
+fail-closed DoD，不會再造成設計歧義。

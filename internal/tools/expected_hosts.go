@@ -47,10 +47,12 @@ func resolveExpectedHosts(in expectedHostInput) (expectedHostResolution, error) 
 	universeSet := stringSet(universe)
 
 	resolved := append([]string(nil), universe...)
+	executionSelectorProvided := false
 	for _, selection := range in.ExecutionSelections {
 		if !selection.Provided {
 			continue
 		}
+		executionSelectorProvided = true
 		name := strings.TrimSpace(selection.Name)
 		if name == "" {
 			return expectedHostResolution{}, fmt.Errorf("expected-host resolver: execution selection has no name")
@@ -86,12 +88,16 @@ func resolveExpectedHosts(in expectedHostInput) (expectedHostResolution, error) 
 			if len(specHosts) == 0 {
 				return expectedHostResolution{}, fmt.Errorf("expected-host resolver: spec targets matched zero inventory hosts and no target_group override was provided")
 			}
-			outside := differenceHostSets(resolved, specHosts)
-			if len(outside) > 0 {
-				return expectedHostResolution{}, fmt.Errorf(
-					"expected-host resolver: execution scope contains hosts outside spec targets: %s",
-					strings.Join(outside, ", "),
-				)
+			if !executionSelectorProvided {
+				resolved = specHosts
+			} else {
+				outside := differenceHostSets(resolved, specHosts)
+				if len(outside) > 0 {
+					return expectedHostResolution{}, fmt.Errorf(
+						"expected-host resolver: execution scope contains hosts outside spec targets: %s",
+						strings.Join(outside, ", "),
+					)
+				}
 			}
 		}
 	} else if in.TargetGroupOverride {
