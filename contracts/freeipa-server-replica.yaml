@@ -25,5 +25,21 @@ stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:
   mode: mapped
+  rows:
+    "docs/verification/freeipa-server-replica.md#C1": {tags: [R1, R2], reason: client enrollment followed by replica promotion}
+    "docs/verification/freeipa-server-replica.md#C2": {tags: [R2], reason: replica service health}
+    "docs/verification/freeipa-server-replica.md#C3": {tags: [R1], reason: replica hostname setup}
+    "docs/verification/freeipa-server-replica.md#C4": {tags: [R2], reason: replica install listener}
+    "docs/verification/freeipa-server-replica.md#C5": {tags: [R2], reason: replica install listener}
+    "docs/verification/freeipa-server-replica.md#C6": {tags: [R2], reason: replica install listener}
+    "docs/verification/freeipa-server-replica.md#C7": {tags: [R2], reason: replica install listener}
+    "docs/verification/freeipa-server-replica.md#C8": {tags: [R2], reason: replica install listener}
+    "docs/verification/freeipa-server-replica.md#C9": {tags: [R2], reason: replica install listener}
+    "docs/verification/freeipa-server-replica.md#C10": {tags: [R2], reason: replica install listener}
+    "docs/verification/freeipa-server-replica.md#C11": {tags: [R2], reason: replicated directory suffix}
+    "docs/verification/freeipa-server-replica.md#C12": {tags: [R2], reason: replica CA setup}
+    "docs/verification/freeipa-server-replica.md#C13": {tags: [freeipa-replica-verify], reason: replicated sudo subtree verification}
+    "docs/verification/freeipa-server-replica.md#C14": {tags: [freeipa-replica-verify], reason: topology verification}
+    "docs/verification/freeipa-server-replica.md#C15": {tags: [freeipa-replica-verify], reason: topology verification}
 verification: {autoDeploy: false}
 site: {include: false, order: 0, vars: {}, tags: [], optIn: true}
