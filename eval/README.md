@@ -11,9 +11,10 @@ Run the deterministic gate from the repository root:
 eval/run.sh
 ```
 
-Set `PILOT_EVAL_TARGET_TEST` to an already-authorized target-test command when
-the candidate bundle has a disposable target.  The script never provisions or
-mutates a target itself.  Its static gates are repeatable and model-neutral;
-the optional target command supplies the actual-run and idempotency evidence
-required before a bundle can be promoted.
-
+The harness writes `tmp/eval-scorecard.json`. Without a target command the
+scorecard is honestly marked `incomplete`; static checks are not presented as
+delivery proof. Set `PILOT_EVAL_TARGET_TEST` to an already-authorized
+`docker-target test` or `vm-target test` command. Set
+`PILOT_EVAL_REQUIRE_TARGET=1` in the production promotion gate so a missing
+actual-run/idempotency test is a hard failure. The harness is model-independent
+and never provisions a target by itself.
