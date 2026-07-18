@@ -433,8 +433,13 @@ docker run --rm -v "$(pwd)/hosts.yml:/pilot/hosts.yml:ro" pilot-cli:latest pilot
   - **逐項勾選角色**：方向鍵移動、space 勾選/取消、enter 完成——單一畫面
     持續操作，游標停在你上次的位置，不會像逐個確認的選單一樣每按一次就
     跳回清單最上面。
-  - **套用常用角色範本**：內建幾個 `hosts.example.yml` 就示範過的常見組合
-    （FreeIPA 身份伺服器、納入 FreeIPA 的一般 server、核心基礎服務）。
+  - **套用常用角色範本**：未客製時提供與
+    `docs/runbooks/minimal-poc-architecture.md` 實際 inventory 完全一致的三組：
+    FreeIPA 身份伺服器、Nexus 中央服務節點、被監控的 Linux 主機。FreeIPA replica
+    不在 minimal PoC；需要時從「管理角色範本」新增。
+  - **管理角色範本**：新增、修改或刪除範本；第一次儲存時會在同一個 `--dir`
+    建立 `role-presets.yml`。該檔案存在後會完整取代內建清單，因此每個環境可有
+    不同的選單內容；也可從選單刪除檔案還原內建範本。
   - **複製自其他主機的角色**：直接整組複製 `hosts.yml` 裡任何一台已經設定好
     角色的主機——最適合「這批機器角色都跟那台一樣」的情境，一次選好之後
     再用逐項勾選微調即可。

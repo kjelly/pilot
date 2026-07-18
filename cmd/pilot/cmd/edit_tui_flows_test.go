@@ -46,8 +46,8 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // toggle the first role on
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm checklist -> back to roles menu
 
-	// roles menu items: 0 checklist, 1 preset, 2 copy, 3 done
-	for i := 0; i < 3; i++ {
+	// roles menu items: 0 checklist, 1 preset, 2 manage presets, 3 copy, 4 done
+	for i := 0; i < 4; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "✅ 完成" -> back to host menu
