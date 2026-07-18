@@ -116,6 +116,8 @@ func init() {
 	vtTopologyTestCmd.Flags().StringArrayVar(&vtTopoTestVerify, "verify", nil, "verification spec to run after apply, as 'docs/verification/<x>.md' or 'docs/verification/<x>.md=<ansible-limit>'; repeatable, at least one required")
 	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestSkipLint, "skip-lint", false, "skip syntax check pre-flight")
 	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestNoRollback, "no-rollback", false, "disable automatic cluster rollback on failure")
+	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestEphemeral, "ephemeral", false, "provision a new topology, test it, then tear down the VMs on success or failure")
+	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestKeepOnFailure, "keep-on-failure", false, "with --ephemeral, preserve the failed VM state instead of rolling back or tearing it down")
 	vtTopologyTestCmd.Flags().IntVar(&vtTopoTestVerifyTimeout, "verify-timeout", 0, "per-row timeout (seconds) forwarded to `pilot verify` (0 = verify's own default)")
 	_ = vtTopologyTestCmd.MarkFlagRequired("playbook")
 	_ = vtTopologyTestCmd.MarkFlagRequired("verify")
@@ -495,6 +497,8 @@ var (
 	vtTopoTestVerify        []string
 	vtTopoTestSkipLint      bool
 	vtTopoTestNoRollback    bool
+	vtTopoTestEphemeral     bool
+	vtTopoTestKeepOnFailure bool
 	vtTopoTestVerifyTimeout int
 )
 
@@ -528,6 +532,12 @@ Everything after '--' is forwarded VERBATIM to the apply AND idempotency
 runs. Unlike single-VM 'test', no '-l <name>' limit is ever added: the
 rendered topology inventory's groups own targeting (that is the point of
 'groups:' in the topology spec).
+
+With --ephemeral, pilot first requires every declared node name to be absent,
+then provisions and wires the full topology before this test chain. A passing
+run always tears those VMs down. A failing run also tears them down by default;
+--keep-on-failure instead preserves the unrolled-back failed state for SSH
+debugging. This mode never adopts or destroys pre-existing topology VMs.
 `,
 	Args: cobra.ArbitraryArgs,
 	RunE: runVtTopologyTest,
@@ -555,7 +565,202 @@ func parseTopoVerifyArgs(raw []string) ([]topoVerify, error) {
 	return out, nil
 }
 
+func runTopologySyntaxCheck(cmd *cobra.Command) error {
+	if vtTopoTestSkipLint {
+		return nil
+	}
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out, "=== [Step 1/5] L1 Syntax Check ===")
+	if err := execAnsiblePlaybook(out, vtTopoTestPlaybook, "--syntax-check"); err != nil {
+		return fmt.Errorf("syntax check failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Syntax check passed")
+	return nil
+}
+
+// requireEphemeralTopologyAbsent prevents --ephemeral from adopting or later
+// destroying a VM that existed before this invocation.
+func requireEphemeralTopologyAbsent(ctx context.Context, m *vmtarget.Manager, spec *vmtarget.TopologySpec) error {
+	targets, err := m.List(ctx)
+	if err != nil {
+		return err
+	}
+	byName := make(map[string]vmtarget.Target, len(targets))
+	for _, t := range targets {
+		byName[t.Name] = t
+	}
+	for _, n := range spec.Nodes {
+		if t, ok := byName[n.Name]; ok {
+			return fmt.Errorf("--ephemeral requires node %q to be absent, but it already exists (status=%s); use topology test without --ephemeral or tear it down first", n.Name, t.Status)
+		}
+	}
+	return nil
+}
+
+// provisionEphemeralTopology returns only nodes successfully created by this
+// invocation. The returned names are the cleanup ownership boundary if another
+// pilot process races one of the topology names.
+func provisionEphemeralTopology(ctx context.Context, spec *vmtarget.TopologySpec, out io.Writer, keepOnFailure bool) ([]string, error) {
+	var outMu sync.Mutex
+	printf := func(format string, a ...any) {
+		outMu.Lock()
+		defer outMu.Unlock()
+		fmt.Fprintf(out, format, a...)
+	}
+
+	created := make([]string, len(spec.Nodes))
+	errs := make([]error, len(spec.Nodes))
+	var wg sync.WaitGroup
+	for i, n := range spec.Nodes {
+		wg.Add(1)
+		go func(i int, n vmtarget.TopologyNode) {
+			defer wg.Done()
+			nm, err := vtNewManager()
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			opt, err := n.ToOptions()
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			// The CLI policy controls the whole ephemeral workflow. A
+			// node-level YAML keep_on_failure cannot leak a default-cleanup run.
+			opt.KeepOnFailure = keepOnFailure
+			printf("▶ provisioning %s...\n", n.Name)
+			t, err := nm.Up(ctx, opt)
+			if err != nil {
+				errs[i] = fmt.Errorf("node %q: %w", n.Name, err)
+				return
+			}
+			created[i] = t.Name
+			printf("✓ %s up (ip=%s)\n", t.Name, t.IP)
+		}(i, n)
+	}
+	wg.Wait()
+
+	owned := make([]string, 0, len(created))
+	for i, err := range errs {
+		if created[i] != "" {
+			owned = append(owned, created[i])
+		}
+		if err != nil {
+			return owned, err
+		}
+	}
+	return owned, nil
+}
+
+func teardownEphemeralTopology(ctx context.Context, m *vmtarget.Manager, out, errOut io.Writer, names []string) error {
+	var firstErr error
+	for _, name := range names {
+		if err := m.Down(ctx, name); err != nil {
+			fmt.Fprintf(errOut, "✗ ephemeral cleanup %s: %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		fmt.Fprintf(out, "✓ ephemeral cleanup: %s down\n", name)
+	}
+	return firstErr
+}
+
+func printEphemeralDebugHints(errOut io.Writer, topologyPath string) {
+	fmt.Fprintln(errOut, "⚠️ --keep-on-failure preserved the unrolled-back topology for debugging.")
+	fmt.Fprintf(errOut, "  status    : pilot vm-target topology status --topology %s\n", topologyPath)
+	fmt.Fprintf(errOut, "  inventory : pilot vm-target topology inventory --topology %s\n", topologyPath)
+	fmt.Fprintf(errOut, "  teardown  : pilot vm-target topology down --topology %s\n", topologyPath)
+}
+
+func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, verifies []topoVerify, invPath string, args []string, rollbackOnFailure bool) error {
+	out := cmd.OutOrStdout()
+
+	snapTag := fmt.Sprintf("pre-test-%d", time.Now().Unix())
+	fmt.Fprintf(out, "=== [Step 2/5] Cluster snapshot: %d node(s) (tag: %s) ===\n", len(spec.Nodes), snapTag)
+	if err := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
+		if serr := nm.Snapshot(context.Background(), n.Name, snapTag); serr != nil {
+			return fmt.Errorf("node %q: %w", n.Name, serr)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to snapshot cluster: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Cluster snapshot created")
+
+	rollback := func(origErr error) error {
+		if !rollbackOnFailure {
+			return origErr
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed: %v. Rolling back every node to %s...\n", origErr, snapTag)
+		if rerr := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
+			if err := nm.Rollback(context.Background(), n.Name, snapTag); err != nil {
+				return fmt.Errorf("node %q: %w", n.Name, err)
+			}
+			return nil
+		}); rerr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 Double fault: cluster rollback failed: %v\n", rerr)
+			return fmt.Errorf("%w (cluster rollback also failed: %v)", origErr, rerr)
+		}
+		if werr := rewireTopology(spec, out); werr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 rollback OK but re-wiring failed: %v\n", werr)
+			return fmt.Errorf("%w (re-wire after rollback failed: %v)", origErr, werr)
+		}
+		fmt.Fprintln(out, "✓ Rollback successful. Every node restored to pre-test state.")
+		return origErr
+	}
+
+	fmt.Fprintln(out, "=== [Step 3/5] L4 Apply Playbook (topology inventory) ===")
+	ansibleArgs := append([]string{vtTopoTestPlaybook, "-i", invPath}, args...)
+	if err := execExternal(out, "ansible-playbook", ansibleArgs...); err != nil {
+		return rollback(fmt.Errorf("playbook apply failed: %w", err))
+	}
+	fmt.Fprintln(out, "✓ Playbook apply completed")
+
+	fmt.Fprintf(out, "=== [Step 4/5] L5 Verification Specs (%d) ===\n", len(verifies))
+	for _, v := range verifies {
+		pilotArgs := []string{"verify", v.spec, "-i", invPath}
+		if v.limit != "" {
+			pilotArgs = append(pilotArgs, "-l", v.limit)
+		}
+		if vtTopoTestVerifyTimeout > 0 {
+			pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
+		}
+		if err := execPilot(out, pilotArgs...); err != nil {
+			return rollback(fmt.Errorf("verification failed (%s): %w", v.spec, err))
+		}
+	}
+	fmt.Fprintln(out, "✓ Verification checks passed")
+
+	fmt.Fprintln(out, "=== [Step 5/5] L6 Idempotency Check ===")
+	var idemBuf bytes.Buffer
+	if err := execExternal(io.MultiWriter(out, &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
+		return rollback(fmt.Errorf("idempotency run failed: %w", err))
+	}
+	changed, ok := idempotencyChangedCount(idemBuf.String())
+	if !ok {
+		return rollback(fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)"))
+	}
+	if changed > 0 {
+		return rollback(fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed))
+	}
+	fmt.Fprintln(out, "✓ Idempotency check passed (changed=0)")
+	fmt.Fprintln(out, "🎉 ALL TESTS PASSED SUCCESSFULLY!")
+	return nil
+}
+
+func validateTopologyTestMode(ephemeral, keepOnFailure bool) error {
+	if keepOnFailure && !ephemeral {
+		return fmt.Errorf("--keep-on-failure requires --ephemeral; use --no-rollback when testing an existing topology")
+	}
+	return nil
+}
+
 func runVtTopologyTest(cmd *cobra.Command, args []string) error {
+	if err := validateTopologyTestMode(vtTopoTestEphemeral, vtTopoTestKeepOnFailure); err != nil {
+		return err
+	}
 	spec, err := vmtarget.LoadTopologySpec(vtTopoSpecPath)
 	if err != nil {
 		return err
@@ -569,106 +774,105 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	ctx := context.Background()
-	out := cmd.OutOrStdout()
+	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
 
-	// Rendering the inventory up front doubles as the "every node is
-	// running" pre-flight — fail before snapshotting anything.
+	// Syntax is intentionally first so --ephemeral does not allocate VMs for
+	// a playbook that cannot parse.
+	if err := runTopologySyntaxCheck(cmd); err != nil {
+		return err
+	}
+
+	if !vtTopoTestEphemeral {
+		inv, err := renderTopologyInventory(ctx, m, spec, vtTopoSpecPath)
+		if err != nil {
+			return err
+		}
+		invPath, cleanup, err := writeTempInventory(inv)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		if vtTopoTestNoRollback {
+			fmt.Fprintln(errOut, "⚠️ Auto-rollback is disabled via --no-rollback")
+		}
+		return runTopologyTestPipeline(cmd, spec, verifies, invPath, args, !vtTopoTestNoRollback)
+	}
+
+	if err := requireEphemeralTopologyAbsent(ctx, m, spec); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "=== [Ephemeral setup] Provisioning %d fresh node(s) ===\n", len(spec.Nodes))
+	owned, err := provisionEphemeralTopology(ctx, spec, out, vtTopoTestKeepOnFailure)
+	if err != nil {
+		if vtTopoTestKeepOnFailure {
+			printEphemeralDebugHints(errOut, vtTopoSpecPath)
+			return fmt.Errorf("ephemeral topology provisioning failed: %w", err)
+		}
+		fmt.Fprintf(errOut, "❌ Ephemeral provisioning failed: %v. Tearing down %d created node(s)...\n", err, len(owned))
+		if cerr := teardownEphemeralTopology(ctx, m, out, errOut, owned); cerr != nil {
+			return fmt.Errorf("ephemeral topology provisioning failed: %w (cleanup also failed: %v)", err, cerr)
+		}
+		return fmt.Errorf("ephemeral topology provisioning failed: %w", err)
+	}
+
+	for _, n := range spec.Nodes {
+		if len(n.Wire) == 0 {
+			continue
+		}
+		if err := wireTargetToPeers(ctx, m, out, n.Name, n.Wire); err != nil {
+			if vtTopoTestKeepOnFailure {
+				printEphemeralDebugHints(errOut, vtTopoSpecPath)
+				return fmt.Errorf("wire %q: %w", n.Name, err)
+			}
+			fmt.Fprintf(errOut, "❌ Ephemeral wiring failed: %v. Tearing down created node(s)...\n", err)
+			if cerr := teardownEphemeralTopology(ctx, m, out, errOut, owned); cerr != nil {
+				return fmt.Errorf("wire %q: %w (cleanup also failed: %v)", n.Name, err, cerr)
+			}
+			return fmt.Errorf("wire %q: %w", n.Name, err)
+		}
+	}
+
 	inv, err := renderTopologyInventory(ctx, m, spec, vtTopoSpecPath)
 	if err != nil {
+		if vtTopoTestKeepOnFailure {
+			printEphemeralDebugHints(errOut, vtTopoSpecPath)
+			return err
+		}
+		if cerr := teardownEphemeralTopology(ctx, m, out, errOut, owned); cerr != nil {
+			return fmt.Errorf("%w (ephemeral cleanup also failed: %v)", err, cerr)
+		}
 		return err
 	}
 	invPath, cleanup, err := writeTempInventory(inv)
 	if err != nil {
+		if vtTopoTestKeepOnFailure {
+			printEphemeralDebugHints(errOut, vtTopoSpecPath)
+			return err
+		}
+		if cerr := teardownEphemeralTopology(ctx, m, out, errOut, owned); cerr != nil {
+			return fmt.Errorf("%w (ephemeral cleanup also failed: %v)", err, cerr)
+		}
 		return err
 	}
 	defer cleanup()
 
-	// Step 1: L1 syntax check.
-	if !vtTopoTestSkipLint {
-		fmt.Fprintln(out, "=== [Step 1/5] L1 Syntax Check ===")
-		if err := execAnsiblePlaybook(out, vtTopoTestPlaybook, "--syntax-check"); err != nil {
-			return fmt.Errorf("syntax check failed: %w", err)
+	err = runTopologyTestPipeline(cmd, spec, verifies, invPath, args, false)
+	if err != nil {
+		if vtTopoTestKeepOnFailure {
+			printEphemeralDebugHints(errOut, vtTopoSpecPath)
+			return err
 		}
-		fmt.Fprintln(out, "✓ Syntax check passed")
+		fmt.Fprintf(errOut, "❌ Ephemeral test failed: %v. Tearing down created node(s)...\n", err)
+		if cerr := teardownEphemeralTopology(ctx, m, out, errOut, owned); cerr != nil {
+			return fmt.Errorf("%w (ephemeral cleanup also failed: %v)", err, cerr)
+		}
+		return err
 	}
 
-	// Step 2: cluster-wide snapshot under one tag.
-	snapTag := fmt.Sprintf("pre-test-%d", time.Now().Unix())
-	fmt.Fprintf(out, "=== [Step 2/5] Cluster snapshot: %d node(s) (tag: %s) ===\n", len(spec.Nodes), snapTag)
-	if err := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
-		if serr := nm.Snapshot(context.Background(), n.Name, snapTag); serr != nil {
-			return fmt.Errorf("node %q: %w", n.Name, serr)
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("failed to snapshot cluster: %w", err)
+	fmt.Fprintln(out, "=== [Ephemeral cleanup] Test passed; tearing down created node(s) ===")
+	if err := teardownEphemeralTopology(ctx, m, out, errOut, owned); err != nil {
+		return fmt.Errorf("ephemeral test passed but cleanup failed: %w", err)
 	}
-	fmt.Fprintln(out, "✓ Cluster snapshot created")
-
-	rollbackOnFailure := func(origErr error) error {
-		if vtTopoTestNoRollback {
-			fmt.Fprintln(cmd.ErrOrStderr(), "⚠️ Auto-rollback is disabled via --no-rollback")
-			return origErr
-		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed: %v. Rolling back every node to %s...\n", origErr, snapTag)
-		if rerr := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
-			if e := nm.Rollback(context.Background(), n.Name, snapTag); e != nil {
-				return fmt.Errorf("node %q: %w", n.Name, e)
-			}
-			return nil
-		}); rerr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 Double fault: cluster rollback failed: %v\n", rerr)
-			return fmt.Errorf("%w (cluster rollback also failed: %v)", origErr, rerr)
-		}
-		// The pre-test tag postdates wiring, but Rollback restores the
-		// disk verbatim — rewire anyway to mirror 'topology rollback'
-		// and stay correct if wiring changed since the snapshot.
-		if werr := rewireTopology(spec, out); werr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 rollback OK but re-wiring failed: %v\n", werr)
-			return fmt.Errorf("%w (re-wire after rollback failed: %v)", origErr, werr)
-		}
-		fmt.Fprintln(out, "✓ Rollback successful. Every node restored to pre-test state.")
-		return origErr
-	}
-
-	// Step 3: L4 apply. No -l limit — the grouped inventory owns targeting.
-	fmt.Fprintln(out, "=== [Step 3/5] L4 Apply Playbook (topology inventory) ===")
-	ansibleArgs := append([]string{vtTopoTestPlaybook, "-i", invPath}, args...)
-	if err := execExternal(out, "ansible-playbook", ansibleArgs...); err != nil {
-		return rollbackOnFailure(fmt.Errorf("playbook apply failed: %w", err))
-	}
-	fmt.Fprintln(out, "✓ Playbook apply completed")
-
-	// Step 4: L5 verify, one run per --verify entry.
-	fmt.Fprintf(out, "=== [Step 4/5] L5 Verification Specs (%d) ===\n", len(verifies))
-	for _, v := range verifies {
-		pilotArgs := []string{"verify", v.spec, "-i", invPath}
-		if v.limit != "" {
-			pilotArgs = append(pilotArgs, "-l", v.limit)
-		}
-		if vtTopoTestVerifyTimeout > 0 {
-			pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
-		}
-		if err := execPilot(out, pilotArgs...); err != nil {
-			return rollbackOnFailure(fmt.Errorf("verification failed (%s): %w", v.spec, err))
-		}
-	}
-	fmt.Fprintln(out, "✓ Verification checks passed")
-
-	// Step 5: L6 idempotency across the whole cluster.
-	fmt.Fprintln(out, "=== [Step 5/5] L6 Idempotency Check ===")
-	var idemBuf bytes.Buffer
-	if err := execExternal(io.MultiWriter(out, &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
-		return rollbackOnFailure(fmt.Errorf("idempotency run failed: %w", err))
-	}
-	changed, ok := idempotencyChangedCount(idemBuf.String())
-	if !ok {
-		return rollbackOnFailure(fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)"))
-	}
-	if changed > 0 {
-		return rollbackOnFailure(fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed))
-	}
-	fmt.Fprintln(out, "✓ Idempotency check passed (changed=0)")
-	fmt.Fprintln(out, "🎉 ALL TESTS PASSED SUCCESSFULLY!")
+	fmt.Fprintln(out, "✓ Ephemeral topology removed")
 	return nil
 }

@@ -1,3 +1,5 @@
+# STATUS: PROPOSED FIXTURE ONLY — pilot runtime does not load this file yet.
+# The schema may change before the M1.1 loader and lint implementation.
 schemaVersion: 1
 id: restic-backup
 role: restic-backup

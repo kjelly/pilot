@@ -5,7 +5,23 @@
 > 修訂 2:2026-07-18 依 review 第二輪修正——tag 改依 contract `tagMode` 推導(前版「tag coverage 同時接受兩型」的宣稱經對 `tag_coverage_test.go` 與 AGENTS.md 查證**不正確**,已更正)、移除 `traceability.applyPlaybook`、inputs 補值來源優先序、`needsReview` 改 `[]string`、「真實 inventory」驗收明確化。
 > 修訂 3:2026-07-18 依 review 第三輪修正——`secretRef` input 不得 materialize 進 CLI/module argv(受控 transport 由 safety RFC 選定,定稿前 verify 對含 secretRef 的 spec 拒跑)、M2.1 v1 相容層拆成 compile / compatibility evaluator / replay adapter 三塊、DoD 清除殘留的「預設 tag `<component>-<id>`」舊規則。
 > 修訂 4:2026-07-18 依 review 第四輪修正——`probeStatus` 增 `runner_error`/`missing`(timeout 歸因由 M0.2 spike 定案,不把未觀察 host 壓成 timeout)、M2.3 migration 表的 `needsReview` 範例改 YAML list 語法(欄位型別本就是 `[]string`)、`safety.destructive` 的粒度(spec 層 vs per-check)交 safety RFC 定案。
-> 前置依賴(硬性):**M0.2 先合併,M2.1 才開工**(同動 verifier 執行層,不可平行);**Verification safety boundary RFC 定稿是 M2.2 的門檻**(目前已建立 Proposed，尚未 final；inputs 的 secret transport 與 safety 語意依 RFC)。M1.1 ComponentContract RFC 已建立六份 fixtures；shared spec 的 `traceability` 引用需由單數 `component` 改為複數 `components`，M2.2 前同步 schema。
+> 前置依賴(硬性):**M0.2 先合併,M2.1 才開工**(同動 verifier 執行層,不可平行);**Verification safety boundary RFC 定稿是 M2.2 的門檻**(目前已建立 Proposed，尚未 final；inputs 的 secret transport 與 safety 語意依 RFC)。M1.1 ComponentContract RFC 已建立六份 fixtures；shared spec 的 `traceability` 引用已改為複數 `components`(§3.1 schema 已同步)。
+
+> **實作狀態：SPEC V2 尚未實作**
+>
+> 本文件是 schema／migration 設計，不代表 pilot 已接受 `schemaVersion: 2`。
+> 目前 parser、verifier 與正式 `docs/verification/*.md` 仍使用 v1。
+
+## 0. 實作邊界（2026-07-18）
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| M0.2 callback decoder | **Spike 已驗證** | 只在 `internal/tools/ansible_callback_spike.go`；未接正式 verify |
+| Safety RFC | **Proposed** | per-check action/secret transport 已選方向，尚未 final/implement |
+| ComponentContract | **RFC + fixtures** | traceability plural/mapped 設計已產出，loader 未實作 |
+| M2.1 typed matcher | **尚未實作** | 必須等待完整 M0.2 合併 |
+| M2.2 v2 parser | **尚未實作** | 不得新增正式 v2 spec |
+| M2.3 migrate | **尚未實作** | CLI、sidecar report、模板更新皆不存在 |
 
 ## 1. v1 現況精確描述(遷移的地基)
 

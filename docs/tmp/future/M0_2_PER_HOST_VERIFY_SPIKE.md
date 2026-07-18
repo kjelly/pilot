@@ -3,6 +3,10 @@
 > 狀態：callback data contract 已驗證；尚未接入正式 verify
 > 日期：2026-07-18
 > 環境：ansible-core 2.19.2、ansible package 12.0.0
+>
+> **實作標示：這是可測試的 spike，不是 production per-host verify。**
+> 已實作 decoder／fixtures／tests；尚未實作 expected-host resolver、正式 runner
+> 接線、per-host timeout 與 delivery evidence persistence。
 
 ## 1. 結論
 

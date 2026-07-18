@@ -3,6 +3,10 @@
 > 狀態：Proposed
 > 日期：2026-07-18
 > 範圍：M1.1 RFC + 六份 fixtures；本 RFC 尚不授權 loader／API 實作
+>
+> **實作標示：六份 fixture 已建立並通過 YAML parse；正式功能尚未實作。**
+> `internal/contract`、strict loader、contract lint、deploy catalog view、
+> site lint 與 TUI integration 目前都不存在。
 
 ## 1. 決策摘要
 

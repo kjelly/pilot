@@ -48,13 +48,15 @@ virsh net-list --all | grep default   # 一個 active 的 libvirt NAT 網路
 
 per-target 的 `overlay.qcow2` / `seed.iso` 預設放在 `--vm-dir`
 （default `/var/lib/libvirt/images/pilot`）。這個位置 **qemu(libvirt-qemu) 必須能存取**：
+pilot 會在每個新 VM 的私有目錄上加最小 ACL（目錄 traverse、overlay 讀寫、seed ISO 唯讀），
+因此不需要把 VM artifact 設成 world-readable 或 world-writable：
 
 ```bash
 sudo mkdir -p /var/lib/libvirt/images/pilot
 sudo chown "$USER":"$USER" /var/lib/libvirt/images/pilot
 sudo chmod 0755 /var/lib/libvirt/images/pilot
 # 父目錄 /var/lib/libvirt/images 是 0711 root → libvirt-qemu 可 traverse；
-# disk 檔由 libvirt 的 dynamic-ownership 在 start 時自動 chown 給 qemu。
+# pilot 對每個新 target 的私有 artifact 加 ACL，供 QEMU 存取。
 ```
 
 > 不要把 `--vm-dir` 指到 `$HOME` 深處：libvirt 的 AppArmor profile 通常擋掉
@@ -100,7 +102,9 @@ pilot vm-target down --name infra-vm
 
 多機情境(site.yml、跨 host 角色)用 `vm-target topology test` 一條命令跑完
 「全 cluster snapshot → apply → 逐 spec verify → 冪等 → 失敗全 node
-rollback」。首次實跑用的 smoke 拓樸(2 台 ubuntu-24.04,各 2GB/2vcpu):
+rollback」。若沒有既有 topology，加入 `--ephemeral` 會先建立宣告的所有 VM，成功或失敗後
+自動拆除；故障時加入 `--keep-on-failure`，會保留未 rollback 的 VM，供 SSH 檢查 apply 後現場。
+這個組合拒絕採用既有同名 VM，避免意外接管或刪除既有測試環境。首次實跑用的 smoke 拓樸(2 台 ubuntu-24.04,各 2GB/2vcpu):
 
 ```yaml
 # topo-smoke.yaml
