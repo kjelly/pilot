@@ -15,9 +15,9 @@ import (
 //	Post-fix verifier extracts rc-from-stdout=1 and compares to expected 0 → FAIL.
 //
 // The cases below exercise every branch the post-fix switch handles.
-// To prove they aren't tautological, point matchExpected back at the
+// To prove they aren't tautological, replace the typed compatibility adapter with the
 // pre-fix default ("return rc == 0") and these tests all FAIL.
-func TestVerifySpec_MatchExpected(t *testing.T) {
+func TestVerifySpec_EvaluateV1Expected(t *testing.T) {
 	cases := []struct {
 		name     string
 		expected string
@@ -54,7 +54,7 @@ func TestVerifySpec_MatchExpected(t *testing.T) {
 		// returning bare stdout: "<host> | CHANGED | rc=0 | (stdout) <val>".
 		// Before the unwrapAdhocOneline fix, extractRC's isInt() check saw
 		// this whole wrapped string (not a bare integer), returned -1, and
-		// matchExpected fell back to comparing the ANSIBLE PROCESS's own
+		// the former compatibility code fell back to comparing the ANSIBLE PROCESS's own
 		// exit code (rc param, always 0 for the `cmd; echo $?` idiom, since
 		// the trailing echo always succeeds) against expected — meaning a
 		// numeric check using this repo's own recommended idiom ALWAYS
@@ -101,7 +101,7 @@ func TestVerifySpec_MatchExpected(t *testing.T) {
 		// against docs/verification/audit-log-forwarding.md's C16 with no
 		// forward config present: real stdout was "2", but the unwrapped
 		// value became "2 (stderr) grep: ... No such file or directory"
-		// (not a pure integer) and matchExpected fell back to the always-0
+		// (not a pure integer) and the former compatibility code fell back to the always-0
 		// ansible process rc — the exact same false-PASS this fix targets.
 		{
 			"ad-hoc oneline stdout + stderr on one line",
@@ -112,9 +112,9 @@ func TestVerifySpec_MatchExpected(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, msg := matchExpected(c.expected, c.detail, c.rc)
+			got, msg := evaluateV1Expected(c.expected, c.detail, c.rc)
 			if got != c.wantPass {
-				t.Errorf("matchExpected(%q, %q, rc=%d) = %v (msg=%q), want %v",
+				t.Errorf("evaluateV1Expected(%q, %q, rc=%d) = %v (msg=%q), want %v",
 					c.expected, c.detail, c.rc, got, msg, c.wantPass)
 			}
 		})
@@ -187,7 +187,7 @@ func TestVerifySpec_ExtractRC(t *testing.T) {
 // mode the C5 os-patch-sla row uses: systemctl is-active returns
 // `active` somewhere inside multi-line stdout, and we only care that
 // the substring is present.
-func TestVerifySpec_MatchExpected_Substring(t *testing.T) {
+func TestVerifySpec_EvaluateV1Expected_Substring(t *testing.T) {
 	cases := []struct {
 		name     string
 		expected string
@@ -199,9 +199,9 @@ func TestVerifySpec_MatchExpected_Substring(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, _ := matchExpected(c.expected, c.detail, 0)
+			got, _ := evaluateV1Expected(c.expected, c.detail, 0)
 			if got != c.wantPass {
-				t.Errorf("matchExpected(%q, %q) = %v want %v", c.expected, c.detail, got, c.wantPass)
+				t.Errorf("evaluateV1Expected(%q, %q) = %v want %v", c.expected, c.detail, got, c.wantPass)
 			}
 		})
 	}

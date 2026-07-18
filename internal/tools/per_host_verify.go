@@ -153,7 +153,7 @@ func (t *VerifySpecTool) runAnsiblePerHost(ctx context.Context, row spec.Row, ho
 			continue
 		}
 		detail := fmt.Sprintf("(rc=%d) %s", probe.ExitCode, probe.Stdout)
-		ok, mismatch := matchExpected(row.Expected, detail, probe.ExitCode)
+		ok, mismatch := evaluateV1Expected(row.Expected, detail, probe.ExitCode)
 		vr.Detail = mismatch
 		vr.Status = "pass"
 		if !ok {
