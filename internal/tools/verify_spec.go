@@ -15,6 +15,7 @@ import (
 
 	"github.com/anomalyco/pilot/internal/ansible"
 	"github.com/anomalyco/pilot/internal/spec"
+	"github.com/anomalyco/pilot/internal/store"
 )
 
 // VerifySpecTool replaces the standalone `scripts/spec-runner.py`.
@@ -48,6 +49,9 @@ type VerifySpecTool struct {
 	// PerHostWorkers bounds concurrent isolated host×row invocations. Zero
 	// selects the production default (8); larger values are capped at 8.
 	PerHostWorkers int
+	// EvidenceWriter, when present, receives one immutable observation for
+	// every host×row result before Execute returns.
+	EvidenceWriter *store.RunWriter
 
 	// Test seams: production uses Ansible for both operations. Kept private so
 	// callers cannot accidentally replace the evidence path.
@@ -171,6 +175,11 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		}
 		rows = append(rows, t.runRow(ctx, r, host, timeoutSec))
 	}
+	if t.EvidenceWriter != nil {
+		if err := t.appendEvidence(ctx, parsed, rows); err != nil {
+			return &Result{Content: fmt.Sprintf("ERROR: append verification evidence: %v", err), IsError: true}, nil
+		}
+	}
 
 	var sb strings.Builder
 	for _, r := range rows {
@@ -179,6 +188,43 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		sb.WriteByte('\n')
 	}
 	return &Result{Content: sb.String()}, nil
+}
+
+func (t *VerifySpecTool) appendEvidence(ctx context.Context, parsed *spec.Spec, rows []VerifyRow) error {
+	byID := make(map[string]spec.Row, len(parsed.Rows))
+	for _, row := range parsed.Rows {
+		byID[row.ID] = row
+	}
+	evidence := make([]store.VerifyEvidence, 0, len(rows))
+	for i, result := range rows {
+		if result.Status == "skip" {
+			continue
+		}
+		row, ok := byID[result.ID]
+		if !ok {
+			return fmt.Errorf("result references unknown spec row %q", result.ID)
+		}
+		host := result.Host
+		if host == "" {
+			host = "localhost"
+		}
+		verdict := result.Status
+		evidence = append(evidence, store.VerifyEvidence{
+			SpecPath:    parsed.Path,
+			RowID:       result.ID,
+			Host:        host,
+			Attempt:     1,
+			OperationID: fmt.Sprintf("verify:%s:%s:%s:%d", parsed.Path, result.ID, host, i),
+			Command:     row.Command,
+			Expected:    row.Expected,
+			Stdout:      result.Stdout,
+			Stderr:      result.Stderr,
+			ExitCode:    result.ExitCode,
+			ProbeStatus: firstNonEmpty(result.ProbeStatus, "local"),
+			Verdict:     verdict,
+		})
+	}
+	return t.EvidenceWriter.AppendEvidence(ctx, evidence)
 }
 
 // runRow runs one spec row against either ansible ad-hoc or a local

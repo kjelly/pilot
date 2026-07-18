@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/anomalyco/pilot/internal/store"
 )
 
 func TestVerifySpec_LocalMode(t *testing.T) {
@@ -51,6 +53,41 @@ func TestVerifySpec_LocalMode(t *testing.T) {
 	}
 	if rows[2].Status != "pass" {
 		t.Errorf("C3 (/tmp) should pass, got %q", rows[2].Status)
+	}
+}
+
+func TestVerifySpec_PersistsHostRowEvidence(t *testing.T) {
+	tmp := t.TempDir()
+	specPath := filepath.Join(tmp, "x.md")
+	if err := writeFile(specPath, `# Verification Spec — evidence
+
+## 2. Checklist
+
+| ID | Category | Check | Expected | Command |
+|----|----------|-------|----------|---------|
+| C1 | file | tmp exists | present | `+"`test -d /tmp`"+` |
+`); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(filepath.Join(tmp, "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w, err := store.StartRun(context.Background(), s, store.RunStarted{RunID: "verify-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := &VerifySpecTool{LocalOnly: true, EvidenceWriter: w}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"spec_path": specPath}))
+	if err != nil || res.IsError {
+		t.Fatalf("Execute err=%v result=%+v", err, res)
+	}
+	if err := w.Finish(context.Background(), store.RunFinished{Outcome: "success"}); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := s.EvidenceCount(w.RunID()); err != nil || count != 1 {
+		t.Fatalf("evidence count=%d err=%v", count, err)
 	}
 }
 

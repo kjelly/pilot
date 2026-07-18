@@ -176,10 +176,19 @@ func openSpecStore() (*store.Store, error) {
 		home, _ := os.UserHomeDir()
 		dataDir = filepath.Join(home, ".local", "share", "pilot")
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
-	return store.Open(filepath.Join(dataDir, "history.db"))
+	path := filepath.Join(dataDir, "history.db")
+	st, err := store.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = st.Close()
+		return nil, err
+	}
+	return st, nil
 }
 
 func countBySeverity(fs []spec.Finding, sev spec.Severity) int {

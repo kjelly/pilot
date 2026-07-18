@@ -35,6 +35,7 @@ import (
 // they shouldn't.
 func TestPilotSpec_RootFlag(t *testing.T) {
 	tmp := t.TempDir()
+	t.Setenv("PILOT_DATA_DIR", filepath.Join(tmp, "pilot-data"))
 	// Layout: <tmp>/docs/verification/spec.md
 	if err := os.MkdirAll(filepath.Join(tmp, "docs", "verification"), 0o755); err != nil {
 		t.Fatal(err)

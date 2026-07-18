@@ -16,7 +16,7 @@ type Store struct {
 // migration is added to migrateSteps. PRAGMA user_version is used to
 // record the installed version on disk so that startup is idempotent
 // and free of swallowed errors.
-const SchemaVersion = 12
+const SchemaVersion = 13
 
 const schema = `
 -- The base schema is the FINAL shape only. The agent-loop tables that
@@ -44,6 +44,69 @@ CREATE TABLE IF NOT EXISTS spec_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_checkpoints_spec ON spec_checkpoints(spec_path, row_id);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_run ON spec_checkpoints(run_id);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_proposal ON spec_checkpoints(proposal_id);
+
+CREATE TABLE IF NOT EXISTS delivery_events (
+    event_id     INTEGER PRIMARY KEY,
+    run_id       TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    operation_id TEXT NOT NULL,
+    type         TEXT NOT NULL,
+    step         TEXT,
+    payload_json TEXT NOT NULL,
+    exit_code    INTEGER,
+    created_at   TEXT NOT NULL,
+    UNIQUE(run_id, seq),
+    UNIQUE(run_id, operation_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_events_one_start
+    ON delivery_events(run_id) WHERE type = 'run_started';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_events_one_finish
+    ON delivery_events(run_id) WHERE type = 'run_finished';
+CREATE INDEX IF NOT EXISTS idx_delivery_events_run_seq ON delivery_events(run_id, seq);
+
+CREATE TABLE IF NOT EXISTS verify_evidence (
+    evidence_id         INTEGER PRIMARY KEY,
+    run_id              TEXT NOT NULL,
+    spec_path           TEXT NOT NULL,
+    row_id              TEXT NOT NULL,
+    host                TEXT NOT NULL,
+    attempt             INTEGER NOT NULL,
+    operation_id        TEXT NOT NULL,
+    content_hash        TEXT NOT NULL,
+    command             TEXT NOT NULL,
+    expected            TEXT NOT NULL,
+    stdout              TEXT,
+    stderr              TEXT,
+    exit_code           INTEGER,
+    probe_status        TEXT NOT NULL,
+    verdict             TEXT NOT NULL,
+    redacted            INTEGER NOT NULL,
+    stdout_truncated    INTEGER NOT NULL,
+    stderr_truncated    INTEGER NOT NULL,
+    started_at          TEXT NOT NULL,
+    finished_at         TEXT NOT NULL,
+    UNIQUE(run_id, spec_path, row_id, host, attempt),
+    UNIQUE(run_id, operation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_verify_evidence_run ON verify_evidence(run_id, spec_path, row_id, host);
+
+CREATE VIEW IF NOT EXISTS delivery_runs AS
+SELECT s.run_id,
+       s.created_at AS started_at,
+       (SELECT MAX(h.created_at) FROM delivery_events h WHERE h.run_id=s.run_id AND h.type='run_heartbeat') AS last_heartbeat_at,
+       (SELECT f.created_at FROM delivery_events f WHERE f.run_id=s.run_id AND f.type='run_finished') AS finished_at,
+       (SELECT json_extract(f.payload_json, '$.outcome') FROM delivery_events f WHERE f.run_id=s.run_id AND f.type='run_finished') AS outcome,
+       (SELECT f.exit_code FROM delivery_events f WHERE f.run_id=s.run_id AND f.type='run_finished') AS exit_code
+FROM delivery_events s WHERE s.type='run_started';
+
+CREATE TRIGGER IF NOT EXISTS delivery_events_no_update
+BEFORE UPDATE ON delivery_events BEGIN SELECT RAISE(ABORT, 'delivery_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS delivery_events_no_delete
+BEFORE DELETE ON delivery_events BEGIN SELECT RAISE(ABORT, 'delivery_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS verify_evidence_no_update
+BEFORE UPDATE ON verify_evidence BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS verify_evidence_no_delete
+BEFORE DELETE ON verify_evidence BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;
 `
 
 // migration is one ALTER TABLE statement. Bump SchemaVersion when
@@ -229,6 +292,36 @@ var migrateSteps = []migration{
 		      DROP TABLE IF EXISTS host_failure_seen;
 		      DROP TABLE IF EXISTS proposals;
 		      DROP TABLE IF EXISTS runs;`,
+	},
+	{
+		Description: "create append-only delivery evidence stream",
+		SQL: `CREATE TABLE IF NOT EXISTS delivery_events (
+				event_id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, seq INTEGER NOT NULL,
+				operation_id TEXT NOT NULL, type TEXT NOT NULL, step TEXT, payload_json TEXT NOT NULL,
+				exit_code INTEGER, created_at TEXT NOT NULL, UNIQUE(run_id, seq), UNIQUE(run_id, operation_id));
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_events_one_start ON delivery_events(run_id) WHERE type = 'run_started';
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_events_one_finish ON delivery_events(run_id) WHERE type = 'run_finished';
+			CREATE INDEX IF NOT EXISTS idx_delivery_events_run_seq ON delivery_events(run_id, seq);
+			CREATE TABLE IF NOT EXISTS verify_evidence (
+				evidence_id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, spec_path TEXT NOT NULL, row_id TEXT NOT NULL,
+				host TEXT NOT NULL, attempt INTEGER NOT NULL, operation_id TEXT NOT NULL, content_hash TEXT NOT NULL,
+				command TEXT NOT NULL, expected TEXT NOT NULL, stdout TEXT, stderr TEXT, exit_code INTEGER,
+				probe_status TEXT NOT NULL, verdict TEXT NOT NULL, redacted INTEGER NOT NULL,
+				stdout_truncated INTEGER NOT NULL, stderr_truncated INTEGER NOT NULL,
+				started_at TEXT NOT NULL, finished_at TEXT NOT NULL,
+				UNIQUE(run_id, spec_path, row_id, host, attempt), UNIQUE(run_id, operation_id));
+			CREATE INDEX IF NOT EXISTS idx_verify_evidence_run ON verify_evidence(run_id, spec_path, row_id, host);
+			CREATE VIEW IF NOT EXISTS delivery_runs AS
+			SELECT s.run_id, s.created_at AS started_at,
+				(SELECT MAX(h.created_at) FROM delivery_events h WHERE h.run_id=s.run_id AND h.type='run_heartbeat') AS last_heartbeat_at,
+				(SELECT f.created_at FROM delivery_events f WHERE f.run_id=s.run_id AND f.type='run_finished') AS finished_at,
+				(SELECT json_extract(f.payload_json, '$.outcome') FROM delivery_events f WHERE f.run_id=s.run_id AND f.type='run_finished') AS outcome,
+				(SELECT f.exit_code FROM delivery_events f WHERE f.run_id=s.run_id AND f.type='run_finished') AS exit_code
+			FROM delivery_events s WHERE s.type='run_started';
+			CREATE TRIGGER IF NOT EXISTS delivery_events_no_update BEFORE UPDATE ON delivery_events BEGIN SELECT RAISE(ABORT, 'delivery_events is append-only'); END;
+			CREATE TRIGGER IF NOT EXISTS delivery_events_no_delete BEFORE DELETE ON delivery_events BEGIN SELECT RAISE(ABORT, 'delivery_events is append-only'); END;
+			CREATE TRIGGER IF NOT EXISTS verify_evidence_no_update BEFORE UPDATE ON verify_evidence BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;
+			CREATE TRIGGER IF NOT EXISTS verify_evidence_no_delete BEFORE DELETE ON verify_evidence BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;`,
 	},
 }
 
