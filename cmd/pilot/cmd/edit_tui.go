@@ -149,18 +149,19 @@ var editDir string
 
 var editCmd = &cobra.Command{
 	Use:   "edit",
-	Short: "選單式編輯精靈 — 修改 hosts.yml / group_vars / .vault 不需要會用文字編輯器",
+	Short: "選單式編輯精靈 — 修改 hosts.yml / 角色範本 / group_vars / .vault 不需要會用文字編輯器",
 	Long: `pilot edit 用問答/選單的方式編輯 hosts.yml(機器清單與角色)跟
-group_vars/*.yml(角色的設定值，例如 FreeIPA realm、DNS 位址...)，以及
-.vault/*.yaml(明文 vault skeleton，或跳到 ansible-vault edit 編輯加密檔)。
+role-presets.yml(常用角色範本)、group_vars/*.yml(角色的設定值，例如 FreeIPA
+realm、DNS 位址...)，以及 .vault/*.yaml(明文 vault skeleton，或跳到
+ansible-vault edit 編輯加密檔)。
 
 適合不熟悉終端機文字編輯器(vim/nano)、只習慣 VSCode 之類 GUI 介面的人 ——
 每一步都是從清單挑選或回答一個問題，存檔前會再確認一次。熟悉 YAML 的人
 仍可以直接用文字編輯器改這些檔案，兩種方式改出來的檔案格式相容。
 
-預設編輯目前資料夾底下的 hosts.yml / group_vars/ / .vault/；用 --dir 指到另一個資料夾
-就會改編輯那裡的檔案 —— 適合同時維護多個環境(envs/staging/、envs/prod/…)
-各自一包 hosts.yml / group_vars/ / .vault/ 的情況。`,
+預設編輯目前資料夾底下的 hosts.yml / role-presets.yml / group_vars/ / .vault/；
+用 --dir 指到另一個資料夾就會改編輯那裡的檔案 —— 適合同時維護多個環境
+(envs/staging/、envs/prod/…)各自一包設定的情況。`,
 	RunE: runEdit,
 }
 
@@ -176,7 +177,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("pilot edit 需要互動式終端機(TTY)才能顯示選單；非互動場景請直接編輯檔案")
 	}
 
-	fmt.Fprintln(out, "═══ pilot edit — hosts.yml / group_vars / .vault 編輯精靈 ═══")
+	fmt.Fprintln(out, "═══ pilot edit — hosts.yml / 角色範本 / group_vars / .vault 編輯精靈 ═══")
 	if editDir != "." {
 		fmt.Fprintf(out, "編輯目標資料夾：%s\n", editDir)
 	}
@@ -413,41 +414,14 @@ func pushEnvMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile, 
 	})
 }
 
-// rolePreset is a quick-apply role bundle for a combo this repo's own
-// hosts.example.yml already documents as typical — not an exhaustive
-// catalog of every valid combination (see DELIVERY.md's "Playbook
-// 對照表" for that). Applying one unions its roles into whatever the
-// host already has selected; a preset never removes a role, so it's
-// safe to apply more than one, or fine-tune with the checkboxes right
-// after.
-type rolePreset struct {
-	Label string
-	Roles []string
-}
-
-var rolePresets = []rolePreset{
-	{
-		Label: "FreeIPA 身份伺服器(含 DNS/NTP)",
-		Roles: []string{"freeipa-server", "dns", "ntp", "audit-log-forwarding", "wazuh-fim", "restic-backup"},
-	},
-	{
-		Label: "一般 Linux server(納入 FreeIPA)",
-		Roles: []string{"freeipa-client", "linux-servers", "audit-log-forwarding", "wazuh-fim", "restic-backup"},
-	},
-	{
-		Label: "核心基礎服務(DNS/NTP/Docker)",
-		Roles: []string{"dns", "ntp", "docker"},
-	},
-}
-
 // pushRolesMenu offers a full space-to-toggle/enter-to-confirm
 // checklist screen (pushRoleChecklist) plus two shortcuts for the
 // common case that most hosts of the same kind end up needing the
-// exact same role set: applying a rolePreset, or copying wholesale
-// from a host that's already configured. The two shortcuts only ever
-// add roles (see unionRoles) — they never silently remove one — so
-// the checklist remains the tool for removing anything a shortcut
-// brought in that this host doesn't need.
+// exact same role set: applying a role preset, managing the preset
+// catalog, or copying wholesale from a host that's already configured.
+// The apply/copy shortcuts only ever add roles (see unionRoles) — they
+// never silently remove one — so the checklist remains the tool for
+// removing anything a shortcut brought in that this host doesn't need.
 func pushRolesMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
 	return pushRolesMenuBanner(r, dir, path, hf, name, "")
 }
@@ -460,6 +434,7 @@ func pushRolesMenuBanner(r *editRouterModel, dir, path string, hf *inventory.Hos
 	items := []string{
 		"☑  逐項勾選角色(方向鍵移動、space 勾選/取消、enter 完成)",
 		"📋 套用常用角色範本",
+		"⚙  管理角色範本",
 		"📄 複製自其他主機的角色",
 		"✅ 完成",
 	}
@@ -474,8 +449,10 @@ func pushRolesMenuBanner(r *editRouterModel, dir, path string, hf *inventory.Hos
 		case 1:
 			return pushApplyRolePreset(r, dir, path, hf, name)
 		case 2:
-			return pushCopyRolesFromHost(r, dir, path, hf, name)
+			return pushRolePresetManager(r, dir, path, hf, name, "")
 		case 3:
+			return pushCopyRolesFromHost(r, dir, path, hf, name)
+		case 4:
 			return pushHostMenu(r, dir, path, hf, name)
 		}
 		return nil
@@ -512,20 +489,30 @@ func pushRoleChecklist(r *editRouterModel, dir, path string, hf *inventory.Hosts
 }
 
 func pushApplyRolePreset(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
-	items := make([]string, len(rolePresets)+1)
-	for i, p := range rolePresets {
+	presets, _, err := loadRolePresets(dir)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	if len(presets) == 0 {
+		return r.transitionTo(newSelectModel("套用哪個範本？", []string{"↩  取消"}), "目前沒有角色範本；請從「管理角色範本」新增。", func(r *editRouterModel, s screen) tea.Cmd {
+			return pushRolesMenu(r, dir, path, hf, name)
+		})
+	}
+	items := make([]string, len(presets)+1)
+	for i, p := range presets {
 		items[i] = fmt.Sprintf("%s — %s", p.Label, strings.Join(p.Roles, ", "))
 	}
-	items[len(rolePresets)] = "↩  取消"
+	items[len(presets)] = "↩  取消"
 	title := "套用哪個範本？(把範本的角色加進目前已勾選的角色，不會移除既有的)"
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			return quitWizard(r)
 		}
-		if idx := m.Selected(); idx < len(rolePresets) {
+		if idx := m.Selected(); idx < len(presets) {
 			if h := findHost(hf, name); h != nil {
-				h.Roles = unionRoles(h.Roles, rolePresets[idx].Roles)
+				h.Roles = unionRoles(h.Roles, presets[idx].Roles)
 			}
 		}
 		return pushRolesMenu(r, dir, path, hf, name)

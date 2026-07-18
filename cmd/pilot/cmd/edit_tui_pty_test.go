@@ -235,7 +235,7 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 	proc.press(t, "\r") // confirm checklist -> back to roles menu
 
 	waitForPTYOutput(t, proc.out, 5*time.Second, "完成")
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "✅ 完成" -> back to host menu
