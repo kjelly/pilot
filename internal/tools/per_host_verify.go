@@ -29,6 +29,7 @@ type ansibleJSONInvocation struct {
 
 type ansibleHostLister func(context.Context, string, string) ([]string, error)
 type ansibleJSONRunner func(context.Context, []string, int) ansibleJSONInvocation
+type ansibleInventoryHostRunner func(context.Context, string, string) (string, string, error)
 
 const defaultPerHostWorkers = 8
 
@@ -154,15 +155,19 @@ func (t *VerifySpecTool) resolveHostInputs(ctx context.Context, parsed *spec.Spe
 }
 
 func (t *VerifySpecTool) listAnsibleHostInputs(ctx context.Context, host string) (map[string]string, error) {
-	out, err := exec.CommandContext(ctx, "ansible-inventory", "-i", t.Inventory, "--host", host).CombinedOutput()
+	run := t.runInventoryHost
+	if run == nil {
+		run = runAnsibleInventoryHost
+	}
+	stdout, stderr, err := run(ctx, t.Inventory, host)
 	if err != nil {
-		return nil, fmt.Errorf("ansible-inventory --host %s: %w: %s", host, err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("ansible-inventory --host %s: %w: %s", host, err, strings.TrimSpace(stderr))
 	}
 	var hostVars struct {
 		PilotInputs map[string]any `json:"pilot_inputs"`
 	}
-	if err := json.Unmarshal(out, &hostVars); err != nil {
-		return nil, fmt.Errorf("ansible-inventory --host %s returned invalid JSON: %w", host, err)
+	if err := json.Unmarshal([]byte(stdout), &hostVars); err != nil {
+		return nil, fmt.Errorf("ansible-inventory --host %s returned invalid JSON: %w (stderr: %s)", host, err, strings.TrimSpace(stderr))
 	}
 	values := make(map[string]string, len(hostVars.PilotInputs))
 	for name, value := range hostVars.PilotInputs {
@@ -173,6 +178,15 @@ func (t *VerifySpecTool) listAnsibleHostInputs(ctx context.Context, host string)
 		values[name] = text
 	}
 	return values, nil
+}
+
+func runAnsibleInventoryHost(ctx context.Context, inventory, host string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "ansible-inventory", "-i", inventory, "--host", host)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 func parseAnsibleListHosts(raw string) ([]string, error) {

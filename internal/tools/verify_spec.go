@@ -65,9 +65,10 @@ type VerifySpecTool struct {
 
 	// Test seams: production uses Ansible for both operations. Kept private so
 	// callers cannot accidentally replace the evidence path.
-	listHosts  ansibleHostLister
-	runJSON    ansibleJSONRunner
-	hostInputs func(context.Context, string) (map[string]string, error)
+	listHosts        ansibleHostLister
+	runJSON          ansibleJSONRunner
+	hostInputs       func(context.Context, string) (map[string]string, error)
+	runInventoryHost ansibleInventoryHostRunner
 }
 
 // Spec describes the tool for its caller (`pilot verify`).

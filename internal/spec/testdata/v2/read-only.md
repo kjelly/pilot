@@ -6,12 +6,10 @@ intent:
   source: internal/spec/testdata
   maintainer: sre
 targets:
-  roles: [fixture]
+  roles: [all]
   hostScope: per-host
   platforms:
     - {os: linux, versions: ["any"]}
-  hosts:
-    - {hostname: localhost, group: all}
 inputs: []
 traceability: {components: [fixture]}
 defaults:

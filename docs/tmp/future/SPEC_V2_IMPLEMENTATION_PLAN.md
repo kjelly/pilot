@@ -12,7 +12,7 @@
 > Verification Safety Boundary RFC 與 ComponentContract RFC 已 Final，可依序
 > 開始 M2.2 implementation。
 
-> **實作狀態：M2.2 parser/runtime 已實作；production deploy wiring 與 migration 尚待後續里程碑。**
+> **實作狀態：M2.2 parser/runtime 與 M2.3 migration CLI 已實作；production deploy wiring 與正式 spec 遷移尚待後續里程碑。**
 >
 > `pilot verify` 已接受嚴格的 `schemaVersion: 2` front-matter + `## Checks`
 > YAML block；正式 `docs/verification/*.md` 尚未遷移，仍使用 v1。
@@ -25,7 +25,7 @@
 | Safety RFC | **🟡 v2 boundary 已實作** | readOnly/isolatedMutation gate、secretRef fail-closed；secret-aware runner 仍待 M0.4 |
 | ComponentContract | **🟡 loader 已實作** | strict loader、placement/provider selection、v2 autoDeploy schema gate；deploy wiring 尚待 M0.4 |
 | M2.1 typed matcher | **✅ 已實作並驗證** | `Expect`/`StringMatcher`、v1 compiler、legacy replay compatibility evaluator 已完成 |
-| M2.2 v2 parser | **✅ 已實作並驗證** | strict parser、typed execution、per-host applicability/input resolution、action/secret safety gate、v2 fixture；真實 inventory acceptance 尚未執行 |
+| M2.2 v2 parser | **✅ 已實作並驗證** | strict parser、typed execution、per-host applicability/input resolution、action/secret safety gate；同一 fixture 在 local/docker/vm/general-inventory backend 均 PASS，未宣稱 staging／真實主機 acceptance |
 | M2.3 migrate | **✅ migration CLI 已實作** | `pilot spec migrate`、review-gated v2 draft、JSON sidecar 與 v1 prose preservation；模板/正式 spec 遷移與 target acceptance 待後續工作 |
 
 ## 1. v1 現況精確描述(遷移的地基)
@@ -441,7 +441,10 @@ Jinja 與 applicability prose 都會產生機器可辨識的 `needsReview`/sidec
 
 - [ ] matcher 不再依賴隱晦 prefix 才能理解 —— `matchExpected` 刪除,執行層只有 `Expect.Eval`;v2 檔內 expect 全為 typed。
 - [ ] parser 明確拒絕未知版本與未支援欄位 —— 負向測試鎖住。
-- [ ] 同一份 v2 spec 在 local / docker-target / vm-target / 使用者提供的一般 inventory(staging 主機實跑留 evidence;無則明示未在真實主機驗證)判定一致 —— 跨 target 一致性測試 + topology test 實跑。
+- [x] 同一份 v2 spec 在 local / docker-target / vm-target / 一般 inventory
+  backend 判定一致：2026-07-18 read-only fixture 四者均為 1/1 PASS。一般
+  inventory 使用 localhost connection fixture，依本條降級規則明示**未在
+  staging／真實主機驗證**。
 - [ ] v1 全部 24 份 spec 在整個過程零判定回歸 —— regression suite + NDJSON 重放。
 - [ ] `pilot spec migrate` 可用:needsReview 為機器可辨識 schema 欄位 + sidecar report,含未決標記的檔案 verify 一律拒跑,無靜默語意轉換路徑。
 - [ ] v2 全宣告式:become/timeout 無任何 heuristic 回退；resolved tag 依 contract traceability 推導(rowTags bare/prefixed 或 mapped row tags；verifyOnly/derived 逐 row exemption；standalone spec 逐 check 顯式宣告——見 §3.1)，tag coverage 對 v1/v2 混合 repo 全綠。

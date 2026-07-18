@@ -251,6 +251,26 @@ func TestResolveHostInputsUsesInventoryThenCLIOverride(t *testing.T) {
 	}
 }
 
+func TestListAnsibleHostInputsIgnoresDiagnosticsOnStderr(t *testing.T) {
+	tool := &VerifySpecTool{
+		Inventory: "inventory.yml",
+		runInventoryHost: func(_ context.Context, inventory, host string) (string, string, error) {
+			if inventory != "inventory.yml" || host != "host-a" {
+				t.Fatalf("inventory=%q host=%q", inventory, host)
+			}
+			return `{"pilot_inputs":{"endpoint":"https://example.test"}}`,
+				"[WARNING]: fact cache is not writable", nil
+		},
+	}
+	inputs, err := tool.listAnsibleHostInputs(context.Background(), "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := inputs["endpoint"]; got != "https://example.test" {
+		t.Fatalf("endpoint=%q", got)
+	}
+}
+
 func TestResolveRemoteHostsUsesV2RolesAsDefaultScope(t *testing.T) {
 	tool := &VerifySpecTool{
 		Inventory: "inventory.yml",
