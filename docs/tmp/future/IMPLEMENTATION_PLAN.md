@@ -69,8 +69,8 @@
 | 里程碑／產物 | 狀態 | 實作內容 | 明確未實作 |
 |---|---|---|---|
 | M0.1 | **✅ 已實作並驗證** | deploy exit-code、preflight rejection、`verify --dir` 原始錯誤、regression tests | deploy 後自動 verify/evidence |
-| Safety RFC | **🟡 部分已實作** | v2 action gate、secretRef fail-closed、v2-only autoDeploy schema gate | secret-aware module、deploy authorization wiring |
-| Evidence RFC | **✅ 已實作並驗證** | schema v14、RunWriter、heartbeat/finalization、archive/prune/admin audit | artifact/image-digest 自動擷取仍待擴充 |
+| Safety RFC | **✅ 已實作並驗證** | v2 action gate、explicit isolatedMutation + mandatory cleanup evidence、secretRef vault-reference + `no_log` runner、v2-only autoDeploy schema gate | 無 |
+| Evidence RFC | **✅ 已實作並驗證** | schema v14、RunWriter、heartbeat/finalization、archive/prune/admin audit、source revision 與 playbook/contract SHA-256 | runtime image digest 由各 component endpoint/probe 後續按需擴充 |
 | M0.2 | **✅ 已實作並驗證** | JSON decoder、status、expected-host resolver、Ansible scope adapter、single-host bounded runner | 無 |
 | M1.1/M1.2 | **✅ 已實作並驗證** | strict loader/Catalog、22 份 canonical contracts、bundle/traceability/dependency/endpoint/apply/deploy catalog lint | DELIVERY table 改為生成 view |
 | M0.3 | **✅ 已實作並驗證** | schema v14、append-only event/evidence stream、serialized RunWriter、heartbeat/finalization、standalone/deploy evidence | 無 |
@@ -79,7 +79,7 @@
 | M2.1 | **✅ 已實作並驗證** | typed `Expect`、v1 Expected compiler、legacy output compatibility evaluator | migration |
 | M2.2 | **✅ 已實作並驗證** | strict v2 parser、typed execution、applicability/action/secretRef boundary、input precedence；local/docker/vm/general-inventory backend 同一 fixture 均 PASS | staging／真實主機 acceptance、migration |
 | M2.3 | **🟡 部分已實作** | `pilot spec migrate`、v1 prose preservation、needsReview/sidecar/非零 fail-closed | template/document migration、正式 spec target-test |
-| P3/P4/P5 | **✅ 已實作並驗證** | dependency-first contract plan/lifecycle action gate、brief corpus + target-backed 100/100 eval scorecard、runs query/archive/prune/admin audit/supply-chain metadata | other formal spec target migrations are rollout work |
+| P3/P4/P5 | **✅ 已實作並驗證** | TUI 與 `pilot deploy plan` 共用 dependency-first contract plan/lifecycle action gate、brief corpus + target-backed 100/100 eval scorecard、runs query/archive/prune/admin audit/supply-chain metadata | other formal spec target migrations are rollout work |
 
 ## 0. 現況與差距總覽
 
