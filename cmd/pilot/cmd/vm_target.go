@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/anomalyco/pilot/internal/ansible"
+	"github.com/anomalyco/pilot/internal/delivery"
 	"github.com/anomalyco/pilot/internal/sandbox"
 	"github.com/anomalyco/pilot/internal/vmtarget"
 )
@@ -1517,26 +1518,11 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "✓ Auto-snapshot created")
 
-	// Helper for rollback on failure
-	rollbackOnFailure := func(origErr error) error {
-		if vtTestNoRollback {
-			fmt.Fprintln(cmd.ErrOrStderr(), "⚠️ Auto-rollback is disabled via --no-rollback")
-			return origErr
-		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed: %v. Rolling back VM to %s...\n", origErr, snapTag)
-		if rerr := m.Rollback(ctx, vtName, snapTag); rerr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 Double fault: failed to rollback: %v\n", rerr)
-			return fmt.Errorf("%w (rollback also failed: %v)", origErr, rerr)
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), "✓ Rollback successful. Target VM restored to pre-test state.")
-		return origErr
-	}
-
 	// Step 3: L4 Apply
 	fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 3/5] L4 Apply Playbook ===")
 	t, cleanup, invPath, err := vtStageInventory()
 	if err != nil {
-		return rollbackOnFailure(err)
+		return err
 	}
 	defer cleanup()
 
@@ -1548,41 +1534,65 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 	var applyBuf bytes.Buffer
 	mw := io.MultiWriter(cmd.OutOrStdout(), &applyBuf)
 
-	if err := execExternal(mw, "ansible-playbook", ansibleArgs...); err != nil {
-		return rollbackOnFailure(fmt.Errorf("playbook apply failed: %w", err))
+	rollbackPolicy := delivery.RollbackSnapshot
+	rollback := delivery.StepFunc(func(context.Context) error {
+		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed. Rolling back VM to %s...\n", snapTag)
+		if err := m.Rollback(ctx, vtName, snapTag); err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "✓ Rollback successful. Target VM restored to pre-test state.")
+		return nil
+	})
+	if vtTestNoRollback {
+		fmt.Fprintln(cmd.ErrOrStderr(), "⚠️ Auto-rollback is disabled via --no-rollback")
+		rollbackPolicy = delivery.RollbackNone
+		rollback = nil
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), "✓ Playbook apply completed")
-
-	// Step 4: L5 Verify
-	fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 4/5] L5 Verification Spec ===")
-	pilotArgs := []string{"verify", vtTestSpec, "-i", invPath, "-l", t.Name}
-	if vtTestVerifyTimeout > 0 {
-		pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTestVerifyTimeout))
+	transaction := delivery.Transaction{
+		Apply: func(context.Context) error {
+			if err := execExternal(mw, "ansible-playbook", ansibleArgs...); err != nil {
+				return fmt.Errorf("playbook apply failed: %w", err)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "✓ Playbook apply completed")
+			return nil
+		},
+		Verify: func(context.Context) error {
+			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 4/5] L5 Verification Spec ===")
+			pilotArgs := []string{"verify", vtTestSpec, "-i", invPath, "-l", t.Name}
+			if vtTestVerifyTimeout > 0 {
+				pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTestVerifyTimeout))
+			}
+			if err := execPilot(cmd.OutOrStdout(), pilotArgs...); err != nil {
+				return fmt.Errorf("verification failed: %w", err)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "✓ Verification checks passed")
+			return nil
+		},
+		Idempotency: func(context.Context) error {
+			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 5/5] L6 Idempotency Check ===")
+			var idemBuf bytes.Buffer
+			if err := execExternal(io.MultiWriter(cmd.OutOrStdout(), &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
+				return fmt.Errorf("idempotency run failed: %w", err)
+			}
+			changed, ok := idempotencyChangedCount(idemBuf.String())
+			if !ok {
+				return fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)")
+			}
+			if changed > 0 {
+				return fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "✓ Idempotency check passed (changed=0)")
+			return nil
+		},
+		IdempotencyPolicy: delivery.IdempotencyAlways,
+		Rollback:          rollback,
+		RollbackPolicy:    rollbackPolicy,
 	}
-
-	if err := execPilot(cmd.OutOrStdout(), pilotArgs...); err != nil {
-		return rollbackOnFailure(fmt.Errorf("verification failed: %w", err))
+	outcome, err := transaction.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("vm-target test transaction %s: %w", outcome, err)
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), "✓ Verification checks passed")
-
-	// Step 5: L6 Idempotency Check
-	fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 5/5] L6 Idempotency Check ===")
-	var idemBuf bytes.Buffer
-	mwIdem := io.MultiWriter(cmd.OutOrStdout(), &idemBuf)
-	if err := execExternal(mwIdem, "ansible-playbook", ansibleArgs...); err != nil {
-		return rollbackOnFailure(fmt.Errorf("idempotency run failed: %w", err))
-	}
-
-	changed, ok := idempotencyChangedCount(idemBuf.String())
-	if !ok {
-		return rollbackOnFailure(fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)"))
-	}
-	if changed > 0 {
-		return rollbackOnFailure(fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed))
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), "✓ Idempotency check passed (changed=0)")
 	fmt.Fprintln(cmd.OutOrStdout(), "🎉 ALL TESTS PASSED SUCCESSFULLY!")
-
 	return nil
 }
 

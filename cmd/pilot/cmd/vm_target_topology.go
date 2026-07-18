@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/anomalyco/pilot/internal/delivery"
 	"github.com/anomalyco/pilot/internal/vmtarget"
 )
 
@@ -689,63 +690,78 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 	}
 	fmt.Fprintln(out, "✓ Cluster snapshot created")
 
-	rollback := func(origErr error) error {
-		if !rollbackOnFailure {
-			return origErr
-		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed: %v. Rolling back every node to %s...\n", origErr, snapTag)
-		if rerr := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
+	fmt.Fprintln(out, "=== [Step 3/5] L4 Apply Playbook (topology inventory) ===")
+	ansibleArgs := append([]string{vtTopoTestPlaybook, "-i", invPath}, args...)
+	rollbackPolicy := delivery.RollbackSnapshot
+	rollback := delivery.StepFunc(func(context.Context) error {
+		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed. Rolling back every node to %s...\n", snapTag)
+		if err := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
 			if err := nm.Rollback(context.Background(), n.Name, snapTag); err != nil {
 				return fmt.Errorf("node %q: %w", n.Name, err)
 			}
 			return nil
-		}); rerr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 Double fault: cluster rollback failed: %v\n", rerr)
-			return fmt.Errorf("%w (cluster rollback also failed: %v)", origErr, rerr)
+		}); err != nil {
+			return err
 		}
-		if werr := rewireTopology(spec, out); werr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "🚨 rollback OK but re-wiring failed: %v\n", werr)
-			return fmt.Errorf("%w (re-wire after rollback failed: %v)", origErr, werr)
+		if err := rewireTopology(spec, out); err != nil {
+			return fmt.Errorf("re-wire after rollback: %w", err)
 		}
 		fmt.Fprintln(out, "✓ Rollback successful. Every node restored to pre-test state.")
-		return origErr
+		return nil
+	})
+	if !rollbackOnFailure {
+		rollbackPolicy = delivery.RollbackNone
+		rollback = nil
 	}
-
-	fmt.Fprintln(out, "=== [Step 3/5] L4 Apply Playbook (topology inventory) ===")
-	ansibleArgs := append([]string{vtTopoTestPlaybook, "-i", invPath}, args...)
-	if err := execExternal(out, "ansible-playbook", ansibleArgs...); err != nil {
-		return rollback(fmt.Errorf("playbook apply failed: %w", err))
+	transaction := delivery.Transaction{
+		Apply: func(context.Context) error {
+			if err := execExternal(out, "ansible-playbook", ansibleArgs...); err != nil {
+				return fmt.Errorf("playbook apply failed: %w", err)
+			}
+			fmt.Fprintln(out, "✓ Playbook apply completed")
+			return nil
+		},
+		Verify: func(context.Context) error {
+			fmt.Fprintf(out, "=== [Step 4/5] L5 Verification Specs (%d) ===\n", len(verifies))
+			for _, v := range verifies {
+				pilotArgs := []string{"verify", v.spec, "-i", invPath}
+				if v.limit != "" {
+					pilotArgs = append(pilotArgs, "-l", v.limit)
+				}
+				if vtTopoTestVerifyTimeout > 0 {
+					pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
+				}
+				if err := execPilot(out, pilotArgs...); err != nil {
+					return fmt.Errorf("verification failed (%s): %w", v.spec, err)
+				}
+			}
+			fmt.Fprintln(out, "✓ Verification checks passed")
+			return nil
+		},
+		Idempotency: func(context.Context) error {
+			fmt.Fprintln(out, "=== [Step 5/5] L6 Idempotency Check ===")
+			var idemBuf bytes.Buffer
+			if err := execExternal(io.MultiWriter(out, &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
+				return fmt.Errorf("idempotency run failed: %w", err)
+			}
+			changed, ok := idempotencyChangedCount(idemBuf.String())
+			if !ok {
+				return fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)")
+			}
+			if changed > 0 {
+				return fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed)
+			}
+			fmt.Fprintln(out, "✓ Idempotency check passed (changed=0)")
+			return nil
+		},
+		IdempotencyPolicy: delivery.IdempotencyAlways,
+		Rollback:          rollback,
+		RollbackPolicy:    rollbackPolicy,
 	}
-	fmt.Fprintln(out, "✓ Playbook apply completed")
-
-	fmt.Fprintf(out, "=== [Step 4/5] L5 Verification Specs (%d) ===\n", len(verifies))
-	for _, v := range verifies {
-		pilotArgs := []string{"verify", v.spec, "-i", invPath}
-		if v.limit != "" {
-			pilotArgs = append(pilotArgs, "-l", v.limit)
-		}
-		if vtTopoTestVerifyTimeout > 0 {
-			pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
-		}
-		if err := execPilot(out, pilotArgs...); err != nil {
-			return rollback(fmt.Errorf("verification failed (%s): %w", v.spec, err))
-		}
+	outcome, err := transaction.Run(context.Background())
+	if err != nil {
+		return fmt.Errorf("topology test transaction %s: %w", outcome, err)
 	}
-	fmt.Fprintln(out, "✓ Verification checks passed")
-
-	fmt.Fprintln(out, "=== [Step 5/5] L6 Idempotency Check ===")
-	var idemBuf bytes.Buffer
-	if err := execExternal(io.MultiWriter(out, &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
-		return rollback(fmt.Errorf("idempotency run failed: %w", err))
-	}
-	changed, ok := idempotencyChangedCount(idemBuf.String())
-	if !ok {
-		return rollback(fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)"))
-	}
-	if changed > 0 {
-		return rollback(fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed))
-	}
-	fmt.Fprintln(out, "✓ Idempotency check passed (changed=0)")
 	fmt.Fprintln(out, "🎉 ALL TESTS PASSED SUCCESSFULLY!")
 	return nil
 }

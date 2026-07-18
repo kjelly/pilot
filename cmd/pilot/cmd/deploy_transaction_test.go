@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/anomalyco/pilot/internal/ansible"
+	"github.com/anomalyco/pilot/internal/contract"
+	"github.com/anomalyco/pilot/internal/delivery"
+	"github.com/anomalyco/pilot/internal/spec"
 	"github.com/anomalyco/pilot/internal/store"
 )
 
@@ -48,5 +51,32 @@ func TestExecuteRecordedDeploymentPersistsTransactionAfterAuthorization(t *testi
 	}
 	if runs[0].Stage != "sandbox" || len(runs[0].Hosts) != 1 || runs[0].Hosts[0] != "host-a" {
 		t.Fatalf("run=%+v", runs[0])
+	}
+}
+
+func TestScopeVerificationPlansUsesContractTraceability(t *testing.T) {
+	root := repoRootForTest(t)
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans := []delivery.VerificationPlan{{
+		Component: "docker",
+		SpecPath:  "docs/verification/docker.md",
+		Rows:      []spec.Row{{ID: "C1"}, {ID: "C2"}, {ID: "C3"}},
+	}}
+	scoped, err := scopeVerificationPlans(catalog, plans, "docker-C1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scoped) != 1 || len(scoped[0].Rows) != 2 || scoped[0].Rows[0].ID != "C1" || scoped[0].Rows[1].ID != "C3" {
+		t.Fatalf("scoped=%+v", scoped)
+	}
+	if _, err := scopeVerificationPlans(catalog, plans, "unknown-tag"); err == nil {
+		t.Fatal("unknown tag unexpectedly broadened verification scope")
 	}
 }
