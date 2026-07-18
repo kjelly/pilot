@@ -62,6 +62,10 @@ type VerifySpecTool struct {
 	EnvironmentInputs  map[string]string
 	Stage              string
 	SelectedComponents map[string]bool
+	// SelectedRowIDs narrows execution to contract-resolved rows for a partial
+	// deploy. An empty set means every row; unknown IDs are rejected before any
+	// probe runs so a tag mapping can never silently broaden verification.
+	SelectedRowIDs map[string]bool
 
 	// Test seams: production uses Ansible for both operations. Kept private so
 	// callers cannot accidentally replace the evidence path.
@@ -181,6 +185,9 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 			}
 		}
 	}
+	if err := t.validateSelectedRows(parsed); err != nil {
+		return &Result{Content: "ERROR: " + err.Error(), IsError: true}, nil
+	}
 	// NOTE: spec.Lint(parsed) may report errors here; we intentionally run
 	// the verifier anyway (lint issues are surfaced by `pilot spec --lint`,
 	// not by the verify tool).
@@ -239,6 +246,9 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 
 	rows := make([]VerifyRow, 0, len(parsed.Rows)*max(1, len(remoteHosts)))
 	for _, r := range parsed.Rows {
+		if len(t.SelectedRowIDs) > 0 && !t.SelectedRowIDs[r.ID] {
+			continue
+		}
 		if parsed.SchemaVersion == 2 && r.Scope == "aggregate" {
 			applicable, err := spec.EvaluateApplicability(r.AppliesWhen, spec.ApplicabilityContext{Inputs: localInputs, Components: t.SelectedComponents, Stage: t.Stage})
 			if err != nil {
@@ -304,6 +314,22 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		sb.WriteByte('\n')
 	}
 	return &Result{Content: sb.String()}, nil
+}
+
+func (t *VerifySpecTool) validateSelectedRows(parsed *spec.Spec) error {
+	if len(t.SelectedRowIDs) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(parsed.Rows))
+	for _, row := range parsed.Rows {
+		known[row.ID] = true
+	}
+	for id := range t.SelectedRowIDs {
+		if !known[id] {
+			return fmt.Errorf("selected verification row %q does not exist in %s", id, parsed.Path)
+		}
+	}
+	return nil
 }
 
 func (t *VerifySpecTool) appendEvidence(ctx context.Context, parsed *spec.Spec, rows []VerifyRow) error {

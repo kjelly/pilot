@@ -101,6 +101,9 @@ func resolveContractRoot(flagValue string) (string, error) {
 	if flagValue != "" {
 		return filepath.Abs(flagValue)
 	}
+	if root := os.Getenv("PILOT_ROOT"); root != "" {
+		return filepath.Abs(root)
+	}
 	root, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("get working directory: %w", err)

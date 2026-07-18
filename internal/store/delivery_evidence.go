@@ -228,7 +228,7 @@ func (w *RunWriter) appendEvidence(ctx context.Context, row VerifyEvidence) erro
 	if row.Attempt < 1 {
 		return fmt.Errorf("append verification evidence: attempt must be >= 1")
 	}
-	if len(w.hosts) > 0 {
+	if row.Host != "controller" && len(w.hosts) > 0 {
 		if _, ok := w.hosts[row.Host]; !ok {
 			return fmt.Errorf("append verification evidence: host %q is outside the resolved run scope", row.Host)
 		}

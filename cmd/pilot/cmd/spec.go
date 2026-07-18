@@ -250,15 +250,18 @@ func checkGenerateOutPath(outPath, specPath string) error {
 }
 
 func openSpecStore() (*store.Store, error) {
-	dataDir := os.Getenv("PILOT_DATA_DIR")
-	if dataDir == "" {
-		home, _ := os.UserHomeDir()
-		dataDir = filepath.Join(home, ".local", "share", "pilot")
+	storeDir := dataDir
+	if storeDir == "" {
+		storeDir = os.Getenv("PILOT_DATA_DIR")
 	}
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+	if storeDir == "" {
+		home, _ := os.UserHomeDir()
+		storeDir = filepath.Join(home, ".local", "share", "pilot")
+	}
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dataDir, "history.db")
+	path := filepath.Join(storeDir, "history.db")
 	st, err := store.Open(path)
 	if err != nil {
 		return nil, err

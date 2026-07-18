@@ -47,6 +47,9 @@ func TestRunWriterAppendOnlyIdempotencyAndFinish(t *testing.T) {
 	if err := w.AppendEvidence(context.Background(), []VerifyEvidence{{SpecPath: "spec.md", RowID: "C1", Host: "host-b", Attempt: 1, OperationID: "outside", Command: "true", ProbeStatus: "ok", Verdict: "pass"}}); err == nil {
 		t.Fatal("expected host outside scope to fail")
 	}
+	if err := w.AppendEvidence(context.Background(), []VerifyEvidence{{SpecPath: "spec.md", RowID: "C2", Host: "controller", Attempt: 1, OperationID: "aggregate", Command: "true", ProbeStatus: "ok", Verdict: "pass"}}); err != nil {
+		t.Fatalf("aggregate controller evidence rejected: %v", err)
+	}
 
 	if err := w.Finish(context.Background(), RunFinished{Outcome: "success", ExitCode: 0}); err != nil {
 		t.Fatal(err)
@@ -61,7 +64,7 @@ func TestRunWriterAppendOnlyIdempotencyAndFinish(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM verify_evidence WHERE run_id='run-1'`).Scan(&evidence); err != nil {
 		t.Fatal(err)
 	}
-	if events != 3 || evidence != 1 {
+	if events != 3 || evidence != 2 {
 		t.Fatalf("events=%d evidence=%d", events, evidence)
 	}
 	var outcome string
