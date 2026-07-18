@@ -22,8 +22,8 @@
 | 項目 | 狀態 | 說明 |
 |---|---|---|
 | M0.2 callback／host resolver | **✅ 已實作並驗證** | Ansible scope adapter、isolated bounded runner 與 JSON callback 已接正式 verify |
-| Safety RFC | **🟡 v2 boundary 已實作** | readOnly/isolatedMutation gate、secretRef fail-closed；secret-aware runner 仍待 M0.4 |
-| ComponentContract | **✅ catalog/lint；🟡 runtime wiring** | 22-component strict catalog、traceability/dependency/endpoint lint 與 deterministic preflight engine；deploy wiring 尚待 M0.4 |
+| Safety RFC | **🟡 v2 boundary 已實作** | readOnly/isolatedMutation gate、secretRef fail-closed；deploy auto verification remains v2-only contract opt-in |
+| ComponentContract | **✅ catalog/lint/runtime deploy wiring** | 22-component strict catalog、traceability/dependency/endpoint lint、deterministic preflight engine 與 deploy contract scope wiring |
 | M2.1 typed matcher | **✅ 已實作並驗證** | `Expect`/`StringMatcher`、v1 compiler、legacy replay compatibility evaluator 已完成 |
 | M2.2 v2 parser | **✅ 已實作並驗證** | strict parser、typed execution、per-host applicability/input resolution、action/secret safety gate；同一 fixture 在 local/docker/vm/general-inventory backend 均 PASS，未宣稱 staging／真實主機 acceptance |
 | M2.3 migrate | **✅ migration CLI 已實作** | `pilot spec migrate`、review-gated v2 draft、JSON sidecar 與 v1 prose preservation；模板/正式 spec 遷移與 target acceptance 待後續工作 |

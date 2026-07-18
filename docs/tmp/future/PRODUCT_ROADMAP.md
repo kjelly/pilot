@@ -24,12 +24,12 @@ Codex/Claude 直接產生 verification spec、apply playbook 與 regression test
 | M0.1 deploy exit-code | **已實作並驗證** | preview/apply 非零、binary 啟動失敗、preflight failure 後停止皆回 error；乾淨取消維持 exit 0 |
 | `verify --dir` 原始錯誤 | **已實作並驗證** | no-report 時保留 per-spec parse/runner error |
 | M0.2 per-host verify | **已實作並驗證** | single-host invocation、bounded workers、Ansible scope adapter、callback runner 已接正式 verify |
-| Verification safety | **部分已實作** | v2 readOnly/isolatedMutation 與 secretRef fail-closed；secret-aware transport/deploy wiring 待 M0.4 |
-| Append-only evidence | **已實作並驗證** | schema v13、operation/evidence idempotency、heartbeat/finalization；rotation 移 P5 |
-| ComponentContract | **22-component catalog/lint 已實作；preflight engine 已實作** | strict loader、row/tag traceability、dependency endpoint、apply/deploy catalog drift、cardinality/input/provider/OS/resource preflight；尚未接 deploy/TUI resolver |
-| M0.3/M0.4 | **M0.3 已實作；M0.4 尚未實作** | append-only evidence 已接 standalone verify；deploy transaction 尚待整合 |
+| Verification safety | **部分已實作** | v2 readOnly/isolatedMutation 與 secretRef fail-closed；deploy 僅 auto-verify contract opt-in 的 v2 spec，既有 v1 不會被自動執行 |
+| Append-only evidence | **已實作並驗證** | schema v14、operation/evidence idempotency、heartbeat/finalization、hash-verified archive/prune 與獨立 admin event stream |
+| ComponentContract | **22-component catalog/lint/preflight 已實作** | strict loader、row/tag traceability、dependency endpoint、apply/deploy catalog drift、cardinality/input/provider/OS/resource preflight；已接 deploy scope resolver 與 TUI plan |
+| M0.3/M0.4 | **已實作並驗證** | deploy transaction 記錄 preview/apply/verify/idempotency/rollback evidence；staging/prod 第二次 apply 必須 changed=0 |
 | Spec v2（M2.1–M2.3） | **M2.1/M2.2 已實作；M2.3 migration CLI 已實作** | strict v2 parser/runtime、review-gated migrate draft/sidecar；local/docker/vm/general-inventory backend 同 fixture 均 PASS；正式 spec 遷移與 staging／真實主機 acceptance 待完成 |
-| P3/P4/P5 | **尚未實作** | 仍是 roadmap |
+| P3/P4/P5 | **核心路徑已實作並驗證** | P3 contract plan/action gate、P4 五題 model-independent corpus + deterministic gate、P5 run queries/archive/prune/admin audit；正式 v1 spec 的 target acceptance 遷移仍待另行授權 |
 
 ## 產品北極星
 
@@ -189,6 +189,11 @@ P2 完成定義：
 
 ## P3：讓 TUI 從「填 YAML」提升成「組合架構」
 
+> **實作狀態（2026-07-18）：核心路徑已實作。** 單一元件流程在收集 vault／授權前
+> 以 ComponentContract 顯示 role、apply path 與 required dependency；未在 contract
+> 宣告 playbook 的 upgrade/decommission fail closed。完整 capability composer、scale
+> workflow 與已遷移 v2 spec 的 auto-verify coverage 仍是後續產品擴充。
+
 `pilot edit` / `pilot deploy` 的下一步應由 ComponentContract 驅動：
 
 - 先選想要的 capability，再解析必要 component 與依賴。
@@ -206,6 +211,11 @@ P3 完成定義：
   刪除角色。
 
 ## P4：建立 coding-agent authoring eval
+
+> **實作狀態（2026-07-18）：已實作 deterministic baseline。** `eval/briefs/` 有五份
+> 版本化 brief；`eval/run.sh` 跑 contract/spec/tag/shell/secret-host guard。它只在
+> 呼叫端明確提供 `PILOT_EVAL_TARGET_TEST` 時執行 disposable target test，不會自行
+> provision 或 mutate 環境。
 
 既然 Codex/Claude 是主要 authoring 介面，就應測量產出的 Delivery Bundle，而不是
 把 model 放回 pilot runtime。
@@ -225,6 +235,11 @@ eval 應該 model-independent，讓不同 Codex/Claude 版本都能用相同 det
 gate 比較，而不是依靠主觀閱讀判斷產物「看起來不錯」。
 
 ## P5：證據、查詢與供應鏈追溯
+
+> **實作狀態（2026-07-18）：已實作 run 查詢與 retention。** `pilot runs` 提供
+> list/show/last-success/pending-spec/diff/affected；archive 必須建立不可覆寫、hash
+> 記錄的匯出，prune 必須重新驗 hash 並顯式 `--confirm-prune`，所有 retention 動作
+> 都寫入獨立 append-only `evidence_admin_events`。
 
 建議把 deployment run 保存成 append-only record：
 
