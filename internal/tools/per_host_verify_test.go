@@ -208,9 +208,93 @@ func TestInvokeAnsibleJSON_DeadlineIsHostTimeout(t *testing.T) {
 			return ansibleJSONInvocation{Err: context.DeadlineExceeded}
 		},
 	}
-	result := tool.invokeAnsibleJSON(context.Background(), "host-a", spec.Row{Command: "true"}, 1)
+	result := tool.invokeAnsibleJSON(context.Background(), "host-a", spec.Row{Command: "true"}, 1, 1, nil)
 	if result.Status != callbackStatusTimeout || result.Host != "host-a" {
 		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestPOSIXEnvironmentPrefix(t *testing.T) {
+	got := posixEnvironmentPrefix(map[string]string{"quoted-value": "a'b", "plain": "two words"})
+	want := "PILOT_VAR_PLAIN='two words' PILOT_VAR_QUOTED_VALUE='a'\\''b' "
+	if got != want {
+		t.Fatalf("prefix=%q want=%q", got, want)
+	}
+}
+
+func TestResolveHostInputsUsesInventoryThenCLIOverride(t *testing.T) {
+	tool := &VerifySpecTool{
+		Inputs:            map[string]string{"endpoint": "cli"},
+		EnvironmentInputs: map[string]string{"endpoint": "env"},
+		hostInputs: func(_ context.Context, host string) (map[string]string, error) {
+			if host != "host-a" {
+				t.Fatalf("host=%q", host)
+			}
+			return map[string]string{"endpoint": "inventory", "ignored": "value"}, nil
+		},
+	}
+	parsed := &spec.Spec{Inputs: []spec.Input{{Name: "endpoint", Required: true}}}
+	inputs, err := tool.resolveHostInputs(context.Background(), parsed, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inputs) != 1 || inputs["endpoint"] != "cli" {
+		t.Fatalf("inputs=%v", inputs)
+	}
+	tool.Inputs = nil
+	inputs, err = tool.resolveHostInputs(context.Background(), parsed, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputs["endpoint"] != "inventory" {
+		t.Fatalf("inventory must override environment, inputs=%v", inputs)
+	}
+}
+
+func TestResolveRemoteHostsUsesV2RolesAsDefaultScope(t *testing.T) {
+	tool := &VerifySpecTool{
+		Inventory: "inventory.yml",
+		listHosts: func(_ context.Context, pattern, limit string) ([]string, error) {
+			if limit != "" {
+				t.Fatalf("unexpected limit %q", limit)
+			}
+			switch pattern {
+			case "all":
+				return []string{"client-a", "server-a"}, nil
+			case "server":
+				return []string{"server-a"}, nil
+			default:
+				return nil, errors.New("unexpected pattern " + pattern)
+			}
+		},
+	}
+	parsed := &spec.Spec{SchemaVersion: 2, Roles: []string{"server"}}
+	resolved, err := tool.resolveRemoteHosts(context.Background(), parsed, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Hosts) != 1 || resolved.Hosts[0] != "server-a" {
+		t.Fatalf("resolved=%+v", resolved)
+	}
+}
+
+func TestResolveRemoteHostsRejectsV2RoleHostDrift(t *testing.T) {
+	tool := &VerifySpecTool{
+		Inventory: "inventory.yml",
+		listHosts: func(_ context.Context, pattern, _ string) ([]string, error) {
+			switch pattern {
+			case "all":
+				return []string{"server-a", "server-b"}, nil
+			case "server":
+				return []string{"server-a"}, nil
+			default:
+				return nil, errors.New("unexpected pattern " + pattern)
+			}
+		},
+	}
+	parsed := &spec.Spec{SchemaVersion: 2, Roles: []string{"server"}, Hosts: []spec.Host{{Hostname: "server-b"}}}
+	if _, err := tool.resolveRemoteHosts(context.Background(), parsed, ""); err == nil {
+		t.Fatal("role/host drift unexpectedly accepted")
 	}
 }
 

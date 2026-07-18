@@ -18,6 +18,10 @@
 > Spec v2 新增 `appliesWhen`/`not_applicable`、canonical action 與 secretRef；
 > ComponentContract 固定 role 1:N、dependency placement/provider selection；
 > Evidence 固定 idempotency/finalization 並把 rotation 移至 P5。
+> 實作進度 3:2026-07-18——M2.2 已完成 strict v2 parser、typed runtime、
+> applicability/not_applicable evidence、aggregate scope、CLI/file/env/inventory
+> `pilot_inputs` precedence，以及 secretRef/isolatedMutation fail-closed gate。local
+> CLI fixture 已實跑 PASS；docker/vm-target/一般 inventory target acceptance 尚未執行。
 >
 > 上述修訂 1–5／實作進度 1–2 是決策歷史，包含當時的 Proposed／NO-GO
 > 狀態與已被更正的 1—1 假設；目前 gate 只看修訂 6、下方狀態快照與各
@@ -49,15 +53,16 @@
 | 里程碑／產物 | 狀態 | 實作內容 | 明確未實作 |
 |---|---|---|---|
 | M0.1 | **✅ 已實作並驗證** | deploy exit-code、preflight rejection、`verify --dir` 原始錯誤、regression tests | deploy 後自動 verify/evidence |
-| Safety RFC | **🟢 Final design／runtime 待實作** | canonical action、v2-only auto deploy、secret-aware playbook/module transport | action runtime、secret-aware module |
-| Evidence RFC | **🟢 Final design／runtime 待實作** | event/evidence idempotency、RunWriter、heartbeat/finalization；rotation 移 P5 | schema v13、store API、runs CLI |
-| M0.2 | **🧪 Spike 已驗證／design Final** | JSON decoder、status、expected-host resolver、single-host invocation timeout/scope 決策 | Ansible inventory/scope adapter、bounded runner 正式接線 |
+| Safety RFC | **🟡 部分已實作** | v2 action gate、secretRef fail-closed、v2-only autoDeploy schema gate | secret-aware module、deploy authorization wiring |
+| Evidence RFC | **✅ 已實作並驗證** | schema v13、RunWriter、heartbeat/finalization、standalone verify evidence；rotation 移 P5 | deploy transaction usage（M0.4） |
+| M0.2 | **✅ 已實作並驗證** | JSON decoder、status、expected-host resolver、Ansible scope adapter、single-host bounded runner | deploy transaction wiring（M0.4） |
 | M1.1 | **🟡 Loader baseline + 六份 production contracts 已實作** | strict loader/Catalog、canonical `contracts/`、`pilot contract lint`、role cardinality、placement/provider selection、strict tests | 全量 contract lint、catalog/site integration |
 | M0.3 | **✅ 已實作並驗證** | schema v13、append-only event/evidence stream、serialized RunWriter、heartbeat/finalization、standalone verify evidence | deploy transaction 對 writer 的使用（M0.4） |
 | M0.4 | **⏸ 尚未實作** | 無 | deploy transaction、rollback/idempotency policy |
 | M1.2/M1.3 | **⏸ 尚未實作** | 無 | 全量 contracts、DAG/preflight |
-| M2.1 | **✅ 已實作並驗證** | typed `Expect`、v1 Expected compiler、legacy output compatibility evaluator | v2 parser、migration |
-| M2.2–M2.3 | **🟢 Design Final／尚未實作** | applicability/action/secretRef/normalization/migration contract 已定案 | v2 parser、migration |
+| M2.1 | **✅ 已實作並驗證** | typed `Expect`、v1 Expected compiler、legacy output compatibility evaluator | migration |
+| M2.2 | **✅ 已實作並驗證** | strict v2 parser、typed execution、applicability/action/secretRef boundary、input precedence、local CLI fixture | docker/vm/general-inventory target acceptance、migration |
+| M2.3 | **⏸ 尚未實作** | 無 | migration CLI、template/document migration |
 | P3/P4/P5 | **⏸ 尚未實作** | 無 | TUI/eval/query |
 
 ## 0. 現況與差距總覽
@@ -370,6 +375,8 @@ contract lint。這是 code dependency，不是未決 schema blocker。
   v2 使用 one-trailing-newline normalization；24 份 spec verdict 零回歸。
 
 ### M2.2 — v2 parser 並存
+
+**狀態（2026-07-18）：✅ 已實作並驗證（local + unit）；跨 target integration acceptance 待執行。**
 
 - v2 spec 用 front-matter + fenced YAML checks；包含 typed matcher、
   `appliesWhen`、`scope`、canonical object action 與

@@ -2,13 +2,16 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -52,11 +55,19 @@ type VerifySpecTool struct {
 	// EvidenceWriter, when present, receives one immutable observation for
 	// every host×row result before Execute returns.
 	EvidenceWriter *store.RunWriter
+	// Inputs and Stage are resolved by the CLI/deploy planner. They contain
+	// non-secret values only; secret inputs are fail-closed until their runner
+	// exists. SelectedComponents drives declarative dependency applicability.
+	Inputs             map[string]string
+	EnvironmentInputs  map[string]string
+	Stage              string
+	SelectedComponents map[string]bool
 
 	// Test seams: production uses Ansible for both operations. Kept private so
 	// callers cannot accidentally replace the evidence path.
-	listHosts ansibleHostLister
-	runJSON   ansibleJSONRunner
+	listHosts  ansibleHostLister
+	runJSON    ansibleJSONRunner
+	hostInputs func(context.Context, string) (map[string]string, error)
 }
 
 // Spec describes the tool for its caller (`pilot verify`).
@@ -88,11 +99,12 @@ type verifySpecArgsStruct struct {
 }
 
 // VerifyRow is one NDJSON object emitted by VerifySpecTool.Execute.
-// Mirrors what the (removed 2026-07-17) scripts/spec-runner.py
-// produced, so old reports stay diffable against new ones.
+// The status is pass, fail, skip, or not_applicable. The latter is a v2
+// applicability outcome and deliberately does not represent a successful
+// probe.
 type VerifyRow struct {
 	ID          string `json:"id"`
-	Status      string `json:"status"` // pass | fail | skip
+	Status      string `json:"status"` // pass | fail | skip | not_applicable
 	Detail      string `json:"detail"`
 	Host        string `json:"host,omitempty"`
 	ExitCode    int    `json:"exit_code,omitempty"`
@@ -137,6 +149,37 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 	if err != nil {
 		return &Result{Content: fmt.Sprintf("ERROR: %v", err), IsError: true}, nil
 	}
+	if parsed.SchemaVersion == 2 {
+		if t.Stage == "" {
+			t.Stage = "sandbox"
+		}
+		declared := make(map[string]spec.Input, len(parsed.Inputs))
+		for _, input := range parsed.Inputs {
+			declared[input.Name] = input
+		}
+		for name := range t.Inputs {
+			input, ok := declared[name]
+			if !ok {
+				return &Result{Content: fmt.Sprintf("ERROR: Spec v2 input %q is not declared", name), IsError: true}, nil
+			}
+			if input.SecretRef != nil {
+				return &Result{Content: fmt.Sprintf("ERROR: Spec v2 secret input %q cannot be supplied as plaintext", name), IsError: true}, nil
+			}
+		}
+		for _, input := range parsed.Inputs {
+			if input.SecretRef != nil {
+				return &Result{Content: "ERROR: Spec v2 secretRef verification requires the secret-aware runner", IsError: true}, nil
+			}
+		}
+		for _, row := range parsed.Rows {
+			if len(row.NeedsReview) > 0 {
+				return &Result{Content: fmt.Sprintf("ERROR: Spec v2 check %s has needsReview findings", row.ID), IsError: true}, nil
+			}
+			if row.Action != nil && row.Action.Mode == "isolatedMutation" {
+				return &Result{Content: fmt.Sprintf("ERROR: Spec v2 check %s requires the isolatedMutation authorization runner", row.ID), IsError: true}, nil
+			}
+		}
+	}
 	// NOTE: spec.Lint(parsed) may report errors here; we intentionally run
 	// the verifier anyway (lint issues are surfaced by `pilot spec --lint`,
 	// not by the verify tool).
@@ -149,7 +192,11 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 	if host == "" {
 		host = t.Host
 	}
-	stageVerifyEnv(t.Inventory)
+	// The legacy v1 issuer staging mechanism mutates targets. Spec v2 has a
+	// declared input transport and must never fall back to this path.
+	if parsed.SchemaVersion == 1 {
+		stageVerifyEnv(t.Inventory)
+	}
 	var remoteHosts []string
 	if !t.LocalOnly && t.Inventory != "" {
 		resolution, err := t.resolveRemoteHosts(ctx, parsed, host)
@@ -161,8 +208,50 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 			slog.Warn("verify host-scope finding", "finding", finding)
 		}
 	}
+	localInputs := copyStringMap(t.EnvironmentInputs)
+	overlayStringMap(localInputs, t.Inputs)
+	remoteInputs := make(map[string]map[string]string, len(remoteHosts))
+	if parsed.SchemaVersion == 2 {
+		if len(remoteHosts) == 0 {
+			if err := spec.ValidateInputValues(parsed.Inputs, localInputs); err != nil {
+				return &Result{Content: "ERROR: Spec v2 inputs: " + err.Error(), IsError: true}, nil
+			}
+		} else {
+			for _, remoteHost := range remoteHosts {
+				values, err := t.resolveHostInputs(ctx, parsed, remoteHost)
+				if err != nil {
+					return &Result{Content: fmt.Sprintf("ERROR: resolve Spec v2 inputs for %s: %v", remoteHost, err), IsError: true}, nil
+				}
+				remoteInputs[remoteHost] = values
+			}
+			for _, row := range parsed.Rows {
+				if row.Scope != "aggregate" {
+					continue
+				}
+				if err := spec.ValidateInputValues(parsed.Inputs, localInputs); err != nil {
+					return &Result{Content: "ERROR: Spec v2 aggregate inputs: " + err.Error(), IsError: true}, nil
+				}
+				break
+			}
+		}
+	}
+
 	rows := make([]VerifyRow, 0, len(parsed.Rows)*max(1, len(remoteHosts)))
 	for _, r := range parsed.Rows {
+		if parsed.SchemaVersion == 2 && r.Scope == "aggregate" {
+			applicable, err := spec.EvaluateApplicability(r.AppliesWhen, spec.ApplicabilityContext{Inputs: localInputs, Components: t.SelectedComponents, Stage: t.Stage})
+			if err != nil {
+				return &Result{Content: fmt.Sprintf("ERROR: Spec v2 check %s applicability: %v", r.ID, err), IsError: true}, nil
+			}
+			if !applicable.Applicable {
+				rows = append(rows, notApplicableRow(r.ID, "controller", applicable.Reason))
+				continue
+			}
+			vr := t.runLocal(ctx, r, effectiveTimeout(r, timeoutSec), parsed.SchemaVersion, localInputs)
+			vr.Host = "controller"
+			rows = append(rows, vr)
+			continue
+		}
 		if !t.LocalOnly && t.Inventory != "" {
 			if r.Command == "" {
 				for _, remoteHost := range remoteHosts {
@@ -170,10 +259,36 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 				}
 				continue
 			}
-			rows = append(rows, t.runAnsiblePerHost(ctx, r, remoteHosts, timeoutSec)...)
+			applicableHosts := make([]string, 0, len(remoteHosts))
+			for _, remoteHost := range remoteHosts {
+				if parsed.SchemaVersion != 2 {
+					applicableHosts = append(applicableHosts, remoteHost)
+					continue
+				}
+				applicable, err := spec.EvaluateApplicability(r.AppliesWhen, spec.ApplicabilityContext{Inputs: remoteInputs[remoteHost], Components: t.SelectedComponents, Stage: t.Stage})
+				if err != nil {
+					return &Result{Content: fmt.Sprintf("ERROR: Spec v2 check %s applicability on %s: %v", r.ID, remoteHost, err), IsError: true}, nil
+				}
+				if !applicable.Applicable {
+					rows = append(rows, notApplicableRow(r.ID, remoteHost, applicable.Reason))
+					continue
+				}
+				applicableHosts = append(applicableHosts, remoteHost)
+			}
+			rows = append(rows, t.runAnsiblePerHost(ctx, r, applicableHosts, effectiveTimeout(r, timeoutSec), parsed.SchemaVersion, remoteInputs)...)
 			continue
 		}
-		rows = append(rows, t.runRow(ctx, r, host, timeoutSec))
+		if parsed.SchemaVersion == 2 {
+			applicable, err := spec.EvaluateApplicability(r.AppliesWhen, spec.ApplicabilityContext{Inputs: localInputs, Components: t.SelectedComponents, Stage: t.Stage})
+			if err != nil {
+				return &Result{Content: fmt.Sprintf("ERROR: Spec v2 check %s applicability: %v", r.ID, err), IsError: true}, nil
+			}
+			if !applicable.Applicable {
+				rows = append(rows, notApplicableRow(r.ID, firstNonEmpty(host, "localhost"), applicable.Reason))
+				continue
+			}
+		}
+		rows = append(rows, t.runRow(ctx, r, host, effectiveTimeout(r, timeoutSec), parsed.SchemaVersion, localInputs))
 	}
 	if t.EvidenceWriter != nil {
 		if err := t.appendEvidence(ctx, parsed, rows); err != nil {
@@ -229,36 +344,112 @@ func (t *VerifySpecTool) appendEvidence(ctx context.Context, parsed *spec.Spec, 
 
 // runRow runs one spec row against either ansible ad-hoc or a local
 // shell, depending on t.LocalOnly / inventory presence.
-func (t *VerifySpecTool) runRow(ctx context.Context, r spec.Row, host string, timeoutSec int) VerifyRow {
+func (t *VerifySpecTool) runRow(ctx context.Context, r spec.Row, host string, timeoutSec int, schemaVersion int, inputs map[string]string) VerifyRow {
 	if r.Command == "" {
 		return VerifyRow{ID: r.ID, Status: "skip", Detail: "no command"}
 	}
 	if t.LocalOnly || t.Inventory == "" {
-		return t.runLocal(ctx, r, timeoutSec)
+		return t.runLocal(ctx, r, timeoutSec, schemaVersion, inputs)
 	}
 	return t.runAnsibleAdHoc(ctx, r, host, timeoutSec)
 }
 
-func (t *VerifySpecTool) runLocal(ctx context.Context, r spec.Row, timeoutSec int) VerifyRow {
+func (t *VerifySpecTool) runLocal(ctx context.Context, r spec.Row, timeoutSec int, schemaVersion int, inputs map[string]string) VerifyRow {
 	timeout := time.Duration(timeoutSec) * time.Second
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "sh", "-c", r.Command)
-	out, err := cmd.CombinedOutput()
-	rawOut := strings.TrimSpace(string(out))
+	if schemaVersion == 2 && len(inputs) > 0 {
+		cmd.Env = append(os.Environ(), verifyInputEnvironment(inputs)...)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	rawOut, rawErr := stdout.String(), stderr.String()
+	if schemaVersion != 2 {
+		rawOut = strings.TrimSpace(rawOut + rawErr)
+		rawErr = ""
+	}
 	rc := 0
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			rc = ee.ExitCode()
 		}
 	}
-	detail := fmt.Sprintf("(rc=%d) %s", rc, rawOut)
-	ok, mismatch := evaluateV1Expected(r.Expected, detail, rc)
+	if schemaVersion == 2 && cctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+		return VerifyRow{ID: r.ID, Status: "fail", Detail: "probe_status=timeout: local probe timed out", ExitCode: -1, ProbeStatus: "timeout", Stdout: rawOut, Stderr: rawErr}
+	}
+	ok, mismatch := evaluateRow(r, schemaVersion, rawOut, rawErr, rc, fmt.Sprintf("(rc=%d) %s", rc, rawOut))
 	status := "pass"
 	if !ok {
 		status = "fail"
 	}
-	return VerifyRow{ID: r.ID, Status: status, Detail: mismatch, ExitCode: rc}
+	return VerifyRow{ID: r.ID, Status: status, Detail: mismatch, ExitCode: rc, ProbeStatus: "ok", Stdout: rawOut, Stderr: rawErr}
+}
+
+func effectiveTimeout(row spec.Row, fallback int) int {
+	if row.Timeout > 0 {
+		return int(math.Ceil(row.Timeout.Seconds()))
+	}
+	return fallback
+}
+
+func evaluateRow(row spec.Row, schemaVersion int, stdout, stderr string, rc int, legacyDetail string) (bool, string) {
+	if schemaVersion != 2 {
+		return evaluateV1Expected(row.Expected, legacyDetail, rc)
+	}
+	verdict := row.Expect.Eval(spec.ProbeResult{Stdout: normalizeV2Text(stdout), Stderr: normalizeV2Text(stderr), ExitCode: rc})
+	return verdict.Pass, verdict.Detail
+}
+
+func normalizeV2Text(value string) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return strings.TrimSuffix(value, "\n")
+}
+
+func notApplicableRow(id, host, reason string) VerifyRow {
+	return VerifyRow{ID: id, Status: "not_applicable", Detail: reason, Host: host, ProbeStatus: "not_applicable", Message: reason}
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func overlayStringMap(destination, source map[string]string) {
+	for key, value := range source {
+		destination[key] = value
+	}
+}
+
+func verifyInputEnvironment(inputs map[string]string) []string {
+	keys := make([]string, 0, len(inputs))
+	for key := range inputs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, "PILOT_VAR_"+inputEnvironmentSuffix(key)+"="+inputs[key])
+	}
+	return out
+}
+
+func inputEnvironmentSuffix(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func (t *VerifySpecTool) runAnsibleAdHoc(ctx context.Context, r spec.Row, host string, timeoutSec int) VerifyRow {

@@ -3,6 +3,7 @@ package tools
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -60,13 +61,33 @@ func (t *VerifySpecTool) resolveRemoteHosts(ctx context.Context, parsed *spec.Sp
 	}
 
 	specHosts := make([]string, 0, len(parsed.Hosts))
-	for _, target := range parsed.Hosts {
-		specHosts = append(specHosts, target.Hostname)
+	specTargetsDeclared := parsed.HasTargets()
+	if parsed.SchemaVersion == 2 && len(parsed.Roles) > 0 {
+		rolePattern := strings.Join(parsed.Roles, ":")
+		roleHosts, err := list(ctx, rolePattern, "")
+		if err != nil {
+			return expectedHostResolution{}, fmt.Errorf("resolve spec target roles %q: %w", rolePattern, err)
+		}
+		specHosts = roleHosts
+		specTargetsDeclared = true
+		if parsed.HasTargets() {
+			declared := make([]string, 0, len(parsed.Hosts))
+			for _, target := range parsed.Hosts {
+				declared = append(declared, target.Hostname)
+			}
+			if !equalHostSets(declared, roleHosts) {
+				return expectedHostResolution{}, fmt.Errorf("v2 targets.hosts and targets.roles resolve to different hosts: hosts=%v roles=%v", sortedUniqueHosts(declared), sortedUniqueHosts(roleHosts))
+			}
+		}
+	} else {
+		for _, target := range parsed.Hosts {
+			specHosts = append(specHosts, target.Hostname)
+		}
 	}
 	resolution, err := resolveExpectedHosts(expectedHostInput{
 		InventoryHosts:      inventoryHosts,
 		ExecutionSelections: selections,
-		SpecTargetsDeclared: parsed.HasTargets(),
+		SpecTargetsDeclared: specTargetsDeclared,
 		SpecTargetHosts:     specHosts,
 	})
 	if err != nil {
@@ -93,6 +114,65 @@ func (t *VerifySpecTool) listAnsibleHosts(ctx context.Context, pattern, limit st
 		return nil, err
 	}
 	return hosts, nil
+}
+
+func (t *VerifySpecTool) resolveHostInputs(ctx context.Context, parsed *spec.Spec, host string) (map[string]string, error) {
+	load := t.hostInputs
+	if load == nil {
+		load = t.listAnsibleHostInputs
+	}
+	values, err := load(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	declared := make(map[string]spec.Input, len(parsed.Inputs))
+	for _, input := range parsed.Inputs {
+		declared[input.Name] = input
+	}
+	resolved := make(map[string]string, len(values)+len(t.Inputs)+len(t.EnvironmentInputs))
+	for name, value := range t.EnvironmentInputs {
+		input, ok := declared[name]
+		if !ok || input.SecretRef != nil {
+			continue
+		}
+		resolved[name] = value
+	}
+	for name, value := range values {
+		input, ok := declared[name]
+		if !ok || input.SecretRef != nil {
+			continue
+		}
+		resolved[name] = value
+	}
+	for name, value := range t.Inputs {
+		resolved[name] = value
+	}
+	if err := spec.ValidateInputValues(parsed.Inputs, resolved); err != nil {
+		return nil, err
+	}
+	return resolved, nil
+}
+
+func (t *VerifySpecTool) listAnsibleHostInputs(ctx context.Context, host string) (map[string]string, error) {
+	out, err := exec.CommandContext(ctx, "ansible-inventory", "-i", t.Inventory, "--host", host).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ansible-inventory --host %s: %w: %s", host, err, strings.TrimSpace(string(out)))
+	}
+	var hostVars struct {
+		PilotInputs map[string]any `json:"pilot_inputs"`
+	}
+	if err := json.Unmarshal(out, &hostVars); err != nil {
+		return nil, fmt.Errorf("ansible-inventory --host %s returned invalid JSON: %w", host, err)
+	}
+	values := make(map[string]string, len(hostVars.PilotInputs))
+	for name, value := range hostVars.PilotInputs {
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("pilot_inputs.%s on %s must be a string", name, host)
+		}
+		values[name] = text
+	}
+	return values, nil
 }
 
 func parseAnsibleListHosts(raw string) ([]string, error) {
@@ -129,11 +209,32 @@ func parseAnsibleListHosts(raw string) ([]string, error) {
 	return hosts, nil
 }
 
+func sortedUniqueHosts(hosts []string) []string {
+	set := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		if host != "" {
+			set[host] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for host := range set {
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func equalHostSets(left, right []string) bool {
+	left = sortedUniqueHosts(left)
+	right = sortedUniqueHosts(right)
+	return sameHostSet(left, right)
+}
+
 // runAnsiblePerHost invokes a row separately for every resolved host. No
 // failed host cancels its siblings; output order is deterministic by host.
-func (t *VerifySpecTool) runAnsiblePerHost(ctx context.Context, row spec.Row, hosts []string, timeoutSec int) []VerifyRow {
+func (t *VerifySpecTool) runAnsiblePerHost(ctx context.Context, row spec.Row, hosts []string, timeoutSec int, schemaVersion int, inputsByHost map[string]map[string]string) []VerifyRow {
 	probes := runBoundedPerHost(ctx, hosts, t.perHostWorkers(), func(ctx context.Context, host string) callbackProbeResult {
-		return t.invokeAnsibleJSON(ctx, host, row, timeoutSec)
+		return t.invokeAnsibleJSON(ctx, host, row, timeoutSec, schemaVersion, inputsByHost[host])
 	})
 	rows := make([]VerifyRow, 0, len(probes))
 	for _, probe := range probes {
@@ -152,8 +253,7 @@ func (t *VerifySpecTool) runAnsiblePerHost(ctx context.Context, row spec.Row, ho
 			rows = append(rows, vr)
 			continue
 		}
-		detail := fmt.Sprintf("(rc=%d) %s", probe.ExitCode, probe.Stdout)
-		ok, mismatch := evaluateV1Expected(row.Expected, detail, probe.ExitCode)
+		ok, mismatch := evaluateRow(row, schemaVersion, probe.Stdout, probe.Stderr, probe.ExitCode, fmt.Sprintf("(rc=%d) %s", probe.ExitCode, probe.Stdout))
 		vr.Detail = mismatch
 		vr.Status = "pass"
 		if !ok {
@@ -181,12 +281,17 @@ func (t *VerifySpecTool) perHostWorkers() int {
 	return defaultPerHostWorkers
 }
 
-func (t *VerifySpecTool) invokeAnsibleJSON(ctx context.Context, host string, row spec.Row, timeoutSec int) callbackProbeResult {
+func (t *VerifySpecTool) invokeAnsibleJSON(ctx context.Context, host string, row spec.Row, timeoutSec int, schemaVersion int, inputs map[string]string) callbackProbeResult {
 	if err := ctx.Err(); err != nil {
 		return callbackProbeResult{Host: host, ExitCode: -1, Status: callbackStatusRunnerError, Message: "parent_cancelled: " + err.Error()}
 	}
-	module := adHocModule(row.Command)
-	args := []string{host, "-i", t.Inventory, "-m", module, "-a", row.Command}
+	command := row.Command
+	module := adHocModule(command)
+	if schemaVersion == 2 && len(inputs) > 0 {
+		module = "shell"
+		command = posixEnvironmentPrefix(inputs) + command
+	}
+	args := []string{host, "-i", t.Inventory, "-m", module, "-a", command}
 	if spec.NeedsBecome(row) {
 		args = append(args, "-b")
 	}
@@ -213,6 +318,26 @@ func (t *VerifySpecTool) invokeAnsibleJSON(ctx context.Context, host string, row
 		return callbackProbeResult{Host: host, ExitCode: -1, Status: callbackStatusRunnerError, Message: message}
 	}
 	return probes[0]
+}
+
+func posixEnvironmentPrefix(inputs map[string]string) string {
+	keys := make([]string, 0, len(inputs))
+	for key := range inputs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString("PILOT_VAR_")
+		b.WriteString(inputEnvironmentSuffix(key))
+		b.WriteByte('=')
+		b.WriteString(posixSingleQuote(inputs[key]))
+		b.WriteByte(' ')
+	}
+	return b.String()
+}
+func posixSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func (t *VerifySpecTool) execAnsibleJSON(ctx context.Context, args []string, timeoutSec int) ansibleJSONInvocation {

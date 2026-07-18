@@ -23,12 +23,12 @@ Codex/Claude 直接產生 verification spec、apply playbook 與 regression test
 |---|---|---|
 | M0.1 deploy exit-code | **已實作並驗證** | preview/apply 非零、binary 啟動失敗、preflight failure 後停止皆回 error；乾淨取消維持 exit 0 |
 | `verify --dir` 原始錯誤 | **已實作並驗證** | no-report 時保留 per-spec parse/runner error |
-| M0.2 per-host verify | **spike verified／design Final** | single-host invocation、bounded workers、standalone scope 已定；adapter/runner 待實作 |
-| Verification safety | **Final design／runtime 待實作** | canonical action、v2-only auto deploy、secret-aware playbook/module transport |
-| Append-only evidence | **Final design／schema v13 待實作** | operation/evidence idempotency、heartbeat/finalization 已定；rotation 移 P5 |
+| M0.2 per-host verify | **已實作並驗證** | single-host invocation、bounded workers、Ansible scope adapter、callback runner 已接正式 verify |
+| Verification safety | **部分已實作** | v2 readOnly/isolatedMutation 與 secretRef fail-closed；secret-aware transport/deploy wiring 待 M0.4 |
+| Append-only evidence | **已實作並驗證** | schema v13、operation/evidence idempotency、heartbeat/finalization；rotation 移 P5 |
 | ComponentContract | **loader baseline 已實作／runtime wiring 待完成** | strict loader、role 1:N、dependency placement、provider selection、autoDeploy eligibility；尚未接 deploy/TUI |
-| M0.3/M0.4 | **design ready／尚未實作** | 按 M0.2→M2.2/M0.3/M1 mapping dependency 實作 |
-| Spec v2（M2.1–M2.3） | **design Final／尚未實作** | applicability/action/secretRef/normalization/migration 已定 |
+| M0.3/M0.4 | **M0.3 已實作；M0.4 尚未實作** | append-only evidence 已接 standalone verify；deploy transaction 尚待整合 |
+| Spec v2（M2.1–M2.3） | **M2.1/M2.2 已實作；M2.3 尚未實作** | strict v2 parser/runtime 已有 local CLI evidence；migration 與跨 target acceptance 待完成 |
 | P3/P4/P5 | **尚未實作** | 仍是 roadmap |
 
 ## 產品北極星

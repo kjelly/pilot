@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/spf13/cobra"
 
 	"github.com/anomalyco/pilot/internal/spec"
@@ -30,6 +32,10 @@ var (
 	verifyDir        string
 	verifyProbe      string
 	verifyProbeExp   string
+	verifyInputs     []string
+	verifyInputsFile string
+	verifyStage      string
+	verifyComponents []string
 )
 
 var verifyCmd = &cobra.Command{
@@ -68,6 +74,10 @@ func init() {
 	verifyCmd.Flags().StringVar(&verifyDir, "dir", "", "verify every *.md under this directory in one shot; prints a rollup table at the end. Mutually exclusive with positional spec.md.")
 	verifyCmd.Flags().StringVar(&verifyProbe, "probe", "", "author aid: run a SINGLE command through the exact verify pipeline (same module/become/ad-hoc as a spec row) and print rc + raw stdout + cleaned stdout + matcher verdict. Writes no report/store. Combine with --probe-expected to test a match.")
 	verifyCmd.Flags().StringVar(&verifyProbeExp, "probe-expected", "", "expected value to test the --probe command against (same grammar as a spec Expected cell: int=rc, ~=contains, ^=regex).")
+	verifyCmd.Flags().StringArrayVar(&verifyInputs, "input", nil, "non-secret Spec v2 input as name=value; repeatable")
+	verifyCmd.Flags().StringVar(&verifyInputsFile, "inputs-file", "", "YAML map supplying non-secret Spec v2 inputs")
+	verifyCmd.Flags().StringVar(&verifyStage, "stage", "", "Spec v2 applicability stage: sandbox, staging, or prod (default: PILOT_STAGE or sandbox)")
+	verifyCmd.Flags().StringArrayVar(&verifyComponents, "selected-component", nil, "component selected in the current plan for Spec v2 applicability; repeatable")
 	rootCmd.AddCommand(verifyCmd)
 }
 
@@ -123,6 +133,14 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	if findings := spec.Lint(parsed); spec.HasErrors(findings) {
 		return fmt.Errorf("spec has errors; fix them before verify")
 	}
+	inputs, err := resolveVerifyInputs(parsed)
+	if err != nil {
+		return err
+	}
+	components, err := resolveVerifyComponents(parsed)
+	if err != nil {
+		return err
+	}
 
 	ctx := context.Background()
 	st, err := openSpecStore()
@@ -145,12 +163,26 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 			_ = writer.Finish(context.Background(), store.RunFinished{Outcome: "failure", ExitCode: 1})
 		}
 	}()
+	stage := verifyStage
+	if stage == "" {
+		stage = os.Getenv("PILOT_STAGE")
+	}
+	if stage == "" {
+		stage = "sandbox"
+	}
+	if stage != "sandbox" && stage != "staging" && stage != "prod" {
+		return fmt.Errorf("--stage must be sandbox, staging, or prod")
+	}
 	tool := &tools.VerifySpecTool{
-		Inventory:      verifyInventory,
-		Limit:          verifyLimit,
-		LocalOnly:      verifyLocal,
-		Host:           verifyHost,
-		EvidenceWriter: writer,
+		Inventory:          verifyInventory,
+		Limit:              verifyLimit,
+		LocalOnly:          verifyLocal,
+		Host:               verifyHost,
+		EvidenceWriter:     writer,
+		Inputs:             inputs.Overrides,
+		EnvironmentInputs:  inputs.Environment,
+		Stage:              stage,
+		SelectedComponents: components,
 	}
 	res, err := tool.Execute(ctx, mustJSONVerify(map[string]any{
 		"spec_path":   specPath,
@@ -203,12 +235,12 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 
 	// Flip spec_checkpoints.
 	for _, vr := range rows {
+		if vr.Status == "skip" || vr.Status == "not_applicable" {
+			continue
+		}
 		stMap := "verified-fail"
 		if vr.Status == "pass" {
 			stMap = "verified-pass"
-		}
-		if vr.Status == "skip" {
-			continue
 		}
 		cp := &store.Checkpoint{
 			SpecPath:     relOrAbs(specPath),
@@ -230,6 +262,8 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 			fail++
 		case "skip":
 			skip++
+		case "not_applicable":
+			skip++
 		}
 	}
 	verdict := "PASS"
@@ -249,6 +283,83 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	}
 	finalized = true
 	return nil
+}
+
+type verifyInputLayers struct {
+	Overrides   map[string]string
+	Environment map[string]string
+}
+
+func resolveVerifyInputs(parsed *spec.Spec) (verifyInputLayers, error) {
+	layers := verifyInputLayers{Overrides: make(map[string]string), Environment: make(map[string]string)}
+	if verifyInputsFile != "" {
+		raw, err := os.ReadFile(verifyInputsFile)
+		if err != nil {
+			return verifyInputLayers{}, fmt.Errorf("read --inputs-file: %w", err)
+		}
+		if err := yaml.Unmarshal(raw, &layers.Overrides); err != nil {
+			return verifyInputLayers{}, fmt.Errorf("parse --inputs-file: %w", err)
+		}
+	}
+	declared := make(map[string]spec.Input, len(parsed.Inputs))
+	for _, input := range parsed.Inputs {
+		declared[input.Name] = input
+		envName := "PILOT_INPUT_" + inputEnvSuffix(input.Name)
+		if value, ok := os.LookupEnv(envName); ok {
+			layers.Environment[input.Name] = value
+		}
+	}
+	for _, raw := range verifyInputs {
+		name, value, ok := strings.Cut(raw, "=")
+		if !ok || name == "" {
+			return verifyInputLayers{}, fmt.Errorf("--input must be name=value")
+		}
+		layers.Overrides[name] = value
+	}
+	for _, values := range []map[string]string{layers.Overrides, layers.Environment} {
+		for name := range values {
+			input, ok := declared[name]
+			if !ok {
+				return verifyInputLayers{}, fmt.Errorf("input %q is not declared by this spec", name)
+			}
+			if input.SecretRef != nil {
+				return verifyInputLayers{}, fmt.Errorf("secret input %q cannot be supplied through CLI, file, or environment", name)
+			}
+		}
+	}
+	return layers, nil
+}
+
+func resolveVerifyComponents(parsed *spec.Spec) (map[string]bool, error) {
+	if parsed.SchemaVersion != 2 {
+		if len(verifyComponents) > 0 {
+			return nil, fmt.Errorf("--selected-component requires Spec v2")
+		}
+		return nil, nil
+	}
+	selected := make(map[string]bool, len(parsed.Components))
+	for _, component := range parsed.Components {
+		selected[component] = false
+	}
+	for _, component := range verifyComponents {
+		if _, ok := selected[component]; !ok {
+			return nil, fmt.Errorf("selected component %q is not declared by this spec", component)
+		}
+		selected[component] = true
+	}
+	return selected, nil
+}
+
+func inputEnvSuffix(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func stemForVerify(path string) string {
@@ -306,11 +417,12 @@ func renderVerifyReport(s *spec.Spec, rows []tools.VerifyRow) string {
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# Verification Report — %s\n\n", s.Title)
+	fmt.Fprintf(&sb, "- schema:    v%d\n", s.SchemaVersion)
 	fmt.Fprintf(&sb, "- generated: %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(&sb, "- spec:      %s\n", s.Path)
 	fmt.Fprintf(&sb, "- total:     %d  pass: %d  fail: %d  skip: %d\n", len(rows), pass, fail, skip)
 	fmt.Fprintf(&sb, "- verdict:   **%s**\n\n", verdict)
-	fmt.Fprintf(&sb, "| ID | Status | Detail |\n|----|--------|--------|\n")
+	fmt.Fprintf(&sb, "| ID | Host | Status | Probe status | Detail |\n|----|------|--------|--------------|--------|\n")
 	// Failures first (matches the historical render-report.py layout).
 	var fails []tools.VerifyRow
 	var rest []tools.VerifyRow
@@ -322,12 +434,19 @@ func renderVerifyReport(s *spec.Spec, rows []tools.VerifyRow) string {
 		}
 	}
 	for _, r := range fails {
-		fmt.Fprintf(&sb, "| %s | %s | %s |\n", r.ID, r.Status, r.Detail)
+		fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s |\n", r.ID, reportHost(r.Host), r.Status, r.ProbeStatus, r.Detail)
 	}
 	for _, r := range rest {
-		fmt.Fprintf(&sb, "| %s | %s | %s |\n", r.ID, r.Status, r.Detail)
+		fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s |\n", r.ID, reportHost(r.Host), r.Status, r.ProbeStatus, r.Detail)
 	}
 	return sb.String()
+}
+
+func reportHost(host string) string {
+	if host == "" {
+		return "local"
+	}
+	return host
 }
 
 // mustJSONVerify is a tiny local helper that JSON-encodes v. We use

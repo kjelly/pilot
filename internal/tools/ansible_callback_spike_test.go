@@ -109,8 +109,8 @@ func TestCallbackRunnerErrorResults_InvocationTimeoutIsNotPerHostTimeout(t *test
 	}
 }
 
-func TestNormalizeCallbackText_RemovesExactlyOneTrailingNewline(t *testing.T) {
-	if got := normalizeCallbackText("line\r\n\r\n"); got != "line\n" {
-		t.Fatalf("normalizeCallbackText() = %q, want %q", got, "line\n")
+func TestNormalizeCallbackText_DefersTrailingNewlinePolicyToSchema(t *testing.T) {
+	if got := normalizeCallbackText("line\r\n\r\n"); got != "line\n\n" {
+		t.Fatalf("normalizeCallbackText() = %q, want %q", got, "line\n\n")
 	}
 }

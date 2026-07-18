@@ -2,6 +2,7 @@ package spec
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Row is one checklist entry from a spec.
@@ -18,18 +20,38 @@ type Row struct {
 	Check    string // human description
 	Expected string // machine-comparable expected value
 	Command  string // one-line shell command, executed on target host
+	// Expect is the normalized typed matcher. V1 rows compile Expected into it;
+	// v2 rows provide it directly and leave Expected as a display rendering.
+	Expect      Expect
+	Timeout     time.Duration
+	Scope       string
+	Become      *bool
+	Action      *Action
+	AppliesWhen *Applicability
+	Tags        []string
+	VerifyOnly  bool
+	NeedsReview []string
 	// line is the 1-based source line (used for diagnostics).
 	Line int
 }
 
 // Spec is the parsed content of one verification markdown file.
 type Spec struct {
-	Path       string // absolute path on disk
-	Title      string // "# Verification Spec — <title>"
-	Version    string // `> 版本：vX.Y`
-	Alignment  string // `> 對齊規範：...`
-	Maintainer string
-	Rows       []Row
+	SchemaVersion   int
+	Path            string // absolute path on disk
+	Title           string // "# Verification Spec — <title>"
+	Version         string // `> 版本：vX.Y`
+	Alignment       string // `> 對齊規範：...`
+	Maintainer      string
+	MinPilotVersion string
+	Defaults        Defaults
+	Inputs          []Input
+	Components      []string
+	Roles           []string
+	HostScope       string
+	Platforms       []Platform
+	EvidencePolicy  EvidencePolicy
+	Rows            []Row
 	// Hosts are parsed from the optional `## 1. Targets` markdown
 	// table (or any H2 whose body is a Hosts table). Used by
 	// `Spec.GenerateInventory` to emit an ansible inventory
@@ -42,12 +64,11 @@ type Spec struct {
 
 // Parse reads a markdown spec file and returns a Spec.
 func Parse(path string) (*Spec, error) {
-	f, err := os.Open(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("spec: open %s: %w", path, err)
 	}
-	defer f.Close()
-	s, err := ParseReader(f)
+	s, err := parseSpecBytes(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -59,9 +80,24 @@ func Parse(path string) (*Spec, error) {
 // ParseReader parses a spec from any io.Reader. Used by tests and
 // when reading specs from stdin.
 func ParseReader(r io.Reader) (*Spec, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("spec: read: %w", err)
+	}
+	return parseSpecBytes(raw)
+}
+
+func parseSpecBytes(raw []byte) (*Spec, error) {
+	if bytes.HasPrefix(raw, []byte("---\n")) || bytes.HasPrefix(raw, []byte("---\r\n")) {
+		return parseV2(raw)
+	}
+	return parseV1Reader(bytes.NewReader(raw))
+}
+
+func parseV1Reader(r io.Reader) (*Spec, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	s := &Spec{}
+	s := &Spec{SchemaVersion: 1}
 	state := stateNormal
 	checklistHeaders := []string{}
 	targetsBuf := []string{}
@@ -153,6 +189,11 @@ func ParseReader(r io.Reader) (*Spec, error) {
 				Command:  stripBackticks(cmd),
 				Line:     lineNo,
 			}
+			matcher, err := CompileV1Expected(row.Expected)
+			if err != nil {
+				return nil, fmt.Errorf("spec: row %s expected: %w", row.ID, err)
+			}
+			row.Expect = matcher
 			s.Rows = append(s.Rows, row)
 		}
 	}

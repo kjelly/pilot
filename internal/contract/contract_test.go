@@ -140,7 +140,7 @@ func TestLoaderRequiresV2SpecsForAutoDeploy(t *testing.T) {
 		t.Fatalf("LoadFile error = %v, want v2 eligibility rejection", err)
 	}
 
-	v2 := "---\nschemaVersion: 2\n---\n# Verification Spec — v2\n"
+	v2 := "---\nschemaVersion: 2\ncompatibility: {minPilotVersion: \"0.9\"}\nintent: {summary: v2, source: test, maintainer: sre}\ntargets: {roles: [test]}\ninputs: []\ntraceability: {components: [test]}\ndefaults: {become: false, action: {mode: readOnly}}\n---\n# Verification Spec — v2\n\n## Checks\n```yaml\n- {id: C1, category: test, check: test, probe: 'true', expect: {exitCode: 0}}\n```\n"
 	if err := os.WriteFile(filepath.Join(root, "spec.md"), []byte(v2), 0o600); err != nil {
 		t.Fatal(err)
 	}

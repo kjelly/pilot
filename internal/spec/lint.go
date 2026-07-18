@@ -88,6 +88,11 @@ func Lint(s *Spec) []Finding {
 				Message: "command is empty"})
 		}
 
+		if s.SchemaVersion == 2 {
+			out = append(out, v2RowLint(s, r)...)
+			continue
+		}
+
 		// Matcher-semantics warnings — the three traps that pass lint but
 		// misbehave under `pilot verify`'s ansible ad-hoc path. All are
 		// SeverityWarn (guidance, non-blocking).
@@ -102,6 +107,93 @@ func Lint(s *Spec) []Finding {
 	})
 	return out
 }
+
+func v2RowLint(s *Spec, r Row) []Finding {
+	var out []Finding
+	if strings.Contains(r.Command, "{{") {
+		out = append(out, Finding{Severity: SeverityError, Line: r.Line, ID: r.ID, Message: "v2 probe must not contain Jinja template syntax"})
+	}
+	if r.Action != nil && r.Action.Mode == "readOnly" && obviousMutation(r.Command) {
+		out = append(out, Finding{Severity: SeverityError, Line: r.Line, ID: r.ID, Message: "readOnly action has an obvious mutation command; declare isolatedMutation with cleanup or move it to apply/fixture"})
+	}
+	if len(r.NeedsReview) > 0 {
+		out = append(out, Finding{Severity: SeverityError, Line: r.Line, ID: r.ID, Message: "v2 check has unresolved needsReview findings"})
+	}
+	if r.Expect.Stdout != nil && r.Expect.Stdout.Contains != nil && len(*r.Expect.Stdout.Contains) < 3 {
+		out = append(out, Finding{Severity: SeverityWarn, Line: r.Line, ID: r.ID, Message: "v2 stdout.contains shorter than three characters is weak"})
+	}
+	if r.Action != nil && r.Action.Mode == "readOnly" && looksLikeMutation(r.Command) {
+		out = append(out, Finding{Severity: SeverityError, Line: r.Line, ID: r.ID, Message: "readOnly action uses a known mutation pattern"})
+	}
+	for _, input := range s.Inputs {
+		if !input.Required && probeReferencesInput(r.Command, input.Name) && !applicabilityReferencesInput(r.AppliesWhen, input.Name) {
+			out = append(out, Finding{Severity: SeverityError, Line: r.Line, ID: r.ID, Message: fmt.Sprintf("optional input %q is used by probe without appliesWhen", input.Name)})
+		}
+		if input.SecretRef != nil && (r.Expect.Stdout != nil || r.Expect.Stderr != nil) {
+			out = append(out, Finding{Severity: SeverityError, Line: r.Line, ID: r.ID, Message: "secret-bearing spec must not use stdout/stderr content matcher"})
+			break
+		}
+	}
+	return out
+}
+
+var v2MutationPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(^|[;&|]\s*|\s)(rm|mv|cp|install|chmod|chown|useradd|userdel|groupadd|groupdel|mkdir|touch|truncate|tee)\s`),
+	regexp.MustCompile(`(?i)\bsystemctl\s+(start|stop|restart|reload|enable|disable|mask|unmask|daemon-reload)\b`),
+	regexp.MustCompile(`(?i)\b(apt|apt-get|dnf|yum|apk)\s+(install|remove|purge|upgrade|update)\b`),
+	regexp.MustCompile(`(?i)\bcurl\b[^\n]*(--request|-X)\s*(POST|PUT|PATCH|DELETE)\b`),
+}
+
+func looksLikeMutation(command string) bool {
+	for _, pattern := range v2MutationPatterns {
+		if pattern.MatchString(command) {
+			return true
+		}
+	}
+	safeRedirectsRemoved := strings.NewReplacer(
+		">/dev/null", "",
+		"> /dev/null", "",
+		"2>&1", "",
+		"1>&2", "",
+	).Replace(command)
+	return regexp.MustCompile(`(^|\s)>{1,2}\s*\S`).MatchString(safeRedirectsRemoved)
+}
+
+func probeReferencesInput(command, name string) bool {
+	return strings.Contains(command, "PILOT_VAR_"+inputNameSuffix(name))
+}
+
+func inputNameSuffix(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+func applicabilityReferencesInput(applicability *Applicability, name string) bool {
+	if applicability == nil {
+		return false
+	}
+	conditions := applicability.All
+	if applicability.Any != nil {
+		conditions = applicability.Any
+	}
+	for _, condition := range conditions {
+		if condition.Input != nil && condition.Input.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+var obviousMutationRe = regexp.MustCompile(`(?i)(\bcurl\b[^\n]*(?:-X\s*(POST|PUT|PATCH|DELETE)|--request\s*(POST|PUT|PATCH|DELETE))|\b(apt|apt-get|dnf|yum)\b[^\n]*(install|remove|upgrade)|\bsystemctl\b[^\n]*(start|stop|restart|enable|disable)|(^|\s)(>|>>)\s*[^&])`)
+
+func obviousMutation(command string) bool { return obviousMutationRe.MatchString(command) }
 
 // HasErrors returns true when at least one Finding is SeverityError.
 func HasErrors(fs []Finding) bool {
