@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -12,9 +13,13 @@ import (
 )
 
 var (
-	runsLimit     int
-	runsHost      string
-	runsComponent string
+	runsLimit        int
+	runsHost         string
+	runsComponent    string
+	runsBefore       string
+	runsOutput       string
+	runsArchiveID    string
+	runsConfirmPrune bool
 )
 
 var runsCmd = &cobra.Command{Use: "runs", Short: "Query append-only delivery evidence"}
@@ -24,6 +29,8 @@ var runsLastSuccessCmd = &cobra.Command{Use: "last-success", Short: "Show a host
 var runsPendingSpecCmd = &cobra.Command{Use: "pending-spec <spec-path>", Short: "List recorded hosts not passing a spec", Args: cobra.ExactArgs(1), RunE: runRunsPendingSpec}
 var runsDiffCmd = &cobra.Command{Use: "diff <run-a> <run-b>", Short: "Diff host-by-row evidence between two runs", Args: cobra.ExactArgs(2), RunE: runRunsDiff}
 var runsAffectedCmd = &cobra.Command{Use: "affected", Short: "List recorded runs for a component", Args: cobra.NoArgs, RunE: runRunsAffected}
+var runsArchiveCmd = &cobra.Command{Use: "archive", Short: "Archive finished evidence before a cutoff without deleting it", Args: cobra.NoArgs, RunE: runRunsArchive}
+var runsPruneCmd = &cobra.Command{Use: "prune", Short: "Prune only a hash-verified completed archive", Args: cobra.NoArgs, RunE: runRunsPrune}
 
 func init() {
 	runsListCmd.Flags().IntVar(&runsLimit, "limit", 50, "maximum runs to display")
@@ -32,8 +39,53 @@ func init() {
 	runsLastSuccessCmd.Flags().StringVar(&runsHost, "host", "", "host to query (required)")
 	runsAffectedCmd.Flags().StringVar(&runsComponent, "component", "", "contract component to query (required)")
 	runsAffectedCmd.Flags().IntVar(&runsLimit, "limit", 50, "maximum runs to display")
-	runsCmd.AddCommand(runsListCmd, runsShowCmd, runsLastSuccessCmd, runsPendingSpecCmd, runsDiffCmd, runsAffectedCmd)
+	runsArchiveCmd.Flags().StringVar(&runsBefore, "before", "", "RFC3339 cutoff; only finished runs strictly before it are archived")
+	runsArchiveCmd.Flags().StringVar(&runsOutput, "output", "", "new archive output path (must not already exist)")
+	runsPruneCmd.Flags().StringVar(&runsArchiveID, "archive", "", "archive id returned by runs archive")
+	runsPruneCmd.Flags().BoolVar(&runsConfirmPrune, "confirm-prune", false, "required explicit authorization for irreversible local retention pruning")
+	runsCmd.AddCommand(runsListCmd, runsShowCmd, runsLastSuccessCmd, runsPendingSpecCmd, runsDiffCmd, runsAffectedCmd, runsArchiveCmd, runsPruneCmd)
 	rootCmd.AddCommand(runsCmd)
+}
+
+func runRunsArchive(cmd *cobra.Command, _ []string) error {
+	if runsBefore == "" || runsOutput == "" {
+		return fmt.Errorf("--before and --output are required")
+	}
+	before, err := time.Parse(time.RFC3339, runsBefore)
+	if err != nil {
+		return fmt.Errorf("parse --before: %w", err)
+	}
+	s, err := openSpecStore()
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	archive, err := s.ArchiveEvidenceBefore(cmd.Context(), before, runsOutput)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "archive_id: %s\npath: %s\nsha256: %s\nruns: %d\n", archive.ArchiveID, archive.Path, archive.SHA256, len(archive.RunIDs))
+	return nil
+}
+
+func runRunsPrune(cmd *cobra.Command, _ []string) error {
+	if runsArchiveID == "" {
+		return fmt.Errorf("--archive is required")
+	}
+	if !runsConfirmPrune {
+		return fmt.Errorf("refusing prune without --confirm-prune")
+	}
+	s, err := openSpecStore()
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	count, err := s.PruneEvidenceArchive(cmd.Context(), runsArchiveID)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "pruned_runs: %d\narchive_id: %s\n", count, runsArchiveID)
+	return nil
 }
 
 func runRunsList(cmd *cobra.Command, _ []string) error {
