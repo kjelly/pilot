@@ -78,7 +78,7 @@ export KEYCLOAK_ISSUER=https://idp.infra.internal/realms/master
 
 ## 6. Playbook 對應
 
-對應產生的 **verify** playbook：`playbooks/verify/keycloak.yml`（spec generator）
+對應的 verify playbook（`playbooks/verify/keycloak.yml`）**已於 2026-07-17 棄用**（僅存檔參考，見該目錄 README.md）；驗收直接 `pilot verify` 吃本 spec 執行。
 
 對應手寫的 **apply** playbook：`playbooks/apply/keycloak-apply.yml`
 
@@ -103,9 +103,8 @@ export KEYCLOAK_ISSUER=https://idp.infra.internal/realms/master
 go run ./cmd/pilot spec docs/verification/keycloak.md --lint
 # spec Verification Spec — keycloak (Keycloak server, identity provider): 3 rows, 0 findings (0 errors)
 
-# 1. Generate verify playbook
-go run ./cmd/pilot spec docs/verification/keycloak.md \
-    --generate playbooks/verify/keycloak.yml
+# 1. （此步驟已棄用 2026-07-17）不再產生 playbooks/verify/keycloak.yml——
+#    驗收由後面的 `pilot verify`/`vm-target verify` 直接吃本 spec 執行
 
 # 2. 套前先看 keycloak-db 已經 PASS（Keycloak 啟動需要 DB）
 go run ./cmd/pilot vm-target verify --name core \

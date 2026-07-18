@@ -18,7 +18,6 @@
 #
 # 選用環境變數（有預設值）：
 #   PB_PLAYBOOK   — playbook 路徑（預設從 spec 推導）
-#   PB_VERIFY     — verify 腳本路徑（預設從 spec 推導）
 #   PB_INVENTORY  — inventory 路徑（預設 inventory/hosts）
 #   PB_RUNS       — idempotent 連跑次數（預設 3）
 #   PB_VERIF_ROOT — 報告輸出目錄（預設 .verification/）
@@ -31,7 +30,6 @@ shift || true
 
 PB_SPEC="${PB_SPEC:-}"
 PB_PLAYBOOK="${PB_PLAYBOOK:-}"
-PB_VERIFY="${PB_VERIFY:-}"
 PB_INVENTORY="${PB_INVENTORY:-inventory/hosts}"
 PB_RUNS="${PB_RUNS:-3}"
 PB_VERIF_ROOT="${PB_VERIF_ROOT:-.verification}"
@@ -72,25 +70,13 @@ default_playbook() {
   echo "playbooks/${host}.yml"
 }
 
-# 推導預設 verify 腳本
-default_verify() {
-  local host
-  host=$(host_tag_from_spec)
-  echo "scripts/verify-${host}.sh"
-}
-
 resolve_paths() {
   require_spec
   PB_PLAYBOOK="${PB_PLAYBOOK:-$(default_playbook)}"
-  PB_VERIFY="${PB_VERIFY:-$(default_verify)}"
   HOST_TAG="$(host_tag_from_spec)"
-  TS="$(date +%Y%m%d-%H%M%S)"
-  REPORT_MD="${PB_VERIF_ROOT}/${HOST_TAG}-${TS}.md"
-  REPORT_NDJSON="${PB_VERIF_ROOT}/${HOST_TAG}-${TS}.ndjson"
 
   log "Spec:        $PB_SPEC"
   log "Playbook:    $PB_PLAYBOOK"
-  log "Verify:      $PB_VERIFY"
   log "Inventory:   $PB_INVENTORY"
   log "Report dir:  $PB_VERIF_ROOT/"
   log "Host tag:    $HOST_TAG"
@@ -101,10 +87,6 @@ check_paths() {
   local missing=0
   if [ ! -f "$PB_PLAYBOOK" ]; then
     warn "playbook 不存在：$PB_PLAYBOOK（之後的 apply 會 fail）"
-    missing=1
-  fi
-  if [ ! -f "$PB_VERIFY" ]; then
-    warn "verify script 不存在：$PB_VERIFY（之後的 verify 會 fail）"
     missing=1
   fi
   return $missing
@@ -143,13 +125,10 @@ l4_apply() {
 l5_verify() {
   banner "L5 verify"
   ensure_verif_root
-  bash "$PB_VERIFY" > "$REPORT_NDJSON"
-  python3 scripts/render-report.py < "$REPORT_NDJSON" > "$REPORT_MD"
-  cat "$REPORT_MD"
-  if grep -q 'verdict: \*\*FAIL\*\*' "$REPORT_MD"; then
-    err "Verify report verdict=FAIL"
-    return 1
-  fi
+  # pilot verify 逐列比對 Expected，並自寫 <stem>-<UTC-ts>.{ndjson,md} 到
+  # --report-dir（命名與 L7 baseline diff 的 glob 相容）。舊的
+  # scripts/verify-<host>.sh + render-report.py 管線已於 2026-07-17 棄用。
+  go run ./cmd/pilot verify "$PB_SPEC" -i "$PB_INVENTORY" --report-dir "$PB_VERIF_ROOT"
 }
 
 l6_idempotent() {
@@ -198,7 +177,7 @@ cmd_iter() {
   l5_verify
   l6_idempotent
   l7_baseline_diff
-  log "全部完成。最新報告：$REPORT_MD"
+  log "全部完成。最新報告見 ${PB_VERIF_ROOT}/${HOST_TAG}-*.md"
 }
 
 cmd_verify() {

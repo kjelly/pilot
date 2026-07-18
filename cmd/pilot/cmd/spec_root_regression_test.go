@@ -56,13 +56,10 @@ func TestPilotSpec_RootFlag(t *testing.T) {
 	}
 
 	// Save/restore the flag state across the sub-calls.
-	savedRoot, savedGen, savedApply, savedLint, savedLoc, savedTo, savedFrom := specRoot, specGenerateOut, specApply, specLintOnly, verifyRoot, specToInv, specFromSSH
+	savedRoot, savedGen, savedLint, savedLoc := specRoot, specGenerateOut, specLintOnly, verifyRoot
 	defer func() {
-		specRoot, specGenerateOut, specApply, specLintOnly, verifyRoot, specToInv, specFromSSH = savedRoot, savedGen, savedApply, savedLint, savedLoc, savedTo, savedFrom
+		specRoot, specGenerateOut, specLintOnly, verifyRoot = savedRoot, savedGen, savedLint, savedLoc
 	}()
-	specApply = false
-	specFromSSH = false
-	specToInv = ""
 
 	// --- Step 1: lint with --root tmp ---
 	specRoot = tmp

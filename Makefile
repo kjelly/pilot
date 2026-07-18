@@ -1,4 +1,4 @@
-.PHONY: build test run clean vet lint help install install-callback-user install-callback-system uninstall-callback test-callback test-sandbox test-prereq test-no-llm test-cleanup
+.PHONY: build test clean vet lint help install install-callback-user install-callback-system uninstall-callback test-callback test-prereq
 
 BIN := pilot
 PKG := ./cmd/pilot
@@ -29,12 +29,6 @@ lint:          	## Run golangci-lint
 
 test-race:     	## Run tests with the race detector
 	go test -race -count=1 ./...
-
-run-demo: build	## Run the demo script
-	./scripts/demo.sh
-
-chat: build    	## Start interactive chat
-	./$(BIN) chat
 
 clean:         	## Remove build artifacts
 	rm -f $(BIN)
@@ -67,22 +61,11 @@ uninstall-callback: ## Remove installed callback plugin
 test-callback: ## Run Python callback unit tests
 	cd ansible_callback && python3 -m unittest test_pilot_diagnose.py -v
 
-test-sandbox: ## Run L1+L2+L3 sandbox smoke test (see TESTING.md)
-	./scripts/test-sandbox.sh
-
-test-no-llm: ## Run L1+L2+L3 smoke test without ollama (raw ansible only)
-	./scripts/test-sandbox.sh --no-llm
-
-test-prereq: ## Check go / docker / ansible / ollama / image availability
+test-prereq: ## Check go / docker / ansible availability
 	@command -v go >/dev/null              && echo "go OK"              || (echo "go MISSING"; exit 1)
 	@command -v docker >/dev/null          && echo "docker OK"          || (echo "docker MISSING"; exit 1)
 	@command -v ansible-playbook >/dev/null && echo "ansible OK"        || (echo "ansible MISSING"; exit 1)
 	@docker ps >/dev/null 2>&1              && echo "docker daemon OK"   || (echo "docker daemon NOT REACHABLE"; exit 1)
-	@docker images -q geerlingguy/docker-ubuntu2204-ansible:latest 2>/dev/null | grep -q . && echo "ansible image OK" || (echo "ansible image MISSING; docker pull geerlingguy/docker-ubuntu2204-ansible:latest"; exit 1)
-	@curl -sf --max-time 3 http://localhost:11434/api/tags >/dev/null && echo "ollama OK" || echo "ollama not reachable (L3 will use --no-llm)"
-
-test-cleanup: ## Remove all pilot-sandbox / pilot-dexec containers
-	./scripts/test-sandbox.sh --cleanup-only
 
 playbook-lint: ## L1 syntax (blocking) + L2 lint (advisory) over ALL playbooks — no VM needed
 	@fail=0; \
@@ -107,7 +90,7 @@ install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each
 	@echo "✓ git hooksPath set to .githooks — playbook-lint now runs on commit"
 	@echo "  bypass a single commit with: git commit --no-verify"
 
-.PHONY: help build test vet run-demo chat clean install install-callback-user install-callback-system uninstall-callback test-callback test-sandbox test-prereq test-no-llm test-cleanup playbook-lint install-hooks pb-check-spec pb-init pb-iter pb-verify pb-idempotent pb-baseline pb-report pb-lint pb-clean
+.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）
@@ -125,7 +108,6 @@ install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each
 # 變數：
 #   SPEC     — spec 檔案路徑（必填）
 #   PLAYBOOK — 覆寫預設 playbook 路徑（預設 playbooks/<host>.yml）
-#   VERIFY   — 覆寫預設 verify 腳本（預設 scripts/verify-<host>.sh）
 #   INVENTORY— inventory 路徑（預設 inventory/hosts）
 #   RUNS     — idempotent 連跑次數（預設 3）
 #   VERIF_ROOT — 報告目錄（預設 .verification）
@@ -133,12 +115,11 @@ install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each
 
 PB_SPEC ?= $(SPEC)
 PB_PLAYBOOK ?= $(PLAYBOOK)
-PB_VERIFY ?= $(VERIFY)
 PB_INVENTORY ?= $(INVENTORY)
 PB_RUNS ?= $(RUNS)
 PB_VERIF_ROOT ?= $(VERIF_ROOT)
 
-PB_ENV = PB_SPEC='$(PB_SPEC)' PB_PLAYBOOK='$(PB_PLAYBOOK)' PB_VERIFY='$(PB_VERIFY)' \
+PB_ENV = PB_SPEC='$(PB_SPEC)' PB_PLAYBOOK='$(PB_PLAYBOOK)' \
          PB_INVENTORY='$(PB_INVENTORY)' PB_RUNS='$(PB_RUNS)' PB_VERIF_ROOT='$(PB_VERIF_ROOT)'
 
 pb-check-spec: ## Verify SPEC variable is set and file exists (internal helper)

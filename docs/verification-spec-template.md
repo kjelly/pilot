@@ -159,9 +159,13 @@ Spec-driven 工作流把 **inspect 跟 mutate 分開**：
 
 | 檔 | 誰寫 | 用什麼跑 |
 |----|------|---------|
-| `docs/verification/<name>.md`（這份） | 你 | `pilot spec --lint` |
-| `playbooks/verify/<name>.yml` | **`pilot spec --generate`**（不要手寫） | `ansible-playbook … verify.yml` 或 `pilot verify` |
+| `docs/verification/<name>.md`（這份） | 你 | `pilot spec --lint` 把關；驗收直接 `pilot verify <本檔> -i <inventory>` |
 | `playbooks/apply/<name>-apply.yml` | **你手寫**，但有結構 | `ansible-playbook … apply.yml -e key=value` |
+
+> **不要**再為 spec 產生 `playbooks/verify/<name>.yml`——該目錄已於
+> 2026-07-17 棄用（generator 產物不比對 Expected、部分 pattern 會 mutate，
+> 見 `playbooks/verify/README.md`）。inspect 由 `pilot verify` 直接吃這份
+> spec 執行，單列調參用 `pilot verify --probe`。
 
 **Apply playbook 必須做的 3 件事**：
 

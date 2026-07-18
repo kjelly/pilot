@@ -119,3 +119,31 @@ func TestRunVtTopologyInventory_RequiresGroups(t *testing.T) {
 		t.Fatalf("want a no-groups error, got %v", err)
 	}
 }
+
+func TestParseTopoVerifyArgs(t *testing.T) {
+	got, err := parseTopoVerifyArgs([]string{
+		"docs/verification/freeipa-server.md=ipa_masters",
+		"docs/verification/freeipa-client.md",
+		"docs/verification/x.md=ipa_masters:ipa_replicas",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []topoVerify{
+		{spec: "docs/verification/freeipa-server.md", limit: "ipa_masters"},
+		{spec: "docs/verification/freeipa-client.md", limit: ""},
+		{spec: "docs/verification/x.md", limit: "ipa_masters:ipa_replicas"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	if _, err := parseTopoVerifyArgs([]string{"=ipa_masters"}); err == nil {
+		t.Error("empty spec path must be rejected")
+	}
+}

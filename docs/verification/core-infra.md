@@ -72,7 +72,7 @@ export KEYCLOAK_TOKEN=$(kubectl get secret keycloak-admin -o jsonpath='{.data.pa
 
 ## 6. Playbook 對應
 
-對應產生的 **verify** playbook：`playbooks/verify/core-infra.yml`（spec generator）
+對應的 verify playbook（`playbooks/verify/core-infra.yml`）**已於 2026-07-17 棄用**（僅存檔參考，見該目錄 README.md）；驗收直接 `pilot verify` 吃本 spec 執行。
 
 對應手寫的 **apply** playbook：`playbooks/apply/core-infra-apply.yml`
 

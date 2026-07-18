@@ -16,6 +16,7 @@ __pycache__/
 *.db-wal
 .crush/
 .claude/
+opencode.json
 
 # Test artifacts
 *.test

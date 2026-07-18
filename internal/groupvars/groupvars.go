@@ -53,17 +53,46 @@ func (d *Doc) Bytes() []byte {
 }
 
 // Entries returns every editable key line, in file order.
+//
+// Only top-level lines qualify — `key: value` or `# key: value` with
+// no indentation before the key (nor, for comments, after the "#").
+// Indented lines are never real flat vars: active ones are the body
+// of a block scalar like alertmanager_config's embedded YAML, and
+// commented ones are the illustrations the example files embed in
+// prose (host_vars snippets, alert-rule bodies). Offering those as
+// editable rows produced phantom duplicates like three
+// prometheus_site_label entries, and "setting" one rewrote a line of
+// documentation. A commented default is also suppressed once the same
+// key is set for real (or already offered by an earlier commented
+// line), so a key never appears twice in the editor.
 func (d *Doc) Entries() []Entry {
 	var out []Entry
+	seen := map[string]bool{}
+	activeKeys := map[string]bool{}
+	for _, line := range d.lines {
+		if m := keyLineRe.FindStringSubmatch(line); m != nil && m[1] == "" && m[2] == "" {
+			activeKeys[m[3]] = true
+		}
+	}
 	for i, line := range d.lines {
 		m := keyLineRe.FindStringSubmatch(line)
-		if m == nil {
+		if m == nil || m[1] != "" {
 			continue
 		}
+		active := m[2] == ""
+		if !active {
+			if len(m[2]) > 2 { // indented illustration inside a comment block
+				continue
+			}
+			if activeKeys[m[3]] || seen[m[3]] { // the key is already offered
+				continue
+			}
+		}
+		seen[m[3]] = true
 		out = append(out, Entry{
 			Key:         m[3],
 			Value:       unquote(m[4]),
-			Active:      m[2] == "",
+			Active:      active,
 			Description: precedingComment(d.lines, i),
 			Line:        i,
 		})

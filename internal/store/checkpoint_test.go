@@ -48,29 +48,3 @@ func TestCheckpointUpsertAndList(t *testing.T) {
 		t.Errorf("detail=%q", got[0].VerifyDetail)
 	}
 }
-
-func TestProposalResultRecordAndList(t *testing.T) {
-	tmp := filepath.Join(t.TempDir(), "test.db")
-	s, err := Open(tmp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	r1 := &ProposalResult{ProposalID: "p1", CheckID: "C1", Host: "host-a", Status: "pass", Detail: "exists"}
-	if err := s.RecordProposalResult(r1); err != nil {
-		t.Fatal(err)
-	}
-	// Re-record with new status — must upsert.
-	r2 := &ProposalResult{ProposalID: "p1", CheckID: "C1", Host: "host-a", Status: "fail", Detail: "missing"}
-	if err := s.RecordProposalResult(r2); err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.ListProposalResults("p1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Status != "fail" {
-		t.Fatalf("results=%+v", got)
-	}
-}

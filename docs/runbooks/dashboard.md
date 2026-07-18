@@ -107,17 +107,23 @@ $ go run ./cmd/pilot vm-target up --name ds-log  --ssh-user ubuntu --disk 20 --m
 ```bash
 $ for n in ds-s3 ds-tq ds-dash ds-log; do
     go run ./cmd/pilot vm-target run --name $n \
-      playbooks/apply/core-infra-provider-apply.yml \
-      -e target_group=all -e infra_role=docker
+      playbooks/apply/docker-apply.yml \
+      -e target_group=all
   done
-# 四台皆 PLAY RECAP: ok=6 changed=2 failed=0 skipped=13
+# 四台皆 PLAY RECAP: ok=5 changed=2 failed=0 skipped=2
 ```
+
+> 2026-07-17：docker preflight 改用獨立的 `playbooks/apply/docker-apply.yml`
+> （原本是 `core-infra-provider-apply.yml -e infra_role=docker`），見
+> `docs/runbooks/docker.md`。任務本身（apt install + systemd enable/start +
+> group add）不變，只是不再跟 dns/ntp 共用同一支檔案，`skipped` 數字也因此
+> 變少（少了 dns/ntp 那些恆為 false 的 `when:` 分支）。
 
 ---
 
 ## 2. `ds-s3` + `ds-tq`：給 dashboard 一個真實的 Prometheus 上游
 
-跟 `docs/runbooks/prometheus-thanos.md` §2 完全同一套 SeaweedFS 簽章模式
+跟 `docs/runbooks/metrics-alerting.md` §2 完全同一套 SeaweedFS 簽章模式
 setup（只是換一個 bucket 名避免跟舊資料混用）:
 
 ```bash

@@ -151,7 +151,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	router := newEditRouterModel(".")
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // top menu -> group_vars/ (index 1)
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // top menu -> group_vars/ (index 1)
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // file picker: "➕ 從範例建立 dns.yml" (only entry, cursor 0)
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // editor: pick the dns_forwarders entry (cursor 0)

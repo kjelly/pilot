@@ -32,8 +32,8 @@
         enabled: true
       become: true
       tags: [C5]
-    - name: "C6 — Stratum ≤ 5（本機沒被上上游設成 leaf-of-leaf）"
-      ansible.builtin.command: "timedatectl show-timesync 2>&1 \\| grep -oE 'Stratum=[0-5]'"
+    - name: "C6 — Stratum ≤ 5（本機沒被上上游設成 leaf-of-leaf；…"
+      ansible.builtin.command: "sh -c 'chronyc tracking 2>/dev/null \\| grep -oE \"Stratum[[:space:]]*:[[:space:]]*[0-5]\" \\|\\| timedatectl show-timesync 2>&1 \\| grep -oE \"Stratum=[0-5]\"'"
       changed_when: false
       tags: [C6]
     - name: "C7 — 自訂內部網域可解析（**選用**；只在設 `$DNS_…"

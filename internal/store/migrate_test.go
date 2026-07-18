@@ -82,16 +82,19 @@ CREATE TABLE proposals (
 	}
 	defer func() { _ = s.Close() }()
 
-	for _, col := range []string{"batch_id", "dry_run", "error"} {
+	// After the 2026-07-17 agent-surface retirement, the final migration
+	// DROPs the agent-loop tables the old DB carried — they must be gone,
+	// while the mainline spec_checkpoints table must exist.
+	for _, tbl := range []string{"runs", "proposals", "proposal_results", "agent_messages", "host_failure_seen", "plans", "embedding_cache"} {
 		var name string
-		err := s.db.QueryRow(`SELECT name FROM pragma_table_info('runs') WHERE name = ?`, col).Scan(&name)
-		if err != nil || name != col {
-			t.Errorf("expected column runs.%s after migration, got err=%v", col, err)
+		err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, tbl).Scan(&name)
+		if err == nil {
+			t.Errorf("expected table %s to be dropped after migration, but it exists", tbl)
 		}
 	}
 	var name string
-	if err := s.db.QueryRow(`SELECT name FROM pragma_table_info('proposals') WHERE name = 'dry_run'`).Scan(&name); err != nil || name != "dry_run" {
-		t.Errorf("expected column proposals.dry_run after migration, got err=%v", err)
+	if err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name = 'spec_checkpoints'`).Scan(&name); err != nil || name != "spec_checkpoints" {
+		t.Errorf("expected table spec_checkpoints after migration, got err=%v", err)
 	}
 
 	got, err := readUserVersion(dbPath)

@@ -15,7 +15,7 @@
 | OS / version | Ubuntu 24.04 LTS |
 | 角色 | Wazuh **single-node**（manager + indexer + dashboard，同一台主機、三個 Docker 容器）：接收 agent 送來的 FIM(syscheck)/who-data 事件、跑規則引擎產生告警、跑 CVE 弱點掃描（vulnerability-detection），選填把告警轉送至中央 SIEM(`log-server`) |
 | 套用範圍 | `/opt/pilot/wazuh-docker/`（官方 wazuh-docker 發行包 + 憑證 + `wazuh_manager.conf`）、官方 single-node compose 專案（`single-node-wazuh.manager-1`/`single-node-wazuh.indexer-1`/`single-node-wazuh.dashboard-1` 三容器與其 named volumes）、`vm.max_map_count` sysctl、`/etc/hosts`（`siem-log-server` 別名） |
-| 前置依賴 | `docs/verification/docker.md` 8/8 PASS（`docker.io` + `docker.service` + compose v2 plugin，由 `core-infra-provider-apply.yml -e infra_role=docker` 佈署） |
+| 前置依賴 | `docs/verification/docker.md` 8/8 PASS（`docker.io` + `docker.service` + compose v2 plugin，由 `playbooks/apply/docker-apply.yml` 佈署，2026-07-17 起獨立 playbook） |
 | 風險等級 | High（對外開 1514/1515 收 agent 連線、443 供 dashboard；告警規則/轉送設定錯誤會導致資安事件漏判或漏送） |
 | **資源需求（v1.0 實測踩過的雷，見 §5）** | 官方建議 1–25 agents：**4 vCPU / 8 GiB RAM / 50 GB 磁碟**。CVE feed 解壓後常駐磁碟用量 ~7–9 GB（Docker 部署下位於 `wazuh_queue` named volume 內，磁碟壓力不變）；磁碟不足會讓 `wazuh-db`/`wazuh-analysisd` 寫入失敗，**所有告警（含 FIM）都會靜默停止產生**，且不會有明顯的服務關閉徵兆（容器仍顯示 running）。本 spec 的 vm-target SOP（§7）用 60GB 磁碟、8192MB 記憶體、4 vCPU，不要沿用 `log-server`/`audit-log-forwarding`（20GB/2048MB/2vCPU）的規格 |
 
@@ -178,8 +178,8 @@ go run ./cmd/pilot vm-target up --name wazuh-manager \
 
 # 2. docker preflight（docker.io + docker.service + compose v2；docker.md 的前置依賴）
 go run ./cmd/pilot vm-target run --name wazuh-manager \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=all -e infra_role=docker
+    playbooks/apply/docker-apply.yml \
+    -e target_group=all
 
 # 3. apply（首次會拉三個官方 image ~3-4GB + indexer 初始化，playbook 內建等待）
 go run ./cmd/pilot vm-target run --name wazuh-manager \

@@ -1,6 +1,6 @@
 # Verification Spec — thanos-query (central Thanos Query + Store Gateway + Compactor)
 
-> 版本：v1.0
+> 版本：v1.1（2026-07-17：C4/C5/C9/C10 的 port 從 10902 改成 10912，見 §6）
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -60,13 +60,13 @@
 | C1  | docker        | `pilot-thanos-query` container 存在且 running                      | ~pilot-thanos-query | docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'pilot-thanos-query' | head -n1 |
 | C2  | docker        | `pilot-thanos-store` container 存在且 running                      | ~pilot-thanos-store | docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'pilot-thanos-store' | head -n1 |
 | C3  | docker        | `pilot-thanos-compact` container 存在且 running                    | ~pilot-thanos-compact | docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'pilot-thanos-compact' | head -n1 |
-| C4  | http          | Thanos Query `/-/healthy`（10902）回 200                          | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10902/-/healthy |
-| C5  | http          | Thanos Query `/-/ready`（10902）回 200                            | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10902/-/ready |
+| C4  | http          | Thanos Query `/-/healthy`（10912）回 200                          | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10912/-/healthy |
+| C5  | http          | Thanos Query `/-/ready`（10912）回 200                            | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10912/-/ready |
 | C6  | http          | Thanos Store Gateway `/-/healthy`（10904）回 200                  | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10904/-/healthy |
 | C7  | http          | Thanos Compactor `/-/healthy`（10905）回 200                      | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10905/-/healthy |
 | C8  | object-storage | Thanos Store Gateway 可讀取 object storage bucket（`thanos tools bucket ls`） | 0 | sh -c 'docker exec pilot-thanos-store thanos tools bucket ls --objstore.config-file=/etc/thanos/objstore.yml >/dev/null 2>&1' |
-| C9  | discovery     | Thanos Query 至少發現一個站台的 Thanos Sidecar（`sidecar` StoreAPI group）| 0 | sh -c 'curl -fsS http://127.0.0.1:10902/api/v1/stores | grep -q "\"sidecar\":\["' |
-| C10 | query         | 全局查詢結果帶有 `site` label（證明跨站資料真的被彙總，不是只查中心自己） | 0 | sh -c 'curl -fsS "http://127.0.0.1:10902/api/v1/query?query=up" | grep -q "\"site\""' |
+| C9  | discovery     | Thanos Query 至少發現一個站台的 Thanos Sidecar（`sidecar` StoreAPI group）| 0 | sh -c 'curl -fsS http://127.0.0.1:10912/api/v1/stores | grep -q "\"sidecar\":\["' |
+| C10 | query         | 全局查詢結果帶有 `site` label（證明跨站資料真的被彙總，不是只查中心自己） | 0 | sh -c 'curl -fsS "http://127.0.0.1:10912/api/v1/query?query=up" | grep -q "\"site\""' |
 
 > C9/C10 需要至少一個 `prometheus` 角色已經套用完成才會 pass；純中央
 > 單獨套用時這兩行預期 fail，屬正常狀態（見 §1.5、§5）。
@@ -105,3 +105,4 @@
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
 | 2026-07-06 | v1.0 | 初版 | sre |
+| 2026-07-17 | v1.1 | 修正 C4/C5/C9/C10：`thanos-query-apply.yml` 的 `thanos_query_http_port` 早已預設改成 `10912`（避開跟站台 Thanos Sidecar 的 10902 collide），本規格的 checklist command 沒跟著更新，導致這 4 條在真實環境上必定 fail（`curl` 打 10902 拿到 000/connection refused）。`docs/runbooks/metrics-alerting.md` 整併重測時發現。若套用時有覆寫 `-e thanos_query_http_port=<其他值>`，這 4 條也要跟著改 | sre |

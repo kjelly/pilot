@@ -82,8 +82,8 @@ func TestDeployCatalog_PlaybooksExistAndAreWellFormed(t *testing.T) {
 	}
 	// AGENTS.md §4.3 tracks this count; keep the two in sync deliberately
 	// rather than silently drifting.
-	if len(deployCatalog) != 20 {
-		t.Fatalf("expected 20 apply playbooks in the catalog (see AGENTS.md §4.3), got %d", len(deployCatalog))
+	if len(deployCatalog) != 21 {
+		t.Fatalf("expected 21 apply playbooks in the catalog (see AGENTS.md §4.3), got %d", len(deployCatalog))
 	}
 }
 
@@ -281,5 +281,30 @@ func TestDefaultVaultFile(t *testing.T) {
 
 	if got := defaultVaultFile(inv); got != vaultFile {
 		t.Errorf("expected %q, got %q", vaultFile, got)
+	}
+}
+
+func TestSiteAutoHostVars_DedupesByVar(t *testing.T) {
+	avs := siteAutoHostVars()
+
+	seen := make(map[string]string) // var -> group
+	for _, av := range avs {
+		if g, dup := seen[av.Var]; dup {
+			t.Errorf("var %q appears twice (groups %q and %q)", av.Var, g, av.Group)
+		}
+		seen[av.Var] = av.Group
+	}
+
+	// The site-wide flow must cover every var any catalog entry can
+	// auto-detect — a var reachable from the single-component wizard but
+	// missing here reintroduces the pre-2026-07-17 site-deploy gap.
+	for _, p := range deployCatalog {
+		for _, av := range p.AutoHostVars {
+			if g, ok := seen[av.Var]; !ok {
+				t.Errorf("catalog var %q (component %s) missing from siteAutoHostVars", av.Var, p.Key)
+			} else if g != av.Group {
+				t.Errorf("var %q resolves group %q site-wide but %q under component %s", av.Var, g, av.Group, p.Key)
+			}
+		}
 	}
 }

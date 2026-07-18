@@ -1,6 +1,6 @@
 # Verification Spec — docker (container engine)
 
-> 版本：v1.0
+> 版本：v1.2
 > 對齊規範：pilot 通用 container engine 規範（`docker.io` 提供 container runtime；`db` 跟 `keycloak` 兩個 infra role 都跑在它上面）
 > 維護者：sre
 
@@ -74,9 +74,12 @@
 
 ## 6. Playbook 對應
 
-對應產生的 **verify** playbook：`playbooks/verify/docker.yml`（spec generator）
+對應的 verify playbook（`playbooks/verify/docker.yml`）**已於 2026-07-17 棄用**（僅存檔參考，見該目錄 README.md）；驗收直接 `pilot verify` 吃本 spec 執行。
 
-對應手寫的 **apply** playbook：`playbooks/apply/core-infra-provider-apply.yml`（`infra_role=docker` 段）
+對應手寫的 **apply** playbook：`playbooks/apply/docker-apply.yml`（獨立 playbook，
+2026-07-17 從 `core-infra-provider-apply.yml` 的 `infra_role=docker` 段拆出，理由
+與同日拆 `keycloak-db` 相同——machine 級的 docker 引擎安裝跟 dns/ntp provider
+設定沒有共通的 stage/confirm 生命週期）
 
 | Spec ID | Apply task (示例)                              | 備註 |
 |---------|-----------------------------------------------|------|
@@ -94,14 +97,14 @@ ansible docker-host -i inventory-core-infra.yaml -m shell -a "id; hostname"
 
 # 2. 跑 dry-run
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=docker -e infra_role=docker \
+    playbooks/apply/docker-apply.yml \
+    -e target_group=docker \
     --check --diff
 
 # 3. 真套用
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=docker -e infra_role=docker
+    playbooks/apply/docker-apply.yml \
+    -e target_group=docker
 # PLAY RECAP: changed=4..6 failed=0
 #   - apt install docker.io docker-compose-v2
 #   - apt cache update
@@ -115,7 +118,9 @@ go run ./cmd/pilot vm-target verify --name core \
 ```
 
 > **順序很重要**：`docker` 必須在 `db` 跟 `keycloak` 之前（後兩者用 docker）。
-> 跑同一台 VM 場景（sibling-of-vm-target）：同一 IP 跑 3 個 role 就好。
+> 跑同一台 VM 場景（sibling-of-vm-target）：同一 IP 跑 3 個 role 就好，只是
+> 現在是 3 支各自獨立的 playbook（`docker-apply.yml` → `keycloak-db-apply.yml`
+> → `keycloak-apply.yml`），不再是同一支 playbook 換 `infra_role`。
 
 ## 8. 變更紀錄
 
@@ -123,3 +128,4 @@ go run ./cmd/pilot vm-target verify --name core \
 |------------|------|-------------------------------------------|--------|
 | 2026-07-01 | v1.0 | 初版（C1–C8：docker engine 端到端健康）     | sre    |
 | 2026-07-06 | v1.1 | C6 移除 docker Go template `{{.Name}}`（被 ansible ad-hoc 的 Jinja 吃掉、task FAILED rc=2，`pilot verify` 下 C6 永遠 fail——wazuh-manager v2.0 docker preflight 實測撞到），改用 `awk` 欄位比對；§2 註記 + regression test 加「Command 欄禁用 `{{`」invariant | sre    |
+| 2026-07-17 | v1.2 | Apply playbook 從 `core-infra-provider-apply.yml` 的 `infra_role=docker` 段拆成獨立的 `playbooks/apply/docker-apply.yml`；§6/§7 更新指令；spec checklist（C1–C8）本身不變 | pilot  |

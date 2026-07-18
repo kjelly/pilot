@@ -83,8 +83,8 @@
     - name: "T3 — assert hostgroup membership matches the roster"
       ansible.builtin.assert:
         that:
-          - "'freeipa-client.ipa.pilot.internal' in t3_hostgroups.results[0].stdout"
-          - "'freeipa-client-2.ipa.pilot.internal' in t3_hostgroups.results[1].stdout"
+          - "webhost_fqdn in t3_hostgroups.results[0].stdout"
+          - "dbhost_fqdn in t3_hostgroups.results[1].stdout"
         fail_msg: "hostgroup membership does not match roster: {{ t3_hostgroups.results | map(attribute='stdout') | list }}"
       tags: [fixtures, t3]
 

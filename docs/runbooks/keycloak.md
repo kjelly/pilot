@@ -48,8 +48,16 @@ ok  	github.com/anomalyco/pilot/internal/spec	0.00s
 
 ### 0.5.1 實際 end-to-end 結果（這次跑的 PLAY RECAP 截錄）
 
+> 2026-07-17：`docker` 前置依賴改用獨立的 `playbooks/apply/docker-apply.yml`
+> （原本是下面截錄的 `core-infra-provider-apply.yml -e infra_role=docker`），
+> 新指令與實跑截錄見 `docs/runbooks/docker.md`；下面 §0.5.1 保留當初拆分
+> keycloak 時（2026-07-01）的原始截錄，任務內容不變，只是今天要重跑請改用
+> `playbooks/apply/docker-apply.yml -e target_group=docker`（不再需要
+> `-e infra_role=docker`）。
+
 ```bash
-# Apply — docker role（先行依賴）
+# Apply — docker role（先行依賴；2026-07-01 截錄，playbook 已於 2026-07-17
+# 拆成 playbooks/apply/docker-apply.yml，見上方提示）
 $ go run ./cmd/pilot vm-target run --name core \
       playbooks/apply/core-infra-provider-apply.yml \
       -e target_group=docker -e infra_role=docker
@@ -104,9 +112,9 @@ verdict: **PASS**  (pass=3 fail=0 skip=0)
 依賴：`KC_DB=postgres` 跟 `KC_DB_URL=...` 從 vault 注入，
 **但從來沒人保證那台 PostgreSQL 存在**。拆分後三個角色各自獨立 apply：
 
-| infra_role / playbook | 對象 host | 前提 |
+| playbook | 對象 host | 前提 |
 |-----------------------|-----------|------|
-| `core-infra-provider-apply.yml` `-e infra_role=docker` | `docker` alias | 無 |
+| `docker-apply.yml`（2026-07-17 起獨立 playbook，原本是 `core-infra-provider-apply.yml -e infra_role=docker`） | `docker` alias | 無 |
 | `keycloak-db-apply.yml` | `keycloak-db` alias | `docker` role 已 PASS |
 | `keycloak-apply.yml` | `keycloak` alias | `docker` + `keycloak-db` 已 PASS |
 
@@ -119,19 +127,17 @@ verdict: **PASS**  (pass=3 fail=0 skip=0)
 go run ./cmd/pilot spec docs/verification/keycloak.md --lint
 # spec Verification Spec — keycloak (Keycloak server, identity provider): 3 rows, 0 findings (0 errors)
 
-# 1. Generate verify playbook
-go run ./cmd/pilot spec docs/verification/keycloak.md \
-    --generate playbooks/verify/keycloak.yml
-# ✔ generated playbook: ... (1 task, 3 rows → 2 deduped)
+# 1. （此步驟已棄用 2026-07-17）不再產生 playbooks/verify/keycloak.yml——
+#    驗收由後面的 `pilot verify`/`vm-target test` 直接吃 spec 執行
 
 # 2. 確認 VM inventory 跟 spec 對齊
 go run ./cmd/pilot vm-target show-inventory --name core | grep "^    [a-z]"
 # 預期：core / dns / ntp / keycloak / keycloak-db / db / docker 都要在
 
-# 3. Docker role（先行依賴）
+# 3. Docker role（先行依賴；2026-07-17 起獨立 playbook）
 go run ./cmd/pilot vm-target run --name core \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=docker -e infra_role=docker
+    playbooks/apply/docker-apply.yml \
+    -e target_group=docker
 
 # 4. DB role（PostgreSQL container）
 go run ./cmd/pilot vm-target run --name core \

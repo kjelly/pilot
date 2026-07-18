@@ -38,10 +38,15 @@ type autoHostVar struct {
 // drive in "single component" mode. Order matches DELIVERY.md's table.
 var deployCatalog = []deployPlaybook{
 	{
-		Key: "core-infra-provider", Label: "核心基礎服務 — DNS / NTP / Docker",
+		Key: "core-infra-provider", Label: "核心基礎服務 — DNS / NTP",
 		Playbook: "playbooks/apply/core-infra-provider-apply.yml", StageVar: "stage",
-		InfraRoles: []string{"dns", "ntp", "docker"},
-		Note:       "同一支 playbook 用 -e infra_role= 選角色；docker 角色是 keycloak/keycloak-db 的前置。",
+		InfraRoles: []string{"dns", "ntp"},
+		Note:       "同一支 playbook 用 -e infra_role= 選角色。",
+	},
+	{
+		Key: "docker", Label: "Container 引擎(Docker)",
+		Playbook: "playbooks/apply/docker-apply.yml", DefaultGroup: "docker", StageVar: "stage",
+		Note: "keycloak-db/keycloak、seaweedfs-s3、wazuh-manager、prometheus/thanos-query/alertmanager 等角色的前置，需先套用。",
 	},
 	{
 		Key: "freeipa-server", Label: "FreeIPA 身份伺服器",
@@ -61,7 +66,7 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "freeipa-server-replica", Label: "第二台 FreeIPA server(multi-master HA replica)",
 		Playbook: "playbooks/apply/freeipa-server-replica-apply.yml", DefaultGroup: "freeipa-server-replica", StageVar: "stage",
-		Note:      "v0.1 草稿、尚未實跑，見 docs/verification/freeipa-server-replica.md §0/§5。",
+		Note:      "day-2/opt-in 角色(不在 site.yml);已於三台 vm-target 全鏈路實跑過,見 docs/verification/freeipa-server-replica.md §0/§5。",
 		VaultHint: "既有 realm 的管理員密碼(ipa_admin_password)",
 	},
 	{

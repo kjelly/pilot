@@ -20,9 +20,7 @@ import (
 // VerifySpecTool replaces the standalone `scripts/spec-runner.py`.
 // It walks a parsed Spec, runs each row's `command` against the
 // inventory (via `ansible <host> -m command -a …`), and emits one
-// NDJSON line per row. Results are also written to
-// proposal_results when a ProposalID is provided (linking verify
-// output back to the spec → apply lifecycle).
+// NDJSON line per row.
 //
 // Why ansible ad-hoc instead of running commands directly?
 //
@@ -43,20 +41,16 @@ type VerifySpecTool struct {
 	// without touching ansible. Useful for spec rows that test the
 	// host that pilot itself is running on (the smoke-test case).
 	LocalOnly bool
-	// ProposalID, when non-empty, records each NDJSON result into
-	// proposal_results (joined on ProposalID + row ID) so the
-	// store can answer "did requirement C2.5.1 pass on proposal P?".
-	ProposalID string
 	// Host, when non-empty, overrides the default target for
 	// ansible ad-hoc (default: "all").
 	Host string
 }
 
-// Spec is the tool spec exposed to the LLM agent loop.
+// Spec describes the tool for its caller (`pilot verify`).
 func (t *VerifySpecTool) Spec() *Spec {
 	return &Spec{
 		Name:        "verify_spec",
-		Description: "Verify a spec by running each row's command and emitting one NDJSON object per row. Use after a `pilot spec --apply` to close the loop.",
+		Description: "Verify a spec by running each row's command and emitting one NDJSON object per row.",
 		RiskLevel:   "low",
 		Reversible:  true,
 		DryRunSafe:  true,
@@ -81,8 +75,8 @@ type verifySpecArgsStruct struct {
 }
 
 // VerifyRow is one NDJSON object emitted by VerifySpecTool.Execute.
-// Mirrors what scripts/spec-runner.py produced, so downstream
-// tooling (render-report.py, dashboards) keeps working.
+// Mirrors what the (removed 2026-07-17) scripts/spec-runner.py
+// produced, so old reports stay diffable against new ones.
 type VerifyRow struct {
 	ID       string `json:"id"`
 	Status   string `json:"status"` // pass | fail | skip
@@ -113,9 +107,7 @@ func stageVerifyEnv(invPath string) {
 }
 
 // Execute runs every row in the spec and returns the joined NDJSON
-// stream as the tool Result. It does NOT touch proposal_results —
-// callers that need that should call RecordVerifyResults separately
-// (the cmd/pilot/cmd/verify.go path does this).
+// stream as the tool Result.
 func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Result, error) {
 	var a verifySpecArgsStruct
 	if err := json.Unmarshal(args, &a); err != nil {

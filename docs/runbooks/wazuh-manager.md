@@ -67,15 +67,19 @@ go run ./cmd/pilot vm-target up --name wazuh-manager \
     --ssh-timeout 8m --boot-timeout 8m
 
 go run ./cmd/pilot vm-target run --name wazuh-manager \
-    playbooks/apply/core-infra-provider-apply.yml \
-    -e target_group=all -e infra_role=docker
-# PLAY RECAP: ok=6 changed=2 failed=0 skipped=13
+    playbooks/apply/docker-apply.yml \
+    -e target_group=all
+# PLAY RECAP: ok=5 changed=2 failed=0 skipped=2
 
 go run ./cmd/pilot vm-target verify --name wazuh-manager docs/verification/docker.md
 # verdict: **PASS**  (pass=8 fail=0 skip=0)
 ```
 
 （docker.md 的 C6 在這次 preflight 撞出一個既有 spec bug 並已修正，見 §5.3。）
+
+> 2026-07-17：docker preflight 改用獨立的 `playbooks/apply/docker-apply.yml`
+> （原本是 `core-infra-provider-apply.yml -e infra_role=docker`），見
+> `docs/runbooks/docker.md`；任務內容不變，只是不再跟 dns/ntp 共用同一支檔案。
 
 ### 2.2 首次 apply（不轉送，log server 尚未存在）
 

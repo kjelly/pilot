@@ -1,0 +1,107 @@
+---
+# Apply playbook for docs/verification/docker.md
+#
+# Single-role playbook: installs + starts the Docker engine (container
+# runtime). Split out of playbooks/apply/core-infra-provider-apply.yml
+# (which now only owns the dns/ntp provider roles) — same move already
+# made for the `db` role, see playbooks/apply/keycloak-db-apply.yml's
+# header comment.
+#
+# Docker itself has no upstream infra_role prerequisite, but it is the
+# prerequisite for every role that runs containers: keycloak-db,
+# keycloak, seaweedfs-s3, wazuh-manager, prometheus/thanos-query/
+# alertmanager (S3 backing store), restic-backup (via seaweedfs-s3).
+# Apply this one first.
+#
+# Usage (sandbox):
+#
+#   go run ./cmd/pilot vm-target run --name core \
+#       playbooks/apply/docker-apply.yml \
+#       -e target_group=docker
+#
+# Stage gating:
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND -e staging_attested_within_hours<=168
+- name: Docker engine apply
+  hosts: "{{ target_group | default('docker') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    target_group: docker
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
+          target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
+          且要跟這台機器所屬的環境 group 一致。
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - stage != 'prod'
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+
+  tasks:
+    # Spec: docs/verification/docker.md C1
+    - name: "Docker — install docker.io (Debian family)"
+      tags: [docker, docker-C1]
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+        state: present
+        update_cache: true
+      when:
+        - ansible_os_family == 'Debian'
+        - not ansible_check_mode
+
+    - name: "Docker — install docker (RHEL family)"
+      tags: [docker, docker-C1]
+      ansible.builtin.dnf:
+        name:
+          - docker
+          - docker-compose
+        state: present
+      when:
+        - ansible_os_family == 'RedHat'
+        - not ansible_check_mode
+
+    # Spec: docs/verification/docker.md C2
+    - name: "Docker — enable + start docker.service"
+      tags: [docker, docker-C2]
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+      when: not ansible_check_mode
+
+    # Spec: docs/verification/docker.md C4
+    - name: "Docker — ensure docker CLI usable by current user (group add)"
+      tags: [docker, docker-C4]
+      ansible.builtin.user:
+        name: "{{ ansible_user_id | default('root') }}"
+        groups: docker
+        append: true
+      when: not ansible_check_mode

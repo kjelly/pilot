@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -166,4 +167,8 @@ func TestLooksLikePermissionError(t *testing.T) {
 			t.Errorf("did not expect permission error for %q", s)
 		}
 	}
+}
+
+func writeFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0o644)
 }

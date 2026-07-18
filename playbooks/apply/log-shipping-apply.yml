@@ -98,6 +98,40 @@
       when: stage == 'prod'
       tags: [always]
 
+    # Composability gate: without a resolvable Loki target (no explicit
+    # -e loki_target_host and an empty dashboard group) shipping has nowhere
+    # to go — end this host cleanly instead of failing halfway through the
+    # docker tasks, mirroring audit-log-forwarding's optional
+    # siem_forward_host semantics (site.yml: 之後 dashboard 就緒、補上變數
+    # 重跑即可補齊). Found live 2026-07-18: a site-wide fresh deploy with a
+    # plain rsyslog log-server and no dashboard host died here.
+    - name: "Skip log-shipping: no Loki target (dashboard group empty and no -e loki_target_host)"
+      ansible.builtin.debug:
+        msg: >-
+          loki_target_host is unset and the dashboard group has no hosts —
+          nothing to ship to. Skipping log-shipping on
+          {{ inventory_hostname }}; rerun with -e loki_target_host=<dashboard
+          IP> (or after filling the dashboard group) to enable it.
+      when: (loki_effective_target_host | trim | length) == 0
+      tags: [always]
+
+    - name: "End host: no Loki target"
+      ansible.builtin.meta: end_host
+      when: (loki_effective_target_host | trim | length) == 0
+      tags: [always]
+
+    # Same fail-early gate as wazuh-manager-apply.yml / keycloak-db-apply.yml
+    # — Promtail runs as a container, so a host without a docker engine must
+    # fail HERE with an actionable message (apply docker-apply.yml first),
+    # not inside docker_container_info/docker_network several tasks later
+    # with a bare "Error while fetching server API version".
+    - name: "Pre-flight: docker engine is up (Promtail runs as a container; see docker-apply.yml)"
+      ansible.builtin.command: docker info
+      register: logship_docker_pre
+      changed_when: false
+      failed_when: logship_docker_pre.rc != 0 and not ansible_check_mode
+      tags: [always]
+
   tasks:
     # Read-only `docker inspect` — safe to run even when no wazuh-manager
     # container exists on this host (exists: false, container: none). It

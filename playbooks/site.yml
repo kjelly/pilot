@@ -32,6 +32,12 @@
 #  注意:FreeIPA 使用者/權限(freeipa-identity-apply.yml)是「資料驅動的 day-2
 #  維運」,需要 vault roster,刻意不放進 site.yml。單獨執行,見 DELIVERY.md。
 #
+#  注意:跨角色 host 變數(siem_forward_host、wazuh_manager_host、
+#  restic_s3_target_host、loki_target_host、thanos_s3_target_host、
+#  alertmanager_target_host、thanos_query_target_host)在 `pilot deploy` 的
+#  全站流程會自動從 inventory 偵測並問你要不要帶上(2026-07-17 起,與單一
+#  元件流程一致);手動組 ansible-playbook 指令時仍要自己 -e 提供。
+#
 #  注意:audit-log-forwarding 的 siem_forward_host、wazuh-manager 的
 #  siem_forward_host、wazuh-fim 的 wazuh_manager_host 都是選填(分別見
 #  group_vars/audit-log-forwarding.example.yml、
@@ -41,9 +47,9 @@
 #  site.yml(或單獨重跑對應的 apply playbook)即可補齊,不需要重裝任何東西。
 #
 #  注意:wazuh-manager 是 Docker 部署(官方 wazuh-docker single-node 三容器),
-#  該主機要先過 docker preflight(core-infra-provider-apply.yml
-#  -e infra_role=docker,同 keycloak-db 的前置;playbook 內建 docker info
-#  fail-early gate)。且需要較大的資源(4 vCPU/8GB RAM/50GB 磁碟起跳,CVE
+#  該主機要先過 docker preflight(playbooks/apply/docker-apply.yml,同
+#  keycloak-db 的前置;playbook 內建 docker info fail-early gate)。且需要
+#  較大的資源(4 vCPU/8GB RAM/50GB 磁碟起跳,CVE
 #  弱點掃描 feed 常駐 ~7-9GB)——磁碟不足會讓所有告警靜默停止產生且無明顯
 #  服務層級失敗徵兆(容器仍顯示 running),見 docs/runbooks/wazuh-manager.md §5。
 #
@@ -53,9 +59,11 @@
 #  (log-server 的 /var/log/siem,或 Wazuh manager 那個 docker named volume
 #  底下的真實 alerts.log)由 log-shipping-apply.yml 自己在套用當下用
 #  `docker inspect` 動態解析(siem_log_root_effective),不假設固定的
-#  compose volume 名稱。全站執行時請提供 -e loki_target_host=<dashboard
-#  IP/FQDN>，或在實際 inventory 的 log-server/wazuh-manager host/group vars
-#  中設定它。
+#  compose volume 名稱。Loki 目標的解析順序:-e loki_target_host >
+#  inventory 的 dashboard group 第一台;兩者都沒有時 log-shipping 會**乾淨
+#  跳過該 host**(2026-07-18 起,比照 siem_forward_host 的選填語意)——之後
+#  dashboard 就緒再重跑即可補齊。另外 Promtail 是容器部署,目標主機要先過
+#  docker preflight(playbook 內建 docker info fail-early gate)。
 #
 #  注意:restic-backup 的目的地(restic_s3_target_host,見
 #  group_vars/restic-backup.example.yml)跟 audit-log-forwarding/wazuh 那組
@@ -96,7 +104,8 @@
 # ── 0. 前置檢查(一律先跑)───────────────────────────────────────────────
 - import_playbook: preflight.yml
 
-# ── 1. 核心基礎服務(同一支 playbook 以 infra_role 分別套 dns / ntp)──────
+# ── 1. 核心基礎服務(core-infra-provider-apply.yml 以 infra_role 分別套
+#      dns / ntp;docker 是獨立 playbook,見下)────────────────────────────
 - import_playbook: apply/core-infra-provider-apply.yml
   vars:
     infra_role: dns
@@ -105,9 +114,7 @@
   vars:
     infra_role: ntp
   tags: [infra, ntp]
-- import_playbook: apply/core-infra-provider-apply.yml
-  vars:
-    infra_role: docker
+- import_playbook: apply/docker-apply.yml
   tags: [infra, docker]
 
 # ── 2. 身份 / AAA(FreeIPA)server 先於 client ───────────────────────────

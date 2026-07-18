@@ -54,18 +54,16 @@ func TestPilotSpec_HostsFlag(t *testing.T) {
 	}
 	outPath := filepath.Join(tmp, "apply-hosts.yml")
 
-	savedHosts, savedConn, savedGen, savedApply := specHosts, specConnection, specGenerateOut, specApply
+	savedHosts, savedConn, savedGen := specHosts, specConnection, specGenerateOut
 	defer func() {
-		specHosts, specConnection, specGenerateOut, specApply = savedHosts, savedConn, savedGen, savedApply
+		specHosts, specConnection, specGenerateOut = savedHosts, savedConn, savedGen
 	}()
 
 	specHosts = "webservers"
 	specConnection = "ssh"
 	specGenerateOut = outPath
-	specApply = false // don't actually run ansible-playbook
 
-	// Bypass openSpecStore by simply not exercising --apply; the
-	// generated playbook file is what we inspect.
+	// The generated playbook file is what we inspect.
 	if err := runSpec(nil, []string{specPath}); err != nil {
 		t.Fatalf("runSpec: %v", err)
 	}

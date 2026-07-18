@@ -66,3 +66,24 @@ func TestSpecGenerate_Pipeline(t *testing.T) {
 		}
 	}
 }
+
+// TestSpecGenerate_RejectsDeprecatedVerifyDir locks the 2026-07-17
+// deprecation of playbooks/verify/: `pilot spec --generate` must refuse to
+// write there (relative or absolute), while playbooks/generated/ stays fine.
+func TestSpecGenerate_RejectsDeprecatedVerifyDir(t *testing.T) {
+	for _, out := range []string{
+		"playbooks/verify/docker.yml",
+		"/repo/playbooks/verify/docker.yml",
+	} {
+		err := checkGenerateOutPath(out, "docs/verification/docker.md")
+		if err == nil {
+			t.Fatalf("outPath=%q: want deprecation error, got nil", out)
+		}
+		if !strings.Contains(err.Error(), "deprecated") {
+			t.Fatalf("outPath=%q: error %q does not mention deprecation", out, err)
+		}
+	}
+	if err := checkGenerateOutPath("/repo/playbooks/generated/docker.yml", "docs/verification/docker.md"); err != nil {
+		t.Fatalf("playbooks/generated must stay allowed, got: %v", err)
+	}
+}

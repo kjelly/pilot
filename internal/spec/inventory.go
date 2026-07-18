@@ -2,7 +2,6 @@ package spec
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -215,92 +214,4 @@ func (s *Spec) GenerateInventory(opts GenerateInventoryOptions) (string, error) 
 // quoteScalar to keep diffs consistent across both YAML emitters.
 func quoteInventoryScalar(s string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
-}
-
-// InventoryFromSSHConfig resolves a hostname against the user's
-// `~/.ssh/config` and produces a Host with Address/User/IdentityFile
-// fields populated. This is the bridge that lets `pilot spec`
-// fall back to the user's existing SSH setup when the spec
-// author doesn't want to repeat every machine's metadata.
-//
-// Returns (nil, nil) when the config file is missing or the host
-// isn't found — those are not errors, just signals to the caller
-// that the spec's own Targets table should be used instead.
-//
-// We deliberately keep this dependency-free (no third-party ssh
-// config parser). The subset we understand: `Host`, `Hostname`,
-// `User`, `IdentityFile`, `Port`. Everything else is ignored —
-// ansible itself will read ProxyCommand etc from ssh at runtime.
-func InventoryFromSSHConfig(hostAlias string) (*Host, error) {
-	if hostAlias == "" {
-		return nil, nil
-	}
-	path := os.Getenv("PILOT_SSH_CONFIG")
-	if path == "" {
-		path = fmt.Sprintf("%s/.ssh/config", func() string {
-			h, _ := os.UserHomeDir()
-			return h
-		}())
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil // missing config is not an error
-	}
-	return parseSSHConfigBlock(string(data), hostAlias), nil
-}
-
-func parseSSHConfigBlock(data, alias string) *Host {
-	lines := strings.Split(data, "\n")
-	inBlock := false
-	matched := false
-	h := &Host{Hostname: alias}
-	hostRe := regexp.MustCompile(`(?i)^Host\s+(.+)$`)
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		m := hostRe.FindStringSubmatch(line)
-		if m != nil {
-			// Close previous block.
-			if matched {
-				return h
-			}
-			tokens := strings.Fields(m[1])
-			for _, t := range tokens {
-				if t == alias {
-					matched = true
-					inBlock = true
-					break
-				}
-			}
-			if !matched {
-				inBlock = false
-			}
-			continue
-		}
-		if !inBlock {
-			continue
-		}
-		kv := strings.SplitN(trimmed, " ", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		key := strings.ToLower(kv[0])
-		val := strings.TrimSpace(kv[1])
-		switch key {
-		case "hostname":
-			h.Address = val
-		case "user":
-			h.User = val
-		case "identityfile":
-			h.IdentityFile = val
-		case "port":
-			h.Port = val
-		}
-	}
-	if matched {
-		return h
-	}
-	return nil
 }

@@ -1,12 +1,18 @@
 # docs/
 
-> 從這裡開始：**讀 spec 範例、用 spec template、讀現有 runbook、開發 ansible playbook**。
+> pilot 的實際工作流是 **自然語言需求 → Codex/Claude authoring spec + apply
+> playbook → pilot 確定性 lint/test/deploy/verify**。外部 coding agent 負責把
+> 需求落成 repo 內可 review 的產物；pilot runtime 不呼叫 LLM，而是用
+> `vm-target`/`docker-target`、TUI `deploy`/`edit` 與真實證據解決「如何正確
+> 交付軟體」。本目錄從這裡開始：**讀 spec 範例、用 spec template、讀現有
+> runbook、開發 ansible playbook**。
 
 ## 入口地圖
 
 | 你想做什麼 | 從這裡開始 |
 |----------|-----------|
-| 第一次接觸 pilot 的 spec-driven 工作流 | [README.md §「Spec-driven 工作流」](../README.md#-spec-driven-工作流寫需求--套用--驗證) |
+| 第一次接觸 pilot 的 coding-agent-assisted、spec-driven 工作流 | [README.md §「Spec-driven 工作流」](../README.md) |
+| 請 Codex/Claude 從需求新增功能 | 先讀 [`../AGENTS.md`](../AGENTS.md) 的 authoring model，再依序產出 spec、apply playbook、regression test 與 actual-run evidence |
 | **寫第一份 spec** | [`verification-spec-template.md`](./verification-spec-template.md)（先 copy 再改） |
 | 讀一份已有的 spec 學作者風格 | [`verification/hello-localhost.md`](./verification/hello-localhost.md)（3 row 最小）、[`verification/os-patch-sla.md`](./verification/os-patch-sla.md)（stage-aware 範例） |
 | **寫 apply playbook** | 範本在 `playbooks/apply/pam-oidc-sshd-apply.yml` 跟 `playbooks/apply/os-patch-sla-apply.yml`（必含 `-e` vars + `block/rescue` + stage gate） |
@@ -21,18 +27,20 @@
 | **Wazuh 中央伺服器（FIM/who-data 告警引擎 + CVE 弱點掃描；Docker 部署）** | [`runbooks/wazuh-manager.md`](./runbooks/wazuh-manager.md) |
 | **Wazuh agent：檔案完整性監控(FIM) + auditd who-data** | [`runbooks/wazuh-fim.md`](./runbooks/wazuh-fim.md) |
 | **S3 相容物件儲存（SeaweedFS）** | [`runbooks/seaweedfs-s3.md`](./runbooks/seaweedfs-s3.md) |
-| **跨主機通用備份到 S3（restic）** | [`runbooks/restic-backup.md`](./runbooks/restic-backup.md) |
-| **重跑 restic 災難復原(DR)演練（以 FreeIPA 為例）** | [`runbooks/restic-backup-dr-drill-test-plan.md`](./runbooks/restic-backup-dr-drill-test-plan.md) |
-| **跨機房指標彙總（每站 Prometheus + Thanos 全局查詢）** | [`runbooks/prometheus-thanos.md`](./runbooks/prometheus-thanos.md) |
+| **跨主機通用備份到 S3（restic），含 FreeIPA 災難復原(DR)演練** | [`runbooks/restic-backup.md`](./runbooks/restic-backup.md) |
+| **跨機房指標彙總 + 中央告警（Prometheus + Thanos 全局查詢 + Alertmanager）** | [`runbooks/metrics-alerting.md`](./runbooks/metrics-alerting.md) |
 | **觀測畫面（Grafana + Loki 看 Prometheus/log-server 資料）** | [`runbooks/dashboard.md`](./runbooks/dashboard.md) |
 | 開發 ansible playbook 的心法 | [`ansible-playbook-development.md`](./ansible-playbook-development.md) |
 | 跑測試 | [`../TESTING.md`](../TESTING.md) |
 
 ## 怎麼用各目錄
 
-### `verification/` — Spec 範本（給人讀 + 給 LLM 讀）
+### `verification/` — Spec 範本（coding agent 起草 + reviewer 確認）
 
-每檔是**一條功能需求的合約**。寫 spec 詳 `verification-spec-template.md`。
+每檔是**一條功能需求的 acceptance contract**。Codex/Claude 可以依自然語言
+需求直接起草，但 spec 必須先被 lint、review 並確認驗收行為，之後才依它撰寫
+apply playbook；不准為了讓既有實作過關而靜默放寬 Expected。格式詳
+`verification-spec-template.md`。
 驗證：「apply 完之後主機有沒有符合 spec？用 `pilot verify` 跑」。
 
 - `hello-localhost.md` — 3 row smoke test
@@ -56,11 +64,14 @@ SQLite 寫入、恢復 SOP 都進來。**讀 runbook 比看範例更有教學價
   `os-patch-sla.md`, `disable-root-ssh.md`）
 - apply playbook：`playbooks/apply/<name>-apply.yml`（**必加 `-apply` 後綴**跟
   inspect playbooks 區分）
-- inspect playbook：`playbooks/verify/<name>.yml`（generator 產的，不要手寫）
+- inspect：不再有獨立 playbook——`pilot verify docs/verification/<name>.md` 直接吃 spec 執行
+  （`playbooks/verify/` 已於 2026-07-17 棄用，見該目錄 README.md）
 - runbook：`docs/runbooks/<name>.md`（每份 spec 對應一份 runbook 是合理 expectation）
 
 ## 跟 `.gitignore` 的協作
 
 `inventory*.yaml`、`.verification/`、`playbooks/generated/`、SQLite DB
-都不進版控。本地跑產物、spec 與 apply 是 source of truth 入版控。
+都不進版控。本地跑產物不進版控；經 review 的 spec、apply playbook 與
+regression test 才是可追溯的 repo 產物。`playbooks/generated/` 只是診斷輸出，
+不是正式 apply 來源。
 詳見 [`../TESTING.md`](../TESTING.md) 的「Repository layout & version control policy」。

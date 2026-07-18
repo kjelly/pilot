@@ -58,7 +58,7 @@
 
 對應的 **apply** playbook：`playbooks/apply/os-patch-sla-apply.yml`（手寫）
 
-對應產生的 **verify** playbook：`playbooks/verify/os-patch-sla.yml`（spec generator）
+對應的 verify playbook（`playbooks/verify/os-patch-sla.yml`）**已於 2026-07-17 棄用**（僅存檔參考，見該目錄 README.md）；驗收直接 `pilot verify` 吃本 spec 執行。
 
 | Spec ID | Playbook task       | 備註 |
 |---------|---------------------|------|
@@ -86,22 +86,30 @@
        playbooks/apply/os-patch-sla-apply.yml \
        -e patch_stage=sandbox
    ```
-2. **推 staging**（仍可手動）：
+2. **推 staging**（仍可手動；`pilot spec --apply` 已於 2026-07-17 棄用，
+   套用一律走手寫 apply playbook）：
    ```bash
-   pilot spec docs/verification/os-patch-sla.md --apply \
-       -i inventory-staging.yaml --root <staging-root>
+   ansible-playbook -i inventory-staging.yaml \
+       playbooks/apply/os-patch-sla-apply.yml \
+       -e patch_stage=staging
    ```
 3. **觀察 24h**：再跑一次 `pilot verify`，確認 C2/C3 都 PASS。
-4. **推 prod**（promote gate）：
+4. **推 prod**（promote gate 在 playbook 本身：`confirm_prod` + staging 佐證時效）：
    ```bash
-   pilot rollout promote docs/verification/os-patch-sla.md \
-       --from staging --to prod
+   ansible-playbook -i inventory-prod.yaml \
+       playbooks/apply/os-patch-sla-apply.yml \
+       -e patch_stage=prod -e confirm_prod=true \
+       -e staging_attested_within_hours=24
    ```
-5. **事後回填 SQLite**：apply exit 0 後自動寫 `spec_checkpoints.status=verified-pass`。
+   沒帶 `confirm_prod=true`、或 staging 佐證超過時效，playbook 的
+   pre_tasks assert 會直接擋下（fail-closed），不會套用。
+5. **事後回填 SQLite**：對 prod inventory 再跑一次 `pilot verify
+   docs/verification/os-patch-sla.md -i inventory-prod.yaml`，
+   `spec_checkpoints.status` 翻成 `verified-pass`。
 
 ## 8. Commit / 版控
 
-- ✅ 進版控：`docs/verification/os-patch-sla.md`、`playbooks/apply/os-patch-sla-apply.yml`、`playbooks/verify/os-patch-sla.yml`
+- ✅ 進版控：`docs/verification/os-patch-sla.md`、`playbooks/apply/os-patch-sla-apply.yml`（`playbooks/verify/os-patch-sla.yml` 已於 2026-07-17 棄用，不再更新）
 - ❌ 不進版控：`.verification/*.md`、`.verification/*.ndjson`、本地 inventory.yaml、`~/.local/share/pilot/history.db`
 
 ## 9. 變更紀錄

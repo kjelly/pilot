@@ -12,7 +12,11 @@ import (
 //
 //	C1-C3  pilot-thanos-query / pilot-thanos-store / pilot-thanos-compact
 //	       containers running
-//	C4-C5  Thanos Query /-/healthy, /-/ready (10902)
+//	C4-C5  Thanos Query /-/healthy, /-/ready (10912 — the host-published
+//	       port; the container's internal listen port is 10902, but
+//	       thanos-query-apply.yml maps it to host port 10912 by default
+//	       to avoid colliding with a co-located Prometheus site's own
+//	       Thanos Sidecar, which hardcodes host port 10902)
 //	C6     Thanos Store Gateway /-/healthy (10904)
 //	C7     Thanos Compactor /-/healthy (10905)
 //	C8     Thanos Store Gateway can read the object storage bucket
@@ -80,8 +84,8 @@ func TestRegression_ThanosQuerySpec(t *testing.T) {
 	}
 
 	wantHTTP := map[string]struct{ port, path string }{
-		"C4": {"10902", "/-/healthy"},
-		"C5": {"10902", "/-/ready"},
+		"C4": {"10912", "/-/healthy"},
+		"C5": {"10912", "/-/ready"},
 		"C6": {"10904", "/-/healthy"},
 		"C7": {"10905", "/-/healthy"},
 	}

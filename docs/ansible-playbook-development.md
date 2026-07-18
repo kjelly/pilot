@@ -1,10 +1,12 @@
 # Ansible Playbook 開發流程
 
 > 適用場景：把模糊的合規 / 資安 / 維運需求落地成可重現、可驗證、可回歸的 Ansible Playbook。
-> 核心精神：**先寫 spec → 再寫 playbook → 用證據驗證 → 用 baseline 回歸**。
+> 核心精神：**先確認 spec → 再寫 playbook → 用證據驗證 → 用 baseline 回歸**。
+> 實際 authoring 由 Codex/Claude 依自然語言需求直接產出 spec、apply playbook 與
+> regression test；人負責確認意圖、驗收條件、風險與上線授權。
 
-> **2026-06 更新**：文件內的目錄結構、`pilot run` vs `ansible-playbook` 抉擇、
-> apply playbook 樣板結構請見 [`README.md` 的「Spec-driven 工作流」章節](../README.md#-spec-driven-工作流寫需求--套用--驗證)。
+> **2026-07 更新**：目錄結構與 apply playbook 樣板結構請見
+> [`README.md` 的「Spec-driven 工作流」章節](../README.md#-spec-driven-工作流寫需求--套用--驗證)。
 > 本檔是「為何這樣做」的心法，README 是「今天怎麼跑」的 SOP。
 
 ---
@@ -25,14 +27,17 @@
 ## 1. 整體流程
 
 ```
-模糊需求
-   │ (拆解 / 對齊法規 / 詢問利害關係人)
+自然語言 Requirement Brief
+   │ (coding agent 拆解；未知項與風險回到人確認)
    ▼
 Verification Spec (docs/verification/<host>.md)
-   │ (契約：給 LLM + 給人 + 給 playbook 作者)
+   │ (acceptance contract：先 lint + review，固定「何謂完成」)
    ▼
-Playbook skeleton (task 名稱 = spec ID)
-   │ (L1 syntax → L2 lint → L3 dry-run)
+Delivery Bundle
+   ├─ apply playbook（task tag = spec ID）
+   ├─ regression test（鎖 row / vars / invariant）
+   └─ actual-run evidence plan
+   │ (L1 syntax → L2 lint → L3 dry-run；pilot runtime 不呼叫 LLM)
    ▼
 迭代迴圈（每次都在同一個 sandbox 內完成）：
    L4 apply  ──┐
@@ -41,7 +46,7 @@ Playbook skeleton (task 名稱 = spec ID)
    ▼
 L7 baseline diff（vs 上次 report）
    ▼
-commit: spec + playbook + verify script + report
+commit: spec + apply playbook + regression test + actual-run evidence
 ```
 
 每一層的細節在後面章節。
@@ -53,7 +58,8 @@ commit: spec + playbook + verify script + report
 ### 為什麼先寫 spec
 
 - **Playbook 是手段，spec 是目的。** 手段換掉（例如改用 Puppet、Chef、shell）目的不變。
-- Spec 是給 LLM 驗證用的契約：寫清楚 expected value + 收集方式，LLM 就能自動跑、自動判 PASS/FAIL。
+- Coding agent 可以從需求起草 spec，但人必須先確認 intent、acceptance criteria 與風險。
+- Spec 是給 `pilot verify` 的確定性契約：寫清楚 Expected + Command，pilot 才能逐列判 PASS/FAIL。
 - Spec 進版控 → spec 變更要走 PR review，playbook 才能跟著改。
 
 ### Spec 結構
@@ -74,9 +80,10 @@ commit: spec + playbook + verify script + report
 | C2  | file     | PermitRootLogin      | ^PermitRootLogin no$ | grep -E ... |
 | C3  | sysctl   | net.ipv4.ip_forward  | "0"            | sysctl -n ... |
 
-## 3. 證據收集腳本
-- 路徑：scripts/verify-<host>.sh
-- 格式：每行一個 JSON object（NDJSON），含 id / status / detail
+## 3. Actual-run evidence 計畫
+- 指定 target（vm-target / docker-target / staging / 真實主機）與 inventory 來源
+- 由 pilot verify 產生 .verification/<spec>-<UTC>.{ndjson,md}
+- 記錄 apply、verify、idempotency 的真實結果與失敗
 
 ## 4. PASS / FAIL 規則
 - 全部 C1..CN pass → PASS
@@ -86,6 +93,9 @@ commit: spec + playbook + verify script + report
 ```
 
 ### 拆需求的實際動作
+
+通常由 coding agent 執行下列整理，再由人確認需求解讀與風險；不要求人從空白頁
+手刻完整 spec：
 
 1. **拿原始來源**：CIS Benchmark PDF、STIG .xml、公司 Wiki、客戶信件
 2. **逐條轉成 checklist row**：每個 requirement 一個 row
@@ -101,13 +111,13 @@ commit: spec + playbook + verify script + report
 
 ```
 docs/verification/
-  <name>.md                   # spec（人寫；pilot spec --lint 把關）
+  <name>.md                   # coding agent 起草、reviewer 確認；pilot spec --lint 把關
 
 playbooks/
-  verify/
-    <name>.yml                # inspect-only（不要手寫；pilot spec --generate 產）
   apply/
-    <name>-apply.yml          # mutations（人寫；含 -e vars + block/rescue）
+    <name>-apply.yml          # coding agent 依已確認 spec 直接撰寫；含 -e vars + block/rescue
+  # inspect 不再有獨立 playbook：pilot verify 直接吃 spec
+  # （playbooks/verify/ 已於 2026-07-17 棄用，見該目錄 README.md）
 
 inventory/
   <env>.yaml                  # sandbox / staging / prod 三份
@@ -121,10 +131,10 @@ inventory/
 
 **原則**：
 
-- `verify/<name>.yml` 用 `pilot spec --generate` 產出；手寫會跟 spec 漂移
-- `apply/<name>-apply.yml` 永遠手寫（這就是 mutate playbook）；必須含 `-e` 參數、
+- inspect 由 `pilot verify` 直接吃 spec 逐列執行，不產生也不維護 verify playbook
+- `apply/<name>-apply.yml` 由 coding agent 直接撰寫並經 review（這就是 mutate
+  playbook），不是 `pilot spec --generate` 的產物；必須含 `-e` 參數、
   `block/rescue`、stage gate
-- **不要**把兩種產物放在同個檔
 
 ### Task 命名對齊 spec
 
@@ -188,12 +198,10 @@ ansible-playbook -i inventory/dev playbooks/<host>.yml --check --diff
 # L4: 真的套用
 ansible-playbook -i inventory/dev playbooks/<host>.yml
 
-# L5: 驗證（產出 NDJSON）
-bash scripts/verify-<host>.sh > /tmp/verify-raw.ndjson
-
-# L6: 渲染成 markdown report 並寫到 writable root
-python3 scripts/render-report.py /tmp/verify-raw.ndjson \
-  > "$HOME/nfs/github/pilot/.verification/<host>-$(date +%Y%m%d-%H%M%S).md"
+# L5+L6: 驗證並產出報告（NDJSON + markdown 一次落到 .verification/）
+#（舊的 scripts/verify-<host>.sh + render-report.py 手寫管線已於
+#  2026-07-17 棄用；pilot verify 逐列比對 spec 的 Expected）
+go run ./cmd/pilot verify docs/verification/<host>.md -i inventory/dev
 
 # L7: 跟 baseline diff（取最新一份舊 report）
 PREV=$(ls -1t /workspace/pilot/.verification/<host>-*.md | sed -n '2p')
@@ -229,9 +237,12 @@ LLM 拿到 NDJSON 就能直接判定，不用 regex 抓字串：
 - `status`：`pass` / `fail` / `skip`
 - `detail`：實際值或錯誤訊息（給人讀）
 
-### Shell template
+### Shell template（歷史參考——今天由 `pilot verify` 內建）
 
-完整通用版見 `scripts/verify.sh`。最小骨架：
+> 2026-07-17 起，手寫 verify shell script 與 `scripts/verify.sh` 模板已棄用：
+> `pilot verify <spec.md>` 直接逐列執行 spec 的 Command、比對 Expected、
+> 產出同格式的 NDJSON + markdown 報告。以下骨架保留給「理解 NDJSON 驗證
+> 是怎麼組成的」之用，不要再新寫這種腳本。最小骨架：
 
 ```bash
 #!/bin/bash
@@ -269,11 +280,11 @@ state=$(systemctl is-active sshd 2>/dev/null || echo unknown)
 [ "$state" = "active" ] && emit C6 pass "active" || emit C6 fail "$state"
 ```
 
-### Python render-report
+### Python render-report（歷史參考——已內建於 `pilot verify`，腳本已移除）
 
 ```python
 #!/usr/bin/env python3
-# scripts/render-report.py — NDJSON → markdown
+# （原 scripts/render-report.py，2026-07-17 移除）NDJSON → markdown
 import json, sys, datetime
 
 rows = [json.loads(line) for line in sys.stdin if line.strip()]
@@ -325,7 +336,7 @@ diff <(grep '^|.*fail' .verification/old.md) \
 | L2 | lint | ansible-lint | `ansible-lint <file>` | 改寫法 |
 | L3 | intent | ansible-playbook | `--check --diff` | 確認 playbook 意圖 |
 | L4 | apply | ansible-playbook | （無 flag） | 看 stderr |
-| L5 | verify | scripts/verify.sh | （bash） | 對 spec |
+| L5 | verify | pilot verify | `pilot verify <spec.md> -i <inv>` | 對 spec |
 | L6 | idempotency | ansible-playbook × N | `grep changed` | 用 idempotent module |
 | L7 | regression | diff | `diff old new` | 查環境漂移 |
 
@@ -372,14 +383,18 @@ pilot vm-target run   --name core \
 # 看結果 → 改 playbook → reset → run …
 ```
 
-**只調一個 check 時，用 `--tags` 只跑那一條** —— `pilot spec --generate` 產出的 verify
-playbook 每個 task 都帶對齊 spec ID 的 tag，apply playbook 也已手動補上：
+**只調一個 check（verify 側）時，用 `pilot verify --probe` 單跑那條命令**——
+它走跟 spec row 完全相同的 pipeline（module / become / ad-hoc），印出 rc、
+raw/clean stdout 與 matcher verdict（舊做法「跑 `playbooks/verify/<name>.yml
+--tags C3`」已隨該目錄於 2026-07-17 棄用）：
 
 ```bash
-pilot vm-target run --name core playbooks/verify/<name>.yml --tags C3
+pilot verify --probe 'systemctl is-active docker' --probe-expected '~active' \
+    -i <inventory> --host core
 ```
 
-tag 命名慣例（apply playbook 手動補時遵循）：
+**apply playbook 只調一個段落時，用 `--tags`**——apply playbook 已手動補上
+對齊 spec ID 的 tag。tag 命名慣例（手動補時遵循）：
 
 - **單一 spec 的 playbook**（如 `pam-oidc-sshd-apply.yml`）：直接用裸 `tags: [C3]`。
 - **多 spec / 多 role 的 playbook**（如 `core-infra-provider-apply.yml`，一個檔涵蓋
@@ -463,41 +478,5 @@ Playbook 可以 merge / ship 的條件：
 ## 11. 參考與模板
 
 - Spec template：`docs/verification-spec-template.md`
-- Verify shell template：`scripts/verify.sh`
 - 範例 playbook：`playbooks/test/hello-localhost.yml`（smoke test 起點）
 - Sandbox 行為：見 `docs/sandbox-notes.md`（若需要可另外建立）
-
----
-
-## 12. `ansible-playbook` vs `pilot run`：開發期間怎麼選
-
-這兩個**不是替代關係** — `pilot run` 底下就是 `ansible-playbook`。
-差別在誰負責「產生 playbook」這件事：
-
-| 場景 | 選誰 | 理由 |
-|------|------|-----|
-| CI、production、可重現執行 | `ansible-playbook` | 你已寫好 playbook、不需 LLM |
-| 第一次寫 playbook、要 iterate | `pilot run "<goal>"` | LLM 幫你看 spec、自己生出 playbook + 自動 root-cause 失敗 |
-| 失敗後 debug | `pilot run "<我懷疑 X>"` | LLM 讀 stderr、自己 trace |
-| Spec 還在變、要 explore | `pilot run` | 不用先把全部 playbook 寫對 |
-| 改 apply playbook | **`ansible-playbook --check --diff`** + 然後 `ansible-playbook` 真套用 | 你已知道答案，只需要驗證 + 真套用 |
-
-**判斷訣竅**：如果你問得出「該跑哪一條 ansible-playbook、帶什麼 flag、衝到哪個 host」，
-**用 `ansible-playbook`**（省 token / 省錢 / 可 audit）。
-
-如果你只講得出「我想要 Y 結果」但不知道 playbook 該怎麼寫，
-**用 `pilot run`**（LLM 幫你 derive，你給意圖就好）。
-
-### 開發期間用 `pilot run` 的 4 個 best practices
-
-1. **`pilot run --no-tui --model minimax-m3:cloud`** 起手：non-interactive、方便抓 CI 跑的 log
-2. **prompt 要包含意圖 + 環境**：「Apply pam-oidc-sshd 到 test-vm（libvirt 192.168.122.232），
-   帶 .deb path X 跟 keycloak issuer Y」 — 別只給意圖不給環境，LLM 會猜錯
-3. **第一次跑 agent 一定先 `--check --diff`**：spec → apply 失敗的鎖定 ssh 行為風險高，
-   一定要看 dry-run diff 才放行
-4. **一旦 playbook 收斂，把成果 commit 下來**：`pilot run` 適合 prototype，**不適合作為
-   production 執行路徑**。 Prototype 完成後轉成 `playbooks/apply/<name>-apply.yml` +
-   `ansible-playbook` 配上 inventory，三層分工：spec (人) / verify playbook (generator) / apply
-   playbook (人)
-
-詳細比較見 [README 的 Spec-driven 工作流章節](../README.md#-spec-driven-工作流寫需求--套用--驗證)。

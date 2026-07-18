@@ -356,6 +356,51 @@ docker run --rm -it -v "$HOME/.ssh:/root/.ssh:ro" -v "$(pwd)/inventory.yml:/pilo
 
 ---
 
+## 5. 驗收（交付證據）
+
+套用完成不等於交付完成——**用 `pilot verify` 對照 spec 逐條驗收**，產出的
+報告就是交付證據。每個元件對應一份 spec（`docs/verification/<元件>.md`，
+對應關係見下方 Playbook 對照表），對你**實際部署的每個元件**跑一次：
+
+```bash
+# bash (Linux/macOS) — 掛一個本機目錄接住報告，驗完留檔
+mkdir -p .verification
+docker run --rm -it \
+    -v "$HOME/.ssh:/root/.ssh:ro" \
+    -v "$(pwd)/inventory.yml:/pilot/inventory.yml:ro" \
+    -v "$(pwd)/.verification:/pilot/.verification" \
+    pilot-cli:latest \
+    pilot verify docs/verification/freeipa-server.md -i inventory.yml
+# verdict: **PASS**  (pass=18 fail=0 skip=0)
+```
+
+- 每次執行落兩個檔在 `.verification/`：`<spec>-<UTC>.md`（PASS/FAIL 表格，
+  **這就是驗收報告**，直接附進交付紀錄）與同名 `.ndjson`（原始輸出）。
+- exit code：全部 row PASS 才是 0——可以直接接 CI / 腳本判斷。
+- 部署了多個元件就逐一跑；inventory 覆蓋**全部**角色的全站部署，可以用
+  `pilot verify --dir docs/verification -i inventory.yml` 一次驗完並印
+  rollup 總表（注意：`--dir` 會跑目錄下**每一份** spec，只部署部分元件時
+  沒部署的 spec 會 FAIL，這種情況請逐份指定）。
+
+### 定期重驗（交付後的持續正確）
+
+主機交付後仍會漂移（有人手動改設定、套件更新覆蓋檔案…）。建議在操作機
+排一個每週重驗，exit code 非 0 就告警：
+
+```bash
+# /etc/cron.d/pilot-reverify — 每週一 06:00 重驗，失敗寫 syslog（接上你既有
+# 的告警管道；部署了 alertmanager 的話也可以改打 webhook）
+0 6 * * 1  ops  cd /opt/pilot-delivery && \
+  docker run --rm -v "$HOME/.ssh:/root/.ssh:ro" \
+      -v "$(pwd)/inventory.yml:/pilot/inventory.yml:ro" \
+      -v "$(pwd)/.verification:/pilot/.verification" \
+      pilot-cli:latest \
+      pilot verify docs/verification/freeipa-server.md -i inventory.yml \
+  || logger -p user.err -t pilot-reverify "spec re-verify FAILED — check .verification/"
+```
+
+---
+
 ## `pilot inventory` 指令一覽
 
 方式 A（見步驟 1）用到的三個子指令，全部透過 `docker run pilot-cli:latest pilot inventory ...` 執行：
@@ -449,6 +494,7 @@ docker run --rm -it \
 | 管理 FreeIPA 使用者／權限 | `playbooks/apply/freeipa-identity-apply.yml` | (見下方「機密」) |
 | 把第二台（或後續台）FreeIPA server 加入既有 realm（multi-master HA） | `playbooks/apply/freeipa-server-replica-apply.yml` | `freeipa-server-replica`（**v0.1 草稿、未實跑**，見 `docs/verification/freeipa-server-replica.md` §0；限制與已知偏差見該檔 §5）|
 | DNS／NTP 等核心服務 | `playbooks/apply/core-infra-provider-apply.yml` | 依 `-e infra_role=dns\|ntp` |
+| Container 引擎(Docker) | `playbooks/apply/docker-apply.yml` | `docker`（keycloak-db/keycloak、seaweedfs-s3、wazuh-manager、prometheus/thanos-query/alertmanager 等角色的前置） |
 | Keycloak（IdP） | `playbooks/apply/keycloak-apply.yml` | `keycloak` |
 | Keycloak 資料庫 | `playbooks/apply/keycloak-db-apply.yml` | `keycloak-db` |
 | SSH 走 OIDC 登入 | `playbooks/apply/pam-oidc-sshd-apply.yml` | `linux-servers` |
