@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -348,6 +349,7 @@ func runVerifyMulti(cmd *cobra.Command, dir string) error {
 		ok   bool
 	}
 	var rows []rollup
+	var executionErrors []error
 	overallOK := true
 	for _, p := range matched {
 		stem := strings.TrimSuffix(filepath.Base(p), filepath.Ext(p))
@@ -359,11 +361,16 @@ func runVerifyMulti(cmd *cobra.Command, dir string) error {
 		// Run the per-spec verify. Non-nil err means at least one
 		// row failed; we still want a rollup entry (the verdict)
 		// derived from the rendered report below.
-		_ = runVerifyOne(cmd, p)
+		verifyErr := runVerifyOne(cmd, p)
 		// Parse the last .verification/<stem>-*.md to get verdict.
 		pass, fail, total, ok := readLastReport(p)
 		if !ok {
-			fmt.Printf("\n  ✗ %s: no report produced\n", stem)
+			if verifyErr != nil {
+				fmt.Printf("\n  ✗ %s: %v (no report produced)\n", stem, verifyErr)
+				executionErrors = append(executionErrors, fmt.Errorf("%s: %w", stem, verifyErr))
+			} else {
+				fmt.Printf("\n  ✗ %s: no report produced\n", stem)
+			}
 			overallOK = false
 		}
 		if fail > 0 {
@@ -392,6 +399,9 @@ func runVerifyMulti(cmd *cobra.Command, dir string) error {
 		fmt.Printf("── rollup: %d/%d specs PASS; aggregate: FAIL ──\n", passed, len(rows))
 	}
 	if !overallOK || passed < len(rows) {
+		if len(executionErrors) > 0 {
+			return fmt.Errorf("rollup: not every spec passed: %w", errors.Join(executionErrors...))
+		}
 		return fmt.Errorf("rollup: not every spec passed")
 	}
 	return nil

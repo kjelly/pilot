@@ -1,0 +1,16 @@
+{
+  "plays": [{
+    "tasks": [{
+      "hosts": {
+        "missing": {
+          "changed": false,
+          "unreachable": true,
+          "msg": "Task failed: Failed to connect to the host via ssh: connection timed out"
+        }
+      }
+    }]
+  }],
+  "stats": {
+    "missing": {"ok": 0, "failures": 0, "unreachable": 1}
+  }
+}

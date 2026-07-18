@@ -1,0 +1,44 @@
+schemaVersion: 1
+id: dns
+role: dns
+specs:
+  - path: docs/verification/core-infra-provider.md
+    rows: {categories: [dns]}
+playbooks:
+  apply: playbooks/apply/core-infra-provider-apply.yml
+  rollback: null
+  upgrade: null
+  decommission: null
+regressionTests:
+  - internal/spec/core_infra_provider_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies: []
+conflicts: []
+bindings: []
+os:
+  - {distro: ubuntu, versions: ["22.04", "24.04"]}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
+groupVars:
+  - {name: dns_listen_addr, required: true, secret: false}
+  - {name: dns_upstream, required: false, default: 1.1.1.1, secret: false}
+  - {name: dns_zones, required: false, default: [], secret: false}
+endpoints:
+  - {name: dnsTcp, scheme: tcp, port: 53}
+  - {name: dnsUdp, scheme: udp, port: 53}
+stagePolicy: {variable: stage, default: sandbox}
+experimental: false
+evidenceRequirement: {targetTest: vm, idempotency: required}
+lifecycle: {backup: null, upgrade: null, decommission: null}
+traceability:
+  mode: rowTags
+  tag: {kind: rolePrefixed, prefix: dns}
+  exemptions:
+    C7: {kind: verifyOnly, reason: optional DNS functional probe}
+site:
+  include: true
+  order: 10
+  vars: {infra_role: dns}
+  tags: [infra, dns]
+  optIn: false
+  targetGroupExpression: null

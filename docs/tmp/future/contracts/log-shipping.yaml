@@ -1,0 +1,49 @@
+schemaVersion: 1
+id: log-shipping
+role: log-server
+specs:
+  - path: docs/verification/log-shipping.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/log-shipping-apply.yml
+  rollback: null
+  upgrade: null
+  decommission: null
+regressionTests:
+  - internal/spec/log_shipping_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: docker, required: true}
+  - {component: dashboard, required: true}
+conflicts: []
+bindings:
+  - input: loki_target_host
+    requiredWhenDependencySelected: true
+    from: {component: dashboard, endpoint: loki}
+os:
+  - {distro: ubuntu, versions: ["22.04", "24.04"]}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 5}
+groupVars:
+  - {name: loki_target_host, required: true, secret: false}
+  - {name: siem_log_root, required: false, default: /var/log/siem, secret: false}
+endpoints:
+  - {name: promtailReady, scheme: http, port: 9080}
+stagePolicy: {variable: stage, default: sandbox}
+experimental: false
+evidenceRequirement: {targetTest: topology, idempotency: required}
+lifecycle:
+  backup: {paths: [/etc/pilot/promtail, /var/lib/pilot/promtail]}
+  upgrade: null
+  decommission: null
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions: {}
+site:
+  include: true
+  order: 180
+  vars: {}
+  tags: [observability, log-shipping]
+  optIn: false
+  targetGroupExpression: "log-server if present, otherwise dashboard"

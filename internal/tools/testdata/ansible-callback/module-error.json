@@ -1,0 +1,21 @@
+{
+  "plays": [{
+    "tasks": [{
+      "hosts": {
+        "localhost": {
+          "changed": true,
+          "failed": true,
+          "msg": "non-zero return code",
+          "rc": 7,
+          "stdout": "bad-out",
+          "stderr": "bad-err",
+          "start": "2026-07-18 13:53:04.033194",
+          "end": "2026-07-18 13:53:04.036336"
+        }
+      }
+    }]
+  }],
+  "stats": {
+    "localhost": {"ok": 0, "failures": 1, "unreachable": 0}
+  }
+}
