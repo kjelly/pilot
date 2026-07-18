@@ -12,17 +12,18 @@
 > Verification Safety Boundary RFC 與 ComponentContract RFC 已 Final，可依序
 > 開始 M2.2 implementation。
 
-> **實作狀態：M2.2 parser/runtime 與 M2.3 migration CLI 已實作；production deploy wiring 與正式 spec 遷移尚待後續里程碑。**
+> **實作狀態：M2.2 parser/runtime、M2.3 migration CLI 與 production deploy wiring 已實作；Docker 已完成第一份正式 v2 遷移與 target-backed acceptance，其餘 v1 spec 依功能變更逐份 rollout。**
 >
 > `pilot verify` 已接受嚴格的 `schemaVersion: 2` front-matter + `## Checks`
-> YAML block；正式 `docs/verification/*.md` 尚未遷移，仍使用 v1。
+> YAML block；`docs/verification/docker.md` 已遷移並由 disposable VM 驗證，
+> 其餘 spec 保持 v1 compatibility，避免未 target-test 就批次改寫語意。
 
 ## 0. 實作邊界（2026-07-18）
 
 | 項目 | 狀態 | 說明 |
 |---|---|---|
 | M0.2 callback／host resolver | **✅ 已實作並驗證** | Ansible scope adapter、isolated bounded runner 與 JSON callback 已接正式 verify |
-| Safety RFC | **🟡 v2 boundary 已實作** | readOnly/isolatedMutation gate、secretRef fail-closed；deploy auto verification remains v2-only contract opt-in |
+| Safety RFC | **✅ 已實作並驗證** | readOnly gate；isolatedMutation 顯式授權 + cleanup evidence；secretRef 經 vault reference 與 runner-owned `no_log` assert；auto verification 僅接受 v2 contract opt-in |
 | ComponentContract | **✅ catalog/lint/runtime deploy wiring** | 22-component strict catalog、traceability/dependency/endpoint lint、deterministic preflight engine 與 deploy contract scope wiring |
 | M2.1 typed matcher | **✅ 已實作並驗證** | `Expect`/`StringMatcher`、v1 compiler、legacy replay compatibility evaluator 已完成 |
 | M2.2 v2 parser | **✅ 已實作並驗證** | strict parser、typed execution、per-host applicability/input resolution、action/secret safety gate；同一 fixture 在 local/docker/vm/general-inventory backend 均 PASS，未宣稱 staging／真實主機 acceptance |
@@ -439,18 +440,18 @@ Jinja 與 applicability prose 都會產生機器可辨識的 `needsReview`/sidec
 
 ## 6. 完成定義(對照 roadmap P2)
 
-- [ ] matcher 不再依賴隱晦 prefix 才能理解 —— `matchExpected` 刪除,執行層只有 `Expect.Eval`;v2 檔內 expect 全為 typed。
-- [ ] parser 明確拒絕未知版本與未支援欄位 —— 負向測試鎖住。
+- [x] matcher 不再依賴隱晦 prefix 才能理解 —— `matchExpected` 刪除,執行層只有 `Expect.Eval`;v2 檔內 expect 全為 typed。
+- [x] parser 明確拒絕未知版本與未支援欄位 —— 負向測試鎖住。
 - [x] 同一份 v2 spec 在 local / docker-target / vm-target / 一般 inventory
   backend 判定一致：2026-07-18 read-only fixture 四者均為 1/1 PASS。一般
   inventory 使用 localhost connection fixture，依本條降級規則明示**未在
   staging／真實主機驗證**。
-- [ ] v1 全部 24 份 spec 在整個過程零判定回歸 —— regression suite + NDJSON 重放。
-- [ ] `pilot spec migrate` 可用:needsReview 為機器可辨識 schema 欄位 + sidecar report,含未決標記的檔案 verify 一律拒跑,無靜默語意轉換路徑。
-- [ ] v2 全宣告式:become/timeout 無任何 heuristic 回退；resolved tag 依 contract traceability 推導(rowTags bare/prefixed 或 mapped row tags；verifyOnly/derived 逐 row exemption；standalone spec 逐 check 顯式宣告——見 §3.1)，tag coverage 對 v1/v2 混合 repo 全綠。
-- [ ] conditional row 由 `appliesWhen` 決定，false 產生
+- [x] v1 全部 24 份 spec 在整個過程零判定回歸 —— regression suite + NDJSON 重放。
+- [x] `pilot spec migrate` 可用:needsReview 為機器可辨識 schema 欄位 + sidecar report,含未決標記的檔案 verify 一律拒跑,無靜默語意轉換路徑。
+- [x] v2 全宣告式:become/timeout 無任何 heuristic 回退；resolved tag 依 contract traceability 推導(rowTags bare/prefixed 或 mapped row tags；verifyOnly/derived 逐 row exemption；standalone spec 逐 check 顯式宣告——見 §3.1)，tag coverage 對 v1/v2 混合 repo 全綠。
+- [x] conditional row 由 `appliesWhen` 決定，false 產生
   `not_applicable` evidence；production deploy 不執行 v1。
-- [ ] v1 使用 legacy TrimSpace normalization，v2 使用 one-trailing-newline
+- [x] v1 使用 legacy TrimSpace normalization，v2 使用 one-trailing-newline
   normalization；parity corpus 全綠。
 - [x] Verification Safety Boundary 與 ComponentContract RFC 已在 M2.2 前 Final。
 
