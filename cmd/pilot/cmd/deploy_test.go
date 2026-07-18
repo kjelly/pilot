@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/anomalyco/pilot/internal/contract"
 )
 
 // repoRootForTest walks up from the current package directory until it
@@ -28,6 +31,32 @@ func repoRootForTest(t *testing.T) string {
 			t.Fatal("could not find repo root (go.mod) above " + dir)
 		}
 		dir = parent
+	}
+}
+
+func TestContractMenuAndActionPlanFailClosed(t *testing.T) {
+	catalog, err := contract.NewCatalog([]contract.Contract{{
+		ID: "worker", Role: "workers", Playbooks: contract.Playbooks{Apply: "playbooks/apply/worker.yml"},
+		Dependencies: []contract.Dependency{{Component: "provider", Required: true, Relation: "providerEndpoint"}},
+	}, {ID: "provider", Role: "providers", Playbooks: contract.Playbooks{Apply: "playbooks/apply/provider.yml"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := deployPlaybook{Key: "worker", Label: "Worker"}
+	if got := deployMenuLabel(entry, catalog); !strings.Contains(got, "worker (role=workers)") {
+		t.Fatalf("menu label = %q", got)
+	}
+	var out bytes.Buffer
+	if err := showContractActionPlan(&out, catalog, []string{"worker"}, "apply"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Contract plan: worker", "provider (providerEndpoint)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("plan missing %q: %s", want, out.String())
+		}
+	}
+	if err := showContractActionPlan(&out, catalog, []string{"worker"}, "upgrade"); err == nil {
+		t.Fatal("upgrade without a declared playbook must fail closed")
 	}
 }
 
