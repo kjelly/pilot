@@ -102,6 +102,8 @@ func resolveExpectedHosts(in expectedHostInput) (expectedHostResolution, error) 
 		}
 	} else if in.TargetGroupOverride {
 		findings = append(findings, "target_group override supplied for a spec without declared targets")
+	} else if !executionSelectorProvided {
+		return expectedHostResolution{}, fmt.Errorf("expected-host resolver: spec has no declared targets; provide an explicit --host/--limit selector or use --local")
 	}
 
 	return expectedHostResolution{Hosts: resolved, Findings: findings}, nil

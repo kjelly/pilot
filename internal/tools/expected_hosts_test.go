@@ -17,9 +17,9 @@ func TestResolveExpectedHosts(t *testing.T) {
 		wantErr      string
 	}{
 		{
-			name:      "inventory is the default execution scope",
-			input:     expectedHostInput{InventoryHosts: []string{"beta", "alpha", "alpha"}},
-			wantHosts: []string{"alpha", "beta"},
+			name:    "no targets or selector fails closed",
+			input:   expectedHostInput{InventoryHosts: []string{"beta", "alpha", "alpha"}},
+			wantErr: "spec has no declared targets; provide an explicit --host/--limit selector",
 		},
 		{
 			name: "host pattern narrows inventory",
