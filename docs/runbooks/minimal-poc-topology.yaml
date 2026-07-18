@@ -1,0 +1,85 @@
+# Declarative three-node topology for docs/runbooks/minimal-poc-architecture.md.
+# The groups below are the role memberships captured in that runbook's
+# actual inventory snapshot; an empty role group is intentionally omitted.
+#
+# Bring up/render the same three hosts with:
+#   pilot vm-target topology up --spec docs/runbooks/minimal-poc-topology.yaml
+#   pilot vm-target topology inventory --spec docs/runbooks/minimal-poc-topology.yaml
+#
+# The site-wide verification set is passed repeatably to `topology test` (the
+# YAML format deliberately stays limited to VM topology and group membership):
+#   --verify docs/verification/freeipa-server.md=freeipa-server
+#   --verify docs/verification/freeipa-client.md=freeipa-client
+#   --verify docs/verification/docker.md=docker
+#   --verify docs/verification/audit-log-forwarding.md=audit-log-forwarding
+#   --verify docs/verification/wazuh-manager.md=wazuh-manager
+#   --verify docs/verification/wazuh-fim.md=wazuh-fim
+#   --verify docs/verification/seaweedfs-s3.md=seaweedfs-s3
+#   --verify docs/verification/restic-backup.md=restic-backup
+#   --verify docs/verification/alertmanager.md=alertmanager
+#   --verify docs/verification/prometheus.md=prometheus
+#   --verify docs/verification/thanos-query.md=thanos-query
+#   --verify docs/verification/dashboard.md=dashboard
+#   --verify docs/verification/log-shipping.md=wazuh-manager
+#
+# freeipa-identity.md is intentionally not listed: site.yml excludes the
+# day-2 roster reconciler and it must be applied (with its fixture/roster)
+# separately before verifying that spec.
+nodes:
+  - name: freeipa-server
+    base_image: almalinux-9
+    memory: 4096
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 3m
+    boot_timeout: 6m
+    groups:
+      - freeipa-server
+      - audit-log-forwarding
+      - wazuh-fim
+      - restic-backup
+    wire:
+      - nexus
+      - client-vm=client-vm.ipa.pilot.internal
+
+  - name: nexus
+    base_image: ubuntu-24.04
+    memory: 12288
+    vcpus: 6
+    disk: 80
+    ssh_user: root
+    ssh_timeout: 3m
+    boot_timeout: 6m
+    groups:
+      - docker
+      - audit-log-forwarding
+      - wazuh-manager
+      - wazuh-fim
+      - seaweedfs-s3
+      - restic-backup
+      - prometheus
+      - thanos-query
+      - alertmanager
+      - dashboard
+    wire:
+      - freeipa-server=ipa1.ipa.pilot.internal
+      - client-vm=client-vm.ipa.pilot.internal
+
+  - name: client-vm
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 3m
+    boot_timeout: 6m
+    groups:
+      - freeipa-client
+      - docker
+      - audit-log-forwarding
+      - wazuh-fim
+      - restic-backup
+    wire:
+      - freeipa-server=ipa1.ipa.pilot.internal
+      - nexus
