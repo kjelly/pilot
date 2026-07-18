@@ -37,10 +37,18 @@ type RunStarted struct {
 	OperationID string
 	Stage       string
 	Component   string
-	Playbook    string
-	Inventory   string
-	Hosts       []string
-	StartedAt   time.Time
+	// Components records every contract component selected by a site-level
+	// transaction. Component remains for backwards-compatible single-component
+	// callers and display defaults.
+	Components []string
+	Playbook   string
+	Inventory  string
+	Hosts      []string
+	// Metadata is a non-sensitive, immutable audit summary (for example git
+	// revisions, input references, and authorization facts). Callers must not
+	// place secret values in it.
+	Metadata  map[string]any
+	StartedAt time.Time
 }
 
 type Event struct {
@@ -112,9 +120,16 @@ func StartRun(ctx context.Context, s *Store, start RunStarted) (*RunWriter, erro
 	for _, host := range hosts {
 		w.hosts[host] = struct{}{}
 	}
+	components := append([]string(nil), start.Components...)
+	if len(components) == 0 && start.Component != "" {
+		components = []string{start.Component}
+	}
 	payload := map[string]any{
 		"stage": start.Stage, "component": start.Component, "playbook": start.Playbook,
-		"inventory": start.Inventory, "hosts": hosts,
+		"components": components, "inventory": start.Inventory, "hosts": hosts,
+	}
+	if len(start.Metadata) > 0 {
+		payload["metadata"] = start.Metadata
 	}
 	if err := w.appendEvent(ctx, Event{OperationID: start.OperationID, Type: EventRunStarted, Payload: payload, CreatedAt: start.StartedAt}, true); err != nil {
 		return nil, err
