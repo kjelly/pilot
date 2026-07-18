@@ -36,7 +36,7 @@ traceability:
   mode: rowTags
   tag: {kind: rolePrefixed, prefix: dns}
   exemptions:
-    C7: {kind: verifyOnly, reason: optional DNS functional probe}
+    "docs/verification/core-infra-provider.md#C7": {kind: verifyOnly, reason: optional DNS functional probe}
 site:
   include: true
   order: 10

@@ -33,11 +33,11 @@ traceability:
   mode: rowTags
   tag: {kind: rolePrefixed, prefix: docker}
   exemptions:
-    C3: {kind: derived, tags: [docker-C1], reason: CLI comes from the engine package}
-    C5: {kind: verifyOnly, reason: whole-chain pull/run/cleanup probe}
-    C6: {kind: derived, tags: [docker-C1], reason: default networks come from engine installation}
-    C7: {kind: derived, tags: [docker-C1], reason: compose plugin comes from the package set}
-    C8: {kind: derived, tags: [docker-C1], reason: cgroup mode is an engine property}
+    "docs/verification/docker.md#C3": {kind: derived, tags: [docker-C1], reason: CLI comes from the engine package}
+    "docs/verification/docker.md#C5": {kind: verifyOnly, reason: whole-chain pull/run/cleanup probe}
+    "docs/verification/docker.md#C6": {kind: derived, tags: [docker-C1], reason: default networks come from engine installation}
+    "docs/verification/docker.md#C7": {kind: derived, tags: [docker-C1], reason: compose plugin comes from the package set}
+    "docs/verification/docker.md#C8": {kind: derived, tags: [docker-C1], reason: cgroup mode is an engine property}
 site:
   include: true
   order: 30

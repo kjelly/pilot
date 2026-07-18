@@ -1,17 +1,19 @@
 # RFC：ComponentContract v1
 
-> 狀態：Proposed
+> 狀態：Proposed — technical schema gate passed，等待接受
 > 日期：2026-07-18
 > 範圍：M1.1 RFC + 六份 fixtures；本 RFC 尚不授權 loader／API 實作
 >
-> **實作標示：六份 fixture 已建立並通過 YAML parse；正式功能尚未實作。**
-> `internal/contract`、strict loader、contract lint、deploy catalog view、
+> **實作標示：六份 fixture 已通過 test-only strict schema／semantic gate；
+> 正式功能尚未實作。**
+> `internal/contract/fixture_schema_test.go` 只保存 private draft types 與 fixture
+> validation，不提供 production loader/API。contract lint、deploy catalog view、
 > site lint 與 TUI integration 目前都不存在。
 
 ## 1. 決策摘要
 
 1. component ↔ primary inventory role 是 1—1。
-2. 一支 playbook可以被多個 component 引用；dns、ntp 共用
+2. 一支 playbook 可以被多個 component 引用；dns、ntp 共用
    `core-infra-provider-apply.yml`。
 3. `specs` 使用結構化 entry，可選 row selector；因此 dns、ntp 可共用
    `core-infra-provider.md`，分別選 category `dns`／`ntp`。
@@ -58,6 +60,38 @@ site: {}
 
 Strict YAML decode；unknown schema version／unknown field 是 error。
 
+### 2.1 Test-only executable schema gate
+
+`internal/contract/fixture_schema_test.go` 以 private Go types 固定本輪已 review 的
+nested shape；不匯出 symbol、不讓 runtime 載入 fixture。已固定的結構包括：
+
+| 區塊 | nested shape |
+|---|---|
+| `specs[].rows` | `all`、`ids`、`categories` 三者恰選一 |
+| `playbooks` | `apply` 必填；`rollback`／`upgrade`／`decommission` nullable |
+| `dependencies` | `{component, required}` |
+| `bindings` | `{input, requiredWhenDependencySelected, from: {component, endpoint}}` |
+| `os` | `{distro, versions[]}` |
+| `resources` | `{minCPU, minRAMMiB, minDiskGiB}` |
+| `groupVars` | `{name, required, default, secret, validation}` |
+| `endpoints` | `{name, scheme, port, path}`；unix 用 path，network endpoint 用 port |
+| `stagePolicy` | `{variable, default}` |
+| `evidenceRequirement` | `{targetTest, idempotency}` |
+| `lifecycle.backup` | nullable `{provider, preHook, paths[]}` |
+| `traceability` | `rowTags` strategy 或逐 qualified row ref `mapped`；exemption 為 `verifyOnly`／`derived` |
+| `site` | `{include, order, vars, tags, optIn, targetGroupExpression}` |
+
+schema gate 已驗證：
+
+- unknown top-level／nested field 與 unknown version 會被拒絕；
+- fixture 引用的 spec、apply playbook、regression test 確實存在；
+- selector 選到的 row/category 存在且非空；
+- rowTags／mapped／derived 引用的 apply tag 確實存在；
+- binding input 必須存在於 `groupVars`，source component 必須是 dependency；
+- 六份 fixture 不得重複擁有同一個 spec row。
+
+這是 RFC 接受前的 executable review evidence，不是 M1.1 production loader。
+
 ## 3. Spec mapping
 
 `specs` entry：
@@ -79,7 +113,7 @@ Contract lint 必須證明：
 - selector 至少選到一列；
 - 同一 spec row 不會在同一 deploy plan 被兩個 component 重複擁有；
 - selector 引用的 ID／category 存在；
-- 未被任何 component接管的 row 有明確 finding。
+- 未被任何 component 接管的 row 有明確 finding。
 
 Spec v2 的 traceability 引用改為 plural：
 
@@ -90,6 +124,12 @@ traceability:
 
 真正的 row ownership 仍由 contract selector 決定；spec 只保存可引用的 component
 集合，避免 shared spec 被迫謊稱只有一個 owner。
+
+Contract 內的 row identity 一律是 `<spec-path>#<row-id>`，例如
+`docs/verification/docker.md#C3`。原因是 component 可擁有 1–N 份 spec，而每份
+spec 都可能有 `C1`；只用裸 row ID 會碰撞。`rowTags` 仍以 row ID 推導實際
+Ansible tag，但所有 `mapped`／`exemptions` map key 與 evidence scope 都使用
+qualified row ref。
 
 ## 4. Traceability
 
@@ -116,8 +156,8 @@ Installer／reconciler／stage pipeline 沒有 1:1 row task 時：
 traceability:
   mode: mapped
   rows:
-    C1: {tags: [freeipa-install], reason: "..."}
-    C2: {tags: [freeipa-service], reason: "..."}
+    "docs/verification/freeipa-server.md#C1": {tags: [freeipa-install], reason: "..."}
+    "docs/verification/freeipa-server.md#C2": {tags: [freeipa-service], reason: "..."}
 ```
 
 每個 selected row 都必須出現在 mapping；不允許只有 component-level
@@ -128,10 +168,10 @@ traceability:
 ```yaml
 traceability:
   exemptions:
-    C5:
+    "docs/verification/docker.md#C5":
       kind: verifyOnly
       reason: whole-chain functional probe
-    C3:
+    "docs/verification/docker.md#C3":
       kind: derived
       tags: [docker-C1]
       reason: CLI is delivered by the package task
@@ -212,7 +252,7 @@ lifecycle:
 
 - playbooks 保存 executable path。
 - lifecycle 保存 policy／data handling contract，不重複保存 path。
-- `playbooks.rollback: null` → rollback policy只能 `none`。
+- `playbooks.rollback: null` → rollback policy 只能 `none`。
 - lifecycle null 先 warning；decommission action 遇 null 必須 fail closed。
 
 ## 9. 六份試點
@@ -230,14 +270,19 @@ Fixtures 位於 `docs/tmp/future/contracts/`，不是 production loader input。
 
 ## 10. Loader 開工 gate
 
-以下全數完成才開始 `internal/contract`：
+以下全數完成才開始 production `internal/contract` loader/API：
 
-- 六份 fixtures 可被 strict YAML decoder 解析。
-- selector／traceability 的正負案例定稿。
-- shared spec plural traceability 同步回 Spec v2 RFC。
-- site lint-only 決策被接受。
-- regression test 明確留在 Delivery Bundle DoD。
-- group vars／vault key／endpoint 欄位完成命名 review。
+| Gate | 狀態 |
+|---|---|
+| 六份 fixtures 可被 strict YAML decoder 解析 | **完成（test-only）** |
+| selector／traceability 正負案例 | **完成本輪核心案例** |
+| shared spec plural traceability 同步回 Spec v2 RFC | **完成** |
+| site lint-only 決策 | **已記錄，待 RFC 接受** |
+| regression test 留在 Delivery Bundle DoD | **完成** |
+| group vars／vault key／endpoint 欄位命名 review | **schema test 已固定，待 RFC 接受** |
+
+因此 production loader gate 仍關閉；下一個狀態轉換是由人接受本 RFC，不是讓
+test-only schema 自動把 `Proposed` 升為 `Final`。
 
 ## 11. 非目標
 
