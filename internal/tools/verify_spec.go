@@ -62,6 +62,10 @@ type VerifySpecTool struct {
 	EnvironmentInputs  map[string]string
 	Stage              string
 	SelectedComponents map[string]bool
+	// AllowIsolatedMutation is set only by an explicitly authorized delivery
+	// transaction. The runner always executes and verifies the declared cleanup
+	// probe before returning a verdict.
+	AllowIsolatedMutation bool
 	// SelectedRowIDs narrows execution to contract-resolved rows for a partial
 	// deploy. An empty set means every row; unknown IDs are rejected before any
 	// probe runs so a tag mapping can never silently broaden verification.
@@ -177,10 +181,13 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 			}
 		}
 		for _, row := range parsed.Rows {
+			if len(t.SelectedRowIDs) > 0 && !t.SelectedRowIDs[row.ID] {
+				continue
+			}
 			if len(row.NeedsReview) > 0 {
 				return &Result{Content: fmt.Sprintf("ERROR: Spec v2 check %s has needsReview findings", row.ID), IsError: true}, nil
 			}
-			if row.Action != nil && row.Action.Mode == "isolatedMutation" {
+			if row.Action != nil && row.Action.Mode == "isolatedMutation" && !t.AllowIsolatedMutation {
 				return &Result{Content: fmt.Sprintf("ERROR: Spec v2 check %s requires the isolatedMutation authorization runner", row.ID), IsError: true}, nil
 			}
 		}
@@ -259,6 +266,7 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 				continue
 			}
 			vr := t.runLocal(ctx, r, effectiveTimeout(r, timeoutSec), parsed.SchemaVersion, localInputs)
+			vr = t.cleanupLocal(ctx, r, vr, effectiveTimeout(r, timeoutSec), localInputs)
 			vr.Host = "controller"
 			rows = append(rows, vr)
 			continue
@@ -286,7 +294,8 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 				}
 				applicableHosts = append(applicableHosts, remoteHost)
 			}
-			rows = append(rows, t.runAnsiblePerHost(ctx, r, applicableHosts, effectiveTimeout(r, timeoutSec), parsed.SchemaVersion, remoteInputs)...)
+			results := t.runAnsiblePerHost(ctx, r, applicableHosts, effectiveTimeout(r, timeoutSec), parsed.SchemaVersion, remoteInputs)
+			rows = append(rows, t.cleanupRemote(ctx, r, results, effectiveTimeout(r, timeoutSec), remoteInputs)...)
 			continue
 		}
 		if parsed.SchemaVersion == 2 {
@@ -299,7 +308,8 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 				continue
 			}
 		}
-		rows = append(rows, t.runRow(ctx, r, host, effectiveTimeout(r, timeoutSec), parsed.SchemaVersion, localInputs))
+		result := t.runRow(ctx, r, host, effectiveTimeout(r, timeoutSec), parsed.SchemaVersion, localInputs)
+		rows = append(rows, t.cleanupLocal(ctx, r, result, effectiveTimeout(r, timeoutSec), localInputs))
 	}
 	if t.EvidenceWriter != nil {
 		if err := t.appendEvidence(ctx, parsed, rows); err != nil {
@@ -314,6 +324,41 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 		sb.WriteByte('\n')
 	}
 	return &Result{Content: sb.String()}, nil
+}
+
+func (t *VerifySpecTool) cleanupLocal(ctx context.Context, row spec.Row, result VerifyRow, timeoutSec int, inputs map[string]string) VerifyRow {
+	if row.Action == nil || row.Action.Mode != "isolatedMutation" || row.Action.Cleanup == nil {
+		return result
+	}
+	cleanup := spec.Row{ID: row.ID, Command: row.Action.Cleanup.Probe, Expect: *row.Action.Cleanup.Expect, Action: &spec.Action{Mode: "readOnly"}}
+	cleanupResult := t.runLocal(ctx, cleanup, timeoutSec, 2, inputs)
+	if cleanupResult.Status != "pass" {
+		result.Status = "fail"
+		result.Detail = strings.TrimSpace(result.Detail + "; cleanup failed: " + cleanupResult.Detail)
+		result.Message = "isolatedMutation cleanup failed"
+	}
+	return result
+}
+
+func (t *VerifySpecTool) cleanupRemote(ctx context.Context, row spec.Row, results []VerifyRow, timeoutSec int, inputs map[string]map[string]string) []VerifyRow {
+	if row.Action == nil || row.Action.Mode != "isolatedMutation" || row.Action.Cleanup == nil {
+		return results
+	}
+	cleanup := spec.Row{ID: row.ID, Command: row.Action.Cleanup.Probe, Expect: *row.Action.Cleanup.Expect, Action: &spec.Action{Mode: "readOnly"}}
+	for i := range results {
+		probe := t.invokeAnsibleJSON(ctx, results[i].Host, cleanup, timeoutSec, 2, inputs[results[i].Host])
+		ok := probe.Status == callbackStatusOK
+		detail := callbackFailureDetail(probe)
+		if ok {
+			ok, detail = evaluateRow(cleanup, 2, probe.Stdout, probe.Stderr, probe.ExitCode, "")
+		}
+		if !ok {
+			results[i].Status = "fail"
+			results[i].Detail = strings.TrimSpace(results[i].Detail + "; cleanup failed: " + detail)
+			results[i].Message = "isolatedMutation cleanup failed"
+		}
+	}
+	return results
 }
 
 func (t *VerifySpecTool) validateSelectedRows(parsed *spec.Spec) error {

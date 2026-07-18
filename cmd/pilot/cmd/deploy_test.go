@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/anomalyco/pilot/internal/contract"
+	"github.com/anomalyco/pilot/internal/delivery"
 )
 
 // repoRootForTest walks up from the current package directory until it
@@ -64,6 +65,29 @@ func TestContractMenuAndActionPlanFailClosed(t *testing.T) {
 	}
 	if _, err := selectedActionPlaybook(catalog, []string{"provider"}, "upgrade"); err == nil {
 		t.Fatal("upgrade without a declared playbook must fail closed")
+	}
+}
+
+func TestDeployEntryExperimentalAndDependencyOrder(t *testing.T) {
+	catalog, err := contract.NewCatalog([]contract.Contract{
+		{ID: "client", Role: "client", Dependencies: []contract.Dependency{{Component: "provider", Required: true}}},
+		{ID: "provider", Role: "provider"},
+		{ID: "experimental", Role: "lab", Experimental: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deployEntryExperimental(deployPlaybook{Key: "experimental"}, catalog) {
+		t.Fatal("experimental entry was not recognized")
+	}
+	plan, err := delivery.PlanComponents(catalog, []string{"client"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	showComponentDeploymentOrder(&out, plan)
+	if !strings.Contains(out.String(), "provider[provider] → client[client]") {
+		t.Fatalf("order view = %q", out.String())
 	}
 }
 
