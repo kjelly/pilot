@@ -1,0 +1,26 @@
+schemaVersion: 1
+id: seaweedfs-s3
+role: seaweedfs-s3
+specs:
+  - path: docs/verification/seaweedfs-s3.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/seaweedfs-s3-apply.yml
+regressionTests:
+  - internal/spec/seaweedfs_s3_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: docker, required: true, relation: sameHosts}
+hostCardinality: exactly-one
+resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
+endpoints:
+  - {name: s3, scheme: http, port: 8333}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: vm, idempotency: required}
+lifecycle:
+  backup: {provider: restic, paths: [/var/lib/pilot/seaweedfs]}
+traceability:
+  mode: rowTags
+  tag: {kind: rolePrefixed, prefix: s3}
+verification: {autoDeploy: false}
+site: {include: true, order: 120, vars: {}, tags: [storage, seaweedfs-s3], optIn: false}

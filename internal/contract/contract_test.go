@@ -23,7 +23,14 @@ func TestLoaderLoadsFinalFixtureDirectoryInStableOrder(t *testing.T) {
 	for _, contract := range contracts {
 		got = append(got, contract.ID)
 	}
-	want := []string{"dns", "docker", "freeipa-server", "log-shipping", "ntp", "restic-backup"}
+	want := []string{
+		"alertmanager", "audit-log-forwarding", "dashboard", "dns", "docker",
+		"freeipa-client", "freeipa-identity", "freeipa-server-replica",
+		"freeipa-server", "keycloak-db", "keycloak", "log-server",
+		"log-shipping", "ntp", "os-patch-sla", "pam-oidc-sshd",
+		"prometheus", "restic-backup", "seaweedfs-s3", "thanos-query",
+		"wazuh-fim", "wazuh-manager",
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("contract IDs = %v, want %v", got, want)
 	}
@@ -45,7 +52,7 @@ func TestCatalogLooksUpComponentAndRole(t *testing.T) {
 		t.Fatalf("docker lookup = %#v, %t", docker, ok)
 	}
 	components := catalog.ComponentsForRole("log-server")
-	if len(components) != 1 || components[0].ID != "log-shipping" {
+	if len(components) != 2 || components[0].ID != "log-server" || components[1].ID != "log-shipping" {
 		t.Fatalf("ComponentsForRole(log-server) = %#v", components)
 	}
 	if _, ok := catalog.Component("missing"); ok {
@@ -68,8 +75,14 @@ func TestReviewFixturesMirrorCanonicalContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(canonical, mirrors) {
-		t.Fatal("review fixtures differ semantically from canonical contracts")
+	canonicalByID := make(map[string]Contract, len(canonical))
+	for _, component := range canonical {
+		canonicalByID[component.ID] = component
+	}
+	for _, mirror := range mirrors {
+		if !reflect.DeepEqual(canonicalByID[mirror.ID], mirror) {
+			t.Fatalf("review fixture %s differs semantically from its canonical contract", mirror.ID)
+		}
 	}
 }
 

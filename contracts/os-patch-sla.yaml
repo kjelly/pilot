@@ -1,0 +1,19 @@
+schemaVersion: 1
+id: os-patch-sla
+role: os-patch-sla
+specs:
+  - path: docs/verification/os-patch-sla.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/os-patch-sla-apply.yml
+regressionTests:
+  - internal/spec/os_patch_sla_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
+stagePolicy: {variable: patch_stage, default: sandbox}
+evidenceRequirement: {targetTest: vm, idempotency: required}
+traceability:
+  mode: mapped
+verification: {autoDeploy: false}
+site: {include: true, order: 140, vars: {}, tags: [maintenance, os-patch-sla], optIn: false}

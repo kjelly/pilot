@@ -1,0 +1,31 @@
+schemaVersion: 1
+id: pam-oidc-sshd
+role: linux-servers
+specs:
+  - path: docs/verification/pam-oidc-sshd.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/pam-oidc-sshd-apply.yml
+regressionTests:
+  - internal/spec/pam_oidc_sshd_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: keycloak, required: true, relation: providerEndpoint}
+bindings:
+  - input: keycloak_server_url
+    requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
+    from: {component: keycloak, endpoint: oidc}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
+groupVars:
+  - {name: keycloak_server_url, type: string, required: true, secret: false}
+  - {name: keycloak_realm, type: string, required: true, secret: false}
+  - {name: keycloak_client_id, type: string, required: true, secret: false}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+verification: {autoDeploy: false}
+site: {include: true, order: 75, vars: {}, tags: [keycloak, pam-oidc], optIn: false}

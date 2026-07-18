@@ -1,0 +1,34 @@
+schemaVersion: 1
+id: wazuh-manager
+role: wazuh-manager
+specs:
+  - path: docs/verification/wazuh-manager.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/wazuh-manager-apply.yml
+regressionTests:
+  - internal/spec/wazuh_manager_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: docker, required: true, relation: sameHosts}
+  - {component: log-server, required: false, relation: providerEndpoint}
+bindings:
+  - input: siem_forward_host
+    requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
+    from: {component: log-server, endpoint: syslog}
+hostCardinality: exactly-one
+resources: {minCPU: 4, minRAMMiB: 8192, minDiskGiB: 50}
+groupVars:
+  - {name: siem_forward_host, type: string, required: false, default: "", secret: false}
+endpoints:
+  - {name: agent, scheme: tcp, port: 1514}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+lifecycle:
+  backup: {provider: restic, paths: [/var/ossec]}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+verification: {autoDeploy: false}
+site: {include: true, order: 100, vars: {}, tags: [security, wazuh-manager], optIn: false}
