@@ -165,6 +165,10 @@ func TestVerifySpecV2AuthorizedIsolatedMutationAlwaysCleansUp(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("cleanup did not remove marker: %v", err)
 	}
+	rows, err := ReadNDJSON(res.Content)
+	if err != nil || len(rows) == 0 || rows[0].CleanupStatus != "pass" {
+		t.Fatalf("cleanup result was not recorded: rows=%+v err=%v", rows, err)
+	}
 }
 
 func TestVerifySpecV2ApplicabilityUsesPerHostInventoryInputs(t *testing.T) {
