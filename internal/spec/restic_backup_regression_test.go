@@ -106,6 +106,9 @@ func TestRegression_ResticBackupSpec(t *testing.T) {
 	if !strings.Contains(cmd["C6"], "restic check") {
 		t.Errorf("C6 must run `restic check`, got %q", cmd["C6"])
 	}
+	if !strings.Contains(cmd["C6"], "--retry-lock 30s") {
+		t.Errorf("C6 must wait safely for concurrent shared-repository checks, got %q", cmd["C6"])
+	}
 
 	// C10 must reference the site-independent s3-backup-server alias.
 	if !strings.Contains(cmd["C10"], "s3-backup-server") {

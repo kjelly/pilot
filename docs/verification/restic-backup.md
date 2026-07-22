@@ -1,8 +1,9 @@
 # Verification Spec — restic-backup（跨主機通用 restic 備份到 S3，涵蓋本專案各軟體的資料/設定檔）
 
-> 版本：v1.1（v1.0 的通用骨架已於 vm-target 沙盒實測；v1.1 用真實的 FreeIPA
+> 版本：v1.2（v1.0 的通用骨架已於 vm-target 沙盒實測；v1.1 用真實的 FreeIPA
 > server/client 做完整備份/故障/還原演練，修好 3 個真事故，見 §8 與
-> `docs/runbooks/restic-backup.md` §5–§6）
+> `docs/runbooks/restic-backup.md` §5–§6；v1.2 讓多主機共用 repository 的並行驗證
+> 以有界 lock 等待安全完成）
 > 對齊規範：pilot 通用 config-only 服務規範；備份目的地預設指向本專案自建的
 > `docs/verification/seaweedfs-s3.md`（SeaweedFS S3 gateway），亦可透過變數
 > 切換到外部/獨立 S3（AWS S3、另一台 MinIO 等）。
@@ -77,7 +78,7 @@
 | C3  | file     | `/etc/pilot/restic-env` 權限為 `0600`（內含 S3 credentials 與 repository 密碼）| 600 | stat -c '%a' /etc/pilot/restic-env |
 | C4  | config   | repository 可連線且已初始化（`restic snapshots` 執行成功）      | 0        | sh -c '. /etc/pilot/restic-env && restic snapshots >/dev/null 2>&1; echo $?' |
 | C5  | data     | 至少已有一筆快照（首次 apply 已觸發一次備份）                    | 0        | sh -c '. /etc/pilot/restic-env && restic snapshots --json 2>/dev/null | grep -q "short_id" && echo 0 || echo 1' |
-| C6  | data     | `restic check` 完整性驗證通過                                  | 0        | sh -c '. /etc/pilot/restic-env && restic check >/dev/null 2>&1; echo $?' |
+| C6  | data     | `restic check` 完整性驗證通過                                  | 0        | sh -c '. /etc/pilot/restic-env && restic check --retry-lock 30s >/dev/null 2>&1; echo $?' |
 | C7  | config   | 備份腳本含保留策略旗標（`--keep-daily`）                        | 0        | grep -q -- '--keep-daily' /usr/local/bin/pilot-restic-backup.sh; echo $? |
 | C8  | service  | `restic-backup.timer` 為 enabled                              | 0        | systemctl is-enabled restic-backup.timer >/dev/null 2>&1; echo $? |
 | C9  | service  | `restic-backup.timer` 為 active                               | 0        | systemctl is-active restic-backup.timer >/dev/null 2>&1; echo $? |
@@ -103,10 +104,13 @@
 > 指令會直接以 rc=127 misreport 成「沒裝」，即使套件（EPEL 的 `restic.rpm`）
 > 其實已經裝好。apply playbook 同時支援 Debian（`apt`）與 EL（`dnf`+EPEL，
 > 見 §6），checklist 用套件管理器中立的檢查法避免綁死單一發行版。
+> C6 保留 restic repository lock 的安全性，但允許多台
+> `restic-backup` host 的 per-host verifier 並行時有界等待 30 秒。因此對整個
+> group 驗證時必須配 `--timeout 60`，避免 pilot 預設 15 秒先中止等待。
 
 ## 3. 證據收集
 
-- 工具：`go run ./cmd/pilot vm-target verify --name restic-backup docs/verification/restic-backup.md`
+- 工具：`pilot verify docs/verification/restic-backup.md -i <inventory> -l restic-backup --timeout 60`
 - 輸出格式：`.verification/restic-backup-<UTC>.{ndjson,md}`
 - 預期 row 數：10（C1–C10）
 
@@ -209,3 +213,4 @@ go run ./cmd/pilot vm-target run --name restic-backup \
 |------|------|------|--------|
 | 2026-07-06 | v1.0 | 初版：跨主機通用 restic 備份到 S3（預設本專案自建 SeaweedFS S3 gateway，可切換外部 S3），逐主機可覆寫備份路徑與 pre-hook | sre |
 | 2026-07-06 | v1.1 | 用真實的 FreeIPA server（EL9）跑一次完整備份/故障/還原演練，發現並修正三個真事故：(1) apply playbook 原本只支援 Debian `apt`，補上 EL 系 `dnf`+EPEL 分流，C1 checklist 從 `dpkg -s` 改成套件管理器中立的 `command -v restic`；(2) 備份腳本在 systemd oneshot service 底下缺 `$HOME`，補 `export HOME=/root`；(3) 目的地 SeaweedFS bucket 若從未存在，`restic snapshots` 對「bucket does not exist」的重試退避會拖非常久、看起來像卡死，非 playbook bug 但記錄於 runbook 供排查。演練成功：刪除 389-ds 設定檔造成 server 故障、client 登入失敗，restic restore 還原後系統恢復正常，見 `docs/runbooks/restic-backup.md` §7 | sre |
+| 2026-07-22 | v1.2 | C6 加入 `--retry-lock 30s`，使多台 host 共用 repository 時的並行 verifier 保留 lock 保護並有界等待；group 驗證明確使用 `--timeout 60` | sre |
