@@ -82,8 +82,10 @@ func TestRegression_FreeipaIdentitySpec(t *testing.T) {
 	if !strings.Contains(commands["C16"], "role-fixture-canonical-ops") {
 		t.Errorf("C16 must verify role-category sudo attachment, got %q", commands["C16"])
 	}
-	if !strings.Contains(commands["C18"], "freeipa-nfs-v2.ipa.pilot.internal") {
-		t.Errorf("C18 must verify FQDN Kerberos automount target, got %q", commands["C18"])
+	if !strings.Contains(commands["C18"], "sec=krb5i") ||
+		!strings.Contains(commands["C18"], "[[:alnum:].-]+:/projects/fixture-alpha") ||
+		strings.Contains(commands["C18"], "freeipa-nfs-v2.ipa.pilot.internal") {
+		t.Errorf("C18 must verify a portable FQDN Kerberos automount target, got %q", commands["C18"])
 	}
 }
 
