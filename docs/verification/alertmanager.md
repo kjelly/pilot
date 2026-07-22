@@ -1,14 +1,14 @@
 # Verification Spec — alertmanager (central Alertmanager for all sites)
 
-> 版本：v1.0
+> 版本：v1.1
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `prometheus.md` / `thanos-query.md` 的 docker container 模式）
 > 維護者：sre
 
 ## 1. 目標系統
 
-| Hostname / Inventory group | alertmanager |
-|----------------------------|-------------|
-| central                   | alertmanager |
+| Hostname | Group |
+|----------|-------|
+| central  | alertmanager |
 
 > `alertmanager` group 只能有 **單一** 主機（與 `thanos-query` 可同機）。
 
@@ -55,4 +55,5 @@
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-07-22 | v1.1 | 修正 Targets table 欄位，讓 verifier 以 `alertmanager` inventory group 解析實際主機 | sre |
 | 2026-07-07 | v1.0 | 初版 | sre |

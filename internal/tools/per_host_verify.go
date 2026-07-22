@@ -80,6 +80,13 @@ func (t *VerifySpecTool) resolveRemoteHosts(ctx context.Context, parsed *spec.Sp
 				return expectedHostResolution{}, fmt.Errorf("v2 targets.hosts and targets.roles resolve to different hosts: hosts=%v roles=%v", sortedUniqueHosts(declared), sortedUniqueHosts(roleHosts))
 			}
 		}
+	} else if groups := v1TargetGroups(parsed.Hosts); len(groups) > 0 {
+		groupPattern := strings.Join(groups, ":")
+		groupHosts, err := list(ctx, groupPattern, "")
+		if err != nil {
+			return expectedHostResolution{}, fmt.Errorf("resolve spec target groups %q: %w", groupPattern, err)
+		}
+		specHosts = groupHosts
 	} else {
 		for _, target := range parsed.Hosts {
 			specHosts = append(specHosts, target.Hostname)
@@ -95,6 +102,22 @@ func (t *VerifySpecTool) resolveRemoteHosts(ctx context.Context, parsed *spec.Sp
 		return expectedHostResolution{}, err
 	}
 	return resolution, nil
+}
+
+// v1TargetGroups returns explicit role groups from the legacy Targets table.
+// Hostnames in portable v1 specs are examples (for example, "site-a"); the
+// inventory group is the executable target contract. A default "all" group
+// carries no such contract, so those specs retain their literal host scope.
+func v1TargetGroups(hosts []spec.Host) []string {
+	groups := make([]string, 0, len(hosts))
+	for _, target := range hosts {
+		group := strings.TrimSpace(target.Group)
+		if group == "" || group == "all" {
+			return nil
+		}
+		groups = append(groups, group)
+	}
+	return sortedUniqueHosts(groups)
 }
 
 // listAnsibleHosts asks Ansible to resolve a host pattern against the exact

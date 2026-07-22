@@ -57,7 +57,7 @@ func TestVerifySpec_RemotePerHostCallback(t *testing.T) {
 				return nil, errors.New("unexpected limit")
 			}
 			switch pattern {
-			case "all":
+			case "all", "test":
 				return []string{"host-b", "host-a"}, nil
 			default:
 				return nil, errors.New("unexpected pattern " + pattern)
@@ -315,6 +315,44 @@ func TestResolveRemoteHostsRejectsV2RoleHostDrift(t *testing.T) {
 	parsed := &spec.Spec{SchemaVersion: 2, Roles: []string{"server"}, Hosts: []spec.Host{{Hostname: "server-b"}}}
 	if _, err := tool.resolveRemoteHosts(context.Background(), parsed, ""); err == nil {
 		t.Fatal("role/host drift unexpectedly accepted")
+	}
+}
+
+func TestResolveRemoteHostsUsesV1TargetGroupsInsteadOfExampleAliases(t *testing.T) {
+	tool := &VerifySpecTool{
+		Inventory: "inventory.yml",
+		listHosts: func(_ context.Context, pattern, limit string) ([]string, error) {
+			if limit != "" {
+				t.Fatalf("unexpected limit %q", limit)
+			}
+			switch pattern {
+			case "all", "seaweedfs-s3", "nexus":
+				return []string{"nexus"}, nil
+			default:
+				return nil, errors.New("unexpected pattern " + pattern)
+			}
+		},
+	}
+	parsed := &spec.Spec{
+		SchemaVersion: 1,
+		Hosts:         []spec.Host{{Hostname: "s3", Group: "seaweedfs-s3"}},
+	}
+	resolved, err := tool.resolveRemoteHosts(context.Background(), parsed, "nexus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Hosts) != 1 || resolved.Hosts[0] != "nexus" {
+		t.Fatalf("resolved=%+v", resolved)
+	}
+}
+
+func TestV1TargetGroupsFallsBackToLiteralHostsForDefaultAll(t *testing.T) {
+	groups := v1TargetGroups([]spec.Host{
+		{Hostname: "host-a", Group: "service"},
+		{Hostname: "host-b", Group: "all"},
+	})
+	if groups != nil {
+		t.Fatalf("groups=%v, want nil", groups)
 	}
 }
 
