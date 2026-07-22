@@ -67,6 +67,7 @@ func TestRegression_FreeIPANFSServerSupportsEnrolledUbuntuHosts(t *testing.T) {
 		"path: /etc/ipa/default.conf",
 		"systemctl is-active sssd\n      check_mode: false",
 		"nfs_server_fqdn == ansible_fqdn",
+		"path: \"{{ nfs_exports_fragment | dirname }}\"",
 		"name: \"{{ nfs_server_service }}\"",
 		"when: not ansible_check_mode",
 	} {
