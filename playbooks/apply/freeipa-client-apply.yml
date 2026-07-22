@@ -331,8 +331,9 @@
         regexp: '^services\s*='
         line: >-
           services = nss, pam, ssh{{ ', autofs'
-          if (ipa_sssd_services_current.stdout | default(''))
-          is search('(^|,)\\s*autofs\\s*(,|$)') else '' }}
+          if 'autofs' in
+          ((ipa_sssd_services_current.stdout | default(''))
+          | split(',') | map('trim') | list) else '' }}
         state: present
         create: false
       register: ipa_sssd_services

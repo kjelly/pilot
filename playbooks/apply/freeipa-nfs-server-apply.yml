@@ -138,6 +138,7 @@
             src: "{{ nfs_exports_fragment }}"
             dest: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
             remote_src: true
+            force: false
             mode: preserve
           when: nfs_exports_before.stat.exists
           tags: [C7]
