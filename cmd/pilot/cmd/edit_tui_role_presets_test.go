@@ -81,14 +81,24 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 	pushRolePresetManager(&router, dir, filepath.Join(dir, "hosts.yml"), hf, "node-1", "")
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "管理 ")
+	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	for range defaultRolePresets() {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // add a preset
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "角色範本名稱")
+	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Type("test monitored node")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), `範本 "test monitored node" 的角色`)
+	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // first catalog role
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitForRolePresetOverride(t, dir)
 	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // cleanly exit the wizard
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
@@ -105,5 +115,24 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 	last := presets[len(presets)-1]
 	if last.Label != "test monitored node" || !hasRole(last.Roles, inventory.Roles()[0].Name) {
 		t.Fatalf("created preset = %+v, want label and first catalog role", last)
+	}
+}
+
+func waitForRolePresetOverride(t *testing.T, dir string) {
+	t.Helper()
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+
+	for {
+		if _, customized, err := loadRolePresets(dir); err == nil && customized {
+			return
+		}
+		select {
+		case <-timeout.C:
+			t.Fatalf("%s was not created within 2s", rolePresetPath(dir))
+		case <-tick.C:
+		}
 	}
 }
