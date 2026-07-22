@@ -1,4 +1,4 @@
-# FreeIPA Kerberos NFSv4 Server Verification Spec v1.0
+# FreeIPA Kerberos NFSv4 Server Verification Spec v1.1
 
 ## 0. 目的
 
@@ -9,7 +9,7 @@
 | 項目 | 值 |
 |------|----|
 | Ansible group | `freeipa-nfs-server`（vm-target 以 `-e target_group=<exact-host>` 對齊） |
-| OS | AlmaLinux 9 |
+| OS | AlmaLinux 9、Ubuntu 24.04 |
 | Apply | `playbooks/apply/freeipa-nfs-server-apply.yml` |
 
 ## 1.5 依賴變數契約
@@ -22,7 +22,7 @@
 |----|----------|-------|----------|---------|
 | C1 | principal | NFS service principal 存在 | ~nfs/ | klist -k /etc/krb5.keytab |
 | C2 | keytab | system keytab 僅 root 可讀 | ~600 root root | stat -c '%a %U %G' /etc/krb5.keytab |
-| C3 | package | NFS server package 已安裝 | 0 | rpm -q nfs-utils |
+| C3 | package | 對應 OS 的 NFS server package 已安裝 | 0 | if command -v rpm >/dev/null 2>&1; then rpm -q nfs-utils; else dpkg-query -W -f='${Status}\n' nfs-kernel-server | grep -qx 'install ok installed'; fi |
 | C4 | service | NFS server service 正在執行 | active | systemctl is-active nfs-server |
 | C5 | ownership | fixture share 是 setgid 且 others 不可寫 | ~2770 | stat -c '%a' /srv/nfs/projects/fixture-alpha |
 | C6 | acl | access 與 default ACL 都包含 read-only group | ~default:group:data-fixture-nfs-ro:r-x | getfacl -cp /srv/nfs/projects/fixture-alpha |
@@ -54,3 +54,4 @@ pilot vm-target test --name <nfs-vm> --playbook playbooks/apply/freeipa-nfs-serv
 ## 8. 變更紀錄
 
 - v1.0：canonical Kerberos NFSv4 server acceptance contract。
+- v1.1：支援 AlmaLinux 9 與 Ubuntu 24.04；C3 改為 OS-aware package check，已在 Nexus Ubuntu target 透過 `pilot verify --probe` 實跑 PASS（evidence：`.verification/minimal-poc-update/2026-07-22-round-12/dev-probe-nfs-c3/probe.cast`）。
