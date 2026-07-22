@@ -42,9 +42,9 @@ get wrong (e.g. accidentally wiring a role to a host it shouldn't touch).
 ## 1. Setup the Multi-VM Test Environment
 
 We provision three KVM nodes using `pilot vm-target`:
-- **`ipa-1`**: AlmaLinux 9 (`almalinux-9`). Role: FreeIPA identity provider (server).
-- **`web-1`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Central services server. Hosts Prometheus/Thanos sidecar, Thanos Query, Alertmanager, Grafana+Loki dashboard, Wazuh Manager (syslog receiver & FIM controller), SeaweedFS S3 storage.
-- **`web-2`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Client node. Integrates into FreeIPA realm, ships logs (Promtail) and forwards audit logs to `web-1`, backs up config files to SeaweedFS S3 on `web-1`, and runs the Wazuh FIM agent reporting to `web-1`.
+- **`freeipa`**: AlmaLinux 9 (`almalinux-9`). Role: FreeIPA identity provider (server).
+- **`nexus`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Central services server. Hosts Grafana, Prometheus/Thanos sidecar, Thanos Query, Alertmanager, Loki, Wazuh Manager (syslog receiver & FIM controller), SeaweedFS S3, and the NFS server.
+- **`client`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Verification client. Integrates into FreeIPA realm, validates SSH/HBAC/sudo, ships logs (Promtail), forwards audit logs to `nexus`, backs up config files to SeaweedFS S3 on `nexus`, collects metrics, and runs the Wazuh FIM agent reporting to `nexus`.
 
 Node names are illustrative — reuse whatever `pilot vm-target list` already
 shows if VMs are already up rather than tearing down and renaming; the
@@ -54,13 +54,13 @@ role/scenario coverage below is what matters, not the literal hostnames.
 
 ```bash
 # 1. Provision AlmaLinux 9 VM for FreeIPA Server (needs at least 4096 MiB Memory)
-pilot vm-target up --name ipa-1 --base-image almalinux-9 --memory 4096 --vcpus 2 --disk 30 --ssh-user root
+pilot vm-target up --name freeipa --base-image almalinux-9 --memory 4096 --vcpus 2 --disk 30 --ssh-user root
 
 # 2. Provision Ubuntu 24.04 VM for Central Services Server (needs 8192+ MiB Memory, 4+ vCPUs for Wazuh/Containers)
-pilot vm-target up --name web-1 --base-image ubuntu-24.04 --memory 8192 --vcpus 4 --disk 50 --ssh-user root
+pilot vm-target up --name nexus --base-image ubuntu-24.04 --memory 8192 --vcpus 4 --disk 50 --ssh-user root
 
 # 3. Provision Ubuntu 24.04 VM for Client verification
-pilot vm-target up --name web-2 --base-image ubuntu-24.04 --memory 2048 --vcpus 2 --disk 30 --ssh-user root
+pilot vm-target up --name client --base-image ubuntu-24.04 --memory 2048 --vcpus 2 --disk 30 --ssh-user root
 ```
 
 If all three are started concurrently, the heaviest VM can miss the default
@@ -78,9 +78,9 @@ pilot vm-target list
 > reassigns leases on every rebuild.
 
 ```bash
-pilot vm-target exec --name ipa-1 -- ip -4 a
-pilot vm-target exec --name web-1 -- id
-pilot vm-target exec --name web-2 -- id
+pilot vm-target exec --name freeipa -- ip -4 a
+pilot vm-target exec --name nexus -- id
+pilot vm-target exec --name client -- id
 ```
 
 Per-VM SSH keys live under `/var/lib/libvirt/images/pilot/<name>/id_ed25519`
@@ -106,9 +106,9 @@ For each VM, add a host with its real `ansible_host` (from §1.2),
 
 | Host | Roles |
 |---|---|
-| `ipa-1` | `freeipa-server`, `restic-backup`, `audit-log-forwarding`, `wazuh-fim` |
-| `web-1` | `docker`, `wazuh-manager`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard`, `audit-log-forwarding`, `wazuh-fim` |
-| `web-2` | `docker`, `freeipa-client`, `restic-backup`, `audit-log-forwarding`, `wazuh-fim` |
+| `freeipa` | `freeipa-server`, `restic-backup`, `audit-log-forwarding`, `wazuh-fim` |
+| `nexus` | `docker`, `wazuh-manager`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard`, `freeipa-nfs-server`, `audit-log-forwarding`, `wazuh-fim` |
+| `client` | `docker`, `freeipa-client`, `restic-backup`, `audit-log-forwarding`, `wazuh-fim`, `freeipa-nfs-client` |
 
 **All three hosts get `wazuh-fim` and `audit-log-forwarding`**, not just the
 client node — every node's own `/etc` should be FIM-monitored and every
@@ -117,7 +117,7 @@ manager's own host and the FreeIPA server. This is a real scope correction
 from an earlier version of this skill that only wired those two roles to the
 client VM.
 
-Since `wazuh-manager` is enabled on `web-1`, leave the `log-server` group
+Since `wazuh-manager` is enabled on `nexus`, leave the `log-server` group
 empty — Wazuh Manager is the primary syslog receiver, avoiding a port
 514/udp collision. Keycloak and PAM-OIDC-SSHD are out of scope for this
 delivery test (leave those groups empty too; `site.yml`'s empty-group
@@ -125,9 +125,9 @@ auto-skip means you don't need vault entries for them).
 
 Host-level extra vars (via `pilot edit`'s "其他變數" host menu, not `-e` on
 the command line, so they persist with the workspace):
-- `ipa-1`: none extra beyond the role set.
-- `web-2`, `ipa-1` (and `web-1` itself): `siem_forward_host` / `wazuh_manager_host`
-  pointed at `web-1`'s IP — or set these once at the group_vars level (§2.2)
+- `freeipa`: none extra beyond the role set.
+- `client`, `freeipa` (and `nexus` itself): `siem_forward_host` / `wazuh_manager_host`
+  pointed at `nexus`'s IP — or set these once at the group_vars level (§2.2)
   since all three hosts resolve to the same manager.
 
 ### 2.2 group_vars (via `pilot edit` -> group_vars/)
@@ -136,13 +136,13 @@ After `pilot inventory generate --dir <workspace>` backfills the
 `.example.yml` templates for every role you selected, fill in via `pilot
 edit`:
 
-- `freeipa.yml`: `freeipa_server_ip` = ipa-1's IP.
+- `freeipa.yml`: `freeipa_server_ip` = `freeipa`'s IP.
 - `prometheus.yml`: `prometheus_site_label` (required, unique — e.g.
-  `site-test`), `thanos_s3_target_host` = web-1's IP (same host as
+  `site-test`), `thanos_s3_target_host` = `nexus`'s IP (same host as
   `seaweedfs-s3`).
-- `thanos-query.yml`: `thanos_s3_target_host` = web-1's IP (must match
+- `thanos-query.yml`: `thanos_s3_target_host` = `nexus`'s IP (must match
   `prometheus.yml`'s value and bucket).
-- `dashboard.yml`: `thanos_query_target_host` = web-1's IP (Grafana's
+- `dashboard.yml`: `thanos_query_target_host` = `nexus`'s IP (Grafana's
   datasource points at the central Thanos Query, not straight at
   Prometheus).
 
@@ -150,11 +150,11 @@ edit`:
   `thanos_query_target_host`) genuinely take effect from group_vars now —
   see §3.2 for the play-vars-precedence bug this used to hit and how it
   was fixed at the source.
-- `restic-backup.yml`: `restic_s3_target_host` = web-1's IP.
+- `restic-backup.yml`: `restic_s3_target_host` = `nexus`'s IP.
 - `wazuh-manager.yml`: `siem_forward_host` (optional; leave empty unless
   you also want the manager's own syslog forwarded elsewhere).
-- `wazuh-fim.yml`: `wazuh_manager_host` = web-1's IP (all three hosts share
-  this group_vars file, so one edit covers `ipa-1`/`web-1`/`web-2`).
+- `wazuh-fim.yml`: `wazuh_manager_host` = `nexus`'s IP (all three hosts share
+  this group_vars file, so one edit covers `freeipa`/`nexus`/`client`).
 
 ### 2.3 Vault Setup (via `pilot edit` -> `.vault/main.yaml`)
 
@@ -236,7 +236,7 @@ All four can still be overridden via `-e` at deploy time or via
 `group_vars/freeipa.yml` if needed, but none require it. The "還有其他
 -e 變數要帶嗎？" prompt during `pilot deploy` can be answered **empty**.
 
-Do **not** put `dns`/`ntp` in `ipa-1`'s role list — those are
+Do **not** put `dns`/`ntp` in `freeipa`'s role list — those are
 Debian/Ubuntu-only roles (`ansible.builtin.apt`,
 `/etc/systemd/resolved.conf`) and will fail on AlmaLinux. FreeIPA's
 native flags supersede them.
@@ -300,17 +300,17 @@ misconfiguration:
 
 ```bash
 # Live: allowed sudo command (-o ControlMaster=no — see note below)
-sshpass -p '<password>' ssh -o ControlMaster=no -o PreferredAuthentications=password alice@<web-2-ip> \
+  sshpass -p '<password>' ssh -o ControlMaster=no -o PreferredAuthentications=password alice@<client-ip> \
   "echo '<password>' | sudo -S systemctl is-active ssh"
 # Live: denied sudo command
-sshpass -p '<password>' ssh -o ControlMaster=no -o PreferredAuthentications=password alice@<web-2-ip> \
+  sshpass -p '<password>' ssh -o ControlMaster=no -o PreferredAuthentications=password alice@<client-ip> \
   "echo '<password>' | sudo -S cat /etc/shadow"
 # Live: login denied entirely for an out-of-policy user
-ssh -o ControlMaster=no -o PreferredAuthentications=password bob@<web-2-ip> 'echo should-not-reach-here'
+ssh -o ControlMaster=no -o PreferredAuthentications=password bob@<client-ip> 'echo should-not-reach-here'
 
-# FreeIPA's own authoritative check (run on ipa-1, after kinit admin)
-ipa hbactest --user=alice --host=<web-2-fqdn> --service=sshd   # Access granted: True
-ipa hbactest --user=bob   --host=<web-2-fqdn> --service=sshd   # Access granted: False
+# FreeIPA's own authoritative check (run on freeipa, after kinit admin)
+ipa hbactest --user=alice --host=<client-fqdn> --service=sshd   # Access granted: True
+ipa hbactest --user=bob   --host=<client-fqdn> --service=sshd   # Access granted: False
 ```
 
 Both layers must agree: `hbactest`'s verdict for alice/bob should match what
@@ -361,7 +361,7 @@ ASSERT_EXIT 0
 ```
 ```bash
 trec drive --script kinit-alice.txt --secret-env ALICE_TEMP_PW --secret-env ALICE_NEW_PW \
-  -o kinit-alice.cast -- ssh -t -o StrictHostKeyChecking=accept-new -i <client-vm-key> root@<web-2-ip> kinit alice
+  -o kinit-alice.cast -- ssh -t -o StrictHostKeyChecking=accept-new -i <client-vm-key> root@<client-ip> kinit alice
 ```
 
 Once this completes, `ipa user-show alice --all --raw`'s
@@ -383,8 +383,8 @@ federates every site's Prometheus/sidecar, so a check that only curls
 Prometheus directly can pass even if the Thanos Query hop is broken:
 
 ```bash
-curl -s http://<web-1-ip>:3000/api/health                         # Grafana itself
-curl -s "http://<web-1-ip>:10912/api/v1/query?query=up"           # Thanos Query -- same datasource Grafana's panel reads
+curl -s http://<nexus-ip>:3000/api/health                         # Grafana itself
+curl -s "http://<nexus-ip>:10912/api/v1/query?query=up"           # Thanos Query -- same datasource Grafana's panel reads
 ```
 
 A real `result` array with a live `up{...}` sample means Prometheus's own
@@ -394,8 +394,8 @@ StoreAPI), and Thanos Query's federation are all working end-to-end.
 ### 4.3 Log chain: Grafana -> Loki <- Promtail (log-shipping)
 
 ```bash
-curl -s "http://<web-1-ip>:3100/loki/api/v1/label/job/values"
-curl -s -G "http://<web-1-ip>:3100/loki/api/v1/query_range" \
+curl -s "http://<nexus-ip>:3100/loki/api/v1/label/job/values"
+curl -s -G "http://<nexus-ip>:3100/loki/api/v1/query_range" \
   --data-urlencode 'query={job=~".+"}' --data-urlencode 'limit=5'
 ```
 
@@ -406,7 +406,7 @@ itself is good evidence the pipeline is live, not just configured).
 ### 4.4 Config Backup to S3 (SeaweedFS via Restic)
 
 ```bash
-pilot vm-target exec --name web-2 -- restic snapshots
+pilot vm-target exec --name client -- restic snapshots
 ```
 Expect at least one snapshot of `/etc`. See Troubleshooting for the
 `ciphertext verification failed` / stale-lock failure modes.
@@ -414,9 +414,9 @@ Expect at least one snapshot of `/etc`. See Troubleshooting for the
 ### 4.5 Wazuh File Integrity Monitoring (FIM)
 
 ```bash
-pilot vm-target exec --name web-2 -- touch /etc/wazuh_test_fim_trigger
-# wait a few seconds, then on web-1:
-pilot vm-target exec --name web-1 -- docker exec single-node-wazuh.manager-1 \
+pilot vm-target exec --name client -- touch /etc/wazuh_test_fim_trigger
+# wait a few seconds, then on nexus:
+pilot vm-target exec --name nexus -- docker exec single-node-wazuh.manager-1 \
   tail -n 200 /var/ossec/logs/alerts/alerts.log | grep wazuh_test_fim_trigger
 ```
 
@@ -436,11 +436,11 @@ correction directions are what's new and what actually needs testing here.
 1. In `.vault/ipa-identity.yaml`, remove `alice` from whichever group grants
    her the §4.1 sudo/SSH access (e.g. drop `sysops` from her `groups:`
    list).
-2. Rerun `pilot reconcile`, selecting `freeipa-identity` against `ipa-1`.
+2. Rerun `pilot reconcile`, selecting `freeipa-identity` against `freeipa`.
 3. Re-run the exact §4.1 checks for alice:
    ```bash
-   ssh alice@<web-2-ip> "echo '<password>' | sudo -S systemctl is-active ssh"   # now expect denial
-   ipa hbactest --user=alice --host=<web-2-fqdn> --service=sshd                  # now expect Access granted: False
+   ssh alice@<client-ip> "echo '<password>' | sudo -S systemctl is-active ssh"   # now expect denial
+   ipa hbactest --user=alice --host=<client-fqdn> --service=sshd                  # now expect Access granted: False
    ```
    Both must flip to denied. If either still says granted, the roster
    change did not actually revoke live access — that's a real regression
@@ -455,7 +455,7 @@ don't."
 HBAC rule in the roster and change one of its own attributes (e.g. its
 `desc:`, or flip a rule between `hostcat: all` and an explicit `hosts:`
 list). Rerun `pilot reconcile` and confirm the live rule (`ipa sudorule-show
-<rule> --all` / `ipa hbacrule-show <rule> --all` on `ipa-1`) actually
+<rule> --all` / `ipa hbacrule-show <rule> --all` on `freeipa`) actually
 reflects the new value — before the 2026-07-16 redesign, only a
 brand-new object ever got these fields set; an already-existing one
 silently kept whatever it was created with.
@@ -478,9 +478,9 @@ disposable fixture roster.
 ## 5. Cleanup
 
 ```bash
-pilot vm-target down --name web-2
-pilot vm-target down --name web-1
-pilot vm-target down --name ipa-1
+pilot vm-target down --name client
+pilot vm-target down --name nexus
+pilot vm-target down --name freeipa
 ```
 
 Only tear down VMs you actually brought up for this test — never tear down a
@@ -496,7 +496,7 @@ VM you didn't create or that the user didn't explicitly name for deletion.
 | `restic-backup` fails with `ciphertext verification failed` | Either the bucket was initialized with a different `restic_password`, or multiple hosts raced to initialize the same fresh repository | Ensure single-host repository initialization, then delete/recreate the test bucket and re-run |
 | `preflight` fails with `Permission denied (publickey)` | Wrong SSH key used | Use the pilot VM-specific key: `/var/lib/libvirt/images/pilot/<name>/id_ed25519` |
 | `prometheus-apply.yml` fails with `prometheus_site_label is required` even after setting it in `group_vars/prometheus.yml` (should no longer occur — see §3.2) | On an older checkout: `prometheus_site_label`/`thanos_s3_target_host`/`thanos_query_target_host` were declared as play-level `vars:` with a hardcoded `""`, which outranks group_vars/host_vars, silently shadowing what you set | Fixed at the source (see §3.2) — upgrade the checkout. If stuck on an old one, pass it as `-e prometheus_site_label=...` instead as a one-off workaround |
-| Thanos Query container fails to start: `Bind for 0.0.0.0:10902 failed: port is already allocated` (should no longer occur by default — see §3.2) | Prometheus's own Thanos sidecar hardcodes host port 10902; the central Thanos Query used to default its own host-published HTTP port to the same 10902, colliding whenever the two are co-located on one host (e.g. `web-1` in this scenario's own role table) | Fixed at the source: `thanos-query-apply.yml`'s `thanos_query_http_port` (and `dashboard-apply.yml`'s matching `thanos_query_port`) now default to **10912**, not 10902 — no override needed for this topology. Only pass `-e thanos_query_http_port=... -e thanos_query_port=...` if you need some other port scheme |
+| Thanos Query container fails to start: `Bind for 0.0.0.0:10902 failed: port is already allocated` (should no longer occur by default — see §3.2) | Prometheus's own Thanos sidecar hardcodes host port 10902; the central Thanos Query used to default its own host-published HTTP port to the same 10902, colliding whenever the two are co-located on one host (e.g. `nexus` in this scenario's own role table) | Fixed at the source: `thanos-query-apply.yml`'s `thanos_query_http_port` (and `dashboard-apply.yml`'s matching `thanos_query_port`) now default to **10912**, not 10902 — no override needed for this topology. Only pass `-e thanos_query_http_port=... -e thanos_query_port=...` if you need some other port scheme |
 | FreeIPA sudo test fails with `user does not exist` | Wrong shell used to run `sudo runuser` | Use `bash -c "sudo runuser -u <user> -- sudo -n id"` |
 | §4.1 live-SSH allow/deny test for `alice` fails with `Password change required but no TTY available` (or the login just hangs) | Her account is in FreeIPA's "must change" state — a first-time onboard with `force_password: true`, or a genuine out-of-band `ipa passwd` reset done directly on the server, outside the roster/reconciler | Confirmed live, 2026-07-16: personalize the password with a scripted `kinit` (3-line forced-change flow — old password / new password / retype), fully `trec`-scriptable with `TEXT_ENV`/`--secret-env`. See the worked example above §4.1's live-SSH commands. A routine roster-driven `freeipa-identity` redeploy no longer reproduces this on its own (v4.8's Phase 0 password self-change protection correctly declines to re-reset an already-personalized password) — this only bites first-time onboarding or a genuinely out-of-band reset |
 | §4.1 live-SSH test "passes" (or "fails" the deny case) in a way that contradicts `ipa hbactest`'s verdict, right after a password/HBAC/sudo-rule change | A local `ControlMaster auto`/`ControlPersist` SSH config (common) silently reused an already-authenticated multiplexed connection from an earlier test instead of actually re-authenticating | Always add `-o ControlMaster=no` to these specific commands (or `ssh -O exit <host>` first) — confirmed live, 2026-07-16, that a stale multiplexed session hid a genuine "password expired" block |
@@ -505,4 +505,4 @@ VM you didn't create or that the user didn't explicitly name for deletion.
 | `freeipa-server-apply.yml` fails with `Source /etc/systemd/resolved.conf not found` | `dns`/`ntp` roles (Debian/Ubuntu-only) were assigned to the AlmaLinux FreeIPA host instead of using its native flags | Remove `dns`/`ntp` from that host's role list; `freeipa_setup_dns` and `freeipa_setup_ntp` both default to `true` (§3.3) — no `-e` override needed |
 | Grafana's Thanos Query datasource returns no data even though Prometheus itself has metrics | Checked Prometheus directly instead of through Thanos Query, or `thanos_s3_target_host`/bucket mismatch between `prometheus.yml` and `thanos-query.yml` | Always verify via the Thanos Query port (§4.2), and confirm both group_vars files point at the same S3 host + bucket |
 | Loki has no log data | `log-shipping` didn't reach a host with real logs — either `site.yml` still hardcodes `target_group: log-server` (older checkout) and that group is empty, or `wazuh-manager`/`log-server` are both empty in this inventory | On current `site.yml`, check the resolved host with `--list-hosts --tags log-shipping`; on an older checkout, run `log-shipping` as its own `pilot deploy` single-component invocation with `-e target_group=<host with real logs>` |
-| §4.6: removed a roster group/rule membership, redeployed `freeipa-identity`, but `hbactest`/live sudo still shows the old (granted) state | On an older checkout, `freeipa-identity-apply.yml`'s "Ensure X exists" tasks were create-only — removing a roster entry and rerunning did nothing, since `ipa *-add`/`*-add-member` no-op on "already exists"/"already a member" and there was no matching `*-remove-*` step | Upgrade to a checkout with the 2026-07-16 reconciler redesign (adds lookup + diff + `*-remove-*` tasks — see `docs/runbooks/minimal-poc-architecture.md` v4.8). On an older checkout, the only workaround is to manually `ipa group-remove-member`/`sudorule-remove-*`/`hbacrule-remove-*` on `ipa-1` for the specific stale entry — exactly the manual-edit anti-pattern §3.4 says this playbook should make unnecessary |
+| §4.6: removed a roster group/rule membership, reconciled `freeipa-identity`, but `hbactest`/live sudo still shows the old (granted) state | On an older checkout, `freeipa-identity-apply.yml`'s "Ensure X exists" tasks were create-only — removing a roster entry and rerunning did nothing, since `ipa *-add`/`*-add-member` no-op on "already exists"/"already a member" and there was no matching `*-remove-*` step | Upgrade to a checkout with the 2026-07-16 reconciler redesign (adds lookup + diff + `*-remove-*` tasks — see `docs/runbooks/minimal-poc-architecture.md` v4.8). On an older checkout, the only workaround is to manually `ipa group-remove-member`/`sudorule-remove-*`/`hbacrule-remove-*` on `freeipa` for the specific stale entry — exactly the manual-edit anti-pattern §3.4 says this playbook should make unnecessary |
