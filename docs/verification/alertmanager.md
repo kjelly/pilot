@@ -1,6 +1,6 @@
 # Verification Spec — alertmanager (central Alertmanager for all sites)
 
-> 版本：v1.1
+> 版本：v1.2
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `prometheus.md` / `thanos-query.md` 的 docker container 模式）
 > 維護者：sre
 
@@ -30,7 +30,7 @@
 | C2 | http | Alertmanager `/-/healthy`（9093）回 200 | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9093/-/healthy |
 | C3 | http | Alertmanager `/-/ready`（9093）回 200 | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9093/-/ready |
 | C4 | config | `alertmanager.yml` 語法有效 (`amtool check-config`) | 0 | sh -c 'docker exec pilot-alertmanager amtool check-config /etc/alertmanager/alertmanager.yml >/dev/null 2>&1' |
-| C5 | config | `alertmanager.yml` 含 `route:` 區塊 (非空) | 0 | sh -c 'grep -qE "^[[:space:]]*route:" /etc/pilot/alertmanager/alertmanager.yml' |
+| C5 | config | `alertmanager.yml` 含 route 區塊（YAML 或 JSON） | 0 | sh -c 'grep -qE "(^[[:space:]]*route:|\"route\"[[:space:]]*:)" /etc/pilot/alertmanager/alertmanager.yml' |
 | C6 | http | API `/api/v2/status` 回 200 | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9093/api/v2/status |
 | C7 | functional | 推一筆測試告警至 Alertmanager，`/api/v2/alerts` 可查得 | 0 | sh -c 'curl -fsS -X POST http://127.0.0.1:9093/api/v2/alerts -H "Content-Type: application/json" -d "[{\"labels\":{\"alertname\":\"pilot-alertmanager-selftest\",\"severity\":\"info\"},\"annotations\":{\"msg\":\"PILOT-ALERTMANAGER-SELFTEST\"}}]" >/dev/null 2>&1; sleep 1; curl -fsS http://127.0.0.1:9093/api/v2/alerts | grep -q pilot-alertmanager-selftest' |
 
@@ -49,11 +49,12 @@
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|----------|----------|------|
-| C5 | `alertmanager_config` 尚未覆寫,僅有 stub `null` receiver，仍屬正常 (只要 `route:` 存在) | 所有環境 | 永久 |
+| C5 | `alertmanager_config` 尚未覆寫,僅有 stub `null` receiver，仍屬正常（只要 YAML `route:` 或 JSON `"route"` 存在） | 所有環境 | 永久 |
 
 ## 6. 變更紀錄
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-07-22 | v1.2 | C5 同時支援 Alertmanager 接受的 YAML 與 JSON config，避免合法 compact JSON 被誤判 | sre |
 | 2026-07-22 | v1.1 | 修正 Targets table 欄位，讓 verifier 以 `alertmanager` inventory group 解析實際主機 | sre |
 | 2026-07-07 | v1.0 | 初版 | sre |
