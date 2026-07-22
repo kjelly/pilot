@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -83,5 +84,24 @@ func TestRegression_FreeipaIdentitySpec(t *testing.T) {
 	}
 	if !strings.Contains(commands["C18"], "freeipa-nfs-v2.ipa.pilot.internal") {
 		t.Errorf("C18 must verify FQDN Kerberos automount target, got %q", commands["C18"])
+	}
+}
+
+// TestRegression_FreeipaIdentityAllowsSharedNFSRoster locks the canonical
+// roster hand-off: identity reconciliation must tolerate nfs_clients entries
+// that the dedicated NFS client playbook consumes, while migration stays
+// fail-closed until it has its own supported workflow.
+func TestRegression_FreeipaIdentityAllowsSharedNFSRoster(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-identity-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+	if strings.Contains(playbook, "freeipa_roster.nfs_clients | default([]) | length == 0") {
+		t.Fatal("identity reconciliation must accept nfs_clients in the shared canonical roster")
+	}
+	if !strings.Contains(playbook, "freeipa_roster.migration | default({}) | length == 0") {
+		t.Fatal("identity reconciliation must keep unsupported migration input fail-closed")
 	}
 }

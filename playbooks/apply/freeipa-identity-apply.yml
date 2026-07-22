@@ -130,15 +130,14 @@
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
-    - name: "Gate: canonical NFS and migration are handled by dedicated playbooks"
+    - name: "Gate: canonical migration remains a dedicated fail-closed workflow"
       ansible.builtin.assert:
         that:
-          - freeipa_roster.nfs_clients | default([]) | length == 0
           - freeipa_roster.migration | default({}) | length == 0
         fail_msg: >-
-          NFS clients and migration are separate target-side workflows. Run
-          freeipa-nfs-client-apply.yml for nfs_clients; migration remains
-          fail-closed until its dedicated delivery batch.
+          Migration remains fail-closed until its dedicated delivery batch.
+          Canonical nfs_clients entries are accepted here but reconciled only
+          by freeipa-nfs-client-apply.yml.
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
