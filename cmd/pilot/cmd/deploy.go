@@ -1525,7 +1525,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 		return err
 	}
 
-	vault, err := promptVault(out, inv, "只有你的 inventory 實際填了 freeipa-server/keycloak/keycloak-db 機器時才需要")
+	vault, err := promptVault(out, inv, "inventory 有 freeipa-server、freeipa-nfs-server、keycloak 或 keycloak-db 機器時需要；NFS server 使用 canonical roster")
 	if err != nil {
 		return err
 	}

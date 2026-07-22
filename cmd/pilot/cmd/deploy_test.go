@@ -226,6 +226,49 @@ func TestDeployCatalog_PlaybooksExistAndAreWellFormed(t *testing.T) {
 	}
 }
 
+func TestNFSSiteDeploymentProjection(t *testing.T) {
+	root := repoRootForTest(t)
+	data, err := os.ReadFile(filepath.Join(root, "playbooks", "site.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	site := string(data)
+	for _, want := range []string{
+		"import_playbook: apply/freeipa-nfs-server-apply.yml",
+		"tags: [freeipa, freeipa-nfs-server]",
+		"import_playbook: apply/freeipa-nfs-client-apply.yml",
+		"tags: [freeipa, freeipa-nfs-client]",
+	} {
+		if !strings.Contains(site, want) {
+			t.Errorf("site.yml missing NFS deployment projection %q", want)
+		}
+	}
+
+	serverPos := strings.Index(site, "apply/freeipa-nfs-server-apply.yml")
+	clientPos := strings.Index(site, "apply/freeipa-nfs-client-apply.yml")
+	if !(strings.Index(site, "apply/freeipa-server-apply.yml") < serverPos && serverPos < strings.Index(site, "apply/freeipa-client-apply.yml") && strings.Index(site, "apply/freeipa-client-apply.yml") < clientPos) {
+		t.Error("site.yml must deploy FreeIPA server, NFS server, FreeIPA client, then NFS clients")
+	}
+
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	components, err := componentsForPlaybook(catalog, "playbooks/site.yml", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"freeipa-nfs-server", "freeipa-nfs-client"} {
+		if !slices.Contains(components, want) {
+			t.Errorf("full-site deployment contracts omit %q: %v", want, components)
+		}
+	}
+}
+
 func TestValidateOptionalKV(t *testing.T) {
 	cases := []struct {
 		in      string
