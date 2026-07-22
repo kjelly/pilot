@@ -265,6 +265,9 @@
             name: "{{ nfs_server_service }}"
             enabled: true
             state: started
+          # On a fresh host, package installation is only predicted during
+          # --check, so the systemd unit does not exist until the real apply.
+          when: not ansible_check_mode
           tags: [C3, C4]
       rescue:
         - name: "Inspect managed exports rollback snapshot"
