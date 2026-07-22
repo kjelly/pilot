@@ -90,3 +90,16 @@ func TestRegression_FreeIPANFSServerSupportsEnrolledUbuntuHosts(t *testing.T) {
 		}
 	}
 }
+
+func TestRegression_FreeIPANFSClientFreshPreviewIsCheckSafe(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-nfs-client-apply.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	if !strings.Contains(playbook, "name: autofs\n        enabled: true\n        state: started\n      #") ||
+		!strings.Contains(playbook, "when: not ansible_check_mode") {
+		t.Fatal("fresh NFS client preview must not inspect the autofs unit before package installation")
+	}
+}

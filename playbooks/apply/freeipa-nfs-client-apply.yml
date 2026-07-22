@@ -58,4 +58,7 @@
         name: autofs
         enabled: true
         state: started
+      # The package task is predictive during --check, so a fresh host does
+      # not have the autofs unit until the real apply installs it.
+      when: not ansible_check_mode
       tags: [C5]
