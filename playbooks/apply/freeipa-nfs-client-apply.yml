@@ -53,6 +53,15 @@
         - nfs_client_automount.rc != 0
         - "'already configured' not in (nfs_client_automount.stdout | default('') + nfs_client_automount.stderr | default(''))"
       tags: [C3, C4]
+    - name: "Ensure SSSD keeps the autofs responder enabled"
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: '^services\s*='
+        line: "services = nss, pam, ssh, autofs"
+        state: present
+        create: false
+      notify: Restart SSSD after enabling automount
+      tags: [C3]
     - name: "Enable autofs"
       ansible.builtin.service:
         name: autofs
@@ -62,3 +71,9 @@
       # not have the autofs unit until the real apply installs it.
       when: not ansible_check_mode
       tags: [C5]
+
+  handlers:
+    - name: Restart SSSD after enabling automount
+      ansible.builtin.service:
+        name: sssd
+        state: restarted

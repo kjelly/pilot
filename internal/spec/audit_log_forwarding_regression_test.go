@@ -95,6 +95,12 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 			t.Errorf("%s expected should be `present` (file-existence check), got %q", id, exp[id])
 		}
 	}
+	for _, id := range []string{"C1", "C2"} {
+		if !strings.Contains(cmd[id], "command -v rpm") ||
+			!strings.Contains(cmd[id], "dpkg-query") {
+			t.Errorf("%s package probe must support both EL rpm and Ubuntu dpkg, got %q", id, cmd[id])
+		}
+	}
 
 	// C4/C5 must gate on the actual privilege-transition condition, not
 	// just a bare -S execve watch.
@@ -178,6 +184,11 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 		t.Fatalf("read audit-log-forwarding-apply.yml: %v", err)
 	}
 	applyRaw := string(playbookRaw)
+	for _, required := range []string{"audit_syslog_path", "/var/log/messages", "audit_syslog_group"} {
+		if !strings.Contains(applyRaw, required) {
+			t.Errorf("audit-log-forwarding apply must render a portable EL/Ubuntu syslog logrotate policy; missing %q", required)
+		}
+	}
 	if strings.Contains(applyRaw, "Missing required var") || strings.Contains(applyRaw, "Assert required variables") {
 		t.Errorf("audit-log-forwarding-apply.yml must not hard-require siem_forward_host; forwarding must be optional")
 	}

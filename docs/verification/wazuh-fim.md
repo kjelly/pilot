@@ -1,6 +1,6 @@
 # Verification Spec — wazuh-fim（Wazuh agent：檔案完整性監控 FIM + auditd who-data）
 
-> 版本：v1.1
+> 版本：v1.2
 > 對齊規範：pilot 通用 config-only 服務規範；註冊目標為
 > `docs/verification/wazuh-manager.md`（Wazuh 中央伺服器），兩份 spec 搭配構成
 > 一組 Shape 3（agent+server）；`wazuh-manager.md` 再選填轉送至
@@ -62,8 +62,8 @@
 
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
-| C1  | package   | `wazuh-agent` 已安裝                                                   | 0        | dpkg -s wazuh-agent >/dev/null 2>&1; echo $? |
-| C2  | package   | `auditd` 已安裝（who-data provider 依賴）                              | 0        | dpkg -s auditd >/dev/null 2>&1; echo $? |
+| C1  | package   | `wazuh-agent` 已安裝                                                   | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q wazuh-agent >/dev/null; else dpkg-query -W -f='${Status}\n' wazuh-agent 2>/dev/null | grep -qx 'install ok installed'; fi |
+| C2  | package   | `auditd`／EL `audit` 已安裝（who-data provider 依賴）                   | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q audit >/dev/null; else dpkg-query -W -f='${Status}\n' auditd 2>/dev/null | grep -qx 'install ok installed'; fi |
 | C3  | service   | `wazuh-agent.service` 為 active                                        | 0        | systemctl is-active wazuh-agent >/dev/null 2>&1; echo $? |
 | C4  | service   | `auditd.service` 為 active                                             | 0        | systemctl is-active auditd >/dev/null 2>&1; echo $? |
 | C5  | config    | 至少一個目錄設定了 FIM + whodata（`check_all="yes" whodata="yes"`，不綁定特定路徑——見 §1.5） | 0 | grep -qE '<directories check_all="yes" whodata="yes">' /var/ossec/etc/ossec.conf; echo $? |
@@ -189,3 +189,4 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 |------|------|------|--------|
 | 2026-07-06 | v1.0 | 初版：Wazuh agent FIM（`/etc`、`/boot` whodata）+ auditd who-data provider + 向 `wazuh-manager.md` 註冊 | sre |
 | 2026-07-06 | v1.1 | `wazuh_fim_directories` 改為可依主機覆寫的變數清單（不同主機可監控不同路徑），預設仍是 `["/etc", "/boot"]`；對應把 C5/C6（原本各自綁死 `/etc`/`/boot` 字面值）合併成單一「至少一個 whodata 目錄」的通用檢查，原 C7-C10 遞補成 C6-C9（row 數 10 → 9），見 §1.5、§2 的重排說明 | sre |
+| 2026-07-22 | v1.2 | C1/C2 package probe 改為 Ubuntu dpkg 與 EL rpm 雙平台；相同候選指令已在 Ubuntu 24.04 與 AlmaLinux 9 的目標 inventory 實跑通過 | sre |

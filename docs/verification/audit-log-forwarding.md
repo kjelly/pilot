@@ -1,6 +1,6 @@
 # Verification Spec — audit-log-forwarding（auditd 稽核規則 + rsyslog 轉送至 SIEM）
 
-> 版本：v1.1
+> 版本：v1.2
 > 對齊規範：pilot 通用 config-only 服務規範；轉送目標為
 > `docs/verification/log-server.md`（rsyslog 中央接收端），兩份 spec 搭配構成
 > 一組 Shape 3（client+server）。
@@ -11,7 +11,7 @@
 | 項目 | 值 |
 |------|----|
 | Hostname / Inventory group | audit-log-forwarding（vm-target 測試時用單一 host，見 §7） |
-| OS / version | Ubuntu 24.04 LTS |
+| OS / version | Ubuntu 24.04 LTS / AlmaLinux 9 |
 | 角色 | 一般受管主機：本機 auditd 稽核（setuid/setgid、sudo、`/etc/passwd`、`/etc/sudoers`）+ rsyslog 轉送 `auth,authpriv.*`/`local6.*` 到中央 SIEM |
 | 套用範圍 | `/etc/audit/rules.d/99-custom.rules`、`/etc/logrotate.d/{auditd,syslog}`、`/etc/rsyslog.d/99-siem-forward.conf`、`/etc/hosts`（`siem-log-server` 別名） |
 | 風險等級 | High（auditd 規則寫錯可能導致稽核死鎖或漏記；rsyslog 轉送設定錯誤只會漏送，不影響本機既有日誌） |
@@ -49,8 +49,8 @@
 
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
-| C1  | package   | `auditd` 已安裝                                                        | 0        | dpkg -s auditd >/dev/null 2>&1; echo $? |
-| C2  | package   | `audispd-plugins` 已安裝                                               | 0        | dpkg -s audispd-plugins >/dev/null 2>&1; echo $? |
+| C1  | package   | Ubuntu `auditd`／EL `audit` 已安裝                                     | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q audit >/dev/null; else dpkg-query -W -f='${Status}\n' auditd 2>/dev/null | grep -qx 'install ok installed'; fi |
+| C2  | package   | Ubuntu `audispd-plugins` 已安裝；EL8+ 的 audisp 由 `audit` 套件提供      | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q audit >/dev/null; else dpkg-query -W -f='${Status}\n' audispd-plugins 2>/dev/null | grep -qx 'install ok installed'; fi |
 | C3  | file      | 自訂稽核規則檔存在                                                      | present  | test -f /etc/audit/rules.d/99-custom.rules |
 | C4  | rule      | setuid 提權執行監控規則存在（`euid!=uid` + `euid=0` execve）             | 0        | grep -qE '^-a always,exit .*-S execve .*-C uid!=euid .*-F euid=0' /etc/audit/rules.d/99-custom.rules; echo $? |
 | C5  | rule      | setgid 提權執行監控規則存在（`egid!=gid` + `egid=0` execve）             | 0        | grep -qE '^-a always,exit .*-S execve .*-C gid!=egid .*-F egid=0' /etc/audit/rules.d/99-custom.rules; echo $? |
@@ -193,3 +193,4 @@ go run ./cmd/pilot vm-target run --name audit-log-forwarding \
 |------|------|------|--------|
 | 2026-07-06 | v1.0 | 初版：auditd 規則（setuid/setgid 變更+執行、sudo、passwd/sudoers 監控）+ logrotate + rsyslog 轉送至 `log-server.md` | sre |
 | 2026-07-06 | v1.1 | `siem_forward_host` 改為選填：log server 不一定先於 client 存在，本機稽核（C1-C14, C18, C19）應獨立可用；未提供時 apply 跳過 `/etc/hosts` pin 與 `99-siem-forward.conf`，C15-C17 對應標記為已知偏差（§5），待 log server 就緒後補跑 apply 即可補齊轉送 | sre |
+| 2026-07-22 | v1.2 | C1/C2 改為 Ubuntu dpkg 與 EL rpm 雙平台 probe；EL logrotate 使用 `/var/log/messages` 與 `root` group，避免不存在的 Ubuntu `syslog` group | sre |

@@ -304,11 +304,30 @@
     # answer. Confirmed live on Ubuntu 24.04 (sssd 2.9.4): adding "sudo" here
     # broke C8 end-to-end; removing it (socket activation handles the rest)
     # fixed it with no other change. Only nss/pam/ssh need to be explicit.
+    # Preserve the optional autofs responder installed by the NFS client role.
+    # site.yml deliberately runs this base client role before the NFS overlay;
+    # on later site runs, replacing the whole line with only nss/pam/ssh would
+    # silently undo the already-configured automount integration.
+    - name: "FreeIPA client — inspect the current SSSD services line"
+      ansible.builtin.command:
+        argv:
+          - awk
+          - -F=
+          - '/^services[[:space:]]*=/{print $2; exit}'
+          - /etc/sssd/sssd.conf
+      register: ipa_sssd_services_current
+      changed_when: false
+      check_mode: false
+      tags: [freeipa-client, C8]
+
     - name: "FreeIPA client — ensure SSSD's services line does not fight socket-activated sudo"
       ansible.builtin.lineinfile:
         path: /etc/sssd/sssd.conf
         regexp: '^services\s*='
-        line: "services = nss, pam, ssh"
+        line: >-
+          services = nss, pam, ssh{{ ', autofs'
+          if (ipa_sssd_services_current.stdout | default(''))
+          is search('(^|,)\\s*autofs\\s*(,|$)') else '' }}
         state: present
         create: false
       register: ipa_sssd_services

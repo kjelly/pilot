@@ -47,6 +47,8 @@
     audit_logrotate_maxage: 90
     syslog_logrotate_rotate: 14
     syslog_logrotate_maxage: 90
+    audit_syslog_path: "{{ '/var/log/messages' if ansible_os_family == 'RedHat' else '/var/log/syslog' }}"
+    audit_syslog_group: "{{ 'root' if ansible_os_family == 'RedHat' else 'syslog' }}"
     audit_rules_dest: /etc/audit/rules.d/99-custom.rules
     siem_forward_conf: /etc/rsyslog.d/99-siem-forward.conf
     siem_forward_alias: siem-log-server
@@ -171,7 +173,7 @@
             mode: "0644"
             content: |
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
-              /var/log/syslog {
+              {{ audit_syslog_path }} {
                   daily
                   rotate {{ syslog_logrotate_rotate }}
                   maxage {{ syslog_logrotate_maxage }}
@@ -179,7 +181,7 @@
                   notifempty
                   compress
                   delaycompress
-                  su root syslog
+                  su root {{ audit_syslog_group }}
                   sharedscripts
                   postrotate
                       systemctl kill -s HUP rsyslog.service >/dev/null 2>&1 || true
