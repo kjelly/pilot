@@ -855,3 +855,56 @@ runbook using `verified-runbook`'s rules (real output only, no
   this skill's §4 `SELECT`/timing findings (pilot-specific: reliable
   for `pilot edit`, needs a settle pause between screens for `pilot
   deploy`) rather than trusting either source alone.
+
+
+---
+
+## Why this skill is the canonical home for trec-driver findings
+
+This skill (and its sibling tool-driver skills `~/.agents/skills/trec-mcp/SKILL.md`
+and `~/.agents/skills/trec-tui-drive/SKILL.md`) is the canonical home for any
+issue found while driving an interactive wizard via `trec`. AGENTS.md v1.15
+codifies the rule: **trec-related issues never go in operational runbooks**.
+
+What "trec-related" includes:
+- `EXPECT` / `SELECT` / `TOGGLE` / `CHOOSE` / `CHECKLIST_DOWN` / `DOWN` opcodes
+  misbehaving on a particular screen (cursor reset, label ambiguity, off-by-one,
+  etc.)
+- The `Bubble Tea` / `promptui` text-input pre-fill surprising a script
+  (cursor at start, not at end; pre-fill eats the typed character; etc.)
+- MCP-vs-CLI recording fallbacks diverging (`trec mcp` healthy at the CLI level
+  but no callable tools; agent loop could hold a PTY but could not deliver a
+  real carriage-return byte through the MCP text channel; etc.)
+- `PILOT_DEBUG_MENU=1` interacting badly with `SELECT` (stderr dump line
+  confuses the direction heuristic)
+- `EXPECT_QUIET` being misused as a child-exit signal (it's a quiet-output
+  check, not a child-process completion test)
+- The wizard's prompt chain for a particular component turning out to require
+  the `vars 檔路徑` slot rather than the `extra -e` slot (or vice versa)
+- Host-key churn during `ssh` recording (one `ssh` call hung 70 minutes on an
+  unanswerable interactive host-key prompt — add `-o StrictHostKeyChecking=accept-new`
+  to every raw `ssh` call)
+- The `BACKSPACE <n>` then `TEXT` pre-fill rule (the field's cursor doesn't
+  always start at the end)
+- The "vault/main.yaml auto-detect + 否/需要 second-stage menu" path for
+  non-default vault files
+
+What "trec-related" does NOT include:
+- Bugs in `pilot` itself (Go source) — those go in `cmd/pilot/cmd/...` /
+  `internal/...` with their own regression test
+- Bugs in a playbook (Ansible/YAML) — those go in `playbooks/apply/*.yml`
+- Bugs in a spec row (e.g. the v6.0 / v18.0 Real bugs about row-dedup
+  collapse) — those go in the relevant spec file + `pilot spec --lint`
+- Bugs in a group's topology / group_vars wiring — those go in the
+  group_vars / inventory editor
+
+When a `trec` session uncovers something that turns out to be a bug in
+`pilot` / a playbook / a spec, file the bug in the right place (Go source /
+playbook / spec), but classify the entry as **bug**, not as **trec-driver
+finding**. The `trec` session is the **how you found it**, not the **what
+you found**.
+
+Operational runbooks (`docs/runbooks/*.md`) document the run, not the
+recording driver. They may include the `trec drive --script` command that
+was used, the `Y` keys that were pressed, the real output that resulted —
+but not the **driver issues** encountered. The driver issues go here.
