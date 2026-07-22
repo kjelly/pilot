@@ -1,0 +1,9 @@
+---
+# Canonical schema_version: 1 fixture for freeipa-identity delivery batch 1.
+# The admin secret is supplied separately (for example -e @~/.vault/main.yaml).
+- name: Apply canonical FreeIPA identity fixture
+  ansible.builtin.import_playbook: ../../apply/freeipa-identity-apply.yml
+  vars:
+    target_group: "{{ fixtures_target_group | default('freeipa-server') }}"
+    # import_playbook makes playbook_dir resolve to playbooks/apply.
+    freeipa_roster_file: "{{ playbook_dir }}/../test/fixtures/freeipa-identity-canonical.roster.yaml"

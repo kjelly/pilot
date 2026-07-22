@@ -76,16 +76,223 @@
     ipa_hbac_rules: []
     ipa_sudo_rules: []
 
+    # Canonical roster schema (schema_version: 1).  The legacy ipa_* lists
+    # above remain accepted during the compatibility window, but a roster may
+    # not mix both models.  Canonical input is normalized before kinit so all
+    # validation fails before mutation.
+    freeipa_roster: {}
+
     # Once your own ipa_hbac_rules cover the access you want, set this true
     # to disable IPA's shipped "allow_all" rule — otherwise it keeps granting
     # every user login to every host regardless of the rules above.
     ipa_hbac_disable_allow_all: false
 
   pre_tasks:
+    - name: "Load canonical roster under a namespace"
+      ansible.builtin.include_vars:
+        file: "{{ freeipa_roster_file }}"
+        name: freeipa_roster
+      when: freeipa_roster_file is defined
+      no_log: true
+      tags: [always]
+
+    - name: "Gate: canonical roster version and legacy fields are mutually exclusive"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster.schema_version | int == 1
+          - ipa_users | length == 0
+          - ipa_groups | length == 0
+          - ipa_hostgroups | length == 0
+          - ipa_hbac_rules | length == 0
+          - ipa_sudo_rules | length == 0
+        fail_msg: >-
+          Canonical rosters require schema_version: 1 and must not mix users/
+          groups/hostgroups/hbac/sudo with legacy ipa_* lists.
+      when: freeipa_roster.schema_version is defined
+      tags: [always]
+
+    - name: "Gate: canonical top-level and FreeIPA keys are known"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (freeipa_roster.keys() | list | difference([
+              'schema_version', 'freeipa', 'users', 'groups', 'hosts',
+              'hostgroups', 'hbac', 'sudo', 'nfs', 'nfs_clients',
+              'migration', 'policy_exceptions'
+            ])) | length == 0
+          - >-
+            ((freeipa_roster.freeipa | default({})).keys() | list |
+             difference(['domain', 'realm', 'server', 'admin', 'defaults', 'safety'])) | length == 0
+          - >-
+            (((freeipa_roster.freeipa | default({})).admin | default({})).keys() | list |
+             difference(['principal', 'password'])) | length == 0
+        fail_msg: "Canonical roster contains an unknown freeipa/admin field."
+      when: freeipa_roster.schema_version is defined
+      tags: [always]
+
+    - name: "Gate: canonical batch-1 scope is identity primitives only"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster.hosts | default([]) | length == 0
+          - freeipa_roster.hostgroups | default([]) | length == 0
+          - freeipa_roster.hbac | default({}) | length == 0
+          - freeipa_roster.sudo | default({}) | length == 0
+        fail_msg: >-
+          This candidate implements canonical users/groups only. Canonical
+          hosts/hostgroups/HBAC/sudo are fail-closed until delivery batch 2;
+          use the legacy ipa_* roster for the existing authorization engine.
+      when: freeipa_roster.schema_version is defined
+      tags: [always]
+
+    - name: "Gate: canonical user objects are structurally valid"
+      ansible.builtin.assert:
+        that:
+          - item.name is match('^[a-z_][a-z0-9_.-]*$')
+          - item.state | default('present') in ['present', 'disabled', 'absent']
+          - >-
+            (item.keys() | list | difference([
+              'name', 'state', 'first', 'last', 'display_name', 'email',
+              'uid', 'gid', 'login_shell', 'home_directory', 'password',
+              'ssh_keys', 'enabled'
+            ])) | length == 0
+          - >-
+            ((item.password | default({})).keys() | list |
+             difference(['initial', 'force_change', 'preserve_existing'])) | length == 0
+          - >-
+            ((item.ssh_keys | default({})).keys() | list |
+             difference(['authoritative', 'values'])) | length == 0
+          - (item.ssh_keys | default({})).authoritative | default(true) | bool
+          - item.state | default('present') != 'disabled' or not (item.enabled | default(false) | bool)
+        fail_msg: "Invalid or unknown field in canonical user {{ item.name | default('unnamed') }}."
+      loop: "{{ freeipa_roster.users | default([]) }}"
+      loop_control:
+        label: "{{ item.name | default('unnamed') }}"
+      when: freeipa_roster.schema_version is defined
+      tags: [always]
+
+    - name: "Gate: canonical group objects and category prefixes are valid"
+      ansible.builtin.assert:
+        that:
+          - item.state | default('present') in ['present', 'absent']
+          - item.category in ['team', 'filesystem', 'access', 'role']
+          - item.type | default('posix') in ['posix', 'nonposix', 'external']
+          - >-
+            (item.keys() | list | difference([
+              'name', 'state', 'category', 'type', 'description', 'gid', 'membership'
+            ])) | length == 0
+          - >-
+            ((item.membership | default({})).keys() | list |
+             difference(['authoritative', 'users', 'groups'])) | length == 0
+          - >-
+            (item.category != 'team' or item.name is match('^team-')) and
+            (item.category != 'filesystem' or item.name is match('^data-')) and
+            (item.category != 'access' or item.name is match('^access-')) and
+            (item.category != 'role' or item.name is match('^role-'))
+          - item.name not in ((item.membership | default({})).groups | default([]))
+        fail_msg: "Invalid canonical group {{ item.name | default('unnamed') }} or category prefix."
+      loop: "{{ freeipa_roster.groups | default([]) }}"
+      loop_control:
+        label: "{{ item.name | default('unnamed') }}"
+      when: freeipa_roster.schema_version is defined
+      tags: [always]
+
+    - name: "Gate: canonical names and direct references are unique and resolvable"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster.users | default([]) | map(attribute='name') | list | unique | length == freeipa_roster.users | default([]) | length
+          - freeipa_roster.groups | default([]) | map(attribute='name') | list | unique | length == freeipa_roster.groups | default([]) | length
+          - >-
+            freeipa_roster.groups | default([]) | map(attribute='membership') | select('defined') |
+            map(attribute='users') | select('defined') | flatten |
+            difference(freeipa_roster.users | default([]) | map(attribute='name') | list) | length == 0
+          - >-
+            freeipa_roster.groups | default([]) | map(attribute='membership') | select('defined') |
+            map(attribute='groups') | select('defined') | flatten |
+            difference(freeipa_roster.groups | default([]) | map(attribute='name') | list) | length == 0
+        fail_msg: "Canonical roster has duplicate names or an unresolved user/group reference."
+      when: freeipa_roster.schema_version is defined
+      tags: [always]
+
+    - name: "Normalize canonical FreeIPA settings"
+      ansible.builtin.set_fact:
+        ipa_domain: "{{ freeipa_roster.freeipa.domain | default('ipa.pilot.internal') }}"
+        ipa_realm: "{{ freeipa_roster.freeipa.realm | default(freeipa_roster.freeipa.domain | default('ipa.pilot.internal') | upper) }}"
+        identity_admin_principal: "{{ freeipa_roster.freeipa.admin.principal | default('admin') }}"
+        identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
+        ipa_users: []
+        ipa_groups: []
+      when: freeipa_roster.schema_version is defined
+      no_log: true
+      tags: [always]
+
+    - name: "Normalize canonical users for the compatibility reconciler"
+      ansible.builtin.set_fact:
+        ipa_users: >-
+          {{ ipa_users + [{
+            'name': item.name,
+            'state': item.state | default('present'),
+            'first': item.first | default(item.name),
+            'last': item.last | default(item.name),
+            'display_name': item.display_name | default(none),
+            'email': item.email | default(none),
+            'uid': item.uid | default(none),
+            'gid': item.gid | default(none),
+            'login_shell': item.login_shell | default('/bin/bash'),
+            'home_directory': item.home_directory | default('/home/' + item.name),
+            'enabled': item.enabled | default(item.state | default('present') != 'disabled'),
+            'password': (item.password | default({})).initial | default(none),
+            'force_password': (item.password | default({})).force_change | default(false),
+            'preserve_existing': (item.password | default({})).preserve_existing | default(true),
+            'ssh_keys': (item.ssh_keys | default({}))['values'] | default(none)
+          }] }}
+      loop: "{{ freeipa_roster.users | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: freeipa_roster.schema_version is defined
+      no_log: true
+      tags: [always]
+
+    - name: "Normalize canonical groups for the compatibility reconciler"
+      ansible.builtin.set_fact:
+        ipa_groups: >-
+          {{ ipa_groups + [{
+            'name': item.name,
+            'state': item.state | default('present'),
+            'desc': item.description | default(item.name),
+            'type': item.type | default('posix'),
+            'gid': item.gid | default(none),
+            'membership': item.membership | default({})
+          }] }}
+      loop: "{{ freeipa_roster.groups | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: freeipa_roster.schema_version is defined
+      tags: [always]
+
+    - name: "Select legacy admin settings"
+      ansible.builtin.set_fact:
+        identity_admin_principal: admin
+        identity_admin_password: "{{ ipa_admin_password }}"
+      when: freeipa_roster.schema_version is not defined
+      no_log: true
+      tags: [always]
+
+    - name: "Select active identity objects"
+      ansible.builtin.set_fact:
+        ipa_active_users: >-
+          {{ (ipa_users | rejectattr('state', 'defined') | list)
+             + (ipa_users | selectattr('state', 'defined') |
+                rejectattr('state', 'equalto', 'absent') | list) }}
+        ipa_active_groups: >-
+          {{ (ipa_groups | rejectattr('state', 'defined') | list)
+             + (ipa_groups | selectattr('state', 'defined') |
+                rejectattr('state', 'equalto', 'absent') | list) }}
+      tags: [always]
+
     - name: "Gate: admin credential present (fail early, before any mutation)"
       ansible.builtin.assert:
         that:
-          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+          - identity_admin_password is defined and identity_admin_password | length >= 8
         fail_msg: >-
           Missing ipa_admin_password. Pass an ansible-vault roster with the
           admin credential, e.g. -e @~/.vault/ipa-identity.yaml
@@ -145,7 +352,10 @@
     # ── Admin authentication ───────────────────────────────────────────
     - name: "Kinit admin"
       ansible.builtin.shell:
-        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+        cmd: |
+          set -o pipefail
+          printf %s "{{ identity_admin_password }}" | kinit {{ identity_admin_principal }}@{{ ipa_realm }}
+        executable: /bin/bash
       changed_when: false
       no_log: true
       tags: [identity]
@@ -153,12 +363,14 @@
     # ── Groups ─────────────────────────────────────────────────────────
     - name: "Ensure IPA groups exist"
       ansible.builtin.command:
-        argv:
-          - ipa
-          - group-add
-          - "{{ item.name }}"
-          - "--desc={{ item.desc | default(item.name) }}"
-      loop: "{{ ipa_groups }}"
+        argv: >-
+          {{ ['ipa', 'group-add', item.name,
+              '--desc=' ~ (item.desc | default(item.name))]
+             + (['--nonposix'] if item.type | default('posix') == 'nonposix' else [])
+             + (['--external'] if item.type | default('posix') == 'external' else [])
+             + ([] if item.gid is not defined or item.gid is none
+                else ['--gid=' ~ (item.gid | string)]) }}
+      loop: "{{ ipa_active_groups }}"
       loop_control:
         label: "{{ item.name }}"
       register: ipa_group_add
@@ -166,7 +378,7 @@
       failed_when:
         - ipa_group_add.rc != 0
         - "'already exists' not in (ipa_group_add.stderr | default(''))"
-      tags: [identity, groups]
+      tags: [identity, groups, C11, C12]
 
     # `group-add` above no-ops on "already exists" — an already-created
     # group's own `desc` never gets corrected by editing the roster and
@@ -174,12 +386,12 @@
     # idiom as the SSH-key task below.
     - name: "Reconcile IPA group descriptions"
       ansible.builtin.command:
-        argv:
-          - ipa
-          - group-mod
-          - "{{ item.name }}"
-          - "--desc={{ item.desc | default(item.name) }}"
-      loop: "{{ ipa_groups }}"
+        argv: >-
+          {{ ['ipa', 'group-mod', item.name,
+              '--desc=' ~ (item.desc | default(item.name))]
+             + ([] if item.gid is not defined or item.gid is none
+                else ['--gid=' ~ (item.gid | string)]) }}
+      loop: "{{ ipa_active_groups }}"
       loop_control:
         label: "{{ item.name }}"
       register: ipa_group_mod
@@ -187,18 +399,28 @@
       failed_when:
         - ipa_group_mod.rc != 0
         - "'no modifications to be performed' not in (ipa_group_mod.stderr | default(''))"
-      tags: [identity, groups]
+      tags: [identity, groups, C11, C12]
 
     # ── Users ──────────────────────────────────────────────────────────
     - name: "Ensure IPA users exist"
       ansible.builtin.command:
-        argv:
-          - ipa
-          - user-add
-          - "{{ item.name }}"
-          - "--first={{ item.first | default(item.name) }}"
-          - "--last={{ item.last | default(item.name) }}"
-      loop: "{{ ipa_users }}"
+        argv: >-
+          {{ ['ipa', 'user-add', item.name,
+              '--first=' ~ (item.first | default(item.name)),
+              '--last=' ~ (item.last | default(item.name))]
+             + ([] if item.display_name is not defined or item.display_name is none
+                else ['--displayname=' ~ item.display_name])
+             + ([] if item.email is not defined or item.email is none
+                else ['--email=' ~ item.email])
+             + ([] if item.uid is not defined or item.uid is none
+                else ['--uid=' ~ (item.uid | string)])
+             + ([] if item.gid is not defined or item.gid is none
+                else ['--gidnumber=' ~ (item.gid | string)])
+             + ([] if item.login_shell is not defined or item.login_shell is none
+                else ['--shell=' ~ item.login_shell])
+             + ([] if item.home_directory is not defined or item.home_directory is none
+                else ['--homedir=' ~ item.home_directory]) }}
+      loop: "{{ ipa_active_users }}"
       loop_control:
         label: "{{ item.name }}"
       register: ipa_user_add
@@ -206,7 +428,7 @@
       failed_when:
         - ipa_user_add.rc != 0
         - "'already exists' not in (ipa_user_add.stderr | default(''))"
-      tags: [identity, users]
+      tags: [identity, users, C9, C10]
 
     # `user-add` above no-ops on "already exists" — an already-created
     # user's own `first`/`last` never gets corrected by editing the roster
@@ -214,13 +436,23 @@
     # idiom as the SSH-key task below.
     - name: "Reconcile user first/last names"
       ansible.builtin.command:
-        argv:
-          - ipa
-          - user-mod
-          - "{{ item.name }}"
-          - "--first={{ item.first | default(item.name) }}"
-          - "--last={{ item.last | default(item.name) }}"
-      loop: "{{ ipa_users }}"
+        argv: >-
+          {{ ['ipa', 'user-mod', item.name,
+              '--first=' ~ (item.first | default(item.name)),
+              '--last=' ~ (item.last | default(item.name))]
+             + ([] if item.display_name is not defined or item.display_name is none
+                else ['--displayname=' ~ item.display_name])
+             + ([] if item.email is not defined or item.email is none
+                else ['--email=' ~ item.email])
+             + ([] if item.uid is not defined or item.uid is none
+                else ['--uid=' ~ (item.uid | string)])
+             + ([] if item.gid is not defined or item.gid is none
+                else ['--gidnumber=' ~ (item.gid | string)])
+             + ([] if item.login_shell is not defined or item.login_shell is none
+                else ['--shell=' ~ item.login_shell])
+             + ([] if item.home_directory is not defined or item.home_directory is none
+                else ['--homedir=' ~ item.home_directory]) }}
+      loop: "{{ ipa_active_users }}"
       loop_control:
         label: "{{ item.name }}"
       register: ipa_user_mod
@@ -228,7 +460,7 @@
       failed_when:
         - ipa_user_mod.rc != 0
         - "'no modifications to be performed' not in (ipa_user_mod.stderr | default(''))"
-      tags: [identity, users]
+      tags: [identity, users, C9, C10]
 
     # Passwords are set unconditionally when run (no read-back to diff
     # against), and `ipa passwd` is an admin reset — it always re-arms
@@ -262,7 +494,7 @@
     - name: "Look up password-expiry state for users with a declared password"
       ansible.builtin.command:
         argv: [ipa, user-show, "{{ item.name }}", --all, --raw]
-      loop: "{{ ipa_users | selectattr('password', 'defined') | list }}"
+      loop: "{{ ipa_active_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"
       loop_control:
         label: "{{ item.name }}"
       register: ipa_pwd_state
@@ -297,9 +529,11 @@
     - name: "Set password for users that need one (forced, or first-time onboard)"
       ansible.builtin.shell:
         cmd: |
+          set -o pipefail
           printf '%s\n%s\n' "{{ item.password }}" "{{ item.password }}" \
             | ipa passwd {{ item.name }}
-      loop: "{{ ipa_users | selectattr('password', 'defined') | list }}"
+        executable: /bin/bash
+      loop: "{{ ipa_active_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"
       loop_control:
         label: "{{ item.name }}"
       when: >-
@@ -322,7 +556,7 @@
         argv: >-
           {{ ['ipa', 'user-mod', item.name]
              + (item.ssh_keys | map('regex_replace', '^(.*)$', '--sshpubkey=\1') | list) }}
-      loop: "{{ ipa_users | selectattr('ssh_keys', 'defined') | list }}"
+      loop: "{{ ipa_active_users | selectattr('ssh_keys', 'defined') | rejectattr('ssh_keys', 'none') | list }}"
       loop_control:
         label: "{{ item.name }} ({{ item.ssh_keys | length }} key(s))"
       register: ipa_sshkey
@@ -339,7 +573,7 @@
           - group-add-member
           - "{{ item.1 }}"
           - "--users={{ item.0.name }}"
-      loop: "{{ ipa_users | subelements('groups', skip_missing=True) }}"
+      loop: "{{ ipa_active_users | subelements('groups', skip_missing=True) }}"
       loop_control:
         label: "{{ item.0.name }} -> {{ item.1 }}"
       register: ipa_grp_member
@@ -347,7 +581,8 @@
       failed_when:
         - ipa_grp_member.rc != 0
         - "'already a member' not in (ipa_grp_member.stdout | default('') + ipa_grp_member.stderr | default(''))"
-      tags: [identity, users, groups]
+      when: freeipa_roster.schema_version is not defined
+      tags: [identity, users, groups, C11]
 
     # `group-add-member` above only ever adds — a user removed from their
     # roster `groups:` list keeps stale membership forever without this.
@@ -358,26 +593,29 @@
     - name: "Look up current user group memberships"
       ansible.builtin.command:
         argv: [ipa, user-show, "{{ item.name }}", --all]
-      loop: "{{ ipa_users }}"
+      loop: "{{ ipa_active_users }}"
       loop_control:
         label: "{{ item.name }}"
       register: ipa_user_show
       changed_when: false
       failed_when: false
+      when: freeipa_roster.schema_version is not defined
       tags: [identity, users, groups]
 
     - name: "Compute stale group memberships to remove"
       ansible.builtin.set_fact:
         ipa_group_membership_removals: "{{ (ipa_group_membership_removals | default([])) + [{'name': item.item.name, 'groups': stale_groups}] }}"
       vars:
-        managed_groups: "{{ ipa_groups | map(attribute='name') | list }}"
+        managed_groups: "{{ ipa_active_groups | map(attribute='name') | list }}"
         live_line: "{{ ((item.stdout | default('') | regex_findall('^  Member of groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
         live_groups: "{{ [] if live_line == '' else live_line.split(', ') }}"
         stale_groups: "{{ live_groups | intersect(managed_groups) | difference(item.item.groups | default([])) }}"
       loop: "{{ ipa_user_show.results }}"
       loop_control:
         label: "{{ item.item.name | default('n/a') }}"
-      when: not (item.skipped | default(false))
+      when:
+        - freeipa_roster.schema_version is not defined
+        - not (item.skipped | default(false))
       tags: [identity, users, groups]
 
     - name: "Remove stale group memberships"
@@ -394,7 +632,140 @@
       changed_when: "'Number of members removed 1' in (ipa_grp_removal.stdout | default(''))"
       failed_when:
         - ipa_grp_removal.rc != 0
+      when: freeipa_roster.schema_version is not defined
       tags: [identity, users, groups]
+
+    - name: "Look up canonical group direct membership"
+      ansible.builtin.command:
+        argv: [ipa, group-show, "{{ item.name }}", --all]
+      loop: "{{ ipa_active_groups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: canonical_group_show
+      changed_when: false
+      failed_when: false
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, users, groups]
+
+    - name: "Compute stale canonical group membership"
+      ansible.builtin.set_fact:
+        canonical_group_removals: >-
+          {{ (canonical_group_removals | default([])) + [{
+            'name': item.item.name,
+            'users': live_users | difference(item.item.membership.users | default([])),
+            'groups': live_groups | difference(item.item.membership.groups | default([]))
+          }] }}
+      vars:
+        stdout: "{{ item.stdout | default('') }}"
+        users_line: "{{ ((stdout | regex_findall('^  Member users: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        groups_line: "{{ ((stdout | regex_findall('^  Member groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        live_users: "{{ [] if users_line == '' else users_line.split(', ') }}"
+        live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') }}"
+      loop: "{{ canonical_group_show.results }}"
+      loop_control:
+        label: "{{ item.item.name | default('n/a') }}"
+      when:
+        - freeipa_roster.schema_version is defined
+        - not (item.skipped | default(false))
+        - (item.item.membership | default({})).authoritative | default(true) | bool
+      tags: [identity, users, groups]
+
+    - name: "Remove stale canonical direct users"
+      ansible.builtin.command:
+        argv: [ipa, group-remove-member, "{{ item.0.name }}", "--users={{ item.1 }}"]
+      loop: "{{ canonical_group_removals | default([]) | subelements('users', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -/-> {{ item.0.name }}"
+      register: canonical_group_user_remove
+      changed_when: "'Number of members removed 1' in (canonical_group_user_remove.stdout | default(''))"
+      failed_when: canonical_group_user_remove.rc != 0
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, users, groups]
+
+    - name: "Remove stale canonical direct nested groups"
+      ansible.builtin.command:
+        argv: [ipa, group-remove-member, "{{ item.0.name }}", "--groups={{ item.1 }}"]
+      loop: "{{ canonical_group_removals | default([]) | subelements('groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -/-> {{ item.0.name }}"
+      register: canonical_nested_group_remove
+      changed_when: "'Number of members removed 1' in (canonical_nested_group_remove.stdout | default(''))"
+      failed_when: canonical_nested_group_remove.rc != 0
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, groups, C12]
+
+    - name: "Ensure canonical direct user membership"
+      ansible.builtin.command:
+        argv: [ipa, group-add-member, "{{ item.0.name }}", "--users={{ item.1 }}"]
+      loop: "{{ ipa_active_groups | subelements('membership.users', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0.name }}"
+      register: canonical_group_user_add
+      changed_when: "'Number of members added 1' in (canonical_group_user_add.stdout | default(''))"
+      failed_when:
+        - canonical_group_user_add.rc != 0
+        - "'already a member' not in (canonical_group_user_add.stdout | default('') + canonical_group_user_add.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, users, groups]
+
+    - name: "Ensure canonical direct nested-group membership"
+      ansible.builtin.command:
+        argv: [ipa, group-add-member, "{{ item.0.name }}", "--groups={{ item.1 }}"]
+      loop: "{{ ipa_active_groups | subelements('membership.groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0.name }}"
+      register: canonical_nested_group_add
+      changed_when: "'Number of members added 1' in (canonical_nested_group_add.stdout | default(''))"
+      failed_when:
+        - canonical_nested_group_add.rc != 0
+        - "'already a member' not in (canonical_nested_group_add.stdout | default('') + canonical_nested_group_add.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, groups]
+
+    - name: "Reconcile canonical account enabled state"
+      ansible.builtin.command:
+        argv: [ipa, "user-{{ 'enable' if item.enabled | default(true) | bool else 'disable' }}", "{{ item.name }}"]
+      loop: "{{ ipa_active_users }}"
+      loop_control:
+        label: "{{ item.name }} enabled={{ item.enabled | default(true) }}"
+      register: canonical_user_enabled
+      changed_when: >-
+        ('Enabled user account' in (canonical_user_enabled.stdout | default('')))
+        or ('Disabled user account' in (canonical_user_enabled.stdout | default('')))
+      failed_when:
+        - canonical_user_enabled.rc != 0
+        - "'already enabled' not in (canonical_user_enabled.stderr | default(''))"
+        - "'already disabled' not in (canonical_user_enabled.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, users, C10]
+
+    - name: "Delete canonical users explicitly marked absent"
+      ansible.builtin.command:
+        argv: [ipa, user-del, "{{ item.name }}"]
+      loop: "{{ ipa_users | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: canonical_user_delete
+      changed_when: "'Deleted user' in (canonical_user_delete.stdout | default(''))"
+      failed_when:
+        - canonical_user_delete.rc != 0
+        - "'not found' not in (canonical_user_delete.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, users]
+
+    - name: "Delete canonical groups explicitly marked absent"
+      ansible.builtin.command:
+        argv: [ipa, group-del, "{{ item.name }}"]
+      loop: "{{ ipa_groups | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: canonical_group_delete
+      changed_when: "'Deleted group' in (canonical_group_delete.stdout | default(''))"
+      failed_when:
+        - canonical_group_delete.rc != 0
+        - "'not found' not in (canonical_group_delete.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, groups]
 
     # ── Host groups ────────────────────────────────────────────────────
     # Groups of enrolled hosts (e.g. web-hosts, db-hosts) that HBAC rules and

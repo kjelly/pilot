@@ -1,151 +1,95 @@
-# EXAMPLE roster for freeipa-identity-apply.yml — SCHEMA ONLY, no real data.
-#
-# This file is committed so the roster schema is documented. Your REAL roster
-# lives OUTSIDE the repo and is ansible-vault-encrypted, e.g.:
-#
-#   1. Copy this file:
-#        mkdir -p ~/.vault
-#        cp playbooks/apply/freeipa-identity.roster.example.yaml ~/.vault/ipa-identity.yaml
-#   2. Fill in your real users / groups / rules and a real ipa_admin_password.
-#   3. Encrypt it in place:
-#        ansible-vault encrypt ~/.vault/ipa-identity.yaml
-#      (store the vault password in ~/.vault/vault-pass — already gitignored via
-#       *vault-password* / the ~/.vault dir being outside the repo).
-#   4. Apply:
-#        pilot vm-target run --name alma-vm \
-#            playbooks/apply/freeipa-identity-apply.yml \
-#            -e target_group=all \
-#            -e @~/.vault/ipa-identity.yaml \
-#            --vault-password-file ~/.vault/vault-pass
-#
-# To edit later without decrypting to disk:  ansible-vault edit ~/.vault/ipa-identity.yaml
-#
-# NEVER commit the filled-in / encrypted roster. .gitignore already blocks
-# *.vault and inventory*.yaml; keeping the real file under ~/.vault keeps it
-# out of the repo entirely.
 ---
-# Admin credential used to kinit before any ipa command. REQUIRED.
-ipa_admin_password: "CHANGE-ME-min-8-chars"
+# Canonical freeipa-identity roster (schema_version: 1), delivery batch 1.
+#
+# Keep the real file outside git and encrypt it with ansible-vault. Because
+# `groups` and `hosts` are Ansible magic variables, DO NOT pass this file with
+# `-e @file`. Load it through the playbook's namespaced entrypoint instead:
+#
+#   pilot vm-target run --name <server> \
+#     playbooks/apply/freeipa-identity-apply.yml \
+#     -e target_group=all \
+#     -e freeipa_roster_file=~/.vault/ipa-identity.yaml \
+#     --vault-password-file ~/.vault/vault-pass
+#
+# Batch 1 supports canonical users/groups. Canonical hosts, hostgroups, HBAC,
+# sudo, NFS, clients, and migration fail closed until later delivery batches.
+schema_version: 1
 
-# Realm/domain default to ipa.pilot.internal in the playbook; override here if needed.
-# ipa_domain: ipa.pilot.internal
+freeipa:
+  domain: ipa.pilot.internal
+  realm: IPA.PILOT.INTERNAL
+  server: ipa1.ipa.pilot.internal
+  admin:
+    principal: admin
+    password: CHANGE-ME-min-8-chars
+  defaults:
+    group_type: posix
+    managed_group_membership: authoritative
+    prune_unmanaged: false
+  safety:
+    require_posix_data_groups: true
 
-ipa_groups:
-  - name: developers
-    desc: "Application developers"
-  - name: sysops
-    desc: "Systems operators"
-
-ipa_users:
+users:
   - name: alice
+    state: present
     first: Alice
     last: Wang
-    password: "CHANGE-ME-alice-initial"   # initial password; user resets on first login
-    # force_password defaults to false — a `password:` is only actually
-    # applied when force_password: true is ALSO set (first-time onboard, or
-    # a deliberate reset). Drop this line after alice has her own password
-    # so future reruns don't reset it back to a forced-change state.
-    force_password: true
-    groups: [developers, sysops]
-    # SSH public keys are DECLARATIVE: the list here is the complete set of keys
-    # on the account. Drop a key from this list + rerun to revoke it. Enrolled
-    # clients serve these automatically via SSSD (sss_ssh_authorizedkeys), so the
-    # user can `ssh alice@<enrolled-host>` with no local authorized_keys entry.
-    # Paste the full public-key line (type + base64 + optional comment).
+    display_name: Alice Wang
+    email: alice@example.internal
+    uid: null
+    gid: null
+    login_shell: /bin/bash
+    home_directory: /home/alice
+    password:
+      initial: CHANGE-ME-alice-initial
+      force_change: true
+      preserve_existing: false
     ssh_keys:
-      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...EXAMPLE... alice@laptop"
+      authoritative: true
+      values:
+        - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...EXAMPLE... alice@laptop
+    enabled: true
+
   - name: bob
+    state: disabled
     first: Bob
     last: Lee
-    password: "CHANGE-ME-bob-initial"
-    force_password: true   # same first-time-onboard reasoning as alice above
-    groups: [developers]
-  - name: carol
-    first: Carol
-    last: Chen
-    # No password key => account created without a password set here
-    # (e.g. you'll set an OTP/enrollment token out-of-band).
-    groups: [sysops]
-    # Key-ONLY account: no password key above, only SSH keys => passwordless,
-    # key-based login exactly as in the FreeIPA SSH key-management workshop.
+    login_shell: /bin/bash
+    home_directory: /home/bob
+    password:
+      preserve_existing: true
     ssh_keys:
-      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...EXAMPLE... carol@workstation"
+      authoritative: true
+      values: []
+    enabled: false
 
-ipa_sudo_rules:
-  # sysops may restart services on all hosts
-  - name: sysops-systemctl
-    hostcat: all
-    allow_commands:
-      - /usr/bin/systemctl
-    groups: [sysops]
+groups:
+  - name: team-developers
+    state: present
+    category: team
+    type: posix
+    description: Application development team
+    gid: null
+    membership:
+      authoritative: true
+      users:
+        - alice
+        - bob
+      groups: []
 
-  # a single named user granted a narrow command
-  - name: alice-read-journal
-    hostcat: all
-    allow_commands:
-      - /usr/bin/journalctl
-    users: [alice]
+  - name: data-project-alpha-rw
+    state: present
+    category: filesystem
+    type: posix
+    description: Project Alpha read-write access
+    membership:
+      authoritative: true
+      users: []
+      groups:
+        - team-developers
 
-  # HOST-SCOPED: developers may only restart services on webhosts, nowhere
-  # else. Omit hostcat and give hostgroups/hosts instead of `hostcat: all`.
-  - name: developers-restart-web
-    hostgroups: [webhosts]
-    allow_commands:
-      - /usr/bin/systemctl
-
-  # FULL ADMIN: sysops may run ANY command, same "cat"-suffixed convention
-  # as hostcat. Omit `allow_commands:` and give `cmdcat: all` (or omit both
-  # — a rule with neither defaults to cmdcat=all too, exactly like hostcat)
-  # instead of listing individual commands.
-  - name: devops-sudo
-    hostcat: all
-    cmdcat: all
-    groups: [sysops, developers]
-
-# ── Per-host access control ───────────────────────────────────────────────
-# Two things are needed to make "not everyone can touch every host" real:
-#   1. ipa_hostgroups   — name the host sets you want to scope rules to.
-#   2. ipa_hbac_rules   — gate LOGIN itself. Without an explicit HBAC rule,
-#      IPA's shipped "allow_all" rule lets any enrolled user log in to any
-#      enrolled host, no matter how sudo is scoped above. Once your own
-#      rules below cover every login path you need, set
-#      ipa_hbac_disable_allow_all: true (top-level, alongside
-#      ipa_admin_password) to turn that default off.
-
-ipa_hostgroups:
-  - name: webhosts
-    desc: "Front-end / web tier"
-    hosts: [web1.ipa.pilot.internal, web2.ipa.pilot.internal]
-  - name: dbhosts
-    desc: "Database tier"
-    hosts: [db1.ipa.pilot.internal]
-
-ipa_hbac_rules:
-  # developers may SSH into webhosts only
-  - name: developers-login-web
-    hostgroups: [webhosts]
-    services: [sshd]
-    groups: [developers]
-
-  # sysops may SSH into every host (hostcat defaults to 'all' since no
-  # hosts/hostgroups given). IMPORTANT: `services` must ALSO list `sudo`
-  # (and `sudo-i` if anyone uses `sudo -i`) once `ipa_hbac_disable_allow_all`
-  # is set — SSSD's `access_provider = ipa` runs a fresh HBAC check for
-  # EVERY PAM service, not just the login one. `allow_all` (or
-  # `allow_systemd-user`, which also lists `sshd`) used to mask this: with
-  # either default rule active, `sudo`'s own PAM account phase quietly rode
-  # on that blanket grant. Once you disable `allow_all` for real hardening,
-  # a rule that only lists `sshd` still lets the user log in, but every
-  # `sudo` invocation on that host fails with `sudo: PAM account management
-  # error: Permission denied` even though `ipa sudorule-show` and
-  # `ipa hbactest --service=sshd` both look correct — confirmed live,
-  # 2026-07-16: `ipa hbactest --service=sudo` for the same user/host
-  # returned `Access granted: False` until `sudo`/`sudo-i` were added here.
-  - name: sysops-login-all
-    services: [sshd, sudo, sudo-i]
-    groups: [sysops]
-
-# Set true only once ipa_hbac_rules above cover all the login paths you
-# actually want — this disables IPA's default "allow everyone everywhere"
-# rule. Leave false while you're still building out rules incrementally.
-# ipa_hbac_disable_allow_all: true
+# Reserved for later delivery batches. Non-empty values currently fail closed.
+hosts: []
+hostgroups: []
+hbac: {}
+sudo: {}

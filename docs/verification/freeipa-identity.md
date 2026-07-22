@@ -1,6 +1,8 @@
-# Verification Spec — freeipa-identity（FreeIPA 使用者/群組/HBAC/sudo 資料驅動 reconciler）
+# Verification Spec — freeipa-identity（canonical identity primitives + legacy authorization reconciler）
 
-> 版本：v1.1（已在 `pilot vm-target freeipa-server` 上實跑
+> 版本：v1.2（2026-07-22 delivery batch 1；已在獨立 AlmaLinux 9
+> `freeipa-identity-v2` vm-target 上實跑 canonical apply、checklist 與冪等重跑）
+> 相容基線：v1.1 已在 `pilot vm-target freeipa-server` 上實跑
 > `playbooks/test/fixtures/freeipa-identity-fixtures.yml` 建立 fixture，
 > §2 checklist 逐條實測，見 §3；v1.1 新增 §7.2a check-mode 安全性閘門）
 > 對齊規範：本檔驗證的不是單一 host 的既定角色（如 freeipa-server/freeipa-client），
@@ -19,7 +21,14 @@
 依 `AGENTS.md` §1「actual-run 規則」：寫進 `docs/verification/*.md` 步驟區塊的指令，
 **必須先在對應目標環境實際跑過並截真實輸出**才算數。
 
-本檔為 **v1.0**：`freeipa-identity-apply.yml` 在本次重新設計後（2026-07-16）新增了
+本檔 **v1.2** 依 `freeipa-config.md` 與 `freeipa-roster-implementation-plan.md` 的四批
+交付順序完成第 1 批：canonical `schema_version: 1` 的 users/groups、屬性、狀態、直接與
+nested membership，以及 legacy `ipa_*` compatibility。Canonical roster 必須透過
+`freeipa_roster_file` namespaced 載入；直接 `-e @roster.yaml` 會讓 top-level `groups`/
+`hosts` 撞到 Ansible magic variables，因此不受支援。Canonical hosts/hostgroups/HBAC/
+sudo 在第 2 批前 fail closed；既有 authorization 功能繼續使用 legacy roster。
+
+本檔 v1.0 的既有基線：`freeipa-identity-apply.yml` 在本次重新設計後（2026-07-16）新增了
 三層能力——(1) 密碼自行變更保護（不覆蓋使用者已自行設定的密碼）、(2) 既有物件的
 屬性 drift 修正（`*-mod` reconcile，取代原本 create-only 的 `*-add` no-op）、
 (3) 成員/掛載關係的雙向 diff（roster 移除一筆，rerun 後 live 也真的移除）——
@@ -46,6 +55,9 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 
 | 變數名稱 | 說明/用途 | 是否必填 |
 |---------|----------|---------|
+| `freeipa_roster_file` | canonical roster 檔路徑；以 `include_vars: name=freeipa_roster` 載入，避免 `groups`/`hosts` magic-variable collision | canonical 必填 |
+| `freeipa.admin.principal` / `freeipa.admin.password` | canonical kinit principal/密碼；密碼由 vault 保護，禁止 hard-code | canonical 必填 |
+| `schema_version` / `users` / `groups` | canonical v1 identity primitives；支援 attributes、state、authoritative direct/nested membership | canonical 必填 |
 | `ipa_admin_password` | kinit admin 用密碼；由 vault file 注入，禁止 hard-code | 是 |
 | `ipa_domain` / `ipa_realm` | Kerberos/DNS domain/realm，預設 `ipa.pilot.internal` / `IPA.PILOT.INTERNAL` | 否（有預設）|
 | `ipa_users` / `ipa_groups` / `ipa_hostgroups` / `ipa_hbac_rules` / `ipa_sudo_rules` | 五份資料清單，見 roster schema 檔 | 否（皆預設 `[]`，可只給其中幾份）|
@@ -59,7 +71,7 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 ## 2. Checklist
 
 > 指令直接在 FreeIPA server 本機以 root 執行（`pilot verify` 走 ansible ad-hoc，
-> `become: true`）。前置：先跑過 §7.1 的 fixture 套用一次。
+> `become: true`）。前置：先跑過 §7.1 的 legacy 與 canonical fixture。
 
 | ID | Category | Check | Expected | Command |
 |----|----------|-------|----------|---------|
@@ -71,6 +83,10 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 | C6 | sudo | `fixture-sudo-a` 掛載了 roster 宣告的 `groups: [fixture-group-a]` | ~memberuser: cn=fixture-group-a, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal" "(cn=fixture-sudo-a)" memberuser 2>/dev/null |
 | C7 | drift | `fixture-hostgroup-a` 的 `desc` 與 roster 完全一致（證明 `hostgroup-mod` 屬性 reconcile 有跑）| ~description: freeipa-identity spec fixture hostgroup | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=fixture-hostgroup-a,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal" description 2>/dev/null |
 | C8 | drift | `fixture-user-a` 的姓名（`sn`）與 roster 完全一致（證明 `user-mod` 屬性 reconcile 有跑）| ~sn: A | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "uid=fixture-user-a,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal" sn 2>/dev/null |
+| C9 | canonical-user | canonical user 的 display name、email、shell 與 home 已收斂 | ~displayName: Canonical Alpha | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "uid=fixture-canonical-user-a,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal" displayName mail loginShell homeDirectory 2>/dev/null |
+| C10 | canonical-state | `state: disabled` / `enabled: false` 真的鎖住帳號 | ~nsAccountLock: TRUE | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "uid=fixture-canonical-user-b,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal" nsAccountLock 2>/dev/null |
+| C11 | canonical-membership | canonical team group 直接包含宣告的 user | ~member: uid=fixture-canonical-user-a, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=team-fixture-canonical,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal" member 2>/dev/null |
+| C12 | canonical-nesting | canonical filesystem group 直接包含宣告的 nested team group | ~member: cn=team-fixture-canonical, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=data-fixture-canonical-rw,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal" member 2>/dev/null |
 
 > **rc 型 expected（C1/C2/C5 = `0`）比對 process 退出碼**：C1/C2 直接對 `grep -q` 的
 > rc；C2/C5 用 shell `!` 反轉（`grep` 找不到才是我們要的「pass」），跟
@@ -90,29 +106,18 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
   （真實主機：`pilot verify docs/verification/freeipa-identity.md -i inventory-freeipa.yaml`）
 - 前置：先套用 fixture（見 §7.1），checklist 才有東西可查
 - 格式：`.verification/freeipa-identity-<UTC>.{ndjson,md}`
-- 預期 row 數：8
+- 預期 row 數：12
 
-**真實輸出**（`freeipa-server` VM，2026-07-16 套用 fixture 後，用 `pilot vm-target verify`
-真的跑過，非手動預測）：
+**目前真實輸出摘要**（`freeipa-identity-v2` AlmaLinux 9 VM，2026-07-22 同時套用
+legacy 與 canonical fixture 後實跑；完整 stdout/row payload 留在 raw artifact，正式
+candidate 的 immutable revision 與 evidence link 見 runbook §0.5）：
 
 ```
-$ pilot vm-target verify --name freeipa-server docs/verification/freeipa-identity.md
-▶ pilot verify docs/verification/freeipa-identity.md -i /tmp/pilot-inv-1506715109.yaml -l freeipa-server
-✔ NDJSON:   .verification/freeipa-identity-20260716-072350.ndjson
-✔ Report:   .verification/freeipa-identity-20260716-072350.md
+$ pilot vm-target verify --name freeipa-identity-v2 docs/verification/freeipa-identity.md
+✔ NDJSON:   .verification/freeipa-identity-20260722-032722.ndjson
+✔ Report:   .verification/freeipa-identity-20260722-032722.md
 
-verdict: PASS  (pass=8 fail=0 skip=0)
-```
-
-```json
-{"id":"C1","status":"pass","detail":"rc=0 matches expected 0"}
-{"id":"C2","status":"pass","detail":"rc=0 matches expected 0"}
-{"id":"C3","status":"pass","detail":"stdout contains \"hostCategory: all\""}
-{"id":"C4","status":"pass","detail":"stdout contains \"memberuser: cn=fixture-group-a,\""}
-{"id":"C5","status":"pass","detail":"rc=0 matches expected 0"}
-{"id":"C6","status":"pass","detail":"stdout contains \"memberuser: cn=fixture-group-a,\""}
-{"id":"C7","status":"pass","detail":"stdout contains \"description: freeipa-identity spec fixture hostgroup\""}
-{"id":"C8","status":"pass","detail":"stdout contains \"sn: A\""}
+verdict: PASS  (pass=12 fail=0 skip=0)
 ```
 
 > 這個 PASS 也順帶驗證了一個更大的發現：`pilot spec --generate` 過去有個
@@ -128,7 +133,7 @@ verdict: PASS  (pass=8 fail=0 skip=0)
 
 ## 4. PASS / FAIL 規則
 
-- C1–C8 全部 `status=pass` → **PASS**：reconciler 套用 fixture roster 後，LDAP 裡的
+- C1–C12 全部 `status=pass` → **PASS**：reconciler 套用 legacy 與 canonical fixture 後，LDAP 裡的
   成員關係、規則屬性、物件屬性完全對應 roster 宣告的內容。
 - 任一 `fail` → **FAIL**，常見修法：
   - C1/C2 fail → 確認 §7.1 fixture 已套用過、fixture 的 group/user 名稱沒被改過；
@@ -150,7 +155,8 @@ verdict: PASS  (pass=8 fail=0 skip=0)
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
-| C1–C8 | 本 checklist 只驗證「套用 fixture 後的單次快照」，不驗證 reconciler 的 ADD/REMOVE/drift-correction 動態行為本身（roster 改了、rerun 之後真的生效）——那部分見 §7 的 SOP，不強塞進 `pilot spec` 的單指令快照模型 | 全部 | 永久 |
+| C1–C12 | 本 checklist 只驗證「套用 fixture 後的單次快照」，不驗證 reconciler 的 ADD/REMOVE/drift-correction 動態行為本身（roster 改了、rerun 之後真的生效）——那部分見 §7 的 SOP，不強塞進 `pilot spec` 的單指令快照模型 | 全部 | 永久 |
+| — | canonical hosts/hostgroups/HBAC/sudo/NFS/migration 尚未交付；playbook 對非空值 fail closed，不把忽略欄位偽裝成成功 | canonical roster | delivery batch 2–4 |
 | — | 本 spec 不含密碼自行變更保護（§7.4）的 checklist row：該行為的證據（`krbLastPwdChange`/`krbPasswordExpiration` 前後比對）本質是「rerun 前後對比」，同樣不適合單指令快照——手動走 §7.4 的 SOP 驗證 | 全部 | 永久 |
 
 ## 6. Playbook 對應
@@ -167,6 +173,8 @@ verdict: PASS  (pass=8 fail=0 skip=0)
 | C4/C6 | `Attach groups to HBAC/sudo rules` + `Remove stale groups from HBAC/sudo rules` | 後者是本次新增的移除半邊 |
 | C7 | `Reconcile IPA hostgroup descriptions`（`tags: [identity, hostgroups]`）| 本次新增 |
 | C8 | `Reconcile user first/last names`（`tags: [identity, users]`）| 本次新增 |
+| C9/C10 | `Ensure IPA users exist`、`Reconcile user first/last names`、`Reconcile canonical account enabled state`（`tags: [identity, users]`）| canonical attribute/state reconcile |
+| C11/C12 | `Ensure/Remove stale canonical direct user/nested-group membership`（`tags: [identity, users, groups]`）| authoritative direct membership |
 
 ## 7. 把 FAIL 變 PASS 的 SOP（fixture 套用 + reconciler 動態行為驗證）
 
@@ -174,6 +182,8 @@ verdict: PASS  (pass=8 fail=0 skip=0)
 
 ```bash
 pilot vm-target run --name <server-vm> playbooks/test/fixtures/freeipa-identity-fixtures.yml \
+    -e fixtures_target_group=all -e @~/.vault/main.yaml
+pilot vm-target run --name <server-vm> playbooks/test/fixtures/freeipa-identity-canonical-fixtures.yml \
     -e fixtures_target_group=all -e @~/.vault/main.yaml
 ```
 
@@ -252,3 +262,4 @@ pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.ym
 |------|------|------|--------|
 | 2026-07-16 | v1.0 | 初版：`freeipa-identity-apply.yml` 從 create-only 重設計為真正的 infra-as-code reconciler（密碼自行變更保護、屬性 drift reconcile、成員/掛載關係雙向 diff），新增 `playbooks/test/fixtures/freeipa-identity-fixtures.yml` fixture，checklist C1–C8 全數對著活的 `freeipa-server` VM 實測。§7 記錄了 reconciler 動態行為（roster 增減、密碼保護）的可重現驗證 SOP，因其「改 → rerun → 比較」的本質不適合塞進 §2 的單指令快照模型 | pilot |
 | 2026-07-16 | v1.1 | 全新 3-VM 環境（`docs/runbooks/minimal-poc-architecture.md` v4.9）重新走一遍完整 delivery-test 流程時，發現 v1.0 從未驗證過的一個真實缺口：`pilot vm-target verify`（§7.2）不會用 `--check` 模式跑 Ansible，所以 reconciler 自己的 5 個 `set_fact` 「算待移除項目」任務在 check mode 下全部因為前面 lookup 任務被跳過而拿到未定義變數，讓 `pilot deploy` 自己的 mandatory preview 直接崩潰——這正是本 spec 從未在意的一種行為，現已修好（`\| default(...)` 共 12 處）並新增 §7.2a 這道 SOP 閘門，往後任何人改這支 playbook 都必須額外對一台全新主機跑一次 `--check --diff` 確認 `failed=0`，不能只信 §7.2 綠燈。同一次重跑也順便再驗證了一遍 §7.3/§7.4 的動態行為（移除/恢復/密碼保護），結果與 v1.0 一致 | pilot |
+| 2026-07-22 | v1.2 | 依 implementation plan 完成 delivery batch 1：canonical v1 users/groups normalization、validation、attributes、disabled state、direct/nested authoritative membership 與 legacy compatibility；新增 C9–C12。實測發現 canonical top-level `groups`/`hosts` 與 Ansible magic variables 衝突，正式入口改為 `freeipa_roster_file` namespaced load | pilot |
