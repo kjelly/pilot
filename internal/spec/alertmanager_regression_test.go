@@ -123,14 +123,15 @@ func TestRegression_AlertmanagerSpec(t *testing.T) {
 		}
 	}
 
-	// C5 must assert on a `route:` line — confirms the operator actually
-	// configured a routing tree rather than an empty stub.
+	// C5 must assert on a route key in either YAML or JSON — Alertmanager
+	// accepts both formats, and the vault editor stores multiline-free values
+	// most safely as compact JSON.
 	for _, r := range s.Rows {
 		if r.ID != "C5" {
 			continue
 		}
-		if !strings.Contains(r.Command, "route:") {
-			t.Errorf(`C5 must assert on a "route:" line; got %q`, r.Command)
+		if !strings.Contains(r.Command, "route:") || !strings.Contains(r.Command, `\"route\"`) {
+			t.Errorf(`C5 must accept both YAML "route:" and JSON "route" keys; got %q`, r.Command)
 		}
 		if r.Expected != "0" {
 			t.Errorf("C5 expected must be rc-based \"0\"; got %q", r.Expected)
