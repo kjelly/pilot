@@ -81,10 +81,10 @@ func TestRegression_FreeipaServerSpec(t *testing.T) {
 }
 
 // TestRegression_FreeipaServerSpec_MatcherChoices locks the two hard-won
-// matcher decisions the spec documents (both were verify false-negatives in
+// matcher decisions the spec documents (all were verify false-negatives in
 // practice): C2 must use POSITIVE logic (`sudo ipactl status`, not a
-// reverse-logic `| grep STOPPED`), and C3 must use `~contains` (not a
-// `^`-anchored regex that the ad-hoc wrapper would defeat).
+// reverse-logic `| grep STOPPED`), while C3 and C12 must derive the effective
+// configured FQDN instead of hard-coding the default ipa1 hostname.
 func TestRegression_FreeipaServerSpec_MatcherChoices(t *testing.T) {
 	const specPath = "../../docs/verification/freeipa-server.md"
 	s, err := Parse(specPath)
@@ -109,12 +109,23 @@ func TestRegression_FreeipaServerSpec_MatcherChoices(t *testing.T) {
 		t.Errorf("C2 expected must be rc-based `0`, got %q", exp["C2"])
 	}
 
-	// C3: contains-match for the FQDN, never a ^-anchored regex.
-	if strings.HasPrefix(exp["C3"], "^") {
-		t.Errorf("C3 must use ~contains not a ^-anchored regex (ad-hoc wrapper defeats the anchor); got %q", exp["C3"])
+	// C3: compare hostname -f to FreeIPA's effective host setting exactly.
+	if exp["C3"] != "0" {
+		t.Errorf("C3 expected must be rc-based `0`, got %q", exp["C3"])
 	}
-	if !strings.HasPrefix(exp["C3"], "~") {
-		t.Errorf("C3 expected should be a ~contains match on the FQDN, got %q", exp["C3"])
+	if !strings.Contains(cmd["C3"], "hostname -f") || !strings.Contains(cmd["C3"], "/etc/ipa/default.conf") {
+		t.Errorf("C3 must compare hostname -f with FreeIPA's effective host setting, got %q", cmd["C3"])
+	}
+	if strings.Contains(cmd["C3"], "ipa1.ipa.pilot.internal") {
+		t.Errorf("C3 must not hard-code the default FreeIPA FQDN, got %q", cmd["C3"])
+	}
+
+	// C12: probe the CA endpoint via this host's configured FQDN.
+	if !strings.Contains(cmd["C12"], "$(hostname -f)") {
+		t.Errorf("C12 must derive the CA endpoint FQDN from hostname -f, got %q", cmd["C12"])
+	}
+	if strings.Contains(cmd["C12"], "ipa1.ipa.pilot.internal") {
+		t.Errorf("C12 must not hard-code the default FreeIPA FQDN, got %q", cmd["C12"])
 	}
 
 	// C14/C15: 389-ds audit-log config read via dsconf (needs root over ldapi),
