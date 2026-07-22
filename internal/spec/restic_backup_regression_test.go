@@ -106,7 +106,7 @@ func TestRegression_ResticBackupSpec(t *testing.T) {
 	if !strings.Contains(cmd["C6"], "restic check") {
 		t.Errorf("C6 must run `restic check`, got %q", cmd["C6"])
 	}
-	if !strings.Contains(cmd["C6"], "--retry-lock 30s") {
+	if !strings.Contains(cmd["C6"], "--retry-lock 120s") {
 		t.Errorf("C6 must wait safely for concurrent shared-repository checks, got %q", cmd["C6"])
 	}
 
