@@ -318,6 +318,11 @@
       register: ipa_sssd_services_current
       changed_when: false
       check_mode: false
+      # A fresh-host preview predicts package/enrollment changes but cannot
+      # read the SSSD file until the real ipa-client-install has created it.
+      # The consumers below are also apply-only, so this probe is unnecessary
+      # (and unsafe) during --check.
+      when: not ansible_check_mode
       tags: [freeipa-client, C8]
 
     - name: "FreeIPA client — ensure SSSD's services line does not fight socket-activated sudo"
