@@ -35,6 +35,10 @@ func TestRegression_FreeIPANFSSpecs(t *testing.T) {
 }
 
 func TestRegression_FreeIPANFSSafetyContracts(t *testing.T) {
+	serverDoc, err := os.ReadFile("../../docs/verification/freeipa-nfs-server.md")
+	if err != nil {
+		t.Fatal(err)
+	}
 	server, _ := Parse("../../docs/verification/freeipa-nfs-server.md")
 	all := ""
 	for _, row := range server.Rows {
@@ -43,6 +47,11 @@ func TestRegression_FreeIPANFSSafetyContracts(t *testing.T) {
 	for _, required := range []string{"root_squash", "sec=krb5i", "default:group", "/etc/krb5.keytab"} {
 		if !strings.Contains(all, required) {
 			t.Errorf("NFS server spec must lock %q", required)
+		}
+	}
+	for _, required := range []string{"AlmaLinux 9、Ubuntu 24.04", "command -v rpm", "dpkg-query", "nfs-kernel-server"} {
+		if !strings.Contains(string(serverDoc), required) {
+			t.Errorf("NFS server spec must support portable package check %q", required)
 		}
 	}
 	client, _ := Parse("../../docs/verification/freeipa-nfs-client.md")
