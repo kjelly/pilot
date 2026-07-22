@@ -138,8 +138,8 @@ nfs:
         ensure: true
         principal: nfs/nfs1.ipa.pilot.internal
         keytab: /etc/krb5.keytab
-      packages: [nfs-utils, acl]
-      services: [nfs-server, rpc-gssd]
+      # Packages and the NFS server systemd unit are derived from the target
+      # OS by freeipa-nfs-server-apply.yml (RedHat or Debian/Ubuntu).
       shares:
         - name: project-alpha
           state: present

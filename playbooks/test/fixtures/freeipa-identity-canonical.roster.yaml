@@ -135,8 +135,6 @@ nfs:
         ensure: true
         principal: nfs/freeipa-nfs-v2.ipa.pilot.internal
         keytab: /etc/krb5.keytab
-      packages: [nfs-utils, acl]
-      services: [nfs-server, rpc-gssd]
       shares:
         - name: fixture-alpha
           state: present

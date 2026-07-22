@@ -1,6 +1,8 @@
 package spec
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -50,5 +52,30 @@ func TestRegression_FreeIPANFSSafetyContracts(t *testing.T) {
 	}
 	if !strings.Contains(all, "/etc/fstab") || !strings.Contains(all, "autofs") {
 		t.Error("NFS client spec must lock automount and forbid fstab mutation")
+	}
+}
+
+func TestRegression_FreeIPANFSServerSupportsEnrolledUbuntuHosts(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-nfs-server-apply.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	for _, required := range []string{
+		"Debian: [nfs-kernel-server, acl]",
+		"path: /etc/ipa/default.conf",
+		"systemctl is-active sssd",
+		"nfs_server_fqdn == ansible_fqdn",
+		"name: \"{{ nfs_server_service }}\"",
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Errorf("Ubuntu NFS server contract missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"name: gssproxy", "nfs_exports_fragment is file", "nfs_selected_server.packages", "nfs_selected_server.services"} {
+		if strings.Contains(playbook, forbidden) {
+			t.Errorf("Ubuntu NFS server contract must not contain %q", forbidden)
+		}
 	}
 }

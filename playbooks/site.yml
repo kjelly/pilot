@@ -20,7 +20,7 @@
 #     且『只有當該 group 有 host 時』才會被要求。見 DELIVERY.md。
 #
 #  ── 相依順序 ────────────────────────────────────────────────────────────
-#     核心服務(dns/ntp)→ FreeIPA server → NFS server → FreeIPA client → NFS client
+#     核心服務(dns/ntp)→ FreeIPA server → FreeIPA client → NFS server → NFS client
 #                         → Keycloak DB → Keycloak → PAM-OIDC
 #                         → log-server → audit-log-forwarding
 #                         → wazuh-manager → wazuh-fim
@@ -121,13 +121,13 @@
 - import_playbook: apply/docker-apply.yml
   tags: [infra, docker]
 
-# ── 2. 身份 / AAA(FreeIPA)server 先於 client ───────────────────────────
+# ── 2. 身份 / AAA(FreeIPA)server → enrolled clients → NFS roles ───────
 - import_playbook: apply/freeipa-server-apply.yml
   tags: [freeipa, freeipa-server]
-- import_playbook: apply/freeipa-nfs-server-apply.yml
-  tags: [freeipa, freeipa-nfs-server]
 - import_playbook: apply/freeipa-client-apply.yml
   tags: [freeipa, freeipa-client]
+- import_playbook: apply/freeipa-nfs-server-apply.yml
+  tags: [freeipa, freeipa-nfs-server]
 - import_playbook: apply/freeipa-nfs-client-apply.yml
   tags: [freeipa, freeipa-nfs-client]
 

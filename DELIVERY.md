@@ -502,6 +502,8 @@ docker run --rm -it \
 |---|---|---|
 | 建 FreeIPA 身份伺服器 | `playbooks/apply/freeipa-server-apply.yml` | `freeipa-server` |
 | 把機器納入 FreeIPA（AAA） | `playbooks/apply/freeipa-client-apply.yml` | `freeipa-client` |
+| 建 Kerberos NFSv4 server（目標須先納入 FreeIPA；支援 RedHat 與 Debian/Ubuntu） | `playbooks/apply/freeipa-nfs-server-apply.yml` | `freeipa-nfs-server` |
+| 啟用 FreeIPA automount NFS client（目標須先納入 FreeIPA） | `playbooks/apply/freeipa-nfs-client-apply.yml` | `freeipa-nfs-client` |
 | 管理 FreeIPA 使用者／權限 | `playbooks/apply/freeipa-identity-apply.yml` | (見下方「機密」) |
 | 把第二台（或後續台）FreeIPA server 加入既有 realm（multi-master HA） | `playbooks/apply/freeipa-server-replica-apply.yml` | `freeipa-server-replica`（**v0.1 草稿、未實跑**，見 `docs/verification/freeipa-server-replica.md` §0；限制與已知偏差見該檔 §5）|
 | DNS／NTP 等核心服務 | `playbooks/apply/core-infra-provider-apply.yml` | 依 `-e infra_role=dns\|ntp` |

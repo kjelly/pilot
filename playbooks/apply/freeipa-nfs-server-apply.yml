@@ -11,6 +11,14 @@
     nfs_exports_fragment: /etc/exports.d/90-freeipa-managed.exports
     nfs_pseudo_root: /srv/nfs
     nfs_server_fqdn: "{{ ansible_fqdn }}"
+    nfs_server_packages_by_os_family:
+      RedHat: [nfs-utils, acl]
+      Debian: [nfs-kernel-server, acl]
+    nfs_server_service_by_os_family:
+      RedHat: nfs-server
+      Debian: nfs-kernel-server
+    nfs_server_packages: "{{ nfs_server_packages_by_os_family[ansible_os_family] | default([]) }}"
+    nfs_server_service: "{{ nfs_server_service_by_os_family[ansible_os_family] | default('') }}"
 
   pre_tasks:
     - name: "Load canonical roster under a namespace"
@@ -25,6 +33,9 @@
         that:
           - freeipa_roster.schema_version | int == 1
           - freeipa_roster.freeipa.admin.password | length >= 8
+          - ansible_os_family in nfs_server_packages_by_os_family
+          - nfs_server_packages | length > 0
+          - nfs_server_service | length > 0
           - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
           - stage != 'prod' or staging_attested_within_hours | int <= 168
         fail_msg: "A canonical roster, admin credential, and matching stage confirmation are required."
@@ -40,6 +51,28 @@
         fail_msg: "stage={{ stage }} does not match inventory groups {{ group_names }}."
       tags: [always]
 
+    - name: "Inspect FreeIPA client enrollment marker"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: nfs_ipa_enrollment
+      tags: [always, C1]
+
+    - name: "Inspect SSSD enrollment service"
+      ansible.builtin.command: systemctl is-active sssd
+      register: nfs_sssd_active
+      changed_when: false
+      failed_when: false
+      tags: [always, C1]
+
+    - name: "Gate: NFS server must already be an enrolled FreeIPA client"
+      ansible.builtin.assert:
+        that:
+          - nfs_ipa_enrollment.stat.exists
+          - nfs_sssd_active.rc == 0
+          - nfs_sssd_active.stdout | trim == 'active'
+        fail_msg: "Run freeipa-client-apply.yml on this host before enabling Kerberos NFS."
+      tags: [always, C1]
+
     - name: "Select this NFS server from the canonical roster"
       ansible.builtin.set_fact:
         nfs_selected_servers: "{{ freeipa_roster.nfs.servers | selectattr('host', 'equalto', nfs_server_fqdn) | list }}"
@@ -49,6 +82,7 @@
       ansible.builtin.assert:
         that:
           - nfs_server_fqdn is match('^[^.]+\\.[^.]+\\..+$')
+          - nfs_server_fqdn == ansible_fqdn
           - nfs_selected_servers | length == 1
           - nfs_selected_servers[0].service_principal.principal == 'nfs/' + nfs_server_fqdn
           - nfs_selected_servers[0].service_principal.keytab == '/etc/krb5.keytab'
@@ -77,9 +111,15 @@
   tasks:
     - name: "Install NFSv4 and ACL packages"
       ansible.builtin.package:
-        name: "{{ nfs_selected_server.packages | default(['nfs-utils', 'acl']) }}"
+        name: "{{ nfs_server_packages }}"
         state: present
       tags: [C3]
+
+    - name: "Inspect managed exports fragment before mutation"
+      ansible.builtin.stat:
+        path: "{{ nfs_exports_fragment }}"
+      register: nfs_exports_before
+      tags: [C7]
 
     - name: "Reconcile NFS identity, exports, and ACL with rollback"
       block:
@@ -89,7 +129,7 @@
             dest: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
             remote_src: true
             mode: preserve
-          when: nfs_exports_fragment is file
+          when: nfs_exports_before.stat.exists
           tags: [C7]
 
         - name: "Acquire Kerberos admin ticket"
@@ -221,19 +261,23 @@
 
         - name: "Enable NFS server services"
           ansible.builtin.service:
-            name: "{{ item }}"
+            name: "{{ nfs_server_service }}"
             enabled: true
             state: started
-          loop: "{{ nfs_selected_server.services | default(['nfs-server']) }}"
           tags: [C3, C4]
       rescue:
+        - name: "Inspect managed exports rollback snapshot"
+          ansible.builtin.stat:
+            path: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
+          register: nfs_exports_backup
+
         - name: "Restore managed exports fragment"
           ansible.builtin.copy:
             src: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
             dest: "{{ nfs_exports_fragment }}"
             remote_src: true
             mode: "0644"
-          when: (nfs_exports_fragment + '.pre-freeipa-nfs.bak') is file
+          when: nfs_exports_backup.stat.exists
         - name: "Reload restored exports"
           ansible.builtin.command: exportfs -ra
           changed_when: true
@@ -251,5 +295,5 @@
   handlers:
     - name: Reload NFS GSS credentials
       ansible.builtin.service:
-        name: gssproxy
+        name: "{{ nfs_server_service }}"
         state: restarted
