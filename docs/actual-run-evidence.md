@@ -10,7 +10,7 @@
 | Acceptance contract | `docs/verification/<feature>.md` | 只在需求或驗收語意改變時更新 |
 | 目前操作流程 | `docs/runbooks/<feature>.md` | 只保留現在可執行的步驟、rollback 與有效 gotcha |
 | Sanitized evidence 摘要 | `docs/evidence/<feature>/<date>-<tested-revision>.md` | 每個被接受的 candidate 一份，不混入 runbook |
-| 完整原始輸出 | `.verification/`、pilot append-only evidence store 或受控外部儲存 | 不提交 Git；依 retention policy 保存 |
+| 完整原始輸出 | Gitignored `.verification/` 或暫時的受控驗收儲存 | 不提交 Git；只在一次性驗收與診斷期間保存 |
 
 Runbook 與 spec 不得當成 chronological test journal。重跑時更新「最後驗證」摘要與
 latest evidence link；舊結果留在獨立 evidence record 或 Git history。
@@ -43,7 +43,6 @@ latest evidence link；舊結果留在獨立 evidence record 或 Git history。
 - tested commit ID、tree ID、execution-affecting file hashes；
 - target 類型、inventory 來源與實際 host/group 摘要；
 - dry-run、apply、verify、idempotency 的真實 verdict、exit code 與摘要數字；
-- raw artifact 的受控位置或 archive ID，以及 checksum；
 - target image digest，以及會影響結果之外部 state fingerprint（若適用）；
 - redaction 類別；
 - 失敗時的真實結論，不得改寫成 PASS。
@@ -51,12 +50,17 @@ latest evidence link；舊結果留在獨立 evidence record 或 Git history。
 完整 stdout/stderr、逐 row payload、秘密值與內部 operational identifiers 不放入
 committed evidence summary。
 
-`.verification/` 只是原始報告的 staging location，不等於 durable retention。接受
-candidate 前必須依專案 retention policy 封存 raw artifact 並記錄 checksum。命令若讀取
-秘密，只記 secret-file reference 或 stable command ID，不記展開後的秘密值。
+`.verification/` 是一次性驗收與診斷的 staging location，不是 durable archive。接受
+candidate 的前提是提交一份可獨立判讀的 sanitized evidence summary，不是封存 raw
+artifact。成功候選的 raw stdout/stderr/cast 在摘要提交後可以清除；失敗候選的 raw
+evidence 保留到修正已由新 candidate 驗證即可。命令若讀取秘密，只記 secret-file
+reference 或 stable command ID，不記展開後的秘密值。
 
-失敗 run 的 raw evidence 必須保留；只有 audit 要求、被接受的 known deviation，或仍會
-影響目前操作的失敗才提交 sanitized failure record。已被後續 candidate 取代的一般失敗
+Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit code、duration、
+`PLAY RECAP` 與 verify verdict counts。只有 audit、baseline comparison、使用者明確要求，
+或失敗診斷才讀 raw artifact；失敗時先以 `FAILED!`、`fatal:`、`unreachable`、`PLAY RECAP`
+定位，再開啟受影響 task 的有限上下文。只有 audit 要求、被接受的 known deviation，或仍會
+影響目前操作的失敗才提交 sanitized failure record；已被後續 candidate 取代的一般失敗
 不得塞回 runbook。
 
 ## 4. 何時 evidence 失效
@@ -78,5 +82,5 @@ candidate 前必須依專案 retention policy 封存 raw artifact 並記錄 chec
 - verification spec 保留 acceptance contract，不放大型演練敘事。
 - 只有仍影響目前操作的事故，才濃縮成 gotcha；開發過程由 issue、commit 與 evidence
   record 保存。
-- Coding agent 預設不讀 `docs/evidence/` 或 raw artifact；只有 audit、failure diagnosis、
-  baseline comparison 或使用者明確要求時才載入。
+- Coding agent 預設只讀 command result、compact summary 與 sanitized evidence，不讀 raw
+  artifact；只有 audit、failure diagnosis、baseline comparison 或使用者明確要求時才載入。

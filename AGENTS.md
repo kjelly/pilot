@@ -597,6 +597,22 @@ git status --short
   inventories in committed runbooks. Runbooks may describe that a command was
   executed and include its real sanitized output, but the evidence file itself
   must remain outside the document.
+- Keep raw `trec`/Ansible stdout and stderr only while the one-time acceptance
+  run or its diagnosis is active. Once a truthful sanitized candidate summary
+  has been committed, successful raw artifacts may be deleted. A failed run may
+  be deleted after its fix has been verified by a newer candidate; do not turn
+  disposable recordings into a permanent archive by default.
+- **Summary-first reading rule:** agents must first read the command result or
+  compact summary (exit code, duration, `PLAY RECAP`, verify verdict counts,
+  candidate/tree). A zero-exit run with `failed=0` and passing verdicts does not
+  justify opening the full transcript. On failure, search raw output for
+  `FAILED!`, `fatal:`, `unreachable`, and `PLAY RECAP`, then read only the
+  affected task and its bounded context. Read an entire recording only for an
+  audit, baseline comparison, TUI replay, or an explicit user request.
+- A committed sanitized evidence record must stand on its own after
+  `.verification/` cleanup: it contains truthful candidate/tree, target
+  summary, real verdicts, and redaction facts, but never a raw artifact path,
+  filename, inventory, or required archive ID.
 
 ### Trec-related issues never go in runbooks
 
