@@ -43,8 +43,8 @@ get wrong (e.g. accidentally wiring a role to a host it shouldn't touch).
 
 We provision three KVM nodes using `pilot vm-target`:
 - **`freeipa`**: AlmaLinux 9 (`almalinux-9`). Role: FreeIPA identity provider (server).
-- **`nexus`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Central services server. Hosts Grafana, Prometheus/Thanos sidecar, Thanos Query, Alertmanager, Loki, Wazuh Manager (syslog receiver & FIM controller), SeaweedFS S3, and the NFS server.
-- **`client`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Verification client. Integrates into FreeIPA realm, validates SSH/HBAC/sudo, ships logs (Promtail), forwards audit logs to `nexus`, backs up config files to SeaweedFS S3 on `nexus`, collects metrics, and runs the Wazuh FIM agent reporting to `nexus`.
+- **`nexus`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Central services server. Hosts Grafana, Prometheus/Thanos sidecar, Thanos Query, Alertmanager, Loki, Wazuh Manager (syslog receiver & FIM controller), and SeaweedFS S3.
+- **`client`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Monitored Linux host and verification client. Integrates into FreeIPA realm, validates SSH/HBAC/sudo, ships logs (Promtail), forwards audit logs to `nexus`, backs up config files to SeaweedFS S3 on `nexus`, collects metrics, and runs the Wazuh FIM agent reporting to `nexus`.
 
 Node names are illustrative — reuse whatever `pilot vm-target list` already
 shows if VMs are already up rather than tearing down and renaming; the
@@ -106,9 +106,11 @@ For each VM, add a host with its real `ansible_host` (from §1.2),
 
 | Host | Roles |
 |---|---|
-| `freeipa` | `freeipa-server`, `restic-backup`, `audit-log-forwarding`, `wazuh-fim` |
-| `nexus` | `docker`, `wazuh-manager`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard` (Grafana + Loki), `freeipa-nfs-server`, `audit-log-forwarding`, `wazuh-fim` |
-| `client` | `docker`, `freeipa-client`, `restic-backup`, `audit-log-forwarding`, `wazuh-fim`, `freeipa-nfs-client` |
+| `freeipa` | `freeipa-server`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
+| `nexus` | `docker`, `audit-log-forwarding`, `wazuh-manager`, `wazuh-fim`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard` |
+| `client` | `freeipa-client`, `docker`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
+
+The `dashboard` role on `nexus` provides Grafana and Loki.
 
 **All three hosts get `wazuh-fim` and `audit-log-forwarding`**, not just the
 client node — every node's own `/etc` should be FIM-monitored and every
