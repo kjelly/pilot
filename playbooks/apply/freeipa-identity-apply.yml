@@ -67,6 +67,7 @@
 
     ipa_domain: ipa.pilot.internal
     ipa_realm: "{{ ipa_domain | upper }}"
+    identity_hbac_test_host: "{{ ipa_server_fqdn | default(inventory_hostname) }}"
 
     # Data lists default to empty so a partial roster (e.g. only users, no
     # sudo rules) is valid and each block below simply skips.
@@ -290,6 +291,7 @@
         ipa_realm: "{{ freeipa_roster.freeipa.realm | default(freeipa_roster.freeipa.domain | default('ipa.pilot.internal') | upper) }}"
         identity_admin_principal: "{{ freeipa_roster.freeipa.admin.principal | default('admin') }}"
         identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
+        identity_hbac_test_host: "{{ freeipa_roster.freeipa.server }}"
         ipa_users: []
         ipa_groups: []
         ipa_hostgroups: []
@@ -1370,7 +1372,7 @@
             fail_msg: "Refusing to disable allow_all without an enabled admin break-glass rule."
         - name: "Prove break-glass access before lockdown"
           ansible.builtin.command:
-            argv: [ipa, hbactest, --user=admin, "--host={{ ansible_fqdn }}", --service=sshd]
+            argv: [ipa, hbactest, --user=admin, "--host={{ identity_hbac_test_host }}", --service=sshd]
           register: ipa_hbac_prelock_test
           changed_when: false
           failed_when: "'Access granted: True' not in (ipa_hbac_prelock_test.stdout | default(''))"
@@ -1384,7 +1386,7 @@
           when: "'Enabled: True' in (ipa_hbac_allow_all_show.stdout | default(''))"
         - name: "Prove break-glass access after lockdown"
           ansible.builtin.command:
-            argv: [ipa, hbactest, --user=admin, "--host={{ ansible_fqdn }}", --service=sshd]
+            argv: [ipa, hbactest, --user=admin, "--host={{ identity_hbac_test_host }}", --service=sshd]
           register: ipa_hbac_postlock_test
           changed_when: false
           failed_when: "'Access granted: True' not in (ipa_hbac_postlock_test.stdout | default(''))"

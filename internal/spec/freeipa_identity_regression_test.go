@@ -104,4 +104,11 @@ func TestRegression_FreeipaIdentityAllowsSharedNFSRoster(t *testing.T) {
 	if !strings.Contains(playbook, "freeipa_roster.migration | default({}) | length == 0") {
 		t.Fatal("identity reconciliation must keep unsupported migration input fail-closed")
 	}
+	if strings.Contains(playbook, "--host={{ ansible_fqdn }}") {
+		t.Fatal("HBAC self-tests must not depend on gathered facts when gather_facts is false")
+	}
+	if !strings.Contains(playbook, `identity_hbac_test_host: "{{ freeipa_roster.freeipa.server }}"`) ||
+		strings.Count(playbook, `--host={{ identity_hbac_test_host }}`) != 2 {
+		t.Fatal("HBAC pre/post-lock tests must use the canonical roster server FQDN")
+	}
 }
