@@ -59,6 +59,7 @@
 
     - name: "Inspect SSSD enrollment service"
       ansible.builtin.command: systemctl is-active sssd
+      check_mode: false
       register: nfs_sssd_active
       changed_when: false
       failed_when: false

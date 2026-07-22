@@ -65,7 +65,7 @@ func TestRegression_FreeIPANFSServerSupportsEnrolledUbuntuHosts(t *testing.T) {
 	for _, required := range []string{
 		"Debian: [nfs-kernel-server, acl]",
 		"path: /etc/ipa/default.conf",
-		"systemctl is-active sssd",
+		"systemctl is-active sssd\n      check_mode: false",
 		"nfs_server_fqdn == ansible_fqdn",
 		"name: \"{{ nfs_server_service }}\"",
 	} {
