@@ -20,7 +20,7 @@
 #     且『只有當該 group 有 host 時』才會被要求。見 DELIVERY.md。
 #
 #  ── 相依順序 ────────────────────────────────────────────────────────────
-#     核心服務(dns/ntp)→ FreeIPA server → FreeIPA client
+#     核心服務(dns/ntp)→ FreeIPA server → NFS server → FreeIPA client → NFS client
 #                         → Keycloak DB → Keycloak → PAM-OIDC
 #                         → log-server → audit-log-forwarding
 #                         → wazuh-manager → wazuh-fim
@@ -31,6 +31,10 @@
 #
 #  注意:FreeIPA 使用者/權限(freeipa-identity-apply.yml)是「資料驅動的 day-2
 #  維運」,需要 vault roster,刻意不放進 site.yml。單獨執行,見 DELIVERY.md。
+#  FreeIPA NFS server/client 則是 day-1 主機角色；inventory 有填
+#  freeipa-nfs-server / freeipa-nfs-client 時會在下方套用並安裝所需套件。
+#  NFS server 仍需要 canonical roster（含 nfs.servers）供 principal、keytab
+#  與 exports 使用。
 #
 #  注意:跨角色 host 變數(siem_forward_host、wazuh_manager_host、
 #  restic_s3_target_host、loki_target_host、thanos_s3_target_host、
@@ -120,8 +124,12 @@
 # ── 2. 身份 / AAA(FreeIPA)server 先於 client ───────────────────────────
 - import_playbook: apply/freeipa-server-apply.yml
   tags: [freeipa, freeipa-server]
+- import_playbook: apply/freeipa-nfs-server-apply.yml
+  tags: [freeipa, freeipa-nfs-server]
 - import_playbook: apply/freeipa-client-apply.yml
   tags: [freeipa, freeipa-client]
+- import_playbook: apply/freeipa-nfs-client-apply.yml
+  tags: [freeipa, freeipa-nfs-client]
 
 # ── 3. Keycloak(DB 先於 IdP)────────────────────────────────────────────
 - import_playbook: apply/keycloak-db-apply.yml
