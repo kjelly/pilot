@@ -28,4 +28,4 @@ traceability:
   mode: rowTags
   tag: {kind: bare}
 verification: {autoDeploy: false}
-site: {include: false, order: 0, vars: {}, tags: [], optIn: true}
+site: {include: true, order: 45, vars: {}, tags: [freeipa, freeipa-nfs-server], optIn: false}
