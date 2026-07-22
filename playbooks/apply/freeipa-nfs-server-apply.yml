@@ -131,6 +131,15 @@
       register: nfs_exports_before
       tags: [C7]
 
+    - name: "Inspect create-once managed exports rollback state"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
+        - "{{ nfs_exports_fragment }}.pre-freeipa-nfs.absent"
+      register: nfs_exports_rollback_state
+      tags: [C7]
+
     - name: "Reconcile NFS identity, exports, and ACL with rollback"
       block:
         - name: "Snapshot managed exports fragment"
@@ -140,7 +149,23 @@
             remote_src: true
             force: false
             mode: preserve
-          when: nfs_exports_before.stat.exists
+          when:
+            - nfs_exports_before.stat.exists
+            - not nfs_exports_rollback_state.results[0].stat.exists
+            - not nfs_exports_rollback_state.results[1].stat.exists
+          tags: [C7]
+
+        - name: "Record that the managed exports fragment was initially absent"
+          ansible.builtin.copy:
+            dest: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.absent"
+            content: ""
+            force: false
+            owner: root
+            group: root
+            mode: "0644"
+          when:
+            - not nfs_exports_before.stat.exists
+            - not nfs_exports_rollback_state.results[0].stat.exists
           tags: [C7]
 
         - name: "Acquire Kerberos admin ticket"
@@ -285,6 +310,11 @@
             path: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
           register: nfs_exports_backup
 
+        - name: "Inspect managed exports initially-absent marker"
+          ansible.builtin.stat:
+            path: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.absent"
+          register: nfs_exports_initially_absent
+
         - name: "Restore managed exports fragment"
           ansible.builtin.copy:
             src: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
@@ -292,6 +322,13 @@
             remote_src: true
             mode: "0644"
           when: nfs_exports_backup.stat.exists
+        - name: "Remove a managed exports fragment that did not exist before this role"
+          ansible.builtin.file:
+            path: "{{ nfs_exports_fragment }}"
+            state: absent
+          when:
+            - not nfs_exports_backup.stat.exists
+            - nfs_exports_initially_absent.stat.exists
         - name: "Reload restored exports"
           ansible.builtin.command: exportfs -ra
           changed_when: true
