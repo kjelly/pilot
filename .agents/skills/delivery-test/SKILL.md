@@ -107,8 +107,8 @@ For each VM, add a host with its real `ansible_host` (from §1.2),
 | Host | Roles |
 |---|---|
 | `freeipa` | `freeipa-server`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
-| `nexus` | `docker`, `audit-log-forwarding`, `wazuh-manager`, `wazuh-fim`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard` |
-| `client` | `freeipa-client`, `docker`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
+| `nexus` | `docker`, `audit-log-forwarding`, `wazuh-manager`, `wazuh-fim`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard`, `freeipa-nfs-server` |
+| `client` | `freeipa-client`, `docker`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup`, `freeipa-nfs-client` |
 
 The `dashboard` role on `nexus` provides Grafana and Loki.
 
