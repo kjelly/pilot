@@ -7,9 +7,8 @@
 > `playbooks/apply/freeipa-identity-apply.yml` reconciler
 > Maintainer: sre
 
-Round 12 was executed from the immutable CAND-23 commit/tree recorded in §7. The raw TREC archive
-remains under the round-12 evidence store; this runbook keeps only the current sanitized facts and
-links.
+Round 12 was executed from the immutable CAND-23 commit/tree recorded in §7. This runbook keeps
+only the current sanitized facts and links; its one-time acceptance recordings are disposable.
 
 ## 0. Goal
 
