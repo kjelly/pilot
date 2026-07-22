@@ -14,14 +14,14 @@ package inventory
 // aggregateOrder is where each aggregator (parent group with no hosts
 // of its own — membership flows in automatically from its children)
 // sits relative to the leaf groups in the rendered `all.children` tree.
-// freeipa wraps the three freeipa-* leaves; infra-provider wraps the
+// freeipa wraps the five freeipa-* leaves; infra-provider wraps the
 // five core-infra leaves so `-e target_group=infra-provider` can hit
 // all of them at once (see inventory.example.yml's original comment).
 var aggregates = []struct {
 	Name     string
 	Children []string
 }{
-	{"freeipa", []string{"freeipa-server", "freeipa-client", "freeipa-server-replica"}},
+	{"freeipa", []string{"freeipa-server", "freeipa-client", "freeipa-server-replica", "freeipa-nfs-server", "freeipa-nfs-client"}},
 	{"infra-provider", []string{"dns", "ntp", "docker", "keycloak", "keycloak-db"}},
 }
 
