@@ -116,6 +116,15 @@
         state: present
       tags: [C3]
 
+    - name: "Ensure the managed exports directory exists"
+      ansible.builtin.file:
+        path: "{{ nfs_exports_fragment | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [C7]
+
     - name: "Inspect managed exports fragment before mutation"
       ansible.builtin.stat:
         path: "{{ nfs_exports_fragment }}"
