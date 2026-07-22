@@ -87,6 +87,12 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 | C10 | canonical-state | `state: disabled` / `enabled: false` 真的鎖住帳號 | ~nsAccountLock: TRUE | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "uid=fixture-canonical-user-b,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal" nsAccountLock 2>/dev/null |
 | C11 | canonical-membership | canonical team group 直接包含宣告的 user | ~member: uid=fixture-canonical-user-a, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=team-fixture-canonical,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal" member 2>/dev/null |
 | C12 | canonical-nesting | canonical filesystem group 直接包含宣告的 nested team group | ~member: cn=team-fixture-canonical, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=data-fixture-canonical-rw,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal" member 2>/dev/null |
+| C13 | canonical-hbac | canonical HBAC rule 掛載 access group 與 sshd service | ~memberUser: cn=access-fixture-canonical-ssh, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=hbac,dc=ipa,dc=pilot,dc=internal" "(cn=fixture-canonical-hbac)" memberUser memberService 2>/dev/null |
+| C14 | hbac-lockdown | break-glass enabled 且 `allow_all` disabled | ~ipaEnabledFlag: TRUE | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=hbac,dc=ipa,dc=pilot,dc=internal" "(cn=fixture-canonical-breakglass)" ipaEnabledFlag 2>/dev/null |
+| C15 | canonical-sudo | canonical sudo command group 包含受限 command | ~member: ipaUniqueID= | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=fixture-service-read,cn=sudocmdgroups,cn=sudo,dc=ipa,dc=pilot,dc=internal" member 2>/dev/null |
+| C16 | canonical-sudo | canonical sudo rule 掛載 role group 與 allow command group | ~memberUser: cn=role-fixture-canonical-ops, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal" "(cn=fixture-canonical-sudo)" memberUser memberAllowCmd 2>/dev/null |
+| C17 | canonical-sudo | canonical sudo rule 含 specific run-as root 與 `!authenticate` | ~ipaSudoOpt: !authenticate | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal" "(cn=fixture-canonical-sudo)" ipaSudoRunAsExtUser ipaSudoOpt 2>/dev/null |
+| C18 | automount | FreeIPA indirect automount key 使用 FQDN 與 `sec=krb5i` | ~freeipa-nfs-v2.ipa.pilot.internal:/projects/fixture-alpha | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=default,cn=automount,dc=ipa,dc=pilot,dc=internal" "(automountKey=fixture-alpha)" automountInformation 2>/dev/null |
 
 > **rc 型 expected（C1/C2/C5 = `0`）比對 process 退出碼**：C1/C2 直接對 `grep -q` 的
 > rc；C2/C5 用 shell `!` 反轉（`grep` 找不到才是我們要的「pass」），跟
@@ -106,7 +112,7 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
   （真實主機：`pilot verify docs/verification/freeipa-identity.md -i inventory-freeipa.yaml`）
 - 前置：先套用 fixture（見 §7.1），checklist 才有東西可查
 - 格式：`.verification/freeipa-identity-<UTC>.{ndjson,md}`
-- 預期 row 數：12
+- 預期 row 數：18
 
 **目前真實輸出摘要**（`freeipa-identity-v2` AlmaLinux 9 VM，2026-07-22 同時套用
 legacy 與 canonical fixture 後實跑；完整 stdout/row payload 留在 raw artifact，正式

@@ -91,7 +91,8 @@
     ipa_client_packages_debian: [freeipa-client]
     ipa_client_packages_redhat: [ipa-client]
     # Local host-audit daemon (the "audit/accounting" leg of AAA).
-    ipa_audit_packages: [auditd]
+    ipa_audit_packages_debian: [auditd]
+    ipa_audit_packages_redhat: [audit]
 
   pre_tasks:
     - name: "Gate: required vars present (fail early, before any mutation)"
@@ -215,7 +216,10 @@
 
     - name: "FreeIPA client — install host-audit daemon (auditd)"
       ansible.builtin.package:
-        name: "{{ ipa_audit_packages }}"
+        name: >-
+          {{ ipa_audit_packages_debian
+             if ansible_os_family == 'Debian'
+             else ipa_audit_packages_redhat }}
         state: present
       when: not ansible_check_mode
       tags: [freeipa-client, C9]

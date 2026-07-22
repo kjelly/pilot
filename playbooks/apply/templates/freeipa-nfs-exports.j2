@@ -1,0 +1,11 @@
+{% if nfs_selected_server.shares | default([]) | length > 0 %}
+{% set root_share = nfs_selected_server.shares | first %}
+{% for client in root_share.export.clients %}
+{{ nfs_pseudo_root }} {{ client.value }}(ro,sync,root_squash,sec=krb5i,fsid=0,crossmnt)
+{% endfor %}
+{% endif %}
+{% for share in nfs_selected_server.shares | default([]) if share.state | default('present') == 'present' %}
+{% for client in share.export.clients %}
+{{ share.source_path }} {{ client.value }}({{ share.export.options | join(',') }})
+{% endfor %}
+{% endfor %}

@@ -1,0 +1,31 @@
+schemaVersion: 1
+id: freeipa-nfs-server
+role: freeipa-nfs-server
+specs:
+  - path: docs/verification/freeipa-nfs-server.md
+    rows: {all: true}
+playbooks: {apply: playbooks/apply/freeipa-nfs-server-apply.yml}
+regressionTests:
+  - cmd/pilot/cmd/tag_coverage_test.go
+  - internal/spec/freeipa_nfs_regression_test.go
+dependencies:
+  - {component: freeipa-server, required: true, relation: providerEndpoint}
+bindings:
+  - input: freeipa_server_fqdn
+    requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
+    from: {component: freeipa-server, endpoint: https}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 10}
+groupVars:
+  - {name: freeipa_roster_file, type: string, required: true, secret: true}
+  - {name: freeipa_server_fqdn, type: string, required: false, secret: false}
+endpoints:
+  - {name: nfs, scheme: tcp, port: 2049}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

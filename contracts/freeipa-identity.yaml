@@ -32,5 +32,11 @@ traceability:
     "docs/verification/freeipa-identity.md#C10": {tags: [C10, users], reason: reconcile canonical enabled state}
     "docs/verification/freeipa-identity.md#C11": {tags: [C11, users, groups], reason: reconcile canonical direct user membership}
     "docs/verification/freeipa-identity.md#C12": {tags: [C12, groups], reason: reconcile canonical nested group membership}
+    "docs/verification/freeipa-identity.md#C13": {tags: [C13, hbac], reason: reconcile canonical HBAC services and attachments}
+    "docs/verification/freeipa-identity.md#C14": {tags: [C14, hbac], reason: transactional break-glass lockdown}
+    "docs/verification/freeipa-identity.md#C15": {tags: [C15, sudo], reason: reconcile canonical sudo command groups}
+    "docs/verification/freeipa-identity.md#C16": {tags: [C16, sudo], reason: reconcile canonical sudo allow and deny commands}
+    "docs/verification/freeipa-identity.md#C17": {tags: [C17, sudo], reason: reconcile run-as options and enabled state}
+    "docs/verification/freeipa-identity.md#C18": {tags: [C18, nfs], reason: reconcile FreeIPA automount control plane}
 verification: {autoDeploy: false}
 site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

@@ -130,17 +130,15 @@
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
-    - name: "Gate: canonical batch-1 scope is identity primitives only"
+    - name: "Gate: canonical NFS and migration are handled by dedicated playbooks"
       ansible.builtin.assert:
         that:
-          - freeipa_roster.hosts | default([]) | length == 0
-          - freeipa_roster.hostgroups | default([]) | length == 0
-          - freeipa_roster.hbac | default({}) | length == 0
-          - freeipa_roster.sudo | default({}) | length == 0
+          - freeipa_roster.nfs_clients | default([]) | length == 0
+          - freeipa_roster.migration | default({}) | length == 0
         fail_msg: >-
-          This candidate implements canonical users/groups only. Canonical
-          hosts/hostgroups/HBAC/sudo are fail-closed until delivery batch 2;
-          use the legacy ipa_* roster for the existing authorization engine.
+          NFS clients and migration are separate target-side workflows. Run
+          freeipa-nfs-client-apply.yml for nfs_clients; migration remains
+          fail-closed until its dedicated delivery batch.
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
@@ -196,6 +194,18 @@
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
+    - name: "Gate: canonical host objects use FQDN and valid state"
+      ansible.builtin.assert:
+        that:
+          - item.name is match('^[^.]+\\.[^.]+\\..+$')
+          - item.state | default('present') in ['present', 'absent']
+          - item.ip_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+          - item.keys() | list | difference(['name', 'state', 'ip_address', 'description']) | length == 0
+        fail_msg: "Invalid canonical host {{ item.name | default('unnamed') }}."
+      loop: "{{ freeipa_roster.hosts | default([]) }}"
+      when: freeipa_roster.schema_version is defined
+      tags: [always, C13]
+
     - name: "Gate: canonical names and direct references are unique and resolvable"
       ansible.builtin.assert:
         that:
@@ -213,6 +223,68 @@
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
+    - name: "Gate: canonical HBAC rules are safe and references are resolvable"
+      ansible.builtin.assert:
+        that:
+          - item.state | default('present') in ['present', 'absent']
+          - item.subjects.users | default([]) | length + item.subjects.groups | default([]) | length > 0
+          - item.targets.hostcat | default('') == 'all' or item.targets.hosts | default([]) | length + item.targets.hostgroups | default([]) | length > 0
+          - >-
+            not (item.targets.hostcat | default('') == 'all' and
+            (item.targets.hosts | default([]) | length +
+             item.targets.hostgroups | default([]) | length > 0))
+          - item.services | default([]) | length > 0
+          - >-
+            item.subjects.groups | default([]) |
+            difference(freeipa_roster.groups | default([]) |
+            selectattr('category', 'equalto', 'access') |
+            map(attribute='name') | list) | length == 0
+          - item.subjects.users | default([]) | difference((freeipa_roster.users | default([]) | map(attribute='name') | list) + ['admin']) | length == 0
+          - item.targets.hostgroups | default([]) | difference(freeipa_roster.hostgroups | default([]) | map(attribute='name') | list) | length == 0
+        fail_msg: "Unsafe or unresolved canonical HBAC rule {{ item.name | default('unnamed') }}."
+      loop: "{{ (freeipa_roster.hbac | default({})).rules | default([]) }}"
+      loop_control:
+        label: "{{ item.name | default('unnamed') }}"
+      when: freeipa_roster.schema_version is defined
+      tags: [always, C13, C14]
+
+    - name: "Gate: canonical sudo rules and commands are safe"
+      ansible.builtin.assert:
+        that:
+          - item.state | default('present') in ['present', 'absent']
+          - item.subjects.users | default([]) | length + item.subjects.groups | default([]) | length > 0
+          - >-
+            item.subjects.groups | default([]) |
+            difference(freeipa_roster.groups | default([]) |
+            selectattr('category', 'equalto', 'role') |
+            map(attribute='name') | list) | length == 0
+          - item.targets.hostcat | default('') == 'all' or item.targets.hosts | default([]) | length + item.targets.hostgroups | default([]) | length > 0
+          - >-
+            not (item.targets.hostcat | default('') == 'all' and
+            (item.targets.hosts | default([]) | length +
+             item.targets.hostgroups | default([]) | length > 0))
+        fail_msg: "Unsafe or unresolved canonical sudo rule {{ item.name | default('unnamed') }}."
+      loop: "{{ (freeipa_roster.sudo | default({})).rules | default([]) }}"
+      loop_control:
+        label: "{{ item.name | default('unnamed') }}"
+      when: freeipa_roster.schema_version is defined
+      tags: [always, C16, C17]
+
+    - name: "Gate: canonical sudo commands exclude shell escape primitives"
+      ansible.builtin.assert:
+        that:
+          - item is not match('^/(bin|usr/bin)/(bash|sh|su|sudo|env|python[^ /]*|perl|vim|less)$')
+          - item is not search('[*?;|`$<>]')
+        fail_msg: "Unsafe canonical sudo command: {{ item }}"
+      loop: >-
+        {{ (((freeipa_roster.sudo | default({})).command_groups | default([]) |
+             map(attribute='commands') | select('defined') | flatten) +
+            ((freeipa_roster.sudo | default({})).rules | default([]) |
+             map(attribute='allow') | select('defined') | map(attribute='commands') |
+             select('defined') | flatten)) | unique }}
+      when: freeipa_roster.schema_version is defined
+      tags: [always, C15, C16]
+
     - name: "Normalize canonical FreeIPA settings"
       ansible.builtin.set_fact:
         ipa_domain: "{{ freeipa_roster.freeipa.domain | default('ipa.pilot.internal') }}"
@@ -221,6 +293,12 @@
         identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
         ipa_users: []
         ipa_groups: []
+        ipa_hostgroups: []
+        ipa_hbac_rules: []
+        ipa_sudo_rules: []
+        ipa_hbac_services: "{{ (freeipa_roster.hbac | default({})).services | default([]) }}"
+        ipa_sudo_command_groups: "{{ (freeipa_roster.sudo | default({})).command_groups | default([]) }}"
+        ipa_hbac_disable_allow_all: "{{ (freeipa_roster.hbac | default({})).disable_allow_all | default(false) }}"
       when: freeipa_roster.schema_version is defined
       no_log: true
       tags: [always]
@@ -268,6 +346,70 @@
         label: "{{ item.name }}"
       when: freeipa_roster.schema_version is defined
       tags: [always]
+
+    - name: "Normalize canonical hostgroups for the compatibility reconciler"
+      ansible.builtin.set_fact:
+        ipa_hostgroups: >-
+          {{ ipa_hostgroups + [{
+            'name': item.name,
+            'desc': item.description | default(item.name),
+            'hosts': (item.membership | default({})).hosts | default([])
+          }] }}
+      loop: "{{ freeipa_roster.hostgroups | default([]) }}"
+      when:
+        - freeipa_roster.schema_version is defined
+        - item.state | default('present') == 'present'
+      tags: [always, C13]
+
+    - name: "Normalize canonical HBAC rules for the compatibility reconciler"
+      ansible.builtin.set_fact:
+        ipa_hbac_rules: >-
+          {{ ipa_hbac_rules + [({
+            'name': item.name,
+            'users': item.subjects.users | default([]),
+            'groups': item.subjects.groups | default([]),
+            'services': item.services,
+            'enabled': item.enabled | default(true)
+          } | combine(
+            {'hosts': item.targets.hosts | default([]),
+             'hostgroups': item.targets.hostgroups | default([])}
+            if (item.targets.hosts | default([]) | length +
+                item.targets.hostgroups | default([]) | length > 0)
+            else {'hostcat': item.targets.hostcat | default('all')}
+          ))] }}
+      loop: "{{ (freeipa_roster.hbac | default({})).rules | default([]) }}"
+      when:
+        - freeipa_roster.schema_version is defined
+        - item.state | default('present') == 'present'
+      tags: [always, C13, C14]
+
+    - name: "Normalize canonical sudo rules for the compatibility reconciler"
+      ansible.builtin.set_fact:
+        ipa_sudo_rules: >-
+          {{ ipa_sudo_rules + [({
+            'name': item.name,
+            'users': item.subjects.users | default([]),
+            'groups': item.subjects.groups | default([]),
+            'allow_commands': (item.allow | default({})).commands | default([]),
+            'allow_command_groups': (item.allow | default({})).command_groups | default([]),
+            'deny_commands': (item.deny | default({})).commands | default([]),
+            'deny_command_groups': (item.deny | default({})).command_groups | default([]),
+            'runas_users': (item.run_as | default({})).users | default(['root']),
+            'runas_groups': (item.run_as | default({})).groups | default([]),
+            'options': item.options | default([]),
+            'enabled': item.enabled | default(true)
+          } | combine(
+            {'hosts': item.targets.hosts | default([]),
+             'hostgroups': item.targets.hostgroups | default([])}
+            if (item.targets.hosts | default([]) | length +
+                item.targets.hostgroups | default([]) | length > 0)
+            else {'hostcat': item.targets.hostcat | default('all')}
+          ))] }}
+      loop: "{{ (freeipa_roster.sudo | default({})).rules | default([]) }}"
+      when:
+        - freeipa_roster.schema_version is defined
+        - item.state | default('present') == 'present'
+      tags: [always, C15, C16, C17]
 
     - name: "Select legacy admin settings"
       ansible.builtin.set_fact:
@@ -770,6 +912,55 @@
     # ── Host groups ────────────────────────────────────────────────────
     # Groups of enrolled hosts (e.g. web-hosts, db-hosts) that HBAC rules and
     # sudo rules below can target instead of naming individual hosts.
+    - name: "Look up canonical FreeIPA host objects"
+      ansible.builtin.command:
+        argv: [ipa, host-show, "{{ item.name }}"]
+      loop: "{{ freeipa_roster.hosts | default([]) }}"
+      register: ipa_canonical_host_show
+      changed_when: false
+      failed_when: false
+      when:
+        - freeipa_roster.schema_version is defined
+        - item.state | default('present') == 'present'
+      tags: [identity, hosts, C13]
+
+    - name: "Ensure canonical FreeIPA host objects exist"
+      ansible.builtin.command:
+        argv: [ipa, host-add, "{{ item.name }}", "--ip-address={{ item.ip_address }}", "--desc={{ item.description | default(item.name) }}"]
+      loop: "{{ freeipa_roster.hosts | default([]) }}"
+      loop_control:
+        index_var: ipa_canonical_host_index
+      register: ipa_canonical_host_add
+      changed_when: "'Added host' in (ipa_canonical_host_add.stdout | default(''))"
+      failed_when:
+        - ipa_canonical_host_add.rc != 0
+        - "'already exists' not in (ipa_canonical_host_add.stderr | default(''))"
+      when:
+        - freeipa_roster.schema_version is defined
+        - item.state | default('present') == 'present'
+        - ipa_canonical_host_show.results[ipa_canonical_host_index].rc != 0
+      tags: [identity, hosts, C13]
+
+    - name: "Ensure canonical host DNS A records exist"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - dnsrecord-add
+          - "{{ ipa_domain }}"
+          - "{{ item.name | regex_replace('\\.' + (ipa_domain | regex_escape) + '$', '') }}"
+          - "--a-rec={{ item.ip_address }}"
+      loop: "{{ freeipa_roster.hosts | default([]) }}"
+      register: ipa_canonical_host_dns
+      changed_when: "'Added record' in (ipa_canonical_host_dns.stdout | default(''))"
+      failed_when:
+        - ipa_canonical_host_dns.rc != 0
+        - "'already exists' not in (ipa_canonical_host_dns.stderr | default(''))"
+        - "'no modifications to be performed' not in (ipa_canonical_host_dns.stderr | default(''))"
+      when:
+        - freeipa_roster.schema_version is defined
+        - item.state | default('present') == 'present'
+      tags: [identity, hosts, C13]
+
     - name: "Ensure IPA hostgroups exist"
       ansible.builtin.command:
         argv:
@@ -881,6 +1072,17 @@
     # on every host); give it `hosts:`/`hostgroups:` to restrict login to a
     # subset of hosts. A rule with no services defaults to servicecat=all;
     # give it `services: [sshd]` to restrict which access method it grants.
+    - name: "Ensure canonical HBAC service objects exist"
+      ansible.builtin.command:
+        argv: [ipa, hbacsvc-add, "{{ item.name }}"]
+      loop: "{{ ipa_hbac_services | default([]) }}"
+      register: ipa_hbacsvc_add
+      changed_when: "'Added HBAC service' in (ipa_hbacsvc_add.stdout | default(''))"
+      failed_when:
+        - ipa_hbacsvc_add.rc != 0
+        - "'already exists' not in (ipa_hbacsvc_add.stderr | default(''))"
+      tags: [identity, hbac, C13]
+
     - name: "Ensure HBAC rules exist"
       ansible.builtin.command:
         argv: >-
@@ -1121,15 +1323,80 @@
         - "'already a member' not in (ipa_hbac_group.stdout | default(''))"
       tags: [identity, hbac]
 
-    - name: "Disable the default allow_all HBAC rule"
-      ansible.builtin.command: ipa hbacrule-disable allow_all
-      when: ipa_hbac_disable_allow_all | bool
-      register: ipa_hbac_disable
-      changed_when: "'Disabled HBAC rule' in (ipa_hbac_disable.stdout | default(''))"
+    - name: "Reconcile canonical HBAC rule enabled state"
+      ansible.builtin.command:
+        argv: [ipa, "hbacrule-{{ 'enable' if item.enabled | default(true) else 'disable' }}", "{{ item.name }}"]
+      loop: "{{ ipa_hbac_rules }}"
+      loop_control:
+        index_var: ipa_hbac_enabled_index
+        label: "{{ item.name }} enabled={{ item.enabled | default(true) }}"
+      register: ipa_hbac_enabled
+      changed_when: >-
+        ('Enabled HBAC rule' in (ipa_hbac_enabled.stdout | default(''))) or
+        ('Disabled HBAC rule' in (ipa_hbac_enabled.stdout | default('')))
       failed_when:
-        - ipa_hbac_disable.rc != 0
-        - "'already disabled' not in (ipa_hbac_disable.stderr | default(''))"
-      tags: [identity, hbac]
+        - ipa_hbac_enabled.rc != 0
+        - "'already enabled' not in (ipa_hbac_enabled.stderr | default(''))"
+        - "'already disabled' not in (ipa_hbac_enabled.stderr | default(''))"
+      when: >-
+        (item.enabled | default(true) and
+         'Enabled: True' not in ipa_hbacrule_show.results[ipa_hbac_enabled_index].stdout) or
+        (not item.enabled | default(true) and
+         'Enabled: False' not in ipa_hbacrule_show.results[ipa_hbac_enabled_index].stdout)
+      tags: [identity, hbac, C14]
+
+    - name: "Inspect default allow_all HBAC state"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-show, allow_all, --all]
+      register: ipa_hbac_allow_all_show
+      changed_when: false
+      when: ipa_hbac_disable_allow_all | bool
+      tags: [identity, hbac, C14]
+
+    - name: "Transactional HBAC allow_all lockdown"
+      when: ipa_hbac_disable_allow_all | bool
+      tags: [identity, hbac, C14]
+      block:
+        - name: "Gate: enabled admin break-glass rule exists"
+          ansible.builtin.assert:
+            that:
+              - >-
+                ipa_hbac_rules | selectattr('users', 'contains', 'admin') |
+                selectattr('hostcat', 'equalto', 'all') |
+                rejectattr('enabled', 'defined') | list | length > 0 or
+                ipa_hbac_rules | selectattr('users', 'contains', 'admin') |
+                selectattr('hostcat', 'equalto', 'all') |
+                selectattr('enabled', 'defined') | selectattr('enabled', 'equalto', true) |
+                list | length > 0
+            fail_msg: "Refusing to disable allow_all without an enabled admin break-glass rule."
+        - name: "Prove break-glass access before lockdown"
+          ansible.builtin.command:
+            argv: [ipa, hbactest, --user=admin, "--host={{ ansible_fqdn }}", --service=sshd]
+          register: ipa_hbac_prelock_test
+          changed_when: false
+          failed_when: "'Access granted: True' not in (ipa_hbac_prelock_test.stdout | default(''))"
+        - name: "Disable the default allow_all HBAC rule"
+          ansible.builtin.command: ipa hbacrule-disable allow_all
+          register: ipa_hbac_disable
+          changed_when: "'Disabled HBAC rule' in (ipa_hbac_disable.stdout | default(''))"
+          failed_when:
+            - ipa_hbac_disable.rc != 0
+            - "'already disabled' not in (ipa_hbac_disable.stderr | default(''))"
+          when: "'Enabled: True' in (ipa_hbac_allow_all_show.stdout | default(''))"
+        - name: "Prove break-glass access after lockdown"
+          ansible.builtin.command:
+            argv: [ipa, hbactest, --user=admin, "--host={{ ansible_fqdn }}", --service=sshd]
+          register: ipa_hbac_postlock_test
+          changed_when: false
+          failed_when: "'Access granted: True' not in (ipa_hbac_postlock_test.stdout | default(''))"
+      rescue:
+        - name: "Rollback HBAC lockdown by re-enabling allow_all"
+          ansible.builtin.command: ipa hbacrule-enable allow_all
+          changed_when: true
+          failed_when: false
+        - name: "Fail after HBAC lockdown rollback"
+          ansible.builtin.fail:
+            msg: "HBAC lockdown verification failed; allow_all was re-enabled."
 
     # ── Sudo rules (what a logged-in user may run, and where) ───────────
     # Catch the mutual-exclusivity mistake before it can silently happen
@@ -1137,6 +1404,40 @@
     # over hostcat, and allow_commands over cmdcat, with no warning if a
     # roster sets both — exactly how runbook Real bug #15 (cmdcat silently
     # ignored) went unnoticed.
+    - name: "Ensure canonical sudo command objects exist"
+      ansible.builtin.command:
+        argv: [ipa, sudocmd-add, "{{ item }}"]
+      loop: "{{ ipa_sudo_command_groups | default([]) | map(attribute='commands') | select('defined') | flatten | unique }}"
+      register: ipa_canonical_sudocmd_add
+      changed_when: "'Added Sudo Command' in (ipa_canonical_sudocmd_add.stdout | default(''))"
+      failed_when:
+        - ipa_canonical_sudocmd_add.rc != 0
+        - "'already exists' not in (ipa_canonical_sudocmd_add.stderr | default(''))"
+      tags: [identity, sudo, C15]
+
+    - name: "Ensure canonical sudo command groups exist"
+      ansible.builtin.command:
+        argv: [ipa, sudocmdgroup-add, "{{ item.name }}"]
+      loop: "{{ ipa_sudo_command_groups | default([]) }}"
+      register: ipa_sudocmdgroup_add
+      changed_when: "'Added Sudo Command Group' in (ipa_sudocmdgroup_add.stdout | default(''))"
+      failed_when:
+        - ipa_sudocmdgroup_add.rc != 0
+        - "'already exists' not in (ipa_sudocmdgroup_add.stderr | default(''))"
+      tags: [identity, sudo, C15]
+
+    - name: "Attach commands to canonical sudo command groups"
+      ansible.builtin.command:
+        argv: [ipa, sudocmdgroup-add-member, "{{ item.0.name }}", "--sudocmds={{ item.1 }}"]
+      loop: "{{ ipa_sudo_command_groups | default([]) | subelements('commands', skip_missing=True) }}"
+      register: ipa_sudocmdgroup_member
+      changed_when: "'Number of members added 1' in (ipa_sudocmdgroup_member.stdout | default(''))"
+      failed_when:
+        - ipa_sudocmdgroup_member.rc != 0
+        - "'already a member' not in (ipa_sudocmdgroup_member.stdout | default('') + ipa_sudocmdgroup_member.stderr | default(''))"
+        - "'Number of members added 0' not in (ipa_sudocmdgroup_member.stdout | default(''))"
+      tags: [identity, sudo, C15]
+
     - name: "Gate: sudo rule category vs specific-list fields are mutually exclusive"
       ansible.builtin.assert:
         that:
@@ -1386,6 +1687,75 @@
         - "'Number of members added 0' not in (ipa_allow_cmd.stdout | default(''))"
       tags: [identity, sudo]
 
+    - name: "Attach allowed command groups to canonical sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-add-allow-command, "{{ item.0.name }}", "--sudocmdgroups={{ item.1 }}"]
+      loop: "{{ ipa_sudo_rules | subelements('allow_command_groups', skip_missing=True) }}"
+      register: ipa_allow_cmdgroup
+      changed_when: "'Number of members added 1' in (ipa_allow_cmdgroup.stdout | default(''))"
+      failed_when:
+        - ipa_allow_cmdgroup.rc != 0
+        - "'already a member' not in (ipa_allow_cmdgroup.stdout | default('') + ipa_allow_cmdgroup.stderr | default(''))"
+        - "'Number of members added 0' not in (ipa_allow_cmdgroup.stdout | default(''))"
+      tags: [identity, sudo, C16]
+
+    - name: "Attach denied commands to canonical sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-add-deny-command, "{{ item.0.name }}", "--sudocmds={{ item.1 }}"]
+      loop: "{{ ipa_sudo_rules | subelements('deny_commands', skip_missing=True) }}"
+      register: ipa_deny_cmd
+      changed_when: "'Number of members added 1' in (ipa_deny_cmd.stdout | default(''))"
+      failed_when:
+        - ipa_deny_cmd.rc != 0
+        - "'already a member' not in (ipa_deny_cmd.stdout | default('') + ipa_deny_cmd.stderr | default(''))"
+        - "'Number of members added 0' not in (ipa_deny_cmd.stdout | default(''))"
+      tags: [identity, sudo, C16]
+
+    - name: "Attach denied command groups to canonical sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-add-deny-command, "{{ item.0.name }}", "--sudocmdgroups={{ item.1 }}"]
+      loop: "{{ ipa_sudo_rules | subelements('deny_command_groups', skip_missing=True) }}"
+      register: ipa_deny_cmdgroup
+      changed_when: "'Number of members added 1' in (ipa_deny_cmdgroup.stdout | default(''))"
+      failed_when:
+        - ipa_deny_cmdgroup.rc != 0
+        - "'already a member' not in (ipa_deny_cmdgroup.stdout | default('') + ipa_deny_cmdgroup.stderr | default(''))"
+        - "'Number of members added 0' not in (ipa_deny_cmdgroup.stdout | default(''))"
+      tags: [identity, sudo, C16]
+
+    - name: "Attach specific run-as users to canonical sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-add-runasuser, "{{ item.0.name }}", "--users={{ item.1 }}"]
+      loop: "{{ ipa_sudo_rules | subelements('runas_users', skip_missing=True) }}"
+      register: ipa_runas_user
+      changed_when: "'Number of members added 1' in (ipa_runas_user.stdout | default(''))"
+      failed_when:
+        - ipa_runas_user.rc != 0
+        - "'already a member' not in (ipa_runas_user.stdout | default('') + ipa_runas_user.stderr | default(''))"
+      tags: [identity, sudo, C17]
+
+    - name: "Attach specific run-as groups to canonical sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-add-runasgroup, "{{ item.0.name }}", "--groups={{ item.1 }}"]
+      loop: "{{ ipa_sudo_rules | subelements('runas_groups', skip_missing=True) }}"
+      register: ipa_runas_group
+      changed_when: "'Number of members added 1' in (ipa_runas_group.stdout | default(''))"
+      failed_when:
+        - ipa_runas_group.rc != 0
+        - "'already a member' not in (ipa_runas_group.stdout | default('') + ipa_runas_group.stderr | default(''))"
+      tags: [identity, sudo, C17]
+
+    - name: "Attach sudo options to canonical sudo rules"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-add-option, "{{ item.0.name }}", "--sudooption={{ item.1 }}"]
+      loop: "{{ ipa_sudo_rules | subelements('options', skip_missing=True) }}"
+      register: ipa_sudo_option
+      changed_when: "'Added option' in (ipa_sudo_option.stdout | default(''))"
+      failed_when:
+        - ipa_sudo_option.rc != 0
+        - "'already exists' not in (ipa_sudo_option.stderr | default(''))"
+      tags: [identity, sudo, C17]
+
     - name: "Attach users to sudo rules"
       ansible.builtin.command:
         argv:
@@ -1453,6 +1823,131 @@
         - ipa_rule_host.rc != 0
         - "'already a member' not in (ipa_rule_host.stdout | default('') + ipa_rule_host.stderr | default(''))"
       tags: [identity, sudo]
+
+    - name: "Reconcile canonical sudo rule enabled state"
+      ansible.builtin.command:
+        argv: [ipa, "sudorule-{{ 'enable' if item.enabled | default(true) else 'disable' }}", "{{ item.name }}"]
+      loop: "{{ ipa_sudo_rules }}"
+      loop_control:
+        index_var: ipa_sudo_enabled_index
+        label: "{{ item.name }} enabled={{ item.enabled | default(true) }}"
+      register: ipa_sudo_enabled
+      changed_when: >-
+        ('Enabled Sudo Rule' in (ipa_sudo_enabled.stdout | default(''))) or
+        ('Disabled Sudo Rule' in (ipa_sudo_enabled.stdout | default('')))
+      failed_when:
+        - ipa_sudo_enabled.rc != 0
+        - "'already enabled' not in (ipa_sudo_enabled.stderr | default(''))"
+        - "'already disabled' not in (ipa_sudo_enabled.stderr | default(''))"
+      when: >-
+        (item.enabled | default(true) and
+         'Enabled: True' not in ipa_sudorule_show.results[ipa_sudo_enabled_index].stdout) or
+        (not item.enabled | default(true) and
+         'Enabled: False' not in ipa_sudorule_show.results[ipa_sudo_enabled_index].stdout)
+      tags: [identity, sudo, C17]
+
+    # ── FreeIPA automount control plane for canonical NFS shares ───────
+    - name: "Ensure canonical automount locations exist"
+      ansible.builtin.command:
+        argv: [ipa, automountlocation-add, "{{ item.automount.location | default('default') }}"]
+      loop: >-
+        {{ (freeipa_roster.nfs | default({})).servers | default([]) |
+           map(attribute='shares') | select('defined') | flatten |
+           selectattr('automount.enabled', 'defined') |
+           selectattr('automount.enabled') }}
+      register: ipa_automount_location
+      changed_when: "'Added automount location' in (ipa_automount_location.stdout | default(''))"
+      failed_when:
+        - ipa_automount_location.rc != 0
+        - "'already exists' not in (ipa_automount_location.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, nfs, C18]
+
+    - name: "Ensure canonical indirect automount maps exist"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - automountmap-add
+          - "{{ item.automount.location | default('default') }}"
+          - "{{ item.automount.map }}"
+      loop: >-
+        {{ (freeipa_roster.nfs | default({})).servers | default([]) |
+           map(attribute='shares') | select('defined') | flatten |
+           selectattr('automount.enabled', 'defined') |
+           selectattr('automount.enabled') }}
+      register: ipa_automount_map
+      changed_when: "'Added automount map' in (ipa_automount_map.stdout | default(''))"
+      failed_when:
+        - ipa_automount_map.rc != 0
+        - "'already exists' not in (ipa_automount_map.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, nfs, C18]
+
+    - name: "Ensure canonical auto.master keys exist"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - automountkey-add
+          - "{{ item.automount.location | default('default') }}"
+          - auto.master
+          - "--key={{ item.automount.mount_root }}"
+          - "--info={{ item.automount.map }}"
+      loop: >-
+        {{ (freeipa_roster.nfs | default({})).servers | default([]) |
+           map(attribute='shares') | select('defined') | flatten |
+           selectattr('automount.enabled', 'defined') |
+           selectattr('automount.enabled') }}
+      register: ipa_automount_master_key
+      changed_when: "'Added automount key' in (ipa_automount_master_key.stdout | default(''))"
+      failed_when:
+        - ipa_automount_master_key.rc != 0
+        - "'already exists' not in (ipa_automount_master_key.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, nfs, C18]
+
+    - name: "Ensure canonical indirect automount keys exist"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - automountkey-add
+          - "{{ item.automount.location | default('default') }}"
+          - "{{ item.automount.map }}"
+          - "--key={{ item.automount.key }}"
+          - "--info=-{{ item.automount.options | join(',') }} {{ item.automount.server }}:{{ item.automount.remote_path }}"
+      loop: >-
+        {{ (freeipa_roster.nfs | default({})).servers | default([]) |
+           map(attribute='shares') | select('defined') | flatten |
+           selectattr('automount.enabled', 'defined') |
+           selectattr('automount.enabled') }}
+      register: ipa_automount_share_key
+      changed_when: "'Added automount key' in (ipa_automount_share_key.stdout | default(''))"
+      failed_when:
+        - ipa_automount_share_key.rc != 0
+        - "'already exists' not in (ipa_automount_share_key.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, nfs, C18]
+
+    - name: "Reconcile canonical indirect automount key information"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - automountkey-mod
+          - "{{ item.automount.location | default('default') }}"
+          - "{{ item.automount.map }}"
+          - "--key={{ item.automount.key }}"
+          - "--info=-{{ item.automount.options | join(',') }} {{ item.automount.server }}:{{ item.automount.remote_path }}"
+      loop: >-
+        {{ (freeipa_roster.nfs | default({})).servers | default([]) |
+           map(attribute='shares') | select('defined') | flatten |
+           selectattr('automount.enabled', 'defined') |
+           selectattr('automount.enabled') }}
+      register: ipa_automount_share_mod
+      changed_when: "'Modified automount key' in (ipa_automount_share_mod.stdout | default(''))"
+      failed_when:
+        - ipa_automount_share_mod.rc != 0
+        - "'no modifications to be performed' not in (ipa_automount_share_mod.stderr | default(''))"
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, nfs, C18]
 
     # ── Release ticket ─────────────────────────────────────────────────
     - name: "Release the Kerberos ticket"

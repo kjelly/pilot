@@ -17,7 +17,7 @@ func TestRegression_FreeipaIdentitySpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -62,7 +62,7 @@ func TestRegression_FreeipaIdentitySpec(t *testing.T) {
 
 	commands := map[string]string{}
 	for _, row := range s.Rows {
-		commands[row.ID] = row.Command
+		commands[row.ID] = row.Command + " " + row.Expected
 	}
 	for _, id := range []string{"C9", "C10", "C11", "C12"} {
 		if !strings.Contains(commands[id], "fixture-canonical") {
@@ -74,5 +74,14 @@ func TestRegression_FreeipaIdentitySpec(t *testing.T) {
 	}
 	if !strings.Contains(commands["C12"], "data-fixture-canonical-rw") {
 		t.Errorf("C12 must verify nested group membership, got %q", commands["C12"])
+	}
+	if !strings.Contains(commands["C14"], "fixture-canonical-breakglass") {
+		t.Errorf("C14 must verify canonical break-glass state, got %q", commands["C14"])
+	}
+	if !strings.Contains(commands["C16"], "role-fixture-canonical-ops") {
+		t.Errorf("C16 must verify role-category sudo attachment, got %q", commands["C16"])
+	}
+	if !strings.Contains(commands["C18"], "freeipa-nfs-v2.ipa.pilot.internal") {
+		t.Errorf("C18 must verify FQDN Kerberos automount target, got %q", commands["C18"])
 	}
 }

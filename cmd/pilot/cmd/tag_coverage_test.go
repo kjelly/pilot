@@ -93,6 +93,11 @@ var specTagMap = []specTagMapping{
 			"C7": "legacy hostgroup attribute row predates row tags",
 			"C8": "legacy user attribute row predates row tags",
 		}},
+	{spec: "freeipa-nfs-server.md", playbook: "freeipa-nfs-server-apply.yml"},
+	{spec: "freeipa-nfs-client.md", playbook: "freeipa-nfs-client-apply.yml",
+		exemptRows: map[string]string{
+			"C6": "verify-only invariant proving the client playbook never writes NFS mounts to /etc/fstab",
+		}},
 	{spec: "freeipa-server.md", playbook: "freeipa-server-apply.yml",
 		noRowTags: "installer-shaped playbook: one ipa-server-install task satisfies most rows; feature tags (freeipa-install/-service/-audit) instead"},
 	{spec: "freeipa-server-replica.md", playbook: "freeipa-server-replica-apply.yml",
