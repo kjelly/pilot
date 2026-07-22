@@ -1,19 +1,6 @@
 ---
 name: delivery-test
-description: |
-  Perform delivery verification testing based on DELIVERY.md. Guides the creation
-  of a multi-VM test environment (AlmaLinux 9 for FreeIPA server, Ubuntu for main
-  services server, and Ubuntu for client verification), configuration of inventory,
-  group_vars, vault secrets — entirely through `pilot edit` / `pilot inventory
-  generate` / `pilot deploy` / `pilot reconcile`, never hand-written inventory.yml or raw
-  ansible-playbook/ansible-vault calls — running the site playbook, and
-  validating multi-node features (FreeIPA authentication/sudo via both live SSH
-  and `ipa hbactest`, FreeIPA native DNS/NTP, the full metric chain Grafana to
-  Thanos Query to Prometheus, the full log chain Grafana to Loki from Promtail,
-  restic backups to S3, Wazuh FIM, and that `freeipa-identity-apply.yml`'s
-  infra-as-code reconciler design actually holds — editing the roster to
-  remove a user's group membership or a rule's attributes and rerunning
-  must genuinely revoke/correct the live state, not just leave it stale).
+description: Use when performing immutable-candidate integration acceptance or diagnosing a failed disposable multi-VM delivery topology for pilot; not for production deployment validation or isolated role testing.
 ---
 
 # delivery-test
@@ -22,7 +9,37 @@ description: |
 >
 > This skill covers the *scenario* (which nodes, which roles, which checks). For the mechanics of driving `pilot edit`/`pilot deploy`/`pilot reconcile`'s interactive wizards and recording them with `trec`, see the sibling `pilot-trec-verification` skill — use both together.
 
-## 0. Hard Preconditions
+## 0. Scope and modes
+
+This is a **development-topology integration acceptance** skill. A successful
+run proves that one immutable candidate is reproducible and interoperable in
+the stated disposable KVM topology. It is not a staging/production deployment,
+does not validate a real production inventory, and must not be described as a
+production rollout result.
+
+Use exactly one mode per run:
+
+- **Candidate clean-room acceptance:** the required gate for every
+  execution-affecting candidate. Start from a clean isolated checkout and a
+  freshly provisioned, test-owned three-VM topology; run the complete scenario,
+  cross-host checks, and idempotency proof.
+- **Failed-topology diagnosis:** a short-lived debugging mode entered only
+  after a candidate clean-room failure. Keep that failed topology and workspace
+  long enough to reproduce the failing chain and identify the smallest fix. It
+  must not produce an acceptance PASS, update committed evidence, or stand in
+  for a fresh run of the next candidate.
+
+Existing role-level fast tests are useful preflight feedback, but they do not
+replace the candidate clean-room gate because the defects this skill targets
+can arise only from cross-host topology, role ordering, generated inventory,
+shared group vars, or shared vault inputs.
+
+Raw casts and transcripts are one-time development diagnostics. Commit only a
+sanitized candidate/tree, topology, recap, and verdict summary; do not commit
+or link raw recording paths, cast names, inventories, or other Git-ignored
+artifacts.
+
+### 0.1 Hard Preconditions
 
 Read `AGENTS.md` and `DELIVERY.md` before executing.
 Make sure your host environment meets the prerequisites for KVM VM provisioning (libvirt, kvm, QEMU, cloud-localds).
@@ -46,9 +63,14 @@ We provision three KVM nodes using `pilot vm-target`:
 - **`nexus`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Central services server. Hosts Grafana, Prometheus/Thanos sidecar, Thanos Query, Alertmanager, Loki, Wazuh Manager (syslog receiver & FIM controller), and SeaweedFS S3.
 - **`client`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Monitored Linux host and verification client. Integrates into FreeIPA realm, validates SSH/HBAC/sudo, ships logs (Promtail), forwards audit logs to `nexus`, backs up config files to SeaweedFS S3 on `nexus`, collects metrics, and runs the Wazuh FIM agent reporting to `nexus`.
 
-Node names are illustrative — reuse whatever `pilot vm-target list` already
-shows if VMs are already up rather than tearing down and renaming; the
-role/scenario coverage below is what matters, not the literal hostnames.
+Node names are illustrative. In **candidate clean-room acceptance**, reserve
+fresh, test-owned names for this run and do not reuse an already-provisioned
+VM, workspace, IP, inventory, or vault from a prior candidate. If an example
+name is already in use, choose a new run-scoped name and substitute it
+consistently throughout the scenario; do not tear down an existing target
+unless the user explicitly identified it as disposable for this run. In
+**failed-topology diagnosis**, reuse is allowed only for the failed candidate's
+own topology and only until the root cause is established.
 
 ### 1.1 Provisioning VMs
 
@@ -478,6 +500,15 @@ disposable fixture roster.
 ---
 
 ## 5. Cleanup
+
+For **candidate clean-room acceptance**, produce the sanitized development
+topology summary after all cross-host checks and idempotency pass, then tear
+down only the fresh targets created for that run. For **failed-topology
+diagnosis**, retain the failed candidate's topology only while reproducing and
+isolating the defect. After an execution-affecting fix, create a new candidate
+and return to a fresh clean-room acceptance; do not promote a diagnostic rerun
+to acceptance evidence. Tear down the failed topology after diagnosis or when
+the user directs otherwise.
 
 ```bash
 pilot vm-target down --name client
