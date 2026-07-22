@@ -68,6 +68,7 @@ func TestRegression_FreeIPANFSServerSupportsEnrolledUbuntuHosts(t *testing.T) {
 		"systemctl is-active sssd\n      check_mode: false",
 		"nfs_server_fqdn == ansible_fqdn",
 		"name: \"{{ nfs_server_service }}\"",
+		"when: not ansible_check_mode",
 	} {
 		if !strings.Contains(playbook, required) {
 			t.Errorf("Ubuntu NFS server contract missing %q", required)
