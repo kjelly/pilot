@@ -77,6 +77,12 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 			t.Errorf("%s expected must be rc-based `0`, got %q", id, exp[id])
 		}
 	}
+	for _, id := range []string{"C1", "C2"} {
+		if !strings.Contains(cmd[id], "command -v rpm") ||
+			!strings.Contains(cmd[id], "dpkg-query") {
+			t.Errorf("%s package probe must support both EL rpm and Ubuntu dpkg, got %q", id, cmd[id])
+		}
+	}
 
 	// C9 must use the `sh -c '... && echo 0 || echo 1'` form.
 	if !strings.Contains(cmd["C9"], "&& echo 0") || !strings.Contains(cmd["C9"], "|| echo 1") {

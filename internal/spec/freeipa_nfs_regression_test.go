@@ -103,3 +103,36 @@ func TestRegression_FreeIPANFSClientFreshPreviewIsCheckSafe(t *testing.T) {
 		t.Fatal("fresh NFS client preview must not inspect the autofs unit before package installation")
 	}
 }
+
+func TestRegression_FreeIPAClientPreservesConfiguredAutofsResponder(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-client-apply.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	for _, required := range []string{
+		"FreeIPA client — inspect the current SSSD services line",
+		"ipa_sssd_services_current.stdout",
+		"search('(^|,)\\\\s*autofs\\\\s*(,|$)')",
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Fatalf("base FreeIPA client must preserve an autofs responder configured by the NFS overlay; missing %q", required)
+		}
+	}
+
+	nfsPlaybookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-nfs-client-apply.yml")
+	nfsData, err := os.ReadFile(nfsPlaybookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"Ensure SSSD keeps the autofs responder enabled",
+		"services = nss, pam, ssh, autofs",
+		"Restart SSSD after enabling automount",
+	} {
+		if !strings.Contains(string(nfsData), required) {
+			t.Fatalf("NFS client overlay must self-heal the autofs responder; missing %q", required)
+		}
+	}
+}
