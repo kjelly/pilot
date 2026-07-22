@@ -38,11 +38,11 @@ func defaultRolePresets() []rolePreset {
 		},
 		{
 			Label: "Nexus 中央服務節點(minimal PoC)",
-			Roles: []string{"docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard"},
+			Roles: []string{"docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"},
 		},
 		{
 			Label: "被監控的 Linux 主機(minimal PoC)",
-			Roles: []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-fim", "restic-backup"},
+			Roles: []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client"},
 		},
 	}
 }
