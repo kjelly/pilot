@@ -5,11 +5,11 @@ description: |
   of a multi-VM test environment (AlmaLinux 9 for FreeIPA server, Ubuntu for main
   services server, and Ubuntu for client verification), configuration of inventory,
   group_vars, vault secrets — entirely through `pilot edit` / `pilot inventory
-  generate` / `pilot deploy`, never hand-written inventory.yml or raw
+  generate` / `pilot deploy` / `pilot reconcile`, never hand-written inventory.yml or raw
   ansible-playbook/ansible-vault calls — running the site playbook, and
   validating multi-node features (FreeIPA authentication/sudo via both live SSH
-  and `ipa hbactest`, FreeIPA native DNS/NTP, the full metric chain Grafana ->
-  Thanos Query -> Prometheus, the full log chain Grafana -> Loki <- Promtail,
+  and `ipa hbactest`, FreeIPA native DNS/NTP, the full metric chain Grafana to
+  Thanos Query to Prometheus, the full log chain Grafana to Loki from Promtail,
   restic backups to S3, Wazuh FIM, and that `freeipa-identity-apply.yml`'s
   infra-as-code reconciler design actually holds — editing the roster to
   remove a user's group membership or a rule's attributes and rerunning
@@ -20,15 +20,15 @@ description: |
 
 > Recipe for executing a full integration and delivery test of the pilot codebase, using KVM VMs managed by `pilot vm-target`. It validates that all components (FreeIPA, Prometheus/Thanos/Grafana, Loki/Promtail, Restic S3 Backups, and Wazuh FIM) deploy together and interoperate correctly across a multi-node layout.
 >
-> This skill covers the *scenario* (which nodes, which roles, which checks). For the mechanics of driving `pilot edit`/`pilot deploy`'s interactive wizards and recording them with `trec`, see the sibling `pilot-trec-verification` skill — use both together.
+> This skill covers the *scenario* (which nodes, which roles, which checks). For the mechanics of driving `pilot edit`/`pilot deploy`/`pilot reconcile`'s interactive wizards and recording them with `trec`, see the sibling `pilot-trec-verification` skill — use both together.
 
 ## 0. Hard Preconditions
 
 Read `AGENTS.md` and `DELIVERY.md` before executing.
 Make sure your host environment meets the prerequisites for KVM VM provisioning (libvirt, kvm, QEMU, cloud-localds).
 
-**Editing/deployment only goes through `pilot edit` / `pilot inventory generate` /
-`pilot deploy`** — never a hand-written `inventory.yml`, never a raw
+**Editing/deployment/reconciliation only goes through `pilot edit` /
+`pilot inventory generate` / `pilot deploy` / `pilot reconcile`** — never a hand-written `inventory.yml`, never a raw
 `ansible-playbook`/`ansible-vault` invocation. Everything in §2/§3 below that
 used to be a heredoc or a bare `ansible-playbook -e ...` call is now a wizard
 step. This matters for two reasons: (1) it's the same discipline the rest of
@@ -244,17 +244,30 @@ native flags supersede them.
 `site.yml`'s own safety valve forbids a top-level `-e target_group=` — don't
 pass one; scope with inventory group membership or `--limit` instead.
 
-### 3.4 Components `site.yml` structurally excludes — separate `pilot deploy` runs
+### 3.4 Components `site.yml` structurally excludes — separate day-2 `pilot reconcile` runs
 
 - **`freeipa-identity`**: data-driven day-2 HBAC/sudo roster, needs its own
   vault roster file (`.vault/ipa-identity.yaml` — nested YAML, the one
   tool-endorsed exception to "no hand-edited YAML", since `pilot edit`'s
-  vault editor explicitly declines nested structures). Deploy separately
-  targeting the FreeIPA server.
+  vault editor explicitly declines nested structures). Reconcile separately
+  against the FreeIPA server after the site-wide deployment succeeds.
+
+  Run the dedicated day-2 wizard against the same generated inventory:
+
+  ```bash
+  pilot reconcile -i <workspace>/inventory.yml --timeout 90m
+  ```
+
+  Select `freeipa-identity`, target `freeipa-server`, and the same `sandbox`
+  stage. At the vars-file prompt select the identity roster (for example
+  `.vault/ipa-identity.yaml`), not `.vault/main.yaml`; the roster must include
+  `ipa_admin_password`. Complete the preview and explicit apply confirmation,
+  and retain both recaps. A run where the roster mutation tasks all skip is a
+  wrong-vars-file failure, even when the wizard exits with code 0.
 
   `freeipa-identity-apply.yml`'s design goal is **infra as code**: every
   future add/remove of a user, group, or HBAC/sudo permission is supposed
-  to happen by editing this one roster file and rerunning the playbook —
+  to happen by editing this one roster file and rerunning `pilot reconcile` —
   never a manual `ipa` CLI edit on the server. As of 2026-07-16 it's a real
   reconciler (password self-change protection, `*-mod` attribute-drift
   correction, and roster-driven removal of group membership / rule
@@ -412,8 +425,8 @@ pilot vm-target exec --name web-1 -- docker exec single-node-wazuh.manager-1 \
 §4.1 only proves the roster's **initial** state applied correctly. The
 playbook's actual design goal — see §3.4 — is that it is the **sole**
 channel for changing FreeIPA users/groups/permissions going forward: edit
-`.vault/ipa-identity.yaml`, rerun the single-component `freeipa-identity`
-`pilot deploy` (same wizard mechanics as the rest of this test — see
+`.vault/ipa-identity.yaml`, rerun `pilot reconcile` and select the
+`freeipa-identity` component (same wizard mechanics as the rest of this test — see
 `pilot-trec-verification`), and the live state must match exactly, in
 **both** directions. Don't stop at "adding a grant works" (that was always
 true even before the reconciler redesign) — the removal and drift-
@@ -423,7 +436,7 @@ correction directions are what's new and what actually needs testing here.
 1. In `.vault/ipa-identity.yaml`, remove `alice` from whichever group grants
    her the §4.1 sudo/SSH access (e.g. drop `sysops` from her `groups:`
    list).
-2. Rerun the `freeipa-identity` single-component deploy against `ipa-1`.
+2. Rerun `pilot reconcile`, selecting `freeipa-identity` against `ipa-1`.
 3. Re-run the exact §4.1 checks for alice:
    ```bash
    ssh alice@<web-2-ip> "echo '<password>' | sudo -S systemctl is-active ssh"   # now expect denial
@@ -434,20 +447,20 @@ correction directions are what's new and what actually needs testing here.
    in the reconciler, not a flaky test.
 
 **恢復測試（加回權限）**：put `sysops` back in alice's `groups:` list, rerun
-the same deploy, and confirm both checks flip back to granted — proving the
+the same `pilot reconcile` flow, and confirm both checks flip back to granted — proving the
 roster is genuinely bidirectional, not just "additive changes stick, removals
 don't."
 
 **Drift-correction 測試（屬性被改壞後能自我修正）**：pick an existing sudo or
 HBAC rule in the roster and change one of its own attributes (e.g. its
 `desc:`, or flip a rule between `hostcat: all` and an explicit `hosts:`
-list). Rerun the deploy and confirm the live rule (`ipa sudorule-show
+list). Rerun `pilot reconcile` and confirm the live rule (`ipa sudorule-show
 <rule> --all` / `ipa hbacrule-show <rule> --all` on `ipa-1`) actually
 reflects the new value — before the 2026-07-16 redesign, only a
 brand-new object ever got these fields set; an already-existing one
 silently kept whatever it was created with.
 
-**冪等性**：a rerun of the deploy with **no** roster changes should settle
+**冪等性**：a rerun of `pilot reconcile` with **no** roster changes should settle
 to `changed=0` for every task except two known, unrelated, pre-existing
 non-idempotent items: a user roster entry that deliberately keeps
 `force_password: true` to re-arm a forced-change test scenario, and
