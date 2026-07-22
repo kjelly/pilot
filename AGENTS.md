@@ -613,6 +613,13 @@ git status --short
   `.verification/` cleanup: it contains truthful candidate/tree, target
   summary, real verdicts, and redaction facts, but never a raw artifact path,
   filename, inventory, or required archive ID.
+- **Committed-document link rule:** every repository-relative Markdown link in
+  a tracked document must resolve to a tracked repository file at commit time.
+  Do not link to `.verification/`, `tmp`/`/tmp`, vaults, generated local-only
+  files, an ignored path, or a file that does not exist in Git. If the target
+  is one-time operational evidence, replace the link with its sanitized
+  candidate/tree, target summary, and real verdict; never leave a dead local
+  evidence link behind.
 
 ### Trec-related issues never go in runbooks
 
@@ -660,3 +667,4 @@ git status --short
 | 2026-07-20 | v1.14 | 明定 trec cast 為不可提交的暫存證據；committed runbook 不得記錄 cast 檔名、路徑或錄影檔清單，只保留實際執行輸出 | pilot |
 | 2026-07-22 | v1.15 | 新增「Trec-related issues never go in runbooks」：任何 trec 驅動 wizard 過程中發現的 issue（opcodes 行為、MCP/CLI 差異、wizard prompt chain、host-key churn、預填行為等）一律記錄在 `.agents/skills/pilot-trec-verification/SKILL.md` 及其同層 tool-driver skills；operational runbook 只記錄「這次 pass 做了什麼/驗證了什麼」，不記錄「trec 驅動時踩了什麼坑」。原因：v11.0 重新驗證時把 wizard banner 的 UI 落差誤列為「Real bugs #27」，實際是 trec 驅動時的 prompting 路徑問題，應該留在 trec skill 的 §7 gotcha list 而非 runbook 的 bug table | pilot |
 | 2026-07-22 | v1.16 | actual-run evidence 與操作文件分離：runbook/spec 只留目前有效摘要與連結，完整輸出進獨立 artifact；正式完整測試改為先凍結本地 candidate commit，再從乾淨隔離 checkout 驗證，後續 evidence-only commit 引用 tested revision/tree。日常 dirty worktree 仍可跑快速測試 | pilot |
+| 2026-07-23 | v1.17 | 新增 committed-document link rule：tracked 文件的 repository-relative Markdown link 必須指向 Git 追蹤檔；不得連到 `.verification/`、暫存、vault、generated local-only、ignored 或不存在的檔案。一次性驗收改以 sanitized candidate/tree、target 與 verdict 摘要表達 | pilot |
