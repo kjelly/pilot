@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anomalyco/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/contract"
 )
 
 var contractRoot string

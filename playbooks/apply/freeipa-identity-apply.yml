@@ -91,6 +91,26 @@
           admin credential, e.g. -e @~/.vault/ipa-identity.yaml
       tags: [always]
 
+    - name: "Gate: roster supplies at least one data list (catches the wrong -e file)"
+      ansible.builtin.assert:
+        that:
+          - (ipa_users | length > 0)
+            or (ipa_groups | length > 0)
+            or (ipa_hostgroups | length > 0)
+            or (ipa_hbac_rules | length > 0)
+            or (ipa_sudo_rules | length > 0)
+        fail_msg: >-
+          ipa_users/ipa_groups/ipa_hostgroups/ipa_hbac_rules/ipa_sudo_rules
+          are all empty, so this apply would do nothing but still report
+          success (every loop below simply skips). This is virtually always
+          a sign the wrong -e file was passed — e.g. a group_vars file that
+          only sets ipa_admin_password, instead of the roster
+          (playbooks/apply/freeipa-identity.roster.example.yaml's schema)
+          that actually declares users/groups/rules. A partial roster
+          (e.g. only ipa_users, nothing else) is fine and stays past this
+          gate — only a completely empty one is rejected.
+      tags: [always]
+
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
         that:

@@ -23,10 +23,12 @@
 #   see group_vars/wazuh-fim.example.yml)
 #
 # Variables (see docs/verification/wazuh-fim.md §1.5):
-#   wazuh_manager_host      optional — IP/FQDN of the wazuh-manager target; if
-#                           omitted, the agent still installs with local FIM
-#                           whodata rules configured, but enrollment (and the
-#                           /etc/hosts pin + <address> rewrite) is skipped
+#   wazuh_manager_host      optional — IP/FQDN of the wazuh-manager target. If
+#                           omitted and inventory has a wazuh-manager group,
+#                           its first host's ansible_host is used. Otherwise
+#                           the agent installs with local FIM whodata rules
+#                           configured, but enrollment (and the /etc/hosts
+#                           pin + <address> rewrite) is skipped.
 #                           (spec C7-C9 not applicable — see spec §5)
 #   wazuh_fim_directories   optional — list of paths to monitor with
 #                           check_all=yes whodata=yes; default: ["/etc",
@@ -88,12 +90,10 @@
     # wazuh_manager_host genuinely unset (no -e/group_vars/host_vars) and
     # this inventory happens to define a wazuh-manager group, use that
     # host's own connection address instead of silently leaving enrollment
-    # disabled. `pilot deploy`'s single-component wizard already offers
-    # this as an interactive prompt (deploy_catalog.go's wazuh-fim
-    # AutoHostVars); this makes a site-wide `playbooks/site.yml` run (which
-    # does not carry that wizard-level convenience — site.yml's own
-    # `import_playbook: apply/wazuh-fim-apply.yml` has no vars: override)
-    # get the same default, mirroring restic-backup-apply.yml's own
+    # disabled. `pilot deploy`'s single-component wizard also offers this as
+    # an inventory-derived interactive default; this makes a site-wide
+    # `playbooks/site.yml` run get the same default, mirroring
+    # restic-backup-apply.yml's own
     # "Auto-detect backup destination host from this inventory's
     # seaweedfs-s3 group" task exactly.
     - name: "Auto-detect Wazuh manager host from this inventory's wazuh-manager group"

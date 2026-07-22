@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/dockertarget"
+	"github.com/kjelly/pilot/internal/dockertarget"
 )
 
 // newImageShim writes a fake `docker` that logs argv to PILOT_CALLS_LOG

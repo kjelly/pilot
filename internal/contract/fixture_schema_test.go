@@ -13,7 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/anomalyco/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/spec"
 )
 
 // These private types retain repository/spec/tag traceability checks while the

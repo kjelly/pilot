@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/ansible"
 )
 
 func TestExecuteDeployment_NonZeroAnsibleExitIsError(t *testing.T) {

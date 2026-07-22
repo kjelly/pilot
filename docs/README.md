@@ -3,7 +3,7 @@
 > pilot 的實際工作流是 **自然語言需求 → Codex/Claude authoring spec + apply
 > playbook → pilot 確定性 lint/test/deploy/verify**。外部 coding agent 負責把
 > 需求落成 repo 內可 review 的產物；pilot runtime 不呼叫 LLM，而是用
-> `vm-target`/`docker-target`、TUI `deploy`/`edit` 與真實證據解決「如何正確
+> `vm-target`/`docker-target`、TUI `deploy`/`reconcile`/`edit` 與真實證據解決「如何正確
 > 交付軟體」。本目錄從這裡開始：**讀 spec 範例、用 spec template、讀現有
 > runbook、開發 ansible playbook**。
 
@@ -19,7 +19,7 @@
 | **跑完整閉環** | 從 `verification/<name>.md` → `apply/<name>-apply.yml` → 對 inventory 跑 ansible-playbook | 
 | 看一份完整的「spec → apply → verify → 失敗 → 修」| [`runbooks/pam-oidc-sshd.md`](./runbooks/pam-oidc-sshd.md) |
 | spec-to-spec supplier pattern（同一 host 多 spec 如何 cross-check）| [`runbooks/sso-composition.md`](./runbooks/sso-composition.md) |
-| **管 FreeIPA 使用者/權限（名冊與機密不進 git）** | [`runbooks/freeipa-identity.md`](./runbooks/freeipa-identity.md) |
+| **管 FreeIPA 使用者/權限（名冊與機密不進 git）** | [`runbooks/freeipa-identity.md`](./runbooks/freeipa-identity.md)；已部署後以 `pilot reconcile` 調和 roster |
 | **開啟 FreeIPA 目錄服務（389-ds）稽核日誌** | [`runbooks/freeipa-389ds-audit-log.md`](./runbooks/freeipa-389ds-audit-log.md) |
 | **DNS 服務自訂內部網域（網域資料不進公開 git）** | [`runbooks/core-infra-provider-dns-zones.md`](./runbooks/core-infra-provider-dns-zones.md) |
 | **部署中央 SIEM 日誌接收端（rsyslog）** | [`runbooks/log-server.md`](./runbooks/log-server.md) |

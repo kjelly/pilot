@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/ansible"
-	"github.com/anomalyco/pilot/internal/contract"
-	"github.com/anomalyco/pilot/internal/delivery"
-	"github.com/anomalyco/pilot/internal/spec"
-	"github.com/anomalyco/pilot/internal/store"
+	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/store"
 )
 
 func TestExecuteRecordedDeploymentPersistsTransactionAfterAuthorization(t *testing.T) {

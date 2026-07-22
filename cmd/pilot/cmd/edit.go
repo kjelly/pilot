@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/anomalyco/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // ---- hosts.yml -------------------------------------------------------------

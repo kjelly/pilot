@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 
-	"github.com/anomalyco/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/ansible"
 )
 
 // syntaxCheckAndLint runs `ansible-playbook --syntax-check` over

@@ -13,7 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	verification "github.com/anomalyco/pilot/internal/spec"
+	verification "github.com/kjelly/pilot/internal/spec"
 )
 
 // SchemaVersion is the ComponentContract schema version supported by this loader.

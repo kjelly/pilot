@@ -60,7 +60,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/statefile"
+	"github.com/kjelly/pilot/internal/statefile"
 )
 
 // Status is the lifecycle state of a vm target.
@@ -247,6 +247,13 @@ func runIO(ctx context.Context, envKey, dflt string, timeout time.Duration, stdi
 	c, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(c, bin, args...)
+	if envKey == "PILOT_VIRSH_BIN" {
+		// vm-target owns system-level libvirt domains and DHCP reservations.
+		// Never let an ambient virsh default URI silently switch it to a
+		// per-user session connection, where the same network/domain names may
+		// not exist.
+		cmd.Env = append(os.Environ(), "LIBVIRT_DEFAULT_URI=qemu:///system")
+	}
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}

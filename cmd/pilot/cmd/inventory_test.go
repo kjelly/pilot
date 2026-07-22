@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 func TestCopyMissingGroupVars_CopiesExampleForUsedStemOnly(t *testing.T) {

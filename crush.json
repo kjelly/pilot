@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "trec": {
+      "type": "stdio",
+      "command": "trec",
+      "args": [
+        "mcp"
+      ],
+      "env": {
+      }
+    }
+  }
+}

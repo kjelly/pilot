@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/spec"
 )
 
 // TestPilotSpec_HostsFlag is the regression test for the

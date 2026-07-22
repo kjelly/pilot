@@ -25,7 +25,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/anomalyco/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/spec"
 )
 
 // specTagMapping pairs one verification spec with the apply playbook that

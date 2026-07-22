@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/vmtarget"
+	"github.com/kjelly/pilot/internal/vmtarget"
 )
 
 func TestParseAnsibleJSONResult_Basic(t *testing.T) {

@@ -14,8 +14,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anomalyco/pilot/internal/delivery"
-	"github.com/anomalyco/pilot/internal/vmtarget"
+	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/vmtarget"
 )
 
 // vm-target topology treats a declarative YAML spec (a list of nodes,

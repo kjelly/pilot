@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"github.com/anomalyco/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/spec"
 )
 
 // parseSpecForTest / generateSpecPlaybookForTest are thin wrappers

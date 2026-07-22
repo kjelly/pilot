@@ -22,7 +22,10 @@ freeipa_domain: ipa.pilot.internal
 # FreeIPA server 的 LAN IP。
 # freeipa-server-apply.yml 需要它來執行 --ip-address=... (ipa-server-install)，
 # freeipa-client-apply.yml 需要它來寫入 client 的 /etc/hosts (pin server FQDN → 此 IP)。
-# 【必填】不可省略。請填入與 inventory 裡 freeipa-server host 的 ansible_host 相同 IP。
+# 若 inventory 有且只有一台 freeipa-server，client apply 會自動採用該主機的
+# ansible_host；只有 server 位址在 inventory 外部、或要覆寫此預設時才需填入。
+# freeipa-server apply 本身仍需這個值執行 --ip-address=...；請填入時使用與
+# inventory 裡 freeipa-server host 的 ansible_host 相同 IP。
 #
 # Example placeholder only:
 # freeipa_server_ip: "192.0.2.10"

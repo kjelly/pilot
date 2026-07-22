@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/contract"
 )
 
 func TestPlanComponentsOrdersDependenciesAndRejectsExperimental(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/anomalyco/pilot/internal/groupvars"
+	"github.com/kjelly/pilot/internal/groupvars"
 )
 
 // pushGroupVarsFilePicker lists group_vars files under <dir>/group_vars

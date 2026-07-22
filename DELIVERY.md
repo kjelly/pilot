@@ -27,6 +27,12 @@
 > 熟悉 Ansible 的人，或需要精靈沒問到的細節（例如某個角色專屬的 group_vars）
 > 時，仍照下面的手動步驟操作。
 
+> **已部署服務的 day-2 宣告式設定**（例如 FreeIPA 使用者、群組、HBAC 與 sudo
+> roster）改用 `pilot reconcile`。它和 `pilot deploy` 共用 preflight、stage gate、
+> preview 與確認機制，但只列出已具 contract、apply playbook、schema 與驗證證據的
+> reconciler；目前可用項目是 `freeipa-identity`。未來 Nginx config 也必須先具備這些
+> 交付物才會出現在清單中。
+
 ---
 
 ## 0. 準備 pilot-cli image

@@ -113,9 +113,8 @@
     # restic_s3_target_host genuinely unset (no -e/group_vars/host_vars) and
     # this inventory happens to define a seaweedfs-s3 group, use that host's
     # own connection address instead of failing the gate below. `pilot
-    # deploy` already offers this as an interactive prompt (deploy.go's
-    # promptResticS3Target); this makes `ansible-playbook ...
-    # restic-backup-apply.yml` run directly get the same default. Only
+    # deploy` also offers this as an inventory-derived interactive default;
+    # this makes direct playbook runs get the same default. Only
     # applies to the self-hosted default repository — an externally
     # overridden restic_repository has no SeaweedFS group to borrow from and
     # must set restic_s3_target_host itself if it needs the /etc/hosts pin.

@@ -33,7 +33,7 @@ import (
 
 	"github.com/creack/pty"
 
-	"github.com/anomalyco/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 var (

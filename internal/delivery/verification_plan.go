@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/anomalyco/pilot/internal/contract"
-	"github.com/anomalyco/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/spec"
 )
 
 // VerificationPlan is the exact v2 acceptance scope for one selected

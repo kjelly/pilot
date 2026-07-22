@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/ansible"
 )
 
 func TestSyntaxCheckAndLint_ValidPlaybookPasses(t *testing.T) {

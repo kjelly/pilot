@@ -9,17 +9,15 @@ playbooks:
 regressionTests:
   - internal/spec/audit_log_forwarding_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
-dependencies:
-  - {component: log-server, required: true, relation: providerEndpoint}
-bindings:
-  - input: siem_forward_host
-    requiredWhenDependencySelected: true
-    sourceSelection: exactlyOne
-    from: {component: log-server, endpoint: syslog}
+# A SIEM receiver is optional.  The apply playbook resolves it from
+# log-server first, then wazuh-manager; with neither present it still applies
+# the local auditd controls and deliberately omits forwarding.
+dependencies: []
+bindings: []
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
-  - {name: siem_forward_host, type: string, required: true, secret: false}
+  - {name: siem_forward_host, type: string, required: false, default: "", secret: false}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:
