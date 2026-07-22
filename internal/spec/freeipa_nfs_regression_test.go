@@ -158,6 +158,16 @@ func TestRegression_FreeIPANFSServerSnapshotIsCreateOnce(t *testing.T) {
 	if !strings.Contains(task, "force: false") {
 		t.Fatal("managed exports .pre-freeipa-nfs.bak must be created once so a no-op run does not rewrite it")
 	}
+	for _, required := range []string{
+		"pre-freeipa-nfs.absent",
+		"Record that the managed exports fragment was initially absent",
+		"Remove a managed exports fragment that did not exist before this role",
+		"nfs_exports_initially_absent.stat.exists",
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Fatalf("managed exports rollback must preserve an initially-absent state; missing %q", required)
+		}
+	}
 }
 
 func TestRegression_FreeIPAClientFreshPreviewDoesNotReadMissingSSSDConfig(t *testing.T) {
