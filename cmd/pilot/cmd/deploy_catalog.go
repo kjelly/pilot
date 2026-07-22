@@ -68,7 +68,7 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "freeipa-nfs-server", Label: "FreeIPA Kerberos NFSv4 server",
 		Playbook: "playbooks/apply/freeipa-nfs-server-apply.yml", DefaultGroup: "freeipa-nfs-server", StageVar: "stage",
-		Note:      "使用 canonical FreeIPA roster 建立 nfs/FQDN principal、keytab、ACL 與安全 exports。",
+		Note:      "目標主機必須先完成 freeipa-client enrollment；使用 canonical FreeIPA roster 建立 nfs/FQDN principal、keytab、ACL 與安全 exports（支援 RedHat 與 Debian/Ubuntu）。",
 		VaultHint: "canonical roster 檔(含 FreeIPA admin 密碼與 nfs.servers)",
 	},
 	{

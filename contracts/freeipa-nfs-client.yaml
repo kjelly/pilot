@@ -28,4 +28,4 @@ traceability:
   exemptions:
     "docs/verification/freeipa-nfs-client.md#C6": {kind: verifyOnly, reason: proves the playbook does not write managed NFS mounts into fstab}
 verification: {autoDeploy: false}
-site: {include: true, order: 55, vars: {}, tags: [freeipa, freeipa-nfs-client], optIn: false}
+site: {include: true, order: 60, vars: {}, tags: [freeipa, freeipa-nfs-client], optIn: false}

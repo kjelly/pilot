@@ -10,6 +10,8 @@
 # YAML format deliberately stays limited to VM topology and group membership):
 #   --verify docs/verification/freeipa-server.md=freeipa-server
 #   --verify docs/verification/freeipa-client.md=freeipa-client
+#   --verify docs/verification/freeipa-nfs-server.md=freeipa-nfs-server
+#   --verify docs/verification/freeipa-nfs-client.md=freeipa-nfs-client
 #   --verify docs/verification/docker.md=docker
 #   --verify docs/verification/audit-log-forwarding.md=audit-log-forwarding
 #   --verify docs/verification/wazuh-manager.md=wazuh-manager
@@ -52,6 +54,7 @@ nodes:
     ssh_timeout: 3m
     boot_timeout: 6m
     groups:
+      - freeipa-client
       - docker
       - audit-log-forwarding
       - wazuh-manager
@@ -62,6 +65,7 @@ nodes:
       - thanos-query
       - alertmanager
       - dashboard
+      - freeipa-nfs-server
     wire:
       - freeipa-server=ipa1.ipa.pilot.internal
       - client-vm=client-vm.ipa.pilot.internal
@@ -80,6 +84,7 @@ nodes:
       - audit-log-forwarding
       - wazuh-fim
       - restic-backup
+      - freeipa-nfs-client
     wire:
       - freeipa-server=ipa1.ipa.pilot.internal
       - nexus

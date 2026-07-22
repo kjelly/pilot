@@ -27,7 +27,7 @@ type rolePresetFile struct {
 	Presets []rolePreset `yaml:"presets"`
 }
 
-// defaultRolePresets is the actual three-host, nineteen-role inventory from
+// defaultRolePresets is the actual three-host minimal-PoC inventory from
 // docs/runbooks/minimal-poc-architecture.md. Other topologies, including a
 // FreeIPA replica, are intentionally added through the per-environment editor.
 func defaultRolePresets() []rolePreset {
@@ -38,7 +38,7 @@ func defaultRolePresets() []rolePreset {
 		},
 		{
 			Label: "Nexus 中央服務節點(minimal PoC)",
-			Roles: []string{"docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"},
+			Roles: []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"},
 		},
 		{
 			Label: "被監控的 Linux 主機(minimal PoC)",

@@ -10,6 +10,7 @@ regressionTests:
   - internal/spec/freeipa_nfs_regression_test.go
 dependencies:
   - {component: freeipa-server, required: true, relation: providerEndpoint}
+  - {component: freeipa-client, required: true, relation: sameHosts}
 bindings:
   - input: freeipa_server_fqdn
     requiredWhenDependencySelected: true
@@ -28,4 +29,4 @@ traceability:
   mode: rowTags
   tag: {kind: bare}
 verification: {autoDeploy: false}
-site: {include: true, order: 45, vars: {}, tags: [freeipa, freeipa-nfs-server], optIn: false}
+site: {include: true, order: 55, vars: {}, tags: [freeipa, freeipa-nfs-server], optIn: false}
