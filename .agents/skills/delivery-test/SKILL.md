@@ -107,7 +107,7 @@ For each VM, add a host with its real `ansible_host` (from §1.2),
 | Host | Roles |
 |---|---|
 | `freeipa` | `freeipa-server`, `restic-backup`, `audit-log-forwarding`, `wazuh-fim` |
-| `nexus` | `docker`, `wazuh-manager`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard`, `freeipa-nfs-server`, `audit-log-forwarding`, `wazuh-fim` |
+| `nexus` | `docker`, `wazuh-manager`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard` (Grafana + Loki), `freeipa-nfs-server`, `audit-log-forwarding`, `wazuh-fim` |
 | `client` | `docker`, `freeipa-client`, `restic-backup`, `audit-log-forwarding`, `wazuh-fim`, `freeipa-nfs-client` |
 
 **All three hosts get `wazuh-fim` and `audit-log-forwarding`**, not just the
