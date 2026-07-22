@@ -9,8 +9,9 @@
 - 目標：AlmaLinux 9 vm-target `freeipa-nfs-v2`，inventory 僅含同名 host；FreeIPA provider 是 `freeipa-authz-v2`。
 - 對齊決定：A。NFS VM 的 `ansible_fqdn`、roster `nfs.servers[].host`、IPA host/DNS 與 principal 全部使用 `freeipa-nfs-v2.ipa.pilot.internal`。
 - 外部 state：`/home/kjelly/.vault/main.yaml` 只確認存在 `ipa_admin_password` key，未保存值。
-- Development run（2026-07-22）：最終修正 apply `changed=2 failed=0`、verify `8/8 PASS`、第二次 apply `changed=0 failed=0`；獨立 client 實際 automount 為 `nfs4,sec=krb5i`。
-- 正式 immutable candidate evidence：候選凍結後更新於 `docs/evidence/freeipa-nfs-server/`；目前 development transcript 不冒充正式 evidence。
+- 正式 immutable candidate（2026-07-22）：commit `9d7eeb4f29e24df28bd100867a161b170e8aca86`、tree `ea5461e6b6ac8c5fc861bea585dd6a158ee60ebb`。
+- 正式結果：check `ok=14 changed=0 failed=0`；apply/idempotency 均 `ok=23 changed=0 failed=0`；server spec `8/8 PASS`；獨立 client 實際 automount 為 `nfs4,sec=krb5i`。
+- Evidence：[2026-07-22 immutable candidate record](../evidence/freeipa-nfs-server/2026-07-22-9d7eeb4.md)。
 
 ## 1. 邊界與前置
 
