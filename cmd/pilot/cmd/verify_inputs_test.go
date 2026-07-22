@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/spec"
 )
 
 func TestResolveVerifyInputsPrecedenceAndSecretBoundary(t *testing.T) {

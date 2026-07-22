@@ -13,8 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anomalyco/pilot/images"
-	"github.com/anomalyco/pilot/internal/dockertarget"
+	"github.com/kjelly/pilot/images"
+	"github.com/kjelly/pilot/internal/dockertarget"
 )
 
 // dockerTargetCmd is the parent for `pilot docker-target ...`.

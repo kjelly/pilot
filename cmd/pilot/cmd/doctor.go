@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anomalyco/pilot/internal/vmtarget"
+	"github.com/kjelly/pilot/internal/vmtarget"
 )
 
 var doctorCmd = &cobra.Command{

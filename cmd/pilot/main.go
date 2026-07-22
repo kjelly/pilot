@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/anomalyco/pilot/cmd/pilot/cmd"
+	"github.com/kjelly/pilot/cmd/pilot/cmd"
 )
 
 func main() {

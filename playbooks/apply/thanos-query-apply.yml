@@ -208,6 +208,24 @@
         # Same secret-in-mounted-file tradeoff as prometheus-apply.yml —
         # see that playbook's comment on the equivalent task. Must contain
         # the exact same bucket/credentials as every site's objstore.yml.
+        # Docker auto-creates a directory at a bind-mount source path that
+        # doesn't exist when the container is (re)created; the rescue block
+        # below only deletes this file (not the container) after a failed
+        # apply, so a later container recreate can leave a directory here
+        # instead of a file, permanently breaking `copy` on retry. `stat`
+        # (not the `directory` Jinja test, which checks the control host)
+        # runs on the managed node, where this path actually lives.
+        - name: "Guard: check for stray directory left at objstore.yml path"
+          ansible.builtin.stat:
+            path: "{{ thanos_config_dir }}/objstore.yml"
+          register: objstore_yml_stat
+
+        - name: "Guard: clear stray directory left at objstore.yml path"
+          ansible.builtin.file:
+            path: "{{ thanos_config_dir }}/objstore.yml"
+            state: absent
+          when: objstore_yml_stat.stat.exists and objstore_yml_stat.stat.isdir
+
         - name: "Render Thanos objstore config (S3 backend)"
           ansible.builtin.copy:
             dest: "{{ thanos_config_dir }}/objstore.yml"

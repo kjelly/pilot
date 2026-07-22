@@ -11,7 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"gopkg.in/yaml.v3"
 
-	"github.com/anomalyco/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 const rolePresetFilename = "role-presets.yml"

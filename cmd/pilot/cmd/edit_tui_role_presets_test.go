@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
-	"github.com/anomalyco/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 func TestDefaultRolePresets_CoversCompactTopology(t *testing.T) {

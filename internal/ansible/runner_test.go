@@ -19,6 +19,7 @@ func TestSyntaxCheckFailsForBadPlaybook(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := NewRunner()
+	r.Env = []string{"ANSIBLE_LOCAL_TEMP=" + filepath.Join(tmp, "ansible-tmp")}
 	res, err := r.SyntaxCheck(context.Background(), bad, "", "")
 	if err != nil {
 		t.Fatalf("SyntaxCheck returned error: %v", err)
@@ -48,6 +49,7 @@ func TestSyntaxCheckPassesForGoodPlaybook(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := NewRunner()
+	r.Env = []string{"ANSIBLE_LOCAL_TEMP=" + filepath.Join(tmp, "ansible-tmp")}
 	res, err := r.SyntaxCheck(context.Background(), good, "", "")
 	if err != nil {
 		t.Fatalf("SyntaxCheck returned error: %v", err)
@@ -73,6 +75,19 @@ func TestSyntaxCheckMissingFile(t *testing.T) {
 	if !strings.Contains(strings.ToLower(res.Stderr+res.Stdout), "no such file") &&
 		!strings.Contains(strings.ToLower(res.Stderr+res.Stdout), "could not find") {
 		t.Logf("note: ansible did not print expected 'no such file' error; got: %s / %s", res.Stdout, res.Stderr)
+	}
+}
+
+func TestRunnerAppliesEnvironmentOverrides(t *testing.T) {
+	r := NewRunner()
+	r.Binary = "sh"
+	r.Env = []string{"PILOT_ANSIBLE_TEST_VALUE=isolated"}
+	res, err := r.Run(context.Background(), "-c", "printf %s \"$PILOT_ANSIBLE_TEST_VALUE\"")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Stdout; got != "isolated" {
+		t.Fatalf("stdout = %q, want environment override", got)
 	}
 }
 

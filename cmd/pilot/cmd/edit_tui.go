@@ -38,7 +38,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/anomalyco/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // editRouterModel is the single long-lived Bubble Tea model backing
@@ -336,7 +336,7 @@ func pushHostMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 	}
 	items := []string{
 		fmt.Sprintf("ansible_host(連線位址)：%s", displayOrPlaceholder(h.AnsibleHost)),
-		fmt.Sprintf("ansible_user(SSH 帳號)：%s", displayOrPlaceholder(h.AnsibleUser)),
+		fmt.Sprintf("ansible_user(登入帳號)：%s", displayOrPlaceholder(h.AnsibleUser)),
 		fmt.Sprintf("SSH 私鑰路徑：%s", displayOrPlaceholder(h.SSHKeyFile)),
 		fmt.Sprintf("env(環境標籤)：%s", displayOrPlaceholder(h.Env)),
 		fmt.Sprintf("角色(roles)：%s", displayOrPlaceholder(strings.Join(h.Roles, ", "))),
@@ -354,7 +354,7 @@ func pushHostMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 		case 0:
 			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_host(可路由的 IP 或主機名)", h.AnsibleHost, func(h *inventory.Host, v string) { h.AnsibleHost = v })
 		case 1:
-			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_user(SSH 登入帳號，留空 = 用 vars 裡的預設)", h.AnsibleUser, func(h *inventory.Host, v string) { h.AnsibleUser = v })
+			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_user(登入帳號，留空 = 用 vars 裡的預設)", h.AnsibleUser, func(h *inventory.Host, v string) { h.AnsibleUser = v })
 		case 2:
 			return pushHostFieldEdit(r, dir, path, hf, name, "SSH 私鑰路徑(留空 = 用 vars 裡的預設)", h.SSHKeyFile, func(h *inventory.Host, v string) { h.SSHKeyFile = v })
 		case 3:

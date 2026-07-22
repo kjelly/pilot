@@ -188,7 +188,7 @@ pilot vm-target exec --name <server-vm> -- true   # 暖連線
 pilot vm-target verify --name <server-vm> docs/verification/freeipa-identity.md
 ```
 
-### 7.2a Check-mode 安全性閘門（`pilot deploy` 的 preview 也要跑過，不能只信 `pilot vm-target verify`）
+### 7.2a Check-mode 安全性閘門（`pilot deploy`／`pilot reconcile` 的 preview 也要跑過，不能只信 `pilot vm-target verify`）
 
 **2026-07-16（v4.9 全新環境重跑）發現並修好**：`pilot vm-target verify`（§7.2）
 從不用 `--check` 模式跑 Ansible，所以 v4.8 reconciler 改版加的 5 個

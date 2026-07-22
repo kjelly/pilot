@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anomalyco/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 var (

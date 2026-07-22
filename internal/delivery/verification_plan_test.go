@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/contract"
 )
 
 func TestPlanVerificationResolvesSelectedV2Rows(t *testing.T) {

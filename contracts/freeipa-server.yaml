@@ -27,7 +27,8 @@ hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 4096, minDiskGiB: 20}
 groupVars:
   - {name: freeipa_domain, type: string, required: false, default: ipa.pilot.internal, secret: false}
-  - {name: freeipa_server_ip, type: string, required: true, secret: false, validation: "^[0-9a-fA-F:.]+$"}
+  # freeipa-server-apply.yml defaults this to the target host's ansible_host.
+  - {name: freeipa_server_ip, type: string, required: false, secret: false, validation: "^[0-9a-fA-F:.]+$"}
   - {name: ipa_admin_password, type: string, required: true, secret: true, validation: "^.{8,}$"}
 inputRules: []
 endpoints:

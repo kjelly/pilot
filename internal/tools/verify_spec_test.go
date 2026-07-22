@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/store"
+	"github.com/kjelly/pilot/internal/store"
 )
 
 func TestVerifySpec_LocalMode(t *testing.T) {

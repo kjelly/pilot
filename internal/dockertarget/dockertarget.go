@@ -28,7 +28,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/statefile"
+	"github.com/kjelly/pilot/internal/statefile"
 )
 
 // Status is the lifecycle state of a docker target.

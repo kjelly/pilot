@@ -17,9 +17,10 @@
 #
 # 選填 —— 留白/不填的話,這個 group 的機器仍會裝好本機 FIM 規則
 # (預設 /etc、/boot 的 whodata 監控,搭配 auditd 取得 who-data),只是不會向
-# manager 註冊(spec C7-C9 不適用,屬設計如此,見 spec §5 已知偏差)。等
-# wazuh-manager 就緒後,把這裡填上它的 IP/FQDN、重新套用即可補上註冊,不需要
-# 重裝 agent 或重套 FIM 規則。
+# manager 註冊(spec C7-C9 不適用,屬設計如此,見 spec §5 已知偏差)。若 inventory
+# 有 wazuh-manager group,留空時 apply playbook 會自動取該 group 第一台主機的
+# ansible_host 作為註冊目標。只有 manager 在 inventory 外部、或要覆寫該預設時才
+# 在這裡填 IP/FQDN；重新套用即可補上註冊,不需要重裝 agent 或重套 FIM 規則。
 wazuh_manager_host: ""
 
 # 這個 group 全部主機共用的 FIM 監控目錄(選填,預設 ["/etc", "/boot"])。

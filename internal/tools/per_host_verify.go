@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/spec"
 )
 
 // ansibleJSONInvocation is the controller-level result of one isolated
@@ -106,7 +106,9 @@ func (t *VerifySpecTool) listAnsibleHosts(ctx context.Context, pattern, limit st
 	if limit != "" {
 		args = append(args, "-l", limit)
 	}
-	out, err := exec.CommandContext(ctx, "ansible", args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "ansible", args...)
+	cmd.Env = append(os.Environ(), t.Env...)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("ansible --list-hosts: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -157,7 +159,7 @@ func (t *VerifySpecTool) resolveHostInputs(ctx context.Context, parsed *spec.Spe
 func (t *VerifySpecTool) listAnsibleHostInputs(ctx context.Context, host string) (map[string]string, error) {
 	run := t.runInventoryHost
 	if run == nil {
-		run = runAnsibleInventoryHost
+		run = t.runAnsibleInventoryHost
 	}
 	stdout, stderr, err := run(ctx, t.Inventory, host)
 	if err != nil {
@@ -180,8 +182,9 @@ func (t *VerifySpecTool) listAnsibleHostInputs(ctx context.Context, host string)
 	return values, nil
 }
 
-func runAnsibleInventoryHost(ctx context.Context, inventory, host string) (string, string, error) {
+func (t *VerifySpecTool) runAnsibleInventoryHost(ctx context.Context, inventory, host string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, "ansible-inventory", "-i", inventory, "--host", host)
+	cmd.Env = append(os.Environ(), t.Env...)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -363,7 +366,8 @@ func (t *VerifySpecTool) execAnsibleJSON(ctx context.Context, args []string, tim
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "ansible", args...)
-	cmd.Env = append(os.Environ(), "ANSIBLE_LOAD_CALLBACK_PLUGINS=1", "ANSIBLE_STDOUT_CALLBACK=ansible.posix.json")
+	cmd.Env = append(os.Environ(), t.Env...)
+	cmd.Env = append(cmd.Env, "ANSIBLE_LOAD_CALLBACK_PLUGINS=1", "ANSIBLE_STDOUT_CALLBACK=ansible.posix.json")
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

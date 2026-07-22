@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anomalyco/pilot/internal/spec"
-	"github.com/anomalyco/pilot/internal/store"
+	"github.com/kjelly/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/store"
 )
 
 var (
@@ -250,14 +250,7 @@ func checkGenerateOutPath(outPath, specPath string) error {
 }
 
 func openSpecStore() (*store.Store, error) {
-	storeDir := dataDir
-	if storeDir == "" {
-		storeDir = os.Getenv("PILOT_DATA_DIR")
-	}
-	if storeDir == "" {
-		home, _ := os.UserHomeDir()
-		storeDir = filepath.Join(home, ".local", "share", "pilot")
-	}
+	storeDir := resolvePilotDataDir()
 	if err := os.MkdirAll(storeDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -271,6 +264,16 @@ func openSpecStore() (*store.Store, error) {
 		return nil, err
 	}
 	return st, nil
+}
+
+func resolvePilotDataDir() string {
+	if dataDir != "" {
+		return dataDir
+	}
+	if dir := os.Getenv("PILOT_DATA_DIR"); dir != "" {
+		return dir
+	}
+	return loadConfig().DataDir
 }
 
 func countBySeverity(fs []spec.Finding, sev spec.Severity) int {

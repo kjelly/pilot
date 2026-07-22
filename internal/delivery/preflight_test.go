@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/contract"
 )
 
 func TestValidatePreflightCardinalityAndSameHosts(t *testing.T) {
@@ -17,6 +17,19 @@ func TestValidatePreflightCardinalityAndSameHosts(t *testing.T) {
 	err = ValidatePreflight([]contract.Contract{server}, Scope{HostsByRole: map[string][]string{"server": {"a", "b"}}})
 	if err == nil || !strings.Contains(err.Error(), "exactly one") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// A sameHosts dependency only requires the dependent's own hosts to also
+// carry the dependency — the dependency is free to additionally cover hosts
+// the dependent doesn't run on (e.g. "docker" wired to more hosts than any
+// single docker-based component). See COMPONENT_CONTRACT_RFC.md §5.1.
+func TestValidatePreflightSameHostsAllowsProviderSuperset(t *testing.T) {
+	docker := contract.Contract{ID: "docker", Role: "docker", HostCardinality: "one-or-more"}
+	dashboard := contract.Contract{ID: "dashboard", Role: "dashboard", HostCardinality: "exactly-one", Dependencies: []contract.Dependency{{Component: "docker", Required: true, Relation: "sameHosts"}}}
+	scope := Scope{HostsByRole: map[string][]string{"docker": {"client-vm", "nexus"}, "dashboard": {"nexus"}}}
+	if err := ValidatePreflight([]contract.Contract{docker, dashboard}, scope); err != nil {
+		t.Fatalf("expected pass, got err=%v", err)
 	}
 }
 

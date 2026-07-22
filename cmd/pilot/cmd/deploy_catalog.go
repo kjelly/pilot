@@ -18,6 +18,7 @@ type deployPlaybook struct {
 	VaultHint      string        // shown when offering the vault-file prompt; "" skips extra context
 	PromptS3Config bool          // true => ask about signed-mode S3 identity, sets -e seaweedfs_s3_config_path=<path>
 	AutoHostVars   []autoHostVar // each => auto-detect a cross-role host address from inventory, sets -e <Var>=<ip>
+	Reconcile      bool          // true => eligible for pilot reconcile's day-2 declarative configuration flow
 }
 
 // autoHostVar describes one "-e <Var>=<ip>" pilot deploy can offer to fill
@@ -62,6 +63,7 @@ var deployCatalog = []deployPlaybook{
 		Playbook: "playbooks/apply/freeipa-identity-apply.yml", DefaultGroup: "freeipa-server", StageVar: "stage",
 		Note:      "資料驅動的 reconciler，需要一份 ansible-vault 加密的 roster 檔（範本：playbooks/apply/freeipa-identity.roster.example.yaml），接下來會問你 roster 檔路徑。",
 		VaultHint: "roster 檔(含 ipa_users/ipa_groups/ipa_hbac_rules/ipa_sudo_rules 與 ipa_admin_password)",
+		Reconcile: true,
 	},
 	{
 		Key: "freeipa-server-replica", Label: "第二台 FreeIPA server(multi-master HA replica)",

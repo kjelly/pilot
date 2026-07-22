@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/spec"
 )
 
 func TestParseAnsibleListHosts(t *testing.T) {

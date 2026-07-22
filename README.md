@@ -11,7 +11,7 @@ The normal lifecycle is:
 
 ```text
 requirement → verification spec → apply playbook → disposable-target test
-            → deploy → verify → report + checkpoint history
+            → deploy / reconcile → verify → report + checkpoint history
 ```
 
 The repository rules in [AGENTS.md](./AGENTS.md) are part of this workflow:
@@ -29,6 +29,7 @@ actual-run evidence for runbooks and verification documents.
 | Need kernel fidelity, snapshots, or SSH to an isolated host | `vm-target` |
 | Test a multi-node scenario such as FreeIPA HA | `vm-target topology` |
 | Deploy through a guarded, interactive flow | `deploy` |
+| Reconcile declared day-2 service configuration | `reconcile` |
 | Diagnose Ansible or target prerequisites | `doctor` |
 
 ## Install and orient yourself
@@ -61,6 +62,7 @@ target binary overrides are available through `PILOT_SSH_BIN`,
 | `pilot inventory lint` | Validate `hosts.yml` before generating or committing an inventory. |
 | `pilot inventory roles` | List the valid role values accepted in the simple host source. |
 | `pilot deploy` | Guided deployment: choose inventory, component(s), stage, preview, and confirmation. It preserves the same stage gates as manual deployment. |
+| `pilot reconcile` | Guided day-2 reconcile: choose a contract-backed declarative configuration component, its roster/config source, stage, preview, and confirmation. Only catalog entries explicitly marked as reconcilers appear; a future Nginx config reconciler must first supply its contract, apply playbook, schema, and verification evidence. |
 | `pilot doctor` | Check the Ansible toolchain and target prerequisites before a deployment or target test. |
 
 ### Spec and verification

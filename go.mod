@@ -1,4 +1,4 @@
-module github.com/anomalyco/pilot
+module github.com/kjelly/pilot
 
 go 1.26.4
 

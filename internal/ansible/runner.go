@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -21,8 +22,11 @@ type Result struct {
 
 // Runner wraps ansible-playbook invocation
 type Runner struct {
-	Binary       string        // path to ansible-playbook (default "ansible-playbook")
-	Defaults     []string      // extra args always passed, e.g. ["-i", "inv.yml"]
+	Binary   string   // path to ansible-playbook (default "ansible-playbook")
+	Defaults []string // extra args always passed, e.g. ["-i", "inv.yml"]
+	// Env appends controller environment overrides to each invocation. Later
+	// entries win, matching exec.Cmd's environment semantics on supported OSes.
+	Env          []string
 	Timeout      time.Duration // per-run timeout
 	StdoutWriter io.Writer     // if set, stdout is streamed in real-time here
 	StderrWriter io.Writer     // if set, stderr is streamed in real-time here
@@ -47,6 +51,9 @@ func (r *Runner) Run(ctx context.Context, args ...string) (*Result, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(c, r.Binary, allArgs...)
+	if len(r.Env) > 0 {
+		cmd.Env = append(os.Environ(), r.Env...)
+	}
 	if r.Stdin != nil {
 		cmd.Stdin = r.Stdin
 	}

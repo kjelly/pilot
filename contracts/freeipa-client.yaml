@@ -19,7 +19,10 @@ bindings:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 5}
 groupVars:
-  - {name: freeipa_server_ip, type: string, required: true, secret: false}
+  # freeipa-client-apply.yml derives this from the exactly-one freeipa-server
+  # inventory host when the operator leaves it unset; an explicit value still
+  # overrides that inventory default.
+  - {name: freeipa_server_ip, type: string, required: false, secret: false}
   - {name: ipa_admin_password, type: string, required: true, secret: true}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}

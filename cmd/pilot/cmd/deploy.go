@@ -28,12 +28,12 @@ import (
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
-	"github.com/anomalyco/pilot/internal/ansible"
-	"github.com/anomalyco/pilot/internal/contract"
-	"github.com/anomalyco/pilot/internal/delivery"
-	"github.com/anomalyco/pilot/internal/spec"
-	"github.com/anomalyco/pilot/internal/store"
-	"github.com/anomalyco/pilot/internal/tools"
+	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/store"
+	"github.com/kjelly/pilot/internal/tools"
 )
 
 var deployInventoryFlag string
@@ -41,6 +41,58 @@ var deployTimeoutFlag string
 var deployActionFlag string
 var deployShowExperimental bool
 var deployPlanComponents []string
+
+type deployAnsibleRuntime struct {
+	Env     []string
+	TempDir string
+}
+
+type deployAnsibleEnvKey struct{}
+
+// prepareDeployAnsibleRuntime keeps every controller-side Ansible artifact
+// for a deploy under data-dir. Remote module files intentionally remain on
+// their managed host; they cannot be stored on the controller.
+func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
+	root := filepath.Join(dir, "ansible")
+	home := filepath.Join(root, "home")
+	tmp := filepath.Join(root, "tmp")
+	factCache := filepath.Join(root, "fact-cache")
+	sshControl := filepath.Join(root, "ssh-control")
+	for _, path := range []string{home, tmp, factCache, sshControl} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return deployAnsibleRuntime{}, fmt.Errorf("create Ansible data directory %s: %w", path, err)
+		}
+	}
+	return deployAnsibleRuntime{
+		TempDir: tmp,
+		Env: []string{
+			"ANSIBLE_HOME=" + home,
+			"ANSIBLE_LOCAL_TEMP=" + tmp,
+			"ANSIBLE_CACHE_PLUGIN=jsonfile",
+			"ANSIBLE_CACHE_PLUGIN_CONNECTION=" + factCache,
+			"ANSIBLE_LOG_PATH=" + filepath.Join(root, "ansible.log"),
+			"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath=" + strconv.Quote(filepath.Join(sshControl, "pilot-%r@%h:%p")) + " -o ControlPersist=60s",
+			"ANSIBLE_RETRY_FILES_ENABLED=False",
+		},
+	}, nil
+}
+
+func withDeployAnsibleRuntime(ctx context.Context, runtime deployAnsibleRuntime) context.Context {
+	return context.WithValue(ctx, deployAnsibleEnvKey{}, runtime)
+}
+
+func deployAnsibleRuntimeFromContext(ctx context.Context) deployAnsibleRuntime {
+	runtime, _ := ctx.Value(deployAnsibleEnvKey{}).(deployAnsibleRuntime)
+	return runtime
+}
+
+func deployAnsibleCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, name, args...)
+	if runtime := deployAnsibleRuntimeFromContext(ctx); len(runtime.Env) > 0 {
+		command.Env = append(os.Environ(), runtime.Env...)
+	}
+	return command
+}
 
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
@@ -114,9 +166,15 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
+	if err != nil {
+		return err
+	}
+	ctx := withDeployAnsibleRuntime(cmd.Context(), runtime)
 
 	runner := ansible.NewRunner()
 	runner.Timeout = timeout
+	runner.Env = runtime.Env
 	runner.StdoutWriter = out
 	runner.StderrWriter = cmd.ErrOrStderr()
 
@@ -130,11 +188,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if runConfirmProgram("要不要先看一下這份 inventory 的 host/group 結構？(ansible-inventory --graph)", true) {
-		previewInventoryGraph(cmd.Context(), out, inv)
+		previewInventoryGraph(ctx, out, inv)
 		fmt.Fprintln(out)
 	}
 
-	ok, err := runPreflight(cmd.Context(), runner, out, inv)
+	ok, err := runPreflight(ctx, runner, out, inv)
 	if err != nil {
 		return abortOrErr(err)
 	}
@@ -151,9 +209,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if scopeIdx == 0 {
-		err = runSiteDeploy(cmd.Context(), runner, out, inv)
+		err = runSiteDeploy(ctx, runner, out, inv)
 	} else {
-		err = runSinglePlaybookDeploy(cmd.Context(), runner, out, inv)
+		err = runCatalogPlaybookDeploy(ctx, runner, out, inv, deployActionFlag, false)
 	}
 	return abortOrErr(err)
 }
@@ -253,6 +311,7 @@ func validateHoursWithinWeek(s string) error {
 func previewInventoryGraph(ctx context.Context, out io.Writer, inv string) {
 	r := ansible.NewRunner()
 	r.Binary = "ansible-inventory"
+	r.Env = deployAnsibleRuntimeFromContext(ctx).Env
 	r.StdoutWriter = out
 	res, err := r.Run(ctx, "-i", inv, "--graph")
 	if err != nil {
@@ -1013,7 +1072,7 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 }
 
 func resolveInventoryGroups(ctx context.Context, inventory string) (map[string][]string, error) {
-	command := exec.CommandContext(ctx, "ansible-inventory", "-i", inventory, "--list")
+	command := deployAnsibleCommand(ctx, "ansible-inventory", "-i", inventory, "--list")
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -1077,7 +1136,7 @@ func resolvePatternHosts(ctx context.Context, inventory, pattern, limit string) 
 	if limit != "" {
 		args = append(args, "--limit", limit)
 	}
-	command := exec.CommandContext(ctx, "ansible", args...)
+	command := deployAnsibleCommand(ctx, "ansible", args...)
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -1149,7 +1208,7 @@ func resolveInventoryVariables(ctx context.Context, inventory string, extraVars 
 		args = append(args, "-e", value)
 	}
 	args = append(args, vault.args()...)
-	command := exec.CommandContext(ctx, "ansible-inventory", args...)
+	command := deployAnsibleCommand(ctx, "ansible-inventory", args...)
 	command.Stdin = os.Stdin
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
@@ -1264,7 +1323,7 @@ func fileSHA256(path string) (string, error) {
 }
 
 func resolveInventoryHosts(ctx context.Context, inventory string) ([]string, error) {
-	command := exec.CommandContext(ctx, "ansible-inventory", "-i", inventory, "--list")
+	command := deployAnsibleCommand(ctx, "ansible-inventory", "-i", inventory, "--list")
 	output, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("ansible-inventory --list: %w", err)
@@ -1324,6 +1383,8 @@ func autoDeployVerify(root string, catalog contract.Catalog, components []string
 				Inventory: inventory, Limit: limit, Host: plan.Role, EvidenceWriter: writer,
 				Stage: stage, SelectedComponents: selectedComponents, SelectedRowIDs: selectedRows,
 				AllowIsolatedMutation: true, VaultArgs: vault.args(),
+				Env:     deployAnsibleRuntimeFromContext(ctx).Env,
+				TempDir: deployAnsibleRuntimeFromContext(ctx).TempDir,
 			}
 			result, err := tool.Execute(ctx, json.RawMessage(fmt.Sprintf(`{"spec_path":%q}`, filepath.Join(root, plan.SpecPath))))
 			if err != nil {
@@ -1496,8 +1557,8 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 
 // ---- single-playbook flow ---------------------------------------------------
 
-func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv string) error {
-	if deployActionFlag != "apply" && deployActionFlag != "upgrade" && deployActionFlag != "decommission" {
+func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, reconcileOnly bool) error {
+	if action != "apply" && action != "upgrade" && action != "decommission" {
 		return fmt.Errorf("--action must be apply, upgrade, or decommission")
 	}
 	root, err := resolveContractRoot("")
@@ -1515,6 +1576,9 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 	entries := make([]deployPlaybook, 0, len(deployCatalog))
 	labels := make([]string, 0, len(deployCatalog))
 	for _, p := range deployCatalog {
+		if reconcileOnly && !p.Reconcile {
+			continue
+		}
 		if !deployShowExperimental && deployEntryExperimental(p, catalog) {
 			continue
 		}
@@ -1522,9 +1586,16 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 		labels = append(labels, deployMenuLabel(p, catalog))
 	}
 	if len(entries) == 0 {
+		if reconcileOnly {
+			return fmt.Errorf("no day-2 reconcile components are available; add a contract-backed apply playbook before exposing it here")
+		}
 		return fmt.Errorf("no contract components are available; use --show-experimental only after reviewing their evidence requirements")
 	}
-	idx, err := runSelectProgram("挑一個要佈署的元件 (contract 驅動)", labels)
+	prompt := "挑一個要佈署的元件 (contract 驅動)"
+	if reconcileOnly {
+		prompt = "挑一個要調和的 day-2 設定元件 (contract 驅動)"
+	}
+	idx, err := runSelectProgram(prompt, labels)
 	if err != nil {
 		return err
 	}
@@ -1545,7 +1616,7 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 		extraVars = append(extraVars, "infra_role="+role)
 		componentHints = []string{role}
 	}
-	if err := showContractActionPlan(out, catalog, componentHints, deployActionFlag); err != nil {
+	if err := showContractActionPlan(out, catalog, componentHints, action); err != nil {
 		return err
 	}
 	plan, err := delivery.PlanComponents(catalog, componentHints, deployShowExperimental)
@@ -1553,11 +1624,11 @@ func runSinglePlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io
 		return err
 	}
 	showComponentDeploymentOrder(out, plan)
-	actionPlaybook, err := selectedActionPlaybook(catalog, componentHints, deployActionFlag)
+	actionPlaybook, err := selectedActionPlaybook(catalog, componentHints, action)
 	if err != nil {
 		return err
 	}
-	if deployActionFlag == "decommission" {
+	if action == "decommission" {
 		for _, id := range componentHints {
 			component, _ := catalog.Component(id)
 			if component.Lifecycle.Decommission == nil {

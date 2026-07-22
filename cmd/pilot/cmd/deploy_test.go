@@ -2,15 +2,17 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/contract"
-	"github.com/anomalyco/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/delivery"
 )
 
 // repoRootForTest walks up from the current package directory until it
@@ -32,6 +34,53 @@ func repoRootForTest(t *testing.T) string {
 			t.Fatal("could not find repo root (go.mod) above " + dir)
 		}
 		dir = parent
+	}
+}
+
+func TestPrepareDeployAnsibleRuntimeKeepsControllerArtifactsInDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	runtime, err := prepareDeployAnsibleRuntime(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{
+		"ansible/home",
+		"ansible/tmp",
+		"ansible/fact-cache",
+		"ansible/ssh-control",
+	} {
+		if info, err := os.Stat(filepath.Join(dataDir, relative)); err != nil || !info.IsDir() {
+			t.Fatalf("runtime directory %s: info=%v err=%v", relative, info, err)
+		}
+	}
+	joined := strings.Join(runtime.Env, "\n")
+	for _, want := range []string{
+		"ANSIBLE_HOME=" + filepath.Join(dataDir, "ansible", "home"),
+		"ANSIBLE_LOCAL_TEMP=" + filepath.Join(dataDir, "ansible", "tmp"),
+		"ANSIBLE_CACHE_PLUGIN=jsonfile",
+		"ANSIBLE_CACHE_PLUGIN_CONNECTION=" + filepath.Join(dataDir, "ansible", "fact-cache"),
+		"ANSIBLE_LOG_PATH=" + filepath.Join(dataDir, "ansible", "ansible.log"),
+		"ANSIBLE_SSH_ARGS=",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("runtime environment missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestDeployAnsibleCommandUsesRuntimeEnvironment(t *testing.T) {
+	runtime, err := prepareDeployAnsibleRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := withDeployAnsibleRuntime(context.Background(), runtime)
+	cmd := deployAnsibleCommand(ctx, "sh", "-c", "printf %s \"$ANSIBLE_LOCAL_TEMP\"")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(output), runtime.TempDir; got != want {
+		t.Fatalf("ANSIBLE_LOCAL_TEMP = %q, want %q", got, want)
 	}
 }
 
@@ -88,6 +137,36 @@ func TestDeployEntryExperimentalAndDependencyOrder(t *testing.T) {
 	showComponentDeploymentOrder(&out, plan)
 	if !strings.Contains(out.String(), "provider[provider] → client[client]") {
 		t.Fatalf("order view = %q", out.String())
+	}
+}
+
+func TestReconcileCatalogIsExplicitAndContractBacked(t *testing.T) {
+	root := repoRootForTest(t)
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, entry := range deployCatalog {
+		if !entry.Reconcile {
+			continue
+		}
+		got = append(got, entry.Key)
+		component, ok := catalog.Component(entry.Key)
+		if !ok {
+			t.Errorf("reconcile entry %q has no contract", entry.Key)
+			continue
+		}
+		if component.Playbooks.Apply != entry.Playbook {
+			t.Errorf("reconcile entry %q playbook=%q, contract apply=%q", entry.Key, entry.Playbook, component.Playbooks.Apply)
+		}
+	}
+	if want := []string{"freeipa-identity"}; !slices.Equal(got, want) {
+		t.Fatalf("reconcile entries = %v, want %v; future nginx config must not be exposed before its contract and playbook exist", got, want)
 	}
 }
 

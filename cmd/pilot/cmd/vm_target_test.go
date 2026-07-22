@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anomalyco/pilot/internal/vmtarget"
+	"github.com/kjelly/pilot/internal/vmtarget"
 )
 
 // TestVMTargetCmdRegistered guards the rootCmd.AddCommand wiring.

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/anomalyco/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/contract"
 )
 
 // ComponentPlan is a deterministic dependency-first view of the components a

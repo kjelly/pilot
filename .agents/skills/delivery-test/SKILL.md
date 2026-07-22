@@ -91,9 +91,11 @@ Per-VM SSH keys live under `/var/lib/libvirt/images/pilot/<name>/id_ed25519`
 ## 2. Configure Inventory, Group Vars, and Vault — via the wizards
 
 Do this entirely with `pilot edit --dir <workspace>` and `pilot inventory
-generate --dir <workspace>`, driven/recorded the way `pilot-trec-verification`
-describes (`SELECT`/`EXPECT`/`ASSERT` against the real menu labels — never a
-blind `DOWN <n>` count). Put `<workspace>` under this repo's gitignored
+generate --dir <workspace>`, driven/recorded through the mandatory
+`pilot-trec-verification` closed-loop gate: `trec drive lint --strict`, then
+`trec drive --strict-agent`, then `trec verify`. Use
+`EXPECT` → `CHOOSE <unique label>` → `EXPECT` for ordinary menus; never a
+blind `DOWN <n>` count. Put `<workspace>` under this repo's gitignored
 `./tmp/` directory, never inside the tracked project tree, and never reuse a
 prior run's IPs.
 

@@ -15,9 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
-	"github.com/anomalyco/pilot/internal/groupvars"
-	"github.com/anomalyco/pilot/internal/inventory"
-	"github.com/anomalyco/pilot/internal/vaultfile"
+	"github.com/kjelly/pilot/internal/groupvars"
+	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
 func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testing.T) {

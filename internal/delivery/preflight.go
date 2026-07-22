@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/anomalyco/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/contract"
 )
 
 // Scope is the inventory truth resolved for this transaction. Host lists are
@@ -88,7 +88,7 @@ func ValidateContractPreflight(request PreflightRequest) (PreflightResult, error
 			if !selectedProvider {
 				continue
 			}
-			if dependency.Relation == "sameHosts" && !hostSetsEqual(scope.HostsByRole[component.Role], scope.HostsByRole[provider.Role]) {
+			if dependency.Relation == "sameHosts" && !hostsSubset(scope.HostsByRole[component.Role], scope.HostsByRole[provider.Role]) {
 				return result, fmt.Errorf("component %q requires dependency %q on the same hosts", component.ID, dependency.Component)
 			}
 			if dependency.Relation == "providerEndpoint" {
@@ -312,6 +312,23 @@ func uniqueHosts(hosts []string) []string {
 	sort.Strings(out)
 	return out
 }
+// hostsSubset reports whether every host in sub also appears in super — the
+// sameHosts relation only requires the dependent's hosts to carry the
+// dependency, not that the dependency is confined to exactly those hosts
+// (see COMPONENT_CONTRACT_RFC.md §5.1).
+func hostsSubset(sub, super []string) bool {
+	superSet := make(map[string]struct{}, len(super))
+	for _, host := range uniqueHosts(super) {
+		superSet[host] = struct{}{}
+	}
+	for _, host := range uniqueHosts(sub) {
+		if _, ok := superSet[host]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func hostSetsEqual(left, right []string) bool {
 	left = uniqueHosts(left)
 	right = uniqueHosts(right)

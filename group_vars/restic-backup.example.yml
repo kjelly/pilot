@@ -15,10 +15,12 @@
 
 # 備份目的地(SeaweedFS S3 gateway)的 IP 或 FQDN。
 #
-# 二擇一必填(見 spec §1.5):填這個變數(走預設 repository,指向本專案自建
-# 的 SeaweedFS S3 gateway),或改用下面註解的 restic_repository 完全覆寫成
-# 外部/獨立 S3(有真實 DNS 名稱,不需要靠 /etc/hosts 別名)。兩者都不填,
-# apply 會在任何 mutation 前直接 fail(見 spec §6 的 gate)。
+# 預設 repository 使用本專案自建的 SeaweedFS S3 gateway。若 inventory 有
+# seaweedfs-s3 group，留空時 apply playbook 會自動取該 group 第一台主機的
+# ansible_host 作為目的地。只有目的地在 inventory 外部、或要覆寫該預設時才填
+# 這個變數；也可以改用下面註解的 restic_repository 完全覆寫成外部/獨立 S3
+# (有真實 DNS 名稱,不需要靠 /etc/hosts 別名)。若兩者都沒有可解析目的地，apply
+# 會在任何 mutation 前直接 fail(見 spec §6 的 gate)。
 restic_s3_target_host: ""
 
 # 走外部 S3 時,取消註解並覆寫(此時上面的 restic_s3_target_host 留空即可):

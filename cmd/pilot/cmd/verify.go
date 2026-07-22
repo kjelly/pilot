@@ -16,9 +16,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anomalyco/pilot/internal/spec"
-	"github.com/anomalyco/pilot/internal/store"
-	"github.com/anomalyco/pilot/internal/tools"
+	"github.com/kjelly/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/store"
+	"github.com/kjelly/pilot/internal/tools"
 )
 
 var (

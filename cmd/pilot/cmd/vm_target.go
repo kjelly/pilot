@@ -16,11 +16,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anomalyco/pilot/internal/ansible"
-	"github.com/anomalyco/pilot/internal/delivery"
-	"github.com/anomalyco/pilot/internal/sandbox"
-	"github.com/anomalyco/pilot/internal/spec"
-	"github.com/anomalyco/pilot/internal/vmtarget"
+	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/sandbox"
+	"github.com/kjelly/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/vmtarget"
 )
 
 // vmTargetCmd is the parent for `pilot vm-target ...` — the QEMU/KVM

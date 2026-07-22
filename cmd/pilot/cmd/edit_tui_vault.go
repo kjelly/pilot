@@ -17,7 +17,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/anomalyco/pilot/internal/vaultfile"
+	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
 func pushVaultFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {

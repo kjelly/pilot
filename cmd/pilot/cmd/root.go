@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/anomalyco/pilot/internal/config"
-	"github.com/anomalyco/pilot/internal/logx"
+	"github.com/kjelly/pilot/internal/config"
+	"github.com/kjelly/pilot/internal/logx"
 )
 
 var (
@@ -31,10 +31,11 @@ problems:
   2. Fast spec-conformance validation with docker/VM: "pilot vm-target" /
      "pilot docker-target" spin up disposable environments; "vm-target test"
      runs syntax → apply → verify → idempotency in one go.
-  3. Fast, convenient deployment into the architecture the user wants:
-     inventories and group_vars are built with the interactive "pilot edit" /
-     "pilot inventory generate" wizards, and "pilot deploy" walks component,
-     stage, preview, and confirmation.`,
+  3. Fast, convenient deployment and day-2 reconciliation into the architecture
+     the user wants: inventories and group_vars are built with the interactive
+     "pilot edit" / "pilot inventory generate" wizards, "pilot deploy" walks
+     component, stage, preview, and confirmation, and "pilot reconcile" applies
+     contract-backed declarative service configuration.`,
 	Version: "0.2.0",
 	// PersistentPreRun installs the diagnostic logger before any command
 	// runs, so every `slog.Warn/Debug/...` call is leveled and formatted

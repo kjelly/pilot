@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	verification "github.com/anomalyco/pilot/internal/spec"
+	verification "github.com/kjelly/pilot/internal/spec"
 	"gopkg.in/yaml.v3"
 )
 

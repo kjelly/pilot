@@ -16,6 +16,14 @@
 跟 `freeipa-server-apply.yml` 是同一套慣例（gate、`no_log`、冪等、stage gating），也
 沿用 repo 既有的 `~/.vault/` 機密模式（見 `freeipa-server-apply.yml` 的 `-e @~/.vault/…`）。
 
+已部署 FreeIPA 的日常 roster 調和入口是 **`pilot reconcile`**，不是全站 `pilot
+deploy`：兩者同樣會先做 preflight、stage gate、preview 與人工確認，但前者只顯示
+contract-backed 的 day-2 reconciler。此版本已實機跑過 `freeipa-identity` 的
+preview→apply，PLAY RECAP 為 `freeipa-server: ok=31 changed=12 failed=0`；原始 trec
+證據保留在 disposable verification workspace。未來 Nginx config 之類的設定型角色，
+必須先具備自己的 contract、apply playbook、schema 與 verification evidence，才可加入
+這個入口。
+
 ---
 
 ## 1. 檔案分工

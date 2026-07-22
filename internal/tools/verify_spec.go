@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anomalyco/pilot/internal/ansible"
-	"github.com/anomalyco/pilot/internal/spec"
-	"github.com/anomalyco/pilot/internal/store"
+	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/spec"
+	"github.com/kjelly/pilot/internal/store"
 )
 
 // VerifySpecTool replaces the standalone `scripts/spec-runner.py`.
@@ -37,6 +37,11 @@ import (
 //     command locally, matching what spec-runner.py used to do.
 type VerifySpecTool struct {
 	Runner *ansible.Runner
+	// Env is appended to every Ansible subprocess environment. It lets a
+	// caller isolate controller-side artifacts such as fact caches and logs.
+	Env []string
+	// TempDir holds temporary Ansible playbooks created for secret probes.
+	TempDir string
 	// Inventory, when non-empty, is forwarded to ansible ad-hoc.
 	Inventory string
 	// Limit, when non-empty, narrows the inventory pattern.
@@ -135,6 +140,10 @@ type VerifyRow struct {
 // so we drop a file). Best-effort: spec rows fall back to the in-spec
 // default if this fails.
 func stageVerifyEnv(invPath string) {
+	(&VerifySpecTool{}).stageVerifyEnv(invPath)
+}
+
+func (t *VerifySpecTool) stageVerifyEnv(invPath string) {
 	val := os.Getenv("KEYCLOAK_ISSUER")
 	if val == "" || invPath == "" {
 		return
@@ -146,7 +155,9 @@ func stageVerifyEnv(invPath string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "ansible", args...).Run()
+	cmd := exec.CommandContext(ctx, "ansible", args...)
+	cmd.Env = append(os.Environ(), t.Env...)
+	_ = cmd.Run()
 }
 
 // Execute runs every row in the spec and returns the joined NDJSON
@@ -210,7 +221,7 @@ func (t *VerifySpecTool) Execute(ctx context.Context, args json.RawMessage) (*Re
 	// The legacy v1 issuer staging mechanism mutates targets. Spec v2 has a
 	// declared input transport and must never fall back to this path.
 	if parsed.SchemaVersion == 1 {
-		stageVerifyEnv(t.Inventory)
+		t.stageVerifyEnv(t.Inventory)
 	}
 	var remoteHosts []string
 	if !t.LocalOnly && t.Inventory != "" {
@@ -370,7 +381,7 @@ func (t *VerifySpecTool) assertSecretRef(ctx context.Context, host, variable str
           - (%s | string | length) > 0
       no_log: true
 `, variable, variable)
-	file, err := os.CreateTemp("", "pilot-secret-ref-*.yml")
+	file, err := os.CreateTemp(t.TempDir, "pilot-secret-ref-*.yml")
 	if err != nil {
 		return err
 	}
@@ -386,6 +397,7 @@ func (t *VerifySpecTool) assertSecretRef(ctx context.Context, host, variable str
 	args := []string{path, "-i", t.Inventory, "--limit", host}
 	args = append(args, t.VaultArgs...)
 	command := exec.CommandContext(ctx, "ansible-playbook", args...)
+	command.Env = append(os.Environ(), t.Env...)
 	command.Stdin = os.Stdin
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -703,7 +715,9 @@ func (t *VerifySpecTool) warmConnection(ctx context.Context, host string) {
 func (t *VerifySpecTool) execAnsible(ctx context.Context, args []string, timeoutSec int) (int, string) {
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(cctx, "ansible", args...).CombinedOutput()
+	cmd := exec.CommandContext(cctx, "ansible", args...)
+	cmd.Env = append(os.Environ(), t.Env...)
+	out, err := cmd.CombinedOutput()
 	rc := 0
 	if ee, ok := err.(*exec.ExitError); ok {
 		rc = ee.ExitCode()
