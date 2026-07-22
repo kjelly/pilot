@@ -1,0 +1,255 @@
+---
+- name: FreeIPA Kerberos NFSv4 server
+  hosts: "{{ target_group | default('freeipa-nfs-server') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    nfs_exports_fragment: /etc/exports.d/90-freeipa-managed.exports
+    nfs_pseudo_root: /srv/nfs
+    nfs_server_fqdn: "{{ ansible_fqdn }}"
+
+  pre_tasks:
+    - name: "Load canonical roster under a namespace"
+      ansible.builtin.include_vars:
+        file: "{{ freeipa_roster_file }}"
+        name: freeipa_roster
+      no_log: true
+      tags: [always]
+
+    - name: "Gate: required roster and stage authorization"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster.schema_version | int == 1
+          - freeipa_roster.freeipa.admin.password | length >= 8
+          - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
+          - stage != 'prod' or staging_attested_within_hours | int <= 168
+        fail_msg: "A canonical roster, admin credential, and matching stage confirmation are required."
+      no_log: true
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: "stage={{ stage }} does not match inventory groups {{ group_names }}."
+      tags: [always]
+
+    - name: "Select this NFS server from the canonical roster"
+      ansible.builtin.set_fact:
+        nfs_selected_servers: "{{ freeipa_roster.nfs.servers | selectattr('host', 'equalto', nfs_server_fqdn) | list }}"
+      tags: [always]
+
+    - name: "Gate: inventory FQDN maps to exactly one safe NFS server"
+      ansible.builtin.assert:
+        that:
+          - nfs_server_fqdn is match('^[^.]+\\.[^.]+\\..+$')
+          - nfs_selected_servers | length == 1
+          - nfs_selected_servers[0].service_principal.principal == 'nfs/' + nfs_server_fqdn
+          - nfs_selected_servers[0].service_principal.keytab == '/etc/krb5.keytab'
+        fail_msg: "inventory/ansible FQDN must map exactly to the roster NFS server and nfs/FQDN principal."
+      tags: [always, C1, C2]
+
+    - name: "Select the unique NFS server object"
+      ansible.builtin.set_fact:
+        nfs_selected_server: "{{ nfs_selected_servers[0] }}"
+      tags: [always]
+
+    - name: "Gate: exports, ownership, and ACL policy are safe"
+      ansible.builtin.assert:
+        that:
+          - item.source_path is match('^/srv/nfs/')
+          - item.ownership.mode is match('^2[0-7][0-7]0$')
+          - item.ownership.group is match('^data-')
+          - item.export.options | intersect(['no_root_squash', 'insecure', 'sec=sys', 'anonuid=0', 'anongid=0']) | length == 0
+          - item.export.options | intersect(['root_squash']) | length == 1
+          - item.export.options | select('match', '^sec=krb5(i|p)?$') | list | length == 1
+          - item.acl.default.enabled | bool
+        fail_msg: "Unsafe NFS export/ACL policy in share {{ item.name }}."
+      loop: "{{ nfs_selected_server.shares | default([]) }}"
+      tags: [always, C5, C6, C7, C8]
+
+  tasks:
+    - name: "Install NFSv4 and ACL packages"
+      ansible.builtin.package:
+        name: "{{ nfs_selected_server.packages | default(['nfs-utils', 'acl']) }}"
+        state: present
+      tags: [C3]
+
+    - name: "Reconcile NFS identity, exports, and ACL with rollback"
+      block:
+        - name: "Snapshot managed exports fragment"
+          ansible.builtin.copy:
+            src: "{{ nfs_exports_fragment }}"
+            dest: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
+            remote_src: true
+            mode: preserve
+          when: nfs_exports_fragment is file
+          tags: [C7]
+
+        - name: "Acquire Kerberos admin ticket"
+          ansible.builtin.command:
+            argv: [kinit, "{{ freeipa_roster.freeipa.admin.principal | default('admin') }}"]
+            stdin: "{{ freeipa_roster.freeipa.admin.password }}"
+            stdin_add_newline: true
+          changed_when: false
+          no_log: true
+          tags: [C1]
+
+        - name: "Ensure NFS service principal exists"
+          ansible.builtin.command:
+            argv: [ipa, service-add, "{{ nfs_selected_server.service_principal.principal }}"]
+          register: nfs_service_add
+          changed_when: "'Added service' in (nfs_service_add.stdout | default(''))"
+          failed_when:
+            - nfs_service_add.rc != 0
+            - "'already exists' not in (nfs_service_add.stderr | default(''))"
+          tags: [C1]
+
+        - name: "Inspect the system keytab for the NFS principal"
+          ansible.builtin.command: klist -k /etc/krb5.keytab
+          register: nfs_keytab_list
+          changed_when: false
+          failed_when: false
+          no_log: true
+          tags: [C2]
+
+        - name: "Ensure NFS principal exists in the system keytab"
+          ansible.builtin.command:
+            argv: [ipa-getkeytab, -p, "{{ nfs_selected_server.service_principal.principal }}", -k, /etc/krb5.keytab]
+          register: nfs_keytab_write
+          changed_when: "'Keytab successfully retrieved' in (nfs_keytab_write.stderr | default('') + nfs_keytab_write.stdout | default(''))"
+          when: nfs_selected_server.service_principal.principal not in (nfs_keytab_list.stdout | default(''))
+          no_log: true
+          notify: Reload NFS GSS credentials
+          tags: [C2]
+
+        - name: "Protect the system keytab"
+          ansible.builtin.file:
+            path: /etc/krb5.keytab
+            owner: root
+            group: root
+            mode: "0600"
+          tags: [C2]
+
+        - name: "Create the traversable NFSv4 pseudo-root"
+          ansible.builtin.file:
+            path: "{{ nfs_pseudo_root }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          tags: [C5]
+
+        - name: "Create traversable parents for managed share roots"
+          ansible.builtin.file:
+            path: "{{ item.source_path | dirname }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          loop: "{{ nfs_selected_server.shares | default([]) }}"
+          tags: [C5]
+
+        - name: "Create managed NFS share roots"
+          ansible.builtin.file:
+            path: "{{ item.source_path }}"
+            state: directory
+            owner: "{{ item.ownership.owner }}"
+            group: "{{ item.ownership.group }}"
+            mode: "{{ item.ownership.mode }}"
+          loop: "{{ nfs_selected_server.shares | default([]) }}"
+          tags: [C5]
+
+        - name: "Apply authoritative access ACL"
+          ansible.builtin.command:
+            argv:
+              - setfacl
+              - --set
+              - "u::{{ item.acl.access.owner }},g::{{ item.acl.access.owning_group }},m::{{ item.acl.access.mask }},o::{{ item.acl.access.others }}"
+              - "{{ item.source_path }}"
+          loop: "{{ nfs_selected_server.shares | default([]) }}"
+          register: nfs_access_acl
+          changed_when: false
+          tags: [C6]
+
+        - name: "Apply authoritative named-group access ACL"
+          ansible.builtin.command:
+            argv: [setfacl, -m, "g:{{ item.1.name }}:{{ item.1.permissions }}", "{{ item.0.source_path }}"]
+          loop: "{{ nfs_selected_server.shares | default([]) | subelements('acl.access.named_groups', skip_missing=True) }}"
+          changed_when: false
+          tags: [C6]
+
+        - name: "Apply authoritative default ACL"
+          ansible.builtin.command:
+            argv:
+              - setfacl
+              - --set
+              - "d:u::{{ item.acl.default.owner }},d:g::{{ item.acl.default.owning_group }},d:m::{{ item.acl.default.mask }},d:o::{{ item.acl.default.others }}"
+              - "{{ item.source_path }}"
+          loop: "{{ nfs_selected_server.shares | default([]) }}"
+          register: nfs_default_acl
+          changed_when: false
+          tags: [C6]
+
+        - name: "Apply authoritative named-group default ACL"
+          ansible.builtin.command:
+            argv: [setfacl, -m, "d:g:{{ item.1.name }}:{{ item.1.permissions }}", "{{ item.0.source_path }}"]
+          loop: "{{ nfs_selected_server.shares | default([]) | subelements('acl.default.named_groups', skip_missing=True) }}"
+          changed_when: false
+          tags: [C6]
+
+        - name: "Render the isolated managed exports fragment"
+          ansible.builtin.template:
+            src: templates/freeipa-nfs-exports.j2
+            dest: "{{ nfs_exports_fragment }}"
+            owner: root
+            group: root
+            mode: "0644"
+          register: nfs_exports_render
+          tags: [C7]
+
+        - name: "Validate managed NFS exports"
+          ansible.builtin.command: exportfs -rav
+          changed_when: nfs_exports_render is changed
+          tags: [C7]
+
+        - name: "Enable NFS server services"
+          ansible.builtin.service:
+            name: "{{ item }}"
+            enabled: true
+            state: started
+          loop: "{{ nfs_selected_server.services | default(['nfs-server']) }}"
+          tags: [C3, C4]
+      rescue:
+        - name: "Restore managed exports fragment"
+          ansible.builtin.copy:
+            src: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
+            dest: "{{ nfs_exports_fragment }}"
+            remote_src: true
+            mode: "0644"
+          when: (nfs_exports_fragment + '.pre-freeipa-nfs.bak') is file
+        - name: "Reload restored exports"
+          ansible.builtin.command: exportfs -ra
+          changed_when: true
+          failed_when: false
+        - name: "Fail after NFS rollback"
+          ansible.builtin.fail:
+            msg: "NFS reconciliation failed; the managed exports fragment was restored."
+      always:
+        - name: "Release Kerberos ticket"
+          ansible.builtin.command: kdestroy
+          changed_when: false
+          failed_when: false
+          tags: [always]
+
+  handlers:
+    - name: Reload NFS GSS credentials
+      ansible.builtin.service:
+        name: gssproxy
+        state: restarted

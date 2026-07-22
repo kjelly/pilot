@@ -66,6 +66,17 @@ var deployCatalog = []deployPlaybook{
 		Reconcile: true,
 	},
 	{
+		Key: "freeipa-nfs-server", Label: "FreeIPA Kerberos NFSv4 server",
+		Playbook: "playbooks/apply/freeipa-nfs-server-apply.yml", DefaultGroup: "freeipa-nfs-server", StageVar: "stage",
+		Note:      "使用 canonical FreeIPA roster 建立 nfs/FQDN principal、keytab、ACL 與安全 exports。",
+		VaultHint: "canonical roster 檔(含 FreeIPA admin 密碼與 nfs.servers)",
+	},
+	{
+		Key: "freeipa-nfs-client", Label: "FreeIPA automount NFS client",
+		Playbook: "playbooks/apply/freeipa-nfs-client-apply.yml", DefaultGroup: "freeipa-nfs-client", StageVar: "stage",
+		Note: "主機必須先完成 freeipa-client enrollment；設定 IPA automount location，不修改 /etc/fstab。",
+	},
+	{
 		Key: "freeipa-server-replica", Label: "第二台 FreeIPA server(multi-master HA replica)",
 		Playbook: "playbooks/apply/freeipa-server-replica-apply.yml", DefaultGroup: "freeipa-server-replica", StageVar: "stage",
 		Note:      "day-2/opt-in 角色(不在 site.yml);已於三台 vm-target 全鏈路實跑過,見 docs/verification/freeipa-server-replica.md §0/§5。",

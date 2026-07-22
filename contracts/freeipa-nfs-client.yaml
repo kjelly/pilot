@@ -1,0 +1,31 @@
+schemaVersion: 1
+id: freeipa-nfs-client
+role: freeipa-nfs-client
+specs:
+  - path: docs/verification/freeipa-nfs-client.md
+    rows: {all: true}
+playbooks: {apply: playbooks/apply/freeipa-nfs-client-apply.yml}
+regressionTests:
+  - cmd/pilot/cmd/tag_coverage_test.go
+  - internal/spec/freeipa_nfs_regression_test.go
+dependencies:
+  - {component: freeipa-client, required: true, relation: sameHosts}
+  - {component: freeipa-nfs-server, required: true, relation: providerEndpoint}
+bindings:
+  - input: nfs_server_fqdn
+    requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
+    from: {component: freeipa-nfs-server, endpoint: nfs}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
+groupVars:
+  - {name: nfs_server_fqdn, type: string, required: false, secret: false}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions:
+    "docs/verification/freeipa-nfs-client.md#C6": {kind: verifyOnly, reason: proves the playbook does not write managed NFS mounts into fstab}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

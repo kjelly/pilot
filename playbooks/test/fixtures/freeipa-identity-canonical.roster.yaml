@@ -61,7 +61,117 @@ groups:
       users: []
       groups:
         - team-fixture-canonical
-hosts: []
+  - name: access-fixture-canonical-ssh
+    state: present
+    category: access
+    type: posix
+    description: Canonical fixture HBAC access
+    membership:
+      authoritative: true
+      users: []
+      groups: [team-fixture-canonical]
+  - name: role-fixture-canonical-ops
+    state: present
+    category: role
+    type: posix
+    description: Canonical fixture sudo role
+    membership:
+      authoritative: true
+      users: [fixture-canonical-user-a]
+      groups: []
+  - name: data-fixture-nfs-ro
+    state: present
+    category: filesystem
+    type: posix
+    description: Canonical fixture NFS read-only group
+    membership:
+      authoritative: true
+      users: []
+      groups: []
+hosts:
+  - name: freeipa-nfs-v2.ipa.pilot.internal
+    state: present
+    ip_address: 192.168.122.5
+    description: Canonical fixture NFS server
 hostgroups: []
-hbac: {}
-sudo: {}
+hbac:
+  disable_allow_all: true
+  services:
+    - {name: sshd, state: present}
+  rules:
+    - name: fixture-canonical-hbac
+      state: present
+      enabled: true
+      subjects: {users: [], groups: [access-fixture-canonical-ssh]}
+      targets: {hostcat: all, hosts: [], hostgroups: []}
+      services: [sshd]
+    - name: fixture-canonical-breakglass
+      state: present
+      enabled: true
+      subjects: {users: [admin], groups: []}
+      targets: {hostcat: all, hosts: [], hostgroups: []}
+      services: [sshd]
+sudo:
+  command_groups:
+    - name: fixture-service-read
+      state: present
+      commands:
+        - /usr/bin/systemctl status sshd
+  rules:
+    - name: fixture-canonical-sudo
+      state: present
+      enabled: true
+      subjects: {users: [], groups: [role-fixture-canonical-ops]}
+      targets: {hostcat: all, hosts: [], hostgroups: []}
+      allow: {command_groups: [fixture-service-read], commands: []}
+      deny: {command_groups: [], commands: []}
+      run_as: {users: [root], groups: []}
+      options: ['!authenticate']
+nfs:
+  servers:
+    - host: freeipa-nfs-v2.ipa.pilot.internal
+      state: present
+      service_principal:
+        ensure: true
+        principal: nfs/freeipa-nfs-v2.ipa.pilot.internal
+        keytab: /etc/krb5.keytab
+      packages: [nfs-utils, acl]
+      services: [nfs-server, rpc-gssd]
+      shares:
+        - name: fixture-alpha
+          state: present
+          source_path: /srv/nfs/projects/fixture-alpha
+          ownership: {owner: root, group: data-fixture-canonical-rw, mode: '2770'}
+          acl:
+            mode: authoritative
+            access:
+              owner: rwx
+              owning_group: rwx
+              others: '---'
+              mask: rwx
+              named_users: []
+              named_groups:
+                - {name: data-fixture-canonical-rw, permissions: rwx}
+                - {name: data-fixture-nfs-ro, permissions: r-x}
+            default:
+              enabled: true
+              owner: rwx
+              owning_group: rwx
+              others: '---'
+              mask: rwx
+              named_users: []
+              named_groups:
+                - {name: data-fixture-canonical-rw, permissions: rwx}
+                - {name: data-fixture-nfs-ro, permissions: r-x}
+          export:
+            clients: [{type: network, value: 192.168.122.0/24}]
+            options: [rw, sync, root_squash, sec=krb5i]
+          automount:
+            enabled: true
+            location: default
+            mount_root: /projects
+            map: auto.projects
+            key: fixture-alpha
+            server: freeipa-nfs-v2.ipa.pilot.internal
+            remote_path: /projects/fixture-alpha
+            options: [fstype=nfs4, sec=krb5i, hard]

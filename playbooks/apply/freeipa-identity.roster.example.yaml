@@ -1,5 +1,5 @@
 ---
-# Canonical freeipa-identity roster (schema_version: 1), delivery batch 1.
+# Canonical freeipa-identity roster (schema_version: 1).
 #
 # Keep the real file outside git and encrypt it with ansible-vault. Because
 # `groups` and `hosts` are Ansible magic variables, DO NOT pass this file with
@@ -11,8 +11,8 @@
 #     -e freeipa_roster_file=~/.vault/ipa-identity.yaml \
 #     --vault-password-file ~/.vault/vault-pass
 #
-# Batch 1 supports canonical users/groups. Canonical hosts, hostgroups, HBAC,
-# sudo, NFS, clients, and migration fail closed until later delivery batches.
+# Identity, HBAC/sudo, Kerberos NFSv4 server, and IPA automount clients are
+# supported. Migration remains a separate fail-closed delivery batch.
 schema_version: 1
 
 freeipa:
@@ -88,8 +88,97 @@ groups:
       groups:
         - team-developers
 
-# Reserved for later delivery batches. Non-empty values currently fail closed.
+  - name: role-web-service-admin
+    state: present
+    category: role
+    type: posix
+    description: Web service administrators
+    membership:
+      authoritative: true
+      users: [alice]
+      groups: []
+
 hosts: []
 hostgroups: []
-hbac: {}
-sudo: {}
+hbac:
+  disable_allow_all: true
+  services:
+    - {name: sshd, state: present}
+  rules:
+    - name: breakglass-admin-access
+      state: present
+      enabled: true
+      subjects: {users: [admin], groups: []}
+      targets: {hostcat: all, hosts: [], hostgroups: []}
+      services: [sshd]
+
+sudo:
+  command_groups:
+    - name: web-service-read
+      state: present
+      commands:
+        - /usr/bin/systemctl status nginx
+        - /usr/bin/journalctl -u nginx
+  rules:
+    - name: web-service-administration
+      state: present
+      enabled: true
+      subjects: {users: [], groups: [role-web-service-admin]}
+      targets: {hostcat: all, hosts: [], hostgroups: []}
+      allow: {command_groups: [web-service-read], commands: []}
+      deny: {command_groups: [], commands: []}
+      run_as: {users: [root], groups: []}
+      options: ['!authenticate']
+
+nfs:
+  servers:
+    - host: nfs1.ipa.pilot.internal
+      state: present
+      service_principal:
+        ensure: true
+        principal: nfs/nfs1.ipa.pilot.internal
+        keytab: /etc/krb5.keytab
+      packages: [nfs-utils, acl]
+      services: [nfs-server, rpc-gssd]
+      shares:
+        - name: project-alpha
+          state: present
+          source_path: /srv/nfs/projects/alpha
+          ownership: {owner: root, group: data-project-alpha-rw, mode: '2770'}
+          acl:
+            mode: authoritative
+            access:
+              owner: rwx
+              owning_group: rwx
+              others: '---'
+              mask: rwx
+              named_users: []
+              named_groups:
+                - {name: data-project-alpha-rw, permissions: rwx}
+            default:
+              enabled: true
+              owner: rwx
+              owning_group: rwx
+              others: '---'
+              mask: rwx
+              named_users: []
+              named_groups:
+                - {name: data-project-alpha-rw, permissions: rwx}
+          export:
+            clients: [{type: network, value: 192.168.50.0/24}]
+            options: [rw, sync, root_squash, sec=krb5i]
+          automount:
+            enabled: true
+            location: default
+            mount_root: /projects
+            map: auto.projects
+            key: alpha
+            server: nfs1.ipa.pilot.internal
+            remote_path: /projects/alpha
+            options: [fstype=nfs4, sec=krb5i, hard, timeo=600, retrans=2]
+
+nfs_clients:
+  - hostgroup: nfsclients
+    state: present
+    automount: {location: default, enable_service: true}
+    verification_mounts: [/projects/alpha]

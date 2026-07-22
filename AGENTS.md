@@ -395,9 +395,10 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 21 支**都有 `stage`/`confirm_staging`/
+`playbooks/apply/*.yml` 現在**全部 23 支**都有 `stage`/`confirm_staging`/
 `confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`docker`、
-`freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-server-replica`、
+`freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-nfs-server`、
+`freeipa-nfs-client`、`freeipa-server-replica`、
 `keycloak`、`keycloak-db`、`seaweedfs-s3`、`pam-oidc-sshd`、`log-server`、
 `audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
 `os-patch-sla`(用 `patch_stage`)、`prometheus`、`thanos-query`、

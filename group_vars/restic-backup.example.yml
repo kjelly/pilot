@@ -65,6 +65,14 @@ restic_s3_target_host: ""
 #   restic_backup_paths: ["/etc", "/var/lib/ipa/backup"]
 #   restic_backup_pre_hook: "ipa-backup --data --logs"
 #
+#   # host_vars/nfs-1.yml (managed NFS shares: data and ACL/export config).
+#   # The share data is quiesced by the application owner when required;
+#   # NFS itself has no database dump format. getfacl preserves an independent
+#   # ACL manifest beside the restic snapshot.
+#   restic_backup_paths: ["/etc/exports.d", "/srv/nfs"]
+#   restic_backup_pre_hook: >-
+#     getfacl -R -p /srv/nfs > /var/backups/freeipa-nfs-acl.txt
+#
 #   # host_vars/ipa-2.yml(FreeIPA replica,見
 #   # docs/verification/freeipa-server-replica.md;同一個角色的第二台,備份
 #   # 手法與 ipa-1 相同——每台 replica 各自有自己的 389-ds data 目錄,

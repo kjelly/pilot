@@ -1,0 +1,61 @@
+---
+- name: FreeIPA automount NFS client
+  hosts: "{{ target_group | default('freeipa-nfs-client') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    nfs_automount_location: default
+
+  pre_tasks:
+    - name: "Gate: stage authorization and enrolled IPA client"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
+          - stage != 'prod' or staging_attested_within_hours | int <= 168
+          - ansible_facts['os_family'] in ['RedHat', 'Debian']
+        fail_msg: "Matching stage confirmation and a supported enrolled client are required."
+      tags: [always]
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: "stage={{ stage }} does not match inventory groups {{ group_names }}."
+      tags: [always]
+    - name: "Gate: this host is enrolled in FreeIPA"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: nfs_ipa_enrollment
+      tags: [always, C1]
+    - name: "Refuse local automount setup on an unenrolled host"
+      ansible.builtin.assert:
+        that: [nfs_ipa_enrollment.stat.exists]
+        fail_msg: "Run freeipa-client-apply.yml before enabling IPA automount."
+      tags: [always, C1]
+
+  tasks:
+    - name: "Install NFS and automount client packages"
+      ansible.builtin.package:
+        name: "{{ ['nfs-utils', 'autofs'] if ansible_os_family == 'RedHat' else ['nfs-common', 'autofs'] }}"
+        state: present
+      tags: [C2]
+    - name: "Configure the IPA automount location"
+      ansible.builtin.command:
+        argv: [ipa-client-automount, --unattended, "--location={{ nfs_automount_location }}"]
+      register: nfs_client_automount
+      changed_when: "'Configured automount' in (nfs_client_automount.stdout | default(''))"
+      failed_when:
+        - nfs_client_automount.rc != 0
+        - "'already configured' not in (nfs_client_automount.stdout | default('') + nfs_client_automount.stderr | default(''))"
+      tags: [C3, C4]
+    - name: "Enable autofs"
+      ansible.builtin.service:
+        name: autofs
+        enabled: true
+        state: started
+      tags: [C5]

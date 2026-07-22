@@ -77,6 +77,12 @@ all:
             web-2:
         freeipa-server-replica:  # v0.1 草稿未實跑,見 docs/verification/freeipa-server-replica.md §5
           hosts: {}              # 例:第二台 → hosts: { ipa-2: }
+        freeipa-nfs-server:      # Kerberos NFSv4 exports + ACL
+          hosts: {}              # 例:專用 NFS → hosts: { nfs-1: }
+        freeipa-nfs-client:      # IPA automount client (同時也要在 freeipa-client)
+          hosts:
+            web-1:
+            web-2:
 
     # -- 核心基礎服務(core-infra-provider-apply.yml,以 infra_role 選角色)--
     dns:                       # 跑 -e infra_role=dns 時作用的機器
@@ -137,6 +143,7 @@ all:
         ipa-1:
         web-1:
         web-2:
+        # nfs-1:               # 啟用 NFS role 時也應備份 /srv/nfs + ACL manifest
 
     # -- 指標:每站 Prometheus + Thanos Sidecar(prometheus-apply.yml)-------
     prometheus:
