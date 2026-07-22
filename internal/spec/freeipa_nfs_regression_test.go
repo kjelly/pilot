@@ -136,3 +136,25 @@ func TestRegression_FreeIPAClientPreservesConfiguredAutofsResponder(t *testing.T
 		}
 	}
 }
+
+func TestRegression_FreeIPAClientFreshPreviewDoesNotReadMissingSSSDConfig(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-client-apply.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	start := strings.Index(playbook, "- name: \"FreeIPA client — inspect the current SSSD services line\"")
+	if start < 0 {
+		t.Fatal("SSSD services inspection task is missing")
+	}
+	rest := playbook[start:]
+	end := strings.Index(rest[1:], "\n    - name:")
+	if end < 0 {
+		t.Fatal("could not isolate SSSD services inspection task")
+	}
+	task := rest[:end+1]
+	if !strings.Contains(task, "when: not ansible_check_mode") {
+		t.Fatal("fresh FreeIPA client preview must not read /etc/sssd/sssd.conf before enrollment creates it")
+	}
+}
