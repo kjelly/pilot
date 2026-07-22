@@ -23,6 +23,9 @@ func TestDefaultRolePresets_CoversCompactTopology(t *testing.T) {
 	if len(presets) != len(want) {
 		t.Fatalf("default preset count = %d, want %d", len(presets), len(want))
 	}
+	if err := validateRolePresets(presets); err != nil {
+		t.Fatalf("default presets contain unknown roles: %v", err)
+	}
 	for _, preset := range presets {
 		roles, ok := want[preset.Label]
 		if !ok {
@@ -97,7 +100,14 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 		return strings.Contains(string(b), `範本 "test monitored node" 的角色`)
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // first catalog role
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		screen := string(b)
+		return strings.Contains(screen, "[x]") && strings.Contains(screen, inventory.Roles()[0].Name)
+	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "✅ 已儲存 ")
+	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	waitForRolePresetOverride(t, dir)
 	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // cleanly exit the wizard
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))

@@ -18,6 +18,8 @@ var roleContracts = []roleContract{
 	{Name: "freeipa-server", Description: "FreeIPA 身份伺服器 (freeipa-server-apply.yml)", GroupVarsStem: "freeipa", VaultSections: []string{"freeipa"}},
 	{Name: "freeipa-client", Description: "納入 FreeIPA 的機器 (freeipa-client-apply.yml)", GroupVarsStem: "freeipa", VaultSections: []string{"freeipa"}},
 	{Name: "freeipa-server-replica", Description: "FreeIPA multi-master replica（day-2/opt-in，已實跑驗證），見 docs/verification/freeipa-server-replica.md", GroupVarsStem: "freeipa", VaultSections: []string{"freeipa"}},
+	{Name: "freeipa-nfs-server", Description: "Kerberos NFSv4 exports + ACL (freeipa-nfs-server-apply.yml)"},
+	{Name: "freeipa-nfs-client", Description: "IPA automount client (freeipa-nfs-client-apply.yml)"},
 	{Name: "dns", Description: "core-infra-provider-apply.yml -e infra_role=dns", GroupVarsStem: "dns"},
 	{Name: "ntp", Description: "core-infra-provider-apply.yml -e infra_role=ntp", GroupVarsStem: "ntp"},
 	{Name: "docker", Description: "Container 引擎 (docker-apply.yml)"},
