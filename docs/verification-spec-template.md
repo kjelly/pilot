@@ -57,8 +57,10 @@
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/<name>.md -i inv.yaml`
-- 輸出格式：`.verification/<name>-<UTC>.{ndjson,md}`
-- 預期 row 數：N（等於 checklist row 數）
+- 原始輸出：gitignored `.verification/<name>-<UTC>.{ndjson,md}` 或 pilot evidence store
+- Sanitized 摘要：`docs/evidence/<name>/<date>-<tested-revision>.md`
+- 本節只保留最新 tested revision/tree、真實 verdict 與摘要連結，不貼完整 transcript
+- Row 數：N（等於 checklist row 數）
 
 ## 4. PASS / FAIL 規則
 
@@ -229,7 +231,9 @@ Spec-driven 工作流把 **inspect 跟 mutate 分開**：
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/bastion-host.md -i inv.yaml`
-- 格式：`.verification/bastion-host-<UTC>.{ndjson,md}`
+- 原始輸出：gitignored `.verification/bastion-host-<UTC>.{ndjson,md}`
+- Sanitized 摘要：`docs/evidence/bastion-host/<date>-<tested-revision>.md`
+- Spec 只保留最新 revision/tree、真實 verdict 與摘要連結，不累積完整 transcript
 - Row 數：12
 
 ## 4. PASS / FAIL 規則
