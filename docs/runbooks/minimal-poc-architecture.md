@@ -1,17 +1,15 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
-> Status: **VERIFIED — LEGACY EVIDENCE**
-> Latest completed pass: 2026-07-21, round 11 / v11.0
-> Evidence: [`round-11.md`](../evidence/minimal-poc-architecture/2026-07-21-round-11.md)
+> Status: **VERIFIED — IMMUTABLE CANDIDATE**
+> Latest completed pass: 2026-07-23 (Asia/Taipei), round 12 / CAND-23
+> Evidence: [`2026-07-23-round-12.md`](../evidence/minimal-poc-architecture/2026-07-23-round-12.md)
 > Automation: `playbooks/site.yml` plus the day-2
 > `playbooks/apply/freeipa-identity-apply.yml` reconciler
 > Maintainer: sre
 
-The round-11 run predates the immutable-candidate evidence policy in
-[`docs/actual-run-evidence.md`](../actual-run-evidence.md). Its real verdicts are retained, but the
-tested tree, raw archive checksum, and durable raw-artifact location were not recorded. This
-current-only rewrite changes documentation layout, not the executable procedure. The next
-execution-affecting change must be verified from a frozen candidate revision under the new policy.
+Round 12 was executed from the immutable CAND-23 commit/tree recorded in §7. The raw TREC archive
+remains under the round-12 evidence store; this runbook keeps only the current sanitized facts and
+links.
 
 ## 0. Goal
 
@@ -20,8 +18,8 @@ Rebuild and verify this three-node PoC entirely through sanctioned `pilot` workf
 | Node | Platform | Purpose |
 |---|---|---|
 | `freeipa-server` | AlmaLinux 9 | FreeIPA identity, HBAC, sudo policy |
-| `nexus` | Ubuntu 24.04 | Docker, Wazuh manager, SeaweedFS, Prometheus, Thanos, Grafana/Loki |
-| `client-vm` | Ubuntu 24.04 | FreeIPA client and end-user authorization checks |
+| `nexus` | Ubuntu 24.04 | FreeIPA client and Kerberos NFSv4 server; Docker, Wazuh manager, signed SeaweedFS S3, restic, Prometheus, Thanos, Grafana/Loki |
+| `client-vm` | Ubuntu 24.04 | FreeIPA and Kerberos automount NFS client; end-user authorization checks |
 
 Use `pilot edit`, `pilot inventory generate`, `pilot deploy`, and `pilot reconcile`; do not
 hand-edit the generated inventory and do not call `ansible-playbook` directly. Inventory group
@@ -32,14 +30,15 @@ reconciler because it consumes a roster rather than ordinary role membership.
 
 | Item | Last verified value |
 |---|---|
-| Fact timestamp | 2026-07-21T17:30Z |
+| Fact timestamp | 2026-07-23T03:25+08:00 |
 | Targets | `freeipa-server`, `nexus`, `client-vm` |
 | VM sizing | FreeIPA: 2 vCPU/4096 MiB/30 GiB; nexus: 6/12288/80; client: 2/2048/20 |
 | Inventory source | Generated from a fresh gitignored workspace by `pilot edit` + `pilot inventory generate` |
 | Stage | `sandbox` |
 | Alignment | Actual hosts and populated role groups matched the intended topology |
 | Manual extra `-e` | Empty; inventory-derived values were accepted through the wizard |
-| Result | Site apply, identity reconcile, and functional checks completed with `failed=0` |
+| Tested candidate | commit `4034ccd6cc7290a3dd625ea2e6e15d825c9373a3`; tree `d72c9f9c21bc531d0d3127e3b03c70d20594f6af` |
+| Result | Fresh site apply passed; identical second site apply was `changed=0 failed=0` on all three hosts; canonical identity no-op reconcile was `changed=0 failed=0` |
 
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
@@ -47,7 +46,8 @@ addresses and generated inventory before each rebuild.
 ### Required role placement
 
 - `freeipa-server`: `freeipa-server`.
-- `client-vm`: `freeipa-client`.
+- `nexus` and `client-vm`: `freeipa-client`.
+- `nexus`: `freeipa-nfs-server`; `client-vm`: `freeipa-nfs-client`.
 - `nexus` and `client-vm`: `docker`.
 - `nexus`: `wazuh-manager`, `seaweedfs-s3`, `prometheus`, `thanos-query`, `alertmanager`,
   `dashboard`.
@@ -58,6 +58,11 @@ addresses and generated inventory before each rebuild.
 
 After generation, inspect the actual inventory. If it differs from this topology, choose A (fix
 the workspace/environment) or B (change the contract), then regenerate and restart the formal run.
+
+When the generated vault supplies the restic/Thanos S3 access key and secret, full-site deployment
+automatically renders `/etc/seaweedfs/s3.json` with mode `0600` and starts SeaweedFS with
+`-s3.config=/etc/seaweedfs/s3.json`. That is the supported signed S3 path; do not add a manual
+`seaweedfs_s3_config_path` override for this topology.
 
 ## 1. Aligned acceptance contracts
 
@@ -94,12 +99,13 @@ remove/restore/drift reconciliation cycle.
   `ipa_admin_password`, `grafana_admin_password`, `restic_aws_access_key_id`,
   `restic_aws_secret_access_key`, `restic_password`, `thanos_aws_access_key_id`,
   `thanos_aws_secret_access_key`, and `alertmanager_config`.
-- A FreeIPA identity roster containing `ipa_admin_password`, `ipa_groups`, `ipa_users`,
-  `ipa_sudo_rules`, `ipa_hbac_rules`, and `ipa_hbac_disable_allow_all`.
+- A canonical FreeIPA identity roster with `schema_version: 1`, the `freeipa` connection/safety
+  block, and the required `users`, `groups`, `hosts`, `hbac`, `sudo`, and `nfs` objects.
 
-Use `playbooks/apply/freeipa-identity.roster.example.yaml` as the roster schema. User rows use
-`name`, `groups`, and `allow_commands`; do not invent aliases. If `allow_all` is disabled, the
-intended HBAC rule must include `sshd`, `sudo`, and `sudo-i` where sudo access is required.
+Use `playbooks/apply/freeipa-identity.roster.example.yaml` as the roster schema. Keep Nexus's
+canonical FQDN/IP, NFS service principal, export, ACL, and automount objects in that roster. If
+`allow_all` is disabled, the intended HBAC rule must include `sshd`, `sudo`, and `sudo-i` where
+sudo access is required.
 
 ## 3. Rebuild procedure
 
@@ -115,9 +121,9 @@ Remove only the three named disposable targets and the exact gitignored PoC work
 read-only confirmation. Retain shared base images. Rebuild these targets:
 
 ```bash
-./pilot vm-target up --name freeipa-server --base-image almalinux-9 --memory 4096 --vcpus 2 --disk 30 --ssh-user root --boot-timeout 6m --ssh-timeout 3m
-./pilot vm-target up --name nexus --base-image ubuntu-24.04 --memory 12288 --vcpus 6 --disk 80 --ssh-user root --boot-timeout 6m --ssh-timeout 3m
-./pilot vm-target up --name client-vm --base-image ubuntu-24.04 --memory 2048 --vcpus 2 --disk 20 --ssh-user root --boot-timeout 6m --ssh-timeout 3m
+./pilot vm-target up --name freeipa-server --base-image almalinux-9 --vcpus 2 --memory 4096 --disk 30
+./pilot vm-target up --name nexus --base-image ubuntu-24.04 --vcpus 6 --memory 12288 --disk 80
+./pilot vm-target up --name client-vm --base-image ubuntu-24.04 --vcpus 2 --memory 2048 --disk 20
 ./pilot vm-target list
 ```
 
@@ -130,9 +136,9 @@ broad directory.
 Use one fresh workspace consistently throughout the run:
 
 ```bash
-./pilot edit --dir tmp/pilot-verify-minimal-poc-r10/demo
-./pilot inventory generate --dir tmp/pilot-verify-minimal-poc-r10/demo
-./pilot edit --dir tmp/pilot-verify-minimal-poc-r10/demo
+./pilot edit --dir tmp/pilot-verify-minimal-poc-r12-formal-cand23
+./pilot inventory generate --dir tmp/pilot-verify-minimal-poc-r12-formal-cand23
+./pilot edit --dir tmp/pilot-verify-minimal-poc-r12-formal-cand23
 ```
 
 In the first edit pass, set every host's SSH user, exact generated private-key path, and role
@@ -155,7 +161,7 @@ inspect the generated files before proceeding.
 Run the site-wide wizard using the generated inventory:
 
 ```bash
-./pilot deploy -i tmp/pilot-verify-minimal-poc-r10/demo/inventory.yml --timeout 90m
+./pilot deploy -i tmp/pilot-verify-minimal-poc-r12-formal-cand23/inventory.yml --timeout 90m
 ```
 
 Select the full-site `site.yml` scope and `sandbox` stage. Accept inventory-derived automatic
@@ -171,13 +177,14 @@ Run the full preview (`--check --diff`) and continue to real apply only when eve
 Run the separate day-2 reconciler against the same inventory:
 
 ```bash
-./pilot reconcile -i tmp/pilot-verify-minimal-poc-r10/demo/inventory.yml --timeout 90m
+./pilot reconcile -i tmp/pilot-verify-minimal-poc-r12-formal-cand23/inventory.yml --timeout 90m
 ```
 
-Select `freeipa-identity`, `freeipa-server`, and `sandbox`. At the vault vars-file prompt, select the
-identity roster rather than `.vault/main.yaml`; the roster already includes
-`ipa_admin_password`. Leave manual extra `-e` empty. A clean recap with every reconcile task skipped
-means the wrong vars file was selected and is not a successful identity apply.
+Select `freeipa-identity`, `freeipa-server`, and `sandbox`. Set `freeipa_roster_file` on the managed
+host through `pilot edit`; the reconciler loads that canonical roster separately. At the secret
+vars-file prompt select `.vault/main.yaml`, which supplies the `ipa_admin_password` referenced by
+the roster. Leave manual extra `-e` empty. A clean recap with every reconcile task skipped means the
+roster was not loaded and is not a successful identity apply.
 
 ## 4. Verification procedure
 
@@ -244,25 +251,26 @@ evidence record.
 | Identity reconcile reports `failed=0` but all mutation tasks skip | `.vault/main.yaml` was selected instead of the roster | Select `.vault/ipa-identity.yaml` at the vars-file prompt and rerun preview/apply. |
 | Generated files do not contain intended wizard values | Saving the wrong cursor field can still exit successfully | Inspect saved host, role, group-var, and vault-key facts before deployment; keep TUI-driving details in the trec skills. |
 | A no-op reconcile still reports changes | Forced test-password handling, HBAC disable behavior, or Dogtag-owned mode correction may be non-idempotent | Identify the exact changed tasks and preserve their real count; do not claim `changed=0`. |
+| SeaweedFS anonymous C6–C8 fail while restic credentials are enabled | Full-site correctly selected signed S3 mode; the legacy rows intentionally send unsigned requests | Require the signed config/runtime probes plus `restic-backup` and Thanos verification to pass; do not weaken authentication. |
 
 Detailed component-specific troubleshooting belongs in the aligned spec/runbook for that component,
 not in this composition runbook.
 
 ## 7. Latest verified evidence
 
-| Field | Round 11 legacy record |
+| Field | Round 12 / CAND-23 record |
 |---|---|
-| Verified at | 2026-07-21T17:30Z |
-| Evidence recorded by | Git commit `04809b551599bc42a3fb833e97c6f2cf04d0c6d8` |
-| Tested revision/tree | Not recorded under the pre-v1.16 evidence process |
-| Targets | Fresh `freeipa-server`, `nexus`, and `client-vm` VMs |
-| Site apply | `client-vm ok=83 changed=41 failed=0`; `freeipa-server ok=35 changed=10 failed=0`; `nexus ok=154 changed=74 failed=0`; `localhost ok=1 changed=0 failed=0` |
-| Identity apply | `freeipa-server ok=31 changed=12 failed=0` |
-| Functional verdict | PASS: FreeIPA HBAC/sudo, Grafana→Thanos→Prometheus, Grafana→Loki←Promtail, restic, Wazuh FIM |
-| Reconciler cycle | Removal and restore/drift correction passed; final rerun `changed=2 failed=0` |
-| Raw artifact/checksum | Not durably retained in the legacy record |
-| Publication | Sanitized summary; secret values omitted, lab addresses omitted |
+| Verified at | 2026-07-23T03:25+08:00 |
+| Tested revision/tree | `4034ccd6cc7290a3dd625ea2e6e15d825c9373a3` / `d72c9f9c21bc531d0d3127e3b03c70d20594f6af` |
+| Targets | Fresh `freeipa-server` (AlmaLinux 9), `nexus` and `client-vm` (Ubuntu 24.04) |
+| First site apply | `client-vm ok=101 changed=31 failed=0`; `freeipa-server ok=72 changed=25 failed=0`; `nexus ok=220 changed=87 failed=0`; `localhost ok=1 changed=0 failed=0` |
+| Identical second site apply | `client-vm ok=95 changed=0 failed=0`; `freeipa-server ok=67 changed=0 failed=0`; `nexus ok=207 changed=0 failed=0`; `localhost ok=1 changed=0 failed=0` |
+| Canonical identity | Initial reconcile `changed=21 failed=0`; final no-op reconcile `changed=0 failed=0` |
+| Signed S3/restic | `s3.json` mode `0600`; live `-s3.config` flag present; restic `30/30`; Prometheus `12/12`; Thanos `10/10` |
+| Functional verdict | PASS with documented applicability exceptions: unsigned SeaweedFS rows C6–C8; Wazuh manager C11 and log-shipping C3/C6 require an independent `log-server` |
+| Evidence integrity | Critical evidence set: 51/51 TREC recordings valid and secret-scan safe |
+| Publication | [`2026-07-23-round-12.md`](../evidence/minimal-poc-architecture/2026-07-23-round-12.md); secret values and ephemeral addresses omitted |
 
-The compact evidence record contains the retained round-11 facts and limitations. Historical v2–v10
-procedures, transcripts, bug narratives, and changelog entries remain available in Git history and
-are intentionally not duplicated in the current runbook.
+The compact evidence record contains the current candidate provenance, result matrix, documented
+exceptions, and raw-artifact pointers. Earlier runs remain available in their evidence records and
+Git history and are intentionally not duplicated here.
