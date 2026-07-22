@@ -44,9 +44,12 @@ Delivery Bundle
    L5 verify  ──┤  對齊 spec → 改 playbook → 再 L4
    L6 idem    ──┘
    ▼
+freeze local candidate commit
+   │ (從乾淨、隔離 checkout 跑完整 target test)
+   ▼
 L7 baseline diff（vs 上次 report）
    ▼
-commit: spec + apply playbook + regression test + actual-run evidence
+evidence-only commit: sanitized summary 引用 tested revision/tree
 ```
 
 每一層的細節在後面章節。
@@ -310,8 +313,10 @@ for r in rows:
 
 ### Baseline 規則
 
-- `.verification/<host>-*.md` 進版控（或進 git LFS）
-- 最新一份 = **當前期望狀態**
+- `.verification/<host>-*.{md,ndjson}` 是 gitignored 原始報告，不進版控
+- 被接受 candidate 的 sanitized 摘要放在
+  `docs/evidence/<feature>/<date>-<tested-revision>.md`
+- runbook/spec 只連到最新有效 evidence，不貼入或累積完整 report
 - 任何 playbook 變更 → 重跑 → diff 新舊 report
 - diff 出現**未預期的變化**（playbook 沒動但 report 變了）→ 環境漂移，需調查
 
@@ -465,13 +470,16 @@ Sandbox 銷毀後檔案不見。
 
 Playbook 可以 merge / ship 的條件：
 
-- [ ] spec 文件 commit，ID 編號連續
+- [ ] spec 文件已納入本地 candidate commit，ID 編號連續
 - [ ] verify script 產出 NDJSON，每個 check 有 id/status/detail
 - [ ] L1..L6 全部通過
 - [ ] L7 baseline diff 對上一次 report 沒有未預期變化
 - [ ] L8 idempotency：連跑 3 次 changed=0
 - [ ] 在 staging 跑過一次完整 apply + verify
-- [ ] PR 描述含：spec 連結、verify 報告連結、idempotency 證據
+- [ ] 完整測試從 candidate revision 的乾淨隔離 checkout 執行
+- [ ] sanitized evidence record 記錄 tested revision/tree、file hashes、target、verdict 與 raw artifact checksum
+- [ ] 測試後 execution-affecting files 未改；否則已建立新 candidate 並重跑
+- [ ] PR 描述含：spec 連結、evidence 摘要連結、idempotency 證據
 
 ---
 

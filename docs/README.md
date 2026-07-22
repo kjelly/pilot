@@ -17,6 +17,7 @@
 | 讀一份已有的 spec 學作者風格 | [`verification/hello-localhost.md`](./verification/hello-localhost.md)（3 row 最小）、[`verification/os-patch-sla.md`](./verification/os-patch-sla.md)（stage-aware 範例） |
 | **寫 apply playbook** | 範本在 `playbooks/apply/pam-oidc-sshd-apply.yml` 跟 `playbooks/apply/os-patch-sla-apply.yml`（必含 `-e` vars + `block/rescue` + stage gate） |
 | **跑完整閉環** | 從 `verification/<name>.md` → `apply/<name>-apply.yml` → 對 inventory 跑 ansible-playbook | 
+| **保存 actual-run evidence** | [`actual-run-evidence.md`](./actual-run-evidence.md)：candidate revision、raw artifact、sanitized summary 與文件內容預算 |
 | 看一份完整的「spec → apply → verify → 失敗 → 修」| [`runbooks/pam-oidc-sshd.md`](./runbooks/pam-oidc-sshd.md) |
 | spec-to-spec supplier pattern（同一 host 多 spec 如何 cross-check）| [`runbooks/sso-composition.md`](./runbooks/sso-composition.md) |
 | **管 FreeIPA 使用者/權限（名冊與機密不進 git）** | [`runbooks/freeipa-identity.md`](./runbooks/freeipa-identity.md)；已部署後以 `pilot reconcile` 調和 roster |
