@@ -114,7 +114,8 @@ func TestRegression_FreeIPAClientPreservesConfiguredAutofsResponder(t *testing.T
 	for _, required := range []string{
 		"FreeIPA client — inspect the current SSSD services line",
 		"ipa_sssd_services_current.stdout",
-		"search('(^|,)\\\\s*autofs\\\\s*(,|$)')",
+		"'autofs' in",
+		"split(',') | map('trim') | list",
 	} {
 		if !strings.Contains(playbook, required) {
 			t.Fatalf("base FreeIPA client must preserve an autofs responder configured by the NFS overlay; missing %q", required)
@@ -134,6 +135,28 @@ func TestRegression_FreeIPAClientPreservesConfiguredAutofsResponder(t *testing.T
 		if !strings.Contains(string(nfsData), required) {
 			t.Fatalf("NFS client overlay must self-heal the autofs responder; missing %q", required)
 		}
+	}
+}
+
+func TestRegression_FreeIPANFSServerSnapshotIsCreateOnce(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-nfs-server-apply.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	start := strings.Index(playbook, "- name: \"Snapshot managed exports fragment\"")
+	if start < 0 {
+		t.Fatal("managed exports snapshot task is missing")
+	}
+	rest := playbook[start:]
+	end := strings.Index(rest[1:], "\n        - name:")
+	if end < 0 {
+		t.Fatal("could not isolate managed exports snapshot task")
+	}
+	task := rest[:end+1]
+	if !strings.Contains(task, "force: false") {
+		t.Fatal("managed exports .pre-freeipa-nfs.bak must be created once so a no-op run does not rewrite it")
 	}
 }
 
