@@ -563,6 +563,39 @@ git status --short
 
 ---
 
+### Evidence recordings are disposable
+
+- `trec` recordings and cast files are disposable evidence artifacts and are not
+  committed to Git. Do not put cast filenames, cast paths, or recording-file
+  inventories in committed runbooks. Runbooks may describe that a command was
+  executed and include its real sanitized output, but the evidence file itself
+  must remain outside the document.
+
+### Trec-related issues never go in runbooks
+
+- Any issue discovered while driving a wizard via `trec` — `EXPECT`/`SELECT`/
+  `TOGGLE`/`CHOOSE`/`CHECKLIST_DOWN`/`DOWN` opcodes misbehaving, the `Bubble
+  Tea`/promptui prompt pre-fill surprising a text input, MCP-vs-CLI recording
+  fallbacks diverging, `PILOT_DEBUG_MENU` interacting badly with `SELECT`,
+  `EXPECT_QUIET` being misused as a child-exit signal, the `vault`/`extra -e`/
+  `vars 檔路徑` prompt chain for `freeipa-identity`'s roster turning out to
+  require `vars 檔路徑` and not `extra -e`, host-key churn during `ssh`
+  recording, the `BACKSPACE <n>` then `TEXT` pre-fill rule, etc. — is a
+  **trec / wizard-driving** issue, not an operational / playbook issue.
+  The canonical home for such issues is `.agents/skills/pilot-trec-verification/SKILL.md`
+  (plus `~/.agents/skills/trec-mcp/SKILL.md` and `~/.agents/skills/trec-tui-drive/SKILL.md`
+  for the tool layer itself). Operational runbooks (`docs/runbooks/*.md`)
+  may describe **what** the operator did (which `trec drive --script` was
+  used, what `Y` was pressed, what the output was), but never the
+  *operational finding* that came from a `trec` recording session —
+  not in the §0.5a fact snapshot, not in the changelog, not in a "Real
+  bugs #N" row. The §0.5a timestamp + the changelog are for *what this
+  pass actually deployed / verified*, not for *how the recording driver
+  behaved*. If a `trec`-discovered finding also turns out to be a real
+  bug in `pilot` or a playbook (not just in the driver), record the bug
+  in the appropriate place (Go source / playbook / spec) — but
+  categorize the entry as *bug* not *trec issue*.
+
 ## 8. 變更紀錄
 
 | 日期       | 版本 | 變更 | 變更者 |
@@ -581,3 +614,5 @@ git status --short
 | 2026-07-17 | v1.11 | 把 `docker` 角色從 `core-infra-provider-apply.yml`(`-e infra_role=docker`)拆成獨立的第 21 支 apply playbook `playbooks/apply/docker-apply.yml`,理由與 2026-07-01 拆 `keycloak-db` 相同(見 `docs/runbooks/docker.md`);`core-infra-provider-apply.yml` 現在只剩 `dns`/`ntp` 兩個 `infra_role`;`site.yml`、`deployCatalog`、`inventory` role contract、`DELIVERY.md` playbook 對照表一併更新;§4.3 playbook 清點更新為 21 支 | pilot |
 | 2026-07-18 | v1.12 | 對齊實際 authoring model：使用者寫自然語言需求，外部 Codex/Claude 先確定 spec、再直接撰寫 apply playbook/regression test，pilot runtime 專注確定性 lint/test/deploy/verify/evidence；明定 generator 非正式 apply 來源，移除已退役 LLM tool/agent loop 規則 | pilot |
 | 2026-07-18 | v1.13 | 新增 §7 patch/workspace 規則：套用 patch 前確認 Git root；patch backend 找不到檔案時先重試相對路徑並驗證追蹤檔與父目錄，fallback 必須採精確錨點與 diff 驗證 | pilot |
+| 2026-07-20 | v1.14 | 明定 trec cast 為不可提交的暫存證據；committed runbook 不得記錄 cast 檔名、路徑或錄影檔清單，只保留實際執行輸出 | pilot |
+| 2026-07-22 | v1.15 | 新增「Trec-related issues never go in runbooks」：任何 trec 驅動 wizard 過程中發現的 issue（opcodes 行為、MCP/CLI 差異、wizard prompt chain、host-key churn、預填行為等）一律記錄在 `.agents/skills/pilot-trec-verification/SKILL.md` 及其同層 tool-driver skills；operational runbook 只記錄「這次 pass 做了什麼/驗證了什麼」，不記錄「trec 驅動時踩了什麼坑」。原因：v11.0 重新驗證時把 wizard banner 的 UI 落差誤列為「Real bugs #27」，實際是 trec 驅動時的 prompting 路徑問題，應該留在 trec skill 的 §7 gotcha list 而非 runbook 的 bug table | pilot |
