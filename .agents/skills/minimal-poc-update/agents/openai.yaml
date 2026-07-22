@@ -1,0 +1,6 @@
+interface:
+  display_name: "Minimal POC Update"
+  short_description: "Clean-room deploy, record, and update the minimal POC runbook"
+  default_prompt: "Use $minimal-poc-update to update docs/runbooks/minimal-poc-architecture.md from a clean deployment."
+policy:
+  allow_implicit_invocation: false
