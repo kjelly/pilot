@@ -230,6 +230,31 @@ func TestGenerate_Shape(t *testing.T) {
 	}
 }
 
+func TestGenerate_FreeIPANFSGroups(t *testing.T) {
+	hf, err := Parse([]byte(`
+hosts:
+  nfs-1:
+    ansible_host: "10.0.0.30"
+    roles: [freeipa-nfs-server]
+  client-1:
+    ansible_host: "10.0.0.31"
+    roles: [freeipa-nfs-client]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Generate(hf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "        freeipa-nfs-server:\n          hosts:\n            nfs-1:\n") {
+		t.Errorf("missing freeipa > freeipa-nfs-server > nfs-1 nesting:\n%s", out)
+	}
+	if !strings.Contains(out, "        freeipa-nfs-client:\n          hosts:\n            client-1:\n") {
+		t.Errorf("missing freeipa > freeipa-nfs-client > client-1 nesting:\n%s", out)
+	}
+}
+
 func TestGenerate_Deterministic(t *testing.T) {
 	hf, err := Parse([]byte(sampleSource))
 	if err != nil {
@@ -382,6 +407,26 @@ func TestTopLevelOrder_LeafEntriesComeFromRoleContracts(t *testing.T) {
 		}
 		if !valid[name] {
 			t.Fatalf("topLevelOrder contains %q but no role contract defines it", name)
+		}
+	}
+}
+
+func TestRoleContracts_AllRolesAppearInRenderedCatalog(t *testing.T) {
+	renderedRoles := make(map[string]bool, len(roleContracts))
+	for _, name := range topLevelOrder {
+		children := aggregateChildren(name)
+		if children == nil {
+			renderedRoles[name] = true
+			continue
+		}
+		for _, child := range children {
+			renderedRoles[child] = true
+		}
+	}
+
+	for _, contract := range roleContracts {
+		if !renderedRoles[contract.Name] {
+			t.Errorf("role contract %q is accepted by lint but cannot be rendered", contract.Name)
 		}
 	}
 }
