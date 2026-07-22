@@ -111,9 +111,14 @@ func TestRegression_FreeipaClientSpec_AAACoverage(t *testing.T) {
 	if !strings.Contains(cmd["C6"], "access_provider") || !strings.Contains(cmd["C6"], "ipa") {
 		t.Errorf("C6 (authorization/HBAC) must assert access_provider=ipa, got %q", cmd["C6"])
 	}
-	// Authorization: C8 must exercise centrally-defined sudo via `sudo -l`.
-	if !strings.Contains(cmd["C8"], "sudo -l") {
+	// Authorization: C8 must query centrally-defined sudo as root without
+	// invoking runuser/PAM, because canonical HBAC may intentionally deny the
+	// fixture account's login while its sudo policy remains valid.
+	if !strings.Contains(cmd["C8"], "sudo -l -U pilotuser") {
 		t.Errorf("C8 (authorization/sudo) must use `sudo -l -U <user>`, got %q", cmd["C8"])
+	}
+	if strings.Contains(cmd["C8"], "runuser") {
+		t.Errorf("C8 must not invoke runuser/PAM when isolating central sudo policy, got %q", cmd["C8"])
 	}
 	// Audit: C9 must check the audit daemon.
 	if !strings.Contains(cmd["C9"], "auditd") {
