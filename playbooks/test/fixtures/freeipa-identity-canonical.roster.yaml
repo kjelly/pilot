@@ -1,0 +1,67 @@
+---
+schema_version: 1
+freeipa:
+  domain: ipa.pilot.internal
+  realm: IPA.PILOT.INTERNAL
+  server: freeipa-server.ipa.pilot.internal
+  admin:
+    principal: admin
+    password: "{{ ipa_admin_password }}"
+  defaults:
+    group_type: posix
+    managed_group_membership: authoritative
+    prune_unmanaged: false
+  safety:
+    require_posix_data_groups: true
+users:
+  - name: fixture-canonical-user-a
+    state: present
+    first: Canonical
+    last: Alpha
+    display_name: Canonical Alpha
+    email: canonical-alpha@ipa.pilot.internal
+    login_shell: /bin/bash
+    home_directory: /home/fixture-canonical-user-a
+    password:
+      preserve_existing: true
+    ssh_keys:
+      authoritative: true
+      values: []
+    enabled: true
+  - name: fixture-canonical-user-b
+    state: disabled
+    first: Canonical
+    last: Beta
+    login_shell: /bin/bash
+    home_directory: /home/fixture-canonical-user-b
+    password:
+      preserve_existing: true
+    ssh_keys:
+      authoritative: true
+      values: []
+    enabled: false
+groups:
+  - name: team-fixture-canonical
+    state: present
+    category: team
+    type: posix
+    description: Canonical fixture team
+    membership:
+      authoritative: true
+      users:
+        - fixture-canonical-user-a
+      groups: []
+  - name: data-fixture-canonical-rw
+    state: present
+    category: filesystem
+    type: posix
+    description: Canonical fixture nested data group
+    membership:
+      authoritative: true
+      users: []
+      groups:
+        - team-fixture-canonical
+hosts: []
+hostgroups: []
+hbac: {}
+sudo: {}

@@ -8,6 +8,7 @@ playbooks:
   apply: playbooks/apply/freeipa-identity-apply.yml
 regressionTests:
   - cmd/pilot/cmd/tag_coverage_test.go
+  - internal/spec/freeipa_identity_regression_test.go
 dependencies:
   - {component: freeipa-server, required: true, relation: sameHosts}
 hostCardinality: exactly-one
@@ -27,5 +28,9 @@ traceability:
     "docs/verification/freeipa-identity.md#C6": {tags: [sudo], reason: reconcile sudo group membership}
     "docs/verification/freeipa-identity.md#C7": {tags: [hostgroups], reason: reconcile hostgroup attributes}
     "docs/verification/freeipa-identity.md#C8": {tags: [users], reason: reconcile user attributes}
+    "docs/verification/freeipa-identity.md#C9": {tags: [C9, users], reason: reconcile canonical user attributes}
+    "docs/verification/freeipa-identity.md#C10": {tags: [C10, users], reason: reconcile canonical enabled state}
+    "docs/verification/freeipa-identity.md#C11": {tags: [C11, users, groups], reason: reconcile canonical direct user membership}
+    "docs/verification/freeipa-identity.md#C12": {tags: [C12, groups], reason: reconcile canonical nested group membership}
 verification: {autoDeploy: false}
 site: {include: false, order: 0, vars: {}, tags: [], optIn: true}
