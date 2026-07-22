@@ -1,0 +1,7 @@
+# Merge this section into the repository's existing .codex/config.toml.
+# Do not replace an existing config.toml with this snippet.
+
+[agents]
+max_threads = 2
+max_depth = 1
+interrupt_message = true

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Minimal POC Revalidate"
+  short_description: "Clean-room verification of the existing minimal POC runbook"
+  default_prompt: "Use $minimal-poc-revalidate to verify docs/runbooks/minimal-poc-architecture.md from zero without editing it."
+policy:
+  allow_implicit_invocation: false
