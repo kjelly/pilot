@@ -73,6 +73,16 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 			"ANSIBLE_LOG_PATH=" + filepath.Join(root, "ansible.log"),
 			"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath=" + strconv.Quote(filepath.Join(sshControl, "pilot-%r@%h:%p")) + " -o ControlPersist=60s",
 			"ANSIBLE_RETRY_FILES_ENABLED=False",
+			// Collapses each task to one SSH round-trip instead of a
+			// separate sftp-and-exec per task; safe because every target
+			// image pilot provisions has no sudoers `requiretty`.
+			"ANSIBLE_PIPELINING=True",
+			// Default forks is 5, which serializes host 6+ behind the
+			// first batch on any play targeting a full topology (site.yml)
+			// or a wide overlay group. Only widens per-play SSH
+			// concurrency — task/role order (e.g. FreeIPA server before
+			// client, Wazuh manager before agent) is unaffected.
+			"ANSIBLE_FORKS=20",
 		},
 	}, nil
 }
