@@ -22,6 +22,18 @@ install or configure them inside a VM. Pulp uses the official OCI single
 container layout; Harbor uses its official installer to generate the supported
 Compose stack. Podman is not a first-version backend.
 
+`services up` also performs required control-plane reconciliation before it
+records the stack as running:
+
+- each configured Pulp RPM repository gets an `on_demand` remote, repository,
+  and distribution; only a repository with no metadata version receives the
+  initial metadata sync, while package payloads are fetched on demand;
+- each configured Harbor registry endpoint and proxy-cache project is created
+  if absent, and a name/configuration collision fails closed.
+
+If either API reconciliation or the initial metadata sync fails, `services up`
+fails and does not persist a successful service state.
+
 The design does not make cache contents portable by themselves. Moving an
 existing populated cache requires moving the persistent data directory or
 restoring a backup; a new host can always recreate the services and refill the
@@ -60,10 +72,10 @@ The generated Compose project has separate persistent paths for:
 The paths are outside the VM overlay/seed directory. Services bind only to an
 address reachable from the selected libvirt network, not to every host
 interface. The selected profile defines upstream allowlists, repository
-snapshot/release policy, image proxy projects, storage limits, and retention
-policy. The first `dev-lite` profile may use on-demand package retrieval; a
-future reproducible profile promotes verified repository snapshots and image
-digests into immutable release locations.
+on-demand policy, image proxy projects, storage limits, and retention policy.
+The first `dev-lite` profile uses on-demand package retrieval; a future
+reproducible profile promotes verified repository snapshots and image digests
+into immutable release locations.
 
 ## VM bootstrap and endpoint discovery
 
