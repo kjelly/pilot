@@ -34,7 +34,7 @@
       tags: [always, C1]
     - name: "Refuse local automount setup on an unenrolled host"
       ansible.builtin.assert:
-        that: [nfs_ipa_enrollment.stat.exists]
+        that: [nfs_ipa_enrollment.stat.exists or ansible_check_mode]
         fail_msg: "Run freeipa-client-apply.yml before enabling IPA automount."
       tags: [always, C1]
 
@@ -60,6 +60,7 @@
         line: "services = nss, pam, ssh, autofs"
         state: present
         create: false
+      when: not ansible_check_mode
       notify: Restart SSSD after enabling automount
       tags: [C3]
     - name: "Enable autofs"

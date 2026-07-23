@@ -68,9 +68,9 @@
     - name: "Gate: NFS server must already be an enrolled FreeIPA client"
       ansible.builtin.assert:
         that:
-          - nfs_ipa_enrollment.stat.exists
-          - nfs_sssd_active.rc == 0
-          - nfs_sssd_active.stdout | trim == 'active'
+          - nfs_ipa_enrollment.stat.exists or ansible_check_mode
+          - (nfs_sssd_active.rc == 0) or ansible_check_mode
+          - (nfs_sssd_active.stdout | trim == 'active') or ansible_check_mode
         fail_msg: "Run freeipa-client-apply.yml on this host before enabling Kerberos NFS."
       tags: [always, C1]
 
@@ -88,11 +88,13 @@
           - nfs_selected_servers[0].service_principal.principal == 'nfs/' + nfs_server_fqdn
           - nfs_selected_servers[0].service_principal.keytab == '/etc/krb5.keytab'
         fail_msg: "inventory/ansible FQDN must map exactly to the roster NFS server and nfs/FQDN principal."
+      when: not ansible_check_mode
       tags: [always, C1, C2]
 
     - name: "Select the unique NFS server object"
       ansible.builtin.set_fact:
         nfs_selected_server: "{{ nfs_selected_servers[0] }}"
+      when: nfs_selected_servers | length > 0
       tags: [always]
 
     - name: "Gate: exports, ownership, and ACL policy are safe"
@@ -141,6 +143,7 @@
       tags: [C7]
 
     - name: "Reconcile NFS identity, exports, and ACL with rollback"
+      when: not ansible_check_mode
       block:
         - name: "Snapshot managed exports fragment"
           ansible.builtin.copy:
@@ -179,7 +182,7 @@
 
         - name: "Ensure NFS service principal exists"
           ansible.builtin.command:
-            argv: [ipa, service-add, "{{ nfs_selected_server.service_principal.principal }}"]
+            argv: [ipa, service-add, "{{ nfs_selected_server.service_principal.principal }}", --force]
           register: nfs_service_add
           changed_when: "'Added service' in (nfs_service_add.stdout | default(''))"
           failed_when:
@@ -222,6 +225,61 @@
             mode: "0755"
           tags: [C5]
 
+        # A share's ownership/ACL group is normally roster-managed (created by
+        # the separate `freeipa-identity` reconciler, per the runbook's own
+        # site-deploy-then-identity-reconcile order) — on a genuinely fresh
+        # host it may not exist yet the first time this playbook runs. Rather
+        # than hard-failing the whole component (the previous behavior:
+        # `chgrp failed: failed to look up group <name>`, requiring an
+        # operator to notice, reconcile identity, then re-run by hand), skip
+        # just the not-yet-ready shares with a clear warning; a later re-run
+        # (after identity reconcile) picks them up automatically since NSS
+        # will resolve the group by then. This makes the ordering dependency
+        # self-healing instead of a hard block.
+        - name: "Check whether each share's ownership group is resolvable via NSS"
+          ansible.builtin.command:
+            argv: [getent, group, "{{ item.ownership.group }}"]
+          loop: "{{ nfs_selected_server.shares | default([]) }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: nfs_share_group_resolvable
+          changed_when: false
+          failed_when: false
+          tags: [C5]
+
+        - name: "Warn and defer shares whose roster-managed group does not exist yet"
+          ansible.builtin.debug:
+            msg: >-
+              Share {{ item.item.name }}'s ownership group
+              {{ item.item.ownership.group }} is not yet resolvable via
+              NSS/SSSD. Deferring this share until a later apply — run
+              `pilot reconcile` (freeipa-identity) to create the roster's
+              groups, then re-run this playbook to pick it up.
+          loop: "{{ nfs_share_group_resolvable.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+          when: item.rc != 0
+          tags: [C5]
+
+        - name: "Compute the shares whose ownership group already exists"
+          ansible.builtin.set_fact:
+            nfs_shares_ready: "{{ nfs_share_group_resolvable.results | default([]) | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+          tags: [C5]
+
+        # A task-level `vars:` override of `nfs_selected_server` (as the
+        # exports-template task used to do) is silently ignored: Ansible
+        # variable precedence ranks `set_fact` above task vars, and
+        # `nfs_selected_server` was set via set_fact above. Re-set the fact
+        # itself so every later reference — including the exports template —
+        # sees only the ready shares (confirmed live: without this, the
+        # rendered exports fragment still listed the deferred share's path,
+        # and `exportfs -rav` then failed with "Failed to stat ...: No such
+        # file or directory" since its directory was never created).
+        - name: "Narrow the selected NFS server to its ready shares"
+          ansible.builtin.set_fact:
+            nfs_selected_server: "{{ nfs_selected_server | combine({'shares': nfs_shares_ready}) }}"
+          tags: [C5]
+
         - name: "Create traversable parents for managed share roots"
           ansible.builtin.file:
             path: "{{ item.source_path | dirname }}"
@@ -229,7 +287,7 @@
             owner: root
             group: root
             mode: "0755"
-          loop: "{{ nfs_selected_server.shares | default([]) }}"
+          loop: "{{ nfs_shares_ready }}"
           tags: [C5]
 
         - name: "Create managed NFS share roots"
@@ -239,7 +297,7 @@
             owner: "{{ item.ownership.owner }}"
             group: "{{ item.ownership.group }}"
             mode: "{{ item.ownership.mode }}"
-          loop: "{{ nfs_selected_server.shares | default([]) }}"
+          loop: "{{ nfs_shares_ready }}"
           tags: [C5]
 
         - name: "Apply authoritative access ACL"
@@ -249,7 +307,7 @@
               - --set
               - "u::{{ item.acl.access.owner }},g::{{ item.acl.access.owning_group }},m::{{ item.acl.access.mask }},o::{{ item.acl.access.others }}"
               - "{{ item.source_path }}"
-          loop: "{{ nfs_selected_server.shares | default([]) }}"
+          loop: "{{ nfs_shares_ready }}"
           register: nfs_access_acl
           changed_when: false
           tags: [C6]
@@ -257,7 +315,7 @@
         - name: "Apply authoritative named-group access ACL"
           ansible.builtin.command:
             argv: [setfacl, -m, "g:{{ item.1.name }}:{{ item.1.permissions }}", "{{ item.0.source_path }}"]
-          loop: "{{ nfs_selected_server.shares | default([]) | subelements('acl.access.named_groups', skip_missing=True) }}"
+          loop: "{{ nfs_shares_ready | subelements('acl.access.named_groups', skip_missing=True) }}"
           changed_when: false
           tags: [C6]
 
@@ -268,7 +326,7 @@
               - --set
               - "d:u::{{ item.acl.default.owner }},d:g::{{ item.acl.default.owning_group }},d:m::{{ item.acl.default.mask }},d:o::{{ item.acl.default.others }}"
               - "{{ item.source_path }}"
-          loop: "{{ nfs_selected_server.shares | default([]) }}"
+          loop: "{{ nfs_shares_ready }}"
           register: nfs_default_acl
           changed_when: false
           tags: [C6]
@@ -276,7 +334,7 @@
         - name: "Apply authoritative named-group default ACL"
           ansible.builtin.command:
             argv: [setfacl, -m, "d:g:{{ item.1.name }}:{{ item.1.permissions }}", "{{ item.0.source_path }}"]
-          loop: "{{ nfs_selected_server.shares | default([]) | subelements('acl.default.named_groups', skip_missing=True) }}"
+          loop: "{{ nfs_shares_ready | subelements('acl.default.named_groups', skip_missing=True) }}"
           changed_when: false
           tags: [C6]
 
