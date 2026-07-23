@@ -41,6 +41,9 @@ var deployTimeoutFlag string
 var deployActionFlag string
 var deployShowExperimental bool
 var deployPlanComponents []string
+var deployActionsPath string
+var deployPresentation bool
+var deployTracePath string
 
 type deployAnsibleRuntime struct {
 	Env     []string
@@ -121,6 +124,9 @@ func init() {
 	deployCmd.Flags().StringVar(&deployTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限，Go duration 格式(例如 45m、1h30m)；跑得比這個久會被強制中止")
 	deployCmd.Flags().StringVar(&deployActionFlag, "action", "apply", "contract lifecycle action: apply, upgrade, or decommission (only declared actions may run)")
 	deployCmd.Flags().BoolVar(&deployShowExperimental, "show-experimental", false, "include experimental contract components after their evidence requirement is reviewed")
+	deployCmd.Flags().StringVar(&deployActionsPath, "actions", "", "以 JSON scenario 自動回答 deploy TUI prompts")
+	deployCmd.Flags().BoolVar(&deployPresentation, "presentation", false, "自動操作時顯示教學步驟與 prompt 畫面")
+	deployCmd.Flags().StringVar(&deployTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
 	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
 	deployCmd.AddCommand(deployPlanCmd)
 	deployGraphCmd.Flags().StringVarP(&deployGraphInventoryFlag, "inventory", "i", "inventory.yml", "inventory 路徑，用來解析每個角色 group 有哪些主機")
@@ -238,6 +244,13 @@ var errDeployAborted = errors.New("已取消")
 var errPreflightRejected = errors.New("前置檢查失敗，已停止部署")
 
 func runDeploy(cmd *cobra.Command, args []string) error {
+	if deployActionsPath != "" {
+		return runStandalonePromptWorkflow(cmd, "deploy", deployActionsPath, deployPresentation, deployTracePath)
+	}
+	return runDeployInteractive(cmd, args)
+}
+
+func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
 	if !term.IsTerminal(int(os.Stdin.Fd())) {

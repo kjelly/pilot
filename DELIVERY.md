@@ -485,6 +485,16 @@ scenario 的 `steps` 先放 edit actions，最後可放 `deploy`／`reconcile` a
 confirmation 與 transaction。可以用 TREC 或其他 PTY 工具錄影，但錄影和
 `trec verify` 都不是 pilot 執行成功的必要條件。
 
+也可以分開錄製 deploy 或 reconcile：
+
+```bash
+pilot deploy --actions deploy-scenario.json --presentation --trace-out deploy.jsonl
+pilot reconcile --actions reconcile-scenario.json --presentation --trace-out reconcile.jsonl
+```
+
+獨立 scenario 必須各自只含一個相符的 `deploy` 或 `reconcile` action，仍會
+使用原本的 preflight、preview、stage gate、確認與 transaction 流程。
+
 > `--dir` 只是換掉 `--in`/`--out`的預設值（分別變成 `<dir>/hosts.yml`、
 > `<dir>/inventory.yml`）；額外指定 `--in`/`--out` 一樣會覆蓋掉 `--dir`
 > 算出來的路徑，兩者不衝突。`--dir` 指到的資料夾不存在也沒關係，存檔/產生

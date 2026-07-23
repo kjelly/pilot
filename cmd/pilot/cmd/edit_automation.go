@@ -244,9 +244,9 @@ func runAutomatedDeploymentStep(cmd *cobra.Command, step editAction, presentatio
 	}
 	var err error
 	if step.Action == "deploy" {
-		err = runDeploy(cmd, nil)
+		err = runDeployInteractive(cmd, nil)
 	} else {
-		err = runReconcile(cmd, nil)
+		err = runReconcileInteractive(cmd)
 	}
 	for _, event := range p.events {
 		sink.add(event)
@@ -261,4 +261,26 @@ func runAutomatedDeploymentStep(cmd *cobra.Command, step editAction, presentatio
 		return fmt.Errorf("workflow left %d prompt answers unused", len(p.answers))
 	}
 	return nil
+}
+
+func runStandalonePromptWorkflow(cmd *cobra.Command, action, scenarioPath string, presentation bool, tracePath string) error {
+	scenario, err := loadEditScenario(scenarioPath)
+	if err != nil {
+		return err
+	}
+	if len(scenario.Steps) != 1 || scenario.Steps[0].Action != action {
+		return fmt.Errorf("%s --actions requires exactly one %s action", action, action)
+	}
+	sink, err := newAutomationTraceSink(tracePath)
+	if err != nil {
+		return err
+	}
+	if sink != nil {
+		defer func() { _ = sink.close() }()
+	}
+	err = runAutomatedDeploymentStep(cmd, scenario.Steps[0], presentation, cmd.OutOrStdout(), sink)
+	if sink != nil && sink.err != nil {
+		return fmt.Errorf("write automation trace: %w", sink.err)
+	}
+	return err
 }
