@@ -36,7 +36,8 @@ type TopologyNode struct {
 // group inventory, and /etc/hosts wiring are all driven from one file
 // instead of hand-assembled shell commands.
 type TopologySpec struct {
-	Nodes []TopologyNode `yaml:"nodes"`
+	Services string         `yaml:"services,omitempty"`
+	Nodes    []TopologyNode `yaml:"nodes"`
 }
 
 // LoadTopologySpec reads and validates a topology YAML file.
@@ -62,6 +63,9 @@ func LoadTopologySpec(path string) (*TopologySpec, error) {
 func (s *TopologySpec) Validate() error {
 	if len(s.Nodes) == 0 {
 		return errors.New("at least one node is required")
+	}
+	if s.Services != "" && s.Services != "none" && s.Services != "local" && strings.TrimSpace(s.Services) != s.Services {
+		return errors.New("services must be none, local, or a profile path without surrounding whitespace")
 	}
 	names := make(map[string]bool, len(s.Nodes))
 	for _, n := range s.Nodes {

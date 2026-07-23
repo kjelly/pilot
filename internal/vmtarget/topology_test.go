@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,6 +21,7 @@ func writeTopologySpec(t *testing.T, yamlBody string) string {
 
 func TestLoadTopologySpec_ValidSpecParses(t *testing.T) {
 	path := writeTopologySpec(t, `
+services: local
 nodes:
   - name: ipa-primary
     base_image: rocky9
@@ -38,6 +40,9 @@ nodes:
 	if len(spec.Nodes) != 2 {
 		t.Fatalf("len(Nodes) = %d, want 2", len(spec.Nodes))
 	}
+	if spec.Services != "local" {
+		t.Fatalf("services = %q, want local", spec.Services)
+	}
 	if spec.Nodes[1].DiskGB != 20 {
 		t.Errorf("Nodes[1].DiskGB = %d, want 20", spec.Nodes[1].DiskGB)
 	}
@@ -48,6 +53,13 @@ nodes:
 	}
 	if !reflect.DeepEqual(groups["ipa_masters"], []string{"ipa-primary"}) {
 		t.Errorf("groups[ipa_masters] = %v", groups["ipa_masters"])
+	}
+}
+
+func TestTopologySpecValidate_InvalidServices(t *testing.T) {
+	spec := &TopologySpec{Services: " local ", Nodes: []TopologyNode{{Name: "a"}}}
+	if err := spec.Validate(); err == nil || !strings.Contains(err.Error(), "services") {
+		t.Fatalf("want services validation error, got %v", err)
 	}
 }
 
