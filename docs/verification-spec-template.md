@@ -113,6 +113,29 @@
 3. **`~active` 會誤命中 `inactive`**：`active` 是 `inactive` 的子字串，服務停掉也會 PASS。
    **服務健康檢查改用數字 rc**：`systemctl is-active <svc>` expected `0`（active 才回 0）。
 
+### 第四個陷阱：長時間 probe 的 timeout 沒寫進規格
+
+`pilot verify` 的 per-row command timeout **預設只有 15 秒**（`--timeout` 旗標，
+見 `cmd/pilot/cmd/verify.go`）。任何 checklist row 的 command 本身就需要等待
+（lock 重試、完整性掃描、跨主機共用 repository 的並行 probe……），只要
+「command 自己的等待上限」大於這 15 秒，第一次 `pilot verify` 幾乎必定在真正
+探測完成前就被中止、回報無意義的 timeout fail，逼作者重跑一次才抓到真正的
+結果——白白浪費一輪。
+
+**寫規格時要做的事，不要等踩到才補**：
+
+1. 如果 command 本身有重試/等待旗標（例如 `restic check --retry-lock 120s`），
+   在 Check 說明或表格下方的備註寫清楚這個內建等待上限是多少。
+2. 在 §3 證據收集直接把對應的 `pilot verify --timeout <N>` 寫進工具指令裡，
+   `N` 要包含 command 自身等待上限 + 合理緩衝（不要抓剛好；剛好等於 command
+   等待上限，會在 ansible wrapper 本身的往返延遲上再度踩線）。
+3. 不要留給操作者「跑失敗了再自己加 `--timeout`」——那正是失敗一輪才發現
+   的重跑成本，規格寫清楚就能一次過。
+
+範例見 `docs/verification/restic-backup.md` C6（`restic check --retry-lock
+120s`）與 §3（`pilot verify … --timeout 180`）：120 秒的 lock 等待上限 + 一段
+緩衝，取整為 180 秒的 verify timeout。
+
 ### 拿不準 expected 怎麼寫？用 `--probe` 先探
 
 不要靠猜。把候選指令丟進**與 verify 完全相同**的管線，看它實際回什麼：
@@ -150,6 +173,9 @@ Command 欄位的注意事項：
 - [ ] 涉及檔案權限的 row 寫出數字（`0644`）而非文字（`644` 或 `0o644`）
 - [ ] 涉及 service 的 row 用 `systemctl is-active <svc>` + expected `0`（**不要**用 `~active`，會誤命中 `inactive`）
 - [ ] 涉及 sysctl 的 row 寫出字串型 expected（`sysctl -n` 永遠回字串）
+- [ ] 任一 row 的 command 本身等待上限超過 15 秒（`pilot verify` 預設 timeout），
+      §3 證據收集的工具指令要帶對應的 `pilot verify --timeout <N>`（見「第四個
+      陷阱：長時間 probe 的 timeout 沒寫進規格」）
 - [ ] 例外有寫清楚「適用環境」跟「為什麼」
 - [ ] 有版本號跟變更紀錄
 
