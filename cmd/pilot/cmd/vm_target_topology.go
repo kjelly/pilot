@@ -188,6 +188,10 @@ func runVtTopologyUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	serviceBootstrap, err := resolveTopologyServiceBootstrap(context.Background(), spec)
+	if err != nil {
+		return err
+	}
 	m, err := vtNewManager()
 	if err != nil {
 		return err
@@ -234,6 +238,7 @@ func runVtTopologyUp(cmd *cobra.Command, args []string) error {
 				errs[i] = operr
 				return
 			}
+			opt.Services = serviceBootstrap
 			tgt, uerr := nm.Up(ctx, opt)
 			if uerr != nil {
 				errs[i] = fmt.Errorf("node %q: %w", n.Name, uerr)
@@ -262,6 +267,25 @@ func runVtTopologyUp(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "\ninventory : `pilot vm-target topology inventory --topology %s`\n", vtTopoSpecPath)
 	}
 	return nil
+}
+
+func resolveTopologyServiceBootstrap(ctx context.Context, spec *vmtarget.TopologySpec) (*vmtarget.ServiceBootstrap, error) {
+	if spec.Services == "" || spec.Services == "none" {
+		return nil, nil
+	}
+	if len(spec.Nodes) == 0 {
+		return nil, fmt.Errorf("topology services: at least one node is required")
+	}
+	network := spec.Nodes[0].Network
+	if network == "" {
+		network = "default"
+	}
+	for _, n := range spec.Nodes[1:] {
+		if n.Network != "" && n.Network != network {
+			return nil, fmt.Errorf("topology services: all nodes must use the same libvirt network (got %q and %q)", network, n.Network)
+		}
+	}
+	return resolveVMServiceBootstrap(ctx, spec.Services, network)
 }
 
 // ---- down ---------------------------------------------------------------
@@ -601,7 +625,7 @@ func requireEphemeralTopologyAbsent(ctx context.Context, m *vmtarget.Manager, sp
 // provisionEphemeralTopology returns only nodes successfully created by this
 // invocation. The returned names are the cleanup ownership boundary if another
 // pilot process races one of the topology names.
-func provisionEphemeralTopology(ctx context.Context, spec *vmtarget.TopologySpec, out io.Writer, keepOnFailure bool) ([]string, error) {
+func provisionEphemeralTopology(ctx context.Context, spec *vmtarget.TopologySpec, out io.Writer, keepOnFailure bool, serviceBootstrap *vmtarget.ServiceBootstrap) ([]string, error) {
 	var outMu sync.Mutex
 	printf := func(format string, a ...any) {
 		outMu.Lock()
@@ -629,6 +653,7 @@ func provisionEphemeralTopology(ctx context.Context, spec *vmtarget.TopologySpec
 			// The CLI policy controls the whole ephemeral workflow. A
 			// node-level YAML keep_on_failure cannot leak a default-cleanup run.
 			opt.KeepOnFailure = keepOnFailure
+			opt.Services = serviceBootstrap
 			printf("▶ provisioning %s...\n", n.Name)
 			t, err := nm.Up(ctx, opt)
 			if err != nil {
@@ -781,6 +806,10 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	serviceBootstrap, err := resolveTopologyServiceBootstrap(context.Background(), spec)
+	if err != nil {
+		return err
+	}
 	verifies, err := parseTopoVerifyArgs(vtTopoTestVerify)
 	if err != nil {
 		return err
@@ -818,7 +847,7 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Fprintf(out, "=== [Ephemeral setup] Provisioning %d fresh node(s) ===\n", len(spec.Nodes))
-	owned, err := provisionEphemeralTopology(ctx, spec, out, vtTopoTestKeepOnFailure)
+	owned, err := provisionEphemeralTopology(ctx, spec, out, vtTopoTestKeepOnFailure, serviceBootstrap)
 	if err != nil {
 		if vtTopoTestKeepOnFailure {
 			printEphemeralDebugHints(errOut, vtTopoSpecPath)
