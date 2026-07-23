@@ -90,7 +90,11 @@ install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each
 	@echo "✓ git hooksPath set to .githooks — playbook-lint now runs on commit"
 	@echo "  bypass a single commit with: git commit --no-verify"
 
-.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks
+poc-checkmode-test: ## Full ephemeral fresh-host topology test of minimal-poc (L1 syntax, L3 check-mode dry-run, L4 apply, L5 verify, L6 idempotency). Requires VAULT=<path>; pass ROSTER=<path> too if PLAYBOOK touches freeipa-nfs-server. See AGENTS.md §1.4 and §4.4.
+	@test -n "$(VAULT)" || (echo "ERROR: VAULT=<path-to-vault-file> is required. e.g. make poc-checkmode-test VAULT=~/.vault/minimal-poc-sandbox.yaml" && exit 2)
+	TOPOLOGY="$(TOPOLOGY)" PLAYBOOK="$(PLAYBOOK)" STAGE="$(STAGE)" VAULT="$(VAULT)" ROSTER="$(ROSTER)" ./scripts/topology-checkmode-test.sh
+
+.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）

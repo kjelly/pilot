@@ -270,6 +270,48 @@ sudo virsh net-autostart default
 
 Also check the host firewall is not blocking DHCP (dnsmasq on port 67).
 
+## Host-local cache services (`pilot services` + `--services local`)
+
+`vm-target up`/`topology up` default to `--services none` (no cache; each
+VM's `apt install`/`docker pull` hits the public internet directly). If
+you're bringing the same VM(s) up more than once in a session, start the
+host-side cache stack first and reuse it across every `up`:
+
+```bash
+pilot services up --profile dev-lite   # long-lived; apt-cacher-ng + Pulp RPM + Harbor on the host
+pilot services status                  # confirm running=true / bind_ip before the first `up`
+```
+
+Then add `--services local` to `vm-target up`, or a root-level
+`services: local` field to a topology YAML (applies to every node in that
+spec) -- see `docs/runbooks/vm-target.md` §2.2. From first boot, cloud-init
+points the VM's APT/DNF repos and Docker Hub/Harbor proxy config at the
+host stack instead of upstream.
+
+Key behaviors:
+- **Fail-closed, no silent fallback.** If the stack isn't running,
+  unhealthy, or the selected libvirt network's gateway can't be probed,
+  `up --services local` errors out before creating the VM -- it never
+  substitutes an uncached VM. If you hit this, run `pilot services
+  status` and fix/restart the stack; don't work around it by switching to
+  `--services none` unless you actually intend an uncached run.
+- **Cache data lives on the host**, separate from any VM's qcow2/state
+  (`~/.local/share/pilot/cache/` by default). `vm-target down` never
+  touches it; `pilot services down` stops the containers but keeps the
+  data; only `pilot services purge --confirm` deletes it.
+- **Don't churn `services down`/`purge` between iterations** of the same
+  testing session -- there's no benefit to stopping/restarting the cache
+  stack while you're still using it, and `purge` throws away the warmed
+  cache you were trying to avoid re-downloading.
+- **Not yet acceptance-tested end-to-end on a disposable VM** (as of
+  2026-07-23): host-side lifecycle and the fail-closed `vm-target`
+  preflight are implemented and verified, but a VM actually installing a
+  package / pulling an image through the cache is still pending real
+  evidence -- see `docs/superpowers/specs/2026-07-23-host-local-services-design.md`
+  Task 8. Treat `--services local` as a bandwidth-saving default, not yet
+  a fully proven path; don't cite it as verified in a spec's Expected
+  behavior until that evidence lands.
+
 ## Clean slate
 
 When you need a truly clean VM:
