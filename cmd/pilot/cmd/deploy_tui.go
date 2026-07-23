@@ -43,6 +43,9 @@ import (
 // standaloneScreen standing in for one) decides when a one-shot
 // prompt's Program should actually exit.
 func runSelectProgram(label string, items []string) (int, error) {
+	if activePromptAutomation != nil {
+		return activePromptAutomation.selectPrompt(label, items)
+	}
 	m := standaloneScreen{s: newSelectModel(label, items)}
 	final, err := tea.NewProgram(m, tea.WithOutput(os.Stdout)).Run()
 	if err != nil {
@@ -57,6 +60,9 @@ func runSelectProgram(label string, items []string) (int, error) {
 
 // runTextProgram is promptText's Bubble Tea equivalent.
 func runTextProgram(label, def string, validate func(string) error) (string, error) {
+	if activePromptAutomation != nil {
+		return activePromptAutomation.textPrompt(label, def, validate)
+	}
 	m := standaloneScreen{s: newTextInputModel(label, def, validate)}
 	final, err := tea.NewProgram(m, tea.WithOutput(os.Stdout)).Run()
 	if err != nil {
@@ -75,6 +81,9 @@ func runTextProgram(label, def string, validate func(string) error) (string, err
 // is always false; see tui_confirm.go's doc comment), not a
 // wizard-level abort.
 func runConfirmProgram(question string, defaultYes bool) bool {
+	if activePromptAutomation != nil {
+		return activePromptAutomation.confirmPrompt(question, defaultYes)
+	}
 	m := standaloneScreen{s: newConfirmModel(question, defaultYes)}
 	final, err := tea.NewProgram(m, tea.WithOutput(os.Stdout)).Run()
 	if err != nil {

@@ -58,6 +58,12 @@ target binary overrides are available through `PILOT_SSH_BIN`,
 | Command | Appropriate use |
 |---|---|
 | `pilot edit` | Interactive editor for `hosts.yml`, role presets, `group_vars`, and vault skeletons; useful when you prefer a wizard or maintain separate environment directories. |
+
+`pilot edit --actions <scenario.json> --presentation` can also run a semantic
+edit scenario through the real TUI and continue with `deploy`/`reconcile`
+steps in the same terminal session. A PTY recorder such as TREC may wrap this
+command; recording and `trec verify` are optional. Use `--trace-out` for a
+JSONL action trace without putting secret values in the recording.
 | `pilot inventory generate` | Render the simple host-to-roles source into the full Ansible inventory; also backfills missing role variables and vault skeletons unless disabled. |
 | `pilot inventory lint` | Validate `hosts.yml` before generating or committing an inventory. |
 | `pilot inventory roles` | List the valid role values accepted in the simple host source. |

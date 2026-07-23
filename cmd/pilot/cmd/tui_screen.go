@@ -27,6 +27,9 @@ type screen interface {
 	// rather than a genuine confirm (enter). The router maps this to
 	// the shared errDeployAborted sentinel.
 	Canceled() bool
+	// automationScreenID identifies the primitive screen type for the
+	// semantic automation driver without changing the rendered UI.
+	automationScreenID() string
 }
 
 // listChromeLines is how many lines a scrollable list screen

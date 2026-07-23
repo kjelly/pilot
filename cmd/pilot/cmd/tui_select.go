@@ -39,6 +39,10 @@ func (m selectModel) Init() tea.Cmd { return nil }
 func (m selectModel) Finished() bool { return m.confirmed || m.canceled }
 func (m selectModel) Canceled() bool { return m.canceled }
 
+func (m selectModel) automationScreenID() string { return "select" }
+
+func (m selectModel) automationItems() []string { return append([]string(nil), m.items...) }
+
 // Selected is the chosen item's index — valid once Finished() &&
 // !Canceled().
 func (m selectModel) Selected() int { return m.cursor }
