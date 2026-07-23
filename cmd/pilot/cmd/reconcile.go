@@ -12,6 +12,9 @@ import (
 var (
 	reconcileInventoryFlag string
 	reconcileTimeoutFlag   string
+	reconcileActionsPath   string
+	reconcilePresentation  bool
+	reconcileTracePath     string
 )
 
 // reconcileCmd is the day-2 counterpart to deploy: it intentionally lists
@@ -32,10 +35,20 @@ var reconcileCmd = &cobra.Command{
 func init() {
 	reconcileCmd.Flags().StringVarP(&reconcileInventoryFlag, "inventory", "i", "inventory.yml", "預先填入的 inventory 路徑(精靈仍會再問一次，可直接按 Enter 採用)")
 	reconcileCmd.Flags().StringVar(&reconcileTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限")
+	reconcileCmd.Flags().StringVar(&reconcileActionsPath, "actions", "", "以 JSON scenario 自動回答 reconcile TUI prompts")
+	reconcileCmd.Flags().BoolVar(&reconcilePresentation, "presentation", false, "自動操作時顯示教學步驟與 prompt 畫面")
+	reconcileCmd.Flags().StringVar(&reconcileTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
 	rootCmd.AddCommand(reconcileCmd)
 }
 
 func runReconcile(cmd *cobra.Command, _ []string) error {
+	if reconcileActionsPath != "" {
+		return runStandalonePromptWorkflow(cmd, "reconcile", reconcileActionsPath, reconcilePresentation, reconcileTracePath)
+	}
+	return runReconcileInteractive(cmd)
+}
+
+func runReconcileInteractive(cmd *cobra.Command) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return fmt.Errorf("pilot reconcile 需要互動式終端機(TTY)才能問問題")
 	}

@@ -27,6 +27,11 @@ confirmation, contract resolution, and transaction handling remain in force.
 The optional PTY recording covers all three phases; TREC and `trec verify`
 remain optional.
 
+The same prompt driver is also exposed independently as
+`pilot deploy --actions <scenario>` and `pilot reconcile --actions <scenario>`.
+Standalone scenarios must contain exactly one matching action, so each command
+can be recorded, replayed, and reviewed as its own teaching session.
+
 ---
 
 ### Task 1: Scenario contract
@@ -140,4 +145,3 @@ remain optional.
 - [ ] **Step 2: Run `go build ./...`, `go test ./... -count=1`, and `go test -race ./... -count=1`; expect exit 0.**
 - [ ] **Step 3: Run one optional fixed-size PTY recording of presentation mode, inspect transcript/final screen, and run `trec verify` only when the cast is intended for archival.**
 - [ ] **Step 4: Confirm normal edit has no changed labels/banner, no direct automation file mutation, and no recorder dependency; confirm the teaching cast and JSONL trace align action-by-action.**
-

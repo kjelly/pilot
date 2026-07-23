@@ -64,6 +64,11 @@ edit scenario through the real TUI and continue with `deploy`/`reconcile`
 steps in the same terminal session. A PTY recorder such as TREC may wrap this
 command; recording and `trec verify` are optional. Use `--trace-out` for a
 JSONL action trace without putting secret values in the recording.
+
+`pilot deploy --actions <deploy-scenario.json> --presentation` and
+`pilot reconcile --actions <reconcile-scenario.json> --presentation` are also
+available as standalone semantic TUI drivers. Each standalone scenario must
+contain exactly one matching `deploy` or `reconcile` action.
 | `pilot inventory generate` | Render the simple host-to-roles source into the full Ansible inventory; also backfills missing role variables and vault skeletons unless disabled. |
 | `pilot inventory lint` | Validate `hosts.yml` before generating or committing an inventory. |
 | `pilot inventory roles` | List the valid role values accepted in the simple host source. |
