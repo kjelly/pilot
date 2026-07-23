@@ -46,6 +46,10 @@ go build -o pilot ./cmd/pilot
 The CLI help is the authoritative flag reference for the version you are
 running. Use `pilot <command> --help` before a state-changing operation.
 
+For agent-driven TUI scenarios, use `pilot actions list` for the action names
+and `pilot actions schema` for the current JSON contract. These commands are
+read-only and come from the same catalog used by scenario validation.
+
 Global options available across commands include `--config`, `--data-dir`, and
 `--log-level`. `PILOT_LOG_LEVEL` and `PILOT_LOG_FORMAT` configure diagnostics;
 target binary overrides are available through `PILOT_SSH_BIN`,

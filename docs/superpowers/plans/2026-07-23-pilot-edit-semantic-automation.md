@@ -32,6 +32,11 @@ The same prompt driver is also exposed independently as
 Standalone scenarios must contain exactly one matching action, so each command
 can be recorded, replayed, and reviewed as its own teaching session.
 
+Agents discover the current action contract through the read-only
+`pilot actions list` and `pilot actions schema` commands. The schema is emitted
+from the catalog used by scenario validation, so it is not a second hand-written
+contract.
+
 ---
 
 ### Task 1: Scenario contract
