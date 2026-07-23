@@ -130,6 +130,9 @@ type Options struct {
 	SSHTimeout    time.Duration // override sshTimeout  (0 = use default 2m)
 	BootTimeout   time.Duration // override bootTimeout (0 = use default 3m)
 	KeepOnFailure bool          // keep VM on failure for debugging
+	// Services optionally bootstraps the guest from host-local package/image
+	// services. A nil value preserves the legacy SSH-only cloud-init.
+	Services *ServiceBootstrap
 }
 
 // state is the on-disk JSON shape, versioned like dockertarget's.
@@ -569,7 +572,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if pubKey, err = os.ReadFile(tg.KeyPath + ".pub"); err != nil {
 		return nil, fmt.Errorf("vmtarget: read public key: %w", err)
 	}
-	if err = m.buildSeed(ctx, tg, string(pubKey)); err != nil {
+	if err = m.buildSeed(ctx, tg, string(pubKey), opt.Services); err != nil {
 		return nil, err
 	}
 	if err = m.createOverlay(ctx, tg); err != nil {
@@ -670,8 +673,11 @@ func (m *Manager) generateKey(ctx context.Context, t *Target) error {
 // a NoCloud seed ISO. Provisioning is fully declarative: the only thing
 // injected is the SSH public key (authorised for the login user) and the
 // hostname.
-func (m *Manager) buildSeed(ctx context.Context, t *Target, pubKey string) error {
-	userData := renderUserData(t, pubKey)
+func (m *Manager) buildSeed(ctx context.Context, t *Target, pubKey string, services *ServiceBootstrap) error {
+	userData, err := renderUserData(t, pubKey, services)
+	if err != nil {
+		return fmt.Errorf("vmtarget: render user-data: %w", err)
+	}
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", t.Name, t.Name)
 
 	udPath := filepath.Join(t.Dir, "user-data")
@@ -695,7 +701,7 @@ func (m *Manager) buildSeed(ctx context.Context, t *Target, pubKey string) error
 // renderUserData produces the cloud-config that authorises the SSH key
 // for the login user. For root we both flip disable_root off and write
 // the key directly, so cloud images with varied root policies all work.
-func renderUserData(t *Target, pubKey string) string {
+func renderUserData(t *Target, pubKey string, services *ServiceBootstrap) (string, error) {
 	pubKey = strings.TrimSpace(pubKey)
 	var sb strings.Builder
 	sb.WriteString("#cloud-config\n")
@@ -725,7 +731,21 @@ func renderUserData(t *Target, pubKey string) string {
 		sb.WriteString("    ssh_authorized_keys:\n")
 		fmt.Fprintf(&sb, "      - %s\n", pubKey)
 	}
-	return sb.String()
+	if services != nil {
+		fragment, err := services.RenderCloudInit()
+		if err != nil {
+			return "", err
+		}
+		if t.SSHUser != "root" {
+			// The root branch already opened write_files for authorized_keys.
+			sb.WriteString("write_files:\n")
+		}
+		if t.SSHUser == "root" {
+			fragment = strings.TrimPrefix(fragment, "write_files:\n")
+		}
+		sb.WriteString(fragment)
+	}
+	return sb.String(), nil
 }
 
 // createOverlay creates the per-target qcow2 overlay backed by the
