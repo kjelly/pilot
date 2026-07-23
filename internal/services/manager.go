@@ -117,9 +117,6 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	if err := profile.Validate(); err != nil {
 		return err
 	}
-	if err := m.requireCompose(ctx); err != nil {
-		return err
-	}
 	fingerprint, err := profile.Fingerprint()
 	if err != nil {
 		return err
@@ -129,6 +126,9 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	}
 	bundle, err := RenderBundle(profile, m.root, bindIP)
 	if err != nil {
+		return err
+	}
+	if err := m.requireCompose(ctx); err != nil {
 		return err
 	}
 	if err := m.ensureHarbor(ctx, profile, bundle); err != nil {
