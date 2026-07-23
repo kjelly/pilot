@@ -475,6 +475,13 @@ go run ./cmd/pilot inventory generate --dir envs/staging # 讀 envs/staging/host
 Agent 可使用 version 1 JSON scenario 讓 `pilot edit` 依照真實 TUI 完成編輯，
 再在同一個終端 session 依序操作 `pilot deploy` 與 `pilot reconcile`：
 
+建立 scenario 前先查目前 binary 的契約：
+
+```bash
+./pilot actions list
+./pilot actions schema
+```
+
 ```bash
 pilot edit --actions scenario.json --presentation --trace-out edit-workflow.jsonl
 ```

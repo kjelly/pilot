@@ -72,6 +72,9 @@ func validateEditScenario(s editScenario) error {
 }
 
 func validateEditAction(step editAction) error {
+	if _, ok := semanticActionSpecFor(step.Action); !ok {
+		return fmt.Errorf("unknown action")
+	}
 	switch step.Action {
 	case "create_host":
 		if strings.TrimSpace(step.Host) == "" {
@@ -91,9 +94,15 @@ func validateEditAction(step editAction) error {
 		if hasSecretName(step.Field) {
 			return fmt.Errorf("secret values are not accepted")
 		}
-		switch step.Field {
-		case "ansible_host", "ansible_user", "ssh_key_file":
-		default:
+		spec, _ := semanticActionSpecFor(step.Action)
+		allowed := false
+		for _, field := range spec.Values["field"] {
+			if step.Field == field {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
 			return fmt.Errorf("unsupported host field")
 		}
 		return nil
@@ -122,7 +131,7 @@ func validateEditAction(step editAction) error {
 		}
 		return validatePromptAnswers(step.Answers)
 	default:
-		return fmt.Errorf("unknown action")
+		return fmt.Errorf("action is not executable by the edit workflow")
 	}
 }
 
