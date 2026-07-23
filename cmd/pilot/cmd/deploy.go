@@ -123,7 +123,79 @@ func init() {
 	deployCmd.Flags().BoolVar(&deployShowExperimental, "show-experimental", false, "include experimental contract components after their evidence requirement is reviewed")
 	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
 	deployCmd.AddCommand(deployPlanCmd)
+	deployGraphCmd.Flags().StringVarP(&deployGraphInventoryFlag, "inventory", "i", "inventory.yml", "inventory 路徑，用來解析每個角色 group 有哪些主機")
+	deployGraphCmd.Flags().StringVar(&deployGraphViewFlag, "view", "component", "拓樸圖視角：component（元件依賴樹）、host（以主機為主，含跨主機依賴）、both（兩者都印）")
+	deployCmd.AddCommand(deployGraphCmd)
 	rootCmd.AddCommand(deployCmd)
+}
+
+var (
+	deployGraphInventoryFlag string
+	deployGraphViewFlag      string
+)
+
+var deployGraphCmd = &cobra.Command{
+	Use:   "graph",
+	Short: "顯示這份 inventory 的完整部署拓樸圖（元件、主機落點、依賴關係）",
+	Long: `pilot deploy graph 讀 contracts/ 的依賴宣告，投影到你指定的
+inventory 上，用 ASCII 圖畫出整體拓樸。純唯讀，不會變更任何東西，適合在
+pilot deploy 前先看清楚整體拓樸。
+
+--view 選擇視角：
+  component（預設）依賴樹：元件先後（必要／選填）、落在哪台主機、每台承載彙總
+  host              以主機為主：每台承載哪些角色、資源總和、跨主機服務依賴
+  both              兩種視角都印`,
+	Args: cobra.NoArgs,
+	RunE: runDeployGraph,
+}
+
+func runDeployGraph(cmd *cobra.Command, _ []string) error {
+	switch deployGraphViewFlag {
+	case "component", "host", "both":
+	default:
+		return fmt.Errorf("--view 只接受 component、host 或 both（收到 %q）", deployGraphViewFlag)
+	}
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return err
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		return err
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		return err
+	}
+	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
+	if err != nil {
+		return err
+	}
+	ctx := withDeployAnsibleRuntime(cmd.Context(), runtime)
+	out := cmd.OutOrStdout()
+	resolvedInv, notice, cleanup, err := expandIfSimplifiedHosts(deployGraphInventoryFlag)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if notice != "" {
+		fmt.Fprintln(out, notice)
+	}
+	groups, err := resolveInventoryGroups(ctx, resolvedInv)
+	if err != nil {
+		return err
+	}
+	topo := buildInventoryTopology(catalog, groups)
+	if deployGraphViewFlag == "component" || deployGraphViewFlag == "both" {
+		renderInventoryTopology(out, topo, deployGraphInventoryFlag)
+	}
+	if deployGraphViewFlag == "both" {
+		fmt.Fprintln(out)
+	}
+	if deployGraphViewFlag == "host" || deployGraphViewFlag == "both" {
+		renderHostTopology(out, topo, deployGraphInventoryFlag)
+	}
+	return nil
 }
 
 var deployPlanCmd = &cobra.Command{
@@ -1516,6 +1588,11 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	fmt.Fprintln(out, "沒填機器的角色會自動跳過，不需要為它們準備 group_vars/vault。")
 	fmt.Fprintln(out)
 
+	// Show the topology this run will apply before asking anything, so the
+	// operator can eyeball component placement and dependencies. Best-effort:
+	// a failure to build it must never block the deploy.
+	printSiteTopology(ctx, out, inv)
+
 	decision, err := promptStageDecision(out, "site.yml")
 	if err != nil {
 		return err
@@ -1563,6 +1640,44 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	extraVars = append(extraVars, strings.Fields(extra)...)
 
 	return executeRecordedDeployment(ctx, runner, out, "playbooks/site.yml", inv, limit, tags, extraVars, vault, decision.Stage, nil)
+}
+
+// printSiteTopology renders the contract-derived topology graph for inv as a
+// best-effort preview. Any error (missing ansible-inventory, unreadable
+// contracts) is surfaced as a one-line notice and swallowed — the deploy
+// itself is authoritative and must not be gated on this read-only view.
+func printSiteTopology(ctx context.Context, out io.Writer, inv string) {
+	root, err := resolveContractRoot("")
+	if err != nil {
+		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
+		return
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
+		return
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
+		return
+	}
+	resolvedInv, notice, cleanup, err := expandIfSimplifiedHosts(inv)
+	if err != nil {
+		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
+		return
+	}
+	defer cleanup()
+	if notice != "" {
+		fmt.Fprintln(out, notice)
+	}
+	groups, err := resolveInventoryGroups(ctx, resolvedInv)
+	if err != nil {
+		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
+		return
+	}
+	renderInventoryTopology(out, buildInventoryTopology(catalog, groups), inv)
+	fmt.Fprintln(out)
 }
 
 // ---- single-playbook flow ---------------------------------------------------
