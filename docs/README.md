@@ -21,6 +21,7 @@
 | 看一份完整的「spec → apply → verify → 失敗 → 修」| [`runbooks/pam-oidc-sshd.md`](./runbooks/pam-oidc-sshd.md) |
 | spec-to-spec supplier pattern（同一 host 多 spec 如何 cross-check）| [`runbooks/sso-composition.md`](./runbooks/sso-composition.md) |
 | **管 FreeIPA 使用者/權限（名冊與機密不進 git）** | [`runbooks/freeipa-identity.md`](./runbooks/freeipa-identity.md)；已部署後以 `pilot reconcile` 調和 roster |
+| **把 FreeIPA NFS clients 接到 NetApp、Synology 或 QNAP** | [`external-nfs-provider-integration.md`](./external-nfs-provider-integration.md)；未經硬體實跑的 provider readiness 與安全邊界指南 |
 | **開啟 FreeIPA 目錄服務（389-ds）稽核日誌** | [`runbooks/freeipa-389ds-audit-log.md`](./runbooks/freeipa-389ds-audit-log.md) |
 | **DNS 服務自訂內部網域（網域資料不進公開 git）** | [`runbooks/core-infra-provider-dns-zones.md`](./runbooks/core-infra-provider-dns-zones.md) |
 | **部署中央 SIEM 日誌接收端（rsyslog）** | [`runbooks/log-server.md`](./runbooks/log-server.md) |
