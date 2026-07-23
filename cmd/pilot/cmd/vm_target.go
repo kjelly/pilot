@@ -19,6 +19,7 @@ import (
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/delivery"
 	"github.com/kjelly/pilot/internal/sandbox"
+	"github.com/kjelly/pilot/internal/services"
 	"github.com/kjelly/pilot/internal/spec"
 	"github.com/kjelly/pilot/internal/vmtarget"
 )
@@ -90,6 +91,7 @@ var (
 	vtSSHTimeout    time.Duration
 	vtBootTimeout   time.Duration
 	vtKeepOnFailure bool
+	vtServices      string
 
 	// run batch/preflight flags (see runVtRun)
 	vtDiscover        string
@@ -142,6 +144,7 @@ func init() {
 	vtUpCmd.Flags().DurationVar(&vtSSHTimeout, "ssh-timeout", 0, "override SSH readiness timeout (default 2m)")
 	vtUpCmd.Flags().DurationVar(&vtBootTimeout, "boot-timeout", 0, "override boot/IP-acquisition timeout (default 3m)")
 	vtUpCmd.Flags().BoolVar(&vtKeepOnFailure, "keep-on-failure", false, "keep the VM and its on-disk files/state on provisioning failure for investigation")
+	vtUpCmd.Flags().StringVar(&vtServices, "services", "none", "host service profile: none, local, or a profile YAML path")
 }
 
 func runVtUp(cmd *cobra.Command, args []string) error {
@@ -152,6 +155,10 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 		vtBaseImage = "ubuntu-24.04"
 	}
 	m, err := vtNewManager()
+	if err != nil {
+		return err
+	}
+	serviceBootstrap, err := resolveVMServiceBootstrap(context.Background(), vtServices, vtNetwork)
 	if err != nil {
 		return err
 	}
@@ -168,6 +175,7 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 		SSHTimeout:    vtSSHTimeout,
 		BootTimeout:   vtBootTimeout,
 		KeepOnFailure: vtKeepOnFailure,
+		Services:      serviceBootstrap,
 	})
 	if err != nil {
 		if !vtKeepOnFailure {
@@ -184,6 +192,42 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "  disk      : %d GiB\n", tgt.DiskGB)
 	fmt.Fprintf(out, "  inventory : `pilot vm-target show-inventory --name %s`\n", tgt.Name)
 	return nil
+}
+
+func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtarget.ServiceBootstrap, error) {
+	if ref == "" || ref == "none" {
+		return nil, nil
+	}
+	cfg := loadConfig()
+	profile, err := services.LoadProfile(ref)
+	if err != nil {
+		return nil, err
+	}
+	_, err = discoverLibvirtNetworkAddress(ctx, network)
+	if err != nil {
+		return nil, err
+	}
+	m, err := services.NewManager(cfg.DataDir, nil)
+	if err != nil {
+		return nil, err
+	}
+	client, err := m.ClientConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if client.Profile != profile.Name {
+		return nil, fmt.Errorf("vm-target: requested services profile %q but host is running %q", profile.Name, client.Profile)
+	}
+	return &vmtarget.ServiceBootstrap{
+		Profile:           client.Profile,
+		Fingerprint:       client.Fingerprint,
+		Hostname:          client.Hostname,
+		AptProxyURL:       client.AptProxyURL,
+		RPMBaseURL:        client.RPMBaseURL,
+		RegistryMirrorURL: client.RegistryMirrorURL,
+		RegistryProjects:  client.RegistryProjects,
+		CAPEM:             client.CAPEM,
+	}, nil
 }
 
 // ---- down -----------------------------------------------------------------
