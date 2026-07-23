@@ -470,6 +470,21 @@ go run ./cmd/pilot edit --dir envs/staging               # 編輯 envs/staging/h
 go run ./cmd/pilot inventory generate --dir envs/staging # 讀 envs/staging/hosts.yml，展開成 envs/staging/inventory.yml
 ```
 
+### Semantic workflow recording
+
+Agent 可使用 version 1 JSON scenario 讓 `pilot edit` 依照真實 TUI 完成編輯，
+再在同一個終端 session 依序操作 `pilot deploy` 與 `pilot reconcile`：
+
+```bash
+pilot edit --actions scenario.json --presentation --trace-out edit-workflow.jsonl
+```
+
+scenario 的 `steps` 先放 edit actions，最後可放 `deploy`／`reconcile` action；
+每個後續 action 透過 `answers` 提供 prompt 的可見 label、文字或確認答案。
+這條路徑仍會經過 deploy/reconcile 原有的 preflight、preview、stage gate、
+confirmation 與 transaction。可以用 TREC 或其他 PTY 工具錄影，但錄影和
+`trec verify` 都不是 pilot 執行成功的必要條件。
+
 > `--dir` 只是換掉 `--in`/`--out`的預設值（分別變成 `<dir>/hosts.yml`、
 > `<dir>/inventory.yml`）；額外指定 `--in`/`--out` 一樣會覆蓋掉 `--dir`
 > 算出來的路徑，兩者不衝突。`--dir` 指到的資料夾不存在也沒關係，存檔/產生

@@ -146,6 +146,9 @@ func newEditRouterModel(dir string) editRouterModel {
 }
 
 var editDir string
+var editActionsPath string
+var editPresentation bool
+var editTracePath string
 
 var editCmd = &cobra.Command{
 	Use:   "edit",
@@ -167,6 +170,9 @@ ansible-vault edit 編輯加密檔)。
 
 func init() {
 	editCmd.Flags().StringVar(&editDir, "dir", ".", "要編輯哪個資料夾底下的 hosts.yml / group_vars/ / .vault/(預設目前資料夾)")
+	editCmd.Flags().StringVar(&editActionsPath, "actions", "", "以 JSON scenario 自動操作 edit，並可接續 deploy/reconcile")
+	editCmd.Flags().BoolVar(&editPresentation, "presentation", false, "自動操作時顯示教學步驟與每個 TUI 畫面")
+	editCmd.Flags().StringVar(&editTracePath, "trace-out", "", "將 automation action 以 JSONL 寫入指定檔案")
 	rootCmd.AddCommand(editCmd)
 }
 
@@ -183,6 +189,13 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
 	fmt.Fprintln(out)
+	if editActionsPath != "" {
+		scenario, err := loadEditScenario(editActionsPath)
+		if err != nil {
+			return err
+		}
+		return runAutomatedEditWorkflow(cmd, scenario, editPresentation, editTracePath)
+	}
 
 	router := newEditRouterModel(editDir)
 	final, err := tea.NewProgram(router, tea.WithOutput(os.Stdout)).Run()

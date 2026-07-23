@@ -38,6 +38,16 @@ func (m multiSelectModel) Init() tea.Cmd { return nil }
 func (m multiSelectModel) Finished() bool { return m.confirmed || m.canceled }
 func (m multiSelectModel) Canceled() bool { return m.canceled }
 
+func (m multiSelectModel) automationScreenID() string { return "multi-select" }
+
+func (m multiSelectModel) automationItems() []string {
+	items := make([]string, len(m.items))
+	for i, item := range m.items {
+		items[i] = item.Label
+	}
+	return items
+}
+
 // CheckedLabels returns the Label of every checked item, in item
 // order — valid once Finished() && !Canceled().
 func (m multiSelectModel) CheckedLabels() []string {

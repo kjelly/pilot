@@ -44,6 +44,10 @@ func (m textInputModel) Init() tea.Cmd {
 func (m textInputModel) Finished() bool { return m.confirmed || m.canceled }
 func (m textInputModel) Canceled() bool { return m.canceled }
 
+func (m textInputModel) automationScreenID() string { return "text-input" }
+
+func (m textInputModel) automationLabel() string { return m.label }
+
 // Value is the entered text — valid once Finished() && !Canceled().
 func (m textInputModel) Value() string { return m.input.Value() }
 

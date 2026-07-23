@@ -30,6 +30,8 @@ func (m confirmModel) Init() tea.Cmd { return nil }
 func (m confirmModel) Finished() bool { return m.answered }
 func (m confirmModel) Canceled() bool { return false }
 
+func (m confirmModel) automationScreenID() string { return "confirm" }
+
 // Value is the yes/no answer — valid once Finished().
 func (m confirmModel) Value() bool { return m.value }
 
