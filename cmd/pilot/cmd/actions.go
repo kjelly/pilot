@@ -25,16 +25,21 @@ type semanticPromptSpec struct {
 }
 
 // semanticActionSpecs is the single source of truth for the action names and
-// input contract exposed to agents and enforced by scenario validation.
+// input contract exposed to agents and enforced by scenario validation. The
+// edit-workflow actions come from editActionRegistry (edit_actions_registry.go);
+// deploy/reconcile are appended separately since they run through a different
+// execution path (prompt_automation.go), not the edit router.
 func semanticActionSpecs() []semanticActionSpec {
-	return []semanticActionSpec{
-		{Name: "create_host", Description: "create a host through the hosts TUI", Required: []string{"host"}},
-		{Name: "set_host_field", Description: "set one supported non-secret host field", Required: []string{"host", "field", "value"}, Values: map[string][]string{"field": {"ansible_host", "ansible_user", "ssh_key_file"}}},
-		{Name: "enable_role", Description: "enable one role in a host role checklist", Required: []string{"host", "role"}},
-		{Name: "save_hosts", Description: "save hosts.yml and finish the edit TUI"},
-		{Name: "deploy", Description: "answer the deploy TUI and run its guarded transaction", Required: []string{"inventory", "answers"}, Standalone: true, Answer: &semanticPromptSpec{Required: []string{"prompt"}, ExactlyOneOf: []string{"select", "text", "confirm"}, SecretAllowed: false}},
-		{Name: "reconcile", Description: "answer the reconcile TUI and run its guarded transaction", Required: []string{"inventory", "answers"}, Standalone: true, Answer: &semanticPromptSpec{Required: []string{"prompt"}, ExactlyOneOf: []string{"select", "text", "confirm"}, SecretAllowed: false}},
+	registry := editActionRegistry()
+	specs := make([]semanticActionSpec, 0, len(registry)+2)
+	for _, def := range registry {
+		specs = append(specs, def.Spec)
 	}
+	specs = append(specs,
+		semanticActionSpec{Name: "deploy", Description: "answer the deploy TUI and run its guarded transaction", Required: []string{"inventory", "answers"}, Standalone: true, Answer: &semanticPromptSpec{Required: []string{"prompt"}, ExactlyOneOf: []string{"select", "text", "confirm"}, SecretAllowed: false}},
+		semanticActionSpec{Name: "reconcile", Description: "answer the reconcile TUI and run its guarded transaction", Required: []string{"inventory", "answers"}, Standalone: true, Answer: &semanticPromptSpec{Required: []string{"prompt"}, ExactlyOneOf: []string{"select", "text", "confirm"}, SecretAllowed: false}},
+	)
+	return specs
 }
 
 func semanticActionSpecFor(name string) (semanticActionSpec, bool) {
