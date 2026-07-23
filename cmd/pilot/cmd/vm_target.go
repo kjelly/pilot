@@ -1493,22 +1493,28 @@ var (
 	vtTestPlaybook      string
 	vtTestSpec          string
 	vtTestSkipLint      bool
+	vtTestSkipCheckmode bool
 	vtTestNoRollback    bool
 	vtTestVerifyTimeout int
 )
 
 var vtTestCmd = &cobra.Command{
 	Use:   "test [-- <ansible extra-vars>...]",
-	Short: "Run syntax, apply, verify, and idempotency tests against a VM target",
+	Short: "Run syntax, check-mode, apply, verify, and idempotency tests against a VM target",
 	Long: `Run a full integration and verification test suite against a VM target.
 
 Steps executed:
   1. L1 syntax check: 'ansible-playbook --syntax-check'
-  2. Auto-snapshot: captures current state under 'pre-test' tag
-  3. L4 apply: runs the playbook
-  4. L5 verify: runs 'pilot verify' against the target
-  5. L6 idempotency: runs the playbook again and checks that changed=0
-  6. Auto-rollback: if any step fails, automatically rolls back to 'pre-test'
+  2. L3 dry-run: 'ansible-playbook --check --diff' against the target's current
+     state (catches check-mode/fresh-host ordering bugs before any mutation —
+     see AGENTS.md §1.4; use --skip-checkmode for a playbook that legitimately
+     cannot run in check mode)
+  3. Auto-snapshot: captures current state under 'pre-test' tag
+  4. L4 apply: runs the playbook
+  5. L5 verify: runs 'pilot verify' against the target
+  6. L6 idempotency: runs the playbook again and checks that changed=0
+  7. Auto-rollback: if any step after the dry-run fails, automatically rolls
+     back to 'pre-test'
 
 Everything after '--' is forwarded VERBATIM to the apply AND idempotency
 ansible-playbook runs — this is how you pass playbook variables the run needs:
@@ -1533,6 +1539,7 @@ func init() {
 	vtTestCmd.Flags().StringVar(&vtTestPlaybook, "playbook", "", "path to the playbook to run (required)")
 	vtTestCmd.Flags().StringVar(&vtTestSpec, "spec", "", "path to the verification spec.md (required)")
 	vtTestCmd.Flags().BoolVar(&vtTestSkipLint, "skip-lint", false, "skip syntax check pre-flight")
+	vtTestCmd.Flags().BoolVar(&vtTestSkipCheckmode, "skip-checkmode", false, "skip the --check --diff dry-run pre-flight (only for a playbook that cannot run in check mode)")
 	vtTestCmd.Flags().BoolVar(&vtTestNoRollback, "no-rollback", false, "disable automatic rollback on failure")
 	vtTestCmd.Flags().IntVar(&vtTestVerifyTimeout, "verify-timeout", 0, "per-row timeout (seconds) forwarded to `pilot verify` (0 = verify's own default)")
 
@@ -1570,7 +1577,7 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 
 	// Step 1: L1 Syntax Check
 	if !vtTestSkipLint {
-		fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 1/5] L1 Syntax Check ===")
+		fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 1/6] L1 Syntax Check ===")
 		syntaxArgs := []string{vtTestPlaybook, "--syntax-check"}
 		if err := execAnsiblePlaybook(cmd.OutOrStdout(), syntaxArgs...); err != nil {
 			return fmt.Errorf("syntax check failed: %w", err)
@@ -1578,21 +1585,38 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.OutOrStdout(), "✓ Syntax check passed")
 	}
 
-	// Step 2: Auto-snapshot
-	snapTag := fmt.Sprintf("pre-test-%d", time.Now().Unix())
-	fmt.Fprintf(cmd.OutOrStdout(), "=== [Step 2/5] Auto-snapshotting VM state (tag: %s) ===\n", snapTag)
-	if err := m.Snapshot(ctx, vtName, snapTag); err != nil {
-		return fmt.Errorf("failed to create auto-snapshot: %w", err)
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), "✓ Auto-snapshot created")
-
-	// Step 3: L4 Apply
-	fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 3/5] L4 Apply Playbook ===")
 	t, cleanup, invPath, err := vtStageInventory()
 	if err != nil {
 		return err
 	}
 	defer cleanup()
+
+	// Step 2: L3 dry-run (--check --diff) against the target's CURRENT state.
+	// This is the step that catches check-mode/fresh-host ordering bugs (e.g.
+	// a later gate asserting on real state that an earlier, correctly
+	// check-mode-gated task never actually created) before any real mutation
+	// happens. It runs before the snapshot deliberately: --check is expected
+	// to be a no-op for check-mode-aware modules, so it needs no rollback
+	// safety net of its own.
+	if !vtTestSkipCheckmode {
+		fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 2/6] L3 Dry-run (--check --diff) ===")
+		checkArgs := append(buildApplyArgs(vtTestPlaybook, invPath, t.Name, args), "--check", "--diff")
+		if err := execExternal(cmd.OutOrStdout(), "ansible-playbook", checkArgs...); err != nil {
+			return fmt.Errorf("check-mode dry-run failed: %w (see AGENTS.md §1.4 — a playbook must apply cleanly in --check mode against the target's current state, not just for real; if this playbook is a legitimate exception, rerun with --skip-checkmode)", err)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "✓ Check-mode dry-run passed")
+	}
+
+	// Step 3: Auto-snapshot
+	snapTag := fmt.Sprintf("pre-test-%d", time.Now().Unix())
+	fmt.Fprintf(cmd.OutOrStdout(), "=== [Step 3/6] Auto-snapshotting VM state (tag: %s) ===\n", snapTag)
+	if err := m.Snapshot(ctx, vtName, snapTag); err != nil {
+		return fmt.Errorf("failed to create auto-snapshot: %w", err)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "✓ Auto-snapshot created")
+
+	// Step 4: L4 Apply
+	fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 4/6] L4 Apply Playbook ===")
 
 	// Extras after '--' (e.g. -e ipa_server_ip=…, -e @vault) are forwarded to
 	// the apply run. Mirror `vm-target run`: when the caller supplies
@@ -1625,7 +1649,7 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 			return nil
 		},
 		Verify: func(context.Context) error {
-			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 4/5] L5 Verification Spec ===")
+			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 5/6] L5 Verification Spec ===")
 			limit, err := vmTargetVerificationLimit(vtTestSpec, t.Name)
 			if err != nil {
 				return err
@@ -1641,7 +1665,7 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 			return nil
 		},
 		Idempotency: func(context.Context) error {
-			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 5/5] L6 Idempotency Check ===")
+			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 6/6] L6 Idempotency Check ===")
 			var idemBuf bytes.Buffer
 			if err := execExternal(io.MultiWriter(cmd.OutOrStdout(), &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
 				return fmt.Errorf("idempotency run failed: %w", err)

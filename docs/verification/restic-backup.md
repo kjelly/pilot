@@ -1,13 +1,16 @@
 # Verification Spec — restic-backup（跨主機通用 restic 備份到 S3，涵蓋本專案各軟體的資料/設定檔）
 
-> 版本：v1.2（v1.0 的通用骨架已於 vm-target 沙盒實測；v1.1 用真實的 FreeIPA
+> 版本：v1.3（v1.0 的通用骨架已於 vm-target 沙盒實測；v1.1 用真實的 FreeIPA
 > server/client 做完整備份/故障/還原演練，修好 3 個真事故，見 §8 與
 > `docs/runbooks/restic-backup.md` §5–§6；v1.2 讓多主機共用 repository 的並行驗證
-> 以有界 lock 等待安全完成）
+> 以有界 lock 等待安全完成；v1.3 用 `> 驗證逾時：` 讓這份 spec 自己宣告所需的
+> 逾時秒數，`pilot verify` 會自動套用——不用再靠操作者記得手動加 `--timeout 180`，
+> 見 round 13 教訓 `docs/runbooks/minimal-poc-architecture.md`）
 > 對齊規範：pilot 通用 config-only 服務規範；備份目的地預設指向本專案自建的
 > `docs/verification/seaweedfs-s3.md`（SeaweedFS S3 gateway），亦可透過變數
 > 切換到外部/獨立 S3（AWS S3、另一台 MinIO 等）。
 > 維護者：sre
+> 驗證逾時：180
 
 ## 1. 目標系統
 
