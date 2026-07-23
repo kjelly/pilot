@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -24,6 +25,7 @@ type ServiceBootstrap struct {
 	Hostname          string
 	AptProxyURL       string
 	RPMBaseURL        string
+	RPMRepositories   map[string]string
 	RegistryMirrorURL string
 	RegistryProjects  map[string]string
 	CAPEM             string
@@ -95,8 +97,18 @@ func (s ServiceBootstrap) RenderCloudInit() (string, error) {
 	fmt.Fprintf(&b, "      Acquire::https::Proxy %s;\n", strconv.Quote(s.AptProxyURL))
 	b.WriteString("  - path: /etc/yum.repos.d/pilot-services.repo\n")
 	b.WriteString("    permissions: '0644'\n    content: |\n")
-	b.WriteString("      [pilot-pulp]\n      name=pilot-pulp\n      enabled=1\n      gpgcheck=0\n")
-	fmt.Fprintf(&b, "      baseurl=%s\n", s.RPMBaseURL)
+	repositories := s.RPMRepositories
+	if len(repositories) == 0 {
+		repositories = map[string]string{"pilot": s.RPMBaseURL}
+	}
+	names := make([]string, 0, len(repositories))
+	for name := range repositories {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Fprintf(&b, "      [pilot-pulp-%s]\n      name=pilot-pulp-%s\n      enabled=1\n      gpgcheck=0\n      baseurl=%s\n", name, name, repositories[name])
+	}
 	projects, _ := json.Marshal(s.RegistryProjects)
 	b.WriteString("  - path: /etc/pilot/registry-projects.json\n")
 	b.WriteString("    permissions: '0644'\n    content: |\n")
@@ -113,7 +125,19 @@ func (s ServiceBootstrap) RenderCloudInit() (string, error) {
 		fmt.Fprintf(&b, "  - [sh, -c, 'grep -qF %s /etc/hosts || printf \"%%s %%s\\n\" %s %s >> /etc/hosts']\n", strconv.Quote(s.HostIP+" "+s.Hostname), strconv.Quote(s.HostIP), strconv.Quote(s.Hostname))
 	}
 	b.WriteString("  - [sh, -c, 'if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates; elif command -v update-ca-trust >/dev/null 2>&1; then update-ca-trust extract; else exit 1; fi']\n")
-	fmt.Fprintf(&b, "  - [sh, -c, 'if command -v curl >/dev/null 2>&1; then curl --fail --silent --show-error --cacert /usr/local/share/ca-certificates/pilot-services.crt %s/pulp/api/v3/status/; elif command -v wget >/dev/null 2>&1; then wget --ca-certificate=/usr/local/share/ca-certificates/pilot-services.crt -qO- %s/pulp/api/v3/status/; else exit 1; fi']\n", s.RPMBaseURL, s.RPMBaseURL)
+	pulpAPI := pulpStatusURL(s.RPMBaseURL)
+	fmt.Fprintf(&b, "  - [sh, -c, 'if command -v curl >/dev/null 2>&1; then curl --fail --silent --show-error --cacert /usr/local/share/ca-certificates/pilot-services.crt %s; elif command -v wget >/dev/null 2>&1; then wget --ca-certificate=/usr/local/share/ca-certificates/pilot-services.crt -qO- %s; else exit 1; fi']\n", pulpAPI, pulpAPI)
 	fmt.Fprintf(&b, "  - [sh, -c, 'if command -v curl >/dev/null 2>&1; then curl --fail --silent --show-error %s/v2/; elif command -v wget >/dev/null 2>&1; then wget -qO- %s/v2/; else exit 1; fi']\n", s.RegistryMirrorURL, s.RegistryMirrorURL)
 	return b.String(), nil
+}
+
+func pulpStatusURL(rpmURL string) string {
+	u, err := url.Parse(rpmURL)
+	if err != nil {
+		return strings.TrimRight(rpmURL, "/") + "/pulp/api/v3/status/"
+	}
+	u.Path = "/pulp/api/v3/status/"
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }

@@ -15,6 +15,9 @@ func TestBuiltInDevLiteValid(t *testing.T) {
 	if got, err := p.Fingerprint(); err != nil || len(got) != 64 {
 		t.Fatalf("fingerprint = %q, err = %v", got, err)
 	}
+	if got := p.OCI.Registries[0].Type; got != "docker-hub" {
+		t.Fatalf("OCI registry type = %q, want docker-hub", got)
+	}
 }
 
 func TestLoadProfileUnknownRefErrors(t *testing.T) {

@@ -50,6 +50,9 @@ func TestManagerCreatesPersistentRootBeforeComposePreflight(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.client = server.Client()
+	m.seed = func(_ context.Context, _ Profile, _ string, _ net.IP, _ *http.Client) (ClientConfig, error) {
+		return ClientConfig{Profile: profile.Name}, nil
+	}
 	if err := m.Up(context.Background(), profile, net.ParseIP("192.168.122.1")); err != nil {
 		t.Fatalf("Up failed after creating root: %v", err)
 	}
@@ -102,6 +105,35 @@ func TestManagerRequiresComposeV2(t *testing.T) {
 	err = m.Up(context.Background(), BuiltInDevLite(), net.ParseIP("192.168.122.1"))
 	if err == nil || !strings.Contains(err.Error(), "Compose v2") {
 		t.Fatalf("want Compose v2 error, got %v", err)
+	}
+}
+
+func TestManagerSeedFailureDoesNotPersistRunningState(t *testing.T) {
+	dataDir := t.TempDir()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(harborTestArchive(t))
+	}))
+	defer server.Close()
+	profile := BuiltInDevLite()
+	profile.Harbor.InstallerURL = server.URL + "/harbor.tgz"
+	runner := &fakeRunner{}
+	m, err := NewManager(dataDir, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.client = server.Client()
+	m.seed = func(context.Context, Profile, string, net.IP, *http.Client) (ClientConfig, error) {
+		return ClientConfig{}, errors.New("metadata sync failed")
+	}
+	if err := m.Up(context.Background(), profile, net.ParseIP("192.168.122.1")); err == nil || !strings.Contains(err.Error(), "seed cache resources") {
+		t.Fatalf("want seed failure, got %v", err)
+	}
+	state, err := m.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Running || state.Fingerprint != "" {
+		t.Fatalf("failed seed persisted running state: %+v", state)
 	}
 }
 

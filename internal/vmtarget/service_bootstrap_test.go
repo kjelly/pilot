@@ -21,6 +21,7 @@ func testServiceBootstrap(t *testing.T) ServiceBootstrap {
 		Hostname:          bundle.Client.Hostname,
 		AptProxyURL:       bundle.Client.AptProxyURL,
 		RPMBaseURL:        bundle.Client.RPMBaseURL,
+		RPMRepositories:   bundle.Client.RPMRepositories,
 		RegistryMirrorURL: bundle.Client.RegistryMirrorURL,
 		RegistryProjects:  bundle.Client.RegistryProjects,
 		CAPEM:             bundle.Client.CAPEM,
@@ -42,6 +43,7 @@ func TestServiceBootstrapRenderCloudInit(t *testing.T) {
 		"/pulp/api/v3/status/",
 		"cache.pilot.internal",
 		"192.168.122.1 cache.pilot.internal",
+		"[pilot-pulp-almalinux-9-baseos]",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("cloud-init missing %q", want)

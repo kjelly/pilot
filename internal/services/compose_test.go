@@ -35,6 +35,9 @@ func TestRenderBundlePersistentAndBound(t *testing.T) {
 	if bundle.Client.Hostname != "cache.pilot.internal" || bundle.Client.CAPEM == "" {
 		t.Fatalf("invalid client config: %+v", bundle.Client)
 	}
+	if got := bundle.Client.RPMRepositories["almalinux-9-baseos"]; !strings.Contains(got, "/dev-lite/almalinux-9-baseos") {
+		t.Fatalf("RPM repository URL = %q", got)
+	}
 	if mode := fileMode(t, bundle.CAKeyPath); mode.Perm() != 0o600 {
 		t.Fatalf("CA key mode = %o, want 600", mode.Perm())
 	}
@@ -51,6 +54,9 @@ func TestRenderBundlePersistentAndBound(t *testing.T) {
 	}
 	if strings.Contains(string(harborConfig), "change-me-before-production") {
 		t.Fatal("Harbor config must not contain a placeholder password")
+	}
+	if _, err := os.Stat(filepath.Join(root, "pulp", "admin.env")); err != nil {
+		t.Fatalf("Pulp admin env missing: %v", err)
 	}
 	for _, path := range []string{filepath.Join(root, "harbor", "secrets", "admin-password"), filepath.Join(root, "harbor", "secrets", "database-password")} {
 		if mode := fileMode(t, path); mode.Perm() != 0o600 {
