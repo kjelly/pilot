@@ -43,7 +43,7 @@ func TestProfileValidationRejectsUnsafeValues(t *testing.T) {
 
 func TestLoadProfileYAMLAndFingerprintChanges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "profile.yaml")
-	content := "name: local\napt:\n  upstream: http://archive.ubuntu.com/ubuntu\n  allowlist: [archive.ubuntu.com]\n  port: 3142\nrpm:\n  port: 8443\n  repos:\n    - name: alma\n      upstream: https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os/\noci:\n  port: 5000\n  registries:\n    - name: docker\n      upstream: https://registry-1.docker.io\n      proxy_project: dockerhub\nstorage:\n  max_bytes: 1000\nretention:\n  cache_ttl_hours: 1\n"
+	content := "name: local\napt:\n  upstream: http://archive.ubuntu.com/ubuntu\n  allowlist: [archive.ubuntu.com]\n  port: 3142\nrpm:\n  port: 8443\n  repos:\n    - name: alma\n      upstream: https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os/\noci:\n  port: 5000\n  registries:\n    - name: docker\n      upstream: https://registry-1.docker.io\n      proxy_project: dockerhub\nharbor:\n  version: v2.15.1\n  installer_url: https://github.com/goharbor/harbor/releases/download/v2.15.1/harbor-online-installer-v2.15.1.tgz\n  http_port: 8081\nstorage:\n  max_bytes: 1000\nretention:\n  cache_ttl_hours: 1\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

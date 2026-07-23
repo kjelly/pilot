@@ -23,6 +23,7 @@ type Profile struct {
 	Apt       AptProfile    `yaml:"apt"`
 	RPM       RPMProfile    `yaml:"rpm"`
 	OCI       OCIProfile    `yaml:"oci"`
+	Harbor    HarborProfile `yaml:"harbor"`
 	Storage   StoragePolicy `yaml:"storage"`
 	Retention Retention     `yaml:"retention"`
 }
@@ -59,6 +60,15 @@ type OCIRegistry struct {
 	Name         string `yaml:"name"`
 	Upstream     string `yaml:"upstream"`
 	ProxyProject string `yaml:"proxy_project"`
+}
+
+// HarborProfile identifies the official Harbor installer bundle. The bundle
+// generates Harbor's supported internal Compose topology; pilot does not
+// duplicate that topology in its own template.
+type HarborProfile struct {
+	Version      string `yaml:"version"`
+	InstallerURL string `yaml:"installer_url"`
+	HTTPPort     int    `yaml:"http_port"`
 }
 
 // StoragePolicy bounds host-side cache growth.
@@ -108,6 +118,11 @@ func BuiltInDevLite() Profile {
 				Upstream:     "https://registry-1.docker.io",
 				ProxyProject: "dockerhub",
 			}},
+		},
+		Harbor: HarborProfile{
+			Version:      "v2.15.1",
+			InstallerURL: "https://github.com/goharbor/harbor/releases/download/v2.15.1/harbor-online-installer-v2.15.1.tgz",
+			HTTPPort:     8081,
 		},
 		Storage:   StoragePolicy{MaxBytes: 100 * 1024 * 1024 * 1024},
 		Retention: Retention{CacheTTLHours: 168},
@@ -179,6 +194,15 @@ func (p Profile) Validate() error {
 		if err := validateURL("oci upstream", registry.Upstream, true); err != nil {
 			return err
 		}
+	}
+	if p.Harbor.Version == "" {
+		return errors.New("harbor version must not be empty")
+	}
+	if err := validateURL("harbor installer", p.Harbor.InstallerURL, true); err != nil {
+		return err
+	}
+	if p.Harbor.HTTPPort < 1 || p.Harbor.HTTPPort > 65535 {
+		return fmt.Errorf("harbor http port %d is invalid", p.Harbor.HTTPPort)
 	}
 	if p.Storage.MaxBytes <= 0 {
 		return errors.New("storage max_bytes must be positive")

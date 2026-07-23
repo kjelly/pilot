@@ -22,8 +22,8 @@
 ## File Map
 
 - Create `internal/services/profile.go`: profile schema, built-in `dev-lite`, validation, stable fingerprinting, persistent-path derivation.
-- Create `internal/services/compose.go`: deterministic Compose/config/CA rendering with safe file permissions and no shell interpolation.
-- Create `internal/services/manager.go`: Docker Compose command runner, state persistence, lifecycle operations, health/status inspection, and purge confirmation boundary.
+- Create `internal/services/compose.go`: deterministic Compose/config/CA rendering with safe file permissions and no shell interpolation. Pulp uses the official OCI single-container layout (`settings`, `pulp_storage`, `pgsql`, `containers`, `container_build`) and the pinned `pulp/pulp` image.
+- Create `internal/services/manager.go`: Docker Compose command runner, Harbor official-installer bootstrap, state persistence, lifecycle operations, health/status inspection, and purge confirmation boundary.
 - Create `internal/services/services_test.go`, `internal/services/compose_test.go`, and `internal/services/profile_test.go`: unit and fake-runner tests.
 - Create `cmd/pilot/cmd/services.go` and `cmd/pilot/cmd/services_test.go`: `pilot services` command tree, output, flags, and error mapping.
 - Create `internal/vmtarget/service_bootstrap.go` and tests: non-secret VM client contract and cloud-init fragment rendering.
@@ -63,7 +63,7 @@
 
 - [ ] **Step 1: Write failing renderer tests** asserting deterministic Compose output, pinned image references, separate persistent mounts for apt-cacher-ng/Pulp/Harbor data, bind address restricted to the libvirt-reachable host IP, no host-wide `0.0.0.0` publish, generated CA mode `0600`, and no credentials in rendered files.
 - [ ] **Step 2: Run `go test ./internal/services -run 'TestRender' -count=1`** and confirm FAIL.
-- [ ] **Step 3: Implement deterministic Compose rendering** for the approved `dev-lite` stack, generated service configuration, CA generation/reuse, metadata/fingerprint writing, and atomic file replacement. Keep all paths under the validated persistent root and reject traversal/symlink escape.
+- [ ] **Step 3: Implement deterministic Compose rendering** for apt-cacher-ng and the Pulp OCI quickstart's single-container mounts (`settings`, `pulp_storage`, `pgsql`, `containers`, `container_build`) with `PULP_HTTPS`/`/dev/fuse` settings. Render Harbor's official `harbor.yml` inputs and installer directory separately; do not hand-author Harbor's internal component Compose topology. Add generated service configuration, CA generation/reuse, metadata/fingerprint writing, and atomic file replacement. Keep all paths under the validated persistent root and reject traversal/symlink escape.
 - [ ] **Step 4: Run renderer tests, `gofmt`, and `go vet ./internal/services`**; confirm PASS.
 - [ ] **Step 5: Commit** with `git add internal/services/compose.go internal/services/compose_test.go && git commit -m "feat: render persistent host service stack"`.
 
