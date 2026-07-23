@@ -47,6 +47,7 @@ coverage.txt
 
 # Local-only pilot artifacts
 .verification/
+.worktrees/
 .playbooks/generated/
 inventory*.yaml
 inventories/*
