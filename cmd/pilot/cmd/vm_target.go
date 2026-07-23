@@ -228,6 +228,7 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 		Hostname:          client.Hostname,
 		AptProxyURL:       client.AptProxyURL,
 		RPMBaseURL:        client.RPMBaseURL,
+		RPMRepositories:   client.RPMRepositories,
 		RegistryMirrorURL: client.RegistryMirrorURL,
 		RegistryProjects:  client.RegistryProjects,
 		CAPEM:             client.CAPEM,

@@ -96,6 +96,7 @@ type Manager struct {
 	runner  CommandRunner
 	now     func() time.Time
 	client  *http.Client
+	seed    func(context.Context, Profile, string, net.IP, *http.Client) (ClientConfig, error)
 }
 
 // NewManager creates a host-service manager rooted below dataDir/cache.
@@ -110,7 +111,7 @@ func NewManager(dataDir string, runner CommandRunner) (*Manager, error) {
 	if runner == nil {
 		runner = osCommandRunner{}
 	}
-	return &Manager{dataDir: dataDir, root: DataRoot(dataDir), store: store, runner: runner, now: time.Now, client: &http.Client{Timeout: 5 * time.Second}}, nil
+	return &Manager{dataDir: dataDir, root: DataRoot(dataDir), store: store, runner: runner, seed: seedServices, now: time.Now, client: &http.Client{Timeout: 5 * time.Second}}, nil
 }
 
 // Up renders and starts the service bundle on bindIP. It is idempotent for an
@@ -124,10 +125,27 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 		return err
 	}
 	current, currentErr := m.current()
+	legacyFingerprint := ""
 	if currentErr == nil && current.Fingerprint != "" && current.Fingerprint != fingerprint {
+		// The OCI registry type is derivable for the built-in profile. Accept
+		// the pre-seeding fingerprint once so an existing persistent bundle can
+		// be upgraded without purging its cache.
+		legacy := profile
+		for i := range legacy.OCI.Registries {
+			legacy.OCI.Registries[i].Type = ""
+		}
+		legacyFingerprint, _ = legacy.Fingerprint()
+	}
+	if currentErr == nil && current.Fingerprint != "" && current.Fingerprint != fingerprint && current.Fingerprint != legacyFingerprint {
 		return fmt.Errorf("services: profile fingerprint mismatch (running=%s requested=%s); purge or use the existing profile", current.Fingerprint, fingerprint)
 	}
 	forceRecreate := currentErr != nil || current.Fingerprint == ""
+	// Older service state did not record the per-repository RPM endpoints. Force
+	// one recreation on upgrade so the Pulp admin env file is consumed by the
+	// container instead of silently keeping an old unauthenticated instance.
+	if currentErr == nil && current.Fingerprint != "" && len(current.Client.RPMRepositories) == 0 {
+		forceRecreate = true
+	}
 	if currentErr == nil && current.Running && m.probeEndpoints(ctx, current) != nil {
 		forceRecreate = true
 	}
@@ -169,7 +187,23 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 			return fmt.Errorf("services: start harbor failed: %s", redact(result.Stderr))
 		}
 	}
-	state := ServiceState{Profile: profile.Name, Fingerprint: fingerprint, Root: m.root, ComposePath: bundle.ComposePath, HarborComposePath: harborComposePath(bundle), Client: bundle.Client, BindIP: bindIP.String(), Running: true, UpdatedAt: m.now().UTC()}
+	seededClient, err := m.seed(ctx, profile, bundle.Root, bindIP, m.client)
+	if err != nil {
+		// A failed control-plane reconcile must not leave a previously healthy
+		// state usable by vm-target. Keep the persistent cache, but require the
+		// next caller to complete seeding before provisioning another VM.
+		if markErr := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
+			for i := range states {
+				states[i].Running = false
+			}
+			return states, nil
+		}); markErr != nil {
+			return fmt.Errorf("services: seed cache resources: %w (also mark stopped: %v)", err, markErr)
+		}
+		return fmt.Errorf("services: seed cache resources: %w", err)
+	}
+	seededClient.CAPEM = bundle.Client.CAPEM
+	state := ServiceState{Profile: profile.Name, Fingerprint: fingerprint, Root: m.root, ComposePath: bundle.ComposePath, HarborComposePath: harborComposePath(bundle), Client: seededClient, BindIP: bindIP.String(), Running: true, UpdatedAt: m.now().UTC()}
 	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{state}, nil
 	})

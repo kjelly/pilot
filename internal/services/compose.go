@@ -53,7 +53,7 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return Bundle{}, fmt.Errorf("create service root: %w", err)
 	}
-	for _, dir := range []string{"apt", "pulp/settings/certs", "pulp/pulp_storage", "pulp/pgsql", "pulp/containers", "pulp/container_build", "harbor", "ca"} {
+	for _, dir := range []string{"apt", "pulp/settings/certs", "pulp/pulp_storage", "pulp/pgsql", "pulp/containers", "pulp/container_build", "pulp/secrets", "harbor", "ca"} {
 		path := filepath.Join(root, dir)
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return Bundle{}, fmt.Errorf("create service directory %s: %w", dir, err)
@@ -87,6 +87,13 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Harbor database password: %w", err)
 	}
+	pulpAdminPassword, err := loadOrCreateSecret(filepath.Join(root, "pulp", "secrets", "admin-password"))
+	if err != nil {
+		return Bundle{}, fmt.Errorf("create Pulp admin password: %w", err)
+	}
+	if err := writeAtomicMode(filepath.Join(root, "pulp", "admin.env"), []byte("PULP_DEFAULT_ADMIN_PASSWORD="+pulpAdminPassword+"\n"), 0o600); err != nil {
+		return Bundle{}, fmt.Errorf("write Pulp admin environment: %w", err)
+	}
 	pulpSecretKey, err := loadOrCreateSecret(filepath.Join(root, "pulp", "settings", "secret-key"))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Pulp secret key: %w", err)
@@ -118,6 +125,15 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	for _, registry := range profile.OCI.Registries {
 		projects[registry.Name] = fmt.Sprintf("http://%s:%d/%s", serviceHostname, profile.Harbor.HTTPPort, registry.ProxyProject)
 	}
+	rpmRepositories := make(map[string]string, len(profile.RPM.Repos))
+	for _, repo := range profile.RPM.Repos {
+		rpmRepositories[repo.Name] = fmt.Sprintf("http://%s:8080/pulp/content/%s/%s", serviceHostname, profile.Name, repo.Name)
+	}
+	rpmBaseURL := ""
+	for _, repo := range profile.RPM.Repos {
+		rpmBaseURL = rpmRepositories[repo.Name]
+		break
+	}
 	return Bundle{
 		Root:             root,
 		ComposePath:      composePath,
@@ -130,7 +146,8 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 			HostIP:            host,
 			Hostname:          serviceHostname,
 			AptProxyURL:       fmt.Sprintf("http://%s:%d", serviceHostname, profile.Apt.Port),
-			RPMBaseURL:        fmt.Sprintf("http://%s:8080/pulp/content", serviceHostname),
+			RPMBaseURL:        rpmBaseURL,
+			RPMRepositories:   rpmRepositories,
 			RegistryMirrorURL: fmt.Sprintf("http://%s:%d", serviceHostname, profile.Harbor.HTTPPort),
 			RegistryProjects:  projects,
 			CAPEM:             string(caPEM),
@@ -161,6 +178,8 @@ func renderCompose(profile Profile, root, bindIP string) string {
 		"    environment:",
 		"      PULP_HTTPS: \"false\"",
 		fmt.Sprintf("      CONTENT_ORIGIN: %s", strconv.Quote("http://"+serviceHostname+":8080")),
+		"    env_file:",
+		"      - " + strconv.Quote(filepath.Join(root, "pulp", "admin.env")),
 		"    volumes:",
 		"      - " + composeVolume(filepath.Join(root, "pulp", "settings"), "/etc/pulp"),
 		"      - " + composeVolume(filepath.Join(root, "pulp", "pulp_storage"), "/var/lib/pulp"),

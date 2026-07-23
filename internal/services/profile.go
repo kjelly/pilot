@@ -58,6 +58,7 @@ type OCIProfile struct {
 // OCIRegistry identifies an allowed upstream OCI registry and Harbor project.
 type OCIRegistry struct {
 	Name         string `yaml:"name"`
+	Type         string `yaml:"type,omitempty"`
 	Upstream     string `yaml:"upstream"`
 	ProxyProject string `yaml:"proxy_project"`
 }
@@ -89,6 +90,7 @@ type ClientConfig struct {
 	Hostname          string            `yaml:"hostname"`
 	AptProxyURL       string            `yaml:"apt_proxy_url"`
 	RPMBaseURL        string            `yaml:"rpm_base_url"`
+	RPMRepositories   map[string]string `yaml:"rpm_repositories,omitempty"`
 	RegistryMirrorURL string            `yaml:"registry_mirror_url"`
 	RegistryProjects  map[string]string `yaml:"registry_projects,omitempty"`
 	CAPEM             string            `yaml:"ca_pem"`
@@ -116,6 +118,7 @@ func BuiltInDevLite() Profile {
 			Port: 5000,
 			Registries: []OCIRegistry{{
 				Name:         "docker-hub",
+				Type:         "docker-hub",
 				Upstream:     "https://registry-1.docker.io",
 				ProxyProject: "dockerhub",
 			}},
@@ -147,6 +150,7 @@ func LoadProfile(ref string) (Profile, error) {
 	if p.Name == "" {
 		p.Name = strings.TrimSuffix(filepath.Base(ref), filepath.Ext(ref))
 	}
+	normalizeProfile(&p)
 	if err := p.Validate(); err != nil {
 		return Profile{}, fmt.Errorf("service profile %q: %w", ref, err)
 	}
@@ -183,7 +187,7 @@ func (p Profile) Validate() error {
 		return errors.New("rpm repos must not be empty")
 	}
 	for _, repo := range p.RPM.Repos {
-		if repo.Name == "" {
+		if repo.Name == "" || strings.ContainsAny(repo.Name, "/\\ \t\r\n") {
 			return errors.New("rpm repository name must not be empty")
 		}
 		if err := validateURL("rpm upstream", repo.Upstream, true); err != nil {
@@ -199,6 +203,9 @@ func (p Profile) Validate() error {
 	for _, registry := range p.OCI.Registries {
 		if registry.Name == "" || registry.ProxyProject == "" {
 			return errors.New("oci registry name and proxy_project must not be empty")
+		}
+		if registry.Type == "" && inferHarborRegistryType(registry.Name) == "" {
+			return fmt.Errorf("oci registry %q type must not be empty", registry.Name)
 		}
 		if err := validateURL("oci upstream", registry.Upstream, true); err != nil {
 			return err
@@ -220,6 +227,27 @@ func (p Profile) Validate() error {
 		return errors.New("retention cache_ttl_hours must be positive")
 	}
 	return nil
+}
+
+func normalizeProfile(p *Profile) {
+	for i := range p.OCI.Registries {
+		if p.OCI.Registries[i].Type == "" {
+			p.OCI.Registries[i].Type = inferHarborRegistryType(p.OCI.Registries[i].Name)
+		}
+	}
+}
+
+func inferHarborRegistryType(name string) string {
+	switch strings.ToLower(name) {
+	case "docker", "dockerhub", "docker-hub":
+		return "docker-hub"
+	case "ghcr", "github", "github-ghcr":
+		return "github-ghcr"
+	case "quay":
+		return "quay"
+	default:
+		return name
+	}
 }
 
 func validateURL(label, raw string, httpsOnly bool) error {
