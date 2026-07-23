@@ -16,7 +16,9 @@ host reboots.
 
 The first bundle contains apt-cacher-ng, Pulp RPM, and Harbor. `pilot` manages
 their host-side Docker Compose lifecycle and persistent data; it does not
-install or configure them inside a VM. Podman is not a first-version backend.
+install or configure them inside a VM. Pulp uses the official OCI single
+container layout; Harbor uses its official installer to generate the supported
+Compose stack. Podman is not a first-version backend.
 
 The design does not make cache contents portable by themselves. Moving an
 existing populated cache requires moving the persistent data directory or
@@ -47,7 +49,8 @@ upstreams.
 The generated Compose project has separate persistent paths for:
 
 - apt-cacher-ng cache;
-- Pulp content, PostgreSQL data, and Pulp configuration;
+- Pulp's official OCI single-container layout: `settings`, `pulp_storage`,
+  `pgsql`, `containers`, and `container_build`;
 - Harbor registry data, PostgreSQL/Redis data, and Harbor configuration;
 - generated CA material, service metadata, profile fingerprint, and health
   state.
