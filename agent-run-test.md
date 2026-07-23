@@ -10,9 +10,9 @@
 
 1. 依 runbook 宣告的 VM 拓樸，從乾淨環境重建全部 VM 與暫存工作目錄。
 2. `hosts.yml`、`group_vars/`、`.vault/` 與 inventory 都由 `pilot edit` 和 `pilot inventory generate` 產生；不得手寫或以 `sed`、`yq`、redirect 等方式修改 YAML。
-3. 所有實際套用都經由 `pilot deploy` wizard 完成：一次全站 `site.yml` 部署，以及 runbook 指定、未納入 `site.yml` 的獨立元件（目前為 `freeipa-identity`）。不得直接呼叫 `ansible-playbook` 套用。
+3. 所有實際套用都經由 `pilot deploy` wizard 完成：一次全站 `site.yml` 部署，以及 runbook 指定、未納入 `site.yml` 的獨立元件（目前為 `freeipa-identity`）。agent 可以用 `pilot deploy --actions` 自動回答 wizard，但仍不得直接呼叫 `ansible-playbook` 套用。
 4. runbook §4 的每一項部署後驗證都實際執行並通過，包括 FreeIPA allow/deny 與 `ipa hbactest`、Grafana/Thanos/Prometheus、Loki/Promtail、restic、Wazuh FIM，以及 FreeIPA identity reconciler 的移除／復原／drift／冪等性驗證。
-5. 每個互動 wizard 與每個唯讀驗證步驟都有可驗證的 `trec` 錄影；每個 cast 的 result、exit code、完整性與 secret scan 都通過 `trec verify`。
+5. 每個互動 wizard 與每個唯讀驗證步驟都有可驗證的 `trec` 錄影；正式 evidence cast 的 result、exit code、完整性與 secret scan 都通過 `trec verify`。semantic automation 的 runtime 不依賴 `trec verify`，但要交付影片時仍執行它。
 6. 最終回報能連到各項錄影、實際輸出與驗證結果；不可用「應可通過」、「看起來成功」或只引用舊紀錄代替本次證據。
 
 ## 開始前必讀
@@ -40,7 +40,7 @@
 
 ## Wizard 與錄影規則
 
-- 所有 `pilot edit`、`pilot deploy` 都設 `CI=1`，並用 `trec drive` 錄製；先探勘實際畫面，再寫最終 `.drive` 腳本。
+- 所有 `pilot edit`、`pilot deploy`、`pilot reconcile` 都設 `CI=1`。可用 semantic scenario 直接驅動真實 TUI，或用 `trec drive` 驅動互動按鍵並錄製；先探勘實際畫面，再決定哪種路徑適合該段影片。
 - 每支 `.drive` 腳本執行前都要通過 `trec drive lint --strict`，並執行 `.agents/skills/pilot-trec-verification/references/lint_drive.py`。
 - `SELECT` 只用畫面上唯一的完整 label 子字串，且每個 `SELECT` 後都要各自 `ENTER`；每次轉場後，在下一個動作前以 `EXPECT` 驗證新畫面。
 - 角色 checklist 是例外：依當前 `roleContracts` 順序，以 `DOWN <n>` + `SPACE` 操作；index 0 不可寫 `DOWN 0`。
@@ -48,6 +48,22 @@
 - 儲存、提交或套用後立刻 `ASSERT` 成功訊息。長時間部署以 `WAIT_CHILD_EXIT@<足夠時限>` 再 `ASSERT_EXIT 0` 收尾，不能用安靜輸出判定完成。
 - 每次 `pilot edit` 存檔後，立即唯讀核對落盤設定；特別確認每一 host 的 `ansible_user` 是帳號名稱，SSH key 欄位才是金鑰路徑。發現欄位污染時，視為 drive script 問題，修正後從乾淨 workspace 重跑。
 - `pilot deploy` 的預覽成功不等於部署成功。必須明確通過 preview 後的「套用真正變更」確認，並在 cast 中確認 `✅ 套用完成` 與成功 exit code。
+- agent 需要自動回答 deploy prompt 時，建立只含一個 `deploy` action 的 version 1 JSON scenario，然後執行：
+
+  ```bash
+  ./pilot deploy --actions ./tmp/deploy-scenario.json \
+      --presentation --trace-out ./tmp/deploy.jsonl
+  ```
+
+  scenario 的 `answers` 以 prompt 的可見文字定位 select/text/confirm 答案；不要用固定 menu index，也不要把密碼、token、私鑰或 vault secret 放進 scenario。`--presentation` 會輸出適合教學影片的步驟畫面，`--trace-out` 是 machine-readable sidecar。這條路徑仍會執行原有 preflight、inventory preview、stage gate、preview、apply confirmation、transaction 與 evidence。
+- day-2 調和同樣使用只含一個 `reconcile` action 的 scenario：
+
+  ```bash
+  ./pilot reconcile --actions ./tmp/reconcile-scenario.json \
+      --presentation --trace-out ./tmp/reconcile.jsonl
+  ```
+
+  `pilot reconcile` 只會接受 contract catalog 宣告的 reconciler；不要把 `reconcile` action 混進 standalone `deploy` scenario。需要 edit→deploy→reconcile 連續影片時，才使用 `pilot edit --actions` 的 workflow scenario。
 - 每個 cast 完成後執行 `trec verify`；結果不完整、仍為 `in_progress`、exit code 非 0、digest 不符或 secret scan 有 finding，均不可當作證據。
 
 ## 部署與驗證流程
