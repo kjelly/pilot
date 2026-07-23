@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,6 +45,15 @@ type Spec struct {
 	Alignment       string // `> 對齊規範：...`
 	Maintainer      string
 	MinPilotVersion string
+	// VerifyTimeout is an optional per-spec default row timeout declared via
+	// `> 驗證逾時：<seconds>` in a v1 spec's header (e.g. a spec whose checks
+	// take longer than `pilot verify`'s 15s CLI default, such as a shared-lock
+	// integrity check run concurrently across hosts). Applied to every v1 Row
+	// that doesn't already have its own Timeout set — see effectiveTimeout in
+	// internal/tools/verify_spec.go, which already prefers a spec-declared
+	// Row.Timeout over the CLI --timeout fallback (previously only reachable
+	// from a v2 schema's per-check `timeout` field).
+	VerifyTimeout time.Duration
 	Defaults        Defaults
 	Inputs          []Input
 	Components      []string
@@ -117,6 +127,13 @@ func parseV1Reader(r io.Reader) (*Spec, error) {
 				s.Alignment = strings.TrimSpace(strings.TrimPrefix(line, "> 對齊規範："))
 			case strings.HasPrefix(line, "> 維護者："):
 				s.Maintainer = strings.TrimSpace(strings.TrimPrefix(line, "> 維護者："))
+			case strings.HasPrefix(line, "> 驗證逾時："):
+				raw := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(line, "> 驗證逾時：")), "s"))
+				secs, err := strconv.Atoi(raw)
+				if err != nil || secs <= 0 {
+					return nil, fmt.Errorf("spec: line %d: `> 驗證逾時：%s` must be a positive integer number of seconds", lineNo, raw)
+				}
+				s.VerifyTimeout = time.Duration(secs) * time.Second
 			case strings.HasPrefix(line, "## 2. Checklist"):
 				state = stateChecklist
 			case strings.HasPrefix(line, "## "):
@@ -212,6 +229,13 @@ func parseV1Reader(r io.Reader) (*Spec, error) {
 	}
 	if len(s.Rows) == 0 {
 		return nil, errors.New("spec: no checklist rows found under `## 2. Checklist`")
+	}
+	if s.VerifyTimeout > 0 {
+		for i := range s.Rows {
+			if s.Rows[i].Timeout == 0 {
+				s.Rows[i].Timeout = s.VerifyTimeout
+			}
+		}
 	}
 	return s, nil
 }
