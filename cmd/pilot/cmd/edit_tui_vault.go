@@ -221,7 +221,7 @@ func pushVaultAddKey(r *editRouterModel, dir, path string, doc *vaultfile.Doc, d
 }
 
 func pushVaultAddKeyValue(r *editRouterModel, dir, path string, doc *vaultfile.Doc, key string, dirty bool) tea.Cmd {
-	return r.transitionTo(newTextInputModel("值（多行請直接輸入 \\n）", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSecretTextInputModel("值（多行請直接輸入 \\n）", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return quitWizard(r)
@@ -254,7 +254,7 @@ func pushVaultEntryMenu(r *editRouterModel, dir, path string, doc *vaultfile.Doc
 
 func pushVaultEditValue(r *editRouterModel, dir, path string, doc *vaultfile.Doc, entry vaultfile.Entry, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 的新值（多行請直接輸入 \\n）", entry.Key)
-	return r.transitionTo(newTextInputModel(label, entry.EditValue(), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSecretTextInputModel(label, entry.EditValue(), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return quitWizard(r)
