@@ -85,6 +85,7 @@ type Retention struct {
 type ClientConfig struct {
 	Profile           string            `yaml:"profile"`
 	Fingerprint       string            `yaml:"fingerprint"`
+	HostIP            string            `yaml:"host_ip,omitempty"`
 	Hostname          string            `yaml:"hostname"`
 	AptProxyURL       string            `yaml:"apt_proxy_url"`
 	RPMBaseURL        string            `yaml:"rpm_base_url"`
@@ -155,8 +156,16 @@ func LoadProfile(ref string) (Profile, error) {
 // Validate rejects profiles that could result in an unbounded, ambiguous, or
 // unsafe host service deployment.
 func (p Profile) Validate() error {
-	if p.Name == "" || strings.ContainsAny(p.Name, "/\\") {
-		return errors.New("name must be non-empty and contain no path separators")
+	if p.Name == "" || strings.ContainsAny(p.Name, "/\\ \t\r\n") {
+		return errors.New("name must be non-empty and contain no path separators or whitespace")
+	}
+	for _, r := range p.Name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' && r != '.' {
+			return fmt.Errorf("name contains unsupported character %q", r)
+		}
+	}
+	if first := p.Name[0]; !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || (first >= '0' && first <= '9')) {
+		return errors.New("name must start with a letter or digit")
 	}
 	if p.Apt.Port < 1 || p.Apt.Port > 65535 {
 		return fmt.Errorf("apt port %d is invalid", p.Apt.Port)

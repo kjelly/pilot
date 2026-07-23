@@ -10,9 +10,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -121,8 +123,13 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	if err != nil {
 		return err
 	}
-	if current, err := m.current(); err == nil && current.Fingerprint != "" && current.Fingerprint != fingerprint {
+	current, currentErr := m.current()
+	if currentErr == nil && current.Fingerprint != "" && current.Fingerprint != fingerprint {
 		return fmt.Errorf("services: profile fingerprint mismatch (running=%s requested=%s); purge or use the existing profile", current.Fingerprint, fingerprint)
+	}
+	forceRecreate := currentErr != nil || current.Fingerprint == ""
+	if currentErr == nil && current.Running && m.probeEndpoints(ctx, current) != nil {
+		forceRecreate = true
 	}
 	bundle, err := RenderBundle(profile, m.root, bindIP)
 	if err != nil {
@@ -135,19 +142,28 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 		return err
 	}
 	installerDir := filepath.Join(bundle.Root, "harbor", "installer")
-	if result, err := m.runner.Run(ctx, installerDir, "./install.sh"); err != nil {
-		return fmt.Errorf("services: install harbor: %w", err)
+	harborCompose := filepath.Join(installerDir, "docker-compose.yml")
+	if result, err := m.runner.Run(ctx, installerDir, "sudo", "-n", "./prepare"); err != nil {
+		return fmt.Errorf("services: prepare harbor: %w", err)
 	} else if result.ExitCode != 0 {
-		return fmt.Errorf("services: install harbor failed: %s", redact(result.Stderr))
+		return fmt.Errorf("services: prepare harbor failed: %s", redact(result.Stderr))
+	}
+	if err := namespaceHarborCompose(harborCompose, profile.Name, bindIP.String()); err != nil {
+		return err
 	}
 	project := "pilot-services-" + profile.Name
-	if result, err := m.runner.Run(ctx, m.root, "docker", "compose", "-f", bundle.ComposePath, "-p", project, "up", "-d", "--wait"); err != nil {
+	composeArgs := []string{"compose", "-f", bundle.ComposePath, "-p", project, "up", "-d", "--wait"}
+	if forceRecreate {
+		composeArgs = append(composeArgs, "--force-recreate")
+	}
+	if result, err := m.runner.Run(ctx, m.root, "docker", composeArgs...); err != nil {
 		return fmt.Errorf("services: start compose: %w", err)
 	} else if result.ExitCode != 0 {
 		return fmt.Errorf("services: start compose failed: %s", redact(result.Stderr))
 	}
 	if harborCompose := harborComposePath(bundle); harborCompose != "" {
-		if result, err := m.runner.Run(ctx, filepath.Dir(harborCompose), "docker", "compose", "-f", harborCompose, "up", "-d"); err != nil {
+		harborProject := "pilot-harbor-" + profile.Name
+		if result, err := m.runner.Run(ctx, filepath.Dir(harborCompose), "sudo", "-n", "docker", "compose", "-f", harborCompose, "-p", harborProject, "up", "-d", "--wait"); err != nil {
 			return fmt.Errorf("services: start harbor: %w", err)
 		} else if result.ExitCode != 0 {
 			return fmt.Errorf("services: start harbor failed: %s", redact(result.Stderr))
@@ -195,7 +211,8 @@ func (m *Manager) Down(ctx context.Context) error {
 		return fmt.Errorf("services: stop compose failed: %s", redact(result.Stderr))
 	}
 	if state.HarborComposePath != "" {
-		if result, err := m.runner.Run(ctx, filepath.Dir(state.HarborComposePath), "docker", "compose", "-f", state.HarborComposePath, "down"); err != nil {
+		harborProject := "pilot-harbor-" + state.Profile
+		if result, err := m.runner.Run(ctx, filepath.Dir(state.HarborComposePath), "sudo", "-n", "docker", "compose", "-f", state.HarborComposePath, "-p", harborProject, "down"); err != nil {
 			return fmt.Errorf("services: stop harbor: %w", err)
 		} else if result.ExitCode != 0 {
 			return fmt.Errorf("services: stop harbor failed: %s", redact(result.Stderr))
@@ -235,7 +252,68 @@ func (m *Manager) ClientConfig(ctx context.Context) (ClientConfig, error) {
 	if !state.Running {
 		return ClientConfig{}, errors.New("services: service stack is not running")
 	}
+	if err := m.probeEndpoints(ctx, state); err != nil {
+		return ClientConfig{}, err
+	}
+	if state.Client.HostIP == "" {
+		state.Client.HostIP = state.BindIP
+	}
 	return state.Client, nil
+}
+
+func (m *Manager) probeEndpoints(ctx context.Context, state ServiceState) error {
+	bindIP := net.ParseIP(state.BindIP)
+	if bindIP == nil || bindIP.IsUnspecified() {
+		return errors.New("services: persisted service bind IP is invalid")
+	}
+	aptProbe, err := serviceProbeURL(state.Client.AptProxyURL, bindIP, "/acng-report.html")
+	if err != nil {
+		return fmt.Errorf("services: persisted apt URL is invalid: %w", err)
+	}
+	pulpProbe, err := serviceProbeURL(state.Client.RPMBaseURL, bindIP, "/pulp/api/v3/status/")
+	if err != nil {
+		return fmt.Errorf("services: persisted Pulp URL is invalid: %w", err)
+	}
+	harborProbe, err := serviceProbeURL(state.Client.RegistryMirrorURL, bindIP, "/api/v2.0/health")
+	if err != nil {
+		return fmt.Errorf("services: persisted Harbor URL is invalid: %w", err)
+	}
+	probes := []struct {
+		name string
+		url  string
+	}{
+		{name: "apt-cacher-ng", url: aptProbe},
+		{name: "Pulp", url: pulpProbe},
+		{name: "Harbor", url: harborProbe},
+	}
+	for _, probe := range probes {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, probe.url, nil)
+		if err != nil {
+			return fmt.Errorf("services: create %s health probe: %w", probe.name, err)
+		}
+		resp, err := m.client.Do(req)
+		if err != nil {
+			return fmt.Errorf("services: %s is unreachable: %w", probe.name, err)
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if resp.StatusCode >= http.StatusInternalServerError {
+			return fmt.Errorf("services: %s health probe returned HTTP %s", probe.name, resp.Status)
+		}
+	}
+	return nil
+}
+
+func serviceProbeURL(raw string, bindIP net.IP, path string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Port() == "" {
+		return "", errors.New("missing scheme or port")
+	}
+	u.Host = net.JoinHostPort(bindIP.String(), u.Port())
+	u.Path = path
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
 }
 
 func (m *Manager) current() (ServiceState, error) {
@@ -371,6 +449,43 @@ func harborComposePath(bundle Bundle) string {
 		return ""
 	}
 	return path
+}
+
+var harborContainerNameRE = regexp.MustCompile(`^(\s*container_name:\s*)([^\s#]+)(\s*)$`)
+
+// namespaceHarborCompose keeps the official generated topology intact while
+// avoiding collisions with unrelated host containers and binding its proxy
+// only to the selected libvirt gateway address.
+func namespaceHarborCompose(path, profile, bindIP string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("services: read generated Harbor Compose: %w", err)
+	}
+	prefix := "pilot-harbor-" + profile + "-"
+	lines := strings.Split(string(b), "\n")
+	portRewritten := false
+	for i, line := range lines {
+		if match := harborContainerNameRE.FindStringSubmatch(line); match != nil {
+			name := match[2]
+			if !strings.HasPrefix(name, prefix) {
+				name = prefix + name
+			}
+			lines[i] = match[1] + name + match[3]
+			continue
+		}
+		if strings.TrimSpace(line) == "- 8081:8080" {
+			indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+			lines[i] = indent + "- " + bindIP + ":8081:8080"
+			portRewritten = true
+		}
+	}
+	if !portRewritten {
+		return errors.New("services: generated Harbor Compose has no expected proxy port mapping")
+	}
+	if err := writeAtomicMode(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
+		return fmt.Errorf("services: namespace generated Harbor Compose: %w", err)
+	}
+	return nil
 }
 
 func writeStream(path string, r io.Reader, mode os.FileMode) error {

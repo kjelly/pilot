@@ -203,7 +203,7 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 	if err != nil {
 		return nil, err
 	}
-	_, err = discoverLibvirtNetworkAddress(ctx, network)
+	bindIP, err := discoverLibvirtNetworkAddress(ctx, network)
 	if err != nil {
 		return nil, err
 	}
@@ -218,9 +218,13 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 	if client.Profile != profile.Name {
 		return nil, fmt.Errorf("vm-target: requested services profile %q but host is running %q", profile.Name, client.Profile)
 	}
+	if client.HostIP != "" && client.HostIP != bindIP.String() {
+		return nil, fmt.Errorf("vm-target: services are bound to %s but network %q gateway is %s", client.HostIP, network, bindIP)
+	}
 	return &vmtarget.ServiceBootstrap{
 		Profile:           client.Profile,
 		Fingerprint:       client.Fingerprint,
+		HostIP:            client.HostIP,
 		Hostname:          client.Hostname,
 		AptProxyURL:       client.AptProxyURL,
 		RPMBaseURL:        client.RPMBaseURL,

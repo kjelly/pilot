@@ -5,12 +5,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeRunner struct {
@@ -59,7 +63,8 @@ func harborTestArchive(t *testing.T) []byte {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tarWriter := tar.NewWriter(gz)
-	for name, data := range map[string]string{"harbor/install.sh": "#!/bin/sh\n", "harbor/docker-compose.yml": "services: {}\n"} {
+	compose := "services:\n  proxy:\n    container_name: nginx\n    ports:\n      - 8081:8080\n"
+	for name, data := range map[string]string{"harbor/install.sh": "#!/bin/sh\n", "harbor/prepare": "#!/bin/sh\n", "harbor/docker-compose.yml": compose} {
 		b := []byte(data)
 		h := &tar.Header{Name: name, Mode: 0o700, Size: int64(len(b))}
 		if err := tarWriter.WriteHeader(h); err != nil {
@@ -99,3 +104,56 @@ func TestManagerRequiresComposeV2(t *testing.T) {
 		t.Fatalf("want Compose v2 error, got %v", err)
 	}
 }
+
+func TestClientConfigFailsClosedWhenServiceProbeFails(t *testing.T) {
+	m, err := NewManager(t.TempDir(), &fakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
+		return []ServiceState{{
+			Profile: "dev-lite", Fingerprint: "fp", BindIP: "192.168.122.1", Running: true,
+			Client: ClientConfig{AptProxyURL: "http://cache.pilot.internal:3142", RPMBaseURL: "http://cache.pilot.internal:8080/pulp/content", RegistryMirrorURL: "http://cache.pilot.internal:8081"}, UpdatedAt: time.Now(),
+		}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	})}
+	if _, err := m.ClientConfig(context.Background()); err == nil || !strings.Contains(err.Error(), "unreachable") {
+		t.Fatalf("expected fail-closed probe error, got %v", err)
+	}
+}
+
+func TestClientConfigProbesAllServices(t *testing.T) {
+	m, err := NewManager(t.TempDir(), &fakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
+		return []ServiceState{{
+			Profile: "dev-lite", Fingerprint: "fp", BindIP: "192.168.122.1", Running: true,
+			Client: ClientConfig{AptProxyURL: "http://cache.pilot.internal:3142", RPMBaseURL: "http://cache.pilot.internal:8080/pulp/content", RegistryMirrorURL: "http://cache.pilot.internal:8081"}, UpdatedAt: time.Now(),
+		}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	m.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		paths = append(paths, req.URL.Path)
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header), Request: req}, nil
+	})}
+	if _, err := m.ClientConfig(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"/acng-report.html", "/pulp/api/v3/status/", "/api/v2.0/health"} {
+		if !slices.Contains(paths, want) {
+			t.Errorf("missing probe %s in %v", want, paths)
+		}
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
