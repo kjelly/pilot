@@ -37,6 +37,19 @@ func newTextInputModel(label, def string, validate func(string) error) textInput
 	return textInputModel{label: label, validate: validate, input: ti}
 }
 
+// newSecretTextInputModel is newTextInputModel for a value that
+// shouldn't be visible on screen while typed (vault entries) — it
+// renders each character as `*` instead of echoing it, matching
+// bubbles/textinput's EchoPassword mode. Value() still returns the
+// real typed text; only the rendered View() is masked, so this has no
+// effect on the semantic automation driver (which reads/writes
+// Value() directly, never the rendered screen).
+func newSecretTextInputModel(label, def string, validate func(string) error) textInputModel {
+	m := newTextInputModel(label, def, validate)
+	m.input.EchoMode = textinput.EchoPassword
+	return m
+}
+
 func (m textInputModel) Init() tea.Cmd {
 	return textinput.Blink
 }
