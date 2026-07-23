@@ -40,6 +40,23 @@
 
 ## Wizard 與錄影規則
 
+### Agent semantic action discovery
+
+開始寫 scenario 前，先從**目前建置的同一個 `pilot` binary** 讀 action
+契約，不要從舊文件或記憶猜 action 名稱、欄位或可用值：
+
+```bash
+./pilot actions list
+./pilot actions schema
+```
+
+`actions schema` 是 version 1 的 machine-readable JSON；它列出每個 action
+的 required fields、field values、是否可 standalone，以及 deploy/reconcile
+的 prompt answer contract。scenario validator 與這份輸出共用 action catalog。
+`pilot edit --actions` 可包含 edit 後的 deploy/reconcile steps；獨立執行時，
+`pilot deploy --actions` 只能含一個 `deploy` action，`pilot reconcile --actions`
+只能含一個 `reconcile` action。
+
 - 所有 `pilot edit`、`pilot deploy`、`pilot reconcile` 都設 `CI=1`。可用 semantic scenario 直接驅動真實 TUI，或用 `trec drive` 驅動互動按鍵並錄製；先探勘實際畫面，再決定哪種路徑適合該段影片。
 - 每支 `.drive` 腳本執行前都要通過 `trec drive lint --strict`，並執行 `.agents/skills/pilot-trec-verification/references/lint_drive.py`。
 - `SELECT` 只用畫面上唯一的完整 label 子字串，且每個 `SELECT` 後都要各自 `ENTER`；每次轉場後，在下一個動作前以 `EXPECT` 驗證新畫面。
