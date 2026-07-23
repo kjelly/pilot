@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,6 +28,11 @@ type automationDriver struct {
 	presentation bool
 	out          io.Writer
 	keys         []string
+	// dir is the --dir value the router was built with. It's only needed to
+	// construct a full path when creating a brand-new .vault/ file that
+	// doesn't show up in the file picker yet (openVaultFile) — every other
+	// navigation resolves against on-screen labels alone.
+	dir string
 }
 
 func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error {
@@ -62,18 +68,12 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 }
 
 func (d *automationDriver) runStep(r *editRouterModel, step editAction) error {
-	switch step.Action {
-	case "create_host":
-		return d.createHost(r, step.Host)
-	case "set_host_field":
-		return d.setHostField(r, step.Host, step.Field, step.Value)
-	case "enable_role":
-		return d.enableRole(r, step.Host, step.Role)
-	case "save_hosts":
-		return d.saveHosts(r)
-	default:
-		return fmt.Errorf("unsupported action %q", step.Action)
+	for _, def := range editActionRegistry() {
+		if def.Spec.Name == step.Action {
+			return def.Run(d, r, step)
+		}
 	}
+	return fmt.Errorf("unsupported action %q", step.Action)
 }
 
 func (d *automationDriver) createHost(r *editRouterModel, host string) error {
@@ -95,6 +95,25 @@ func (d *automationDriver) setHostField(r *editRouterModel, host, field, value s
 	if err := d.ensureHostMenu(r, host); err != nil {
 		return err
 	}
+	if field == "env" {
+		if err := d.choose(r, "env(環境標籤)"); err != nil {
+			return err
+		}
+		idx := -1
+		for i, c := range envChoices {
+			if c == value {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return fmt.Errorf("unsupported env value %q", value)
+		}
+		if err := d.moveCursor(r, idx); err != nil {
+			return err
+		}
+		return d.enter(r)
+	}
 	labels := map[string]string{
 		"ansible_host": "ansible_host(連線位址)",
 		"ansible_user": "ansible_user(登入帳號)",
@@ -113,7 +132,12 @@ func (d *automationDriver) setHostField(r *editRouterModel, host, field, value s
 	return d.enter(r)
 }
 
-func (d *automationDriver) enableRole(r *editRouterModel, host, role string) error {
+// setRoleChecked drives the role checklist so role ends up with
+// Checked == want, mirroring the same navigation enableRole always
+// used. It only toggles Space when the role's current state doesn't
+// already match want, exactly like a human would only press Space on
+// a role that needs to change.
+func (d *automationDriver) setRoleChecked(r *editRouterModel, host, role string, want bool) error {
 	if err := d.ensureHostMenu(r, host); err != nil {
 		return err
 	}
@@ -131,7 +155,7 @@ func (d *automationDriver) enableRole(r *editRouterModel, host, role string) err
 	if err != nil {
 		return err
 	}
-	if !list.items[idx].Checked {
+	if list.items[idx].Checked != want {
 		if err := d.moveCursor(r, idx); err != nil {
 			return err
 		}
@@ -145,6 +169,43 @@ func (d *automationDriver) enableRole(r *editRouterModel, host, role string) err
 	return d.choose(r, "✅ 完成")
 }
 
+func (d *automationDriver) enableRole(r *editRouterModel, host, role string) error {
+	return d.setRoleChecked(r, host, role, true)
+}
+
+func (d *automationDriver) disableRole(r *editRouterModel, host, role string) error {
+	return d.setRoleChecked(r, host, role, false)
+}
+
+func (d *automationDriver) deleteHost(r *editRouterModel, host string) error {
+	if err := d.ensureHostMenu(r, host); err != nil {
+		return err
+	}
+	if err := d.choose(r, "刪除這台主機"); err != nil {
+		return err
+	}
+	// The confirm defaults to No; an explicit "y" is required to actually delete.
+	return d.confirmYesNo(r, true)
+}
+
+func (d *automationDriver) discardHosts(r *editRouterModel) error {
+	if err := d.ensureHostsList(r); err != nil {
+		return err
+	}
+	if err := d.choose(r, "不存檔離開"); err != nil {
+		return err
+	}
+	return d.confirmYesNo(r, true)
+}
+
+// saveHosts leaves the router at the top menu (where "存檔並離開" always
+// lands, via pushSaveHostsAndReturnTop -> pushTopMenu) rather than also
+// choosing "離開" to quit the whole session: quitting sets r.quit, and
+// editRouterModel.Update short-circuits every message to tea.Quit once
+// that's set — silently freezing the router if any group_vars/vault
+// action follows save_hosts in the same scenario. A hosts.yml-only
+// scenario ending here simply returns from d.run normally; nothing
+// downstream depends on r.quit being true.
 func (d *automationDriver) saveHosts(r *editRouterModel) error {
 	if list, ok := r.current.(selectModel); ok && strings.Contains(list.title, "選要編輯的項目") {
 		if err := d.choose(r, "返回主機清單"); err != nil {
@@ -155,13 +216,7 @@ func (d *automationDriver) saveHosts(r *editRouterModel) error {
 	if !ok || !strings.Contains(list.title, "編輯") {
 		return fmt.Errorf("expected host list before save")
 	}
-	if err := d.choose(r, "存檔並離開"); err != nil {
-		return err
-	}
-	if err := d.choose(r, "離開"); err != nil {
-		return err
-	}
-	return nil
+	return d.choose(r, "存檔並離開")
 }
 
 func (d *automationDriver) ensureHostMenu(r *editRouterModel, host string) error {
@@ -189,7 +244,7 @@ func (d *automationDriver) ensureHostsList(r *editRouterModel) error {
 		case strings.Contains(list.title, "編輯") && strings.Contains(list.title, "選一台主機"):
 			return nil
 		case strings.Contains(list.title, "選要編輯的項目"):
-			return fmt.Errorf("host menu must return to host list first")
+			return d.choose(r, "返回主機清單")
 		}
 	}
 	if input, ok := r.current.(textInputModel); ok && input.label == "hosts.yml 路徑" {
@@ -265,12 +320,87 @@ func (d *automationDriver) typeText(r *editRouterModel, value string, replace bo
 	return nil
 }
 
+// typeSecretOrPlain is typeText for a value that may have come from
+// ValueEnv: when secret is true, the literal characters are still sent to
+// the model (so the real value ends up in the file, exactly like a human
+// typing it), but the trace records a fixed placeholder instead of the
+// value itself. replace behaves like typeText's replace (send Ctrl-U
+// first) — clearing the field isn't itself sensitive, so that key always
+// goes through the normal (unredacted) send.
+func (d *automationDriver) typeSecretOrPlain(r *editRouterModel, value string, secret, replace bool) error {
+	if _, ok := r.current.(textInputModel); !ok {
+		return fmt.Errorf("cannot type on %s screen", automationScreenID(r))
+	}
+	if replace {
+		if err := d.send(r, tea.KeyMsg{Type: tea.KeyCtrlU}); err != nil {
+			return err
+		}
+	}
+	if value == "" {
+		return nil
+	}
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)}
+	if !secret {
+		return d.send(r, msg)
+	}
+	return d.sendRedacted(r, msg, "«redacted»")
+}
+
+// resolveValueOrEnv reads step's actual value at execution time — from
+// ValueEnv (the environment) if set, otherwise from Value — never at
+// validation time (see validateValueOrEnv). A ValueEnv naming an unset or
+// empty variable is a hard error rather than a silently-empty secret.
+func resolveValueOrEnv(step editAction) (value string, secret bool, err error) {
+	if step.ValueEnv != "" {
+		v := os.Getenv(step.ValueEnv)
+		if v == "" {
+			return "", false, fmt.Errorf("value_env %q is not set in the environment", step.ValueEnv)
+		}
+		return v, true, nil
+	}
+	return step.Value, false, nil
+}
+
 func (d *automationDriver) enter(r *editRouterModel) error {
 	return d.send(r, tea.KeyMsg{Type: tea.KeyEnter})
 }
 
+// confirmYesNo answers the current confirmModel with an explicit y/n
+// rune rather than relying on Enter (which would only ever accept
+// whatever the screen's own defaultYes is) — needed by any action that
+// must override a confirm defaulting to "no" (e.g. delete/discard).
+func (d *automationDriver) confirmYesNo(r *editRouterModel, yes bool) error {
+	if _, ok := r.current.(confirmModel); !ok {
+		return fmt.Errorf("cannot answer yes/no on %s screen", automationScreenID(r))
+	}
+	key := "n"
+	if yes {
+		key = "y"
+	}
+	return d.send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+}
+
 func (d *automationDriver) send(r *editRouterModel, msg tea.KeyMsg) error {
 	d.keys = append(d.keys, msg.String())
+	model, _ := r.Update(msg)
+	next, ok := model.(editRouterModel)
+	if !ok {
+		return fmt.Errorf("edit router returned unexpected model")
+	}
+	*r = next
+	if r.err != nil {
+		return r.err
+	}
+	return nil
+}
+
+// sendRedacted is send, except the trace records placeholder instead of the
+// key message's literal text — used exclusively for secret-bearing input
+// (see typeSecretOrPlain) so a ValueEnv-sourced secret never appears in
+// --trace-out JSONL, even though the model itself still receives the real
+// characters.
+func (d *automationDriver) sendRedacted(r *editRouterModel, msg tea.KeyMsg, placeholder string) error {
+	d.keys = append(d.keys, placeholder)
 	model, _ := r.Update(msg)
 	next, ok := model.(editRouterModel)
 	if !ok {

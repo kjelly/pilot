@@ -21,14 +21,38 @@ type editScenario struct {
 
 // editAction describes one semantic operation in an edit scenario.
 type editAction struct {
-	Action    string         `json:"action"`
-	Host      string         `json:"host,omitempty"`
-	Field     string         `json:"field,omitempty"`
-	Value     string         `json:"value,omitempty"`
-	Role      string         `json:"role,omitempty"`
-	Label     string         `json:"label,omitempty"`
-	Inventory string         `json:"inventory,omitempty"`
-	Answers   []promptAnswer `json:"answers,omitempty"`
+	Action   string `json:"action"`
+	Host     string `json:"host,omitempty"`
+	Field    string `json:"field,omitempty"`
+	Value    string `json:"value,omitempty"`
+	ValueEnv string `json:"value_env,omitempty"` // read from the environment at run time instead of Value; mutually exclusive with it
+	Role     string `json:"role,omitempty"`
+	Key      string `json:"key,omitempty"`  // extra host var / group_vars / vault key name
+	File     string `json:"file,omitempty"` // group_vars/vault filename, relative to group_vars/ or .vault/
+	// Label is the role preset name: the *new* label for rename_role_preset,
+	// or the label for create_role_preset. Preset is the *existing* preset
+	// label being targeted (apply/rename/delete). SourceHost is
+	// copy_roles_from_host's source. Roles is create_role_preset's role set.
+	Label      string         `json:"label,omitempty"`
+	Preset     string         `json:"preset,omitempty"`
+	SourceHost string         `json:"source_host,omitempty"`
+	Roles      []string       `json:"roles,omitempty"`
+	Inventory  string         `json:"inventory,omitempty"`
+	Answers    []promptAnswer `json:"answers,omitempty"`
+}
+
+// validateValueOrEnv enforces that exactly one of Value/ValueEnv is set,
+// without ever reading the environment itself — validation must be able to
+// run (e.g. in CI, linting a scenario file) in an environment where the
+// real secret variables are deliberately absent.
+func validateValueOrEnv(step editAction, actionName string) error {
+	if step.Value != "" && step.ValueEnv != "" {
+		return fmt.Errorf("%s accepts either value or value_env, not both", actionName)
+	}
+	if step.Value == "" && step.ValueEnv == "" {
+		return fmt.Errorf("%s requires value or value_env", actionName)
+	}
+	return nil
 }
 
 // loadEditScenario reads and validates the JSON envelope. Unknown fields are
@@ -75,53 +99,12 @@ func validateEditAction(step editAction) error {
 	if _, ok := semanticActionSpecFor(step.Action); !ok {
 		return fmt.Errorf("unknown action")
 	}
+	for _, def := range editActionRegistry() {
+		if def.Spec.Name == step.Action {
+			return def.Validate(step)
+		}
+	}
 	switch step.Action {
-	case "create_host":
-		if strings.TrimSpace(step.Host) == "" {
-			return fmt.Errorf("create_host requires host")
-		}
-		if hasSecretName(step.Host) {
-			return fmt.Errorf("secret-like host names are not allowed")
-		}
-		return nil
-	case "set_host_field":
-		if strings.TrimSpace(step.Host) == "" {
-			return fmt.Errorf("set_host_field requires host")
-		}
-		if strings.TrimSpace(step.Field) == "" {
-			return fmt.Errorf("set_host_field requires field")
-		}
-		if hasSecretName(step.Field) {
-			return fmt.Errorf("secret values are not accepted")
-		}
-		spec, _ := semanticActionSpecFor(step.Action)
-		allowed := false
-		for _, field := range spec.Values["field"] {
-			if step.Field == field {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return fmt.Errorf("unsupported host field")
-		}
-		return nil
-	case "enable_role":
-		if strings.TrimSpace(step.Host) == "" {
-			return fmt.Errorf("enable_role requires host")
-		}
-		if strings.TrimSpace(step.Role) == "" {
-			return fmt.Errorf("enable_role requires role")
-		}
-		if hasSecretName(step.Role) {
-			return fmt.Errorf("secret-like role names are not allowed")
-		}
-		return nil
-	case "save_hosts":
-		if step.Host != "" || step.Field != "" || step.Value != "" || step.Role != "" || step.Label != "" || step.Inventory != "" || len(step.Answers) > 0 {
-			return fmt.Errorf("save_hosts does not accept parameters")
-		}
-		return nil
 	case "deploy", "reconcile":
 		if strings.TrimSpace(step.Inventory) == "" {
 			return fmt.Errorf("%s requires inventory", step.Action)
@@ -133,6 +116,15 @@ func validateEditAction(step editAction) error {
 	default:
 		return fmt.Errorf("action is not executable by the edit workflow")
 	}
+}
+
+func scenarioUsesValueEnv(steps []editAction) bool {
+	for _, s := range steps {
+		if s.ValueEnv != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasSecretName(value string) bool {
@@ -198,8 +190,12 @@ func runAutomatedEditWorkflow(cmd *cobra.Command, scenario editScenario, present
 		}
 		editSteps = append(editSteps, step)
 	}
-	if len(editSteps) == 0 || editSteps[len(editSteps)-1].Action != "save_hosts" {
+	hasDeployTail := len(editSteps) < len(scenario.Steps)
+	if hasDeployTail && (len(editSteps) == 0 || editSteps[len(editSteps)-1].Action != "save_hosts") {
 		return fmt.Errorf("workflow must save hosts before deploy or reconcile")
+	}
+	if presentation && scenarioUsesValueEnv(scenario.Steps) {
+		return fmt.Errorf("--presentation cannot be combined with value_env steps: the resolved secret would be rendered on screen; rerun without --presentation")
 	}
 	sink, err := newAutomationTraceSink(tracePath)
 	if err != nil {
@@ -211,7 +207,7 @@ func runAutomatedEditWorkflow(cmd *cobra.Command, scenario editScenario, present
 	out := cmd.OutOrStdout()
 	r := newEditRouterModel(editDir)
 	f := func(event automationTraceEvent) { sink.add(event) }
-	d := automationDriver{trace: f, presentation: presentation, out: out}
+	d := automationDriver{trace: f, presentation: presentation, out: out, dir: editDir}
 	if presentation {
 		if scenario.Title != "" {
 			fmt.Fprintf(out, "═══ %s ═══\n", scenario.Title)
