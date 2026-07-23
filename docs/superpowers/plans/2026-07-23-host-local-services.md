@@ -176,3 +176,13 @@
 - The plan does not require Podman, public-upstream fallback, secrets in user-data, or cache data inside VM state.
 - The topology design is explicit: only a root-level `services` value is supported initially; node-level overrides are not silently inferred.
 - No implementation claims are made until the real host/VM integration evidence passes.
+
+## Implementation status (2026-07-23)
+
+Tasks 1–7 are implemented on `main`, including the Pulp OCI quickstart's
+single-container Compose layout, official Harbor installer generation,
+persistent host state, `/etc/hosts` service-name mapping, endpoint probes, and
+fail-closed `vm-target` resolution. Host-level lifecycle and outage checks pass
+on the libvirt `default` network. Task 8's disposable-VM package retrieval and
+image-pull acceptance is intentionally still pending and must follow the
+repository evidence rules before being called verified.
