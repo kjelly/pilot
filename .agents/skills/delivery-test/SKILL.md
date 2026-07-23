@@ -44,6 +44,29 @@ artifacts.
 Read `AGENTS.md` and `DELIVERY.md` before executing.
 Make sure your host environment meets the prerequisites for KVM VM provisioning (libvirt, kvm, QEMU, cloud-localds).
 
+### 0.2 Start host cache services before provisioning
+
+This scenario provisions three package-heavy VMs (FreeIPA, Grafana/
+Prometheus/Thanos/Wazuh/SeaweedFS on `nexus`, plus a client) and gets
+re-run for every candidate — a good fit for the host-local cache stack so
+repeat runs don't re-pull the same packages/images from upstream on every
+clean-room rebuild:
+
+```bash
+pilot services up --profile dev-lite   # one-time per host session
+pilot services status                  # confirm running=true before §1.1
+```
+
+Add `--services local` to each `vm-target up` in §1.1. It's fail-closed —
+if the stack isn't healthy, `up` errors out rather than silently falling
+back to public upstreams; run `pilot services status` to diagnose rather
+than dropping the flag. As of 2026-07-23 this integration hasn't itself
+been re-run with `--services local` yet, so treat it as a bandwidth
+optimization to adopt on your next run, not something already reflected
+in a committed acceptance verdict — see
+`docs/superpowers/specs/2026-07-23-host-local-services-design.md` for the
+feature's own acceptance status.
+
 **Editing/deployment/reconciliation only goes through `pilot edit` /
 `pilot inventory generate` / `pilot deploy` / `pilot reconcile`** — never a hand-written `inventory.yml`, never a raw
 `ansible-playbook`/`ansible-vault` invocation. Everything in §2/§3 below that
@@ -76,14 +99,16 @@ own topology and only until the root cause is established.
 
 ```bash
 # 1. Provision AlmaLinux 9 VM for FreeIPA Server (needs at least 4096 MiB Memory)
-pilot vm-target up --name freeipa --base-image almalinux-9 --memory 4096 --vcpus 2 --disk 30 --ssh-user root
+pilot vm-target up --name freeipa --base-image almalinux-9 --memory 4096 --vcpus 2 --disk 30 --ssh-user root --services local
 
 # 2. Provision Ubuntu 24.04 VM for Central Services Server (needs 8192+ MiB Memory, 4+ vCPUs for Wazuh/Containers)
-pilot vm-target up --name nexus --base-image ubuntu-24.04 --memory 8192 --vcpus 4 --disk 50 --ssh-user root
+pilot vm-target up --name nexus --base-image ubuntu-24.04 --memory 8192 --vcpus 4 --disk 50 --ssh-user root --services local
 
 # 3. Provision Ubuntu 24.04 VM for Client verification
-pilot vm-target up --name client --base-image ubuntu-24.04 --memory 2048 --vcpus 2 --disk 30 --ssh-user root
+pilot vm-target up --name client --base-image ubuntu-24.04 --memory 2048 --vcpus 2 --disk 30 --ssh-user root --services local
 ```
+
+(drop `--services local` — equivalent to `--services none` — if you haven't started `pilot services up` per §0.2, or want an intentionally uncached run)
 
 If all three are started concurrently, the heaviest VM can miss the default
 DHCP-lease window — retry that one alone (optionally with a longer

@@ -39,6 +39,30 @@ The host must have `/dev/kvm`, `virsh`, `qemu-img`, `qemu-system-x86_64`,
 `cloud-localds`, an active `default` libvirt network, and the user in the
 `libvirt` group with ownership of `/var/lib/libvirt/images/pilot`.
 
+### 0.1 Start host cache services once, reuse across every `up`
+
+If you'll bring the same VM(s) up/down more than once in this session
+(iterating on a playbook, retrying a failed run), start the host-local
+cache stack **before** the first `vm-target up` so every VM boots against
+it instead of hitting the public internet on each `apt install`/`docker
+pull`:
+
+```bash
+pilot services up --profile dev-lite   # one-time, long-lived; apt-cacher-ng + Pulp RPM + Harbor
+pilot services status                  # confirm running=true before the first `up`
+```
+
+Then pass `--services local` to every `vm-target up` (or set root-level
+`services: local` in a topology YAML — see
+`references/vm-target-basics.md`'s "Host-local cache services" section).
+It is fail-closed: if the stack isn't running/healthy, `up` errors out
+instead of silently falling back to public upstreams. A one-shot VM you
+won't reset/reiterate on can skip this and use the default `--services
+none`. **Do not `pilot services down`/`purge` between iterations of the
+same session** — `down` only stops containers (data persists, cheap to
+restart) but there's no reason to churn it while you're still using it;
+leave the stack running until you're done testing.
+
 ## 1. Decide the test shape
 
 Every spec test fits one of three shapes. Pick the right one before
@@ -172,8 +196,8 @@ other way around.
 | `--boot-timeout` | 3m         | First boot -> 8m                                   |
 
 ```bash
-# single VM: generic
-go run ./cmd/pilot vm-target up     --name <name>     --ssh-user ubuntu     --disk 30 --memory 4096 --vcpus 2     --ssh-timeout 8m --boot-timeout 8m
+# single VM: generic (add --services local if you started `pilot services up` per §0.1)
+go run ./cmd/pilot vm-target up     --name <name>     --ssh-user ubuntu     --disk 30 --memory 4096 --vcpus 2     --ssh-timeout 8m --boot-timeout 8m     --services local
 ```
 
 ### 3.2 First-up warnings you will see (ignore them)
@@ -352,6 +376,12 @@ for every spec.
 - **Prefer `reset` over `down`+`up` while iterating** on a playbook
   that isn't green yet (§8) — seconds instead of a full reprovision +
   boot wait.
+- **Bringing the same VM(s) up more than once in a session → start
+  `pilot services up` first and pass `--services local` to every `up`**
+  (§0.1). Fail-closed, so a missing/unhealthy stack fails the `up`
+  loudly instead of quietly falling back to public upstreams — don't
+  work around a failure here by dropping to `--services none`, fix the
+  stack (`pilot services status`) instead.
 - **`--skip-syntax-check`/`--skip-lint` are for speed during rapid
   iteration only.** Leave the (default-on) `ansible-playbook
   --syntax-check` + `ansible-lint` preflight enabled for the run whose
@@ -363,8 +393,9 @@ for every spec.
 1. `references/vm-target-basics.md` -- vm-target lifecycle,
    `show-inventory` contract, timeout defaults, first-boot costs,
    `libguestfs` supermin warning, `dnsmasq` lease behaviour, **`--sandbox`
-   mode (the default for `run`), `--json`, run transcripts, and
-   `--group` multi-host inventories**.
+   mode (the default for `run`), `--json`, run transcripts, `--group`
+   multi-host inventories, and host-local cache services (`pilot
+   services` + `--services local`, §0.1 above)**.
 2. `references/spec-promotion-checklist.md` -- the AGENTS.md §3
    checklist that applies to any spec: lint, `bash -n`, regression
    test, evidence swap, version bump.
