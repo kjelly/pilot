@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -19,7 +20,7 @@ import (
 
 const (
 	serviceHostname = "cache.pilot.internal"
-	aptImage        = "sameersbn/apt-cacher-ng:3.7.4"
+	aptImage        = "sameersbn/apt-cacher-ng:3.7.4-20220421"
 	pulpImage       = "pulp/pulp:3.85.25"
 )
 
@@ -53,9 +54,17 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 		return Bundle{}, fmt.Errorf("create service root: %w", err)
 	}
 	for _, dir := range []string{"apt", "pulp/settings/certs", "pulp/pulp_storage", "pulp/pgsql", "pulp/containers", "pulp/container_build", "harbor", "ca"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
+		path := filepath.Join(root, dir)
+		if err := os.MkdirAll(path, 0o755); err != nil {
 			return Bundle{}, fmt.Errorf("create service directory %s: %w", dir, err)
 		}
+	}
+	secretsDir := filepath.Join(root, "harbor", "secrets")
+	if err := os.MkdirAll(secretsDir, 0o700); err != nil {
+		return Bundle{}, fmt.Errorf("create Harbor secrets directory: %w", err)
+	}
+	if err := os.Chmod(secretsDir, 0o700); err != nil {
+		return Bundle{}, fmt.Errorf("set Harbor secrets directory mode: %w", err)
 	}
 
 	caPEM, caKeyPEM, err := loadOrCreateCA(filepath.Join(root, "ca"))
@@ -70,6 +79,26 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	if err := writeAtomicMode(caKeyPath, caKeyPEM, 0o600); err != nil {
 		return Bundle{}, err
 	}
+	adminPassword, err := loadOrCreateSecret(filepath.Join(root, "harbor", "secrets", "admin-password"))
+	if err != nil {
+		return Bundle{}, fmt.Errorf("create Harbor admin password: %w", err)
+	}
+	databasePassword, err := loadOrCreateSecret(filepath.Join(root, "harbor", "secrets", "database-password"))
+	if err != nil {
+		return Bundle{}, fmt.Errorf("create Harbor database password: %w", err)
+	}
+	pulpSecretKey, err := loadOrCreateSecret(filepath.Join(root, "pulp", "settings", "secret-key"))
+	if err != nil {
+		return Bundle{}, fmt.Errorf("create Pulp secret key: %w", err)
+	}
+	pulpSettings := strings.Join([]string{
+		"CONTENT_ORIGIN = 'http://" + serviceHostname + ":8080'",
+		"SECRET_KEY = '" + pulpSecretKey + "'",
+		"",
+	}, "\n")
+	if err := writeAtomicMode(filepath.Join(root, "pulp", "settings", "settings.py"), []byte(pulpSettings), 0o644); err != nil {
+		return Bundle{}, fmt.Errorf("write Pulp settings: %w", err)
+	}
 
 	host := bindIP.String()
 	compose := renderCompose(profile, root, host)
@@ -78,7 +107,7 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 		return Bundle{}, err
 	}
 	harborPath := filepath.Join(root, "harbor", "harbor.yml")
-	if err := writeAtomicMode(harborPath, []byte(renderHarborYML(profile, root, host)), 0o600); err != nil {
+	if err := writeAtomicMode(harborPath, []byte(renderHarborYML(profile, root, host, adminPassword, databasePassword)), 0o600); err != nil {
 		return Bundle{}, err
 	}
 	fingerprint, err := profile.Fingerprint()
@@ -98,6 +127,7 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 		Client: ClientConfig{
 			Profile:           profile.Name,
 			Fingerprint:       fingerprint,
+			HostIP:            host,
 			Hostname:          serviceHostname,
 			AptProxyURL:       fmt.Sprintf("http://%s:%d", serviceHostname, profile.Apt.Port),
 			RPMBaseURL:        fmt.Sprintf("http://%s:8080/pulp/content", serviceHostname),
@@ -109,16 +139,15 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 }
 
 func renderCompose(profile Profile, root, bindIP string) string {
-	q := strconv.Quote
 	return strings.Join([]string{
 		"services:",
 		"  apt-cacher-ng:",
 		"    image: " + aptImage,
 		"    restart: unless-stopped",
 		"    ports:",
-		fmt.Sprintf("      - %s", q(fmt.Sprintf("%s:%d:%d", bindIP, profile.Apt.Port, profile.Apt.Port))),
+		fmt.Sprintf("      - %s", composeVolume(fmt.Sprintf("%s:%d:%d", bindIP, profile.Apt.Port, profile.Apt.Port), "")),
 		"    volumes:",
-		"      - " + q(filepath.Join(root, "apt")) + ":/var/cache/apt-cacher-ng",
+		"      - " + composeVolume(filepath.Join(root, "apt"), "/var/cache/apt-cacher-ng"),
 		"    healthcheck:",
 		"      test: [\"CMD-SHELL\", \"wget -q -O /dev/null http://127.0.0.1:3142/acng-report.html || exit 1\"]",
 		"      interval: 10s",
@@ -128,16 +157,16 @@ func renderCompose(profile Profile, root, bindIP string) string {
 		"    image: " + pulpImage,
 		"    restart: unless-stopped",
 		"    ports:",
-		fmt.Sprintf("      - %s", q(fmt.Sprintf("%s:8080:80", bindIP))),
+		fmt.Sprintf("      - %s", composeVolume(fmt.Sprintf("%s:8080:80", bindIP), "")),
 		"    environment:",
 		"      PULP_HTTPS: \"false\"",
-		fmt.Sprintf("      CONTENT_ORIGIN: %s", q("http://"+serviceHostname+":8080")),
+		fmt.Sprintf("      CONTENT_ORIGIN: %s", strconv.Quote("http://"+serviceHostname+":8080")),
 		"    volumes:",
-		"      - " + q(filepath.Join(root, "pulp", "settings")) + ":/etc/pulp",
-		"      - " + q(filepath.Join(root, "pulp", "pulp_storage")) + ":/var/lib/pulp",
-		"      - " + q(filepath.Join(root, "pulp", "pgsql")) + ":/var/lib/pgsql",
-		"      - " + q(filepath.Join(root, "pulp", "containers")) + ":/var/lib/containers",
-		"      - " + q(filepath.Join(root, "pulp", "container_build")) + ":/var/lib/pulp/.local/share/containers",
+		"      - " + composeVolume(filepath.Join(root, "pulp", "settings"), "/etc/pulp"),
+		"      - " + composeVolume(filepath.Join(root, "pulp", "pulp_storage"), "/var/lib/pulp"),
+		"      - " + composeVolume(filepath.Join(root, "pulp", "pgsql"), "/var/lib/pgsql"),
+		"      - " + composeVolume(filepath.Join(root, "pulp", "containers"), "/var/lib/containers"),
+		"      - " + composeVolume(filepath.Join(root, "pulp", "container_build"), "/var/lib/pulp/.local/share/containers"),
 		"    devices:",
 		"      - /dev/fuse:/dev/fuse",
 		"    healthcheck:",
@@ -149,25 +178,69 @@ func renderCompose(profile Profile, root, bindIP string) string {
 	}, "\n")
 }
 
-func renderHarborYML(profile Profile, root, host string) string {
+func composeVolume(source, target string) string {
+	value := source
+	if target != "" {
+		value += ":" + target
+	}
+	return strconv.Quote(value)
+}
+
+func renderHarborYML(profile Profile, root, host, adminPassword, databasePassword string) string {
 	data := filepath.Join(root, "harbor", "data")
 	return strings.Join([]string{
 		"hostname: " + host,
 		"http:",
 		fmt.Sprintf("  port: %d", profile.Harbor.HTTPPort),
-		"harbor_admin_password: change-me-before-production",
+		"harbor_admin_password: " + adminPassword,
 		"database:",
-		"  password: change-me-before-production",
+		"  password: " + databasePassword,
 		"  max_idle_conns: 100",
 		"  max_open_conns: 900",
+		"jobservice:",
+		"  max_job_workers: 10",
+		"  max_job_duration_hours: 24",
+		"  job_loggers:",
+		"    - STD_OUTPUT",
+		"    - FILE",
+		"  logger_sweeper_duration: 1",
+		"notification:",
+		"  webhook_job_max_retry: 3",
+		"  webhook_job_http_client_timeout: 3",
+		"trivy:",
+		"  skip_update: true",
+		"  skip_java_db_update: true",
+		"  offline_scan: true",
+		"_version: 2.15.0",
 		"data_volume: " + data,
 		"log:",
 		"  level: info",
-		"  rotate_count: 10",
-		"  rotate_size: 100M",
-		"  location: " + filepath.Join(root, "harbor", "logs"),
+		"  local:",
+		"    rotate_count: 10",
+		"    rotate_size: 100M",
+		"    location: " + filepath.Join(root, "harbor", "logs"),
 		"", // Harbor installer fills the generated Compose topology.
 	}, "\n")
+}
+
+func loadOrCreateSecret(path string) (string, error) {
+	if b, err := os.ReadFile(path); err == nil {
+		value := strings.TrimSpace(string(b))
+		if value != "" {
+			return value, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	value := base64.RawURLEncoding.EncodeToString(b)
+	if err := writeAtomicMode(path, []byte(value+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func loadOrCreateCA(dir string) ([]byte, []byte, error) {

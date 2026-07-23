@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -19,6 +20,7 @@ var safeServiceHostname = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
 type ServiceBootstrap struct {
 	Profile           string
 	Fingerprint       string
+	HostIP            string
 	Hostname          string
 	AptProxyURL       string
 	RPMBaseURL        string
@@ -34,6 +36,9 @@ func (s ServiceBootstrap) Validate() error {
 	}
 	if !safeServiceHostname.MatchString(s.Hostname) {
 		return fmt.Errorf("service hostname %q is invalid", s.Hostname)
+	}
+	if s.HostIP != "" && net.ParseIP(s.HostIP) == nil {
+		return fmt.Errorf("service host IP %q is invalid", s.HostIP)
 	}
 	for label, raw := range map[string]string{"apt proxy": s.AptProxyURL, "rpm base": s.RPMBaseURL, "registry mirror": s.RegistryMirrorURL} {
 		if err := validateServiceURL(label, raw); err != nil {
@@ -104,6 +109,9 @@ func (s ServiceBootstrap) RenderCloudInit() (string, error) {
 	})
 	fmt.Fprintf(&b, "      %s\n", config)
 	b.WriteString("runcmd:\n")
+	if s.HostIP != "" {
+		fmt.Fprintf(&b, "  - [sh, -c, 'grep -qF %s /etc/hosts || printf \"%%s %%s\\n\" %s %s >> /etc/hosts']\n", strconv.Quote(s.HostIP+" "+s.Hostname), strconv.Quote(s.HostIP), strconv.Quote(s.Hostname))
+	}
 	b.WriteString("  - [sh, -c, 'if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates; elif command -v update-ca-trust >/dev/null 2>&1; then update-ca-trust extract; else exit 1; fi']\n")
 	fmt.Fprintf(&b, "  - [sh, -c, 'if command -v curl >/dev/null 2>&1; then curl --fail --silent --show-error --cacert /usr/local/share/ca-certificates/pilot-services.crt %s/pulp/api/v3/status/; elif command -v wget >/dev/null 2>&1; then wget --ca-certificate=/usr/local/share/ca-certificates/pilot-services.crt -qO- %s/pulp/api/v3/status/; else exit 1; fi']\n", s.RPMBaseURL, s.RPMBaseURL)
 	fmt.Fprintf(&b, "  - [sh, -c, 'if command -v curl >/dev/null 2>&1; then curl --fail --silent --show-error %s/v2/; elif command -v wget >/dev/null 2>&1; then wget -qO- %s/v2/; else exit 1; fi']\n", s.RegistryMirrorURL, s.RegistryMirrorURL)

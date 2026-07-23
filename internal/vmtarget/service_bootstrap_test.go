@@ -17,6 +17,7 @@ func testServiceBootstrap(t *testing.T) ServiceBootstrap {
 	return ServiceBootstrap{
 		Profile:           bundle.Client.Profile,
 		Fingerprint:       bundle.Client.Fingerprint,
+		HostIP:            bundle.Client.HostIP,
 		Hostname:          bundle.Client.Hostname,
 		AptProxyURL:       bundle.Client.AptProxyURL,
 		RPMBaseURL:        bundle.Client.RPMBaseURL,
@@ -40,6 +41,7 @@ func TestServiceBootstrapRenderCloudInit(t *testing.T) {
 		"update-ca-certificates",
 		"/pulp/api/v3/status/",
 		"cache.pilot.internal",
+		"192.168.122.1 cache.pilot.internal",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("cloud-init missing %q", want)
