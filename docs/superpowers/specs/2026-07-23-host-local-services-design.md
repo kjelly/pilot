@@ -2,7 +2,9 @@
 
 ## Status
 
-Approved design. Implementation is intentionally not included in this document.
+Approved design. The host-service lifecycle and VM bootstrap implementation is
+landed; full disposable-VM package/image acceptance remains a separate test
+milestone.
 
 ## Goal
 
