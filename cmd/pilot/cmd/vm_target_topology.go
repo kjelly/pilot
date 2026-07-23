@@ -116,6 +116,7 @@ func init() {
 	vtTopologyTestCmd.Flags().StringVar(&vtTopoTestPlaybook, "playbook", "", "path to the playbook to run against the topology (required; e.g. playbooks/site.yml)")
 	vtTopologyTestCmd.Flags().StringArrayVar(&vtTopoTestVerify, "verify", nil, "verification spec to run after apply, as 'docs/verification/<x>.md' or 'docs/verification/<x>.md=<ansible-limit>'; repeatable, at least one required")
 	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestSkipLint, "skip-lint", false, "skip syntax check pre-flight")
+	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestSkipCheckmode, "skip-checkmode", false, "skip the --check --diff dry-run pre-flight (only for a playbook that cannot run in check mode)")
 	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestNoRollback, "no-rollback", false, "disable automatic cluster rollback on failure")
 	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestEphemeral, "ephemeral", false, "provision a new topology, test it, then tear down the VMs on success or failure")
 	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestKeepOnFailure, "keep-on-failure", false, "with --ephemeral, preserve the failed VM state instead of rolling back or tearing it down")
@@ -521,6 +522,7 @@ var (
 	vtTopoTestPlaybook      string
 	vtTopoTestVerify        []string
 	vtTopoTestSkipLint      bool
+	vtTopoTestSkipCheckmode bool
 	vtTopoTestNoRollback    bool
 	vtTopoTestEphemeral     bool
 	vtTopoTestKeepOnFailure bool
@@ -537,12 +539,21 @@ or a replica-install playbook that needs primary+replica+client at once.
 
 Steps executed:
   1. L1 syntax check: 'ansible-playbook --syntax-check'
-  2. Cluster snapshot: every node under one 'pre-test-<ts>' tag (concurrent)
-  3. L4 apply: the playbook against the rendered grouped inventory
-  4. L5 verify: 'pilot verify' once per --verify entry
-  5. L6 idempotency: apply again, assert changed=0 across ALL hosts
-  6. Auto-rollback: any failure reverts EVERY node to the pre-test tag and
-     re-wires /etc/hosts (mirroring 'topology rollback')
+  2. L3 dry-run: 'ansible-playbook --check --diff' against the rendered
+     topology inventory's CURRENT state (catches check-mode/fresh-host
+     ordering bugs — e.g. a later gate asserting on real state that an
+     earlier, correctly check-mode-gated task in a DIFFERENT playbook never
+     actually created — before any node is mutated; see AGENTS.md §1.4).
+     With --ephemeral this runs against genuinely fresh nodes, which is
+     exactly the scenario that class of bug needs to reproduce. Use
+     --skip-checkmode for a playbook that legitimately cannot run in check
+     mode.
+  3. Cluster snapshot: every node under one 'pre-test-<ts>' tag (concurrent)
+  4. L4 apply: the playbook against the rendered grouped inventory
+  5. L5 verify: 'pilot verify' once per --verify entry
+  6. L6 idempotency: apply again, assert changed=0 across ALL hosts
+  7. Auto-rollback: any failure after the dry-run reverts EVERY node to the
+     pre-test tag and re-wires /etc/hosts (mirroring 'topology rollback')
 
 --verify is repeatable and takes 'spec.md' or 'spec.md=<ansible-limit>',
 so each spec is verified only against the group it applies to:
@@ -595,7 +606,7 @@ func runTopologySyntaxCheck(cmd *cobra.Command) error {
 		return nil
 	}
 	out := cmd.OutOrStdout()
-	fmt.Fprintln(out, "=== [Step 1/5] L1 Syntax Check ===")
+	fmt.Fprintln(out, "=== [Step 1/6] L1 Syntax Check ===")
 	if err := execAnsiblePlaybook(out, vtTopoTestPlaybook, "--syntax-check"); err != nil {
 		return fmt.Errorf("syntax check failed: %w", err)
 	}
@@ -703,8 +714,24 @@ func printEphemeralDebugHints(errOut io.Writer, topologyPath string) {
 func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, verifies []topoVerify, invPath string, args []string, rollbackOnFailure bool) error {
 	out := cmd.OutOrStdout()
 
+	// L3 dry-run against the topology's CURRENT state, before any node is
+	// mutated. This is what catches check-mode/fresh-host ordering bugs: a
+	// later gate/task (possibly in a different playbook than the one that
+	// was actually changed) asserting on real state that an earlier,
+	// correctly check-mode-gated task never creates during --check. With
+	// --ephemeral the nodes are genuinely fresh, which is exactly the
+	// scenario that class of bug needs to reproduce (see AGENTS.md §1.4).
+	if !vtTopoTestSkipCheckmode {
+		fmt.Fprintln(out, "=== [Step 2/6] L3 Dry-run (--check --diff) ===")
+		checkArgs := append(append([]string{vtTopoTestPlaybook, "-i", invPath}, args...), "--check", "--diff")
+		if err := execExternal(out, "ansible-playbook", checkArgs...); err != nil {
+			return fmt.Errorf("check-mode dry-run failed: %w (see AGENTS.md §1.4 — a playbook must apply cleanly in --check mode against the topology's current state, not just for real; if this playbook is a legitimate exception, rerun with --skip-checkmode)", err)
+		}
+		fmt.Fprintln(out, "✓ Check-mode dry-run passed")
+	}
+
 	snapTag := fmt.Sprintf("pre-test-%d", time.Now().Unix())
-	fmt.Fprintf(out, "=== [Step 2/5] Cluster snapshot: %d node(s) (tag: %s) ===\n", len(spec.Nodes), snapTag)
+	fmt.Fprintf(out, "=== [Step 3/6] Cluster snapshot: %d node(s) (tag: %s) ===\n", len(spec.Nodes), snapTag)
 	if err := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
 		if serr := nm.Snapshot(context.Background(), n.Name, snapTag); serr != nil {
 			return fmt.Errorf("node %q: %w", n.Name, serr)
@@ -715,7 +742,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 	}
 	fmt.Fprintln(out, "✓ Cluster snapshot created")
 
-	fmt.Fprintln(out, "=== [Step 3/5] L4 Apply Playbook (topology inventory) ===")
+	fmt.Fprintln(out, "=== [Step 4/6] L4 Apply Playbook (topology inventory) ===")
 	ansibleArgs := append([]string{vtTopoTestPlaybook, "-i", invPath}, args...)
 	rollbackPolicy := delivery.RollbackSnapshot
 	rollback := delivery.StepFunc(func(context.Context) error {
@@ -747,7 +774,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 			return nil
 		},
 		Verify: func(context.Context) error {
-			fmt.Fprintf(out, "=== [Step 4/5] L5 Verification Specs (%d) ===\n", len(verifies))
+			fmt.Fprintf(out, "=== [Step 5/6] L5 Verification Specs (%d) ===\n", len(verifies))
 			for _, v := range verifies {
 				pilotArgs := []string{"verify", v.spec, "-i", invPath, "--allow-isolated-mutation"}
 				if v.limit != "" {
@@ -764,7 +791,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 			return nil
 		},
 		Idempotency: func(context.Context) error {
-			fmt.Fprintln(out, "=== [Step 5/5] L6 Idempotency Check ===")
+			fmt.Fprintln(out, "=== [Step 6/6] L6 Idempotency Check ===")
 			var idemBuf bytes.Buffer
 			if err := execExternal(io.MultiWriter(out, &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
 				return fmt.Errorf("idempotency run failed: %w", err)

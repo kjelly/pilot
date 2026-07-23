@@ -62,6 +62,43 @@ sudo chmod 0755 /var/lib/libvirt/images/pilot
 > 不要把 `--vm-dir` 指到 `$HOME` 深處：libvirt 的 AppArmor profile 通常擋掉
 > 家目錄路徑，VM 會起不來。
 
+### 2.2 先起 `pilot services`，讓每台 VM 從第一次開機就走快取（建議預設做）
+
+會重複起停同一批 VM（迭代開發、CI、重跑 spec）就該先起 host-side 快取，
+不然每次 `apt install` / `docker pull` 都直接打公網，浪費頻寬也拖慢每一輪：
+
+```bash
+pilot services up --profile dev-lite   # 一次性、長駐；起 apt-cacher-ng + Pulp RPM + Harbor
+pilot services status                  # 看 running/bind_ip/各服務健康狀態
+```
+
+服務資料放在 host（預設 `~/.local/share/pilot/cache/`），跟 VM 的 qcow2/state
+分開；VM `down` 不會動到快取內容。起好之後，`vm-target up`/`topology` 帶
+`--services local`（或 topology YAML 根層 `services: local`），新 VM 從
+cloud-init 階段就把 APT/DNF repo 與 Docker Hub/Harbor proxy 指到這組本地快取：
+
+```bash
+pilot vm-target up --base-image "$BASE" --name infra-vm --ssh-user root \
+  --services local
+```
+
+**fail-closed，不會偷偷退回公網**：沒先 `pilot services up`、服務不健康、或
+選定的 libvirt network 探測不到 gateway，`--services local` 會直接讓 `up` 報錯
+中止，而不是拿一台沒接快取的 VM 頂替。不需要快取（一次性、跑完即丟的 VM）就用
+預設值 `--services none`。
+
+```bash
+pilot services down             # 停容器、保留快取資料（下次 up 重用）
+pilot services purge --confirm  # 唯一會真的刪快取資料的動作
+```
+
+> **驗收狀態（2026-07-23）**：host 端 lifecycle（`up`/`status`/`down`/`purge`）
+> 與 `vm-target`/`topology` 的 fail-closed 串接已實作並在 libvirt `default`
+> network 上跑過健康檢查；VM 內實際透過快取安裝套件、拉 image 的完整
+> disposable-VM 驗收（見 `docs/superpowers/specs/2026-07-23-host-local-services-design.md`
+> 的 Task 8）仍待跑。跑完並補上真實 evidence 前，把 `--services local` 當
+> 「省頻寬的建議預設」，別當成已驗收的路徑寫進 spec 的 Expected 行為。
+
 ---
 
 ## 3. 一次完整操作流程
@@ -70,7 +107,10 @@ sudo chmod 0755 /var/lib/libvirt/images/pilot
 export BASE=/var/lib/libvirt/images/pilot/noble-base.qcow2
 
 # 3.1 起 VM（會 provision + 等開機 + 等 SSH 通才回）
-pilot vm-target up --base-image "$BASE" --name infra-vm --ssh-user root
+# 會重複起停就先 `pilot services up`，再帶 --services local 吃本地快取（見 §2.2）；
+# 一次性、跑完即丟就省略（等同 --services none）。
+pilot vm-target up --base-image "$BASE" --name infra-vm --ssh-user root \
+  --services local
 # ▶ provisioning VM infra-vm (this can take a minute while it boots)…
 # ✓ target infra-vm up
 #   ip        : 192.168.123.90
@@ -158,6 +198,10 @@ log-shipping-apply.yml 在「純 rsyslog、沒裝 docker」的 log-server 上無
 加「無 Loki 目標就 end_host 乾淨跳過」+「docker info fail-early gate」兩道
 pre_tasks(見該 playbook 檔頭與 site.yml 註解)。
 
+> 這次(2026-07-18)實跑早於 §2.2 的 `pilot services` 快取功能，`topo-smoke.yaml`
+> 沒有 `services:` 欄位。之後重跑同一份 topology 想吃本地快取，先 `pilot
+> services up`，再在檔案根層加一行 `services: local`（不必改 `nodes:` 任何欄位）。
+
 ---
 
 ## 4. correct-by-construction 設計（為什麼這條路寫得出正確的程式）
@@ -222,8 +266,9 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
 | 需要 `/dev/kvm` | CI runner 常常沒有 nested virt | 挑有 KVM 的 runner；或 CI 走雲 VM |
 | 開機 ~30–60s | 比 docker exec 慢很多 | 對需要 kernel 保真才用；batch 注意資源 |
 | base image 要自備 + qcow2 | minimal image 的 cloud-init 行為有雷 | 建議用 **standard** server cloudimg（非 minimal） |
-| 沒有 pre-bake/golden image 流程 | 每次靠 cloud-init 裝東西 | 後續可加 `vm-target build`（packer / virt-customize 烤 golden image），對齊 docker 的 `--image-pilot` |
+| 沒有 pre-bake/golden image 流程 | 每次靠 cloud-init 裝東西，重複起停很浪費頻寬 | `pilot services up` + `--services local`（見 §2.2）快取 apt/RPM/image，不必等 pre-bake image 流程也能省下大部分重跑成本；golden image 本身仍待後續加 `vm-target build`（packer / virt-customize），對齊 docker 的 `--image-pilot` |
 | 單 host | 一個 target = 一台 VM | `--hosts` alias 已支援（多 inventory key 指同一台）；真多機拓樸走 `vm-target topology`（宣告式 spec，up/inventory/snapshot/rollback/reset/test 全套，實跑範例見 `docs/runbooks/freeipa-server-replica-ha-drill.md`） |
+| `--services local` 的 disposable-VM 端驗收仍待跑 | 目前只驗過 host-side lifecycle + fail-closed 串接，VM 內實際吃快取裝套件/拉 image 尚無實測 evidence | 見 `docs/superpowers/specs/2026-07-23-host-local-services-design.md` Task 8；補完前別把 `--services local` 寫進任何 spec 的 Expected 驗收行為 |
 
 ---
 
@@ -245,3 +290,4 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
 | 日期 | 版本 | 變更 |
 |------|------|------|
 | 2026-06-30 | v1.0 | 初版：QEMU/KVM vm-target（up/down/list/show-inventory/run/verify/exec/snapshot/rollback），cloud-init NoCloud + qcow2 overlay + 權威 IP；修 virtio-seed / undefine-snapshots-metadata / up-cleanup 三個坑 |
+| 2026-07-23 | v1.1 | 補§2.2：文件化 `pilot services up/status/down/purge` + `vm-target --services local` / topology 根層 `services: local` 的 host-local 快取用法（apt-cacher-ng + Pulp RPM + Harbor，fail-closed，不會退回公網）；VM 端完整驗收仍待補（見 §7） |
