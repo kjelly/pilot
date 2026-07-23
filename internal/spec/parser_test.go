@@ -3,6 +3,7 @@ package spec
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const sampleSpec = `# Verification Spec — bastion-host
@@ -66,6 +67,67 @@ func TestParseReader_NoRows(t *testing.T) {
 	body := "# Verification Spec — empty\n\n## 1. target\n\n## 2. Checklist\n\n| (no rows) |\n"
 	if _, err := ParseReader(strings.NewReader(body)); err == nil {
 		t.Fatal("expected error for empty checklist")
+	}
+}
+
+// TestParseReader_VerifyTimeout confirms a v1 spec's `> 驗證逾時：<seconds>`
+// header directive sets Spec.VerifyTimeout and is applied as every row's
+// default Timeout (which effectiveTimeout, in internal/tools/verify_spec.go,
+// already prefers over the CLI --timeout fallback) — closing the gap where
+// only a v2 schema's per-check `timeout` field could declare this, and a v1
+// spec (like docs/verification/restic-backup.md) needing a longer default for
+// a slow/lock-contended check had no way to declare it except a changelog
+// comment nobody enforces.
+func TestParseReader_VerifyTimeout(t *testing.T) {
+	body := "# Verification Spec — slow-check\n\n" +
+		"> 驗證逾時：180\n\n" +
+		"## 2. Checklist\n\n" +
+		"| ID | Category | Check | Expected | Command |\n" +
+		"|----|----------|-------|----------|---------|\n" +
+		"| C1 | data | slow integrity check | 0 | `slow-check` |\n"
+	s, err := ParseReader(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if s.VerifyTimeout != 180*time.Second {
+		t.Errorf("VerifyTimeout=%v want=180s", s.VerifyTimeout)
+	}
+	if len(s.Rows) != 1 || s.Rows[0].Timeout != 180*time.Second {
+		t.Fatalf("row Timeout=%v want=180s (rows=%+v)", s.Rows[0].Timeout, s.Rows)
+	}
+}
+
+// TestParseReader_VerifyTimeout_Invalid confirms a non-positive-integer value
+// is rejected at parse time rather than silently ignored.
+func TestParseReader_VerifyTimeout_Invalid(t *testing.T) {
+	body := "# Verification Spec — bad-timeout\n\n" +
+		"> 驗證逾時：not-a-number\n\n" +
+		"## 2. Checklist\n\n" +
+		"| ID | Category | Check | Expected | Command |\n" +
+		"|----|----------|-------|----------|---------|\n" +
+		"| C1 | data | x | 0 | `true` |\n"
+	if _, err := ParseReader(strings.NewReader(body)); err == nil {
+		t.Fatal("expected error for non-numeric verify timeout")
+	}
+}
+
+// TestParseReader_VerifyTimeout_DoesNotOverrideExplicitRowTimeout confirms
+// the spec-level default only fills in rows that don't already have their
+// own Timeout (relevant once a v1 row gains a way to set one directly; today
+// no v1 row ever does, so this documents the intended precedence for anyone
+// adding that later).
+func TestParseReader_VerifyTimeout_DoesNotOverrideExplicitRowTimeout(t *testing.T) {
+	s, err := ParseReader(strings.NewReader(sampleSpec))
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if s.VerifyTimeout != 0 {
+		t.Errorf("VerifyTimeout=%v want=0 (sampleSpec declares none)", s.VerifyTimeout)
+	}
+	for _, r := range s.Rows {
+		if r.Timeout != 0 {
+			t.Errorf("row %s Timeout=%v want=0", r.ID, r.Timeout)
+		}
 	}
 }
 
