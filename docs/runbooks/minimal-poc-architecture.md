@@ -1,22 +1,25 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
 > Status: **VERIFIED**
-> Latest completed pass: 2026-07-23 (Asia/Taipei), round 14
-> Evidence: [`2026-07-23-round-14.md`](../evidence/minimal-poc-architecture/2026-07-23-round-14.md)
+> Latest completed pass: 2026-07-23 (Asia/Taipei), round 15
+> Evidence: [`2026-07-23-round-15.md`](../evidence/minimal-poc-architecture/2026-07-23-round-15.md)
+> Round 14 (deep §4 verification matrix): [`2026-07-23-round-14.md`](../evidence/minimal-poc-architecture/2026-07-23-round-14.md)
 > Semantic action catalog expansion (local-only, no VM rebuild): [`2026-07-23-semantic-actions-expansion.md`](../evidence/minimal-poc-architecture/2026-07-23-semantic-actions-expansion.md)
 > Automation: `playbooks/site.yml` plus the day-2
 > `playbooks/apply/freeipa-identity-apply.yml` reconciler
 > Maintainer: sre
 
-Round 14 rebuilt the same topology from a clean environment specifically to validate two
-capabilities added the same day as round 13: **`pilot actions` semantic TUI automation**
-(`pilot edit/deploy/reconcile --actions <scenario.json>` — drives the real screens via synthesized
-key events resolved against live labels, not raw keystroke/index counting) and **`pilot services`**
-(host-local package/image cache for `vm-target up`, `--services local`). It found and fixed one real
-multi-host bug in the new edit automation (authorized; diff in the round-14 evidence file) and one
-stale/misleading roster-authoring instruction (documentation-only; corrected in §2/§3.5 below).
-Round 13's own findings (2 playbook fixes, both already merged) remain valid and are not
-re-litigated here. This runbook keeps only the current sanitized facts and links; its one-time
+Round 15 evaluated whether §3.2's three hand-typed `pilot vm-target up` invocations should be
+replaced by `pilot vm-target topology up` against a committed declarative spec
+([`docs/topologies/minimal-poc-topology.yaml`](../topologies/minimal-poc-topology.yaml), already
+used successfully by an earlier `vm-target topology test` smoke run) and, having confirmed it
+should, rewrote §3.2/§5 and rebuilt the full three-node topology from zero this way to prove it out
+end to end: site-wide deploy (`failed=0` all hosts) and `freeipa-identity` reconcile
+(`changed=17 failed=0`) both passed against VMs created this way. This round's own verification
+focus was the bring-up mechanism and a light §4.1/§4.2 spot-check (HBAC allow/deny + one Thanos
+metric), not a re-run of the full §4 matrix — round 14's deep verification (Grafana/Loki, restic
+snapshots, Wazuh FIM) remains the last full pass and is not re-litigated here. Round 14's own
+findings remain valid. This runbook keeps only the current sanitized facts and links; its one-time
 acceptance recordings are disposable.
 
 ## 0. Goal
@@ -38,16 +41,16 @@ reconciler because it consumes a roster rather than ordinary role membership.
 
 | Item | Last verified value |
 |---|---|
-| Fact timestamp | 2026-07-23T19:05+08:00 |
+| Fact timestamp | 2026-07-23T22:00+08:00 |
 | Targets | `freeipa-server`, `nexus`, `client-vm` |
 | VM sizing | FreeIPA: 2 vCPU/4096 MiB/30 GiB; nexus: 6/12288/80; client: 2/2048/20 |
-| VM provisioning | `pilot vm-target up --services local` — host-local cache reused from an already-running `pilot services up --profile dev-lite` session |
-| Inventory source | Generated from a fresh gitignored workspace; `hosts.yml` built via `pilot edit --actions` (semantic automation), group_vars/vault via interactive `pilot edit`, then `pilot inventory generate` |
+| VM provisioning | `pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml` (spec's own `services: local` key) — replaces three separate `vm-target up` calls; see §3.2 |
+| Inventory source | Generated from a fresh gitignored workspace; `hosts.yml` built via `pilot edit --actions` (semantic automation, including `add_extra_var` for `freeipa_roster_file`), group_vars/vault via `pilot edit --actions`' newer `set_group_var`/`set_vault_value`/`save_vault` actions, `host_vars/nexus.yml` hand-written for `prometheus_site_label` (tool-endorsed exception — see §3.3), then `pilot inventory generate` |
 | Stage | `sandbox` |
 | Alignment | Actual hosts and populated role groups matched the intended topology |
 | Manual extra `-e` | Empty; inventory-derived values were accepted through the wizard/scenario |
-| Tested candidate | commit `23786e76dc8366660cbddcbc0ed8e8111cd892dd`; tree `14e4761d438b27dfb80a56db586ae619775028f8`; plus 1 authorized Go-source fix to `pilot edit --actions` (not yet committed — see round-14 evidence) |
-| Result | Site-wide deploy via `pilot deploy --actions` passed `failed=0` on all three hosts; `freeipa-identity` reconcile via `pilot reconcile --actions` passed initial apply (`changed=21`), remove-membership (`changed=1`, denial confirmed live+authoritative), restore+drift-correction (`changed=3`, new sudo command live after `sss_cache -E`), and a final no-op reconcile was genuinely `changed=0 failed=0` — no exceptions needed this round |
+| Tested candidate | commit `c76f805` (tree as of 2026-07-23T21:29+08:00), rebuilt `./pilot` binary; no Go source changes this round |
+| Result | Site-wide deploy via `pilot deploy --actions` passed `failed=0` on all three hosts (`client-vm ok=89 changed=14`, `freeipa-server ok=70 changed=15`, `nexus ok=206 changed=87`) after one retry (transient FreeIPA LDAP enrollment race — see §6); `freeipa-identity` reconcile via `pilot reconcile --actions` passed initial apply (`changed=17 failed=0`); §4.1 HBAC allow (alice)/deny (bob) and §4.2 one Thanos metric (`up{site="site-nexus"}=1`) spot-checked live — see round-15 evidence for scope |
 
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
@@ -155,20 +158,34 @@ relevant file hashes, target image digests, and tool versions in the evidence re
 
 ### 3.2 Create fresh targets
 
-Remove only the three named disposable targets and the exact gitignored PoC workspace after
-read-only confirmation. Retain shared base images. Rebuild these targets:
+The three nodes' names, sizing, base images, and required role-group membership are captured once
+in [`docs/topologies/minimal-poc-topology.yaml`](../topologies/minimal-poc-topology.yaml) — a
+declarative spec `pilot vm-target topology` consumes directly. Prefer it over three hand-typed
+`pilot vm-target up` invocations: the sizing/role facts then live in one reviewable file instead of
+being re-typed (and potentially drifting) in this prose every round. Remove only the three named
+disposable targets and the exact gitignored PoC workspace after read-only confirmation. Retain
+shared base images. Rebuild the whole topology in one command:
 
 ```bash
-./pilot vm-target up --name freeipa-server --base-image almalinux-9 --vcpus 2 --memory 4096 --disk 30 --services local
-./pilot vm-target up --name nexus --base-image ubuntu-24.04 --vcpus 6 --memory 12288 --disk 80 --services local
-./pilot vm-target up --name client-vm --base-image ubuntu-24.04 --vcpus 2 --memory 2048 --disk 20 --services local
-./pilot vm-target list
+./pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml
+./pilot vm-target topology status --topology docs/topologies/minimal-poc-topology.yaml
 ```
 
-`--services local` requires `pilot services up` to already be running (see §2); drop it for an
-intentionally uncached run. Bring these up **serially, one at a time** — not concurrently — even
-though `pilot vm-target up` itself now tolerates parallel invocations; this runbook's own execution
-discipline keeps VM lifecycle operations serialized for auditability.
+The spec's own `services: local` key is the declarative equivalent of `vm-target up --services
+local` — it requires `pilot services up` to already be running (see §2); remove that key (or set it
+to `none`) for an intentionally uncached run. `topology up` provisions every not-yet-running node
+**concurrently** (one goroutine + one `*vmtarget.Manager` per node; an already-running node with a
+matching name is left alone, so re-running this after only one node needed a rebuild is idempotent)
+and then wires every node's declared `wire:` peers into `/etc/hosts` once all three have an IP. The
+previous revision of this runbook deliberately serialized three separate `vm-target up` calls "for
+auditability" even after `pilot vm-target up` itself became safe under concurrent invocation
+(2026-07-06 cross-process bring-up race fix, `internal/vmtarget`'s `Store.Mutate` flock) — that
+caution is no longer buying anything now that bring-up is expressed as one auditable command against
+one committed spec file, and round 15's rebuild confirmed concurrent bring-up completes correctly
+for all three nodes (see the round-15 evidence link at the top of this file). `topology status`
+reports exactly the three spec-declared nodes (name/status/IP/groups/wire), scoped to this topology
+rather than every VM `pilot vm-target list` happens to know about; either view reads the same
+underlying state, so use whichever is more convenient.
 
 Do not assume addresses from a previous run. If pilot state and libvirt disagree, resolve only the
 three exact target domains/directories after read-only inspection; never delete shared images or a
@@ -237,11 +254,31 @@ group_vars/vault file to a *different* file (or a different workspace entirely) 
 file's own `save_*`/`discard_*` action first — the automation will not guess a discard confirm's
 answer on your behalf.
 
+`prometheus-apply.yml` gates on `prometheus_site_label` with **no default** (see
+`docs/verification/prometheus.md` §1.5) — it identifies which site's Prometheus a given metric came
+from once Thanos Query aggregates across sites, so a silent default would let two sites' data
+collide. It is a genuinely per-site value, not one of the cross-role host *addresses* the deploy
+wizard's site-wide flow auto-detects (§3.4), and `pilot edit` has no `host_vars/` editor — hand-write
+it (the same tool-endorsed exception as the vault's nested-YAML case, §3.3 above):
+
+```bash
+mkdir -p <workspace>/host_vars
+cat > <workspace>/host_vars/nexus.yml <<'EOF'
+---
+prometheus_site_label: site-nexus
+EOF
+```
+
+Skipping this fails a real apply (not just a preview) with `prometheus_site_label is required`,
+confirmed live 2026-07-23 (round 15) on a genuinely fresh workspace that had never set it.
+
 Before deployment:
 
-1. Read `pilot vm-target list` and each target's `show-inventory` output.
+1. Read `pilot vm-target topology status --topology docs/topologies/minimal-poc-topology.yaml` (or
+   `pilot vm-target list`) and each target's `show-inventory` output.
 2. Inspect the generated inventory and confirm the role placement in §0.5.
-3. Confirm required group variables contain real values rather than `CHANGE-ME` or empty defaults.
+3. Confirm required group variables contain real values rather than `CHANGE-ME` or empty defaults,
+   and that `host_vars/nexus.yml`'s `prometheus_site_label` above is present.
 4. Confirm vault **key names only** and compare them with §2.
 5. Run the complete deploy preflight; never choose its skip option.
 
@@ -319,6 +356,15 @@ Run every aligned component spec against the generated inventory, then perform t
 checks. Capture exact commands, outputs, exit codes, target facts, and retries in the raw evidence
 artifact rather than appending them here.
 
+§4.1's HBAC checks and §4.2's Thanos `up` check are pure read-only assertions against an already-
+deployed site — there is no wizard, prompt, or mutation to observe, so they are scripted (see
+below). §4.3 and §4.4 are deliberately **not** scripted: they mutate state and/or drive `pilot
+reconcile`'s wizard, and for those the actual thing under test is the live interactive flow itself
+(TREC-driven), not just its end state — a canned script would verify the wrong layer. Round 15
+evaluated converting all of §4 to scripts and drew the line here; see
+[`2026-07-23-round-15.md`](../evidence/minimal-poc-architecture/2026-07-23-round-15.md) for the
+tradeoffs considered.
+
 ### 4.1 FreeIPA authorization
 
 - Confirm FreeIPA services are active.
@@ -332,12 +378,22 @@ artifact rather than appending them here.
 If `ipa hbactest` allows sudo but the first live sudo lookup is denied, use the SSSD cache recovery
 in §6 and repeat both checks.
 
+Repeatable form: `ALICE_PASSWORD='...' ./scripts/minimal-poc-section4-spotcheck.sh` (see the
+script's own header for the full env var list — `ALICE_SUDO_CMD` in particular must match whatever
+the *current* roster's sudo rule actually grants). It resolves `nexus`'s IP live from `pilot
+vm-target topology status` rather than assuming one, since libvirt DHCP reservations are not
+guaranteed identical across rebuilds. It assumes `hbac.disable_allow_all: true` is set on the active
+roster (required by §2/§1) — otherwise `hbactest`'s top-level `Access granted` is always `True`
+regardless of the real per-rule result (see `docs/runbooks/freeipa-identity.md`'s note on this).
+
 ### 4.2 Metrics and logs through Grafana dependencies
 
 - Confirm Grafana, Prometheus, Loki, and Thanos Query readiness.
-- Query Thanos for `up` and confirm the `site-nexus` series has value `1`.
+- Query Thanos for `up` and confirm the `site-nexus` series has value `1`. (Covered by
+  `scripts/minimal-poc-section4-spotcheck.sh` above, `THANOS_SITE_LABEL`/`THANOS_PORT` env vars.)
 - Query Loki label values and a recent range; confirm the `pilot-siem` stream contains a real event
-  generated during this run.
+  generated during this run. (Not yet scripted — no round has needed to repeat this check often
+  enough to justify it; add it to the spot-check script if that changes.)
 
 ### 4.3 Backup and Wazuh FIM
 
@@ -368,7 +424,10 @@ evidence record.
 - Failed `pilot deploy`/`reconcile` previews must stop before mutation.
 - Apply playbooks retain their own snapshot/rescue boundaries; preserve their failure evidence.
 - For a disposable full teardown, confirm the exact three target names, then use `pilot vm-target
-  down` for each.
+  topology down --topology docs/topologies/minimal-poc-topology.yaml` — it tears down exactly the
+  three nodes that spec declares (the same three-name scope this step has always required), driven
+  from the same file §3.2 used to bring them up, instead of three separate `pilot vm-target down`
+  invocations.
 - Never use a broad recursive deletion target, unresolved variable, wildcard, repository root, or
   shared image directory.
 
@@ -385,6 +444,7 @@ path; only remove it once the user has reviewed it or explicitly asks for cleanu
 
 | Symptom | Cause | Current action |
 |---|---|---|
+| Site-wide deploy's real apply fails `nexus`'s `freeipa-client` component with `Joining realm failed: Operations error: Error checking for attribute uniqueness` | Transient FreeIPA/389-ds LDAP contention when two `freeipa-client` hosts run `ipa-client-install` concurrently against the same server (Ansible's default `ANSIBLE_FORKS=20` runs both in the same play) — confirmed live 2026-07-23 (round 15); the losing host is excluded from every subsequent play in that same `ansible-playbook` run, which cascades into unrelated-looking failures on it (e.g. `wazuh-fim`'s agent-auth failing because `wazuh-manager` never got applied to the excluded host) | Simply re-run `pilot deploy` (site-wide is idempotent — already-applied hosts report `changed=0`); only one host is left to enroll on retry, so it no longer races. Not evidence of a topology/bring-up defect. |
 | First live sudo is denied although `ipa hbactest --service=sudo` allows it | Stale SSSD sudo cache on the client | Run `sss_cache -E`, restart `sssd`, and repeat the live and authoritative checks. Do **not** add `sudo` to `sssd.conf` `services=`; the sudo responder is socket-activated and that edit breaks its socket. |
 | `pilot deploy --dir ...` is rejected | `deploy` takes an inventory with `-i`; `--dir` belongs to authoring commands such as `pilot edit` | Use the §3.4 invocation. |
 | Site deploy asks to confirm auto-detected host variables | These are derived from inventory and are distinct from the manual extra-`-e` field | Accept the detected values; keep the manual field empty. If a required value is not derived, stop and fix inputs. |
@@ -402,20 +462,21 @@ not in this composition runbook.
 
 ## 7. Latest verified evidence
 
-| Field | Round 14 record |
+| Field | Round 15 record |
 |---|---|
-| Verified at | 2026-07-23T19:05+08:00 |
-| Tested revision/tree | `23786e76dc8366660cbddcbc0ed8e8111cd892dd` / `14e4761d438b27dfb80a56db586ae619775028f8`, plus 1 authorized Go-source fix to `pilot edit --actions` (diff in the evidence file; not yet committed) |
-| Targets | Fresh `freeipa-server` (AlmaLinux 9), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via `vm-target up --services local` |
-| Focus | Validating `pilot actions` semantic TUI automation and `pilot services` host-local cache (user-requested), not re-deriving round 13's own findings |
-| hosts.yml build | Entire 3-host, 22-role-assignment `hosts.yml` built via `pilot edit --actions` in one non-interactive run (after the fix) |
-| Site apply | `pilot deploy --actions` — `client-vm ok=92 changed=41 failed=0`; `freeipa-server ok=78 changed=33 failed=0`; `nexus ok=209 changed=95 failed=0`; `localhost ok=1 changed=0 failed=0` |
-| Canonical identity | `pilot reconcile --actions` throughout — initial `changed=21 failed=0`; remove-membership `changed=1 failed=0` (denial confirmed both authoritative and live — live SSH itself was refused, not just sudo); restore+drift `changed=3 failed=0` (membership and a newly-added sudo command both confirmed live after `sss_cache -E`); final no-op reconcile was genuinely `changed=0 failed=0` — no non-idempotent exceptions hit this round |
-| §4 verification | FreeIPA hbactest+live allow/deny: PASS. Grafana/Thanos Query (`site-nexus` series=1): PASS. Loki (`pilot-siem` real log lines): PASS. restic-backup: 4 snapshots across all 3 hosts in the shared repo: PASS. Wazuh FIM: real-time whodata alert (rule 554) matched the trigger file: PASS |
-| Functional verdict | PASS. Round 13's own documented applicability exceptions (unsigned SeaweedFS C6–C8, Wazuh/log-shipping needing an independent `log-server`, `freeipa-client.md` C5/C8 fixture account) were not re-tested this round and remain as last recorded |
-| New this round | 1 real Go bug found+fixed (`pilot edit --actions` couldn't build a multi-host `hosts.yml`, regression test added); 1 stale documentation instruction corrected (roster must not carry a bare top-level `ipa_admin_password`; §2/§3.5/§6); `pilot deploy/reconcile --actions` validated end-to-end against this full topology for the first time, including the duplicate-literal-prompt authoring trap (§3.4) |
-| Evidence integrity | All 15 produced TREC recordings passed `cast_verify`: complete, exit 0, 0 secret-scan findings, safe to share. No leaked `trec mcp` sessions |
-| Publication | [`2026-07-23-round-14.md`](../evidence/minimal-poc-architecture/2026-07-23-round-14.md); secret values and ephemeral addresses omitted |
+| Verified at | 2026-07-23T22:00+08:00 |
+| Tested revision/tree | commit `c76f805`, tree as of 2026-07-23T21:29+08:00; rebuilt `./pilot` binary; no Go source changes this round |
+| Targets | Fresh `freeipa-server` (AlmaLinux 9), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via **`pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml`** (concurrent bring-up + `/etc/hosts` wiring in one command, replacing three serial `vm-target up` calls) |
+| Focus | Evaluating and adopting `vm-target topology` for §3.2/§5's VM lifecycle (user-requested); a light §4.1/§4.2 spot-check, not the full §4 matrix (round 14 remains the last full pass) |
+| hosts.yml build | 3-host, 22-role-assignment `hosts.yml` built via `pilot edit --actions`, including `add_extra_var` for `freeipa_roster_file` on both `freeipa-server` and `nexus` |
+| group_vars/vault | Filled via `pilot edit --actions`' `set_vault_value`/`save_vault` actions (`value_env`, never rendered on screen); `host_vars/nexus.yml` hand-written for `prometheus_site_label` (no semantic action covers `host_vars/` — see §3.3) |
+| Site apply | `pilot deploy --actions` — `client-vm ok=89 changed=14 failed=0`; `freeipa-server ok=70 changed=15 failed=0`; `nexus ok=206 changed=87 failed=0`; passed on the 2nd attempt after a transient FreeIPA LDAP enrollment race (§6) |
+| Canonical identity | `pilot reconcile --actions` initial apply: `changed=17 failed=0` |
+| §4 spot-check | FreeIPA hbactest + live: alice (sshd+sudo) allowed, matched `poc-ssh-access`; bob denied. Live `sudo -n -l` showed exactly the roster-authorized command; an unlisted command (`/etc/shadow`) was refused. Thanos Query `up{site="site-nexus"}` = `1`. Full §4.3/§4.4 (restic snapshots, Wazuh FIM trigger, remove/restore identity cycle) not re-run this round — see round 14 |
+| Functional verdict | PASS for this round's scope (VM-creation mechanism swap + spot-check). Round 14's fuller verification and its documented exceptions stand as last recorded |
+| New this round | Runbook §3.2/§5/§3.3/§6 updated to adopt `vm-target topology`; 2 own roster/inventory authoring gaps found and fixed before any real mutation (missing `nfs.servers` entry — hard `--check` failure; missing `host_vars` `prometheus_site_label` — hard apply failure); 1 operational gotcha newly documented (§6, concurrent-enrollment LDAP race, self-heals on retry); 1 pre-existing playbook bug found and fixed (authorized) — `freeipa-identity-apply.yml`'s "Gate: canonical user objects are structurally valid" task was missing `no_log: true`, printing roster users' plaintext initial passwords to the ansible-playbook transcript on every real run; now suppressed like its sibling tasks |
+| Evidence integrity | All 6 produced TREC recordings passed `cast_verify`: complete, exit 0, 0 secret-scan findings, safe to share — after one self-caught fix: an intermediate ad-hoc verification script used `set -x` and leaked a (since-rotated) test password into a `.cast` via `sshpass -p`; regenerated with `sshpass -e`/no `set -x` before keeping it as evidence |
+| Publication | [`2026-07-23-round-15.md`](../evidence/minimal-poc-architecture/2026-07-23-round-15.md); secret values and ephemeral addresses omitted |
 
 The compact evidence record contains the current candidate provenance, result matrix, documented
 exceptions, and raw-artifact pointers. Earlier runs remain available in their evidence records and
