@@ -349,6 +349,43 @@ func TestEditAutomationDriverExtraVarCRUD(t *testing.T) {
 	}
 }
 
+// TestEditAutomationDriverExtraVarPresentationShowsContent proves that a
+// presentation recording captures each extra var's actual key/value —
+// pushExtraVarsMenu (edit_tui.go) is presented as an interior sub-step right
+// before the driver navigates back to the host menu, whose own listing only
+// ever shows a count ("其他變數(共 N 個)") and never the content.
+func TestEditAutomationDriverExtraVarPresentationShowsContent(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_host", Host: "web-1"},
+			{Action: "add_extra_var", Host: "web-1", Key: "ipa_server_ip", Value: "10.0.0.9"},
+			{Action: "edit_extra_var", Host: "web-1", Key: "ipa_server_ip", Value: "10.0.0.10"},
+			{Action: "delete_extra_var", Host: "web-1", Key: "ipa_server_ip"},
+			{Action: "save_hosts"},
+		},
+	}
+
+	var out bytes.Buffer
+	r := newEditRouterModel(dir)
+	d := automationDriver{presentation: true, out: &out}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{
+		"新增變數：ipa_server_ip", "ipa_server_ip = 10.0.0.9",
+		"修改變數：ipa_server_ip", "ipa_server_ip = 10.0.0.10",
+		"刪除變數：ipa_server_ip",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("presentation output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // TestEditAutomationDriverExtraVarKeyPrefixDisambiguation proves the
 // "key + \" = \"" navigation fix: bare-substring matching would make
 // "region" ambiguous against "region_id"'s own row ("region_id = 42"

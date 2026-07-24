@@ -33,6 +33,15 @@ type automationDriver struct {
 	// doesn't show up in the file picker yet (openVaultFile) — every other
 	// navigation resolves against on-screen labels alone.
 	dir string
+	// marker, if non-nil, receives one line per completed step (same
+	// action/result/error fields as the trace event, so it carries no
+	// action values either). This drives the router directly against the
+	// TUI model rather than through real PTY keystrokes, so a trec
+	// recording wrapping this process would otherwise have "o" output but
+	// no "i"/"m" trail of what produced each screen. Wired to
+	// TREC_MARKER_FD when trec is the one running this process; nil
+	// (no-op) otherwise.
+	marker io.Writer
 }
 
 func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error {
@@ -52,6 +61,7 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 		if err != nil {
 			event.Result = "error"
 			event.Error = err.Error()
+			d.emitMarker(event)
 			if d.trace != nil {
 				d.trace(event)
 			}
@@ -60,11 +70,37 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 		if d.presentation && d.out != nil {
 			fmt.Fprintf(d.out, "\n── %s ──\n%s", step.Action, r.View())
 		}
+		d.emitMarker(event)
 		if d.trace != nil {
 			d.trace(event)
 		}
 	}
 	return nil
+}
+
+// present renders r's current screen under label when running in
+// presentation mode, mirroring run()'s per-step render. It exists for
+// interior sub-steps whose content wouldn't otherwise reach the recording:
+// e.g. an extra host var's key/value, since the host menu it's navigated
+// back to only ever shows a count ("其他變數(共 N 個)"), never the content.
+func (d *automationDriver) present(r *editRouterModel, label string) {
+	if d.presentation && d.out != nil {
+		fmt.Fprintf(d.out, "\n── %s ──\n%s", label, r.View())
+	}
+}
+
+// emitMarker writes event to d.marker as a trec STEP_ marker line, so
+// markers.go's parseMarkerKind classifies a failed step as "failure" and a
+// completed one as "action". No-op when d.marker is nil.
+func (d *automationDriver) emitMarker(event automationTraceEvent) {
+	if d.marker == nil {
+		return
+	}
+	if event.Result == "error" {
+		fmt.Fprintf(d.marker, "STEP_FAILED step=%d action=%s screen=%s: %s\n", event.Step, event.Action, event.ScreenID, event.Error)
+		return
+	}
+	fmt.Fprintf(d.marker, "STEP_ACTION step=%d action=%s screen=%s\n", event.Step, event.Action, event.ScreenID)
 }
 
 func (d *automationDriver) runStep(r *editRouterModel, step editAction) error {

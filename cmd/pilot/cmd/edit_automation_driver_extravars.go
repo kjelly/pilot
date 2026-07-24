@@ -10,6 +10,8 @@
 // to navigate from.
 package cmd
 
+import "fmt"
+
 func (d *automationDriver) addExtraVar(r *editRouterModel, host, key, value string, secret bool) error {
 	if err := d.ensureHostMenu(r, host); err != nil {
 		return err
@@ -31,6 +33,12 @@ func (d *automationDriver) addExtraVar(r *editRouterModel, host, key, value stri
 	}
 	if err := d.enter(r); err != nil {
 		return err
+	}
+	// Present the 其他變數 submenu (now listing "key = value") before
+	// navigating back to the host menu, which only ever shows a count —
+	// otherwise the added variable never appears in a presentation recording.
+	if !secret {
+		d.present(r, fmt.Sprintf("新增變數：%s", key))
 	}
 	return d.choose(r, "返回")
 }
@@ -58,6 +66,9 @@ func (d *automationDriver) editExtraVar(r *editRouterModel, host, key, value str
 	if err := d.enter(r); err != nil {
 		return err
 	}
+	if !secret {
+		d.present(r, fmt.Sprintf("修改變數：%s", key))
+	}
 	return d.choose(r, "返回")
 }
 
@@ -75,5 +86,6 @@ func (d *automationDriver) deleteExtraVar(r *editRouterModel, host, key string) 
 	if err := d.choose(r, "刪除"); err != nil {
 		return err
 	}
+	d.present(r, fmt.Sprintf("刪除變數：%s", key))
 	return d.choose(r, "返回")
 }

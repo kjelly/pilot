@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -179,6 +180,22 @@ func (s *automationTraceSink) close() error {
 	return os.Rename(s.tmp, s.path)
 }
 
+// openTrecMarkerFD opens the fd trec's `record` announces via TREC_MARKER_FD
+// (see trec's AGENTS.md/CLAUDE.md conventions) so automationDriver can
+// self-report each step as it happens. Returns nil when the env var is
+// absent (not running under trec record) or unparsable.
+func openTrecMarkerFD() *os.File {
+	fdStr := os.Getenv("TREC_MARKER_FD")
+	if fdStr == "" {
+		return nil
+	}
+	fd, err := strconv.Atoi(fdStr)
+	if err != nil {
+		return nil
+	}
+	return os.NewFile(uintptr(fd), "trec-marker")
+}
+
 func runAutomatedEditWorkflow(cmd *cobra.Command, scenario editScenario, presentation bool, tracePath string) error {
 	if err := validateEditScenario(scenario); err != nil {
 		return err
@@ -207,7 +224,11 @@ func runAutomatedEditWorkflow(cmd *cobra.Command, scenario editScenario, present
 	out := cmd.OutOrStdout()
 	r := newEditRouterModel(editDir)
 	f := func(event automationTraceEvent) { sink.add(event) }
-	d := automationDriver{trace: f, presentation: presentation, out: out, dir: editDir}
+	marker := openTrecMarkerFD()
+	if marker != nil {
+		defer marker.Close()
+	}
+	d := automationDriver{trace: f, presentation: presentation, out: out, dir: editDir, marker: marker}
 	if presentation {
 		if scenario.Title != "" {
 			fmt.Fprintf(out, "═══ %s ═══\n", scenario.Title)
