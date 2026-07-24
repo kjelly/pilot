@@ -27,6 +27,13 @@
 # freeipa-identity.md is intentionally not listed: site.yml excludes the
 # day-2 roster reconciler and it must be applied (with its fixture/roster)
 # separately before verifying that spec.
+#
+# services: local reuses `pilot services up --profile dev-lite`'s host-local
+# package/image cache across all three nodes (equivalent to `vm-target up
+# --services local`, see docs/runbooks/minimal-poc-architecture.md §2). It is
+# fail-closed if that stack isn't running — drop this key for an
+# intentionally uncached run.
+services: local
 nodes:
   - name: freeipa-server
     base_image: almalinux-9
