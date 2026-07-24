@@ -80,11 +80,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # docker: python SDK backing community.docker.*.
 # psycopg2-binary: backing community.postgresql.*.
+#
+# Collections install to the system-wide path (-p), not the default
+# ~/.ansible/collections: `pilot deploy`/`pilot reconcile` always set
+# ANSIBLE_HOME to an isolated per-run directory (prepareDeployAnsibleRuntime
+# in cmd/pilot/cmd/deploy.go), which redirects ansible-core's default
+# collections search path away from $HOME. A collection installed only at
+# the default path becomes invisible the moment ANSIBLE_HOME is overridden —
+# confirmed live: `ansible-doc -l` under an overridden ANSIBLE_HOME showed
+# zero community.docker/community.postgresql/ansible.posix modules, and the
+# ansible.posix.json stdout callback (used by pilot's per-host verify step)
+# failed to load with the same root cause. /usr/share/ansible/collections is
+# ansible-core's other default search entry and does not depend on HOME/
+# ANSIBLE_HOME, so it survives the redirection.
 RUN pip install --no-cache-dir \
         ansible-core \
         docker \
         psycopg2-binary \
-    && ansible-galaxy collection install \
+    && ansible-galaxy collection install -p /usr/share/ansible/collections \
         ansible.posix \
         community.docker \
         community.postgresql
@@ -94,6 +107,8 @@ COPY --from=builder /out/pilot /usr/local/bin/pilot
 WORKDIR /pilot
 COPY playbooks/ playbooks/
 COPY group_vars/ group_vars/
+COPY contracts/ contracts/
+COPY docs/verification/ docs/verification/
 COPY ansible.cfg ansible.cfg
 COPY inventory.example.yml inventory.example.yml
 COPY hosts.example.yml hosts.example.yml

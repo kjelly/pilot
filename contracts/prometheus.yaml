@@ -27,6 +27,7 @@ resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
 groupVars:
   - {name: thanos_s3_target_host, type: string, required: true, secret: false}
   - {name: alertmanager_target_host, type: string, required: true, secret: false}
+  - {name: prometheus_site_label, type: string, required: true, secret: false}
 endpoints:
   - {name: prometheus, scheme: http, port: 9090}
   - {name: sidecar, scheme: grpc, port: 10901}

@@ -37,6 +37,11 @@ hand-edit the generated inventory and do not call `ansible-playbook` directly. I
 membership controls which `site.yml` roles run. `freeipa-identity` remains a separate day-2
 reconciler because it consumes a roster rather than ordinary role membership.
 
+Before building the workspace, use the companion [Minimal PoC configuration guide](minimal-poc-configuration.md)
+for the complete role membership, group vars, host vars, and vault key contract. The semantic-action
+recordings under `tmp/` are smoke coverage for the editor API, not a complete walkthrough of these
+component-specific values.
+
 ## 0.5 Current fact summary
 
 | Item | Last verified value |
@@ -140,7 +145,10 @@ Set `freeipa_roster_file` as an extra host var (via `pilot edit`'s hosts.yml edi
 host whose apply playbook reads it — in this topology that is both `freeipa-server`
 (`freeipa-identity-apply.yml`) and `nexus` (`freeipa-nfs-server-apply.yml`, which independently
 loads the same roster to resolve its own NFS server/share entries). Point it at the same absolute
-roster path on both hosts.
+roster path on both hosts. The project convention is `.vault/ipa-identity.yaml` under the
+workspace; there is **no playbook default path**, so pass its deployment-controller absolute path,
+for example `<workspace>/.vault/ipa-identity.yaml` (on the investigated controller:
+`/home/ubuntu/ansible/.vault/ipa-identity.yaml`). Do not use `.vault/main.yaml` as the roster path.
 
 A roster group's `category` must match its name's prefix: `team` → `^team-`, `filesystem` →
 `^data-`, `access` → `^access-`, `role` → `^role-` (enforced by a validation gate). HBAC rule

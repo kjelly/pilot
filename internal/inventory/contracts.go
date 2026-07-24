@@ -4,12 +4,15 @@ import "sort"
 
 // roleContract is the single source of truth for one inventory role's
 // generated companions: descriptive catalog text, shared group_vars
-// stem (if any), and vault skeleton sections (if any).
+// stem (if any), vault skeleton sections (if any), and host_vars keys
+// (if any) that have no safe cross-host default and must be scaffolded
+// per host rather than shared.
 type roleContract struct {
 	Name          string
 	Description   string
 	GroupVarsStem string
 	VaultSections []string
+	HostVarsKeys  []string
 }
 
 // roleContracts must stay in the same order as inventory.example.yml's
@@ -32,7 +35,7 @@ var roleContracts = []roleContract{
 	{Name: "wazuh-fim", Description: "Wazuh agent：FIM + auditd who-data (wazuh-fim-apply.yml)", GroupVarsStem: "wazuh-fim"},
 	{Name: "seaweedfs-s3", Description: "S3 相容物件儲存，需先過 docker (seaweedfs-s3-apply.yml)"},
 	{Name: "restic-backup", Description: "跨主機備份到 S3，見 docs/runbooks/restic-backup.md §5 (restic-backup-apply.yml)", GroupVarsStem: "restic-backup", VaultSections: []string{"restic-backup"}},
-	{Name: "prometheus", Description: "每站 Prometheus + Thanos Sidecar (prometheus-apply.yml)", GroupVarsStem: "prometheus", VaultSections: []string{"thanos-s3"}},
+	{Name: "prometheus", Description: "每站 Prometheus + Thanos Sidecar (prometheus-apply.yml)", GroupVarsStem: "prometheus", VaultSections: []string{"thanos-s3"}, HostVarsKeys: []string{"prometheus_site_label"}},
 	{Name: "thanos-query", Description: "中央 Thanos Query，只需一台 (thanos-query-apply.yml)", GroupVarsStem: "thanos-query", VaultSections: []string{"thanos-s3"}},
 	{Name: "alertmanager", Description: "中央 Alertmanager，只需一台 (alertmanager-apply.yml)", GroupVarsStem: "alertmanager", VaultSections: []string{"alertmanager"}},
 	{Name: "dashboard", Description: "Grafana + Loki，只需一台 (dashboard-apply.yml)", GroupVarsStem: "dashboard", VaultSections: []string{"dashboard"}},
