@@ -282,6 +282,16 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 		return abortOrErr(err)
 	}
 
+	// Hard, unskippable gate — runs before even the optional ansible-side
+	// preflight below, let alone a real apply. See deploy_completeness.go.
+	violations, err := validateDeploymentCompleteness(ctx, inv)
+	if err != nil {
+		return err
+	}
+	if len(violations) > 0 {
+		return formatCompletenessViolations(violations)
+	}
+
 	if runConfirmProgram("要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
 		previewInventoryGraph(ctx, out, inv)
 		fmt.Fprintln(out)
