@@ -75,7 +75,7 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	if err != nil {
 		return abortOrErr(err)
 	}
-	if runConfirmProgram("要不要先看一下這份 inventory 的 host/group 結構？(ansible-inventory --graph)", true) {
+	if runConfirmProgram("要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
 		previewInventoryGraph(ctx, out, inv)
 		fmt.Fprintln(out)
 	}

@@ -108,7 +108,7 @@ func TestPilotDeployPTY_DeclineAtFinalConfirmNeverRunsAnsible(t *testing.T) {
 	waitForNewDeployScreen(t, proc, "Inventory 檔路徑")
 	proc.press(t, "\r") // accept default "inventory.yml" (resolves via cmd.Dir)
 
-	waitForNewDeployScreen(t, proc, "ansible-inventory --graph")
+	waitForNewDeployScreen(t, proc, "pilot deploy graph --view both")
 	proc.press(t, "n") // decline inventory graph preview — confirmModel finalizes on y/n alone, no Enter needed
 
 	waitForNewDeployScreen(t, proc, "前置檢查")
