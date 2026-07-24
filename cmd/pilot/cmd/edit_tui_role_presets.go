@@ -150,7 +150,8 @@ func pushRolePresetManager(r *editRouterModel, dir, path string, hf *inventory.H
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors the trailing "↩ 返回" item.
+			return pushRolesMenu(r, dir, path, hf, name)
 		}
 		idx := m.Selected()
 		switch {
@@ -172,7 +173,8 @@ func pushRolePresetAction(r *editRouterModel, dir, path string, hf *inventory.Ho
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors the trailing "↩ 返回" item.
+			return pushRolePresetManager(r, dir, path, hf, name, "")
 		}
 		switch m.Selected() {
 		case 0:
@@ -205,7 +207,12 @@ func pushRolePresetName(r *editRouterModel, dir, path string, hf *inventory.Host
 	return r.transitionTo(newTextInputModel("角色範本名稱", current, validate), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// create flow (idx < 0): back to the preset list; rename flow:
+			// back to that preset's own action menu, not all the way out.
+			if idx < 0 {
+				return pushRolePresetManager(r, dir, path, hf, name, "")
+			}
+			return pushRolePresetAction(r, dir, path, hf, name, presets, idx)
 		}
 		label := strings.TrimSpace(m.Value())
 		if idx < 0 {

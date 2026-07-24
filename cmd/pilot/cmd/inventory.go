@@ -45,7 +45,21 @@ var (
 	// explicitly, it follows --dir just like the default inventory/group_vars
 	// bundle, landing under <dir>/.vault/main.yaml.
 	invGenVaultOut string
-	invLintIn      string
+	// invGenNoHostVars opts OUT of scaffolding host_vars/<host>.yml for
+	// hosts whose roles have no safe cross-host default (e.g.
+	// prometheus_site_label). Like the vault skeleton, this only ever
+	// writes a placeholder — it never invents the real per-host value —
+	// and only when the file is missing, never overwriting one already
+	// filled in.
+	invGenNoHostVars bool
+	// invGenNoNFSRoster opts OUT of auto-completing a missing nfs.servers
+	// entry in the freeipa-identity roster for hosts carrying
+	// freeipa-nfs-server. Unlike host_vars/vault scaffolding, this one
+	// value (the NFS service principal) is fully derived from data pilot
+	// already has, so it's safe to write for real rather than only
+	// placeholder — but it still never touches an already-matching entry.
+	invGenNoNFSRoster bool
+	invLintIn         string
 )
 
 var inventoryCmd = &cobra.Command{
@@ -87,6 +101,12 @@ var inventoryGenerateCmd = &cobra.Command{
 		}
 		if !invGenNoVault {
 			writeMissingVaultSkeleton(cmd.ErrOrStderr(), vaultOut, hf)
+		}
+		if !invGenNoHostVars {
+			writeMissingHostVarsSkeleton(cmd.ErrOrStderr(), groupVarsBaseDir(out), hf)
+		}
+		if !invGenNoNFSRoster {
+			writeMissingNFSRosterEntries(cmd.ErrOrStderr(), groupVarsBaseDir(out), hf)
 		}
 		if out == "" || out == "-" {
 			fmt.Print(rendered)
@@ -227,6 +247,81 @@ func writeMissingVaultSkeleton(w io.Writer, dst string, hf *inventory.HostsFile)
 	fmt.Fprintf(w, "vault: wrote %s\n", dst)
 }
 
+// writeMissingHostVarsSkeleton scaffolds host_vars/<host>.yml for every host
+// whose roles have a var with no safe cross-host default (e.g.
+// prometheus_site_label) — same stat-then-skip, only-write-when-missing
+// semantics as writeMissingVaultSkeleton, one file per host instead of one
+// shared file.
+func writeMissingHostVarsSkeleton(w io.Writer, dir string, hf *inventory.HostsFile) {
+	for _, h := range hf.Hosts {
+		rendered, ok := inventory.GenerateHostVarsSkeleton(h)
+		if !ok {
+			continue
+		}
+		dst := filepath.Join(dir, "host_vars", h.Name+".yml")
+
+		if _, err := os.Stat(dst); err == nil {
+			fmt.Fprintf(w, "host_vars: %s already exists, left untouched\n", dst)
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(w, "host_vars: skip %s (%v)\n", dst, err)
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			fmt.Fprintf(w, "host_vars: skip %s (%v)\n", dst, err)
+			continue
+		}
+		if err := os.WriteFile(dst, []byte(rendered), 0o644); err != nil {
+			fmt.Fprintf(w, "host_vars: skip %s (%v)\n", dst, err)
+			continue
+		}
+		fmt.Fprintf(w, "host_vars: wrote %s\n", dst)
+	}
+}
+
+// resolveRosterPath resolves a freeipa_roster_file value the same way a
+// human editing hosts.yml inside a workspace would expect: an absolute path
+// is used as-is, a relative one is relative to that workspace's own
+// directory (dir), not the pilot process's current working directory.
+func resolveRosterPath(dir, rosterPath string) string {
+	if rosterPath == "" || filepath.IsAbs(rosterPath) {
+		return rosterPath
+	}
+	return filepath.Join(dir, rosterPath)
+}
+
+// writeMissingNFSRosterEntries auto-completes a missing nfs.servers entry
+// in the freeipa-identity roster for every host carrying freeipa-nfs-server
+// and a non-empty freeipa_roster_file extra var — the one requirement in
+// this generator that's safe to fully write for real rather than only
+// scaffold, since the NFS service principal is fully derived from data
+// pilot already has (see inventory.AppendMissingNFSServerStub). A roster
+// that can't be inspected (missing, unparseable, or ansible-vault
+// encrypted) is reported and skipped, never treated as an error worth
+// failing generation over.
+func writeMissingNFSRosterEntries(w io.Writer, dir string, hf *inventory.HostsFile) {
+	for _, h := range hf.Hosts {
+		if !hasRole(h.Roles, "freeipa-nfs-server") {
+			continue
+		}
+		rosterPath := resolveRosterPath(dir, h.Extra["freeipa_roster_file"])
+		if rosterPath == "" {
+			continue
+		}
+
+		appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name)
+		switch {
+		case err != nil:
+			fmt.Fprintf(w, "nfs roster: skip %s for %s (%v)\n", rosterPath, h.Name, err)
+		case appended:
+			fmt.Fprintf(w, "nfs roster: appended nfs.servers entry for %s to %s\n", h.Name, rosterPath)
+		default:
+			fmt.Fprintf(w, "nfs roster: %s already has an entry for %s\n", rosterPath, h.Name)
+		}
+	}
+}
+
 var inventoryLintCmd = &cobra.Command{
 	Use:   "lint",
 	Short: "Validate a simple hosts source file without generating anything",
@@ -271,6 +366,8 @@ func init() {
 	inventoryGenerateCmd.Flags().BoolVar(&invGenNoGroupVars, "no-group-vars", false, "skip backfilling group_vars/<role>.yml from group_vars/<role>.example.yml for roles actually used (default: backfill missing files, never overwrite existing ones)")
 	inventoryGenerateCmd.Flags().BoolVar(&invGenNoVault, "no-vault", false, "skip generating .vault/main.yaml from the roles actually used (default: write only when missing, never overwrite existing files)")
 	inventoryGenerateCmd.Flags().StringVar(&invGenVaultOut, "vault-out", ".vault/main.yaml", "path to write the generated plaintext vault skeleton (relative to --dir unless this flag is set explicitly)")
+	inventoryGenerateCmd.Flags().BoolVar(&invGenNoHostVars, "no-host-vars", false, "skip scaffolding host_vars/<host>.yml for hosts whose roles have no safe cross-host default, e.g. prometheus_site_label (default: write only when missing, never overwrite existing files)")
+	inventoryGenerateCmd.Flags().BoolVar(&invGenNoNFSRoster, "no-nfs-roster", false, "skip auto-completing a missing nfs.servers roster entry for hosts with the freeipa-nfs-server role (default: append only when missing, never touch an existing entry)")
 	inventoryLintCmd.Flags().StringVar(&invLintIn, "in", "hosts.yml", "path to the simple hosts source file")
 
 	inventoryCmd.AddCommand(inventoryGenerateCmd)

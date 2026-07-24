@@ -222,3 +222,147 @@ func TestWriteMissingVaultSkeleton_NoApplicableRolesIsSilent(t *testing.T) {
 		t.Fatalf("expected no output, got %q", got)
 	}
 }
+
+func TestWriteMissingHostVarsSkeleton_WritesOnlyForHostsNeedingKeys(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{
+		{Name: "nexus", Roles: []string{"docker", "prometheus"}},
+		{Name: "client-vm", Roles: []string{"docker", "freeipa-client"}},
+	}}
+
+	var buf bytes.Buffer
+	writeMissingHostVarsSkeleton(&buf, filepath.Join("envs", "staging"), hf)
+
+	path := filepath.Join("envs", "staging", "host_vars", "nexus.yml")
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !bytes.Contains(got, []byte(`prometheus_site_label: ""`)) {
+		t.Fatalf("host_vars skeleton missing prometheus_site_label:\n%s", string(got))
+	}
+
+	if _, err := os.Stat(filepath.Join("envs", "staging", "host_vars", "client-vm.yml")); !os.IsNotExist(err) {
+		t.Fatalf("client-vm should not have gotten a host_vars skeleton, stat err=%v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Fatalf("host_vars file mode = %o, want 644", perm)
+	}
+	if got := buf.String(); !bytes.Contains([]byte(got), []byte("host_vars: wrote")) {
+		t.Fatalf("expected a write message, got %q", got)
+	}
+}
+
+func TestWriteMissingHostVarsSkeleton_NeverOverwritesExistingFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	mustWriteFile(t, filepath.Join("host_vars", "nexus.yml"), "prometheus_site_label: site-nexus\n")
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "nexus", Roles: []string{"prometheus"}}}}
+
+	var buf bytes.Buffer
+	writeMissingHostVarsSkeleton(&buf, ".", hf)
+
+	assertFileContent(t, filepath.Join("host_vars", "nexus.yml"), "prometheus_site_label: site-nexus\n")
+	if got := buf.String(); !bytes.Contains([]byte(got), []byte("already exists")) {
+		t.Fatalf("expected an already exists message, got %q", got)
+	}
+}
+
+func TestWriteMissingHostVarsSkeleton_NoApplicableRolesIsSilent(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "web-1", Roles: []string{"linux-servers"}}}}
+
+	var buf bytes.Buffer
+	writeMissingHostVarsSkeleton(&buf, ".", hf)
+
+	if _, err := os.Stat(filepath.Join("host_vars", "web-1.yml")); !os.IsNotExist(err) {
+		t.Fatalf("host_vars skeleton should not have been created, stat err=%v", err)
+	}
+	if got := buf.String(); got != "" {
+		t.Fatalf("expected no output, got %q", got)
+	}
+}
+
+func TestWriteMissingNFSRosterEntries_AppendsForFreeIPANFSServerHost(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	rosterPath := filepath.Join("roster.yaml")
+	mustWriteFile(t, rosterPath, "---\nschema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\n")
+
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{
+		{Name: "nexus", Roles: []string{"freeipa-nfs-server"}, Extra: map[string]string{"freeipa_roster_file": rosterPath}},
+	}}
+
+	var buf bytes.Buffer
+	writeMissingNFSRosterEntries(&buf, ".", hf)
+
+	has, err := inventory.RosterHasNFSServer(rosterPath, "nexus.ipa.pilot.internal")
+	if err != nil {
+		t.Fatalf("RosterHasNFSServer() error = %v", err)
+	}
+	if !has {
+		t.Fatalf("expected nexus.ipa.pilot.internal to be appended to the roster")
+	}
+	if got := buf.String(); !bytes.Contains([]byte(got), []byte("nfs roster: appended")) {
+		t.Fatalf("expected an appended message, got %q", got)
+	}
+}
+
+func TestWriteMissingNFSRosterEntries_SkipsHostsWithoutTheRole(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	rosterPath := filepath.Join("roster.yaml")
+	mustWriteFile(t, rosterPath, "---\nschema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\n")
+
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{
+		{Name: "client-vm", Roles: []string{"freeipa-client"}, Extra: map[string]string{"freeipa_roster_file": rosterPath}},
+	}}
+
+	var buf bytes.Buffer
+	writeMissingNFSRosterEntries(&buf, ".", hf)
+
+	if got := buf.String(); got != "" {
+		t.Fatalf("expected no output for a host without freeipa-nfs-server, got %q", got)
+	}
+	has, err := inventory.RosterHasNFSServer(rosterPath, "client-vm.ipa.pilot.internal")
+	if err != nil {
+		t.Fatalf("RosterHasNFSServer() error = %v", err)
+	}
+	if has {
+		t.Fatalf("roster should not have gained an entry for a host without the role")
+	}
+}
+
+func TestWriteMissingNFSRosterEntries_IdempotentAcrossRepeatedRuns(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	rosterPath := filepath.Join("roster.yaml")
+	mustWriteFile(t, rosterPath, "---\nschema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\n")
+
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{
+		{Name: "nexus", Roles: []string{"freeipa-nfs-server"}, Extra: map[string]string{"freeipa_roster_file": rosterPath}},
+	}}
+
+	var buf1, buf2 bytes.Buffer
+	writeMissingNFSRosterEntries(&buf1, ".", hf)
+	writeMissingNFSRosterEntries(&buf2, ".", hf)
+
+	if got := buf2.String(); !bytes.Contains([]byte(got), []byte("already has an entry")) {
+		t.Fatalf("expected the second run to report an existing entry, got %q", got)
+	}
+
+	data, err := os.ReadFile(rosterPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", rosterPath, err)
+	}
+	if n := bytes.Count(data, []byte("principal: nfs/nexus.ipa.pilot.internal")); n != 1 {
+		t.Fatalf("expected exactly one nexus entry after two runs, got %d:\n%s", n, data)
+	}
+}

@@ -38,7 +38,8 @@ func pushVaultFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors the trailing "↩ 返回" item.
+			return pushTopMenu(r, dir, "")
 		}
 		idx := m.Selected()
 		switch {
@@ -57,7 +58,7 @@ func pushVaultPathPrompt(r *editRouterModel, dir, targetDir string) tea.Cmd {
 	return r.transitionTo(newTextInputModel("vault 檔路徑", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushVaultFilePicker(r, dir, "")
 		}
 		return pushVaultOpen(r, dir, strings.TrimSpace(m.Value()))
 	})
@@ -162,7 +163,11 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors "🚪 不存檔離開" exactly, including its dirty gate.
+			if !dirty {
+				return pushVaultFilePicker(r, dir, "")
+			}
+			return pushConfirmDiscardVault(r, dir, path, doc)
 		}
 		idx := m.Selected()
 		switch {
@@ -213,7 +218,7 @@ func pushVaultAddKey(r *editRouterModel, dir, path string, doc *vaultfile.Doc, d
 	return r.transitionTo(newTextInputModel("新的 key 名稱", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushVaultEditorScreen(r, dir, path, doc, dirty, "")
 		}
 		key := strings.TrimSpace(m.Value())
 		return pushVaultAddKeyValue(r, dir, path, doc, key, dirty)
@@ -224,7 +229,7 @@ func pushVaultAddKeyValue(r *editRouterModel, dir, path string, doc *vaultfile.D
 	return r.transitionTo(newSecretTextInputModel("值（多行請直接輸入 \\n）", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushVaultAddKey(r, dir, path, doc, dirty)
 		}
 		doc.Add(key, strings.ReplaceAll(m.Value(), `\n`, "\n"))
 		return pushVaultEditorScreen(r, dir, path, doc, true, "")
@@ -237,7 +242,8 @@ func pushVaultEntryMenu(r *editRouterModel, dir, path string, doc *vaultfile.Doc
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors "返回" (case 2).
+			return pushVaultEditorScreen(r, dir, path, doc, dirty, "")
 		}
 		switch m.Selected() {
 		case 0:
@@ -257,7 +263,7 @@ func pushVaultEditValue(r *editRouterModel, dir, path string, doc *vaultfile.Doc
 	return r.transitionTo(newSecretTextInputModel(label, entry.EditValue(), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushVaultEntryMenu(r, dir, path, doc, entry, dirty)
 		}
 		doc.Set(entry.Key, strings.ReplaceAll(m.Value(), `\n`, "\n"))
 		return pushVaultEditorScreen(r, dir, path, doc, true, "")

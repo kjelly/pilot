@@ -17,13 +17,24 @@
 // callback the router invokes once the current screen finishes
 // instead of running inline after a blocking prompt call returns.
 //
-// Cancel semantics are preserved exactly from the promptui version:
-// esc/ctrl+c on almost every screen aborts the *whole* wizard
-// (mirroring errDeployAborted propagating, unhandled, all the way up
-// to runEdit's original abortOrErr) — see quitWizard. The one
-// documented exception is the role checklist, whose cancel returns to
-// the roles menu instead (see pushRoleChecklist); that mirrors
-// editRolesMenu's original explicit catch of errDeployAborted.
+// Cancel semantics: esc/ctrl+c on every screen steps back exactly one
+// level — the same destination (and, where one already exists, the
+// same dirty-gated discard confirmation) that screen's own explicit
+// "back"/"cancel"/"🚪 不存檔離開" menu item already uses. It is not new
+// behavior invented for esc; it's binding an already-correct action to
+// a second key. The only screen where esc still quits the whole wizard
+// is the top-level "要編輯什麼？" menu (pushTopMenu) — there is no level
+// above it to go back to.
+//
+// This used to be the reverse (esc aborted the whole wizard everywhere,
+// mirroring errDeployAborted propagating, unhandled, all the way up to
+// runEdit's original abortOrErr — a straight port of the old promptui
+// version's behavior). Two narrow exceptions were carved out first (the
+// role checklist, then the whole 其他變數 CRUD flow) after each was
+// separately reported as a surprising bug; a further report generalized
+// this to every remaining screen, at which point the wizard-wide
+// "quits everything" default was inverted instead of adding a longer
+// list of one-off exceptions.
 package cmd
 
 import (
@@ -78,8 +89,9 @@ func (r *editRouterModel) transitionTo(s screen, banner string, onResult func(*e
 	return cmd
 }
 
-// quitWizard is the default cancel handler used by almost every
-// screen — see the package doc comment above for why.
+// quitWizard aborts the whole `pilot edit` session. Only pushTopMenu's
+// cancel handler still calls this directly — see the package doc
+// comment above for why every other screen instead steps back one level.
 func quitWizard(r *editRouterModel) tea.Cmd {
 	r.quit = true
 	return nil
@@ -241,7 +253,7 @@ func pushHostsPathPrompt(r *editRouterModel, dir string) tea.Cmd {
 	return r.transitionTo(newTextInputModel("hosts.yml 路徑", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushTopMenu(r, dir, "")
 		}
 		return pushLoadOrInitHosts(r, dir, strings.TrimSpace(m.Value()))
 	})
@@ -285,7 +297,9 @@ func pushHostList(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors "🚪 不存檔離開" exactly — this screen has no dirty
+			// flag of its own, so that item (and now esc) always confirms.
+			return pushConfirmDiscardHosts(r, dir, path, hf)
 		}
 		idx := m.Selected()
 		switch {
@@ -334,7 +348,7 @@ func pushAddHost(r *editRouterModel, dir, path string, hf *inventory.HostsFile) 
 	return r.transitionTo(newTextInputModel("新主機名稱(唯一，例如 web-3)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushHostList(r, dir, path, hf, "")
 		}
 		name := strings.TrimSpace(m.Value())
 		hf.Hosts = append(hf.Hosts, inventory.Host{Name: name, Extra: map[string]string{}})
@@ -354,31 +368,50 @@ func pushHostMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 		fmt.Sprintf("env(環境標籤)：%s", displayOrPlaceholder(h.Env)),
 		fmt.Sprintf("角色(roles)：%s", displayOrPlaceholder(strings.Join(h.Roles, ", "))),
 		fmt.Sprintf("其他變數(共 %d 個)", len(h.Extra)),
-		"🗑  刪除這台主機",
-		"↩  返回主機清單",
 	}
+	// host_vars/<name>.yml only ever appears when h's current roles
+	// actually need a var with no safe cross-host default (e.g.
+	// prometheus_site_label) — mirrors how the group_vars picker only
+	// lists stems applicable to the roles in play. Item count varies by
+	// host, so the trailing delete/return items are addressed relative
+	// to len(items) rather than fixed indices (same pattern
+	// pushGroupVarsFilePicker already uses).
+	hostVarsIdx := -1
+	if len(inventory.HostVarsKeysForRoles(h.Roles)) > 0 {
+		hostVarsIdx = len(items)
+		items = append(items, fmt.Sprintf("host_vars/%s.yml(必填、無安全預設值的設定)", name))
+	}
+	deleteIdx := len(items)
+	items = append(items, "🗑  刪除這台主機")
+	returnIdx := len(items)
+	items = append(items, "↩  返回主機清單")
+
 	title := fmt.Sprintf("主機 %q — 選要編輯的項目", name)
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors "↩ 返回主機清單" — unconditional, no data at risk
+			// (hf stays in memory regardless of which screen shows it).
+			return pushHostList(r, dir, path, hf, "")
 		}
-		switch m.Selected() {
-		case 0:
+		switch {
+		case m.Selected() == 0:
 			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_host(可路由的 IP 或主機名)", h.AnsibleHost, func(h *inventory.Host, v string) { h.AnsibleHost = v })
-		case 1:
+		case m.Selected() == 1:
 			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_user(登入帳號，留空 = 用 vars 裡的預設)", h.AnsibleUser, func(h *inventory.Host, v string) { h.AnsibleUser = v })
-		case 2:
+		case m.Selected() == 2:
 			return pushHostFieldEdit(r, dir, path, hf, name, "SSH 私鑰路徑(留空 = 用 vars 裡的預設)", h.SSHKeyFile, func(h *inventory.Host, v string) { h.SSHKeyFile = v })
-		case 3:
+		case m.Selected() == 3:
 			return pushEnvMenu(r, dir, path, hf, name)
-		case 4:
+		case m.Selected() == 4:
 			return pushRolesMenu(r, dir, path, hf, name)
-		case 5:
+		case m.Selected() == 5:
 			return pushExtraVarsMenu(r, dir, path, hf, name, "")
-		case 6:
+		case hostVarsIdx >= 0 && m.Selected() == hostVarsIdx:
+			return pushHostVarsEditor(r, dir, path, hf, name)
+		case m.Selected() == deleteIdx:
 			return pushConfirmDeleteHost(r, dir, path, hf, name)
-		case 7:
+		case m.Selected() == returnIdx:
 			return pushHostList(r, dir, path, hf, "")
 		}
 		return nil
@@ -389,7 +422,7 @@ func pushHostFieldEdit(r *editRouterModel, dir, path string, hf *inventory.Hosts
 	return r.transitionTo(newTextInputModel(label, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushHostMenu(r, dir, path, hf, name)
 		}
 		if h := findHost(hf, name); h != nil {
 			apply(h, strings.TrimSpace(m.Value()))
@@ -418,7 +451,10 @@ func pushEnvMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile, 
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// no explicit "back" item exists (every item IS a choice), but
+			// nothing has been applied yet, so cancel is a plain, safe
+			// return with h.Env untouched.
+			return pushHostMenu(r, dir, path, hf, name)
 		}
 		if h := findHost(hf, name); h != nil {
 			h.Env = envChoices[m.Selected()]
@@ -454,7 +490,10 @@ func pushRolesMenuBanner(r *editRouterModel, dir, path string, hf *inventory.Hos
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors "✅ 完成" (case 4) — roles changes are already
+			// applied in-memory the moment the checklist/preset/copy
+			// screens confirm, so there's nothing left to lose here.
+			return pushHostMenu(r, dir, path, hf, name)
 		}
 		switch m.Selected() {
 		case 0:
@@ -487,18 +526,49 @@ func pushRoleChecklist(r *editRouterModel, dir, path string, hf *inventory.Hosts
 		m := s.(multiSelectModel)
 		if m.Canceled() {
 			// esc/ctrl+c inside the checklist: no change, back to the
-			// roles menu — the one documented exception to "cancel
-			// aborts the whole wizard" (mirrors editRolesMenu's
-			// original explicit errDeployAborted catch).
+			// roles menu (mirrors editRolesMenu's original explicit
+			// errDeployAborted catch, from before this file's rewrite).
 			return pushRolesMenu(r, dir, path, hf, name)
 		}
 		checked := m.CheckedLabels()
 		sort.Strings(checked)
+		banner := ""
 		if h := findHost(hf, name); h != nil {
+			hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 			h.Roles = checked
+			if !hadNFSServer && hasRole(checked, "freeipa-nfs-server") {
+				// freeipa-nfs-server was just added: the roster's
+				// nfs.servers entry for this host is safe to auto-write in
+				// full (unlike host_vars' prometheus_site_label, the NFS
+				// service principal is fully derived, not a judgment call)
+				// — see internal/inventory/roster.go.
+				banner = autofixNFSRosterEntry(dir, *h)
+			}
 		}
-		return pushRolesMenu(r, dir, path, hf, name)
+		return pushRolesMenuBanner(r, dir, path, hf, name, banner)
 	})
+}
+
+// autofixNFSRosterEntry appends a missing nfs.servers entry for h to its
+// freeipa_roster_file, returning a one-line banner describing what
+// happened — empty if there's nothing worth telling the user (no roster
+// path set yet, or an entry already existed). A relative freeipa_roster_file
+// is resolved against dir (the workspace `pilot edit --dir` is pointed at),
+// matching writeMissingNFSRosterEntries' convention (inventory.go).
+func autofixNFSRosterEntry(dir string, h inventory.Host) string {
+	rosterPath := resolveRosterPath(dir, h.Extra["freeipa_roster_file"])
+	if rosterPath == "" {
+		return ""
+	}
+	appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("⚠️  已勾選 freeipa-nfs-server，但無法檢查/補齊 roster %s 的 nfs.servers 項目（%v）；請自行確認", rosterPath, err)
+	case appended:
+		return fmt.Sprintf("✅ 已自動在 %s 補上 %s 的 nfs.servers 項目", rosterPath, h.Name)
+	default:
+		return ""
+	}
 }
 
 func pushApplyRolePreset(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
@@ -521,7 +591,8 @@ func pushApplyRolePreset(r *editRouterModel, dir, path string, hf *inventory.Hos
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors the trailing "↩ 取消" item.
+			return pushRolesMenu(r, dir, path, hf, name)
 		}
 		if idx := m.Selected(); idx < len(presets) {
 			if h := findHost(hf, name); h != nil {
@@ -546,7 +617,8 @@ func pushCopyRolesFromHost(r *editRouterModel, dir, path string, hf *inventory.H
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// mirrors the trailing "↩ 取消" item.
+			return pushRolesMenu(r, dir, path, hf, name)
 		}
 		if idx := m.Selected(); idx < len(candidates) {
 			if h := findHost(hf, name); h != nil {
@@ -609,7 +681,8 @@ func pushExtraVarsMenu(r *editRouterModel, dir, path string, hf *inventory.Hosts
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			// esc/ctrl+c here: back to the host menu.
+			return pushHostMenu(r, dir, path, hf, name)
 		}
 		idx := m.Selected()
 		switch {
@@ -640,7 +713,7 @@ func pushAddExtraVar(r *editRouterModel, dir, path string, hf *inventory.HostsFi
 	return r.transitionTo(newTextInputModel("變數名稱", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushExtraVarsMenu(r, dir, path, hf, name, "")
 		}
 		return pushAddExtraVarValue(r, dir, path, hf, name, strings.TrimSpace(m.Value()))
 	})
@@ -650,7 +723,7 @@ func pushAddExtraVarValue(r *editRouterModel, dir, path string, hf *inventory.Ho
 	return r.transitionTo(newTextInputModel("變數值", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushExtraVarsMenu(r, dir, path, hf, name, "")
 		}
 		if h := findHost(hf, name); h != nil {
 			if h.Extra == nil {
@@ -673,7 +746,7 @@ func pushExtraVarActionMenu(r *editRouterModel, dir, path string, hf *inventory.
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushExtraVarsMenu(r, dir, path, hf, name, "")
 		}
 		switch m.Selected() {
 		case 0:
@@ -700,7 +773,7 @@ func pushEditExtraVarValue(r *editRouterModel, dir, path string, hf *inventory.H
 	return r.transitionTo(newTextInputModel(label, cur, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
-			return quitWizard(r)
+			return pushExtraVarActionMenu(r, dir, path, hf, name, key)
 		}
 		if h := findHost(hf, name); h != nil {
 			h.Extra[key] = m.Value()

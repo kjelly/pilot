@@ -109,7 +109,12 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 		return strings.Contains(string(b), "✅ 已儲存 ")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	waitForRolePresetOverride(t, dir)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // cleanly exit the wizard
+	// Esc here now steps back to the roles menu rather than quitting (see
+	// edit_tui.go's package doc comment); this test only cares about the
+	// preset persisted to disk, so end the program directly.
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
 	presets, customized, err := loadRolePresets(dir)
@@ -125,6 +130,78 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 	last := presets[len(presets)-1]
 	if last.Label != "test monitored node" || !hasRole(last.Roles, inventory.Roles()[0].Name) {
 		t.Fatalf("created preset = %+v, want label and first catalog role", last)
+	}
+}
+
+// TestEditRouter_Teatest_RolePresetNameFlow_EscOnCreateReturnsToManager proves
+// pushRolePresetName's idx<0 (create) branch: esc out of the new-preset name
+// prompt lands back on the preset manager's list, not some other screen.
+func TestEditRouter_Teatest_RolePresetNameFlow_EscOnCreateReturnsToManager(t *testing.T) {
+	dir := t.TempDir()
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "node-1"}}}
+	var router editRouterModel
+	pushRolePresetManager(&router, dir, filepath.Join(dir, "hosts.yml"), hf, "node-1", "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("管理 ")
+	for range defaultRolePresets() {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增範本"
+	waitFor("角色範本名稱")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // create-flow esc -> back to the manager list
+	waitFor("管理 ")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	if _, customized, err := loadRolePresets(dir); err != nil || customized {
+		t.Fatalf("esc-canceling a create should not have persisted a preset: customized=%v err=%v", customized, err)
+	}
+}
+
+// TestEditRouter_Teatest_RolePresetNameFlow_EscOnRenameReturnsToAction proves
+// pushRolePresetName's idx>=0 (rename) branch: esc out of the rename name
+// prompt lands back on that SAME preset's action menu, not the manager list
+// two levels up.
+func TestEditRouter_Teatest_RolePresetNameFlow_EscOnRenameReturnsToAction(t *testing.T) {
+	dir := t.TempDir()
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "node-1"}}}
+	var router editRouterModel
+	pushRolePresetManager(&router, dir, filepath.Join(dir, "hosts.yml"), hf, "node-1", "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("管理 ")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // first preset in the list -> its action menu
+	waitFor("範本 ")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "✏ 修改名稱與角色"
+	waitFor("角色範本名稱")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // rename-flow esc -> back to THIS preset's action menu
+	waitFor("範本 ")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	if presets, customized, err := loadRolePresets(dir); err != nil || customized || len(presets) != len(defaultRolePresets()) {
+		t.Fatalf("esc-canceling a rename should leave the default presets untouched: presets=%+v customized=%v err=%v", presets, customized, err)
 	}
 }
 
