@@ -282,7 +282,7 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 		return abortOrErr(err)
 	}
 
-	if runConfirmProgram("要不要先看一下這份 inventory 的 host/group 結構？(ansible-inventory --graph)", true) {
+	if runConfirmProgram("要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
 		previewInventoryGraph(ctx, out, inv)
 		fmt.Fprintln(out)
 	}
@@ -403,19 +403,44 @@ func validateHoursWithinWeek(s string) error {
 
 // ---- inventory preview / preflight -----------------------------------------
 
+// previewInventoryGraph renders the same contract-derived topology graph as
+// `pilot deploy graph --view both` for the wizard's chosen inventory, so the
+// preview a deploy/reconcile operator sees before committing to anything
+// matches what they'd get by running that command directly.
 func previewInventoryGraph(ctx context.Context, out io.Writer, inv string) {
-	r := ansible.NewRunner()
-	r.Binary = "ansible-inventory"
-	r.Env = deployAnsibleRuntimeFromContext(ctx).Env
-	r.StdoutWriter = out
-	res, err := r.Run(ctx, "-i", inv, "--graph")
+	root, err := resolveContractRoot("")
 	if err != nil {
-		fmt.Fprintf(out, "(無法執行 ansible-inventory：%v)\n", err)
+		fmt.Fprintf(out, "(無法載入 contracts：%v)\n", err)
 		return
 	}
-	if res.ExitCode != 0 {
-		fmt.Fprintf(out, "(ansible-inventory 結束碼 %d，上面輸出可能有錯誤訊息)\n", res.ExitCode)
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		fmt.Fprintf(out, "(無法載入 contracts：%v)\n", err)
+		return
 	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		fmt.Fprintf(out, "(無法載入 contracts：%v)\n", err)
+		return
+	}
+	resolvedInv, notice, cleanup, err := expandIfSimplifiedHosts(inv)
+	if err != nil {
+		fmt.Fprintf(out, "(無法解析 inventory：%v)\n", err)
+		return
+	}
+	defer cleanup()
+	if notice != "" {
+		fmt.Fprintln(out, notice)
+	}
+	groups, err := resolveInventoryGroups(ctx, resolvedInv)
+	if err != nil {
+		fmt.Fprintf(out, "(無法解析 inventory：%v)\n", err)
+		return
+	}
+	topo := buildInventoryTopology(catalog, groups)
+	renderInventoryTopology(out, topo, inv)
+	fmt.Fprintln(out)
+	renderHostTopology(out, topo, inv)
 }
 
 // runPreflight offers to run playbooks/preflight.yml before anything
@@ -951,9 +976,10 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	writer.StartHeartbeat(ctx, 10*time.Second)
 	fmt.Fprintf(out, "ℹ️  deployment run: %s\n", writer.RunID())
 
-	preflight := func(context.Context) error {
+	preflight := func(ctx context.Context) error {
+		facts := gatherHostFacts(ctx, inv, hosts)
 		result, err := delivery.ValidateContractPreflight(delivery.PreflightRequest{
-			Selected: selected, Scope: scope, Inputs: inputs,
+			Selected: selected, Scope: scope, Inputs: inputs, Facts: facts,
 		})
 		for _, warning := range result.Warnings {
 			fmt.Fprintf(out, "⚠️  %s\n", warning)
