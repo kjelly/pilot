@@ -1,8 +1,9 @@
-.PHONY: build test clean vet lint help install install-callback-user install-callback-system uninstall-callback test-callback test-prereq
+.PHONY: build test clean vet lint help install install-callback-user install-callback-system uninstall-callback test-callback test-prereq pilot-cli-image
 
 BIN := pilot
 PKG := ./cmd/pilot
 CALLBACK_SRC := ansible_callback/pilot_diagnose.py
+PILOT_CLI_IMAGE ?= pilot-cli:latest
 
 USER_CALLBACK_DIR := $(HOME)/.ansible/plugins/callback
 SYSTEM_CALLBACK_DIR := /etc/ansible/plugins/callback
@@ -13,6 +14,9 @@ help:          	## Show this help
 
 build:         	## Compile the binary (with debug info, for local dev)
 	go build -o $(BIN) $(PKG)
+
+pilot-cli-image: ## Build the deployment/control-node Docker image
+	docker build -t $(PILOT_CLI_IMAGE) -f images/Dockerfile.pilot-cli .
 
 release:       	## Compile stripped release binary
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) $(PKG)
@@ -161,4 +165,3 @@ pb-clean: pb-check-spec ## Remove baseline reports for this spec (interactive co
 	$(PB_ENV) ./scripts/pb-iter.sh clean
 
 .PHONY: pb-check-spec pb-init pb-iter pb-verify pb-idempotent pb-baseline pb-report pb-lint pb-clean release
-
