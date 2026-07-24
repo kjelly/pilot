@@ -166,6 +166,7 @@
       loop_control:
         label: "{{ item.name | default('unnamed') }}"
       when: freeipa_roster.schema_version is defined
+      no_log: true
       tags: [always]
 
     - name: "Gate: canonical group objects and category prefixes are valid"
