@@ -25,6 +25,29 @@ import (
 // starts with Chinese text or a banner) or a nested block value.
 var keyLineRe = regexp.MustCompile(`^(\s*)(#\s*)?([A-Za-z_][A-Za-z0-9_]*):\s+(\S.*?)\s*$`)
 
+// blockScalarRe matches a bare YAML block-scalar header as a key's
+// "value" — "|", "|-", "|+", ">", ">-", ">+", optionally followed by an
+// explicit indentation-indicator digit (e.g. "|2"). This is the whole
+// value token keyLineRe captures for a line like
+// "alertmanager_config: |"; the real content lives in the indented
+// lines below it, which keyLineRe's m[1]=="" requirement already
+// excludes from ever being treated as their own key.
+var blockScalarRe = regexp.MustCompile(`^[|>][+-]?[0-9]?$`)
+
+// flowListRe/flowMapRe match a bare single-line YAML flow collection as a
+// key's "value" — "[a, b]" or "{a: 1}". keyLineRe's (\S.*?) capture treats
+// these as an ordinary scalar token exactly like blockScalarRe's case, but
+// SetValue's formatValue/looksLikePlainScalar only allow bare
+// alphanumeric-ish scalars — anything else gets double-quoted, so
+// "editing" one of these here would turn a real YAML list/map into a YAML
+// *string* (e.g. `restic_backup_paths: ["/etc"]` -> `restic_backup_paths:
+// "[\"/etc\"]"`). See ListEntries/SetList for the list-editable
+// replacement and FlowMapKeys for surfacing maps (no editor for those yet).
+var (
+	flowListRe = regexp.MustCompile(`^\[.*\]$`)
+	flowMapRe  = regexp.MustCompile(`^\{.*\}$`)
+)
+
 // Entry is one editable "key: value" line, found either active or
 // commented-out (i.e. shown only as an example of what could be set).
 type Entry struct {
@@ -33,6 +56,16 @@ type Entry struct {
 	Active      bool
 	Description string // the free-text comment paragraph immediately above, if any
 	Line        int    // index into the Doc's lines; pass back to SetValue/CommentOut
+}
+
+// ListEntry is one editable "key: [a, b, ...]" flow-list line — the
+// list-shaped counterpart to Entry (see ListEntries/SetList).
+type ListEntry struct {
+	Key         string
+	Values      []string
+	Active      bool
+	Description string
+	Line        int // pass back to SetList/CommentOut
 }
 
 // Doc is a group_vars file loaded for editing.
@@ -65,6 +98,20 @@ func (d *Doc) Bytes() []byte {
 // documentation. A commented default is also suppressed once the same
 // key is set for real (or already offered by an earlier commented
 // line), so a key never appears twice in the editor.
+//
+// A key whose value is a bare block-scalar header (e.g.
+// "alertmanager_config: |") is excluded outright, active or commented:
+// SetValue only ever rewrites the single line it's given, so "editing"
+// one here would replace the "key: |" line with a plain scalar while
+// leaving the block's indented body stranded as orphaned raw lines
+// immediately below it — corrupt YAML, not a hypothetical (reproduced
+// against group_vars/alertmanager.example.yml's alertmanager_config).
+// See BlockScalarKeys for surfacing these to the user instead. A key
+// whose value is a bare flow list ("[a, b]") or flow map ("{a: 1}") is
+// excluded the same way — SetValue would quote it into a YAML string
+// instead of leaving it a list/map. Flow lists get their own editable
+// ListEntries/SetList API instead; flow maps are only surfaced via
+// FlowMapKeys (no editor for those yet).
 func (d *Doc) Entries() []Entry {
 	var out []Entry
 	seen := map[string]bool{}
@@ -77,6 +124,9 @@ func (d *Doc) Entries() []Entry {
 	for i, line := range d.lines {
 		m := keyLineRe.FindStringSubmatch(line)
 		if m == nil || m[1] != "" {
+			continue
+		}
+		if blockScalarRe.MatchString(m[4]) || flowListRe.MatchString(m[4]) || flowMapRe.MatchString(m[4]) {
 			continue
 		}
 		active := m[2] == ""
@@ -100,6 +150,79 @@ func (d *Doc) Entries() []Entry {
 	return out
 }
 
+// BlockScalarKeys returns the key names of every top-level, active
+// "key: |"/"key: >" block-scalar header in the document — the settings
+// Entries deliberately excludes because editing them here would corrupt
+// the file. Callers should surface these to the user as "edit the file
+// directly for this one" rather than silently omitting them.
+func (d *Doc) BlockScalarKeys() []string {
+	return d.keysMatching(blockScalarRe)
+}
+
+// FlowMapKeys returns the key names of every top-level, active
+// "key: {a: 1}" flow-map header in the document — excluded from Entries
+// for the same reason as BlockScalarKeys, but with no editor of its own
+// yet (no known setting needs one); surface these as "edit the file
+// directly" too.
+func (d *Doc) FlowMapKeys() []string {
+	return d.keysMatching(flowMapRe)
+}
+
+func (d *Doc) keysMatching(re *regexp.Regexp) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, line := range d.lines {
+		m := keyLineRe.FindStringSubmatch(line)
+		if m == nil || m[1] != "" || m[2] != "" {
+			continue
+		}
+		if re.MatchString(m[4]) && !seen[m[3]] {
+			seen[m[3]] = true
+			out = append(out, m[3])
+		}
+	}
+	return out
+}
+
+// ListEntries returns every editable flow-list ("key: [a, b]") line, in
+// file order — the SetList-editable counterpart to Entries, whose plain-
+// scalar detection deliberately excludes these values (see Entries).
+// Active/commented-default handling mirrors Entries exactly.
+func (d *Doc) ListEntries() []ListEntry {
+	var out []ListEntry
+	seen := map[string]bool{}
+	activeKeys := map[string]bool{}
+	for _, line := range d.lines {
+		if m := keyLineRe.FindStringSubmatch(line); m != nil && m[1] == "" && m[2] == "" && flowListRe.MatchString(m[4]) {
+			activeKeys[m[3]] = true
+		}
+	}
+	for i, line := range d.lines {
+		m := keyLineRe.FindStringSubmatch(line)
+		if m == nil || m[1] != "" || !flowListRe.MatchString(m[4]) {
+			continue
+		}
+		active := m[2] == ""
+		if !active {
+			if len(m[2]) > 2 {
+				continue
+			}
+			if activeKeys[m[3]] || seen[m[3]] {
+				continue
+			}
+		}
+		seen[m[3]] = true
+		out = append(out, ListEntry{
+			Key:         m[3],
+			Values:      parseFlowList(m[4]),
+			Active:      active,
+			Description: precedingComment(d.lines, i),
+			Line:        i,
+		})
+	}
+	return out
+}
+
 // SetValue rewrites the line at lineIdx to "<key>: <value>" (activating
 // it if it was previously commented out), preserving its original
 // indent and key.
@@ -109,6 +232,18 @@ func (d *Doc) SetValue(lineIdx int, newValue string) error {
 		return err
 	}
 	d.lines[lineIdx] = fmt.Sprintf("%s%s: %s", indent, key, formatValue(newValue))
+	return nil
+}
+
+// SetList rewrites the line at lineIdx to "<key>: [v1, v2, ...]"
+// (activating it if it was previously commented out), preserving its
+// original indent and key — the flow-list counterpart to SetValue.
+func (d *Doc) SetList(lineIdx int, values []string) error {
+	indent, _, key, err := d.splitKeyLine(lineIdx)
+	if err != nil {
+		return err
+	}
+	d.lines[lineIdx] = fmt.Sprintf("%s%s: %s", indent, key, formatList(values))
 	return nil
 }
 
@@ -200,6 +335,50 @@ func formatValue(v string) string {
 		return `"` + strings.ReplaceAll(strings.ReplaceAll(v, `\`, `\\`), `"`, `\"`) + `"`
 	}
 	return v
+}
+
+// formatList renders values as a single-line YAML flow sequence, quoting
+// each element the same way formatValue quotes a lone scalar.
+func formatList(values []string) string {
+	quoted := make([]string, len(values))
+	for i, v := range values {
+		quoted[i] = formatValue(v)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+// parseFlowList splits a bare "[a, b, ...]" flow-sequence body into its
+// element strings, respecting quoted commas (e.g. "a, b") so an element
+// value containing a comma isn't split apart.
+func parseFlowList(raw string) []string {
+	inner := strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]")
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		return nil
+	}
+	var out []string
+	var buf strings.Builder
+	var inQuote byte
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		switch {
+		case inQuote != 0:
+			buf.WriteByte(c)
+			if c == inQuote {
+				inQuote = 0
+			}
+		case c == '"' || c == '\'':
+			inQuote = c
+			buf.WriteByte(c)
+		case c == ',':
+			out = append(out, unquote(strings.TrimSpace(buf.String())))
+			buf.Reset()
+		default:
+			buf.WriteByte(c)
+		}
+	}
+	out = append(out, unquote(strings.TrimSpace(buf.String())))
+	return out
 }
 
 func looksLikePlainScalar(v string) bool {

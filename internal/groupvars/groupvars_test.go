@@ -1,6 +1,8 @@
 package groupvars
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -107,11 +109,144 @@ func TestEntries_SkipsIndentedCommentIllustrations(t *testing.T) {
 
 func TestEntries_SkipsBlockScalarBody(t *testing.T) {
 	// alertmanager.example.yml embeds the whole Alertmanager YAML as a
-	// block scalar; its indented body lines are text, not vars.
+	// block scalar. Its indented body lines were already excluded as
+	// "not vars" — but the header line itself ("alertmanager_config: |")
+	// must ALSO be excluded, not just its body: SetValue only ever
+	// rewrites one line, so "editing" the header here would replace it
+	// with a plain scalar while stranding the body below as orphaned raw
+	// lines — genuine YAML corruption, reproduced against the real
+	// group_vars/alertmanager.example.yml (found while evaluating pilot
+	// edit's group_vars gaps). BlockScalarKeys() is how a caller finds out
+	// this key exists at all, so it can be surfaced instead of vanishing.
 	doc := Parse([]byte("alertmanager_config: |\n  route:\n    receiver: 'null'\n    group_wait: 30s\n"))
+	if entries := doc.Entries(); len(entries) != 0 {
+		t.Fatalf("got %+v, want alertmanager_config excluded entirely", entries)
+	}
+	if keys := doc.BlockScalarKeys(); len(keys) != 1 || keys[0] != "alertmanager_config" {
+		t.Fatalf("BlockScalarKeys() = %v, want [alertmanager_config]", keys)
+	}
+}
+
+func TestEntries_SkipsBlockScalarHeaderVariants(t *testing.T) {
+	for _, header := range []string{"|", "|-", "|+", ">", ">-", ">+", "|2"} {
+		doc := Parse([]byte("cfg: " + header + "\n  body line\n"))
+		if entries := doc.Entries(); len(entries) != 0 {
+			t.Fatalf("header %q: got %+v, want excluded", header, entries)
+		}
+		if keys := doc.BlockScalarKeys(); len(keys) != 1 || keys[0] != "cfg" {
+			t.Fatalf("header %q: BlockScalarKeys() = %v, want [cfg]", header, keys)
+		}
+	}
+}
+
+func TestEntries_PlainScalarStartingWithPipeCharIsNotABlockScalar(t *testing.T) {
+	// a value merely containing '|'/'>' shouldn't be mistaken for a block
+	// scalar header — only a BARE header (nothing else on the line) counts.
+	doc := Parse([]byte(`path: "a|b"` + "\n"))
 	entries := doc.Entries()
-	if len(entries) != 1 || entries[0].Key != "alertmanager_config" {
-		t.Fatalf("got %+v, want only alertmanager_config", entries)
+	if len(entries) != 1 || entries[0].Key != "path" || entries[0].Value != "a|b" {
+		t.Fatalf("got %+v, want path=a|b treated as an ordinary scalar", entries)
+	}
+	if keys := doc.BlockScalarKeys(); len(keys) != 0 {
+		t.Fatalf("BlockScalarKeys() = %v, want none", keys)
+	}
+}
+
+func TestBlockScalarKeys_EmptyWhenNoneExist(t *testing.T) {
+	doc := Parse([]byte(sampleDoc))
+	if keys := doc.BlockScalarKeys(); len(keys) != 0 {
+		t.Fatalf("BlockScalarKeys() = %v, want none", keys)
+	}
+}
+
+// TestEntries_SkipsFlowListValue proves a second live corruption bug found
+// while evaluating pilot edit's group_vars gaps, same class as the block
+// scalar one: keyLineRe already matched a bare "[a, b]" flow list as an
+// ordinary scalar value, and SetValue's formatValue only allow-lists plain
+// alphanumeric-ish characters — anything else gets double-quoted, so
+// "editing" restic_backup_paths here would have turned a real YAML list
+// into a YAML *string* (`restic_backup_paths: "[\"/etc\"]"`). Reproduced
+// against the real group_vars/restic-backup.example.yml before fixing.
+func TestEntries_SkipsFlowListValue(t *testing.T) {
+	doc := Parse([]byte(`# restic_backup_paths: ["/etc"]` + "\n"))
+	if entries := doc.Entries(); len(entries) != 0 {
+		t.Fatalf("got %+v, want restic_backup_paths excluded entirely from Entries", entries)
+	}
+	le := doc.ListEntries()
+	if len(le) != 1 || le[0].Key != "restic_backup_paths" {
+		t.Fatalf("ListEntries() = %+v, want [restic_backup_paths]", le)
+	}
+	if le[0].Active {
+		t.Fatalf("ListEntries()[0].Active = true, want false (commented default)")
+	}
+	if len(le[0].Values) != 1 || le[0].Values[0] != "/etc" {
+		t.Fatalf("ListEntries()[0].Values = %v, want [/etc]", le[0].Values)
+	}
+}
+
+func TestEntries_SkipsFlowMapValue(t *testing.T) {
+	doc := Parse([]byte("labels: {severity: warning}\n"))
+	if entries := doc.Entries(); len(entries) != 0 {
+		t.Fatalf("got %+v, want labels excluded entirely from Entries", entries)
+	}
+	if keys := doc.FlowMapKeys(); len(keys) != 1 || keys[0] != "labels" {
+		t.Fatalf("FlowMapKeys() = %v, want [labels]", keys)
+	}
+}
+
+func TestFlowMapKeys_EmptyWhenNoneExist(t *testing.T) {
+	doc := Parse([]byte(sampleDoc))
+	if keys := doc.FlowMapKeys(); len(keys) != 0 {
+		t.Fatalf("FlowMapKeys() = %v, want none", keys)
+	}
+}
+
+func TestListEntries_ActivatesAndDedupesLikeEntries(t *testing.T) {
+	doc := Parse([]byte("paths: [/etc]\n\n# paths: [/var]\n"))
+	le := doc.ListEntries()
+	if len(le) != 1 || le[0].Key != "paths" || !le[0].Active || len(le[0].Values) != 1 || le[0].Values[0] != "/etc" {
+		t.Fatalf("ListEntries() = %+v, want the active [/etc] entry only (commented default suppressed)", le)
+	}
+}
+
+func TestSetList_ActivatesAndAppendsItem(t *testing.T) {
+	doc := Parse([]byte(`# restic_backup_paths: ["/etc"]` + "\n"))
+	entries := doc.ListEntries()
+	if err := doc.SetList(entries[0].Line, append(append([]string{}, entries[0].Values...), "/srv/data")); err != nil {
+		t.Fatalf("SetList() error = %v", err)
+	}
+	got := doc.ListEntries()
+	if len(got) != 1 || !got[0].Active {
+		t.Fatalf("after SetList, ListEntries() = %+v, want an active entry", got)
+	}
+	if len(got[0].Values) != 2 || got[0].Values[0] != "/etc" || got[0].Values[1] != "/srv/data" {
+		t.Fatalf("after SetList, Values = %v, want [/etc /srv/data]", got[0].Values)
+	}
+	if !strings.Contains(string(doc.Bytes()), "restic_backup_paths: [/etc, /srv/data]") {
+		t.Fatalf("rendered doc = %q, want an uncommented flow list", doc.Bytes())
+	}
+}
+
+func TestSetList_QuotesValuesContainingCommas(t *testing.T) {
+	doc := Parse([]byte("paths: [/etc]\n"))
+	if err := doc.SetList(0, []string{"/etc", "a value, with comma"}); err != nil {
+		t.Fatalf("SetList() error = %v", err)
+	}
+	// round-trips correctly even though the value contains the list's own
+	// separator character.
+	reparsed := Parse(doc.Bytes()).ListEntries()
+	if len(reparsed) != 1 || len(reparsed[0].Values) != 2 || reparsed[0].Values[1] != "a value, with comma" {
+		t.Fatalf("round-tripped ListEntries() = %+v, want the comma-containing value preserved", reparsed)
+	}
+}
+
+func TestSetList_EmptyValuesRendersBareEmptyList(t *testing.T) {
+	doc := Parse([]byte("paths: [/etc]\n"))
+	if err := doc.SetList(0, nil); err != nil {
+		t.Fatalf("SetList() error = %v", err)
+	}
+	if !strings.Contains(string(doc.Bytes()), "paths: []") {
+		t.Fatalf("rendered doc = %q, want paths: []", doc.Bytes())
 	}
 }
 
@@ -234,5 +369,34 @@ func TestBytes_RoundTripsUntouchedInput(t *testing.T) {
 	doc := Parse([]byte(sampleDoc))
 	if got := string(doc.Bytes()); got != sampleDoc {
 		t.Errorf("Bytes() without any edits should equal the original input\ngot:\n%s\nwant:\n%s", got, sampleDoc)
+	}
+}
+
+// TestListEntries_RealResticBackupExampleFile ties the flow-list guard to
+// the actual shipped group_vars/restic-backup.example.yml (not just a
+// synthetic fixture) — catches a future edit to that file's format
+// silently breaking the corruption fix.
+func TestListEntries_RealResticBackupExampleFile(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "group_vars", "restic-backup.example.yml"))
+	if err != nil {
+		t.Skipf("real group_vars/restic-backup.example.yml not found: %v", err)
+	}
+	doc := Parse(data)
+	for _, e := range doc.Entries() {
+		if e.Key == "restic_backup_paths" {
+			t.Fatalf("restic_backup_paths should not be offered as a scalar entry, got %+v", e)
+		}
+	}
+	var found bool
+	for _, e := range doc.ListEntries() {
+		if e.Key == "restic_backup_paths" {
+			found = true
+			if len(e.Values) != 1 || e.Values[0] != "/etc" {
+				t.Fatalf("ListEntries() restic_backup_paths = %+v, want [/etc]", e)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("restic_backup_paths not found via ListEntries() against the real example file")
 	}
 }
