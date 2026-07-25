@@ -30,7 +30,7 @@ var roleContracts = []roleContract{
 	{Name: "keycloak-db", Description: "Keycloak 的 PostgreSQL (keycloak-db-apply.yml)", VaultSections: []string{"keycloak-db"}},
 	{Name: "linux-servers", Description: "SSH 走 OIDC 登入 (pam-oidc-sshd-apply.yml)", GroupVarsStem: "linux-servers"},
 	{Name: "log-server", Description: "中央稽核日誌接收 (log-server-apply.yml)"},
-	{Name: "audit-log-forwarding", Description: "主機稽核 + 轉送到 log-server (audit-log-forwarding-apply.yml)"},
+	{Name: "audit-log-forwarding", Description: "主機稽核 + 轉送到 log-server (audit-log-forwarding-apply.yml)", GroupVarsStem: "audit-log-forwarding"},
 	{Name: "wazuh-manager", Description: "Wazuh 中央伺服器，需先過 docker，資源需求見 docs/runbooks/wazuh-manager.md §5 (wazuh-manager-apply.yml)", GroupVarsStem: "wazuh-manager"},
 	{Name: "wazuh-fim", Description: "Wazuh agent：FIM + auditd who-data (wazuh-fim-apply.yml)", GroupVarsStem: "wazuh-fim"},
 	{Name: "seaweedfs-s3", Description: "S3 相容物件儲存，需先過 docker (seaweedfs-s3-apply.yml)"},

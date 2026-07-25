@@ -60,3 +60,37 @@ func TestHostVarsKeysForRoles_DedupesAcrossRoles(t *testing.T) {
 		t.Fatalf("HostVarsKeysForRoles() = %v, want [prometheus_site_label]", got)
 	}
 }
+
+// TestGenerateHostVarsSkeleton_ListKindRendersFlowList exercises the
+// hostVarsKindList render branch — no shipped catalog entry uses it yet,
+// but the type exists specifically so a future list-shaped host_vars key
+// doesn't need another catalog redesign; this proves that branch actually
+// renders valid YAML before anything depends on it.
+func TestGenerateHostVarsSkeleton_ListKindRendersFlowList(t *testing.T) {
+	const testKey = "zz_test_list_key"
+	origCatalog := hostVarsKeyCatalog
+	origOrder := hostVarsKeyOrder
+	origContracts := roleContracts
+	t.Cleanup(func() {
+		hostVarsKeyCatalog = origCatalog
+		hostVarsKeyOrder = origOrder
+		roleContracts = origContracts
+	})
+
+	hostVarsKeyCatalog = map[string]hostVarsKey{
+		testKey: {Name: testKey, Kind: hostVarsKindList, Values: nil, Comment: "test-only list key"},
+	}
+	hostVarsKeyOrder = []string{testKey}
+	roleContracts = append(append([]roleContract{}, origContracts...), roleContract{
+		Name: "zz-test-role", HostVarsKeys: []string{testKey},
+	})
+
+	h := Host{Name: "test-host", Roles: []string{"zz-test-role"}}
+	got, ok := GenerateHostVarsSkeleton(h)
+	if !ok {
+		t.Fatalf("GenerateHostVarsSkeleton() ok = false, want true")
+	}
+	if !strings.Contains(got, testKey+": []") {
+		t.Fatalf("GenerateHostVarsSkeleton() = %q, want %q rendered as a bare empty flow list", got, testKey+": []")
+	}
+}

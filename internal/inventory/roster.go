@@ -179,3 +179,135 @@ func mappingChild(mapNode *yaml.Node, key string, kind yaml.Kind, tag string) *y
 	mapNode.Content = append(mapNode.Content, keyNode, valNode)
 	return valNode
 }
+
+// readRosterAsMap reads and generically decodes the roster at path — the
+// same read-only, cannot-lose-content posture as readRosterHead/
+// ValidateRosterFile, just decoded as a plain map instead of a fixed
+// struct or yaml.Node tree, for the append-simulation helpers below.
+func readRosterAsMap(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+		return nil, ErrRosterEncrypted
+	}
+	var root map[string]any
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("parse roster %s: %w", path, err)
+	}
+	return root, nil
+}
+
+// RosterUserNames returns every user name in the roster at path, in file
+// order — for display only (see ValidateRosterFile for real validation).
+func RosterUserNames(path string) ([]string, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	return namesOf(listField(root, "users")), nil
+}
+
+// RosterGroupNames returns every group name in the roster at path, in file
+// order — for display only.
+func RosterGroupNames(path string) ([]string, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	return namesOf(listField(root, "groups")), nil
+}
+
+// SimulateAddRosterUser reports what ValidateRoster would say about the
+// roster at path if name were added as a minimal user stub (name + state:
+// present only, matching AppendRosterUser exactly) — without writing
+// anything. Callers should only call AppendRosterUser once this returns no
+// violations, so a roster never gets a mutation that would fail
+// freeipa-identity-apply.yml's real gates.
+func SimulateAddRosterUser(path, name string) ([]RosterViolation, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	root["users"] = append(listField(root, "users"), map[string]any{"name": name, "state": "present"})
+	return ValidateRoster(root), nil
+}
+
+// SimulateAddRosterGroup is SimulateAddRosterUser's group counterpart —
+// see AppendRosterGroup for the stub shape this mirrors.
+func SimulateAddRosterGroup(path, name, category string) ([]RosterViolation, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	root["groups"] = append(listField(root, "groups"), map[string]any{"name": name, "state": "present", "category": category})
+	return ValidateRoster(root), nil
+}
+
+// rosterUserStub is the minimal, valid shape AppendRosterUser writes —
+// every other user field (email/ssh_keys/password/...) is optional per
+// the roster schema and left for the operator to fill in by hand
+// afterward; see freeipa-identity.roster.example.yaml for the full shape.
+type rosterUserStub struct {
+	Name  string `yaml:"name"`
+	State string `yaml:"state"`
+}
+
+// rosterGroupStub is AppendRosterGroup's minimal, valid shape — category
+// is required (it drives the name-prefix gate), everything else optional.
+type rosterGroupStub struct {
+	Name     string `yaml:"name"`
+	State    string `yaml:"state"`
+	Category string `yaml:"category"`
+}
+
+// AppendRosterUser appends a minimal user stub to the roster's top-level
+// users: list, preserving all other content exactly (yaml.Node surgery,
+// same technique as AppendMissingNFSServerStub — never a full-struct
+// remarshal, so nothing else in the file is disturbed). Callers should run
+// SimulateAddRosterUser first and only call this once it reports no
+// violations — this function does not validate anything itself.
+func AppendRosterUser(path, name string) error {
+	return appendTopLevelRosterEntry(path, "users", rosterUserStub{Name: name, State: "present"})
+}
+
+// AppendRosterGroup is AppendRosterUser's group counterpart. See
+// SimulateAddRosterGroup.
+func AppendRosterGroup(path, name, category string) error {
+	return appendTopLevelRosterEntry(path, "groups", rosterGroupStub{Name: name, State: "present", Category: category})
+}
+
+func appendTopLevelRosterEntry(path, listKey string, stub any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+		return ErrRosterEncrypted
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("parse roster %s: %w", path, err)
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("roster %s: expected a top-level YAML mapping", path)
+	}
+	top := root.Content[0]
+	listNode := mappingChild(top, listKey, yaml.SequenceNode, "!!seq")
+
+	var entryNode yaml.Node
+	if err := entryNode.Encode(stub); err != nil {
+		return fmt.Errorf("encode roster %s entry: %w", listKey, err)
+	}
+	listNode.Content = append(listNode.Content, &entryNode)
+
+	rendered, err := yaml.Marshal(&root)
+	if err != nil {
+		return fmt.Errorf("render roster %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, rendered, 0o600); err != nil {
+		return fmt.Errorf("write roster %s: %w", path, err)
+	}
+	return nil
+}

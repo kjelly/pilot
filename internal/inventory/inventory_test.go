@@ -307,6 +307,18 @@ func TestGroupVarsStems_DedupesSharedFreeipaStem(t *testing.T) {
 	}
 }
 
+func TestGroupVarsStems_AuditLogForwardingContributesItsOwnStem(t *testing.T) {
+	// group_vars/audit-log-forwarding.example.yml ships in the repo but
+	// this role had no GroupVarsStem set, so `pilot inventory generate`
+	// never backfilled it and `pilot edit` never offered "從範例建立" for
+	// it — found while auditing pilot edit's group_vars scaffolding gaps.
+	hf := &HostsFile{Hosts: []Host{{Name: "web-1", Roles: []string{"audit-log-forwarding"}}}}
+	got := GroupVarsStems(hf)
+	if len(got) != 1 || got[0] != "audit-log-forwarding" {
+		t.Fatalf("GroupVarsStems() = %v, want [audit-log-forwarding]", got)
+	}
+}
+
 func TestGroupVarsStems_RoleWithoutGroupVarsContractContributesNothing(t *testing.T) {
 	hf := &HostsFile{Hosts: []Host{
 		{Name: "d-1", Roles: []string{"docker"}},

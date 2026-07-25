@@ -5,12 +5,26 @@ import (
 	"strings"
 )
 
+// hostVarsKind discriminates how a hostVarsKey's placeholder renders —
+// added so a future list-shaped host_vars key (e.g. a per-host override
+// list) doesn't need another catalog redesign; hostVarsKindScalar is the
+// zero value, so every existing entry needs no change.
+type hostVarsKind int
+
+const (
+	hostVarsKindScalar hostVarsKind = iota
+	hostVarsKindList
+)
+
 // hostVarsKey describes one host_vars variable that has no safe cross-host
-// default — Value is always the empty-string placeholder (never a guessed
-// real value); Comment explains why it must be set per host.
+// default — Value/Values is always the empty placeholder (never a guessed
+// real value), selected by Kind; Comment explains why it must be set per
+// host.
 type hostVarsKey struct {
 	Name    string
-	Value   string
+	Kind    hostVarsKind
+	Value   string   // placeholder when Kind == hostVarsKindScalar
+	Values  []string // placeholder when Kind == hostVarsKindList
 	Comment string
 }
 
@@ -82,7 +96,12 @@ func GenerateHostVarsSkeleton(h Host) (rendered string, ok bool) {
 				sb.WriteString(fmt.Sprintf("# %s\n", line))
 			}
 		}
-		sb.WriteString(fmt.Sprintf("%s: %q\n", key.Name, key.Value))
+		switch key.Kind {
+		case hostVarsKindList:
+			sb.WriteString(fmt.Sprintf("%s: [%s]\n", key.Name, strings.Join(key.Values, ", ")))
+		default:
+			sb.WriteString(fmt.Sprintf("%s: %q\n", key.Name, key.Value))
+		}
 		if i < len(keys)-1 {
 			sb.WriteString("\n")
 		}
