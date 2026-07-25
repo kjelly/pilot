@@ -657,16 +657,88 @@ func pushRoleChecklist(r *editRouterModel, dir, path string, hf *inventory.Hosts
 			hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 			h.Roles = checked
 			if !hadNFSServer && hasRole(checked, "freeipa-nfs-server") {
-				// freeipa-nfs-server was just added: the roster's
-				// nfs.servers entry for this host is safe to auto-write in
-				// full (unlike host_vars' prometheus_site_label, the NFS
-				// service principal is fully derived, not a judgment call)
-				// — see internal/inventory/roster.go.
-				banner = autofixNFSRosterEntry(dir, *h)
+				return pushNFSRoleBootstrap(r, dir, path, hf, name)
 			}
 		}
 		return pushRolesMenuBanner(r, dir, path, hf, name, banner)
 	})
+}
+
+// pushNFSRoleBootstrap fills the non-secret NFS wiring and, when the default
+// roster does not exist yet, asks only for the one value that cannot be
+// derived safely: the FreeIPA admin password. This keeps the common demo
+// flow inside edit without pretending that NetApp is a Linux NFS server.
+func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+	h := findHost(hf, name)
+	if h == nil {
+		return pushHostList(r, dir, path, hf, "")
+	}
+	if h.Extra == nil {
+		h.Extra = map[string]string{}
+	}
+	if strings.TrimSpace(h.Extra["freeipa_roster_file"]) == "" {
+		// include_vars runs from the controller context, not the workspace
+		// directory; store an absolute path so `edit --dir <workspace>` followed
+		// by deploy can find the roster outside the repository.
+		defaultPath, err := filepath.Abs(filepath.Join(dir, ".vault", "ipa-identity.yaml"))
+		if err != nil {
+			return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("⚠️  無法建立 roster 絕對路徑：%v", err))
+		}
+		h.Extra["freeipa_roster_file"] = defaultPath
+	}
+	rosterPath := resolveRosterPath(dir, h.Extra["freeipa_roster_file"])
+	if _, err := os.Stat(rosterPath); err == nil {
+		return pushRolesMenuBanner(r, dir, path, hf, name, autofixNFSRosterEntry(dir, *h))
+	} else if !os.IsNotExist(err) {
+		return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("⚠️  無法檢查 roster %s：%v", rosterPath, err))
+	}
+
+	validate := func(value string) error {
+		if len([]rune(value)) < 8 {
+			return fmt.Errorf("FreeIPA admin password 至少需要 8 個字元")
+		}
+		return nil
+	}
+	return r.transitionTo(newSecretTextInputModel("FreeIPA admin password(不會顯示；至少 8 字元)", "", validate), "已自動設定 freeipa_roster_file="+h.Extra["freeipa_roster_file"]+"，接著建立最小 NFS roster。", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(textInputModel)
+		if m.Canceled() {
+			return pushRolesMenuBanner(r, dir, path, hf, name, "⚠️  已設定 freeipa_roster_file，但尚未建立 roster；請重新選取 NFS role 完成 bootstrap。")
+		}
+		domain := nfsBootstrapDomain(dir)
+		if err := inventory.WriteMinimalNFSServerRoster(rosterPath, h.Name, domain, "admin", m.Value()); err != nil {
+			r.err = err
+			return nil
+		}
+		vaultPath := filepath.Join(dir, ".vault", "main.yaml")
+		vaultNote := ""
+		if _, statErr := os.Stat(vaultPath); os.IsNotExist(statErr) {
+			if vaultErr := inventory.WriteMinimalFreeIPAVault(vaultPath, m.Value()); vaultErr != nil {
+				r.err = vaultErr
+				return nil
+			}
+			vaultNote = fmt.Sprintf("；並建立 %s 的 ipa_admin_password", vaultPath)
+		} else if statErr == nil {
+			changed, vaultErr := inventory.FillFreeIPAAdminPassword(vaultPath, m.Value())
+			if vaultErr != nil {
+				r.err = vaultErr
+				return nil
+			}
+			if changed {
+				vaultNote = fmt.Sprintf("；並填入 %s 的 ipa_admin_password", vaultPath)
+			}
+		}
+		return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("✅ 已建立最小 NFS roster %s（shares: []）%s；demo 可直接套用，production 請改用 NetApp 外部 provider。", rosterPath, vaultNote))
+	})
+}
+
+func nfsBootstrapDomain(dir string) string {
+	values, err := readYAMLMap(filepath.Join(dir, "group_vars", "freeipa.yml"))
+	if err == nil {
+		if domain, ok := values["freeipa_domain"].(string); ok && strings.TrimSpace(domain) != "" {
+			return strings.TrimSpace(domain)
+		}
+	}
+	return "ipa.pilot.internal"
 }
 
 // autofixNFSRosterEntry appends a missing nfs.servers entry for h to its
@@ -716,7 +788,11 @@ func pushApplyRolePreset(r *editRouterModel, dir, path string, hf *inventory.Hos
 		}
 		if idx := m.Selected(); idx < len(presets) {
 			if h := findHost(hf, name); h != nil {
+				hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 				h.Roles = unionRoles(h.Roles, presets[idx].Roles)
+				if !hadNFSServer && hasRole(h.Roles, "freeipa-nfs-server") {
+					return pushNFSRoleBootstrap(r, dir, path, hf, name)
+				}
 			}
 		}
 		return pushRolesMenu(r, dir, path, hf, name)
@@ -742,7 +818,11 @@ func pushCopyRolesFromHost(r *editRouterModel, dir, path string, hf *inventory.H
 		}
 		if idx := m.Selected(); idx < len(candidates) {
 			if h := findHost(hf, name); h != nil {
+				hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 				h.Roles = unionRoles(h.Roles, candidates[idx].Roles)
+				if !hadNFSServer && hasRole(h.Roles, "freeipa-nfs-server") {
+					return pushNFSRoleBootstrap(r, dir, path, hf, name)
+				}
 			}
 		}
 		return pushRolesMenu(r, dir, path, hf, name)

@@ -586,6 +586,56 @@ func TestEditRouter_Teatest_RoleChecklistFlow_AddingFreeIPANFSServerAutofixesRos
 	}
 }
 
+func TestEditRouter_Teatest_RoleChecklistFlow_BootstrapsMissingNFSRoster(t *testing.T) {
+	dir := t.TempDir()
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "nfs-demo", Extra: map[string]string{}}}}
+	var router editRouterModel
+	pushRoleChecklist(&router, dir, filepath.Join(dir, "hosts.yml"), hf, "nfs-demo")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("freeipa-nfs-server")
+	for i := 0; i < 3; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeySpace})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("FreeIPA admin password")
+	tm.Type("demo-password")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("已建立最小 NFS roster")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	h := hf.Hosts[0]
+	wantRosterPath, err := filepath.Abs(filepath.Join(dir, ".vault", "ipa-identity.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Extra["freeipa_roster_file"] != wantRosterPath {
+		t.Fatalf("freeipa_roster_file = %q, want absolute default roster path %q", h.Extra["freeipa_roster_file"], wantRosterPath)
+	}
+	rosterPath := h.Extra["freeipa_roster_file"]
+	if has, err := inventory.RosterHasNFSServer(rosterPath, "nfs-demo.ipa.pilot.internal"); err != nil || !has {
+		t.Fatalf("minimal roster NFS entry = has:%v err:%v, want present", has, err)
+	}
+	vault, err := os.ReadFile(filepath.Join(dir, ".vault", "main.yaml"))
+	if err != nil {
+		t.Fatalf("minimal FreeIPA vault missing: %v", err)
+	}
+	if string(vault) != "ipa_admin_password: demo-password\n" {
+		t.Fatalf("minimal FreeIPA vault = %q, want generated admin password", vault)
+	}
+}
+
 // TestEditRouter_Teatest_GroupVarsFlow_FiltersToUsedRolesAndAutofillsHostVar
 // proves two things together: the "➕ 從範例建立" list only offers stems for
 // roles hosts.yml actually uses (dns is never shown when nothing has the dns
