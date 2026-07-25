@@ -224,6 +224,8 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		"hosts.yml — 機器清單與角色",
 		"group_vars/ — 角色的設定值(FreeIPA realm、DNS 位址...)",
 		".vault/ — vault 變數檔(明文 skeleton 或 ansible-vault 加密檔)",
+		"roster — FreeIPA users/groups(canonical roster，僅支援新增)",
+		"🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則",
 		"離開",
 	}
 	return r.transitionTo(newSelectModel("要編輯什麼？", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
@@ -239,11 +241,24 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		case 2:
 			return pushVaultFilePicker(r, dir, "")
 		case 3:
+			return pushRosterPathPrompt(r, dir)
+		case 4:
+			return pushConfigCompletenessCheck(r, dir)
+		case 5:
 			r.quit = true
 			return nil
 		}
 		return nil
 	})
+}
+
+// pushConfigCompletenessCheck runs checkWorkspaceCompleteness (shared with
+// pilot deploy's hard gate, see workspace_completeness.go /
+// deploy_completeness.go) and shows the result as a banner on the top
+// menu — a read-only report, nothing here writes to any file.
+func pushConfigCompletenessCheck(r *editRouterModel, dir string) tea.Cmd {
+	checks := checkWorkspaceCompleteness(dir)
+	return pushTopMenu(r, dir, formatCompletenessReport(checks))
 }
 
 // ---- hosts.yml ----------------------------------------------------------
@@ -286,11 +301,13 @@ func pushLoadOrInitHosts(r *editRouterModel, dir, path string) tea.Cmd {
 
 func pushHostList(r *editRouterModel, dir, path string, hf *inventory.HostsFile, banner string) tea.Cmd {
 	names := hostNames(hf)
-	items := make([]string, 0, len(names)+3)
+	items := make([]string, 0, len(names)+4)
 	items = append(items, "➕ 新增主機")
 	for _, n := range names {
 		items = append(items, fmt.Sprintf("🖥  %s", hostSummary(hf, n)))
 	}
+	fleetVarsIdx := len(items)
+	items = append(items, "⚙  共用變數(vars: — 所有主機共用的連線預設值，例如 ansible_user)")
 	items = append(items, "💾 存檔並離開", "🚪 不存檔離開")
 
 	title := fmt.Sprintf("編輯 %s — 選一台主機，或選下面的操作", path)
@@ -305,6 +322,8 @@ func pushHostList(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 		switch {
 		case idx == 0:
 			return pushAddHost(r, dir, path, hf)
+		case idx == fleetVarsIdx:
+			return pushFleetVarsMenu(r, dir, path, hf, "")
 		case idx == len(items)-2:
 			return pushSaveHostsAndReturnTop(r, dir, path, hf)
 		case idx == len(items)-1:
@@ -312,6 +331,107 @@ func pushHostList(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 		default:
 			return pushHostMenu(r, dir, path, hf, names[idx-1])
 		}
+	})
+}
+
+// pushFleetVarsMenu edits hf.Vars — the fleet-wide "vars:" block at the top
+// of hosts.yml (shared connection defaults like ansible_user,
+// ansible_ssh_private_key_file; see hosts.example.yml). It mirrors
+// pushExtraVarsMenu's CRUD pattern exactly, just keyed to hf.Vars instead of
+// one host's Extra — hosts.yml's own Render/Parse already round-trip
+// Vars, this only adds the missing wizard screen for it.
+func pushFleetVarsMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile, banner string) tea.Cmd {
+	if hf.Vars == nil {
+		hf.Vars = map[string]string{}
+	}
+	keys := sortedKeysOf(hf.Vars)
+	items := make([]string, 0, len(keys)+2)
+	for _, k := range keys {
+		items = append(items, fmt.Sprintf("%s = %s", k, hf.Vars[k]))
+	}
+	items = append(items, "➕ 新增變數", "↩  返回")
+	title := "共用變數(vars: — 所有主機共用的連線預設值，例如 ansible_user)"
+	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(selectModel)
+		if m.Canceled() {
+			return pushHostList(r, dir, path, hf, "")
+		}
+		idx := m.Selected()
+		switch {
+		case idx == len(items)-1:
+			return pushHostList(r, dir, path, hf, "")
+		case idx == len(items)-2:
+			return pushAddFleetVar(r, dir, path, hf)
+		default:
+			return pushFleetVarActionMenu(r, dir, path, hf, keys[idx])
+		}
+	})
+}
+
+func pushAddFleetVar(r *editRouterModel, dir, path string, hf *inventory.HostsFile) tea.Cmd {
+	validate := func(s string) error {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return fmt.Errorf("不能留空")
+		}
+		if _, ok := hf.Vars[s]; ok {
+			return fmt.Errorf("變數 %q 已存在，請從清單選它來修改", s)
+		}
+		return nil
+	}
+	return r.transitionTo(newTextInputModel("變數名稱", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(textInputModel)
+		if m.Canceled() {
+			return pushFleetVarsMenu(r, dir, path, hf, "")
+		}
+		return pushAddFleetVarValue(r, dir, path, hf, strings.TrimSpace(m.Value()))
+	})
+}
+
+func pushAddFleetVarValue(r *editRouterModel, dir, path string, hf *inventory.HostsFile, key string) tea.Cmd {
+	return r.transitionTo(newTextInputModel("變數值", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(textInputModel)
+		if m.Canceled() {
+			return pushFleetVarsMenu(r, dir, path, hf, "")
+		}
+		if hf.Vars == nil {
+			hf.Vars = map[string]string{}
+		}
+		hf.Vars[key] = m.Value()
+		return pushFleetVarsMenu(r, dir, path, hf, "")
+	})
+}
+
+func pushFleetVarActionMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile, key string) tea.Cmd {
+	title := fmt.Sprintf("變數 %s = %s", key, hf.Vars[key])
+	items := []string{"修改值", "刪除", "返回"}
+	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(selectModel)
+		if m.Canceled() {
+			return pushFleetVarsMenu(r, dir, path, hf, "")
+		}
+		switch m.Selected() {
+		case 0:
+			return pushEditFleetVarValue(r, dir, path, hf, key)
+		case 1:
+			delete(hf.Vars, key)
+			return pushFleetVarsMenu(r, dir, path, hf, "")
+		case 2:
+			return pushFleetVarsMenu(r, dir, path, hf, "")
+		}
+		return nil
+	})
+}
+
+func pushEditFleetVarValue(r *editRouterModel, dir, path string, hf *inventory.HostsFile, key string) tea.Cmd {
+	label := fmt.Sprintf("%s 的新值", key)
+	return r.transitionTo(newTextInputModel(label, hf.Vars[key], nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(textInputModel)
+		if m.Canceled() {
+			return pushFleetVarActionMenu(r, dir, path, hf, key)
+		}
+		hf.Vars[key] = m.Value()
+		return pushFleetVarsMenu(r, dir, path, hf, "")
 	})
 }
 

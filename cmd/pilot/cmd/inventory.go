@@ -98,6 +98,7 @@ var inventoryGenerateCmd = &cobra.Command{
 			// also means a group_vars write failure surfaces before we've
 			// claimed success on the inventory itself.
 			copyMissingGroupVars(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.GroupVarsStems(hf))
+			copyMissingNestedGroupVarsExamples(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.UsedRoles(hf))
 		}
 		if !invGenNoVault {
 			writeMissingVaultSkeleton(cmd.ErrOrStderr(), vaultOut, hf)
@@ -197,6 +198,72 @@ func copyMissingGroupVars(w io.Writer, baseDir string, stems []string) {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue // role has no group_vars of its own
+			}
+			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
+			continue
+		}
+
+		if _, err := os.Stat(dst); err == nil {
+			fmt.Fprintf(w, "group_vars: %s already exists, left untouched\n", dst)
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
+			continue
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
+			continue
+		}
+		fmt.Fprintf(w, "group_vars: copied %s -> %s\n", src, dst)
+	}
+}
+
+// nestedGroupVarsExample is a group_vars example that lives outside the
+// flat "<stem>.example.yml" convention copyMissingGroupVars/scanGroupVars
+// handle. Currently just dns_zones (group_vars/dns/zones.example.yaml) —
+// the repo's own .gitignore (`/group_vars/dns/*.yaml`, tracking only the
+// .example.yaml) treats real dns zone files as deliberately separate from
+// the templated per-role scaffold, so this only makes the example
+// discoverable/copyable through `pilot inventory generate` and `pilot
+// edit`'s file picker (see pushGroupVarsFilePicker) — editing its contents
+// is still hand-edit-only: dns_zones is a 2-level nested list-of-maps
+// (zones, each optionally containing a nested records list), a shape no
+// generic small editor in this wizard fits.
+type nestedGroupVarsExample struct {
+	Role       string // role that implies this example is relevant
+	ExampleRel string // relative to the fixed group_vars/ example dir
+	DestRel    string // relative to <workspace>/group_vars
+}
+
+var nestedGroupVarsExamples = []nestedGroupVarsExample{
+	{Role: "dns", ExampleRel: filepath.Join("dns", "zones.example.yaml"), DestRel: filepath.Join("dns", "zones.yaml")},
+}
+
+// copyMissingNestedGroupVarsExamples backfills each nestedGroupVarsExample
+// whose Role is actually used, mirroring copyMissingGroupVars' stat-then-
+// skip idempotency exactly — only ever writes when the destination is
+// missing, never overwrites.
+func copyMissingNestedGroupVarsExamples(w io.Writer, baseDir string, roles []string) {
+	used := make(map[string]bool, len(roles))
+	for _, r := range roles {
+		used[r] = true
+	}
+	for _, ex := range nestedGroupVarsExamples {
+		if !used[ex.Role] {
+			continue
+		}
+		src := filepath.Join("group_vars", ex.ExampleRel)
+		dst := filepath.Join(baseDir, "group_vars", ex.DestRel)
+
+		data, err := os.ReadFile(src)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
 			}
 			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
 			continue

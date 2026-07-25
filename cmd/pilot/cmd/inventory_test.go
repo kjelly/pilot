@@ -86,6 +86,51 @@ func TestCopyMissingGroupVars_RoleWithNoExampleIsSkippedSilently(t *testing.T) {
 	}
 }
 
+func TestCopyMissingNestedGroupVarsExamples_CopiesForUsedRoleOnly(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	mustWriteFile(t, filepath.Join("group_vars", "dns", "zones.example.yaml"), "dns_zones:\n  - name: pilot.lan\n")
+
+	var buf bytes.Buffer
+	copyMissingNestedGroupVarsExamples(&buf, ".", []string{"dns", "docker"})
+
+	assertFileContent(t, filepath.Join("group_vars", "dns", "zones.yaml"), "dns_zones:\n  - name: pilot.lan\n")
+	if got := buf.String(); !bytes.Contains([]byte(got), []byte("copied")) {
+		t.Fatalf("expected a copied message, got %q", got)
+	}
+}
+
+func TestCopyMissingNestedGroupVarsExamples_SkipsWhenRoleUnused(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	mustWriteFile(t, filepath.Join("group_vars", "dns", "zones.example.yaml"), "dns_zones: []\n")
+
+	var buf bytes.Buffer
+	copyMissingNestedGroupVarsExamples(&buf, ".", []string{"docker"}) // no "dns" role used
+
+	if _, err := os.Stat(filepath.Join("group_vars", "dns", "zones.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("group_vars/dns/zones.yaml should not have been created, stat err=%v", err)
+	}
+	if got := buf.String(); got != "" {
+		t.Fatalf("expected no output when the role isn't used, got %q", got)
+	}
+}
+
+func TestCopyMissingNestedGroupVarsExamples_NeverOverwritesExistingFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	mustWriteFile(t, filepath.Join("group_vars", "dns", "zones.example.yaml"), "dns_zones: []\n")
+	mustWriteFile(t, filepath.Join("group_vars", "dns", "zones.yaml"), "dns_zones:\n  - name: already-customized.lan\n")
+
+	var buf bytes.Buffer
+	copyMissingNestedGroupVarsExamples(&buf, ".", []string{"dns"})
+
+	assertFileContent(t, filepath.Join("group_vars", "dns", "zones.yaml"), "dns_zones:\n  - name: already-customized.lan\n")
+	if got := buf.String(); !bytes.Contains([]byte(got), []byte("already exists")) {
+		t.Fatalf("expected an already exists message, got %q", got)
+	}
+}
+
 func TestResolveGenPaths_DefaultDirLeavesPathsAlone(t *testing.T) {
 	in, out := resolveGenPaths(".", "hosts.yml", "inventory.yml", false, false)
 	if in != "hosts.yml" || out != "inventory.yml" {

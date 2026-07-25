@@ -1,10 +1,25 @@
 // deploy_completeness.go is a hard, unskippable Go-side gate that runs
 // before any ansible-playbook invocation in `pilot deploy` — including the
-// optional ansible-side preflight (runPreflight) — to catch the two gaps
-// that reached a real deploy silently in the minimal-poc round-15 incident:
-// a host_vars var with no safe cross-host default left unset (e.g.
+// optional ansible-side preflight (runPreflight) — to catch the gaps that
+// reached a real deploy silently in the minimal-poc round-15 incident: a
+// host_vars var with no safe cross-host default left unset (e.g.
 // prometheus_site_label), and a freeipa-identity roster missing an
-// nfs.servers entry for a host carrying freeipa-nfs-server.
+// nfs.servers entry for a host carrying freeipa-nfs-server. It also runs
+// three checks shared with `pilot edit`'s "🔍 檢查設定完整性" report
+// (workspace_completeness.go) — an unfilled/still-CHANGE-ME vault key, the
+// roster's own canonical structural rules, and the S3-target either/or
+// gate (thanos_s3_target_host/-endpoint, restic_s3_target_host/
+// restic_repository) — so the two never enforce different things; see
+// that file's rationale for why they can't share the same *data source*
+// (resolved inventory.yml here vs. raw source files there), only the same
+// catalogs/validators. One thing deliberately NOT shared: this gate's
+// roster check stays scoped to freeipa-nfs-server hosts specifically
+// (that role's apply playbook genuinely depends on the roster's
+// nfs.servers section) — workspace_completeness.go's advisory report also
+// flags a roster for freeipa-server-only workspaces (freeipa-identity
+// reconcile's actual target), but a hard deploy gate has no business
+// blocking a freeipa-server-only deploy over a file that playbook never
+// even reads.
 //
 // `pilot inventory generate` (inventory.go's writeMissingHostVarsSkeleton /
 // writeMissingNFSRosterEntries) is the mechanism that prevents these gaps
@@ -52,6 +67,21 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 
 	var violations []completenessViolation
 
+	var roles []string
+	for role, hosts := range groups {
+		if len(hosts) > 0 {
+			roles = append(roles, role)
+		}
+	}
+	for _, c := range checkVaultCompleteness(filepath.Dir(inv), roles) {
+		if c.OK {
+			continue
+		}
+		for _, d := range c.Details {
+			violations = append(violations, completenessViolation{Host: "vault", Detail: fmt.Sprintf("%s: %s", c.Label, d)})
+		}
+	}
+
 	for _, host := range groups["prometheus"] {
 		for _, key := range inventory.ExpectedHostVarsKeysForRoles([]string{"prometheus"}) {
 			value, _ := hostVars[host][key].(string)
@@ -63,6 +93,34 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 						host, key),
 				})
 			}
+		}
+	}
+
+	// Same either/or S3-target gate prometheus-apply.yml/thanos-query-apply.yml/
+	// restic-backup-apply.yml assert themselves — catching it here means a
+	// deploy fails fast instead of burning through preflight and most of a
+	// real apply before hitting that assert. Shares the catalog with
+	// workspace_completeness.go's checkGroupVarsCompleteness (see
+	// groupVarsEitherOrRequirements) — only the data source differs: the
+	// resolved per-host vars here vs. a raw group_vars file there.
+	for _, req := range groupVarsEitherOrRequirements {
+		for _, host := range groups[req.Stem] {
+			targetHost, _ := hostVars[host][req.TargetHostKey].(string)
+			endpointRaw, endpointSet := hostVars[host][req.EndpointKey]
+			endpoint, _ := endpointRaw.(string)
+			if groupVarsEitherOrSatisfied(targetHost, endpointSet, endpoint, req.Alias) {
+				continue
+			}
+			if req.AutoDetectRole != "" && len(groups[req.AutoDetectRole]) > 0 &&
+				groupVarsAutoDetectApplies(endpointSet, endpoint, req.Alias) {
+				continue // the apply playbook itself auto-derives this at runtime
+			}
+			violations = append(violations, completenessViolation{
+				Host: host,
+				Detail: fmt.Sprintf(
+					"has role %s but neither %s nor an overridden %s (still defaults to the shared %q alias) is set",
+					req.Stem, req.TargetHostKey, req.EndpointKey, req.Alias),
+			})
 		}
 	}
 
@@ -91,6 +149,21 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 			})
 			continue
 		}
+
+		// Full canonical-roster structural check — shares rules with `pilot
+		// edit`'s 檢查設定完整性 (workspace_completeness.go) so a roster that
+		// fails this also fails there, not just at real-apply time. Only
+		// reached once RosterDomain above proved the file readable/parseable
+		// plain YAML, so this can't itself fail with a redundant read error.
+		if structViolations, _ := inventory.ValidateRosterFile(rosterPath); len(structViolations) > 0 {
+			for _, v := range structViolations {
+				violations = append(violations, completenessViolation{
+					Host:   host,
+					Detail: fmt.Sprintf("roster %s failed a canonical check: %s", rosterPath, v.String()),
+				})
+			}
+		}
+
 		fqdn := inventory.RosterHostFQDN(host, domain)
 		has, err := inventory.RosterHasNFSServer(rosterPath, fqdn)
 		if err != nil {

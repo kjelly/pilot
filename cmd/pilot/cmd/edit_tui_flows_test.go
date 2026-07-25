@@ -60,13 +60,16 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to host list
 
-	// host list items now: 0 新增主機, 1 host summary, 2 存檔並離開, 3 不存檔離開
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	// host list items now: 0 新增主機, 1 host summary, 2 共用變數,
+	// 3 存檔並離開, 4 不存檔離開
+	for i := 0; i < 3; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save and return to top menu
 
-	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 離開
-	for i := 0; i < 3; i++ {
+	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
+	// 4 檢查設定完整性, 5 離開
+	for i := 0; i < 5; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -94,6 +97,102 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	wantRole := inventory.Roles()[0].Name
 	if !hasRole(h.Roles, wantRole) {
 		t.Fatalf("expected role %q to be set, got %v", wantRole, h.Roles)
+	}
+}
+
+// TestEditRouter_Teatest_FleetVarsFlow_AddEditDeleteAndSave exercises the
+// hosts.yml top-level "vars:" (fleet-wide connection defaults, e.g.
+// ansible_user) CRUD screen — mirrors pushExtraVarsMenu's pattern exactly,
+// just keyed to hf.Vars, and proves the round-trip through Render/Parse.
+func TestEditRouter_Teatest_FleetVarsFlow_AddEditDeleteAndSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hosts.yml")
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "web-1"}}}
+	var router editRouterModel
+	pushHostList(&router, dir, path, hf, "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("共用變數")
+	// host list items: 0 新增主機, 1 web-1, 2 共用變數, 3 存檔並離開, 4 不存檔離開
+	for i := 0; i < 2; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> fleet vars menu
+	waitFor("➕ 新增變數")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增變數" (only item, cursor 0)
+	waitFor("變數名稱")
+	tm.Type("ansible_user")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("變數值")
+	tm.Type("ubuntu")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to fleet vars menu
+	waitFor("ansible_user = ubuntu")
+
+	// edit it
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick "ansible_user = ubuntu" (cursor 0)
+	waitFor("修改值")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "修改值"
+	waitFor("的新值")
+	for range "ubuntu" {
+		tm.Send(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	tm.Type("admin")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to fleet vars menu
+	waitFor("ansible_user = admin")
+
+	// add a second var, then delete it, proving delete actually removes it
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "➕ 新增變數" (index 1 now)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // add
+	waitFor("變數名稱")
+	tm.Type("scratch_var")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("變數值")
+	tm.Type("temp")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("scratch_var = temp")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // scratch_var entry (sorted after ansible_user)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // its action menu
+	waitFor("刪除")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "刪除" -> back to fleet vars menu
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		out := string(b)
+		return strings.Contains(out, "ansible_user = admin") && !strings.Contains(out, "scratch_var")
+	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // fleet vars menu -> host list
+	waitFor("💾 存檔並離開")
+	for i := 0; i < 3; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save -> top menu
+	waitFor("要編輯什麼")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // top menu -> quit
+
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected hosts.yml to be written: %v", err)
+	}
+	got, err := inventory.Parse(data)
+	if err != nil {
+		t.Fatalf("written hosts.yml did not parse: %v\n%s", err, data)
+	}
+	if got.Vars["ansible_user"] != "admin" {
+		t.Fatalf("Vars[ansible_user] = %q, want admin (full vars: %v)", got.Vars["ansible_user"], got.Vars)
+	}
+	if _, ok := got.Vars["scratch_var"]; ok {
+		t.Fatalf("scratch_var should have been deleted, got %v", got.Vars)
 	}
 }
 
@@ -562,6 +661,67 @@ func TestEditRouter_Teatest_GroupVarsFlow_FiltersToUsedRolesAndAutofillsHostVar(
 	}
 }
 
+// TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable
+// proves the nested group_vars/dns/zones.example.yaml (previously invisible
+// to both `pilot inventory generate` and `pilot edit`) is now discoverable
+// and scaffoldable through the wizard's file picker, while still pointing
+// at hand-editing rather than opening a confusingly empty structured editor
+// (dns_zones is a 2-level nested list-of-maps with no top-level "key:
+// value" line groupvars.Doc can represent).
+func TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(
+		"hosts:\n  ns-1:\n    ansible_host: \"10.0.0.53\"\n    roles: [dns]\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exampleDir := filepath.Join(dir, "group_vars")
+	if err := os.MkdirAll(filepath.Join(exampleDir, "dns"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(exampleDir, "dns", "zones.example.yaml"), []byte("dns_zones:\n  - name: pilot.lan\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	router := newEditRouterModel(".")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // top menu -> group_vars/ (index 1)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("➕ 從範例建立 dns/zones.yaml")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // create it (only entry, cursor 0)
+	waitFor("巢狀清單設定")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	data, err := os.ReadFile(filepath.Join(dir, "group_vars", "dns", "zones.yaml"))
+	if err != nil {
+		t.Fatalf("expected group_vars/dns/zones.yaml to be created: %v", err)
+	}
+	if !strings.Contains(string(data), "pilot.lan") {
+		t.Fatalf("created file = %q, want the copied example content", data)
+	}
+}
+
 func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testing.T) {
 	dir := t.TempDir()
 	exampleDir := filepath.Join(dir, "group_vars")
@@ -608,7 +768,9 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
 
-	for i := 0; i < 3; i++ {
+	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
+	// 4 檢查設定完整性, 5 離開
+	for i := 0; i < 5; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -623,6 +785,98 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	entries := doc.Entries()
 	if len(entries) != 1 || entries[0].Value != "1.1.1.1" {
 		t.Fatalf("expected dns_forwarders = 1.1.1.1, got entries: %+v\n%s", entries, data)
+	}
+}
+
+// TestEditRouter_Teatest_GroupVarsFlow_ListEntryAddEditRemoveAndSave exercises
+// the flow-list ("key: [a, b]") CRUD screens end to end through the real
+// wizard: activating a commented-default list, adding an item, editing an
+// existing item, removing one, and saving — proving the corruption bug
+// found in Initiative 0 (restic_backup_paths-style settings silently
+// getting quoted into a string) stays fixed all the way through real use.
+func TestEditRouter_Teatest_GroupVarsFlow_ListEntryAddEditRemoveAndSave(t *testing.T) {
+	dir := t.TempDir()
+	gvDir := filepath.Join(dir, "group_vars")
+	if err := os.MkdirAll(gvDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(gvDir, "restic-backup.yml")
+	if err := os.WriteFile(path, []byte("# 備份路徑\n# restic_backup_paths: [\"/etc\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var router editRouterModel
+	pushGroupVarsEditor(&router, dir, path, "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("restic_backup_paths = [/etc]")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // the only row (cursor 0) -> list entry menu
+	waitFor("編輯清單項目")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "編輯清單項目" -> items menu
+	waitFor("➕ 新增項目")
+
+	// add a second item
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "/etc" (0) -> "➕ 新增項目" (1)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // add
+	waitFor("新項目的值")
+	tm.Type("/srv/data")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to top-level editor screen
+	waitFor("restic_backup_paths = [/etc, /srv/data]")
+
+	// edit the first item ("/etc" -> "/var/log")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // the only row (cursor reset to 0)
+	waitFor("編輯清單項目")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> items menu (now /etc, /srv/data, 新增, 返回)
+	waitFor("的項目")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "/etc" (cursor 0)
+	waitFor("修改值")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "修改值"
+	waitFor("的新值")
+	for range "/etc" {
+		tm.Send(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	tm.Type("/var/log")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to top-level editor screen
+	waitFor("restic_backup_paths = [/var/log, /srv/data]")
+
+	// remove the second item ("/srv/data")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // the only row (cursor reset to 0)
+	waitFor("編輯清單項目")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> items menu
+	waitFor("的項目")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "/var/log" (0) -> "/srv/data" (1)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "/srv/data"
+	waitFor("移除")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "修改值" (0) -> "移除" (1)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm removal -> back to top-level editor screen
+	waitFor("restic_backup_paths = [/var/log]")
+
+	// save
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // the only row (0) -> "💾 存檔並離開" (1)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save
+	waitFor("✅ 已存檔")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "restic_backup_paths: [/var/log]") {
+		t.Fatalf("saved file = %q, want an active restic_backup_paths: [/var/log]", got)
+	}
+	if strings.Contains(got, "/srv/data") || strings.Contains(got, "\"/etc\"") {
+		t.Fatalf("saved file = %q, want /srv/data removed and /etc edited away, not both lingering", got)
 	}
 }
 
@@ -714,7 +968,9 @@ func TestEditRouter_Teatest_VaultFlow_CreateAddKeyAndSave(t *testing.T) {
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
 
-	for i := 0; i < 3; i++ {
+	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
+	// 4 檢查設定完整性, 5 離開
+	for i := 0; i < 5; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -791,5 +1047,130 @@ func TestEditRouter_Teatest_VaultFlow_EscMirrorsDirtyDiscardGate(t *testing.T) {
 	}
 	if strings.Contains(string(data), "baz") {
 		t.Fatalf("declining the discard confirm should not have saved to disk: %s", data)
+	}
+}
+
+// TestEditRouter_Teatest_RosterFlow_TopMenuReachesManager proves the new
+// "roster" top-menu item (alongside hosts.yml/group_vars/.vault) actually
+// reaches the roster manager for an existing roster file.
+func TestEditRouter_Teatest_RosterFlow_TopMenuReachesManager(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	if err := os.MkdirAll(filepath.Dir(rosterPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rosterPath, []byte("schema_version: 1\nusers: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	router := newEditRouterModel(dir)
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster, 4 離開
+	for i := 0; i < 3; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> roster path prompt
+	waitFor("Roster 檔路徑")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept the default (.vault/ipa-identity.yaml matches our fixture)
+	waitFor("👤 Users")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+// TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate
+// exercises the append-only users/groups CRUD end to end: a valid add
+// persists and still validates clean; an invalid add (duplicate name, wrong
+// category prefix) is blocked before ever touching disk, with the
+// violation surfaced instead of silently failing or silently succeeding.
+func TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(path, []byte("schema_version: 1\nusers:\n  - name: alice\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var router editRouterModel
+	pushRosterManager(&router, dir, path, "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("👤 Users")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> Users menu
+	waitFor("現有 users")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 User"
+	waitFor("新 user 的名稱")
+	tm.Type("bob")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // valid -> appended
+	waitFor("已新增 user bob")
+
+	// duplicate name: blocked by the validator, never written.
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 User"
+	waitFor("新 user 的名稱")
+	tm.Type("bob")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("驗證沒過")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // Users menu -> roster manager
+	waitFor("👥 Groups")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "👤 Users" (0) -> "👥 Groups" (1)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> Groups menu
+	waitFor("目前沒有任何 group")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 Group"
+	waitFor("分類")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // category: team (cursor 0)
+	waitFor("記得帶前綴")
+	tm.Type("team-ops")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // valid -> appended
+	waitFor("已新增 group team-ops")
+
+	// wrong prefix for the chosen category: blocked by the validator.
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 Group"
+	waitFor("分類")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // category: team
+	waitFor("記得帶前綴")
+	tm.Type("ops-nomatch")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("驗證沒過")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	users, err := inventory.RosterUserNames(path)
+	if err != nil {
+		t.Fatalf("RosterUserNames() error = %v", err)
+	}
+	if len(users) != 2 || users[0] != "alice" || users[1] != "bob" {
+		t.Fatalf("RosterUserNames() = %v, want [alice bob] (no duplicate)", users)
+	}
+	groups, err := inventory.RosterGroupNames(path)
+	if err != nil {
+		t.Fatalf("RosterGroupNames() error = %v", err)
+	}
+	if len(groups) != 1 || groups[0] != "team-ops" {
+		t.Fatalf("RosterGroupNames() = %v, want [team-ops] (bad-prefix group rejected)", groups)
+	}
+	violations, err := inventory.ValidateRosterFile(path)
+	if err != nil {
+		t.Fatalf("ValidateRosterFile() error = %v", err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf("expected the final roster to still validate clean, got %v", violations)
 	}
 }

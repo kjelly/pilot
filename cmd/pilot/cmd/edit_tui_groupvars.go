@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -28,6 +29,13 @@ import (
 // is filtered) — an already-existing file is always still listed and
 // editable regardless of current role usage, since it may predate a roster
 // change and a human already chose to create it.
+//
+// Nested examples (nestedGroupVarsExamples, inventory.go — currently just
+// dns_zones) are listed too, so they're at least discoverable/scaffoldable
+// instead of invisible, but selecting one never opens the normal editor:
+// dns_zones is a 2-level nested list-of-maps with no top-level "key: value"
+// line at all, so groupvars.Doc would show a confusingly empty screen
+// (harmless, just useless) — point at hand-editing instead.
 func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 	targetDir := filepath.Join(dir, "group_vars")
 	exampleDir := "group_vars"
@@ -43,12 +51,36 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 		missingExamples = filterStemsToUsedRoles(missingExamples, hf)
 	}
 
-	items := make([]string, 0, len(existing)+len(missingExamples)+1)
+	usedRoles := map[string]bool{}
+	if hf != nil {
+		for _, role := range inventory.UsedRoles(hf) {
+			usedRoles[role] = true
+		}
+	}
+	var nestedExisting, nestedMissing []nestedGroupVarsExample
+	for _, ex := range nestedGroupVarsExamples {
+		if !usedRoles[ex.Role] {
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(targetDir, ex.DestRel)); statErr == nil {
+			nestedExisting = append(nestedExisting, ex)
+		} else {
+			nestedMissing = append(nestedMissing, ex)
+		}
+	}
+
+	items := make([]string, 0, len(existing)+len(nestedExisting)+len(missingExamples)+len(nestedMissing)+1)
 	for _, f := range existing {
 		items = append(items, "📝 "+f)
 	}
+	for _, ex := range nestedExisting {
+		items = append(items, "📝 "+ex.DestRel)
+	}
 	for _, stem := range missingExamples {
 		items = append(items, fmt.Sprintf("➕ 從範例建立 %s.yml", stem))
+	}
+	for _, ex := range nestedMissing {
+		items = append(items, fmt.Sprintf("➕ 從範例建立 %s", ex.DestRel))
 	}
 	items = append(items, "↩  返回")
 
@@ -65,8 +97,13 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 			return pushTopMenu(r, dir, "")
 		case idx < len(existing):
 			return pushGroupVarsEditor(r, dir, filepath.Join(targetDir, existing[idx]), "")
-		default:
-			stem := missingExamples[idx-len(existing)]
+		case idx < len(existing)+len(nestedExisting):
+			ex := nestedExisting[idx-len(existing)]
+			dst := filepath.Join(targetDir, ex.DestRel)
+			return pushGroupVarsFilePicker(r, dir, fmt.Sprintf(
+				"ℹ️  %s 是巢狀清單設定，pilot edit 目前不支援結構化編輯，請直接用文字編輯器修改。", dst))
+		case idx < len(existing)+len(nestedExisting)+len(missingExamples):
+			stem := missingExamples[idx-len(existing)-len(nestedExisting)]
 			src := filepath.Join(exampleDir, stem+".example.yml")
 			dst := filepath.Join(targetDir, stem+".yml")
 			data, rerr := os.ReadFile(src)
@@ -84,6 +121,25 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 				return nil
 			}
 			return pushGroupVarsEditor(r, dir, dst, fmt.Sprintf("已從 %s 建立 %s", src, dst))
+		default:
+			ex := nestedMissing[idx-len(existing)-len(nestedExisting)-len(missingExamples)]
+			src := filepath.Join(exampleDir, ex.ExampleRel)
+			dst := filepath.Join(targetDir, ex.DestRel)
+			data, rerr := os.ReadFile(src)
+			if rerr != nil {
+				r.err = fmt.Errorf("read %s: %w", src, rerr)
+				return nil
+			}
+			if merr := os.MkdirAll(filepath.Dir(dst), 0o755); merr != nil {
+				r.err = fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), merr)
+				return nil
+			}
+			if werr := os.WriteFile(dst, data, 0o644); werr != nil {
+				r.err = fmt.Errorf("write %s: %w", dst, werr)
+				return nil
+			}
+			return pushGroupVarsFilePicker(r, dir, fmt.Sprintf(
+				"已從 %s 建立 %s — 這是巢狀清單設定，pilot edit 目前不支援結構化編輯，請直接用文字編輯器修改。", src, dst))
 		}
 	})
 }
@@ -194,7 +250,8 @@ func pushGroupVarsEditor(r *editRouterModel, dir, path, banner string) tea.Cmd {
 
 func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupvars.Doc, dirty bool, banner string) tea.Cmd {
 	entries := doc.Entries()
-	items := make([]string, 0, len(entries)+2)
+	listEntries := doc.ListEntries()
+	items := make([]string, 0, len(entries)+len(listEntries)+2)
 	for _, e := range entries {
 		state := "已設定"
 		if !e.Active {
@@ -202,7 +259,37 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 		}
 		items = append(items, fmt.Sprintf("%s = %s  [%s]", e.Key, e.Value, state))
 	}
+	for _, e := range listEntries {
+		state := "已設定"
+		if !e.Active {
+			state = "未設定，使用內建預設"
+		}
+		items = append(items, fmt.Sprintf("%s = [%s]  [%s]", e.Key, strings.Join(e.Values, ", "), state))
+	}
 	items = append(items, "💾 存檔並離開", "🚪 不存檔離開")
+
+	// A block-scalar key (e.g. alertmanager_config: |) or a flow-map key
+	// (e.g. "labels: {a: 1}") is deliberately never offered as an item
+	// above — Entries() excludes both because editing them here would
+	// corrupt the file (see groupvars.Doc.Entries). Surface them instead
+	// of silently disappearing. Flow lists get their own editable rows
+	// below instead of this note — see ListEntries().
+	if keys := doc.BlockScalarKeys(); len(keys) > 0 {
+		note := fmt.Sprintf("ℹ️  %s 是多行 YAML 設定，pilot edit 不支援在這裡編輯，請直接改檔案 %s。", strings.Join(keys, "、"), path)
+		if banner == "" {
+			banner = note
+		} else {
+			banner += "\n" + note
+		}
+	}
+	if keys := doc.FlowMapKeys(); len(keys) > 0 {
+		note := fmt.Sprintf("ℹ️  %s 是巢狀設定(map)，pilot edit 不支援在這裡編輯，請直接改檔案 %s。", strings.Join(keys, "、"), path)
+		if banner == "" {
+			banner = note
+		} else {
+			banner += "\n" + note
+		}
+	}
 
 	title := fmt.Sprintf("編輯 %s", path)
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
@@ -227,8 +314,10 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 				return pushGroupVarsFilePicker(r, dir, "")
 			}
 			return pushConfirmDiscardGroupVars(r, dir, path, doc)
-		default:
+		case idx < len(entries):
 			return pushGroupVarsEntryMenu(r, dir, path, doc, entries[idx], dirty)
+		default:
+			return pushGroupVarsListEntryMenu(r, dir, path, doc, listEntries[idx-len(entries)], dirty)
 		}
 	})
 }
@@ -280,6 +369,126 @@ func pushGroupVarsEditValue(r *editRouterModel, dir, path string, doc *groupvars
 			return pushGroupVarsEntryMenu(r, dir, path, doc, e, dirty)
 		}
 		if err := doc.SetValue(e.Line, m.Value()); err != nil {
+			r.err = err
+			return nil
+		}
+		return pushGroupVarsEditorScreen(r, dir, path, doc, true, "")
+	})
+}
+
+// ---- flow-list ("key: [a, b]") entries ------------------------------------
+//
+// Every mutation (add/remove/edit an item) returns straight to
+// pushGroupVarsEditorScreen for a fresh re-render, the same convention the
+// scalar entry flow above already uses (pushGroupVarsEditValue does the
+// same) — it avoids ever holding a stale groupvars.ListEntry across a
+// SetList call, since Entry.Line stays valid (SetList only ever rewrites
+// that one line) but .Values would otherwise go stale.
+
+func pushGroupVarsListEntryMenu(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, dirty bool) tea.Cmd {
+	title := fmt.Sprintf("%s 目前有 %d 個項目：[%s]", e.Key, len(e.Values), strings.Join(e.Values, ", "))
+	banner := ""
+	if e.Description != "" {
+		banner = "──────────────────────────────────\n" + e.Description + "\n──────────────────────────────────"
+	}
+	items := []string{"編輯清單項目", "還原成內建預設(取消設定)", "返回"}
+	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(selectModel)
+		if m.Canceled() {
+			// mirrors "返回" (case 2).
+			return pushGroupVarsEditorScreen(r, dir, path, doc, dirty, "")
+		}
+		switch m.Selected() {
+		case 0:
+			return pushGroupVarsListItemsMenu(r, dir, path, doc, e, dirty)
+		case 1:
+			if err := doc.CommentOut(e.Line); err != nil {
+				r.err = err
+				return nil
+			}
+			return pushGroupVarsEditorScreen(r, dir, path, doc, true, "")
+		case 2:
+			return pushGroupVarsEditorScreen(r, dir, path, doc, dirty, "")
+		}
+		return nil
+	})
+}
+
+func pushGroupVarsListItemsMenu(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, dirty bool) tea.Cmd {
+	items := make([]string, 0, len(e.Values)+2)
+	items = append(items, e.Values...)
+	items = append(items, "➕ 新增項目", "↩  返回")
+
+	title := fmt.Sprintf("%s 的項目", e.Key)
+	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(selectModel)
+		if m.Canceled() {
+			// mirrors the trailing "↩ 返回" item.
+			return pushGroupVarsListEntryMenu(r, dir, path, doc, e, dirty)
+		}
+		idx := m.Selected()
+		switch {
+		case idx == len(items)-1:
+			return pushGroupVarsListEntryMenu(r, dir, path, doc, e, dirty)
+		case idx == len(items)-2:
+			return pushGroupVarsAddListItem(r, dir, path, doc, e, dirty)
+		default:
+			return pushGroupVarsListItemAction(r, dir, path, doc, e, idx, dirty)
+		}
+	})
+}
+
+func pushGroupVarsAddListItem(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, dirty bool) tea.Cmd {
+	return r.transitionTo(newTextInputModel("新項目的值", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(textInputModel)
+		if m.Canceled() {
+			return pushGroupVarsListItemsMenu(r, dir, path, doc, e, dirty)
+		}
+		newValues := append(append([]string{}, e.Values...), m.Value())
+		if err := doc.SetList(e.Line, newValues); err != nil {
+			r.err = err
+			return nil
+		}
+		return pushGroupVarsEditorScreen(r, dir, path, doc, true, "")
+	})
+}
+
+func pushGroupVarsListItemAction(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, itemIdx int, dirty bool) tea.Cmd {
+	title := fmt.Sprintf("%s 項目：%s", e.Key, e.Values[itemIdx])
+	items := []string{"修改值", "移除", "返回"}
+	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(selectModel)
+		if m.Canceled() {
+			// mirrors "返回" (case 2).
+			return pushGroupVarsListItemsMenu(r, dir, path, doc, e, dirty)
+		}
+		switch m.Selected() {
+		case 0:
+			return pushGroupVarsEditListItemValue(r, dir, path, doc, e, itemIdx, dirty)
+		case 1:
+			newValues := append(append([]string{}, e.Values[:itemIdx]...), e.Values[itemIdx+1:]...)
+			if err := doc.SetList(e.Line, newValues); err != nil {
+				r.err = err
+				return nil
+			}
+			return pushGroupVarsEditorScreen(r, dir, path, doc, true, "")
+		case 2:
+			return pushGroupVarsListItemsMenu(r, dir, path, doc, e, dirty)
+		}
+		return nil
+	})
+}
+
+func pushGroupVarsEditListItemValue(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, itemIdx int, dirty bool) tea.Cmd {
+	label := fmt.Sprintf("%s 第 %d 項的新值", e.Key, itemIdx+1)
+	return r.transitionTo(newTextInputModel(label, e.Values[itemIdx], nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(textInputModel)
+		if m.Canceled() {
+			return pushGroupVarsListItemAction(r, dir, path, doc, e, itemIdx, dirty)
+		}
+		newValues := append([]string{}, e.Values...)
+		newValues[itemIdx] = m.Value()
+		if err := doc.SetList(e.Line, newValues); err != nil {
 			r.err = err
 			return nil
 		}
