@@ -37,7 +37,7 @@ services: local
 nodes:
   - name: freeipa-server
     base_image: almalinux-9
-    memory: 4096
+    memory: 4608
     vcpus: 2
     disk: 30
     ssh_user: root

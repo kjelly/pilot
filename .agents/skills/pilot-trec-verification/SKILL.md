@@ -262,14 +262,64 @@ CI=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   `group_vars/<role>.yml` from `.example.yml` and writes a vault
   skeleton listing every secret key the roles you selected actually
   need — read its output before writing the vault-fill script.
-- **`pilot edit` has no `host_vars/` editor** — its top menu is only
-  hosts.yml / group_vars/ / .vault/. A per-host override that the
-  docs themselves recommend putting in `host_vars/<主機>.yml` (e.g.
-  `prometheus_site_label`, which is deliberately per-site) can only be
-  hand-written. Like the vault nested-YAML case above, treat this as a
-  tool-endorsed exception to "no hand-edited YAML": write the
-  `host_vars` file directly, keep it minimal, and note it in the
-  evidence log instead of contorting the value into a group-wide file.
+- **`pilot edit` now has a real `host_vars/` editor** (added after
+  2026-07-23; confirmed live 2026-07-25, round 16) — reachable from a
+  host's own menu as a conditional item, `host_vars/<host>.yml(必填、
+  無安全預設值的設定)`, that only appears when that host's current roles
+  imply a key with no safe cross-host default (`internal/inventory
+  .HostVarsKeysForRoles` — today just `prometheus_site_label` for the
+  `prometheus` role). Selecting it auto-scaffolds the file if missing and
+  reuses the same flat key-list editor `group_vars/` uses (still
+  scalar-only). The stale claim this replaced ("no host_vars editor,
+  hand-write it") predates this feature — don't hand-write
+  `host_vars/*.yml` for a key this screen covers; use the wizard.
+- **`pilot edit`'s top menu gained two more items** (same 2026-07-23+
+  work): `roster` (append-only FreeIPA Users/Groups CRUD against a
+  canonical roster — see below) and `🔍 檢查設定完整性`, an advisory
+  report sharing its checks with `pilot deploy`'s own hard completeness
+  gate (`workspace_completeness.go`/`deploy_completeness.go`) — run it
+  before deploying to catch a missing/CHANGE-ME vault key, an unfilled
+  host_vars key, or a roster structural violation without waiting for a
+  real preflight. It only warns (✅/❌ banner); it never blocks a save or
+  an exit, unlike `pilot deploy`'s own gate.
+- **The FreeIPA identity roster is no longer 100% hand-authored** — two
+  edit-menu features now cover part of it (confirmed live 2026-07-25,
+  round 16), narrowing but not eliminating the roster's nested-YAML
+  hand-edit exception:
+  - **NFS-role-add bootstrap**: the moment a host's role checklist (or a
+    role preset/copy-roles action) newly checks `freeipa-nfs-server` and
+    that host has no `freeipa_roster_file` set yet, the wizard
+    auto-derives `<workspace>/.vault/ipa-identity.yaml`, sets that host's
+    `freeipa_roster_file` extra var to it, prompts once for the FreeIPA
+    admin password (masked `EchoPassword` input — never appears in a
+    `--secret-env`/`--secret-file`-protected recording), and writes a
+    *minimal* roster: `schema_version: 1`, `freeipa.admin.{principal,
+    password}`, and one `nfs.servers` entry for that host with
+    `shares: []`. It also creates/fills `.vault/main.yaml`'s
+    `ipa_admin_password` from the same value, without ever clobbering an
+    existing non-`CHANGE-ME` one. This fires only for
+    `freeipa-nfs-server`, never `freeipa-nfs-client`.
+  - **Roster manager** (top-menu `roster` item → `👤 Users` / `👥
+    Groups`): append-only. Adding a user writes only `{name, state:
+    present}`; adding a group writes only `{name, state: present,
+    category}` (category comes from a 4-way picker —
+    `team-`/`data-`/`access-`/`role-` — matching the runbook §2 prefix
+    rule). Both dry-run the addition against the roster validator first
+    and refuse (showing the violation) rather than writing anything
+    invalid. Neither screen can set membership, passwords, `ssh_keys`,
+    HBAC/sudo rules, hostgroups, or NFS shares/exports — those still need
+    a hand edit, the same tool-endorsed nested-YAML exception the vault
+    section above documents. `./pilot roster lint <file>` validates a
+    hand-edited roster against the same rules the apply playbook enforces,
+    without needing a live target.
+  - A user roster built this way needs an explicit `ssh_keys: {
+    authoritative: true, values: [...] }` block added by hand for *every*
+    user before a real `freeipa-identity` reconcile, even if the list is
+    empty. A user with no `ssh_keys` field at all currently crashes
+    `freeipa-identity-apply.yml`'s own user-normalization task on
+    ansible-core 2.19.x — this is a suspected playbook bug, not a
+    trec-driver issue, so its full writeup lives in
+    `docs/runbooks/minimal-poc-architecture.md` §6, not here.
 
 ### Timing: avoid dropped keys without stalling the run
 
@@ -605,30 +655,63 @@ during the minimal-poc re-verification (two site-deploy runs burned
   in your script is a bare `ENTER`, you recorded a preview, not a
   deploy. Check the cast for 「✅ 套用完成」 before calling it evidence.
 
-### Data-driven playbooks (`freeipa-identity`): the vault prompt IS the roster prompt
+### Data-driven playbooks (`freeipa-identity`): for a canonical roster, answer `y` to the main.yaml prompt — do NOT redirect it at the roster path
 
-`freeipa-identity` (and any future roster-driven entry) needs
-`-e @<roster-file>`, and the wizard **does** support this — but not
-where a script author expects. The 「還有其他 -e 變數要帶嗎？」 prompt
-only accepts `key=value` tokens (`validateOptionalKV` rejects `@path`)
-**by design**; the file goes through the *vault vars-file* prompt
-instead. The catalog entry's own Note says so on screen: 「接下來會問你
-roster 檔路徑」. The correct drive sequence:
+**This flipped since the note below was first written (2026-07-17) — read
+the whole subsection before scripting this prompt, not just the first
+rule you find.** The roster is now loaded exclusively via the
+`freeipa_roster_file` **host var** (set on `freeipa-server` — and, for
+this repo's minimal-poc topology, also on `nexus` — either by hand via
+`pilot edit`'s hosts.yml "其他變數" screen, or automatically by the
+NFS-role-add roster bootstrap, `edit_tui.go`'s `pushNFSRoleBootstrap`).
+That host var is completely independent of whatever gets selected at the
+wizard's own vars-file prompt below.
+
+The wizard's 「偵測到 …/.vault/main.yaml，這次佈署要用它當密碼變數檔
+嗎？」 prompt exists to satisfy a *different*, Go-side check:
+`contracts/freeipa-identity.yaml`'s own required-input preflight wants a
+bare top-level `ipa_admin_password` key. A canonical (`schema_version: 1`)
+roster's own top-level-key gate (`internal/inventory/roster_validate.go`'s
+`checkTopLevelKeys`) **rejects** a bare `ipa_admin_password` at the
+roster's top level — the admin credential must live nested under
+`freeipa.admin.password` instead (see the runbook's own §2 note on this).
+That means the roster file can **never** satisfy this particular contract
+check by itself, no matter what you answer here. The correct sequence for
+a canonical roster:
 
 1. At 「偵測到 …/.vault/main.yaml，這次佈署要用它當密碼變數檔嗎？」
-   answer **`n`** — main.yaml is NOT the roster.
-2. At the vars-file path prompt, enter the roster file path (e.g.
-   `…/.vault/ipa-identity.yaml`). The roster schema includes
-   `ipa_admin_password`, so main.yaml is not needed as a second file.
+   answer **`y`** — `.vault/main.yaml`'s own `ipa_admin_password` key
+   satisfies the contract's required-input check.
+2. Nothing else to do here — the roster itself loads separately via the
+   `freeipa_roster_file` host var, not via this prompt.
 
-Answering `y` to the main.yaml prompt "works" — the run ends in
-「✅ 套用完成」 with `failed=0` — but the roster vars never load and
-every reconcile task skips. **A `freeipa-identity` PLAY RECAP of
-`changed=0` with `skipped=` in the dozens on a roster that should
-create anything is a failed deploy, not a pass** — confirmed live
-2026-07-17 (v8: `ok=5 skipped=50 changed=0` was initially misread as
-"wizard can't do freeipa-identity" when the script had simply answered
-the roster prompt wrong). Do not fall back to bare `ansible-playbook`
+Answering `n` and pointing the vars-file prompt at the roster path instead
+— the documented sequence before this update — now fails outright with
+`Error: delivery transaction failed: component "freeipa-identity" requires
+input "ipa_admin_password"`, before any ansible-playbook run, confirmed
+live 2026-07-25 (round 16). No mutation happens either way (the Go-side
+contract check runs before the preview), so this is a safe mistake to
+make and retry — but don't burn a second attempt rediscovering this.
+
+That `n`-then-roster-path sequence was correct once, for an
+**older, non-canonical roster shape** current from around 2026-07-17
+(v8) that predates both the `freeipa_roster_file` host-var mechanism and
+the canonical top-level-key gate — at the time, the roster path *was* the
+only way to get the roster loaded at all, and a bare `ipa_admin_password`
+inside that older roster shape was legal. Answering `y` against *that*
+older shape genuinely skipped every reconcile task (`ok=5 skipped=50
+changed=0`, initially misread as "wizard can't do freeipa-identity"). If
+you are re-verifying a workspace that still uses that older roster shape
+(no `freeipa_roster_file` host var anywhere, a bare top-level
+`ipa_admin_password` inside the roster itself), the original `n` sequence
+still applies to it — but that shape itself is stale; migrate to the
+canonical schema documented in the runbook and
+`playbooks/apply/freeipa-identity.roster.example.yaml` instead of
+preserving the old prompt answer to match it.
+
+Either way: a `freeipa-identity` PLAY RECAP of `changed=0` with
+`skipped=` in the dozens on a roster that should create anything is a
+failed deploy, not a pass. Do not fall back to bare `ansible-playbook`
 for this; the wizard path above is the sanctioned one.
 
 ---
@@ -744,6 +827,17 @@ runbook using `verified-runbook`'s rules (real output only, no
 
 ## 7. Known gotchas (all discovered the hard way — check first)
 
+- **`TOGGLE`/`SELECT`/`CHOOSE` "docker" on the role checklist is
+  ambiguous** — confirmed live 2026-07-25, round 16: on the ~21-row role
+  checklist, a bare `TOGGLE docker` (or `SELECT`/`CHOOSE` with the same
+  label) errors "ambiguous selectable label rows [34 40 42]" — rows 40
+  and 42 are `wazuh-manager`/`seaweedfs-s3`, whose own *description* text
+  happens to contain the substring "docker" ("需先過 docker"). This is
+  the same "unique substring" rule §4 already documents for other
+  screens, just against a source of collision easy to miss (another
+  row's description prose, not its label or the static banner). Use
+  `TOGGLE docker-apply.yml` instead — the `(docker-apply.yml)` suffix is
+  unique to that one row.
 - **Stale `pilot` binary**: a `pilot` binary at a fixed path
   (`$(which pilot)` may be a symlink into the repo) can predate a
   feature added to source — rebuild before trusting wizard menu shape.

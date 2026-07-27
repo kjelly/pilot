@@ -1,26 +1,31 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
 > Status: **VERIFIED**
-> Latest completed pass: 2026-07-23 (Asia/Taipei), round 15
-> Evidence: [`2026-07-23-round-15.md`](../evidence/minimal-poc-architecture/2026-07-23-round-15.md)
+> Latest completed pass: 2026-07-25 (Asia/Taipei), round 16
+> Evidence: [`2026-07-25-round-16.md`](../evidence/minimal-poc-architecture/2026-07-25-round-16.md)
+> Round 15 (adopted `vm-target topology`): [`2026-07-23-round-15.md`](../evidence/minimal-poc-architecture/2026-07-23-round-15.md)
 > Round 14 (deep §4 verification matrix): [`2026-07-23-round-14.md`](../evidence/minimal-poc-architecture/2026-07-23-round-14.md)
 > Semantic action catalog expansion (local-only, no VM rebuild): [`2026-07-23-semantic-actions-expansion.md`](../evidence/minimal-poc-architecture/2026-07-23-semantic-actions-expansion.md)
+> Reusable `trec drive` scripts (edit-menu-only rebuild): [`scripts/minimal-poc/`](../../scripts/minimal-poc/)
 > Automation: `playbooks/site.yml` plus the day-2
 > `playbooks/apply/freeipa-identity-apply.yml` reconciler
 > Maintainer: sre
 
-Round 15 evaluated whether §3.2's three hand-typed `pilot vm-target up` invocations should be
-replaced by `pilot vm-target topology up` against a committed declarative spec
-([`docs/topologies/minimal-poc-topology.yaml`](../topologies/minimal-poc-topology.yaml), already
-used successfully by an earlier `vm-target topology test` smoke run) and, having confirmed it
-should, rewrote §3.2/§5 and rebuilt the full three-node topology from zero this way to prove it out
-end to end: site-wide deploy (`failed=0` all hosts) and `freeipa-identity` reconcile
-(`changed=17 failed=0`) both passed against VMs created this way. This round's own verification
-focus was the bring-up mechanism and a light §4.1/§4.2 spot-check (HBAC allow/deny + one Thanos
-metric), not a re-run of the full §4 matrix — round 14's deep verification (Grafana/Loki, restic
-snapshots, Wazuh FIM) remains the last full pass and is not re-litigated here. Round 14's own
-findings remain valid. This runbook keeps only the current sanitized facts and links; its one-time
-acceptance recordings are disposable.
+Round 16 evaluated whether §3.3's workspace build could go entirely through `pilot edit`'s real
+interactive menu — including the host_vars editor, roster manager, and NFS-role-add roster
+bootstrap added after round 15 — rather than the `--actions` JSON scenario round 15 used, and
+rewrote §3.3 to document exactly what that path can and cannot cover today. It rebuilt the full
+three-node topology from zero this way (real `trec` recordings of every wizard invocation, no
+`--actions`) and proved out the full chain end to end: site-wide deploy (`failed=0` all hosts,
+first real-apply attempt) and `freeipa-identity` reconcile (`changed=15 failed=0`, plus a live
+drift-correction re-run) both passed. This round's own verification focus was the edit-menu
+coverage and a light §4.1/§4.2 spot-check (HBAC allow/deny + one Thanos metric, both fully passing
+after two authoring fixes below), not a re-run of the full §4 matrix — round 14's deep verification
+(Grafana/Loki, restic snapshots, Wazuh FIM) remains the last full pass and is not re-litigated here.
+Two suspected implementation defects were found and are reported, not silently patched — see §6.
+Round 14/15's own findings remain valid. This runbook keeps only the current sanitized facts and
+links; its one-time acceptance recordings are disposable, but the `scripts/minimal-poc/*.drive`
+files above are checked-in, reusable evidence of the edit-menu path and are not disposable.
 
 ## 0. Goal
 
@@ -46,16 +51,16 @@ component-specific values.
 
 | Item | Last verified value |
 |---|---|
-| Fact timestamp | 2026-07-23T22:00+08:00 |
+| Fact timestamp | 2026-07-25T15:04+08:00 |
 | Targets | `freeipa-server`, `nexus`, `client-vm` |
-| VM sizing | FreeIPA: 2 vCPU/4096 MiB/30 GiB; nexus: 6/12288/80; client: 2/2048/20 |
-| VM provisioning | `pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml` (spec's own `services: local` key) — replaces three separate `vm-target up` calls; see §3.2 |
-| Inventory source | Generated from a fresh gitignored workspace; `hosts.yml` built via `pilot edit --actions` (semantic automation, including `add_extra_var` for `freeipa_roster_file`), group_vars/vault via `pilot edit --actions`' newer `set_group_var`/`set_vault_value`/`save_vault` actions, `host_vars/nexus.yml` hand-written for `prometheus_site_label` (tool-endorsed exception — see §3.3), then `pilot inventory generate` |
+| VM sizing | FreeIPA: 2 vCPU/**4608 MiB**/30 GiB (bumped from 4096 this round — see §6); nexus: 6/12288/80; client: 2/2048/20 |
+| VM provisioning | `pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml` (spec's own `services: local` key); see §3.2 |
+| Inventory source | Generated from a fresh gitignored workspace; `hosts.yml` (incl. role checklist, `add_extra_var`-equivalent `freeipa_roster_file`), `host_vars/nexus.yml`, and the FreeIPA identity roster's initial NFS/admin block all built through the real interactive `pilot edit` menu — no `--actions` scenario this round, see §3.3; `pilot inventory generate` backfilled group_vars/vault skeletons; remaining vault secrets and the roster's HBAC/sudo/membership sections filled via the edit menu's vault `➕ 新增 key` action and one sanctioned hand-edit of the roster's nested YAML respectively (§3.3) |
 | Stage | `sandbox` |
 | Alignment | Actual hosts and populated role groups matched the intended topology |
-| Manual extra `-e` | Empty; inventory-derived values were accepted through the wizard/scenario |
-| Tested candidate | commit `c76f805` (tree as of 2026-07-23T21:29+08:00), rebuilt `./pilot` binary; no Go source changes this round |
-| Result | Site-wide deploy via `pilot deploy --actions` passed `failed=0` on all three hosts (`client-vm ok=89 changed=14`, `freeipa-server ok=70 changed=15`, `nexus ok=206 changed=87`) after one retry (transient FreeIPA LDAP enrollment race — see §6); `freeipa-identity` reconcile via `pilot reconcile --actions` passed initial apply (`changed=17 failed=0`); §4.1 HBAC allow (alice)/deny (bob) and §4.2 one Thanos metric (`up{site="site-nexus"}=1`) spot-checked live — see round-15 evidence for scope |
+| Manual extra `-e` | Empty; inventory-derived values were accepted through the wizard |
+| Tested candidate | commit `228938b` (clean tree at round start); topology memory sizing and `scripts/minimal-poc-section4-spotcheck.sh`'s JSON parsing fixed in-round (documented below, both are config/tooling, not `pilot` Go source or an Ansible playbook); rebuilt `./pilot` binary; no Go source changes this round |
+| Result | Site-wide deploy via the interactive `pilot deploy` wizard passed `failed=0` on all three hosts on the **first** real-apply attempt (`client-vm ok=92 changed=41`, `freeipa-server ok=78 changed=33`, `nexus ok=206 changed=95`) — no retry needed this round; `freeipa-identity` reconcile via the interactive `pilot reconcile` wizard passed initial apply (`changed=15 failed=0`) plus a live sudo-command drift-correction re-run (`changed=3 failed=0`); §4.1 HBAC allow (alice)/deny (bob) and §4.2 one Thanos metric (`up{site="site-nexus"}=1`) spot-checked live, all 8/8 checks passing — see round-16 evidence for scope and the two fixes that got there |
 
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
@@ -120,9 +125,19 @@ remove/restore/drift reconciliation cycle.
 - Vault values for the keys listed below; never record their values:
   `ipa_admin_password`, `grafana_admin_password`, `restic_aws_access_key_id`,
   `restic_aws_secret_access_key`, `restic_password`, `thanos_aws_access_key_id`,
-  `thanos_aws_secret_access_key`, and `alertmanager_config`.
+  `thanos_aws_secret_access_key`, and `alertmanager_config`. `ipa_dm_password` remains genuinely
+  optional (falls back to `ipa_admin_password`) — round 16 found and fixed a bug where `pilot
+  deploy`'s hard completeness gate demanded it anyway despite `internal/inventory/vault.go` marking
+  it `Optional: true`; see §6's now-historical gotcha entry if you're on a checkout older than that
+  fix.
 - A canonical FreeIPA identity roster with `schema_version: 1`, the `freeipa` connection/safety
-  block, and the required `users`, `groups`, `hosts`, `hbac`, `sudo`, and `nfs` objects.
+  block, and the required `users`, `groups`, `hosts`, `hbac`, `sudo`, and `nfs` objects. A user entry
+  with no `ssh_keys` field at all is fine — round 16 found and fixed a crash in
+  `freeipa-identity-apply.yml`'s user-normalization task that made this combination (exactly what
+  `pilot edit`'s roster manager, §3.3, produces) fail on ansible-core 2.19.x; see §6's now-historical
+  gotcha entry if you're on a checkout older than that fix. Add an explicit `ssh_keys:
+  {authoritative: true, values: [...]}` block only when a user actually has SSH public keys to
+  authorize.
 
 Use `playbooks/apply/freeipa-identity.roster.example.yaml` as the roster schema. Keep Nexus's
 canonical FQDN/IP, NFS service principal, export, ACL, and automount objects in that roster. If
@@ -204,26 +219,81 @@ broad directory.
 Use one fresh workspace consistently throughout the run:
 
 ```bash
-./pilot edit --dir tmp/pilot-verify-minimal-poc-r14
-./pilot inventory generate --dir tmp/pilot-verify-minimal-poc-r14
-./pilot edit --dir tmp/pilot-verify-minimal-poc-r14
+./pilot edit --dir <workspace>
+./pilot inventory generate --dir <workspace>
+./pilot edit --dir <workspace>
 ```
 
 In the first edit pass, set every host's SSH user, exact generated private-key path, and role
 membership. In the second, fill group variables and `.vault/main.yaml`. The nested identity roster
-is the tool-documented exception and may be authored from the committed roster example.
+is a narrower tool-documented exception than it used to be (see below) and may still be authored
+from the committed roster example for the parts the wizard doesn't cover.
 
-The entire build — `hosts.yml` (hosts, `ansible_host`/`ansible_user`/SSH-key/`env` fields, role
-checklist, role presets, extra host vars), `group_vars/*.yml`, and the plaintext `.vault/*.yaml`
-skeleton — can be driven either interactively (`trec drive` or a live `trec mcp` session) or
-non-interactively via **`pilot edit --actions <scenario.json> --presentation --trace-out <path>`**
-— a versioned JSON scenario of semantic action steps, resolved against the live in-memory screen
-model rather than rendered terminal text or a remembered index. Discover the current action
-contract fresh from the binary being tested, never from memory: `./pilot actions list` / `./pilot
-actions schema` (as of 2026-07-23 this is 25 edit-workflow actions plus the standalone `deploy`/
-`reconcile`). It still needs a real PTY (same TTY guard as the interactive path) even though it
-takes no live keystrokes, so wrap it in a plain `trec` recorder (no `drive` script needed — the
-scenario file drives itself):
+#### Driving the build entirely through the real interactive menu
+
+As of round 16 (2026-07-25), this is the recommended default path — every step below goes through
+`pilot edit`'s genuine live TUI, driven and recorded by `trec drive --script <file>` (label-based
+`CHOOSE`/`TOGGLE`, never blind `DOWN <n>` counting — see the `pilot-trec-verification` skill). The
+checked-in, reusable scripts in [`scripts/minimal-poc/`](../../scripts/minimal-poc/) reproduce this
+exact sequence; read that directory's `README.md` for the required env vars and run order before
+using them. In outline:
+
+- **`hosts.yml`**: add each host, set `ansible_host`/`ansible_user`/SSH-key, then the role
+  checklist. The moment `freeipa-nfs-server` is newly checked on a host with no
+  `freeipa_roster_file` set yet, the wizard auto-derives
+  `<workspace>/.vault/ipa-identity.yaml`, sets that host's `freeipa_roster_file` extra var to it,
+  and prompts once (masked) for the FreeIPA admin password — writing a *minimal* roster
+  (`schema_version: 1`, `freeipa.admin.{principal,password}`, one `nfs.servers` entry for that
+  host, `shares: []`) and filling `.vault/main.yaml`'s `ipa_admin_password` from the same value.
+  This fires for `freeipa-nfs-server` only, never `freeipa-nfs-client` — set `freeipa_roster_file`
+  by hand (host's "其他變數" menu) on any *other* host whose apply playbook also reads the roster
+  (in this topology, `freeipa-server` — point it at the same absolute path the bootstrap already
+  used on nexus).
+- **`host_vars/<host>.yml`**: a per-host menu item, `host_vars/<host>.yml(必填、無安全預設值的設定)`,
+  appears automatically once that host has a role with such a key (today just
+  `prometheus_site_label` for `prometheus`, gating on `prometheus-apply.yml`'s hard requirement —
+  see `docs/verification/prometheus.md` §1.5). Selecting it auto-scaffolds the file and reuses the
+  same flat key-editor `group_vars/` uses.
+- **`group_vars/*.yml`** and **`.vault/main.yaml`**: unchanged from before — `pilot inventory
+  generate` backfills the group_vars skeleton from `.example.yml` files and (only on a workspace
+  with no existing vault file) a vault skeleton; fill remaining group_vars values and add any vault
+  key `pilot inventory generate` didn't already create via `.vault/`'s `➕ 新增 key` action.
+- **`roster` (top-menu item)**: append-only `👤 Users` / `👥 Groups` CRUD against the same canonical
+  roster the NFS bootstrap already created. Adding a user writes only `{name, state: present}`;
+  adding a group writes only `{name, state: present, category}` (category from a
+  team-/data-/access-/role- picker matching §2's prefix rule). Both dry-run against the roster
+  validator first and refuse (showing the violation) rather than writing anything invalid.
+- **`🔍 檢查設定完整性` (top-menu item)**: an advisory ✅/❌ report sharing its checks with `pilot
+  deploy`'s own hard gate (missing/CHANGE-ME vault keys, unfilled host_vars, roster structural
+  violations) — run it before deploying; it never blocks a save or exit itself.
+
+What the edit menu still cannot do — hand-edit the roster's nested YAML for these, the same
+tool-endorsed exception as before, now narrower in scope:
+
+- HBAC rules, sudo rules, hostgroups, and NFS shares/exports/automount entries.
+- Group and user **membership** (the roster manager creates the bare group/user objects only).
+- A user's `password`/`ssh_keys` fields — the roster manager's `➕ 新增 User` writes only
+  `{name, state}`, so add these by hand when a user needs a password or an authorized SSH key.
+
+Run `./pilot roster lint <roster-file>` after any hand edit — it checks the same rules
+`freeipa-identity-apply.yml` enforces at real-apply time, without needing a live target.
+
+The wizard also has an `ansible-vault`-**encrypted** shellout exclusion (`pilot edit` suspends its
+own Program and shells out to the real `ansible-vault edit` with stdio wired to the terminal — not
+a screen, can't be key-driven); fill that by hand via a text editor or `trec drive` if the workspace
+uses an encrypted vault file.
+
+#### Alternative: non-interactive `--actions` scenario
+
+The same `hosts.yml`/`group_vars`/`.vault` build (not the roster manager or host_vars editor, which
+postdate the `--actions` action catalog and are not yet covered by it as of 2026-07-25) can also be
+driven non-interactively via **`pilot edit --actions <scenario.json>
+--presentation --trace-out <path>`** — a versioned JSON scenario of semantic action steps, resolved
+against the live in-memory screen model rather than rendered terminal text or a remembered index.
+Discover the current action contract fresh from the binary being tested, never from memory:
+`./pilot actions list` / `./pilot actions schema`. It still needs a real PTY (same TTY guard as the
+interactive path) even though it takes no live keystrokes, so wrap it in a plain `trec` recorder (no
+`drive` script needed — the scenario file drives itself):
 
 ```bash
 CI=1 trec -o casts/01-edit-hosts.cast --title "pilot edit --actions -- hosts.yml" \
@@ -235,13 +305,6 @@ Every action drives the same real menu a human would (`choose`/`moveCursor` only
 against labels that genuinely exist on the *current* live screen — there is no shortcut that
 mutates `hosts.yml`/group_vars/vault data directly), so a `--presentation` + `trec` recording is
 real evidence of menu correspondence, not a claim to take on faith.
-
-Two permanent, deliberate exclusions — not gaps, the wizard has no menu path here for a human
-either: the `ansible-vault`-**encrypted** shellout (`pilot edit` suspends its own Program and shells
-out to the real `ansible-vault edit` with stdio wired to the terminal — not a screen, can't be
-key-driven) and any vault file whose top-level values aren't plain scalars (nested YAML/roster —
-`pilot edit`'s own `doc.Editable()` check rejects this for everyone). Fill both by hand via a text
-editor or `trec drive`.
 
 Vault/extra-var actions (`add_vault_key`, `set_vault_value`, `add_extra_var`, `edit_extra_var`)
 accept a value **or** a `value_env` field naming an environment variable to read the real value
@@ -261,21 +324,6 @@ One `save_hosts`/workspace-boundary rule worth knowing before authoring a multi-
 group_vars/vault file to a *different* file (or a different workspace entirely) requires that
 file's own `save_*`/`discard_*` action first — the automation will not guess a discard confirm's
 answer on your behalf.
-
-`prometheus-apply.yml` gates on `prometheus_site_label` with **no default** (see
-`docs/verification/prometheus.md` §1.5) — it identifies which site's Prometheus a given metric came
-from once Thanos Query aggregates across sites, so a silent default would let two sites' data
-collide. It is a genuinely per-site value, not one of the cross-role host *addresses* the deploy
-wizard's site-wide flow auto-detects (§3.4), and `pilot edit` has no `host_vars/` editor — hand-write
-it (the same tool-endorsed exception as the vault's nested-YAML case, §3.3 above):
-
-```bash
-mkdir -p <workspace>/host_vars
-cat > <workspace>/host_vars/nexus.yml <<'EOF'
----
-prometheus_site_label: site-nexus
-EOF
-```
 
 Skipping this fails a real apply (not just a preview) with `prometheus_site_label is required`,
 confirmed live 2026-07-23 (round 15) on a genuinely fresh workspace that had never set it.
@@ -298,7 +346,7 @@ inspect the generated files before proceeding.
 Run the site-wide wizard using the generated inventory:
 
 ```bash
-./pilot deploy -i tmp/pilot-verify-minimal-poc-r14/inventory.yml --timeout 90m
+./pilot deploy -i <workspace>/inventory.yml --timeout 90m
 ```
 
 Select the full-site `site.yml` scope and `sandbox` stage. Accept inventory-derived automatic
@@ -307,7 +355,10 @@ value cannot be derived and would need manual input there, stop and fix the inve
 do not improvise an override during the evidence run.
 
 Run the full preview (`--check --diff`) and continue to real apply only when every host reports
-`failed=0`.
+`failed=0`. Confirmed live 2026-07-25 (round 16) driving this real interactive wizard directly
+(`scripts/minimal-poc/03-deploy-sitewide.drive`) rather than `--actions`: `failed=0` on the first
+real-apply attempt, once §2's `ipa_dm_password` and this topology's `freeipa-server` memory sizing
+(§6) were both fixed ahead of the run.
 
 As an alternative to driving the interactive wizard by hand or with `trec drive`, **`pilot deploy
 --actions <scenario.json> --presentation --trace-out <path>`** answers the exact same prompt chain
@@ -337,7 +388,7 @@ not run. Run §3.5 now, then re-run this site-wide deploy — every already-appl
 Run the separate day-2 reconciler against the same inventory:
 
 ```bash
-./pilot reconcile -i tmp/pilot-verify-minimal-poc-r14/inventory.yml --timeout 90m
+./pilot reconcile -i <workspace>/inventory.yml --timeout 90m
 ```
 
 Select `freeipa-identity`, `freeipa-server`, and `sandbox`. Set `freeipa_roster_file` on the managed
@@ -346,6 +397,13 @@ roster separately via that host var, independent of whatever is selected at the 
 below. At the secret vars-file prompt select `.vault/main.yaml`, which supplies the
 `ipa_admin_password` referenced by the roster. Leave manual extra `-e` empty. A clean recap with
 every reconcile task skipped means the roster was not loaded and is not a successful identity apply.
+Confirmed live 2026-07-25 (round 16) driving this real interactive wizard directly
+(`scripts/minimal-poc/04-reconcile-identity.drive`): initial apply `changed=15 failed=0`, plus a
+live drift-correction re-run (`changed=3 failed=0`) after fixing an authoring mistake in the
+roster's own sudo command (§6) — the `pilot-trec-verification` skill's older `n`-then-roster-path
+guidance for this exact prompt chain is now stale; it actively fails a canonical roster with a
+Go-side `requires input "ipa_admin_password"` error before this document's own **yes** answer
+below was applied. That skill has been corrected; don't resurrect the old sequence from memory.
 
 `.vault/main.yaml` here satisfies `contracts/freeipa-identity.yaml`'s own required-input preflight
 check (it wants a bare `ipa_admin_password`); the roster file's `freeipa.admin.password` is what the
@@ -464,27 +522,33 @@ path; only remove it once the user has reviewed it or explicitly asks for cleanu
 | A brand-new roster user's first live login/sudo fails with "Password change required but no TTY available", even though the roster sets `force_change: false` | FreeIPA's own `ipa passwd` always arms the forced-change flag on first-ever password assignment, independent of the roster flag — `force_change` only controls whether a *routine rerun* re-arms it for an already-onboarded user | Personalize with a scripted `kinit <user>` (3-line forced-change stdin: old/new/new), confirmed live 2026-07-23 to work over `pilot vm-target exec` piped stdin without needing a PTY (unlike the equivalent SSH+PAM path, which does need one) |
 | SeaweedFS anonymous C6–C8 fail while restic credentials are enabled | Full-site correctly selected signed S3 mode; the legacy rows intentionally send unsigned requests | Require the signed config/runtime probes plus `restic-backup` and Thanos verification to pass; do not weaken authentication. |
 | `pilot verify docs/verification/restic-backup.md ... --host restic-backup` reports a `C6` timeout | Default per-row timeout (15s) is too short for `restic check --retry-lock 120s` run concurrently across all hosts sharing one repository — confirmed live 2026-07-23 | Pass `--timeout 180` for group verification of this spec, per its own v1.3 changelog note. |
+| `pilot deploy` aborts before any preview with `delivery transaction failed: component "freeipa-server" host "..." resources cpu=2 ramMiB=<observed> ... are below minimum ... ramMiB=4096` | **Suspected environment/topology gap, not a code defect.** `deploy_facts.go` (added 2026-07-24) now gathers real per-host OS facts before the delivery preflight check runs; before that commit the check always saw "facts unavailable" and silently passed. AlmaLinux 9's actual usable RAM under this topology's KVM/virtio overhead landed ~185 MiB below the nominal 4096 MiB `vm-target up --memory` value — confirmed live 2026-07-25 (round 16), first time this exact gate could ever fire for real. | Give `freeipa-server` headroom above the component's declared minimum — `docs/topologies/minimal-poc-topology.yaml`'s `memory: 4608` (was `4096`) reflects this. If the node was already up, `pilot vm-target down --name freeipa-server` then `topology up` again recreates just that one node (the topology's own idempotent skip leaves the other two alone) — but it gets a **new DHCP-assigned IP**, even with the same MAC; re-set that host's `ansible_host` via `pilot edit` and re-run `pilot inventory generate` before redeploying. |
+| `pilot deploy`/`pilot reconcile` refuses to run at all with `inventory 完整性檢查沒過(1 項)： - vault: .vault/main.yaml: ipa_dm_password 未設定` | **Fixed** (round 16, 2026-07-26). `internal/inventory/vault.go`'s `ipa_dm_password` catalog entry is marked `Optional: true` and `docs/verification/freeipa-server.md` documents it as not required (falls back to `ipa_admin_password`), but `checkVaultCompleteness`'s key list (`vaultSection.keyNames()`) never filtered on that flag, so `pilot deploy`'s hard gate (`deploy_completeness.go`) treated it as required anyway. `pilot edit`'s own advisory "🔍 檢查設定完整性" report showed the identical ❌ but — being advisory-only — never blocked on it, which is why this could look like it "used to work." Confirmed live 2026-07-25, round 16; root-caused and fixed live 2026-07-26: `keyNames()` now skips `Optional: true` keys, matching `GenerateVaultSkeleton`'s own comment-out-when-Optional behavior (`internal/inventory/vault_test.go`'s `TestExpectedVaultKeysForRoles_ExcludesOptionalKeys` locks this in); re-verified live against the exact original repro (`.vault/main.yaml` with no `ipa_dm_password`, same workspace) — the gate no longer fires. | Upgrade past this fix; `ipa_dm_password` needs no value unless you actually want a separate Directory Manager password. If you're stuck on an older checkout, add it to `.vault/main.yaml` anyway (any value, e.g. equal to `ipa_admin_password`) as a workaround. |
+| A real `freeipa-identity` reconcile fails preview with `Type 'method' is unsupported for variable storage` / `<bound method _AnsibleLazyTemplateDict.values of {}>`, tasks masked by `no_log` | **Fixed** (round 16, 2026-07-26). `freeipa-identity-apply.yml`'s "Normalize canonical users for the compatibility reconciler" task did `(item.ssh_keys \| default({}))['values']`. For a roster user with **no `ssh_keys` field at all** (exactly what `pilot edit`'s roster manager's `➕ 新增 User` produces), this was a bracket lookup on a genuinely empty dict for the key `'values'` — Jinja2's item-then-attribute fallback resolution turned that into the dict's own bound `.values` method instead of raising `Undefined`/`KeyError`, which `set_fact` then refused to store. Every prior round's roster populated `ssh_keys` for every user (copied from the committed example), so this path was never exercised before the roster manager started producing bare `{name, state}` entries. Confirmed live 2026-07-25, round 16, on ansible-core 2.19.2; fixed live 2026-07-26 by switching to `.get('values', none)` — a real dict-method call, not a subscript, so it can't hit the same fallback — mirroring an identical `.get(...)` pattern already used elsewhere in the same file (line ~685). Re-verified live against the exact original repro (roster with `alice`/`bob` having no `ssh_keys` field at all, same workspace): preview now completes cleanly (`failed=0`). | Upgrade past this fix. If you're stuck on an older checkout, give every roster user an explicit `ssh_keys: {authoritative: true, values: [...]}` block (empty `values` is fine) before reconciling. |
+| §4.1's roster-authorized sudo command (`ALICE_SUDO_CMD`) fails with `sudo: a password is required` right after a fresh identity reconcile, even though `ipa sudorule-show`/`sudo -n -l` on the client show the rule attached with the `!authenticate` option | Same documented SSSD-sudo-cache-staleness gotcha as the row above ("First live sudo is denied...") — a *newly applied* sudo rule needs the same `sss_cache -E && systemctl restart sssd` on the client the rule targets, not just on the FreeIPA server. Confirmed live 2026-07-25, round 16. | Run `sss_cache -E && systemctl restart sssd` on the **client host being sudo'd into** (not the FreeIPA server) after any sudo-rule change, then retry. |
+| §4.1's roster-authorized sudo command fails with `Unit sshd.service could not be found` even though the sudo rule itself is correctly attached | **Authoring mistake, not a tool/playbook defect.** The roster granted `/usr/bin/systemctl status sshd`, but the live target (`nexus`) is Ubuntu 24.04, where the real unit is `ssh.service` — AlmaLinux/RHEL and Debian/Ubuntu use different systemd unit names for the same daemon. Confirmed live 2026-07-25, round 16. | Grant a command that actually exists on the target host's OS family (`systemctl status ssh` on Debian/Ubuntu, `systemctl status sshd` on RHEL/AlmaLinux); re-run `pilot reconcile` to apply the correction (a real, useful exercise of the drift-correction path — see §4.4) and re-fresh the client's SSSD sudo cache (row above) before retrying. |
+| `scripts/minimal-poc-section4-spotcheck.sh`'s `4.2-thanos-up` check reports `got ''` even though the same script's own `raw:` output shows a genuine `"value":[...,"1"]` result | **Script bug, fixed this round.** `pilot vm-target exec ... 2>&1` merges the SSH host-key warning ("Warning: Permanently added ... known_hosts") into the same stream as the real JSON response — sometimes before it, sometimes after, depending on SSH/curl buffering — and a plain `json.load()`/`json.loads()` fails closed on either ordering (caught by the script's own `except Exception: pass`). Confirmed live 2026-07-25, round 16, both orderings. Fixed by parsing with `json.JSONDecoder().raw_decode()` from the first `{`, which tolerates trailing garbage the way `json.loads()` does not. | Use an up-to-date checkout of the script; if you still see this on an older one, the fix is in the `4.2-thanos-up` block. |
 
 Detailed component-specific troubleshooting belongs in the aligned spec/runbook for that component,
 not in this composition runbook.
 
 ## 7. Latest verified evidence
 
-| Field | Round 15 record |
+| Field | Round 16 record |
 |---|---|
-| Verified at | 2026-07-23T22:00+08:00 |
-| Tested revision/tree | commit `c76f805`, tree as of 2026-07-23T21:29+08:00; rebuilt `./pilot` binary; no Go source changes this round |
-| Targets | Fresh `freeipa-server` (AlmaLinux 9), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via **`pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml`** (concurrent bring-up + `/etc/hosts` wiring in one command, replacing three serial `vm-target up` calls) |
-| Focus | Evaluating and adopting `vm-target topology` for §3.2/§5's VM lifecycle (user-requested); a light §4.1/§4.2 spot-check, not the full §4 matrix (round 14 remains the last full pass) |
-| hosts.yml build | 3-host, 22-role-assignment `hosts.yml` built via `pilot edit --actions`, including `add_extra_var` for `freeipa_roster_file` on both `freeipa-server` and `nexus` |
-| group_vars/vault | Filled via `pilot edit --actions`' `set_vault_value`/`save_vault` actions (`value_env`, never rendered on screen); `host_vars/nexus.yml` hand-written for `prometheus_site_label` (no semantic action covers `host_vars/` — see §3.3) |
-| Site apply | `pilot deploy --actions` — `client-vm ok=89 changed=14 failed=0`; `freeipa-server ok=70 changed=15 failed=0`; `nexus ok=206 changed=87 failed=0`; passed on the 2nd attempt after a transient FreeIPA LDAP enrollment race (§6) |
-| Canonical identity | `pilot reconcile --actions` initial apply: `changed=17 failed=0` |
-| §4 spot-check | FreeIPA hbactest + live: alice (sshd+sudo) allowed, matched `poc-ssh-access`; bob denied. Live `sudo -n -l` showed exactly the roster-authorized command; an unlisted command (`/etc/shadow`) was refused. Thanos Query `up{site="site-nexus"}` = `1`. Full §4.3/§4.4 (restic snapshots, Wazuh FIM trigger, remove/restore identity cycle) not re-run this round — see round 14 |
-| Functional verdict | PASS for this round's scope (VM-creation mechanism swap + spot-check). Round 14's fuller verification and its documented exceptions stand as last recorded |
-| New this round | Runbook §3.2/§5/§3.3/§6 updated to adopt `vm-target topology`; 2 own roster/inventory authoring gaps found and fixed before any real mutation (missing `nfs.servers` entry — hard `--check` failure; missing `host_vars` `prometheus_site_label` — hard apply failure); 1 operational gotcha newly documented (§6, concurrent-enrollment LDAP race, self-heals on retry); 1 pre-existing playbook bug found and fixed (authorized) — `freeipa-identity-apply.yml`'s "Gate: canonical user objects are structurally valid" task was missing `no_log: true`, printing roster users' plaintext initial passwords to the ansible-playbook transcript on every real run; now suppressed like its sibling tasks |
-| Evidence integrity | All 6 produced TREC recordings passed `cast_verify`: complete, exit 0, 0 secret-scan findings, safe to share — after one self-caught fix: an intermediate ad-hoc verification script used `set -x` and leaked a (since-rotated) test password into a `.cast` via `sshpass -p`; regenerated with `sshpass -e`/no `set -x` before keeping it as evidence |
-| Publication | [`2026-07-23-round-15.md`](../evidence/minimal-poc-architecture/2026-07-23-round-15.md); secret values and ephemeral addresses omitted |
+| Verified at | 2026-07-25T15:04+08:00 |
+| Tested revision/tree | commit `228938b` (clean at round start); in-round config/tooling fixes only — `docs/topologies/minimal-poc-topology.yaml` memory sizing, `scripts/minimal-poc-section4-spotcheck.sh` JSON parsing; rebuilt `./pilot` binary; no Go source changes this round |
+| Targets | Fresh `freeipa-server` (AlmaLinux 9, memory bumped to 4608 MiB mid-round — see §6), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via **`pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml`** |
+| Focus | Building the entire workspace through `pilot edit`'s real interactive menu — including the host_vars editor, roster manager, and NFS-role-add roster bootstrap that landed after round 15 — instead of the `--actions` JSON scenario round 15 used; a light §4.1/§4.2 spot-check, not the full §4 matrix (round 14 remains the last full pass) |
+| hosts.yml build | 3-host, 22-role-assignment `hosts.yml` built entirely through the live interactive menu (`scripts/minimal-poc/01-edit-hosts.drive`), including the NFS-role-add bootstrap on `nexus` and a hand-set `freeipa_roster_file` extra var on `freeipa-server` |
+| group_vars/vault/roster | group_vars and `host_vars/nexus.yml`'s `prometheus_site_label` filled via the live interactive menu; `.vault/main.yaml`'s remaining secrets added via the vault editor's `➕ 新增 key` action (`scripts/minimal-poc/02-edit-vault-secrets.drive`); roster's `access-poc-ssh`/`role-poc-sudo` groups and `alice`/`bob` users added via the new roster manager; HBAC rules, sudo rule, and per-user `ssh_keys` blocks hand-edited (the roster manager doesn't cover these — see §3.3) |
+| Site apply | Interactive `pilot deploy` wizard (`scripts/minimal-poc/03-deploy-sitewide.drive`) — `client-vm ok=92 changed=41 failed=0`; `freeipa-server ok=78 changed=33 failed=0`; `nexus ok=206 changed=95 failed=0`; passed on the **first** real-apply attempt, no retry needed |
+| Canonical identity | Interactive `pilot reconcile` wizard (`scripts/minimal-poc/04-reconcile-identity.drive`) — initial apply `changed=15 failed=0`; a live drift-correction re-run after fixing an authoring mistake in the roster's sudo command (§6) — `changed=3 failed=0` |
+| §4 spot-check | `scripts/minimal-poc-section4-spotcheck.sh`, 8/8 checks passing: FreeIPA hbactest + live — alice (sshd+sudo) allowed, matched `poc-ssh-access`; bob denied. Live `sudo -n -l` showed exactly the roster-authorized command (`systemctl status ssh`, corrected mid-round for Ubuntu — see §6); an unlisted command (`/etc/shadow`) was refused. Thanos Query `up{site="site-nexus"}` = `1`. Full §4.3/§4.4 (restic snapshots, Wazuh FIM trigger, remove/restore identity cycle) not re-run this round — see round 14 |
+| Functional verdict | PASS for this round's scope (edit-menu-only rebuild + spot-check). Round 14's fuller verification and its documented exceptions stand as last recorded |
+| New this round | Runbook §2/§3.3/§6 updated for the new edit-menu capabilities (host_vars editor, roster manager, NFS bootstrap) and their remaining gaps; `pilot-trec-verification` skill corrected (its `freeipa-identity` vars-file-prompt guidance had gone stale and now actively fails a canonical roster) and one new trec-driver gotcha added (`TOGGLE docker` label ambiguity on the role checklist); 4 checked-in `scripts/minimal-poc/*.drive` scripts added as reusable, lint-clean (not yet independently re-proven end to end) reproduction of this exact rebuild; 1 verification-script bug found and fixed (`scripts/minimal-poc-section4-spotcheck.sh`'s Thanos JSON parsing, broken by `pilot vm-target exec`'s own SSH warning sharing stdout); 2 suspected `pilot`/playbook implementation defects found, reported, authorized, and **fixed** (2026-07-26) — `internal/inventory/vault.go`'s `keyNames()` now skips `Optional: true` keys (fixing `ipa_dm_password` being wrongly required by `pilot deploy`'s hard completeness gate) and `freeipa-identity-apply.yml`'s user-normalization task now uses `.get('values', none)` instead of a colliding bracket lookup (fixing the ansible-core 2.19.x crash for a roster user with no `ssh_keys` field); both re-verified live against their exact original repro, plus the full Go test suite (988 tests) and an Ansible syntax-check; 1 topology sizing gap found and fixed (`freeipa-server` memory 4096→4608 MiB) after a newly-enabled real-fact resource gate correctly caught it for the first time |
+| Evidence integrity | 10 TREC recordings kept as evidence, all passed `cast_verify`: complete, exit 0, 0 secret-scan findings, safe to share. An 11th recording leaked `grafana_admin_password`/`ipa_admin_password` in plaintext (vault key-list screens render saved values in plaintext by design — same limitation prior rounds' evidence documents — and this one was typed without declaring `--secret-file` first) and was deleted rather than kept once caught during final review, not by `cast_verify` (never run on it); the group_vars-fill file changes that recording also covered are real and file-verified but have no surviving recording — see the round-16 evidence's own integrity section |
+| Publication | [`2026-07-25-round-16.md`](../evidence/minimal-poc-architecture/2026-07-25-round-16.md); secret values and ephemeral addresses omitted |
 
 The compact evidence record contains the current candidate provenance, result matrix, documented
 exceptions, and raw-artifact pointers. Earlier runs remain available in their evidence records and

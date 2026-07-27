@@ -23,7 +23,7 @@ func TestMinimalPoCTopologyMatchesRunbook(t *testing.T) {
 		disk   int
 		groups []string
 	}{
-		"freeipa-server": {"almalinux-9", 4096, 2, 30, []string{"freeipa-server", "audit-log-forwarding", "wazuh-fim", "restic-backup"}},
+		"freeipa-server": {"almalinux-9", 4608, 2, 30, []string{"freeipa-server", "audit-log-forwarding", "wazuh-fim", "restic-backup"}},
 		"nexus":          {"ubuntu-24.04", 12288, 6, 80, []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"}},
 		"client-vm":      {"ubuntu-24.04", 2048, 2, 20, []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client"}},
 	}

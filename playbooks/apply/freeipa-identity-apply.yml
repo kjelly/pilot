@@ -323,7 +323,7 @@
             'password': (item.password | default({})).initial | default(none),
             'force_password': (item.password | default({})).force_change | default(false),
             'preserve_existing': (item.password | default({})).preserve_existing | default(true),
-            'ssh_keys': (item.ssh_keys | default({}))['values'] | default(none)
+            'ssh_keys': (item.ssh_keys | default({})).get('values', none)
           }] }}
       loop: "{{ freeipa_roster.users | default([]) }}"
       loop_control:

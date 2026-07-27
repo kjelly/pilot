@@ -75,6 +75,29 @@ func TestVaultSectionExpectedKeys_KnownSection(t *testing.T) {
 	}
 }
 
+func TestExpectedVaultKeysForRoles_ExcludesOptionalKeys(t *testing.T) {
+	// ipa_dm_password is the freeipa section's one Optional key — it must
+	// never appear in the completeness-check input, even though it does
+	// appear (commented out) in GenerateVaultSkeleton's output. Regression
+	// test for the round-16 bug where `pilot deploy`'s hard completeness
+	// gate demanded a value for this key despite it being marked Optional.
+	got := ExpectedVaultKeysForRoles([]string{"freeipa-server"})
+	for _, key := range got {
+		if key == "ipa_dm_password" {
+			t.Fatalf("ExpectedVaultKeysForRoles(freeipa-server) = %v, must not include Optional key %q", got, key)
+		}
+	}
+	found := false
+	for _, key := range got {
+		if key == "ipa_admin_password" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ExpectedVaultKeysForRoles(freeipa-server) = %v, want required key %q present", got, "ipa_admin_password")
+	}
+}
+
 func TestGenerateVaultSkeleton_ContainsExactlyExpectedKeysForRoles(t *testing.T) {
 	roles := []string{"freeipa-server", "keycloak", "alertmanager"}
 	hf := &HostsFile{Hosts: []Host{{Name: "node-1", Roles: roles}}}

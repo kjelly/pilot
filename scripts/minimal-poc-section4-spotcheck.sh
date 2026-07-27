@@ -156,11 +156,19 @@ fi
 thanos_out=$(./pilot vm-target exec --name "$NEXUS_NODE" -- curl -fsS "http://127.0.0.1:${THANOS_PORT}/api/v1/query?query=up" 2>&1)
 value=""
 if command -v python3 >/dev/null 2>&1; then
+  # pilot vm-target exec's own SSH host-key warning ("Warning: Permanently
+  # added ... known_hosts") shares stdout with 2>&1 above, and lands either
+  # before or after the real JSON depending on SSH/curl buffering — either
+  # way json.load() on the raw stream fails closed (caught by except,
+  # leaving value empty even when the query itself succeeded) — confirmed
+  # live 2026-07-25, round 16, both orderings. raw_decode() from the first
+  # '{' tolerates trailing garbage the way json.loads() does not.
   value=$(printf '%s' "$thanos_out" | python3 -c '
 import json, sys
 label = sys.argv[1]
+raw = sys.stdin.read()
 try:
-    data = json.load(sys.stdin)
+    data, _ = json.JSONDecoder().raw_decode(raw, raw.index("{"))
     for r in data.get("data", {}).get("result", []):
         if r.get("metric", {}).get("site") == label:
             print(r["value"][1])

@@ -20,9 +20,19 @@ type vaultSection struct {
 	Keys  []vaultField
 }
 
+// keyNames returns the section's *required* key names — it excludes
+// Optional keys (e.g. "freeipa"'s ipa_dm_password) on purpose: this feeds
+// completeness checking (ExpectedVaultKeysForRoles -> checkVaultCompleteness,
+// used by both `pilot edit`'s advisory report and `pilot deploy`'s hard
+// gate), which must not demand a value for a key the vault skeleton itself
+// only ever writes commented-out (see GenerateVaultSkeleton's own
+// key.Optional handling below, which is independent of this method).
 func (s vaultSection) keyNames() []string {
 	out := make([]string, 0, len(s.Keys))
 	for _, k := range s.Keys {
+		if k.Optional {
+			continue
+		}
 		out = append(out, k.Name)
 	}
 	return out
@@ -145,7 +155,10 @@ var vaultSectionOrder = []string{
 	"alertmanager",
 }
 
-// VaultSectionExpectedKeys returns the declared key names for one vault section.
+// VaultSectionExpectedKeys returns one vault section's *required* key
+// names — Optional keys are excluded; see keyNames's own doc comment for
+// why. This is narrower than "every key GenerateVaultSkeleton writes for
+// this section" (that includes Optional keys too, just commented out).
 func VaultSectionExpectedKeys(sectionID string) []string {
 	section, ok := vaultSections[sectionID]
 	if !ok {
@@ -155,7 +168,9 @@ func VaultSectionExpectedKeys(sectionID string) []string {
 }
 
 // ExpectedVaultKeysForRoles returns the deduped, ordered set of vault keys
-// that should appear in the generated skeleton for the given roles.
+// that MUST have a real (non-empty, non-CHANGE-ME) value for the given
+// roles to deploy — i.e. completeness-check input, not skeleton-generation
+// input. Optional keys (see vaultField.Optional) are deliberately excluded.
 func ExpectedVaultKeysForRoles(roles []string) []string {
 	contracts := roleContractsByName()
 	seenSections := map[string]bool{}
