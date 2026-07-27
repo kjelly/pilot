@@ -203,6 +203,7 @@ go run ./cmd/pilot vm-target verify --name s3 \
 | `weed shell s3.bucket.create` 對已存在的 bucket 一樣印 `created bucket`、rc=0（不是 create-exclusive 語意） | filer 端把 bucket 當一般目錄用 `mkdir`-like 語意處理，沒有「已存在就報錯」這條路 | apply 先 `s3.bucket.list` 查一次，只有真的沒有才跑 `s3.bucket.create`，`changed_when` 才會在第二次 apply 正確回報 `false` |
 | C6/C7 若 apply 換成掛 `-s3.config` identity 檔（prod 用）就會全部 fail | 兩條 row 走匿名、無簽章請求，一旦伺服器要求驗證身份，匿名請求直接 403 | 這是**設計上的預期行為**，不是 regression；上 prod 前把這兩條 row 視為「僅適用 sandbox」的已知例外（spec §5 已註記） |
 | **任何會送簽章請求的 S3 client（`restic`、`aws` CLI、boto3…）對預設匿名模式一律失敗**，錯誤是 `Signed request requires setting up SeaweedFS S3 authentication`，跟上一列「匿名 client 對已加身份驗證的伺服器」剛好相反方向 | 匿名模式只接受**完全不帶簽章**的請求；一旦請求帶了 `Authorization: AWS4-HMAC-SHA256...` 表頭，SeaweedFS 會嘗試驗證卻找不到任何 identity 可比對，直接拒絕——跟「允許匿名」和「允許任何簽章」是兩件不同的事，本文件先前只驗證過純 `curl`（真正不簽章）這一種 client | 要接真正的 S3 SDK/CLI（包括 `restic`），必須掛 `-e seaweedfs_s3_config_path=<s3.json>`，且該 identity 的 access/secret key 要跟 client 端設定的一致。完整實測見 `docs/runbooks/restic-backup.md` §5（`restic` 對接這個 S3 gateway 的案例）|
+| 換過一次 `restic_aws_access_key_id`/`secret`（vault 輪替）後，`restic`（或其他簽章 client）開始回報 `The access key ID you provided does not exist in our records`，即使每次都用全站部署、`s3.json` 檔案內容其實已經更新成新的了 | **SeaweedFS 的 S3 身份只在 `weed` process 啟動當下讀一次，之後完全不會重新載入**——已用同一支 image 隔離實測證實：把掛進去的 `s3.json` 內容整個換掉、不重啟容器，新身份被拒絕（403）、舊身份（已經不在檔案裡）反而還能用。`community.docker.docker_container` 的 `state: started` 只比對 image/ports/volume 清單等容器規格，偵測不到「掛進去的檔案內容變了」，所以不會自動重啟 | apply 讓 render `s3.json` 的任務 `register: seaweedfs_s3_json_result`，容器任務加 `restart: "{{ seaweedfs_s3_json_result is changed }}"`——身份檔真的被改過的那次 apply 就會強制重啟容器讓新憑證生效，不再依賴 `docker_container` 自己看不到的 idempotency 判斷 |
 
 ---
 
@@ -211,3 +212,4 @@ go run ./cmd/pilot vm-target verify --name s3 \
 | 日期       | 版本 | 變更 | 變更者 |
 |------------|------|------|--------|
 | 2026-07-04 | v1.0 | 初版：SeaweedFS S3 gateway spec + apply playbook，單一 `weed server -s3` container；vm-target `s3` 7/7 PASS，`pilot vm-target test` 全套（apply/verify/idempotency）跑過 | sre |
+| 2026-07-27 | v1.1 | 修正：`restic_aws_access_key_id`/`secret` 輪替後 `s3.json` 內容雖已更新，已在跑的容器不會重新讀取，簽章 client 認證失敗（見 §5）。render s3.json 任務加 `register`，容器任務加 `restart: "{{ ... is changed }}"` 讓身份異動時強制重啟生效 | sre |

@@ -145,6 +145,7 @@
             ]
           }
       no_log: true
+      register: seaweedfs_s3_json_result
       when: >-
         seaweedfs_s3_config_path | default('') | length > 0
         and restic_aws_access_key_id is defined
@@ -189,12 +190,25 @@
     # gateway (8333) in a single process. -ip.bind=0.0.0.0 makes each
     # sub-service listen on all interfaces inside the container so the
     # published ports are reachable from the host.
+    # `restart` is set explicitly whenever the s3.json render task above
+    # actually changed the file: `state: started` alone only diffs this
+    # task's own container spec (image/ports/volumes list, etc.) — it has
+    # no way to notice that the *content* of a bind-mounted file changed,
+    # so rotating restic_aws_access_key_id/secret would otherwise
+    # re-render s3.json on disk while an already-running container keeps
+    # serving whatever identity it read at its own last startup.
+    # Confirmed live against this exact image: SeaweedFS's S3 gateway
+    # never re-reads s3.json after process start, so a real credential
+    # rotation without this restart silently drifts until the container
+    # happens to be recreated for an unrelated reason (see
+    # docs/runbooks/seaweedfs-s3.md).
     - name: "SeaweedFS — run pilot-seaweedfs container (server -s3 mode)"
       tags: [seaweedfs-s3, s3-C1, s3-C2, s3-C3, s3-C4, s3-C5]
       community.docker.docker_container:
         name: pilot-seaweedfs
         image: "chrislusf/seaweedfs:{{ seaweedfs_version }}"
         state: started
+        restart: "{{ seaweedfs_s3_json_result is changed }}"
         restart_policy: unless-stopped
         hostname: seaweedfs
         command: >-

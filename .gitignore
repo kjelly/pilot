@@ -73,3 +73,8 @@ inventories/*
 workspace
 tmp/
 docs/tmp
+
+# trec teaching/evidence recordings (minimal-poc-update and friends) — one-time
+# proof reviewed locally, never committed; docs/runbooks/minimal-poc-architecture.md
+# §5 assumes this is gitignored, but no rule actually enforced it before now.
+casts/
