@@ -320,3 +320,210 @@ func TestSimulateAddRosterUser_EncryptedFileReturnsErrRosterEncrypted(t *testing
 		t.Fatalf("AppendRosterUser() error = %v, want ErrRosterEncrypted", err)
 	}
 }
+
+const rosterFixtureWithGroup = `---
+schema_version: 1
+freeipa:
+  domain: ipa.pilot.internal
+users:
+- name: alice
+  state: present
+groups:
+- name: team-ops
+  state: present
+  category: team
+`
+
+const rosterFixtureDuplicateUsers = `---
+schema_version: 1
+freeipa:
+  domain: ipa.pilot.internal
+users:
+- name: alice
+  state: present
+- name: alice
+  state: present
+`
+
+func TestRosterUser_ReturnsFieldsForExistingUser(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureNoNFS)
+	fields, found, err := RosterUser(path, "alice")
+	if err != nil {
+		t.Fatalf("RosterUser() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("RosterUser() found = false, want true")
+	}
+	if fields["state"] != "present" {
+		t.Fatalf("RosterUser() fields = %v, want state=present", fields)
+	}
+}
+
+func TestRosterUser_NotFoundForUnknownName(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureNoNFS)
+	_, found, err := RosterUser(path, "bob")
+	if err != nil {
+		t.Fatalf("RosterUser() error = %v", err)
+	}
+	if found {
+		t.Fatalf("RosterUser() found = true, want false")
+	}
+}
+
+func TestRosterGroup_ReturnsFieldsForExistingGroup(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureWithGroup)
+	fields, found, err := RosterGroup(path, "team-ops")
+	if err != nil {
+		t.Fatalf("RosterGroup() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("RosterGroup() found = false, want true")
+	}
+	if fields["category"] != "team" {
+		t.Fatalf("RosterGroup() fields = %v, want category=team", fields)
+	}
+}
+
+func TestSimulateSetRosterUser_ReportsNoViolationsForAValidEdit(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureNoNFS)
+	updated := map[string]any{"name": "alice", "state": "present", "email": "alice@example.internal"}
+	violations, found, err := SimulateSetRosterUser(path, "alice", updated)
+	if err != nil {
+		t.Fatalf("SimulateSetRosterUser() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("SimulateSetRosterUser() found = false, want true")
+	}
+	if len(violations) != 0 {
+		t.Fatalf("SimulateSetRosterUser() violations = %v, want none", violations)
+	}
+	// simulation must not have written anything.
+	if fields, _, _ := RosterUser(path, "alice"); fields["email"] != nil {
+		t.Fatalf("simulation should not persist the edit, got %v", fields)
+	}
+}
+
+func TestSimulateSetRosterUser_ReportsViolationForBadEdit(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureNoNFS)
+	updated := map[string]any{"name": "alice", "state": "disabled", "enabled": true}
+	violations, found, err := SimulateSetRosterUser(path, "alice", updated)
+	if err != nil {
+		t.Fatalf("SimulateSetRosterUser() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("SimulateSetRosterUser() found = false, want true")
+	}
+	if len(violations) == 0 {
+		t.Fatalf("expected a violation for state:disabled + enabled:true, got none")
+	}
+}
+
+func TestSimulateSetRosterUser_NotFoundForUnknownName(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureNoNFS)
+	_, found, err := SimulateSetRosterUser(path, "bob", map[string]any{"name": "bob", "state": "present"})
+	if err != nil {
+		t.Fatalf("SimulateSetRosterUser() error = %v", err)
+	}
+	if found {
+		t.Fatalf("SimulateSetRosterUser() found = true, want false")
+	}
+}
+
+func TestSimulateSetRosterUser_ErrorsWhenNameIsAmbiguous(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureDuplicateUsers)
+	_, _, err := SimulateSetRosterUser(path, "alice", map[string]any{"name": "alice", "state": "present"})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("SimulateSetRosterUser() error = %v, want an ambiguous-name error", err)
+	}
+}
+
+func TestSetRosterUser_PersistsFieldChangeAndPassesValidation(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureNoNFS)
+	updated := map[string]any{"name": "alice", "state": "present", "email": "alice@example.internal"}
+	if err := SetRosterUser(path, "alice", updated); err != nil {
+		t.Fatalf("SetRosterUser() error = %v", err)
+	}
+	fields, found, err := RosterUser(path, "alice")
+	if err != nil {
+		t.Fatalf("RosterUser() error = %v", err)
+	}
+	if !found || fields["email"] != "alice@example.internal" {
+		t.Fatalf("RosterUser() fields = %v, want email persisted", fields)
+	}
+	violations, err := ValidateRosterFile(path)
+	if err != nil {
+		t.Fatalf("ValidateRosterFile() error = %v", err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf("expected the roster to still pass validation after set, got %v", violations)
+	}
+}
+
+func TestSetRosterUser_NeverTouchesUnrelatedContent(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureWithNFS)
+	if err := AppendRosterUser(path, "alice"); err != nil {
+		t.Fatalf("AppendRosterUser() error = %v", err)
+	}
+	before := readFileHelper(t, path)
+
+	updated := map[string]any{"name": "alice", "state": "present", "email": "alice@example.internal"}
+	if err := SetRosterUser(path, "alice", updated); err != nil {
+		t.Fatalf("SetRosterUser() error = %v", err)
+	}
+
+	after := readFileHelper(t, path)
+	if !strings.Contains(after, "nfs1.ipa.pilot.internal") {
+		t.Fatalf("expected the existing nfs section to survive the set:\n%s", after)
+	}
+	if before == after {
+		t.Fatalf("expected the file to actually change (email added)")
+	}
+}
+
+func TestSetRosterUser_ErrorsWhenNameNotFound(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureNoNFS)
+	err := SetRosterUser(path, "bob", map[string]any{"name": "bob", "state": "present"})
+	if err == nil {
+		t.Fatalf("SetRosterUser() error = nil, want an error for an unknown name")
+	}
+}
+
+func TestSetRosterUser_ErrorsWhenAmbiguous(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureDuplicateUsers)
+	err := SetRosterUser(path, "alice", map[string]any{"name": "alice", "state": "present"})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("SetRosterUser() error = %v, want an ambiguous-name error", err)
+	}
+}
+
+func TestSetRosterGroup_PersistsFieldChangeAndPassesValidation(t *testing.T) {
+	path := writeRosterFixture(t, rosterFixtureWithGroup)
+	updated := map[string]any{"name": "team-ops", "state": "present", "category": "team", "description": "Ops team"}
+	if err := SetRosterGroup(path, "team-ops", updated); err != nil {
+		t.Fatalf("SetRosterGroup() error = %v", err)
+	}
+	fields, found, err := RosterGroup(path, "team-ops")
+	if err != nil {
+		t.Fatalf("RosterGroup() error = %v", err)
+	}
+	if !found || fields["description"] != "Ops team" {
+		t.Fatalf("RosterGroup() fields = %v, want description persisted", fields)
+	}
+	violations, err := ValidateRosterFile(path)
+	if err != nil {
+		t.Fatalf("ValidateRosterFile() error = %v", err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf("expected the roster to still pass validation after set, got %v", violations)
+	}
+}
+
+func TestRosterUser_EncryptedFileReturnsErrRosterEncrypted(t *testing.T) {
+	path := writeRosterFixture(t, "$ANSIBLE_VAULT;1.1;AES256\n633864363...\n")
+	if _, _, err := RosterUser(path, "alice"); err != ErrRosterEncrypted {
+		t.Fatalf("RosterUser() error = %v, want ErrRosterEncrypted", err)
+	}
+	if err := SetRosterUser(path, "alice", map[string]any{"name": "alice"}); err != ErrRosterEncrypted {
+		t.Fatalf("SetRosterUser() error = %v, want ErrRosterEncrypted", err)
+	}
+}

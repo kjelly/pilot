@@ -180,6 +180,18 @@ func mappingChild(mapNode *yaml.Node, key string, kind yaml.Kind, tag string) *y
 	return valNode
 }
 
+// findMappingChild is mappingChild's read-only sibling: it never creates a
+// missing key, since replaceTopLevelRosterEntry treats "nothing to replace"
+// as an error, not something to scaffold.
+func findMappingChild(mapNode *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(mapNode.Content); i += 2 {
+		if mapNode.Content[i].Value == key {
+			return mapNode.Content[i+1]
+		}
+	}
+	return nil
+}
+
 // readRosterAsMap reads and generically decodes the roster at path — the
 // same read-only, cannot-lose-content posture as readRosterHead/
 // ValidateRosterFile, just decoded as a plain map instead of a fixed
@@ -219,6 +231,59 @@ func RosterGroupNames(path string) ([]string, error) {
 	return namesOf(listField(root, "groups")), nil
 }
 
+// findNamedEntry returns the index of the entry named name within list (a
+// users[]/groups[]-shaped []any of map[string]any decodes), or -1 if none
+// match. ambiguous is true when more than one entry already shares the
+// name — a pre-existing corruption ValidateRoster's "unique user/group
+// names" rule would already flag; the write path (SimulateSetRosterUser/
+// Group, SetRosterUser/Group) treats this as its own error rather than
+// guessing which entry was meant. The read path (RosterUser/RosterGroup
+// below) is display-only, so it just takes the first match.
+func findNamedEntry(list []any, name string) (idx int, ambiguous bool) {
+	idx = -1
+	for i, raw := range list {
+		if stringField(asMap(raw), "name") == name {
+			if idx >= 0 {
+				return idx, true
+			}
+			idx = i
+		}
+	}
+	return idx, false
+}
+
+// RosterUser returns the named user's full field map, exactly as
+// readRosterAsMap already decodes it (matching the shape
+// roster_validate.go's checkUsers reads: name/state/first/last/
+// display_name/email/uid/gid/login_shell/home_directory/password/
+// ssh_keys/enabled). found=false when no such user exists.
+func RosterUser(path, name string) (fields map[string]any, found bool, err error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	users := listField(root, "users")
+	idx, _ := findNamedEntry(users, name)
+	if idx < 0 {
+		return nil, false, nil
+	}
+	return asMap(users[idx]), true, nil
+}
+
+// RosterGroup is RosterUser's group counterpart.
+func RosterGroup(path, name string) (fields map[string]any, found bool, err error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	groups := listField(root, "groups")
+	idx, _ := findNamedEntry(groups, name)
+	if idx < 0 {
+		return nil, false, nil
+	}
+	return asMap(groups[idx]), true, nil
+}
+
 // SimulateAddRosterUser reports what ValidateRoster would say about the
 // roster at path if name were added as a minimal user stub (name + state:
 // present only, matching AppendRosterUser exactly) — without writing
@@ -243,6 +308,50 @@ func SimulateAddRosterGroup(path, name, category string) ([]RosterViolation, err
 	}
 	root["groups"] = append(listField(root, "groups"), map[string]any{"name": name, "state": "present", "category": category})
 	return ValidateRoster(root), nil
+}
+
+// SimulateSetRosterUser reports what ValidateRoster would say about the
+// roster at path if the named user's entry were replaced by updated —
+// without writing anything. found=false means no such user exists. err is
+// non-nil (not a violation) when name is ambiguous — more than one user
+// already shares it, a pre-existing corruption this refuses to guess
+// through rather than silently picking one. Callers should only call
+// SetRosterUser once this returns no violations.
+func SimulateSetRosterUser(path, name string, updated map[string]any) (violations []RosterViolation, found bool, err error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	users := listField(root, "users")
+	idx, ambiguous := findNamedEntry(users, name)
+	if ambiguous {
+		return nil, true, fmt.Errorf("roster %s: name %q is ambiguous (more than one user already has it); fix the duplicate by hand first", path, name)
+	}
+	if idx < 0 {
+		return nil, false, nil
+	}
+	users[idx] = updated
+	root["users"] = users
+	return ValidateRoster(root), true, nil
+}
+
+// SimulateSetRosterGroup is SimulateSetRosterUser's group counterpart.
+func SimulateSetRosterGroup(path, name string, updated map[string]any) (violations []RosterViolation, found bool, err error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	groups := listField(root, "groups")
+	idx, ambiguous := findNamedEntry(groups, name)
+	if ambiguous {
+		return nil, true, fmt.Errorf("roster %s: name %q is ambiguous (more than one group already has it); fix the duplicate by hand first", path, name)
+	}
+	if idx < 0 {
+		return nil, false, nil
+	}
+	groups[idx] = updated
+	root["groups"] = groups
+	return ValidateRoster(root), true, nil
 }
 
 // rosterUserStub is the minimal, valid shape AppendRosterUser writes —
@@ -301,6 +410,85 @@ func appendTopLevelRosterEntry(path, listKey string, stub any) error {
 		return fmt.Errorf("encode roster %s entry: %w", listKey, err)
 	}
 	listNode.Content = append(listNode.Content, &entryNode)
+
+	rendered, err := yaml.Marshal(&root)
+	if err != nil {
+		return fmt.Errorf("render roster %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, rendered, 0o600); err != nil {
+		return fmt.Errorf("write roster %s: %w", path, err)
+	}
+	return nil
+}
+
+// SetRosterUser replaces the named user's entry in the roster at path with
+// updated, via yaml.Node surgery — same technique as
+// AppendMissingNFSServerStub/appendTopLevelRosterEntry, "replace at index"
+// instead of "append": every other line in the file (formatting, comments,
+// other users/groups/hbac/sudo/nfs/...) survives untouched. Two trade-offs
+// specific to replacing an existing entry that appending never had: yaml.v3
+// sorts map keys on Encode, so updated's fields render in alphabetical
+// order regardless of how the original entry was ordered — deterministic,
+// just visually different, not a bug; and any inline comment or anchor
+// that lived on specifically this entry is lost (append only ever adds a
+// brand-new node, so it never had anything to lose). Callers should run
+// SimulateSetRosterUser first and only call this once it reports no
+// violations — this function does not validate anything itself, and
+// errors rather than guessing if name doesn't exist or is ambiguous.
+func SetRosterUser(path, name string, updated map[string]any) error {
+	return replaceTopLevelRosterEntry(path, "users", name, updated)
+}
+
+// SetRosterGroup is SetRosterUser's group counterpart.
+func SetRosterGroup(path, name string, updated map[string]any) error {
+	return replaceTopLevelRosterEntry(path, "groups", name, updated)
+}
+
+func replaceTopLevelRosterEntry(path, listKey, name string, updated map[string]any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+		return ErrRosterEncrypted
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("parse roster %s: %w", path, err)
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("roster %s: expected a top-level YAML mapping", path)
+	}
+	top := root.Content[0]
+
+	listNode := findMappingChild(top, listKey)
+	if listNode == nil || listNode.Kind != yaml.SequenceNode {
+		return fmt.Errorf("roster %s: no %s entry named %q (no %s: list)", path, listKey, name, listKey)
+	}
+
+	idx := -1
+	for i, item := range listNode.Content {
+		var m map[string]any
+		if err := item.Decode(&m); err != nil {
+			return fmt.Errorf("decode roster %s %s entry %d: %w", path, listKey, i, err)
+		}
+		if stringField(m, "name") != name {
+			continue
+		}
+		if idx >= 0 {
+			return fmt.Errorf("roster %s: name %q is ambiguous (more than one %s entry already has it); fix the duplicate by hand first", path, name, listKey)
+		}
+		idx = i
+	}
+	if idx < 0 {
+		return fmt.Errorf("roster %s: no %s entry named %q", path, listKey, name)
+	}
+
+	var entryNode yaml.Node
+	if err := entryNode.Encode(updated); err != nil {
+		return fmt.Errorf("encode roster %s entry: %w", listKey, err)
+	}
+	listNode.Content[idx] = &entryNode
 
 	rendered, err := yaml.Marshal(&root)
 	if err != nil {
