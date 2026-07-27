@@ -102,12 +102,18 @@ func pushVaultEditorFromData(r *editRouterModel, dir, path string, data []byte, 
 	}
 	doc, err := vaultfile.Parse(data)
 	if err != nil {
-		r.err = fmt.Errorf("%s 解析失敗: %w", path, err)
-		return nil
+		// A parse failure or an unsupported shape (e.g. a FreeIPA roster
+		// sitting under .vault/ by convention, like the default
+		// ipa-identity.yaml path) is an entirely foreseeable pick from the
+		// file list this same screen just offered — not a reason to kill
+		// the whole `pilot edit` session (r.err would do exactly that, see
+		// editRouterModel.Update). Bounce back to the picker with an
+		// explanatory banner instead, same as every other recoverable
+		// mistake in this wizard.
+		return pushVaultFilePicker(r, dir, fmt.Sprintf("⚠️  %s 解析失敗：%v", path, err))
 	}
 	if !doc.Editable() {
-		r.err = fmt.Errorf("%s 是複雜 YAML（例如 roster/list/nested map）；目前 `pilot edit` 只支援編輯 top-level scalar 的明文 vault skeleton，請改用文字編輯器或先加密後走 ansible-vault edit", path)
-		return nil
+		return pushVaultFilePicker(r, dir, complexVaultFileBanner(path, doc))
 	}
 	if len(doc.Entries()) == 0 {
 		empty := "目前是空的 vault 檔。先新增一個 key。"
@@ -118,6 +124,39 @@ func pushVaultEditorFromData(r *editRouterModel, dir, path string, data []byte, 
 		}
 	}
 	return pushVaultEditorScreen(r, dir, path, doc, false, banner)
+}
+
+// rosterShapedKeys are top-level keys unique to the canonical FreeIPA
+// roster schema (playbooks/apply/freeipa-identity.roster.example.yaml) —
+// none of them ever appear in a real vault skeleton, so seeing one here
+// means the picker's default .vault/*.yaml scan (scanVaultFiles) turned up
+// a roster file rather than a genuine vault key list.
+var rosterShapedKeys = map[string]bool{
+	"schema_version": true, "freeipa": true, "nfs": true,
+	"hbac": true, "sudo": true, "users": true, "groups": true,
+}
+
+func looksLikeRoster(doc *vaultfile.Doc) bool {
+	for _, e := range doc.Entries() {
+		if rosterShapedKeys[e.Key] {
+			return true
+		}
+	}
+	return false
+}
+
+// complexVaultFileBanner explains why path can't be opened as a vault
+// skeleton, keeping the "複雜 YAML" wording automation depends on (see
+// edit_automation_driver_vault.go's openVaultFile) but adding a pointer to
+// the dedicated roster editor for the common case — .vault/ipa-identity.yaml
+// is the default freeipa_roster_file convention, so it sits right next to
+// main.yaml in this same picker and is an easy file to pick by mistake.
+func complexVaultFileBanner(path string, doc *vaultfile.Doc) string {
+	msg := fmt.Sprintf("⚠️  %s 是複雜 YAML（例如 roster/list/nested map）；目前 `pilot edit` 只支援編輯 top-level scalar 的明文 vault skeleton，請改用文字編輯器或先加密後走 ansible-vault edit。", path)
+	if looksLikeRoster(doc) {
+		msg += "\n這看起來是 FreeIPA roster 檔，請改從主選單選「roster — FreeIPA」編輯。"
+	}
+	return msg
 }
 
 // vaultShelloutDoneMsg is delivered by tea.ExecProcess's callback once

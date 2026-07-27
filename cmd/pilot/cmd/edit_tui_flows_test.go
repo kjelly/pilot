@@ -586,6 +586,62 @@ func TestEditRouter_Teatest_RoleChecklistFlow_AddingFreeIPANFSServerAutofixesRos
 	}
 }
 
+// TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt
+// proves the gap this closes: checking "prometheus" on for a host that
+// didn't have it before must not silently leave prometheus_site_label
+// unfilled for the user to stumble on later. The checklist confirm now
+// jumps straight into that field's text input — generalizing
+// freeipa-nfs-server's own forced bootstrap prompt to any HostVarsKeys role
+// (see pushForcedHostVarsPrompt, edit_tui_hostvars.go) — instead of
+// returning to the plain roles menu and leaving host_vars/<host>.yml's menu
+// item to be noticed on its own.
+func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hosts.yml")
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "nexus", Roles: []string{"docker"}}}}
+	var router editRouterModel
+	pushRoleChecklist(&router, dir, path, hf, "nexus")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("prometheus")
+
+	// roleContracts order: 0 freeipa-server .. 17 prometheus.
+	for i := 0; i < 17; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // toggle prometheus on
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm checklist -> forced host_vars prompt, NOT the roles menu
+
+	waitFor("prometheus_site_label 的新值")
+	tm.Type("site-nexus")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm value -> lands on host_vars list editor, dirty
+
+	waitFor("已設定")
+	// editor screen items: 0 the entry, 1 save, 2 discard.
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "💾 存檔並離開" -> back to host menu
+
+	waitFor("host_vars/nexus.yml")
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	data, err := os.ReadFile(filepath.Join(dir, "host_vars", "nexus.yml"))
+	if err != nil {
+		t.Fatalf("expected host_vars/nexus.yml to be written: %v", err)
+	}
+	if !strings.Contains(string(data), "prometheus_site_label: site-nexus") {
+		t.Fatalf("expected prometheus_site_label to be filled, got:\n%s", data)
+	}
+}
+
 func TestEditRouter_Teatest_RoleChecklistFlow_BootstrapsMissingNFSRoster(t *testing.T) {
 	dir := t.TempDir()
 	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "nfs-demo", Extra: map[string]string{}}}}
@@ -633,6 +689,59 @@ func TestEditRouter_Teatest_RoleChecklistFlow_BootstrapsMissingNFSRoster(t *test
 	}
 	if string(vault) != "ipa_admin_password: demo-password\n" {
 		t.Fatalf("minimal FreeIPA vault = %q, want generated admin password", vault)
+	}
+}
+
+// TestEditRouter_Teatest_RoleChecklistFlow_NFSBootstrapReusesExistingAdminPassword
+// proves the fix for a real complaint: when .vault/main.yaml already has a
+// real ipa_admin_password (e.g. from an earlier bootstrap), toggling
+// freeipa-nfs-server on for a NEW host must not make the operator type
+// that same password again — it should reuse it silently (with a banner
+// saying so), never showing the password prompt at all.
+func TestEditRouter_Teatest_RoleChecklistFlow_NFSBootstrapReusesExistingAdminPassword(t *testing.T) {
+	dir := t.TempDir()
+	vaultDir := filepath.Join(dir, ".vault")
+	if err := os.MkdirAll(vaultDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultDir, "main.yaml"), []byte("ipa_admin_password: \"existing-secret\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "nfs-demo", Extra: map[string]string{}}}}
+	var router editRouterModel
+	pushRoleChecklist(&router, dir, filepath.Join(dir, "hosts.yml"), hf, "nfs-demo")
+	// Much wider than this file's usual 100 columns: the success banner
+	// embeds the full (absolute, t.TempDir()-rooted) roster path plus its
+	// own explanatory text plus the reuse note — comfortably past 220
+	// columns before the reuse note is even reached.
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(400, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("freeipa-nfs-server")
+	for i := 0; i < 3; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeySpace})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm checklist -> straight to the roster, no password prompt
+	waitFor("沿用 .vault/main.yaml 現有的 ipa_admin_password")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	rosterPath := hf.Hosts[0].Extra["freeipa_roster_file"]
+	data, err := os.ReadFile(rosterPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", rosterPath, err)
+	}
+	if !strings.Contains(string(data), "existing-secret") {
+		t.Fatalf("expected the reused password in the generated roster:\n%s", data)
 	}
 }
 
@@ -1041,6 +1150,60 @@ func TestEditRouter_Teatest_VaultFlow_CreateAddKeyAndSave(t *testing.T) {
 	}
 }
 
+// TestEditRouter_Teatest_VaultFlow_PickingRosterShapedFileStaysInWizard
+// reproduces a real support report: .vault/ipa-identity.yaml (the default
+// freeipa_roster_file convention) sits right next to main.yaml in the vault
+// picker, and picking it used to set editRouterModel.err — which quits the
+// ENTIRE `pilot edit` session (see editRouterModel.Update's `r.err != nil`
+// branch), losing any other unsaved work. It must instead bounce back to
+// this same picker with an explanatory banner, and the wizard must still be
+// fully usable afterward (e.g. opening main.yaml right after).
+func TestEditRouter_Teatest_VaultFlow_PickingRosterShapedFileStaysInWizard(t *testing.T) {
+	dir := t.TempDir()
+	vaultDir := filepath.Join(dir, ".vault")
+	if err := os.MkdirAll(vaultDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	roster := "schema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\nusers: []\n"
+	if err := os.WriteFile(filepath.Join(vaultDir, "ipa-identity.yaml"), []byte(roster), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultDir, "main.yaml"), []byte("---\nfoo: \"bar\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var router editRouterModel
+	pushVaultFilePicker(&router, dir, "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	// picker items: 0 ipa-identity.yaml, 1 main.yaml, 2 輸入其他, 3 返回.
+	waitFor("ipa-identity.yaml")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick ipa-identity.yaml (cursor 0)
+
+	// The banner (roster-specific pointer) and the picker's own title
+	// ("still on the picker, not quit") render in the same first frame —
+	// check both in one WaitFor, since a second call looking for text
+	// already emitted in an already-drained frame would hang.
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		out := string(b)
+		return strings.Contains(out, "roster — FreeIPA") && strings.Contains(out, "選一個")
+	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // now pick main.yaml — wizard must still work
+	waitFor("foo = ")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
 // TestEditRouter_Teatest_VaultFlow_EscMirrorsDirtyDiscardGate is the vault
 // analogue of the group_vars dirty-mirroring test: clean editor -> esc goes
 // straight back; dirty editor -> esc shows the same discard confirm
@@ -1161,14 +1324,19 @@ func TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate(t *test
 
 	waitFor("👤 Users")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> Users menu
-	waitFor("現有 users")
+	waitFor("選一個查看/編輯欄位，或新增一個")
+	// menu: 0 "👤 alice", 1 "➕ 新增 User", 2 "↩ 返回".
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 User"
 	waitFor("新 user 的名稱")
 	tm.Type("bob")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // valid -> appended
 	waitFor("已新增 user bob")
 
-	// duplicate name: blocked by the validator, never written.
+	// duplicate name: blocked by the validator, never written. menu is now
+	// 0 "👤 alice", 1 "👤 bob", 2 "➕ 新增 User", 3 "↩ 返回".
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 User"
 	waitFor("新 user 的名稱")
 	tm.Type("bob")
@@ -1188,7 +1356,9 @@ func TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate(t *test
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // valid -> appended
 	waitFor("已新增 group team-ops")
 
-	// wrong prefix for the chosen category: blocked by the validator.
+	// wrong prefix for the chosen category: blocked by the validator. menu
+	// is now 0 "👥 team-ops", 1 "➕ 新增 Group", 2 "↩ 返回".
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 Group"
 	waitFor("分類")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // category: team
@@ -1222,5 +1392,270 @@ func TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate(t *test
 	}
 	if len(violations) != 0 {
 		t.Fatalf("expected the final roster to still validate clean, got %v", violations)
+	}
+}
+
+// TestEditRouter_Teatest_RosterFlow_UserDetailPreviewAndScalarEditRoundTrips
+// proves the roster editor's new preview+edit capability (previously
+// add-only, see edit_tui_roster.go's package doc comment): opening an
+// existing user's detail screen renders every known field with its current
+// value/placeholder, and editing one plain scalar field persists to disk.
+func TestEditRouter_Teatest_RosterFlow_UserDetailPreviewAndScalarEditRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	fixture := "schema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\nusers:\n  - name: alice\n    state: present\n"
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var router editRouterModel
+	pushRosterUserDetail(&router, dir, path, "alice", "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	// full field-detail preview: every known field rendered, unset ones as
+	// a placeholder rather than silently omitted.
+	waitFor("email：(未設定)")
+
+	// items: 0 name,1 state,2 first,3 last,4 display_name,5 email,...
+	for i := 0; i < 5; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "email" -> straight to text input
+	waitFor("email")
+	tm.Type("alice@example.internal")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> re-validate + write -> back to detail
+	waitFor("alice@example.internal")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	fields, found, err := inventory.RosterUser(path, "alice")
+	if err != nil {
+		t.Fatalf("RosterUser() error = %v", err)
+	}
+	if !found || fields["email"] != "alice@example.internal" {
+		t.Fatalf("RosterUser() fields = %v, want email persisted", fields)
+	}
+}
+
+// TestEditRouter_Teatest_RosterFlow_GroupMembershipChecklistEditRoundTrips
+// proves membership.users edits via the checklist (not an open-ended list
+// editor — see pushRosterGroupMembershipUsers' doc comment on why) persist
+// correctly.
+func TestEditRouter_Teatest_RosterFlow_GroupMembershipChecklistEditRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	fixture := "schema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\nusers:\n  - name: alice\n    state: present\ngroups:\n  - name: team-ops\n    state: present\n    category: team\n"
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var router editRouterModel
+	pushRosterGroupDetail(&router, dir, path, "team-ops", "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("membership.users（共 0 位）")
+
+	// items: 0 name,1 state,2 category,3 type,4 description,5 gid,
+	// 6 membership.authoritative,7 membership.users,8 membership.groups,9 返回.
+	for i := 0; i < 7; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // membership.users -> checklist (only alice, unchecked)
+	waitFor("membership.users")
+	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // check alice (cursor 0)
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> re-validate + write -> back to detail
+	waitFor("membership.users（共 1 位）")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	fields, found, err := inventory.RosterGroup(path, "team-ops")
+	if err != nil {
+		t.Fatalf("RosterGroup() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("expected team-ops to still exist")
+	}
+	mem, _ := fields["membership"].(map[string]any)
+	users, _ := mem["users"].([]any)
+	if len(users) != 1 || users[0] != "alice" {
+		t.Fatalf("membership.users = %v, want [alice]", users)
+	}
+}
+
+// TestEditRouter_Teatest_RosterFlow_RejectedUserEditShowsBannerAndDoesNotWrite
+// proves the field-edit gate: state:disabled + enabled:true is a real
+// checkUsers violation, so committing it must show the violation banner
+// and never reach disk, while an earlier, independently-valid edit in the
+// same session (enabled:true on its own) does persist.
+func TestEditRouter_Teatest_RosterFlow_RejectedUserEditShowsBannerAndDoesNotWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	fixture := "schema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\nusers:\n  - name: alice\n    state: present\n"
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var router editRouterModel
+	pushRosterUserDetail(&router, dir, path, "alice", "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("enabled：false")
+
+	// items: 0 name,1 state,...,10 enabled. Set enabled=true first — no
+	// violation on its own (checkUsers only rejects state:disabled +
+	// enabled:true together).
+	for i := 0; i < 10; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "enabled" -> ["true","false"]
+	waitFor("true")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick "true" (cursor 0) -> write -> fresh detail (cursor reset)
+	waitFor("enabled：true")
+
+	// Now flip state to disabled — this combination IS the violation.
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // "state" is index 1
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("disabled")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // choices ["present","disabled"]; pick "disabled"
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // rejected -> banner, no write
+	waitFor("驗證沒過")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	fields, found, err := inventory.RosterUser(path, "alice")
+	if err != nil {
+		t.Fatalf("RosterUser() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("expected alice to still exist")
+	}
+	if fields["state"] != "present" {
+		t.Fatalf("state = %v, want present (the rejected edit must not persist)", fields["state"])
+	}
+	if fields["enabled"] != true {
+		t.Fatalf("enabled = %v, want true (the earlier, valid edit should have persisted)", fields["enabled"])
+	}
+}
+
+// TestEditRouter_Teatest_RosterFlow_MissingRosterOffersToCreateSkeleton
+// reproduces a real support report: pointing pushRosterManager at a roster
+// path that doesn't exist yet must not kill the whole `pilot edit` session
+// (r.err would do exactly that, see editRouterModel.Update's `r.err != nil`
+// branch) — it should offer to auto-generate the minimal schema_version/
+// freeipa.admin skeleton instead, then land in the normal Users/Groups
+// manager on that new file.
+func TestEditRouter_Teatest_RosterFlow_MissingRosterOffersToCreateSkeleton(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+
+	var router editRouterModel
+	pushRosterManager(&router, dir, path, "")
+	// Wider than this file's usual 100 columns: the confirm/prompt text
+	// below embeds path in full, and t.TempDir()'s directory name (which
+	// includes this whole test function name) alone can approach 100
+	// columns, wrapping mid-path before the Chinese question text even
+	// starts.
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(220, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("要建立最小 roster 骨架嗎")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm, default yes
+
+	waitFor("FreeIPA admin password")
+	tm.Type("s3cr3tpass")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+
+	waitFor("👤 Users") // landed on the normal roster manager
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	violations, err := inventory.ValidateRosterFile(path)
+	if err != nil {
+		t.Fatalf("ValidateRosterFile() error = %v", err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf("expected the generated skeleton to validate clean, got %v", violations)
+	}
+	domain, err := inventory.RosterDomain(path)
+	if err != nil {
+		t.Fatalf("RosterDomain() error = %v", err)
+	}
+	if domain != "ipa.pilot.internal" {
+		t.Fatalf("RosterDomain() = %q, want the default", domain)
+	}
+}
+
+// TestEditRouter_Teatest_RosterFlow_CreateSkeletonReusesExistingAdminPassword
+// is the roster-manager analogue of the NFS-bootstrap reuse test: creating
+// a missing roster skeleton must reuse .vault/main.yaml's existing
+// ipa_admin_password instead of asking the operator to type it again.
+func TestEditRouter_Teatest_RosterFlow_CreateSkeletonReusesExistingAdminPassword(t *testing.T) {
+	dir := t.TempDir()
+	vaultDir := filepath.Join(dir, ".vault")
+	if err := os.MkdirAll(vaultDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultDir, "main.yaml"), []byte("ipa_admin_password: \"existing-secret\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(vaultDir, "ipa-identity.yaml")
+
+	var router editRouterModel
+	pushRosterManager(&router, dir, path, "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(220, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("要建立最小 roster 骨架嗎")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm, default yes -> straight to skeleton creation, no password prompt
+	waitFor("沿用 .vault/main.yaml 現有的 ipa_admin_password")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), "existing-secret") {
+		t.Fatalf("expected the reused password in the generated roster:\n%s", data)
 	}
 }

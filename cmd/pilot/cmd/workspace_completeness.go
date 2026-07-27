@@ -327,17 +327,11 @@ func checkHostVarsCompleteness(dir string, hf *inventory.HostsFile) []completene
 			continue
 		}
 		label := filepath.Join("host_vars", h.Name+".yml")
-		fileValues, _ := readYAMLMap(filepath.Join(dir, label))
+		missing := missingHostVarsKeys(dir, h, keys)
 
-		var details []string
-		for _, k := range keys {
-			if strings.TrimSpace(h.Extra[k]) != "" {
-				continue
-			}
-			v, _ := fileValues[k].(string)
-			if strings.TrimSpace(v) == "" {
-				details = append(details, fmt.Sprintf("%s 未填", k))
-			}
+		details := make([]string, len(missing))
+		for i, k := range missing {
+			details[i] = fmt.Sprintf("%s 未填", k)
 		}
 		out = append(out, completenessCheck{Label: label, OK: len(details) == 0, Details: details})
 	}

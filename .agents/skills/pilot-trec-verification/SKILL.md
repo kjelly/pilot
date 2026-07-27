@@ -827,6 +827,59 @@ runbook using `verified-runbook`'s rules (real output only, no
 
 ## 7. Known gotchas (all discovered the hard way — check first)
 
+- **A `host_vars`/`group_vars`/vault value-edit field that already has a
+  value pre-fills it with the cursor at the end — plain `TEXT_AND_ENTER`
+  on that field APPENDS instead of replacing, and this bites for real, not
+  just in theory.** Confirmed live 2026-07-27, round 17: a re-run of
+  `01-edit-hosts.drive` against a workspace where `host_vars/nexus.yml`'s
+  `prometheus_site_label` was already set from an earlier attempt produced
+  `site-nexussite-nexus` — the intended value typed twice, concatenated,
+  saved cleanly, cast looked green throughout. Fixed by switching every
+  value-set field (`ansible_host`/`ansible_user`/SSH-key-path,
+  `host_vars`/`group_vars` value edits) to `REPLACE_TEXT_AND_ENTER` (sends
+  Ctrl-U first) — harmless when the field is genuinely blank, and immune
+  to this failure mode when it isn't. Prefer `REPLACE_TEXT_AND_ENTER` over
+  `TEXT_AND_ENTER` by default for any field that isn't a brand-new item's
+  name (host name, new variable name, new roster user/group name) —
+  those are the only prompts structurally guaranteed to start blank.
+- **A sub-editor's save/exit action returns to the *immediate parent
+  menu*, not necessarily the screen a script assumes — verify the actual
+  next screen for every "return" step, don't assume how many menu levels
+  a single action pops.** Two independent instances confirmed live
+  2026-07-27, round 17, in the same script:
+  - `host_vars/<host>.yml`'s "💾 存檔並離開" returns to that **host's own
+    item menu** (`主機 "<host>" — 選要編輯的項目`), not the top-level host
+    list — the same pattern every other host-level sub-editor already
+    follows, just easy to miss when authoring a brand-new screen's script
+    for the first time. A script that jumps straight to
+    `EXPECT <host-list text>` after this save times out.
+  - The roster manager's **Users** screen's "↩ 返回" returns to the
+    roster's own `管理 <roster>` submenu (`👤 Users`/`👥 Groups`/`↩ 返回`),
+    not the top-level `要編輯什麼？` menu — the sibling **Groups** screen's
+    exit in the same script already had the correct two-step
+    `EXPECT 管理` / `CHOOSE ↩ 返回` pair; the Users exit was missing it.
+  Both were caught because the script explicitly `EXPECT`ed the next
+  screen's own unique text rather than assuming a step count — the same
+  discipline §4 already recommends ("`EXPECT <text unique to the screen
+  you expect to be on>` immediately after every `ENTER`"). When a
+  multi-level menu structure is being scripted for the first time, budget
+  for at least one extra "return" step per nesting level and confirm each
+  one against the live screen (MCP exploration, §4a) rather than counting
+  menu levels from memory.
+- **The vault key-list screen re-renders *every already-set key's value*
+  in plaintext each time it opens — including keys the current script
+  isn't setting.** Confirmed live 2026-07-27, round 17: a script that only
+  declared `--secret-env` for the keys it was actively adding still leaked
+  `ipa_admin_password` (set by an earlier, separate bootstrap step in the
+  same workspace) in plaintext, because that key's value renders on the
+  same key-list screen every time it's opened, regardless of which key the
+  script is there to edit. Caught by `trec scan` before the cast was kept
+  as evidence, per this skill's own discipline. **Declare `--secret-env`/
+  `--secret-file` for every vault key that already has a real value in the
+  target workspace, not just the ones this particular script sets** — the
+  full current key list, checked live (e.g. via a quick MCP peek at the
+  vault screen, or `grep -oE '^[a-zA-Z_]+:' .vault/main.yaml` for names
+  only, never values), not assumed from what the script intends to write.
 - **`TOGGLE`/`SELECT`/`CHOOSE` "docker" on the role checklist is
   ambiguous** — confirmed live 2026-07-25, round 16: on the ~21-row role
   checklist, a bare `TOGGLE docker` (or `SELECT`/`CHOOSE` with the same

@@ -224,7 +224,7 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		"hosts.yml — 機器清單與角色",
 		"group_vars/ — 角色的設定值(FreeIPA realm、DNS 位址...)",
 		".vault/ — vault 變數檔(明文 skeleton 或 ansible-vault 加密檔)",
-		"roster — FreeIPA users/groups(canonical roster，僅支援新增)",
+		"roster — FreeIPA users/groups(canonical roster，可預覽/編輯/新增)",
 		"🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則",
 		"離開",
 	}
@@ -642,6 +642,7 @@ func pushRoleChecklist(r *editRouterModel, dir, path string, hf *inventory.Hosts
 		items[i] = multiSelectItem{Label: ri.Name, Description: ri.Description, Checked: hasRole(h.Roles, ri.Name)}
 	}
 	title := fmt.Sprintf("主機 %q 的角色", name)
+	beforeRoles := append([]string(nil), h.Roles...)
 	return r.transitionTo(newMultiSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(multiSelectModel)
 		if m.Canceled() {
@@ -652,15 +653,17 @@ func pushRoleChecklist(r *editRouterModel, dir, path string, hf *inventory.Hosts
 		}
 		checked := m.CheckedLabels()
 		sort.Strings(checked)
-		banner := ""
 		if h := findHost(hf, name); h != nil {
 			hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 			h.Roles = checked
 			if !hadNFSServer && hasRole(checked, "freeipa-nfs-server") {
 				return pushNFSRoleBootstrap(r, dir, path, hf, name)
 			}
+			if cmd := pushForcedHostVarsPrompt(r, dir, path, hf, name, beforeRoles); cmd != nil {
+				return cmd
+			}
 		}
-		return pushRolesMenuBanner(r, dir, path, hf, name, banner)
+		return pushRolesMenuBanner(r, dir, path, hf, name, "")
 	})
 }
 
@@ -693,42 +696,63 @@ func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.Ho
 		return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("⚠️  無法檢查 roster %s：%v", rosterPath, err))
 	}
 
+	if existing := existingFreeIPAAdminPassword(dir); existing != "" {
+		// Skipping straight to the write — no password-prompt screen shows
+		// at all here, so there's no "已自動設定 freeipa_roster_file=..."
+		// banner to explain; just note the reuse.
+		return pushNFSRoleBootstrapWithPassword(r, dir, path, hf, name, rosterPath, existing,
+			"（沿用 .vault/main.yaml 現有的 ipa_admin_password，不用重新輸入）")
+	}
+
+	banner := "已自動設定 freeipa_roster_file=" + h.Extra["freeipa_roster_file"] + "，接著建立最小 NFS roster。"
 	validate := func(value string) error {
 		if len([]rune(value)) < 8 {
 			return fmt.Errorf("FreeIPA admin password 至少需要 8 個字元")
 		}
 		return nil
 	}
-	return r.transitionTo(newSecretTextInputModel("FreeIPA admin password(不會顯示；至少 8 字元)", "", validate), "已自動設定 freeipa_roster_file="+h.Extra["freeipa_roster_file"]+"，接著建立最小 NFS roster。", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSecretTextInputModel("FreeIPA admin password(不會顯示；至少 8 字元)", "", validate), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRolesMenuBanner(r, dir, path, hf, name, "⚠️  已設定 freeipa_roster_file，但尚未建立 roster；請重新選取 NFS role 完成 bootstrap。")
 		}
-		domain := nfsBootstrapDomain(dir)
-		if err := inventory.WriteMinimalNFSServerRoster(rosterPath, h.Name, domain, "admin", m.Value()); err != nil {
-			r.err = err
+		return pushNFSRoleBootstrapWithPassword(r, dir, path, hf, name, rosterPath, m.Value(), "")
+	})
+}
+
+// pushNFSRoleBootstrapWithPassword writes the minimal NFS roster plus
+// keeps .vault/main.yaml's ipa_admin_password in sync, however password
+// was obtained (typed fresh or reused via existingFreeIPAAdminPassword) —
+// the shared commit point for pushNFSRoleBootstrap's two branches.
+func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, rosterPath, password, extraNote string) tea.Cmd {
+	h := findHost(hf, name)
+	if h == nil {
+		return pushHostList(r, dir, path, hf, "")
+	}
+	domain := nfsBootstrapDomain(dir)
+	if err := inventory.WriteMinimalNFSServerRoster(rosterPath, h.Name, domain, "admin", password); err != nil {
+		r.err = err
+		return nil
+	}
+	vaultPath := filepath.Join(dir, ".vault", "main.yaml")
+	vaultNote := ""
+	if _, statErr := os.Stat(vaultPath); os.IsNotExist(statErr) {
+		if vaultErr := inventory.WriteMinimalFreeIPAVault(vaultPath, password); vaultErr != nil {
+			r.err = vaultErr
 			return nil
 		}
-		vaultPath := filepath.Join(dir, ".vault", "main.yaml")
-		vaultNote := ""
-		if _, statErr := os.Stat(vaultPath); os.IsNotExist(statErr) {
-			if vaultErr := inventory.WriteMinimalFreeIPAVault(vaultPath, m.Value()); vaultErr != nil {
-				r.err = vaultErr
-				return nil
-			}
-			vaultNote = fmt.Sprintf("；並建立 %s 的 ipa_admin_password", vaultPath)
-		} else if statErr == nil {
-			changed, vaultErr := inventory.FillFreeIPAAdminPassword(vaultPath, m.Value())
-			if vaultErr != nil {
-				r.err = vaultErr
-				return nil
-			}
-			if changed {
-				vaultNote = fmt.Sprintf("；並填入 %s 的 ipa_admin_password", vaultPath)
-			}
+		vaultNote = fmt.Sprintf("；並建立 %s 的 ipa_admin_password", vaultPath)
+	} else if statErr == nil {
+		changed, vaultErr := inventory.FillFreeIPAAdminPassword(vaultPath, password)
+		if vaultErr != nil {
+			r.err = vaultErr
+			return nil
 		}
-		return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("✅ 已建立最小 NFS roster %s（shares: []）%s；demo 可直接套用，production 請改用 NetApp 外部 provider。", rosterPath, vaultNote))
-	})
+		if changed {
+			vaultNote = fmt.Sprintf("；並填入 %s 的 ipa_admin_password", vaultPath)
+		}
+	}
+	return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("✅ 已建立最小 NFS roster %s（shares: []）%s；demo 可直接套用，production 請改用 NetApp 外部 provider。%s", rosterPath, vaultNote, extraNote))
 }
 
 func nfsBootstrapDomain(dir string) string {
@@ -788,10 +812,14 @@ func pushApplyRolePreset(r *editRouterModel, dir, path string, hf *inventory.Hos
 		}
 		if idx := m.Selected(); idx < len(presets) {
 			if h := findHost(hf, name); h != nil {
+				beforeRoles := append([]string(nil), h.Roles...)
 				hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 				h.Roles = unionRoles(h.Roles, presets[idx].Roles)
 				if !hadNFSServer && hasRole(h.Roles, "freeipa-nfs-server") {
 					return pushNFSRoleBootstrap(r, dir, path, hf, name)
+				}
+				if cmd := pushForcedHostVarsPrompt(r, dir, path, hf, name, beforeRoles); cmd != nil {
+					return cmd
 				}
 			}
 		}
@@ -818,10 +846,14 @@ func pushCopyRolesFromHost(r *editRouterModel, dir, path string, hf *inventory.H
 		}
 		if idx := m.Selected(); idx < len(candidates) {
 			if h := findHost(hf, name); h != nil {
+				beforeRoles := append([]string(nil), h.Roles...)
 				hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 				h.Roles = unionRoles(h.Roles, candidates[idx].Roles)
 				if !hadNFSServer && hasRole(h.Roles, "freeipa-nfs-server") {
 					return pushNFSRoleBootstrap(r, dir, path, hf, name)
+				}
+				if cmd := pushForcedHostVarsPrompt(r, dir, path, hf, name, beforeRoles); cmd != nil {
+					return cmd
 				}
 			}
 		}

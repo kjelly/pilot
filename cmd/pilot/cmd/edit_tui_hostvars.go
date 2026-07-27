@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -31,41 +32,147 @@ func hostVarsPath(dir, name string) string {
 	return filepath.Join(dir, "host_vars", name+".yml")
 }
 
-func pushHostVarsEditor(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
-	h := findHost(hf, name)
-	if h == nil {
-		return pushHostList(r, dir, path, hf, "")
-	}
-	dst := hostVarsPath(dir, name)
-	banner := ""
-	if _, err := os.Stat(dst); err != nil {
-		if !os.IsNotExist(err) {
-			r.err = fmt.Errorf("stat %s: %w", dst, err)
-			return nil
+// loadOrScaffoldHostVarsDoc loads host_vars/<h.Name>.yml, scaffolding it from
+// inventory.GenerateHostVarsSkeleton first if it doesn't exist yet. doc==nil
+// with a nil error means h's current roles need no host_vars key at all —
+// callers decide their own fallback for that case.
+func loadOrScaffoldHostVarsDoc(dir string, h *inventory.Host) (path string, doc *groupvars.Doc, banner string, err error) {
+	dst := hostVarsPath(dir, h.Name)
+	if _, statErr := os.Stat(dst); statErr != nil {
+		if !os.IsNotExist(statErr) {
+			return "", nil, "", fmt.Errorf("stat %s: %w", dst, statErr)
 		}
 		rendered, ok := inventory.GenerateHostVarsSkeleton(*h)
 		if !ok {
-			// pushHostMenu only renders this screen's menu item when true;
-			// getting here regardless means roles changed since the menu
-			// was drawn — just fall back to the host menu.
-			return pushHostMenu(r, dir, path, hf, name)
+			return "", nil, "", nil
 		}
 		if merr := os.MkdirAll(filepath.Dir(dst), 0o755); merr != nil {
-			r.err = fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), merr)
-			return nil
+			return "", nil, "", fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), merr)
 		}
 		if werr := os.WriteFile(dst, []byte(rendered), 0o644); werr != nil {
-			r.err = fmt.Errorf("write %s: %w", dst, werr)
-			return nil
+			return "", nil, "", fmt.Errorf("write %s: %w", dst, werr)
 		}
 		banner = fmt.Sprintf("已建立 %s", dst)
 	}
 	data, err := os.ReadFile(dst)
 	if err != nil {
-		r.err = fmt.Errorf("read %s: %w", dst, err)
+		return "", nil, "", fmt.Errorf("read %s: %w", dst, err)
+	}
+	return dst, groupvars.Parse(data), banner, nil
+}
+
+// newHostVarsKeys returns the host_vars keys that after (the host's roles
+// post-edit) requires but before (its roles pre-edit) did not — i.e. keys a
+// just-added role newly introduced.
+func newHostVarsKeys(before, after []string) []string {
+	beforeSet := map[string]bool{}
+	for _, k := range inventory.HostVarsKeysForRoles(before) {
+		beforeSet[k] = true
+	}
+	var out []string
+	for _, k := range inventory.HostVarsKeysForRoles(after) {
+		if !beforeSet[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// missingHostVarsKeys filters keys down to the ones that are still blank in
+// h — checked the same two places checkHostVarsCompleteness (workspace_
+// completeness.go) reads a value from: hosts.yml's per-host extra vars, or
+// host_vars/<h.Name>.yml.
+func missingHostVarsKeys(dir string, h inventory.Host, keys []string) []string {
+	fileValues, _ := readYAMLMap(hostVarsPath(dir, h.Name))
+	var missing []string
+	for _, k := range keys {
+		if strings.TrimSpace(h.Extra[k]) != "" {
+			continue
+		}
+		v, _ := fileValues[k].(string)
+		if strings.TrimSpace(v) == "" {
+			missing = append(missing, k)
+		}
+	}
+	return missing
+}
+
+// pushForcedHostVarsPrompt generalizes freeipa-nfs-server's own forced
+// roster-password prompt (pushNFSRoleBootstrap) to every role in
+// hostVarsKeyCatalog: when a role just added via the checklist/preset/copy
+// screens introduces a host_vars key with no safe default that's still
+// blank, it jumps straight into that key's text input instead of leaving the
+// user to notice the new host-menu item on their own (the original gap:
+// checking "prometheus" alone gave zero feedback that prometheus_site_label
+// now needed a value). Returns nil when nothing newly requires attention, so
+// callers fall through to their normal follow-up screen.
+func pushForcedHostVarsPrompt(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, beforeRoles []string) tea.Cmd {
+	h := findHost(hf, name)
+	if h == nil {
 		return nil
 	}
-	doc := groupvars.Parse(data)
+	newKeys := newHostVarsKeys(beforeRoles, h.Roles)
+	if len(newKeys) == 0 {
+		return nil
+	}
+	missing := missingHostVarsKeys(dir, *h, newKeys)
+	if len(missing) == 0 {
+		return nil
+	}
+	hvPath, doc, banner, err := loadOrScaffoldHostVarsDoc(dir, h)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	if doc == nil {
+		return nil
+	}
+	return pushForcedHostVarsPromptChain(r, dir, path, hf, name, hvPath, doc, missing, banner)
+}
+
+// pushForcedHostVarsPromptChain walks remaining one text-input at a time,
+// then lands on the normal list editor (dirty=true) so the user still gets
+// an explicit save/discard choice, exactly like a manually-opened session.
+func pushForcedHostVarsPromptChain(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, hvPath string, doc *groupvars.Doc, remaining []string, banner string) tea.Cmd {
+	if len(remaining) == 0 {
+		return pushHostVarsEditorScreen(r, dir, path, hf, name, hvPath, doc, true, "")
+	}
+	key := remaining[0]
+	for _, e := range doc.Entries() {
+		if e.Key != key {
+			continue
+		}
+		prompt := strings.TrimSpace(banner + "\n" + e.Description)
+		return r.transitionTo(newTextInputModel(fmt.Sprintf("角色需要新設定：%s 的新值", e.Key), e.Value, nil), prompt, func(r *editRouterModel, s screen) tea.Cmd {
+			m := s.(textInputModel)
+			if !m.Canceled() {
+				if err := doc.SetValue(e.Line, m.Value()); err != nil {
+					r.err = err
+					return nil
+				}
+			}
+			return pushForcedHostVarsPromptChain(r, dir, path, hf, name, hvPath, doc, remaining[1:], "")
+		})
+	}
+	return pushForcedHostVarsPromptChain(r, dir, path, hf, name, hvPath, doc, remaining[1:], banner)
+}
+
+func pushHostVarsEditor(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+	h := findHost(hf, name)
+	if h == nil {
+		return pushHostList(r, dir, path, hf, "")
+	}
+	dst, doc, banner, err := loadOrScaffoldHostVarsDoc(dir, h)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	if doc == nil {
+		// pushHostMenu only renders this screen's menu item when h's roles
+		// need at least one host_vars key; getting here regardless means
+		// roles changed since the menu was drawn — just fall back to it.
+		return pushHostMenu(r, dir, path, hf, name)
+	}
 	return pushHostVarsEditorScreen(r, dir, path, hf, name, dst, doc, false, banner)
 }
 

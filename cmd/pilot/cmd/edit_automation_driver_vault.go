@@ -4,9 +4,12 @@
 // discard_vault. The ansible-vault-ENCRYPTED shellout path
 // (pushAnsibleVaultShellout) and any vault file failing doc.Editable()
 // (nested YAML/roster) are deliberately not automatable here — that's not a
-// gap, the wizard has no menu path there for a human either; a step
-// targeting such a file surfaces the router's own r.err as a normal action
-// failure (see automationDriver.send).
+// gap, the wizard has no menu path there for a human either: picking such a
+// file bounces back to this same picker with an explanatory banner instead
+// of opening an editor (see pushVaultEditorFromData) — a human can just
+// pick something else, but a scenario step targeting one is an authoring
+// bug, so openVaultFile turns that bounce-back into the step's own fatal
+// error rather than silently re-selecting the same file forever.
 package cmd
 
 import (
@@ -43,6 +46,7 @@ func (d *automationDriver) openVaultFile(r *editRouterModel, file string) error 
 				return err
 			}
 		case strings.Contains(list.title, "選一個") && strings.Contains(list.title, "vault 檔"):
+			pickerTitle := list.title
 			if err := d.choose(r, base); err != nil {
 				// Not listed yet — take the "type a path" branch to create it.
 				// The path must be exactly what the picker's own default would
@@ -58,6 +62,13 @@ func (d *automationDriver) openVaultFile(r *editRouterModel, file string) error 
 				if err := d.enter(r); err != nil {
 					return err
 				}
+			} else if again, ok := r.current.(selectModel); ok && again.title == pickerTitle {
+				// Choosing an existing, listed file either opens its editor (a
+				// different screen) or — for a parse failure or a file
+				// doc.Editable() rejects — bounces right back to this same
+				// picker with a banner explaining why (pushVaultEditorFromData).
+				// That banner IS the fatal error here.
+				return fmt.Errorf("%s", r.banner)
 			}
 		case strings.HasPrefix(list.title, "編輯 "):
 			if strings.Contains(list.title, base) {
