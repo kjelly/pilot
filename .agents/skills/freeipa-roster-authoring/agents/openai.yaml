@@ -1,0 +1,4 @@
+interface:
+  display_name: "FreeIPA Roster Authoring"
+  short_description: "Generate and validate safe FreeIPA roster YAML"
+  default_prompt: "Use $freeipa-roster-authoring to generate or update a canonical FreeIPA roster from the provided requirements."
