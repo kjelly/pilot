@@ -408,8 +408,17 @@ func asMap(v any) map[string]any {
 }
 
 func asList(v any) []any {
-	l, _ := v.([]any)
-	return l
+	if l, ok := v.([]any); ok {
+		return l
+	}
+	if l, ok := v.([]string); ok {
+		out := make([]any, len(l))
+		for i, item := range l {
+			out[i] = item
+		}
+		return out
+	}
+	return nil
 }
 
 func mapField(m map[string]any, key string) map[string]any {

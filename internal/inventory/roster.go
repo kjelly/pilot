@@ -231,6 +231,239 @@ func RosterGroupNames(path string) ([]string, error) {
 	return namesOf(listField(root, "groups")), nil
 }
 
+// RosterHostgroupNames returns every canonical hostgroup name in file order.
+func RosterHostgroupNames(path string) ([]string, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	return namesOf(listField(root, "hostgroups")), nil
+}
+
+// RosterHostgroup returns one canonical hostgroup entry.
+func RosterHostgroup(path, name string) (map[string]any, bool, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	entries := listField(root, "hostgroups")
+	idx, _ := findNamedEntry(entries, name)
+	if idx < 0 {
+		return nil, false, nil
+	}
+	return asMap(entries[idx]), true, nil
+}
+
+// RosterHBACRuleNames returns canonical HBAC rule names in file order.
+func RosterHBACRuleNames(path string) ([]string, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	return namesOf(listField(mapField(root, "hbac"), "rules")), nil
+}
+
+// RosterHBACRule returns one canonical HBAC rule entry.
+func RosterHBACRule(path, name string) (map[string]any, bool, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	entries := listField(mapField(root, "hbac"), "rules")
+	idx, _ := findNamedEntry(entries, name)
+	if idx < 0 {
+		return nil, false, nil
+	}
+	return asMap(entries[idx]), true, nil
+}
+
+func RosterHBACDisableAllowAll(path string) (bool, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return false, err
+	}
+	return boolFieldDefault(mapField(root, "hbac"), "disable_allow_all", false), nil
+}
+
+func SetRosterHBACDisableAllowAll(path string, value bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+		return ErrRosterEncrypted
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return err
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("roster %s: expected a top-level YAML mapping", path)
+	}
+	hbac := mappingChild(root.Content[0], "hbac", yaml.MappingNode, "!!map")
+	key := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "disable_allow_all"}
+	val := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: fmt.Sprintf("%t", value)}
+	for i := 0; i+1 < len(hbac.Content); i += 2 {
+		if hbac.Content[i].Value == "disable_allow_all" {
+			hbac.Content[i+1] = val
+			goto render
+		}
+	}
+	hbac.Content = append(hbac.Content, key, val)
+render:
+	rendered, err := yaml.Marshal(&root)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, rendered, 0o600)
+}
+
+func SimulateSetRosterHostgroup(path, name string, updated map[string]any) ([]RosterViolation, bool, error) {
+	return simulateSetRosterNested(path, "hostgroups", name, updated, "hostgroup")
+}
+
+func SimulateSetRosterHBACRule(path, name string, updated map[string]any) ([]RosterViolation, bool, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	hbac := mapField(root, "hbac")
+	rules := listField(hbac, "rules")
+	idx, ambiguous := findNamedEntry(rules, name)
+	if ambiguous {
+		return nil, true, fmt.Errorf("roster %s: HBAC rule %q is ambiguous", path, name)
+	}
+	if idx < 0 {
+		return nil, false, nil
+	}
+	rules[idx] = updated
+	hbac["rules"] = rules
+	root["hbac"] = hbac
+	return ValidateRoster(root), true, nil
+}
+
+func AppendRosterHostgroup(path, name string) error {
+	return appendTopLevelRosterEntry(path, "hostgroups", map[string]any{
+		"name": name, "state": "present", "description": name,
+		"membership": map[string]any{"authoritative": true, "hosts": []string{}, "hostgroups": []string{}},
+	})
+}
+
+func AppendRosterHBACRule(path string, rule map[string]any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+		return ErrRosterEncrypted
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("parse roster %s: %w", path, err)
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("roster %s: expected a top-level YAML mapping", path)
+	}
+	top := root.Content[0]
+	hbac := mappingChild(top, "hbac", yaml.MappingNode, "!!map")
+	rules := mappingChild(hbac, "rules", yaml.SequenceNode, "!!seq")
+	var node yaml.Node
+	if err := node.Encode(rule); err != nil {
+		return err
+	}
+	rules.Content = append(rules.Content, &node)
+	rendered, err := yaml.Marshal(&root)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, rendered, 0o600)
+}
+
+func SimulateAddRosterHBACRule(path string, rule map[string]any) ([]RosterViolation, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	hbac := mapField(root, "hbac")
+	hbac["rules"] = append(listField(hbac, "rules"), rule)
+	root["hbac"] = hbac
+	return ValidateRoster(root), nil
+}
+
+func SetRosterHostgroup(path, name string, updated map[string]any) error {
+	return replaceTopLevelRosterEntry(path, "hostgroups", name, updated)
+}
+
+func SetRosterHBACRule(path, name string, updated map[string]any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+		return ErrRosterEncrypted
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return err
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("roster %s: expected a top-level YAML mapping", path)
+	}
+	top := root.Content[0]
+	hbac := findMappingChild(top, "hbac")
+	if hbac == nil {
+		return fmt.Errorf("roster %s: no hbac map", path)
+	}
+	rules := findMappingChild(hbac, "rules")
+	if rules == nil || rules.Kind != yaml.SequenceNode {
+		return fmt.Errorf("roster %s: no hbac.rules list", path)
+	}
+	idx := -1
+	for i, item := range rules.Content {
+		var m map[string]any
+		if err := item.Decode(&m); err != nil {
+			return err
+		}
+		if stringField(m, "name") == name {
+			if idx >= 0 {
+				return fmt.Errorf("roster %s: HBAC rule %q is ambiguous", path, name)
+			}
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("roster %s: no HBAC rule named %q", path, name)
+	}
+	var node yaml.Node
+	if err := node.Encode(updated); err != nil {
+		return err
+	}
+	rules.Content[idx] = &node
+	rendered, err := yaml.Marshal(&root)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, rendered, 0o600)
+}
+
+func simulateSetRosterNested(path, listKey, name string, updated map[string]any, kind string) ([]RosterViolation, bool, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	entries := listField(root, listKey)
+	idx, ambiguous := findNamedEntry(entries, name)
+	if ambiguous {
+		return nil, true, fmt.Errorf("roster %s: %s %q is ambiguous", path, kind, name)
+	}
+	if idx < 0 {
+		return nil, false, nil
+	}
+	entries[idx] = updated
+	root[listKey] = entries
+	return ValidateRoster(root), true, nil
+}
+
 // findNamedEntry returns the index of the entry named name within list (a
 // users[]/groups[]-shaped []any of map[string]any decodes), or -1 if none
 // match. ambiguous is true when more than one entry already shares the
