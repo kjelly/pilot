@@ -50,6 +50,8 @@
     alertmanager_config_dir: /etc/pilot/alertmanager
     docker_network_name: pilot-metrics
     alertmanager_config: |
+      global:
+        resolve_timeout: 5m
       route:
         receiver: 'null'
         group_by: ['alertname']

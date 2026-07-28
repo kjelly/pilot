@@ -23,6 +23,8 @@
 #         - api_url: 'https://hooks.slack.com/services/...'
 #           channel: '#alerts'
 alertmanager_config: |
+  global:
+    resolve_timeout: 5m
   route:
     receiver: 'null'
     group_by: ['alertname']

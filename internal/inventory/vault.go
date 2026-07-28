@@ -133,8 +133,11 @@ var vaultSections = map[string]vaultSection{
 			{
 				Name:      "alertmanager_config",
 				Comment:   "完整 alertmanager.yml 內容；先放一個可用的 null receiver stub",
+				Optional:  true,
 				Multiline: true,
 				Value: strings.Join([]string{
+					"global:",
+					"  resolve_timeout: 5m",
 					"route:",
 					"  receiver: \"null\"",
 					"receivers:",

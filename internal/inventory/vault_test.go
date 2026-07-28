@@ -120,3 +120,30 @@ func TestGenerateVaultSkeleton_ContainsExactlyExpectedKeysForRoles(t *testing.T)
 		}
 	}
 }
+
+func TestAlertmanagerDefaultConfigIsMinimalAndOperational(t *testing.T) {
+	section := vaultSections["alertmanager"]
+	if len(section.Keys) != 1 || section.Keys[0].Name != "alertmanager_config" {
+		t.Fatalf("alertmanager fields = %+v, want one alertmanager_config field", section.Keys)
+	}
+	if !section.Keys[0].Optional {
+		t.Fatal("alertmanager_config must be optional so the apply playbook default can be used")
+	}
+	for _, key := range ExpectedVaultKeysForRoles([]string{"alertmanager"}) {
+		if key == "alertmanager_config" {
+			t.Fatalf("alertmanager_config must not be a required vault key")
+		}
+	}
+	config := section.Keys[0].Value
+	for _, required := range []string{
+		"global:",
+		"route:",
+		"receiver: \"null\"",
+		"receivers:",
+		"- name: \"null\"",
+	} {
+		if !strings.Contains(config, required) {
+			t.Errorf("default alertmanager config missing %q:\n%s", required, config)
+		}
+	}
+}
