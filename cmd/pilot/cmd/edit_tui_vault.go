@@ -17,6 +17,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
@@ -115,6 +116,18 @@ func pushVaultEditorFromData(r *editRouterModel, dir, path string, data []byte, 
 	if !doc.Editable() {
 		return pushVaultFilePicker(r, dir, complexVaultFileBanner(path, doc))
 	}
+	dirty := false
+	if filepath.Base(path) == "main.yaml" {
+		added := backfillVaultSkeletonKeys(dir, doc)
+		if len(added) > 0 {
+			dirty = true
+			message := fmt.Sprintf("✅ 已補齊缺少的 vault skeleton key：%s", strings.Join(added, ", "))
+			if banner != "" {
+				banner += "\n"
+			}
+			banner += message + "\n請填入真實值後存檔。"
+		}
+	}
 	if len(doc.Entries()) == 0 {
 		empty := "目前是空的 vault 檔。先新增一個 key。"
 		if banner == "" {
@@ -123,7 +136,48 @@ func pushVaultEditorFromData(r *editRouterModel, dir, path string, data []byte, 
 			banner += "\n" + empty
 		}
 	}
-	return pushVaultEditorScreen(r, dir, path, doc, false, banner)
+	cmd := pushVaultEditorScreen(r, dir, path, doc, dirty, banner)
+	if dirty {
+		// The list can grow when a stale main.yaml is backfilled. Ask the
+		// renderer to clear the old frame so rows from the previous, shorter
+		// list cannot remain visible on terminals without alt-screen mode.
+		return tea.Batch(cmd, func() tea.Msg { return tea.ClearScreen() })
+	}
+	return cmd
+}
+
+// backfillVaultSkeletonKeys adds the required vault keys implied by the
+// workspace's current roles. It is deliberately best-effort: opening the
+// editor must remain possible while hosts.yml is absent or temporarily
+// invalid. Existing values are never changed, and only main.yaml uses this
+// path because it is the workspace-wide generated vault convention.
+func backfillVaultSkeletonKeys(dir string, doc *vaultfile.Doc) []string {
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		return nil
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		return nil
+	}
+	skeleton := inventory.GenerateVaultSkeleton(hf)
+	if skeleton == "" {
+		return nil
+	}
+	skeletonDoc, err := vaultfile.Parse([]byte(skeleton))
+	if err != nil || !skeletonDoc.Editable() {
+		return nil
+	}
+
+	var added []string
+	for _, entry := range skeletonDoc.Entries() {
+		if doc.HasKey(entry.Key) {
+			continue
+		}
+		doc.Add(entry.Key, entry.DisplayValue())
+		added = append(added, entry.Key)
+	}
+	return added
 }
 
 // rosterShapedKeys are top-level keys unique to the canonical FreeIPA
@@ -194,7 +248,7 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 	entries := doc.Entries()
 	items := make([]string, 0, len(entries)+3)
 	for _, e := range entries {
-		items = append(items, fmt.Sprintf("%s = %s", e.Key, truncateForErr(e.DisplayValue(), 80)))
+		items = append(items, fmt.Sprintf("%s = %s", e.Key, displayVaultValue(e.DisplayValue(), 80)))
 	}
 	items = append(items, "➕ 新增 key", "💾 存檔並離開", "🚪 不存檔離開")
 
@@ -231,6 +285,19 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 			return pushVaultEntryMenu(r, dir, path, doc, entries[idx], dirty)
 		}
 	})
+}
+
+// displayVaultValue keeps plaintext vault secrets out of the interactive
+// menu and screen recordings. CHANGE-ME placeholders remain visible because
+// they are explicitly non-secret and tell the user what still needs filling.
+func displayVaultValue(value string, limit int) string {
+	if strings.HasPrefix(strings.TrimSpace(value), "CHANGE-ME") {
+		return truncateForErr(value, limit)
+	}
+	if strings.TrimSpace(value) == "" {
+		return "<未設定>"
+	}
+	return "<已設定>"
 }
 
 func pushConfirmDiscardVault(r *editRouterModel, dir, path string, doc *vaultfile.Doc) tea.Cmd {
@@ -276,7 +343,7 @@ func pushVaultAddKeyValue(r *editRouterModel, dir, path string, doc *vaultfile.D
 }
 
 func pushVaultEntryMenu(r *editRouterModel, dir, path string, doc *vaultfile.Doc, entry vaultfile.Entry, dirty bool) tea.Cmd {
-	title := fmt.Sprintf("%s 目前值：%s", entry.Key, truncateForErr(entry.DisplayValue(), 120))
+	title := fmt.Sprintf("%s 目前值：%s", entry.Key, displayVaultValue(entry.DisplayValue(), 120))
 	items := []string{"修改值", "刪除", "返回"}
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
