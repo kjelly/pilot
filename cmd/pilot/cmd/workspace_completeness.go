@@ -141,16 +141,11 @@ func checkInventoryYmlFresh(dir string, hf *inventory.HostsFile) completenessChe
 //
 // AutoDetectRole, when non-empty, names a role/group whose mere presence
 // in the inventory means the apply playbook auto-derives TargetHostKey at
-// runtime regardless of group_vars content — restic-backup-apply.yml's own
-// "Auto-detect backup destination host from this inventory's seaweedfs-s3
-// group" set_fact task (gated only on `groups.get('seaweedfs-s3')`, not on
-// any pilot-side prompt being answered) is the only example of this today.
-// prometheus-apply.yml/thanos-query-apply.yml have NO such in-playbook
-// fallback — pilot deploy's own AutoHostVars prompt (deploy_catalog.go)
-// can offer the same auto-detected value there, but only if that
-// interactive flow actually runs and is accepted; a raw ansible-playbook
-// invocation, or a deploy where the prompt is declined, still hits the
-// assert. So only restic-backup gets an AutoDetectRole here.
+// runtime regardless of group_vars content. Restic has an in-playbook
+// fallback; prometheus/thanos-query receive the same inventory-derived
+// value from pilot deploy's AutoHostVars prompt before site.yml runs. A raw
+// ansible-playbook invocation still needs the explicit -e value for the
+// latter two roles.
 type groupVarsEitherOrRequirement struct {
 	Stem           string
 	TargetHostKey  string
@@ -160,8 +155,8 @@ type groupVarsEitherOrRequirement struct {
 }
 
 var groupVarsEitherOrRequirements = []groupVarsEitherOrRequirement{
-	{Stem: "prometheus", TargetHostKey: "thanos_s3_target_host", EndpointKey: "thanos_s3_endpoint", Alias: "thanos-s3-backend"},
-	{Stem: "thanos-query", TargetHostKey: "thanos_s3_target_host", EndpointKey: "thanos_s3_endpoint", Alias: "thanos-s3-backend"},
+	{Stem: "prometheus", TargetHostKey: "thanos_s3_target_host", EndpointKey: "thanos_s3_endpoint", Alias: "thanos-s3-backend", AutoDetectRole: "seaweedfs-s3"},
+	{Stem: "thanos-query", TargetHostKey: "thanos_s3_target_host", EndpointKey: "thanos_s3_endpoint", Alias: "thanos-s3-backend", AutoDetectRole: "seaweedfs-s3"},
 	{Stem: "restic-backup", TargetHostKey: "restic_s3_target_host", EndpointKey: "restic_repository", Alias: "s3-backup-server", AutoDetectRole: "seaweedfs-s3"},
 }
 

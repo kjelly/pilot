@@ -198,6 +198,36 @@ thanos_s3_endpoint: "s3.internal.example.com:443"
 	}
 }
 
+func TestCheckWorkspaceCompleteness_S3EitherOrAutoDetectsSeaweedfsForPrometheus(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
+  nexus:
+    ansible_host: 10.0.0.1
+    roles: [prometheus, seaweedfs-s3]
+`)
+	writeFile(t, filepath.Join(dir, "group_vars", "prometheus.yml"), "---\nthanos_s3_target_host: \"\"\n")
+
+	got := checkWorkspaceCompleteness(dir)
+	if c := findCheck(t, got, filepath.Join("group_vars", "prometheus.yml")); !c.OK {
+		t.Fatalf("group_vars/prometheus.yml = %+v, want OK (seaweedfs-s3 provides the auto-detected target)", c)
+	}
+}
+
+func TestCheckWorkspaceCompleteness_S3EitherOrAutoDetectsSeaweedfsForThanosQuery(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
+  nexus:
+    ansible_host: 10.0.0.1
+    roles: [thanos-query, seaweedfs-s3]
+`)
+	writeFile(t, filepath.Join(dir, "group_vars", "thanos-query.yml"), "---\nthanos_s3_target_host: \"\"\n")
+
+	got := checkWorkspaceCompleteness(dir)
+	if c := findCheck(t, got, filepath.Join("group_vars", "thanos-query.yml")); !c.OK {
+		t.Fatalf("group_vars/thanos-query.yml = %+v, want OK (seaweedfs-s3 provides the auto-detected target)", c)
+	}
+}
+
 // TestCheckWorkspaceCompleteness_S3EitherOrAppliesToResticBackupToo proves
 // the catalog isn't hardcoded to prometheus's key names — restic-backup
 // uses a different alias/key pair for the same shape of gate.
@@ -280,11 +310,9 @@ func TestCheckWorkspaceCompleteness_ResticS3AutoDetectSkippedWhenRepositoryExpli
 	}
 }
 
-// TestCheckWorkspaceCompleteness_ThanosS3NotAutoDetectedEvenWithSeaweedfsS3
-// proves the AutoDetectRole carve-out doesn't leak to prometheus/thanos-query:
-// unlike restic-backup-apply.yml, those playbooks have no in-playbook
-// seaweedfs-s3 fallback — only pilot deploy's own interactive prompt does.
-func TestCheckWorkspaceCompleteness_ThanosS3NotAutoDetectedEvenWithSeaweedfsS3(t *testing.T) {
+// TestCheckWorkspaceCompleteness_PrometheusS3AutoDetectedWithSeaweedfsS3 verifies
+// the completeness report matches pilot deploy's inventory-derived prompt.
+func TestCheckWorkspaceCompleteness_PrometheusS3AutoDetectedWithSeaweedfsS3(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
   nexus:
@@ -299,8 +327,8 @@ func TestCheckWorkspaceCompleteness_ThanosS3NotAutoDetectedEvenWithSeaweedfsS3(t
 	got := checkWorkspaceCompleteness(dir)
 
 	c := findCheck(t, got, filepath.Join("group_vars", "prometheus.yml"))
-	if c.OK {
-		t.Fatalf("group_vars/prometheus.yml = %+v, want not-OK — prometheus-apply.yml has no in-playbook seaweedfs-s3 fallback", c)
+	if !c.OK {
+		t.Fatalf("group_vars/prometheus.yml = %+v, want OK — pilot deploy auto-detects seaweedfs-s3", c)
 	}
 }
 
