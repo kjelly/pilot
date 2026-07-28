@@ -14,8 +14,8 @@
 //
 // Deliberately still out of scope: delete (state: absent for either
 // entity — a declarative removal request out of this wizard's reach on
-// purpose), and hosts/hostgroups/hbac/sudo/nfs_clients/migration (no
-// editor at all). A user/group's name and a group's category are shown
+// purpose), and sudo/nfs_clients/migration. Host access (hostgroups and
+// HBAC) is edited by the separate relationship editor. A user/group's name and a group's category are shown
 // read-only in the detail screen — both are referenced by name elsewhere
 // (hbac/sudo/membership), so renaming here would silently orphan those
 // references.
@@ -60,7 +60,7 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		return nil
 	}
 
-	items := []string{"👤 Users", "👥 Groups", "↩  返回"}
+	items := []string{"👤 Users", "👥 Groups", "🔐 Host access", "↩  返回"}
 	title := fmt.Sprintf("管理 %s", path)
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
@@ -74,6 +74,8 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		case 1:
 			return pushRosterGroupsMenu(r, dir, path, "")
 		case 2:
+			return pushRosterHostAccessMenu(r, dir, path, "")
+		case 3:
 			return pushTopMenu(r, dir, "")
 		}
 		return nil
