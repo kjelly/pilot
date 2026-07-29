@@ -239,6 +239,37 @@ hbac:
 	}
 }
 
+func TestValidateRoster_HBACDisableAllowAllRequiresAdminBreakGlass(t *testing.T) {
+	withoutBreakGlass := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+hbac:
+  disable_allow_all: true
+  rules:
+    - name: user-access
+      subjects: {users: [alice]}
+      targets: {hostcat: all}
+      services: [sshd]
+`))
+	if !contains(ruleNames(withoutBreakGlass), "hbac break-glass") {
+		t.Fatalf("expected break-glass violation, got: %v", withoutBreakGlass)
+	}
+
+	withBreakGlass := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+hbac:
+  disable_allow_all: true
+  rules:
+    - name: admin-breakglass
+      enabled: true
+      subjects: {users: [admin]}
+      targets: {hostcat: all}
+      services: [sshd]
+`))
+	if contains(ruleNames(withBreakGlass), "hbac break-glass") {
+		t.Fatalf("did not expect break-glass violation, got: %v", withBreakGlass)
+	}
+}
+
 func TestValidateRoster_SudoSubjectGroupWrongCategory(t *testing.T) {
 	v := ValidateRoster(mustParseRoster(t, `
 schema_version: 1
@@ -253,6 +284,25 @@ sudo:
 `))
 	if !contains(ruleNames(v), "sudo subject group category") {
 		t.Fatalf("expected a sudo subject group category violation, got: %v", v)
+	}
+}
+
+func TestValidateRoster_SudoCommandGroupReferenceMustResolve(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+groups:
+  - name: role-ops
+    category: role
+sudo:
+  command_groups: []
+  rules:
+    - name: ops-sudo
+      subjects: {groups: [role-ops]}
+      targets: {hostcat: all}
+      allow: {command_groups: [missing-group], commands: []}
+`))
+	if !contains(ruleNames(v), "sudo command group reference") {
+		t.Fatalf("expected unresolved sudo command group violation, got: %v", v)
 	}
 }
 

@@ -287,6 +287,13 @@ func checkHBAC(root map[string]any, groups, hostgroups []any) []RosterViolation 
 	hostgroupNames := namesOf(hostgroups)
 	allowedUsers := append(namesOf(listField(root, "users")), "admin")
 
+	if boolFieldDefault(hbac, "disable_allow_all", false) && !hasEnabledAdminBreakGlassRule(rules) {
+		out = append(out, RosterViolation{
+			Rule:   "hbac break-glass",
+			Detail: "hbac.disable_allow_all requires an enabled admin rule targeting hostcat: all",
+		})
+	}
+
 	for _, raw := range rules {
 		item := asMap(raw)
 		label := labelOf(item)
@@ -336,6 +343,21 @@ func checkHBAC(root map[string]any, groups, hostgroups []any) []RosterViolation 
 	return out
 }
 
+func hasEnabledAdminBreakGlassRule(rules []any) bool {
+	for _, raw := range rules {
+		item := asMap(raw)
+		if stateOrDefault(item, "present") != "present" || !boolFieldDefault(item, "enabled", true) {
+			continue
+		}
+		subjects := mapField(item, "subjects")
+		targets := mapField(item, "targets")
+		if contains(stringListField(subjects, "users"), "admin") && stringField(targets, "hostcat") == "all" {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- Gate: canonical sudo rules/commands are safe ------------------------
 
 var (
@@ -348,6 +370,14 @@ func checkSudo(root map[string]any, groups []any) []RosterViolation {
 	sudo := mapField(root, "sudo")
 	roleGroupNames := namesWithCategory(groups, "role")
 	rules := listField(sudo, "rules")
+	commandGroups := listField(sudo, "command_groups")
+	commandGroupNames := namesOf(commandGroups)
+	if dupes := findDuplicates(commandGroupNames); len(dupes) > 0 {
+		out = append(out, RosterViolation{Rule: "unique sudo command group names", Detail: fmt.Sprintf("duplicate sudo command group name(s): %s", strings.Join(dupes, ", "))})
+	}
+	if dupes := findDuplicates(namesOf(rules)); len(dupes) > 0 {
+		out = append(out, RosterViolation{Rule: "unique sudo rule names", Detail: fmt.Sprintf("duplicate sudo rule name(s): %s", strings.Join(dupes, ", "))})
+	}
 
 	for _, raw := range rules {
 		item := asMap(raw)
@@ -379,10 +409,16 @@ func checkSudo(root map[string]any, groups []any) []RosterViolation {
 		if hostcat == "all" && hasHostTargets {
 			out = append(out, RosterViolation{Rule: "sudo targets", Detail: fmt.Sprintf("sudo rule %q: targets can't combine hostcat: all with hosts/hostgroups", label)})
 		}
+
+		for _, group := range append(stringListField(mapField(item, "allow"), "command_groups"), stringListField(mapField(item, "deny"), "command_groups")...) {
+			if !contains(commandGroupNames, group) {
+				out = append(out, RosterViolation{Rule: "sudo command group reference", Detail: fmt.Sprintf("sudo rule %q references unknown command group %q", label, group)})
+			}
+		}
 	}
 
 	var allCommands []string
-	for _, raw := range listField(sudo, "command_groups") {
+	for _, raw := range commandGroups {
 		allCommands = append(allCommands, stringListField(asMap(raw), "commands")...)
 	}
 	for _, raw := range rules {

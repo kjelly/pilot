@@ -133,12 +133,30 @@ func Lint(hf *HostsFile) []Issue {
 			}
 			roleSeen[r] = true
 		}
+		if hostNeedsFreeIPARoster(h.Roles) {
+			rosterPath := strings.TrimSpace(h.Extra["freeipa_roster_file"])
+			if rosterPath == "" {
+				issues = append(issues, Issue{h.Name, "error", "roles " + strings.Join(h.Roles, ", ") + " require freeipa_roster_file pointing to the canonical FreeIPA roster"})
+			} else if strings.Contains(rosterPath, "<FILL-ME>") {
+				issues = append(issues, Issue{h.Name, "error", "freeipa_roster_file still has a <FILL-ME> placeholder"})
+			}
+		}
 
 		if h.Env != "" && !validEnvs[h.Env] {
 			issues = append(issues, Issue{h.Name, "error", fmt.Sprintf("unknown env %q (must be one of prod|staging|sandbox, or omitted)", h.Env)})
 		}
 	}
 	return issues
+}
+
+func hostNeedsFreeIPARoster(roles []string) bool {
+	for _, role := range roles {
+		switch role {
+		case "freeipa-server", "freeipa-server-replica", "freeipa-nfs-server":
+			return true
+		}
+	}
+	return false
 }
 
 // HasErrors reports whether any issue is severity "error".

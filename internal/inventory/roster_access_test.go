@@ -53,6 +53,15 @@ hbac:
 	if err := AppendRosterHBACRule(path, rule); err != nil {
 		t.Fatal(err)
 	}
+	breakGlass := map[string]any{
+		"name": "admin-breakglass", "state": "present", "enabled": true,
+		"subjects": map[string]any{"users": []string{"admin"}, "groups": []string{}},
+		"targets":  map[string]any{"hostcat": "all"},
+		"services": []string{"sshd"},
+	}
+	if err := AppendRosterHBACRule(path, breakGlass); err != nil {
+		t.Fatal(err)
+	}
 	if err := SetRosterHBACDisableAllowAll(path, true); err != nil {
 		t.Fatal(err)
 	}
@@ -64,8 +73,77 @@ hbac:
 		t.Fatalf("final roster violations: %v", violations)
 	}
 	names, err := RosterHBACRuleNames(path)
-	if err != nil || len(names) != 1 || names[0] != "webhosts-ssh-access" {
+	if err != nil || len(names) != 2 || names[0] != "webhosts-ssh-access" || names[1] != "admin-breakglass" {
 		t.Fatalf("HBAC names=%v err=%v", names, err)
+	}
+}
+
+func TestRosterSudoRelationshipRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "roster.yaml")
+	fixture := `schema_version: 1
+groups:
+  - name: role-ops
+    state: present
+    category: role
+sudo:
+  command_groups: []
+  rules: []
+`
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	commandGroup := map[string]any{
+		"name": "ops-read", "state": "present",
+		"commands": []string{"/usr/bin/journalctl -u nginx", "/usr/bin/systemctl status nginx"},
+	}
+	if violations, err := SimulateAddRosterSudoCommandGroup(path, commandGroup); err != nil || len(violations) != 0 {
+		t.Fatalf("command group simulation: violations=%v err=%v", violations, err)
+	}
+	if err := AppendRosterSudoCommandGroup(path, commandGroup); err != nil {
+		t.Fatal(err)
+	}
+
+	rule := map[string]any{
+		"name": "ops-read-sudo", "state": "present", "enabled": true,
+		"subjects": map[string]any{"users": []string{}, "groups": []string{"role-ops"}},
+		"targets":  map[string]any{"hostcat": "all", "hosts": []string{}, "hostgroups": []string{}},
+		"allow":    map[string]any{"command_groups": []string{"ops-read"}, "commands": []string{}},
+		"deny":     map[string]any{"command_groups": []string{}, "commands": []string{}},
+		"run_as":   map[string]any{"users": []string{"root"}, "groups": []string{}},
+		"options":  []string{"!authenticate"},
+	}
+	if violations, err := SimulateAddRosterSudoRule(path, rule); err != nil || len(violations) != 0 {
+		t.Fatalf("sudo rule simulation: violations=%v err=%v", violations, err)
+	}
+	if err := AppendRosterSudoRule(path, rule); err != nil {
+		t.Fatal(err)
+	}
+
+	groupNames, err := RosterSudoCommandGroupNames(path)
+	if err != nil || len(groupNames) != 1 || groupNames[0] != "ops-read" {
+		t.Fatalf("RosterSudoCommandGroupNames() = %v, %v", groupNames, err)
+	}
+	ruleNames, err := RosterSudoRuleNames(path)
+	if err != nil || len(ruleNames) != 1 || ruleNames[0] != "ops-read-sudo" {
+		t.Fatalf("RosterSudoRuleNames() = %v, %v", ruleNames, err)
+	}
+
+	stored, found, err := RosterSudoRule(path, "ops-read-sudo")
+	if err != nil || !found {
+		t.Fatalf("RosterSudoRule() found=%v err=%v", found, err)
+	}
+	allow := mapField(stored, "allow")
+	allow["commands"] = []string{"/usr/bin/id"}
+	stored["allow"] = allow
+	if violations, found, err := SimulateSetRosterSudoRule(path, "ops-read-sudo", stored); err != nil || !found || len(violations) != 0 {
+		t.Fatalf("sudo rule set simulation: found=%v violations=%v err=%v", found, violations, err)
+	}
+	if err := SetRosterSudoRule(path, "ops-read-sudo", stored); err != nil {
+		t.Fatal(err)
+	}
+	if violations, err := ValidateRosterFile(path); err != nil || len(violations) != 0 {
+		t.Fatalf("final roster violations: %v err=%v", violations, err)
 	}
 }
 

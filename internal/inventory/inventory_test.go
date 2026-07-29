@@ -17,6 +17,7 @@ hosts:
   ipa-1:
     ansible_host: "10.0.0.10"
     ipa_server_ip: "10.0.0.10"
+    freeipa_roster_file: ".vault/ipa-identity.yaml"
     roles: [freeipa-server, dns, ntp]
     env: prod
   web-1:
@@ -90,6 +91,25 @@ hosts:
 	if !found {
 		t.Errorf("expected an issue mentioning the bad role name, got %v", issues)
 	}
+}
+
+func TestLint_FreeIPARosterRequiredForConsumerRoles(t *testing.T) {
+	hf, err := Parse([]byte(`
+hosts:
+  ipa-1:
+    ansible_host: "10.0.0.10"
+    roles: [freeipa-server]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issues := Lint(hf)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "require freeipa_roster_file") {
+			return
+		}
+	}
+	t.Fatalf("expected missing roster path error, got %v", issues)
 }
 
 func TestLint_EmptyAnsibleHost(t *testing.T) {
@@ -235,6 +255,7 @@ func TestGenerate_FreeIPANFSGroups(t *testing.T) {
 hosts:
   nfs-1:
     ansible_host: "10.0.0.30"
+    freeipa_roster_file: ".vault/ipa-identity.yaml"
     roles: [freeipa-nfs-server]
   client-1:
     ansible_host: "10.0.0.31"
