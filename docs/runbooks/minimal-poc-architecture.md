@@ -92,6 +92,9 @@ automatically renders `/etc/seaweedfs/s3.json` with mode `0600` and starts Seawe
 `-s3.config=/etc/seaweedfs/s3.json`. That is the supported signed S3 path; do not add a manual
 `seaweedfs_s3_config_path` override for this topology.
 
+The standalone [network firewall matrix](../network-firewall-matrix.md) defines the required
+inter-node and controlled outbound connections for this topology.
+
 ## 1. Aligned acceptance contracts
 
 The component checks live in these specs and are not duplicated here:
