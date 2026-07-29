@@ -1,6 +1,7 @@
 package ansible
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -88,6 +89,26 @@ func TestRunnerAppliesEnvironmentOverrides(t *testing.T) {
 	}
 	if got := res.Stdout; got != "isolated" {
 		t.Fatalf("stdout = %q, want environment override", got)
+	}
+}
+
+func TestRunnerPrintsFailureSummaryAfterNonZeroExit(t *testing.T) {
+	r := NewRunner()
+	r.Binary = "sh"
+	r.StdoutWriter = &bytes.Buffer{}
+	var errOut bytes.Buffer
+	r.StderrWriter = &errOut
+	res, err := r.Run(context.Background(), "-c", "printf '%s\\n' 'TASK [Install package] ********' 'fatal: [web-1]: FAILED! => {\"msg\": \"package missing\"}'; exit 2")
+	if err != nil {
+		t.Fatalf("Run() error = %v, want result with non-zero exit", err)
+	}
+	if res.ExitCode != 2 {
+		t.Fatalf("Run() exit code = %d, want 2", res.ExitCode)
+	}
+	for _, want := range []string{"Ansible 失敗摘要", "host=web-1", "task=Install package", "msg=package missing"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("failure output = %q, missing %q", errOut.String(), want)
+		}
 	}
 }
 

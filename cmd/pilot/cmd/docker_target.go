@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kjelly/pilot/images"
+	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/dockertarget"
 )
 
@@ -600,9 +602,14 @@ func execExternal(stdout io.Writer, bin string, args ...string) error {
 	}
 	ctx := context.Background()
 	c := newCmd(ctx, bin, args...)
-	c.Stdout = stdout
-	c.Stderr = os.Stderr
-	return c.Run()
+	var capturedOut, capturedErr bytes.Buffer
+	c.Stdout = io.MultiWriter(stdout, &capturedOut)
+	c.Stderr = io.MultiWriter(os.Stderr, &capturedErr)
+	err := c.Run()
+	if err != nil && filepath.Base(bin) == "ansible-playbook" {
+		fmt.Fprint(os.Stderr, ansible.FailureSummary(capturedOut.String()+"\n"+capturedErr.String()))
+	}
+	return err
 }
 
 // newCmd is package-local so tests can swap it for a fake. Default

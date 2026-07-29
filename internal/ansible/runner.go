@@ -81,6 +81,9 @@ func (r *Runner) Run(ctx context.Context, args ...string) (*Result, error) {
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		res.ExitCode = exitErr.ExitCode()
+		if r.StderrWriter != nil {
+			fmt.Fprint(r.StderrWriter, FailureSummary(res.Stdout+"\n"+res.Stderr))
+		}
 	} else if err != nil {
 		return res, fmt.Errorf("ansible run failed: %w", err)
 	} else {
