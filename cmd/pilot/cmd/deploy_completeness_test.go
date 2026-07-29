@@ -103,6 +103,41 @@ func TestValidateDeploymentCompleteness_NoViolationsWhenEverythingPresent(t *tes
 	}
 }
 
+func TestValidateDeploymentCompleteness_ReportsMissingRosterOnFreeIPAServerTarget(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(rosterPath, []byte(rosterWithDomainOnly), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inv := filepath.Join(dir, "inventory.yml")
+	if err := os.WriteFile(inv, []byte(`---
+all:
+  hosts:
+    freeipa:
+      ansible_host: 10.0.0.11
+  children:
+    freeipa-server:
+      hosts:
+        freeipa:
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".vault"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".vault", "main.yaml"), []byte("ipa_admin_password: real-password\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := validateDeploymentCompleteness(context.Background(), inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Host != "freeipa" || !strings.Contains(got[0].Detail, "freeipa_roster_file") {
+		t.Fatalf("violations = %v, want missing roster path on freeipa", got)
+	}
+}
+
 func TestValidateDeploymentCompleteness_ReportsMissingPrometheusSiteLabel(t *testing.T) {
 	_, inv := writeCompletenessFixture(t, "", rosterWithNFSEntry, completenessValidVault)
 

@@ -1,7 +1,8 @@
 // edit_tui_roster.go implements the roster screens of the `pilot edit`
 // router (edit_tui.go): a manager for the canonical FreeIPA-identity
-// roster file covering users and groups — add, full-detail preview, and
-// per-field edit (scalars, membership, password/SSH keys). Every write
+// roster file covering users, groups, and sudo policy — add, full-detail
+// preview, and per-field edit (scalars, membership, password/SSH keys,
+// command groups, and sudo allow-lists). Every write
 // goes through internal/inventory.Simulate{Add,Set}Roster{User,Group}
 // first (mirroring freeipa-identity-apply.yml's own "Gate: canonical ..."
 // assert chain) so a mistake is caught before it ever touches disk, then
@@ -14,8 +15,9 @@
 //
 // Deliberately still out of scope: delete (state: absent for either
 // entity — a declarative removal request out of this wizard's reach on
-// purpose), and sudo/nfs_clients/migration. Host access (hostgroups and
-// HBAC) is edited by the separate relationship editor. A user/group's name and a group's category are shown
+// purpose), and nfs_clients/migration. Host access (hostgroups and
+// HBAC) and sudo authorization are edited by separate relationship editors.
+// A user/group's name and a group's category are shown
 // read-only in the detail screen — both are referenced by name elsewhere
 // (hbac/sudo/membership), so renaming here would silently orphan those
 // references.
@@ -60,7 +62,7 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		return nil
 	}
 
-	items := []string{"👤 Users", "👥 Groups", "🔐 Host access", "↩  返回"}
+	items := []string{"👤 Users", "👥 Groups", "🔐 Host access", "🛡️  Sudo commands & rules", "↩  返回"}
 	title := fmt.Sprintf("管理 %s", path)
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
@@ -76,6 +78,8 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		case 2:
 			return pushRosterHostAccessMenu(r, dir, path, "")
 		case 3:
+			return pushRosterSudoMenu(r, dir, path, "")
+		case 4:
 			return pushTopMenu(r, dir, "")
 		}
 		return nil

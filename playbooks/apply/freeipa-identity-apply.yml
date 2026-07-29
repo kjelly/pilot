@@ -97,6 +97,28 @@
       no_log: true
       tags: [always]
 
+    - name: "Detect FreeIPA server FQDN when roster omits freeipa.server"
+      ansible.builtin.command: hostname -f
+      register: freeipa_detected_server_fqdn
+      changed_when: false
+      failed_when: freeipa_detected_server_fqdn.stdout | trim | length == 0
+      when:
+        - freeipa_roster.schema_version is defined
+        - (freeipa_roster.freeipa | default({})).server | default('') | string | trim | length == 0
+      tags: [always]
+
+    - name: "Fill canonical roster freeipa.server for this reconcile"
+      ansible.builtin.set_fact:
+        freeipa_roster: >-
+          {{ freeipa_roster | combine({
+               'freeipa': (freeipa_roster.freeipa | default({})) |
+                 combine({'server': freeipa_detected_server_fqdn.stdout | trim})
+             }, recursive=True) }}
+      when:
+        - freeipa_detected_server_fqdn is defined
+        - freeipa_detected_server_fqdn.stdout | default('') | trim | length > 0
+      tags: [always]
+
     - name: "Gate: canonical roster version and legacy fields are mutually exclusive"
       ansible.builtin.assert:
         that:
@@ -109,6 +131,16 @@
         fail_msg: >-
           Canonical rosters require schema_version: 1 and must not mix users/
           groups/hostgroups/hbac/sudo with legacy ipa_* lists.
+      when: freeipa_roster.schema_version is defined
+      tags: [always]
+
+    - name: "Gate: canonical roster declares the FreeIPA server"
+      ansible.builtin.assert:
+        that:
+          - (freeipa_roster.freeipa | default({})).server | default('') | string | length > 0
+        fail_msg: >-
+          Canonical roster must declare freeipa.server (the verified FreeIPA
+          server FQDN used for HBAC verification and Kerberos operations).
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
@@ -292,7 +324,7 @@
         ipa_realm: "{{ freeipa_roster.freeipa.realm | default(freeipa_roster.freeipa.domain | default('ipa.pilot.internal') | upper) }}"
         identity_admin_principal: "{{ freeipa_roster.freeipa.admin.principal | default('admin') }}"
         identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
-        identity_hbac_test_host: "{{ freeipa_roster.freeipa.server }}"
+        identity_hbac_test_host: "{{ freeipa_roster.freeipa.server | default(inventory_hostname) }}"
         ipa_users: []
         ipa_groups: []
         ipa_hostgroups: []

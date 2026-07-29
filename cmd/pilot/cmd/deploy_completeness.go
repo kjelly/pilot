@@ -12,14 +12,10 @@
 // restic_repository) — so the two never enforce different things; see
 // that file's rationale for why they can't share the same *data source*
 // (resolved inventory.yml here vs. raw source files there), only the same
-// catalogs/validators. One thing deliberately NOT shared: this gate's
-// roster check stays scoped to freeipa-nfs-server hosts specifically
-// (that role's apply playbook genuinely depends on the roster's
-// nfs.servers section) — workspace_completeness.go's advisory report also
-// flags a roster for freeipa-server-only workspaces (freeipa-identity
-// reconcile's actual target), but a hard deploy gate has no business
-// blocking a freeipa-server-only deploy over a file that playbook never
-// even reads.
+// catalogs/validators. The resolved-inventory gate checks the roster path on
+// every effective FreeIPA server target, including the day-2 reconcile target;
+// the NFS-specific section below additionally validates each host's
+// nfs.servers entry.
 //
 // `pilot inventory generate` (inventory.go's writeMissingHostVarsSkeleton /
 // writeMissingNFSRosterEntries) is the mechanism that prevents these gaps
@@ -121,6 +117,22 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 					"has role %s but neither %s nor an overridden %s (still defaults to the shared %q alias) is set",
 					req.Stem, req.TargetHostKey, req.EndpointKey, req.Alias),
 			})
+		}
+	}
+
+	// freeipa-identity-apply.yml targets the freeipa-server group, so the
+	// roster path must be present on that effective target host. Checking only
+	// freeipa-nfs-server here misses the day-2 reconcile path and lets Ansible
+	// fall back to an empty legacy data model until its late roster gate.
+	for _, role := range []string{"freeipa-server", "freeipa-server-replica"} {
+		for _, host := range groups[role] {
+			rosterPath, _ := hostVars[host]["freeipa_roster_file"].(string)
+			if strings.TrimSpace(rosterPath) == "" {
+				violations = append(violations, completenessViolation{
+					Host:   host,
+					Detail: fmt.Sprintf("has role %s but no freeipa_roster_file is set on the effective target host", role),
+				})
+			}
 		}
 	}
 

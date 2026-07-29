@@ -1395,6 +1395,83 @@ func TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate(t *test
 	}
 }
 
+// TestEditRouter_Teatest_RosterSudoFlow creates a command group and then edits
+// a rule's direct allow-list through the roster UI. It proves sudo commands
+// use the same simulated-validation-before-write path as users and groups.
+func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	fixture := "schema_version: 1\ngroups:\n  - name: role-ops\n    state: present\n    category: role\nsudo:\n  command_groups: []\n  rules: []\n"
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var router editRouterModel
+	pushRosterSudoMenu(&router, dir, path, "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	waitFor("Command groups")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // command groups
+	waitFor("新增 command group")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("command group 名稱")
+	tm.Type("ops-status")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("完整 sudo 指令")
+	tm.Type("/usr/bin/systemctl status nginx")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("已新增 command group")
+
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	rule := newRosterSudoRule("ops-status-sudo", []string{"role-ops"}, []string{"ops-status"}, nil)
+	if err := inventory.AppendRosterSudoRule(path, rule); err != nil {
+		t.Fatal(err)
+	}
+
+	var ruleRouter editRouterModel
+	pushRosterSudoRuleDetail(&ruleRouter, dir, path, "ops-status-sudo", "")
+	ruleTM := teatest.NewTestModel(t, ruleRouter, teatest.WithInitialTermSize(100, 40))
+	ruleWaitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, ruleTM.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+	ruleWaitFor("allow.commands")
+	ruleTM.Send(tea.KeyMsg{Type: tea.KeyDown})
+	ruleTM.Send(tea.KeyMsg{Type: tea.KeyDown})
+	ruleTM.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	ruleWaitFor("額外允許")
+	ruleTM.Type("/usr/bin/id")
+	ruleTM.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	ruleWaitFor("已更新")
+	if err := ruleTM.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	ruleTM.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	stored, found, err := inventory.RosterSudoRule(path, "ops-status-sudo")
+	if err != nil || !found {
+		t.Fatalf("RosterSudoRule() found=%v err=%v", found, err)
+	}
+	if got := rosterStringSlice(rosterSubmap(stored, "allow"), "commands"); len(got) != 1 || got[0] != "/usr/bin/id" {
+		t.Fatalf("allow.commands = %v, want [/usr/bin/id]", got)
+	}
+	if violations, err := inventory.ValidateRosterFile(path); err != nil || len(violations) != 0 {
+		t.Fatalf("final roster violations: %v err=%v", violations, err)
+	}
+}
+
 // TestEditRouter_Teatest_RosterFlow_UserDetailPreviewAndScalarEditRoundTrips
 // proves the roster editor's new preview+edit capability (previously
 // add-only, see edit_tui_roster.go's package doc comment): opening an

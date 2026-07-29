@@ -75,6 +75,17 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	if err != nil {
 		return abortOrErr(err)
 	}
+	// Fail before preflight or any component selection when the effective
+	// FreeIPA target cannot load the canonical roster. Otherwise
+	// freeipa-identity-apply.yml reaches its late empty-data gate after all
+	// earlier checks have passed, which obscures the actual inventory defect.
+	violations, err := validateDeploymentCompleteness(ctx, inv)
+	if err != nil {
+		return err
+	}
+	if len(violations) > 0 {
+		return formatCompletenessViolations(violations)
+	}
 	if runConfirmProgram("要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
 		previewInventoryGraph(ctx, out, inv)
 		fmt.Fprintln(out)

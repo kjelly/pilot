@@ -45,6 +45,8 @@ all:
       # FreeIPA 專用:伺服器 FQDN 必須解析到「這個非 loopback IP」。
       # 沒有要裝 FreeIPA server 的話,這行刪掉。
       ipa_server_ip: "<FILL-ME>"       # 同上那個 IP,例 10.0.0.10
+      # freeipa-server / replica / NFS server 的 apply target 必須能載入 canonical roster。
+      freeipa_roster_file: ".vault/ipa-identity.yaml"
 
     # 範例:兩台一般 Linux server(FreeIPA client / 補丁 / 一般管理)。
     web-1:

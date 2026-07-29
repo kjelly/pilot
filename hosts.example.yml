@@ -39,6 +39,7 @@ hosts:
   ipa-1:
     ansible_host: "<FILL-ME>"        # 可路由 IP,例 10.0.0.10
     ipa_server_ip: "<FILL-ME>"       # FreeIPA 專用:同上那個 IP;沒裝 freeipa-server 就刪這行
+    freeipa_roster_file: ".vault/ipa-identity.yaml" # FreeIPA server/NFS roles 的 canonical roster
     roles: [freeipa-server, dns, ntp, audit-log-forwarding, wazuh-fim, restic-backup]
     env: prod
 

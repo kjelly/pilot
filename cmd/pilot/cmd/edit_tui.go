@@ -224,7 +224,7 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		"hosts.yml — 機器清單與角色",
 		"group_vars/ — 角色的設定值(FreeIPA realm、DNS 位址...)",
 		".vault/ — vault 變數檔(明文 skeleton 或 ansible-vault 加密檔)",
-		"roster — FreeIPA users/groups(canonical roster，可預覽/編輯/新增)",
+		"roster — FreeIPA users/groups/sudo(canonical roster，可預覽/編輯/新增)",
 		"🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則",
 		"離開",
 	}
