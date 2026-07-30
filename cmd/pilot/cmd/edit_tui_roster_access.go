@@ -234,7 +234,7 @@ func accessGroupChoices(path string) ([]string, error) {
 	return out, nil
 }
 
-func checklist(r *editRouterModel, title string, options, current []string, next func([]string) tea.Cmd, cancel tea.Cmd) tea.Cmd {
+func checklist(r *editRouterModel, title string, options, current []string, next func(*editRouterModel, []string) tea.Cmd, cancel func(*editRouterModel) tea.Cmd) tea.Cmd {
 	items := make([]multiSelectItem, len(options))
 	for i, o := range options {
 		items[i] = multiSelectItem{Label: o, Checked: hasRole(current, o)}
@@ -242,9 +242,9 @@ func checklist(r *editRouterModel, title string, options, current []string, next
 	return r.transitionTo(newMultiSelectModel(title+"（space 勾選、enter 完成）", items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(multiSelectModel)
 		if m.Canceled() {
-			return cancel
+			return cancel(r)
 		}
-		return next(m.CheckedLabels())
+		return next(r, m.CheckedLabels())
 	})
 }
 
@@ -254,7 +254,9 @@ func pushRosterAddHBACGroups(r *editRouterModel, dir, path, name string) tea.Cmd
 		r.err = err
 		return nil
 	}
-	return checklist(r, "允許登入的 access group", groups, nil, func(selected []string) tea.Cmd { return pushRosterAddHBACHostgroups(r, dir, path, name, selected) }, pushRosterHBACMenu(r, dir, path, ""))
+	return checklist(r, "允許登入的 access group", groups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
+		return pushRosterAddHBACHostgroups(r, dir, path, name, selected)
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACMenu(r, dir, path, "") })
 }
 
 func pushRosterAddHBACHostgroups(r *editRouterModel, dir, path, name string, groups []string) tea.Cmd {
@@ -263,13 +265,13 @@ func pushRosterAddHBACHostgroups(r *editRouterModel, dir, path, name string, gro
 		r.err = err
 		return nil
 	}
-	return checklist(r, "允許登入的 hostgroup", hostgroups, nil, func(selected []string) tea.Cmd {
+	return checklist(r, "允許登入的 hostgroup", hostgroups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterAddHBACServices(r, dir, path, name, groups, selected)
-	}, pushRosterHBACMenu(r, dir, path, ""))
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACMenu(r, dir, path, "") })
 }
 
 func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, groups, hostgroups []string) tea.Cmd {
-	return checklist(r, "允許的 PAM service", rosterHBACServices, []string{"sshd"}, func(services []string) tea.Cmd {
+	return checklist(r, "允許的 PAM service", rosterHBACServices, []string{"sshd"}, func(r *editRouterModel, services []string) tea.Cmd {
 		rule := map[string]any{"name": name, "state": "present", "enabled": true, "subjects": map[string]any{"users": []string{}, "groups": groups}, "targets": map[string]any{"hosts": []string{}, "hostgroups": hostgroups}, "services": services}
 		v, err := inventory.SimulateAddRosterHBACRule(path, rule)
 		if err != nil {
@@ -284,7 +286,7 @@ func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, group
 			return nil
 		}
 		return pushRosterHBACMenu(r, dir, path, "✅ 已新增登入規則")
-	}, pushRosterHBACMenu(r, dir, path, ""))
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACMenu(r, dir, path, "") })
 }
 
 func pushRosterHBACDetail(r *editRouterModel, dir, path, name, banner string) tea.Cmd {
@@ -323,9 +325,9 @@ func pushRosterHBACGroups(r *editRouterModel, dir, path, name string) tea.Cmd {
 		r.err = err
 		return nil
 	}
-	return checklist(r, "access groups", groups, rosterStringSlice(rosterSubmap(f, "subjects"), "groups"), func(v []string) tea.Cmd {
+	return checklist(r, "access groups", groups, rosterStringSlice(rosterSubmap(f, "subjects"), "groups"), func(r *editRouterModel, v []string) tea.Cmd {
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { s := rosterSubmapClone(x, "subjects"); s["groups"] = v; x["subjects"] = s })
-	}, pushRosterHBACDetail(r, dir, path, name, ""))
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
 func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
@@ -334,7 +336,7 @@ func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 		r.err = err
 		return nil
 	}
-	return checklist(r, "hostgroups", hgs, rosterStringSlice(rosterSubmap(f, "targets"), "hostgroups"), func(v []string) tea.Cmd {
+	return checklist(r, "hostgroups", hgs, rosterStringSlice(rosterSubmap(f, "targets"), "hostgroups"), func(r *editRouterModel, v []string) tea.Cmd {
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) {
 			t := rosterSubmapClone(x, "targets")
 			t["hostgroups"] = v
@@ -342,13 +344,13 @@ func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 			delete(t, "hostcat")
 			x["targets"] = t
 		})
-	}, pushRosterHBACDetail(r, dir, path, name, ""))
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
 func pushRosterHBACServices(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
-	return checklist(r, "services", rosterHBACServices, rosterStringSlice(f, "services"), func(v []string) tea.Cmd {
+	return checklist(r, "services", rosterHBACServices, rosterStringSlice(f, "services"), func(r *editRouterModel, v []string) tea.Cmd {
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { x["services"] = v })
-	}, pushRosterHBACDetail(r, dir, path, name, ""))
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
 func pushRosterHBACEdit(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
 	f, ok, err := inventory.RosterHBACRule(path, name)

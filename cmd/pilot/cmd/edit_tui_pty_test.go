@@ -254,7 +254,7 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 
 	waitForPTYOutput(t, proc.out, 5*time.Second, "✅ 已存檔")
 	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "離開"

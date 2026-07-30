@@ -200,9 +200,9 @@ func pushRosterAddSudoRuleGroups(r *editRouterModel, dir, path, name string) tea
 		r.err = err
 		return nil
 	}
-	return checklist(r, "可使用 sudo 的 role group", groups, nil, func(selected []string) tea.Cmd {
+	return checklist(r, "可使用 sudo 的 role group", groups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterAddSudoRuleCommandGroups(r, dir, path, name, selected)
-	}, pushRosterSudoRulesMenu(r, dir, path, ""))
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterSudoRulesMenu(r, dir, path, "") })
 }
 
 func pushRosterAddSudoRuleCommandGroups(r *editRouterModel, dir, path, name string, groups []string) tea.Cmd {
@@ -211,9 +211,9 @@ func pushRosterAddSudoRuleCommandGroups(r *editRouterModel, dir, path, name stri
 		r.err = err
 		return nil
 	}
-	return checklist(r, "允許的 command group", choices, nil, func(selected []string) tea.Cmd {
+	return checklist(r, "允許的 command group", choices, nil, func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterAddSudoRuleCommands(r, dir, path, name, groups, selected)
-	}, pushRosterSudoRulesMenu(r, dir, path, ""))
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterSudoRulesMenu(r, dir, path, "") })
 }
 
 func pushRosterAddSudoRuleCommands(r *editRouterModel, dir, path, name string, groups, commandGroups []string) tea.Cmd {
@@ -354,13 +354,13 @@ func pushRosterSudoRuleGroups(r *editRouterModel, dir, path, name string) tea.Cm
 		r.err = err
 		return nil
 	}
-	return checklist(r, "role groups", groups, rosterStringSlice(rosterSubmap(f, "subjects"), "groups"), func(selected []string) tea.Cmd {
+	return checklist(r, "role groups", groups, rosterStringSlice(rosterSubmap(f, "subjects"), "groups"), func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterSudoRuleEdit(r, dir, path, name, func(rule map[string]any) {
 			subjects := rosterSubmapClone(rule, "subjects")
 			subjects["groups"] = selected
 			rule["subjects"] = subjects
 		})
-	}, pushRosterSudoRuleDetail(r, dir, path, name, ""))
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterSudoRuleDetail(r, dir, path, name, "") })
 }
 
 func pushRosterSudoRuleCommandGroups(r *editRouterModel, dir, path, name string) tea.Cmd {
@@ -370,13 +370,13 @@ func pushRosterSudoRuleCommandGroups(r *editRouterModel, dir, path, name string)
 		r.err = err
 		return nil
 	}
-	return checklist(r, "allowed command groups", choices, rosterStringSlice(rosterSubmap(f, "allow"), "command_groups"), func(selected []string) tea.Cmd {
+	return checklist(r, "allowed command groups", choices, rosterStringSlice(rosterSubmap(f, "allow"), "command_groups"), func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterSudoRuleEdit(r, dir, path, name, func(rule map[string]any) {
 			allow := rosterSubmapClone(rule, "allow")
 			allow["command_groups"] = selected
 			rule["allow"] = allow
 		})
-	}, pushRosterSudoRuleDetail(r, dir, path, name, ""))
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterSudoRuleDetail(r, dir, path, name, "") })
 }
 
 func pushRosterSudoRuleCommands(r *editRouterModel, dir, path, name string) tea.Cmd {

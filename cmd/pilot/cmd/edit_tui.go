@@ -225,6 +225,7 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		"group_vars/ — 角色的設定值(FreeIPA realm、DNS 位址...)",
 		".vault/ — vault 變數檔(明文 skeleton 或 ansible-vault 加密檔)",
 		"roster — FreeIPA users/groups/sudo(canonical roster，可預覽/編輯/新增)",
+		"freeipa-dns manifest — DNS zones/records(day-2 reconciler，可預覽/編輯/新增)",
 		"🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則",
 		"離開",
 	}
@@ -243,8 +244,10 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		case 3:
 			return pushRosterPathPrompt(r, dir)
 		case 4:
-			return pushConfigCompletenessCheck(r, dir)
+			return pushDNSManifestPathPrompt(r, dir)
 		case 5:
+			return pushConfigCompletenessCheck(r, dir)
+		case 6:
 			r.quit = true
 			return nil
 		}

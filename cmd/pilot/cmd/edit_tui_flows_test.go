@@ -68,8 +68,8 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save and return to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 檢查設定完整性, 5 離開
-	for i := 0; i < 5; i++ {
+	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 離開
+	for i := 0; i < 6; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -928,8 +928,8 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 檢查設定完整性, 5 離開
-	for i := 0; i < 5; i++ {
+	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 離開
+	for i := 0; i < 6; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -1128,8 +1128,8 @@ func TestEditRouter_Teatest_VaultFlow_CreateAddKeyAndSave(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 檢查設定完整性, 5 離開
-	for i := 0; i < 5; i++ {
+	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 離開
+	for i := 0; i < 6; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
