@@ -158,7 +158,7 @@
             ])) | length == 0
           - >-
             ((freeipa_roster.freeipa | default({})).keys() | list |
-             difference(['server', 'admin', 'defaults', 'safety'])) | length == 0
+             difference(['domain', 'realm', 'server', 'admin', 'defaults', 'safety'])) | length == 0
           - >-
             (((freeipa_roster.freeipa | default({})).admin | default({})).keys() | list |
              difference(['principal', 'password'])) | length == 0

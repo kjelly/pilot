@@ -19,12 +19,15 @@
 #
 # Design decisions (locked in the spec, do not change without bumping it):
 #   * host-native: all of 389/636/88/464/80/443 bind on the host directly.
-#   * NO built-in DNS (no --setup-dns; --no-host-dns skips the DNS precheck
-#     since we resolve the FQDN via /etc/hosts): DNS is owned by the
-#     existing `dns`(unbound) role; FreeIPA's bind9 would fight over :53.
-#   * NO built-in NTP (--no-ntp): time sync is owned by the existing
-#     `ntp`(chrony) role. Kerberos needs clock skew < 5 min — a
-#     PRE-CONDITION the ntp role handles; asserted/ warned below.
+#   * Native FreeIPA DNS (--setup-dns) and NTP (chrony via FreeIPA) are the
+#     DEFAULT (ipa_setup_dns/ipa_setup_ntp default true — see the vars
+#     block below): this playbook only supports EL9 hosts, and the generic
+#     core-infra-provider dns(unbound)/ntp(chrony) roles are Debian/Ubuntu-
+#     only, so there is no working non-native path to fall back to. Set
+#     freeipa_setup_dns/ntp: false (group_vars or -e) to opt out on a host
+#     with externally-managed DNS/NTP already. `freeipa-dns` (this repo's
+#     day-2 DNS zone/record reconciler) requires native DNS to be enabled
+#     on this host.
 #   * realm IPA.PILOT.INTERNAL / domain ipa.pilot.internal (override with
 #     -e ipa_realm=... -e ipa_domain=...). Suffix DN dc=ipa,dc=pilot,dc=internal.
 #   * FreeIPA HARD-FORBIDS the server FQDN == domain name; the FQDN must be a
