@@ -282,6 +282,26 @@ CI=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   host_vars key, or a roster structural violation without waiting for a
   real preflight. It only warns (✅/❌ banner); it never blocks a save or
   an exit, unlike `pilot deploy`'s own gate.
+- **2026-07-30: a fifth top-menu item, `freeipa-dns manifest`, was
+  inserted between `roster` and `🔍 檢查設定完整性`** —
+  `cmd/pilot/cmd/edit_tui_dns.go`, append/edit CRUD for
+  `docs/specs/freeipa-dns.md`'s DNS zones/records manifest (zone
+  state/records_mode/split-horizon-ack, and A/AAAA/CNAME records
+  including a `target.inventory_host` picker sourced from `hosts.yml`).
+  Same Simulate-then-write gate as the roster screens
+  (`inventory.ValidateDNSManifest`), and `state: absent` on either a
+  zone or a record is offered directly (unlike roster users/groups) —
+  it's a declarative reconcile request, not an in-wizard delete; real
+  deletion happens later at apply time behind its own safety gates. If
+  you drive the top menu by **index** (`DOWN` N times) rather than by
+  `SELECT <label text>`, every item at or after this one shifted by
+  +1 — this exact class of bug broke four unrelated existing teatest/PTY
+  tests the same day this item was added (fixed-count `DOWN` loops
+  landing on the wrong item after the insertion). Prefer `SELECT <label
+  text>` for top-menu navigation in any new script for this reason; if
+  you must count, re-verify the count against the live item list
+  (`PILOT_DEBUG_MENU=1`, see above) rather than trusting an old
+  transcript.
 - **The FreeIPA identity roster is no longer 100% hand-authored** — two
   edit-menu features now cover part of it (confirmed live 2026-07-25,
   round 16), narrowing but not eliminating the roster's nested-YAML
