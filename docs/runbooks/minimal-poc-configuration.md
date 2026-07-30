@@ -236,6 +236,36 @@ absolute path；不可假設 `~/.vault/ipa-identity.yaml`、`./.vault/ipa-identi
 放進 canonical roster；credential 應在 roster 的 `freeipa.admin.password`，而
 contract-level 的 `ipa_admin_password` 由 `.vault/main.yaml` 提供。
 
+## 3.2 FreeIPA DNS manifest（`freeipa-dns`，day-2 reconciler）
+
+`freeipa-dns`（`docs/specs/freeipa-dns.md`）是另一個獨立的 day-2 reconciler，管理 FreeIPA
+原生 DNS 的 zones/records。與 roster 不同，manifest 本身**不是**秘密檔案（不含密碼），
+慣例放在 workspace 頂層，而非 `.vault/` 下：
+
+```text
+<workspace>/freeipa-dns.yaml
+```
+
+透過 `pilot edit`'s "freeipa-dns manifest" 頂層選單建立/編輯，涵蓋 zone（含
+`records_mode`/`acknowledge_split_horizon`）與 A/AAAA/CNAME record CRUD，record 可選擇
+`target.inventory_host`（從 `hosts.yml` 解析 `ansible_host`）或明確 `values:`。
+
+`freeipa_dns_manifest_file` 必須以 host extra var 設在 `freeipa-server`（**沒有 playbook
+內建 default**，未設定會在載入 manifest 階段失敗）：
+
+```text
+freeipa_dns_manifest_file=<workspace 的 absolute path>/freeipa-dns.yaml
+```
+
+同一台 `freeipa-server` host 通常也需要 `freeipa_roster_file`（見 §3.1）——兩個 extra var
+互不影響，都要設。manifest 內的 `freeipa.domain`/`freeipa.realm`/`freeipa.server` 必須與
+`group_vars/freeipa.yml` 的 `freeipa_domain`/`freeipa_realm`/`freeipa_server_fqdn`（或其
+內建預設 `ipa1.<domain>`）完全一致，否則在 kinit 前 fail closed——2026-07-30 round-18
+發現：若 workspace 依 §2 慣例把 `freeipa_server_fqdn` 留空（用內建預設），必須確認
+`playbooks/apply/freeipa-dns-apply.yml` 已修過 `ipa_server_fqdn_expected` 的預設值計算
+（舊版錯誤地退回 inventory 短別名而非真正的 FQDN，見該 playbook的行內註解與
+`docs/verification/freeipa-dns.md` v1.1 changelog）。
+
 ## 4. 使用 `pilot edit` 時的 action 對照
 
 Semantic scenario 的 action 應按照下表使用；scenario 只放非秘密值或 `value_env` 名稱。

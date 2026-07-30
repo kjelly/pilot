@@ -12,8 +12,12 @@ live, MCP-driven session (round 16, 2026-07-25); **as of round 17
 (2026-07-27), every script below has been run at least once fully
 unattended (`trec drive --script`, no live supervision) against a
 genuinely fresh VM rebuild** — the standing "not yet proven end-to-end
-unattended" caveat this file used to carry is resolved. Three real script
-bugs surfaced and were fixed doing so (see round-17 evidence). Still
+unattended" caveat this file used to carry is resolved. Round 18
+(2026-07-30) added `04b-reconcile-dns.drive` for the new `freeipa-dns`
+day-2 component, also confirmed unattended against a real rebuild. Three
+real script bugs surfaced round 17 and were fixed doing so (see round-17
+evidence); two more real (non-script) bugs surfaced round 18 — see below.
+Still
 diff the resulting files against this runbook's §0.5 role table / §2
 vault key list after any future rerun — a clean unattended exit proves
 the script ran to completion, not that every field landed where you
@@ -42,16 +46,20 @@ intended (inspect persisted files regardless, per the
    keys.
 6. **Hand-edit `.vault/ipa-identity.yaml`** for HBAC rules, sudo rules,
    group/user membership, NFS shares, and any other roster field beyond
-   bare `users`/`groups` entries — the roster manager only supports
-   append-only Users/Groups creation (no membership, no HBAC/sudo, no
-   NFS shares); this is the same tool-endorsed nested-YAML exception the
-   runbook already documents for the vault. `./pilot roster lint
-   <roster-file>` validates the result against the same rules
-   `freeipa-identity-apply.yml` enforces at real-apply time. As of round
-   17, also add `freeipa.server`/`freeipa.realm` explicitly (the
-   NFS-bootstrap-generated roster omits them, which crashes
-   `pilot reconcile` — see the runbook's §6 gotcha table) until that's
-   fixed upstream.
+   bare `users`/`groups` entries — the roster manager (as of round 18)
+   does cover per-group/per-user field editing and membership
+   checklists (see the runbook's own note), but HBAC/sudo rules and NFS
+   shares are still nested-YAML-only; this is the same tool-endorsed
+   nested-YAML exception the runbook already documents for the vault.
+   `./pilot roster lint <roster-file>` validates the result against the
+   same rules `freeipa-identity-apply.yml` enforces at real-apply time.
+   As of round 17, also add `freeipa.server`/`freeipa.realm` explicitly
+   (the NFS-bootstrap-generated roster omits them, which crashes
+   `pilot reconcile`'s `identity_hbac_test_host` Jinja evaluation — see
+   the runbook's §6 gotcha table) until that's fixed upstream. Round 18
+   found and fixed a second, independent bug in the same area: the
+   playbook's own top-level-key gate rejected `domain`/`realm` even
+   though they're legal per the Go-side schema — see §6.
 7. **`03-deploy-sitewide.drive`** — the site-wide `pilot deploy` wizard.
 8. **`04-reconcile-identity.drive`** — the `pilot reconcile` wizard for
    the `freeipa-identity` day-2 component.
@@ -60,6 +68,21 @@ intended (inspect persisted files regardless, per the
    3 lines). Run this before any §4.1 password-based SSH check — FreeIPA
    arms the forced-change flag on first-ever password assignment
    regardless of the roster's `force_change` value.
+10. **Author the freeipa-dns manifest** via `pilot edit`'s "freeipa-dns
+    manifest" top-menu item (zone + A/AAAA/CNAME records, a
+    `target.inventory_host` picker sourced from `hosts.yml`) — set
+    `freeipa_dns_manifest_file` as an extra host var on `freeipa-server`
+    first (same "其他變數" screen used for `freeipa_roster_file`). Not a
+    checked-in `.drive` script (round 18 authored it live via MCP, one
+    zone + 3 A records — grafana/wazuh/s3 resolved through nexus — takes
+    under two minutes interactively; script it yourself the same way if
+    you need it unattended).
+11. **`04b-reconcile-dns.drive`** — the `pilot reconcile` wizard for the
+    new `freeipa-dns` day-2 component (added round 18, 2026-07-30).
+    Confirmed unattended (`trec drive --script`, no live supervision)
+    against the real 3-VM rebuild: first apply `changed=2 failed=0`
+    (3 A records created), idempotent rerun `changed=0 failed=0`. Run
+    after step 10 has produced a manifest.
 
 ## Fixed implementation defects (see round-16 evidence)
 
@@ -111,8 +134,35 @@ Reported, not fixed — no Ansible/Go change was authorized this round:
   `freeipa.server`/`freeipa.realm` to the roster by hand (step 6 above) until this is fixed
   upstream.
 
+## Real bugs found and fixed this round (see round-18 evidence)
+
+Two, both found rebuilding the workspace live and fixed the same round:
+
+- **`freeipa-identity-apply.yml`'s top-level-key gate rejected `domain`/`realm`**: the
+  "Gate: canonical top-level and FreeIPA keys are known" assert's allowed `freeipa.*` key list was
+  hardcoded to `['server', 'admin', 'defaults', 'safety']`, omitting `domain`/`realm` even though
+  `internal/inventory/roster_validate.go`'s `knownFreeIPAKeys` explicitly allows both (its own
+  comment says the apply playbook is supposed to just ignore them, not reject them).
+  `WriteMinimalNFSServerRoster`'s bootstrap-generated roster always writes `freeipa.domain` — so
+  any workspace built via the sanctioned NFS-role-add path failed this gate on the very first
+  `freeipa-identity` reconcile, before ever reaching the round-17 `freeipa.server` defect above.
+  `pilot roster lint` never caught it (the Go validator already allowed the shape). Fixed by adding
+  `domain`/`realm` to the assert's allowed list.
+- **`freeipa-dns-apply.yml`'s `ipa_server_fqdn_expected` default didn't match
+  `freeipa-server-apply.yml`'s own default**: it fell back to a bare `inventory_hostname` (e.g.
+  `freeipa-server`, the inventory's short host alias) instead of `'ipa1.' ~ ipa_domain` (the FQDN
+  the server actually installed as) when `freeipa_server_fqdn` was left unset — exactly the
+  "usually don't need to fill this in" convention `group_vars/freeipa.example.yml` documents. Every
+  `freeipa-dns` reconcile against a workspace following that convention failed the
+  manifest-vs-inventory gate. Fixed to match `freeipa-server-apply.yml`'s default exactly.
+
+Both are one-line fixes; see `docs/verification/freeipa-identity.md` (v1.4) and
+`docs/verification/freeipa-dns.md` (v1.1) changelogs for the full write-up.
+
 ## Related evidence
 
+- `docs/evidence/minimal-poc-architecture/2026-07-30-round-18.md`
+- `docs/evidence/freeipa-dns/2026-07-30.md`
 - `docs/evidence/minimal-poc-architecture/2026-07-27-round-17.md`
 - `docs/evidence/minimal-poc-architecture/2026-07-25-round-16.md`
 - `docs/runbooks/minimal-poc-architecture.md`

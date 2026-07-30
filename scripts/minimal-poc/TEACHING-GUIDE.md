@@ -479,6 +479,39 @@ ssh -t -o StrictHostKeyChecking=accept-new \
 
 ---
 
+## 第 9.5 步:`pilot reconcile` 跑 `freeipa-dns`(對應 `04b-reconcile-dns.cast`，round 18 新增)
+
+`freeipa-dns` 是另一個獨立的 day-2 reconciler（`docs/specs/freeipa-dns.md`），管理 FreeIPA
+原生 DNS 的 zones/records，跟第 8 步的 `freeipa-identity` 是同一個「挑一個要調和的
+day-2 設定元件」選單裡的**第二個**選項（第一個永遠是 `freeipa-identity`）。
+
+先決條件（跑這一步之前）：
+
+1. `freeipa-server` 這台主機的「其他變數」要多設一個 `freeipa_dns_manifest_file`（跟
+   `freeipa_roster_file` 是兩個獨立的 extra var，都要設），指向 workspace 頂層的
+   `freeipa-dns.yaml`（**不是** `.vault/` 底下——manifest 本身不含密碼）。
+2. 用 `pilot edit` 的「freeipa-dns manifest」頂層選單建立至少一個 zone、加幾筆
+   A/AAAA/CNAME record（`target.inventory_host` 可以直接選 `nexus`，會自動解析成它的
+   `ansible_host`）。
+
+接著跟第 8 步幾乎一樣的流程：inventory 路徑 Enter、拓樸圖選 `n`、preflight 選預設、
+day-2 元件選單這次選**第二項**（`管理 FreeIPA DNS zones／records`）、target_group/
+stage/limit/tags 全部 Enter 採預設、密碼變數檔選 `y`（用 `.vault/main.yaml`）、預覽
+`y` → `y`、確認套用 `y` → `y`。
+
+| 畫面文字 | 要打什麼 |
+|---|---|
+| `挑一個要調和的 day-2 設定元件` | ↓ 一次，選到「管理 FreeIPA DNS zones／records」再 Enter |
+| 其餘每一句 | 跟第 8 步同一套 Enter/y 節奏 |
+
+過關的判斷跟第 8 步一樣看最後的 `PLAY RECAP`：第一次套用應該是
+`changed=2 failed=0`（3 筆 A record 只算 1 個 changed 任務，因為同一個 task 迴圈處理
+3 筆項目，recap 只算「這個 task 對這台主機有沒有回報 changed」，不是逐筆算）；`dig
++short <名稱>.<你的 zone> A @127.0.0.1` 應該回傳 `nexus` 的真實 IP；再跑一次同樣的
+reconcile,應該是`changed=0 failed=0`。
+
+---
+
 ## 第 10 步:§4 驗收(對應 `06`~`13` 錄影)
 
 這幾支都是**唯讀查核**,沒有互動選單,直接看終端機輸出結果就好:
@@ -510,6 +543,33 @@ Error while resolving value for 'identity_hbac_test_host': object of type 'dict'
 `docs/evidence/minimal-poc-architecture/2026-07-27-round-17.md`)。教學時的暫時解法就是
 第 6 步範例裡的做法:手動在 roster 補上 `freeipa.server`(用 `hostname -f` 到
 freeipa-server 上確認真實值,本例是 `ipa1.ipa.pilot.internal`)和 `freeipa.realm`。
+
+**round 18(2026-07-30)額外找到並修好了兩個獨立的真實 bug**(教學時可以對照著講「同一個
+`freeipa.server` gap 附近,還藏了另一個更早就會擋下來的 gate」):
+
+1. 就算照上面的方法補了 `freeipa.server`/`freeipa.realm`,第 8 步仍然可能在**更早**的
+   gate 失敗:
+
+   ```
+   Canonical roster contains an unknown freeipa/admin field.
+   ```
+
+   原因是 `freeipa-identity-apply.yml` 自己的允許清單漏寫了 `domain`/`realm`,即使
+   Go 那邊的 schema(`internal/inventory/roster_validate.go`)明明允許——而且
+   `pilot edit` 的 NFS bootstrap 本來就會自動寫 `freeipa.domain`,所以**任何**照著
+   官方精靈建出來的 roster,第一次跑 `freeipa-identity` reconcile 都會卡在這裡。
+   這個已經修好了,升級到新版 `pilot` 就不會再遇到。
+2. 第 9.5 步的 `freeipa-dns` 也有一個類似形狀的 bug:manifest 裡填的
+   `freeipa.server` 就算跟 group_vars 對得上,如果**沒有手動填**
+   `freeipa_server_fqdn`(教學上通常建議留空,用內建預設)、`pilot reconcile` 還是會
+   在下面這句失敗:
+
+   ```
+   manifest freeipa.domain/realm/server must equal this deployment's freeipa_domain/freeipa_realm/freeipa_server_fqdn (§5.2)
+   ```
+
+   原因是 `freeipa-dns-apply.yml` 自己算「預期的 FQDN」時退回成 inventory 裡的短
+   別名(例如 `freeipa-server`),而不是真正的 FQDN(`ipa1.<domain>`)。同樣已經修好。
 
 ## 附錄 B:操作上真的會踩到的坑
 
