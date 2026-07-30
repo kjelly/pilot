@@ -44,6 +44,7 @@ var deployPlanComponents []string
 var deployActionsPath string
 var deployPresentation bool
 var deployTracePath string
+var deployForceFlag bool
 
 type deployAnsibleRuntime struct {
 	Env     []string
@@ -127,6 +128,7 @@ func init() {
 	deployCmd.Flags().StringVar(&deployActionsPath, "actions", "", "以 JSON scenario 自動回答 deploy TUI prompts")
 	deployCmd.Flags().BoolVar(&deployPresentation, "presentation", false, "自動操作時顯示教學步驟與 prompt 畫面")
 	deployCmd.Flags().StringVar(&deployTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
+	deployCmd.Flags().BoolVar(&deployForceFlag, "force", false, "不顯示互動提示；所有欄位採用精靈顯示的預設值")
 	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
 	deployCmd.AddCommand(deployPlanCmd)
 	deployGraphCmd.Flags().StringVarP(&deployGraphInventoryFlag, "inventory", "i", "inventory.yml", "inventory 路徑，用來解析每個角色 group 有哪些主機")
@@ -245,6 +247,9 @@ var errPreflightRejected = errors.New("前置檢查失敗，已停止部署")
 
 func runDeploy(cmd *cobra.Command, args []string) error {
 	if deployActionsPath != "" {
+		if deployForceFlag {
+			return fmt.Errorf("--force 不能與 --actions 同時使用")
+		}
 		return runStandalonePromptWorkflow(cmd, "deploy", deployActionsPath, deployPresentation, deployTracePath)
 	}
 	return runDeployInteractive(cmd, args)
@@ -272,6 +277,13 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	runner.Env = runtime.Env
 	runner.StdoutWriter = out
 	runner.StderrWriter = cmd.ErrOrStderr()
+
+	if deployForceFlag {
+		defaults := &promptAutomation{useDefaults: true, forceApply: true}
+		oldPrompt := activePromptAutomation
+		activePromptAutomation = defaults
+		defer func() { activePromptAutomation = oldPrompt }()
+	}
 
 	fmt.Fprintln(out, "═══ pilot deploy — 互動式部署精靈 ═══")
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
@@ -855,7 +867,11 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 			args = append([]string{"--check", "--diff"}, baseArgs...)
 		}
 		fmt.Fprintf(out, "\n▶ %s：ansible-playbook %s\n\n", mode, strings.Join(args, " "))
-		if confirm && !confirmDeployment("確定要執行以上指令嗎？", true) {
+		question := "確定要執行正式套用指令嗎？"
+		if check {
+			question = "確定要執行預覽指令嗎？"
+		}
+		if confirm && !confirmDeployment(question, true) {
 			return nil, delivery.ErrCancelled
 		}
 		return runner.Run(ctx, args...)
@@ -882,7 +898,7 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 				fmt.Fprintln(out, "先在這裡停下來，沒有套用任何變更。")
 				return delivery.ErrCancelled
 			}
-		} else if !confirmDeployment("確定要執行以上指令嗎？", true) {
+		} else if !confirmDeployment("確定要執行正式套用指令嗎？", true) {
 			return delivery.ErrCancelled
 		}
 		if options.PrepareApply != nil {

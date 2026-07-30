@@ -150,7 +150,7 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 		// writeMissingNFSRosterEntries' convention (inventory.go).
 		rosterPath = resolveRosterPath(filepath.Dir(inv), rosterPath)
 
-		domain, err := inventory.RosterDomain(rosterPath)
+		domain, err := inventory.FreeIPADomain(filepath.Dir(inv))
 		if err != nil {
 			if errors.Is(err, inventory.ErrRosterEncrypted) {
 				continue // can't verify without a vault password — not our call to block on
@@ -165,8 +165,8 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 		// Full canonical-roster structural check — shares rules with `pilot
 		// edit`'s 檢查設定完整性 (workspace_completeness.go) so a roster that
 		// fails this also fails there, not just at real-apply time. Only
-		// reached once RosterDomain above proved the file readable/parseable
-		// plain YAML, so this can't itself fail with a redundant read error.
+		// reached once the inventory domain was resolved and the roster path
+		// was found, so this can't itself fail with a redundant domain read.
 		if structViolations, _ := inventory.ValidateRosterFile(rosterPath); len(structViolations) > 0 {
 			for _, v := range structViolations {
 				violations = append(violations, completenessViolation{

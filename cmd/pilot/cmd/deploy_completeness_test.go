@@ -52,6 +52,13 @@ func writeCompletenessFixture(t *testing.T, hostVarsContent, rosterContent, vaul
 	if err := os.WriteFile(inv, []byte(invContent), 0o644); err != nil {
 		t.Fatalf("write inventory: %v", err)
 	}
+	groupVarsDir := filepath.Join(dir, "group_vars")
+	if err := os.MkdirAll(groupVarsDir, 0o755); err != nil {
+		t.Fatalf("mkdir group_vars: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(groupVarsDir, "freeipa.yml"), []byte("freeipa_domain: ipa.pilot.internal\n"), 0o644); err != nil {
+		t.Fatalf("write group_vars/freeipa.yml: %v", err)
+	}
 
 	if hostVarsContent != "" {
 		hostVarsDir := filepath.Join(dir, "host_vars")
@@ -74,12 +81,11 @@ func writeCompletenessFixture(t *testing.T, hostVarsContent, rosterContent, vaul
 	return dir, inv
 }
 
-const rosterWithDomainOnly = "---\nschema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\n"
+const rosterWithDomainOnly = "---\nschema_version: 1\nfreeipa: {}\n"
 
 const rosterWithNFSEntry = `---
 schema_version: 1
 freeipa:
-  domain: ipa.pilot.internal
 nfs:
   servers:
     - host: nexus.ipa.pilot.internal

@@ -137,7 +137,7 @@ func TestPilotDeployPTY_DeclineAtFinalConfirmNeverRunsAnsible(t *testing.T) {
 	waitForNewDeployScreen(t, proc, "要先預覽")
 	proc.press(t, "n") // skip the --check --diff preview
 
-	waitForNewDeployScreen(t, proc, "確定要執行以上指令嗎")
+	waitForNewDeployScreen(t, proc, "確定要執行正式套用指令嗎")
 	proc.press(t, "n") // decline — must exit cleanly without ever running ansible-playbook
 
 	code := proc.waitExit(t, 10*time.Second)

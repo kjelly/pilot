@@ -63,6 +63,37 @@ func TestExecuteDeployment_NonZeroAnsibleExitIsError(t *testing.T) {
 	}
 }
 
+func TestExecuteDeployment_LabelsPreviewAndApplyConfirmations(t *testing.T) {
+	runner := ansible.NewRunner()
+	runner.Binary = writeExitFixture(t, 0)
+	runner.Timeout = 5 * time.Second
+
+	original := confirmDeployment
+	defer func() { confirmDeployment = original }()
+	var questions []string
+	confirmDeployment = func(question string, _ bool) bool {
+		questions = append(questions, question)
+		return true
+	}
+
+	if err := executeDeployment(
+		context.Background(), runner, &bytes.Buffer{},
+		"playbooks/apply/docker-apply.yml", "inventory.yml", "", "", nil, vaultInput{},
+	); err != nil {
+		t.Fatalf("executeDeployment() error = %v", err)
+	}
+
+	want := []string{
+		"要先預覽(--check --diff)再決定要不要真的套用嗎？",
+		"確定要執行預覽指令嗎？",
+		"預覽看起來沒問題，要接著套用真正的變更嗎？",
+		"確定要執行正式套用指令嗎？",
+	}
+	if strings.Join(questions, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("confirmation sequence = %#v, want %#v", questions, want)
+	}
+}
+
 func TestExecuteDeployment_MissingBinaryIsError(t *testing.T) {
 	runner := ansible.NewRunner()
 	runner.Binary = filepath.Join(t.TempDir(), "missing-ansible-playbook")
