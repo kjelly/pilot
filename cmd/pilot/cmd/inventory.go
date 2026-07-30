@@ -368,6 +368,7 @@ func resolveRosterPath(dir, rosterPath string) string {
 // encrypted) is reported and skipped, never treated as an error worth
 // failing generation over.
 func writeMissingNFSRosterEntries(w io.Writer, dir string, hf *inventory.HostsFile) {
+	domain := nfsBootstrapDomain(dir)
 	for _, h := range hf.Hosts {
 		if !hasRole(h.Roles, "freeipa-nfs-server") {
 			continue
@@ -377,7 +378,7 @@ func writeMissingNFSRosterEntries(w io.Writer, dir string, hf *inventory.HostsFi
 			continue
 		}
 
-		appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name)
+		appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain)
 		switch {
 		case err != nil:
 			fmt.Fprintf(w, "nfs roster: skip %s for %s (%v)\n", rosterPath, h.Name, err)

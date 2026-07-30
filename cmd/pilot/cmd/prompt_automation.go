@@ -23,6 +23,8 @@ type promptAutomation struct {
 	err          error
 	presentation bool
 	out          io.Writer
+	useDefaults  bool
+	forceApply   bool
 }
 
 func validatePromptAnswers(answers []promptAnswer) error {
@@ -55,6 +57,9 @@ func (p *promptAutomation) answer(kind, prompt string) (promptAnswer, bool) {
 }
 
 func (p *promptAutomation) selectPrompt(prompt string, items []string) (int, error) {
+	if p.useDefaults {
+		return 0, nil
+	}
 	answer, ok := p.answer("select", prompt)
 	if !ok {
 		return 0, fmt.Errorf("no automation answer for select prompt")
@@ -84,6 +89,9 @@ func (p *promptAutomation) selectPrompt(prompt string, items []string) (int, err
 }
 
 func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) error) (string, error) {
+	if p.useDefaults {
+		return def, nil
+	}
 	answer, ok := p.answer("text", prompt)
 	if !ok {
 		return "", fmt.Errorf("no automation answer for text prompt")
@@ -115,6 +123,12 @@ func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) 
 }
 
 func (p *promptAutomation) confirmPrompt(prompt string, defaultYes bool) bool {
+	if p.forceApply && strings.Contains(prompt, "預覽看起來沒問題，要接著套用真正的變更嗎？") {
+		return true
+	}
+	if p.useDefaults {
+		return defaultYes
+	}
 	answer, ok := p.answer("confirm", prompt)
 	if !ok || answer.Confirm == nil {
 		p.err = fmt.Errorf("no automation answer for confirm prompt")

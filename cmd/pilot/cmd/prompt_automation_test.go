@@ -41,3 +41,32 @@ func TestPromptAutomationRejectsUnknownPromptAndAmbiguousChoice(t *testing.T) {
 		t.Fatalf("ambiguous choice error = %v", err)
 	}
 }
+
+func TestPromptAutomationUsesPromptDefaults(t *testing.T) {
+	p := &promptAutomation{useDefaults: true}
+
+	idx, err := p.selectPrompt("choose", []string{"first", "second"})
+	if err != nil || idx != 0 {
+		t.Fatalf("selectPrompt() = %d, %v; want first option", idx, err)
+	}
+	value, err := p.textPrompt("name", "default-value", nil)
+	if err != nil || value != "default-value" {
+		t.Fatalf("textPrompt() = %q, %v; want default-value", value, err)
+	}
+	if !p.confirmPrompt("yes-by-default", true) {
+		t.Fatal("confirmPrompt(yes-by-default) = false")
+	}
+	if p.confirmPrompt("no-by-default", false) {
+		t.Fatal("confirmPrompt(no-by-default) = true")
+	}
+}
+
+func TestPromptAutomationForceApplyOverridesPostPreviewDefault(t *testing.T) {
+	p := &promptAutomation{useDefaults: true, forceApply: true}
+	if !p.confirmPrompt("預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
+		t.Fatal("force apply must continue after a successful preview")
+	}
+	if p.confirmPrompt("其他確認", false) {
+		t.Fatal("force apply must preserve unrelated false defaults")
+	}
+}

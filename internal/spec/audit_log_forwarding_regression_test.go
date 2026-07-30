@@ -184,6 +184,22 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 		t.Fatalf("read audit-log-forwarding-apply.yml: %v", err)
 	}
 	applyRaw := string(playbookRaw)
+	universeIndex := strings.Index(applyRaw, "Ensure Ubuntu universe repository is enabled")
+	installIndex := strings.Index(applyRaw, "Step 1: Install auditd + audispd-plugins")
+	if universeIndex < 0 || installIndex < 0 || universeIndex > installIndex {
+		t.Fatalf("audit-log-forwarding must enable Ubuntu universe before installing audispd-plugins")
+	}
+	if !strings.Contains(applyRaw, "ansible.builtin.apt_repository") ||
+		!strings.Contains(applyRaw, "{{ ansible_distribution_release }} universe") {
+		t.Fatalf("audit-log-forwarding must manage the Ubuntu universe repository explicitly")
+	}
+	if !strings.Contains(applyRaw, "check_mode: false") {
+		t.Fatalf("universe bootstrap must run during site --check preview so apt metadata is available to the install task")
+	}
+	refreshIndex := strings.Index(applyRaw, "Step 0b: Refresh Ubuntu APT metadata after enabling universe")
+	if refreshIndex < 0 || refreshIndex > installIndex || !strings.Contains(applyRaw[refreshIndex:installIndex], "ansible.builtin.apt:") {
+		t.Fatalf("universe bootstrap must explicitly refresh APT metadata before installing audispd-plugins")
+	}
 	for _, required := range []string{"audit_syslog_path", "/var/log/messages", "audit_syslog_group"} {
 		if !strings.Contains(applyRaw, required) {
 			t.Errorf("audit-log-forwarding apply must render a portable EL/Ubuntu syslog logrotate policy; missing %q", required)
@@ -197,6 +213,20 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	}
 	if !strings.Contains(applyRaw, "siem_forwarding_enabled") {
 		t.Errorf("audit-log-forwarding-apply.yml must derive a siem_forwarding_enabled gate from siem_forward_host")
+	}
+	// A SIEM receiver can be co-located with the forwarding host.  Its
+	// convenience alias must never become the first reverse name for the
+	// host IP, otherwise a later Ansible fact gather reports a short alias
+	// instead of the host FQDN (and breaks FreeIPA/NFS principal matching).
+	for _, required := range []string{
+		"hostname --fqdn",
+		"PILOT FQDN CANONICAL HOSTNAME",
+		"insertbefore: '^127\\.0\\.1\\.1\\s'",
+		"siem_forward_effective_host == ansible_default_ipv4.address",
+	} {
+		if !strings.Contains(applyRaw, required) {
+			t.Errorf("co-located SIEM alias must preserve canonical host FQDN; missing %q", required)
+		}
 	}
 
 	fs := Lint(s)

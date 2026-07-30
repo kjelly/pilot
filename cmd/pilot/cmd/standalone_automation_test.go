@@ -22,7 +22,10 @@ func TestStandalonePromptWorkflowRejectsWrongActionBeforeTTY(t *testing.T) {
 
 func TestDeployAndReconcileExposeAutomationFlags(t *testing.T) {
 	for _, command := range []*cobra.Command{deployCmd, reconcileCmd} {
-		for _, name := range []string{"actions", "presentation", "trace-out"} {
+		for _, name := range []string{"actions", "presentation", "trace-out", "force"} {
+			if name == "force" && command != deployCmd {
+				continue
+			}
 			if command.Flag(name) == nil {
 				t.Fatalf("%s missing --%s", command.Name(), name)
 			}

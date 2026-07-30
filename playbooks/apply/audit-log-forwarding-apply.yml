@@ -104,6 +104,30 @@
              if siem_forwarding_enabled
              else 'siem_forward_host not provided and no log-server/wazuh-manager host in inventory — skipping /etc/hosts pin and 99-siem-forward.conf; only local auditd monitoring (C1-C14, C18) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN>, or add a log-server/wazuh-manager host to inventory, once a SIEM receiver exists to add forwarding.' }}
 
+    - name: "Step 0a: Ensure Ubuntu universe repository is enabled"
+      tags: [C1, C2]
+      ansible.builtin.apt_repository:
+        repo: "deb https://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} universe"
+        filename: pilot-ubuntu-universe
+        state: present
+        update_cache: true
+      # The site deploy always runs a --check --diff preview first.  Repository
+      # metadata is a prerequisite for the following apt task, so this
+      # bootstrap must be real even during preview; it does not install or
+      # configure the service itself.
+      check_mode: false
+      when: ansible_distribution == "Ubuntu"
+
+    - name: "Step 0b: Refresh Ubuntu APT metadata after enabling universe"
+      tags: [C1, C2]
+      ansible.builtin.apt:
+        update_cache: true
+      # The following package task runs in the same --check preview.  Refresh
+      # the package index for real so a fresh target can resolve universe
+      # packages during that preview.
+      check_mode: false
+      when: ansible_distribution == "Ubuntu"
+
     - name: "Step 1: Install auditd + audispd-plugins (Debian family)"
       tags: [C1, C2]
       ansible.builtin.apt:
@@ -188,14 +212,47 @@
                   endscript
               }
 
-        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_effective_host }} in /etc/hosts (spec C15)"
+        - name: "Step 6a: Resolve this host's canonical FQDN before pinning SIEM aliases"
+          tags: [C15]
+          ansible.builtin.command: hostname --fqdn
+          check_mode: false
+          changed_when: false
+          register: siem_local_fqdn
+
+        - name: "Step 6b: Keep a local SIEM receiver's FQDN canonical in /etc/hosts"
+          tags: [C15]
+          ansible.builtin.blockinfile:
+            path: /etc/hosts
+            marker: "# {mark} PILOT FQDN CANONICAL HOSTNAME"
+            insertbefore: '^127\.0\.1\.1\s'
+            block: >-
+              {{ ansible_default_ipv4.address }} {{ siem_local_fqdn.stdout | trim }}
+              {{ (siem_local_fqdn.stdout | trim).split('.')[0] }}
+          when:
+            - siem_forwarding_enabled | bool
+            - siem_forward_effective_host == ansible_default_ipv4.address
+
+        - name: "Step 6c: Pin a remote {{ siem_forward_alias }} receiver in /etc/hosts (spec C15)"
           tags: [C15]
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '\s{{ siem_forward_alias }}$'
             line: "{{ siem_forward_effective_host }}\t{{ siem_forward_alias }}"
             state: present
-          when: siem_forwarding_enabled | bool
+          when:
+            - siem_forwarding_enabled | bool
+            - siem_forward_effective_host != ansible_default_ipv4.address
+
+        - name: "Step 6d: Preserve the canonical mapping when this host is the {{ siem_forward_alias }} receiver"
+          tags: [C15]
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '^\s*{{ siem_forward_effective_host | regex_escape }}\s+{{ siem_forward_alias | regex_escape }}\s*$'
+            line: "{{ siem_forward_effective_host }}\t{{ siem_forward_alias }}"
+            state: present
+          when:
+            - siem_forwarding_enabled | bool
+            - siem_forward_effective_host == ansible_default_ipv4.address
 
         - name: "Step 7: Render 99-siem-forward.conf (local6.* + auth,authpriv.* -> siem-log-server)"
           tags: [C16, C17]

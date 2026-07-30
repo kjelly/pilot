@@ -82,6 +82,7 @@ var specTagMap = []specTagMapping{
 			"C6":  "sssd.conf access_provider=ipa is written by ipa-client-install — same as C4",
 			"C10": "kernel auditing probe (auditctl -s) — verify-only outcome of the audit tasks",
 		}},
+	{spec: "freeipa-realm-replacement.md", playbook: "freeipa-realm-replacement-apply.yml"},
 	{spec: "freeipa-identity.md", playbook: "freeipa-identity-apply.yml",
 		exemptRows: map[string]string{
 			"C1": "legacy data-driven membership row predates row tags",
