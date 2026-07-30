@@ -240,14 +240,23 @@ func pushRosterAddSudoRuleCommands(r *editRouterModel, dir, path, name string, g
 }
 
 func newRosterSudoRule(name string, groups, commandGroups, commands []string) map[string]any {
+	allow := map[string]any{"command_groups": commandGroups, "commands": commands}
+	// An empty selection in the creation wizard is an intentional allow-all
+	// policy, not an accidentally empty explicit list. Persist that decision
+	// in the canonical roster so reconciliation always sets FreeIPA cmdcat=all.
+	if len(commandGroups)+len(commands) == 0 {
+		allow["command_category"] = "all"
+	}
 	return map[string]any{
 		"name": name, "state": "present", "enabled": true,
 		"subjects": map[string]any{"users": []string{}, "groups": groups},
 		"targets":  map[string]any{"hostcat": "all", "hosts": []string{}, "hostgroups": []string{}},
-		"allow":    map[string]any{"command_groups": commandGroups, "commands": commands},
+		"allow":    allow,
 		"deny":     map[string]any{"command_groups": []string{}, "commands": []string{}},
 		"run_as":   map[string]any{"users": []string{"root"}, "groups": []string{}},
-		"options":  []string{"!authenticate"},
+		// Password authentication is the safe default. Operators may grant
+		// !authenticate only through an explicit existing-rule policy change.
+		"options": []string{},
 	}
 }
 
@@ -264,24 +273,77 @@ func pushRosterSudoRuleDetail(r *editRouterModel, dir, path, name, banner string
 	allow := rosterSubmap(f, "allow")
 	items := []string{
 		fmt.Sprintf("subjects.groups（%v）", rosterStringSlice(subjects, "groups")),
+		"allow.command_category（" + rosterSudoAllowMode(allow) + "）",
 		fmt.Sprintf("allow.command_groups（%v）", rosterStringSlice(allow, "command_groups")),
 		fmt.Sprintf("allow.commands（%d 條；逗號分隔）", len(rosterStringSlice(allow, "commands"))),
 		"↩  返回",
 	}
 	return r.transitionTo(newSelectModel("Sudo rule "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
-		if m.Canceled() || m.Selected() == 3 {
+		if m.Canceled() || m.Selected() == 4 {
 			return pushRosterSudoRulesMenu(r, dir, path, "")
 		}
 		switch m.Selected() {
 		case 0:
 			return pushRosterSudoRuleGroups(r, dir, path, name)
 		case 1:
-			return pushRosterSudoRuleCommandGroups(r, dir, path, name)
+			return pushRosterSudoRuleAllowMode(r, dir, path, name)
 		case 2:
+			return pushRosterSudoRuleCommandGroups(r, dir, path, name)
+		case 3:
 			return pushRosterSudoRuleCommands(r, dir, path, name)
 		}
 		return nil
+	})
+}
+
+func rosterSudoAllowMode(allow map[string]any) string {
+	if rosterStringOr(allow, "command_category", "") == "all" ||
+		(len(rosterStringSlice(allow, "commands")) == 0 && len(rosterStringSlice(allow, "command_groups")) == 0) {
+		return "all commands"
+	}
+	return "restricted allow-list"
+}
+
+func pushRosterSudoRuleAllowMode(r *editRouterModel, dir, path, name string) tea.Cmd {
+	f, found, err := inventory.RosterSudoRule(path, name)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	if !found {
+		return pushRosterSudoRulesMenu(r, dir, path, "sudo rule 已不存在")
+	}
+	allow := rosterSubmap(f, "allow")
+	items := []string{"Allow all commands（危險：可執行任何 sudo 指令）", "Restricted allow-list（只允許下方 commands / command groups）", "↩  返回"}
+	return r.transitionTo(newSelectModel("Sudo command scope", items), "目前："+rosterSudoAllowMode(allow), func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(selectModel)
+		if m.Canceled() || m.Selected() == 2 {
+			return pushRosterSudoRuleDetail(r, dir, path, name, "")
+		}
+		if m.Selected() == 0 {
+			return r.transitionTo(newConfirmModel("確認 allow all？此 role group 可用 sudo 執行任何指令。", false), "", func(r *editRouterModel, s screen) tea.Cmd {
+				confirm := s.(confirmModel)
+				if !confirm.Value() {
+					return pushRosterSudoRuleDetail(r, dir, path, name, "未變更 sudo command scope")
+				}
+				return pushRosterSudoRuleEdit(r, dir, path, name, func(rule map[string]any) {
+					allow := rosterSubmapClone(rule, "allow")
+					allow["command_category"] = "all"
+					allow["commands"] = []string{}
+					allow["command_groups"] = []string{}
+					rule["allow"] = allow
+				})
+			})
+		}
+		if len(rosterStringSlice(allow, "commands"))+len(rosterStringSlice(allow, "command_groups")) == 0 {
+			return pushRosterSudoRuleDetail(r, dir, path, name, "先設定至少一條 command 或 command group，才能改為 restricted allow-list")
+		}
+		return pushRosterSudoRuleEdit(r, dir, path, name, func(rule map[string]any) {
+			allow := rosterSubmapClone(rule, "allow")
+			delete(allow, "command_category")
+			rule["allow"] = allow
+		})
 	})
 }
 

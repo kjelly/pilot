@@ -1434,6 +1434,9 @@ func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
 	rule := newRosterSudoRule("ops-status-sudo", []string{"role-ops"}, []string{"ops-status"}, nil)
+	if got, _ := rule["options"].([]string); len(got) != 0 {
+		t.Fatalf("new sudo rule options = %v, want password authentication by default", got)
+	}
 	if err := inventory.AppendRosterSudoRule(path, rule); err != nil {
 		t.Fatal(err)
 	}
@@ -1448,6 +1451,7 @@ func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
 		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 	ruleWaitFor("allow.commands")
+	ruleTM.Send(tea.KeyMsg{Type: tea.KeyDown})
 	ruleTM.Send(tea.KeyMsg{Type: tea.KeyDown})
 	ruleTM.Send(tea.KeyMsg{Type: tea.KeyDown})
 	ruleTM.Send(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1469,6 +1473,42 @@ func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
 	}
 	if violations, err := inventory.ValidateRosterFile(path); err != nil || len(violations) != 0 {
 		t.Fatalf("final roster violations: %v err=%v", violations, err)
+	}
+}
+
+func TestEditRouter_Teatest_RosterSudoRuleCanSetExplicitAllowAll(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	fixture := "schema_version: 1\ngroups:\n  - name: role-ops\n    state: present\n    category: role\nsudo:\n  command_groups: []\n  rules:\n    - name: ops-sudo\n      state: present\n      enabled: true\n      subjects: {users: [], groups: [role-ops]}\n      targets: {hostcat: all, hosts: [], hostgroups: []}\n      allow: {command_groups: [], commands: [/usr/bin/id]}\n      deny: {command_groups: [], commands: []}\n      run_as: {users: [root], groups: []}\n      options: ['!authenticate']\n"
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var router editRouterModel
+	pushRosterSudoRuleDetail(&router, dir, path, "ops-sudo", "")
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "allow.command_category") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "Allow all commands") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "確認 allow all") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	tm.Type("y")
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "✅ 已更新") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	stored, found, err := inventory.RosterSudoRule(path, "ops-sudo")
+	if err != nil || !found {
+		t.Fatalf("RosterSudoRule() found=%v err=%v", found, err)
+	}
+	allow := rosterSubmap(stored, "allow")
+	if got := rosterStringOr(allow, "command_category", ""); got != "all" {
+		t.Fatalf("allow.command_category = %q, want all", got)
+	}
+	if len(rosterStringSlice(allow, "commands"))+len(rosterStringSlice(allow, "command_groups")) != 0 {
+		t.Fatalf("allow all must clear restricted allow lists: %#v", allow)
 	}
 }
 

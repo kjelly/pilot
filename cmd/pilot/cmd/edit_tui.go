@@ -776,7 +776,8 @@ func autofixNFSRosterEntry(dir string, h inventory.Host) string {
 	if rosterPath == "" {
 		return ""
 	}
-	appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name)
+	domain := nfsBootstrapDomain(dir)
+	appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain)
 	switch {
 	case err != nil:
 		return fmt.Sprintf("⚠️  已勾選 freeipa-nfs-server，但無法檢查/補齊 roster %s 的 nfs.servers 項目（%v）；請自行確認", rosterPath, err)
