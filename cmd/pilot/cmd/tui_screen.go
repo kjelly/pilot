@@ -15,6 +15,31 @@ package cmd
 
 import tea "github.com/charmbracelet/bubbletea"
 
+// tuiKeyName normalizes the control-code form of Return. Most terminals
+// deliver Return as CR (KeyEnter), but some PTY/tmux combinations deliver LF
+// (Ctrl-J). All embedded screens should use this helper so navigation keys
+// behave consistently across terminals.
+func tuiKeyName(msg tea.KeyMsg) string {
+	switch msg.Type {
+	case tea.KeyEnter, tea.KeyCtrlJ:
+		return "enter"
+	case tea.KeyEsc:
+		return "esc"
+	case tea.KeyCtrlC:
+		return "ctrl+c"
+	}
+	// A few terminal/PTY layers leave CR, LF, or ESC as a rune key rather
+	// than converting it to Bubble Tea's named key type.
+	switch msg.String() {
+	case "\r", "\n":
+		return "enter"
+	case "\x1b", "ctrl+[":
+		return "esc"
+	default:
+		return msg.String()
+	}
+}
+
 // screen is the contract a router-embedded wizard screen satisfies in
 // addition to tea.Model.
 type screen interface {

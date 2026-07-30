@@ -66,7 +66,7 @@ func (m multiSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.windowStart = listClampWindow(m.cursor, m.windowStart, len(m.items), m.height)
 	case tea.KeyMsg:
-		switch msg.String() {
+		switch tuiKeyName(msg) {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--

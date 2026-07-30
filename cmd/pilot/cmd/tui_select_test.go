@@ -59,6 +59,15 @@ func TestSelectModel_EnterConfirmsWithoutCanceling(t *testing.T) {
 	}
 }
 
+func TestSelectModel_LFEnterConfirmsWithoutCanceling(t *testing.T) {
+	m := selectModel{title: "t", items: []string{"a"}}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = next.(selectModel)
+	if !m.Finished() || m.Canceled() {
+		t.Fatal("expected LF/ctrl+j Return to confirm without canceling")
+	}
+}
+
 func TestSelectModel_EnterOnEmptyListDoesNothing(t *testing.T) {
 	m := selectModel{title: "t"}
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})

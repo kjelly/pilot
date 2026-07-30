@@ -43,6 +43,15 @@ func TestConfirmModel_EnterUsesDefault(t *testing.T) {
 	}
 }
 
+func TestConfirmModel_LFEnterUsesDefault(t *testing.T) {
+	m := newConfirmModel("q", true)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = next.(confirmModel)
+	if !m.Finished() || !m.Value() {
+		t.Fatal("expected LF/ctrl+j Return to answer the default")
+	}
+}
+
 // TestConfirmModel_EscResolvesToNoNotAbort matches promptConfirm's
 // existing contract: a cancel on a yes/no question resolves to the
 // safe "no" answer, it does not propagate as a wizard-level abort —

@@ -66,7 +66,7 @@ func (m textInputModel) Value() string { return m.input.Value() }
 
 func (m textInputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		switch keyMsg.String() {
+		switch tuiKeyName(keyMsg) {
 		case "enter":
 			v := m.input.Value()
 			if m.validate != nil {

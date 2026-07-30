@@ -86,12 +86,30 @@ func TestMultiSelect_EnterFinishesWithoutCanceling(t *testing.T) {
 	}
 }
 
+func TestMultiSelect_LFEnterFinishesWithoutCanceling(t *testing.T) {
+	m := newTestMultiSelect()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = next.(multiSelectModel)
+	if !m.Finished() || m.Canceled() {
+		t.Fatal("expected LF/ctrl+j Return to finish without canceling")
+	}
+}
+
 func TestMultiSelect_EscCancels(t *testing.T) {
 	m := newTestMultiSelect()
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = next.(multiSelectModel)
 	if !m.Finished() || !m.Canceled() {
 		t.Fatal("expected finished+canceled after esc")
+	}
+}
+
+func TestMultiSelect_RawEscapeCancels(t *testing.T) {
+	m := newTestMultiSelect()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{27}})
+	m = next.(multiSelectModel)
+	if !m.Finished() || !m.Canceled() {
+		t.Fatal("expected raw ESC to cancel")
 	}
 }
 

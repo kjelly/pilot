@@ -40,7 +40,7 @@ func (m confirmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	switch keyMsg.String() {
+	switch tuiKeyName(keyMsg) {
 	case "y", "Y":
 		m.value, m.answered = true, true
 	case "n", "N":

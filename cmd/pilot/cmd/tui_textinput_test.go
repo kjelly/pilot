@@ -48,6 +48,15 @@ func TestTextInputModel_EnterConfirmsWhenValid(t *testing.T) {
 	}
 }
 
+func TestTextInputModel_LFEnterConfirmsWhenValid(t *testing.T) {
+	m := newTextInputModel("label", "hello", nil)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = next.(textInputModel)
+	if !m.Finished() || m.Canceled() {
+		t.Fatal("expected LF/ctrl+j Return to confirm without canceling")
+	}
+}
+
 func TestTextInputModel_EnterBlockedByFailingValidator(t *testing.T) {
 	validate := func(s string) error {
 		if s == "" {
