@@ -66,6 +66,13 @@ var deployCatalog = []deployPlaybook{
 		Reconcile: true,
 	},
 	{
+		Key: "freeipa-dns", Label: "管理 FreeIPA DNS zones／records(資料驅動,day-2 reconciler)",
+		Playbook: "playbooks/apply/freeipa-dns-apply.yml", DefaultGroup: "freeipa-server", StageVar: "stage",
+		Note:      "資料驅動的 DNS reconciler；需在 freeipa-server host_vars 設定 freeipa_dns_manifest_file(絕對路徑，範本：playbooks/apply/freeipa-dns.manifest.example.yaml)。支援 zone 建立/刪除、A/AAAA/CNAME present record 的 value/TTL reconcile、明確 RRset 刪除與 authoritative prune;已對活體 FreeIPA server 實跑驗證(v1.0，見 docs/verification/freeipa-dns.md)。",
+		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，跟 freeipa-identity 共用同一份 vault 檔)",
+		Reconcile: true,
+	},
+	{
 		Key: "freeipa-nfs-server", Label: "FreeIPA Kerberos NFSv4 server",
 		Playbook: "playbooks/apply/freeipa-nfs-server-apply.yml", DefaultGroup: "freeipa-nfs-server", StageVar: "stage",
 		Note:      "目標主機必須先完成 freeipa-client enrollment；使用 canonical FreeIPA roster 建立 nfs/FQDN principal、keytab、ACL 與安全 exports（支援 RedHat 與 Debian/Ubuntu）。",

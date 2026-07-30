@@ -75,6 +75,10 @@ var specTagMap = []specTagMapping{
 			"C7": "compose v2 plugin version probe — installed by the same package set (docker-C1)",
 			"C8": "cgroup driver probe — property of the engine install (docker-C1)",
 		}},
+	{spec: "freeipa-dns.md", playbook: "freeipa-dns-apply.yml",
+		exemptRows: map[string]string{
+			"C12": "idempotent-rerun is a multi-run property, not a single tagged task — same reasoning as freeipa-identity.md's own §7 dynamic SOPs",
+		}},
 	{spec: "freeipa-client.md", playbook: "freeipa-client-apply.yml",
 		exemptRows: map[string]string{
 			"C4":  "host keytab is produced by ipa-client-install (C1..C3) — no separate mutation task",
