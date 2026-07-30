@@ -1,0 +1,76 @@
+# EXAMPLE freeipa-dns manifest — schema_version: 1.
+#
+# Schema and safety rules: docs/specs/freeipa-dns.md §4-§7.
+# Consumed by: playbooks/apply/freeipa-dns-apply.yml, via the
+# freeipa_dns_manifest_file host var set on the freeipa-server host
+# (see docs/specs/freeipa-dns.md §3.2/§12.1 — an absolute path, NOT a
+# vault-encrypted file; this manifest must never contain a password).
+#
+# freeipa.domain/realm/server must match this deployment's inventory
+# (freeipa_domain / freeipa_realm / freeipa_server_fqdn group vars) — a
+# mismatch fails before kinit (docs/specs/freeipa-dns.md §5.2/§8.2).
+---
+schema_version: 1
+
+freeipa:
+  domain: ipa.pilot.internal
+  realm: IPA.PILOT.INTERNAL
+  server: ipa1.ipa.pilot.internal
+
+dns:
+  defaults:
+    ttl: 300
+    records_mode: merge
+
+  safety:
+    allow_shadow_existing_zone: false
+    allow_authoritative_prune: false
+    allow_zone_delete: false
+
+  zones:
+    - name: svc.pilot.internal.
+      state: present
+
+      # merge:         only manage RRsets that appear explicitly below.
+      # authoritative:  this manifest is the complete desired state for
+      #                 every supported record type in this zone.
+      records_mode: merge
+
+      # Only needed if svc.pilot.internal already resolves at an upstream
+      # DNS server outside FreeIPA — creating a same-named zone here would
+      # then be a deliberate split-horizon zone (docs/specs/freeipa-dns.md
+      # §7.1). Leave false for a zone that only ever lives in FreeIPA.
+      acknowledge_split_horizon: false
+
+      records:
+        # A record resolved from the current inventory — re-running
+        # reconcile after `pilot vm-target topology up` reassigns nexus's
+        # DHCP lease converges these records to the new IP automatically.
+        - name: grafana
+          type: A
+          state: present
+          ttl: 300
+          target:
+            inventory_host: nexus
+
+        - name: wazuh
+          type: A
+          state: present
+          ttl: 300
+          target:
+            inventory_host: nexus
+
+        - name: s3
+          type: A
+          state: present
+          ttl: 300
+          target:
+            inventory_host: nexus
+
+        # Explicit values (not inventory-resolved) are also valid.
+        - name: docs
+          type: CNAME
+          state: present
+          ttl: 300
+          values:
+            - grafana.svc.pilot.internal.

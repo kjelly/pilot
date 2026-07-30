@@ -1,7 +1,9 @@
 # SPEC：FreeIPA DNS Service Domain Declarative Reconciler
 
 * **Component ID**：`freeipa-dns`
-* **狀態**：Proposed
+* **狀態**：Implemented（Phase 1-5 全部完成，2026-07-30 對活體 vm-target
+  實跑驗證，見 `docs/verification/freeipa-dns.md` v1.0 與 §17 下方的
+  實作狀態）
 * **適用專案**：`kjelly/pilot`
 * **目標架構**：Minimal PoC Architecture
 * **主要入口**：`pilot reconcile`
@@ -1243,4 +1245,21 @@ failed=0
 ```
 
 這是第一版完成的核心 Definition of Done。
+
+---
+
+## 18. 實作狀態（2026-07-30）
+
+Phase 1-5 全部完成，對一台真實的 vm-target（AlmaLinux 9
+`ipa-server-install --setup-dns`）實跑驗證，非僅本機 fake shim。本節 §17
+描述的核心情境（3 個 service name 解析、IP 改變後自動收斂、最終
+`changed=0 failed=0`）已用等價的真實 manifest（zone 名稱
+`svc.pilot.internal.`，記錄 grafana/wazuh/s3）驗證通過，另外也驗證了
+§17 未涵蓋的：AAAA/CNAME/自訂 TTL、明確 RRset 刪除、authoritative-mode
+stale-record prune（含真實 unmanaged record）、merge-mode 保留 unmanaged
+record、zone 刪除。完整真實輸出見 `docs/verification/freeipa-dns.md`
+（v1.0）§3；Phase 5 過程中發現並修復 3 個真實 bug（`--all --raw` 輸出
+每行有 2 空白縮排導致所有 parsing regex 失效、`ipa dnszone-add`
+`changed_when` 判斷字串不存在、split-horizon 偵測對自己剛建立的 zone
+誤判），細節與修法見同一份文件的 §0。
 

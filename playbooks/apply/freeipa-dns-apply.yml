@@ -1,0 +1,740 @@
+# Apply playbook: FreeIPA DNS service-domain declarative reconciler (DATA-DRIVEN)
+#
+# PHASE 1-5 SCOPE (docs/specs/freeipa-dns.md §15) — full zone/record CRUD is
+# REAL mutation, confirmed against a live FreeIPA server (Phase 5, below):
+# `ipa dnszone-add`/`dnszone-del`, `ipa dnsrecord-add`/
+# `dnsrecord-mod`/`dnsrecord-del`. Present-record value+TTL reconcile,
+# explicit RRset deletion (`state: absent`), and authoritative-mode
+# stale-record pruning are all gated on a computed "does this already
+# match desired state" diff against read-only discovery output, so a
+# clean rerun is a true no-op (changed=0).
+#
+# PHASE 5 (live vm-target run — see docs/verification/freeipa-dns.md §0)
+# confirmed the attribute names (`arecord`/`aaaarecord`/`cnamerecord`/
+# `dnsttl`/`idnsname`) but found EVERY line of real `ipa ... --all --raw`
+# output (dnszone-find/dnsrecord-find/dnsrecord-show alike) carries a
+# 2-space leading indent (e.g. "  arecord: 192.168.122.3") — every regex
+# in this file anchored on `^attrname:` is therefore `^[ \t]*attrname:`,
+# never a bare `^attrname:`. Before this fix the authoritative-prune block
+# splitting (anchored on `idnsname:` lines) silently never matched
+# anything at all — not merely "least-confirmed", but completely inert —
+# and current-value/TTL diffing always saw an empty current state, which
+# only looked correct in the one previously-tested scenario (first-time
+# record creation, where "current is empty" happens to be the right
+# answer for the wrong reason). Live testing since fixing this confirmed:
+# zone create, 3-record create, multi-value drift correction (SET_VALUE),
+# explicit RRset deletion, authoritative-mode stale-record prune (with a
+# genuinely unmanaged record), merge-mode leaving an unmanaged record
+# untouched, zone deletion, and a clean idempotent rerun (changed=0
+# failed=0) after every mutation above.
+#
+# A later full minimal-poc round-18 rebuild (real `pilot reconcile` wizard,
+# no manual -e overrides) found one more: `ipa_server_fqdn_expected`
+# defaulted to a bare `inventory_hostname` when `freeipa_server_fqdn` was
+# left unset — the documented "usually don't need to fill this in"
+# convention (group_vars/freeipa.example.yml) — instead of matching
+# freeipa-server-apply.yml's own `'ipa1.' ~ ipa_domain` default, so the
+# manifest-vs-inventory gate compared against the short inventory alias
+# (e.g. "freeipa-server") instead of the real installed FQDN and always
+# failed. Fixed below to use the same default freeipa-server-apply.yml uses.
+#
+# This playbook contains NO zone or record data of its own — it is a
+# generic reconciler that loads its data from a plain (never
+# ansible-vault-encrypted — see §3.2) manifest file, referenced by the
+# `freeipa_dns_manifest_file` host var set on the freeipa-server host:
+#
+#   host_vars/<freeipa-server short name>.yml:
+#     freeipa_dns_manifest_file: /absolute/path/to/workspace/freeipa-dns.yaml
+#
+# Schema and safety rules: docs/specs/freeipa-dns.md §4-§8.
+# Manifest schema example: playbooks/apply/freeipa-dns.manifest.example.yaml
+# Go-side mirror of every gate below (unit-testable without kinit or a live
+# FreeIPA server): internal/inventory/freeipa_dns_validate.go
+#
+# Usage (against a pilot vm-target that hosts the FreeIPA server):
+#
+#   pilot vm-target run --name freeipa-vm \
+#       playbooks/apply/freeipa-dns-apply.yml \
+#       -e target_group=freeipa-server \
+#       -e freeipa_dns_manifest_file=/abs/path/freeipa-dns.yaml \
+#       -e @~/.vault/main.yaml \
+#       --check --diff
+#
+# `ipa_admin_password` MUST come from the vault file above (`ipa_admin_password: ...`),
+# same convention as freeipa-identity-apply.yml / freeipa-server-apply.yml.
+#
+# Stage gating (same convention as freeipa-identity-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: FreeIPA DNS service-domain reconcile (Phase 1-3 — full zone/record CRUD)
+  hosts: "{{ target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    confirm_dns_zone_delete: false
+
+    # The deployment inventory is the single source of truth for FreeIPA
+    # naming, same as freeipa-identity-apply.yml — the manifest must agree
+    # with it, not the other way around (docs/specs/freeipa-dns.md §5.2).
+    ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+    ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
+    # Matches freeipa-server-apply.yml's own default exactly (`ipa1.<domain>`),
+    # not a bare `inventory_hostname` fallback — confirmed live that leaving
+    # freeipa_server_fqdn unset (the documented "usually don't need to fill
+    # this in" convention, group_vars/freeipa.example.yml) made this gate
+    # compare the manifest against the inventory's short host alias (e.g.
+    # "freeipa-server") instead of the real FQDN the server actually
+    # installed as, failing every reconcile that relies on that convention.
+    ipa_server_fqdn_expected: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
+
+    # docs/specs/freeipa-dns.md §7.1: "FreeIPA identity domain" and any
+    # installer-protected zone can never be deleted or authoritative-pruned,
+    # regardless of manifest safety flags.
+    freeipa_dns_protected_zones:
+      - "{{ ipa_domain }}."
+
+    # Maps a manifest record `type` to the raw LDAP attribute name
+    # `ipa dnsrecord-show --all --raw` prints it under, and to the CLI flag
+    # `dnsrecord-add`/`dnsrecord-mod` use to set it.
+    freeipa_dns_type_attr: {A: arecord, AAAA: aaaarecord, CNAME: cnamerecord}
+    freeipa_dns_type_flag: {A: a-rec, AAAA: aaaa-rec, CNAME: cname-rec}
+
+    freeipa_dns_manifest: {}
+
+  pre_tasks:
+    - name: "Load freeipa-dns manifest under a namespace"
+      ansible.builtin.include_vars:
+        file: "{{ freeipa_dns_manifest_file }}"
+        name: freeipa_dns_manifest
+      when: freeipa_dns_manifest_file is defined
+      tags: [always]
+
+    - name: "Gate: manifest file is configured"
+      ansible.builtin.assert:
+        that:
+          - freeipa_dns_manifest_file is defined
+          - freeipa_dns_manifest_file | default('') | length > 0
+        fail_msg: >-
+          freeipa_dns_manifest_file must be set (host_vars on the
+          freeipa-server host) — see docs/specs/freeipa-dns.md §3.2/§12.1.
+      tags: [always]
+
+    - name: "Gate: schema_version is 1"
+      ansible.builtin.assert:
+        that:
+          - (freeipa_dns_manifest.schema_version | default(0)) | int == 1
+        fail_msg: "freeipa-dns manifest requires schema_version: 1."
+      tags: [always]
+
+    - name: "Gate: manifest declares no unknown top-level keys"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (freeipa_dns_manifest.keys() | list |
+             difference(['schema_version', 'freeipa', 'dns'])) | length == 0
+        fail_msg: "freeipa-dns manifest has an unknown top-level key."
+      tags: [always]
+
+    - name: "Gate: manifest does not declare freeipa.admin (passwords come from vault only)"
+      ansible.builtin.assert:
+        that:
+          - >-
+            ((freeipa_dns_manifest.freeipa | default({})).keys() | list |
+             difference(['domain', 'realm', 'server'])) | length == 0
+        fail_msg: >-
+          freeipa-dns manifest must not declare freeipa.admin — passwords
+          come from vault-injected ipa_admin_password only (§3.2).
+      tags: [always]
+
+    - name: "Gate: manifest freeipa.{domain,realm,server} match this inventory"
+      ansible.builtin.assert:
+        that:
+          - (freeipa_dns_manifest.freeipa | default({})).domain | default('') == ipa_domain
+          - (freeipa_dns_manifest.freeipa | default({})).realm | default('') == ipa_realm
+          - (freeipa_dns_manifest.freeipa | default({})).server | default('') == ipa_server_fqdn_expected
+        fail_msg: >-
+          manifest freeipa.domain/realm/server must equal this deployment's
+          freeipa_domain/freeipa_realm/freeipa_server_fqdn (§5.2) — got
+          {{ (freeipa_dns_manifest.freeipa | default({})).domain | default('<unset>') }}/
+          {{ (freeipa_dns_manifest.freeipa | default({})).realm | default('<unset>') }}/
+          {{ (freeipa_dns_manifest.freeipa | default({})).server | default('<unset>') }}
+          vs {{ ipa_domain }}/{{ ipa_realm }}/{{ ipa_server_fqdn_expected }}.
+      tags: [always]
+
+    - name: "Gate: freeipa_setup_dns has not been disabled on this host"
+      ansible.builtin.assert:
+        that:
+          - freeipa_setup_dns | default(true) | bool
+        fail_msg: >-
+          freeipa_setup_dns is false — this host was not installed with
+          native FreeIPA DNS, freeipa-dns cannot reconcile records here.
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境
+          group 不一致（group_names: {{ group_names }}）。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Flatten manifest zones+records for per-record gates and plan rendering"
+      ansible.builtin.set_fact:
+        freeipa_dns_flat_records: "{{ query('subelements', (freeipa_dns_manifest.dns | default({})).zones | default([]), 'records', {'skip_missing': True}) }}"
+      tags: [always]
+
+    - name: "Gate: zone name, state and records_mode are well-formed"
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - item.name | default('') | trim | length > 0
+          - (item.state | default('present')) in ['present', 'absent']
+          - (item.records_mode | default('merge')) in ['merge', 'authoritative']
+        fail_msg: "zone {{ item.name | default('unnamed') }}: name/state/records_mode are invalid — see docs/specs/freeipa-dns.md §5.3."
+      loop: "{{ (freeipa_dns_manifest.dns | default({})).zones | default([]) }}"
+      loop_control: {label: "{{ item.name | default('unnamed') }}"}
+      tags: [always]
+
+    - name: "Gate: authoritative prune requires dns.safety.allow_authoritative_prune"
+      ansible.builtin.assert:
+        that:
+          - (item.records_mode | default((freeipa_dns_manifest.dns.defaults | default({})).records_mode | default('merge'))) != 'authoritative'
+            or ((freeipa_dns_manifest.dns.safety | default({})).allow_authoritative_prune | default(false))
+        fail_msg: "zone {{ item.name }}: records_mode: authoritative requires dns.safety.allow_authoritative_prune: true (§6.2)."
+      loop: "{{ (freeipa_dns_manifest.dns | default({})).zones | default([]) }}"
+      loop_control: {label: "{{ item.name | default('unnamed') }}"}
+      tags: [always]
+
+    - name: "Gate: zone delete requires dns.safety.allow_zone_delete AND runtime confirmation"
+      ansible.builtin.assert:
+        that:
+          - (item.state | default('present')) != 'absent'
+            or ((freeipa_dns_manifest.dns.safety | default({})).allow_zone_delete | default(false) and confirm_dns_zone_delete | bool)
+        fail_msg: "zone {{ item.name }}: state: absent requires dns.safety.allow_zone_delete: true AND -e confirm_dns_zone_delete=true (§6.3)."
+      loop: "{{ (freeipa_dns_manifest.dns | default({})).zones | default([]) }}"
+      loop_control: {label: "{{ item.name | default('unnamed') }}"}
+      tags: [always]
+
+    - name: "Gate: protected zone cannot be deleted or authoritative-pruned"
+      ansible.builtin.assert:
+        that:
+          - (item.state | default('present')) != 'absent'
+          - (item.records_mode | default((freeipa_dns_manifest.dns.defaults | default({})).records_mode | default('merge'))) != 'authoritative'
+        fail_msg: >-
+          zone {{ item.name }} is protected (the FreeIPA identity domain) and
+          can never be deleted or authoritative-pruned, regardless of safety
+          flags (§5.3/§6.3).
+      loop: "{{ (freeipa_dns_manifest.dns | default({})).zones | default([]) }}"
+      loop_control: {label: "{{ item.name | default('unnamed') }}"}
+      when: (item.name | default('') | lower | regex_replace('\.$', '')) + '.' in freeipa_dns_protected_zones
+      tags: [C9]
+
+    - name: "Gate: inventory target host exists and resolves to a non-empty ansible_host"
+      ansible.builtin.assert:
+        that:
+          - item.1.target.inventory_host in hostvars
+          - hostvars[item.1.target.inventory_host].ansible_host | default('') | length > 0
+        fail_msg: >-
+          zone {{ item.0.name }} record {{ item.1.name }}:
+          target.inventory_host {{ item.1.target.inventory_host }} must
+          exist in inventory with a non-empty ansible_host (§5.5).
+      loop: "{{ freeipa_dns_flat_records }}"
+      loop_control: {label: "{{ item.0.name }}/{{ item.1.name }}"}
+      when: item.1.target is defined
+      tags: [C5]
+
+  tasks:
+    - name: "DNS reconcile (kinit, discovery, plan)"
+      block:
+        # check_mode: false on this task and every task through the
+        # discovery block below: docs/specs/freeipa-dns.md §8.6 requires
+        # `--check` to still perform full current-state discovery so the
+        # plan is accurate in preview — none of these are DNS mutations
+        # (kinit only authenticates; dnszone-find/dnsrecord-find are
+        # read-only), and the ccache is destroyed in `always:` either way,
+        # so nothing persists past this run even under --check.
+        - name: "Create a dedicated Kerberos credential cache path"
+          ansible.builtin.tempfile:
+            state: file
+            prefix: pilot-freeipa-dns-
+            suffix: .ccache
+          register: freeipa_dns_ccache_file
+          changed_when: false
+          check_mode: false
+          tags: [always]
+
+        - name: "Kinit admin into the dedicated ccache"
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              printf %s "{{ ipa_admin_password }}" | KRB5CCNAME="{{ freeipa_dns_ccache_file.path }}" kinit admin@{{ ipa_realm }}
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+          check_mode: false
+          tags: [always]
+
+        # ── Current-state discovery (read-only; no mutation) ──────────────
+        # Registered raw for Phase 1. Parsing this into a structured
+        # current_zones map (docs/specs/freeipa-dns.md §8.4) so the plan
+        # below can suppress NOOPs is deferred to Phase 2, once the exact
+        # `--all --raw` field layout has been confirmed against a live
+        # FreeIPA DNS-enabled server (see docs/verification/freeipa-dns.md §0).
+        - name: "Discover current DNS zones (raw ipa CLI output)"
+          ansible.builtin.command:
+            argv: [ipa, dnszone-find, --all, --raw]
+          environment:
+            KRB5CCNAME: "{{ freeipa_dns_ccache_file.path }}"
+          register: freeipa_dns_current_zones_raw
+          changed_when: false
+          check_mode: false
+          tags: [always]
+
+        # ── Split-horizon detection (§7.1) — MUST run only for zones FreeIPA
+        # does not already manage. Querying this host's own default resolver
+        # is only meaningful as a *pre-creation* upstream-conflict check —
+        # once FreeIPA is the answer for `dig SOA <zone>` (its own resolver,
+        # or any host whose resolver is FreeIPA), that's not an "upstream
+        # conflict", that's the zone this very playbook created. Confirmed
+        # via live testing: this host's /etc/resolv.conf points at 127.0.0.1
+        # (FreeIPA's own bind), so gating this on `freeipa_dns_current_zones_raw`
+        # (not just `item.state == present`, the original — and broken —
+        # condition) is required, or every rerun after the first successful
+        # zone creation falsely self-reports as a split-horizon conflict and
+        # aborts the whole play, permanently breaking idempotency.
+        - name: "Discover whether each present zone already exists upstream (split-horizon detection)"
+          ansible.builtin.command:
+            argv: [dig, "+short", "SOA", "{{ item.name }}"]
+          loop: "{{ (freeipa_dns_manifest.dns | default({})).zones | default([]) }}"
+          loop_control: {label: "{{ item.name | default('unnamed') }}"}
+          when:
+            - (item.state | default('present')) == 'present'
+            - "((freeipa_dns_current_zones_raw.stdout | default('')) | regex_search('(?im)^[ \\t]*idnsname: ' ~ (item.name | regex_escape) ~ '\\.?$')) is none"
+          register: freeipa_dns_upstream_soa
+          changed_when: false
+          failed_when: false
+          check_mode: false
+          tags: [C10]
+
+        - name: "Gate: unacknowledged split-horizon zone creation is rejected"
+          ansible.builtin.assert:
+            that:
+              - (result.item.acknowledge_split_horizon | default(false)) or ((result.stdout | default('') | trim | length) == 0)
+            fail_msg: >-
+              zone {{ result.item.name }} already exists upstream (split-horizon)
+              — set acknowledge_split_horizon: true to confirm deliberately (§7.1).
+          loop: "{{ freeipa_dns_upstream_soa.results | default([]) }}"
+          loop_control: {loop_var: result, label: "{{ result.item.name | default('unnamed') }}"}
+          when: freeipa_dns_upstream_soa.results is defined
+          tags: [C10]
+
+        - name: "Discover current DNS records for each manifest zone (raw ipa CLI output)"
+          ansible.builtin.command:
+            argv: [ipa, dnsrecord-find, "{{ item.name }}", --all, --raw]
+          environment:
+            KRB5CCNAME: "{{ freeipa_dns_ccache_file.path }}"
+          loop: "{{ (freeipa_dns_manifest.dns | default({})).zones | default([]) }}"
+          loop_control: {label: "{{ item.name | default('unnamed') }}"}
+          when: (item.state | default('present')) == 'present'
+          register: freeipa_dns_current_records_raw
+          changed_when: false
+          check_mode: false
+          # A zone that doesn't exist yet (pre-CREATE_ZONE) makes
+          # dnsrecord-find fail — expected pre-state, not a play failure.
+          failed_when: false
+          tags: [always]
+
+        # ── Zone create (real mutation; §8.7 step 1) ──────────────────────
+        # `freeipa_dns_current_zones_raw` was discovered above with
+        # check_mode: false, so this `when:` is accurate even under
+        # --check — Ansible then auto-skips the actual `dnszone-add` call
+        # in preview (no check_mode: false here — this task DOES mutate).
+        - name: "Ensure declared zones exist"
+          ansible.builtin.command:
+            argv: [ipa, dnszone-add, "{{ item.name }}"]
+          environment:
+            KRB5CCNAME: "{{ freeipa_dns_ccache_file.path }}"
+          loop: "{{ (freeipa_dns_manifest.dns | default({})).zones | default([]) }}"
+          loop_control: {label: "{{ item.name | default('unnamed') }}"}
+          when:
+            - (item.state | default('present')) == 'present'
+            - "((freeipa_dns_current_zones_raw.stdout | default('')) | regex_search('(?im)^[ \\t]*idnsname: ' ~ (item.name | regex_escape) ~ '\\.?$')) is none"
+          register: freeipa_dns_zone_create
+          # Confirmed via live testing: real `ipa dnszone-add` success output
+          # contains no "Added DNS zone" (or similar) marker text to key off
+          # of — the `when:` above already filters this loop down to zones
+          # the bulk discovery confirmed absent, so every iteration that
+          # actually runs is a genuine creation.
+          changed_when: true
+          # Belt-and-suspenders against a same-run race — the `when:` above
+          # already filters out zones the bulk discovery saw as existing.
+          failed_when:
+            - freeipa_dns_zone_create.rc | default(0) != 0
+            - "'already exists' not in (freeipa_dns_zone_create.stdout | default('') + freeipa_dns_zone_create.stderr | default(''))"
+          tags: [C1]
+
+        - name: "Report zone creation"
+          ansible.builtin.debug:
+            msg: "CREATE_ZONE {{ item.item.name }}"
+          loop: "{{ freeipa_dns_zone_create.results | default([]) }}"
+          loop_control: {label: "{{ item.item.name | default('unnamed') }}"}
+          # This loop's parent task has a per-item `when:` (only zones
+          # confirmed absent get the real dnszone-add call), so `.results`
+          # also includes already-existing zones marked skipped — confirmed
+          # via live testing this otherwise prints a false "CREATE_ZONE" for
+          # zones that were correctly left untouched.
+          when: not (item.skipped | default(false))
+          tags: [C1]
+
+        # ── Present-record value+TTL reconcile + explicit deletion (real
+        #    mutation; §8.7 steps 3/5/6) ────────────────────────────────────
+        # NOTE: always use item.1.get('values'), never item.1.values or
+        # item.1['values'] — on ansible-core 2.19's lazy-templated dicts,
+        # BOTH dot and bracket access on a record with no `values` key
+        # return dict's own builtin `.values()` *method* instead of
+        # Undefined (confirmed empirically; not just a dot-notation quirk),
+        # which then breaks `| join(...)` with a confusing "'method' object
+        # is not iterable" error. Only an explicit `.get()` method call
+        # performs real key lookup and returns None for a missing key.
+        - name: "Discover current state for each declared A/AAAA/CNAME record"
+          ansible.builtin.command:
+            argv: [ipa, dnsrecord-show, "{{ item.0.name }}", "{{ item.1.name }}", --all, --raw]
+          environment:
+            KRB5CCNAME: "{{ freeipa_dns_ccache_file.path }}"
+          loop: "{{ freeipa_dns_flat_records }}"
+          loop_control: {label: "{{ item.0.name }}/{{ item.1.name }}"}
+          when: (item.1.type | default('') | upper) in ['A', 'AAAA', 'CNAME']
+          register: freeipa_dns_record_show
+          changed_when: false
+          # A record that doesn't exist yet makes dnsrecord-show fail —
+          # expected pre-state (first-ever apply, or an already-absent
+          # explicit deletion target), not a play failure.
+          failed_when: false
+          check_mode: false
+          tags: [always]
+
+        - name: "Compute record reconcile plan (value/TTL diff and explicit-absence against current state)"
+          ansible.builtin.set_fact:
+            freeipa_dns_record_plan: >-
+              {{ (freeipa_dns_record_plan | default([])) + [{
+                'zone': item.item.0.name, 'name': item.item.1.name, 'type': rtype,
+                'exists': exists, 'action': record_action, 'value_args': value_args,
+                'current_value_args': current_value_args, 'ttl': desired_ttl }] }}
+          # NOTE: the local var is `record_action`, not `action` — ansible-core
+          # warns "Found variable using reserved name" for `action`/`block`/etc
+          # since those are Ansible task keywords; the *dict key* in the
+          # constructed plan entry is still plain 'action' (just a string key,
+          # not a var name, so it's unaffected by the reserved-name rule).
+          vars:
+            rtype: "{{ item.item.1.type | upper }}"
+            rattr: "{{ freeipa_dns_type_attr[rtype] }}"
+            rflag: "{{ freeipa_dns_type_flag[rtype] }}"
+            rstate: "{{ item.item.1.state | default('present') }}"
+            exists: "{{ (item.rc | default(1)) == 0 }}"
+            desired_values_raw: >-
+              {{ (item.item.1.get('values') if item.item.1.get('values')
+                 else ([hostvars[item.item.1.target.inventory_host].ansible_host]
+                       if item.item.1.target is defined else []))
+                 if rstate == 'present' else [] }}
+            desired_values: >-
+              {{ (desired_values_raw | map('lower') | list | sort) if rtype == 'CNAME'
+                 else (desired_values_raw | map('string') | list | sort) }}
+            dns_default_ttl: "{{ (freeipa_dns_manifest.dns.defaults | default({})).ttl | default(300) }}"
+            desired_ttl: "{{ (item.item.1.ttl | default(dns_default_ttl)) | int }}"
+            # `^[ \t]*` (not a bare `^`): confirmed via live testing that
+            # every attribute line in `ipa ... --all --raw` output carries a
+            # 2-space leading indent (e.g. "  arecord: 192.168.122.3"), so a
+            # bare `^attrname:` anchor never matches and this would otherwise
+            # silently and always evaluate to an empty current-state — making
+            # every existing record look like drift on every single run.
+            current_values_raw: "{{ item.stdout | default('') | regex_findall('(?im)^[ \\t]*' ~ rattr ~ ': (.+)$') }}"
+            current_values: >-
+              {{ (current_values_raw | map('lower') | list | sort) if rtype == 'CNAME'
+                 else (current_values_raw | map('string') | list | sort) }}
+            current_ttl: >-
+              {{ ((item.stdout | default('') | regex_findall('(?im)^[ \\t]*dnsttl: (.+)$'))
+                 | first | default(-1)) | int }}
+            needs_change: "{{ (not exists) or (current_values != desired_values) or (current_ttl != desired_ttl) }}"
+            record_action: >-
+              {{ 'delete' if (rstate == 'absent' and exists)
+                 else ('noop' if rstate == 'absent'
+                 else ('add' if not exists
+                 else ('mod' if needs_change else 'noop'))) }}
+            value_args: "{{ desired_values_raw | map('regex_replace', '^(.*)$', '--' ~ rflag ~ '=\\1') | list }}"
+            current_value_args: "{{ current_values_raw | map('regex_replace', '^(.*)$', '--' ~ rflag ~ '=\\1') | list }}"
+          loop: "{{ freeipa_dns_record_show.results | default([]) }}"
+          loop_control: {label: "{{ item.item.0.name }}/{{ item.item.1.name }}"}
+          when:
+            - not (item.skipped | default(false))
+            - (item.item.1.type | default('') | upper) in ['A', 'AAAA', 'CNAME']
+          tags: [always]
+
+        - name: "Delete explicit absent RRsets"
+          ansible.builtin.command:
+            argv: "{{ ['ipa', 'dnsrecord-del', item.zone, item.name] + item.current_value_args }}"
+          environment:
+            KRB5CCNAME: "{{ freeipa_dns_ccache_file.path }}"
+          loop: "{{ freeipa_dns_record_plan | default([]) | selectattr('action', 'equalto', 'delete') | list }}"
+          loop_control: {label: "{{ item.zone }}/{{ item.name }} ({{ item.type }})"}
+          register: freeipa_dns_record_delete
+          changed_when: true
+          tags: [C7]
+
+        - name: "Report explicit RRset deletion"
+          ansible.builtin.debug:
+            msg: "DELETE_RRSET {{ item.item.name }}.{{ item.item.zone }} {{ item.item.type }}"
+          loop: "{{ freeipa_dns_record_delete.results | default([]) }}"
+          loop_control: {label: "{{ item.item.zone }}/{{ item.item.name }}"}
+          tags: [C7]
+
+        # ── Authoritative-mode stale-RRset prune (real mutation; §8.7 step
+        #    4) ─────────────────────────────────────────────────────────────
+        # Splits a MULTI-record `ipa dnsrecord-find <zone> --all --raw` dump
+        # into per-owner blocks using each `idnsname:` line as an anchor
+        # (the one line every record block is guaranteed to start with).
+        # Confirmed against a live server (Phase 5 — docs/verification/
+        # freeipa-dns.md §0): a zone with a genuinely unmanaged A record
+        # correctly gets that record pruned while a declared-but-missing
+        # record in the same zone gets added, in the same run. Every step
+        # below still fails CLOSED on ambiguity: a block with no confirmed
+        # `idnsname:` line is dropped rather than guessed at, so a parsing
+        # miss under-prunes (leaves a stale record in place) instead of
+        # over-pruning (deleting the wrong thing).
+        - name: "Compute declared owner/type keys (zone|owner|TYPE)"
+          ansible.builtin.set_fact:
+            freeipa_dns_declared_keys: >-
+              {{ (freeipa_dns_flat_records | map(attribute='0.name') | list)
+                 | zip(freeipa_dns_flat_records | map(attribute='1.name') | list,
+                       freeipa_dns_flat_records | map(attribute='1.type') | map('upper') | list)
+                 | map('join', '|') | list }}
+          tags: [always]
+
+        - name: "Flatten authoritative-zone record dumps into per-owner blocks"
+          ansible.builtin.set_fact:
+            freeipa_dns_authoritative_blocks: >-
+              {{ (freeipa_dns_authoritative_blocks | default([])) +
+                 (blocks | product([item.item.name]) | list) }}
+          vars:
+            zone_mode: >-
+              {{ item.item.records_mode
+                 | default((freeipa_dns_manifest.dns.defaults | default({})).records_mode | default('merge')) }}
+            dns_block_marker: "RECORD-BLOCK-MARKER"
+            # `^[ \t]*idnsname:` (not a bare `^idnsname:`): every attribute
+            # line in real `ipa ... --all --raw` output carries a 2-space
+            # leading indent (confirmed via live testing) — a bare anchor
+            # never matched, so this marker was never inserted and `blocks`
+            # was always empty, meaning authoritative-mode pruning silently
+            # never pruned anything at all, regardless of input.
+            marked: "{{ (item.stdout | default('')) | regex_replace('(?m)^[ \\t]*idnsname:', dns_block_marker ~ 'idnsname:') }}"
+            blocks: "{{ marked.split(dns_block_marker)[1:] }}"
+          loop: "{{ freeipa_dns_current_records_raw.results | default([]) }}"
+          loop_control: {label: "{{ item.item.name | default('unnamed') }}"}
+          when:
+            - not (item.skipped | default(false))
+            - zone_mode == 'authoritative'
+          tags: [always]
+
+        - name: "Parse current authoritative-zone owner/type/value entries"
+          ansible.builtin.set_fact:
+            freeipa_dns_authoritative_current: "{{ (freeipa_dns_authoritative_current | default([])) + entries }}"
+          vars:
+            # `block` is an ansible-core reserved var name (like `action`
+            # above) — use `rec_block`. Owner extraction uses
+            # regex_findall + first, NOT regex_search with a backreference
+            # arg — regex_search(pattern, '\1') returns a LIST (even for a
+            # single backreference), not a bare string, so piping it
+            # straight into `trim` silently stringified the list
+            # (`"['legacy']"`) instead of erroring — confirmed empirically.
+            # regex_findall's list-of-matches + `first` is the same
+            # idiom already used for current_ttl above.
+            rec_block: "{{ item.0 }}"
+            zone: "{{ item.1 }}"
+            owner: "{{ (rec_block | regex_findall('(?im)^[ \\t]*idnsname: (.+)$')) | first | default('') | trim }}"
+            a_values: "{{ rec_block | regex_findall('(?im)^[ \\t]*arecord: (.+)$') }}"
+            aaaa_values: "{{ rec_block | regex_findall('(?im)^[ \\t]*aaaarecord: (.+)$') }}"
+            cname_values: "{{ rec_block | regex_findall('(?im)^[ \\t]*cnamerecord: (.+)$') }}"
+            entries: >-
+              {{ ([{'zone': zone, 'owner': owner, 'type': 'A', 'values': a_values}] if a_values | length > 0 else []) +
+                 ([{'zone': zone, 'owner': owner, 'type': 'AAAA', 'values': aaaa_values}] if aaaa_values | length > 0 else []) +
+                 ([{'zone': zone, 'owner': owner, 'type': 'CNAME', 'values': cname_values}] if cname_values | length > 0 else []) }}
+          loop: "{{ freeipa_dns_authoritative_blocks | default([]) }}"
+          loop_control: {label: "{{ item.1 }}"}
+          when: owner | length > 0
+          tags: [always]
+
+        - name: "Compute stale authoritative RRsets to prune"
+          ansible.builtin.set_fact:
+            freeipa_dns_authoritative_stale: >-
+              {{ (freeipa_dns_authoritative_stale | default([])) + ([item] if key not in freeipa_dns_declared_keys else []) }}
+          vars:
+            key: "{{ item.zone }}|{{ item.owner }}|{{ item.type }}"
+          loop: "{{ freeipa_dns_authoritative_current | default([]) }}"
+          loop_control: {label: "{{ item.zone }}/{{ item.owner }} ({{ item.type }})"}
+          tags: [always]
+
+        - name: "Prune stale authoritative RRsets"
+          ansible.builtin.command:
+            # item.get('values'), not item.values — see the .values dict
+            # -method-collision note earlier in this file.
+            argv: >-
+              {{ ['ipa', 'dnsrecord-del', item.zone, item.owner] +
+                 (item.get('values') | map('regex_replace', '^(.*)$', '--' ~ freeipa_dns_type_flag[item.type] ~ '=\1') | list) }}
+          environment:
+            KRB5CCNAME: "{{ freeipa_dns_ccache_file.path }}"
+          loop: "{{ freeipa_dns_authoritative_stale | default([]) }}"
+          loop_control: {label: "{{ item.zone }}/{{ item.owner }} ({{ item.type }})"}
+          register: freeipa_dns_authoritative_prune
+          changed_when: true
+          tags: [C8]
+
+        - name: "Report authoritative prune"
+          ansible.builtin.debug:
+            msg: "PRUNE_RRSET {{ item.item.owner }}.{{ item.item.zone }} {{ item.item.type }}"
+          loop: "{{ freeipa_dns_authoritative_prune.results | default([]) }}"
+          loop_control: {label: "{{ item.item.zone }}/{{ item.item.owner }}"}
+          tags: [C8]
+
+        - name: "Reconcile A/AAAA/CNAME record value and TTL"
+          ansible.builtin.command:
+            argv: "{{ ['ipa', (item.exists | ternary('dnsrecord-mod', 'dnsrecord-add')), item.zone, item.name] + item.value_args + ['--ttl=' ~ item.ttl] }}"
+          environment:
+            KRB5CCNAME: "{{ freeipa_dns_ccache_file.path }}"
+          loop: "{{ freeipa_dns_record_plan | default([]) | selectattr('action', 'in', ['add', 'mod']) | list }}"
+          loop_control: {label: "{{ item.zone }}/{{ item.name }} ({{ item.type }})"}
+          register: freeipa_dns_record_reconcile
+          changed_when: true
+          # Same defensive pattern as freeipa-identity-apply.yml: the plan
+          # already gates this loop to items where computed current-vs-
+          # desired state differs, but if that diff was ever a false
+          # positive (e.g. a parsing mismatch against real `--all --raw`
+          # output), `ipa dnsrecord-mod` fails with this exact FreeIPA
+          # wording rather than silently no-op'ing — tolerate it instead of
+          # failing the whole play over a redundant mutation attempt.
+          failed_when:
+            - freeipa_dns_record_reconcile.rc | default(0) != 0
+            - "'no modifications to be performed' not in (freeipa_dns_record_reconcile.stderr | default(''))"
+          tags: [C2, C3, C4, C6]
+
+        - name: "Report record reconciliation"
+          ansible.builtin.debug:
+            msg: >-
+              {{ (item.item.exists | ternary('SET_VALUE', 'ADD_VALUE')) }}
+              {{ item.item.name }}.{{ item.item.zone }} {{ item.item.type }}
+              ttl={{ item.item.ttl }}
+          loop: "{{ freeipa_dns_record_reconcile.results | default([]) }}"
+          loop_control: {label: "{{ item.item.zone }}/{{ item.item.name }}"}
+          tags: [C2, C3, C4, C6]
+
+        # ── Zone deletion (real mutation; §8.7 step 7) — no dedicated
+        #    checklist row exists for the positive "deletion happened"
+        #    path (only the C9 protected-zone rejection is checklist-
+        #    tested); gates (allow_zone_delete + confirm_dns_zone_delete +
+        #    protected-zone) already ran in pre_tasks before kinit. ────────
+        - name: "Delete state-absent zones"
+          ansible.builtin.command:
+            argv: [ipa, dnszone-del, "{{ item.name }}"]
+          environment:
+            KRB5CCNAME: "{{ freeipa_dns_ccache_file.path }}"
+          loop: "{{ (freeipa_dns_manifest.dns | default({})).zones | default([]) }}"
+          loop_control: {label: "{{ item.name | default('unnamed') }}"}
+          when:
+            - (item.state | default('present')) == 'absent'
+            - >-
+              ((freeipa_dns_current_zones_raw.stdout | default(''))
+              | regex_search('(?im)^[ \t]*idnsname: ' ~ (item.name | regex_escape) ~ '\.?$'))
+              is not none
+          register: freeipa_dns_zone_delete
+          changed_when: "'Deleted DNS zone' in (freeipa_dns_zone_delete.stdout | default(''))"
+          failed_when:
+            - freeipa_dns_zone_delete.rc | default(0) != 0
+            - "'not found' not in (freeipa_dns_zone_delete.stdout | default('') + freeipa_dns_zone_delete.stderr | default(''))"
+          tags: [always]
+
+        - name: "Report zone deletion"
+          ansible.builtin.debug:
+            msg: "DELETE_ZONE {{ item.item.name }}"
+          loop: "{{ freeipa_dns_zone_delete.results | default([]) }}"
+          loop_control: {label: "{{ item.item.name | default('unnamed') }}"}
+          when: not (item.skipped | default(false))
+          tags: [always]
+
+        # ── Post-apply verification (§8.8) ────────────────────────────────
+        # Only meaningful once mutation has actually run — skip entirely
+        # under --check, where nothing above was really applied yet.
+        - name: "Post-apply verification: query the authoritative DNS answer"
+          ansible.builtin.command:
+            argv: [dig, "+short", "{{ item.1.name }}.{{ item.0.name }}", "{{ item.1.type | upper }}", "@127.0.0.1"]
+          loop: "{{ freeipa_dns_flat_records }}"
+          loop_control: {label: "{{ item.0.name }}/{{ item.1.name }}"}
+          when:
+            - not ansible_check_mode
+            - (item.1.state | default('present')) == 'present'
+            - (item.1.type | default('') | upper) in ['A', 'AAAA', 'CNAME']
+          register: freeipa_dns_post_apply_dig
+          changed_when: false
+          tags: [C11]
+
+        - name: "Gate: post-apply DNS answer matches desired state"
+          ansible.builtin.assert:
+            that:
+              - (result.stdout_lines | default([]) | map('trim') | map('lower') | reject('equalto', '') | list | sort) == desired
+            fail_msg: >-
+              {{ result.item.1.name }}.{{ result.item.0.name }}
+              {{ result.item.1.type }}: dig answered
+              {{ result.stdout_lines | default([]) }}, desired {{ desired }}.
+          vars:
+            desired: >-
+              {{ (result.item.1.get('values') if result.item.1.get('values')
+                 else [hostvars[result.item.1.target.inventory_host].ansible_host])
+                 | map('lower') | list | sort }}
+          loop: "{{ freeipa_dns_post_apply_dig.results | default([]) }}"
+          loop_control: {loop_var: result, label: "{{ result.item.0.name }}/{{ result.item.1.name }}"}
+          when: not (result.skipped | default(false))
+          tags: [C11]
+      always:
+        # freeipa_dns_ccache_file.path (not just "... is defined") since a
+        # skipped tempfile task under a hard failure earlier still
+        # registers a result dict — just one without a .path key.
+        - name: "Destroy the Kerberos ticket in the dedicated ccache"
+          ansible.builtin.command:
+            argv: [kdestroy, -c, "{{ freeipa_dns_ccache_file.path }}"]
+          when: freeipa_dns_ccache_file.path is defined
+          changed_when: false
+          failed_when: false
+          check_mode: false
+          tags: [always]
+
+        - name: "Remove the dedicated ccache file"
+          ansible.builtin.file:
+            path: "{{ freeipa_dns_ccache_file.path }}"
+            state: absent
+          when: freeipa_dns_ccache_file.path is defined
+          changed_when: false
+          check_mode: false
+          tags: [always]

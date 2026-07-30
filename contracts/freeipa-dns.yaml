@@ -1,0 +1,38 @@
+schemaVersion: 1
+id: freeipa-dns
+role: freeipa-server
+specs:
+  - path: docs/verification/freeipa-dns.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/freeipa-dns-apply.yml
+regressionTests:
+  - cmd/pilot/cmd/tag_coverage_test.go
+  - internal/spec/freeipa_dns_regression_test.go
+dependencies:
+  - {component: freeipa-server, required: true, relation: sameHosts}
+hostCardinality: exactly-one
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 1}
+groupVars:
+  - {name: ipa_admin_password, type: string, required: true, secret: true, validation: "^.{8,}$"}
+  - {name: freeipa_dns_manifest_file, type: string, required: true, secret: false}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: mapped
+  rows:
+    "docs/verification/freeipa-dns.md#C1": {tags: [C1], reason: zone creation}
+    "docs/verification/freeipa-dns.md#C2": {tags: [C2], reason: A record reconcile}
+    "docs/verification/freeipa-dns.md#C3": {tags: [C3], reason: AAAA record reconcile}
+    "docs/verification/freeipa-dns.md#C4": {tags: [C4], reason: CNAME reconcile}
+    "docs/verification/freeipa-dns.md#C5": {tags: [C5], reason: inventory host resolution}
+    "docs/verification/freeipa-dns.md#C6": {tags: [C6], reason: TTL reconcile}
+    "docs/verification/freeipa-dns.md#C7": {tags: [C7], reason: explicit RRset deletion}
+    "docs/verification/freeipa-dns.md#C8": {tags: [C8], reason: authoritative stale-record pruning}
+    "docs/verification/freeipa-dns.md#C9": {tags: [C9], reason: protected-zone safety}
+    "docs/verification/freeipa-dns.md#C10": {tags: [C10], reason: split-horizon safety}
+    "docs/verification/freeipa-dns.md#C11": {tags: [C11], reason: authoritative DNS answer}
+  exemptions:
+    "docs/verification/freeipa-dns.md#C12": {kind: verifyOnly, reason: "idempotent-rerun is a multi-run property, not a single tagged task — verified by re-running the whole playbook and observing changed=0, same as freeipa-identity.md's own §7 dynamic SOPs"}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}
