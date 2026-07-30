@@ -1,0 +1,292 @@
+# Apply playbook for docs/verification/freeipa-realm-replacement.md.
+#
+# This is deliberately a client-wave migration, not a FreeIPA server restore.
+# The old server must remain available if automatic local rollback is expected
+# to yield a working old login path.  A rebuilt/retired old server makes the
+# old archive forensic material only, not a trust rollback mechanism.
+---
+- name: Replace a client's FreeIPA realm enrollment
+  hosts: "{{ target_group | default('freeipa-client') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    freeipa_realm_replacement_confirm: false
+    freeipa_realm_replacement_finalize_only: false
+    freeipa_realm_replacement_ticket: ""
+    freeipa_realm_replacement_verify_user: admin
+    freeipa_realm_replacement_state_dir: /etc/pilot
+    freeipa_realm_replacement_state_file: /etc/pilot/freeipa-realm-replacement.env
+    freeipa_realm_replacement_expected_realm_file: /etc/pilot/freeipa-realm-replacement.expected-realm
+    freeipa_realm_replacement_expected_host_file: /etc/pilot/freeipa-realm-replacement.expected-host
+    freeipa_realm_replacement_expected_user_file: /etc/pilot/freeipa-realm-replacement.expected-user
+    freeipa_realm_replacement_backup_link: /etc/pilot/freeipa-realm-replacement.backup
+    freeipa_realm_replacement_backup_dir: /var/backups/pilot/freeipa-realm-replacement
+    freeipa_realm_replacement_backup_archive: >-
+      {{ freeipa_realm_replacement_backup_dir }}/{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short }}.tar.gz
+
+  pre_tasks:
+    - name: "Gate: realm replacement requires explicit human confirmation"
+      ansible.builtin.assert:
+        that:
+          - freeipa_realm_replacement_confirm | bool
+          - freeipa_realm_replacement_ticket | length >= 3
+          - freeipa_realm_replacement_old_realm is defined and freeipa_realm_replacement_old_realm | length > 0
+          - freeipa_realm_replacement_new_domain is defined and freeipa_realm_replacement_new_domain | length > 0
+          - freeipa_realm_replacement_new_realm is defined and freeipa_realm_replacement_new_realm | length > 0
+          - freeipa_realm_replacement_new_server_fqdn is defined and freeipa_realm_replacement_new_server_fqdn | length > 0
+          - freeipa_realm_replacement_new_server_ip is defined and freeipa_realm_replacement_new_server_ip | length > 0
+          - freeipa_realm_replacement_client_fqdn is defined and freeipa_realm_replacement_client_fqdn | length > 0
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+          - freeipa_realm_replacement_old_realm != freeipa_realm_replacement_new_realm
+          - freeipa_realm_replacement_new_realm == (freeipa_realm_replacement_new_domain | upper)
+        fail_msg: >-
+          This destructive client-wave migration is fail-closed. Supply every
+          old/new realm coordinate, a vault-backed ipa_admin_password, a change
+          ticket, and -e freeipa_realm_replacement_confirm=true. The new realm
+          must differ from the old realm and equal NEW_DOMAIN upper-cased.
+      tags: [always]
+
+    - name: "Gate: supported client OS"
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family in ['Debian', 'RedHat']
+        fail_msg: "Only Debian/Ubuntu and Enterprise Linux FreeIPA clients are supported."
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Gate: reject a second migration without explicit recovery review"
+      ansible.builtin.stat:
+        path: "{{ freeipa_realm_replacement_state_file }}"
+      register: freeipa_realm_replacement_prior_state
+      tags: [always]
+
+    - name: "Gate: client must still be enrolled in the declared old realm"
+      ansible.builtin.shell: >-
+        test -f /etc/ipa/default.conf &&
+        awk -F= -v want="{{ freeipa_realm_replacement_old_realm }}"
+        '/^realm[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); exit $2 != want}'
+        /etc/ipa/default.conf
+      changed_when: false
+      when: not freeipa_realm_replacement_prior_state.stat.exists
+      tags: [C1]
+
+    - name: "Gate: prior migration state must be absent"
+      ansible.builtin.assert:
+        that:
+          - freeipa_realm_replacement_finalize_only | bool or not freeipa_realm_replacement_prior_state.stat.exists
+        fail_msg: >-
+          {{ freeipa_realm_replacement_state_file }} already exists. This host
+          has a recorded migration; inspect its archive and run a separately
+          reviewed recovery procedure instead of re-running destructive cleanup.
+      tags: [always]
+
+  tasks:
+    - name: "Realm replacement — create local state and backup directories"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop:
+        - "{{ freeipa_realm_replacement_state_dir }}"
+        - "{{ freeipa_realm_replacement_backup_dir }}"
+      tags: [C2]
+
+    - name: "Realm replacement — snapshot old client trust before mutation"
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --ignore-failed-read
+          - --xattrs
+          - -czf
+          - "{{ freeipa_realm_replacement_backup_archive }}"
+          - /etc/ipa
+          - /etc/krb5.conf
+          - /etc/krb5.keytab
+          - /etc/sssd
+          - /etc/nsswitch.conf
+          - /etc/hosts
+      changed_when: true
+      no_log: true
+      tags: [C2]
+
+    - name: "Realm replacement — destructive switch with automatic local restore"
+      block:
+        - name: "Realm replacement — pin new server FQDN before enrollment"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '\\s{{ freeipa_realm_replacement_new_server_fqdn | regex_escape }}(\\s|$)'
+            line: >-
+              {{ freeipa_realm_replacement_new_server_ip }}
+              {{ freeipa_realm_replacement_new_server_fqdn }}
+              {{ freeipa_realm_replacement_new_server_fqdn.split('.')[0] }}
+            state: present
+          tags: [C3]
+
+        - name: "Realm replacement — preflight new server HTTPS reachability"
+          ansible.builtin.wait_for:
+            host: "{{ freeipa_realm_replacement_new_server_ip }}"
+            port: 443
+            timeout: 15
+          changed_when: false
+          tags: [C1]
+
+        - name: "Realm replacement — remove old client enrollment"
+          ansible.builtin.command:
+            argv: [ipa-client-install, --uninstall, -U]
+          changed_when: true
+          no_log: true
+          tags: [C3]
+
+        - name: "Realm replacement — enroll client in the new realm"
+          ansible.builtin.command:
+            argv:
+              - ipa-client-install
+              - -U
+              - "--server={{ freeipa_realm_replacement_new_server_fqdn }}"
+              - "--domain={{ freeipa_realm_replacement_new_domain }}"
+              - "--realm={{ freeipa_realm_replacement_new_realm }}"
+              - --principal=admin
+              - "--password={{ ipa_admin_password }}"
+              - "--hostname={{ freeipa_realm_replacement_client_fqdn }}"
+              - --mkhomedir
+              - --no-ntp
+              - --no-dns-sshfp
+              - --force-join
+          changed_when: true
+          no_log: true
+          tags: [C3]
+
+        - name: "Realm replacement — enable and start SSSD"
+          ansible.builtin.systemd:
+            name: sssd
+            state: started
+            enabled: true
+          tags: [C4]
+
+        - name: "Realm replacement — pin SSSD to the new server"
+          ansible.builtin.lineinfile:
+            path: /etc/sssd/sssd.conf
+            regexp: '^ipa_server\\s*='
+            line: "ipa_server = {{ freeipa_realm_replacement_new_server_fqdn }}"
+            insertafter: '^\\[domain/'
+            owner: root
+            group: root
+            mode: "0600"
+          notify: Restart SSSD after realm replacement
+          tags: [C4]
+
+        - name: "Realm replacement — wait for new realm identity resolution"
+          ansible.builtin.command:
+            argv:
+              - getent
+              - passwd
+              - "{{ freeipa_realm_replacement_verify_user }}@{{ freeipa_realm_replacement_new_domain }}"
+          register: freeipa_realm_replacement_identity
+          changed_when: false
+          until: freeipa_realm_replacement_identity.rc == 0
+          retries: 30
+          delay: 10
+          tags: [C5]
+
+        - name: "Realm replacement — record completed migration without secrets"
+          ansible.builtin.copy:
+            dest: "{{ freeipa_realm_replacement_state_file }}"
+            owner: root
+            group: root
+            mode: "0600"
+            content: |
+              ticket={{ freeipa_realm_replacement_ticket }}
+              old_realm={{ freeipa_realm_replacement_old_realm }}
+              new_domain={{ freeipa_realm_replacement_new_domain }}
+              new_realm={{ freeipa_realm_replacement_new_realm }}
+              new_server_fqdn={{ freeipa_realm_replacement_new_server_fqdn }}
+              new_server_ip={{ freeipa_realm_replacement_new_server_ip }}
+              client_fqdn={{ freeipa_realm_replacement_client_fqdn }}
+              verify_user={{ freeipa_realm_replacement_verify_user }}
+              backup_archive={{ freeipa_realm_replacement_backup_archive }}
+          no_log: true
+          tags: [C6]
+
+        - name: "Realm replacement — record derived verification expectations"
+          ansible.builtin.copy:
+            dest: "{{ item.path }}"
+            owner: root
+            group: root
+            mode: "0600"
+            content: "{{ item.content }}\n"
+          loop:
+            - path: "{{ freeipa_realm_replacement_expected_realm_file }}"
+              content: "realm = {{ freeipa_realm_replacement_new_realm }}"
+            - path: "{{ freeipa_realm_replacement_expected_host_file }}"
+              content: "host/{{ freeipa_realm_replacement_client_fqdn }}@{{ freeipa_realm_replacement_new_realm }}"
+            - path: "{{ freeipa_realm_replacement_expected_user_file }}"
+              content: "{{ freeipa_realm_replacement_verify_user }}@{{ freeipa_realm_replacement_new_domain }}"
+          no_log: true
+          tags: [C3, C4, C5, C6]
+
+        - name: "Realm replacement — expose archive through a stable root-only link"
+          ansible.builtin.file:
+            src: "{{ freeipa_realm_replacement_backup_archive }}"
+            dest: "{{ freeipa_realm_replacement_backup_link }}"
+            state: link
+            owner: root
+            group: root
+          tags: [C6]
+      rescue:
+        - name: "Realm replacement — restore local pre-migration archive"
+          ansible.builtin.command:
+            argv: [tar, -xpf, "{{ freeipa_realm_replacement_backup_archive }}", -C, /]
+          changed_when: true
+          no_log: true
+          failed_when: false
+
+        - name: "Realm replacement — restart restored SSSD when present"
+          ansible.builtin.systemd:
+            name: sssd
+            state: restarted
+          failed_when: false
+
+        - name: "Realm replacement — stop with the rollback boundary"
+          ansible.builtin.fail:
+            msg: >-
+              New realm enrollment failed. The prior local client configuration
+              was restored from {{ freeipa_realm_replacement_backup_archive }}.
+              This only restores working access if the old FreeIPA server and
+              its client principal still exist; a rebuilt/retired old server
+              cannot be recovered by restoring local files alone.
+
+  handlers:
+    - name: Restart SSSD after realm replacement
+      ansible.builtin.systemd:
+        name: sssd
+        state: restarted
