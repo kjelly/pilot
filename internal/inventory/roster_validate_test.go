@@ -306,6 +306,60 @@ sudo:
 	}
 }
 
+func TestValidateRoster_SudoAllowCommandCategoryAllIsExclusive(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+groups:
+  - name: role-ops
+    category: role
+sudo:
+  rules:
+    - name: ops-sudo
+      subjects: {groups: [role-ops]}
+      targets: {hostcat: all}
+      allow: {command_category: all, command_groups: [], commands: [/usr/bin/id]}
+`))
+	if !contains(ruleNames(v), "sudo allow command category") {
+		t.Fatalf("expected allow-all/list mutual-exclusion violation, got: %v", v)
+	}
+}
+
+func TestValidateRoster_SudoAllowCommandCategoryRejectsUnknownValue(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+groups:
+  - name: role-ops
+    category: role
+sudo:
+  rules:
+    - name: ops-sudo
+      subjects: {groups: [role-ops]}
+      targets: {hostcat: all}
+      allow: {command_category: none, command_groups: [], commands: []}
+`))
+	if !contains(ruleNames(v), "sudo allow command category") {
+		t.Fatalf("expected invalid command-category violation, got: %v", v)
+	}
+}
+
+func TestValidateRoster_SudoAllowCommandCategoryAllIsValid(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+groups:
+  - name: role-ops
+    category: role
+sudo:
+  rules:
+    - name: ops-sudo
+      subjects: {groups: [role-ops]}
+      targets: {hostcat: all}
+      allow: {command_category: all, command_groups: [], commands: []}
+`))
+	if contains(ruleNames(v), "sudo allow command category") {
+		t.Fatalf("explicit allow-all must validate, got: %v", v)
+	}
+}
+
 func TestValidateRoster_SudoCommandDenylistBinary(t *testing.T) {
 	v := ValidateRoster(mustParseRoster(t, `
 schema_version: 1

@@ -92,8 +92,6 @@ Canonical schema（完整範例見 `freeipa-identity.roster.example.yaml`）：
 ```yaml
 schema_version: 1
 freeipa:
-  domain: ipa.pilot.internal
-  realm: IPA.PILOT.INTERNAL
   server: ipa1.ipa.pilot.internal
   admin:
     principal: admin
@@ -124,6 +122,10 @@ hostgroups: []
 hbac: {}
 sudo: {}
 ```
+
+`freeipa_domain` 唯一設定於 inventory 的 `group_vars/freeipa.yml`；roster
+只保存 FreeIPA 身分、群組與授權規則。`realm` 由 domain 大寫推導，server
+FQDN 由 inventory/target facts 或 roster 的驗證欄位提供。
 
 > Canonical roster 不可用 `-e @~/.vault/ipa-identity.yaml` 直接注入：top-level
 > `groups`/`hosts` 是 Ansible magic variables。必須用下方的

@@ -1,8 +1,6 @@
 ---
 schema_version: 1
 freeipa:
-  domain: ipa.pilot.internal
-  realm: IPA.PILOT.INTERNAL
   server: freeipa-server.ipa.pilot.internal
   admin:
     principal: admin

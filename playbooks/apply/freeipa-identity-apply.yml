@@ -65,8 +65,11 @@
     confirm_prod: false
     staging_attested_within_hours: 168
 
-    ipa_domain: ipa.pilot.internal
-    ipa_realm: "{{ ipa_domain | upper }}"
+    # The deployment inventory is the single source of truth for the
+    # FreeIPA domain.  The identity roster contains identities and access
+    # policy, not infrastructure naming.
+    ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+    ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
     identity_hbac_test_host: "{{ ipa_server_fqdn | default(inventory_hostname) }}"
 
     # Data lists default to empty so a partial roster (e.g. only users, no
@@ -155,7 +158,7 @@
             ])) | length == 0
           - >-
             ((freeipa_roster.freeipa | default({})).keys() | list |
-             difference(['domain', 'realm', 'server', 'admin', 'defaults', 'safety'])) | length == 0
+             difference(['server', 'admin', 'defaults', 'safety'])) | length == 0
           - >-
             (((freeipa_roster.freeipa | default({})).admin | default({})).keys() | list |
              difference(['principal', 'password'])) | length == 0
@@ -320,11 +323,11 @@
 
     - name: "Normalize canonical FreeIPA settings"
       ansible.builtin.set_fact:
-        ipa_domain: "{{ freeipa_roster.freeipa.domain | default('ipa.pilot.internal') }}"
-        ipa_realm: "{{ freeipa_roster.freeipa.realm | default(freeipa_roster.freeipa.domain | default('ipa.pilot.internal') | upper) }}"
+        ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+        ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
         identity_admin_principal: "{{ freeipa_roster.freeipa.admin.principal | default('admin') }}"
         identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
-        identity_hbac_test_host: "{{ freeipa_roster.freeipa.server | default(inventory_hostname) }}"
+        identity_hbac_test_host: "{{ freeipa_roster.freeipa.server | default(ipa_server_fqdn | default(inventory_hostname)) }}"
         ipa_users: []
         ipa_groups: []
         ipa_hostgroups: []
@@ -424,8 +427,6 @@
             'name': item.name,
             'users': item.subjects.users | default([]),
             'groups': item.subjects.groups | default([]),
-            'allow_commands': (item.allow | default({})).commands | default([]),
-            'allow_command_groups': (item.allow | default({})).command_groups | default([]),
             'deny_commands': (item.deny | default({})).commands | default([]),
             'deny_command_groups': (item.deny | default({})).command_groups | default([]),
             'runas_users': (item.run_as | default({})).users | default(['root']),
@@ -438,6 +439,12 @@
             if (item.targets.hosts | default([]) | length +
                 item.targets.hostgroups | default([]) | length > 0)
             else {'hostcat': item.targets.hostcat | default('all')}
+          ) | combine(
+            {'allow_commands': (item.allow | default({})).commands | default([]),
+             'allow_command_groups': (item.allow | default({})).command_groups | default([])}
+            if ((item.allow | default({})).commands | default([]) | length +
+                (item.allow | default({})).command_groups | default([]) | length > 0)
+            else {'cmdcat': (item.allow | default({})).command_category | default('all')}
           ))] }}
       loop: "{{ (freeipa_roster.sudo | default({})).rules | default([]) }}"
       when:
@@ -1491,17 +1498,13 @@
     # A rule with no hosts/hostgroups defaults to hostcat=all (applies
     # everywhere); give it `hosts:`/`hostgroups:` to scope it to a subset.
     #
-    # Commands follow the identical convention: a rule with no
-    # `allow_commands:` defaults to cmdcat=all (matches ANY command) — give
-    # it `allow_commands:` to scope it to a specific set instead. `--cmdcat`
-    # and individual sudoCmd members are mutually exclusive in FreeIPA
-    # itself (same as hostcat vs. hosts/hostgroups), so this is only sent
-    # when `allow_commands` is absent. `cmdcat: all` is accepted as an
-    # explicit synonym for the same default, for rosters that prefer to say
-    # so out loud. Before this, a roster that set `cmdcat: all` (expecting
-    # hostcat-like behavior) was silently ignored — the rule ended up with
-    # NO command grant at all (deny-everything), since only `allow_commands`
-    # was ever read (runbook Real bug #15).
+    # Commands follow the identical convention. Declare
+    # `allow.command_category: all` for an intentional allow-all rule; omit
+    # it only for backward-compatible implicit allow-all. Give the rule
+    # `allow.commands` or `allow.command_groups` to scope it instead.
+    # `--cmdcat` and individual sudoCmd members are mutually exclusive in
+    # FreeIPA itself (same as hostcat vs. hosts/hostgroups), so this is only
+    # sent when the specific allow lists are absent.
     #
     # `runas_user`/`runasgroup` are the same "cat" convention again, but for
     # WHO the command may be run as: with neither set, FreeIPA's own default

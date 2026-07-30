@@ -303,7 +303,10 @@
     # silently reports "not allowed" for every user — no error, just a wrong
     # answer. Confirmed live on Ubuntu 24.04 (sssd 2.9.4): adding "sudo" here
     # broke C8 end-to-end; removing it (socket activation handles the rest)
-    # fixed it with no other change. Only nss/pam/ssh need to be explicit.
+    # fixed it with no other change. nss/pam/ssh/autofs below are deliberately
+    # explicit responders, so their matching socket units must be disabled
+    # before SSSD is restarted; otherwise systemd starts a second copy and
+    # `sssd_check_socket_activated_responders` fails with exit status 17.
     # Preserve the optional autofs responder installed by the NFS client role.
     # site.yml deliberately runs this base client role before the NFS overlay;
     # on later site runs, replacing the whole line with only nss/pam/ssh would
@@ -323,6 +326,35 @@
       # The consumers below are also apply-only, so this probe is unnecessary
       # (and unsafe) during --check.
       when: not ansible_check_mode
+      tags: [freeipa-client, C8]
+
+    - name: "FreeIPA client — disable socket activation for explicit SSSD responders"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      loop:
+        - sssd-nss.socket
+        - sssd-pam.socket
+        - sssd-pam-priv.socket
+        - sssd-ssh.socket
+        - sssd-autofs.socket
+      register: ipa_sssd_explicit_responder_sockets
+      # EL distributions do not consistently ship these socket units; their
+      # explicit responders remain valid, so a missing unit is not a failure.
+      failed_when: false
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
+      tags: [freeipa-client, C8]
+
+    - name: "FreeIPA client — clear stale SSSD responder socket failures"
+      ansible.builtin.command:
+        argv: [systemctl, reset-failed]
+      changed_when: false
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
       tags: [freeipa-client, C8]
 
     - name: "FreeIPA client — ensure SSSD's services line does not fight socket-activated sudo"
@@ -352,13 +384,17 @@
       when: not ansible_check_mode
       tags: [freeipa-client, C8]
 
-    - name: "FreeIPA client — restart SSSD after wiring sudo (only if sssd.conf changed)"
+    - name: "FreeIPA client — restart SSSD after wiring responders"
       ansible.builtin.systemd:
         name: sssd
         state: restarted
       when:
         - not ansible_check_mode
-        - ipa_sssd_services is changed or ipa_sssd_sudo_provider is changed
+        - >-
+          ipa_sssd_services is changed or
+          ipa_sssd_sudo_provider is changed or
+          (ipa_sssd_explicit_responder_sockets.results | default([]) |
+           selectattr('changed', 'defined') | selectattr('changed') | list | length > 0)
       tags: [freeipa-client, C8]
 
     - name: "FreeIPA client — enable + start SSSD (survives reboot)"
@@ -368,6 +404,16 @@
         enabled: true
       when: not ansible_check_mode
       tags: [freeipa-client, C2]
+
+    - name: "FreeIPA client — enable socket-activated sudo responder"
+      ansible.builtin.systemd:
+        name: sssd-sudo.socket
+        enabled: true
+        state: started
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
+      tags: [freeipa-client, C8]
 
     # ipa-client-install's own sshd drop-in (04-ipa.conf) only sets
     # ChallengeResponseAuthentication (the deprecated alias for

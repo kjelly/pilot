@@ -75,7 +75,10 @@ func TestRegression_FreeIPANFSServerSupportsEnrolledUbuntuHosts(t *testing.T) {
 		"Debian: [nfs-kernel-server, acl]",
 		"path: /etc/ipa/default.conf",
 		"systemctl is-active sssd\n      check_mode: false",
-		"nfs_server_fqdn == ansible_fqdn",
+		"hostname --fqdn",
+		"PILOT FQDN CANONICAL HOSTNAME",
+		"insertbefore: '^127\\.0\\.1\\.1\\s'",
+		"ipa_admin_password == freeipa_roster.freeipa.admin.password",
 		"path: \"{{ nfs_exports_fragment | dirname }}\"",
 		"name: \"{{ nfs_server_service }}\"",
 		"when: not ansible_check_mode",
@@ -116,6 +119,10 @@ func TestRegression_FreeIPAClientPreservesConfiguredAutofsResponder(t *testing.T
 		"ipa_sssd_services_current.stdout",
 		"'autofs' in",
 		"split(',') | map('trim') | list",
+		"FreeIPA client — disable socket activation for explicit SSSD responders",
+		"sssd-pam-priv.socket",
+		"argv: [systemctl, reset-failed]",
+		"name: sssd-sudo.socket",
 	} {
 		if !strings.Contains(playbook, required) {
 			t.Fatalf("base FreeIPA client must preserve an autofs responder configured by the NFS overlay; missing %q", required)

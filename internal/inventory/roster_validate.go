@@ -87,6 +87,9 @@ var (
 		"hostgroups", "hbac", "sudo", "nfs", "nfs_clients",
 		"migration", "policy_exceptions",
 	}
+	// domain/realm remain accepted while old encrypted rosters are migrated,
+	// but the apply playbook deliberately ignores them. New rosters must keep
+	// the authoritative value in group_vars/freeipa.yml.
 	knownFreeIPAKeys      = []string{"domain", "realm", "server", "admin", "defaults", "safety"}
 	knownFreeIPAAdminKeys = []string{"principal", "password"}
 )
@@ -414,6 +417,16 @@ func checkSudo(root map[string]any, groups []any) []RosterViolation {
 			if !contains(commandGroupNames, group) {
 				out = append(out, RosterViolation{Rule: "sudo command group reference", Detail: fmt.Sprintf("sudo rule %q references unknown command group %q", label, group)})
 			}
+		}
+
+		allow := mapField(item, "allow")
+		commandCategory := stringField(allow, "command_category")
+		hasSpecificAllow := len(stringListField(allow, "commands"))+len(stringListField(allow, "command_groups")) > 0
+		if commandCategory != "" && commandCategory != "all" {
+			out = append(out, RosterViolation{Rule: "sudo allow command category", Detail: fmt.Sprintf("sudo rule %q: allow.command_category must be all when set", label)})
+		}
+		if commandCategory == "all" && hasSpecificAllow {
+			out = append(out, RosterViolation{Rule: "sudo allow command category", Detail: fmt.Sprintf("sudo rule %q: allow.command_category: all can't combine with commands or command_groups", label)})
 		}
 	}
 

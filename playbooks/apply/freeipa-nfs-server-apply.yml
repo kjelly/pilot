@@ -10,7 +10,6 @@
     staging_attested_within_hours: 168
     nfs_exports_fragment: /etc/exports.d/90-freeipa-managed.exports
     nfs_pseudo_root: /srv/nfs
-    nfs_server_fqdn: "{{ ansible_fqdn }}"
     nfs_server_packages_by_os_family:
       RedHat: [nfs-utils, acl]
       Debian: [nfs-kernel-server, acl]
@@ -33,12 +32,17 @@
         that:
           - freeipa_roster.schema_version | int == 1
           - freeipa_roster.freeipa.admin.password | length >= 8
+          # `pilot deploy` normally loads main.yaml as well as the canonical
+          # roster.  Do not let a stale duplicate admin secret surface much
+          # later as a no_log kinit failure.
+          - (ipa_admin_password is not defined) or
+            (ipa_admin_password == freeipa_roster.freeipa.admin.password)
           - ansible_os_family in nfs_server_packages_by_os_family
           - nfs_server_packages | length > 0
           - nfs_server_service | length > 0
           - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
           - stage != 'prod' or staging_attested_within_hours | int <= 168
-        fail_msg: "A canonical roster, admin credential, and matching stage confirmation are required."
+        fail_msg: "A canonical roster, consistent admin credential, and matching stage confirmation are required."
       no_log: true
       tags: [always]
 
@@ -74,6 +78,24 @@
         fail_msg: "Run freeipa-client-apply.yml on this host before enabling Kerberos NFS."
       tags: [always, C1]
 
+    # ansible_fqdn is collected before this play starts.  A pre-existing
+    # same-IP /etc/hosts alias can therefore make it a short service alias
+    # (for example siem-log-server), even when the machine hostname itself is
+    # a valid FQDN.  hostname --fqdn follows the configured local hostname;
+    # we still fail closed by matching that result against the canonical
+    # roster below.
+    - name: "Discover this NFS server's operating-system FQDN"
+      ansible.builtin.command: hostname --fqdn
+      check_mode: false
+      changed_when: false
+      register: nfs_hostname_fqdn
+      tags: [always]
+
+    - name: "Use the operating-system FQDN for canonical roster selection"
+      ansible.builtin.set_fact:
+        nfs_server_fqdn: "{{ nfs_hostname_fqdn.stdout | trim }}"
+      tags: [always]
+
     - name: "Select this NFS server from the canonical roster"
       ansible.builtin.set_fact:
         nfs_selected_servers: "{{ freeipa_roster.nfs.servers | selectattr('host', 'equalto', nfs_server_fqdn) | list }}"
@@ -83,13 +105,22 @@
       ansible.builtin.assert:
         that:
           - nfs_server_fqdn is match('^[^.]+\\.[^.]+\\..+$')
-          - nfs_server_fqdn == ansible_fqdn
           - nfs_selected_servers | length == 1
           - nfs_selected_servers[0].service_principal.principal == 'nfs/' + nfs_server_fqdn
           - nfs_selected_servers[0].service_principal.keytab == '/etc/krb5.keytab'
-        fail_msg: "inventory/ansible FQDN must map exactly to the roster NFS server and nfs/FQDN principal."
+        fail_msg: "Operating-system FQDN must map exactly to the roster NFS server and nfs/FQDN principal."
       when: not ansible_check_mode
       tags: [always, C1, C2]
+
+    - name: "Keep this NFS server FQDN canonical in /etc/hosts"
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} PILOT FQDN CANONICAL HOSTNAME"
+        insertbefore: '^127\.0\.1\.1\s'
+        block: >-
+          {{ ansible_default_ipv4.address }} {{ nfs_server_fqdn }}
+          {{ nfs_server_fqdn.split('.')[0] }}
+      tags: [C1, C2]
 
     - name: "Select the unique NFS server object"
       ansible.builtin.set_fact:

@@ -88,7 +88,7 @@ func TestRosterHasNFSServer_FalseWhenAbsent(t *testing.T) {
 func TestAppendMissingNFSServerStub_CreatesNFSSectionWhenAbsent(t *testing.T) {
 	path := writeRosterFixture(t, rosterFixtureNoNFS)
 
-	appended, err := AppendMissingNFSServerStub(path, "nexus")
+	appended, err := AppendMissingNFSServerStub(path, "nexus", "ipa.pilot.internal")
 	if err != nil {
 		t.Fatalf("AppendMissingNFSServerStub() error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestAppendMissingNFSServerStub_CreatesNFSSectionWhenAbsent(t *testing.T) {
 func TestAppendMissingNFSServerStub_AppendsAlongsideExistingServer(t *testing.T) {
 	path := writeRosterFixture(t, rosterFixtureWithNFS)
 
-	appended, err := AppendMissingNFSServerStub(path, "nexus")
+	appended, err := AppendMissingNFSServerStub(path, "nexus", "ipa.pilot.internal")
 	if err != nil {
 		t.Fatalf("AppendMissingNFSServerStub() error = %v", err)
 	}
@@ -142,10 +142,10 @@ func TestAppendMissingNFSServerStub_AppendsAlongsideExistingServer(t *testing.T)
 func TestAppendMissingNFSServerStub_IdempotentOnRepeatedCalls(t *testing.T) {
 	path := writeRosterFixture(t, rosterFixtureNoNFS)
 
-	if _, err := AppendMissingNFSServerStub(path, "nexus"); err != nil {
+	if _, err := AppendMissingNFSServerStub(path, "nexus", "ipa.pilot.internal"); err != nil {
 		t.Fatalf("first append error = %v", err)
 	}
-	appended, err := AppendMissingNFSServerStub(path, "nexus")
+	appended, err := AppendMissingNFSServerStub(path, "nexus", "ipa.pilot.internal")
 	if err != nil {
 		t.Fatalf("second append error = %v", err)
 	}
@@ -165,7 +165,7 @@ func TestRosterDomain_EncryptedFileReturnsErrRosterEncrypted(t *testing.T) {
 	if _, err := RosterDomain(path); err != ErrRosterEncrypted {
 		t.Fatalf("RosterDomain() error = %v, want ErrRosterEncrypted", err)
 	}
-	if _, err := AppendMissingNFSServerStub(path, "nexus"); err != ErrRosterEncrypted {
+	if _, err := AppendMissingNFSServerStub(path, "nexus", "ipa.pilot.internal"); err != ErrRosterEncrypted {
 		t.Fatalf("AppendMissingNFSServerStub() error = %v, want ErrRosterEncrypted", err)
 	}
 }

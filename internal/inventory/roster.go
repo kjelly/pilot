@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -30,6 +31,26 @@ type rosterHead struct {
 			} `yaml:"service_principal"`
 		} `yaml:"servers"`
 	} `yaml:"nfs"`
+}
+
+// FreeIPADomain reads the deployment domain from group_vars/freeipa.yml.
+// The domain is inventory configuration, not roster data; keeping this
+// lookup here lets controller-side helpers derive FQDNs without duplicating
+// the value in .vault/ipa-identity.yaml.
+func FreeIPADomain(workspaceDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(workspaceDir, "group_vars", "freeipa.yml"))
+	if err != nil {
+		return "", err
+	}
+	var vars map[string]any
+	if err := yaml.Unmarshal(data, &vars); err != nil {
+		return "", fmt.Errorf("parse FreeIPA group vars: %w", err)
+	}
+	domain, _ := vars["freeipa_domain"].(string)
+	if strings.TrimSpace(domain) == "" {
+		return "", fmt.Errorf("freeipa_domain is missing from group_vars/freeipa.yml")
+	}
+	return strings.TrimSpace(domain), nil
 }
 
 func readRosterHead(path string) (rosterHead, error) {
@@ -104,13 +125,13 @@ type nfsServicePrincipal struct {
 // entry for hostName to the roster at path if one matching its principal
 // isn't already present. It never touches or reorders any existing content
 // — appended=false, nil means the roster already had a matching entry.
-// ErrRosterEncrypted is returned unchanged (via RosterDomain/RosterHasNFSServer)
+// ErrRosterEncrypted is returned unchanged (via RosterHasNFSServer)
 // when the file can't be inspected at all, so callers can tell "nothing to
 // do" apart from "couldn't check."
-func AppendMissingNFSServerStub(path, hostName string) (appended bool, err error) {
-	domain, err := RosterDomain(path)
-	if err != nil {
-		return false, err
+func AppendMissingNFSServerStub(path, hostName, domain string) (appended bool, err error) {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return false, fmt.Errorf("FreeIPA domain is required from group_vars/freeipa.yml")
 	}
 	fqdn := RosterHostFQDN(hostName, domain)
 	has, err := RosterHasNFSServer(path, fqdn)

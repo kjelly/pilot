@@ -100,6 +100,12 @@ func TestRegression_FreeipaIdentityAllowsSharedNFSRoster(t *testing.T) {
 		t.Fatalf("read %s: %v", playbookPath, err)
 	}
 	playbook := string(raw)
+	if strings.Contains(playbook, "freeipa_roster.freeipa.domain") || strings.Contains(playbook, "freeipa_roster.freeipa.realm") {
+		t.Fatal("FreeIPA domain/realm must come from inventory group_vars, not the identity roster")
+	}
+	if !strings.Contains(playbook, `ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"`) {
+		t.Fatal("identity reconciliation must source its domain from freeipa_domain")
+	}
 	if strings.Contains(playbook, "freeipa_roster.nfs_clients | default([]) | length == 0") {
 		t.Fatal("identity reconciliation must accept nfs_clients in the shared canonical roster")
 	}
@@ -109,8 +115,26 @@ func TestRegression_FreeipaIdentityAllowsSharedNFSRoster(t *testing.T) {
 	if strings.Contains(playbook, "--host={{ ansible_fqdn }}") {
 		t.Fatal("HBAC self-tests must not depend on gathered facts when gather_facts is false")
 	}
-	if !strings.Contains(playbook, `identity_hbac_test_host: "{{ freeipa_roster.freeipa.server }}"`) ||
+	if !strings.Contains(playbook, `identity_hbac_test_host: "{{ freeipa_roster.freeipa.server | default(ipa_server_fqdn | default(inventory_hostname)) }}"`) ||
 		strings.Count(playbook, `--host={{ identity_hbac_test_host }}`) != 2 {
 		t.Fatal("HBAC pre/post-lock tests must use the canonical roster server FQDN")
+	}
+}
+
+// TestRegression_FreeipaIdentityAllowAllUsesCommandCategory prevents an empty
+// command list from becoming deny-everything and locks the explicit canonical
+// roster mechanism: allow.command_category: all.
+func TestRegression_FreeipaIdentityAllowAllUsesCommandCategory(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-identity-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+	if !strings.Contains(playbook, "Normalize canonical sudo rules for the compatibility reconciler") ||
+		!strings.Contains(playbook, "'allow_commands': (item.allow | default({})).commands | default([])") ||
+		!strings.Contains(playbook, "item.allow | default({})).command_groups | default([]) | length > 0") ||
+		!strings.Contains(playbook, "'cmdcat': (item.allow | default({})).command_category | default('all')") {
+		t.Fatal("allow.command_category: all must reconcile to FreeIPA cmdcat=all")
 	}
 }
