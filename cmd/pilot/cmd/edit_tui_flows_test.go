@@ -1637,7 +1637,7 @@ func TestEditRouter_Teatest_RosterFlow_RejectedUserEditShowsBannerAndDoesNotWrit
 		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
-	waitFor("enabled：false")
+	waitFor("enabled：true")
 
 	// items: 0 name,1 state,...,10 enabled. Set enabled=true first — no
 	// violation on its own (checkUsers only rejects state:disabled +

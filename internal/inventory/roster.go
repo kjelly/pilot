@@ -549,7 +549,7 @@ func SimulateAddRosterUser(path, name string) ([]RosterViolation, error) {
 	if err != nil {
 		return nil, err
 	}
-	root["users"] = append(listField(root, "users"), map[string]any{"name": name, "state": "present"})
+	root["users"] = append(listField(root, "users"), map[string]any{"name": name, "state": "present", "enabled": true})
 	return ValidateRoster(root), nil
 }
 
@@ -612,9 +612,17 @@ func SimulateSetRosterGroup(path, name string, updated map[string]any) (violatio
 // every other user field (email/ssh_keys/password/...) is optional per
 // the roster schema and left for the operator to fill in by hand
 // afterward; see freeipa-identity.roster.example.yaml for the full shape.
+// Enabled is written explicitly (mirroring the HBAC/sudo rule stubs) rather
+// than left absent: freeipa-identity-apply.yml defaults a missing `enabled`
+// to true, but the roster manager's own detail screen displayed the field
+// as "false" when absent — a brand-new user showed as disabled in the
+// editor while reconcile actually left them enabled (confirmed live against
+// a real FreeIPA server: kinit succeeded). Writing it explicitly keeps the
+// persisted value and the editor's display in agreement.
 type rosterUserStub struct {
-	Name  string `yaml:"name"`
-	State string `yaml:"state"`
+	Name    string `yaml:"name"`
+	State   string `yaml:"state"`
+	Enabled bool   `yaml:"enabled"`
 }
 
 // rosterGroupStub is AppendRosterGroup's minimal, valid shape — category
@@ -632,7 +640,7 @@ type rosterGroupStub struct {
 // SimulateAddRosterUser first and only call this once it reports no
 // violations — this function does not validate anything itself.
 func AppendRosterUser(path, name string) error {
-	return appendTopLevelRosterEntry(path, "users", rosterUserStub{Name: name, State: "present"})
+	return appendTopLevelRosterEntry(path, "users", rosterUserStub{Name: name, State: "present", Enabled: true})
 }
 
 // AppendRosterGroup is AppendRosterUser's group counterpart. See

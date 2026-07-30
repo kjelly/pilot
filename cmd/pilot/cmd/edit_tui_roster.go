@@ -580,10 +580,10 @@ func pushRosterUserDetail(r *editRouterModel, dir, path, name, banner string) te
 		fmt.Sprintf("gid：%s", rosterIntDisplay(fields, "gid")),
 		fmt.Sprintf("login_shell：%s", rosterDisplay(fields, "login_shell")),
 		fmt.Sprintf("home_directory：%s", rosterDisplay(fields, "home_directory")),
-		fmt.Sprintf("enabled：%s", rosterBoolDisplay(fields, "enabled")),
+		fmt.Sprintf("enabled：%s", rosterBoolDisplayDefault(fields, "enabled", true)),
 		fmt.Sprintf("password.initial：%s", rosterSecretDisplay(pw, "initial")),
 		fmt.Sprintf("password.force_change：%s", rosterBoolDisplay(pw, "force_change")),
-		fmt.Sprintf("password.preserve_existing：%s", rosterBoolDisplay(pw, "preserve_existing")),
+		fmt.Sprintf("password.preserve_existing：%s", rosterBoolDisplayDefault(pw, "preserve_existing", true)),
 		fmt.Sprintf("ssh_keys.values（共 %d 支公鑰）", len(values)),
 		"↩  返回",
 	}
