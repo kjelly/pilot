@@ -709,6 +709,7 @@ type vaultInput struct {
 	ExtraVarsFile     string // -e @<file>
 	VaultPasswordFile string // --vault-password-file <file>
 	AskVaultPass      bool   // --ask-vault-pass (needs stdin wired to the terminal)
+	AskBecomePass     bool   // --ask-become-pass (sudo password prompt; optional, independent of vault — see becomeArgs)
 }
 
 // defaultVaultFile returns the conventional vault vars file path next to an
@@ -811,6 +812,28 @@ func (v vaultInput) args() []string {
 	return out
 }
 
+// becomeArgs returns --ask-become-pass when the operator opted into sudo
+// password prompting. Kept separate from args(): args() is also handed to
+// `ansible-inventory` (resolveInventoryVariables), which does not accept
+// --ask-become-pass and errors out on an unrecognized argument.
+func (v vaultInput) becomeArgs() []string {
+	if v.AskBecomePass {
+		return []string{"--ask-become-pass"}
+	}
+	return nil
+}
+
+// promptBecome asks whether this deployment should prompt for a sudo
+// (become) password at ansible-playbook run time. Optional and off by
+// default: most pilot-provisioned hosts have NOPASSWD sudoers, so today's
+// passwordless behavior is unchanged unless the operator opts in here.
+func promptBecome() bool {
+	return runConfirmProgram(
+		"這次套用要手動輸入 sudo(become)密碼嗎？(--ask-become-pass；多數 pilot 主機 sudoers 已設 NOPASSWD，可略過)",
+		false,
+	)
+}
+
 // ---- execution: dry-run first, then optionally apply -----------------------
 
 var confirmDeployment = runConfirmProgram
@@ -852,8 +875,9 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		baseArgs = append(baseArgs, "-e", v)
 	}
 	baseArgs = append(baseArgs, vault.args()...)
+	baseArgs = append(baseArgs, vault.becomeArgs()...)
 
-	if vault.AskVaultPass {
+	if vault.AskVaultPass || vault.AskBecomePass {
 		runner.Stdin = os.Stdin
 	}
 
@@ -1397,6 +1421,7 @@ func deploymentRollbackStep(runner *ansible.Runner, out io.Writer, selected []co
 				args = append(args, "-e", value)
 			}
 			args = append(args, vault.args()...)
+			args = append(args, vault.becomeArgs()...)
 			fmt.Fprintf(out, "▶ 回滾：ansible-playbook %s\n", strings.Join(args, " "))
 			result, err := runner.Run(ctx, args...)
 			if err != nil {
@@ -1439,6 +1464,9 @@ func deploymentMetadata(root, playbook string, components, extraVars []string, v
 	}
 	if vault.AskVaultPass {
 		metadata["vault_password_prompted"] = true
+	}
+	if vault.AskBecomePass {
+		metadata["become_password_prompted"] = true
 	}
 	digests := make(map[string]string)
 	if digest, err := fileSHA256(filepath.Join(root, playbook)); err == nil {
@@ -1681,6 +1709,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	if err != nil {
 		return err
 	}
+	vault.AskBecomePass = promptBecome()
 
 	// Cross-role host addresses (thanos_s3_target_host, siem_forward_host,
 	// wazuh_manager_host, …): auto-detect from the inventory exactly like the
@@ -1905,6 +1934,7 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 	if err != nil {
 		return err
 	}
+	vault.AskBecomePass = promptBecome()
 
 	extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
 	if err != nil {

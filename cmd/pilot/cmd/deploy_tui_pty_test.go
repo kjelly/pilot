@@ -131,6 +131,9 @@ func TestPilotDeployPTY_DeclineAtFinalConfirmNeverRunsAnsible(t *testing.T) {
 	waitForNewDeployScreen(t, proc, "需要密碼變數嗎")
 	proc.press(t, "\r") // "不需要"
 
+	waitForNewDeployScreen(t, proc, "sudo(become)密碼")
+	proc.press(t, "\r") // decline --ask-become-pass (default off)
+
 	waitForNewDeployScreen(t, proc, "還有其他 -e 變數")
 	proc.press(t, "\r") // leave extra -e vars blank
 
