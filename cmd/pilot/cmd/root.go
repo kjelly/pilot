@@ -55,6 +55,15 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
+// ExitCoder lets a RunE error carry a specific process exit code instead of
+// the default 1 every other error maps to (see cmd/pilot/main.go). Most
+// commands never need this — only ones with a documented multi-code exit
+// contract, like `pilot network-check`'s 0/1/2 (see network_check.go).
+type ExitCoder interface {
+	error
+	ExitCode() int
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default ~/.config/pilot/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "data directory for the history db and target state")
