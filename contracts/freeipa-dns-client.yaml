@@ -1,0 +1,37 @@
+schemaVersion: 1
+id: freeipa-dns-client
+role: freeipa-dns-client
+specs:
+  - path: docs/verification/freeipa-dns-client.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/freeipa-dns-client-apply.yml
+regressionTests:
+  - internal/spec/freeipa_dns_client_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: freeipa-server, required: true, relation: providerEndpoint}
+  - {component: freeipa-server-replica, required: false, relation: planOnly,
+     reason: "optional extra DNS-providing host, considered as a fallback nameserver when that replica's own freeipa_setup_dns=true; the apply playbook walks groups['freeipa-server-replica'] itself, no explicit binding needed"}
+bindings:
+  - input: freeipa_dns_client_servers
+    requiredWhenDependencySelected: false
+    sourceSelection: all
+    from: {component: freeipa-server, endpoint: https}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 1}
+groupVars:
+  - {name: freeipa_domain, type: string, required: false, default: ipa.pilot.internal, secret: false}
+  # Explicit override; empty (the default) means "auto-detect from
+  # groups['freeipa-server']/groups['freeipa-server-replica']" — see the
+  # apply playbook's pre_tasks and the spec's §1.5.
+  - {name: freeipa_dns_client_servers, type: stringList, required: false, secret: false}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions:
+    "docs/verification/freeipa-dns-client.md#C2": {kind: verifyOnly, reason: "resolver-managing service health (Debian systemd-resolved / EL NetworkManager already active) is a precondition this playbook consumes, not a service it starts/stops itself"}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}
