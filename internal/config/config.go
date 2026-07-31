@@ -12,8 +12,9 @@ import (
 )
 
 type Config struct {
-	DataDir string        `yaml:"data_dir"`
-	Sandbox SandboxConfig `yaml:"sandbox,omitempty"`
+	DataDir      string        `yaml:"data_dir"`
+	Sandbox      SandboxConfig `yaml:"sandbox,omitempty"`
+	HBACServices []string      `yaml:"hbac_services,omitempty"`
 }
 
 // SandboxConfig configures the optional Docker-sandbox mode used by
@@ -35,13 +36,28 @@ func Default() *Config {
 		Sandbox: SandboxConfig{
 			Pull: "missing",
 		},
+		HBACServices: []string{
+			"sshd",
+			"sudo",
+			"sudo-i",
+			"su",
+			"su-l",
+			"login",
+			"gdm-password",
+			"nx",
+			"cockpit",
+		},
 	}
 }
 
 func Load(path string) (*Config, error) {
 	cfg := Default()
 	if path == "" {
-		return cfg, nil
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return cfg, nil
+		}
+		path = filepath.Join(dir, "pilot", "config.yaml")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
