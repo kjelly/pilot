@@ -185,9 +185,13 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	}
 	applyRaw := string(playbookRaw)
 	universeIndex := strings.Index(applyRaw, "Ensure Ubuntu universe repository is enabled")
-	installIndex := strings.Index(applyRaw, "Step 1: Install auditd + audispd-plugins")
+	installIndex := strings.Index(applyRaw, "Step 1: Install auditd + audispd-plugins + rsyslog")
 	if universeIndex < 0 || installIndex < 0 || universeIndex > installIndex {
-		t.Fatalf("audit-log-forwarding must enable Ubuntu universe before installing audispd-plugins")
+		t.Fatalf("audit-log-forwarding must enable Ubuntu universe before installing auditd/audispd-plugins/rsyslog")
+	}
+	installBlock := applyRaw[installIndex:]
+	if !strings.Contains(installBlock, "name: [auditd, audispd-plugins, rsyslog]") {
+		t.Fatalf("Ubuntu audit-log-forwarding install must include rsyslog")
 	}
 	if !strings.Contains(applyRaw, "ansible.builtin.apt_repository") ||
 		!strings.Contains(applyRaw, "{{ ansible_distribution_release }} universe") {

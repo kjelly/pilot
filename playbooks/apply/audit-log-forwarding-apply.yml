@@ -128,10 +128,10 @@
       check_mode: false
       when: ansible_distribution == "Ubuntu"
 
-    - name: "Step 1: Install auditd + audispd-plugins (Debian family)"
+    - name: "Step 1: Install auditd + audispd-plugins + rsyslog (Debian family)"
       tags: [C1, C2]
       ansible.builtin.apt:
-        name: [auditd, audispd-plugins]
+        name: [auditd, audispd-plugins, rsyslog]
         state: present
         update_cache: true
       when: ansible_os_family == "Debian"
