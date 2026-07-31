@@ -436,19 +436,20 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 23 支**都有 `stage`/`confirm_staging`/
+`playbooks/apply/*.yml` 現在**全部 25 支**都有 `stage`/`confirm_staging`/
 `confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`docker`、
-`freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-nfs-server`、
+`freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
+`freeipa-dns-client`、`freeipa-nfs-server`、
 `freeipa-nfs-client`、`freeipa-server-replica`、
 `keycloak`、`keycloak-db`、`seaweedfs-s3`、`pam-oidc-sshd`、`log-server`、
 `audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
 `os-patch-sla`(用 `patch_stage`)、`prometheus`、`thanos-query`、
-`alertmanager`、`dashboard`、`log-shipping`)。`freeipa-server-replica` 與後五支
-可觀測性堆疊一樣是**還沒接進 `site.yml`**(前者是刻意的:加 HA replica 是
-day-2、opt-in 操作,不是每個部署都要的穩態角色,比照 `freeipa-identity` 的
-待遇;後五支則是一開始清點時漏掉,2026-07-09 一併補齊)——**不要因為一支
-playbook「還沒接進 site.yml」或「角色感覺不重要」就假設它可以不用 gate**,
-新增任何 apply playbook 一律要帶。
+`alertmanager`、`dashboard`、`log-shipping`)。`freeipa-server-replica`、
+`freeipa-dns`、`freeipa-dns-client` 與後五支可觀測性堆疊一樣是**還沒接進
+`site.yml`**(前三者是刻意的:day-2、opt-in 操作,不是每個部署都要的穩態
+角色,比照 `freeipa-identity` 的待遇;後五支則是一開始清點時漏掉,
+2026-07-09 一併補齊)——**不要因為一支 playbook「還沒接進 site.yml」或
+「角色感覺不重要」就假設它可以不用 gate**,新增任何 apply playbook 一律要帶。
 
 寫或改任何一支 apply playbook,`pre_tasks` 除了既有的「staging/prod 需要
 confirm 旗標」assert,**必須**同時帶這一道 cross-check(新增同類 playbook 照抄,
@@ -709,3 +710,4 @@ git status --short
 | 2026-07-22 | v1.15 | 新增「Trec-related issues never go in runbooks」：任何 trec 驅動 wizard 過程中發現的 issue（opcodes 行為、MCP/CLI 差異、wizard prompt chain、host-key churn、預填行為等）一律記錄在 `.agents/skills/pilot-trec-verification/SKILL.md` 及其同層 tool-driver skills；operational runbook 只記錄「這次 pass 做了什麼/驗證了什麼」，不記錄「trec 驅動時踩了什麼坑」。原因：v11.0 重新驗證時把 wizard banner 的 UI 落差誤列為「Real bugs #27」，實際是 trec 驅動時的 prompting 路徑問題，應該留在 trec skill 的 §7 gotcha list 而非 runbook 的 bug table | pilot |
 | 2026-07-22 | v1.16 | actual-run evidence 與操作文件分離：runbook/spec 只留目前有效摘要與連結，完整輸出進獨立 artifact；正式完整測試改為先凍結本地 candidate commit，再從乾淨隔離 checkout 驗證，後續 evidence-only commit 引用 tested revision/tree。日常 dirty worktree 仍可跑快速測試 | pilot |
 | 2026-07-23 | v1.17 | 新增 committed-document link rule：tracked 文件的 repository-relative Markdown link 必須指向 Git 追蹤檔；不得連到 `.verification/`、暫存、vault、generated local-only、ignored 或不存在的檔案。一次性驗收改以 sanitized candidate/tree、target 與 verdict 摘要表達 | pilot |
+| 2026-07-31 | v1.18 | 新增第 25 支 apply playbook `freeipa-dns-client-apply.yml`(目標主機把 DNS resolver 指向已經在跑 DNS 的 FreeIPA server/replica;與 `freeipa-client` AAA 納管互不相依,day-2/opt-in,不接進 `site.yml`,比照 `freeipa-server-replica`/`freeipa-dns`);§4.3 playbook 清點更新為 25 支,補上先前清點漏掉的 `freeipa-dns` | pilot |

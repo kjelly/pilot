@@ -12,7 +12,9 @@
 > `docs/verification/freeipa-server.md`），而是 `freeipa-dns-apply.yml` 這個
 > **通用 reconciler**本身的正確性：給它任何 manifest（zones/records 宣告），
 > 套用後 FreeIPA 的 DNS 控制平面必須完全對應 manifest 宣告的內容。與
-> `freeipa-identity.md`（授權資料 reconciler）同一種驗證模型。
+> `freeipa-identity.md`（授權資料 reconciler）同一種驗證模型。本檔管的是
+> FreeIPA **自己**的 DNS 控制平面資料；讓**其他目標主機**的 OS resolver 真的
+> 去用這個 DNS 服務是另一個獨立能力，見 `docs/verification/freeipa-dns-client.md`。
 
 ## 0. 這份檔的狀態（先讀）
 
