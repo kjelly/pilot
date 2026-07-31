@@ -73,6 +73,11 @@ var deployCatalog = []deployPlaybook{
 		Reconcile: true,
 	},
 	{
+		Key: "freeipa-dns-client", Label: "把機器的 DNS resolver 指向 FreeIPA DNS(server/replica)",
+		Playbook: "playbooks/apply/freeipa-dns-client-apply.yml", DefaultGroup: "freeipa-dns-client", StageVar: "stage",
+		Note: "day-2/opt-in 角色(不在 site.yml);與 freeipa-client(AAA 納管)互不相依,不需先做身分 enrollment。自動從 inventory 偵測 freeipa-server/freeipa-server-replica 裡有開 DNS 的主機;也可套用到 FreeIPA server/replica 自己身上(自動優先指向自己)。支援 Debian/Ubuntu(systemd-resolved)與 EL(NetworkManager)。",
+	},
+	{
 		Key: "freeipa-nfs-server", Label: "FreeIPA Kerberos NFSv4 server",
 		Playbook: "playbooks/apply/freeipa-nfs-server-apply.yml", DefaultGroup: "freeipa-nfs-server", StageVar: "stage",
 		Note:      "目標主機必須先完成 freeipa-client enrollment；使用 canonical FreeIPA roster 建立 nfs/FQDN principal、keytab、ACL 與安全 exports（支援 RedHat 與 Debian/Ubuntu）。",

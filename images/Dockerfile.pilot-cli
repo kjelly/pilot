@@ -80,7 +80,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # docker: python SDK backing community.docker.*.
 # psycopg2-binary: backing community.postgresql.*.
+# community.general: backing community.general.nmcli (used by
+#   playbooks/apply/freeipa-dns-client-apply.yml's EL/NetworkManager branch).
+#   Added 2026-07-31: this was the first playbook in the repo to need
+#   community.general, and its absence was only caught by actually running
+#   the playbook through --sandbox against a real EL9 vm-target (AGENTS.md
+#   §1.1 actual-run rule) — ansible failed with "couldn't resolve
+#   module/action 'community.general.nmcli'" until this collection was added.
 #
+
 # Collections install to the system-wide path (-p), not the default
 # ~/.ansible/collections: `pilot deploy`/`pilot reconcile` always set
 # ANSIBLE_HOME to an isolated per-run directory (prepareDeployAnsibleRuntime
@@ -100,7 +108,8 @@ RUN pip install --no-cache-dir \
     && ansible-galaxy collection install -p /usr/share/ansible/collections \
         ansible.posix \
         community.docker \
-        community.postgresql
+        community.postgresql \
+        community.general
 
 COPY --from=builder /out/pilot /usr/local/bin/pilot
 

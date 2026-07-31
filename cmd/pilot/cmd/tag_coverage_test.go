@@ -79,6 +79,10 @@ var specTagMap = []specTagMapping{
 		exemptRows: map[string]string{
 			"C12": "idempotent-rerun is a multi-run property, not a single tagged task — same reasoning as freeipa-identity.md's own §7 dynamic SOPs",
 		}},
+	{spec: "freeipa-dns-client.md", playbook: "freeipa-dns-client-apply.yml",
+		exemptRows: map[string]string{
+			"C2": "resolver-managing service health (Debian systemd-resolved / EL NetworkManager already active) is a precondition this playbook consumes, not a service it starts/stops itself — verify-only",
+		}},
 	{spec: "freeipa-client.md", playbook: "freeipa-client-apply.yml",
 		exemptRows: map[string]string{
 			"C4":  "host keytab is produced by ipa-client-install (C1..C3) — no separate mutation task",

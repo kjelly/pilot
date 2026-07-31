@@ -85,6 +85,10 @@ all:
           hosts:
             web-1:
             web-2:
+        freeipa-dns-client:      # DNS resolver 指向 FreeIPA DNS;與 freeipa-client 互不相依
+          hosts:                 # 見 docs/verification/freeipa-dns-client.md;FreeIPA server/replica 自己也可加進來(自動優先指向自己)
+            web-1:
+            web-2:
 
     # -- 核心基礎服務(core-infra-provider-apply.yml,以 infra_role 選角色)--
     dns:                       # 跑 -e infra_role=dns 時作用的機器
