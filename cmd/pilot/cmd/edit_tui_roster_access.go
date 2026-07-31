@@ -176,7 +176,13 @@ func pushRosterHostgroupEdit(r *editRouterModel, dir, path, name string, mutate 
 	return pushRosterHostgroupDetail(r, dir, path, name, "✅ 已更新")
 }
 
-var rosterHBACServices = []string{"sshd", "sudo", "sudo-i"}
+func rosterHBACServiceChoices() []string {
+	services := loadConfig().HBACServices
+	if len(services) == 0 {
+		return []string{"sshd", "sudo", "sudo-i", "su", "su-l", "login", "gdm-password", "nx", "cockpit"}
+	}
+	return append([]string(nil), services...)
+}
 
 func pushRosterHBACMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	names, err := inventory.RosterHBACRuleNames(path)
@@ -271,7 +277,7 @@ func pushRosterAddHBACHostgroups(r *editRouterModel, dir, path, name string, gro
 }
 
 func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, groups, hostgroups []string) tea.Cmd {
-	return checklist(r, "允許的 PAM service", rosterHBACServices, []string{"sshd"}, func(r *editRouterModel, services []string) tea.Cmd {
+	return checklist(r, "允許的 PAM service", rosterHBACServiceChoices(), []string{"sshd"}, func(r *editRouterModel, services []string) tea.Cmd {
 		rule := map[string]any{"name": name, "state": "present", "enabled": true, "subjects": map[string]any{"users": []string{}, "groups": groups}, "targets": map[string]any{"hosts": []string{}, "hostgroups": hostgroups}, "services": services}
 		v, err := inventory.SimulateAddRosterHBACRule(path, rule)
 		if err != nil {
@@ -348,7 +354,7 @@ func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 }
 func pushRosterHBACServices(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
-	return checklist(r, "services", rosterHBACServices, rosterStringSlice(f, "services"), func(r *editRouterModel, v []string) tea.Cmd {
+	return checklist(r, "services", rosterHBACServiceChoices(), rosterStringSlice(f, "services"), func(r *editRouterModel, v []string) tea.Cmd {
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { x["services"] = v })
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }

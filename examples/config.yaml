@@ -8,6 +8,19 @@ auto_approve: never   # never | low | medium
 
 data_dir: ~/.local/share/pilot
 
+# PAM services offered by `pilot edit` when creating/editing FreeIPA HBAC rules.
+# Keep this list aligned with the PAM service names installed on your hosts.
+hbac_services:
+  - sshd
+  - sudo
+  - sudo-i
+  - su
+  - su-l
+  - login
+  - gdm-password
+  - nx
+  - cockpit
+
 # Block specific tools from being callable (defense in depth)
 # blocked_tools:
 #   - run_command
