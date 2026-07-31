@@ -62,10 +62,11 @@ type fixturePlaybooks struct {
 }
 
 type fixtureDependency struct {
-	Component string `yaml:"component"`
-	Required  bool   `yaml:"required"`
-	Relation  string `yaml:"relation"`
-	Reason    string `yaml:"reason"`
+	Component string   `yaml:"component"`
+	Required  bool     `yaml:"required"`
+	Relation  string   `yaml:"relation"`
+	Reason    string   `yaml:"reason"`
+	Endpoints []string `yaml:"endpoints"`
 }
 
 type fixtureBinding struct {
@@ -380,6 +381,23 @@ func TestFixtureSemanticValidationRejectsInvalidContracts(t *testing.T) {
 			},
 			wantErr: `tag "docker-C999" is absent`,
 		},
+		{
+			name: "dependency endpoints filter requires providerEndpoint relation",
+			base: restic,
+			mutate: func(c *fixtureContract) {
+				c.Dependencies[0].Relation = "sameHosts"
+				c.Dependencies[0].Endpoints = []string{"s3"}
+			},
+			wantErr: "endpoints filter requires providerEndpoint relation",
+		},
+		{
+			name: "dependency endpoints filter rejects duplicate entries",
+			base: restic,
+			mutate: func(c *fixtureContract) {
+				c.Dependencies[0].Endpoints = []string{"s3", "s3"}
+			},
+			wantErr: `duplicate endpoints entry "s3"`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -581,6 +599,21 @@ func validateFixtureFields(root string, contract fixtureContract) error {
 			}
 		default:
 			return fmt.Errorf("invalid dependency relation %q", dependency.Relation)
+		}
+		if len(dependency.Endpoints) > 0 {
+			if dependency.Relation != "providerEndpoint" {
+				return fmt.Errorf("dependency %q endpoints filter requires providerEndpoint relation", dependency.Component)
+			}
+			seenEndpoints := make(map[string]struct{}, len(dependency.Endpoints))
+			for _, name := range dependency.Endpoints {
+				if name == "" {
+					return fmt.Errorf("dependency %q endpoints entry cannot be empty", dependency.Component)
+				}
+				if _, exists := seenEndpoints[name]; exists {
+					return fmt.Errorf("dependency %q duplicate endpoints entry %q", dependency.Component, name)
+				}
+				seenEndpoints[name] = struct{}{}
+			}
 		}
 		dependencies[dependency.Component] = dependency
 	}

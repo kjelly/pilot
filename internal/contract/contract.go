@@ -71,10 +71,11 @@ type Playbooks struct {
 
 // Dependency describes a component dependency and its placement relation.
 type Dependency struct {
-	Component string `yaml:"component"`
-	Required  bool   `yaml:"required"`
-	Relation  string `yaml:"relation"`
-	Reason    string `yaml:"reason"`
+	Component string   `yaml:"component"`
+	Required  bool     `yaml:"required"`
+	Relation  string   `yaml:"relation"`
+	Reason    string   `yaml:"reason"`
+	Endpoints []string `yaml:"endpoints"`
 }
 
 // Binding maps a provider endpoint to one component input.
@@ -599,6 +600,21 @@ func validateDependenciesAndBindings(dependencies []Dependency, bindings []Bindi
 			}
 		default:
 			return fmt.Errorf("invalid dependency relation %q", dependency.Relation)
+		}
+		if len(dependency.Endpoints) > 0 {
+			if dependency.Relation != "providerEndpoint" {
+				return fmt.Errorf("dependency %q endpoints filter requires providerEndpoint relation", dependency.Component)
+			}
+			seen := make(map[string]struct{}, len(dependency.Endpoints))
+			for _, name := range dependency.Endpoints {
+				if name == "" {
+					return fmt.Errorf("dependency %q endpoints entry cannot be empty", dependency.Component)
+				}
+				if _, exists := seen[name]; exists {
+					return fmt.Errorf("dependency %q duplicate endpoints entry %q", dependency.Component, name)
+				}
+				seen[name] = struct{}{}
+			}
 		}
 		knownDependencies[dependency.Component] = dependency
 	}

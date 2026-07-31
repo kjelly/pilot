@@ -34,6 +34,9 @@ endpoints:
   - {name: ldap, scheme: ldap, port: 389}
   - {name: ldaps, scheme: ldaps, port: 636}
   - {name: kerberosTcp, scheme: tcp, port: 88}
+  - {name: kerberosUdp, scheme: udp, port: 88}
+  - {name: kpasswdUdp, scheme: udp, port: 464}
+  - {name: httpBootstrap, scheme: http, port: 80}
   - {name: https, scheme: https, port: 443}
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false

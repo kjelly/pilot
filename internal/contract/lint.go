@@ -40,7 +40,10 @@ func ValidateBundleReferences(root string, catalog Catalog) error {
 	if err := validateDependencyCycles(byID); err != nil {
 		return err
 	}
-	return validateBindingEndpoints(byID)
+	if err := validateBindingEndpoints(byID); err != nil {
+		return err
+	}
+	return validateDependencyEndpoints(byID)
 }
 
 func validateContractFiles(root string, component Contract) ([]string, error) {
@@ -244,6 +247,34 @@ func validateBindingEndpoints(components map[string]Contract) error {
 			}
 			if !found {
 				return fmt.Errorf("component %q binding %s references unknown endpoint %s.%s", component.ID, binding.Input, binding.From.Component, binding.From.Endpoint)
+			}
+		}
+	}
+	return nil
+}
+
+// validateDependencyEndpoints checks that every name in a providerEndpoint
+// dependency's optional Endpoints filter (see Dependency.Endpoints) exists in
+// the referenced provider component's own Endpoints. An empty filter means
+// "check every endpoint the provider declares" and needs no cross-reference.
+func validateDependencyEndpoints(components map[string]Contract) error {
+	for _, component := range components {
+		for _, dependency := range component.Dependencies {
+			if len(dependency.Endpoints) == 0 {
+				continue
+			}
+			provider, ok := components[dependency.Component]
+			if !ok {
+				return fmt.Errorf("component %q dependency %q endpoints filter references unknown component", component.ID, dependency.Component)
+			}
+			known := make(map[string]bool, len(provider.Endpoints))
+			for _, endpoint := range provider.Endpoints {
+				known[endpoint.Name] = true
+			}
+			for _, name := range dependency.Endpoints {
+				if !known[name] {
+					return fmt.Errorf("component %q dependency %q references unknown endpoint %s.%s", component.ID, dependency.Component, dependency.Component, name)
+				}
 			}
 		}
 	}

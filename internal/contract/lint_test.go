@@ -72,3 +72,49 @@ func TestValidateBundleReferencesRejectsUnknownProviderEndpoint(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestValidateDependencyEndpointsRejectsUnknownEndpointName(t *testing.T) {
+	components := map[string]Contract{
+		"provider": {ID: "provider", Endpoints: []Endpoint{{Name: "ldap"}, {Name: "kerberosTcp"}}},
+		"client": {
+			ID: "client",
+			Dependencies: []Dependency{
+				{Component: "provider", Relation: "providerEndpoint", Endpoints: []string{"ldap", "does-not-exist"}},
+			},
+		},
+	}
+	err := validateDependencyEndpoints(components)
+	if err == nil || !strings.Contains(err.Error(), "unknown endpoint") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateDependencyEndpointsAcceptsKnownEndpointNames(t *testing.T) {
+	components := map[string]Contract{
+		"provider": {ID: "provider", Endpoints: []Endpoint{{Name: "ldap"}, {Name: "kerberosTcp"}}},
+		"client": {
+			ID: "client",
+			Dependencies: []Dependency{
+				{Component: "provider", Relation: "providerEndpoint", Endpoints: []string{"ldap", "kerberosTcp"}},
+			},
+		},
+	}
+	if err := validateDependencyEndpoints(components); err != nil {
+		t.Fatalf("valid endpoints filter rejected: %v", err)
+	}
+}
+
+func TestValidateDependencyEndpointsRejectsUnknownProviderComponent(t *testing.T) {
+	components := map[string]Contract{
+		"client": {
+			ID: "client",
+			Dependencies: []Dependency{
+				{Component: "ghost", Relation: "providerEndpoint", Endpoints: []string{"anything"}},
+			},
+		},
+	}
+	err := validateDependencyEndpoints(components)
+	if err == nil || !strings.Contains(err.Error(), "unknown component") {
+		t.Fatalf("err=%v", err)
+	}
+}
