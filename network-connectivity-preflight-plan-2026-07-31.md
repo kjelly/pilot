@@ -71,57 +71,79 @@ contracts 已有下列結構化資訊：
 
 ## 3. Contract schema 設計
 
-### 3.1 新增 consumer-side `networkRequirements`
+港口資訊的 source of truth 是「provider 自己宣告的 `endpoints:`」，不新增一份
+consumer 側手工維護的網路需求清單。理由見 3.2。
 
-在 `ComponentContract v1` 增加可選欄位，不改既有 `endpoints` 的 provider 宣告責任：
+### 3.1 重用並補齊既有 `dependencies` + `endpoints`，只加一個可選過濾欄位
+
+現有 `Dependency`（`relation: providerEndpoint`）已經宣告「這個 consumer 需要連到哪個
+provider」；現有 `Endpoint`（`name/scheme/port/path`）已經可以宣告 provider 開放的
+tcp/udp/http port（`contracts/dns.yaml`、`contracts/ntp.yaml` 已經在用 `scheme: udp`，
+不是新概念）。這兩者組合就足以推導多數 edge，不需要另一份 `networkRequirements` 頂層
+schema、也不需要 `probes[] {protocol, port, purpose}` 這種平行結構。
+
+唯一要補的是 `Dependency` 上一個可選欄位，用來處理「provider 開放多個 port，但這個
+consumer 只用得到其中幾個」：
 
 ```yaml
-networkRequirements:
-  - name: ipa-enrollment
-    to: {component: freeipa-server}
-    probes:
-      - {protocol: tcp, port: 80,  purpose: ipa-client discovery/bootstrap}
-      - {protocol: tcp, port: 88,  purpose: Kerberos KDC}
-      - {protocol: udp, port: 88,  purpose: Kerberos KDC}
-      - {protocol: tcp, port: 389, purpose: LDAP}
-      - {protocol: tcp, port: 464, purpose: kpasswd}
-      - {protocol: udp, port: 464, purpose: kpasswd}
+dependencies:
+  - component: freeipa-server
+    required: true
+    relation: providerEndpoint
+    endpoints: [ldap, kerberosTcp, kerberosUdp, kpasswdUdp, httpBootstrap]
 ```
 
-每個 requirement 必須包含：
+- 省略 `endpoints`＝檢查 provider 宣告的**全部** endpoint。多數元件只有 1–2 個
+  endpoint（`seaweedfs-s3`、`wazuh-manager`、`keycloak`），省略即可，零額外撰寫。
+- 填 `endpoints`＝只檢查列出的名字；每個名字必須存在於 provider 的 `endpoints[].name`，
+  否則 lint 直接拒絕——沿用 `internal/contract/lint.go:234`
+  `validateBindingEndpoints` 已有的「binding 引用不存在 endpoint 就報錯」模式，加一個
+  對稱的 `validateDependencyEndpoints`。
+- 這個欄位只在「provider 開放多個 port，但這個特定 consumer 用不到全部」時才填；填寫時
+  必須對照 apply playbook 真正使用的 port 與 §3.3 的 verification spec 交叉核對，不可
+  憑常識猜。
 
-- `name`：stable ID，作為輸出、測試與 evidence key。
-- `to.component`：已存在的 provider component；必須對應既有 dependency。
-- `probes[]`：`protocol` (`tcp` 或 `udp`)、`port` (1–65535)、可選 `purpose`。
-- 可選 `endpoint`：如有指定，lint 必須確認 provider 有同名 `endpoints` entry，並由該
-  entry supply scheme/port。consumer 特有的多埠需求則用 `probes` 明列。
-- 可選 `whenInput`：只在某個已解析的 non-secret input 為某值時產生 edge；第一版不實作，
-  先以不同 contract requirement 明確表達，避免 condition language 過早膨脹。
+`scheme` 已經足以決定探測方式，不需要另外的 `probes[].kind`：`tcp`/`udp`/`unix` 走
+socket-level connect；`http`/`https`/`ldap`/`ldaps`/`grpc` 走該 scheme 對應的 TCP
+connect（`http`/`https` 額外送一次請求，但任何有效 HTTP 回應——含 403/401——都算
+PASS，理由見 §4.2）。
 
-`endpoints` 仍表示「provider 對外提供什麼」；`networkRequirements` 表示「consumer 在
-runtime 必須能從哪裡連到什麼」。兩者不可互相取代。
+### 3.2 為什麼不讓 consumer 自己宣告 probes
 
-### 3.2 第一批 contract 更新
+原案曾考慮讓每個 consumer 自行列一份 `probes[] {protocol, port, purpose}`。放棄的理由：
 
-先覆蓋所有有明確 `providerEndpoint` dependency 的元件；每個變更需對照 apply playbook
-真正使用的協定/port 與 verification spec，而不是憑常識補值。
+- 這等於把 provider 已經宣告過的 port，在 consumer 端重新打一次。兩份資料源一旦不
+  同步，本身就是一種新的 drift——跟 §7 要避免的「CLI 寫 component→port switch map」
+  是同一類風險，只是把它搬進了 contract 裡而已。
+- 對照既有 `bindings`（1 個 input ↔ 1 個 provider endpoint）發現它已經覆蓋大多數單埠
+  案例：`restic-backup`→`seaweedfs-s3.s3`、`wazuh-fim`→`wazuh-manager.agent`、
+  `pam-oidc-sshd`→`keycloak.oidc`。真正需要「一個 consumer 要連 provider 多個 port」
+  的案例，目前只有 FreeIPA enrollment 這一個；而它現有的 binding
+  （`freeipa_server_ip` ← `freeipa-server.https`，port 443）根本沒有指到這次事故真正
+  卡住的 port（80/88/389/464，見 §2.1）——binding 本來就不是為「多埠依賴」設計的。
+  可見「一個可選 `endpoints` 過濾欄位＋把 provider 自己的 `endpoints:` 補齊」就足以
+  精確表達這個唯一的多埠案例，不必為此新增一整套 probes schema。
+- Port 的權威來源應該只有一份：provider 的 `endpoints:`。它現在不完整
+  （`freeipa-server.yaml` 只宣告 4 個，但 `docs/verification/freeipa-server.md`
+  C4–C10 已經用 `ss`/`curl` 驗證過 7 個真實 listening port），先把它補齊，比另開一份
+  平行資料結構更省、也更符合「contract 是唯一宣告來源」（§7）。
 
-| Consumer | Provider | 首批 requirement |
-|---|---|---|
-| `freeipa-client` | `freeipa-server` | TCP 80/88/389/464、UDP 88/464 |
-| `restic-backup` | `seaweedfs-s3` | provider endpoint `s3` (`tcp:8333`) |
-| `prometheus` | `seaweedfs-s3`、`alertmanager` | S3 endpoint、Alertmanager 實際 ingest port |
-| `thanos-query` | `seaweedfs-s3` | S3 endpoint |
-| `dashboard` | `thanos-query` | Thanos Query 實際 API port |
-| `log-shipping` | `dashboard` | Loki ingest port |
-| `wazuh-fim` | `wazuh-manager` | agent enrollment/runtime ports |
-| `pam-oidc-sshd` | `keycloak` | OIDC discovery/token/JWKS HTTPS port |
-| NFS client/server contracts | FreeIPA/NFS providers | 依實際 client operation 宣告 |
+### 3.3 第一批 contract 更新
+
+| Provider 要補的 `endpoints:` | 依據 |
+|---|---|
+| `freeipa-server` | 補 `httpBootstrap`(tcp:80)、`kerberosUdp`(udp:88)、`kpasswdUdp`(udp:464)；`docs/verification/freeipa-server.md` C7–C9 已驗證這三個真的在 listen，既有 `ldap`/`ldaps`/`kerberosTcp`/`https` 不動 |
+| 其餘有 `providerEndpoint` dependency 的 provider | 逐一核對對應 `docs/verification/<provider>.md` 的 `port`/`http` 分類 row 與 apply playbook 真正 bind 的 port，補齊 `endpoints:`；目前只確認 FreeIPA 缺項，其餘假設完整、實作時逐一驗證 |
+
+| Consumer dependency 要窄化 `endpoints:` | 理由 |
+|---|---|
+| `freeipa-client → freeipa-server` | `ipa-client-install` 不會用到 443(https)；填 `endpoints: [ldap, kerberosTcp, kerberosUdp, kpasswdUdp, httpBootstrap]` |
+| 其餘（`restic-backup`、`prometheus`、`thanos-query`、`dashboard`、`log-shipping`、`wazuh-fim`、`pam-oidc-sshd`、NFS client/server …）| 先省略 `endpoints`（＝檢查 provider 全部 endpoint），除非實測發現某 provider 有這個 consumer 用不到的 port |
 
 若某個 provider 沒有足夠的 `endpoints` 資料，先補 provider contract；不可在 CLI 寫一張
 component-name → port 的 switch map。這是避免 drift 的核心規則。
 
-### 3.3 外部 endpoint 與 alias
+### 3.4 外部 endpoint 與 alias
 
 若 `restic_repository`、OIDC issuer 等被使用者覆寫成 inventory 外的 FQDN/IP，contract
 無法從 provider group 推得目標 host。第一版採明確行為：
@@ -201,20 +223,31 @@ break-glass，但必須要求 `--confirm-skip-network-check`，並在輸出/evid
 ## 5. 實作步驟
 
 1. **Contract model/lint**
-   - 擴充 `internal/contract.Contract`、YAML schema/fixture 與 validation。
-   - 驗證 component、dependency、endpoint、protocol、port、duplicate requirement/probe。
-   - contract lint 必須拒絕缺 dependency 的跨 component requirement。
+   - 在 `internal/contract.Dependency` 加一個可選 `Endpoints []string` 過濾欄位（見
+     §3.1）；不新增頂層 schema。
+   - 新增 `validateDependencyEndpoints`（仿 `internal/contract/lint.go:234`
+     `validateBindingEndpoints` 的模式）：`Dependency.Endpoints` 裡的每個名字都必須存在於
+     對應 provider 的 `endpoints[].name`，否則 lint 拒絕。
+   - 依 §3.3 補齊 `freeipa-server.yaml` 等 provider 的 `endpoints:`，並在
+     `freeipa-client.yaml` 的 dependency 上填 `endpoints:` 窄化清單。
+   - fixture/schema test 補上「`Endpoints` 引用不存在的名字」與「provider 補齊後 lint 仍
+     PASS」兩個 case。
 
 2. **Planning layer**
    - 新增純 Go planner：載入 contract catalog + rendered inventory，產生排序穩定的
      `NetworkProbePlan`。
-   - 支援 provider endpoint binding、同 group 多 host 的笛卡兒展開、consumer/source limit、
-     endpoint override/alias 的 explicit result。
+   - Edge 來源＝每個被選中 component 的 `dependencies[relation=providerEndpoint]`；
+     endpoint 集合＝該 dependency 的 `Endpoints`（若非空）否則 provider 的全部
+     `endpoints`。
+   - 支援同 group 多 host 的笛卡兒展開、consumer/source limit、endpoint override/alias 的
+     explicit result（§3.4）。
    - planner 不跑 shell、也不接觸 secret。
 
 3. **Ansible execution adapter**
-   - 由 Go 產生暫時的唯讀 probe playbook，或以 `ansible` ad-hoc JSON callback 執行安全的
-     Python socket probe；兩者都不可修改 target。
+   - 沿用 `internal/tools/verify_spec.go` 已有的 ansible ad-hoc 執行模式（該檔案已有
+     「為什麼用 ad-hoc 而不直接跑指令」的說明），不另外產生暫時 playbook：對每個
+     source host 以 ad-hoc 呼叫一個安全的 Python socket probe 模組/腳本，兩者都不可修改
+     target。
    - 實作 JSON parser、timeout、unreachable handling、stable result formatting。
    - probe 無法執行、source SSH 不通、遠端 Python 不可用，都要以 `ERROR` 匯入結果，不能
      靜默略過。
@@ -233,37 +266,54 @@ break-glass，但必須要求 `--confirm-skip-network-check`，並在輸出/evid
    - 再依 catalog 的 providerEndpoint components 分批補齊，不在第一個 PR 混入未驗證的 port。
 
 7. **文件與 evidence**
-   - 新增 verification spec、apply-free command behavior（此功能不需要 apply playbook）、
-     regression tests 和 runbook。
+   - **不是** `docs/verification/network-check.md`（見 §6 說明為什麼）；`pilot
+     network-check` 的行為驗收改寫成 Go regression tests，evidence 走
+     `docs/runbooks/network-check.md`（比照既有 `docs/runbooks/vm-target.md`——
+     同樣是「CLI 工具本身」的 runbook，不對應任何 role/apply playbook）。
    - 正式候選 revision 必須在 disposable topology 上做 PASS 與故意阻斷一條 edge 的 FAIL
      兩條路徑，保存 evidence；最後用 evidence-only commit 更新摘要。
 
-## 6. Verification spec 與測試計畫
+## 6. 驗收方式：為什麼不是 `docs/verification/network-check.md`
 
-新增 `docs/verification/network-check.md`，至少含：
+`docs/verification/*.md` 這套格式（`TESTING.md` §0 定義）綁定一個很具體的形狀：一個
+`contracts/*.yaml` component、一支 `playbooks/apply/*.yml`、Command 欄位是**一條 ansible
+ad-hoc（或 `--local`）shell 指令，對已經被那支 apply playbook converge 過的單一 target
+host** 驗證 post-condition，執行方式是 `pilot verify docs/verification/<x>.md`。本 repo
+現有 29 份 spec（`freeipa-server.md`、`restic-backup.md`……）全部是這個形狀，包含
+`hello-localhost.md` 這種最小 smoke test 也一樣。
 
-| Row | Acceptance criterion |
-|---|---|
-| C1 | contract lint 拒絕無效 network requirement |
-| C2 | planner 從 `freeipa-client → freeipa-server` 展開正確 source/target/ports |
-| C3 | planner 從 `restic-backup → seaweedfs-s3.s3` 取得 `tcp:8333` |
-| C4 | target-side TCP probe 對可達 endpoint PASS |
-| C5 | target-side TCP probe 對被阻斷 endpoint FAIL，含 source/target/port |
-| C6 | alias 解析錯誤與 port 不通可區分 |
-| C7 | `network-check --format json` schema 穩定且不洩漏 secret |
-| C8 | deploy/reconcile 在 required edge FAIL 時 preview/apply 前停止 |
-| C9 | `--skip-network-check --confirm-skip-network-check` 需要雙旗標並留下警示 |
+`pilot network-check` 不是這個形狀：它**沒有 apply playbook**，不 converge 任何 host，
+`contracts/*.yaml` 也不會有它的條目（`internal/contract/lint.go:60` 目前假設每個
+component 的 `Playbooks.Apply` 都是一個真實存在的檔案路徑，硬塞一個空 apply 只會讓 lint
+邏輯打結）。它的驗收本質上分兩種，各自已有更適合的既有機制：
 
-測試分層：
+- **contract lint / planner 展開 / CLI 輸出格式 / exit code / deploy 閘門**——這些是
+  Go 程式邏輯正確性，跟 `vm-target`、`doctor`、`deploy_completeness` 等既有 CLI 功能
+  的驗收方式相同：直接寫 Go regression test（`internal/contract/*_test.go`、新的
+  `internal/networkcheck/*_test.go`、`cmd/pilot/cmd/network_check_test.go`），跑
+  `TESTING.md` L1 tier 的 `go test ./...`，不需要一份 markdown spec 去描述「go test 應該
+  過」。
+- **在真實/拋棄式 topology 上，probe 對可達/被阻斷的 port 是否真的回報對的結果**——這是
+  L4 tier 的 actual-run evidence，跟其他工具功能（例如 `docs/runbooks/vm-target.md`）
+  一樣寫進 **runbook**，不是 verification spec：因為這裡沒有「重跑 `pilot verify` 比對
+  Expected」這個動作，有的是「跑一次 `pilot network-check`，看它自己回報的 PASS/FAIL 對
+  不對」。
 
-- Go unit tests：contract lint、planner 展開、renderer、exit code、deploy/reconcile gate。
-- Ansible adapter tests：解析 PASS/FAIL/UNREACHABLE/timeout JSON。
-- Docker target：以可達 local listener 驗證 PASS；以不存在/隔離 port 驗證 FAIL。
-- Multi-VM topology：一台 consumer、一台 provider，驗證真實 target-originated probe；再加入
-  firewall/network namespace rule 製造單向阻斷，證明 controller 可 SSH 但 consumer 不可達 provider
-  時仍會被抓到。
-- 真實 staging：在不改動主機狀態下，對 `infra-deploy` inventory 執行一次，只保存 sanitized
-  result（IP/host 是否可公開依既有 evidence policy 決定）。
+具體要驗收的項目（以 Go test 或 runbook 記錄，視性質分流，不建一份新 spec）：
+
+| # | Acceptance criterion | 驗收方式 |
+|---|---|---|
+| 1 | contract lint 拒絕引用不存在 endpoint 名字的 `Dependency.Endpoints` | `internal/contract` unit test |
+| 2 | planner 從 `freeipa-client → freeipa-server` 展開正確 source/target/ports | `internal/networkcheck` unit test |
+| 3 | planner 從 `restic-backup → seaweedfs-s3.s3` 取得 `tcp:8333` | `internal/networkcheck` unit test |
+| 4 | target-side TCP probe 對可達 endpoint PASS | Docker-target regression test |
+| 5 | target-side TCP probe 對被阻斷 endpoint FAIL，含 source/target/port | Docker-target regression test |
+| 6 | alias 解析錯誤與 port 不通可區分 | `internal/networkcheck` unit test |
+| 7 | `network-check --format json` schema 穩定且不洩漏 secret | `cmd/pilot/cmd` regression test |
+| 8 | deploy/reconcile 在 required edge FAIL 時 preview/apply 前停止 | `cmd/pilot/cmd` regression test（同 `deploy_exitcode_regression_test.go` 的模式）|
+| 9 | `--skip-network-check --confirm-skip-network-check` 需要雙旗標並留下警示 | `cmd/pilot/cmd` regression test |
+| 10 | Multi-VM topology：真實 target-originated probe，故意用 firewall/network namespace 規則製造單向阻斷，證明 controller SSH 通但 consumer 連不到 provider 時仍會被抓到 | `docs/runbooks/network-check.md` 實跑 evidence（PASS + 故意 FAIL 兩條路徑）|
+| 11 | 真實 staging：對 `infra-deploy` inventory 唯讀執行一次 | `docs/runbooks/network-check.md`，只保存 sanitized result |
 
 ## 7. 不納入第一版的項目
 
@@ -289,9 +339,10 @@ break-glass，但必須要求 `--confirm-skip-network-check`，並在輸出/evid
 
 ### PR 1 — Foundation + 本次事故覆蓋
 
-- contract schema + lint。
+- `Dependency.Endpoints` 欄位 + lint。
 - `pilot network-check` planner/executor/text+JSON output。
-- `freeipa-client`、`restic-backup` 的 requirements。
+- 補齊 `freeipa-server` 的 `endpoints:`、窄化 `freeipa-client`/驗證 `restic-backup` 的
+  dependency。
 - Docker/VM PASS+FAIL tests。
 - 僅以 standalone command 交付，不改 deploy/reconcile default flow。
 
@@ -303,8 +354,9 @@ break-glass，但必須要求 `--confirm-skip-network-check`，並在輸出/evid
 
 ### PR 3 — Catalog coverage
 
-- 依 component 分批補齊其餘 providerEndpoint requirements。
-- 每個 component 一併補 provider endpoints、regression test 和 verification evidence。
+- 依 component 分批補齊其餘 provider 的 `endpoints:`，並在需要窄化的 dependency 上補
+  `Endpoints`。
+- 每個 component 一併補 regression test 和 verification evidence。
 
 此切分讓使用者能先用新 command 檢查目前 `dt-port6000` 的網段問題，同時避免在未完成
 所有 legacy contract 定義前，以廣泛的自動 gate 阻擋無關工作。
