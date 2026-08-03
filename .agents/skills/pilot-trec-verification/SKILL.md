@@ -792,8 +792,16 @@ Use `trec mcp`'s session tools instead (full contract: the global
   reply and decide the next step from the actual rendered screen,
   instead of a remembered or assumed item order.
 - `terminal_close` — call this once the exploration is done, every
-  time. An unclosed session leaks the child process; `session_list`
-  can audit for ones you forgot.
+  time. **For a recording that must be evidence, do not call it while
+  the wizard is still running.** First use the wizard's own exit item
+  (for `pilot edit`, return to the top menu and choose `離開`), then
+  repeatedly use `terminal_read` until it reports `running=false` and
+  `exit_code=0`. Only then call `terminal_close` to release the MCP
+  handle, and run `cast_verify`. Closing an active session is an
+  operator termination: a save/bootstrap may already have succeeded,
+  but the cast is rightly finalized as `aborted`, not `success`. An
+  unclosed session leaks the child process; `session_list` can audit
+  for ones you forgot.
 
 Treat the resulting MCP-driven walkthrough as throwaway reconnaissance,
 not the recorded evidence: once you've confirmed the real item
@@ -942,11 +950,15 @@ runbook using `verified-runbook`'s rules (real output only, no
   documentation line. Fixed in `internal/groupvars` (only top-level
   keys, deduped); if the editor shows duplicate keys, you're on a
   stale binary.
-- **Leaked `trec mcp` sessions**: forgetting `terminal_close` after an
-  §4a exploration leaves the wizard's child process (and, if it got as
-  far as a save/apply step, potentially unflushed state) running
-  unattended. Call `session_list` before ending a task that used MCP
-  mode to check for anything you forgot to close.
+- **MCP recording lifecycle has two separate finish steps**: after a
+  successful save/bootstrap, `pilot edit` intentionally remains alive
+  at its top menu. For an evidence recording, select `離開`, then poll
+  `terminal_read` until `running=false` and `exit_code=0`; only then
+  call `terminal_close` and `cast_verify`. Calling `terminal_close`
+  first turns an otherwise successful edit into an `aborted` cast;
+  omitting both leaves the sidecar `in_progress` with no final
+  `SESSION_END`. Before ending a task that used MCP mode, call
+  `session_list` to find any session that still needs this sequence.
 - **Ansible fact-cache poisoning across VM rebuilds**: if
   `ansible.cfg` has `fact_caching = jsonfile` keyed by
   `inventory_hostname`, and a preflight/check play runs any module
