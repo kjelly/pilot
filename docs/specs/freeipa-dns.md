@@ -1162,10 +1162,8 @@ playbooks/test/fixtures/freeipa-dns-canonical.yaml
 playbooks/test/fixtures/freeipa-dns-invalid-cname.yaml
 playbooks/test/fixtures/freeipa-dns-authoritative.yaml
 
-scripts/minimal-poc/04a-edit-freeipa-dns.drive
-scripts/minimal-poc/04b-reconcile-freeipa-dns.drive
-scripts/minimal-poc/README.md
-scripts/minimal-poc/TEACHING-GUIDE.md
+Per-run edit/reconcile drivers are generated from the current UI and environment when needed;
+they are not retained as repository fixtures.
 ```
 
 ---
@@ -1262,4 +1260,3 @@ record、zone 刪除。完整真實輸出見 `docs/verification/freeipa-dns.md`
 每行有 2 空白縮排導致所有 parsing regex 失效、`ipa dnszone-add`
 `changed_when` 判斷字串不存在、split-horizon 偵測對自己剛建立的 zone
 誤判），細節與修法見同一份文件的 §0。
-

@@ -663,6 +663,20 @@ git status --short
   candidate/tree, target summary, and real verdict; never leave a dead local
   evidence link behind.
 
+### Per-run wizard drivers and path removal
+
+- A `trec drive` script or other wizard driver is derived from the current
+  inventory, environment, and live UI. Unless the user explicitly asks to
+  maintain one as a product fixture, create it per run under `tmp/`, `/tmp`,
+  `.verification/`, or the evidence store; do not commit it or describe it as
+  a reusable operational contract.
+- Runbooks and evidence records may state that a wizard was driven, but must
+  not link to, require, or preserve a per-run driver. Record the tested
+  candidate/tree, target facts, and actual verdict instead.
+- Before deleting or moving a tracked path, run
+  `git grep -nF '<old-path>' -- .` and resolve every match. After the change,
+  the same search must have no matches, and `git diff --check` must pass.
+
 ### Trec-related issues never go in runbooks
 
 - Any issue discovered while driving a wizard via `trec` — `EXPECT`/`SELECT`/
@@ -710,4 +724,5 @@ git status --short
 | 2026-07-22 | v1.15 | 新增「Trec-related issues never go in runbooks」：任何 trec 驅動 wizard 過程中發現的 issue（opcodes 行為、MCP/CLI 差異、wizard prompt chain、host-key churn、預填行為等）一律記錄在 `.agents/skills/pilot-trec-verification/SKILL.md` 及其同層 tool-driver skills；operational runbook 只記錄「這次 pass 做了什麼/驗證了什麼」，不記錄「trec 驅動時踩了什麼坑」。原因：v11.0 重新驗證時把 wizard banner 的 UI 落差誤列為「Real bugs #27」，實際是 trec 驅動時的 prompting 路徑問題，應該留在 trec skill 的 §7 gotcha list 而非 runbook 的 bug table | pilot |
 | 2026-07-22 | v1.16 | actual-run evidence 與操作文件分離：runbook/spec 只留目前有效摘要與連結，完整輸出進獨立 artifact；正式完整測試改為先凍結本地 candidate commit，再從乾淨隔離 checkout 驗證，後續 evidence-only commit 引用 tested revision/tree。日常 dirty worktree 仍可跑快速測試 | pilot |
 | 2026-07-23 | v1.17 | 新增 committed-document link rule：tracked 文件的 repository-relative Markdown link 必須指向 Git 追蹤檔；不得連到 `.verification/`、暫存、vault、generated local-only、ignored 或不存在的檔案。一次性驗收改以 sanitized candidate/tree、target 與 verdict 摘要表達 | pilot |
+| 2026-08-03 | v1.19 | 新增 per-run wizard driver 與路徑刪除規則：agent 依當前環境產生暫存 driver，不提交、不當作 runbook 契約；刪除／搬移 tracked path 前後必須盤點並清除引用 | pilot |
 | 2026-07-31 | v1.18 | 新增第 25 支 apply playbook `freeipa-dns-client-apply.yml`(目標主機把 DNS resolver 指向已經在跑 DNS 的 FreeIPA server/replica;與 `freeipa-client` AAA 納管互不相依,day-2/opt-in,不接進 `site.yml`,比照 `freeipa-server-replica`/`freeipa-dns`);§4.3 playbook 清點更新為 25 支,補上先前清點漏掉的 `freeipa-dns` | pilot |
