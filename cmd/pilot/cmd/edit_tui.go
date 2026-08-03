@@ -183,7 +183,7 @@ ansible-vault edit 編輯加密檔)。
 func init() {
 	editCmd.Flags().StringVar(&editDir, "dir", ".", "要編輯哪個資料夾底下的 hosts.yml / group_vars/ / .vault/(預設目前資料夾)")
 	editCmd.Flags().StringVar(&editActionsPath, "actions", "", "以 JSON scenario 自動操作 edit，並可接續 deploy/reconcile")
-	editCmd.Flags().BoolVar(&editPresentation, "presentation", false, "自動操作時顯示教學步驟與每個 TUI 畫面")
+	editCmd.Flags().BoolVar(&editPresentation, "presentation", false, "自動操作時顯示教學步驟、展開後的按鍵與每個 TUI 畫面")
 	editCmd.Flags().StringVar(&editTracePath, "trace-out", "", "將 automation action 以 JSONL 寫入指定檔案")
 	rootCmd.AddCommand(editCmd)
 }

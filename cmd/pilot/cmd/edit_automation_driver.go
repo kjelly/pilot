@@ -22,7 +22,9 @@ type automationTraceEvent struct {
 }
 
 // automationDriver translates semantic edit actions into the same key
-// messages handled by a human-driven editRouterModel.
+// messages handled by a human-driven editRouterModel. In presentation mode it
+// also renders that expansion as keyboard commands, so a PTY recording makes
+// the operation auditable instead of showing only the high-level action name.
 type automationDriver struct {
 	trace        func(automationTraceEvent)
 	presentation bool
@@ -68,7 +70,7 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 			return fmt.Errorf("step %d (%s): %w", i+1, step.Action, err)
 		}
 		if d.presentation && d.out != nil {
-			fmt.Fprintf(d.out, "\n── %s ──\n%s", step.Action, r.View())
+			fmt.Fprintf(d.out, "\n── %s ──\n⌨ 按鍵：%s\n%s", step.Action, formatKeyboardCommands(event.Keys), r.View())
 		}
 		d.emitMarker(event)
 		if d.trace != nil {
@@ -76,6 +78,44 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 		}
 	}
 	return nil
+}
+
+// formatKeyboardCommands turns the driver's low-level Tea key trace into a
+// compact, recording-friendly representation. Consecutive cursor moves are
+// folded only for display; the driver still sends every individual KeyMsg to
+// the router, exactly as a human-driven session would receive them.
+func formatKeyboardCommands(keys []string) string {
+	if len(keys) == 0 {
+		return "（無；此操作未送出按鍵）"
+	}
+
+	labels := map[string]string{
+		"up":         "↑",
+		"down":       "↓",
+		"enter":      "Enter",
+		"space":      "Space",
+		"ctrl+u":     "Ctrl+U",
+		"«redacted»": "TEXT «redacted»",
+	}
+
+	var commands []string
+	for i := 0; i < len(keys); {
+		key := keys[i]
+		label, known := labels[key]
+		if !known {
+			label = fmt.Sprintf("TEXT %q", key)
+		}
+		run := 1
+		for i+run < len(keys) && keys[i+run] == key {
+			run++
+		}
+		if run > 1 && (key == "up" || key == "down") {
+			label = fmt.Sprintf("%s × %d", label, run)
+		}
+		commands = append(commands, label)
+		i += run
+	}
+	return strings.Join(commands, " → ")
 }
 
 // present renders r's current screen under label when running in

@@ -128,12 +128,26 @@ func TestEditAutomationWorkflowPresentationAndTrace(t *testing.T) {
 	if !strings.Contains(out.String(), "── create_host ──") || !strings.Contains(out.String(), "── save_hosts ──") || !strings.Contains(out.String(), "✅ 已存檔") {
 		t.Fatalf("presentation output missing screen/action:\n%s", out.String())
 	}
+	if !strings.Contains(out.String(), "⌨ 按鍵：") || !strings.Contains(out.String(), `TEXT "web-1"`) {
+		t.Fatalf("presentation output missing expanded keyboard commands:\n%s", out.String())
+	}
 	trace, err := os.ReadFile(tracePath)
 	if err != nil {
 		t.Fatalf("read trace: %v", err)
 	}
 	if got := strings.Count(string(trace), "\"result\":\"ok\""); got != 2 {
 		t.Fatalf("trace success events = %d, want 2:\n%s", got, trace)
+	}
+}
+
+func TestFormatKeyboardCommands(t *testing.T) {
+	got := formatKeyboardCommands([]string{"down", "down", "enter", "ctrl+u", "web-1", "space", "«redacted»"})
+	want := `↓ × 2 → Enter → Ctrl+U → TEXT "web-1" → Space → TEXT «redacted»`
+	if got != want {
+		t.Fatalf("formatKeyboardCommands() = %q, want %q", got, want)
+	}
+	if got := formatKeyboardCommands(nil); got != "（無；此操作未送出按鍵）" {
+		t.Fatalf("formatKeyboardCommands(nil) = %q", got)
 	}
 }
 
