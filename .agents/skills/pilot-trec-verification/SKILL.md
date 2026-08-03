@@ -202,8 +202,29 @@ Drive every interactive step with `trec drive`:
 CI=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   --key-delay 150 --settle-delay 400 --timeout <generous> \
   -o "$SCRATCH/casts/01-edit-hosts.cast" --title "pilot edit -- build hosts.yml" \
-  -- pilot edit --dir "$SCRATCH/demo"
+  -- pilot edit --presentation --dir "$SCRATCH/demo"
 ```
+
+Always include `--presentation` in a TREC-wrapped `pilot edit`, `pilot deploy`,
+or `pilot reconcile` command. It keeps automation recordings in their
+presentation-oriented mode; it is required even when the recording is driven
+by low-level TREC keyboard operations.
+
+### Recording-first rule for `pilot edit`
+
+For every `pilot edit` cast that will be used as evidence, drive the ordinary
+wizard with TREC's low-level keyboard operations (`DOWN`, `ENTER`, `TEXT`,
+`CTRLU`, `SPACE`, and so on). This is what puts the actual input events in the
+cast and makes the recording self-explanatory. The reference pattern is an
+input trail such as `↓`, `Enter`, `Ctrl+U`, then the replacement text — not a
+single opaque semantic operation.
+
+Do **not** wrap `pilot edit --actions <scenario.json>` in an evidence recording.
+That interface is useful for non-recorded automation and its JSONL trace, but
+it drives Bubble Tea models inside the process; TREC consequently sees rendered
+output without the matching PTY input events. When a scenario is a convenient
+way to describe the desired edit, first explore the live wizard, then compile
+its steps into guarded `trec drive` keyboard instructions for the recording.
 
 - **`CI=1` is now required for every `pilot edit`/`pilot deploy`
   invocation, full stop** — as of the 2026-07-17 Bubble Tea rewrite
