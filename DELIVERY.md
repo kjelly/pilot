@@ -489,7 +489,12 @@ pilot edit --actions scenario.json --presentation --trace-out edit-workflow.json
 scenario 的 `steps` 先放 edit actions，最後可放 `deploy`／`reconcile` action；
 每個後續 action 透過 `answers` 提供 prompt 的可見 label、文字或確認答案。
 這條路徑仍會經過 deploy/reconcile 原有的 preflight、preview、stage gate、
-confirmation 與 transaction。可以用 TREC 或其他 PTY 工具錄影，但錄影和
+confirmation 與 transaction。`--presentation` 會把每個高階 edit action 展開成
+邏輯上的鍵盤指令（例如 `↓ × 2 → Enter`）。但它是 process 內的 Tea model
+event，不會成為 PTY input event；要用錄影證明 edit 操作時，應以 TREC 對普通的
+`pilot edit` wizard 逐一送出鍵盤指令，讓錄影直接呈現 `↓`、`Enter`、`Ctrl+U` 與
+文字輸入。任何 TREC 包裝的 `pilot edit`、`pilot deploy`、`pilot reconcile`
+命令都必須附上 `--presentation`。可以用 TREC 或其他 PTY 工具錄影，但錄影和
 `trec verify` 都不是 pilot 執行成功的必要條件。
 
 也可以分開錄製 deploy 或 reconcile：

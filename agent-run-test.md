@@ -57,7 +57,7 @@
 `pilot deploy --actions` 只能含一個 `deploy` action，`pilot reconcile --actions`
 只能含一個 `reconcile` action。
 
-- 所有 `pilot edit`、`pilot deploy`、`pilot reconcile` 都設 `CI=1`。可用 semantic scenario 直接驅動真實 TUI，或用 `trec drive` 驅動互動按鍵並錄製；先探勘實際畫面，再決定哪種路徑適合該段影片。
+- 所有 `pilot edit`、`pilot deploy`、`pilot reconcile` 都設 `CI=1`；只要由 TREC 錄影，一律同時加 `--presentation`。**任何需要交付或驗證的 `pilot edit` 錄影**，一律以 `trec drive` 或 TREC MCP 對普通的 wizard 送出低階按鍵；不可把 `pilot edit --actions` 包進錄影，因為它在 process 內直接送 Tea event，cast 不會有對應的 PTY input。semantic scenario 適合非錄影自動化與 JSONL trace；若需要同時可審計的影片，以已探勘的實際畫面把它展開為 `DOWN`、`ENTER`、`TEXT`、`CTRLU` 等鍵盤指令。
 - 每支 `.drive` 腳本執行前都要通過 `trec drive lint --strict`，並執行 `.agents/skills/pilot-trec-verification/references/lint_drive.py`。
 - `SELECT` 只用畫面上唯一的完整 label 子字串，且每個 `SELECT` 後都要各自 `ENTER`；每次轉場後，在下一個動作前以 `EXPECT` 驗證新畫面。
 - 角色 checklist 是例外：依當前 `roleContracts` 順序，以 `DOWN <n>` + `SPACE` 操作；index 0 不可寫 `DOWN 0`。

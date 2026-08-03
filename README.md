@@ -65,9 +65,14 @@ target binary overrides are available through `PILOT_SSH_BIN`,
 
 `pilot edit --actions <scenario.json> --presentation` can also run a semantic
 edit scenario through the real TUI and continue with `deploy`/`reconcile`
-steps in the same terminal session. A PTY recorder such as TREC may wrap this
-command; recording and `trec verify` are optional. Use `--trace-out` for a
-JSONL action trace without putting secret values in the recording.
+steps in the same terminal session. Presentation mode expands each edit action
+into the logical keyboard commands it sends (for example `↓ × 2 → Enter`). For
+a recording that must prove the operation, drive the ordinary `pilot edit`
+wizard with TREC keyboard events instead: semantic automation updates the Tea
+model internally, so its logical expansion is not a PTY input event. Use
+`--trace-out` for a JSONL action trace without putting secret values in the
+recording. TREC-wrapped `edit`, `deploy`, and `reconcile` commands always
+include `--presentation`.
 
 `pilot deploy --actions <deploy-scenario.json> --presentation` and
 `pilot reconcile --actions <reconcile-scenario.json> --presentation` are also
