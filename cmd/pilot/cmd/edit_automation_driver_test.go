@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/spf13/cobra"
@@ -137,6 +138,32 @@ func TestEditAutomationWorkflowPresentationAndTrace(t *testing.T) {
 	}
 	if got := strings.Count(string(trace), "\"result\":\"ok\""); got != 2 {
 		t.Fatalf("trace success events = %d, want 2:\n%s", got, trace)
+	}
+}
+
+func TestEditAutomationDriverPresentationPausesBetweenRenderedSteps(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_host", Host: "web-1"},
+		{Action: "save_hosts"},
+	}}
+	var pauses []time.Duration
+	r := newEditRouterModel(dir)
+	d := automationDriver{
+		presentation:      true,
+		out:               &bytes.Buffer{},
+		pausePresentation: func(duration time.Duration) { pauses = append(pauses, duration) },
+	}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	if len(pauses) != len(scenario.Steps) {
+		t.Fatalf("presentation pauses = %d, want %d", len(pauses), len(scenario.Steps))
+	}
+	for _, got := range pauses {
+		if got != time.Second {
+			t.Fatalf("presentation pause = %s, want %s", got, time.Second)
+		}
 	}
 }
 

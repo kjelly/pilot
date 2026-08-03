@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -44,6 +45,10 @@ type automationDriver struct {
 	// TREC_MARKER_FD when trec is the one running this process; nil
 	// (no-op) otherwise.
 	marker io.Writer
+	// pausePresentation keeps each rendered screen visible long enough for a
+	// presentation recording to show the transition. It is injected so model
+	// tests do not need to wait in real time.
+	pausePresentation func(time.Duration)
 }
 
 func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error {
@@ -71,6 +76,7 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 		}
 		if d.presentation && d.out != nil {
 			fmt.Fprintf(d.out, "\n── %s ──\n⌨ 按鍵：%s\n%s", step.Action, formatKeyboardCommands(event.Keys), r.View())
+			d.pause(time.Second)
 		}
 		d.emitMarker(event)
 		if d.trace != nil {
@@ -78,6 +84,12 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 		}
 	}
 	return nil
+}
+
+func (d *automationDriver) pause(duration time.Duration) {
+	if d.pausePresentation != nil {
+		d.pausePresentation(duration)
+	}
 }
 
 // formatKeyboardCommands turns the driver's low-level Tea key trace into a

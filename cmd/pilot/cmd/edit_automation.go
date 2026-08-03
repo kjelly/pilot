@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -229,6 +230,9 @@ func runAutomatedEditWorkflow(cmd *cobra.Command, scenario editScenario, present
 		defer marker.Close()
 	}
 	d := automationDriver{trace: f, presentation: presentation, out: out, dir: editDir, marker: marker}
+	if presentation {
+		d.pausePresentation = time.Sleep
+	}
 	if presentation {
 		if scenario.Title != "" {
 			fmt.Fprintf(out, "═══ %s ═══\n", scenario.Title)
