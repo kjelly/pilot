@@ -60,3 +60,25 @@ func TestListClampWindow_NeverNegative(t *testing.T) {
 		t.Fatalf("listClampWindow with 0 items = %d, want 0", got)
 	}
 }
+
+func TestListMoveCursorWrapsAndHandlesEmptyLists(t *testing.T) {
+	tests := []struct {
+		name      string
+		cursor    int
+		itemCount int
+		delta     int
+		want      int
+	}{
+		{name: "up from first wraps to last", cursor: 0, itemCount: 3, delta: -1, want: 2},
+		{name: "down from last wraps to first", cursor: 2, itemCount: 3, delta: 1, want: 0},
+		{name: "empty list remains at zero", cursor: 0, itemCount: 0, delta: -1, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := listMoveCursor(tt.cursor, tt.itemCount, tt.delta); got != tt.want {
+				t.Fatalf("listMoveCursor(%d, %d, %d) = %d, want %d", tt.cursor, tt.itemCount, tt.delta, got, tt.want)
+			}
+		})
+	}
+}

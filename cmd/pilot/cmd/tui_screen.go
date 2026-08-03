@@ -117,3 +117,17 @@ func listClampWindow(cursor, windowStart, itemCount, height int) int {
 	windowStart = max(windowStart, 0)
 	return windowStart
 }
+
+// listMoveCursor moves one or more positions through a list, wrapping at
+// either end. An empty list always keeps its cursor at zero so callers can
+// safely pass every navigation key through this helper.
+func listMoveCursor(cursor, itemCount, delta int) int {
+	if itemCount <= 0 {
+		return 0
+	}
+	cursor = (cursor + delta) % itemCount
+	if cursor < 0 {
+		cursor += itemCount
+	}
+	return cursor
+}
