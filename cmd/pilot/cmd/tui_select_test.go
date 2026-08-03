@@ -43,6 +43,55 @@ func TestSelectModel_CursorWrapsAtBounds(t *testing.T) {
 	}
 }
 
+func TestSelectModel_FuzzySearchPreservesOriginalSelection(t *testing.T) {
+	m := newSelectModel("t", []string{"alpha", "FreeIPA Server", "freeipa-client", "beta"})
+	for _, msg := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("/")},
+		{Type: tea.KeyRunes, Runes: []rune("fas")},
+		{Type: tea.KeyEnter}, // finish editing the search, keep its results
+		{Type: tea.KeyEnter}, // select the sole match
+	} {
+		next, _ := m.Update(msg)
+		m = next.(selectModel)
+	}
+	if !m.Finished() || m.Canceled() {
+		t.Fatal("expected fuzzy-matched item to be selected")
+	}
+	if m.Selected() != 1 {
+		t.Fatalf("Selected() = %d, want original index 1", m.Selected())
+	}
+	if view := m.View(); !strings.Contains(view, "搜尋：fas") || strings.Contains(view, "freeipa-client") {
+		t.Fatalf("view did not retain only the fuzzy-matched item:\n%s", view)
+	}
+}
+
+func TestSelectModel_SearchNoMatchesCanClearThenCancel(t *testing.T) {
+	m := newSelectModel("t", []string{"alpha"})
+	for _, msg := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("/")},
+		{Type: tea.KeyRunes, Runes: []rune("zzz")},
+	} {
+		next, _ := m.Update(msg)
+		m = next.(selectModel)
+	}
+	if m.Finished() {
+		t.Fatal("searching with no matches must not finish the screen")
+	}
+	if view := m.View(); !strings.Contains(view, "沒有符合搜尋條件") {
+		t.Fatalf("missing no-results feedback:\n%s", view)
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(selectModel)
+	if m.Canceled() || m.query != "" || m.searching {
+		t.Fatalf("first esc should clear search, got canceled=%v query=%q searching=%v", m.Canceled(), m.query, m.searching)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(selectModel)
+	if !m.Canceled() {
+		t.Fatal("second esc should cancel the list")
+	}
+}
+
 func TestSelectModel_EnterConfirmsWithoutCanceling(t *testing.T) {
 	m := selectModel{title: "t", items: []string{"a", "b"}}
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -138,6 +187,31 @@ func TestSelectModel_Teatest_HappyPath(t *testing.T) {
 	}
 	if got.Selected() != 2 {
 		t.Fatalf("Selected() = %d, want 2", got.Selected())
+	}
+}
+
+func TestSelectModel_Teatest_FuzzySearchAndSelect(t *testing.T) {
+	m := screenTestHarness{s: newSelectModel("t", []string{"alpha", "FreeIPA Server", "freeipa-client"})}
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+
+	tm.Type("/fas")
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "搜尋：fas")
+	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second))
+	got := final.(screenTestHarness).s.(selectModel)
+	if got.Selected() != 1 || got.Canceled() {
+		t.Fatalf("fuzzy selection = %d, canceled=%v; want original index 1, false", got.Selected(), got.Canceled())
+	}
+	output, err := io.ReadAll(tm.FinalOutput(t, teatest.WithFinalTimeout(3*time.Second)))
+	if err != nil {
+		t.Fatalf("read program output: %v", err)
+	}
+	if !strings.Contains(string(output), "搜尋：fas") {
+		t.Fatalf("program output did not show the search query:\n%s", output)
 	}
 }
 

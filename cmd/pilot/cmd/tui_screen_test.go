@@ -1,6 +1,9 @@
 package cmd
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestListVisibleRows_FallsBackWhenHeightUnknown(t *testing.T) {
 	if got := listVisibleRows(20, 0); got != 15 {
@@ -80,5 +83,15 @@ func TestListMoveCursorWrapsAndHandlesEmptyLists(t *testing.T) {
 				t.Fatalf("listMoveCursor(%d, %d, %d) = %d, want %d", tt.cursor, tt.itemCount, tt.delta, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestListFilterIndicesUsesCaseInsensitiveFuzzyMatching(t *testing.T) {
+	items := []string{"alpha", "FreeIPA Server", "freeipa-client", "beta"}
+	if got, want := listFilterIndices(items, "fas"), []int{1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("listFilterIndices() = %v, want %v", got, want)
+	}
+	if got, want := listFilterIndices(items, "F C"), []int{2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("listFilterIndices() = %v, want %v", got, want)
 	}
 }

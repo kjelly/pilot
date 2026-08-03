@@ -25,6 +25,8 @@ type multiSelectModel struct {
 	cursor      int
 	windowStart int
 	height      int
+	query       string
+	searching   bool
 	confirmed   bool
 	canceled    bool
 }
@@ -60,25 +62,50 @@ func (m multiSelectModel) CheckedLabels() []string {
 	return out
 }
 
+func (m multiSelectModel) matchingIndices() []int {
+	items := make([]string, len(m.items))
+	for i, item := range m.items {
+		items[i] = item.Label + " " + item.Description
+	}
+	return listFilterIndices(items, m.query)
+}
+
+func (m *multiSelectModel) resetFilterCursor() {
+	m.cursor = 0
+	m.windowStart = 0
+}
+
 func (m multiSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
-		m.windowStart = listClampWindow(m.cursor, m.windowStart, len(m.items), m.height)
+		m.windowStart = listClampWindow(m.cursor, m.windowStart, len(m.matchingIndices()), m.height)
 	case tea.KeyMsg:
+		if query, searching, handled := updateListSearch(m.query, m.searching, msg); handled {
+			if query != m.query {
+				m.query = query
+				m.resetFilterCursor()
+			}
+			m.searching = searching
+			return m, nil
+		}
+		matches := m.matchingIndices()
 		switch tuiKeyName(msg) {
 		case "up", "k":
-			m.cursor = listMoveCursor(m.cursor, len(m.items), -1)
-			m.windowStart = listClampWindow(m.cursor, m.windowStart, len(m.items), m.height)
+			m.cursor = listMoveCursor(m.cursor, len(matches), -1)
+			m.windowStart = listClampWindow(m.cursor, m.windowStart, len(matches), m.height)
 		case "down", "j":
-			m.cursor = listMoveCursor(m.cursor, len(m.items), 1)
-			m.windowStart = listClampWindow(m.cursor, m.windowStart, len(m.items), m.height)
+			m.cursor = listMoveCursor(m.cursor, len(matches), 1)
+			m.windowStart = listClampWindow(m.cursor, m.windowStart, len(matches), m.height)
 		case " ":
-			if len(m.items) > 0 {
-				m.items[m.cursor].Checked = !m.items[m.cursor].Checked
+			if len(matches) > 0 {
+				itemIndex := matches[m.cursor]
+				m.items[itemIndex].Checked = !m.items[itemIndex].Checked
 			}
 		case "enter":
-			m.confirmed = true
+			if len(matches) > 0 {
+				m.confirmed = true
+			}
 		case "esc", "ctrl+c":
 			m.canceled = true
 		}
@@ -89,10 +116,17 @@ func (m multiSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m multiSelectModel) View() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", m.title)
-	b.WriteString("↑/↓ 循環移動　space 勾選/取消　enter 完成　esc 取消\n\n")
+	b.WriteString("/ 搜尋　↑/↓ 循環移動　space 勾選/取消　enter 完成　esc 取消\n")
+	b.WriteString(listSearchHint(m.query, m.searching) + "\n")
 
-	rows := listVisibleRows(len(m.items), m.height)
-	end := min(m.windowStart+rows, len(m.items))
+	matches := m.matchingIndices()
+	if len(matches) == 0 {
+		b.WriteString("\n   沒有符合搜尋條件的項目\n")
+		return b.String()
+	}
+
+	rows := listVisibleRows(len(matches), m.height)
+	end := min(m.windowStart+rows, len(matches))
 
 	if m.windowStart > 0 {
 		fmt.Fprintf(&b, "   ▲ 還有 %d 項在上面\n", m.windowStart)
@@ -100,7 +134,7 @@ func (m multiSelectModel) View() string {
 		b.WriteString("\n")
 	}
 	for i := m.windowStart; i < end; i++ {
-		it := m.items[i]
+		it := m.items[matches[i]]
 		cursor := "  "
 		if i == m.cursor {
 			cursor = "▸ "
@@ -111,8 +145,8 @@ func (m multiSelectModel) View() string {
 		}
 		fmt.Fprintf(&b, "%s%s %-24s %s\n", cursor, mark, it.Label, it.Description)
 	}
-	if end < len(m.items) {
-		fmt.Fprintf(&b, "   ▼ 還有 %d 項在下面\n", len(m.items)-end)
+	if end < len(matches) {
+		fmt.Fprintf(&b, "   ▼ 還有 %d 項在下面\n", len(matches)-end)
 	} else {
 		b.WriteString("\n")
 	}

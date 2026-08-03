@@ -300,6 +300,26 @@ func TestPilotEditPTY_EscOnTopMenuQuitsCleanly(t *testing.T) {
 	}
 }
 
+func TestPilotEditPTY_FuzzySearchSelectsTopMenuResult(t *testing.T) {
+	dir := t.TempDir()
+	proc := startEditPTY(t, dir, 40, 100)
+
+	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	proc.press(t, "/")
+	proc.typeText(t, "vault")
+	waitForPTYOutput(t, proc.out, 5*time.Second, "搜尋：vault")
+	proc.press(t, "\r") // finish editing the search
+	proc.press(t, "\r") // select the filtered .vault/ menu item
+	waitForPTYOutput(t, proc.out, 5*time.Second, "選一個")
+
+	proc.press(t, "\x1b") // vault picker -> top menu
+	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	proc.press(t, "\x1b") // top menu -> quit
+	if code := proc.waitExit(t, 5*time.Second); code != 0 {
+		t.Fatalf("exit code = %d, want 0; output:\n%s", code, proc.out.String())
+	}
+}
+
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if pilotBinaryDir != "" {

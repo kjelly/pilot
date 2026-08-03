@@ -69,6 +69,46 @@ func TestMultiSelect_CursorWrapsAtBounds(t *testing.T) {
 	}
 }
 
+func TestMultiSelect_FuzzySearchTogglesMatchedOriginalItem(t *testing.T) {
+	m := newMultiSelectModel("t", []multiSelectItem{
+		{Label: "dns", Description: "resolves hosts"},
+		{Label: "ntp", Description: "time synchronization"},
+		{Label: "restic", Description: "encrypted backups"},
+	})
+	for _, msg := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("/")},
+		{Type: tea.KeyRunes, Runes: []rune("syn")},
+		{Type: tea.KeyEnter}, // finish editing the search, keep its results
+		{Type: tea.KeySpace}, // toggle the sole matched item
+		{Type: tea.KeyEnter}, // finish the checklist
+	} {
+		next, _ := m.Update(msg)
+		m = next.(multiSelectModel)
+	}
+	if !m.Finished() || !m.items[1].Checked || m.items[0].Checked || m.items[2].Checked {
+		t.Fatalf("fuzzy toggle changed the wrong items: %+v", m.items)
+	}
+}
+
+func TestMultiSelect_SearchNoMatchesDoesNotFinish(t *testing.T) {
+	m := newMultiSelectModel("t", []multiSelectItem{{Label: "dns"}})
+	for _, msg := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("/")},
+		{Type: tea.KeyRunes, Runes: []rune("zzz")},
+		{Type: tea.KeyEnter}, // finish editing the search, keep the empty results
+		{Type: tea.KeyEnter}, // must not submit a checklist with no result
+	} {
+		next, _ := m.Update(msg)
+		m = next.(multiSelectModel)
+	}
+	if m.Finished() {
+		t.Fatal("enter with no fuzzy-search results must not finish the checklist")
+	}
+	if view := m.View(); !strings.Contains(view, "沒有符合搜尋條件") {
+		t.Fatalf("missing no-results feedback:\n%s", view)
+	}
+}
+
 func TestMultiSelect_EnterFinishesWithoutCanceling(t *testing.T) {
 	m := newTestMultiSelect()
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})

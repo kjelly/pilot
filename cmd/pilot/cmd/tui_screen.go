@@ -13,7 +13,12 @@
 // router reads its result, then decides the next screen to show.
 package cmd
 
-import tea "github.com/charmbracelet/bubbletea"
+import (
+	"strings"
+	"unicode"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
 
 // tuiKeyName normalizes the control-code form of Return. Most terminals
 // deliver Return as CR (KeyEnter), but some PTY/tmux combinations deliver LF
@@ -130,4 +135,91 @@ func listMoveCursor(cursor, itemCount, delta int) int {
 		cursor += itemCount
 	}
 	return cursor
+}
+
+// listFilterIndices returns the original item indexes whose labels fuzzy-match
+// query. A fuzzy match is case-insensitive and allows unmatched characters
+// between query characters, so "fas" matches "freeipa-server".
+func listFilterIndices(items []string, query string) []int {
+	var matches []int
+	for i, item := range items {
+		if listFuzzyMatches(query, item) {
+			matches = append(matches, i)
+		}
+	}
+	return matches
+}
+
+func listFuzzyMatches(query, item string) bool {
+	queryRunes := listSearchRunes(query)
+	if len(queryRunes) == 0 {
+		return true
+	}
+	itemRunes := listSearchRunes(item)
+	queryAt := 0
+	for _, r := range itemRunes {
+		if r == queryRunes[queryAt] {
+			queryAt++
+			if queryAt == len(queryRunes) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func listSearchRunes(value string) []rune {
+	var out []rune
+	for _, r := range []rune(strings.ToLower(value)) {
+		if !unicode.IsSpace(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// updateListSearch consumes keys while a list search is active. Enter or Tab
+// leaves search mode while preserving the result set; Esc clears the query
+// and leaves search mode, so a second Esc keeps the normal cancel behavior.
+func updateListSearch(query string, searching bool, msg tea.KeyMsg) (nextQuery string, nextSearching, handled bool) {
+	key := tuiKeyName(msg)
+	if key == "/" && !searching {
+		return query, true, true
+	}
+	if !searching {
+		return query, false, false
+	}
+
+	switch key {
+	case "esc":
+		return "", false, true
+	case "enter", "tab":
+		return query, false, true
+	case "backspace", "ctrl+h":
+		return string(dropLastRune([]rune(query))), true, true
+	case "ctrl+u":
+		return "", true, true
+	}
+	if msg.Type == tea.KeyRunes {
+		return query + string(msg.Runes), true, true
+	}
+	return query, true, false
+}
+
+func dropLastRune(value []rune) []rune {
+	if len(value) == 0 {
+		return value
+	}
+	return value[:len(value)-1]
+}
+
+func listSearchHint(query string, searching bool) string {
+	switch {
+	case searching:
+		return "搜尋：" + query + "（enter/tab 套用　esc 清除）"
+	case query != "":
+		return "搜尋：" + query + "（/ 修改　esc 清除）"
+	default:
+		return "搜尋：按 / 開始"
+	}
 }
