@@ -55,19 +55,17 @@ func TestMultiSelect_DownMovesCursorWithoutResettingOthers(t *testing.T) {
 	}
 }
 
-func TestMultiSelect_CursorClampedAtBounds(t *testing.T) {
+func TestMultiSelect_CursorWrapsAtBounds(t *testing.T) {
 	m := newTestMultiSelect()
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = next.(multiSelectModel)
-	if m.cursor != 0 {
-		t.Fatalf("cursor = %d, want 0 (clamped)", m.cursor)
-	}
-	for i := 0; i < 10; i++ {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-		m = next.(multiSelectModel)
-	}
 	if m.cursor != len(m.items)-1 {
-		t.Fatalf("cursor = %d, want %d (clamped)", m.cursor, len(m.items)-1)
+		t.Fatalf("cursor = %d, want %d after wrapping up from first item", m.cursor, len(m.items)-1)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(multiSelectModel)
+	if m.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0 after wrapping down from last item", m.cursor)
 	}
 }
 

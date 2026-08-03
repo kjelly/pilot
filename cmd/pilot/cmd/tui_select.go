@@ -55,14 +55,10 @@ func (m selectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch tuiKeyName(msg) {
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
+			m.cursor = listMoveCursor(m.cursor, len(m.items), -1)
 			m.windowStart = listClampWindow(m.cursor, m.windowStart, len(m.items), m.height)
 		case "down", "j":
-			if m.cursor < len(m.items)-1 {
-				m.cursor++
-			}
+			m.cursor = listMoveCursor(m.cursor, len(m.items), 1)
 			m.windowStart = listClampWindow(m.cursor, m.windowStart, len(m.items), m.height)
 		case "enter":
 			if len(m.items) > 0 {
@@ -78,7 +74,7 @@ func (m selectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m selectModel) View() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", m.title)
-	b.WriteString("↑/↓ 移動　enter 選擇　esc 取消\n\n")
+	b.WriteString("↑/↓ 循環移動　enter 選擇　esc 取消\n\n")
 
 	rows := listVisibleRows(len(m.items), m.height)
 	end := min(m.windowStart+rows, len(m.items))

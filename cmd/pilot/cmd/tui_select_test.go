@@ -29,19 +29,17 @@ func TestSelectModel_DownMovesCursor(t *testing.T) {
 	}
 }
 
-func TestSelectModel_CursorClampedAtBounds(t *testing.T) {
+func TestSelectModel_CursorWrapsAtBounds(t *testing.T) {
 	m := selectModel{title: "t", items: []string{"a", "b", "c"}}
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = next.(selectModel)
-	if m.cursor != 0 {
-		t.Fatalf("cursor = %d, want 0 (clamped)", m.cursor)
-	}
-	for i := 0; i < 10; i++ {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-		m = next.(selectModel)
-	}
 	if m.cursor != 2 {
-		t.Fatalf("cursor = %d, want 2 (clamped)", m.cursor)
+		t.Fatalf("cursor = %d, want 2 after wrapping up from first item", m.cursor)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(selectModel)
+	if m.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0 after wrapping down from last item", m.cursor)
 	}
 }
 
