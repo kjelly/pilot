@@ -140,9 +140,9 @@ grep -n 'Name:' internal/inventory/contracts.go       # pilot edit's role checkl
   the moment the menu is shown, including any file-content drift.
   Prepend it to every driving invocation in this skill, e.g.:
   ```bash
-  PILOT_DEBUG_MENU=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
+PILOT_DEBUG_MENU=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
     --key-delay 150 --settle-delay 400 --timeout <generous> \
-    -o "$SCRATCH/casts/01-edit-hosts.cast" -- pilot edit --dir "$SCRATCH/demo"
+    -o "$SCRATCH/casts/evidence/01-edit-hosts.cast" -- pilot edit --dir "$SCRATCH/demo"
   ```
   It's a no-op for normal human interactive use (gated behind the env
   var; doesn't touch the rendered menu itself).
@@ -176,7 +176,9 @@ See `references/index-computation.md` for a worked walkthrough.
 
 ```bash
 SCRATCH="$(git rev-parse --show-toplevel)/tmp/pilot-verify-<slug>"
-mkdir -p "$SCRATCH/demo/group_vars" "$SCRATCH/casts" "$SCRATCH/scripts"
+mkdir -p "$SCRATCH/demo/group_vars" "$SCRATCH/scripts" \
+  "$SCRATCH/casts/exploration" "$SCRATCH/casts/failed" \
+  "$SCRATCH/casts/evidence" "$SCRATCH/evidence"
 ```
 
 `pilot edit --dir <path>` and `pilot inventory generate --dir <path>`
@@ -187,6 +189,64 @@ and leave the tracked project tree untouched. `./tmp/` is already
 listed in `.gitignore`, so artifacts here never show up in `git
 status` as untracked additions — pick a `<slug>` specific enough that
 concurrent runs (or a future session) don't collide on the same path.
+
+---
+
+### 3a. Recording evidence lifecycle — hard gate for every checkpoint
+
+Never use one undifferentiated `casts/` directory. It causes exploratory,
+failed, and shareable recordings to be mistaken for one another. Create the
+three directories above before the first recording and enforce this contract:
+
+| Directory | Allowed contents | May support a PASS / walkthrough claim? |
+|---|---|---|
+| `$SCRATCH/casts/exploration/` | live-menu discovery and bounded diagnosis; `END_SESSION` / `QUIT` are allowed | No |
+| `$SCRATCH/casts/failed/` | any failed, aborted, timed-out, in-progress, or unsafe recording and its `.result.json` | No |
+| `$SCRATCH/casts/evidence/` | one completed, reviewable checkpoint per cast, after its verification gate passes | Yes |
+
+Use MCP interactive sessions only to discover the current screen or repair a
+driver. They belong in `exploration/`; close them normally when possible, but
+never promote them to evidence. Once a workflow is understood, write a fresh,
+strict-linted script for the final recording. Do not continue recovering from
+a derailment in the same evidence candidate: stop at the first unexpected
+screen or result, preserve that cast in `failed/`, and start a new checkpoint
+cast after correcting the script.
+
+Every deliverable wizard script must visibly save/apply, choose the product's
+own exit action, then end with `WAIT_CHILD_EXIT@<timeout>` and `ASSERT_EXIT 0`.
+Before running it, require:
+
+```bash
+trec drive lint --strict "$SCRATCH/scripts/<checkpoint>.drive"
+```
+
+Immediately after the child exits, verify that *one cast*, not a mixed
+directory, is eligible for promotion:
+
+```bash
+trec verify "$SCRATCH/casts/evidence/<checkpoint>.cast"
+```
+
+For MCP-created casts, use `mcp__trec__cast_verify` on that single path. The
+gate passes only when the result is `status=success`, `exit_code=0`, the sole
+final `SESSION_END` is successful, integrity matches, and `safe_to_share=true`.
+`terminal_close` is permitted only after polling `terminal_read` to observe
+`running=false` and `exit_code=0`; closing a live wizard produces an aborted
+recording even if it already saved.
+
+Maintain `$SCRATCH/evidence/recording-manifest.md` as the reviewed index of
+deliverable recordings. Each row must include the checkpoint, final cast path,
+driver path (or `read-only command`), `trec verify`/`cast_verify` verdict,
+secret-scan verdict, and the observed state claim. A later state-changing
+checkpoint must not start until the current row is complete and passing. The
+final evidence audit reads only this manifest and `casts/evidence/`; it must
+never infer success from casts in `exploration/` or `failed/`.
+
+`pilot edit --actions` / `deploy --actions` casts and JSONL traces may prove
+automation behavior, but are not visual walkthrough evidence: keep them out
+of `casts/evidence/` unless the user explicitly asks for action-mode evidence
+and the manifest labels them as such. A two-event wrapper result does not show
+the UI a reviewer needs to audit.
 
 ---
 
@@ -201,7 +261,7 @@ Drive every interactive step with `trec drive`:
 ```bash
 CI=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   --key-delay 150 --settle-delay 400 --timeout <generous> \
-  -o "$SCRATCH/casts/01-edit-hosts.cast" --title "pilot edit -- build hosts.yml" \
+  -o "$SCRATCH/casts/evidence/01-edit-hosts.cast" --title "pilot edit -- build hosts.yml" \
   -- pilot edit --presentation --dir "$SCRATCH/demo"
 ```
 
@@ -225,6 +285,30 @@ it drives Bubble Tea models inside the process; TREC consequently sees rendered
 output without the matching PTY input events. When a scenario is a convenient
 way to describe the desired edit, first explore the live wizard, then compile
 its steps into guarded `trec drive` keyboard instructions for the recording.
+
+### Exploration casts are not deliverable evidence
+
+Use exploration only to discover the live menu shape or diagnose one bounded
+transition. `END_SESSION` / `QUIT` are valid for that purpose, but deliberately
+finalize the recording as non-successful; they are not a harmless shortcut for
+a saved wizard. Keep those casts in the scratch directory for diagnosis and do
+not merge them into a walkthrough.
+
+For a deliverable `pilot edit` walkthrough, require all of the following in a
+single visual cast:
+
+1. ordinary wizard driven by low-level TREC input (not `--actions`);
+2. the relevant menu/form screens and the save confirmation are visible;
+3. after saving, return to the top menu and choose `離開` normally;
+4. finish with `WAIT_CHILD_EXIT@<timeout>` and `ASSERT_EXIT 0`;
+5. pass `trec verify` with `status=success`, a final `SESSION_END`, matching
+   digest, and a clean secret scan.
+
+When assembling a replay, create an explicit, reviewed list of these visual
+evidence casts. Do not merge an entire cast directory, and do not treat
+`--status success` as sufficient: a successful action-driven cast can contain
+only a banner and semantic markers rather than the UI a viewer needs to audit.
+Keep failed, aborted, ended, and in-progress casts separate as diagnostics.
 
 - **`CI=1` is now required for every `pilot edit`/`pilot deploy`
   invocation, full stop** — as of the 2026-07-17 Bubble Tea rewrite
@@ -861,7 +945,7 @@ Once deploy is done, re-run the runbook's own §4 Verify commands
 checks, log queries, …) and wrap the whole batch in one recording:
 
 ```bash
-trec -o "$SCRATCH/casts/0N-verify.cast" --title "Re-verify: <what>" -- bash "$SCRATCH/scripts/verify.sh"
+trec -o "$SCRATCH/casts/evidence/0N-verify.cast" --title "Re-verify: <what>" -- bash "$SCRATCH/scripts/verify.sh"
 ```
 
 `trec` (no `drive` subcommand) is a plain recorder for a non-interactive

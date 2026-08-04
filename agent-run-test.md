@@ -63,6 +63,8 @@
 - 角色 checklist 是例外：依當前 `roleContracts` 順序，以 `DOWN <n>` + `SPACE` 操作；index 0 不可寫 `DOWN 0`。
 - 覆寫預填欄位必須先清空；vault 值用 `TEXT_ENV`／`TEXT_FILE` 或相對應的 replace 指令，不能以明文輸入。
 - 儲存、提交或套用後立刻 `ASSERT` 成功訊息。長時間部署以 `WAIT_CHILD_EXIT@<足夠時限>` 再 `ASSERT_EXIT 0` 收尾，不能用安靜輸出判定完成。
+- **探勘錄影與交付證據必須分開**：只為確認 menu/prompt 的錄影可以用 `END_SESSION`／`QUIT`，但必須標示為 exploration，且不得用作 evidence 或合併到交付影片。正式 `pilot edit` 錄影完成存檔後，必須回到頂層選單、選取 `離開`，再以 `WAIT_CHILD_EXIT` + `ASSERT_EXIT 0` 收尾；不可用 `END_SESSION`、`CTRLC` 或關閉仍在執行的 MCP session 代替。這些終止方式會讓 cast 成為 `aborted`／`ended`，即使檔案已存檔也不可交付。
+- **交付影片必須是真正可觀看的 wizard 證據**：`pilot edit --actions` 的成功 cast 只證明 semantic action 執行，通常只有 banner/marker，不能取代逐頁 TUI 錄影。交付前確認該 cast 顯示選單、實際鍵盤輸入、儲存結果與正常離開畫面。
 - 每次 `pilot edit` 存檔後，立即唯讀核對落盤設定；特別確認每一 host 的 `ansible_user` 是帳號名稱，SSH key 欄位才是金鑰路徑。發現欄位污染時，視為 drive script 問題，修正後從乾淨 workspace 重跑。
 - `pilot deploy` 的預覽成功不等於部署成功。必須明確通過 preview 後的「套用真正變更」確認，並在 cast 中確認 `✅ 套用完成` 與成功 exit code。
 - agent 需要自動回答 deploy prompt 時，建立只含一個 `deploy` action 的 version 1 JSON scenario，然後執行：
@@ -80,8 +82,8 @@
       --presentation --trace-out ./tmp/reconcile.jsonl
   ```
 
-  `pilot reconcile` 只會接受 contract catalog 宣告的 reconciler；不要把 `reconcile` action 混進 standalone `deploy` scenario。需要 edit→deploy→reconcile 連續影片時，才使用 `pilot edit --actions` 的 workflow scenario。
-- 每個 cast 完成後執行 `trec verify`；結果不完整、仍為 `in_progress`、exit code 非 0、digest 不符或 secret scan 有 finding，均不可當作證據。
+  `pilot reconcile` 只會接受 contract catalog 宣告的 reconciler；不要把 `reconcile` action 混進 standalone `deploy` scenario。`pilot edit --actions` 的 workflow scenario 只能用於非視覺自動化與 trace；若要交付 edit→deploy→reconcile 的影片，仍須以低階 TREC input 錄製普通 `pilot edit` wizard。
+- 每個 cast 完成後執行 `trec verify`；結果不完整、仍為 `in_progress`、exit code 非 0、digest 不符或 secret scan 有 finding，均不可當作證據。合併交付影片時，先列出已驗證的 **visual evidence** cast，再以明確檔案清單合併；不可用目錄 glob 把 exploration/failed/aborted casts 混入，也不可只按 `status=success` 篩選而誤納入 action-driven 的非視覺錄影。
 
 ## 部署與驗證流程
 

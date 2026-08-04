@@ -103,6 +103,24 @@ Never run these concurrently:
 Read-only audits may overlap only after their input evidence is complete
 and immutable.
 
+## Recording checkpoint gate
+
+For every interactive or recorded checkpoint, the controller creates and keeps
+separate scratch paths for `casts/exploration/`, `casts/failed/`,
+`casts/evidence/`, and `evidence/recording-manifest.md`. The checkpoint may
+advance only after its own final cast has passed `trec verify` (or MCP
+`cast_verify`) with `status=success`, exit code 0, one final successful
+`SESSION_END`, matching integrity, and a clean secret scan.
+
+Exploration casts, action-mode wrapper casts, and any failed/aborted/unsafe
+cast are diagnostic artifacts only; never cite them as walkthrough evidence or
+include them in a final replay. A save/bootstrap is not a successful recording
+unless the wizard then exits through its own `離開` action and the child has
+been observed to exit 0 before the session is closed. On a recording failure,
+stop the current checkpoint, preserve its cast and result under `failed/`, and
+make a newly scripted evidence attempt after the cause is understood. Do not
+recover inside the same candidate cast.
+
 ## Failure policy
 
 Every delegated agent stops at the first unexpected result.
@@ -136,8 +154,9 @@ Each state-changing step returns:
 4. concise relevant output;
 5. resources changed;
 6. evidence paths;
-7. expected versus observed result;
-8. PASS, FAIL, or BLOCKED.
+7. per-cast verification and secret-scan verdict;
+8. expected versus observed result;
+9. PASS, FAIL, or BLOCKED.
 
 Store complete logs as evidence files. Return only focused excerpts to the
 root context.
