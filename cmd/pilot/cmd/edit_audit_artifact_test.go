@@ -114,6 +114,94 @@ func TestWritePlanAuditArtifacts_WritesAllFourFiles(t *testing.T) {
 	}
 }
 
+func TestWriteApplyAuditArtifacts_WritesFullFileSet(t *testing.T) {
+	dir := t.TempDir()
+	meta := auditMetadata{SessionID: "xyz789", Kind: "apply", PilotVersion: "0.2.0", Workspace: dir}
+	scenario := editScenario{Version: 1, Steps: []editAction{{Action: "create_host", Host: "web-1"}}}
+	before := []managedFileEntry{{RelPath: "hosts.yml", Content: []byte("hosts: {}\n")}}
+	after := []managedFileEntry{{RelPath: "hosts.yml", Content: []byte("hosts: {web-1: {}}\n")}}
+	result := &editApplyResult{
+		RevisionBefore: "sha256:before",
+		RevisionAfter:  "sha256:after",
+		AffectedFiles:  []string{"hosts.yml"},
+		Diff:           "--- a/hosts.yml\n+++ b/hosts.yml\n",
+		Before:         before,
+		After:          after,
+		RolledBack:     false,
+	}
+
+	if err := writeApplyAuditArtifacts(dir, meta, scenario, result); err != nil {
+		t.Fatalf("writeApplyAuditArtifacts() error = %v", err)
+	}
+
+	for _, name := range []string{
+		"metadata.json", "scenario.redacted.json", "diff.patch", "validation.json",
+		"managed-files-before.json", "managed-files-after.json", "result.json",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("expected %s to exist: %v", name, err)
+		}
+	}
+
+	resultData, err := os.ReadFile(filepath.Join(dir, "result.json"))
+	if err != nil {
+		t.Fatalf("read result.json: %v", err)
+	}
+	var gotResult resultSummary
+	if err := json.Unmarshal(resultData, &gotResult); err != nil {
+		t.Fatalf("result.json did not parse: %v", err)
+	}
+	if gotResult.Result != "applied" || gotResult.RolledBack {
+		t.Fatalf("gotResult = %+v, want result=applied rolled_back=false", gotResult)
+	}
+	if gotResult.RevisionBefore != "sha256:before" || gotResult.RevisionAfter != "sha256:after" {
+		t.Fatalf("gotResult revisions = %+v", gotResult)
+	}
+
+	beforeData, err := os.ReadFile(filepath.Join(dir, "managed-files-before.json"))
+	if err != nil {
+		t.Fatalf("read managed-files-before.json: %v", err)
+	}
+	var gotBefore []managedFileManifestEntry
+	if err := json.Unmarshal(beforeData, &gotBefore); err != nil {
+		t.Fatalf("managed-files-before.json did not parse: %v", err)
+	}
+	if len(gotBefore) != 1 || gotBefore[0].RelPath != "hosts.yml" || gotBefore[0].ContentSHA256 == "" {
+		t.Fatalf("gotBefore = %+v", gotBefore)
+	}
+	if bytes.Contains(beforeData, []byte("hosts: {}")) {
+		t.Fatal("expected the manifest to hold a content hash, not literal file content")
+	}
+}
+
+func TestWriteApplyAuditArtifacts_RolledBackResultReportsFailed(t *testing.T) {
+	dir := t.TempDir()
+	meta := auditMetadata{SessionID: "rb1", Kind: "apply"}
+	scenario := editScenario{Version: 1, Steps: []editAction{{Action: "create_host", Host: "web-1"}}}
+	result := &editApplyResult{
+		RevisionBefore: "sha256:same",
+		RevisionAfter:  "sha256:same",
+		RolledBack:     true,
+		Before:         []managedFileEntry{},
+		After:          []managedFileEntry{},
+	}
+
+	if err := writeApplyAuditArtifacts(dir, meta, scenario, result); err != nil {
+		t.Fatalf("writeApplyAuditArtifacts() error = %v", err)
+	}
+	resultData, err := os.ReadFile(filepath.Join(dir, "result.json"))
+	if err != nil {
+		t.Fatalf("read result.json: %v", err)
+	}
+	var gotResult resultSummary
+	if err := json.Unmarshal(resultData, &gotResult); err != nil {
+		t.Fatalf("result.json did not parse: %v", err)
+	}
+	if gotResult.Result != "failed" || !gotResult.RolledBack {
+		t.Fatalf("gotResult = %+v, want result=failed rolled_back=true", gotResult)
+	}
+}
+
 func TestGitRevision_EmptyForNonGitDirectory(t *testing.T) {
 	dir := t.TempDir() // an OS temp dir is never inside a git working tree
 	if rev := gitRevision(dir); rev != "" {

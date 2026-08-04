@@ -188,6 +188,170 @@ func TestPlanHandler_SuccessfulPlanWritesAuditArtifactsAndLeavesWorkspaceUntouch
 	}
 }
 
+func TestApplyHandler_WriteDisabledWhenWriteEnabledFalse(t *testing.T) {
+	handler := applyHandler(editMCPToolsOptions{Dir: t.TempDir(), AuditDir: t.TempDir(), WriteEnabled: false})
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, applyInput{PlanID: "whatever"})
+	if err != nil {
+		t.Fatalf("applyHandler() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected an error result when WriteEnabled is false")
+	}
+	if toolErr := decodeToolError(t, result); toolErr.Code != mcpErrWriteDisabled {
+		t.Fatalf("Code = %q, want %q", toolErr.Code, mcpErrWriteDisabled)
+	}
+}
+
+func TestApplyHandler_TargetNotFoundForUnknownPlanID(t *testing.T) {
+	handler := applyHandler(editMCPToolsOptions{Dir: t.TempDir(), AuditDir: t.TempDir(), WriteEnabled: true})
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, applyInput{PlanID: "no-such-plan"})
+	if err != nil {
+		t.Fatalf("applyHandler() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected an error result for an unknown plan_id")
+	}
+	if toolErr := decodeToolError(t, result); toolErr.Code != mcpErrTargetNotFound {
+		t.Fatalf("Code = %q, want %q", toolErr.Code, mcpErrTargetNotFound)
+	}
+}
+
+// createTestPlan runs a real plan through planHandler and returns its
+// plan_id and the workspace's revision at plan time — the fixture the
+// apply-handler tests below build on, exactly mirroring how apply
+// would actually be reached in practice (via a prior plan call).
+func createTestPlan(t *testing.T, dir, auditDir string, scenario editScenario) (planID, revision string) {
+	t.Helper()
+	rev, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+	handler := planHandler(editMCPToolsOptions{Dir: dir, AuditDir: auditDir})
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, planInput{BaseRevision: rev, Scenario: scenario})
+	if err != nil {
+		t.Fatalf("planHandler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected a successful plan, got error result: %+v", result.Content)
+	}
+	return out.PlanID, rev
+}
+
+func TestApplyHandler_WorkspaceChangedForStaleExpectedRevision(t *testing.T) {
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+	scenario := editScenario{Version: 1, Steps: []editAction{{Action: "create_host", Host: "web-01"}, {Action: "save_hosts"}}}
+	planID, _ := createTestPlan(t, dir, auditDir, scenario)
+
+	handler := applyHandler(editMCPToolsOptions{Dir: dir, AuditDir: auditDir, WriteEnabled: true})
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, applyInput{PlanID: planID, ExpectedRevision: "sha256:stale"})
+	if err != nil {
+		t.Fatalf("applyHandler() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected an error result for a stale expected_revision")
+	}
+	if toolErr := decodeToolError(t, result); toolErr.Code != mcpErrWorkspaceChanged {
+		t.Fatalf("Code = %q, want %q", toolErr.Code, mcpErrWorkspaceChanged)
+	}
+}
+
+func TestApplyHandler_SuccessfulPlanThenApplyMutatesRealWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+	scenario := editScenario{Version: 1, Title: "add web-01", Steps: []editAction{
+		{Action: "create_host", Host: "web-01"},
+		{Action: "set_host_field", Host: "web-01", Field: "ansible_host", Value: "10.0.0.9"},
+		{Action: "save_hosts"},
+	}}
+	planID, revision := createTestPlan(t, dir, auditDir, scenario)
+
+	handler := applyHandler(editMCPToolsOptions{Dir: dir, AuditDir: auditDir, WriteEnabled: true})
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, applyInput{PlanID: planID, ExpectedRevision: revision})
+	if err != nil {
+		t.Fatalf("applyHandler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected a successful apply, got error result: %+v", result.Content)
+	}
+	if out.Result != "applied" || out.RolledBack {
+		t.Fatalf("out = %+v, want result=applied rolled_back=false", out)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("expected hosts.yml to exist for real: %v", err)
+	}
+	if !strings.Contains(string(data), "web-01") || !strings.Contains(string(data), "10.0.0.9") {
+		t.Fatalf("hosts.yml = %q, want it to contain the planned change", data)
+	}
+
+	for _, name := range []string{
+		"metadata.json", "scenario.redacted.json", "diff.patch", "validation.json",
+		"trace.jsonl", "session.cast", "managed-files-before.json", "managed-files-after.json", "result.json",
+	} {
+		if _, err := os.Stat(filepath.Join(out.Audit.Directory, name)); err != nil {
+			t.Fatalf("expected apply audit artifact %s to exist: %v", name, err)
+		}
+	}
+}
+
+// TestApplyHandler_FailedScenarioRollsBackAndReportsStructuredError uses
+// a hand-written plan audit directory rather than createTestPlan: a
+// scenario that fails partway would *also* fail identically during
+// planning (plan and apply run the same deterministic driver against
+// byte-identical content once revisions match), so it could never
+// produce a real plan_id through planHandler in the first place. This
+// simulates the case apply's rollback path actually exists for: a plan
+// directory whose scenario now fails at apply time (e.g. environment
+// drift) despite having been recorded as a valid plan.
+func TestApplyHandler_FailedScenarioRollsBackAndReportsStructuredError(t *testing.T) {
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "hosts.yml"), "hosts: {}\n")
+	revision, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_host", Host: "web-01"},
+		{Action: "save_hosts"},
+		{Action: "set_group_var", File: "no-such-stem.yml", Key: "x", Value: "y"},
+	}}
+	planID := "hand-written-plan"
+	planDir := filepath.Join(auditDir, "20260101T000000Z-"+planID+"-plan")
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatalf("mkdir planDir: %v", err)
+	}
+	if err := writeJSONFile(filepath.Join(planDir, "metadata.json"), auditMetadata{WorkspaceRevision: revision}); err != nil {
+		t.Fatalf("write plan metadata.json: %v", err)
+	}
+	if err := writeJSONFile(filepath.Join(planDir, "scenario.redacted.json"), scenario); err != nil {
+		t.Fatalf("write plan scenario.redacted.json: %v", err)
+	}
+
+	handler := applyHandler(editMCPToolsOptions{Dir: dir, AuditDir: auditDir, WriteEnabled: true})
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, applyInput{PlanID: planID, ExpectedRevision: revision})
+	if err != nil {
+		t.Fatalf("applyHandler() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected a structured error result for a scenario that fails partway")
+	}
+	toolErr := decodeToolError(t, result)
+	if toolErr.Code != mcpErrApplyFailed || !toolErr.RolledBack {
+		t.Fatalf("toolErr = %+v, want code=apply_failed rolled_back=true", toolErr)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("read hosts.yml: %v", err)
+	}
+	if string(data) != "hosts: {}\n" {
+		t.Fatalf("hosts.yml = %q, want the pre-apply content restored", data)
+	}
+}
+
 func decodeToolError(t *testing.T, result *mcp.CallToolResult) mcpToolError {
 	t.Helper()
 	raw := contentText(t, result)

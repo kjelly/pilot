@@ -9,6 +9,8 @@
 package cmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -132,6 +134,83 @@ func writePlanAuditArtifacts(dir string, meta auditMetadata, scenario editScenar
 		return err
 	}
 	return nil
+}
+
+// managedFileManifestEntry is one row of managed-files-before.json /
+// managed-files-after.json — a compact manifest (content hash only,
+// not the full content, which is already fully visible in diff.patch).
+type managedFileManifestEntry struct {
+	RelPath       string `json:"rel_path"`
+	Mode          string `json:"mode"`
+	IsSymlink     bool   `json:"is_symlink"`
+	ContentSHA256 string `json:"content_sha256"`
+}
+
+func manifestFor(entries []managedFileEntry) []managedFileManifestEntry {
+	out := make([]managedFileManifestEntry, len(entries))
+	for i, e := range entries {
+		sum := sha256.Sum256(e.Content)
+		out[i] = managedFileManifestEntry{
+			RelPath:       e.RelPath,
+			Mode:          e.Mode.String(),
+			IsSymlink:     e.IsSymlink,
+			ContentSHA256: hex.EncodeToString(sum[:]),
+		}
+	}
+	return out
+}
+
+// resultSummary is result.json's content — apply-specific (a plan
+// never rolls back a real mutation, so it has no comparable file).
+type resultSummary struct {
+	Result           string `json:"result"` // "applied" | "failed"
+	FailedStep       *int   `json:"failed_step"`
+	RolledBack       bool   `json:"rolled_back"`
+	RevisionBefore   string `json:"revision_before"`
+	RevisionAfter    string `json:"revision_after"`
+	ValidationPassed bool   `json:"validation_passed"`
+}
+
+// writeApplyAuditArtifacts writes the full apply audit file set:
+// everything writePlanAuditArtifacts writes, plus
+// managed-files-before.json/managed-files-after.json and result.json —
+// rollback bookkeeping that only matters once something can actually
+// roll back. FailedStep is always nil: automationDriver's error
+// doesn't currently carry a structured step index outside its wrapped
+// error string, though the precise failed step is always visible in
+// this same directory's trace.jsonl.
+func writeApplyAuditArtifacts(dir string, meta auditMetadata, scenario editScenario, result *editApplyResult) error {
+	if err := writeJSONFile(filepath.Join(dir, "metadata.json"), meta); err != nil {
+		return err
+	}
+	if err := writeJSONFile(filepath.Join(dir, "scenario.redacted.json"), scenario); err != nil {
+		return err
+	}
+	if err := writeTextFile(filepath.Join(dir, "diff.patch"), result.Diff); err != nil {
+		return err
+	}
+	validation := validationSummary{Blocking: result.Blocking, Warnings: result.Warnings}
+	if err := writeJSONFile(filepath.Join(dir, "validation.json"), validation); err != nil {
+		return err
+	}
+	if err := writeJSONFile(filepath.Join(dir, "managed-files-before.json"), manifestFor(result.Before)); err != nil {
+		return err
+	}
+	if err := writeJSONFile(filepath.Join(dir, "managed-files-after.json"), manifestFor(result.After)); err != nil {
+		return err
+	}
+	resultKind := "applied"
+	if result.RolledBack {
+		resultKind = "failed"
+	}
+	summary := resultSummary{
+		Result:           resultKind,
+		RolledBack:       result.RolledBack,
+		RevisionBefore:   result.RevisionBefore,
+		RevisionAfter:    result.RevisionAfter,
+		ValidationPassed: len(result.Blocking) == 0,
+	}
+	return writeJSONFile(filepath.Join(dir, "result.json"), summary)
 }
 
 func writeJSONFile(path string, value any) error {

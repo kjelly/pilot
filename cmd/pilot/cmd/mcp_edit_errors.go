@@ -13,15 +13,15 @@ import (
 )
 
 // mcpToolError is the JSON shape every MCP tool error result carries.
-// Only a subset of spec's full error-code list is reachable from the
-// read-only capabilities/inspect/plan tools this phase implements
-// (invalidScenario, unsupportedAction, workspaceChanged,
-// validationFailed, recordingFailed); the rest
-// (write_disabled/workspace_locked/path_outside_workspace/
-// secret_policy_violation/unexpected_screen/target_not_found/
-// ambiguous_target/save_failed/apply_failed/rollback_failed) belong to
-// apply/vault/roster phases and aren't produced here, but the type is
-// shared so those phases reuse it rather than inventing another.
+// Phase 3 (capabilities/inspect/plan) and Phase 4 (apply) between them
+// produce invalid_scenario, unsupported_action, workspace_changed,
+// validation_failed, recording_failed, write_disabled,
+// workspace_locked, target_not_found, ambiguous_target, apply_failed,
+// and rollback_failed. The remaining codes in spec's full list
+// (path_outside_workspace/secret_policy_violation/unexpected_screen/
+// save_failed) belong to vault/roster phases and aren't produced yet,
+// but the type is shared so those phases reuse it rather than
+// inventing another.
 type mcpToolError struct {
 	Code           string `json:"code"`
 	Message        string `json:"message"`
@@ -40,6 +40,12 @@ const (
 	mcpErrWorkspaceChanged  = "workspace_changed"
 	mcpErrValidationFailed  = "validation_failed"
 	mcpErrRecordingFailed   = "recording_failed"
+	mcpErrWriteDisabled     = "write_disabled"
+	mcpErrWorkspaceLocked   = "workspace_locked"
+	mcpErrTargetNotFound    = "target_not_found"
+	mcpErrAmbiguousTarget   = "ambiguous_target"
+	mcpErrApplyFailed       = "apply_failed"
+	mcpErrRollbackFailed    = "rollback_failed"
 )
 
 // toolErrorResult builds the CallToolResult a handler returns for a

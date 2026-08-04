@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,7 +59,7 @@ func TestMCPServe_Integration_CapabilitiesInspectPlan(t *testing.T) {
 	defer cancel()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-integration-test", Version: "0.0.1"}, nil)
-	transport := &mcp.CommandTransport{Command: exec.Command(binary, "mcp", "serve", "--dir", dir, "--audit-dir", auditDir)}
+	transport := &mcp.CommandTransport{Command: exec.Command(binary, "mcp", "serve", "--dir", dir, "--audit-dir", auditDir, "--allow-write")}
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
@@ -69,7 +70,12 @@ func TestMCPServe_Integration_CapabilitiesInspectPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools() error = %v", err)
 	}
-	wantTools := map[string]bool{"pilot_edit_capabilities": false, "pilot_edit_inspect": false, "pilot_edit_plan": false}
+	wantTools := map[string]bool{
+		"pilot_edit_capabilities": false,
+		"pilot_edit_inspect":      false,
+		"pilot_edit_plan":         false,
+		"pilot_edit_apply":        false, // only listed because --allow-write is set above
+	}
 	for _, tool := range toolsResult.Tools {
 		if _, ok := wantTools[tool.Name]; ok {
 			wantTools[tool.Name] = true
@@ -158,5 +164,47 @@ func TestMCPServe_Integration_CapabilitiesInspectPlan(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(plan.Audit.Directory, name)); err != nil {
 			t.Fatalf("expected audit artifact %s to exist: %v", name, err)
 		}
+	}
+
+	// --- apply: the plan just approved now mutates the real workspace ---
+	applyArgsJSON, _ := json.Marshal(applyInput{PlanID: plan.PlanID, ExpectedRevision: inspect.WorkspaceRevision})
+	var applyArgsMap map[string]any
+	_ = json.Unmarshal(applyArgsJSON, &applyArgsMap)
+	applyResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_apply", Arguments: applyArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_apply) error = %v", err)
+	}
+	if applyResult.IsError {
+		t.Fatalf("pilot_edit_apply returned an error: %+v", applyResult.Content)
+	}
+	applied := decodeStructured[applyOutput](t, applyResult)
+	if applied.Result != "applied" || applied.RolledBack {
+		t.Fatalf("applied = %+v, want result=applied rolled_back=false", applied)
+	}
+
+	hostsData, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("expected the real workspace's hosts.yml to exist after apply: %v", err)
+	}
+	if !strings.Contains(string(hostsData), "web-01") || !strings.Contains(string(hostsData), "10.0.0.9") {
+		t.Fatalf("hosts.yml = %q, want it to contain the applied change", hostsData)
+	}
+	for _, name := range []string{
+		"metadata.json", "scenario.redacted.json", "diff.patch", "validation.json",
+		"trace.jsonl", "session.cast", "managed-files-before.json", "managed-files-after.json", "result.json",
+	} {
+		if _, err := os.Stat(filepath.Join(applied.Audit.Directory, name)); err != nil {
+			t.Fatalf("expected apply audit artifact %s to exist: %v", name, err)
+		}
+	}
+
+	// A second apply against the same (now-stale) plan/revision must be
+	// rejected rather than silently reapplied.
+	secondApplyResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_apply", Arguments: applyArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_apply) [second attempt] error = %v", err)
+	}
+	if !secondApplyResult.IsError {
+		t.Fatal("expected the second apply attempt (stale revision) to be rejected")
 	}
 }
