@@ -32,8 +32,11 @@ type editPlanResult struct {
 // copyManagedFilesToTemp — dir is only ever read (by
 // computeWorkspaceRevision and diffManagedFiles), never written to
 // here, matching the spec's "Plan 不得修改真實 workspace" invariant
-// (AC4). recorder may be nil (automationDriver defaults to a no-op).
-func planEditScenario(dir string, scenario editScenario, recorder AuditRecorder) (*editPlanResult, error) {
+// (AC4). opts is passed straight through to newEditAgentSession — a
+// caller that wants trace.jsonl/session.cast output (e.g. the MCP plan
+// tool) sets opts.Trace/opts.Recorder; the zero value behaves exactly
+// like a bare recorder-less session (every field defaults to a no-op).
+func planEditScenario(dir string, scenario editScenario, opts editAgentSessionOptions) (*editPlanResult, error) {
 	if err := validateEditScenario(scenario); err != nil {
 		return nil, err
 	}
@@ -49,7 +52,7 @@ func planEditScenario(dir string, scenario editScenario, recorder AuditRecorder)
 	}
 	defer cleanup()
 
-	session := newEditAgentSession(tempDir, editAgentSessionOptions{Recorder: recorder})
+	session := newEditAgentSession(tempDir, opts)
 	if err := session.Run(scenario); err != nil {
 		return nil, fmt.Errorf("plan scenario: %w", err)
 	}

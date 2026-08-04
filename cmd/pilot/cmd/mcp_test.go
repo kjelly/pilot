@@ -1,0 +1,162 @@
+//go:build linux || darwin || freebsd
+
+// mcp_test.go is the "MCP Integration Tests" spec's Phase 3 asks for:
+// spawn the real, compiled `pilot` binary (not a reimplementation) and
+// talk to it as a real MCP client would, over the real stdio
+// transport. buildPilotBinary/repoRootForPTYTest are reused from
+// edit_tui_pty_test.go's existing PTY harness — building the same
+// binary twice for two different kinds of subprocess test would be
+// wasteful and drift-prone.
+//
+// A successful round-trip through mcp.CommandTransport/ClientSession
+// is itself strong evidence of stdout cleanliness: that transport's
+// newline-delimited JSON framing cannot complete a request/response
+// cycle at all if the server has written any stray non-protocol bytes
+// to stdout in between — a passing CallTool here is the assertion
+// spec's "MCP stdout 每一筆輸出都是合法 protocol message" wants, not
+// just a side effect of one.
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// decodeStructured re-marshals a CallToolResult's StructuredContent
+// (typed as `any` on the wire) into a concrete Go type.
+func decodeStructured[T any](t *testing.T, result *mcp.CallToolResult) T {
+	t.Helper()
+	var out T
+	data, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal StructuredContent: %v", err)
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal StructuredContent into %T: %v\nraw: %s", out, err, data)
+	}
+	return out
+}
+
+func TestMCPServe_Integration_CapabilitiesInspectPlan(t *testing.T) {
+	binary := buildPilotBinary(t)
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+
+	beforeRevision, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-integration-test", Version: "0.0.1"}, nil)
+	transport := &mcp.CommandTransport{Command: exec.Command(binary, "mcp", "serve", "--dir", dir, "--audit-dir", auditDir)}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	toolsResult, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	wantTools := map[string]bool{"pilot_edit_capabilities": false, "pilot_edit_inspect": false, "pilot_edit_plan": false}
+	for _, tool := range toolsResult.Tools {
+		if _, ok := wantTools[tool.Name]; ok {
+			wantTools[tool.Name] = true
+		}
+	}
+	for name, seen := range wantTools {
+		if !seen {
+			t.Fatalf("expected tool %q to be listed, got %+v", name, toolsResult.Tools)
+		}
+	}
+
+	capResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_capabilities", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_capabilities) error = %v", err)
+	}
+	if capResult.IsError {
+		t.Fatalf("pilot_edit_capabilities returned an error: %+v", capResult.Content)
+	}
+	caps := decodeStructured[capabilitiesOutput](t, capResult)
+	if len(caps.Actions) == 0 {
+		t.Fatal("expected at least one action in capabilities")
+	}
+	for _, a := range caps.Actions {
+		if mcpVaultActionNames[a.Name] {
+			t.Fatalf("vault action %q leaked through the real MCP wire", a.Name)
+		}
+	}
+
+	inspectArgs, _ := json.Marshal(inspectInput{IncludeGroupVars: true})
+	var inspectArgsMap map[string]any
+	_ = json.Unmarshal(inspectArgs, &inspectArgsMap)
+	inspectResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_inspect", Arguments: inspectArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_inspect) error = %v", err)
+	}
+	if inspectResult.IsError {
+		t.Fatalf("pilot_edit_inspect returned an error: %+v", inspectResult.Content)
+	}
+	inspect := decodeStructured[inspectOutput](t, inspectResult)
+	if inspect.WorkspaceRevision == "" {
+		t.Fatal("expected a non-empty workspace_revision from inspect")
+	}
+
+	planScenario := editScenario{Version: 1, Title: "mcp integration test", Steps: []editAction{
+		{Action: "create_host", Host: "web-01"},
+		{Action: "set_host_field", Host: "web-01", Field: "ansible_host", Value: "10.0.0.9"},
+		{Action: "save_hosts"},
+	}}
+	planArgsJSON, _ := json.Marshal(planInput{BaseRevision: inspect.WorkspaceRevision, Scenario: planScenario})
+	var planArgsMap map[string]any
+	_ = json.Unmarshal(planArgsJSON, &planArgsMap)
+	planResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_plan", Arguments: planArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_plan) error = %v", err)
+	}
+	if planResult.IsError {
+		t.Fatalf("pilot_edit_plan returned an error: %+v", planResult.Content)
+	}
+	// Not asserting plan.Valid here: a brand-new workspace with no
+	// `pilot inventory generate`-produced inventory.yml legitimately
+	// fails checkWorkspaceCompleteness regardless of what this scenario
+	// did correctly — the same real gate `pilot edit`'s own
+	// completeness check reports. What matters for this test is that
+	// the scenario itself ran and produced the expected diff/artifacts.
+	plan := decodeStructured[planOutput](t, planResult)
+	if plan.Audit.Directory == "" {
+		t.Fatal("expected a non-empty audit directory reference")
+	}
+
+	// The real workspace must never see this scenario's write.
+	if _, err := os.Stat(filepath.Join(dir, "hosts.yml")); !os.IsNotExist(err) {
+		t.Fatalf("expected dir/hosts.yml to still not exist after a plan call, stat error = %v", err)
+	}
+	afterRevision, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+	if afterRevision != beforeRevision {
+		t.Fatal("expected the real workspace's revision to be unchanged after a plan call")
+	}
+
+	if _, err := os.Stat(plan.Audit.Directory); err != nil {
+		t.Fatalf("expected the plan's audit directory to exist on disk: %v", err)
+	}
+	for _, name := range []string{"metadata.json", "scenario.redacted.json", "diff.patch", "validation.json", "trace.jsonl", "session.cast"} {
+		if _, err := os.Stat(filepath.Join(plan.Audit.Directory, name)); err != nil {
+			t.Fatalf("expected audit artifact %s to exist: %v", name, err)
+		}
+	}
+}

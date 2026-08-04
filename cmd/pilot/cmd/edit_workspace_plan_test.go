@@ -20,7 +20,7 @@ func TestPlanEditScenario_ReturnsDiffAndLeavesRealWorkspaceUntouched(t *testing.
 		t.Fatalf("computeWorkspaceRevision() error = %v", err)
 	}
 
-	result, err := planEditScenario(dir, scenario, nil)
+	result, err := planEditScenario(dir, scenario, editAgentSessionOptions{})
 	if err != nil {
 		t.Fatalf("planEditScenario() error = %v", err)
 	}
@@ -67,7 +67,7 @@ func TestPlanEditScenario_InvalidScenarioLeavesWorkspaceUntouched(t *testing.T) 
 	scenario := editScenario{Version: 1, Steps: []editAction{
 		{Action: "enable_role", Host: "no-such-host", Role: "docker"},
 	}}
-	if _, err := planEditScenario(dir, scenario, nil); err == nil {
+	if _, err := planEditScenario(dir, scenario, editAgentSessionOptions{}); err == nil {
 		t.Fatal("expected an error for a scenario targeting a nonexistent host")
 	}
 
@@ -82,7 +82,7 @@ func TestPlanEditScenario_InvalidScenarioLeavesWorkspaceUntouched(t *testing.T) 
 
 func TestPlanEditScenario_EmptyScenarioIsRejected(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := planEditScenario(dir, editScenario{Version: 1}, nil); err == nil {
+	if _, err := planEditScenario(dir, editScenario{Version: 1}, editAgentSessionOptions{}); err == nil {
 		t.Fatal("expected an empty scenario to be rejected by validateEditScenario before any temp copy is made")
 	}
 }
