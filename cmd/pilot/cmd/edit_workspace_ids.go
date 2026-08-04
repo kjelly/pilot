@@ -12,12 +12,12 @@ import (
 	"fmt"
 )
 
-// newPlanID returns a fresh, opaque, unique-enough identifier — 16
+// newID returns a fresh, opaque, unique-enough identifier — 16
 // random bytes, hex-encoded. Spec's examples show ULID-shaped IDs
 // ("01K1...") but that's illustrative, not a mandated format: nothing
 // depends on ID sortability here, since the audit directory name
 // itself already carries an explicit timestamp prefix.
-func newPlanID() (string, error) {
+func newID() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("generate plan id: %w", err)

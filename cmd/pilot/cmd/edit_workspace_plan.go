@@ -57,7 +57,7 @@ func planEditScenario(dir string, scenario editScenario, opts editAgentSessionOp
 		return nil, fmt.Errorf("plan scenario: %w", err)
 	}
 
-	blocking, warnings := collectPlanValidation(tempDir)
+	blocking, warnings := collectWorkspaceValidation(tempDir)
 
 	patch, affected, err := diffManagedFiles(dir, tempDir)
 	if err != nil {
@@ -84,11 +84,11 @@ func planEditScenario(dir string, scenario editScenario, opts editAgentSessionOp
 	}, nil
 }
 
-// collectPlanValidation runs the same completeness sweep and lint pass
+// collectWorkspaceValidation runs the same completeness sweep and lint pass
 // a real save already goes through (checkWorkspaceCompleteness,
 // inventory.Lint — see saveHosts) against dir, splitting results into
 // blocking vs. warning by severity.
-func collectPlanValidation(dir string) (blocking, warnings []string) {
+func collectWorkspaceValidation(dir string) (blocking, warnings []string) {
 	for _, c := range checkWorkspaceCompleteness(dir) {
 		if c.OK {
 			continue
