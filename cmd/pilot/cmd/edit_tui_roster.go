@@ -39,7 +39,7 @@ import (
 
 func pushRosterPathPrompt(r *editRouterModel, dir string) tea.Cmd {
 	def := filepath.Join(dir, ".vault", "ipa-identity.yaml")
-	return r.transitionTo(newTextInputModel("Roster 檔路徑(canonical FreeIPA roster)", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.path", "Roster 檔路徑(canonical FreeIPA roster)", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
@@ -64,7 +64,7 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 
 	items := []string{"👤 Users", "👥 Groups", "🔐 Host access", "🛡️  Sudo commands & rules", "↩  返回"}
 	title := fmt.Sprintf("管理 %s", path)
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.top", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -214,7 +214,7 @@ func pushRosterUsersMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	}
 	items = append(items, "➕ 新增 User", "↩  返回")
 
-	return r.transitionTo(newSelectModel(fmt.Sprintf("Users — %s", path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.users.list", fmt.Sprintf("Users — %s", path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "↩ 返回".
@@ -238,7 +238,7 @@ func pushRosterAddUser(r *editRouterModel, dir, path string) tea.Cmd {
 		}
 		return nil
 	}
-	return r.transitionTo(newTextInputModel("新 user 的名稱(小寫英數字/底線/點/連字號)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.user.add", "新 user 的名稱(小寫英數字/底線/點/連字號)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterUsersMenu(r, dir, path, "")
@@ -587,7 +587,7 @@ func pushRosterUserDetail(r *editRouterModel, dir, path, name, banner string) te
 		fmt.Sprintf("ssh_keys.values（共 %d 支公鑰）", len(values)),
 		"↩  返回",
 	}
-	return r.transitionTo(newSelectModel(fmt.Sprintf("User %q — %s", name, path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.user.detail", fmt.Sprintf("User %q — %s", name, path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			return pushRosterUsersMenu(r, dir, path, "")
@@ -631,7 +631,7 @@ func pushRosterUserDetail(r *editRouterModel, dir, path, name, banner string) te
 }
 
 func pushRosterUserTextField(r *editRouterModel, dir, path, name, key, label, current string) tea.Cmd {
-	return r.transitionTo(newTextInputModel(label, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.user.field_text", label, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
@@ -642,7 +642,7 @@ func pushRosterUserTextField(r *editRouterModel, dir, path, name, key, label, cu
 }
 
 func pushRosterUserIntField(r *editRouterModel, dir, path, name, key, current string) tea.Cmd {
-	return r.transitionTo(newTextInputModel(key+"(留空 = 未設定)", current, rosterIntValidator), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.user.field_int", key+"(留空 = 未設定)", current, rosterIntValidator), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
@@ -660,7 +660,7 @@ func pushRosterUserIntField(r *editRouterModel, dir, path, name, key, current st
 }
 
 func pushRosterUserBoolField(r *editRouterModel, dir, path, name, key, label string) tea.Cmd {
-	return r.transitionTo(newSelectModel(label, rosterBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.user.field_bool", label, rosterBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
@@ -676,7 +676,7 @@ var rosterUserStateChoices = []string{"present", "disabled"}
 
 func pushRosterUserStateField(r *editRouterModel, dir, path, name string) tea.Cmd {
 	title := "state(不提供 absent — 這個精靈不支援刪除；如需刪除請直接編輯檔案)"
-	return r.transitionTo(newSelectModel(title, rosterUserStateChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.user.field_state", title, rosterUserStateChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")

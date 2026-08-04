@@ -15,6 +15,7 @@ func TestSemanticActionCatalogIsStable(t *testing.T) {
 		"delete_role_preset", "restore_role_presets",
 		"set_group_var", "restore_group_var_default", "save_group_vars", "discard_group_vars",
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",
+		"create_user", "set_user_field",
 		"save_hosts", "deploy", "reconcile",
 	}
 	specs := semanticActionSpecs()
@@ -46,7 +47,7 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &schema); err != nil {
 		t.Fatalf("schema is not JSON: %v\n%s", err, out.String())
 	}
-	if schema.Version != 1 || len(schema.Actions) != 27 {
+	if schema.Version != 1 || len(schema.Actions) != 29 {
 		t.Fatalf("schema metadata = version %d, actions %d", schema.Version, len(schema.Actions))
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {
@@ -66,6 +67,7 @@ func TestActionsListIncludesEverySemanticAction(t *testing.T) {
 		"delete_role_preset", "restore_role_presets",
 		"set_group_var", "restore_group_var_default", "save_group_vars", "discard_group_vars",
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",
+		"create_user", "set_user_field",
 		"save_hosts", "deploy", "reconcile",
 	} {
 		if !strings.Contains(out.String(), name) {

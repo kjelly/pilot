@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -265,6 +266,25 @@ func editActionRegistry() []editActionDef {
 			},
 		},
 		{
+			Spec:     semanticActionSpec{Name: "create_user", Description: "create a FreeIPA roster user (Phase 6 increment 1: users only)", Required: []string{"user"}},
+			Validate: validateCreateUser,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createUser(r, step.User)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_user_field",
+				Description: "set one non-secret roster user field (password.initial/ssh_keys.values are not yet supported)",
+				Required:    []string{"user", "field", "value"},
+				Values:      map[string][]string{"field": {"state", "first", "last", "display_name", "email", "uid", "gid", "login_shell", "home_directory", "enabled"}},
+			},
+			Validate: validateSetUserField,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setUserField(r, step.User, step.Field, step.Value)
+			},
+		},
+		{
 			Spec:     semanticActionSpec{Name: "save_hosts", Description: "save hosts.yml and finish the edit TUI"},
 			Validate: validateNoParamsAction("save_hosts"),
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
@@ -307,6 +327,61 @@ func validateSetHostField(step editAction) error {
 	}
 	if step.Field == "env" && !isValidEnvChoice(step.Value) {
 		return fmt.Errorf("unsupported env value %q", step.Value)
+	}
+	return nil
+}
+
+func validateCreateUser(step editAction) error {
+	if strings.TrimSpace(step.User) == "" {
+		return fmt.Errorf("create_user requires user")
+	}
+	if hasSecretName(step.User) {
+		return fmt.Errorf("secret-like user names are not allowed")
+	}
+	return nil
+}
+
+func validateSetUserField(step editAction) error {
+	if strings.TrimSpace(step.User) == "" {
+		return fmt.Errorf("set_user_field requires user")
+	}
+	if strings.TrimSpace(step.Field) == "" {
+		return fmt.Errorf("set_user_field requires field")
+	}
+	if hasSecretName(step.Field) {
+		return fmt.Errorf("secret values are not accepted")
+	}
+	spec, _ := semanticActionSpecFor("set_user_field")
+	allowed := false
+	for _, field := range spec.Values["field"] {
+		if step.Field == field {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("unsupported user field")
+	}
+	switch step.Field {
+	case "state":
+		valid := false
+		for _, s := range rosterUserStateChoices {
+			if step.Value == s {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("unsupported state value %q", step.Value)
+		}
+	case "uid", "gid":
+		if _, err := strconv.Atoi(step.Value); err != nil {
+			return fmt.Errorf("%s must be an integer", step.Field)
+		}
+	case "enabled":
+		if step.Value != "true" && step.Value != "false" {
+			return fmt.Errorf(`enabled must be "true" or "false"`)
+		}
 	}
 	return nil
 }
@@ -511,7 +586,7 @@ func validateHostRoleAction(name string) func(editAction) error {
 func editActionHasAnyParam(step editAction) bool {
 	return step.Host != "" || step.Field != "" || step.Value != "" || step.ValueEnv != "" || step.Role != "" ||
 		step.Key != "" || step.File != "" || step.Label != "" || step.Preset != "" || step.SourceHost != "" || len(step.Roles) > 0 ||
-		step.Inventory != "" || len(step.Answers) > 0
+		step.Inventory != "" || len(step.Answers) > 0 || step.User != ""
 }
 
 func validateNoParamsAction(name string) func(editAction) error {

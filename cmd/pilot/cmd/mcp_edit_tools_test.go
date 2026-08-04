@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -168,6 +169,60 @@ func TestInspectHandler_OmitsVaultFilesWhenNotRequested(t *testing.T) {
 	}
 	if out.VaultFiles != nil {
 		t.Fatalf("VaultFiles = %+v, want nil when include_vault_metadata is false", out.VaultFiles)
+	}
+}
+
+func TestInspectHandler_RosterListsUsersWithNonSecretFieldsOnly(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalRosterFixture(t, dir)
+
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_user", User: "alice"},
+		{Action: "set_user_field", User: "alice", Field: "email", Value: "alice@example.com"},
+		{Action: "set_user_field", User: "alice", Field: "uid", Value: "10001"},
+	}}
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	handler := inspectHandler(editMCPToolsOptions{Dir: dir})
+	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeRoster: true})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+	if len(out.RosterUsers) != 1 {
+		t.Fatalf("RosterUsers = %+v, want exactly one entry", out.RosterUsers)
+	}
+	ru := out.RosterUsers[0]
+	if ru.Name != "alice" || ru.Email != "alice@example.com" || ru.UID == nil || *ru.UID != 10001 {
+		t.Fatalf("ru = %+v", ru)
+	}
+
+	// Serialize and confirm no password/ssh-key field ever appears —
+	// inspectRosterUser's type doesn't have those fields at all, but
+	// this also guards against a future field addition leaking one.
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal inspectOutput: %v", err)
+	}
+	if strings.Contains(string(data), "password") || strings.Contains(string(data), "ssh_keys") {
+		t.Fatalf("inspect output leaked a secret-adjacent field: %s", data)
+	}
+}
+
+func TestInspectHandler_OmitsRosterWhenNotRequested(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalRosterFixture(t, dir)
+
+	handler := inspectHandler(editMCPToolsOptions{Dir: dir})
+	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeRoster: false})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+	if out.RosterUsers != nil {
+		t.Fatalf("RosterUsers = %+v, want nil when include_roster is false", out.RosterUsers)
 	}
 }
 
@@ -461,6 +516,80 @@ func TestApplyHandler_FailedScenarioRollsBackAndReportsStructuredError(t *testin
 	}
 	if string(data) != "hosts: {}\n" {
 		t.Fatalf("hosts.yml = %q, want the pre-apply content restored", data)
+	}
+}
+
+// TestCapabilitiesHandler_ListsRosterUserActions asserts
+// create_user/set_user_field are automatically exposed once they exist
+// in editActionRegistry() — capabilitiesHandler needed zero roster-
+// specific code changes to pick them up (Phase 5's "include everything
+// in the registry" default).
+func TestCapabilitiesHandler_ListsRosterUserActions(t *testing.T) {
+	handler := capabilitiesHandler(editMCPToolsOptions{Dir: "/workspace"})
+	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, capabilitiesInput{})
+	if err != nil {
+		t.Fatalf("capabilitiesHandler() error = %v", err)
+	}
+	seen := map[string]bool{}
+	for _, a := range out.Actions {
+		seen[a.Name] = true
+	}
+	for _, name := range []string{"create_user", "set_user_field"} {
+		if !seen[name] {
+			t.Fatalf("expected capabilities to list %q", name)
+		}
+	}
+}
+
+// TestPlanAndApplyHandler_RosterScenarioRoundTrip asserts
+// planHandler/applyHandler round-trip a roster scenario correctly with
+// zero roster-specific plan/apply code — planEditScenario/
+// applyEditScenario are already generic over editScenario, and the
+// roster file was already swept into managedFileEntries (tagged
+// IsSecret) before this increment even started.
+func TestPlanAndApplyHandler_RosterScenarioRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+	rosterPath := writeMinimalRosterFixture(t, dir)
+	rev, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+
+	scenario := editScenario{Version: 1, Title: "roster round trip", Steps: []editAction{
+		{Action: "create_user", User: "carol"},
+		{Action: "set_user_field", User: "carol", Field: "email", Value: "carol@example.com"},
+	}}
+
+	planH := planHandler(editMCPToolsOptions{Dir: dir, AuditDir: auditDir})
+	planResult, planOut, err := planH(context.Background(), &mcp.CallToolRequest{}, planInput{BaseRevision: rev, Scenario: scenario})
+	if err != nil {
+		t.Fatalf("planHandler() error = %v", err)
+	}
+	if planResult != nil {
+		t.Fatalf("expected a successful plan, got error result: %+v", planResult.Content)
+	}
+	if _, found, err := inventory.RosterUser(rosterPath, "carol"); err != nil || found {
+		t.Fatalf("expected carol not to exist in the real workspace after a plan (found=%v, err=%v)", found, err)
+	}
+
+	applyH := applyHandler(editMCPToolsOptions{Dir: dir, AuditDir: auditDir, WriteEnabled: true})
+	applyResult, applyOut, err := applyH(context.Background(), &mcp.CallToolRequest{}, applyInput{PlanID: planOut.PlanID, ExpectedRevision: rev})
+	if err != nil {
+		t.Fatalf("applyHandler() error = %v", err)
+	}
+	if applyResult != nil {
+		t.Fatalf("expected a successful apply, got error result: %+v", applyResult.Content)
+	}
+	if applyOut.Result != "applied" || applyOut.RolledBack {
+		t.Fatalf("applyOut = %+v", applyOut)
+	}
+	fields, found, err := inventory.RosterUser(rosterPath, "carol")
+	if err != nil {
+		t.Fatalf("RosterUser() error = %v", err)
+	}
+	if !found || fields["email"] != "carol@example.com" {
+		t.Fatalf("expected carol to exist with email set after apply, fields=%+v found=%v", fields, found)
 	}
 }
 

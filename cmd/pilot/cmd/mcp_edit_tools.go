@@ -14,7 +14,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/kjelly/pilot/internal/groupvars"
 	"github.com/kjelly/pilot/internal/inventory"
@@ -181,6 +184,7 @@ func capabilitiesHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[capabiliti
 type inspectInput struct {
 	IncludeGroupVars     bool `json:"include_group_vars"`
 	IncludeVaultMetadata bool `json:"include_vault_metadata"`
+	IncludeRoster        bool `json:"include_roster"`
 }
 
 type inspectHost struct {
@@ -206,13 +210,48 @@ type inspectVaultFile struct {
 	Keys      []string `json:"keys,omitempty"`
 }
 
+// inspectRosterUser is one FreeIPA roster user's non-secret fields —
+// Phase 6 increment 1 scope (users only). Never password.initial,
+// never ssh_keys.values.
+type inspectRosterUser struct {
+	Name        string `json:"name"`
+	State       string `json:"state"`
+	Email       string `json:"email,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	UID         *int   `json:"uid,omitempty"`
+	GID         *int   `json:"gid,omitempty"`
+	Enabled     bool   `json:"enabled"`
+}
+
 type inspectOutput struct {
 	WorkspaceRevision string                       `json:"workspace_revision"`
 	Hosts             []inspectHost                `json:"hosts"`
 	RolePresets       []inspectRolePreset          `json:"role_presets"`
 	GroupVars         map[string]map[string]string `json:"group_vars,omitempty"`
 	VaultFiles        []inspectVaultFile           `json:"vault_files,omitempty"`
+	RosterUsers       []inspectRosterUser          `json:"roster_users,omitempty"`
 	Completeness      validationSummary            `json:"completeness"`
+}
+
+// looksLikeRosterFile distinguishes the roster file from other
+// .vault/*.yml(.yaml) files (e.g. main.yaml's ipa_admin_password) by
+// the presence of a top-level "users" key — the roster's own schema
+// always declares one (possibly empty), and nothing else under .vault/
+// does.
+func looksLikeRosterFile(content []byte) bool {
+	var root map[string]any
+	if err := yaml.Unmarshal(content, &root); err != nil {
+		return false
+	}
+	_, ok := root["users"]
+	return ok
+}
+
+func rosterBoolFieldOr(fields map[string]any, key string, def bool) bool {
+	if b, ok := fields[key].(bool); ok {
+		return b
+	}
+	return def
 }
 
 func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, inspectOutput] {
@@ -285,6 +324,48 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			}
 		}
 
+		var rosterUsers []inspectRosterUser
+		if in.IncludeRoster {
+			entries, err := managedFileEntries(opts.Dir)
+			if err == nil {
+				for _, e := range entries {
+					if !e.IsSecret || !looksLikeRosterFile(e.Content) {
+						continue
+					}
+					fullPath := filepath.Join(opts.Dir, filepath.FromSlash(e.RelPath))
+					names, err := inventory.RosterUserNames(fullPath)
+					if err != nil {
+						continue // encrypted or unreadable — skip rather than fail the whole inspect call
+					}
+					for _, name := range names {
+						fields, found, err := inventory.RosterUser(fullPath, name)
+						if err != nil || !found {
+							continue
+						}
+						ru := inspectRosterUser{
+							Name:        name,
+							State:       rosterStringOr(fields, "state", "present"),
+							Email:       rosterStringValue(fields, "email"),
+							DisplayName: rosterStringValue(fields, "display_name"),
+							Enabled:     rosterBoolFieldOr(fields, "enabled", true),
+						}
+						if s := rosterIntValue(fields, "uid"); s != "" {
+							if n, err := strconv.Atoi(s); err == nil {
+								ru.UID = &n
+							}
+						}
+						if s := rosterIntValue(fields, "gid"); s != "" {
+							if n, err := strconv.Atoi(s); err == nil {
+								ru.GID = &n
+							}
+						}
+						rosterUsers = append(rosterUsers, ru)
+					}
+					break // only one roster file is expected per workspace
+				}
+			}
+		}
+
 		var blocking []string
 		for _, c := range checkWorkspaceCompleteness(opts.Dir) {
 			if c.OK {
@@ -301,6 +382,7 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			RolePresets:       presets,
 			GroupVars:         groupVars,
 			VaultFiles:        vaultFiles,
+			RosterUsers:       rosterUsers,
 			Completeness:      validationSummary{Blocking: blocking},
 		}
 		return nil, out, nil

@@ -315,3 +315,85 @@ func TestMCPServe_Integration_VaultPlanApplyRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestMCPServe_Integration_RosterPlanApplyRoundTrip drives a real
+// create_user + set_user_field scenario (Phase 6 increment 1) through
+// the real spawned pilot mcp serve binary, then confirms
+// pilot_edit_inspect's include_roster listing sees the new user.
+func TestMCPServe_Integration_RosterPlanApplyRoundTrip(t *testing.T) {
+	binary := buildPilotBinary(t)
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+	writeMinimalRosterFixture(t, dir)
+
+	rev, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-roster-integration-test", Version: "0.0.1"}, nil)
+	transport := &mcp.CommandTransport{Command: exec.Command(binary, "mcp", "serve", "--dir", dir, "--audit-dir", auditDir, "--allow-write")}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	scenario := editScenario{Version: 1, Title: "roster mcp round trip", Steps: []editAction{
+		{Action: "create_user", User: "dana"},
+		{Action: "set_user_field", User: "dana", Field: "email", Value: "dana@example.com"},
+	}}
+	planArgsJSON, _ := json.Marshal(planInput{BaseRevision: rev, Scenario: scenario})
+	var planArgsMap map[string]any
+	_ = json.Unmarshal(planArgsJSON, &planArgsMap)
+	planResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_plan", Arguments: planArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_plan) error = %v", err)
+	}
+	if planResult.IsError {
+		t.Fatalf("pilot_edit_plan returned an error: %+v", planResult.Content)
+	}
+	plan := decodeStructured[planOutput](t, planResult)
+
+	applyArgsJSON, _ := json.Marshal(applyInput{PlanID: plan.PlanID, ExpectedRevision: rev})
+	var applyArgsMap map[string]any
+	_ = json.Unmarshal(applyArgsJSON, &applyArgsMap)
+	applyResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_apply", Arguments: applyArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_apply) error = %v", err)
+	}
+	if applyResult.IsError {
+		t.Fatalf("pilot_edit_apply returned an error: %+v", applyResult.Content)
+	}
+	applied := decodeStructured[applyOutput](t, applyResult)
+	if applied.Result != "applied" {
+		t.Fatalf("applied = %+v, want result=applied", applied)
+	}
+
+	inspectArgsJSON, _ := json.Marshal(inspectInput{IncludeRoster: true})
+	var inspectArgsMap map[string]any
+	_ = json.Unmarshal(inspectArgsJSON, &inspectArgsMap)
+	inspectResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_inspect", Arguments: inspectArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_inspect) error = %v", err)
+	}
+	if inspectResult.IsError {
+		t.Fatalf("pilot_edit_inspect returned an error: %+v", inspectResult.Content)
+	}
+	inspect := decodeStructured[inspectOutput](t, inspectResult)
+	found := false
+	for _, ru := range inspect.RosterUsers {
+		if ru.Name == "dana" {
+			found = true
+			if ru.Email != "dana@example.com" {
+				t.Fatalf("dana's email = %q, want dana@example.com", ru.Email)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected inspect to list user dana, got %+v", inspect.RosterUsers)
+	}
+}

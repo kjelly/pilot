@@ -41,6 +41,10 @@ type editAction struct {
 	Roles      []string       `json:"roles,omitempty"`
 	Inventory  string         `json:"inventory,omitempty"`
 	Answers    []promptAnswer `json:"answers,omitempty"`
+	// User is the roster user name targeted by create_user/set_user_field.
+	// A separate field from Host: reusing Host would be semantically wrong
+	// (every existing host validator assumes Host names a host).
+	User string `json:"user,omitempty"`
 }
 
 // validateValueOrEnv enforces that exactly one of Value/ValueEnv is set,
