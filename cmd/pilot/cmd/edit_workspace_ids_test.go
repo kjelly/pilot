@@ -3,19 +3,19 @@ package cmd
 import "testing"
 
 func TestNewPlanID_UniqueAndNonEmpty(t *testing.T) {
-	a, err := newPlanID()
+	a, err := newID()
 	if err != nil {
-		t.Fatalf("newPlanID() error = %v", err)
+		t.Fatalf("newID() error = %v", err)
 	}
-	b, err := newPlanID()
+	b, err := newID()
 	if err != nil {
-		t.Fatalf("newPlanID() error = %v", err)
+		t.Fatalf("newID() error = %v", err)
 	}
 	if a == "" || b == "" {
 		t.Fatal("expected non-empty plan IDs")
 	}
 	if a == b {
-		t.Fatal("expected two calls to newPlanID() to differ")
+		t.Fatal("expected two calls to newID() to differ")
 	}
 }
 

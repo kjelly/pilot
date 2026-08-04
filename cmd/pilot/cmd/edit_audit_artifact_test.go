@@ -9,6 +9,37 @@ import (
 	"testing"
 )
 
+func TestRedactScenarioForAudit_ClearsVaultActionValues(t *testing.T) {
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_host_field", Host: "web-1", Field: "ansible_host", Value: "10.0.0.1"},
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: "literal-secret"},
+		{Action: "add_vault_key", File: "main.yaml", Key: "x", ValueEnv: "SOME_ENV_VAR"},
+	}}
+	redacted := redactScenarioForAudit(scenario)
+
+	if redacted.Steps[0].Value != "10.0.0.1" {
+		t.Fatalf("non-vault step's value should be untouched, got %q", redacted.Steps[0].Value)
+	}
+	if redacted.Steps[1].Value == "literal-secret" {
+		t.Fatal("expected the vault step's literal value to be redacted")
+	}
+	if redacted.Steps[1].Value == "" {
+		t.Fatal("expected a visible redaction placeholder, not a silently emptied field")
+	}
+	if redacted.Steps[2].Value != "" {
+		t.Fatalf("expected the value_env-only vault step's Value to remain empty, got %q", redacted.Steps[2].Value)
+	}
+	if redacted.Steps[2].ValueEnv != "SOME_ENV_VAR" {
+		t.Fatalf("expected ValueEnv (just a variable name, not a secret) to survive redaction, got %q", redacted.Steps[2].ValueEnv)
+	}
+
+	// The original scenario must be untouched (redactScenarioForAudit
+	// returns a copy, callers might still need the real scenario).
+	if scenario.Steps[1].Value != "literal-secret" {
+		t.Fatal("redactScenarioForAudit must not mutate its input")
+	}
+}
+
 func TestCastAuditRecorder_WritesParseableAsciicastHeaderAndFrames(t *testing.T) {
 	var buf bytes.Buffer
 	rec, err := newCastAuditRecorder(&buf, "test session", 100, 30)

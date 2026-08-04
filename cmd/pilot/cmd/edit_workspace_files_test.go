@@ -44,6 +44,34 @@ func TestManagedFileEntries_EnumeratesExpectedFilesSorted(t *testing.T) {
 	}
 }
 
+func TestManagedFileEntries_IncludesVaultFilesTaggedSecret(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "hosts.yml"), "hosts: {}\n")
+	writeTestFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: hunter2\n")
+	writeTestFile(t, filepath.Join(dir, ".vault", "extra.yml"), "another_secret: x\n")
+
+	entries, err := managedFileEntries(dir)
+	if err != nil {
+		t.Fatalf("managedFileEntries() error = %v", err)
+	}
+	byPath := map[string]managedFileEntry{}
+	for _, e := range entries {
+		byPath[e.RelPath] = e
+	}
+	for _, path := range []string{".vault/main.yaml", ".vault/extra.yml"} {
+		e, ok := byPath[path]
+		if !ok {
+			t.Fatalf("expected %s to be enumerated, got %v", path, entries)
+		}
+		if !e.IsSecret {
+			t.Fatalf("expected %s to be tagged IsSecret", path)
+		}
+	}
+	if hostsEntry, ok := byPath["hosts.yml"]; !ok || hostsEntry.IsSecret {
+		t.Fatalf("expected hosts.yml to NOT be tagged IsSecret, got %+v", hostsEntry)
+	}
+}
+
 func TestManagedFileEntries_IgnoresNestedSubdirectories(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "group_vars", "nested", "deep.yml"), "x: 1\n")

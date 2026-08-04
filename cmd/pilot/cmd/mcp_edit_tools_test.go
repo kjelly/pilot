@@ -11,29 +11,25 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestMCPAllowedActionNames_ExcludesVaultButKeepsEverythingElse(t *testing.T) {
+func TestMCPAllowedActionNames_IncludesEveryRegistryAction(t *testing.T) {
 	allowed := mcpAllowedActionNames()
-	for name := range mcpVaultActionNames {
-		if allowed[name] {
-			t.Fatalf("expected vault action %q to be excluded from MCP capabilities", name)
-		}
+	registry := editActionRegistry()
+	if len(allowed) != len(registry) {
+		t.Fatalf("allowed has %d entries, want exactly the %d registry actions", len(allowed), len(registry))
 	}
-	nonVaultCount := 0
-	for _, def := range editActionRegistry() {
-		if mcpVaultActionNames[def.Spec.Name] {
-			continue
-		}
-		nonVaultCount++
+	for _, def := range registry {
 		if !allowed[def.Spec.Name] {
-			t.Fatalf("expected non-vault action %q to be allowed", def.Spec.Name)
+			t.Fatalf("expected action %q to be allowed (Phase 5: vault actions are no longer excluded)", def.Spec.Name)
 		}
 	}
-	if len(allowed) != nonVaultCount {
-		t.Fatalf("allowed has %d entries, want exactly the %d non-vault registry actions", len(allowed), nonVaultCount)
+	for name := range mcpVaultActionNames {
+		if !allowed[name] {
+			t.Fatalf("expected vault action %q to be allowed (value_env-only policy is enforced separately)", name)
+		}
 	}
 }
 
-func TestCapabilitiesHandler_ExcludesVaultActionsAndPopulatesUnsupported(t *testing.T) {
+func TestCapabilitiesHandler_IncludesVaultActionsWithValueEnvOnlySchema(t *testing.T) {
 	handler := capabilitiesHandler(editMCPToolsOptions{Dir: "/workspace", WriteEnabled: true})
 	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, capabilitiesInput{})
 	if err != nil {
@@ -42,17 +38,33 @@ func TestCapabilitiesHandler_ExcludesVaultActionsAndPopulatesUnsupported(t *test
 	if out.Workspace != "/workspace" || !out.WriteEnabled {
 		t.Fatalf("out = %+v, want workspace=/workspace write_enabled=true", out)
 	}
-	for _, a := range out.Actions {
-		if mcpVaultActionNames[a.Name] {
-			t.Fatalf("vault action %q leaked into Actions", a.Name)
-		}
-	}
 	if out.Unsupported["deploy"] == "" {
 		t.Fatal(`expected Unsupported["deploy"] to be set`)
 	}
 	for name := range mcpVaultActionNames {
-		if out.Unsupported[name] == "" {
-			t.Fatalf("expected Unsupported[%q] to explain why it's excluded", name)
+		if _, stillExcluded := out.Unsupported[name]; stillExcluded {
+			t.Fatalf("vault action %q should no longer be in Unsupported (Phase 5)", name)
+		}
+	}
+
+	seen := map[string]bool{}
+	for _, a := range out.Actions {
+		seen[a.Name] = true
+	}
+	for name := range mcpVaultActionNames {
+		if !seen[name] {
+			t.Fatalf("expected vault action %q to be listed in Actions", name)
+		}
+	}
+
+	for _, a := range out.Actions {
+		if !mcpVaultActionNames[a.Name] {
+			continue
+		}
+		for _, opt := range a.Optional {
+			if opt == "value" {
+				t.Fatalf("action %q advertises a literal \"value\" field; MCP requires value_env-only, got Optional=%v", a.Name, a.Optional)
+			}
 		}
 	}
 }
@@ -92,6 +104,73 @@ func TestInspectHandler_OmitsGroupVarsWhenNotRequested(t *testing.T) {
 	}
 }
 
+func TestInspectHandler_VaultMetadataListsKeyNamesNotValues(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: super-secret-value\nother_key: another-secret\n")
+
+	handler := inspectHandler(editMCPToolsOptions{Dir: dir})
+	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeVaultMetadata: true})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+	if len(out.VaultFiles) != 1 {
+		t.Fatalf("VaultFiles = %+v, want exactly one entry", out.VaultFiles)
+	}
+	vf := out.VaultFiles[0]
+	if vf.Filename != "main.yaml" || vf.Encrypted {
+		t.Fatalf("vf = %+v, want filename=main.yaml encrypted=false", vf)
+	}
+	wantKeys := map[string]bool{"ipa_admin_password": true, "other_key": true}
+	if len(vf.Keys) != len(wantKeys) {
+		t.Fatalf("Keys = %v, want %v", vf.Keys, wantKeys)
+	}
+	for _, k := range vf.Keys {
+		if !wantKeys[k] {
+			t.Fatalf("unexpected key %q in %v", k, vf.Keys)
+		}
+	}
+
+	// Serialize the whole output and confirm no secret value leaked in.
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal inspectOutput: %v", err)
+	}
+	if strings.Contains(string(data), "super-secret-value") || strings.Contains(string(data), "another-secret") {
+		t.Fatalf("inspect output leaked a vault value: %s", data)
+	}
+}
+
+func TestInspectHandler_EncryptedVaultFileReportsEncryptedWithNoKeys(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, ".vault", "main.yaml"), "$ANSIBLE_VAULT;1.1;AES256\n663864653966...\n")
+
+	handler := inspectHandler(editMCPToolsOptions{Dir: dir})
+	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeVaultMetadata: true})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+	if len(out.VaultFiles) != 1 || !out.VaultFiles[0].Encrypted {
+		t.Fatalf("VaultFiles = %+v, want one encrypted entry", out.VaultFiles)
+	}
+	if len(out.VaultFiles[0].Keys) != 0 {
+		t.Fatalf("expected no keys for an encrypted vault file, got %v", out.VaultFiles[0].Keys)
+	}
+}
+
+func TestInspectHandler_OmitsVaultFilesWhenNotRequested(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, ".vault", "main.yaml"), "x: y\n")
+
+	handler := inspectHandler(editMCPToolsOptions{Dir: dir})
+	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeVaultMetadata: false})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+	if out.VaultFiles != nil {
+		t.Fatalf("VaultFiles = %+v, want nil when include_vault_metadata is false", out.VaultFiles)
+	}
+}
+
 func TestPlanHandler_RejectsUnsupportedAction(t *testing.T) {
 	dir := t.TempDir()
 	rev, err := computeWorkspaceRevision(dir)
@@ -102,14 +181,19 @@ func TestPlanHandler_RejectsUnsupportedAction(t *testing.T) {
 	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, planInput{
 		BaseRevision: rev,
 		Scenario: editScenario{Version: 1, Steps: []editAction{
-			{Action: "set_vault_value", File: "main.yaml", Key: "x", Value: "y"},
+			// deploy/reconcile run through a different execution path
+			// entirely (prompt_automation.go) and are never in
+			// editActionRegistry() — genuinely unsupported by MCP,
+			// unlike the vault actions (Phase 5: allowed, but
+			// value_env-only — see TestPlanHandler_RejectsLiteralVaultValue).
+			{Action: "deploy", Inventory: "inventory.yml"},
 		}},
 	})
 	if err != nil {
 		t.Fatalf("planHandler() error = %v", err)
 	}
 	if !result.IsError {
-		t.Fatal("expected an error result for a vault action")
+		t.Fatal("expected an error result for an unsupported action")
 	}
 	if out.PlanID != "" {
 		t.Fatalf("expected zero-value output on error, got %+v", out)
@@ -117,6 +201,34 @@ func TestPlanHandler_RejectsUnsupportedAction(t *testing.T) {
 	toolErr := decodeToolError(t, result)
 	if toolErr.Code != mcpErrUnsupportedAction {
 		t.Fatalf("Code = %q, want %q", toolErr.Code, mcpErrUnsupportedAction)
+	}
+}
+
+func TestPlanHandler_RejectsLiteralVaultValue(t *testing.T) {
+	dir := t.TempDir()
+	rev, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+	handler := planHandler(editMCPToolsOptions{Dir: dir, AuditDir: t.TempDir()})
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, planInput{
+		BaseRevision: rev,
+		Scenario: editScenario{Version: 1, Steps: []editAction{
+			{Action: "set_vault_value", File: "main.yaml", Key: "x", Value: "literal-secret-not-allowed"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("planHandler() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected an error result for a vault action carrying a literal value")
+	}
+	if out.PlanID != "" {
+		t.Fatalf("expected zero-value output on error, got %+v", out)
+	}
+	toolErr := decodeToolError(t, result)
+	if toolErr.Code != mcpErrSecretPolicyViolation {
+		t.Fatalf("Code = %q, want %q", toolErr.Code, mcpErrSecretPolicyViolation)
 	}
 }
 

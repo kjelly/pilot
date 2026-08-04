@@ -98,9 +98,23 @@ func TestMCPServe_Integration_CapabilitiesInspectPlan(t *testing.T) {
 	if len(caps.Actions) == 0 {
 		t.Fatal("expected at least one action in capabilities")
 	}
+	// Phase 5: vault actions ARE exposed, but only with a value_env-only
+	// schema — no action may advertise a literal "value" field.
+	seenVaultAction := map[string]bool{}
 	for _, a := range caps.Actions {
-		if mcpVaultActionNames[a.Name] {
-			t.Fatalf("vault action %q leaked through the real MCP wire", a.Name)
+		if !mcpVaultActionNames[a.Name] {
+			continue
+		}
+		seenVaultAction[a.Name] = true
+		for _, opt := range a.Optional {
+			if opt == "value" {
+				t.Fatalf("vault action %q advertises a literal \"value\" field over the real MCP wire: Optional=%v", a.Name, a.Optional)
+			}
+		}
+	}
+	for name := range mcpVaultActionNames {
+		if !seenVaultAction[name] {
+			t.Fatalf("expected vault action %q to be listed in capabilities over the real MCP wire", name)
 		}
 	}
 
@@ -206,5 +220,98 @@ func TestMCPServe_Integration_CapabilitiesInspectPlan(t *testing.T) {
 	}
 	if !secondApplyResult.IsError {
 		t.Fatal("expected the second apply attempt (stale revision) to be rejected")
+	}
+}
+
+// TestMCPServe_Integration_VaultPlanApplyRoundTrip drives a real
+// add_vault_key scenario (value_env, never a literal value) through
+// the real spawned pilot mcp serve binary end to end — the env var the
+// scenario names must be set on the *subprocess's* environment
+// (Command.Env), not just this test process's, since resolution
+// happens inside pilot mcp serve itself.
+func TestMCPServe_Integration_VaultPlanApplyRoundTrip(t *testing.T) {
+	binary := buildPilotBinary(t)
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+	const envVar = "PILOT_TEST_VAULT_SENTINEL_MCP_BINARY"
+
+	rev, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-vault-integration-test", Version: "0.0.1"}, nil)
+	cmd := exec.Command(binary, "mcp", "serve", "--dir", dir, "--audit-dir", auditDir, "--allow-write")
+	cmd.Env = append(os.Environ(), envVar+"="+vaultSentinelValue)
+	transport := &mcp.CommandTransport{Command: cmd}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	scenario := editScenario{Version: 1, Title: "vault mcp round trip", Steps: []editAction{
+		{Action: "add_vault_key", File: "main.yaml", Key: "test_secret", ValueEnv: envVar},
+		{Action: "save_vault", File: "main.yaml"},
+	}}
+	planArgsJSON, _ := json.Marshal(planInput{BaseRevision: rev, Scenario: scenario})
+	var planArgsMap map[string]any
+	_ = json.Unmarshal(planArgsJSON, &planArgsMap)
+	planResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_plan", Arguments: planArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_plan) error = %v", err)
+	}
+	if planResult.IsError {
+		t.Fatalf("pilot_edit_plan returned an error: %+v", planResult.Content)
+	}
+	plan := decodeStructured[planOutput](t, planResult)
+
+	planResultRaw, _ := json.Marshal(planResult)
+	assertSentinelAbsent(t, "plan CallToolResult (raw)", string(planResultRaw), vaultSentinelValue)
+
+	applyArgsJSON, _ := json.Marshal(applyInput{PlanID: plan.PlanID, ExpectedRevision: rev})
+	var applyArgsMap map[string]any
+	_ = json.Unmarshal(applyArgsJSON, &applyArgsMap)
+	applyResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_apply", Arguments: applyArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_apply) error = %v", err)
+	}
+	if applyResult.IsError {
+		t.Fatalf("pilot_edit_apply returned an error: %+v", applyResult.Content)
+	}
+	applied := decodeStructured[applyOutput](t, applyResult)
+	if applied.Result != "applied" || !applied.RedactedDiff {
+		t.Fatalf("applied = %+v, want result=applied redacted_diff=true", applied)
+	}
+
+	applyResultRaw, _ := json.Marshal(applyResult)
+	assertSentinelAbsent(t, "apply CallToolResult (raw)", string(applyResultRaw), vaultSentinelValue)
+
+	vaultData, err := os.ReadFile(filepath.Join(dir, ".vault", "main.yaml"))
+	if err != nil {
+		t.Fatalf("expected the real .vault/main.yaml to exist after apply: %v", err)
+	}
+	if !strings.Contains(string(vaultData), vaultSentinelValue) {
+		t.Fatal("expected the real vault file to contain the sentinel value")
+	}
+
+	for _, root := range []string{plan.Audit.Directory, applied.Audit.Directory} {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			assertSentinelAbsent(t, path, string(data), vaultSentinelValue)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
 	}
 }

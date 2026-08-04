@@ -13,15 +13,14 @@ import (
 )
 
 // mcpToolError is the JSON shape every MCP tool error result carries.
-// Phase 3 (capabilities/inspect/plan) and Phase 4 (apply) between them
-// produce invalid_scenario, unsupported_action, workspace_changed,
-// validation_failed, recording_failed, write_disabled,
-// workspace_locked, target_not_found, ambiguous_target, apply_failed,
-// and rollback_failed. The remaining codes in spec's full list
-// (path_outside_workspace/secret_policy_violation/unexpected_screen/
-// save_failed) belong to vault/roster phases and aren't produced yet,
-// but the type is shared so those phases reuse it rather than
-// inventing another.
+// Phases 3-5 between them produce invalid_scenario, unsupported_action,
+// workspace_changed, validation_failed, recording_failed,
+// write_disabled, workspace_locked, target_not_found,
+// ambiguous_target, apply_failed, rollback_failed, and
+// secret_policy_violation. The remaining codes in spec's full list
+// (path_outside_workspace/unexpected_screen/save_failed) belong to
+// roster/DNS phases and aren't produced yet, but the type is shared so
+// those phases reuse it rather than inventing another.
 type mcpToolError struct {
 	Code           string `json:"code"`
 	Message        string `json:"message"`
@@ -35,17 +34,18 @@ type mcpToolError struct {
 func (e mcpToolError) Error() string { return e.Code + ": " + e.Message }
 
 const (
-	mcpErrInvalidScenario   = "invalid_scenario"
-	mcpErrUnsupportedAction = "unsupported_action"
-	mcpErrWorkspaceChanged  = "workspace_changed"
-	mcpErrValidationFailed  = "validation_failed"
-	mcpErrRecordingFailed   = "recording_failed"
-	mcpErrWriteDisabled     = "write_disabled"
-	mcpErrWorkspaceLocked   = "workspace_locked"
-	mcpErrTargetNotFound    = "target_not_found"
-	mcpErrAmbiguousTarget   = "ambiguous_target"
-	mcpErrApplyFailed       = "apply_failed"
-	mcpErrRollbackFailed    = "rollback_failed"
+	mcpErrInvalidScenario       = "invalid_scenario"
+	mcpErrUnsupportedAction     = "unsupported_action"
+	mcpErrWorkspaceChanged      = "workspace_changed"
+	mcpErrValidationFailed      = "validation_failed"
+	mcpErrRecordingFailed       = "recording_failed"
+	mcpErrWriteDisabled         = "write_disabled"
+	mcpErrWorkspaceLocked       = "workspace_locked"
+	mcpErrTargetNotFound        = "target_not_found"
+	mcpErrAmbiguousTarget       = "ambiguous_target"
+	mcpErrApplyFailed           = "apply_failed"
+	mcpErrRollbackFailed        = "rollback_failed"
+	mcpErrSecretPolicyViolation = "secret_policy_violation"
 )
 
 // toolErrorResult builds the CallToolResult a handler returns for a

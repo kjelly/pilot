@@ -16,6 +16,7 @@ type editApplyResult struct {
 	RevisionAfter  string
 	AffectedFiles  []string
 	Diff           string
+	RedactedDiff   bool
 	Blocking       []string
 	Warnings       []string
 	RolledBack     bool
@@ -85,7 +86,7 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	if err != nil {
 		return nil, err
 	}
-	diff, affected := diffEntries(snapshot, after)
+	diff, affected, redacted := diffEntries(snapshot, after)
 	blocking, warnings := collectWorkspaceValidation(dir)
 	revisionAfter, err := computeWorkspaceRevision(dir)
 	if err != nil {
@@ -97,6 +98,7 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 		RevisionAfter:  revisionAfter,
 		AffectedFiles:  affected,
 		Diff:           diff,
+		RedactedDiff:   redacted,
 		Blocking:       blocking,
 		Warnings:       warnings,
 		RolledBack:     false,

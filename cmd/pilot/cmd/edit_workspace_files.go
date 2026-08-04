@@ -4,8 +4,9 @@
 // (docs/superpowers/specs/2026-08-04-pilot-edit-mcp-semantic-tui-design.md).
 // computeWorkspaceRevision, copyManagedFilesToTemp, and diffManagedFiles
 // all call managedFileEntries so they can never disagree about the file
-// set. Vault files are deliberately excluded until Phase 5's secret-safe
-// recording lands.
+// set. .vault/*.yml(.yaml) files are included as of Phase 5, tagged
+// IsSecret so diffEntries can redact them instead of embedding real
+// secret content in a diff.
 package cmd
 
 import (
@@ -29,6 +30,11 @@ type managedFileEntry struct {
 	IsSymlink bool
 	// Content is the file's fully resolved (symlink-following) bytes.
 	Content []byte
+	// IsSecret marks a .vault/ file — diffEntries redacts these instead
+	// of embedding real content in a diff; revision hashing and
+	// temp-copy handling are unaffected (hashing/copying bytes doesn't
+	// expose them).
+	IsSecret bool
 }
 
 // managedFileExtensions is the allowlist for group_vars/ and host_vars/
@@ -55,7 +61,7 @@ func hasManagedFileExtension(name string) bool {
 func managedFileEntries(dir string) ([]managedFileEntry, error) {
 	var entries []managedFileEntry
 
-	addFile := func(relPath string) error {
+	addFile := func(relPath string, isSecret bool) error {
 		full := filepath.Join(dir, filepath.FromSlash(relPath))
 		lst, err := os.Lstat(full)
 		if os.IsNotExist(err) {
@@ -73,11 +79,12 @@ func managedFileEntries(dir string) ([]managedFileEntry, error) {
 			Mode:      lst.Mode(),
 			IsSymlink: lst.Mode()&os.ModeSymlink != 0,
 			Content:   content,
+			IsSecret:  isSecret,
 		})
 		return nil
 	}
 
-	addDirFiles := func(subdir string) error {
+	addDirFiles := func(subdir string, isSecret bool) error {
 		full := filepath.Join(dir, subdir)
 		items, err := os.ReadDir(full)
 		if os.IsNotExist(err) {
@@ -90,23 +97,26 @@ func managedFileEntries(dir string) ([]managedFileEntry, error) {
 			if item.IsDir() || !hasManagedFileExtension(item.Name()) {
 				continue
 			}
-			if err := addFile(subdir + "/" + item.Name()); err != nil {
+			if err := addFile(subdir+"/"+item.Name(), isSecret); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	if err := addFile("hosts.yml"); err != nil {
+	if err := addFile("hosts.yml", false); err != nil {
 		return nil, err
 	}
-	if err := addFile(rolePresetFilename); err != nil {
+	if err := addFile(rolePresetFilename, false); err != nil {
 		return nil, err
 	}
-	if err := addDirFiles("group_vars"); err != nil {
+	if err := addDirFiles("group_vars", false); err != nil {
 		return nil, err
 	}
-	if err := addDirFiles("host_vars"); err != nil {
+	if err := addDirFiles("host_vars", false); err != nil {
+		return nil, err
+	}
+	if err := addDirFiles(".vault", true); err != nil {
 		return nil, err
 	}
 

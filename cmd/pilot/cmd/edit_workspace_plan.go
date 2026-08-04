@@ -20,6 +20,7 @@ type editPlanResult struct {
 	BaseRevision  string
 	AffectedFiles []string
 	Diff          string
+	RedactedDiff  bool
 	Blocking      []string
 	Warnings      []string
 }
@@ -59,7 +60,7 @@ func planEditScenario(dir string, scenario editScenario, opts editAgentSessionOp
 
 	blocking, warnings := collectWorkspaceValidation(tempDir)
 
-	patch, affected, err := diffManagedFiles(dir, tempDir)
+	patch, affected, redacted, err := diffManagedFiles(dir, tempDir)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +80,7 @@ func planEditScenario(dir string, scenario editScenario, opts editAgentSessionOp
 		BaseRevision:  baseRevision,
 		AffectedFiles: affected,
 		Diff:          patch,
+		RedactedDiff:  redacted,
 		Blocking:      blocking,
 		Warnings:      warnings,
 	}, nil

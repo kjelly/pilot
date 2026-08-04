@@ -107,23 +107,36 @@ type auditRefs struct {
 	Diff      string `json:"diff"`
 }
 
+// redactScenarioForAudit returns a copy of scenario with Value cleared
+// on every step whose Action is a vault action (mcpVaultActionNames) —
+// the value_env-only MCP policy (validateNoLiteralVaultValues) already
+// guarantees an *accepted* vault step never carries a literal Value,
+// so this is belt-and-suspenders: even a future bug in that upstream
+// check still can't put a secret into scenario.redacted.json, since
+// this runs unconditionally right before every write of that file.
+func redactScenarioForAudit(scenario editScenario) editScenario {
+	redacted := scenario
+	redacted.Steps = make([]editAction, len(scenario.Steps))
+	copy(redacted.Steps, scenario.Steps)
+	for i, step := range redacted.Steps {
+		if mcpVaultActionNames[step.Action] && step.Value != "" {
+			step.Value = "«redacted»"
+			redacted.Steps[i] = step
+		}
+	}
+	return redacted
+}
+
 // writePlanAuditArtifacts writes the static (non-streaming) files a
 // finished plan run produces: metadata.json, scenario.redacted.json,
 // diff.patch, validation.json. trace.jsonl and session.cast are
 // already closed by the caller by the time this runs (they're written
 // live, during the scenario run itself).
-//
-// scenario.redacted.json is the scenario exactly as submitted: it
-// never carries a resolved secret value (only value_env variable
-// *names*), and no vault action can reach this far (MCP policy filters
-// them out before a plan is ever attempted) — so no separate
-// redaction pass is needed yet. Phase 5 revisits this once vault
-// actions exist on this path.
 func writePlanAuditArtifacts(dir string, meta auditMetadata, scenario editScenario, result *editPlanResult) error {
 	if err := writeJSONFile(filepath.Join(dir, "metadata.json"), meta); err != nil {
 		return err
 	}
-	if err := writeJSONFile(filepath.Join(dir, "scenario.redacted.json"), scenario); err != nil {
+	if err := writeJSONFile(filepath.Join(dir, "scenario.redacted.json"), redactScenarioForAudit(scenario)); err != nil {
 		return err
 	}
 	if err := writeTextFile(filepath.Join(dir, "diff.patch"), result.Diff); err != nil {
@@ -183,7 +196,7 @@ func writeApplyAuditArtifacts(dir string, meta auditMetadata, scenario editScena
 	if err := writeJSONFile(filepath.Join(dir, "metadata.json"), meta); err != nil {
 		return err
 	}
-	if err := writeJSONFile(filepath.Join(dir, "scenario.redacted.json"), scenario); err != nil {
+	if err := writeJSONFile(filepath.Join(dir, "scenario.redacted.json"), redactScenarioForAudit(scenario)); err != nil {
 		return err
 	}
 	if err := writeTextFile(filepath.Join(dir, "diff.patch"), result.Diff); err != nil {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/groupvars"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/vaultfile"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -35,9 +36,11 @@ const (
 	castTerminalHeight = 30
 )
 
-// mcpVaultActionNames are editActionRegistry() entries MCP must never
-// expose until Phase 5's secret-safe recording lands (see spec's
-// "後續階段" section).
+// mcpVaultActionNames are editActionRegistry() entries that carry a
+// secret value — exposed via MCP as of Phase 5, but only under the
+// value_env-only policy validateNoLiteralVaultValues enforces, and with
+// their advertised capabilities schema tightened (capabilitiesHandler)
+// to drop the literal "value" field entirely.
 var mcpVaultActionNames = map[string]bool{
 	"add_vault_key":    true,
 	"set_vault_value":  true,
@@ -47,16 +50,39 @@ var mcpVaultActionNames = map[string]bool{
 }
 
 // mcpAllowedActionNames is which editActionRegistry() action names MCP
-// currently exposes — everything except the vault actions above.
+// currently exposes — every registered action, including the vault
+// ones (Phase 5); mcpAllowedActionNames alone doesn't enforce the
+// vault value_env-only rule, see validateNoLiteralVaultValues.
 func mcpAllowedActionNames() map[string]bool {
 	allowed := make(map[string]bool)
 	for _, def := range editActionRegistry() {
-		if mcpVaultActionNames[def.Spec.Name] {
-			continue
-		}
 		allowed[def.Spec.Name] = true
 	}
 	return allowed
+}
+
+// validateNoLiteralVaultValues rejects any scenario step targeting a
+// vault action that carries a literal Value — MCP callers must use
+// ValueEnv (an environment variable *name*) exclusively for secret
+// content, per spec's "MCP arguments" section. Called before any temp
+// copy (plan) or real mutation (apply) is attempted, so a rejected
+// scenario never gets far enough to type a literal secret into the
+// router at all.
+func validateNoLiteralVaultValues(scenario editScenario) error {
+	for i, step := range scenario.Steps {
+		if !mcpVaultActionNames[step.Action] {
+			continue
+		}
+		if step.Value != "" {
+			return mcpToolError{
+				Code:    mcpErrSecretPolicyViolation,
+				Message: fmt.Sprintf("action %q must use value_env, not a literal value", step.Action),
+				Step:    i + 1,
+				Action:  step.Action,
+			}
+		}
+	}
+	return nil
 }
 
 // validationSummary is the {blocking, warnings} shape both
@@ -115,19 +141,30 @@ type capabilitiesOutput struct {
 	Unsupported   map[string]string    `json:"unsupported"`
 }
 
+// mcpValueOnlyOptionalFields is the Optional field list capabilities
+// advertises for a vault action whose registry Spec allows a literal
+// "value" — MCP's real contract only accepts value_env
+// (validateNoLiteralVaultValues), so the advertised schema is
+// tightened to match rather than echoing the more-permissive global
+// registry, per Core Invariant #1.
+var mcpValueOnlyOptionalFields = []string{"value_env"}
+
 func capabilitiesHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[capabilitiesInput, capabilitiesOutput] {
 	return func(_ context.Context, _ *mcp.CallToolRequest, _ capabilitiesInput) (*mcp.CallToolResult, capabilitiesOutput, error) {
 		allowed := mcpAllowedActionNames()
 		var actions []semanticActionSpec
 		for _, def := range editActionRegistry() {
-			if allowed[def.Spec.Name] {
-				actions = append(actions, def.Spec)
+			if !allowed[def.Spec.Name] {
+				continue
 			}
+			spec := def.Spec
+			if mcpVaultActionNames[spec.Name] && len(spec.Optional) > 0 {
+				spec.Optional = mcpValueOnlyOptionalFields
+				spec.Description += " (MCP requires value_env; a literal value is rejected)"
+			}
+			actions = append(actions, spec)
 		}
 		unsupported := map[string]string{"deploy": "not part of pilot edit MCP"}
-		for name := range mcpVaultActionNames {
-			unsupported[name] = "secret-safe recording is not enabled"
-		}
 		out := capabilitiesOutput{
 			SchemaVersion: editCapabilitiesSchemaVersion,
 			Workspace:     opts.Dir,
@@ -159,11 +196,22 @@ type inspectRolePreset struct {
 	Roles []string `json:"roles"`
 }
 
+// inspectVaultFile is a .vault/ file's metadata — filename, whether
+// it's ansible-vault encrypted, and (for a plaintext skeleton only)
+// its key *names*. Never Key values — see spec's "MCP 可讀但不可修改"
+// vault scope ("filename、是否加密及 key name metadata").
+type inspectVaultFile struct {
+	Filename  string   `json:"filename"`
+	Encrypted bool     `json:"encrypted"`
+	Keys      []string `json:"keys,omitempty"`
+}
+
 type inspectOutput struct {
 	WorkspaceRevision string                       `json:"workspace_revision"`
 	Hosts             []inspectHost                `json:"hosts"`
 	RolePresets       []inspectRolePreset          `json:"role_presets"`
 	GroupVars         map[string]map[string]string `json:"group_vars,omitempty"`
+	VaultFiles        []inspectVaultFile           `json:"vault_files,omitempty"`
 	Completeness      validationSummary            `json:"completeness"`
 }
 
@@ -216,6 +264,27 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			}
 		}
 
+		var vaultFiles []inspectVaultFile
+		if in.IncludeVaultMetadata {
+			entries, err := managedFileEntries(opts.Dir)
+			if err == nil {
+				for _, e := range entries {
+					if !e.IsSecret {
+						continue
+					}
+					vf := inspectVaultFile{Filename: filepath.Base(e.RelPath), Encrypted: isAnsibleVaultEncrypted(e.Content)}
+					if !vf.Encrypted {
+						if doc, err := vaultfile.Parse(e.Content); err == nil {
+							for _, entry := range doc.Entries() {
+								vf.Keys = append(vf.Keys, entry.Key)
+							}
+						}
+					}
+					vaultFiles = append(vaultFiles, vf)
+				}
+			}
+		}
+
 		var blocking []string
 		for _, c := range checkWorkspaceCompleteness(opts.Dir) {
 			if c.OK {
@@ -231,6 +300,7 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			Hosts:             hosts,
 			RolePresets:       presets,
 			GroupVars:         groupVars,
+			VaultFiles:        vaultFiles,
 			Completeness:      validationSummary{Blocking: blocking},
 		}
 		return nil, out, nil
@@ -251,6 +321,7 @@ type planOutput struct {
 	Valid         bool              `json:"valid"`
 	AffectedFiles []string          `json:"affected_files"`
 	Diff          string            `json:"diff"`
+	RedactedDiff  bool              `json:"redacted_diff"`
 	Validation    validationSummary `json:"validation"`
 	Audit         auditRefs         `json:"audit"`
 }
@@ -267,6 +338,9 @@ func planHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[planInput, planOut
 					Action:  step.Action,
 				}), planOutput{}, nil
 			}
+		}
+		if err := validateNoLiteralVaultValues(in.Scenario); err != nil {
+			return toolErrorResult(err.(mcpToolError)), planOutput{}, nil
 		}
 
 		currentRevision, err := computeWorkspaceRevision(opts.Dir)
@@ -355,6 +429,7 @@ func planHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[planInput, planOut
 			Valid:         len(result.Blocking) == 0,
 			AffectedFiles: result.AffectedFiles,
 			Diff:          result.Diff,
+			RedactedDiff:  result.RedactedDiff,
 			Validation:    validationSummary{Blocking: result.Blocking, Warnings: result.Warnings},
 			Audit: auditRefs{
 				Directory: auditDir,
@@ -381,6 +456,7 @@ type applyOutput struct {
 	RevisionBefore string            `json:"revision_before"`
 	RevisionAfter  string            `json:"revision_after"`
 	AffectedFiles  []string          `json:"affected_files"`
+	RedactedDiff   bool              `json:"redacted_diff"`
 	Validation     validationSummary `json:"validation"`
 	RolledBack     bool              `json:"rolled_back"`
 	Audit          auditRefs         `json:"audit"`
@@ -430,6 +506,13 @@ func applyHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[applyInput, apply
 		var scenario editScenario
 		if err := json.Unmarshal(scenarioData, &scenario); err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrTargetNotFound, Message: fmt.Sprintf("parse plan scenario: %v", err)}), applyOutput{}, nil
+		}
+		if err := validateNoLiteralVaultValues(scenario); err != nil {
+			// Defense-in-depth: scenario.redacted.json should already have
+			// Value cleared for vault steps (redactScenarioForAudit ran when
+			// the plan was written) — this only fires if that ever regresses
+			// or a plan directory was tampered with.
+			return toolErrorResult(err.(mcpToolError)), applyOutput{}, nil
 		}
 
 		currentRevision, err := computeWorkspaceRevision(opts.Dir)
@@ -521,6 +604,7 @@ func applyHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[applyInput, apply
 			RevisionBefore: result.RevisionBefore,
 			RevisionAfter:  result.RevisionAfter,
 			AffectedFiles:  result.AffectedFiles,
+			RedactedDiff:   result.RedactedDiff,
 			Validation:     validationSummary{Blocking: result.Blocking, Warnings: result.Warnings},
 			RolledBack:     false,
 			Audit: auditRefs{
