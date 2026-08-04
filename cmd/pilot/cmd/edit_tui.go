@@ -229,7 +229,7 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		"🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則",
 		"離開",
 	}
-	return r.transitionTo(newSelectModel("要編輯什麼？", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("edit.top", "要編輯什麼？", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			return quitWizard(r)
@@ -268,7 +268,7 @@ func pushConfigCompletenessCheck(r *editRouterModel, dir string) tea.Cmd {
 
 func pushHostsPathPrompt(r *editRouterModel, dir string) tea.Cmd {
 	def := filepath.Join(dir, "hosts.yml")
-	return r.transitionTo(newTextInputModel("hosts.yml 路徑", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("hosts.path", "hosts.yml 路徑", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
@@ -314,7 +314,7 @@ func pushHostList(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 	items = append(items, "💾 存檔並離開", "🚪 不存檔離開")
 
 	title := fmt.Sprintf("編輯 %s — 選一台主機，或選下面的操作", path)
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.list", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "🚪 不存檔離開" exactly — this screen has no dirty
@@ -354,7 +354,7 @@ func pushFleetVarsMenu(r *editRouterModel, dir, path string, hf *inventory.Hosts
 	}
 	items = append(items, "➕ 新增變數", "↩  返回")
 	title := "共用變數(vars: — 所有主機共用的連線預設值，例如 ansible_user)"
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.fleet_vars", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			return pushHostList(r, dir, path, hf, "")
@@ -408,7 +408,7 @@ func pushAddFleetVarValue(r *editRouterModel, dir, path string, hf *inventory.Ho
 func pushFleetVarActionMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile, key string) tea.Cmd {
 	title := fmt.Sprintf("變數 %s = %s", key, hf.Vars[key])
 	items := []string{"修改值", "刪除", "返回"}
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.fleet_var_action", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			return pushFleetVarsMenu(r, dir, path, hf, "")
@@ -448,7 +448,7 @@ func pushSaveHostsAndReturnTop(r *editRouterModel, dir, path string, hf *invento
 }
 
 func pushConfirmDiscardHosts(r *editRouterModel, dir, path string, hf *inventory.HostsFile) tea.Cmd {
-	return r.transitionTo(newConfirmModel("確定不存檔離開嗎？這次的修改會遺失", false), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newConfirmModelWithScreenID("confirm.discard", "確定不存檔離開嗎？這次的修改會遺失", false), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(confirmModel)
 		if m.Value() {
 			return pushTopMenu(r, dir, "")
@@ -510,7 +510,7 @@ func pushHostMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 	items = append(items, "↩  返回主機清單")
 
 	title := fmt.Sprintf("主機 %q — 選要編輯的項目", name)
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.item", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "↩ 返回主機清單" — unconditional, no data at risk
@@ -571,7 +571,7 @@ var envChoices = []string{"", "prod", "staging", "sandbox"}
 func pushEnvMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
 	title := "env(環境標籤，給 -e target_group='dns:&prod' 這種交集查詢用)"
 	items := []string{"(留空/不歸類，預設等同 sandbox)", "prod", "staging", "sandbox"}
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.env", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// no explicit "back" item exists (every item IS a choice), but
@@ -610,7 +610,7 @@ func pushRolesMenuBanner(r *editRouterModel, dir, path string, hf *inventory.Hos
 		"📄 複製自其他主機的角色",
 		"✅ 完成",
 	}
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.roles", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "✅ 完成" (case 4) — roles changes are already
@@ -642,11 +642,11 @@ func pushRoleChecklist(r *editRouterModel, dir, path string, hf *inventory.Hosts
 	roles := inventory.Roles()
 	items := make([]multiSelectItem, len(roles))
 	for i, ri := range roles {
-		items[i] = multiSelectItem{Label: ri.Name, Description: ri.Description, Checked: hasRole(h.Roles, ri.Name)}
+		items[i] = multiSelectItem{ID: ri.Name, Label: ri.Name, Description: ri.Description, Checked: hasRole(h.Roles, ri.Name)}
 	}
 	title := fmt.Sprintf("主機 %q 的角色", name)
 	beforeRoles := append([]string(nil), h.Roles...)
-	return r.transitionTo(newMultiSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newMultiSelectModelWithScreenID("hosts.roles_checklist", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(multiSelectModel)
 		if m.Canceled() {
 			// esc/ctrl+c inside the checklist: no change, back to the
@@ -798,7 +798,7 @@ func pushApplyRolePreset(r *editRouterModel, dir, path string, hf *inventory.Hos
 		return nil
 	}
 	if len(presets) == 0 {
-		return r.transitionTo(newSelectModel("套用哪個範本？", []string{"↩  取消"}), "目前沒有角色範本；請從「管理角色範本」新增。", func(r *editRouterModel, s screen) tea.Cmd {
+		return r.transitionTo(newSelectModelWithScreenID("hosts.role_preset_apply", "套用哪個範本？", []string{"↩  取消"}), "目前沒有角色範本；請從「管理角色範本」新增。", func(r *editRouterModel, s screen) tea.Cmd {
 			return pushRolesMenu(r, dir, path, hf, name)
 		})
 	}
@@ -808,7 +808,7 @@ func pushApplyRolePreset(r *editRouterModel, dir, path string, hf *inventory.Hos
 	}
 	items[len(presets)] = "↩  取消"
 	title := "套用哪個範本？(把範本的角色加進目前已勾選的角色，不會移除既有的)"
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.role_preset_apply", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 取消" item.
@@ -842,7 +842,7 @@ func pushCopyRolesFromHost(r *editRouterModel, dir, path string, hf *inventory.H
 	}
 	items[len(candidates)] = "↩  取消"
 	title := fmt.Sprintf("把哪台主機的角色複製到 %q？(加進目前已勾選的角色)", name)
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.role_copy_from_host", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 取消" item.
@@ -914,7 +914,7 @@ func pushExtraVarsMenu(r *editRouterModel, dir, path string, hf *inventory.Hosts
 	}
 	items = append(items, "➕ 新增變數", "↩  返回")
 	title := fmt.Sprintf("主機 %q 的其他變數(例如 ipa_server_ip)", name)
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.extra_vars", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// esc/ctrl+c here: back to the host menu.
@@ -979,7 +979,7 @@ func pushExtraVarActionMenu(r *editRouterModel, dir, path string, hf *inventory.
 	}
 	title := fmt.Sprintf("變數 %s = %s", key, val)
 	items := []string{"修改值", "刪除", "返回"}
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.extra_var_action", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			return pushExtraVarsMenu(r, dir, path, hf, name, "")

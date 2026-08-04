@@ -115,6 +115,20 @@ func TestTextInputModel_ViewShowsLabel(t *testing.T) {
 	}
 }
 
+func TestTextInputModel_ScreenIDFallsBackWhenUnset(t *testing.T) {
+	m := newTextInputModel("label", "", nil)
+	if got := m.automationScreenID(); got != "text-input" {
+		t.Fatalf("automationScreenID() = %q, want legacy fallback %q", got, "text-input")
+	}
+}
+
+func TestTextInputModel_ScreenIDUsesExplicitID(t *testing.T) {
+	m := newTextInputModelWithScreenID("hosts.path", "label", "", nil)
+	if got := m.automationScreenID(); got != "hosts.path" {
+		t.Fatalf("automationScreenID() = %q, want %q", got, "hosts.path")
+	}
+}
+
 func TestTextInputModel_Teatest_HappyPath(t *testing.T) {
 	m := screenTestHarness{s: newTextInputModel("label", "", nil)}
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))

@@ -12,16 +12,27 @@ import (
 	"github.com/charmbracelet/x/exp/teatest"
 )
 
-func newManySelectItems(n int) []string {
-	items := make([]string, n)
+func newManySelectItems(n int) []selectItem {
+	items := make([]selectItem, n)
 	for i := range items {
-		items[i] = fmt.Sprintf("item-%02d", i)
+		items[i] = selectItem{Label: fmt.Sprintf("item-%02d", i)}
+	}
+	return items
+}
+
+// selectItems builds []selectItem from bare labels, for tests that
+// construct a selectModel literal directly rather than through
+// newSelectModel.
+func selectItems(labels ...string) []selectItem {
+	items := make([]selectItem, len(labels))
+	for i, l := range labels {
+		items[i] = selectItem{Label: l}
 	}
 	return items
 }
 
 func TestSelectModel_DownMovesCursor(t *testing.T) {
-	m := selectModel{title: "t", items: []string{"a", "b", "c"}}
+	m := selectModel{title: "t", items: selectItems("a", "b", "c")}
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(selectModel)
 	if m.cursor != 1 {
@@ -30,7 +41,7 @@ func TestSelectModel_DownMovesCursor(t *testing.T) {
 }
 
 func TestSelectModel_CursorWrapsAtBounds(t *testing.T) {
-	m := selectModel{title: "t", items: []string{"a", "b", "c"}}
+	m := selectModel{title: "t", items: selectItems("a", "b", "c")}
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = next.(selectModel)
 	if m.cursor != 2 {
@@ -93,7 +104,7 @@ func TestSelectModel_SearchNoMatchesCanClearThenCancel(t *testing.T) {
 }
 
 func TestSelectModel_EnterConfirmsWithoutCanceling(t *testing.T) {
-	m := selectModel{title: "t", items: []string{"a", "b"}}
+	m := selectModel{title: "t", items: selectItems("a", "b")}
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(selectModel)
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -107,7 +118,7 @@ func TestSelectModel_EnterConfirmsWithoutCanceling(t *testing.T) {
 }
 
 func TestSelectModel_LFEnterConfirmsWithoutCanceling(t *testing.T) {
-	m := selectModel{title: "t", items: []string{"a"}}
+	m := selectModel{title: "t", items: selectItems("a")}
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
 	m = next.(selectModel)
 	if !m.Finished() || m.Canceled() {
@@ -125,7 +136,7 @@ func TestSelectModel_EnterOnEmptyListDoesNothing(t *testing.T) {
 }
 
 func TestSelectModel_EscCancels(t *testing.T) {
-	m := selectModel{title: "t", items: []string{"a"}}
+	m := selectModel{title: "t", items: selectItems("a")}
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = next.(selectModel)
 	if !m.Finished() || !m.Canceled() {
@@ -134,7 +145,7 @@ func TestSelectModel_EscCancels(t *testing.T) {
 }
 
 func TestSelectModel_ViewShowsTitleAndItems(t *testing.T) {
-	m := selectModel{title: "選單標題", items: []string{"alpha", "beta"}}
+	m := selectModel{title: "選單標題", items: selectItems("alpha", "beta")}
 	view := m.View()
 	for _, want := range []string{"選單標題", "alpha", "beta", "▸"} {
 		if !strings.Contains(view, want) {
@@ -149,6 +160,32 @@ func TestSelectModel_ScrollIndicatorReflectsHiddenItems(t *testing.T) {
 	m = next.(selectModel)
 	if !strings.Contains(m.View(), "還有 16 項在下面") {
 		t.Fatalf("expected below-indicator for remaining 16 items:\n%s", m.View())
+	}
+}
+
+func TestSelectModel_ScreenIDFallsBackWhenUnset(t *testing.T) {
+	m := newSelectModel("t", []string{"a"})
+	if got := m.automationScreenID(); got != "select" {
+		t.Fatalf("automationScreenID() = %q, want legacy fallback %q", got, "select")
+	}
+}
+
+func TestSelectModel_ScreenIDUsesExplicitID(t *testing.T) {
+	m := newSelectModelWithScreenID("hosts.list", "t", []string{"a"})
+	if got := m.automationScreenID(); got != "hosts.list" {
+		t.Fatalf("automationScreenID() = %q, want %q", got, "hosts.list")
+	}
+}
+
+func TestSelectModel_WithIDsPreservesLabelsAndIDs(t *testing.T) {
+	items := []selectItem{{ID: "hosts.create", Label: "➕ 新增主機"}, {ID: "", Label: "web-01"}}
+	m := newSelectModelWithIDs("hosts.list", "t", items)
+	if got := m.automationItems(); len(got) != 2 || got[0] != "➕ 新增主機" || got[1] != "web-01" {
+		t.Fatalf("automationItems() = %v, want labels from items", got)
+	}
+	idx, err := itemIndexByID(m.items, "hosts.create")
+	if err != nil || idx != 0 {
+		t.Fatalf("itemIndexByID(hosts.create) = (%d, %v), want (0, nil)", idx, err)
 	}
 }
 
@@ -174,7 +211,7 @@ func TestNewSelectModel_DumpsMenuUnderDebugEnv(t *testing.T) {
 }
 
 func TestSelectModel_Teatest_HappyPath(t *testing.T) {
-	m := screenTestHarness{s: selectModel{title: "t", items: []string{"a", "b", "c"}}}
+	m := screenTestHarness{s: selectModel{title: "t", items: selectItems("a", "b", "c")}}
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
 
 	tm.Type("jj") // cursor -> index 2
@@ -216,7 +253,7 @@ func TestSelectModel_Teatest_FuzzySearchAndSelect(t *testing.T) {
 }
 
 func TestSelectModel_Teatest_EscCancels(t *testing.T) {
-	m := screenTestHarness{s: selectModel{title: "t", items: []string{"a", "b"}}}
+	m := screenTestHarness{s: selectModel{title: "t", items: selectItems("a", "b")}}
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})

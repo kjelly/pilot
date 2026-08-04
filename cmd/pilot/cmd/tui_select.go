@@ -8,13 +8,26 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// selectItem is one row of a selectModel list. ID is a stable
+// automation target that survives Label text/emoji/ordering changes —
+// see the "Stable Automation Identity" section of
+// docs/superpowers/specs/2026-08-04-pilot-edit-mcp-semantic-tui-design.md.
+// It is empty for the many call sites that don't need automation to
+// target them by anything other than Label; automationDriver's
+// label-based choose() keeps working regardless of whether ID is set.
+type selectItem struct {
+	ID    string
+	Label string
+}
+
 // selectModel is an embedded single-select scrollable list screen —
 // the router-based replacement for promptui.Select via
 // promptSelectIndex. See tui_screen.go for why it never calls
 // tea.Quit.
 type selectModel struct {
 	title       string
-	items       []string
+	items       []selectItem
+	screenID    string
 	cursor      int
 	windowStart int
 	height      int
@@ -30,10 +43,32 @@ type selectModel struct {
 // is the authoritative source a trec-driven script reads instead of
 // recomputing from source or eyeballing the rendered screen.
 func newSelectModel(title string, items []string) selectModel {
-	if os.Getenv("PILOT_DEBUG_MENU") != "" {
-		dumpMenuDebug(title, items)
+	return newSelectModelWithScreenID("", title, items)
+}
+
+// newSelectModelWithScreenID is newSelectModel plus a stable, contextual
+// automationScreenID() — e.g. "hosts.list" instead of the generic
+// "select" every selectModel would otherwise report regardless of what
+// it's actually showing. screenID may be "" (same as newSelectModel).
+func newSelectModelWithScreenID(screenID, title string, items []string) selectModel {
+	labeled := make([]selectItem, len(items))
+	for i, s := range items {
+		labeled[i] = selectItem{Label: s}
 	}
-	return selectModel{title: title, items: items}
+	return newSelectModelWithIDs(screenID, title, labeled)
+}
+
+// newSelectModelWithIDs is newSelectModelWithScreenID for call sites
+// that also need per-item AutomationID targeting (see selectItem).
+func newSelectModelWithIDs(screenID, title string, items []selectItem) selectModel {
+	if os.Getenv("PILOT_DEBUG_MENU") != "" {
+		labels := make([]string, len(items))
+		for i, it := range items {
+			labels[i] = it.Label
+		}
+		dumpMenuDebug(title, labels)
+	}
+	return selectModel{title: title, items: items, screenID: screenID}
 }
 
 func (m selectModel) Init() tea.Cmd { return nil }
@@ -41,9 +76,20 @@ func (m selectModel) Init() tea.Cmd { return nil }
 func (m selectModel) Finished() bool { return m.confirmed || m.canceled }
 func (m selectModel) Canceled() bool { return m.canceled }
 
-func (m selectModel) automationScreenID() string { return "select" }
+func (m selectModel) automationScreenID() string {
+	if m.screenID != "" {
+		return m.screenID
+	}
+	return "select"
+}
 
-func (m selectModel) automationItems() []string { return append([]string(nil), m.items...) }
+func (m selectModel) automationItems() []string {
+	labels := make([]string, len(m.items))
+	for i, it := range m.items {
+		labels[i] = it.Label
+	}
+	return labels
+}
 
 // Selected is the original chosen item's index — valid once Finished() &&
 // !Canceled(). The cursor itself is an index into the filtered result set.
@@ -56,7 +102,7 @@ func (m selectModel) Selected() int {
 }
 
 func (m selectModel) matchingIndices() []int {
-	return listFilterIndices(m.items, m.query)
+	return listFilterIndices(m.automationItems(), m.query)
 }
 
 func (m *selectModel) resetFilterCursor() {
@@ -122,7 +168,7 @@ func (m selectModel) View() string {
 		if i == m.cursor {
 			cursor = "▸ "
 		}
-		fmt.Fprintf(&b, "%s%s\n", cursor, m.items[matches[i]])
+		fmt.Fprintf(&b, "%s%s\n", cursor, m.items[matches[i]].Label)
 	}
 	if end < len(matches) {
 		fmt.Fprintf(&b, "   ▼ 還有 %d 項在下面\n", len(matches)-end)

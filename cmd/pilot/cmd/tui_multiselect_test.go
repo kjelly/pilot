@@ -214,3 +214,17 @@ func TestMultiSelect_Teatest_ResizeMidSessionUpdatesVisibleWindow(t *testing.T) 
 		t.Fatal("expected a clean cancel after resize")
 	}
 }
+
+func TestMultiSelect_ScreenIDFallsBackWhenUnset(t *testing.T) {
+	m := newMultiSelectModel("t", nil)
+	if got := m.automationScreenID(); got != "multi-select" {
+		t.Fatalf("automationScreenID() = %q, want legacy fallback %q", got, "multi-select")
+	}
+}
+
+func TestMultiSelect_ScreenIDUsesExplicitID(t *testing.T) {
+	m := newMultiSelectModelWithScreenID("hosts.roles_checklist", "t", nil)
+	if got := m.automationScreenID(); got != "hosts.roles_checklist" {
+		t.Fatalf("automationScreenID() = %q, want %q", got, "hosts.roles_checklist")
+	}
+}

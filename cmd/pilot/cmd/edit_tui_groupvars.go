@@ -85,7 +85,7 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 	items = append(items, "↩  返回")
 
 	title := fmt.Sprintf("選一個 %s 底下的檔案", targetDir)
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("group_vars.files", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -292,7 +292,7 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 	}
 
 	title := fmt.Sprintf("編輯 %s", path)
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("group_vars.entries", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "🚪 不存檔離開" exactly, including its dirty gate.
@@ -323,7 +323,7 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 }
 
 func pushConfirmDiscardGroupVars(r *editRouterModel, dir, path string, doc *groupvars.Doc) tea.Cmd {
-	return r.transitionTo(newConfirmModel("有未存檔的修改，確定要放棄離開嗎？", false), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newConfirmModelWithScreenID("confirm.discard", "有未存檔的修改，確定要放棄離開嗎？", false), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(confirmModel)
 		if m.Value() {
 			return pushGroupVarsFilePicker(r, dir, "")
@@ -339,7 +339,7 @@ func pushGroupVarsEntryMenu(r *editRouterModel, dir, path string, doc *groupvars
 		banner = "──────────────────────────────────\n" + e.Description + "\n──────────────────────────────────"
 	}
 	items := []string{"修改值", "還原成內建預設(取消設定)", "返回"}
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("group_vars.entry_action", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "返回" (case 2).
@@ -392,7 +392,7 @@ func pushGroupVarsListEntryMenu(r *editRouterModel, dir, path string, doc *group
 		banner = "──────────────────────────────────\n" + e.Description + "\n──────────────────────────────────"
 	}
 	items := []string{"編輯清單項目", "還原成內建預設(取消設定)", "返回"}
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("group_vars.list_entry_action", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "返回" (case 2).
@@ -420,7 +420,7 @@ func pushGroupVarsListItemsMenu(r *editRouterModel, dir, path string, doc *group
 	items = append(items, "➕ 新增項目", "↩  返回")
 
 	title := fmt.Sprintf("%s 的項目", e.Key)
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("group_vars.list_items", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -456,7 +456,7 @@ func pushGroupVarsAddListItem(r *editRouterModel, dir, path string, doc *groupva
 func pushGroupVarsListItemAction(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, itemIdx int, dirty bool) tea.Cmd {
 	title := fmt.Sprintf("%s 項目：%s", e.Key, e.Values[itemIdx])
 	items := []string{"修改值", "移除", "返回"}
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("group_vars.list_item_action", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "返回" (case 2).

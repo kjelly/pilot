@@ -17,12 +17,19 @@ import (
 type confirmModel struct {
 	question   string
 	defaultYes bool
+	screenID   string
 	answered   bool
 	value      bool
 }
 
 func newConfirmModel(question string, defaultYes bool) confirmModel {
-	return confirmModel{question: question, defaultYes: defaultYes}
+	return newConfirmModelWithScreenID("", question, defaultYes)
+}
+
+// newConfirmModelWithScreenID is newConfirmModel plus a stable,
+// contextual automationScreenID() — see newSelectModelWithScreenID.
+func newConfirmModelWithScreenID(screenID, question string, defaultYes bool) confirmModel {
+	return confirmModel{question: question, defaultYes: defaultYes, screenID: screenID}
 }
 
 func (m confirmModel) Init() tea.Cmd { return nil }
@@ -30,7 +37,12 @@ func (m confirmModel) Init() tea.Cmd { return nil }
 func (m confirmModel) Finished() bool { return m.answered }
 func (m confirmModel) Canceled() bool { return false }
 
-func (m confirmModel) automationScreenID() string { return "confirm" }
+func (m confirmModel) automationScreenID() string {
+	if m.screenID != "" {
+		return m.screenID
+	}
+	return "confirm"
+}
 
 // Value is the yes/no answer — valid once Finished().
 func (m confirmModel) Value() bool { return m.value }

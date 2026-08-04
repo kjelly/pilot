@@ -7,8 +7,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// multiSelectItem is one row of a multiSelectModel checklist.
+// multiSelectItem is one row of a multiSelectModel checklist. ID is a
+// stable automation target — see selectItem in tui_select.go for why.
 type multiSelectItem struct {
+	ID          string
 	Label       string
 	Description string
 	Checked     bool
@@ -22,6 +24,7 @@ type multiSelectItem struct {
 type multiSelectModel struct {
 	title       string
 	items       []multiSelectItem
+	screenID    string
 	cursor      int
 	windowStart int
 	height      int
@@ -32,7 +35,13 @@ type multiSelectModel struct {
 }
 
 func newMultiSelectModel(title string, items []multiSelectItem) multiSelectModel {
-	return multiSelectModel{title: title, items: items}
+	return newMultiSelectModelWithScreenID("", title, items)
+}
+
+// newMultiSelectModelWithScreenID is newMultiSelectModel plus a stable,
+// contextual automationScreenID() — see newSelectModelWithScreenID.
+func newMultiSelectModelWithScreenID(screenID, title string, items []multiSelectItem) multiSelectModel {
+	return multiSelectModel{title: title, items: items, screenID: screenID}
 }
 
 func (m multiSelectModel) Init() tea.Cmd { return nil }
@@ -40,7 +49,12 @@ func (m multiSelectModel) Init() tea.Cmd { return nil }
 func (m multiSelectModel) Finished() bool { return m.confirmed || m.canceled }
 func (m multiSelectModel) Canceled() bool { return m.canceled }
 
-func (m multiSelectModel) automationScreenID() string { return "multi-select" }
+func (m multiSelectModel) automationScreenID() string {
+	if m.screenID != "" {
+		return m.screenID
+	}
+	return "multi-select"
+}
 
 func (m multiSelectModel) automationItems() []string {
 	items := make([]string, len(m.items))

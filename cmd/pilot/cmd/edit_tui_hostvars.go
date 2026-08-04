@@ -194,7 +194,7 @@ func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventor
 	items = append(items, "💾 存檔並離開", "🚪 不存檔離開")
 
 	title := fmt.Sprintf("編輯 %s", hvPath)
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("host_vars.entries", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "🚪 不存檔離開" exactly, including its dirty gate.
@@ -223,7 +223,7 @@ func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventor
 }
 
 func pushConfirmDiscardHostVars(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, hvPath string, doc *groupvars.Doc) tea.Cmd {
-	return r.transitionTo(newConfirmModel("有未存檔的修改，確定要放棄離開嗎？", false), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newConfirmModelWithScreenID("confirm.discard", "有未存檔的修改，確定要放棄離開嗎？", false), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(confirmModel)
 		if m.Value() {
 			return pushHostMenu(r, dir, path, hf, name)
@@ -239,7 +239,7 @@ func pushHostVarsEntryMenu(r *editRouterModel, dir, path string, hf *inventory.H
 		banner = "──────────────────────────────────\n" + e.Description + "\n──────────────────────────────────"
 	}
 	items := []string{"修改值", "返回"}
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("host_vars.entry_action", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors "返回" (case 1).

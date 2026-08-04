@@ -49,6 +49,23 @@ type automationDriver struct {
 	// presentation recording to show the transition. It is injected so model
 	// tests do not need to wait in real time.
 	pausePresentation func(time.Duration)
+	// recorder observes each key/frame/action boundary (see edit_audit.go)
+	// without altering driver behavior. Left unset by every existing
+	// construction of automationDriver, so recorderOrNoop's noopAuditRecorder
+	// fallback makes this field's addition behavior-neutral.
+	recorder AuditRecorder
+	frameSeq int
+}
+
+// recorderOrNoop is every recorder-calling site's entry point — never
+// read d.recorder directly, so a driver built before AuditRecorder
+// existed (every current construction) keeps behaving exactly as it
+// did.
+func (d *automationDriver) recorderOrNoop() AuditRecorder {
+	if d.recorder == nil {
+		return noopAuditRecorder{}
+	}
+	return d.recorder
 }
 
 func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error {
@@ -57,7 +74,13 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 	}
 	for i, step := range scenario.Steps {
 		d.keys = nil
+		if err := d.recorderOrNoop().RecordActionStart(step); err != nil {
+			return fmt.Errorf("step %d (%s): record action start: %w", i+1, step.Action, err)
+		}
 		err := d.runStep(r, step)
+		if recErr := d.recorderOrNoop().RecordActionResult(step, err); recErr != nil && err == nil {
+			err = fmt.Errorf("record action result: %w", recErr)
+		}
 		event := automationTraceEvent{
 			Step:     i + 1,
 			Action:   step.Action,
@@ -356,7 +379,7 @@ func (d *automationDriver) choose(r *editRouterModel, label string) error {
 	if !ok {
 		return fmt.Errorf("cannot choose %q on %s screen", label, automationScreenID(r))
 	}
-	idx, err := uniqueItemIndex(list.items, label)
+	idx, err := uniqueItemIndex(list.automationItems(), label)
 	if err != nil {
 		return err
 	}
@@ -476,6 +499,9 @@ func (d *automationDriver) send(r *editRouterModel, msg tea.KeyMsg) error {
 		return fmt.Errorf("edit router returned unexpected model")
 	}
 	*r = next
+	if err := d.notifyRecorder(r, msg.String()); err != nil {
+		return err
+	}
 	if r.err != nil {
 		return r.err
 	}
@@ -495,8 +521,28 @@ func (d *automationDriver) sendRedacted(r *editRouterModel, msg tea.KeyMsg, plac
 		return fmt.Errorf("edit router returned unexpected model")
 	}
 	*r = next
+	if err := d.notifyRecorder(r, placeholder); err != nil {
+		return err
+	}
 	if r.err != nil {
 		return r.err
+	}
+	return nil
+}
+
+// notifyRecorder reports the key just applied and the resulting live
+// frame to d.recorderOrNoop() — called from send/sendRedacted only, so
+// every key either function applies is observed exactly once,
+// regardless of which one a given automationDriver method used.
+func (d *automationDriver) notifyRecorder(r *editRouterModel, keyRepr string) error {
+	rec := d.recorderOrNoop()
+	if err := rec.RecordKeys([]string{keyRepr}); err != nil {
+		return fmt.Errorf("record keys: %w", err)
+	}
+	d.frameSeq++
+	frame := FrameEvent{Sequence: d.frameSeq, ScreenID: automationScreenID(r), View: r.View()}
+	if err := rec.RecordFrame(frame); err != nil {
+		return fmt.Errorf("record frame: %w", err)
 	}
 	return nil
 }
@@ -530,6 +576,61 @@ func uniqueItemIndex(items []string, label string) (int, error) {
 		return -1, fmt.Errorf("label %q not found", label)
 	}
 	return index, nil
+}
+
+// itemIndexByID is uniqueItemIndex's ID-based counterpart, for the
+// MCP-facing automation path (docs/superpowers/specs/2026-08-04-pilot-edit-mcp-semantic-tui-design.md's
+// "Agent 不操作 raw terminal" invariant): it requires an exact, unique,
+// non-empty ID match and never falls back to substring or label
+// matching, so an item with no AutomationID assigned can never be
+// targeted this way — that's fail-closed by construction, not by an
+// extra check.
+func itemIndexByID(items []selectItem, id string) (int, error) {
+	if id == "" {
+		return -1, fmt.Errorf("item id must not be empty")
+	}
+	index := -1
+	count := 0
+	for i, item := range items {
+		if item.ID == id {
+			index = i
+			count++
+		}
+	}
+	if count == 0 {
+		return -1, fmt.Errorf("item id %q not found", id)
+	}
+	if count > 1 {
+		return -1, fmt.Errorf("item id %q is ambiguous", id)
+	}
+	return index, nil
+}
+
+// chooseByID is choose's ID-based counterpart. Unlike choose (which
+// trusts the caller to already be on the right screen, matching
+// today's --actions automation path), it first asserts the current
+// screen's automationScreenID() equals wantScreenID and fails closed on
+// a mismatch — the ID-based replacement for the ad-hoc
+// strings.Contains(list.title, ...) screen checks scattered through
+// this file's label-based driver methods. No existing caller uses this
+// yet; it's the primitive a future ID-based MVP action executor (spec
+// Phase 3/4) will call.
+func (d *automationDriver) chooseByID(r *editRouterModel, wantScreenID, itemID string) error {
+	if got := automationScreenID(r); got != wantScreenID {
+		return fmt.Errorf("expected %s screen, got %s", wantScreenID, got)
+	}
+	list, ok := r.current.(selectModel)
+	if !ok {
+		return fmt.Errorf("cannot choose item %q: %s screen is not a select list", itemID, wantScreenID)
+	}
+	idx, err := itemIndexByID(list.items, itemID)
+	if err != nil {
+		return err
+	}
+	if err := d.moveCursor(r, idx); err != nil {
+		return err
+	}
+	return d.enter(r)
 }
 
 func automationScreenID(r *editRouterModel) string {

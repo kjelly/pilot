@@ -223,23 +223,27 @@ func runAutomatedEditWorkflow(cmd *cobra.Command, scenario editScenario, present
 		defer func() { _ = sink.close() }()
 	}
 	out := cmd.OutOrStdout()
-	r := newEditRouterModel(editDir)
-	f := func(event automationTraceEvent) { sink.add(event) }
 	marker := openTrecMarkerFD()
 	if marker != nil {
 		defer marker.Close()
 	}
-	d := automationDriver{trace: f, presentation: presentation, out: out, dir: editDir, marker: marker}
-	if presentation {
-		d.pausePresentation = time.Sleep
+	opts := editAgentSessionOptions{
+		Out:          out,
+		Presentation: presentation,
+		Trace:        func(event automationTraceEvent) { sink.add(event) },
+		Marker:       marker,
 	}
+	if presentation {
+		opts.PausePresentation = time.Sleep
+	}
+	session := newEditAgentSession(editDir, opts)
 	if presentation {
 		if scenario.Title != "" {
 			fmt.Fprintf(out, "═══ %s ═══\n", scenario.Title)
 		}
-		fmt.Fprintln(out, r.View())
+		fmt.Fprintln(out, session.View())
 	}
-	if err := d.run(&r, editScenario{Version: 1, Title: scenario.Title, Steps: editSteps}); err != nil {
+	if err := session.Run(editScenario{Version: 1, Title: scenario.Title, Steps: editSteps}); err != nil {
 		return err
 	}
 	if sink != nil && sink.err != nil {

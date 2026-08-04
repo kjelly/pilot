@@ -89,6 +89,20 @@ func TestConfirmModel_ViewShowsDefaultHint(t *testing.T) {
 	}
 }
 
+func TestConfirmModel_ScreenIDFallsBackWhenUnset(t *testing.T) {
+	m := newConfirmModel("q", false)
+	if got := m.automationScreenID(); got != "confirm" {
+		t.Fatalf("automationScreenID() = %q, want legacy fallback %q", got, "confirm")
+	}
+}
+
+func TestConfirmModel_ScreenIDUsesExplicitID(t *testing.T) {
+	m := newConfirmModelWithScreenID("confirm.discard", "q", false)
+	if got := m.automationScreenID(); got != "confirm.discard" {
+		t.Fatalf("automationScreenID() = %q, want %q", got, "confirm.discard")
+	}
+}
+
 func TestConfirmModel_Teatest_HappyPath(t *testing.T) {
 	m := screenTestHarness{s: newConfirmModel("q", false)}
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))

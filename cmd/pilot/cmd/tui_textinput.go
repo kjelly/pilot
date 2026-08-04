@@ -16,6 +16,7 @@ type textInputModel struct {
 	label     string
 	validate  func(string) error
 	input     textinput.Model
+	screenID  string
 	err       string
 	confirmed bool
 	canceled  bool
@@ -26,6 +27,12 @@ type textInputModel struct {
 // passes or the user cancels; validate may be nil (no validation,
 // matching promptText's nil-validator callers).
 func newTextInputModel(label, def string, validate func(string) error) textInputModel {
+	return newTextInputModelWithScreenID("", label, def, validate)
+}
+
+// newTextInputModelWithScreenID is newTextInputModel plus a stable,
+// contextual automationScreenID() — see newSelectModelWithScreenID.
+func newTextInputModelWithScreenID(screenID, label, def string, validate func(string) error) textInputModel {
 	ti := textinput.New()
 	ti.SetValue(def)
 	ti.CursorEnd()
@@ -34,7 +41,7 @@ func newTextInputModel(label, def string, validate func(string) error) textInput
 	// sets on ti would be discarded the moment Init() returned if
 	// called there instead of before the value is stored on the model.
 	ti.Focus()
-	return textInputModel{label: label, validate: validate, input: ti}
+	return textInputModel{label: label, validate: validate, input: ti, screenID: screenID}
 }
 
 // newSecretTextInputModel is newTextInputModel for a value that
@@ -57,7 +64,12 @@ func (m textInputModel) Init() tea.Cmd {
 func (m textInputModel) Finished() bool { return m.confirmed || m.canceled }
 func (m textInputModel) Canceled() bool { return m.canceled }
 
-func (m textInputModel) automationScreenID() string { return "text-input" }
+func (m textInputModel) automationScreenID() string {
+	if m.screenID != "" {
+		return m.screenID
+	}
+	return "text-input"
+}
 
 func (m textInputModel) automationLabel() string { return m.label }
 

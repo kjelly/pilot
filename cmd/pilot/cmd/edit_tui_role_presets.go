@@ -147,7 +147,7 @@ func pushRolePresetManager(r *editRouterModel, dir, path string, hf *inventory.H
 	}
 	items = append(items, "↩ 返回")
 	title := fmt.Sprintf("管理 %s", rolePresetPath(dir))
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.role_preset_manager", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -170,7 +170,7 @@ func pushRolePresetManager(r *editRouterModel, dir, path string, hf *inventory.H
 func pushRolePresetAction(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, presets []rolePreset, idx int) tea.Cmd {
 	title := fmt.Sprintf("範本 %q", presets[idx].Label)
 	items := []string{"✏ 修改名稱與角色", "🗑 刪除範本", "↩ 返回"}
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("hosts.role_preset_action", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -229,10 +229,10 @@ func pushRolePresetChecklist(r *editRouterModel, dir, path string, hf *inventory
 	roles := inventory.Roles()
 	items := make([]multiSelectItem, len(roles))
 	for i, role := range roles {
-		items[i] = multiSelectItem{Label: role.Name, Description: role.Description, Checked: hasRole(presets[idx].Roles, role.Name)}
+		items[i] = multiSelectItem{ID: role.Name, Label: role.Name, Description: role.Description, Checked: hasRole(presets[idx].Roles, role.Name)}
 	}
 	title := fmt.Sprintf("範本 %q 的角色", presets[idx].Label)
-	return r.transitionTo(newMultiSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newMultiSelectModelWithScreenID("hosts.role_preset_checklist", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(multiSelectModel)
 		if m.Canceled() {
 			return pushRolePresetManager(r, dir, path, hf, name, "")
