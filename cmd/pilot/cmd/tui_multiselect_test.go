@@ -170,6 +170,18 @@ func TestMultiSelect_EmptyItemListDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestMultiSelect_EmptyItemListEnterFinishes(t *testing.T) {
+	m := multiSelectModel{title: "optional empty checklist"}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(multiSelectModel)
+	if !m.Finished() || m.Canceled() {
+		t.Fatalf("empty checklist should accept Enter as an empty selection: finished=%t canceled=%t", m.Finished(), m.Canceled())
+	}
+	if got := m.CheckedLabels(); len(got) != 0 {
+		t.Fatalf("empty checklist selected unexpected items: %v", got)
+	}
+}
+
 func TestMultiSelect_ViewShowsCheckboxMarks(t *testing.T) {
 	m := newTestMultiSelect()
 	view := m.View()

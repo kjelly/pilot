@@ -91,6 +91,12 @@
     # every user login to every host regardless of the rules above.
     ipa_hbac_disable_allow_all: false
 
+    # SSSD clients cache identity, HBAC, and sudo data.  Refresh every
+    # inventory-declared FreeIPA client after a successful identity reconcile
+    # so authorization changes become observable without waiting for cache
+    # expiry.  This is intentionally inventory-driven; never hard-code hosts.
+    ipa_identity_refresh_sssd_cache: true
+
   pre_tasks:
     - name: "Load canonical roster under a namespace"
       ansible.builtin.include_vars:
@@ -1987,6 +1993,20 @@
       tags: [identity, nfs, C18]
 
     # ── Release ticket ─────────────────────────────────────────────────
+    - name: "Refresh SSSD caches on enrolled FreeIPA clients"
+      ansible.builtin.command: sss_cache -E
+      delegate_to: "{{ item }}"
+      become: true
+      become_method: sudo
+      loop: "{{ groups.get('freeipa-client', []) }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+      when:
+        - not ansible_check_mode
+        - ipa_identity_refresh_sssd_cache | bool
+      tags: [identity, client-cache]
+
     - name: "Release the Kerberos ticket"
       ansible.builtin.command: kdestroy
       changed_when: false

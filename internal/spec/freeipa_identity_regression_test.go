@@ -138,3 +138,31 @@ func TestRegression_FreeipaIdentityAllowAllUsesCommandCategory(t *testing.T) {
 		t.Fatal("allow.command_category: all must reconcile to FreeIPA cmdcat=all")
 	}
 }
+
+// TestRegression_FreeipaIdentityRefreshesClientSSSDCache locks the post-
+// reconcile hand-off: FreeIPA authorization changes must not remain hidden
+// behind stale client-side SSSD caches.
+func TestRegression_FreeipaIdentityRefreshesClientSSSDCache(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-identity-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+	for _, want := range []string{
+		"ipa_identity_refresh_sssd_cache: true",
+		`name: "Refresh SSSD caches on enrolled FreeIPA clients"`,
+		"ansible.builtin.command: sss_cache -E",
+		`delegate_to: "{{ item }}"`,
+		`loop: "{{ groups.get('freeipa-client', []) }}"`,
+		"become: true",
+		"become_method: sudo",
+		"- not ansible_check_mode",
+		"- ipa_identity_refresh_sssd_cache | bool",
+		"changed_when: false",
+	} {
+		if !strings.Contains(playbook, want) {
+			t.Errorf("identity playbook must contain %q", want)
+		}
+	}
+}

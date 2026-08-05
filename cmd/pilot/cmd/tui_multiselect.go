@@ -117,7 +117,11 @@ func (m multiSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.items[itemIndex].Checked = !m.items[itemIndex].Checked
 			}
 		case "enter":
-			if len(matches) > 0 {
+			// An empty source list is a valid answer for optional checklist
+			// fields (for example, a new sudo rule may use direct commands
+			// without any command groups).  A non-empty list filtered to zero
+			// results is different: do not let Enter silently submit a typo.
+			if len(matches) > 0 || len(m.items) == 0 {
 				m.confirmed = true
 			}
 		case "esc", "ctrl+c":
