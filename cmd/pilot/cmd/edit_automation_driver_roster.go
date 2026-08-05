@@ -1,13 +1,16 @@
 // edit_automation_driver_roster.go drives the roster user screens
 // (edit_tui_roster.go) for semantic edit-scenario actions — create_user,
-// set_user_field. Phase 6 increment 1: users only, non-secret fields
-// only (password.initial/ssh_keys.values are out of scope — see
+// set_user_field (Phase 6 increment 1, non-secret fields), and
+// set_user_password/add_ssh_key/delete_ssh_key (Phase 6 increment 2,
+// password.initial + ssh_keys.values) — see
 // docs/superpowers/specs/2026-08-04-pilot-edit-mcp-semantic-tui-design.md's
-// Phase 6 plan). Mirrors createHost/setHostField
+// Phase 6 plan. Mirrors createHost/setHostField
 // (edit_automation_driver.go) exactly, using the stable screen IDs
 // edit_tui_roster.go now carries (roster.top, roster.users.list,
 // roster.user.add, roster.user.detail, roster.user.field_text/int/
-// bool/state) instead of title-substring matching.
+// bool/state, roster.user.field_password/field_password_bool,
+// roster.user.ssh_keys.list/add/item_action/edit_item) instead of
+// title-substring matching.
 package cmd
 
 import (
@@ -23,7 +26,7 @@ import (
 // this increment) — automation requires the roster file to already
 // exist at its default path.
 func (d *automationDriver) ensureRosterUsersList(r *editRouterModel) error {
-	for attempts := 0; attempts < 6; attempts++ {
+	for attempts := 0; attempts < 8; attempts++ {
 		switch automationScreenID(r) {
 		case "roster.users.list":
 			return nil
@@ -40,12 +43,16 @@ func (d *automationDriver) ensureRosterUsersList(r *editRouterModel) error {
 			if err := d.choose(r, "👤 Users"); err != nil {
 				return err
 			}
-		case "roster.user.detail":
-			if err := d.choose(r, "返回"); err != nil {
-				return err
-			}
 		default:
-			return fmt.Errorf("cannot navigate to roster users list from %s screen", automationScreenID(r))
+			// Any other screen (roster.user.detail, roster.user.ssh_keys.list,
+			// or a sibling section's screen like roster.group.detail) climbs
+			// back one level via its own "返回"/"↩  返回" item — every detail
+			// or sub-list screen has exactly one, and "返回" substring-matches
+			// either form (uniqueItemIndex), so this is a single generic step
+			// rather than enumerating every screen this function might see.
+			if err := d.choose(r, "返回"); err != nil {
+				return fmt.Errorf("cannot navigate to roster users list from %s screen: %w", automationScreenID(r), err)
+			}
 		}
 	}
 	return fmt.Errorf("could not resolve navigation to roster users list")
@@ -111,4 +118,59 @@ func (d *automationDriver) setUserField(r *editRouterModel, user, field, value s
 		return err
 	}
 	return d.enter(r)
+}
+
+// setUserPassword drives pushRosterUserPasswordInitial, which always
+// starts blank (it never prefills the old password — see that
+// function's own label text), so replace=false is correct here, unlike
+// setUserField's replace=true for a pre-filled scalar.
+func (d *automationDriver) setUserPassword(r *editRouterModel, user, value string, secret bool) error {
+	if err := d.ensureRosterUserDetail(r, user); err != nil {
+		return err
+	}
+	if err := d.choose(r, "password.initial"); err != nil {
+		return err
+	}
+	if err := d.typeSecretOrPlain(r, value, secret, false); err != nil {
+		return err
+	}
+	return d.enter(r)
+}
+
+// addSSHKey drives pushRosterUserSSHKeysList's "➕ 新增公鑰" entry.
+// ssh_keys.values items are public keys, never masked in the interactive
+// TUI (pushRosterUserSSHKeysAdd uses a plain, unmasked text input), so
+// this reads value literally rather than through typeSecretOrPlain.
+func (d *automationDriver) addSSHKey(r *editRouterModel, user, value string) error {
+	if err := d.ensureRosterUserDetail(r, user); err != nil {
+		return err
+	}
+	if err := d.choose(r, "ssh_keys.values"); err != nil {
+		return err
+	}
+	if err := d.choose(r, "➕ 新增公鑰"); err != nil {
+		return err
+	}
+	if err := d.typeText(r, value, false); err != nil {
+		return err
+	}
+	return d.enter(r)
+}
+
+// deleteSSHKey matches value against the list screen's "<n>: <value>"
+// item text (uniqueItemIndex's substring match) — value must be the
+// exact public key string, matching exactly one entry. choose() already
+// sends Enter after moving the cursor, so no separate enter() call is
+// needed after either selection below.
+func (d *automationDriver) deleteSSHKey(r *editRouterModel, user, value string) error {
+	if err := d.ensureRosterUserDetail(r, user); err != nil {
+		return err
+	}
+	if err := d.choose(r, "ssh_keys.values"); err != nil {
+		return err
+	}
+	if err := d.choose(r, value); err != nil {
+		return err
+	}
+	return d.choose(r, "移除")
 }

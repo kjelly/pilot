@@ -46,6 +46,13 @@ const (
 	mcpErrApplyFailed           = "apply_failed"
 	mcpErrRollbackFailed        = "rollback_failed"
 	mcpErrSecretPolicyViolation = "secret_policy_violation"
+
+	// mcpErrHostNotFound and mcpErrInvalidParam are produced by the
+	// pilot_diagnose_* tools (mcp_diagnose_tools.go) — a host that isn't
+	// an exact inventory key, or a user/name parameter that fails its
+	// validator, are rejected before any ad-hoc command is ever run.
+	mcpErrHostNotFound = "host_not_found"
+	mcpErrInvalidParam = "invalid_param"
 )
 
 // toolErrorResult builds the CallToolResult a handler returns for a

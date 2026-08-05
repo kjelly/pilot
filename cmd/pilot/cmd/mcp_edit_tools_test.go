@@ -23,7 +23,7 @@ func TestMCPAllowedActionNames_IncludesEveryRegistryAction(t *testing.T) {
 			t.Fatalf("expected action %q to be allowed (Phase 5: vault actions are no longer excluded)", def.Spec.Name)
 		}
 	}
-	for name := range mcpVaultActionNames {
+	for name := range mcpSecretActionNames {
 		if !allowed[name] {
 			t.Fatalf("expected vault action %q to be allowed (value_env-only policy is enforced separately)", name)
 		}
@@ -42,7 +42,7 @@ func TestCapabilitiesHandler_IncludesVaultActionsWithValueEnvOnlySchema(t *testi
 	if out.Unsupported["deploy"] == "" {
 		t.Fatal(`expected Unsupported["deploy"] to be set`)
 	}
-	for name := range mcpVaultActionNames {
+	for name := range mcpSecretActionNames {
 		if _, stillExcluded := out.Unsupported[name]; stillExcluded {
 			t.Fatalf("vault action %q should no longer be in Unsupported (Phase 5)", name)
 		}
@@ -52,14 +52,14 @@ func TestCapabilitiesHandler_IncludesVaultActionsWithValueEnvOnlySchema(t *testi
 	for _, a := range out.Actions {
 		seen[a.Name] = true
 	}
-	for name := range mcpVaultActionNames {
+	for name := range mcpSecretActionNames {
 		if !seen[name] {
 			t.Fatalf("expected vault action %q to be listed in Actions", name)
 		}
 	}
 
 	for _, a := range out.Actions {
-		if !mcpVaultActionNames[a.Name] {
+		if !mcpSecretActionNames[a.Name] {
 			continue
 		}
 		for _, opt := range a.Optional {
@@ -223,6 +223,139 @@ func TestInspectHandler_OmitsRosterWhenNotRequested(t *testing.T) {
 	}
 	if out.RosterUsers != nil {
 		t.Fatalf("RosterUsers = %+v, want nil when include_roster is false", out.RosterUsers)
+	}
+	if out.RosterGroups != nil || out.RosterHostgroups != nil || out.HBACRules != nil ||
+		out.SudoCommandGroups != nil || out.SudoRules != nil ||
+		out.EffectiveHBACAccess != nil || out.EffectiveSudoAccess != nil {
+		t.Fatalf("expected every roster-derived field nil when include_roster is false, got %+v", out)
+	}
+}
+
+// TestInspectHandler_RosterGraphAndEffectiveAccessAnswerCanUserReachHost is
+// the general-mechanism check behind this increment: an MCP caller asking
+// "can alice reach web1.ipa.pilot.internal over ssh, and sudo-restart nginx
+// there" must be answerable straight from EffectiveHBACAccess/
+// EffectiveSudoAccess, without itself re-walking group/hostgroup nesting —
+// access-web/role-web only reach alice and webhosts only reaches
+// web1.ipa.pilot.internal through membership.groups/membership.hosts, which
+// this test exercises via the real semantic actions (not a hand-written
+// fixture) to also prove the whole registry-to-inspect pipeline agrees.
+func TestInspectHandler_RosterGraphAndEffectiveAccessAnswerCanUserReachHost(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalRosterFixture(t, dir)
+
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_user", User: "alice"},
+		{Action: "create_group", Name: "access-web", Category: "access"},
+		{Action: "set_group_members_users", Name: "access-web", Users: []string{"alice"}},
+		{Action: "create_hostgroup", Name: "webhosts"},
+		{Action: "set_hostgroup_field", Name: "webhosts", Field: "membership.hosts", Value: "web1.ipa.pilot.internal"},
+		{Action: "create_hbac_rule", Name: "web-login", Groups: []string{"access-web"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
+		{Action: "create_group", Name: "role-web", Category: "role"},
+		{Action: "set_group_members_users", Name: "role-web", Users: []string{"alice"}},
+		{Action: "create_sudo_command_group", Name: "web-restart", Value: "systemctl restart nginx"},
+		{Action: "create_sudo_rule", Name: "web-sudo", Groups: []string{"role-web"}, CommandGroups: []string{"web-restart"}},
+	}}
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	handler := inspectHandler(editMCPToolsOptions{Dir: dir})
+	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeRoster: true})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+
+	if len(out.RosterGroups) != 2 {
+		t.Fatalf("RosterGroups = %+v, want 2 entries", out.RosterGroups)
+	}
+	if len(out.RosterHostgroups) != 1 || out.RosterHostgroups[0].Name != "webhosts" ||
+		len(out.RosterHostgroups[0].MemberHosts) != 1 || out.RosterHostgroups[0].MemberHosts[0] != "web1.ipa.pilot.internal" {
+		t.Fatalf("RosterHostgroups = %+v", out.RosterHostgroups)
+	}
+	if len(out.HBACRules) != 1 || out.HBACRules[0].Name != "web-login" {
+		t.Fatalf("HBACRules = %+v", out.HBACRules)
+	}
+	if len(out.SudoCommandGroups) != 1 || out.SudoCommandGroups[0].Name != "web-restart" {
+		t.Fatalf("SudoCommandGroups = %+v", out.SudoCommandGroups)
+	}
+	if len(out.SudoRules) != 1 || out.SudoRules[0].Name != "web-sudo" {
+		t.Fatalf("SudoRules = %+v", out.SudoRules)
+	}
+
+	if len(out.EffectiveHBACAccess) != 1 {
+		t.Fatalf("EffectiveHBACAccess = %+v, want exactly 1 rule", out.EffectiveHBACAccess)
+	}
+	hbac := out.EffectiveHBACAccess[0]
+	if hbac.Rule != "web-login" || len(hbac.Users) != 1 || hbac.Users[0] != "alice" ||
+		len(hbac.Hosts) != 1 || hbac.Hosts[0] != "web1.ipa.pilot.internal" {
+		t.Fatalf("EffectiveHBACAccess[0] = %+v, want alice able to reach web1.ipa.pilot.internal", hbac)
+	}
+
+	if len(out.EffectiveSudoAccess) != 1 {
+		t.Fatalf("EffectiveSudoAccess = %+v, want exactly 1 rule", out.EffectiveSudoAccess)
+	}
+	sudo := out.EffectiveSudoAccess[0]
+	if sudo.Rule != "web-sudo" || len(sudo.Users) != 1 || sudo.Users[0] != "alice" ||
+		len(sudo.Commands) != 1 || sudo.Commands[0] != "systemctl restart nginx" {
+		t.Fatalf("EffectiveSudoAccess[0] = %+v, want alice able to sudo-restart nginx", sudo)
+	}
+}
+
+func TestInspectHandler_DNSZonesIncludeResolvedIPAndOmitWhenNotRequested(t *testing.T) {
+	dir := t.TempDir()
+	writeDNSTestHostsFile(t, dir)
+	dnsPath := filepath.Join(dir, "freeipa-dns.yaml")
+	if err := inventory.CreateMinimalDNSManifest(dnsPath, "svc.pilot.internal", "SVC.PILOT.INTERNAL", "ipa1.svc.pilot.internal"); err != nil {
+		t.Fatalf("CreateMinimalDNSManifest() error = %v", err)
+	}
+	if err := inventory.AppendDNSZone(dnsPath, map[string]any{"name": "svc.pilot.internal.", "state": "present"}); err != nil {
+		t.Fatalf("AppendDNSZone() error = %v", err)
+	}
+	if err := inventory.AppendDNSRecord(dnsPath, "svc.pilot.internal.", map[string]any{
+		"name": "grafana", "type": "A", "target": map[string]any{"inventory_host": "nexus"},
+	}); err != nil {
+		t.Fatalf("AppendDNSRecord(grafana) error = %v", err)
+	}
+	if err := inventory.AppendDNSRecord(dnsPath, "svc.pilot.internal.", map[string]any{
+		"name": "www", "type": "CNAME", "values": []string{"nexus.svc.pilot.internal."},
+	}); err != nil {
+		t.Fatalf("AppendDNSRecord(www) error = %v", err)
+	}
+
+	handler := inspectHandler(editMCPToolsOptions{Dir: dir})
+	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeDNS: true})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+	if len(out.DNSZones) != 1 || out.DNSZones[0].Name != "svc.pilot.internal." {
+		t.Fatalf("DNSZones = %+v, want exactly one zone svc.pilot.internal.", out.DNSZones)
+	}
+	zone := out.DNSZones[0]
+	if len(zone.Records) != 2 {
+		t.Fatalf("Records = %+v, want 2 entries", zone.Records)
+	}
+	byName := map[string]inspectDNSRecord{}
+	for _, r := range zone.Records {
+		byName[r.Name] = r
+	}
+	grafana, ok := byName["grafana"]
+	if !ok || grafana.TargetHost != "nexus" || grafana.ResolvedIP != "192.168.122.81" {
+		t.Fatalf("grafana record = %+v, want target_host=nexus resolved_ip=192.168.122.81 (joined against inventory hosts)", grafana)
+	}
+	www, ok := byName["www"]
+	if !ok || www.ResolvedIP != "" || len(www.Values) != 1 || www.Values[0] != "nexus.svc.pilot.internal." {
+		t.Fatalf("www record = %+v, want explicit values and no resolved_ip", www)
+	}
+
+	_, out2, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeDNS: false})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+	if out2.DNSZones != nil {
+		t.Fatalf("DNSZones = %+v, want nil when include_dns is false", out2.DNSZones)
 	}
 }
 

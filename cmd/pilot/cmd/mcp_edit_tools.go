@@ -14,12 +14,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/kjelly/pilot/internal/groupvars"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/vaultfile"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -39,23 +37,27 @@ const (
 	castTerminalHeight = 30
 )
 
-// mcpVaultActionNames are editActionRegistry() entries that carry a
-// secret value — exposed via MCP as of Phase 5, but only under the
-// value_env-only policy validateNoLiteralVaultValues enforces, and with
-// their advertised capabilities schema tightened (capabilitiesHandler)
-// to drop the literal "value" field entirely.
-var mcpVaultActionNames = map[string]bool{
-	"add_vault_key":    true,
-	"set_vault_value":  true,
-	"delete_vault_key": true,
-	"save_vault":       true,
-	"discard_vault":    true,
+// mcpSecretActionNames are editActionRegistry() entries that carry a
+// secret value — exposed via MCP as of Phase 5 (vault) and Phase 6
+// increment 2 (roster password), but only under the value_env-only
+// policy validateNoLiteralSecretValues enforces, and with their
+// advertised capabilities schema tightened (capabilitiesHandler) to
+// drop the literal "value" field entirely. add_ssh_key/delete_ssh_key
+// are deliberately NOT here: ssh_keys.values are public keys, not
+// secrets, and the interactive TUI itself never masks them.
+var mcpSecretActionNames = map[string]bool{
+	"add_vault_key":     true,
+	"set_vault_value":   true,
+	"delete_vault_key":  true,
+	"save_vault":        true,
+	"discard_vault":     true,
+	"set_user_password": true,
 }
 
 // mcpAllowedActionNames is which editActionRegistry() action names MCP
-// currently exposes — every registered action, including the vault
-// ones (Phase 5); mcpAllowedActionNames alone doesn't enforce the
-// vault value_env-only rule, see validateNoLiteralVaultValues.
+// currently exposes — every registered action, including the secret
+// ones (Phase 5/6); mcpAllowedActionNames alone doesn't enforce the
+// value_env-only rule, see validateNoLiteralSecretValues.
 func mcpAllowedActionNames() map[string]bool {
 	allowed := make(map[string]bool)
 	for _, def := range editActionRegistry() {
@@ -64,16 +66,16 @@ func mcpAllowedActionNames() map[string]bool {
 	return allowed
 }
 
-// validateNoLiteralVaultValues rejects any scenario step targeting a
-// vault action that carries a literal Value — MCP callers must use
+// validateNoLiteralSecretValues rejects any scenario step targeting a
+// secret action that carries a literal Value — MCP callers must use
 // ValueEnv (an environment variable *name*) exclusively for secret
 // content, per spec's "MCP arguments" section. Called before any temp
 // copy (plan) or real mutation (apply) is attempted, so a rejected
 // scenario never gets far enough to type a literal secret into the
 // router at all.
-func validateNoLiteralVaultValues(scenario editScenario) error {
+func validateNoLiteralSecretValues(scenario editScenario) error {
 	for i, step := range scenario.Steps {
-		if !mcpVaultActionNames[step.Action] {
+		if !mcpSecretActionNames[step.Action] {
 			continue
 		}
 		if step.Value != "" {
@@ -114,11 +116,11 @@ type editMCPToolsOptions struct {
 func registerEditTools(server *mcp.Server, opts editMCPToolsOptions) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "pilot_edit_capabilities",
-		Description: "list the semantic edit actions this MCP server currently allows, reflecting real server policy (not just the global action registry)",
+		Description: "list the semantic *edit* (mutation) actions this MCP server currently allows, reflecting real server policy (not just the global action registry); read-only queries are served by pilot_edit_inspect, not by an action here",
 	}, capabilitiesHandler(opts))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "pilot_edit_inspect",
-		Description: "read the workspace's non-secret configuration summary an agent needs to plan semantic actions",
+		Description: "read-only query over the workspace's non-secret configuration: inventory hosts (name/IP/roles), role presets, and — via opt-in flags — group_vars, vault metadata, the FreeIPA roster (users, groups, hostgroups, HBAC rules, sudo rules, plus server-resolved effective_hbac_access/effective_sudo_access that answer \"which users can log in to / run sudo on which hosts\" with nested group membership already expanded), and DNS zones/records with resolved IPs",
 	}, inspectHandler(opts))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "pilot_edit_plan",
@@ -130,6 +132,7 @@ func registerEditTools(server *mcp.Server, opts editMCPToolsOptions) {
 			Description: "apply a previously-created plan's exact scenario to the real workspace through the real pilot edit TUI, under a mutation lock with automatic rollback on failure",
 		}, applyHandler(opts))
 	}
+	registerEditResources(server, opts)
 }
 
 // ---- pilot_edit_capabilities ------------------------------------------------
@@ -147,7 +150,7 @@ type capabilitiesOutput struct {
 // mcpValueOnlyOptionalFields is the Optional field list capabilities
 // advertises for a vault action whose registry Spec allows a literal
 // "value" — MCP's real contract only accepts value_env
-// (validateNoLiteralVaultValues), so the advertised schema is
+// (validateNoLiteralSecretValues), so the advertised schema is
 // tightened to match rather than echoing the more-permissive global
 // registry, per Core Invariant #1.
 var mcpValueOnlyOptionalFields = []string{"value_env"}
@@ -161,13 +164,18 @@ func capabilitiesHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[capabiliti
 				continue
 			}
 			spec := def.Spec
-			if mcpVaultActionNames[spec.Name] && len(spec.Optional) > 0 {
+			if mcpSecretActionNames[spec.Name] && len(spec.Optional) > 0 {
 				spec.Optional = mcpValueOnlyOptionalFields
 				spec.Description += " (MCP requires value_env; a literal value is rejected)"
 			}
 			actions = append(actions, spec)
 		}
-		unsupported := map[string]string{"deploy": "not part of pilot edit MCP"}
+		unsupported := map[string]string{
+			"deploy": "not part of pilot edit MCP",
+			// Every action here mutates; agents looking for a query/list
+			// action land on this map, so point them at the actual read path.
+			"query": "read-only queries (hosts, roster users/groups/HBAC/sudo, effective access, DNS) are served by the pilot_edit_inspect tool or the pilot:// resources, not a semantic action",
+		}
 		out := capabilitiesOutput{
 			SchemaVersion: editCapabilitiesSchemaVersion,
 			Workspace:     opts.Dir,
@@ -181,10 +189,15 @@ func capabilitiesHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[capabiliti
 
 // ---- pilot_edit_inspect ------------------------------------------------
 
+// inspectInput's flags are all opt-in extras, so every field carries
+// ,omitempty — without it the SDK's inferred input schema marks each
+// one required, and a client sending only {"include_roster": true}
+// gets rejected with "missing properties" instead of a result.
 type inspectInput struct {
-	IncludeGroupVars     bool `json:"include_group_vars"`
-	IncludeVaultMetadata bool `json:"include_vault_metadata"`
-	IncludeRoster        bool `json:"include_roster"`
+	IncludeGroupVars     bool `json:"include_group_vars,omitempty" jsonschema:"also return each group_vars/*.yml file's top-level keys and values"`
+	IncludeVaultMetadata bool `json:"include_vault_metadata,omitempty" jsonschema:"also return .vault/ file metadata (filename, encrypted, key names — never key values)"`
+	IncludeRoster        bool `json:"include_roster,omitempty" jsonschema:"also return the FreeIPA roster: users, groups, hostgroups, HBAC rules, sudo command groups and rules, plus effective_hbac_access/effective_sudo_access — per-rule lists of concrete usernames and host FQDNs with nested group/hostgroup membership already expanded, answering 'which users can log in to / run sudo on which hosts'"`
+	IncludeDNS           bool `json:"include_dns,omitempty" jsonschema:"also return FreeIPA DNS zones and records, each record's target_host cross-resolved to its inventory IP (resolved_ip)"`
 }
 
 type inspectHost struct {
@@ -223,14 +236,107 @@ type inspectRosterUser struct {
 	Enabled     bool   `json:"enabled"`
 }
 
+// inspectRosterGroup is one roster group's fields plus its *direct*
+// (non-transitive) membership references. See EffectiveHBACAccess/
+// EffectiveSudoAccess in internal/inventory for the transitively-resolved
+// view — a group's membership.groups can itself list other groups, so the
+// direct list here does not by itself answer "who is really in this group".
+type inspectRosterGroup struct {
+	Name         string   `json:"name"`
+	State        string   `json:"state"`
+	Category     string   `json:"category,omitempty"`
+	Type         string   `json:"type,omitempty"`
+	Description  string   `json:"description,omitempty"`
+	MemberUsers  []string `json:"member_users,omitempty"`
+	MemberGroups []string `json:"member_groups,omitempty"`
+}
+
+// inspectRosterHostgroup is inspectRosterGroup's hostgroup counterpart —
+// membership.hostgroups can itself nest further hostgroups.
+type inspectRosterHostgroup struct {
+	Name             string   `json:"name"`
+	State            string   `json:"state"`
+	Description      string   `json:"description,omitempty"`
+	MemberHosts      []string `json:"member_hosts,omitempty"`
+	MemberHostgroups []string `json:"member_hostgroups,omitempty"`
+}
+
+// inspectHBACRule is one HBAC rule's raw (non-expanded) fields — see
+// inspectOutput.EffectiveHBACAccess for the resolved view a caller should
+// use to answer "can user X reach host Y" without re-walking
+// subject/target group nesting itself.
+type inspectHBACRule struct {
+	Name             string   `json:"name"`
+	State            string   `json:"state"`
+	Enabled          bool     `json:"enabled"`
+	SubjectUsers     []string `json:"subject_users,omitempty"`
+	SubjectGroups    []string `json:"subject_groups,omitempty"`
+	AllHosts         bool     `json:"all_hosts"`
+	TargetHosts      []string `json:"target_hosts,omitempty"`
+	TargetHostgroups []string `json:"target_hostgroups,omitempty"`
+	Services         []string `json:"services,omitempty"`
+}
+
+type inspectSudoCommandGroup struct {
+	Name     string   `json:"name"`
+	Commands []string `json:"commands,omitempty"`
+}
+
+// inspectSudoRule mirrors inspectHBACRule — see
+// inspectOutput.EffectiveSudoAccess for the resolved view.
+type inspectSudoRule struct {
+	Name               string   `json:"name"`
+	State              string   `json:"state"`
+	SubjectUsers       []string `json:"subject_users,omitempty"`
+	SubjectGroups      []string `json:"subject_groups,omitempty"`
+	AllHosts           bool     `json:"all_hosts"`
+	TargetHosts        []string `json:"target_hosts,omitempty"`
+	TargetHostgroups   []string `json:"target_hostgroups,omitempty"`
+	AllCommands        bool     `json:"all_commands"`
+	AllowCommands      []string `json:"allow_commands,omitempty"`
+	AllowCommandGroups []string `json:"allow_command_groups,omitempty"`
+	DenyCommandGroups  []string `json:"deny_command_groups,omitempty"`
+}
+
+// inspectDNSRecord's ResolvedIP cross-references TargetHost against
+// inspectOutput.Hosts (the ansible inventory, always populated) so a
+// caller never needs a second lookup to turn a service name into an IP.
+// It is left empty when TargetHost doesn't match a known inventory host,
+// or when the record uses explicit Values instead of a target host.
+type inspectDNSRecord struct {
+	Name       string   `json:"name"`
+	Type       string   `json:"type"`
+	State      string   `json:"state"`
+	TTL        int      `json:"ttl,omitempty"`
+	Values     []string `json:"values,omitempty"`
+	TargetHost string   `json:"target_host,omitempty"`
+	ResolvedIP string   `json:"resolved_ip,omitempty"`
+}
+
+type inspectDNSZone struct {
+	Name                    string             `json:"name"`
+	State                   string             `json:"state"`
+	RecordsMode             string             `json:"records_mode,omitempty"`
+	AcknowledgeSplitHorizon bool               `json:"acknowledge_split_horizon,omitempty"`
+	Records                 []inspectDNSRecord `json:"records,omitempty"`
+}
+
 type inspectOutput struct {
-	WorkspaceRevision string                       `json:"workspace_revision"`
-	Hosts             []inspectHost                `json:"hosts"`
-	RolePresets       []inspectRolePreset          `json:"role_presets"`
-	GroupVars         map[string]map[string]string `json:"group_vars,omitempty"`
-	VaultFiles        []inspectVaultFile           `json:"vault_files,omitempty"`
-	RosterUsers       []inspectRosterUser          `json:"roster_users,omitempty"`
-	Completeness      validationSummary            `json:"completeness"`
+	WorkspaceRevision   string                          `json:"workspace_revision"`
+	Hosts               []inspectHost                   `json:"hosts"`
+	RolePresets         []inspectRolePreset             `json:"role_presets"`
+	GroupVars           map[string]map[string]string    `json:"group_vars,omitempty"`
+	VaultFiles          []inspectVaultFile              `json:"vault_files,omitempty"`
+	RosterUsers         []inspectRosterUser             `json:"roster_users,omitempty"`
+	RosterGroups        []inspectRosterGroup            `json:"roster_groups,omitempty"`
+	RosterHostgroups    []inspectRosterHostgroup        `json:"roster_hostgroups,omitempty"`
+	HBACRules           []inspectHBACRule               `json:"hbac_rules,omitempty"`
+	SudoCommandGroups   []inspectSudoCommandGroup       `json:"sudo_command_groups,omitempty"`
+	SudoRules           []inspectSudoRule               `json:"sudo_rules,omitempty"`
+	EffectiveHBACAccess []inventory.EffectiveHBACAccess `json:"effective_hbac_access,omitempty"`
+	EffectiveSudoAccess []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
+	DNSZones            []inspectDNSZone                `json:"dns_zones,omitempty"`
+	Completeness        validationSummary               `json:"completeness"`
 }
 
 // looksLikeRosterFile distinguishes the roster file from other
@@ -261,20 +367,7 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidScenario, Message: err.Error()}), inspectOutput{}, nil
 		}
 
-		var hosts []inspectHost
-		if data, err := os.ReadFile(filepath.Join(opts.Dir, "hosts.yml")); err == nil {
-			if hf, err := inventory.Parse(data); err == nil {
-				for _, h := range hf.Hosts {
-					hosts = append(hosts, inspectHost{
-						Name:        h.Name,
-						AnsibleHost: h.AnsibleHost,
-						AnsibleUser: h.AnsibleUser,
-						Env:         h.Env,
-						Roles:       h.Roles,
-					})
-				}
-			}
-		}
+		hosts := buildInspectHosts(opts.Dir)
 
 		var presets []inspectRolePreset
 		if loaded, _, err := loadRolePresets(opts.Dir); err == nil {
@@ -285,22 +378,7 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 
 		var groupVars map[string]map[string]string
 		if in.IncludeGroupVars {
-			groupVars = map[string]map[string]string{}
-			entries, err := managedFileEntries(opts.Dir)
-			if err == nil {
-				for _, e := range entries {
-					if filepath.Dir(e.RelPath) != "group_vars" {
-						continue
-					}
-					values := map[string]string{}
-					for _, entry := range groupvars.Parse(e.Content).Entries() {
-						if entry.Active {
-							values[entry.Key] = entry.Value
-						}
-					}
-					groupVars[filepath.Base(e.RelPath)] = values
-				}
-			}
+			groupVars = buildInspectGroupVars(opts.Dir)
 		}
 
 		var vaultFiles []inspectVaultFile
@@ -324,46 +402,14 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			}
 		}
 
-		var rosterUsers []inspectRosterUser
+		var roster inspectRosterData
 		if in.IncludeRoster {
-			entries, err := managedFileEntries(opts.Dir)
-			if err == nil {
-				for _, e := range entries {
-					if !e.IsSecret || !looksLikeRosterFile(e.Content) {
-						continue
-					}
-					fullPath := filepath.Join(opts.Dir, filepath.FromSlash(e.RelPath))
-					names, err := inventory.RosterUserNames(fullPath)
-					if err != nil {
-						continue // encrypted or unreadable — skip rather than fail the whole inspect call
-					}
-					for _, name := range names {
-						fields, found, err := inventory.RosterUser(fullPath, name)
-						if err != nil || !found {
-							continue
-						}
-						ru := inspectRosterUser{
-							Name:        name,
-							State:       rosterStringOr(fields, "state", "present"),
-							Email:       rosterStringValue(fields, "email"),
-							DisplayName: rosterStringValue(fields, "display_name"),
-							Enabled:     rosterBoolFieldOr(fields, "enabled", true),
-						}
-						if s := rosterIntValue(fields, "uid"); s != "" {
-							if n, err := strconv.Atoi(s); err == nil {
-								ru.UID = &n
-							}
-						}
-						if s := rosterIntValue(fields, "gid"); s != "" {
-							if n, err := strconv.Atoi(s); err == nil {
-								ru.GID = &n
-							}
-						}
-						rosterUsers = append(rosterUsers, ru)
-					}
-					break // only one roster file is expected per workspace
-				}
-			}
+			roster = buildInspectRoster(opts.Dir)
+		}
+
+		var dnsZones []inspectDNSZone
+		if in.IncludeDNS {
+			dnsZones = buildInspectDNSZones(opts.Dir, hosts)
 		}
 
 		var blocking []string
@@ -377,13 +423,21 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 		}
 
 		out := inspectOutput{
-			WorkspaceRevision: revision,
-			Hosts:             hosts,
-			RolePresets:       presets,
-			GroupVars:         groupVars,
-			VaultFiles:        vaultFiles,
-			RosterUsers:       rosterUsers,
-			Completeness:      validationSummary{Blocking: blocking},
+			WorkspaceRevision:   revision,
+			Hosts:               hosts,
+			RolePresets:         presets,
+			GroupVars:           groupVars,
+			VaultFiles:          vaultFiles,
+			RosterUsers:         roster.Users,
+			RosterGroups:        roster.Groups,
+			RosterHostgroups:    roster.Hostgroups,
+			HBACRules:           roster.HBACRules,
+			SudoCommandGroups:   roster.SudoCommandGroups,
+			SudoRules:           roster.SudoRules,
+			EffectiveHBACAccess: roster.EffectiveHBACAccess,
+			EffectiveSudoAccess: roster.EffectiveSudoAccess,
+			DNSZones:            dnsZones,
+			Completeness:        validationSummary{Blocking: blocking},
 		}
 		return nil, out, nil
 	}
@@ -421,7 +475,7 @@ func planHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[planInput, planOut
 				}), planOutput{}, nil
 			}
 		}
-		if err := validateNoLiteralVaultValues(in.Scenario); err != nil {
+		if err := validateNoLiteralSecretValues(in.Scenario); err != nil {
 			return toolErrorResult(err.(mcpToolError)), planOutput{}, nil
 		}
 
@@ -589,7 +643,7 @@ func applyHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[applyInput, apply
 		if err := json.Unmarshal(scenarioData, &scenario); err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrTargetNotFound, Message: fmt.Sprintf("parse plan scenario: %v", err)}), applyOutput{}, nil
 		}
-		if err := validateNoLiteralVaultValues(scenario); err != nil {
+		if err := validateNoLiteralSecretValues(scenario); err != nil {
 			// Defense-in-depth: scenario.redacted.json should already have
 			// Value cleared for vault steps (redactScenarioForAudit ran when
 			// the plan was written) — this only fires if that ever regresses

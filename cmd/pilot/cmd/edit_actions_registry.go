@@ -275,13 +275,258 @@ func editActionRegistry() []editActionDef {
 		{
 			Spec: semanticActionSpec{
 				Name:        "set_user_field",
-				Description: "set one non-secret roster user field (password.initial/ssh_keys.values are not yet supported)",
+				Description: "set one non-secret roster user field (see set_user_password/add_ssh_key/delete_ssh_key for password.initial/ssh_keys.values)",
 				Required:    []string{"user", "field", "value"},
 				Values:      map[string][]string{"field": {"state", "first", "last", "display_name", "email", "uid", "gid", "login_shell", "home_directory", "enabled"}},
 			},
 			Validate: validateSetUserField,
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
 				return d.setUserField(r, step.User, step.Field, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_user_password",
+				Description: "set a roster user's password.initial (secret; MCP requires value_env)",
+				Required:    []string{"user"},
+				Optional:    []string{"value", "value_env"},
+			},
+			Validate: validateSetUserPassword,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				value, secret, err := resolveValueOrEnv(step)
+				if err != nil {
+					return err
+				}
+				return d.setUserPassword(r, step.User, value, secret)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "add_ssh_key", Description: "append one ssh public key to a roster user's ssh_keys.values (not secret — a public key)", Required: []string{"user", "value"}},
+			Validate: validateUserSSHKeyAction("add_ssh_key"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.addSSHKey(r, step.User, step.Value)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "delete_ssh_key", Description: "remove one ssh public key from a roster user's ssh_keys.values (matched by exact value)", Required: []string{"user", "value"}},
+			Validate: validateUserSSHKeyAction("delete_ssh_key"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deleteSSHKey(r, step.User, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "create_group",
+				Description: "create a FreeIPA roster group (category determines the required name prefix)",
+				Required:    []string{"name", "category"},
+			},
+			Validate: validateCreateGroup,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createGroup(r, step.Name, step.Category)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_group_field",
+				Description: "set one roster group field (see set_group_members_users/set_group_members_groups for membership.users/membership.groups)",
+				Required:    []string{"name", "field", "value"},
+				Values:      map[string][]string{"field": {"type", "description", "gid", "membership.authoritative"}},
+			},
+			Validate: validateSetGroupField,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGroupField(r, step.Name, step.Field, step.Value)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_group_members_users", Description: "bulk-replace a roster group's membership.users (the whole set, not one item — matching the interactive checklist)", Required: []string{"name"}, Optional: []string{"users"}},
+			Validate: validateGroupNameOnly("set_group_members_users"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGroupMembersUsers(r, step.Name, step.Users)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_group_members_groups", Description: "bulk-replace a roster group's membership.groups (the whole set, not one item — matching the interactive checklist)", Required: []string{"name"}, Optional: []string{"groups"}},
+			Validate: validateGroupNameOnly("set_group_members_groups"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGroupMembersGroups(r, step.Name, step.Groups)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "create_hostgroup", Description: "create a FreeIPA roster hostgroup (a group of enrolled hosts, for HBAC targets)", Required: []string{"name"}},
+			Validate: validateEntityNameOnly("create_hostgroup"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createHostgroup(r, step.Name)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_hostgroup_field",
+				Description: "set one roster hostgroup field; membership.hosts's value is a comma-separated list of enrolled host FQDNs, matching the interactive text field exactly",
+				Required:    []string{"name", "field", "value"},
+				Values:      map[string][]string{"field": {"description", "membership.hosts"}},
+			},
+			Validate: validateHostgroupField,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setHostgroupField(r, step.Name, step.Field, step.Value)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "create_hbac_rule", Description: "create an HBAC login rule (access group -> hostgroup -> PAM service), replaying the full creation wizard in one step", Required: []string{"name"}, Optional: []string{"groups", "hostgroups", "services"}},
+			Validate: validateEntityNameOnly("create_hbac_rule"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createHBACRule(r, step.Name, step.Groups, step.Hostgroups, step.Services)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_hbac_groups", Description: "bulk-replace an HBAC rule's subjects.groups (the whole set — access-category groups only)", Required: []string{"name"}, Optional: []string{"groups"}},
+			Validate: validateEntityNameOnly("set_hbac_groups"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setHBACGroups(r, step.Name, step.Groups)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_hbac_targets", Description: "bulk-replace an HBAC rule's targets.hostgroups (the whole set)", Required: []string{"name"}, Optional: []string{"hostgroups"}},
+			Validate: validateEntityNameOnly("set_hbac_targets"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setHBACTargets(r, step.Name, step.Hostgroups)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_hbac_services", Description: "bulk-replace an HBAC rule's allowed PAM services (the whole set)", Required: []string{"name"}, Optional: []string{"services"}},
+			Validate: validateEntityNameOnly("set_hbac_services"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setHBACServices(r, step.Name, step.Services)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_hbac_disable_allow_all",
+				Description: "set the global hbac.disable_allow_all flag (idempotent — a no-op if already at the requested value)",
+				Required:    []string{"value"},
+				Values:      map[string][]string{"value": {"true", "false"}},
+			},
+			Validate: validateBoolValueAction("set_hbac_disable_allow_all"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setHBACDisableAllowAll(r, step.Value == "true")
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "create_sudo_command_group", Description: "create a reusable sudo command group; value is a comma-separated list of full sudo commands", Required: []string{"name"}, Optional: []string{"value"}},
+			Validate: validateEntityNameOnly("create_sudo_command_group"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createSudoCommandGroup(r, step.Name, step.Value)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_sudo_command_group_commands", Description: "bulk-replace a sudo command group's commands; value is a comma-separated list of full sudo commands", Required: []string{"name"}, Optional: []string{"value"}},
+			Validate: validateEntityNameOnly("set_sudo_command_group_commands"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setSudoCommandGroupCommands(r, step.Name, step.Value)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "create_sudo_rule", Description: "create a sudo rule (role group -> command groups/commands), replaying the full creation wizard in one step; value is a comma-separated list of extra full sudo commands", Required: []string{"name"}, Optional: []string{"groups", "command_groups", "value"}},
+			Validate: validateEntityNameOnly("create_sudo_rule"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createSudoRule(r, step.Name, step.Groups, step.CommandGroups, step.Value)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_sudo_rule_groups", Description: "bulk-replace a sudo rule's subjects.groups (the whole set — role-category groups only)", Required: []string{"name"}, Optional: []string{"groups"}},
+			Validate: validateEntityNameOnly("set_sudo_rule_groups"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setSudoRuleGroups(r, step.Name, step.Groups)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_sudo_rule_command_groups", Description: "bulk-replace a sudo rule's allow.command_groups (the whole set)", Required: []string{"name"}, Optional: []string{"command_groups"}},
+			Validate: validateEntityNameOnly("set_sudo_rule_command_groups"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setSudoRuleCommandGroups(r, step.Name, step.CommandGroups)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_sudo_rule_commands", Description: "bulk-replace a sudo rule's extra allow.commands; value is a comma-separated list of full sudo commands", Required: []string{"name"}, Optional: []string{"value"}},
+			Validate: validateEntityNameOnly("set_sudo_rule_commands"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setSudoRuleCommands(r, step.Name, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_sudo_rule_allow_mode",
+				Description: `set a sudo rule's command scope: "all" (dangerous — any command) or "restricted" (requires at least one command/command group already set)`,
+				Required:    []string{"name", "value"},
+				Values:      map[string][]string{"value": {"all", "restricted"}},
+			},
+			Validate: validateSudoRuleAllowMode,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setSudoRuleAllowMode(r, step.Name, step.Value)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "create_dns_manifest", Description: "create the minimal freeipa-dns manifest skeleton (only way to produce the file at all)", Required: []string{"domain", "realm", "server"}},
+			Validate: validateCreateDNSManifest,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createDNSManifest(r, step.Domain, step.Realm, step.Server)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "create_dns_zone", Description: "create a freeipa-dns zone (absolute FQDN, e.g. example.com.)", Required: []string{"zone"}},
+			Validate: validateDNSZoneNameOnly("create_dns_zone"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createDNSZone(r, step.Zone)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_dns_zone_field",
+				Description: "set one freeipa-dns zone field; state:absent is a safe declarative delete request — real deletion happens later at apply time behind its own allow_zone_delete/confirm_dns_zone_delete gates",
+				Required:    []string{"zone", "field", "value"},
+				Values:      map[string][]string{"field": {"state", "records_mode", "acknowledge_split_horizon"}},
+			},
+			Validate: validateSetDNSZoneField,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setDNSZoneField(r, step.Zone, step.Field, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "create_dns_record",
+				Description: `create an A/AAAA/CNAME record; exactly one of target_host (resolves an inventory host's ansible_host) or values (explicit list) must be set — CNAME always requires values (a single full FQDN) and rejects target_host`,
+				Required:    []string{"zone", "record_type", "record_name"},
+				Optional:    []string{"target_host", "values"},
+				Values:      map[string][]string{"record_type": {"A", "AAAA", "CNAME"}},
+			},
+			Validate: validateCreateDNSRecord,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createDNSRecord(r, step.Zone, step.RecordType, step.RecordName, step.TargetHost, step.Values)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_dns_record_field",
+				Description: "set one freeipa-dns record field (see set_dns_record_values/set_dns_record_target_host for the value-source field); state:absent only affects this record's own type, not other types at the same owner name",
+				Required:    []string{"zone", "record_name", "record_type", "field", "value"},
+				Values:      map[string][]string{"field": {"state", "ttl"}},
+			},
+			Validate: validateSetDNSRecordField,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setDNSRecordField(r, step.Zone, step.RecordName, step.RecordType, step.Field, step.Value)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_dns_record_values", Description: "bulk-replace a record's explicit values (clears target.inventory_host)", Required: []string{"zone", "record_name", "record_type"}, Optional: []string{"values"}},
+			Validate: validateDNSRecordIdentityOnly("set_dns_record_values"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setDNSRecordValues(r, step.Zone, step.RecordName, step.RecordType, step.Values)
+			},
+		},
+		{
+			Spec:     semanticActionSpec{Name: "set_dns_record_target_host", Description: "set a record's target.inventory_host, resolved against hosts.yml at apply time (clears explicit values); not valid for CNAME", Required: []string{"zone", "record_name", "record_type", "target_host"}},
+			Validate: validateSetDNSRecordTargetHost,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setDNSRecordTargetHost(r, step.Zone, step.RecordName, step.RecordType, step.TargetHost)
 			},
 		},
 		{
@@ -382,6 +627,298 @@ func validateSetUserField(step editAction) error {
 		if step.Value != "true" && step.Value != "false" {
 			return fmt.Errorf(`enabled must be "true" or "false"`)
 		}
+	}
+	return nil
+}
+
+func validateSetUserPassword(step editAction) error {
+	if strings.TrimSpace(step.User) == "" {
+		return fmt.Errorf("set_user_password requires user")
+	}
+	return validateValueOrEnv(step, "set_user_password")
+}
+
+func validateUserSSHKeyAction(name string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.User) == "" {
+			return fmt.Errorf("%s requires user", name)
+		}
+		if strings.TrimSpace(step.Value) == "" {
+			return fmt.Errorf("%s requires value", name)
+		}
+		return nil
+	}
+}
+
+func validateCreateGroup(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("create_group requires name")
+	}
+	if hasSecretName(step.Name) {
+		return fmt.Errorf("secret-like group names are not allowed")
+	}
+	valid := false
+	for _, c := range rosterGroupCategories {
+		if step.Category == c.Category {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return fmt.Errorf("unsupported group category %q", step.Category)
+	}
+	return nil
+}
+
+func validateSetGroupField(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("set_group_field requires name")
+	}
+	if strings.TrimSpace(step.Field) == "" {
+		return fmt.Errorf("set_group_field requires field")
+	}
+	spec, _ := semanticActionSpecFor("set_group_field")
+	allowed := false
+	for _, field := range spec.Values["field"] {
+		if step.Field == field {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("unsupported group field")
+	}
+	switch step.Field {
+	case "type":
+		valid := false
+		for _, c := range rosterGroupTypeChoices {
+			if step.Value == c {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("unsupported type value %q", step.Value)
+		}
+	case "gid":
+		if _, err := strconv.Atoi(step.Value); err != nil {
+			return fmt.Errorf("gid must be an integer")
+		}
+	case "membership.authoritative":
+		if step.Value != "true" && step.Value != "false" {
+			return fmt.Errorf(`membership.authoritative must be "true" or "false"`)
+		}
+	}
+	return nil
+}
+
+func validateGroupNameOnly(name string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.Name) == "" {
+			return fmt.Errorf("%s requires name", name)
+		}
+		return nil
+	}
+}
+
+// validateEntityNameOnly is validateGroupNameOnly's shared counterpart
+// for hostgroup/HBAC/sudo entities — kept as a distinct name from the
+// group-specific one since it's used across several unrelated entity
+// kinds (hostgroups, HBAC rules, sudo command groups, sudo rules), not
+// just groups.
+func validateEntityNameOnly(name string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.Name) == "" {
+			return fmt.Errorf("%s requires name", name)
+		}
+		return nil
+	}
+}
+
+func validateHostgroupField(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("set_hostgroup_field requires name")
+	}
+	if strings.TrimSpace(step.Field) == "" {
+		return fmt.Errorf("set_hostgroup_field requires field")
+	}
+	spec, _ := semanticActionSpecFor("set_hostgroup_field")
+	for _, field := range spec.Values["field"] {
+		if step.Field == field {
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported hostgroup field")
+}
+
+func validateBoolValueAction(name string) func(editAction) error {
+	return func(step editAction) error {
+		if step.Value != "true" && step.Value != "false" {
+			return fmt.Errorf(`%s requires value "true" or "false"`, name)
+		}
+		return nil
+	}
+}
+
+func validateSudoRuleAllowMode(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("set_sudo_rule_allow_mode requires name")
+	}
+	if step.Value != "all" && step.Value != "restricted" {
+		return fmt.Errorf(`set_sudo_rule_allow_mode requires value "all" or "restricted"`)
+	}
+	return nil
+}
+
+func validateCreateDNSManifest(step editAction) error {
+	if strings.TrimSpace(step.Domain) == "" {
+		return fmt.Errorf("create_dns_manifest requires domain")
+	}
+	if strings.TrimSpace(step.Realm) == "" {
+		return fmt.Errorf("create_dns_manifest requires realm")
+	}
+	if strings.TrimSpace(step.Server) == "" {
+		return fmt.Errorf("create_dns_manifest requires server")
+	}
+	return nil
+}
+
+func validateDNSZoneNameOnly(name string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.Zone) == "" {
+			return fmt.Errorf("%s requires zone", name)
+		}
+		return nil
+	}
+}
+
+func validateSetDNSZoneField(step editAction) error {
+	if strings.TrimSpace(step.Zone) == "" {
+		return fmt.Errorf("set_dns_zone_field requires zone")
+	}
+	if strings.TrimSpace(step.Field) == "" {
+		return fmt.Errorf("set_dns_zone_field requires field")
+	}
+	spec, _ := semanticActionSpecFor("set_dns_zone_field")
+	allowed := false
+	for _, field := range spec.Values["field"] {
+		if step.Field == field {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("unsupported dns zone field")
+	}
+	switch step.Field {
+	case "state":
+		if step.Value != "present" && step.Value != "absent" {
+			return fmt.Errorf(`state must be "present" or "absent"`)
+		}
+	case "records_mode":
+		if step.Value != "merge" && step.Value != "authoritative" {
+			return fmt.Errorf(`records_mode must be "merge" or "authoritative"`)
+		}
+	case "acknowledge_split_horizon":
+		if step.Value != "true" && step.Value != "false" {
+			return fmt.Errorf(`acknowledge_split_horizon must be "true" or "false"`)
+		}
+	}
+	return nil
+}
+
+func validateCreateDNSRecord(step editAction) error {
+	if strings.TrimSpace(step.Zone) == "" {
+		return fmt.Errorf("create_dns_record requires zone")
+	}
+	if strings.TrimSpace(step.RecordName) == "" {
+		return fmt.Errorf("create_dns_record requires record_name")
+	}
+	valid := false
+	for _, t := range dnsRecordTypeChoices {
+		if step.RecordType == t {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return fmt.Errorf("unsupported record_type %q", step.RecordType)
+	}
+	hasTarget := step.TargetHost != ""
+	hasValues := len(step.Values) > 0
+	if step.RecordType == "CNAME" {
+		if step.TargetHost != "" {
+			return fmt.Errorf("create_dns_record: CNAME records cannot use target_host")
+		}
+		if !hasValues {
+			return fmt.Errorf("create_dns_record: CNAME requires values")
+		}
+		return nil
+	}
+	if hasTarget == hasValues {
+		return fmt.Errorf("create_dns_record requires exactly one of target_host or values")
+	}
+	return nil
+}
+
+func validateSetDNSRecordField(step editAction) error {
+	if strings.TrimSpace(step.Zone) == "" {
+		return fmt.Errorf("set_dns_record_field requires zone")
+	}
+	if strings.TrimSpace(step.RecordName) == "" {
+		return fmt.Errorf("set_dns_record_field requires record_name")
+	}
+	if strings.TrimSpace(step.RecordType) == "" {
+		return fmt.Errorf("set_dns_record_field requires record_type")
+	}
+	spec, _ := semanticActionSpecFor("set_dns_record_field")
+	allowed := false
+	for _, field := range spec.Values["field"] {
+		if step.Field == field {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("unsupported dns record field")
+	}
+	switch step.Field {
+	case "state":
+		if step.Value != "present" && step.Value != "absent" {
+			return fmt.Errorf(`state must be "present" or "absent"`)
+		}
+	case "ttl":
+		if _, err := strconv.Atoi(step.Value); err != nil {
+			return fmt.Errorf("ttl must be an integer")
+		}
+	}
+	return nil
+}
+
+func validateDNSRecordIdentityOnly(name string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.Zone) == "" {
+			return fmt.Errorf("%s requires zone", name)
+		}
+		if strings.TrimSpace(step.RecordName) == "" {
+			return fmt.Errorf("%s requires record_name", name)
+		}
+		if strings.TrimSpace(step.RecordType) == "" {
+			return fmt.Errorf("%s requires record_type", name)
+		}
+		return nil
+	}
+}
+
+func validateSetDNSRecordTargetHost(step editAction) error {
+	if err := validateDNSRecordIdentityOnly("set_dns_record_target_host")(step); err != nil {
+		return err
+	}
+	if step.RecordType == "CNAME" {
+		return fmt.Errorf("set_dns_record_target_host: CNAME records cannot use target_host")
+	}
+	if strings.TrimSpace(step.TargetHost) == "" {
+		return fmt.Errorf("set_dns_record_target_host requires target_host")
 	}
 	return nil
 }

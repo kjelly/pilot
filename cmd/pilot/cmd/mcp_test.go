@@ -102,7 +102,7 @@ func TestMCPServe_Integration_CapabilitiesInspectPlan(t *testing.T) {
 	// schema — no action may advertise a literal "value" field.
 	seenVaultAction := map[string]bool{}
 	for _, a := range caps.Actions {
-		if !mcpVaultActionNames[a.Name] {
+		if !mcpSecretActionNames[a.Name] {
 			continue
 		}
 		seenVaultAction[a.Name] = true
@@ -112,7 +112,7 @@ func TestMCPServe_Integration_CapabilitiesInspectPlan(t *testing.T) {
 			}
 		}
 	}
-	for name := range mcpVaultActionNames {
+	for name := range mcpSecretActionNames {
 		if !seenVaultAction[name] {
 			t.Fatalf("expected vault action %q to be listed in capabilities over the real MCP wire", name)
 		}
@@ -395,5 +395,347 @@ func TestMCPServe_Integration_RosterPlanApplyRoundTrip(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected inspect to list user dana, got %+v", inspect.RosterUsers)
+	}
+}
+
+// TestMCPServe_Integration_RosterPasswordAndSSHKeysRoundTrip drives a
+// real set_user_password (Phase 6 increment 2, value_env-only) plus
+// add_ssh_key/delete_ssh_key (not secret — public keys) through the
+// real spawned pilot mcp serve binary, mirroring
+// TestMCPServe_Integration_VaultPlanApplyRoundTrip's sentinel-scan style
+// for the roster password specifically.
+func TestMCPServe_Integration_RosterPasswordAndSSHKeysRoundTrip(t *testing.T) {
+	binary := buildPilotBinary(t)
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+	writeMinimalRosterFixture(t, dir)
+	const envVar = "PILOT_TEST_ROSTER_PASSWORD_SENTINEL_MCP_BINARY"
+
+	rev, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-roster-password-integration-test", Version: "0.0.1"}, nil)
+	cmd := exec.Command(binary, "mcp", "serve", "--dir", dir, "--audit-dir", auditDir, "--allow-write")
+	cmd.Env = append(os.Environ(), envVar+"="+vaultSentinelValue)
+	transport := &mcp.CommandTransport{Command: cmd}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	scenario := editScenario{Version: 1, Title: "roster password + ssh key mcp round trip", Steps: []editAction{
+		{Action: "create_user", User: "erin"},
+		{Action: "set_user_password", User: "erin", ValueEnv: envVar},
+		{Action: "add_ssh_key", User: "erin", Value: "ssh-ed25519 AAAAERIN erin@laptop"},
+	}}
+	planArgsJSON, _ := json.Marshal(planInput{BaseRevision: rev, Scenario: scenario})
+	var planArgsMap map[string]any
+	_ = json.Unmarshal(planArgsJSON, &planArgsMap)
+	planResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_plan", Arguments: planArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_plan) error = %v", err)
+	}
+	if planResult.IsError {
+		t.Fatalf("pilot_edit_plan returned an error: %+v", planResult.Content)
+	}
+	plan := decodeStructured[planOutput](t, planResult)
+
+	planResultRaw, _ := json.Marshal(planResult)
+	assertSentinelAbsent(t, "plan CallToolResult (raw)", string(planResultRaw), vaultSentinelValue)
+
+	applyArgsJSON, _ := json.Marshal(applyInput{PlanID: plan.PlanID, ExpectedRevision: rev})
+	var applyArgsMap map[string]any
+	_ = json.Unmarshal(applyArgsJSON, &applyArgsMap)
+	applyResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_apply", Arguments: applyArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_apply) error = %v", err)
+	}
+	if applyResult.IsError {
+		t.Fatalf("pilot_edit_apply returned an error: %+v", applyResult.Content)
+	}
+	applied := decodeStructured[applyOutput](t, applyResult)
+	if applied.Result != "applied" || !applied.RedactedDiff {
+		t.Fatalf("applied = %+v, want result=applied redacted_diff=true", applied)
+	}
+
+	applyResultRaw, _ := json.Marshal(applyResult)
+	assertSentinelAbsent(t, "apply CallToolResult (raw)", string(applyResultRaw), vaultSentinelValue)
+
+	rosterData, err := os.ReadFile(filepath.Join(dir, ".vault", "ipa-identity.yaml"))
+	if err != nil {
+		t.Fatalf("expected the real roster file to exist after apply: %v", err)
+	}
+	if !strings.Contains(string(rosterData), vaultSentinelValue) {
+		t.Fatal("expected the real roster file to contain the sentinel password value")
+	}
+	if !strings.Contains(string(rosterData), "ssh-ed25519 AAAAERIN erin@laptop") {
+		t.Fatal("expected the real roster file to contain the (non-secret) ssh key")
+	}
+
+	for _, root := range []string{plan.Audit.Directory, applied.Audit.Directory} {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			assertSentinelAbsent(t, path, string(data), vaultSentinelValue)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+}
+
+// TestMCPServe_Integration_RosterAccessAndSudoRoundTrip drives the full
+// Phase 6 increment 3 relational-entity surface (groups, hostgroups,
+// HBAC rules, sudo command groups, sudo rules) through the real spawned
+// pilot mcp serve binary in one scenario, proving the whole new action
+// set works end to end through the real MCP client/plan/apply pipeline,
+// not just the in-process driver tests.
+func TestMCPServe_Integration_RosterAccessAndSudoRoundTrip(t *testing.T) {
+	binary := buildPilotBinary(t)
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+	writeMinimalRosterFixture(t, dir)
+
+	rev, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-roster-access-integration-test", Version: "0.0.1"}, nil)
+	transport := &mcp.CommandTransport{Command: exec.Command(binary, "mcp", "serve", "--dir", dir, "--audit-dir", auditDir, "--allow-write")}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	scenario := editScenario{Version: 1, Title: "roster access + sudo mcp round trip", Steps: []editAction{
+		{Action: "create_group", Name: "access-web", Category: "access"},
+		{Action: "create_hostgroup", Name: "webhosts"},
+		{Action: "create_hbac_rule", Name: "web-login", Groups: []string{"access-web"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
+		{Action: "create_group", Name: "role-web", Category: "role"},
+		{Action: "create_sudo_command_group", Name: "web-restart", Value: "systemctl restart nginx"},
+		{Action: "create_sudo_rule", Name: "web-sudo", Groups: []string{"role-web"}, CommandGroups: []string{"web-restart"}},
+	}}
+	planArgsJSON, _ := json.Marshal(planInput{BaseRevision: rev, Scenario: scenario})
+	var planArgsMap map[string]any
+	_ = json.Unmarshal(planArgsJSON, &planArgsMap)
+	planResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_plan", Arguments: planArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_plan) error = %v", err)
+	}
+	if planResult.IsError {
+		t.Fatalf("pilot_edit_plan returned an error: %+v", planResult.Content)
+	}
+	plan := decodeStructured[planOutput](t, planResult)
+
+	applyArgsJSON, _ := json.Marshal(applyInput{PlanID: plan.PlanID, ExpectedRevision: rev})
+	var applyArgsMap map[string]any
+	_ = json.Unmarshal(applyArgsJSON, &applyArgsMap)
+	applyResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_apply", Arguments: applyArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_apply) error = %v", err)
+	}
+	if applyResult.IsError {
+		t.Fatalf("pilot_edit_apply returned an error: %+v", applyResult.Content)
+	}
+	applied := decodeStructured[applyOutput](t, applyResult)
+	if applied.Result != "applied" {
+		t.Fatalf("applied = %+v, want result=applied", applied)
+	}
+
+	rosterData, err := os.ReadFile(filepath.Join(dir, ".vault", "ipa-identity.yaml"))
+	if err != nil {
+		t.Fatalf("expected the real roster file to exist after apply: %v", err)
+	}
+	for _, want := range []string{"access-web", "webhosts", "web-login", "role-web", "web-restart", "web-sudo"} {
+		if !strings.Contains(string(rosterData), want) {
+			t.Fatalf("expected the real roster file to contain %q, got:\n%s", want, rosterData)
+		}
+	}
+
+	// The general-mechanism check this increment adds: pilot_edit_inspect
+	// with include_roster must surface the flat entity dump plus the
+	// server-resolved effective_hbac_access/effective_sudo_access views
+	// over the real MCP wire, not just in-process.
+	inspectArgsJSON, _ := json.Marshal(inspectInput{IncludeRoster: true})
+	var inspectArgsMap map[string]any
+	_ = json.Unmarshal(inspectArgsJSON, &inspectArgsMap)
+	inspectResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_inspect", Arguments: inspectArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_inspect) error = %v", err)
+	}
+	if inspectResult.IsError {
+		t.Fatalf("pilot_edit_inspect returned an error: %+v", inspectResult.Content)
+	}
+	inspect := decodeStructured[inspectOutput](t, inspectResult)
+	if len(inspect.HBACRules) != 1 || inspect.HBACRules[0].Name != "web-login" {
+		t.Fatalf("HBACRules = %+v, want exactly rule web-login", inspect.HBACRules)
+	}
+	if len(inspect.SudoRules) != 1 || inspect.SudoRules[0].Name != "web-sudo" {
+		t.Fatalf("SudoRules = %+v, want exactly rule web-sudo", inspect.SudoRules)
+	}
+	if len(inspect.EffectiveHBACAccess) != 1 || inspect.EffectiveHBACAccess[0].Rule != "web-login" {
+		t.Fatalf("EffectiveHBACAccess = %+v, want exactly rule web-login", inspect.EffectiveHBACAccess)
+	}
+	if len(inspect.EffectiveSudoAccess) != 1 || inspect.EffectiveSudoAccess[0].Rule != "web-sudo" {
+		t.Fatalf("EffectiveSudoAccess = %+v, want exactly rule web-sudo", inspect.EffectiveSudoAccess)
+	}
+
+	// The same data must also be reachable as MCP resources — agents that
+	// probe resources/list instead of guessing the right tool must not
+	// dead-end on "No resources found" (real failure observed 2026-08-05).
+	listed, err := session.ListResources(ctx, &mcp.ListResourcesParams{})
+	if err != nil {
+		t.Fatalf("ListResources() error = %v", err)
+	}
+	wantURIs := map[string]bool{
+		"pilot://hosts":                   false,
+		"pilot://roster":                  false,
+		"pilot://roster/effective-access": false,
+		"pilot://dns":                     false,
+	}
+	for _, res := range listed.Resources {
+		if _, ok := wantURIs[res.URI]; ok {
+			wantURIs[res.URI] = true
+		}
+	}
+	for uri, seen := range wantURIs {
+		if !seen {
+			t.Fatalf("resources/list is missing %s; got %+v", uri, listed.Resources)
+		}
+	}
+
+	readResult, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "pilot://roster/effective-access"})
+	if err != nil {
+		t.Fatalf("ReadResource(pilot://roster/effective-access) error = %v", err)
+	}
+	if len(readResult.Contents) != 1 || readResult.Contents[0].MIMEType != "application/json" {
+		t.Fatalf("ReadResource contents = %+v, want one application/json entry", readResult.Contents)
+	}
+	var access effectiveAccessResource
+	if err := json.Unmarshal([]byte(readResult.Contents[0].Text), &access); err != nil {
+		t.Fatalf("unmarshal effective-access resource: %v\n%s", err, readResult.Contents[0].Text)
+	}
+	if len(access.EffectiveSudoAccess) != 1 || access.EffectiveSudoAccess[0].Rule != "web-sudo" {
+		t.Fatalf("resource effective_sudo_access = %+v, want exactly rule web-sudo", access.EffectiveSudoAccess)
+	}
+	if len(access.EffectiveHBACAccess) != 1 || access.EffectiveHBACAccess[0].Rule != "web-login" {
+		t.Fatalf("resource effective_hbac_access = %+v, want exactly rule web-login", access.EffectiveHBACAccess)
+	}
+}
+
+// TestMCPServe_Integration_DNSManifestRoundTrip drives the full Phase 6
+// increment 4 freeipa-dns manifest surface (create manifest, create
+// zone, create records both by inventory-host resolution and by
+// explicit CNAME values) through the real spawned pilot mcp serve
+// binary, proving it works end to end through the real MCP client/
+// plan/apply pipeline.
+func TestMCPServe_Integration_DNSManifestRoundTrip(t *testing.T) {
+	binary := buildPilotBinary(t)
+	dir := t.TempDir()
+	auditDir := t.TempDir()
+	writeDNSTestHostsFile(t, dir)
+
+	rev, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatalf("computeWorkspaceRevision() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-dns-integration-test", Version: "0.0.1"}, nil)
+	transport := &mcp.CommandTransport{Command: exec.Command(binary, "mcp", "serve", "--dir", dir, "--audit-dir", auditDir, "--allow-write")}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	scenario := editScenario{Version: 1, Title: "dns manifest mcp round trip", Steps: []editAction{
+		{Action: "create_dns_manifest", Domain: "ipa.pilot.internal", Realm: "IPA.PILOT.INTERNAL", Server: "ipa1.ipa.pilot.internal"},
+		{Action: "create_dns_zone", Zone: "svc.pilot.internal."},
+		{Action: "create_dns_record", Zone: "svc.pilot.internal.", RecordType: "A", RecordName: "nexus", TargetHost: "nexus"},
+		{Action: "create_dns_record", Zone: "svc.pilot.internal.", RecordType: "CNAME", RecordName: "www", Values: []string{"nexus.svc.pilot.internal."}},
+	}}
+	planArgsJSON, _ := json.Marshal(planInput{BaseRevision: rev, Scenario: scenario})
+	var planArgsMap map[string]any
+	_ = json.Unmarshal(planArgsJSON, &planArgsMap)
+	planResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_plan", Arguments: planArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_plan) error = %v", err)
+	}
+	if planResult.IsError {
+		t.Fatalf("pilot_edit_plan returned an error: %+v", planResult.Content)
+	}
+	plan := decodeStructured[planOutput](t, planResult)
+
+	applyArgsJSON, _ := json.Marshal(applyInput{PlanID: plan.PlanID, ExpectedRevision: rev})
+	var applyArgsMap map[string]any
+	_ = json.Unmarshal(applyArgsJSON, &applyArgsMap)
+	applyResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_apply", Arguments: applyArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_apply) error = %v", err)
+	}
+	if applyResult.IsError {
+		t.Fatalf("pilot_edit_apply returned an error: %+v", applyResult.Content)
+	}
+	applied := decodeStructured[applyOutput](t, applyResult)
+	if applied.Result != "applied" {
+		t.Fatalf("applied = %+v, want result=applied", applied)
+	}
+
+	dnsData, err := os.ReadFile(filepath.Join(dir, "freeipa-dns.yaml"))
+	if err != nil {
+		t.Fatalf("expected the real freeipa-dns.yaml to exist after apply: %v", err)
+	}
+	for _, want := range []string{"svc.pilot.internal.", "nexus", "www", "nexus.svc.pilot.internal."} {
+		if !strings.Contains(string(dnsData), want) {
+			t.Fatalf("expected the real freeipa-dns.yaml to contain %q, got:\n%s", want, dnsData)
+		}
+	}
+
+	// The general-mechanism check this increment adds: pilot_edit_inspect
+	// with include_dns must cross-resolve a record's target_host into its
+	// inventory IP over the real MCP wire, not just in-process.
+	inspectArgsJSON, _ := json.Marshal(inspectInput{IncludeDNS: true})
+	var inspectArgsMap map[string]any
+	_ = json.Unmarshal(inspectArgsJSON, &inspectArgsMap)
+	inspectResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_inspect", Arguments: inspectArgsMap})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_edit_inspect) error = %v", err)
+	}
+	if inspectResult.IsError {
+		t.Fatalf("pilot_edit_inspect returned an error: %+v", inspectResult.Content)
+	}
+	inspect := decodeStructured[inspectOutput](t, inspectResult)
+	if len(inspect.DNSZones) != 1 || inspect.DNSZones[0].Name != "svc.pilot.internal." {
+		t.Fatalf("DNSZones = %+v, want exactly zone svc.pilot.internal.", inspect.DNSZones)
+	}
+	byName := map[string]inspectDNSRecord{}
+	for _, r := range inspect.DNSZones[0].Records {
+		byName[r.Name] = r
+	}
+	if nexus, ok := byName["nexus"]; !ok || nexus.ResolvedIP != "192.168.122.81" {
+		t.Fatalf("nexus record = %+v, want resolved_ip=192.168.122.81", nexus)
+	}
+	if www, ok := byName["www"]; !ok || www.ResolvedIP != "" {
+		t.Fatalf("www record = %+v, want no resolved_ip (explicit values, not a target host)", www)
 	}
 }
