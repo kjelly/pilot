@@ -14,7 +14,7 @@ import (
 // reusable command groups and rules that grant those commands to role groups.
 func pushRosterSudoMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	items := []string{"Command groups — 可重用的 sudo 指令清單", "Sudo rules — role group → commands", "↩  返回"}
-	return r.transitionTo(newSelectModel("Sudo authorization", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.sudo.top", "Sudo authorization", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == 2 {
 			return pushRosterManager(r, dir, path, "")
@@ -37,7 +37,7 @@ func pushRosterSudoCommandGroupsMenu(r *editRouterModel, dir, path, banner strin
 		items = append(items, "⌘ "+name)
 	}
 	items = append(items, "➕ 新增 command group", "↩  返回")
-	return r.transitionTo(newSelectModel("Sudo command groups", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.sudo.command_groups.list", "Sudo command groups", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == len(items)-1 {
 			return pushRosterSudoMenu(r, dir, path, "")
@@ -50,7 +50,7 @@ func pushRosterSudoCommandGroupsMenu(r *editRouterModel, dir, path, banner strin
 }
 
 func pushRosterAddSudoCommandGroupName(r *editRouterModel, dir, path string) tea.Cmd {
-	return r.transitionTo(newTextInputModel("sudo command group 名稱", "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.sudo.command_group.add_name", "sudo command group 名稱", "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterSudoCommandGroupsMenu(r, dir, path, "")
@@ -60,7 +60,7 @@ func pushRosterAddSudoCommandGroupName(r *editRouterModel, dir, path string) tea
 }
 
 func pushRosterAddSudoCommandGroupCommands(r *editRouterModel, dir, path, name string) tea.Cmd {
-	return r.transitionTo(newTextInputModel("允許的完整 sudo 指令（逗號分隔）", "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.sudo.command_group.add_commands", "允許的完整 sudo 指令（逗號分隔）", "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterSudoCommandGroupsMenu(r, dir, path, "")
@@ -96,7 +96,7 @@ func pushRosterSudoCommandGroupDetail(r *editRouterModel, dir, path, name, banne
 		fmt.Sprintf("commands（%d 條；逗號分隔）", len(rosterStringSlice(f, "commands"))),
 		"↩  返回",
 	}
-	return r.transitionTo(newSelectModel("Sudo command group "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.sudo.command_group.detail", "Sudo command group "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == 2 {
 			return pushRosterSudoCommandGroupsMenu(r, dir, path, "")
@@ -109,7 +109,7 @@ func pushRosterSudoCommandGroupDetail(r *editRouterModel, dir, path, name, banne
 }
 
 func pushRosterSudoCommandGroupCommands(r *editRouterModel, dir, path, name string, current []string) tea.Cmd {
-	return r.transitionTo(newTextInputModel("允許的完整 sudo 指令（逗號分隔）", strings.Join(current, ", "), nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.sudo.command_group.commands", "允許的完整 sudo 指令（逗號分隔）", strings.Join(current, ", "), nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterSudoCommandGroupDetail(r, dir, path, name, "")
@@ -154,7 +154,7 @@ func pushRosterSudoRulesMenu(r *editRouterModel, dir, path, banner string) tea.C
 		items = append(items, "⚙ "+name)
 	}
 	items = append(items, "➕ 新增 sudo rule", "↩  返回")
-	return r.transitionTo(newSelectModel("Sudo rules", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.sudo.rules.list", "Sudo rules", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == len(items)-1 {
 			return pushRosterSudoMenu(r, dir, path, "")
@@ -167,7 +167,7 @@ func pushRosterSudoRulesMenu(r *editRouterModel, dir, path, banner string) tea.C
 }
 
 func pushRosterAddSudoRuleName(r *editRouterModel, dir, path string) tea.Cmd {
-	return r.transitionTo(newTextInputModel("sudo rule 名稱", "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.sudo.rule.add_name", "sudo rule 名稱", "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterSudoRulesMenu(r, dir, path, "")
@@ -200,7 +200,7 @@ func pushRosterAddSudoRuleGroups(r *editRouterModel, dir, path, name string) tea
 		r.err = err
 		return nil
 	}
-	return checklist(r, "可使用 sudo 的 role group", groups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
+	return checklist(r, "roster.sudo.rule.add_groups", "可使用 sudo 的 role group", groups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterAddSudoRuleCommandGroups(r, dir, path, name, selected)
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterSudoRulesMenu(r, dir, path, "") })
 }
@@ -211,13 +211,13 @@ func pushRosterAddSudoRuleCommandGroups(r *editRouterModel, dir, path, name stri
 		r.err = err
 		return nil
 	}
-	return checklist(r, "允許的 command group", choices, nil, func(r *editRouterModel, selected []string) tea.Cmd {
+	return checklist(r, "roster.sudo.rule.add_command_groups", "允許的 command group", choices, nil, func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterAddSudoRuleCommands(r, dir, path, name, groups, selected)
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterSudoRulesMenu(r, dir, path, "") })
 }
 
 func pushRosterAddSudoRuleCommands(r *editRouterModel, dir, path, name string, groups, commandGroups []string) tea.Cmd {
-	return r.transitionTo(newTextInputModel("額外允許的完整 sudo 指令（逗號分隔；留空 = 只用 command group）", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.sudo.rule.add_commands", "額外允許的完整 sudo 指令（逗號分隔；留空 = 只用 command group）", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterSudoRulesMenu(r, dir, path, "")
@@ -278,7 +278,7 @@ func pushRosterSudoRuleDetail(r *editRouterModel, dir, path, name, banner string
 		fmt.Sprintf("allow.commands（%d 條；逗號分隔）", len(rosterStringSlice(allow, "commands"))),
 		"↩  返回",
 	}
-	return r.transitionTo(newSelectModel("Sudo rule "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.sudo.rule.detail", "Sudo rule "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == 4 {
 			return pushRosterSudoRulesMenu(r, dir, path, "")
@@ -316,7 +316,7 @@ func pushRosterSudoRuleAllowMode(r *editRouterModel, dir, path, name string) tea
 	}
 	allow := rosterSubmap(f, "allow")
 	items := []string{"Allow all commands（危險：可執行任何 sudo 指令）", "Restricted allow-list（只允許下方 commands / command groups）", "↩  返回"}
-	return r.transitionTo(newSelectModel("Sudo command scope", items), "目前："+rosterSudoAllowMode(allow), func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.sudo.rule.allow_mode", "Sudo command scope", items), "目前："+rosterSudoAllowMode(allow), func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == 2 {
 			return pushRosterSudoRuleDetail(r, dir, path, name, "")
@@ -354,7 +354,7 @@ func pushRosterSudoRuleGroups(r *editRouterModel, dir, path, name string) tea.Cm
 		r.err = err
 		return nil
 	}
-	return checklist(r, "role groups", groups, rosterStringSlice(rosterSubmap(f, "subjects"), "groups"), func(r *editRouterModel, selected []string) tea.Cmd {
+	return checklist(r, "roster.sudo.rule.groups", "role groups", groups, rosterStringSlice(rosterSubmap(f, "subjects"), "groups"), func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterSudoRuleEdit(r, dir, path, name, func(rule map[string]any) {
 			subjects := rosterSubmapClone(rule, "subjects")
 			subjects["groups"] = selected
@@ -370,7 +370,7 @@ func pushRosterSudoRuleCommandGroups(r *editRouterModel, dir, path, name string)
 		r.err = err
 		return nil
 	}
-	return checklist(r, "allowed command groups", choices, rosterStringSlice(rosterSubmap(f, "allow"), "command_groups"), func(r *editRouterModel, selected []string) tea.Cmd {
+	return checklist(r, "roster.sudo.rule.command_groups", "allowed command groups", choices, rosterStringSlice(rosterSubmap(f, "allow"), "command_groups"), func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterSudoRuleEdit(r, dir, path, name, func(rule map[string]any) {
 			allow := rosterSubmapClone(rule, "allow")
 			allow["command_groups"] = selected
@@ -382,7 +382,7 @@ func pushRosterSudoRuleCommandGroups(r *editRouterModel, dir, path, name string)
 func pushRosterSudoRuleCommands(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterSudoRule(path, name)
 	current := rosterStringSlice(rosterSubmap(f, "allow"), "commands")
-	return r.transitionTo(newTextInputModel("額外允許的完整 sudo 指令（逗號分隔）", strings.Join(current, ", "), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.sudo.rule.commands", "額外允許的完整 sudo 指令（逗號分隔）", strings.Join(current, ", "), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterSudoRuleDetail(r, dir, path, name, "")

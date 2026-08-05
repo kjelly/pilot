@@ -45,6 +45,43 @@ type editAction struct {
 	// A separate field from Host: reusing Host would be semantically wrong
 	// (every existing host validator assumes Host names a host).
 	User string `json:"user,omitempty"`
+	// Name is the roster entity name for the group/hostgroup/HBAC-rule/
+	// sudo-command-group/sudo-rule actions (Phase 6 increment 3) — one
+	// shared field rather than five near-duplicates, safe because each
+	// action name uniquely determines which entity kind Name refers to
+	// and no validator ever reads it across two different kinds.
+	// Category is create_group's category (team/filesystem/access/role),
+	// which also determines the required name prefix. Users/Groups/
+	// Hostgroups/Services/CommandGroups are bulk checklist-replace
+	// selections (never toggle-one-item — matching the interactive TUI's
+	// own "pick the whole set, then Enter" checklists): Users is a
+	// group's membership.users; Groups is a group's membership.groups OR
+	// an HBAC rule's/sudo rule's subjects.groups; Hostgroups is an HBAC
+	// rule's targets.hostgroups; Services is an HBAC rule's services;
+	// CommandGroups is a sudo rule's allow.command_groups.
+	Name          string   `json:"name,omitempty"`
+	Category      string   `json:"category,omitempty"`
+	Users         []string `json:"users,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
+	Hostgroups    []string `json:"hostgroups,omitempty"`
+	Services      []string `json:"services,omitempty"`
+	CommandGroups []string `json:"command_groups,omitempty"`
+	// Domain/Realm/Server are create_dns_manifest's freeipa.{domain,realm,server}
+	// skeleton fields. Zone is the freeipa-dns manifest's zone name, targeted
+	// by create_dns_zone/set_dns_zone_field and by every record action (a
+	// record's parent zone). RecordName/RecordType together identify one
+	// record within a zone (the schema's own uniqueness key). TargetHost is
+	// a record's target.inventory_host; Values is a record's explicit value
+	// list — exactly one of TargetHost/Values may be set per record (never
+	// both), matching the interactive TUI's own value-source choice.
+	Domain     string   `json:"domain,omitempty"`
+	Realm      string   `json:"realm,omitempty"`
+	Server     string   `json:"server,omitempty"`
+	Zone       string   `json:"zone,omitempty"`
+	RecordName string   `json:"record_name,omitempty"`
+	RecordType string   `json:"record_type,omitempty"`
+	TargetHost string   `json:"target_host,omitempty"`
+	Values     []string `json:"values,omitempty"`
 }
 
 // validateValueOrEnv enforces that exactly one of Value/ValueEnv is set,

@@ -19,7 +19,7 @@ func pushRosterHostAccessMenu(r *editRouterModel, dir, path, banner string) tea.
 		return nil
 	}
 	items := []string{"Hostgroups", "HBAC rules", fmt.Sprintf("hbac.disable_allow_all：%t", disabled), "↩  返回"}
-	return r.transitionTo(newSelectModel("Host access — 誰可以登入哪些主機", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.access.top", "Host access — 誰可以登入哪些主機", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == 3 {
 			return pushRosterManager(r, dir, path, "")
@@ -51,7 +51,7 @@ func pushRosterHostgroupsMenu(r *editRouterModel, dir, path, banner string) tea.
 		items = append(items, "🖥 "+n)
 	}
 	items = append(items, "➕ 新增 Hostgroup", "↩  返回")
-	return r.transitionTo(newSelectModel("Hostgroups — 已 enroll 主機的群組", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.hostgroups.list", "Hostgroups — 已 enroll 主機的群組", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() {
 			return pushRosterHostAccessMenu(r, dir, path, "")
@@ -67,7 +67,7 @@ func pushRosterHostgroupsMenu(r *editRouterModel, dir, path, banner string) tea.
 }
 
 func pushRosterAddHostgroup(r *editRouterModel, dir, path string) tea.Cmd {
-	return r.transitionTo(newTextInputModel("Hostgroup 名稱(例如 webhosts)", "", func(v string) error {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.hostgroup.add", "Hostgroup 名稱(例如 webhosts)", "", func(v string) error {
 		if strings.TrimSpace(v) == "" {
 			return fmt.Errorf("不能留空")
 		}
@@ -103,7 +103,7 @@ func pushRosterHostgroupDetail(r *editRouterModel, dir, path, name, banner strin
 		fmt.Sprintf("membership.hosts（%d 台；輸入逗號分隔 FQDN）", len(hosts)),
 		"↩  返回",
 	}
-	return r.transitionTo(newSelectModel("Hostgroup "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.hostgroup.detail", "Hostgroup "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == 3 {
 			return pushRosterHostgroupsMenu(r, dir, path, "")
@@ -121,7 +121,7 @@ func pushRosterHostgroupDetail(r *editRouterModel, dir, path, name, banner strin
 }
 
 func pushRosterHostgroupText(r *editRouterModel, dir, path, name, key, current string) tea.Cmd {
-	return r.transitionTo(newTextInputModel(key, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.hostgroup.field_text", key, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterHostgroupDetail(r, dir, path, name, "")
@@ -131,7 +131,7 @@ func pushRosterHostgroupText(r *editRouterModel, dir, path, name, key, current s
 }
 
 func pushRosterHostgroupHosts(r *editRouterModel, dir, path, name string, current []string) tea.Cmd {
-	return r.transitionTo(newTextInputModel("已 enroll 主機 FQDN（逗號分隔；例如 web1.ipa.pilot.internal）", strings.Join(current, ", "), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.hostgroup.field_hosts", "已 enroll 主機 FQDN（逗號分隔；例如 web1.ipa.pilot.internal）", strings.Join(current, ", "), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRosterHostgroupDetail(r, dir, path, name, "")
@@ -195,7 +195,7 @@ func pushRosterHBACMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		items = append(items, "🔑 "+n)
 	}
 	items = append(items, "➕ 新增登入規則", "↩  返回")
-	return r.transitionTo(newSelectModel("HBAC rules — group → hostgroup", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.hbac.list", "HBAC rules — group → hostgroup", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == len(items)-1 {
 			return pushRosterHostAccessMenu(r, dir, path, "")
@@ -208,7 +208,7 @@ func pushRosterHBACMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 }
 
 func pushRosterAddHBACRuleName(r *editRouterModel, dir, path string) tea.Cmd {
-	return r.transitionTo(newTextInputModel("HBAC rule 名稱", "", func(v string) error {
+	return r.transitionTo(newTextInputModelWithScreenID("roster.hbac.add_name", "HBAC rule 名稱", "", func(v string) error {
 		if strings.TrimSpace(v) == "" {
 			return fmt.Errorf("不能留空")
 		}
@@ -240,12 +240,12 @@ func accessGroupChoices(path string) ([]string, error) {
 	return out, nil
 }
 
-func checklist(r *editRouterModel, title string, options, current []string, next func(*editRouterModel, []string) tea.Cmd, cancel func(*editRouterModel) tea.Cmd) tea.Cmd {
+func checklist(r *editRouterModel, screenID, title string, options, current []string, next func(*editRouterModel, []string) tea.Cmd, cancel func(*editRouterModel) tea.Cmd) tea.Cmd {
 	items := make([]multiSelectItem, len(options))
 	for i, o := range options {
 		items[i] = multiSelectItem{Label: o, Checked: hasRole(current, o)}
 	}
-	return r.transitionTo(newMultiSelectModel(title+"（space 勾選、enter 完成）", items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newMultiSelectModelWithScreenID(screenID, title+"（space 勾選、enter 完成）", items), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(multiSelectModel)
 		if m.Canceled() {
 			return cancel(r)
@@ -260,7 +260,7 @@ func pushRosterAddHBACGroups(r *editRouterModel, dir, path, name string) tea.Cmd
 		r.err = err
 		return nil
 	}
-	return checklist(r, "允許登入的 access group", groups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
+	return checklist(r, "roster.hbac.add_groups", "允許登入的 access group", groups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterAddHBACHostgroups(r, dir, path, name, selected)
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACMenu(r, dir, path, "") })
 }
@@ -271,13 +271,13 @@ func pushRosterAddHBACHostgroups(r *editRouterModel, dir, path, name string, gro
 		r.err = err
 		return nil
 	}
-	return checklist(r, "允許登入的 hostgroup", hostgroups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
+	return checklist(r, "roster.hbac.add_hostgroups", "允許登入的 hostgroup", hostgroups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
 		return pushRosterAddHBACServices(r, dir, path, name, groups, selected)
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACMenu(r, dir, path, "") })
 }
 
 func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, groups, hostgroups []string) tea.Cmd {
-	return checklist(r, "允許的 PAM service", rosterHBACServiceChoices(), []string{"sshd"}, func(r *editRouterModel, services []string) tea.Cmd {
+	return checklist(r, "roster.hbac.add_services", "允許的 PAM service", rosterHBACServiceChoices(), []string{"sshd"}, func(r *editRouterModel, services []string) tea.Cmd {
 		rule := map[string]any{"name": name, "state": "present", "enabled": true, "subjects": map[string]any{"users": []string{}, "groups": groups}, "targets": map[string]any{"hosts": []string{}, "hostgroups": hostgroups}, "services": services}
 		v, err := inventory.SimulateAddRosterHBACRule(path, rule)
 		if err != nil {
@@ -307,7 +307,7 @@ func pushRosterHBACDetail(r *editRouterModel, dir, path, name, banner string) te
 	sub := rosterSubmap(f, "subjects")
 	tar := rosterSubmap(f, "targets")
 	items := []string{fmt.Sprintf("subjects.groups（%v）", rosterStringSlice(sub, "groups")), fmt.Sprintf("targets.hostgroups（%v）", rosterStringSlice(tar, "hostgroups")), fmt.Sprintf("services（%v）", rosterStringSlice(f, "services")), "↩  返回"}
-	return r.transitionTo(newSelectModel("HBAC rule "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSelectModelWithScreenID("roster.hbac.detail", "HBAC rule "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
 		if m.Canceled() || m.Selected() == 3 {
 			return pushRosterHBACMenu(r, dir, path, "")
@@ -331,7 +331,7 @@ func pushRosterHBACGroups(r *editRouterModel, dir, path, name string) tea.Cmd {
 		r.err = err
 		return nil
 	}
-	return checklist(r, "access groups", groups, rosterStringSlice(rosterSubmap(f, "subjects"), "groups"), func(r *editRouterModel, v []string) tea.Cmd {
+	return checklist(r, "roster.hbac.groups", "access groups", groups, rosterStringSlice(rosterSubmap(f, "subjects"), "groups"), func(r *editRouterModel, v []string) tea.Cmd {
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { s := rosterSubmapClone(x, "subjects"); s["groups"] = v; x["subjects"] = s })
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
@@ -342,7 +342,7 @@ func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 		r.err = err
 		return nil
 	}
-	return checklist(r, "hostgroups", hgs, rosterStringSlice(rosterSubmap(f, "targets"), "hostgroups"), func(r *editRouterModel, v []string) tea.Cmd {
+	return checklist(r, "roster.hbac.targets", "hostgroups", hgs, rosterStringSlice(rosterSubmap(f, "targets"), "hostgroups"), func(r *editRouterModel, v []string) tea.Cmd {
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) {
 			t := rosterSubmapClone(x, "targets")
 			t["hostgroups"] = v
@@ -354,7 +354,7 @@ func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 }
 func pushRosterHBACServices(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
-	return checklist(r, "services", rosterHBACServiceChoices(), rosterStringSlice(f, "services"), func(r *editRouterModel, v []string) tea.Cmd {
+	return checklist(r, "roster.hbac.services", "services", rosterHBACServiceChoices(), rosterStringSlice(f, "services"), func(r *editRouterModel, v []string) tea.Cmd {
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { x["services"] = v })
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }

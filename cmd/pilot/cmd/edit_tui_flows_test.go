@@ -1242,12 +1242,12 @@ func TestEditRouter_Teatest_VaultFlow_EscMirrorsDirtyDiscardGate(t *testing.T) {
 	}
 	tm.Type("baz")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to the now-dirty editor
-	waitFor("foo = baz")
+	waitFor("foo = <已設定>") // displayVaultValue masks any real value (edit_tui_vault.go)
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // dirty editor: esc mirrors "🚪 不存檔離開"'s dirty gate
 	waitFor("確定要放棄離開嗎")
 	tm.Type("n") // decline discard -> back to the still-dirty editor
-	waitFor("foo = baz")
+	waitFor("foo = <已設定>") // displayVaultValue masks any real value (edit_tui_vault.go)
 
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)

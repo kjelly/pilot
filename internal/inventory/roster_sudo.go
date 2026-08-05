@@ -88,6 +88,13 @@ func simulateAddRosterSudoEntry(path, listKey string, entry map[string]any) ([]R
 		return nil, err
 	}
 	sudo := mapField(root, "sudo")
+	if sudo == nil {
+		// mapField returns nil, not an empty map, when "sudo" is absent
+		// (e.g. a roster that has never had a sudo command group/rule
+		// before) — assigning into a nil map panics, so it must be
+		// initialized before the listKey write below.
+		sudo = map[string]any{}
+	}
 	sudo[listKey] = append(listField(sudo, listKey), entry)
 	root["sudo"] = sudo
 	return ValidateRoster(root), nil

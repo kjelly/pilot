@@ -406,6 +406,13 @@ func SimulateAddRosterHBACRule(path string, rule map[string]any) ([]RosterViolat
 		return nil, err
 	}
 	hbac := mapField(root, "hbac")
+	if hbac == nil {
+		// mapField returns nil, not an empty map, when "hbac" is absent
+		// (e.g. a roster that has never had an HBAC rule before) —
+		// assigning into a nil map panics, so it must be initialized
+		// before the "rules" write below.
+		hbac = map[string]any{}
+	}
 	hbac["rules"] = append(listField(hbac, "rules"), rule)
 	root["hbac"] = hbac
 	return ValidateRoster(root), nil

@@ -110,6 +110,11 @@ func managedFileEntries(dir string) ([]managedFileEntry, error) {
 	if err := addFile(rolePresetFilename, false); err != nil {
 		return nil, err
 	}
+	// freeipa-dns.yaml is the automation-only default path (pushDNSManifestPathPrompt's
+	// prefill) — not secret, per the manifest's own schema (no ansible-vault content).
+	if err := addFile("freeipa-dns.yaml", false); err != nil {
+		return nil, err
+	}
 	if err := addDirFiles("group_vars", false); err != nil {
 		return nil, err
 	}

@@ -126,7 +126,24 @@ var (
 	knownUserKeys         = []string{"name", "state", "first", "last", "display_name", "email", "uid", "gid", "login_shell", "home_directory", "password", "ssh_keys", "enabled"}
 	knownUserPasswordKeys = []string{"initial", "force_change", "preserve_existing"}
 	knownUserSSHKeysKeys  = []string{"authoritative", "values"}
+
+	// diagnoseUserNameRe is userNameRe widened to accept an optional
+	// @REALM suffix, matching FreeIPA's fully-qualified principal form
+	// (e.g. "pilotuser@ipa.pilot.internal", as
+	// docs/verification/freeipa-client.md's C5 check uses) — roster user
+	// names themselves are always bare shortnames, so userNameRe stays
+	// unchanged; this is a separate, deliberately looser regex for
+	// callers (internal/diagnose) that accept either form.
+	diagnoseUserNameRe = regexp.MustCompile(`^[a-z_][a-z0-9_.-]*(@[A-Za-z0-9_.-]+)?$`)
 )
+
+// ValidRosterUserName reports whether s is a syntactically valid OS/FreeIPA
+// username, optionally with an @REALM suffix. This is the single source of
+// truth internal/diagnose's sudo check uses to validate its user parameter
+// before it ever reaches an ansible ad-hoc command line.
+func ValidRosterUserName(s string) bool {
+	return diagnoseUserNameRe.MatchString(s)
+}
 
 func checkUsers(users []any) []RosterViolation {
 	var out []RosterViolation
