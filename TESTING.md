@@ -61,6 +61,13 @@ go run ./cmd/pilot vm-target test --name <vm> \
   一律 `CI=1 go test ./cmd/pilot/cmd/`。
 - **race detector**：`make test-race`（= `go test -race -count=1 ./...`）。
 - **Python callback**：`make test-callback`。
+- **MCP server**（`pilot mcp serve`）：`cmd/pilot/cmd/mcp_edit_tools_test.go` /
+  `mcp_test.go` 用真的 MCP client（非 mock handler）對編譯出的 `pilot` binary
+  跑 capabilities/inspect/plan/apply 全流程,含 workspace revision 前後比對、
+  audit artifact（asciicast + scenario/diff metadata）驗證、secret sentinel
+  掃描（確認 vault 值從不外洩到 plan/apply 回傳或 audit 紀錄）。手動驗證：
+  `go run ./cmd/pilot mcp serve --dir <workspace> --allow-write` 起一個
+  stdio server,再用任一 MCP client 送 tool call。
 
 ## 2. Pre-requisites
 

@@ -85,6 +85,93 @@ contain exactly one matching `deploy` or `reconcile` action.
 | `pilot reconcile` | Guided day-2 reconcile: choose a contract-backed declarative configuration component, its roster/config source, stage, preview, and confirmation. Only catalog entries explicitly marked as reconcilers appear; a future Nginx config reconciler must first supply its contract, apply playbook, schema, and verification evidence. |
 | `pilot doctor` | Check the Ansible toolchain and target prerequisites before a deployment or target test. |
 
+### MCP server for `pilot edit`
+
+| Command | Appropriate use |
+|---|---|
+| `pilot mcp serve` | Serve `pilot edit`'s semantic edit actions to an external coding agent over the Model Context Protocol (stdio transport only). |
+
+`pilot mcp serve` flags: `--dir` (workspace root the server may read/write,
+default `.`), `--transport` (only `stdio` is implemented), `--audit-dir`
+(plan/apply audit artifacts, default `<dir>/.pilot/audit/edit`), and
+`--allow-write` (registers the mutation tool; omit it to run strictly
+read-only).
+
+Without `--allow-write` the server registers three read-only tools:
+
+- `pilot_edit_capabilities` — list the semantic edit actions this server
+  currently allows (reflects real server policy, not just the global action
+  registry).
+- `pilot_edit_inspect` — read the workspace's non-secret configuration
+  summary (hosts, role presets, and optionally group vars, vault key names,
+  the full roster graph, and the DNS manifest) an agent needs to plan
+  actions or answer access questions. `include_roster` returns roster
+  users/groups/hostgroups/HBAC rules/sudo command groups+rules, plus two
+  server-resolved views — `effective_hbac_access` and
+  `effective_sudo_access` — where nested group/hostgroup membership is
+  already expanded into concrete usernames and host FQDNs (e.g. "can user X
+  reach host Y" is a direct filter over `effective_hbac_access`, no client-
+  side graph walk needed). `include_dns` returns DNS zones/records, with
+  each record's `target_host` cross-resolved to its `resolved_ip` from the
+  inventory. Never returns secret values.
+- `pilot_edit_plan` — validate and rehearse a semantic action scenario
+  against a temporary copy of the workspace, through the real `pilot edit`
+  TUI, without touching the real workspace. Returns a diff, validation
+  result, and a `plan_id` for a later apply.
+
+`--allow-write` additionally registers:
+
+- `pilot_edit_apply` — apply a previously-created plan's exact scenario to
+  the real workspace through the real `pilot edit` TUI, under a mutation
+  lock with automatic rollback on failure.
+
+The same read-only data is also exposed as MCP *resources* (always
+registered, independent of `--allow-write`), for clients that browse
+`resources/list` instead of calling a tool:
+
+- `pilot://hosts` — ansible inventory hosts (name, IP, user, env, roles).
+- `pilot://roster` — the full non-secret roster graph, including the
+  effective access views.
+- `pilot://roster/effective-access` — just `effective_hbac_access` /
+  `effective_sudo_access`, for callers that only want the "who can log in
+  to / sudo on which hosts" answer.
+- `pilot://dns` — DNS zones/records with `resolved_ip` cross-resolution.
+
+Every `pilot_edit_plan`/`pilot_edit_apply` call writes an audit artifact
+(asciicast recording plus scenario/diff metadata) under `--audit-dir`.
+Vault/secret actions must use `value_env` (an environment variable name);
+a literal secret `value` is rejected before any plan or apply is attempted.
+
+#### Live-host diagnostics (`pilot_diagnose_*`)
+
+Everything above is local-workspace-file read/write only — it never
+touches a live host. Two additional, independently-gated flags register a
+separate tool family that runs real Ansible ad-hoc commands against a real
+inventory host:
+
+- `--enable-diagnose` (requires `--diagnose-inventory`) registers
+  `pilot_diagnose_sudo` and `pilot_diagnose_dns` — each a **fixed,
+  code-defined, read-only** command allow-list (mirroring
+  `docs/verification/freeipa-client.md` and
+  `docs/verification/core-infra{,-provider}.md`) that diagnoses,
+  respectively, why a user can/cannot sudo on a host, or why DNS resolution
+  is failing there. The `host` argument must be an exact inventory
+  hostname — never an ansible pattern/group/wildcard.
+- `--enable-diagnose-raw` (also requires `--diagnose-inventory`,
+  independent of `--enable-diagnose`) registers `pilot_diagnose_run`,
+  which runs a **caller-supplied** command via ansible's `command` module
+  (no shell — pipes/redirects/chaining are not interpreted) against one
+  inventory host. Unlike the two tools above, this is **not** a fixed
+  allow-list: it can run anything the connecting `ansible_user` (and
+  `become`, if configured) is permitted to run, including commands that
+  mutate the target. Only enable it when that's genuinely needed.
+
+Both flags default to off. Every `pilot_diagnose_*` call writes a
+mandatory JSON audit record under `<audit-dir>/diagnose/` (there is no way
+to turn this off while the flag is on), since each call is a real action
+against a live host — the sudo check's own commands are exactly what
+generates auditd/PAM events on the target.
+
 ### Spec and verification
 
 | Command | Appropriate use |
