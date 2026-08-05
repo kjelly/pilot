@@ -1,0 +1,360 @@
+// mcp_edit_resources.go exposes the same read-only data pilot_edit_inspect
+// serves as MCP *resources* (pilot:// URIs). Agents probe both surfaces —
+// some clients try resources/list before (or instead of) guessing which
+// tool answers a read query — so the data is reachable either way, built
+// by one shared set of builders (also used by inspectHandler) rather than
+// two diverging read paths. Resources are read-only by nature, so they are
+// registered unconditionally, independent of --allow-write.
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+
+	"github.com/kjelly/pilot/internal/groupvars"
+	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// ---- shared builders (pilot_edit_inspect + pilot:// resources) -------------
+
+// buildInspectHosts reads the workspace's ansible inventory (hosts.yml).
+// Like all inspect reads it is lenient: a missing or unparsable file yields
+// an empty list, never an error — inspect summarizes what exists.
+func buildInspectHosts(dir string) []inspectHost {
+	var hosts []inspectHost
+	if data, err := os.ReadFile(filepath.Join(dir, "hosts.yml")); err == nil {
+		if hf, err := inventory.Parse(data); err == nil {
+			for _, h := range hf.Hosts {
+				hosts = append(hosts, inspectHost{
+					Name:        h.Name,
+					AnsibleHost: h.AnsibleHost,
+					AnsibleUser: h.AnsibleUser,
+					Env:         h.Env,
+					Roles:       h.Roles,
+				})
+			}
+		}
+	}
+	return hosts
+}
+
+// inspectRosterData is the roster's full non-secret graph plus the
+// server-resolved effective views — the payload of pilot://roster, and the
+// source of inspectOutput's Roster*/HBAC*/Sudo*/Effective* fields.
+type inspectRosterData struct {
+	Users               []inspectRosterUser             `json:"users"`
+	Groups              []inspectRosterGroup            `json:"groups,omitempty"`
+	Hostgroups          []inspectRosterHostgroup        `json:"hostgroups,omitempty"`
+	HBACRules           []inspectHBACRule               `json:"hbac_rules,omitempty"`
+	SudoCommandGroups   []inspectSudoCommandGroup       `json:"sudo_command_groups,omitempty"`
+	SudoRules           []inspectSudoRule               `json:"sudo_rules,omitempty"`
+	EffectiveHBACAccess []inventory.EffectiveHBACAccess `json:"effective_hbac_access,omitempty"`
+	EffectiveSudoAccess []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
+}
+
+// buildInspectRoster locates the roster file among the workspace's managed
+// files (by its top-level "users" key — see looksLikeRosterFile) and reads
+// its full non-secret graph. Never password.initial, never ssh_keys.values.
+func buildInspectRoster(dir string) inspectRosterData {
+	var out inspectRosterData
+	entries, err := managedFileEntries(dir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsSecret || !looksLikeRosterFile(e.Content) {
+			continue
+		}
+		fullPath := filepath.Join(dir, filepath.FromSlash(e.RelPath))
+		names, err := inventory.RosterUserNames(fullPath)
+		if err != nil {
+			continue // encrypted or unreadable — skip rather than fail the whole read
+		}
+		for _, name := range names {
+			fields, found, err := inventory.RosterUser(fullPath, name)
+			if err != nil || !found {
+				continue
+			}
+			ru := inspectRosterUser{
+				Name:        name,
+				State:       rosterStringOr(fields, "state", "present"),
+				Email:       rosterStringValue(fields, "email"),
+				DisplayName: rosterStringValue(fields, "display_name"),
+				Enabled:     rosterBoolFieldOr(fields, "enabled", true),
+			}
+			if s := rosterIntValue(fields, "uid"); s != "" {
+				if n, err := strconv.Atoi(s); err == nil {
+					ru.UID = &n
+				}
+			}
+			if s := rosterIntValue(fields, "gid"); s != "" {
+				if n, err := strconv.Atoi(s); err == nil {
+					ru.GID = &n
+				}
+			}
+			out.Users = append(out.Users, ru)
+		}
+
+		if groupNames, err := inventory.RosterGroupNames(fullPath); err == nil {
+			for _, name := range groupNames {
+				fields, found, err := inventory.RosterGroup(fullPath, name)
+				if err != nil || !found {
+					continue
+				}
+				membership := rosterSubmap(fields, "membership")
+				out.Groups = append(out.Groups, inspectRosterGroup{
+					Name:         name,
+					State:        rosterStringOr(fields, "state", "present"),
+					Category:     rosterStringValue(fields, "category"),
+					Type:         rosterStringOr(fields, "type", "posix"),
+					Description:  rosterStringValue(fields, "description"),
+					MemberUsers:  rosterStringSlice(membership, "users"),
+					MemberGroups: rosterStringSlice(membership, "groups"),
+				})
+			}
+		}
+
+		if hostgroupNames, err := inventory.RosterHostgroupNames(fullPath); err == nil {
+			for _, name := range hostgroupNames {
+				fields, found, err := inventory.RosterHostgroup(fullPath, name)
+				if err != nil || !found {
+					continue
+				}
+				membership := rosterSubmap(fields, "membership")
+				out.Hostgroups = append(out.Hostgroups, inspectRosterHostgroup{
+					Name:             name,
+					State:            rosterStringOr(fields, "state", "present"),
+					Description:      rosterStringValue(fields, "description"),
+					MemberHosts:      rosterStringSlice(membership, "hosts"),
+					MemberHostgroups: rosterStringSlice(membership, "hostgroups"),
+				})
+			}
+		}
+
+		if ruleNames, err := inventory.RosterHBACRuleNames(fullPath); err == nil {
+			for _, name := range ruleNames {
+				fields, found, err := inventory.RosterHBACRule(fullPath, name)
+				if err != nil || !found {
+					continue
+				}
+				subjects := rosterSubmap(fields, "subjects")
+				targets := rosterSubmap(fields, "targets")
+				out.HBACRules = append(out.HBACRules, inspectHBACRule{
+					Name:             name,
+					State:            rosterStringOr(fields, "state", "present"),
+					Enabled:          rosterBoolFieldOr(fields, "enabled", true),
+					SubjectUsers:     rosterStringSlice(subjects, "users"),
+					SubjectGroups:    rosterStringSlice(subjects, "groups"),
+					AllHosts:         rosterStringValue(targets, "hostcat") == "all",
+					TargetHosts:      rosterStringSlice(targets, "hosts"),
+					TargetHostgroups: rosterStringSlice(targets, "hostgroups"),
+					Services:         rosterStringSlice(fields, "services"),
+				})
+			}
+		}
+
+		if cgNames, err := inventory.RosterSudoCommandGroupNames(fullPath); err == nil {
+			for _, name := range cgNames {
+				fields, found, err := inventory.RosterSudoCommandGroup(fullPath, name)
+				if err != nil || !found {
+					continue
+				}
+				out.SudoCommandGroups = append(out.SudoCommandGroups, inspectSudoCommandGroup{
+					Name:     name,
+					Commands: rosterStringSlice(fields, "commands"),
+				})
+			}
+		}
+
+		if sudoRuleNames, err := inventory.RosterSudoRuleNames(fullPath); err == nil {
+			for _, name := range sudoRuleNames {
+				fields, found, err := inventory.RosterSudoRule(fullPath, name)
+				if err != nil || !found {
+					continue
+				}
+				subjects := rosterSubmap(fields, "subjects")
+				targets := rosterSubmap(fields, "targets")
+				allow := rosterSubmap(fields, "allow")
+				deny := rosterSubmap(fields, "deny")
+				out.SudoRules = append(out.SudoRules, inspectSudoRule{
+					Name:               name,
+					State:              rosterStringOr(fields, "state", "present"),
+					SubjectUsers:       rosterStringSlice(subjects, "users"),
+					SubjectGroups:      rosterStringSlice(subjects, "groups"),
+					AllHosts:           rosterStringValue(targets, "hostcat") == "all",
+					TargetHosts:        rosterStringSlice(targets, "hosts"),
+					TargetHostgroups:   rosterStringSlice(targets, "hostgroups"),
+					AllCommands:        rosterStringValue(allow, "command_category") == "all",
+					AllowCommands:      rosterStringSlice(allow, "commands"),
+					AllowCommandGroups: rosterStringSlice(allow, "command_groups"),
+					DenyCommandGroups:  rosterStringSlice(deny, "command_groups"),
+				})
+			}
+		}
+
+		if resolved, err := inventory.EffectiveHBACAccessList(fullPath); err == nil {
+			out.EffectiveHBACAccess = resolved
+		}
+		if resolved, err := inventory.EffectiveSudoAccessList(fullPath); err == nil {
+			out.EffectiveSudoAccess = resolved
+		}
+
+		break // only one roster file is expected per workspace
+	}
+	return out
+}
+
+// buildInspectDNSZones reads the freeipa-dns.yaml manifest, cross-resolving
+// each record's target.inventory_host against hosts (the ansible inventory)
+// into ResolvedIP.
+func buildInspectDNSZones(dir string, hosts []inspectHost) []inspectDNSZone {
+	entries, err := managedFileEntries(dir)
+	if err != nil {
+		return nil
+	}
+	hostIPs := map[string]string{}
+	for _, h := range hosts {
+		if h.AnsibleHost != "" {
+			hostIPs[h.Name] = h.AnsibleHost
+		}
+	}
+	var dnsZones []inspectDNSZone
+	for _, e := range entries {
+		if e.IsSecret || filepath.Base(e.RelPath) != "freeipa-dns.yaml" {
+			continue
+		}
+		fullPath := filepath.Join(dir, filepath.FromSlash(e.RelPath))
+		zoneNames, err := inventory.DNSManifestZoneNames(fullPath)
+		if err != nil {
+			break // unreadable — skip rather than fail the whole read
+		}
+		for _, zoneName := range zoneNames {
+			zf, found, err := inventory.DNSManifestZone(fullPath, zoneName)
+			if err != nil || !found {
+				continue
+			}
+			zone := inspectDNSZone{
+				Name:                    zoneName,
+				State:                   rosterStringOr(zf, "state", "present"),
+				RecordsMode:             rosterStringValue(zf, "records_mode"),
+				AcknowledgeSplitHorizon: rosterBoolFieldOr(zf, "acknowledge_split_horizon", false),
+			}
+			records, err := inventory.DNSManifestRecords(fullPath, zoneName)
+			if err == nil {
+				for _, rf := range records {
+					target := rosterSubmap(rf, "target")
+					targetHost := rosterStringValue(target, "inventory_host")
+					ttl := 0
+					if s := rosterIntValue(rf, "ttl"); s != "" {
+						if n, err := strconv.Atoi(s); err == nil {
+							ttl = n
+						}
+					}
+					rec := inspectDNSRecord{
+						Name:       rosterStringValue(rf, "name"),
+						Type:       rosterStringValue(rf, "type"),
+						State:      rosterStringOr(rf, "state", "present"),
+						TTL:        ttl,
+						Values:     rosterStringSlice(rf, "values"),
+						TargetHost: targetHost,
+					}
+					if targetHost != "" {
+						rec.ResolvedIP = hostIPs[targetHost]
+					}
+					zone.Records = append(zone.Records, rec)
+				}
+			}
+			dnsZones = append(dnsZones, zone)
+		}
+		break // only one DNS manifest is expected per workspace
+	}
+	return dnsZones
+}
+
+// buildInspectGroupVars reads each group_vars/*.yml file's active
+// (non-commented) top-level key/value pairs.
+func buildInspectGroupVars(dir string) map[string]map[string]string {
+	groupVars := map[string]map[string]string{}
+	entries, err := managedFileEntries(dir)
+	if err != nil {
+		return groupVars
+	}
+	for _, e := range entries {
+		if filepath.Dir(e.RelPath) != "group_vars" {
+			continue
+		}
+		values := map[string]string{}
+		for _, entry := range groupvars.Parse(e.Content).Entries() {
+			if entry.Active {
+				values[entry.Key] = entry.Value
+			}
+		}
+		groupVars[filepath.Base(e.RelPath)] = values
+	}
+	return groupVars
+}
+
+// ---- pilot:// resources ------------------------------------------------
+
+const (
+	resourceURIHosts           = "pilot://hosts"
+	resourceURIRoster          = "pilot://roster"
+	resourceURIEffectiveAccess = "pilot://roster/effective-access"
+	resourceURIDNS             = "pilot://dns"
+)
+
+// effectiveAccessResource is pilot://roster/effective-access's payload —
+// just the two server-resolved views, for callers that only want the
+// "who can reach/sudo what" answer without the rest of the roster graph.
+type effectiveAccessResource struct {
+	EffectiveHBACAccess []inventory.EffectiveHBACAccess `json:"effective_hbac_access"`
+	EffectiveSudoAccess []inventory.EffectiveSudoAccess `json:"effective_sudo_access"`
+}
+
+// registerEditResources registers the pilot:// read-only resources. Data is
+// re-read from the workspace on every resources/read call — same freshness
+// contract as pilot_edit_inspect.
+func registerEditResources(server *mcp.Server, opts editMCPToolsOptions) {
+	add := func(uri, name, description string, build func() any) {
+		server.AddResource(&mcp.Resource{
+			URI:         uri,
+			Name:        name,
+			Description: description,
+			MIMEType:    "application/json",
+		}, func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			data, err := json.MarshalIndent(build(), "", "  ")
+			if err != nil {
+				return nil, fmt.Errorf("marshal %s: %w", uri, err)
+			}
+			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{
+				URI:      uri,
+				MIMEType: "application/json",
+				Text:     string(data),
+			}}}, nil
+		})
+	}
+
+	add(resourceURIHosts, "hosts",
+		"ansible inventory hosts: name, IP (ansible_host), user, env, roles",
+		func() any { return buildInspectHosts(opts.Dir) })
+	add(resourceURIRoster, "roster",
+		"FreeIPA roster (non-secret): users, groups, hostgroups, HBAC rules, sudo command groups and rules, plus server-resolved effective_hbac_access/effective_sudo_access",
+		func() any { return buildInspectRoster(opts.Dir) })
+	add(resourceURIEffectiveAccess, "roster-effective-access",
+		"server-resolved access views only: per-rule lists of concrete usernames and host FQDNs (nested group/hostgroup membership already expanded), answering 'which users can log in to / run sudo on which hosts'",
+		func() any {
+			roster := buildInspectRoster(opts.Dir)
+			return effectiveAccessResource{
+				EffectiveHBACAccess: roster.EffectiveHBACAccess,
+				EffectiveSudoAccess: roster.EffectiveSudoAccess,
+			}
+		})
+	add(resourceURIDNS, "dns",
+		"FreeIPA DNS zones and records, each record's target_host cross-resolved to its inventory IP (resolved_ip)",
+		func() any { return buildInspectDNSZones(opts.Dir, buildInspectHosts(opts.Dir)) })
+}
