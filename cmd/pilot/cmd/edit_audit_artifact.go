@@ -108,9 +108,9 @@ type auditRefs struct {
 }
 
 // redactScenarioForAudit returns a copy of scenario with Value cleared
-// on every step whose Action is a vault action (mcpVaultActionNames) —
-// the value_env-only MCP policy (validateNoLiteralVaultValues) already
-// guarantees an *accepted* vault step never carries a literal Value,
+// on every step whose Action is a secret action (mcpSecretActionNames) —
+// the value_env-only MCP policy (validateNoLiteralSecretValues) already
+// guarantees an *accepted* secret step never carries a literal Value,
 // so this is belt-and-suspenders: even a future bug in that upstream
 // check still can't put a secret into scenario.redacted.json, since
 // this runs unconditionally right before every write of that file.
@@ -119,7 +119,7 @@ func redactScenarioForAudit(scenario editScenario) editScenario {
 	redacted.Steps = make([]editAction, len(scenario.Steps))
 	copy(redacted.Steps, scenario.Steps)
 	for i, step := range redacted.Steps {
-		if mcpVaultActionNames[step.Action] && step.Value != "" {
+		if mcpSecretActionNames[step.Action] && step.Value != "" {
 			step.Value = "«redacted»"
 			redacted.Steps[i] = step
 		}

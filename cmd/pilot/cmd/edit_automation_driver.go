@@ -280,6 +280,45 @@ func (d *automationDriver) setRoleChecked(r *editRouterModel, host, role string,
 	return d.choose(r, "✅ 完成")
 }
 
+// setChecklistSelection drives the multiSelectModel currently on screen
+// so that exactly the labels in want end up checked, then presses Enter
+// to commit — a bulk replace, matching how the roster group/HBAC/sudo
+// checklists work (pushRosterGroupMembershipUsers et al.: pick the whole
+// set, then Enter), unlike setRoleChecked's single-item toggle. want
+// entries are matched by exact Label equality, not uniqueItemIndex's
+// substring match, since these checklist Labels are already complete,
+// unambiguous entity names (usernames/group names/hostgroup names/
+// service names) rather than prose field labels.
+func (d *automationDriver) setChecklistSelection(r *editRouterModel, want []string) error {
+	wantSet := make(map[string]bool, len(want))
+	for _, w := range want {
+		wantSet[w] = true
+	}
+	for {
+		list, ok := r.current.(multiSelectModel)
+		if !ok {
+			return fmt.Errorf("expected a checklist screen, got %s", automationScreenID(r))
+		}
+		mismatch := -1
+		for i, item := range list.items {
+			if item.Checked != wantSet[item.Label] {
+				mismatch = i
+				break
+			}
+		}
+		if mismatch < 0 {
+			break
+		}
+		if err := d.moveCursor(r, mismatch); err != nil {
+			return err
+		}
+		if err := d.send(r, tea.KeyMsg{Type: tea.KeySpace}); err != nil {
+			return err
+		}
+	}
+	return d.enter(r)
+}
+
 func (d *automationDriver) enableRole(r *editRouterModel, host, role string) error {
 	return d.setRoleChecked(r, host, role, true)
 }
