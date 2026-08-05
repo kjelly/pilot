@@ -57,6 +57,14 @@ func newSecretTextInputModel(label, def string, validate func(string) error) tex
 	return m
 }
 
+// newSecretTextInputModelWithScreenID is newSecretTextInputModel plus a
+// stable, contextual automationScreenID() — see newSelectModelWithScreenID.
+func newSecretTextInputModelWithScreenID(screenID, label, def string, validate func(string) error) textInputModel {
+	m := newTextInputModelWithScreenID(screenID, label, def, validate)
+	m.input.EchoMode = textinput.EchoPassword
+	return m
+}
+
 func (m textInputModel) Init() tea.Cmd {
 	return textinput.Blink
 }
