@@ -1,0 +1,30 @@
+schemaVersion: 1
+id: freeipa-realm-replacement
+role: freeipa-realm-replacement
+specs:
+  - path: docs/verification/freeipa-realm-replacement.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/freeipa-realm-replacement-apply.yml
+regressionTests:
+  - internal/spec/freeipa_realm_replacement_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: freeipa-client, required: true, relation: sameHosts}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
+groupVars:
+  - {name: ipa_admin_password, type: string, required: true, secret: true}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: mapped
+  rows:
+    "docs/verification/freeipa-realm-replacement.md#C1": {tags: [C6], reason: completion marker is written by the record-completed-migration task}
+    "docs/verification/freeipa-realm-replacement.md#C2": {tags: [C4], reason: SSSD is enabled and started right after enrollment}
+    "docs/verification/freeipa-realm-replacement.md#C3": {tags: [C3], reason: ipa-client-install writes /etc/ipa/default.conf during enrollment}
+    "docs/verification/freeipa-realm-replacement.md#C4": {tags: [C3], reason: ipa-client-install also provisions the host keytab during enrollment}
+    "docs/verification/freeipa-realm-replacement.md#C5": {tags: [C5], reason: identity resolution wait is the direct producer of this row}
+    "docs/verification/freeipa-realm-replacement.md#C6": {tags: [C2], reason: pre-migration backup archive is created by the snapshot task}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

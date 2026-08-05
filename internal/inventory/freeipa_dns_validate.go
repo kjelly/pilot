@@ -61,6 +61,15 @@ var (
 	dnsKnownTargetKeys     = []string{"inventory_host"}
 )
 
+// ValidDNSRecordName reports whether s is a syntactically valid DNS record
+// name (a bare label, an FQDN, or "@" for the zone apex). This is the single
+// source of truth internal/diagnose's dns check uses to validate its
+// optional name parameter before it ever reaches an ansible ad-hoc command
+// line.
+func ValidDNSRecordName(s string) bool {
+	return dnsRecordNameRe.MatchString(s)
+}
+
 // ValidateDNSManifestFile reads and validates the manifest at path.
 func ValidateDNSManifestFile(path string, opts DNSValidateOptions) ([]DNSViolation, error) {
 	root, err := LoadDNSManifest(path)
