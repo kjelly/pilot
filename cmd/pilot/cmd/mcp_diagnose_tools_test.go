@@ -345,7 +345,10 @@ func TestDiagnoseLogsHandler_SuccessBuildsOutputAndWritesAudit(t *testing.T) {
 	requireRealAnsible(t)
 	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
 	query := `{job="pilot-siem"} |= "error"`
-	steps := diagnose.LogsSteps(query, "", "", "", "")
+	// The fixture inventory sets no ansible_user, so the default noise
+	// exclusion only ever appends the BECOME-SUCCESS clause here.
+	wantQuery := diagnose.ExcludeAnsibleNoise(query, nil)
+	steps := diagnose.LogsSteps(wantQuery, "", "", "", "")
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
 		steps[0].Command: func() (string, int, error) {
 			return diagnoseOKDoc(t, "dash1", 0, `{"status":"success","data":{}}`+"\nHTTP_STATUS:200"), 0, nil
@@ -362,6 +365,9 @@ func TestDiagnoseLogsHandler_SuccessBuildsOutputAndWritesAudit(t *testing.T) {
 	if out.Host != "dash1" {
 		t.Fatalf("out.Host = %q, want dash1 — auto-resolved, there is no host parameter", out.Host)
 	}
+	if out.Query != wantQuery {
+		t.Fatalf("out.Query = %q, want %q — ansible noise exclusion should be appended by default", out.Query, wantQuery)
+	}
 	if out.HTTPStatus != 200 || out.ResultJSON != `{"status":"success","data":{}}` {
 		t.Fatalf("out = %+v, want http_status=200 and the raw Loki body split from the trailing status", out)
 	}
@@ -376,15 +382,38 @@ func TestDiagnoseLogsHandler_SuccessBuildsOutputAndWritesAudit(t *testing.T) {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		t.Fatalf("parse audit record: %v", err)
 	}
-	if rec.Check != "logs" || rec.Host != "dash1" || rec.Params["query"] != query {
-		t.Fatalf("audit record = %+v, want check=logs host=dash1 params.query=%q", rec, query)
+	if rec.Check != "logs" || rec.Host != "dash1" || rec.Params["query"] != wantQuery {
+		t.Fatalf("audit record = %+v, want check=logs host=dash1 params.query=%q", rec, wantQuery)
+	}
+}
+
+func TestDiagnoseLogsHandler_IncludeAnsibleNoiseOptsOutOfExclusion(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
+	query := `{job="pilot-siem"} |= "error"`
+	steps := diagnose.LogsSteps(query, "", "", "", "")
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		steps[0].Command: func() (string, int, error) {
+			return diagnoseOKDoc(t, "dash1", 0, `{"status":"success","data":{}}`+"\nHTTP_STATUS:200"), 0, nil
+		},
+	}}
+	handler := diagnoseLogsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLogsInput{Query: query, IncludeAnsibleNoise: true})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil (success)", result)
+	}
+	if out.Query != query {
+		t.Fatalf("out.Query = %q, want %q verbatim — include_ansible_noise=true must skip the exclusion filters", out.Query, query)
 	}
 }
 
 func TestDiagnoseLogsHandler_UnreachableSurfacesAsFieldNotError(t *testing.T) {
 	requireRealAnsible(t)
 	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
-	steps := diagnose.LogsSteps("up", "", "", "", "")
+	steps := diagnose.LogsSteps(diagnose.ExcludeAnsibleNoise("up", nil), "", "", "", "")
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
 		steps[0].Command: func() (string, int, error) {
 			doc := map[string]any{"plays": []any{map[string]any{"tasks": []any{map[string]any{"hosts": map[string]any{
@@ -432,7 +461,8 @@ func TestDiagnoseSecurityLogsHandler_NoDashboardGroupRejectedBeforeAnyCall(t *te
 func TestDiagnoseSecurityLogsHandler_SuccessWithNoFiltersBuildsOutputAndWritesAudit(t *testing.T) {
 	requireRealAnsible(t)
 	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
-	steps := diagnose.SecurityLogsSteps("", "", "", "", "", "")
+	wantQuery := diagnose.ExcludeAnsibleNoise(diagnose.SecurityLogsQuery("", ""), nil)
+	steps := diagnose.LogsSteps(wantQuery, "", "", "", "")
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
 		steps[0].Command: func() (string, int, error) {
 			return diagnoseOKDoc(t, "dash1", 0, `{"status":"success","data":{}}`+"\nHTTP_STATUS:200"), 0, nil
@@ -449,8 +479,8 @@ func TestDiagnoseSecurityLogsHandler_SuccessWithNoFiltersBuildsOutputAndWritesAu
 	if out.Host != "dash1" {
 		t.Fatalf("out.Host = %q, want dash1 — auto-resolved, there is no host parameter", out.Host)
 	}
-	if out.Query != diagnose.SecurityLogsQuery("", "") {
-		t.Fatalf("out.Query = %q, want %q", out.Query, diagnose.SecurityLogsQuery("", ""))
+	if out.Query != wantQuery {
+		t.Fatalf("out.Query = %q, want %q — ansible noise exclusion should be appended by default", out.Query, wantQuery)
 	}
 	if out.HTTPStatus != 200 || out.ResultJSON != `{"status":"success","data":{}}` {
 		t.Fatalf("out = %+v, want http_status=200 and the raw Loki body", out)
@@ -463,8 +493,8 @@ func TestDiagnoseSecurityLogsHandler_SuccessWithNoFiltersBuildsOutputAndWritesAu
 	if err := json.Unmarshal(data, &rec); err != nil {
 		t.Fatalf("parse audit record: %v", err)
 	}
-	if rec.Check != "security_logs" || rec.Host != "dash1" || rec.Params["query"] != diagnose.SecurityLogsQuery("", "") {
-		t.Fatalf("audit record = %+v, want check=security_logs host=dash1 params.query=%q", rec, diagnose.SecurityLogsQuery("", ""))
+	if rec.Check != "security_logs" || rec.Host != "dash1" || rec.Params["query"] != wantQuery {
+		t.Fatalf("audit record = %+v, want check=security_logs host=dash1 params.query=%q", rec, wantQuery)
 	}
 }
 
@@ -472,7 +502,8 @@ func TestDiagnoseSecurityLogsHandler_HostAndSearchComposeIntoQuery(t *testing.T)
 	requireRealAnsible(t)
 	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
 	host, search := "web1", "Failed password"
-	steps := diagnose.SecurityLogsSteps(host, search, "", "", "", "")
+	wantQuery := diagnose.ExcludeAnsibleNoise(diagnose.SecurityLogsQuery(host, search), nil)
+	steps := diagnose.LogsSteps(wantQuery, "", "", "", "")
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
 		steps[0].Command: func() (string, int, error) {
 			return diagnoseOKDoc(t, "dash1", 0, `{"status":"success","data":{}}`+"\nHTTP_STATUS:200"), 0, nil
@@ -486,7 +517,6 @@ func TestDiagnoseSecurityLogsHandler_HostAndSearchComposeIntoQuery(t *testing.T)
 	if result != nil {
 		t.Fatalf("result = %+v, want nil (success)", result)
 	}
-	wantQuery := diagnose.SecurityLogsQuery(host, search)
 	if out.Query != wantQuery {
 		t.Fatalf("out.Query = %q, want %q", out.Query, wantQuery)
 	}
@@ -509,7 +539,7 @@ func TestDiagnoseSecurityLogsHandler_HostAndSearchComposeIntoQuery(t *testing.T)
 func TestDiagnoseSecurityLogsHandler_UnreachableSurfacesAsFieldNotError(t *testing.T) {
 	requireRealAnsible(t)
 	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
-	steps := diagnose.SecurityLogsSteps("", "", "", "", "", "")
+	steps := diagnose.LogsSteps(diagnose.ExcludeAnsibleNoise(diagnose.SecurityLogsQuery("", ""), nil), "", "", "", "")
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
 		steps[0].Command: func() (string, int, error) {
 			doc := map[string]any{"plays": []any{map[string]any{"tasks": []any{map[string]any{"hosts": map[string]any{
@@ -779,7 +809,7 @@ func TestResolveDiagnoseInventory_RegeneratesFreshOnEveryCallNotJustAtStartup(t 
 	if err := os.WriteFile(hostsPath, []byte(hostsWithDashboard), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	steps := diagnose.LogsSteps("up", "", "", "", "")
+	steps := diagnose.LogsSteps(diagnose.ExcludeAnsibleNoise("up", nil), "", "", "", "")
 	fake.byCommand[steps[0].Command] = func() (string, int, error) {
 		return diagnoseOKDoc(t, "dash1", 0, `{"status":"success"}`+"\nHTTP_STATUS:200"), 0, nil
 	}

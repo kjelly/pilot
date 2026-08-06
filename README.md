@@ -167,7 +167,8 @@ inventory host:
     There is no time-range cap: `start`/`end`/`step`/`time` are passed
     through verbatim to Loki/Thanos — the caller decides the query window;
     `--diagnose-step-timeout` is the only backstop against a runaway
-    query.
+    query. `pilot_diagnose_logs` excludes ansible/pilot's own noise by
+    default (see below); pass `include_ansible_noise: true` to see it.
   - `pilot_diagnose_security_logs` — a convenience wrapper over
     `pilot_diagnose_logs` for security/audit events specifically: it
     auto-scopes the query to Loki's `job="pilot-siem"` label, which by
@@ -183,6 +184,18 @@ inventory host:
     JSON body, not in a per-host file path the way log-server's files do,
     so a content search is the one mechanism that finds a host either
     way).
+  - Both `pilot_diagnose_logs` and `pilot_diagnose_security_logs`
+    **exclude pilot's own ansible-generated log noise by default** —
+    ansible's `BECOME-SUCCESS-` become/sudo marker, and any line
+    mentioning one of this inventory's configured `ansible_user` service
+    accounts — since every diagnose/deploy/reconcile ad-hoc or playbook
+    run against a host otherwise pollutes that same host's own logs (e.g.
+    a `pilot_diagnose_sudo` call against a host would show up as a fresh
+    "login" in a later "who logged into that host" query). Set
+    `include_ansible_noise: true` to see it anyway (useful for auditing
+    pilot's own activity specifically). This is a best-effort content
+    filter, not a precise scope — see
+    `internal/diagnose.ExcludeAnsibleNoise`.
 - `--enable-diagnose-raw` (also requires `--diagnose-inventory`,
   independent of `--enable-diagnose`) registers `pilot_diagnose_run`,
   which runs a **caller-supplied** command via ansible's `command` module
