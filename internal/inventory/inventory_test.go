@@ -425,8 +425,15 @@ func TestRoleContracts_VaultSectionsExist(t *testing.T) {
 			if _, ok := vaultSections[sectionID]; !ok {
 				t.Fatalf("role %q references unknown vault section %q", c.Name, sectionID)
 			}
-			if len(VaultSectionExpectedKeys(sectionID)) == 0 {
-				t.Fatalf("role %q references vault section %q but it exposes no expected keys", c.Name, sectionID)
+			// Deliberately checks every declared key, not just required
+			// ones (VaultSectionExpectedKeys excludes Optional keys by
+			// design — see vaultSection.keyNames) — a section can be
+			// legitimately all-Optional (e.g. "alertmanager", whose
+			// apply playbook supplies a working default; see
+			// TestAlertmanagerDefaultConfigIsMinimalAndOperational)
+			// without that being a catalog gap.
+			if len(vaultSections[sectionID].Keys) == 0 {
+				t.Fatalf("role %q references vault section %q but it declares no vault keys at all", c.Name, sectionID)
 			}
 		}
 	}
