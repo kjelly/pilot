@@ -212,6 +212,56 @@
                   endscript
               }
 
+        - name: "Step 5a: Check whether the distro-shipped rsyslog logrotate policy exists"
+          tags: [C20]
+          ansible.builtin.stat:
+            path: /etc/logrotate.d/rsyslog
+          register: distro_rsyslog_logrotate
+
+        - name: "Step 5b: Count paths the distro rsyslog policy rotates OTHER than {{ audit_syslog_path }}"
+          tags: [C20]
+          # Both Debian and RedHat family ship their rsyslog package's
+          # logrotate policy under this exact filename (Debian: mail.log,
+          # kern.log, auth.log, ...; RHEL/AlmaLinux via rsyslog-logrotate:
+          # cron, maillog, messages, secure, spooler), each as one shared
+          # block also listing audit_syslog_path. Since Step 5 above renders
+          # our own /etc/logrotate.d/syslog for the same path, logrotate
+          # finds that path declared in two policy files and aborts the
+          # ENTIRE run with "duplicate log entry", silently breaking
+          # rotation for every log on the host — this is the root cause of
+          # the C20 regression (see docs/runbooks/audit-log-forwarding.md
+          # §5.5). Only the count is needed here to decide whether removing
+          # our path leaves other paths behind.
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail;
+              grep -vFx {{ audit_syslog_path | quote }} /etc/logrotate.d/rsyslog
+              | grep -cE '^/' || true
+            executable: /bin/bash
+          register: distro_rsyslog_other_paths
+          changed_when: false
+          check_mode: false
+          when: distro_rsyslog_logrotate.stat.exists | default(false)
+
+        - name: "Step 5c: Drop {{ audit_syslog_path }} from the distro rsyslog policy, keeping its other paths (spec C20)"
+          tags: [C20]
+          ansible.builtin.lineinfile:
+            path: /etc/logrotate.d/rsyslog
+            regexp: '^{{ audit_syslog_path | regex_escape }}$'
+            state: absent
+          when:
+            - distro_rsyslog_logrotate.stat.exists | default(false)
+            - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) > 0
+
+        - name: "Step 5d: Remove the distro rsyslog policy entirely if it only rotated {{ audit_syslog_path }} (avoids leaving an orphan block with no filename)"
+          tags: [C20]
+          ansible.builtin.file:
+            path: /etc/logrotate.d/rsyslog
+            state: absent
+          when:
+            - distro_rsyslog_logrotate.stat.exists | default(false)
+            - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) == 0
+
         - name: "Step 6a: Resolve this host's canonical FQDN before pinning SIEM aliases"
           tags: [C15]
           ansible.builtin.command: hostname --fqdn

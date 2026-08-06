@@ -1,8 +1,9 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
 > Status: **VERIFIED**
-> Latest completed pass: 2026-07-30 (Asia/Taipei), round 18
-> Evidence: [`2026-07-30-round-18.md`](../evidence/minimal-poc-architecture/2026-07-30-round-18.md)
+> Latest completed pass: 2026-08-06 (Asia/Taipei), round 19
+> Evidence: [`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md)
+> Round 18: [`2026-07-30-round-18.md`](../evidence/minimal-poc-architecture/2026-07-30-round-18.md)
 > Round 17 (unattended-script proof): [`2026-07-27-round-17.md`](../evidence/minimal-poc-architecture/2026-07-27-round-17.md)
 > Round 16 (edit-menu-only rebuild): [`2026-07-25-round-16.md`](../evidence/minimal-poc-architecture/2026-07-25-round-16.md)
 > Round 15 (adopted `vm-target topology`): [`2026-07-23-round-15.md`](../evidence/minimal-poc-architecture/2026-07-23-round-15.md)
@@ -12,6 +13,27 @@
 > `playbooks/apply/freeipa-identity-apply.yml` and
 > `playbooks/apply/freeipa-dns-apply.yml` reconcilers
 > Maintainer: sre
+
+Round 19 (2026-08-06) re-ran the **full** rebuild plus the **full** §4 verification matrix (§4.1–
+§4.4, not a spot-check) from a genuinely fresh clean-room 3-VM topology, driven entirely through
+`pilot edit`/`pilot inventory generate`/`pilot deploy`/`pilot reconcile` — no hand-edited inventory
+YAML outside the documented roster exception, no direct `ansible-playbook`. It also carried a
+specific mandate from a same-day production incident: confirm a same-day fix to
+`audit-log-forwarding-apply.yml` (a cross-file logrotate duplicate-declaration bug, new spec
+regression check C20) actually works on a clean host of every OS family in this topology. It does
+— **except C20 itself surfaced a second, independent gap in that same fix**: v1.3's remediation was
+scoped to Debian family only, but AlmaLinux 9's `rsyslog-logrotate` RPM has the identical
+duplicate-declaration bug under different paths/filenames. Fixed the same session (now v1.4); see
+`docs/runbooks/audit-log-forwarding.md` §5.5.1 for the full incident/fix detail — this composition
+runbook does not duplicate component-specific troubleshooting. Three more findings surfaced during
+the full §4 matrix, all traced to this round's own roster-authoring choices rather than any
+tool/playbook defect (a live-test target left out of a hostgroup, a `force_change` flag left `true`
+after personalizing a user's password — causing an *unrelated* later reconcile to silently reset it,
+a documented-but-easy-to-hit limitation of the reconciler's own password-reset safety design — and a
+sudo rule missing its NOPASSWD option); see §3.3 and §6. One suspected implementation defect
+(`pilot services status` reporting a dead Harbor container stack as healthy) was found and is
+reported, not fixed, matching this round's scope. Full detail:
+[`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md).
 
 Round 18 (2026-07-30) added the new `freeipa-dns` day-2 reconciler
 (`docs/specs/freeipa-dns.md` Phase 5) to a full fresh 3-VM rebuild: site-wide
@@ -65,7 +87,7 @@ component-specific values.
 
 | Item | Last verified value |
 |---|---|
-| Fact timestamp | 2026-07-30T16:15+08:00 |
+| Fact timestamp | 2026-08-06T13:24+08:00 |
 | Targets | `freeipa-server`, `nexus`, `client-vm` |
 | VM sizing | FreeIPA: 2 vCPU/**4608 MiB**/30 GiB; nexus: 6/12288/80; client: 2/2048/20 |
 | VM provisioning | `pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml` (spec's own `services: local` key); see §3.2 |
@@ -73,8 +95,8 @@ component-specific values.
 | Stage | `sandbox` |
 | Alignment | Actual hosts and populated role groups matched the intended topology |
 | Manual extra `-e` | Empty; inventory-derived values were accepted through the wizard |
-| Tested candidate | Working tree at round start (uncommitted `freeipa-dns` Phase 1-5 work); 2 real playbook bugs found+fixed this round (see §6): `freeipa-identity-apply.yml`'s top-level-key gate allow-list, `freeipa-dns-apply.yml`'s FQDN default |
-| Result | Site-wide deploy via the interactive `pilot deploy` wizard passed `failed=0` on all three hosts on the **first** real-apply attempt (`client-vm ok=98 changed=43`, `freeipa-server ok=79 changed=33`, `nexus ok=219 changed=98`); `freeipa-identity` reconcile passed initial apply (`changed=20 failed=0`, after fixing the top-level-key gate bug); `alice`'s forced-change password personalized via scripted `kinit`; **`freeipa-dns` reconcile — new this round** — passed initial apply via the real `pilot reconcile` wizard (`changed=2 failed=0`, after fixing the FQDN-default bug), 3 A records (grafana/wazuh/s3) resolved through `nexus`'s real IP via `dig`, and a clean idempotent rerun through the same wizard (`changed=0 failed=0`); §4 matrix not repeated this round (see §4.5) — this round's focus was proving `freeipa-dns` end to end, not re-running the full verification matrix; see round-18 evidence for both bugs found+fixed |
+| Tested candidate | Working tree at round start, including a same-day `audit-log-forwarding-apply.yml` fix (v1.3, Debian-family logrotate cross-file duplicate removal + new spec check C20); one real gap in that same fix found+fixed mid-round (v1.4, extended to RedHat family — see §6 and `docs/runbooks/audit-log-forwarding.md` §5.5.1) |
+| Result | Site-wide deploy via the interactive `pilot deploy` wizard passed `failed=0` on all three hosts on the **first** real-apply attempt (`client-vm ok=101 changed=44`, `freeipa-server ok=79 changed=33`, `nexus ok=219 changed=99`); `freeipa-identity` reconcile passed initial apply; `alice`'s forced-change password personalized via scripted `kinit`; `freeipa-dns` reconcile passed initial apply (zone + 3 A records resolved through `nexus`'s real IP via `dig`) and an idempotent rerun; **full §4.1–§4.4 matrix re-run this round** (not a repeat of round 18's `freeipa-dns`-only focus) — all checkpoints PASS after fixing 3 round-specific roster-authoring gaps found along the way (see §6); see round-19 evidence for full detail |
 
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
@@ -122,6 +144,20 @@ The component checks live in these specs and are not duplicated here:
 - `docs/verification/wazuh-fim.md`
 - `docs/verification/audit-log-forwarding.md`
 - `docs/verification/restic-backup.md`
+
+**`freeipa-client.md`, `freeipa-identity.md`, and `freeipa-dns.md` do not fully pass `pilot verify`
+against this topology's own roster/manifest — this is expected, not a regression.** All three
+specs' Command/Expected columns are pinned to a fixed fixture (a `pilotuser` account for
+`freeipa-client.md`'s C5/C8; `fixture-group-a`/`fixture-canonical-user-a`/etc. for
+`freeipa-identity.md`; `delete-fixture`/`authoritative-fixture.pilot.internal.`/etc. for
+`freeipa-dns.md`), provisioned by each spec's own separate `§7.1` fixtures playbook — never by this
+runbook's roster/manifest, which intentionally uses `alice`/`bob` and this PoC's own DNS zone.
+Confirmed 2026-08-06 (round 19, the first round to actually run `pilot verify` against these 3
+specs): `freeipa-client.md` 16/20 (only the fixture-bound C5/C8 fail), `freeipa-identity.md` 2/18,
+`freeipa-dns.md` 0/12 — all failures are fixture-name mismatches, not tool/playbook errors. The real
+acceptance test for THIS runbook's own identity/DNS state is §4.1/§4.4 below plus the live checks
+already exercised during `freeipa-identity`/`freeipa-dns` reconcile (group membership, HBAC,
+hostgroups, sudo rules, and a live `dig` round-trip against the real records) — not these 3 specs.
 
 This runbook adds only the cross-component checks: live HBAC/sudo allow and deny, Grafana-facing
 metric/log queries, shared backup visibility, a Wazuh FIM event, and the FreeIPA identity
@@ -294,6 +330,35 @@ tool-endorsed exception as before, now narrower in scope:
 Run `./pilot roster lint <roster-file>` after any hand edit — it checks the same rules
 `freeipa-identity-apply.yml` enforces at real-apply time, without needing a live target.
 
+**Three authoring pitfalls confirmed live 2026-08-06 (round 19) — none caught by `pilot roster
+lint` or any wizard gate, because all three are structurally valid rosters that simply don't do
+what the author intended:**
+
+- **The HBAC rule's target hostgroup must include every host §4.1's live checks actually test
+  against — by default `nexus`, per `scripts/minimal-poc-section4-spotcheck.sh`'s `NEXUS_NODE`
+  default and every prior round's roster (see §6's `sshd.service`/`ssh.service` gotcha, which
+  already assumes `nexus` as the live target).** A hostgroup that only lists `client-vm` lints
+  clean, reconciles clean, and then fails every live SSH/sudo check against `nexus` with a genuine
+  (and correct) HBAC denial — `journalctl -u ssh` on the target shows
+  `pam_sss(sshd:account): Access denied for user <name>` — that is the roster doing exactly what it
+  was told, not a bug.
+- **Flip a user's `password.force_change` to `false` immediately after personalizing that user's
+  password via a real `kinit` — not just once, ever, but as a standing edit whenever you next touch
+  the roster.** `playbooks/apply/freeipa-identity-apply.yml` only skips re-resetting a password when
+  EITHER `force_password: false` and the self-change gap (`krbPasswordExpiration >
+  krbLastPwdChange`) is detected, OR when left `true` it always wins — leaving `force_change: true`
+  on an already-personalized user means the **next reconcile for any unrelated reason** (e.g. a
+  hostgroup fix, a new sudo command) silently resets that user's password back to the roster's
+  `initial` value and re-arms the forced-change flag, breaking every live check that assumed the
+  personalized password until you re-run the `kinit` dance. Confirmed live: a hostgroup-only
+  roster edit stomped an already-personalized user's password this way.
+- **A sudo rule needs `options: ["!authenticate"]` for any live check that runs `sudo -n` (non-
+  interactive).** An empty `options: []` list is a legal, common roster shape — it just means real
+  interactive-password sudo, not NOPASSWD. The resulting `sudo: a password is required` looks
+  identical to the existing stale-SSSD-sudo-cache gotcha (§6) unless you check `ipa sudorule-show
+  <rule>` first: a cache issue shows the rule correctly attached with `!authenticate` already
+  present; a missing-option issue shows the rule attached with no options at all.
+
 The wizard also has an `ansible-vault`-**encrypted** shellout exclusion (`pilot edit` suspends its
 own Program and shells out to the real `ansible-vault edit` with stdio wired to the terminal — not
 a screen, can't be key-driven); fill that by hand via a text editor or `trec drive` if the workspace
@@ -462,12 +527,13 @@ Run every aligned component spec against the generated inventory, then perform t
 checks. Capture exact commands, outputs, exit codes, target facts, and retries in the raw evidence
 artifact rather than appending them here.
 
-**Round 18 scope note**: this round's focus was proving `freeipa-dns` end to end (§3.6) on top of
-a fresh full rebuild — it did not re-run the full §4.1–§4.4 matrix (round 17 already proved that
-matrix cleanly; nothing in §4.1–§4.4 depends on `freeipa-dns`). `freeipa-dns`'s own end-to-end
-check — 3 service names resolving to the right IP via `dig`, surviving a drift-correction cycle,
-staying idempotent — is `docs/verification/freeipa-dns.md`'s own checklist (C1–C12), not a §4 row
-here; see that file and the round-18 evidence record for the real output.
+**Round 18 scope note (historical)**: that round's focus was proving `freeipa-dns` end to end
+(§3.6) on top of a fresh full rebuild — it did not re-run the full §4.1–§4.4 matrix (round 17 had
+already proved that matrix cleanly). `freeipa-dns`'s own end-to-end check — 3 service names
+resolving to the right IP via `dig`, surviving a drift-correction cycle, staying idempotent — is
+`docs/verification/freeipa-dns.md`'s own checklist (C1–C12), not a §4 row here; see that file and
+the round-18 evidence record for the real output. **Round 19 re-ran the full §4.1–§4.4 matrix**
+(see §7) — this scope note is kept only as historical context for round 18's own record.
 
 §4.1's HBAC checks and §4.2's Thanos `up` check are pure read-only assertions against an already-
 deployed site — there is no wizard, prompt, or mutation to observe, so they are scripted (see
@@ -557,6 +623,7 @@ path; only remove it once the user has reviewed it or explicitly asks for cleanu
 
 | Symptom | Cause | Current action |
 |---|---|---|
+| `pilot vm-target topology up` fails with `services: Harbor is unreachable: ... connection refused`, even though `pilot services status` reported `running=true` moments before | **Suspected implementation defect, reported not fixed (round 19, 2026-08-06).** The dev-lite Harbor containers had actually exited (`docker ps` showed `Exited (128)` ~28 hours earlier), but `pilot services status`'s health signal did not reflect that — the first real signal came from `topology up`'s own consumer-side connectivity check, not from `services status` itself. Confirmed live 2026-08-06. | `./pilot services down && ./pilot services up --profile dev-lite` (full recreate), confirm the Harbor health endpoint returns HTTP 200, then retry `topology up`. Not yet root-caused in Go source this round (out of scope for the audit-log-forwarding fix this round was scoped to); a future round should investigate `pilot services status`'s health-check implementation. |
 | Site-wide deploy's real apply fails `nexus`'s `freeipa-client` component with `Joining realm failed: Operations error: Error checking for attribute uniqueness` | Transient FreeIPA/389-ds LDAP contention when two `freeipa-client` hosts run `ipa-client-install` concurrently against the same server (Ansible's default `ANSIBLE_FORKS=20` runs both in the same play) — confirmed live 2026-07-23 (round 15); the losing host is excluded from every subsequent play in that same `ansible-playbook` run, which cascades into unrelated-looking failures on it (e.g. `wazuh-fim`'s agent-auth failing because `wazuh-manager` never got applied to the excluded host) | Simply re-run `pilot deploy` (site-wide is idempotent — already-applied hosts report `changed=0`); only one host is left to enroll on retry, so it no longer races. Not evidence of a topology/bring-up defect. |
 | First live sudo is denied although `ipa hbactest --service=sudo` allows it | Stale SSSD sudo cache on the client | Run `sss_cache -E`, restart `sssd`, and repeat the live and authoritative checks. Do **not** add `sudo` to `sssd.conf` `services=`; the sudo responder is socket-activated and that edit breaks its socket. |
 | `pilot deploy --dir ...` is rejected | `deploy` takes an inventory with `-i`; `--dir` belongs to authoring commands such as `pilot edit` | Use the §3.4 invocation. |
@@ -578,30 +645,36 @@ path; only remove it once the user has reviewed it or explicitly asks for cleanu
 | `pilot reconcile`'s `freeipa-identity` preview crashes with `Error while resolving value for 'identity_hbac_test_host': object of type 'dict' has no attribute 'server'` | **Suspected implementation defect, reported not fixed (round 17, 2026-07-27).** `freeipa-identity-apply.yml`'s "Normalize canonical FreeIPA settings" task reads `freeipa_roster.freeipa.server` with no `\| default(...)` fallback, unlike every sibling field in the same `set_fact` block and unlike the same variable's own top-level default at line 70 (`ipa_server_fqdn \| default(inventory_hostname)`). `freeipa.server` is a legal-but-optional roster key (`roster_validate.go`'s `knownFreeIPAKeys`, not required by `contracts/freeipa-identity.yaml`), and `pilot edit`'s own NFS-role-add bootstrap (`internal/inventory/nfs_bootstrap.go`'s `WriteMinimalNFSServerRoster`) never writes it — so this crashes on a roster produced entirely through sanctioned tooling, not a hand-authoring mistake. Confirmed live 2026-07-27, round 17; reproduction changed exactly one variable (adding `freeipa.server` made the identical preview pass). Still not fixed as of round 18 — the round-18 fix below is a *different*, independent bug in the same gate area. | Add `freeipa.server: <the freeipa-server host's real FQDN>` (confirm via `hostname -f` on the VM, e.g. `ipa1.<domain>` — don't assume the alias other hosts use) and `freeipa.realm` to the roster by hand (the existing nested-YAML hand-edit exception, §3.3) until this is fixed upstream. Proposed fix for a future round: give `identity_hbac_test_host` the same `\| default(ipa_server_fqdn \| default(inventory_hostname))` fallback its sibling top-level default already uses. |
 | `pilot reconcile`'s `freeipa-identity` preview fails with `Canonical roster contains an unknown freeipa/admin field` even though the roster's `freeipa.domain`/`freeipa.realm` are exactly the fields the round-17 workaround above says to add | **Real bug, found and fixed (round 18, 2026-07-30).** `freeipa-identity-apply.yml`'s "Gate: canonical top-level and FreeIPA keys are known" assert hardcoded its allowed `freeipa.*` keys to `['server', 'admin', 'defaults', 'safety']`, omitting `domain`/`realm` — but `internal/inventory/roster_validate.go`'s `knownFreeIPAKeys` explicitly allows both, with a comment stating the apply playbook is supposed to just ignore them, not reject them. Worse: `WriteMinimalNFSServerRoster`'s bootstrap-generated roster (the NFS-role-add path, §3.3) always writes `freeipa.domain` — so this gate failed on **every** workspace built through the sanctioned tooling, before ever reaching the round-17 `freeipa.server` defect above. `pilot roster lint` never caught it (the Go-side validator already permitted the shape); only a real `ansible-playbook` run surfaced it. Confirmed live 2026-07-30, round 18. | Fixed in `freeipa-identity-apply.yml`: the assert's allowed `freeipa.*` key list now includes `domain`/`realm`, matching `knownFreeIPAKeys`. Upgrade past this fix; no roster-level workaround needed. |
 | `pilot reconcile`'s `freeipa-dns` preview fails with `manifest freeipa.domain/realm/server must equal this deployment's freeipa_domain/freeipa_realm/freeipa_server_fqdn (§5.2)`, showing the manifest's `server` value against a bare inventory host alias (e.g. `freeipa-server`) rather than a real FQDN | **Real bug, found and fixed (round 18, 2026-07-30).** `freeipa-dns-apply.yml`'s `ipa_server_fqdn_expected` defaulted to a bare `inventory_hostname` when `freeipa_server_fqdn` was left unset — the documented "usually don't need to fill this in" convention (`group_vars/freeipa.example.yml`) — instead of `'ipa1.' ~ ipa_domain`, the default `freeipa-server-apply.yml` itself uses to compute the FQDN it actually installs the server as. Any workspace following that documented convention (i.e. every workspace built through §3.3's wizard-driven path) failed this gate on `freeipa-dns` reconcile. Confirmed live 2026-07-30, round 18; reproduction changed exactly one variable (setting `freeipa_server_fqdn` explicitly made the identical preview pass, which is why earlier ad hoc testing of this playbook never hit it). | Fixed in `freeipa-dns-apply.yml`: `ipa_server_fqdn_expected` now defaults to `'ipa1.' ~ ipa_domain`, matching `freeipa-server-apply.yml`. Upgrade past this fix; no manual `-e freeipa_server_fqdn=...` override needed for the standard naming convention. |
+| A reconcile for one unrelated roster change (e.g. adding a hostgroup member) silently resets an already-personalized user's password, breaking every live SSH/sudo check that assumed it | **Documented, acknowledged limitation of the reconciler's own password-reset safety design — confirmed live 2026-08-06, round 19, not a new bug.** `freeipa-identity-apply.yml`'s own code comment (around "Passwords are set unconditionally...") explains the `krbLastPwdChange`/`krbPasswordExpiration` self-change detection only protects the `force_password: false` case; a roster entry that still has `force_change: true` from its original onboarding always re-triggers `ipa passwd` on every subsequent reconcile, regardless of whether the user has since personalized it, because the task's `when:` is `force_password OR needs_reset` (an OR, not a gate). | Flip `password.force_change` to `false` in the roster the same day you personalize a user's password via `kinit` — see the new §3.3 authoring-pitfalls note. If it already happened: re-run the `kinit` forced-change dance once more (old=roster's `initial` value, new=your choice), then flip the flag so it doesn't recur on the next reconcile. |
+| A sudo rule's live `sudo -n <cmd>` fails with `sudo: a password is required`, and `ipa sudorule-show <rule>` confirms the rule is attached | **Authoring mistake (missing NOPASSWD), not the stale-SSSD-sudo-cache gotcha above — confirmed live 2026-08-06, round 19.** The roster's `sudo.rules[].options` was `[]`; without `!authenticate`, `sudo -n` correctly refuses since it can't prompt interactively. Distinguish from the cache-staleness row above by checking `ipa sudorule-show <rule>`'s own output: a cache issue shows `!authenticate` already present; a missing-option issue shows no options at all. | Add `"!authenticate"` to the rule's `options` list, reconcile, then still run `sss_cache -E && systemctl restart sssd` on the target client (the cache-staleness gotcha applies on top of this once the option exists). |
 
 Detailed component-specific troubleshooting belongs in the aligned spec/runbook for that component,
 not in this composition runbook.
 
 ## 7. Latest verified evidence
 
-| Field | Round 18 record |
+| Field | Round 19 record |
 |---|---|
-| Verified at | 2026-07-30T16:15+08:00 |
-| Tested revision/tree | Working tree at round start (uncommitted `docs/specs/freeipa-dns.md` Phase 1-5 work); 2 real playbook bugs found+fixed this round (§6); rebuilt `./pilot` binary |
+| Verified at | 2026-08-06T13:24+08:00 |
+| Tested revision/tree | Working tree at round start, including a same-day `audit-log-forwarding-apply.yml` v1.3 fix (Debian-family logrotate cross-file duplicate removal + new C20 check); one real gap in that fix found+fixed mid-round (v1.4, RedHat family — §6, `docs/runbooks/audit-log-forwarding.md` §5.5.1) |
 | Targets | Fresh `freeipa-server` (AlmaLinux 9), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via **`pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml`** |
-| Focus | Adding the new `freeipa-dns` day-2 reconciler (`docs/specs/freeipa-dns.md` Phase 5) to a full fresh rebuild — site-wide deploy, `freeipa-identity` reconcile, and (new) `freeipa-dns` reconcile, all through the real `pilot edit`/`pilot deploy`/`pilot reconcile` wizards; not a repeat of round 17's full §4 matrix (see §4's round-18 scope note) |
-| hosts.yml build | 3-host, 24-role-assignment `hosts.yml` (adds `freeipa-dns`'s two extra host vars on top of round 17's 22 role-assignments), including the NFS-role-add bootstrap on `nexus` and hand-set `freeipa_roster_file`/`freeipa_dns_manifest_file` extra vars on `freeipa-server` |
-| group_vars/vault/roster | Hard-required `group_vars` values filled (prometheus/thanos-query S3 target, dashboard Thanos-Query target, restic S3 target, wazuh-fim manager host, freeipa server IP); `.vault/main.yaml`'s remaining secrets added; roster's `access-poc-ssh`/`role-poc-sudo`/`data-poc-share-rw` groups and `alice`/`bob` users added via the roster manager (now covers per-entry fields/membership, not just append-only creation); HBAC rules (incl. a `hostcat: all` breakglass admin rule), sudo rule, and one NFS share hand-edited into the roster's nested YAML (still the documented exception — the roster manager's own HBAC/sudo screens only support group→hostgroup rules, not `hostcat: all`); `freeipa.server`/`freeipa.realm` added per the round-17 workaround |
-| Site apply | Interactive `pilot deploy` wizard — `client-vm ok=98 changed=43 failed=0`; `freeipa-server ok=79 changed=33 failed=0`; `nexus ok=219 changed=98 failed=0`; passed on the **first** real-apply attempt |
-| Canonical identity | Interactive `pilot reconcile` wizard — initial apply `changed=20 failed=0` (after fixing the top-level-key gate bug, §6); `alice`'s forced-change password personalized via scripted `kinit` |
-| **DNS reconcile — new this round** | Interactive and unattended `pilot reconcile` wizard runs — initial apply `changed=2 failed=0` (after fixing the FQDN-default bug, §6): 3 A records (grafana/wazuh/s3) created in a new `svc.pilot.internal.` zone, all resolving to `nexus`'s real IP via `dig +short ... @127.0.0.1`; idempotent rerun `changed=0 failed=0` |
-| §4 full matrix | **Not re-run this round** — round 17 already proved it cleanly and nothing in §4.1–§4.4 depends on `freeipa-dns`; see §4's scope note |
-| Functional verdict | PASS — `freeipa-dns` proven end to end through the real, sanctioned `pilot reconcile` wizard (both live-interactive and unattended) against a genuinely fresh full-topology rebuild, alongside a still-passing `freeipa-identity` reconcile |
-| New this round | Per-run DNS wizard flow confirmed unattended; 2 real (non-script) bugs found and fixed — `freeipa-identity-apply.yml`'s top-level-key gate allow-list (missing `domain`/`realm`) and `freeipa-dns-apply.yml`'s `ipa_server_fqdn_expected` default (see §6 for both) |
-| Publication | [`2026-07-30-round-18.md`](../evidence/minimal-poc-architecture/2026-07-30-round-18.md), [`docs/evidence/freeipa-dns/2026-07-30.md`](../evidence/freeipa-dns/2026-07-30.md); secret values and ephemeral addresses omitted |
+| Focus | Full clean-room rebuild **plus the complete §4.1–§4.4 verification matrix** (not a spot-check) — the first round since 17 to re-run the whole matrix — carrying a specific mandate to confirm the audit-log-forwarding fix on a clean multi-OS host set |
+| hosts.yml build | 3-host, 24-role-assignment `hosts.yml`, including the NFS-role-add bootstrap on `nexus` and hand-set `freeipa_roster_file`/`freeipa_dns_manifest_file` extra vars on `freeipa-server` |
+| group_vars/vault/roster | Hard-required `group_vars` values filled; `.vault/main.yaml` secrets added (self-chosen sandbox-only values); roster's `access-poc-ssh`/`role-poc-sudo` groups and `alice`/`bob` users added via the roster manager; HBAC rules (incl. breakglass admin), sudo rule, and one NFS share hand-edited into the roster's nested YAML (documented exception) |
+| Site apply | Interactive `pilot deploy` wizard — `client-vm ok=101 changed=44 failed=0`; `freeipa-server ok=79 changed=33 failed=0`; `nexus ok=219 changed=99 failed=0`; passed on the **first** real-apply attempt; live-confirmed the audit-log-forwarding C20 fix's diff on both `client-vm` and `nexus` in the `--check --diff` preview |
+| Canonical identity + DNS reconcile | Both passed initial apply and an idempotent rerun through the real `pilot reconcile` wizard; 3 A records (grafana/wazuh/s3) resolved through `nexus`'s real IP via `dig` |
+| §1 spec verify (new this round) | First round to run `pilot verify` against all 15 §1-listed specs (plus 2 extra) on this topology: 12 clean, 1 real bug found+fixed (`audit-log-forwarding` C20 on RedHat family, now 60/60), 2 expected non-applicable given this PoC's deliberate scope (`wazuh-manager.md` C11, `log-shipping.md`), 3 expected fixture-only non-passes clarified in §1 (`freeipa-client.md`/`freeipa-identity.md`/`freeipa-dns.md`) |
+| §4.1/§4.2 spot-check | 8/8 pass after fixing 3 round-specific roster-authoring gaps (hostgroup target, `force_change` flip-back, sudo `!authenticate`) — see §6 |
+| §4.3 backup + Wazuh FIM | `restic-backup.timer` active/enabled on all 3 hosts; triggered fresh backup, shared repo snapshot count 3→6 (one per host); created a unique `/etc` file on `client-vm`, genuine real-time `whodata` FIM alert captured on the manager with a populated `audit` block — both PASS on first attempt |
+| §4.4 identity reconciler cycle | Full remove → confirm denial (password untouched) → restore + add new sudo command → confirm both take effect → idempotent rerun cycle, all PASS; idempotent rerun's `changed=1` fully explained (bob's `force_change: true` deterministically re-arms every run — by design, not flaky) |
+| Functional verdict | PASS — every checkpoint reached a clean, explained PASS; the 1 real regression found (audit-log-forwarding C20 on RedHat family) was fixed and re-verified the same session |
+| New this round | 1 real playbook bug found+fixed (audit-log-forwarding C20, RedHat family); 3 round-specific roster-authoring gaps found+fixed (not tool/playbook defects — new §3.3 guidance added); 1 suspected implementation defect reported not fixed (`pilot services status` health-check gap, §6); first-ever `pilot verify` run against `freeipa-client.md`/`freeipa-identity.md`/`freeipa-dns.md` on this topology, clarifying their fixture-only design in §1 |
+| Publication | [`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md); secret values and ephemeral addresses omitted |
 
-Round 17's own record (full §4 matrix, unattended-script proof for scripts 01-05) remains valid and
-is not repeated here — see [`2026-07-27-round-17.md`](../evidence/minimal-poc-architecture/2026-07-27-round-17.md).
+Round 18's own record (`freeipa-dns` day-2 reconciler proof) and round 17's (full §4 matrix,
+unattended-script proof for scripts 01-05) remain valid and are not repeated here — see
+[`2026-07-30-round-18.md`](../evidence/minimal-poc-architecture/2026-07-30-round-18.md) and
+[`2026-07-27-round-17.md`](../evidence/minimal-poc-architecture/2026-07-27-round-17.md).
 
 The compact evidence record contains the current candidate provenance, result matrix, documented
 exceptions, and raw-artifact pointers. Earlier runs remain available in their evidence records and

@@ -1,6 +1,6 @@
 # Verification Spec — audit-log-forwarding（auditd 稽核規則 + rsyslog 轉送至 SIEM）
 
-> 版本：v1.2
+> 版本：v1.4
 > 對齊規範：pilot 通用 config-only 服務規範；轉送目標為
 > `docs/verification/log-server.md`（rsyslog 中央接收端），兩份 spec 搭配構成
 > 一組 Shape 3（client+server）。
@@ -13,7 +13,7 @@
 | Hostname / Inventory group | audit-log-forwarding（vm-target 測試時用單一 host，見 §7） |
 | OS / version | Ubuntu 24.04 LTS / AlmaLinux 9 |
 | 角色 | 一般受管主機：本機 auditd 稽核（setuid/setgid、sudo、`/etc/passwd`、`/etc/sudoers`）+ rsyslog 轉送 `auth,authpriv.*`/`local6.*` 到中央 SIEM |
-| 套用範圍 | `/etc/audit/rules.d/99-custom.rules`、`/etc/logrotate.d/{auditd,syslog}`、`/etc/rsyslog.d/99-siem-forward.conf`、`/etc/hosts`（`siem-log-server` 別名） |
+| 套用範圍 | `/etc/audit/rules.d/99-custom.rules`、`/etc/logrotate.d/{auditd,syslog}`（Debian 與 RedHat family 上都會另外從 distro 內建的 `/etc/logrotate.d/rsyslog` 移除重複的 `{{ audit_syslog_path }}` 宣告，見 C20）、`/etc/rsyslog.d/99-siem-forward.conf`、`/etc/hosts`（`siem-log-server` 別名） |
 | 風險等級 | High（auditd 規則寫錯可能導致稽核死鎖或漏記；rsyslog 轉送設定錯誤只會漏送，不影響本機既有日誌） |
 
 ## 1.5 依賴變數契約
@@ -68,8 +68,9 @@
 | C17 | forward   | 轉送設定含 `auth,authpriv.*` → `siem-log-server` 的 TCP 轉送規則         | 0        | grep -qE '^auth,authpriv\.\*[[:space:]]+@@siem-log-server:' /etc/rsyslog.d/99-siem-forward.conf; echo $? |
 | C18 | service   | `auditd.service` 為 active                                             | 0        | systemctl is-active auditd >/dev/null 2>&1; echo $? |
 | C19 | service   | `rsyslog.service` 為 active                                            | 0        | systemctl is-active rsyslog >/dev/null 2>&1; echo $? |
+| C20 | logrotate | `/etc/logrotate.d/` 下沒有任何 log path 被兩份以上的 policy 檔重複宣告（不限於本模組管理的 auditd/syslog 兩個檔案，涵蓋 distro 內建的 `rsyslog` 等所有檔案） | 0        | sh -c 'test -z "$(grep -rhoE "^/[^ {]+" /etc/logrotate.d/ 2>/dev/null | sort | uniq -d)" && echo 0 || echo 1' |
 
-> C1–C19 全部用**正邏輯 rc**（`; echo $?` 或原生 rc，C11 用
+> C1–C20 全部用**正邏輯 rc**（`; echo $?` 或原生 rc，C11 用
 > `sh -c '... && echo 0 || echo 1'` 讓外層指令恆回 0），不用反邏輯 grep + 數字
 > expected（見 `verification-spec-template.md` 陷阱 1）。
 > C11 原本設計用 `ausearch -k privileged-sudo`，但實測（見 §7 SOP 的 vm-target
@@ -96,11 +97,11 @@
 
 - 工具：`go run ./cmd/pilot vm-target verify --name <target> docs/verification/audit-log-forwarding.md`
 - 輸出格式：`.verification/audit-log-forwarding-<UTC>.{ndjson,md}`
-- 預期 row 數：19（C1–C19）
+- 預期 row 數：20（C1–C20）
 
 ## 4. PASS / FAIL 規則
 
-- 全部 C1–C19 `status=pass` → **PASS**
+- 全部 C1–C20 `status=pass` → **PASS**
 - 任一 `status=fail` → **FAIL**，列出 fail id + actual + want
 
 ## 5. 例外與已知偏差
@@ -109,7 +110,37 @@
 |----|---------|---------|------|
 | C10/C11/C16/C17 | 本 spec 只驗證「client 端規則正確載入 + 本機稽核事件正確產生 + 轉送設定正確指向別名」，**不**驗證「訊息真的被 log-server 收到」——那是跨主機 Shape 3 cross-check，做法見 `docs/runbooks/audit-log-forwarding.md` §4（在這台注入、去 log-server 讀檔驗證） | 所有環境 | 永久（設計如此，非暫時偏差） |
 | C6 | `chmod`/`fchmod`/`fchmodat` 規則沒有加 `-F auid>=1000 -F auid!=unset`（CIS 常見寫法會加，用來排除系統自身的 chmod 呼叫），本 spec 選擇不排除，讓 sandbox 環境的驗證更單純；正式站台若稽核量太大可在規則加此過濾，但要同步改 C6 的 grep pattern | sandbox / 測試環境 | 正式站台上線前檢討 |
-| C15, C16, C17 | 這三條的前提是套用時提供了 `siem_forward_host`（見 §1.5，v1.1 起選填）。若 log server 尚未存在、套用時未帶這個變數，playbook 會跳過轉送設定，C15–C17 在 `pilot verify` 會回報 `fail`（`/etc/hosts` 沒有別名、`99-siem-forward.conf` 不存在）——這是**預期行為**，不是 bug：此時應只驗證 C1–C14, C18–C19（本機稽核 + logrotate + auditd 服務），待 log server 就緒、補跑一次 apply 帶上 `siem_forward_host` 後再驗全部 19 條 | 無 log server 的獨立部署 / log server 尚未就緒的過渡期 | 補上 `siem_forward_host` 並重新 apply 後即解除 |
+| C15, C16, C17 | 這三條的前提是套用時提供了 `siem_forward_host`（見 §1.5，v1.1 起選填）。若 log server 尚未存在、套用時未帶這個變數，playbook 會跳過轉送設定，C15–C17 在 `pilot verify` 會回報 `fail`（`/etc/hosts` 沒有別名、`99-siem-forward.conf` 不存在）——這是**預期行為**，不是 bug：此時應只驗證 C1–C14, C18–C20（本機稽核 + logrotate + auditd 服務），待 log server 就緒、補跑一次 apply 帶上 `siem_forward_host` 後再驗全部 20 條 | 無 log server 的獨立部署 / log server 尚未就緒的過渡期 | 補上 `siem_forward_host` 並重新 apply 後即解除 |
+
+> **C20 的由來**：v1.2 的 C14 只對本模組自己管理的兩個檔案跑
+> `logrotate -d /etc/logrotate.d/auditd /etc/logrotate.d/syslog`，範圍太窄，
+> 抓不到「我們的檔案跟 distro 內建檔案互相衝突」這類跨檔案問題。實際 incident：
+> Ubuntu 的 `rsyslog` 套件本身就內建 `/etc/logrotate.d/rsyslog`，預設也會列出
+> `/var/log/syslog`（跟其他路徑如 `mail.log`/`kern.log`/`auth.log` 共用一個
+> block）；本 playbook 的 Step 5 又另外 render 了 `/etc/logrotate.d/syslog`
+> 管同一個路徑，兩份檔案對同一個 log path 重複宣告，logrotate 會直接中止
+> **整台機器**的 rotation（`error: syslog:N duplicate log entry for
+> /var/log/syslog`），不是只有我們自己的兩個檔案受影響。詳見
+> `docs/runbooks/audit-log-forwarding.md` §5.5。C20 直接掃描
+> `/etc/logrotate.d/` 整個目錄找重複路徑，才會抓到這類問題；C14 本身維持
+> 原範圍不變（驗證的是我們自己兩個檔案的語法正確性，跟 §5.4 的
+> insecure-permissions 教訓有關，換成掃全目錄反而會誤觸 distro 自己檔案
+> 沒有 `su` 宣告的已知雜訊）。
+>
+> **v1.3 的修法一開始只蓋到 Debian family，v1.4 補上 RedHat family**：
+> v1.3 的 Step 5a–5d 只在 `ansible_os_family == "Debian"` 時檢查
+> `/etc/logrotate.d/rsyslog`。round-19 clean-room 重建（AlmaLinux 9 的
+> `freeipa-server`）跑 C20 時當場抓到同一類 bug 也在 RedHat family 上發生：
+> `rsyslog-logrotate` RPM 套件同樣把 `/etc/logrotate.d/rsyslog` 這個檔名
+> 內建成一個共用 block（`cron`/`maillog`/`messages`/`secure`/`spooler`），
+> 跟本模組 render 的 `/etc/logrotate.d/syslog`（此時 `audit_syslog_path`
+> 已解析成 `/var/log/messages`）對同一路徑重複宣告，會踩到跟 Ubuntu 一樣的
+> `duplicate log entry` 全機中止。修法：拿掉 Step 5a–5d 的
+> `ansible_os_family` 條件，只靠 `distro_rsyslog_logrotate.stat.exists`
+> 本身把關——因為兩個 family 內建檔案剛好都叫 `rsyslog`、都是「多行路徑 +
+> 一個共用 block」的格式，同一套 `grep`/`lineinfile` 邏輯兩邊都適用。已在
+> `freeipa-server` 實測 `--check --diff` 預覽、真套用、`changed=0` 冪等重跑
+> 全部通過，C20 20/20 全綠（含 client-vm/nexus 兩台 Debian family）。
 
 ## 6. Playbook 對應
 
@@ -125,10 +156,11 @@
 | C15 | `lineinfile /etc/hosts` pin `siem-log-server` | 必須在轉送設定 render 之前（同 freeipa-client `/etc/hosts` 先於 enroll 的教訓） |
 | C16, C17 | `template 99-siem-forward.conf` | `auth,authpriv.*` + `local6.*` 都用 `@@`（TCP）轉送 |
 | C18, C19 | `ensure auditd + rsyslog enabled+restarted` | rsyslog 只在轉送設定真的變更時才 restart |
+| C20 | `stat` + `shell`（計算 distro rsyslog 檔還剩幾個其他路徑）+ `lineinfile`/`file`（Step 5a–5d，Debian 與 RedHat family 都跑，只看 `/etc/logrotate.d/rsyslog` 是否存在，不再用 `ansible_os_family` 額外過濾） | 只移除 `{{ audit_syslog_path }}` 這一行，其他路徑（Debian：`mail.log`/`kern.log`/`auth.log`...；RHEL：`cron`/`maillog`/`secure`/`spooler`...）留給 distro 自己的檔案繼續管；如果那份檔案原本就只列這一個路徑，改成整份移除，避免留下沒有檔名的空 block 讓 logrotate 解析失敗 |
 
 ## 7. SOP
 
-### 7.1 標準情境：log server 已存在（轉送啟用，驗證全部 19 條）
+### 7.1 標準情境：log server 已存在（轉送啟用，驗證全部 20 條）
 
 ```bash
 # 前置：log-server 必須先 apply（見 docs/verification/log-server.md §7）並記下其 IP
@@ -145,7 +177,7 @@ go run ./cmd/pilot vm-target run --name audit-log-forwarding \
     playbooks/apply/audit-log-forwarding-apply.yml \
     -e siem_forward_host=$LOG_SERVER_IP
 
-# 3. verify（本機規則/服務/轉送設定，全部 19 條）
+# 3. verify（本機規則/服務/轉送設定，全部 20 條）
 go run ./cmd/pilot vm-target verify --name audit-log-forwarding \
     docs/verification/audit-log-forwarding.md
 
@@ -170,9 +202,9 @@ go run ./cmd/pilot vm-target exec --name log-server -- \
 go run ./cmd/pilot vm-target run --name audit-log-forwarding \
     playbooks/apply/audit-log-forwarding-apply.yml
 
-# 2. verify（pilot verify 沒有「只驗證部分 row」的選項，會照跑全部 19 條；
+# 2. verify（pilot verify 沒有「只驗證部分 row」的選項，會照跑全部 20 條；
 #    C15-C17 這時預期回報 fail——屬設計如此，見 §5，判讀報告時忽略這三條，
-#    只看 C1-C14, C18, C19 是否全 pass）
+#    只看 C1-C14, C18-C20 是否全 pass）
 go run ./cmd/pilot vm-target verify --name audit-log-forwarding \
     docs/verification/audit-log-forwarding.md
 
@@ -194,3 +226,5 @@ go run ./cmd/pilot vm-target run --name audit-log-forwarding \
 | 2026-07-06 | v1.0 | 初版：auditd 規則（setuid/setgid 變更+執行、sudo、passwd/sudoers 監控）+ logrotate + rsyslog 轉送至 `log-server.md` | sre |
 | 2026-07-06 | v1.1 | `siem_forward_host` 改為選填：log server 不一定先於 client 存在，本機稽核（C1-C14, C18, C19）應獨立可用；未提供時 apply 跳過 `/etc/hosts` pin 與 `99-siem-forward.conf`，C15-C17 對應標記為已知偏差（§5），待 log server 就緒後補跑 apply 即可補齊轉送 | sre |
 | 2026-07-22 | v1.2 | C1/C2 改為 Ubuntu dpkg 與 EL rpm 雙平台 probe；EL logrotate 使用 `/var/log/messages` 與 `root` group，避免不存在的 Ubuntu `syslog` group | sre |
+| 2026-08-06 | v1.3 | 新增 C20：全目錄掃描 `/etc/logrotate.d/` 偵測跨檔案的重複 log path 宣告；修 5 台 Ubuntu 主機的真實 incident——`rsyslog` 套件內建的 `/etc/logrotate.d/rsyslog` 跟本模組自己的 `/etc/logrotate.d/syslog` 都宣告了 `/var/log/syslog`，logrotate 因此對全機 rotation 整個中止（`duplicate log entry`）；apply playbook Step 5a–5d 在 Debian family 上從 distro 檔案移除重複路徑（詳見 `docs/runbooks/audit-log-forwarding.md` §5.5） | sre |
+| 2026-08-06 | v1.4 | round-19 minimal-poc clean-room 重建時，C20 在 AlmaLinux 9 的 `freeipa-server` 上當場抓到 v1.3 的修法漏了 RedHat family：`rsyslog-logrotate` RPM 同樣把 `/etc/logrotate.d/rsyslog` 內建成一個共用 block（`cron`/`maillog`/`messages`/`secure`/`spooler`），跟本模組 render 的 `/etc/logrotate.d/syslog`（`audit_syslog_path=/var/log/messages`）重複宣告，會踩到同一種全機 rotation 中止；拿掉 Step 5a–5d 的 `ansible_os_family == "Debian"` 限制，改成只靠 `distro_rsyslog_logrotate.stat.exists` 把關，兩個 family 共用同一套 `grep`/`lineinfile` 邏輯；已在 `freeipa-server` 實測 check-mode 預覽、真套用、`changed=0` 冪等重跑全部通過，C20 20/20 全綠 | sre |

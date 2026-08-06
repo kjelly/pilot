@@ -375,6 +375,113 @@ logrotate「以 `root:syslog` 身分執行這個 policy 的檔案動作」，log
 路徑，但既然我們的 spec C14 要驗證「dry-run 不出錯」，我們自己的檔案就該
 加上這個宣告讓檢查有意義。）
 
+### 5.5 五台正式站台的 logrotate 全機中止：`/var/log/syslog` 被兩份 policy 檔重複宣告
+
+2026-08-06，五台主機（`it-core`、`lkvs-ovx2`、`vlm`、`pro6k-edge`、
+`dt-port6000`）在幾乎同一時間（UTC 00:00 前後，`dt-port6000` 晚一輪，UTC
+16:00）出現 logrotate 失敗。逐台看 journal 的根因都一樣：
+
+```
+syslog:2 duplicate log entry for /var/log/syslog
+```
+
+**根因**：這五台上同時存在兩份 logrotate policy 檔，都宣告了
+`/var/log/syslog`：
+
+- `/etc/logrotate.d/rsyslog` —— Ubuntu `rsyslog` 套件內建的預設檔，實測內容
+  是把 `/var/log/syslog`、`/var/log/mail.log`、`/var/log/kern.log`、
+  `/var/log/auth.log`、`/var/log/user.log`、`/var/log/cron.log` 全部列在
+  同一個共用 block 裡。
+- `/etc/logrotate.d/syslog` —— 本 playbook Step 5 自己 render 的檔案，同樣
+  管 `/var/log/syslog`（Debian family 上 `audit_syslog_path` 就是這個路徑）。
+
+logrotate 讀 `/etc/logrotate.conf` 的 `include /etc/logrotate.d` 時，一旦同一
+個路徑在兩份檔案裡出現，會直接整個 run 回報 error、退出 `status=1`——不是只
+跳過衝突的那個路徑，而是**整台機器所有 log 都不再輪替**（`auth.log`、
+`kern.log`、`mail.log`... 全部受影響，不只 syslog 自己）。另外查證：
+
+- `/etc/logrotate.d/auditd`（管 `/var/log/audit/audit.log`）內容正常，不在
+  衝突範圍內——`auditd` 自己建的 `/var/log/audit` 目錄權限較嚴，且路徑跟
+  `rsyslog`/`syslog` 兩份檔案都不重疊。
+- 五台在對應時間窗都查不到 AVC；`getenforce`/`/sys/fs/selinux` 在這些環境
+  不存在——手上證據不支持「SELinux `logrotate_t` → `auditd_log_t` 被擋」這個
+  假設，`lkvs-ovx2` 曾出現過的 AVC 說法對不上這次事件的時間點/環境，不能拿
+  來解釋這次的 service failure。
+
+**修法**（`playbooks/apply/audit-log-forwarding-apply.yml` Step 5a–5d，
+v1.3 版最初只蓋 Debian family，v1.4 版擴大到 RedHat family——見下方
+「5.5.1 後續發現」）：不是整份刪掉 `/etc/logrotate.d/rsyslog`（那會連
+`mail.log`/`kern.log`/`auth.log`/`user.log`/`cron.log` 的輪替都一起丟掉），
+而是先數一下這份 distro 檔案裡，除了 `audit_syslog_path` 之外還剩幾個其他
+路徑：
+
+- 還有其他路徑（實測 Ubuntu 24.04 就是這種情況，剩 5 個）→ 只用
+  `lineinfile` 移除 `/var/log/syslog` 這一行，其他路徑跟共用的 block（`{
+  ... postrotate ... }`）原封不動留給 distro 自己管。
+- 沒有其他路徑（該檔案本來就只列這一個路徑）→ 整份 `file: state=absent`
+  刪掉，因為只移除路徑行會留下一個沒有檔名的空 block，logrotate 解析會噴
+  `lines must begin with a keyword or a filename` 這個新錯誤——比原來的
+  duplicate 更糟。
+
+兩種分支都在本機用一個 repro（`/etc/logrotate.d/` 底下放兩份都宣告同一個
+假路徑的檔案）驗證過：修前 `logrotate -d` 回報
+`error: syslog:1 duplicate log entry for ...` 且 `exit_rc=1`；修後（無論是
+「移除一行、留其他路徑」還是「整份刪除」）`exit_rc=0`，且原本共用 block 裡
+的其他路徑仍然存在、仍會被輪替。
+
+**回歸檢查**：新增 C20，直接掃描整個 `/etc/logrotate.d/` 目錄找重複路徑
+（`grep -rhoE '^/[^ {]+' /etc/logrotate.d/ | sort | uniq -d`，非空即 fail），
+不像原本的 C14 只對本模組自己管理的兩個檔案做 dry-run。C14 保留原範圍不變：
+如果 C20 改成對整個 `/etc/logrotate.conf` 做 `logrotate -d`，會重新踩到
+§5.4 那個「distro 自己的 `/etc/logrotate.d/rsyslog` 沒加 `su` 宣告，`-d`
+下永遠對 `/var/log` 的 group-writable 報 insecure-permissions」的已知雜訊
+（而且這次波及的路徑更多，因為那份檔案本來就管六個路徑，不是只有
+`/var/log/syslog`）——純粹的路徑重複掃描才是對兩種問題都精準的解法。
+
+#### 5.5.1 後續發現（2026-08-06，minimal-poc round-19 clean-room 重建）：RedHat family 也有同一個 bug
+
+v1.3 的 Step 5a–5d 只在 `ansible_os_family == "Debian"` 時檢查
+`/etc/logrotate.d/rsyslog`，隱含假設是「只有 Ubuntu 的 `rsyslog` 套件會把
+`/var/log/syslog` 跟其他路徑塞進同一個內建檔案」。minimal-poc 3-VM 重建
+（`freeipa-server` 是 AlmaLinux 9）跑新增的 C20 時，在這台上實測抓到同一種
+bug：AlmaLinux 的 `rsyslog-logrotate` RPM 套件同樣把 `/etc/logrotate.d/`
+底下一個叫 `rsyslog` 的檔案內建成共用 block，只是列的路徑換成 RHEL 這邊的
+預設稽核日誌集合：
+
+```
+/var/log/cron
+/var/log/maillog
+/var/log/messages
+/var/log/secure
+/var/log/spooler
+{
+    missingok
+    sharedscripts
+    postrotate
+        /usr/bin/systemctl -s HUP kill rsyslog.service >/dev/null 2>&1 || true
+    endscript
+}
+```
+
+而本 playbook 在 RedHat family 上 `audit_syslog_path` 解析成
+`/var/log/messages`（見 §1.5），Step 5 render 的 `/etc/logrotate.d/syslog`
+也管這個路徑——跟 Debian 案例一模一樣的跨檔案重複宣告，只是路徑跟檔名
+（distro 內建檔案剛好兩邊都叫 `rsyslog`）不同。
+
+**修法**：拿掉 Step 5a–5d 的 `ansible_os_family == "Debian"` 限制，改成只靠
+`distro_rsyslog_logrotate.stat.exists` 把關——因為兩個 family 內建檔案剛好
+都叫 `rsyslog`、格式都是「多行路徑 + 一個共用 block」，同一套
+`grep -vFx`/`lineinfile` 移除單行的邏輯兩邊通用，不需要另外分支。已在
+`freeipa-server` 實測：`--check --diff` 預覽正確只會刪掉
+`/var/log/messages` 這一行、保留其他 4 個路徑；真套用 `changed=1`；
+`changed=0` 冪等重跑；`pilot verify docs/verification/audit-log-forwarding.md`
+在 `client-vm`/`freeipa-server`/`nexus` 三台上 C20（連同其餘 19 條）全部
+`PASS`（60/60）。
+
+這個發現本身印證了 C20「掃全目錄」比原本 C14「只查自己兩個檔案」更有用的
+設計初衷——如果只驗證本模組自己的 `auditd`/`syslog` 兩個檔案語法正確，
+AlmaLinux 上這個新的跨檔案重複永遠不會被抓到。
+
 ---
 
 ## 6. 常見問題

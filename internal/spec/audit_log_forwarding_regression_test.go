@@ -23,10 +23,22 @@ import (
 //	C15     /etc/hosts pins the siem-log-server alias
 //	C16/C17 rsyslog forward directives for local6.* and auth,authpriv.*
 //	C18/C19 auditd + rsyslog active
+//	C20     no log path is declared by more than one policy file anywhere
+//	        under /etc/logrotate.d/ (catches cross-file duplicates that
+//	        C14's own-files-only dry-run cannot see — see the incident in
+//	        docs/runbooks/audit-log-forwarding.md §5.5: Ubuntu's own
+//	        rsyslog package ships /etc/logrotate.d/rsyslog, which by
+//	        default also declares /var/log/syslog, so it collided with
+//	        our own /etc/logrotate.d/syslog and logrotate aborted the
+//	        entire run with "duplicate log entry" on five production
+//	        hosts. A minimal-poc clean-room rebuild then found the same
+//	        bug on RedHat family too — rsyslog-logrotate ships the same
+//	        /etc/logrotate.d/rsyslog filename declaring /var/log/messages —
+//	        so the fix must not be gated to ansible_os_family == "Debian")
 //
 // Cross-row invariants locked below:
 //
-//   - C1–C19 must all use positive-logic rc (never a reverse-logic grep
+//   - C1–C20 must all use positive-logic rc (never a reverse-logic grep
 //     with a numeric expected) per verification-spec-template.md trap 1.
 //   - C4/C5 must gate on the actual privilege-escalation condition
 //     (uid!=euid / gid!=egid with euid=0/egid=0), not just `-S execve`
@@ -59,7 +71,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 
 	wantIDs := []string{
 		"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",
-		"C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19",
+		"C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20",
 	}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
@@ -84,7 +96,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	// checks and legitimately use `present` instead). C11 uses the
 	// `sh -c '... && echo 0 || echo 1'` idiom so the outer command
 	// always exits 0 regardless of match outcome.
-	rcRows := []string{"C1", "C2", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C14", "C15", "C16", "C17", "C18", "C19"}
+	rcRows := []string{"C1", "C2", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C14", "C15", "C16", "C17", "C18", "C19", "C20"}
 	for _, id := range rcRows {
 		if exp[id] != "0" {
 			t.Errorf("%s expected must be rc-based `0`, got %q", id, exp[id])
@@ -165,6 +177,45 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	}
 	if !strings.Contains(cmd["C17"], "auth") || !strings.Contains(cmd["C17"], "authpriv") {
 		t.Errorf("C17 must forward auth,authpriv.*, got %q", cmd["C17"])
+	}
+
+	// C20 must scan the whole /etc/logrotate.d/ directory (not just this
+	// module's own auditd/syslog files, which is what C14 already checks
+	// and what left the real cross-file duplicate with the distro's
+	// rsyslog package undetected).
+	if !strings.Contains(cmd["C20"], "/etc/logrotate.d/") {
+		t.Errorf("C20 must scan the whole /etc/logrotate.d/ directory, got %q", cmd["C20"])
+	}
+	if strings.Contains(cmd["C20"], "/etc/logrotate.d/auditd") || strings.Contains(cmd["C20"], "/etc/logrotate.d/syslog") {
+		t.Errorf("C20 must not be scoped to only this module's own files (that regresses to C14's blind spot), got %q", cmd["C20"])
+	}
+	if !strings.Contains(cmd["C20"], "uniq -d") && !strings.Contains(cmd["C20"], "uniq -c") {
+		t.Errorf("C20 must detect duplicate paths (e.g. via `sort | uniq -d`), got %q", cmd["C20"])
+	}
+
+	// The Step 5a-5d remediation must run on BOTH Debian and RedHat family:
+	// a minimal-poc clean-room rebuild found rsyslog-logrotate ships the
+	// same /etc/logrotate.d/rsyslog filename on RHEL/AlmaLinux too, so
+	// gating Step 5a's stat check to ansible_os_family == "Debian" leaves
+	// the identical duplicate-declaration bug live on RedHat family.
+	{
+		playbookRaw, err := os.ReadFile("../../playbooks/apply/audit-log-forwarding-apply.yml")
+		if err != nil {
+			t.Fatalf("read audit-log-forwarding-apply.yml: %v", err)
+		}
+		applyRaw := string(playbookRaw)
+		startIdx := strings.Index(applyRaw, "Step 5a:")
+		endIdx := strings.Index(applyRaw, "Step 6a:")
+		if startIdx < 0 || endIdx < 0 || startIdx > endIdx {
+			t.Fatalf("could not locate Step 5a..Step 6a block in audit-log-forwarding-apply.yml")
+		}
+		step5Block := applyRaw[startIdx:endIdx]
+		if strings.Contains(step5Block, `ansible_os_family == "Debian"`) {
+			t.Errorf("Step 5a-5d must not gate the distro rsyslog policy removal to Debian family only; RedHat family ships the same /etc/logrotate.d/rsyslog collision")
+		}
+		if !strings.Contains(step5Block, "distro_rsyslog_logrotate.stat.exists") {
+			t.Errorf("Step 5a-5d must gate on distro_rsyslog_logrotate.stat.exists so it works across every OS family that ships /etc/logrotate.d/rsyslog")
+		}
 	}
 
 	// No row anywhere may use ~active (false-positives on "inactive").
