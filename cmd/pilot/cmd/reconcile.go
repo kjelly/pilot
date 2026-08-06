@@ -75,6 +75,17 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	if err != nil {
 		return abortOrErr(err)
 	}
+
+	// Best-effort: keep inv fresh relative to a sibling hosts.yml (edited
+	// via `pilot edit`) before anything below reads it — see
+	// autoRegenerateInventoryFromHosts's doc comment for why this never
+	// hard-fails the run.
+	if regenerated, genErr := autoRegenerateInventoryFromHosts(cmd.ErrOrStderr(), inv); genErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "警告：自動重新產生 inventory.yml 失敗（沿用現有檔案）：%v\n", genErr)
+	} else if regenerated {
+		fmt.Fprintf(out, "已從 hosts.yml 自動重新產生 %s\n", inv)
+	}
+
 	// Fail before preflight or any component selection when the effective
 	// FreeIPA target cannot load the canonical roster. Otherwise
 	// freeipa-identity-apply.yml reaches its late empty-data gate after all

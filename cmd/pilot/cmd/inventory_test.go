@@ -411,3 +411,94 @@ func TestWriteMissingNFSRosterEntries_IdempotentAcrossRepeatedRuns(t *testing.T)
 		t.Fatalf("expected exactly one nexus entry after two runs, got %d:\n%s", n, data)
 	}
 }
+
+// ---- autoRegenerateInventoryFromHosts ------------------------------------
+
+func TestAutoRegenerateInventoryFromHosts_NoSiblingHostsYMLIsNoOp(t *testing.T) {
+	t.Chdir(t.TempDir())
+	invPath := "inventory.yml"
+	mustWriteFile(t, invPath, "stale content\n")
+
+	var buf bytes.Buffer
+	regenerated, err := autoRegenerateInventoryFromHosts(&buf, invPath)
+	if err != nil {
+		t.Fatalf("autoRegenerateInventoryFromHosts() error = %v, want nil", err)
+	}
+	if regenerated {
+		t.Fatal("regenerated = true, want false — there is no sibling hosts.yml")
+	}
+	assertFileContent(t, invPath, "stale content\n")
+}
+
+func TestAutoRegenerateInventoryFromHosts_ValidSiblingRegeneratesInPlace(t *testing.T) {
+	t.Chdir(t.TempDir())
+	mustWriteFile(t, "hosts.yml", "hosts:\n  dash1:\n    ansible_host: 10.0.0.5\n    roles: [dashboard]\n")
+	invPath := "inventory.yml"
+	mustWriteFile(t, invPath, "stale content\n")
+
+	var buf bytes.Buffer
+	regenerated, err := autoRegenerateInventoryFromHosts(&buf, invPath)
+	if err != nil {
+		t.Fatalf("autoRegenerateInventoryFromHosts() error = %v, want nil", err)
+	}
+	if !regenerated {
+		t.Fatal("regenerated = false, want true — a valid sibling hosts.yml exists")
+	}
+	got, err := os.ReadFile(invPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", invPath, err)
+	}
+	if !bytes.Contains(got, []byte("dash1")) || bytes.Contains(got, []byte("stale content")) {
+		t.Fatalf("%s = %q, want it replaced with generated content mentioning dash1", invPath, got)
+	}
+}
+
+func TestAutoRegenerateInventoryFromHosts_LintErrorLeavesInvUntouched(t *testing.T) {
+	t.Chdir(t.TempDir())
+	mustWriteFile(t, "hosts.yml", "hosts:\n  bad1:\n    ansible_host: 10.0.0.5\n    roles: [not-a-real-role]\n")
+	invPath := "inventory.yml"
+	mustWriteFile(t, invPath, "stale content\n")
+
+	var buf bytes.Buffer
+	regenerated, err := autoRegenerateInventoryFromHosts(&buf, invPath)
+	if err == nil {
+		t.Fatal("autoRegenerateInventoryFromHosts() error = nil, want an error — hosts.yml has an unknown role")
+	}
+	if regenerated {
+		t.Fatal("regenerated = true, want false when generation fails")
+	}
+	assertFileContent(t, invPath, "stale content\n")
+}
+
+func TestAutoRegenerateInventoryFromHosts_InvPointingAtHostsYMLItselfIsSkipped(t *testing.T) {
+	t.Chdir(t.TempDir())
+	original := "hosts:\n  dash1:\n    ansible_host: 10.0.0.5\n    roles: [dashboard]\n"
+	mustWriteFile(t, "hosts.yml", original)
+
+	var buf bytes.Buffer
+	regenerated, err := autoRegenerateInventoryFromHosts(&buf, "hosts.yml")
+	if err != nil {
+		t.Fatalf("autoRegenerateInventoryFromHosts() error = %v, want nil", err)
+	}
+	if regenerated {
+		t.Fatal("regenerated = true, want false — invPath IS the sibling hosts.yml, must never regenerate from itself")
+	}
+	assertFileContent(t, "hosts.yml", original)
+}
+
+func TestAutoRegenerateInventoryFromHosts_BackfillHelpersStillFire(t *testing.T) {
+	t.Chdir(t.TempDir())
+	mustWriteFile(t, "group_vars/dns.example.yml", "dns_forwarders: []\n")
+	mustWriteFile(t, "hosts.yml", "hosts:\n  dns1:\n    ansible_host: 10.0.0.5\n    roles: [dns]\n")
+	invPath := "inventory.yml"
+
+	var buf bytes.Buffer
+	regenerated, err := autoRegenerateInventoryFromHosts(&buf, invPath)
+	if err != nil {
+		t.Fatalf("autoRegenerateInventoryFromHosts() error = %v, want nil", err)
+	}
+	if !regenerated {
+		t.Fatal("regenerated = false, want true")
+	}
+	assertFileContent(t, filepath.Join("group_vars", "dns.yml"), "dns_forwarders: []\n")
+}

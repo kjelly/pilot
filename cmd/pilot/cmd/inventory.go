@@ -390,6 +390,61 @@ func writeMissingNFSRosterEntries(w io.Writer, dir string, hf *inventory.HostsFi
 	}
 }
 
+// autoRegenerateInventoryFromHosts refreshes invPath from a sibling
+// hosts.yml in the same directory, if one exists — the same core logic
+// `pilot inventory generate` runs manually (Parse -> Generate -> the
+// same group_vars/vault/host_vars/NFS-roster backfill helpers above),
+// triggered automatically so hosts.yml edits (via `pilot edit`) can no
+// longer silently drift from the inventory.yml deploy/reconcile/diagnose
+// tools actually read (see workspace_completeness.go's
+// checkInventoryYmlFresh, which only warns about this drift today).
+// Best-effort: no sibling hosts.yml, or any error reading/parsing/
+// generating it, leaves invPath exactly as it was before this feature
+// existed — never a new hard failure for the caller. Skips entirely
+// (regenerated=false, err=nil) when invPath itself IS the sibling
+// hosts.yml (the expandIfSimplifiedHosts case, -i pointed directly at a
+// hosts.yml-shaped file) — regenerating "from itself" would overwrite the
+// source with rendered inventory content.
+func autoRegenerateInventoryFromHosts(stderr io.Writer, invPath string) (regenerated bool, err error) {
+	dir, err := filepath.Abs(filepath.Dir(invPath))
+	if err != nil {
+		return false, err
+	}
+	hostsPath := filepath.Join(dir, "hosts.yml")
+	absInv, err := filepath.Abs(invPath)
+	if err != nil {
+		return false, err
+	}
+	if hostsPath == absInv {
+		return false, nil
+	}
+	if _, statErr := os.Stat(hostsPath); statErr != nil {
+		return false, nil
+	}
+
+	data, err := os.ReadFile(hostsPath)
+	if err != nil {
+		return false, err
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		return false, err
+	}
+	rendered, err := inventory.Generate(hf)
+	if err != nil {
+		return false, err
+	}
+	copyMissingGroupVars(stderr, groupVarsBaseDir(invPath), inventory.GroupVarsStems(hf))
+	copyMissingNestedGroupVarsExamples(stderr, groupVarsBaseDir(invPath), inventory.UsedRoles(hf))
+	writeMissingVaultSkeleton(stderr, resolveGenVaultPath(invPath, "", false), hf)
+	writeMissingHostVarsSkeleton(stderr, groupVarsBaseDir(invPath), hf)
+	writeMissingNFSRosterEntries(stderr, groupVarsBaseDir(invPath), hf)
+	if err := os.WriteFile(invPath, []byte(rendered), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 var inventoryLintCmd = &cobra.Command{
 	Use:   "lint",
 	Short: "Validate a simple hosts source file without generating anything",
