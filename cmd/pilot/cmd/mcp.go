@@ -55,7 +55,7 @@ func init() {
 	mcpServeCmd.Flags().BoolVar(&mcpAllowWrite, "allow-write", false, "register mutation tools (not yet implemented)")
 	mcpServeCmd.Flags().BoolVar(&mcpEnableDiagnose, "enable-diagnose", false, "register live-host diagnostic tools (pilot_diagnose_sudo/pilot_diagnose_dns) that run a fixed, read-only ansible ad-hoc allow-list against --diagnose-inventory; independent of --allow-write (live-host reach is a different risk axis than local-file mutation)")
 	mcpServeCmd.Flags().BoolVar(&mcpEnableDiagnoseRaw, "enable-diagnose-raw", false, "register pilot_diagnose_run, which runs a caller-supplied command (ansible's command module, no shell) against --diagnose-inventory — NOT a fixed allow-list; independent of --enable-diagnose")
-	mcpServeCmd.Flags().StringVar(&mcpDiagnoseInventory, "diagnose-inventory", "", "ansible inventory path pilot_diagnose_* tools may target; required when --enable-diagnose or --enable-diagnose-raw is set")
+	mcpServeCmd.Flags().StringVar(&mcpDiagnoseInventory, "diagnose-inventory", "", "ansible inventory path pilot_diagnose_* tools may target; defaults to <dir>/inventory.yml when --enable-diagnose or --enable-diagnose-raw is set and this is left empty")
 	mcpServeCmd.Flags().DurationVar(&mcpDiagnoseStepTimeout, "diagnose-step-timeout", 20*time.Second, "per ad-hoc step timeout for pilot_diagnose_* tools")
 
 	mcpCmd.AddCommand(mcpServeCmd)
@@ -82,10 +82,6 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve --audit-dir: %w", err)
 	}
 
-	if (mcpEnableDiagnose || mcpEnableDiagnoseRaw) && mcpDiagnoseInventory == "" {
-		return fmt.Errorf("--enable-diagnose/--enable-diagnose-raw requires --diagnose-inventory")
-	}
-
 	server := mcp.NewServer(&mcp.Implementation{Name: "pilot-edit", Version: rootCmd.Version}, nil)
 	registerEditTools(server, editMCPToolsOptions{
 		Dir:          canonicalDir,
@@ -94,7 +90,16 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	})
 
 	if mcpEnableDiagnose || mcpEnableDiagnoseRaw {
-		canonicalDiagnoseInventory, err := filepath.Abs(mcpDiagnoseInventory)
+		// Same directory as --dir in every real deployment (hosts.yml and
+		// inventory.yml are sibling files there) — default to it so a
+		// flag-value-swallowing typo like `--diagnose-inventory --dir
+		// /path` can't silently point diagnostics at a bogus path (it now
+		// falls back to a sane default instead of an empty string).
+		diagnoseInventoryPath := mcpDiagnoseInventory
+		if diagnoseInventoryPath == "" {
+			diagnoseInventoryPath = filepath.Join(canonicalDir, "inventory.yml")
+		}
+		canonicalDiagnoseInventory, err := filepath.Abs(diagnoseInventoryPath)
 		if err != nil {
 			return fmt.Errorf("resolve --diagnose-inventory: %w", err)
 		}
