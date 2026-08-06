@@ -15,7 +15,14 @@ func TestSemanticActionCatalogIsStable(t *testing.T) {
 		"delete_role_preset", "restore_role_presets",
 		"set_group_var", "restore_group_var_default", "save_group_vars", "discard_group_vars",
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",
-		"create_user", "set_user_field",
+		"create_user", "set_user_field", "set_user_password", "add_ssh_key", "delete_ssh_key",
+		"create_group", "set_group_field", "set_group_members_users", "set_group_members_groups",
+		"create_hostgroup", "set_hostgroup_field",
+		"create_hbac_rule", "set_hbac_groups", "set_hbac_targets", "set_hbac_services", "set_hbac_disable_allow_all",
+		"create_sudo_command_group", "set_sudo_command_group_commands",
+		"create_sudo_rule", "set_sudo_rule_groups", "set_sudo_rule_command_groups", "set_sudo_rule_commands", "set_sudo_rule_allow_mode",
+		"create_dns_manifest", "create_dns_zone", "set_dns_zone_field",
+		"create_dns_record", "set_dns_record_field", "set_dns_record_values", "set_dns_record_target_host",
 		"save_hosts", "deploy", "reconcile",
 	}
 	specs := semanticActionSpecs()
@@ -47,7 +54,7 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &schema); err != nil {
 		t.Fatalf("schema is not JSON: %v\n%s", err, out.String())
 	}
-	if schema.Version != 1 || len(schema.Actions) != 29 {
+	if schema.Version != 1 || len(schema.Actions) != 57 {
 		t.Fatalf("schema metadata = version %d, actions %d", schema.Version, len(schema.Actions))
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {
@@ -67,7 +74,14 @@ func TestActionsListIncludesEverySemanticAction(t *testing.T) {
 		"delete_role_preset", "restore_role_presets",
 		"set_group_var", "restore_group_var_default", "save_group_vars", "discard_group_vars",
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",
-		"create_user", "set_user_field",
+		"create_user", "set_user_field", "set_user_password", "add_ssh_key", "delete_ssh_key",
+		"create_group", "set_group_field", "set_group_members_users", "set_group_members_groups",
+		"create_hostgroup", "set_hostgroup_field",
+		"create_hbac_rule", "set_hbac_groups", "set_hbac_targets", "set_hbac_services", "set_hbac_disable_allow_all",
+		"create_sudo_command_group", "set_sudo_command_group_commands",
+		"create_sudo_rule", "set_sudo_rule_groups", "set_sudo_rule_command_groups", "set_sudo_rule_commands", "set_sudo_rule_allow_mode",
+		"create_dns_manifest", "create_dns_zone", "set_dns_zone_field",
+		"create_dns_record", "set_dns_record_field", "set_dns_record_values", "set_dns_record_target_host",
 		"save_hosts", "deploy", "reconcile",
 	} {
 		if !strings.Contains(out.String(), name) {
