@@ -1,12 +1,21 @@
-// mcp_diagnose_tools.go implements pilot_diagnose_sudo/pilot_diagnose_dns:
-// live-host diagnostics, separate from the pilot_edit_* family (which is
-// local-workspace-file read/write only and explicitly excludes any
-// Ansible invocation — see docs/superpowers/specs/2026-08-04-pilot-edit-mcp-semantic-tui-design.md's
+// mcp_diagnose_tools.go implements pilot_diagnose_sudo/pilot_diagnose_dns/
+// pilot_diagnose_logs/pilot_diagnose_metrics/pilot_diagnose_security_logs:
+// live-host diagnostics,
+// separate from the pilot_edit_* family (which is local-workspace-file
+// read/write only and explicitly excludes any Ansible invocation — see
+// docs/superpowers/specs/2026-08-04-pilot-edit-mcp-semantic-tui-design.md's
 // "MVP 不包含"). These tools run a fixed, code-defined allow-list of
 // read-only ansible ad-hoc commands (internal/diagnose) against exactly
 // one real inventory host — never a client-suppliable module/args pair,
 // never an ansible pattern/group — and are registered only when the
-// server was started with --enable-diagnose.
+// server was started with --enable-diagnose. pilot_diagnose_logs/_metrics
+// query Loki/Thanos Query the same way sudo/dns query the OS: curl runs
+// on the target's own loopback via ansible ad-hoc (SSH), not a direct
+// HTTP client in the MCP server — docs/network-firewall-matrix.md only
+// grants the deployment controller SSH into this topology, not direct
+// HTTP to Loki/Thanos Query's ports. Both auto-resolve their singleton
+// central host (dashboard/thanos-query) instead of taking a host
+// parameter, since there's exactly one by contract.
 //
 // pilot_diagnose_run (below) is a deliberately separate, higher-risk tool:
 // it runs a caller-supplied command via ansible's `command` module (never
@@ -19,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +37,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/diagnose"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/networkcheck"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -41,6 +52,36 @@ type diagnoseMCPToolsOptions struct {
 	AdHocRunner    diagnose.AdHocRunner
 }
 
+// resolveDiagnoseInventory best-effort refreshes opts.Inventory from a
+// sibling hosts.yml (autoRegenerateInventoryFromHosts, inventory.go)
+// before resolving it — called fresh on every pilot_diagnose_*
+// invocation, not cached from mcp serve startup, so a hosts.yml edited
+// while this long-running server is up is picked up on the very next
+// diagnose call rather than requiring a restart. Silent on failure: an
+// unregenerable hosts.yml (or none present) just means this call sees
+// whatever inventory.yml already had, exactly as before this feature
+// existed.
+//
+// The explicit os.Stat below exists because `ansible-inventory --list -i
+// <missing-file>` does not error — it warns on stderr and falls back to
+// an empty "only implicit localhost is available" inventory (exit 0).
+// Without this check, a missing/mistyped --diagnose-inventory path (or
+// its <dir>/inventory.yml default, when hosts.yml has no dashboard/
+// thanos-query role yet either) silently resolves to zero hosts, and the
+// caller only ever sees a misleading "role not deployed"/"host not
+// found" error indistinguishable from the inventory genuinely lacking
+// that host.
+func resolveDiagnoseInventory(ctx context.Context, opts diagnoseMCPToolsOptions) (networkcheck.ResolvedInventory, error) {
+	_, _ = autoRegenerateInventoryFromHosts(io.Discard, opts.Inventory)
+	if _, statErr := os.Stat(opts.Inventory); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return networkcheck.ResolvedInventory{}, fmt.Errorf("inventory file not found: %s", opts.Inventory)
+		}
+		return networkcheck.ResolvedInventory{}, fmt.Errorf("stat inventory file %s: %w", opts.Inventory, statErr)
+	}
+	return resolveNetworkCheckInventory(ctx, opts.Inventory)
+}
+
 func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_sudo",
@@ -50,6 +91,18 @@ func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 		Name:        "pilot_diagnose_dns",
 		Description: "run fixed, read-only ansible ad-hoc commands against one real inventory host to diagnose DNS resolution problems there: /etc/resolv.conf's nameserver, whether systemd-resolved is active, whether a local (non-stub) DNS daemon is listening on :53 and installed, and — when a name is supplied — whether it resolves both via NSS (getent hosts) and a direct query against the loopback resolver (dig @127.0.0.1), which separates an NSS/nsswitch misconfiguration from an unreachable/non-authoritative upstream.",
 	}, diagnoseDNSHandler(opts))
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "pilot_diagnose_logs",
+		Description: "run a LogQL query against Loki (the dashboard host's log store) via an ansible ad-hoc curl against its own loopback — no host parameter, since dashboard is this deployment's singleton central role. start/end/limit/direction are optional and passed through verbatim to Loki with no range cap; omit them to use Loki's own defaults (last 1h, now, 100 entries, backward). Returns the raw Loki JSON response body plus its HTTP status.",
+	}, diagnoseLogsHandler(opts))
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "pilot_diagnose_metrics",
+		Description: "run a PromQL query against Thanos Query (the cross-site metrics aggregator) via an ansible ad-hoc curl against its own loopback — no host parameter, since thanos-query is this deployment's singleton central role. Supplying both start and end runs a range query (/api/v1/query_range, with optional step); otherwise an instant query (/api/v1/query, with optional time). No range cap — the caller decides. Returns the raw Prometheus-compatible JSON response body plus its HTTP status.",
+	}, diagnoseMetricsHandler(opts))
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "pilot_diagnose_security_logs",
+		Description: "convenience wrapper over pilot_diagnose_logs for security/audit events specifically: automatically scopes the Loki query to job=\"pilot-siem\", which — by this deployment's own design — already covers nothing but security/audit-relevant log lines, from EITHER log-server's forwarded auth/authpriv/local6(auditd) logs OR a co-located wazuh-manager's alerts (whichever this deployment ships; both land under the same job label, no source parameter needed). host and search are both optional plain-substring filters against the log line content (not a regex, and not a precise scope like pilot_diagnose_sudo/dns's host — wazuh's JSON alerts carry the source agent's identity inside the line itself, not in a per-host file path, so a content search is the one mechanism that finds a host either way). No time-range cap. Returns the raw Loki JSON response body plus its HTTP status and the exact LogQL query that was run.",
+	}, diagnoseSecurityLogsHandler(opts))
 }
 
 // ---- shared plumbing --------------------------------------------------
@@ -209,7 +262,7 @@ func diagnoseSudoHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 		}
 
 		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
-		resolved, err := resolveNetworkCheckInventory(ctx, opts.Inventory)
+		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseSudoOutput{}, nil
 		}
@@ -289,7 +342,7 @@ func diagnoseDNSHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 		}
 
 		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
-		resolved, err := resolveNetworkCheckInventory(ctx, opts.Inventory)
+		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseDNSOutput{}, nil
 		}
@@ -344,6 +397,277 @@ func diagnoseDNSHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 	}
 }
 
+// ---- pilot_diagnose_logs --------------------------------------------------
+
+type diagnoseLogsInput struct {
+	Query     string `json:"query" jsonschema:"LogQL query, e.g. {job=\"pilot-siem\"} |= \"error\""`
+	Start     string `json:"start,omitempty" jsonschema:"optional, passed through verbatim to Loki (RFC3339 or unix ns) — omit for Loki's default (1h ago)"`
+	End       string `json:"end,omitempty" jsonschema:"optional, passed through verbatim to Loki — omit for Loki's default (now)"`
+	Limit     string `json:"limit,omitempty" jsonschema:"optional max entries, passed through verbatim to Loki — omit for Loki's default (100)"`
+	Direction string `json:"direction,omitempty" jsonschema:"optional forward|backward, passed through verbatim to Loki — omit for Loki's default (backward)"`
+}
+
+type diagnoseLogsOutput struct {
+	Host           string `json:"host"`
+	ResolvedAddr   string `json:"resolved_addr,omitempty"`
+	Query          string `json:"query"`
+	HTTPStatus     int    `json:"http_status,omitempty"`
+	ResultJSON     string `json:"result_json,omitempty"`
+	Unreachable    bool   `json:"unreachable,omitempty"`
+	Error          string `json:"error,omitempty"`
+	AuditDirectory string `json:"audit_directory"`
+}
+
+// diagnoseLogsHandler auto-resolves diagnose.DashboardGroup's singleton
+// host (see internal/diagnose.ResolveSingletonGroupHost) instead of
+// taking a host parameter — unlike pilot_diagnose_sudo/dns/run, there is
+// no arbitrary target here; Loki always lives on the one dashboard host.
+func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseLogsInput, diagnoseLogsOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseLogsInput) (*mcp.CallToolResult, diagnoseLogsOutput, error) {
+		if strings.TrimSpace(in.Query) == "" {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "query must not be empty"}), diagnoseLogsOutput{}, nil
+		}
+
+		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		resolved, err := resolveDiagnoseInventory(ctx, opts)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseLogsOutput{}, nil
+		}
+		host, err := diagnose.ResolveSingletonGroupHost(resolved, diagnose.DashboardGroup)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseLogsOutput{}, nil
+		}
+
+		sessionID, err := newID()
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseLogsOutput{}, nil
+		}
+		start := time.Now()
+		auditDir, err := prepareDiagnoseAuditDir(opts, "logs", sessionID, start)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseLogsOutput{}, nil
+		}
+
+		runner := opts.AdHocRunner
+		if runner == nil {
+			runner = realDiagnoseAdHocRunner()
+		}
+		steps := diagnose.LogsSteps(in.Query, in.Start, in.End, in.Limit, in.Direction)
+		results := diagnose.RunSteps(ctx, runner, opts.Inventory, host, steps, opts.StepTimeout)
+
+		rec := diagnoseAuditRecord{
+			SessionID: sessionID, Check: "logs", PilotVersion: rootCmd.Version,
+			GitRevision: gitRevision(filepath.Dir(opts.Inventory)), MCPClient: mcpClientString(req),
+			Inventory: opts.Inventory, Host: host,
+			Params: map[string]string{"query": in.Query, "start": in.Start, "end": in.End, "limit": in.Limit, "direction": in.Direction},
+			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
+		}
+		_ = writeDiagnoseAudit(auditDir, rec)
+
+		out := diagnoseLogsOutput{
+			Host: host, ResolvedAddr: resolved.HostAddr(host), Query: in.Query,
+			AuditDirectory: auditDir,
+		}
+		result := results[0].Result
+		switch {
+		case result.RunErr != nil:
+			out.Error = result.RunErr.Error()
+		case result.Unreachable:
+			out.Unreachable = true
+		default:
+			if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
+				out.ResultJSON = body
+				out.HTTPStatus = status
+			} else {
+				out.ResultJSON = strings.TrimSpace(result.Stdout)
+			}
+		}
+		return nil, out, nil
+	}
+}
+
+// ---- pilot_diagnose_security_logs ------------------------------------------
+
+type diagnoseSecurityLogsInput struct {
+	Host      string `json:"host,omitempty" jsonschema:"optional hostname/agent name to filter for — a plain substring match against the log line (works against both log-server's syslog lines and wazuh-manager's JSON alerts), not a precise scope; omit to search across everything"`
+	Search    string `json:"search,omitempty" jsonschema:"optional substring to filter log lines by — plain text match, not a regex (e.g. \"Failed password\", \"sudo\", a rule ID)"`
+	Start     string `json:"start,omitempty" jsonschema:"passed through verbatim to Loki (RFC3339 or unix ns) — omit for Loki's default (1h ago)"`
+	End       string `json:"end,omitempty" jsonschema:"passed through verbatim — omit for Loki's default (now)"`
+	Limit     string `json:"limit,omitempty" jsonschema:"max entries, passed through verbatim — omit for Loki's default (100)"`
+	Direction string `json:"direction,omitempty" jsonschema:"forward|backward, passed through verbatim — omit for Loki's default (backward)"`
+}
+
+type diagnoseSecurityLogsOutput struct {
+	Host           string `json:"host"` // resolved dashboard-group host, informational only
+	ResolvedAddr   string `json:"resolved_addr,omitempty"`
+	Query          string `json:"query"` // the composed LogQL, so the caller can see/iterate on it
+	HTTPStatus     int    `json:"http_status,omitempty"`
+	ResultJSON     string `json:"result_json,omitempty"`
+	Unreachable    bool   `json:"unreachable,omitempty"`
+	Error          string `json:"error,omitempty"`
+	AuditDirectory string `json:"audit_directory"`
+}
+
+// diagnoseSecurityLogsHandler is structurally identical to
+// diagnoseLogsHandler (same dashboard-group auto-resolution, same Loki
+// query_range/HTTP-status plumbing) except the LogQL query is composed
+// from host/search via diagnose.SecurityLogsSteps rather than taken
+// verbatim from the caller — so, unlike pilot_diagnose_logs, there is no
+// required/non-empty input to validate: every field is optional.
+func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseSecurityLogsInput, diagnoseSecurityLogsOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseSecurityLogsInput) (*mcp.CallToolResult, diagnoseSecurityLogsOutput, error) {
+		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		resolved, err := resolveDiagnoseInventory(ctx, opts)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseSecurityLogsOutput{}, nil
+		}
+		host, err := diagnose.ResolveSingletonGroupHost(resolved, diagnose.DashboardGroup)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseSecurityLogsOutput{}, nil
+		}
+
+		sessionID, err := newID()
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseSecurityLogsOutput{}, nil
+		}
+		start := time.Now()
+		auditDir, err := prepareDiagnoseAuditDir(opts, "security_logs", sessionID, start)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseSecurityLogsOutput{}, nil
+		}
+
+		runner := opts.AdHocRunner
+		if runner == nil {
+			runner = realDiagnoseAdHocRunner()
+		}
+		query := diagnose.SecurityLogsQuery(in.Host, in.Search)
+		steps := diagnose.SecurityLogsSteps(in.Host, in.Search, in.Start, in.End, in.Limit, in.Direction)
+		results := diagnose.RunSteps(ctx, runner, opts.Inventory, host, steps, opts.StepTimeout)
+
+		rec := diagnoseAuditRecord{
+			SessionID: sessionID, Check: "security_logs", PilotVersion: rootCmd.Version,
+			GitRevision: gitRevision(filepath.Dir(opts.Inventory)), MCPClient: mcpClientString(req),
+			Inventory: opts.Inventory, Host: host,
+			Params: map[string]string{
+				"host": in.Host, "search": in.Search, "start": in.Start, "end": in.End,
+				"limit": in.Limit, "direction": in.Direction, "query": query,
+			},
+			Start: start, Finish: time.Now(), Steps: stepAuditList(results),
+		}
+		_ = writeDiagnoseAudit(auditDir, rec)
+
+		out := diagnoseSecurityLogsOutput{
+			Host: host, ResolvedAddr: resolved.HostAddr(host), Query: query,
+			AuditDirectory: auditDir,
+		}
+		result := results[0].Result
+		switch {
+		case result.RunErr != nil:
+			out.Error = result.RunErr.Error()
+		case result.Unreachable:
+			out.Unreachable = true
+		default:
+			if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
+				out.ResultJSON = body
+				out.HTTPStatus = status
+			} else {
+				out.ResultJSON = strings.TrimSpace(result.Stdout)
+			}
+		}
+		return nil, out, nil
+	}
+}
+
+// ---- pilot_diagnose_metrics ------------------------------------------------
+
+type diagnoseMetricsInput struct {
+	Query string `json:"query" jsonschema:"PromQL query, e.g. up{job=\"prometheus\"}"`
+	Time  string `json:"time,omitempty" jsonschema:"optional instant-query evaluation time — ignored if start/end are set"`
+	Start string `json:"start,omitempty" jsonschema:"optional range-query start — set together with end to run a range query instead of an instant query"`
+	End   string `json:"end,omitempty" jsonschema:"optional range-query end — required together with start"`
+	Step  string `json:"step,omitempty" jsonschema:"optional range-query step, e.g. 30s or 5m — Thanos's default if omitted"`
+}
+
+type diagnoseMetricsOutput struct {
+	Host           string `json:"host"`
+	ResolvedAddr   string `json:"resolved_addr,omitempty"`
+	Query          string `json:"query"`
+	HTTPStatus     int    `json:"http_status,omitempty"`
+	ResultJSON     string `json:"result_json,omitempty"`
+	Unreachable    bool   `json:"unreachable,omitempty"`
+	Error          string `json:"error,omitempty"`
+	AuditDirectory string `json:"audit_directory"`
+}
+
+// diagnoseMetricsHandler auto-resolves diagnose.ThanosQueryGroup's
+// singleton host, same reasoning as diagnoseLogsHandler.
+func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseMetricsInput, diagnoseMetricsOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseMetricsInput) (*mcp.CallToolResult, diagnoseMetricsOutput, error) {
+		if strings.TrimSpace(in.Query) == "" {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "query must not be empty"}), diagnoseMetricsOutput{}, nil
+		}
+		if (in.Start == "") != (in.End == "") {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "start and end must both be set together, or both omitted"}), diagnoseMetricsOutput{}, nil
+		}
+
+		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		resolved, err := resolveDiagnoseInventory(ctx, opts)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseMetricsOutput{}, nil
+		}
+		host, err := diagnose.ResolveSingletonGroupHost(resolved, diagnose.ThanosQueryGroup)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseMetricsOutput{}, nil
+		}
+
+		sessionID, err := newID()
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseMetricsOutput{}, nil
+		}
+		start := time.Now()
+		auditDir, err := prepareDiagnoseAuditDir(opts, "metrics", sessionID, start)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseMetricsOutput{}, nil
+		}
+
+		runner := opts.AdHocRunner
+		if runner == nil {
+			runner = realDiagnoseAdHocRunner()
+		}
+		steps := diagnose.MetricsSteps(in.Query, in.Time, in.Start, in.End, in.Step)
+		results := diagnose.RunSteps(ctx, runner, opts.Inventory, host, steps, opts.StepTimeout)
+
+		rec := diagnoseAuditRecord{
+			SessionID: sessionID, Check: "metrics", PilotVersion: rootCmd.Version,
+			GitRevision: gitRevision(filepath.Dir(opts.Inventory)), MCPClient: mcpClientString(req),
+			Inventory: opts.Inventory, Host: host,
+			Params: map[string]string{"query": in.Query, "time": in.Time, "start": in.Start, "end": in.End, "step": in.Step},
+			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
+		}
+		_ = writeDiagnoseAudit(auditDir, rec)
+
+		out := diagnoseMetricsOutput{
+			Host: host, ResolvedAddr: resolved.HostAddr(host), Query: in.Query,
+			AuditDirectory: auditDir,
+		}
+		result := results[0].Result
+		switch {
+		case result.RunErr != nil:
+			out.Error = result.RunErr.Error()
+		case result.Unreachable:
+			out.Unreachable = true
+		default:
+			if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
+				out.ResultJSON = body
+				out.HTTPStatus = status
+			} else {
+				out.ResultJSON = strings.TrimSpace(result.Stdout)
+			}
+		}
+		return nil, out, nil
+	}
+}
+
 // ---- pilot_diagnose_run --------------------------------------------------
 
 // registerDiagnoseRunTool adds pilot_diagnose_run — kept separate from
@@ -380,7 +704,7 @@ func diagnoseRunHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 		}
 
 		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
-		resolved, err := resolveNetworkCheckInventory(ctx, opts.Inventory)
+		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseRunOutput{}, nil
 		}

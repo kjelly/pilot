@@ -39,3 +39,32 @@ func TestValidateHost_PatternsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveSingletonGroupHost_ExactlyOneHostResolves(t *testing.T) {
+	resolved := networkcheck.ResolvedInventory{
+		GroupHosts: map[string][]string{"dashboard": {"dash1"}},
+	}
+	host, err := ResolveSingletonGroupHost(resolved, "dashboard")
+	if err != nil {
+		t.Fatalf("ResolveSingletonGroupHost() error = %v, want nil", err)
+	}
+	if host != "dash1" {
+		t.Fatalf("ResolveSingletonGroupHost() = %q, want %q", host, "dash1")
+	}
+}
+
+func TestResolveSingletonGroupHost_EmptyGroupFails(t *testing.T) {
+	resolved := networkcheck.ResolvedInventory{GroupHosts: map[string][]string{}}
+	if _, err := ResolveSingletonGroupHost(resolved, "dashboard"); err == nil {
+		t.Fatal("ResolveSingletonGroupHost() error = nil, want an error for an empty group")
+	}
+}
+
+func TestResolveSingletonGroupHost_MultipleHostsFails(t *testing.T) {
+	resolved := networkcheck.ResolvedInventory{
+		GroupHosts: map[string][]string{"thanos-query": {"tq1", "tq2"}},
+	}
+	if _, err := ResolveSingletonGroupHost(resolved, "thanos-query"); err == nil {
+		t.Fatal("ResolveSingletonGroupHost() error = nil, want an error when the group has more than one host")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,6 +48,34 @@ func (f *diagnoseFakeRunner) run(_ context.Context, args []string, _ int) (strin
 		return "", 0, fmt.Errorf("no fake response configured for command %q", command)
 	}
 	return fn()
+}
+
+// writeDiagnoseGroupFixtureInventory writes a fixture inventory whose
+// only non-"all" group is group, containing hosts (each reachable via
+// ansible_connection: local, same as writeDiagnoseFixtureInventory) — used
+// to exercise ResolveSingletonGroupHost's zero/one/many-host branches for
+// pilot_diagnose_logs/metrics, which auto-resolve dashboard/thanos-query
+// instead of taking a host parameter.
+func writeDiagnoseGroupFixtureInventory(t *testing.T, group string, hosts []string) string {
+	t.Helper()
+	dir := t.TempDir()
+	var b strings.Builder
+	b.WriteString("all:\n  children:\n    ")
+	b.WriteString(group)
+	b.WriteString(":\n")
+	if len(hosts) == 0 {
+		b.WriteString("      hosts: {}\n")
+	} else {
+		b.WriteString("      hosts:\n")
+		for _, h := range hosts {
+			b.WriteString("        " + h + ": {ansible_connection: local, ansible_host: 127.0.0.1}\n")
+		}
+	}
+	path := filepath.Join(dir, "inventory.yml")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func diagnoseOKDoc(t *testing.T, host string, rc int, stdout string) string {
@@ -261,6 +290,371 @@ func TestDiagnoseDNSHandler_SuccessWithoutNameOmitsNameSteps(t *testing.T) {
 	}
 }
 
+// ---- pilot_diagnose_logs --------------------------------------------------
+
+func TestDiagnoseLogsHandler_EmptyQueryRejectedBeforeAnyCall(t *testing.T) {
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseLogsHandler(baseDiagnoseOpts(t, "unused.yml", fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLogsInput{Query: "   "})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result for an empty query", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0", len(fake.calls))
+	}
+}
+
+func TestDiagnoseLogsHandler_NoDashboardGroupRejectedBeforeAnyCall(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseFixtureInventory(t) // no "dashboard" group in this inventory at all
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseLogsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLogsInput{Query: "up"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result when no dashboard group exists", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0 — an inventory-shape problem must never reach an ad-hoc call", len(fake.calls))
+	}
+}
+
+func TestDiagnoseLogsHandler_MultipleDashboardHostsRejectedBeforeAnyCall(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1", "dash2"})
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseLogsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLogsInput{Query: "up"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result when the dashboard group has more than one host", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0", len(fake.calls))
+	}
+}
+
+func TestDiagnoseLogsHandler_SuccessBuildsOutputAndWritesAudit(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
+	query := `{job="pilot-siem"} |= "error"`
+	steps := diagnose.LogsSteps(query, "", "", "", "")
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		steps[0].Command: func() (string, int, error) {
+			return diagnoseOKDoc(t, "dash1", 0, `{"status":"success","data":{}}`+"\nHTTP_STATUS:200"), 0, nil
+		},
+	}}
+	handler := diagnoseLogsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLogsInput{Query: query})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil (success)", result)
+	}
+	if out.Host != "dash1" {
+		t.Fatalf("out.Host = %q, want dash1 — auto-resolved, there is no host parameter", out.Host)
+	}
+	if out.HTTPStatus != 200 || out.ResultJSON != `{"status":"success","data":{}}` {
+		t.Fatalf("out = %+v, want http_status=200 and the raw Loki body split from the trailing status", out)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("fake runner recorded %d calls, want exactly 1", len(fake.calls))
+	}
+	data, err := os.ReadFile(filepath.Join(out.AuditDirectory, "record.json"))
+	if err != nil {
+		t.Fatalf("read audit record: %v", err)
+	}
+	var rec diagnoseAuditRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse audit record: %v", err)
+	}
+	if rec.Check != "logs" || rec.Host != "dash1" || rec.Params["query"] != query {
+		t.Fatalf("audit record = %+v, want check=logs host=dash1 params.query=%q", rec, query)
+	}
+}
+
+func TestDiagnoseLogsHandler_UnreachableSurfacesAsFieldNotError(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
+	steps := diagnose.LogsSteps("up", "", "", "", "")
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		steps[0].Command: func() (string, int, error) {
+			doc := map[string]any{"plays": []any{map[string]any{"tasks": []any{map[string]any{"hosts": map[string]any{
+				"dash1": map[string]any{"stdout": "", "rc": 0, "failed": true, "unreachable": true},
+			}}}}}}
+			data, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data), 0, nil
+		},
+	}}
+	handler := diagnoseLogsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLogsInput{Query: "up"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil — an unreachable target is a normal result field, not a tool error", result)
+	}
+	if !out.Unreachable {
+		t.Fatal("out.Unreachable = false, want true")
+	}
+}
+
+// ---- pilot_diagnose_security_logs ------------------------------------------
+
+func TestDiagnoseSecurityLogsHandler_NoDashboardGroupRejectedBeforeAnyCall(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseFixtureInventory(t) // no "dashboard" group in this inventory at all
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseSecurityLogsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseSecurityLogsInput{})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result when no dashboard group exists", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0", len(fake.calls))
+	}
+}
+
+func TestDiagnoseSecurityLogsHandler_SuccessWithNoFiltersBuildsOutputAndWritesAudit(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
+	steps := diagnose.SecurityLogsSteps("", "", "", "", "", "")
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		steps[0].Command: func() (string, int, error) {
+			return diagnoseOKDoc(t, "dash1", 0, `{"status":"success","data":{}}`+"\nHTTP_STATUS:200"), 0, nil
+		},
+	}}
+	handler := diagnoseSecurityLogsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseSecurityLogsInput{})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil (success) — every field is optional", result)
+	}
+	if out.Host != "dash1" {
+		t.Fatalf("out.Host = %q, want dash1 — auto-resolved, there is no host parameter", out.Host)
+	}
+	if out.Query != diagnose.SecurityLogsQuery("", "") {
+		t.Fatalf("out.Query = %q, want %q", out.Query, diagnose.SecurityLogsQuery("", ""))
+	}
+	if out.HTTPStatus != 200 || out.ResultJSON != `{"status":"success","data":{}}` {
+		t.Fatalf("out = %+v, want http_status=200 and the raw Loki body", out)
+	}
+	data, err := os.ReadFile(filepath.Join(out.AuditDirectory, "record.json"))
+	if err != nil {
+		t.Fatalf("read audit record: %v", err)
+	}
+	var rec diagnoseAuditRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse audit record: %v", err)
+	}
+	if rec.Check != "security_logs" || rec.Host != "dash1" || rec.Params["query"] != diagnose.SecurityLogsQuery("", "") {
+		t.Fatalf("audit record = %+v, want check=security_logs host=dash1 params.query=%q", rec, diagnose.SecurityLogsQuery("", ""))
+	}
+}
+
+func TestDiagnoseSecurityLogsHandler_HostAndSearchComposeIntoQuery(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
+	host, search := "web1", "Failed password"
+	steps := diagnose.SecurityLogsSteps(host, search, "", "", "", "")
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		steps[0].Command: func() (string, int, error) {
+			return diagnoseOKDoc(t, "dash1", 0, `{"status":"success","data":{}}`+"\nHTTP_STATUS:200"), 0, nil
+		},
+	}}
+	handler := diagnoseSecurityLogsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseSecurityLogsInput{Host: host, Search: search})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil (success)", result)
+	}
+	wantQuery := diagnose.SecurityLogsQuery(host, search)
+	if out.Query != wantQuery {
+		t.Fatalf("out.Query = %q, want %q", out.Query, wantQuery)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("fake runner recorded %d calls, want exactly 1 — host/search must select the exact composed-query command the fake was keyed on", len(fake.calls))
+	}
+	data, err := os.ReadFile(filepath.Join(out.AuditDirectory, "record.json"))
+	if err != nil {
+		t.Fatalf("read audit record: %v", err)
+	}
+	var rec diagnoseAuditRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse audit record: %v", err)
+	}
+	if rec.Params["host"] != host || rec.Params["search"] != search || rec.Params["query"] != wantQuery {
+		t.Fatalf("audit record params = %+v, want host/search/query recorded verbatim", rec.Params)
+	}
+}
+
+func TestDiagnoseSecurityLogsHandler_UnreachableSurfacesAsFieldNotError(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "dashboard", []string{"dash1"})
+	steps := diagnose.SecurityLogsSteps("", "", "", "", "", "")
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		steps[0].Command: func() (string, int, error) {
+			doc := map[string]any{"plays": []any{map[string]any{"tasks": []any{map[string]any{"hosts": map[string]any{
+				"dash1": map[string]any{"stdout": "", "rc": 0, "failed": true, "unreachable": true},
+			}}}}}}
+			data, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data), 0, nil
+		},
+	}}
+	handler := diagnoseSecurityLogsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseSecurityLogsInput{})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil — an unreachable target is a normal result field, not a tool error", result)
+	}
+	if !out.Unreachable {
+		t.Fatal("out.Unreachable = false, want true")
+	}
+}
+
+// ---- pilot_diagnose_metrics ------------------------------------------------
+
+func TestDiagnoseMetricsHandler_EmptyQueryRejectedBeforeAnyCall(t *testing.T) {
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseMetricsHandler(baseDiagnoseOpts(t, "unused.yml", fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMetricsInput{Query: ""})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result for an empty query", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0", len(fake.calls))
+	}
+}
+
+func TestDiagnoseMetricsHandler_StartWithoutEndRejectedBeforeAnyCall(t *testing.T) {
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseMetricsHandler(baseDiagnoseOpts(t, "unused.yml", fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMetricsInput{Query: "up", Start: "2026-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result when start is set without end", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0", len(fake.calls))
+	}
+}
+
+func TestDiagnoseMetricsHandler_NoThanosQueryGroupRejectedBeforeAnyCall(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseFixtureInventory(t) // no "thanos-query" group in this inventory at all
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseMetricsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMetricsInput{Query: "up"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result when no thanos-query group exists", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0", len(fake.calls))
+	}
+}
+
+func TestDiagnoseMetricsHandler_SuccessInstantQueryBuildsOutputAndWritesAudit(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "thanos-query", []string{"tq1"})
+	query := `up{job="prometheus"}`
+	steps := diagnose.MetricsSteps(query, "", "", "", "")
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		steps[0].Command: func() (string, int, error) {
+			return diagnoseOKDoc(t, "tq1", 0, `{"status":"success","data":{"resultType":"vector","result":[]}}`+"\nHTTP_STATUS:200"), 0, nil
+		},
+	}}
+	handler := diagnoseMetricsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMetricsInput{Query: query})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil (success)", result)
+	}
+	if out.Host != "tq1" {
+		t.Fatalf("out.Host = %q, want tq1 — auto-resolved, there is no host parameter", out.Host)
+	}
+	if out.HTTPStatus != 200 || out.ResultJSON != `{"status":"success","data":{"resultType":"vector","result":[]}}` {
+		t.Fatalf("out = %+v, want http_status=200 and the raw Thanos body", out)
+	}
+	data, err := os.ReadFile(filepath.Join(out.AuditDirectory, "record.json"))
+	if err != nil {
+		t.Fatalf("read audit record: %v", err)
+	}
+	var rec diagnoseAuditRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse audit record: %v", err)
+	}
+	if rec.Check != "metrics" || rec.Host != "tq1" || rec.Params["query"] != query {
+		t.Fatalf("audit record = %+v, want check=metrics host=tq1 params.query=%q", rec, query)
+	}
+}
+
+func TestDiagnoseMetricsHandler_SuccessRangeQueryPassesStartEndStepThrough(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "thanos-query", []string{"tq1"})
+	query, start, end, step := "up", "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z", "30s"
+	steps := diagnose.MetricsSteps(query, "", start, end, step)
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		steps[0].Command: func() (string, int, error) {
+			return diagnoseOKDoc(t, "tq1", 0, `{"status":"success","data":{"resultType":"matrix","result":[]}}`+"\nHTTP_STATUS:200"), 0, nil
+		},
+	}}
+	handler := diagnoseMetricsHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMetricsInput{Query: query, Start: start, End: end, Step: step})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil (success)", result)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("fake runner recorded %d calls, want exactly 1 — start/end/step must select the range-query URL the fake was keyed on", len(fake.calls))
+	}
+	data, err := os.ReadFile(filepath.Join(out.AuditDirectory, "record.json"))
+	if err != nil {
+		t.Fatalf("read audit record: %v", err)
+	}
+	var rec diagnoseAuditRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse audit record: %v", err)
+	}
+	if rec.Params["start"] != start || rec.Params["end"] != end || rec.Params["step"] != step {
+		t.Fatalf("audit record params = %+v, want start/end/step to be recorded verbatim", rec.Params)
+	}
+}
+
 // ---- pilot_diagnose_run --------------------------------------------------
 
 func TestDiagnoseRunHandler_EmptyCommandRejectedBeforeAnyCall(t *testing.T) {
@@ -344,5 +738,60 @@ func TestDiagnoseRunHandler_NonzeroRCIsNotAnMCPError(t *testing.T) {
 	}
 	if out.RC != 3 {
 		t.Fatalf("out.RC = %d, want 3", out.RC)
+	}
+}
+
+// ---- resolveDiagnoseInventory (auto-regenerate from sibling hosts.yml) ----
+
+// TestResolveDiagnoseInventory_RegeneratesFreshOnEveryCallNotJustAtStartup
+// proves the auto-regenerate hook (autoRegenerateInventoryFromHosts,
+// inventory.go) runs on every pilot_diagnose_* call, not once when the
+// server starts: a hosts.yml edit made between two calls to the same
+// handler (modeling an mcp serve process that stays up across a
+// separate `pilot edit` session touching the same workspace) must be
+// picked up by the very next call, with no restart.
+func TestResolveDiagnoseInventory_RegeneratesFreshOnEveryCallNotJustAtStartup(t *testing.T) {
+	requireRealAnsible(t)
+	dir := t.TempDir()
+	invPath := filepath.Join(dir, "inventory.yml")
+	hostsPath := filepath.Join(dir, "hosts.yml")
+	if err := os.WriteFile(invPath, []byte("all:\n  hosts: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hostsPath, []byte("hosts: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseLogsHandler(baseDiagnoseOpts(t, invPath, fake.run))
+
+	result1, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLogsInput{Query: "up"})
+	if err != nil {
+		t.Fatalf("first handler() call error = %v", err)
+	}
+	if result1 == nil || !result1.IsError {
+		t.Fatalf("first call result = %+v, want an IsError result — hosts.yml declares no dashboard host yet", result1)
+	}
+
+	// Simulate a hosts.yml edit made while the (conceptual) long-running
+	// mcp serve process stays up — e.g. via a separate `pilot edit` session.
+	hostsWithDashboard := "hosts:\n  dash1:\n    ansible_host: 127.0.0.1\n    ansible_connection: local\n    roles: [dashboard]\n"
+	if err := os.WriteFile(hostsPath, []byte(hostsWithDashboard), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	steps := diagnose.LogsSteps("up", "", "", "", "")
+	fake.byCommand[steps[0].Command] = func() (string, int, error) {
+		return diagnoseOKDoc(t, "dash1", 0, `{"status":"success"}`+"\nHTTP_STATUS:200"), 0, nil
+	}
+
+	result2, out2, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLogsInput{Query: "up"})
+	if err != nil {
+		t.Fatalf("second handler() call error = %v", err)
+	}
+	if result2 != nil {
+		t.Fatalf("second call result = %+v, want nil (success) — hosts.yml now declares a dashboard host, and this call must see it without a restart", result2)
+	}
+	if out2.Host != "dash1" {
+		t.Fatalf("out2.Host = %q, want dash1", out2.Host)
 	}
 }

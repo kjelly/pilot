@@ -149,14 +149,40 @@ touches a live host. Two additional, independently-gated flags register a
 separate tool family that runs real Ansible ad-hoc commands against a real
 inventory host:
 
-- `--enable-diagnose` (requires `--diagnose-inventory`) registers
-  `pilot_diagnose_sudo` and `pilot_diagnose_dns` — each a **fixed,
-  code-defined, read-only** command allow-list (mirroring
-  `docs/verification/freeipa-client.md` and
-  `docs/verification/core-infra{,-provider}.md`) that diagnoses,
-  respectively, why a user can/cannot sudo on a host, or why DNS resolution
-  is failing there. The `host` argument must be an exact inventory
-  hostname — never an ansible pattern/group/wildcard.
+- `--enable-diagnose` (requires `--diagnose-inventory`) registers five
+  **fixed, code-defined, read-only** tools:
+  - `pilot_diagnose_sudo` / `pilot_diagnose_dns` — a command allow-list
+    (mirroring `docs/verification/freeipa-client.md` and
+    `docs/verification/core-infra{,-provider}.md`) that diagnoses,
+    respectively, why a user can/cannot sudo on a host, or why DNS
+    resolution is failing there. The `host` argument must be an exact
+    inventory hostname — never an ansible pattern/group/wildcard.
+  - `pilot_diagnose_logs` / `pilot_diagnose_metrics` — run a
+    caller-supplied LogQL/PromQL query against Loki / Thanos Query via an
+    ansible ad-hoc `curl` against that service's own loopback (SSH is the
+    only reach this server needs — see
+    `docs/network-firewall-matrix.md`). Both auto-resolve their singleton
+    inventory group (`dashboard` / `thanos-query`) instead of taking a
+    `host` argument, since each is contractually a single central role.
+    There is no time-range cap: `start`/`end`/`step`/`time` are passed
+    through verbatim to Loki/Thanos — the caller decides the query window;
+    `--diagnose-step-timeout` is the only backstop against a runaway
+    query.
+  - `pilot_diagnose_security_logs` — a convenience wrapper over
+    `pilot_diagnose_logs` for security/audit events specifically: it
+    auto-scopes the query to Loki's `job="pilot-siem"` label, which by
+    this deployment's own design already covers nothing but
+    security/audit-relevant log lines — from **either**
+    `docs/verification/log-server.md`'s forwarded `auth`/`authpriv`/
+    `local6` (auditd) logs **or** a co-located `wazuh-manager`'s alerts
+    (whichever this deployment ships; both land under the same job label,
+    so there's no separate "source" argument). `host` and `search` are
+    both optional, plain-substring filters against the log line content
+    (not a regex, and — unlike `pilot_diagnose_sudo`/`dns`'s `host` — not
+    a precise scope: a wazuh alert's source agent name lives inside its
+    JSON body, not in a per-host file path the way log-server's files do,
+    so a content search is the one mechanism that finds a host either
+    way).
 - `--enable-diagnose-raw` (also requires `--diagnose-inventory`,
   independent of `--enable-diagnose`) registers `pilot_diagnose_run`,
   which runs a **caller-supplied** command via ansible's `command` module

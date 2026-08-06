@@ -19,3 +19,24 @@ func ValidateHost(resolved networkcheck.ResolvedInventory, host string) error {
 	}
 	return nil
 }
+
+// ResolveSingletonGroupHost resolves the exactly-one host in inventory
+// group group ("dashboard", "thanos-query" — both contractually
+// hostCardinality: exactly-one, see contracts/dashboard.yaml and
+// contracts/thanos-query.yaml). Unlike ValidateHost, there is no
+// caller-supplied host to check here — the logs/metrics checks target a
+// fixed central role, not an arbitrary host, so this resolves it directly
+// from the inventory instead of asking the MCP caller to name it. Returns
+// an error naming the group and actual host count when it's empty or has
+// more than one host, since either means there's no safe host to guess.
+func ResolveSingletonGroupHost(resolved networkcheck.ResolvedInventory, group string) (string, error) {
+	hosts := resolved.GroupHosts[group]
+	switch len(hosts) {
+	case 0:
+		return "", fmt.Errorf("inventory group %q has no hosts — is the %q role deployed in this inventory?", group, group)
+	case 1:
+		return hosts[0], nil
+	default:
+		return "", fmt.Errorf("inventory group %q has %d hosts, expected exactly one (hostCardinality: exactly-one)", group, len(hosts))
+	}
+}
