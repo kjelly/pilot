@@ -95,6 +95,12 @@ var deployCatalog = []deployPlaybook{
 		VaultHint: "既有 realm 的管理員密碼(ipa_admin_password)",
 	},
 	{
+		Key: "freeipa-realm-replacement", Label: "把一台 FreeIPA client 換到另一個 realm(client-wave migration)",
+		Playbook: "playbooks/apply/freeipa-realm-replacement-apply.yml", DefaultGroup: "freeipa-client", StageVar: "stage",
+		Note:      "day-2/opt-in 角色(不在 site.yml);僅換 client 端 enrollment，不是 server 端 restore；舊 server 若已重裝/退役，本機 archive 只剩鑑識用途，不能拿來 rollback trust。見 docs/verification/freeipa-realm-replacement.md。",
+		VaultHint: "新 realm 的管理員密碼(ipa_admin_password)",
+	},
+	{
 		Key: "keycloak-db", Label: "Keycloak 的 PostgreSQL",
 		Playbook: "playbooks/apply/keycloak-db-apply.yml", DefaultGroup: "keycloak-db", StageVar: "stage",
 		VaultHint: "資料庫密碼(keycloak_db_password)",

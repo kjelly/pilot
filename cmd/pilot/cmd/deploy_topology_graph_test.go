@@ -190,6 +190,7 @@ func TestExpandIfSimplifiedHostsDetectsAndExpands(t *testing.T) {
   it-freeipa:
     ansible_host: "10.0.0.1"
     ansible_user: ubuntu
+    freeipa_roster_file: ".vault/ipa-identity.yaml"
     roles: [freeipa-server]
   it-service:
     ansible_host: "10.0.0.2"
