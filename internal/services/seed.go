@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +87,10 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 		baseURL = rpmURLs[repo.Name]
 		break
 	}
+	caPEM, err := readCAPEM(root)
+	if err != nil {
+		return ClientConfig{}, fmt.Errorf("read service CA: %w", err)
+	}
 	return ClientConfig{
 		Profile:           profile.Name,
 		Fingerprint:       fingerprint,
@@ -96,7 +101,7 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 		RPMRepositories:   rpmURLs,
 		RegistryMirrorURL: fmt.Sprintf("http://%s:%d", serviceHostname, profile.Harbor.HTTPPort),
 		RegistryProjects:  projects,
-		CAPEM:             "",
+		CAPEM:             caPEM,
 	}, nil
 }
 
@@ -122,6 +127,18 @@ func readPulpAdminPassword(root string) (string, error) {
 		return "", errors.New("read Pulp admin password: admin password is empty")
 	}
 	return password, nil
+}
+
+func readCAPEM(root string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(root, "ca", "ca.pem"))
+	if err != nil {
+		return "", fmt.Errorf("read CA PEM: %w", err)
+	}
+	pem := strings.TrimSpace(string(b))
+	if pem == "" {
+		return "", errors.New("CA PEM is empty")
+	}
+	return pem, nil
 }
 
 type pulpRemote struct {

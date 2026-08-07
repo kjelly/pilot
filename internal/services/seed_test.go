@@ -28,6 +28,7 @@ func TestSeedServicesCreatesOnDemandRPMAndHarborProxy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "pulp", "secrets", "admin-password"), []byte("pulp-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	wantCAPEM := writeSeedTestCAPEM(t, root)
 	var gotRemote, gotRepository, gotDistribution, gotSync, gotRegistry, gotProject map[string]any
 	var taskPolls int
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -111,6 +112,9 @@ func TestSeedServicesCreatesOnDemandRPMAndHarborProxy(t *testing.T) {
 	}
 	auth := clientConfig // keep the contract assertion local to avoid logging secrets
 	_ = auth
+	if clientConfig.CAPEM != strings.TrimSpace(wantCAPEM) {
+		t.Fatalf("seeded CA PEM = %q, want rendered CA", clientConfig.CAPEM)
+	}
 }
 
 func TestSeedServicesIsIdempotentForExistingResources(t *testing.T) {
@@ -128,6 +132,7 @@ func TestSeedServicesIsIdempotentForExistingResources(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "pulp", "secrets", "admin-password"), []byte("pulp-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	_ = writeSeedTestCAPEM(t, root)
 	posts := 0
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Method == http.MethodPost {
@@ -160,6 +165,15 @@ func TestSeedServicesIsIdempotentForExistingResources(t *testing.T) {
 	if posts != 0 {
 		t.Fatalf("idempotent seed made %d POST requests", posts)
 	}
+}
+
+func writeSeedTestCAPEM(t *testing.T, root string) string {
+	t.Helper()
+	bundle, err := RenderBundle(BuiltInDevLite(), root, net.ParseIP("192.168.122.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle.Client.CAPEM
 }
 
 func TestSeedServicesRequiresHarborAdminSecret(t *testing.T) {

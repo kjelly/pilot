@@ -139,7 +139,13 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	if currentErr == nil && current.Fingerprint != "" && current.Fingerprint != fingerprint && current.Fingerprint != legacyFingerprint {
 		return fmt.Errorf("services: profile fingerprint mismatch (running=%s requested=%s); purge or use the existing profile", current.Fingerprint, fingerprint)
 	}
-	forceRecreate := currentErr != nil || current.Fingerprint == ""
+	// A missing state file is not itself evidence that live containers are
+	// stale. Compose can reconcile a clean or externally restored bundle
+	// without interrupting its first-time migrations. Force recreation only
+	// for an unreadable state or a previously registered stack that failed its
+	// health probes below.
+	forceRecreate := currentErr != nil
+	recoverHarbor := false
 	// Older service state did not record the per-repository RPM endpoints. Force
 	// one recreation on upgrade so the Pulp admin env file is consumed by the
 	// container instead of silently keeping an old unauthenticated instance.
@@ -148,12 +154,16 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	}
 	if currentErr == nil && current.Running && m.probeEndpoints(ctx, current) != nil {
 		forceRecreate = true
+		recoverHarbor = true
 	}
 	bundle, err := RenderBundle(profile, m.root, bindIP)
 	if err != nil {
 		return err
 	}
 	if err := m.requireCompose(ctx); err != nil {
+		return err
+	}
+	if err := m.ensurePulpSettingsAccess(ctx, bundle.Root); err != nil {
 		return err
 	}
 	if err := m.ensureHarbor(ctx, profile, bundle); err != nil {
@@ -172,19 +182,28 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	project := "pilot-services-" + profile.Name
 	composeArgs := []string{"compose", "-f", bundle.ComposePath, "-p", project, "up", "-d", "--wait"}
 	if forceRecreate {
-		composeArgs = append(composeArgs, "--force-recreate")
+		composeArgs = append(composeArgs, "--force-recreate", "--remove-orphans")
 	}
 	if result, err := m.runner.Run(ctx, m.root, "docker", composeArgs...); err != nil {
 		return fmt.Errorf("services: start compose: %w", err)
 	} else if result.ExitCode != 0 {
-		return fmt.Errorf("services: start compose failed: %s", redact(result.Stderr))
+		// A Pulp worker can remain unhealthy after a bind-mounted setting
+		// directory is repaired. Recreate this Compose project once so each
+		// worker reloads the corrected access mode. This is intentionally
+		// bounded: a second failure is returned to the caller.
+		firstFailure := redact(result.Stderr)
+		retryArgs := []string{"compose", "-f", bundle.ComposePath, "-p", project, "up", "-d", "--wait", "--force-recreate", "--remove-orphans"}
+		retry, retryErr := m.runner.Run(ctx, m.root, "docker", retryArgs...)
+		if retryErr != nil {
+			return fmt.Errorf("services: start compose failed: %s; recreate services: %w", firstFailure, retryErr)
+		}
+		if retry.ExitCode != 0 {
+			return fmt.Errorf("services: start compose failed: %s; recreate services failed: %s", firstFailure, redact(retry.Stderr))
+		}
 	}
 	if harborCompose := harborComposePath(bundle); harborCompose != "" {
-		harborProject := "pilot-harbor-" + profile.Name
-		if result, err := m.runner.Run(ctx, filepath.Dir(harborCompose), "sudo", "-n", "docker", "compose", "-f", harborCompose, "-p", harborProject, "up", "-d", "--wait"); err != nil {
-			return fmt.Errorf("services: start harbor: %w", err)
-		} else if result.ExitCode != 0 {
-			return fmt.Errorf("services: start harbor failed: %s", redact(result.Stderr))
+		if err := m.startHarbor(ctx, harborCompose, profile.Name, forceRecreate, recoverHarbor); err != nil {
+			return err
 		}
 	}
 	seededClient, err := m.seed(ctx, profile, bundle.Root, bindIP, m.client)
@@ -207,6 +226,71 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{state}, nil
 	})
+}
+
+// ensurePulpSettingsAccess repairs the modes of bind-mounted Pulp settings
+// after a container-managed retry or image upgrade. Docker may own those
+// directories, so this must use the same explicit sudo boundary as Compose.
+// The database-field key remains root:pulp 0640; only directory traversal is
+// granted to the unprivileged Pulp workers.
+func (m *Manager) ensurePulpSettingsAccess(ctx context.Context, root string) error {
+	settings := filepath.Join(root, "pulp", "settings")
+	certs := filepath.Join(settings, "certs")
+	result, err := m.runner.Run(ctx, root, "sudo", "-n", "chmod", "0755", settings, certs)
+	if err != nil {
+		return fmt.Errorf("services: set Pulp settings directory access: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("services: set Pulp settings directory access failed: %s", redact(result.Stderr))
+	}
+	return nil
+}
+
+// startHarbor starts the generated Harbor Compose project. A previous
+// interrupted start can leave container network endpoints behind even though
+// the persistent cache data is valid. Retry that case once by removing only
+// this project's containers and orphan endpoints, then recreate the project.
+// Compose volumes and the cache data below the service root are preserved.
+func (m *Manager) startHarbor(ctx context.Context, harborCompose, profile string, forceRecreate, recoverStale bool) error {
+	project := "pilot-harbor-" + profile
+	dir := filepath.Dir(harborCompose)
+	up := []string{"-n", "docker", "compose", "-f", harborCompose, "-p", project, "up", "-d", "--wait"}
+	if forceRecreate {
+		up = append(up, "--force-recreate", "--remove-orphans")
+	}
+	result, err := m.runner.Run(ctx, dir, "sudo", up...)
+	if err != nil {
+		return fmt.Errorf("services: start harbor: %w", err)
+	}
+	if result.ExitCode == 0 {
+		return nil
+	}
+	firstFailure := redact(result.Stderr)
+	if !recoverStale {
+		return fmt.Errorf("services: start harbor failed: %s", firstFailure)
+	}
+
+	// This is intentionally a single, bounded recovery attempt for a
+	// previously healthy stack. It addresses stale Docker network sandboxes
+	// without interrupting a new Harbor database's initial schema migration or
+	// turning a genuine configuration error into an unbounded restart loop.
+	result, err = m.runner.Run(ctx, dir, "sudo", "-n", "docker", "compose", "-f", harborCompose, "-p", project, "down", "--remove-orphans")
+	if err != nil {
+		return fmt.Errorf("services: start harbor failed: %s; recover Harbor topology: %w", firstFailure, err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("services: start harbor failed: %s; recover Harbor topology failed: %s", firstFailure, redact(result.Stderr))
+	}
+
+	up = append([]string{"-n", "docker", "compose", "-f", harborCompose, "-p", project, "up", "-d", "--wait"}, "--force-recreate", "--remove-orphans")
+	result, err = m.runner.Run(ctx, dir, "sudo", up...)
+	if err != nil {
+		return fmt.Errorf("services: recover Harbor topology: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("services: recover Harbor topology failed after initial startup failure (%s): %s", firstFailure, redact(result.Stderr))
+	}
+	return nil
 }
 
 // Status returns persisted state and live Compose status where available.
@@ -271,10 +355,23 @@ func (m *Manager) Purge(ctx context.Context, confirmed bool) error {
 	if err := m.Down(ctx); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(m.root); err != nil {
-		return fmt.Errorf("services: purge data: %w", err)
+	// Detach the live root first. os.RemoveAll can fail part-way through a
+	// root-owned container bind mount; deleting in place would otherwise leave
+	// a new service render paired with an old Harbor database or secret.
+	staged := fmt.Sprintf("%s.purge-%s", m.root, m.now().UTC().Format("20060102T150405.000000000Z"))
+	if err := os.Rename(m.root, staged); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("services: stage purge data: %w", err)
 	}
-	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) { return nil, nil })
+	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) { return nil, nil }); err != nil {
+		return fmt.Errorf("services: clear state after detaching data: %w", err)
+	}
+	if _, err := os.Stat(staged); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err := os.RemoveAll(staged); err != nil {
+		return fmt.Errorf("services: purge detached data at %s but cleanup failed: %w", staged, err)
+	}
+	return nil
 }
 
 // ClientConfig returns the last successful non-secret client contract.
