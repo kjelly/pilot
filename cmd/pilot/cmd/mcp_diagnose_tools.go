@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,7 +98,7 @@ func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 	}, diagnoseDNSHandler(opts))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_logs",
-		Description: "run a LogQL query against Loki (the dashboard host's log store) via an ansible ad-hoc curl against its own loopback — no host parameter, since dashboard is this deployment's singleton central role. start/end/limit/direction are optional and passed through verbatim to Loki with no range cap; omit them to use Loki's own defaults (last 1h, now, 100 entries, backward). Returns the raw Loki JSON response body plus its HTTP status.",
+		Description: "run a LogQL query against Loki (the dashboard host's log store) via an ansible ad-hoc curl against its own loopback — no host parameter, since dashboard is this deployment's singleton central role. start/end accept RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; when either is supplied pilot makes both UTC boundaries explicit and rejects start >= end before querying Loki. Omit both for Loki's default last hour. Returns the raw Loki JSON response body plus its HTTP status.",
 	}, diagnoseLogsHandler(opts))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_metrics",
@@ -105,8 +106,82 @@ func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 	}, diagnoseMetricsHandler(opts))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_security_logs",
-		Description: "convenience wrapper over pilot_diagnose_logs for security/audit events specifically: automatically scopes the Loki query to job=\"pilot-siem\", which — by this deployment's own design — already covers nothing but security/audit-relevant log lines, from EITHER log-server's forwarded auth/authpriv/local6(auditd) logs OR a co-located wazuh-manager's alerts (whichever this deployment ships; both land under the same job label, no source parameter needed). host and search are both optional plain-substring filters against the log line content (not a regex, and not a precise scope like pilot_diagnose_sudo/dns's host — wazuh's JSON alerts carry the source agent's identity inside the line itself, not in a per-host file path, so a content search is the one mechanism that finds a host either way). No time-range cap. Returns the raw Loki JSON response body plus its HTTP status and the exact LogQL query that was run.",
+		Description: "convenience wrapper over pilot_diagnose_logs for security/audit events specifically: automatically scopes the Loki query to job=\"pilot-siem\", which — by this deployment's own design — already covers nothing but security/audit-relevant log lines, from EITHER log-server's forwarded auth/authpriv/local6(auditd) logs OR a co-located wazuh-manager's alerts (whichever this deployment ships; both land under the same job label, no source parameter needed). host and search are both optional plain-substring filters against the log line content (not a regex, and not a precise scope like pilot_diagnose_sudo/dns's host — wazuh's JSON alerts carry the source agent's identity inside the line itself, not in a per-host file path, so a content search is the one mechanism that finds a host either way). start/end accept RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; when either is supplied pilot makes both UTC boundaries explicit and rejects start >= end. Returns the raw Loki JSON response body plus its HTTP status and the exact LogQL query that was run.",
 	}, diagnoseSecurityLogsHandler(opts))
+}
+
+// normalizeLokiRange makes every caller-supplied log time unambiguous before
+// it reaches Loki. Log lines may carry an incorrect timezone offset, so a
+// client must never derive a range by comparing such text with Loki's implicit
+// server-side "now". If either boundary is supplied, make both boundaries
+// explicit in UTC and reject an empty or backwards range locally.
+//
+// Loki accepts RFC3339 and several Unix precisions. We deliberately accept
+// seconds, milliseconds, microseconds, and nanoseconds here, then emit one
+// canonical RFC3339Nano representation. The old pass-through behavior made a
+// malformed or future timestamp surface only as Loki's opaque "end <= start"
+// response.
+func normalizeLokiRange(start, end string, now time.Time) (string, string, error) {
+	start = strings.TrimSpace(start)
+	end = strings.TrimSpace(end)
+	if start == "" && end == "" {
+		return "", "", nil
+	}
+
+	now = now.UTC()
+	endTime := now
+	var err error
+	if end != "" {
+		endTime, err = parseLokiTime(end, now, false)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid end %q: %w", end, err)
+		}
+	}
+
+	startTime := endTime.Add(-time.Hour)
+	if start != "" {
+		startTime, err = parseLokiTime(start, now, true)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid start %q: %w", start, err)
+		}
+	}
+	if !startTime.Before(endTime) {
+		return "", "", fmt.Errorf(
+			"start (%s) must be before end (%s); use Loki entry timestamps or the dashboard host clock, not a timestamp embedded in a log line",
+			startTime.Format(time.RFC3339Nano), endTime.Format(time.RFC3339Nano),
+		)
+	}
+	return startTime.Format(time.RFC3339Nano), endTime.Format(time.RFC3339Nano), nil
+}
+
+func parseLokiTime(value string, now time.Time, isStart bool) (time.Time, error) {
+	if value == "now" {
+		return now, nil
+	}
+	if duration, err := time.ParseDuration(value); err == nil {
+		if !isStart {
+			return time.Time{}, fmt.Errorf("relative duration is only valid for start; use now or an absolute time for end")
+		}
+		return now.Add(-duration), nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.UTC(), nil
+	}
+
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n < 0 {
+		return time.Time{}, fmt.Errorf("expected RFC3339 or a non-negative Unix timestamp in seconds, milliseconds, microseconds, or nanoseconds")
+	}
+	switch {
+	case n < 10_000_000_000:
+		return time.Unix(n, 0).UTC(), nil
+	case n <= 9_223_372_036_854:
+		return time.Unix(0, n*int64(time.Millisecond)).UTC(), nil
+	case n <= 9_223_372_036_854_775:
+		return time.Unix(0, n*int64(time.Microsecond)).UTC(), nil
+	default:
+		return time.Unix(0, n).UTC(), nil
+	}
 }
 
 // ---- shared plumbing --------------------------------------------------
@@ -413,8 +488,8 @@ func diagnoseDNSHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 
 type diagnoseLogsInput struct {
 	Query               string `json:"query" jsonschema:"LogQL query, e.g. {job=\"pilot-siem\"} |= \"error\""`
-	Start               string `json:"start,omitempty" jsonschema:"optional, passed through verbatim to Loki (RFC3339 or unix ns) — omit for Loki's default (1h ago)"`
-	End                 string `json:"end,omitempty" jsonschema:"optional, passed through verbatim to Loki — omit for Loki's default (now)"`
+	Start               string `json:"start,omitempty" jsonschema:"optional range start: RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; a duration such as 1h means that far before now"`
+	End                 string `json:"end,omitempty" jsonschema:"optional range end: RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; now is accepted"`
 	Limit               string `json:"limit,omitempty" jsonschema:"optional max entries, passed through verbatim to Loki — omit for Loki's default (100)"`
 	Direction           string `json:"direction,omitempty" jsonschema:"optional forward|backward, passed through verbatim to Loki — omit for Loki's default (backward)"`
 	IncludeAnsibleNoise bool   `json:"include_ansible_noise,omitempty" jsonschema:"set true to include log lines generated by pilot's own ansible activity (BECOME-SUCCESS sudo/become markers, SSH logins by this inventory's ansible_user automation accounts) — excluded by default since it is noise from pilot itself, not the system/user activity being investigated"`
@@ -439,6 +514,10 @@ func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseLogsInput) (*mcp.CallToolResult, diagnoseLogsOutput, error) {
 		if strings.TrimSpace(in.Query) == "" {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "query must not be empty"}), diagnoseLogsOutput{}, nil
+		}
+		queryStart, queryEnd, err := normalizeLokiRange(in.Start, in.End, time.Now())
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseLogsOutput{}, nil
 		}
 
 		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
@@ -470,14 +549,14 @@ func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 		if runner == nil {
 			runner = realDiagnoseAdHocRunner()
 		}
-		steps := diagnose.LogsSteps(query, in.Start, in.End, in.Limit, in.Direction)
+		steps := diagnose.LogsSteps(query, queryStart, queryEnd, in.Limit, in.Direction)
 		results := diagnose.RunSteps(ctx, runner, opts.Inventory, host, steps, opts.StepTimeout)
 
 		rec := diagnoseAuditRecord{
 			SessionID: sessionID, Check: "logs", PilotVersion: rootCmd.Version,
 			GitRevision: gitRevision(filepath.Dir(opts.Inventory)), MCPClient: mcpClientString(req),
 			Inventory: opts.Inventory, Host: host,
-			Params: map[string]string{"query": query, "start": in.Start, "end": in.End, "limit": in.Limit, "direction": in.Direction},
+			Params: map[string]string{"query": query, "start": queryStart, "end": queryEnd, "limit": in.Limit, "direction": in.Direction},
 			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
 		_ = writeDiagnoseAudit(auditDir, rec)
@@ -509,8 +588,8 @@ func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 type diagnoseSecurityLogsInput struct {
 	Host                string `json:"host,omitempty" jsonschema:"optional hostname/agent name to filter for — a plain substring match against the log line (works against both log-server's syslog lines and wazuh-manager's JSON alerts), not a precise scope; omit to search across everything"`
 	Search              string `json:"search,omitempty" jsonschema:"optional substring to filter log lines by — plain text match, not a regex (e.g. \"Failed password\", \"sudo\", a rule ID)"`
-	Start               string `json:"start,omitempty" jsonschema:"passed through verbatim to Loki (RFC3339 or unix ns) — omit for Loki's default (1h ago)"`
-	End                 string `json:"end,omitempty" jsonschema:"passed through verbatim — omit for Loki's default (now)"`
+	Start               string `json:"start,omitempty" jsonschema:"optional range start: RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; a duration such as 1h means that far before now"`
+	End                 string `json:"end,omitempty" jsonschema:"optional range end: RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; now is accepted"`
 	Limit               string `json:"limit,omitempty" jsonschema:"max entries, passed through verbatim — omit for Loki's default (100)"`
 	Direction           string `json:"direction,omitempty" jsonschema:"forward|backward, passed through verbatim — omit for Loki's default (backward)"`
 	IncludeAnsibleNoise bool   `json:"include_ansible_noise,omitempty" jsonschema:"set true to include log lines generated by pilot's own ansible activity (BECOME-SUCCESS sudo/become markers, SSH logins by this inventory's ansible_user automation accounts) — excluded by default since it is noise from pilot itself, not a real security/audit event. Turning this on is useful when auditing pilot's own deploy/reconcile/diagnose activity specifically."`
@@ -535,6 +614,10 @@ type diagnoseSecurityLogsOutput struct {
 // required/non-empty input to validate: every field is optional.
 func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseSecurityLogsInput, diagnoseSecurityLogsOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseSecurityLogsInput) (*mcp.CallToolResult, diagnoseSecurityLogsOutput, error) {
+		queryStart, queryEnd, err := normalizeLokiRange(in.Start, in.End, time.Now())
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseSecurityLogsOutput{}, nil
+		}
 		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
@@ -564,7 +647,7 @@ func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFo
 		if runner == nil {
 			runner = realDiagnoseAdHocRunner()
 		}
-		steps := diagnose.LogsSteps(query, in.Start, in.End, in.Limit, in.Direction)
+		steps := diagnose.LogsSteps(query, queryStart, queryEnd, in.Limit, in.Direction)
 		results := diagnose.RunSteps(ctx, runner, opts.Inventory, host, steps, opts.StepTimeout)
 
 		rec := diagnoseAuditRecord{
@@ -572,7 +655,7 @@ func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFo
 			GitRevision: gitRevision(filepath.Dir(opts.Inventory)), MCPClient: mcpClientString(req),
 			Inventory: opts.Inventory, Host: host,
 			Params: map[string]string{
-				"host": in.Host, "search": in.Search, "start": in.Start, "end": in.End,
+				"host": in.Host, "search": in.Search, "start": queryStart, "end": queryEnd,
 				"limit": in.Limit, "direction": in.Direction, "query": query,
 			},
 			Start: start, Finish: time.Now(), Steps: stepAuditList(results),
