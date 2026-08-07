@@ -45,20 +45,95 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 		t.Fatalf("writeActionsSchema() error = %v", err)
 	}
 	var schema struct {
-		Version int `json:"version"`
-		Actions []struct {
+		PilotVersion  string `json:"pilot_version"`
+		SchemaVersion int    `json:"schema_version"`
+		Actions       []struct {
 			Name     string   `json:"name"`
 			Required []string `json:"required"`
 		} `json:"actions"`
+		SupportedRoutingModes []string `json:"supported_routing_modes"`
+		UnsupportedOperations []struct {
+			Operation   string `json:"operation"`
+			Reason      string `json:"reason"`
+			Alternative string `json:"alternative"`
+		} `json:"unsupported_operations"`
+		SecretsPolicy *struct {
+			ReferencesOnly bool   `json:"references_only"`
+			ValueEnvField  string `json:"value_env_field"`
+			ExtraVars      string `json:"extra_vars"`
+			GroupVars      string `json:"group_vars"`
+			Vault          string `json:"vault"`
+		} `json:"secrets_policy"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &schema); err != nil {
 		t.Fatalf("schema is not JSON: %v\n%s", err, out.String())
 	}
-	if schema.Version != 1 || len(schema.Actions) != 57 {
-		t.Fatalf("schema metadata = version %d, actions %d", schema.Version, len(schema.Actions))
+	if schema.PilotVersion == "" {
+		t.Error("pilot_version is empty")
+	}
+	if schema.SchemaVersion != 1 || len(schema.Actions) != 57 {
+		t.Fatalf("schema metadata = schema_version %d, actions %d", schema.SchemaVersion, len(schema.Actions))
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {
 		t.Fatalf("schema omitted deploy answer contract:\n%s", out.String())
+	}
+	if len(schema.SupportedRoutingModes) == 0 {
+		t.Error("supported_routing_modes is empty")
+	}
+	if schema.SecretsPolicy == nil {
+		t.Fatal("secrets_policy is missing from schema")
+	}
+	if schema.SecretsPolicy.ExtraVars != "value_env_required" {
+		t.Errorf("secrets_policy.extra_vars = %q, want value_env_required", schema.SecretsPolicy.ExtraVars)
+	}
+	if schema.SecretsPolicy.GroupVars != "rejected" {
+		t.Errorf("secrets_policy.group_vars = %q, want rejected", schema.SecretsPolicy.GroupVars)
+	}
+	if schema.SecretsPolicy.Vault != "value_env_recommended" {
+		t.Errorf("secrets_policy.vault = %q, want value_env_recommended", schema.SecretsPolicy.Vault)
+	}
+	// Every declared unsupported operation must name a real gap, not one
+	// of the 57 actions actually in the catalog — otherwise the schema
+	// would contradict itself.
+	known := map[string]bool{}
+	for _, spec := range semanticActionSpecs() {
+		known[spec.Name] = true
+	}
+	for _, op := range schema.UnsupportedOperations {
+		if op.Reason == "" {
+			t.Errorf("unsupported operation %q has empty reason", op.Operation)
+		}
+		if op.Alternative == "" {
+			t.Errorf("unsupported operation %q has empty alternative", op.Operation)
+		}
+		if known[op.Operation] {
+			t.Errorf("unsupported operation %q collides with an action name that IS in the catalog", op.Operation)
+		}
+	}
+}
+
+// TestAllActionsHaveNonEmptyMetadata verifies that every action in the
+// registry has the Hufu-Pilot integration metadata populated: an
+// execution mode, a side-effect classification, and (except for the
+// two read-only leave-without-saving actions per file kind) a
+// verification method.
+func TestAllActionsHaveNonEmptyMetadata(t *testing.T) {
+	specs := semanticActionSpecs()
+	if len(specs) == 0 {
+		t.Fatal("semanticActionSpecs() returned empty slice")
+	}
+	for _, spec := range specs {
+		t.Run(spec.Name, func(t *testing.T) {
+			if spec.ExecutionMode == "" {
+				t.Errorf("action %q missing execution_mode", spec.Name)
+			}
+			if spec.SideEffectClassification == "" {
+				t.Errorf("action %q missing side_effect_classification", spec.Name)
+			}
+			if spec.Verification == nil {
+				t.Errorf("action %q missing verification", spec.Name)
+			}
+		})
 	}
 }
 
