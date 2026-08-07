@@ -10,7 +10,7 @@ regressionTests:
   - internal/spec/freeipa_client_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
-  - {component: freeipa-server, required: true, relation: providerEndpoint, endpoints: [ldap, kerberosTcp, kerberosUdp, kpasswdUdp, httpBootstrap]}
+  - {component: freeipa-server, required: true, relation: providerEndpoint, endpoints: [ldap, kerberosTcp, kerberosUdp, kpasswdUdp, kpasswdTcp, httpBootstrap, https]}
 bindings:
   - input: freeipa_server_ip
     requiredWhenDependencySelected: true

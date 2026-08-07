@@ -36,6 +36,7 @@ endpoints:
   - {name: kerberosTcp, scheme: tcp, port: 88}
   - {name: kerberosUdp, scheme: udp, port: 88}
   - {name: kpasswdUdp, scheme: udp, port: 464}
+  - {name: kpasswdTcp, scheme: tcp, port: 464}
   - {name: httpBootstrap, scheme: http, port: 80}
   - {name: https, scheme: https, port: 443}
 stagePolicy: {variable: stage, default: sandbox}
@@ -66,6 +67,7 @@ traceability:
     "docs/verification/freeipa-server.md#C16": {tags: [freeipa-audit], reason: directory audit file}
     "docs/verification/freeipa-server.md#C17": {tags: [freeipa-install], reason: optional native DNS TCP listener}
     "docs/verification/freeipa-server.md#C18": {tags: [freeipa-install], reason: optional native DNS UDP listener}
+    "docs/verification/freeipa-server.md#C19": {tags: [freeipa-install], reason: kpasswd TCP listener from installer}
 verification: {autoDeploy: false}
 site:
   include: true
