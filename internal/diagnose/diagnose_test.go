@@ -3,6 +3,7 @@ package diagnose
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -13,6 +14,20 @@ import (
 type fakeRunner struct {
 	byCommand map[string]func() (string, int, error)
 	calls     []string
+}
+
+func TestRunStepsPassesPerStepTimeoutToAnsible(t *testing.T) {
+	var gotArgs []string
+	runner := func(_ context.Context, args []string, _ int) (string, int, error) {
+		gotArgs = append([]string(nil), args...)
+		return callbackDoc(t, "web1", 0, "ok", false, false), 0, nil
+	}
+
+	RunSteps(context.Background(), runner, "inv.yml", "web1", []Step{{ID: "C1", Module: "command", Command: "true"}}, 7*time.Second)
+	want := []string{"web1", "-i", "inv.yml", "-T", "7", "-m", "command", "-a", "true"}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("ansible args = %q, want %q", gotArgs, want)
+	}
 }
 
 func (f *fakeRunner) run(_ context.Context, args []string, _ int) (string, int, error) {

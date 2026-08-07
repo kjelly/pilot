@@ -161,6 +161,39 @@ func buildInventoryTopology(catalog contract.Catalog, groupHosts map[string][]st
 	return topo
 }
 
+// siemReceiverWarning returns a non-empty advisory line when
+// audit-log-forwarding is active (has at least one host) but neither of
+// its two possible SIEM receiver targets — log-server or wazuh-manager,
+// the same two groups audit-log-forwarding-apply.yml's own
+// siem_forward_host auto-resolution checks, in that order — has any host
+// at all. Those hosts' local6/auth/authpriv forwarding config is silently
+// skipped by design (contracts/audit-log-forwarding.yaml's dependencies:
+// [] deliberately keeps this optional, so a host can get local auditd
+// coverage before a receiver exists yet) — which is exactly the shape of a
+// real incident (2026-08-06): operators can add audit-log-forwarding to a
+// whole fleet, never add log-server anywhere, and get zero errors while
+// every forwarded log silently goes nowhere. This is advisory only, never
+// a hard fail — a legitimately receiver-less bring-up stage must not be
+// blocked by it.
+func siemReceiverWarning(topo inventoryTopology) string {
+	forwarding := topo.Nodes["audit-log-forwarding"]
+	if forwarding == nil || !forwarding.Active {
+		return ""
+	}
+	logServer := topo.Nodes["log-server"]
+	wazuh := topo.Nodes["wazuh-manager"]
+	if (logServer != nil && logServer.Active) || (wazuh != nil && wazuh.Active) {
+		return ""
+	}
+	plural := ""
+	if len(forwarding.Hosts) != 1 {
+		plural = "s"
+	}
+	return fmt.Sprintf(
+		"%d host%s have audit-log-forwarding but inventory has no log-server or wazuh-manager host — their local6/auth/authpriv forwarding is skipped (local auditd monitoring still applies); see docs/verification/audit-log-forwarding.md §1.5. Add a log-server host if these logs should reach Loki.",
+		len(forwarding.Hosts), plural)
+}
+
 // less orders components by (site.order, id) for deterministic output.
 func (t inventoryTopology) less(a, b string) bool {
 	na, nb := t.Nodes[a], t.Nodes[b]

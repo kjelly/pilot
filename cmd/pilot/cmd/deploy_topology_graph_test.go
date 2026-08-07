@@ -76,6 +76,78 @@ func TestBuildInventoryTopologyClassifiesNodes(t *testing.T) {
 	}
 }
 
+// siemTopologyCatalog builds a minimal catalog with just the three
+// components siemReceiverWarning inspects, for testing that function in
+// isolation without pulling in the larger testTopologyCatalog's unrelated
+// components.
+func siemTopologyCatalog(t *testing.T) contract.Catalog {
+	t.Helper()
+	c := func(id, role string) contract.Contract {
+		return contract.Contract{
+			ID: id, Role: role, HostCardinality: "one-or-more",
+			Resources: contract.Resources{MinCPU: 1, MinRAMMiB: 512, MinDiskGiB: 2},
+			Site:      contract.Site{Include: true, Order: 90},
+		}
+	}
+	catalog, err := contract.NewCatalog([]contract.Contract{
+		c("audit-log-forwarding", "audit-log-forwarding"),
+		c("log-server", "log-server"),
+		c("wazuh-manager", "wazuh-manager"),
+	})
+	if err != nil {
+		t.Fatalf("NewCatalog: %v", err)
+	}
+	return catalog
+}
+
+func TestSiemReceiverWarning(t *testing.T) {
+	catalog := siemTopologyCatalog(t)
+
+	// No audit-log-forwarding hosts at all -> no warning, regardless of
+	// receivers.
+	if got := siemReceiverWarning(buildInventoryTopology(catalog, map[string][]string{})); got != "" {
+		t.Errorf("no audit-log-forwarding hosts: want no warning, got %q", got)
+	}
+
+	// audit-log-forwarding active, neither receiver active -> warning,
+	// mentioning the host count.
+	got := siemReceiverWarning(buildInventoryTopology(catalog, map[string][]string{
+		"audit-log-forwarding": {"a", "b", "c"},
+	}))
+	if got == "" {
+		t.Fatal("audit-log-forwarding active with no receiver: want a warning, got none")
+	}
+	if !strings.Contains(got, "3 hosts") {
+		t.Errorf("warning should mention the host count (3 hosts), got %q", got)
+	}
+
+	// audit-log-forwarding active, log-server active -> no warning.
+	if got := siemReceiverWarning(buildInventoryTopology(catalog, map[string][]string{
+		"audit-log-forwarding": {"a"},
+		"log-server":           {"a"},
+	})); got != "" {
+		t.Errorf("log-server active: want no warning, got %q", got)
+	}
+
+	// audit-log-forwarding active, wazuh-manager active (no log-server,
+	// the fallback receiver audit-log-forwarding-apply.yml itself
+	// resolves to) -> no warning.
+	if got := siemReceiverWarning(buildInventoryTopology(catalog, map[string][]string{
+		"audit-log-forwarding": {"a"},
+		"wazuh-manager":        {"a"},
+	})); got != "" {
+		t.Errorf("wazuh-manager active: want no warning, got %q", got)
+	}
+
+	// Singular host count must not say "1 hosts".
+	got = siemReceiverWarning(buildInventoryTopology(catalog, map[string][]string{
+		"audit-log-forwarding": {"a"},
+	}))
+	if !strings.Contains(got, "1 host ") {
+		t.Errorf("singular host count should say \"1 host\" not \"1 hosts\", got %q", got)
+	}
+}
+
 func TestPrimaryParentPrefersActiveRequiredDep(t *testing.T) {
 	topo := buildInventoryTopology(testTopologyCatalog(t), testTopologyGroups())
 

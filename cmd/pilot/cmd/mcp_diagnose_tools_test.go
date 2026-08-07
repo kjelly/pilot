@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -94,11 +95,59 @@ func diagnoseOKDoc(t *testing.T, host string, rc int, stdout string) string {
 
 func baseDiagnoseOpts(t *testing.T, inventory string, runner diagnose.AdHocRunner) diagnoseMCPToolsOptions {
 	t.Helper()
+	runtime, err := prepareDeployAnsibleRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	return diagnoseMCPToolsOptions{
-		Inventory:   inventory,
-		AuditDir:    t.TempDir(),
-		StepTimeout: 5 * time.Second,
-		AdHocRunner: runner,
+		Inventory:      inventory,
+		AuditDir:       t.TempDir(),
+		StepTimeout:    5 * time.Second,
+		AnsibleRuntime: runtime,
+		AdHocRunner:    runner,
+	}
+}
+
+func TestResolveDiagnoseInventory_RefreshFailureIsNotSilentlyIgnored(t *testing.T) {
+	// A bad sibling hosts.yml must not leave a live diagnostic using a stale
+	// inventory whose hosts could now point to a different machine.
+	dir := t.TempDir()
+	inv := filepath.Join(dir, "inventory.yml")
+	if err := os.WriteFile(inv, []byte("all:\n  hosts:\n    web1: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte("hosts: [not-a-map]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := prepareDeployAnsibleRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = resolveDiagnoseInventory(withDeployAnsibleRuntime(context.Background(), runtime), diagnoseMCPToolsOptions{Inventory: inv, StepTimeout: time.Second, AnsibleRuntime: runtime})
+	if err == nil || !strings.Contains(err.Error(), "refresh inventory") {
+		t.Fatalf("resolveDiagnoseInventory() error = %v, want explicit refresh failure", err)
+	}
+}
+
+func TestRealDiagnoseAdHocRunner_TimeoutReturnsWhenSSHChildKeepsPipesOpen(t *testing.T) {
+	// Reproduce the failure mode behind a stuck MCP call: killing the direct
+	// ansible process is insufficient when its ssh child still owns stdout.
+	// The runner must return the context timeout after WaitDelay, rather than
+	// wait for that descendant indefinitely.
+	binDir := t.TempDir()
+	ansible := filepath.Join(binDir, "ansible")
+	if err := os.WriteFile(ansible, []byte("#!/bin/sh\nsleep 30 &\nwait\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	start := time.Now()
+	_, _, err := realDiagnoseAdHocRunner()(context.Background(), []string{"web1"}, 1)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runner error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("runner returned after %s, want bounded timeout (<= 5s)", elapsed)
 	}
 }
 

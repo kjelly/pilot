@@ -197,6 +197,9 @@ func runDeployGraph(cmd *cobra.Command, _ []string) error {
 	if deployGraphViewFlag == "component" || deployGraphViewFlag == "both" {
 		renderInventoryTopology(out, topo, deployGraphInventoryFlag)
 	}
+	if warning := siemReceiverWarning(topo); warning != "" {
+		fmt.Fprintf(out, "⚠️  %s\n", warning)
+	}
 	if deployGraphViewFlag == "both" {
 		fmt.Fprintln(out)
 	}
@@ -471,6 +474,9 @@ func previewInventoryGraph(ctx context.Context, out io.Writer, inv string) {
 	}
 	topo := buildInventoryTopology(catalog, groups)
 	renderInventoryTopology(out, topo, inv)
+	if warning := siemReceiverWarning(topo); warning != "" {
+		fmt.Fprintf(out, "⚠️  %s\n", warning)
+	}
 	fmt.Fprintln(out)
 	renderHostTopology(out, topo, inv)
 }
@@ -1780,7 +1786,11 @@ func printSiteTopology(ctx context.Context, out io.Writer, inv string) {
 		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
 		return
 	}
-	renderInventoryTopology(out, buildInventoryTopology(catalog, groups), inv)
+	topo := buildInventoryTopology(catalog, groups)
+	renderInventoryTopology(out, topo, inv)
+	if warning := siemReceiverWarning(topo); warning != "" {
+		fmt.Fprintf(out, "⚠️  %s\n", warning)
+	}
 	fmt.Fprintln(out)
 }
 

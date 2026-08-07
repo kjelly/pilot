@@ -57,10 +57,10 @@ type diagnoseMCPToolsOptions struct {
 // before resolving it — called fresh on every pilot_diagnose_*
 // invocation, not cached from mcp serve startup, so a hosts.yml edited
 // while this long-running server is up is picked up on the very next
-// diagnose call rather than requiring a restart. Silent on failure: an
-// unregenerable hosts.yml (or none present) just means this call sees
-// whatever inventory.yml already had, exactly as before this feature
-// existed.
+// diagnose call rather than requiring a restart. A sibling hosts.yml that
+// cannot be regenerated is surfaced as a tool error: silently falling back
+// to an older inventory can direct a live-host diagnostic to the wrong
+// machine.
 //
 // The explicit os.Stat below exists because `ansible-inventory --list -i
 // <missing-file>` does not error — it warns on stderr and falls back to
@@ -72,14 +72,18 @@ type diagnoseMCPToolsOptions struct {
 // found" error indistinguishable from the inventory genuinely lacking
 // that host.
 func resolveDiagnoseInventory(ctx context.Context, opts diagnoseMCPToolsOptions) (networkcheck.ResolvedInventory, error) {
-	_, _ = autoRegenerateInventoryFromHosts(io.Discard, opts.Inventory)
+	if _, err := autoRegenerateInventoryFromHosts(io.Discard, opts.Inventory); err != nil {
+		return networkcheck.ResolvedInventory{}, fmt.Errorf("refresh inventory from sibling hosts.yml: %w", err)
+	}
 	if _, statErr := os.Stat(opts.Inventory); statErr != nil {
 		if os.IsNotExist(statErr) {
 			return networkcheck.ResolvedInventory{}, fmt.Errorf("inventory file not found: %s", opts.Inventory)
 		}
 		return networkcheck.ResolvedInventory{}, fmt.Errorf("stat inventory file %s: %w", opts.Inventory, statErr)
 	}
-	return resolveNetworkCheckInventory(ctx, opts.Inventory)
+	resolveCtx, cancel := context.WithTimeout(ctx, opts.StepTimeout)
+	defer cancel()
+	return resolveNetworkCheckInventory(resolveCtx, opts.Inventory)
 }
 
 func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
@@ -118,6 +122,11 @@ func realDiagnoseAdHocRunner() diagnose.AdHocRunner {
 		cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 		defer cancel()
 		command := deployAnsibleCommand(cctx, "ansible", args...)
+		// CommandContext kills only the direct ansible process. A descendant
+		// ssh process can retain stdout/stderr after that kill, which otherwise
+		// lets Cmd.Wait block indefinitely. Bound pipe draining so MCP always
+		// returns a timeout result.
+		command.WaitDelay = 2 * time.Second
 		if command.Env == nil {
 			command.Env = os.Environ()
 		}
@@ -131,6 +140,9 @@ func realDiagnoseAdHocRunner() diagnose.AdHocRunner {
 		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 			err = nil
+		}
+		if cctx.Err() != nil {
+			return stdout.String(), exitCode, fmt.Errorf("ansible diagnose step timed out after %ds: %w", timeoutSeconds, cctx.Err())
 		}
 		if err != nil {
 			return "", exitCode, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))

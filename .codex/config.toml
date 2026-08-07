@@ -6,3 +6,26 @@ max_threads = 2
 max_depth = 1
 
 interrupt_message = true
+
+[mcp_servers.pilot]
+command = "ssh"
+args = [ "ubuntu@infra-deploy",
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "-v",
+        "./infra-config:/pilot/config",
+        "pilot-cli:latest",
+        "pilot",
+        "mcp",
+        "serve",
+        "--dir",
+        "/pilot/config/",
+        "--enable-diagnose",
+        "--enable-diagnose-raw",
+        "--diagnose-inventory",
+        "/pilot/config/inventory.yml"
+]
+env = { PROJECT_ROOT = "${workspaceFolder}" }
+

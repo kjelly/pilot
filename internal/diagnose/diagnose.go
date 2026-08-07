@@ -9,6 +9,7 @@ package diagnose
 
 import (
 	"context"
+	"strconv"
 	"time"
 )
 
@@ -57,7 +58,11 @@ type AdHocRunner func(ctx context.Context, args []string, timeoutSeconds int) (r
 func RunSteps(ctx context.Context, run AdHocRunner, inventory, host string, steps []Step, perStepTimeout time.Duration) []StepResult {
 	results := make([]StepResult, len(steps))
 	for i, step := range steps {
-		args := []string{host, "-i", inventory, "-m", step.Module, "-a", step.Command}
+		// Bound Ansible's own SSH connection setup as well as the runner's
+		// outer context. Without -T, a TCP black hole can leave an ssh child
+		// alive after cancellation and make an MCP diagnose request appear to
+		// hang instead of returning evidence.
+		args := []string{host, "-i", inventory, "-T", strconv.Itoa(int(perStepTimeout.Seconds())), "-m", step.Module, "-a", step.Command}
 		rawJSON, _, err := run(ctx, args, int(perStepTimeout.Seconds()))
 		var result AdHocResult
 		if err != nil {
