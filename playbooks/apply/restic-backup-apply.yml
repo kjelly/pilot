@@ -279,12 +279,22 @@
                 eval "${RESTIC_BACKUP_PRE_HOOK}"
               fi
 
-              # bounded: against a destination bucket that doesn't exist yet,
-              # restic's S3 backend retries with growing backoff instead of
-              # failing fast (real bug hit against SeaweedFS — see
-              # docs/runbooks/restic-backup.md §5 Bug 3). timeout turns an
-              # effectively-indefinite hang into a clear, fast failure.
-              timeout 60 restic snapshots >/dev/null 2>&1 || timeout 60 restic init
+              # Initialize only a demonstrably empty repository. A generic
+              # `snapshots || init` turns a wrong password, access failure, or
+              # corrupted existing repository into restic init's misleading
+              # "create key" error. Keep the original probe output and fail
+              # closed for every error other than the missing-config message
+              # emitted by a fresh repository.
+              probe_output="$(timeout 60 restic snapshots --json 2>&1)" || probe_rc=$?
+              if [ "${probe_rc:-0}" -ne 0 ]; then
+                if printf '%s\n' "$probe_output" | grep -Fq 'Is there a repository at the following location?'; then
+                  timeout 60 restic init
+                else
+                  printf '%s\n' "$probe_output" >&2
+                  echo 'restic repository exists but could not be opened; refusing to initialize over it' >&2
+                  exit "${probe_rc}"
+                fi
+              fi
 
               # A prior run killed mid-operation (ansible timeout, host
               # reboot, `systemctl stop` racing a still-running oneshot)
@@ -373,7 +383,16 @@
           ansible.builtin.shell: |
             . {{ restic_env_path }}
             export HOME=/root
-            timeout 60 restic snapshots >/dev/null 2>&1 || timeout 60 restic init
+            probe_output="$(timeout 60 restic snapshots --json 2>&1)" || probe_rc=$?
+            if [ "${probe_rc:-0}" -ne 0 ]; then
+              if printf '%s\n' "$probe_output" | grep -Fq 'Is there a repository at the following location?'; then
+                timeout 60 restic init
+              else
+                printf '%s\n' "$probe_output" >&2
+                echo 'restic repository exists but could not be opened; refusing to initialize over it' >&2
+                exit "${probe_rc}"
+              fi
+            fi
           register: restic_repository_init_result
           changed_when: "'created restic repository' in (restic_repository_init_result.stdout + restic_repository_init_result.stderr)"
           run_once: true
