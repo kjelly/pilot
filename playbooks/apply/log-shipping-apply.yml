@@ -1,11 +1,22 @@
-# Apply playbook for docs/verification/log-shipping.md v1.0
+# Apply playbook for docs/verification/log-shipping.md v1.1
 #
 # Agent role that layers ON TOP of docs/verification/log-server.md (same
 # inventory group, same host) WITHOUT modifying that playbook/spec at all —
 # see log-server.md's own note anticipating exactly this extension. Runs
 # Promtail as a Docker container that tails the log files log-server.md's
-# rsyslog already writes under siem_log_root, and pushes them to the Loki
-# container docs/verification/dashboard.md runs on a separate central host.
+# rsyslog writes under siem_log_root, and pushes them to the Loki container
+# docs/verification/dashboard.md runs on a separate central host.
+#
+# siem_log_root is ALWAYS scraped (job_name = promtail_job_label). When a
+# wazuh-manager container is also co-located on this host, its real
+# alerts-log volume (resolved via `docker inspect`, not an assumed volume
+# name) is scraped ADDITIONALLY under a second, separate job_name
+# (promtail_wazuh_job_label) — never as a replacement for siem_log_root.
+# (v1.0 had this backwards: the wazuh path REPLACED siem_log_root whenever
+# a wazuh-manager container was present, which combined with a since-fixed
+# bug in log-server-apply.yml to silently drop every forwarded
+# local6/auth/authpriv log in production — see log-server-apply.yml's own
+# v1.1 changelog entry for the full incident.)
 #
 # Uses the same "agent knows the central address" idiom as
 # audit-log-forwarding-apply.yml (siem_forward_host/siem_forward_alias) —
@@ -53,19 +64,31 @@
     loki_alias: pilot-loki-backend
     loki_port: 3100
     loki_endpoint: "{{ loki_alias }}:{{ loki_port }}"
-    # Explicit override always wins. Otherwise: if a wazuh-manager container
-    # is running on THIS host, resolve its real alerts-log host path via
-    # `docker inspect` (community.docker.docker_container_info below) rather
-    # than assuming the docker-compose-project-derived volume name — this
-    # is what lets log-shipping run co-located with wazuh-manager (e.g. when
-    # log-server is empty and wazuh-manager is the de facto SIEM receiver)
-    # and actually tail real alerts.log content, instead of the log-server
-    # default (/var/log/siem) which is empty unless log-server's own rsyslog
-    # is also running on this same host. See siem_log_root_effective below.
+    # siem_log_root is ALWAYS scraped (explicit override, else the
+    # log-server default) — this is log-server.md's real receiver output,
+    # and docs/verification/log-shipping.md's C3 hardcodes this exact
+    # path, so it must never be silently swapped out.
+    #
+    # Previously this variable was *replaced* by a wazuh-manager container's
+    # real alerts-log volume whenever one was co-located, on the assumption
+    # that "log-server is empty and wazuh-manager is the de facto SIEM
+    # receiver" — that assumption is false in production (confirmed via a
+    # real incident: log-server never actually ran because of a now-removed
+    # bug in log-server-apply.yml, so siem_log_root/{hostname}/*.log was
+    # never created and never scraped, silently losing every forwarded
+    # local6/auth/authpriv log). log-server-apply.yml now runs correctly
+    # co-located with wazuh-manager, so siem_log_root is real going forward.
+    #
+    # The wazuh-manager alerts-log detection below is kept as an ADDITIONAL,
+    # separate scrape source (its own job_name) when a wazuh-manager
+    # container is present — that capability was already working and is
+    # worth keeping alongside the fixed siem_log_root path, not instead of
+    # it.
     siem_log_root: ""
     siem_log_root_default: /var/log/siem
     siem_wazuh_manager_container: single-node-wazuh.manager-1
     promtail_job_label: pilot-siem
+    promtail_wazuh_job_label: "{{ promtail_job_label }}-wazuh-alerts"
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -146,24 +169,29 @@
       changed_when: false
       when: not ansible_check_mode
 
-    - name: "Resolve effective siem_log_root (explicit > wazuh-manager's real alerts-log volume > log-server default)"
+    # siem_log_root_effective is ALWAYS log-server's own path (explicit
+    # override, else the default) — never swapped out for the wazuh path.
+    # siem_log_root_wazuh_detected is a SEPARATE, additive fact: when
+    # non-empty, the config/volumes tasks below add it as a second,
+    # independent scrape source instead of replacing the first.
+    - name: "Resolve siem_log_root_effective (log-server's own receiver output — always scraped)"
       ansible.builtin.set_fact:
-        siem_log_root_effective: >-
-          {{ siem_log_root | default('', true)
-             or siem_log_root_wazuh_detected
-             or siem_log_root_default }}
-      vars:
-        siem_wazuh_logs_mount: >-
-          {{ (siem_wazuh_container_info.container.Mounts | default([]))
-             | selectattr('Destination', 'equalto', '/var/ossec/logs') | list
-             if siem_wazuh_container_info is not skipped
-             else [] }}
+        siem_log_root_effective: "{{ siem_log_root | default('', true) or siem_log_root_default }}"
+
+    - name: "Resolve siem_log_root_wazuh_detected (additive: co-located wazuh-manager's real alerts-log volume, if any)"
+      ansible.builtin.set_fact:
         siem_log_root_wazuh_detected: >-
           {{ (siem_wazuh_logs_mount | map(attribute='Source') | first)
              if (siem_wazuh_container_info is not skipped
                  and siem_wazuh_container_info.exists | default(false)
                  and siem_wazuh_logs_mount | length > 0)
              else '' }}
+      vars:
+        siem_wazuh_logs_mount: >-
+          {{ (siem_wazuh_container_info.container.Mounts | default([]))
+             | selectattr('Destination', 'equalto', '/var/ossec/logs') | list
+             if siem_wazuh_container_info is not skipped
+             else [] }}
 
     - name: "Pin {{ loki_alias }} -> {{ loki_effective_target_host }} in /etc/hosts"
       tags: [C5]
@@ -190,7 +218,7 @@
 
         # Spec: docs/verification/log-shipping.md C3, C4
         - name: "Render Promtail config"
-          tags: [C3, C4]
+          tags: [C3, C4, C8]
           ansible.builtin.copy:
             dest: "{{ promtail_config_dir }}/promtail-config.yml"
             mode: "0644"
@@ -209,6 +237,26 @@
                       labels:
                         job: {{ promtail_job_label }}
                         __path__: {{ siem_log_root_effective }}/**/*.log
+                  pipeline_stages:
+                    - regex:
+                        source: filename
+                        expression: '^{{ siem_log_root_effective }}/(?P<host>[^/]+)/[^/]+\.log$'
+                    - labels:
+                        host:
+              {% if siem_log_root_wazuh_detected | trim | length > 0 %}
+                - job_name: {{ promtail_wazuh_job_label }}
+                  static_configs:
+                    - targets: [localhost]
+                      labels:
+                        job: {{ promtail_wazuh_job_label }}
+                        __path__: {{ siem_log_root_wazuh_detected }}/alerts/alerts.json
+                  pipeline_stages:
+                    - json:
+                        expressions:
+                          host: agent.name
+                    - labels:
+                        host:
+              {% endif %}
           register: promtail_config_result
 
         - name: "Ensure docker network {{ docker_network_name }} exists"
@@ -221,7 +269,7 @@
         # need chowned host dirs to read log-server's rsyslog-owned files
         # under siem_log_root (mounted :ro) or write its own positions dir.
         - name: "Promtail — run pilot-promtail container"
-          tags: [C1, C2, C6, C7]
+          tags: [C1, C2, C6, C7, C9]
           community.docker.docker_container:
             name: pilot-promtail
             image: "grafana/promtail:{{ promtail_version }}"
@@ -231,10 +279,16 @@
             command: "-config.file=/etc/promtail/config.yml"
             networks:
               - name: "{{ docker_network_name }}"
-            volumes:
-              - "{{ promtail_config_dir }}/promtail-config.yml:/etc/promtail/config.yml:ro"
-              - "{{ siem_log_root_effective }}:{{ siem_log_root_effective }}:ro"
-              - "{{ promtail_positions_dir }}:/var/lib/promtail"
+            volumes: >-
+              {{
+                [
+                  promtail_config_dir + '/promtail-config.yml:/etc/promtail/config.yml:ro',
+                  siem_log_root_effective + ':' + siem_log_root_effective + ':ro',
+                  promtail_positions_dir + ':/var/lib/promtail'
+                ]
+                + ([siem_log_root_wazuh_detected + ':' + siem_log_root_wazuh_detected + ':ro']
+                   if siem_log_root_wazuh_detected | trim | length > 0 else [])
+              }}
             ports:
               - "9080:9080"
 

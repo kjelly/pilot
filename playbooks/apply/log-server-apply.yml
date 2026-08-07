@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/log-server.md v1.0
+# Apply playbook for docs/verification/log-server.md v1.2
 # rsyslog central receiver (SIEM forward target) for audit-log-forwarding.md
 # client hosts. Additive-only (no existing /etc file is mutated), so rescue
 # just removes the two drop-in files it created and restarts rsyslog back to
@@ -13,11 +13,20 @@
 #     playbooks/apply/log-server-apply.yml -e target_group=all
 #
 # Variables (all optional, see docs/verification/log-server.md §1.5):
-#   siem_receiver_udp_port  default: 514
 #   siem_receiver_tcp_port  default: 514
 #   siem_log_root           default: /var/log/siem
 #   siem_logrotate_rotate   default: 14
 #   siem_logrotate_maxage   default: 90
+#
+# TCP only (v1.2, 2026-08-06): audit-log-forwarding-apply.yml only ever
+# forwards over TCP (`@@`), and nothing else in this repo forwards syslog at
+# all — v1.0/v1.1's UDP receiver (imudp) was unused capability that existed
+# only for a hypothetical future non-TCP producer. Dropped entirely rather
+# than kept conditional: simpler to reason about, nothing to lose today, and
+# it removes the whole 514/udp-vs-wazuh-manager-compose conflict this file
+# used to work around (siem_receiver_udp_enabled, now gone). If a real UDP
+# syslog producer (e.g. a network appliance) ever needs this, re-add imudp
+# then — TCP-only until that's an actual requirement, not a speculative one.
 #
 # Stage gating (same convention as freeipa-server-apply.yml):
 #   sandbox  default; runs immediately
@@ -32,7 +41,6 @@
     confirm_staging: false
     confirm_prod: false
     staging_attested_within_hours: 168
-    siem_receiver_udp_port: "514"
     siem_receiver_tcp_port: "514"
     siem_log_root: /var/log/siem
     siem_logrotate_rotate: 14
@@ -76,10 +84,21 @@
       when: stage == 'prod'
       tags: [always]
   tasks:
-    - name: "Skip log-server if wazuh-manager is enabled"
-      meta: end_play
-      when: groups['wazuh-manager'] | default([]) | length > 0
-
+    # Previously: unconditionally end_play'd this whole host whenever
+    # ANY host in inventory had wazuh-manager, on the assumption that
+    # wazuh-manager's own 514/udp port mapping made it "a syslog collector"
+    # and log-server therefore redundant ("avoid double-deployed syslog
+    # collectors"). That assumption was false in production: the official
+    # wazuh-docker compose's 514/udp mapping is never wired into anything
+    # that parses/routes local6/auth/authpriv content (confirmed via a real
+    # incident — 6 client hosts forwarding to a wazuh-manager host with no
+    # TCP/514 listener at all; see docs/runbooks/audit-log-forwarding.md and
+    # docs/verification/wazuh-manager.md §5's own note that this port is
+    # intentionally unused). log-server must run on every host assigned to
+    # it, regardless of whether wazuh-manager also runs there. TCP/514 (the
+    # only protocol this role uses since v1.2) never conflicted with
+    # anything wazuh-manager's compose maps, so there is no conflict left
+    # to work around here at all.
     - name: "Step 1: Install rsyslog (Debian family)"
       tags: [C1]
       ansible.builtin.apt:
@@ -100,7 +119,7 @@
 
     - block:
         - name: "Step 2: Ensure {{ siem_log_root }} exists"
-          tags: [C8]
+          tags: [C6]
           ansible.builtin.file:
             path: "{{ siem_log_root }}"
             state: directory
@@ -108,8 +127,8 @@
             group: "{{ siem_log_owner }}"
             mode: "0755"
 
-        - name: "Step 3: Render 10-siem-receiver.conf (imudp/imtcp + %HOSTNAME% dynaFile routing)"
-          tags: [C3, C4, C5, C9, C10]
+        - name: "Step 3: Render 10-siem-receiver.conf (imtcp + %HOSTNAME% dynaFile routing)"
+          tags: [C3, C4, C7, C8]
           ansible.builtin.copy:
             dest: "{{ siem_receiver_conf }}"
             owner: root
@@ -121,26 +140,44 @@
               # Central SIEM receiver: accepts rsyslog forwarding from
               # audit-log-forwarding.md client hosts (auth,authpriv.* + local6.*)
               # and routes each by source %HOSTNAME% into {{ siem_log_root }}.
-              module(load="imudp")
-              input(type="imudp" port="{{ siem_receiver_udp_port }}")
-
+              # TCP only (v1.2) — audit-log-forwarding-apply.yml only ever
+              # forwards over TCP; see this file's own header comment.
+              #
+              # v1.3: the imtcp input is bound to its own dedicated ruleset
+              # rather than falling into rsyslog's default ruleset. This
+              # topology always co-locates log-server with an
+              # audit-log-forwarding client on the same host (the central
+              # SIEM host needs its own logs collected too), which forwards
+              # this host's own local6/auth/authpriv traffic to itself over
+              # TCP. If the received copy re-entered the default ruleset, it
+              # would match audit-log-forwarding-apply.yml's own forwarding
+              # rule (99-siem-forward.conf, also unscoped/default-ruleset)
+              # again and re-forward itself forever — a real incident
+              # (confirmed live 2026-08-07, minimal-poc round 20) filled a
+              # 77GB disk with a single host's auth.log (121M+ lines) in
+              # under an hour. Scoping the receiver to its own ruleset means
+              # a network-received message is written to the per-host
+              # dynaFile exactly once and never reaches the forwarding rule.
               module(load="imtcp")
-              input(type="imtcp" port="{{ siem_receiver_tcp_port }}")
 
               template(name="SiemAuditPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/audit.log")
               template(name="SiemAuthPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/auth.log")
 
-              if $syslogfacility-text == 'local6' then {
-                  action(type="omfile" dynaFile="SiemAuditPath" createDirs="on")
+              ruleset(name="siemReceiver") {
+                  if $syslogfacility-text == 'local6' then {
+                      action(type="omfile" dynaFile="SiemAuditPath" createDirs="on")
+                  }
+                  if ($syslogfacility-text == 'auth' or $syslogfacility-text == 'authpriv') then {
+                      action(type="omfile" dynaFile="SiemAuthPath" createDirs="on")
+                  }
+                  stop
               }
 
-              if ($syslogfacility-text == 'auth' or $syslogfacility-text == 'authpriv') then {
-                  action(type="omfile" dynaFile="SiemAuthPath" createDirs="on")
-              }
+              input(type="imtcp" port="{{ siem_receiver_tcp_port }}" ruleset="siemReceiver")
           register: siem_receiver_conf_result
 
         - name: "Step 4: Render /etc/logrotate.d/siem-incoming"
-          tags: [C11, C12]
+          tags: [C9, C10]
           ansible.builtin.copy:
             dest: "{{ siem_logrotate_conf }}"
             owner: root
@@ -168,15 +205,15 @@
           changed_when: false
           failed_when: rsyslog_syntax.rc != 0
 
-        - name: "Step 6: Ensure rsyslog enabled + started (spec C2, C6, C7)"
-          tags: [C2, C6, C7]
+        - name: "Step 6: Ensure rsyslog enabled + started (spec C2, C5)"
+          tags: [C2, C5]
           ansible.builtin.systemd:
             name: rsyslog
             state: started
             enabled: true
 
         - name: "Step 6a: Restart rsyslog only if the receiver config actually changed"
-          tags: [C2, C6, C7]
+          tags: [C2, C5]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
@@ -191,9 +228,8 @@
               changed_when: false
               failed_when: false
 
-            - name: "Open 514/udp + 514/tcp (only if ufw is active)"
-              ansible.builtin.command: "ufw allow {{ siem_receiver_udp_port }}/{{ item }}"
-              loop: [udp, tcp]
+            - name: "Open 514/tcp (only if ufw is active)"
+              ansible.builtin.command: "ufw allow {{ siem_receiver_tcp_port }}/tcp"
               when: "'Status: active' in ufw_status.stdout"
 
         - name: "Step 6b: Best-effort firewall opening — firewalld (RedHat)"
@@ -205,13 +241,12 @@
               changed_when: false
               failed_when: false
 
-            - name: "Open 514/udp + 514/tcp (only if firewalld is running)"
+            - name: "Open 514/tcp (only if firewalld is running)"
               ansible.posix.firewalld:
-                port: "{{ siem_receiver_udp_port }}/{{ item }}"
+                port: "{{ siem_receiver_tcp_port }}/tcp"
                 permanent: true
                 immediate: true
                 state: enabled
-              loop: [udp, tcp]
               when: firewalld_state.stdout == "running"
 
       rescue:

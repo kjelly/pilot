@@ -52,6 +52,7 @@
     audit_rules_dest: /etc/audit/rules.d/99-custom.rules
     siem_forward_conf: /etc/rsyslog.d/99-siem-forward.conf
     siem_forward_alias: siem-log-server
+    audit_syslog_plugin_conf: /etc/audit/plugins.d/syslog.conf
     # Prefer an explicit -e/group_vars/host_vars value; otherwise resolve the
     # central SIEM receiver from the actual inventory: the log-server group
     # if it has a host, else wazuh-manager (which supersedes log-server as
@@ -139,10 +140,10 @@
       until: apt_auditd is succeeded
       retries: 2
 
-    - name: "Step 1a: Install audit (RedHat family — audisp is built into audit on EL8+)"
+    - name: "Step 1a: Install audit + audispd-plugins (RedHat family — audisp is built into audit on EL8+, but the syslog plugin is a separate package on both families)"
       tags: [C1, C2]
       ansible.builtin.dnf:
-        name: audit
+        name: [audit, audispd-plugins]
         state: present
       when: ansible_os_family == "RedHat"
 
@@ -304,6 +305,48 @@
             - siem_forwarding_enabled | bool
             - siem_forward_effective_host == ansible_default_ipv4.address
 
+        - name: "Step 6e: Enable the audisp-syslog plugin (spec C21) — without this, auditd never emits local6 traffic at all"
+          tags: [C21]
+          # Both Debian's audispd-plugins and RedHat's audispd-plugins ship
+          # this file inactive (`active = no`) by default. Rendering
+          # 99-siem-forward.conf's `local6.*` forward rule and log-server's
+          # receiver is not sufficient on its own — with the plugin left
+          # inactive, auditd never puts anything on local6 in the first
+          # place, so /var/log/siem/<host>/audit.log never gets created no
+          # matter how correct the forwarding/receiving config is (confirmed
+          # live 2026-08-07, minimal-poc round 20: the receiver and forward
+          # rule were both correctly deployed and audit.log still never
+          # appeared on any host).
+          #
+          # Steps 1/1a simulate the audispd-plugins install in check mode
+          # without actually installing the package (same Ansible dnf/apt
+          # module behavior noted on Step 8's auditd start below), so on a
+          # host that doesn't already have it, this file doesn't exist yet
+          # during --check --diff preview. Deferred to the real apply, same
+          # pattern as Step 8's own `when: not ansible_check_mode` guard.
+          ansible.builtin.lineinfile:
+            path: "{{ audit_syslog_plugin_conf }}"
+            regexp: '^active\s*='
+            line: "active = yes"
+          register: audisp_syslog_active_result
+          when: not ansible_check_mode
+
+        - name: "Step 6f: Pin the audisp-syslog plugin's facility to local6 (spec C21)"
+          tags: [C21]
+          # The plugin's own man page documents an optional facility
+          # argument on the args line with no stated default when omitted;
+          # rather than rely on undocumented plugin behavior, pin it
+          # explicitly to match what 99-siem-forward.conf/log-server.md
+          # actually forward and route on (local6). Same check-mode guard
+          # as Step 6e — same file, same "might not exist yet" reason.
+          ansible.builtin.lineinfile:
+            path: "{{ audit_syslog_plugin_conf }}"
+            regexp: '^args\s*='
+            line: "args = LOG_INFO LOG_LOCAL6"
+          register: audisp_syslog_args_result
+          when: not ansible_check_mode
+          register: audisp_syslog_args_result
+
         - name: "Step 7: Render 99-siem-forward.conf (local6.* + auth,authpriv.* -> siem-log-server)"
           tags: [C16, C17]
           ansible.builtin.copy:
@@ -333,6 +376,65 @@
           # real apply, same pattern as seaweedfs-s3-apply.yml's C5/C6/C7
           # guards and freeipa-server-apply.yml's ipa.service start.
           when: not ansible_check_mode
+
+        - name: "Step 8c: Check whether the audisp-syslog plugin process is actually running (spec C21)"
+          tags: [C21]
+          # Gating the reload purely on "did this run's own lineinfile tasks
+          # report changed" is not enough to be idempotent across a failed
+          # run: if a PRIOR apply changed active/args but then failed before
+          # reaching the reload step (rescued), the file is already correct
+          # on the next run, that run's own lineinfile tasks report
+          # unchanged, and the reload would be skipped forever even though
+          # auditd was never actually reloaded with the new config — auditd
+          # keeps running with the plugin it started with (confirmed live
+          # 2026-08-07, minimal-poc round 20: exactly this sequence left
+          # freeipa-server's auditd running with the plugin still inactive
+          # despite a "clean", failed=0 apply). Checking the plugin's own
+          # process is what actually decides whether a reload is needed,
+          # independent of this run's own change bookkeeping.
+          ansible.builtin.command: pgrep -x audisp-syslog
+          register: audisp_syslog_process
+          changed_when: false
+          failed_when: false
+          when: not ansible_check_mode
+
+        - name: "Step 8a: Reload auditd if the syslog plugin config changed or isn't actually running (spec C21) — Debian family"
+          tags: [C21]
+          ansible.builtin.systemd:
+            name: auditd
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == "Debian"
+            - (audisp_syslog_active_result is changed) or (audisp_syslog_args_result is changed) or (audisp_syslog_process.rc | default(1) != 0)
+
+        - name: "Step 8b: Reload auditd if the syslog plugin config changed or isn't actually running (spec C21) — RedHat family"
+          tags: [C21]
+          # RHEL/AlmaLinux's auditd.service unit ships RefuseManualStop=yes
+          # (a security-hardening property of the audit package — operators
+          # shouldn't be able to trivially stop the audit daemon via generic
+          # systemctl). `ansible.builtin.systemd: state: restarted` is a
+          # stop-then-start and the stop half is refused outright:
+          # "Operation refused, unit auditd.service may be requested by
+          # dependency only". The traditional RHEL workaround, the SysV
+          # `service` wrapper, does not exist at all on a minimal EL9 image
+          # (no `initscripts`/`chkconfig` package — confirmed live
+          # 2026-08-07, minimal-poc round 20: `service: command not
+          # found`). The actual fix is auditd's own documented signal
+          # handler (`man auditd(8)` SIGNALS: "SIGHUP causes auditd to
+          # reconfigure... re-reads the configuration file... implement the
+          # requested changes") — a raw signal is delivered directly to the
+          # process, never goes through systemd's stop path at all, so
+          # RefuseManualStop simply does not apply. Confirmed live: sending
+          # this respawned the audisp-syslog plugin process and a real
+          # audit event (an SSH session open) was forwarded to the central
+          # SIEM receiver immediately after.
+          ansible.builtin.command: pkill -HUP -x auditd
+          changed_when: true
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == "RedHat"
+            - (audisp_syslog_active_result is changed) or (audisp_syslog_args_result is changed) or (audisp_syslog_process.rc | default(1) != 0)
 
         - name: "Step 9: Ensure rsyslog enabled + started (spec C19)"
           tags: [C19]

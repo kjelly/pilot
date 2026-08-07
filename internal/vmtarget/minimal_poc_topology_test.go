@@ -24,7 +24,7 @@ func TestMinimalPoCTopologyMatchesRunbook(t *testing.T) {
 		groups []string
 	}{
 		"freeipa-server": {"almalinux-9", 4608, 2, 30, []string{"freeipa-server", "audit-log-forwarding", "wazuh-fim", "restic-backup"}},
-		"nexus":          {"ubuntu-24.04", 12288, 6, 80, []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"}},
+		"nexus":          {"ubuntu-24.04", 12288, 6, 80, []string{"freeipa-client", "docker", "audit-log-forwarding", "log-server", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"}},
 		"client-vm":      {"ubuntu-24.04", 2048, 2, 20, []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client"}},
 	}
 	for _, node := range spec.Nodes {
@@ -40,8 +40,8 @@ func TestMinimalPoCTopologyMatchesRunbook(t *testing.T) {
 		}
 	}
 	order, groups := spec.Groups()
-	if len(order) != 14 {
-		t.Fatalf("group count = %d, want 14", len(order))
+	if len(order) != 15 {
+		t.Fatalf("group count = %d, want 15", len(order))
 	}
 	if len(groups["freeipa-server"]) != 1 || groups["freeipa-server"][0] != "freeipa-server" {
 		t.Fatalf("freeipa-server group = %v", groups["freeipa-server"])
@@ -54,6 +54,9 @@ func TestMinimalPoCTopologyMatchesRunbook(t *testing.T) {
 	}
 	if !reflect.DeepEqual(groups["freeipa-nfs-server"], []string{"nexus"}) {
 		t.Fatalf("freeipa-nfs-server group = %v", groups["freeipa-nfs-server"])
+	}
+	if !reflect.DeepEqual(groups["log-server"], []string{"nexus"}) {
+		t.Fatalf("log-server group = %v", groups["log-server"])
 	}
 	if !reflect.DeepEqual(groups["freeipa-nfs-client"], []string{"client-vm"}) {
 		t.Fatalf("freeipa-nfs-client group = %v", groups["freeipa-nfs-client"])

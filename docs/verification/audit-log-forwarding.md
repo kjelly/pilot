@@ -1,6 +1,6 @@
 # Verification Spec — audit-log-forwarding（auditd 稽核規則 + rsyslog 轉送至 SIEM）
 
-> 版本：v1.4
+> 版本：v1.5
 > 對齊規範：pilot 通用 config-only 服務規範；轉送目標為
 > `docs/verification/log-server.md`（rsyslog 中央接收端），兩份 spec 搭配構成
 > 一組 Shape 3（client+server）。
@@ -69,6 +69,7 @@
 | C18 | service   | `auditd.service` 為 active                                             | 0        | systemctl is-active auditd >/dev/null 2>&1; echo $? |
 | C19 | service   | `rsyslog.service` 為 active                                            | 0        | systemctl is-active rsyslog >/dev/null 2>&1; echo $? |
 | C20 | logrotate | `/etc/logrotate.d/` 下沒有任何 log path 被兩份以上的 policy 檔重複宣告（不限於本模組管理的 auditd/syslog 兩個檔案，涵蓋 distro 內建的 `rsyslog` 等所有檔案） | 0        | sh -c 'test -z "$(grep -rhoE "^/[^ {]+" /etc/logrotate.d/ 2>/dev/null | sort | uniq -d)" && echo 0 || echo 1' |
+| C21 | rule      | audisp-syslog plugin 已啟用且 facility 釘死 local6（沒有這條，local6 永遠不會有任何流量，跟轉送/接收設定是否正確無關） | 0        | sh -c 'grep -q "^active = yes" /etc/audit/plugins.d/syslog.conf && grep -q "^args = LOG_INFO LOG_LOCAL6" /etc/audit/plugins.d/syslog.conf && echo 0 || echo 1' |
 
 > C1–C20 全部用**正邏輯 rc**（`; echo $?` 或原生 rc，C11 用
 > `sh -c '... && echo 0 || echo 1'` 讓外層指令恆回 0），不用反邏輯 grep + 數字
@@ -97,11 +98,11 @@
 
 - 工具：`go run ./cmd/pilot vm-target verify --name <target> docs/verification/audit-log-forwarding.md`
 - 輸出格式：`.verification/audit-log-forwarding-<UTC>.{ndjson,md}`
-- 預期 row 數：20（C1–C20）
+- 預期 row 數：21（C1–C21）
 
 ## 4. PASS / FAIL 規則
 
-- 全部 C1–C20 `status=pass` → **PASS**
+- 全部 C1–C21 `status=pass` → **PASS**
 - 任一 `status=fail` → **FAIL**，列出 fail id + actual + want
 
 ## 5. 例外與已知偏差
@@ -142,6 +143,21 @@
 > `freeipa-server` 實測 `--check --diff` 預覽、真套用、`changed=0` 冪等重跑
 > 全部通過，C20 20/20 全綠（含 client-vm/nexus 兩台 Debian family）。
 
+> **C21 的由來**：minimal-poc round 20（2026-08-07）對一個全新 clean-room
+> 拓樸做深入 Loki/SIEM 查核時發現，即使 `log-server.md` 的接收端（TCP/514）
+> 與本模組的 `99-siem-forward.conf` 轉送規則都已正確部署，三台主機上
+> `/var/log/siem/<host>/audit.log` 仍然完全不存在——因為 Debian 與 EL9 的
+> `audispd-plugins`（round 20 之前 RedHat family 的 Step 1a 沒裝這個套件，
+> 只裝了 `audit`）都預設出貨 `/etc/audit/plugins.d/syslog.conf` 為
+> `active = no`；沒有這一步，auditd 從來不會真的把任何事件放上 local6，
+> 轉送/接收設定再正確也沒有東西可轉。Step 1a 補裝 `audispd-plugins`
+> （RedHat family），新增 Step 6e/6f 把 `active` 打開、把 `args` 的
+> facility 明確釘死 `LOG_LOCAL6`（plugin 的 man page 沒說沒給 facility 時
+> 的預設值是什麼，不能賭），Step 8a 只在這兩個值真的改變時才 restart
+> auditd。已在 round 20 的 3 台主機（AlmaLinux 9 + 2 台 Ubuntu 24.04）
+> 實測：修前 `audit.log` 三台全無；修後三台皆產生，且 C21 直接 grep 驗證
+> `active`/`args` 兩個值。
+
 ## 6. Playbook 對應
 
 對應 apply playbook：`playbooks/apply/audit-log-forwarding-apply.yml`
@@ -157,6 +173,7 @@
 | C16, C17 | `template 99-siem-forward.conf` | `auth,authpriv.*` + `local6.*` 都用 `@@`（TCP）轉送 |
 | C18, C19 | `ensure auditd + rsyslog enabled+restarted` | rsyslog 只在轉送設定真的變更時才 restart |
 | C20 | `stat` + `shell`（計算 distro rsyslog 檔還剩幾個其他路徑）+ `lineinfile`/`file`（Step 5a–5d，Debian 與 RedHat family 都跑，只看 `/etc/logrotate.d/rsyslog` 是否存在，不再用 `ansible_os_family` 額外過濾） | 只移除 `{{ audit_syslog_path }}` 這一行，其他路徑（Debian：`mail.log`/`kern.log`/`auth.log`...；RHEL：`cron`/`maillog`/`secure`/`spooler`...）留給 distro 自己的檔案繼續管；如果那份檔案原本就只列這一個路徑，改成整份移除，避免留下沒有檔名的空 block 讓 logrotate 解析失敗 |
+| C21 | `lineinfile`（Step 6e/6f，打開 `active` + 釘死 `args` facility，兩者都在 `--check` 模式下跳過）+ `command`（Step 8c 用 `pgrep` 確認 plugin process 是否真的在跑）+ Step 8a（Debian，`systemd: state: restarted`）/ Step 8b（RedHat，`pkill -HUP -x auditd`，見上方 v1.5 說明為何不能用 `systemctl restart` 或 `service`） | RedHat family 的 Step 1a 同步補裝 `audispd-plugins`（EL9 上這是 `audit` 套件以外的獨立 RPM）；Step 8a/8b 的觸發條件同時看「這次有沒有改到檔案」跟「plugin process 是否真的在跑」，避免前一輪失敗的 apply 留下「檔案已對、但從未 reload」的殘留狀態 |
 
 ## 7. SOP
 
@@ -228,3 +245,4 @@ go run ./cmd/pilot vm-target run --name audit-log-forwarding \
 | 2026-07-22 | v1.2 | C1/C2 改為 Ubuntu dpkg 與 EL rpm 雙平台 probe；EL logrotate 使用 `/var/log/messages` 與 `root` group，避免不存在的 Ubuntu `syslog` group | sre |
 | 2026-08-06 | v1.3 | 新增 C20：全目錄掃描 `/etc/logrotate.d/` 偵測跨檔案的重複 log path 宣告；修 5 台 Ubuntu 主機的真實 incident——`rsyslog` 套件內建的 `/etc/logrotate.d/rsyslog` 跟本模組自己的 `/etc/logrotate.d/syslog` 都宣告了 `/var/log/syslog`，logrotate 因此對全機 rotation 整個中止（`duplicate log entry`）；apply playbook Step 5a–5d 在 Debian family 上從 distro 檔案移除重複路徑（詳見 `docs/runbooks/audit-log-forwarding.md` §5.5） | sre |
 | 2026-08-06 | v1.4 | round-19 minimal-poc clean-room 重建時，C20 在 AlmaLinux 9 的 `freeipa-server` 上當場抓到 v1.3 的修法漏了 RedHat family：`rsyslog-logrotate` RPM 同樣把 `/etc/logrotate.d/rsyslog` 內建成一個共用 block（`cron`/`maillog`/`messages`/`secure`/`spooler`），跟本模組 render 的 `/etc/logrotate.d/syslog`（`audit_syslog_path=/var/log/messages`）重複宣告，會踩到同一種全機 rotation 中止；拿掉 Step 5a–5d 的 `ansible_os_family == "Debian"` 限制，改成只靠 `distro_rsyslog_logrotate.stat.exists` 把關，兩個 family 共用同一套 `grep`/`lineinfile` 邏輯；已在 `freeipa-server` 實測 check-mode 預覽、真套用、`changed=0` 冪等重跑全部通過，C20 20/20 全綠 | sre |
+| 2026-08-07 | v1.5 | 新增 C21：啟用 audisp-syslog plugin（EL9 補裝 `audispd-plugins`，Step 6e/6f 把 `/etc/audit/plugins.d/syslog.conf` 的 `active` 打開、`args` facility 釘死 `LOG_LOCAL6`，Step 8a/8b 條件式 restart auditd）。real incident：minimal-poc round 20 對一個全新 clean-room 拓樸做深入 Loki 查核時，即使接收端（`log-server.md`）與轉送規則（C15–C17）都已正確部署，三台主機的 `/var/log/siem/<host>/audit.log` 仍完全不存在——因為這個 plugin 出貨時預設停用，auditd 從未真的產生任何 local6 流量。修的過程中連續踩到四個子問題，都在同一組 3 台主機（AlmaLinux 9 + 2×Ubuntu 24.04）現場實測確認：(1) Step 6e/6f 一開始沒有 `when: not ansible_check_mode`，在套件真的還沒裝的主機上 `--check` 預覽會直接失敗（同檔案 Step 8 的 auditd 啟動早就有這個 guard，這次沒套用到新任務上）；(2) AlmaLinux/RHEL 的 `auditd.service` 出貨 `RefuseManualStop=yes`，`ansible.builtin.systemd: state: restarted`（本質是 stop 再 start）的 stop 那一半會被系統拒絕，錯誤訊息是 `Operation refused, unit auditd.service may be requested by dependency only`；(3) 原本想改用 RHEL 傳統的 `service auditd restart` SysV wrapper 繞過限制，但 minimal EL9 image 根本沒裝 `initscripts`/`chkconfig`，`service` 這支指令完全不存在（`command not found`）；改成直接送 `SIGHUP` 給 auditd（`man auditd(8)` SIGNALS 明載「SIGHUP causes auditd to reconfigure」，訊號直接送給 process，完全不經過 systemd 的 stop 路徑，`RefuseManualStop` 對它沒有作用），實測送出後 audisp-syslog plugin process 確實重新起來、一筆真實 audit 事件（SSH session open）立刻被轉送到中央 SIEM；(4) 光靠「這次 apply 有沒有改到檔案」判斷要不要 reload 不夠：上一輪失敗的 apply 已經把 `active`/`args` 改好、但在真正 reload 之前就因為問題 (2) 而 rescue 中止，導致下一輪重跑時 lineinfile 兩個 task 都回報 unchanged（檔案本來就對了），Step 8a/8b 的 reload 就永遠不會觸發——即使 apply 回報 `failed=0`、看起來全綠，auditd 實際上仍在用舊設定跑，plugin 從未真的生效。新增 Step 8c 直接檢查 `audisp-syslog` process 是否真的在跑（`pgrep -x audisp-syslog`），跟檔案是否改變並列進 Step 8a/8b 的觸發條件，讓 reload 判斷不再只依賴這次 run 自己的異動旗標 | sre |

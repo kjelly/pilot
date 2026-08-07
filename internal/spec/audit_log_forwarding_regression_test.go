@@ -35,6 +35,13 @@ import (
 //	        bug on RedHat family too — rsyslog-logrotate ships the same
 //	        /etc/logrotate.d/rsyslog filename declaring /var/log/messages —
 //	        so the fix must not be gated to ansible_os_family == "Debian")
+//	C21     the audisp-syslog plugin is active with facility pinned to
+//	        local6 (both Debian's and EL9's audispd-plugins package ships
+//	        /etc/audit/plugins.d/syslog.conf with `active = no` by
+//	        default — without flipping it, auditd never emits anything on
+//	        local6 at all, so C15-C17's forwarding/receiving config being
+//	        perfectly correct still leaves audit.log never appearing
+//	        anywhere; confirmed live 2026-08-07, minimal-poc round 20)
 //
 // Cross-row invariants locked below:
 //
@@ -72,6 +79,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	wantIDs := []string{
 		"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",
 		"C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20",
+		"C21",
 	}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
@@ -96,7 +104,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	// checks and legitimately use `present` instead). C11 uses the
 	// `sh -c '... && echo 0 || echo 1'` idiom so the outer command
 	// always exits 0 regardless of match outcome.
-	rcRows := []string{"C1", "C2", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C14", "C15", "C16", "C17", "C18", "C19", "C20"}
+	rcRows := []string{"C1", "C2", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21"}
 	for _, id := range rcRows {
 		if exp[id] != "0" {
 			t.Errorf("%s expected must be rc-based `0`, got %q", id, exp[id])
@@ -225,6 +233,14 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 		}
 	}
 
+	// C21 must check both the plugin's active flag and its pinned facility.
+	if !strings.Contains(cmd["C21"], "active = yes") {
+		t.Errorf("C21 must check the audisp-syslog plugin is active, got %q", cmd["C21"])
+	}
+	if !strings.Contains(cmd["C21"], "LOG_LOCAL6") {
+		t.Errorf("C21 must check the audisp-syslog plugin's facility is pinned to LOG_LOCAL6, got %q", cmd["C21"])
+	}
+
 	// siem_forward_host must be OPTIONAL (v1.1): the apply playbook must not
 	// hard-fail when it's omitted, since local auditd monitoring (C1-C14,
 	// C18, C19) is independent of whether a log server exists yet. Forward
@@ -235,6 +251,79 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 		t.Fatalf("read audit-log-forwarding-apply.yml: %v", err)
 	}
 	applyRaw := string(playbookRaw)
+
+	// v1.5: RedHat family must install audispd-plugins too (EL9 ships it as
+	// a package separate from `audit`, unlike the C1/C2 comment's historical
+	// "audisp is built into audit on EL8+" claim about the dispatcher
+	// itself — the syslog plugin specifically is not bundled).
+	if !strings.Contains(applyRaw, "name: [audit, audispd-plugins]") {
+		t.Errorf("RedHat family install must include audispd-plugins alongside audit, got install block missing 'name: [audit, audispd-plugins]'")
+	}
+	// v1.5: the audisp-syslog plugin must be explicitly activated with its
+	// facility pinned — a bug found live (round 20) where the receiver/
+	// forwarder were both correctly configured but audit.log never
+	// appeared anywhere because this plugin ships inactive by default.
+	for _, required := range []string{
+		`regexp: '^active\s*='`,
+		"line: \"active = yes\"",
+		`regexp: '^args\s*='`,
+		"line: \"args = LOG_INFO LOG_LOCAL6\"",
+		"audit_syslog_plugin_conf",
+	} {
+		if !strings.Contains(applyRaw, required) {
+			t.Errorf("audit-log-forwarding-apply.yml must enable+pin the audisp-syslog plugin; missing %q", required)
+		}
+	}
+
+	// v1.5: RHEL/AlmaLinux's auditd.service ships RefuseManualStop=yes, so
+	// `ansible.builtin.systemd: state: restarted` (a stop-then-start) is
+	// refused outright — confirmed live 2026-08-07, minimal-poc round 20.
+	// A minimal EL9 image also has no SysV `service` wrapper at all (no
+	// initscripts/chkconfig package) — confirmed live the same round
+	// ("service: command not found"). The actual fix is auditd's own
+	// documented SIGHUP reconfigure handler, which is a raw signal and
+	// never goes through systemd's stop path.
+	if !strings.Contains(applyRaw, `ansible.builtin.command: pkill -HUP -x auditd`) {
+		t.Error(`RedHat family must reload auditd via "pkill -HUP -x auditd" (systemd restart is refused by RefuseManualStop=yes, and there is no SysV service wrapper on a minimal EL9 image)`)
+	}
+	if strings.Contains(applyRaw, "service auditd restart") {
+		t.Error(`audit-log-forwarding-apply.yml must not use "service auditd restart" — that binary does not exist on a minimal EL9 image`)
+	}
+	debianRestartIdx := strings.Index(applyRaw, "Step 8a: Reload auditd")
+	redhatRestartIdx := strings.Index(applyRaw, "Step 8b: Reload auditd")
+	if debianRestartIdx < 0 || redhatRestartIdx < 0 {
+		t.Fatal("expected both Step 8a (Debian) and Step 8b (RedHat) auditd-reload tasks")
+	}
+	if !strings.Contains(applyRaw[debianRestartIdx:redhatRestartIdx], `ansible_os_family == "Debian"`) {
+		t.Error("Step 8a must be scoped to ansible_os_family == \"Debian\"")
+	}
+	if !strings.Contains(applyRaw[redhatRestartIdx:], `ansible_os_family == "RedHat"`) {
+		t.Error("Step 8b must be scoped to ansible_os_family == \"RedHat\"")
+	}
+
+	// v1.5 (round 20 follow-up): the reload must not be gated purely on
+	// "did this run's own lineinfile tasks report changed" — that is not
+	// idempotent across a run that changed the file but then failed before
+	// reloading (confirmed live: left freeipa-server's auditd running with
+	// the plugin still inactive despite a later "clean" apply). The reload
+	// condition must also check whether the plugin process is actually
+	// running right now.
+	if !strings.Contains(applyRaw, "ansible.builtin.command: pgrep -x audisp-syslog") {
+		t.Error("must check whether audisp-syslog is actually running (pgrep -x audisp-syslog), not just this run's own change bookkeeping")
+	}
+	for _, block := range []struct {
+		name string
+		idx  int
+	}{{"Step 8a", debianRestartIdx}, {"Step 8b", redhatRestartIdx}} {
+		nextIdx := len(applyRaw)
+		if block.name == "Step 8a" {
+			nextIdx = redhatRestartIdx
+		}
+		if !strings.Contains(applyRaw[block.idx:nextIdx], "audisp_syslog_process.rc") {
+			t.Errorf("%s must also trigger when audisp_syslog_process.rc indicates the plugin isn't running, not only on this run's own file-change flags", block.name)
+		}
+	}
+
 	universeIndex := strings.Index(applyRaw, "Ensure Ubuntu universe repository is enabled")
 	installIndex := strings.Index(applyRaw, "Step 1: Install auditd + audispd-plugins + rsyslog")
 	if universeIndex < 0 || installIndex < 0 || universeIndex > installIndex {

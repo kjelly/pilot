@@ -83,7 +83,7 @@ get wrong (e.g. accidentally wiring a role to a host it shouldn't touch).
 
 We provision three KVM nodes using `pilot vm-target`:
 - **`freeipa`**: AlmaLinux 9 (`almalinux-9`). Role: FreeIPA identity provider (server).
-- **`nexus`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Central services server. Hosts Grafana, Prometheus/Thanos sidecar, Thanos Query, Alertmanager, Loki, Wazuh Manager (syslog receiver & FIM controller), and SeaweedFS S3.
+- **`nexus`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Central services server. Hosts Grafana, Prometheus/Thanos sidecar, Thanos Query, Alertmanager, Loki, the `log-server` central rsyslog SIEM receiver (TCP/514 — the thing that actually turns `audit-log-forwarding`'s local6/auth/authpriv traffic into files Promtail can tail), Wazuh Manager (FIM/alerting controller — its own 514/udp container port is never wired to parse forwarded syslog content, see §2.1's note), and SeaweedFS S3.
 - **`client`**: Ubuntu 24.04 (`ubuntu-24.04`). Role: Monitored Linux host and verification client. Integrates into FreeIPA realm, validates SSH/HBAC/sudo, ships logs (Promtail), forwards audit logs to `nexus`, backs up config files to SeaweedFS S3 on `nexus`, collects metrics, and runs the Wazuh FIM agent reporting to `nexus`.
 
 Node names are illustrative. In **candidate clean-room acceptance**, reserve
@@ -154,7 +154,7 @@ For each VM, add a host with its real `ansible_host` (from §1.2),
 | Host | Roles |
 |---|---|
 | `freeipa` | `freeipa-server`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
-| `nexus` | `docker`, `audit-log-forwarding`, `wazuh-manager`, `wazuh-fim`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard`, `freeipa-nfs-server` |
+| `nexus` | `docker`, `log-server`, `audit-log-forwarding`, `wazuh-manager`, `wazuh-fim`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard`, `freeipa-nfs-server` |
 | `client` | `freeipa-client`, `docker`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup`, `freeipa-nfs-client` |
 
 The `dashboard` role on `nexus` provides Grafana and Loki.
@@ -166,11 +166,24 @@ manager's own host and the FreeIPA server. This is a real scope correction
 from an earlier version of this skill that only wired those two roles to the
 client VM.
 
-Since `wazuh-manager` is enabled on `nexus`, leave the `log-server` group
-empty — Wazuh Manager is the primary syslog receiver, avoiding a port
-514/udp collision. Keycloak and PAM-OIDC-SSHD are out of scope for this
-delivery test (leave those groups empty too; `site.yml`'s empty-group
-auto-skip means you don't need vault entries for them).
+**Put `nexus` in the `log-server` group too, alongside `wazuh-manager`** —
+do not leave `log-server` empty. `log-server-apply.yml` targets the
+`log-server` inventory group directly (no fallback), so if that group has
+no hosts, `site.yml` silently skips it — and then `audit-log-forwarding`'s
+local6/auth/authpriv traffic from all three hosts has nowhere to land,
+reproducing a real production incident: an earlier belief that Wazuh
+Manager's own `514/udp` container port mapping was "the syslog receiver"
+turned out to be false — that port is never wired to parse forwarded
+syslog content (see `docs/verification/wazuh-manager.md` §5's own note and
+`docs/verification/log-server.md`'s v1.1/v1.2 changelog for the incident
+writeup). `log-server` (rsyslog, TCP/514 only as of v1.2) is the only thing
+that actually turns forwarded logs into `/var/log/siem/<host>/*.log` files
+Promtail can tail — and TCP/514 coexists on the same host as Wazuh's
+unrelated UDP/514 container mapping with zero conflict, so there was never
+a real port collision to avoid by leaving it empty. §4.3 tests this chain
+end-to-end. Keycloak and PAM-OIDC-SSHD are out of scope for this delivery
+test (leave those groups empty; `site.yml`'s empty-group auto-skip means
+you don't need vault entries for them).
 
 Host-level extra vars (via `pilot edit`'s "其他變數" host menu, not `-e` on
 the command line, so they persist with the workspace):
@@ -442,15 +455,92 @@ StoreAPI), and Thanos Query's federation are all working end-to-end.
 
 ### 4.3 Log chain: Grafana -> Loki <- Promtail (log-shipping)
 
+A generic "Loki has *some* job label with *some* line" check can pass for
+the wrong reason — it doesn't prove raw auditd/auth/authpriv logs from each
+host actually arrived, doesn't prove each host's data is distinguishable
+(no host label = you can't tell if one of the three hosts is silently
+missing), and doesn't distinguish Wazuh's parsed *alerts* from real
+per-host raw audit/syslog content. This is a real, previously-diagnosed gap
+in a live deployment (six client hosts *looked* covered because Wazuh
+alerts were flowing, while the raw local6/auth/authpriv forwarding chain
+was silently broken end-to-end) — the checks below close it. Confirm §2.1's
+`log-server` group has `nexus` in it before running these; an empty
+`log-server` group makes every check in this section fail or return empty.
+
+**C-log-1 — central landing files exist per host** (proves `log-server`
+actually ran and `audit-log-forwarding`'s TCP forwarding reached it, before
+even involving Promtail/Loki):
+
 ```bash
-curl -s "http://<nexus-ip>:3100/loki/api/v1/label/job/values"
-curl -s -G "http://<nexus-ip>:3100/loki/api/v1/query_range" \
-  --data-urlencode 'query={job=~".+"}' --data-urlencode 'limit=5'
+pilot vm-target exec --name nexus -- ls /var/log/siem/
+# expect one subdirectory per host that forwards to nexus: freeipa/ nexus/ client/
+pilot vm-target exec --name nexus -- tail -n3 /var/log/siem/client/audit.log /var/log/siem/client/auth.log
 ```
 
-Expect a real `job` label value and at least one real log line from the
-client host (e.g. `sssd_sudo.log` entries generated by the §4.1 sudo test
-itself is good evidence the pipeline is live, not just configured).
+**C-log-2 — inject a unique marker per host, confirm each lands in its own
+file and reaches Loki with the correct `host` label** (this is the actual
+per-host-traceability proof the generic job-label check can't provide —
+run once per host: `freeipa`, `nexus`, `client`):
+
+```bash
+for h in freeipa nexus client; do
+  pilot vm-target exec --name "$h" -- logger -p local6.info "PILOT-DT-${h}-$(date +%s)"
+done
+sleep 6
+
+# each of these three must return ONLY that host's own marker, never another host's
+for h in freeipa nexus client; do
+  curl -s -G "http://<nexus-ip>:3100/loki/api/v1/query" \
+    --data-urlencode "query={job=\"pilot-siem\", host=\"${h}\"}" \
+    --data-urlencode "time=$(date +%s)" | grep -o "PILOT-DT-${h}-[0-9]*"
+done
+```
+
+If a query for one host's label returns another host's marker (or nothing
+at all), the pipeline-stage `host` label extraction in
+`log-shipping-apply.yml` isn't matching this host's file path — see
+Troubleshooting.
+
+**C-log-3 — coverage query proves no host is silently missing** (directly
+answers "did we actually collect from every host, not just the ones we
+happened to check"):
+
+```bash
+curl -s -G "http://<nexus-ip>:3100/loki/api/v1/query" \
+  --data-urlencode 'query=sum by (host) (count_over_time({job="pilot-siem"}[5m]))' \
+  --data-urlencode "time=$(date +%s)"
+```
+
+Expect a non-zero count for all three of `freeipa`, `nexus`, `client`. A
+missing host in this result means that host's `audit-log-forwarding` ->
+`log-server` -> Promtail chain is broken somewhere, even if the other two
+hosts look fine — don't stop checking once the first host passes.
+
+**C-log-4 — Wazuh alerts are collected additionally, also with per-host
+attribution, and are not confused with raw audit/syslog** (Wazuh's parsed
+alerts are a real, useful signal but must not be the *only* evidence of log
+collection — see the note above):
+
+```bash
+curl -s -G "http://<nexus-ip>:3100/loki/api/v1/query_range" \
+  --data-urlencode 'query={job="pilot-siem-wazuh-alerts"}' --data-urlencode 'limit=5'
+```
+
+Expect real alert JSON lines with a `host` label (extracted from the
+alert's own `agent.name` field via `log-shipping-apply.yml`'s `json`
+pipeline stage) matching one of the three hosts. This job is intentionally
+narrowed to Wazuh's `alerts/*.log` only (not the whole `logs/` tree) —
+Wazuh's `archives.log` stays unscraped by design, since `<logall>`/
+`<logall_json>` both default to `no` and an always-empty scrape target is
+noise, not evidence.
+
+**Legacy smoke check** (still useful as a first, cheap sanity check before
+running C-log-1 through C-log-4, but insufficient on its own — see above):
+
+```bash
+curl -s "http://<nexus-ip>:3100/loki/api/v1/label/job/values"
+# expect at least: pilot-siem, pilot-siem-wazuh-alerts
+```
 
 ### 4.4 Config Backup to S3 (SeaweedFS via Restic)
 
@@ -563,4 +653,7 @@ VM you didn't create or that the user didn't explicitly name for deletion.
 | `freeipa-server-apply.yml` fails with `Source /etc/systemd/resolved.conf not found` | `dns`/`ntp` roles (Debian/Ubuntu-only) were assigned to the AlmaLinux FreeIPA host instead of using its native flags | Remove `dns`/`ntp` from that host's role list; `freeipa_setup_dns` and `freeipa_setup_ntp` both default to `true` (§3.3) — no `-e` override needed |
 | Grafana's Thanos Query datasource returns no data even though Prometheus itself has metrics | Checked Prometheus directly instead of through Thanos Query, or `thanos_s3_target_host`/bucket mismatch between `prometheus.yml` and `thanos-query.yml` | Always verify via the Thanos Query port (§4.2), and confirm both group_vars files point at the same S3 host + bucket |
 | Loki has no log data | `log-shipping` didn't reach a host with real logs — either `site.yml` still hardcodes `target_group: log-server` (older checkout) and that group is empty, or `wazuh-manager`/`log-server` are both empty in this inventory | On current `site.yml`, check the resolved host with `--list-hosts --tags log-shipping`; on an older checkout, run `log-shipping` as its own `pilot deploy` single-component invocation with `-e target_group=<host with real logs>` |
+| §4.3 C-log-1/C-log-2 fail outright — `/var/log/siem/` doesn't exist on `nexus`, or every Loki query in §4.3 returns empty | §2.1's `log-server` group was left empty on `nexus` (the old, incorrect guidance this skill used to give, based on the false belief that Wazuh Manager's `514/udp` container port was a working syslog receiver) — `log-server-apply.yml` targets the `log-server` group directly with no fallback, so `site.yml` silently skipped it entirely | Add `nexus` to the `log-server` group (§2.1) and redeploy; confirm with `pilot vm-target exec --name nexus -- ss -ltnp \| grep :514` that something is actually listening on TCP/514 before re-checking Loki |
+| §4.3 C-log-2's per-host query returns another host's marker, or returns nothing for a host whose file clearly has data (`tail /var/log/siem/<host>/audit.log` shows the marker) | Promtail's `host` label comes from a regex against the tailed file's path (`^{{ siem_log_root_effective }}/(?P<host>[^/]+)/...`), not from the forwarding host's own hostname fact — a mismatch usually means the file isn't under the expected `siem_log_root_effective` path, or Promtail hasn't picked up a config change yet | `docker logs pilot-promtail` on `nexus` for scrape/tail errors; confirm `/etc/pilot/promtail/promtail-config.yml`'s `__path__` matches where `log-server-apply.yml` actually wrote the file (`siem_log_root`, default `/var/log/siem`) |
+| §4.3 C-log-4 returns alert lines but with no `host` label, or `host` is empty | The alert JSON line didn't have a populated `agent.name` field (e.g. an alert generated before the Wazuh agent fully enrolled), or the `json` pipeline stage's `expressions: {host: agent.name}` isn't matching the actual alert schema on this Wazuh version | Re-check after §4.5's FIM trigger produces a fresh alert (agent should be enrolled by then); if it persists, `docker exec` into the Wazuh manager and inspect one raw `alerts.log` line's actual JSON shape against the pipeline stage's `agent.name` path |
 | §4.6: removed a roster group/rule membership, reconciled `freeipa-identity`, but `hbactest`/live sudo still shows the old (granted) state | On an older checkout, `freeipa-identity-apply.yml`'s "Ensure X exists" tasks were create-only — removing a roster entry and rerunning did nothing, since `ipa *-add`/`*-add-member` no-op on "already exists"/"already a member" and there was no matching `*-remove-*` step | Upgrade to a checkout with the 2026-07-16 reconciler redesign (adds lookup + diff + `*-remove-*` tasks — see `docs/runbooks/minimal-poc-architecture.md` v4.8). On an older checkout, the only workaround is to manually `ipa group-remove-member`/`sudorule-remove-*`/`hbacrule-remove-*` on `freeipa` for the specific stale entry — exactly the manual-edit anti-pattern §3.4 says this playbook should make unnecessary |

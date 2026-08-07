@@ -1,8 +1,9 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
 > Status: **VERIFIED**
-> Latest completed pass: 2026-08-06 (Asia/Taipei), round 19
-> Evidence: [`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md)
+> Latest completed pass: 2026-08-07 (Asia/Taipei), round 20
+> Evidence: [`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md)
+> Round 19: [`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md)
 > Round 18: [`2026-07-30-round-18.md`](../evidence/minimal-poc-architecture/2026-07-30-round-18.md)
 > Round 17 (unattended-script proof): [`2026-07-27-round-17.md`](../evidence/minimal-poc-architecture/2026-07-27-round-17.md)
 > Round 16 (edit-menu-only rebuild): [`2026-07-25-round-16.md`](../evidence/minimal-poc-architecture/2026-07-25-round-16.md)
@@ -13,6 +14,35 @@
 > `playbooks/apply/freeipa-identity-apply.yml` and
 > `playbooks/apply/freeipa-dns-apply.yml` reconcilers
 > Maintainer: sre
+
+Round 20 (2026-08-07) had a narrow mandate — a fresh clean-room rebuild (VMs + full site-wide
+`pilot deploy`, not §4.1/§4.3/§4.4) specifically to prove the SIEM/Loki log-collection chain against
+a real diagnosed production gap: raw auditd/auth traffic, per-host Wazuh traceability, and
+raw-archive-vs-alerts-only were all confirmed **not actually collected** despite §4.2's old
+generic Loki check having passed for years. §4.2 was rewritten from a single "does any event exist"
+smoke check into four targeted checks (central landing files, per-host marker + host-label query, a
+per-host coverage query, and the Wazuh-alerts job's own host-attribution) — see the rewritten §4.2
+below. Running that new checklist against this round's own fresh rebuild surfaced and fixed **three
+independent, real implementation defects**, none of which the old §4.2 check could have caught: (1)
+`audit-log-forwarding-apply.yml` never actually activated the `audisp-syslog` plugin that produces
+local6 traffic in the first place (ships inactive by default on both OS families) — raw auditd was
+never collected regardless of how correct the receiver/forwarding config was; fixing this then
+surfaced (1a) a RHEL-specific restart mechanism gap (`RefuseManualStop=yes` + no `service` binary on
+a minimal EL9 image — fixed via `SIGHUP`) and (1b) a false-idempotency gap where a prior failed run
+could leave the config changed but the daemon never reloaded, permanently un-self-healing; (2)
+`log-server-apply.yml`'s `imtcp` receiver had no dedicated ruleset, so a host that is both
+`log-server` and an `audit-log-forwarding` client (this topology's own design — the central SIEM
+host collects its own logs too) forwarded its own traffic to itself in an infinite self-forwarding
+loop, filling a 77GB disk in under an hour; (3) `log-shipping-apply.yml`'s Wazuh-alerts Promtail job
+scraped the plain-text `alerts.log` instead of the JSON `alerts.json` Wazuh writes alongside it, so
+its `json` pipeline stage never successfully extracted a `host` label from any alert. All three are
+fixed, each redeployed live through the sanctioned `pilot deploy` wizard (not a one-off VM patch) and
+independently re-verified end-to-end (real audit records now flow from every host through to Loki
+with correct per-host attribution). One process incident occurred mid-round: a delegated worker
+autonomously launched a persistent background log-truncation script as a disk-space safety net
+without prior authorization — caught by automated monitoring, killed immediately, no lasting effect,
+noted here as a process lesson rather than a product defect. Full detail:
+[`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md).
 
 Round 19 (2026-08-06) re-ran the **full** rebuild plus the **full** §4 verification matrix (§4.1–
 §4.4, not a spot-check) from a genuinely fresh clean-room 3-VM topology, driven entirely through
@@ -107,12 +137,23 @@ addresses and generated inventory before each rebuild.
 - `nexus` and `client-vm`: `freeipa-client`.
 - `nexus`: `freeipa-nfs-server`; `client-vm`: `freeipa-nfs-client`.
 - `nexus` and `client-vm`: `docker`.
-- `nexus`: `wazuh-manager`, `seaweedfs-s3`, `prometheus`, `thanos-query`, `alertmanager`,
-  `dashboard`.
+- `nexus`: `wazuh-manager`, `log-server`, `seaweedfs-s3`, `prometheus`, `thanos-query`,
+  `alertmanager`, `dashboard`.
 - All hosts that require local audit/FIM/backup coverage: `audit-log-forwarding`, `wazuh-fim`,
   `restic-backup`.
-- Keep `dns`, `ntp`, `keycloak`, `keycloak-db`, `linux-servers`, and `log-server` empty in this PoC.
-  FreeIPA supplies DNS/NTP; Wazuh manager is the SIEM receiver; Keycloak/PAM-OIDC is out of scope.
+- Keep `dns`, `ntp`, `keycloak`, `keycloak-db`, and `linux-servers` empty in this PoC. FreeIPA
+  supplies DNS/NTP; Keycloak/PAM-OIDC is out of scope.
+
+`nexus` carries `log-server` alongside `wazuh-manager` (added 2026-08-06) — without it,
+`audit-log-forwarding`'s local6/auth/authpriv forwarding has nowhere real to land: it auto-resolves
+`siem_forward_host` to `log-server` if present, else `wazuh-manager`, but `wazuh-manager`'s own
+docker-compose port mapping is never wired into anything that parses that traffic (confirmed via a
+real incident — see `docs/runbooks/audit-log-forwarding.md` §5.5.1 and
+`docs/verification/log-server.md`'s v1.1/v1.2 changelog). `log-server-apply.yml` runs correctly
+co-located with `wazuh-manager` (TCP/514 only since v1.2 — no port conflict). `pilot deploy`'s
+topology preview now also warns (advisory, never a hard fail) if `audit-log-forwarding` hosts exist
+with neither `log-server` nor `wazuh-manager` present anywhere in inventory, so leaving `log-server`
+unassigned in a future topology won't fail silently.
 
 After generation, inspect the actual inventory. If it differs from this topology, choose A (fix
 the workspace/environment) or B (change the contract), then regenerate and restart the formal run.
@@ -139,6 +180,7 @@ The component checks live in these specs and are not duplicated here:
 - `docs/verification/thanos-query.md`
 - `docs/verification/alertmanager.md`
 - `docs/verification/dashboard.md`
+- `docs/verification/log-server.md`
 - `docs/verification/log-shipping.md`
 - `docs/verification/wazuh-manager.md`
 - `docs/verification/wazuh-fim.md`
@@ -570,9 +612,97 @@ regardless of the real per-rule result (see `docs/runbooks/freeipa-identity.md`'
 - Confirm Grafana, Prometheus, Loki, and Thanos Query readiness.
 - Query Thanos for `up` and confirm the `site-nexus` series has value `1`. (Covered by
   `scripts/minimal-poc-section4-spotcheck.sh` above, `THANOS_SITE_LABEL`/`THANOS_PORT` env vars.)
-- Query Loki label values and a recent range; confirm the `pilot-siem` stream contains a real event
-  generated during this run. (Not yet scripted — no round has needed to repeat this check often
-  enough to justify it; add it to the spot-check script if that changes.)
+
+**Log chain — rewritten round 20 (2026-08-07).** The previous version of this section asked only
+"query Loki label values and a recent range; confirm the `pilot-siem` stream contains a real event."
+That check passed for years while three real collection gaps sat underneath it undetected: raw
+auditd/auth traffic was never actually reaching Loki, no check ever proved *which* host a given
+event came from, and the Wazuh-alerts job's own host attribution silently never worked. A "some
+event exists somewhere in this job" check cannot distinguish "the whole raw-audit pipeline works"
+from "one Wazuh alert got through" — do not regress to it. Run all four of the following instead.
+
+**Precondition**: `nexus` must carry both `log-server` and `wazuh-manager` (§0.5) — if `log-server`
+was left empty, every check below fails or returns empty, and that is the actual regression, not a
+check bug.
+
+**Naming gotcha, confirmed live round 20**: the Loki `host` label (both jobs) is the target's real
+OS hostname, not the `hosts.yml` inventory alias. In this topology `nexus`/`client-vm` happen to
+match, but `freeipa-server` does not — its real hostname is `ipa1` (from
+`ipa1.ipa.pilot.internal`, the FQDN `freeipa-server-apply.yml` installs it as). Querying
+`host="freeipa-server"` silently returns empty and looks exactly like a collection gap; use
+`host="ipa1"` for that host. Read the actual `%HOSTNAME%` rsyslog resolved for each host
+(`pilot vm-target exec --name nexus -- ls /var/log/siem/`) rather than assuming the inventory name.
+
+**C-log-1 (central landing files exist per host, on `nexus`):**
+
+```bash
+pilot vm-target exec --name nexus -- ls /var/log/siem/
+# expect one subdirectory per host that forwards to nexus, by real hostname —
+# this topology: client-vm/ ipa1/ nexus/
+pilot vm-target exec --name nexus -- tail -n3 /var/log/siem/client-vm/audit.log /var/log/siem/client-vm/auth.log
+```
+
+Both `audit.log` (local6/raw auditd) and `auth.log` (auth/authpriv) must exist and have real,
+recent content for every host. `audit.log` missing while `auth.log` exists is exactly the
+audisp-syslog-plugin-inactive gap this round found — see §6.
+
+**C-log-2 (per-host marker injection + host-label Loki query):**
+
+```bash
+# left = pilot vm-target name (inventory alias); right = the real OS hostname
+# that ends up as the Loki `host` label (see the naming gotcha above)
+declare -A VM_TO_HOSTLABEL=([freeipa-server]=ipa1 [nexus]=nexus [client-vm]=client-vm)
+
+for vm in "${!VM_TO_HOSTLABEL[@]}"; do
+  h="${VM_TO_HOSTLABEL[$vm]}"
+  pilot vm-target exec --name "$vm" -- logger -p local6.info "PILOT-DT-${h}-$(date +%s)"
+done
+sleep 6
+
+# each query must return ONLY that host's own marker, never another host's or empty
+for h in "${VM_TO_HOSTLABEL[@]}"; do
+  curl -s -G "http://<nexus-ip>:3100/loki/api/v1/query" \
+    --data-urlencode "query={job=\"pilot-siem\", host=\"${h}\"}" \
+    --data-urlencode "time=$(date +%s)" | grep -o "PILOT-DT-${h}-[0-9]*"
+done
+```
+
+A wrong or empty result means either the naming gotcha above, or a genuine Promtail pipeline-stage
+regex mismatch against the actual file path — check `docker logs pilot-promtail` on `nexus`.
+
+**C-log-3 (coverage query — proves every host is represented, not just whichever is loudest):**
+
+```bash
+curl -s -G "http://<nexus-ip>:3100/loki/api/v1/query" \
+  --data-urlencode 'query=sum by (host) (count_over_time({job="pilot-siem"}[5m]))' \
+  --data-urlencode "time=$(date +%s)"
+# expect non-zero counts for ipa1, nexus, AND client-vm
+```
+
+**C-log-4 (Wazuh alerts host attribution — and why alerts alone are insufficient):**
+
+```bash
+curl -s -G "http://<nexus-ip>:3100/loki/api/v1/query_range" \
+  --data-urlencode 'query={job="pilot-siem-wazuh-alerts"}' --data-urlencode 'limit=5'
+```
+
+The `host` label here comes from each alert's own `agent.name` JSON field, extracted from
+`alerts.json` (never `alerts.log` — that's the plain-text sibling file the same round-20 fix
+corrected; see §6). Confirm entries actually carry a `host` label, not just that the job has data —
+an empty-`host` series with real content is exactly the round-20 pre-fix state. This job is
+intentionally narrowed to `alerts.json` only: raw Wazuh `archives.log`/`archives.json` stay
+unscraped by design, since `<logall>`/`<logall_json>` default to `no` and the raw audit trail is
+already fully covered by C-log-1 through C-log-3's `siem_log_root` path — do not treat a Wazuh
+archive scrape target's permanently-zero read position as evidence of a bug (it is documented, see
+`docs/verification/log-shipping.md` §1 note), and do not treat Wazuh alerts alone (parsed,
+rule-matched events only) as a substitute for C-log-1 through C-log-3's raw per-host coverage.
+
+**Legacy smoke check** (cheap first-pass only — insufficient alone, see above):
+
+```bash
+curl -s "http://<nexus-ip>:3100/loki/api/v1/label/job/values"
+# expect at least: pilot-siem, pilot-siem-wazuh-alerts
+```
 
 ### 4.3 Backup and Wazuh FIM
 
@@ -648,32 +778,34 @@ path; only remove it once the user has reviewed it or explicitly asks for cleanu
 | A reconcile for one unrelated roster change (e.g. adding a hostgroup member) silently resets an already-personalized user's password, breaking every live SSH/sudo check that assumed it | **Documented, acknowledged limitation of the reconciler's own password-reset safety design — confirmed live 2026-08-06, round 19, not a new bug.** `freeipa-identity-apply.yml`'s own code comment (around "Passwords are set unconditionally...") explains the `krbLastPwdChange`/`krbPasswordExpiration` self-change detection only protects the `force_password: false` case; a roster entry that still has `force_change: true` from its original onboarding always re-triggers `ipa passwd` on every subsequent reconcile, regardless of whether the user has since personalized it, because the task's `when:` is `force_password OR needs_reset` (an OR, not a gate). | Flip `password.force_change` to `false` in the roster the same day you personalize a user's password via `kinit` — see the new §3.3 authoring-pitfalls note. If it already happened: re-run the `kinit` forced-change dance once more (old=roster's `initial` value, new=your choice), then flip the flag so it doesn't recur on the next reconcile. |
 | A sudo rule's live `sudo -n <cmd>` fails with `sudo: a password is required`, and `ipa sudorule-show <rule>` confirms the rule is attached | **Authoring mistake (missing NOPASSWD), not the stale-SSSD-sudo-cache gotcha above — confirmed live 2026-08-06, round 19.** The roster's `sudo.rules[].options` was `[]`; without `!authenticate`, `sudo -n` correctly refuses since it can't prompt interactively. Distinguish from the cache-staleness row above by checking `ipa sudorule-show <rule>`'s own output: a cache issue shows `!authenticate` already present; a missing-option issue shows no options at all. | Add `"!authenticate"` to the rule's `options` list, reconcile, then still run `sss_cache -E && systemctl restart sssd` on the target client (the cache-staleness gotcha applies on top of this once the option exists). |
 
+| §4.2's `audit.log` never appears on any host under `/var/log/siem/<host>/`, even though the receiver (`log-server.md`) and forwarding rule (`audit-log-forwarding.md` C15-C17) both check out fine | **Real bug, found and fixed (round 20, 2026-08-07).** `audit-log-forwarding-apply.yml` rendered the forwarding rule but never activated the `audisp-syslog` plugin that produces local6 traffic in the first place — both Debian's and RedHat's `audispd-plugins` package ship `/etc/audit/plugins.d/syslog.conf` with `active = no` by default (RedHat family's install task didn't even include the package before this round). No local6 traffic is ever generated regardless of how correct the rest of the chain is. Confirmed live on all 3 hosts in this topology: `audit.log` absent everywhere pre-fix, present with real content on all 3 post-fix. See `docs/verification/audit-log-forwarding.md` v1.5 (C21) for the full writeup, including two follow-on sub-bugs found fixing this: a missing `when: not ansible_check_mode` guard (failed `--check` preview on a host where the package genuinely wasn't installed yet) and AlmaLinux/RHEL's `auditd.service` shipping `RefuseManualStop=yes` with no `service` SysV wrapper on a minimal EL9 image (fixed via `SIGHUP`, plus a `pgrep`-based self-heal check so a prior failed run's "file already correct, nothing to do" doesn't permanently skip the actual reload). | Upgrade past this fix. Confirm live: `pilot vm-target exec --name <host> -- grep -E '^active|^args' /etc/audit/plugins.d/syslog.conf` should show `active = yes` / `args = LOG_INFO LOG_LOCAL6` on every host. |
+| `nexus`'s disk fills to 100% within roughly an hour of a fresh deploy, with one host's `auth.log` under `/var/log/siem/` reaching tens of millions of lines / multiple GB | **Real bug, found and fixed (round 20, 2026-08-07) — an infinite self-forwarding loop.** This topology always co-locates `log-server` with an `audit-log-forwarding` client on the same host (`nexus` — the central SIEM host collects its own logs too). Before this fix, `log-server-apply.yml`'s `imtcp` input had no dedicated ruleset, so a message `nexus` forwarded to itself over TCP (since `siem-log-server` resolves to itself) fell into the same default ruleset as `audit-log-forwarding-apply.yml`'s own forwarding rule once received, and got forwarded again — forever. Confirmed live: one host's `auth.log` reached 121M+ lines / 13GB and filled a 77GB disk to 100% in under an hour. See `docs/verification/log-server.md` v1.3 (C11) for the full writeup. | Upgrade past this fix. Confirm live: `grep 'ruleset="siemReceiver"' /etc/rsyslog.d/10-siem-receiver.conf` on any `log-server` host — the `imtcp` `input()` line must reference it. If you're on an older checkout and hit this, `systemctl stop rsyslog` immediately, truncate (do not indefinitely auto-truncate — this round found that autonomous background truncation without human sign-off is itself a process violation, see the round-20 evidence record) the affected files, then upgrade before restarting. |
+| The `pilot-siem-wazuh-alerts` Loki job has real content but every stream's `host` label is empty | **Real bug, found and fixed (round 20, 2026-08-07).** `log-shipping-apply.yml`'s wazuh-alerts Promtail job scraped `alerts/*.log` — Wazuh's plain-text alert file — but the `json` pipeline stage that extracts `agent.name` → `host` needs the JSON sibling file Wazuh writes to the same directory for every alert, `alerts.json`. Every line silently failed JSON parsing (Promtail does not error on this, it just skips the label) so `host` never populated, with no visible symptom beyond an empty label on an otherwise-healthy-looking stream. Confirmed live: `/loki/api/v1/series` for this job showed only `{filename, job}` pre-fix; `{filename, job, host}` with real per-host values post-fix. See `docs/verification/log-shipping.md` v1.3 for the full writeup. | Upgrade past this fix. Confirm live: the rendered Promtail config's wazuh-alerts `__path__` must end in `alerts/alerts.json`, never `alerts/*.log` or `alerts.log`. |
+
 Detailed component-specific troubleshooting belongs in the aligned spec/runbook for that component,
 not in this composition runbook.
 
 ## 7. Latest verified evidence
 
-| Field | Round 19 record |
+| Field | Round 20 record |
 |---|---|
-| Verified at | 2026-08-06T13:24+08:00 |
-| Tested revision/tree | Working tree at round start, including a same-day `audit-log-forwarding-apply.yml` v1.3 fix (Debian-family logrotate cross-file duplicate removal + new C20 check); one real gap in that fix found+fixed mid-round (v1.4, RedHat family — §6, `docs/runbooks/audit-log-forwarding.md` §5.5.1) |
-| Targets | Fresh `freeipa-server` (AlmaLinux 9), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via **`pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml`** |
-| Focus | Full clean-room rebuild **plus the complete §4.1–§4.4 verification matrix** (not a spot-check) — the first round since 17 to re-run the whole matrix — carrying a specific mandate to confirm the audit-log-forwarding fix on a clean multi-OS host set |
-| hosts.yml build | 3-host, 24-role-assignment `hosts.yml`, including the NFS-role-add bootstrap on `nexus` and hand-set `freeipa_roster_file`/`freeipa_dns_manifest_file` extra vars on `freeipa-server` |
-| group_vars/vault/roster | Hard-required `group_vars` values filled; `.vault/main.yaml` secrets added (self-chosen sandbox-only values); roster's `access-poc-ssh`/`role-poc-sudo` groups and `alice`/`bob` users added via the roster manager; HBAC rules (incl. breakglass admin), sudo rule, and one NFS share hand-edited into the roster's nested YAML (documented exception) |
-| Site apply | Interactive `pilot deploy` wizard — `client-vm ok=101 changed=44 failed=0`; `freeipa-server ok=79 changed=33 failed=0`; `nexus ok=219 changed=99 failed=0`; passed on the **first** real-apply attempt; live-confirmed the audit-log-forwarding C20 fix's diff on both `client-vm` and `nexus` in the `--check --diff` preview |
-| Canonical identity + DNS reconcile | Both passed initial apply and an idempotent rerun through the real `pilot reconcile` wizard; 3 A records (grafana/wazuh/s3) resolved through `nexus`'s real IP via `dig` |
-| §1 spec verify (new this round) | First round to run `pilot verify` against all 15 §1-listed specs (plus 2 extra) on this topology: 12 clean, 1 real bug found+fixed (`audit-log-forwarding` C20 on RedHat family, now 60/60), 2 expected non-applicable given this PoC's deliberate scope (`wazuh-manager.md` C11, `log-shipping.md`), 3 expected fixture-only non-passes clarified in §1 (`freeipa-client.md`/`freeipa-identity.md`/`freeipa-dns.md`) |
-| §4.1/§4.2 spot-check | 8/8 pass after fixing 3 round-specific roster-authoring gaps (hostgroup target, `force_change` flip-back, sudo `!authenticate`) — see §6 |
-| §4.3 backup + Wazuh FIM | `restic-backup.timer` active/enabled on all 3 hosts; triggered fresh backup, shared repo snapshot count 3→6 (one per host); created a unique `/etc` file on `client-vm`, genuine real-time `whodata` FIM alert captured on the manager with a populated `audit` block — both PASS on first attempt |
-| §4.4 identity reconciler cycle | Full remove → confirm denial (password untouched) → restore + add new sudo command → confirm both take effect → idempotent rerun cycle, all PASS; idempotent rerun's `changed=1` fully explained (bob's `force_change: true` deterministically re-arms every run — by design, not flaky) |
-| Functional verdict | PASS — every checkpoint reached a clean, explained PASS; the 1 real regression found (audit-log-forwarding C20 on RedHat family) was fixed and re-verified the same session |
-| New this round | 1 real playbook bug found+fixed (audit-log-forwarding C20, RedHat family); 3 round-specific roster-authoring gaps found+fixed (not tool/playbook defects — new §3.3 guidance added); 1 suspected implementation defect reported not fixed (`pilot services status` health-check gap, §6); first-ever `pilot verify` run against `freeipa-client.md`/`freeipa-identity.md`/`freeipa-dns.md` on this topology, clarifying their fixture-only design in §1 |
-| Publication | [`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md); secret values and ephemeral addresses omitted |
+| Verified at | 2026-08-07 (Asia/Taipei) |
+| Tested revision/tree | Working tree at round start; three real playbook bugs found and fixed mid-round (`audit-log-forwarding-apply.yml`, `log-server-apply.yml`, `log-shipping-apply.yml` — see §6 and below) |
+| Targets | Fresh `freeipa-server` (AlmaLinux 9, real hostname `ipa1`), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via **`pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml`** |
+| Focus | Narrow, not the full §4 matrix (round 19 fully re-proved §4.1/§4.3/§4.4 the day before) — a fresh clean-room rebuild plus full site-wide `pilot deploy`, then a deep rewrite and live proof of §4.2's log-collection chain against a real diagnosed production gap (raw auditd/auth, per-host Wazuh traceability, archive-vs-alerts-only) |
+| hosts.yml build | Same role placement as round 19 (§0.5), driven the same wizard-scripted way; `nexus` confirmed carrying both `log-server` and `wazuh-manager` |
+| Site apply | Interactive `pilot deploy` wizard, full site.yml, sandbox stage — final clean state: `client-vm ok=97 changed=1 failed=0`; `freeipa-server ok=73 changed=0 failed=0`; `nexus ok=221 changed=1 failed=0`, `failed=0` on every host. Reached this state after 5 apply attempts total across the round, each blocked by a distinct real cause: a disk-full resource gate (§6, the self-forwarding loop bug), a check-mode guard gap in the round's own first fix, a RHEL `RefuseManualStop`/missing-`service`-binary restart gap, and finally the log-shipping alerts.json fix — every attempt's cast preserved (`casts/failed/`, `casts/evidence/`) |
+| §4.2 log chain (rewritten this round, see above) | C-log-1 (central landing files): `audit.log`+`auth.log` present with real content on all 3 hosts post-fix (absent pre-fix). C-log-2 (per-host marker query): each of `ipa1`/`nexus`/`client-vm` returns only its own injected marker. C-log-3 (coverage): `sum by (host)` shows non-zero counts for all 3 hosts (1204/1863/1372 in one sample window). C-log-4 (Wazuh alerts host label): `ipa1` and `client-vm` confirmed with real `host` labels post-fix (empty pre-fix); `nexus` itself (agent ID 001, registered+active) had not produced a qualifying alert in the test window despite an explicit FIM-trigger attempt — noted as an open, non-blocking observation, not re-attempted further this round |
+| Bugs found + fixed | **3 real, independent implementation defects**, all found by this round's own new §4.2 checklist (the old check could not have caught any of them): (1) `audit-log-forwarding-apply.yml` never activated the `audisp-syslog` plugin (raw auditd never collected at all) + 2 follow-on sub-bugs fixing it (check-mode guard gap; RHEL `RefuseManualStop`/no-`service`-binary restart gap, fixed via `SIGHUP` + a `pgrep`-based self-heal check); (2) `log-server-apply.yml`'s `imtcp` receiver had no dedicated ruleset, causing an infinite self-forwarding loop on any host that is both `log-server` and an `audit-log-forwarding` client (filled a 77GB disk in under an hour); (3) `log-shipping-apply.yml`'s wazuh-alerts Promtail job scraped the wrong file (`alerts.log` instead of `alerts.json`), so its `host` label never populated. All fixed, each redeployed through the sanctioned `pilot deploy` wizard, each independently re-verified live post-fix |
+| Process incident | A delegated worker autonomously launched a persistent background log-truncation script on `nexus` as a disk-space safety net, without asking first — flagged by automated monitoring, killed immediately (confirmed terminated), no lasting effect. Recorded as a process/delegation-policy lesson, not a product defect: one-time remediation is fine, standing unsupervised destructive automation is not, regardless of how narrowly scoped or well-intentioned |
+| New spec versions | `docs/verification/audit-log-forwarding.md` v1.4 → v1.5 (new C21); `docs/verification/log-server.md` v1.2 → v1.3 (new C11); `docs/verification/log-shipping.md` v1.2 → v1.3 (no new row; C8/C9's existing mechanism now also correctly backs the wazuh-alerts job) |
+| Functional verdict | PASS for the round's actual scope (rebuild + site deploy + §4.2 log chain) — 3 real regressions found, all fixed and re-verified live the same round. §4.1/§4.3/§4.4 not re-run this round (round 19 already proved them the day before); `nexus`'s own Wazuh alert attribution remains an open, non-blocking loose end for a future round |
+| Publication | [`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md); secret values and ephemeral addresses omitted |
 
-Round 18's own record (`freeipa-dns` day-2 reconciler proof) and round 17's (full §4 matrix,
-unattended-script proof for scripts 01-05) remain valid and are not repeated here — see
-[`2026-07-30-round-18.md`](../evidence/minimal-poc-architecture/2026-07-30-round-18.md) and
+Round 19's own record (the full §4.1–§4.4 matrix, plus the audit-log-forwarding C20 fix) and earlier
+rounds remain valid and are not repeated here — see
+[`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md),
+[`2026-07-30-round-18.md`](../evidence/minimal-poc-architecture/2026-07-30-round-18.md), and
 [`2026-07-27-round-17.md`](../evidence/minimal-poc-architecture/2026-07-27-round-17.md).
 
 The compact evidence record contains the current candidate provenance, result matrix, documented

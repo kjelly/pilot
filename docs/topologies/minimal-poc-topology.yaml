@@ -14,6 +14,7 @@
 #   --verify docs/verification/freeipa-nfs-client.md=freeipa-nfs-client
 #   --verify docs/verification/docker.md=docker
 #   --verify docs/verification/audit-log-forwarding.md=audit-log-forwarding
+#   --verify docs/verification/log-server.md=log-server
 #   --verify docs/verification/wazuh-manager.md=wazuh-manager
 #   --verify docs/verification/wazuh-fim.md=wazuh-fim
 #   --verify docs/verification/seaweedfs-s3.md=seaweedfs-s3
@@ -22,7 +23,16 @@
 #   --verify docs/verification/prometheus.md=prometheus
 #   --verify docs/verification/thanos-query.md=thanos-query
 #   --verify docs/verification/dashboard.md=dashboard
-#   --verify docs/verification/log-shipping.md=wazuh-manager
+#   --verify docs/verification/log-shipping.md=log-server
+#
+# nexus carries both log-server and wazuh-manager (2026-08-06): confirmed
+# live that log-server-apply.yml runs correctly co-located with
+# wazuh-manager (TCP/514 only since v1.2 — no port conflict with anything
+# wazuh-manager's docker-compose maps) — see
+# docs/runbooks/audit-log-forwarding.md §5.5.1 and
+# docs/verification/log-server.md's changelog. Without this, nexus's
+# audit-log-forwarding traffic (and every other host forwarding to it)
+# would silently go nowhere — the exact incident that motivated this fix.
 #
 # freeipa-identity.md is intentionally not listed: site.yml excludes the
 # day-2 roster reconciler and it must be applied (with its fixture/roster)
@@ -64,6 +74,7 @@ nodes:
       - freeipa-client
       - docker
       - audit-log-forwarding
+      - log-server
       - wazuh-manager
       - wazuh-fim
       - seaweedfs-s3
