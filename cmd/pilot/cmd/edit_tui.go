@@ -191,8 +191,18 @@ func init() {
 func runEdit(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
+	// Check --actions flag FIRST: structured path does not require TTY
+	if editActionsPath != "" {
+		scenario, err := loadEditScenario(editActionsPath)
+		if err != nil {
+			return err
+		}
+		return runAutomatedEditWorkflow(cmd, scenario, editPresentation, editTracePath)
+	}
+
+	// TTY check only applies to interactive TUI path
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return fmt.Errorf("pilot edit 需要互動式終端機(TTY)才能顯示選單；非互動場景請直接編輯檔案")
+		return fmt.Errorf("pilot edit 需要互動式終端機(TTY)才能顯示選單；非互動場景請使用 --actions 參數指定 JSON scenario 檔案")
 	}
 
 	fmt.Fprintln(out, "═══ pilot edit — hosts.yml / 角色範本 / group_vars / .vault 編輯精靈 ═══")
@@ -201,13 +211,6 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
 	fmt.Fprintln(out)
-	if editActionsPath != "" {
-		scenario, err := loadEditScenario(editActionsPath)
-		if err != nil {
-			return err
-		}
-		return runAutomatedEditWorkflow(cmd, scenario, editPresentation, editTracePath)
-	}
 
 	router := newEditRouterModel(editDir)
 	final, err := tea.NewProgram(router, tea.WithOutput(os.Stdout)).Run()
