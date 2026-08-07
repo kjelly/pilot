@@ -60,11 +60,11 @@ func TestPlan_FreeipaClientToFreeipaServer_ExpandsNarrowedEndpointSet(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(edges) != 5 {
-		t.Fatalf("got %d edges, want 5 (one per narrowed endpoint): %+v", len(edges), edges)
+	if len(edges) != 7 {
+		t.Fatalf("got %d edges, want 7 (one per narrowed endpoint): %+v", len(edges), edges)
 	}
 	got := endpointNames(edges)
-	want := []string{"httpBootstrap", "kerberosTcp", "kerberosUdp", "kpasswdUdp", "ldap"}
+	want := []string{"httpBootstrap", "https", "kerberosTcp", "kerberosUdp", "kpasswdTcp", "kpasswdUdp", "ldap"}
 	if len(got) != len(want) {
 		t.Fatalf("endpoint names = %v, want %v", got, want)
 	}
@@ -83,7 +83,7 @@ func TestPlan_FreeipaClientToFreeipaServer_ExpandsNarrowedEndpointSet(t *testing
 		if e.TargetKind != TargetInventory || e.TargetHost != "10.1.58.11" {
 			t.Fatalf("target not resolved from inventory: %+v", e)
 		}
-		if e.EndpointName == "ldaps" || e.EndpointName == "https" {
+		if e.EndpointName == "ldaps" {
 			t.Fatalf("narrowed dependency must exclude %s: %+v", e.EndpointName, e)
 		}
 	}

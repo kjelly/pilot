@@ -8,9 +8,10 @@ import (
 )
 
 // TestRegression_FreeipaServerSpec locks the structural contract of
-// docs/verification/freeipa-server.md: 16 rows C1..C16 (C14–C16 = 389-ds
-// directory-service audit log, added in v1.1), lint-clean, and a generated
-// verify playbook that covers every row.
+// docs/verification/freeipa-server.md: 19 rows C1..C19 (C14–C16 = 389-ds
+// directory-service audit log, added in v1.1; C19 = kpasswd 464/tcp, added
+// in v1.5), lint-clean, and a generated verify playbook that covers every
+// row.
 //
 // Inventory alignment: like freeipa-client.md, §1 declares group
 // `freeipa-server` while the vm-target reference environment puts the host in
@@ -24,11 +25,11 @@ func TestRegression_FreeipaServerSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	if len(s.Rows) != 18 {
-		t.Fatalf("rows=%d want=18 (spec must cover C1..C18 inclusive)", len(s.Rows))
+	if len(s.Rows) != 19 {
+		t.Fatalf("rows=%d want=19 (spec must cover C1..C19 inclusive)", len(s.Rows))
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19"}
 	gotIDs := make([]string, 0, len(s.Rows))
 	seen := map[string]bool{}
 	for _, r := range s.Rows {

@@ -1,6 +1,6 @@
 # Verification Spec — freeipa-server (native EL9, 帳號 + sudo 中央管理端)
 
-> 版本：v1.4（v1.0 的 13 條已在 pilot vm-target `almalinux-9` 上實跑 `ipa-server-install` + `pilot verify`；v1.1 新增稽核日誌 C14–C16；v1.2 將 DNS 與 NTP 服務改為可選啟用，並新增相容性檢測列 C17–C18；v1.3 修正 §0/§1/§1.5 對 `ipa_setup_dns`/`ipa_setup_ntp` 預設值的文件描述；v1.4 讓 C3/C12 驗證實際 configured FQDN，見 §0 / §3 / §8）
+> 版本：v1.5（v1.0 的 13 條已在 pilot vm-target `almalinux-9` 上實跑 `ipa-server-install` + `pilot verify`；v1.1 新增稽核日誌 C14–C16；v1.2 將 DNS 與 NTP 服務改為可選啟用，並新增相容性檢測列 C17–C18；v1.3 修正 §0/§1/§1.5 對 `ipa_setup_dns`/`ipa_setup_ntp` 預設值的文件描述；v1.4 讓 C3/C12 驗證實際 configured FQDN，見 §0 / §3 / §8；v1.5 補上 kpasswd 464/tcp 的 C19，見 §8）
 > 對齊規範：pilot 通用基礎設施**服務端**規範；本 host 是提供 LDAP + Kerberos + sudo 中央目錄的那台（identity provider / directory），不是使用端
 > 維護者：sre
 
@@ -102,10 +102,11 @@ httpd 的 mod_auth_gssapi 取不到自己的 `HTTP/…` acceptor 憑證（SPNEGO
 | C16 | audit     | 稽核日誌檔存在且已寫入（啟用後 389-ds 會寫入 header，非空）         | 0                              | sudo test -s /var/log/dirsrv/slapd-IPA-PILOT-INTERNAL/audit |
 | C17 | port      | DNS 53/tcp 在 host listening（僅在啟用 DNS 時強驗，未啟用則自動 skip 達標） | 0                              | if ! ss -tlnH | grep -q ":53 "; then ! systemctl is-active --quiet named-pkcs11 && ! systemctl is-active --quiet named; fi |
 | C18 | port      | DNS 53/udp 在 host listening（僅在啟用 DNS 時強驗，未啟用則自動 skip 達標） | 0                              | if ! ss -ulnH | grep -q ":53 "; then ! systemctl is-active --quiet named-pkcs11 && ! systemctl is-active --quiet named; fi |
+| C19 | port      | kpasswd 464/tcp 在 host listening                                | 0                              | ss -tlnH | grep -q ":464 " |
 
-> **C4–C10** 都含 `|` pipeline，parser 會把後續 column 自動接回 Command（見 spec template 說明），
+> **C4–C10、C19** 都含 `|` pipeline，parser 會把後續 column 自動接回 Command（見 spec template 說明），
 > 並用 `":<port> "`（尾隨空白）避免 `:80` 誤命中 `:8080`；host-native 下埠直接 bind 在主機。
-> 純數字 expected（C1/C2/C4–C10 = `0`）比對 **exit code**：`grep -q` 命中回 0。
+> 純數字 expected（C1/C2/C4–C10/C19 = `0`）比對 **exit code**：`grep -q` 命中回 0。
 > **C2 用正邏輯**（`sudo ipactl status` 全服務 RUNNING 時自身回 rc 0；任一 STOPPED/FAILED 則回非 0）
 > ——刻意不寫成 `... | grep STOPPED` 的反邏輯，因為 ansible ad-hoc 會把「指令回非 0」判為 task 失敗、
 > 讓 verify 收到的是 ansible 的 rc（2）而非管線的 rc（1），反邏輯 expected 永遠對不上（實測踩過）。
@@ -125,7 +126,7 @@ httpd 的 mod_auth_gssapi 取不到自己的 `HTTP/…` acceptor 憑證（SPNEGO
 - 工具：`pilot vm-target verify --name <el9-vm> docs/verification/freeipa-server.md`
   （真實主機：`pilot verify docs/verification/freeipa-server.md -i inventory-freeipa.yaml`）
 - 格式：`.verification/freeipa-server-<UTC>.{ndjson,md}`
-- 預期 row 數：18
+- 預期 row 數：19
 
 **真實輸出（C17–C18，v1.2，未啟用 DNS 時）**：
 `pilot vm-target verify` 實跑，C17/C18 與其餘 rows 共 18/18 獲得 PASS，範例如下：
@@ -174,13 +175,13 @@ httpd 的 mod_auth_gssapi 取不到自己的 `HTTP/…` acceptor 憑證（SPNEGO
 
 ## 4. PASS / FAIL 規則
 
-- C1–C18 全部 `status=pass`（或 §5 允許的 `skip`）→ **PASS**：本機已可對外提供帳號 + sudo 管理，client 可 enroll，且目錄寫入操作留有稽核軌跡。
+- C1–C19 全部 `status=pass`（或 §5 允許的 `skip`）→ **PASS**：本機已可對外提供帳號 + sudo 管理，client 可 enroll，且目錄寫入操作留有稽核軌跡。
 - 任一 `fail` → **FAIL**，常見修法：
   - C1 fail → `ipa-server-install` 沒跑完或失敗；`sudo tail -n 80 /var/log/ipaserver-install.log`，重跑 apply playbook。
   - C17/C18 fail → 啟用 DNS 時 named 服務未正常啟動，或未啟用 DNS 時系統 named 服務處於異常狀態。可使用 `sudo systemctl status named-pkcs11 named` 檢查狀態。
   - C2 fail → 某 IPA 服務掛了；`sudo ipactl status` 看哪個 STOPPED，`sudo ipactl restart`。
   - C3 fail → 主機 hostname 與 FreeIPA effective 設定不一致；比較 `hostname -f` 與 `/etc/ipa/default.conf` 的 `host =`，再以部署使用的 `ipa_server_fqdn` 修正設定並重跑 apply。
-  - C4–C10 fail → 對應服務沒起或防火牆擋；先查 C2，再查 host firewall（`firewalld`/`nftables`）是否放行該埠。
+  - C4–C10、C19 fail → 對應服務沒起或防火牆擋；先查 C2，再查 host firewall（`firewalld`/`nftables`）是否放行該埠。kpasswd（C8/C19）需要 TCP 與 UDP 464 皆放行，兩者缺一都會讓部分 client 密碼變更流程失敗。
   - C11 fail → Directory Server 沒起或 realm 後綴打錯（對照 `ipa_domain`）。
   - C12 fail → HTTP(80) 沒起或 configured FQDN 在本機不可解析；確認 `/etc/hosts` 有 `ipa_server_ip ipa_server_fqdn`（FQDN 在前）。
   - C13 fail → schema-compat（slapi-nis）未載入或匿名讀被關；見 §5 例外。
@@ -215,6 +216,7 @@ httpd 的 mod_auth_gssapi 取不到自己的 `HTTP/…` acceptor 憑證（SPNEGO
 | C11–C13 | `ipa-server-install -r IPA.PILOT.INTERNAL -n ipa.pilot.internal` 建立後綴、sudo compat 子樹 | — |
 | C14–C16 | `command: dsconf {{ ipa_ds_instance }} config replace nsslapd-auditlog-logging-enabled=on nsslapd-auditfaillog-logging-enabled=on`（tag `freeipa-audit`）| `dsconf` 走 ldapi socket 以 root autobind，免 DM 密碼；動態生效、免重啟；先 `config get` 判斷、已 `on` 則跳過（冪等）；`ipa_enable_audit_log=false` 可整段關閉 |
 | C17–C18 | `command: ipa-server-install --setup-dns ...` 且安裝 `ipa-server-dns` 套件，啟動 named 服務 | 預設不啟用。啟用後 named 服務聽在 `53` 埠 |
+| C19     | 由 `ipa-server-install` 一次帶起（同 C4–C10）；kpasswd 服務同時聽 TCP 與 UDP 464 | firewall 放行由 host 層負責，需與 C8 一併確認 |
 
 > Apply playbook 用 `block/rescue`：安裝失敗時 rescue 收 `ipactl status` + `ipaserver-install.log` 便於除錯；
 > `pre_tasks: assert` 對 `ipa_admin_password` / `ipa_server_ip` 做 mandatory gate、對 OS（必須 EL9）與 staging/prod 做 gate。
@@ -282,3 +284,4 @@ sudo -l -U <ipa-user>              # sudo 規則來自 FreeIPA（C13 的子樹�
 | 2026-07-07 | v1.2 | **變更為可選 DNS 與 NTP**。在 playbook 中支援 `ipa_setup_dns` (自動安裝 `ipa-server-dns` 套件與配置 forwarders) 及 `ipa_setup_ntp`。Spec checklist 新增 `C17`、`C18` 作為 DNS 埠檢測，並以 shell `||` 邏輯實現無狀態的「動態 skip 達標」機制。Go Regression 測試同步更新 row 數與 ID 校驗 | pilot |
 | 2026-07-17 | v1.3 | 修正文件與程式碼不一致：`ipa_setup_dns`/`ipa_setup_ntp` 在 `freeipa-server-apply.yml` 實際預設都是 `true`（由 FreeIPA 自己管理 DNS/NTP），本檔 §0/§1/§1.5 原本記載「預設 `false`/關閉」跟程式碼不符——`docs/runbooks/metrics-alerting.md`/`restic-backup.md` 整併重測時，用真實 `ipactl start` 輸出（9 個服務，含 `named`/`ipa-dnskeysyncd`）發現此落差。只更新文件描述以符合現行程式碼行為，未改程式碼、未改 checklist 判斷邏輯（C17/C18 本來就相容兩種狀態） | sre |
 | 2026-07-22 | v1.4 | CAND19 clean-room 使用非預設 `freeipa-server.ipa.pilot.internal` 時發現 C3/C12 硬編碼 `ipa1`。改為比對 `/etc/ipa/default.conf` 的 effective host，並透過 `hostname -f` 探測 CA endpoint；兩條候選指令已在同一 live target 實跑 PASS，原始 casts 保存於 `.verification/minimal-poc-update/2026-07-22-round-12/formal-verify-cand19/` | sre |
+| 2026-08-07 | v1.5 | 補 network-check coverage 缺口：kpasswd（464）在 MIT krb5 協定上同時走 TCP 與 UDP，但 `contracts/freeipa-server.yaml`/`freeipa-client.yaml` 先前只宣告了 `kpasswdUdp`。新增 checklist `C19`（464/tcp listening，比照 C8 的 464/udp）、contract 新增 `kpasswdTcp` endpoint 並納入 `freeipa-client` 的 `providerEndpoint` 依賴清單，`pilot network-check` 現在會探測兩個協定 | pilot |
