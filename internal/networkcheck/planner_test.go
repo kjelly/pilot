@@ -118,6 +118,40 @@ func TestPlan_ResticBackupToSeaweedfsS3_SingleTCP8333Edge(t *testing.T) {
 	}
 }
 
+func TestPlan_WazuhFimToWazuhManager_IncludesAgentAuthPort(t *testing.T) {
+	catalog := loadRealCatalog(t)
+	inv := ResolvedInventory{
+		GroupHosts: map[string][]string{
+			"wazuh-fim":     {"dt-port6000"},
+			"wazuh-manager": {"it-core"},
+		},
+		HostVars: map[string]map[string]any{
+			"dt-port6000": {"ansible_host": "192.168.110.35"},
+			"it-core":     {"ansible_host": "10.1.58.12"},
+		},
+	}
+
+	edges, err := Plan(catalog, inv, PlanOptions{Components: []string{"wazuh-fim"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := endpointNames(edges)
+	want := []string{"agent", "agentAuth"}
+	if len(got) != len(want) {
+		t.Fatalf("endpoint names = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("endpoint names = %v, want %v", got, want)
+		}
+	}
+	for _, e := range edges {
+		if e.EndpointName == "agentAuth" && (e.Protocol != "tcp" || e.Port != 1515) {
+			t.Fatalf("agentAuth edge wrong protocol/port: %+v", e)
+		}
+	}
+}
+
 func TestPlan_MultiHostCartesianExpansionIsSortedAndDeterministic(t *testing.T) {
 	catalog := syntheticCatalog(t)
 	inv := ResolvedInventory{

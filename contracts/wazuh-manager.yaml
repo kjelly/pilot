@@ -23,6 +23,7 @@ groupVars:
   - {name: siem_forward_host, type: string, required: false, default: "", secret: false}
 endpoints:
   - {name: agent, scheme: tcp, port: 1514}
+  - {name: agentAuth, scheme: tcp, port: 1515}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 lifecycle:
