@@ -409,7 +409,7 @@ func TestCheckWorkspaceCompleteness_VaultOKWhenFilledIn(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "hosts.yml"), workspaceHostsWithPrometheus)
 	writeFile(t, filepath.Join(dir, ".vault", "main.yaml"),
-		"---\nthanos_aws_access_key_id: \"AKIAEXAMPLE\"\nthanos_aws_secret_access_key: \"a-real-secret\"\n")
+		"---\nthanos_aws_access_key_id: \"AKIAEXAMPLE\"\nthanos_aws_secret_access_key: \"a-real-secret\"\nnode_exporter_basic_auth_password: \"a-real-password\"\n")
 
 	got := checkWorkspaceCompleteness(dir)
 
