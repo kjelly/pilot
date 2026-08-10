@@ -1,6 +1,6 @@
 # Verification Spec — host-monitoring（被監控主機的監控 agent：node_exporter）
 
-> 版本：v1.1
+> 版本：v1.2
 > 對齊規範：pilot 通用「每台受管主機都裝一份」agent 規範，跟
 > `wazuh-fim.md`/`audit-log-forwarding.md` 同一類 Shape（cross-cutting agent
 > role，可疊加到任何既有主機上，不擁有專屬 role 之外的意義）。
@@ -20,6 +20,16 @@
 > node_exporter：見 `prometheus.md` §1.5 的 `node_exporter_targets`——留空時
 > 會自動展開 inventory 裡 `host-monitoring` group 的所有主機，不需要手動
 > 逐台填 IP。
+>
+> **Kubernetes 自動偵測（v1.2）**：`host-monitoring` group 裡的某些主機可能
+> 已經透過 Kubernetes DaemonSet（例如 kube-prometheus-stack 用 hostPort
+> 9100）跑了 node_exporter，不是靠這支 playbook。apply 在動手前會先檢查
+> `node_exporter_port` 是否已經被監聽、且不是這支 playbook 自己管理的
+> pinned binary——如果是，整段原生安裝直接跳過（不搶 port、不因為不支援的
+> OS 而 fail、也不要求任何密碼），Prometheus 仍會照常把這台主機當 scrape
+> target（純粹靠 inventory group 成員資格，跟這支 playbook 有沒有真的做過
+> 事無關，見 `prometheus.md` §1.5）。這種主機上 `pilot verify` 本檔會有
+> 多條 row 預期 fail，見 §5。
 
 ## 1. 目標系統
 
@@ -134,6 +144,7 @@
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
 | — | 目前只預先內建 `linux-amd64`/`linux-arm64` 兩種架構的 release checksum；其他架構（例：`386`、`ppc64le`）會在 pre_tasks gate 直接 fail，不會裝出未驗證 checksum 的 binary | 非 amd64/arm64 主機 | 需要時在 apply playbook 的 `node_exporter_checksums` 補上對應架構與其官方 sha256sums.txt 的值 |
+| C1, C3–C7, C9, C10 | 當 `node_exporter_port` 已被非本 playbook 管理的程式佔用（常見於 Kubernetes DaemonSet 已部署 node_exporter，見 §0），apply 會整段跳過原生安裝，本檔全部 row 都不適用於這台主機——C1/C3–C7/C10 因為沒有真的裝任何東西必定 fail；C8（port 監聽）通常仍會 pass（有別的東西在 serve）；C9（未認證應回 401）視現有 exporter 是否有自己的認證機制而定，Kubernetes 版 node_exporter 預設沒有認證，通常會回 200 而 fail，這是**預期行為，不是 bug** | 由 Kubernetes（或任何其他機制）自行管理 node_exporter 的主機 | 不會解除——這種主機的 node_exporter 健康狀態改由該機制自己的健康檢查（例如 `kubectl` 查 DaemonSet/Pod 狀態）負責，不屬於本 spec 範圍 |
 
 ## 6. 變更紀錄
 
@@ -141,3 +152,4 @@
 |------|------|------|--------|
 | 2026-08-10 | v1.0 | 初版：node_exporter，兩種 distro（Ubuntu apt 版本過舊、AlmaLinux 9 無套件）統一走固定版本官方 release binary + systemd | sre |
 | 2026-08-10 | v1.1 | 新增強制 HTTP Basic Auth（`--web.config.file` + bcrypt hash，密碼不落地/不進 log）；C9 從「未認證回 200」改成「未認證回 401」（驗證認證真的生效，不只是設定存在）；C10 從「exposition 含 node_uname_info」改成「web-config.yml 已宣告 basic_auth_users」，含認證的內容驗證改交給 `prometheus.md` 的 `up{job="node"}==1` | sre |
+| 2026-08-10 | v1.2 | 新增 Kubernetes 自動偵測：`node_exporter_port` 已被非本 playbook 管理的程式佔用時（例如 DaemonSet），整段跳過原生安裝，不搶 port、不要求密碼；Prometheus 仍照常把該主機當 scrape target（純靠 inventory group 成員資格）；新增對應 §5 例外列 | sre |

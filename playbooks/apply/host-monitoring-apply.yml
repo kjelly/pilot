@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/host-monitoring.md v1.1
+# Apply playbook for docs/verification/host-monitoring.md v1.2
 #
 # Cross-cutting per-host monitoring agent role (like audit-log-forwarding /
 # wazuh-fim): installs node_exporter as a systemd service, running as a
@@ -25,6 +25,19 @@
 # plaintext credential must also be supplied to
 # docs/verification/prometheus.md's node_exporter_basic_auth_user/password
 # so its scrape config can authenticate — see that spec's §1.5.
+#
+# Kubernetes auto-detection (v1.2) — some hosts in the host-monitoring
+# inventory group may already have node_exporter running via a Kubernetes
+# DaemonSet (e.g. kube-prometheus-stack with hostPort 9100), not this
+# playbook. Before touching anything, this play checks whether
+# node_exporter_port is already listening AND isn't our own pinned binary;
+# if so, it skips the native install entirely for that host (no port fight,
+# no OS/arch/secret gates fired) rather than failing or double-installing.
+# Prometheus still scrapes the host regardless — its auto-discovery is
+# driven purely by inventory host-monitoring group membership, independent
+# of whether this play actually did anything there (see
+# docs/verification/prometheus.md §1.5, and this spec's §5 for what a
+# `pilot verify` run against a skipped host looks like).
 #
 # Usage (dry run):
 #   go run ./cmd/pilot vm-target run --name host-monitoring \
@@ -102,48 +115,14 @@
       when: stage == 'prod'
       tags: [always]
 
-    - name: "Gate: supported OS (Ubuntu/Debian, AlmaLinux/EL — both via pinned upstream release, no distro package manager)"
-      ansible.builtin.assert:
-        that:
-          - ansible_os_family in ['Debian', 'RedHat']
-        fail_msg: >-
-          host-monitoring-apply supports Debian/Ubuntu and Enterprise Linux,
-          both installed from the same pinned upstream node_exporter release
-          binary (see docs/verification/host-monitoring.md §1.5 for why
-          neither distro's package manager is used). Detected
-          {{ ansible_distribution }} {{ ansible_distribution_version }}
-          ({{ ansible_os_family }}).
-      tags: [always]
-
-    - name: "Gate: supported CPU architecture"
-      ansible.builtin.assert:
-        that:
-          - ansible_architecture in node_exporter_arch_map
-        fail_msg: >-
-          host-monitoring-apply only has a pinned release checksum for
-          {{ node_exporter_arch_map.keys() | list }}. Detected
-          {{ ansible_architecture }}. Add an entry to node_exporter_arch_map
-          and node_exporter_checksums to support it (see spec §5).
-      tags: [always]
-
-    - name: "Gate: required basic-auth password present (fail early, before any mutation)"
-      ansible.builtin.assert:
-        that:
-          - node_exporter_basic_auth_password is defined
-          - node_exporter_basic_auth_password | length > 0
-        fail_msg: >-
-          node_exporter_basic_auth_password is required — node_exporter must
-          not serve :9100/metrics without a credential (see spec §1.5). Pass
-          -e node_exporter_basic_auth_password=... (vault file recommended
-          over -e in real inventories). The SAME value must also be given to
-          prometheus-apply.yml's node_exporter_basic_auth_password so its
-          scrape config can authenticate.
-      tags: [always]
-
-    - name: "Determine target architecture for this host"
-      ansible.builtin.set_fact:
-        node_exporter_arch: "{{ node_exporter_arch_map[ansible_architecture] }}"
-
+    # Port-occupied detection runs BEFORE the OS/arch gates below on
+    # purpose: a host that already has a foreign exporter bound to this
+    # port (most commonly a Kubernetes DaemonSet — e.g. kube-prometheus-
+    # stack's node-exporter with hostPort 9100) may run an OS this
+    # playbook doesn't otherwise support at all (Flatcar, Bottlerocket,
+    # Talos...). We want to detect and gracefully skip THOSE hosts before
+    # any OS-family assumption could hard-fail them for an irrelevant
+    # reason — see docs/verification/host-monitoring.md §5.
     - name: "Check currently installed node_exporter version"
       ansible.builtin.command: /usr/local/bin/node_exporter --version
       register: node_exporter_current_version
@@ -159,8 +138,100 @@
                ~ (node_exporter_current_version.stderr | default(''))
              ) }}
 
+    - name: "Check whether {{ node_exporter_port }}/tcp is already listening"
+      ansible.builtin.shell: "ss -ltn '( sport = :{{ node_exporter_port }} )' | grep -q LISTEN"
+      register: node_exporter_port_check
+      changed_when: false
+      failed_when: false
+
+    # Purely informational — does NOT gate the skip decision (that's based
+    # solely on "is the port already taken by something that isn't our own
+    # pinned binary"), only makes the report message below more useful when
+    # it happens to be true.
+    - name: "Detect kubelet (informational — common reason a foreign exporter already owns this port)"
+      ansible.builtin.stat:
+        path: /var/lib/kubelet
+      register: node_exporter_kubelet_stat
+
+    # If something is already listening on this port AND it isn't the
+    # pinned binary we manage, treat this host as externally monitored and
+    # skip the native install entirely rather than fighting over the port.
+    # Prometheus still scrapes this host regardless — its auto-discovery
+    # (docs/verification/prometheus.md §1.5) is driven purely by inventory
+    # `host-monitoring` group membership, not by whether this play actually
+    # did anything here.
+    - name: "Determine whether the port is already served by something we don't manage"
+      ansible.builtin.set_fact:
+        node_exporter_port_occupied_by_other: >-
+          {{ (node_exporter_port_check.rc | default(1)) == 0 and not node_exporter_version_ok }}
+
+    - name: "Report: skipping native install (port already served by something else)"
+      ansible.builtin.debug:
+        msg: >-
+          {{ node_exporter_port }}/tcp is already listening and is not our
+          own pinned node_exporter binary — skipping native install on this
+          host to avoid a port conflict.
+          {{ '偵測到 /var/lib/kubelet 存在,這台主機很可能是 Kubernetes node,
+          node_exporter 大概是透過叢集的 DaemonSet(例如
+          kube-prometheus-stack)部署的。'
+          if node_exporter_kubelet_stat.stat.exists else
+          '沒有偵測到 kubelet,但這個 port 已經被其他非本 playbook 管理的程式佔用。' }}
+          Prometheus 仍會透過 inventory 的 host-monitoring group 成員資格照常
+          把這台主機當 scrape target;若現有的 exporter 有自己的認證機制,
+          請確認跟 node_exporter_basic_auth_user/password 相容,或改用
+          node_exporter_targets 手動排除/調整這台主機（見
+          docs/verification/prometheus.md §1.5）。
+      when: node_exporter_port_occupied_by_other
+
+    - name: "Gate: supported OS (Ubuntu/Debian, AlmaLinux/EL — both via pinned upstream release, no distro package manager)"
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family in ['Debian', 'RedHat']
+        fail_msg: >-
+          host-monitoring-apply supports Debian/Ubuntu and Enterprise Linux,
+          both installed from the same pinned upstream node_exporter release
+          binary (see docs/verification/host-monitoring.md §1.5 for why
+          neither distro's package manager is used). Detected
+          {{ ansible_distribution }} {{ ansible_distribution_version }}
+          ({{ ansible_os_family }}).
+      when: not node_exporter_port_occupied_by_other
+      tags: [always]
+
+    - name: "Gate: supported CPU architecture"
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture in node_exporter_arch_map
+        fail_msg: >-
+          host-monitoring-apply only has a pinned release checksum for
+          {{ node_exporter_arch_map.keys() | list }}. Detected
+          {{ ansible_architecture }}. Add an entry to node_exporter_arch_map
+          and node_exporter_checksums to support it (see spec §5).
+      when: not node_exporter_port_occupied_by_other
+      tags: [always]
+
+    - name: "Gate: required basic-auth password present (fail early, before any mutation)"
+      ansible.builtin.assert:
+        that:
+          - node_exporter_basic_auth_password is defined
+          - node_exporter_basic_auth_password | length > 0
+        fail_msg: >-
+          node_exporter_basic_auth_password is required — node_exporter must
+          not serve :9100/metrics without a credential (see spec §1.5). Pass
+          -e node_exporter_basic_auth_password=... (vault file recommended
+          over -e in real inventories). The SAME value must also be given to
+          prometheus-apply.yml's node_exporter_basic_auth_password so its
+          scrape config can authenticate.
+      when: not node_exporter_port_occupied_by_other
+      tags: [always]
+
+    - name: "Determine target architecture for this host"
+      ansible.builtin.set_fact:
+        node_exporter_arch: "{{ node_exporter_arch_map[ansible_architecture] }}"
+      when: not node_exporter_port_occupied_by_other
+
   tasks:
     - name: "Node_exporter install + systemd service"
+      when: not node_exporter_port_occupied_by_other
       block:
         - name: "Step 1: Create dedicated system user (spec C3)"
           tags: [C3]
@@ -170,7 +241,7 @@
             shell: /usr/sbin/nologin
             create_home: false
 
-        - name: "Step 2: Download node_exporter {{ node_exporter_version }} release ({{ node_exporter_arch }}) (spec C1, C2)"
+        - name: "Step 2: Download node_exporter {{ node_exporter_version }} release ({{ node_exporter_arch | default('unknown') }}) (spec C1, C2)"
           tags: [C1, C2]
           ansible.builtin.get_url:
             url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"

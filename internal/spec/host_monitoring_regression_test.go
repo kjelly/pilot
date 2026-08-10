@@ -46,8 +46,21 @@ import (
 //     disk unused.
 //   - The dedicated user must be a system account with no interactive
 //     shell (matches C3).
-//   - The basic-auth password must be a hard-required gate (no escape
-//     hatch) — node_exporter must never serve metrics without a credential.
+//   - The basic-auth password must be a hard-required gate EXCEPT when the
+//     port is already occupied by something we don't manage (e.g. a
+//     Kubernetes DaemonSet) — that host should skip natively-installing
+//     rather than fighting for the port or demanding a secret it will
+//     never use.
+//   - The occupied-by-other detection must be based on "port already
+//     listening AND not our own pinned binary", not merely "port
+//     listening" — otherwise a normal idempotent rerun (our own
+//     node_exporter still bound to the port from a prior apply) would
+//     misfire as a foreign occupant and skip forever.
+//   - The OS-family and CPU-architecture gates must also be skipped when
+//     occupied-by-other — a host already running node_exporter via
+//     Kubernetes may run an OS this playbook doesn't otherwise support at
+//     all (e.g. Flatcar, Bottlerocket), and that must not block the
+//     graceful skip.
 //   - The bcrypt hash must be generated via htpasswd (apache2-utils/
 //     httpd-tools), gated on a change-detection fingerprint of the
 //     plaintext (not the password itself) — bcrypt salts are
@@ -251,5 +264,51 @@ func TestRegression_HostMonitoringSpec(t *testing.T) {
 		!strings.Contains(applyRaw, "node_exporter_unit_result is changed") ||
 		!strings.Contains(applyRaw, "node_exporter_webconfig_result is changed") {
 		t.Errorf("host-monitoring-apply.yml's restart task must be gated on the binary, unit, or web-config credential actually changing, not run unconditionally")
+	}
+
+	// Kubernetes/foreign-exporter detection (spec v1.2, §0/§5): the port
+	// must be checked, and "occupied by other" must require BOTH the port
+	// listening AND the binary not being our own pinned install — port
+	// alone would misfire against our own idempotent rerun.
+	if !strings.Contains(applyRaw, "ss -ltn") {
+		t.Errorf("host-monitoring-apply.yml must check whether node_exporter_port is already listening (ss -ltn)")
+	}
+	occupiedIdx := strings.Index(applyRaw, "node_exporter_port_occupied_by_other:")
+	if occupiedIdx < 0 {
+		t.Fatalf("host-monitoring-apply.yml must compute a node_exporter_port_occupied_by_other fact")
+	}
+	occupiedExpr := applyRaw[occupiedIdx : occupiedIdx+300]
+	if !strings.Contains(occupiedExpr, "node_exporter_port_check.rc") || !strings.Contains(occupiedExpr, "not node_exporter_version_ok") {
+		t.Errorf("node_exporter_port_occupied_by_other must require BOTH the port listening AND the binary not being our own pinned install (port-only would misfire on our own idempotent rerun), got %q", occupiedExpr)
+	}
+
+	// The OS-family and CPU-architecture gates, and the password gate,
+	// must all be skipped when occupied-by-other — a host already running
+	// node_exporter via Kubernetes may run an unsupported OS at all, and
+	// must not be blocked from a graceful skip, nor be forced to supply a
+	// secret it will never use.
+	for _, gate := range []string{
+		"Gate: supported OS",
+		"Gate: supported CPU architecture",
+		"Gate: required basic-auth password present",
+	} {
+		gateIdx := strings.Index(applyRaw, gate)
+		if gateIdx < 0 {
+			t.Fatalf("host-monitoring-apply.yml missing expected gate %q", gate)
+		}
+		gateBlock := applyRaw[gateIdx : gateIdx+900]
+		if !strings.Contains(gateBlock, "when: not node_exporter_port_occupied_by_other") {
+			t.Errorf("gate %q must be skipped when node_exporter_port_occupied_by_other, got:\n%s", gate, gateBlock)
+		}
+	}
+
+	// The entire install block must be skipped wholesale when
+	// occupied-by-other, not just individual gates.
+	blockIdx := strings.Index(applyRaw, `"Node_exporter install + systemd service"`)
+	if blockIdx < 0 {
+		t.Fatalf("host-monitoring-apply.yml missing the main install block")
+	}
+	if !strings.Contains(applyRaw[blockIdx:blockIdx+200], "when: not node_exporter_port_occupied_by_other") {
+		t.Errorf("the main install block must be skipped wholesale when node_exporter_port_occupied_by_other")
 	}
 }
