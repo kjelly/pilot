@@ -13,6 +13,8 @@ dependencies:
   - {component: docker, required: true, relation: sameHosts}
   - {component: seaweedfs-s3, required: true, relation: providerEndpoint}
   - {component: alertmanager, required: true, relation: providerEndpoint}
+  - {component: host-monitoring, required: false, relation: providerEndpoint,
+     reason: "genuinely optional forever, not just deferred — a site can validly have zero node_exporter hosts; scrape targets auto-expand from the host-monitoring group when present (see docs/verification/prometheus.md §1.5)"}
 bindings:
   - input: thanos_s3_target_host
     requiredWhenDependencySelected: true
@@ -22,12 +24,19 @@ bindings:
     requiredWhenDependencySelected: true
     sourceSelection: exactlyOne
     from: {component: alertmanager, endpoint: api}
+  - input: node_exporter_targets
+    requiredWhenDependencySelected: false
+    sourceSelection: all
+    from: {component: host-monitoring, endpoint: metrics}
 hostCardinality: one-or-more
 resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
 groupVars:
   - {name: thanos_s3_target_host, type: string, required: true, secret: false}
   - {name: alertmanager_target_host, type: string, required: true, secret: false}
   - {name: prometheus_site_label, type: string, required: true, secret: false}
+  - {name: node_exporter_targets, type: stringList, required: false, secret: false}
+  - {name: node_exporter_basic_auth_user, type: string, required: false, default: "prometheus", secret: false}
+  - {name: node_exporter_basic_auth_password, type: string, required: false, secret: true}
 endpoints:
   - {name: prometheus, scheme: http, port: 9090}
   - {name: sidecar, scheme: grpc, port: 10901}
@@ -36,5 +45,7 @@ evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:
   mode: rowTags
   tag: {kind: bare}
+  exemptions:
+    "docs/verification/prometheus.md#C14": {kind: verifyOnly, reason: "up{job=\"node\"}==1 probe — verify-only outcome of the node-exporter scrape job rendered for C13 actually authenticating and succeeding"}
 verification: {autoDeploy: false}
 site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

@@ -158,6 +158,11 @@ var deployCatalog = []deployPlaybook{
 		Note: "旗標名稱是 patch_stage，不是 stage；沒有另外覆寫 target_group 時，預設目標 group 就等於你接下來選的 patch_stage(sandbox/staging/prod)；confirm/attestation 規則跟其它角色一致。",
 	},
 	{
+		Key: "host-monitoring", Label: "被監控主機的監控 agent(node_exporter)",
+		Playbook: "playbooks/apply/host-monitoring-apply.yml", DefaultGroup: "host-monitoring", StageVar: "stage",
+		Note: "裝在任何被監控主機上,兩種 distro(Ubuntu/AlmaLinux)都走同一份 pinned 官方 release binary;prometheus 會自動從 inventory 的 host-monitoring group 展開 scrape target,不需要額外設定。",
+	},
+	{
 		Key: "prometheus", Label: "Prometheus + Thanos Sidecar",
 		Playbook: "playbooks/apply/prometheus-apply.yml", DefaultGroup: "prometheus", StageVar: "stage",
 		AutoHostVars: []autoHostVar{

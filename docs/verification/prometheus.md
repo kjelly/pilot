@@ -44,6 +44,9 @@
 | `alertmanager_alias` | 上面那個 IP 對應的 `/etc/hosts` 別名；`prometheus.yml` 的 `alerting.alertmanagers` 指向這個固定別名 | 否 | `alertmanager-backend` |
 | `alertmanager_port` | Alertmanager API port | 否 | `9093` |
 | `prometheus_alert_rules_file` | 站台 alert rules YAML 檔案路徑（相對於 `playbooks/apply/`）；檔案內容**不會**經過 Jinja 處理，所以 Prometheus 的 `{{ $labels.X }}` template 語法會原封不動保留。覆寫方式：`-e prometheus_alert_rules_file=host_vars/mysite-alerts.yml` | 否 | `files/pilot-alert-rules-seed.yml`（Watchdog canary + PrometheusDown + HostDown） |
+| `node_exporter_targets` | 要 scrape 的 node_exporter target 清單（`host:port` 字串陣列）；留空時自動展開這份 inventory 的 `host-monitoring` group（見 `docs/verification/host-monitoring.md`）所有主機的 9100 port | 否 | 空陣列（自動偵測） |
+| `node_exporter_basic_auth_user` | 抓 node_exporter 用的 HTTP Basic Auth 使用者名稱（非機密） | 否 | `prometheus` |
+| `node_exporter_basic_auth_password` | 抓 node_exporter 用的 HTTP Basic Auth 密碼；**必須跟 `host-monitoring.md` 的 `node_exporter_basic_auth_password` 用同一個值**，否則會被 401 擋下，`up{job="node"}` 永遠是 0（見下方 escape hatch） | 僅在有 node-exporter target 時必填 | 無 |
 
 > **為何 `prometheus_site_label` 是必填、跟 `wazuh_manager_host` 不一樣**：
 > `wazuh_manager_host`/`siem_forward_host` 空著時還有「純本機」意義（本機
@@ -70,6 +73,19 @@
 > 跟 C12 仍然 pass），但告警推不出去——C11 會如預期 fail，記在 §5
 > 例外。這跟「先上 Prometheus、後上 Alertmanager」逐步部署的順序相容，
 > 不會因為「Alertmanager 還沒準備好」就把站台 Prometheus 套用 block 起來。
+>
+> **`node_exporter_targets` 自動偵測、`node_exporter_basic_auth_*` 有條件必填**：
+> 跟 `alertmanager_target_host` 同一種「留空退化、不 block 套用」精神，但
+> 方向相反——這裡預設會**主動**從 inventory 的 `host-monitoring` group 展開
+> 所有主機（見 `host-monitoring.md`），不需要手動逐台填 IP；只有明確要
+> override 成別的清單時才需要帶 `node_exporter_targets`。`node_exporter`
+> 強制要求 HTTP Basic Auth（見 `host-monitoring.md` §1.5 的理由），所以只要
+> 展開出來的 target 清單非空，apply playbook 就會在任何 mutation 前 gate
+> 檢查 `node_exporter_basic_auth_user`/`password` 是否都有值——這跟
+> `restic_s3_target_host`「沒有目的地就直接 fail」是同一種「escape hatch
+> 只擋『用不到』的情況，用得到就不准漏填」設計。這組密碼**必須**跟
+> `host-monitoring.md` 那邊用同一個值，操作者責任，跟 `thanos_s3_bucket`
+> 兩邊要填同一個值是同一種契約。
 
 ## 2. Checklist
 
@@ -87,6 +103,8 @@
 | C10 | config        | `alert-rules.yml` 存在且語法有效（`promtool check rules`）       | 0 | sh -c 'docker exec pilot-prometheus promtool check rules /etc/prometheus/alert-rules.yml >/dev/null 2>&1' |
 | C11 | config        | `prometheus.yml` 含 `alerting.alertmanagers` 區塊（僅在 `alertmanager_target_host` 有設時 render） | 0 | sh -c 'grep -qE "^[[:space:]]*alerting:" /etc/pilot/prometheus/prometheus.yml' |
 | C12 | http          | Prometheus 已載入 rules（`/api/v1/rules` 回含 `"name":` 的 group/rules 列表） | 0 | sh -c 'curl -fsS http://127.0.0.1:9090/api/v1/rules | grep -q "\"name\":"' |
+| C13 | config        | `prometheus.yml` 含自動探索到的 node-exporter scrape job（僅在 inventory 有 `host-monitoring` 主機、或明確帶 `node_exporter_targets` 時 render） | 0 | sh -c 'grep -qE "^[[:space:]]*job_name:[[:space:]]*node$" /etc/pilot/prometheus/prometheus.yml' |
+| C14 | metrics       | 至少一個 node-exporter target 被成功（認證通過）scrape（`up{job="node"}==1`；僅在有 node-exporter target 時適用） | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22node%22%7D' | grep -o '"value":\[[0-9.]*,"1"\]' |
 
 > C7 只驗證「Prometheus 有沒有成功 scrape 到至少一個 target」，不綁定
 > 特定 job 名稱字面值以外的東西——`up` 查詢不加 label matcher，因為
@@ -98,16 +116,28 @@
 > block 週期才能驗證「有沒有真的上傳過東西」不切實際）——這條只驗證
 > 「object storage 這一段的連線/認證是通的」，「有沒有真的搬過資料」交給
 > `thanos-query.md` C10（全局查詢帶 site label）間接證明。
+> C14 的 URL 對 `{`/`}` 做了 percent-encoding（`%7B`/`%7D`）——curl 會把未
+> 轉義的 `{...}` 當成自己的 URL globbing 語法解析，直接對這個 endpoint 測
+> 過，不轉義會是 `400`（curl 端錯誤，連 Prometheus 都沒真的收到請求）。
+> C14 同時是「認證有正確設定」的間接證明：`node_exporter_basic_auth_*`
+> 帶錯的話，Prometheus 端的 scrape 會被 401 擋下，`up{job="node"}` 永遠是
+> 0，C14 fail——這條檢查的是**認證後**能不能拿到真資料，不是只確認
+> 「連線通不通」。
+> C13 刻意**不**錨定 `^-\s*job_name:`（曾經這樣寫過，實測在真的 vm-target
+> 上失敗）：apply playbook 用 `to_nice_yaml` 把 scrape job 的 dict 序列化，
+> 該 filter 預設會把 key 依字母序排列，所以真實輸出是 `- basic_auth:` 開頭、
+> `job_name: node` 變成清單項目裡的第二行（不是第一行）。只錨 `^\s*job_name:`
+> 對 key 順序無感，兩種排法都抓得到。
 
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
-- 預期 row 數：12
+- 預期 row 數：14
 
 ## 4. PASS / FAIL 規則
 
-- C1–C12 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路都通
+- C1–C14 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路、node-exporter scrape 鏈路都通
 - 任一 fail → **FAIL**，常見修法：
   - C1/C2 fail → container 沒起；`docker ps -a` / `docker logs pilot-prometheus` / `docker logs pilot-thanos-sidecar`
   - C3/C4 fail → Prometheus 還沒 ready 或設定檔有誤；`docker logs pilot-prometheus`
@@ -118,6 +148,10 @@
   - C10 fail → `prometheus_alert_rules` 語法有誤；`docker exec pilot-prometheus cat /etc/prometheus/alert-rules.yml` 看內容
   - C11 fail → 預期 fail 見 §5（Alertmanager 尚未部署）；若非預期則檢查 `alertmanager_target_host` 是否帶入
   - C12 fail → Prometheus 還沒完成 rules reload；`docker logs pilot-prometheus | grep -i rule`
+  - C13/C14 fail → 預期 fail 見 §5（inventory 沒有 `host-monitoring` 主機）；若非預期，C13 fail 檢查
+    `groups['host-monitoring']` 是否真的有機器，C14 fail（但 C13 pass）通常是
+    `node_exporter_basic_auth_user`/`password` 跟 `host-monitoring.md` 那邊不一致
+    （401）——`docker logs pilot-prometheus | grep -i node` 看 scrape 錯誤訊息
 
 ## 5. 例外與已知偏差
 
@@ -125,6 +159,7 @@
 |----|---------|---------|------|
 | C9 | SeaweedFS 不會自動生出不存在的 bucket，套用前需手動 `weed shell` 建好 `thanos_s3_bucket`（跟 `restic-backup.md` §5 Bug 5 同一個坑），否則本行 fail 且 sidecar log 會顯示 retry | SeaweedFS 目的地 | 無（預建 bucket 是常態操作） |
 | C11 | `alertmanager_target_host` 未填或中央 Alertmanager 尚未套用完成時，本行預期 fail（apply playbook 不會 render `alerting.alertmanagers` 區塊） | Alertmanager 尚未部署的環境 | 直到 `alertmanager.md` PASS 為止 |
+| C13, C14 | inventory 沒有 `host-monitoring` group 主機、且未明確帶 `node_exporter_targets` 時，這兩行預期 fail（apply playbook 不會 render node-exporter scrape job） | 尚未部署 `host-monitoring` 的環境 | 直到至少一台 `host-monitoring.md` PASS 為止 |
 
 ## 6. 變更紀錄
 
@@ -132,3 +167,4 @@
 |------|------|------|--------|
 | 2026-07-06 | v1.0 | 初版 | sre |
 | 2026-07-07 | v1.1 | 新增 C10–C12：seed alert rules + alerting.alertmanagers 區塊（escape hatch 跟 `alertmanager_target_host` 連動） | sre |
+| 2026-08-10 | v1.2 | 新增 C13–C14：自動從 inventory 的 `host-monitoring` group 展開 node-exporter scrape target（`node_exporter_targets`，escape hatch 跟 `alertmanager_target_host` 同一種模式），並對認證後成功 scrape 做端到端驗證（node_exporter 強制 Basic Auth，見 `host-monitoring.md` v1.1） | sre |

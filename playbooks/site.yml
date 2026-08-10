@@ -162,8 +162,15 @@
 - import_playbook: apply/restic-backup-apply.yml
   tags: [backup, restic-backup]
 
-# ── 5c. 觀測(Alertmanager → Prometheus+Thanos Sidecar → 中央 Thanos Query
-#         → Grafana+Loki 儀表板)── 各自 hosts: <group>,沒填機器的 group 照樣自動跳過
+# ── 5c. 觀測(被監控主機 node_exporter → Alertmanager → Prometheus+Thanos
+#         Sidecar → 中央 Thanos Query → Grafana+Loki 儀表板)── 各自
+#         hosts: <group>,沒填機器的 group 照樣自動跳過
+#     host-monitoring 放在 prometheus 之前:prometheus-apply.yml 會自動展開
+#     這個 group 的所有主機當 scrape target(見 docs/verification/
+#     prometheus.md §1.5 的 node_exporter_targets),兩者執行順序其實對
+#     inventory group 的內容無影響(group 是靜態的),放前面純粹是可讀性。
+- import_playbook: apply/host-monitoring-apply.yml
+  tags: [observability, host-monitoring]
 - import_playbook: apply/alertmanager-apply.yml
   tags: [observability, alertmanager]
 - import_playbook: apply/prometheus-apply.yml

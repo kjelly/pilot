@@ -91,6 +91,11 @@ var specTagMap = []specTagMapping{
 			"C10": "kernel auditing probe (auditctl -s) — verify-only outcome of the audit tasks",
 		}},
 	{spec: "freeipa-realm-replacement.md", playbook: "freeipa-realm-replacement-apply.yml"},
+	{spec: "host-monitoring.md", playbook: "host-monitoring-apply.yml",
+		exemptRows: map[string]string{
+			"C8": "port-listening probe — verify-only outcome of the service actually running (C7)",
+			"C9": "unauthenticated-request-rejected probe — verify-only outcome of the web-config.yml render (C10) actually being enforced by the running service (C7)",
+		}},
 	{spec: "freeipa-identity.md", playbook: "freeipa-identity-apply.yml",
 		exemptRows: map[string]string{
 			"C1": "legacy data-driven membership row predates row tags",
@@ -121,7 +126,10 @@ var specTagMap = []specTagMapping{
 	{spec: "os-patch-sla.md", playbook: "os-patch-sla-apply.yml",
 		noRowTags: "stage-gated patch pipeline: rows assert SLA policy outcomes, not per-task mutations"},
 	{spec: "pam-oidc-sshd.md", playbook: "pam-oidc-sshd-apply.yml"},
-	{spec: "prometheus.md", playbook: "prometheus-apply.yml"},
+	{spec: "prometheus.md", playbook: "prometheus-apply.yml",
+		exemptRows: map[string]string{
+			"C14": "up{job=\"node\"}==1 probe — verify-only outcome of the node-exporter scrape job rendered for C13 actually authenticating and succeeding",
+		}},
 	{spec: "restic-backup.md", playbook: "restic-backup-apply.yml"},
 	{spec: "seaweedfs-s3.md", playbook: "seaweedfs-s3-apply.yml", prefixes: []string{"s3"},
 		exemptRows: map[string]string{

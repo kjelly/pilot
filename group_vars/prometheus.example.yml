@@ -57,18 +57,30 @@ thanos_s3_target_host: ""
 # 的 Store Gateway 讀不到這一站上傳的歷史資料。
 # thanos_s3_bucket: pilot-thanos-metrics
 
-# 這一站要 scrape 什麼(選填,預設只 scrape Prometheus 自己)。想加其他
-# exporter(例:node_exporter)時,整段覆寫成完整的 scrape_configs 內容,
-# 放進 host_vars/<主機短名>.yml,不要改這份 group 共用檔案:
+# 這一站要 scrape 什麼(選填,預設只 scrape Prometheus 自己)。想加除了
+# node_exporter 以外的其他 exporter 時,整段覆寫成完整的 scrape_configs
+# 內容,放進 host_vars/<主機短名>.yml,不要改這份 group 共用檔案:
 #
 #   # host_vars/site-a.yml
 #   prometheus_scrape_configs: |
 #     - job_name: prometheus
 #       static_configs:
 #         - targets: ["localhost:9090"]
-#     - job_name: node
-#       static_configs:
-#         - targets: ["localhost:9100"]
+
+# node_exporter 的 scrape target **不需要**手動加進上面的
+# prometheus_scrape_configs——apply playbook 會自動展開這份 inventory 的
+# `host-monitoring` group(見 inventory.example.yml、
+# docs/verification/host-monitoring.md)所有主機的 9100 port。只有明確要
+# override 成別的清單時才需要填這個變數:
+# node_exporter_targets: []
+
+# node_exporter 強制要求 HTTP Basic Auth(見 host-monitoring.example.yml
+# 的說明)。使用者名稱非機密,有安全預設;密碼**只在展開出來的 target 清單
+# 非空時才必填**,且**必須跟 host-monitoring.example.yml 的
+# node_exporter_basic_auth_password 用同一個值**,否則會被 401 擋下,
+# `up{job="node"}` 永遠是 0。一律用 ansible-vault 加密檔帶入。
+# node_exporter_basic_auth_user: prometheus
+# node_exporter_basic_auth_password: ""
 
 # 本機 TSDB 保留時間、scrape 間隔,通常不用改,會沿用 playbook 內建預設:
 # prometheus_retention_time: "6h"

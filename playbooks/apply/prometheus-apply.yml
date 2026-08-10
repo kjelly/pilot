@@ -64,7 +64,8 @@
     thanos_config_dir: /etc/pilot/thanos
     docker_network_name: pilot-metrics
     # prometheus_site_label / thanos_s3_target_host / alertmanager_target_host
-    # are DELIBERATELY NOT declared here (not even as `default('')`). Ansible
+    # / node_exporter_targets are DELIBERATELY NOT declared here (not even as
+    # `default('')`). Ansible
     # play-level `vars:` outrank both group_vars and host_vars, so declaring
     # them with a hardcoded "" here would silently shadow any value a caller
     # sets via `pilot edit`'s group_vars editor, forcing `-e` for every
@@ -72,9 +73,11 @@
     # docs/runbooks/minimal-poc-architecture.md § Real bugs #1). Leaving
     # them undeclared lets normal precedence apply: group_vars/host_vars
     # values now win with no `-e` needed, while `-e` still overrides on top.
-    # Every task below that references one of these three uses
-    # `| default('', true)` at the point of use instead, so an unset value
-    # still resolves to an empty string (never an undefined-variable error).
+    # Every task below that references one of these four uses
+    # `| default('', true)` (or `| default([], true)` for the list-typed
+    # node_exporter_targets) at the point of use instead, so an unset value
+    # still resolves to an empty string/list (never an undefined-variable
+    # error).
     prometheus_scrape_interval: "15s"
     prometheus_retention_time: "6h"
     prometheus_scrape_configs: |
@@ -87,6 +90,21 @@
     thanos_s3_endpoint: "{{ thanos_s3_alias }}:{{ thanos_s3_port }}"
     alertmanager_alias: alertmanager-backend
     alertmanager_port: 9093
+    # node_exporter_basic_auth_user has a safe universal default (not a
+    # secret). node_exporter_basic_auth_password is DELIBERATELY NOT
+    # declared here, same undeclared-secret convention as
+    # thanos_aws_access_key_id below — it must be the SAME value given to
+    # host-monitoring-apply.yml's node_exporter_basic_auth_password (see
+    # docs/verification/host-monitoring.md §1.5).
+    node_exporter_basic_auth_user: prometheus
+    # Host path (where this playbook writes the file) vs. container path
+    # (what prometheus.yml's basic_auth.password_file must point to, since
+    # the prom/prometheus process reads it through its OWN bind-mount, not
+    # the host's path) — deliberately two separate variables, wired
+    # together by an explicit volume line below (same host/container path
+    # split as prometheus.yml and alert-rules.yml themselves).
+    node_exporter_basic_auth_password_host_path: "{{ prometheus_config_dir }}/node-exporter-basic-auth-password"
+    node_exporter_basic_auth_password_container_path: /etc/prometheus/node-exporter-basic-auth-password
     # prometheus_alert_rules_file: path (relative to the playbook) to a
     # Prometheus rules YAML file. The default is the seed file shipped in
     # playbooks/apply/files/. Operators override by passing
@@ -149,6 +167,61 @@
         (alertmanager_target_host | default('') | length == 0)
         and (groups.get('alertmanager', []) | length > 0)
       tags: [always]
+
+    # Auto-discover node_exporter scrape targets (docs/verification/
+    # host-monitoring.md) from this inventory's host-monitoring group when
+    # node_exporter_targets was left genuinely unset — same "explicit
+    # override wins, otherwise walk the inventory group" convention as the
+    # Alertmanager auto-detect above and freeipa-dns-client-apply.yml's
+    # freeipa_dns_client_servers. Assumes each host-monitoring host runs on
+    # the contract's default port (9100); if a site overrode
+    # node_exporter_port there, pass -e node_exporter_targets=[...] here
+    # explicitly instead of relying on this auto-detect.
+    - name: "Auto-detect node-exporter scrape targets from this inventory's host-monitoring group"
+      ansible.builtin.set_fact:
+        prometheus_node_exporter_targets: >-
+          {{ (node_exporter_targets | default([], true))
+             if ((node_exporter_targets | default([], true)) | length > 0)
+             else (groups.get('host-monitoring', [])
+                   | map('extract', hostvars, 'ansible_host')
+                   | map('regex_replace', '$', ':9100')
+                   | list) }}
+      tags: [always]
+
+    # Built as a native list/dict and serialized with to_nice_yaml, not
+    # hand-concatenated with literal "\n" — Jinja string literals here do
+    # NOT unescape \n inside a `>-` folded scalar (verified: it comes
+    # through as a literal backslash+n, not a real newline, silently
+    # corrupting prometheus.yml into invalid YAML). to_nice_yaml sidesteps
+    # the whole class of escaping bugs.
+    - name: "Render the node-exporter scrape job block (spec C13; empty string when no targets)"
+      ansible.builtin.set_fact:
+        prometheus_node_exporter_scrape_block: >-
+          {{ ([{'job_name': 'node',
+                'basic_auth': {'username': node_exporter_basic_auth_user | default('', true),
+                                'password_file': node_exporter_basic_auth_password_container_path},
+                'static_configs': [{'targets': prometheus_node_exporter_targets}]}]
+             | to_nice_yaml(indent=2))
+             if (prometheus_node_exporter_targets | length > 0) else '' }}
+      tags: [always]
+
+    # Gate placed right after the targets/credentials are resolved (not
+    # earlier) so a site with zero host-monitoring hosts is never forced to
+    # supply this — same "required only when actually used" shape as
+    # alertmanager_target_host.
+    - name: "Gate: node-exporter basic-auth credentials required when there are scrape targets"
+      ansible.builtin.assert:
+        that:
+          - (node_exporter_basic_auth_user | default('', true) | length > 0)
+          - (node_exporter_basic_auth_password | default('', true) | length > 0)
+        fail_msg: >-
+          prometheus_node_exporter_targets resolved to at least one target,
+          but node_exporter_basic_auth_user/node_exporter_basic_auth_password
+          are not both set. node_exporter always requires Basic Auth (see
+          docs/verification/host-monitoring.md §1.5) — pass the SAME
+          credential that was given to host-monitoring-apply.yml's
+          node_exporter_basic_auth_password.
+      when: prometheus_node_exporter_targets | length > 0
 
     # prometheus_site_label has no safe default (see spec §1.5 for why —
     # unlike wazuh_manager_host/siem_forward_host, a blank/placeholder
@@ -241,7 +314,7 @@
         # object storage — Thanos Compactor (on the thanos-query host) owns
         # compaction/downsampling/retention from that point on.
         - name: "Render prometheus.yml (with alerting.alertmanagers)"
-          tags: [C8, C11]
+          tags: [C8, C11, C13]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -259,11 +332,12 @@
                           - "{{ alertmanager_alias }}:{{ alertmanager_port }}"
               scrape_configs:
               {{ prometheus_scrape_configs }}
+              {{ prometheus_node_exporter_scrape_block }}
           register: prometheus_yml_with_am
           when: alertmanager_target_host | default('', true) | length > 0
 
         - name: "Render prometheus.yml (without alerting — alertmanager_target_host empty)"
-          tags: [C8]
+          tags: [C8, C13]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -276,6 +350,7 @@
                 - /etc/prometheus/alert-rules.yml
               scrape_configs:
               {{ prometheus_scrape_configs }}
+              {{ prometheus_node_exporter_scrape_block }}
           register: prometheus_yml_no_am
           when: alertmanager_target_host | default('', true) | length == 0
 
@@ -285,6 +360,24 @@
               {{ prometheus_yml_with_am
                  | default({'changed': False})
                  | combine(prometheus_yml_no_am | default({'changed': False})) }}
+
+        # The credential Prometheus presents on every node_exporter scrape.
+        # mode 0644 (not 0600) is the SAME deliberate tradeoff as the Thanos
+        # objstore.yml secret_key below: prom/prometheus's official image
+        # reads this via a bind-mount as its own fixed uid (65534), not a
+        # uid this playbook controls. no_log keeps the plaintext out of
+        # Ansible's own output/logs; the main prometheus.yml render above
+        # needed no such guard because the secret lives here instead of
+        # inline (contrast objstore.yml, which mixes secret+non-secret
+        # content and has to no_log the whole render).
+        - name: "Render node-exporter basic-auth password file for Prometheus's scrape config"
+          ansible.builtin.copy:
+            dest: "{{ node_exporter_basic_auth_password_host_path }}"
+            mode: "0644"
+            content: "{{ node_exporter_basic_auth_password | default('', true) }}"
+          when: prometheus_node_exporter_targets | length > 0
+          no_log: true
+          register: node_exporter_password_file_result
 
         # Spec: docs/verification/prometheus.md C10
         # Use `copy: src:` (not `content:`) because Prometheus rules files
@@ -386,7 +479,10 @@
             image: "prom/prometheus:{{ prometheus_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ prometheus_yml_result is changed or alert_rules_result is changed }}"
+            restart: >-
+              {{ prometheus_yml_result is changed
+                 or alert_rules_result is changed
+                 or node_exporter_password_file_result is changed }}
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -396,10 +492,22 @@
               --storage.tsdb.min-block-duration=2h
               --storage.tsdb.max-block-duration=2h
               --web.enable-lifecycle
-            volumes:
-              - "{{ prometheus_config_dir }}/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
-              - "{{ prometheus_config_dir }}/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro"
-              - "{{ prometheus_host_data_dir }}:/prometheus"
+            # The node-exporter password-file mount is appended
+            # conditionally, not as an unconditional list item: Docker
+            # auto-creates an empty DIRECTORY at a bind-mount source path
+            # that doesn't exist on the host, which would permanently break
+            # this path once a real file is later expected there (same
+            # stray-mount trap this file's own "Guard: check for stray
+            # directory left at objstore.yml path" task exists to catch —
+            # here the fix is to just never mount a path whose file we
+            # didn't render, rather than mount-then-clean-up).
+            volumes: >-
+              {{ [
+                   prometheus_config_dir ~ '/prometheus.yml:/etc/prometheus/prometheus.yml:ro',
+                   prometheus_config_dir ~ '/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro',
+                   prometheus_host_data_dir ~ ':/prometheus'
+                 ] + ([node_exporter_basic_auth_password_host_path ~ ':' ~ node_exporter_basic_auth_password_container_path ~ ':ro']
+                      if (prometheus_node_exporter_targets | length > 0) else []) }}
             ports:
               - "9090:9090"
 

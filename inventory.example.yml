@@ -151,6 +151,15 @@ all:
         web-2:
         # nfs-1:               # 啟用 NFS role 時也應備份 /srv/nfs + ACL manifest
 
+    # -- 指標:被監控主機的監控 agent(node_exporter,host-monitoring-apply.yml)
+    #    prometheus 會自動展開這個 group 的所有主機當 scrape target,見
+    #    docs/verification/prometheus.md §1.5 的 node_exporter_targets。
+    host-monitoring:
+      hosts:
+        ipa-1:
+        web-1:
+        web-2:
+
     # -- 指標:每站 Prometheus + Thanos Sidecar(prometheus-apply.yml)-------
     prometheus:
       hosts: {}                 # 例:兩站 → hosts: { site-a: , site-b: }

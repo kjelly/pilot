@@ -4,9 +4,13 @@
 > 2026-07-07（`alertmanager` 部分，原獨立文件 `docs/runbooks/alertmanager.md`）；
 > v2.0（2026-07-17）文件整併：兩者合併成本檔，共用一次四主機環境重新實跑，
 > 原 `alertmanager.md` 已歸檔。
-> 對齊規範：`docs/verification/prometheus.md`（v1.1）、
+> v2.1（2026-08-10）新增 §7a：`prometheus` 自動從 inventory 的
+> `host-monitoring` group 展開 node_exporter scrape target（強制 HTTP
+> Basic Auth），對應新元件 `docs/runbooks/host-monitoring.md`。
+> 對齊規範：`docs/verification/prometheus.md`（v1.2）、
 > `docs/verification/thanos-query.md`（v1.1）、
-> `docs/verification/alertmanager.md`（v1.0）
+> `docs/verification/alertmanager.md`（v1.0）、
+> `docs/verification/host-monitoring.md`（v1.1）
 > 維護者：sre
 
 ---
@@ -368,15 +372,142 @@ inhibited/unprocessed）消失——確認它真的 resolved 並被清掉，不�
 
 ---
 
-## 8. 三角色 Verify / Idempotency 總表
+## 7a. 新增：`host-monitoring`（node_exporter）自動探索 + Basic Auth（2026-08-10）
+
+### 背景
+
+調查 Grafana 的 `Node Exporter Full` dashboard 為何沒資料，追到根因是這個
+repo 從來沒有部署 node_exporter 的能力——`prometheus` 只 scrape 自己。新增
+獨立元件 `host-monitoring`（`docs/verification/host-monitoring.md` +
+`playbooks/apply/host-monitoring-apply.yml`），裝在被監控主機上；`prometheus`
+這邊新增自動從 inventory 的 `host-monitoring` group 展開 scrape target 的
+邏輯（`node_exporter_targets`，留空時自動探索），並要求強制 HTTP Basic
+Auth（`node_exporter_basic_auth_user`/`password`，兩邊必須帶同一個值）。
+
+### 事實快照（2026-08-10T07:40–07:55 UTC）
+
+- `pilot vm-target list`（測試前）：既有 `client-vm`/`freeipa-server`/`nexus`
+  三台（別的 workstream 保留中，未動）。
+- 本次新建 3 台：`hm-ubuntu`（Ubuntu 24.04）、`hm-el9`（AlmaLinux 9，跨
+  distro 驗證）、`prom-test`（Ubuntu 24.04，跑 `prometheus`）。
+- Tested revision：本次 host-monitoring 相關變更的工作樹（`git status`
+  當時為 host-monitoring 系列新檔 + prometheus 系列修改，未 commit）。
+
+### 單機測試：`host-monitoring` on Ubuntu 24.04（`hm-ubuntu`）
+
+```bash
+go run ./cmd/pilot vm-target up --name hm-ubuntu --ssh-user ubuntu \
+    --disk 20 --memory 2048 --vcpus 2 --ssh-timeout 8m --boot-timeout 8m --services local
+
+go run ./cmd/pilot vm-target run --name hm-ubuntu --skip-lint \
+    playbooks/apply/host-monitoring-apply.yml -e target_group=hm-ubuntu \
+    -e node_exporter_basic_auth_password=<password>
+# PLAY RECAP: ok=24 changed=11 failed=0 skipped=2
+
+go run ./cmd/pilot vm-target verify --name hm-ubuntu docs/verification/host-monitoring.md
+# verdict: PASS (pass=10 fail=0 skip=0)
+
+# 冪等重跑（同一組密碼)
+go run ./cmd/pilot vm-target run --name hm-ubuntu --skip-lint \
+    playbooks/apply/host-monitoring-apply.yml -e target_group=hm-ubuntu \
+    -e node_exporter_basic_auth_password=<password>
+# PLAY RECAP: ok=16 changed=0 failed=0 skipped=10
+```
+
+### 單機測試：`host-monitoring` on AlmaLinux 9（`hm-el9`，跨 distro）
+
+同一套 playbook、同一個密碼，對 `hm-el9`（`--base-image almalinux-9`）重跑
+一次完整流程：apply（`ok=24 changed=11 failed=0`）→ verify
+（`PASS pass=10 fail=0 skip=0`）→ 冪等重跑（`changed=0`）。EL9 走
+`httpd-tools`（非 Debian 的 `apache2-utils`）取得 `htpasswd`，bcrypt hash
+產生流程與 Ubuntu 完全一致，兩邊行為/版本一致（符合設計目標）。
+
+### 多 VM cross-check：`prometheus` 自動探索 `host-monitoring`
+
+```bash
+go run ./cmd/pilot vm-target up --name prom-test --ssh-user ubuntu \
+    --disk 20 --memory 3072 --vcpus 2 --ssh-timeout 8m --boot-timeout 8m --services local
+go run ./cmd/pilot vm-target run --name prom-test --skip-lint \
+    playbooks/apply/docker-apply.yml -e target_group=prom-test
+
+# 用 --group 把 hm-ubuntu 標成 host-monitoring group、prom-test 標成
+# prometheus group,組成同一份 inventory（沒有真的 seaweedfs-s3/alertmanager,
+# 用假 S3 endpoint 只為了通過 gate,不影響 node-exporter 整合本身要驗證的東西)
+go run ./cmd/pilot vm-target run \
+    --group host-monitoring=hm-ubuntu --group prometheus=prom-test --skip-lint \
+    playbooks/apply/prometheus-apply.yml -e target_group=prometheus \
+    -e prometheus_site_label=test-site -e thanos_s3_endpoint=203.0.113.1:9000 \
+    -e thanos_aws_access_key_id=fakekey -e thanos_aws_secret_access_key=fakesecret \
+    -e node_exporter_basic_auth_password=<同一組password>
+# PLAY RECAP: ok=21 changed=9 failed=0 skipped=8
+```
+
+實際渲染出來的 `/etc/pilot/prometheus/prometheus.yml`（節錄）：
+
+```yaml
+scrape_configs:
+- job_name: prometheus
+  static_configs:
+    - targets: ["localhost:9090"]
+
+- basic_auth:
+    password_file: /etc/prometheus/node-exporter-basic-auth-password
+    username: prometheus
+  job_name: node
+  static_configs:
+  - targets:
+    - 192.168.122.5:9100
+```
+
+端到端證明（直接對 Prometheus API 查詢，percent-encode `{`/`}` 避開 curl
+自己的 URL globbing）：
+
+```bash
+$ curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22node%22%7D'
+{"status":"success","data":{"resultType":"vector","result":[{"metric":
+{"__name__":"up","instance":"192.168.122.5:9100","job":"node"},
+"value":[1786348255.670,"1"]}]}}
+```
+
+`up{job="node"}==1`——認證通過、真的抓到資料。同時在 `hm-ubuntu` 上直接
+確認「未認證會被擋」與「認證後放行」兩條路徑都對：
+
+```bash
+$ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9100/metrics
+401
+$ curl -sS -u prometheus:<password> -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9100/metrics
+200
+```
+
+`docs/verification/prometheus.md -i <combined-inv> -l prometheus` 全 14
+rows：`pass=12 fail=2`——fail 的只有 C9（假 S3 endpoint 連不到，timeout，
+跟本次改動無關）跟 C11（沒接 alertmanager，§5 已知例外），本次改動直接
+相關的 C13/C14 皆 pass。冪等重跑 `changed=0`。
+
+### 完成後：teardown
+
+```bash
+go run ./cmd/pilot vm-target down --name prom-test
+go run ./cmd/pilot vm-target down --name hm-el9
+go run ./cmd/pilot vm-target down --name hm-ubuntu
+```
+
+---
+
+## 8. 各角色 Verify / Idempotency 總表
 
 | 角色 | target | verify | 冪等重跑 |
 |---|---|---|---|
 | `alertmanager` | pt-alert | PASS pass=7 fail=0 skip=0 | changed=0 |
 | `prometheus` | client-vm | PASS pass=12 fail=0 skip=0 | changed=0 |
 | `thanos-query` | nexus | PASS pass=10 fail=0 skip=0（修正 port 後） | changed=0 |
+| `host-monitoring`（Ubuntu 24.04） | hm-ubuntu | PASS pass=10 fail=0 skip=0 | changed=0 |
+| `host-monitoring`（AlmaLinux 9） | hm-el9 | PASS pass=10 fail=0 skip=0 | changed=0 |
+| `prometheus`（+ node-exporter 自動探索，§7a） | prom-test + hm-ubuntu | pass=12 fail=2（C9/C11，跟本次改動無關，見 §7a） | changed=0 |
 
-三份 spec 全數 PASS，三個 apply 的第二次執行皆 `changed=0`。
+三份原始 spec 全數 PASS；`host-monitoring` 兩種 distro 皆 PASS；`prometheus`
+的 node-exporter 整合相關 rows（C13/C14）皆 PASS。所有 apply 的第二次
+執行皆 `changed=0`。
 
 ---
 
@@ -393,6 +524,10 @@ inhibited/unprocessed）消失——確認它真的 resolved 並被清掉，不�
 | Jinja vs Prometheus template：`prometheus_alert_rules` 是 inline YAML 字串時 `{{ $labels.X }}` 被 Ansible Jinja 二次解析失敗 | `"Syntax error: unexpected char '$'"` | 改用 `prometheus_alert_rules_file` 檔案路徑 + `copy: src:`，避開 Jinja 處理 |
 | 舊版文件用「手動合併 inventory + raw `ansible-playbook -i <file>`」測 `thanos-query-apply.yml` 的站台探索 | 當時 `pilot vm-target run` 還沒有能組合多台 vm-target inventory 的旗標 | 現在改用 `vm-target run --group <group>=<target1,target2,...>`（見 §5），不再需要繞出 `vm-target` 這層 CLI、也不用手寫合併 inventory |
 | AlmaLinux 9（RHEL family）套 `core-infra-provider-apply.yml -e infra_role=docker` 失敗：`No package docker-compose available` | RHEL family 的 docker 安裝沒處理 EPEL/docker-ce repo 依賴（本檔範圍外，未修，已記錄在 `docs/runbooks/docker.md` §4） | 本檔四個角色一律用 Ubuntu vm-target；若要在 EL 系上跑，需先手動解決 docker-compose 套件來源 |
+| （2026-08-10，§7a）`host-monitoring-apply.yml` 在 `--check` 對從零開始的主機跑：`unarchive` 對一個只被 `get_url` 模擬下載（check mode 下沒真的下載）的來源檔案，直接 crash（不像 `copy`/`file` 能優雅模擬） | `Source '/tmp/node_exporter-....tar.gz' does not exist` | 在 `unarchive`/後續 `copy` 的 `when` 加 `and not ansible_check_mode`，延後到真正 apply 才做，跟本 repo既有的 check-mode-fresh-bootstrap 慣例一致 |
+| （2026-08-10，§7a）同一類 check-mode 坑：`htpasswd` 這個 CLI 工具本身是**這支 playbook 自己**在同一次 apply 裡用 `apt`/`dnf` 裝的，在 `--check` 下只被模擬安裝，強制 `check_mode: false` 讓產生 bcrypt hash 的 task 真的執行,反而因為 binary 真的不存在而失敗 | `Error executing command: No such file or directory: 'htpasswd'` | 拿掉 `check_mode: false`，改成跟 `unarchive` 一樣加 `and not ansible_check_mode` 整段延後——`check_mode: false` 只適合「前提條件來自前一次 apply」的情境（例如既有 docker_container_exec 探測已存在的容器），不適合前提條件就是**同一次** check-mode run 裡才會建立的東西 |
+| （2026-08-10，§7a）`prometheus-apply.yml` 新增的 node-exporter scrape job 用 Jinja `~ "\n"` 手動拼字串塞進 `>-` YAML folded scalar，結果 `\n` 沒被展開成真正換行,渲染出無效 YAML | 本機模擬測試就抓到，未上真機（見下一條真機才抓到的坑） | 改用原生 list/dict 資料結構 + `to_nice_yaml(indent=2)` 序列化，徹底避開手動處理換行字元 |
+| （2026-08-10，§7a）改用 `to_nice_yaml` 後，spec C13 原本錨定 `^-\s*job_name:\s*node$`（假設 `job_name` 是這個 list item 的第一個 key），實測在真的 `prom-test` vm-target 上失敗 | `to_nice_yaml` 預設把 dict key 依字母序排列，真實輸出是 `- basic_auth:` 打頭，`job_name: node` 變成第二行 | C13 改成只錨 `^\s*job_name:\s*node$`（不管前面有沒有 `-`），對 key 順序無感 |
 
 ---
 
@@ -419,3 +554,4 @@ go run ./cmd/pilot vm-target list   # 確認為空
 | 2026-07-06 | v1.0 | 初版：`prometheus`/`thanos-query` 設計、apply playbook、spec、regression test、vm-target 三台 VM 實測（3 個真事故修好），全局跨站查詢驗證成功 | sre |
 | 2026-07-14 | v1.1 | 更正舊版 `vm-target up` state-file race 說明：不同名稱 VM 現可平行建立 | Codex |
 | 2026-07-17 | v2.0 | 文件整併：`docs/runbooks/alertmanager.md` 併入本檔（該檔已歸檔），檔名由 `prometheus-thanos.md` 改為 `metrics-alerting.md`。用同一次四主機環境（`prometheus`/`thanos-query`/`alertmanager`/S3 目的地）重新實跑三個角色的 apply/verify/idempotency，新增 Prometheus→Alertmanager 端到端證明（含有界測試告警 firing→resolved 的完整生命週期）。改用 `vm-target run --group` 取代舊版手動合併 inventory + raw `ansible-playbook` 的探索測試方式。發現並修好 `docs/verification/thanos-query.md` 的 port 10902→10912 真事故（規格落後於 playbook 早先的預設值變更）。發現一個範圍外的真實環境限制：`core-infra-provider-apply.yml` 的 RHEL family docker 安裝缺 `docker-compose` 套件來源（AlmaLinux 9），未修 | sre |
+| 2026-08-10 | v2.1 | 新增 §7a：`prometheus` 自動從 inventory 的 `host-monitoring` group 展開 node_exporter scrape target（新元件，見 `docs/runbooks/host-monitoring.md`），強制 HTTP Basic Auth。3 台新 vm-target（Ubuntu + AlmaLinux 9 + prometheus）實跑：`host-monitoring` 兩種 distro 各自 apply/verify（10/10 PASS）/冪等重跑（changed=0）；`prometheus` 用 `--group` 跟 `host-monitoring` 組合 inventory，端到端證明 `up{job="node"}==1`（認證通過）與未認證 401/認證後 200 兩條路徑。實跑中發現並修好 4 個真 bug：`unarchive`/`htpasswd` 在 check-mode 對「同一次 apply 裡才會建立的前提條件」處理不當（兩處）、`prometheus_scrape_configs` 手動拼 `\n` 在 `>-` YAML scalar 下沒被展開成真換行（改用 `to_nice_yaml`）、改用 `to_nice_yaml` 後 spec C13 原本錨定的 `^-\s*job_name:` 因為 key 依字母序排列而抓不到（改成不錨 `^-`）——後兩個是本機模擬/真機分別抓到的，見 §9 表格 | sre |
