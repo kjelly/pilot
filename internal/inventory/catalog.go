@@ -38,6 +38,7 @@ var topLevelOrder = []string{
 	"wazuh-fim",
 	"seaweedfs-s3",
 	"restic-backup",
+	"host-monitoring",
 	"prometheus",
 	"thanos-query",
 	"alertmanager",

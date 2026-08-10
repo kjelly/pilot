@@ -12,7 +12,7 @@ func TestVaultSectionIDs_DedupesAndOrdersSections(t *testing.T) {
 	}}
 
 	got := VaultSectionIDs(hf)
-	want := []string{"freeipa", "keycloak-admin", "keycloak-db", "restic-backup", "thanos-s3", "alertmanager"}
+	want := []string{"freeipa", "keycloak-admin", "keycloak-db", "restic-backup", "thanos-s3", "node-exporter-auth", "alertmanager"}
 	if len(got) != len(want) {
 		t.Fatalf("VaultSectionIDs() = %v, want %v", got, want)
 	}

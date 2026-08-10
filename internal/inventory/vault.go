@@ -126,6 +126,17 @@ var vaultSections = map[string]vaultSection{
 			},
 		},
 	},
+	"node-exporter-auth": {
+		Title: "node_exporter Basic Auth 相關",
+		Note:  "host-monitoring 與 prometheus 共用的 HTTP Basic Auth 密碼——兩邊必須是同一個值，否則 prometheus 端的 scrape 會被 401 擋下。",
+		Keys: []vaultField{
+			{
+				Name:    "node_exporter_basic_auth_password",
+				Value:   "CHANGE-ME-node-exporter-basic-auth-password",
+				Comment: "node_exporter Basic Auth 密碼（必填）",
+			},
+		},
+	},
 	"alertmanager": {
 		Title: "Alertmanager 相關",
 		Note:  "這不是密碼，但正式環境通常會把完整 receiver config 跟 secret webhook 一起放進 vault。",
@@ -155,6 +166,7 @@ var vaultSectionOrder = []string{
 	"dashboard",
 	"restic-backup",
 	"thanos-s3",
+	"node-exporter-auth",
 	"alertmanager",
 }
 
