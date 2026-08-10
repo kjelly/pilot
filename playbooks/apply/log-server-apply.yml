@@ -128,7 +128,7 @@
             mode: "0755"
 
         - name: "Step 3: Render 10-siem-receiver.conf (imtcp + %HOSTNAME% dynaFile routing)"
-          tags: [C3, C4, C7, C8]
+          tags: [C3, C4, C7, C8, C11]
           ansible.builtin.copy:
             dest: "{{ siem_receiver_conf }}"
             owner: root
