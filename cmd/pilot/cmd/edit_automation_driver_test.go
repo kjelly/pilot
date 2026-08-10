@@ -466,6 +466,86 @@ func TestEditAutomationDriverExtraVarCRUD(t *testing.T) {
 	}
 }
 
+// TestEditAutomationDriverAddExtraVarDuplicateKeyErrors proves the fix for
+// the driver silently treating a rejected "新增變數" Enter as successful:
+// pushAddExtraVar's validate() (edit_tui.go) rejects a key that already
+// exists in h.Extra and leaves the router on the same, not-yet-confirmed
+// text-input screen with its own local err set. Before the fix, send()/
+// enter() only checked editRouterModel.err (reserved for I/O/vault
+// failures) and never looked at that local err, so the driver typed the
+// next step's characters into the still-active key field and only failed
+// much later with an opaque "cannot choose ... on text-input screen".
+// textInputRejectionError (edit_automation_driver.go) now surfaces the
+// duplicate-key message the moment the Enter is rejected.
+func TestEditAutomationDriverAddExtraVarDuplicateKeyErrors(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_host", Host: "web-1"},
+			{Action: "add_extra_var", Host: "web-1", Key: "a", Value: "1"},
+			{Action: "add_extra_var", Host: "web-1", Key: "a", Value: "2"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	err := d.run(&r, scenario)
+	if err == nil {
+		t.Fatal("driver.run() error = nil, want an error naming the duplicate key")
+	}
+	if strings.Contains(err.Error(), "cannot choose") {
+		t.Fatalf("driver.run() error = %v, still the opaque screen-type mismatch", err)
+	}
+	if !strings.Contains(err.Error(), "已存在") {
+		t.Fatalf("driver.run() error = %v, want it to say the key already exists", err)
+	}
+}
+
+// TestEditAutomationDriverEnableNFSServerThenDuplicateExtraVarErrors
+// reproduces the exact real-world collision: enabling freeipa-nfs-server
+// auto-creates the host's freeipa_roster_file extra var
+// (pushNFSRoleBootstrap, edit_tui.go), so a scenario step that also tries
+// to add_extra_var that same key must fail with a clear "already exists"
+// message rather than the opaque screen-type error from a later,
+// unrelated step.
+func TestEditAutomationDriverEnableNFSServerThenDuplicateExtraVarErrors(t *testing.T) {
+	dir := t.TempDir()
+	vaultDir := filepath.Join(dir, ".vault")
+	if err := os.MkdirAll(vaultDir, 0o700); err != nil {
+		t.Fatalf("mkdir .vault: %v", err)
+	}
+	// Pre-seed the admin password so pushNFSRoleBootstrap skips its own
+	// password prompt and writes the roster straight away, matching a
+	// scenario where an earlier step already populated .vault/main.yaml.
+	vaultContent := "ipa_admin_password: Sup3rSecret!\n"
+	if err := os.WriteFile(filepath.Join(vaultDir, "main.yaml"), []byte(vaultContent), 0o600); err != nil {
+		t.Fatalf("seed .vault/main.yaml: %v", err)
+	}
+
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_host", Host: "nexus"},
+			{Action: "enable_role", Host: "nexus", Role: "freeipa-nfs-server"},
+			{Action: "add_extra_var", Host: "nexus", Key: "freeipa_roster_file", Value: "/tmp/should-not-be-used.yaml"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	err := d.run(&r, scenario)
+	if err == nil {
+		t.Fatal("driver.run() error = nil, want an error naming the already-set freeipa_roster_file key")
+	}
+	if strings.Contains(err.Error(), "cannot choose") {
+		t.Fatalf("driver.run() error = %v, still the opaque screen-type mismatch", err)
+	}
+	if !strings.Contains(err.Error(), "freeipa_roster_file") || !strings.Contains(err.Error(), "已存在") {
+		t.Fatalf("driver.run() error = %v, want it to name freeipa_roster_file as already existing", err)
+	}
+}
+
 // TestEditAutomationDriverExtraVarPresentationShowsContent proves that a
 // presentation recording captures each extra var's actual key/value —
 // pushExtraVarsMenu (edit_tui.go) is presented as an interior sub-step right

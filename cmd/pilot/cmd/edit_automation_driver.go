@@ -582,6 +582,9 @@ func (d *automationDriver) send(r *editRouterModel, msg tea.KeyMsg) error {
 	if r.err != nil {
 		return r.err
 	}
+	if err := textInputRejectionError(r); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -604,7 +607,28 @@ func (d *automationDriver) sendRedacted(r *editRouterModel, msg tea.KeyMsg, plac
 	if r.err != nil {
 		return r.err
 	}
+	if err := textInputRejectionError(r); err != nil {
+		return err
+	}
 	return nil
+}
+
+// textInputRejectionError surfaces a textInputModel's own validate()
+// rejection (e.g. "變數 ... 已存在") the moment it happens. Without this, a
+// rejected Enter leaves the router sitting on the same not-yet-confirmed
+// text-input screen with only its local, string-typed m.err set — a state
+// editRouterModel.err (checked above) never learns about, since transitionTo's
+// onResult callback only fires once the screen actually finishes. The driver
+// would otherwise treat the rejected Enter as a no-op and push its next
+// scripted keystrokes into that same stale field, eventually failing much
+// later with an opaque "cannot choose ... on text-input screen" that names
+// the wrong step.
+func textInputRejectionError(r *editRouterModel) error {
+	ti, ok := r.current.(textInputModel)
+	if !ok || ti.err == "" {
+		return nil
+	}
+	return fmt.Errorf("input rejected on %s screen: %s", automationScreenID(r), ti.err)
 }
 
 // notifyRecorder reports the key just applied and the resulting live
