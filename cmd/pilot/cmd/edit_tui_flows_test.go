@@ -611,8 +611,8 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 
 	waitFor("prometheus")
 
-	// roleContracts order: 0 freeipa-server .. 17 prometheus.
-	for i := 0; i < 17; i++ {
+	// roleContracts order: 0 freeipa-server .. 17 host-monitoring .. 18 prometheus.
+	for i := 0; i < 18; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // toggle prometheus on

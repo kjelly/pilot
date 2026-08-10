@@ -34,15 +34,15 @@ func defaultRolePresets() []rolePreset {
 	return []rolePreset{
 		{
 			Label: "FreeIPA 身份伺服器(minimal PoC)",
-			Roles: []string{"freeipa-server", "audit-log-forwarding", "wazuh-fim", "restic-backup"},
+			Roles: []string{"freeipa-server", "audit-log-forwarding", "wazuh-fim", "restic-backup", "host-monitoring"},
 		},
 		{
 			Label: "Nexus 中央服務節點(minimal PoC)",
-			Roles: []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"},
+			Roles: []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "host-monitoring", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"},
 		},
 		{
 			Label: "被監控的 Linux 主機(minimal PoC)",
-			Roles: []string{"freeipa-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client"},
+			Roles: []string{"freeipa-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client", "host-monitoring"},
 		},
 	}
 }
