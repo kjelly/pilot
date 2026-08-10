@@ -18,6 +18,25 @@ import (
 	"strings"
 )
 
+// normalizeVaultFileName appends ".yaml" to file when it doesn't already end
+// in ".yaml"/".yml" — mirroring pushVaultPathPrompt's prefilled default
+// (edit_tui_vault.go, "main.yaml") and scanVaultFiles' accepted suffix set
+// (edit.go), the only two things that decide what a *human* ends up naming
+// a new vault file. Without this, a scenario step with file: "main" created
+// a literal extension-less ".vault/main" on a fresh workspace (openVaultFile
+// used to join the raw name onto ".vault/" verbatim) — a file every
+// .vault/main.yaml-hardcoded convention (deploy's defaultVaultFile,
+// checkVaultCompleteness, `pilot inventory generate`'s --vault-out default,
+// pushNFSRoleBootstrap's own ipa_admin_password reuse) then fails to find.
+func normalizeVaultFileName(file string) string {
+	switch strings.ToLower(filepath.Ext(file)) {
+	case ".yaml", ".yml":
+		return file
+	default:
+		return file + ".yaml"
+	}
+}
+
 // openVaultFile resolves the router to the vault key-list editor screen
 // for file, from wherever r.current currently is — the top menu, the file
 // picker (whether file is already listed or needs to be typed in and
@@ -26,6 +45,7 @@ import (
 // on the caller's behalf (that file may hold unsaved changes) rather than
 // guessing a discard confirm's answer.
 func (d *automationDriver) openVaultFile(r *editRouterModel, file string) error {
+	file = normalizeVaultFileName(file)
 	base := filepath.Base(file)
 	for attempts := 0; attempts < 6; attempts++ {
 		if _, ok := r.current.(confirmModel); ok {

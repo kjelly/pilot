@@ -37,6 +37,45 @@ func TestEditAutomationDriverVaultCreateFileAddKeySave(t *testing.T) {
 	}
 }
 
+// TestEditAutomationDriverVaultCreateFileBareNameGetsYamlExtension proves the
+// fix for openVaultFile (edit_automation_driver_vault.go) treating a bare
+// file name verbatim: on a fresh workspace with no .vault/main.yaml yet, a
+// scenario step using file: "main" (no extension) used to create a literal
+// ".vault/main" — invisible to every other .vault/main.yaml-hardcoded
+// convention (deploy's defaultVaultFile, checkVaultCompleteness, `pilot
+// inventory generate`'s --vault-out default). normalizeVaultFileName now
+// makes the automation driver produce the exact same ".vault/main.yaml" a
+// human accepting pushVaultPathPrompt's prefilled default would.
+func TestEditAutomationDriverVaultCreateFileBareNameGetsYamlExtension(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "add_vault_key", File: "main", Key: "ipa_admin_password", Value: "plain-value"},
+		{Action: "save_vault", File: "main"},
+	}}
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, ".vault", "main")); !os.IsNotExist(err) {
+		t.Fatalf(".vault/main (extension-less) exists, want it not to: err=%v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".vault", "main.yaml"))
+	if err != nil {
+		t.Fatalf("read .vault/main.yaml: %v", err)
+	}
+	doc, err := vaultfile.Parse(data)
+	if err != nil {
+		t.Fatalf("parse vault file: %v\n%s", err, data)
+	}
+	entries := doc.Entries()
+	if len(entries) != 1 || entries[0].Key != "ipa_admin_password" || entries[0].Value.Value != "plain-value" {
+		t.Fatalf("entries = %+v, want ipa_admin_password=plain-value\n%s", entries, data)
+	}
+}
+
 func TestEditAutomationDriverVaultSetAndDeleteKey(t *testing.T) {
 	dir := t.TempDir()
 	scenario := editScenario{Version: 1, Steps: []editAction{
