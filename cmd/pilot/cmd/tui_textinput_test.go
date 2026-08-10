@@ -48,6 +48,25 @@ func TestTextInputModel_EnterConfirmsWhenValid(t *testing.T) {
 	}
 }
 
+func TestTextInputModel_TrimsWhitespaceOnConfirm(t *testing.T) {
+	var validated string
+	m := newTextInputModel("label", "  hello \t", func(value string) error {
+		validated = value
+		return nil
+	})
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(textInputModel)
+	if !m.Finished() || m.Canceled() {
+		t.Fatal("expected whitespace-padded input to confirm")
+	}
+	if validated != "hello" {
+		t.Fatalf("validator received %q, want trimmed value %q", validated, "hello")
+	}
+	if got := m.Value(); got != "hello" {
+		t.Fatalf("Value() = %q, want trimmed value %q", got, "hello")
+	}
+}
+
 func TestTextInputModel_LFEnterConfirmsWhenValid(t *testing.T) {
 	m := newTextInputModel("label", "hello", nil)
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})

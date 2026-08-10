@@ -31,6 +31,15 @@ type editAction struct {
 	Role     string `json:"role,omitempty"`
 	Key      string `json:"key,omitempty"`  // extra host var / group_vars / vault key name
 	File     string `json:"file,omitempty"` // group_vars/vault filename, relative to group_vars/ or .vault/
+	// HostVars supplies values for host_vars/<host>.yml keys that
+	// enable_role's role newly requires and don't already have a value
+	// (inventory.roleContract.HostVarsKeys, e.g. prometheus's
+	// prometheus_site_label) — the interactive TUI jumps straight into a
+	// text-input prompt for each such key (pushForcedHostVarsPrompt,
+	// edit_tui_hostvars.go) instead of leaving it to be noticed later, and
+	// enable_role must answer that same prompt rather than error out. Keyed
+	// by host_vars key name; disable_role never reads this.
+	HostVars map[string]string `json:"host_vars,omitempty"`
 	// Label is the role preset name: the *new* label for rename_role_preset,
 	// or the label for create_role_preset. Preset is the *existing* preset
 	// label being targeted (apply/rename/delete). SourceHost is

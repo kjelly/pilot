@@ -130,6 +130,27 @@ func pushForcedHostVarsPrompt(r *editRouterModel, dir, path string, hf *inventor
 	return pushForcedHostVarsPromptChain(r, dir, path, hf, name, hvPath, doc, missing, banner)
 }
 
+// forcedHostVarsPromptScreenIDPrefix identifies a pushForcedHostVarsPromptChain
+// text-input screen to the automation driver (setRoleChecked's
+// resolveRoleChecklistFollowUp, edit_automation_driver.go), which needs to
+// tell this forced prompt apart from any other text-input screen and recover
+// which host_vars key it's asking for — the screenID carries the key rather
+// than the (presentation-facing, freely rewordable) label.
+const forcedHostVarsPromptScreenIDPrefix = "host_vars.forced_prompt:"
+
+func forcedHostVarsPromptScreenID(key string) string {
+	return forcedHostVarsPromptScreenIDPrefix + key
+}
+
+// forcedHostVarsPromptKey extracts the host_vars key from a screen ID built
+// by forcedHostVarsPromptScreenID, e.g. for automation driving that screen.
+func forcedHostVarsPromptKey(screenID string) (string, bool) {
+	if !strings.HasPrefix(screenID, forcedHostVarsPromptScreenIDPrefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(screenID, forcedHostVarsPromptScreenIDPrefix), true
+}
+
 // pushForcedHostVarsPromptChain walks remaining one text-input at a time,
 // then lands on the normal list editor (dirty=true) so the user still gets
 // an explicit save/discard choice, exactly like a manually-opened session.
@@ -143,7 +164,8 @@ func pushForcedHostVarsPromptChain(r *editRouterModel, dir, path string, hf *inv
 			continue
 		}
 		prompt := strings.TrimSpace(banner + "\n" + e.Description)
-		return r.transitionTo(newTextInputModel(fmt.Sprintf("角色需要新設定：%s 的新值", e.Key), e.Value, nil), prompt, func(r *editRouterModel, s screen) tea.Cmd {
+		label := fmt.Sprintf("角色需要新設定：%s 的新值", e.Key)
+		return r.transitionTo(newTextInputModelWithScreenID(forcedHostVarsPromptScreenID(e.Key), label, e.Value, nil), prompt, func(r *editRouterModel, s screen) tea.Cmd {
 			m := s.(textInputModel)
 			if !m.Canceled() {
 				if err := doc.SetValue(e.Line, m.Value()); err != nil {

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -81,14 +82,16 @@ func (m textInputModel) automationScreenID() string {
 
 func (m textInputModel) automationLabel() string { return m.label }
 
-// Value is the entered text — valid once Finished() && !Canceled().
-func (m textInputModel) Value() string { return m.input.Value() }
+// Value is the entered text — valid once Finished() && !Canceled(). Leading
+// and trailing whitespace is discarded when the value is read so every edit
+// menu text field stores a clean value consistently.
+func (m textInputModel) Value() string { return strings.TrimSpace(m.input.Value()) }
 
 func (m textInputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		switch tuiKeyName(keyMsg) {
 		case "enter":
-			v := m.input.Value()
+			v := strings.TrimSpace(m.input.Value())
 			if m.validate != nil {
 				if err := m.validate(v); err != nil {
 					m.err = err.Error()

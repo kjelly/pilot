@@ -218,6 +218,82 @@ func TestEditAutomationDriverDisableRole(t *testing.T) {
 	}
 }
 
+// TestEditAutomationDriverEnableRolePrometheusRequiresHostVars proves the
+// fix for the gap where enabling "prometheus" (the only role with
+// inventory.roleContract.HostVarsKeys) on a host with no
+// prometheus_site_label value used to fail with the opaque
+// `cannot choose "✅ 完成" on text-input screen` — pushForcedHostVarsPrompt
+// (edit_tui_hostvars.go) detours the interactive router into a text-input
+// screen that setRoleChecked's unconditional choose("✅ 完成") never
+// accounted for. Omitting host_vars must now fail with an error that names
+// the missing key, not that opaque screen-type mismatch.
+func TestEditAutomationDriverEnableRolePrometheusRequiresHostVars(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_host", Host: "nexus"},
+			{Action: "enable_role", Host: "nexus", Role: "prometheus"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	err := d.run(&r, scenario)
+	if err == nil {
+		t.Fatal("driver.run() error = nil, want an error naming the missing host_vars key")
+	}
+	if strings.Contains(err.Error(), "text-input screen") {
+		t.Fatalf("driver.run() error = %v, still the opaque screen-type mismatch", err)
+	}
+	if !strings.Contains(err.Error(), "prometheus_site_label") {
+		t.Fatalf("driver.run() error = %v, want it to name prometheus_site_label", err)
+	}
+}
+
+// TestEditAutomationDriverEnableRolePrometheusFillsHostVars is the same
+// scenario's happy path: supplying host_vars answers the forced prompt the
+// same way a human would type "site-nexus" into it, and enable_role
+// completes normally, leaving the router back at the host menu ready for
+// the next step (save_hosts here).
+func TestEditAutomationDriverEnableRolePrometheusFillsHostVars(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_host", Host: "nexus"},
+			{Action: "enable_role", Host: "nexus", Role: "prometheus", HostVars: map[string]string{"prometheus_site_label": "site-nexus"}},
+			{Action: "save_hosts"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("read hosts.yml: %v", err)
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		t.Fatalf("parse hosts.yml: %v\n%s", err, data)
+	}
+	if len(hf.Hosts) != 1 || !hasRole(hf.Hosts[0].Roles, "prometheus") {
+		t.Fatalf("hosts = %+v, want role prometheus", hf.Hosts)
+	}
+
+	hvData, err := os.ReadFile(filepath.Join(dir, "host_vars", "nexus.yml"))
+	if err != nil {
+		t.Fatalf("read host_vars/nexus.yml: %v", err)
+	}
+	if !strings.Contains(string(hvData), "prometheus_site_label: site-nexus") {
+		t.Fatalf("host_vars/nexus.yml = %q, want prometheus_site_label: site-nexus", hvData)
+	}
+}
+
 func TestEditAutomationDriverSetHostFieldEnv(t *testing.T) {
 	dir := t.TempDir()
 	scenario := editScenario{

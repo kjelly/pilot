@@ -248,7 +248,7 @@ func (d *automationDriver) setHostField(r *editRouterModel, host, field, value s
 // used. It only toggles Space when the role's current state doesn't
 // already match want, exactly like a human would only press Space on
 // a role that needs to change.
-func (d *automationDriver) setRoleChecked(r *editRouterModel, host, role string, want bool) error {
+func (d *automationDriver) setRoleChecked(r *editRouterModel, host, role string, want bool, hostVars map[string]string) error {
 	if err := d.ensureHostMenu(r, host); err != nil {
 		return err
 	}
@@ -276,6 +276,44 @@ func (d *automationDriver) setRoleChecked(r *editRouterModel, host, role string,
 	}
 	if err := d.enter(r); err != nil {
 		return err
+	}
+	return d.resolveRoleChecklistFollowUp(r, hostVars)
+}
+
+// resolveRoleChecklistFollowUp drives whatever screen the role checklist's
+// confirming Enter landed on, back to the host menu. Most of the time that's
+// the roles menu (pushRolesMenuBanner) with "✅ 完成" straight away, but a
+// newly-checked role that introduces a host_vars key with no existing value
+// (inventory.roleContract.HostVarsKeys, e.g. prometheus's
+// prometheus_site_label) detours through pushForcedHostVarsPrompt first: one
+// text-input screen per missing key, then the host_vars list editor —
+// exactly like a human filling in host_vars/<host>.yml by hand
+// (edit_tui_hostvars.go). hostVars supplies the values for that detour; a
+// key it doesn't cover is a hard error rather than silently keeping
+// whatever blank/placeholder value the screen was scaffolded with.
+func (d *automationDriver) resolveRoleChecklistFollowUp(r *editRouterModel, hostVars map[string]string) error {
+	for {
+		input, ok := r.current.(textInputModel)
+		if !ok {
+			break
+		}
+		key, ok := forcedHostVarsPromptKey(input.automationScreenID())
+		if !ok {
+			return fmt.Errorf("unexpected text-input screen %q after role checklist confirm", automationScreenID(r))
+		}
+		value, known := hostVars[key]
+		if !known {
+			return fmt.Errorf("role checklist requires a value for host_vars key %q; supply it via enable_role's host_vars.%s", key, key)
+		}
+		if err := d.typeText(r, value, true); err != nil {
+			return err
+		}
+		if err := d.enter(r); err != nil {
+			return err
+		}
+	}
+	if automationScreenID(r) == "host_vars.entries" {
+		return d.choose(r, "💾 存檔並離開")
 	}
 	return d.choose(r, "✅ 完成")
 }
@@ -319,12 +357,12 @@ func (d *automationDriver) setChecklistSelection(r *editRouterModel, want []stri
 	return d.enter(r)
 }
 
-func (d *automationDriver) enableRole(r *editRouterModel, host, role string) error {
-	return d.setRoleChecked(r, host, role, true)
+func (d *automationDriver) enableRole(r *editRouterModel, host, role string, hostVars map[string]string) error {
+	return d.setRoleChecked(r, host, role, true, hostVars)
 }
 
 func (d *automationDriver) disableRole(r *editRouterModel, host, role string) error {
-	return d.setRoleChecked(r, host, role, false)
+	return d.setRoleChecked(r, host, role, false, nil)
 }
 
 func (d *automationDriver) deleteHost(r *editRouterModel, host string) error {

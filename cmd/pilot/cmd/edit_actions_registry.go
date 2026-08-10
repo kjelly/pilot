@@ -76,6 +76,7 @@ func editActionRegistry() []editActionDef {
 				Name:                     "enable_role",
 				Description:              "enable one role in a host role checklist",
 				Required:                 []string{"host", "role"},
+				Optional:                 []string{"host_vars"},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
 				SecretHandling:           SecretHandlingNone,
@@ -85,9 +86,9 @@ func editActionRegistry() []editActionDef {
 					Assertion: "role appears in host's role list",
 				},
 			},
-			Validate: validateHostRoleAction("enable_role"),
+			Validate: validateEnableRole,
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
-				return d.enableRole(r, step.Host, step.Role)
+				return d.enableRole(r, step.Host, step.Role, step.HostVars)
 			},
 		},
 		{
@@ -1696,6 +1697,25 @@ func validateHostRoleAction(name string) func(editAction) error {
 		}
 		return nil
 	}
+}
+
+// validateEnableRole is validateHostRoleAction("enable_role") plus
+// host_vars validation: keys must be non-empty and non-secret-shaped,
+// since host_vars/<host>.yml is plain YAML, not vault (secrets belong in
+// add_vault_key instead).
+func validateEnableRole(step editAction) error {
+	if err := validateHostRoleAction("enable_role")(step); err != nil {
+		return err
+	}
+	for key := range step.HostVars {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("enable_role host_vars key must not be empty")
+		}
+		if hasSecretName(key) {
+			return fmt.Errorf("secret-like host_vars keys are not allowed")
+		}
+	}
+	return nil
 }
 
 // editActionHasAnyParam reports whether step carries any field beyond
