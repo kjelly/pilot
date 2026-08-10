@@ -107,6 +107,18 @@ func validateValueOrEnv(step editAction, actionName string) error {
 	return nil
 }
 
+// validateOptionalValueOrEnv is validateValueOrEnv without the "one of them
+// must be set" requirement — for actions where value/value_env only matters
+// conditionally at run time (e.g. enable_role's admin password, needed only
+// when the role change happens to trigger a secret-bearing bootstrap
+// prompt), so a step that never hits that condition may leave both unset.
+func validateOptionalValueOrEnv(step editAction, actionName string) error {
+	if step.Value != "" && step.ValueEnv != "" {
+		return fmt.Errorf("%s accepts either value or value_env, not both", actionName)
+	}
+	return nil
+}
+
 // loadEditScenario reads and validates the JSON envelope. Unknown fields are
 // rejected so a typo cannot silently turn into a different operation.
 func loadEditScenario(path string) (editScenario, error) {
