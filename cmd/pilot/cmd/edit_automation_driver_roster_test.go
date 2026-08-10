@@ -22,6 +22,87 @@ func writeMinimalRosterFixture(t *testing.T, dir string) string {
 	return path
 }
 
+// TestEditAutomationDriverCreateUserBootstrapsRosterOnFreshWorkspace proves
+// the fix for the automation driver not knowing how to answer
+// pushRosterCreateConfirm's "no roster yet, create a minimal skeleton?"
+// confirm (rosterCreateConfirmScreenID, edit_tui_roster.go): running
+// create_user against a genuinely brand-new workspace — no
+// writeMinimalRosterFixture call, unlike every other roster test in this
+// file — used to fail with `cannot navigate to roster users list from
+// confirm screen: cannot choose "返回" on confirm screen` the instant
+// ensureRosterUsersList hit that confirm. resolveRosterCreatePrompt
+// (edit_automation_driver_roster.go) now answers "yes" the same way
+// openVaultFile already does for its own analogous ".vault/" bootstrap
+// confirm, reusing .vault/main.yaml's ipa_admin_password when one is
+// already on file so no password prompt is even shown.
+func TestEditAutomationDriverCreateUserBootstrapsRosterOnFreshWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	vaultDir := filepath.Join(dir, ".vault")
+	if err := os.MkdirAll(vaultDir, 0o700); err != nil {
+		t.Fatalf("mkdir .vault: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultDir, "main.yaml"), []byte("ipa_admin_password: Sup3rSecret!\n"), 0o600); err != nil {
+		t.Fatalf("seed .vault/main.yaml: %v", err)
+	}
+
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_user", User: "alice"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	rosterPath := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	names, err := inventory.RosterUserNames(rosterPath)
+	if err != nil {
+		t.Fatalf("read roster user names: %v", err)
+	}
+	found := false
+	for _, n := range names {
+		if n == "alice" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("roster users = %v, want alice", names)
+	}
+}
+
+// TestEditAutomationDriverCreateUserWithoutRosterOrPasswordErrorsClearly
+// covers the other half of the same gap: a brand-new workspace with no
+// reusable .vault/main.yaml ipa_admin_password can't auto-bootstrap the
+// roster non-interactively (there is no scenario field yet to source a
+// fresh password from), so this must fail with an actionable message
+// naming that requirement, not the opaque screen-type mismatch it used to.
+func TestEditAutomationDriverCreateUserWithoutRosterOrPasswordErrorsClearly(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_user", User: "alice"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	err := d.run(&r, scenario)
+	if err == nil {
+		t.Fatal("driver.run() error = nil, want an error naming the missing admin password")
+	}
+	if strings.Contains(err.Error(), "confirm screen") {
+		t.Fatalf("driver.run() error = %v, still the opaque screen-type mismatch", err)
+	}
+	if !strings.Contains(err.Error(), "admin password") {
+		t.Fatalf("driver.run() error = %v, want it to name the missing FreeIPA admin password", err)
+	}
+}
+
 func TestEditAutomationDriverRosterFlow_CreateUserAndSetFields(t *testing.T) {
 	dir := t.TempDir()
 	path := writeMinimalRosterFixture(t, dir)

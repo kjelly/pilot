@@ -294,6 +294,152 @@ func TestEditAutomationDriverEnableRolePrometheusFillsHostVars(t *testing.T) {
 	}
 }
 
+// TestEditAutomationDriverEnableFreeipaNFSServerWithoutPasswordErrors proves
+// the fix for the automation driver not knowing how to answer
+// pushNFSRoleBootstrap's own FreeIPA admin password prompt
+// (nfsRosterBootstrapPasswordScreenID, edit_tui.go): newly enabling
+// freeipa-nfs-server on a workspace with no reusable .vault/main.yaml
+// ipa_admin_password used to fail with the opaque `unexpected text-input
+// screen "text-input" after role checklist confirm` the moment
+// resolveRoleChangeFollowUp's loop hit that screen. Omitting value/value_env
+// must now fail with an error that names the missing admin password.
+func TestEditAutomationDriverEnableFreeipaNFSServerWithoutPasswordErrors(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_host", Host: "nexus"},
+			{Action: "enable_role", Host: "nexus", Role: "freeipa-nfs-server"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	err := d.run(&r, scenario)
+	if err == nil {
+		t.Fatal("driver.run() error = nil, want an error naming the missing admin password")
+	}
+	if strings.Contains(err.Error(), "text-input screen") {
+		t.Fatalf("driver.run() error = %v, still the opaque screen-type mismatch", err)
+	}
+	if !strings.Contains(err.Error(), "admin password") {
+		t.Fatalf("driver.run() error = %v, want it to name the missing FreeIPA admin password", err)
+	}
+}
+
+// TestEditAutomationDriverEnableFreeipaNFSServerBootstrapsWithPassword is the
+// happy path: supplying value answers pushNFSRoleBootstrap's password
+// prompt the same way a human would type it in, and enable_role completes
+// normally, actually writing the minimal NFS roster.
+func TestEditAutomationDriverEnableFreeipaNFSServerBootstrapsWithPassword(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_host", Host: "nexus"},
+			{Action: "enable_role", Host: "nexus", Role: "freeipa-nfs-server", Value: "Sup3rSecret!"},
+			{Action: "save_hosts"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("read hosts.yml: %v", err)
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		t.Fatalf("parse hosts.yml: %v\n%s", err, data)
+	}
+	if len(hf.Hosts) != 1 || !hasRole(hf.Hosts[0].Roles, "freeipa-nfs-server") {
+		t.Fatalf("hosts = %+v, want nexus with freeipa-nfs-server", hf.Hosts)
+	}
+	rosterFile := hf.Hosts[0].Extra["freeipa_roster_file"]
+	if rosterFile == "" {
+		t.Fatalf("freeipa_roster_file not set on host: %+v", hf.Hosts[0])
+	}
+	if _, err := os.Stat(rosterFile); err != nil {
+		t.Fatalf("roster file not created at %s: %v", rosterFile, err)
+	}
+}
+
+// TestEditAutomationDriverApplyRolePresetBootstrapsNFSAndFillsForcedHostVars
+// proves two fixes at once by applying a preset containing both
+// freeipa-nfs-server and prometheus in a single commit:
+//
+//  1. applyRolePreset (edit_automation_driver_presets.go) now resolves the
+//     same NFS-bootstrap/forced-host-vars detours enable_role does, instead
+//     of blindly choose("✅ 完成") — which used to fail with `cannot choose
+//     "✅ 完成" on text-input screen` the instant a preset newly enabled NFS.
+//  2. pushNFSRoleBootstrapWithPassword (edit_tui.go) now chains into
+//     pushForcedHostVarsPrompt for the *other* newly-checked role
+//     (prometheus) instead of returning straight to the roles menu — before
+//     the fix, prometheus_site_label would never get asked for at all when
+//     NFS was enabled in the same commit, silently leaving it unset.
+func TestEditAutomationDriverApplyRolePresetBootstrapsNFSAndFillsForcedHostVars(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_host", Host: "template"},
+			{Action: "create_role_preset", Host: "template", Label: "nfs-plus-prometheus", Roles: []string{"freeipa-nfs-server", "prometheus"}},
+			{Action: "create_host", Host: "nexus"},
+			{
+				Action:   "apply_role_preset",
+				Host:     "nexus",
+				Preset:   "nfs-plus-prometheus",
+				Value:    "Sup3rSecret!",
+				HostVars: map[string]string{"prometheus_site_label": "site-nexus"},
+			},
+			{Action: "save_hosts"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("read hosts.yml: %v", err)
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		t.Fatalf("parse hosts.yml: %v\n%s", err, data)
+	}
+	var nexus *inventory.Host
+	for i := range hf.Hosts {
+		if hf.Hosts[i].Name == "nexus" {
+			nexus = &hf.Hosts[i]
+		}
+	}
+	if nexus == nil || !hasRole(nexus.Roles, "freeipa-nfs-server") || !hasRole(nexus.Roles, "prometheus") {
+		t.Fatalf("nexus = %+v, want both freeipa-nfs-server and prometheus", nexus)
+	}
+	rosterFile := nexus.Extra["freeipa_roster_file"]
+	if rosterFile == "" {
+		t.Fatalf("freeipa_roster_file not set on nexus: %+v", nexus)
+	}
+	if _, err := os.Stat(rosterFile); err != nil {
+		t.Fatalf("roster file not created at %s: %v", rosterFile, err)
+	}
+
+	hvData, err := os.ReadFile(filepath.Join(dir, "host_vars", "nexus.yml"))
+	if err != nil {
+		t.Fatalf("read host_vars/nexus.yml: %v", err)
+	}
+	if !strings.Contains(string(hvData), "prometheus_site_label: site-nexus") {
+		t.Fatalf("host_vars/nexus.yml = %q, want prometheus_site_label: site-nexus", hvData)
+	}
+}
+
 func TestEditAutomationDriverSetHostFieldEnv(t *testing.T) {
 	dir := t.TempDir()
 	scenario := editScenario{

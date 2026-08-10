@@ -23,6 +23,10 @@ func (d *automationDriver) ensureRosterSudoCommandGroupsList(r *editRouterModel)
 			if err := d.enter(r); err != nil {
 				return err
 			}
+		case rosterCreateConfirmScreenID:
+			if err := d.resolveRosterCreatePrompt(r); err != nil {
+				return err
+			}
 		case "roster.top":
 			if err := d.choose(r, "Sudo commands"); err != nil {
 				return err
@@ -98,6 +102,10 @@ func (d *automationDriver) ensureRosterSudoRulesList(r *editRouterModel) error {
 			}
 		case "roster.path":
 			if err := d.enter(r); err != nil {
+				return err
+			}
+		case rosterCreateConfirmScreenID:
+			if err := d.resolveRosterCreatePrompt(r); err != nil {
 				return err
 			}
 		case "roster.top":

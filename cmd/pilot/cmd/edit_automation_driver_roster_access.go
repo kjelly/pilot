@@ -22,6 +22,10 @@ func (d *automationDriver) ensureRosterHostAccessMenu(r *editRouterModel) error 
 			if err := d.enter(r); err != nil {
 				return err
 			}
+		case rosterCreateConfirmScreenID:
+			if err := d.resolveRosterCreatePrompt(r); err != nil {
+				return err
+			}
 		case "roster.top":
 			if err := d.choose(r, "🔐 Host access"); err != nil {
 				return err
@@ -46,6 +50,10 @@ func (d *automationDriver) ensureRosterHostgroupsList(r *editRouterModel) error 
 			}
 		case "roster.path":
 			if err := d.enter(r); err != nil {
+				return err
+			}
+		case rosterCreateConfirmScreenID:
+			if err := d.resolveRosterCreatePrompt(r); err != nil {
 				return err
 			}
 		case "roster.top":
@@ -117,6 +125,10 @@ func (d *automationDriver) ensureRosterHBACList(r *editRouterModel) error {
 			}
 		case "roster.path":
 			if err := d.enter(r); err != nil {
+				return err
+			}
+		case rosterCreateConfirmScreenID:
+			if err := d.resolveRosterCreatePrompt(r); err != nil {
 				return err
 			}
 		case "roster.top":

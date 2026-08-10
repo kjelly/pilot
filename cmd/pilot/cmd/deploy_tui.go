@@ -28,6 +28,24 @@
 // revisitable-menu structure that benefited from consolidating into
 // one router, and duplicating that machinery here would only add risk
 // to a long, business-logic-heavy file for no benefit.
+//
+// Known tradeoff of the per-prompt-Program design: between one Program's
+// Run() returning and the next one's Run() re-entering raw mode, the
+// terminal briefly reverts to cooked/echoed mode. A keystroke that arrives
+// in that gap (a fast typist, a paste, or any scripted driver) can be
+// swallowed into the kernel's line-buffered input instead of delivered to
+// the new screen, and resurface later as garbled echoed text once some
+// later reader (even a spawned subprocess with no active raw-mode reader)
+// finally consumes it — confirmed and documented in
+// deploy_tui_pty_test.go's newProgramSettle and in
+// .agents/skills/pilot-trec-verification/SKILL.md. This was weighed and
+// accepted, not overlooked, when this file replaced promptui: a real human
+// is naturally slow enough (reads before typing) to rarely hit it, and a
+// single continuous tea.Program (edit_tui.go's router) was rejected above
+// for unrelated reasons. Anything driving pilot deploy at high speed —
+// trec, a very low key-delay, or another scripted PTY client — should
+// settle briefly after each new prompt appears before sending its first
+// keystroke, the same discipline newProgramSettle already applies in tests.
 package cmd
 
 import (

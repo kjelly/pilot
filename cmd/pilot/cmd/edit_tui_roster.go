@@ -86,12 +86,26 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	})
 }
 
+// rosterCreateConfirmScreenID and rosterCreatePasswordScreenID identify
+// pushRosterCreateConfirm's and pushRosterCreatePrompt's own screens to the
+// automation driver (resolveRosterCreatePrompt,
+// edit_automation_driver_roster.go) the same way
+// nfsRosterBootstrapPasswordScreenID identifies pushNFSRoleBootstrap's
+// analogous prompt — without a stable ID, a generic "confirm"/"text-input"
+// screen is indistinguishable from any other, and every ensureRosterXxxList
+// helper's default branch (a bare choose("返回")) fails outright the moment
+// it lands here instead of on the roster list it expected.
+const (
+	rosterCreateConfirmScreenID  = "roster.create_confirm"
+	rosterCreatePasswordScreenID = "roster.create_password"
+)
+
 // pushRosterCreateConfirm offers to auto-generate the smallest canonical
 // roster skeleton when path doesn't exist yet — the same recoverable
 // posture as pushVaultOpen's "不存在，要建立新的明文 vault 檔嗎？" confirm.
 func pushRosterCreateConfirm(r *editRouterModel, dir, path string) tea.Cmd {
 	question := fmt.Sprintf("%s 不存在，要建立最小 roster 骨架嗎？", path)
-	return r.transitionTo(newConfirmModel(question, true), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newConfirmModelWithScreenID(rosterCreateConfirmScreenID, question, true), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(confirmModel)
 		if !m.Value() {
 			return pushTopMenu(r, dir, "")
@@ -118,7 +132,7 @@ func pushRosterCreatePrompt(r *editRouterModel, dir, path string) tea.Cmd {
 		}
 		return nil
 	}
-	return r.transitionTo(newSecretTextInputModel("FreeIPA admin password(不會顯示；至少 8 字元)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSecretTextInputModelWithScreenID(rosterCreatePasswordScreenID, "FreeIPA admin password(不會顯示；至少 8 字元)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")

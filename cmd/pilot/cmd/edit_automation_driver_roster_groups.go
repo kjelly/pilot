@@ -28,6 +28,10 @@ func (d *automationDriver) ensureRosterGroupsList(r *editRouterModel) error {
 			if err := d.enter(r); err != nil {
 				return err
 			}
+		case rosterCreateConfirmScreenID:
+			if err := d.resolveRosterCreatePrompt(r); err != nil {
+				return err
+			}
 		case "roster.top":
 			if err := d.choose(r, "👥 Groups"); err != nil {
 				return err

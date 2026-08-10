@@ -74,12 +74,12 @@ func editActionRegistry() []editActionDef {
 		{
 			Spec: semanticActionSpec{
 				Name:                     "enable_role",
-				Description:              "enable one role in a host role checklist",
+				Description:              "enable one role in a host role checklist; host_vars is required (not just optional) when role has its own required per-host settings with no safe default (e.g. prometheus needs host_vars.prometheus_site_label) — omitting it fails at run time, not at validation time, since whether a value is still missing depends on the workspace's existing host_vars/<host>.yml; value/value_env supplies the FreeIPA admin password when newly enabling freeipa-nfs-server triggers its own roster-bootstrap prompt",
 				Required:                 []string{"host", "role"},
-				Optional:                 []string{"host_vars"},
+				Optional:                 []string{"host_vars", "value", "value_env"},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
-				SecretHandling:           SecretHandlingNone,
+				SecretHandling:           SecretHandlingValueEnvRecommended,
 				Verification: &verificationSpec{
 					Method:    verificationMethodFileContent,
 					Path:      "hosts.yml",
@@ -88,7 +88,7 @@ func editActionRegistry() []editActionDef {
 			},
 			Validate: validateEnableRole,
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
-				return d.enableRole(r, step.Host, step.Role, step.HostVars)
+				return d.enableRole(r, step)
 			},
 		},
 		{
@@ -216,11 +216,12 @@ func editActionRegistry() []editActionDef {
 		{
 			Spec: semanticActionSpec{
 				Name:                     "apply_role_preset",
-				Description:              "add a role preset's roles to a host's role set (host is the navigation entry point; role-presets.yml is shared, not host-specific)",
+				Description:              "add a role preset's roles to a host's role set (host is the navigation entry point; role-presets.yml is shared, not host-specific); host_vars/value/value_env answer any forced prompt a newly-added role triggers (e.g. freeipa-nfs-server's roster bootstrap, prometheus's site label)",
 				Required:                 []string{"host", "preset"},
+				Optional:                 []string{"host_vars", "value", "value_env"},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
-				SecretHandling:           SecretHandlingNone,
+				SecretHandling:           SecretHandlingValueEnvRecommended,
 				Verification: &verificationSpec{
 					Method:    verificationMethodFileContent,
 					Path:      "hosts.yml",
@@ -229,17 +230,18 @@ func editActionRegistry() []editActionDef {
 			},
 			Validate: validateApplyRolePreset,
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
-				return d.applyRolePreset(r, step.Host, step.Preset)
+				return d.applyRolePreset(r, step)
 			},
 		},
 		{
 			Spec: semanticActionSpec{
 				Name:                     "copy_roles_from_host",
-				Description:              "add another host's roles to this host's role set",
+				Description:              "add another host's roles to this host's role set; host_vars/value/value_env answer any forced prompt a newly-added role triggers (e.g. freeipa-nfs-server's roster bootstrap, prometheus's site label)",
 				Required:                 []string{"host", "source_host"},
+				Optional:                 []string{"host_vars", "value", "value_env"},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
-				SecretHandling:           SecretHandlingNone,
+				SecretHandling:           SecretHandlingValueEnvRecommended,
 				Verification: &verificationSpec{
 					Method:    verificationMethodFileContent,
 					Path:      "hosts.yml",
@@ -248,7 +250,7 @@ func editActionRegistry() []editActionDef {
 			},
 			Validate: validateCopyRolesFromHost,
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
-				return d.copyRolesFromHost(r, step.Host, step.SourceHost)
+				return d.copyRolesFromHost(r, step)
 			},
 		},
 		{
@@ -1553,6 +1555,21 @@ func validateDeleteExtraVar(step editAction) error {
 	return nil
 }
 
+// validateHostVarsMap is validateEnableRole's host_vars check, shared with
+// apply_role_preset/copy_roles_from_host since all three can trigger the
+// same pushForcedHostVarsPrompt detour (resolveRoleChangeFollowUp).
+func validateHostVarsMap(step editAction) error {
+	for key := range step.HostVars {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("host_vars key must not be empty")
+		}
+		if hasSecretName(key) {
+			return fmt.Errorf("secret-like host_vars keys are not allowed")
+		}
+	}
+	return nil
+}
+
 func validateApplyRolePreset(step editAction) error {
 	if strings.TrimSpace(step.Host) == "" {
 		return fmt.Errorf("apply_role_preset requires host")
@@ -1560,7 +1577,10 @@ func validateApplyRolePreset(step editAction) error {
 	if strings.TrimSpace(step.Preset) == "" {
 		return fmt.Errorf("apply_role_preset requires preset")
 	}
-	return nil
+	if err := validateHostVarsMap(step); err != nil {
+		return err
+	}
+	return validateOptionalValueOrEnv(step, "apply_role_preset")
 }
 
 func validateCopyRolesFromHost(step editAction) error {
@@ -1569,6 +1589,12 @@ func validateCopyRolesFromHost(step editAction) error {
 	}
 	if strings.TrimSpace(step.SourceHost) == "" {
 		return fmt.Errorf("copy_roles_from_host requires source_host")
+	}
+	if err := validateHostVarsMap(step); err != nil {
+		return err
+	}
+	if err := validateOptionalValueOrEnv(step, "copy_roles_from_host"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1707,15 +1733,10 @@ func validateEnableRole(step editAction) error {
 	if err := validateHostRoleAction("enable_role")(step); err != nil {
 		return err
 	}
-	for key := range step.HostVars {
-		if strings.TrimSpace(key) == "" {
-			return fmt.Errorf("enable_role host_vars key must not be empty")
-		}
-		if hasSecretName(key) {
-			return fmt.Errorf("secret-like host_vars keys are not allowed")
-		}
+	if err := validateHostVarsMap(step); err != nil {
+		return err
 	}
-	return nil
+	return validateOptionalValueOrEnv(step, "enable_role")
 }
 
 // editActionHasAnyParam reports whether step carries any field beyond

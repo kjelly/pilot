@@ -13,8 +13,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func (d *automationDriver) applyRolePreset(r *editRouterModel, host, preset string) error {
-	if err := d.ensureHostMenu(r, host); err != nil {
+func (d *automationDriver) applyRolePreset(r *editRouterModel, step editAction) error {
+	if err := d.ensureHostMenu(r, step.Host); err != nil {
 		return err
 	}
 	if err := d.choose(r, "角色(roles)"); err != nil {
@@ -27,14 +27,18 @@ func (d *automationDriver) applyRolePreset(r *editRouterModel, host, preset stri
 	// another preset's roles column; it also naturally fails with "label not
 	// found" when there are no presets at all (the placeholder screen only
 	// offers "↩  取消") — a real, expected error, not a silent no-op.
-	if err := d.choose(r, preset+" — "); err != nil {
+	if err := d.choose(r, step.Preset+" — "); err != nil {
 		return err
 	}
-	return d.choose(r, "✅ 完成")
+	// A preset can include freeipa-nfs-server and/or a role that needs its
+	// own host_vars (e.g. prometheus) — same two detours a lone
+	// enable_role can hit, resolved the same way (resolveRoleChangeFollowUp,
+	// edit_automation_driver.go), not a blind "✅ 完成".
+	return d.resolveRoleChangeFollowUp(r, step)
 }
 
-func (d *automationDriver) copyRolesFromHost(r *editRouterModel, host, sourceHost string) error {
-	if err := d.ensureHostMenu(r, host); err != nil {
+func (d *automationDriver) copyRolesFromHost(r *editRouterModel, step editAction) error {
+	if err := d.ensureHostMenu(r, step.Host); err != nil {
 		return err
 	}
 	if err := d.choose(r, "角色(roles)"); err != nil {
@@ -48,10 +52,11 @@ func (d *automationDriver) copyRolesFromHost(r *editRouterModel, host, sourceHos
 	// picker — sourceHost+" — " then fails to match any of the roles menu's
 	// own fixed labels, so this still surfaces a clear "label not found"
 	// error rather than silently doing nothing.
-	if err := d.choose(r, sourceHost+" — "); err != nil {
+	if err := d.choose(r, step.SourceHost+" — "); err != nil {
 		return err
 	}
-	return d.choose(r, "✅ 完成")
+	// Same NFS-bootstrap / forced-host-vars detours as applyRolePreset.
+	return d.resolveRoleChangeFollowUp(r, step)
 }
 
 func (d *automationDriver) createRolePreset(r *editRouterModel, host, label string, roles []string) error {

@@ -663,7 +663,7 @@ func pushRoleChecklist(r *editRouterModel, dir, path string, hf *inventory.Hosts
 			hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 			h.Roles = checked
 			if !hadNFSServer && hasRole(checked, "freeipa-nfs-server") {
-				return pushNFSRoleBootstrap(r, dir, path, hf, name)
+				return pushNFSRoleBootstrap(r, dir, path, hf, name, beforeRoles)
 			}
 			if cmd := pushForcedHostVarsPrompt(r, dir, path, hf, name, beforeRoles); cmd != nil {
 				return cmd
@@ -673,11 +673,24 @@ func pushRoleChecklist(r *editRouterModel, dir, path string, hf *inventory.Hosts
 	})
 }
 
+// nfsRosterBootstrapPasswordScreenID identifies pushNFSRoleBootstrap's own
+// FreeIPA admin password prompt to the automation driver
+// (resolveRoleChangeFollowUp, edit_automation_driver.go) the same way
+// forcedHostVarsPromptScreenID identifies a forced host_vars prompt.
+// Without a stable ID this screen is indistinguishable from any other
+// unvalidated text-input, and the driver has no way to answer it — it used
+// to fail with "unexpected text-input screen \"text-input\"".
+const nfsRosterBootstrapPasswordScreenID = "nfs.roster_bootstrap.password"
+
 // pushNFSRoleBootstrap fills the non-secret NFS wiring and, when the default
 // roster does not exist yet, asks only for the one value that cannot be
 // derived safely: the FreeIPA admin password. This keeps the common demo
 // flow inside edit without pretending that NetApp is a Linux NFS server.
-func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+// beforeRoles is threaded through to the eventual pushForcedHostVarsPrompt
+// call (pushNFSRoleBootstrapWithPassword) so that a role newly checked in
+// the very same commit as freeipa-nfs-server (e.g. prometheus) still gets
+// its own forced host_vars prompt instead of being silently skipped.
+func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, beforeRoles []string) tea.Cmd {
 	h := findHost(hf, name)
 	if h == nil {
 		return pushHostList(r, dir, path, hf, "")
@@ -707,7 +720,7 @@ func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.Ho
 		// at all here, so there's no "已自動設定 freeipa_roster_file=..."
 		// banner to explain; just note the reuse.
 		return pushNFSRoleBootstrapWithPassword(r, dir, path, hf, name, rosterPath, existing,
-			"（沿用 .vault/main.yaml 現有的 ipa_admin_password，不用重新輸入）")
+			"（沿用 .vault/main.yaml 現有的 ipa_admin_password，不用重新輸入）", beforeRoles)
 	}
 
 	banner := "已自動設定 freeipa_roster_file=" + h.Extra["freeipa_roster_file"] + "，接著建立最小 NFS roster。"
@@ -717,12 +730,12 @@ func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.Ho
 		}
 		return nil
 	}
-	return r.transitionTo(newSecretTextInputModel("FreeIPA admin password(不會顯示；至少 8 字元)", "", validate), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newSecretTextInputModelWithScreenID(nfsRosterBootstrapPasswordScreenID, "FreeIPA admin password(不會顯示；至少 8 字元)", "", validate), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushRolesMenuBanner(r, dir, path, hf, name, "⚠️  已設定 freeipa_roster_file，但尚未建立 roster；請重新選取 NFS role 完成 bootstrap。")
 		}
-		return pushNFSRoleBootstrapWithPassword(r, dir, path, hf, name, rosterPath, m.Value(), "")
+		return pushNFSRoleBootstrapWithPassword(r, dir, path, hf, name, rosterPath, m.Value(), "", beforeRoles)
 	})
 }
 
@@ -730,7 +743,7 @@ func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.Ho
 // keeps .vault/main.yaml's ipa_admin_password in sync, however password
 // was obtained (typed fresh or reused via existingFreeIPAAdminPassword) —
 // the shared commit point for pushNFSRoleBootstrap's two branches.
-func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, rosterPath, password, extraNote string) tea.Cmd {
+func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, rosterPath, password, extraNote string, beforeRoles []string) tea.Cmd {
 	h := findHost(hf, name)
 	if h == nil {
 		return pushHostList(r, dir, path, hf, "")
@@ -757,6 +770,15 @@ func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *
 		if changed {
 			vaultNote = fmt.Sprintf("；並填入 %s 的 ipa_admin_password", vaultPath)
 		}
+	}
+	// A role that newly needs its own host_vars (e.g. prometheus's
+	// prometheus_site_label) may have been checked in the very same
+	// checklist/preset/copy commit as freeipa-nfs-server — without this,
+	// returning straight to the roles menu here silently drops that
+	// requirement forever, since the checklist commit only ever routes to
+	// ONE of pushNFSRoleBootstrap or pushForcedHostVarsPrompt, never both.
+	if cmd := pushForcedHostVarsPrompt(r, dir, path, hf, name, beforeRoles); cmd != nil {
+		return cmd
 	}
 	return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("✅ 已建立最小 NFS roster %s（shares: []）%s；demo 可直接套用，production 請改用 NetApp 外部 provider。%s", rosterPath, vaultNote, extraNote))
 }
@@ -823,7 +845,7 @@ func pushApplyRolePreset(r *editRouterModel, dir, path string, hf *inventory.Hos
 				hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 				h.Roles = unionRoles(h.Roles, presets[idx].Roles)
 				if !hadNFSServer && hasRole(h.Roles, "freeipa-nfs-server") {
-					return pushNFSRoleBootstrap(r, dir, path, hf, name)
+					return pushNFSRoleBootstrap(r, dir, path, hf, name, beforeRoles)
 				}
 				if cmd := pushForcedHostVarsPrompt(r, dir, path, hf, name, beforeRoles); cmd != nil {
 					return cmd
@@ -857,7 +879,7 @@ func pushCopyRolesFromHost(r *editRouterModel, dir, path string, hf *inventory.H
 				hadNFSServer := hasRole(h.Roles, "freeipa-nfs-server")
 				h.Roles = unionRoles(h.Roles, candidates[idx].Roles)
 				if !hadNFSServer && hasRole(h.Roles, "freeipa-nfs-server") {
-					return pushNFSRoleBootstrap(r, dir, path, hf, name)
+					return pushNFSRoleBootstrap(r, dir, path, hf, name, beforeRoles)
 				}
 				if cmd := pushForcedHostVarsPrompt(r, dir, path, hf, name, beforeRoles); cmd != nil {
 					return cmd

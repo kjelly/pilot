@@ -18,13 +18,33 @@ import (
 	"strings"
 )
 
+// resolveRosterCreatePrompt answers pushRosterCreateConfirm's "no roster yet,
+// create a minimal skeleton?" confirm with "yes" — matching openVaultFile's
+// identical bootstrap-confirm handling for its own ".vault/" files
+// (edit_automation_driver_vault.go's confirmYesNo(r, true) branch) — so the
+// very first roster action against a brand-new workspace no longer fails
+// with the opaque `cannot navigate to roster ... from confirm screen:
+// cannot choose "返回" on confirm screen`. If that still lands on
+// pushRosterCreatePrompt's own FreeIPA admin password prompt (no reusable
+// .vault/main.yaml ipa_admin_password to fall back on), there is no
+// scenario field yet to source a fresh one from, so this fails with one
+// clear, actionable message instead of the same opaque screen-type
+// mismatch a few steps further down.
+func (d *automationDriver) resolveRosterCreatePrompt(r *editRouterModel) error {
+	if err := d.confirmYesNo(r, true); err != nil {
+		return err
+	}
+	if automationScreenID(r) == rosterCreatePasswordScreenID {
+		return fmt.Errorf("roster file does not exist yet and needs a FreeIPA admin password to bootstrap; pre-set .vault/main.yaml's ipa_admin_password first (e.g. via an add_vault_key step or an earlier enable_role freeipa-nfs-server step) — typing a brand-new roster-bootstrap password isn't scriptable yet")
+	}
+	return nil
+}
+
 // ensureRosterUsersList resolves the router to the roster users list
 // screen from wherever it currently is — the top menu, the roster path
-// prompt (accepts the prefilled default path), the roster top menu, or
-// an open user detail screen. It does not handle a missing roster file
-// (that flow requires a FreeIPA admin password prompt, out of scope for
-// this increment) — automation requires the roster file to already
-// exist at its default path.
+// prompt (accepts the prefilled default path), a first-visit "roster
+// doesn't exist yet" bootstrap confirm, the roster top menu, or an open
+// user detail screen.
 func (d *automationDriver) ensureRosterUsersList(r *editRouterModel) error {
 	for attempts := 0; attempts < 8; attempts++ {
 		switch automationScreenID(r) {
@@ -37,6 +57,10 @@ func (d *automationDriver) ensureRosterUsersList(r *editRouterModel) error {
 		case "roster.path":
 			// Accept the prefilled default path (.vault/ipa-identity.yaml).
 			if err := d.enter(r); err != nil {
+				return err
+			}
+		case rosterCreateConfirmScreenID:
+			if err := d.resolveRosterCreatePrompt(r); err != nil {
 				return err
 			}
 		case "roster.top":
