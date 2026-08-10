@@ -1,0 +1,371 @@
+# Apply playbook for docs/verification/host-monitoring.md v1.1
+#
+# Cross-cutting per-host monitoring agent role (like audit-log-forwarding /
+# wazuh-fim): installs node_exporter as a systemd service, running as a
+# dedicated unprivileged user, exposing OS/hardware metrics on :9100 for
+# docs/verification/prometheus.md to scrape. Designed to be layered onto
+# ANY existing host rather than owning a dedicated role of its own.
+#
+# Both supported OS families (Ubuntu apt, AlmaLinux/EL dnf) install the SAME
+# pinned upstream release binary — neither distro's package manager is used.
+# Reason: Ubuntu's prometheus-node-exporter apt package lags well behind
+# upstream, and EL9 (even with EPEL) ships no node_exporter package at all;
+# a single pinned-and-checksummed binary keeps behavior/version identical
+# across the fleet instead of letting Debian/EL drift apart (see
+# docs/verification/host-monitoring.md §1.5).
+#
+# HTTP Basic Auth is mandatory (v1.1) — node_exporter exposes detailed
+# hardware/OS/process metadata, so :9100/metrics must not be readable by
+# anything on the network without a credential. Uses node_exporter's own
+# --web.config.file mechanism (exporter-toolkit): a bcrypt hash is generated
+# on the target host with `htpasswd` (apache2-utils/httpd-tools — NOT a web
+# server, just the CLI tool) and written to a root-only-readable
+# web-config.yml; the plaintext password never touches this host's disk or
+# Ansible's logs (no_log on every task that handles it). The matching
+# plaintext credential must also be supplied to
+# docs/verification/prometheus.md's node_exporter_basic_auth_user/password
+# so its scrape config can authenticate — see that spec's §1.5.
+#
+# Usage (dry run):
+#   go run ./cmd/pilot vm-target run --name host-monitoring \
+#       playbooks/apply/host-monitoring-apply.yml --check --diff
+#
+# Real apply:
+#   go run ./cmd/pilot vm-target run --name host-monitoring \
+#       playbooks/apply/host-monitoring-apply.yml
+#
+# Variables: see docs/verification/host-monitoring.md §1.5.
+#
+# Stage gating (same convention as freeipa-server-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+- name: Apply host-monitoring (node_exporter agent, pinned upstream release)
+  hosts: "{{ target_group | default('host-monitoring') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    node_exporter_version: "1.12.1"
+    node_exporter_port: 9100
+    node_exporter_user: node_exporter
+    node_exporter_webconfig_path: /etc/node_exporter/web-config.yml
+    # node_exporter_basic_auth_user has a sane default (not a secret).
+    # node_exporter_basic_auth_password is DELIBERATELY NOT declared here —
+    # same "don't shadow group_vars/host_vars with a hardcoded default"
+    # reasoning as prometheus-apply.yml's thanos_s3_target_host (see that
+    # file's comment); it's referenced via `is defined` in the gate below,
+    # which only works meaningfully when left undeclared.
+    node_exporter_basic_auth_user: prometheus
+    node_exporter_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+    # sha256 of the official node_exporter release tarballs, from the
+    # upstream sha256sums.txt for v1.12.1 (github.com/prometheus/node_exporter
+    # releases). Add an entry here (and to node_exporter_arch_map above) to
+    # support another architecture.
+    node_exporter_checksums:
+      amd64: b51d8a76aa2a9156a55d501aca6276fae09e262259a5e4e831d2c2222f084e63
+      arm64: ad35b605f9954b9f1ffddf5ba054bdc5a98d790b9eae5291e1eeb83f1ecbd0e7
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
+          target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
+          且要跟這台機器所屬的環境 group 一致。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Gate: supported OS (Ubuntu/Debian, AlmaLinux/EL — both via pinned upstream release, no distro package manager)"
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family in ['Debian', 'RedHat']
+        fail_msg: >-
+          host-monitoring-apply supports Debian/Ubuntu and Enterprise Linux,
+          both installed from the same pinned upstream node_exporter release
+          binary (see docs/verification/host-monitoring.md §1.5 for why
+          neither distro's package manager is used). Detected
+          {{ ansible_distribution }} {{ ansible_distribution_version }}
+          ({{ ansible_os_family }}).
+      tags: [always]
+
+    - name: "Gate: supported CPU architecture"
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture in node_exporter_arch_map
+        fail_msg: >-
+          host-monitoring-apply only has a pinned release checksum for
+          {{ node_exporter_arch_map.keys() | list }}. Detected
+          {{ ansible_architecture }}. Add an entry to node_exporter_arch_map
+          and node_exporter_checksums to support it (see spec §5).
+      tags: [always]
+
+    - name: "Gate: required basic-auth password present (fail early, before any mutation)"
+      ansible.builtin.assert:
+        that:
+          - node_exporter_basic_auth_password is defined
+          - node_exporter_basic_auth_password | length > 0
+        fail_msg: >-
+          node_exporter_basic_auth_password is required — node_exporter must
+          not serve :9100/metrics without a credential (see spec §1.5). Pass
+          -e node_exporter_basic_auth_password=... (vault file recommended
+          over -e in real inventories). The SAME value must also be given to
+          prometheus-apply.yml's node_exporter_basic_auth_password so its
+          scrape config can authenticate.
+      tags: [always]
+
+    - name: "Determine target architecture for this host"
+      ansible.builtin.set_fact:
+        node_exporter_arch: "{{ node_exporter_arch_map[ansible_architecture] }}"
+
+    - name: "Check currently installed node_exporter version"
+      ansible.builtin.command: /usr/local/bin/node_exporter --version
+      register: node_exporter_current_version
+      changed_when: false
+      failed_when: false
+
+    - name: "Determine whether the pinned version is already installed"
+      ansible.builtin.set_fact:
+        node_exporter_version_ok: >-
+          {{ (node_exporter_current_version.rc | default(1)) == 0 and
+             node_exporter_version in (
+               (node_exporter_current_version.stdout | default(''))
+               ~ (node_exporter_current_version.stderr | default(''))
+             ) }}
+
+  tasks:
+    - name: "Node_exporter install + systemd service"
+      block:
+        - name: "Step 1: Create dedicated system user (spec C3)"
+          tags: [C3]
+          ansible.builtin.user:
+            name: "{{ node_exporter_user }}"
+            system: true
+            shell: /usr/sbin/nologin
+            create_home: false
+
+        - name: "Step 2: Download node_exporter {{ node_exporter_version }} release ({{ node_exporter_arch }}) (spec C1, C2)"
+          tags: [C1, C2]
+          ansible.builtin.get_url:
+            url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"
+            dest: "/tmp/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"
+            checksum: "sha256:{{ node_exporter_checksums[node_exporter_arch] }}"
+            mode: "0644"
+          when: not node_exporter_version_ok
+          register: node_exporter_download
+
+        # Step 2's get_url only SIMULATES the download under check mode
+        # (reports changed=true without writing anything), so on a
+        # from-scratch host the tarball genuinely doesn't exist yet here.
+        # unarchive, unlike copy/file, doesn't degrade gracefully when its
+        # src is missing under --check — it tries to actually inspect the
+        # archive and crashes. Deferred to the real apply, same pattern as
+        # restic-backup-apply.yml's timer-enable guard.
+        - name: "Step 3: Extract node_exporter tarball (spec C1, C2)"
+          tags: [C1, C2]
+          ansible.builtin.unarchive:
+            src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"
+            dest: /tmp
+            remote_src: true
+          when: node_exporter_download is changed and not ansible_check_mode
+
+        # Same check-mode gap as Step 3: the extracted directory doesn't
+        # exist yet under --check on a from-scratch host.
+        - name: "Step 4: Install node_exporter binary to /usr/local/bin (spec C1, C2)"
+          tags: [C1, C2]
+          ansible.builtin.copy:
+            src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}/node_exporter"
+            dest: /usr/local/bin/node_exporter
+            mode: "0755"
+            owner: root
+            group: root
+            remote_src: true
+          when: node_exporter_download is changed and not ansible_check_mode
+          register: node_exporter_binary_result
+
+        - name: "Step 5: Install htpasswd (Debian apt) — generates the bcrypt hash below, not a web server"
+          tags: [C10]
+          ansible.builtin.apt:
+            name: apache2-utils
+            state: present
+            update_cache: true
+            cache_valid_time: 3600
+          when: ansible_os_family == 'Debian'
+
+        - name: "Step 5: Install htpasswd (EL dnf) — generates the bcrypt hash below, not a web server"
+          tags: [C10]
+          ansible.builtin.dnf:
+            name: httpd-tools
+            state: present
+          when: ansible_os_family == 'RedHat'
+
+        - name: "Step 6: Ensure {{ node_exporter_webconfig_path | dirname }} exists"
+          ansible.builtin.file:
+            path: "{{ node_exporter_webconfig_path | dirname }}"
+            state: directory
+            mode: "0750"
+            owner: root
+            group: "{{ node_exporter_user }}"
+
+        # bcrypt hashing is non-deterministic (random salt per call), so
+        # re-hashing the same password on every apply would rewrite
+        # web-config.yml — and thrash the service restart below — on every
+        # single run even when nothing changed. Track a fingerprint of the
+        # plaintext instead (not reversible, not the password itself) and
+        # only touch the hash/file when that fingerprint actually changes.
+        - name: "Step 7: Compute a change-detection fingerprint for the basic-auth credential"
+          ansible.builtin.set_fact:
+            node_exporter_basic_auth_fingerprint: "{{ (node_exporter_basic_auth_user ~ ':' ~ node_exporter_basic_auth_password) | hash('sha256') }}"
+          no_log: true
+
+        - name: "Step 7: Read the previously stored fingerprint, if any"
+          ansible.builtin.slurp:
+            src: "{{ node_exporter_webconfig_path | dirname }}/.basic_auth.fingerprint"
+          register: node_exporter_stored_fingerprint_raw
+          failed_when: false
+          no_log: true
+
+        - name: "Step 7: Determine whether the basic-auth credential changed"
+          ansible.builtin.set_fact:
+            node_exporter_basic_auth_changed: >-
+              {{ (node_exporter_stored_fingerprint_raw.content is not defined) or
+                 ((node_exporter_stored_fingerprint_raw.content | b64decode) != node_exporter_basic_auth_fingerprint) }}
+          no_log: true
+
+        # On a from-scratch host, Step 5's package install (htpasswd) is
+        # only SIMULATED under --check, so the binary genuinely isn't there
+        # yet — this can't safely force-run for real the way the
+        # docker_container_exec read-only probes elsewhere in this repo do
+        # (those assume a precondition from a PRIOR apply; htpasswd's
+        # precondition is from THIS SAME check-mode run). Deferred to the
+        # real apply, same pattern as Steps 3/4 above.
+        - name: "Step 8: Generate bcrypt hash for basic auth (spec C10; only when the credential changed)"
+          tags: [C10]
+          ansible.builtin.command: "htpasswd -nbBC 10 {{ node_exporter_basic_auth_user }} {{ node_exporter_basic_auth_password }}"
+          register: node_exporter_htpasswd_result
+          changed_when: false
+          no_log: true
+          when: node_exporter_basic_auth_changed and not ansible_check_mode
+
+        # Depends on Step 8's real .stdout — deferred alongside it under
+        # check mode on a from-scratch host (same reasoning as Step 8).
+        - name: "Step 9: Render web-config.yml (spec C10; only when the credential changed)"
+          tags: [C10]
+          ansible.builtin.copy:
+            dest: "{{ node_exporter_webconfig_path }}"
+            mode: "0640"
+            owner: root
+            group: "{{ node_exporter_user }}"
+            content: |
+              basic_auth_users:
+                {{ node_exporter_htpasswd_result.stdout.split(':', 1)[0] }}: {{ node_exporter_htpasswd_result.stdout.split(':', 1)[1] }}
+          when: node_exporter_basic_auth_changed and not ansible_check_mode
+          no_log: true
+          register: node_exporter_webconfig_result
+
+        - name: "Step 9: Persist the basic-auth fingerprint for future idempotency checks"
+          ansible.builtin.copy:
+            dest: "{{ node_exporter_webconfig_path | dirname }}/.basic_auth.fingerprint"
+            content: "{{ node_exporter_basic_auth_fingerprint }}"
+            mode: "0600"
+          when: node_exporter_basic_auth_changed and not ansible_check_mode
+          no_log: true
+
+        - name: "Step 10: Render node_exporter.service (spec C4, C5, C6)"
+          tags: [C4, C5, C6]
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/node_exporter.service
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Prometheus Node Exporter
+              Wants=network-online.target
+              After=network-online.target
+
+              [Service]
+              User={{ node_exporter_user }}
+              Group={{ node_exporter_user }}
+              Type=simple
+              ExecStart=/usr/local/bin/node_exporter --web.listen-address=:{{ node_exporter_port }} --web.config.file={{ node_exporter_webconfig_path }}
+              Restart=on-failure
+              NoNewPrivileges=true
+              ProtectSystem=strict
+              ProtectHome=true
+
+              [Install]
+              WantedBy=multi-user.target
+          register: node_exporter_unit_result
+
+        - name: "Step 11: Reload systemd if the unit file changed"
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when: node_exporter_unit_result is changed
+
+        # Step 10's copy task only simulates writing the unit file under
+        # check mode, so it doesn't really exist yet on a from-scratch host;
+        # deferred to the real apply, same pattern as
+        # restic-backup-apply.yml's timer-enable guard.
+        - name: "Step 12: Ensure node_exporter.service enabled+started (spec C7)"
+          tags: [C7]
+          ansible.builtin.systemd:
+            name: node_exporter.service
+            state: started
+            enabled: true
+          when: not ansible_check_mode
+
+        # `state: restarted` is never idempotent (AGENTS.md / spec-driven
+        # workflow §3) — only restart when the binary, unit, or basic-auth
+        # credential actually changed, so a genuine no-op rerun stays
+        # changed=0.
+        - name: "Step 13: Restart node_exporter if the binary, unit, or credential changed (spec C7)"
+          tags: [C7]
+          ansible.builtin.systemd:
+            name: node_exporter.service
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - >-
+                node_exporter_binary_result is changed
+                or node_exporter_unit_result is changed
+                or node_exporter_webconfig_result is changed
+
+      rescue:
+        - name: "ROLLBACK — stop and disable node_exporter"
+          ansible.builtin.systemd:
+            name: node_exporter.service
+            state: stopped
+            enabled: false
+          failed_when: false
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              host-monitoring apply FAILED (see task output above); the
+              service was stopped/disabled. The binary and unit file are
+              left in place for inspection.

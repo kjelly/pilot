@@ -1,0 +1,27 @@
+---
+# ============================================================================
+#  group_vars/host-monitoring.example.yml —— node_exporter agent 設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/host-monitoring.yml
+#    cp group_vars/host-monitoring.example.yml <inventory 目錄>/group_vars/host-monitoring.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/host-monitoring.md
+#  消費端(自動展開這個 group 當 scrape target)的 spec:
+#    docs/verification/prometheus.md §1.5 的 node_exporter_targets
+# ============================================================================
+
+# HTTP Basic Auth 密碼 —— 必填,沒有預設值(node_exporter 不允許匿名讀取
+# 硬體/OS 細節,見 spec §1.5)。一律用 ansible-vault 加密檔帶入,不要明文寫在
+# 這裡或用 -e 帶(除了拋棄式沙盒測試)。
+#
+# **必須跟 prometheus.example.yml 的 node_exporter_basic_auth_password
+# 用同一個值**,否則 Prometheus 端的 scrape 會被 401 擋下,`up{job="node"}`
+# 永遠是 0。
+# node_exporter_basic_auth_password: ""
+
+# 以下通常不用填,會沿用 playbook 內建預設:
+# node_exporter_basic_auth_user: prometheus
+# node_exporter_version: "1.12.1"
+# node_exporter_port: 9100

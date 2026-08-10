@@ -1,0 +1,37 @@
+schemaVersion: 1
+id: host-monitoring
+role: host-monitoring
+specs:
+  - path: docs/verification/host-monitoring.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/host-monitoring-apply.yml
+regressionTests:
+  - internal/spec/host_monitoring_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies: []
+conflicts: []
+bindings: []
+os:
+  - {distro: ubuntu, versions: ["22.04", "24.04"]}
+  - {distro: almalinux, versions: ["9"]}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 256, minDiskGiB: 1}
+groupVars:
+  - {name: node_exporter_version, type: string, required: false, default: "1.12.1", secret: false}
+  - {name: node_exporter_port, type: string, required: false, default: "9100", secret: false}
+  - {name: node_exporter_user, type: string, required: false, default: "node_exporter", secret: false}
+  - {name: node_exporter_basic_auth_user, type: string, required: false, default: "prometheus", secret: false}
+  - {name: node_exporter_basic_auth_password, type: string, required: true, secret: true}
+endpoints:
+  - {name: metrics, scheme: http, port: 9100}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions:
+    "docs/verification/host-monitoring.md#C8": {kind: verifyOnly, reason: "port-listening probe — verify-only outcome of the service actually running (C7)"}
+    "docs/verification/host-monitoring.md#C9": {kind: verifyOnly, reason: "unauthenticated-request-rejected probe — verify-only outcome of the web-config.yml render (C10) actually being enforced by the running service (C7)"}
+verification: {autoDeploy: false}
+site: {include: true, order: 95, vars: {}, tags: [observability, host-monitoring], optIn: false}
