@@ -156,6 +156,17 @@ func EffectiveHBACAccessList(path string) ([]EffectiveHBACAccess, error) {
 	if err != nil {
 		return nil, err
 	}
+	return EffectiveHBACAccessFromRoster(root), nil
+}
+
+// EffectiveHBACAccessFromRoster is EffectiveHBACAccessList's in-memory
+// counterpart, evaluating an already-parsed root directly instead of
+// reading a path. Migration's semantic-equivalence fingerprint
+// (roster_migrate.go) needs this: it compares a v1->v2 candidate that
+// exists only in memory against the original, and writing the candidate
+// to a temp file just to re-read it here would defeat the point of
+// validating before ever touching disk.
+func EffectiveHBACAccessFromRoster(root map[string]any) []EffectiveHBACAccess {
 	groupsByName := rosterGroupsByName(root)
 	hostgroupsByName := rosterHostgroupsByName(root)
 
@@ -196,7 +207,7 @@ func EffectiveHBACAccessList(path string) ([]EffectiveHBACAccess, error) {
 			Services: stringListField(item, "services"),
 		})
 	}
-	return out, nil
+	return out
 }
 
 // EffectiveSudoAccess is one sudo rule's fully-resolved subject, target,
@@ -223,6 +234,13 @@ func EffectiveSudoAccessList(path string) ([]EffectiveSudoAccess, error) {
 	if err != nil {
 		return nil, err
 	}
+	return EffectiveSudoAccessFromRoster(root), nil
+}
+
+// EffectiveSudoAccessFromRoster is EffectiveSudoAccessList's in-memory
+// counterpart — see EffectiveHBACAccessFromRoster's doc comment for why
+// migration's semantic-equivalence fingerprint needs this shape.
+func EffectiveSudoAccessFromRoster(root map[string]any) []EffectiveSudoAccess {
 	groupsByName := rosterGroupsByName(root)
 	hostgroupsByName := rosterHostgroupsByName(root)
 	sudo := mapField(root, "sudo")
@@ -300,5 +318,5 @@ func EffectiveSudoAccessList(path string) ([]EffectiveSudoAccess, error) {
 			DeniedCommandGroups: stringListField(mapField(item, "deny"), "command_groups"),
 		})
 	}
-	return out, nil
+	return out
 }

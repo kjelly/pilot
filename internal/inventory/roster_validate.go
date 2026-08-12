@@ -42,15 +42,66 @@ func ValidateRosterFile(path string) ([]RosterViolation, error) {
 	return ValidateRoster(root), nil
 }
 
-// ValidateRoster runs every structural/semantic check against an
-// already-parsed roster document (a plain map[string]any, e.g. from
-// yaml.Unmarshal(data, &root)).
+// ValidateRoster dispatches an already-parsed roster document (a plain
+// map[string]any, e.g. from yaml.Unmarshal(data, &root)) to the validator
+// for whatever schema_version it declares. A missing, non-integer, or
+// out-of-range version fails closed with a single schema_version violation
+// rather than falling back to some other version's rules — see
+// docs/verification/freeipa-identity.md's roster-schema-v2 spec.
 func ValidateRoster(root map[string]any) []RosterViolation {
-	var v []RosterViolation
-	v = append(v, checkSchemaVersion(root)...)
-	v = append(v, checkTopLevelKeys(root)...)
-	v = append(v, checkMigration(root)...)
+	raw, ok := root["schema_version"]
+	if !ok {
+		return []RosterViolation{{Rule: "schema_version", Detail: "schema_version is required"}}
+	}
+	n, ok := toInt(raw)
+	if !ok {
+		return []RosterViolation{{Rule: "schema_version", Detail: fmt.Sprintf("schema_version must be an integer, got %v", raw)}}
+	}
+	switch RosterSchemaVersion(n) {
+	case RosterSchemaV1:
+		return ValidateRosterV1(root)
+	case RosterSchemaV2:
+		return ValidateRosterV2(root)
+	}
+	if n > int(CurrentRosterSchemaVersion) {
+		return []RosterViolation{{Rule: "schema_version", Detail: fmt.Sprintf("roster schema v%d is newer than this pilot supports (max v%d)", n, CurrentRosterSchemaVersion)}}
+	}
+	return []RosterViolation{{Rule: "schema_version", Detail: fmt.Sprintf("schema_version %d is invalid", n)}}
+}
 
+// ValidateRosterV1 validates a schema-v1 roster document: the pre-netgroups
+// structure, kept exactly as it always was. This is also what a v1 -> v2
+// migration candidate is checked against before conversion (see
+// docs/verification/freeipa-identity.md's roster-migration spec).
+func ValidateRosterV1(root map[string]any) []RosterViolation {
+	var v []RosterViolation
+	v = append(v, checkSchemaVersionExact(root, RosterSchemaV1)...)
+	v = append(v, checkTopLevelKeys(root, knownTopLevelKeysV1)...)
+	v = append(v, checkMigration(root)...)
+	v = append(v, validateRosterCommon(root)...)
+	return v
+}
+
+// ValidateRosterV2 validates a schema-v2 roster document. It runs the same
+// common checks as v1 against the same wider top-level key set (adding
+// netgroups), plus netgroups' own member-reference and cycle validation
+// (checkNetgroups, roster_netgroup.go) — v1 never had netgroups at all, so
+// none of that applies there.
+func ValidateRosterV2(root map[string]any) []RosterViolation {
+	var v []RosterViolation
+	v = append(v, checkSchemaVersionExact(root, RosterSchemaV2)...)
+	v = append(v, checkTopLevelKeys(root, knownTopLevelKeysV2)...)
+	v = append(v, checkMigration(root)...)
+	v = append(v, validateRosterCommon(root)...)
+	v = append(v, checkNetgroups(root)...)
+	return v
+}
+
+// validateRosterCommon runs the structural checks every schema version
+// shares: users/groups/hosts/hostgroups and the HBAC/sudo rules built on
+// top of them. None of this differs between v1 and v2.
+func validateRosterCommon(root map[string]any) []RosterViolation {
+	var v []RosterViolation
 	users := listField(root, "users")
 	groups := listField(root, "groups")
 	hosts := listField(root, "hosts")
@@ -67,14 +118,14 @@ func ValidateRoster(root map[string]any) []RosterViolation {
 
 // ---- Gate: canonical roster version -----------------------------------
 
-func checkSchemaVersion(root map[string]any) []RosterViolation {
+func checkSchemaVersionExact(root map[string]any, want RosterSchemaVersion) []RosterViolation {
 	v, ok := root["schema_version"]
 	if !ok {
-		return []RosterViolation{{Rule: "schema_version", Detail: "schema_version is required (must be 1)"}}
+		return []RosterViolation{{Rule: "schema_version", Detail: fmt.Sprintf("schema_version is required (must be %d)", want)}}
 	}
 	n, ok := toInt(v)
-	if !ok || n != 1 {
-		return []RosterViolation{{Rule: "schema_version", Detail: fmt.Sprintf("schema_version must be 1, got %v", v)}}
+	if !ok || RosterSchemaVersion(n) != want {
+		return []RosterViolation{{Rule: "schema_version", Detail: fmt.Sprintf("schema_version must be %d, got %v", want, v)}}
 	}
 	return nil
 }
@@ -82,11 +133,17 @@ func checkSchemaVersion(root map[string]any) []RosterViolation {
 // ---- Gate: canonical top-level and FreeIPA keys are known ---------------
 
 var (
-	knownTopLevelKeys = []string{
+	knownTopLevelKeysV1 = []string{
 		"schema_version", "freeipa", "users", "groups", "hosts",
 		"hostgroups", "hbac", "sudo", "nfs", "nfs_clients",
 		"migration", "policy_exceptions",
 	}
+	// knownTopLevelKeysV2 adds first-class netgroups on top of the v1 set;
+	// a v1 document listing netgroups still fails closed as an unknown key
+	// (see docs/verification/freeipa-identity.md's roster-schema-v2 spec,
+	// "netgroups currently fails closed under v1").
+	knownTopLevelKeysV2 = append(append([]string{}, knownTopLevelKeysV1...), "netgroups")
+
 	// domain/realm remain accepted while old encrypted rosters are migrated,
 	// but the apply playbook deliberately ignores them. New rosters must keep
 	// the authoritative value in group_vars/freeipa.yml.
@@ -94,9 +151,9 @@ var (
 	knownFreeIPAAdminKeys = []string{"principal", "password"}
 )
 
-func checkTopLevelKeys(root map[string]any) []RosterViolation {
+func checkTopLevelKeys(root map[string]any, allowedTopLevel []string) []RosterViolation {
 	var out []RosterViolation
-	if unk := unknownKeys(root, knownTopLevelKeys); len(unk) > 0 {
+	if unk := unknownKeys(root, allowedTopLevel); len(unk) > 0 {
 		out = append(out, RosterViolation{Rule: "top-level keys", Detail: fmt.Sprintf("unknown top-level key(s): %s", strings.Join(unk, ", "))})
 	}
 	freeipa := mapField(root, "freeipa")

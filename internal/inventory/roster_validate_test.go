@@ -90,10 +90,60 @@ func TestValidateRoster_MissingSchemaVersion(t *testing.T) {
 	}
 }
 
-func TestValidateRoster_WrongSchemaVersion(t *testing.T) {
-	v := ValidateRoster(mustParseRoster(t, "schema_version: 2\n"))
+func TestValidateRoster_MinimalValidV2RosterPassesClean(t *testing.T) {
+	if v := ValidateRoster(mustParseRoster(t, "schema_version: 2\n")); len(v) != 0 {
+		t.Fatalf("expected a minimal schema_version: 2 roster to pass clean, got: %v", v)
+	}
+}
+
+func TestValidateRoster_V1RejectsNetgroupsTopLevelKey(t *testing.T) {
+	// netgroups is a v2-only key; a v1 document declaring it must still
+	// fail closed as unknown, exactly like any other unrecognized field.
+	v := ValidateRoster(mustParseRoster(t, "schema_version: 1\nnetgroups: []\n"))
+	if !contains(ruleNames(v), "top-level keys") {
+		t.Fatalf("expected a top-level keys violation for netgroups under v1, got: %v", v)
+	}
+}
+
+func TestValidateRoster_V2AllowsNetgroupsTopLevelKey(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, "schema_version: 2\nnetgroups: []\n"))
+	if contains(ruleNames(v), "top-level keys") {
+		t.Fatalf("did not expect a top-level keys violation for netgroups under v2, got: %v", v)
+	}
+}
+
+func TestValidateRoster_UnsupportedFutureSchemaVersion(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, "schema_version: 999\n"))
 	if !contains(ruleNames(v), "schema_version") {
 		t.Fatalf("expected a schema_version violation, got: %v", v)
+	}
+}
+
+func TestValidateRoster_InvalidZeroSchemaVersion(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, "schema_version: 0\n"))
+	if !contains(ruleNames(v), "schema_version") {
+		t.Fatalf("expected a schema_version violation, got: %v", v)
+	}
+}
+
+func TestValidateRoster_InvalidNegativeSchemaVersion(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, "schema_version: -1\n"))
+	if !contains(ruleNames(v), "schema_version") {
+		t.Fatalf("expected a schema_version violation, got: %v", v)
+	}
+}
+
+func TestValidateRosterV1_RejectsSchemaVersion2(t *testing.T) {
+	v := ValidateRosterV1(mustParseRoster(t, "schema_version: 2\n"))
+	if !contains(ruleNames(v), "schema_version") {
+		t.Fatalf("expected a schema_version violation calling ValidateRosterV1 directly on a v2 document, got: %v", v)
+	}
+}
+
+func TestValidateRosterV2_RejectsSchemaVersion1(t *testing.T) {
+	v := ValidateRosterV2(mustParseRoster(t, "schema_version: 1\n"))
+	if !contains(ruleNames(v), "schema_version") {
+		t.Fatalf("expected a schema_version violation calling ValidateRosterV2 directly on a v1 document, got: %v", v)
 	}
 }
 
@@ -401,7 +451,10 @@ sudo:
 
 func TestValidateRoster_MultipleViolationsAllCollected(t *testing.T) {
 	// proves violations accumulate across independent checks rather than
-	// short-circuiting on the first one found.
+	// short-circuiting on the first one found. schema_version: 2 is itself
+	// valid here — an *invalid* version deliberately short-circuits (see
+	// TestValidateRoster_UnsupportedFutureSchemaVersion) since there's no
+	// version-specific rule set left to check anything else against.
 	v := ValidateRoster(mustParseRoster(t, `
 schema_version: 2
 users:
@@ -411,7 +464,7 @@ groups:
     category: team
 `))
 	names := ruleNames(v)
-	for _, want := range []string{"schema_version", "user name", "group category prefix"} {
+	for _, want := range []string{"user name", "group category prefix"} {
 		if !contains(names, want) {
 			t.Fatalf("expected violation %q among %v", want, names)
 		}
@@ -437,5 +490,57 @@ func TestRosterViolation_StringIncludesRuleAndDetail(t *testing.T) {
 	v := RosterViolation{Rule: "test-rule", Detail: "test detail"}
 	if got := v.String(); !strings.Contains(got, "test-rule") || !strings.Contains(got, "test detail") {
 		t.Fatalf("String() = %q, want it to include both the rule and detail", got)
+	}
+}
+
+func TestDetectRosterSchemaVersion_V1(t *testing.T) {
+	v, err := DetectRosterSchemaVersion([]byte("schema_version: 1\n"))
+	if err != nil {
+		t.Fatalf("DetectRosterSchemaVersion() error = %v", err)
+	}
+	if v != RosterSchemaV1 {
+		t.Fatalf("DetectRosterSchemaVersion() = %v, want RosterSchemaV1", v)
+	}
+}
+
+func TestDetectRosterSchemaVersion_V2(t *testing.T) {
+	v, err := DetectRosterSchemaVersion([]byte("schema_version: 2\n"))
+	if err != nil {
+		t.Fatalf("DetectRosterSchemaVersion() error = %v", err)
+	}
+	if v != RosterSchemaV2 {
+		t.Fatalf("DetectRosterSchemaVersion() = %v, want RosterSchemaV2", v)
+	}
+}
+
+func TestDetectRosterSchemaVersion_MissingVersion(t *testing.T) {
+	if _, err := DetectRosterSchemaVersion([]byte("users: []\n")); err == nil {
+		t.Fatal("expected an error for a document with no schema_version")
+	}
+}
+
+func TestDetectRosterSchemaVersion_NonIntegerVersion(t *testing.T) {
+	if _, err := DetectRosterSchemaVersion([]byte("schema_version: banana\n")); err == nil {
+		t.Fatal("expected an error for a non-integer schema_version")
+	}
+}
+
+func TestDetectRosterSchemaVersion_EncryptedReturnsErrRosterEncrypted(t *testing.T) {
+	_, err := DetectRosterSchemaVersion([]byte("$ANSIBLE_VAULT;1.1;AES256\n633864363...\n"))
+	if err != ErrRosterEncrypted {
+		t.Fatalf("DetectRosterSchemaVersion() error = %v, want ErrRosterEncrypted", err)
+	}
+}
+
+func TestDetectRosterSchemaVersion_UnsupportedFutureVersionStillDetects(t *testing.T) {
+	// Detection alone doesn't reject an unsupported version — that's
+	// ValidateRoster's job. A migration engine deciding whether it even
+	// knows how to handle this file needs the raw detected value first.
+	v, err := DetectRosterSchemaVersion([]byte("schema_version: 999\n"))
+	if err != nil {
+		t.Fatalf("DetectRosterSchemaVersion() error = %v", err)
+	}
+	if v != RosterSchemaVersion(999) {
+		t.Fatalf("DetectRosterSchemaVersion() = %v, want 999", v)
 	}
 }
