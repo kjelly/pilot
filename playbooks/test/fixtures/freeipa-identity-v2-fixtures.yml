@@ -1,0 +1,10 @@
+---
+# Schema-v2-only fixture for freeipa-identity: netgroups and hostgroup
+# nested membership. The admin secret is supplied separately (for example
+# -e @~/.vault/main.yaml).
+- name: Apply schema-v2 FreeIPA identity fixture
+  ansible.builtin.import_playbook: ../../apply/freeipa-identity-apply.yml
+  vars:
+    target_group: "{{ fixtures_target_group | default('freeipa-server') }}"
+    # import_playbook makes playbook_dir resolve to playbooks/apply.
+    freeipa_roster_file: "{{ playbook_dir }}/../test/fixtures/freeipa-identity-v2.roster.yaml"
