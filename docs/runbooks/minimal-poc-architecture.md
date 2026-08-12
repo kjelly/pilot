@@ -640,13 +640,41 @@ tradeoffs considered.
 
 ### 4.1 FreeIPA authorization
 
+**Prerequisite, confirmed live 2026-08-12 — personalize the test users' passwords before running
+any check below.** A roster user's `password.initial` value is a one-time bootstrap password with
+FreeIPA's forced-change flag already armed (this happens on first-ever password assignment
+regardless of the roster's own `force_change` setting — see §6's "brand-new roster user's first
+live login" row). A live SSH/sudo/`kinit` attempt using that initial value fails with "Password
+change required but no TTY available" (or an SSH session that hangs on an interactive password
+prompt it can't answer) — that is a missing prerequisite, not a check failure, and it is easy to
+misread as a real HBAC/sudo regression. Personalize each test user (both the allowed user and the
+denied user — the denied-user check below needs a *real*, usable credential too, not just a
+missing one) with a scripted 3-line forced-change `kinit` (old password, new password, new
+password repeat — no more, no less) before doing anything else:
+
+```bash
+printf '%s\n%s\n%s\n' "<initial password>" "<new personalized password>" "<new personalized password>" \
+  | pilot vm-target exec --name freeipa-server -- kinit alice
+```
+
+Use the **personalized** password (never the roster's `initial` value) for every check below and
+for the `ALICE_PASSWORD` env var in the repeatable form. Do not flip the roster's own
+`password.force_change` to `false` yet — that edit belongs with §4.4 (see its own note on doing it
+"whenever you next touch the roster"), not here.
+
 - Confirm FreeIPA services are active.
 - Use `ipa hbactest` for both `sshd` and `sudo` services.
 - With real test credentials, prove an allowed user can log in and run the roster-authorized
   `systemctl` command.
 - Prove the same user cannot run an unlisted command such as reading `/etc/shadow`.
-- Prove the denied user cannot log in. A credential-less BatchMode attempt is not evidence of HBAC
-  denial.
+- Prove the denied user cannot log in, using that user's own real (personalized) password — a
+  wrong-password or credential-less attempt is not evidence of HBAC denial, only of a failed
+  authentication, which would fail identically whether or not HBAC denies the user. Confirm the
+  denial is specifically an authorization decision, not an authentication failure, via
+  `journalctl -u ssh` on the target: a real HBAC denial shows `pam_sss(sshd:auth): authentication
+  success` immediately followed by `pam_sss(sshd:account): Access denied for user <name>`; a
+  wrong-password attempt never gets past `pam_sss(sshd:auth): authentication failure` in the first
+  place, and only proves the password was wrong.
 
 If `ipa hbactest` allows sudo but the first live sudo lookup is denied, use the SSSD cache recovery
 in §6 and repeat both checks.
@@ -658,6 +686,10 @@ vm-target topology status` rather than assuming one, since libvirt DHCP reservat
 guaranteed identical across rebuilds. It assumes `hbac.disable_allow_all: true` is set on the active
 roster (required by §2/§1) — otherwise `hbactest`'s top-level `Access granted` is always `True`
 regardless of the real per-rule result (see `docs/runbooks/freeipa-identity.md`'s note on this).
+**The script's own denied-user check uses a deliberately wrong password, not the denied user's
+real one** — it only proves a wrong password fails, which the prerequisite note above already
+explains is not HBAC evidence. Treat it as a cheap sanity check only, and additionally run the
+`journalctl`-based real-credentialed check above by hand for actual HBAC-denial evidence.
 
 ### 4.2 Metrics and logs through Grafana dependencies
 
