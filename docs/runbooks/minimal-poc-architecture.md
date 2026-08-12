@@ -537,11 +537,26 @@ Two traps found authoring the answers array:
 - It still needs a real PTY (same TTY guard as interactive `pilot deploy`) despite taking no live
   keystrokes — wrap it in a plain `trec` recorder, not `trec drive`.
 
-On a genuinely fresh host, if `nexus`'s `freeipa-nfs-server` component fails a real apply with
-`chgrp failed: failed to look up group <name>` for a roster-managed NFS share ownership group (e.g.
-`data-project-alpha-rw`), that group does not exist yet because §3.5's identity reconciliation has
-not run. Run §3.5 now, then re-run this site-wide deploy — every already-applied component reports
-`changed=0` and only the NFS share step completes.
+**Corrected 2026-08-12**: this used to describe a hard failure. As of HEAD `88b62db`,
+`freeipa-nfs-server-apply.yml` is self-healing instead: on a genuinely fresh host, if a
+roster-managed NFS share's ownership group (e.g. `data-ops-share`) does not exist yet because
+§3.5's identity reconciliation has not run, the playbook no longer fails the whole component with
+`chgrp failed: failed to look up group <name>`. It runs `getent group <name>` per share first
+(`changed_when: false`, `failed_when: false`), and for any share whose group doesn't resolve yet,
+prints a clear per-share warning (`Share <name>'s ownership group <group> is not yet resolvable via
+NSS/SSSD. Deferring this share until a later apply — run \`pilot reconcile\` (freeipa-identity) to
+create the roster's groups, then re-run this playbook to pick it up.`) and narrows
+`nfs_selected_server.shares` to just the ready ones — every other task in the component still runs
+and the overall play still reports `failed=0`. Confirmed live 2026-08-12 (minimal-poc
+revalidation): a site-wide deploy against a roster whose `ops-data` share's owning group
+(`data-ops-share`) did not exist yet in live FreeIPA reported `nexus failed=0` and emitted exactly
+this warning, deferring only that one share. **This means a clean `failed=0` site-wide deploy does
+not by itself prove every roster-managed NFS share was actually created** — check the deploy output
+for this warning (or just diff the roster's declared shares against a live `exportfs -v`/`ls` on
+the target) before assuming §3.5 is unnecessary. The remedy is unchanged: run §3.5, then re-run
+either this site-wide deploy or (faster) a single-component `pilot deploy` limited to
+`freeipa-nfs-server` — every already-applied component/share reports `changed=0` and only the
+deferred share's step completes.
 
 ### 3.5 Identity reconciliation
 
@@ -734,6 +749,13 @@ archive scrape target's permanently-zero read position as evidence of a bug (it 
 `docs/verification/log-shipping.md` §1 note), and do not treat Wazuh alerts alone (parsed,
 rule-matched events only) as a substitute for C-log-1 through C-log-3's raw per-host coverage.
 
+**Label-format mismatch between the two jobs, confirmed live 2026-08-12**: `pilot-siem`'s `host`
+label is the short real hostname (`nexus`, `ipa1`, `client-vm` — see the naming gotcha above), while
+`pilot-siem-wazuh-alerts`'s `host` label is the full FQDN taken verbatim from Wazuh's `agent.name`
+(`nexus.ipa.pilot.internal`, etc.). A query or dashboard panel that tries to correlate C-log-3's raw
+coverage against C-log-4's alert coverage with a naive `host=` join across both jobs will silently
+match nothing — normalize one side's label format (e.g. strip the domain suffix) before joining.
+
 **Legacy smoke check** (cheap first-pass only — insufficient alone, see above):
 
 ```bash
@@ -749,6 +771,12 @@ curl -s "http://<nexus-ip>:3100/loki/api/v1/label/job/values"
 - Create a unique file under `/etc` on an enrolled agent and confirm Wazuh manager receives the
   corresponding real-time `whodata` file-add alert.
 
+**Naming gotcha, confirmed live 2026-08-12**: `restic snapshots`' `Host` column reflects each VM's
+real FQDN (`ipa1.ipa.pilot.internal`, `nexus.ipa.pilot.internal`, `client-vm.ipa.pilot.internal`),
+not the inventory/topology alias — the same "real hostname, not the alias" gotcha §4.2 already
+documents for Loki's `host` label. Grepping the snapshot list for the literal string
+`freeipa-server` to confirm coverage finds nothing; use `ipa1.ipa.pilot.internal` instead.
+
 ### 4.4 Identity reconciler cycle
 
 1. Remove the allowed user's access/role-group membership from the roster and reconcile. Per §2's
@@ -759,7 +787,14 @@ curl -s "http://<nexus-ip>:3100/loki/api/v1/label/job/values"
 3. Restore membership and add one new allowed sudo command in the same roster edit; reconcile.
 4. Confirm both membership and command drift are corrected in effective state. A newly-added sudo
    command may need a client-side `sss_cache -E && systemctl restart sssd` before it takes effect
-   live (§6) — that is a cache-staleness gotcha, not evidence the reconcile itself failed.
+   live (§6) — that is a cache-staleness gotcha, not evidence the reconcile itself failed. **A
+   second, easily-confused failure mode, confirmed live 2026-08-12**: the roster grants an
+   exact-match (non-wildcarded) command string, and sudoers matches the full command line —
+   testing with any extra CLI argument the roster didn't grant (e.g. adding `--no-pager` to a
+   granted `systemctl status <unit>`) produces the identical `sudo: a password is required`
+   symptom as real cache staleness. Distinguish with `sudo -n -l` (shows the rule as `NOPASSWD`
+   regardless of which symptom you're hitting) and by retrying with the exact declared command
+   string before concluding the cache needs a flush.
 5. Reconcile again without changing the roster and record the real changed count.
 
 Do not round residual changes down to zero. Explain every repeatable non-idempotent task in the

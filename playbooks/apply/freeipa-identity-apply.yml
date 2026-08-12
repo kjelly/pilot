@@ -114,6 +114,7 @@
       register: freeipa_detected_server_fqdn
       changed_when: false
       failed_when: freeipa_detected_server_fqdn.stdout | trim | length == 0
+      check_mode: false
       when:
         - freeipa_roster.schema_version is defined
         - (freeipa_roster.freeipa | default({})).server | default('') | string | trim | length == 0

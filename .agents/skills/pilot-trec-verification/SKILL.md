@@ -742,7 +742,27 @@ elsewhere in scrollback can't mislead it. Use `SELECT` for `pilot
 deploy` only if you've verified it against the current build for that
 specific screen transition; default to `DOWN <n>`.
 
+### Prompts before the confirm chain — two previously undocumented steps
+
+Confirmed live 2026-08-12 against HEAD `88b62db` (minimal-poc revalidation):
+between the inventory-path prompt and the preflight menu, and again right
+after the vault-file prompt, two more `[Y/n]`/`[y/N]` confirms fire that
+neither this skill nor the runbook previously documented — script for both
+or the run stalls waiting on unscripted input:
+
+- 「要不要先看一下這份 inventory 的拓樸圖？」 `[Y/n]` — shows a topology
+  graph of role placement; safe to answer `n`.
+- 「這次套用要手動輸入 sudo(become)密碼嗎？」 `[y/N]` — default No; answer
+  `n` when every target host's `ansible_user` already has passwordless
+  sudo/root (true for this repo's vm-target-provisioned hosts, which
+  connect as `root` directly).
+
 ### The deploy confirm chain — exact prompts, exact defaults
+
+**Corrected 2026-08-12**: the text below through step 4 used to claim the
+preview-confirm and apply-confirm prompts share one identical literal
+string. That is not true of the current source — see the correction note
+right after the numbered list.
 
 After the preflight and the stage/`--limit`/`--tags`/vault/`-e`
 questions, `pilot deploy` runs this fixed confirm sequence (strings
@@ -750,31 +770,37 @@ from `deploy.go`; do not paraphrase them in `EXPECT`s):
 
 1. 「要先預覽(--check --diff)再決定要不要真的套用嗎？」 `[Y/n]` —
    default **Yes**.
-2. 「確定要執行以上指令嗎？」 `[Y/n]` — default **Yes**; answering it
+2. 「確定要執行預覽指令嗎？」 `[Y/n]` — default **Yes**; answering it
    runs the **preview**, streaming the full ansible output.
 3. On a clean preview: 「✅ 預覽完成，沒有錯誤。」 followed by
    「預覽看起來沒問題，要接著套用真正的變更嗎？」 `[y/N]` — default
    **No**. A bare `ENTER` here aborts with 「先在這裡停下來，沒有套用
    任何變更。」 and exits 0 — a run that *looks* fine but applied
    nothing. You must send a single `y` (no trailing `ENTER`, per §4).
-4. A **second** 「確定要執行以上指令嗎？」 `[Y/n]` for the real apply —
-   only now does anything mutate.
+4. 「確定要執行正式套用指令嗎？」 `[Y/n]` for the real apply — a
+   **different** literal string from step 2, not a repeat of it — only
+   now does anything mutate.
 
-Two script-killing traps in this chain, both hit live 2026-07-17
-during the minimal-poc re-verification (two site-deploy runs burned
-~36 minutes each without ever applying):
+**Correction, 2026-08-12**: this section previously claimed steps 2 and 4
+share one identical literal string, 「確定要執行以上指令嗎？」, appearing
+twice, and warned about an `EXPECT` collision between them. Reading
+`cmd/pilot/cmd/deploy.go`'s `executeDeploymentTransaction` directly against
+HEAD `88b62db` shows this is not the current source's behavior — it emits
+two distinct strings (`question := "確定要執行正式套用指令嗎？"`, then
+`if check { question = "確定要執行預覽指令嗎？" }`), so the specific
+same-string collision described below no longer applies (whether it ever
+did, or whether an earlier version of `deploy.go` really shared one string,
+was not re-verified — treat the current two-string behavior as
+authoritative for HEAD `88b62db` and later). The general anchoring
+discipline is still worth keeping as defensive practice against a future
+refactor reintroducing a shared string:
 
-- **Don't `EXPECT` a string that already occurred.** 「確定要執行以上
-  指令嗎」 and 「PLAY RECAP」 each appear multiple times (preflight
-  recap, the step-2 prompt, screen redraws). An `EXPECT` for the
-  step-4 prompt written as `確定要執行以上指令嗎` can match stale
-  scrollback while the preview is still streaming; the keystroke it
-  releases gets swallowed by the gap/echo behavior above, and the
-  wizard then sits at the `[y/N]` gate with the script already past
-  it — `WAIT_CHILD_EXIT` waits until `--timeout` kills the child
-  (`exit -1`, `ASSERT_EXIT 0` fails). Anchor the post-preview steps on
-  the strings that occur exactly once: 「✅ 預覽完成」 /
-  「要接著套用真正的變更嗎」.
+- **Don't `EXPECT` a string that already occurred.** 「PLAY RECAP」 still
+  appears multiple times (preflight recap, screen redraws) regardless of
+  the confirm-prompt fix above. An `EXPECT` on `PLAY RECAP` alone can still
+  match stale scrollback while the preview is still streaming; anchor the
+  post-preview step specifically on 「✅ 預覽完成」 or
+  「要接著套用真正的變更嗎」, not on `PLAY RECAP`.
 - **The apply gate defaults to No.** There is no drive script that
   reaches a real apply by only ever sending `ENTER` — if every confirm
   in your script is a bare `ENTER`, you recorded a preview, not a
