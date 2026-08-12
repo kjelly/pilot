@@ -1047,9 +1047,14 @@ func (m *Manager) teardown(ctx context.Context, t *Target) {
 // ---- Down -----------------------------------------------------------------
 
 // Down destroys the VM, undefines the domain, removes the per-target
-// artifacts, and drops the state record. Idempotent: a target whose
-// domain is already gone still has its state cleaned and returns nil.
-// An unknown name errors so the CLI can surface a typo.
+// artifacts, and drops the state record. Fully idempotent: a target
+// whose domain is already gone still has its state cleaned and
+// returns nil, and an unknown name is treated as already torn down
+// rather than an error — retried teardown loops (topology down,
+// ephemeral cleanup) must not fail just because a prior pass already
+// removed the record. Callers that need to surface a typo'd name
+// (the single-target `vm-target down` CLI command) check existence
+// themselves before calling Down.
 func (m *Manager) Down(ctx context.Context, name string) error {
 	if name == "" {
 		return errors.New("vmtarget: name is required")
@@ -1069,7 +1074,8 @@ func (m *Manager) Down(ctx context.Context, name string) error {
 		}
 	}
 	if found == nil {
-		return fmt.Errorf("vmtarget: no target named %q in state", name)
+		// Idempotent: a target that was already removed is already gone.
+		return nil
 	}
 	// Teardown happens OUTSIDE the state lock (it can take minutes for a
 	// running domain); the record is then dropped under the lock via

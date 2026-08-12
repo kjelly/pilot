@@ -251,10 +251,11 @@ func TestDown_RemovesState(t *testing.T) {
 	}
 }
 
-func TestDown_UnknownNameErrors(t *testing.T) {
+func TestDown_UnknownNameIsIdempotent(t *testing.T) {
 	m, _ := newTestManager(t, happyVirsh)
-	if err := m.Down(context.Background(), "nope"); err == nil || !strings.Contains(err.Error(), "no target named") {
-		t.Fatalf("want not-found, got %v", err)
+	// Idempotent: unknown target is already gone — no error.
+	if err := m.Down(context.Background(), "nope"); err != nil {
+		t.Fatalf("want nil for unknown target, got %v", err)
 	}
 }
 

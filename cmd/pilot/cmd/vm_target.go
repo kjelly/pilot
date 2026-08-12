@@ -253,6 +253,11 @@ func runVtDown(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Down itself is idempotent (retried teardown loops must not fail on an
+	// already-gone target), so a typo'd --name has to be caught here instead.
+	if _, err := m.Get(context.Background(), vtName); err != nil {
+		return err
+	}
 	if err := m.Down(context.Background(), vtName); err != nil {
 		return err
 	}
