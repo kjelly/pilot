@@ -1,5 +1,5 @@
 ---
-# Canonical freeipa-identity roster (schema_version: 1).
+# Canonical freeipa-identity roster (schema_version: 2).
 #
 # Keep the real file outside git and encrypt it with ansible-vault. Because
 # `groups` and `hosts` are Ansible magic variables, DO NOT pass this file with
@@ -12,8 +12,12 @@
 #     --vault-password-file ~/.vault/vault-pass
 #
 # Identity, HBAC/sudo, Kerberos NFSv4 server, and IPA automount clients are
-# supported. Migration remains a separate fail-closed delivery batch.
-schema_version: 1
+# supported. An old schema_version: 1 roster auto-migrates the first time
+# `pilot edit`/the MCP roster driver/`pilot deploy`/`pilot reconcile` opens
+# it (EnsureRosterCurrent) — or run `pilot roster migrate <file>` explicitly.
+# `migration` (declarative bulk rename/removal) remains a separate
+# fail-closed delivery batch.
+schema_version: 2
 
 freeipa:
   server: ipa1.ipa.pilot.internal
@@ -96,8 +100,66 @@ groups:
       users: [alice]
       groups: []
 
-hosts: []
-hostgroups: []
+hosts:
+  - name: web01.ipa.pilot.internal
+    state: present
+    ip_address: 192.168.50.21
+    description: Web server 01
+  - name: web02.ipa.pilot.internal
+    state: present
+    ip_address: 192.168.50.22
+    description: Web server 02
+
+hostgroups:
+  - name: web-servers
+    state: present
+    description: Web servers
+    membership:
+      authoritative: true
+      hosts: [web01.ipa.pilot.internal, web02.ipa.pilot.internal]
+      hostgroups: []
+
+  # Nested hostgroup membership (membership.hostgroups) is authoritative and
+  # fully reconciled, same as membership.hosts.
+  - name: production-linux
+    state: present
+    description: All production Linux systems
+    membership:
+      authoritative: true
+      hosts: []
+      hostgroups: [web-servers]
+
+# Netgroups are optional and v2-only: a FreeIPA netgroup can contain users,
+# groups, hosts, hostgroups, and nested netgroups, feeding NSS/NFS/legacy
+# UNIX consumers (not HBAC/sudo, which stay hostgroup-scoped). Names must
+# match ^ng-[a-z0-9][a-z0-9_.-]*$ and not collide with a hostgroup name;
+# membership.authoritative must be true; every reference must resolve to
+# something else declared in this roster; no netgroup may directly or
+# transitively contain itself.
+netgroups:
+  - name: ng-project-alpha-clients
+    state: present
+    description: Project Alpha client machines
+    nis_domain: null
+    membership:
+      authoritative: true
+      users: []
+      groups: []
+      hosts: []
+      hostgroups: [web-servers]
+      netgroups: []
+
+  - name: ng-build-environment
+    state: present
+    description: Build environment
+    membership:
+      authoritative: true
+      users: []
+      groups: []
+      hosts: []
+      hostgroups: [production-linux]
+      netgroups: [ng-project-alpha-clients]
+
 hbac:
   disable_allow_all: true
   services:
@@ -163,7 +225,16 @@ nfs:
               named_groups:
                 - {name: data-project-alpha-rw, permissions: rwx}
           export:
-            clients: [{type: network, value: 192.168.50.0/24}]
+            # network/host render as a bare value; hostgroup/netgroup render
+            # as @value (implemented once, shared by the pseudo-root export
+            # and every individual share — see
+            # playbooks/apply/templates/freeipa-nfs-exports.j2). `raw` also
+            # exists but is a migration compatibility escape hatch only —
+            # never hand-author it.
+            clients:
+              - {type: network, value: 192.168.50.0/24}
+              - {type: hostgroup, value: web-servers}
+              - {type: netgroup, value: ng-project-alpha-clients}
             options: [rw, sync, root_squash, sec=krb5i]
           automount:
             enabled: true

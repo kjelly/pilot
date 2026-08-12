@@ -79,8 +79,11 @@
     ipa_hostgroups: []
     ipa_hbac_rules: []
     ipa_sudo_rules: []
+    # Schema-v2-only: netgroups have no legacy ipa_* equivalent, so this is
+    # never populated via -e — only by canonical roster normalization below.
+    ipa_netgroups: []
 
-    # Canonical roster schema (schema_version: 1).  The legacy ipa_* lists
+    # Canonical roster schema (schema_version: 1 or 2).  The legacy ipa_* lists
     # above remain accepted during the compatibility window, but a roster may
     # not mix both models.  Canonical input is normalized before kinit so all
     # validation fails before mutation.
@@ -131,15 +134,15 @@
     - name: "Gate: canonical roster version and legacy fields are mutually exclusive"
       ansible.builtin.assert:
         that:
-          - freeipa_roster.schema_version | int == 1
+          - freeipa_roster.schema_version | int in [1, 2]
           - ipa_users | length == 0
           - ipa_groups | length == 0
           - ipa_hostgroups | length == 0
           - ipa_hbac_rules | length == 0
           - ipa_sudo_rules | length == 0
         fail_msg: >-
-          Canonical rosters require schema_version: 1 and must not mix users/
-          groups/hostgroups/hbac/sudo with legacy ipa_* lists.
+          Canonical rosters require schema_version: 1 or 2 and must not mix
+          users/groups/hostgroups/hbac/sudo with legacy ipa_* lists.
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
@@ -161,7 +164,7 @@
               'schema_version', 'freeipa', 'users', 'groups', 'hosts',
               'hostgroups', 'hbac', 'sudo', 'nfs', 'nfs_clients',
               'migration', 'policy_exceptions'
-            ])) | length == 0
+            ] + (['netgroups'] if freeipa_roster.schema_version | int >= 2 else []))) | length == 0
           - >-
             ((freeipa_roster.freeipa | default({})).keys() | list |
              difference(['domain', 'realm', 'server', 'admin', 'defaults', 'safety'])) | length == 0
@@ -265,6 +268,83 @@
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
+    # netgroups are schema-v2-only (a v1 roster declaring one already fails
+    # the top-level-keys gate above as unknown), so every gate below only
+    # runs for schema_version >= 2. Deliberately NOT replicated here: nested-
+    # netgroup cycle detection. Pure Jinja has no reasonable way to walk an
+    # arbitrary-depth graph, and this repo has no existing precedent for
+    # doing so safely (freeipa-dns.md's changelog documents how a wrong
+    # assumption about `ipa ... --all` output silently broke a much simpler
+    # regex-based check for an entire DRAFT cycle, undetected until real-VM
+    # testing) — pilot roster lint / ValidateRosterV2's checkNetgroups
+    # (internal/inventory/roster_netgroup.go) is the authoritative cycle
+    # gate; a roster reaching this playbook without going through pilot at
+    # least once is already outside every other gate's safety net too.
+    - name: "Gate: canonical netgroup objects are structurally valid"
+      ansible.builtin.assert:
+        that:
+          - item.name is match('^ng-[a-z0-9][a-z0-9_.-]*$')
+          - item.state | default('present') in ['present', 'absent']
+          - (item.membership | default({})).authoritative | default(false) | bool
+          - >-
+            (item.keys() | list | difference([
+              'name', 'state', 'description', 'nis_domain', 'membership'
+            ])) | length == 0
+          - >-
+            ((item.membership | default({})).keys() | list |
+             difference(['authoritative', 'users', 'groups', 'hosts', 'hostgroups', 'netgroups'])) | length == 0
+        fail_msg: "Invalid canonical netgroup {{ item.name | default('unnamed') }}."
+      loop: "{{ freeipa_roster.netgroups | default([]) }}"
+      loop_control:
+        label: "{{ item.name | default('unnamed') }}"
+      when:
+        - freeipa_roster.schema_version is defined
+        - freeipa_roster.schema_version | int >= 2
+      tags: [always]
+
+    - name: "Gate: canonical netgroup names are unique and don't collide with hostgroups"
+      ansible.builtin.assert:
+        that:
+          - >-
+            freeipa_roster.netgroups | default([]) | map(attribute='name') | list | unique | length ==
+            freeipa_roster.netgroups | default([]) | length
+          - >-
+            freeipa_roster.netgroups | default([]) | map(attribute='name') | list |
+            intersect(freeipa_roster.hostgroups | default([]) | map(attribute='name') | list) | length == 0
+        fail_msg: "Canonical roster has duplicate netgroup names or a netgroup/hostgroup name collision."
+      when:
+        - freeipa_roster.schema_version is defined
+        - freeipa_roster.schema_version | int >= 2
+      tags: [always]
+
+    - name: "Gate: canonical netgroup membership references are resolvable"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (item.membership | default({})).users | default([]) |
+            difference(freeipa_roster.users | default([]) | map(attribute='name') | list) | length == 0
+          - >-
+            (item.membership | default({})).groups | default([]) |
+            difference(freeipa_roster.groups | default([]) | map(attribute='name') | list) | length == 0
+          - >-
+            (item.membership | default({})).hosts | default([]) |
+            difference(freeipa_roster.hosts | default([]) | map(attribute='name') | list) | length == 0
+          - >-
+            (item.membership | default({})).hostgroups | default([]) |
+            difference(freeipa_roster.hostgroups | default([]) | map(attribute='name') | list) | length == 0
+          - >-
+            (item.membership | default({})).netgroups | default([]) |
+            difference(freeipa_roster.netgroups | default([]) | map(attribute='name') | list) | length == 0
+          - item.name not in ((item.membership | default({})).netgroups | default([]))
+        fail_msg: "Canonical netgroup {{ item.name | default('unnamed') }} has an unresolved membership reference or directly contains itself."
+      loop: "{{ freeipa_roster.netgroups | default([]) }}"
+      loop_control:
+        label: "{{ item.name | default('unnamed') }}"
+      when:
+        - freeipa_roster.schema_version is defined
+        - freeipa_roster.schema_version | int >= 2
+      tags: [always]
+
     - name: "Gate: canonical HBAC rules are safe and references are resolvable"
       ansible.builtin.assert:
         that:
@@ -339,6 +419,7 @@
         ipa_hostgroups: []
         ipa_hbac_rules: []
         ipa_sudo_rules: []
+        ipa_netgroups: []
         ipa_hbac_services: "{{ (freeipa_roster.hbac | default({})).services | default([]) }}"
         ipa_sudo_command_groups: "{{ (freeipa_roster.sudo | default({})).command_groups | default([]) }}"
         ipa_hbac_disable_allow_all: "{{ (freeipa_roster.hbac | default({})).disable_allow_all | default(false) }}"
@@ -396,13 +477,37 @@
           {{ ipa_hostgroups + [{
             'name': item.name,
             'desc': item.description | default(item.name),
-            'hosts': (item.membership | default({})).hosts | default([])
+            'hosts': (item.membership | default({})).hosts | default([]),
+            'hostgroups': (item.membership | default({})).hostgroups | default([])
           }] }}
       loop: "{{ freeipa_roster.hostgroups | default([]) }}"
       when:
         - freeipa_roster.schema_version is defined
         - item.state | default('present') == 'present'
       tags: [always, C13]
+
+    # Unlike ipa_hostgroups above, this keeps state: absent entries too (not
+    # filtered here) — netgroups need real deletion support (roster-schema-
+    # v2 migration spec §24 "delete netgroups marked absent"), so
+    # ipa_active_netgroups (below) and the delete task (── Netgroups ──
+    # section) each filter this same full list for their own purpose,
+    # mirroring ipa_users/ipa_groups' pattern rather than ipa_hostgroups',
+    # which has no delete task at all.
+    - name: "Normalize canonical netgroups for the compatibility reconciler"
+      ansible.builtin.set_fact:
+        ipa_netgroups: >-
+          {{ ipa_netgroups + [{
+            'name': item.name,
+            'state': item.state | default('present'),
+            'desc': item.description | default(item.name),
+            'nisdomain': item.nis_domain | default(none),
+            'membership': item.membership | default({})
+          }] }}
+      loop: "{{ freeipa_roster.netgroups | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: freeipa_roster.schema_version is defined
+      tags: [always]
 
     - name: "Normalize canonical HBAC rules for the compatibility reconciler"
       ansible.builtin.set_fact:
@@ -476,6 +581,11 @@
           {{ (ipa_groups | rejectattr('state', 'defined') | list)
              + (ipa_groups | selectattr('state', 'defined') |
                 rejectattr('state', 'equalto', 'absent') | list) }}
+        # ipa_netgroups always has an explicit state (normalization above
+        # defaults it), unlike ipa_users/ipa_groups which can arrive via
+        # legacy -e with no state key at all — so this needs only the one
+        # simpler filter.
+        ipa_active_netgroups: "{{ ipa_netgroups | rejectattr('state', 'equalto', 'absent') | list }}"
       tags: [always]
 
     - name: "Gate: admin credential present (fail early, before any mutation)"
@@ -1063,16 +1173,39 @@
         - "'already a member' not in (ipa_hostgroup_member.stdout | default('') + ipa_hostgroup_member.stderr | default(''))"
       tags: [identity, hostgroups]
 
-    # `hostgroup-add-member` above only ever adds — a host removed from the
-    # roster's `hosts:` list keeps stale membership forever without this.
-    # `hostgroup-show` always reports hosts as FQDNs even when the roster
-    # (and the add task above) used a short name that IPA itself resolved —
-    # normalize both sides to the short name before diffing, or every
-    # single rerun would see "client-vm.ipa.pilot.internal" (live) as
-    # absent from a roster that says "client-vm", remove it, then the
-    # existing add task immediately re-adds it — permanent flip-flop
-    # instead of a settled `changed=0` idempotent rerun.
-    - name: "Look up current hostgroup host memberships"
+    - name: "Ensure nested hostgroup membership"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hostgroup-add-member
+          - "{{ item.0.name }}"
+          - "--hostgroups={{ item.1 }}"
+      loop: "{{ ipa_hostgroups | subelements('hostgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0.name }}"
+      register: ipa_hostgroup_nested_member
+      changed_when: "'Number of members added 1' in (ipa_hostgroup_nested_member.stdout | default(''))"
+      failed_when:
+        - ipa_hostgroup_nested_member.rc != 0
+        - "'already a member' not in (ipa_hostgroup_nested_member.stdout | default('') + ipa_hostgroup_nested_member.stderr | default(''))"
+      tags: [identity, hostgroups, C19]
+
+    # `hostgroup-add-member` above only ever adds — a host or nested
+    # hostgroup removed from the roster's `hosts:`/`hostgroups:` lists keeps
+    # stale membership forever without this. `hostgroup-show` always
+    # reports hosts as FQDNs even when the roster (and the add task above)
+    # used a short name that IPA itself resolved — normalize both sides to
+    # the short name before diffing, or every single rerun would see
+    # "client-vm.ipa.pilot.internal" (live) as absent from a roster that
+    # says "client-vm", remove it, then the existing add task immediately
+    # re-adds it — permanent flip-flop instead of a settled `changed=0`
+    # idempotent rerun. Nested hostgroup names need no such normalization —
+    # verified against a real FreeIPA server (not assumed): `hostgroup-show
+    # --all`'s nested-hostgroup field is "Member host-groups:" (lowercase,
+    # hyphenated, plural — its own distinct convention, not "Member
+    # hostgroups:"/"Member Host Groups:"), and it reports plain short names
+    # on both sides already, unlike the host FQDN field.
+    - name: "Look up current hostgroup memberships"
       ansible.builtin.command:
         argv: [ipa, hostgroup-show, "{{ item.name }}", --all]
       loop: "{{ ipa_hostgroups }}"
@@ -1083,15 +1216,23 @@
       failed_when: false
       tags: [identity, hostgroups]
 
-    - name: "Compute stale hostgroup host memberships to remove"
+    - name: "Compute stale hostgroup memberships to remove"
       ansible.builtin.set_fact:
-        ipa_hostgroup_membership_removals: "{{ (ipa_hostgroup_membership_removals | default([])) + [{'name': item.item.name, 'hosts': stale_hosts}] }}"
+        ipa_hostgroup_membership_removals: >-
+          {{ (ipa_hostgroup_membership_removals | default([])) + [{
+            'name': item.item.name,
+            'hosts': stale_hosts,
+            'hostgroups': stale_hostgroups
+          }] }}
       vars:
-        live_line: "{{ ((item.stdout | default('') | regex_findall('^  Member hosts: (.*)$', multiline=True)) + ['']) | first | trim }}"
-        live_hosts_fqdn: "{{ [] if live_line == '' else live_line.split(', ') }}"
+        hosts_line: "{{ ((item.stdout | default('') | regex_findall('^  Member hosts: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        live_hosts_fqdn: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
         live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | list }}"
         roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | list }}"
         stale_hosts: "{{ live_hosts | difference(roster_hosts) }}"
+        hostgroups_line: "{{ ((item.stdout | default('') | regex_findall('^  Member host-groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') }}"
+        stale_hostgroups: "{{ live_hostgroups | difference(item.item.hostgroups | default([])) }}"
       loop: "{{ ipa_hostgroup_show.results }}"
       loop_control:
         label: "{{ item.item.name | default('n/a') }}"
@@ -1113,6 +1254,269 @@
       failed_when:
         - ipa_hostgroup_removal.rc != 0
       tags: [identity, hostgroups]
+
+    - name: "Remove stale nested hostgroup memberships"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - hostgroup-remove-member
+          - "{{ item.0.name }}"
+          - "--hostgroups={{ item.1 }}"
+      loop: "{{ ipa_hostgroup_membership_removals | default([]) | subelements('hostgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.name }} -/-> {{ item.1 }}"
+      register: ipa_hostgroup_nested_removal
+      changed_when: "'Number of members removed 1' in (ipa_hostgroup_nested_removal.stdout | default(''))"
+      failed_when:
+        - ipa_hostgroup_nested_removal.rc != 0
+      tags: [identity, hostgroups, C19]
+
+    # ── Netgroups ──────────────────────────────────────────────────────
+    # Schema-v2-only (ipa_active_netgroups/ipa_netgroups default to [] when
+    # the roster has none, making every task below a no-op — same
+    # unconditional style as the hostgroup tasks above, no schema_version
+    # gate needed here since that already happened at normalization time).
+    #
+    # `ipa netgroup-show --all`'s member-type field labels are singular and
+    # inconsistent with every other object type in this file (verified
+    # against a real FreeIPA server, not assumed — see the roster-schema-v2
+    # migration spec's Phase 7 notes): "Member User:", "Member Group:",
+    # "Member Host:", "Member Hostgroup:" (all singular, unlike group-show's
+    # plural "Member users:"), and "Member netgroups:" (lowercase, plural —
+    # unlike every other member type on this same object). Getting any one
+    # of these wrong would silently break authoritative pruning exactly the
+    # way freeipa-dns.md's changelog documents happening before: the regex
+    # never matches, current-state reads as permanently empty, and nothing
+    # ever gets flagged as stale.
+    #
+    # All state: present netgroups are created (and existing ones' members
+    # reconciled) as one pass each, fully, before any nested-netgroup
+    # membership is added — so a netgroup referencing another one declared
+    # later in the roster's netgroups: list still finds it already created,
+    # regardless of YAML order.
+    - name: "Ensure IPA netgroups exist"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'netgroup-add', item.name, '--desc=' + item.desc]
+             + (['--nisdomain=' + item.nisdomain] if item.nisdomain else []) }}
+      loop: "{{ ipa_active_netgroups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_netgroup_add
+      changed_when: "'Added netgroup' in (ipa_netgroup_add.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_add.rc != 0
+        - "'already exists' not in (ipa_netgroup_add.stderr | default(''))"
+      tags: [identity, netgroups]
+
+    # `netgroup-add` above no-ops on "already exists" — an already-created
+    # netgroup's own desc/nisdomain never gets corrected by editing the
+    # roster and rerunning without this. Unconditional declarative
+    # reconcile, same idiom as "Reconcile IPA hostgroup descriptions" above.
+    - name: "Reconcile IPA netgroup descriptions and NIS domain"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'netgroup-mod', item.name, '--desc=' + item.desc]
+             + (['--nisdomain=' + item.nisdomain] if item.nisdomain else []) }}
+      loop: "{{ ipa_active_netgroups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_netgroup_mod
+      changed_when: "'Modified netgroup' in (ipa_netgroup_mod.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_mod.rc != 0
+        - "'no modifications to be performed' not in (ipa_netgroup_mod.stderr | default(''))"
+      tags: [identity, netgroups]
+
+    - name: "Ensure netgroup direct user membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-add-member, "{{ item.0.name }}", "--users={{ item.1 }}"]
+      loop: "{{ ipa_active_netgroups | subelements('membership.users', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0.name }}"
+      register: ipa_netgroup_user_add
+      changed_when: "'Number of members added 1' in (ipa_netgroup_user_add.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_user_add.rc != 0
+        - "'already a member' not in (ipa_netgroup_user_add.stdout | default('') + ipa_netgroup_user_add.stderr | default(''))"
+      tags: [identity, netgroups, C20]
+
+    - name: "Ensure netgroup direct group membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-add-member, "{{ item.0.name }}", "--groups={{ item.1 }}"]
+      loop: "{{ ipa_active_netgroups | subelements('membership.groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0.name }}"
+      register: ipa_netgroup_group_add
+      changed_when: "'Number of members added 1' in (ipa_netgroup_group_add.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_group_add.rc != 0
+        - "'already a member' not in (ipa_netgroup_group_add.stdout | default('') + ipa_netgroup_group_add.stderr | default(''))"
+      tags: [identity, netgroups, C21]
+
+    - name: "Ensure netgroup direct host membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-add-member, "{{ item.0.name }}", "--hosts={{ item.1 }}"]
+      loop: "{{ ipa_active_netgroups | subelements('membership.hosts', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0.name }}"
+      register: ipa_netgroup_host_add
+      changed_when: "'Number of members added 1' in (ipa_netgroup_host_add.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_host_add.rc != 0
+        - "'already a member' not in (ipa_netgroup_host_add.stdout | default('') + ipa_netgroup_host_add.stderr | default(''))"
+      tags: [identity, netgroups, C22]
+
+    - name: "Ensure netgroup direct hostgroup membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-add-member, "{{ item.0.name }}", "--hostgroups={{ item.1 }}"]
+      loop: "{{ ipa_active_netgroups | subelements('membership.hostgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0.name }}"
+      register: ipa_netgroup_hostgroup_add
+      changed_when: "'Number of members added 1' in (ipa_netgroup_hostgroup_add.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_hostgroup_add.rc != 0
+        - "'already a member' not in (ipa_netgroup_hostgroup_add.stdout | default('') + ipa_netgroup_hostgroup_add.stderr | default(''))"
+      tags: [identity, netgroups, C23]
+
+    - name: "Ensure nested netgroup membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-add-member, "{{ item.0.name }}", "--netgroups={{ item.1 }}"]
+      loop: "{{ ipa_active_netgroups | subelements('membership.netgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0.name }}"
+      register: ipa_netgroup_nested_add
+      changed_when: "'Number of members added 1' in (ipa_netgroup_nested_add.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_nested_add.rc != 0
+        - "'already a member' not in (ipa_netgroup_nested_add.stdout | default('') + ipa_netgroup_nested_add.stderr | default(''))"
+      tags: [identity, netgroups, C24]
+
+    - name: "Look up current netgroup direct membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-show, "{{ item.name }}", --all]
+      loop: "{{ ipa_active_netgroups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_netgroup_show
+      changed_when: false
+      failed_when: false
+      tags: [identity, netgroups]
+
+    # membership.authoritative is required true by the earlier structural
+    # gate (and by ValidateRosterV2's checkNetgroups), so this condition is
+    # defensive rather than load-bearing — same posture as the equivalent
+    # canonical-group authoritative check above.
+    - name: "Compute stale netgroup memberships to remove"
+      ansible.builtin.set_fact:
+        ipa_netgroup_membership_removals: >-
+          {{ (ipa_netgroup_membership_removals | default([])) + [{
+            'name': item.item.name,
+            'users': live_users | difference(item.item.membership.users | default([])),
+            'groups': live_groups | difference(item.item.membership.groups | default([])),
+            'hosts': live_hosts | difference(item.item.membership.hosts | default([])),
+            'hostgroups': live_hostgroups | difference(item.item.membership.hostgroups | default([])),
+            'netgroups': live_netgroups | difference(item.item.membership.netgroups | default([]))
+          }] }}
+      vars:
+        stdout: "{{ item.stdout | default('') }}"
+        users_line: "{{ ((stdout | regex_findall('^  Member User: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        groups_line: "{{ ((stdout | regex_findall('^  Member Group: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        hosts_line: "{{ ((stdout | regex_findall('^  Member Host: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        hostgroups_line: "{{ ((stdout | regex_findall('^  Member Hostgroup: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        netgroups_line: "{{ ((stdout | regex_findall('^  Member netgroups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        live_users: "{{ [] if users_line == '' else users_line.split(', ') }}"
+        live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') }}"
+        live_hosts: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
+        live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') }}"
+        live_netgroups: "{{ [] if netgroups_line == '' else netgroups_line.split(', ') }}"
+      loop: "{{ ipa_netgroup_show.results }}"
+      loop_control:
+        label: "{{ item.item.name | default('n/a') }}"
+      when:
+        - not (item.skipped | default(false))
+        - (item.item.membership | default({})).authoritative | default(true) | bool
+      tags: [identity, netgroups]
+
+    - name: "Remove stale netgroup direct user membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-remove-member, "{{ item.0.name }}", "--users={{ item.1 }}"]
+      loop: "{{ ipa_netgroup_membership_removals | default([]) | subelements('users', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -/-> {{ item.0.name }}"
+      register: ipa_netgroup_user_remove
+      changed_when: "'Number of members removed 1' in (ipa_netgroup_user_remove.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_user_remove.rc != 0
+      tags: [identity, netgroups, C20]
+
+    - name: "Remove stale netgroup direct group membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-remove-member, "{{ item.0.name }}", "--groups={{ item.1 }}"]
+      loop: "{{ ipa_netgroup_membership_removals | default([]) | subelements('groups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -/-> {{ item.0.name }}"
+      register: ipa_netgroup_group_remove
+      changed_when: "'Number of members removed 1' in (ipa_netgroup_group_remove.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_group_remove.rc != 0
+      tags: [identity, netgroups, C21]
+
+    - name: "Remove stale netgroup direct host membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-remove-member, "{{ item.0.name }}", "--hosts={{ item.1 }}"]
+      loop: "{{ ipa_netgroup_membership_removals | default([]) | subelements('hosts', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -/-> {{ item.0.name }}"
+      register: ipa_netgroup_host_remove
+      changed_when: "'Number of members removed 1' in (ipa_netgroup_host_remove.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_host_remove.rc != 0
+      tags: [identity, netgroups, C22]
+
+    - name: "Remove stale netgroup direct hostgroup membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-remove-member, "{{ item.0.name }}", "--hostgroups={{ item.1 }}"]
+      loop: "{{ ipa_netgroup_membership_removals | default([]) | subelements('hostgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -/-> {{ item.0.name }}"
+      register: ipa_netgroup_hostgroup_remove
+      changed_when: "'Number of members removed 1' in (ipa_netgroup_hostgroup_remove.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_hostgroup_remove.rc != 0
+      tags: [identity, netgroups, C23]
+
+    - name: "Remove stale nested netgroup membership"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-remove-member, "{{ item.0.name }}", "--netgroups={{ item.1 }}"]
+      loop: "{{ ipa_netgroup_membership_removals | default([]) | subelements('netgroups', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.1 }} -/-> {{ item.0.name }}"
+      register: ipa_netgroup_nested_remove
+      changed_when: "'Number of members removed 1' in (ipa_netgroup_nested_remove.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_nested_remove.rc != 0
+      tags: [identity, netgroups, C24]
+
+    # Deliberately last of the netgroup tasks (mirroring the roster-schema-
+    # v2 migration spec's reconciliation order: netgroups are only deleted
+    # after every other netgroup-related reconciliation in this file has
+    # run) — a future consumer added in another playbook run (e.g. NFS
+    # exports referencing a netgroup selector) should see this file's own
+    # membership/creation settle first.
+    - name: "Delete netgroups explicitly marked absent"
+      ansible.builtin.command:
+        argv: [ipa, netgroup-del, "{{ item.name }}"]
+      loop: "{{ ipa_netgroups | selectattr('state', 'equalto', 'absent') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_netgroup_delete
+      changed_when: "'Deleted netgroup' in (ipa_netgroup_delete.stdout | default(''))"
+      failed_when:
+        - ipa_netgroup_delete.rc != 0
+        - "'not found' not in (ipa_netgroup_delete.stderr | default(''))"
+      tags: [identity, netgroups]
 
     # ── HBAC rules (who may LOG IN, and where) ──────────────────────────
     # A rule with no hosts/hostgroups defaults to hostcat=all (login allowed
