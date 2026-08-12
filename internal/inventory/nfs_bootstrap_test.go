@@ -19,8 +19,8 @@ func TestWriteMinimalNFSServerRosterCreatesDemoSkeleton(t *testing.T) {
 	}
 	content := string(data)
 	for _, want := range []string{
-		"schema_version: 1",
-		"domain: ipa.example.test",
+		"schema_version: 2",
+		"netgroups: []",
 		"principal: admin",
 		"password: a-real-password",
 		"host: nfs-demo.ipa.example.test",
@@ -31,8 +31,42 @@ func TestWriteMinimalNFSServerRosterCreatesDemoSkeleton(t *testing.T) {
 			t.Fatalf("roster missing %q:\n%s", want, content)
 		}
 	}
+	if strings.Contains(content, "domain:") {
+		t.Fatalf("a new schema-v2 roster must not generate freeipa.domain:\n%s", content)
+	}
 	if mode := dataMode(t, path); mode.Perm() != 0o600 {
 		t.Fatalf("roster mode = %o, want 600", mode.Perm())
+	}
+
+	root := mustParseRoster(t, content)
+	if v := ValidateRosterV2(root); len(v) != 0 {
+		t.Fatalf("generated skeleton failed ValidateRosterV2: %v", v)
+	}
+}
+
+func TestWriteMinimalRosterSkeletonCreatesSchemaV2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".vault", "ipa-identity.yaml")
+	if err := WriteMinimalRosterSkeleton(path, "admin", "a-real-password"); err != nil {
+		t.Fatalf("WriteMinimalRosterSkeleton() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read roster: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{"schema_version: 2", "netgroups: []", "principal: admin", "password: a-real-password"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("roster missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "domain:") {
+		t.Fatalf("a new schema-v2 roster must not generate freeipa.domain:\n%s", content)
+	}
+
+	root := mustParseRoster(t, content)
+	if v := ValidateRosterV2(root); len(v) != 0 {
+		t.Fatalf("generated skeleton failed ValidateRosterV2: %v", v)
 	}
 }
 

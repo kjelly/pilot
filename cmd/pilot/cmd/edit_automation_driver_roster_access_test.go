@@ -83,6 +83,80 @@ func TestEditAutomationDriverRosterAccessFlow_HostgroupAndHBAC(t *testing.T) {
 	}
 }
 
+// TestEditAutomationDriverRosterAccessFlow_HostgroupNestedMembership covers
+// the roster-schema-v2 migration spec's §8 requirement: hostgroup nested
+// membership (membership.hostgroups) is now a real, editable, reconciled
+// field, not just something freeipa-identity-apply.yml silently ignored.
+func TestEditAutomationDriverRosterAccessFlow_HostgroupNestedMembership(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMinimalRosterFixture(t, dir)
+
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_hostgroup", Name: "hg-child"},
+			{Action: "create_hostgroup", Name: "hg-parent"},
+			{Action: "set_hostgroup_hostgroups", Name: "hg-parent", Hostgroups: []string{"hg-child"}},
+		},
+	}
+
+	var events []automationTraceEvent
+	r := newEditRouterModel(dir)
+	d := automationDriver{trace: func(event automationTraceEvent) { events = append(events, event) }}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	for _, event := range events {
+		if event.Result != "ok" {
+			t.Fatalf("bad trace event: %+v", event)
+		}
+	}
+
+	hg, found, err := inventory.RosterHostgroup(path, "hg-parent")
+	if err != nil {
+		t.Fatalf("RosterHostgroup() error = %v", err)
+	}
+	if !found {
+		t.Fatal("expected hostgroup hg-parent to exist")
+	}
+	mem, _ := hg["membership"].(map[string]any)
+	hostgroups, _ := mem["hostgroups"].([]any)
+	if len(hostgroups) != 1 || hostgroups[0] != "hg-child" {
+		t.Fatalf("membership.hostgroups = %+v, want [hg-child]", hostgroups)
+	}
+}
+
+// TestPushRosterHostgroupHostgroups_ExcludesSelfFromChoices proves the
+// picker never offers a hostgroup as its own nested member — there's no
+// roster/Ansible validation gate rejecting a direct self-reference here
+// (unlike netgroups), so the UI is the only thing preventing it.
+func TestPushRosterHostgroupHostgroups_ExcludesSelfFromChoices(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMinimalRosterFixture(t, dir)
+	if err := inventory.AppendRosterHostgroup(path, "hg-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := inventory.AppendRosterHostgroup(path, "hg-b"); err != nil {
+		t.Fatal(err)
+	}
+
+	var router editRouterModel
+	pushRosterHostgroupHostgroups(&router, dir, path, "hg-a", nil)
+
+	list, ok := router.current.(multiSelectModel)
+	if !ok {
+		t.Fatalf("router.current = %T, want multiSelectModel", router.current)
+	}
+	for _, item := range list.items {
+		if item.Label == "hg-a" {
+			t.Fatalf("choices included hg-a itself: %+v", list.items)
+		}
+	}
+	if len(list.items) != 1 || list.items[0].Label != "hg-b" {
+		t.Fatalf("choices = %+v, want just [hg-b]", list.items)
+	}
+}
+
 func TestEditAutomationDriverRosterAccessFlow_SudoCommandGroupsAndRules(t *testing.T) {
 	dir := t.TempDir()
 	path := writeMinimalRosterFixture(t, dir)

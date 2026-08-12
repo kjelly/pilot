@@ -729,6 +729,26 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "set_hostgroup_hostgroups",
+				Description:              "bulk-replace a hostgroup's membership.hostgroups (the whole set of nested hostgroups) — freeipa-identity-apply.yml reconciles this authoritatively alongside membership.hosts",
+				Required:                 []string{"name"},
+				Optional:                 []string{"hostgroups"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "hostgroup's membership.hostgroups matches the requested set",
+				},
+			},
+			Validate: validateEntityNameOnly("set_hostgroup_hostgroups"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setHostgroupHostgroups(r, step.Name, step.Hostgroups)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "create_hbac_rule",
 				Description:              "create an HBAC login rule (access group -> hostgroup -> PAM service), replaying the full creation wizard in one step",
 				Required:                 []string{"name"},

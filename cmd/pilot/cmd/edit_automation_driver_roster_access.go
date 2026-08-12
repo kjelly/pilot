@@ -114,6 +114,21 @@ func (d *automationDriver) setHostgroupField(r *editRouterModel, hostgroup, fiel
 	return d.enter(r)
 }
 
+// setHostgroupHostgroups bulk-replaces a hostgroup's membership.hostgroups
+// (nested hostgroup membership, roster.hostgroup.field_hostgroups) — a
+// checklist screen, not a text field, so this drives it the same way
+// setHBACTargets drives targets.hostgroups rather than going through
+// setHostgroupField (which only handles text-input fields).
+func (d *automationDriver) setHostgroupHostgroups(r *editRouterModel, hostgroup string, hostgroups []string) error {
+	if err := d.ensureRosterHostgroupDetail(r, hostgroup); err != nil {
+		return err
+	}
+	if err := d.choose(r, "membership.hostgroups"); err != nil {
+		return err
+	}
+	return d.setChecklistSelection(r, hostgroups)
+}
+
 func (d *automationDriver) ensureRosterHBACList(r *editRouterModel) error {
 	for attempts := 0; attempts < 8; attempts++ {
 		switch automationScreenID(r) {

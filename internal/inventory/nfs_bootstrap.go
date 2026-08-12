@@ -12,21 +12,26 @@ import (
 )
 
 // minimalRosterBase is the smallest canonical roster common to every
-// "create a fresh roster from within pilot edit" flow: just schema_version
-// plus freeipa.domain/admin. WriteMinimalNFSServerRoster adds an
-// nfs.servers entry on top of this for the NFS-role bootstrap case;
-// WriteMinimalRosterSkeleton uses it as-is for the generic "roster —
-// FreeIPA" entry point, which isn't tied to any specific host.
-func minimalRosterBase(domain, adminPrincipal, adminPassword string) map[string]any {
+// "create a fresh roster from within pilot edit" flow: schema_version,
+// freeipa.admin, and an empty netgroups list. WriteMinimalNFSServerRoster
+// adds an nfs.servers entry on top of this for the NFS-role bootstrap
+// case; WriteMinimalRosterSkeleton uses it as-is for the generic
+// "roster — FreeIPA" entry point, which isn't tied to any specific host.
+//
+// freeipa.domain/realm are deliberately omitted: those fields exist only
+// for migration compatibility with old v1 rosters (see
+// ValidateRosterV1/V2's shared knownFreeIPAKeys) — a new roster's domain
+// comes from group_vars/freeipa.yml (FreeIPADomain), not from here.
+func minimalRosterBase(adminPrincipal, adminPassword string) map[string]any {
 	return map[string]any{
-		"schema_version": 1,
+		"schema_version": int(CurrentRosterSchemaVersion),
 		"freeipa": map[string]any{
-			"domain": domain,
 			"admin": map[string]any{
 				"principal": adminPrincipal,
 				"password":  adminPassword,
 			},
 		},
+		"netgroups": []any{},
 	}
 }
 
@@ -60,7 +65,7 @@ func writeRosterSkeleton(path string, roster map[string]any) error {
 // such as NetApp must not be represented as a Linux-managed share here.
 func WriteMinimalNFSServerRoster(path, hostName, domain, adminPrincipal, adminPassword string) error {
 	fqdn := RosterHostFQDN(hostName, domain)
-	roster := minimalRosterBase(domain, adminPrincipal, adminPassword)
+	roster := minimalRosterBase(adminPrincipal, adminPassword)
 	roster["nfs"] = map[string]any{
 		"servers": []any{map[string]any{
 			"host":  fqdn,
@@ -77,16 +82,16 @@ func WriteMinimalNFSServerRoster(path, hostName, domain, adminPrincipal, adminPa
 }
 
 // WriteMinimalRosterSkeleton creates the smallest canonical roster with no
-// users/groups/hosts yet — just enough (schema_version + freeipa.domain/
-// admin) to pass ValidateRosterFile and let pilot edit's roster manager add
+// users/groups/hosts yet — just enough (schema_version + freeipa.admin) to
+// pass ValidateRosterFile and let pilot edit's roster manager add
 // users/groups from here. Used when a workspace's "roster — FreeIPA" entry
 // point finds no roster file yet at all (not tied to any specific host, so
 // it never gets an nfs.servers entry the way WriteMinimalNFSServerRoster
 // does) — a completely foreseeable first visit to a fresh workspace, not
 // something that should end the whole `pilot edit` session. Create-only,
 // same posture as WriteMinimalNFSServerRoster.
-func WriteMinimalRosterSkeleton(path, domain, adminPrincipal, adminPassword string) error {
-	return writeRosterSkeleton(path, minimalRosterBase(domain, adminPrincipal, adminPassword))
+func WriteMinimalRosterSkeleton(path, adminPrincipal, adminPassword string) error {
+	return writeRosterSkeleton(path, minimalRosterBase(adminPrincipal, adminPassword))
 }
 
 // WriteMinimalFreeIPAVault creates the one shared vault value required by
