@@ -38,5 +38,11 @@ traceability:
     "docs/verification/freeipa-identity.md#C16": {tags: [C16, sudo], reason: reconcile canonical sudo allow and deny commands}
     "docs/verification/freeipa-identity.md#C17": {tags: [C17, sudo], reason: reconcile run-as options and enabled state}
     "docs/verification/freeipa-identity.md#C18": {tags: [C18, nfs], reason: reconcile FreeIPA automount control plane}
+    "docs/verification/freeipa-identity.md#C19": {tags: [C19, hostgroups], reason: reconcile nested hostgroup membership}
+    "docs/verification/freeipa-identity.md#C20": {tags: [C20, netgroups], reason: reconcile netgroup direct user membership}
+    "docs/verification/freeipa-identity.md#C21": {tags: [C21, netgroups], reason: reconcile netgroup direct group membership}
+    "docs/verification/freeipa-identity.md#C22": {tags: [C22, netgroups], reason: reconcile netgroup direct host membership}
+    "docs/verification/freeipa-identity.md#C23": {tags: [C23, netgroups], reason: reconcile netgroup direct hostgroup membership}
+    "docs/verification/freeipa-identity.md#C24": {tags: [C24, netgroups], reason: reconcile nested netgroup membership}
 verification: {autoDeploy: false}
 site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

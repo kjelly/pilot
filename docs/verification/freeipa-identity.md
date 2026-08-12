@@ -1,6 +1,10 @@
 # Verification Spec — freeipa-identity（canonical identity primitives + legacy authorization reconciler）
 
-> 版本：v1.2（2026-07-22 delivery batch 1；已在獨立 AlmaLinux 9
+> 版本：v1.6（2026-08-11 roster-schema-v2 migration：netgroups 與 hostgroup
+> 巢狀 membership 交付，新增 C19–C24，已在 `freeipa-server` vm-target 上依序
+> 套用 legacy/canonical v1/schema-v2 三份 fixture 後實跑 24/24 PASS，並實測
+> netgroup authoritative pruning，見 §3、§7.1a）
+> 前一版：v1.2（2026-07-22 delivery batch 1；已在獨立 AlmaLinux 9
 > `freeipa-identity-v2` vm-target 上實跑 canonical apply、checklist 與冪等重跑）
 > 相容基線：v1.1 已在 `pilot vm-target freeipa-server` 上實跑
 > `playbooks/test/fixtures/freeipa-identity-fixtures.yml` 建立 fixture，
@@ -21,12 +25,16 @@
 依 `AGENTS.md` §1「actual-run 規則」：寫進 `docs/verification/*.md` 步驟區塊的指令，
 **必須先在對應目標環境實際跑過並截真實輸出**才算數。
 
-本檔 **v1.2** 依 `freeipa-config.md` 與 `freeipa-roster-implementation-plan.md` 的四批
-交付順序完成第 1 批：canonical `schema_version: 1` 的 users/groups、屬性、狀態、直接與
-nested membership，以及 legacy `ipa_*` compatibility。Canonical roster 必須透過
-`freeipa_roster_file` namespaced 載入；直接 `-e @roster.yaml` 會讓 top-level `groups`/
-`hosts` 撞到 Ansible magic variables，因此不受支援。Canonical hosts/hostgroups/HBAC/
-sudo 在第 2 批前 fail closed；既有 authorization 功能繼續使用 legacy roster。
+本檔 **v1.6** 已交付 canonical `schema_version: 1` 與 `2` 的 users/groups/hosts/
+hostgroups（含巢狀 membership）/HBAC/sudo/netgroups，以及 legacy `ipa_*`
+compatibility。Canonical roster 必須透過 `freeipa_roster_file` namespaced
+載入；直接 `-e @roster.yaml` 會讓 top-level `groups`/`hosts` 撞到 Ansible
+magic variables，因此不受支援。一支 schema_version: 1 roster 不需要手動轉
+版——`pilot edit`/MCP roster driver/`pilot deploy`/`pilot reconcile` 的
+preflight 都會在打開 roster 時自動呼叫 `EnsureRosterCurrent` 升級到 v2
+（已驗證、已備份、atomic），或用 `pilot roster migrate <file>` 明確觸發。
+尚未交付的僅剩 `migration`（roster 內宣告式批次改名/刪除）這個獨立
+fail-closed 工作流程——見 §5。
 
 本檔 v1.0 的既有基線：`freeipa-identity-apply.yml` 在本次重新設計後（2026-07-16）新增了
 三層能力——(1) 密碼自行變更保護（不覆蓋使用者已自行設定的密碼）、(2) 既有物件的
@@ -57,7 +65,9 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 |---------|----------|---------|
 | `freeipa_roster_file` | canonical roster 檔路徑；以 `include_vars: name=freeipa_roster` 載入，避免 `groups`/`hosts` magic-variable collision | canonical 必填 |
 | `freeipa.admin.principal` / `freeipa.admin.password` | canonical kinit principal/密碼；密碼由 vault 保護，禁止 hard-code | canonical 必填 |
-| `schema_version` / `users` / `groups` | canonical v1 identity primitives；支援 attributes、state、authoritative direct/nested membership | canonical 必填 |
+| `schema_version` / `users` / `groups` | canonical identity primitives，`1` 或 `2`；支援 attributes、state、authoritative direct/nested membership | canonical 必填 |
+| `hostgroups[].membership.hostgroups` | 巢狀 hostgroup 成員（v1/v2 皆支援，authoritative，雙向 diff）；本檔 C19 驗證 | 否 |
+| `netgroups` | schema-v2-only：可含 users/groups/hosts/hostgroups/nested netgroups，命名須符合 `^ng-[a-z0-9][a-z0-9_.-]*$`；`internal/inventory/roster_netgroup.go` 驗證 unique/collision/reference/cycle | 否（v1 roster 宣告此欄位會在 top-level-keys gate fail closed）|
 | `ipa_admin_password` | kinit admin 用密碼；由 vault file 注入，禁止 hard-code | 是 |
 | `ipa_domain` / `ipa_realm` | Kerberos/DNS domain/realm，預設 `ipa.pilot.internal` / `IPA.PILOT.INTERNAL` | 否（有預設）|
 | `ipa_users` / `ipa_groups` / `ipa_hostgroups` / `ipa_hbac_rules` / `ipa_sudo_rules` | 五份資料清單，見 roster schema 檔 | 否（皆預設 `[]`，可只給其中幾份）|
@@ -93,6 +103,26 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 | C16 | canonical-sudo | canonical sudo rule 掛載 role group 與 allow command group | ~memberUser: cn=role-fixture-canonical-ops, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal" "(cn=fixture-canonical-sudo)" memberUser memberAllowCmd 2>/dev/null |
 | C17 | canonical-sudo | canonical sudo rule 含 specific run-as root 與 `!authenticate` | ~ipaSudoOpt: !authenticate | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal" "(cn=fixture-canonical-sudo)" ipaSudoRunAsExtUser ipaSudoOpt 2>/dev/null |
 | C18 | automount | FreeIPA indirect automount key 使用 FQDN 與 `sec=krb5i` | 0 | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=default,cn=automount,dc=ipa,dc=pilot,dc=internal" "(automountKey=fixture-alpha)" automountInformation 2>/dev/null | grep -Eq '^automountInformation: .*sec=krb5i.* [[:alnum:].-]+:/projects/fixture-alpha$' |
+| C19 | hostgroup-nesting | `hostgroup-fixture-v2-parent` 直接包含宣告的巢狀 hostgroup（schema-v2 §8：`membership.hostgroups` 現在真的被 reconcile） | ~member: cn=hostgroup-fixture-v2-child, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=hostgroup-fixture-v2-parent,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal" member 2>/dev/null |
+| C20 | netgroup | netgroup 直接包含宣告的 user（`memberUser`；netgroup 的 user 與 group 成員共用同一個 LDAP 屬性，不是分開的 `memberUser`/`memberGroup`——已對活體 server 查證，不是假設） | ~memberUser: uid=fixture-v2-user-a, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=ng,cn=alt,dc=ipa,dc=pilot,dc=internal" "(cn=ng-fixture-v2-clients)" memberUser 2>/dev/null |
+| C21 | netgroup | netgroup 直接包含宣告的 group（同一個 `memberUser` 屬性，見 C20 備註） | ~memberUser: cn=team-fixture-v2, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=ng,cn=alt,dc=ipa,dc=pilot,dc=internal" "(cn=ng-fixture-v2-clients)" memberUser 2>/dev/null |
+| C22 | netgroup | netgroup 直接包含宣告的 host（`memberHost`；host 與 hostgroup 成員也共用同一個屬性，同上已查證） | ~memberHost: fqdn=fixture-v2-host-a.ipa.pilot.internal, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=ng,cn=alt,dc=ipa,dc=pilot,dc=internal" "(cn=ng-fixture-v2-clients)" memberHost 2>/dev/null |
+| C23 | netgroup | netgroup 直接包含宣告的 hostgroup（同一個 `memberHost` 屬性，見 C22 備註） | ~memberHost: cn=hostgroup-fixture-v2-parent, | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=ng,cn=alt,dc=ipa,dc=pilot,dc=internal" "(cn=ng-fixture-v2-clients)" memberHost 2>/dev/null |
+| C24 | netgroup-nesting | netgroup 直接包含宣告的巢狀 netgroup（`member`，一般 `member` 屬性，不是 `memberUser`/`memberHost`；netgroup-to-netgroup DN 一律是 `ipaUniqueID=<隨機值>`，不像其他型別有穩定的 `cn=` 形式，所以驗證存在性而非比對特定 UUID） | 0 | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=ng,cn=alt,dc=ipa,dc=pilot,dc=internal" "(cn=ng-fixture-v2-clients)" member 2>/dev/null | grep -q '^member: ipaUniqueID=' |
+
+> **C19–C24 沿用同一套 SASL EXTERNAL/ldapi 唯讀查詢**，fixture 是
+> `playbooks/test/fixtures/freeipa-identity-v2.roster.yaml`（schema_version: 2，
+> 獨立於 v1 canonical fixture，不共用物件）。**C20–C23 的屬性名稱刻意對活體
+> FreeIPA server 查證過**，不是照 `ipa netgroup-show` CLI 的人類可讀欄位名稱
+> （`Member User:`/`Member Group:`/`Member Host:`/`Member Hostgroup:`/`Member
+> netgroups:`）類推：底層 LDAP schema 把 user 和 group 成員合併進同一個
+> `memberUser` 屬性、host 和 hostgroup 成員合併進同一個 `memberHost` 屬性，
+> 只有巢狀 netgroup 走一般的 `member` 屬性——這五個標籤在 CLI 上看起來分開，
+> 在 LDAP 上其實只有三種屬性。這類「CLI 顯示欄位 ≠ 底層儲存屬性」的落差，
+> 正是 `freeipa-dns.md` changelog 記載過的同一類風險（規則格式假設一旦猜錯，
+> 檢查會靜默失敗或永遠讀到空值），此處查證方式：先在活體 server 上用
+> `ipa netgroup-add-member` 建好每種成員，再直接 `ldapsearch` 讀原始屬性，
+> 而非假設 CLI 標籤與 LDAP 屬性同名。
 
 > **rc 型 expected（C1/C2/C5 = `0`）比對 process 退出碼**：C1/C2 直接對 `grep -q` 的
 > rc；C2/C5 用 shell `!` 反轉（`grep` 找不到才是我們要的「pass」），跟
@@ -110,9 +140,10 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 
 - 工具：`pilot vm-target verify --name <server-vm> docs/verification/freeipa-identity.md`
   （真實主機：`pilot verify docs/verification/freeipa-identity.md -i inventory-freeipa.yaml`）
-- 前置：先套用 fixture（見 §7.1），checklist 才有東西可查
+- 前置：先套用 legacy 與 canonical v1 fixture（見 §7.1），C19–C24 另外需要
+  §7.1a 的 schema-v2 fixture
 - 格式：`.verification/freeipa-identity-<UTC>.{ndjson,md}`
-- 預期 row 數：18
+- 預期 row 數：24
 
 **目前真實輸出摘要**（`freeipa-identity-v2` AlmaLinux 9 VM，2026-07-22 同時套用
 legacy 與 canonical fixture 後實跑；完整 stdout/row payload 留在 raw artifact，正式
@@ -125,6 +156,31 @@ $ pilot vm-target verify --name freeipa-identity-v2 docs/verification/freeipa-id
 
 verdict: PASS  (pass=12 fail=0 skip=0)
 ```
+
+**Schema-v2 / C19–C24 真實輸出**（`freeipa-server` vm-target，2026-08-11 依序套用
+legacy、canonical v1、schema-v2 三份 fixture 後實跑；C19–C24 首次加入時單獨驗證
+`pass=6 fail=0`，此處是三份 fixture 都套用後的完整 24-row 結果）：
+
+```
+$ pilot vm-target run --name freeipa-server playbooks/test/fixtures/freeipa-identity-v2-fixtures.yml \
+    -e fixtures_target_group=all -e ipa_admin_password=NewPass123!
+freeipa-server             : ok=53   changed=13   unreachable=0    failed=0    skipped=80
+
+# 立刻重跑一次：
+freeipa-server             : ok=52   changed=0    unreachable=0    failed=0    skipped=81
+
+$ pilot vm-target verify --name freeipa-server docs/verification/freeipa-identity.md
+✔ NDJSON:   .verification/freeipa-identity-20260811-061431.ndjson
+✔ Report:   .verification/freeipa-identity-20260811-061431.md
+
+verdict: PASS  (pass=24 fail=0 skip=0)
+```
+
+> C19–C24 一開始單獨跑（尚未套用 legacy/canonical v1 fixture）時，其餘既有 row
+> 如預期 `fail`（fixture 物件在這次全新 VM 狀態下還不存在）——這不是本次交付
+> 的 regression，純粹是同一顆 VM 上 legacy/canonical fixture 沒重新套用過；
+> 套用 §7.1 兩份既有 fixture 後同一份 spec 立刻變成 24/24 PASS，證明 C19–C24
+> 與既有 18 row 彼此獨立、互不干擾。
 
 > 這個 PASS 也順帶驗證了一個更大的發現：`pilot spec --generate` 過去有個
 > dedup 邏輯錯誤（見 v1.0 changelog、`internal/spec/generator.go`），凡是
@@ -139,8 +195,10 @@ verdict: PASS  (pass=12 fail=0 skip=0)
 
 ## 4. PASS / FAIL 規則
 
-- C1–C12 全部 `status=pass` → **PASS**：reconciler 套用 legacy 與 canonical fixture 後，LDAP 裡的
-  成員關係、規則屬性、物件屬性完全對應 roster 宣告的內容。
+- C1–C24 全部 `status=pass` → **PASS**：reconciler 套用 legacy、canonical v1
+  與 schema-v2 三份 fixture 後，LDAP 裡的成員關係、規則屬性、物件屬性完全對應
+  roster 宣告的內容（C19–C24 額外驗證巢狀 hostgroup 與 netgroup 五種 membership
+  型別）。
 - 任一 `fail` → **FAIL**，常見修法：
   - C1/C2 fail → 確認 §7.1 fixture 已套用過、fixture 的 group/user 名稱沒被改過；
     若 C2 fail（fixture-user-b 意外變成員），檢查是不是誤把兩個 fixture 使用者的
@@ -156,14 +214,21 @@ verdict: PASS  (pass=12 fail=0 skip=0)
   - Socket 路徑找不到（`ldap_sasl_interactive_bind: Can't contact LDAP server`）→
     確認 389-ds instance 名稱是否仍是 `slapd-IPA-PILOT-INTERNAL`
     （`find /run -iname '*slapd*sock*'` 確認實際路徑）。
+  - C19 fail → 檢查 "Ensure nested hostgroup membership"（`tags: [identity,
+    hostgroups]`）有沒有跑過；C20–C23 fail → 檢查 "Ensure netgroup direct
+    user/group/host/hostgroup membership"（`tags: [identity, netgroups]`）；
+    C24 fail → 檢查 "Ensure nested netgroup membership"。四者皆需先套用
+    §7.1a 的 schema-v2 fixture。
 
 ## 5. 例外與已知偏差
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
 | C1–C12 | 本 checklist 只驗證「套用 fixture 後的單次快照」，不驗證 reconciler 的 ADD/REMOVE/drift-correction 動態行為本身（roster 改了、rerun 之後真的生效）——那部分見 §7 的 SOP，不強塞進 `pilot spec` 的單指令快照模型 | 全部 | 永久 |
-| — | canonical hosts/hostgroups/HBAC/sudo/NFS/migration 尚未交付；playbook 對非空值 fail closed，不把忽略欄位偽裝成成功 | canonical roster | delivery batch 2–4 |
+| — | `migration`（roster 內宣告式批次改名/刪除）仍是獨立的 fail-closed 工作流程，尚未交付；playbook 對非空值 fail closed，不把忽略欄位偽裝成成功。Users/groups/hosts/hostgroups（含巢狀）/HBAC/sudo/netgroups 皆已交付 | canonical roster | 待定 |
+| — | netgroup 巢狀 cycle 偵測（`ng-a → ng-b → ng-a` 這類）只在 Go 層（`internal/inventory/roster_netgroup.go`、`pilot roster lint`）擋，**沒有**在 `freeipa-identity-apply.yml` 重複實作同一個檢查——刻意的設計決策：Jinja 沒有安全的方式走任意深度 graph traversal，硬做風險（見 `freeipa-dns.md` changelog 記載過的規則格式假設猜錯、靜默失效案例）大於效益。前提：roster 必須先過 `pilot roster lint`（或走 `pilot edit`/`EnsureRosterCurrent` 的自動升級路徑）才套用——繞過 `pilot` 直接手改 roster 再 `ansible-playbook` 套用的人，本來就已經在其他既有 gate（Go validator 完全沒跑到）的保護範圍之外 | 直接 `ansible-playbook`（不經 `pilot`）套用 netgroups 的情境 | 永久 |
 | — | 本 spec 不含密碼自行變更保護（§7.4）的 checklist row：該行為的證據（`krbLastPwdChange`/`krbPasswordExpiration` 前後比對）本質是「rerun 前後對比」，同樣不適合單指令快照——手動走 §7.4 的 SOP 驗證 | 全部 | 永久 |
+| — | 本 spec 不含 netgroup authoritative pruning（roster 移除一個 netgroup 成員、rerun 後 live 真的移除）的 checklist row，理由同 C1–C12——這是「改 → rerun → 比較」動態行為，見 §7.1a 的 pruning 驗證記錄 | 全部 | 永久 |
 
 ## 6. Playbook 對應
 
@@ -181,6 +246,10 @@ verdict: PASS  (pass=12 fail=0 skip=0)
 | C8 | `Reconcile user first/last names`（`tags: [identity, users]`）| 本次新增 |
 | C9/C10 | `Ensure IPA users exist`、`Reconcile user first/last names`、`Reconcile canonical account enabled state`（`tags: [identity, users]`）| canonical attribute/state reconcile |
 | C11/C12 | `Ensure/Remove stale canonical direct user/nested-group membership`（`tags: [identity, users, groups]`）| authoritative direct membership |
+| C19 | `Ensure nested hostgroup membership` + `Remove stale nested hostgroup memberships`（`tags: [identity, hostgroups, C19]`）| roster-schema-v2 migration spec §8；`membership.hostgroups` 從完全未 reconcile 變成 authoritative |
+| C20/C21 | `Ensure netgroup direct user membership`（`C20`）+ `Ensure netgroup direct group membership`（`C21`）+ 對應的 `Remove stale netgroup direct user/group membership` | netgroup 的 user/group 成員在 LDAP 層共用 `memberUser`，Ansible 層仍是各自獨立的 task/roster 欄位 |
+| C22/C23 | `Ensure netgroup direct host membership`（`C22`）+ `Ensure netgroup direct hostgroup membership`（`C23`）+ 對應的 `Remove stale netgroup direct host/hostgroup membership` | 同上，LDAP 層共用 `memberHost` |
+| C24 | `Ensure nested netgroup membership` + `Remove stale nested netgroup membership`（`tags: [identity, netgroups, C24]`）| 建立順序：所有 `state: present` netgroup 物件先建完，才開始接 nested membership，YAML 宣告順序不影響結果 |
 
 ## 7. 把 FAIL 變 PASS 的 SOP（fixture 套用 + reconciler 動態行為驗證）
 
@@ -196,6 +265,43 @@ pilot vm-target run --name <server-vm> playbooks/test/fixtures/freeipa-identity-
 冪等：重跑應只剩 `Kinit admin`/`Release the Kerberos ticket` 之外全部 `ok`
 （實測：首次套用 `changed=10`，第二次重跑除既有的「密碼相關」/「disable allow_all」
 兩個已知的非冪等雜訊外，其餘全 `ok`）。
+
+### 7.1a 套用 schema-v2 fixture（netgroups + 巢狀 hostgroup，C19–C24 前置）
+
+```bash
+pilot vm-target run --name <server-vm> playbooks/test/fixtures/freeipa-identity-v2-fixtures.yml \
+    -e fixtures_target_group=all -e @~/.vault/main.yaml
+```
+
+真實輸出（`freeipa-server` vm-target，2026-08-11）：
+
+```
+首次套用：ok=53  changed=13  failed=0  skipped=80
+立刻重跑：ok=52  changed=0   failed=0  skipped=81
+```
+
+**Netgroup authoritative pruning 驗證**（本節是 roster-schema-v2 migration
+spec §25 的即時驗證，跟 §7.3 的既有 user/group 撤銷驗證是同一類「改 →
+rerun → 比較」動態行為，理由同樣不適合塞進 §2 單指令快照）：
+
+```bash
+# 1. 手動在 live 端幫 ng-fixture-v2-clients 加一個 roster 沒宣告的 member：
+pilot vm-target exec --name <server-vm> -- sudo ipa netgroup-add-member ng-fixture-v2-clients --users=admin
+# 2. 重新套用 fixture（roster 沒變，membership.users 仍只有 fixture-v2-user-a）：
+pilot vm-target run --name <server-vm> playbooks/test/fixtures/freeipa-identity-v2-fixtures.yml \
+    -e fixtures_target_group=all -e @~/.vault/main.yaml
+# → changed=1（只有 "Remove stale netgroup direct user membership" 顯示 changed）
+# 3. 確認 live 狀態真的撤銷了：
+pilot vm-target exec --name <server-vm> -- \
+    ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket \
+    -b "cn=ng,cn=alt,dc=ipa,dc=pilot,dc=internal" "(cn=ng-fixture-v2-clients)" memberUser
+#    → 只剩 uid=fixture-v2-user-a 與 cn=team-fixture-v2；uid=admin 已消失
+```
+
+實測於 2026-08-11：步驟 2 的 `changed=1` 與步驟 3 的 LDAP 查詢結果都與上述描述
+一致——手動加的 `admin` 成員在下一次 apply 就被移除，且移除後同一份 spec 立刻
+重驗（`pilot vm-target verify`）仍是 24/24 PASS，證明 pruning 不會誤刪
+roster 本來就宣告的成員。
 
 ### 7.2 執行 checklist
 
@@ -272,3 +378,4 @@ pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.ym
 | 2026-07-22 | v1.3 | C18 移除舊 fixture host `freeipa-nfs-v2.ipa.pilot.internal` 的硬編碼，改以 rc matcher 同時驗證 `sec=krb5i`、合法 FQDN 與固定 remote path；新 matcher 已透過 `pilot verify --probe` 對 Nexus 的真實 IPA automount entry 實跑 PASS，evidence：`.verification/minimal-poc-update/2026-07-22-round-12/dev-probe-identity-c18/probe.cast` | pilot |
 | 2026-07-30 | v1.4 | 修復真實 bug（`freeipa-dns` Phase 5 minimal-poc round-18 重建時發現）：「`Gate: canonical top-level and FreeIPA keys are known`」（~行 156-161）的 `freeipa.*` 允許清單硬寫成 `['server', 'admin', 'defaults', 'safety']`，遺漏 `domain`/`realm` —— 但 `internal/inventory/roster_validate.go` 的 `knownFreeIPAKeys` 明確允許這兩個欄位（其註解本身就寫著「the apply playbook deliberately ignores them」，即這兩個欄位存在時 apply 應該容忍、非拒絕）。`pilot edit`'s NFS-role-add bootstrap（`WriteMinimalNFSServerRoster`）本身就會在 roster 寫入 `freeipa.domain`，代表**任何透過官方 sanctioned 工具鏈建立的 roster，只要曾走過 NFS bootstrap，套用 `freeipa-identity` reconcile 就必定在第一個 gate 就 fail**——`pilot roster lint` 完全不會抓到（Go validator 本來就允許），只有真的跑 `ansible-playbook` 才會顯現。修法：把這兩個欄位加進 assert 的允許清單，使其與 Go-side schema 一致。 | pilot |
 | 2026-07-30 | v1.5 | 修復真實 bug（使用者回報「`pilot edit` 裡新增的 user，`enabled` 欄位顯示 `false`，但 reconcile 之後卻登得進去」，兩台獨立 AlmaLinux 9 vm-target 上對活的 FreeIPA server 實測重現）：`freeipa-identity-apply.yml` 本身的 enable/disable 邏輯是對的——顯式 `enabled: false` 套用後 `ipa user-show --all --raw` 確認 `nsaccountlock: TRUE`，且 `kinit` 直接被 KDC 拒絕（`Client's credentials have been revoked`）；真正的 bug 在 `pilot edit` 的 roster manager：`internal/inventory/roster.go`'s `AppendRosterUser`（`rosterUserStub{Name, State}`）新增 user 時完全不寫 `enabled` 欄位，而 `cmd/pilot/cmd/edit_tui_roster.go` 的欄位清單畫面卻用 `rosterBoolDisplay`（缺欄位一律顯示 `false`）顯示這個欄位——但 playbook 對缺欄位的實際預設是 `item.enabled \| default(true)`（第 910、357 行）。結果：編輯畫面告訴使用者「這個帳號是 disabled」，reconcile 卻把它當 enabled 套用，activate 之後真的能 `kinit`/登入，兩邊完全對不上。連帶發現 `password.preserve_existing` 欄位有同一類 bug（顯示預設 `false`，playbook 實際預設 `true`，第 360 行）。修法：`AppendRosterUser`/`SimulateAddRosterUser` 新增 user 時明確寫入 `enabled: true`（比照既有 HBAC/sudo rule stub 建立時就明寫 `enabled: true` 的慣例），`enabled`/`password.preserve_existing` 兩處顯示欄位改用 `rosterBoolDisplayDefault(..., true)`，讓沒有這兩個欄位的既有/手改 roster 也能顯示與 playbook 一致的有效值。`go test ./internal/inventory/... ./cmd/pilot/cmd/...` 全綠(4 個既有無關失敗維持不變)。 | pilot |
+| 2026-08-11 | v1.6 | Roster-schema-v2 migration 交付（spec.md 11-phase 實作全數完成）：schema v2 版本判定/驗證（`internal/inventory/roster_version.go`/`roster_validate.go`）、v1→v2 純 in-memory migration + semantic-equivalence fingerprint（`roster_migrate.go`）、mutation lock/backup/atomic write/rollback（`roster_migrate_file.go`）、`pilot roster migrate`/`pilot roster lint --upgrade`、TUI/MCP/`pilot deploy`/`pilot reconcile` preflight 全面自動升級（`EnsureRosterCurrent`）、netgroups 首次成為 first-class schema 物件（`roster_netgroup.go` + `freeipa-identity-apply.yml` 的 create/reconcile-membership/authoritative-prune/delete-absent 五種成員型別）、hostgroup 巢狀 membership 從完全未 reconcile 變成 authoritative（`membership.hostgroups`，本檔新增 §8 §6/§8 前身 issue，見 C19）、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染，`freeipa-nfs-exports.j2`）、ansible-vault 加密 roster 的 migration 支援（真實 `ansible-vault` binary，never 落地 plaintext temp file）。本檔新增 C19–C24（netgroup 五種 membership 型別 + hostgroup 巢狀 membership），與既有 C1–C18 一起在 `freeipa-server` vm-target 上依序套用 legacy/canonical v1/schema-v2 三份 fixture 後實跑 24/24 PASS；另外實測 netgroup authoritative pruning（手動加一個 roster 未宣告的 member、重新 apply 後確認被移除，見 §7.1a）。**兩個非顯而易見的真實 gotcha，皆已對活體 FreeIPA server 查證、非假設**：(1) `ipa netgroup-show --all` 的成員欄位標籤是單數且不一致——`Member User:`/`Member Group:`/`Member Host:`/`Member Hostgroup:`（均單數）但 `Member netgroups:`（小寫、複數），跟其他物件類型的慣例（如 `group-show` 的 `Member users:`，複數）都不一樣；(2) 同一組成員在底層 LDAP 完全是另一套屬性名稱——netgroup 的 user 與 group 成員共用 `memberUser`、host 與 hostgroup 成員共用 `memberHost`、nested netgroup 走一般的 `member`（不是 `memberGroup`/`memberHostgroup`/`memberNetgroup`），且 netgroup-to-netgroup 的 DN 一律是不可預測的 `ipaUniqueID=<uuid>`（不像其他物件類型有穩定的 `cn=` 形式）。netgroup 巢狀 cycle 偵測刻意只留在 Go 層（`pilot roster lint`），未在 Ansible 重複實作，理由與已知限制見 §5。`go test ./...`（1626 tests）、`ansible-playbook --syntax-check`、`go vet`、`gofmt`、`-race` 全綠。 | pilot |
