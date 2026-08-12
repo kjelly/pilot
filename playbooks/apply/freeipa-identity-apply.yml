@@ -166,6 +166,13 @@
               'hostgroups', 'hbac', 'sudo', 'nfs', 'nfs_clients',
               'migration', 'policy_exceptions'
             ] + (['netgroups'] if freeipa_roster.schema_version | int >= 2 else []))) | length == 0
+          # This allowlist MUST stay in sync with `knownFreeIPAKeys` in
+          # internal/inventory/roster_validate.go. `domain`/`realm` were omitted
+          # here once while the Go validator allowed them, so this gate rejected
+          # every roster the sanctioned tooling produced —
+          # `WriteMinimalNFSServerRoster` always writes `freeipa.domain`, and
+          # `pilot roster lint` could not catch it because the Go side already
+          # permitted the shape. Found live round 18 (2026-07-30).
           - >-
             ((freeipa_roster.freeipa | default({})).keys() | list |
              difference(['domain', 'realm', 'server', 'admin', 'defaults', 'safety'])) | length == 0
@@ -428,6 +435,16 @@
       no_log: true
       tags: [always]
 
+    # `ssh_keys` below MUST use `.get('values', none)`, never `['values']` or
+    # `.values`. On a roster user with no `ssh_keys` field at all (exactly what
+    # `pilot edit`'s roster manager "➕ 新增 User" produces), a bracket lookup for
+    # the key 'values' on an empty dict hits Jinja2's item-then-attribute
+    # fallback and resolves to the dict's own bound `.values` METHOD instead of
+    # raising Undefined — `set_fact` then fails with
+    # "Type 'method' is unsupported for variable storage", masked by no_log.
+    # Found live round 16 (2026-07-25) on ansible-core 2.19.2; do not "simplify"
+    # this back to a subscript. Full writeup:
+    # docs/evidence/minimal-poc-architecture/2026-07-25-round-16.md
     - name: "Normalize canonical users for the compatibility reconciler"
       ansible.builtin.set_fact:
         ipa_users: >-

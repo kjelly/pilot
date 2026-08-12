@@ -30,6 +30,11 @@
     - name: "Gate: required roster and stage authorization"
       ansible.builtin.assert:
         that:
+          # Keep this accepted-schema list identical to
+          # freeipa-identity-apply.yml's — the sibling playbook that loads the
+          # same roster. This gate hardcoded `== 1` through the whole Roster
+          # Schema v2 rollout and rejected structurally valid, lint-clean v2
+          # rosters outright. Found live round 21 (2026-08-11).
           - freeipa_roster.schema_version | int in [1, 2]
           - freeipa_roster.freeipa.admin.password | length >= 8
           # `pilot deploy` normally loads main.yaml as well as the canonical
