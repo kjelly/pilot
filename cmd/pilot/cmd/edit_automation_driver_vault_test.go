@@ -76,6 +76,93 @@ func TestEditAutomationDriverVaultCreateFileBareNameGetsYamlExtension(t *testing
 	}
 }
 
+func TestEditAutomationDriverVaultCanonicalFilePaths(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		want string
+	}{
+		{name: "bare name", file: "main", want: "main.yaml"},
+		{name: "bare yaml", file: "main.yaml", want: "main.yaml"},
+		{name: "vault-prefixed bare name", file: ".vault/main", want: "main.yaml"},
+		{name: "vault-prefixed yaml", file: ".vault/main.yaml", want: "main.yaml"},
+		{name: "vault-prefixed yml", file: ".vault/foo.yml", want: "foo.yml"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			scenario := editScenario{Version: 1, Steps: []editAction{
+				{Action: "add_vault_key", File: tt.file, Key: "a", Value: "1"},
+				{Action: "save_vault", File: tt.file},
+			}}
+			r := newEditRouterModel(dir)
+			d := automationDriver{dir: dir}
+			if err := d.run(&r, scenario); err != nil {
+				t.Fatalf("driver.run() error = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, ".vault", tt.want)); err != nil {
+				t.Fatalf("canonical vault file not written: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, ".vault", ".vault", tt.want)); !os.IsNotExist(err) {
+				t.Fatalf("double-prefixed vault file exists, err=%v", err)
+			}
+
+			// Start again from the picker to prove a canonical spelling also
+			// selects an already-existing file rather than only creating it.
+			r2 := newEditRouterModel(dir)
+			d2 := automationDriver{dir: dir}
+			if err := d2.run(&r2, editScenario{Version: 1, Steps: []editAction{
+				{Action: "set_vault_value", File: tt.file, Key: "a", Value: "2"},
+				{Action: "save_vault", File: tt.file},
+			}}); err != nil {
+				t.Fatalf("reopen existing canonical vault file: %v", err)
+			}
+		})
+	}
+}
+
+func TestEditAutomationDriverVaultPrefixedMainReusedByNFSServer(t *testing.T) {
+	dir := t.TempDir()
+	vaultScenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "add_vault_key", File: ".vault/main.yaml", Key: "ipa_admin_password", Value: "test-password"},
+		{Action: "save_vault", File: ".vault/main.yaml"},
+	}}
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, vaultScenario); err != nil {
+		t.Fatalf("save prefixed main vault file: %v", err)
+	}
+
+	// A fresh router models the later scenario phase. NFS reads its default
+	// .vault/main.yaml directly, so this must not request a second password.
+	nfsScenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_host", Host: "nexus"},
+		{Action: "enable_role", Host: "nexus", Role: "freeipa-nfs-server"},
+	}}
+	r2 := newEditRouterModel(dir)
+	d2 := automationDriver{dir: dir}
+	if err := d2.run(&r2, nfsScenario); err != nil {
+		t.Fatalf("enable NFS server with saved vault password: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".vault", ".vault", "main.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("double-prefixed vault file exists, err=%v", err)
+	}
+}
+
+func TestEditAutomationDriverVaultRejectsEscapingPaths(t *testing.T) {
+	for _, file := range []string{"../main.yaml", ".vault/../main.yaml", "/tmp/main.yaml"} {
+		t.Run(file, func(t *testing.T) {
+			err := validateEditScenario(editScenario{Version: 1, Steps: []editAction{{
+				Action: "add_vault_key", File: file, Key: "a", Value: "1",
+			}}})
+			if err == nil || !strings.Contains(err.Error(), "vault file") {
+				t.Fatalf("validateEditScenario() error = %v, want unsafe vault path rejection", err)
+			}
+		})
+	}
+}
+
 func TestEditAutomationDriverVaultSetAndDeleteKey(t *testing.T) {
 	dir := t.TempDir()
 	scenario := editScenario{Version: 1, Steps: []editAction{

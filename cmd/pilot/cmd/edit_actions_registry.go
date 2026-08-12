@@ -488,7 +488,7 @@ func editActionRegistry() []editActionDef {
 					Assertion: "file encrypted and written; TUI returns to file picker",
 				},
 			},
-			Validate: validateFileOnlyAction("save_vault"),
+			Validate: validateVaultFileOnlyAction("save_vault"),
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
 				return d.saveVault(r, step.File)
 			},
@@ -506,7 +506,7 @@ func editActionRegistry() []editActionDef {
 					Assertion: "no file write occurred",
 				},
 			},
-			Validate: validateFileOnlyAction("discard_vault"),
+			Validate: validateVaultFileOnlyAction("discard_vault"),
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
 				return d.discardVault(r, step.File)
 			},
@@ -2908,8 +2908,23 @@ func validateVaultFileKeyAction(name string) func(editAction) error {
 		if strings.TrimSpace(step.File) == "" {
 			return fmt.Errorf("%s requires file", name)
 		}
+		if _, err := canonicalVaultFileName(step.File); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
 		if strings.TrimSpace(step.Key) == "" {
 			return fmt.Errorf("%s requires key", name)
+		}
+		return nil
+	}
+}
+
+func validateVaultFileOnlyAction(name string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.File) == "" {
+			return fmt.Errorf("%s requires file", name)
+		}
+		if _, err := canonicalVaultFileName(step.File); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
 		}
 		return nil
 	}
@@ -2924,6 +2939,9 @@ func validateAddOrSetVaultValue(name string) func(editAction) error {
 	return func(step editAction) error {
 		if strings.TrimSpace(step.File) == "" {
 			return fmt.Errorf("%s requires file", name)
+		}
+		if _, err := canonicalVaultFileName(step.File); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
 		}
 		if strings.TrimSpace(step.Key) == "" {
 			return fmt.Errorf("%s requires key", name)
