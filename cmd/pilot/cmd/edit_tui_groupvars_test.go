@@ -95,6 +95,18 @@ func TestAutofillCrossRoleHostVars_NeverOverwritesAlreadyActiveValue(t *testing.
 	}
 }
 
+func TestAutofillCrossRoleHostVars_FillsActiveEmptyValue(t *testing.T) {
+	hf := &inventory.HostsFile{Hosts: []inventory.Host{
+		{Name: "s3-1", AnsibleHost: "10.0.0.8", Roles: []string{"seaweedfs-s3"}},
+	}}
+	data := []byte("---\nthanos_s3_target_host: \"\"\n")
+
+	got := autofillCrossRoleHostVars(hf, data)
+	if !strings.Contains(string(got), "thanos_s3_target_host: 10.0.0.8") {
+		t.Fatalf("autofillCrossRoleHostVars() = %q, want an active derived thanos S3 host", got)
+	}
+}
+
 func TestAutofillCrossRoleHostVars_NilHostsFileIsNoop(t *testing.T) {
 	data := []byte("---\n# freeipa_server_ip: \"192.0.2.10\"\n")
 	got := autofillCrossRoleHostVars(nil, data)

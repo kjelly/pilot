@@ -68,8 +68,9 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save and return to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 離開
-	for i := 0; i < 6; i++ {
+	// 4 freeipa-dns manifest, 5 檢查設定完整性,
+	// 6 快速建立最小 workspace, 7 離開
+	for i := 0; i < 7; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -97,6 +98,71 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	wantRole := inventory.Roles()[0].Name
 	if !hasRole(h.Roles, wantRole) {
 		t.Fatalf("expected role %q to be set, got %v", wantRole, h.Roles)
+	}
+}
+
+func TestEditRouter_Teatest_MinimalWorkspaceEntryKeepsAdvancedEntries(t *testing.T) {
+	dir := t.TempDir()
+	router := newEditRouterModel(dir)
+	view := router.View()
+	for _, want := range []string{
+		"快速建立最小 workspace",
+		"hosts.yml — 機器清單與角色",
+		"group_vars/ — 角色的設定值",
+		".vault/ — vault 變數檔",
+		"🔍 檢查設定完整性",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("top-menu view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestEditRouter_Teatest_MinimalWorkspaceRequiresHostsBeforeScaffolding(t *testing.T) {
+	dir := t.TempDir()
+	tm := teatest.NewTestModel(t, newEditRouterModel(dir), teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
+	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 快速建立最小 workspace, 7 離開
+	for i := 0; i < 6; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("快速建立最小 workspace")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // 建立／更新最小設定骨架
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("先選「設定主機與角色」")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+func TestPushSaveHostsAndReturnTop_UsesQuickPathContinuation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hosts.yml")
+	router := editRouterModel{}
+	called := false
+	router.afterHostsSave = func(r *editRouterModel) tea.Cmd {
+		called = true
+		return nil
+	}
+
+	pushSaveHostsAndReturnTop(&router, dir, path, &inventory.HostsFile{Hosts: []inventory.Host{{Name: "node"}}})
+	if !called {
+		t.Fatal("quick-path continuation was not called after hosts save")
+	}
+	if router.afterHostsSave != nil {
+		t.Fatal("quick-path continuation was not cleared")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("hosts.yml was not saved before continuation: %v", err)
 	}
 }
 
@@ -928,8 +994,9 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 離開
-	for i := 0; i < 6; i++ {
+	// 4 freeipa-dns manifest, 5 檢查設定完整性,
+	// 6 快速建立最小 workspace, 7 離開
+	for i := 0; i < 7; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -1128,8 +1195,9 @@ func TestEditRouter_Teatest_VaultFlow_CreateAddKeyAndSave(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 離開
-	for i := 0; i < 6; i++ {
+	// 4 freeipa-dns manifest, 5 檢查設定完整性,
+	// 6 快速建立最小 workspace, 7 離開
+	for i := 0; i < 7; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit

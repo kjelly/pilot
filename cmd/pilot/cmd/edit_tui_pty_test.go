@@ -254,7 +254,9 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 
 	waitForPTYOutput(t, proc.out, 5*time.Second, "✅ 已存檔")
 	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
-	for i := 0; i < 6; i++ {
+	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
+	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 快速建立最小 workspace, 7 離開
+	for i := 0; i < 7; i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "離開"
@@ -317,6 +319,31 @@ func TestPilotEditPTY_FuzzySearchSelectsTopMenuResult(t *testing.T) {
 	proc.press(t, "\x1b") // top menu -> quit
 	if code := proc.waitExit(t, 5*time.Second); code != 0 {
 		t.Fatalf("exit code = %d, want 0; output:\n%s", code, proc.out.String())
+	}
+}
+
+func TestPilotEditPTY_MinimalWorkspaceRequiresHostsThenReturnsCleanly(t *testing.T) {
+	dir := t.TempDir()
+	proc := startEditPTY(t, dir, 40, 100)
+
+	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
+	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 快速建立最小 workspace, 7 離開
+	for i := 0; i < 6; i++ {
+		proc.press(t, "j")
+	}
+	proc.press(t, "\r")
+	waitForPTYOutput(t, proc.out, 5*time.Second, "快速建立最小 workspace")
+	proc.press(t, "j") // 建立／更新最小設定骨架
+	proc.press(t, "\r")
+	waitForPTYOutput(t, proc.out, 5*time.Second, "先選「設定主機與角色」")
+
+	proc.press(t, "\x1b") // quick wizard -> top menu
+	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	proc.press(t, "\x1b") // top menu -> exit
+
+	if code := proc.waitExit(t, 5*time.Second); code != 0 {
+		t.Fatalf("exit code = %d, want 0\noutput:\n%s", code, proc.out.String())
 	}
 }
 

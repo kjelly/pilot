@@ -223,7 +223,10 @@ func autofillCrossRoleHostVars(hf *inventory.HostsFile, data []byte) []byte {
 	}
 	doc := groupvars.Parse(data)
 	for _, entry := range doc.Entries() {
-		if entry.Active {
+		// An active non-empty value is a user override. An empty value has no
+		// usable destination and can safely receive an unambiguous inventory
+		// default, just like an inactive example line.
+		if entry.Active && strings.TrimSpace(entry.Value) != "" {
 			continue
 		}
 		for _, av := range groupVarsAutoHostVars() {

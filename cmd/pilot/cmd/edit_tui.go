@@ -57,6 +57,10 @@ import (
 type editRouterModel struct {
 	current  screen
 	onResult func(r *editRouterModel, s screen) tea.Cmd
+	// afterHostsSave is set only by the quick workspace path. It preserves
+	// the established hosts editor while giving its successful save a
+	// well-defined next step instead of always returning to the top menu.
+	afterHostsSave func(r *editRouterModel) tea.Cmd
 
 	banner string // shown above the current screen; explicitly set (or cleared to "") by every transition
 
@@ -230,6 +234,7 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		"roster — FreeIPA users/groups/sudo(canonical roster，可預覽/編輯/新增)",
 		"freeipa-dns manifest — DNS zones/records(day-2 reconciler，可預覽/編輯/新增)",
 		"🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則",
+		"快速建立最小 workspace — 引導式設定並驗證可部署性",
 		"離開",
 	}
 	return r.transitionTo(newSelectModelWithScreenID("edit.top", "要編輯什麼？", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
@@ -239,6 +244,7 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		}
 		switch m.Selected() {
 		case 0:
+			r.afterHostsSave = nil
 			return pushHostsPathPrompt(r, dir)
 		case 1:
 			return pushGroupVarsFilePicker(r, dir, "")
@@ -251,6 +257,8 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		case 5:
 			return pushConfigCompletenessCheck(r, dir)
 		case 6:
+			return pushMinimalWorkspaceWizard(r, dir, "")
+		case 7:
 			r.quit = true
 			return nil
 		}
@@ -446,6 +454,10 @@ func pushSaveHostsAndReturnTop(r *editRouterModel, dir, path string, hf *invento
 	if err := saveHosts(&buf, path, hf); err != nil {
 		r.err = err
 		return nil
+	}
+	if afterSave := r.afterHostsSave; afterSave != nil {
+		r.afterHostsSave = nil
+		return afterSave(r)
 	}
 	return pushTopMenu(r, dir, strings.TrimRight(buf.String(), "\n"))
 }
