@@ -298,6 +298,15 @@ Use one fresh workspace consistently throughout the run:
 ./pilot edit --dir <workspace>
 ```
 
+> **Alternative entry route.** `pilot edit`'s top menu also offers
+> `快速建立最小 workspace`, a guided quick-start that walks hosts → skeleton →
+> group_vars → vault → readiness in one pass. It is an *alternative* to the
+> advanced sequence above, not a different mechanism: it drives the same editors
+> and writes exactly the same workspace files, and its readiness gate is the same
+> `checkWorkspaceCompleteness` contract `pilot deploy` enforces. Either route is
+> acceptable for this runbook, and neither substitutes for real deployment
+> evidence against the targets — §3.4 onward is unchanged whichever you use.
+
 In the first edit pass, set every host's SSH user, exact generated private-key path, and role
 membership. In the second, fill group variables and `.vault/main.yaml`. The nested identity roster
 is a narrower tool-documented exception than it used to be (see below) and may still be authored

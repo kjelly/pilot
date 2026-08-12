@@ -33,7 +33,7 @@
 - Produces: `minimalWorkspaceReadiness(dir string) ([]completenessCheck, error)`
 - Consumes: `copyMissingGroupVars`, `copyMissingNestedGroupVarsExamples`, `writeMissingVaultSkeleton`, `writeMissingHostVarsSkeleton`, `writeMissingNFSRosterEntries`, and `inventory.Generate`.
 
-- [ ] **Step 1: Write failing preparation tests**
+- [x] **Step 1: Write failing preparation tests**
 
 ```go
 func TestPrepareMinimalWorkspace_CreatesOnlyRoleDerivedArtifacts(t *testing.T) {
@@ -52,13 +52,13 @@ func TestPrepareMinimalWorkspace_CreatesOnlyRoleDerivedArtifacts(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the focused test and confirm it fails**
+- [x] **Step 2: Run the focused test and confirm it fails**
 
 Run: `rtk go test ./cmd/pilot/cmd -run TestPrepareMinimalWorkspace_CreatesOnlyRoleDerivedArtifacts -count=1`
 
 Expected: FAIL because `prepareMinimalWorkspace` does not exist.
 
-- [ ] **Step 3: Implement preparation using existing inventory helpers**
+- [x] **Step 3: Implement preparation using existing inventory helpers**
 
 ```go
 func prepareMinimalWorkspace(dir string) error {
@@ -80,7 +80,7 @@ func prepareMinimalWorkspace(dir string) error {
 Call the helpers with `io.Discard`, `dir`, and `hf` exactly as shown; their
 existing stat-before-write behavior preserves all user-created files.
 
-- [ ] **Step 4: Add readiness tests**
+- [x] **Step 4: Add readiness tests**
 
 ```go
 func TestMinimalWorkspaceReadiness_ReturnsBlockingChecks(t *testing.T) {
@@ -101,7 +101,7 @@ func TestMinimalWorkspaceReadiness_RendersInventoryBeforeReady(t *testing.T) {
 }
 ```
 
-- [ ] **Step 5: Implement readiness and run tests**
+- [x] **Step 5: Implement readiness and run tests**
 
 `minimalWorkspaceReadiness` must call `checkWorkspaceCompleteness` after a
 successful `prepareMinimalWorkspace`; return the checks unchanged so quick and
@@ -123,7 +123,7 @@ Expected: PASS.
 - Consumes: `prepareMinimalWorkspace`, `minimalWorkspaceReadiness`, `pushHostList`, `pushGroupVarsFilePicker`, `pushVaultFilePicker`, `pushConfigCompletenessCheck`.
 - Produces: `pushMinimalWorkspaceWizard(r *editRouterModel, dir string) tea.Cmd`.
 
-- [ ] **Step 1: Write a failing top-menu flow test**
+- [x] **Step 1: Write a failing top-menu flow test**
 
 ```go
 func TestEditRouter_Teatest_MinimalWorkspaceEntryKeepsAdvancedEntries(t *testing.T) {
@@ -135,13 +135,13 @@ func TestEditRouter_Teatest_MinimalWorkspaceEntryKeepsAdvancedEntries(t *testing
 }
 ```
 
-- [ ] **Step 2: Run the focused test and confirm it fails**
+- [x] **Step 2: Run the focused test and confirm it fails**
 
 Run: `rtk go test ./cmd/pilot/cmd -run TestEditRouter_Teatest_MinimalWorkspaceEntryKeepsAdvancedEntries -count=1`
 
 Expected: FAIL because the quick-start item is absent.
 
-- [ ] **Step 3: Add the top-level menu item and router entry**
+- [x] **Step 3: Add the top-level menu item and router entry**
 
 Insert the quick-start item at index 0. Shift the existing switch indexes
 without changing their destinations. `pushMinimalWorkspaceWizard` presents a
@@ -151,7 +151,7 @@ returns to the existing top menu, after which the user may re-enter the quick
 path; this deliberately preserves the existing host-editor navigation rather
 than threading a new callback through every host sub-screen.
 
-- [ ] **Step 4: Implement the post-host-save quick flow**
+- [x] **Step 4: Implement the post-host-save quick flow**
 
 The quick-flow hub calls `prepareMinimalWorkspace(dir)` only after `hosts.yml`
 exists and parses. It then shows:
@@ -171,7 +171,7 @@ editors. `建立／更新最小設定骨架` is idempotent and never overwrites 
 user values. `改用進階設定` returns to `pushTopMenu` and preserves all current
 files.
 
-- [ ] **Step 5: Run router flow tests**
+- [x] **Step 5: Run router flow tests**
 
 Run: `rtk go test ./cmd/pilot/cmd -run 'TestEditRouter_Teatest_(MinimalWorkspace|HostsFlow)' -count=1`
 
@@ -189,7 +189,7 @@ Expected: PASS.
 - Reuse: `groupVarsAutoHostVars`, `resolveSingleRoleHost`, `autofillCrossRoleHostVars`.
 - Produces: `autofillCrossRoleHostVars` behavior for both commented and active-empty entries, without replacing an active non-empty user override.
 
-- [ ] **Step 1: Write failing derived-value tests**
+- [x] **Step 1: Write failing derived-value tests**
 
 ```go
 func TestAutofillCrossRoleHostVars_ActivatesEmptyThanosTarget(t *testing.T) {
@@ -205,19 +205,19 @@ func TestAutofillCrossRoleHostVars_DoesNotReplaceUserOverride(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the focused tests and confirm failure**
+- [x] **Step 2: Run the focused tests and confirm failure**
 
 Run: `rtk go test ./cmd/pilot/cmd -run TestAutofillCrossRoleHostVars -count=1`
 
 Expected: the active-empty case fails before implementation.
 
-- [ ] **Step 3: Extend only the safe prefill behaviour**
+- [x] **Step 3: Extend only the safe prefill behaviour**
 
 Treat an active empty value as unconfigured only for known cross-role host
 keys. Fill it when the source role resolves uniquely. Do not alter comments,
 block scalars, unknown keys, active non-empty values, or ambiguous sources.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run: `rtk go test ./cmd/pilot/cmd -run 'TestAutofillCrossRoleHostVars|TestCheckWorkspaceCompleteness' -count=1`
 
@@ -237,7 +237,7 @@ Expected: PASS.
 - Produces: a quick-flow readiness screen that either says deploy-ready or
   routes to an existing editor.
 
-- [ ] **Step 1: Write a failing readiness flow test**
+- [x] **Step 1: Write a failing readiness flow test**
 
 ```go
 func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksMissingSiteLabel(t *testing.T) {
@@ -252,13 +252,13 @@ func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksMissingSiteLabel(t *t
 }
 ```
 
-- [ ] **Step 2: Run the focused test and confirm failure**
+- [x] **Step 2: Run the focused test and confirm failure**
 
 Run: `rtk go test ./cmd/pilot/cmd -run TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksMissingSiteLabel -count=1`
 
 Expected: FAIL because the quick readiness flow is absent.
 
-- [ ] **Step 3: Implement readiness screen and routes**
+- [x] **Step 3: Implement readiness screen and routes**
 
 Display all blocking checks using the existing report formatter. Provide
 `前往 hosts 設定`, `前往 group_vars`, `前往 vault`, `改用進階設定`, and
@@ -266,14 +266,14 @@ Display all blocking checks using the existing report formatter. Provide
 must show the exact inventory-generate and deploy commands using the chosen
 workspace directory.
 
-- [ ] **Step 4: Document the parallel entry route**
+- [x] **Step 4: Document the parallel entry route**
 
 Add a concise paragraph to the runbook's workspace-building section: the
 quick-start route is an alternative to the existing advanced edit sequence;
 both produce the same files and still require actual target deployment
 evidence.
 
-- [ ] **Step 5: Run verification**
+- [x] **Step 5: Run verification**
 
 Run:
 
@@ -284,3 +284,41 @@ rtk git diff --check
 ```
 
 Expected: all targeted tests PASS and no whitespace errors.
+
+---
+
+## Implementation status
+
+All four tasks are implemented and verified. Completed across two sittings:
+
+- **Tasks 1-3** (2026-07-28) — `prepareMinimalWorkspace`,
+  `minimalWorkspaceReadiness`, the quick-start router flow and its top-menu
+  entry, and the `autofillCrossRoleHostVars` active-empty rule. Task 3's two
+  required cases are covered by
+  `TestAutofillCrossRoleHostVars_FillsActiveEmptyValue` and
+  `TestAutofillCrossRoleHostVars_NeverOverwritesAlreadyActiveValue`.
+- **Task 4** (2026-08-12) — the readiness screen, the pure
+  `minimalWorkspaceRouteFor` / `minimalWorkspaceRoutes` label-to-route mapping,
+  the ready banner carrying both the inventory-generate and deploy commands, and
+  the runbook's parallel-entry-route paragraph (§3.3).
+
+Deviations from the plan as written, both deliberate:
+
+- The plan's Task 4 test sketch used helpers that do not exist in this
+  repository (`preparedPrometheusWorkspace`, `focusAndEnter`, `waitForOutput`)
+  and `string(tm.Output())`, which does not compile — `tm.Output()` is an
+  `io.Reader`. The test follows this codebase's actual conventions instead:
+  a local `waitFor` closure over `teatest.WaitFor`, and
+  `io.ReadAll(tm.FinalOutput(...))` for negative assertions.
+- `tm.Output()` is a *streaming* reader, so two consecutive `waitFor` calls
+  against the same rendered screen cannot both match — the second sees an
+  already-drained stream. Assertions for one screen are combined into a single
+  condition.
+
+Verification (all green): `go build ./...`; `go test ./...` across all 21
+packages; the plan's Step 5 command set; `go test -race` on the new code;
+`git diff --check`.
+
+**Not covered:** this is local build/test evidence only. No live target
+deployment was exercised for the quick path — the runbook's §3.4 onward still
+requires real deployment evidence, per the note added to §3.3.

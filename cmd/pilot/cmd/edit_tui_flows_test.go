@@ -144,6 +144,63 @@ func TestEditRouter_Teatest_MinimalWorkspaceRequiresHostsBeforeScaffolding(t *te
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 }
 
+func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksAndOffersRoute(t *testing.T) {
+	useRepositoryTemplates(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
+  nexus:
+    ansible_host: 10.0.0.10
+    roles: [prometheus]
+`)
+	tm := teatest.NewTestModel(t, newEditRouterModel(dir), teatest.WithInitialTermSize(100, 40))
+	waitFor := func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(3*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+
+	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
+	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 快速建立最小 workspace, 7 離開
+	for i := 0; i < 6; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("快速建立最小 workspace")
+
+	// quick wizard: 0 設定主機與角色 ... 4 驗證並檢查是否可部署
+	for i := 0; i < 4; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// prometheus_site_label has no safe cross-host default, so host_vars blocks.
+	// Both the report line and the offered route render together, so assert them
+	// in one condition — tm.Output() is a streaming reader, not a re-readable
+	// snapshot, so a second waitFor on the same screen would see nothing.
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		out := string(b)
+		return strings.Contains(out, filepath.Join("host_vars", "nexus.yml")) &&
+			strings.Contains(out, "前往 hosts 設定")
+	}, teatest.WithDuration(3*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // readiness -> quick wizard
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // quick wizard -> top menu
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // top menu -> quit
+
+	final, err := io.ReadAll(tm.FinalOutput(t, teatest.WithFinalTimeout(3*time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(final), "最小 workspace 已可部署") {
+		t.Fatalf("reported deploy-ready while host_vars was still incomplete:\n%s", final)
+	}
+	// The blocking screen must not offer a destination that cannot fix anything.
+	if strings.Contains(string(final), "前往 vault") {
+		t.Fatalf("offered a vault route with no failing vault check:\n%s", final)
+	}
+}
+
 func TestPushSaveHostsAndReturnTop_UsesQuickPathContinuation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hosts.yml")
