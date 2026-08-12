@@ -1,8 +1,9 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
 > Status: **VERIFIED**
-> Latest completed pass: 2026-08-07 (Asia/Taipei), round 20
-> Evidence: [`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md)
+> Latest completed pass: 2026-08-11 (Asia/Taipei), round 21
+> Evidence: [`2026-08-11-round-21.md`](../evidence/minimal-poc-architecture/2026-08-11-round-21.md)
+> Round 20: [`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md)
 > Round 19: [`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md)
 > Round 18: [`2026-07-30-round-18.md`](../evidence/minimal-poc-architecture/2026-07-30-round-18.md)
 > Round 17 (unattended-script proof): [`2026-07-27-round-17.md`](../evidence/minimal-poc-architecture/2026-07-27-round-17.md)
@@ -14,6 +15,30 @@
 > `playbooks/apply/freeipa-identity-apply.yml` and
 > `playbooks/apply/freeipa-dns-apply.yml` reconcilers
 > Maintainer: sre
+
+Round 21 (2026-08-11) authored and deployed the FreeIPA identity roster as **Roster Schema v2** for
+the first time in this runbook's history — the schema, its automatic v1→v2 migration engine, and
+its netgroup feature had all been implemented on the working tree but never exercised end-to-end
+against a real 3-VM rebuild before this round. The new roster (`schema_version: 2`) added a genuine
+netgroup (`ng-nfs-clients`) wired into the NFS export via a hostgroup, alongside a nested hostgroup
+(`production-hosts`). Found and fixed **one real implementation defect**: `freeipa-nfs-server-
+apply.yml` had never been updated for v2 (still hardcoded `schema_version == 1`), rejecting an
+otherwise-valid, lint-clean v2 roster — the fix was a single line matching
+`freeipa-identity-apply.yml`'s already-correct `in [1, 2]` convention exactly, applied only after
+explicit user authorization. After that fix, the full site-wide deploy, the initial
+`freeipa-identity` reconcile, and the complete §4.4 remove/restore/drift-correction/idempotency cycle
+all passed cleanly — including, for the first time ever in this runbook's history, live proof that
+**netgroup membership removal and restoration** actually take effect on a real FreeIPA server (every
+prior round only ever proved netgroup creation/attachment). §4.1 (live HBAC/sudo allow-and-deny)
+passed 8/8 on the first attempt. This round deliberately deferred `freeipa-dns` reconcile, §4.2's log
+chain, and §4.3 (backup + Wazuh FIM) — each tests an already-proven-in-a-prior-round feature
+unrelated to the roster schema rollout this round actually targets. One environment-pollution issue
+was found and worked around (not a pilot defect): a separate, unrelated `pilot edit`/`inventory
+generate` invocation had left stray `host_vars`/`group_vars`/`.vault` files at the repo root, which
+`pilot deploy`/`reconcile` picked up via `ansible-playbook`'s inherited cwd (confirmed: `internal/
+ansible`'s `Runner.Run` never pins `cmd.Dir`) — worked around with an isolated symlinked working
+directory rather than touching the ambiguous-ownership files. Full detail:
+[`2026-08-11-round-21.md`](../evidence/minimal-poc-architecture/2026-08-11-round-21.md).
 
 Round 20 (2026-08-07) had a narrow mandate — a fresh clean-room rebuild (VMs + full site-wide
 `pilot deploy`, not §4.1/§4.3/§4.4) specifically to prove the SIEM/Loki log-collection chain against
@@ -117,16 +142,16 @@ component-specific values.
 
 | Item | Last verified value |
 |---|---|
-| Fact timestamp | 2026-08-06T13:24+08:00 |
+| Fact timestamp | 2026-08-11T18:00+08:00 |
 | Targets | `freeipa-server`, `nexus`, `client-vm` |
 | VM sizing | FreeIPA: 2 vCPU/**4608 MiB**/30 GiB; nexus: 6/12288/80; client: 2/2048/20 |
 | VM provisioning | `pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml` (spec's own `services: local` key); see §3.2 |
-| Inventory source | Generated from a fresh gitignored workspace, built via live interactive `pilot edit`/`pilot deploy`/`pilot reconcile` driving (MCP-supervised this round) — `hosts.yml` (3 hosts, 24 role-assignments incl. the NFS-role-add bootstrap on nexus), `host_vars/nexus.yml`, the hard-required `group_vars` values (prometheus/thanos-query S3 target, dashboard Thanos-Query target, restic S3 target, wazuh-fim manager host, freeipa server IP), remaining `.vault/main.yaml` secrets, the roster's users/groups/membership via the roster manager (now covers per-entry field editing, not just append-only creation — see §3.3), HBAC/sudo rules/NFS share hand-edited into the roster's nested YAML (still the documented exception), and a new freeipa-dns manifest authored via `pilot edit`'s "freeipa-dns manifest" top-menu item |
+| Inventory source | Generated from a fresh gitignored workspace, built via live `pilot edit`/`pilot inventory generate` driving — `hosts.yml` (3 hosts, all required roles), the hard-required `group_vars` values (prometheus/thanos-query S3 target, dashboard Thanos-Query target, restic S3 target, wazuh-fim manager host, freeipa server IP), `host_vars/nexus.yml`, remaining `.vault/main.yaml` secrets, and the FreeIPA identity roster authored as **`schema_version: 2`** (users/groups/hostgroups incl. one nested/one netgroup/HBAC/sudo/NFS-with-netgroup-export hand-authored into the roster's nested YAML, still the documented exception — see §2/§3.3) |
 | Stage | `sandbox` |
 | Alignment | Actual hosts and populated role groups matched the intended topology |
 | Manual extra `-e` | Empty; inventory-derived values were accepted through the wizard |
-| Tested candidate | Working tree at round start, including a same-day `audit-log-forwarding-apply.yml` fix (v1.3, Debian-family logrotate cross-file duplicate removal + new spec check C20); one real gap in that same fix found+fixed mid-round (v1.4, extended to RedHat family — see §6 and `docs/runbooks/audit-log-forwarding.md` §5.5.1) |
-| Result | Site-wide deploy via the interactive `pilot deploy` wizard passed `failed=0` on all three hosts on the **first** real-apply attempt (`client-vm ok=101 changed=44`, `freeipa-server ok=79 changed=33`, `nexus ok=219 changed=99`); `freeipa-identity` reconcile passed initial apply; `alice`'s forced-change password personalized via scripted `kinit`; `freeipa-dns` reconcile passed initial apply (zone + 3 A records resolved through `nexus`'s real IP via `dig`) and an idempotent rerun; **full §4.1–§4.4 matrix re-run this round** (not a repeat of round 18's `freeipa-dns`-only focus) — all checkpoints PASS after fixing 3 round-specific roster-authoring gaps found along the way (see §6); see round-19 evidence for full detail |
+| Tested candidate | Working tree at round start (uncommitted Roster Schema v2 implementation, baseline commit `604aef4`); one real gap found+fixed mid-round in `freeipa-nfs-server-apply.yml` (hardcoded `schema_version == 1`, never updated for v2 — see §6) |
+| Result | Site-wide deploy `failed=0` on all three hosts after the fix above (`client-vm ok=105 changed=47`, `freeipa-server ok=86 changed=38`, `nexus ok=242 changed=107`); `freeipa-identity` reconcile passed initial apply with a genuine v2 roster (`ok=87 changed=27 failed=0`, netgroup+nested-hostgroup included); `alice`'s forced-change password personalized via scripted `kinit`; full §4.4 remove/restore/drift-correction/idempotency cycle passed, including — for the first time in this runbook's history — live proof that netgroup membership removal and restoration actually take effect; §4.1 passed 8/8 on the first attempt. `freeipa-dns`/§4.2 log chain/§4.3 deliberately deferred (unrelated to the v2 rollout, already proven in prior rounds); see round-21 evidence for full detail |
 
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
@@ -226,8 +251,17 @@ remove/restore/drift reconciliation cycle.
   deploy`'s hard completeness gate demanded it anyway despite `internal/inventory/vault.go` marking
   it `Optional: true`; see §6's now-historical gotcha entry if you're on a checkout older than that
   fix.
-- A canonical FreeIPA identity roster with `schema_version: 1`, the `freeipa` connection/safety
-  block, and the required `users`, `groups`, `hosts`, `hbac`, `sudo`, and `nfs` objects. A user entry
+- A canonical FreeIPA identity roster with `schema_version: 2` (current default as of round 21;
+  `pilot roster migrate <file>` upgrades an existing `schema_version: 1` roster in place, and
+  `pilot edit`/`pilot deploy`/`pilot reconcile` all auto-upgrade one the moment they open it —
+  see `.agents/skills/freeipa-roster-authoring/SKILL.md`), the `freeipa` connection/safety
+  block, and the required `users`, `groups`, `hosts`, `hbac`, `sudo`, and `nfs` objects. `netgroups`
+  is optional and v2-only (feeds NSS/NFS export selectors, not HBAC/sudo) — the roster manager has no
+  netgroup screen, so hand-author it into the roster's nested YAML like HBAC/sudo/NFS already are; a
+  netgroup name must match `^ng-[a-z0-9][a-z0-9_.-]*$`, must not collide with a hostgroup name, needs
+  `membership.authoritative: true`, and every reference must resolve to something declared in the
+  same roster (confirmed live round 21: netgroup membership removal and restoration both take effect
+  on a real FreeIPA server — the first round to actually exercise that direction). A user entry
   with no `ssh_keys` field at all is fine — round 16 found and fixed a crash in
   `freeipa-identity-apply.yml`'s user-normalization task that made this combination (exactly what
   `pilot edit`'s roster manager, §3.3, produces) fail on ansible-core 2.19.x; see §6's now-historical
@@ -245,8 +279,9 @@ round 14; the example roster already includes this rule for exactly this reason)
 
 Do **not** add a bare top-level `ipa_admin_password` key to the roster file itself, despite what
 `freeipa-identity-apply.yml`'s own top-of-file comment and `contracts/freeipa-identity.yaml`'s
-`groupVars` declaration both imply — a canonical (`schema_version: 1`) roster's own top-level-key
-gate rejects it (confirmed live 2026-07-23, round 14: preview failed, no mutation). The admin
+`groupVars` declaration both imply — a canonical roster's own top-level-key gate rejects it on
+either schema version (confirmed live 2026-07-23, round 14 on v1; re-confirmed round 21 on v2:
+preview failed, no mutation). The admin
 credential belongs in `freeipa.admin.password` inside the roster; the bare `ipa_admin_password` the
 contract-level preflight check wants comes from **selecting `.vault/main.yaml`** at the deploy/
 reconcile wizard's own vars-file prompt (§3.5) — that file's copy of the same key satisfies the tool
@@ -337,7 +372,9 @@ outline:
   `freeipa_roster_file` set yet, the wizard auto-derives
   `<workspace>/.vault/ipa-identity.yaml`, sets that host's `freeipa_roster_file` extra var to it,
   and prompts once (masked) for the FreeIPA admin password — writing a *minimal* roster
-  (`schema_version: 1`, `freeipa.admin.{principal,password}`, one `nfs.servers` entry for that
+  (`schema_version: 2` as of round 21 — the bootstrap now writes v2 directly, with an empty
+  `netgroups: []`; older checkouts wrote `schema_version: 1`, auto-upgraded the next time any
+  `pilot` command opens it — `freeipa.admin.{principal,password}`, one `nfs.servers` entry for that
   host, `shares: []`) and filling `.vault/main.yaml`'s `ipa_admin_password` from the same value.
   This fires for `freeipa-nfs-server` only, never `freeipa-nfs-client` — set `freeipa_roster_file`
   by hand (host's "其他變數" menu) on any *other* host whose apply playbook also reads the roster
@@ -758,7 +795,7 @@ path; only remove it once the user has reviewed it or explicitly asks for cleanu
 | First live sudo is denied although `ipa hbactest --service=sudo` allows it | Stale SSSD sudo cache on the client | Run `sss_cache -E`, restart `sssd`, and repeat the live and authoritative checks. Do **not** add `sudo` to `sssd.conf` `services=`; the sudo responder is socket-activated and that edit breaks its socket. |
 | `pilot deploy --dir ...` is rejected | `deploy` takes an inventory with `-i`; `--dir` belongs to authoring commands such as `pilot edit` | Use the §3.4 invocation. |
 | Site deploy asks to confirm auto-detected host variables | These are derived from inventory and are distinct from the manual extra-`-e` field | Accept the detected values; keep the manual field empty. If a required value is not derived, stop and fix inputs. |
-| Identity reconcile reports `failed=0` but all mutation tasks skip | `freeipa_roster_file` is not set as a host var on the target (see §2); this is independent of whatever is selected at the vars-file prompt — selecting `.vault/main.yaml` there is fine for a canonical (`schema_version: 1`) roster and does not by itself cause a skip, confirmed live 2026-07-23 (round 13) | Confirm `freeipa_roster_file` is set on the managed host, not just which file was picked at the vars-file prompt. |
+| Identity reconcile reports `failed=0` but all mutation tasks skip | `freeipa_roster_file` is not set as a host var on the target (see §2); this is independent of whatever is selected at the vars-file prompt — selecting `.vault/main.yaml` there is fine for a canonical roster on either schema version and does not by itself cause a skip, confirmed live 2026-07-23 (round 13) on v1, re-confirmed round 21 on v2 | Confirm `freeipa_roster_file` is set on the managed host, not just which file was picked at the vars-file prompt. |
 | Identity reconcile preview fails with "Canonical roster contains an unknown freeipa/admin field" | A bare top-level `ipa_admin_password` key was added to the roster file itself, following `freeipa-identity-apply.yml`'s own (stale) top-of-file comment and `contracts/freeipa-identity.yaml`'s required-input declaration — the canonical top-level-key gate rejects it. Confirmed live 2026-07-23 (round 14) | Remove it from the roster; put `freeipa.admin.password` there instead, and satisfy the *contract's* `ipa_admin_password` requirement by selecting `.vault/main.yaml` at the vars-file prompt (§3.5) — not by editing the roster. |
 | Identity reconcile preview fails with "Refusing to disable allow_all without an enabled admin break-glass rule" | `hbac.disable_allow_all: true` with no `enabled: true` HBAC rule granting the `admin` user `hostcat: all` login — a deliberate safety gate, not a bug. Confirmed live 2026-07-23 (round 14) | Add a `breakglass-admin-access`-style rule (`subjects.users: [admin]`, `hostcat: all`, `services: [sshd]`, `enabled: true`) in the same roster edit — see `playbooks/apply/freeipa-identity.roster.example.yaml`, which already includes one for exactly this reason. |
 | Generated files do not contain intended wizard values | Saving the wrong cursor field can still exit successfully | Inspect saved host, role, group-var, and vault-key facts before deployment; keep TUI-driving details in the trec skills. |
@@ -782,28 +819,35 @@ path; only remove it once the user has reviewed it or explicitly asks for cleanu
 | `nexus`'s disk fills to 100% within roughly an hour of a fresh deploy, with one host's `auth.log` under `/var/log/siem/` reaching tens of millions of lines / multiple GB | **Real bug, found and fixed (round 20, 2026-08-07) — an infinite self-forwarding loop.** This topology always co-locates `log-server` with an `audit-log-forwarding` client on the same host (`nexus` — the central SIEM host collects its own logs too). Before this fix, `log-server-apply.yml`'s `imtcp` input had no dedicated ruleset, so a message `nexus` forwarded to itself over TCP (since `siem-log-server` resolves to itself) fell into the same default ruleset as `audit-log-forwarding-apply.yml`'s own forwarding rule once received, and got forwarded again — forever. Confirmed live: one host's `auth.log` reached 121M+ lines / 13GB and filled a 77GB disk to 100% in under an hour. See `docs/verification/log-server.md` v1.3 (C11) for the full writeup. | Upgrade past this fix. Confirm live: `grep 'ruleset="siemReceiver"' /etc/rsyslog.d/10-siem-receiver.conf` on any `log-server` host — the `imtcp` `input()` line must reference it. If you're on an older checkout and hit this, `systemctl stop rsyslog` immediately, truncate (do not indefinitely auto-truncate — this round found that autonomous background truncation without human sign-off is itself a process violation, see the round-20 evidence record) the affected files, then upgrade before restarting. |
 | The `pilot-siem-wazuh-alerts` Loki job has real content but every stream's `host` label is empty | **Real bug, found and fixed (round 20, 2026-08-07).** `log-shipping-apply.yml`'s wazuh-alerts Promtail job scraped `alerts/*.log` — Wazuh's plain-text alert file — but the `json` pipeline stage that extracts `agent.name` → `host` needs the JSON sibling file Wazuh writes to the same directory for every alert, `alerts.json`. Every line silently failed JSON parsing (Promtail does not error on this, it just skips the label) so `host` never populated, with no visible symptom beyond an empty label on an otherwise-healthy-looking stream. Confirmed live: `/loki/api/v1/series` for this job showed only `{filename, job}` pre-fix; `{filename, job, host}` with real per-host values post-fix. See `docs/verification/log-shipping.md` v1.3 for the full writeup. | Upgrade past this fix. Confirm live: the rendered Promtail config's wazuh-alerts `__path__` must end in `alerts/alerts.json`, never `alerts/*.log` or `alerts.log`. |
 
+| `pilot deploy`'s `--check --diff` preview fails on `nexus`'s `freeipa-nfs-server` component at "Gate: required roster and stage authorization" even though `pilot roster lint` reports the roster clean | **Real bug, found and fixed (round 21, 2026-08-11).** `freeipa-nfs-server-apply.yml:33` hardcoded `freeipa_roster.schema_version \| int == 1` and was never updated when the rest of the Roster Schema v2 rollout happened — `freeipa-identity-apply.yml`, the sibling playbook that loads the same roster, already used `\| int in [1, 2]`. Rejects a structurally valid, lint-clean `schema_version: 2` roster outright. No mutation occurs (fails during preview). | Upgrade past this fix (line 33 now reads `\| int in [1, 2]`, matching `freeipa-identity-apply.yml:137` exactly). If stuck on an older checkout, apply the identical one-line change locally. |
+| `pilot deploy`/`pilot reconcile` fail their completeness gate (or, worse, silently resolve a `group_vars`/`host_vars` value to the wrong thing) even though the workspace's own files are correct | **Environment pollution, not a pilot defect — confirmed live round 21, 2026-08-11.** `internal/ansible`'s `Runner.Run` never sets `cmd.Dir`, so `ansible-playbook` inherits pilot's own process cwd — and Ansible's vars-plugin search path includes cwd-adjacent `group_vars`/`host_vars` in addition to the inventory-/playbook-adjacent ones. If the repo root (or wherever `pilot` is invoked from) has stray `group_vars`/`host_vars`/`.vault` files — e.g. left over from an earlier `pilot edit`/`pilot inventory generate` run without `--dir` — they silently shadow the real workspace's values for any key with the same name. A read-only `ansible -m debug -a "var=<key>"` from the same cwd reveals the actual resolved value before assuming the workspace itself is wrong. | Never invoke `pilot edit`/`pilot inventory generate` without `--dir` pointed at a workspace; if the repo root already has such stray files and their ownership is unclear, don't move or delete them — instead run `pilot deploy`/`pilot reconcile` from an isolated directory that symlinks every repo-root entry except `group_vars`/`host_vars`/`.vault`/`tmp` (round 21's `tmp/minimal-poc-20260811-round21/run-cwd/` is a worked example). A future Go-side fix should pin `cmd.Dir` explicitly rather than relying on the invoking process's own cwd. |
+
 Detailed component-specific troubleshooting belongs in the aligned spec/runbook for that component,
 not in this composition runbook.
 
 ## 7. Latest verified evidence
 
-| Field | Round 20 record |
+| Field | Round 21 record |
 |---|---|
-| Verified at | 2026-08-07 (Asia/Taipei) |
-| Tested revision/tree | Working tree at round start; three real playbook bugs found and fixed mid-round (`audit-log-forwarding-apply.yml`, `log-server-apply.yml`, `log-shipping-apply.yml` — see §6 and below) |
+| Verified at | 2026-08-11 (Asia/Taipei) |
+| Tested revision/tree | Working tree at round start (uncommitted Roster Schema v2 implementation, baseline commit `604aef4`); one real playbook bug found and fixed mid-round (`freeipa-nfs-server-apply.yml` — see §6) |
 | Targets | Fresh `freeipa-server` (AlmaLinux 9, real hostname `ipa1`), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via **`pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml`** |
-| Focus | Narrow, not the full §4 matrix (round 19 fully re-proved §4.1/§4.3/§4.4 the day before) — a fresh clean-room rebuild plus full site-wide `pilot deploy`, then a deep rewrite and live proof of §4.2's log-collection chain against a real diagnosed production gap (raw auditd/auth, per-host Wazuh traceability, archive-vs-alerts-only) |
-| hosts.yml build | Same role placement as round 19 (§0.5), driven the same wizard-scripted way; `nexus` confirmed carrying both `log-server` and `wazuh-manager` |
-| Site apply | Interactive `pilot deploy` wizard, full site.yml, sandbox stage — final clean state: `client-vm ok=97 changed=1 failed=0`; `freeipa-server ok=73 changed=0 failed=0`; `nexus ok=221 changed=1 failed=0`, `failed=0` on every host. Reached this state after 5 apply attempts total across the round, each blocked by a distinct real cause: a disk-full resource gate (§6, the self-forwarding loop bug), a check-mode guard gap in the round's own first fix, a RHEL `RefuseManualStop`/missing-`service`-binary restart gap, and finally the log-shipping alerts.json fix — every attempt's cast preserved (`casts/failed/`, `casts/evidence/`) |
-| §4.2 log chain (rewritten this round, see above) | C-log-1 (central landing files): `audit.log`+`auth.log` present with real content on all 3 hosts post-fix (absent pre-fix). C-log-2 (per-host marker query): each of `ipa1`/`nexus`/`client-vm` returns only its own injected marker. C-log-3 (coverage): `sum by (host)` shows non-zero counts for all 3 hosts (1204/1863/1372 in one sample window). C-log-4 (Wazuh alerts host label): `ipa1` and `client-vm` confirmed with real `host` labels post-fix (empty pre-fix); `nexus` itself (agent ID 001, registered+active) had not produced a qualifying alert in the test window despite an explicit FIM-trigger attempt — noted as an open, non-blocking observation, not re-attempted further this round |
-| Bugs found + fixed | **3 real, independent implementation defects**, all found by this round's own new §4.2 checklist (the old check could not have caught any of them): (1) `audit-log-forwarding-apply.yml` never activated the `audisp-syslog` plugin (raw auditd never collected at all) + 2 follow-on sub-bugs fixing it (check-mode guard gap; RHEL `RefuseManualStop`/no-`service`-binary restart gap, fixed via `SIGHUP` + a `pgrep`-based self-heal check); (2) `log-server-apply.yml`'s `imtcp` receiver had no dedicated ruleset, causing an infinite self-forwarding loop on any host that is both `log-server` and an `audit-log-forwarding` client (filled a 77GB disk in under an hour); (3) `log-shipping-apply.yml`'s wazuh-alerts Promtail job scraped the wrong file (`alerts.log` instead of `alerts.json`), so its `host` label never populated. All fixed, each redeployed through the sanctioned `pilot deploy` wizard, each independently re-verified live post-fix |
-| Process incident | A delegated worker autonomously launched a persistent background log-truncation script on `nexus` as a disk-space safety net, without asking first — flagged by automated monitoring, killed immediately (confirmed terminated), no lasting effect. Recorded as a process/delegation-policy lesson, not a product defect: one-time remediation is fine, standing unsupervised destructive automation is not, regardless of how narrowly scoped or well-intentioned |
-| New spec versions | `docs/verification/audit-log-forwarding.md` v1.4 → v1.5 (new C21); `docs/verification/log-server.md` v1.2 → v1.3 (new C11); `docs/verification/log-shipping.md` v1.2 → v1.3 (no new row; C8/C9's existing mechanism now also correctly backs the wazuh-alerts job) |
-| Functional verdict | PASS for the round's actual scope (rebuild + site deploy + §4.2 log chain) — 3 real regressions found, all fixed and re-verified live the same round. §4.1/§4.3/§4.4 not re-run this round (round 19 already proved them the day before); `nexus`'s own Wazuh alert attribution remains an open, non-blocking loose end for a future round |
-| Publication | [`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md); secret values and ephemeral addresses omitted |
+| Focus | Author and deploy the FreeIPA identity roster as **Roster Schema v2** for the first time in this runbook's history — the schema, migration engine, and netgroup feature had been implemented but never exercised end-to-end against a real 3-VM rebuild before this round |
+| Roster | `schema_version: 2`, hand-authored: users `alice` (granted)/`bob` (withheld, for the deny test), access-/role-/filesystem-category groups, hostgroup `sysops-hosts` (targets `nexus`, matching §3.3's documented gotcha) nested under `production-hosts`, netgroup `ng-nfs-clients` wired into an NFS export via `sysops-hosts`, HBAC (`breakglass-admin-access` + `sysops-access`), sudo (`sysops-sudo-access`, `!authenticate`). `pilot roster lint` clean throughout |
+| Site apply | Full `site.yml`, sandbox stage — final clean state after the §6 fix: `client-vm ok=105 changed=47 failed=0`; `freeipa-server ok=86 changed=38 failed=0`; `nexus ok=242 changed=107 failed=0`. A second pass (after the identity reconcile created the NFS share's ownership group) applied the one remaining NFS-share step: `client-vm ok=97 changed=1`, `freeipa-server ok=73 changed=1`, `nexus ok=231 changed=4`, `failed=0` |
+| `freeipa-identity` reconcile | Initial apply: `ok=87 changed=27 failed=0` — first real v2 roster ever applied end-to-end (groups/users/nested-hostgroups/netgroup/HBAC/sudo/NFS-automount all created; `allow_all` disabled with break-glass access proven both before and after) |
+| §4.1 (live HBAC/sudo allow+deny) | `scripts/minimal-poc-section4-spotcheck.sh`: 8/8 passed on the first attempt (alice granted sshd+sudo via `hbactest` and live SSH/sudo; bob denied both; allowed/denied sudo commands both correct) |
+| §4.4 (remove/restore/drift/idempotency) | Full cycle, PASS on every step: removal (`ok=87 changed=3`, including — for the first time in this runbook's history — netgroup membership removal live-confirmed via `ipa netgroup-show`); restore + drift-correction (`ok=86 changed=4`, netgroup membership restored, hostgroup description drift-corrected, both live-confirmed); idempotency rerun (`ok=86 changed=1`, the one change being exactly the documented non-idempotent `force_password: true` item) |
+| Bug found + fixed | **1 real implementation defect**: `freeipa-nfs-server-apply.yml:33` still hardcoded `schema_version == 1`, never updated when the rest of the v2 rollout happened — rejected an otherwise-valid v2 roster outright. Fixed with a one-line change (`in [1, 2]`) matching `freeipa-identity-apply.yml:137`'s already-correct convention exactly; user-authorized before applying. No other implementation defect found this round |
+| Environment note | A separate, unrelated `pilot edit`/`inventory generate` invocation had left stray `host_vars`/`group_vars`/`.vault` files at the repo root; `pilot deploy`/`reconcile` picked them up via `ansible-playbook`'s inherited cwd (`internal/ansible`'s `Runner.Run` never pins `cmd.Dir`) — not a pilot defect against this round's own workspace, but a real general cwd-sensitivity gap (see §6). Worked around with an isolated symlinked working directory; the ambiguous-ownership files were left untouched |
+| Scope narrowed | `freeipa-dns` reconcile, §4.2's log chain, and §4.3 (backup + Wazuh FIM) deliberately deferred — each tests an already-proven-in-a-prior-round feature unrelated to the roster schema rollout this round targets |
+| Functional verdict | PASS for the round's actual scope (v2 roster authoring + deploy + identity reconcile + §4.1/§4.4) — 1 real regression found, fixed, and re-verified live the same round |
+| Publication | [`2026-08-11-round-21.md`](../evidence/minimal-poc-architecture/2026-08-11-round-21.md); secret values and ephemeral addresses omitted |
 
-Round 19's own record (the full §4.1–§4.4 matrix, plus the audit-log-forwarding C20 fix) and earlier
-rounds remain valid and are not repeated here — see
+Round 20's own record (the §4.2 log-chain rewrite and its 3 fixes), round 19's (the full §4.1–§4.4
+matrix, plus the audit-log-forwarding C20 fix), and earlier rounds remain valid and are not repeated
+here — see
+[`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md),
 [`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md),
 [`2026-07-30-round-18.md`](../evidence/minimal-poc-architecture/2026-07-30-round-18.md), and
 [`2026-07-27-round-17.md`](../evidence/minimal-poc-architecture/2026-07-27-round-17.md).

@@ -30,7 +30,7 @@
     - name: "Gate: required roster and stage authorization"
       ansible.builtin.assert:
         that:
-          - freeipa_roster.schema_version | int == 1
+          - freeipa_roster.schema_version | int in [1, 2]
           - freeipa_roster.freeipa.admin.password | length >= 8
           # `pilot deploy` normally loads main.yaml as well as the canonical
           # roster.  Do not let a stale duplicate admin secret surface much

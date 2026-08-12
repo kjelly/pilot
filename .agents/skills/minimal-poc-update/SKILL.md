@@ -21,9 +21,7 @@ Before any destructive action, read completely:
 - `.agents/skills/pilot-trec-verification/SKILL.md`;
 - `.agents/skills/delivery-test/SKILL.md`;
 - `$HOME/.agents/skills/trec-mcp/SKILL.md`;
-- `$HOME/.agents/skills/trec-tui-drive/SKILL.md`;
-- `../../workflows/minimal-poc/common-contract.md`;
-- `../../workflows/minimal-poc/delegation-policy.md`.
+- `$HOME/.agents/skills/trec-tui-drive/SKILL.md`.
 
 If any required file is unavailable, return BLOCKED.
 
@@ -64,13 +62,15 @@ Follow the shared wizard input policy:
 
 ## 3. Delegate bounded work
 
-Use the custom agents defined in the delegation policy:
+Delegate narrow, bounded work to subagents rather than doing everything inline,
+using the general-purpose agent for each of these roles:
 
-- `poc_state_probe` for one read-only precondition;
-- `poc_step_runner` for one selected atomic state-changing checkpoint;
-- `poc_evidence_auditor` for one completed evidence check;
-- `poc_roster_builder` only for the new FreeIPA nested roster;
-- `poc_bug_investigator` for one bounded read-only suspected-bug hypothesis.
+- one read-only precondition probe at a time;
+- one selected atomic state-changing checkpoint at a time;
+- one completed evidence check at a time;
+- roster authoring for the new FreeIPA nested roster (follow the
+  `freeipa-roster-authoring` skill's contract);
+- one bounded read-only suspected-bug hypothesis at a time.
 
 Only one state-changing agent may run at a time. The root controller retains all
 ordering, deviation, and final documentation decisions.
