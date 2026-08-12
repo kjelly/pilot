@@ -97,15 +97,17 @@ func pushRosterHostgroupDetail(r *editRouterModel, dir, path, name, banner strin
 	}
 	mem := rosterSubmap(f, "membership")
 	hosts := rosterStringSlice(mem, "hosts")
+	hostgroups := rosterStringSlice(mem, "hostgroups")
 	items := []string{
 		"name：" + name + "（唯讀）",
 		"description：" + rosterDisplay(f, "description"),
 		fmt.Sprintf("membership.hosts（%d 台；輸入逗號分隔 FQDN）", len(hosts)),
+		fmt.Sprintf("membership.hostgroups（%d 個巢狀 hostgroup）", len(hostgroups)),
 		"↩  返回",
 	}
 	return r.transitionTo(newSelectModelWithScreenID("roster.hostgroup.detail", "Hostgroup "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
-		if m.Canceled() || m.Selected() == 3 {
+		if m.Canceled() || m.Selected() == 4 {
 			return pushRosterHostgroupsMenu(r, dir, path, "")
 		}
 		switch m.Selected() {
@@ -115,6 +117,8 @@ func pushRosterHostgroupDetail(r *editRouterModel, dir, path, name, banner strin
 			return pushRosterHostgroupText(r, dir, path, name, "description", rosterStringValue(f, "description"))
 		case 2:
 			return pushRosterHostgroupHosts(r, dir, path, name, hosts)
+		case 3:
+			return pushRosterHostgroupHostgroups(r, dir, path, name, hostgroups)
 		}
 		return nil
 	})
@@ -149,6 +153,39 @@ func pushRosterHostgroupHosts(r *editRouterModel, dir, path, name string, curren
 			f["membership"] = mem
 		})
 	})
+}
+
+// pushRosterHostgroupHostgroups edits membership.hostgroups (nested
+// hostgroup membership — freeipa-identity-apply.yml now reconciles this
+// authoritatively via hostgroup-add-member/-remove-member --hostgroups,
+// alongside the long-standing --hosts reconciliation pushRosterHostgroupHosts
+// edits). Unlike hosts (free-form FQDNs, possibly outside the roster
+// entirely), a nested hostgroup must itself be a roster-declared hostgroup,
+// so this is a checklist over inventory.RosterHostgroupNames — same idiom
+// as pushRosterHBACTargets's hostgroup picker — rather than free text. The
+// current hostgroup is excluded from its own choices: the roster/Ansible
+// gates don't reject a direct self-reference here (unlike netgroups, which
+// schema v2 added strict cycle protection for — see roster_netgroup.go),
+// but there's no reason the picker should ever offer it.
+func pushRosterHostgroupHostgroups(r *editRouterModel, dir, path, name string, current []string) tea.Cmd {
+	all, err := inventory.RosterHostgroupNames(path)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	choices := make([]string, 0, len(all))
+	for _, hg := range all {
+		if hg != name {
+			choices = append(choices, hg)
+		}
+	}
+	return checklist(r, "roster.hostgroup.field_hostgroups", "membership.hostgroups（巢狀 hostgroup）", choices, current, func(r *editRouterModel, v []string) tea.Cmd {
+		return pushRosterHostgroupEdit(r, dir, path, name, func(f map[string]any) {
+			mem := rosterSubmapClone(f, "membership")
+			mem["hostgroups"] = v
+			f["membership"] = mem
+		})
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHostgroupDetail(r, dir, path, name, "") })
 }
 
 func pushRosterHostgroupEdit(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {

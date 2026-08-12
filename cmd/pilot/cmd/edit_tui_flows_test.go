@@ -1725,12 +1725,16 @@ func TestEditRouter_Teatest_RosterFlow_MissingRosterOffersToCreateSkeleton(t *te
 	if len(violations) != 0 {
 		t.Fatalf("expected the generated skeleton to validate clean, got %v", violations)
 	}
+	// A new schema-v2 roster deliberately omits freeipa.domain — that field
+	// is migration-compatibility-only for old v1 rosters; a new roster's
+	// domain comes from group_vars/freeipa.yml instead (see
+	// minimalRosterBase's doc comment).
 	domain, err := inventory.RosterDomain(path)
 	if err != nil {
 		t.Fatalf("RosterDomain() error = %v", err)
 	}
-	if domain != "ipa.pilot.internal" {
-		t.Fatalf("RosterDomain() = %q, want the default", domain)
+	if domain != "" {
+		t.Fatalf("RosterDomain() = %q, want empty for a freshly-generated schema-v2 roster", domain)
 	}
 }
 

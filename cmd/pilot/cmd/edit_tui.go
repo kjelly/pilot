@@ -804,15 +804,30 @@ func autofixNFSRosterEntry(dir string, h inventory.Host) string {
 	if rosterPath == "" {
 		return ""
 	}
+	// Auto-upgrade before mutating — same "roster-open/mutation boundary"
+	// posture as pushRosterManager (edit_tui_roster.go). Best-effort: an
+	// encrypted/invalid/locked roster isn't migrated here either, and
+	// AppendMissingNFSServerStub below reports that exactly as it always
+	// has, unmigrated or not.
+	migrateNote := ""
+	if result, err := inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{}); err == nil && result.Changed {
+		migrateNote = fmt.Sprintf("✅ Roster schema v%d detected. Automatically upgraded to schema v%d (backup: %s)", result.FromVersion, result.ToVersion, result.BackupPath)
+	}
+	prefixNote := func(s string) string {
+		if migrateNote == "" {
+			return s
+		}
+		return migrateNote + "\n" + s
+	}
 	domain := nfsBootstrapDomain(dir)
 	appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain)
 	switch {
 	case err != nil:
-		return fmt.Sprintf("⚠️  已勾選 freeipa-nfs-server，但無法檢查/補齊 roster %s 的 nfs.servers 項目（%v）；請自行確認", rosterPath, err)
+		return prefixNote(fmt.Sprintf("⚠️  已勾選 freeipa-nfs-server，但無法檢查/補齊 roster %s 的 nfs.servers 項目（%v）；請自行確認", rosterPath, err))
 	case appended:
-		return fmt.Sprintf("✅ 已自動在 %s 補上 %s 的 nfs.servers 項目", rosterPath, h.Name)
+		return prefixNote(fmt.Sprintf("✅ 已自動在 %s 補上 %s 的 nfs.servers 項目", rosterPath, h.Name))
 	default:
-		return ""
+		return migrateNote
 	}
 }
 

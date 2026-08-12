@@ -62,6 +62,27 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		return nil
 	}
 
+	// This is the one place every path into roster editing passes through
+	// — the interactive TUI (pushRosterPathPrompt -> here) and the MCP
+	// semantic roster driver (which drives these same screens by ID, see
+	// edit_automation_driver_roster.go's ensureRosterUsersList) alike — so
+	// it's also the roster-schema-v2 migration spec's required "automatic
+	// TUI/MCP migration" boundary: auto-upgrading here, once, covers both
+	// instead of duplicating the call into every screen or driver.
+	// Deliberately tolerant of failure (encrypted, invalid, locked): a
+	// roster this can't migrate is not a reason to kill the whole `pilot
+	// edit` session, since pushRosterUsersMenu/pushRosterGroupsMenu below
+	// already have their own, less disruptive way of reporting exactly
+	// that (e.g. the ErrRosterEncrypted banner) once something actually
+	// tries to read it.
+	if notice := ensureRosterSchemaCurrentBanner(path); notice != "" {
+		if banner == "" {
+			banner = notice
+		} else {
+			banner = notice + "\n" + banner
+		}
+	}
+
 	items := []string{"👤 Users", "👥 Groups", "🔐 Host access", "🛡️  Sudo commands & rules", "↩  返回"}
 	title := fmt.Sprintf("管理 %s", path)
 	return r.transitionTo(newSelectModelWithScreenID("roster.top", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
@@ -84,6 +105,23 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		}
 		return nil
 	})
+}
+
+// ensureRosterSchemaCurrentBanner attempts to auto-upgrade the roster at
+// path to the current schema (inventory.EnsureRosterCurrent) and returns a
+// banner note describing it — "" if nothing happened, whether because it
+// was already current or because it couldn't be migrated (encrypted,
+// invalid, locked). The required UX for a real upgrade is "Roster schema
+// vN detected. Automatically upgraded to schema vM. Backup: <path>" — no
+// confirmation prompt, since a deterministic, validated migration with a
+// successfully created backup doesn't need one.
+func ensureRosterSchemaCurrentBanner(path string) string {
+	result, err := inventory.EnsureRosterCurrent(path, inventory.RosterMigrationOptions{})
+	if err != nil || !result.Changed {
+		return ""
+	}
+	return fmt.Sprintf("✅ Roster schema v%d detected. Automatically upgraded to schema v%d.\nBackup:\n  %s",
+		result.FromVersion, result.ToVersion, result.BackupPath)
 }
 
 // rosterCreateConfirmScreenID and rosterCreatePasswordScreenID identify
@@ -146,8 +184,7 @@ func pushRosterCreatePrompt(r *editRouterModel, dir, path string) tea.Cmd {
 // was obtained (typed fresh or reused) — the shared commit point for
 // pushRosterCreatePrompt's two branches.
 func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extraNote string) tea.Cmd {
-	domain := nfsBootstrapDomain(dir)
-	if err := inventory.WriteMinimalRosterSkeleton(path, domain, "admin", password); err != nil {
+	if err := inventory.WriteMinimalRosterSkeleton(path, "admin", password); err != nil {
 		r.err = err
 		return nil
 	}

@@ -378,6 +378,16 @@ func writeMissingNFSRosterEntries(w io.Writer, dir string, hf *inventory.HostsFi
 			continue
 		}
 
+		// Auto-upgrade before mutating (roster-schema-v2 migration spec's
+		// "NFS roster bootstrap/update paths" call site). Best-effort: an
+		// encrypted/invalid/locked roster isn't migrated here either, and
+		// AppendMissingNFSServerStub below reports that exactly as it
+		// always has, unmigrated or not — never a new reason to fail
+		// generation.
+		if result, err := inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{}); err == nil && result.Changed {
+			fmt.Fprintf(w, "nfs roster: %s auto-upgraded schema v%d -> v%d (backup: %s)\n", rosterPath, result.FromVersion, result.ToVersion, result.BackupPath)
+		}
+
 		appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain)
 		switch {
 		case err != nil:
