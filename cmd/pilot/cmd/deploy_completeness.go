@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -203,6 +204,68 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 		return violations[i].Detail < violations[j].Detail
 	})
 	return violations, nil
+}
+
+// ensureFreeIPARostersCurrent auto-upgrades every distinct freeipa_roster_file
+// referenced by an effective freeipa-server/freeipa-server-replica target to
+// the current roster schema — the "pilot reconcile / freeipa-identity
+// preflight" call site the roster-schema-v2 migration spec requires before
+// every local mutating workflow that consumes a canonical roster.
+//
+// Deliberately a separate function from validateDeploymentCompleteness
+// rather than folded into it: that function is documented above to "never
+// touch any file," and callers (deploy.go, reconcile.go, and their tests)
+// rely on that. This shares its group/hostVars resolution instead of its
+// mutation.
+//
+// Best-effort, matching this file's existing "can't verify without a vault
+// password — not our call to block on" posture toward ErrRosterEncrypted:
+// a real .vault/ path is commonly encrypted, and Phase 10's vault-password
+// support isn't built yet, so failing to migrate an encrypted roster here
+// must never block a deploy/reconcile that worked fine before this feature
+// existed. Any other migration failure (invalid v1 content, lock
+// contention) is reported to out as a warning, not a new blocking
+// violation — the real ansible-playbook apply's own canonical gates catch
+// a genuinely broken roster exactly as they always have.
+func ensureFreeIPARostersCurrent(ctx context.Context, out io.Writer, inv string) error {
+	groups, err := resolveInventoryGroups(ctx, inv)
+	if err != nil {
+		return err
+	}
+	hostVars, err := resolveInventoryVariables(ctx, inv, nil, vaultInput{})
+	if err != nil {
+		return err
+	}
+
+	seen := map[string]bool{}
+	for _, role := range []string{"freeipa-server", "freeipa-server-replica"} {
+		for _, host := range groups[role] {
+			rosterPath, _ := hostVars[host]["freeipa_roster_file"].(string)
+			rosterPath = strings.TrimSpace(rosterPath)
+			if rosterPath == "" {
+				continue
+			}
+			rosterPath = resolveRosterPath(filepath.Dir(inv), rosterPath)
+			if seen[rosterPath] {
+				continue
+			}
+			seen[rosterPath] = true
+
+			result, err := inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
+			if err != nil {
+				if !errors.Is(err, inventory.ErrRosterEncrypted) {
+					fmt.Fprintf(out, "warning: could not auto-upgrade roster schema for %s: %v\n", rosterPath, err)
+				}
+				continue
+			}
+			if !result.Changed {
+				continue
+			}
+			fmt.Fprintf(out, "Roster schema v%d detected (%s).\nAutomatically upgraded to schema v%d.\nBackup:\n  %s\n\n",
+				result.FromVersion, rosterPath, result.ToVersion, result.BackupPath)
+		}
+	}
+	return nil
 }
 
 // formatCompletenessViolations renders every violation into a single error

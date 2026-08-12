@@ -17,7 +17,7 @@ func TestSemanticActionCatalogIsStable(t *testing.T) {
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",
 		"create_user", "set_user_field", "set_user_password", "add_ssh_key", "delete_ssh_key",
 		"create_group", "set_group_field", "set_group_members_users", "set_group_members_groups",
-		"create_hostgroup", "set_hostgroup_field",
+		"create_hostgroup", "set_hostgroup_field", "set_hostgroup_hostgroups",
 		"create_hbac_rule", "set_hbac_groups", "set_hbac_targets", "set_hbac_services", "set_hbac_disable_allow_all",
 		"create_sudo_command_group", "set_sudo_command_group_commands",
 		"create_sudo_rule", "set_sudo_rule_groups", "set_sudo_rule_command_groups", "set_sudo_rule_commands", "set_sudo_rule_allow_mode",
@@ -71,7 +71,7 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	if schema.PilotVersion == "" {
 		t.Error("pilot_version is empty")
 	}
-	if schema.SchemaVersion != 1 || len(schema.Actions) != 57 {
+	if schema.SchemaVersion != 1 || len(schema.Actions) != 58 {
 		t.Fatalf("schema metadata = schema_version %d, actions %d", schema.SchemaVersion, len(schema.Actions))
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {
@@ -151,7 +151,7 @@ func TestActionsListIncludesEverySemanticAction(t *testing.T) {
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",
 		"create_user", "set_user_field", "set_user_password", "add_ssh_key", "delete_ssh_key",
 		"create_group", "set_group_field", "set_group_members_users", "set_group_members_groups",
-		"create_hostgroup", "set_hostgroup_field",
+		"create_hostgroup", "set_hostgroup_field", "set_hostgroup_hostgroups",
 		"create_hbac_rule", "set_hbac_groups", "set_hbac_targets", "set_hbac_services", "set_hbac_disable_allow_all",
 		"create_sudo_command_group", "set_sudo_command_group_commands",
 		"create_sudo_rule", "set_sudo_rule_groups", "set_sudo_rule_command_groups", "set_sudo_rule_commands", "set_sudo_rule_allow_mode",

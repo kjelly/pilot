@@ -232,11 +232,13 @@ func TestValidateDeploymentCompleteness_ReportsVaultChangeMePlaceholder(t *testi
 }
 
 func TestValidateDeploymentCompleteness_ReportsRosterStructuralViolation(t *testing.T) {
-	// schema_version: 2 fails checkSchemaVersion — a canonical-structure
-	// rule ValidateRosterFile enforces that the narrower nfs.servers-only
-	// check this gate used to run on its own would never have caught.
+	// schema_version: 999 fails ValidateRoster's version dispatch — a
+	// canonical-structure rule ValidateRosterFile enforces that the
+	// narrower nfs.servers-only check this gate used to run on its own
+	// would never have caught. (schema_version 1 and 2 are both valid as
+	// of roster schema v2, so this must use a version beyond either.)
 	badRoster := `---
-schema_version: 2
+schema_version: 999
 freeipa:
   domain: ipa.pilot.internal
 nfs:

@@ -316,6 +316,9 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	if len(violations) > 0 {
 		return formatCompletenessViolations(violations)
 	}
+	if err := ensureFreeIPARostersCurrent(ctx, out, inv); err != nil {
+		return err
+	}
 
 	if runConfirmProgram("要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
 		previewInventoryGraph(ctx, out, inv)
