@@ -64,7 +64,8 @@ sessions: `cmd/pilot/cmd/deploy_catalog.go` and
   keystroke driver for every interactive step. `trec drive --help` /
   `trec --help` for the current flag set — don't assume flags from
   memory. `trec --help` also lists an `mcp` subcommand (stdio MCP
-  server) — see §4a for when to use it instead of a plain shell call.
+  server) — see `references/mcp-mode.md` for when to use it instead of a
+  plain shell call.
 - Decide up front whether the calling agent has a genuinely persistent
   PTY/shell available for `trec drive --interactive`, or whether every
   shell tool call is an independent one-shot subprocess (true for this
@@ -75,7 +76,8 @@ sessions: `cmd/pilot/cmd/deploy_catalog.go` and
   needs a stateful session. If `mcp__trec__*` tools (e.g.
   `terminal_start`) aren't already available via `ToolSearch`, and the
   task needs one, register `trec mcp` as an MCP server rather than
-  trying to fake a persistent PTY with one-shot Bash calls. See §4a.
+  trying to fake a persistent PTY with one-shot Bash calls. See
+  `references/mcp-mode.md`.
 - Test artifacts (the disposable inventory workspace, `trec` scripts,
   `.cast` recordings) go under the repo's own `./tmp/` directory
   (gitignored — see `.gitignore`), **never** loose inside the tracked
@@ -146,8 +148,7 @@ PILOT_DEBUG_MENU=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   ```
   It's a no-op for normal human interactive use (gated behind the env
   var; doesn't touch the rendered menu itself).
-  **Caveat, confirmed live (both this skill's own re-verification and
-  independently reproduced 2026-07-17): don't combine
+  **Caveat `[live 2026-07-17, independently reproduced]`: don't combine
   `PILOT_DEBUG_MENU=1` with `SELECT` in the same recorded run.** The
   extra stderr lines it interleaves into the same PTY stream actively
   confuse `SELECT`'s screen-scan — a script that passes cleanly without
@@ -164,7 +165,8 @@ PILOT_DEBUG_MENU=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   you're an agent whose shell tool only spawns one-shot subprocesses
   (this session's `Bash` tool included), you cannot hold `trec drive
   --interactive`'s stdin open across calls to do this — use `trec
-  mcp`'s stateful tools instead (§4a), with `PILOT_DEBUG_MENU=1` set on
+  mcp`'s stateful tools instead (`references/mcp-mode.md`), with
+  `PILOT_DEBUG_MENU=1` set on
   the driven process, rather than guessing from a short throwaway
   script and hoping it matches.
 
@@ -310,620 +312,64 @@ evidence casts. Do not merge an entire cast directory, and do not treat
 only a banner and semantic markers rather than the UI a viewer needs to audit.
 Keep failed, aborted, ended, and in-progress casts separate as diagnostics.
 
-- **`CI=1` is now required for every `pilot edit`/`pilot deploy`
-  invocation, full stop** — as of the 2026-07-17 Bubble Tea rewrite
-  (see `cmd/pilot/cmd/edit_tui.go`/`deploy_tui.go`), both commands are
-  100% Bubble Tea, not just the one role-checklist screen from before.
-  Every screen triggers bubbletea's package-init OSC background-color
-  query the first time any `tea.Program` runs in the process; without
-  `CI=1` it hangs ~5s on that query under a bare PTY with nothing to
-  answer it. Don't special-case this to "only when the role checklist
-  is involved" anymore — always set it.
-- Text-entry fields (ansible_host, ansible_user, ssh key path, vault
-  entry values, …) still **pre-fill the current/default value with the
-  cursor at the end** — plain `TEXT` appends instead of replacing, same
-  as before the rewrite (now `bubbles/textinput` under the hood instead
-  of promptui's readline, deliberately kept identical — see
-  `tui_textinput.go`'s `TestTextInputModel_TypingReplacesRatherThanAppending`).
-  Always `BACKSPACE <n>` (n ≥ the current value's length;
-  over-backspacing is harmless) before typing a new value.
-- **The vault/group_vars key-list screens rebuild with the cursor back
-  at the TOP after every single field edit — there is no auto-advance
-  to the next entry.** A script that edits field 0 and then just sends
-  `ENTER` again re-opens field 0, not field 1. Confirmed live
-  2026-07-17 (v8 minimal-poc run): a vault-fill script with no `DOWN`
-  between entries typed all seven intended values into
-  `ipa_admin_password` one after another — the file saved cleanly with
-  the *last* value (`pilot-secret-key`) in that one key and every
-  other key still at its `CHANGE-ME` placeholder, and the cast looked
-  green throughout. Send `DOWN <index>` before the `ENTER` for *every*
-  entry, recomputing the index from the top each time.
-- **After every `pilot edit` save, verify the file on disk before
-  moving on** — `grep` each key you intended to set and compare the
-  actual value against what you meant to type. The cast showing
-  `✅ 已存檔` proves a save happened, not that the right fields got the
-  right values (see the cursor-reset incident above, which this check
-  would have caught immediately). Treat a mismatch as a script bug to
-  fix and re-run, never as evidence of a wizard write-path bug — check
-  the transcript for where your keystrokes actually landed first.
-- **`pilot deploy`'s yes/no prompts now finalize on a single `y`/`n`
-  keypress — do not send a trailing `ENTER` after it.** Before the
-  rewrite, promptui's confirm was a line-editor requiring Enter to
-  submit; the new `confirmModel` (`tui_confirm.go`) answers immediately
-  on `y`/`Y`/`n`/`N` (Enter still works too, using the shown default,
-  but only when no y/n was typed first). Sending `TEXT n` then `ENTER`
-  the old way sends that stray `ENTER` on to whatever screen comes
-  *next*, silently submitting its default choice before your script's
-  own steps for that screen ever run — confirmed live 2026-07-17,
-  it derailed a `pilot deploy` preflight-mode select this way. Send
-  just `n` (or `y`) and move on to the next `EXPECT`.
-- `pilot edit`'s vault editor explicitly refuses nested-structure YAML
-  ("複雜 YAML（例如 roster/list/nested map）") and tells you to use a
-  text editor instead. That is a legitimate, tool-endorsed exception to
-  "no hand-edited YAML" — but only for files the tool itself declines;
-  everything the wizard *will* edit (scalar vault entries, hosts.yml,
-  group_vars) must still go through it.
-- `pilot inventory generate --dir <path>` backfills missing
-  `group_vars/<role>.yml` from `.example.yml` and writes a vault
-  skeleton listing every secret key the roles you selected actually
-  need — read its output before writing the vault-fill script.
-- **`pilot edit` now has a real `host_vars/` editor** (added after
-  2026-07-23; confirmed live 2026-07-25, round 16) — reachable from a
-  host's own menu as a conditional item, `host_vars/<host>.yml(必填、
-  無安全預設值的設定)`, that only appears when that host's current roles
-  imply a key with no safe cross-host default (`internal/inventory
-  .HostVarsKeysForRoles` — today just `prometheus_site_label` for the
-  `prometheus` role). Selecting it auto-scaffolds the file if missing and
-  reuses the same flat key-list editor `group_vars/` uses (still
-  scalar-only). The stale claim this replaced ("no host_vars editor,
-  hand-write it") predates this feature — don't hand-write
-  `host_vars/*.yml` for a key this screen covers; use the wizard.
-- **`pilot edit`'s top menu gained two more items** (same 2026-07-23+
-  work): `roster` (append-only FreeIPA Users/Groups CRUD against a
-  canonical roster — see below) and `🔍 檢查設定完整性`, an advisory
-  report sharing its checks with `pilot deploy`'s own hard completeness
-  gate (`workspace_completeness.go`/`deploy_completeness.go`) — run it
-  before deploying to catch a missing/CHANGE-ME vault key, an unfilled
-  host_vars key, or a roster structural violation without waiting for a
-  real preflight. It only warns (✅/❌ banner); it never blocks a save or
-  an exit, unlike `pilot deploy`'s own gate.
-- **2026-07-30: a fifth top-menu item, `freeipa-dns manifest`, was
-  inserted between `roster` and `🔍 檢查設定完整性`** —
-  `cmd/pilot/cmd/edit_tui_dns.go`, append/edit CRUD for
-  `docs/specs/freeipa-dns.md`'s DNS zones/records manifest (zone
-  state/records_mode/split-horizon-ack, and A/AAAA/CNAME records
-  including a `target.inventory_host` picker sourced from `hosts.yml`).
-  Same Simulate-then-write gate as the roster screens
-  (`inventory.ValidateDNSManifest`), and `state: absent` on either a
-  zone or a record is offered directly (unlike roster users/groups) —
-  it's a declarative reconcile request, not an in-wizard delete; real
-  deletion happens later at apply time behind its own safety gates. If
-  you drive the top menu by **index** (`DOWN` N times) rather than by
-  `SELECT <label text>`, every item at or after this one shifted by
-  +1 — this exact class of bug broke four unrelated existing teatest/PTY
-  tests the same day this item was added (fixed-count `DOWN` loops
-  landing on the wrong item after the insertion). Prefer `SELECT <label
-  text>` for top-menu navigation in any new script for this reason; if
-  you must count, re-verify the count against the live item list
-  (`PILOT_DEBUG_MENU=1`, see above) rather than trusting an old
-  transcript.
-- **The FreeIPA identity roster is no longer 100% hand-authored** — two
-  edit-menu features now cover part of it (confirmed live 2026-07-25,
-  round 16), narrowing but not eliminating the roster's nested-YAML
-  hand-edit exception:
-  - **NFS-role-add bootstrap**: the moment a host's role checklist (or a
-    role preset/copy-roles action) newly checks `freeipa-nfs-server` and
-    that host has no `freeipa_roster_file` set yet, the wizard
-    auto-derives `<workspace>/.vault/ipa-identity.yaml`, sets that host's
-    `freeipa_roster_file` extra var to it, prompts once for the FreeIPA
-    admin password (masked `EchoPassword` input — never appears in a
-    `--secret-env`/`--secret-file`-protected recording), and writes a
-    *minimal* roster: `schema_version: 1`, `freeipa.admin.{principal,
-    password}`, and one `nfs.servers` entry for that host with
-    `shares: []`. It also creates/fills `.vault/main.yaml`'s
-    `ipa_admin_password` from the same value, without ever clobbering an
-    existing non-`CHANGE-ME` one. This fires only for
-    `freeipa-nfs-server`, never `freeipa-nfs-client`.
-  - **Roster manager** (top-menu `roster` item → `👤 Users` / `👥
-    Groups`): append-only. Adding a user writes only `{name, state:
-    present}`; adding a group writes only `{name, state: present,
-    category}` (category comes from a 4-way picker —
-    `team-`/`data-`/`access-`/`role-` — matching the runbook §2 prefix
-    rule). Both dry-run the addition against the roster validator first
-    and refuse (showing the violation) rather than writing anything
-    invalid. Neither screen can set membership, passwords, `ssh_keys`,
-    HBAC/sudo rules, hostgroups, or NFS shares/exports — those still need
-    a hand edit, the same tool-endorsed nested-YAML exception the vault
-    section above documents. `./pilot roster lint <file>` validates a
-    hand-edited roster against the same rules the apply playbook enforces,
-    without needing a live target.
-  - A user roster built this way needs an explicit `ssh_keys: {
-    authoritative: true, values: [...] }` block added by hand for *every*
-    user before a real `freeipa-identity` reconcile, even if the list is
-    empty. A user with no `ssh_keys` field at all currently crashes
-    `freeipa-identity-apply.yml`'s own user-normalization task on
-    ansible-core 2.19.x — this is a suspected playbook bug, not a
-    trec-driver issue, so its full writeup lives in
-    `docs/runbooks/minimal-poc-architecture.md` §6, not here.
-
-### Timing: avoid dropped keys without stalling the run
-
-- `--key-delay` below ~100ms on a long burst of repeated `DOWN`/`SPACE`
-  presses (e.g. selecting many roles in the checklist) can silently
-  drop one keystroke, landing the cursor one row off with no error.
-  150ms has been reliable; don't go much lower purely to save time.
-- A script that runs out of instructions while the target program is
-  still waiting on a prompt does **not** make `trec drive` hang
-  forever — but it also does not mean the intended action happened.
-  **Always verify success by content, not exit code**: grep the output
-  for the wizard's own confirmation text (`✅ 已存檔`, `✅ 套用完成`),
-  not just `trec drive: process exited 0`. A derailed script exits 0
-  just as cleanly as a correct one, having done nothing you intended.
-- **End every `pilot edit` drive by actually exiting the wizard**:
-  navigate back to the top menu, `SELECT 離開` + `ENTER`, then
-  `WAIT_CHILD_EXIT` + `ASSERT_EXIT 0`. A script that stops after its
-  last edit (or ends with `QUIT`) leaves the wizard alive at a menu;
-  `trec drive` then waits out `--timeout`, kills the child, and writes
-  `status: failed / exit_code: -1` into the `.result.json` — turning a
-  perfectly successful edit into red evidence. All four edit casts of
-  the 2026-07-17 minimal-poc run failed this way despite every save
-  succeeding.
-- If a run derails (lands on the wrong menu item), nothing is corrupted
-  — `pilot edit`/`deploy` only write on an explicit save/apply step —
-  but nothing was saved either. Fix the index bug and rerun from
-  scratch; there is no partial state to reconcile.
-- For a long real command (`pilot deploy`'s actual apply can run
-  15–40+ minutes for a full site.yml), give `trec drive --timeout` a
-  generous ceiling and run the whole thing under `run_in_background`.
-  There is no more scripted input needed after the last confirm
-  keypress — `trec drive` just keeps recording until the child process
-  exits on its own.
-- **Always pass `--timeout` explicitly for a long run, even if your last
-  step is an `EXPECT@<ms>` with its own generous per-step timeout.** A
-  run was observed to get killed by the *default* `--timeout` (120s)
-  while still legitimately waiting on a final `EXPECT@3600000 PLAY
-  RECAP` step — the per-step override did not reliably supersede the
-  global default in every build. Set `--timeout` to at least as large as
-  your longest `EXPECT@` value; don't rely on the per-step value alone.
-
-### SELECT is now reliable for `pilot edit` — re-verified live 2026-07-17
-
-The previous version of this section documented `SELECT` failing with a
-stale-pointer bug specifically when a menu came right after (or later
-in the same script than) the one bubbletea screen that used to exist
-(the role checklist), while the rest of `pilot edit` was still
-promptui. The root cause was never `SELECT` itself — it was **switching
-between two different rendering libraries mid-session** (promptui's
-inline scrolling vs. bubbletea's screen model), which left trec's
-screen-tracking confused across that boundary.
-
-As of the 2026-07-17 rewrite, `pilot edit` is **one continuous Bubble
-Tea `tea.Program` for the whole invocation** (see `edit_tui.go`'s
-router) — every screen, including the role checklist, is now the same
-rendering model throughout, so that boundary no longer exists. Re-ran
-a full `trec drive --script` walkthrough (`CI=1`, default `--pointer`)
-covering: top menu → hosts.yml → add host → host menu → roles menu →
-role checklist (toggle + confirm) → **back to roles menu, then host
-menu, then host list, all via `SELECT` immediately after the
-checklist** → save → top menu → quit. Every `SELECT` matched correctly
-on the first try; the process exited 0 with the expected file written.
-**`SELECT` is the recommended default for `pilot edit` now** — prefer
-it over `DOWN <n>` counting, since it survives a menu's item count
-drifting (see §2) without needing to recompute an index. **Exception:
-the role checklist screen itself (the `multiSelect` toggle-many-rows
-screen) — see the dedicated subsection below, use `DOWN <n>` + `SPACE`
-there instead.**
-
-One real gotcha hit during that same re-verification, worth carrying
-forward: **pick a label substring unique to one row.** A first attempt
-used `SELECT 完成` intending to match the roles menu's "✅ 完成" row, but
-the checklist's own row also contains "完成" in its hint text ("space
-勾選/取消、enter 完成") — `SELECT` matched that row instead and
-re-entered the checklist. Using `SELECT ✅ 完成` (the emoji prefix is
-part of the rendered row and unique) fixed it immediately. This is the
-`trec-tui-drive` skill's own rule #1 ("label 選畫面上該行獨有的子字串"),
-restated here because it's easy to reach for the shortest label that
-merely *looks* unique and be wrong. Also remember `SELECT` only moves
-the pointer — it does **not** submit; every `SELECT` still needs its
-own following `ENTER`.
-
-`DOWN <n>` index counting still works identically to before (cursor
-resets to 0 on every fresh menu) and remains a fine fallback if you
-ever hit a `SELECT` mismatch — but there is no longer a known reason to
-reach for it by default in `pilot edit`.
-
-A second, subtler gotcha found in that same re-verification, worth
-knowing about explicitly: **`runEdit`'s own static banner — printed
-once via plain `fmt.Fprintln` *before* the router's `tea.Program` ever
-starts, so it's never cleared (neither `pilot edit` nor `pilot deploy`
-uses the alternate screen buffer) — stays visible in scrollback for the
-rest of the session and can collide with a `SELECT` label.** The banner
-line is literally `"═══ pilot edit — hosts.yml / group_vars / .vault
-編輯精靈 ═══"`, which contains both `hosts.yml` and `group_vars` as
-substrings. `SELECT group_vars` failed 150/150 presses, pointer
-permanently stuck at row 0, in a script otherwise identical to a
-working one — because trec's direction heuristic (walk the screen for
-another line containing the label to decide up-vs-down) found the
-label in the banner line *above* the already-topmost menu row and
-picked "up" forever, a no-op once already at row 0. The fix was a more
-specific label that isn't also a substring of the banner — `SELECT
-group_vars/` (the trailing slash, part of the real menu row's text,
-isn't in the banner) matched correctly and the run completed exit 0.
-This is the same "unique substring" rule as above, just against a
-*different, easy-to-forget* source of false matches — the static
-preamble text isn't a screen you're navigating, but `SELECT` doesn't
-know that, and it never scrolls out of the buffer since there's no
-alt-screen. When a `SELECT` mismatches with the pointer "stuck at the
-very first (or very last) row" symptom, check whether the label
-appears anywhere in `runEdit`/`runDeploy`'s own startup banner text
-before assuming it's a wizard bug.
-
-### The role checklist (`multiSelect`) screen: use `DOWN <n>` + `SPACE`, not `SELECT` — this is a proven path, don't re-litigate it
-
-An agent session concluded "the role checklist can't be reliably driven
-by `trec drive --script` for a full ~19-role pass" after `SELECT`-based
-navigation on that screen got its pointer stuck, and proposed
-hand-writing `hosts.yml` outside the wizard as a documented exception.
-**That conclusion was wrong — don't repeat it.** This exact
-screen has been driven successfully by scripted `trec drive --script`
-across multiple independent from-scratch rebuilds — see
-`docs/runbooks/minimal-poc-architecture.md` v5.2, v6.0, v7.0, all of
-which built a multi-host, ~19-role `hosts.yml` this way with zero
-hand-edited YAML. `hosts.yml` has no tool-endorsed hand-edit exception
-(unlike the vault's nested-YAML refusal, §4's note) — treating it as
-one anyway without first ruling out the proven method violates this
-skill's own hard precondition (§0) as much as silently hand-editing
-would.
-
-The reason those rounds succeeded: they drove the checklist with
-**`DOWN <n>` then `SPACE`** to toggle each role, not `SELECT`. This
-matters structurally, not just as a style preference:
-
-- `multiSelectModel` (`cmd/pilot/cmd/tui_multiselect.go`) renders only
-  a **scrolling window** of the item list (`listVisibleRows`, capped at
-  15 rows by default) — with ~19+ roles, most rows are off-screen at
-  any given moment. `SELECT` works by scanning the *currently rendered*
-  screen text for a label substring, so it cannot reliably target a row
-  that's scrolled out of the visible window.
-- The screen's own title (`主機 "<host>" 的角色`) and its in-screen hint
-  line (`☑ 逐項勾選角色(...)`) both routinely share substrings with role
-  names or with each other (the same `完成`-collision class of bug
-  documented above) — one more reason content-based matching is fragile
-  here specifically.
-- `up`/`down` in `multiSelectModel.Update` is pure `cursor++`/`cursor--`
-  with no dependency on what's currently rendered, and `windowStart`
-  auto-follows the cursor — so `DOWN <n>` + `SPACE` is fully
-  content-independent and immune to both problems above. This is the
-  same reason §2's "recompute indices fresh every run" discipline
-  exists: get the role's position from `internal/inventory/contracts.go`
-  (`roleContracts` order), not from memory, then `DOWN <n>` to it.
-- One real failure mode with this approach, already hit and fixed once
-  (v5.2's changelog): a `DOWN 0` sent for the very first role violates
-  this skill's own "omit `DOWN` for index 0" rule and silently lands on
-  the wrong row. Self-catchable by reading the saved `hosts.yml` back
-  before trusting the wizard's exit code (§ "avoid dropped keys"
-  above) — not evidence the screen itself is unreliable.
-
-If a `SELECT`-based script gets the checklist's pointer stuck, the fix
-is to switch that screen's navigation to `DOWN`/`SPACE`, not to
-conclude the wizard can't do the job.
-
-#### `DOWN 0` — fixed upstream in `trec` as of commit `6f77bfc` (2026-07-17); check your `trec` build if you still see this
-
-**Old behavior (any `trec` build at or before `f7bf88e`/`efd26ad`):**
-`DOWN 0` silently misbehaved as `DOWN 1` instead of erroring or being a
-no-op. Confirmed by reading `trec`'s source at the time
-(`drive.go`'s `atoiOr1`/`atoiOrDef`): the script parser treated any
-non-positive count as invalid input and silently fell back to `1`:
-
-```go
-func atoiOrDef(s string, def int) int {
-    ...
-    n, err := strconv.Atoi(s)
-    if err != nil || n <= 0 {
-        return def   // <-- "0" hit this branch, same as "" or garbage
-    }
-    return n
-}
-```
-
-Live-reproduced 2026-07-17 against that build: a script that did
-`SELECT ✅ 完成` → `ENTER` → ... → checklist screen → `DOWN 0` →
-`SPACE` → `ENTER` checked **`freeipa-client` (row 1)**, not
-`freeipa-server` (row 0) — every time, deterministically. Removing the
-`DOWN 0` line entirely (cursor already starts at row 0 on every fresh
-screen — see §2) and sending just `SPACE` checked `freeipa-server`
-correctly.
-
-**Current behavior (`trec` commit `6f77bfc`, "refine drive controls,
-session handling, and MCP tests", and anything after): `DOWN 0` is now
-a hard parse error, caught before the driven program even starts** —
-`atoiOrDef` was replaced with `parsePositiveCount`, which returns an
-error instead of silently defaulting:
-
-```
-$ trec drive --script script.txt -- pilot edit --dir demo
-trec drive: load script: line 2: DOWN needs a positive count
-```
-
-(exit 2). Re-verified live against this build 2026-07-17. The same
-commit also normalizes extra/leading whitespace between an opcode and
-its argument in the plain-text script format (use a JSON step, e.g.
-`{"kind":"text","text":" hello"}`, if a `TEXT` payload genuinely needs
-leading whitespace) — see `trec`'s own
-`skills/trec-tui-drive/SKILL.md` rule 8/9 for the authoritative wording.
-
-**Practical upshot:** check your `trec --version`/build before treating
-"wrong checklist row got checked" as this bug — a current build will
-refuse to run the script at all rather than silently misbehaving, which
-makes the mistake self-evident immediately. The underlying rule is
-unchanged either way: **never write `DOWN 0`; for index 0, omit the
-`DOWN` line entirely.** This is still the single most likely explanation
-if you see "the wrong checklist row got checked" on an older `trec`
-build, or a script load failure mentioning `DOWN` on a current one —
-check your script for a literal `DOWN 0` before suspecting
-`multiSelectModel`'s cursor logic itself (which is correct — plain
-`cursor++`/`cursor--`, no hidden
-state carried from the previous screen).
-
-#### If `SELECT` seems to target a label that "isn't there": you're probably not on the screen you think you're on
-
-A related false alarm: don't assume a `SELECT` failure means the
-label is unreachable due to scrollback pollution — first check whether
-your script is even searching the *right* screen. Concretely: `☑ 逐項
-勾選角色(...)` is the **roles-menu**'s item that *leads into* the
-checklist — it does not appear anywhere on the checklist screen itself
-(the checklist's own hint line reads `↑/↓ 移動　space 勾選/取消　enter
-完成`, different text). A script that does `SELECT 逐項勾選角色` a
-*second* time while already inside the checklist (e.g. because an
-earlier `SELECT`/`ENTER` pair didn't actually transition — a bare
-`SELECT` never submits, it only moves the pointer; a missing `ENTER`
-right after it is the classic cause) will correctly fail to find that
-text, because it's genuinely not part of the current screen — that's
-not a scrollback bug, it's a "which screen am I actually on" bug.
-Before blaming `SELECT`/scrollback, re-run with `EXPECT <text unique to
-the screen you expect to be on>` immediately after every `ENTER`, so a
-missed transition fails loudly at the exact step it happened instead of
-surfacing as a confusing mismatch several steps later. (Live-verified
-2026-07-17: a full `hosts.yml`-build script — top menu → hosts.yml →
-add host → host menu → roles menu → checklist → back through roles
-menu/host menu/host list → save → quit — using nothing but
-disambiguated `SELECT` labels and zero `DOWN` lines ran clean end to
-end, confirming the router's lack of an alt-screen buffer is not by
-itself a blocker when labels are chosen correctly and transitions are
-confirmed with `EXPECT`.)
-
-### `pilot deploy` is architecturally different — many short Programs, not one
-
-Unlike `pilot edit`, `pilot deploy`'s wizard is a long, strictly linear
-sequence with no revisitable menus (see `deploy_tui.go`'s package doc
-comment for why), so its rewrite kept the pre-existing shape of **one
-brand-new `tea.Program` per individual prompt**, run one after another
-in plain Go code — the same shape promptui's blocking `Run()` calls
-already had, just bubbletea underneath. This has its own timing
-consequence `pilot edit` doesn't: **there is a real gap, between one
-prompt's Program exiting and the next one's Program starting, where the
-terminal briefly reverts to cooked/echoed mode.** A keystroke sent into
-that gap gets swallowed into the kernel's line-buffered input instead
-of delivered to the new screen, and can resurface much later as garbled
-echoed text once some later reader (even a spawned `ansible-playbook`
-subprocess) finally drains it — confirmed live 2026-07-17: navigation
-keys meant for the preflight-mode select arrived after that screen had
-already defaulted, then echoed out verbatim once `ansible-playbook`
-started running with no raw-mode reader active.
-
-Mitigation: after every `EXPECT` for a new `pilot deploy` screen, add a
-short settle pause (~150ms was reliable) *before* sending that screen's
-first keystroke — don't rely on `EXPECT` succeeding as proof the new
-Program is already reading input.
-
-**Prefer `DOWN <n>` over `SELECT` for `pilot deploy`'s menus specifically**
-— revised after a second, distinct finding during the
-2026-07-17 3-VM-demo re-verification
-(`docs/runbooks/archived/3vm-freeipa-wazuh-grafana-demo.md` §7 — archived
-2026-07-17 as a strict subset of `docs/runbooks/minimal-poc-architecture.md`,
-which covers the same topology plus more; the finding itself still stands):
-right after the
-scope-select screen ("單一元件") transitioned into the 20-item catalog
-select, `SELECT <first catalog label>` immediately mismatched and drove
-the pointer to the *last* row instead, then reported "not reached after
-150 presses" stuck at the bottom — even though the catalog screen's own
-cursor genuinely starts at row 0 (confirmed by removing `SELECT`
-entirely and using a bare `ENTER`, which worked). The apparent cause:
-`SELECT`'s row-scan can lock onto a stale pointer marker left in
-scrollback by the *just-exited* scope-select Program (still visible
-above the new screen, since neither Program uses the alt-screen buffer)
-and compute the wrong direction from that stale position — a different
-mechanism than the keystroke-swallowing gap above, but the same root
-cause (many short-lived Programs, not one). `DOWN <n>` (absolute count
-from `deploy_catalog.go`'s `Key:` order, per §2) does not have this
-failure mode — it doesn't do a screen row-scan, so a stale pointer
-elsewhere in scrollback can't mislead it. Use `SELECT` for `pilot
-deploy` only if you've verified it against the current build for that
-specific screen transition; default to `DOWN <n>`.
-
-### Prompts before the confirm chain — two previously undocumented steps
-
-Confirmed live 2026-08-12 against HEAD `88b62db` (minimal-poc revalidation):
-between the inventory-path prompt and the preflight menu, and again right
-after the vault-file prompt, two more `[Y/n]`/`[y/N]` confirms fire that
-neither this skill nor the runbook previously documented — script for both
-or the run stalls waiting on unscripted input:
-
-- 「要不要先看一下這份 inventory 的拓樸圖？」 `[Y/n]` — shows a topology
-  graph of role placement; safe to answer `n`.
-- 「這次套用要手動輸入 sudo(become)密碼嗎？」 `[y/N]` — default No; answer
-  `n` when every target host's `ansible_user` already has passwordless
-  sudo/root (true for this repo's vm-target-provisioned hosts, which
-  connect as `root` directly).
-
-### The deploy confirm chain — exact prompts, exact defaults
-
-**Corrected 2026-08-12**: the text below through step 4 used to claim the
-preview-confirm and apply-confirm prompts share one identical literal
-string. That is not true of the current source — see the correction note
-right after the numbered list.
-
-After the preflight and the stage/`--limit`/`--tags`/vault/`-e`
-questions, `pilot deploy` runs this fixed confirm sequence (strings
-from `deploy.go`; do not paraphrase them in `EXPECT`s):
-
-1. 「要先預覽(--check --diff)再決定要不要真的套用嗎？」 `[Y/n]` —
-   default **Yes**.
-2. 「確定要執行預覽指令嗎？」 `[Y/n]` — default **Yes**; answering it
-   runs the **preview**, streaming the full ansible output.
-3. On a clean preview: 「✅ 預覽完成，沒有錯誤。」 followed by
-   「預覽看起來沒問題，要接著套用真正的變更嗎？」 `[y/N]` — default
-   **No**. A bare `ENTER` here aborts with 「先在這裡停下來，沒有套用
-   任何變更。」 and exits 0 — a run that *looks* fine but applied
-   nothing. You must send a single `y` (no trailing `ENTER`, per §4).
-4. 「確定要執行正式套用指令嗎？」 `[Y/n]` for the real apply — a
-   **different** literal string from step 2, not a repeat of it — only
-   now does anything mutate.
-
-**Correction, 2026-08-12**: this section previously claimed steps 2 and 4
-share one identical literal string, 「確定要執行以上指令嗎？」, appearing
-twice, and warned about an `EXPECT` collision between them. Reading
-`cmd/pilot/cmd/deploy.go`'s `executeDeploymentTransaction` directly against
-HEAD `88b62db` shows this is not the current source's behavior — it emits
-two distinct strings (`question := "確定要執行正式套用指令嗎？"`, then
-`if check { question = "確定要執行預覽指令嗎？" }`), so the specific
-same-string collision described below no longer applies (whether it ever
-did, or whether an earlier version of `deploy.go` really shared one string,
-was not re-verified — treat the current two-string behavior as
-authoritative for HEAD `88b62db` and later). The general anchoring
-discipline is still worth keeping as defensive practice against a future
-refactor reintroducing a shared string:
-
-- **Don't `EXPECT` a string that already occurred.** 「PLAY RECAP」 still
-  appears multiple times (preflight recap, screen redraws) regardless of
-  the confirm-prompt fix above. An `EXPECT` on `PLAY RECAP` alone can still
-  match stale scrollback while the preview is still streaming; anchor the
-  post-preview step specifically on 「✅ 預覽完成」 or
-  「要接著套用真正的變更嗎」, not on `PLAY RECAP`.
-- **The apply gate defaults to No.** There is no drive script that
-  reaches a real apply by only ever sending `ENTER` — if every confirm
-  in your script is a bare `ENTER`, you recorded a preview, not a
-  deploy. Check the cast for 「✅ 套用完成」 before calling it evidence.
-
-### Data-driven playbooks (`freeipa-identity`): for a canonical roster, answer `y` to the main.yaml prompt — do NOT redirect it at the roster path
-
-**This flipped since the note below was first written (2026-07-17) — read
-the whole subsection before scripting this prompt, not just the first
-rule you find.** The roster is now loaded exclusively via the
-`freeipa_roster_file` **host var** (set on `freeipa-server` — and, for
-this repo's minimal-poc topology, also on `nexus` — either by hand via
-`pilot edit`'s hosts.yml "其他變數" screen, or automatically by the
-NFS-role-add roster bootstrap, `edit_tui.go`'s `pushNFSRoleBootstrap`).
-That host var is completely independent of whatever gets selected at the
-wizard's own vars-file prompt below.
-
-The wizard's 「偵測到 …/.vault/main.yaml，這次佈署要用它當密碼變數檔
-嗎？」 prompt exists to satisfy a *different*, Go-side check:
-`contracts/freeipa-identity.yaml`'s own required-input preflight wants a
-bare top-level `ipa_admin_password` key. A canonical (`schema_version: 1`)
-roster's own top-level-key gate (`internal/inventory/roster_validate.go`'s
-`checkTopLevelKeys`) **rejects** a bare `ipa_admin_password` at the
-roster's top level — the admin credential must live nested under
-`freeipa.admin.password` instead (see the runbook's own §2 note on this).
-That means the roster file can **never** satisfy this particular contract
-check by itself, no matter what you answer here. The correct sequence for
-a canonical roster:
-
-1. At 「偵測到 …/.vault/main.yaml，這次佈署要用它當密碼變數檔嗎？」
-   answer **`y`** — `.vault/main.yaml`'s own `ipa_admin_password` key
-   satisfies the contract's required-input check.
-2. Nothing else to do here — the roster itself loads separately via the
-   `freeipa_roster_file` host var, not via this prompt.
-
-Answering `n` and pointing the vars-file prompt at the roster path instead
-— the documented sequence before this update — now fails outright with
-`Error: delivery transaction failed: component "freeipa-identity" requires
-input "ipa_admin_password"`, before any ansible-playbook run, confirmed
-live 2026-07-25 (round 16). No mutation happens either way (the Go-side
-contract check runs before the preview), so this is a safe mistake to
-make and retry — but don't burn a second attempt rediscovering this.
-
-That `n`-then-roster-path sequence was correct once, for an
-**older, non-canonical roster shape** current from around 2026-07-17
-(v8) that predates both the `freeipa_roster_file` host-var mechanism and
-the canonical top-level-key gate — at the time, the roster path *was* the
-only way to get the roster loaded at all, and a bare `ipa_admin_password`
-inside that older roster shape was legal. Answering `y` against *that*
-older shape genuinely skipped every reconcile task (`ok=5 skipped=50
-changed=0`, initially misread as "wizard can't do freeipa-identity"). If
-you are re-verifying a workspace that still uses that older roster shape
-(no `freeipa_roster_file` host var anywhere, a bare top-level
-`ipa_admin_password` inside the roster itself), the original `n` sequence
-still applies to it — but that shape itself is stale; migrate to the
-canonical schema documented in the runbook and
-`playbooks/apply/freeipa-identity.roster.example.yaml` instead of
-preserving the old prompt answer to match it.
-
-Either way: a `freeipa-identity` PLAY RECAP of `changed=0` with
-`skipped=` in the dozens on a roster that should create anything is a
-failed deploy, not a pass. Do not fall back to bare `ansible-playbook`
-for this; the wizard path above is the sanctioned one.
-
 ---
 
-## 4a. Driving trec via MCP server mode (stateful sessions)
+## 4b. Screen-driving rules — the complete checklist
 
-Every `trec drive --script <file>` invocation in this skill (§4, §5) is
-a single one-shot command — it works identically whether you run it as
-a plain shell command or as one call to `trec mcp`'s `run` tool,
-because script mode owns its own stdin/child lifecycle and needs no
-follow-up call. Nothing above requires MCP mode.
+Every rule below is normative and self-contained. The reference file in the
+last column holds the evidence, the live-confirmation dates, and the failure
+stories behind it — open it when you are working on that screen, when a rule
+surprises you, or before you argue a rule is wrong. **Do not skip a rule
+because you have not read its reference.**
 
-MCP mode matters for the steps that are inherently a back-and-forth
-with a live screen: confirming a menu's real item list before writing
-`DOWN <n>`/`SELECT` into a script (§2), or diagnosing a run that
-derailed, or re-verifying whether `SELECT` is safe against the current
-`trec` build (the note above). Those need `trec drive --interactive`'s
-live PTY, which in turn needs *something* to hold its stdin open across
-multiple send-then-read turns. An agent whose shell tool spawns an
-independent subprocess per call — this session's `Bash` tool included —
-cannot do that directly: a command sent via one `Bash` call cannot see
-the screen state and send a follow-up keystroke in a later `Bash` call
-to the *same* process.
+### Always
 
-Use `trec mcp`'s session tools instead (full contract: the global
-`trec-mcp` skill; DSL syntax and reliability rules: the global
-`trec-tui-drive` skill — this skill doesn't duplicate either):
+| # | Rule | Detail |
+|---|---|---|
+| 1 | Set `CI=1` on **every** `pilot edit`/`pilot deploy` invocation, full stop. Without it the run hangs ~5s on bubbletea's OSC background-colour query under a bare PTY. | `references/pilot-edit-wizard.md` |
+| 2 | Pass `--presentation` on every TREC-wrapped `pilot edit`/`deploy`/`reconcile`. | §4 |
+| 3 | Recompute every catalog/checklist index from current source each session; never reuse a number from a prior run or from the runbook prose. | §2, `references/index-computation.md` |
+| 4 | Never combine `PILOT_DEBUG_MENU=1` with `SELECT` in a recorded run — its stderr lines confuse `SELECT`'s screen scan. Use it for exploration only. | §2 |
+| 5 | Verify success **by content** (`✅ 已存檔`, `✅ 套用完成`), never by exit code — a derailed script exits 0 just as cleanly. | `references/timing.md` |
+| 6 | After every save, `grep` the file on disk and compare each value against what you meant to type. A green cast proves a save happened, not that the right fields got the right values. | `references/pilot-edit-wizard.md` |
+| 7 | `EXPECT <text unique to the screen you expect to be on>` immediately after every `ENTER`, so a missed transition fails at the step it happened. | `references/role-checklist.md` |
+| 8 | Never `EXPECT` a string that already occurred earlier in the stream (e.g. `PLAY RECAP`); anchor on a string unique to the moment. | `references/deploy-wizard.md` |
+| 9 | End every `pilot edit` drive by exiting the wizard (`SELECT 離開` + `ENTER`), then `WAIT_CHILD_EXIT@<timeout>` + `ASSERT_EXIT 0`. Stopping after the last edit turns a successful edit into red evidence. | `references/timing.md` |
+| 10 | Pass `--timeout` explicitly, at least as large as your longest `EXPECT@` value; do not rely on a per-step override. | `references/timing.md` |
+| 11 | Keep `--key-delay` at ~150ms; below ~100ms a long `DOWN`/`SPACE` burst silently drops a keystroke. | `references/timing.md` |
 
-- `terminal_start` — launch the wizard (e.g. `pilot edit --dir
-  "$SCRATCH/demo"`, always with `CI=1` — see §4 — and
-  `PILOT_DEBUG_MENU=1` to get each menu's live item list for free — see
-  §2) and keep the returned `session_id`.
-- `terminal_write` — send one DSL line at a time to that session
-  (`TEXT`, `ENTER`, `SNAPSHOT`, `EXPECT ...`, `SELECT <label>`, …) —
-  same vocabulary as a `--script` file, one step per call.
-- `terminal_read` — pull the accumulated `OK|ERR` / `CURSOR` / `SCREEN`
-  reply and decide the next step from the actual rendered screen,
-  instead of a remembered or assumed item order.
-- `terminal_close` — call this once the exploration is done, every
-  time. **For a recording that must be evidence, do not call it while
-  the wizard is still running.** First use the wizard's own exit item
-  (for `pilot edit`, return to the top menu and choose `離開`), then
-  repeatedly use `terminal_read` until it reports `running=false` and
-  `exit_code=0`. Only then call `terminal_close` to release the MCP
-  handle, and run `cast_verify`. Closing an active session is an
-  operator termination: a save/bootstrap may already have succeeded,
-  but the cast is rightly finalized as `aborted`, not `success`. An
-  unclosed session leaks the child process; `session_list` can audit
-  for ones you forgot.
+### Navigation
 
-Treat the resulting MCP-driven walkthrough as throwaway reconnaissance,
-not the recorded evidence: once you've confirmed the real item
-list/order from the screen, write (or fix) the final `trec drive
---script <file>` run per §4/§5 and record *that* as the evidence cast.
-If `trec`'s MCP server isn't already connected in this session (check
-via `ToolSearch` for `mcp__trec__*`), register it (e.g. `claude mcp add
-trec -- trec mcp`) rather than approximating a persistent PTY with
-repeated one-shot `Bash` calls — those cannot share process state
-between calls no matter how they're sequenced.
+| # | Rule | Detail |
+|---|---|---|
+| 12 | `SELECT` is the default for `pilot edit`'s menus. It only moves the pointer — **every `SELECT` still needs its own `ENTER`**. | `references/select-labels.md` |
+| 13 | Prefer `DOWN <n>` for `pilot deploy`'s menus; `SELECT` there can lock onto a stale pointer left in scrollback by the just-exited Program. | `references/deploy-wizard.md` |
+| 14 | On the role checklist (`multiSelect`) use `DOWN <n>` + `SPACE`, never `SELECT` — only ~15 rows render, so a content scan cannot reach a scrolled-out row. This is a proven path; do not re-litigate it. | `references/role-checklist.md` |
+| 15 | Never write `DOWN 0`; for index 0 omit the `DOWN` line entirely. | `references/role-checklist.md` |
+| 16 | Pick a `SELECT`/`TOGGLE` label substring unique to one row. Collisions come from three easy-to-miss sources: another row's hint text, another row's *description* prose, and `runEdit`/`runDeploy`'s own static startup banner (never cleared — no alt-screen). | `references/select-labels.md`, `references/known-gotchas.md` |
+| 17 | Use `TOGGLE docker-apply.yml`, not `TOGGLE docker` — bare `docker` is ambiguous across three rows. | `references/known-gotchas.md` |
+| 18 | After every `EXPECT` for a new `pilot deploy` screen, add a ~150ms settle pause before the first keystroke — `EXPECT` succeeding does not prove the new Program is reading input yet. | `references/deploy-wizard.md` |
+| 19 | A sub-editor's save/exit returns to its **immediate parent menu**. Verify the actual next screen for every return step; budget one extra return per nesting level. | `references/known-gotchas.md` |
+| 20 | The vault/group_vars key-list screen rebuilds with the cursor back at the **top** after every field edit — there is no auto-advance. Send `DOWN <index>` before the `ENTER` for *every* entry, recomputed from the top. | `references/pilot-edit-wizard.md` |
 
----
+### Text entry and confirms
+
+| # | Rule | Detail |
+|---|---|---|
+| 21 | Prefer `REPLACE_TEXT_AND_ENTER` (sends Ctrl-U first) over `TEXT_AND_ENTER` for any field that may already hold a value — pre-filled fields put the cursor at the end, so plain `TEXT` **appends**. Only a brand-new item's name is guaranteed blank. | `references/known-gotchas.md`, `references/pilot-edit-wizard.md` |
+| 22 | `pilot deploy`'s y/n prompts finalise on a **single** `y`/`n` keypress — do not send a trailing `ENTER`, or it leaks into the next screen and submits its default. | `references/pilot-edit-wizard.md` |
+| 23 | The real-apply gate defaults to **No**. A script of bare `ENTER`s records a preview, not a deploy — you must send a single `y`. Check the cast for `✅ 套用完成`. | `references/deploy-wizard.md` |
+| 24 | Script the two easily-missed confirms between the inventory-path prompt and the preflight menu (topology graph `[Y/n]`, manual sudo password `[y/N]`) or the run stalls on unscripted input. | `references/deploy-wizard.md` |
+| 25 | For `freeipa-identity` with a canonical roster, answer **`y`** to the `.vault/main.yaml` prompt; do **not** redirect it at the roster path. The roster loads separately via the `freeipa_roster_file` host var. | `references/freeipa-identity-prompt.md` |
+| 26 | Declare `--secret-env`/`--secret-file` for **every** vault key that already holds a real value in the target workspace, not just the ones this script sets — the key-list screen re-renders every set value in plaintext. | `references/known-gotchas.md` |
+
+### Live-host checks
+
+| # | Rule | Detail |
+|---|---|---|
+| 27 | Add `-o StrictHostKeyChecking=accept-new` (or `ssh-keygen -R <ip>`) to every raw `ssh` after a VM rebuild. | `references/known-gotchas.md` |
+| 28 | Add `-o ControlMaster=no` to any live-SSH re-auth check meant to prove a credential/policy state changed — a multiplexed session silently reuses the old authentication. | `references/known-gotchas.md` |
+| 29 | Before reporting a "Real bug" against a playbook or the wizard, cross-verify three ways: read the surrounding code, replay the cast with `trec transcript`, and `grep` the on-disk files your report claims were written. | `references/known-gotchas.md` |
 
 ## 5. Choose the deploy strategy: one-shot vs per-component
 
@@ -984,237 +430,40 @@ runbook using `verified-runbook`'s rules (real output only, no
 
 ---
 
-## 7. Known gotchas (all discovered the hard way — check first)
-
-- **A `host_vars`/`group_vars`/vault value-edit field that already has a
-  value pre-fills it with the cursor at the end — plain `TEXT_AND_ENTER`
-  on that field APPENDS instead of replacing, and this bites for real, not
-  just in theory.** Confirmed live 2026-07-27, round 17: a re-run of
-  `01-edit-hosts.drive` against a workspace where `host_vars/nexus.yml`'s
-  `prometheus_site_label` was already set from an earlier attempt produced
-  `site-nexussite-nexus` — the intended value typed twice, concatenated,
-  saved cleanly, cast looked green throughout. Fixed by switching every
-  value-set field (`ansible_host`/`ansible_user`/SSH-key-path,
-  `host_vars`/`group_vars` value edits) to `REPLACE_TEXT_AND_ENTER` (sends
-  Ctrl-U first) — harmless when the field is genuinely blank, and immune
-  to this failure mode when it isn't. Prefer `REPLACE_TEXT_AND_ENTER` over
-  `TEXT_AND_ENTER` by default for any field that isn't a brand-new item's
-  name (host name, new variable name, new roster user/group name) —
-  those are the only prompts structurally guaranteed to start blank.
-- **A sub-editor's save/exit action returns to the *immediate parent
-  menu*, not necessarily the screen a script assumes — verify the actual
-  next screen for every "return" step, don't assume how many menu levels
-  a single action pops.** Two independent instances confirmed live
-  2026-07-27, round 17, in the same script:
-  - `host_vars/<host>.yml`'s "💾 存檔並離開" returns to that **host's own
-    item menu** (`主機 "<host>" — 選要編輯的項目`), not the top-level host
-    list — the same pattern every other host-level sub-editor already
-    follows, just easy to miss when authoring a brand-new screen's script
-    for the first time. A script that jumps straight to
-    `EXPECT <host-list text>` after this save times out.
-  - The roster manager's **Users** screen's "↩ 返回" returns to the
-    roster's own `管理 <roster>` submenu (`👤 Users`/`👥 Groups`/`↩ 返回`),
-    not the top-level `要編輯什麼？` menu — the sibling **Groups** screen's
-    exit in the same script already had the correct two-step
-    `EXPECT 管理` / `CHOOSE ↩ 返回` pair; the Users exit was missing it.
-  Both were caught because the script explicitly `EXPECT`ed the next
-  screen's own unique text rather than assuming a step count — the same
-  discipline §4 already recommends ("`EXPECT <text unique to the screen
-  you expect to be on>` immediately after every `ENTER`"). When a
-  multi-level menu structure is being scripted for the first time, budget
-  for at least one extra "return" step per nesting level and confirm each
-  one against the live screen (MCP exploration, §4a) rather than counting
-  menu levels from memory.
-- **The vault key-list screen re-renders *every already-set key's value*
-  in plaintext each time it opens — including keys the current script
-  isn't setting.** Confirmed live 2026-07-27, round 17: a script that only
-  declared `--secret-env` for the keys it was actively adding still leaked
-  `ipa_admin_password` (set by an earlier, separate bootstrap step in the
-  same workspace) in plaintext, because that key's value renders on the
-  same key-list screen every time it's opened, regardless of which key the
-  script is there to edit. Caught by `trec scan` before the cast was kept
-  as evidence, per this skill's own discipline. **Declare `--secret-env`/
-  `--secret-file` for every vault key that already has a real value in the
-  target workspace, not just the ones this particular script sets** — the
-  full current key list, checked live (e.g. via a quick MCP peek at the
-  vault screen, or `grep -oE '^[a-zA-Z_]+:' .vault/main.yaml` for names
-  only, never values), not assumed from what the script intends to write.
-- **`TOGGLE`/`SELECT`/`CHOOSE` "docker" on the role checklist is
-  ambiguous** — confirmed live 2026-07-25, round 16: on the ~21-row role
-  checklist, a bare `TOGGLE docker` (or `SELECT`/`CHOOSE` with the same
-  label) errors "ambiguous selectable label rows [34 40 42]" — rows 40
-  and 42 are `wazuh-manager`/`seaweedfs-s3`, whose own *description* text
-  happens to contain the substring "docker" ("需先過 docker"). This is
-  the same "unique substring" rule §4 already documents for other
-  screens, just against a source of collision easy to miss (another
-  row's description prose, not its label or the static banner). Use
-  `TOGGLE docker-apply.yml` instead — the `(docker-apply.yml)` suffix is
-  unique to that one row.
-- **Stale `pilot` binary**: a `pilot` binary at a fixed path
-  (`$(which pilot)` may be a symlink into the repo) can predate a
-  feature added to source — rebuild before trusting wizard menu shape.
-  One concrete tell: builds before 2026-07-17 listed the commented
-  YAML *illustrations* inside group_vars example comments as editable
-  rows (three `prometheus_site_label` entries, phantom `expr`/`for`/
-  `labels` rows from an alert-rule example) — "setting" one rewrote a
-  documentation line. Fixed in `internal/groupvars` (only top-level
-  keys, deduped); if the editor shows duplicate keys, you're on a
-  stale binary.
-- **MCP recording lifecycle has two separate finish steps**: after a
-  successful save/bootstrap, `pilot edit` intentionally remains alive
-  at its top menu. For an evidence recording, select `離開`, then poll
-  `terminal_read` until `running=false` and `exit_code=0`; only then
-  call `terminal_close` and `cast_verify`. Calling `terminal_close`
-  first turns an otherwise successful edit into an `aborted` cast;
-  omitting both leaves the sidecar `in_progress` with no final
-  `SESSION_END`. Before ending a task that used MCP mode, call
-  `session_list` to find any session that still needs this sequence.
-- **Ansible fact-cache poisoning across VM rebuilds**: if
-  `ansible.cfg` has `fact_caching = jsonfile` keyed by
-  `inventory_hostname`, and a preflight/check play runs any module
-  under `connection: local` for that same hostname, the *controller's*
-  discovered Python interpreter gets cached under that hostname's key —
-  a later real-SSH play for the same hostname then tries to use it and
-  fails with `The module interpreter '...' was not found`, with an
-  error that looks entirely unrelated to fact caching. Fix at the
-  source (use `delegate_to: localhost` for the local-only task, not a
-  play-level `connection: local`), and/or clear the specific
-  `~/.ansible/<cache-dir>/s1_<hostname>` files for hostnames being
-  reused before a fresh preflight.
-- **`known_hosts` churn**: VM rebuilds at the same IP get a new host
-  key; a stale `known_hosts` entry breaks any direct `ssh`/`sshpass`
-  verification step with `Host key verification failed` — expect to
-  `ssh-keygen -R <ip>` (or `-o StrictHostKeyChecking=accept-new`)
-  before the first real connection each rebuild.
-- **Kerberos realm case**: `kinit user@<realm>` needs the realm in the
-  case FreeIPA actually configured (conventionally uppercase) — check
-  `/etc/krb5.conf`'s `default_realm`, don't assume it matches the
-  lowercase DNS domain string used elsewhere.
-- **`kinit`'s forced-password-change flow is exactly 3 lines** (old
-  password, new password, new password repeat) — a 4-line heredoc
-  produces a confusing "Password mismatch"/early-EOF failure that looks
-  like a wrong password, not an extra line.
-- **Direct SSH/`ipa passwd`/live credential mutations are treated as
-  "Remote Shell Writes" by this environment's safety classifier** even
-  when the target is a disposable sandbox VM the same session just
-  built — a prior approval for this class of action does not carry
-  over to a new session/rebuild. Expect to ask again via
-  `AskUserQuestion`, scoped to the specific action.
-- **A local `ControlMaster`/`ControlPersist` SSH config silently reuses
-  an already-authenticated multiplexed connection** for a later "fresh"
-  `ssh`/`sshpass` call to the same `user@host` — this can mask a real
-  auth-layer change (password rotation, a forced-password-change state,
-  an HBAC/sudo deny) with a stale "it still works" result, since the new
-  invocation never actually re-authenticates. Confirmed live,
-  2026-07-16: an account genuinely in FreeIPA's "must change" state
-  still let a second `sshpass` call straight through with no error,
-  purely by reusing the first call's multiplexed session; adding
-  `-o ControlMaster=no` (or running `ssh -O exit <user>@<host>` first)
-  correctly surfaced the real block on the next attempt. Always add
-  `-o ControlMaster=no` to any live-SSH re-auth check meant to prove a
-  credential/policy state actually changed.
-- **SSSD sudo on a fresh FreeIPA client: the first `sudo` attempt
-  failing is the known cache-staleness gotcha — the fix is
-  `sss_cache -E && systemctl restart sssd` on the client, and ONLY
-  that.** Do NOT "fix" it by adding `sudo` to `sssd.conf`'s
-  `services=` line: `freeipa-client-apply.yml`'s C8 task deliberately
-  writes `services = nss, pam, ssh` because SSSD ≥ 2.3
-  socket-activates the sudo responder, and listing `sudo` there puts
-  `sssd-sudo.socket` into a permanent `failed` state (the responder
-  then only survives via monitor mode) — the task's own comment block
-  documents this with the live confirmation. Two non-evidence traps
-  that caused a live misdiagnosis (2026-07-17 v8): (a) `sssd_sudo`
-  being absent from `ps` proves nothing — a socket-activated responder
-  only appears after the first sudo lookup; (b) if you apply
-  `sss_cache` *and* a config change in the same debugging step, the
-  cache flush is almost certainly what fixed it — change one variable
-  at a time before attributing the fix.
-- **Before reporting a "Real bug" against a playbook or the wizard,
-  cross-verify your narrative three ways**: (1) read the code around
-  the alleged bug — an in-code comment saying the behavior is
-  deliberate (like C8 above) means your finding is a misdiagnosis
-  until you can refute the comment's stated evidence; (2) replay the
-  relevant cast with `trec transcript` and confirm your keystrokes
-  landed where your script assumed (the v8 vault incident reported
-  phantom "string concatenation in the write path" that the transcript
-  plainly showed never happened); (3) `grep` the on-disk files your
-  report claims the wizard wrote — the v8 report's §1.7 "final vault
-  values" did not match the actual saved file. A proposed fix that
-  survives all three checks is worth reporting; one that fails any of
-  them goes back to being a script bug in your own run.
-
 ---
 
 ## References
 
-- `references/index-computation.md` — worked example of reading
-  `deploy_catalog.go`/`contracts.go` and turning them into a correct
-  `trec` script, including the off-by-one class of bug.
-- The sibling `verified-runbook` skill (global, `~/.agents/skills/`) —
-  use it for the actual document write-up once you have real output
-  and recordings in hand.
-- The sibling `vm-target-spec-testing` skill (this repo) — use it when
-  the task is testing a *single* spec/playbook pair on disposable VMs,
-  rather than re-verifying an existing multi-component runbook.
-- The sibling `trec-mcp` skill (global) — the full `trec mcp` tool
-  contract (`run`/`terminal_start`/`terminal_write`/`terminal_read`/
-  `terminal_close`/`session_list`) referenced by §4a.
-- The sibling `trec-tui-drive` skill (global) — the current `trec
-  drive` DSL reference (`SELECT`/`EXPECT`/`ASSERT`/`WAIT_CHILD_EXIT`/
-  `ASSERT_EXIT`/…) and its own reliability rules; read it alongside
-  this skill's §4 `SELECT`/timing findings (pilot-specific: reliable
-  for `pilot edit`, needs a settle pause between screens for `pilot
-  deploy`) rather than trusting either source alone.
+Load a reference when you reach the screen or decision it covers — the core
+above is complete on its own for planning and for every normative rule.
 
+| Reference | Read it when |
+|---|---|
+| `references/index-computation.md` | Turning `deploy_catalog.go`/`contracts.go` into a script; includes the off-by-one bug class. |
+| `references/pilot-edit-wizard.md` | Authoring or changing a `pilot edit` drive script. |
+| `references/deploy-wizard.md` | Authoring or changing a `pilot deploy` drive script. |
+| `references/role-checklist.md` | Driving the role checklist, or before claiming it can't be driven. |
+| `references/select-labels.md` | Choosing `SELECT` vs `DOWN <n>`, or a `SELECT` sticks at the first/last row. |
+| `references/timing.md` | Setting `--key-delay`/`--settle-delay`/`--timeout`, or a run exits 0 having done nothing. |
+| `references/freeipa-identity-prompt.md` | Deploying or reconciling `freeipa-identity`. |
+| `references/known-gotchas.md` | A step behaves unexpectedly; skim once before a first full run. |
+| `references/mcp-mode.md` | A step needs live back-and-forth with the screen (menu discovery, diagnosis). |
+| `references/filing-policy.md` | You have a finding and must decide where it belongs. |
 
----
+Sibling skills:
 
-## Why this skill is the canonical home for trec-driver findings
-
-This skill (and its sibling tool-driver skills `~/.agents/skills/trec-mcp/SKILL.md`
-and `~/.agents/skills/trec-tui-drive/SKILL.md`) is the canonical home for any
-issue found while driving an interactive wizard via `trec`. AGENTS.md v1.15
-codifies the rule: **trec-related issues never go in operational runbooks**.
-
-What "trec-related" includes:
-- `EXPECT` / `SELECT` / `TOGGLE` / `CHOOSE` / `CHECKLIST_DOWN` / `DOWN` opcodes
-  misbehaving on a particular screen (cursor reset, label ambiguity, off-by-one,
-  etc.)
-- The `Bubble Tea` / `promptui` text-input pre-fill surprising a script
-  (cursor at start, not at end; pre-fill eats the typed character; etc.)
-- MCP-vs-CLI recording fallbacks diverging (`trec mcp` healthy at the CLI level
-  but no callable tools; agent loop could hold a PTY but could not deliver a
-  real carriage-return byte through the MCP text channel; etc.)
-- `PILOT_DEBUG_MENU=1` interacting badly with `SELECT` (stderr dump line
-  confuses the direction heuristic)
-- `EXPECT_QUIET` being misused as a child-exit signal (it's a quiet-output
-  check, not a child-process completion test)
-- The wizard's prompt chain for a particular component turning out to require
-  the `vars 檔路徑` slot rather than the `extra -e` slot (or vice versa)
-- Host-key churn during `ssh` recording (one `ssh` call hung 70 minutes on an
-  unanswerable interactive host-key prompt — add `-o StrictHostKeyChecking=accept-new`
-  to every raw `ssh` call)
-- The `BACKSPACE <n>` then `TEXT` pre-fill rule (the field's cursor doesn't
-  always start at the end)
-- The "vault/main.yaml auto-detect + 否/需要 second-stage menu" path for
-  non-default vault files
-
-What "trec-related" does NOT include:
-- Bugs in `pilot` itself (Go source) — those go in `cmd/pilot/cmd/...` /
-  `internal/...` with their own regression test
-- Bugs in a playbook (Ansible/YAML) — those go in `playbooks/apply/*.yml`
-- Bugs in a spec row (e.g. the v6.0 / v18.0 Real bugs about row-dedup
-  collapse) — those go in the relevant spec file + `pilot spec --lint`
-- Bugs in a group's topology / group_vars wiring — those go in the
-  group_vars / inventory editor
-
-When a `trec` session uncovers something that turns out to be a bug in
-`pilot` / a playbook / a spec, file the bug in the right place (Go source /
-playbook / spec), but classify the entry as **bug**, not as **trec-driver
-finding**. The `trec` session is the **how you found it**, not the **what
-you found**.
-
-Operational runbooks (`docs/runbooks/*.md`) document the run, not the
-recording driver. They may include the `trec drive --script` command that
-was used, the `Y` keys that were pressed, the real output that resulted —
-but not the **driver issues** encountered. The driver issues go here.
+- `_shared/clean-room-contract.md` (this repo) — the shared clean-room,
+  Pilot-ownership, wizard-input, serialization, and evidence contract that the
+  `minimal-poc-*` skills execute; read it when a task is a full clean-room
+  rebuild rather than a single spec run.
+- `verified-runbook` (global, `~/.agents/skills/`) — use it for the document
+  write-up once you have real output and recordings in hand.
+- `vm-target-spec-testing` (this repo) — use it when the task is testing a
+  *single* spec/playbook pair on disposable VMs, rather than re-verifying an
+  existing multi-component runbook.
+- `trec-tui-drive` (global) — the `trec drive` DSL reference
+  (`SELECT`/`EXPECT`/`ASSERT`/`WAIT_CHILD_EXIT`/`ASSERT_EXIT`/…) and its own
+  reliability rules. Read it alongside this skill's rules table rather than
+  trusting either source alone.
+- `trec-mcp` (global) — the full `trec mcp` tool contract. **Only needed in MCP
+  mode**; see `references/mcp-mode.md`.

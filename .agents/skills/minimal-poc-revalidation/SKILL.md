@@ -23,11 +23,24 @@ code review, or unrelated infrastructure tasks.
 Before making any change, read completely:
 
 - `docs/runbooks/minimal-poc-architecture.md`
-- `.agents/skills/pilot-trec-verification/SKILL.md`
-- `$HOME/.agents/skills/trec-mcp/SKILL.md`
+- `.agents/skills/_shared/clean-room-contract.md` — modes, Pilot ownership,
+  teardown/rebuild, wizard input policy, serialization, stop conditions,
+  output contract, cleanup
+- `.agents/skills/pilot-trec-verification/SKILL.md` — its §4b rules table is
+  complete and normative on its own; load a `references/` file when you reach
+  the screen or decision it covers
 - `$HOME/.agents/skills/trec-tui-drive/SKILL.md`
 
+Read only if this run needs a stateful back-and-forth with a live screen
+(see `pilot-trec-verification/references/mcp-mode.md`):
+
+- `$HOME/.agents/skills/trec-mcp/SKILL.md`
+
 Resolve their requirements into a numbered execution contract.
+
+This skill is **read-only with respect to the runbook**: revalidate and report,
+never edit `minimal-poc-architecture.md`. Use `minimal-poc-update` when the
+runbook itself must change.
 
 ## Controller responsibilities
 
@@ -85,78 +98,19 @@ Use only for the explicitly permitted nested FreeIPA identity roster.
 
 It may not create or modify ordinary generated inventory or group variables.
 
-## Serialization
+## Serialization, recording gate, failure policy, output contract
 
-Only one state-changing agent may run at a time.
+These are not restated here — they are shared with `minimal-poc-update` and
+`delivery-test`, and a second copy would drift. Apply, as written:
 
-Never run these concurrently:
+| Concern | Authority |
+|---|---|
+| Serialization of state-changing work | `_shared/clean-room-contract.md` §7 |
+| Failure policy and stop conditions | `_shared/clean-room-contract.md` §8 |
+| Per-step output contract | `_shared/clean-room-contract.md` §9 |
+| Recording/evidence gate, cast directories, manifest | `pilot-trec-verification/SKILL.md` §3a |
+| Wizard keyboard-driving rules | `pilot-trec-verification/SKILL.md` §4b |
 
-- teardown;
-- VM creation;
-- inventory generation;
-- interactive wizard execution;
-- deployment;
-- FreeIPA mutation;
-- NFS configuration;
-- idempotency reruns.
-
-Read-only audits may overlap only after their input evidence is complete
-and immutable.
-
-## Recording checkpoint gate
-
-For every interactive or recorded checkpoint, the controller creates and keeps
-separate scratch paths for `casts/exploration/`, `casts/failed/`,
-`casts/evidence/`, and `evidence/recording-manifest.md`. The checkpoint may
-advance only after its own final cast has passed `trec verify` (or MCP
-`cast_verify`) with `status=success`, exit code 0, one final successful
-`SESSION_END`, matching integrity, and a clean secret scan.
-
-Exploration casts, action-mode wrapper casts, and any failed/aborted/unsafe
-cast are diagnostic artifacts only; never cite them as walkthrough evidence or
-include them in a final replay. A save/bootstrap is not a successful recording
-unless the wizard then exits through its own `離開` action and the child has
-been observed to exit 0 before the session is closed. On a recording failure,
-stop the current checkpoint, preserve its cast and result under `failed/`, and
-make a newly scripted evidence attempt after the cause is understood. Do not
-recover inside the same candidate cast.
-
-## Failure policy
-
-Every delegated agent stops at the first unexpected result.
-
-A delegated agent must never independently:
-
-- select a workaround;
-- change target type;
-- reuse stale state;
-- manually edit generator-owned files;
-- suppress errors;
-- reinterpret a runbook requirement;
-- continue into the next checkpoint.
-
-The root agent must classify the result as:
-
-- retryable execution failure;
-- environment blocker;
-- implementation defect;
-- runbook defect;
-- evidence deficiency;
-- policy decision required.
-
-## Output contract
-
-Each state-changing step returns:
-
-1. checkpoint identifier;
-2. commands executed;
-3. exit status;
-4. concise relevant output;
-5. resources changed;
-6. evidence paths;
-7. per-cast verification and secret-scan verdict;
-8. expected versus observed result;
-9. PASS, FAIL, or BLOCKED.
-
-Store complete logs as evidence files. Return only focused excerpts to the
-root context.
+The delegation policy above is specific to this skill and overrides nothing in
+those files; the contract's serialization rule (§7) applies to the custom agents
+named here exactly as it does to a general-purpose one.

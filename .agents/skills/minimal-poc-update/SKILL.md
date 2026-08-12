@@ -17,11 +17,26 @@ the runbook first to make the deployment appear successful.
 
 Before any destructive action, read completely:
 
-- `docs/runbooks/minimal-poc-architecture.md`;
-- `.agents/skills/pilot-trec-verification/SKILL.md`;
-- `.agents/skills/delivery-test/SKILL.md`;
-- `$HOME/.agents/skills/trec-mcp/SKILL.md`;
-- `$HOME/.agents/skills/trec-tui-drive/SKILL.md`.
+- `docs/runbooks/minimal-poc-architecture.md` — the document under update;
+- `.agents/skills/_shared/clean-room-contract.md` — the common clean-room
+  contract this workflow executes (modes, Pilot ownership, teardown/rebuild
+  sequence, wizard input policy, serialization, stop conditions, output
+  contract, cleanup);
+- `.agents/skills/pilot-trec-verification/SKILL.md` — the wizard-driving and
+  recording contract. Its §4b rules table is complete and normative on its own;
+  load a file from its `references/` directory when you reach the screen or
+  decision that file covers;
+- `$HOME/.agents/skills/trec-tui-drive/SKILL.md` — the `trec drive` DSL.
+
+Read **only if this run actually needs a stateful back-and-forth with a live
+screen** (menu discovery, diagnosing a derailed run — see
+`pilot-trec-verification/references/mcp-mode.md`):
+
+- `$HOME/.agents/skills/trec-mcp/SKILL.md`.
+
+Do **not** read `.agents/skills/delivery-test/SKILL.md` for this task. Its
+clean-room rules are now in the shared contract above; the rest of it defines a
+*different* three-VM scenario, and loading it imports a competing host/role list.
 
 If any required file is unavailable, return BLOCKED.
 
@@ -36,29 +51,23 @@ Do not modify the runbook at this stage.
 
 ## 2. Execute from zero
 
-Apply the common clean-room contract:
+Execute `_shared/clean-room-contract.md` in **clean-room acceptance** mode
+(its §1). That file is authoritative for the teardown/rebuild sequence (§4),
+Pilot ownership and the permitted hand-edit exceptions (§3), the wizard input
+policy (§5), the recording gate (§6), serialization (§7), and cleanup (§10).
 
-- record and remove every runbook VM;
-- remove the entire disposable workspace;
-- prove prohibited stale state is absent;
-- create a new workspace;
-- rebuild VMs only through `pilot vm-target`;
-- create ordinary settings only through `pilot edit` and
-  `pilot inventory generate`;
-- create only the explicitly allowed new FreeIPA roster or narrowly scoped
-  reconcile input exceptions;
-- deploy every role again through `pilot deploy` wizard, including roles that
-  appear already satisfied;
-- never invoke `ansible-playbook` directly.
+Run in **clean-room acceptance** mode, never diagnosis mode: this workflow
+updates a committed runbook, so a diagnostic rerun cannot supply its evidence.
 
-Use TREC and persisted-file checks for every wizard exactly as required by the
-common contract.
+Two points from the contract carry extra weight for this workflow specifically:
 
-Follow the shared wizard input policy:
-
-- select `Y` for automatically detected `-e` values;
-- leave manually entered additional `-e` empty;
-- if any other human-authored value is required, stop the entire workflow.
+- **Deploy every role again, including roles that appear already satisfied.**
+  A green check-mode preview on an already-applied host proves nothing about a
+  genuinely fresh one, and this runbook's value is the fresh path.
+- **Persisted-file checks are part of every wizard checkpoint**, not just the
+  cast. `grep` each key you intended to set and compare the actual value on
+  disk; a cast showing `✅ 已存檔` proves a save happened, not that the right
+  fields got the right values.
 
 ## 3. Delegate bounded work
 

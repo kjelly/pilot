@@ -17,6 +17,17 @@ the stated disposable KVM topology. It is not a staging/production deployment,
 does not validate a real production inventory, and must not be described as a
 production rollout result.
 
+> **Clean-room conduct lives in `../_shared/clean-room-contract.md`.** That file
+> is the single authority for execution modes, Pilot ownership, the
+> teardown/rebuild sequence, wizard input policy, serialization, stop
+> conditions, and cleanup. This skill's own contribution is the **scenario** —
+> which nodes, which roles, which checks. Make future edits to clean-room rules
+> in the shared contract, not here, so the two cannot drift.
+>
+> If you arrived here from another skill only to learn the clean-room rules,
+> read the shared contract instead: this skill's three-VM host/role list is
+> specific to *this* scenario and will conflict with yours.
+
 Use exactly one mode per run:
 
 - **Candidate clean-room acceptance:** the required gate for every
