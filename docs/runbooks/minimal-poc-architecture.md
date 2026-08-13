@@ -2,8 +2,9 @@
 
 > Status: **VERIFIED**
 > Latest completed pass: 2026-08-11 (Asia/Taipei), round 21 (identity + §4 matrix)
-> Latest partial pass: 2026-08-12, round 22 — clean-room rebuild + full site deploy
-> only (roster/reconcilers/§4.1–§4.4 not executed)
+> Latest partial pass: 2026-08-13, round 23 — roster build-out + `freeipa-identity`
+> reconcile + §4.1, continuing round 22's topology (`freeipa-dns`/§4.2–§4.4 not executed)
+> Round 23: [`2026-08-13-round-23.md`](../evidence/minimal-poc-architecture/2026-08-13-round-23.md)
 > Round 22: [`2026-08-12-round-22.md`](../evidence/minimal-poc-architecture/2026-08-12-round-22.md)
 > Evidence: [`2026-08-11-round-21.md`](../evidence/minimal-poc-architecture/2026-08-11-round-21.md)
 > Round 20: [`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md)
@@ -18,6 +19,26 @@
 > `playbooks/apply/freeipa-identity-apply.yml` and
 > `playbooks/apply/freeipa-dns-apply.yml` reconcilers
 > Maintainer: sre
+
+Round 23 (2026-08-13) continued round 22's still-running topology and executed exactly what
+round 22 had left out at the identity layer: the **full roster build-out**, the
+**`freeipa-identity` reconcile**, and **§4.1**. The reconcile applied
+`freeipa-server ok=85 changed=27 failed=0` with `✅ 套用完成` — `changed=27` matching round
+21's count exactly — and §4.1 then passed **8/8** plus the real-credentialed HBAC-denial
+check §4.1 requires on top of the script (`pam_sss(sshd:auth): authentication success`
+followed by `pam_sss(sshd:account): Access denied for user bob`, with alice logging in as
+the control). No product defect was found. It did find that **this runbook's description of
+`pilot edit`'s roster manager was substantially stale**: HBAC rules, sudo rules, hostgroups,
+group/user membership, `password.initial` and `ssh_keys` all have real wizard editors now, so
+§3.3's "cannot do" list was directing operators to hand-edit files the wizard owns — which
+the clean-room contract's Pilot-ownership rule forbids. §3.3's roster bullet and that list
+are rewritten from verified source, and the genuinely wizard-impossible remainder is now
+enumerated precisely (netgroups, the NFS share model, an HBAC rule's `subjects.users`/
+`hostcat` — hence the mandatory `breakglass-admin-access` rule — a sudo rule's `options`,
+and deletion). Five further corrections landed in §2, §3.3, §3.5, §4.1 and §6. Full detail:
+[`2026-08-13-round-23.md`](../evidence/minimal-poc-architecture/2026-08-13-round-23.md).
+`freeipa-dns`, §4.2's log chain, §4.3 and §4.4 were **not executed** — round 21 remains the
+reference for §4.4, round 20 for §4.2, round 18 for `freeipa-dns`.
 
 Round 22 (2026-08-12) rebuilt the whole topology clean-room and re-proved the
 **workspace-authoring and site-deploy path** end to end: `topology up` → `pilot edit`
@@ -203,10 +224,16 @@ remove/restore/drift reconciliation cycle.
 - A real TTY for `pilot edit`, `pilot deploy`, and `pilot reconcile`.
 - `trec` recording according to the `pilot-trec-verification` and `trec-tui-drive` skills. Driver
   mechanics and recording failures belong in those skills, not this operational runbook.
-- Vault values for the keys listed below; never record their values:
+- Vault values for the eight **required** keys listed below; never record their values:
   `ipa_admin_password`, `grafana_admin_password`, `restic_aws_access_key_id`,
   `restic_aws_secret_access_key`, `restic_password`, `thanos_aws_access_key_id`,
-  `thanos_aws_secret_access_key`, and `alertmanager_config`. `ipa_dm_password` remains genuinely
+  `thanos_aws_secret_access_key`, and `node_exporter_basic_auth_password`.
+  **Corrected round 23**: this list previously ended in `alertmanager_config`, which is
+  wrong in both directions. `internal/inventory/vault.go` marks `alertmanager_config`
+  `Optional: true` and the generator emits it commented-out; the genuinely required eighth
+  key is `node_exporter_basic_auth_password` (shared with `host-monitoring` — both sides
+  must hold the same value or Prometheus's scrape is refused with 401), which this list
+  never mentioned. `ipa_dm_password` remains genuinely
   optional (falls back to `ipa_admin_password`) — round 16 found and fixed a bug where `pilot
   deploy`'s hard completeness gate demanded it anyway despite `internal/inventory/vault.go` marking
   it `Optional: true`; see §6's now-historical gotcha entry if you're on a checkout older than that
@@ -217,7 +244,9 @@ remove/restore/drift reconciliation cycle.
   see `.agents/skills/freeipa-roster-authoring/SKILL.md`), the `freeipa` connection/safety
   block, and the required `users`, `groups`, `hosts`, `hbac`, `sudo`, and `nfs` objects. `netgroups`
   is optional and v2-only (feeds NSS/NFS export selectors, not HBAC/sudo) — the roster manager has no
-  netgroup screen, so hand-author it into the roster's nested YAML like HBAC/sudo/NFS already are; a
+  netgroup screen, so hand-author it into the roster's nested YAML like the NFS shares already are
+  (**corrected round 23**: HBAC rules and sudo rules are no longer in that hand-authored set —
+  they have wizard editors now, with the narrow exceptions §3.3 lists); a
   netgroup name must match `^ng-[a-z0-9][a-z0-9_.-]*$`, must not collide with a hostgroup name, needs
   `membership.authoritative: true`, and every reference must resolve to something declared in the
   same roster (confirmed live round 21: netgroup membership removal and restoration both take effect
@@ -361,6 +390,13 @@ attempt; all are wizard behaviour, not defects):
   checkpoint's evidence be the on-disk key check — `grep` each key and confirm no
   `CHANGE-ME` remains. Verify first that your own declared secrets really are
   redacted; only the placeholder/pattern findings are benign.
+- **Scope that `CHANGE-ME` check to *uncommented* lines (corrected round 23).** A
+  correct, fully-filled vault still greps one hit: the generator writes each
+  **optional** key commented-out but keeps its `CHANGE-ME-…` placeholder text, so
+  `ipa_dm_password` matches forever by design. A bare `grep -c CHANGE-ME` therefore
+  reports a finished vault as incomplete. Check the key's active state instead — e.g.
+  confirm every required key from §2 appears at column 0 with a non-placeholder value,
+  and ignore anything behind a `#`.
 
 > **Alternative entry route.** `pilot edit`'s top menu also offers
 > `快速建立最小 workspace`, a guided quick-start that walks hosts → skeleton →
@@ -416,22 +452,68 @@ outline:
   generate` backfills the group_vars skeleton from `.example.yml` files and (only on a workspace
   with no existing vault file) a vault skeleton; fill remaining group_vars values and add any vault
   key `pilot inventory generate` didn't already create via `.vault/`'s `➕ 新增 key` action.
-- **`roster` (top-menu item)**: append-only `👤 Users` / `👥 Groups` CRUD against the same canonical
-  roster the NFS bootstrap already created. Adding a user writes only `{name, state: present}`;
-  adding a group writes only `{name, state: present, category}` (category from a
-  team-/data-/access-/role- picker matching §2's prefix rule). Both dry-run against the roster
-  validator first and refuse (showing the violation) rather than writing anything invalid.
+- **`roster` (top-menu item)**: four editors against the same canonical roster the NFS
+  bootstrap already created — `👤 Users`, `👥 Groups`, `🔐 Host access`, and
+  `🛡️  Sudo commands & rules`. **Substantially wider than this runbook claimed before
+  round 23**, which described it as Users/Groups only. Every action dry-runs against the
+  roster validator first and refuses — showing the violation — rather than writing
+  anything invalid. Writes land immediately; there is no separate save step, so the
+  `✅` banner *is* the save confirmation. Verified live in round 23:
+  - **Users** — add writes `{name, state: present}`, then per-user field editors for
+    `state` (present/disabled), `first`, `last`, `display_name`, `email`, `uid`, `gid`,
+    `login_shell`, `home_directory`, `enabled`, **`password.initial`** (masked input,
+    never pre-filled), `password.force_change`, `password.preserve_existing`, and
+    **`ssh_keys.values`** (add/modify/remove individual public keys).
+  - **Groups** — add is a category picker (team-/data-/access-/role-, matching §2's
+    prefix rule) then a name, then editors for `type`, `description`, `gid`,
+    `membership.authoritative`, and **`membership.users`/`membership.groups`** as
+    checklists over what the roster already declares.
+  - **Host access** — **`Hostgroups`** (add; `description`; `membership.hosts` as a
+    comma-separated FQDN field; `membership.hostgroups` as a nested-hostgroup checklist)
+    and **`HBAC rules`** (add walks name → access-group checklist → hostgroup checklist →
+    PAM-service checklist; edit covers `subjects.groups`, `targets.hostgroups`,
+    `services`), plus a direct **`hbac.disable_allow_all`** toggle.
+  - **Sudo** — **`Command groups`** (name + comma-separated absolute commands) and
+    **`Sudo rules`** (add walks name → role-group checklist → command-group checklist →
+    extra-commands text; edit covers `subjects.groups`, `allow.command_category`,
+    `allow.command_groups`, `allow.commands`).
 - **`🔍 檢查設定完整性` (top-menu item)**: an advisory ✅/❌ report sharing its checks with `pilot
   deploy`'s own hard gate (missing/CHANGE-ME vault keys, unfilled host_vars, roster structural
   violations) — run it before deploying; it never blocks a save or exit itself.
 
 What the edit menu still cannot do — hand-edit the roster's nested YAML for these, the same
-tool-endorsed exception as before, now narrower in scope:
+tool-endorsed exception as before. **This list was rewritten in round 23**: the previous
+version named HBAC rules, sudo rules, hostgroups, membership, passwords and `ssh_keys`, and
+every one of those now has a wizard editor (see the `roster` bullet above). Following the
+old list meant hand-editing files the wizard owns, which the clean-room contract's
+Pilot-ownership rule forbids. Each item below was verified against the current source and
+exercised live in round 23:
 
-- HBAC rules, sudo rules, hostgroups, and NFS shares/exports/automount entries.
-- Group and user **membership** (the roster manager creates the bare group/user objects only).
-- A user's `password`/`ssh_keys` fields — the roster manager's `➕ 新增 User` writes only
-  `{name, state}`, so add these by hand when a user needs a password or an authorized SSH key.
+- **`netgroups`** — no screen anywhere in `pilot edit`. Still fully hand-authored (§2).
+- **`nfs.servers[].shares[]`** and **`nfs_clients`** — no screen. The NFS-role bootstrap
+  writes one `nfs.servers` entry with `shares: []`; every share, its `ownership`, `acl`,
+  `export.clients` and `automount` block is hand work.
+- **An HBAC rule's `subjects.users` and `targets.hostcat`** — the HBAC editor only offers
+  *access-group* subjects and *hostgroup* targets, and `pushRosterHBACTargets` explicitly
+  deletes `hostcat` when you touch targets. The practical consequence: the
+  **`breakglass-admin-access` rule §2 requires before `allow_all` can be disabled cannot be
+  produced by the wizard at all** (it needs `subjects.users: [admin]` + `hostcat: all`).
+  Hand-author it *before* flipping the `hbac.disable_allow_all` toggle, or the apply-time
+  safety gate rejects the run.
+- **A sudo rule's `options`** — `newRosterSudoRule` hard-codes `options: []` and the rule
+  detail screen has no options field, deliberately ("password authentication is the safe
+  default"). So `!authenticate`, which §4.1's `sudo -n` checks require, is *always* a hand
+  edit. See §6's NOPASSWD row.
+- **A sudo rule's `deny`, `run_as`, and `targets`**, and an HBAC/sudo rule's `enabled`
+  flag — creation sets `enabled: true`, `run_as.users: [root]`, `hostcat: all` and empty
+  deny lists; nothing edits them afterwards.
+- **`freeipa.*` beyond `admin.{principal,password}`** — `server`, `realm`, `domain`,
+  `defaults`, `safety` have no editor.
+- **Deletion.** The user `state` picker deliberately excludes `absent`, and groups are
+  read-only on `state`; there is no delete for hostgroups, HBAC rules, sudo rules or
+  command groups either. Removing an object is a hand edit — which is what §4.4's
+  remove-membership step exercises (membership *itself* is wizard-editable; removing the
+  whole object is not).
 
 Run `./pilot roster lint <roster-file>` after any hand edit — it checks the same rules
 `freeipa-identity-apply.yml` enforces at real-apply time, without needing a live target.
@@ -617,7 +699,28 @@ Run the separate day-2 reconciler against the same inventory:
 ./pilot reconcile -i <workspace>/inventory.yml --timeout 90m
 ```
 
-Select `freeipa-identity`, `freeipa-server`, and `sandbox`. Set `freeipa_roster_file` on the managed
+Select `freeipa-identity`, `freeipa-server`, and `sandbox`. **Round 23 pinned down the exact
+prompt chain**, which differs from §3.4's site-wide one in two ways that matter if you script it:
+
+```
+Inventory 檔路徑 → 拓樸圖 [Y/n] → 前置檢查(select) → 挑一個要調和的元件(select)
+→ target_group(text) → 哪個 stage(select) → --limit → --tags → 密碼變數檔 [Y/n]
+→ sudo(become) [y/N] → 還有其他 -e(text) → 要先預覽 [Y/n]
+→ 確定要執行預覽指令嗎 [Y/n] → (preview)
+→ 要接著套用真正的變更嗎 [y/N] → 確定要執行正式套用指令嗎 [Y/n] → (apply)
+```
+
+- **The `freeipa-server` in "select freeipa-identity, freeipa-server, sandbox" is a *text*
+  prompt, not a menu**: `要限定只套用到哪個 group/host 嗎？(-e target_group=...；留空 = 用預設
+  group "freeipa-server")`, sitting between the component menu and the stage menu. Leaving it
+  empty selects that default, which is what this runbook wants. Round 23's first scripted
+  attempt expected the stage menu here and stalled — before any mutation.
+- **There are no auto-detected `-e` confirms at all.** §3.4's seven `[Y/n]` prompts come from
+  the site-wide path's `siteAutoHostVars()` loop; the catalog path used by `reconcile` iterates
+  only that component's own `AutoHostVars`, and `freeipa-identity` declares none. Do not budget
+  keystrokes for them here.
+
+Set `freeipa_roster_file` on the managed
 host through `pilot edit` (see §2 — also required on `nexus`); the reconciler loads that canonical
 roster separately via that host var, independent of whatever is selected at the vars-file prompt
 below. At the secret vars-file prompt select `.vault/main.yaml`, which supplies the
@@ -728,7 +831,12 @@ for the `ALICE_PASSWORD` env var in the repeatable form. Do not flip the roster'
   place, and only proves the password was wrong.
 
 If `ipa hbactest` allows sudo but the first live sudo lookup is denied, use the SSSD cache recovery
-in §6 and repeat both checks.
+in §6 and repeat both checks. **Expect this on every fresh run, not occasionally** (round 23: the
+spotcheck scored 6/8 with both alice-sudo rows failing `sudo: a password is required`, then 8/8
+immediately after `sss_cache -E && systemctl restart sssd` on `nexus`, with no roster change in
+between). Confirm it is the cache and not the NOPASSWD authoring gap first — `ipa sudorule-show`
+showing `Sudo Option: !authenticate` already attached means cache; no options at all means §6's
+NOPASSWD row.
 
 Repeatable form: `ALICE_PASSWORD='...' ./scripts/minimal-poc-section4-spotcheck.sh` (see the
 script's own header for the full env var list — `ALICE_SUDO_CMD` in particular must match whatever
@@ -926,11 +1034,10 @@ fixed upstream — on a current checkout you can skip it entirely.
 | A no-op reconcile still reports changes | Forced test-password handling, HBAC disable behavior and Dogtag-owned mode correction may be non-idempotent. Also, any roster user who has never actually logged in (`krbLastPwdChange == krbPasswordExpiration`) has their bootstrap password legitimately re-applied every run regardless of `force_change`, by design — only a user's own real password change breaks the equality. | Identify the exact changed tasks and preserve their real count; do not claim `changed=0`. |
 | A brand-new roster user's first live login/sudo fails with "Password change required but no TTY available", even though the roster sets `force_change: false` | FreeIPA's own `ipa passwd` always arms the forced-change flag on first-ever password assignment, independent of the roster flag — `force_change` only controls whether a *routine rerun* re-arms it for an already-onboarded user. | Personalize with a scripted `kinit <user>` (3-line forced-change stdin: old/new/new). Works over `pilot vm-target exec` piped stdin without needing a PTY, unlike the equivalent SSH+PAM path. |
 | A reconcile for one unrelated roster change (e.g. adding a hostgroup member) silently resets an already-personalized user's password, breaking every live check that assumed it | **Acknowledged limitation of the reconciler's password-reset safety design, not a new bug.** The `krbLastPwdChange`/`krbPasswordExpiration` self-change detection only protects the `force_password: false` case; the task's `when:` is `force_password OR needs_reset` (an OR, not a gate), so a roster entry still carrying `force_change: true` from onboarding re-triggers `ipa passwd` on every reconcile. | Flip `password.force_change` to `false` in the roster the same day you personalize a user's password via `kinit` — see §3.3's authoring-pitfalls note. If it already happened, redo the `kinit` forced-change dance once (old = roster's `initial`, new = your choice), then flip the flag. |
-| A sudo rule's live `sudo -n <cmd>` fails with `sudo: a password is required` and `ipa sudorule-show <rule>` confirms the rule is attached | **Authoring mistake (missing NOPASSWD)** — `sudo.rules[].options` was `[]`; without `!authenticate`, `sudo -n` correctly refuses since it cannot prompt. Distinguish from the cache-staleness row above via `ipa sudorule-show`'s output: cache issue shows `!authenticate` already present, this shows no options at all. | Add `"!authenticate"` to the rule's `options`, reconcile, then still refresh the target client's SSSD cache (the staleness gotcha applies on top once the option exists). |
+| A sudo rule's live `sudo -n <cmd>` fails with `sudo: a password is required` and `ipa sudorule-show <rule>` confirms the rule is attached | **Missing NOPASSWD — and not really an authoring slip (reclassified round 23).** `sudo.rules[].options` was `[]`; without `!authenticate`, `sudo -n` correctly refuses since it cannot prompt. What the old wording missed: a rule created through `pilot edit`'s sudo wizard **always** starts this way — `newRosterSudoRule` hard-codes `options: []` as its deliberate safe default and no screen edits the field — so every wizard-authored rule needs this hand edit before §4.1 can pass. Distinguish from the cache-staleness row above via `ipa sudorule-show`'s output: cache issue shows `!authenticate` already present, this shows no options at all. | Add `"!authenticate"` to the rule's `options`, reconcile, then still refresh the target client's SSSD cache (the staleness gotcha applies on top once the option exists). |
 | §4.1's roster-authorized sudo command fails with `Unit sshd.service could not be found` even though the rule is correctly attached | **Authoring mistake, not a tool/playbook defect.** The roster granted `/usr/bin/systemctl status sshd`, but the live target is Ubuntu 24.04 where the unit is `ssh.service` — RHEL/AlmaLinux and Debian/Ubuntu name the same daemon differently. | Grant a command that exists on the target's OS family (`systemctl status ssh` on Debian/Ubuntu, `systemctl status sshd` on RHEL/AlmaLinux), re-run `pilot reconcile` to apply the correction (a useful exercise of the drift-correction path, §4.4), then refresh the client's SSSD sudo cache. |
-| `pilot reconcile`'s `freeipa-identity` preview crashes with `Error while resolving value for 'identity_hbac_test_host': object of type 'dict' has no attribute 'server'` | **Suspected implementation defect, reported not fixed (round 17, 2026-07-27).** The "Normalize canonical FreeIPA settings" task reads `freeipa_roster.freeipa.server` with no `\| default(...)` fallback, unlike every sibling field in the same `set_fact`. `freeipa.server` is a legal-but-optional roster key that `pilot edit`'s NFS-role-add bootstrap never writes — so this crashes on a roster produced entirely through sanctioned tooling. | Add `freeipa.server: <the freeipa-server host's real FQDN>` (confirm via `hostname -f` on the VM, e.g. `ipa1.<domain>` — don't assume the alias other hosts use) and `freeipa.realm` to the roster by hand (the nested-YAML hand-edit exception, §3.3) until fixed upstream. Proposed fix: give `identity_hbac_test_host` the same `\| default(ipa_server_fqdn \| default(inventory_hostname))` fallback its sibling top-level default already uses. |
 | `pilot deploy` aborts before any preview with `delivery transaction failed: component "freeipa-server" ... resources ... are below minimum ... ramMiB=4096` | **Environment/topology gap, not a code defect.** `deploy_facts.go` gathers real per-host OS facts before the delivery preflight; AlmaLinux 9's usable RAM under this topology's KVM/virtio overhead lands ~185 MiB below the nominal `--memory` value. | Give `freeipa-server` headroom above the declared minimum — `docs/topologies/minimal-poc-topology.yaml`'s `memory: 4608` reflects this. If the node was already up, `pilot vm-target down --name freeipa-server` then `topology up` recreates just that node, **but it gets a new DHCP-assigned IP even with the same MAC** — re-set that host's `ansible_host` via `pilot edit` and re-run `pilot inventory generate` before redeploying. |
-| `pilot deploy`/`pilot reconcile` fail their completeness gate — or, worse, silently resolve a `group_vars`/`host_vars` value to the wrong thing — even though the workspace's own files are correct | **Environment pollution, not a pilot defect.** `internal/ansible`'s `Runner.Run` never sets `cmd.Dir`, so `ansible-playbook` inherits pilot's process cwd, and Ansible's vars-plugin search path includes cwd-adjacent `group_vars`/`host_vars` alongside the inventory-adjacent ones. Stray files at the repo root — e.g. from an earlier `pilot edit`/`inventory generate` run without `--dir` — silently shadow the real workspace for any same-named key. A read-only `ansible -m debug -a "var=<key>"` from the same cwd reveals the actually-resolved value. | Never invoke `pilot edit`/`pilot inventory generate` without `--dir`. If the repo root already has such stray files and their ownership is unclear, don't move or delete them — run from an isolated directory that symlinks every repo-root entry except `host_vars`/`.vault`/`tmp`, **and a `group_vars/` containing symlinks to only the `*.example.yml` templates plus the `dns/` example dir**. Excluding `group_vars/` wholesale (what this row said before round 22) silently breaks `pilot inventory generate`'s backfill: that one directory holds both the stray shadowing `*.yml` and the 13 legitimate templates the generator copies from, so the run produces a workspace with **zero** group_vars files and still exits 0 — see §3.3. A future Go-side fix should pin `cmd.Dir` explicitly. |
+| `pilot deploy`/`pilot reconcile` fail their completeness gate — or, worse, silently resolve a `group_vars`/`host_vars` value to the wrong thing — even though the workspace's own files are correct | **Environment pollution, not a pilot defect** — but the mechanism stated here for four rounds is wrong, **corrected round 23**. `internal/ansible`'s `Runner.Run` genuinely never sets `cmd.Dir`, so `ansible-playbook` does inherit pilot's process cwd. What does *not* follow is the vars-plugin claim: for `ansible-playbook <playbook>` the `host_group_vars` plugin reads the **inventory** directory and the **playbook's** directory, not the cwd. A controlled probe with inventory, playbook and cwd in three separate directories, each holding a conflicting `group_vars/<group>.yml`, resolved the **inventory-adjacent** value. Do **not** use `ansible -m debug -a "var=<key>"` from the same cwd as the diagnostic (what this row used to say): ad-hoc `ansible` *does* treat cwd as its basedir, so it reports a value the real deploy never uses. Round 23 hit exactly that false positive — the isolated cwd had accumulated six verbatim copies of unfilled `*.example.yml`, `ansible -m debug` reported `thanos_s3_target_host: ""`, and the live host had every derived alias correctly mapped to nexus in `/etc/hosts`, proving the apply had used the real values all along. A real cwd sensitivity may still exist by another route — vars-file paths reach `ansible-playbook` unresolved as `-e @<path>` (`internal/ansible/runner.go:207`), so a *relative* vault path would resolve against cwd — but that was not the thing this row described and has not been re-tested. | Never invoke `pilot edit`/`pilot inventory generate` without `--dir`. If the repo root already has such stray files and their ownership is unclear, don't move or delete them — run from an isolated directory that symlinks every repo-root entry except `host_vars`/`.vault`/`tmp`, **and a `group_vars/` containing symlinks to only the `*.example.yml` templates plus the `dns/` example dir**. Excluding `group_vars/` wholesale (what this row said before round 22) silently breaks `pilot inventory generate`'s backfill: that one directory holds both the stray shadowing `*.yml` and the 13 legitimate templates the generator copies from, so the run produces a workspace with **zero** group_vars files and still exits 0 — see §3.3. A future Go-side fix should pin `cmd.Dir` explicitly. |
 
 ### 6.2 Fixed upstream — upgrade past these
 
@@ -948,6 +1055,7 @@ checkout none of these can fire.
 | `nexus`'s disk fills to 100% within about an hour, one host's `auth.log` reaching multiple GB | round 20 (2026-08-07) | An rsyslog self-forwarding loop. `systemctl stop rsyslog` immediately, truncate the affected files, then upgrade before restarting. Full writeup: `docs/verification/log-server.md` v1.3 (C11). |
 | The `pilot-siem-wazuh-alerts` Loki job has real content but every stream's `host` label is empty | round 20 (2026-08-07) | See `docs/verification/log-shipping.md` v1.3 — the Promtail job scraped the plain-text alert file instead of `alerts/alerts.json`. |
 | `--check --diff` preview fails on `nexus`'s `freeipa-nfs-server` at "Gate: required roster and stage authorization" although `pilot roster lint` reports the roster clean | round 21 (2026-08-11) | Apply the one-line `\| int in [1, 2]` change locally. Guard comment now lives at the fix site in `freeipa-nfs-server-apply.yml`. |
+| `pilot reconcile`'s `freeipa-identity` preview crashes with `Error while resolving value for 'identity_hbac_test_host': object of type 'dict' has no attribute 'server'` | 2026-07-30, commit `e5c56c4` (i.e. before round 18) | Add `freeipa.server` (the FreeIPA host's real FQDN, e.g. `ipa1.<domain>`) to the roster by hand. **Moved out of §6.1 in round 23**: §6.1 had carried this as a live "reported not fixed (round 17)" row for four rounds, together with a mandatory roster workaround, after the exact fix it proposed had already landed — `freeipa-identity-apply.yml:424` now reads `{{ freeipa_roster.freeipa.server \| default(ipa_server_fqdn \| default(inventory_hostname)) }}`. Round 23 confirmed it live by authoring a roster with **no** `freeipa.server` key — precisely the bootstrap-produced shape the old row said would crash — and reconciling it successfully. |
 
 Two rows previously listed here now live with their component, which is
 authoritative for them: SeaweedFS's anonymous `C6`–`C8` rows failing once signed
