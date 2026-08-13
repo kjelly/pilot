@@ -1,7 +1,10 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
 > Status: **VERIFIED**
-> Latest completed pass: 2026-08-11 (Asia/Taipei), round 21
+> Latest completed pass: 2026-08-11 (Asia/Taipei), round 21 (identity + §4 matrix)
+> Latest partial pass: 2026-08-12, round 22 — clean-room rebuild + full site deploy
+> only (roster/reconcilers/§4.1–§4.4 not executed)
+> Round 22: [`2026-08-12-round-22.md`](../evidence/minimal-poc-architecture/2026-08-12-round-22.md)
 > Evidence: [`2026-08-11-round-21.md`](../evidence/minimal-poc-architecture/2026-08-11-round-21.md)
 > Round 20: [`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md)
 > Round 19: [`2026-08-06-round-19.md`](../evidence/minimal-poc-architecture/2026-08-06-round-19.md)
@@ -16,11 +19,25 @@
 > `playbooks/apply/freeipa-dns-apply.yml` reconcilers
 > Maintainer: sre
 
+Round 22 (2026-08-12) rebuilt the whole topology clean-room and re-proved the
+**workspace-authoring and site-deploy path** end to end: `topology up` → `pilot edit`
+→ `inventory generate` → vault/group_vars fill → full `site.yml` deploy, every step
+TREC-recorded. Preview and apply both finished `failed=0` on all three hosts
+(`client-vm ok=105 changed=47`, `freeipa-server ok=86 changed=38`,
+`nexus ok=239 changed=107`, `✅ 套用完成`). It deliberately stopped there: the roster
+build-out, both day-2 reconcilers, and §4.1–§4.4 were **not executed**, so round 21
+remains the reference for those. The round found **no product defect** but six
+documentation defects — four of them in this runbook — all corrected here: §6.1's
+isolated-cwd workaround was actively broken, §3.3 claimed the two authoring routes
+produce identical files when they do not, and the wizards' automatic prompts were
+substantially under-documented (§3.3, §3.4). Full detail:
+[`2026-08-12-round-22.md`](../evidence/minimal-poc-architecture/2026-08-12-round-22.md).
+
 Round 21 (2026-08-11) authored and deployed the FreeIPA identity roster as **Roster
-Schema v2** for the first time in this runbook's history, and is the current verified
-pass. **§7 holds its full record** — scope, the roster's actual shape, every
-`ok=/changed=/failed=` count, the one real implementation defect found and fixed, and
-the environment note — with the precise numbers rather than a prose summary of them.
+Schema v2** for the first time in this runbook's history, and remains the reference
+pass for identity, the reconcilers and §4.1/§4.4. **§7 holds its full record** — scope,
+the roster's actual shape, every `ok=/changed=/failed=` count, the one real
+implementation defect found and fixed, and the environment note.
 
 Earlier rounds, newest first — each round's own evidence record (linked above) holds
 the full detail; this runbook keeps only the current sanitized facts:
@@ -298,14 +315,72 @@ Use one fresh workspace consistently throughout the run:
 ./pilot edit --dir <workspace>
 ```
 
+**Authoring pitfalls confirmed live in round 22** (each one cost a scripted
+attempt; all are wizard behaviour, not defects):
+
+- **Checking `freeipa-nfs-server` fires three chained prompts on checklist
+  confirm, not one.** In order: `pushNFSRoleBootstrap`'s masked FreeIPA
+  admin-password prompt; then — if that host also has `prometheus` — an inline
+  `prometheus_site_label` prompt; then the `host_vars/<host>.yml` key-list
+  editor, which you must save explicitly (`💾 存檔並離開`). Saving it returns to
+  that **host's own menu**, not the roles menu, so this host never shows the
+  `✅ 完成` roles-menu row the other hosts do. Script all three or the run
+  stalls on unscripted input.
+- **`freeipa_roster_file` is needed on `freeipa-server` too, and nothing sets it
+  for you.** The NFS bootstrap only auto-sets it on the host that gained the
+  `freeipa-nfs-server` role (here `nexus`). `pilot inventory generate` then
+  fail-closes with `host "freeipa-server": roles ... require freeipa_roster_file
+  pointing to the canonical FreeIPA roster` until you add it by hand through
+  that host's `其他變數` screen. This is correct fail-closed behaviour — expect
+  it rather than treating it as a bug.
+- **The bootstrap's minimal vault blocks skeleton completion.** Because the NFS
+  bootstrap creates `.vault/main.yaml` with exactly one key
+  (`ipa_admin_password`) during hosts.yml authoring, `inventory generate`'s
+  never-overwrite policy reports "already exists, left untouched" and never adds
+  the remaining required keys. Round 22 measured **1 of 8** present. Get the
+  authoritative list without touching the workspace:
+  ```bash
+  ./pilot inventory generate --dir <workspace> --out /dev/null \
+    --vault-out /tmp/vault-skeleton.yaml \
+    --no-group-vars --no-host-vars --no-nfs-roster
+  ```
+  then fill every missing key through `pilot edit`'s vault editor.
+- **A derailed wizard run is not always side-effect-free.** The ordinary editors
+  only write on an explicit save, but the auto-bootstrap paths above write
+  immediately — a run that dies before any save can still have created
+  `.vault/ipa-identity.yaml`, `.vault/main.yaml` and `host_vars/<host>.yml`.
+  Wipe the workspace between scripted attempts to keep them deterministic.
+- **A recorded vault fill will fail `trec verify`'s secret scan, and that is
+  expected.** The vault key-list screen re-renders `<key> = <value>` for every key
+  each time it opens, and the scanner's `inline-secret-assignment` rule fires on
+  that *pattern* — it matches the shipped `CHANGE-ME-…` placeholders and even
+  redacted or empty values. Round 22's fill was correct (all keys set on disk,
+  every declared secret redacted, literal greps clean) yet still scored 33
+  findings. Do **not** chase these as leaks and do not weaken `--secret-env`
+  coverage to silence them. Treat the vault-fill cast as a diagnostic and let the
+  checkpoint's evidence be the on-disk key check — `grep` each key and confirm no
+  `CHANGE-ME` remains. Verify first that your own declared secrets really are
+  redacted; only the placeholder/pattern findings are benign.
+
 > **Alternative entry route.** `pilot edit`'s top menu also offers
 > `快速建立最小 workspace`, a guided quick-start that walks hosts → skeleton →
-> group_vars → vault → readiness in one pass. It is an *alternative* to the
-> advanced sequence above, not a different mechanism: it drives the same editors
-> and writes exactly the same workspace files, and its readiness gate is the same
-> `checkWorkspaceCompleteness` contract `pilot deploy` enforces. Either route is
-> acceptable for this runbook, and neither substitutes for real deployment
-> evidence against the targets — §3.4 onward is unchanged whichever you use.
+> group_vars → vault → readiness in one pass. It drives the same editors, targets
+> the same workspace files, and gates on the same `checkWorkspaceCompleteness`
+> contract `pilot deploy` enforces. Either route is acceptable here, and neither
+> substitutes for real deployment evidence — §3.4 onward is unchanged.
+>
+> **They are not byte-identical, though (corrected round 22).** The cross-role
+> host pointers differ. `autofillCrossRoleHostVars` runs in only two places: the
+> quick path calls it explicitly, and `pilot edit`'s group_vars picker calls it
+> **only when creating a file from its example**. `pilot inventory generate`'s own
+> backfill (`copyMissingGroupVars`) copies the example verbatim with no autofill,
+> and a second `pilot edit` pass cannot recover it because the file now exists.
+> So the sequence above leaves seven derivable values empty —
+> `restic_s3_target_host`, `siem_forward_host` (×2), `thanos_query_target_host`,
+> `thanos_s3_target_host` (×2), `wazuh_manager_host` — for you to type by hand,
+> while the quick path fills them from the inventory. If you want the autofill on
+> the advanced route, let `pilot edit`'s group_vars picker create the files rather
+> than `pilot inventory generate`.
 
 In the first edit pass, set every host's SSH user, exact generated private-key path, and role
 membership. In the second, fill group variables and `.vault/main.yaml`. The nested identity roster
@@ -465,6 +540,30 @@ Select the full-site `site.yml` scope and `sandbox` stage. Accept inventory-deri
 values when the wizard presents them. Leave the later manual extra-`-e` field empty. If a required
 value cannot be derived and would need manual input there, stop and fix the inventory/group vars;
 do not improvise an override during the evidence run.
+
+**Round 22 pinned down the exact prompt sequence**, which matters if you script it:
+
+```
+Inventory 檔路徑 → 拓樸圖 [Y/n] → 前置檢查(select) → 要佈署什麼(select)
+→ 哪個 stage(select) → --limit → --tags → 密碼變數檔 [Y/n]
+→ sudo(become) [y/N] → N× auto-detected -e [Y/n] → 還有其他 -e(text)
+→ 要先預覽 [Y/n] → 確定要執行預覽指令嗎 [Y/n] → (preview)
+→ 要接著套用真正的變更嗎 [y/N] → 確定要執行正式套用指令嗎 [Y/n] → (apply)
+```
+
+The `N× auto-detected -e` step is the one that bites: the wizard asks **one `[Y/n]`
+confirm per derived host pointer**, and `N` depends on which roles this inventory
+places. This topology produced **seven** — `siem_forward_host`,
+`wazuh_manager_host`, `restic_s3_target_host`, `thanos_s3_target_host`,
+`thanos_query_target_host`, `loki_target_host`, `alertmanager_target_host`, every one
+resolving to `nexus`. Derive the expected set from `AutoHostVars` in
+`cmd/pilot/cmd/deploy_catalog.go` rather than assuming a count; answering the wrong
+number sends the next keystroke into the following prompt, and round 22's first
+attempt silently answered `n` to `siem_forward_host` that way — declining a derived
+value, which the input policy forbids. Because neither wizard uses an alternate
+screen buffer, a guard-matched answer loop can also re-match the previous prompt from
+scrollback and type a stray character into the `還有其他 -e` text field; clear that
+field (Ctrl-U) before submitting it empty.
 
 Run the full preview (`--check --diff`) and continue to real apply only when every host reports
 `failed=0`. Confirmed live 2026-07-25 (round 16) driving this real interactive wizard directly
@@ -815,7 +914,7 @@ fixed upstream — on a current checkout you can skip it entirely.
 
 | Symptom | Cause | Current action |
 |---|---|---|
-| `pilot vm-target topology up` fails with `services: Harbor is unreachable: ... connection refused`, moments after `pilot services status` reported `running=true` | **Suspected implementation defect, reported not fixed (round 19, 2026-08-06).** The dev-lite Harbor containers had actually exited (`Exited (128)` ~28h earlier) but `services status`'s health signal did not reflect it; the first real signal came from `topology up`'s own consumer-side connectivity check. | `./pilot services down && ./pilot services up --profile dev-lite` (full recreate), confirm the Harbor health endpoint returns HTTP 200, then retry. A future round should investigate `services status`'s health-check implementation. |
+| `pilot vm-target topology up` fails with `services: Harbor is unreachable: ... connection refused`, moments after `pilot services status` reported `running=true` | **Suspected implementation defect, reported not fixed (round 19, 2026-08-06).** The dev-lite Harbor containers had actually exited (`Exited (128)` ~28h earlier) but `services status`'s health signal did not reflect it; the first real signal came from `topology up`'s own consumer-side connectivity check. | `./pilot services down && ./pilot services up --profile dev-lite` (full recreate), then retry. To tell a real outage from this reporting gap, check container state directly — `docker ps --format '{{.Names}}\t{{.Status}}' \| grep dev-lite` — and expect every Harbor container plus `pulp` and `apt-cacher-ng` to read `Up ... (healthy)`; the round-19 incident showed `Exited (128)` there while `services status` still said `running=true`. Round 22 confirmed a genuinely healthy stack this way. Don't probe an HTTP health path for this — the earlier wording said to, without naming one, and a guessed path returns 404 on a healthy Harbor. `topology up` with `services: local` is fail-closed, so it is the authoritative test either way. A future round should investigate `services status`'s health-check implementation. |
 | Site-wide deploy's real apply fails `nexus`'s `freeipa-client` with `Joining realm failed: Operations error: Error checking for attribute uniqueness` | Transient FreeIPA/389-ds LDAP contention when two `freeipa-client` hosts run `ipa-client-install` concurrently against the same server (default `ANSIBLE_FORKS=20` runs both in one play). The losing host is then excluded from every later play in that run, cascading into unrelated-looking failures on it (e.g. `wazuh-fim` agent-auth failing because `wazuh-manager` never applied). | Re-run `pilot deploy` — site-wide is idempotent, already-applied hosts report `changed=0`, and only one host is left to enroll so it no longer races. Not a topology/bring-up defect. |
 | First live sudo is denied although `ipa hbactest --service=sudo` allows it — **or** a *newly applied* sudo rule fails `sudo: a password is required` even though `ipa sudorule-show`/`sudo -n -l` show it attached with `!authenticate` | Stale SSSD sudo cache. Applies both on first enrollment and after every sudo-rule change. | `sss_cache -E && systemctl restart sssd` on the **client host being sudo'd into** (not the FreeIPA server), then repeat the live and authoritative checks. Do **not** add `sudo` to `sssd.conf` `services=` — the sudo responder is socket-activated and that edit breaks its socket. |
 | `pilot deploy --dir ...` is rejected | `deploy` takes an inventory with `-i`; `--dir` belongs to authoring commands such as `pilot edit` | Use the §3.4 invocation. |
@@ -831,7 +930,7 @@ fixed upstream — on a current checkout you can skip it entirely.
 | §4.1's roster-authorized sudo command fails with `Unit sshd.service could not be found` even though the rule is correctly attached | **Authoring mistake, not a tool/playbook defect.** The roster granted `/usr/bin/systemctl status sshd`, but the live target is Ubuntu 24.04 where the unit is `ssh.service` — RHEL/AlmaLinux and Debian/Ubuntu name the same daemon differently. | Grant a command that exists on the target's OS family (`systemctl status ssh` on Debian/Ubuntu, `systemctl status sshd` on RHEL/AlmaLinux), re-run `pilot reconcile` to apply the correction (a useful exercise of the drift-correction path, §4.4), then refresh the client's SSSD sudo cache. |
 | `pilot reconcile`'s `freeipa-identity` preview crashes with `Error while resolving value for 'identity_hbac_test_host': object of type 'dict' has no attribute 'server'` | **Suspected implementation defect, reported not fixed (round 17, 2026-07-27).** The "Normalize canonical FreeIPA settings" task reads `freeipa_roster.freeipa.server` with no `\| default(...)` fallback, unlike every sibling field in the same `set_fact`. `freeipa.server` is a legal-but-optional roster key that `pilot edit`'s NFS-role-add bootstrap never writes — so this crashes on a roster produced entirely through sanctioned tooling. | Add `freeipa.server: <the freeipa-server host's real FQDN>` (confirm via `hostname -f` on the VM, e.g. `ipa1.<domain>` — don't assume the alias other hosts use) and `freeipa.realm` to the roster by hand (the nested-YAML hand-edit exception, §3.3) until fixed upstream. Proposed fix: give `identity_hbac_test_host` the same `\| default(ipa_server_fqdn \| default(inventory_hostname))` fallback its sibling top-level default already uses. |
 | `pilot deploy` aborts before any preview with `delivery transaction failed: component "freeipa-server" ... resources ... are below minimum ... ramMiB=4096` | **Environment/topology gap, not a code defect.** `deploy_facts.go` gathers real per-host OS facts before the delivery preflight; AlmaLinux 9's usable RAM under this topology's KVM/virtio overhead lands ~185 MiB below the nominal `--memory` value. | Give `freeipa-server` headroom above the declared minimum — `docs/topologies/minimal-poc-topology.yaml`'s `memory: 4608` reflects this. If the node was already up, `pilot vm-target down --name freeipa-server` then `topology up` recreates just that node, **but it gets a new DHCP-assigned IP even with the same MAC** — re-set that host's `ansible_host` via `pilot edit` and re-run `pilot inventory generate` before redeploying. |
-| `pilot deploy`/`pilot reconcile` fail their completeness gate — or, worse, silently resolve a `group_vars`/`host_vars` value to the wrong thing — even though the workspace's own files are correct | **Environment pollution, not a pilot defect.** `internal/ansible`'s `Runner.Run` never sets `cmd.Dir`, so `ansible-playbook` inherits pilot's process cwd, and Ansible's vars-plugin search path includes cwd-adjacent `group_vars`/`host_vars` alongside the inventory-adjacent ones. Stray files at the repo root — e.g. from an earlier `pilot edit`/`inventory generate` run without `--dir` — silently shadow the real workspace for any same-named key. A read-only `ansible -m debug -a "var=<key>"` from the same cwd reveals the actually-resolved value. | Never invoke `pilot edit`/`pilot inventory generate` without `--dir`. If the repo root already has such stray files and their ownership is unclear, don't move or delete them — run `pilot deploy`/`reconcile` from an isolated directory that symlinks every repo-root entry except `group_vars`/`host_vars`/`.vault`/`tmp`. A future Go-side fix should pin `cmd.Dir` explicitly. |
+| `pilot deploy`/`pilot reconcile` fail their completeness gate — or, worse, silently resolve a `group_vars`/`host_vars` value to the wrong thing — even though the workspace's own files are correct | **Environment pollution, not a pilot defect.** `internal/ansible`'s `Runner.Run` never sets `cmd.Dir`, so `ansible-playbook` inherits pilot's process cwd, and Ansible's vars-plugin search path includes cwd-adjacent `group_vars`/`host_vars` alongside the inventory-adjacent ones. Stray files at the repo root — e.g. from an earlier `pilot edit`/`inventory generate` run without `--dir` — silently shadow the real workspace for any same-named key. A read-only `ansible -m debug -a "var=<key>"` from the same cwd reveals the actually-resolved value. | Never invoke `pilot edit`/`pilot inventory generate` without `--dir`. If the repo root already has such stray files and their ownership is unclear, don't move or delete them — run from an isolated directory that symlinks every repo-root entry except `host_vars`/`.vault`/`tmp`, **and a `group_vars/` containing symlinks to only the `*.example.yml` templates plus the `dns/` example dir**. Excluding `group_vars/` wholesale (what this row said before round 22) silently breaks `pilot inventory generate`'s backfill: that one directory holds both the stray shadowing `*.yml` and the 13 legitimate templates the generator copies from, so the run produces a workspace with **zero** group_vars files and still exits 0 — see §3.3. A future Go-side fix should pin `cmd.Dir` explicitly. |
 
 ### 6.2 Fixed upstream — upgrade past these
 
