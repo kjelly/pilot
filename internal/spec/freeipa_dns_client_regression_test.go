@@ -167,7 +167,13 @@ func TestRegression_FreeipaDNSClientContract(t *testing.T) {
 // 127.0.0.1 preference would silently make a FreeIPA DNS host depend on
 // network reachability to itself for its own name resolution.
 func TestRegression_FreeipaDNSClientApplyPlaybook_SelfFirstOrdering(t *testing.T) {
-	const playbookPath = "../../playbooks/apply/freeipa-dns-client-apply.yml"
+	// 2026-08-14: the actual resolver logic was extracted into this shared
+	// task file (spec.md §26 point 1) — also included by
+	// internal-endpoint-apply.yml's fleet-wide DNS resolver baseline
+	// (docs/verification/internal-endpoint.md C9) — so
+	// freeipa-dns-client-apply.yml itself is now just a stage-gated
+	// wrapper around one include_tasks call.
+	const playbookPath = "../../playbooks/apply/tasks/freeipa-dns-client-resolver.yml"
 	raw, err := os.ReadFile(playbookPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", playbookPath, err)
@@ -205,7 +211,13 @@ func TestRegression_FreeipaDNSClientApplyPlaybook_SelfFirstOrdering(t *testing.T
 // almost always FreeIPA-related (server/replica/EL client) — losing this
 // branch would silently leave every such host unconfigured.
 func TestRegression_FreeipaDNSClientApplyPlaybook_MultiOSCoverage(t *testing.T) {
-	const playbookPath = "../../playbooks/apply/freeipa-dns-client-apply.yml"
+	// 2026-08-14: the actual resolver logic was extracted into this shared
+	// task file (spec.md §26 point 1) — also included by
+	// internal-endpoint-apply.yml's fleet-wide DNS resolver baseline
+	// (docs/verification/internal-endpoint.md C9) — so
+	// freeipa-dns-client-apply.yml itself is now just a stage-gated
+	// wrapper around one include_tasks call.
+	const playbookPath = "../../playbooks/apply/tasks/freeipa-dns-client-resolver.yml"
 	raw, err := os.ReadFile(playbookPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", playbookPath, err)
