@@ -1,0 +1,15 @@
+---
+# Fixture for docs/verification/internal-endpoint.md C2: a nested FQDN
+# (aaa.xxx.<zone>) must normalize to the correct relative owner "aaa.xxx".
+schema_version: 1
+endpoints:
+  - fqdn: aaa.xxx.apps.pilot.internal
+    state: present
+    dns:
+      zone: apps.pilot.internal.
+    route:
+      mode: direct
+      target:
+        address: 10.0.0.1
+    tls:
+      mode: disabled

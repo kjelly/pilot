@@ -1,0 +1,18 @@
+---
+# Fixture for docs/verification/internal-endpoint.md C8: an endpoint whose
+# (zone, owner, type) is already explicitly managed by freeipa-dns.yaml must
+# be rejected. Run with --freeipa-dns-manifest pointing at the real
+# freeipa-dns.yaml for this topology, which explicitly declares an A record
+# named "reserved" at apps.pilot.internal. (spec.md §11.3).
+schema_version: 1
+endpoints:
+  - fqdn: reserved.apps.pilot.internal
+    state: present
+    dns:
+      zone: apps.pilot.internal.
+    route:
+      mode: direct
+      target:
+        address: 10.0.0.1
+    tls:
+      mode: disabled

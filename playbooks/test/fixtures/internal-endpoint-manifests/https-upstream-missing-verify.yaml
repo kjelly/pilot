@@ -1,0 +1,21 @@
+---
+# Fixture for docs/verification/internal-endpoint.md C30: an HTTPS upstream
+# without an explicit tls.verify must be rejected (fail closed, no implicit
+# default — spec.md §12.4.1).
+schema_version: 1
+endpoints:
+  - fqdn: badverify.apps.pilot.internal
+    state: present
+    dns:
+      zone: apps.pilot.internal.
+    route:
+      mode: reverse_proxy
+      proxy:
+        provider: nginx
+        inventory_host: p10-proxy
+      upstream:
+        scheme: https
+        address: 10.0.0.9
+        port: 8443
+    tls:
+      mode: disabled

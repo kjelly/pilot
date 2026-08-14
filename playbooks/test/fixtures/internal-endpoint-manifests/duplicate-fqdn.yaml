@@ -1,0 +1,26 @@
+---
+# Fixture for docs/verification/internal-endpoint.md C3: two endpoints with
+# the same canonical FQDN (case/trailing-dot differences included) must be
+# rejected.
+schema_version: 1
+endpoints:
+  - fqdn: dup.apps.pilot.internal
+    state: present
+    dns:
+      zone: apps.pilot.internal.
+    route:
+      mode: direct
+      target:
+        address: 10.0.0.1
+    tls:
+      mode: disabled
+  - fqdn: DUP.apps.pilot.internal.
+    state: present
+    dns:
+      zone: apps.pilot.internal.
+    route:
+      mode: direct
+      target:
+        address: 10.0.0.2
+    tls:
+      mode: disabled

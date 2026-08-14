@@ -1,0 +1,6 @@
+---
+# Fixture for docs/verification/internal-endpoint.md C1: an unknown
+# top-level key must be rejected by `pilot internal-endpoint validate`.
+schema_version: 1
+not_a_real_top_level_key: true
+endpoints: []
