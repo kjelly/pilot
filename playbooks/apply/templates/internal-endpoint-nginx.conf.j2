@@ -1,0 +1,62 @@
+# Managed by pilot (internal-endpoint-apply.yml). FQDN: {{ iep_endpoint.fqdn }}.
+# Do not hand-edit — this file is fully regenerated on every reconcile.
+# Upstream protocol: {{ iep_endpoint.upstream_scheme }} (spec.md §12.4, §13.1).
+# Frontend TLS: {{ iep_endpoint.tls_mode }} (spec.md §14 — independent of upstream TLS).
+{% if iep_endpoint.tls_mode == 'freeipa' %}
+server {
+    listen {{ iep_endpoint.tls_port | default(443) }} ssl;
+    listen [::]:{{ iep_endpoint.tls_port | default(443) }} ssl;
+    server_name {{ iep_endpoint.fqdn }};
+
+    ssl_certificate     {{ iep_endpoint.cert_file }};
+    ssl_certificate_key {{ iep_endpoint.key_file }};
+
+    location / {
+{% else %}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ iep_endpoint.fqdn }};
+
+    location / {
+{% endif %}
+        proxy_pass {{ iep_endpoint.upstream_scheme }}://{{ iep_endpoint.upstream_ip }}:{{ iep_endpoint.upstream_port }};
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+{% if iep_endpoint.upstream_scheme == 'https' %}
+
+        proxy_ssl_server_name on;
+{% if iep_endpoint.upstream_sni | length > 0 %}
+        proxy_ssl_name {{ iep_endpoint.upstream_sni }};
+{% endif %}
+{% if iep_endpoint.upstream_tls_verify %}
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 5;
+        proxy_ssl_trusted_certificate {{ iep_ca_bundle_path }};
+{% else %}
+        proxy_ssl_verify off;
+{% endif %}
+{% endif %}
+    }
+}
+
+{% if iep_endpoint.tls_mode == 'freeipa' %}
+{% if (iep_endpoint.tls_port | default(443) | int) != 443 %}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ iep_endpoint.fqdn }};
+    return 301 https://$host:{{ iep_endpoint.tls_port }}$request_uri;
+}
+{% else %}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ iep_endpoint.fqdn }};
+    return 301 https://$host$request_uri;
+}
+{% endif %}
+{% endif %}

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -216,9 +217,31 @@ func TestInvokeAnsibleJSON_DeadlineIsHostTimeout(t *testing.T) {
 
 func TestPOSIXEnvironmentPrefix(t *testing.T) {
 	got := posixEnvironmentPrefix(map[string]string{"quoted-value": "a'b", "plain": "two words"})
-	want := "PILOT_VAR_PLAIN='two words' PILOT_VAR_QUOTED_VALUE='a'\\''b' "
+	want := "export PILOT_VAR_PLAIN='two words'\nexport PILOT_VAR_QUOTED_VALUE='a'\\''b'\n"
 	if got != want {
 		t.Fatalf("prefix=%q want=%q", got, want)
+	}
+}
+
+// TestPOSIXEnvironmentPrefixVisibleToSameScript locks the actual bug this
+// format fixes (2026-08-14): a same-line `VAR=value cmd "$VAR"` prefix is
+// invisible to that command's own "$VAR" expansion in every POSIX shell —
+// only `export VAR=value` on its own line, followed by later lines that
+// reference it, actually works. Runs the real prefix through /bin/sh so a
+// future regression back to the single-command prefix form fails loudly
+// instead of only being caught by eyeballing generated shell text.
+func TestPOSIXEnvironmentPrefixVisibleToSameScript(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	prefix := posixEnvironmentPrefix(map[string]string{"test_dns_zone": "apps.pilot.internal."})
+	script := prefix + `echo "$PILOT_VAR_TEST_DNS_ZONE"`
+	out, err := exec.Command("sh", "-c", script).Output()
+	if err != nil {
+		t.Fatalf("sh -c: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "apps.pilot.internal." {
+		t.Fatalf("script=%q got=%q want=%q", script, got, "apps.pilot.internal.")
 	}
 }
 

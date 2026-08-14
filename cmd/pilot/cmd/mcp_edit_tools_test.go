@@ -359,6 +359,102 @@ func TestInspectHandler_DNSZonesIncludeResolvedIPAndOmitWhenNotRequested(t *test
 	}
 }
 
+func TestInspectHandler_InternalEndpointsIncludeResolvedIPAndOmitWhenNotRequested(t *testing.T) {
+	dir := t.TempDir()
+	writeDNSTestHostsFile(t, dir)
+	iepPath := filepath.Join(dir, "internal-endpoints.yaml")
+	if err := inventory.CreateMinimalInternalEndpointManifest(iepPath); err != nil {
+		t.Fatalf("CreateMinimalInternalEndpointManifest() error = %v", err)
+	}
+	if err := inventory.AppendInternalEndpoint(iepPath, map[string]any{
+		"fqdn":  "direct.svc.pilot.internal",
+		"state": "present",
+		"dns":   map[string]any{"zone": "svc.pilot.internal."},
+		"route": map[string]any{"mode": "direct", "target": map[string]any{"inventory_host": "nexus"}},
+		"tls":   map[string]any{"mode": "disabled"},
+	}); err != nil {
+		t.Fatalf("AppendInternalEndpoint(direct) error = %v", err)
+	}
+	if err := inventory.AppendInternalEndpoint(iepPath, map[string]any{
+		"fqdn":  "proxy.svc.pilot.internal",
+		"state": "present",
+		"dns":   map[string]any{"zone": "svc.pilot.internal.", "ttl": 600},
+		"route": map[string]any{
+			"mode":  "reverse_proxy",
+			"proxy": map[string]any{"provider": "nginx", "inventory_host": "nexus"},
+			"upstream": map[string]any{
+				"scheme":  "https",
+				"address": "10.0.0.5",
+				"port":    8443,
+				"tls":     map[string]any{"verify": true, "server_name": "backend.internal"},
+			},
+		},
+		"tls": map[string]any{
+			"mode": "freeipa",
+			"port": 8443,
+			"sink": map[string]any{
+				"cert_file": "/etc/pilot/tls/proxy.crt",
+				"key_file":  "/etc/pilot/tls/proxy.key",
+				"key_owner": "nginx",
+				"key_group": "nginx",
+				"key_mode":  "0640",
+				"reload":    map[string]any{"mode": "systemd", "unit": "nginx.service"},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("AppendInternalEndpoint(proxy) error = %v", err)
+	}
+
+	handler := inspectHandler(editMCPToolsOptions{Dir: dir})
+	_, out, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeInternalEndpoints: true})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+	if len(out.InternalEndpoints) != 2 {
+		t.Fatalf("InternalEndpoints = %+v, want exactly 2 entries", out.InternalEndpoints)
+	}
+	byFQDN := map[string]inspectInternalEndpoint{}
+	for _, ep := range out.InternalEndpoints {
+		byFQDN[ep.FQDN] = ep
+	}
+
+	direct, ok := byFQDN["direct.svc.pilot.internal"]
+	if !ok || direct.Route.Mode != "direct" || direct.Route.Target == nil ||
+		direct.Route.Target.InventoryHost != "nexus" || direct.Route.Target.ResolvedIP != "192.168.122.81" ||
+		direct.TLS.Mode != "disabled" {
+		t.Fatalf("direct endpoint = %+v, want route.target.inventory_host=nexus resolved_ip=192.168.122.81 tls.mode=disabled", direct)
+	}
+
+	proxy, ok := byFQDN["proxy.svc.pilot.internal"]
+	if !ok || proxy.Route.Mode != "reverse_proxy" {
+		t.Fatalf("proxy endpoint = %+v, want route.mode=reverse_proxy", proxy)
+	}
+	if proxy.Route.Proxy == nil || proxy.Route.Proxy.InventoryHost != "nexus" || proxy.Route.Proxy.ResolvedIP != "192.168.122.81" {
+		t.Fatalf("proxy.Route.Proxy = %+v, want inventory_host=nexus resolved_ip=192.168.122.81", proxy.Route.Proxy)
+	}
+	up := proxy.Route.Upstream
+	if up == nil || up.Address != "10.0.0.5" || up.ResolvedIP != "" || up.Port != 8443 {
+		t.Fatalf("proxy.Route.Upstream = %+v, want address=10.0.0.5 (unresolved) port=8443", up)
+	}
+	if up.TLS == nil || up.TLS.Verify == nil || !*up.TLS.Verify || up.TLS.ServerName != "backend.internal" {
+		t.Fatalf("proxy.Route.Upstream.TLS = %+v, want verify=true server_name=backend.internal", up.TLS)
+	}
+	if proxy.TLS.Mode != "freeipa" || proxy.TLS.Port != 8443 {
+		t.Fatalf("proxy.TLS = %+v, want mode=freeipa port=8443", proxy.TLS)
+	}
+	if proxy.TLS.Sink == nil || proxy.TLS.Sink.CertFile != "/etc/pilot/tls/proxy.crt" || proxy.TLS.Sink.ReloadUnit != "nginx.service" {
+		t.Fatalf("proxy.TLS.Sink = %+v, want cert_file=/etc/pilot/tls/proxy.crt reload_unit=nginx.service", proxy.TLS.Sink)
+	}
+
+	_, out2, err := handler(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeInternalEndpoints: false})
+	if err != nil {
+		t.Fatalf("inspectHandler() error = %v", err)
+	}
+	if out2.InternalEndpoints != nil {
+		t.Fatalf("InternalEndpoints = %+v, want nil when include_internal_endpoints is false", out2.InternalEndpoints)
+	}
+}
+
 func TestPlanHandler_RejectsUnsupportedAction(t *testing.T) {
 	dir := t.TempDir()
 	rev, err := computeWorkspaceRevision(dir)

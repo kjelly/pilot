@@ -1,0 +1,94 @@
+---
+# Shared task: fetch the FreeIPA integrated CA from the designated
+# freeipa-server host and install it into the CURRENT host's OS trust
+# store (spec.md §5.3, §5.5). Included by both
+# playbooks/apply/freeipa-ca-trust-apply.yml (hosts: all) and
+# playbooks/apply/internal-endpoint-apply.yml (Phase 2 CA-trust baseline,
+# spec.md §28) so the two playbooks never fork into two different
+# implementations (spec.md §26 point 1, §5.6).
+#
+# Requires the including play to define:
+#   freeipa_ca_trust_source_host  -- inventory hostname of the designated
+#                                     freeipa-server (spec.md §5.3)
+#
+# Every task here runs per-host (no run_once): the root-CA preflight is a
+# safety gate (spec.md §5.4), and a run_once failure would only fail the
+# one host that happened to execute it, silently letting every other host
+# in the play proceed — the opposite of fail-closed. The live preflight
+# re-reads /etc/ipa/ca.crt on every host's behalf via delegate_to, which is
+# a cheap, read-only round trip.
+
+- name: "FreeIPA CA trust — designated freeipa-server has an integrated CA (spec.md §5.4)"
+  ansible.builtin.stat:
+    path: /etc/ipa/ca.crt
+  register: freeipa_ca_trust_ca_stat
+  delegate_to: "{{ freeipa_ca_trust_source_host }}"
+
+- name: "FreeIPA CA trust — Gate: /etc/ipa/ca.crt exists on {{ freeipa_ca_trust_source_host }}"
+  ansible.builtin.assert:
+    that:
+      - freeipa_ca_trust_ca_stat.stat.exists
+    fail_msg: >-
+      FreeIPA CA is not the configured root trust anchor: /etc/ipa/ca.crt
+      does not exist on {{ freeipa_ca_trust_source_host }} (spec.md §5.4).
+
+- name: "FreeIPA CA trust — read the integrated CA's issuer/subject/basicConstraints"
+  ansible.builtin.command: openssl x509 -in /etc/ipa/ca.crt -noout -issuer -subject -ext basicConstraints
+  register: freeipa_ca_trust_ca_info
+  # Read-only diagnostic: ansible.builtin.command is otherwise skipped
+  # under --check (it isn't idempotency-aware), which would leave the
+  # next task's assert evaluating an empty stdout_lines and crash instead
+  # of failing closed — caught for real on ca-trust-ipa/-ubuntu/-el
+  # (2026-08-13 vm-target run, see docs/evidence/freeipa-ca-trust/).
+  check_mode: false
+  changed_when: false
+  delegate_to: "{{ freeipa_ca_trust_source_host }}"
+
+- name: "FreeIPA CA trust — Gate: FreeIPA CA is a genuine self-signed root (spec.md §5.4)"
+  ansible.builtin.assert:
+    that:
+      - (freeipa_ca_trust_ca_info.stdout_lines | select('match', '^issuer=') | first | regex_replace('^issuer=', '')) ==
+        (freeipa_ca_trust_ca_info.stdout_lines | select('match', '^subject=') | first | regex_replace('^subject=', ''))
+      - "'CA:TRUE' in freeipa_ca_trust_ca_info.stdout"
+    fail_msg: >-
+      FreeIPA CA is not the configured root trust anchor — issuer/subject
+      mismatch or missing CA:TRUE basicConstraint (spec.md §5.4). Live state:
+      {{ freeipa_ca_trust_ca_info.stdout }}
+
+- name: "FreeIPA CA trust — fetch the CA certificate from {{ freeipa_ca_trust_source_host }}"
+  ansible.builtin.slurp:
+    src: /etc/ipa/ca.crt
+  register: freeipa_ca_trust_slurp
+  delegate_to: "{{ freeipa_ca_trust_source_host }}"
+
+- name: "FreeIPA CA trust — determine this host's per-distro trust anchor path"
+  ansible.builtin.set_fact:
+    freeipa_ca_trust_anchor_path: >-
+      {{ '/usr/local/share/ca-certificates/pilot-freeipa-ca.crt'
+         if ansible_os_family == 'Debian'
+         else '/etc/pki/ca-trust/source/anchors/pilot-freeipa-ca.crt' }}
+
+- name: "FreeIPA CA trust — install the CA bundle to the OS trust anchor path"
+  ansible.builtin.copy:
+    content: "{{ freeipa_ca_trust_slurp.content | b64decode }}"
+    dest: "{{ freeipa_ca_trust_anchor_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: freeipa_ca_trust_installed
+
+- name: "FreeIPA CA trust — refresh Debian/Ubuntu system trust store"
+  ansible.builtin.command: update-ca-certificates
+  when:
+    - ansible_os_family == 'Debian'
+    - freeipa_ca_trust_installed.changed
+    - not ansible_check_mode
+  changed_when: true
+
+- name: "FreeIPA CA trust — refresh RedHat-family system trust store"
+  ansible.builtin.command: update-ca-trust
+  when:
+    - ansible_os_family == 'RedHat'
+    - freeipa_ca_trust_installed.changed
+    - not ansible_check_mode
+  changed_when: true

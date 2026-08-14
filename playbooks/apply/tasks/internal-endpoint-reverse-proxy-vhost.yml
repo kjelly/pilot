@@ -1,0 +1,188 @@
+---
+# Spec: docs/verification/internal-endpoint.md C27 (spec.md §12.3, §12.4,
+# §13, §13.1, §13.2, §28 Phase 6).
+#
+# Per-endpoint: render this endpoint's nginx vhost on the proxy host,
+# validate + reload, then a local proxy->backend readiness check. Included
+# with `loop:` over internal_endpoint_reverse_proxy; `iep_endpoint` is the
+# loop_var. Everything here delegates to iep_endpoint.route_owner_host (the
+# proxy host) — the reconcile play's own `hosts:` is freeipa-server.
+#
+# "套用前 MUST nginx -t，成功後才 reload；錯誤 config 不得取代 running
+# config" (spec.md §13): the candidate is rendered directly into
+# /etc/nginx/conf.d/ (nginx -t validates the FULL config tree, so testing a
+# file elsewhere wouldn't accurately validate how it fits in). Uses
+# ansible.builtin.template's own `backup: true` for the pre-change
+# snapshot — NOT a hand-rolled stat+copy+remove: that unconditionally
+# recreated and deleted a .bak file on every single run (even when the
+# rendered content was byte-identical), which made `changed` nonzero
+# forever and broke idempotency (confirmed live, 2026-08-14 — a second,
+# no-op run still reported changed=6). `backup: true` only creates a
+# backup file, and only reports changed=true, when the content genuinely
+# differs — a real no-op rerun does neither, and reload/nginx -t are
+# skipped below precisely because there's nothing new to validate.
+- name: "Ensure the Pilot-owned nginx config directory exists"
+  ansible.builtin.file:
+    path: /etc/nginx/conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+- name: "Determine the proxy host's OS-appropriate CA bundle path (spec.md §13.1 — never hardcode Ubuntu-only)"
+  ansible.builtin.set_fact:
+    iep_ca_bundle_path: >-
+      {{ '/etc/ssl/certs/ca-certificates.crt'
+         if (hostvars[iep_endpoint.route_owner_host].ansible_os_family | default('')) == 'Debian'
+         else '/etc/pki/tls/certs/ca-bundle.crt' }}
+
+- name: "Render the candidate nginx vhost (backup: true — automatic pre-change snapshot, only on a genuine content change)"
+  ansible.builtin.template:
+    src: templates/internal-endpoint-nginx.conf.j2
+    dest: "/etc/nginx/conf.d/pilot-internal-endpoint-{{ iep_endpoint.stable_id }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  register: iep_vhost_render
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+- name: "Validate the full nginx config (spec.md §13)"
+  ansible.builtin.command: nginx -t
+  register: iep_nginx_test
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: iep_vhost_render.changed
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+- name: "Rollback: restore the previous vhost config if nginx -t failed"
+  ansible.builtin.copy:
+    remote_src: true
+    src: "{{ iep_vhost_render.backup_file }}"
+    dest: "/etc/nginx/conf.d/pilot-internal-endpoint-{{ iep_endpoint.stable_id }}.conf"
+    mode: preserve
+  when:
+    - iep_vhost_render.changed
+    - iep_nginx_test.get('rc', -1) != 0
+    - iep_vhost_render.backup_file | default('') | length > 0
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+- name: "Rollback: remove the candidate vhost config if nginx -t failed and none existed before"
+  ansible.builtin.file:
+    path: "/etc/nginx/conf.d/pilot-internal-endpoint-{{ iep_endpoint.stable_id }}.conf"
+    state: absent
+  when:
+    - iep_vhost_render.changed
+    - iep_nginx_test.get('rc', -1) != 0
+    - iep_vhost_render.backup_file | default('') | length == 0
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+- name: "Gate: nginx config must be valid before proceeding (spec.md §13 — a bad config never replaces the running one)"
+  ansible.builtin.assert:
+    that:
+      - (not iep_vhost_render.changed) or (iep_nginx_test.get('rc', -1) == 0)
+    fail_msg: >-
+      endpoint {{ iep_endpoint.fqdn }}: generated nginx vhost failed `nginx
+      -t` — rolled back, NOT reloaded (spec.md §13). Output:
+      {{ iep_nginx_test.get('stdout', '') }} {{ iep_nginx_test.get('stderr', '') }}
+
+- name: "Remove the rollback snapshot (config is valid)"
+  ansible.builtin.file:
+    path: "{{ iep_vhost_render.backup_file }}"
+    state: absent
+  when:
+    - iep_vhost_render.changed
+    - iep_vhost_render.backup_file | default('') | length > 0
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+- name: "Reload nginx (config changed and validated)"
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  when:
+    - not ansible_check_mode
+    - iep_vhost_render.changed
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+# --- Local proxy/backend readiness check (spec.md §13.2 — branches on
+#     upstream scheme/verify; a connection refused/TLS-handshake-failure/
+#     timeout must still fail readiness even when verify=false). Runs FROM
+#     the proxy host, bypassing nginx, to test the backend directly. ---
+- name: "Local backend readiness check — HTTP upstream (TCP connect + HTTP transport)"
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sS
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - --max-time
+      - "5"
+      - "http://{{ iep_endpoint.upstream_ip }}:{{ iep_endpoint.upstream_port }}/"
+  register: iep_backend_check_http
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - iep_endpoint.upstream_scheme == 'http'
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+- name: "Local backend readiness check — HTTPS upstream, verify=true (TCP+TLS+CA+hostname+HTTP)"
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sS
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - --max-time
+      - "5"
+      - --resolve
+      - "{{ iep_endpoint.upstream_sni }}:{{ iep_endpoint.upstream_port }}:{{ iep_endpoint.upstream_ip }}"
+      - "https://{{ iep_endpoint.upstream_sni }}:{{ iep_endpoint.upstream_port }}/"
+  register: iep_backend_check_https_verified
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - iep_endpoint.upstream_scheme == 'https'
+    - iep_endpoint.upstream_tls_verify
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+- name: "Local backend readiness check — HTTPS upstream, verify=false (TCP+TLS+HTTP; cert issues never fail this)"
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sSk
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - --max-time
+      - "5"
+      - "https://{{ iep_endpoint.upstream_ip }}:{{ iep_endpoint.upstream_port }}/"
+  register: iep_backend_check_https_insecure
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - iep_endpoint.upstream_scheme == 'https'
+    - not iep_endpoint.upstream_tls_verify
+  delegate_to: "{{ iep_endpoint.route_owner_host }}"
+
+- name: "Gate: local backend must be reachable per its declared upstream mode (spec.md §13.2)"
+  ansible.builtin.assert:
+    that:
+      - (iep_backend_check_http.skipped | default(false)) or (iep_backend_check_http.rc | default(1)) == 0
+      - (iep_backend_check_https_verified.skipped | default(false)) or (iep_backend_check_https_verified.rc | default(1)) == 0
+      - (iep_backend_check_https_insecure.skipped | default(false)) or (iep_backend_check_https_insecure.rc | default(1)) == 0
+    fail_msg: >-
+      endpoint {{ iep_endpoint.fqdn }}: local backend readiness check
+      failed (connection refused / TLS handshake failure / timeout) —
+      spec.md §13.2 does not tolerate this even under upstream tls.verify=false
+      (only certificate trust/identity problems are tolerated there).
+  when: not ansible_check_mode

@@ -28,21 +28,27 @@ type rolePresetFile struct {
 }
 
 // defaultRolePresets is the actual three-host minimal-PoC inventory from
-// docs/runbooks/minimal-poc-architecture.md. Other topologies, including a
-// FreeIPA replica, are intentionally added through the per-environment editor.
+// docs/runbooks/minimal-poc-architecture.md, plus freeipa-dns-client on all
+// three (spec.md §27.1): any host built from these presets gets the FreeIPA
+// DNS resolver baseline out of the box, without needing internal-endpoint to
+// be enabled first. This doesn't change §27's component-contract opt-in
+// semantics — it only changes which roles these built-in presets pre-check;
+// freeipa-dns-client-apply.yml still only runs against hosts actually
+// carrying the role. Other topologies, including a FreeIPA replica, are
+// intentionally added through the per-environment editor.
 func defaultRolePresets() []rolePreset {
 	return []rolePreset{
 		{
 			Label: "FreeIPA 身份伺服器(minimal PoC)",
-			Roles: []string{"freeipa-server", "audit-log-forwarding", "wazuh-fim", "restic-backup", "host-monitoring"},
+			Roles: []string{"freeipa-server", "freeipa-dns-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "host-monitoring"},
 		},
 		{
 			Label: "Nexus 中央服務節點(minimal PoC)",
-			Roles: []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "host-monitoring", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"},
+			Roles: []string{"freeipa-client", "freeipa-dns-client", "docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "host-monitoring", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"},
 		},
 		{
 			Label: "被監控的 Linux 主機(minimal PoC)",
-			Roles: []string{"freeipa-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client", "host-monitoring"},
+			Roles: []string{"freeipa-client", "freeipa-dns-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client", "host-monitoring"},
 		},
 	}
 }

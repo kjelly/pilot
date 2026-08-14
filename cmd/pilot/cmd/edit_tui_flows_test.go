@@ -68,9 +68,9 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save and return to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 檢查設定完整性,
-	// 6 快速建立最小 workspace, 7 離開
-	for i := 0; i < 7; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
+	// 7 快速建立最小 workspace, 8 離開
+	for i := 0; i < 8; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -129,8 +129,9 @@ func TestEditRouter_Teatest_MinimalWorkspaceRequiresHostsBeforeScaffolding(t *te
 	}
 
 	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 快速建立最小 workspace, 7 離開
-	for i := 0; i < 6; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
+	// 7 快速建立最小 workspace, 8 離開
+	for i := 0; i < 7; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
@@ -161,8 +162,9 @@ func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksAndOffersRoute(t *tes
 	}
 
 	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 檢查設定完整性, 6 快速建立最小 workspace, 7 離開
-	for i := 0; i < 6; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
+	// 7 快速建立最小 workspace, 8 離開
+	for i := 0; i < 7; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
@@ -734,8 +736,8 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 
 	waitFor("prometheus")
 
-	// roleContracts order: 0 freeipa-server .. 17 host-monitoring .. 18 prometheus.
-	for i := 0; i < 18; i++ {
+	// roleContracts order: 0 freeipa-server .. 19 host-monitoring .. 20 prometheus.
+	for i := 0; i < 20; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // toggle prometheus on
@@ -1051,9 +1053,9 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 檢查設定完整性,
-	// 6 快速建立最小 workspace, 7 離開
-	for i := 0; i < 7; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
+	// 7 快速建立最小 workspace, 8 離開
+	for i := 0; i < 8; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -1252,9 +1254,9 @@ func TestEditRouter_Teatest_VaultFlow_CreateAddKeyAndSave(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 檢查設定完整性,
-	// 6 快速建立最小 workspace, 7 離開
-	for i := 0; i < 7; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
+	// 7 快速建立最小 workspace, 8 離開
+	for i := 0; i < 8; i++ {
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
@@ -1367,11 +1369,11 @@ func TestEditRouter_Teatest_VaultFlow_EscMirrorsDirtyDiscardGate(t *testing.T) {
 	}
 	tm.Type("baz")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to the now-dirty editor
-	waitFor("foo = <已設定>") // displayVaultValue masks any real value (edit_tui_vault.go)
+	waitFor("foo = <已設定>")                  // displayVaultValue masks any real value (edit_tui_vault.go)
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // dirty editor: esc mirrors "🚪 不存檔離開"'s dirty gate
 	waitFor("確定要放棄離開嗎")
-	tm.Type("n") // decline discard -> back to the still-dirty editor
+	tm.Type("n")           // decline discard -> back to the still-dirty editor
 	waitFor("foo = <已設定>") // displayVaultValue masks any real value (edit_tui_vault.go)
 
 	if err := tm.Quit(); err != nil {

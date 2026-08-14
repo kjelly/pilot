@@ -276,6 +276,188 @@ func buildInspectDNSZones(dir string, hosts []inspectHost) []inspectDNSZone {
 	return dnsZones
 }
 
+// inspectInternalEndpointTarget is route.target (direct mode)'s host
+// reference, cross-resolved to its inventory IP the same way
+// inspectDNSRecord.ResolvedIP is.
+type inspectInternalEndpointTarget struct {
+	InventoryHost string `json:"inventory_host,omitempty"`
+	Address       string `json:"address,omitempty"`
+	ResolvedIP    string `json:"resolved_ip,omitempty"`
+}
+
+// inspectInternalEndpointProxy is route.proxy (reverse_proxy mode)'s
+// nginx-host reference.
+type inspectInternalEndpointProxy struct {
+	Provider      string `json:"provider,omitempty"`
+	InventoryHost string `json:"inventory_host,omitempty"`
+	ResolvedIP    string `json:"resolved_ip,omitempty"`
+}
+
+type inspectInternalEndpointUpstreamTLS struct {
+	Verify     *bool  `json:"verify,omitempty"`
+	ServerName string `json:"server_name,omitempty"`
+}
+
+type inspectInternalEndpointUpstream struct {
+	Scheme        string                              `json:"scheme,omitempty"`
+	InventoryHost string                              `json:"inventory_host,omitempty"`
+	Address       string                              `json:"address,omitempty"`
+	ResolvedIP    string                              `json:"resolved_ip,omitempty"`
+	Port          int                                 `json:"port,omitempty"`
+	TLS           *inspectInternalEndpointUpstreamTLS `json:"tls,omitempty"`
+}
+
+type inspectInternalEndpointRoute struct {
+	Mode     string                           `json:"mode,omitempty"`
+	Target   *inspectInternalEndpointTarget   `json:"target,omitempty"`
+	Proxy    *inspectInternalEndpointProxy    `json:"proxy,omitempty"`
+	Upstream *inspectInternalEndpointUpstream `json:"upstream,omitempty"`
+}
+
+// inspectInternalEndpointTLSSink's fields are all filesystem paths/POSIX
+// ownership metadata, never key material — spec.md §40 prohibits secrets
+// in any MCP output, but a certificate/key *path* isn't the secret itself
+// (same reasoning as inspectVaultFile.Keys never carrying values).
+type inspectInternalEndpointTLSSink struct {
+	CertFile   string `json:"cert_file,omitempty"`
+	KeyFile    string `json:"key_file,omitempty"`
+	KeyOwner   string `json:"key_owner,omitempty"`
+	KeyGroup   string `json:"key_group,omitempty"`
+	KeyMode    string `json:"key_mode,omitempty"`
+	ReloadMode string `json:"reload_mode,omitempty"`
+	ReloadUnit string `json:"reload_unit,omitempty"`
+}
+
+type inspectInternalEndpointTLS struct {
+	Mode string                          `json:"mode,omitempty"`
+	Port int                             `json:"port,omitempty"`
+	Sink *inspectInternalEndpointTLSSink `json:"sink,omitempty"`
+}
+
+type inspectInternalEndpoint struct {
+	FQDN    string                       `json:"fqdn"`
+	State   string                       `json:"state"`
+	DNSZone string                       `json:"dns_zone,omitempty"`
+	DNSTTL  int                          `json:"dns_ttl,omitempty"`
+	Route   inspectInternalEndpointRoute `json:"route"`
+	TLS     inspectInternalEndpointTLS   `json:"tls"`
+}
+
+// buildInspectInternalEndpoints reads the internal-endpoints.yaml manifest,
+// cross-resolving every inventory_host reference (route.target,
+// route.proxy, route.upstream) against hosts the same way
+// buildInspectDNSZones resolves DNS record targets.
+func buildInspectInternalEndpoints(dir string, hosts []inspectHost) []inspectInternalEndpoint {
+	entries, err := managedFileEntries(dir)
+	if err != nil {
+		return nil
+	}
+	hostIPs := map[string]string{}
+	for _, h := range hosts {
+		if h.AnsibleHost != "" {
+			hostIPs[h.Name] = h.AnsibleHost
+		}
+	}
+	var endpoints []inspectInternalEndpoint
+	for _, e := range entries {
+		if e.IsSecret || filepath.Base(e.RelPath) != "internal-endpoints.yaml" {
+			continue
+		}
+		fullPath := filepath.Join(dir, filepath.FromSlash(e.RelPath))
+		fqdns, err := inventory.InternalEndpointManifestFQDNs(fullPath)
+		if err != nil {
+			break // unreadable — skip rather than fail the whole read
+		}
+		for _, fqdn := range fqdns {
+			fields, found, err := inventory.InternalEndpointManifestEndpoint(fullPath, fqdn)
+			if err != nil || !found {
+				continue
+			}
+			dns := iepMapField(fields, "dns")
+			ep := inspectInternalEndpoint{
+				FQDN:    fqdn,
+				State:   rosterStringOr(fields, "state", "present"),
+				DNSZone: iepStringValue(dns, "zone"),
+			}
+			if ttl := iepIntValue(dns, "ttl"); ttl != "" {
+				if n, err := strconv.Atoi(ttl); err == nil {
+					ep.DNSTTL = n
+				}
+			}
+
+			route := iepMapField(fields, "route")
+			ep.Route.Mode = iepStringValue(route, "mode")
+			if target := iepMapField(route, "target"); target != nil {
+				t := &inspectInternalEndpointTarget{
+					InventoryHost: iepStringValue(target, "inventory_host"),
+					Address:       iepStringValue(target, "address"),
+				}
+				if t.InventoryHost != "" {
+					t.ResolvedIP = hostIPs[t.InventoryHost]
+				}
+				ep.Route.Target = t
+			}
+			if proxy := iepMapField(route, "proxy"); proxy != nil {
+				p := &inspectInternalEndpointProxy{
+					Provider:      iepStringValue(proxy, "provider"),
+					InventoryHost: iepStringValue(proxy, "inventory_host"),
+				}
+				if p.InventoryHost != "" {
+					p.ResolvedIP = hostIPs[p.InventoryHost]
+				}
+				ep.Route.Proxy = p
+			}
+			if upstream := iepMapField(route, "upstream"); upstream != nil {
+				u := &inspectInternalEndpointUpstream{
+					Scheme:        iepStringValue(upstream, "scheme"),
+					InventoryHost: iepStringValue(upstream, "inventory_host"),
+					Address:       iepStringValue(upstream, "address"),
+				}
+				if u.InventoryHost != "" {
+					u.ResolvedIP = hostIPs[u.InventoryHost]
+				}
+				if port := iepIntValue(upstream, "port"); port != "" {
+					if n, err := strconv.Atoi(port); err == nil {
+						u.Port = n
+					}
+				}
+				if utls := iepMapField(upstream, "tls"); utls != nil {
+					t := &inspectInternalEndpointUpstreamTLS{ServerName: iepStringValue(utls, "server_name")}
+					if v, ok := utls["verify"].(bool); ok {
+						t.Verify = &v
+					}
+					u.TLS = t
+				}
+				ep.Route.Upstream = u
+			}
+
+			tls := iepMapField(fields, "tls")
+			ep.TLS.Mode = rosterStringOr(tls, "mode", "disabled")
+			if port := iepIntValue(tls, "port"); port != "" {
+				if n, err := strconv.Atoi(port); err == nil {
+					ep.TLS.Port = n
+				}
+			}
+			if sink := iepMapField(tls, "sink"); sink != nil {
+				reload := iepMapField(sink, "reload")
+				ep.TLS.Sink = &inspectInternalEndpointTLSSink{
+					CertFile:   iepStringValue(sink, "cert_file"),
+					KeyFile:    iepStringValue(sink, "key_file"),
+					KeyOwner:   iepStringValue(sink, "key_owner"),
+					KeyGroup:   iepStringValue(sink, "key_group"),
+					KeyMode:    iepStringValue(sink, "key_mode"),
+					ReloadMode: iepStringValue(reload, "mode"),
+					ReloadUnit: iepStringValue(reload, "unit"),
+				}
+			}
+
+			endpoints = append(endpoints, ep)
+		}
+		break // only one internal-endpoints manifest is expected per workspace
+	}
+	return endpoints
+}
+
 // buildInspectGroupVars reads each group_vars/*.yml file's active
 // (non-commented) top-level key/value pairs.
 func buildInspectGroupVars(dir string) map[string]map[string]string {
@@ -302,10 +484,11 @@ func buildInspectGroupVars(dir string) map[string]map[string]string {
 // ---- pilot:// resources ------------------------------------------------
 
 const (
-	resourceURIHosts           = "pilot://hosts"
-	resourceURIRoster          = "pilot://roster"
-	resourceURIEffectiveAccess = "pilot://roster/effective-access"
-	resourceURIDNS             = "pilot://dns"
+	resourceURIHosts             = "pilot://hosts"
+	resourceURIRoster            = "pilot://roster"
+	resourceURIEffectiveAccess   = "pilot://roster/effective-access"
+	resourceURIDNS               = "pilot://dns"
+	resourceURIInternalEndpoints = "pilot://internal-endpoints"
 )
 
 // effectiveAccessResource is pilot://roster/effective-access's payload —
@@ -357,4 +540,7 @@ func registerEditResources(server *mcp.Server, opts editMCPToolsOptions) {
 	add(resourceURIDNS, "dns",
 		"FreeIPA DNS zones and records, each record's target_host cross-resolved to its inventory IP (resolved_ip)",
 		func() any { return buildInspectDNSZones(opts.Dir, buildInspectHosts(opts.Dir)) })
+	add(resourceURIInternalEndpoints, "internal-endpoints",
+		"internal-endpoint manifest entries (dns/route/tls), every inventory_host reference cross-resolved to its inventory IP (resolved_ip)",
+		func() any { return buildInspectInternalEndpoints(opts.Dir, buildInspectHosts(opts.Dir)) })
 }

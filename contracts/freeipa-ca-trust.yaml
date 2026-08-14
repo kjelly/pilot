@@ -1,0 +1,36 @@
+schemaVersion: 1
+id: freeipa-ca-trust
+role: freeipa-ca-trust
+specs:
+  - path: docs/verification/freeipa-ca-trust.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/freeipa-ca-trust-apply.yml
+regressionTests:
+  - internal/spec/freeipa_ca_trust_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - component: freeipa-server
+    required: true
+    relation: planOnly
+    reason: >
+      CA source is selected from the designated freeipa-server inventory
+      host and transferred through the existing Ansible management channel
+      (spec.md §5.3); ComponentContract v1 has no "read artifact from
+      provider inventory host" relation, so this is planOnly per spec.md
+      §43.1.
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 256, minDiskGiB: 1}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions:
+    "docs/verification/freeipa-ca-trust.md#C1": {kind: verifyOnly, reason: "self-signed/root property observed on the same CA file C2 installs — no separate mutation"}
+    "docs/verification/freeipa-ca-trust.md#C3": {kind: verifyOnly, reason: "effective Debian/Ubuntu trust-store behavior derived from C2's install"}
+    "docs/verification/freeipa-ca-trust.md#C4": {kind: verifyOnly, reason: "effective RedHat-family trust-store behavior derived from C2's install"}
+    "docs/verification/freeipa-ca-trust.md#C5": {kind: verifyOnly, reason: "same installed state as C2, independent of FreeIPA (AAA) enrollment"}
+    "docs/verification/freeipa-ca-trust.md#C6": {kind: verifyOnly, reason: "idempotent-rerun is a multi-run property, not a single tagged task — evidenced by vm-target topology test, same reasoning as freeipa-dns.md's own C12"}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

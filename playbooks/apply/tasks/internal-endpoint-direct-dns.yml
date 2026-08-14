@@ -1,0 +1,52 @@
+---
+# Spec: docs/verification/internal-endpoint.md C4, C5, C6, C25 (spec.md
+# §11.4 direct+reverse_proxy cases, §11.5 no port suffix, §28 Phase 7 —
+# "DNS IS CHANGED LAST").
+#
+# Per-endpoint: reconcile the route A/AAAA record. Included with `loop:`
+# over internal_endpoint_present (spec.md §63 Phase 6/7, EVERY present
+# endpoint regardless of route_mode or tls_mode — a tls.disabled direct
+# endpoint still needs its DNS record, and a reverse_proxy endpoint's
+# record must point at its proxy host, never its upstream — both are
+# already the SAME `iep_endpoint.dns_value` by construction, spec.md
+# §11.4's route_owner_ip); `iep_endpoint` is the loop_var. Runs on the
+# freeipa-server host (this play's own `hosts:`) — DNS zones live there,
+# unlike the cert-lifecycle/vhost-render tasks which delegate to the
+# route owner host. Assumes a kinit'd admin ticket already exists (the
+# caller kinits once before looping).
+#
+# Only ever writes iep_endpoint.dns_value (a bare IP) — the value never
+# carries a port suffix (spec.md §11.5, C6): port lives only in
+# tls.port/route config, never constructed into the DNS value here.
+- name: "Determine desired DNS record type (A vs AAAA)"
+  ansible.builtin.set_fact:
+    iep_dns_type: "{{ 'AAAA' if ':' in iep_endpoint.dns_value else 'A' }}"
+    iep_dns_flag: "{{ 'aaaa-rec' if ':' in iep_endpoint.dns_value else 'a-rec' }}"
+
+- name: "Check current DNS record state for this owner"
+  ansible.builtin.command: ipa dnsrecord-show {{ iep_endpoint.dns_zone }} {{ iep_endpoint.dns_owner }} --all --raw
+  register: iep_dns_show
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: "Compute current record value (if any)"
+  ansible.builtin.set_fact:
+    iep_dns_current_values: >-
+      {{ (iep_dns_show.stdout | default('')) | regex_findall('(?im)^[ \t]*' ~ (iep_dns_type | lower) ~ 'record: (.+)$') }}
+
+- name: "Create/update the direct-route A/AAAA record (DNS changed last, spec.md §28 Phase 7)"
+  ansible.builtin.command:
+    argv: >-
+      {{ ['ipa', ('dnsrecord-mod' if iep_dns_show.rc == 0 else 'dnsrecord-add'),
+          iep_endpoint.dns_zone, iep_endpoint.dns_owner,
+          '--' ~ iep_dns_flag ~ '=' ~ iep_endpoint.dns_value] }}
+  when:
+    - not ansible_check_mode
+    - iep_endpoint.dns_value | length > 0
+    - iep_dns_current_values != [iep_endpoint.dns_value]
+  register: iep_dns_reconcile
+  changed_when: true
+  failed_when:
+    - iep_dns_reconcile.rc | default(0) != 0
+    - "'no modifications to be performed' not in (iep_dns_reconcile.stderr | default(''))"

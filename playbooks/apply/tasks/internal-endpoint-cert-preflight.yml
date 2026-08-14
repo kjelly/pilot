@@ -1,0 +1,43 @@
+---
+# Spec: docs/verification/internal-endpoint.md C12 (spec.md §16)
+#
+# Per-endpoint gate: the certificate owner host must have a LIVE FreeIPA
+# enrollment before any mutation is attempted. Included with `loop:` over
+# internal_endpoint_direct_freeipa (spec.md §63 Phase 6) — `iep_endpoint`
+# is the loop_var, one normalized endpoint dict per iteration (see
+# internal-endpoint-apply.yml's "Compute normalized per-endpoint desired
+# state" task for its fields).
+- name: "Check /etc/ipa/default.conf exists on the certificate owner"
+  ansible.builtin.stat:
+    path: /etc/ipa/default.conf
+  register: iep_owner_ipa_conf
+  delegate_to: "{{ iep_endpoint.cert_owner }}"
+
+- name: "Check /etc/krb5.keytab has a host principal on the certificate owner"
+  ansible.builtin.command: klist -k /etc/krb5.keytab
+  register: iep_owner_keytab
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: "{{ iep_endpoint.cert_owner }}"
+
+- name: "Check certmonger/ipa-getcert tooling is available on the certificate owner"
+  ansible.builtin.command: which ipa-getcert
+  register: iep_owner_getcert_bin
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: "{{ iep_endpoint.cert_owner }}"
+
+- name: "Gate: certificate owner host has live FreeIPA enrollment (spec.md §16)"
+  ansible.builtin.assert:
+    that:
+      - iep_owner_ipa_conf.stat.exists
+      - iep_owner_keytab.rc == 0
+      - "'host/' in iep_owner_keytab.stdout"
+      - iep_owner_getcert_bin.rc == 0
+    fail_msg: >-
+      certificate owner host {{ iep_endpoint.cert_owner }} ({{ iep_endpoint.fqdn }})
+      has no live FreeIPA enrollment (spec.md §16) — refusing to request a
+      certificate. Not enough that the manifest declares route.target — live
+      enrollment must be confirmed.

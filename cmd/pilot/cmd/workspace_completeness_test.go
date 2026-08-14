@@ -375,6 +375,136 @@ func TestCheckWorkspaceCompleteness_NoRosterRowForClientOnlyRoles(t *testing.T) 
 	}
 }
 
+func TestCheckWorkspaceCompleteness_NoInternalEndpointRowWhenManifestAbsent(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
+  nexus:
+    ansible_host: 10.0.0.10
+    roles: []
+`)
+
+	got := checkWorkspaceCompleteness(dir)
+
+	for _, c := range got {
+		if c.Label == "internal-endpoints.yaml" {
+			t.Fatalf("unexpected internal-endpoints.yaml row %+v — the manifest is opt-in and doesn't exist", c)
+		}
+	}
+}
+
+func TestCheckWorkspaceCompleteness_InternalEndpointReportsUnresolvedInventoryHost(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
+  nexus:
+    ansible_host: 10.0.0.10
+    roles: []
+`)
+	iepPath := filepath.Join(dir, "internal-endpoints.yaml")
+	if err := inventory.CreateMinimalInternalEndpointManifest(iepPath); err != nil {
+		t.Fatalf("CreateMinimalInternalEndpointManifest() error = %v", err)
+	}
+	if err := inventory.AppendInternalEndpoint(iepPath, map[string]any{
+		"fqdn":  "direct.svc.pilot.internal",
+		"state": "present",
+		"dns":   map[string]any{"zone": "svc.pilot.internal."},
+		"route": map[string]any{"mode": "direct", "target": map[string]any{"inventory_host": "does-not-exist"}},
+		"tls":   map[string]any{"mode": "disabled"},
+	}); err != nil {
+		t.Fatalf("AppendInternalEndpoint() error = %v", err)
+	}
+
+	got := checkWorkspaceCompleteness(dir)
+
+	c := findCheck(t, got, "internal-endpoints.yaml")
+	if c.OK {
+		t.Fatalf("internal-endpoints.yaml = %+v, want not-OK for an unresolvable route.target.inventory_host", c)
+	}
+	if !strings.Contains(strings.Join(c.Details, "\n"), "does-not-exist") {
+		t.Fatalf("internal-endpoints.yaml details = %v, want a complaint naming does-not-exist", c.Details)
+	}
+}
+
+func TestCheckWorkspaceCompleteness_InternalEndpointOKWithValidDirectAndProxyRoutes(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
+  app01:
+    ansible_host: 10.0.0.11
+    roles: []
+  lb01:
+    ansible_host: 10.0.0.12
+    roles: [reverse-proxy]
+`)
+	iepPath := filepath.Join(dir, "internal-endpoints.yaml")
+	if err := inventory.CreateMinimalInternalEndpointManifest(iepPath); err != nil {
+		t.Fatalf("CreateMinimalInternalEndpointManifest() error = %v", err)
+	}
+	if err := inventory.AppendInternalEndpoint(iepPath, map[string]any{
+		"fqdn":  "direct.svc.pilot.internal",
+		"state": "present",
+		"dns":   map[string]any{"zone": "svc.pilot.internal."},
+		"route": map[string]any{"mode": "direct", "target": map[string]any{"inventory_host": "app01"}},
+		"tls":   map[string]any{"mode": "disabled"},
+	}); err != nil {
+		t.Fatalf("AppendInternalEndpoint(direct) error = %v", err)
+	}
+	if err := inventory.AppendInternalEndpoint(iepPath, map[string]any{
+		"fqdn":  "proxy.svc.pilot.internal",
+		"state": "present",
+		"dns":   map[string]any{"zone": "svc.pilot.internal."},
+		"route": map[string]any{
+			"mode":     "reverse_proxy",
+			"proxy":    map[string]any{"provider": "nginx", "inventory_host": "lb01"},
+			"upstream": map[string]any{"scheme": "http", "inventory_host": "app01", "port": 8080},
+		},
+		"tls": map[string]any{"mode": "disabled"},
+	}); err != nil {
+		t.Fatalf("AppendInternalEndpoint(proxy) error = %v", err)
+	}
+
+	got := checkWorkspaceCompleteness(dir)
+
+	c := findCheck(t, got, "internal-endpoints.yaml")
+	if !c.OK {
+		t.Fatalf("internal-endpoints.yaml = %+v, want OK", c)
+	}
+}
+
+func TestCheckWorkspaceCompleteness_InternalEndpointReportsProxyHostWithoutReverseProxyRole(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
+  app01:
+    ansible_host: 10.0.0.11
+    roles: []
+  lb01:
+    ansible_host: 10.0.0.12
+    roles: []
+`)
+	iepPath := filepath.Join(dir, "internal-endpoints.yaml")
+	if err := inventory.CreateMinimalInternalEndpointManifest(iepPath); err != nil {
+		t.Fatalf("CreateMinimalInternalEndpointManifest() error = %v", err)
+	}
+	if err := inventory.AppendInternalEndpoint(iepPath, map[string]any{
+		"fqdn":  "proxy.svc.pilot.internal",
+		"state": "present",
+		"dns":   map[string]any{"zone": "svc.pilot.internal."},
+		"route": map[string]any{
+			"mode":     "reverse_proxy",
+			"proxy":    map[string]any{"provider": "nginx", "inventory_host": "lb01"},
+			"upstream": map[string]any{"scheme": "http", "inventory_host": "app01", "port": 8080},
+		},
+		"tls": map[string]any{"mode": "disabled"},
+	}); err != nil {
+		t.Fatalf("AppendInternalEndpoint(proxy) error = %v", err)
+	}
+
+	got := checkWorkspaceCompleteness(dir)
+
+	c := findCheck(t, got, "internal-endpoints.yaml")
+	if c.OK {
+		t.Fatalf("internal-endpoints.yaml = %+v, want not-OK — lb01 lacks the reverse-proxy role", c)
+	}
+}
+
 func TestCheckWorkspaceCompleteness_ReportsMissingVaultFile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "hosts.yml"), workspaceHostsWithPrometheus)

@@ -78,6 +78,11 @@ var deployCatalog = []deployPlaybook{
 		Note: "day-2/opt-in 角色(不在 site.yml);與 freeipa-client(AAA 納管)互不相依,不需先做身分 enrollment。自動從 inventory 偵測 freeipa-server/freeipa-server-replica 裡有開 DNS 的主機;也可套用到 FreeIPA server/replica 自己身上(自動優先指向自己)。支援 Debian/Ubuntu(systemd-resolved)與 EL(NetworkManager)。",
 	},
 	{
+		Key: "freeipa-ca-trust", Label: "把 FreeIPA integrated CA 裝進機器的 OS trust store",
+		Playbook: "playbooks/apply/freeipa-ca-trust-apply.yml", DefaultGroup: "all", StageVar: "stage",
+		Note: "day-2/opt-in 角色(不在 site.yml);與 freeipa-client(AAA 納管)互不相依,不需先做身分 enrollment。Phase-1 骨架:目前只有 placeholder task,真正的 CA fetch-and-install 邏輯待 spec.md §63 Phase 3 補上。",
+	},
+	{
 		Key: "freeipa-nfs-server", Label: "FreeIPA Kerberos NFSv4 server",
 		Playbook: "playbooks/apply/freeipa-nfs-server-apply.yml", DefaultGroup: "freeipa-nfs-server", StageVar: "stage",
 		Note:      "目標主機必須先完成 freeipa-client enrollment；使用 canonical FreeIPA roster 建立 nfs/FQDN principal、keytab、ACL 與安全 exports（支援 RedHat 與 Debian/Ubuntu）。",
@@ -99,6 +104,18 @@ var deployCatalog = []deployPlaybook{
 		Playbook: "playbooks/apply/freeipa-realm-replacement-apply.yml", DefaultGroup: "freeipa-client", StageVar: "stage",
 		Note:      "day-2/opt-in 角色(不在 site.yml);僅換 client 端 enrollment，不是 server 端 restore；舊 server 若已重裝/退役，本機 archive 只剩鑑識用途，不能拿來 rollback trust。見 docs/verification/freeipa-realm-replacement.md。",
 		VaultHint: "新 realm 的管理員密碼(ipa_admin_password)",
+	},
+	{
+		Key: "reverse-proxy", Label: "Nginx reverse proxy 基礎安裝",
+		Playbook: "playbooks/apply/reverse-proxy-apply.yml", DefaultGroup: "reverse-proxy", StageVar: "stage",
+		Note: "site.yml 角色(所有 reverse-proxy group 主機都會套用);只裝 nginx、關掉 distro default site、建立 Pilot config namespace，不管任何 endpoint 的 vhost——那是 internal-endpoint 的責任。Phase-1 骨架:目前只有 placeholder task,真正的 nginx 安裝邏輯待 spec.md §63 Phase 4 補上。",
+	},
+	{
+		Key: "internal-endpoint", Label: "管理內部 FQDN 的 DNS/TLS/nginx route(資料驅動,day-2 reconciler)",
+		Playbook: "playbooks/apply/internal-endpoint-apply.yml", DefaultGroup: "freeipa-server", StageVar: "stage",
+		Note:      "資料驅動的 day-2 reconciler;需要在 freeipa-server host_vars 設定 internal_endpoint_manifest_file(絕對路徑)。管理內部 FQDN 的 DNS record、FreeIPA service certificate(certmonger)、以及可選的 nginx reverse proxy vhost。依賴 freeipa-server(sameHosts)、freeipa-dns(zone 必須先存在且為 merge mode)、freeipa-ca-trust(CA trust baseline)。Phase-1 骨架:目前只有 placeholder task,真正的 reconcile 邏輯待 spec.md §63 Phase 2/5/6/7 補上。",
+		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，跟 freeipa-identity/freeipa-dns 共用同一份 vault 檔)",
+		Reconcile: true,
 	},
 	{
 		Key: "keycloak-db", Label: "Keycloak 的 PostgreSQL",

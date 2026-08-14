@@ -23,6 +23,8 @@ var roleContracts = []roleContract{
 	{Name: "freeipa-server-replica", Description: "FreeIPA multi-master replica（day-2/opt-in，已實跑驗證），見 docs/verification/freeipa-server-replica.md", GroupVarsStem: "freeipa", VaultSections: []string{"freeipa"}},
 	{Name: "freeipa-nfs-server", Description: "Kerberos NFSv4 exports + ACL (freeipa-nfs-server-apply.yml)"},
 	{Name: "freeipa-nfs-client", Description: "IPA automount client (freeipa-nfs-client-apply.yml)"},
+	{Name: "freeipa-dns-client", Description: "DNS resolver 指向 FreeIPA DNS，與 freeipa-client 互不相依 (freeipa-dns-client-apply.yml)"},
+	{Name: "reverse-proxy", Description: "Nginx reverse proxy 基礎安裝 (reverse-proxy-apply.yml)"},
 	{Name: "dns", Description: "core-infra-provider-apply.yml -e infra_role=dns", GroupVarsStem: "dns"},
 	{Name: "ntp", Description: "core-infra-provider-apply.yml -e infra_role=ntp", GroupVarsStem: "ntp"},
 	{Name: "docker", Description: "Container 引擎 (docker-apply.yml)"},

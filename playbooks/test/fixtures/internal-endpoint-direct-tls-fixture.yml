@@ -1,0 +1,210 @@
+# Disposable test service for docs/verification/internal-endpoint.md
+# (spec.md §54).
+#
+# Three modes, selected by iep_fixture_scheme/iep_fixture_tls_source:
+#
+#   scheme=https, tls_source=freeipa (default) — spec.md §53 endpoint A's
+#     direct+tls.freeipa consumer. internal-endpoint's direct route
+#     (spec.md §22/§23) requires a systemd-managed TLS consumer that reads
+#     cert_file/key_file and reloads on SIGHUP when certmonger's renewal
+#     hook fires. Deliberately does NOT pre-seed a placeholder cert/key:
+#     certmonger's `ipa-getcert request -f -k` treats a pre-existing,
+#     still-valid cert at those paths as something to ADOPT and track for
+#     future renewal, not something to immediately replace — confirmed
+#     live (2026-08-14): a placeholder self-signed cert planted here left
+#     `getcert list` showing status=MONITORING while the file on disk
+#     stayed the placeholder forever. So this mode deploys the unit
+#     enabled but NOT started — internal-endpoint's C15 gates on the unit
+#     already EXISTING (`systemctl cat`), not on it already running; start
+#     it yourself only AFTER certmonger has written a real cert/key pair.
+#
+#   scheme=https, tls_source=self-signed — spec.md §53 endpoint D's
+#     reverse_proxy insecure-upstream backend: a genuinely self-signed
+#     certificate NOT in the FreeIPA CA trust chain (proves nginx's
+#     tls.verify:false accepts an untrusted upstream cert without ever
+#     needing a FreeIPA-signed one). Started immediately — there is no
+#     external cert dependency to wait for.
+#
+#   scheme=http — spec.md §53 endpoint C's reverse_proxy HTTP-upstream
+#     backend. No cert/key at all. Started immediately.
+#
+# Graceful reload (https modes only): SIGHUP re-reads cert_file/key_file
+# into a fresh ssl.SSLContext and swaps it in for the NEXT accepted
+# connection, without ever closing the listening socket — so a real
+# "systemctl reload" never drops the service (same PID before/after).
+#
+# Convention: cross-host preconditions for docs/verification/<spec>.md live
+# in playbooks/test/fixtures/<spec>-fixtures.yml (AGENTS.md §4.1).
+#
+# Usage:
+#   pilot vm-target run --name app01 \
+#     playbooks/test/fixtures/internal-endpoint-direct-tls-fixture.yml \
+#     -e iep_fixture_name=direct -e iep_fixture_scheme=https \
+#     -e iep_fixture_tls_source=freeipa -e iep_fixture_port=8443 \
+#     -e iep_fixture_cert_file=/etc/pilot-endpoint/direct/server.crt \
+#     -e iep_fixture_key_file=/etc/pilot-endpoint/direct/server.key \
+#     -e iep_fixture_unit=pilot-endpoint-direct.service
+---
+- name: Disposable internal-endpoint test service (spec.md §54)
+  hosts: "{{ target_group | default('all') }}"
+  become: true
+  gather_facts: false
+  vars:
+    iep_fixture_name: direct
+    iep_fixture_scheme: https
+    iep_fixture_tls_source: freeipa
+    iep_fixture_port: 8443
+    iep_fixture_cert_file: /etc/pilot-endpoint/direct/server.crt
+    iep_fixture_key_file: /etc/pilot-endpoint/direct/server.key
+    iep_fixture_unit: pilot-endpoint-direct.service
+    iep_fixture_script: "/usr/local/bin/pilot-endpoint-{{ iep_fixture_name }}.py"
+
+  tasks:
+    - name: "Ensure the certificate/key parent directory exists"
+      ansible.builtin.file:
+        path: "{{ iep_fixture_cert_file | dirname }}"
+        state: directory
+        mode: "0755"
+      when: iep_fixture_scheme == 'https'
+
+    - name: "Check whether a self-signed cert already exists (avoid regenerating on rerun)"
+      ansible.builtin.stat:
+        path: "{{ iep_fixture_cert_file }}"
+      register: iep_fixture_existing_cert
+      when:
+        - iep_fixture_scheme == 'https'
+        - iep_fixture_tls_source == 'self-signed'
+
+    - name: "Generate a genuinely self-signed cert/key (spec.md §53 endpoint D — deliberately untrusted, not FreeIPA-issued)"
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -nodes
+          - -newkey
+          - rsa:2048
+          - -keyout
+          - "{{ iep_fixture_key_file }}"
+          - -out
+          - "{{ iep_fixture_cert_file }}"
+          - -days
+          - "3650"
+          - -subj
+          - "/CN={{ iep_fixture_name }}.selfsigned.invalid"
+      when:
+        - iep_fixture_scheme == 'https'
+        - iep_fixture_tls_source == 'self-signed'
+        - not iep_fixture_existing_cert.stat.exists
+      changed_when: true
+
+    - name: "Restrict the self-signed key to owner-only"
+      ansible.builtin.file:
+        path: "{{ iep_fixture_key_file }}"
+        mode: "0600"
+        owner: root
+        group: root
+      when:
+        - iep_fixture_scheme == 'https'
+        - iep_fixture_tls_source == 'self-signed'
+
+    - name: "Deploy the disposable test service script"
+      ansible.builtin.copy:
+        dest: "{{ iep_fixture_script }}"
+        mode: "0755"
+        content: |
+          #!/usr/bin/env python3
+          # Disposable test service (spec.md §54) — NOT a production
+          # component. In https mode, graceful SIGHUP reload rebuilds the
+          # SSL context from cert_file/key_file and swaps it in for the
+          # next accept(), without ever closing the listening socket (no
+          # restart, same PID). In http mode there is no TLS at all.
+          import http.server
+          import signal
+          import ssl
+          import sys
+
+          MODE, CERT, KEY, PORT = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/plain")
+                  self.end_headers()
+                  self.wfile.write(b"pilot-endpoint-ok\n")
+
+              def log_message(self, *args):
+                  pass
+
+
+          class ReloadableHTTPServer(http.server.HTTPServer):
+              def __init__(self, *a, **kw):
+                  super().__init__(*a, **kw)
+                  if MODE == "https":
+                      self.reload_context()
+
+              def reload_context(self):
+                  ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                  ctx.load_cert_chain(certfile=CERT, keyfile=KEY)
+                  self._ssl_context = ctx
+                  sys.stderr.write("reloaded TLS context\n")
+                  sys.stderr.flush()
+
+              def get_request(self):
+                  conn, addr = self.socket.accept()
+                  if MODE == "https":
+                      conn = self._ssl_context.wrap_socket(conn, server_side=True)
+                  return conn, addr
+
+
+          server = ReloadableHTTPServer(("0.0.0.0", PORT), Handler)
+
+
+          def handle_sighup(signum, frame):
+              if MODE == "https":
+                  server.reload_context()
+
+
+          signal.signal(signal.SIGHUP, handle_sighup)
+          server.serve_forever()
+
+    - name: "Deploy the systemd unit"
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ iep_fixture_unit }}"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Disposable pilot internal-endpoint test service ({{ iep_fixture_name }}, {{ iep_fixture_scheme }})
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 {{ iep_fixture_script }} {{ iep_fixture_scheme }} {{ iep_fixture_cert_file }} {{ iep_fixture_key_file }} {{ iep_fixture_port }}
+          ExecReload=/bin/kill -HUP $MAINPID
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Reload systemd units
+
+    - name: "Flush handlers now — the next task needs the reloaded unit database"
+      ansible.builtin.meta: flush_handlers
+
+    - name: "Enable the test service unit (do not start — freeipa TLS source waits for a real cert)"
+      ansible.builtin.systemd:
+        name: "{{ iep_fixture_unit }}"
+        enabled: true
+      when: iep_fixture_scheme == 'https' and iep_fixture_tls_source == 'freeipa'
+
+    - name: "Enable and start the test service unit (no external cert dependency to wait for)"
+      ansible.builtin.systemd:
+        name: "{{ iep_fixture_unit }}"
+        enabled: true
+        state: started
+      when: iep_fixture_scheme == 'http' or iep_fixture_tls_source == 'self-signed'
+
+  handlers:
+    - name: "Reload systemd units"
+      ansible.builtin.systemd:
+        daemon_reload: true

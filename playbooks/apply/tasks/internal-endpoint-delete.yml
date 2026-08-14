@@ -1,0 +1,214 @@
+---
+# Spec: docs/verification/internal-endpoint.md C22 (spec.md §32-§34).
+#
+# The 9-step delete sequence for one endpoint already gated by C21 (dual
+# confirmation) and C23 (ledger presence) — this file assumes both already
+# passed. Included with `loop:` over internal_endpoint_absent; `iep_endpoint`
+# is the loop_var (mainly for .fqdn — the manifest's own state:absent entry
+# may be minimal). Uses the LEDGER entry (looked up fresh per-iteration) as
+# the authoritative source for what to clean up: the ledger is what Pilot
+# actually knows it created (spec.md §29), not whatever the manifest's
+# absent-state entry happens to still declare. Step 9 ("remove ledger
+# entry") has no task here — the FINAL ledger write
+# (internal-endpoint-apply.yml's own last task) is computed fresh from
+# internal_endpoint_present only, which already excludes every endpoint
+# processed by this file, by construction.
+- name: "Look up this endpoint's ledger entry"
+  ansible.builtin.set_fact:
+    iep_ledger: "{{ internal_endpoint_ledger.endpoints[iep_endpoint.fqdn] }}"
+
+- name: "Kinit as IPA admin (delete sequence)"
+  ansible.builtin.shell: |
+    set -o pipefail
+    printf '%s' "{{ ipa_admin_password }}" | kinit admin
+  no_log: true
+  changed_when: false
+  when: not ansible_check_mode
+
+# --- Step 1: remove DNS RRset — only the ledger-recorded type/value, never
+#     a foreign RR type at the same owner (spec.md §34, C22) ---
+- name: "Check current DNS record state for this owner (delete step 1)"
+  ansible.builtin.command: ipa dnsrecord-show {{ iep_ledger.dns_zone }} {{ iep_ledger.dns_owner }} --all --raw
+  register: iep_delete_dns_show
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: "Extract the current Pilot-owned record value(s) for the ledger-recorded type only"
+  ansible.builtin.set_fact:
+    iep_delete_dns_values: >-
+      {{ (iep_delete_dns_show.get('stdout', ''))
+         | regex_findall('(?im)^[ \t]*' ~ (iep_ledger.dns_type | lower) ~ 'record: (.+)$') }}
+
+- name: "Remove only the Pilot-owned A/AAAA record value (spec.md §34 — a foreign RR type at the same owner is untouched)"
+  ansible.builtin.command:
+    argv: >-
+      {{ ['ipa', 'dnsrecord-del', iep_ledger.dns_zone, iep_ledger.dns_owner,
+          '--' ~ (iep_ledger.dns_type | lower) ~ '-rec=' ~ iep_delete_dns_values[0]] }}
+  when:
+    - not ansible_check_mode
+    - iep_delete_dns_values | length > 0
+  register: iep_delete_dns
+  changed_when: iep_delete_dns.rc == 0
+
+# --- Steps 2-3: remove the nginx vhost if Pilot-owned, validate, reload
+#     (reverse_proxy endpoints only) ---
+- name: "Remove the Pilot-owned nginx vhost, if this was a reverse_proxy endpoint (delete step 2)"
+  ansible.builtin.file:
+    path: "{{ iep_ledger.nginx_file }}"
+    state: absent
+  register: iep_delete_nginx_file
+  when:
+    - iep_ledger.get('route_mode', '') == 'reverse_proxy'
+    - iep_ledger.get('nginx_file', '') | length > 0
+  delegate_to: "{{ iep_ledger.route_owner }}"
+
+- name: "Validate nginx config after vhost removal (delete step 3)"
+  ansible.builtin.command: nginx -t
+  register: iep_delete_nginx_test
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: iep_delete_nginx_file.get('changed', false)
+  delegate_to: "{{ iep_ledger.route_owner }}"
+
+- name: "Gate: nginx config must remain valid after vhost removal"
+  ansible.builtin.assert:
+    that:
+      - iep_delete_nginx_test.get('rc', 0) == 0
+    fail_msg: >-
+      endpoint {{ iep_endpoint.fqdn }}: removing its nginx vhost left an
+      invalid nginx config — refusing to reload. Output:
+      {{ iep_delete_nginx_test.get('stdout', '') }} {{ iep_delete_nginx_test.get('stderr', '') }}
+  when: iep_delete_nginx_file.get('changed', false)
+
+- name: "Reload nginx after vhost removal (delete step 3)"
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  when:
+    - not ansible_check_mode
+    - iep_delete_nginx_file.get('changed', false)
+  delegate_to: "{{ iep_ledger.route_owner }}"
+
+# --- Steps 4-6: stop certmonger tracking, revoke the certificate when
+#     identifiable, remove the Pilot-owned local certificate/key (freeipa
+#     endpoints only) ---
+- name: "Check for an existing certmonger tracking request (delete step 4)"
+  ansible.builtin.command: getcert list -f {{ iep_ledger.certificate_file }}
+  register: iep_delete_getcert_list
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: iep_ledger.get('certificate_owner', '') | length > 0
+  delegate_to: "{{ iep_ledger.certificate_owner }}"
+
+- name: "Extract the certificate serial for revocation, if identifiable (delete step 5)"
+  ansible.builtin.command: openssl x509 -in {{ iep_ledger.certificate_file }} -noout -serial
+  register: iep_delete_cert_serial
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - iep_ledger.get('certificate_owner', '') | length > 0
+    - iep_delete_getcert_list.get('rc', 1) == 0
+  delegate_to: "{{ iep_ledger.certificate_owner }}"
+
+- name: "Stop certmonger tracking (delete step 4)"
+  ansible.builtin.command: getcert stop-tracking -f {{ iep_ledger.certificate_file }}
+  when:
+    - not ansible_check_mode
+    - iep_ledger.get('certificate_owner', '') | length > 0
+    - iep_delete_getcert_list.get('rc', 1) == 0
+  register: iep_delete_stop_tracking
+  changed_when: iep_delete_stop_tracking.rc == 0
+  delegate_to: "{{ iep_ledger.certificate_owner }}"
+
+- name: "Revoke the certificate at the FreeIPA CA — reason 5 (cessationOfOperation), spec.md §32 step 5"
+  ansible.builtin.command: >
+    ipa cert-revoke
+    {{ iep_delete_cert_serial.get('stdout', '') | trim | regex_replace('^serial=', '') }}
+    --revocation-reason=5
+  when:
+    - not ansible_check_mode
+    - iep_delete_cert_serial.get('rc', 1) == 0
+    - iep_delete_cert_serial.get('stdout', '') | length > 0
+  register: iep_delete_revoke
+  changed_when: iep_delete_revoke.rc == 0
+  failed_when:
+    - iep_delete_revoke.rc | default(0) != 0
+    - "'already revoked' not in (iep_delete_revoke.get('stdout', '') + iep_delete_revoke.get('stderr', ''))"
+
+- name: "Remove the Pilot-owned local certificate/key files (delete step 6)"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ iep_ledger.certificate_file }}"
+    - "{{ iep_ledger.key_file }}"
+  when:
+    - not ansible_check_mode
+    - iep_ledger.get('certificate_owner', '') | length > 0
+  delegate_to: "{{ iep_ledger.certificate_owner }}"
+
+# --- Steps 7-8: remove the Pilot-created service principal, and the
+#     virtual host object ONLY if unreferenced (spec.md §33 — no cascade
+#     delete; a live re-check, not just trusting the ledger flag) ---
+- name: "Remove the HTTP/<fqdn> service principal, if Pilot created it (delete step 7)"
+  ansible.builtin.command: ipa service-del HTTP/{{ iep_endpoint.fqdn }}
+  when:
+    - not ansible_check_mode
+    - iep_ledger.get('service_created_by_pilot', false)
+  register: iep_delete_service
+  changed_when: iep_delete_service.rc == 0
+  failed_when:
+    - iep_delete_service.rc | default(0) != 0
+    - "'not found' not in (iep_delete_service.get('stdout', '') + iep_delete_service.get('stderr', ''))"
+
+- name: "Check whether any OTHER service principal is still managed by this host (spec.md §33 delete safety)"
+  ansible.builtin.command: ipa host-show {{ iep_endpoint.fqdn }} --all --raw
+  register: iep_delete_host_show
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: iep_ledger.get('virtual_host_created_by_pilot', false)
+
+- name: "Remove the Pilot-created virtual host object only if unreferenced (delete step 8, spec.md §33)"
+  # --updatedns is a bare boolean flag in real ipa CLI (confirmed live,
+  # 2026-08-14: `--updatedns=False` errors "option does not take a
+  # value") — it means "also blast every A/AAAA/SSHFP/PTR record for this
+  # host", which is broader than what we want: step 1 already removed
+  # only the specific ledger-recorded RRset (preserving any foreign RR
+  # type at the same owner, spec.md §34), so host-del must NOT pass
+  # --updatedns here at all — its default (omitted) behavior is to leave
+  # DNS alone, which is exactly correct after our own surgical removal.
+  ansible.builtin.command: ipa host-del {{ iep_endpoint.fqdn }}
+  when:
+    - not ansible_check_mode
+    - iep_ledger.get('virtual_host_created_by_pilot', false)
+    - iep_delete_other_refs | length == 0
+  vars:
+    iep_delete_other_refs: >-
+      {{ (iep_delete_host_show.get('stdout', ''))
+         | regex_findall('(?im)^[ \t]*managedby_service: (.+)$')
+         | reject('equalto', 'HTTP/' ~ iep_endpoint.fqdn) | list }}
+  register: iep_delete_host
+  changed_when: iep_delete_host.rc == 0
+  failed_when:
+    - iep_delete_host.rc | default(0) != 0
+    - "'not found' not in (iep_delete_host.get('stdout', '') + iep_delete_host.get('stderr', ''))"
+
+- name: "Warn and leave the virtual host object if other service principals still reference it (spec.md §33 — no cascade delete)"
+  ansible.builtin.debug:
+    msg: >-
+      endpoint {{ iep_endpoint.fqdn }}: virtual host object left in place —
+      other service principal(s) still reference it: {{ iep_delete_other_refs }}
+      (spec.md §33 delete safety, no cascade delete).
+  vars:
+    iep_delete_other_refs: >-
+      {{ (iep_delete_host_show.get('stdout', ''))
+         | regex_findall('(?im)^[ \t]*managedby_service: (.+)$')
+         | reject('equalto', 'HTTP/' ~ iep_endpoint.fqdn) | list }}
+  when:
+    - iep_ledger.get('virtual_host_created_by_pilot', false)
+    - iep_delete_other_refs | length > 0

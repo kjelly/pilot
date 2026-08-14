@@ -115,6 +115,11 @@ func managedFileEntries(dir string) ([]managedFileEntry, error) {
 	if err := addFile("freeipa-dns.yaml", false); err != nil {
 		return nil, err
 	}
+	// internal-endpoints.yaml is pushInternalEndpointManifestPathPrompt's default
+	// path — not secret, per the manifest's own schema (no ansible-vault content).
+	if err := addFile("internal-endpoints.yaml", false); err != nil {
+		return nil, err
+	}
 	if err := addDirFiles("group_vars", false); err != nil {
 		return nil, err
 	}

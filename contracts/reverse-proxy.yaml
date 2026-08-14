@@ -1,0 +1,24 @@
+schemaVersion: 1
+id: reverse-proxy
+role: reverse-proxy
+specs:
+  - path: docs/verification/reverse-proxy.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/reverse-proxy-apply.yml
+regressionTests:
+  - internal/spec/reverse_proxy_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies: []
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: vm, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions:
+    "docs/verification/reverse-proxy.md#C3": {kind: verifyOnly, reason: "nginx -t is an effective outcome of C1/C2's valid base install, not a separate mutation"}
+    "docs/verification/reverse-proxy.md#C6": {kind: verifyOnly, reason: "idempotent-rerun is a multi-run property, not a single tagged task — evidenced by vm-target topology test, same reasoning as freeipa-ca-trust.md's own C6"}
+verification: {autoDeploy: false}
+site: {include: true, order: 65, vars: {}, tags: [reverse-proxy], optIn: false}

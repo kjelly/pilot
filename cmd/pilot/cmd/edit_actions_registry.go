@@ -1127,6 +1127,184 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "create_internal_endpoint_manifest",
+				Description:              "create the minimal internal-endpoints manifest skeleton (only way to produce the file at all) — declares no freeipa identity block, unlike freeipa-dns",
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "internal-endpoints.yaml",
+					Assertion: "manifest file created with an empty endpoints list",
+				},
+			},
+			Validate: validateNoParamsAction("create_internal_endpoint_manifest"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createInternalEndpointManifest(r)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "create_internal_endpoint",
+				Description:              "create an internal-endpoint (direct route, tls.mode: disabled by default — use set_internal_endpoint_route_proxy/set_internal_endpoint_tls_freeipa afterward to change either)",
+				Required:                 []string{"fqdn", "zone", "target_host"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "internal-endpoints.yaml",
+					Assertion: "endpoint appears in the manifest with the requested fqdn/zone/target",
+				},
+			},
+			Validate: validateCreateInternalEndpoint,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createInternalEndpoint(r, step.FQDN, step.Zone, step.TargetHost)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_internal_endpoint_state",
+				Description:              "set an internal-endpoint's state; state:absent is a safe declarative delete request — real deletion happens later at apply time behind its own safety.allow_endpoint_delete/confirm_endpoint_delete gates",
+				Required:                 []string{"fqdn", "value"},
+				Values:                   map[string][]string{"value": {"present", "absent"}},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "internal-endpoints.yaml",
+					Assertion: "endpoint state updated; state:absent only takes effect at apply time",
+				},
+			},
+			Validate: validateSetInternalEndpointState,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setInternalEndpointState(r, step.FQDN, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_internal_endpoint_dns",
+				Description:              "set an internal-endpoint's dns.zone and (optionally) dns.ttl together",
+				Required:                 []string{"fqdn", "zone"},
+				Optional:                 []string{"dns_ttl"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "internal-endpoints.yaml",
+					Assertion: "endpoint dns.zone/dns.ttl updated",
+				},
+			},
+			Validate: validateSetInternalEndpointDNS,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setInternalEndpointDNS(r, step.FQDN, step.Zone, step.DNSTTL)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_internal_endpoint_route_direct",
+				Description:              "set an internal-endpoint's route to direct mode; exactly one of target_host (resolved via hosts.yml) or target_address (literal IP) must be set",
+				Required:                 []string{"fqdn"},
+				Optional:                 []string{"target_host", "target_address"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "internal-endpoints.yaml",
+					Assertion: "endpoint route set to direct with the requested target",
+				},
+			},
+			Validate: validateSetInternalEndpointRouteDirect,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setInternalEndpointRouteDirect(r, step.FQDN, step.TargetHost, step.TargetAddress)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name: "set_internal_endpoint_route_proxy",
+				Description: "set an internal-endpoint's route to reverse_proxy mode; exactly one of upstream_host/upstream_address must be set; " +
+					"upstream_tls_verify is required when upstream_scheme=https and rejected when http (spec.md §12.4.1/§12.4.4)",
+				Required:                 []string{"fqdn", "proxy_host", "upstream_scheme", "upstream_port"},
+				Optional:                 []string{"upstream_host", "upstream_address", "upstream_tls_verify", "upstream_sni"},
+				Values:                   map[string][]string{"upstream_scheme": {"http", "https"}, "upstream_tls_verify": {"true", "false"}},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "internal-endpoints.yaml",
+					Assertion: "endpoint route set to reverse_proxy with the requested proxy/upstream",
+				},
+			},
+			Validate: validateSetInternalEndpointRouteProxy,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setInternalEndpointRouteProxy(r, step.FQDN, step.ProxyHost, step.UpstreamScheme, step.UpstreamHost, step.UpstreamAddress, step.UpstreamPort, step.UpstreamTLSVerify, step.UpstreamSNI)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_internal_endpoint_tls_disabled",
+				Description:              "disable TLS termination for an internal-endpoint's frontend (independent of any upstream TLS, spec.md §14)",
+				Required:                 []string{"fqdn"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "internal-endpoints.yaml",
+					Assertion: "endpoint tls.mode set to disabled",
+				},
+			},
+			Validate: validateFQDNOnly("set_internal_endpoint_tls_disabled"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setInternalEndpointTLSDisabled(r, step.FQDN)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_internal_endpoint_tls_freeipa",
+				Description:              "enable FreeIPA-issued TLS termination for an internal-endpoint's frontend; tls_port is optional (0/absent means the scheme default, spec.md §14)",
+				Required:                 []string{"fqdn"},
+				Optional:                 []string{"tls_port"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "internal-endpoints.yaml",
+					Assertion: "endpoint tls.mode set to freeipa (and tls.port, if requested)",
+				},
+			},
+			Validate: validateSetInternalEndpointTLSFreeIPA,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setInternalEndpointTLSFreeIPA(r, step.FQDN, step.TLSPort)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_internal_endpoint_tls_sink",
+				Description:              "set a direct+tls.freeipa endpoint's certificate sink (spec.md §22) — only valid once route.mode=direct and tls.mode=freeipa are already set",
+				Required:                 []string{"fqdn", "cert_file", "key_file", "reload_unit"},
+				Optional:                 []string{"key_owner", "key_group", "key_mode"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "internal-endpoints.yaml",
+					Assertion: "endpoint tls.sink updated with the requested cert/key/reload unit",
+				},
+			},
+			Validate: validateSetInternalEndpointTLSSink,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setInternalEndpointTLSSink(r, step.FQDN, step.CertFile, step.KeyFile, step.KeyOwner, step.KeyGroup, step.KeyMode, step.ReloadUnit)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "save_hosts",
 				Description:              "save hosts.yml and finish the edit TUI",
 				ExecutionMode:            ExecutionModeStructured,
@@ -1526,6 +1704,132 @@ func validateSetDNSRecordTargetHost(step editAction) error {
 	}
 	if strings.TrimSpace(step.TargetHost) == "" {
 		return fmt.Errorf("set_dns_record_target_host requires target_host")
+	}
+	return nil
+}
+
+func validateCreateInternalEndpoint(step editAction) error {
+	if strings.TrimSpace(step.FQDN) == "" {
+		return fmt.Errorf("create_internal_endpoint requires fqdn")
+	}
+	if strings.TrimSpace(step.Zone) == "" {
+		return fmt.Errorf("create_internal_endpoint requires zone")
+	}
+	if strings.TrimSpace(step.TargetHost) == "" {
+		return fmt.Errorf("create_internal_endpoint requires target_host")
+	}
+	return nil
+}
+
+// validateFQDNOnly is internal-endpoint's counterpart to
+// validateDNSZoneNameOnly/validateEntityNameOnly: a factory for actions
+// whose only required identity field is fqdn.
+func validateFQDNOnly(name string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.FQDN) == "" {
+			return fmt.Errorf("%s requires fqdn", name)
+		}
+		return nil
+	}
+}
+
+func validateSetInternalEndpointState(step editAction) error {
+	if strings.TrimSpace(step.FQDN) == "" {
+		return fmt.Errorf("set_internal_endpoint_state requires fqdn")
+	}
+	if step.Value != "present" && step.Value != "absent" {
+		return fmt.Errorf(`set_internal_endpoint_state requires value "present" or "absent"`)
+	}
+	return nil
+}
+
+func validateSetInternalEndpointDNS(step editAction) error {
+	if strings.TrimSpace(step.FQDN) == "" {
+		return fmt.Errorf("set_internal_endpoint_dns requires fqdn")
+	}
+	if strings.TrimSpace(step.Zone) == "" {
+		return fmt.Errorf("set_internal_endpoint_dns requires zone")
+	}
+	if step.DNSTTL != "" {
+		if _, err := strconv.Atoi(step.DNSTTL); err != nil {
+			return fmt.Errorf("dns_ttl must be an integer")
+		}
+	}
+	return nil
+}
+
+func validateSetInternalEndpointRouteDirect(step editAction) error {
+	if strings.TrimSpace(step.FQDN) == "" {
+		return fmt.Errorf("set_internal_endpoint_route_direct requires fqdn")
+	}
+	hasHost := strings.TrimSpace(step.TargetHost) != ""
+	hasAddress := strings.TrimSpace(step.TargetAddress) != ""
+	if hasHost == hasAddress {
+		return fmt.Errorf("set_internal_endpoint_route_direct requires exactly one of target_host or target_address")
+	}
+	return nil
+}
+
+func validateSetInternalEndpointRouteProxy(step editAction) error {
+	if strings.TrimSpace(step.FQDN) == "" {
+		return fmt.Errorf("set_internal_endpoint_route_proxy requires fqdn")
+	}
+	if strings.TrimSpace(step.ProxyHost) == "" {
+		return fmt.Errorf("set_internal_endpoint_route_proxy requires proxy_host")
+	}
+	if step.UpstreamScheme != "http" && step.UpstreamScheme != "https" {
+		return fmt.Errorf(`set_internal_endpoint_route_proxy requires upstream_scheme "http" or "https"`)
+	}
+	if strings.TrimSpace(step.UpstreamPort) == "" {
+		return fmt.Errorf("set_internal_endpoint_route_proxy requires upstream_port")
+	}
+	if port, err := strconv.Atoi(step.UpstreamPort); err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("upstream_port must be a valid TCP port")
+	}
+	hasHost := strings.TrimSpace(step.UpstreamHost) != ""
+	hasAddress := strings.TrimSpace(step.UpstreamAddress) != ""
+	if hasHost == hasAddress {
+		return fmt.Errorf("set_internal_endpoint_route_proxy requires exactly one of upstream_host or upstream_address")
+	}
+	// spec.md §12.4.1/§12.4.4: upstream_tls_verify is meaningful only for
+	// an https upstream and must not be silently ignored for an http one.
+	switch step.UpstreamScheme {
+	case "https":
+		if step.UpstreamTLSVerify != "true" && step.UpstreamTLSVerify != "false" {
+			return fmt.Errorf(`set_internal_endpoint_route_proxy requires upstream_tls_verify "true" or "false" when upstream_scheme is https`)
+		}
+	case "http":
+		if step.UpstreamTLSVerify != "" {
+			return fmt.Errorf("set_internal_endpoint_route_proxy: upstream_tls_verify is not allowed when upstream_scheme is http")
+		}
+	}
+	return nil
+}
+
+func validateSetInternalEndpointTLSFreeIPA(step editAction) error {
+	if strings.TrimSpace(step.FQDN) == "" {
+		return fmt.Errorf("set_internal_endpoint_tls_freeipa requires fqdn")
+	}
+	if step.TLSPort != "" {
+		if port, err := strconv.Atoi(step.TLSPort); err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("tls_port must be a valid TCP port")
+		}
+	}
+	return nil
+}
+
+func validateSetInternalEndpointTLSSink(step editAction) error {
+	if strings.TrimSpace(step.FQDN) == "" {
+		return fmt.Errorf("set_internal_endpoint_tls_sink requires fqdn")
+	}
+	if strings.TrimSpace(step.CertFile) == "" {
+		return fmt.Errorf("set_internal_endpoint_tls_sink requires cert_file")
+	}
+	if strings.TrimSpace(step.KeyFile) == "" {
+		return fmt.Errorf("set_internal_endpoint_tls_sink requires key_file")
+	}
+	if strings.TrimSpace(step.ReloadUnit) == "" {
+		return fmt.Errorf("set_internal_endpoint_tls_sink requires reload_unit")
 	}
 	return nil
 }

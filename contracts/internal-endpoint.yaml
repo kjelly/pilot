@@ -1,0 +1,67 @@
+schemaVersion: 1
+id: internal-endpoint
+role: freeipa-server
+specs:
+  - path: docs/verification/internal-endpoint.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/internal-endpoint-apply.yml
+regressionTests:
+  - internal/spec/internal_endpoint_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - component: freeipa-server
+    required: true
+    relation: sameHosts
+
+  - component: freeipa-dns
+    required: true
+    relation: planOnly
+    reason: >
+      Endpoint records may only be reconciled inside a FreeIPA DNS zone
+      already declared by the freeipa-dns manifest (spec.md §11.1).
+
+  - component: freeipa-ca-trust
+    required: true
+    relation: planOnly
+    reason: >
+      The endpoint reconciler applies the same CA-trust baseline to all
+      managed hosts before endpoint verification (spec.md §28 Phase 2).
+
+  - component: reverse-proxy
+    required: false
+    relation: planOnly
+    reason: >
+      Required only for endpoints whose route.mode is reverse_proxy; the
+      exact host is selected in the endpoint manifest, not by this
+      contract (spec.md §43.3).
+hostCardinality: exactly-one
+groupVars:
+  - {name: ipa_admin_password, type: string, required: true, secret: true}
+  - {name: internal_endpoint_manifest_file, type: string, required: true, secret: false}
+  - {name: freeipa_dns_manifest_file, type: string, required: true, secret: false}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions:
+    "docs/verification/internal-endpoint.md#C1": {kind: verifyOnly, reason: "pure Go manifest-validator behavior — no Ansible task"}
+    "docs/verification/internal-endpoint.md#C2": {kind: verifyOnly, reason: "pure Go manifest-validator behavior — no Ansible task"}
+    "docs/verification/internal-endpoint.md#C3": {kind: verifyOnly, reason: "pure Go manifest-validator behavior — no Ansible task"}
+    "docs/verification/internal-endpoint.md#C11": {kind: verifyOnly, reason: "certificate-owner derivation is a Go-side computation consumed by the C13 service-principal task, not a separate mutation"}
+    "docs/verification/internal-endpoint.md#C14": {kind: verifyOnly, reason: "cert SAN is a property of the C15 certmonger request, not a separate mutation"}
+    "docs/verification/internal-endpoint.md#C16": {kind: verifyOnly, reason: "architectural invariant of C15 — certmonger runs on the owner host and never distributes the private key"}
+    "docs/verification/internal-endpoint.md#C17": {kind: verifyOnly, reason: "end-to-end effective behavior of the C27 nginx render task"}
+    "docs/verification/internal-endpoint.md#C18": {kind: verifyOnly, reason: "end-to-end effective behavior of the C27 nginx render task"}
+    "docs/verification/internal-endpoint.md#C19": {kind: verifyOnly, reason: "end-to-end effective behavior of the C4 direct-route DNS write plus C15's certificate"}
+    "docs/verification/internal-endpoint.md#C20": {kind: verifyOnly, reason: "client-usage convention check (fqdn:port), not a separate mutation"}
+    "docs/verification/internal-endpoint.md#C25": {kind: derived, tags: [C4], reason: "same DNS-write task as C4 — this row asserts the record still matches after an inventory_host IP change, not a distinct mutation"}
+    "docs/verification/internal-endpoint.md#C26": {kind: verifyOnly, reason: "idempotent-rerun is a multi-run property, not a single tagged task — evidenced by vm-target topology test, same reasoning as freeipa-dns.md's own C12"}
+    "docs/verification/internal-endpoint.md#C28": {kind: verifyOnly, reason: "effective TLS behavior (proxy_ssl_verify on) of the same C27 nginx render task"}
+    "docs/verification/internal-endpoint.md#C29": {kind: verifyOnly, reason: "effective TLS behavior (proxy_ssl_verify off) of the same C27 nginx render task"}
+    "docs/verification/internal-endpoint.md#C30": {kind: verifyOnly, reason: "pure Go manifest-validator behavior — no Ansible task"}
+    "docs/verification/internal-endpoint.md#C31": {kind: verifyOnly, reason: "effective behavior proving the C27 nginx render task did not silently downgrade to plaintext"}
+    "docs/verification/internal-endpoint.md#C32": {kind: verifyOnly, reason: "effective proxy_ssl_name behavior of the same C27 nginx render task"}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

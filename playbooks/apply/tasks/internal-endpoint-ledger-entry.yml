@@ -1,0 +1,49 @@
+---
+# Spec.md §29 (Ownership Ledger), §28 Phase 9 ("atomically update ownership
+# ledger"). Computes ONE present endpoint's ledger entry and appends it to
+# the running internal_endpoint_ledger_entries dict (assembled into the
+# real ledger file by a later, single write task — spec.md's own "atomic
+# temp+rename" requirement is satisfied by ansible.builtin.copy's default
+# behavior, not anything in this file). Included with `loop:` over
+# internal_endpoint_present; `iep_endpoint` is the loop_var.
+#
+# service_created_by_pilot/virtual_host_created_by_pilot are recorded true
+# whenever tls_mode == freeipa: Pilot is always the one managing the
+# HTTP/<fqdn> service principal and virtual host object for such an
+# endpoint (spec.md §17/§19), whether this specific run created them fresh
+# or found them already present. These flags are informational history,
+# not the delete-safety mechanism itself — spec.md §33 requires a LIVE
+# re-check of other references at delete time regardless of what the
+# ledger says (see tasks/internal-endpoint-delete.yml).
+- name: "Fetch the certificate serial for this endpoint's cert, if it has one"
+  ansible.builtin.command: openssl x509 -in {{ iep_endpoint.cert_file }} -noout -serial
+  register: iep_ledger_cert_serial
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: iep_endpoint.tls_mode == 'freeipa'
+  delegate_to: "{{ iep_endpoint.cert_owner }}"
+
+- name: "Append this endpoint's ledger entry"
+  ansible.builtin.set_fact:
+    internal_endpoint_ledger_entries: >-
+      {{ (internal_endpoint_ledger_entries | default({})) | combine({iep_endpoint.fqdn: entry}) }}
+  vars:
+    entry:
+      route_mode: "{{ iep_endpoint.route_mode }}"
+      route_owner: "{{ iep_endpoint.route_owner_host }}"
+      dns_zone: "{{ iep_endpoint.dns_zone }}"
+      dns_owner: "{{ iep_endpoint.dns_owner }}"
+      dns_type: "{{ 'AAAA' if ':' in iep_endpoint.dns_value else 'A' }}"
+      service_principal: "{{ ('HTTP/' ~ iep_endpoint.fqdn) if iep_endpoint.tls_mode == 'freeipa' else '' }}"
+      service_created_by_pilot: "{{ iep_endpoint.tls_mode == 'freeipa' }}"
+      virtual_host_created_by_pilot: "{{ iep_endpoint.tls_mode == 'freeipa' }}"
+      certificate_owner: "{{ iep_endpoint.cert_owner }}"
+      certificate_file: "{{ iep_endpoint.cert_file if iep_endpoint.tls_mode == 'freeipa' else '' }}"
+      key_file: "{{ iep_endpoint.key_file if iep_endpoint.tls_mode == 'freeipa' else '' }}"
+      nginx_file: >-
+        {{ ('/etc/nginx/conf.d/pilot-internal-endpoint-' ~ iep_endpoint.stable_id ~ '.conf')
+           if iep_endpoint.route_mode == 'reverse_proxy' else '' }}
+      certificate_serial: >-
+        {{ (iep_ledger_cert_serial.get('stdout', '') | trim | regex_replace('^serial=', ''))
+           if (iep_ledger_cert_serial.get('rc', 1) == 0) else '' }}

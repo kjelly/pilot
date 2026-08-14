@@ -23,6 +23,9 @@ func TestSemanticActionCatalogIsStable(t *testing.T) {
 		"create_sudo_rule", "set_sudo_rule_groups", "set_sudo_rule_command_groups", "set_sudo_rule_commands", "set_sudo_rule_allow_mode",
 		"create_dns_manifest", "create_dns_zone", "set_dns_zone_field",
 		"create_dns_record", "set_dns_record_field", "set_dns_record_values", "set_dns_record_target_host",
+		"create_internal_endpoint_manifest", "create_internal_endpoint", "set_internal_endpoint_state",
+		"set_internal_endpoint_dns", "set_internal_endpoint_route_direct", "set_internal_endpoint_route_proxy",
+		"set_internal_endpoint_tls_disabled", "set_internal_endpoint_tls_freeipa", "set_internal_endpoint_tls_sink",
 		"save_hosts", "deploy", "reconcile",
 	}
 	specs := semanticActionSpecs()
@@ -71,7 +74,7 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	if schema.PilotVersion == "" {
 		t.Error("pilot_version is empty")
 	}
-	if schema.SchemaVersion != 1 || len(schema.Actions) != 58 {
+	if schema.SchemaVersion != 1 || len(schema.Actions) != 67 {
 		t.Fatalf("schema metadata = schema_version %d, actions %d", schema.SchemaVersion, len(schema.Actions))
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {
@@ -157,6 +160,9 @@ func TestActionsListIncludesEverySemanticAction(t *testing.T) {
 		"create_sudo_rule", "set_sudo_rule_groups", "set_sudo_rule_command_groups", "set_sudo_rule_commands", "set_sudo_rule_allow_mode",
 		"create_dns_manifest", "create_dns_zone", "set_dns_zone_field",
 		"create_dns_record", "set_dns_record_field", "set_dns_record_values", "set_dns_record_target_host",
+		"create_internal_endpoint_manifest", "create_internal_endpoint", "set_internal_endpoint_state",
+		"set_internal_endpoint_dns", "set_internal_endpoint_route_direct", "set_internal_endpoint_route_proxy",
+		"set_internal_endpoint_tls_disabled", "set_internal_endpoint_tls_freeipa", "set_internal_endpoint_tls_sink",
 		"save_hosts", "deploy", "reconcile",
 	} {
 		if !strings.Contains(out.String(), name) {

@@ -46,11 +46,11 @@ hosts:
   # 範例:兩台一般 Linux server。
   web-1:
     ansible_host: "<FILL-ME>"        # 例 10.0.0.21
-    roles: [freeipa-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]
+    roles: [freeipa-client, freeipa-dns-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]
     env: prod
   web-2:
     ansible_host: "<FILL-ME>"        # 例 10.0.0.22
-    roles: [freeipa-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]
+    roles: [freeipa-client, freeipa-dns-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]
     env: staging
 
   # 需要更多機器就照上面格式往下加;key(短名)自己取,全域唯一即可。

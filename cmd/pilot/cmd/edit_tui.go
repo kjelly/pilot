@@ -233,6 +233,7 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		".vault/ — vault 變數檔(明文 skeleton 或 ansible-vault 加密檔)",
 		"roster — FreeIPA users/groups/sudo(canonical roster，可預覽/編輯/新增)",
 		"freeipa-dns manifest — DNS zones/records(day-2 reconciler，可預覽/編輯/新增)",
+		"internal-endpoints manifest — internal DNS/TLS/routes(day-2 reconciler，可預覽/編輯/新增)",
 		"🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則",
 		"快速建立最小 workspace — 引導式設定並驗證可部署性",
 		"離開",
@@ -255,10 +256,12 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		case 4:
 			return pushDNSManifestPathPrompt(r, dir)
 		case 5:
-			return pushConfigCompletenessCheck(r, dir)
+			return pushInternalEndpointManifestPathPrompt(r, dir)
 		case 6:
-			return pushMinimalWorkspaceWizard(r, dir, "")
+			return pushConfigCompletenessCheck(r, dir)
 		case 7:
+			return pushMinimalWorkspaceWizard(r, dir, "")
+		case 8:
 			r.quit = true
 			return nil
 		}

@@ -1,0 +1,66 @@
+---
+# Spec: docs/verification/internal-endpoint.md C13 (spec.md §17-§19)
+#
+# Per-endpoint: create the HTTP/<fqdn> service principal (and the virtual
+# host object backing it) and delegate BOTH host and service management to
+# the certificate owner. Included with `loop:` over
+# internal_endpoint_direct_freeipa (spec.md §63 Phase 6); `iep_endpoint` is
+# the loop_var. Assumes a kinit'd admin ticket already exists on this host
+# (the caller kinits once before looping, not per-endpoint — the ticket
+# persists across tasks in the same play run).
+- name: "Check whether a host object already exists for the endpoint FQDN"
+  ansible.builtin.command: ipa host-show {{ iep_endpoint.fqdn }}
+  register: iep_host_show
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: "Create a virtual host object for the endpoint FQDN if none exists (spec.md §19)"
+  ansible.builtin.command: ipa host-add {{ iep_endpoint.fqdn }} --force
+  when:
+    - not ansible_check_mode
+    - iep_host_show.rc != 0
+  register: iep_host_add
+  changed_when: "'Added host' in iep_host_add.stdout"
+
+- name: "Delegate host management to the certificate owner (spec.md §18)"
+  ansible.builtin.command: >
+    ipa host-add-managedby {{ iep_endpoint.fqdn }}
+    --hosts={{ iep_endpoint.cert_owner }}
+  register: iep_host_managedby
+  when: not ansible_check_mode
+  # Real observed rerun output (2026-08-13 vm-target run): FreeIPA reports
+  # the already-delegated case as rc=1 with the reason on STDOUT
+  # ("member host: <owner>: This entry is already a member"), not stderr.
+  failed_when:
+    - iep_host_managedby.rc != 0
+    - "'already a member' not in (iep_host_managedby.stdout | default(''))"
+  changed_when: iep_host_managedby.rc == 0
+
+- name: "Check whether the HTTP service principal already exists"
+  ansible.builtin.command: ipa service-show HTTP/{{ iep_endpoint.fqdn }}
+  register: iep_service_show
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: "Create the HTTP/<fqdn> service principal if none exists (spec.md §17)"
+  ansible.builtin.command: ipa service-add HTTP/{{ iep_endpoint.fqdn }} --force
+  when:
+    - not ansible_check_mode
+    - iep_service_show.rc != 0
+  register: iep_service_add
+  changed_when: "'Added' in iep_service_add.stdout"
+
+- name: "Delegate service management to the certificate owner (spec.md §18 — service-add-host; host-add-managedby does not cascade)"
+  ansible.builtin.command: >
+    ipa service-add-host HTTP/{{ iep_endpoint.fqdn }}
+    --hosts={{ iep_endpoint.cert_owner }}
+  register: iep_service_managedby
+  when: not ansible_check_mode
+  # Same real-observed wording as host-add-managedby above: rc=1, reason on
+  # stdout, "already a member" (not "already a managing host").
+  failed_when:
+    - iep_service_managedby.rc != 0
+    - "'already a member' not in (iep_service_managedby.stdout | default(''))"
+  changed_when: iep_service_managedby.rc == 0

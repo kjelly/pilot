@@ -365,6 +365,22 @@ func (t *VerifySpecTool) invokeAnsibleJSON(ctx context.Context, host string, row
 	return probes[0]
 }
 
+// posixEnvironmentPrefix renders one `export NAME='value'` statement per
+// line, not a single-command `VAR=value cmd` prefix. POSIX shells apply a
+// same-line `VAR=value` prefix only to the environment of the ONE command
+// it precedes — it is invisible to that command's own "$VAR" argument
+// expansion (the shell expands arguments using its existing variable table
+// before splicing in the temporary child-process environment), and it
+// never persists to subsequent lines of a multi-line probe script either.
+// Confirmed empirically (2026-08-14): `VAR=x echo "$VAR"` prints an empty
+// line, every time, on every POSIX shell — this silently made every
+// PILOT_VAR_* reference in every per-host Spec v2 probe evaluate to empty,
+// which any `equals`-style row whose expected side also happened to
+// resolve to empty (e.g. a failed lookup, or another blank PILOT_VAR_*)
+// would then silently false-positive PASS on. `export NAME=value` followed
+// by a newline is a real, persistent shell variable for every line that
+// follows in the same `/bin/sh -c "..."` script, which is what a
+// multi-line probe actually needs.
 func posixEnvironmentPrefix(inputs map[string]string) string {
 	keys := make([]string, 0, len(inputs))
 	for key := range inputs {
@@ -373,11 +389,11 @@ func posixEnvironmentPrefix(inputs map[string]string) string {
 	sort.Strings(keys)
 	var b strings.Builder
 	for _, key := range keys {
-		b.WriteString("PILOT_VAR_")
+		b.WriteString("export PILOT_VAR_")
 		b.WriteString(inputEnvironmentSuffix(key))
 		b.WriteByte('=')
 		b.WriteString(posixSingleQuote(inputs[key]))
-		b.WriteByte(' ')
+		b.WriteByte('\n')
 	}
 	return b.String()
 }

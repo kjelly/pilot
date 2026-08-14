@@ -85,6 +85,7 @@ func checkWorkspaceCompleteness(dir string) []completenessCheck {
 	checks = append(checks, checkVaultCompleteness(dir, roles)...)
 	checks = append(checks, checkHostVarsCompleteness(dir, hf)...)
 	checks = append(checks, checkRosterCompleteness(dir, hf)...)
+	checks = append(checks, checkInternalEndpointCompleteness(dir, hf)...)
 	return checks
 }
 
@@ -420,6 +421,50 @@ func checkRosterCompleteness(dir string, hf *inventory.HostsFile) []completeness
 		out = append(out, rosterCompletenessCheck(label, p))
 	}
 	return out
+}
+
+// checkInternalEndpointCompleteness reports the internal-endpoints.yaml
+// manifest's static validity — schema shape plus every check
+// ValidateInternalEndpointManifest can resolve from hosts.yml alone
+// (inventory_host references, reverse-proxy role coverage). It
+// deliberately never touches live host state (FreeIPA enrollment,
+// nginx, certmonger, actual DNS/certificates, the ownership ledger) —
+// those gates fire for real at apply time
+// (playbooks/apply/internal-endpoint-apply.yml), not here. Unlike
+// roster/group_vars/vault, this manifest has no per-host trigger in
+// hosts.yml — it's a workspace-root file like hosts.yml itself, so this
+// check simply runs when the file exists and stays silent otherwise
+// (internal-endpoint is an opt-in feature, not implied by any role).
+func checkInternalEndpointCompleteness(dir string, hf *inventory.HostsFile) []completenessCheck {
+	path := filepath.Join(dir, "internal-endpoints.yaml")
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+
+	hostvars := make(map[string]map[string]any, len(hf.Hosts))
+	reverseProxyHosts := make(map[string]bool)
+	for _, h := range hf.Hosts {
+		hostvars[h.Name] = map[string]any{"ansible_host": h.AnsibleHost}
+		if hasRole(h.Roles, "reverse-proxy") {
+			reverseProxyHosts[h.Name] = true
+		}
+	}
+
+	violations, err := inventory.ValidateInternalEndpointManifestFile(path, inventory.InternalEndpointValidateOptions{
+		Hostvars:          hostvars,
+		ReverseProxyHosts: reverseProxyHosts,
+	})
+	if err != nil {
+		return []completenessCheck{{Label: "internal-endpoints.yaml", OK: false, Details: []string{err.Error()}}}
+	}
+	if len(violations) == 0 {
+		return []completenessCheck{{Label: "internal-endpoints.yaml", OK: true}}
+	}
+	details := make([]string, len(violations))
+	for i, v := range violations {
+		details[i] = v.String()
+	}
+	return []completenessCheck{{Label: "internal-endpoints.yaml", OK: false, Details: details}}
 }
 
 func rosterCompletenessCheck(label, path string) completenessCheck {

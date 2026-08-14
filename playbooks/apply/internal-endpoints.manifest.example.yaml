@@ -1,0 +1,66 @@
+# EXAMPLE internal-endpoints manifest — schema_version: 1.
+#
+# Schema and rules: spec.md §8-§24 (Internal Endpoint / FreeIPA PKI feature).
+# Consumed by: playbooks/apply/internal-endpoint-apply.yml, via the
+# internal_endpoint_manifest_file group var (spec.md §8 — an absolute path,
+# NOT vault-encrypted; this manifest must never contain a password, spec.md
+# §59). Cross-checked at apply time against the freeipa-dns manifest
+# (freeipa_dns_manifest_file) — the endpoint's dns.zone MUST already exist
+# there as state: present with an effective records_mode: merge (spec.md
+# §11.1/§11.2), and MUST NOT collide with a record freeipa-dns.yaml already
+# manages explicitly (spec.md §11.3).
+---
+schema_version: 1
+
+endpoints:
+
+  # ─────────────────────────────────────────────
+  # A. Direct + FreeIPA TLS, non-standard port (spec.md §53 endpoint A)
+  # ─────────────────────────────────────────────
+  - fqdn: direct.apps.pilot.internal
+    state: present
+
+    dns:
+      zone: apps.pilot.internal.
+      ttl: 300
+
+    route:
+      mode: direct
+
+      target:
+        inventory_host: app01
+
+    tls:
+      mode: freeipa
+      port: 8443
+
+      sink:
+        cert_file: /etc/pilot-endpoint/direct/server.crt
+        key_file: /etc/pilot-endpoint/direct/server.key
+
+        key_owner: root
+        key_group: root
+        key_mode: "0600"
+
+        reload:
+          mode: systemd
+          unit: pilot-endpoint-direct.service
+
+  # ─────────────────────────────────────────────
+  # B. Nested direct DNS, no TLS — proves nested owner (spec.md §53 endpoint B)
+  # ─────────────────────────────────────────────
+  - fqdn: aaa.xxx.apps.pilot.internal
+    state: present
+
+    dns:
+      zone: apps.pilot.internal.
+      ttl: 300
+
+    route:
+      mode: direct
+
+      target:
+        inventory_host: app01
+
+    tls:
+      mode: disabled

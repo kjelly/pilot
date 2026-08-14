@@ -1,0 +1,63 @@
+---
+# Apply playbook for docs/verification/freeipa-ca-trust.md
+#
+# Installs the FreeIPA integrated CA trust chain into the OS system trust
+# store of every managed host, independent of whether that host is itself
+# a FreeIPA (AAA) client — see spec.md §5.1-§5.2. Default target is the
+# literal Ansible `all` group, not a new opt-in role tag, because TLS
+# trust and FreeIPA enrollment are different responsibilities (spec.md
+# §5.2). The actual fetch/preflight/install logic lives in
+# tasks/freeipa-ca-trust.yml, shared with internal-endpoint-apply.yml's
+# Phase 2 CA-trust baseline (spec.md §5.6, §26 point 1) — see that file's
+# header comment for why every gate there runs per-host with no run_once.
+#
+# Usage (sandbox):
+#
+#   go run ./cmd/pilot vm-target run --name web-1 \
+#       playbooks/apply/freeipa-ca-trust-apply.yml \
+#       -e target_group=all
+#
+# Stage gating (same convention as other apply playbooks):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+- name: FreeIPA CA trust — install the integrated CA into the OS trust store
+  hosts: "{{ target_group | default('all') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    target_group: all
+    freeipa_ca_trust_source_host: "{{ groups['freeipa-server'][0] | default('') }}"
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - stage != 'prod'
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+
+    - name: "Gate: a freeipa-server host is present in inventory"
+      ansible.builtin.assert:
+        that:
+          - freeipa_ca_trust_source_host | length > 0
+        fail_msg: "no host in the freeipa-server inventory group — freeipa-ca-trust has no CA source (spec.md §5.3)."
+
+  tasks:
+    # Spec: docs/verification/freeipa-ca-trust.md C2
+    - name: "Fetch and install the FreeIPA CA bundle into the OS trust store"
+      tags: [C2]
+      ansible.builtin.include_tasks: tasks/freeipa-ca-trust.yml

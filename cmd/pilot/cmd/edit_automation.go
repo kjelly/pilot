@@ -91,6 +91,44 @@ type editAction struct {
 	RecordType string   `json:"record_type,omitempty"`
 	TargetHost string   `json:"target_host,omitempty"`
 	Values     []string `json:"values,omitempty"`
+	// internal-endpoints.yaml fields (spec.md §39). FQDN is the endpoint's
+	// own primary key (spec.md §10.2) — Zone is reused for dns.zone (same
+	// semantic as freeipa-dns's own Zone field: a DNS zone name), and Value
+	// is reused for set_internal_endpoint_state's new state, matching how
+	// DNS's own single-purpose set actions reuse Value for "the new value"
+	// rather than adding a dedicated field per action. TargetAddress is
+	// route.target's literal-IP alternative to TargetHost (direct mode) —
+	// exactly one of the two may be set, never both, matching a DNS
+	// record's own TargetHost/Values mutual exclusivity. ProxyHost is
+	// route.proxy.inventory_host (reverse_proxy mode); UpstreamHost/
+	// UpstreamAddress are route.upstream's inventory_host/address pair
+	// (again exactly one).
+	FQDN            string `json:"fqdn,omitempty"`
+	DNSTTL          string `json:"dns_ttl,omitempty"`
+	TargetAddress   string `json:"target_address,omitempty"`
+	ProxyHost       string `json:"proxy_host,omitempty"`
+	UpstreamScheme  string `json:"upstream_scheme,omitempty"`
+	UpstreamHost    string `json:"upstream_host,omitempty"`
+	UpstreamAddress string `json:"upstream_address,omitempty"`
+	UpstreamPort    string `json:"upstream_port,omitempty"`
+	// UpstreamTLSVerify is "true"/"false" (a string, like every other
+	// boolean-valued action field in this struct — parsed at Run time),
+	// required exactly when UpstreamScheme is "https" (spec.md §12.4.1)
+	// and rejected when "http" (spec.md §12.4.4).
+	UpstreamTLSVerify string `json:"upstream_tls_verify,omitempty"`
+	UpstreamSNI       string `json:"upstream_sni,omitempty"`
+	// TLSPort is tls.port (freeipa mode only, optional — 0/absent means
+	// "use the scheme default", spec.md §14).
+	TLSPort string `json:"tls_port,omitempty"`
+	// CertFile/KeyFile/KeyOwner/KeyGroup/KeyMode/ReloadUnit are
+	// tls.sink's fields (direct+freeipa only, spec.md §22) —
+	// set_internal_endpoint_tls_sink's own parameters.
+	CertFile   string `json:"cert_file,omitempty"`
+	KeyFile    string `json:"key_file,omitempty"`
+	KeyOwner   string `json:"key_owner,omitempty"`
+	KeyGroup   string `json:"key_group,omitempty"`
+	KeyMode    string `json:"key_mode,omitempty"`
+	ReloadUnit string `json:"reload_unit,omitempty"`
 }
 
 // validateValueOrEnv enforces that exactly one of Value/ValueEnv is set,

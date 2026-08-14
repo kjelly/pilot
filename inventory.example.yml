@@ -90,6 +90,12 @@ all:
             web-1:
             web-2:
 
+    # -- Nginx reverse proxy 基礎安裝(reverse-proxy-apply.yml)---------------
+    #    只裝 nginx、關掉 distro default site、建立 Pilot config namespace；
+    #    任何 endpoint 的 vhost 屬於 internal-endpoint 的責任，不在這裡。
+    reverse-proxy:
+      hosts: {}                 # 例:專門一台 → hosts: { web-1: }
+
     # -- 核心基礎服務(core-infra-provider-apply.yml,以 infra_role 選角色)--
     dns:                       # 跑 -e infra_role=dns 時作用的機器
       hosts: {}                # 例:讓 ipa-1 兼當 DNS → 改成  hosts: { ipa-1: }

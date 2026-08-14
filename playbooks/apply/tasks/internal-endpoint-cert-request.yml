@@ -1,0 +1,105 @@
+---
+# Spec: docs/verification/internal-endpoint.md C15 (spec.md §20-§22)
+#
+# Per-endpoint: request/converge the endpoint certificate via certmonger
+# (ipa-getcert), delegated to the certificate owner host — spec.md §20's
+# private-key boundary requires the key be generated and stay on the owner
+# host, never distributed from elsewhere. Included with `loop:` over
+# internal_endpoint_direct_freeipa (spec.md §63 Phase 6); `iep_endpoint` is
+# the loop_var.
+#
+# The renewal/reload hook (spec.md §21, §58) is derived here from the
+# manifest's tls.sink.reload — v1 only supports {mode: systemd, unit: ...}
+# (spec.md §23: "不接受 raw shell command"), never a free-form string.
+- name: "Gate: TLS reload config is systemd-only with a strict unit name (spec.md §22/§23)"
+  ansible.builtin.assert:
+    that:
+      - iep_endpoint.reload_mode == 'systemd'
+      - iep_endpoint.reload_unit is match('^[A-Za-z0-9_.:@-]+\.service$')
+    fail_msg: >-
+      endpoint {{ iep_endpoint.fqdn }}: tls.sink.reload must be
+      {mode: systemd, unit: <name>.service} with a strict unit name
+      (spec.md §22/§23) — got mode={{ iep_endpoint.reload_mode }}
+      unit={{ iep_endpoint.reload_unit }}.
+
+- name: "Gate: cert_file and key_file are absolute, distinct paths (spec.md §22)"
+  ansible.builtin.assert:
+    that:
+      - iep_endpoint.cert_file is match('^/')
+      - iep_endpoint.key_file is match('^/')
+      - iep_endpoint.cert_file != iep_endpoint.key_file
+    fail_msg: >-
+      endpoint {{ iep_endpoint.fqdn }}: tls.sink.cert_file/key_file must be
+      absolute and distinct paths (spec.md §22) — got
+      cert_file={{ iep_endpoint.cert_file }} key_file={{ iep_endpoint.key_file }}.
+
+- name: "Ensure the certificate/key parent directory exists on the owner host"
+  ansible.builtin.file:
+    path: "{{ iep_endpoint.cert_file | dirname }}"
+    state: directory
+    mode: "0755"
+  delegate_to: "{{ iep_endpoint.cert_owner }}"
+
+- name: "Check the target systemd reload unit exists on the owner host (spec.md §22)"
+  ansible.builtin.command: systemctl cat {{ iep_endpoint.reload_unit }}
+  register: iep_reload_unit_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: "{{ iep_endpoint.cert_owner }}"
+
+- name: "Gate: the target systemd unit exists on the owner host (spec.md §22)"
+  ansible.builtin.assert:
+    that:
+      - iep_reload_unit_check.rc == 0
+    fail_msg: >-
+      endpoint {{ iep_endpoint.fqdn }}: tls.sink.reload.unit
+      {{ iep_endpoint.reload_unit }} does not exist on
+      {{ iep_endpoint.cert_owner }} (spec.md §22) — deploy the TLS
+      consumer's systemd unit before running the endpoint reconciler.
+
+- name: "Check for an existing certmonger tracking request for this cert file"
+  ansible.builtin.command: getcert list -f {{ iep_endpoint.cert_file }}
+  register: iep_getcert_list
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: "{{ iep_endpoint.cert_owner }}"
+
+- name: "Request the endpoint certificate via certmonger (ipa-getcert), SAN = exact endpoint FQDN"
+  # argv (a real list), not a free-form string: ansible.builtin.command's
+  # free-form string is shlex-split, which silently truncated a -C value
+  # containing spaces/args down to just its first word — a real bug caught
+  # on the 2026-08-13 vm-target run. argv passes each element straight
+  # through as its own exec() argument, so ipa-getcert receives the full
+  # -C value intact.
+  #
+  # -o/-O take a single OWNER string (chown-style "user:group"), not a
+  # separate group flag — confirmed live against a real FreeIPA server
+  # (2026-08-14): -g is --key-size (BITS) and -G is --key-type (RSA/EC),
+  # NOT group flags. The first attempt passed key_group to -g and got
+  # "No support for generating 'root' keys. Known key types include: RSA
+  # EC" — certmonger was trying to parse the manifest's key_group value as
+  # a key algorithm name. ipa-getcert/getcert-request(1) has no dedicated
+  # --key-group option at all; group must ride along in the OWNER string.
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['ipa-getcert', 'request',
+         '-f', iep_endpoint.cert_file,
+         '-k', iep_endpoint.key_file,
+         '-K', 'HTTP/' ~ iep_endpoint.fqdn,
+         '-D', iep_endpoint.fqdn,
+         '-N', 'CN=' ~ iep_endpoint.fqdn,
+         '-o', iep_endpoint.key_owner ~ ':' ~ iep_endpoint.key_group,
+         '-m', iep_endpoint.key_mode,
+         '-O', 'root:root', '-M', '0644',
+         '-C', 'systemctl reload ' ~ iep_endpoint.reload_unit,
+         '-w']
+      }}
+  when:
+    - not ansible_check_mode
+    - iep_getcert_list.rc != 0
+  register: iep_getcert_request
+  changed_when: iep_getcert_request.rc == 0
+  delegate_to: "{{ iep_endpoint.cert_owner }}"

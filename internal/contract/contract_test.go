@@ -25,11 +25,12 @@ func TestLoaderLoadsFinalFixtureDirectoryInStableOrder(t *testing.T) {
 	}
 	want := []string{
 		"alertmanager", "audit-log-forwarding", "dashboard", "dns", "docker",
+		"freeipa-ca-trust",
 		"freeipa-client", "freeipa-dns-client", "freeipa-dns", "freeipa-identity", "freeipa-nfs-client", "freeipa-nfs-server",
 		"freeipa-realm-replacement", "freeipa-server-replica",
-		"freeipa-server", "host-monitoring", "keycloak-db", "keycloak", "log-server",
+		"freeipa-server", "host-monitoring", "internal-endpoint", "keycloak-db", "keycloak", "log-server",
 		"log-shipping", "ntp", "os-patch-sla", "pam-oidc-sshd",
-		"prometheus", "restic-backup", "seaweedfs-s3", "thanos-query",
+		"prometheus", "restic-backup", "reverse-proxy", "seaweedfs-s3", "thanos-query",
 		"wazuh-fim", "wazuh-manager",
 	}
 	if !reflect.DeepEqual(got, want) {
