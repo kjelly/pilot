@@ -140,9 +140,22 @@ C4 confirmed via a real `curl -H 'Host: pilot-c4-probe.invalid'` returning
 second real `reverse-proxy-apply.yml` run producing `changed=0 failed=0` on
 both hosts.
 
+2026-08-14, Phase 10's fresh full-topology re-confirmation round (`p10-proxy`,
+Ubuntu 24.04, part of a combined 3-VM internal-endpoint/reverse-proxy/
+freeipa-ca-trust topology):
+
+```
+$ pilot verify docs/verification/reverse-proxy.md -i <grouped-inventory> -l p10-proxy
+verdict: PASS  (pass=6 fail=0 skip=0)
+```
+
+No regressions found. See `docs/evidence/internal-endpoint/2026-08-14-phase10.md`
+for the full round.
+
 ## Change record
 
 | Date | Version | Change |
 |---|---|---|
 | 2026-08-13 | DRAFT | Phase 1 (spec.md §63): initial Spec v2 authoring. No actual-run evidence yet — the apply playbook is a Phase-1 skeleton; Phase 4 supplies real installation logic and VM evidence. |
 | 2026-08-13 | v1.0 | Phase 4: real nginx base install logic landed and confirmed against real Ubuntu 24.04 + AlmaLinux 9 VMs — all 6 rows PASS on both, idempotent rerun confirmed (`changed=0`). C4's probe was strengthened from a file-absence check to a real functional check (unmatched Host header must get no response) after discovering AlmaLinux 9's inline vendor default block made the original probe a false PASS; the apply playbook now claims `default_server` explicitly rather than editing vendor `nginx.conf` (see evidence doc). |
+| 2026-08-14 | v1.0 | Phase 10: re-confirmed clean (6/6) against a fresh, independent topology built for the combined internal-endpoint/reverse-proxy/freeipa-ca-trust round — no regressions. |

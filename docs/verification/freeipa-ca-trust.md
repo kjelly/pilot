@@ -150,9 +150,26 @@ clients and `enrolled` on the freeipa-server itself; C6 confirmed via a
 second real `freeipa-ca-trust-apply.yml` run producing `changed=0 failed=0`
 on all three hosts.
 
+2026-08-14, Phase 10's fresh full-topology re-confirmation round (3 new
+disposable VMs: `p10-ipa` AlmaLinux 9 FreeIPA server, `p10-app` Ubuntu 24.04
+never FreeIPA-enrolled, `p10-proxy` Ubuntu 24.04 freeipa-client +
+reverse-proxy). One grouped-inventory `pilot verify` run against all three
+hosts at once (rather than three separate `vm-target verify` calls):
+
+```
+$ pilot verify docs/verification/freeipa-ca-trust.md -i <grouped-inventory> \
+    --input expected_ca_sha256=b99d559c307a74df1204736c87093cc2a25c7f73151de464c4634c2571aac95a
+verdict: PASS  (pass=18 fail=0 skip=0)
+```
+
+No regressions found. See `docs/evidence/internal-endpoint/2026-08-14-phase10.md`
+for the full round (this spec's own re-confirmation is one part of a larger
+combined internal-endpoint/reverse-proxy/freeipa-ca-trust topology round).
+
 ## Change record
 
 | Date | Version | Change |
 |---|---|---|
 | 2026-08-13 | DRAFT | Phase 1 (spec.md §63): initial Spec v2 authoring. No actual-run evidence yet — the apply playbook is a Phase-1 skeleton; Phase 3 supplies real installation logic and VM evidence. |
 | 2026-08-13 | v1.0 | Phase 3: real installation logic (`tasks/freeipa-ca-trust.yml`, spec.md §5.6) landed and confirmed against a real 3-VM topology — all 6 rows PASS on both Debian- and RedHat-family hosts, idempotent rerun confirmed (`changed=0`). Fixed a real `--check`-mode assert crash found by the first dry-run (see evidence doc). |
+| 2026-08-14 | v1.0 | Phase 10: re-confirmed clean (18/18) against a fresh, independent 3-VM topology built for the combined internal-endpoint/reverse-proxy/freeipa-ca-trust round — no regressions. |
