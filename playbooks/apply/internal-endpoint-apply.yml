@@ -80,6 +80,16 @@
       tags: [C10]
       ansible.builtin.include_tasks: tasks/freeipa-ca-trust.yml
 
+    # Spec: docs/verification/internal-endpoint.md C9. Genuinely fleet-wide
+    # (every managed host, not just the freeipa-server) — this task
+    # previously lived, wrongly, in the single-host reconcile play below,
+    # where it could only ever have applied to freeipa-server itself,
+    # never to the other managed hosts C9's own probe checks (found
+    # 2026-08-14 while fixing the resolver logic itself).
+    - name: "Apply the FreeIPA DNS resolver baseline to this managed host"
+      tags: [C9]
+      ansible.builtin.include_tasks: tasks/freeipa-dns-client-resolver.yml
+
 - name: Internal endpoint reconcile
   hosts: "{{ target_group | default('freeipa-server') }}"
   become: true
@@ -206,7 +216,13 @@
              else route_target.get('address', '') }}
         tls: "{{ item.get('tls', {}) }}"
         tls_mode: "{{ tls.get('mode', 'disabled') }}"
-        tls_port: "{{ tls.get('port', 0) }}"
+        # An omitted tls.port means "use the scheme default" (spec.md §14 —
+        # the TUI's own set_internal_endpoint_tls_freeipa documents this
+        # same "0/absent means 443" contract). Defaulting to 0 here instead
+        # of 443 would literally render `listen 0 ssl` in the nginx vhost
+        # template (0 is a defined value, so Jinja's `default(443)` filter
+        # there never kicks in for it) — confirmed live (2026-08-14).
+        tls_port: "{{ tls.get('port', 443) }}"
         # Certificate ownership is the same rule for direct and reverse_proxy
         # (spec.md §15): whichever inventory host physically terminates the
         # frontend TLS socket. For reverse_proxy that is the proxy host
@@ -397,9 +413,13 @@
       loop: "{{ internal_endpoint_freeipa }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
 
-    # Spec: docs/verification/internal-endpoint.md C21 (spec.md §31)
+    # spec.md §31. No spec.md-verification-doc tag: this row (formerly C21)
+    # was retired 2026-08-14 — its probe depended on a non-interactive
+    # `pilot reconcile internal-endpoint` CLI that will never be built (see
+    # docs/verification/internal-endpoint.md's Change record). The gate
+    # itself is unchanged and stays real; it was already independently
+    # proven fail-closed via a real negative-path VM test in Phase 8.
     - name: "Gate: state=absent requires manifest safety.allow_endpoint_delete AND -e confirm_endpoint_delete=true"
-      tags: [C21]
       ansible.builtin.assert:
         that:
           - internal_endpoint_manifest.get('safety', {}).get('allow_endpoint_delete', false)
@@ -412,9 +432,9 @@
       loop: "{{ internal_endpoint_absent }}"
       loop_control: {label: "{{ item.fqdn }}"}
 
-    # Spec: docs/verification/internal-endpoint.md C23 (spec.md §32)
+    # spec.md §32. No spec.md-verification-doc tag: this row (formerly C23)
+    # was retired 2026-08-14 — see the C21 comment above for why.
     - name: "Gate: a destructive request for an endpoint absent from the ownership ledger fails closed"
-      tags: [C23]
       ansible.builtin.assert:
         that:
           - item.fqdn in internal_endpoint_ledger.endpoints
@@ -426,9 +446,9 @@
       loop: "{{ internal_endpoint_absent }}"
       loop_control: {label: "{{ item.fqdn }}"}
 
-    # Spec: docs/verification/internal-endpoint.md C24 (spec.md §30)
+    # spec.md §30. No spec.md-verification-doc tag: this row (formerly C24)
+    # was retired 2026-08-14 — see the C21 comment above for why.
     - name: "Gate: in-place route-owner migration is rejected (v1 fail closed)"
-      tags: [C24]
       ansible.builtin.assert:
         that:
           - (ledger_entry | length == 0) or
@@ -455,15 +475,8 @@
     # single-host reconcile play deliberately isn't.
 
     # --- Phase 3: all hosts — FreeIPA DNS resolver baseline (spec.md §28) ---
-
-    # Spec: docs/verification/internal-endpoint.md C9
-    - name: "PLACEHOLDER — apply the FreeIPA DNS resolver baseline to all managed hosts"
-      tags: [C9]
-      ansible.builtin.debug:
-        msg: >-
-          Phase-1 skeleton: real logic reuses freeipa-dns-client-apply.yml's
-          resolver tasks (spec.md §26 point 1) once they are extracted into
-          a shared include.
+    # Moved to the fleet-wide baseline play above (spec.md §26 point 1) —
+    # see that play's own C9 task for why this can't run per-reconcile-host.
 
     # --- Phase 4: FreeIPA control plane — service identity + managedBy (spec.md §28) ---
 

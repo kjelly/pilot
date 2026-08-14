@@ -51,6 +51,13 @@
 #   sandbox  default; runs immediately
 #   staging  requires -e confirm_staging=true
 #   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+#
+# The actual resolver-configuration logic lives in the shared
+# tasks/freeipa-dns-client-resolver.yml (spec.md §26 point 1) — also
+# included by internal-endpoint-apply.yml's fleet-wide DNS resolver
+# baseline (docs/verification/internal-endpoint.md C9) so the two
+# playbooks never fork into two different implementations, mirroring
+# tasks/freeipa-ca-trust.yml's own sharing convention.
 - name: FreeIPA DNS client — point this host's resolver at FreeIPA DNS
   hosts: "{{ target_group | default('freeipa-dns-client') }}"
   become: true
@@ -60,24 +67,6 @@
     confirm_staging: false
     confirm_prod: false
     staging_attested_within_hours: 168
-
-    # NOTE: freeipa_domain / freeipa_dns_client_servers are deliberately NOT
-    # given a "self-referencing" default here (e.g. `freeipa_domain: "{{
-    # freeipa_domain | default(...) }}"`). That pattern looks like it lets an
-    # operator's -e override win while still providing an in-play default,
-    # but a play-level `vars:` entry that templates a Jinja expression
-    # referencing ITS OWN key causes ansible-core to try to resolve that key
-    # against itself, which recurses until "Recursive loop detected in
-    # template: maximum recursion depth exceeded" (confirmed live via
-    # `pilot vm-target run --check` on a real vm-target 2026-07-31 — this
-    # broke EVERY host, not just an edge case). The normalization is done as
-    # a `set_fact` in pre_tasks instead (see "Normalize freeipa_domain /
-    # freeipa_dns_client_servers" below), which resolves the same expression
-    # exactly once, from a plain task, instead of as a lazily-templated vars:
-    # layer referencing itself.
-
-    resolv_conf_marker: "pilot-freeipa-dns-client"
-    resolved_dropin_path: /etc/systemd/resolved.conf.d/90-pilot-freeipa-dns-client.conf
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -110,220 +99,7 @@
       when: stage == 'prod'
       tags: [always]
 
-    - name: "Gate: supported OS (Debian/Ubuntu systemd-resolved; EL NetworkManager)"
-      ansible.builtin.assert:
-        that:
-          - ansible_os_family in ['Debian', 'RedHat']
-        fail_msg: >-
-          freeipa-dns-client-apply supports Debian/Ubuntu (systemd-resolved) and
-          Enterprise Linux (NetworkManager). Detected {{ ansible_distribution }}
-          {{ ansible_distribution_version }} ({{ ansible_os_family }}).
-      tags: [always]
-
-    - name: "Normalize freeipa_domain / freeipa_dns_client_servers (see vars: comment above)"
-      ansible.builtin.set_fact:
-        freeipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
-        freeipa_dns_client_servers: "{{ freeipa_dns_client_servers | default([], true) }}"
-      tags: [always]
-
-    # ── Auto-detect FreeIPA DNS-providing hosts from inventory ──────────────
-    # Each DNS-providing host's OWN freeipa_setup_dns hostvar decides whether
-    # it counts — read with the SAME per-group default freeipa-server-apply.yml
-    # / freeipa-server-replica-apply.yml themselves use, so this list always
-    # matches what those playbooks actually installed on that host.
-    - name: "Init FreeIPA DNS-provider list"
-      ansible.builtin.set_fact:
-        freeipa_dns_providers: []
-      tags: [always]
-
-    - name: "Add primary freeipa-server if it provides DNS"
-      ansible.builtin.set_fact:
-        freeipa_dns_providers: >-
-          {{ freeipa_dns_providers + [{'host': item, 'ip': hostvars[item].ansible_host | default(item, true)}] }}
-      loop: "{{ groups['freeipa-server'] | default([]) }}"
-      when: hostvars[item].freeipa_setup_dns | default(true) | bool
-      tags: [always]
-
-    - name: "Add freeipa-server-replica hosts that provide their own DNS"
-      ansible.builtin.set_fact:
-        freeipa_dns_providers: >-
-          {{ freeipa_dns_providers + [{'host': item, 'ip': hostvars[item].ansible_host | default(item, true)}] }}
-      loop: "{{ groups['freeipa-server-replica'] | default([]) }}"
-      when: hostvars[item].freeipa_setup_dns | default(false) | bool
-      tags: [always]
-
-    - name: "Compute effective nameserver list for THIS host"
-      ansible.builtin.set_fact:
-        freeipa_dns_client_effective_servers: >-
-          {{
-            (freeipa_dns_client_servers)
-            if (freeipa_dns_client_servers | length > 0)
-            else (
-              (['127.0.0.1'] + (freeipa_dns_providers | rejectattr('host', 'equalto', inventory_hostname) | map(attribute='ip') | list))
-              if (inventory_hostname in (freeipa_dns_providers | map(attribute='host') | list))
-              else (freeipa_dns_providers | map(attribute='ip') | list)
-            )
-          }}
-      tags: [always]
-
-    - name: "Gate: at least one FreeIPA DNS server resolved (explicit or inventory)"
-      ansible.builtin.assert:
-        that:
-          - freeipa_dns_client_effective_servers | length > 0
-        fail_msg: >-
-          No FreeIPA DNS-providing host found. Either pass
-          -e freeipa_dns_client_servers=[ip1,ip2] explicitly, or make sure
-          this inventory has a freeipa-server (or freeipa-server-replica with
-          freeipa_setup_dns=true) host.
-      tags: [always]
-
   tasks:
-    - name: "C1 — install dig (Debian)"
-      tags: [C1]
-      ansible.builtin.apt:
-        name: dnsutils
-        state: present
-      when:
-        - ansible_os_family == 'Debian'
-        - not ansible_check_mode
-
-    - name: "C1 — install dig (RedHat)"
-      tags: [C1]
-      ansible.builtin.dnf:
-        name: bind-utils
-        state: present
-      when:
-        - ansible_os_family == 'RedHat'
-        - not ansible_check_mode
-
-    - name: "Configure DNS resolver and verify it actually resolves via FreeIPA"
-      block:
-        # ── Debian/Ubuntu: systemd-resolved ──────────────────────────────────
-        - name: "Debian — ensure /etc/systemd/resolved.conf.d/ exists"
-          tags: [C3, C4, C5]
-          ansible.builtin.file:
-            path: /etc/systemd/resolved.conf.d
-            state: directory
-            owner: root
-            group: root
-            mode: '0755'
-          when: ansible_os_family == 'Debian'
-
-        - name: "Debian — write systemd-resolved drop-in (nss-resolve/resolvectl path)"
-          tags: [C3, C4, C5]
-          ansible.builtin.copy:
-            dest: "{{ resolved_dropin_path }}"
-            owner: root
-            group: root
-            mode: '0644'
-            content: |
-              # {{ resolv_conf_marker }}: managed by playbooks/apply/freeipa-dns-client-apply.yml — DO NOT EDIT BY HAND
-              [Resolve]
-              DNS={{ freeipa_dns_client_effective_servers | join(' ') }}
-              Domains={{ freeipa_domain }}
-          when: ansible_os_family == 'Debian'
-          notify: Restart systemd-resolved
-
-        - name: "Debian/EL — write /etc/resolv.conf (glibc-resolver/dig path; symlink- and bind-mount-safe)"
-          tags: [C3, C4, C5]
-          ansible.builtin.copy:
-            dest: /etc/resolv.conf
-            owner: root
-            group: root
-            mode: '0644'
-            follow: false
-            unsafe_writes: true
-            backup: true
-            content: |
-              # {{ resolv_conf_marker }}: managed by playbooks/apply/freeipa-dns-client-apply.yml — DO NOT EDIT BY HAND
-              search {{ freeipa_domain }}
-              {% for ip in freeipa_dns_client_effective_servers %}
-              nameserver {{ ip }}
-              {% endfor %}
-
-        # ── EL/RHEL: NetworkManager ──────────────────────────────────────────
-        - name: "EL — discover the active NetworkManager connection"
-          tags: [C3, C4, C5]
-          ansible.builtin.command: nmcli -t -f NAME,DEVICE connection show --active
-          register: freeipa_dns_client_nm_active
-          changed_when: false
-          when: ansible_os_family == 'RedHat'
-
-        - name: "EL — parse active connection name/device"
-          tags: [C3, C4, C5]
-          ansible.builtin.set_fact:
-            freeipa_dns_client_nm_conn: "{{ (freeipa_dns_client_nm_active.stdout_lines | first).split(':')[0] }}"
-            freeipa_dns_client_nm_device: "{{ (freeipa_dns_client_nm_active.stdout_lines | first).split(':')[1] }}"
-          when:
-            - ansible_os_family == 'RedHat'
-            - freeipa_dns_client_nm_active.stdout_lines | default([]) | length > 0
-
-        - name: "EL — gate: an active NetworkManager connection was found"
-          ansible.builtin.assert:
-            that:
-              - freeipa_dns_client_nm_conn is defined
-              - freeipa_dns_client_nm_conn | length > 0
-            fail_msg: >-
-              No active NetworkManager connection found (`nmcli connection show --active`
-              returned nothing) — cannot set dns4 on a non-existent profile.
-          when: ansible_os_family == 'RedHat'
-
-        - name: "EL — set dns4/dns4_search on the active connection"
-          tags: [C3, C4, C5]
-          community.general.nmcli:
-            conn_name: "{{ freeipa_dns_client_nm_conn }}"
-            dns4: "{{ freeipa_dns_client_effective_servers }}"
-            dns4_search: ["{{ freeipa_domain }}"]
-            dns4_ignore_auto: true
-            state: present
-          when: ansible_os_family == 'RedHat'
-          register: freeipa_dns_client_nm_mod
-
-        - name: "EL — reapply the connection onto the live device (no disconnect)"
-          ansible.builtin.command: "nmcli device reapply {{ freeipa_dns_client_nm_device }}"
-          when:
-            - ansible_os_family == 'RedHat'
-            - freeipa_dns_client_nm_mod is changed
-          register: freeipa_dns_client_nm_reapply
-          failed_when: false
-          changed_when: freeipa_dns_client_nm_reapply.rc == 0
-
-        - name: "EL — fall back to `nmcli con up` if reapply was rejected"
-          ansible.builtin.command: "nmcli con up {{ freeipa_dns_client_nm_conn }}"
-          when:
-            - ansible_os_family == 'RedHat'
-            - freeipa_dns_client_nm_mod is changed
-            - freeipa_dns_client_nm_reapply is defined
-            - freeipa_dns_client_nm_reapply.rc != 0
-          changed_when: true
-
-        # ── C6: functional proof (both OS) ──────────────────────────────────
-        - name: "C6 — FreeIPA server FQDN actually resolves via DNS"
-          tags: [C6]
-          ansible.builtin.command: >-
-            sh -c 'dig +short {{ freeipa_server_fqdn | default("ipa1." ~ freeipa_domain) }} | grep -qE "^[0-9]+\." && echo 0 || echo 1'
-          register: freeipa_dns_client_c6
-          changed_when: false
-          failed_when: freeipa_dns_client_c6.stdout | trim != '0'
-
-      rescue:
-        - name: "ROLLBACK — restore /etc/resolv.conf from the automatic backup"
-          ansible.builtin.shell: >-
-            set -o pipefail;
-            latest="$(ls -t /etc/resolv.conf.*.* 2>/dev/null | head -n1)";
-            if [ -n "$latest" ]; then cp "$latest" /etc/resolv.conf; fi
-          changed_when: true
-          failed_when: false
-
-        - name: "ROLLBACK — surface the original failure"
-          ansible.builtin.fail:
-            msg: >-
-              freeipa-dns-client apply failed; /etc/resolv.conf was restored
-              from its most recent ansible.builtin.copy backup where possible.
-              Fix the failing task and re-run.
-
-  handlers:
-    - name: Restart systemd-resolved
-      ansible.builtin.systemd:
-        name: systemd-resolved
-        state: restarted
+    - name: "Apply the FreeIPA DNS resolver baseline to this host"
+      tags: [C1, C3, C4, C5, C6]
+      ansible.builtin.include_tasks: tasks/freeipa-dns-client-resolver.yml
