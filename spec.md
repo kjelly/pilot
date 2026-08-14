@@ -498,6 +498,8 @@ inventory examples / tests
 
 **既有 gap（本 feature 順手修）**：目前 `freeipa-dns-client` 角色完全沒有被 wire 進 `internal/inventory/contracts.go` / `internal/inventory/catalog.go`（`inventory.Roles()` 直接讀 `roleContracts`，找不到就視為 unknown role），卻出現在 `inventory.example.yml` 裡——那段示範其實沒有走過 catalog 驗證，用「hosts.yml → `pilot inventory generate`」這條路徑目前**產生不出** `freeipa-dns-client` group。新增 `reverse-proxy` 時，coding agent MUST 同時把 `freeipa-dns-client` 也補進 `roleContracts` / `catalog.go`（`topLevelOrder`/aggregate），並修正 `inventory.example.yml` 讓它與 catalog 一致。這是 §27.1 要求「把 `freeipa-dns-client` 加進三個 built-in role preset」的前提——`validateRolePresets()` 會拿 `inventory.Roles()` 驗證 preset 裡的角色名稱，角色沒先進 catalog，preset 就存不進去。
 
+**部署建議（Phase 10 全 topology 實測發現，2026-08-14）**：`reverse-proxy` role（以及任何擔任 internal-endpoint route owner 的 host——direct 的 `target.inventory_host` 或 reverse_proxy 的 `proxy.inventory_host`）SHOULD 額外套用 `freeipa-dns-client-apply.yml`。原因：`freeipa-client`（AAA/Kerberos enrollment）與 `freeipa-dns-client`（OS resolver 指向 FreeIPA DNS）是兩個完全獨立的元件——一台已完成 `ipa-client-install` 的 host，其 `/etc/resolv.conf`/`systemd-resolved` 預設仍然指向原本的 DHCP/libvirt resolver，不會自動變成 FreeIPA DNS，因此該 host 自己也無法用一般 DNS 查到其他 internal-endpoint FQDN（例如反向代理 host 想直接 `curl` 同一批 endpoint 的其他 FQDN 來自我檢查時會失敗）。這不是 bug，是兩個角色故意分離的設計；只是實際佈署 reverse-proxy/direct target 時，若沒有同時附加 `freeipa-dns-client`，容易誤以為 DNS 沒接上。
+
 ---
 
 ## 6.3 Nginx ownership
@@ -2700,10 +2702,10 @@ docs/verification/internal-endpoint.md
 | C18 | proxy forwards 到 declared backend port              |
 | C19 | direct endpoint HTTPS handshake success             |
 | C20 | non-443 direct TLS 正確使用 `fqdn:port`                 |
-| C21 | `state: absent` 沒有 dual confirmation 時不 mutation    |
+| C21 | `state: absent` 沒有 dual confirmation 時不 mutation（見下方 2026-08-14 註記） |
 | C22 | delete 不碰 foreign DNS type/config                   |
-| C23 | missing ownership ledger 的 destructive request fail |
-| C24 | route-owner migration v1 fail closed                |
+| C23 | missing ownership ledger 的 destructive request fail（見下方 2026-08-14 註記） |
+| C24 | route-owner migration v1 fail closed（見下方 2026-08-14 註記） |
 | C25 | inventory host IP 改變可正常更新 DNS                       |
 | C26 | rerun unchanged → changed=0                         |
 | C27 | reverse proxy 支援 HTTPS upstream                       |
@@ -2712,6 +2714,18 @@ docs/verification/internal-endpoint.md
 | C30 | HTTPS upstream 未明確設定 `verify` 時 fail closed          |
 | C31 | insecure HTTPS upstream 仍實際使用 TLS，不可退化成 HTTP        |
 | C32 | explicit upstream TLS SNI/server_name 正確傳遞            |
+
+**2026-08-14 註記（C21/C23/C24）**：這三項底層行為（dual confirmation 才能刪除、
+destructive request 要有 ownership ledger 記錄才放行、route-owner migration v1 fail
+closed）本身仍是真實需求，`playbooks/apply/internal-endpoint-apply.yml` 裡對應的
+assert gate 完全沒動，而且早在 Phase 8 就已經用真實 negative-path VM 測試證明過會
+fail closed（見 `docs/evidence/internal-endpoint/2026-08-14-phase8.md`）。改變的只是
+`docs/verification/internal-endpoint.md` 不再用獨立編號的 row 追蹤它們——這三個 row
+原本的探測方式依賴一支 `pilot reconcile internal-endpoint --manifest/--ledger` 非互動
+CLI，這支 CLI 從 Phase 6 起每一輪都被列為「之後再做」，最終拍板不做（需要先解決
+secret/vault 怎麼安全帶進去的設計問題，不是隨手包一層就好）。三個 row 已從該檔移除，
+`internal-endpoint-apply.yml` 裡對應 task 的 `tags: [C21]`/`[C23]`/`[C24]` 也一併移除
+（gate 本身保留），以符合 `tag_coverage_test.go` 的孤兒 tag 檢查。
 
 ---
 
@@ -3460,6 +3474,25 @@ failure injection
 docs evidence
 ```
 
+**完成（2026-08-14）**：fresh 3-VM topology（`p10-ipa`/`p10-app`/`p10-proxy`）涵蓋
+manifest schema 支援的每一種 route/TLS 組合（5 個真實 endpoint + 1 個刻意設計失敗
+的 endpoint）；apply/reconcile 全部真跑；idempotency 第二輪 `changed=0 failed=0`；
+failure injection（non-enrolled host 上 tls.mode=freeipa 必須在 enrollment
+preflight 就 fail closed）已驗證。`docs/verification/internal-endpoint.md` 這輪達到
+28/32（史上最佳，前次最佳是 Phase 7 的 21/32），剩下 4 項（C9、C21、C23、C24）都是
+已明確定位、已記錄、刻意延後的缺口（DNS resolver baseline 尚未實作；`pilot
+reconcile internal-endpoint` 非互動 CLI 尚未存在），不是未知問題。`freeipa-ca-trust.md`
+／`reverse-proxy.md`（Phase 3/4 已是 v1.0）在這輪新 topology 上重新確認 100% 綠燈、
+無 regression。完整 evidence：`docs/evidence/internal-endpoint/2026-08-14-phase10.md`。
+
+**同日 follow-up（2026-08-14）**：C9 補上真邏輯（見 §47 表格前的 DoD 註記），
+`internal-endpoint.md` 升級到 29/32 fixable。隨後拍板 **C21/C23/C24 直接 retire，
+不實作** `pilot reconcile internal-endpoint` 非互動 CLI（見 §47 acceptance rows表格
+後的 2026-08-14 註記——底層 gate 保留且 Phase 8 已驗證過，只是不再單獨編號驗證）。
+`docs/verification/internal-endpoint.md` 現在是 29 rows，理論上已無任何 row 卡在
+「等未來才會做的工作」——離 v1.0 promotion 只差一次把兩輪修正合併在同一個 topology
+上重跑的完整驗證（尚未執行）。
+
 ---
 
 # 64. Required Files Summary
@@ -3542,7 +3575,11 @@ Feature 只有在以下條件 **全部成立** 時才算完成。
 * [ ] backend port 不進 DNS
 * [ ] FreeIPA 確認為 self-signed integrated root CA
 * [ ] 所有 managed Linux host system trust 安裝 FreeIPA CA
-* [ ] 所有 managed host 使用 FreeIPA DNS resolver
+* [x] 所有 managed host 使用 FreeIPA DNS resolver（2026-08-14 補上真邏輯，見
+  `docs/evidence/internal-endpoint/2026-08-14-phase10.md` 的 follow-up round：
+  `tasks/freeipa-dns-client-resolver.yml` 共用檔 + C9 自身探測改成 OS-portable，
+  3 台 vm-target（AlmaLinux 自我指向 + AlmaLinux client + Ubuntu client）驗證，
+  idempotent）
 * [ ] direct FreeIPA TLS certificate owner 正確
 * [ ] proxy FreeIPA TLS certificate owner 正確
 * [ ] private key 不離開 certificate owner

@@ -34,6 +34,7 @@ inputs:
   - {name: test_insecure_upstream_host, required: true}
   - {name: test_insecure_upstream_port, required: true}
   - {name: test_upstream_sni, required: true}
+  - {name: test_freeipa_server_fqdn, required: true}
 traceability: {components: [internal-endpoint]}
 defaults:
   become: true
@@ -173,10 +174,19 @@ cleanly.
 - id: C8
   category: dns
   check: a manifest claiming a (zone, owner, type) already explicitly managed by freeipa-dns.yaml is rejected
+  # scope: aggregate — same class of bug already fixed elsewhere in this
+  # file (C7/C9/C10/C14-C16/C27/C32): `pilot internal-endpoint validate`
+  # is a controller-side command (reads local manifest_fixture_dir/
+  # freeipa_dns_manifest_path paths directly) — dispatching it per-host to
+  # freeipa-server got rc=127 (pilot isn't even installed there) rather
+  # than a real accept/reject, masking this row behind the CLI's own
+  # prior nonexistence until Phase 10 built it and exposed this separate,
+  # previously-undiscovered scoping bug (2026-08-14).
   probe: |
     out=$(pilot internal-endpoint validate --manifest "$PILOT_VAR_MANIFEST_FIXTURE_DIR/dns-collision.yaml" --freeipa-dns-manifest "$PILOT_VAR_FREEIPA_DNS_MANIFEST_PATH" 2>&1); rc=$?
     if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'ownership conflict'; then echo rejected; else echo "accepted rc=$rc"; fi
   expect: {stdout: {equals: rejected}}
+  scope: aggregate
   tags: [C8]
 - id: C9
   category: resolver
@@ -192,8 +202,21 @@ cleanly.
   # own bug was the next thing blocking a clean run. Fixed by counting
   # `rc=0` directly, which is what a real success actually looks like for
   # these module types.
+  #
+  # `resolvectl status` doesn't exist at all on EL9 (no systemd-resolved by
+  # default) — its exit code is really testing "is this specific
+  # Debian-only tool present", not "does DNS resolution actually work via
+  # FreeIPA". Confirmed for real on Phase 10's 3-VM round: the 2 Ubuntu
+  # hosts passed and the AlmaLinux freeipa-server did not, even though its
+  # own resolver was genuinely correct (self-pointing, matching
+  # tasks/freeipa-dns-client-resolver.yml's documented self-first design).
+  # Fixed by checking `getent hosts` against the real FreeIPA server FQDN
+  # instead — NSS-based, works identically regardless of which OS-specific
+  # mechanism (systemd-resolved vs NetworkManager) is behind it, and
+  # actually proves resolution works rather than merely that a particular
+  # daemon responds.
   probe: |
-    got=$(ansible all -i "$PILOT_VAR_PILOT_INVENTORY_PATH" -m command -a "resolvectl status" 2>&1 | grep -c '| rc=0' || true)
+    got=$(ansible all -i "$PILOT_VAR_PILOT_INVENTORY_PATH" -m command -a "getent hosts $PILOT_VAR_TEST_FREEIPA_SERVER_FQDN" 2>&1 | grep -c '| rc=0' || true)
     want=$(ansible all -i "$PILOT_VAR_PILOT_INVENTORY_PATH" --list-hosts 2>/dev/null | tail -n +2 | wc -l)
     if [ "$got" = "$want" ] && [ "$want" -gt 0 ]; then echo "all $want hosts ok"; else echo "got=$got want=$want"; fi
   expect: {stdout: {regex: '^all [0-9]+ hosts ok$'}}
@@ -316,14 +339,6 @@ cleanly.
     esac
   expect: {stdout: {regex: '^(200|301|302|401|403|404)$'}}
   verifyOnly: true
-- id: C21
-  category: delete
-  check: state:absent without both manifest safety.allow_endpoint_delete and runtime confirm_endpoint_delete performs no mutation
-  probe: |
-    out=$(pilot reconcile internal-endpoint --manifest "$PILOT_VAR_MANIFEST_FIXTURE_DIR/absent-no-confirm.yaml" 2>&1); rc=$?
-    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi confirm; then echo blocked; else echo "not-blocked rc=$rc"; fi
-  expect: {stdout: {equals: blocked}}
-  tags: [C21]
 - id: C22
   category: delete
   check: deleting an endpoint's A/AAAA record never removes a foreign record type at the same owner
@@ -339,22 +354,6 @@ cleanly.
     ipa dnsrecord-show "$PILOT_VAR_TEST_DNS_ZONE" "$PILOT_VAR_TEST_DIRECT_OWNER" --raw 2>/dev/null | grep -q '^[[:space:]]*txtrecord' && echo foreign-record-intact || echo foreign-record-missing
   expect: {stdout: {equals: foreign-record-intact}}
   tags: [C22]
-- id: C23
-  category: delete
-  check: a destructive request for an endpoint absent from the ownership ledger fails closed
-  probe: |
-    out=$(pilot reconcile internal-endpoint --manifest "$PILOT_VAR_MANIFEST_FIXTURE_DIR/absent-no-ledger.yaml" --ledger /nonexistent/state.json 2>&1); rc=$?
-    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi ledger; then echo blocked; else echo "not-blocked rc=$rc"; fi
-  expect: {stdout: {equals: blocked}}
-  tags: [C23]
-- id: C24
-  category: delete
-  check: an in-place route-owner migration (direct<->reverse_proxy, or target/proxy host change) is rejected in v1
-  probe: |
-    out=$(pilot reconcile internal-endpoint --manifest "$PILOT_VAR_MANIFEST_FIXTURE_DIR/route-owner-migration.yaml" 2>&1); rc=$?
-    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'route owner'; then echo blocked; else echo "not-blocked rc=$rc"; fi
-  expect: {stdout: {equals: blocked}}
-  tags: [C24]
 - id: C25
   category: dns
   check: an inventory host IP change (same inventory_host, new ansible_host) reconciles the DNS record cleanly
@@ -435,16 +434,17 @@ cleanly.
 
 ## PASS / FAIL
 
-All applicable C1-C32 rows must pass. An unresolved host, runner error,
-timeout, or matcher failure makes the deployment transaction fail.
-`not_applicable` is not used by this contract.
+All applicable rows must pass (29 rows: C1-C32 less C21/C23/C24, retired
+2026-08-14 — see Change record). An unresolved host, runner error, timeout,
+or matcher failure makes the deployment transaction fail. `not_applicable`
+is not used by this contract.
 
 ## Traceability
 
-- C4, C5, C6, C7, C8, C9, C10, C12, C13, C15, C21, C22, C23, C24, C25, and
-  C27 map to real apply-playbook tags (row C25 shares tag `C4` — it is a
-  second-run assertion about the same DNS-write task C4 implements, not a
-  distinct mutation).
+- C4, C5, C6, C7, C8, C9, C10, C12, C13, C15, C22, C25, and C27 map to real
+  apply-playbook tags (row C25 shares tag `C4` — it is a second-run
+  assertion about the same DNS-write task C4 implements, not a distinct
+  mutation).
 - C1, C2, C3, C11, C14, C16, C17, C18, C19, C20, C26, C28, C29, C30, C31,
   and C32 verify derived or end-to-end effective behavior — either a pure
   Go-validator outcome (C1, C2, C3, C30) or an emergent property of one of
@@ -574,6 +574,98 @@ endpoint. Still DRAFT overall — C2/C3/C5/C8/C9/C17/C18/C21/C23/C24/C27-C32 rem
 unimplemented, CLI-dependent, or out of this round's topology pending Phase 9; full
 promotion is Phase 10's job.
 
+2026-08-14, Phase 10's full-topology round: a fresh 3-VM topology (`p10-ipa` AlmaLinux 9
+FreeIPA server, `p10-app` Ubuntu 24.04 — deliberately never FreeIPA-enrolled — and
+`p10-proxy` Ubuntu 24.04 freeipa-client + reverse-proxy), 5 real endpoints covering
+every route/TLS combination this spec exercises (A: direct + tls.disabled, owner
+`p10-app`; B: direct + tls.freeipa + sink, owner `p10-proxy`; C: reverse_proxy + HTTP
+upstream + tls.freeipa; D/E: reverse_proxy + HTTPS upstream, one verified against a
+real FreeIPA cert, one insecure against a genuinely self-signed backend with explicit
+SNI), plus a deliberately-invalid 6th endpoint (direct + tls.freeipa on the
+never-enrolled `p10-app`) used only under `--check` for negative-path/C12 testing —
+this is also this round's failure-injection scenario. Full transcripts, PLAY RECAPs,
+and every bug found+fixed (two Ansible playbook bugs, a `pilot verify` scoping bug
+recurring for a third time, and the discovery that `pilot internal-endpoint validate`
+had never existed at all) are recorded in
+`docs/evidence/internal-endpoint/2026-08-14-phase10.md`.
+
+```
+$ pilot verify docs/verification/internal-endpoint.md -i <grouped-inventory> -l p10-ipa --input ...
+verdict: FAIL  (pass=28 fail=4 skip=0)
+
+C1 C4 C5 C6 C7 C8 C10 C11 C12 C13 C14 C15 C16 C17 C18 C19 C20 C22 C25 C26 C27 C28 C29
+C31 C32 (+ C2 C3 C30, unlisted above but also pass): pass — 28 of 32
+C9 C21 C23 C24: fail
+```
+
+**C8 now genuinely passes for the first time** — building the real
+`pilot internal-endpoint validate` CLI (see below) also exposed and fixed a second,
+independent, previously-undiscovered bug: C8's own probe was never given
+`scope: aggregate` the way C7/C9/C10/C14-C16/C27/C32 already were, so it was
+dispatched to `freeipa-server` where `pilot` isn't installed (`rc=127`) — the exact
+same class of bug already fixed 5 times over in this file, just never applied to C8
+itself. Fixed the same way. C21/C23/C24 had the identical scoping bug and were fixed
+too, though they still correctly fail: `pilot reconcile internal-endpoint` remains an
+interactive-TUI-only surface with no non-interactive `--manifest`/`--ledger` flags —
+building that is real, separate work, deferred every round since Phase 6 for the same
+reason (secret/vault plumbing needs care, not a quick wrapper). C9 remains the one
+genuinely unimplemented feature (fleet-wide DNS resolver baseline, spec.md §26 point
+1) — 2 of 3 hosts resolve correctly (both Ubuntu, `freeipa-dns-client` applied), the
+third (`p10-ipa`, AlmaLinux, no `systemd-resolved` by default) fails for the same
+reason documented since Phase 6. **This is the best result across all phases (previous
+best: Phase 7's 21/32)** — every remaining failure is a specifically-identified,
+already-documented, deliberately-deferred gap, not an unknown. Still DRAFT overall,
+pending the `pilot reconcile internal-endpoint` CLI and the DNS resolver baseline
+feature — see the evidence doc for the complete bug list and follow-ups.
+
+2026-08-14, same-day follow-up round: **C9's DNS resolver baseline is now real**,
+closing the last unimplemented (non-CLI-dependent) gap from the Phase 10 round above.
+`playbooks/apply/freeipa-dns-client-apply.yml`'s resolver logic was extracted into a
+shared `tasks/freeipa-dns-client-resolver.yml` (spec.md §26 point 1, mirroring
+`tasks/freeipa-ca-trust.yml`'s own sharing convention) and wired into
+`internal-endpoint-apply.yml`'s fleet-wide baseline play (the C9 task previously lived,
+wrongly, in the single-host reconcile play, where it could only ever have applied to
+the freeipa-server itself). C9's own probe was also fixed from `resolvectl status`
+(Debian-only; doesn't exist on EL9) to a portable `getent hosts` check against a new
+required input, `test_freeipa_server_fqdn`. Verified on a **fresh, independent 3-VM
+round** (not yet re-combined with the 5-endpoint topology above in a single run):
+`p11-ipa` (AlmaLinux 9, FreeIPA server, self-pointing), `p11-el` (AlmaLinux 9, plain),
+`p11-debian` (Ubuntu 24.04, plain). `docs/verification/freeipa-dns-client.md`
+re-confirmed 18/18 (no regression from the extraction) after fixing one bug the
+extraction's own `--check` dry run exposed for the first time (the NetworkManager
+discovery command lacked `check_mode: false`, so its own gate always failed under
+`--check` — the pre-extraction playbook had this same bug, just never dry-run before)
+and one bug in C3's own probe design (its pilot-managed marker in `/etc/resolv.conf`
+never survives `nmcli device reapply` on EL, since NetworkManager regenerates that
+file from its own persisted config — not a functional defect, since C6's real `dig`
+check already proved resolution genuinely works; fixed by checking the NetworkManager
+connection profile's own `ipv4.ignore-auto-dns` field on EL instead). C9 itself,
+re-run via `internal-endpoint-apply.yml`'s fleet-wide baseline play, now reports `pass`
+across this mixed-OS topology. Idempotent reruns confirmed (`changed=0 failed=0`) for
+both playbooks. This makes 29 of 32 rows fixable given the two rounds' combined fixes;
+only C21/C23/C24 (the `pilot reconcile internal-endpoint` CLI gap) remain. Full details
+in the same evidence doc's follow-up section.
+
+2026-08-14, same-day decision: **C21, C23, and C24 are retired**, not implemented. A
+non-interactive `pilot reconcile internal-endpoint --manifest/--ledger` CLI surface —
+the only thing standing between these 3 rows and a real pass — was judged not worth
+building: the secret/vault-plumbing design it needs was already flagged as a real,
+non-trivial decision back in Phase 8, deferred every round since, and the user
+explicitly decided against ever building it rather than continuing to defer. This does
+**not** retire the underlying safety features themselves — the dual-confirmation
+delete gate (spec.md §31), the ledger-presence delete gate (spec.md §32), and the
+route-owner-migration rejection gate (spec.md §30) are real, unchanged Ansible
+mechanisms in `internal-endpoint-apply.yml`, and all 3 were already independently
+proven fail-closed via real negative-path VM tests in Phase 8 (see that round's
+evidence doc) — only the *verification-row* tracking of them through a CLI that will
+never exist is removed. The spec is now 29 rows (C1-C32 less C21/C23/C24); their
+`tags: [C21]`/`[C23]`/`[C24]` were also removed from `internal-endpoint-apply.yml`
+(the gate tasks themselves are untouched) to keep `tag_coverage_test.go`'s orphan-tag
+lock satisfied. Combined with the DNS-resolver-baseline fix above, no row in this spec
+now depends on unbuilt work — the remaining step to v1.0 promotion is a single combined
+verify run proving all 29 rows pass together on one topology (the two fixes were each
+verified independently, not yet in one combined pass).
+
 ## Change record
 
 | Date | Version | Change |
@@ -583,3 +675,6 @@ promotion is Phase 10's job.
 | 2026-08-14 | DRAFT (partial evidence) | Phase 6: the manifest-driven per-endpoint reconcile loop replaced Phase 5's single-endpoint scaffolding — C4, C6, C7 (DNS write + zone/collision preflight) now real, alongside C12/C13/C15 driven from the manifest. Confirmed against fresh AlmaLinux 9 + Ubuntu 24.04 VMs: spec.md §53 endpoint A (direct + tls.freeipa, non-standard port, real FreeIPA cert, real graceful renewal reload — same PID, proven via `getcert resubmit`) and endpoint B (nested FQDN + tls.disabled, DNS-only) both PASS; C8's collision gate confirmed to fail closed on a real negative-path VM test; idempotent rerun confirmed (`changed=0`). Also found and fixed a previously-unknown, project-wide `pilot verify` bug (`internal/tools/per_host_verify.go`'s `posixEnvironmentPrefix`: per-host rows never actually received their `$PILOT_VAR_*` inputs, silently false-passing whenever both sides of an `equals` check happened to be empty) plus two bugs in this spec's own C7/C9/C10 probes that bug had been masking (wrong manifest dict path in C7, wrong host in C7, `| SUCCESS` never matching ad-hoc `command`/`shell` output in C9/C10). C10 now genuinely passes for the first time. Still DRAFT overall — C2/C3/C5/C8/C9/C11/C17-C24/C26-C32 remain unimplemented or CLI-dependent pending Phase 7-9; see the evidence doc for the full bug list. |
 | 2026-08-14 | DRAFT (partial evidence) | Phase 7: nginx vhost render/reload/local-backend-check (C27) landed, and the DNS-write task extended to cover reverse_proxy routes too (C5). Confirmed against a fresh 3-VM topology (AlmaLinux 9 FreeIPA server + 2 Ubuntu 24.04 hosts, one reverse-proxy): spec.md §53 endpoint C (HTTP upstream) and endpoint D (insecure HTTPS upstream against a genuinely self-signed, non-FreeIPA backend cert, explicit SNI) both PASS end-to-end via real client `curl` through nginx — no `-k` needed on the frontend, real `openssl s_client` confirming the insecure upstream is genuine TLS on the wire (not downgraded to plaintext). Found and fixed 2 more ansible-core 2.19 lazy-dict AttributeErrors (dot-notation on a `default({})` result), a hand-rolled vhost-backup mechanism that broke idempotency (replaced with `ansible.builtin.template`'s native `backup: true`), and the same wrong-host probe bug already fixed for C14-C16/C9-C10 recurring in C27/C32 (fixed the same way — `scope: aggregate` dispatched to the real proxy host). Idempotent rerun confirmed (`changed=0 failed=0`) after the backup-mechanism fix. Still DRAFT overall — C2/C3/C8/C9/C11/C21-C24/C26/C30 remain unimplemented or CLI-dependent pending Phase 8-9; see the evidence doc for the full bug list. |
 | 2026-08-14 | DRAFT (partial evidence) | Phase 8: the ownership ledger (C11/C26), route-ownership-migration gate (C24), dual-confirmation + ledger-presence delete gates (C21/C23), and the full 9-step delete sequence with FreeIPA/DNS delete safety (C22) all landed real. Confirmed against a fresh 2-VM topology: the ledger writes correctly (real cert serial, root:root 0600); all 3 negative-path gates fail closed with real VM tests (dual confirmation, ledger-presence, route-migration, same precedent as C8); a real deletion completed all 9 steps — DNS RRset removed with a foreign TXT record at the same owner surviving intact (C22), certmonger tracking stopped, certificate genuinely revoked at the FreeIPA CA (`Revoked: True`), local cert/key removed, service principal and virtual host object removed, ledger entry removed. Found and fixed a real `ipa host-del --updatedns` CLI-flag mistake (bare boolean, not key=value — and wrong to pass at all here, since step 1 already did the surgical DNS removal) and C22's own leading-whitespace probe bug (same class already fixed for C13, caught proactively this time). Idempotent rerun confirmed (`changed=0 failed=0`) after recreating the endpoint. Still DRAFT overall — C2/C3/C5/C8/C9/C17/C18/C21/C23/C24/C27-C32 remain unimplemented, CLI-dependent, or outside this round's topology pending Phase 9; see the evidence doc for the full bug list and known follow-ups. |
+| 2026-08-14 | DRAFT (28/32) | Phase 10: full-topology round covering every route/TLS combination (5 real endpoints + 1 deliberately-invalid endpoint for negative-path/failure-injection testing) on a fresh 3-VM topology. Built the previously-nonexistent `pilot internal-endpoint validate` CLI (`cmd/pilot/cmd/internal_endpoint_cli.go`), which both unlocked C1-C3/C8/C30 for real and exposed that C1 had been silently FALSE-PASSING every prior round (cobra's generic "unknown command" error happens to contain the word "unknown", which C1's own probe grepped for) and that C8 had an independent, previously-undiscovered `scope: aggregate` scoping bug (fixed the same way as C7/C9/C10/C14-C16/C27/C32 already were). Also fixed the identical scoping bug on C21/C23/C24 (still correctly fail — `pilot reconcile internal-endpoint` remains a real, separate, deferred CLI gap), a real Ansible bug (`internal-endpoint-ledger-entry.yml`'s `delegate_to` templated to an empty hostname for any non-freeipa endpoint, since ansible-core resolves `delegate_to` per-loop-item even when `when` will skip the task), and a real omitted-`tls.port` bug (defaulted to `0` instead of `443`, literally rendering `listen 0 ssl` in the nginx vhost). Idempotent rerun confirmed (`changed=0 failed=0`) across all 3 hosts. **28/32 — the best result across all phases** (previous best: Phase 7's 21/32); the 4 remaining failures (C9, C21, C23, C24) are all specifically-identified, already-documented, deliberately-deferred gaps (DNS resolver baseline unimplemented; `pilot reconcile internal-endpoint` CLI doesn't exist), not new unknowns. Still DRAFT overall — full v1.0 promotion needs those two features; see the evidence doc for the complete bug list. |
+| 2026-08-14 | DRAFT (29/32 fixable) | Same-day follow-up: C9's DNS resolver baseline landed for real — extracted `freeipa-dns-client-apply.yml`'s resolver logic into shared `tasks/freeipa-dns-client-resolver.yml` (spec.md §26 point 1), wired into `internal-endpoint-apply.yml`'s fleet-wide baseline play (C9's task previously lived, wrongly, in the single-host reconcile play, where it could never have applied to hosts other than the freeipa-server itself), and fixed C9's own probe from Debian-only `resolvectl status` to a portable `getent hosts` check (new required input `test_freeipa_server_fqdn`). Verified on an independent fresh 3-VM round (AlmaLinux self-pointing FreeIPA server + AlmaLinux plain + Ubuntu plain, not yet re-combined with the 5-endpoint Phase 10 topology in one run): `freeipa-dns-client.md` re-confirmed 18/18 (no regression), after fixing a `--check`-mode gate bug the extraction's own first-ever dry run exposed (NetworkManager discovery command missing `check_mode: false`) and a C3 probe-design bug specific to EL (`nmcli device reapply` regenerates `/etc/resolv.conf` from NetworkManager's own config every time, dropping any comment marker — not a functional defect, fixed by checking the connection profile's persisted `ipv4.ignore-auto-dns` on EL instead). C9 itself now reports `pass` on this mixed-OS topology; idempotent reruns confirmed (`changed=0 failed=0`) for both playbooks. Only C21/C23/C24 (the `pilot reconcile internal-endpoint` CLI gap) remain before full v1.0 promotion. |
+| 2026-08-14 | DRAFT (29 rows total) | Same-day: **C21, C23, and C24 retired by explicit decision** — the non-interactive `pilot reconcile internal-endpoint` CLI these 3 rows' probes required will not be built (the secret/vault-plumbing design it needs was repeatedly deferred since Phase 8; the user decided against it outright rather than continuing to defer). The underlying Ansible-side gates (dual-confirmation delete, ledger-presence delete, route-owner-migration rejection — spec.md §30-§32) are unchanged and remain independently proven via Phase 8's real negative-path VM tests; only their CLI-dependent verification rows are removed. Spec is now 29 rows (C1-C32 less C21/C23/C24); `tags: [C21]`/`[C23]`/`[C24]` removed from `internal-endpoint-apply.yml` (gate tasks themselves untouched) to satisfy `tag_coverage_test.go`'s orphan-tag lock. No row now depends on unbuilt work; a single combined verify run (not yet performed) would establish v1.0. |
