@@ -22,7 +22,13 @@
   failed_when: false
   check_mode: false
   when: iep_endpoint.tls_mode == 'freeipa'
-  delegate_to: "{{ iep_endpoint.cert_owner }}"
+  # delegate_to is templated per-item even when `when` will skip the task
+  # (a loop + delegate_to interaction in ansible-core) — cert_owner is ""
+  # for a non-freeipa endpoint, and an empty delegate_to host is a hard
+  # error ("Empty hostname produced from delegate_to"), not a skip. Fall
+  # back to inventory_hostname (always valid) for the endpoints where the
+  # task's own `when` means this value is never actually acted on.
+  delegate_to: "{{ iep_endpoint.cert_owner if iep_endpoint.tls_mode == 'freeipa' else inventory_hostname }}"
 
 - name: "Append this endpoint's ledger entry"
   ansible.builtin.set_fact:
