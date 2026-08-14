@@ -8,11 +8,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestRegression_InternalEndpointSpec locks the Phase 1 shape (spec.md §63)
-// of docs/verification/internal-endpoint.md: all 32 rows (the v1.0
-// acceptance set C1-C26 plus the v1.1 reverse-proxy HTTPS-upstream
-// revision C27-C32, spec.md §67) exist with a non-empty command/expected,
-// and the spec lints clean.
+// TestRegression_InternalEndpointSpec locks the current shape of
+// docs/verification/internal-endpoint.md: 29 rows (the v1.0 acceptance set
+// C1-C26 plus the v1.1 reverse-proxy HTTPS-upstream revision C27-C32,
+// spec.md §67, less C21/C23/C24 — retired 2026-08-14 since their probes
+// depended on a non-interactive `pilot reconcile internal-endpoint` CLI
+// that will never be built; see the spec's own Change record) exist with a
+// non-empty command/expected, and the spec lints clean.
 func TestRegression_InternalEndpointSpec(t *testing.T) {
 	const specPath = "../../docs/verification/internal-endpoint.md"
 	s, err := Parse(specPath)
@@ -20,8 +22,12 @@ func TestRegression_InternalEndpointSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := make([]string, 0, 32)
+	retired := map[int]bool{21: true, 23: true, 24: true}
+	wantIDs := make([]string, 0, 29)
 	for i := 1; i <= 32; i++ {
+		if retired[i] {
+			continue
+		}
 		wantIDs = append(wantIDs, "C"+itoaInternalEndpoint(i))
 	}
 	if len(s.Rows) != len(wantIDs) {
@@ -219,7 +225,7 @@ func TestRegression_InternalEndpointContract(t *testing.T) {
 		t.Errorf("exemption %s tags = %v, want [C4]", derivedRef, derived.Tags)
 	}
 
-	tagged := []string{"C4", "C5", "C6", "C7", "C8", "C9", "C10", "C12", "C13", "C15", "C21", "C22", "C23", "C24", "C27"}
+	tagged := []string{"C4", "C5", "C6", "C7", "C8", "C9", "C10", "C12", "C13", "C15", "C22", "C27"}
 	for _, id := range tagged {
 		ref := "docs/verification/internal-endpoint.md#" + id
 		if _, exempt := c.Traceability.Exemptions[ref]; exempt {
@@ -268,7 +274,7 @@ func TestRegression_InternalEndpointApplyPlaybookCoversContractTags(t *testing.T
 	tags := map[string]bool{}
 	collectInternalEndpointPlaybookTags(&doc, tags)
 
-	tagged := []string{"C4", "C5", "C6", "C7", "C8", "C9", "C10", "C12", "C13", "C15", "C21", "C22", "C23", "C24", "C27"}
+	tagged := []string{"C4", "C5", "C6", "C7", "C8", "C9", "C10", "C12", "C13", "C15", "C22", "C27"}
 	for _, id := range tagged {
 		if !tags[id] {
 			t.Errorf("%s has no tag %q required by traceability", playbookPath, id)
