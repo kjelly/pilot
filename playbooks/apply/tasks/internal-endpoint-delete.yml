@@ -1,9 +1,11 @@
 ---
 # Spec: docs/verification/internal-endpoint.md C22 (spec.md §32-§34).
 #
-# The 9-step delete sequence for one endpoint already gated by C21 (dual
-# confirmation) and C23 (ledger presence) — this file assumes both already
-# passed. Included with `loop:` over internal_endpoint_absent; `iep_endpoint`
+# The 9-step delete sequence for one endpoint already gated by the dual
+# confirmation and ledger-presence asserts above (formerly tagged C21/C23;
+# those verification rows were retired 2026-08-14 — see
+# docs/verification/internal-endpoint.md's Change record — but the gates
+# themselves are unchanged) — this file assumes both already passed. Included with `loop:` over internal_endpoint_absent; `iep_endpoint`
 # is the loop_var (mainly for .fqdn — the manifest's own state:absent entry
 # may be minimal). Uses the LEDGER entry (looked up fresh per-iteration) as
 # the authoritative source for what to clean up: the ledger is what Pilot
