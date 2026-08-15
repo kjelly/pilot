@@ -100,8 +100,9 @@ It may not create or modify ordinary generated inventory or group variables.
 
 ## Serialization, recording gate, failure policy, output contract
 
-These are not restated here — they are shared with `minimal-poc-update` and
-`delivery-test`, and a second copy would drift. Apply, as written:
+These are not restated here — they are shared with `minimal-poc-update`
+(`delivery-test` was retired 2026-08-14 and merged into that runbook), and a second copy would
+drift. Apply, as written:
 
 | Concern | Authority |
 |---|---|

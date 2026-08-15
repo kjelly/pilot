@@ -19,6 +19,7 @@ bindings:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
 groupVars:
+  - {name: freeipa_roster_file, type: string, required: true, secret: true}
   - {name: nfs_server_fqdn, type: string, required: false, secret: false}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}

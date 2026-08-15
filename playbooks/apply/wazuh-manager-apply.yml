@@ -70,6 +70,14 @@
     wazuh_manager_conf: "{{ wazuh_single_node_dir }}/config/wazuh_cluster/wazuh_manager.conf"
     siem_forward_alias: siem-log-server
     siem_forwarding_enabled: "{{ (siem_forward_host | default('')) | length > 0 }}"
+    # The official compose file hard-binds the dashboard to host port 443 —
+    # confirmed live 2026-08-15 that this collides with reverse-proxy/nginx
+    # on any host running both roles (this topology's own nexus): whichever
+    # binds first wins the socket, and nginx's own internal-endpoint vhosts
+    # (which also need 443) silently never receive real traffic. Remap the
+    # dashboard's host port instead of nginx's, since 443 is the one HTTPS
+    # clients cannot avoid using.
+    wazuh_dashboard_host_port: 8443
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
@@ -181,6 +189,21 @@
         dest: "{{ wazuh_docker_root }}"
         remote_src: true
         creates: "{{ wazuh_single_node_dir }}/docker-compose.yml"
+      when: not ansible_check_mode
+
+    # Step 4b: remap the dashboard off host port 443 (spec C1) — the official
+    # compose file ships `- 443:5601` under the dashboard service, which
+    # collides with reverse-proxy/nginx on any host running both roles. Runs
+    # after the unpack (the file doesn't exist before it) and before compose
+    # up (Step 8), so the remapped port is what actually gets bound.
+    # ansible.builtin.replace is naturally idempotent — a rerun after the
+    # port is already remapped matches nothing and reports unchanged.
+    - name: "Step 4b: Remap the dashboard off host port 443 (avoids reverse-proxy/nginx conflict)"
+      tags: [C1]
+      ansible.builtin.replace:
+        path: "{{ wazuh_single_node_dir }}/docker-compose.yml"
+        regexp: '^(\s*-\s*)443:5601\s*$'
+        replace: '\g<1>{{ wazuh_dashboard_host_port }}:5601'
       when: not ansible_check_mode
 
     # One-shot official cert generator (wazuh/wazuh-certs-generator) —

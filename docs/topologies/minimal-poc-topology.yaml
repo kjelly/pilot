@@ -24,6 +24,20 @@
 #   --verify docs/verification/thanos-query.md=thanos-query
 #   --verify docs/verification/dashboard.md=dashboard
 #   --verify docs/verification/log-shipping.md=log-server
+#   --verify docs/verification/host-monitoring.md=host-monitoring
+#   --verify docs/verification/freeipa-dns-client.md=freeipa-dns-client
+#   --verify docs/verification/reverse-proxy.md=reverse-proxy
+#
+# freeipa-ca-trust is day-2/opt-in and targets the literal `all` inventory
+# group by default (not a named per-host role in this file) — see the
+# runbook's §3.5. internal-endpoint and freeipa-dns are day-2 reconcilers
+# (pilot reconcile, not role membership) and likewise not represented here.
+#
+# host-monitoring/freeipa-dns-client/reverse-proxy/freeipa-ca-trust/
+# internal-endpoint merged in from the now-retired `delivery-test` skill
+# (2026-08-14) — this merge has NOT yet been executed end-to-end against
+# this exact topology; do not treat it as verified until a live round says
+# so in the runbook's own round history.
 #
 # nexus carries both log-server and wazuh-manager (2026-08-06): confirmed
 # live that log-server-apply.yml runs correctly co-located with
@@ -55,6 +69,8 @@ nodes:
     boot_timeout: 6m
     groups:
       - freeipa-server
+      - freeipa-dns-client
+      - host-monitoring
       - audit-log-forwarding
       - wazuh-fim
       - restic-backup
@@ -72,6 +88,9 @@ nodes:
     boot_timeout: 6m
     groups:
       - freeipa-client
+      - freeipa-dns-client
+      - reverse-proxy
+      - host-monitoring
       - docker
       - audit-log-forwarding
       - log-server
@@ -98,6 +117,8 @@ nodes:
     boot_timeout: 6m
     groups:
       - freeipa-client
+      - freeipa-dns-client
+      - host-monitoring
       - docker
       - audit-log-forwarding
       - wazuh-fim

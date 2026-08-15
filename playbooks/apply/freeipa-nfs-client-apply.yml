@@ -38,6 +38,89 @@
         fail_msg: "Run freeipa-client-apply.yml before enabling IPA automount."
       tags: [always, C1]
 
+    # --- Roster-driven targeting (freeipa-config.md §14.3) ---
+    # Which hosts are genuine NFS automount clients is now authoritative in
+    # the canonical roster's nfs_clients[], not just static inventory group
+    # membership — mirrors freeipa-nfs-server-apply.yml's own roster-loading
+    # convention exactly (same freeipa_roster_file host var, same
+    # `hostname --fqdn` discovery pattern).
+    - name: "Load canonical roster under a namespace"
+      ansible.builtin.include_vars:
+        file: "{{ freeipa_roster_file }}"
+        name: freeipa_roster
+      no_log: true
+      tags: [always]
+
+    - name: "Discover this NFS client's operating-system FQDN"
+      ansible.builtin.command: hostname --fqdn
+      check_mode: false
+      changed_when: false
+      register: nfs_client_hostname_fqdn
+      tags: [always]
+
+    - name: "Use the operating-system FQDN for canonical roster selection"
+      ansible.builtin.set_fact:
+        nfs_client_fqdn: "{{ nfs_client_hostname_fqdn.stdout | trim }}"
+      tags: [always]
+
+    - name: "Resolve which present nfs_clients entries (if any) cover this host"
+      # Membership resolution covers direct hostgroup membership plus one
+      # level of nested hostgroups — the deepest nesting this roster is
+      # actually authored to in practice. A deeper chain silently will not
+      # match; keep nfs_clients hostgroups shallow. `nfs_client_hg` can
+      # legitimately resolve to `{}` (hostgroup name not found at all) — the
+      # `if nfs_client_hg else []` ternary short-circuits before any dotted
+      # access on it, since dotted access on an empty dict raises
+      # AttributeError rather than returning Undefined.
+      ansible.builtin.set_fact:
+        nfs_client_matches: "{{ (nfs_client_matches | default([])) + [item] }}"
+      vars:
+        nfs_client_hostgroups: "{{ freeipa_roster.hostgroups | default([]) }}"
+        nfs_client_hg: "{{ nfs_client_hostgroups | selectattr('name', 'equalto', item.hostgroup) | list | first | default({}) }}"
+        nfs_client_direct_hosts: "{{ (nfs_client_hg.membership.hosts | default([])) if nfs_client_hg else [] }}"
+        nfs_client_nested_names: "{{ (nfs_client_hg.membership.hostgroups | default([])) if nfs_client_hg else [] }}"
+        nfs_client_nested_hosts: >-
+          {{ nfs_client_hostgroups | selectattr('name', 'in', nfs_client_nested_names)
+             | map(attribute='membership.hosts') | list | sum(start=[]) }}
+        nfs_client_resolved_hosts: "{{ nfs_client_direct_hosts + nfs_client_nested_hosts }}"
+      loop: >-
+        {{ freeipa_roster.nfs_clients | default([])
+           | selectattr('state', 'defined') | selectattr('state', 'equalto', 'present')
+           | selectattr('hostgroup', 'defined') | list }}
+      loop_control:
+        label: "{{ item.hostgroup }}"
+      when: nfs_client_fqdn in nfs_client_resolved_hosts
+      tags: [always]
+
+    - name: "Gate: this host must be declared as a present nfs_clients entry in the roster"
+      ansible.builtin.assert:
+        that:
+          - (nfs_client_matches | default([])) | length > 0
+        fail_msg: >-
+          {{ nfs_client_fqdn }} is in the freeipa-nfs-client inventory group but
+          no roster nfs_clients[] entry (state: present) declares a hostgroup
+          whose membership (direct hosts, or one level of nested hostgroups)
+          includes this host. Add this host to the relevant hostgroup, or add
+          a new nfs_clients entry, then re-run.
+      # A fresh, not-yet-enrolled host's `hostname --fqdn` only reports its
+      # real FQDN after ipa-client-install actually runs (a real mutation,
+      # never during --check), so this gate cannot evaluate meaningfully on
+      # a first-ever preview. Mirrors freeipa-nfs-server-apply.yml's own
+      # analogous "Gate: inventory FQDN maps to exactly one safe NFS server".
+      when: not ansible_check_mode
+      tags: [always]
+
+    - name: "Use the first matching nfs_clients entry for this host's automount configuration"
+      ansible.builtin.set_fact:
+        nfs_client_entry: "{{ nfs_client_matches[0] }}"
+      # Left genuinely undefined (not {}) on a --check preview with no match,
+      # so every downstream `nfs_client_entry.foo | default(...)` reference
+      # chains safely through Undefined instead of raising AttributeError —
+      # mirrors freeipa-nfs-server-apply.yml's own "Select the unique NFS
+      # server object" guard (`when: nfs_selected_servers | length > 0`).
+      when: (nfs_client_matches | default([])) | length > 0
+      tags: [always]
+
   tasks:
     - name: "Install NFS and automount client packages"
       ansible.builtin.package:
@@ -46,7 +129,7 @@
       tags: [C2]
     - name: "Configure the IPA automount location"
       ansible.builtin.command:
-        argv: [ipa-client-automount, --unattended, "--location={{ nfs_automount_location }}"]
+        argv: [ipa-client-automount, --unattended, "--location={{ nfs_client_entry.automount.location | default(nfs_automount_location) }}"]
       register: nfs_client_automount
       changed_when: "'Configured automount' in (nfs_client_automount.stdout | default(''))"
       failed_when:
@@ -70,8 +153,56 @@
         state: started
       # The package task is predictive during --check, so a fresh host does
       # not have the autofs unit until the real apply installs it.
-      when: not ansible_check_mode
+      when: not ansible_check_mode and (nfs_client_entry.automount.enable_service | default(true) | bool)
       tags: [C5]
+
+    # --- Verification-mount proof (freeipa-config.md §14.3 steps 7-8) ---
+    # docs/verification/freeipa-nfs-client.md §4 already deferred mount
+    # security-flavor verification to ad-hoc topology evidence rather than a
+    # static per-host spec row, since the exact path is roster-specific data,
+    # not a fixed property every freeipa-nfs-client host shares. These two
+    # tasks automate exactly that check as a real, tagged part of every
+    # apply — the tags below are deliberately NOT row-shaped (no matching
+    # docs/verification/freeipa-nfs-client.md row exists or is needed; see
+    # tag_coverage_test.go's orphan-tag rule, which only requires spec-row
+    # coverage for row-shaped tags). Skipped under --check for the same
+    # reason "Enable autofs" is: a fresh host only ever has autofs/packages
+    # predicted, never actually installed, during a preview.
+    - name: "Trigger autofs mount for each roster-declared verification path"
+      ansible.builtin.command: ls -la {{ item }}
+      loop: "{{ nfs_client_entry.verification_mounts | default([]) }}"
+      register: nfs_client_verify_access
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [nfs-client-verify-mount-trigger]
+
+    - name: "Verify each triggered path is a genuinely mounted, Kerberized NFSv4 filesystem"
+      ansible.builtin.command: findmnt --noheadings --output TARGET,FSTYPE,OPTIONS {{ item }}
+      loop: "{{ nfs_client_entry.verification_mounts | default([]) }}"
+      register: nfs_client_verify_mount
+      changed_when: false
+      failed_when: >-
+        nfs_client_verify_mount.rc != 0 or
+        'nfs4' not in nfs_client_verify_mount.stdout or
+        'sec=krb5' not in nfs_client_verify_mount.stdout
+      when: not ansible_check_mode
+      tags: [nfs-client-verify-mount-check]
+      # A hard failure here would exclude this host from every later site.yml
+      # play (Ansible's default "failed host is dropped from all subsequent
+      # plays in the run" behavior) — but this check's own prerequisites
+      # (the IPA automount map/key, created only by the separate
+      # freeipa-identity day-2 reconcile; and the NFS server FQDN actually
+      # resolving, which needs the separate freeipa-dns-client day-2 role)
+      # are never guaranteed to exist yet on a plain site.yml pass, since
+      # both run after site.yml in this project's own established rebuild
+      # order. ignore_errors keeps the real pass/fail result visible in the
+      # recap (as "ignored", not "failed") without derailing every other
+      # role this host still needs from the rest of site.yml. Confirmed live
+      # 2026-08-15: without this, a fresh topology's first site.yml pass
+      # silently skipped host-monitoring/wazuh-fim/restic-backup/
+      # audit-log-forwarding on the NFS client host entirely.
+      ignore_errors: true
 
   handlers:
     - name: Restart SSSD after enabling automount

@@ -23,9 +23,9 @@ func TestMinimalPoCTopologyMatchesRunbook(t *testing.T) {
 		disk   int
 		groups []string
 	}{
-		"freeipa-server": {"almalinux-9", 4608, 2, 30, []string{"freeipa-server", "audit-log-forwarding", "wazuh-fim", "restic-backup"}},
-		"nexus":          {"ubuntu-24.04", 12288, 6, 80, []string{"freeipa-client", "docker", "audit-log-forwarding", "log-server", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"}},
-		"client-vm":      {"ubuntu-24.04", 2048, 2, 20, []string{"freeipa-client", "docker", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client"}},
+		"freeipa-server": {"almalinux-9", 4608, 2, 30, []string{"freeipa-server", "freeipa-dns-client", "host-monitoring", "audit-log-forwarding", "wazuh-fim", "restic-backup"}},
+		"nexus":          {"ubuntu-24.04", 12288, 6, 80, []string{"freeipa-client", "freeipa-dns-client", "reverse-proxy", "host-monitoring", "docker", "audit-log-forwarding", "log-server", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"}},
+		"client-vm":      {"ubuntu-24.04", 2048, 2, 20, []string{"freeipa-client", "freeipa-dns-client", "host-monitoring", "docker", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client"}},
 	}
 	for _, node := range spec.Nodes {
 		got, ok := want[node.Name]
@@ -40,8 +40,8 @@ func TestMinimalPoCTopologyMatchesRunbook(t *testing.T) {
 		}
 	}
 	order, groups := spec.Groups()
-	if len(order) != 15 {
-		t.Fatalf("group count = %d, want 15", len(order))
+	if len(order) != 18 {
+		t.Fatalf("group count = %d, want 18", len(order))
 	}
 	if len(groups["freeipa-server"]) != 1 || groups["freeipa-server"][0] != "freeipa-server" {
 		t.Fatalf("freeipa-server group = %v", groups["freeipa-server"])
@@ -60,5 +60,15 @@ func TestMinimalPoCTopologyMatchesRunbook(t *testing.T) {
 	}
 	if !reflect.DeepEqual(groups["freeipa-nfs-client"], []string{"client-vm"}) {
 		t.Fatalf("freeipa-nfs-client group = %v", groups["freeipa-nfs-client"])
+	}
+	// Merged in from the retired delivery-test skill (2026-08-14).
+	if !reflect.DeepEqual(groups["freeipa-dns-client"], []string{"freeipa-server", "nexus", "client-vm"}) {
+		t.Fatalf("freeipa-dns-client group = %v", groups["freeipa-dns-client"])
+	}
+	if !reflect.DeepEqual(groups["host-monitoring"], []string{"freeipa-server", "nexus", "client-vm"}) {
+		t.Fatalf("host-monitoring group = %v", groups["host-monitoring"])
+	}
+	if !reflect.DeepEqual(groups["reverse-proxy"], []string{"nexus"}) {
+		t.Fatalf("reverse-proxy group = %v", groups["reverse-proxy"])
 	}
 }

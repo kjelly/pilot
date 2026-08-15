@@ -2,6 +2,7 @@ package spec
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -235,5 +236,47 @@ func TestRegression_WazuhManagerSpec(t *testing.T) {
 		if !covered[id] {
 			t.Errorf("spec row %s is not covered by any generated task", id)
 		}
+	}
+}
+
+// TestRegression_WazuhManagerDashboardOffPort443 locks the 2026-08-15 fix:
+// the official wazuh-docker compose file hard-binds the dashboard container
+// to host port 443 (`- 443:5601`), which collides with reverse-proxy/nginx
+// on any host running both roles (confirmed live: nginx's bind() to
+// 0.0.0.0:443/[::]:443 failed with "Address already in use", so a
+// reverse-proxy-fronted internal-endpoint vhost silently never received
+// real traffic — every connection to port 443 landed on the dashboard's own
+// self-signed cert instead). The apply playbook now remaps the dashboard's
+// host port via ansible.builtin.replace after unpacking the official
+// bundle, before compose up.
+func TestRegression_WazuhManagerDashboardOffPort443(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "wazuh-manager-apply.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	for _, required := range []string{
+		"wazuh_dashboard_host_port: 8443",
+		"Remap the dashboard off host port 443",
+		"regexp: '^(\\s*-\\s*)443:5601\\s*$'",
+		"replace: '\\g<1>{{ wazuh_dashboard_host_port }}:5601'",
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Errorf("wazuh-manager-apply.yml must remap the dashboard off host port 443 to avoid the reverse-proxy/nginx bind conflict; missing %q", required)
+		}
+	}
+	// The remap must run after the unpack (Step 4, the file doesn't exist
+	// before it) and before compose up (Step 8) — otherwise it either fails
+	// (file absent) or is applied too late (compose already read the
+	// original port).
+	unpackIdx := strings.Index(playbook, "Step 4: Unpack the release bundle")
+	remapIdx := strings.Index(playbook, "Remap the dashboard off host port 443")
+	composeUpIdx := strings.Index(playbook, "Step 8: Compose up the official single-node project")
+	if unpackIdx < 0 || remapIdx < 0 || composeUpIdx < 0 {
+		t.Fatal("could not locate Step 4/4b/8 in wazuh-manager-apply.yml")
+	}
+	if !(unpackIdx < remapIdx && remapIdx < composeUpIdx) {
+		t.Error("the port-443 remap must run after unpacking the compose file and before compose up")
 	}
 }

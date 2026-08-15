@@ -2,8 +2,9 @@
 
 > Shared normative contract for any task that rebuilds a pilot topology from
 > zero and produces evidence from it. Referenced by
-> `.agents/skills/minimal-poc-update`, `.agents/skills/minimal-poc-revalidation`,
-> and `.agents/skills/delivery-test`.
+> `.agents/skills/minimal-poc-update` and `.agents/skills/minimal-poc-revalidation`.
+> (`.agents/skills/delivery-test` was retired 2026-08-14 and merged into
+> `minimal-poc-update`/`docs/runbooks/minimal-poc-architecture.md`.)
 >
 > This file is the authority for **how** a clean-room run is conducted. It says
 > nothing about **which** hosts, roles, or checks a given run covers — that

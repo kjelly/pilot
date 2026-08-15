@@ -177,6 +177,66 @@ func TestRegression_FreeIPANFSServerSnapshotIsCreateOnce(t *testing.T) {
 	}
 }
 
+// TestRegression_FreeIPANFSClientConsumesRosterNFSClients locks the
+// 2026-08-14 fix: nfs_clients[] used to be accepted by the roster schema
+// (schema validation, migration fingerprinting) but never actually read by
+// any playbook — freeipa-nfs-client-apply.yml drove purely off static
+// inventory group membership. This test ensures the roster is genuinely the
+// targeting authority (a host not covered by any present nfs_clients entry
+// must fail closed) and that the verification_mounts steps (freeipa-config.md
+// §14.3 steps 7-8) exist as real, tagged tasks.
+func TestRegression_FreeIPANFSClientConsumesRosterNFSClients(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-nfs-client-apply.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	for _, required := range []string{
+		"Load canonical roster under a namespace",
+		"file: \"{{ freeipa_roster_file }}\"",
+		"Discover this NFS client's operating-system FQDN",
+		"Resolve which present nfs_clients entries (if any) cover this host",
+		"Gate: this host must be declared as a present nfs_clients entry in the roster",
+		"nfs_client_entry.automount.location | default(nfs_automount_location)",
+		"nfs_client_entry.automount.enable_service | default(true) | bool",
+		"Trigger autofs mount for each roster-declared verification path",
+		"tags: [nfs-client-verify-mount-trigger]",
+		"Verify each triggered path is a genuinely mounted, Kerberized NFSv4 filesystem",
+		"tags: [nfs-client-verify-mount-check]",
+		"'nfs4' not in nfs_client_verify_mount.stdout",
+		"'sec=krb5' not in nfs_client_verify_mount.stdout",
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Errorf("freeipa-nfs-client-apply.yml must be roster-driven; missing %q", required)
+		}
+	}
+	// The gate must be a hard fail-closed assert, not a soft warn-and-skip —
+	// static inventory group membership alone must no longer be sufficient.
+	if !strings.Contains(playbook, "(nfs_client_matches | default([])) | length > 0") {
+		t.Error("freeipa-nfs-client-apply.yml must hard-fail when no nfs_clients entry covers this host")
+	}
+	// The mount-check task itself must NOT hard-fail the host: its
+	// prerequisites (the IPA automount map/key, created only by the separate
+	// freeipa-identity day-2 reconcile; and the NFS server FQDN actually
+	// resolving, which needs the separate freeipa-dns-client day-2 role)
+	// are never guaranteed to exist on a plain site.yml pass, since both run
+	// after site.yml in this project's established rebuild order. Confirmed
+	// live 2026-08-15 (round 25): without ignore_errors, a hard failure here
+	// silently excludes this host from every later site.yml play.
+	checkStart := strings.Index(playbook, "- name: \"Verify each triggered path is a genuinely mounted, Kerberized NFSv4 filesystem\"")
+	if checkStart < 0 {
+		t.Fatal("mount-check task is missing")
+	}
+	checkEnd := strings.Index(playbook[checkStart:], "\n  handlers:")
+	if checkEnd < 0 {
+		t.Fatal("could not isolate mount-check task")
+	}
+	if !strings.Contains(playbook[checkStart:checkStart+checkEnd], "ignore_errors: true") {
+		t.Error("freeipa-nfs-client-apply.yml's mount-check task must not cascade-fail the rest of site.yml for this host (ignore_errors: true)")
+	}
+}
+
 func TestRegression_FreeIPAClientFreshPreviewDoesNotReadMissingSSSDConfig(t *testing.T) {
 	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-client-apply.yml")
 	data, err := os.ReadFile(playbookPath)

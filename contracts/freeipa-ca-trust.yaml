@@ -1,6 +1,17 @@
 schemaVersion: 1
 id: freeipa-ca-trust
-role: freeipa-ca-trust
+# The literal Ansible `all` group, not a per-component role — matches
+# freeipa-ca-trust-apply.yml's own `hosts: "{{ target_group | default('all')
+# }}"` default (spec.md §5.2). Fixed 2026-08-15 (round 25): a mismatched
+# `role: freeipa-ca-trust` (a group nothing ever populates, since this
+# component has no hosts.yml role-checklist entry by design) made
+# `cmd/pilot/cmd/deploy.go`'s dependency resolver — which resolves a
+# component's default hosts via a literal `inventoryGroups[component.Role]`
+# lookup, with no knowledge of deploy_catalog.go's cosmetic `DefaultGroup`
+# field — always resolve zero hosts both for this component's own empty
+# `target_group` prompt AND for any other component (`internal-endpoint`)
+# that depends on it, with no possible wizard workaround for the latter.
+role: all
 specs:
   - path: docs/verification/freeipa-ca-trust.md
     rows: {all: true}

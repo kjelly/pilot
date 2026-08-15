@@ -34,9 +34,10 @@ screen** (menu discovery, diagnosing a derailed run — see
 
 - `$HOME/.agents/skills/trec-mcp/SKILL.md`.
 
-Do **not** read `.agents/skills/delivery-test/SKILL.md` for this task. Its
-clean-room rules are now in the shared contract above; the rest of it defines a
-*different* three-VM scenario, and loading it imports a competing host/role list.
+`.agents/skills/delivery-test/SKILL.md` was retired 2026-08-14 — its scope (internal-endpoint,
+reverse-proxy, freeipa-ca-trust, freeipa-dns-client, host-monitoring) is now part of THIS runbook's
+own §0.5/§3.7/§3.8/§4.2/§4.5 (marked DRAFT until a live round confirms them). Do not go looking for
+a separate delivery-test scenario to reconcile against; there is only one canonical topology now.
 
 If any required file is unavailable, return BLOCKED.
 
