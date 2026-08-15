@@ -14,7 +14,7 @@ dependencies:
 hostCardinality: exactly-one
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 endpoints:
-  - {name: api, scheme: http, port: 9093}
+  - {name: api, scheme: http, port: 9093, autoPublish: {eligible: false, reason: "no auth of its own; same operational-surface exclusion as prometheus"}}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: vm, idempotency: required}
 traceability:

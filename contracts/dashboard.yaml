@@ -22,8 +22,8 @@ resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 10}
 groupVars:
   - {name: thanos_query_target_host, type: string, required: true, secret: false}
 endpoints:
-  - {name: grafana, scheme: http, port: 3000}
-  - {name: loki, scheme: http, port: 3100}
+  - {name: grafana, scheme: http, port: 3000, autoPublish: {eligible: true, subdomain: grafana}}
+  - {name: loki, scheme: http, port: 3100, autoPublish: {eligible: false, reason: "Loki's HTTP API is Grafana's own datasource wiring, not a human-facing page"}}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:

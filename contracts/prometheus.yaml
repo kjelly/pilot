@@ -38,7 +38,7 @@ groupVars:
   - {name: node_exporter_basic_auth_user, type: string, required: false, default: "prometheus", secret: false}
   - {name: node_exporter_basic_auth_password, type: string, required: false, secret: true}
 endpoints:
-  - {name: prometheus, scheme: http, port: 9090}
+  - {name: prometheus, scheme: http, port: 9090, autoPublish: {eligible: false, reason: "no auth of its own; publishing this operational surface through the shared reverse-proxy would put unauthenticated metrics on the same trust boundary as user-facing apps"}}
   - {name: sidecar, scheme: grpc, port: 10901}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}

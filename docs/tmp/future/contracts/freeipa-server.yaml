@@ -37,8 +37,8 @@ endpoints:
   - {name: kerberosUdp, scheme: udp, port: 88}
   - {name: kpasswdUdp, scheme: udp, port: 464}
   - {name: kpasswdTcp, scheme: tcp, port: 464}
-  - {name: httpBootstrap, scheme: http, port: 80}
-  - {name: https, scheme: https, port: 443}
+  - {name: httpBootstrap, scheme: http, port: 80, autoPublish: {eligible: false, reason: "installer bootstrap listener, not a human-facing UI"}}
+  - {name: https, scheme: https, port: 443, autoPublish: {eligible: false, reason: "FreeIPA is the trust root internal-endpoint depends on (required sameHosts dependency in contracts/internal-endpoint.yaml); routing its own web UI through that same reverse-proxy mechanism would be circular. Its cert SAN and Kerberos SPN are also bound to freeipa_domain at ipa-server-install time, not to whatever FQDN a reverse-proxy entry would assign"}}
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false
 evidenceRequirement: {targetTest: vm, idempotency: required}

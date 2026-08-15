@@ -10,7 +10,7 @@ regressionTests:
   - internal/spec/wazuh_fim_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
-  - {component: wazuh-manager, required: true, relation: providerEndpoint}
+  - {component: wazuh-manager, required: true, relation: providerEndpoint, endpoints: [agent, agentAuth]}
 bindings:
   - input: wazuh_manager_host
     requiredWhenDependencySelected: true

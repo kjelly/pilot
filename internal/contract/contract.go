@@ -131,10 +131,25 @@ type InputCondition struct {
 
 // Endpoint describes a network or Unix-socket endpoint provided by a component.
 type Endpoint struct {
-	Name   string `yaml:"name"`
-	Scheme string `yaml:"scheme"`
-	Port   int    `yaml:"port"`
-	Path   string `yaml:"path"`
+	Name        string       `yaml:"name"`
+	Scheme      string       `yaml:"scheme"`
+	Port        int          `yaml:"port"`
+	Path        string       `yaml:"path"`
+	AutoPublish *AutoPublish `yaml:"autoPublish"`
+}
+
+// AutoPublish declares whether an http/https endpoint is a candidate for the
+// internal-endpoint auto-provision suggester (`pilot internal-endpoint
+// suggest`, and the edit-TUI's endpoint menu). Eligible defaults to false:
+// publishing a service through the shared reverse-proxy is an explicit,
+// per-endpoint opt-in, never inferred from scheme=http alone. Endpoints that
+// are deliberately excluded (freeipa-server's own https, the metrics-stack
+// operational surfaces) still declare this block with eligible: false and a
+// Reason, so the exclusion reads as a decision, not an oversight.
+type AutoPublish struct {
+	Eligible  bool   `yaml:"eligible"`
+	Subdomain string `yaml:"subdomain"`
+	Reason    string `yaml:"reason"`
 }
 
 // StagePolicy names the stage variable and its default.
@@ -682,6 +697,9 @@ func validateEndpoints(endpoints []Endpoint) error {
 		}
 		if endpoint.Port <= 0 {
 			return fmt.Errorf("network endpoint %s must set a positive port", endpoint.Name)
+		}
+		if endpoint.AutoPublish != nil && endpoint.AutoPublish.Eligible && endpoint.Scheme != "http" && endpoint.Scheme != "https" {
+			return fmt.Errorf("endpoint %s: autoPublish.eligible requires scheme http or https, got %q", endpoint.Name, endpoint.Scheme)
 		}
 	}
 	return nil

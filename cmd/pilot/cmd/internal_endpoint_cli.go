@@ -12,10 +12,13 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
+	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
@@ -23,6 +26,12 @@ var (
 	iepValidateManifestFlag    string
 	iepValidateFreeIPADNSFlag  string
 	iepValidatePrintNormalized bool
+
+	iepSuggestInventoryFlag          string
+	iepSuggestManifestFlag           string
+	iepSuggestFreeIPADNSManifestFlag string
+	iepSuggestZoneFlag               string
+	iepSuggestProxyHostFlag          string
 )
 
 var internalEndpointCmd = &cobra.Command{
@@ -37,13 +46,125 @@ var internalEndpointValidateCmd = &cobra.Command{
 	RunE:  runInternalEndpointValidateCmd,
 }
 
+// internalEndpointSuggestCmd is read-only and advisory: it never writes a
+// manifest or touches a live host, the same character as `validate`. It
+// diffs contracts (which endpoints declare autoPublish.eligible: true)
+// against this inventory's actual role-group membership and an existing
+// manifest's already-published upstreams, and prints ready-to-paste
+// endpoints: entries. A human still decides which to actually add — via
+// `pilot edit`'s internal-endpoint menu (Simulate-then-write, same gate as
+// every manual entry) or by copying the printed YAML by hand. This
+// deliberately stops short of a non-interactive reconcile CLI.
+var internalEndpointSuggestCmd = &cobra.Command{
+	Use:   "suggest",
+	Short: "Suggest internal-endpoint manifest entries for deployed services with autoPublish.eligible: true (read-only, writes nothing)",
+	Args:  cobra.NoArgs,
+	RunE:  runInternalEndpointSuggestCmd,
+}
+
 func init() {
 	internalEndpointValidateCmd.Flags().StringVar(&iepValidateManifestFlag, "manifest", "", "path to internal-endpoints.yaml (required)")
 	internalEndpointValidateCmd.Flags().StringVar(&iepValidateFreeIPADNSFlag, "freeipa-dns-manifest", "", "path to freeipa-dns.yaml, for DNS-zone-existence and ownership-collision checks (spec.md §11)")
 	internalEndpointValidateCmd.Flags().BoolVar(&iepValidatePrintNormalized, "print-normalized", false, "print the normalized endpoint list (one 'dns_owner fqdn' line per endpoint) instead of a violation report")
 	_ = internalEndpointValidateCmd.MarkFlagRequired("manifest")
 	internalEndpointCmd.AddCommand(internalEndpointValidateCmd)
+
+	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestInventoryFlag, "inventory", "", "path to the ansible inventory (hosts.yml) describing this topology (required)")
+	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestManifestFlag, "manifest", "", "path to the existing internal-endpoints.yaml, to skip already-published upstreams (optional; omit for a brand-new manifest)")
+	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestFreeIPADNSManifestFlag, "freeipa-dns-manifest", "", "path to freeipa-dns.yaml, to auto-resolve the zone when it declares exactly one (ignored if --zone is set)")
+	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestZoneFlag, "zone", "", "dns zone to publish suggested endpoints under (overrides --freeipa-dns-manifest auto-detection); required if that manifest declares zero or more than one zone")
+	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestProxyHostFlag, "proxy-host", "", "inventory_host to use as route.proxy (overrides auto-detection from the reverse-proxy group); required if that group has more than one host")
+	_ = internalEndpointSuggestCmd.MarkFlagRequired("inventory")
+	internalEndpointCmd.AddCommand(internalEndpointSuggestCmd)
+
 	rootCmd.AddCommand(internalEndpointCmd)
+}
+
+func runInternalEndpointSuggestCmd(cmd *cobra.Command, _ []string) error {
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return err
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		return err
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		return err
+	}
+
+	groups, err := resolveInventoryGroups(cmd.Context(), iepSuggestInventoryFlag)
+	if err != nil {
+		return fmt.Errorf("resolve inventory groups: %w", err)
+	}
+
+	proxyHost := iepSuggestProxyHostFlag
+	if proxyHost == "" {
+		hosts := groups["reverse-proxy"]
+		switch len(hosts) {
+		case 0:
+			return fmt.Errorf("no reverse-proxy host in this inventory (group %q is empty) — nothing can be published", "reverse-proxy")
+		case 1:
+			proxyHost = hosts[0]
+		default:
+			return fmt.Errorf("ambiguous reverse-proxy host: group %q has %d hosts (%s) — pass --proxy-host", "reverse-proxy", len(hosts), strings.Join(hosts, ", "))
+		}
+	}
+
+	zone := iepSuggestZoneFlag
+	if zone == "" {
+		if iepSuggestFreeIPADNSManifestFlag == "" {
+			return fmt.Errorf("pass --zone or --freeipa-dns-manifest to resolve the publishing zone")
+		}
+		zones, err := inventory.DNSManifestZoneNames(iepSuggestFreeIPADNSManifestFlag)
+		if err != nil {
+			return fmt.Errorf("load --freeipa-dns-manifest: %w", err)
+		}
+		switch len(zones) {
+		case 0:
+			return fmt.Errorf("%s declares no zones — pass --zone explicitly", iepSuggestFreeIPADNSManifestFlag)
+		case 1:
+			zone = zones[0]
+		default:
+			return fmt.Errorf("%s declares %d zones (%s) — pass --zone explicitly", iepSuggestFreeIPADNSManifestFlag, len(zones), strings.Join(zones, ", "))
+		}
+	}
+
+	var existing map[string]any
+	if iepSuggestManifestFlag != "" {
+		if _, statErr := os.Stat(iepSuggestManifestFlag); statErr == nil {
+			existing, err = inventory.LoadInternalEndpointManifest(iepSuggestManifestFlag)
+			if err != nil {
+				return fmt.Errorf("load --manifest: %w", err)
+			}
+		} else if !os.IsNotExist(statErr) {
+			return fmt.Errorf("stat --manifest %s: %w", iepSuggestManifestFlag, statErr)
+		}
+	}
+
+	result := inventory.SuggestInternalEndpoints(catalog.Components(), groups, proxyHost, zone, existing)
+
+	out := cmd.OutOrStdout()
+	if len(result.Candidates) == 0 {
+		fmt.Fprintln(out, "# no candidates")
+	}
+	for _, candidate := range result.Candidates {
+		rendered, err := yaml.Marshal([]any{candidate.Manifest})
+		if err != nil {
+			return fmt.Errorf("encode candidate %s: %w", candidate.FQDN, err)
+		}
+		fmt.Fprintf(out, "# %s (%s.%s) — paste this entry into internal-endpoints.yaml's endpoints:\n", candidate.FQDN, candidate.Component, candidate.Endpoint)
+		fmt.Fprint(out, string(rendered))
+		fmt.Fprintln(out)
+	}
+	if len(result.Skipped) > 0 {
+		fmt.Fprintln(out, "# skipped:")
+		for _, skip := range result.Skipped {
+			fmt.Fprintf(out, "#   %s/%s: %s\n", skip.Component, skip.Endpoint, skip.Reason)
+		}
+	}
+	return nil
 }
 
 func runInternalEndpointValidateCmd(cmd *cobra.Command, _ []string) error {

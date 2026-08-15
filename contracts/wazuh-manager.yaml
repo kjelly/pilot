@@ -24,6 +24,14 @@ groupVars:
 endpoints:
   - {name: agent, scheme: tcp, port: 1514}
   - {name: agentAuth, scheme: tcp, port: 1515}
+  # host port matches wazuh_dashboard_host_port in wazuh-manager-apply.yml
+  # (remapped off 443 in round 25 to avoid the reverse-proxy port conflict).
+  # subdomain is "wazuh-dashboard", not "wazuh" -- the minimal-poc reference
+  # topology's freeipa-dns.yaml already owns a "wazuh" A record for direct
+  # access to the manager's own agent ports; confirmed live 2026-08-15 that
+  # "wazuh" collides with it (DNS-ownership-collision gate correctly blocks
+  # the auto-suggested candidate).
+  - {name: dashboard, scheme: https, port: 8443, autoPublish: {eligible: true, subdomain: wazuh-dashboard}}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 lifecycle:

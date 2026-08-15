@@ -114,10 +114,17 @@ type fixtureInputCondition struct {
 }
 
 type fixtureEndpoint struct {
-	Name   string `yaml:"name"`
-	Scheme string `yaml:"scheme"`
-	Port   int    `yaml:"port"`
-	Path   string `yaml:"path"`
+	Name        string              `yaml:"name"`
+	Scheme      string              `yaml:"scheme"`
+	Port        int                 `yaml:"port"`
+	Path        string              `yaml:"path"`
+	AutoPublish *fixtureAutoPublish `yaml:"autoPublish"`
+}
+
+type fixtureAutoPublish struct {
+	Eligible  bool   `yaml:"eligible"`
+	Subdomain string `yaml:"subdomain"`
+	Reason    string `yaml:"reason"`
 }
 
 type fixtureStagePolicy struct {

@@ -22,7 +22,7 @@ resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 10}
 groupVars:
   - {name: thanos_s3_target_host, type: string, required: true, secret: false}
 endpoints:
-  - {name: query, scheme: http, port: 10902}
+  - {name: query, scheme: http, port: 10902, autoPublish: {eligible: false, reason: "no auth of its own; same operational-surface exclusion as prometheus"}}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:

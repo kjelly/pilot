@@ -29,6 +29,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
@@ -127,11 +129,11 @@ func pushInternalEndpointsMenu(r *editRouterModel, dir, path, banner string) tea
 		banner += "\n" + note
 	}
 
-	items := make([]string, 0, len(fqdns)+2)
+	items := make([]string, 0, len(fqdns)+3)
 	for _, f := range fqdns {
 		items = append(items, "🔌 "+f)
 	}
-	items = append(items, "➕ 新增 endpoint", "↩  返回")
+	items = append(items, "➕ 新增 endpoint", "🔎 從已部署服務建議 endpoint", "↩  返回")
 
 	return r.transitionTo(newSelectModelWithScreenID("iep.list", fmt.Sprintf("Endpoints — %s", path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(selectModel)
@@ -143,9 +145,124 @@ func pushInternalEndpointsMenu(r *editRouterModel, dir, path, banner string) tea
 			return pushInternalEndpointDetail(r, dir, path, fqdns[m.Selected()], "")
 		case m.Selected() == len(fqdns):
 			return pushInternalEndpointAddFQDN(r, dir, path)
+		case m.Selected() == len(fqdns)+1:
+			return pushInternalEndpointSuggestMenu(r, dir, path)
 		default:
 			return pushInternalEndpointManifestManager(r, dir, path, "")
 		}
+	})
+}
+
+// ---- suggest from deployed services ---------------------------------------
+
+// pushInternalEndpointSuggestMenu is the interactive counterpart of `pilot
+// internal-endpoint suggest`: it resolves the same contracts +
+// hosts.yml/freeipa-dns.yaml inputs the CLI takes as flags, but only for the
+// unambiguous common case (exactly one reverse-proxy host, exactly one
+// freeipa-dns zone) — anything ambiguous bails out to a banner pointing at
+// the CLI's --proxy-host/--zone overrides instead of guessing. Accepted
+// candidates still go through the exact same SimulateAddInternalEndpoint ->
+// AppendInternalEndpoint chain as a manually authored entry (see
+// pushInternalEndpointAddTargetHost) — this menu item only pre-fills the
+// wizard, it never writes around its gates.
+func pushInternalEndpointSuggestMenu(r *editRouterModel, dir, path string) tea.Cmd {
+	root, err := resolveContractRoot("")
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		r.err = err
+		return nil
+	}
+
+	groups, err := resolveInventoryGroups(context.Background(), filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		return pushInternalEndpointsMenu(r, dir, path, fmt.Sprintf("⚠️  無法讀取 hosts.yml 的 inventory groups：%v", err))
+	}
+
+	proxyHosts := groups["reverse-proxy"]
+	if len(proxyHosts) != 1 {
+		return pushInternalEndpointsMenu(r, dir, path, fmt.Sprintf(
+			"⚠️  reverse-proxy 主機不是唯一一台（%d 台），這裡無法自動判斷；改用 `pilot internal-endpoint suggest --proxy-host <host>` 手動指定。", len(proxyHosts)))
+	}
+
+	dnsManifestPath := filepath.Join(dir, "freeipa-dns.yaml")
+	zones, err := inventory.DNSManifestZoneNames(dnsManifestPath)
+	if err != nil || len(zones) != 1 {
+		return pushInternalEndpointsMenu(r, dir, path, fmt.Sprintf(
+			"⚠️  %s 沒有恰好一個 zone，這裡無法自動判斷 dns.zone；改用 `pilot internal-endpoint suggest --zone <zone>` 手動指定。", dnsManifestPath))
+	}
+
+	existing, err := inventory.LoadInternalEndpointManifest(path)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+
+	result := inventory.SuggestInternalEndpoints(catalog.Components(), groups, proxyHosts[0], zones[0], existing)
+	if len(result.Candidates) == 0 {
+		banner := "沒有符合條件的候選 endpoint。"
+		for _, skip := range result.Skipped {
+			banner += fmt.Sprintf("\n  %s/%s：%s", skip.Component, skip.Endpoint, skip.Reason)
+		}
+		return pushInternalEndpointsMenu(r, dir, path, banner)
+	}
+
+	byLabel := make(map[string]inventory.InternalEndpointCandidate, len(result.Candidates))
+	items := make([]multiSelectItem, len(result.Candidates))
+	for i, c := range result.Candidates {
+		route := iepMapField(c.Manifest, "route")
+		upstream := iepMapField(route, "upstream")
+		label := fmt.Sprintf("%s  [%s/%s → %s:%s]", c.FQDN, c.Component, c.Endpoint,
+			iepStringValue(upstream, "inventory_host"), iepIntDisplay(upstream, "port", ""))
+		byLabel[label] = c
+		items[i] = multiSelectItem{Label: label}
+	}
+
+	title := "選要建立的 endpoint（space 勾選、enter 確認）"
+	return r.transitionTo(newMultiSelectModelWithScreenID("iep.suggest.pick", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(multiSelectModel)
+		if m.Canceled() {
+			return pushInternalEndpointsMenu(r, dir, path, "")
+		}
+		opts := internalEndpointValidateOptsFor(dir)
+		var added []string
+		var rejected []string
+		for _, label := range m.CheckedLabels() {
+			c, ok := byLabel[label]
+			if !ok {
+				continue
+			}
+			violations, err := inventory.SimulateAddInternalEndpoint(path, c.Manifest, opts)
+			if err != nil {
+				r.err = fmt.Errorf("%s: %w", path, err)
+				return nil
+			}
+			if len(violations) > 0 {
+				rejected = append(rejected, fmt.Sprintf("%s：%s", c.FQDN, formatIEPViolations(violations)))
+				continue
+			}
+			if err := inventory.AppendInternalEndpoint(path, c.Manifest); err != nil {
+				r.err = fmt.Errorf("write %s: %w", path, err)
+				return nil
+			}
+			added = append(added, c.FQDN)
+		}
+		banner := "沒有勾選任何 endpoint。"
+		if len(added) > 0 {
+			banner = fmt.Sprintf("✅ 已新增 %d 個 endpoint：%s", len(added), strings.Join(added, ", "))
+		}
+		if len(rejected) > 0 {
+			banner += "\n⚠️  以下候選未通過驗證，未寫入：\n" + strings.Join(rejected, "\n")
+		}
+		return pushInternalEndpointsMenu(r, dir, path, banner)
 	})
 }
 

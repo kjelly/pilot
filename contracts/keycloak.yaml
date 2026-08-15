@@ -24,7 +24,7 @@ groupVars:
   - {name: keycloak_db_password, type: string, required: true, secret: true}
   - {name: keycloak_admin_password, type: string, required: true, secret: true}
 endpoints:
-  - {name: oidc, scheme: http, port: 8080}
+  - {name: oidc, scheme: http, port: 8080, autoPublish: {eligible: false, reason: "KC_HOSTNAME is hardcoded to idp.infra.internal in keycloak-apply.yml; fronting it under a different internal-endpoint FQDN would issue OIDC tokens whose iss claim doesn't match the URL clients used to reach it. Revisit once kc_issuer_hostname is derived from the endpoint manifest instead of fixed"}}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:
