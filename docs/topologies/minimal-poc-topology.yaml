@@ -30,14 +30,14 @@
 #
 # freeipa-ca-trust is day-2/opt-in and targets the literal `all` inventory
 # group by default (not a named per-host role in this file) — see the
-# runbook's §3.5. internal-endpoint and freeipa-dns are day-2 reconcilers
+# runbook's §3.7. internal-endpoint and freeipa-dns are day-2 reconcilers
 # (pilot reconcile, not role membership) and likewise not represented here.
 #
 # host-monitoring/freeipa-dns-client/reverse-proxy/freeipa-ca-trust/
 # internal-endpoint merged in from the now-retired `delivery-test` skill
-# (2026-08-14) — this merge has NOT yet been executed end-to-end against
-# this exact topology; do not treat it as verified until a live round says
-# so in the runbook's own round history.
+# (2026-08-14) and confirmed live end-to-end against this exact topology in
+# round 25 (2026-08-15) — see the runbook's own round history and
+# docs/evidence/minimal-poc-architecture/2026-08-15-round-25.md.
 #
 # nexus carries both log-server and wazuh-manager (2026-08-06): confirmed
 # live that log-server-apply.yml runs correctly co-located with

@@ -36,8 +36,9 @@ screen** (menu discovery, diagnosing a derailed run — see
 
 `.agents/skills/delivery-test/SKILL.md` was retired 2026-08-14 — its scope (internal-endpoint,
 reverse-proxy, freeipa-ca-trust, freeipa-dns-client, host-monitoring) is now part of THIS runbook's
-own §0.5/§3.7/§3.8/§4.2/§4.5 (marked DRAFT until a live round confirms them). Do not go looking for
-a separate delivery-test scenario to reconcile against; there is only one canonical topology now.
+own §0.5/§3.7/§3.8/§4.2/§4.5, confirmed live end-to-end in round 25 (2026-08-15 — see
+`docs/evidence/minimal-poc-architecture/2026-08-15-round-25.md`). Do not go looking for a separate
+delivery-test scenario to reconcile against; there is only one canonical topology now.
 
 If any required file is unavailable, return BLOCKED.
 

@@ -22,10 +22,12 @@ Kerberos automount and a more exhaustive identity-reconciler cycle that this ski
 **Do not use this skill going forward.** Invoke `minimal-poc-update` instead, which now covers
 this scope as part of `docs/runbooks/minimal-poc-architecture.md`'s own maintained procedure.
 
-As of the merge, the newly-added sections in that runbook are explicitly marked DRAFT / not yet
-executed against the merged topology — the mechanics below were this skill's own last-confirmed
-state before retirement, preserved here only for historical/git-blame reference. Do not treat this
-file as current guidance.
+As of the merge (2026-08-14), the newly-added sections in that runbook were marked DRAFT / not yet
+executed against the merged topology; round 25 (2026-08-15) has since executed and verified that
+scope live end-to-end — see `docs/evidence/minimal-poc-architecture/2026-08-15-round-25.md` and the
+runbook's own current status banner. The mechanics below were this skill's own last-confirmed state
+before retirement, preserved here only for historical/git-blame reference. Do not treat this file as
+current guidance.
 
 <details>
 <summary>Historical content (pre-retirement, for reference only)</summary>
