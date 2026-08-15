@@ -1,10 +1,22 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
-> Status: **VERIFIED**
-> Latest completed pass: 2026-08-11 (Asia/Taipei), round 21 (identity + §4 matrix)
-> Latest partial pass: 2026-08-13, round 23 — roster build-out + `freeipa-identity`
-> reconcile + §4.1, continuing round 22's topology (`freeipa-dns`/§4.2–§4.4 not executed)
-> Round 23: [`2026-08-13-round-23.md`](../evidence/minimal-poc-architecture/2026-08-13-round-23.md)
+> Status: **VERIFIED — the full merged scope (§3.7, §3.8, §4.2's strengthened check, §4.5) was
+> executed end-to-end for the first time in round 25, including the `freeipa-nfs-client`
+> `nfs_clients[]` Plan B fix. Four real bugs were found and fixed live; see round 25's evidence
+> for full detail and the one known, reported-not-fixed limitation (end-to-end Kerberized NFS
+> mount between this topology's own hosts, blocked by a separate FreeIPA DNS-registration gap).**
+> Latest completed pass: 2026-08-15 (Asia/Taipei), round 25 — full clean-room rebuild, the
+> `freeipa-nfs-client` roster-driven `nfs_clients[]` targeting fix, and the complete merged
+> `delivery-test` scope (`freeipa-dns-client`/`freeipa-ca-trust`/`reverse-proxy`/`internal-endpoint`,
+> §4.2, §4.5), all executed live for the first time. Round 26 (same day) added and live-tested a new
+> `internal-endpoint` auto-provision suggester (§3.9) on top of round 25's still-running topology —
+> not an independent clean-room rebuild, a deliberate reuse to exercise the new capability against
+> already-established manifest/DNS-zone state.
+> Round 26 (`internal-endpoint` auto-provision suggester, built on round 25's still-running
+> topology — not a fresh rebuild): [`2026-08-15-round-26.md`](../evidence/minimal-poc-architecture/2026-08-15-round-26.md)
+> Round 25: [`2026-08-15-round-25.md`](../evidence/minimal-poc-architecture/2026-08-15-round-25.md)
+> Round 24 (pre-merge scope only): [`2026-08-14-round-24.md`](../evidence/minimal-poc-architecture/2026-08-14-round-24.md)
+> Round 23 (partial pass, continuation of round 22's topology): [`2026-08-13-round-23.md`](../evidence/minimal-poc-architecture/2026-08-13-round-23.md)
 > Round 22: [`2026-08-12-round-22.md`](../evidence/minimal-poc-architecture/2026-08-12-round-22.md)
 > Evidence: [`2026-08-11-round-21.md`](../evidence/minimal-poc-architecture/2026-08-11-round-21.md)
 > Round 20: [`2026-08-07-round-20.md`](../evidence/minimal-poc-architecture/2026-08-07-round-20.md)
@@ -19,6 +31,76 @@
 > `playbooks/apply/freeipa-identity-apply.yml` and
 > `playbooks/apply/freeipa-dns-apply.yml` reconcilers
 > Maintainer: sre
+
+Round 25 (2026-08-15) ran the **first live test of two things at once**: the
+`freeipa-nfs-client` roster-driven `nfs_clients[]` targeting fix ("Plan B"), and the complete
+`delivery-test`-merged scope (§3.7, §3.8, §4.2's strengthened check, §4.5) that round 24 had left
+as DRAFT. Both are now VERIFIED. Four real bugs were found live and fixed with explicit
+authorization at each stop: (1) the new NFS-client fail-closed gate wasn't check-mode-safe on a
+fresh, not-yet-enrolled host — fixed with `when: not ansible_check_mode`, mirroring
+`freeipa-nfs-server-apply.yml`'s own identical pattern; (2) the new mount-verify task's hard
+failure cascaded through Ansible's default "drop a failed host from all later plays" behavior,
+silently skipping `host-monitoring`/`wazuh-fim`/`restic-backup`/`audit-log-forwarding` on
+`client-vm` — fixed with `ignore_errors: true`; (3) `contracts/freeipa-ca-trust.yaml` declared
+`role: freeipa-ca-trust` instead of the literal `all` group it actually targets, which made
+`cmd/pilot/cmd/deploy.go`'s dependency resolver treat it as permanently unresolvable — this
+completely blocked `internal-endpoint`'s reconcile (which depends on it) with no possible wizard
+workaround, fixed by correcting the contract's `role` field; (4) Wazuh dashboard's docker-compose
+bundle hard-binds host port 443, colliding with `reverse-proxy`/nginx on `nexus` (both roles
+share that host in this topology) — the entire "reach Grafana via a clean internal HTTPS FQDN"
+feature was structurally broken until this was fixed by remapping the dashboard to port 8443.
+After all four fixes: site-wide deploy `client-vm ok=138 changed=41 failed=0 ignored=1,
+freeipa-server ok=106 changed=39 failed=0, nexus ok=271 changed=96 failed=0`; both day-2
+reconcilers clean; all three single-component deploys (`freeipa-dns-client`/`freeipa-ca-trust`/
+`reverse-proxy`) plus `internal-endpoint`'s reconcile `failed=0`; §4.2's strengthened check found
+3/3 `host-monitoring` targets up; §4.5's full matrix (C-ca-1/C-dns-1/C-dns-2/C-endpoint-1) passed
+completely, including a real `curl https://grafana.it.pilot.internal/api/health` with a genuine
+FreeIPA-issued certificate; 4/4 idempotency reruns landed clean `changed=0`. One finding reported,
+not fixed: the Plan B NFS mount itself still cannot complete end-to-end in this topology, because
+`freeipa-client-apply.yml` deliberately never registers a client's FQDN in FreeIPA's own DNS
+(confirmed via a direct `dig` against the authoritative server: `NXDOMAIN`) — a separate,
+pre-existing architectural gap, not a defect in the Plan B mechanism itself (which was proven
+correct: the gate resolves hosts via the roster correctly, and the mount-verify tasks correctly
+detect and report the non-mounted state). Full detail:
+[`2026-08-15-round-25.md`](../evidence/minimal-poc-architecture/2026-08-15-round-25.md).
+
+Round 26 (2026-08-15, same day) added and live-tested a new **`internal-endpoint` auto-provision
+suggester** on top of round 25's still-running topology — **not a fresh clean-room rebuild**, a
+deliberate reuse to exercise the new capability against an already-established manifest/DNS-zone
+state. A new `autoPublish.eligible` contract field lets an endpoint opt in to `pilot internal-endpoint
+suggest` (read-only) and a new `pilot edit` checklist menu item, both of which propose ready-to-use
+`internal-endpoints.yaml` entries — resolved against real inventory group membership, never guessed
+when ambiguous, never writing anything without going through the same `SimulateAddInternalEndpoint`
+gate a manual entry already uses. Live-tested by publishing Wazuh's dashboard as
+`wazuh-dashboard.it.pilot.internal`: `suggest` correctly proposed it and correctly skipped the
+already-published `grafana` endpoint; a first attempt using the default subdomain `wazuh` was
+correctly rejected by the DNS-ownership-collision gate (this topology's `freeipa-dns.yaml` already
+owns a `wazuh` A record for a different purpose) — corrected, then a real `pilot reconcile` applied
+cleanly (`freeipa-server ok=112 changed=10 failed=0`) and `curl https://wazuh-dashboard.it.pilot.internal/`
+succeeded from all 3 hosts with a genuine FreeIPA-issued certificate, no regression to the existing
+`grafana` endpoint. Full detail:
+[`2026-08-15-round-26.md`](../evidence/minimal-poc-architecture/2026-08-15-round-26.md).
+
+Round 24 (2026-08-14) ran the **entire scope in one clean-room pass** — full teardown/rebuild,
+site-wide deploy, both day-2 reconcilers (`freeipa-identity` and `freeipa-dns`), and the complete
+§4.1–§4.4 matrix — the first round since round 19 to do so without narrowing scope. This superseded
+round 23's still-running topology (which round 23 had explicitly left up for continuation) after
+confirming with the user that a genuine clean-room rebuild was wanted rather than a continuation,
+since the `minimal-poc-update` skill's own contract only sanctions clean-room acceptance evidence for
+a runbook update. **No product defect was found.** Every checkpoint passed cleanly, several matching
+round 21's/round 18's counts almost exactly (site-deploy `client-vm ok=105 changed=47, freeipa-server
+ok=86 changed=38, nexus ok=242 changed=107`; `freeipa-dns` apply `changed=2`), and the §4.4
+idempotency rerun landed a genuinely clean `changed=0` — cleaner than round 21's `changed=1`, because
+this round's alice/bob had both already completed a real password self-change via §4.1's `kinit`
+personalization before the rerun. Two documentation-completeness gaps were found and reported, not
+fixed (scope decisions, not defects): `host-monitoring` is a real, current role that this runbook's
+§0.5/topology never assigns anywhere, leaving §4.2's plain `up` check satisfied only by Prometheus's
+own self-scrape; and a stale code comment in `freeipa-identity-apply.yml` claims a playbook consumes
+the roster's `nfs_clients` field when it does not actually load the roster at all. One process lesson
+independent of the product: two long-running wizard-apply checkpoints delegated to subagents were
+each killed mid-flight by session/process lifetime limits before mutating anything; every long-running
+apply from that point on was run directly by the controlling session instead. Full detail:
+[`2026-08-14-round-24.md`](../evidence/minimal-poc-architecture/2026-08-14-round-24.md).
 
 Round 23 (2026-08-13) continued round 22's still-running topology and executed exactly what
 round 22 had left out at the identity layer: the **full roster build-out**, the
@@ -123,16 +205,16 @@ component-specific values.
 
 | Item | Last verified value |
 |---|---|
-| Fact timestamp | 2026-08-11T18:00+08:00 |
+| Fact timestamp | 2026-08-15T03:00+08:00 |
 | Targets | `freeipa-server`, `nexus`, `client-vm` |
 | VM sizing | FreeIPA: 2 vCPU/**4608 MiB**/30 GiB; nexus: 6/12288/80; client: 2/2048/20 |
 | VM provisioning | `pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml` (spec's own `services: local` key); see §3.2 |
-| Inventory source | Generated from a fresh gitignored workspace, built via live `pilot edit`/`pilot inventory generate` driving — `hosts.yml` (3 hosts, all required roles), the hard-required `group_vars` values (prometheus/thanos-query S3 target, dashboard Thanos-Query target, restic S3 target, wazuh-fim manager host, freeipa server IP), `host_vars/nexus.yml`, remaining `.vault/main.yaml` secrets, and the FreeIPA identity roster authored as **`schema_version: 2`** (users/groups/hostgroups incl. one nested/one netgroup/HBAC/sudo/NFS-with-netgroup-export hand-authored into the roster's nested YAML, still the documented exception — see §2/§3.3) |
+| Inventory source | Generated from a fresh gitignored workspace, built via live `pilot edit`/`pilot inventory generate` driving — `hosts.yml` (3 hosts, all required roles), the hard-required `group_vars` values (prometheus/thanos-query S3 target, dashboard Thanos-Query target, restic S3 target, wazuh-fim manager host, freeipa server IP), `host_vars/nexus.yml`, remaining `.vault/main.yaml` secrets, the FreeIPA identity roster authored as **`schema_version: 2`** (users/groups/hostgroups/HBAC/sudo/NFS export incl. the Plan B `nfs_clients[]` entry/one optional netgroup, hand-authored parts into the roster's nested YAML per §2/§3.3's documented exceptions), a `freeipa-dns` manifest (one zone, 2 A records — `grafana` deliberately excluded, owned by `internal-endpoint` instead, see §3.6), and an `internal-endpoints` manifest (one `reverse_proxy`+`tls.mode: freeipa` endpoint for Grafana) |
 | Stage | `sandbox` |
-| Alignment | Actual hosts and populated role groups matched the intended topology |
+| Alignment | Actual hosts and populated role groups matched the intended topology, including the merged `freeipa-dns-client`/`host-monitoring`/`reverse-proxy` placements — confirmed live for the first time in round 25 (previously DRAFT). `freeipa_roster_file` is now also required on `client-vm` (Plan B — see §2) |
 | Manual extra `-e` | Empty; inventory-derived values were accepted through the wizard |
-| Tested candidate | Working tree at round start (uncommitted Roster Schema v2 implementation, baseline commit `604aef4`); one real gap found+fixed mid-round in `freeipa-nfs-server-apply.yml` (hardcoded `schema_version == 1`, never updated for v2 — see §6) |
-| Result | Site-wide deploy `failed=0` on all three hosts after the fix above (`client-vm ok=105 changed=47`, `freeipa-server ok=86 changed=38`, `nexus ok=242 changed=107`); `freeipa-identity` reconcile passed initial apply with a genuine v2 roster (`ok=87 changed=27 failed=0`, netgroup+nested-hostgroup included); `alice`'s forced-change password personalized via scripted `kinit`; full §4.4 remove/restore/drift-correction/idempotency cycle passed, including — for the first time in this runbook's history — live proof that netgroup membership removal and restoration actually take effect; §4.1 passed 8/8 on the first attempt. `freeipa-dns`/§4.2 log chain/§4.3 deliberately deferred (unrelated to the v2 rollout, already proven in prior rounds); see round-21 evidence for full detail |
+| Tested candidate | HEAD `8ba602c` at round start, plus this round's own uncommitted fixes (4 real bugs found and fixed live — see round-25 evidence) |
+| Result | First full live pass of both the Plan B `nfs_clients[]` fix and the complete merged `delivery-test` scope. Site-wide deploy (after fixes) `failed=0` on all three hosts (`client-vm ok=138 changed=41 ignored=1`, `freeipa-server ok=106 changed=39`, `nexus ok=271 changed=96`); both day-2 reconcilers clean; `freeipa-dns-client`/`freeipa-ca-trust`/`reverse-proxy`/`internal-endpoint` all `failed=0`; §4.2's strengthened check found 3/3 `host-monitoring` targets up; §4.5's full matrix (C-ca-1/C-dns-1/C-dns-2/C-endpoint-1) passed completely including a real HTTPS `curl` to Grafana with a genuine FreeIPA certificate; 4/4 idempotency reruns clean. One finding reported, not fixed: the Plan B NFS mount itself still can't complete end-to-end, blocked by a separate pre-existing FreeIPA DNS-registration gap (client hosts are never dynamically registered — a deliberate `freeipa-client-apply.yml` design choice), not a defect in the Plan B mechanism. See [round-25 evidence](../evidence/minimal-poc-architecture/2026-08-15-round-25.md) for full detail |
 
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
@@ -147,8 +229,32 @@ addresses and generated inventory before each rebuild.
   `alertmanager`, `dashboard`.
 - All hosts that require local audit/FIM/backup coverage: `audit-log-forwarding`, `wazuh-fim`,
   `restic-backup`.
+- **All three hosts: `freeipa-dns-client`, `host-monitoring`** (merged in from the retired
+  `delivery-test` skill, 2026-08-14; **verified live end-to-end in round 25** — see §3.7, §4.2, §4.5).
+- **`nexus`: `reverse-proxy`** (merged in from the retired `delivery-test` skill — see §3.7, §3.8,
+  §4.5). `freeipa-ca-trust` is day-2/opt-in and targets the literal `all` inventory group by
+  default, so it has no per-host role-table entry — see §3.7.
 - Keep `dns`, `ntp`, `keycloak`, `keycloak-db`, and `linux-servers` empty in this PoC. FreeIPA
   supplies DNS/NTP; Keycloak/PAM-OIDC is out of scope.
+
+**All three hosts point their own OS-level DNS resolver at the FreeIPA server**
+(`freeipa-dns-client`) — `freeipa-server` resolves itself first (the shared resolver logic
+auto-detects when the current host is itself a DNS provider), `nexus`/`client-vm` resolve against
+`freeipa-server`'s IP — **and all three get the FreeIPA integrated CA installed into their OS trust
+store** (`freeipa-ca-trust`, run explicitly in §3.7, not left as an incidental side effect of §3.8's
+reconcile) **and all three run `host-monitoring`'s node_exporter** so Prometheus has real per-host
+scrape targets instead of only ever scraping itself — see §4.2's strengthened metric-chain check.
+`nexus` additionally gets `freeipa-client` (already required above for NFS/AAA) plus `reverse-proxy`
+specifically so the `internal-endpoint` reconciler can publish Grafana at a stable internal FQDN
+(`grafana.it.pilot.internal`, HTTPS via a FreeIPA-issued certificate) instead of
+`http://<nexus-ip>:3000` — see §3.7, §3.8, and §4.5 for the closed-loop proof that DNS + CA trust
+together are what actually make `curl https://grafana.it.pilot.internal/...` succeed with a
+genuinely valid certificate, from every node, not just from `nexus` itself.
+
+This merge was **executed end-to-end against this exact topology in round 25 (2026-08-15)** — see
+[round-25 evidence](../evidence/minimal-poc-architecture/2026-08-15-round-25.md) for the full
+checkpoint matrix, including the port-443 conflict between `reverse-proxy` and `wazuh-manager`
+that round found and fixed (Wazuh dashboard now maps to host port 8443, not 443).
 
 `nexus` carries `log-server` alongside `wazuh-manager` (added 2026-08-06) — without it,
 `audit-log-forwarding`'s local6/auth/authpriv forwarding has nowhere real to land: it auto-resolves
@@ -192,6 +298,14 @@ The component checks live in these specs and are not duplicated here:
 - `docs/verification/wazuh-fim.md`
 - `docs/verification/audit-log-forwarding.md`
 - `docs/verification/restic-backup.md`
+- `docs/verification/freeipa-dns-client.md`
+- `docs/verification/freeipa-ca-trust.md`
+- `docs/verification/reverse-proxy.md`
+- `docs/verification/internal-endpoint.md`
+- `docs/verification/host-monitoring.md`
+
+The last five were merged in from the retired `delivery-test` skill (2026-08-14) — see §3.7, §3.8,
+and §4.5.
 
 **`freeipa-client.md`, `freeipa-identity.md`, and `freeipa-dns.md` do not fully pass `pilot verify`
 against this topology's own roster/manifest — this is expected, not a regression.** All three
@@ -208,8 +322,10 @@ already exercised during `freeipa-identity`/`freeipa-dns` reconcile (group membe
 hostgroups, sudo rules, and a live `dig` round-trip against the real records) — not these 3 specs.
 
 This runbook adds only the cross-component checks: live HBAC/sudo allow and deny, Grafana-facing
-metric/log queries, shared backup visibility, a Wazuh FIM event, and the FreeIPA identity
-remove/restore/drift reconciliation cycle.
+metric/log queries, shared backup visibility, a Wazuh FIM event, the FreeIPA identity
+remove/restore/drift reconciliation cycle, and (merged in from `delivery-test`, 2026-08-14) a
+closed-loop proof that FreeIPA CA trust + DNS resolver on every host are what make
+`https://grafana.it.pilot.internal/...` succeed with a genuinely valid certificate — see §4.5.
 
 ## 2. Prerequisites
 
@@ -277,13 +393,17 @@ reconcile wizard's own vars-file prompt (§3.5) — that file's copy of the same
 side without ever appearing in the roster.
 
 Set `freeipa_roster_file` as an extra host var (via `pilot edit`'s hosts.yml editor) on **every**
-host whose apply playbook reads it — in this topology that is both `freeipa-server`
-(`freeipa-identity-apply.yml`) and `nexus` (`freeipa-nfs-server-apply.yml`, which independently
-loads the same roster to resolve its own NFS server/share entries). Point it at the same absolute
-roster path on both hosts. The project convention is `.vault/ipa-identity.yaml` under the
-workspace; there is **no playbook default path**, so pass its deployment-controller absolute path,
-for example `<workspace>/.vault/ipa-identity.yaml` (on the investigated controller:
-`/home/ubuntu/ansible/.vault/ipa-identity.yaml`). Do not use `.vault/main.yaml` as the roster path.
+host whose apply playbook reads it — in this topology that is `freeipa-server`
+(`freeipa-identity-apply.yml`), `nexus` (`freeipa-nfs-server-apply.yml`, which independently
+loads the same roster to resolve its own NFS server/share entries), and, **as of the Plan B fix
+(2026-08-14) and confirmed live in round 25**, `client-vm` too
+(`freeipa-nfs-client-apply.yml`, which now resolves its own `nfs_clients[]` targeting from the same
+roster — see §3.4's roster-authoring note and `docs/verification/freeipa-nfs-client.md` §1.5). Point
+it at the same absolute roster path on all three hosts. The project convention is
+`.vault/ipa-identity.yaml` under the workspace; there is **no playbook default path**, so pass its
+deployment-controller absolute path, for example `<workspace>/.vault/ipa-identity.yaml` (on the
+investigated controller: `/home/ubuntu/ansible/.vault/ipa-identity.yaml`). Do not use
+`.vault/main.yaml` as the roster path.
 
 A roster group's `category` must match its name's prefix: `team` → `^team-`, `filesystem` →
 `^data-`, `access` → `^access-`, `role` → `^role-` (enforced by a validation gate). HBAC rule
@@ -492,7 +612,15 @@ exercised live in round 23:
 - **`netgroups`** — no screen anywhere in `pilot edit`. Still fully hand-authored (§2).
 - **`nfs.servers[].shares[]`** and **`nfs_clients`** — no screen. The NFS-role bootstrap
   writes one `nfs.servers` entry with `shares: []`; every share, its `ownership`, `acl`,
-  `export.clients` and `automount` block is hand work.
+  `export.clients` and `automount` block is hand work. **`nfs_clients[]` is functionally load-bearing
+  since the 2026-08-14 Plan B fix** (previously accepted but never read by any playbook): each entry's
+  `hostgroup` must resolve — via direct membership or one level of nesting — to the real FQDN of every
+  `freeipa-nfs-client` host, or `freeipa-nfs-client-apply.yml`'s new gate fails closed (see
+  `docs/verification/freeipa-nfs-client.md` §1.5). **Confirmed live in round 25**: the gate/targeting
+  mechanism itself works correctly, but the actual `verification_mounts` mount can only succeed if the
+  NFS server's own FQDN (`nfs.servers[].host`) resolves from the client — which it does not in this
+  topology today, since `freeipa-client-apply.yml` never registers a client's FQDN in FreeIPA's own DNS
+  (a separate, pre-existing gap, not a Plan B defect — see round-25 evidence and §6).
 - **An HBAC rule's `subjects.users` and `targets.hostcat`** — the HBAC editor only offers
   *access-group* subjects and *hostgroup* targets, and `pushRosterHBACTargets` explicitly
   deletes `hostcat` when you touch targets. The practical consequence: the
@@ -743,7 +871,7 @@ carry a bare top-level `ipa_admin_password`).
 `pilot reconcile --actions <scenario.json>` (a standalone scenario with exactly one `reconcile`
 action) drives this same prompt chain non-interactively — same mechanics, same two traps, as
 §3.4's `pilot deploy --actions` note. Confirmed live 2026-07-23 (round 14) for the full initial
-apply / remove-membership / restore+drift-correction / idempotency-rerun cycle in §4.6.
+apply / remove-membership / restore+drift-correction / idempotency-rerun cycle in §4.4.
 
 ### 3.6 DNS reconciliation (`freeipa-dns`, added round 18)
 
@@ -768,6 +896,169 @@ IP via `dig`), idempotent rerun `changed=0 failed=0`. One real bug found and fix
 alias instead of the FQDN `freeipa-server-apply.yml` actually installed the server as, whenever
 `freeipa_server_fqdn` was left unset (the documented, normal case) — every reconcile against a
 workspace following that convention failed the manifest-vs-inventory gate until fixed.
+
+**Record ownership changed 2026-08-14 (merged in from `delivery-test`): `grafana` moves to
+`internal-endpoint`.** As of this merge, this manifest should declare only the `wazuh` and `s3` A
+records directly (both still `target.inventory_host: nexus`) — **not** `grafana`. §3.8's
+`internal-endpoint` reconciler now owns the `grafana` name itself, fronting it with a real
+FreeIPA-issued TLS certificate and nginx (§3.7), which this manifest's plain A record never did.
+`records_mode: merge` means this manifest only touches the RRsets it explicitly lists, so leaving
+`grafana` out here is exactly what lets `internal-endpoint` add it without either side pruning the
+other. Round 24's evidence (which predates this merge) reflects the pre-merge 3-record shape
+(`grafana`/`wazuh`/`s3` all created directly here) — that record is historically accurate for what
+was run then, not a description of the current procedure. **This 2-record shape was executed
+against this exact topology in round 25 (2026-08-15)**: `freeipa-dns` reconcile
+`ok=31 changed=2 failed=0` with only `wazuh`/`s3` declared, then `internal-endpoint`'s own
+reconcile (§3.8) added `grafana` with no ownership collision and no pruning of the other two —
+confirmed live via `dig`/`getent hosts` from all three nodes. See
+[round-25 evidence](../evidence/minimal-poc-architecture/2026-08-15-round-25.md).
+
+### 3.7 `freeipa-dns-client`/`freeipa-ca-trust`/`reverse-proxy` — day-2/opt-in, single-component
+
+> Merged in from the retired `delivery-test` skill, 2026-08-14. **Executed against this exact
+> topology in round 25 (2026-08-15)** — all three single-component deploys passed `failed=0` on
+> every targeted host, with a clean idempotent rerun for each. See
+> [round-25 evidence](../evidence/minimal-poc-architecture/2026-08-15-round-25.md).
+
+None of these three roles are in `site.yml` (their `deployCatalog` entries have no
+`Reconcile: true`, so they run through `pilot deploy`'s "單一元件" flow, not `pilot reconcile`), and
+all three must be applied **after** §3.4's site-wide deploy — `freeipa-dns-client` needs
+`freeipa-server`'s native DNS already listening (`freeipa_setup_dns` defaults to `true`), and
+`freeipa-ca-trust` needs a real CA cert already minted on `freeipa-server` to fetch. Order between
+the three calls below doesn't matter to each other, but all three must finish before §3.8's
+`internal-endpoint` reconcile (which needs `nexus`'s nginx already installed).
+
+`freeipa-ca-trust` targets the literal `all` inventory group by default (`DefaultGroup: all` — not a
+named role you add to §0.5's table, unlike the other two), so it needs no inventory change. Running
+it here, on its own, is deliberate rather than redundant: `internal-endpoint`'s own reconcile (§3.8)
+*also* re-applies the exact same CA-trust logic fleet-wide as a side effect of its first play, but
+that only exercises the shared task file (`tasks/freeipa-ca-trust.yml`), never the standalone
+`freeipa-ca-trust-apply.yml` playbook's own stage gates and `pilot deploy` path. Running it
+explicitly here means §4.5's later proof that `curl https://grafana.it.pilot.internal/...` gets a
+genuinely valid certificate rests on a CA-trust step that was itself independently applied and
+verified — not on an incidental side effect of a different component's reconcile that happens to
+also do it.
+
+```bash
+pilot deploy   # 選「單一元件」→ freeipa-dns-client
+# target group already resolves to all 3 hosts from §0.5's role table — no
+# -e target_group= override needed.
+
+pilot deploy   # 選「單一元件」→ freeipa-ca-trust
+# target group defaults to the literal `all` group (every host in this
+# inventory) — no role-table entry, no -e target_group= override needed.
+
+pilot deploy   # 選「單一元件」→ reverse-proxy
+# target group already resolves to nexus alone from §0.5's role table.
+```
+
+**Corrected round 25**: in a workspace that already has a `.vault/main.yaml` (every workspace
+built per §3.3 does), the vars-file prompt is the same auto-detect confirm every other component
+uses ("偵測到 .../.vault/main.yaml，這次佈署要用它當密碼變數檔嗎？" `[Y/n]`) — answer `y`. The
+"不需要/需要" select this section previously described only appears when no vault file was
+auto-detected at all; it never actually fires in this runbook's own workspace convention.
+
+**`freeipa-ca-trust`'s empty-`target_group` default was a real bug, found and fixed live in round
+25** (not just this section's prose being wrong): leaving the target-group prompt empty resolved
+zero hosts (`component "freeipa-ca-trust" role "freeipa-ca-trust" resolves no hosts`), and — far
+more seriously — **any other component depending on it, with no possible prompt-level workaround,
+failed the same way** (this is exactly how §3.8's `internal-endpoint` reconcile failed before the
+fix). Root cause: `contracts/freeipa-ca-trust.yaml` declared `role: freeipa-ca-trust` instead of
+the literal `all` it actually targets; `cmd/pilot/cmd/deploy.go`'s dependency resolver has no
+knowledge of `deploy_catalog.go`'s cosmetic `DefaultGroup` field, only a literal
+`inventoryGroups[component.Role]` lookup. Fixed by correcting the contract's `role` to `all` — the
+empty-`target_group` default (and every dependent component) now resolves correctly. See
+[round-25 evidence](../evidence/minimal-poc-architecture/2026-08-15-round-25.md).
+
+**A second real bug found running these three live in round 25**: Wazuh dashboard's official
+docker-compose bundle hard-binds host port 443, which collides with `reverse-proxy`/nginx on
+`nexus` (this topology co-locates both roles there) — nginx's `bind()` to 443 failed with "Address
+already in use", so external HTTPS connections to `nexus` landed on Wazuh's own dashboard cert
+instead of any `internal-endpoint` vhost, no matter what nginx's config said. Fixed by remapping
+the dashboard to host port 8443 in `wazuh-manager-apply.yml` (`community.docker.docker_compose_v2`
+against the official bundle, patched via `ansible.builtin.replace` after unpack, before compose-up)
+— re-run `wazuh-manager` once after upgrading past this fix if `nexus` was ever provisioned before
+it landed, since a stale nginx worker holding a failed-bind state needs one restart to actually
+claim the now-free port (`systemctl restart nginx` on `nexus`; a fresh topology never hits this,
+since Wazuh claims 8443 from its very first start).
+
+A rerun of all three must settle to `changed=0` on every host they apply to — confirm this once
+before moving on to §3.8, since §3.8's own idempotency claim depends on these three already being
+converged, not still catching up on their first apply. Confirmed live in round 25: all three
+idempotency reruns landed clean `changed=0`.
+
+### 3.8 `internal-endpoint` reconcile — publish `grafana.it.pilot.internal`
+
+> Merged in from the retired `delivery-test` skill, 2026-08-14. **Executed against this exact
+> topology in round 25 (2026-08-15)** — `ok=80 changed=10 failed=0`, `✅ 套用完成`. See
+> [round-25 evidence](../evidence/minimal-poc-architecture/2026-08-15-round-25.md).
+
+Must run after §3.7 (nginx installed on `nexus`) and §3.6 (the `it.pilot.internal.` zone exists).
+Author the endpoint manifest first via `pilot edit`'s "internal-endpoints manifest" top-menu item —
+a `reverse_proxy` route through `nexus` to Grafana's own `:3000` on the same host, fronted by a real
+FreeIPA-issued certificate (`tls.mode: freeipa`) so §4.5's check needs no `-k`/`--insecure`. Then run
+the same reconcile wizard as §3.5/§3.6:
+
+```bash
+./pilot reconcile -i <workspace>/inventory.yml --timeout 90m
+```
+
+Select `internal-endpoint`, target `freeipa-server`, `sandbox` stage, vars-file prompt →
+`.vault/main.yaml` (same `ipa_admin_password` requirement as §3.5/§3.6). At "還有其他 -e 變數要帶
+嗎？", pass both manifest paths together (the reconciler cross-checks the endpoint's `dns.zone`
+against the freeipa-dns manifest's own zones, spec.md §11.1-§11.3):
+
+```
+internal_endpoint_manifest_file=<absolute path to workspace>/internal-endpoints.yaml freeipa_dns_manifest_file=<absolute path to workspace>/freeipa-dns.yaml
+```
+
+This run's first play also reapplies the FreeIPA CA-trust and DNS-resolver baseline to **every**
+managed host (not just `nexus`) — expect `changed=0` there if §3.7 already ran, since both playbooks
+share the same underlying task files (`tasks/freeipa-ca-trust.yml` /
+`tasks/freeipa-dns-client-resolver.yml`); that overlap is intentional, not a sign either step was
+redundant to run on its own. Confirm the preview shows: a new `HTTP/grafana.it.pilot.internal`
+service principal + virtual host object (delegated to `nexus`), a certmonger request on `nexus`, a
+rendered nginx vhost on `nexus`, and the `grafana` A record in `it.pilot.internal.` pointing at
+`nexus`'s IP (never Grafana's own "upstream" identity, since `route.mode` is `reverse_proxy` — the
+DNS destination is always the proxy host). Apply, then see §4.5 for the client-side proof.
+
+### 3.9 `internal-endpoint` auto-provision suggester — added and live-tested round 26
+
+> **Round 26 (2026-08-15).** Built on round 25's still-running topology, not a fresh rebuild — see
+> [`2026-08-15-round-26.md`](../evidence/minimal-poc-architecture/2026-08-15-round-26.md).
+
+§3.8 above requires hand-authoring one manifest entry per endpoint. A contract endpoint can instead
+opt in to auto-suggestion by declaring `autoPublish: {eligible: true, subdomain: <name>}` (see e.g.
+`contracts/dashboard.yaml`'s `grafana` entry, `contracts/wazuh-manager.yaml`'s `dashboard` entry).
+Eligibility is a real, per-endpoint decision, never inferred from `scheme: http`/`https` alone — every
+ineligible endpoint in this project's own contracts (FreeIPA's own web UI, Keycloak's OIDC endpoint,
+Prometheus/Alertmanager/Thanos Query) still declares the block with `eligible: false` and a `reason`,
+so the exclusion reads as a decision, not an oversight. See round 26's evidence for the reasoning
+behind each: FreeIPA's own web UI would be circular (it is the trust root `internal-endpoint` itself
+depends on); Keycloak's `KC_HOSTNAME` is hardcoded and would issue OIDC tokens with a mismatched `iss`
+claim if fronted under a different name; the metrics-stack components have no auth of their own.
+
+Two ways to use it, neither of which reconciles a live host by itself — every accepted candidate still
+goes through the exact same `SimulateAddInternalEndpoint`/`AppendInternalEndpoint` gate a hand-authored
+entry uses, then §3.8's own reconcile wizard to actually apply it:
+
+```bash
+# read-only — prints candidates, writes nothing
+./pilot internal-endpoint suggest \
+  --inventory <workspace>/inventory.yml \
+  --freeipa-dns-manifest <workspace>/freeipa-dns.yaml \
+  --manifest <workspace>/internal-endpoints.yaml   # omit for a fresh/empty manifest
+```
+
+or interactively, via `pilot edit`'s internal-endpoints manifest → Endpoints menu → "🔎 從已部署服務建議
+endpoint", which presents the same candidates as a checklist.
+
+Both auto-resolve the publishing zone from `freeipa-dns.yaml` (only when it declares exactly one zone)
+and the proxy host from the `reverse-proxy` inventory group (only when it has exactly one host) —
+anything ambiguous is reported, never guessed; pass `--zone`/`--proxy-host` explicitly in that case.
+A candidate whose default subdomain collides with an existing `freeipa-dns.yaml` record (a real case
+hit live in round 26 — see §6.1) is rejected by the same DNS-ownership-collision gate §3.8 already
+relies on, not silently double-claimed.
 
 ## 4. Verification procedure
 
@@ -855,6 +1146,27 @@ explains is not HBAC evidence. Treat it as a cheap sanity check only, and additi
 - Confirm Grafana, Prometheus, Loki, and Thanos Query readiness.
 - Query Thanos for `up` and confirm the `site-nexus` series has value `1`. (Covered by
   `scripts/minimal-poc-section4-spotcheck.sh` above, `THANOS_SITE_LABEL`/`THANOS_PORT` env vars.)
+
+**Strengthened 2026-08-14 (merged in from `delivery-test`): a plain `up` query is not enough on its
+own.** Prometheus always self-scrapes its own `job="prometheus"` target, so the query above returns
+a non-empty `result` array even when `host-monitoring` (§0.5) has zero real targets — this is the
+same class of vacuous-pass bug this project has hit before (the C1 cobra "unknown"-substring
+false-pass, Wazuh's unused 514/udp port). Query the **node** job specifically and count the targets:
+
+```bash
+curl -s "http://<nexus-ip>:10912/api/v1/query?query=up%7Bjob%3D%22node%22%7D" | \
+  python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]["result"]; print(len(d), [r["metric"].get("instance") for r in d])'
+# expect: 3 [<freeipa-ip>:9100, <nexus-ip>:9100, <client-ip>:9100] — one per host-monitoring host, all value=1
+```
+
+If this returns `0 []` while the plain `up` query above still "passed," `host-monitoring` (§0.5) is
+empty in the inventory, `node_exporter_basic_auth_password` doesn't match between
+`host-monitoring`'s and `prometheus`'s vault consumption (§2 — same key, both sides read it), or
+Prometheus never picked up the `host-monitoring` group's members at apply time (rerun the site-wide
+deploy, §3.4 — `prometheus-apply.yml` re-expands its scrape targets from the current inventory on
+every apply, no separate step needed). **Confirmed live in round 25 (2026-08-15)**:
+`3 [('192.168.122.2:9100', '1'), ('192.168.122.3:9100', '1'), ('192.168.122.4:9100', '1')]` — one
+target per `host-monitoring` host, all `value=1`.
 
 **Log chain — rewritten round 20 (2026-08-07).** The previous version of this section asked only
 "query Loki label values and a recent range; confirm the `pilot-siem` stream contains a real event."
@@ -991,6 +1303,87 @@ documents for Loki's `host` label. Grepping the snapshot list for the literal st
 Do not round residual changes down to zero. Explain every repeatable non-idempotent task in the
 evidence record.
 
+### 4.5 FreeIPA CA trust + DNS resolver on every host, and Grafana via `grafana.it.pilot.internal`
+
+> Merged in from the retired `delivery-test` skill, 2026-08-14. **Executed against this exact
+> topology in round 25 (2026-08-15) — every check below passed.** See
+> [round-25 evidence](../evidence/minimal-poc-architecture/2026-08-15-round-25.md) for the full
+> command output.
+
+Three separate things to prove, not one — a host could resolve the internal FQDN by accident (e.g.
+a stale `/etc/hosts` entry from earlier debugging) without its resolver genuinely pointing at
+FreeIPA, the CA cert could be present on disk but not actually wired into the OS trust store
+nginx/curl consult, and the reverse-proxy chain could work by IP even if DNS were broken. Check all
+three, and check the resolver/trust checks from **all three** hosts, not just `client-vm`.
+
+**C-ca-1 — the FreeIPA CA is genuinely installed and trusted, on every host** (reuses
+`docs/verification/freeipa-ca-trust.md`'s own C1/C3/C4 probes verbatim — this is the property that
+actually determines whether C-endpoint-1's `curl` below needs `-k`, so check it directly rather than
+inferring it backwards from whether `curl` happened to succeed):
+
+```bash
+for h in freeipa-server nexus client-vm; do
+  echo "== $h =="
+  pilot vm-target exec --name "$h" -- sh -c '
+    f=/usr/local/share/ca-certificates/pilot-freeipa-ca.crt
+    [ -f "$f" ] || f=/etc/pki/ca-trust/source/anchors/pilot-freeipa-ca.crt
+    if [ ! -f "$f" ]; then echo missing; exit 0; fi
+    issuer=$(openssl x509 -in "$f" -noout -issuer 2>/dev/null | sed "s/^issuer=//")
+    subject=$(openssl x509 -in "$f" -noout -subject 2>/dev/null | sed "s/^subject=//")
+    [ "$issuer" = "$subject" ] || { echo not-self-signed; exit 0; }
+    openssl verify "$f" 2>&1 | grep -q ": OK$" && echo trusted || echo untrusted'
+done
+# expect "trusted" for all three
+```
+
+**C-dns-1 — every host's resolver is genuinely FreeIPA, not DHCP/distro default** (same probe
+`docs/verification/freeipa-dns-client.md` C3 uses — NetworkManager on EL regenerates
+`/etc/resolv.conf` on every `nmcli device reapply`, so check the persisted connection profile there
+instead of the file):
+
+```bash
+for h in freeipa-server nexus client-vm; do
+  echo "== $h =="
+  pilot vm-target exec --name "$h" -- sh -c '
+    if command -v nmcli >/dev/null 2>&1 && [ -n "$(nmcli -t -f NAME connection show --active 2>/dev/null | head -n1)" ]; then
+      conn=$(nmcli -t -f NAME connection show --active | head -n1)
+      [ "$(nmcli -g ipv4.ignore-auto-dns connection show "$conn" 2>/dev/null)" = yes ] && echo pilot-managed || echo not-managed
+    else
+      grep -q pilot-freeipa-dns-client /etc/resolv.conf && echo pilot-managed || echo not-managed
+    fi'
+done
+# expect pilot-managed for all three
+```
+
+**C-dns-2 — real end-to-end resolution against FreeIPA's own DNS**, not a cached/hardcoded answer:
+
+```bash
+for h in freeipa-server nexus client-vm; do
+  echo "== $h =="
+  pilot vm-target exec --name "$h" -- getent hosts grafana.it.pilot.internal
+done
+# expect the same IP as `pilot vm-target list`'s nexus entry, from all three
+```
+
+**C-endpoint-1 — Grafana reachable by FQDN over HTTPS, real FreeIPA cert, no `-k`**:
+
+```bash
+pilot vm-target exec --name client-vm -- curl -sS https://grafana.it.pilot.internal/api/health
+# {"database": "ok", ...} with no --insecure/-k needed
+
+pilot vm-target exec --name client-vm -- sh -c \
+  "echo | openssl s_client -connect grafana.it.pilot.internal:443 -servername grafana.it.pilot.internal 2>/dev/null | openssl x509 -noout -subject -issuer"
+# subject=...CN=grafana.it.pilot.internal, issuer=...CN=Certificate Authority (FreeIPA's own CA, not self-signed)
+```
+
+If C-endpoint-1's `curl` needs `-k` to succeed, go back to C-ca-1 on that specific host first, not
+nginx — a broken/untrusted cert chain is a trust-store problem on the *client* host running `curl`
+(either §3.7's `freeipa-ca-trust` step never reached it, or §3.8's own fleet-wide reapply somehow
+diverged from it), unrelated to whether nginx itself is serving correctly. If `getent hosts` in
+C-dns-2 fails outright on `freeipa-server` or `nexus` specifically (works fine from `client-vm`),
+re-check that §0.5's role table really was applied to all three — §3.7's `freeipa-dns-client` deploy
+silently no-ops on a host that never joined the inventory group.
+
 ## 5. Rollback and teardown
 
 - Failed `pilot deploy`/`reconcile` previews must stop before mutation.
@@ -1039,6 +1432,23 @@ fixed upstream — on a current checkout you can skip it entirely.
 | `pilot deploy` aborts before any preview with `delivery transaction failed: component "freeipa-server" ... resources ... are below minimum ... ramMiB=4096` | **Environment/topology gap, not a code defect.** `deploy_facts.go` gathers real per-host OS facts before the delivery preflight; AlmaLinux 9's usable RAM under this topology's KVM/virtio overhead lands ~185 MiB below the nominal `--memory` value. | Give `freeipa-server` headroom above the declared minimum — `docs/topologies/minimal-poc-topology.yaml`'s `memory: 4608` reflects this. If the node was already up, `pilot vm-target down --name freeipa-server` then `topology up` recreates just that node, **but it gets a new DHCP-assigned IP even with the same MAC** — re-set that host's `ansible_host` via `pilot edit` and re-run `pilot inventory generate` before redeploying. |
 | `pilot deploy`/`pilot reconcile` fail their completeness gate — or, worse, silently resolve a `group_vars`/`host_vars` value to the wrong thing — even though the workspace's own files are correct | **Environment pollution, not a pilot defect** — but the mechanism stated here for four rounds is wrong, **corrected round 23**. `internal/ansible`'s `Runner.Run` genuinely never sets `cmd.Dir`, so `ansible-playbook` does inherit pilot's process cwd. What does *not* follow is the vars-plugin claim: for `ansible-playbook <playbook>` the `host_group_vars` plugin reads the **inventory** directory and the **playbook's** directory, not the cwd. A controlled probe with inventory, playbook and cwd in three separate directories, each holding a conflicting `group_vars/<group>.yml`, resolved the **inventory-adjacent** value. Do **not** use `ansible -m debug -a "var=<key>"` from the same cwd as the diagnostic (what this row used to say): ad-hoc `ansible` *does* treat cwd as its basedir, so it reports a value the real deploy never uses. Round 23 hit exactly that false positive — the isolated cwd had accumulated six verbatim copies of unfilled `*.example.yml`, `ansible -m debug` reported `thanos_s3_target_host: ""`, and the live host had every derived alias correctly mapped to nexus in `/etc/hosts`, proving the apply had used the real values all along. A real cwd sensitivity may still exist by another route — vars-file paths reach `ansible-playbook` unresolved as `-e @<path>` (`internal/ansible/runner.go:207`), so a *relative* vault path would resolve against cwd — but that was not the thing this row described and has not been re-tested. | Never invoke `pilot edit`/`pilot inventory generate` without `--dir`. If the repo root already has such stray files and their ownership is unclear, don't move or delete them — run from an isolated directory that symlinks every repo-root entry except `host_vars`/`.vault`/`tmp`, **and a `group_vars/` containing symlinks to only the `*.example.yml` templates plus the `dns/` example dir**. Excluding `group_vars/` wholesale (what this row said before round 22) silently breaks `pilot inventory generate`'s backfill: that one directory holds both the stray shadowing `*.yml` and the 13 legitimate templates the generator copies from, so the run produces a workspace with **zero** group_vars files and still exits 0 — see §3.3. A future Go-side fix should pin `cmd.Dir` explicitly. |
 
+The rows below were merged in from the retired `delivery-test` skill (2026-08-14). **Confirmed
+live against this exact topology in round 25 (2026-08-15)** — none of these five actually fired
+during that round (all preconditions were already satisfied in the order §3.6→§3.7→§3.8 runs
+them), so they remain untested *failure* paths even though the surrounding scope is now verified;
+kept as documented troubleshooting guidance.
+
+| Symptom | Cause | Current action |
+|---|---|---|
+| §3.8's `internal-endpoint` reconcile fails requesting the certificate (`ipa-getcert request` errors, or certmonger has no valid credential) on `nexus` | `nexus` was missing the `freeipa-client` role — a FreeIPA *virtual* host object (created automatically for `grafana.it.pilot.internal` itself) has no keytab of its own; the request is authenticated as `nexus`'s own real host principal via the managedBy delegation (spec.md §18), which requires `nexus` to actually be enrolled. This topology's §0.5 already requires `freeipa-client` on `nexus` for NFS/AAA reasons, so this should not fire here — it is listed for the case where that role gets removed | Confirm `freeipa-client` is still in `nexus`'s role list, rerun the site-wide deploy (§3.4) so `nexus` enrolls, then rerun §3.8 |
+| §3.8 fails a precondition/assert about the DNS zone, or the manifest cross-check against `freeipa_dns_manifest_file` | §3.6 (declare the `it.pilot.internal.` zone) wasn't run yet, or its `records_mode` isn't `merge`, or the zone name in `internal-endpoints.yaml`'s `dns.zone` doesn't exactly match `freeipa-dns.yaml`'s zone name (including the trailing dot) | Run §3.6 before §3.8; diff both files' zone name byte-for-byte |
+| §3.8's nginx vhost render/reload task fails on `nexus` (`nginx: command not found`, or `nginx -t` fails against a config namespace that doesn't exist) | §3.7's `reverse-proxy` single-component deploy wasn't run yet — `internal-endpoint`'s own reconcile only ever *renders a vhost*, it never installs nginx itself (see `reverse-proxy`'s `planOnly` dependency in `contracts/internal-endpoint.yaml`) | Run §3.7's `reverse-proxy` deploy against `nexus` before §3.8 |
+| §3.7's `freeipa-ca-trust` deploy step itself fails or is skipped for a host | `freeipa-ca-trust-apply.yml` needs a real CA certificate already minted on the `freeipa-server` host — the site-wide deploy (§3.4) hasn't finished yet, or `freeipa-server`'s own DNS/CA services aren't up yet | Confirm §3.4's site-wide deploy finished cleanly and `freeipa-server-apply.yml`'s own recap showed the CA/DS services started before retrying §3.7 |
+| §4.5's `curl https://grafana.it.pilot.internal/...` needs `-k`, or fails cert verification only from `freeipa-server`/`client-vm` (works fine from `nexus` itself) | The FreeIPA CA-trust baseline hasn't reached that host — either §3.7's standalone `freeipa-ca-trust` deploy was skipped/failed on it, or (less likely, since §3.8's own first play reapplies the identical logic fleet-wide) something diverged between the two runs | Run §4.5's C-ca-1 check on that specific host first to confirm/deny it's a trust-store problem before touching nginx; if C-ca-1 says `untrusted`/`missing`, re-run §3.7's `freeipa-ca-trust` deploy (idempotent) and re-check — don't just re-run §3.8 and hope, since that masks *why* §3.7 didn't already cover it |
+| §4.5's `curl https://grafana.it.pilot.internal/...` gets a connection that presents **Wazuh's own dashboard certificate** (`CN=wazuh.dashboard`), not a FreeIPA one, even though nginx's vhost config looks completely correct | **Real bug, found and fixed round 25.** Wazuh dashboard's official docker-compose bundle hard-binds host port 443, colliding with `reverse-proxy`/nginx on any host running both roles (this topology's `nexus`) — whichever binds first wins the socket; `journalctl -u nginx`/`/var/log/nginx/error.log` shows `bind() to 0.0.0.0:443 failed (98: Address already in use)`. | Upgrade past the fix (`wazuh-manager-apply.yml` now remaps the dashboard to host port 8443). If `nexus` was provisioned before the fix landed, one manual `systemctl restart nginx` is needed after re-running `wazuh-manager` — a stale nginx worker holding the old failed-bind state doesn't self-heal on its own. A fresh topology built after the fix never hits this. |
+| Plan B's `verification_mounts` check on `client-vm` never shows a real `nfs4`/`sec=krb5` mount, even after `freeipa-identity`/`freeipa-dns-client` have both run | **Separate, pre-existing gap, not a Plan B defect (found round 25).** The NFS server's own FQDN (`nfs.servers[].host`, e.g. `nexus.ipa.pilot.internal`) has no A record in FreeIPA's own DNS at all — confirmed via `dig @<freeipa-ip> nexus.ipa.pilot.internal A` returning `NXDOMAIN` directly from the authoritative server. `freeipa-client-apply.yml` deliberately passes `--no-dns-sshfp` with no `--enable-dns-updates` to `ipa-client-install` (this project's own DNS-is-reconciler-managed design choice), so client hosts are never dynamically registered. | Not yet fixed — would need either enabling dynamic DNS updates during enrollment, or adding an explicit `freeipa-dns` manifest record for every NFS server FQDN a client needs to resolve. The Plan B gate/targeting/verify mechanism itself is confirmed correct independent of this gap (see round-25 evidence). |
+| §3.9's `pilot internal-endpoint suggest` (or its `pilot edit` menu item) proposes a candidate that `pilot internal-endpoint validate`/`SimulateAddInternalEndpoint` then rejects with `dns ownership conflict` | **Not a bug — the same gate §3.8 already relies on, working as designed (found round 26).** A contract endpoint's default `autoPublish.subdomain` can collide with a name `freeipa-dns.yaml` already owns for something unrelated — happened live in this exact topology: the dashboard's default `wazuh` collided with an existing direct-access `wazuh` A record for the manager's own agent ports. | Pick a different, non-colliding subdomain for that one candidate (either edit the printed YAML's `fqdn` before pasting it, or the contract's own `autoPublish.subdomain` default if the collision will recur on every fresh run of this same reference topology — `contracts/wazuh-manager.yaml`'s default is already `wazuh-dashboard` for exactly this reason). |
+
 ### 6.2 Fixed upstream — upgrade past these
 
 Listed only so a symptom on an older checkout is recognizable. On a current
@@ -1056,6 +1466,9 @@ checkout none of these can fire.
 | The `pilot-siem-wazuh-alerts` Loki job has real content but every stream's `host` label is empty | round 20 (2026-08-07) | See `docs/verification/log-shipping.md` v1.3 — the Promtail job scraped the plain-text alert file instead of `alerts/alerts.json`. |
 | `--check --diff` preview fails on `nexus`'s `freeipa-nfs-server` at "Gate: required roster and stage authorization" although `pilot roster lint` reports the roster clean | round 21 (2026-08-11) | Apply the one-line `\| int in [1, 2]` change locally. Guard comment now lives at the fix site in `freeipa-nfs-server-apply.yml`. |
 | `pilot reconcile`'s `freeipa-identity` preview crashes with `Error while resolving value for 'identity_hbac_test_host': object of type 'dict' has no attribute 'server'` | 2026-07-30, commit `e5c56c4` (i.e. before round 18) | Add `freeipa.server` (the FreeIPA host's real FQDN, e.g. `ipa1.<domain>`) to the roster by hand. **Moved out of §6.1 in round 23**: §6.1 had carried this as a live "reported not fixed (round 17)" row for four rounds, together with a mandatory roster workaround, after the exact fix it proposed had already landed — `freeipa-identity-apply.yml:424` now reads `{{ freeipa_roster.freeipa.server \| default(ipa_server_fqdn \| default(inventory_hostname)) }}`. Round 23 confirmed it live by authoring a roster with **no** `freeipa.server` key — precisely the bootstrap-produced shape the old row said would crash — and reconciling it successfully. |
+| `pilot deploy`/`pilot reconcile` reports `component "freeipa-ca-trust" role "freeipa-ca-trust" resolves no hosts` — either leaving its own `target_group` empty, or trying to run `internal-endpoint` (which depends on it) at all, with no possible wizard workaround for the latter | round 25 (2026-08-15) | `contracts/freeipa-ca-trust.yaml` now declares `role: all`, matching what `freeipa-ca-trust-apply.yml` actually targets by default. `cmd/pilot/cmd/deploy.go`'s dependency resolver has no knowledge of `deploy_catalog.go`'s cosmetic `DefaultGroup` field — a component's contract `role` must itself be a real, resolvable inventory group name (or the literal `all`) for both its own empty-`target_group` default and any other component's dependency resolution to work. |
+| `freeipa-nfs-client-apply.yml`'s new roster-driven fail-closed gate fails a fresh, not-yet-enrolled host's very first `--check --diff` preview | round 25 (2026-08-15) | Gate now guarded with `when: not ansible_check_mode`, mirroring `freeipa-nfs-server-apply.yml`'s own identical pattern — a fresh host's `hostname --fqdn` only reports its real FQDN after `ipa-client-install` actually runs, never during a preview. |
+| Adding the `verification_mounts` mount-check to `freeipa-nfs-client-apply.yml` made the very first real site-wide apply silently skip `host-monitoring`/`wazuh-fim`/`restic-backup`/`audit-log-forwarding` on the NFS client host | round 25 (2026-08-15) | The check now carries `ignore_errors: true` — its own prerequisites (the IPA automount map, created by the separate `freeipa-identity` day-2 reconcile; the NFS server FQDN resolving, needing the separate `freeipa-dns-client` day-2 role) are never guaranteed during a plain `site.yml` pass, and a hard failure there used to cascade through Ansible's default "drop a failed host from every later play" behavior. |
 
 Two rows previously listed here now live with their component, which is
 authoritative for them: SeaweedFS's anonymous `C6`–`C8` rows failing once signed
@@ -1066,22 +1479,49 @@ automatically).
 
 ## 7. Latest verified evidence
 
-| Field | Round 21 record |
+| Field | Round 25 record |
 |---|---|
-| Verified at | 2026-08-11 (Asia/Taipei) |
-| Tested revision/tree | Working tree at round start (uncommitted Roster Schema v2 implementation, baseline commit `604aef4`); one real playbook bug found and fixed mid-round (`freeipa-nfs-server-apply.yml` — see §6) |
-| Targets | Fresh `freeipa-server` (AlmaLinux 9, real hostname `ipa1`), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via **`pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml`** |
-| Focus | Author and deploy the FreeIPA identity roster as **Roster Schema v2** for the first time in this runbook's history — the schema, migration engine, and netgroup feature had been implemented but never exercised end-to-end against a real 3-VM rebuild before this round |
-| Roster | `schema_version: 2`, hand-authored: users `alice` (granted)/`bob` (withheld, for the deny test), access-/role-/filesystem-category groups, hostgroup `sysops-hosts` (targets `nexus`, matching §3.3's documented gotcha) nested under `production-hosts`, netgroup `ng-nfs-clients` wired into an NFS export via `sysops-hosts`, HBAC (`breakglass-admin-access` + `sysops-access`), sudo (`sysops-sudo-access`, `!authenticate`). `pilot roster lint` clean throughout |
-| Site apply | Full `site.yml`, sandbox stage — final clean state after the §6 fix: `client-vm ok=105 changed=47 failed=0`; `freeipa-server ok=86 changed=38 failed=0`; `nexus ok=242 changed=107 failed=0`. A second pass (after the identity reconcile created the NFS share's ownership group) applied the one remaining NFS-share step: `client-vm ok=97 changed=1`, `freeipa-server ok=73 changed=1`, `nexus ok=231 changed=4`, `failed=0` |
-| `freeipa-identity` reconcile | Initial apply: `ok=87 changed=27 failed=0` — first real v2 roster ever applied end-to-end (groups/users/nested-hostgroups/netgroup/HBAC/sudo/NFS-automount all created; `allow_all` disabled with break-glass access proven both before and after) |
-| §4.1 (live HBAC/sudo allow+deny) | `scripts/minimal-poc-section4-spotcheck.sh`: 8/8 passed on the first attempt (alice granted sshd+sudo via `hbactest` and live SSH/sudo; bob denied both; allowed/denied sudo commands both correct) |
-| §4.4 (remove/restore/drift/idempotency) | Full cycle, PASS on every step: removal (`ok=87 changed=3`, including — for the first time in this runbook's history — netgroup membership removal live-confirmed via `ipa netgroup-show`); restore + drift-correction (`ok=86 changed=4`, netgroup membership restored, hostgroup description drift-corrected, both live-confirmed); idempotency rerun (`ok=86 changed=1`, the one change being exactly the documented non-idempotent `force_password: true` item) |
-| Bug found + fixed | **1 real implementation defect**: `freeipa-nfs-server-apply.yml:33` still hardcoded `schema_version == 1`, never updated when the rest of the v2 rollout happened — rejected an otherwise-valid v2 roster outright. Fixed with a one-line change (`in [1, 2]`) matching `freeipa-identity-apply.yml:137`'s already-correct convention exactly; user-authorized before applying. No other implementation defect found this round |
-| Environment note | A separate, unrelated `pilot edit`/`inventory generate` invocation had left stray `host_vars`/`group_vars`/`.vault` files at the repo root; `pilot deploy`/`reconcile` picked them up via `ansible-playbook`'s inherited cwd (`internal/ansible`'s `Runner.Run` never pins `cmd.Dir`) — not a pilot defect against this round's own workspace, but a real general cwd-sensitivity gap (see §6). Worked around with an isolated symlinked working directory; the ambiguous-ownership files were left untouched |
-| Scope narrowed | `freeipa-dns` reconcile, §4.2's log chain, and §4.3 (backup + Wazuh FIM) deliberately deferred — each tests an already-proven-in-a-prior-round feature unrelated to the roster schema rollout this round targets |
-| Functional verdict | PASS for the round's actual scope (v2 roster authoring + deploy + identity reconcile + §4.1/§4.4) — 1 real regression found, fixed, and re-verified live the same round |
-| Publication | [`2026-08-11-round-21.md`](../evidence/minimal-poc-architecture/2026-08-11-round-21.md); secret values and ephemeral addresses omitted |
+| Verified at | 2026-08-15 (Asia/Taipei) |
+| Tested revision/tree | HEAD `8ba602c` plus this round's own uncommitted fixes (4 real bugs found and fixed live — see below) |
+| Targets | Fresh `freeipa-server` (AlmaLinux 9), `nexus` and `client-vm` (Ubuntu 24.04); all provisioned via **`pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml`** (the merged topology — every host also carries `freeipa-dns-client`/`host-monitoring`; `nexus` also carries `reverse-proxy`) |
+| Focus | First live test of **two things at once**: the `freeipa-nfs-client` `nfs_clients[]` Plan B fix, and the complete `delivery-test`-merged scope (§3.7, §3.8, §4.2's strengthened check, §4.5) round 24 had left as DRAFT |
+| Roster | `schema_version: 2`, same wizard-uncovered hand-authored exceptions as round 24 (users, category groups, hostgroups, HBAC, sudo, NFS share, one netgroup) plus the new Plan B `nfs_clients: [{hostgroup: nfsclients, verification_mounts: [/sysops]}]` entry. `pilot roster lint` clean throughout |
+| Site apply | Full `site.yml`, sandbox stage, after fixes #1/#2 below: `client-vm ok=138 changed=41 failed=0 ignored=1`; `freeipa-server ok=106 changed=39 failed=0`; `nexus ok=271 changed=96 failed=0` |
+| `freeipa-identity` reconcile | `ok=72 changed=21 failed=0` |
+| `freeipa-dns` reconcile | Zone `it.pilot.internal.`, **2** A records (`wazuh`/`s3` → nexus; `grafana` deliberately excluded, owned by `internal-endpoint` instead — see §3.6): `ok=31 changed=2 failed=0` |
+| `freeipa-dns-client`/`freeipa-ca-trust`/`reverse-proxy` (single-component) | All three `failed=0` on every targeted host; 3/3 idempotency reruns clean `changed=0` |
+| `internal-endpoint` reconcile | `ok=80 changed=10 failed=0`, after fix #3 below |
+| §4.2 strengthened check | `up{job="node"}`: 3/3 `host-monitoring` targets up, all `value=1` |
+| §4.5 (CA trust/DNS/endpoint matrix) | C-ca-1 `trusted` × 3 hosts; C-dns-1 `pilot-managed` × 3 hosts; C-dns-2 `grafana.it.pilot.internal` resolves to nexus's real IP × 3 hosts; C-endpoint-1 real HTTPS `curl` + genuine FreeIPA certificate (`CN=grafana.it.pilot.internal`, issuer `IPA.PILOT.INTERNAL`'s CA) — after fix #4 below |
+| Bugs found + fixed | (1) NFS-client fail-closed gate not check-mode-safe — `when: not ansible_check_mode`; (2) mount-verify task cascaded a hard failure through the rest of `site.yml` for that host — `ignore_errors: true`; (3) `contracts/freeipa-ca-trust.yaml`'s `role` field didn't match its actual `all`-group target, permanently blocking `internal-endpoint`'s dependency resolution with no wizard workaround — corrected to `role: all`; (4) Wazuh dashboard's docker-compose bundle hard-binds host port 443, colliding with `reverse-proxy`/nginx on `nexus` — dashboard remapped to port 8443 |
+| Findings reported, not fixed | The Plan B NFS mount itself still can't complete end-to-end: `nexus.ipa.pilot.internal` has no DNS record in FreeIPA's own DNS at all (confirmed via direct `dig`: `NXDOMAIN`), since `freeipa-client-apply.yml` deliberately never requests dynamic DNS registration during enrollment — a separate, pre-existing architectural gap, not a Plan B defect (the gate/targeting/verify mechanism itself is proven correct); `deploy_catalog.go`'s `Note` field for 3 components still says "Phase-1 placeholder only" though all three have substantial real, already-tested logic |
+| Process | Every long-running apply run directly by the controlling session's own backgrounded `Bash` calls, never delegated to a subagent (round 24's process lesson, held to throughout) |
+| Functional verdict | PASS for the full documented scope, both Plan B and the merge, after 4 real fixes applied live with explicit authorization at each stop |
+| Publication | [`2026-08-15-round-25.md`](../evidence/minimal-poc-architecture/2026-08-15-round-25.md); secret values and ephemeral addresses omitted |
+
+**Round 26 (2026-08-15, same day) — `internal-endpoint` auto-provision suggester, added on top of
+round 25's still-running topology (not an independent rebuild):**
+
+| Field | Round 26 record |
+|---|---|
+| Verified at | 2026-08-15 (Asia/Taipei), same day as round 25 |
+| Scope | New `autoPublish` contract field + `SuggestInternalEndpoints` + `pilot internal-endpoint suggest` (read-only) + `pilot edit` checklist menu item (§3.9) |
+| Topology | Round 25's own 3 VMs, left running — no teardown/rebuild between rounds |
+| Live test | Published `wazuh-dashboard.it.pilot.internal` via `suggest` → validate → real `pilot reconcile`: `freeipa-server ok=112 changed=10 failed=0`; `curl` + genuine FreeIPA cert confirmed from all 3 hosts; pre-existing `grafana.it.pilot.internal` unaffected; idempotency rerun `changed=0` on every host |
+| Finding | Default subdomain `wazuh` collided with an existing `freeipa-dns.yaml` A record — caught by the DNS-ownership-collision gate before reaching a live host, not a suggester bug; corrected the contract default to `wazuh-dashboard` (§6.1) |
+| Tests | `go build ./...` clean; `go test ./...` 1749 passed, 0 failed |
+| Publication | [`2026-08-15-round-26.md`](../evidence/minimal-poc-architecture/2026-08-15-round-26.md) |
+
+**Round 24 remains the reference for the pre-merge scope's own full §4.1–§4.4 matrix**
+(HBAC/sudo allow+deny, the full log chain, backup+FIM, and the identity remove/restore/drift/
+idempotency cycle) — round 25 did not re-run that matrix, since its own focus was the Plan B fix
+and the merge's new sections. See
+[`2026-08-14-round-24.md`](../evidence/minimal-poc-architecture/2026-08-14-round-24.md).
+
+**Round 21 remains the historical reference for one narrower detail no later round has
+re-exercised**: live proof that **netgroup** membership removal and restoration (as opposed to
+ordinary group membership) actually take effect on a real FreeIPA server — see
+[`2026-08-11-round-21.md`](../evidence/minimal-poc-architecture/2026-08-11-round-21.md).
 
 Earlier rounds' records remain valid and are not repeated here — see the round links
 at the top of this runbook.
