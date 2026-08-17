@@ -50,6 +50,34 @@
     freeipa_dns_client_resolv_conf_marker: "pilot-freeipa-dns-client"
     freeipa_dns_client_resolved_dropin_path: /etc/systemd/resolved.conf.d/90-pilot-freeipa-dns-client.conf
 
+# `-e freeipa_dns_client_servers=[10.0.0.10]` on an ansible-playbook/ansible
+# command line — a bare `[...]` with no surrounding quotes recognizable as
+# JSON — is NOT parsed as a list. Ansible's k=v extra-vars parser only
+# recovers a native type via `ast.literal_eval`, which raises on
+# `[10.0.0.10]` (an IPv4 octet has more than one '.', so it isn't a valid
+# Python float literal either), and silently falls back to the raw string
+# "[10.0.0.10]". That string is truthy, so the `default([], true)` above
+# never replaces it, and the Jinja `{% for ip in
+# freeipa_dns_client_effective_servers %}` two tasks down then iterates a
+# STRING character-by-character — not the list an operator obviously
+# intended — silently writing one garbage `nameserver <char>` line per
+# character instead of failing loudly. Confirmed live on a vm-target
+# 2026-08-17 (see docs/verification/freeipa-dns-client.md §8). Fail closed
+# here, before any of that templating happens, rather than let it produce a
+# resolv.conf full of single-character "nameservers".
+- name: "FreeIPA DNS client — Gate: freeipa_dns_client_servers, if given, is a real list"
+  ansible.builtin.assert:
+    that:
+      - freeipa_dns_client_servers | type_debug == 'list'
+    fail_msg: >-
+      freeipa_dns_client_servers must be a YAML/JSON list, not a bare string
+      (got: {{ freeipa_dns_client_servers }}). A bare
+      `-e freeipa_dns_client_servers=[10.0.0.10]` on the command line is
+      parsed as the literal string "[10.0.0.10]", not a list. Pass it as
+      JSON extra-vars instead:
+      -e '{"freeipa_dns_client_servers": ["10.0.0.10", "10.0.0.11"]}',
+      or set it as a real YAML list in a group_vars/host_vars file.
+
 # ── Auto-detect FreeIPA DNS-providing hosts from inventory ──────────────────
 - name: "FreeIPA DNS client — init DNS-provider list"
   ansible.builtin.set_fact:
@@ -156,6 +184,73 @@
           {% for ip in freeipa_dns_client_effective_servers %}
           nameserver {{ ip }}
           {% endfor %}
+
+    # Empirically confirmed on a real vm-target (2026-08-17, Ubuntu 24.04):
+    # writing the resolved.conf.d drop-in above only sets systemd-resolved's
+    # GLOBAL DNS server. It does nothing about the DHCP-supplied PER-LINK
+    # DNS server that netplan's default `dhcp4: true` already installs on
+    # the primary interface — `resolvectl status` showed both
+    # simultaneously (`Global: <configured IP>` AND `Link N (<iface>):
+    # <DHCP gateway> (+DefaultRoute)`), and `resolvectl query` was actually
+    # answered by the per-link (DHCP) entry, not Global — proven by
+    # clearing the per-link entry (`resolvectl dns <iface> ""`) and
+    # re-querying, which then correctly timed out against the
+    # Global-only server. So this role looked correctly configured (drop-in
+    # present, Global DNS correct) while ordinary lookups could silently
+    # keep going through DHCP DNS instead of FreeIPA the whole time. The
+    # EL/NetworkManager branch below already avoids this class of bug via
+    # `dns4_ignore_auto: true`; the two tasks below are the Debian-side
+    # equivalent.
+    #
+    # Ubuntu-only (`ansible_distribution`, narrower than the `ansible_os_family
+    # == 'Debian'` this whole branch otherwise gates on): plain Debian does
+    # not ship netplan by default, and every real Debian-family target in
+    # this fleet is Ubuntu 24.04 (docs/runbooks/vm-target.md's base image)
+    # — a host with systemd-resolved but no netplan should silently skip
+    # this pair rather than fail the whole apply.
+    #
+    # Deliberately a NEW, pilot-owned file (99- sorts after cloud-init's own
+    # 50-cloud-init.yaml) instead of editing that file directly: netplan
+    # merges per-device settings across every file in lexical order, so
+    # this stacks on top of whatever cloud-init's own DHCP config says
+    # without pilot ever touching a file cloud-init itself regenerates (the
+    # same vm-target run confirmed `cloud-init clean` + reboot re-renders
+    # 50-cloud-init.yaml's mtime but never its dhcp4/dhcp6 content, and
+    # never touches this file at all).
+    #
+    # No rescue/rollback entry for this file (unlike /etc/resolv.conf
+    # above): there is no prior version to restore to, and reverting it
+    # after a later step fails would just silently re-enable the exact
+    # DHCP-DNS masking this task exists to prevent.
+    - name: "Debian(Ubuntu) — write netplan drop-in disabling DHCP-supplied per-link DNS"
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-pilot-freeipa-dns-client.yaml
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          # {{ freeipa_dns_client_resolv_conf_marker }}: managed by tasks/freeipa-dns-client-resolver.yml — DO NOT EDIT BY HAND
+          network:
+            version: 2
+            ethernets:
+              {{ ansible_default_ipv4.interface }}:
+                dhcp4-overrides:
+                  use-dns: false
+                dhcp6-overrides:
+                  use-dns: false
+      when:
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+        - ansible_default_ipv4.interface is defined
+      register: freeipa_dns_client_netplan_dropin
+
+    - name: "Debian(Ubuntu) — netplan apply (DHCP DNS override changed)"
+      ansible.builtin.command: netplan apply
+      when:
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+        - freeipa_dns_client_netplan_dropin is changed
+      changed_when: true
 
     # ── EL/RHEL: NetworkManager ──────────────────────────────────────────
     - name: "EL — discover the active NetworkManager connection"

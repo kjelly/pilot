@@ -96,7 +96,7 @@ FreeIPA server/replica 自己用得到。
 |-----|----------|---------------------------------------------------------------|--------------------------|---------|
 | C1  | package  | DNS 查詢工具 `dig` 已安裝（供本檔功能性驗證使用）              | 0                        | sh -c 'command -v dig' |
 | C2  | service  | 該 OS 對應的 resolver 管理服務 active（Debian systemd-resolved／EL NetworkManager）| 0 | sh -c 'systemctl is-active systemd-resolved 2>/dev/null || systemctl is-active NetworkManager' |
-| C3  | config   | resolver 設定確實由本 playbook 寫入，非 DHCP 預設（證據依 OS 而異，見下方備註）| pilot-managed | sh -c 'if command -v nmcli >/dev/null 2>&1 && [ -n "$(nmcli -t -f NAME connection show --active 2>/dev/null | head -n1)" ]; then conn=$(nmcli -t -f NAME connection show --active | head -n1); [ "$(nmcli -g ipv4.ignore-auto-dns connection show "$conn" 2>/dev/null)" = yes ] && echo pilot-managed || echo not-managed; else grep -q pilot-freeipa-dns-client /etc/resolv.conf && echo pilot-managed || echo not-managed; fi' |
+| C3  | config   | resolver 設定確實由本 playbook 寫入，且 DHCP 派發的 per-link DNS 已停用（證據依 OS 而異，見下方備註）| pilot-managed | sh -c 'if command -v nmcli >/dev/null 2>&1 && [ -n "$(nmcli -t -f NAME connection show --active 2>/dev/null | head -n1)" ]; then conn=$(nmcli -t -f NAME connection show --active | head -n1); [ "$(nmcli -g ipv4.ignore-auto-dns connection show "$conn" 2>/dev/null)" = yes ] && echo pilot-managed || echo not-managed; else grep -q pilot-freeipa-dns-client /etc/resolv.conf && grep -q "use-dns: false" /etc/netplan/99-pilot-freeipa-dns-client.yaml 2>/dev/null && echo pilot-managed || echo not-managed; fi' |
 | C4  | config   | `/etc/resolv.conf` 至少一行 `nameserver`                       | 0                        | sh -c 'grep -c "^nameserver " /etc/resolv.conf | grep -qv "^0$"' |
 | C5  | config   | search domain 含 FreeIPA domain（未限定名稱可補 domain 解析）  | 0                        | grep -qE "^search .*ipa.pilot.internal" /etc/resolv.conf |
 | C6  | dns      | FreeIPA server FQDN 真的透過 DNS 解析成功（非 `/etc/hosts` 短路）| 0                       | sh -c 'dig +short ipa1.ipa.pilot.internal | grep -qE "^[0-9]+\."' |
@@ -201,7 +201,24 @@ FreeIPA server/replica 自己用得到。
   必然消失（實際 DNS 內容仍然正確，C6 功能性驗證仍會 PASS，純粹是 C3 這個
   探測本身找錯了持久證據）——改成偵測 nmcli 是否存在：存在就檢查該
   connection profile 的 `ipv4.ignore-auto-dns=yes`（唯一只有 pilot 會設定
-  的持久欄位），否則才退回檢查 `/etc/resolv.conf` 標記。 |
+  的持久欄位），否則才退回檢查 `/etc/resolv.conf` 標記。
+  **2026-08-17 再修正**：Debian 分支原本只檢查 `/etc/resolv.conf` 標記字串
+  存在，沒驗證 DHCP 派發的 per-link DNS 是否真的被關掉——活體 vm-target
+  實測發現只寫 `resolved.conf.d` drop-in（設 systemd-resolved 的 Global DNS）
+  完全不影響 netplan `dhcp4: true` 裝在該介面上的 per-link DNS，`resolvectl
+  status` 同時列出 Global（pilot 設定的 IP）與 Link（DHCP 給的閘道器 IP），
+  且實際查詢是 per-link 那組在回答，Global 形同虛設；本檔看起來
+  「設定正確」但日常解析可能整段沒經過 FreeIPA。EL/NetworkManager 分支原本
+  就靠 `dns4_ignore_auto: true` 避開這個問題，Debian 這邊之前沒有對等機制。
+  修法：新增 Ubuntu-only 的 `tasks/freeipa-dns-client-resolver.yml` 任務，寫入
+  獨立的 `/etc/netplan/99-pilot-freeipa-dns-client.yaml`（刻意不改 cloud-init
+  自己管的 `50-cloud-init.yaml`——netplan 對同一張介面的設定是跨檔案依字母
+  順序合併，99- 會蓋過 50- 的 DHCP DNS，且不會被 cloud-init 之後的重新產生
+  蓋回去）設 `dhcp4-overrides`/`dhcp6-overrides: {use-dns: false}`，再
+  `netplan apply`。C3 的 Debian 分支因此也一併補上檢查這個 netplan
+  drop-in 檔是否存在且內容含 `use-dns: false`，單靠 `/etc/resolv.conf`
+  標記字串不再視為足夠證據（否則這個探測本身在有 bug 的舊版本上仍會
+  vacuously PASS，跟 2026-08-14 那次修的問題是同一類）。 |
 | C6 | 驗證用途，無對應 mutate task（apply 完成後的功能性結果）|
 
 ## 7. 動態行為 SOP（fixture：確保有 DNS 提供者可偵測）
@@ -218,3 +235,5 @@ FreeIPA server/replica 自己用得到。
 | 2026-07-31 | v0.1 | 初版（DRAFT，尚未實跑，見 §0）| sre |
 | 2026-07-31 | v1.0 | 對 AlmaLinux 9(FreeIPA server 自我指向)與 Ubuntu 24.04(一般 client) 兩台 vm-target 實跑,C1-C6 兩台皆 6/6 PASS + idempotent `changed=0`;修正 3 個 vacuous-check spec bug(C3/C4/C6)| sre |
 | 2026-08-14 | v1.0 | internal-endpoint Phase 10 收尾:實際邏輯抽到共用檔 `tasks/freeipa-dns-client-resolver.yml`,同時被 internal-endpoint-apply.yml 的 fleet-wide baseline play 引用以修好 docs/verification/internal-endpoint.md 的 C9(見該檔 §26 point 1 的既有 gap)。3 台新 vm-target(AlmaLinux 9 自我指向 + AlmaLinux 9 一般 client + Ubuntu 24.04 一般 client)重跑,17/18 首次全過(1 個真的抽出時才引入的 --check 下 NetworkManager gate 誤判 bug,已修:read-only 的 `nmcli connection show --active` 缺 `check_mode: false`);另修好 C3 本身在 EL 上的探測設計缺陷(`nmcli device reapply` 每次都會讓 NetworkManager 重新產生 `/etc/resolv.conf`,pilot 寫入的標記字串必然消失,即便真實設定完全正確)。修正後 3 台 18/18 PASS + idempotent 重跑 `changed=0`,無 regression。| sre |
+| 2026-08-17 | v1.0 | 修 Debian 分支缺少 DHCP per-link DNS 覆寫的 gap(見 §6 C3 備註)。對活體 Ubuntu 24.04 vm-target 實測:修法前重現 bug——寫入 `resolved.conf.d` drop-in 後 `resolvectl status` 同時列出 `Global: 198.51.100.53`(pilot 設定)與 `Link 2 (enp1s0): 192.168.122.1`(DHCP),`resolvectl query`/`dig` 實際由 DHCP 那組回答(14ms 內完成,黑洞 IP 不可能這麼快);修法後(新增 `/etc/netplan/99-pilot-freeipa-dns-client.yaml` + `netplan apply`)`Link 2` 變成 `Current Scopes: none`,查詢正確改向黑洞 IP 逾時。跑完整 `freeipa-dns-client-apply.yml`(`-e freeipa_dns_client_servers=[...]` 黑洞 IP,C6 功能性驗證預期會 fail-closed 並觸發既有 rescue/rollback,此為預期行為,不是新 bug)驗證兩個新 task 首次套用 `changed`,reboot 後設定存活,第二次重跑 `ok`/`skipping`(無 `changed`),與既有的 idempotent 慣例一致。額外發現一個測試過程才踩到、與本次修法無關的既有陷阱:`-e freeipa_dns_client_servers=[198.51.100.53]`(裸 `[...]` 不加引號)不會被 ansible 解析成 list,而是整段當字串賦值,讓 Jinja 的 `{% for ip in ... %}` 逐字元跑過該字串、產生 15 行垃圾 `nameserver` (`[`/`1`/`9`/`8`/`.`/... 各自一行);必須用 `-e '{"freeipa_dns_client_servers": ["198.51.100.53"]}'` 這種 JSON 型 `-e` 才會正確解析成 list——本檔與呼叫端文件都還沒對這個踩坑留說明,先記錄在此,尚未修正(不在本次改動範圍內)。| sre |
+| 2026-08-17 | v1.0 | 修上一列記錄、當時尚未處理的 `freeipa_dns_client_servers` 裸 `[...]` 陷阱:在「normalize」set_fact 之後新增一個 `ansible.builtin.assert` gate,用 `freeipa_dns_client_servers \| type_debug == 'list'` 判斷這個值是不是真的 list——不是就 fail closed,錯誤訊息直接教怎麼改成 `-e '{"freeipa_dns_client_servers": [...]}'` 或改放進 group_vars/host_vars 的 YAML list,而不是放任 Jinja `for` 迴圈逐字元跑出一堆垃圾 `nameserver` 行。用最小的 localhost-only ansible-playbook(`connection: local`,不需要真的 VM,純粹在測 Ansible 自己的變數型別解析行為)驗證 4 種輸入:沒給值(預設 `[]`)PASS、裸 `-e servers=[ip]` 正確 FAIL 並印出上述訊息、JSON 型 `-e '{"servers": [...]}'` PASS、`-e @file.yml`(YAML list)PASS。`ansible-lint`/`go test ./...` 皆過,無 regression。| sre |

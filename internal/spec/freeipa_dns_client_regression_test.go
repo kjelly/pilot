@@ -237,3 +237,62 @@ func TestRegression_FreeipaDNSClientApplyPlaybook_MultiOSCoverage(t *testing.T) 
 		}
 	}
 }
+
+// TestRegression_FreeipaDNSClientApplyPlaybook_DebianDisablesDHCPPerLinkDNS
+// locks the 2026-08-17 fix for a real bug found on a live vm-target: writing
+// the resolved.conf.d drop-in only sets systemd-resolved's GLOBAL DNS
+// server — it does nothing about the DHCP-supplied PER-LINK DNS server
+// netplan's default dhcp4/dhcp6 already installs, and per-link DNS silently
+// wins over Global for ordinary lookups (resolvectl status showed both at
+// once; `resolvectl query` was actually answered by the DHCP entry, not the
+// configured FreeIPA one). The EL/NetworkManager branch already had the
+// equivalent protection (dns4_ignore_auto). A future edit that drops the
+// Ubuntu netplan override would silently reintroduce that gap.
+func TestRegression_FreeipaDNSClientApplyPlaybook_DebianDisablesDHCPPerLinkDNS(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/tasks/freeipa-dns-client-resolver.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	for _, required := range []string{
+		"ansible_distribution == 'Ubuntu'",
+		"/etc/netplan/99-pilot-freeipa-dns-client.yaml",
+		"dhcp4-overrides",
+		"use-dns: false",
+		"netplan apply",
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Errorf("playbook must contain %q (DHCP per-link DNS override fix)", required)
+		}
+	}
+}
+
+// TestRegression_FreeipaDNSClientApplyPlaybook_RejectsNonListServers locks
+// the 2026-08-17 fix for a documented footgun: `-e
+// freeipa_dns_client_servers=[10.0.0.10]` (a bare bracket, no JSON/YAML
+// quoting) is parsed by ansible's k=v extra-vars handling as the literal
+// string "[10.0.0.10]", not a list — confirmed live to make the resolver
+// task's `for ip in ...` loop iterate the string character-by-character,
+// silently writing one garbage `nameserver <char>` line per character
+// instead of failing loudly. A future edit that removes this gate (or
+// weakens it to something that also accepts a string) would silently
+// reintroduce that failure mode.
+func TestRegression_FreeipaDNSClientApplyPlaybook_RejectsNonListServers(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/tasks/freeipa-dns-client-resolver.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	for _, required := range []string{
+		"freeipa_dns_client_servers | type_debug == 'list'",
+		`{"freeipa_dns_client_servers": ["10.0.0.10", "10.0.0.11"]}`,
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Errorf("playbook must contain %q (non-list freeipa_dns_client_servers gate)", required)
+		}
+	}
+}
