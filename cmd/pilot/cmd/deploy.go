@@ -1025,6 +1025,10 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 		return err
 	}
 	components = contractIDs(applied)
+	extraVars, err = autoFillFreeIPARosterFile(ctx, out, selected, scope, inv, extraVars, vault)
+	if err != nil {
+		return err
+	}
 	inputs, err := resolveDeploymentInputs(ctx, selected, scope, inv, extraVars, vault)
 	if err != nil {
 		return err
@@ -1351,6 +1355,90 @@ func extraVarValue(extraVars []string, wanted string) string {
 		if ok && key == wanted {
 			return value
 		}
+	}
+	return ""
+}
+
+// autoFillFreeIPARosterFile spares the operator from hand-typing the same
+// freeipa_roster_file path onto every freeipa-nfs-client host now that the
+// contract requires it there too (it used to be freeipa-nfs-server-only):
+// it reuses whatever value the inventory's other hosts already resolve it
+// to (the common case — freeipa-server/freeipa-nfs-server already carry
+// it), else falls back to the workspace's conventional default path
+// (<inventory dir>/.vault/ipa-identity.yaml) if that file actually exists
+// on disk. Silent and best-effort, with no confirmation prompt (unlike
+// promptAutoHostVar) — this runs inside executeRecordedDeployment, the one
+// funnel every deploy entry point shares (interactive wizard, scripted -e
+// flags, vm-target), and a new prompt here would renumber every scripted
+// trec drive of the deploy wizard. If it can't resolve anything, extraVars
+// comes back unchanged and the existing ValidateContractPreflight error
+// fires exactly as it did before this function existed.
+func autoFillFreeIPARosterFile(ctx context.Context, out io.Writer, selected []contract.Contract, scope delivery.Scope, inv string, extraVars []string, vault vaultInput) ([]string, error) {
+	if extraVarValue(extraVars, "freeipa_roster_file") != "" {
+		return extraVars, nil
+	}
+
+	var rosterHosts []string
+	for _, component := range selected {
+		for _, gv := range component.GroupVars {
+			if gv.Name == "freeipa_roster_file" && gv.Required {
+				rosterHosts = append(rosterHosts, scope.HostsByRole[component.Role]...)
+				break
+			}
+		}
+	}
+	if len(rosterHosts) == 0 {
+		return extraVars, nil
+	}
+
+	hostVars, err := resolveInventoryVariables(ctx, inv, extraVars, vault)
+	if err != nil {
+		return nil, err
+	}
+
+	def := filepath.Join(filepath.Dir(inv), ".vault", "ipa-identity.yaml")
+	abs, err := filepath.Abs(def)
+	if err != nil {
+		return nil, err
+	}
+	_, statErr := os.Stat(abs)
+
+	value := resolveRosterAutoFillValue(rosterHosts, hostVars, abs, statErr == nil)
+	if value == "" {
+		return extraVars, nil
+	}
+	fmt.Fprintf(out, "ℹ️  freeipa_roster_file 未設定，自動帶入 %s\n", value)
+	return append(extraVars, "freeipa_roster_file="+value), nil
+}
+
+// resolveRosterAutoFillValue is autoFillFreeIPARosterFile's pure decision
+// step, split out so it's testable without shelling out to
+// ansible-inventory. rosterHosts is every host in scope a selected
+// component's contract requires freeipa_roster_file for; hostVars is every
+// host's resolved ansible variables (the whole inventory, not just
+// rosterHosts). If even one rosterHosts entry already has an explicit
+// value, this backs off entirely and returns "" — some hosts may
+// deliberately point at different roster files, and a single blanket -e
+// would silently override whichever of them already work correctly (-e
+// beats host_vars/group_vars in Ansible's precedence).
+func resolveRosterAutoFillValue(rosterHosts []string, hostVars map[string]map[string]any, defaultPath string, defaultExists bool) string {
+	for _, host := range rosterHosts {
+		if v, _ := hostVars[host]["freeipa_roster_file"].(string); strings.TrimSpace(v) != "" {
+			return ""
+		}
+	}
+	names := make([]string, 0, len(hostVars))
+	for name := range hostVars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if v, ok := hostVars[name]["freeipa_roster_file"].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	if defaultExists {
+		return defaultPath
 	}
 	return ""
 }

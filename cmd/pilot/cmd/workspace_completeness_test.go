@@ -352,17 +352,38 @@ thanos_s3_endpoint: ""
 }
 
 // TestCheckWorkspaceCompleteness_NoRosterRowForClientOnlyRoles covers
-// finding #3: freeipa-client/freeipa-nfs-client enrollment never reads
-// the roster, so their mere presence shouldn't trigger a "prepare a
-// roster" guess the way freeipa-server/-nfs-server does.
+// finding #3: plain freeipa-client enrollment never reads the roster, so
+// its mere presence shouldn't trigger a "prepare a roster" guess the way
+// freeipa-server/-nfs-server does.
 func TestCheckWorkspaceCompleteness_NoRosterRowForClientOnlyRoles(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
   client-1:
     ansible_host: 10.0.0.1
     roles: [freeipa-client]
-  client-2:
-    ansible_host: 10.0.0.2
+`)
+
+	got := checkWorkspaceCompleteness(dir)
+
+	for _, c := range got {
+		if strings.HasPrefix(c.Label, "roster") {
+			t.Fatalf("unexpected roster row %+v — freeipa-client never reads the roster", c)
+		}
+	}
+}
+
+// TestCheckWorkspaceCompleteness_RosterRowForNFSClientOnlyRole covers the
+// f9d9f0e contract change: freeipa-nfs-client is roster-driven now (see
+// playbooks/apply/freeipa-nfs-client-apply.yml's include_vars), so a
+// workspace with only that role and no explicit freeipa_roster_file must
+// still get the same "go prepare a roster" guess freeipa-nfs-server gets —
+// otherwise this exact completeness check stays silent about the very gap
+// that made a real deploy fail its contract preflight.
+func TestCheckWorkspaceCompleteness_RosterRowForNFSClientOnlyRole(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
+  client-1:
+    ansible_host: 10.0.0.1
     roles: [freeipa-nfs-client]
 `)
 
@@ -370,9 +391,10 @@ func TestCheckWorkspaceCompleteness_NoRosterRowForClientOnlyRoles(t *testing.T) 
 
 	for _, c := range got {
 		if strings.HasPrefix(c.Label, "roster") {
-			t.Fatalf("unexpected roster row %+v — client-only roles never read the roster", c)
+			return
 		}
 	}
+	t.Fatalf("want a roster completeness row for a freeipa-nfs-client-only workspace, got %+v", got)
 }
 
 func TestCheckWorkspaceCompleteness_NoInternalEndpointRowWhenManifestAbsent(t *testing.T) {

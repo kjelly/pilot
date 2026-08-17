@@ -353,13 +353,16 @@ func readYAMLMap(path string) (map[string]any, error) {
 // replica) is `pilot reconcile`'s freeipa-identity entry's actual target
 // (deploy_catalog.go); freeipa-nfs-server needs it for the nfs.servers
 // cross-check deploy_completeness.go performs. freeipa-client and
-// freeipa-nfs-client are deliberately EXCLUDED: enrolling a client or
-// mounting an NFS export never reads the roster at all, so a workspace
-// with only those roles shouldn't be told to go prepare one — an explicit
-// freeipa_roster_file set on a client host is still honored, just not
-// guessed for it.
+// freeipa-client is deliberately EXCLUDED: enrolling a client never reads
+// the roster at all, so a workspace with only that role shouldn't be told
+// to go prepare one. freeipa-nfs-client used to be excluded for the same
+// reason, but f9d9f0e made it roster-driven too (it now does its own
+// include_vars on freeipa_roster_file — see
+// playbooks/apply/freeipa-nfs-client-apply.yml) — an explicit
+// freeipa_roster_file set on any host is still honored, just not guessed
+// for freeipa-client.
 var freeipaRosterFallbackRoles = []string{
-	"freeipa-server", "freeipa-server-replica", "freeipa-nfs-server",
+	"freeipa-server", "freeipa-server-replica", "freeipa-nfs-server", "freeipa-nfs-client",
 }
 
 // checkRosterCompleteness locates the freeipa-identity roster and runs

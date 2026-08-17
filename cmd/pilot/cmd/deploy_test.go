@@ -467,6 +467,83 @@ func TestDefaultVaultFile(t *testing.T) {
 	}
 }
 
+func TestResolveRosterAutoFillValue(t *testing.T) {
+	defaultPath := "/ws/.vault/ipa-identity.yaml"
+
+	t.Run("reuses value already set on another host", func(t *testing.T) {
+		hostVars := map[string]map[string]any{
+			"ipa-1":      {"freeipa_roster_file": "/ws/.vault/ipa-identity.yaml"},
+			"nfs-client": {},
+		}
+		got := resolveRosterAutoFillValue([]string{"nfs-client"}, hostVars, defaultPath, true)
+		if got != "/ws/.vault/ipa-identity.yaml" {
+			t.Fatalf("got %q, want reused value", got)
+		}
+	})
+
+	t.Run("falls back to default path when nothing else has it", func(t *testing.T) {
+		hostVars := map[string]map[string]any{
+			"nfs-client": {},
+		}
+		got := resolveRosterAutoFillValue([]string{"nfs-client"}, hostVars, defaultPath, true)
+		if got != defaultPath {
+			t.Fatalf("got %q, want default path %q", got, defaultPath)
+		}
+	})
+
+	t.Run("gives up when default path doesn't exist and nothing else has it", func(t *testing.T) {
+		hostVars := map[string]map[string]any{
+			"nfs-client": {},
+		}
+		got := resolveRosterAutoFillValue([]string{"nfs-client"}, hostVars, defaultPath, false)
+		if got != "" {
+			t.Fatalf("got %q, want empty (no safe guess)", got)
+		}
+	})
+
+	t.Run("backs off entirely when a roster host already has an explicit value", func(t *testing.T) {
+		hostVars := map[string]map[string]any{
+			"nfs-client-1": {"freeipa_roster_file": "/ws/.vault/custom.yaml"},
+			"nfs-client-2": {},
+			"ipa-1":        {"freeipa_roster_file": "/ws/.vault/ipa-identity.yaml"},
+		}
+		got := resolveRosterAutoFillValue([]string{"nfs-client-1", "nfs-client-2"}, hostVars, defaultPath, true)
+		if got != "" {
+			t.Fatalf("got %q, want empty — must not override nfs-client-1's explicit value", got)
+		}
+	})
+}
+
+func TestAutoFillFreeIPARosterFile_SkipsWhenExplicitExtraVarAlreadySet(t *testing.T) {
+	selected := []contract.Contract{{
+		ID: "freeipa-nfs-client", Role: "freeipa-nfs-client",
+		GroupVars: []contract.GroupVar{{Name: "freeipa_roster_file", Required: true}},
+	}}
+	scope := delivery.Scope{HostsByRole: map[string][]string{"freeipa-nfs-client": {"nfs-1"}}}
+	extraVars := []string{"freeipa_roster_file=/already/set.yaml"}
+
+	got, err := autoFillFreeIPARosterFile(context.Background(), io.Discard, selected, scope, "unused.yml", extraVars, vaultInput{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "freeipa_roster_file=/already/set.yaml" {
+		t.Fatalf("got %v, want extraVars left untouched", got)
+	}
+}
+
+func TestAutoFillFreeIPARosterFile_NoOpWhenNoComponentRequiresRoster(t *testing.T) {
+	selected := []contract.Contract{{ID: "freeipa-client", Role: "freeipa-client"}}
+	scope := delivery.Scope{HostsByRole: map[string][]string{"freeipa-client": {"client-1"}}}
+
+	got, err := autoFillFreeIPARosterFile(context.Background(), io.Discard, selected, scope, "unused.yml", nil, vaultInput{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %v, want no extra vars appended", got)
+	}
+}
+
 func TestSiteAutoHostVars_DedupesByVar(t *testing.T) {
 	avs := siteAutoHostVars()
 

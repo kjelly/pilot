@@ -63,6 +63,47 @@ func TestRosterDomain_ReadsFreeIPADomain(t *testing.T) {
 	}
 }
 
+func writeFreeIPAGroupVars(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "group_vars"), 0o755); err != nil {
+		t.Fatalf("mkdir group_vars: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "group_vars", "freeipa.yml"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write group_vars/freeipa.yml: %v", err)
+	}
+	return dir
+}
+
+func TestFreeIPAServerFQDN_UsesExplicitOverrideWhenSet(t *testing.T) {
+	dir := writeFreeIPAGroupVars(t, "freeipa_domain: ipa.pilot.internal\nfreeipa_server_fqdn: ipa-primary.ipa.pilot.internal\n")
+	got, err := FreeIPAServerFQDN(dir)
+	if err != nil {
+		t.Fatalf("FreeIPAServerFQDN() error = %v", err)
+	}
+	if got != "ipa-primary.ipa.pilot.internal" {
+		t.Fatalf("FreeIPAServerFQDN() = %q, want ipa-primary.ipa.pilot.internal", got)
+	}
+}
+
+func TestFreeIPAServerFQDN_DerivesIpa1PrefixWhenUnset(t *testing.T) {
+	dir := writeFreeIPAGroupVars(t, "freeipa_domain: ipa.pilot.internal\n")
+	got, err := FreeIPAServerFQDN(dir)
+	if err != nil {
+		t.Fatalf("FreeIPAServerFQDN() error = %v", err)
+	}
+	if got != "ipa1.ipa.pilot.internal" {
+		t.Fatalf("FreeIPAServerFQDN() = %q, want ipa1.ipa.pilot.internal", got)
+	}
+}
+
+func TestFreeIPAServerFQDN_ErrorsWhenDomainMissing(t *testing.T) {
+	dir := writeFreeIPAGroupVars(t, "some_other_var: x\n")
+	if _, err := FreeIPAServerFQDN(dir); err == nil {
+		t.Fatal("FreeIPAServerFQDN() error = nil, want an error when freeipa_domain is missing")
+	}
+}
+
 func TestRosterHasNFSServer_TrueWhenPrincipalMatches(t *testing.T) {
 	path := writeRosterFixture(t, rosterFixtureWithNFS)
 	got, err := RosterHasNFSServer(path, "nfs1.ipa.pilot.internal")

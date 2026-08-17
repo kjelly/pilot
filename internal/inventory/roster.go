@@ -33,24 +33,54 @@ type rosterHead struct {
 	} `yaml:"nfs"`
 }
 
+// freeIPAGroupVars loads group_vars/freeipa.yml once so FreeIPADomain and
+// FreeIPAServerFQDN don't each duplicate the read/parse error handling.
+func freeIPAGroupVars(workspaceDir string) (map[string]any, error) {
+	data, err := os.ReadFile(filepath.Join(workspaceDir, "group_vars", "freeipa.yml"))
+	if err != nil {
+		return nil, err
+	}
+	var vars map[string]any
+	if err := yaml.Unmarshal(data, &vars); err != nil {
+		return nil, fmt.Errorf("parse FreeIPA group vars: %w", err)
+	}
+	return vars, nil
+}
+
 // FreeIPADomain reads the deployment domain from group_vars/freeipa.yml.
 // The domain is inventory configuration, not roster data; keeping this
 // lookup here lets controller-side helpers derive FQDNs without duplicating
 // the value in .vault/ipa-identity.yaml.
 func FreeIPADomain(workspaceDir string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(workspaceDir, "group_vars", "freeipa.yml"))
+	vars, err := freeIPAGroupVars(workspaceDir)
 	if err != nil {
 		return "", err
-	}
-	var vars map[string]any
-	if err := yaml.Unmarshal(data, &vars); err != nil {
-		return "", fmt.Errorf("parse FreeIPA group vars: %w", err)
 	}
 	domain, _ := vars["freeipa_domain"].(string)
 	if strings.TrimSpace(domain) == "" {
 		return "", fmt.Errorf("freeipa_domain is missing from group_vars/freeipa.yml")
 	}
 	return strings.TrimSpace(domain), nil
+}
+
+// FreeIPAServerFQDN reads the deployment's FreeIPA server FQDN from
+// group_vars/freeipa.yml, matching the same default the apply playbooks
+// use ("{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}" in
+// playbooks/apply/freeipa-{server,client,dns}-apply.yml) so the edit
+// wizard never asks the user to hand-copy a value pilot can derive itself.
+func FreeIPAServerFQDN(workspaceDir string) (string, error) {
+	vars, err := freeIPAGroupVars(workspaceDir)
+	if err != nil {
+		return "", err
+	}
+	if fqdn, _ := vars["freeipa_server_fqdn"].(string); strings.TrimSpace(fqdn) != "" {
+		return strings.TrimSpace(fqdn), nil
+	}
+	domain, _ := vars["freeipa_domain"].(string)
+	if strings.TrimSpace(domain) == "" {
+		return "", fmt.Errorf("freeipa_domain is missing from group_vars/freeipa.yml")
+	}
+	return "ipa1." + strings.TrimSpace(domain), nil
 }
 
 func readRosterHead(path string) (rosterHead, error) {
