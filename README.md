@@ -149,7 +149,7 @@ touches a live host. Two additional, independently-gated flags register a
 separate tool family that runs real Ansible ad-hoc commands against a real
 inventory host:
 
-- `--enable-diagnose` (requires `--diagnose-inventory`) registers five
+- `--enable-diagnose` (requires `--diagnose-inventory`) registers six
   **fixed, code-defined, read-only** tools:
   - `pilot_diagnose_sudo` / `pilot_diagnose_dns` — a command allow-list
     (mirroring `docs/verification/freeipa-client.md` and
@@ -184,6 +184,25 @@ inventory host:
     JSON body, not in a per-host file path the way log-server's files do,
     so a content search is the one mechanism that finds a host either
     way).
+  - `pilot_diagnose_login` — a one-call composite for "why can't these
+    users log in / sudo on this host", built from the same allow-listed
+    steps the tools above already use rather than any new mechanism: sssd
+    status, sssd domain backend online/offline, Kerberos machine identity,
+    and this host's own DNS self-resolution, plus per-user NSS passwd
+    resolution and a live central sudo rule check (`sudo -l -U <user>`)
+    for each entry in `users`. It also reads the workspace's FreeIPA
+    roster (a local config-file read, not an ad-hoc step) to report each
+    user's declared HBAC/sudo authorization on this host and flags any
+    drift against what was just observed live — e.g. the roster declares
+    a sudo rule that hasn't reconciled onto this host yet, or a live rule
+    the roster no longer declares. It also best-effort queries recent
+    SSH/PAM login records for these users over the last `lookback` (a Go
+    duration, default `24h`) the same way `pilot_diagnose_security_logs`
+    does; a workspace with no `dashboard` role deployed gets a
+    `skipped_reason` there instead of failing the whole call. This exists
+    to replace the usual manual sequence of `pilot_diagnose_sudo`/`dns`/
+    `security_logs` plus a separate roster lookup — a real investigation
+    that took 17 separate tool calls to assemble by hand collapses to one.
   - Both `pilot_diagnose_logs` and `pilot_diagnose_security_logs`
     **exclude pilot's own ansible-generated log noise by default** —
     ansible's `BECOME-SUCCESS-` become/sudo marker, and any line

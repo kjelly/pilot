@@ -563,6 +563,13 @@ outline:
   by hand (host's "其他變數" menu) on any *other* host whose apply playbook also reads the roster
   (in this topology, `freeipa-server` — point it at the same absolute path the bootstrap already
   used on nexus).
+- **If you use the roles menu's `📋 套用常用角色範本` shortcut instead of the manual checklist for
+  `client-vm`, still check `freeipa-nfs-client` yourself (2026-08-17 change).** The built-in
+  `被監控的 Linux 主機(minimal PoC)` preset no longer bundles `freeipa-nfs-client` by default — it
+  was removed because not every host built from that preset needs an NFS mount. §1's role table is
+  unaffected and still requires it on `client-vm`; the preset shortcut alone will now leave it
+  unchecked, so add it via `☑  逐項勾選角色` (or `⚙  管理角色範本` to add it back into a
+  workspace-local copy of the preset) before moving on.
 - **`host_vars/<host>.yml`**: a per-host menu item, `host_vars/<host>.yml(必填、無安全預設值的設定)`,
   appears automatically once that host has a role with such a key (today just
   `prometheus_site_label` for `prometheus`, gating on `prometheus-apply.yml`'s hard requirement —

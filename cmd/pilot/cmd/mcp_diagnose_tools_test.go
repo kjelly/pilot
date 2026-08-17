@@ -614,6 +614,278 @@ func TestDiagnoseSecurityLogsHandler_UnreachableSurfacesAsFieldNotError(t *testi
 	}
 }
 
+// ---- pilot_diagnose_login ------------------------------------------------
+
+// writeDiagnoseLoginFixtureInventory writes a fixture with one target host
+// (web1, carrying a freeipa_roster_file extra var pointing at rosterPath so
+// discoverRosterFilePath finds it the same way it would from a real
+// freeipa-server/freeipa-nfs-server host) plus, when withDashboard is set,
+// a one-host "dashboard" group for the security-logs section.
+func writeDiagnoseLoginFixtureInventory(t *testing.T, rosterPath string, withDashboard bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	var b strings.Builder
+	b.WriteString("all:\n  hosts:\n    web1:\n      ansible_connection: local\n      ansible_host: 127.0.0.1\n")
+	if rosterPath != "" {
+		b.WriteString("      freeipa_roster_file: " + rosterPath + "\n")
+	}
+	if withDashboard {
+		b.WriteString("  children:\n    dashboard:\n      hosts:\n        dash1: {ansible_connection: local, ansible_host: 127.0.0.1}\n")
+	}
+	path := filepath.Join(dir, "inventory.yml")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// diagnosePrefixRunner is diagnoseFakeRunner's exact-match lookup plus a
+// prefix-matched fallback — needed for pilot_diagnose_login's security-logs
+// step, whose curl command embeds a real time.Now()-derived timestamp
+// (normalizeLokiRange's lookback resolution) that a test cannot predict
+// exactly, unlike every other fixed-literal step in this file.
+type diagnosePrefixRunner struct {
+	byCommand map[string]func() (string, int, error)
+	byPrefix  map[string]func() (string, int, error)
+	calls     []string
+}
+
+func (f *diagnosePrefixRunner) run(_ context.Context, args []string, _ int) (string, int, error) {
+	command := args[len(args)-1]
+	f.calls = append(f.calls, command)
+	if fn, ok := f.byCommand[command]; ok {
+		return fn()
+	}
+	for prefix, fn := range f.byPrefix {
+		if strings.HasPrefix(command, prefix) {
+			return fn()
+		}
+	}
+	return "", 0, fmt.Errorf("no fake response configured for command %q", command)
+}
+
+func TestDiagnoseLoginHandler_NoUsersRejectedBeforeAnyCall(t *testing.T) {
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseLoginHandler(baseDiagnoseOpts(t, "unused.yml", fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLoginInput{Host: "web1"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result for zero users", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0", len(fake.calls))
+	}
+}
+
+func TestDiagnoseLoginHandler_InvalidUserRejectedBeforeAnyCall(t *testing.T) {
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseLoginHandler(baseDiagnoseOpts(t, "unused.yml", fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLoginInput{Host: "web1", Users: []string{"alice; rm -rf /"}})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result for an invalid user", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0 — invalid input must never reach an ad-hoc call", len(fake.calls))
+	}
+}
+
+func TestDiagnoseLoginHandler_InvalidLookbackRejectedBeforeAnyCall(t *testing.T) {
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseLoginHandler(baseDiagnoseOpts(t, "unused.yml", fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLoginInput{Host: "web1", Users: []string{"alice"}, Lookback: "not-a-duration"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result for an unparseable lookback", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0 — an invalid lookback must never reach an ad-hoc call", len(fake.calls))
+	}
+}
+
+func TestDiagnoseLoginHandler_UnknownHostRejectedBeforeAnyCall(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseFixtureInventory(t)
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	handler := diagnoseLoginHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLoginInput{Host: "doesnotexist", Users: []string{"alice"}})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result for an unknown host", result)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("fake runner recorded %d calls, want 0", len(fake.calls))
+	}
+}
+
+// TestDiagnoseLoginHandler_NoDashboardGroupSkipsSecurityLogsGracefully
+// covers the core best-effort design decision: an inventory with no
+// dashboard role deployed must still succeed with every other section
+// intact, only noting that the recent-login-records section was skipped —
+// never turn that into a hard failure of the whole composite tool.
+func TestDiagnoseLoginHandler_NoDashboardGroupSkipsSecurityLogsGracefully(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseLoginFixtureInventory(t, "", false)
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		"systemctl is-active sssd":       func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
+		"sudo klist -k /etc/krb5.keytab": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "host/web1@REALM"), 0, nil },
+		`D=$(sudo sssctl domain-list 2>/dev/null | head -n1); [ -n "$D" ] && sudo sssctl domain-status "$D" 2>&1 || echo "no sssd domain configured"`: func() (string, int, error) {
+			return diagnoseOKDoc(t, "web1", 0, "Domain: example.test\nOnline status: Online"), 0, nil
+		},
+		"awk 'NR==1{print $2}' /etc/resolv.conf":                    func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.1"), 0, nil },
+		"systemctl is-active systemd-resolved":                      func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
+		`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, ""), 0, nil },
+		`dpkg-query -l bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | awk "/^ii/ && /unbound|bind9|dnsmasq/{f=1} END{print f+0}"`: func() (string, int, error) {
+			return diagnoseOKDoc(t, "web1", 0, "0"), 0, nil
+		},
+		"getent hosts web1":          func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5 web1"), 0, nil },
+		"dig +short web1 @127.0.0.1": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5"), 0, nil },
+		"getent passwd alice": func() (string, int, error) {
+			return diagnoseOKDoc(t, "web1", 0, "alice:x:1000:1000::/home/alice:/bin/bash"), 0, nil
+		},
+		"sudo -l -U alice": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "(root) NOPASSWD: ALL"), 0, nil },
+	}}
+	handler := diagnoseLoginHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLoginInput{Host: "web1", Users: []string{"alice"}})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil — a missing dashboard group must not fail the whole call", result)
+	}
+	if out.SecurityLogs.SkippedReason == "" {
+		t.Fatal("SecurityLogs.SkippedReason is empty, want an explanation for why it was skipped")
+	}
+	if !out.SssdActive || !out.HasKerberosMachineIdentity || len(out.Users) != 1 || !out.Users[0].AccountResolvesViaSSSD {
+		t.Fatalf("out = %+v, want host/user sections intact despite the skipped security-logs section", out)
+	}
+	if out.RosterAvailable {
+		t.Fatalf("out.RosterAvailable = true, want false — no freeipa_roster_file anywhere in this fixture")
+	}
+	if out.RosterNote == "" {
+		t.Fatal("out.RosterNote is empty, want an explanation for why roster comparison was skipped")
+	}
+}
+
+func TestDiagnoseLoginHandler_SuccessBuildsOutputRosterDriftAndWritesAudit(t *testing.T) {
+	requireRealAnsible(t)
+	rosterDir := t.TempDir()
+	rosterPath := filepath.Join(rosterDir, "roster.yaml")
+	roster := `
+hbac:
+  rules:
+    - name: allow-web-login
+      subjects: {users: [alice]}
+      targets: {hosts: [web1]}
+      services: [sshd]
+sudo:
+  rules:
+    - name: allow-bob-sudo
+      subjects: {users: [bob]}
+      targets: {hosts: [web1]}
+      commands: {all: true}
+`
+	if err := os.WriteFile(rosterPath, []byte(roster), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inv := writeDiagnoseLoginFixtureInventory(t, rosterPath, true)
+
+	fake := &diagnosePrefixRunner{
+		byCommand: map[string]func() (string, int, error){
+			"systemctl is-active sssd":       func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
+			"sudo klist -k /etc/krb5.keytab": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "host/web1@REALM"), 0, nil },
+			`D=$(sudo sssctl domain-list 2>/dev/null | head -n1); [ -n "$D" ] && sudo sssctl domain-status "$D" 2>&1 || echo "no sssd domain configured"`: func() (string, int, error) {
+				return diagnoseOKDoc(t, "web1", 0, "Domain: example.test\nOnline status: Online"), 0, nil
+			},
+			"awk 'NR==1{print $2}' /etc/resolv.conf":                    func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.1"), 0, nil },
+			"systemctl is-active systemd-resolved":                      func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
+			`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, ""), 0, nil },
+			`dpkg-query -l bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | awk "/^ii/ && /unbound|bind9|dnsmasq/{f=1} END{print f+0}"`: func() (string, int, error) {
+				return diagnoseOKDoc(t, "web1", 0, "0"), 0, nil
+			},
+			"getent hosts web1":          func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5 web1"), 0, nil },
+			"dig +short web1 @127.0.0.1": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5"), 0, nil },
+			// alice: roster declares HBAC but no sudo rule, and live sudo -l
+			// reports none either — no drift for alice, but the roster/live
+			// facts must both come through as "no sudo access".
+			"getent passwd alice": func() (string, int, error) {
+				return diagnoseOKDoc(t, "web1", 0, "alice:x:1000:1000::/home/alice:/bin/bash"), 0, nil
+			},
+			"sudo -l -U alice": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 1, "not allowed"), 0, nil },
+			// bob: roster declares a sudo rule but live sudo -l already
+			// grants it too (consistent), while roster declares no HBAC rule
+			// for bob at all.
+			"getent passwd bob": func() (string, int, error) {
+				return diagnoseOKDoc(t, "web1", 0, "bob:x:1001:1001::/home/bob:/bin/bash"), 0, nil
+			},
+			"sudo -l -U bob": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "(root) NOPASSWD: ALL"), 0, nil },
+		},
+		byPrefix: map[string]func() (string, int, error){
+			"curl -sS -G http://127.0.0.1:3100/loki/api/v1/query_range": func() (string, int, error) {
+				return diagnoseOKDoc(t, "dash1", 0, `{"status":"success","data":{}}`+"\nHTTP_STATUS:200"), 0, nil
+			},
+		},
+	}
+	handler := diagnoseLoginHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseLoginInput{Host: "web1", Users: []string{"alice", "bob"}})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil (success)", result)
+	}
+	if !out.RosterAvailable {
+		t.Fatalf("out.RosterAvailable = false, want true; note=%q", out.RosterNote)
+	}
+	if out.SecurityLogs.HTTPStatus != 200 || out.SecurityLogs.ResultJSON != `{"status":"success","data":{}}` {
+		t.Fatalf("out.SecurityLogs = %+v, want http_status=200 and the raw Loki body", out.SecurityLogs)
+	}
+	if len(out.Users) != 2 {
+		t.Fatalf("len(out.Users) = %d, want 2", len(out.Users))
+	}
+	byUser := map[string]diagnoseLoginUserOutput{out.Users[0].User: out.Users[0], out.Users[1].User: out.Users[1]}
+	alice, bob := byUser["alice"], byUser["bob"]
+	if !alice.RosterHBACAuthorized || alice.RosterSudoAuthorized || alice.CentralSudoRuleGrantsAccess {
+		t.Fatalf("alice = %+v, want HBAC-authorized and no sudo either side (no drift)", alice)
+	}
+	if !strings.Contains(alice.Verdict, "no config/live drift") {
+		t.Fatalf("alice.Verdict = %q, want no drift reported", alice.Verdict)
+	}
+	if bob.RosterHBACAuthorized {
+		t.Fatalf("bob = %+v, want RosterHBACAuthorized=false (roster declares no HBAC rule for bob)", bob)
+	}
+	if !bob.RosterSudoAuthorized || !bob.CentralSudoRuleGrantsAccess {
+		t.Fatalf("bob = %+v, want roster and live sudo to agree (both true)", bob)
+	}
+	if !strings.Contains(bob.Verdict, "no roster HBAC rule") {
+		t.Fatalf("bob.Verdict = %q, want it to flag the missing HBAC rule", bob.Verdict)
+	}
+
+	data, err := os.ReadFile(filepath.Join(out.AuditDirectory, "record.json"))
+	if err != nil {
+		t.Fatalf("read audit record: %v", err)
+	}
+	var rec diagnoseAuditRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse audit record: %v", err)
+	}
+	if rec.Check != "login" || rec.Host != "web1" || rec.Params["users"] != "alice,bob" {
+		t.Fatalf("audit record = %+v, want check=login host=web1 params.users=alice,bob", rec)
+	}
+	// Host-level (3 login-specific + 6 from DNSSteps(host)) + 2 users * 2 + 1 security-logs step.
+	if len(rec.Steps) != 9+4+1 {
+		t.Fatalf("audit record has %d steps, want %d", len(rec.Steps), 9+4+1)
+	}
+}
+
 // ---- pilot_diagnose_metrics ------------------------------------------------
 
 func TestDiagnoseMetricsHandler_EmptyQueryRejectedBeforeAnyCall(t *testing.T) {
