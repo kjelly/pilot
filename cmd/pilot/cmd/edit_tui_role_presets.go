@@ -48,7 +48,7 @@ func defaultRolePresets() []rolePreset {
 		},
 		{
 			Label: "被監控的 Linux 主機(minimal PoC)",
-			Roles: []string{"freeipa-client", "freeipa-dns-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client", "host-monitoring"},
+			Roles: []string{"freeipa-client", "freeipa-dns-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "host-monitoring"},
 		},
 	}
 }

@@ -113,7 +113,6 @@ func TestEditAutomationDriverRosterFlow_CreateUserAndSetFields(t *testing.T) {
 			{Action: "create_user", User: "alice"},
 			{Action: "set_user_field", User: "alice", Field: "email", Value: "alice@example.com"},
 			{Action: "set_user_field", User: "alice", Field: "uid", Value: "10001"},
-			{Action: "set_user_field", User: "alice", Field: "enabled", Value: "false"},
 			{Action: "set_user_field", User: "alice", Field: "state", Value: "disabled"},
 		},
 	}

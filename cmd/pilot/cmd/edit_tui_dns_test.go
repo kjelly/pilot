@@ -62,9 +62,8 @@ func TestEditRouter_Teatest_DNSManifestFlow_CreateSkeletonThenAddZone(t *testing
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	waitFor("FreeIPA realm")
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept the IPA.PILOT.INTERNAL default
-	waitFor("FreeIPA server FQDN")
-	tm.Type("ipa1.ipa.pilot.internal")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor("ipa1.ipa.pilot.internal")      // auto-derived default: ipa1.<domain>
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept the auto-detected default
 	waitFor("已建立最小 freeipa-dns manifest 骨架")
 
 	// Manager menu: cursor starts at item 0, "🌐 Zones".

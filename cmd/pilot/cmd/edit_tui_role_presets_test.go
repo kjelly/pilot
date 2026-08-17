@@ -21,7 +21,7 @@ func TestDefaultRolePresets_CoversCompactTopology(t *testing.T) {
 	want := map[string][]string{
 		"FreeIPA 身份伺服器(minimal PoC)": {"freeipa-server", "freeipa-dns-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "host-monitoring"},
 		"Nexus 中央服務節點(minimal PoC)":  {"freeipa-client", "freeipa-dns-client", "docker", "audit-log-forwarding", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "host-monitoring", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server"},
-		"被監控的 Linux 主機(minimal PoC)": {"freeipa-client", "freeipa-dns-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client", "host-monitoring"},
+		"被監控的 Linux 主機(minimal PoC)": {"freeipa-client", "freeipa-dns-client", "audit-log-forwarding", "wazuh-fim", "restic-backup", "host-monitoring"},
 	}
 	if len(presets) != len(want) {
 		t.Fatalf("default preset count = %d, want %d", len(presets), len(want))
