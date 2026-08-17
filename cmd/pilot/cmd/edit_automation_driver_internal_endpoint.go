@@ -151,16 +151,19 @@ func (d *automationDriver) createInternalEndpoint(r *editRouterModel, fqdn, zone
 	if err := d.enter(r); err != nil {
 		return err
 	}
-	if err := d.typeText(r, zone, false); err != nil {
+	// replace: true — pushInternalEndpointAddZone now pre-fills a detected
+	// zone (see iepDefaultZoneForFQDN) whenever fqdn matches one already
+	// declared in freeipa-dns.yaml, so this must overwrite it rather than
+	// append after it when the scenario names a different zone.
+	if err := d.typeText(r, zone, true); err != nil {
 		return err
 	}
 	if err := d.enter(r); err != nil {
 		return err
 	}
-	if err := d.typeText(r, targetHost, false); err != nil {
-		return err
-	}
-	return d.enter(r)
+	// pushInternalEndpointAddTargetHost is a select list of real hosts.yml
+	// entries, not free text (see edit_tui_internal_endpoints.go).
+	return d.choose(r, targetHost)
 }
 
 func (d *automationDriver) setInternalEndpointState(r *editRouterModel, fqdn, state string) error {
@@ -211,19 +214,22 @@ func (d *automationDriver) setInternalEndpointRouteDirect(r *editRouterModel, fq
 	if err := d.choose(r, "direct"); err != nil {
 		return err
 	}
-	value := targetHost
+	// The "從 inventory host 解析" branch lands on a select list of real
+	// hosts.yml entries; "手動輸入 IP" stays free text (see
+	// pushInternalEndpointRouteDirectHostPicker / -Address).
 	if targetHost == "" {
-		value = targetAddress
 		if err := d.choose(r, "手動輸入 IP"); err != nil {
 			return err
 		}
-	} else if err := d.choose(r, "從 inventory host 解析"); err != nil {
+		if err := d.typeText(r, targetAddress, false); err != nil {
+			return err
+		}
+		return d.enter(r)
+	}
+	if err := d.choose(r, "從 inventory host 解析"); err != nil {
 		return err
 	}
-	if err := d.typeText(r, value, false); err != nil {
-		return err
-	}
-	return d.enter(r)
+	return d.choose(r, targetHost)
 }
 
 // setInternalEndpointRouteProxy sets route.mode: reverse_proxy. verify
@@ -239,7 +245,11 @@ func (d *automationDriver) setInternalEndpointRouteProxy(r *editRouterModel, fqd
 	if err := d.choose(r, "reverse_proxy"); err != nil {
 		return err
 	}
-	if err := d.typeText(r, proxyHost, false); err != nil {
+	// replace: true — pushInternalEndpointRouteProxyHost now pre-fills the
+	// single detected reverse-proxy host as a default (see
+	// iepDefaultReverseProxyHost), so this must overwrite it rather than
+	// append after it when the scenario names a different host.
+	if err := d.typeText(r, proxyHost, true); err != nil {
 		return err
 	}
 	if err := d.enter(r); err != nil {
@@ -248,20 +258,25 @@ func (d *automationDriver) setInternalEndpointRouteProxy(r *editRouterModel, fqd
 	if err := d.choose(r, scheme); err != nil {
 		return err
 	}
-	value := upstreamHost
+	// Same host-picker-select-vs-free-text-address split as
+	// setInternalEndpointRouteDirect above.
 	if upstreamHost == "" {
-		value = upstreamAddress
 		if err := d.choose(r, "手動輸入 IP"); err != nil {
 			return err
 		}
-	} else if err := d.choose(r, "從 inventory host 解析"); err != nil {
-		return err
-	}
-	if err := d.typeText(r, value, false); err != nil {
-		return err
-	}
-	if err := d.enter(r); err != nil {
-		return err
+		if err := d.typeText(r, upstreamAddress, false); err != nil {
+			return err
+		}
+		if err := d.enter(r); err != nil {
+			return err
+		}
+	} else {
+		if err := d.choose(r, "從 inventory host 解析"); err != nil {
+			return err
+		}
+		if err := d.choose(r, upstreamHost); err != nil {
+			return err
+		}
 	}
 	if err := d.typeText(r, port, false); err != nil {
 		return err

@@ -130,8 +130,16 @@ func pushDNSManifestCreateRealmPrompt(r *editRouterModel, dir, path, domain stri
 }
 
 func pushDNSManifestCreateServerPrompt(r *editRouterModel, dir, path, domain, realm string) tea.Cmd {
+	// Same default the apply playbooks fall back to when freeipa_server_fqdn
+	// isn't overridden ("ipa1." + domain) — prefer an explicit override from
+	// group_vars/freeipa.yml when present, since that's the deployment's
+	// actual authority for this value.
+	def := "ipa1." + domain
+	if fqdn, err := inventory.FreeIPAServerFQDN(dir); err == nil && strings.TrimSpace(fqdn) != "" {
+		def = fqdn
+	}
 	label := "FreeIPA server FQDN(必須與 freeipa_server_fqdn 一致)"
-	return r.transitionTo(newTextInputModelWithScreenID("dns.create_server", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("dns.create_server", label, def, nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")

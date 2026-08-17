@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/kjelly/pilot/internal/inventory"
@@ -203,6 +205,95 @@ func TestEditAutomationDriverInternalEndpointFlow_RouteDirectByAddressAndTLSDisa
 	}
 	if iepStringValue(iepMapField(fields, "tls"), "mode") != "disabled" {
 		t.Fatalf("tls.mode = %q, want disabled", iepStringValue(iepMapField(fields, "tls"), "mode"))
+	}
+}
+
+func TestIepDefaultReverseProxyHost_DetectsSoleReverseProxyHost(t *testing.T) {
+	dir := t.TempDir()
+	writeInternalEndpointTestHostsFile(t, dir) // app01 (roles: []), lb01 (roles: [reverse-proxy])
+	if got := iepDefaultReverseProxyHost(dir); got != "lb01" {
+		t.Fatalf("iepDefaultReverseProxyHost() = %q, want lb01", got)
+	}
+}
+
+func TestIepDefaultReverseProxyHost_EmptyWhenAmbiguous(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir+"/hosts.yml", `hosts:
+  lb01:
+    ansible_host: 192.168.122.82
+    ansible_user: ubuntu
+    roles: [reverse-proxy]
+  lb02:
+    ansible_host: 192.168.122.83
+    ansible_user: ubuntu
+    roles: [reverse-proxy]
+`)
+	if got := iepDefaultReverseProxyHost(dir); got != "" {
+		t.Fatalf("iepDefaultReverseProxyHost() = %q, want \"\" when more than one reverse-proxy host exists", got)
+	}
+}
+
+func TestIepDefaultReverseProxyHost_EmptyWhenNone(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir+"/hosts.yml", `hosts:
+  app01:
+    ansible_host: 192.168.122.81
+    ansible_user: ubuntu
+    roles: []
+`)
+	if got := iepDefaultReverseProxyHost(dir); got != "" {
+		t.Fatalf("iepDefaultReverseProxyHost() = %q, want \"\" when no reverse-proxy host exists", got)
+	}
+}
+
+func writeInternalEndpointTestDNSManifest(t *testing.T, dir string, zones ...string) {
+	t.Helper()
+	var sb strings.Builder
+	sb.WriteString("schema_version: 1\n")
+	sb.WriteString("freeipa: {domain: ipa.pilot.internal, realm: IPA.PILOT.INTERNAL, server: ipa1.ipa.pilot.internal}\n")
+	sb.WriteString("dns:\n  defaults: {ttl: 300, records_mode: merge}\n  zones:\n")
+	for _, z := range zones {
+		sb.WriteString(fmt.Sprintf("    - name: %s\n      state: present\n      records: []\n", z))
+	}
+	writeFile(t, dir+"/freeipa-dns.yaml", sb.String())
+}
+
+func TestIepDefaultZoneForFQDN_PicksTheOnlyMatchingZone(t *testing.T) {
+	dir := t.TempDir()
+	writeInternalEndpointTestDNSManifest(t, dir, "linker.internal.")
+	if got := iepDefaultZoneForFQDN(dir, "grafana.linker.internal"); got != "linker.internal." {
+		t.Fatalf("iepDefaultZoneForFQDN() = %q, want linker.internal.", got)
+	}
+}
+
+func TestIepDefaultZoneForFQDN_PrefersMostSpecificZone(t *testing.T) {
+	dir := t.TempDir()
+	writeInternalEndpointTestDNSManifest(t, dir, "internal.", "linker.internal.")
+	if got := iepDefaultZoneForFQDN(dir, "grafana.linker.internal"); got != "linker.internal." {
+		t.Fatalf("iepDefaultZoneForFQDN() = %q, want the more specific linker.internal. (not internal.)", got)
+	}
+}
+
+func TestIepDefaultZoneForFQDN_MatchesZoneApexItself(t *testing.T) {
+	dir := t.TempDir()
+	writeInternalEndpointTestDNSManifest(t, dir, "linker.internal.")
+	if got := iepDefaultZoneForFQDN(dir, "linker.internal"); got != "linker.internal." {
+		t.Fatalf("iepDefaultZoneForFQDN() = %q, want linker.internal. (fqdn == zone apex)", got)
+	}
+}
+
+func TestIepDefaultZoneForFQDN_EmptyWhenNoZoneMatches(t *testing.T) {
+	dir := t.TempDir()
+	writeInternalEndpointTestDNSManifest(t, dir, "other.example.")
+	if got := iepDefaultZoneForFQDN(dir, "grafana.linker.internal"); got != "" {
+		t.Fatalf("iepDefaultZoneForFQDN() = %q, want \"\" when no declared zone is an ancestor of fqdn", got)
+	}
+}
+
+func TestIepDefaultZoneForFQDN_EmptyWhenManifestMissing(t *testing.T) {
+	dir := t.TempDir()
+	if got := iepDefaultZoneForFQDN(dir, "grafana.linker.internal"); got != "" {
+		t.Fatalf("iepDefaultZoneForFQDN() = %q, want \"\" when freeipa-dns.yaml doesn't exist", got)
 	}
 }
 

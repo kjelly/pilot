@@ -285,9 +285,36 @@ func pushInternalEndpointAddFQDN(r *editRouterModel, dir, path string) tea.Cmd {
 	})
 }
 
+// iepDefaultZoneForFQDN picks the freeipa-dns.yaml zone fqdn belongs to —
+// the same apex-or-strict-descendant relationship
+// ValidateInternalEndpointManifest's dns.zone check requires — preferring
+// the longest (most specific) match when more than one declared zone
+// qualifies. Returns "" (leaving the field free-text) when none match.
+func iepDefaultZoneForFQDN(dir, fqdn string) string {
+	zones, err := inventory.DNSManifestZoneNames(filepath.Join(dir, "freeipa-dns.yaml"))
+	if err != nil {
+		return ""
+	}
+	target := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(fqdn), "."))
+	best, bestLen := "", -1
+	for _, z := range zones {
+		zoneName := strings.ToLower(strings.TrimSuffix(z, "."))
+		if zoneName == "" {
+			continue
+		}
+		if target == zoneName || strings.HasSuffix(target, "."+zoneName) {
+			if len(zoneName) > bestLen {
+				best, bestLen = z, len(zoneName)
+			}
+		}
+	}
+	return best
+}
+
 func pushInternalEndpointAddZone(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
+	def := iepDefaultZoneForFQDN(dir, fqdn)
 	label := "dns.zone(絕對 FQDN，必須是 endpoint fqdn 本身或其上層 zone，例如 linker.internal.)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.add.zone", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("iep.add.zone", label, def, nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushInternalEndpointsMenu(r, dir, path, "")
@@ -297,13 +324,22 @@ func pushInternalEndpointAddZone(r *editRouterModel, dir, path, fqdn string) tea
 }
 
 func pushInternalEndpointAddTargetHost(r *editRouterModel, dir, path, fqdn, zone string) tea.Cmd {
-	label := "route.target.inventory_host(direct route 的目標 inventory host；之後可在 detail 畫面改成 reverse_proxy)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.add.target_host", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+	hf, err := loadHostsFileForDNS(dir)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	names := hostNames(hf)
+	if len(names) == 0 {
+		return pushInternalEndpointsMenu(r, dir, path, "⚠️  hosts.yml 沒有任何主機可選；請先在 hosts.yml 新增主機")
+	}
+	title := "route.target.inventory_host(direct route 的目標 inventory host；之後可在 detail 畫面改成 reverse_proxy)"
+	return r.transitionTo(newSelectModelWithScreenID("iep.add.target_host", title, names), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(selectModel)
 		if m.Canceled() {
 			return pushInternalEndpointsMenu(r, dir, path, "")
 		}
-		targetHost := strings.TrimSpace(m.Value())
+		targetHost := names[m.Selected()]
 		endpoint := map[string]any{
 			"fqdn":  fqdn,
 			"state": "present",
@@ -504,33 +540,72 @@ func pushInternalEndpointRouteDirectSource(r *editRouterModel, dir, path, fqdn s
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
 		}
-		byHost := m.Selected() == 0
-		label := "route.target.inventory_host"
-		if !byHost {
-			label = "route.target.address(literal IP)"
+		if m.Selected() == 0 {
+			return pushInternalEndpointRouteDirectHostPicker(r, dir, path, fqdn)
 		}
-		return r.transitionTo(newTextInputModelWithScreenID("iep.route.direct.value", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-			tm := s.(textInputModel)
-			if tm.Canceled() {
-				return pushInternalEndpointDetail(r, dir, path, fqdn, "")
-			}
-			value := strings.TrimSpace(tm.Value())
-			return pushInternalEndpointEditDetail(r, dir, path, fqdn, func(f map[string]any) {
-				target := map[string]any{}
-				if byHost {
-					target["inventory_host"] = value
-				} else {
-					target["address"] = value
-				}
-				f["route"] = map[string]any{"mode": "direct", "target": target}
-			})
+		return pushInternalEndpointRouteDirectAddress(r, dir, path, fqdn)
+	})
+}
+
+// pushInternalEndpointRouteDirectHostPicker renders the real hosts.yml
+// entries as a select list — same convention as edit_tui_dns.go's
+// pushDNSRecordAddHostPicker — rather than free text, so an
+// inventory_host reference can't be misspelled.
+func pushInternalEndpointRouteDirectHostPicker(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
+	hf, err := loadHostsFileForDNS(dir)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	names := hostNames(hf)
+	if len(names) == 0 {
+		return pushInternalEndpointDetail(r, dir, path, fqdn, "⚠️  hosts.yml 沒有任何主機可選；請改用「手動輸入 IP」")
+	}
+	return r.transitionTo(newSelectModelWithScreenID("iep.route.direct.host", "route.target.inventory_host", names), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(selectModel)
+		if m.Canceled() {
+			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
+		}
+		host := names[m.Selected()]
+		return pushInternalEndpointEditDetail(r, dir, path, fqdn, func(f map[string]any) {
+			f["route"] = map[string]any{"mode": "direct", "target": map[string]any{"inventory_host": host}}
 		})
 	})
 }
 
+func pushInternalEndpointRouteDirectAddress(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
+	label := "route.target.address(literal IP)"
+	return r.transitionTo(newTextInputModelWithScreenID("iep.route.direct.address", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(textInputModel)
+		if m.Canceled() {
+			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
+		}
+		value := strings.TrimSpace(m.Value())
+		return pushInternalEndpointEditDetail(r, dir, path, fqdn, func(f map[string]any) {
+			f["route"] = map[string]any{"mode": "direct", "target": map[string]any{"address": value}}
+		})
+	})
+}
+
+// iepDefaultReverseProxyHost mirrors pushInternalEndpointSuggestMenu's own
+// detection: only pre-fill when exactly one host carries the reverse-proxy
+// role, since with more than one there's no deterministically-correct
+// choice — the field stays free-text (unprefilled) in that case.
+func iepDefaultReverseProxyHost(dir string) string {
+	hosts, err := loadIEPReverseProxyHosts(dir)
+	if err != nil || len(hosts) != 1 {
+		return ""
+	}
+	for h := range hosts {
+		return h
+	}
+	return ""
+}
+
 func pushInternalEndpointRouteProxyHost(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
+	def := iepDefaultReverseProxyHost(dir)
 	label := "route.proxy.inventory_host(必須是有 reverse-proxy role 的 host)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.route.proxy.host", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("iep.route.proxy.host", label, def, nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -557,25 +632,44 @@ func pushInternalEndpointRouteUpstreamSource(r *editRouterModel, dir, path, fqdn
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
 		}
-		byHost := m.Selected() == 0
-		label := "upstream.inventory_host"
-		if !byHost {
-			label = "upstream.address(literal IP)"
+		if m.Selected() == 0 {
+			return pushInternalEndpointRouteUpstreamHostPicker(r, dir, path, fqdn, proxyHost, scheme)
 		}
-		return r.transitionTo(newTextInputModelWithScreenID("iep.route.upstream.value", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-			tm := s.(textInputModel)
-			if tm.Canceled() {
-				return pushInternalEndpointDetail(r, dir, path, fqdn, "")
-			}
-			value := strings.TrimSpace(tm.Value())
-			var upstreamHost, upstreamAddress string
-			if byHost {
-				upstreamHost = value
-			} else {
-				upstreamAddress = value
-			}
-			return pushInternalEndpointRouteUpstreamPort(r, dir, path, fqdn, proxyHost, scheme, upstreamHost, upstreamAddress)
-		})
+		return pushInternalEndpointRouteUpstreamAddress(r, dir, path, fqdn, proxyHost, scheme)
+	})
+}
+
+// pushInternalEndpointRouteUpstreamHostPicker is
+// pushInternalEndpointRouteDirectHostPicker's upstream.inventory_host
+// counterpart — same real-hosts.yml select-list convention.
+func pushInternalEndpointRouteUpstreamHostPicker(r *editRouterModel, dir, path, fqdn, proxyHost, scheme string) tea.Cmd {
+	hf, err := loadHostsFileForDNS(dir)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	names := hostNames(hf)
+	if len(names) == 0 {
+		return pushInternalEndpointDetail(r, dir, path, fqdn, "⚠️  hosts.yml 沒有任何主機可選；請改用「手動輸入 IP」")
+	}
+	return r.transitionTo(newSelectModelWithScreenID("iep.route.upstream.host", "upstream.inventory_host", names), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(selectModel)
+		if m.Canceled() {
+			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
+		}
+		return pushInternalEndpointRouteUpstreamPort(r, dir, path, fqdn, proxyHost, scheme, names[m.Selected()], "")
+	})
+}
+
+func pushInternalEndpointRouteUpstreamAddress(r *editRouterModel, dir, path, fqdn, proxyHost, scheme string) tea.Cmd {
+	label := "upstream.address(literal IP)"
+	return r.transitionTo(newTextInputModelWithScreenID("iep.route.upstream.address", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(textInputModel)
+		if m.Canceled() {
+			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
+		}
+		value := strings.TrimSpace(m.Value())
+		return pushInternalEndpointRouteUpstreamPort(r, dir, path, fqdn, proxyHost, scheme, "", value)
 	})
 }
 
@@ -783,8 +877,10 @@ func pushInternalEndpointTLSSinkCertFile(r *editRouterModel, dir, path, fqdn str
 }
 
 func pushInternalEndpointTLSSinkKeyFile(r *editRouterModel, dir, path, fqdn, certFile string) tea.Cmd {
+	fields, _, _ := inventory.InternalEndpointManifestEndpoint(path, fqdn)
+	sink := iepMapField(iepMapField(fields, "tls"), "sink")
 	label := "tls.sink.key_file(絕對路徑，不可與 cert_file 相同)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.tls.sink.key_file", label, "", iepAbsolutePath), "", func(r *editRouterModel, s screen) tea.Cmd {
+	return r.transitionTo(newTextInputModelWithScreenID("iep.tls.sink.key_file", label, iepStringValue(sink, "key_file"), iepAbsolutePath), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(textInputModel)
 		if m.Canceled() {
 			return pushInternalEndpointTLSMenu(r, dir, path, fqdn, "")

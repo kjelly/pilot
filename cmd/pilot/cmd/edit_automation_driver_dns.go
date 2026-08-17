@@ -36,9 +36,10 @@ func (d *automationDriver) ensureDNSManifestPathPrompt(r *editRouterModel) error
 
 // createDNSManifest replays pushDNSManifestCreateConfirm's full flow
 // (confirm -> domain -> realm -> server), the only way to produce the
-// manifest file at all. domain/realm's prompts start pre-filled
-// (FreeIPADomain(dir) / strings.ToUpper(domain)), so both use
-// replace=true; server always starts blank.
+// manifest file at all. domain/realm/server's prompts all start pre-filled
+// (FreeIPADomain(dir) / strings.ToUpper(domain) /
+// inventory.FreeIPAServerFQDN(dir) falling back to "ipa1."+domain), so all
+// three use replace=true.
 func (d *automationDriver) createDNSManifest(r *editRouterModel, domain, realm, server string) error {
 	if err := d.ensureDNSManifestPathPrompt(r); err != nil {
 		return err
@@ -61,7 +62,7 @@ func (d *automationDriver) createDNSManifest(r *editRouterModel, domain, realm, 
 	if err := d.enter(r); err != nil {
 		return err
 	}
-	if err := d.typeText(r, server, false); err != nil {
+	if err := d.typeText(r, server, true); err != nil {
 		return err
 	}
 	return d.enter(r)
