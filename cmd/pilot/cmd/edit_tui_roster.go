@@ -733,7 +733,14 @@ func pushRosterUserStateField(r *editRouterModel, dir, path, name string) tea.Cm
 			return pushRosterUserDetail(r, dir, path, name, "")
 		}
 		value := rosterUserStateChoices[m.Selected()]
-		return pushRosterEditUser(r, dir, path, name, func(f map[string]any) { f["state"] = value })
+		return pushRosterEditUser(r, dir, path, name, func(f map[string]any) {
+			f["state"] = value
+			if value == "disabled" {
+				// Keep the two user fields consistent. A disabled user must
+				// not retain enabled: true, which the roster validator rejects.
+				f["enabled"] = false
+			}
+		})
 	})
 }
 

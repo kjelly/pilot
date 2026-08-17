@@ -1742,12 +1742,10 @@ func TestEditRouter_Teatest_RosterFlow_GroupMembershipChecklistEditRoundTrips(t 
 	}
 }
 
-// TestEditRouter_Teatest_RosterFlow_RejectedUserEditShowsBannerAndDoesNotWrite
-// proves the field-edit gate: state:disabled + enabled:true is a real
-// checkUsers violation, so committing it must show the violation banner
-// and never reach disk, while an earlier, independently-valid edit in the
-// same session (enabled:true on its own) does persist.
-func TestEditRouter_Teatest_RosterFlow_RejectedUserEditShowsBannerAndDoesNotWrite(t *testing.T) {
+// TestEditRouter_Teatest_RosterFlow_DisablingUserSynchronizesEnabled proves
+// that choosing state:disabled also writes enabled:false, rather than
+// leaving the roster in the invalid state:disabled + enabled:true shape.
+func TestEditRouter_Teatest_RosterFlow_DisablingUserSynchronizesEnabled(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
 	fixture := "schema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\nusers:\n  - name: alice\n    state: present\n"
@@ -1777,13 +1775,13 @@ func TestEditRouter_Teatest_RosterFlow_RejectedUserEditShowsBannerAndDoesNotWrit
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick "true" (cursor 0) -> write -> fresh detail (cursor reset)
 	waitFor("enabled：true")
 
-	// Now flip state to disabled — this combination IS the violation.
+	// Now flip state to disabled — the state editor must synchronize enabled.
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // "state" is index 1
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	waitFor("disabled")
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // choices ["present","disabled"]; pick "disabled"
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // rejected -> banner, no write
-	waitFor("驗證沒過")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // synchronize enabled:false and write
+	waitFor("state：disabled")
 
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
@@ -1797,11 +1795,11 @@ func TestEditRouter_Teatest_RosterFlow_RejectedUserEditShowsBannerAndDoesNotWrit
 	if !found {
 		t.Fatalf("expected alice to still exist")
 	}
-	if fields["state"] != "present" {
-		t.Fatalf("state = %v, want present (the rejected edit must not persist)", fields["state"])
+	if fields["state"] != "disabled" {
+		t.Fatalf("state = %v, want disabled", fields["state"])
 	}
-	if fields["enabled"] != true {
-		t.Fatalf("enabled = %v, want true (the earlier, valid edit should have persisted)", fields["enabled"])
+	if fields["enabled"] != false {
+		t.Fatalf("enabled = %v, want false after selecting disabled", fields["enabled"])
 	}
 }
 
