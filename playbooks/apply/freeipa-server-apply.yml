@@ -238,6 +238,15 @@
     # already correct is a clean no-op. The FQDN must be the FIRST
     # (canonical) name for the IP or get_server_ip_address aborts with "does
     # not match configured canonical hostname".
+    # Without this, the pin below is only correct until the next reboot —
+    # cloud-init's own hosts-management module regenerates /etc/hosts from
+    # its template on every boot and silently drops it again (see
+    # cloud-init-freeipa-incident-report.md, 2026-08-18: same class of bug
+    # found on the client side, applies equally to the server's own pin).
+    - name: "FreeIPA — stop cloud-init from wiping our /etc/hosts pin on next boot"
+      ansible.builtin.include_tasks: tasks/cloud-init-etc-hosts-guard.yml
+      tags: [freeipa, freeipa-hosts]
+
     - name: "FreeIPA — pin server FQDN to its LAN IP (FQDN canonical) in /etc/hosts"
       ansible.builtin.lineinfile:
         path: /etc/hosts
