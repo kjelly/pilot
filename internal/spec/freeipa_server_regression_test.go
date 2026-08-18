@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -160,5 +161,32 @@ func TestRegression_FreeipaServerSpec_MatcherChoices(t *testing.T) {
 		if strings.EqualFold(e, "~active") {
 			t.Errorf("row %s uses ~active (matches inactive); use rc-based systemctl is-active", r.ID)
 		}
+	}
+}
+
+// TestRegression_FreeipaServerApplyPlaybook_HasCloudInitEtcHostsGuard locks
+// the 2026-08-18 fix for cloud-init-freeipa-incident-report.md: the same
+// class of bug found on the client side (cloud-init's manage_etc_hosts
+// wiping a /etc/hosts pin on reboot) applies equally to the server's own
+// FQDN pin. freeipa-server-apply.yml must include the shared
+// cloud-init-etc-hosts-guard.yml task BEFORE its own /etc/hosts pin.
+func TestRegression_FreeipaServerApplyPlaybook_HasCloudInitEtcHostsGuard(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-server-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	guardIdx := strings.Index(playbook, "tasks/cloud-init-etc-hosts-guard.yml")
+	if guardIdx < 0 {
+		t.Fatalf("playbook must include tasks/cloud-init-etc-hosts-guard.yml")
+	}
+	pinIdx := strings.Index(playbook, `regexp: '\s{{ ipa_server_fqdn | regex_escape }}(\s|$)'`)
+	if pinIdx < 0 {
+		t.Fatalf("playbook must still pin the server FQDN in /etc/hosts")
+	}
+	if guardIdx > pinIdx {
+		t.Errorf("cloud-init-etc-hosts-guard.yml must be included BEFORE the /etc/hosts FQDN pin")
 	}
 }
