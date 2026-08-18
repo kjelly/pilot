@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -156,6 +157,57 @@ func TestRegression_FreeipaClientSpec_EnrollBeforeAAA(t *testing.T) {
 		if lineOf["C2"] >= lineOf[aaa] {
 			t.Errorf("ordering: C2 (sssd active) at line %d must precede %s at line %d",
 				lineOf["C2"], aaa, lineOf[aaa])
+		}
+	}
+}
+
+// TestRegression_FreeipaClientApplyPlaybook_HasCloudInitEtcHostsGuard locks
+// the 2026-08-18 fix for cloud-init-freeipa-incident-report.md:
+// yk-pro6k-dev-01/02/03 all lost their FreeIPA server /etc/hosts pin on
+// reboot because cloud-init's manage_etc_hosts regenerated /etc/hosts from
+// its own template. freeipa-client-apply.yml must include the shared
+// cloud-init-etc-hosts-guard.yml task BEFORE its own /etc/hosts pin, so the
+// pin survives every future reboot instead of only the next apply.
+func TestRegression_FreeipaClientApplyPlaybook_HasCloudInitEtcHostsGuard(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-client-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	guardIdx := strings.Index(playbook, "tasks/cloud-init-etc-hosts-guard.yml")
+	if guardIdx < 0 {
+		t.Fatalf("playbook must include tasks/cloud-init-etc-hosts-guard.yml")
+	}
+	pinIdx := strings.Index(playbook, `regexp: '\s{{ ipa_server_fqdn | regex_escape }}(\s|$)'`)
+	if pinIdx < 0 {
+		t.Fatalf("playbook must still pin the FreeIPA server FQDN in /etc/hosts")
+	}
+	if guardIdx > pinIdx {
+		t.Errorf("cloud-init-etc-hosts-guard.yml must be included BEFORE the /etc/hosts server-FQDN pin, else a reboot between guard-install and pin could still wipe an unpinned host")
+	}
+}
+
+// TestRegression_CloudInitEtcHostsGuardTask locks the shared task file's
+// core behavior: disable cloud-init's manage_etc_hosts via a new,
+// pilot-owned cloud.cfg.d drop-in, gated on cloud-init actually being
+// present (no-op elsewhere).
+func TestRegression_CloudInitEtcHostsGuardTask(t *testing.T) {
+	const taskPath = "../../playbooks/apply/tasks/cloud-init-etc-hosts-guard.yml"
+	raw, err := os.ReadFile(taskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", taskPath, err)
+	}
+	task := string(raw)
+
+	for _, required := range []string{
+		"/etc/cloud/cloud.cfg.d/99-pilot-disable-manage-etc-hosts.cfg",
+		"manage_etc_hosts: false",
+		"path: /etc/cloud/cloud.cfg",
+	} {
+		if !strings.Contains(task, required) {
+			t.Errorf("cloud-init-etc-hosts-guard.yml must contain %q", required)
 		}
 	}
 }
