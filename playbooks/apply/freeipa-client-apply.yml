@@ -170,6 +170,14 @@
     # times out with "waiting for privilege escalation prompt". Pinning first
     # keeps sudo fast throughout. The client FQDN must be the FIRST (canonical)
     # name for its IP.
+    # Without this, the pins below are only correct until the next reboot —
+    # cloud-init's own hosts-management module regenerates /etc/hosts from
+    # its template on every boot and silently drops them again (see
+    # cloud-init-freeipa-incident-report.md, 2026-08-18: yk-pro6k-dev-01/02/03).
+    - name: "FreeIPA client — stop cloud-init from wiping our /etc/hosts pins on next boot"
+      ansible.builtin.include_tasks: tasks/cloud-init-etc-hosts-guard.yml
+      tags: [freeipa-client, C1, C3]
+
     - name: "FreeIPA client — pin this host {{ ipa_client_fqdn }} to its own IP in /etc/hosts (FQDN canonical)"
       ansible.builtin.lineinfile:
         path: /etc/hosts
