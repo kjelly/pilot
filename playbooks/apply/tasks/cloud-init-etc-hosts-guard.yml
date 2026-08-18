@@ -1,0 +1,70 @@
+---
+# Shared task: stop cloud-init from ever again overwriting /etc/hosts on
+# THIS host, so that any FreeIPA server/client FQDN pin this playbook writes
+# via `lineinfile` (freeipa-server-apply.yml, freeipa-client-apply.yml)
+# survives every subsequent reboot instead of being silently wiped by
+# cloud-init's own hosts-management module on the next boot.
+#
+# Root cause this guards against (see cloud-init-freeipa-incident-report.md,
+# 2026-08-18): cloud-init's cc_update_etc_hosts module, when
+# `manage_etc_hosts: true` (the default already present on the affected
+# hosts' /etc/cloud/cloud.cfg), regenerates /etc/hosts from
+# /etc/cloud/templates/hosts.<distro>.tmpl on every boot — a template that
+# only knows localhost + this host's own hostname, NOT any FreeIPA server/
+# client FQDN a `lineinfile` task pinned into /etc/hosts after the most
+# recent boot. The pin is correct at apply time; it is gone again after the
+# next reboot, SSSD can no longer resolve the IPA server, and login becomes
+# offline-cache-dependent (yk-pro6k-dev-01/02/03 all reproduced this). A
+# hand-fix that only re-edits /etc/hosts (as was done once for yk-03) does
+# not survive the next reboot either — the fix has to disable the overwrite
+# at its source, not just re-assert the pin.
+#
+# Included by both freeipa-server-apply.yml and freeipa-client-apply.yml,
+# immediately before their own /etc/hosts `lineinfile` pin task — mirrors
+# tasks/freeipa-ca-trust.yml's / tasks/freeipa-dns-client-resolver.yml's
+# "one shared file, never fork into two implementations" convention
+# (spec.md §26 point 1).
+#
+# `manage_etc_hosts: false` is set via a NEW, pilot-owned cloud.cfg.d
+# drop-in (cloud-init merges /etc/cloud/cloud.cfg.d/*.cfg over the base
+# cloud.cfg, later filename wins per scalar key) rather than editing
+# /etc/cloud/cloud.cfg or /etc/cloud/templates/hosts.*.tmpl directly — same
+# reasoning as tasks/freeipa-dns-client-resolver.yml's netplan drop-in:
+# pilot never touches a file some other layer (distro image, cloud
+# provider user-data) owns and may re-render; it only adds a
+# higher-precedence file of its own. `cloud-init clean` + reboot was
+# confirmed (2026-08-17, DNS resolver case) to re-render templated
+# cloud-init outputs but never touch already-present cloud.cfg.d files, so
+# this survives a full cloud-init re-init, not just a plain reboot.
+#
+# Hosts with no cloud-init at all (bare metal, manually provisioned) are a
+# silent no-op — gated on /etc/cloud/cloud.cfg existing, so this never
+# creates an /etc/cloud tree of its own where cloud-init isn't installed.
+
+- name: "Cloud-init /etc/hosts guard — detect cloud-init"
+  ansible.builtin.stat:
+    path: /etc/cloud/cloud.cfg
+  register: cloud_init_etc_hosts_guard_cfg
+
+- name: "Cloud-init /etc/hosts guard — disable manage_etc_hosts (stop future boots from wiping the FreeIPA /etc/hosts pin)"
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-pilot-disable-manage-etc-hosts.cfg
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Managed by tasks/cloud-init-etc-hosts-guard.yml — DO NOT EDIT BY HAND.
+      # Stops cloud-init's cc_update_etc_hosts module from regenerating
+      # /etc/hosts on every boot, which would otherwise silently remove any
+      # FreeIPA server/client FQDN pin this host's FreeIPA apply playbook
+      # wrote (see cloud-init-freeipa-incident-report.md, 2026-08-18).
+      manage_etc_hosts: false
+  when: cloud_init_etc_hosts_guard_cfg.stat.exists
+  register: cloud_init_etc_hosts_guard_dropin
+
+- name: "Cloud-init /etc/hosts guard — no cloud-init present, guard is a no-op"
+  ansible.builtin.debug:
+    msg: >-
+      No /etc/cloud/cloud.cfg on this host — cloud-init is not managing
+      /etc/hosts here, so the manage_etc_hosts guard was skipped.
+  when: not cloud_init_etc_hosts_guard_cfg.stat.exists
