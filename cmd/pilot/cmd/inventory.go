@@ -97,7 +97,7 @@ var inventoryGenerateCmd = &cobra.Command{
 			// on the host) regardless of call order, but doing it first
 			// also means a group_vars write failure surfaces before we've
 			// claimed success on the inventory itself.
-			copyMissingGroupVars(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.GroupVarsStems(hf))
+			copyMissingGroupVars(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.GroupVarsStems(hf), hf)
 			copyMissingNestedGroupVarsExamples(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.UsedRoles(hf))
 		}
 		if !invGenNoVault {
@@ -189,7 +189,7 @@ func groupVarsBaseDir(out string) string {
 // generated with `--out envs/staging/inventory.yml` gets its
 // group_vars written to envs/staging/group_vars/, not scattered back
 // into the shipped example directory.
-func copyMissingGroupVars(w io.Writer, baseDir string, stems []string) {
+func copyMissingGroupVars(w io.Writer, baseDir string, stems []string, hf *inventory.HostsFile) {
 	for _, stem := range stems {
 		src := filepath.Join("group_vars", stem+".example.yml")
 		dst := filepath.Join(baseDir, "group_vars", stem+".yml")
@@ -215,7 +215,15 @@ func copyMissingGroupVars(w io.Writer, baseDir string, stems []string) {
 			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
 			continue
 		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
+		// Same cross-role host-pointer autofill pilot edit's group_vars
+		// picker already applies when creating a file from its example
+		// (autofillCrossRoleHostVars) — `pilot inventory generate`'s own
+		// backfill used to copy the example verbatim, leaving every
+		// cross-role pointer (siem_forward_host, thanos_s3_target_host, …)
+		// commented out even when it resolves unambiguously, which is why
+		// `pilot deploy`'s auto-detect prompt for it fired on every single
+		// run of a workspace built this way.
+		if err := os.WriteFile(dst, autofillCrossRoleHostVars(hf, data), 0o644); err != nil {
 			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
 			continue
 		}
@@ -444,7 +452,7 @@ func autoRegenerateInventoryFromHosts(stderr io.Writer, invPath string) (regener
 	if err != nil {
 		return false, err
 	}
-	copyMissingGroupVars(stderr, groupVarsBaseDir(invPath), inventory.GroupVarsStems(hf))
+	copyMissingGroupVars(stderr, groupVarsBaseDir(invPath), inventory.GroupVarsStems(hf), hf)
 	copyMissingNestedGroupVarsExamples(stderr, groupVarsBaseDir(invPath), inventory.UsedRoles(hf))
 	writeMissingVaultSkeleton(stderr, resolveGenVaultPath(invPath, "", false), hf)
 	writeMissingHostVarsSkeleton(stderr, groupVarsBaseDir(invPath), hf)

@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -239,6 +240,96 @@ func autofillCrossRoleHostVars(hf *inventory.HostsFile, data []byte) []byte {
 		}
 	}
 	return doc.Bytes()
+}
+
+// groupVarsFilesInWorkspace lists every real (non-`.example.yml`)
+// group_vars/*.yml file under dir (the workspace root) — the same file set
+// pilot edit's file picker offers for editing.
+func groupVarsFilesInWorkspace(dir string) ([]string, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "group_vars", "*.yml"))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if strings.HasSuffix(m, ".example.yml") {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// groupVarsKeyAlreadyConfigured reports whether key already has a real,
+// active value in every group_vars/*.yml file that mentions it at all —
+// i.e. whether pilot deploy's "偵測到...這次要用它嗎？" auto-detect prompt
+// for this var would be entirely redundant. A key absent from every
+// group_vars file is NOT considered configured (nothing to trust yet, fall
+// back to the existing prompt).
+func groupVarsKeyAlreadyConfigured(dir, key string) (bool, error) {
+	files, err := groupVarsFilesInWorkspace(dir)
+	if err != nil {
+		return false, err
+	}
+	found := false
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return false, err
+		}
+		for _, entry := range groupvars.Parse(data).Entries() {
+			if entry.Key != key {
+				continue
+			}
+			found = true
+			if !entry.Active || strings.TrimSpace(entry.Value) == "" {
+				return false, nil
+			}
+		}
+	}
+	return found, nil
+}
+
+// persistAutoHostVarToGroupVars writes value into key's line in every
+// group_vars/*.yml file that already has key as an entry (active or still
+// commented-out), activating/overwriting it in place — same "one real
+// value pilot can already see" motivation as autofillCrossRoleHostVars,
+// just triggered after a deploy actually succeeds using that value rather
+// than at file-creation time, so it also covers a workspace whose
+// group_vars were instead backfilled via `pilot inventory generate`'s
+// verbatim-copy path (which does not call autofillCrossRoleHostVars).
+// Called only post-success: what's being persisted is proven-good, and
+// groupVarsKeyAlreadyConfigured will see it configured on the next run.
+func persistAutoHostVarToGroupVars(out io.Writer, dir, key, value string) error {
+	files, err := groupVarsFilesInWorkspace(dir)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		doc := groupvars.Parse(data)
+		changed := false
+		for _, entry := range doc.Entries() {
+			if entry.Key != key || (entry.Active && entry.Value == value) {
+				continue
+			}
+			if err := doc.SetValue(entry.Line, value); err != nil {
+				return fmt.Errorf("set %s in %s: %w", key, f, err)
+			}
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		if err := os.WriteFile(f, doc.Bytes(), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", f, err)
+		}
+		fmt.Fprintf(out, "ℹ️  已將 %s=%s 寫入 %s，下次不用再問\n", key, value, f)
+	}
+	return nil
 }
 
 func pushGroupVarsEditor(r *editRouterModel, dir, path, banner string) tea.Cmd {
