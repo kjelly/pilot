@@ -57,6 +57,13 @@ open it. Use `pilot roster migrate <roster-file>` to upgrade one explicitly
      into an FQDN without checking target facts.
    - A hostgroup's `membership.hostgroups` (nested hostgroups) is now fully
      reconciled, same as `membership.hosts` — both are authoritative.
+   - `membership.all: true` on a hostgroup is a wildcard meaningful only to
+     `nfs_clients[]` targeting (`playbooks/apply/freeipa-nfs-client-apply.yml`):
+     it matches every freeipa-nfs-client host, present and future, without
+     listing hosts individually. Only use it when the request is explicitly
+     "every managed host may mount NFS" — it is not a general HBAC/sudo/group
+     wildcard, and combining it with `hosts`/`hostgroups` on the same
+     hostgroup is redundant (`all` alone already covers everything).
    - HBAC/sudo subjects, targets, hostgroups, services, command groups, and
      referenced groups resolve to declared objects.
    - Netgroups (`netgroups:`) are optional and v2-only. Each needs a unique

@@ -5,13 +5,23 @@
 > `nfs_clients[]` Plan B fix. Four real bugs were found and fixed live; see round 25's evidence
 > for full detail and the one known, reported-not-fixed limitation (end-to-end Kerberized NFS
 > mount between this topology's own hosts, blocked by a separate FreeIPA DNS-registration gap).**
-> Latest completed pass: 2026-08-15 (Asia/Taipei), round 25 — full clean-room rebuild, the
-> `freeipa-nfs-client` roster-driven `nfs_clients[]` targeting fix, and the complete merged
-> `delivery-test` scope (`freeipa-dns-client`/`freeipa-ca-trust`/`reverse-proxy`/`internal-endpoint`,
-> §4.2, §4.5), all executed live for the first time. Round 26 (same day) added and live-tested a new
-> `internal-endpoint` auto-provision suggester (§3.9) on top of round 25's still-running topology —
-> not an independent clean-room rebuild, a deliberate reuse to exercise the new capability against
-> already-established manifest/DNS-zone state.
+> Latest completed full-matrix pass: 2026-08-17 (Asia/Taipei), round 27 — another full clean-room
+> rebuild re-confirming the entire round-25/26 scope (site-wide deploy, both day-2 reconcilers, all
+> three delivery-test-merged single components, `internal-endpoint` reconcile, the full idempotency
+> suite, the complete §4.1–§4.5 matrix, and the `internal-endpoint` suggester), no product defects
+> found. Round 28 (2026-08-18, its own independent fresh 3-node rebuild — not a topology reuse) then
+> narrowly verified three new fixes round 27's candidate predates: FreeIPA DNS
+> `allow-recursion`/`allow-query-cache` opened to `any` client (new C20 in
+> `docs/verification/freeipa-server.md`), a `cmd/pilot/cmd/deploy.go` roster-autofill regression fix,
+> and a `nfs_clients` roster `membership.all` wildcard — all three confirmed live, `failed=0` on a
+> clean site-wide deploy, after four earlier attempts blocked on self-inflicted/environment state
+> (not product defects — see round 28's evidence). Round 28 did not re-run the broader §4 matrix;
+> round 27 remains its reference.
+> Round 28 (three new fixes — DNS recursion wildcard, roster-autofill regression, `nfs_clients`
+> `membership.all` wildcard; independent fresh rebuild, narrower scope):
+> [`2026-08-18-round-28.md`](../evidence/minimal-poc-architecture/2026-08-18-round-28.md)
+> Round 27 (full clean-room re-confirmation of the round-25/26 scope, no defects found):
+> [`2026-08-17-round-27.md`](../evidence/minimal-poc-architecture/2026-08-17-round-27.md)
 > Round 26 (`internal-endpoint` auto-provision suggester, built on round 25's still-running
 > topology — not a fresh rebuild): [`2026-08-15-round-26.md`](../evidence/minimal-poc-architecture/2026-08-15-round-26.md)
 > Round 25: [`2026-08-15-round-25.md`](../evidence/minimal-poc-architecture/2026-08-15-round-25.md)
@@ -31,6 +41,44 @@
 > `playbooks/apply/freeipa-identity-apply.yml` and
 > `playbooks/apply/freeipa-dns-apply.yml` reconcilers
 > Maintainer: sre
+
+Round 28 (2026-08-18) narrowly verified **three new fixes** made the same session, none of which
+round 27's candidate (12 commits behind) includes: `freeipa_dns_allow_any_recursion` (opens FreeIPA's
+`allow-recursion`/`allow-query-cache` to `any` client — new C20 in `docs/verification/freeipa-server.md`),
+a `resolveRosterAutoFillValue` regression fix in `cmd/pilot/cmd/deploy.go` (the roster-autofill safety
+valve no longer backs off just because a co-selected component like `freeipa-nfs-server` already
+agrees with the candidate value), and a `membership.all` wildcard on a roster hostgroup
+(`freeipa-nfs-client-apply.yml`'s `nfs_clients` targeting can now cover every `freeipa-nfs-client`
+host via one wildcard entry instead of listing FQDNs individually). Authored the workspace
+deliberately to exercise both Go-side fixes: `client-vm`'s `freeipa_roster_file` was left unset (to
+force autofill) and its `nfs_clients` coverage came from a `membership.all: true` hostgroup with no
+FQDN listed anywhere. All three confirmed live on a genuine fresh 3-node rebuild: the DNS task
+`changed` the config on real apply and reported `ok` (idempotent) on a same-day rerun, a real
+`dig ... @<freeipa-ip>` from `client-vm` resolved a public domain end-to-end, `pilot verify` scored
+FreeIPA-server 20/20 including C20, the autofill informational message fired instead of a
+`requires input` error, and the `nfs_clients` gate passed for `client-vm` via the wildcard alone.
+Getting to that clean pass took five deploy attempts — the first four were blocked by an
+environment/timing hiccup on `ipa-server-install` and three rounds of self-inflicted, accumulated
+VM state from partial recovery attempts in between, none of them defects in the three fixes
+themselves; full narrative in round 28's own evidence. This round deliberately did **not** re-run
+the broader §4.1–§4.4 matrix, the day-2 reconcilers, or the `delivery-test`-merged single
+components — round 27 (the day before) remains their reference. Full detail:
+[`2026-08-18-round-28.md`](../evidence/minimal-poc-architecture/2026-08-18-round-28.md).
+
+Round 27 (2026-08-17) ran **another full clean-room rebuild re-confirming the entire round-25/26
+scope** on a slightly later candidate (12 commits ahead of round 25/26's) — site-wide deploy, both
+day-2 reconcilers, all three `delivery-test`-merged single components, the `internal-endpoint`
+reconcile, the complete idempotency suite, the full §4.1–§4.5 matrix, and the `internal-endpoint`
+auto-provision suggester. **No product defects found.** Every checkpoint passed cleanly with counts
+close to round 25's own (site-deploy `client-vm changed=58`, `freeipa-server changed=48`,
+`nexus changed=120`; `freeipa-identity` reconcile `changed=21`; `freeipa-dns` reconcile `changed=2`,
+2-record shape). One limitation reported, not fixed: after a revoke-then-restore membership cycle,
+`ipa hbactest` correctly re-grants access but a credentialed SSH/`kinit` attempt still reports
+`Client's credentials have been revoked` — a residual identity-reconciler credential-lifecycle gap,
+not something this round's scope covers fixing. This round's evidence sat unpublished until round 28
+prompted writing both up together; see
+[`2026-08-17-round-27.md`](../evidence/minimal-poc-architecture/2026-08-17-round-27.md) for full
+detail.
 
 Round 25 (2026-08-15) ran the **first live test of two things at once**: the
 `freeipa-nfs-client` roster-driven `nfs_clients[]` targeting fix ("Plan B"), and the complete
@@ -205,7 +253,7 @@ component-specific values.
 
 | Item | Last verified value |
 |---|---|
-| Fact timestamp | 2026-08-15T03:00+08:00 |
+| Fact timestamp | 2026-08-18T16:00+08:00 (round 28; round 27's full-matrix pass was 2026-08-17) |
 | Targets | `freeipa-server`, `nexus`, `client-vm` |
 | VM sizing | FreeIPA: 2 vCPU/**4608 MiB**/30 GiB; nexus: 6/12288/80; client: 2/2048/20 |
 | VM provisioning | `pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml` (spec's own `services: local` key); see §3.2 |
@@ -213,8 +261,8 @@ component-specific values.
 | Stage | `sandbox` |
 | Alignment | Actual hosts and populated role groups matched the intended topology, including the merged `freeipa-dns-client`/`host-monitoring`/`reverse-proxy` placements — confirmed live for the first time in round 25 (previously DRAFT). `freeipa_roster_file` is now also required on `client-vm` (Plan B — see §2) |
 | Manual extra `-e` | Empty; inventory-derived values were accepted through the wizard |
-| Tested candidate | HEAD `8ba602c` at round start, plus this round's own uncommitted fixes (4 real bugs found and fixed live — see round-25 evidence) |
-| Result | First full live pass of both the Plan B `nfs_clients[]` fix and the complete merged `delivery-test` scope. Site-wide deploy (after fixes) `failed=0` on all three hosts (`client-vm ok=138 changed=41 ignored=1`, `freeipa-server ok=106 changed=39`, `nexus ok=271 changed=96`); both day-2 reconcilers clean; `freeipa-dns-client`/`freeipa-ca-trust`/`reverse-proxy`/`internal-endpoint` all `failed=0`; §4.2's strengthened check found 3/3 `host-monitoring` targets up; §4.5's full matrix (C-ca-1/C-dns-1/C-dns-2/C-endpoint-1) passed completely including a real HTTPS `curl` to Grafana with a genuine FreeIPA certificate; 4/4 idempotency reruns clean. One finding reported, not fixed: the Plan B NFS mount itself still can't complete end-to-end, blocked by a separate pre-existing FreeIPA DNS-registration gap (client hosts are never dynamically registered — a deliberate `freeipa-client-apply.yml` design choice), not a defect in the Plan B mechanism. See [round-25 evidence](../evidence/minimal-poc-architecture/2026-08-15-round-25.md) for full detail |
+| Tested candidate | Round 27: commit `32f68c3` (full clean pass, no defects). Round 28: HEAD `bc9d7bb` plus that session's own 3 uncommitted fixes (DNS recursion wildcard, roster-autofill regression fix, `nfs_clients` `membership.all` wildcard) |
+| Result | Round 27 re-confirmed the full round-25/26 scope cleanly (no new bugs). Round 28 narrowly verified its 3 new fixes on an independent fresh rebuild: DNS recursion `pilot verify` 20/20 incl. C20 + idempotent + a real cross-host `dig` proving public-domain resolution now works; roster autofill's informational message fired instead of a `requires input` error; the `nfs_clients` gate passed for `client-vm` via a `membership.all` wildcard with no FQDN listed. Site-wide deploy `failed=0` on all three hosts both rounds. See [round-27](../evidence/minimal-poc-architecture/2026-08-17-round-27.md) and [round-28](../evidence/minimal-poc-architecture/2026-08-18-round-28.md) evidence for full detail |
 
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
@@ -405,6 +453,14 @@ deployment-controller absolute path, for example `<workspace>/.vault/ipa-identit
 investigated controller: `/home/ubuntu/ansible/.vault/ipa-identity.yaml`). Do not use
 `.vault/main.yaml` as the roster path.
 
+**Added 2026-08-18 (round 28)**: `pilot deploy` now auto-fills a missing `freeipa_roster_file` at
+preflight time from whatever value another selected component's host already resolves it to (e.g.
+`nexus`'s or `freeipa-server`'s), backing off only if some host's own value genuinely disagrees —
+confirmed live by deliberately leaving it unset on `client-vm` and observing the auto-fill message
+fire instead of a `requires input` error. Setting it explicitly everywhere, as this section
+recommends, remains the clearer and still-fully-supported default; the autofill is a safety net for
+the case where it was missed, not a replacement for setting it.
+
 A roster group's `category` must match its name's prefix: `team` → `^team-`, `filesystem` →
 `^data-`, `access` → `^access-`, `role` → `^role-` (enforced by a validation gate). HBAC rule
 `subjects.groups` may only reference `category: access` groups; sudo rule `subjects.groups` may
@@ -525,18 +581,18 @@ attempt; all are wizard behaviour, not defects):
 > contract `pilot deploy` enforces. Either route is acceptable here, and neither
 > substitutes for real deployment evidence — §3.4 onward is unchanged.
 >
-> **They are not byte-identical, though (corrected round 22).** The cross-role
-> host pointers differ. `autofillCrossRoleHostVars` runs in only two places: the
-> quick path calls it explicitly, and `pilot edit`'s group_vars picker calls it
-> **only when creating a file from its example**. `pilot inventory generate`'s own
-> backfill (`copyMissingGroupVars`) copies the example verbatim with no autofill,
-> and a second `pilot edit` pass cannot recover it because the file now exists.
-> So the sequence above leaves seven derivable values empty —
-> `restic_s3_target_host`, `siem_forward_host` (×2), `thanos_query_target_host`,
-> `thanos_s3_target_host` (×2), `wazuh_manager_host` — for you to type by hand,
-> while the quick path fills them from the inventory. If you want the autofill on
-> the advanced route, let `pilot edit`'s group_vars picker create the files rather
-> than `pilot inventory generate`.
+> **They used to not be byte-identical (round 22 finding, closed 2026-08-19).** The
+> cross-role host pointers used to differ: `autofillCrossRoleHostVars` ran in only
+> two places — the quick path called it explicitly, and `pilot edit`'s group_vars
+> picker called it only when creating a file from its example — while `pilot
+> inventory generate`'s own backfill (`copyMissingGroupVars`) copied each example
+> verbatim with no autofill, leaving seven derivable values
+> (`restic_s3_target_host`, `siem_forward_host` (×2), `thanos_query_target_host`,
+> `thanos_s3_target_host` (×2), `wazuh_manager_host`) empty for you to type by hand.
+> `copyMissingGroupVars` now runs the same autofill too, so both routes fill these
+> from the inventory when it resolves unambiguously — this is also why `pilot
+> deploy`'s own auto-detect prompt (§3.4) for these same seven vars stopped firing
+> on every single run of a workspace built either way.
 
 In the first edit pass, set every host's SSH user, exact generated private-key path, and role
 membership. In the second, fill group variables and `.vault/main.yaml`. The nested identity roster
@@ -628,6 +684,12 @@ exercised live in round 23:
   NFS server's own FQDN (`nfs.servers[].host`) resolves from the client — which it does not in this
   topology today, since `freeipa-client-apply.yml` never registers a client's FQDN in FreeIPA's own DNS
   (a separate, pre-existing gap, not a Plan B defect — see round-25 evidence and §6).
+  **Added 2026-08-18 (round 28)**: a hostgroup's membership may instead be declared
+  `membership: {all: true}` — this wildcard covers every `freeipa-nfs-client` host, present and
+  future, without listing FQDNs individually. Confirmed live: a `client-vm` whose FQDN appears
+  nowhere in any hostgroup's `hosts`/`hostgroups` still passed the targeting gate via a single
+  `nfs_clients` entry pointing at an `all: true` hostgroup. Still hand-authored (no wizard screen)
+  — same "no screen for this" exception as the rest of this bullet.
 - **An HBAC rule's `subjects.users` and `targets.hostcat`** — the HBAC editor only offers
   *access-group* subjects and *hostgroup* targets, and `pushRosterHBACTargets` explicitly
   deletes `hostcat` when you touch targets. The practical consequence: the
@@ -777,7 +839,22 @@ resolving to `nexus`. Derive the expected set from `AutoHostVars` in
 `cmd/pilot/cmd/deploy_catalog.go` rather than assuming a count; answering the wrong
 number sends the next keystroke into the following prompt, and round 22's first
 attempt silently answered `n` to `siem_forward_host` that way — declining a derived
-value, which the input policy forbids. Because neither wizard uses an alternate
+value, which the input policy forbids.
+
+**Added 2026-08-19**: `N` shrinks on its own once a var is genuinely configured. Each
+of these seven no longer gets asked about at all once its group_vars value is already
+active (non-empty, non-`CHANGE-ME`) in every group_vars file that declares it —
+`groupVarsKeyAlreadyConfigured` skips straight past it. And answering `y` here now
+has a lasting effect: once the deploy actually succeeds, every accepted value is
+written back into those group_vars files (`persistAcceptedAutoHostVars`), so the very
+next run of this same workspace won't ask again for that var. `pilot inventory
+generate`'s own group_vars backfill also now runs the same cross-role autofill
+`pilot edit`'s group_vars picker always did (`copyMissingGroupVars` previously copied
+each `*.example.yml` verbatim with every cross-role pointer left commented out — the
+gap the "quick path" note below already flagged, now closed for the standalone
+`pilot inventory generate` path too) — so a brand-new workspace whose topology
+already resolves these vars unambiguously may see this prompt only once, or not at
+all. Because neither wizard uses an alternate
 screen buffer, a guard-matched answer loop can also re-match the previous prompt from
 scrollback and type a stray character into the `還有其他 -e` text field; clear that
 field (Ctrl-U) before submitting it empty.
@@ -893,7 +970,11 @@ then run the same reconcile wizard:
 
 Select `freeipa-dns` (the second, not the first, catalog entry — `freeipa-identity` is always
 listed first). Set both `freeipa_dns_manifest_file` and `freeipa_roster_file` as extra host vars on
-`freeipa-server` (the same "其他變數" screen used in §3.3). At the secret vars-file prompt select
+`freeipa-server` (the same "其他變數" screen used in §3.3). **Added 2026-08-19**: leaving either
+unset is no longer a hard requirement — `pilot deploy`/`pilot reconcile` now auto-fills
+`freeipa_dns_manifest_file` at preflight time from the workspace-convention path
+(`<workspace>/freeipa-dns.yaml`) as long as no host that needs it already has its own explicit
+value; setting it explicitly here remains the clearer default. At the secret vars-file prompt select
 `.vault/main.yaml` — same convention as §3.5, same `ipa_admin_password` requirement. Leave manual
 extra `-e` empty. Confirmed live 2026-07-30 (round 18) driving this real interactive wizard directly
 confirmed unattended): initial apply
@@ -1013,7 +1094,12 @@ the same reconcile wizard as §3.5/§3.6:
 Select `internal-endpoint`, target `freeipa-server`, `sandbox` stage, vars-file prompt →
 `.vault/main.yaml` (same `ipa_admin_password` requirement as §3.5/§3.6). At "還有其他 -e 變數要帶
 嗎？", pass both manifest paths together (the reconciler cross-checks the endpoint's `dns.zone`
-against the freeipa-dns manifest's own zones, spec.md §11.1-§11.3):
+against the freeipa-dns manifest's own zones, spec.md §11.1-§11.3). **Added 2026-08-19**: leaving
+this prompt empty now also works — `pilot reconcile` auto-fills both
+`internal_endpoint_manifest_file` (`<workspace>/internal-endpoints.yaml`) and
+`freeipa_dns_manifest_file` (`<workspace>/freeipa-dns.yaml`) from these conventional paths at
+preflight time when neither is already set elsewhere; typing them explicitly remains the clearer
+default and is what the example below still shows:
 
 ```
 internal_endpoint_manifest_file=<absolute path to workspace>/internal-endpoints.yaml freeipa_dns_manifest_file=<absolute path to workspace>/freeipa-dns.yaml
@@ -1476,6 +1562,8 @@ checkout none of these can fire.
 | `pilot deploy`/`pilot reconcile` reports `component "freeipa-ca-trust" role "freeipa-ca-trust" resolves no hosts` — either leaving its own `target_group` empty, or trying to run `internal-endpoint` (which depends on it) at all, with no possible wizard workaround for the latter | round 25 (2026-08-15) | `contracts/freeipa-ca-trust.yaml` now declares `role: all`, matching what `freeipa-ca-trust-apply.yml` actually targets by default. `cmd/pilot/cmd/deploy.go`'s dependency resolver has no knowledge of `deploy_catalog.go`'s cosmetic `DefaultGroup` field — a component's contract `role` must itself be a real, resolvable inventory group name (or the literal `all`) for both its own empty-`target_group` default and any other component's dependency resolution to work. |
 | `freeipa-nfs-client-apply.yml`'s new roster-driven fail-closed gate fails a fresh, not-yet-enrolled host's very first `--check --diff` preview | round 25 (2026-08-15) | Gate now guarded with `when: not ansible_check_mode`, mirroring `freeipa-nfs-server-apply.yml`'s own identical pattern — a fresh host's `hostname --fqdn` only reports its real FQDN after `ipa-client-install` actually runs, never during a preview. |
 | Adding the `verification_mounts` mount-check to `freeipa-nfs-client-apply.yml` made the very first real site-wide apply silently skip `host-monitoring`/`wazuh-fim`/`restic-backup`/`audit-log-forwarding` on the NFS client host | round 25 (2026-08-15) | The check now carries `ignore_errors: true` — its own prerequisites (the IPA automount map, created by the separate `freeipa-identity` day-2 reconcile; the NFS server FQDN resolving, needing the separate `freeipa-dns-client` day-2 role) are never guaranteed during a plain `site.yml` pass, and a hard failure there used to cascade through Ansible's default "drop a failed host from every later play" behavior. |
+| `pilot vm-target topology up` fails the whole command with `Error: wire "<host>": peer "<other>" has no IP yet; bring it up first`, even though every VM genuinely started booting (fresh qemu processes, fresh overlay disks) | round 28 (2026-08-18) — **not fixed, environment timing, retry works** | The cross-node "wire" step (which pins every node's `wire:` peers into `/etc/hosts` once all three have an IP) appears to check peer IPs once rather than waiting/retrying under concurrent bring-up — one node's DHCP lease can land a few seconds after the check runs. An immediate identical retry of the same `topology up` command succeeds (`already up ... skipping` for the already-booted nodes, then all wire entries succeed) once leases have landed. |
+| Recreating only one node (e.g. `pilot vm-target down --name freeipa-server` then `topology up`) to recover from an unrelated issue leaves the other already-enrolled hosts silently unable to reach it (`ipa` CLI / `service-add` etc. fail `[SSL: CERTIFICATE_VERIFY_FAILED] ... self-signed certificate in certificate chain`) | round 28 (2026-08-18) | A fresh `ipa-server-install` mints a **brand-new self-signed root CA** every time — the existing §6.1 note about this scenario only mentions needing to update the recreated host's `ansible_host` IP, but every other already-enrolled host also still trusts the *old*, now-destroyed CA, and `freeipa-client-apply.yml`'s enrollment task is (correctly) idempotent on `/etc/ipa/default.conf` already existing, so it won't detect or fix the mismatch on its own. Run `ipa-client-install --uninstall --unattended` on every other host before redeploying, so enrollment genuinely re-joins against the new CA (the "Unenrolling host failed: Client not found in Kerberos database" line this prints is expected and harmless — the old server is gone). A genuine full clean-room rebuild (all nodes recreated together) never hits this. |
 
 Two rows previously listed here now live with their component, which is
 authoritative for them: SeaweedFS's anonymous `C6`–`C8` rows failing once signed
@@ -1485,6 +1573,48 @@ weaken authentication), and `restic-backup`'s `C6` verification timeout
 automatically).
 
 ## 7. Latest verified evidence
+
+| Field | Round 28 record |
+|---|---|
+| Verified at | 2026-08-18 (Asia/Taipei) |
+| Tested revision/tree | HEAD `bc9d7bb` plus this session's own uncommitted changes (the 3 fixes below) |
+| Targets | Fresh `freeipa-server` (AlmaLinux 9), `nexus` and `client-vm` (Ubuntu 24.04); independent fresh `pilot vm-target topology up` rebuild (not a topology reuse) |
+| Focus | Narrow verification of **3 new fixes** round 27's candidate (12 commits behind) predates: (1) `freeipa_dns_allow_any_recursion` (new C20); (2) `cmd/pilot/cmd/deploy.go` roster-autofill regression fix; (3) `nfs_clients` roster `membership.all` wildcard |
+| Deliberate authoring choices | `client-vm`'s `freeipa_roster_file` left unset (forces autofill); its `nfs_clients` coverage came from a `membership.all: true` hostgroup with no FQDN listed anywhere |
+| Site apply | Full `site.yml`, sandbox stage, on the 5th attempt (first 4 blocked on an `ipa-server-install` connection timing hiccup and self-inflicted accumulated VM state from recovering it — not fixes-related, see round 28's evidence): `client-vm ok=143 changed=59 failed=0 ignored=1`; `freeipa-server ok=120 changed=52 failed=0`; `nexus ok=271 changed=121 failed=0` |
+| Fix #1 verification | Real apply `changed` the config; `/etc/named/ipa-options-ext.conf` shows `allow-recursion { any; }; allow-query-cache { any; };`; `dig +short archive.ubuntu.com @<freeipa-ip>` from `client-vm` resolved a real public domain end-to-end; `pilot verify docs/verification/freeipa-server.md`: **PASS 20/20** incl. C20; same-day idempotent rerun reported both items `ok` (not `changed`) |
+| Fix #2 verification | Real apply log: `ℹ️ freeipa_roster_file 未設定，自動帶入 .../ipa-identity.yaml` fired for `client-vm` (no `freeipa_roster_file` key in its `hosts.yml` entry) — deploy proceeded with no `requires input` error |
+| Fix #3 verification | Real apply: `Gate: this host must be declared as a present nfs_clients entry in the roster` → `ok: [client-vm] => {"changed": false, "msg": "All assertions passed"}`, purely via the `membership.all` wildcard hostgroup |
+| Not re-run this round | §4.1–§4.4 matrix, day-2 reconcilers, `delivery-test`-merged single components — round 27 remains their reference |
+| Findings (both self-inflicted/environment, not product defects — see §6.1) | `topology up`'s wire step can fail once under concurrent bring-up (retry works); recreating a single node invalidates other hosts' CA trust, not just its IP |
+| Functional verdict | PASS for all 3 fixes under test, on a genuine fresh clean-room rebuild with `failed=0` |
+| Publication | [`2026-08-18-round-28.md`](../evidence/minimal-poc-architecture/2026-08-18-round-28.md) |
+
+| Field | Round 27 record |
+|---|---|
+| Verified at | 2026-08-17 (Asia/Taipei) |
+| Tested revision/tree | Commit `32f68c3` (tree `2e7df67`) — predates round 28's 3 fixes |
+| Targets | Fresh `freeipa-server` (AlmaLinux 9), `nexus` and `client-vm` (Ubuntu 24.04); full `pilot vm-target topology up` clean-room rebuild |
+| Focus | Full re-confirmation of the entire round-25/26 scope on a slightly later candidate — no new features under test |
+| Site apply | Full `site.yml`, sandbox stage: `client-vm ok=140 changed=58 failed=0 ignored=1`; `freeipa-server ok=113 changed=48 failed=0`; `nexus ok=272 changed=120 failed=0` |
+| `freeipa-identity` reconcile | `ok=72 changed=21 failed=0` |
+| `freeipa-dns` reconcile | Zone `it.pilot.internal.`, 2 A records (`wazuh`/`s3` → nexus): `ok=31 changed=2 failed=0` |
+| `freeipa-dns-client`/`freeipa-ca-trust`/`reverse-proxy` (single-component) | All three `failed=0` on every targeted host; idempotency reruns clean `changed=0` |
+| `internal-endpoint` reconcile | `ok=81 changed=11 failed=0` on `freeipa-server`; `changed=0` on `nexus`/`client-vm` |
+| §4.1 HBAC/sudo | 8/8 via `scripts/minimal-poc-section4-spotcheck.sh`; real-credentialed HBAC denial confirmed via `journalctl` (`pam_sss(sshd:auth): authentication success` → `pam_sss(sshd:account): Access denied for user bob`) |
+| §4.2 strengthened check | `up{job="node"}`: 3/3 targets up, all `value=1`; full C-log-1–4 chain confirmed (per-host landing files, unique markers, coverage query, Wazuh alert host attribution) |
+| §4.3 backup/FIM | restic timer active on all 3 hosts, snapshots present for all 3 real hostnames; a real `whodata` FIM alert confirmed for a live-injected file |
+| §4.4 identity reconciler cycle | Revoke `changed=1`; restore + new sudo command `changed=3`; final rerun `changed=0`; password-stability rerun also `changed=0` |
+| §4.5 (CA trust/DNS/endpoint matrix) | C-ca-1 `trusted` × 3; C-dns-1 `pilot-managed` × 3; C-dns-2 resolves × 3; C-endpoint-1 real HTTPS `curl` + genuine FreeIPA certificate |
+| `internal-endpoint` suggester (§3.9) | Proposed `wazuh-dashboard.it.pilot.internal`; correctly skipped the already-published `grafana` endpoint |
+| Bugs found | **None** — full clean pass |
+| Findings reported, not fixed | After a revoke→restore membership cycle, `ipa hbactest` re-grants access correctly but a credentialed SSH/`kinit` attempt still reports `Client's credentials have been revoked` — a residual identity-reconciler credential-lifecycle gap |
+| Functional verdict | PASS for the complete documented scope; no product defects found |
+| Publication | [`2026-08-17-round-27.md`](../evidence/minimal-poc-architecture/2026-08-17-round-27.md); written up 2026-08-18 alongside round 28 |
+
+**Round 25 (2026-08-15) — first live test of the Plan B `nfs_clients[]` fix and the complete
+`delivery-test` merge (kept here as the historical record of that first pass; round 27 re-confirmed
+the same scope cleanly two days later):**
 
 | Field | Round 25 record |
 |---|---|

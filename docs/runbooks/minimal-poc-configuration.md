@@ -258,7 +258,12 @@ freeipa_dns_manifest_file=<workspace 的 absolute path>/freeipa-dns.yaml
 ```
 
 同一台 `freeipa-server` host 通常也需要 `freeipa_roster_file`（見 §3.1）——兩個 extra var
-互不影響，都要設。manifest 內的 `freeipa.domain`/`freeipa.realm`/`freeipa.server` 必須與
+互不影響，都要設。**新增 2026-08-19**：`pilot deploy`/`pilot reconcile` 現在會在 preflight
+階段自動偵測——若沒有任何需要它的 host 已明確設定這個 extra var，且 workspace 慣例路徑
+`<workspace>/freeipa-dns.yaml` 真的存在，就自動帶入該絕對路徑（`internal_endpoint_manifest_file`
+→ `<workspace>/internal-endpoints.yaml` 同理）；若某個 host 已經有自己的明確值，則完全不會
+覆蓋。仍然可以像本節說的那樣明確設定（更清楚、不依賴檔案是否存在），但不再是「一定要」。
+manifest 內的 `freeipa.domain`/`freeipa.realm`/`freeipa.server` 必須與
 `group_vars/freeipa.yml` 的 `freeipa_domain`/`freeipa_realm`/`freeipa_server_fqdn`（或其
 內建預設 `ipa1.<domain>`）完全一致，否則在 kinit 前 fail closed——2026-07-30 round-18
 發現：若 workspace 依 §2 慣例把 `freeipa_server_fqdn` 留空（用內建預設），必須確認
