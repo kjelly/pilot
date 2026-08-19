@@ -64,19 +64,27 @@
       tags: [always]
 
     - name: "Resolve which present nfs_clients entries (if any) cover this host"
-      # Membership resolution covers direct hostgroup membership plus one
-      # level of nested hostgroups — the deepest nesting this roster is
-      # actually authored to in practice. A deeper chain silently will not
-      # match; keep nfs_clients hostgroups shallow. `nfs_client_hg` can
-      # legitimately resolve to `{}` (hostgroup name not found at all) — the
-      # `if nfs_client_hg else []` ternary short-circuits before any dotted
-      # access on it, since dotted access on an empty dict raises
+      # Membership resolution covers direct hostgroup membership, one level
+      # of nested hostgroups — the deepest nesting this roster is actually
+      # authored to in practice (a deeper chain silently will not match; keep
+      # nfs_clients hostgroups shallow) — plus an explicit `membership.all:
+      # true` wildcard. The wildcard exists so a fleet-wide "every managed
+      # host may become an NFS client" policy doesn't require every new host
+      # to be individually appended to a hostgroup's host list as it's
+      # onboarded (see docs/verification/freeipa-nfs-client.md v1.3
+      # changelog, 2026-08-18); it's still an explicit, auditable roster
+      # decision (one hostgroup entry saying "this applies to everyone"),
+      # not a silent fallback to raw inventory-group membership. `nfs_client_hg`
+      # can legitimately resolve to `{}` (hostgroup name not found at all) —
+      # the `if nfs_client_hg else ...` ternaries short-circuit before any
+      # dotted access on it, since dotted access on an empty dict raises
       # AttributeError rather than returning Undefined.
       ansible.builtin.set_fact:
         nfs_client_matches: "{{ (nfs_client_matches | default([])) + [item] }}"
       vars:
         nfs_client_hostgroups: "{{ freeipa_roster.hostgroups | default([]) }}"
         nfs_client_hg: "{{ nfs_client_hostgroups | selectattr('name', 'equalto', item.hostgroup) | list | first | default({}) }}"
+        nfs_client_hg_all: "{{ (nfs_client_hg.membership.all | default(false) | bool) if nfs_client_hg else false }}"
         nfs_client_direct_hosts: "{{ (nfs_client_hg.membership.hosts | default([])) if nfs_client_hg else [] }}"
         nfs_client_nested_names: "{{ (nfs_client_hg.membership.hostgroups | default([])) if nfs_client_hg else [] }}"
         nfs_client_nested_hosts: >-
@@ -89,7 +97,7 @@
            | selectattr('hostgroup', 'defined') | list }}
       loop_control:
         label: "{{ item.hostgroup }}"
-      when: nfs_client_fqdn in nfs_client_resolved_hosts
+      when: nfs_client_hg_all or (nfs_client_fqdn in nfs_client_resolved_hosts)
       tags: [always]
 
     - name: "Gate: this host must be declared as a present nfs_clients entry in the roster"
@@ -99,9 +107,12 @@
         fail_msg: >-
           {{ nfs_client_fqdn }} is in the freeipa-nfs-client inventory group but
           no roster nfs_clients[] entry (state: present) declares a hostgroup
-          whose membership (direct hosts, or one level of nested hostgroups)
-          includes this host. Add this host to the relevant hostgroup, or add
-          a new nfs_clients entry, then re-run.
+          whose membership (direct hosts, one level of nested hostgroups, or
+          an explicit `membership.all: true` wildcard) includes this host.
+          Add this host to the relevant hostgroup, add a new nfs_clients
+          entry, or — if every managed host should be eligible — add one
+          nfs_clients entry pointing at a hostgroup with `membership.all:
+          true`, then re-run.
       # A fresh, not-yet-enrolled host's `hostname --fqdn` only reports its
       # real FQDN after ipa-client-install actually runs (a real mutation,
       # never during --check), so this gate cannot evaluate meaningfully on

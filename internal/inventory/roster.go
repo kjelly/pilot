@@ -400,6 +400,16 @@ func AppendRosterHostgroup(path, name string) error {
 	})
 }
 
+// AppendRosterNFSClient appends one nfs_clients[] entry (see
+// playbooks/apply/freeipa-nfs-client-apply.yml's roster-driven targeting) to
+// the roster at path, creating the top-level nfs_clients list if the roster
+// has never had one before. entry is typically {"hostgroup": <name>,
+// "state": "present"}, optionally with "packages"/"automount"/
+// "verification_mounts" — see freeipa-config.md §14.3.
+func AppendRosterNFSClient(path string, entry map[string]any) error {
+	return appendTopLevelRosterEntry(path, "nfs_clients", entry)
+}
+
 func AppendRosterHBACRule(path string, rule map[string]any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {

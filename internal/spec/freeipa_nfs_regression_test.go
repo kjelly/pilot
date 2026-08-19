@@ -237,6 +237,43 @@ func TestRegression_FreeIPANFSClientConsumesRosterNFSClients(t *testing.T) {
 	}
 }
 
+// TestRegression_FreeIPANFSClientHostgroupAllWildcard locks the 2026-08-18
+// fix that lets a roster declare "every managed host may become an NFS
+// client" once, instead of requiring every new host to be individually
+// appended to a hostgroup's membership.hosts list as it's onboarded. A
+// hostgroup with `membership.all: true` referenced by a present nfs_clients
+// entry must satisfy the targeting gate for ANY host, regardless of whether
+// that host also appears in membership.hosts/nested hostgroups.
+func TestRegression_FreeIPANFSClientHostgroupAllWildcard(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-nfs-client-apply.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	start := strings.Index(playbook, "- name: \"Resolve which present nfs_clients entries (if any) cover this host\"")
+	if start < 0 {
+		t.Fatal("nfs_clients resolution task is missing")
+	}
+	rest := playbook[start:]
+	end := strings.Index(rest[1:], "\n    - name:")
+	if end < 0 {
+		t.Fatal("could not isolate nfs_clients resolution task")
+	}
+	task := rest[:end+1]
+	for _, required := range []string{
+		"nfs_client_hg.membership.all | default(false) | bool",
+		"when: nfs_client_hg_all or (nfs_client_fqdn in nfs_client_resolved_hosts)",
+	} {
+		if !strings.Contains(task, required) {
+			t.Errorf("nfs_clients resolution task must support a membership.all wildcard; missing %q", required)
+		}
+	}
+	if !strings.Contains(playbook, "membership.all: true") {
+		t.Error("Gate fail_msg should point authors at the membership.all wildcard as an alternative to per-host hostgroup membership")
+	}
+}
+
 func TestRegression_FreeIPAClientFreshPreviewDoesNotReadMissingSSSDConfig(t *testing.T) {
 	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-client-apply.yml")
 	data, err := os.ReadFile(playbookPath)

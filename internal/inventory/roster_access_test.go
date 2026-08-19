@@ -78,6 +78,71 @@ hbac:
 	}
 }
 
+// TestAppendRosterNFSClientWithWildcardHostgroup exercises the exact
+// append-hostgroup / set-membership-all / append-nfs_clients sequence used
+// to opt a roster into "every managed host may become an NFS client" (see
+// playbooks/apply/freeipa-nfs-client-apply.yml's membership.all wildcard,
+// 2026-08-18) — the roster must still validate cleanly, and the resulting
+// document must round-trip with the wildcard hostgroup properly wired to a
+// present nfs_clients entry.
+func TestAppendRosterNFSClientWithWildcardHostgroup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "roster.yaml")
+	fixture := `schema_version: 2
+freeipa: {domain: ipa.pilot.internal}
+users: []
+groups: []
+hostgroups: []
+hbac: {disable_allow_all: false, rules: []}
+`
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendRosterHostgroup(path, "nfs-clients-all"); err != nil {
+		t.Fatal(err)
+	}
+	hg, found, err := RosterHostgroup(path, "nfs-clients-all")
+	if err != nil || !found {
+		t.Fatalf("hostgroup lookup: found=%v err=%v", found, err)
+	}
+	hg["membership"] = map[string]any{"all": true}
+	if violations, _, err := SimulateSetRosterHostgroup(path, "nfs-clients-all", hg); err != nil || len(violations) != 0 {
+		t.Fatalf("hostgroup simulation: violations=%v err=%v", violations, err)
+	}
+	if err := SetRosterHostgroup(path, "nfs-clients-all", hg); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendRosterNFSClient(path, map[string]any{"hostgroup": "nfs-clients-all", "state": "present"}); err != nil {
+		t.Fatal(err)
+	}
+	violations, err := ValidateRosterFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf("final roster violations: %v", violations)
+	}
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := listField(root, "nfs_clients")
+	if len(clients) != 1 {
+		t.Fatalf("nfs_clients = %v, want exactly one entry", clients)
+	}
+	entry := asMap(clients[0])
+	if entry["hostgroup"] != "nfs-clients-all" || entry["state"] != "present" {
+		t.Fatalf("nfs_clients[0] = %v, want hostgroup=nfs-clients-all state=present", entry)
+	}
+	rehg, found, err := RosterHostgroup(path, "nfs-clients-all")
+	if err != nil || !found {
+		t.Fatalf("re-read hostgroup: found=%v err=%v", found, err)
+	}
+	mem := rosterMapForTest(rehg, "membership")
+	if all, _ := mem["all"].(bool); !all {
+		t.Fatalf("hostgroup membership = %v, want all: true to survive the round trip", mem)
+	}
+}
+
 func TestRosterSudoRelationshipRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "roster.yaml")
 	fixture := `schema_version: 1

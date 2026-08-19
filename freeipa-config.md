@@ -415,6 +415,19 @@ hostgroups:
         - web2.ipa.pilot.internal
       hostgroups: []
 
+  # `membership.all: true` is a wildcard alternative to an explicit hosts
+  # list: it matches every host that's a member of the freeipa-nfs-client
+  # inventory group, present or future, without needing each new host
+  # individually appended here as it's onboarded. Only meaningful for a
+  # hostgroup referenced by a present nfs_clients[] entry (§14.3) — it is
+  # NOT a general hostgroup/HBAC/sudo wildcard, and hosts/hostgroups become
+  # redundant once all is set.
+  - name: nfs-clients-all
+    state: present
+    description: Every managed host is eligible to mount NFS shares
+    membership:
+      all: true
+
 hbac:
   disable_allow_all: true
 
@@ -1365,6 +1378,10 @@ Agent 必須管理：
 ---
 
 ## 14.3 Client 套用
+
+`nfs_clients[]` 的 `hostgroup` 欄位解析涵蓋：直接成員（`membership.hosts`）、至多一層 nested
+hostgroup（`membership.hostgroups`），以及 `membership.all: true`（涵蓋所有 freeipa-nfs-client
+host，含尚未加入 inventory 的未來主機，不需逐台加進 hosts 清單）。
 
 對 `nfs_clients` 指定的 host 或 hostgroup，Agent 必須：
 

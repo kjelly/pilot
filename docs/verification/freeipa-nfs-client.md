@@ -1,4 +1,4 @@
-# FreeIPA NFS Client Verification Spec v1.2
+# FreeIPA NFS Client Verification Spec v1.3
 
 ## 0. 目的
 
@@ -22,6 +22,12 @@ roster）。這個 apply playbook 現在是資料驅動的：套用前會先讀 
 必須落在某一筆 `state: present` 的 `nfs_clients` entry 的解析結果裡」，否則直接 fail-closed——單靠把主機
 放進 `freeipa-nfs-client` inventory group 已經不夠。這筆 entry 的 `automount.location`/
 `automount.enable_service` 現在也會覆蓋 `nfs_automount_location`/是否啟用 autofs 服務。
+
+**新增 v1.3**：hostgroup 的 membership 除了直接成員（`hosts`）與一層 nested hostgroup
+（`hostgroups`）之外，現在也接受 `all: true` 這個 wildcard——涵蓋所有落在
+`freeipa-nfs-client` inventory group 裡的 host，包含之後才加入 inventory 的新主機，不需要每加一台
+就手動編輯 roster 的 hostgroup 清單。用法：`nfs_clients: [{hostgroup: <名字>, state: present}]`，該
+`<名字>` 對應的 hostgroup 寫 `membership: {all: true}`（見 `freeipa-config.md` §14.3）。
 
 ## 2. Checklist
 
@@ -96,3 +102,8 @@ pilot vm-target test --name <client-vm> --playbook playbooks/apply/freeipa-nfs-c
   `freeipa-identity` day-2 reconcile 建立；NFS server FQDN 能被解析需要另一個 `freeipa-dns-client`
   day-2 角色）在單純跑一次 `site.yml` 時都不保證存在，沒加這個之前，第一次現場實跑讓失敗把
   `client-vm` 剩下的所有 site.yml play 都靜默排除掉。見 §4 修正說明。
+- v1.3（2026-08-18）：hostgroup membership 新增 `all: true` wildcard，讓「所有被管理主機都可能是
+  NFS client」這個政策一次宣告、之後新主機自動涵蓋，不必逐台編輯 roster（見 §1.5、
+  `freeipa-config.md` §14.3）。本機用 `ansible-playbook -c local` 對照組驗證：一個從未出現在任何
+  hostgroup `hosts`/`hostgroups` 清單裡的全新 FQDN，透過 `membership.all: true` 的 hostgroup 仍能通過
+  targeting gate。尚未在真實 VM 上重跑本檔整份 checklist。
