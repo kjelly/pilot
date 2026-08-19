@@ -105,12 +105,32 @@
              if siem_forwarding_enabled
              else 'siem_forward_host not provided and no log-server/wazuh-manager host in inventory — skipping /etc/hosts pin and 99-siem-forward.conf; only local auditd monitoring (C1-C14, C18) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN>, or add a log-server/wazuh-manager host to inventory, once a SIEM receiver exists to add forwarding.' }}
 
-    - name: "Step 0a: Ensure Ubuntu universe repository is enabled"
+    - name: "Step 0a0: Check whether Ubuntu universe component is already enabled"
+      tags: [C1, C2]
+      # Ubuntu 24.04+ cloud images ship a deb822 ubuntu.sources with
+      # `Components: main universe restricted multiverse` already set, so
+      # blindly dropping a second pilot-ubuntu-universe.list duplicates the
+      # universe component and apt warns "configured multiple times" on
+      # every apt operation (found via pilot vm-target on ubuntu-24.04,
+      # 2026-08-19). Detect any *existing* source (classic .list or deb822
+      # .sources, excluding our own managed file) that already provides
+      # universe before adding a redundant one.
+      ansible.builtin.shell:
+        cmd: >-
+          grep -rEl '(^deb\b.*\buniverse\b|^Components:.*\buniverse\b)'
+          /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
+          2>/dev/null | grep -v '/pilot-ubuntu-universe\.list$' || true
+      register: pilot_ubuntu_universe_precheck
+      changed_when: false
+      check_mode: false
+      when: ansible_distribution == "Ubuntu"
+
+    - name: "Step 0a: Ensure Ubuntu universe repository is enabled (state absent when another source already covers it, so a stale pilot-ubuntu-universe.list from before this fix self-heals instead of leaving a duplicate)"
       tags: [C1, C2]
       ansible.builtin.apt_repository:
         repo: "deb https://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} universe"
         filename: pilot-ubuntu-universe
-        state: present
+        state: "{{ 'absent' if (pilot_ubuntu_universe_precheck.stdout | default('')) | length > 0 else 'present' }}"
         update_cache: true
       # The site deploy always runs a --check --diff preview first.  Repository
       # metadata is a prerequisite for the following apt task, so this
