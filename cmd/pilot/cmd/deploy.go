@@ -701,8 +701,13 @@ func siteAutoHostVars() []autoHostVar {
 // resolve av.Group's host from inv, falling back to a manual prompt (blank
 // = skip; the target playbook treats an unset value however it already
 // does today — a hard gate failure for a required destination, or a silent
-// feature-skip for an optional one).
-func promptAutoHostVar(ctx context.Context, out io.Writer, inv string, av autoHostVar) ([]string, error) {
+// feature-skip for an optional one). Asks nothing at all when workspaceDir's
+// group_vars already has a real value for av.Var — see
+// groupVarsKeyAlreadyConfigured.
+func promptAutoHostVar(ctx context.Context, out io.Writer, inv, workspaceDir string, av autoHostVar) ([]string, error) {
+	if configured, err := groupVarsKeyAlreadyConfigured(workspaceDir, av.Var); err == nil && configured {
+		return nil, nil
+	}
 	if host, ok := resolveGroupHost(ctx, inv, av.Group); ok {
 		q := fmt.Sprintf("偵測到這份 inventory 的 %s：%s，這次要用它嗎？(-e %s=%s)", av.Label, host, av.Var, host)
 		if runConfirmProgram(q, true) {
@@ -1026,6 +1031,14 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	}
 	components = contractIDs(applied)
 	extraVars, err = autoFillFreeIPARosterFile(ctx, out, selected, scope, inv, extraVars, vault)
+	if err != nil {
+		return err
+	}
+	extraVars, err = autoFillWorkspaceManifestFile(ctx, out, selected, scope, inv, extraVars, vault, "freeipa_dns_manifest_file", "freeipa-dns.yaml")
+	if err != nil {
+		return err
+	}
+	extraVars, err = autoFillWorkspaceManifestFile(ctx, out, selected, scope, inv, extraVars, vault, "internal_endpoint_manifest_file", "internal-endpoints.yaml")
 	if err != nil {
 		return err
 	}
@@ -1414,33 +1427,146 @@ func autoFillFreeIPARosterFile(ctx context.Context, out io.Writer, selected []co
 // resolveRosterAutoFillValue is autoFillFreeIPARosterFile's pure decision
 // step, split out so it's testable without shelling out to
 // ansible-inventory. rosterHosts is every host in scope a selected
-// component's contract requires freeipa_roster_file for; hostVars is every
-// host's resolved ansible variables (the whole inventory, not just
-// rosterHosts). If even one rosterHosts entry already has an explicit
-// value, this backs off entirely and returns "" — some hosts may
-// deliberately point at different roster files, and a single blanket -e
-// would silently override whichever of them already work correctly (-e
-// beats host_vars/group_vars in Ansible's precedence).
+// component's contract requires freeipa_roster_file for — note this is
+// pooled across ALL co-selected components that declare the var (e.g. both
+// freeipa-nfs-client and its required freeipa-nfs-server dependency), not
+// just the one component actually missing a value. It picks a candidate
+// value by reusing whatever any host in the whole inventory already
+// resolves it to (falling back to the workspace default path), then backs
+// off to "" ONLY if some rosterHosts entry already has an explicit value
+// that DISAGREES with that candidate — some hosts may deliberately point at
+// a different roster file, and a single blanket -e would silently override
+// whichever of them already work correctly (-e beats host_vars/group_vars
+// in Ansible's precedence). Comparing against the candidate (rather than
+// backing off on ANY existing value, agreeing or not) matters in practice:
+// on a real nfs-server + nfs-client topology the server's own host almost
+// always already has its own explicit value — that's the normal, correct
+// steady state, not a conflict — and treating it as one would make this
+// function permanently inert for the exact "server already configured,
+// clients still need it" case it exists to solve.
 func resolveRosterAutoFillValue(rosterHosts []string, hostVars map[string]map[string]any, defaultPath string, defaultExists bool) string {
-	for _, host := range rosterHosts {
-		if v, _ := hostVars[host]["freeipa_roster_file"].(string); strings.TrimSpace(v) != "" {
-			return ""
-		}
-	}
 	names := make([]string, 0, len(hostVars))
 	for name := range hostVars {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
+	candidate := ""
 	for _, name := range names {
 		if v, ok := hostVars[name]["freeipa_roster_file"].(string); ok && strings.TrimSpace(v) != "" {
-			return v
+			candidate = v
+			break
 		}
 	}
-	if defaultExists {
-		return defaultPath
+	if candidate == "" {
+		if !defaultExists {
+			return ""
+		}
+		candidate = defaultPath
 	}
-	return ""
+
+	for _, host := range rosterHosts {
+		if v, _ := hostVars[host]["freeipa_roster_file"].(string); strings.TrimSpace(v) != "" && v != candidate {
+			return ""
+		}
+	}
+	return candidate
+}
+
+// autoFillWorkspaceManifestFile spares the operator from hand-typing an
+// absolute path to a workspace-convention manifest file (freeipa-dns's
+// freeipa_dns_manifest_file -> <workspace>/freeipa-dns.yaml,
+// internal-endpoint's internal_endpoint_manifest_file ->
+// <workspace>/internal-endpoints.yaml) that this project's own runbooks
+// already document as a fixed, predictable location — same "stop making the
+// operator retype a value pilot can already see" motivation as
+// autoFillFreeIPARosterFile, just simpler: unlike the roster, these
+// manifests are only ever read by one host (whichever one carries the
+// freeipa-dns/internal-endpoint role, HostCardinality exactly-one), so
+// there's no "reuse a value another host already resolved" case — only
+// "does the conventional file exist" to fall back to. Still backs off
+// entirely if any host that needs it already has its own explicit value
+// (via host_vars/hosts.yml), matching the roster autofill's same safety
+// principle: -e beats host_vars in Ansible's precedence, so silently
+// injecting a guessed path could otherwise clobber a deliberately different
+// one.
+func autoFillWorkspaceManifestFile(ctx context.Context, out io.Writer, selected []contract.Contract, scope delivery.Scope, inv string, extraVars []string, vault vaultInput, varName, conventionalRelPath string) ([]string, error) {
+	if extraVarValue(extraVars, varName) != "" {
+		return extraVars, nil
+	}
+
+	var hostsNeeding []string
+	for _, component := range selected {
+		for _, gv := range component.GroupVars {
+			if gv.Name == varName && gv.Required {
+				hostsNeeding = append(hostsNeeding, scope.HostsByRole[component.Role]...)
+				break
+			}
+		}
+	}
+	if len(hostsNeeding) == 0 {
+		return extraVars, nil
+	}
+
+	hostVars, err := resolveInventoryVariables(ctx, inv, extraVars, vault)
+	if err != nil {
+		return nil, err
+	}
+
+	def := filepath.Join(filepath.Dir(inv), conventionalRelPath)
+	abs, err := filepath.Abs(def)
+	if err != nil {
+		return nil, err
+	}
+	_, statErr := os.Stat(abs)
+
+	value := resolveWorkspaceManifestAutoFillValue(hostsNeeding, hostVars, varName, abs, statErr == nil)
+	if value == "" {
+		return extraVars, nil
+	}
+	fmt.Fprintf(out, "ℹ️  %s 未設定，自動帶入 %s\n", varName, value)
+	return append(extraVars, varName+"="+value), nil
+}
+
+// resolveWorkspaceManifestAutoFillValue is autoFillWorkspaceManifestFile's
+// pure decision step, split out so it's testable without shelling out to
+// ansible-inventory — same reason resolveRosterAutoFillValue exists.
+// hostsNeeding is every host in scope a selected component's contract
+// requires varName for. Backs off (returns "") if any of them already has
+// an explicit value, since -e would otherwise silently override it;
+// otherwise falls back to defaultPath if that conventional file actually
+// exists on disk.
+func resolveWorkspaceManifestAutoFillValue(hostsNeeding []string, hostVars map[string]map[string]any, varName, defaultPath string, defaultExists bool) string {
+	for _, host := range hostsNeeding {
+		if v, _ := hostVars[host][varName].(string); strings.TrimSpace(v) != "" {
+			return ""
+		}
+	}
+	if !defaultExists {
+		return ""
+	}
+	return defaultPath
+}
+
+// acceptedAutoHostVar is one "偵測到...這次要用它嗎？" prompt the operator
+// answered yes to (or a single-component AutoHostVar filled via the manual
+// text fallback) this run — collected so a successful deploy can persist it
+// into group_vars, sparing every future run from asking again.
+type acceptedAutoHostVar struct {
+	Var, Value string
+}
+
+// persistAcceptedAutoHostVars writes every accepted var=value into
+// group_vars via persistAutoHostVarToGroupVars, once a deploy has already
+// genuinely succeeded using it — best-effort: a failure here must never
+// turn an already-successful deploy into a reported failure, so errors are
+// only surfaced as a warning.
+func persistAcceptedAutoHostVars(out io.Writer, workspaceDir string, accepted []acceptedAutoHostVar) {
+	for _, a := range accepted {
+		if err := persistAutoHostVarToGroupVars(out, workspaceDir, a.Var, a.Value); err != nil {
+			fmt.Fprintf(out, "⚠️  無法把 %s=%s 寫入 group_vars（下次還是會問一次）：%v\n", a.Var, a.Value, err)
+		}
+	}
 }
 
 func resolveDeploymentInputs(ctx context.Context, selected []contract.Contract, scope delivery.Scope, inventory string, extraVars []string, vault vaultInput) (map[string]map[string]any, error) {
@@ -1822,15 +1948,26 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	// wazuh_manager_host, …): auto-detect from the inventory exactly like the
 	// single-component flow. Only vars whose source group actually resolves
 	// are offered — a role group with no hosts is skipped by site.yml anyway,
-	// and its consumers fall back to their own default/gate behavior.
+	// and its consumers fall back to their own default/gate behavior. A var
+	// already configured with a real value in every group_vars file that
+	// mentions it is trusted outright and never asked about — see
+	// groupVarsKeyAlreadyConfigured's doc comment for why re-asking every
+	// run despite an already-correct config was the actual complaint this
+	// guards against.
+	workspaceDir := filepath.Dir(inv)
+	var acceptedAutoHostVars []acceptedAutoHostVar
 	for _, av := range siteAutoHostVars() {
 		host, ok := resolveGroupHost(ctx, inv, av.Group)
 		if !ok {
 			continue
 		}
+		if configured, cfgErr := groupVarsKeyAlreadyConfigured(workspaceDir, av.Var); cfgErr == nil && configured {
+			continue
+		}
 		q := fmt.Sprintf("偵測到這份 inventory 的 %s：%s，這次要用它嗎？(-e %s=%s)", av.Label, host, av.Var, host)
 		if runConfirmProgram(q, true) {
 			extraVars = append(extraVars, av.Var+"="+host)
+			acceptedAutoHostVars = append(acceptedAutoHostVars, acceptedAutoHostVar{Var: av.Var, Value: host})
 		}
 	}
 
@@ -1840,7 +1977,11 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	}
 	extraVars = append(extraVars, strings.Fields(extra)...)
 
-	return executeRecordedDeployment(ctx, runner, out, "playbooks/site.yml", inv, limit, tags, extraVars, vault, decision.Stage, nil)
+	deployErr := executeRecordedDeployment(ctx, runner, out, "playbooks/site.yml", inv, limit, tags, extraVars, vault, decision.Stage, nil)
+	if deployErr == nil {
+		persistAcceptedAutoHostVars(out, workspaceDir, acceptedAutoHostVars)
+	}
+	return deployErr
 }
 
 // printSiteTopology renders the contract-derived topology graph for inv as a
@@ -2024,12 +2165,19 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		extraVars = append(extraVars, s3Vars...)
 	}
 
+	workspaceDir := filepath.Dir(inv)
+	var acceptedAutoHostVars []acceptedAutoHostVar
 	for _, av := range entry.AutoHostVars {
-		hostVars, err := promptAutoHostVar(ctx, out, inv, av)
+		hostVars, err := promptAutoHostVar(ctx, out, inv, workspaceDir, av)
 		if err != nil {
 			return err
 		}
 		extraVars = append(extraVars, hostVars...)
+		if len(hostVars) == 1 {
+			if _, value, ok := strings.Cut(hostVars[0], "="); ok {
+				acceptedAutoHostVars = append(acceptedAutoHostVars, acceptedAutoHostVar{Var: av.Var, Value: value})
+			}
+		}
 	}
 
 	limit, err := runTextProgram("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
@@ -2053,7 +2201,11 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 	}
 	extraVars = append(extraVars, strings.Fields(extra)...)
 
-	return executeRecordedDeployment(ctx, runner, out, actionPlaybook, inv, limit, tags, extraVars, vault, decision.Stage, componentHints)
+	deployErr := executeRecordedDeployment(ctx, runner, out, actionPlaybook, inv, limit, tags, extraVars, vault, decision.Stage, componentHints)
+	if deployErr == nil {
+		persistAcceptedAutoHostVars(out, workspaceDir, acceptedAutoHostVars)
+	}
+	return deployErr
 }
 
 // deployMenuLabel keeps catalog-only copywriting as a presentation projection,

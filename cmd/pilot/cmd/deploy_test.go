@@ -501,7 +501,7 @@ func TestResolveRosterAutoFillValue(t *testing.T) {
 		}
 	})
 
-	t.Run("backs off entirely when a roster host already has an explicit value", func(t *testing.T) {
+	t.Run("backs off entirely when a roster host has an explicit value that disagrees with the candidate", func(t *testing.T) {
 		hostVars := map[string]map[string]any{
 			"nfs-client-1": {"freeipa_roster_file": "/ws/.vault/custom.yaml"},
 			"nfs-client-2": {},
@@ -510,6 +510,28 @@ func TestResolveRosterAutoFillValue(t *testing.T) {
 		got := resolveRosterAutoFillValue([]string{"nfs-client-1", "nfs-client-2"}, hostVars, defaultPath, true)
 		if got != "" {
 			t.Fatalf("got %q, want empty — must not override nfs-client-1's explicit value", got)
+		}
+	})
+
+	// Regression: a freeipa-nfs-client deploy always pulls in its required
+	// freeipa-nfs-server dependency, and that server's contract ALSO
+	// requires freeipa_roster_file — so rosterHosts is pooled across both
+	// components' hosts (see resolveRosterAutoFillValue's doc comment).
+	// nfs-server already carrying its own explicit value is the normal
+	// steady state, not a conflict, since it agrees with the candidate
+	// pulled from the same inventory. Backing off here (the pre-fix
+	// behavior) made the whole feature inert for the exact "server already
+	// configured, clients still missing it" case it was built to solve.
+	t.Run("fills client hosts even when an already-satisfied server host shares the candidate value", func(t *testing.T) {
+		hostVars := map[string]map[string]any{
+			"ipa-1":        {"freeipa_roster_file": "/ws/.vault/ipa-identity.yaml"},
+			"nfs-server-1": {"freeipa_roster_file": "/ws/.vault/ipa-identity.yaml"},
+			"nfs-client-1": {},
+			"nfs-client-2": {},
+		}
+		got := resolveRosterAutoFillValue([]string{"nfs-client-1", "nfs-client-2", "nfs-server-1"}, hostVars, defaultPath, true)
+		if got != "/ws/.vault/ipa-identity.yaml" {
+			t.Fatalf("got %q, want the value nfs-server-1 and ipa-1 already agree on", got)
 		}
 	})
 }
@@ -536,6 +558,101 @@ func TestAutoFillFreeIPARosterFile_NoOpWhenNoComponentRequiresRoster(t *testing.
 	scope := delivery.Scope{HostsByRole: map[string][]string{"freeipa-client": {"client-1"}}}
 
 	got, err := autoFillFreeIPARosterFile(context.Background(), io.Discard, selected, scope, "unused.yml", nil, vaultInput{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %v, want no extra vars appended", got)
+	}
+}
+
+func TestResolveWorkspaceManifestAutoFillValue(t *testing.T) {
+	defaultPath := "/ws/freeipa-dns.yaml"
+
+	t.Run("falls back to conventional path when it exists and nothing already has a value", func(t *testing.T) {
+		hostVars := map[string]map[string]any{"freeipa-server": {}}
+		got := resolveWorkspaceManifestAutoFillValue([]string{"freeipa-server"}, hostVars, "freeipa_dns_manifest_file", defaultPath, true)
+		if got != defaultPath {
+			t.Fatalf("got %q, want default path %q", got, defaultPath)
+		}
+	})
+
+	t.Run("gives up when conventional path doesn't exist and nothing already has a value", func(t *testing.T) {
+		hostVars := map[string]map[string]any{"freeipa-server": {}}
+		got := resolveWorkspaceManifestAutoFillValue([]string{"freeipa-server"}, hostVars, "freeipa_dns_manifest_file", defaultPath, false)
+		if got != "" {
+			t.Fatalf("got %q, want empty (no safe guess)", got)
+		}
+	})
+
+	t.Run("backs off entirely when a needing host already has an explicit value", func(t *testing.T) {
+		hostVars := map[string]map[string]any{
+			"freeipa-server": {"freeipa_dns_manifest_file": "/ws/.vault/custom-dns.yaml"},
+		}
+		got := resolveWorkspaceManifestAutoFillValue([]string{"freeipa-server"}, hostVars, "freeipa_dns_manifest_file", defaultPath, true)
+		if got != "" {
+			t.Fatalf("got %q, want empty — must not override freeipa-server's explicit value", got)
+		}
+	})
+}
+
+func TestAutoFillWorkspaceManifestFile_SkipsWhenExplicitExtraVarAlreadySet(t *testing.T) {
+	selected := []contract.Contract{{
+		ID: "freeipa-dns", Role: "freeipa-server",
+		GroupVars: []contract.GroupVar{{Name: "freeipa_dns_manifest_file", Required: true}},
+	}}
+	scope := delivery.Scope{HostsByRole: map[string][]string{"freeipa-server": {"ipa-1"}}}
+	extraVars := []string{"freeipa_dns_manifest_file=/already/set.yaml"}
+
+	got, err := autoFillWorkspaceManifestFile(context.Background(), io.Discard, selected, scope, "unused.yml", extraVars, vaultInput{}, "freeipa_dns_manifest_file", "freeipa-dns.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "freeipa_dns_manifest_file=/already/set.yaml" {
+		t.Fatalf("got %v, want extraVars left untouched", got)
+	}
+}
+
+// TestAutoFillWorkspaceManifestFile_EndToEndAgainstRealInventory exercises
+// the full function (not just resolveWorkspaceManifestAutoFillValue),
+// including the real `ansible-inventory` shell-out, against a genuine
+// temp-dir inventory + conventional manifest file — the same real-world
+// case docs/runbooks/minimal-poc-configuration.md §3.2 documents (an
+// operator asking whether freeipa_dns_manifest_file must always be typed
+// by hand). Confirmed live 2026-08-19: `ansible-inventory` picks up the
+// plain host var correctly and the function fills in the conventional path.
+func TestAutoFillWorkspaceManifestFile_EndToEndAgainstRealInventory(t *testing.T) {
+	dir := t.TempDir()
+	inv := filepath.Join(dir, "inventory.yml")
+	manifest := filepath.Join(dir, "freeipa-dns.yaml")
+	if err := os.WriteFile(inv, []byte("all:\n  hosts:\n    freeipa-server:\n      ansible_host: 10.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("schema_version: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	selected := []contract.Contract{{
+		ID: "freeipa-dns", Role: "freeipa-server",
+		GroupVars: []contract.GroupVar{{Name: "freeipa_dns_manifest_file", Required: true}},
+	}}
+	scope := delivery.Scope{HostsByRole: map[string][]string{"freeipa-server": {"freeipa-server"}}}
+
+	got, err := autoFillWorkspaceManifestFile(context.Background(), io.Discard, selected, scope, inv, nil, vaultInput{}, "freeipa_dns_manifest_file", "freeipa-dns.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "freeipa_dns_manifest_file=" + manifest
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("got %v, want [%q]", got, want)
+	}
+}
+
+func TestAutoFillWorkspaceManifestFile_NoOpWhenNoComponentRequiresIt(t *testing.T) {
+	selected := []contract.Contract{{ID: "freeipa-server", Role: "freeipa-server"}}
+	scope := delivery.Scope{HostsByRole: map[string][]string{"freeipa-server": {"ipa-1"}}}
+
+	got, err := autoFillWorkspaceManifestFile(context.Background(), io.Discard, selected, scope, "unused.yml", nil, vaultInput{}, "freeipa_dns_manifest_file", "freeipa-dns.yaml")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

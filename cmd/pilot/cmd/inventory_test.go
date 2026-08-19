@@ -17,7 +17,7 @@ func TestCopyMissingGroupVars_CopiesExampleForUsedStemOnly(t *testing.T) {
 	mustWriteFile(t, "group_vars/unused.example.yml", "should_not_be_copied: true\n")
 
 	var buf bytes.Buffer
-	copyMissingGroupVars(&buf, ".", []string{"dns", "freeipa"})
+	copyMissingGroupVars(&buf, ".", []string{"dns", "freeipa"}, nil)
 
 	assertFileContent(t, "group_vars/dns.yml", "dns_forwarders: []\n")
 	assertFileContent(t, "group_vars/freeipa.yml", "freeipa_domain: ipa.pilot.internal\n")
@@ -35,7 +35,7 @@ func TestCopyMissingGroupVars_DestinationFollowsBaseDirSourceStaysFixed(t *testi
 	mustWriteFile(t, "group_vars/dns.example.yml", "dns_forwarders: []\n")
 
 	var buf bytes.Buffer
-	copyMissingGroupVars(&buf, filepath.Join("envs", "staging"), []string{"dns"})
+	copyMissingGroupVars(&buf, filepath.Join("envs", "staging"), []string{"dns"}, nil)
 
 	assertFileContent(t, filepath.Join("envs", "staging", "group_vars", "dns.yml"), "dns_forwarders: []\n")
 	if _, err := os.Stat(filepath.Join("group_vars", "dns.yml")); !os.IsNotExist(err) {
@@ -64,7 +64,7 @@ func TestCopyMissingGroupVars_NeverOverwritesExistingFile(t *testing.T) {
 	mustWriteFile(t, "group_vars/dns.yml", "dns_forwarders: [\"10.0.0.1\"]\n") // already filled in by the operator
 
 	var buf bytes.Buffer
-	copyMissingGroupVars(&buf, ".", []string{"dns"})
+	copyMissingGroupVars(&buf, ".", []string{"dns"}, nil)
 
 	assertFileContent(t, "group_vars/dns.yml", "dns_forwarders: [\"10.0.0.1\"]\n")
 	if got := buf.String(); !bytes.Contains([]byte(got), []byte("already exists")) {
@@ -76,7 +76,7 @@ func TestCopyMissingGroupVars_RoleWithNoExampleIsSkippedSilently(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	var buf bytes.Buffer
-	copyMissingGroupVars(&buf, ".", []string{"docker"}) // "docker" has no group_vars example anywhere in this repo
+	copyMissingGroupVars(&buf, ".", []string{"docker"}, nil) // "docker" has no group_vars example anywhere in this repo
 
 	if _, err := os.Stat("group_vars/docker.yml"); !os.IsNotExist(err) {
 		t.Fatalf("group_vars/docker.yml should not have been created, stat err=%v", err)
