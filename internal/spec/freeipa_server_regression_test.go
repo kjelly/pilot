@@ -9,10 +9,11 @@ import (
 )
 
 // TestRegression_FreeipaServerSpec locks the structural contract of
-// docs/verification/freeipa-server.md: 19 rows C1..C19 (C14–C16 = 389-ds
+// docs/verification/freeipa-server.md: 20 rows C1..C20 (C14–C16 = 389-ds
 // directory-service audit log, added in v1.1; C19 = kpasswd 464/tcp, added
-// in v1.5), lint-clean, and a generated verify playbook that covers every
-// row.
+// in v1.5; C20 = allow-recursion/allow-query-cache opened to any client,
+// added in v1.6), lint-clean, and a generated verify playbook that covers
+// every row.
 //
 // Inventory alignment: like freeipa-client.md, §1 declares group
 // `freeipa-server` while the vm-target reference environment puts the host in
@@ -26,11 +27,11 @@ func TestRegression_FreeipaServerSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	if len(s.Rows) != 19 {
-		t.Fatalf("rows=%d want=19 (spec must cover C1..C19 inclusive)", len(s.Rows))
+	if len(s.Rows) != 20 {
+		t.Fatalf("rows=%d want=20 (spec must cover C1..C20 inclusive)", len(s.Rows))
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20"}
 	gotIDs := make([]string, 0, len(s.Rows))
 	seen := map[string]bool{}
 	for _, r := range s.Rows {
@@ -188,5 +189,82 @@ func TestRegression_FreeipaServerApplyPlaybook_HasCloudInitEtcHostsGuard(t *test
 	}
 	if guardIdx > pinIdx {
 		t.Errorf("cloud-init-etc-hosts-guard.yml must be included BEFORE the /etc/hosts FQDN pin")
+	}
+}
+
+// TestRegression_FreeipaServerApplyPlaybook_OpensRecursionToAnyClient locks
+// the 2026-08-18 fix for "let the FreeIPA DNS server forward arbitrary
+// clients' requests to an external DNS server". Confirmed live (see
+// docs/verification/freeipa-server.md §8) that a stock `ipa-server-install
+// --setup-dns` sets NEITHER allow-recursion NOR allow-query-cache at all —
+// /etc/named.conf is FreeIPA-owned ("DO NOT MODIFY! Any modification will be
+// overwritten by upgrades") and only `include`s
+// /etc/named/ipa-options-ext.conf, which ships with just a commented-out
+// EXAMPLE of a restrictive ACL (e.g. `trusted_clients`) for the operator to
+// fill in. Whether that ACL was never set or was added later by a hardening
+// pass, either way recursive/forwarded lookups get REFUSED for any client
+// outside it even though ipa_domain's own authoritative answers keep working
+// for anyone — so the playbook must set both directives to `any` in
+// ipa-options-ext.conf specifically (NEVER edit named.conf itself), default
+// on, operator-overridable via freeipa_dns_allow_any_recursion, and reload
+// named via a handler rather than a bare command task so a config error
+// can't take down an already-running server (same convention as
+// reverse-proxy-apply.yml's nginx handlers).
+func TestRegression_FreeipaServerApplyPlaybook_OpensRecursionToAnyClient(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-server-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	for _, want := range []string{
+		"ipa_dns_allow_any_recursion",
+		"allow-recursion",
+		"allow-query-cache",
+		"/etc/named/ipa-options-ext.conf",
+		"notify: reload named for open recursion",
+	} {
+		if !strings.Contains(playbook, want) {
+			t.Errorf("playbook must contain %q", want)
+		}
+	}
+
+	// The fix must target ipa-options-ext.conf (FreeIPA's documented
+	// "user customization, survives upgrades" file), never named.conf
+	// itself — named.conf is only ever referenced for read-only validation
+	// (named-checkconf), never as an ansible.builtin.lineinfile/replace/copy
+	// path= target.
+	for _, mod := range []string{"ansible.builtin.lineinfile", "ansible.builtin.replace", "ansible.builtin.copy", "ansible.builtin.blockinfile"} {
+		idx := 0
+		for {
+			i := strings.Index(playbook[idx:], mod)
+			if i < 0 {
+				break
+			}
+			i += idx
+			// Look at the next ~200 chars for a path:/dest: pointing at
+			// named.conf directly (not the ipa-options-ext.conf include).
+			window := playbook[i:min(i+400, len(playbook))]
+			if strings.Contains(window, "/etc/named.conf") && !strings.Contains(window, "ipa-options-ext.conf") {
+				t.Errorf("%s must never target /etc/named.conf directly (FreeIPA: \"DO NOT MODIFY! Any modification will be overwritten by upgrades\") — found near offset %d", mod, i)
+			}
+			idx = i + len(mod)
+		}
+	}
+
+	if !strings.Contains(playbook, "named-checkconf") {
+		t.Errorf("playbook must validate named.conf (named-checkconf) before reloading — a bad substitution must never take down an already-running server")
+	}
+	if !strings.Contains(playbook, "rndc reconfig") {
+		t.Errorf("playbook must reload via `rndc reconfig` (live config reload), not a full service restart")
+	}
+
+	// The reload must be handler-driven (listen: reload named for open
+	// recursion), not a bare command task gated on .changed — ansible-lint's
+	// no-handler rule flags exactly that pattern, and reverse-proxy-apply.yml
+	// already established the validate-then-reload handler convention.
+	if !strings.Contains(playbook, "listen: reload named for open recursion") {
+		t.Errorf("named reload must be handler-driven (listen: reload named for open recursion), not an inline command task")
 	}
 }

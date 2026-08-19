@@ -49,6 +49,13 @@ freeipa_domain: ipa.pilot.internal
 # 不想要任何 forwarder(改用 --no-forwarders)才需要覆寫成空字串或空陣列。
 # freeipa_dns_forwarders: 8.8.8.8
 
+# 是否讓任意 client(不限本機子網路)都能把這台 FreeIPA 當一般 DNS resolver
+# 用(把 named 的 allow-recursion/allow-query-cache 開放成 any)。預設
+# true。注意:這是已知的 DNS open-resolver / 放大式 DDoS 風險特徵,只有在
+# 部署目標確定是私有 fleet 網路、從不對公網曝露時才適合保留預設值;想保留
+# FreeIPA(或站台 hardening 流程)原本設定的限制式 ACL 才需要覆寫成 false:
+# freeipa_dns_allow_any_recursion: true
+
 # ipa-server-install 用的 --ntp-server 清單。預設是台灣的公開時間伺服器;
 # 其他地區請覆寫成該地區慣用的 NTP server。
 # freeipa_ntp_servers: [tock.stdtime.gov.tw, watch.stdtime.gov.tw]

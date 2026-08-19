@@ -29,6 +29,7 @@ groupVars:
   - {name: freeipa_domain, type: string, required: false, default: ipa.pilot.internal, secret: false}
   - {name: freeipa_server_ip, type: string, required: false, secret: false, validation: "^[0-9a-fA-F:.]+$"}
   - {name: ipa_admin_password, type: string, required: true, secret: true, validation: "^.{8,}$"}
+  - {name: freeipa_dns_allow_any_recursion, type: boolean, required: false, default: true, secret: false}
 inputRules: []
 endpoints:
   - {name: ldap, scheme: ldap, port: 389}
@@ -68,6 +69,7 @@ traceability:
     "docs/verification/freeipa-server.md#C17": {tags: [freeipa-install], reason: optional native DNS TCP listener}
     "docs/verification/freeipa-server.md#C18": {tags: [freeipa-install], reason: optional native DNS UDP listener}
     "docs/verification/freeipa-server.md#C19": {tags: [freeipa-install], reason: kpasswd TCP listener from installer}
+    "docs/verification/freeipa-server.md#C20": {tags: [freeipa-dns-recursion], reason: "allow-recursion/allow-query-cache opened to any client"}
 verification: {autoDeploy: false}
 site:
   include: true

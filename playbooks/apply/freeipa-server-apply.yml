@@ -96,6 +96,29 @@
     # working DNS, not silently lose internet resolution on its identity
     # server.
     ipa_dns_forwarders_raw: "{{ ipa_dns_forwarders | default(freeipa_dns_forwarders | default(['8.8.8.8'], true), true) }}"
+    # `allow-recursion`/`allow-query-cache` gate every RECURSIVE lookup on
+    # this host's named — i.e. every query the forwarders above are meant to
+    # answer for. Confirmed on a live install (docs/verification/
+    # freeipa-server.md §8 2026-08-18) that a stock `ipa-server-install
+    # --setup-dns` does NOT set either directive at all: `/etc/named.conf`
+    # (FreeIPA-owned, "DO NOT MODIFY — overwritten by upgrades") only
+    # `include`s `/etc/named/ipa-options-ext.conf`, which ships as a
+    # commented-out EXAMPLE (`allow-recursion { trusted_network; };`) for the
+    # operator to fill in — not an active restriction. Some sites (e.g. a
+    # security-hardening pass applied on top of this playbook) uncomment/add
+    # exactly that example with a restrictive ACL (commonly named
+    # `trusted_clients`, scoped to localhost+localnets), which then silently
+    # REFUSEs recursive/forwarded resolution for every client outside that
+    # ACL — while ipa_domain's own authoritative answers keep working for
+    # anyone, masking the problem until someone tries to use this host as a
+    # general resolver from another subnet. Defaults to true (open to any
+    # client) per explicit operator decision — a public-facing instance of
+    # `allow-recursion { any; }` is a known DNS open-resolver/amplification-
+    # DDoS vector, accepted here because every pilot deployment target is a
+    # private fleet network, never exposed to the public internet. Set
+    # freeipa_dns_allow_any_recursion: false to leave this file exactly as
+    # ipa-server-install (or a later hardening pass) left it.
+    ipa_dns_allow_any_recursion: "{{ freeipa_dns_allow_any_recursion | default(true) }}"
     ipa_setup_ntp: "{{ freeipa_setup_ntp | default(true) }}"
     # NTP servers passed to ipa-server-install as --ntp-server=... when
     # ipa_setup_ntp is true. Defaults to Taiwan's public stratum servers;
@@ -576,6 +599,37 @@
                 ipa_dnsconfig.rc != 0 and
                 'no modifications to be performed' not in (ipa_dnsconfig.stderr | default('') ~ ipa_dnsconfig.stdout | default(''))
 
+        # `ipa dnsconfig-mod` above only controls the LDAP-backed global
+        # forwarder list; allow-recursion/allow-query-cache are plain BIND
+        # `options {}` directives, which FreeIPA deliberately keeps OUT of
+        # its own LDAP-managed config. `/etc/named.conf` itself is
+        # FreeIPA-owned ("DO NOT MODIFY! Any modification will be
+        # overwritten by upgrades" — confirmed on a live install) and only
+        # `include`s /etc/named/ipa-options-ext.conf, which FreeIPA
+        # explicitly documents as the "user customization" file that
+        # upgrades never touch — that is the one and only place this may be
+        # set (same "never edit a file another layer owns/regenerates,
+        # write your own higher-precedence file instead" principle as
+        # tasks/cloud-init-etc-hosts-guard.yml). `lineinfile` (not
+        # `replace`) is required here — a stock install ships neither
+        # directive at all (only a commented-out example), so there may be
+        # nothing to substitute; `regexp` replaces whatever ACL is already
+        # set (e.g. a hardening pass's `trusted_clients`) if the line
+        # exists, `insertafter: EOF` appends it fresh if it doesn't. Either
+        # way it converges on the exact same line, so a second run reports
+        # changed=false.
+        - name: "FreeIPA DNS — open allow-recursion/allow-query-cache to any client (forward arbitrary client requests upstream)"
+          ansible.builtin.lineinfile:
+            path: /etc/named/ipa-options-ext.conf
+            regexp: '^\s*{{ item }}\s*\{[^}]*\};\s*$'
+            line: "{{ item }} { any; };"
+            insertafter: EOF
+          loop: [allow-recursion, allow-query-cache]
+          loop_control: {label: "{{ item }}"}
+          when: ipa_setup_dns | bool and ipa_dns_allow_any_recursion | bool
+          notify: reload named for open recursion
+          tags: [freeipa, freeipa-dns-recursion]
+
       rescue:
         - name: "FreeIPA — rescue: dump ipactl status"
           ansible.builtin.command: ipactl status
@@ -658,3 +712,21 @@
           register: audit_init
           changed_when: "'INITIALIZED' in audit_init.stdout"
           no_log: true
+
+  handlers:
+    # Same "validate before reload, never take down an already-running
+    # service" convention as reverse-proxy-apply.yml's nginx handlers.
+    # `rndc reconfig` (not a service restart) re-reads named.conf's options
+    # block live, so the allow-recursion/allow-query-cache change above takes
+    # effect without disrupting any in-flight DNS query.
+    - name: "Validate named.conf before reload for open recursion"
+      ansible.builtin.command: named-checkconf /etc/named.conf
+      changed_when: false
+      when: not ansible_check_mode
+      listen: reload named for open recursion
+
+    - name: "Reload named for open recursion"
+      ansible.builtin.command: rndc reconfig
+      changed_when: true
+      when: not ansible_check_mode
+      listen: reload named for open recursion
