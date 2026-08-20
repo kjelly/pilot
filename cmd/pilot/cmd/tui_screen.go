@@ -56,19 +56,18 @@ func tuiKeyName(msg tea.KeyPressMsg) string {
 }
 
 // screen is the contract a router-embedded wizard screen satisfies in
-// addition to tea.Model. It embeds tui.Screen (Finished/Canceled/
-// AutomationState) — the Pilot-owned UI contract from internal/tui —
-// so router callbacks and the automation driver can introspect a
-// screen via AutomationState() or a typed result interface
-// (tui.SelectScreen etc.) instead of asserting one of this package's
-// concrete types (selectModel, multiSelectModel, textInputModel,
-// confirmModel). automationScreenID stays as a same-package-only
-// method for now; it always agrees with AutomationState().ScreenID.
+// addition to tea.Model — currently just an alias-by-embedding for
+// tui.Screen (Finished/Canceled/AutomationState), the Pilot-owned UI
+// contract from internal/tui. It carries no extra method of its own:
+// r.current must be assignable from either this package's hand-written
+// primitives (selectModel etc., which happen to also keep a private
+// automationScreenID() method for their own internal use building
+// AutomationState().ScreenID) or internal/tui's Huh-backed screens —
+// and an interface requiring an unexported method can only ever be
+// satisfied by types in the package that declared it, so screen must
+// not require anything beyond tui.Screen's already-exported method set.
 type screen interface {
 	tui.Screen
-	// automationScreenID identifies the primitive screen type for the
-	// semantic automation driver without changing the rendered UI.
-	automationScreenID() string
 }
 
 // listChromeLines is how many lines a scrollable list screen

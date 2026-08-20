@@ -766,7 +766,7 @@ func automationScreenID(r *editRouterModel) string {
 	if r == nil || r.current == nil {
 		return "none"
 	}
-	return r.current.automationScreenID()
+	return r.current.AutomationState().ScreenID
 }
 
 // automationState is automationScreenID's AutomationState counterpart:
