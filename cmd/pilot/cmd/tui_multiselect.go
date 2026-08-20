@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // multiSelectItem is one row of a multiSelectModel checklist. ID is a
@@ -71,6 +73,41 @@ func (m multiSelectModel) CheckedLabels() []string {
 	for _, it := range m.items {
 		if it.Checked {
 			out = append(out, it.Label)
+		}
+	}
+	return out
+}
+
+// AutomationState implements tui.Screen. Items reflects the current
+// filtered view; filtering never changes an item's stable ID or
+// Checked state (Core Invariant 5 / MultiSelect Adapter Requirements).
+func (m multiSelectModel) AutomationState() tui.AutomationState {
+	matches := m.matchingIndices()
+	items := make([]tui.AutomationItem, len(matches))
+	for i, idx := range matches {
+		it := m.items[idx]
+		items[i] = tui.AutomationItem{ID: it.ID, Label: it.Label, Description: it.Description, Checked: it.Checked}
+	}
+	focused := -1
+	if m.cursor >= 0 && m.cursor < len(matches) {
+		focused = m.cursor
+	}
+	return tui.AutomationState{
+		ScreenID:     m.automationScreenID(),
+		Kind:         tui.ScreenMultiSelect,
+		Title:        m.title,
+		Items:        items,
+		FocusedIndex: focused,
+		FilterActive: m.searching || m.query != "",
+	}
+}
+
+// CheckedIDs implements tui.MultiSelectScreen.
+func (m multiSelectModel) CheckedIDs() []string {
+	var out []string
+	for _, it := range m.items {
+		if it.Checked {
+			out = append(out, it.ID)
 		}
 	}
 	return out

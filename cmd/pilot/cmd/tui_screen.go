@@ -18,6 +18,8 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // tuiKeyName normalizes the control-code form of Return. Most terminals
@@ -46,17 +48,16 @@ func tuiKeyName(msg tea.KeyMsg) string {
 }
 
 // screen is the contract a router-embedded wizard screen satisfies in
-// addition to tea.Model.
+// addition to tea.Model. It embeds tui.Screen (Finished/Canceled/
+// AutomationState) — the Pilot-owned UI contract from internal/tui —
+// so router callbacks and the automation driver can introspect a
+// screen via AutomationState() or a typed result interface
+// (tui.SelectScreen etc.) instead of asserting one of this package's
+// concrete types (selectModel, multiSelectModel, textInputModel,
+// confirmModel). automationScreenID stays as a same-package-only
+// method for now; it always agrees with AutomationState().ScreenID.
 type screen interface {
-	tea.Model
-	// Finished reports whether the user has confirmed or canceled this
-	// screen. The router should stop forwarding messages to it and
-	// read its result instead once this is true.
-	Finished() bool
-	// Canceled reports whether the screen finished via esc/ctrl+c
-	// rather than a genuine confirm (enter). The router maps this to
-	// the shared errDeployAborted sentinel.
-	Canceled() bool
+	tui.Screen
 	// automationScreenID identifies the primitive screen type for the
 	// semantic automation driver without changing the rendered UI.
 	automationScreenID() string

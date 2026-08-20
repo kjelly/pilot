@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // selectItem is one row of a selectModel list. ID is a stable
@@ -104,6 +106,42 @@ func (m selectModel) Selected() int {
 func (m selectModel) matchingIndices() []int {
 	return listFilterIndices(m.automationItems(), m.query)
 }
+
+// AutomationState implements tui.Screen. Items reflects the current
+// filtered view (Core Invariant 5: filter must not change item stable
+// ID, but it does change which items are observable/navigable).
+func (m selectModel) AutomationState() tui.AutomationState {
+	matches := m.matchingIndices()
+	items := make([]tui.AutomationItem, len(matches))
+	for i, idx := range matches {
+		items[i] = tui.AutomationItem{ID: m.items[idx].ID, Label: m.items[idx].Label}
+	}
+	focused := -1
+	if m.cursor >= 0 && m.cursor < len(matches) {
+		focused = m.cursor
+	}
+	return tui.AutomationState{
+		ScreenID:     m.automationScreenID(),
+		Kind:         tui.ScreenSelect,
+		Title:        m.title,
+		Items:        items,
+		FocusedIndex: focused,
+		FilterActive: m.searching || m.query != "",
+	}
+}
+
+// SelectedID implements tui.SelectScreen.
+func (m selectModel) SelectedID() string {
+	idx := m.Selected()
+	if idx < 0 || idx >= len(m.items) {
+		return ""
+	}
+	return m.items[idx].ID
+}
+
+// SelectedIndex implements tui.SelectScreen — a migration compatibility
+// helper equivalent to Selected().
+func (m selectModel) SelectedIndex() int { return m.Selected() }
 
 func (m *selectModel) resetFilterCursor() {
 	m.cursor = 0

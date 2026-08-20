@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // confirmModel is an embedded yes/no screen — the router-based
@@ -46,6 +48,16 @@ func (m confirmModel) automationScreenID() string {
 
 // Value is the yes/no answer — valid once Finished().
 func (m confirmModel) Value() bool { return m.value }
+
+// AutomationState implements tui.Screen.
+func (m confirmModel) AutomationState() tui.AutomationState {
+	return tui.AutomationState{
+		ScreenID:     m.automationScreenID(),
+		Kind:         tui.ScreenConfirm,
+		Title:        m.question,
+		FocusedIndex: -1,
+	}
+}
 
 func (m confirmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)

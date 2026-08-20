@@ -6,6 +6,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // textInputModel is an embedded single-line text entry screen — the
@@ -86,6 +88,22 @@ func (m textInputModel) automationLabel() string { return m.label }
 // and trailing whitespace is discarded when the value is read so every edit
 // menu text field stores a clean value consistently.
 func (m textInputModel) Value() string { return strings.TrimSpace(m.input.Value()) }
+
+// AutomationState implements tui.Screen. Secret input never appears
+// here (Core Invariant 6): Secret/HasValue are booleans only, the
+// typed value itself is reachable solely via Value() on the live
+// model, exactly like any other InputScreen.
+func (m textInputModel) AutomationState() tui.AutomationState {
+	return tui.AutomationState{
+		ScreenID:        m.automationScreenID(),
+		Kind:            tui.ScreenInput,
+		Title:           m.label,
+		Secret:          m.input.EchoMode == textinput.EchoPassword,
+		HasValue:        m.Value() != "",
+		ValidationError: m.err,
+		FocusedIndex:    -1,
+	}
+}
 
 func (m textInputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
