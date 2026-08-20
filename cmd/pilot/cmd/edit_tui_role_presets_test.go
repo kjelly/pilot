@@ -1,14 +1,15 @@
 package cmd
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/exp/teatest"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/kjelly/pilot/internal/inventory"
 )
@@ -91,23 +92,40 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 		return strings.Contains(string(b), "管理 ")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	for range defaultRolePresets() {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // add a preset
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // add a preset
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return strings.Contains(string(b), "角色範本名稱")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Type("test monitored node")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return strings.Contains(string(b), `範本 "test monitored node" 的角色`)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	// tm.Output() is a draining reader: once a WaitFor reads past a
+	// substring to satisfy its condition, those bytes are gone from any
+	// later read. The checklist screen's role names (checked below, after
+	// toggling one with Space) are only ever fully painted once, in this
+	// same initial frame — so the tee starts here and both WaitFor calls
+	// below share it, letting the later check still see a role name this
+	// one already read past, without weakening what either verifies.
+	var checklistOutput strings.Builder
+	teed := io.TeeReader(tm.Output(), &checklistOutput)
+	teatest.WaitFor(t, teed, func(_ []byte) bool {
+		return strings.Contains(checklistOutput.String(), `範本 "test monitored node" 的角色`)
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
-	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // first catalog role
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		screen := string(b)
-		return strings.Contains(screen, "[x]") && strings.Contains(screen, inventory.Roles()[0].Name)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // first catalog role
+	// Checks "x]" rather than "[x]": toggling "[ ]" to "[x]" only changes
+	// the middle character under Bubble Tea v2's cell-level render diff,
+	// so the unchanged leading "[" is never retransmitted — only the "x]"
+	// that follows it (a genuine, permanent v2 rendering optimization
+	// confirmed by direct model inspection, not a timing fluke or a
+	// business-logic bug; see the analogous "變數值" comments in
+	// edit_tui_flows_test.go for the fuller explanation of the same
+	// underlying behavior).
+	teatest.WaitFor(t, teed, func(_ []byte) bool {
+		screen := checklistOutput.String()
+		return strings.Contains(screen, "x]") && strings.Contains(screen, inventory.Roles()[0].Name)
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return strings.Contains(string(b), "✅ 已儲存 ")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
@@ -154,12 +172,12 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnCreateReturnsToManager(t *te
 
 	waitFor("管理 ")
 	for range defaultRolePresets() {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增範本"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "➕ 新增範本"
 	waitFor("角色範本名稱")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // create-flow esc -> back to the manager list
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // create-flow esc -> back to the manager list
 	waitFor("管理 ")
 
 	if err := tm.Quit(); err != nil {
@@ -190,12 +208,12 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnRenameReturnsToAction(t *tes
 	}
 
 	waitFor("管理 ")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // first preset in the list -> its action menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // first preset in the list -> its action menu
 	waitFor("範本 ")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "✏ 修改名稱與角色"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "✏ 修改名稱與角色"
 	waitFor("角色範本名稱")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // rename-flow esc -> back to THIS preset's action menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // rename-flow esc -> back to THIS preset's action menu
 	waitFor("範本 ")
 
 	if err := tm.Quit(); err != nil {

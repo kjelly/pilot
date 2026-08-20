@@ -17,7 +17,7 @@ type AuditRecorder interface {
 	// RecordActionStart is called once per scenario step, before it's
 	// dispatched to the action registry's Run function.
 	RecordActionStart(step editAction) error
-	// RecordKeys is called once per tea.KeyMsg the driver sends while
+	// RecordKeys is called once per tea.KeyPressMsg the driver sends while
 	// executing the current step — keys may be placeholders (e.g.
 	// "«redacted»") rather than literal text, matching whatever the
 	// driver itself would have recorded to a trace.

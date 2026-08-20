@@ -155,6 +155,16 @@ func startEditPTY(t *testing.T, dir string, rows, cols uint16) *ptyProc {
 // a real PTY, so keystrokes are paced individually.
 const keyPressSettle = 30 * time.Millisecond
 
+// escAfterTransitionSettle is an extra pause before sending an Esc that's
+// meant to step back/quit immediately after a screen transition's content
+// has already been confirmed on screen (via waitForPTYOutput). Empirically
+// confirmed necessary under Bubble Tea v2 real-PTY input decoding — bare
+// Esc bytes sent the instant new content appears can otherwise go
+// unrecognized (reproduced deterministically without it; a real human
+// reads before typing and is naturally slower than this). keyPressSettle
+// alone (tuned for v1) is not enough for this specific case.
+const escAfterTransitionSettle = 200 * time.Millisecond
+
 func (p *ptyProc) press(t *testing.T, s string) {
 	t.Helper()
 	if _, err := io.WriteString(p.f, s); err != nil {
@@ -310,13 +320,22 @@ func TestPilotEditPTY_FuzzySearchSelectsTopMenuResult(t *testing.T) {
 	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
 	proc.press(t, "/")
 	proc.typeText(t, "vault")
-	waitForPTYOutput(t, proc.out, 5*time.Second, "搜尋：vault")
+	// Bubble Tea v2's renderer diffs incrementally at the cell level, so a
+	// query typed one keystroke at a time (typeText paces each rune with
+	// its own settle) never appears as one contiguous "搜尋：vault" run in
+	// the raw PTY transcript — only whichever suffix differs from the
+	// previous frame gets retransmitted each time. typeText's per-rune
+	// settle already gives the last keystroke's render time to land, and
+	// the waitForPTYOutput("選一個") below re-confirms the search actually
+	// narrowed to the .vault/ item once Enter is pressed — a stronger,
+	// outcome-based check than matching the intermediate search box text.
 	proc.press(t, "\r") // finish editing the search
 	proc.press(t, "\r") // select the filtered .vault/ menu item
 	waitForPTYOutput(t, proc.out, 5*time.Second, "選一個")
 
 	proc.press(t, "\x1b") // vault picker -> top menu
 	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	time.Sleep(escAfterTransitionSettle)
 	proc.press(t, "\x1b") // top menu -> quit
 	if code := proc.waitExit(t, 5*time.Second); code != 0 {
 		t.Fatalf("exit code = %d, want 0; output:\n%s", code, proc.out.String())
@@ -342,6 +361,7 @@ func TestPilotEditPTY_MinimalWorkspaceRequiresHostsThenReturnsCleanly(t *testing
 
 	proc.press(t, "\x1b") // quick wizard -> top menu
 	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	time.Sleep(escAfterTransitionSettle)
 	proc.press(t, "\x1b") // top menu -> exit
 
 	if code := proc.waitExit(t, 5*time.Second); code != 0 {

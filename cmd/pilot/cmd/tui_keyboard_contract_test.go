@@ -3,7 +3,7 @@ package cmd
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // TestAllEmbeddedScreenFamiliesKeyboardContract is the keyboard regression
@@ -47,21 +47,21 @@ func TestAllEmbeddedScreenFamiliesKeyboardContract(t *testing.T) {
 
 	completeKeys := []struct {
 		name string
-		msg  tea.KeyMsg
+		msg  tea.KeyPressMsg
 	}{
-		{name: "named enter", msg: tea.KeyMsg{Type: tea.KeyEnter}},
-		{name: "LF ctrl+j", msg: tea.KeyMsg{Type: tea.KeyCtrlJ}},
-		{name: "raw CR rune", msg: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\r'}}},
-		{name: "raw LF rune", msg: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\n'}}},
+		{name: "named enter", msg: tea.KeyPressMsg{Code: tea.KeyEnter}},
+		{name: "LF ctrl+j", msg: tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl}},
+		{name: "raw CR rune", msg: tea.KeyPressMsg{Code: '\r', Text: "\r"}},
+		{name: "raw LF rune", msg: tea.KeyPressMsg{Code: '\n', Text: "\n"}},
 	}
 	cancelKeys := []struct {
 		name string
-		msg  tea.KeyMsg
+		msg  tea.KeyPressMsg
 	}{
-		{name: "named escape", msg: tea.KeyMsg{Type: tea.KeyEsc}},
-		{name: "ctrl bracket", msg: tea.KeyMsg{Type: tea.KeyCtrlOpenBracket}},
-		{name: "raw escape rune", msg: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{27}}},
-		{name: "ctrl+c", msg: tea.KeyMsg{Type: tea.KeyCtrlC}},
+		{name: "named escape", msg: tea.KeyPressMsg{Code: tea.KeyEsc}},
+		{name: "ctrl bracket", msg: tea.KeyPressMsg{Code: '[', Mod: tea.ModCtrl}},
+		{name: "raw escape rune", msg: tea.KeyPressMsg{Code: 27, Text: "\x1b"}},
+		{name: "ctrl+c", msg: tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}},
 	}
 
 	for _, family := range screens {

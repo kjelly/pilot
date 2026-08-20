@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/exp/teatest"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/exp/teatest/v2"
 )
 
 func TestConfirmModel_YKeyAnswersYesRegardlessOfDefault(t *testing.T) {
 	m := newConfirmModel("q", false)
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	next, _ := m.Update(tea.KeyPressMsg{Text: "y", Code: 'y'})
 	m = next.(confirmModel)
 	if !m.Finished() || !m.Value() {
 		t.Fatalf("expected finished+true after 'y', got finished=%v value=%v", m.Finished(), m.Value())
@@ -20,7 +20,7 @@ func TestConfirmModel_YKeyAnswersYesRegardlessOfDefault(t *testing.T) {
 
 func TestConfirmModel_NKeyAnswersNoRegardlessOfDefault(t *testing.T) {
 	m := newConfirmModel("q", true)
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	next, _ := m.Update(tea.KeyPressMsg{Text: "n", Code: 'n'})
 	m = next.(confirmModel)
 	if !m.Finished() || m.Value() {
 		t.Fatalf("expected finished+false after 'n', got finished=%v value=%v", m.Finished(), m.Value())
@@ -29,14 +29,14 @@ func TestConfirmModel_NKeyAnswersNoRegardlessOfDefault(t *testing.T) {
 
 func TestConfirmModel_EnterUsesDefault(t *testing.T) {
 	m := newConfirmModel("q", true)
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(confirmModel)
 	if !m.Finished() || !m.Value() {
 		t.Fatal("expected enter to answer the default (true)")
 	}
 
 	m2 := newConfirmModel("q", false)
-	next2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next2, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m2 = next2.(confirmModel)
 	if !m2.Finished() || m2.Value() {
 		t.Fatal("expected enter to answer the default (false)")
@@ -45,7 +45,7 @@ func TestConfirmModel_EnterUsesDefault(t *testing.T) {
 
 func TestConfirmModel_LFEnterUsesDefault(t *testing.T) {
 	m := newConfirmModel("q", true)
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 	m = next.(confirmModel)
 	if !m.Finished() || !m.Value() {
 		t.Fatal("expected LF/ctrl+j Return to answer the default")
@@ -59,7 +59,7 @@ func TestConfirmModel_LFEnterUsesDefault(t *testing.T) {
 // errDeployAborted.
 func TestConfirmModel_EscResolvesToNoNotAbort(t *testing.T) {
 	m := newConfirmModel("q", true)
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = next.(confirmModel)
 	if !m.Finished() || m.Value() {
 		t.Fatal("expected esc to resolve to a finished 'no' answer")
@@ -71,7 +71,7 @@ func TestConfirmModel_EscResolvesToNoNotAbort(t *testing.T) {
 
 func TestConfirmModel_UnrecognizedKeyDoesNotFinish(t *testing.T) {
 	m := newConfirmModel("q", true)
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	next, _ := m.Update(tea.KeyPressMsg{Text: "x", Code: 'x'})
 	m = next.(confirmModel)
 	if m.Finished() {
 		t.Fatal("unrecognized key should not finish the screen")
@@ -80,12 +80,12 @@ func TestConfirmModel_UnrecognizedKeyDoesNotFinish(t *testing.T) {
 
 func TestConfirmModel_ViewShowsDefaultHint(t *testing.T) {
 	yes := newConfirmModel("要繼續嗎？", true)
-	if !strings.Contains(yes.View(), "[Y/n]") {
-		t.Fatalf("expected [Y/n] hint for defaultYes, got:\n%s", yes.View())
+	if !strings.Contains(viewContent(yes.View()), "[Y/n]") {
+		t.Fatalf("expected [Y/n] hint for defaultYes, got:\n%s", viewContent(yes.View()))
 	}
 	no := newConfirmModel("要繼續嗎？", false)
-	if !strings.Contains(no.View(), "[y/N]") {
-		t.Fatalf("expected [y/N] hint for !defaultYes, got:\n%s", no.View())
+	if !strings.Contains(viewContent(no.View()), "[y/N]") {
+		t.Fatalf("expected [y/N] hint for !defaultYes, got:\n%s", viewContent(no.View()))
 	}
 }
 

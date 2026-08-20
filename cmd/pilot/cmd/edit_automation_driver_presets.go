@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/kjelly/pilot/internal/tui"
 )
 
@@ -210,7 +208,7 @@ func (d *automationDriver) checkRoleChecklistItems(r *editRouterModel, roles []s
 		if err := d.moveCursor(r, idx); err != nil {
 			return err
 		}
-		if err := d.send(r, tea.KeyMsg{Type: tea.KeySpace}); err != nil {
+		if err := d.send(r, keySpace()); err != nil {
 			return err
 		}
 	}

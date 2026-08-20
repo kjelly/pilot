@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
@@ -106,7 +106,7 @@ func (m textInputModel) AutomationState() tui.AutomationState {
 }
 
 func (m textInputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		switch tuiKeyName(keyMsg) {
 		case "enter":
 			v := strings.TrimSpace(m.input.Value())
@@ -129,7 +129,9 @@ func (m textInputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m textInputModel) View() string {
+func (m textInputModel) View() tea.View { return tea.NewView(m.render()) }
+
+func (m textInputModel) render() string {
 	s := fmt.Sprintf("%s\n%s\n", m.label, m.input.View())
 	if m.err != "" {
 		s += "⚠ " + m.err + "\n"

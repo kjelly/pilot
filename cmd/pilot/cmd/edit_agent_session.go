@@ -57,7 +57,7 @@ func newEditAgentSession(dir string, opts editAgentSessionOptions) *editAgentSes
 // the starting screen (the presentation preamble
 // runAutomatedEditWorkflow already printed before this file existed) or
 // after a failed Run to inspect where the router stopped.
-func (s *editAgentSession) View() string { return s.router.View() }
+func (s *editAgentSession) View() string { return viewContent(s.router.View()) }
 
 // Run drives scenario's steps against the session's router, exactly as
 // calling automationDriver.run directly would — this indirection exists

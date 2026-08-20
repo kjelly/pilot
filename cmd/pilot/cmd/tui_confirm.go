@@ -3,7 +3,7 @@ package cmd
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
@@ -60,7 +60,7 @@ func (m confirmModel) AutomationState() tui.AutomationState {
 }
 
 func (m confirmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return m, nil
 	}
@@ -77,10 +77,10 @@ func (m confirmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m confirmModel) View() string {
+func (m confirmModel) View() tea.View {
 	suffix := " [y/N]"
 	if m.defaultYes {
 		suffix = " [Y/n]"
 	}
-	return fmt.Sprintf("%s%s\n", m.question, suffix)
+	return tea.NewView(fmt.Sprintf("%s%s\n", m.question, suffix))
 }

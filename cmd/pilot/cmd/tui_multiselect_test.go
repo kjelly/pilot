@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/exp/teatest"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/exp/teatest/v2"
 )
 
 func newTestMultiSelect() multiSelectModel {
@@ -31,12 +31,12 @@ func newManyItemMultiSelect(n int) multiSelectModel {
 
 func TestMultiSelect_SpaceTogglesItemUnderCursor(t *testing.T) {
 	m := newTestMultiSelect()
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	m = next.(multiSelectModel)
 	if !m.items[0].Checked {
 		t.Fatalf("expected items[0] to be checked after space, got %+v", m.items)
 	}
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	m = next.(multiSelectModel)
 	if m.items[0].Checked {
 		t.Fatalf("expected items[0] to be unchecked after a second space, got %+v", m.items)
@@ -45,7 +45,7 @@ func TestMultiSelect_SpaceTogglesItemUnderCursor(t *testing.T) {
 
 func TestMultiSelect_DownMovesCursorWithoutResettingOthers(t *testing.T) {
 	m := newTestMultiSelect()
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = next.(multiSelectModel)
 	if m.cursor != 1 {
 		t.Fatalf("cursor = %d, want 1", m.cursor)
@@ -57,12 +57,12 @@ func TestMultiSelect_DownMovesCursorWithoutResettingOthers(t *testing.T) {
 
 func TestMultiSelect_CursorWrapsAtBounds(t *testing.T) {
 	m := newTestMultiSelect()
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = next.(multiSelectModel)
 	if m.cursor != len(m.items)-1 {
 		t.Fatalf("cursor = %d, want %d after wrapping up from first item", m.cursor, len(m.items)-1)
 	}
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = next.(multiSelectModel)
 	if m.cursor != 0 {
 		t.Fatalf("cursor = %d, want 0 after wrapping down from last item", m.cursor)
@@ -75,12 +75,12 @@ func TestMultiSelect_FuzzySearchTogglesMatchedOriginalItem(t *testing.T) {
 		{Label: "ntp", Description: "time synchronization"},
 		{Label: "restic", Description: "encrypted backups"},
 	})
-	for _, msg := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("/")},
-		{Type: tea.KeyRunes, Runes: []rune("syn")},
-		{Type: tea.KeyEnter}, // finish editing the search, keep its results
-		{Type: tea.KeySpace}, // toggle the sole matched item
-		{Type: tea.KeyEnter}, // finish the checklist
+	for _, msg := range []tea.KeyPressMsg{
+		{Text: "/", Code: '/'},
+		{Text: "syn", Code: 's'},
+		{Code: tea.KeyEnter}, // finish editing the search, keep its results
+		{Code: tea.KeySpace}, // toggle the sole matched item
+		{Code: tea.KeyEnter}, // finish the checklist
 	} {
 		next, _ := m.Update(msg)
 		m = next.(multiSelectModel)
@@ -92,11 +92,11 @@ func TestMultiSelect_FuzzySearchTogglesMatchedOriginalItem(t *testing.T) {
 
 func TestMultiSelect_SearchNoMatchesDoesNotFinish(t *testing.T) {
 	m := newMultiSelectModel("t", []multiSelectItem{{Label: "dns"}})
-	for _, msg := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("/")},
-		{Type: tea.KeyRunes, Runes: []rune("zzz")},
-		{Type: tea.KeyEnter}, // finish editing the search, keep the empty results
-		{Type: tea.KeyEnter}, // must not submit a checklist with no result
+	for _, msg := range []tea.KeyPressMsg{
+		{Text: "/", Code: '/'},
+		{Text: "zzz", Code: 'z'},
+		{Code: tea.KeyEnter}, // finish editing the search, keep the empty results
+		{Code: tea.KeyEnter}, // must not submit a checklist with no result
 	} {
 		next, _ := m.Update(msg)
 		m = next.(multiSelectModel)
@@ -104,14 +104,14 @@ func TestMultiSelect_SearchNoMatchesDoesNotFinish(t *testing.T) {
 	if m.Finished() {
 		t.Fatal("enter with no fuzzy-search results must not finish the checklist")
 	}
-	if view := m.View(); !strings.Contains(view, "沒有符合搜尋條件") {
+	if view := viewContent(m.View()); !strings.Contains(view, "沒有符合搜尋條件") {
 		t.Fatalf("missing no-results feedback:\n%s", view)
 	}
 }
 
 func TestMultiSelect_EnterFinishesWithoutCanceling(t *testing.T) {
 	m := newTestMultiSelect()
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(multiSelectModel)
 	if !m.Finished() || m.Canceled() {
 		t.Fatal("expected finished+not-canceled after enter")
@@ -126,7 +126,7 @@ func TestMultiSelect_EnterFinishesWithoutCanceling(t *testing.T) {
 
 func TestMultiSelect_LFEnterFinishesWithoutCanceling(t *testing.T) {
 	m := newTestMultiSelect()
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 	m = next.(multiSelectModel)
 	if !m.Finished() || m.Canceled() {
 		t.Fatal("expected LF/ctrl+j Return to finish without canceling")
@@ -135,7 +135,7 @@ func TestMultiSelect_LFEnterFinishesWithoutCanceling(t *testing.T) {
 
 func TestMultiSelect_EscCancels(t *testing.T) {
 	m := newTestMultiSelect()
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = next.(multiSelectModel)
 	if !m.Finished() || !m.Canceled() {
 		t.Fatal("expected finished+canceled after esc")
@@ -144,7 +144,7 @@ func TestMultiSelect_EscCancels(t *testing.T) {
 
 func TestMultiSelect_RawEscapeCancels(t *testing.T) {
 	m := newTestMultiSelect()
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{27}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 27, Text: "\x1b"})
 	m = next.(multiSelectModel)
 	if !m.Finished() || !m.Canceled() {
 		t.Fatal("expected raw ESC to cancel")
@@ -154,9 +154,9 @@ func TestMultiSelect_RawEscapeCancels(t *testing.T) {
 func TestMultiSelect_EmptyItemListDoesNotPanic(t *testing.T) {
 	m := multiSelectModel{title: "empty"}
 	for _, msg := range []tea.Msg{
-		tea.KeyMsg{Type: tea.KeyDown},
-		tea.KeyMsg{Type: tea.KeyUp},
-		tea.KeyMsg{Type: tea.KeySpace},
+		tea.KeyPressMsg{Code: tea.KeyDown},
+		tea.KeyPressMsg{Code: tea.KeyUp},
+		tea.KeyPressMsg{Code: tea.KeySpace},
 		tea.WindowSizeMsg{Height: 24, Width: 80},
 	} {
 		next, _ := m.Update(msg)
@@ -165,14 +165,14 @@ func TestMultiSelect_EmptyItemListDoesNotPanic(t *testing.T) {
 	if m.cursor != 0 {
 		t.Fatalf("cursor = %d, want 0 for an empty list", m.cursor)
 	}
-	if !strings.Contains(m.View(), "empty") {
-		t.Fatalf("expected title in view even with no items:\n%s", m.View())
+	if !strings.Contains(viewContent(m.View()), "empty") {
+		t.Fatalf("expected title in view even with no items:\n%s", viewContent(m.View()))
 	}
 }
 
 func TestMultiSelect_EmptyItemListEnterFinishes(t *testing.T) {
 	m := multiSelectModel{title: "optional empty checklist"}
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(multiSelectModel)
 	if !m.Finished() || m.Canceled() {
 		t.Fatalf("empty checklist should accept Enter as an empty selection: finished=%t canceled=%t", m.Finished(), m.Canceled())
@@ -184,7 +184,7 @@ func TestMultiSelect_EmptyItemListEnterFinishes(t *testing.T) {
 
 func TestMultiSelect_ViewShowsCheckboxMarks(t *testing.T) {
 	m := newTestMultiSelect()
-	view := m.View()
+	view := viewContent(m.View())
 	if !strings.Contains(view, "[x]") || !strings.Contains(view, "[ ]") {
 		t.Fatalf("expected both checked and unchecked marks in view:\n%s", view)
 	}
@@ -196,7 +196,7 @@ func TestMultiSelect_Teatest_HappyPath(t *testing.T) {
 
 	tm.Type("jj") // dns -> ntp -> docker
 	tm.Type(" ")  // toggle docker on
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second))
 	got := final.(screenTestHarness).s.(multiSelectModel)
@@ -220,7 +220,7 @@ func TestMultiSelect_Teatest_ResizeMidSessionUpdatesVisibleWindow(t *testing.T) 
 		return strings.Contains(string(b), "還有 16 項在下面")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
 	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second))
 	if !final.(screenTestHarness).s.(multiSelectModel).Canceled() {
 		t.Fatal("expected a clean cancel after resize")

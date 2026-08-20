@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/inventory"
 )
@@ -88,13 +88,13 @@ func TestRosterChecklistEscapeRoutesEveryChecklist(t *testing.T) {
 			if _, ok := router.current.(multiSelectModel); !ok {
 				t.Fatalf("initial screen = %T, want multiSelectModel", router.current)
 			}
-			next, _ := router.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{27}})
+			next, _ := router.Update(tea.KeyPressMsg{Code: 27, Text: "\x1b"})
 			router = next.(editRouterModel)
 			if _, stuck := router.current.(multiSelectModel); stuck {
-				t.Fatalf("raw Escape left the finished checklist on screen:\n%s", router.View())
+				t.Fatalf("raw Escape left the finished checklist on screen:\n%s", viewContent(router.View()))
 			}
-			if !strings.Contains(router.View(), tt.wantTitle) {
-				t.Fatalf("cancel destination missing %q:\n%s", tt.wantTitle, router.View())
+			if !strings.Contains(viewContent(router.View()), tt.wantTitle) {
+				t.Fatalf("cancel destination missing %q:\n%s", tt.wantTitle, viewContent(router.View()))
 			}
 		})
 	}
@@ -105,14 +105,14 @@ func TestRosterServicesChecklistRawLFCompletesAndPersists(t *testing.T) {
 	var router editRouterModel
 	pushRosterHBACServices(&router, dir, path, "infra-ssh")
 
-	next, _ := router.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ := router.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	router = next.(editRouterModel)
-	next, _ = router.Update(tea.KeyMsg{Type: tea.KeySpace})
+	next, _ = router.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	router = next.(editRouterModel)
-	next, _ = router.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\n'}})
+	next, _ = router.Update(tea.KeyPressMsg{Code: '\n', Text: "\n"})
 	router = next.(editRouterModel)
-	if !strings.Contains(router.View(), "✅ 已更新") {
-		t.Fatalf("raw LF did not return to the updated detail screen:\n%s", router.View())
+	if !strings.Contains(viewContent(router.View()), "✅ 已更新") {
+		t.Fatalf("raw LF did not return to the updated detail screen:\n%s", viewContent(router.View()))
 	}
 
 	rule, found, err := inventory.RosterHBACRule(path, "infra-ssh")

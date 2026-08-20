@@ -13,15 +13,15 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/exp/teatest"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/exp/teatest/v2"
 )
 
 func TestStandaloneScreen_QuitsOnceFinished(t *testing.T) {
 	m := standaloneScreen{s: newSelectModel("t", []string{"a", "b"})}
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
 }
@@ -30,8 +30,8 @@ func TestStandaloneScreen_UnfinishedScreenDoesNotQuit(t *testing.T) {
 	m := standaloneScreen{s: newSelectModel("t", []string{"a", "b"})}
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // moves cursor, does not finish
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // moves cursor, does not finish
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
 	got := tm.FinalModel(t).(standaloneScreen).s.(selectModel)

@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
@@ -71,20 +71,20 @@ func (p *promptAutomation) selectPrompt(prompt string, items []string) (int, err
 		return 0, err
 	}
 	m := standaloneScreen{s: newSelectModel(prompt, items)}
-	p.render(prompt, m.View())
+	p.render(prompt, viewContent(m.View()))
 	keys := make([]string, 0, index+1)
 	for i := 0; i < index; i++ {
-		if err := applyStandaloneKey(&m, tea.KeyMsg{Type: tea.KeyDown}); err != nil {
+		if err := applyStandaloneKey(&m, keyDown()); err != nil {
 			return 0, err
 		}
 		keys = append(keys, "down")
 	}
-	if err := applyStandaloneKey(&m, tea.KeyMsg{Type: tea.KeyEnter}); err != nil {
+	if err := applyStandaloneKey(&m, keyEnter()); err != nil {
 		return 0, err
 	}
 	keys = append(keys, "enter")
-	p.render(prompt, m.View())
-	if p.tracePrompt("select", prompt, m.View(), keys, "ok"); p.err != nil {
+	p.render(prompt, viewContent(m.View()))
+	if p.tracePrompt("select", prompt, viewContent(m.View()), keys, "ok"); p.err != nil {
 		return 0, p.err
 	}
 	return m.s.(tui.SelectScreen).Selected(), nil
@@ -99,19 +99,19 @@ func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) 
 		return "", fmt.Errorf("no automation answer for text prompt")
 	}
 	m := standaloneScreen{s: newTextInputModel(prompt, def, validate)}
-	p.render(prompt, m.View())
+	p.render(prompt, viewContent(m.View()))
 	keys := make([]string, 0, 3)
 	if answer.Text != "" {
-		if err := applyStandaloneKey(&m, tea.KeyMsg{Type: tea.KeyCtrlU}); err != nil {
+		if err := applyStandaloneKey(&m, keyCtrlU()); err != nil {
 			return "", err
 		}
 		keys = append(keys, "ctrl+u")
-		if err := applyStandaloneKey(&m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(answer.Text)}); err != nil {
+		if err := applyStandaloneKey(&m, keyTextMsg(answer.Text)); err != nil {
 			return "", err
 		}
 		keys = append(keys, "text")
 	}
-	if err := applyStandaloneKey(&m, tea.KeyMsg{Type: tea.KeyEnter}); err != nil {
+	if err := applyStandaloneKey(&m, keyEnter()); err != nil {
 		return "", err
 	}
 	keys = append(keys, "enter")
@@ -119,8 +119,8 @@ func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) 
 	if !m.s.(tui.InputScreen).Finished() {
 		return "", fmt.Errorf("automation text answer failed validation")
 	}
-	p.tracePrompt("text", prompt, m.View(), keys, "ok")
-	p.render(prompt, m.View())
+	p.tracePrompt("text", prompt, viewContent(m.View()), keys, "ok")
+	p.render(prompt, viewContent(m.View()))
 	return value, nil
 }
 
@@ -137,17 +137,17 @@ func (p *promptAutomation) confirmPrompt(prompt string, defaultYes bool) bool {
 		return false
 	}
 	m := standaloneScreen{s: newConfirmModel(prompt, defaultYes)}
-	p.render(prompt, m.View())
-	key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")}
+	p.render(prompt, viewContent(m.View()))
+	key := keyRuneMsg('n')
 	if *answer.Confirm {
-		key = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
+		key = keyRuneMsg('y')
 	}
 	if err := applyStandaloneKey(&m, key); err != nil {
 		p.err = err
 		return false
 	}
-	p.tracePrompt("confirm", prompt, m.View(), []string{key.String()}, "ok")
-	p.render(prompt, m.View())
+	p.tracePrompt("confirm", prompt, viewContent(m.View()), []string{key.String()}, "ok")
+	p.render(prompt, viewContent(m.View()))
 	return m.s.(tui.ConfirmScreen).Value()
 }
 
@@ -167,7 +167,7 @@ func (p *promptAutomation) tracePrompt(kind, prompt, _ string, keys []string, re
 	})
 }
 
-func applyStandaloneKey(m *standaloneScreen, msg tea.KeyMsg) error {
+func applyStandaloneKey(m *standaloneScreen, msg tea.KeyPressMsg) error {
 	next, _ := m.Update(msg)
 	updated, ok := next.(standaloneScreen)
 	if !ok {

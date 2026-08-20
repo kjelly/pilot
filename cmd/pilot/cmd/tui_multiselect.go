@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
@@ -131,7 +131,7 @@ func (m multiSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		m.windowStart = listClampWindow(m.cursor, m.windowStart, len(m.matchingIndices()), m.height)
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if query, searching, handled := updateListSearch(m.query, m.searching, msg); handled {
 			if query != m.query {
 				m.query = query
@@ -148,7 +148,7 @@ func (m multiSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down", "j":
 			m.cursor = listMoveCursor(m.cursor, len(matches), 1)
 			m.windowStart = listClampWindow(m.cursor, m.windowStart, len(matches), m.height)
-		case " ":
+		case "space":
 			if len(matches) > 0 {
 				itemIndex := matches[m.cursor]
 				m.items[itemIndex].Checked = !m.items[itemIndex].Checked
@@ -168,7 +168,9 @@ func (m multiSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m multiSelectModel) View() string {
+func (m multiSelectModel) View() tea.View { return tea.NewView(m.render()) }
+
+func (m multiSelectModel) render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", m.title)
 	b.WriteString("/ 搜尋　↑/↓ 循環移動　space 勾選/取消　enter 完成　esc 取消\n")

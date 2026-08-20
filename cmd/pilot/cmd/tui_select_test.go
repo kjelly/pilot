@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -8,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/exp/teatest"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/exp/teatest/v2"
 )
 
 func newManySelectItems(n int) []selectItem {
@@ -33,7 +34,7 @@ func selectItems(labels ...string) []selectItem {
 
 func TestSelectModel_DownMovesCursor(t *testing.T) {
 	m := selectModel{title: "t", items: selectItems("a", "b", "c")}
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = next.(selectModel)
 	if m.cursor != 1 {
 		t.Fatalf("cursor = %d, want 1", m.cursor)
@@ -42,12 +43,12 @@ func TestSelectModel_DownMovesCursor(t *testing.T) {
 
 func TestSelectModel_CursorWrapsAtBounds(t *testing.T) {
 	m := selectModel{title: "t", items: selectItems("a", "b", "c")}
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	m = next.(selectModel)
 	if m.cursor != 2 {
 		t.Fatalf("cursor = %d, want 2 after wrapping up from first item", m.cursor)
 	}
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = next.(selectModel)
 	if m.cursor != 0 {
 		t.Fatalf("cursor = %d, want 0 after wrapping down from last item", m.cursor)
@@ -56,11 +57,11 @@ func TestSelectModel_CursorWrapsAtBounds(t *testing.T) {
 
 func TestSelectModel_FuzzySearchPreservesOriginalSelection(t *testing.T) {
 	m := newSelectModel("t", []string{"alpha", "FreeIPA Server", "freeipa-client", "beta"})
-	for _, msg := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("/")},
-		{Type: tea.KeyRunes, Runes: []rune("fas")},
-		{Type: tea.KeyEnter}, // finish editing the search, keep its results
-		{Type: tea.KeyEnter}, // select the sole match
+	for _, msg := range []tea.KeyPressMsg{
+		{Text: "/", Code: '/'},
+		{Text: "fas", Code: 'f'},
+		{Code: tea.KeyEnter}, // finish editing the search, keep its results
+		{Code: tea.KeyEnter}, // select the sole match
 	} {
 		next, _ := m.Update(msg)
 		m = next.(selectModel)
@@ -71,16 +72,16 @@ func TestSelectModel_FuzzySearchPreservesOriginalSelection(t *testing.T) {
 	if m.Selected() != 1 {
 		t.Fatalf("Selected() = %d, want original index 1", m.Selected())
 	}
-	if view := m.View(); !strings.Contains(view, "搜尋：fas") || strings.Contains(view, "freeipa-client") {
+	if view := viewContent(m.View()); !strings.Contains(view, "搜尋：fas") || strings.Contains(view, "freeipa-client") {
 		t.Fatalf("view did not retain only the fuzzy-matched item:\n%s", view)
 	}
 }
 
 func TestSelectModel_SearchNoMatchesCanClearThenCancel(t *testing.T) {
 	m := newSelectModel("t", []string{"alpha"})
-	for _, msg := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("/")},
-		{Type: tea.KeyRunes, Runes: []rune("zzz")},
+	for _, msg := range []tea.KeyPressMsg{
+		{Text: "/", Code: '/'},
+		{Text: "zzz", Code: 'z'},
 	} {
 		next, _ := m.Update(msg)
 		m = next.(selectModel)
@@ -88,15 +89,15 @@ func TestSelectModel_SearchNoMatchesCanClearThenCancel(t *testing.T) {
 	if m.Finished() {
 		t.Fatal("searching with no matches must not finish the screen")
 	}
-	if view := m.View(); !strings.Contains(view, "沒有符合搜尋條件") {
+	if view := viewContent(m.View()); !strings.Contains(view, "沒有符合搜尋條件") {
 		t.Fatalf("missing no-results feedback:\n%s", view)
 	}
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = next.(selectModel)
 	if m.Canceled() || m.query != "" || m.searching {
 		t.Fatalf("first esc should clear search, got canceled=%v query=%q searching=%v", m.Canceled(), m.query, m.searching)
 	}
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = next.(selectModel)
 	if !m.Canceled() {
 		t.Fatal("second esc should cancel the list")
@@ -105,9 +106,9 @@ func TestSelectModel_SearchNoMatchesCanClearThenCancel(t *testing.T) {
 
 func TestSelectModel_EnterConfirmsWithoutCanceling(t *testing.T) {
 	m := selectModel{title: "t", items: selectItems("a", "b")}
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = next.(selectModel)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(selectModel)
 	if !m.Finished() || m.Canceled() {
 		t.Fatalf("expected finished+not-canceled after enter, got finished=%v canceled=%v", m.Finished(), m.Canceled())
@@ -119,7 +120,7 @@ func TestSelectModel_EnterConfirmsWithoutCanceling(t *testing.T) {
 
 func TestSelectModel_LFEnterConfirmsWithoutCanceling(t *testing.T) {
 	m := selectModel{title: "t", items: selectItems("a")}
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 	m = next.(selectModel)
 	if !m.Finished() || m.Canceled() {
 		t.Fatal("expected LF/ctrl+j Return to confirm without canceling")
@@ -128,7 +129,7 @@ func TestSelectModel_LFEnterConfirmsWithoutCanceling(t *testing.T) {
 
 func TestSelectModel_EnterOnEmptyListDoesNothing(t *testing.T) {
 	m := selectModel{title: "t"}
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(selectModel)
 	if m.Finished() {
 		t.Fatal("enter on an empty list should not finish the screen")
@@ -137,7 +138,7 @@ func TestSelectModel_EnterOnEmptyListDoesNothing(t *testing.T) {
 
 func TestSelectModel_EscCancels(t *testing.T) {
 	m := selectModel{title: "t", items: selectItems("a")}
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	m = next.(selectModel)
 	if !m.Finished() || !m.Canceled() {
 		t.Fatal("expected finished+canceled after esc")
@@ -146,7 +147,7 @@ func TestSelectModel_EscCancels(t *testing.T) {
 
 func TestSelectModel_ViewShowsTitleAndItems(t *testing.T) {
 	m := selectModel{title: "選單標題", items: selectItems("alpha", "beta")}
-	view := m.View()
+	view := viewContent(m.View())
 	for _, want := range []string{"選單標題", "alpha", "beta", "▸"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q:\n%s", want, view)
@@ -158,8 +159,8 @@ func TestSelectModel_ScrollIndicatorReflectsHiddenItems(t *testing.T) {
 	m := selectModel{title: "t", items: newManySelectItems(20)}
 	next, _ := m.Update(tea.WindowSizeMsg{Height: 10}) // rows = 4
 	m = next.(selectModel)
-	if !strings.Contains(m.View(), "還有 16 項在下面") {
-		t.Fatalf("expected below-indicator for remaining 16 items:\n%s", m.View())
+	if !strings.Contains(viewContent(m.View()), "還有 16 項在下面") {
+		t.Fatalf("expected below-indicator for remaining 16 items:\n%s", viewContent(m.View()))
 	}
 }
 
@@ -215,7 +216,7 @@ func TestSelectModel_Teatest_HappyPath(t *testing.T) {
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
 
 	tm.Type("jj") // cursor -> index 2
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second))
 	got := final.(screenTestHarness).s.(selectModel)
@@ -231,24 +232,33 @@ func TestSelectModel_Teatest_FuzzySearchAndSelect(t *testing.T) {
 	m := screenTestHarness{s: newSelectModel("t", []string{"alpha", "FreeIPA Server", "freeipa-client"})}
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
 
+	// tm.Output() is a draining reader (backed by a bytes.Buffer): once
+	// WaitFor reads past "搜尋：fas" to satisfy its condition, those bytes
+	// are gone from any later read (e.g. FinalOutput below), regardless of
+	// Bubble Tea version — teeing every WaitFor read into our own
+	// non-draining buffer lets the final assertion below see the same
+	// bytes WaitFor already matched on, without weakening what either
+	// check actually verifies.
+	var captured bytes.Buffer
 	tm.Type("/fas")
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+	teatest.WaitFor(t, io.TeeReader(tm.Output(), &captured), func(b []byte) bool {
 		return strings.Contains(string(b), "搜尋：fas")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second))
 	got := final.(screenTestHarness).s.(selectModel)
 	if got.Selected() != 1 || got.Canceled() {
 		t.Fatalf("fuzzy selection = %d, canceled=%v; want original index 1, false", got.Selected(), got.Canceled())
 	}
-	output, err := io.ReadAll(tm.FinalOutput(t, teatest.WithFinalTimeout(3*time.Second)))
+	remaining, err := io.ReadAll(tm.FinalOutput(t, teatest.WithFinalTimeout(3*time.Second)))
 	if err != nil {
 		t.Fatalf("read program output: %v", err)
 	}
-	if !strings.Contains(string(output), "搜尋：fas") {
-		t.Fatalf("program output did not show the search query:\n%s", output)
+	captured.Write(remaining)
+	if !strings.Contains(captured.String(), "搜尋：fas") {
+		t.Fatalf("program output did not show the search query:\n%s", captured.String())
 	}
 }
 
@@ -256,7 +266,7 @@ func TestSelectModel_Teatest_EscCancels(t *testing.T) {
 	m := screenTestHarness{s: selectModel{title: "t", items: selectItems("a", "b")}}
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	final := tm.FinalModel(t, teatest.WithFinalTimeout(3*time.Second))
 	got := final.(screenTestHarness).s.(selectModel)

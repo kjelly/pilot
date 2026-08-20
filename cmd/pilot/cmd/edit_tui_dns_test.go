@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/exp/teatest"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/kjelly/pilot/internal/inventory"
 )
@@ -56,24 +56,33 @@ func TestEditRouter_Teatest_DNSManifestFlow_CreateSkeletonThenAddZone(t *testing
 
 	// Create the minimal skeleton.
 	waitFor("不存在，要建立最小")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm (default yes)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm (default yes)
 	waitFor("FreeIPA domain")
 	tm.Type("ipa.pilot.internal")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	waitFor("FreeIPA realm")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept the IPA.PILOT.INTERNAL default
-	waitFor("ipa1.ipa.pilot.internal")      // auto-derived default: ipa1.<domain>
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept the auto-detected default
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	// Checks the label's post-"FreeIPA " suffix rather than the full
+	// "FreeIPA realm" phrase: Bubble Tea v2's renderer diffs at the cell
+	// level, and since the previous screen's label ("FreeIPA domain(...)")
+	// shares the literal 8-character prefix "FreeIPA " with this one at
+	// the same screen position, it only ever retransmits the differing
+	// suffix ("realm(...)" replacing "domain(...)") — "FreeIPA " itself is
+	// never rewritten once it's already on screen. This is a genuine,
+	// permanent v2 rendering optimization (confirmed by direct model
+	// inspection, not a business-logic bug), not a timing fluke.
+	waitFor("realm(必須與 freeipa_realm 一致")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept the IPA.PILOT.INTERNAL default
+	waitFor("ipa1.ipa.pilot.internal")           // auto-derived default: ipa1.<domain>
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept the auto-detected default
 	waitFor("已建立最小 freeipa-dns manifest 骨架")
 
 	// Manager menu: cursor starts at item 0, "🌐 Zones".
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("目前沒有任何 zone")
 	// Zones menu is empty, so item 0 is already "➕ 新增 zone".
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("新 zone 的名稱")
 	tm.Type("example.com.")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("已新增 zone example.com.")
 
 	if err := tm.Quit(); err != nil {
@@ -120,16 +129,16 @@ func TestEditRouter_Teatest_DNSRecordFlow_AddARecordFromInventoryHost(t *testing
 	tm, waitFor := newDNSTeatestModel(t, router)
 
 	waitFor("這個 zone 目前沒有任何 record")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // cursor starts at "➕ 新增 record" (no records exist yet)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // cursor starts at "➕ 新增 record" (no records exist yet)
 	waitFor("新 record 的類型")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "A" (first choice)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "A" (first choice)
 	waitFor("新 record 的名稱")
 	tm.Type("grafana")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("值的來源")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "從 inventory host 解析"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "從 inventory host 解析"
 	waitFor("要解析哪個 inventory host")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "nexus" (only host)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "nexus" (only host)
 	waitFor("已新增 record grafana")
 
 	if err := tm.Quit(); err != nil {
@@ -198,19 +207,19 @@ func TestEditRouter_Teatest_DNSRecordFlow_CreateThreeServiceRecords(t *testing.T
 
 		waitFor("Records")
 		for i := 0; i < existing; i++ {
-			tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+			tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 		}
 		existing++
-		tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 		waitFor("新 record 的類型")
-		tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "A"
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "A"
 		waitFor("新 record 的名稱")
 		tm.Type(name)
-		tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 		waitFor("值的來源")
-		tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "從 inventory host 解析"
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "從 inventory host 解析"
 		waitFor("要解析哪個 inventory host")
-		tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "nexus"
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "nexus"
 		waitFor("已新增 record " + name)
 
 		if err := tm.Quit(); err != nil {
@@ -286,17 +295,17 @@ func TestEditRouter_Teatest_DNSRecordFlow_RejectsInvalidCNAMEWithoutWriting(t *t
 	tm, waitFor := newDNSTeatestModel(t, router)
 
 	waitFor("Records")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // cursor starts at "➕ 新增 record" (no records exist yet)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // cursor starts at "➕ 新增 record" (no records exist yet)
 	waitFor("新 record 的類型")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "CNAME"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "CNAME"
 	waitFor("新 record 的名稱")
 	tm.Type("docs")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("CNAME 目標")
 	tm.Type("not-an-fqdn-missing-trailing-dot") // invalid: no trailing "."
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("驗證沒過")
 
 	if err := tm.Quit(); err != nil {
@@ -341,11 +350,11 @@ func TestEditRouter_Teatest_DNSZoneFlow_ToggleStateToAbsent(t *testing.T) {
 	tm, waitFor := newDNSTeatestModel(t, router)
 
 	waitFor("state：present")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> state field
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> state field
 	waitFor("state（absent")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "absent"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "absent"
 	waitFor("已更新")
 
 	if err := tm.Quit(); err != nil {

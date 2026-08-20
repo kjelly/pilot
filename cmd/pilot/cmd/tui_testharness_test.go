@@ -1,6 +1,6 @@
 package cmd
 
-import tea "github.com/charmbracelet/bubbletea"
+import tea "charm.land/bubbletea/v2"
 
 // screenTestHarness wraps a single `screen` so it can be driven end to
 // end through teatest, quitting once the screen reports Finished() —
@@ -26,4 +26,4 @@ func (h screenTestHarness) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return h, cmd
 }
 
-func (h screenTestHarness) View() string { return h.s.View() }
+func (h screenTestHarness) View() tea.View { return h.s.View() }

@@ -31,7 +31,7 @@ import (
 	"strconv"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/tui"

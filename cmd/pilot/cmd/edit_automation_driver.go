@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
@@ -100,7 +100,7 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 			return fmt.Errorf("step %d (%s): %w", i+1, step.Action, err)
 		}
 		if d.presentation && d.out != nil {
-			fmt.Fprintf(d.out, "\n── %s ──\n⌨ 按鍵：%s\n%s", step.Action, formatKeyboardCommands(event.Keys), r.View())
+			fmt.Fprintf(d.out, "\n── %s ──\n⌨ 按鍵：%s\n%s", step.Action, formatKeyboardCommands(event.Keys), viewContent(r.View()))
 			d.pause(time.Second)
 		}
 		d.emitMarker(event)
@@ -162,7 +162,7 @@ func formatKeyboardCommands(keys []string) string {
 // back to only ever shows a count ("其他變數(共 N 個)"), never the content.
 func (d *automationDriver) present(r *editRouterModel, label string) {
 	if d.presentation && d.out != nil {
-		fmt.Fprintf(d.out, "\n── %s ──\n%s", label, r.View())
+		fmt.Fprintf(d.out, "\n── %s ──\n%s", label, viewContent(r.View()))
 	}
 }
 
@@ -272,7 +272,7 @@ func (d *automationDriver) setRoleChecked(r *editRouterModel, host, role string,
 		if err := d.moveCursor(r, idx); err != nil {
 			return err
 		}
-		if err := d.send(r, tea.KeyMsg{Type: tea.KeySpace}); err != nil {
+		if err := d.send(r, keySpace()); err != nil {
 			return err
 		}
 	}
@@ -379,7 +379,7 @@ func (d *automationDriver) setChecklistSelection(r *editRouterModel, want []stri
 		if err := d.moveCursor(r, mismatch); err != nil {
 			return err
 		}
-		if err := d.send(r, tea.KeyMsg{Type: tea.KeySpace}); err != nil {
+		if err := d.send(r, keySpace()); err != nil {
 			return err
 		}
 	}
@@ -505,13 +505,13 @@ func (d *automationDriver) moveCursor(r *editRouterModel, target int) error {
 		cursor = 0
 	}
 	for cursor > 0 {
-		if err := d.send(r, tea.KeyMsg{Type: tea.KeyUp}); err != nil {
+		if err := d.send(r, keyUp()); err != nil {
 			return err
 		}
 		cursor--
 	}
 	for cursor < target {
-		if err := d.send(r, tea.KeyMsg{Type: tea.KeyDown}); err != nil {
+		if err := d.send(r, keyDown()); err != nil {
 			return err
 		}
 		cursor++
@@ -524,12 +524,12 @@ func (d *automationDriver) typeText(r *editRouterModel, value string, replace bo
 		return fmt.Errorf("cannot type on %s screen", automationScreenID(r))
 	}
 	if replace {
-		if err := d.send(r, tea.KeyMsg{Type: tea.KeyCtrlU}); err != nil {
+		if err := d.send(r, keyCtrlU()); err != nil {
 			return err
 		}
 	}
 	if value != "" {
-		if err := d.send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)}); err != nil {
+		if err := d.send(r, keyTextMsg(value)); err != nil {
 			return err
 		}
 	}
@@ -548,14 +548,14 @@ func (d *automationDriver) typeSecretOrPlain(r *editRouterModel, value string, s
 		return fmt.Errorf("cannot type on %s screen", automationScreenID(r))
 	}
 	if replace {
-		if err := d.send(r, tea.KeyMsg{Type: tea.KeyCtrlU}); err != nil {
+		if err := d.send(r, keyCtrlU()); err != nil {
 			return err
 		}
 	}
 	if value == "" {
 		return nil
 	}
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)}
+	msg := keyTextMsg(value)
 	if !secret {
 		return d.send(r, msg)
 	}
@@ -578,7 +578,7 @@ func resolveValueOrEnv(step editAction) (value string, secret bool, err error) {
 }
 
 func (d *automationDriver) enter(r *editRouterModel) error {
-	return d.send(r, tea.KeyMsg{Type: tea.KeyEnter})
+	return d.send(r, keyEnter())
 }
 
 // confirmYesNo answers the current confirmModel with an explicit y/n
@@ -593,10 +593,10 @@ func (d *automationDriver) confirmYesNo(r *editRouterModel, yes bool) error {
 	if yes {
 		key = "y"
 	}
-	return d.send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+	return d.send(r, keyTextMsg(key))
 }
 
-func (d *automationDriver) send(r *editRouterModel, msg tea.KeyMsg) error {
+func (d *automationDriver) send(r *editRouterModel, msg tea.KeyPressMsg) error {
 	d.keys = append(d.keys, msg.String())
 	model, _ := r.Update(msg)
 	next, ok := model.(editRouterModel)
@@ -621,7 +621,7 @@ func (d *automationDriver) send(r *editRouterModel, msg tea.KeyMsg) error {
 // (see typeSecretOrPlain) so a ValueEnv-sourced secret never appears in
 // --trace-out JSONL, even though the model itself still receives the real
 // characters.
-func (d *automationDriver) sendRedacted(r *editRouterModel, msg tea.KeyMsg, placeholder string) error {
+func (d *automationDriver) sendRedacted(r *editRouterModel, msg tea.KeyPressMsg, placeholder string) error {
 	d.keys = append(d.keys, placeholder)
 	model, _ := r.Update(msg)
 	next, ok := model.(editRouterModel)
@@ -669,7 +669,7 @@ func (d *automationDriver) notifyRecorder(r *editRouterModel, keyRepr string) er
 		return fmt.Errorf("record keys: %w", err)
 	}
 	d.frameSeq++
-	frame := FrameEvent{Sequence: d.frameSeq, ScreenID: automationScreenID(r), View: r.View()}
+	frame := FrameEvent{Sequence: d.frameSeq, ScreenID: automationScreenID(r), View: viewContent(r.View())}
 	if err := rec.RecordFrame(frame); err != nil {
 		return fmt.Errorf("record frame: %w", err)
 	}

@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
@@ -149,7 +149,7 @@ func (m selectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		m.windowStart = listClampWindow(m.cursor, m.windowStart, len(m.matchingIndices()), m.height)
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if query, searching, handled := updateListSearch(m.query, m.searching, msg); handled {
 			if query != m.query {
 				m.query = query
@@ -177,7 +177,9 @@ func (m selectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m selectModel) View() string {
+func (m selectModel) View() tea.View { return tea.NewView(m.render()) }
+
+func (m selectModel) render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", m.title)
 	b.WriteString("/ 搜尋　↑/↓ 循環移動　enter 選擇　esc 取消\n")

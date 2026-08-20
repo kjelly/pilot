@@ -17,7 +17,7 @@ import (
 	"strings"
 	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
@@ -26,13 +26,21 @@ import (
 // deliver Return as CR (KeyEnter), but some PTY/tmux combinations deliver LF
 // (Ctrl-J). All embedded screens should use this helper so navigation keys
 // behave consistently across terminals.
-func tuiKeyName(msg tea.KeyMsg) string {
-	switch msg.Type {
-	case tea.KeyEnter, tea.KeyCtrlJ:
+//
+// Bubble Tea v2's tea.KeyPressMsg has no v1-style Type enum — a key press is
+// just a Code rune plus a Mod bitmask — so the v1 "switch msg.Type" dispatch
+// becomes an explicit Code/Mod comparison here. Unlike v1, v2 does not
+// auto-unify Ctrl+[ with Esc, so that unification (like Ctrl-J/Return above)
+// is preserved explicitly by the msg.String() fallback switch below rather
+// than being automatic — see the migration spec's "Keyboard Migration" /
+// "Return / Ctrl-J Compatibility" sections.
+func tuiKeyName(msg tea.KeyPressMsg) string {
+	switch {
+	case msg.Code == tea.KeyEnter, msg.Code == 'j' && msg.Mod == tea.ModCtrl:
 		return "enter"
-	case tea.KeyEsc:
+	case msg.Code == tea.KeyEsc:
 		return "esc"
-	case tea.KeyCtrlC:
+	case msg.Code == 'c' && msg.Mod == tea.ModCtrl:
 		return "ctrl+c"
 	}
 	// A few terminal/PTY layers leave CR, LF, or ESC as a rune key rather
@@ -104,7 +112,7 @@ func (h standaloneScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return h, cmd
 }
 
-func (h standaloneScreen) View() string { return h.s.View() }
+func (h standaloneScreen) View() tea.View { return h.s.View() }
 
 // listClampWindow returns a new windowStart that keeps cursor inside
 // [windowStart, windowStart+rows) and windowStart itself inside a
@@ -182,7 +190,7 @@ func listSearchRunes(value string) []rune {
 // updateListSearch consumes keys while a list search is active. Enter or Tab
 // leaves search mode while preserving the result set; Esc clears the query
 // and leaves search mode, so a second Esc keeps the normal cancel behavior.
-func updateListSearch(query string, searching bool, msg tea.KeyMsg) (nextQuery string, nextSearching, handled bool) {
+func updateListSearch(query string, searching bool, msg tea.KeyPressMsg) (nextQuery string, nextSearching, handled bool) {
 	key := tuiKeyName(msg)
 	if key == "/" && !searching {
 		return query, true, true
@@ -201,8 +209,13 @@ func updateListSearch(query string, searching bool, msg tea.KeyMsg) (nextQuery s
 	case "ctrl+u":
 		return "", true, true
 	}
-	if msg.Type == tea.KeyRunes {
-		return query + string(msg.Runes), true, true
+	// v2 populates Text only for keys that represent printable character(s)
+	// (see tea.Key's doc comment) — the direct equivalent of v1's
+	// Type == tea.KeyRunes check, and (per the migration spec's
+	// "Keyboard Migration" requirements) still correctly consumes a
+	// multi-rune Text in one message, exactly like v1's []rune Runes did.
+	if msg.Text != "" {
+		return query + msg.Text, true, true
 	}
 	return query, true, false
 }

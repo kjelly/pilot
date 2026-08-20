@@ -45,7 +45,7 @@ import (
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -145,15 +145,15 @@ func (r editRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return r, tea.Batch(cmd, cbCmd)
 }
 
-func (r editRouterModel) View() string {
-	var s string
+func (r editRouterModel) View() tea.View {
+	if r.current == nil {
+		return tea.NewView(r.banner)
+	}
+	prefix := ""
 	if r.banner != "" {
-		s += r.banner + "\n\n"
+		prefix = r.banner + "\n\n"
 	}
-	if r.current != nil {
-		s += r.current.View()
-	}
-	return s
+	return composeView(prefix, r.current.View())
 }
 
 func newEditRouterModel(dir string) editRouterModel {

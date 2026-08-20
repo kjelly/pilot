@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestEditRouter_TransitionTo_ReplacesCurrentScreen(t *testing.T) {
@@ -17,13 +17,13 @@ func TestEditRouter_TransitionTo_ReplacesCurrentScreen(t *testing.T) {
 		return r.transitionTo(newSelectModel("second", []string{"b"}), "", nil)
 	})
 
-	nm, _ := r.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm, _ := r.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	r2 := nm.(editRouterModel)
-	if !strings.Contains(r2.View(), "second") {
-		t.Fatalf("expected router to transition to the second screen, got view:\n%s", r2.View())
+	if !strings.Contains(viewContent(r2.View()), "second") {
+		t.Fatalf("expected router to transition to the second screen, got view:\n%s", viewContent(r2.View()))
 	}
-	if strings.Contains(r2.View(), "first") {
-		t.Fatalf("expected the first screen to be gone, got view:\n%s", r2.View())
+	if strings.Contains(viewContent(r2.View()), "first") {
+		t.Fatalf("expected the first screen to be gone, got view:\n%s", viewContent(r2.View()))
 	}
 }
 
@@ -32,14 +32,14 @@ func TestEditRouter_BannerShownThenClearedByNextTransition(t *testing.T) {
 	r.transitionTo(newConfirmModel("q", true), "hello banner", func(r *editRouterModel, s screen) tea.Cmd {
 		return r.transitionTo(newConfirmModel("q2", true), "", nil)
 	})
-	if !strings.Contains(r.View(), "hello banner") {
-		t.Fatalf("expected banner in view, got:\n%s", r.View())
+	if !strings.Contains(viewContent(r.View()), "hello banner") {
+		t.Fatalf("expected banner in view, got:\n%s", viewContent(r.View()))
 	}
 
-	nm, _ := r.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm, _ := r.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	r2 := nm.(editRouterModel)
-	if strings.Contains(r2.View(), "hello banner") {
-		t.Fatalf("expected banner to be cleared by the next transition, got:\n%s", r2.View())
+	if strings.Contains(viewContent(r2.View()), "hello banner") {
+		t.Fatalf("expected banner to be cleared by the next transition, got:\n%s", viewContent(r2.View()))
 	}
 }
 
@@ -53,7 +53,7 @@ func TestEditRouter_CancelDefaultsToQuit(t *testing.T) {
 		return nil
 	})
 
-	nm, cmd := r.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	nm, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	r2 := nm.(editRouterModel)
 	if !r2.quit {
 		t.Fatal("expected esc (the default cancel handler) to set quit")
@@ -70,7 +70,7 @@ func TestEditRouter_ErrForcesQuit(t *testing.T) {
 		return nil
 	})
 
-	nm, cmd := r.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	r2 := nm.(editRouterModel)
 	if r2.err == nil {
 		t.Fatal("expected err to propagate onto the router")
@@ -82,7 +82,7 @@ func TestEditRouter_ErrForcesQuit(t *testing.T) {
 
 func TestEditRouter_NoCurrentScreenQuits(t *testing.T) {
 	var r editRouterModel
-	_, cmd := r.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("expected a tea.Quit cmd when there is no current screen")
 	}
@@ -96,12 +96,12 @@ func TestEditRouter_UnfinishedScreenDoesNotInvokeCallback(t *testing.T) {
 		return nil
 	})
 
-	nm, _ := r.Update(tea.KeyMsg{Type: tea.KeyDown}) // moves cursor, does not finish the screen
+	nm, _ := r.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // moves cursor, does not finish the screen
 	r2 := nm.(editRouterModel)
 	if invoked {
 		t.Fatal("callback should not run until the screen reports Finished()")
 	}
-	if !strings.Contains(r2.View(), "t") {
-		t.Fatalf("expected the same screen still showing, got:\n%s", r2.View())
+	if !strings.Contains(viewContent(r2.View()), "t") {
+		t.Fatalf("expected the same screen still showing, got:\n%s", viewContent(r2.View()))
 	}
 }

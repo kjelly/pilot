@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/exp/teatest"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/kjelly/pilot/internal/groupvars"
 	"github.com/kjelly/pilot/internal/inventory"
@@ -27,53 +27,53 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	router := newEditRouterModel(dir)
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // top menu: "hosts.yml" (cursor 0)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept default hosts.yml path
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm "start blank?" (default yes)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // host list: "➕ 新增主機" (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // top menu: "hosts.yml" (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept default hosts.yml path
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm "start blank?" (default yes)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // host list: "➕ 新增主機" (cursor 0)
 	tm.Type("web-1")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm new host name
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // host menu: "ansible_host" (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm new host name
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // host menu: "ansible_host" (cursor 0)
 	tm.Type("10.0.0.5")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm ansible_host value -> back to host menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm ansible_host value -> back to host menu
 
 	// host menu items: 0 ansible_host, 1 ansible_user, 2 ssh key, 3 env,
 	// 4 roles, 5 extra vars, 6 delete, 7 back-to-list
 	for i := 0; i < 4; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // roles menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // roles menu
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // roles menu: "☑ 逐項勾選角色" (cursor 0) -> checklist
-	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // toggle the first role on
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm checklist -> back to roles menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // roles menu: "☑ 逐項勾選角色" (cursor 0) -> checklist
+	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // toggle the first role on
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm checklist -> back to roles menu
 
 	// roles menu items: 0 checklist, 1 preset, 2 manage presets, 3 copy, 4 done
 	for i := 0; i < 4; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "✅ 完成" -> back to host menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "✅ 完成" -> back to host menu
 
 	// host menu again (cursor reset to 0); navigate to "↩ 返回主機清單" (index 7)
 	for i := 0; i < 7; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to host list
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to host list
 
 	// host list items now: 0 新增主機, 1 host summary, 2 共用變數,
 	// 3 存檔並離開, 4 不存檔離開
 	for i := 0; i < 3; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save and return to top menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save and return to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
 	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
 	// 7 快速建立最小 workspace, 8 離開
 	for i := 0; i < 8; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
@@ -104,7 +104,7 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 func TestEditRouter_Teatest_MinimalWorkspaceEntryKeepsAdvancedEntries(t *testing.T) {
 	dir := t.TempDir()
 	router := newEditRouterModel(dir)
-	view := router.View()
+	view := viewContent(router.View())
 	for _, want := range []string{
 		"快速建立最小 workspace",
 		"hosts.yml — 機器清單與角色",
@@ -132,16 +132,16 @@ func TestEditRouter_Teatest_MinimalWorkspaceRequiresHostsBeforeScaffolding(t *te
 	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
 	// 7 快速建立最小 workspace, 8 離開
 	for i := 0; i < 7; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("快速建立最小 workspace")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // 建立／更新最小設定骨架
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // 建立／更新最小設定骨架
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("先選「設定主機與角色」")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 }
 
@@ -165,16 +165,16 @@ func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksAndOffersRoute(t *tes
 	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
 	// 7 快速建立最小 workspace, 8 離開
 	for i := 0; i < 7; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("快速建立最小 workspace")
 
 	// quick wizard: 0 設定主機與角色 ... 4 驗證並檢查是否可部署
 	for i := 0; i < 4; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	// prometheus_site_label has no safe cross-host default, so host_vars blocks.
 	// Both the report line and the offered route render together, so assert them
@@ -186,9 +186,9 @@ func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksAndOffersRoute(t *tes
 			strings.Contains(out, "前往 hosts 設定")
 	}, teatest.WithDuration(3*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // readiness -> quick wizard
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // quick wizard -> top menu
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // top menu -> quit
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // readiness -> quick wizard
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // quick wizard -> top menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> quit
 
 	final, err := io.ReadAll(tm.FinalOutput(t, teatest.WithFinalTimeout(3*time.Second)))
 	if err != nil {
@@ -246,62 +246,68 @@ func TestEditRouter_Teatest_FleetVarsFlow_AddEditDeleteAndSave(t *testing.T) {
 	waitFor("共用變數")
 	// host list items: 0 新增主機, 1 web-1, 2 共用變數, 3 存檔並離開, 4 不存檔離開
 	for i := 0; i < 2; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> fleet vars menu
-	waitFor("➕ 新增變數")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> fleet vars menu
+	waitFor("新增變數")                              // dropped the emoji prefix: v2 sometimes splits it from the text across a small cursor-adjust diff (see the "值" comment above)
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增變數" (only item, cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "➕ 新增變數" (only item, cursor 0)
 	waitFor("變數名稱")
 	tm.Type("ansible_user")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	waitFor("變數值")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	// Checks the label's distinguishing suffix, not the full "變數值"
+	// phrase: Bubble Tea v2's renderer diffs at the cell level, and since
+	// this label shares the "變數" prefix with the previous screen's
+	// "變數名稱" label at the same position, only the differing tail
+	// ("值" replacing "名稱") is ever retransmitted — see the analogous
+	// comment in edit_tui_dns_test.go for the fuller explanation.
+	waitFor("值")
 	tm.Type("ubuntu")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to fleet vars menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm -> back to fleet vars menu
 	waitFor("ansible_user = ubuntu")
 
 	// edit it
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick "ansible_user = ubuntu" (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // pick "ansible_user = ubuntu" (cursor 0)
 	waitFor("修改值")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "修改值"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "修改值"
 	waitFor("的新值")
 	for range "ubuntu" {
-		tm.Send(tea.KeyMsg{Type: tea.KeyBackspace})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	}
 	tm.Type("admin")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to fleet vars menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm -> back to fleet vars menu
 	waitFor("ansible_user = admin")
 
 	// add a second var, then delete it, proving delete actually removes it
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "➕ 新增變數" (index 1 now)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // add
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})  // "➕ 新增變數" (index 1 now)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // add
 	waitFor("變數名稱")
 	tm.Type("scratch_var")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	waitFor("變數值")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	waitFor("值") // see the comment above the first "變數值" waitFor in this test
 	tm.Type("temp")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("scratch_var = temp")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // scratch_var entry (sorted after ansible_user)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // its action menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})  // scratch_var entry (sorted after ansible_user)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // its action menu
 	waitFor("刪除")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "刪除" -> back to fleet vars menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "刪除" -> back to fleet vars menu
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		out := string(b)
 		return strings.Contains(out, "ansible_user = admin") && !strings.Contains(out, "scratch_var")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // fleet vars menu -> host list
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // fleet vars menu -> host list
 	waitFor("💾 存檔並離開")
 	for i := 0; i < 3; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save -> top menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save -> top menu
 	waitFor("要編輯什麼")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // top menu -> quit
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> quit
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
@@ -326,9 +332,9 @@ func TestEditRouter_Teatest_HostsFlow_CancelAnywhereQuitsTheWholeWizard(t *testi
 	router := newEditRouterModel(dir)
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // top menu -> hosts.yml
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept default path
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})   // cancel the "start blank?" confirm... but confirmModel maps esc to "no", not abort
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // top menu -> hosts.yml
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept default path
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})   // cancel the "start blank?" confirm... but confirmModel maps esc to "no", not abort
 
 	// promptConfirm's esc->no semantics mean this particular esc just
 	// answers "no" (declining to start blank), which pushLoadOrInitHosts
@@ -345,7 +351,7 @@ func TestEditRouter_Teatest_HostsFlow_EscOnSelectQuitsWholeWizard(t *testing.T) 
 	router := newEditRouterModel(dir)
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // esc on the very first (top menu) screen
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // esc on the very first (top menu) screen
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 }
@@ -368,40 +374,40 @@ func TestEditRouter_Teatest_EscWalksBackThroughDeepChainThenQuitsAtTopMenu(t *te
 		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // top menu -> hosts.yml
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept default hosts.yml path
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm "start blank?" (default yes)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // host list: "➕ 新增主機"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // top menu -> hosts.yml
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept default hosts.yml path
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm "start blank?" (default yes)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // host list: "➕ 新增主機"
 	tm.Type("web-1")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm new host name -> host menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm new host name -> host menu
 	waitFor("web-1")
 
 	// host menu items: 0 ansible_host, 1 ansible_user, 2 ssh key, 3 env,
 	// 4 roles, 5 extra vars, 6 delete, 7 return.
 	for i := 0; i < 4; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> roles menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> roles menu
 	waitFor("的角色")
 
 	// roles menu items: 0 checklist, 1 preset, 2 manage presets, 3 copy, 4 done
 	for i := 0; i < 2; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> role preset manager
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> role preset manager
 	waitFor("管理 ")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // preset manager -> roles menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // preset manager -> roles menu
 	waitFor("的角色")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // roles menu -> host menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // roles menu -> host menu
 	waitFor("選要編輯的項目")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // host menu -> host list
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // host menu -> host list
 	waitFor("💾 存檔並離開")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // host list -> confirm discard (unconditional here)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // host list -> confirm discard (unconditional here)
 	waitFor("確定不存檔離開嗎")
 	tm.Type("y") // confirm discard -> top menu
 	waitFor("要編輯什麼")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // top menu -> the one screen that still quits for real
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> the one screen that still quits for real
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
@@ -431,64 +437,68 @@ func TestEditRouter_Teatest_ExtraVarsFlow_EscStepsBackInsteadOfQuitting(t *testi
 
 	// esc on the 其他變數 list itself: back to the host menu (which still
 	// shows a live count), not a whole-wizard quit.
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
 	waitFor("其他變數(共 1 個)")
 
 	// host menu index 5 = 其他變數 -> back into the list.
 	for i := 0; i < 5; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	waitFor("➕ 新增變數")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	waitFor("新增變數") // dropped the emoji prefix: v2 sometimes splits it from the text across a small cursor-adjust diff (see the "值" comment above)
 
 	// start adding a var, esc out of the key step: back to the list.
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // "➕ 新增變數"
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // "➕ 新增變數"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("變數名稱")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
-	waitFor("➕ 新增變數")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
+	waitFor("新增變數") // dropped the emoji prefix: v2 sometimes splits it from the text across a small cursor-adjust diff (see the "值" comment above)
 
 	// start adding a var again, esc out of the value step: back to the
 	// list, and the half-added key must not have been kept.
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("變數名稱")
 	tm.Type("foo_key")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	waitFor("變數值")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
-	waitFor("➕ 新增變數")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	// See the "變數值" comment on TestEditRouter_Teatest_FleetVarsFlow_AddEditDeleteAndSave
+	// above: only the label's distinguishing suffix survives Bubble Tea
+	// v2's cell-level render diff, since "變數" is already on screen from
+	// the previous "變數名稱" label at the same position.
+	waitFor("值")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
+	waitFor("新增變數") // dropped the emoji prefix: v2 sometimes splits it from the text across a small cursor-adjust diff (see the "值" comment above)
 
 	// select the existing var, esc out of the action menu: back to the list.
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "ipa_server_ip = 10.0.0.9" (cursor reset to 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "ipa_server_ip = 10.0.0.9" (cursor reset to 0)
 	waitFor("變數 ipa_server_ip = 10.0.0.9")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
-	waitFor("➕ 新增變數")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
+	waitFor("新增變數") // dropped the emoji prefix: v2 sometimes splits it from the text across a small cursor-adjust diff (see the "值" comment above)
 
 	// re-enter the action menu, then esc out of the edit-value step:
 	// back to the action menu (one level), not all the way to the list.
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("變數 ipa_server_ip = 10.0.0.9")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "修改值"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "修改值"
 	waitFor("ipa_server_ip 的新值")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
 	waitFor("變數 ipa_server_ip = 10.0.0.9")
 
 	// esc back out through the list, the host menu, and the host list —
 	// none of these carry the 其他變數 exception, so each now steps back
 	// one level per the wizard-wide "esc = go back" default; only the top
 	// menu, reached at the very end of this chain, still quits for real.
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // action menu -> list
-	waitFor("➕ 新增變數")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // list -> host menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // action menu -> list
+	waitFor("新增變數")                            // dropped the emoji prefix: v2 sometimes splits it from the text across a small cursor-adjust diff (see the "值" comment above)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // list -> host menu
 	waitFor("其他變數(共 1 個)")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // host menu -> host list
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // host menu -> host list
 	waitFor("💾 存檔並離開")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // host list -> confirm discard (unconditional here)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // host list -> confirm discard (unconditional here)
 	waitFor("確定不存檔離開嗎")
 	tm.Type("y") // confirm discard -> top menu
 	waitFor("要編輯什麼")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // top menu -> whole-wizard quit
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> whole-wizard quit
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
@@ -525,9 +535,9 @@ func TestEditRouter_Teatest_HostVarsFlow_ScaffoldsEditsAndSaves(t *testing.T) {
 	// 4 roles, 5 extra vars, 6 host_vars (present because of the
 	// prometheus role), 7 delete, 8 return.
 	for i := 0; i < 6; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // enter host_vars editor -> auto-scaffolds
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // enter host_vars editor -> auto-scaffolds
 	// Both the "already created" banner and the entry's required-placeholder
 	// state render in this same first frame — check them together in one
 	// WaitFor, since each call drains tm.Output() and a second call looking
@@ -537,17 +547,17 @@ func TestEditRouter_Teatest_HostVarsFlow_ScaffoldsEditsAndSaves(t *testing.T) {
 		return strings.Contains(out, "已建立") && strings.Contains(out, "尚未填寫，必填！")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "prometheus_site_label = ...  [...]" (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "prometheus_site_label = ...  [...]" (cursor 0)
 	waitFor("修改值")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "修改值" (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "修改值" (cursor 0)
 	waitFor("的新值")
 	tm.Type("site-nexus")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm new value -> back to editor screen
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm new value -> back to editor screen
 	waitFor("已設定")
 
 	// editor screen items now: 0 the entry, 1 save, 2 discard.
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "💾 存檔並離開" -> back to host menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "💾 存檔並離開" -> back to host menu
 
 	waitFor("host_vars/nexus.yml")
 	// Esc here now steps back to the host list rather than quitting (host
@@ -620,26 +630,26 @@ func TestEditRouter_Teatest_HostVarsFlow_EscMirrorsDirtyDiscardGate(t *testing.T
 	}
 
 	waitFor("尚未填寫，必填！")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // clean editor (freshly scaffolded, untouched): esc goes straight back
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // clean editor (freshly scaffolded, untouched): esc goes straight back
 	waitFor("選要編輯的項目")
 
 	// host_vars/nexus.yml (index 6: docker/ansible_host/user/ssh/env/roles/
 	// extra vars precede it) already exists now, so re-entering just opens
 	// it without the "已建立" scaffold banner.
 	for i := 0; i < 6; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("尚未填寫，必填！")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick the prometheus_site_label entry
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // pick the prometheus_site_label entry
 	waitFor("修改值")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "修改值"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "修改值"
 	waitFor("的新值")
 	tm.Type("site-x")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to the now-dirty editor
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm -> back to the now-dirty editor
 	waitFor("site-x")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // dirty editor: esc mirrors "🚪 不存檔離開"'s dirty gate
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // dirty editor: esc mirrors "🚪 不存檔離開"'s dirty gate
 	waitFor("確定要放棄離開嗎")
 	tm.Type("n") // decline discard -> back to the still-dirty editor
 	waitFor("site-x")
@@ -687,10 +697,10 @@ func TestEditRouter_Teatest_RoleChecklistFlow_AddingFreeIPANFSServerAutofixesRos
 	// roleContracts order: 0 freeipa-server, 1 freeipa-client,
 	// 2 freeipa-server-replica, 3 freeipa-nfs-server.
 	for i := 0; i < 3; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // toggle freeipa-nfs-server on
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm checklist -> roles menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // toggle freeipa-nfs-server on
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm checklist -> roles menu
 
 	waitFor("已自動在")
 
@@ -738,19 +748,19 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 
 	// roleContracts order: 0 freeipa-server .. 19 host-monitoring .. 20 prometheus.
 	for i := 0; i < 20; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // toggle prometheus on
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm checklist -> forced host_vars prompt, NOT the roles menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // toggle prometheus on
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm checklist -> forced host_vars prompt, NOT the roles menu
 
 	waitFor("prometheus_site_label 的新值")
 	tm.Type("site-nexus")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm value -> lands on host_vars list editor, dirty
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm value -> lands on host_vars list editor, dirty
 
 	waitFor("已設定")
 	// editor screen items: 0 the entry, 1 save, 2 discard.
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "💾 存檔並離開" -> back to host menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "💾 存檔並離開" -> back to host menu
 
 	waitFor("host_vars/nexus.yml")
 	if err := tm.Quit(); err != nil {
@@ -782,13 +792,13 @@ func TestEditRouter_Teatest_RoleChecklistFlow_BootstrapsMissingNFSRoster(t *test
 
 	waitFor("freeipa-nfs-server")
 	for i := 0; i < 3; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeySpace})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("FreeIPA admin password")
 	tm.Type("demo-password")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("已建立最小 NFS roster")
 
 	if err := tm.Quit(); err != nil {
@@ -849,10 +859,10 @@ func TestEditRouter_Teatest_RoleChecklistFlow_NFSBootstrapReusesExistingAdminPas
 
 	waitFor("freeipa-nfs-server")
 	for i := 0; i < 3; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeySpace})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm checklist -> straight to the roster, no password prompt
+	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm checklist -> straight to the roster, no password prompt
 	waitFor("沿用 .vault/main.yaml 現有的 ipa_admin_password")
 
 	if err := tm.Quit(); err != nil {
@@ -915,25 +925,25 @@ func TestEditRouter_Teatest_GroupVarsFlow_FiltersToUsedRolesAndAutofillsHostVar(
 		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // top menu -> group_vars/ (index 1)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // top menu -> group_vars/ (index 1)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("➕ 從範例建立 freeipa.yml")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 從範例建立 freeipa.yml" (only entry — dns is filtered out)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "➕ 從範例建立 freeipa.yml" (only entry — dns is filtered out)
 
 	// editor items in file order: 0 freeipa_server_ip (now autofilled and
 	// active), 1 freeipa_domain, 2 save, 3 discard.
 	waitFor("freeipa_server_ip = 10.0.0.9")
 
 	for i := 0; i < 2; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "💾 存檔並離開" -> back to file picker
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "💾 存檔並離開" -> back to file picker
 
 	// esc now steps back to the top menu instead of quitting directly; the
 	// top menu is the one screen that still quits for real.
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // file picker -> top menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // file picker -> top menu
 	waitFor("要編輯什麼")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // top menu -> whole-wizard quit
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> whole-wizard quit
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
 	data, err := os.ReadFile(filepath.Join(dir, "group_vars", "freeipa.yml"))
@@ -986,10 +996,10 @@ func TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable(t *
 		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // top menu -> group_vars/ (index 1)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // top menu -> group_vars/ (index 1)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("➕ 從範例建立 dns/zones.yaml")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // create it (only entry, cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // create it (only entry, cursor 0)
 	waitFor("巢狀清單設定")
 
 	if err := tm.Quit(); err != nil {
@@ -1033,32 +1043,32 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	router := newEditRouterModel(".")
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // top menu -> group_vars/ (index 1)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // file picker: "➕ 從範例建立 dns.yml" (only entry, cursor 0)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // editor: pick the dns_forwarders entry (cursor 0)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // entry menu: "修改值" (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // top menu -> group_vars/ (index 1)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // file picker: "➕ 從範例建立 dns.yml" (only entry, cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // editor: pick the dns_forwarders entry (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // entry menu: "修改值" (cursor 0)
 	for range "8.8.8.8" {
-		tm.Send(tea.KeyMsg{Type: tea.KeyBackspace})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	}
 	tm.Type("1.1.1.1")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm new value -> back to editor
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm new value -> back to editor
 
 	// editor items now: 0 dns_forwarders entry, 1 存檔並離開, 2 不存檔離開
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save -> back to file picker
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save -> back to file picker
 
 	// file picker items now: 0 dns.yml (now exists), 1 返回
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
 	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
 	// 7 快速建立最小 workspace, 8 離開
 	for i := 0; i < 8; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
@@ -1101,50 +1111,50 @@ func TestEditRouter_Teatest_GroupVarsFlow_ListEntryAddEditRemoveAndSave(t *testi
 	}
 
 	waitFor("restic_backup_paths = [/etc]")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // the only row (cursor 0) -> list entry menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // the only row (cursor 0) -> list entry menu
 	waitFor("編輯清單項目")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "編輯清單項目" -> items menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "編輯清單項目" -> items menu
 	waitFor("➕ 新增項目")
 
 	// add a second item
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "/etc" (0) -> "➕ 新增項目" (1)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // add
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})  // "/etc" (0) -> "➕ 新增項目" (1)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // add
 	waitFor("新項目的值")
 	tm.Type("/srv/data")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to top-level editor screen
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm -> back to top-level editor screen
 	waitFor("restic_backup_paths = [/etc, /srv/data]")
 
 	// edit the first item ("/etc" -> "/var/log")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // the only row (cursor reset to 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // the only row (cursor reset to 0)
 	waitFor("編輯清單項目")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> items menu (now /etc, /srv/data, 新增, 返回)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> items menu (now /etc, /srv/data, 新增, 返回)
 	waitFor("的項目")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "/etc" (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "/etc" (cursor 0)
 	waitFor("修改值")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "修改值"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "修改值"
 	waitFor("的新值")
 	for range "/etc" {
-		tm.Send(tea.KeyMsg{Type: tea.KeyBackspace})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	}
 	tm.Type("/var/log")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to top-level editor screen
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm -> back to top-level editor screen
 	waitFor("restic_backup_paths = [/var/log, /srv/data]")
 
 	// remove the second item ("/srv/data")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // the only row (cursor reset to 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // the only row (cursor reset to 0)
 	waitFor("編輯清單項目")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> items menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> items menu
 	waitFor("的項目")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "/var/log" (0) -> "/srv/data" (1)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "/srv/data"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})  // "/var/log" (0) -> "/srv/data" (1)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "/srv/data"
 	waitFor("移除")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "修改值" (0) -> "移除" (1)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm removal -> back to top-level editor screen
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})  // "修改值" (0) -> "移除" (1)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm removal -> back to top-level editor screen
 	waitFor("restic_backup_paths = [/var/log]")
 
 	// save
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // the only row (0) -> "💾 存檔並離開" (1)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})  // the only row (0) -> "💾 存檔並離開" (1)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save
 	waitFor("✅ 已存檔")
 
 	if err := tm.Quit(); err != nil {
@@ -1190,20 +1200,20 @@ func TestEditRouter_Teatest_GroupVarsFlow_EscMirrorsDirtyDiscardGate(t *testing.
 	}
 
 	waitFor("dns_forwarders")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // clean editor: esc goes straight back, no confirm
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // clean editor: esc goes straight back, no confirm
 	waitFor("選一個")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // file picker: dns.yml (the only entry, cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // file picker: dns.yml (the only entry, cursor 0)
 	waitFor("dns_forwarders")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick the dns_forwarders entry
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // pick the dns_forwarders entry
 	waitFor("修改值")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "修改值"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "修改值"
 	waitFor("的新值")
 	tm.Type("1.1.1.1")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to the now-dirty editor
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm -> back to the now-dirty editor
 	waitFor("1.1.1.1")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // dirty editor: esc mirrors "🚪 不存檔離開"'s dirty gate
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // dirty editor: esc mirrors "🚪 不存檔離開"'s dirty gate
 	waitFor("確定要放棄離開嗎")
 	tm.Type("n") // decline discard -> back to the still-dirty editor
 	waitFor("1.1.1.1")
@@ -1228,38 +1238,38 @@ func TestEditRouter_Teatest_VaultFlow_CreateAddKeyAndSave(t *testing.T) {
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 
 	for i := 0; i < 2; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // top menu -> .vault/ (index 2)
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // top menu -> .vault/ (index 2)
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // vault file picker: "📍 輸入其他 vault 檔路徑" (only real entry besides 返回, cursor 0)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept default vault path
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm "create new plaintext vault file?" default yes
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // vault file picker: "📍 輸入其他 vault 檔路徑" (only real entry besides 返回, cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept default vault path
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm "create new plaintext vault file?" default yes
 
 	// vault editor (empty): items 0 新增 key, 1 存檔並離開, 2 不存檔離開
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 key"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "➕ 新增 key"
 	tm.Type("ipa_admin_password")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	tm.Type("s3cr3t")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm value -> back to editor
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm value -> back to editor
 
 	// editor items now: 0 ipa_admin_password entry, 1 新增 key, 2 存檔並離開, 3 不存檔離開
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // save -> back to vault file picker
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save -> back to vault file picker
 
 	// file picker items now: 0 <created file>, 1 輸入其他路徑, 2 返回
 	for i := 0; i < 2; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // back to top menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
 	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
 	// 7 快速建立最小 workspace, 8 離開
 	for i := 0; i < 8; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // quit
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 
@@ -1310,7 +1320,7 @@ func TestEditRouter_Teatest_VaultFlow_PickingRosterShapedFileStaysInWizard(t *te
 
 	// picker items: 0 ipa-identity.yaml, 1 main.yaml, 2 輸入其他, 3 返回.
 	waitFor("ipa-identity.yaml")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick ipa-identity.yaml (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // pick ipa-identity.yaml (cursor 0)
 
 	// The banner (roster-specific pointer) and the picker's own title
 	// ("still on the picker, not quit") render in the same first frame —
@@ -1321,8 +1331,8 @@ func TestEditRouter_Teatest_VaultFlow_PickingRosterShapedFileStaysInWizard(t *te
 		return strings.Contains(out, "roster — FreeIPA") && strings.Contains(out, "選一個")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // now pick main.yaml — wizard must still work
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // now pick main.yaml — wizard must still work
 	waitFor("foo = ")
 
 	if err := tm.Quit(); err != nil {
@@ -1355,23 +1365,23 @@ func TestEditRouter_Teatest_VaultFlow_EscMirrorsDirtyDiscardGate(t *testing.T) {
 	}
 
 	waitFor("foo = ")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // clean editor: esc goes straight back, no confirm
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // clean editor: esc goes straight back, no confirm
 	waitFor("選一個")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // file picker: main.yaml (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // file picker: main.yaml (cursor 0)
 	waitFor("foo = ")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick the foo entry
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // pick the foo entry
 	waitFor("修改值")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "修改值"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "修改值"
 	waitFor("的新值")
 	for range "bar" {
-		tm.Send(tea.KeyMsg{Type: tea.KeyBackspace})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	}
 	tm.Type("baz")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> back to the now-dirty editor
-	waitFor("foo = <已設定>")                  // displayVaultValue masks any real value (edit_tui_vault.go)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm -> back to the now-dirty editor
+	waitFor("foo = <已設定>")                       // displayVaultValue masks any real value (edit_tui_vault.go)
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // dirty editor: esc mirrors "🚪 不存檔離開"'s dirty gate
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // dirty editor: esc mirrors "🚪 不存檔離開"'s dirty gate
 	waitFor("確定要放棄離開嗎")
 	tm.Type("n")           // decline discard -> back to the still-dirty editor
 	waitFor("foo = <已設定>") // displayVaultValue masks any real value (edit_tui_vault.go)
@@ -1414,11 +1424,11 @@ func TestEditRouter_Teatest_RosterFlow_TopMenuReachesManager(t *testing.T) {
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster, 4 離開
 	for i := 0; i < 3; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> roster path prompt
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> roster path prompt
 	waitFor("Roster 檔路徑")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // accept the default (.vault/ipa-identity.yaml matches our fixture)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept the default (.vault/ipa-identity.yaml matches our fixture)
 	waitFor("👤 Users")
 
 	if err := tm.Quit(); err != nil {
@@ -1450,48 +1460,48 @@ func TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate(t *test
 	}
 
 	waitFor("👤 Users")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> Users menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> Users menu
 	waitFor("選一個查看/編輯欄位，或新增一個")
 	// menu: 0 "👤 alice", 1 "➕ 新增 User", 2 "↩ 返回".
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 User"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "➕ 新增 User"
 	waitFor("新 user 的名稱")
 	tm.Type("bob")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // valid -> appended
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // valid -> appended
 	waitFor("已新增 user bob")
 
 	// duplicate name: blocked by the validator, never written. menu is now
 	// 0 "👤 alice", 1 "👤 bob", 2 "➕ 新增 User", 3 "↩ 返回".
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 User"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "➕ 新增 User"
 	waitFor("新 user 的名稱")
 	tm.Type("bob")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("驗證沒過")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyEsc}) // Users menu -> roster manager
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // Users menu -> roster manager
 	waitFor("👥 Groups")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // "👤 Users" (0) -> "👥 Groups" (1)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // -> Groups menu
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})  // "👤 Users" (0) -> "👥 Groups" (1)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> Groups menu
 	waitFor("目前沒有任何 group")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 Group"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "➕ 新增 Group"
 	waitFor("分類")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // category: team (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // category: team (cursor 0)
 	waitFor("記得帶前綴")
 	tm.Type("team-ops")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // valid -> appended
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // valid -> appended
 	waitFor("已新增 group team-ops")
 
 	// wrong prefix for the chosen category: blocked by the validator. menu
 	// is now 0 "👥 team-ops", 1 "➕ 新增 Group", 2 "↩ 返回".
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "➕ 新增 Group"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "➕ 新增 Group"
 	waitFor("分類")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // category: team
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // category: team
 	waitFor("記得帶前綴")
 	tm.Type("ops-nomatch")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("驗證沒過")
 
 	if err := tm.Quit(); err != nil {
@@ -1544,15 +1554,15 @@ func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
 	}
 
 	waitFor("Command groups")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // command groups
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // command groups
 	waitFor("新增 command group")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("command group 名稱")
 	tm.Type("ops-status")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("完整 sudo 指令")
 	tm.Type("/usr/bin/systemctl status nginx")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("已新增 command group")
 
 	if err := tm.Quit(); err != nil {
@@ -1578,13 +1588,13 @@ func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
 		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 	ruleWaitFor("allow.commands")
-	ruleTM.Send(tea.KeyMsg{Type: tea.KeyDown})
-	ruleTM.Send(tea.KeyMsg{Type: tea.KeyDown})
-	ruleTM.Send(tea.KeyMsg{Type: tea.KeyDown})
-	ruleTM.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	ruleTM.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	ruleTM.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	ruleTM.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	ruleTM.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	ruleWaitFor("額外允許")
 	ruleTM.Type("/usr/bin/id")
-	ruleTM.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	ruleTM.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	ruleWaitFor("已更新")
 	if err := ruleTM.Quit(); err != nil {
 		t.Fatal(err)
@@ -1614,10 +1624,10 @@ func TestEditRouter_Teatest_RosterSudoRuleCanSetExplicitAllowAll(t *testing.T) {
 	pushRosterSudoRuleDetail(&router, dir, path, "ops-sudo", "")
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "allow.command_category") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "Allow all commands") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "確認 allow all") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Type("y")
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "✅ 已更新") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
@@ -1667,12 +1677,12 @@ func TestEditRouter_Teatest_RosterFlow_UserDetailPreviewAndScalarEditRoundTrips(
 
 	// items: 0 name,1 state,2 first,3 last,4 display_name,5 email,...
 	for i := 0; i < 5; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "email" -> straight to text input
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "email" -> straight to text input
 	waitFor("email")
 	tm.Type("alice@example.internal")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> re-validate + write -> back to detail
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm -> re-validate + write -> back to detail
 	waitFor("alice@example.internal")
 
 	if err := tm.Quit(); err != nil {
@@ -1715,12 +1725,12 @@ func TestEditRouter_Teatest_RosterFlow_GroupMembershipChecklistEditRoundTrips(t 
 	// items: 0 name,1 state,2 category,3 type,4 description,5 gid,
 	// 6 membership.authoritative,7 membership.users,8 membership.groups,9 返回.
 	for i := 0; i < 7; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // membership.users -> checklist (only alice, unchecked)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // membership.users -> checklist (only alice, unchecked)
 	waitFor("membership.users")
-	tm.Send(tea.KeyMsg{Type: tea.KeySpace}) // check alice (cursor 0)
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm -> re-validate + write -> back to detail
+	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // check alice (cursor 0)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm -> re-validate + write -> back to detail
 	waitFor("membership.users（共 1 位）")
 
 	if err := tm.Quit(); err != nil {
@@ -1768,19 +1778,19 @@ func TestEditRouter_Teatest_RosterFlow_DisablingUserSynchronizesEnabled(t *testi
 	// violation on its own (checkUsers only rejects state:disabled +
 	// enabled:true together).
 	for i := 0; i < 10; i++ {
-		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // "enabled" -> ["true","false"]
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "enabled" -> ["true","false"]
 	waitFor("true")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // pick "true" (cursor 0) -> write -> fresh detail (cursor reset)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // pick "true" (cursor 0) -> write -> fresh detail (cursor reset)
 	waitFor("enabled：true")
 
 	// Now flip state to disabled — the state editor must synchronize enabled.
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // "state" is index 1
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // "state" is index 1
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	waitFor("disabled")
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})  // choices ["present","disabled"]; pick "disabled"
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // synchronize enabled:false and write
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})  // choices ["present","disabled"]; pick "disabled"
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // synchronize enabled:false and write
 	waitFor("state：disabled")
 
 	if err := tm.Quit(); err != nil {
@@ -1830,11 +1840,11 @@ func TestEditRouter_Teatest_RosterFlow_MissingRosterOffersToCreateSkeleton(t *te
 	}
 
 	waitFor("要建立最小 roster 骨架嗎")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm, default yes
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm, default yes
 
 	waitFor("FreeIPA admin password")
 	tm.Type("s3cr3tpass")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	waitFor("👤 Users") // landed on the normal roster manager
 
@@ -1889,7 +1899,7 @@ func TestEditRouter_Teatest_RosterFlow_CreateSkeletonReusesExistingAdminPassword
 	}
 
 	waitFor("要建立最小 roster 骨架嗎")
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter}) // confirm, default yes -> straight to skeleton creation, no password prompt
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm, default yes -> straight to skeleton creation, no password prompt
 	waitFor("沿用 .vault/main.yaml 現有的 ipa_admin_password")
 
 	if err := tm.Quit(); err != nil {
