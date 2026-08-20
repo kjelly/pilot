@@ -113,17 +113,19 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 		return strings.Contains(checklistOutput.String(), `範本 "test monitored node" 的角色`)
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // first catalog role
-	// Checks "x]" rather than "[x]": toggling "[ ]" to "[x]" only changes
-	// the middle character under Bubble Tea v2's cell-level render diff,
-	// so the unchanged leading "[" is never retransmitted — only the "x]"
-	// that follows it (a genuine, permanent v2 rendering optimization
-	// confirmed by direct model inspection, not a timing fluke or a
-	// business-logic bug; see the analogous "變數值" comments in
-	// edit_tui_flows_test.go for the fuller explanation of the same
-	// underlying behavior).
+	// Checks "•]" rather than "[x]": this screen is now Huh-backed (see
+	// docs/superpowers/specs/2026-08-19-pilot-tui-v2-huh-migration-spec.md),
+	// and Huh's own MultiSelect renders a checked row as "[•]" rather than
+	// the hand-written multiSelectModel's "[x]" — a permitted rendering
+	// difference (Core Invariant 7 explicitly allows checkbox/cursor glyph
+	// differences), not a functional regression. Bubble Tea v2's cell-level
+	// render diff also means only the changed "•]" half of the bracket pair
+	// is retransmitted, not the unchanged leading "[" (see the analogous
+	// "變數值" comments in edit_tui_flows_test.go for the fuller explanation
+	// of that underlying behavior, which is unrelated to the glyph change).
 	teatest.WaitFor(t, teed, func(_ []byte) bool {
 		screen := checklistOutput.String()
-		return strings.Contains(screen, "x]") && strings.Contains(screen, inventory.Roles()[0].Name)
+		return strings.Contains(screen, "•]") && strings.Contains(screen, inventory.Roles()[0].Name)
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {

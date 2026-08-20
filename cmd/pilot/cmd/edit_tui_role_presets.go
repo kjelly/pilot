@@ -144,17 +144,21 @@ func pushRolePresetManager(r *editRouterModel, dir, path string, hf *inventory.H
 		r.err = err
 		return nil
 	}
-	items := make([]string, 0, len(presets)+3)
+	// A preset's own Label is already validated unique (validateRolePresets),
+	// so it doubles as the row's Choice.ID; the fixed trailing rows are
+	// namespaced under this screen.
+	choices := make([]tui.Choice, 0, len(presets)+3)
 	for _, preset := range presets {
-		items = append(items, fmt.Sprintf("📝 %s — %s", preset.Label, strings.Join(preset.Roles, ", ")))
+		choices = append(choices, tui.Choice{ID: preset.Label, Label: fmt.Sprintf("📝 %s — %s", preset.Label, strings.Join(preset.Roles, ", "))})
 	}
-	items = append(items, "➕ 新增範本")
+	choices = append(choices, tui.Choice{ID: "hosts.role_preset_manager.create", Label: "➕ 新增範本"})
 	if customized {
-		items = append(items, "↺ 還原為內建範本")
+		choices = append(choices, tui.Choice{ID: "hosts.role_preset_manager.restore", Label: "↺ 還原為內建範本"})
 	}
-	items = append(items, "↩ 返回")
+	choices = append(choices, tui.Choice{ID: "hosts.role_preset_manager.back", Label: "↩ 返回"})
 	title := fmt.Sprintf("管理 %s", rolePresetPath(dir))
-	return r.transitionTo(newSelectModelWithScreenID("hosts.role_preset_manager", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "hosts.role_preset_manager", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -176,8 +180,13 @@ func pushRolePresetManager(r *editRouterModel, dir, path string, hf *inventory.H
 
 func pushRolePresetAction(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, presets []rolePreset, idx int) tea.Cmd {
 	title := fmt.Sprintf("範本 %q", presets[idx].Label)
-	items := []string{"✏ 修改名稱與角色", "🗑 刪除範本", "↩ 返回"}
-	return r.transitionTo(newSelectModelWithScreenID("hosts.role_preset_action", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "hosts.role_preset_action.edit", Label: "✏ 修改名稱與角色"},
+		{ID: "hosts.role_preset_action.delete", Label: "🗑 刪除範本"},
+		{ID: "hosts.role_preset_action.back", Label: "↩ 返回"},
+	}
+	spec := tui.SelectSpec{ScreenID: "hosts.role_preset_action", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -211,7 +220,8 @@ func pushRolePresetName(r *editRouterModel, dir, path string, hf *inventory.Host
 		}
 		return nil
 	}
-	return r.transitionTo(newTextInputModel("角色範本名稱", current, validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{Title: "角色範本名稱", Default: current, Validate: validate}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			// create flow (idx < 0): back to the preset list; rename flow:
@@ -234,12 +244,16 @@ func pushRolePresetName(r *editRouterModel, dir, path string, hf *inventory.Host
 
 func pushRolePresetChecklist(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, presets []rolePreset, idx int) tea.Cmd {
 	roles := inventory.Roles()
-	items := make([]multiSelectItem, len(roles))
+	choices := make([]tui.MultiSelectChoice, len(roles))
 	for i, role := range roles {
-		items[i] = multiSelectItem{ID: role.Name, Label: role.Name, Description: role.Description, Checked: hasRole(presets[idx].Roles, role.Name)}
+		choices[i] = tui.MultiSelectChoice{
+			Choice:  tui.Choice{ID: role.Name, Label: role.Name, Description: role.Description},
+			Checked: hasRole(presets[idx].Roles, role.Name),
+		}
 	}
 	title := fmt.Sprintf("範本 %q 的角色", presets[idx].Label)
-	return r.transitionTo(newMultiSelectModelWithScreenID("hosts.role_preset_checklist", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.MultiSelectSpec{ScreenID: "hosts.role_preset_checklist", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().MultiSelect(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.MultiSelectScreen)
 		if m.Canceled() {
 			return pushRolePresetManager(r, dir, path, hf, name, "")
@@ -260,7 +274,8 @@ func pushRolePresetChecklist(r *editRouterModel, dir, path string, hf *inventory
 
 func pushConfirmDeleteRolePreset(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, presets []rolePreset, idx int) tea.Cmd {
 	question := fmt.Sprintf("確定刪除範本 %q 嗎？", presets[idx].Label)
-	return r.transitionTo(newConfirmModel(question, false), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.ConfirmSpec{Title: question, Default: false}
+	return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.ConfirmScreen)
 		if !m.Value() {
 			return pushRolePresetAction(r, dir, path, hf, name, presets, idx)
@@ -276,7 +291,8 @@ func pushConfirmDeleteRolePreset(r *editRouterModel, dir, path string, hf *inven
 
 func pushConfirmRestoreRolePresets(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
 	question := fmt.Sprintf("確定刪除 %s，還原為內建範本嗎？", rolePresetPath(dir))
-	return r.transitionTo(newConfirmModel(question, false), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.ConfirmSpec{Title: question, Default: false}
+	return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.ConfirmScreen)
 		if !m.Value() {
 			return pushRolePresetManager(r, dir, path, hf, name, "")

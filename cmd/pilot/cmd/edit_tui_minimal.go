@@ -15,16 +15,17 @@ import (
 // intentionally owns no separate configuration format: every action reads or
 // writes the same workspace files as the advanced top-level menu.
 func pushMinimalWorkspaceWizard(r *editRouterModel, dir, banner string) tea.Cmd {
-	items := []string{
-		"設定主機與角色",
-		"建立／更新最小設定骨架",
-		"設定 group_vars（已從角色範本建立）",
-		"設定 vault 必要秘密",
-		"驗證並檢查是否可部署",
-		"改用進階設定",
-		"↩  返回",
+	choices := []tui.Choice{
+		{ID: "minimal.wizard.hosts", Label: "設定主機與角色"},
+		{ID: "minimal.wizard.skeleton", Label: "建立／更新最小設定骨架"},
+		{ID: "minimal.wizard.group_vars", Label: "設定 group_vars（已從角色範本建立）"},
+		{ID: "minimal.wizard.vault", Label: "設定 vault 必要秘密"},
+		{ID: "minimal.wizard.readiness", Label: "驗證並檢查是否可部署"},
+		{ID: "minimal.wizard.advanced", Label: "改用進階設定"},
+		{ID: "minimal.wizard.back", Label: "↩  返回"},
 	}
-	return r.transitionTo(newSelectModel("快速建立最小 workspace", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{Title: "快速建立最小 workspace", Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
@@ -140,6 +141,23 @@ func (route minimalWorkspaceRoute) label() string {
 	}
 }
 
+// id is route's stable automation identity — the enum value itself is
+// already a fixed, finite identity, so this just names it.
+func (route minimalWorkspaceRoute) id() string {
+	switch route {
+	case minimalRouteHosts:
+		return "minimal.readiness.hosts"
+	case minimalRouteGroupVars:
+		return "minimal.readiness.group_vars"
+	case minimalRouteVault:
+		return "minimal.readiness.vault"
+	case minimalRouteAdvanced:
+		return "minimal.readiness.advanced"
+	default:
+		return ""
+	}
+}
+
 // minimalWorkspaceReadyBanner states the deploy-ready outcome together with the
 // exact commands for this workspace, so the operator never has to guess the
 // path the quick flow just built.
@@ -162,14 +180,15 @@ func pushMinimalWorkspaceReadiness(r *editRouterModel, dir string) tea.Cmd {
 	}
 
 	routes := minimalWorkspaceRoutes(checks)
-	items := make([]string, 0, len(routes)+1)
+	choices := make([]tui.Choice, 0, len(routes)+1)
 	for _, route := range routes {
-		items = append(items, route.label())
+		choices = append(choices, tui.Choice{ID: route.id(), Label: route.label()})
 	}
-	items = append(items, "返回快速流程")
+	choices = append(choices, tui.Choice{ID: "minimal.readiness.back", Label: "返回快速流程"})
 
+	spec := tui.SelectSpec{ScreenID: "edit.minimal.readiness", Title: "還不能部署 — 選一個要修的地方", Choices: choices}
 	return r.transitionTo(
-		newSelectModelWithScreenID("edit.minimal.readiness", "還不能部署 — 選一個要修的地方", items),
+		r.uiFactory().Select(spec),
 		formatCompletenessReport(checks),
 		func(r *editRouterModel, s screen) tea.Cmd {
 			m := s.(tui.SelectScreen)
