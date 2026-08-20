@@ -746,6 +746,18 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 
 	waitFor("prometheus")
 
+	// Home the cursor before counting rows: a Huh-backed checklist starts
+	// focused on the first ALREADY-CHECKED option, not on row 0 (huh
+	// v2.0.3 field_multiselect.go, "set the cursor to the existing value
+	// or the last selected option"), and this host starts with docker
+	// (row 9) checked. Pressing Up past the top — huh clamps the cursor
+	// at 0 — is exactly how the production automation driver's own
+	// moveCursor normalizes the cursor before navigating, so the DOWN
+	// count below means the same thing it always did regardless of which
+	// roles happen to be checked on entry.
+	for i := 0; i < len(inventory.Roles()); i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyUp})
+	}
 	// roleContracts order: 0 freeipa-server .. 19 host-monitoring .. 20 prometheus.
 	for i := 0; i < 20; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
