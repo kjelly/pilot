@@ -70,7 +70,14 @@ func (p *promptAutomation) selectPrompt(prompt string, items []string) (int, err
 	if err != nil {
 		return 0, err
 	}
-	m := standaloneScreen{s: newSelectModel(prompt, items)}
+	choices := make([]tui.Choice, len(items))
+	for i, it := range items {
+		choices[i] = tui.Choice{Label: it}
+	}
+	m := standaloneScreen{s: deployUIFactory.Select(tui.SelectSpec{Title: prompt, Choices: choices})}
+	if err := initStandaloneScreen(&m); err != nil {
+		return 0, err
+	}
 	p.render(prompt, viewContent(m.View()))
 	keys := make([]string, 0, index+1)
 	for i := 0; i < index; i++ {
@@ -98,7 +105,10 @@ func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) 
 	if !ok {
 		return "", fmt.Errorf("no automation answer for text prompt")
 	}
-	m := standaloneScreen{s: newTextInputModel(prompt, def, validate)}
+	m := standaloneScreen{s: deployUIFactory.Input(tui.InputSpec{Title: prompt, Default: def, Validate: validate})}
+	if err := initStandaloneScreen(&m); err != nil {
+		return "", err
+	}
 	p.render(prompt, viewContent(m.View()))
 	keys := make([]string, 0, 3)
 	if answer.Text != "" {
@@ -136,7 +146,11 @@ func (p *promptAutomation) confirmPrompt(prompt string, defaultYes bool) bool {
 		p.err = fmt.Errorf("no automation answer for confirm prompt")
 		return false
 	}
-	m := standaloneScreen{s: newConfirmModel(prompt, defaultYes)}
+	m := standaloneScreen{s: deployUIFactory.Confirm(tui.ConfirmSpec{Title: prompt, Default: defaultYes})}
+	if err := initStandaloneScreen(&m); err != nil {
+		p.err = err
+		return false
+	}
 	p.render(prompt, viewContent(m.View()))
 	key := keyRuneMsg('n')
 	if *answer.Confirm {
@@ -174,5 +188,37 @@ func applyStandaloneKey(m *standaloneScreen, msg tea.KeyPressMsg) error {
 		return fmt.Errorf("prompt returned unexpected model")
 	}
 	*m = updated
+	return nil
+}
+
+// initStandaloneScreen runs m's Init() and drains whatever tea.Cmd
+// cascade it returns, feeding each resulting message straight back into
+// Update — exactly what a real tea.Program's event loop already does
+// for deploy_tui.go's runSelectProgram/runTextProgram/runConfirmProgram
+// (which construct a real Program and call .Run()). This automation
+// path drives a standaloneScreen directly instead, so nothing else ever
+// calls Init() for it. The hand-written primitives tolerated that
+// (their Update logic doesn't depend on Init having run), but a Huh
+// screen does: Init() is what activates the wrapped Form's first group
+// and focuses its field — skip it and every key this function sends is
+// silently dropped, since nothing is listening yet. The 10-iteration
+// bound matches the deepest real cascade observed (Huh's own
+// nextFieldMsg -> nextGroupMsg chain is 2 steps); it exists only so a
+// future cascade that never terminates can't hang this call forever.
+func initStandaloneScreen(m *standaloneScreen) error {
+	cmd := m.Init()
+	for i := 0; cmd != nil && i < 10; i++ {
+		msg := cmd()
+		if msg == nil {
+			return nil
+		}
+		next, c := m.Update(msg)
+		updated, ok := next.(standaloneScreen)
+		if !ok {
+			return fmt.Errorf("prompt returned unexpected model")
+		}
+		*m = updated
+		cmd = c
+	}
 	return nil
 }

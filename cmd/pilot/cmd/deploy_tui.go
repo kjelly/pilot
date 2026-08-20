@@ -57,16 +57,26 @@ import (
 	"github.com/kjelly/pilot/internal/tui"
 )
 
+// deployUIFactory is the Factory every standalone deploy prompt builds
+// its screen from — deploy has no router to hold this (see the package
+// doc comment above), so it's a package-level equivalent of
+// editRouterModel.uiFactory().
+var deployUIFactory tui.Factory = tui.NewHuhFactory()
+
 // runSelectProgram is promptSelectIndex's Bubble Tea equivalent. It
-// runs selectModel wrapped in standaloneScreen (tui_screen.go) since
-// selectModel itself never calls tea.Quit — only a router (or, here,
-// standaloneScreen standing in for one) decides when a one-shot
-// prompt's Program should actually exit.
+// runs the screen wrapped in standaloneScreen (tui_screen.go) since a
+// router-embedded screen never calls tea.Quit itself — only a router
+// (or, here, standaloneScreen standing in for one) decides when a
+// one-shot prompt's Program should actually exit.
 func runSelectProgram(label string, items []string) (int, error) {
 	if activePromptAutomation != nil {
 		return activePromptAutomation.selectPrompt(label, items)
 	}
-	m := standaloneScreen{s: newSelectModel(label, items)}
+	choices := make([]tui.Choice, len(items))
+	for i, it := range items {
+		choices[i] = tui.Choice{Label: it}
+	}
+	m := standaloneScreen{s: deployUIFactory.Select(tui.SelectSpec{Title: label, Choices: choices})}
 	final, err := tea.NewProgram(m, tea.WithOutput(os.Stdout)).Run()
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", errDeployAborted, err)
@@ -83,7 +93,7 @@ func runTextProgram(label, def string, validate func(string) error) (string, err
 	if activePromptAutomation != nil {
 		return activePromptAutomation.textPrompt(label, def, validate)
 	}
-	m := standaloneScreen{s: newTextInputModel(label, def, validate)}
+	m := standaloneScreen{s: deployUIFactory.Input(tui.InputSpec{Title: label, Default: def, Validate: validate})}
 	final, err := tea.NewProgram(m, tea.WithOutput(os.Stdout)).Run()
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", errDeployAborted, err)
@@ -97,14 +107,14 @@ func runTextProgram(label, def string, validate func(string) error) (string, err
 
 // runConfirmProgram is promptConfirm's Bubble Tea equivalent — it
 // matches promptConfirm's existing contract exactly: it never returns
-// an error, and esc/ctrl+c resolves to "no" (confirmModel.Canceled()
+// an error, and esc/ctrl+c resolves to "no" (ConfirmScreen.Canceled()
 // is always false; see tui_confirm.go's doc comment), not a
 // wizard-level abort.
 func runConfirmProgram(question string, defaultYes bool) bool {
 	if activePromptAutomation != nil {
 		return activePromptAutomation.confirmPrompt(question, defaultYes)
 	}
-	m := standaloneScreen{s: newConfirmModel(question, defaultYes)}
+	m := standaloneScreen{s: deployUIFactory.Confirm(tui.ConfirmSpec{Title: question, Default: defaultYes})}
 	final, err := tea.NewProgram(m, tea.WithOutput(os.Stdout)).Run()
 	if err != nil {
 		return false
