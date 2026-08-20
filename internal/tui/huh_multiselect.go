@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 	huh "charm.land/huh/v2"
 )
@@ -57,9 +59,38 @@ func NewHuhMultiSelect(spec MultiSelectSpec) MultiSelectScreen {
 	m.field = huh.NewMultiSelect[choiceValue]().
 		Title(spec.Title).
 		Options(options...).
-		Value(&m.checked)
+		Value(&m.checked).
+		Height(huhListFieldHeight(spec.Title, len(spec.Choices)))
 	m.form = newPilotForm(m.field)
 	return m
+}
+
+// huhListFieldHeight is the explicit field height a Huh MultiSelect must
+// be given so that every option actually renders.
+//
+// Leaving the height unset is not an option, measured against huh
+// v2.0.3: MultiSelect.updateViewportSize() computes an automatic height
+// as "one line per option" (which never included the title) and then
+// subtracts the title/description height from it anyway, so an
+// auto-height checklist silently drops its LAST option row — and a
+// single-option checklist renders no rows at all, just an empty frame.
+// huh's Select does not have this defect (its height-0 branch skips the
+// subtraction), which is why only checklist screens were affected.
+//
+// Sizing the field to "the title's lines plus one line per option" makes
+// that subtraction land on exactly the number of options, reproducing
+// Select's own auto-height behaviour. options is floored at 1 so an
+// empty option set still renders its title rather than collapsing.
+//
+// Known limit, inherited rather than introduced: a title long enough to
+// wrap counts as more rendered lines than it has newlines, so a wrapped
+// title would still cost one option row. Pilot's checklist titles are
+// single-line and short enough not to wrap at any usual terminal width.
+func huhListFieldHeight(title string, options int) int {
+	if options < 1 {
+		options = 1
+	}
+	return options + strings.Count(title, "\n") + 1
 }
 
 func (m *huhMultiSelectScreen) Init() tea.Cmd { return m.form.Init() }

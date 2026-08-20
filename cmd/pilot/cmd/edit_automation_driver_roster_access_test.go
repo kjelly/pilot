@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 func TestEditAutomationDriverRosterAccessFlow_HostgroupAndHBAC(t *testing.T) {
@@ -143,17 +144,23 @@ func TestPushRosterHostgroupHostgroups_ExcludesSelfFromChoices(t *testing.T) {
 	var router editRouterModel
 	pushRosterHostgroupHostgroups(&router, dir, path, "hg-a", nil)
 
-	list, ok := router.current.(multiSelectModel)
+	// Inspected through the typed-interface / AutomationState contract
+	// rather than a concrete type assertion: checklist() now builds its
+	// screen through r.uiFactory() (Huh-backed in production), so the
+	// concrete type is deliberately no longer this package's
+	// multiSelectModel. The offered choices themselves are unchanged.
+	list, ok := router.current.(tui.MultiSelectScreen)
 	if !ok {
-		t.Fatalf("router.current = %T, want multiSelectModel", router.current)
+		t.Fatalf("router.current = %T, want tui.MultiSelectScreen", router.current)
 	}
-	for _, item := range list.items {
+	items := list.AutomationState().Items
+	for _, item := range items {
 		if item.Label == "hg-a" {
-			t.Fatalf("choices included hg-a itself: %+v", list.items)
+			t.Fatalf("choices included hg-a itself: %+v", items)
 		}
 	}
-	if len(list.items) != 1 || list.items[0].Label != "hg-b" {
-		t.Fatalf("choices = %+v, want just [hg-b]", list.items)
+	if len(items) != 1 || items[0].Label != "hg-b" {
+		t.Fatalf("choices = %+v, want just [hg-b]", items)
 	}
 }
 

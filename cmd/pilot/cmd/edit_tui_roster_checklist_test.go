@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 func writeChecklistRoster(t *testing.T) (dir, path string) {
@@ -85,12 +86,19 @@ func TestRosterChecklistEscapeRoutesEveryChecklist(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var router editRouterModel
 			tt.open(&router)
-			if _, ok := router.current.(multiSelectModel); !ok {
-				t.Fatalf("initial screen = %T, want multiSelectModel", router.current)
+			// Identified by the typed-interface contract rather than a
+			// concrete type: checklist() now builds its screen through
+			// r.uiFactory() (Huh-backed in production), so "is a
+			// checklist on screen?" is tui.MultiSelectScreen, not this
+			// package's multiSelectModel. Every cancel destination below
+			// is a single-select or detail screen, which does not satisfy
+			// it — so the "stuck" check keeps exactly its old strength.
+			if _, ok := router.current.(tui.MultiSelectScreen); !ok {
+				t.Fatalf("initial screen = %T, want tui.MultiSelectScreen", router.current)
 			}
 			next, _ := router.Update(tea.KeyPressMsg{Code: 27, Text: "\x1b"})
 			router = next.(editRouterModel)
-			if _, stuck := router.current.(multiSelectModel); stuck {
+			if _, stuck := router.current.(tui.MultiSelectScreen); stuck {
 				t.Fatalf("raw Escape left the finished checklist on screen:\n%s", viewContent(router.View()))
 			}
 			if !strings.Contains(viewContent(router.View()), tt.wantTitle) {

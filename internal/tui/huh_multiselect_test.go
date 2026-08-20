@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -306,6 +307,56 @@ func TestHuhMultiSelectChineseAndEmojiLabels(t *testing.T) {
 	}
 	if got := m.CheckedLabels(); !equalStrings(got, []string{"監控 📈"}) {
 		t.Fatalf("CheckedLabels=%v", got)
+	}
+}
+
+// TestHuhMultiSelectRendersEveryOptionRow is the rendering counterpart to
+// the AutomationState assertions above, and exists because they are not a
+// substitute for it: a checklist whose snapshot lists every option can
+// still draw none of them. huh v2.0.3's auto-height MultiSelect does
+// exactly that (see huhListFieldHeight) — it dropped the last option row
+// always, and with a single option drew an empty frame, while
+// AutomationState stayed perfectly correct. The one-option case is the
+// one Pilot hits constantly (a roster with a single access group, a
+// single command group, ...), so every size from 1 upward is checked.
+func TestHuhMultiSelectRendersEveryOptionRow(t *testing.T) {
+	for _, n := range []int{1, 2, 3, 8} {
+		choices := make([]MultiSelectChoice, n)
+		want := make([]string, n)
+		for i := range choices {
+			label := "選項-" + strconv.Itoa(i)
+			choices[i] = MultiSelectChoice{Choice: Choice{ID: strconv.Itoa(i), Label: label}}
+			want[i] = label
+		}
+		m := NewHuhMultiSelect(MultiSelectSpec{
+			ScreenID: "render.rows",
+			Title:    "允許登入的 access group（space 勾選、enter 完成）",
+			Choices:  choices,
+		})
+		m.Init()
+		got := m.View().Content
+		for _, label := range want {
+			if !strings.Contains(got, label) {
+				t.Fatalf("n=%d: option %q missing from rendered view:\n%s", n, label, got)
+			}
+		}
+	}
+}
+
+// TestHuhMultiSelectRendersAfterWindowSize guards the same property once
+// the router has replayed its window size into the screen, which is what
+// every real `pilot edit` transition does (editRouterModel.transitionTo).
+func TestHuhMultiSelectRendersAfterWindowSize(t *testing.T) {
+	m := NewHuhMultiSelect(MultiSelectSpec{
+		ScreenID: "render.rows.wsz",
+		Title:    "允許登入的 access group（space 勾選、enter 完成）",
+		Choices:  []MultiSelectChoice{{Choice: Choice{ID: "access-smoke", Label: "access-smoke"}}},
+	})
+	m.Init()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = next.(MultiSelectScreen)
+	if got := m.View().Content; !strings.Contains(got, "access-smoke") {
+		t.Fatalf("sole option missing after WindowSizeMsg:\n%s", got)
 	}
 }
 

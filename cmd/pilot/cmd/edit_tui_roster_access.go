@@ -19,8 +19,14 @@ func pushRosterHostAccessMenu(r *editRouterModel, dir, path, banner string) tea.
 		r.err = err
 		return nil
 	}
-	items := []string{"Hostgroups", "HBAC rules", fmt.Sprintf("hbac.disable_allow_all：%t", disabled), "↩  返回"}
-	return r.transitionTo(newSelectModelWithScreenID("roster.access.top", "Host access — 誰可以登入哪些主機", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "roster.access.top.hostgroups", Label: "Hostgroups"},
+		{ID: "roster.access.top.hbac_rules", Label: "HBAC rules"},
+		{ID: "roster.access.top.disable_allow_all", Label: fmt.Sprintf("hbac.disable_allow_all：%t", disabled)},
+		{ID: "roster.access.top.back", Label: "↩  返回"},
+	}
+	spec := tui.SelectSpec{ScreenID: "roster.access.top", Title: "Host access — 誰可以登入哪些主機", Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() || m.Selected() == 3 {
 			return pushRosterManager(r, dir, path, "")
@@ -47,12 +53,18 @@ func pushRosterHostgroupsMenu(r *editRouterModel, dir, path, banner string) tea.
 		r.err = err
 		return nil
 	}
-	items := make([]string, 0, len(names)+2)
+	// The hostgroup's own name is its stable identity (HBAC targets and
+	// nested hostgroup membership both reference it by name).
+	choices := make([]tui.Choice, 0, len(names)+2)
 	for _, n := range names {
-		items = append(items, "🖥 "+n)
+		choices = append(choices, tui.Choice{ID: n, Label: "🖥 " + n})
 	}
-	items = append(items, "➕ 新增 Hostgroup", "↩  返回")
-	return r.transitionTo(newSelectModelWithScreenID("roster.hostgroups.list", "Hostgroups — 已 enroll 主機的群組", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	choices = append(choices,
+		tui.Choice{ID: "roster.hostgroups.list.add", Label: "➕ 新增 Hostgroup"},
+		tui.Choice{ID: "roster.hostgroups.list.back", Label: "↩  返回"},
+	)
+	spec := tui.SelectSpec{ScreenID: "roster.hostgroups.list", Title: "Hostgroups — 已 enroll 主機的群組", Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterHostAccessMenu(r, dir, path, "")
@@ -68,12 +80,13 @@ func pushRosterHostgroupsMenu(r *editRouterModel, dir, path, banner string) tea.
 }
 
 func pushRosterAddHostgroup(r *editRouterModel, dir, path string) tea.Cmd {
-	return r.transitionTo(newTextInputModelWithScreenID("roster.hostgroup.add", "Hostgroup 名稱(例如 webhosts)", "", func(v string) error {
+	spec := tui.InputSpec{ScreenID: "roster.hostgroup.add", Title: "Hostgroup 名稱(例如 webhosts)", Validate: func(v string) error {
 		if strings.TrimSpace(v) == "" {
 			return fmt.Errorf("不能留空")
 		}
 		return nil
-	}), "", func(r *editRouterModel, s screen) tea.Cmd {
+	}}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterHostgroupsMenu(r, dir, path, "")
@@ -99,14 +112,15 @@ func pushRosterHostgroupDetail(r *editRouterModel, dir, path, name, banner strin
 	mem := rosterSubmap(f, "membership")
 	hosts := rosterStringSlice(mem, "hosts")
 	hostgroups := rosterStringSlice(mem, "hostgroups")
-	items := []string{
-		"name：" + name + "（唯讀）",
-		"description：" + rosterDisplay(f, "description"),
-		fmt.Sprintf("membership.hosts（%d 台；輸入逗號分隔 FQDN）", len(hosts)),
-		fmt.Sprintf("membership.hostgroups（%d 個巢狀 hostgroup）", len(hostgroups)),
-		"↩  返回",
+	choices := []tui.Choice{
+		{ID: "roster.hostgroup.detail.name", Label: "name：" + name + "（唯讀）"},
+		{ID: "roster.hostgroup.detail.description", Label: "description：" + rosterDisplay(f, "description")},
+		{ID: "roster.hostgroup.detail.membership_hosts", Label: fmt.Sprintf("membership.hosts（%d 台；輸入逗號分隔 FQDN）", len(hosts))},
+		{ID: "roster.hostgroup.detail.membership_hostgroups", Label: fmt.Sprintf("membership.hostgroups（%d 個巢狀 hostgroup）", len(hostgroups))},
+		{ID: "roster.hostgroup.detail.back", Label: "↩  返回"},
 	}
-	return r.transitionTo(newSelectModelWithScreenID("roster.hostgroup.detail", "Hostgroup "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.hostgroup.detail", Title: "Hostgroup " + name, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() || m.Selected() == 4 {
 			return pushRosterHostgroupsMenu(r, dir, path, "")
@@ -126,7 +140,8 @@ func pushRosterHostgroupDetail(r *editRouterModel, dir, path, name, banner strin
 }
 
 func pushRosterHostgroupText(r *editRouterModel, dir, path, name, key, current string) tea.Cmd {
-	return r.transitionTo(newTextInputModelWithScreenID("roster.hostgroup.field_text", key, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.hostgroup.field_text", Title: key, Default: current}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterHostgroupDetail(r, dir, path, name, "")
@@ -136,7 +151,12 @@ func pushRosterHostgroupText(r *editRouterModel, dir, path, name, key, current s
 }
 
 func pushRosterHostgroupHosts(r *editRouterModel, dir, path, name string, current []string) tea.Cmd {
-	return r.transitionTo(newTextInputModelWithScreenID("roster.hostgroup.field_hosts", "已 enroll 主機 FQDN（逗號分隔；例如 web1.ipa.pilot.internal）", strings.Join(current, ", "), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{
+		ScreenID: "roster.hostgroup.field_hosts",
+		Title:    "已 enroll 主機 FQDN（逗號分隔；例如 web1.ipa.pilot.internal）",
+		Default:  strings.Join(current, ", "),
+	}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterHostgroupDetail(r, dir, path, name, "")
@@ -228,14 +248,19 @@ func pushRosterHBACMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		r.err = err
 		return nil
 	}
-	items := make([]string, 0, len(names)+2)
+	// The HBAC rule's own name is its stable identity.
+	choices := make([]tui.Choice, 0, len(names)+2)
 	for _, n := range names {
-		items = append(items, "🔑 "+n)
+		choices = append(choices, tui.Choice{ID: n, Label: "🔑 " + n})
 	}
-	items = append(items, "➕ 新增登入規則", "↩  返回")
-	return r.transitionTo(newSelectModelWithScreenID("roster.hbac.list", "HBAC rules — group → hostgroup", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	choices = append(choices,
+		tui.Choice{ID: "roster.hbac.list.add", Label: "➕ 新增登入規則"},
+		tui.Choice{ID: "roster.hbac.list.back", Label: "↩  返回"},
+	)
+	spec := tui.SelectSpec{ScreenID: "roster.hbac.list", Title: "HBAC rules — group → hostgroup", Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
-		if m.Canceled() || m.Selected() == len(items)-1 {
+		if m.Canceled() || m.Selected() == len(choices)-1 {
 			return pushRosterHostAccessMenu(r, dir, path, "")
 		}
 		if m.Selected() < len(names) {
@@ -246,12 +271,13 @@ func pushRosterHBACMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 }
 
 func pushRosterAddHBACRuleName(r *editRouterModel, dir, path string) tea.Cmd {
-	return r.transitionTo(newTextInputModelWithScreenID("roster.hbac.add_name", "HBAC rule 名稱", "", func(v string) error {
+	spec := tui.InputSpec{ScreenID: "roster.hbac.add_name", Title: "HBAC rule 名稱", Validate: func(v string) error {
 		if strings.TrimSpace(v) == "" {
 			return fmt.Errorf("不能留空")
 		}
 		return nil
-	}), "", func(r *editRouterModel, s screen) tea.Cmd {
+	}}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterHBACMenu(r, dir, path, "")
@@ -278,12 +304,18 @@ func accessGroupChoices(path string) ([]string, error) {
 	return out, nil
 }
 
+// checklist is the shared multi-select used by every roster relationship
+// picker (HBAC groups/hostgroups/services, nested hostgroups, sudo role
+// groups and command groups). Every option is a live roster entity named
+// by a unique string — a group, hostgroup, PAM service or command-group
+// name — so that name is both the Label and the stable Choice.ID.
 func checklist(r *editRouterModel, screenID, title string, options, current []string, next func(*editRouterModel, []string) tea.Cmd, cancel func(*editRouterModel) tea.Cmd) tea.Cmd {
-	items := make([]multiSelectItem, len(options))
+	choices := make([]tui.MultiSelectChoice, len(options))
 	for i, o := range options {
-		items[i] = multiSelectItem{Label: o, Checked: hasRole(current, o)}
+		choices[i] = tui.MultiSelectChoice{Choice: tui.Choice{ID: o, Label: o}, Checked: hasRole(current, o)}
 	}
-	return r.transitionTo(newMultiSelectModelWithScreenID(screenID, title+"（space 勾選、enter 完成）", items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.MultiSelectSpec{ScreenID: screenID, Title: title + "（space 勾選、enter 完成）", Choices: choices}
+	return r.transitionTo(r.uiFactory().MultiSelect(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.MultiSelectScreen)
 		if m.Canceled() {
 			return cancel(r)
@@ -344,8 +376,14 @@ func pushRosterHBACDetail(r *editRouterModel, dir, path, name, banner string) te
 	}
 	sub := rosterSubmap(f, "subjects")
 	tar := rosterSubmap(f, "targets")
-	items := []string{fmt.Sprintf("subjects.groups（%v）", rosterStringSlice(sub, "groups")), fmt.Sprintf("targets.hostgroups（%v）", rosterStringSlice(tar, "hostgroups")), fmt.Sprintf("services（%v）", rosterStringSlice(f, "services")), "↩  返回"}
-	return r.transitionTo(newSelectModelWithScreenID("roster.hbac.detail", "HBAC rule "+name, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "roster.hbac.detail.subjects_groups", Label: fmt.Sprintf("subjects.groups（%v）", rosterStringSlice(sub, "groups"))},
+		{ID: "roster.hbac.detail.targets_hostgroups", Label: fmt.Sprintf("targets.hostgroups（%v）", rosterStringSlice(tar, "hostgroups"))},
+		{ID: "roster.hbac.detail.services", Label: fmt.Sprintf("services（%v）", rosterStringSlice(f, "services"))},
+		{ID: "roster.hbac.detail.back", Label: "↩  返回"},
+	}
+	spec := tui.SelectSpec{ScreenID: "roster.hbac.detail", Title: "HBAC rule " + name, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() || m.Selected() == 3 {
 			return pushRosterHBACMenu(r, dir, path, "")

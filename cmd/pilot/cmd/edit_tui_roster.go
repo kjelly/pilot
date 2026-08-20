@@ -40,7 +40,8 @@ import (
 
 func pushRosterPathPrompt(r *editRouterModel, dir string) tea.Cmd {
 	def := filepath.Join(dir, ".vault", "ipa-identity.yaml")
-	return r.transitionTo(newTextInputModelWithScreenID("roster.path", "Roster 檔路徑(canonical FreeIPA roster)", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.path", Title: "Roster 檔路徑(canonical FreeIPA roster)", Default: def}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
@@ -84,9 +85,16 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		}
 	}
 
-	items := []string{"👤 Users", "👥 Groups", "🔐 Host access", "🛡️  Sudo commands & rules", "↩  返回"}
+	choices := []tui.Choice{
+		{ID: "roster.top.users", Label: "👤 Users"},
+		{ID: "roster.top.groups", Label: "👥 Groups"},
+		{ID: "roster.top.host_access", Label: "🔐 Host access"},
+		{ID: "roster.top.sudo", Label: "🛡️  Sudo commands & rules"},
+		{ID: "roster.top.back", Label: "↩  返回"},
+	}
 	title := fmt.Sprintf("管理 %s", path)
-	return r.transitionTo(newSelectModelWithScreenID("roster.top", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.top", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -144,7 +152,8 @@ const (
 // posture as pushVaultOpen's "不存在，要建立新的明文 vault 檔嗎？" confirm.
 func pushRosterCreateConfirm(r *editRouterModel, dir, path string) tea.Cmd {
 	question := fmt.Sprintf("%s 不存在，要建立最小 roster 骨架嗎？", path)
-	return r.transitionTo(newConfirmModelWithScreenID(rosterCreateConfirmScreenID, question, true), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.ConfirmSpec{ScreenID: rosterCreateConfirmScreenID, Title: question, Default: true}
+	return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.ConfirmScreen)
 		if !m.Value() {
 			return pushTopMenu(r, dir, "")
@@ -171,7 +180,13 @@ func pushRosterCreatePrompt(r *editRouterModel, dir, path string) tea.Cmd {
 		}
 		return nil
 	}
-	return r.transitionTo(newSecretTextInputModelWithScreenID(rosterCreatePasswordScreenID, "FreeIPA admin password(不會顯示；至少 8 字元)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{
+		ScreenID: rosterCreatePasswordScreenID,
+		Title:    "FreeIPA admin password(不會顯示；至少 8 字元)",
+		Secret:   true,
+		Validate: validate,
+	}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
@@ -260,13 +275,20 @@ func pushRosterUsersMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		banner += "\n" + note
 	}
 
-	items := make([]string, 0, len(names)+2)
+	// A roster user's own name is its stable identity everywhere else in
+	// the roster (membership/hbac/sudo all reference it), so it is also
+	// this row's Choice.ID — no synthetic per-row ID needed.
+	choices := make([]tui.Choice, 0, len(names)+2)
 	for _, n := range names {
-		items = append(items, "👤 "+n)
+		choices = append(choices, tui.Choice{ID: n, Label: "👤 " + n})
 	}
-	items = append(items, "➕ 新增 User", "↩  返回")
+	choices = append(choices,
+		tui.Choice{ID: "roster.users.list.add", Label: "➕ 新增 User"},
+		tui.Choice{ID: "roster.users.list.back", Label: "↩  返回"},
+	)
 
-	return r.transitionTo(newSelectModelWithScreenID("roster.users.list", fmt.Sprintf("Users — %s", path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.users.list", Title: fmt.Sprintf("Users — %s", path), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "↩ 返回".
@@ -290,7 +312,8 @@ func pushRosterAddUser(r *editRouterModel, dir, path string) tea.Cmd {
 		}
 		return nil
 	}
-	return r.transitionTo(newTextInputModelWithScreenID("roster.user.add", "新 user 的名稱(小寫英數字/底線/點/連字號)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.user.add", Title: "新 user 的名稱(小寫英數字/底線/點/連字號)", Validate: validate}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUsersMenu(r, dir, path, "")
@@ -333,13 +356,19 @@ func pushRosterGroupsMenu(r *editRouterModel, dir, path, banner string) tea.Cmd 
 		banner += "\n" + note
 	}
 
-	items := make([]string, 0, len(names)+2)
+	// The group's own name is its stable identity — see
+	// pushRosterUsersMenu.
+	choices := make([]tui.Choice, 0, len(names)+2)
 	for _, n := range names {
-		items = append(items, "👥 "+n)
+		choices = append(choices, tui.Choice{ID: n, Label: "👥 " + n})
 	}
-	items = append(items, "➕ 新增 Group", "↩  返回")
+	choices = append(choices,
+		tui.Choice{ID: "roster.groups.list.add", Label: "➕ 新增 Group"},
+		tui.Choice{ID: "roster.groups.list.back", Label: "↩  返回"},
+	)
 
-	return r.transitionTo(newSelectModelWithScreenID("roster.groups.list", fmt.Sprintf("Groups — %s", path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.groups.list", Title: fmt.Sprintf("Groups — %s", path), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "↩ 返回".
@@ -371,19 +400,20 @@ var rosterGroupCategories = []struct {
 }
 
 func pushRosterAddGroupCategory(r *editRouterModel, dir, path string) tea.Cmd {
-	items := make([]string, 0, len(rosterGroupCategories)+1)
+	choices := make([]tui.Choice, 0, len(rosterGroupCategories)+1)
 	for _, c := range rosterGroupCategories {
-		items = append(items, c.Label)
+		choices = append(choices, tui.Choice{ID: "roster.group.add_category." + c.Category, Label: c.Label})
 	}
-	items = append(items, "↩  返回")
-	return r.transitionTo(newSelectModelWithScreenID("roster.group.add_category", "新 group 的分類(決定名稱前綴規則)", items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	choices = append(choices, tui.Choice{ID: "roster.group.add_category.back", Label: "↩  返回"})
+	spec := tui.SelectSpec{ScreenID: "roster.group.add_category", Title: "新 group 的分類(決定名稱前綴規則)", Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "↩ 返回".
 			return pushRosterGroupsMenu(r, dir, path, "")
 		}
 		idx := m.Selected()
-		if idx == len(items)-1 {
+		if idx == len(choices)-1 {
 			return pushRosterGroupsMenu(r, dir, path, "")
 		}
 		return pushRosterAddGroupName(r, dir, path, rosterGroupCategories[idx].Category)
@@ -398,7 +428,8 @@ func pushRosterAddGroupName(r *editRouterModel, dir, path, category string) tea.
 		return nil
 	}
 	label := fmt.Sprintf("新 group 的名稱(category=%s，記得帶前綴)", category)
-	return r.transitionTo(newTextInputModelWithScreenID("roster.group.add_name", label, "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.group.add_name", Title: label, Validate: validate}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterAddGroupCategory(r, dir, path)
@@ -551,6 +582,21 @@ func rosterSecretDisplay(pw map[string]any, key string) string {
 
 var rosterBoolChoices = []string{"true", "false"}
 
+// rosterEnumChoices turns one of this file's fixed enum option slices
+// (rosterBoolChoices, rosterUserStateChoices, rosterGroupTypeChoices)
+// into tui.Choices whose stable IDs are the owning screen's ID plus the
+// option's own value — "roster.user.field_bool.true" and so on. The
+// label is the bare value exactly as before, and the option order (which
+// every one of these screens' callbacks reads back via Selected()) is
+// preserved.
+func rosterEnumChoices(screenID string, values []string) []tui.Choice {
+	out := make([]tui.Choice, len(values))
+	for i, v := range values {
+		out[i] = tui.Choice{ID: screenID + "." + v, Label: v}
+	}
+	return out
+}
+
 func rosterIntValidator(s string) error {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -621,25 +667,28 @@ func pushRosterUserDetail(r *editRouterModel, dir, path, name, banner string) te
 	pw := rosterSubmap(fields, "password")
 	values := rosterStringSlice(rosterSubmap(fields, "ssh_keys"), "values")
 
-	items := []string{
-		fmt.Sprintf("name：%s（唯讀，其他規則會用名稱互相參照）", name),
-		fmt.Sprintf("state：%s", rosterStringOr(fields, "state", "present")),
-		fmt.Sprintf("first：%s", rosterDisplay(fields, "first")),
-		fmt.Sprintf("last：%s", rosterDisplay(fields, "last")),
-		fmt.Sprintf("display_name：%s", rosterDisplay(fields, "display_name")),
-		fmt.Sprintf("email：%s", rosterDisplay(fields, "email")),
-		fmt.Sprintf("uid：%s", rosterIntDisplay(fields, "uid")),
-		fmt.Sprintf("gid：%s", rosterIntDisplay(fields, "gid")),
-		fmt.Sprintf("login_shell：%s", rosterDisplay(fields, "login_shell")),
-		fmt.Sprintf("home_directory：%s", rosterDisplay(fields, "home_directory")),
-		fmt.Sprintf("enabled：%s", rosterBoolDisplayDefault(fields, "enabled", true)),
-		fmt.Sprintf("password.initial：%s", rosterSecretDisplay(pw, "initial")),
-		fmt.Sprintf("password.force_change：%s", rosterBoolDisplay(pw, "force_change")),
-		fmt.Sprintf("password.preserve_existing：%s", rosterBoolDisplayDefault(pw, "preserve_existing", true)),
-		fmt.Sprintf("ssh_keys.values（共 %d 支公鑰）", len(values)),
-		"↩  返回",
+	// Fixed field menu: one namespaced ID per roster field, so a row's
+	// stable identity survives its label (which embeds the live value).
+	choices := []tui.Choice{
+		{ID: "roster.user.detail.name", Label: fmt.Sprintf("name：%s（唯讀，其他規則會用名稱互相參照）", name)},
+		{ID: "roster.user.detail.state", Label: fmt.Sprintf("state：%s", rosterStringOr(fields, "state", "present"))},
+		{ID: "roster.user.detail.first", Label: fmt.Sprintf("first：%s", rosterDisplay(fields, "first"))},
+		{ID: "roster.user.detail.last", Label: fmt.Sprintf("last：%s", rosterDisplay(fields, "last"))},
+		{ID: "roster.user.detail.display_name", Label: fmt.Sprintf("display_name：%s", rosterDisplay(fields, "display_name"))},
+		{ID: "roster.user.detail.email", Label: fmt.Sprintf("email：%s", rosterDisplay(fields, "email"))},
+		{ID: "roster.user.detail.uid", Label: fmt.Sprintf("uid：%s", rosterIntDisplay(fields, "uid"))},
+		{ID: "roster.user.detail.gid", Label: fmt.Sprintf("gid：%s", rosterIntDisplay(fields, "gid"))},
+		{ID: "roster.user.detail.login_shell", Label: fmt.Sprintf("login_shell：%s", rosterDisplay(fields, "login_shell"))},
+		{ID: "roster.user.detail.home_directory", Label: fmt.Sprintf("home_directory：%s", rosterDisplay(fields, "home_directory"))},
+		{ID: "roster.user.detail.enabled", Label: fmt.Sprintf("enabled：%s", rosterBoolDisplayDefault(fields, "enabled", true))},
+		{ID: "roster.user.detail.password_initial", Label: fmt.Sprintf("password.initial：%s", rosterSecretDisplay(pw, "initial"))},
+		{ID: "roster.user.detail.password_force_change", Label: fmt.Sprintf("password.force_change：%s", rosterBoolDisplay(pw, "force_change"))},
+		{ID: "roster.user.detail.password_preserve_existing", Label: fmt.Sprintf("password.preserve_existing：%s", rosterBoolDisplayDefault(pw, "preserve_existing", true))},
+		{ID: "roster.user.detail.ssh_keys", Label: fmt.Sprintf("ssh_keys.values（共 %d 支公鑰）", len(values))},
+		{ID: "roster.user.detail.back", Label: "↩  返回"},
 	}
-	return r.transitionTo(newSelectModelWithScreenID("roster.user.detail", fmt.Sprintf("User %q — %s", name, path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.user.detail", Title: fmt.Sprintf("User %q — %s", name, path), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUsersMenu(r, dir, path, "")
@@ -683,7 +732,8 @@ func pushRosterUserDetail(r *editRouterModel, dir, path, name, banner string) te
 }
 
 func pushRosterUserTextField(r *editRouterModel, dir, path, name, key, label, current string) tea.Cmd {
-	return r.transitionTo(newTextInputModelWithScreenID("roster.user.field_text", label, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.user.field_text", Title: label, Default: current}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
@@ -694,7 +744,8 @@ func pushRosterUserTextField(r *editRouterModel, dir, path, name, key, label, cu
 }
 
 func pushRosterUserIntField(r *editRouterModel, dir, path, name, key, current string) tea.Cmd {
-	return r.transitionTo(newTextInputModelWithScreenID("roster.user.field_int", key+"(留空 = 未設定)", current, rosterIntValidator), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.user.field_int", Title: key + "(留空 = 未設定)", Default: current, Validate: rosterIntValidator}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
@@ -712,7 +763,8 @@ func pushRosterUserIntField(r *editRouterModel, dir, path, name, key, current st
 }
 
 func pushRosterUserBoolField(r *editRouterModel, dir, path, name, key, label string) tea.Cmd {
-	return r.transitionTo(newSelectModelWithScreenID("roster.user.field_bool", label, rosterBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.user.field_bool", Title: label, Choices: rosterEnumChoices("roster.user.field_bool", rosterBoolChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
@@ -728,7 +780,8 @@ var rosterUserStateChoices = []string{"present", "disabled"}
 
 func pushRosterUserStateField(r *editRouterModel, dir, path, name string) tea.Cmd {
 	title := "state(不提供 absent — 這個精靈不支援刪除；如需刪除請直接編輯檔案)"
-	return r.transitionTo(newSelectModelWithScreenID("roster.user.field_state", title, rosterUserStateChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.user.field_state", Title: title, Choices: rosterEnumChoices("roster.user.field_state", rosterUserStateChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
@@ -747,7 +800,8 @@ func pushRosterUserStateField(r *editRouterModel, dir, path, name string) tea.Cm
 
 func pushRosterUserPasswordInitial(r *editRouterModel, dir, path, name string) tea.Cmd {
 	label := "password.initial 的新值(不會顯示；輸入後立即生效，且不會預填舊密碼)"
-	return r.transitionTo(newSecretTextInputModelWithScreenID("roster.user.field_password", label, "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.user.field_password", Title: label, Secret: true}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
@@ -762,7 +816,8 @@ func pushRosterUserPasswordInitial(r *editRouterModel, dir, path, name string) t
 }
 
 func pushRosterUserPasswordBoolField(r *editRouterModel, dir, path, name, key, label string) tea.Cmd {
-	return r.transitionTo(newSelectModelWithScreenID("roster.user.field_password_bool", label, rosterBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.user.field_password_bool", Title: label, Choices: rosterEnumChoices("roster.user.field_password_bool", rosterBoolChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
@@ -797,21 +852,28 @@ func pushRosterUserSSHKeysList(r *editRouterModel, dir, path, name string) tea.C
 }
 
 func pushRosterUserSSHKeysListScreen(r *editRouterModel, dir, path, name string, values []string, banner string) tea.Cmd {
-	items := make([]string, 0, len(values)+2)
+	// An ssh_keys.values entry has no name field, so the key material
+	// itself is its stable identity: unlike a positional ID, it still
+	// designates the same key after another key is removed from the list.
+	choices := make([]tui.Choice, 0, len(values)+2)
 	for i, v := range values {
-		items = append(items, fmt.Sprintf("%d: %s", i+1, v))
+		choices = append(choices, tui.Choice{ID: v, Label: fmt.Sprintf("%d: %s", i+1, v)})
 	}
-	items = append(items, "➕ 新增公鑰", "↩  返回")
+	choices = append(choices,
+		tui.Choice{ID: "roster.user.ssh_keys.list.add", Label: "➕ 新增公鑰"},
+		tui.Choice{ID: "roster.user.ssh_keys.list.back", Label: "↩  返回"},
+	)
 	title := fmt.Sprintf("%s 的 ssh_keys.values", name)
-	return r.transitionTo(newSelectModelWithScreenID("roster.user.ssh_keys.list", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.user.ssh_keys.list", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
 		}
 		switch {
-		case m.Selected() == len(items)-2:
+		case m.Selected() == len(choices)-2:
 			return pushRosterUserSSHKeysAdd(r, dir, path, name, values)
-		case m.Selected() == len(items)-1:
+		case m.Selected() == len(choices)-1:
 			return pushRosterUserDetail(r, dir, path, name, "")
 		default:
 			return pushRosterUserSSHKeysItemAction(r, dir, path, name, values, m.Selected())
@@ -826,7 +888,8 @@ func pushRosterUserSSHKeysAdd(r *editRouterModel, dir, path, name string, values
 		}
 		return nil
 	}
-	return r.transitionTo(newTextInputModelWithScreenID("roster.user.ssh_keys.add", "新公鑰(ssh-ed25519/ssh-rsa ...)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.user.ssh_keys.add", Title: "新公鑰(ssh-ed25519/ssh-rsa ...)", Validate: validate}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserSSHKeysListScreen(r, dir, path, name, values, "")
@@ -837,8 +900,13 @@ func pushRosterUserSSHKeysAdd(r *editRouterModel, dir, path, name string, values
 }
 
 func pushRosterUserSSHKeysItemAction(r *editRouterModel, dir, path, name string, values []string, idx int) tea.Cmd {
-	items := []string{"修改值", "移除", "返回"}
-	return r.transitionTo(newSelectModelWithScreenID("roster.user.ssh_keys.item_action", fmt.Sprintf("公鑰 %d：%s", idx+1, values[idx]), items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "roster.user.ssh_keys.item_action.edit", Label: "修改值"},
+		{ID: "roster.user.ssh_keys.item_action.remove", Label: "移除"},
+		{ID: "roster.user.ssh_keys.item_action.back", Label: "返回"},
+	}
+	spec := tui.SelectSpec{ScreenID: "roster.user.ssh_keys.item_action", Title: fmt.Sprintf("公鑰 %d：%s", idx+1, values[idx]), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserSSHKeysListScreen(r, dir, path, name, values, "")
@@ -863,7 +931,8 @@ func pushRosterUserSSHKeysEditItem(r *editRouterModel, dir, path, name string, v
 		}
 		return nil
 	}
-	return r.transitionTo(newTextInputModelWithScreenID("roster.user.ssh_keys.edit_item", "新值", values[idx], validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.user.ssh_keys.edit_item", Title: "新值", Default: values[idx], Validate: validate}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserSSHKeysItemAction(r, dir, path, name, values, idx)
@@ -948,19 +1017,20 @@ func pushRosterGroupDetail(r *editRouterModel, dir, path, name, banner string) t
 	users := rosterStringSlice(mem, "users")
 	groups := rosterStringSlice(mem, "groups")
 
-	items := []string{
-		fmt.Sprintf("name：%s（唯讀，其他規則會用名稱互相參照）", name),
-		fmt.Sprintf("state：%s（唯讀，這個精靈不支援刪除/absent）", rosterStringOr(fields, "state", "present")),
-		fmt.Sprintf("category：%s（唯讀，決定名稱前綴規則）", rosterStringOr(fields, "category", "")),
-		fmt.Sprintf("type：%s", rosterStringOr(fields, "type", "posix")),
-		fmt.Sprintf("description：%s", rosterDisplay(fields, "description")),
-		fmt.Sprintf("gid：%s", rosterIntDisplay(fields, "gid")),
-		fmt.Sprintf("membership.authoritative：%s", rosterBoolDisplayDefault(mem, "authoritative", true)),
-		fmt.Sprintf("membership.users（共 %d 位）", len(users)),
-		fmt.Sprintf("membership.groups（共 %d 個，不含自己）", len(groups)),
-		"↩  返回",
+	choices := []tui.Choice{
+		{ID: "roster.group.detail.name", Label: fmt.Sprintf("name：%s（唯讀，其他規則會用名稱互相參照）", name)},
+		{ID: "roster.group.detail.state", Label: fmt.Sprintf("state：%s（唯讀，這個精靈不支援刪除/absent）", rosterStringOr(fields, "state", "present"))},
+		{ID: "roster.group.detail.category", Label: fmt.Sprintf("category：%s（唯讀，決定名稱前綴規則）", rosterStringOr(fields, "category", ""))},
+		{ID: "roster.group.detail.type", Label: fmt.Sprintf("type：%s", rosterStringOr(fields, "type", "posix"))},
+		{ID: "roster.group.detail.description", Label: fmt.Sprintf("description：%s", rosterDisplay(fields, "description"))},
+		{ID: "roster.group.detail.gid", Label: fmt.Sprintf("gid：%s", rosterIntDisplay(fields, "gid"))},
+		{ID: "roster.group.detail.membership_authoritative", Label: fmt.Sprintf("membership.authoritative：%s", rosterBoolDisplayDefault(mem, "authoritative", true))},
+		{ID: "roster.group.detail.membership_users", Label: fmt.Sprintf("membership.users（共 %d 位）", len(users))},
+		{ID: "roster.group.detail.membership_groups", Label: fmt.Sprintf("membership.groups（共 %d 個，不含自己）", len(groups))},
+		{ID: "roster.group.detail.back", Label: "↩  返回"},
 	}
-	return r.transitionTo(newSelectModelWithScreenID("roster.group.detail", fmt.Sprintf("Group %q — %s", name, path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.group.detail", Title: fmt.Sprintf("Group %q — %s", name, path), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupsMenu(r, dir, path, "")
@@ -990,7 +1060,8 @@ func pushRosterGroupDetail(r *editRouterModel, dir, path, name, banner string) t
 var rosterGroupTypeChoices = []string{"posix", "nonposix", "external"}
 
 func pushRosterGroupTypeField(r *editRouterModel, dir, path, name string) tea.Cmd {
-	return r.transitionTo(newSelectModelWithScreenID("roster.group.field_type", "type", rosterGroupTypeChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.group.field_type", Title: "type", Choices: rosterEnumChoices("roster.group.field_type", rosterGroupTypeChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
@@ -1001,7 +1072,8 @@ func pushRosterGroupTypeField(r *editRouterModel, dir, path, name string) tea.Cm
 }
 
 func pushRosterGroupTextField(r *editRouterModel, dir, path, name, key, label, current string) tea.Cmd {
-	return r.transitionTo(newTextInputModelWithScreenID("roster.group.field_text", label, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.group.field_text", Title: label, Default: current}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
@@ -1012,7 +1084,8 @@ func pushRosterGroupTextField(r *editRouterModel, dir, path, name, key, label, c
 }
 
 func pushRosterGroupIntField(r *editRouterModel, dir, path, name, key, current string) tea.Cmd {
-	return r.transitionTo(newTextInputModelWithScreenID("roster.group.field_int", key+"(留空 = 未設定)", current, rosterIntValidator), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "roster.group.field_int", Title: key + "(留空 = 未設定)", Default: current, Validate: rosterIntValidator}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
@@ -1030,7 +1103,8 @@ func pushRosterGroupIntField(r *editRouterModel, dir, path, name, key, current s
 }
 
 func pushRosterGroupMembershipAuthoritative(r *editRouterModel, dir, path, name string) tea.Cmd {
-	return r.transitionTo(newSelectModelWithScreenID("roster.group.field_authoritative", "membership.authoritative", rosterBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "roster.group.field_authoritative", Title: "membership.authoritative", Choices: rosterEnumChoices("roster.group.field_authoritative", rosterBoolChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
@@ -1064,12 +1138,13 @@ func pushRosterGroupMembershipUsers(r *editRouterModel, dir, path, name string) 
 		return nil
 	}
 	current := rosterStringSlice(rosterSubmap(fields, "membership"), "users")
-	items := make([]multiSelectItem, len(allUsers))
+	choices := make([]tui.MultiSelectChoice, len(allUsers))
 	for i, u := range allUsers {
-		items[i] = multiSelectItem{Label: u, Checked: hasRole(current, u)}
+		choices[i] = tui.MultiSelectChoice{Choice: tui.Choice{ID: u, Label: u}, Checked: hasRole(current, u)}
 	}
 	title := fmt.Sprintf("%s 的 membership.users(space 勾選、enter 完成)", name)
-	return r.transitionTo(newMultiSelectModelWithScreenID("roster.group.members_users", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.MultiSelectSpec{ScreenID: "roster.group.members_users", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().MultiSelect(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.MultiSelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
@@ -1108,12 +1183,13 @@ func pushRosterGroupMembershipGroups(r *editRouterModel, dir, path, name string)
 		}
 	}
 	current := rosterStringSlice(rosterSubmap(fields, "membership"), "groups")
-	items := make([]multiSelectItem, len(options))
+	choices := make([]tui.MultiSelectChoice, len(options))
 	for i, g := range options {
-		items[i] = multiSelectItem{Label: g, Checked: hasRole(current, g)}
+		choices[i] = tui.MultiSelectChoice{Choice: tui.Choice{ID: g, Label: g}, Checked: hasRole(current, g)}
 	}
 	title := fmt.Sprintf("%s 的 membership.groups(不含自己；space 勾選、enter 完成)", name)
-	return r.transitionTo(newMultiSelectModelWithScreenID("roster.group.members_groups", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.MultiSelectSpec{ScreenID: "roster.group.members_groups", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().MultiSelect(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.MultiSelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
