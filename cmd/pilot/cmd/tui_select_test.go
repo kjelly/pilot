@@ -183,7 +183,7 @@ func TestSelectModel_WithIDsPreservesLabelsAndIDs(t *testing.T) {
 	if got := m.automationItems(); len(got) != 2 || got[0] != "➕ 新增主機" || got[1] != "web-01" {
 		t.Fatalf("automationItems() = %v, want labels from items", got)
 	}
-	idx, err := itemIndexByID(m.items, "hosts.create")
+	idx, err := itemIndexByID(m.AutomationState().Items, "hosts.create")
 	if err != nil || idx != 0 {
 		t.Fatalf("itemIndexByID(hosts.create) = (%d, %v), want (0, nil)", idx, err)
 	}

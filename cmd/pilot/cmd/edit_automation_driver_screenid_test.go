@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // TestAutomationDriver_TraceRecordsDistinctContextualScreenIDs drives a
@@ -49,7 +50,7 @@ func TestAutomationDriver_TraceRecordsDistinctContextualScreenIDs(t *testing.T) 
 }
 
 func TestItemIndexByID_UniqueMatch(t *testing.T) {
-	items := []selectItem{{ID: "a", Label: "Alpha"}, {ID: "b", Label: "Beta"}}
+	items := []tui.AutomationItem{{ID: "a", Label: "Alpha"}, {ID: "b", Label: "Beta"}}
 	idx, err := itemIndexByID(items, "b")
 	if err != nil || idx != 1 {
 		t.Fatalf("itemIndexByID(b) = (%d, %v), want (1, nil)", idx, err)
@@ -57,14 +58,14 @@ func TestItemIndexByID_UniqueMatch(t *testing.T) {
 }
 
 func TestItemIndexByID_Ambiguous(t *testing.T) {
-	items := []selectItem{{ID: "dup", Label: "one"}, {ID: "dup", Label: "two"}}
+	items := []tui.AutomationItem{{ID: "dup", Label: "one"}, {ID: "dup", Label: "two"}}
 	if _, err := itemIndexByID(items, "dup"); err == nil {
 		t.Fatal("expected an error for a duplicated ID")
 	}
 }
 
 func TestItemIndexByID_Missing(t *testing.T) {
-	items := []selectItem{{ID: "a", Label: "Alpha"}}
+	items := []tui.AutomationItem{{ID: "a", Label: "Alpha"}}
 	if _, err := itemIndexByID(items, "nope"); err == nil {
 		t.Fatal("expected an error for an ID with no match")
 	}
@@ -74,7 +75,7 @@ func TestItemIndexByID_EmptyIDRejectedEvenIfAnItemHasOne(t *testing.T) {
 	// An item with ID == "" (the common case — most items never get an
 	// AutomationID) must never be reachable by passing "" as the target:
 	// that would let an unset ID silently match, defeating fail-closed.
-	items := []selectItem{{ID: "", Label: "no id"}, {ID: "b", Label: "Beta"}}
+	items := []tui.AutomationItem{{ID: "", Label: "no id"}, {ID: "b", Label: "Beta"}}
 	if _, err := itemIndexByID(items, ""); err == nil {
 		t.Fatal("expected an error when the target ID itself is empty")
 	}

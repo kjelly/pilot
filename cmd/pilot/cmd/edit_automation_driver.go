@@ -8,6 +8,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // automationTraceEvent records the observable outcome of one semantic action.
@@ -191,7 +193,7 @@ func (d *automationDriver) createHost(r *editRouterModel, host string) error {
 	if err := d.ensureHostsList(r); err != nil {
 		return err
 	}
-	if list, ok := r.current.(selectModel); !ok || !strings.Contains(list.title, "編輯") {
+	if st := automationState(r); st.Kind != tui.ScreenSelect || !strings.Contains(st.Title, "編輯") {
 		return fmt.Errorf("expected host list screen")
 	} else if err := d.choose(r, "新增主機"); err != nil {
 		return err
@@ -258,15 +260,15 @@ func (d *automationDriver) setRoleChecked(r *editRouterModel, host, role string,
 	if err := d.choose(r, "逐項勾選角色"); err != nil {
 		return err
 	}
-	list, ok := r.current.(multiSelectModel)
-	if !ok {
+	st := automationState(r)
+	if st.Kind != tui.ScreenMultiSelect {
 		return fmt.Errorf("expected role checklist screen")
 	}
-	idx, err := uniqueItemIndex(list.automationItems(), role)
+	idx, err := uniqueItemIndex(automationLabels(st.Items), role)
 	if err != nil {
 		return err
 	}
-	if list.items[idx].Checked != want {
+	if st.Items[idx].Checked != want {
 		if err := d.moveCursor(r, idx); err != nil {
 			return err
 		}
@@ -304,11 +306,11 @@ func (d *automationDriver) setRoleChecked(r *editRouterModel, host, role string,
 //     use for their own secret-or-plain input) supply that password.
 func (d *automationDriver) resolveRoleChangeFollowUp(r *editRouterModel, step editAction) error {
 	for {
-		input, ok := r.current.(textInputModel)
-		if !ok {
+		st := automationState(r)
+		if st.Kind != tui.ScreenInput {
 			break
 		}
-		if input.automationScreenID() == nfsRosterBootstrapPasswordScreenID {
+		if st.ScreenID == nfsRosterBootstrapPasswordScreenID {
 			value, secret, err := resolveValueOrEnv(step)
 			if err != nil {
 				return err
@@ -324,7 +326,7 @@ func (d *automationDriver) resolveRoleChangeFollowUp(r *editRouterModel, step ed
 			}
 			continue
 		}
-		key, ok := forcedHostVarsPromptKey(input.automationScreenID())
+		key, ok := forcedHostVarsPromptKey(st.ScreenID)
 		if !ok {
 			return fmt.Errorf("unexpected text-input screen %q after role change", automationScreenID(r))
 		}
@@ -360,12 +362,12 @@ func (d *automationDriver) setChecklistSelection(r *editRouterModel, want []stri
 		wantSet[w] = true
 	}
 	for {
-		list, ok := r.current.(multiSelectModel)
-		if !ok {
+		st := automationState(r)
+		if st.Kind != tui.ScreenMultiSelect {
 			return fmt.Errorf("expected a checklist screen, got %s", automationScreenID(r))
 		}
 		mismatch := -1
-		for i, item := range list.items {
+		for i, item := range st.Items {
 			if item.Checked != wantSet[item.Label] {
 				mismatch = i
 				break
@@ -422,21 +424,21 @@ func (d *automationDriver) discardHosts(r *editRouterModel) error {
 // scenario ending here simply returns from d.run normally; nothing
 // downstream depends on r.quit being true.
 func (d *automationDriver) saveHosts(r *editRouterModel) error {
-	if list, ok := r.current.(selectModel); ok && strings.Contains(list.title, "選要編輯的項目") {
+	if st := automationState(r); st.Kind == tui.ScreenSelect && strings.Contains(st.Title, "選要編輯的項目") {
 		if err := d.choose(r, "返回主機清單"); err != nil {
 			return err
 		}
 	}
-	list, ok := r.current.(selectModel)
-	if !ok || !strings.Contains(list.title, "編輯") {
+	st := automationState(r)
+	if st.Kind != tui.ScreenSelect || !strings.Contains(st.Title, "編輯") {
 		return fmt.Errorf("expected host list before save")
 	}
 	return d.choose(r, "存檔並離開")
 }
 
 func (d *automationDriver) ensureHostMenu(r *editRouterModel, host string) error {
-	if list, ok := r.current.(selectModel); ok && strings.Contains(list.title, "選要編輯") {
-		if strings.Contains(list.title, fmt.Sprintf("主機 %q", host)) {
+	if st := automationState(r); st.Kind == tui.ScreenSelect && strings.Contains(st.Title, "選要編輯") {
+		if strings.Contains(st.Title, fmt.Sprintf("主機 %q", host)) {
 			return nil
 		}
 		if err := d.choose(r, "返回主機清單"); err != nil {
@@ -450,40 +452,40 @@ func (d *automationDriver) ensureHostMenu(r *editRouterModel, host string) error
 }
 
 func (d *automationDriver) ensureHostsList(r *editRouterModel) error {
-	if list, ok := r.current.(selectModel); ok {
+	if st := automationState(r); st.Kind == tui.ScreenSelect {
 		switch {
-		case list.title == "要編輯什麼？":
+		case st.Title == "要編輯什麼？":
 			if err := d.choose(r, "hosts.yml"); err != nil {
 				return err
 			}
-		case strings.Contains(list.title, "編輯") && strings.Contains(list.title, "選一台主機"):
+		case strings.Contains(st.Title, "編輯") && strings.Contains(st.Title, "選一台主機"):
 			return nil
-		case strings.Contains(list.title, "選要編輯的項目"):
+		case strings.Contains(st.Title, "選要編輯的項目"):
 			return d.choose(r, "返回主機清單")
 		}
 	}
-	if input, ok := r.current.(textInputModel); ok && input.label == "hosts.yml 路徑" {
+	if st := automationState(r); st.Kind == tui.ScreenInput && st.Title == "hosts.yml 路徑" {
 		if err := d.enter(r); err != nil {
 			return err
 		}
 	}
-	if _, ok := r.current.(confirmModel); ok {
+	if automationState(r).Kind == tui.ScreenConfirm {
 		if err := d.enter(r); err != nil {
 			return err
 		}
 	}
-	if list, ok := r.current.(selectModel); ok && strings.Contains(list.title, "編輯") && strings.Contains(list.title, "選一台主機") {
+	if st := automationState(r); st.Kind == tui.ScreenSelect && strings.Contains(st.Title, "編輯") && strings.Contains(st.Title, "選一台主機") {
 		return nil
 	}
 	return fmt.Errorf("expected hosts list screen, got %s", automationScreenID(r))
 }
 
 func (d *automationDriver) choose(r *editRouterModel, label string) error {
-	list, ok := r.current.(selectModel)
-	if !ok {
+	st := automationState(r)
+	if st.Kind != tui.ScreenSelect {
 		return fmt.Errorf("cannot choose %q on %s screen", label, automationScreenID(r))
 	}
-	idx, err := uniqueItemIndex(list.automationItems(), label)
+	idx, err := uniqueItemIndex(automationLabels(st.Items), label)
 	if err != nil {
 		return err
 	}
@@ -494,14 +496,13 @@ func (d *automationDriver) choose(r *editRouterModel, label string) error {
 }
 
 func (d *automationDriver) moveCursor(r *editRouterModel, target int) error {
-	var cursor int
-	switch list := r.current.(type) {
-	case selectModel:
-		cursor = list.cursor
-	case multiSelectModel:
-		cursor = list.cursor
-	default:
+	st := automationState(r)
+	if st.Kind != tui.ScreenSelect && st.Kind != tui.ScreenMultiSelect {
 		return fmt.Errorf("cannot move cursor on %s screen", automationScreenID(r))
+	}
+	cursor := st.FocusedIndex
+	if cursor < 0 {
+		cursor = 0
 	}
 	for cursor > 0 {
 		if err := d.send(r, tea.KeyMsg{Type: tea.KeyUp}); err != nil {
@@ -519,7 +520,7 @@ func (d *automationDriver) moveCursor(r *editRouterModel, target int) error {
 }
 
 func (d *automationDriver) typeText(r *editRouterModel, value string, replace bool) error {
-	if _, ok := r.current.(textInputModel); !ok {
+	if automationState(r).Kind != tui.ScreenInput {
 		return fmt.Errorf("cannot type on %s screen", automationScreenID(r))
 	}
 	if replace {
@@ -543,7 +544,7 @@ func (d *automationDriver) typeText(r *editRouterModel, value string, replace bo
 // first) — clearing the field isn't itself sensitive, so that key always
 // goes through the normal (unredacted) send.
 func (d *automationDriver) typeSecretOrPlain(r *editRouterModel, value string, secret, replace bool) error {
-	if _, ok := r.current.(textInputModel); !ok {
+	if automationState(r).Kind != tui.ScreenInput {
 		return fmt.Errorf("cannot type on %s screen", automationScreenID(r))
 	}
 	if replace {
@@ -585,7 +586,7 @@ func (d *automationDriver) enter(r *editRouterModel) error {
 // whatever the screen's own defaultYes is) — needed by any action that
 // must override a confirm defaulting to "no" (e.g. delete/discard).
 func (d *automationDriver) confirmYesNo(r *editRouterModel, yes bool) error {
-	if _, ok := r.current.(confirmModel); !ok {
+	if automationState(r).Kind != tui.ScreenConfirm {
 		return fmt.Errorf("cannot answer yes/no on %s screen", automationScreenID(r))
 	}
 	key := "n"
@@ -651,11 +652,11 @@ func (d *automationDriver) sendRedacted(r *editRouterModel, msg tea.KeyMsg, plac
 // later with an opaque "cannot choose ... on text-input screen" that names
 // the wrong step.
 func textInputRejectionError(r *editRouterModel) error {
-	ti, ok := r.current.(textInputModel)
-	if !ok || ti.err == "" {
+	st := automationState(r)
+	if st.Kind != tui.ScreenInput || st.ValidationError == "" {
 		return nil
 	}
-	return fmt.Errorf("input rejected on %s screen: %s", automationScreenID(r), ti.err)
+	return fmt.Errorf("input rejected on %s screen: %s", automationScreenID(r), st.ValidationError)
 }
 
 // notifyRecorder reports the key just applied and the resulting live
@@ -713,7 +714,7 @@ func uniqueItemIndex(items []string, label string) (int, error) {
 // matching, so an item with no AutomationID assigned can never be
 // targeted this way — that's fail-closed by construction, not by an
 // extra check.
-func itemIndexByID(items []selectItem, id string) (int, error) {
+func itemIndexByID(items []tui.AutomationItem, id string) (int, error) {
 	if id == "" {
 		return -1, fmt.Errorf("item id must not be empty")
 	}
@@ -747,11 +748,11 @@ func (d *automationDriver) chooseByID(r *editRouterModel, wantScreenID, itemID s
 	if got := automationScreenID(r); got != wantScreenID {
 		return fmt.Errorf("expected %s screen, got %s", wantScreenID, got)
 	}
-	list, ok := r.current.(selectModel)
-	if !ok {
+	st := automationState(r)
+	if st.Kind != tui.ScreenSelect {
 		return fmt.Errorf("cannot choose item %q: %s screen is not a select list", itemID, wantScreenID)
 	}
-	idx, err := itemIndexByID(list.items, itemID)
+	idx, err := itemIndexByID(st.Items, itemID)
 	if err != nil {
 		return err
 	}
@@ -766,4 +767,26 @@ func automationScreenID(r *editRouterModel) string {
 		return "none"
 	}
 	return r.current.automationScreenID()
+}
+
+// automationState is automationScreenID's AutomationState counterpart:
+// the nil-safe entry point every automation driver method uses instead
+// of asserting one of this package's concrete screen types (selectModel,
+// multiSelectModel, textInputModel, confirmModel) — see internal/tui
+// and Core Invariant 3 of the TUI v2 + Huh migration spec.
+func automationState(r *editRouterModel) tui.AutomationState {
+	if r == nil || r.current == nil {
+		return tui.AutomationState{ScreenID: "none", FocusedIndex: -1}
+	}
+	return r.current.AutomationState()
+}
+
+// automationLabels projects an AutomationState's filtered item set down
+// to its Labels, for the existing label-based uniqueItemIndex.
+func automationLabels(items []tui.AutomationItem) []string {
+	labels := make([]string, len(items))
+	for i, it := range items {
+		labels[i] = it.Label
+	}
+	return labels
 }
