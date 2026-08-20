@@ -34,9 +34,12 @@ func TestEditAutomationDriverHostsFlow(t *testing.T) {
 	}
 	// save_hosts lands at the top menu without quitting the session (r.quit
 	// stays false) — a later group_vars/vault action in the same scenario
-	// must still be able to navigate from here.
-	if list, ok := r.current.(selectModel); !ok || list.title != "要編輯什麼？" {
-		t.Fatalf("expected top menu after save_hosts, got %s", automationScreenID(&r))
+	// must still be able to navigate from here. Checked via the screen-ID
+	// contract rather than a concrete type assertion: pushTopMenu's screen
+	// is now built through r.uiFactory() (Huh-backed in production), not
+	// necessarily this package's selectModel.
+	if got := automationScreenID(&r); got != "edit.top" {
+		t.Fatalf("expected top menu after save_hosts, got %s", got)
 	}
 	if len(events) != len(scenario.Steps) {
 		t.Fatalf("trace events = %d, want %d", len(events), len(scenario.Steps))

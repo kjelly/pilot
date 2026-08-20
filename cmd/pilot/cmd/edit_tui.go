@@ -58,6 +58,12 @@ import (
 type editRouterModel struct {
 	current  screen
 	onResult func(r *editRouterModel, s screen) tea.Cmd
+	// factory builds every screen this router transitions to. Injected
+	// rather than called as a package-level constructor so the widget
+	// provider (Huh v2 in production; a deterministic test double where
+	// a test needs one) can change without touching push*/workflow code
+	// — see internal/tui.Factory and Core Invariant 2.
+	factory tui.Factory
 	// afterHostsSave is set only by the quick workspace path. It preserves
 	// the established hosts editor while giving its successful save a
 	// well-defined next step instead of always returning to the top menu.
@@ -69,6 +75,19 @@ type editRouterModel struct {
 
 	quit bool
 	err  error
+}
+
+// uiFactory returns r's injected Factory, defaulting to the Huh v2
+// factory when unset. Several call sites (mostly tests) build a raw
+// editRouterModel{} literal directly rather than going through
+// newEditRouterModel, which would otherwise leave factory nil; push*
+// functions should call this instead of reading r.factory directly so
+// none of those call sites need to remember to set it themselves.
+func (r *editRouterModel) uiFactory() tui.Factory {
+	if r.factory == nil {
+		r.factory = tui.NewHuhFactory()
+	}
+	return r.factory
 }
 
 func (r editRouterModel) Init() tea.Cmd {
@@ -158,6 +177,7 @@ func (r editRouterModel) View() tea.View {
 
 func newEditRouterModel(dir string) editRouterModel {
 	var r editRouterModel
+	r.factory = tui.NewHuhFactory()
 	pushTopMenu(&r, dir, "")
 	return r
 }
@@ -228,18 +248,19 @@ func runEdit(cmd *cobra.Command, args []string) error {
 // ---- top menu ---------------------------------------------------------------
 
 func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
-	items := []string{
-		"hosts.yml — 機器清單與角色",
-		"group_vars/ — 角色的設定值(FreeIPA realm、DNS 位址...)",
-		".vault/ — vault 變數檔(明文 skeleton 或 ansible-vault 加密檔)",
-		"roster — FreeIPA users/groups/sudo(canonical roster，可預覽/編輯/新增)",
-		"freeipa-dns manifest — DNS zones/records(day-2 reconciler，可預覽/編輯/新增)",
-		"internal-endpoints manifest — internal DNS/TLS/routes(day-2 reconciler，可預覽/編輯/新增)",
-		"🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則",
-		"快速建立最小 workspace — 引導式設定並驗證可部署性",
-		"離開",
+	choices := []tui.Choice{
+		{ID: "top.hosts", Label: "hosts.yml — 機器清單與角色"},
+		{ID: "top.group_vars", Label: "group_vars/ — 角色的設定值(FreeIPA realm、DNS 位址...)"},
+		{ID: "top.vault", Label: ".vault/ — vault 變數檔(明文 skeleton 或 ansible-vault 加密檔)"},
+		{ID: "top.roster", Label: "roster — FreeIPA users/groups/sudo(canonical roster，可預覽/編輯/新增)"},
+		{ID: "top.dns", Label: "freeipa-dns manifest — DNS zones/records(day-2 reconciler，可預覽/編輯/新增)"},
+		{ID: "top.internal_endpoints", Label: "internal-endpoints manifest — internal DNS/TLS/routes(day-2 reconciler，可預覽/編輯/新增)"},
+		{ID: "top.completeness_check", Label: "🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則"},
+		{ID: "top.minimal_workspace", Label: "快速建立最小 workspace — 引導式設定並驗證可部署性"},
+		{ID: "top.quit", Label: "離開"},
 	}
-	return r.transitionTo(newSelectModelWithScreenID("edit.top", "要編輯什麼？", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "edit.top", Title: "要編輯什麼？", Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return quitWizard(r)
