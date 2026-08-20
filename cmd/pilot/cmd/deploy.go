@@ -1348,6 +1348,14 @@ func resolvePatternHosts(ctx context.Context, inventory, pattern, limit string) 
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
+		// Ansible reports "pattern matches zero hosts" inconsistently: without
+		// --limit it is a [WARNING] (exit 0, "hosts (0):"); with --limit it is a
+		// hard [ERROR] (non-zero exit). Normalize the latter to the same "zero
+		// hosts" outcome so callers (e.g. resolveDeploymentScope's allowEmpty
+		// skip for optional site components) see identical behavior either way.
+		if limit != "" && strings.Contains(stderr.String(), "leaves us with no hosts to target") {
+			return []string{}, nil
+		}
 		return nil, fmt.Errorf("ansible %s --list-hosts: %w: %s", pattern, err, strings.TrimSpace(stderr.String()))
 	}
 	hosts := make([]string, 0)

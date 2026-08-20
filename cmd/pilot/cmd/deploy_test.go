@@ -685,3 +685,76 @@ func TestSiteAutoHostVars_DedupesByVar(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveDeploymentScope_LimitDoesNotAbortZeroHostSiteComponent
+// reproduces a live bug reported against inventories/infra-config/inventory.yml:
+// a site-wide deploy with --limit failed with "resolve component \"dns\" role
+// \"dns\": ansible dns --list-hosts: exit status 1: ... leaves us with no
+// hosts to target" even though the same deploy without --limit succeeds by
+// silently skipping the (legitimately unused) dns role via allowEmpty.
+//
+// Root cause: ansible's own CLI reports "pattern matches zero hosts"
+// differently depending on --limit — a [WARNING] + exit 0 without --limit,
+// a hard [ERROR] + exit 1 with --limit — and resolvePatternHosts propagated
+// that exit-1 as a hard error before allowEmpty ever got a chance to skip it.
+func TestResolveDeploymentScope_LimitDoesNotAbortZeroHostSiteComponent(t *testing.T) {
+	root := repoRootForTest(t)
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	invJSON := `{"_meta": {"hostvars": {"host-a": {}}}, "dns": {"hosts": []}, "docker": {"hosts": ["host-a"]}}`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '"+invJSON+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Mimics real `ansible <pattern> --list-hosts [--limit <limit>]`: the
+	// "dns" role has zero hosts in this fixture, exactly like the empty
+	// `dns: {hosts: {}}` group in the reported inventory.
+	ansibleFixture := `#!/bin/sh
+pattern="$1"
+case "$pattern" in
+  docker)
+    printf '%s\n' '  hosts (1):' '    host-a'
+    exit 0
+    ;;
+  dns)
+    case "$*" in
+      *--limit*)
+        echo '[ERROR]: Specified inventory, host pattern and/or --limit leaves us with no hosts to target.' >&2
+        exit 1
+        ;;
+      *)
+        echo '[WARNING]: No hosts matched, nothing to do' >&2
+        printf '%s\n' '  hosts (0):'
+        exit 0
+        ;;
+    esac
+    ;;
+  *)
+    echo "unexpected pattern: $pattern" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	applied, _, _, hosts, err := resolveDeploymentScope(context.Background(), catalog, []string{"dns", "docker"}, "fake-inventory.yml", "host-a", nil, true)
+	if err != nil {
+		t.Fatalf("site-wide deploy with --limit must skip the zero-host dns role, not abort: %v", err)
+	}
+	if len(applied) != 1 || applied[0].ID != "docker" {
+		t.Fatalf("applied = %v, want only docker (dns has zero hosts and must be skipped)", applied)
+	}
+	if !slices.Equal(hosts, []string{"host-a"}) {
+		t.Fatalf("hosts = %v, want [host-a]", hosts)
+	}
+}
