@@ -16,6 +16,8 @@ package cmd
 import (
 	"fmt"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // resolveRosterCreatePrompt answers pushRosterCreateConfirm's "no roster yet,
@@ -88,7 +90,7 @@ func (d *automationDriver) ensureRosterUsersList(r *editRouterModel) error {
 // on the edited user's detail screen, not back at the list).
 func (d *automationDriver) ensureRosterUserDetail(r *editRouterModel, user string) error {
 	if automationScreenID(r) == "roster.user.detail" {
-		if list, ok := r.current.(selectModel); ok && listTitleNamesUser(list.title, user) {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && listTitleNamesUser(st.Title, user) {
 			return nil
 		}
 		if err := d.choose(r, "返回"); err != nil {

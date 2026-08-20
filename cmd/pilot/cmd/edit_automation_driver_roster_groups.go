@@ -12,6 +12,8 @@ package cmd
 import (
 	"fmt"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 func (d *automationDriver) ensureRosterGroupsList(r *editRouterModel) error {
@@ -52,7 +54,7 @@ func (d *automationDriver) ensureRosterGroupsList(r *editRouterModel) error {
 
 func (d *automationDriver) ensureRosterGroupDetail(r *editRouterModel, group string) error {
 	if automationScreenID(r) == "roster.group.detail" {
-		if list, ok := r.current.(selectModel); ok && listTitleNamesGroup(list.title, group) {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && listTitleNamesGroup(st.Title, group) {
 			return nil
 		}
 		if err := d.choose(r, "↩  返回"); err != nil {

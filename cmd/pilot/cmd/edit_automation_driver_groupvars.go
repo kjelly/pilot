@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // openGroupVarsFile resolves the router to the group_vars key-list editor
@@ -23,25 +25,25 @@ import (
 func (d *automationDriver) openGroupVarsFile(r *editRouterModel, file string) error {
 	base := filepath.Base(file)
 	for attempts := 0; attempts < 6; attempts++ {
-		list, ok := r.current.(selectModel)
-		if !ok {
+		st := automationState(r)
+		if st.Kind != tui.ScreenSelect {
 			return fmt.Errorf("cannot navigate to group_vars file %q from %s screen", file, automationScreenID(r))
 		}
 		switch {
-		case list.title == "要編輯什麼？":
+		case st.Title == "要編輯什麼？":
 			if err := d.choose(r, "group_vars"); err != nil {
 				return err
 			}
-		case strings.Contains(list.title, "選一個") && strings.Contains(list.title, "group_vars"):
+		case strings.Contains(st.Title, "選一個") && strings.Contains(st.Title, "group_vars"):
 			if err := d.choose(r, base); err != nil {
 				return err
 			}
-		case strings.HasPrefix(list.title, "編輯 "):
-			if strings.Contains(list.title, base) {
+		case strings.HasPrefix(st.Title, "編輯 "):
+			if strings.Contains(st.Title, base) {
 				return nil
 			}
-			return fmt.Errorf("group_vars editor is open on a different file (%s); save_group_vars or discard_group_vars it first", list.title)
-		case strings.Contains(list.title, "選一個") && strings.Contains(list.title, "vault 檔"):
+			return fmt.Errorf("group_vars editor is open on a different file (%s); save_group_vars or discard_group_vars it first", st.Title)
+		case strings.Contains(st.Title, "選一個") && strings.Contains(st.Title, "vault 檔"):
 			// A different workspace's file picker is a safely-closed-out state
 			// (no pending edits live on a picker itself) — hop back to the top
 			// menu first. An open vault *editor* is deliberately NOT handled
@@ -50,7 +52,7 @@ func (d *automationDriver) openGroupVarsFile(r *editRouterModel, file string) er
 				return err
 			}
 		default:
-			return fmt.Errorf("cannot navigate to group_vars file %q from screen %q", file, list.title)
+			return fmt.Errorf("cannot navigate to group_vars file %q from screen %q", file, st.Title)
 		}
 	}
 	return fmt.Errorf("could not resolve navigation to group_vars file %q", file)
@@ -99,7 +101,7 @@ func (d *automationDriver) discardGroupVars(r *editRouterModel, file string) err
 	// pushGroupVarsEditorScreen only prompts a confirm when dirty; a clean
 	// file returns straight to the file picker instead, so branch on what
 	// screen we actually landed on rather than assuming a confirm exists.
-	if _, ok := r.current.(confirmModel); ok {
+	if automationState(r).Kind == tui.ScreenConfirm {
 		return d.confirmYesNo(r, true)
 	}
 	return nil

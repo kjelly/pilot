@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // normalizeVaultFileName appends ".yaml" to file when it doesn't already end
@@ -48,7 +50,7 @@ func (d *automationDriver) openVaultFile(r *editRouterModel, file string) error 
 	file = normalizeVaultFileName(file)
 	base := filepath.Base(file)
 	for attempts := 0; attempts < 6; attempts++ {
-		if _, ok := r.current.(confirmModel); ok {
+		if automationState(r).Kind == tui.ScreenConfirm {
 			// "<path> 不存在，要建立新的明文 vault 檔嗎？" — only reached via
 			// the "輸入其他 vault 檔路徑" branch below, for a genuinely new file.
 			if err := d.confirmYesNo(r, true); err != nil {
@@ -56,17 +58,17 @@ func (d *automationDriver) openVaultFile(r *editRouterModel, file string) error 
 			}
 			continue
 		}
-		list, ok := r.current.(selectModel)
-		if !ok {
+		st := automationState(r)
+		if st.Kind != tui.ScreenSelect {
 			return fmt.Errorf("cannot navigate to vault file %q from %s screen", file, automationScreenID(r))
 		}
 		switch {
-		case list.title == "要編輯什麼？":
+		case st.Title == "要編輯什麼？":
 			if err := d.choose(r, ".vault/"); err != nil {
 				return err
 			}
-		case strings.Contains(list.title, "選一個") && strings.Contains(list.title, "vault 檔"):
-			pickerTitle := list.title
+		case strings.Contains(st.Title, "選一個") && strings.Contains(st.Title, "vault 檔"):
+			pickerTitle := st.Title
 			if err := d.choose(r, base); err != nil {
 				// Not listed yet — take the "type a path" branch to create it.
 				// The path must be exactly what the picker's own default would
@@ -82,7 +84,7 @@ func (d *automationDriver) openVaultFile(r *editRouterModel, file string) error 
 				if err := d.enter(r); err != nil {
 					return err
 				}
-			} else if again, ok := r.current.(selectModel); ok && again.title == pickerTitle {
+			} else if again := automationState(r); again.Kind == tui.ScreenSelect && again.Title == pickerTitle {
 				// Choosing an existing, listed file either opens its editor (a
 				// different screen) or — for a parse failure or a file
 				// doc.Editable() rejects — bounces right back to this same
@@ -90,12 +92,12 @@ func (d *automationDriver) openVaultFile(r *editRouterModel, file string) error 
 				// That banner IS the fatal error here.
 				return fmt.Errorf("%s", r.banner)
 			}
-		case strings.HasPrefix(list.title, "編輯 "):
-			if strings.Contains(list.title, base) {
+		case strings.HasPrefix(st.Title, "編輯 "):
+			if strings.Contains(st.Title, base) {
 				return nil
 			}
-			return fmt.Errorf("vault editor is open on a different file (%s); save_vault or discard_vault it first", list.title)
-		case strings.Contains(list.title, "選一個") && strings.Contains(list.title, "group_vars"):
+			return fmt.Errorf("vault editor is open on a different file (%s); save_vault or discard_vault it first", st.Title)
+		case strings.Contains(st.Title, "選一個") && strings.Contains(st.Title, "group_vars"):
 			// A different workspace's file picker is a safely-closed-out state
 			// (no pending edits live on a picker itself) — hop back to the top
 			// menu first. An open group_vars *editor* is deliberately NOT
@@ -104,7 +106,7 @@ func (d *automationDriver) openVaultFile(r *editRouterModel, file string) error 
 				return err
 			}
 		default:
-			return fmt.Errorf("cannot navigate to vault file %q from screen %q", file, list.title)
+			return fmt.Errorf("cannot navigate to vault file %q from screen %q", file, st.Title)
 		}
 	}
 	return fmt.Errorf("could not resolve navigation to vault file %q", file)
@@ -170,7 +172,7 @@ func (d *automationDriver) discardVault(r *editRouterModel, file string) error {
 	if err := d.choose(r, "不存檔離開"); err != nil {
 		return err
 	}
-	if _, ok := r.current.(confirmModel); ok {
+	if automationState(r).Kind == tui.ScreenConfirm {
 		return d.confirmYesNo(r, true)
 	}
 	return nil

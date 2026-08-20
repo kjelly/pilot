@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 func (d *automationDriver) applyRolePreset(r *editRouterModel, step editAction) error {
@@ -188,21 +190,21 @@ func (d *automationDriver) restoreRolePresets(r *editRouterModel, host string) e
 // single-role toggle, used by createRolePreset for a fresh (all-unchecked)
 // checklist.
 func (d *automationDriver) checkRoleChecklistItems(r *editRouterModel, roles []string) error {
-	list, ok := r.current.(multiSelectModel)
-	if !ok {
+	st := automationState(r)
+	if st.Kind != tui.ScreenMultiSelect {
 		return fmt.Errorf("expected role checklist screen")
 	}
-	items := list.automationItems()
+	items := automationLabels(st.Items)
 	for _, role := range roles {
 		idx, err := uniqueItemIndex(items, role)
 		if err != nil {
 			return err
 		}
-		cur, ok := r.current.(multiSelectModel)
-		if !ok {
+		cur := automationState(r)
+		if cur.Kind != tui.ScreenMultiSelect {
 			return fmt.Errorf("expected role checklist screen")
 		}
-		if cur.items[idx].Checked {
+		if cur.Items[idx].Checked {
 			continue
 		}
 		if err := d.moveCursor(r, idx); err != nil {

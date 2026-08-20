@@ -8,7 +8,11 @@
 // edit_automation_driver_roster.go's user pattern.
 package cmd
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/kjelly/pilot/internal/tui"
+)
 
 func (d *automationDriver) ensureRosterSudoCommandGroupsList(r *editRouterModel) error {
 	for attempts := 0; attempts < 8; attempts++ {
@@ -65,7 +69,7 @@ func (d *automationDriver) createSudoCommandGroup(r *editRouterModel, name, comm
 
 func (d *automationDriver) ensureRosterSudoCommandGroupDetail(r *editRouterModel, name string) error {
 	if automationScreenID(r) == "roster.sudo.command_group.detail" {
-		if list, ok := r.current.(selectModel); ok && list.title == "Sudo command group "+name {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && st.Title == "Sudo command group "+name {
 			return nil
 		}
 		if err := d.choose(r, "返回"); err != nil {
@@ -156,7 +160,7 @@ func (d *automationDriver) createSudoRule(r *editRouterModel, name string, group
 
 func (d *automationDriver) ensureRosterSudoRuleDetail(r *editRouterModel, name string) error {
 	if automationScreenID(r) == "roster.sudo.rule.detail" {
-		if list, ok := r.current.(selectModel); ok && list.title == "Sudo rule "+name {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && st.Title == "Sudo rule "+name {
 			return nil
 		}
 		if err := d.choose(r, "返回"); err != nil {

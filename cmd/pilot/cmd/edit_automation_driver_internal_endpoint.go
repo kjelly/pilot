@@ -11,6 +11,8 @@ package cmd
 import (
 	"fmt"
 	"strconv"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // ---- navigation chains (ensure*) ----------------------------------------
@@ -74,7 +76,7 @@ func listTitleNamesInternalEndpoint(title, fqdn string) bool {
 
 func (d *automationDriver) ensureInternalEndpointDetail(r *editRouterModel, fqdn string) error {
 	if automationScreenID(r) == "iep.detail" {
-		if list, ok := r.current.(selectModel); ok && listTitleNamesInternalEndpoint(list.title, fqdn) {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && listTitleNamesInternalEndpoint(st.Title, fqdn) {
 			return nil
 		}
 		if err := d.choose(r, "返回"); err != nil {

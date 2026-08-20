@@ -14,6 +14,8 @@ package cmd
 import (
 	"fmt"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 func (d *automationDriver) ensureDNSManifestPathPrompt(r *editRouterModel) error {
@@ -139,7 +141,7 @@ func listTitleNamesDNSZone(title, zone string) bool {
 
 func (d *automationDriver) ensureDNSZoneDetail(r *editRouterModel, zone string) error {
 	if automationScreenID(r) == "dns.zone.detail" {
-		if list, ok := r.current.(selectModel); ok && listTitleNamesDNSZone(list.title, zone) {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && listTitleNamesDNSZone(st.Title, zone) {
 			return nil
 		}
 		if err := d.choose(r, "返回"); err != nil {
@@ -167,7 +169,7 @@ func (d *automationDriver) setDNSZoneField(r *editRouterModel, zone, field, valu
 
 func (d *automationDriver) ensureDNSRecordsMenu(r *editRouterModel, zone string) error {
 	if automationScreenID(r) == "dns.records.list" {
-		if list, ok := r.current.(selectModel); ok && list.title == fmt.Sprintf("Records — zone %q", zone) {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && st.Title == fmt.Sprintf("Records — zone %q", zone) {
 			return nil
 		}
 		if err := d.choose(r, "返回"); err != nil {
@@ -228,7 +230,7 @@ func (d *automationDriver) createDNSRecord(r *editRouterModel, zone, recordType,
 func (d *automationDriver) ensureDNSRecordDetail(r *editRouterModel, zone, recordName, recordType string) error {
 	wantTitle := fmt.Sprintf("Record %s %s — zone %q", recordName, recordType, zone)
 	if automationScreenID(r) == "dns.record.detail" {
-		if list, ok := r.current.(selectModel); ok && list.title == wantTitle {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && st.Title == wantTitle {
 			return nil
 		}
 		if err := d.choose(r, "返回"); err != nil {

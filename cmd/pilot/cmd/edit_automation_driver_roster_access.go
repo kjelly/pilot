@@ -7,7 +7,11 @@
 // matching, mirroring edit_automation_driver_roster.go's user pattern.
 package cmd
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/kjelly/pilot/internal/tui"
+)
 
 func (d *automationDriver) ensureRosterHostAccessMenu(r *editRouterModel) error {
 	for attempts := 0; attempts < 8; attempts++ {
@@ -88,7 +92,7 @@ func (d *automationDriver) createHostgroup(r *editRouterModel, hostgroup string)
 
 func (d *automationDriver) ensureRosterHostgroupDetail(r *editRouterModel, hostgroup string) error {
 	if automationScreenID(r) == "roster.hostgroup.detail" {
-		if list, ok := r.current.(selectModel); ok && list.title == "Hostgroup "+hostgroup {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && st.Title == "Hostgroup "+hostgroup {
 			return nil
 		}
 		if err := d.choose(r, "返回"); err != nil {
@@ -191,7 +195,7 @@ func (d *automationDriver) createHBACRule(r *editRouterModel, name string, group
 
 func (d *automationDriver) ensureRosterHBACDetail(r *editRouterModel, name string) error {
 	if automationScreenID(r) == "roster.hbac.detail" {
-		if list, ok := r.current.(selectModel); ok && list.title == "HBAC rule "+name {
+		if st := automationState(r); st.Kind == tui.ScreenSelect && st.Title == "HBAC rule "+name {
 			return nil
 		}
 		if err := d.choose(r, "返回"); err != nil {
@@ -243,13 +247,13 @@ func (d *automationDriver) setHBACDisableAllowAll(r *editRouterModel, want bool)
 	if err := d.ensureRosterHostAccessMenu(r); err != nil {
 		return err
 	}
-	list, ok := r.current.(selectModel)
-	if !ok {
+	st := automationState(r)
+	if st.Kind != tui.ScreenSelect {
 		return fmt.Errorf("expected roster host access menu screen, got %s", automationScreenID(r))
 	}
 	wantLabel := fmt.Sprintf("hbac.disable_allow_all：%t", want)
-	for _, item := range list.automationItems() {
-		if item == wantLabel {
+	for _, item := range st.Items {
+		if item.Label == wantLabel {
 			return nil
 		}
 	}
