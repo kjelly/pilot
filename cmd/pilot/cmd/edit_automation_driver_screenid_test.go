@@ -81,9 +81,13 @@ func TestItemIndexByID_EmptyIDRejectedEvenIfAnItemHasOne(t *testing.T) {
 	}
 }
 
+func newHostsListSelectScreen(items []tui.Choice) screen {
+	return tui.NewHuhFactory().Select(tui.SelectSpec{ScreenID: "hosts.list", Title: "t", Choices: items})
+}
+
 func TestChooseByID_WrongScreenFailsClosed(t *testing.T) {
-	items := []selectItem{{ID: "hosts.create", Label: "➕ 新增主機"}}
-	r := editRouterModel{current: newSelectModelWithIDs("hosts.list", "t", items)}
+	items := []tui.Choice{{ID: "hosts.create", Label: "➕ 新增主機"}}
+	r := editRouterModel{current: newHostsListSelectScreen(items)}
 	d := automationDriver{}
 	if err := d.chooseByID(&r, "hosts.item", "hosts.create"); err == nil {
 		t.Fatal("expected an error when wantScreenID doesn't match the current screen")
@@ -91,7 +95,7 @@ func TestChooseByID_WrongScreenFailsClosed(t *testing.T) {
 }
 
 func TestChooseByID_NonSelectScreenFailsClosed(t *testing.T) {
-	r := editRouterModel{current: newConfirmModelWithScreenID("confirm.discard", "q", false)}
+	r := editRouterModel{current: tui.NewHuhFactory().Confirm(tui.ConfirmSpec{ScreenID: "confirm.discard", Title: "q", Default: false})}
 	d := automationDriver{}
 	if err := d.chooseByID(&r, "confirm.discard", "anything"); err == nil {
 		t.Fatal("expected an error targeting an item on a non-select screen")
@@ -99,8 +103,8 @@ func TestChooseByID_NonSelectScreenFailsClosed(t *testing.T) {
 }
 
 func TestChooseByID_UnknownItemIDFailsClosed(t *testing.T) {
-	items := []selectItem{{ID: "hosts.create", Label: "➕ 新增主機"}}
-	r := editRouterModel{current: newSelectModelWithIDs("hosts.list", "t", items)}
+	items := []tui.Choice{{ID: "hosts.create", Label: "➕ 新增主機"}}
+	r := editRouterModel{current: newHostsListSelectScreen(items)}
 	d := automationDriver{}
 	if err := d.chooseByID(&r, "hosts.list", "no-such-id"); err == nil {
 		t.Fatal("expected an error for an item ID that isn't present")
@@ -108,15 +112,15 @@ func TestChooseByID_UnknownItemIDFailsClosed(t *testing.T) {
 }
 
 func TestChooseByID_MovesCursorAndSelects(t *testing.T) {
-	items := []selectItem{{ID: "a", Label: "a"}, {ID: "hosts.create", Label: "➕ 新增主機"}, {ID: "c", Label: "c"}}
-	r := editRouterModel{current: newSelectModelWithIDs("hosts.list", "t", items)}
+	items := []tui.Choice{{ID: "a", Label: "a"}, {ID: "hosts.create", Label: "➕ 新增主機"}, {ID: "c", Label: "c"}}
+	r := editRouterModel{current: newHostsListSelectScreen(items)}
 	d := automationDriver{}
 	if err := d.chooseByID(&r, "hosts.list", "hosts.create"); err != nil {
 		t.Fatalf("chooseByID() error = %v", err)
 	}
-	list, ok := r.current.(selectModel)
+	list, ok := r.current.(tui.SelectScreen)
 	if !ok || !list.Finished() || list.Canceled() {
-		t.Fatalf("expected a finished, non-canceled selectModel, got %#v", r.current)
+		t.Fatalf("expected a finished, non-canceled SelectScreen, got %#v", r.current)
 	}
 	if got := list.Selected(); got != 1 {
 		t.Fatalf("Selected() = %d, want 1", got)

@@ -3,7 +3,6 @@ module github.com/kjelly/pilot
 go 1.26.4
 
 require (
-	charm.land/bubbles/v2 v2.1.1
 	charm.land/bubbletea/v2 v2.0.9
 	charm.land/huh/v2 v2.0.3
 	github.com/aymanbagabas/go-udiff v0.4.1
@@ -18,6 +17,7 @@ require (
 )
 
 require (
+	charm.land/bubbles/v2 v2.1.1 // indirect
 	charm.land/lipgloss/v2 v2.0.4 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/catppuccin/go v0.2.0 // indirect

@@ -9,12 +9,30 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
+
+// newTestSelect is this file's stand-in for the pre-Phase-5 newSelectModel:
+// a bare, unnamed-screen-ID select built straight off the production
+// factory, for router-mechanics tests that don't care which widget
+// provider backs the screen.
+func newTestSelect(title string, labels ...string) screen {
+	choices := make([]tui.Choice, len(labels))
+	for i, l := range labels {
+		choices[i] = tui.Choice{Label: l}
+	}
+	return tui.NewHuhFactory().Select(tui.SelectSpec{Title: title, Choices: choices})
+}
+
+func newTestConfirm(question string, defaultYes bool) screen {
+	return tui.NewHuhFactory().Confirm(tui.ConfirmSpec{Title: question, Default: defaultYes})
+}
 
 func TestEditRouter_TransitionTo_ReplacesCurrentScreen(t *testing.T) {
 	var r editRouterModel
-	r.transitionTo(newSelectModel("first", []string{"a"}), "", func(r *editRouterModel, s screen) tea.Cmd {
-		return r.transitionTo(newSelectModel("second", []string{"b"}), "", nil)
+	r.transitionTo(newTestSelect("first", "a"), "", func(r *editRouterModel, s screen) tea.Cmd {
+		return r.transitionTo(newTestSelect("second", "b"), "", nil)
 	})
 
 	nm, _ := r.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -29,8 +47,8 @@ func TestEditRouter_TransitionTo_ReplacesCurrentScreen(t *testing.T) {
 
 func TestEditRouter_BannerShownThenClearedByNextTransition(t *testing.T) {
 	var r editRouterModel
-	r.transitionTo(newConfirmModel("q", true), "hello banner", func(r *editRouterModel, s screen) tea.Cmd {
-		return r.transitionTo(newConfirmModel("q2", true), "", nil)
+	r.transitionTo(newTestConfirm("q", true), "hello banner", func(r *editRouterModel, s screen) tea.Cmd {
+		return r.transitionTo(newTestConfirm("q2", true), "", nil)
 	})
 	if !strings.Contains(viewContent(r.View()), "hello banner") {
 		t.Fatalf("expected banner in view, got:\n%s", viewContent(r.View()))
@@ -45,8 +63,8 @@ func TestEditRouter_BannerShownThenClearedByNextTransition(t *testing.T) {
 
 func TestEditRouter_CancelDefaultsToQuit(t *testing.T) {
 	var r editRouterModel
-	r.transitionTo(newSelectModel("t", []string{"a"}), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+	r.transitionTo(newTestSelect("t", "a"), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return quitWizard(r)
 		}
@@ -65,7 +83,7 @@ func TestEditRouter_CancelDefaultsToQuit(t *testing.T) {
 
 func TestEditRouter_ErrForcesQuit(t *testing.T) {
 	var r editRouterModel
-	r.transitionTo(newConfirmModel("q", true), "", func(r *editRouterModel, s screen) tea.Cmd {
+	r.transitionTo(newTestConfirm("q", true), "", func(r *editRouterModel, s screen) tea.Cmd {
 		r.err = fmt.Errorf("boom")
 		return nil
 	})
@@ -91,7 +109,7 @@ func TestEditRouter_NoCurrentScreenQuits(t *testing.T) {
 func TestEditRouter_UnfinishedScreenDoesNotInvokeCallback(t *testing.T) {
 	invoked := false
 	var r editRouterModel
-	r.transitionTo(newSelectModel("t", []string{"a", "b"}), "", func(r *editRouterModel, s screen) tea.Cmd {
+	r.transitionTo(newTestSelect("t", "a", "b"), "", func(r *editRouterModel, s screen) tea.Cmd {
 		invoked = true
 		return nil
 	})

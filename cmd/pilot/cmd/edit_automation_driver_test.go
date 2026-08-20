@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -506,24 +507,24 @@ func TestEditAutomationDriverSetHostFieldEnvEmptyRoundTrips(t *testing.T) {
 
 func TestAutomationDriverConfirmYesNo(t *testing.T) {
 	r := &editRouterModel{}
-	r.current = newConfirmModel("q?", false)
+	r.current = tui.NewHuhFactory().Confirm(tui.ConfirmSpec{Title: "q?", Default: false})
 	d := automationDriver{}
 	if err := d.confirmYesNo(r, true); err != nil {
 		t.Fatalf("confirmYesNo(true) error = %v", err)
 	}
-	cm, ok := r.current.(confirmModel)
+	cm, ok := r.current.(tui.ConfirmScreen)
 	if !ok || !cm.Finished() || !cm.Value() {
-		t.Fatalf("confirmModel not resolved to yes: %+v", r.current)
+		t.Fatalf("ConfirmScreen not resolved to yes: %+v", r.current)
 	}
 
 	r2 := &editRouterModel{}
-	r2.current = newConfirmModel("q?", true) // defaultYes=true, but we still expect an explicit "no" to win
+	r2.current = tui.NewHuhFactory().Confirm(tui.ConfirmSpec{Title: "q?", Default: true}) // defaultYes=true, but we still expect an explicit "no" to win
 	if err := d.confirmYesNo(r2, false); err != nil {
 		t.Fatalf("confirmYesNo(false) error = %v", err)
 	}
-	cm2, ok := r2.current.(confirmModel)
+	cm2, ok := r2.current.(tui.ConfirmScreen)
 	if !ok || !cm2.Finished() || cm2.Value() {
-		t.Fatalf("confirmModel did not override defaultYes: %+v", r2.current)
+		t.Fatalf("ConfirmScreen did not override defaultYes: %+v", r2.current)
 	}
 }
 
