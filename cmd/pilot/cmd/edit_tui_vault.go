@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/tui"
 	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
@@ -37,7 +38,7 @@ func pushVaultFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 
 	title := fmt.Sprintf("選一個 %s 底下的 vault 檔", targetDir)
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
 			return pushTopMenu(r, dir, "")
@@ -57,7 +58,7 @@ func pushVaultFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 func pushVaultPathPrompt(r *editRouterModel, dir, targetDir string) tea.Cmd {
 	def := filepath.Join(targetDir, "main.yaml")
 	return r.transitionTo(newTextInputModel("vault 檔路徑", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushVaultFilePicker(r, dir, "")
 		}
@@ -78,7 +79,7 @@ func pushVaultOpen(r *editRouterModel, dir, path string) tea.Cmd {
 		}
 		question := fmt.Sprintf("%s 不存在，要建立新的明文 vault 檔嗎？", path)
 		return r.transitionTo(newConfirmModel(question, true), "", func(r *editRouterModel, s screen) tea.Cmd {
-			m := s.(confirmModel)
+			m := s.(tui.ConfirmScreen)
 			if !m.Value() {
 				return pushVaultFilePicker(r, dir, "")
 			}
@@ -254,7 +255,7 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 
 	title := fmt.Sprintf("編輯 %s", path)
 	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "🚪 不存檔離開" exactly, including its dirty gate.
 			if !dirty {
@@ -302,7 +303,7 @@ func displayVaultValue(value string, limit int) string {
 
 func pushConfirmDiscardVault(r *editRouterModel, dir, path string, doc *vaultfile.Doc) tea.Cmd {
 	return r.transitionTo(newConfirmModel("有未存檔的修改，確定要放棄離開嗎？", false), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(confirmModel)
+		m := s.(tui.ConfirmScreen)
 		if m.Value() {
 			return pushVaultFilePicker(r, dir, "")
 		}
@@ -322,7 +323,7 @@ func pushVaultAddKey(r *editRouterModel, dir, path string, doc *vaultfile.Doc, d
 		return nil
 	}
 	return r.transitionTo(newTextInputModel("新的 key 名稱", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushVaultEditorScreen(r, dir, path, doc, dirty, "")
 		}
@@ -333,7 +334,7 @@ func pushVaultAddKey(r *editRouterModel, dir, path string, doc *vaultfile.Doc, d
 
 func pushVaultAddKeyValue(r *editRouterModel, dir, path string, doc *vaultfile.Doc, key string, dirty bool) tea.Cmd {
 	return r.transitionTo(newSecretTextInputModel("值（多行請直接輸入 \\n）", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushVaultAddKey(r, dir, path, doc, dirty)
 		}
@@ -346,7 +347,7 @@ func pushVaultEntryMenu(r *editRouterModel, dir, path string, doc *vaultfile.Doc
 	title := fmt.Sprintf("%s 目前值：%s", entry.Key, displayVaultValue(entry.DisplayValue(), 120))
 	items := []string{"修改值", "刪除", "返回"}
 	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "返回" (case 2).
 			return pushVaultEditorScreen(r, dir, path, doc, dirty, "")
@@ -367,7 +368,7 @@ func pushVaultEntryMenu(r *editRouterModel, dir, path string, doc *vaultfile.Doc
 func pushVaultEditValue(r *editRouterModel, dir, path string, doc *vaultfile.Doc, entry vaultfile.Entry, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 的新值（多行請直接輸入 \\n）", entry.Key)
 	return r.transitionTo(newSecretTextInputModel(label, entry.EditValue(), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushVaultEntryMenu(r, dir, path, doc, entry, dirty)
 		}

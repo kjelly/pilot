@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 const rolePresetFilename = "role-presets.yml"
@@ -154,7 +155,7 @@ func pushRolePresetManager(r *editRouterModel, dir, path string, hf *inventory.H
 	items = append(items, "↩ 返回")
 	title := fmt.Sprintf("管理 %s", rolePresetPath(dir))
 	return r.transitionTo(newSelectModelWithScreenID("hosts.role_preset_manager", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
 			return pushRolesMenu(r, dir, path, hf, name)
@@ -177,7 +178,7 @@ func pushRolePresetAction(r *editRouterModel, dir, path string, hf *inventory.Ho
 	title := fmt.Sprintf("範本 %q", presets[idx].Label)
 	items := []string{"✏ 修改名稱與角色", "🗑 刪除範本", "↩ 返回"}
 	return r.transitionTo(newSelectModelWithScreenID("hosts.role_preset_action", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
 			return pushRolePresetManager(r, dir, path, hf, name, "")
@@ -211,7 +212,7 @@ func pushRolePresetName(r *editRouterModel, dir, path string, hf *inventory.Host
 		return nil
 	}
 	return r.transitionTo(newTextInputModel("角色範本名稱", current, validate), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			// create flow (idx < 0): back to the preset list; rename flow:
 			// back to that preset's own action menu, not all the way out.
@@ -239,7 +240,7 @@ func pushRolePresetChecklist(r *editRouterModel, dir, path string, hf *inventory
 	}
 	title := fmt.Sprintf("範本 %q 的角色", presets[idx].Label)
 	return r.transitionTo(newMultiSelectModelWithScreenID("hosts.role_preset_checklist", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(multiSelectModel)
+		m := s.(tui.MultiSelectScreen)
 		if m.Canceled() {
 			return pushRolePresetManager(r, dir, path, hf, name, "")
 		}
@@ -260,7 +261,7 @@ func pushRolePresetChecklist(r *editRouterModel, dir, path string, hf *inventory
 func pushConfirmDeleteRolePreset(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, presets []rolePreset, idx int) tea.Cmd {
 	question := fmt.Sprintf("確定刪除範本 %q 嗎？", presets[idx].Label)
 	return r.transitionTo(newConfirmModel(question, false), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(confirmModel)
+		m := s.(tui.ConfirmScreen)
 		if !m.Value() {
 			return pushRolePresetAction(r, dir, path, hf, name, presets, idx)
 		}
@@ -276,7 +277,7 @@ func pushConfirmDeleteRolePreset(r *editRouterModel, dir, path string, hf *inven
 func pushConfirmRestoreRolePresets(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
 	question := fmt.Sprintf("確定刪除 %s，還原為內建範本嗎？", rolePresetPath(dir))
 	return r.transitionTo(newConfirmModel(question, false), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(confirmModel)
+		m := s.(tui.ConfirmScreen)
 		if !m.Value() {
 			return pushRolePresetManager(r, dir, path, hf, name, "")
 		}

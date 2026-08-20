@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 type promptAnswer struct {
@@ -85,7 +87,7 @@ func (p *promptAutomation) selectPrompt(prompt string, items []string) (int, err
 	if p.tracePrompt("select", prompt, m.View(), keys, "ok"); p.err != nil {
 		return 0, p.err
 	}
-	return m.s.(selectModel).Selected(), nil
+	return m.s.(tui.SelectScreen).Selected(), nil
 }
 
 func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) error) (string, error) {
@@ -113,8 +115,8 @@ func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) 
 		return "", err
 	}
 	keys = append(keys, "enter")
-	value := m.s.(textInputModel).Value()
-	if !m.s.(textInputModel).Finished() {
+	value := m.s.(tui.InputScreen).Value()
+	if !m.s.(tui.InputScreen).Finished() {
 		return "", fmt.Errorf("automation text answer failed validation")
 	}
 	p.tracePrompt("text", prompt, m.View(), keys, "ok")
@@ -146,7 +148,7 @@ func (p *promptAutomation) confirmPrompt(prompt string, defaultYes bool) bool {
 	}
 	p.tracePrompt("confirm", prompt, m.View(), []string{key.String()}, "ok")
 	p.render(prompt, m.View())
-	return m.s.(confirmModel).Value()
+	return m.s.(tui.ConfirmScreen).Value()
 }
 
 func (p *promptAutomation) render(prompt, view string) {

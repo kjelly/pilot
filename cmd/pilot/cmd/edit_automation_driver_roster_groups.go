@@ -93,7 +93,7 @@ func (d *automationDriver) createGroup(r *editRouterModel, group, category strin
 // select screen (roster.group.field_type/field_authoritative) rather
 // than a text input.
 var rosterGroupSelectFields = map[string]bool{
-	"type":                      true,
+	"type":                     true,
 	"membership.authoritative": true,
 }
 

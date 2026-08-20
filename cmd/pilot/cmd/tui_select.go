@@ -139,10 +139,6 @@ func (m selectModel) SelectedID() string {
 	return m.items[idx].ID
 }
 
-// SelectedIndex implements tui.SelectScreen — a migration compatibility
-// helper equivalent to Selected().
-func (m selectModel) SelectedIndex() int { return m.Selected() }
-
 func (m *selectModel) resetFilterCursor() {
 	m.cursor = 0
 	m.windowStart = 0

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // pushMinimalWorkspaceWizard is a shortcut into the established editors. It
@@ -23,7 +25,7 @@ func pushMinimalWorkspaceWizard(r *editRouterModel, dir, banner string) tea.Cmd 
 		"↩  返回",
 	}
 	return r.transitionTo(newSelectModel("快速建立最小 workspace", items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -170,7 +172,7 @@ func pushMinimalWorkspaceReadiness(r *editRouterModel, dir string) tea.Cmd {
 		newSelectModelWithScreenID("edit.minimal.readiness", "還不能部署 — 選一個要修的地方", items),
 		formatCompletenessReport(checks),
 		func(r *editRouterModel, s screen) tea.Cmd {
-			m := s.(selectModel)
+			m := s.(tui.SelectScreen)
 			if m.Canceled() {
 				return pushMinimalWorkspaceWizard(r, dir, "")
 			}

@@ -33,6 +33,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // ---- entry point + manifest-level manager -------------------------------
@@ -40,7 +41,7 @@ import (
 func pushDNSManifestPathPrompt(r *editRouterModel, dir string) tea.Cmd {
 	def := filepath.Join(dir, "freeipa-dns.yaml")
 	return r.transitionTo(newTextInputModelWithScreenID("dns.path", "freeipa-dns manifest 檔路徑", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -67,7 +68,7 @@ func pushDNSManifestManager(r *editRouterModel, dir, path, banner string) tea.Cm
 	}
 	title := fmt.Sprintf("管理 %s", path)
 	return r.transitionTo(newSelectModelWithScreenID("dns.manager", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -89,7 +90,7 @@ func pushDNSManifestManager(r *editRouterModel, dir, path, banner string) tea.Cm
 func pushDNSManifestCreateConfirm(r *editRouterModel, dir, path string) tea.Cmd {
 	question := fmt.Sprintf("%s 不存在，要建立最小 freeipa-dns manifest 骨架嗎？", path)
 	return r.transitionTo(newConfirmModelWithScreenID("dns.create_confirm", question, true), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(confirmModel)
+		m := s.(tui.ConfirmScreen)
 		if !m.Value() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -108,7 +109,7 @@ func pushDNSManifestCreateDomainPrompt(r *editRouterModel, dir, path string) tea
 	def, _ := inventory.FreeIPADomain(dir)
 	label := "FreeIPA domain(必須與 group_vars/freeipa.yml 的 freeipa_domain 一致)"
 	return r.transitionTo(newTextInputModelWithScreenID("dns.create_domain", label, def, nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -120,7 +121,7 @@ func pushDNSManifestCreateDomainPrompt(r *editRouterModel, dir, path string) tea
 func pushDNSManifestCreateRealmPrompt(r *editRouterModel, dir, path, domain string) tea.Cmd {
 	label := "FreeIPA realm(必須與 freeipa_realm 一致；預設是 domain 全大寫)"
 	return r.transitionTo(newTextInputModelWithScreenID("dns.create_realm", label, strings.ToUpper(domain), nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -140,7 +141,7 @@ func pushDNSManifestCreateServerPrompt(r *editRouterModel, dir, path, domain, re
 	}
 	label := "FreeIPA server FQDN(必須與 freeipa_server_fqdn 一致)"
 	return r.transitionTo(newTextInputModelWithScreenID("dns.create_server", label, def, nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -179,7 +180,7 @@ func pushDNSZonesMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	items = append(items, "➕ 新增 zone", "↩  返回")
 
 	return r.transitionTo(newSelectModelWithScreenID("dns.zones.list", fmt.Sprintf("Zones — %s", path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSManifestManager(r, dir, path, "")
 		}
@@ -197,7 +198,7 @@ func pushDNSZonesMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 func pushDNSZoneAddName(r *editRouterModel, dir, path string) tea.Cmd {
 	label := "新 zone 的名稱(絕對 FQDN，例如 example.com.)"
 	return r.transitionTo(newTextInputModelWithScreenID("dns.zone.add_name", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushDNSZonesMenu(r, dir, path, "")
 		}
@@ -250,7 +251,7 @@ func pushDNSZoneDetail(r *editRouterModel, dir, path, name, banner string) tea.C
 		"↩  返回",
 	}
 	return r.transitionTo(newSelectModelWithScreenID("dns.zone.detail", fmt.Sprintf("Zone %q — %s", name, path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSZonesMenu(r, dir, path, "")
 		}
@@ -316,7 +317,7 @@ var dnsZoneStateChoices = []string{"present", "absent"}
 func pushDNSZoneStateField(r *editRouterModel, dir, path, name string) tea.Cmd {
 	title := "state（absent 代表要求 reconciler 刪除這個 zone；實際刪除仍受 apply 端 allow_zone_delete + confirm_dns_zone_delete 雙重確認保護，這裡寫入 absent 本身是安全的）"
 	return r.transitionTo(newSelectModelWithScreenID("dns.zone.field_state", title, dnsZoneStateChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSZoneDetail(r, dir, path, name, "")
 		}
@@ -330,7 +331,7 @@ var dnsRecordsModeChoices = []string{"merge", "authoritative"}
 func pushDNSZoneRecordsModeField(r *editRouterModel, dir, path, name string) tea.Cmd {
 	title := "records_mode（authoritative 會在套用時清除 manifest 未宣告的 supported-type record，另外需要 apply 端的 allow_authoritative_prune 安全旗標）"
 	return r.transitionTo(newSelectModelWithScreenID("dns.zone.field_records_mode", title, dnsRecordsModeChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSZoneDetail(r, dir, path, name, "")
 		}
@@ -344,7 +345,7 @@ var dnsBoolChoices = []string{"true", "false"}
 func pushDNSZoneSplitHorizonField(r *editRouterModel, dir, path, name string) tea.Cmd {
 	title := "acknowledge_split_horizon（若這個 zone 名稱已存在於外部 DNS，必須設 true 才能在 apply 端建立，否則會被拒絕）"
 	return r.transitionTo(newSelectModelWithScreenID("dns.zone.field_split_horizon", title, dnsBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSZoneDetail(r, dir, path, name, "")
 		}
@@ -379,7 +380,7 @@ func pushDNSRecordsMenu(r *editRouterModel, dir, path, zoneName, banner string) 
 	items = append(items, "➕ 新增 record", "↩  返回")
 
 	return r.transitionTo(newSelectModelWithScreenID("dns.records.list", fmt.Sprintf("Records — zone %q", zoneName), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSZoneDetail(r, dir, path, zoneName, "")
 		}
@@ -413,7 +414,7 @@ var dnsRecordTypeChoices = []string{"A", "AAAA", "CNAME"}
 
 func pushDNSRecordAddType(r *editRouterModel, dir, path, zoneName string) tea.Cmd {
 	return r.transitionTo(newSelectModelWithScreenID("dns.record.add_type", "新 record 的類型", dnsRecordTypeChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSRecordsMenu(r, dir, path, zoneName, "")
 		}
@@ -424,7 +425,7 @@ func pushDNSRecordAddType(r *editRouterModel, dir, path, zoneName string) tea.Cm
 func pushDNSRecordAddName(r *editRouterModel, dir, path, zoneName, recordType string) tea.Cmd {
 	label := "新 record 的名稱(zone-relative owner，例如 grafana；apex 用 @)"
 	return r.transitionTo(newTextInputModelWithScreenID("dns.record.add_name", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushDNSRecordsMenu(r, dir, path, zoneName, "")
 		}
@@ -445,7 +446,7 @@ var dnsValueSourceChoices = []string{"從 inventory host 解析(target.inventory
 
 func pushDNSRecordAddValueSource(r *editRouterModel, dir, path, zoneName, recordType, name string) tea.Cmd {
 	return r.transitionTo(newSelectModelWithScreenID("dns.record.add_value_source", "值的來源", dnsValueSourceChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSRecordsMenu(r, dir, path, zoneName, "")
 		}
@@ -467,7 +468,7 @@ func pushDNSRecordAddHostPicker(r *editRouterModel, dir, path, zoneName, recordT
 		return pushDNSRecordsMenu(r, dir, path, zoneName, "⚠️  hosts.yml 沒有任何主機可選；請先在 hosts.yml 新增主機，或改用明確指定值(values)")
 	}
 	return r.transitionTo(newSelectModelWithScreenID("dns.record.add_host_picker", "要解析哪個 inventory host 的 ansible_host？", names), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSRecordsMenu(r, dir, path, zoneName, "")
 		}
@@ -486,7 +487,7 @@ func pushDNSRecordAddValues(r *editRouterModel, dir, path, zoneName, recordType,
 		label = "CNAME 目標(單一完整 FQDN，以 . 結尾，例如 nexus.ipa.pilot.internal.)"
 	}
 	return r.transitionTo(newTextInputModelWithScreenID("dns.record.add_values", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushDNSRecordsMenu(r, dir, path, zoneName, "")
 		}
@@ -548,7 +549,7 @@ func pushDNSRecordDetail(r *editRouterModel, dir, path, zoneName, recordName, re
 	}
 	title := fmt.Sprintf("Record %s %s — zone %q", recordName, recordType, zoneName)
 	return r.transitionTo(newSelectModelWithScreenID("dns.record.detail", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSRecordsMenu(r, dir, path, zoneName, "")
 		}
@@ -613,7 +614,7 @@ var dnsRecordStateChoices = []string{"present", "absent"}
 func pushDNSRecordStateField(r *editRouterModel, dir, path, zoneName, recordName, recordType string) tea.Cmd {
 	title := "state（absent 代表要求 reconciler 刪除這個 RRset；只影響這個 type，不影響同 owner 的其他 record type）"
 	return r.transitionTo(newSelectModelWithScreenID("dns.record.field_state", title, dnsRecordStateChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSRecordDetail(r, dir, path, zoneName, recordName, recordType, "")
 		}
@@ -624,7 +625,7 @@ func pushDNSRecordStateField(r *editRouterModel, dir, path, zoneName, recordName
 
 func pushDNSRecordValueSourceField(r *editRouterModel, dir, path, zoneName, recordName, recordType string) tea.Cmd {
 	return r.transitionTo(newSelectModelWithScreenID("dns.record.field_value_source", "值的來源", dnsValueSourceChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSRecordDetail(r, dir, path, zoneName, recordName, recordType, "")
 		}
@@ -647,7 +648,7 @@ func pushDNSRecordValuesField(r *editRouterModel, dir, path, zoneName, recordNam
 		label = "values（CNAME 只能有一個完整 FQDN，以 . 結尾）"
 	}
 	return r.transitionTo(newTextInputModelWithScreenID("dns.record.field_values", label, current, nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushDNSRecordDetail(r, dir, path, zoneName, recordName, recordType, "")
 		}
@@ -670,7 +671,7 @@ func pushDNSRecordTargetField(r *editRouterModel, dir, path, zoneName, recordNam
 		return pushDNSRecordDetail(r, dir, path, zoneName, recordName, recordType, "⚠️  hosts.yml 沒有任何主機可選")
 	}
 	return r.transitionTo(newSelectModelWithScreenID("dns.record.field_target", "要解析哪個 inventory host 的 ansible_host？", names), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushDNSRecordDetail(r, dir, path, zoneName, recordName, recordType, "")
 		}
@@ -690,7 +691,7 @@ func pushDNSRecordTTLField(r *editRouterModel, dir, path, zoneName, recordName, 
 	}
 	label := "ttl（留空 = 使用 zone/manifest 預設；60-86400）"
 	return r.transitionTo(newTextInputModelWithScreenID("dns.record.field_ttl", label, dnsIntValue(fields, "ttl"), dnsTTLValidator), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushDNSRecordDetail(r, dir, path, zoneName, recordName, recordType, "")
 		}

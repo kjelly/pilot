@@ -53,6 +53,8 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 // runSelectProgram is promptSelectIndex's Bubble Tea equivalent. It
@@ -69,7 +71,7 @@ func runSelectProgram(label string, items []string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", errDeployAborted, err)
 	}
-	fm := final.(standaloneScreen).s.(selectModel)
+	fm := final.(standaloneScreen).s.(tui.SelectScreen)
 	if fm.Canceled() {
 		return 0, errDeployAborted
 	}
@@ -86,7 +88,7 @@ func runTextProgram(label, def string, validate func(string) error) (string, err
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", errDeployAborted, err)
 	}
-	fm := final.(standaloneScreen).s.(textInputModel)
+	fm := final.(standaloneScreen).s.(tui.InputScreen)
 	if fm.Canceled() {
 		return "", errDeployAborted
 	}
@@ -107,5 +109,5 @@ func runConfirmProgram(question string, defaultYes bool) bool {
 	if err != nil {
 		return false
 	}
-	return final.(standaloneScreen).s.(confirmModel).Value()
+	return final.(standaloneScreen).s.(tui.ConfirmScreen).Value()
 }

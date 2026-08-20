@@ -24,13 +24,14 @@ type Screen interface {
 	AutomationState() AutomationState
 }
 
-// SelectScreen is a single-choice list screen's typed result.
-// SelectedIndex is a migration compatibility helper for callers still
-// keyed on original-choice index; new code should prefer SelectedID.
+// SelectScreen is a single-choice list screen's typed result. Selected
+// is a migration compatibility helper for the ~120 existing router
+// callback call sites keyed on original-choice index; new code should
+// prefer SelectedID.
 type SelectScreen interface {
 	Screen
 	SelectedID() string
-	SelectedIndex() int
+	Selected() int
 }
 
 // MultiSelectScreen is a checklist screen's typed result. CheckedLabels

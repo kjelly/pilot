@@ -34,13 +34,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/tui"
 	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
 func pushRosterPathPrompt(r *editRouterModel, dir string) tea.Cmd {
 	def := filepath.Join(dir, ".vault", "ipa-identity.yaml")
 	return r.transitionTo(newTextInputModelWithScreenID("roster.path", "Roster 檔路徑(canonical FreeIPA roster)", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -86,7 +87,7 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	items := []string{"👤 Users", "👥 Groups", "🔐 Host access", "🛡️  Sudo commands & rules", "↩  返回"}
 	title := fmt.Sprintf("管理 %s", path)
 	return r.transitionTo(newSelectModelWithScreenID("roster.top", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
 			return pushTopMenu(r, dir, "")
@@ -144,7 +145,7 @@ const (
 func pushRosterCreateConfirm(r *editRouterModel, dir, path string) tea.Cmd {
 	question := fmt.Sprintf("%s 不存在，要建立最小 roster 骨架嗎？", path)
 	return r.transitionTo(newConfirmModelWithScreenID(rosterCreateConfirmScreenID, question, true), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(confirmModel)
+		m := s.(tui.ConfirmScreen)
 		if !m.Value() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -171,7 +172,7 @@ func pushRosterCreatePrompt(r *editRouterModel, dir, path string) tea.Cmd {
 		return nil
 	}
 	return r.transitionTo(newSecretTextInputModelWithScreenID(rosterCreatePasswordScreenID, "FreeIPA admin password(不會顯示；至少 8 字元)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
 		}
@@ -266,7 +267,7 @@ func pushRosterUsersMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	items = append(items, "➕ 新增 User", "↩  返回")
 
 	return r.transitionTo(newSelectModelWithScreenID("roster.users.list", fmt.Sprintf("Users — %s", path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "↩ 返回".
 			return pushRosterManager(r, dir, path, "")
@@ -290,7 +291,7 @@ func pushRosterAddUser(r *editRouterModel, dir, path string) tea.Cmd {
 		return nil
 	}
 	return r.transitionTo(newTextInputModelWithScreenID("roster.user.add", "新 user 的名稱(小寫英數字/底線/點/連字號)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUsersMenu(r, dir, path, "")
 		}
@@ -339,7 +340,7 @@ func pushRosterGroupsMenu(r *editRouterModel, dir, path, banner string) tea.Cmd 
 	items = append(items, "➕ 新增 Group", "↩  返回")
 
 	return r.transitionTo(newSelectModelWithScreenID("roster.groups.list", fmt.Sprintf("Groups — %s", path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "↩ 返回".
 			return pushRosterManager(r, dir, path, "")
@@ -376,7 +377,7 @@ func pushRosterAddGroupCategory(r *editRouterModel, dir, path string) tea.Cmd {
 	}
 	items = append(items, "↩  返回")
 	return r.transitionTo(newSelectModelWithScreenID("roster.group.add_category", "新 group 的分類(決定名稱前綴規則)", items), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "↩ 返回".
 			return pushRosterGroupsMenu(r, dir, path, "")
@@ -398,7 +399,7 @@ func pushRosterAddGroupName(r *editRouterModel, dir, path, category string) tea.
 	}
 	label := fmt.Sprintf("新 group 的名稱(category=%s，記得帶前綴)", category)
 	return r.transitionTo(newTextInputModelWithScreenID("roster.group.add_name", label, "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterAddGroupCategory(r, dir, path)
 		}
@@ -639,7 +640,7 @@ func pushRosterUserDetail(r *editRouterModel, dir, path, name, banner string) te
 		"↩  返回",
 	}
 	return r.transitionTo(newSelectModelWithScreenID("roster.user.detail", fmt.Sprintf("User %q — %s", name, path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUsersMenu(r, dir, path, "")
 		}
@@ -683,7 +684,7 @@ func pushRosterUserDetail(r *editRouterModel, dir, path, name, banner string) te
 
 func pushRosterUserTextField(r *editRouterModel, dir, path, name, key, label, current string) tea.Cmd {
 	return r.transitionTo(newTextInputModelWithScreenID("roster.user.field_text", label, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
 		}
@@ -694,7 +695,7 @@ func pushRosterUserTextField(r *editRouterModel, dir, path, name, key, label, cu
 
 func pushRosterUserIntField(r *editRouterModel, dir, path, name, key, current string) tea.Cmd {
 	return r.transitionTo(newTextInputModelWithScreenID("roster.user.field_int", key+"(留空 = 未設定)", current, rosterIntValidator), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
 		}
@@ -712,7 +713,7 @@ func pushRosterUserIntField(r *editRouterModel, dir, path, name, key, current st
 
 func pushRosterUserBoolField(r *editRouterModel, dir, path, name, key, label string) tea.Cmd {
 	return r.transitionTo(newSelectModelWithScreenID("roster.user.field_bool", label, rosterBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
 		}
@@ -728,7 +729,7 @@ var rosterUserStateChoices = []string{"present", "disabled"}
 func pushRosterUserStateField(r *editRouterModel, dir, path, name string) tea.Cmd {
 	title := "state(不提供 absent — 這個精靈不支援刪除；如需刪除請直接編輯檔案)"
 	return r.transitionTo(newSelectModelWithScreenID("roster.user.field_state", title, rosterUserStateChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
 		}
@@ -747,7 +748,7 @@ func pushRosterUserStateField(r *editRouterModel, dir, path, name string) tea.Cm
 func pushRosterUserPasswordInitial(r *editRouterModel, dir, path, name string) tea.Cmd {
 	label := "password.initial 的新值(不會顯示；輸入後立即生效，且不會預填舊密碼)"
 	return r.transitionTo(newSecretTextInputModelWithScreenID("roster.user.field_password", label, "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
 		}
@@ -762,7 +763,7 @@ func pushRosterUserPasswordInitial(r *editRouterModel, dir, path, name string) t
 
 func pushRosterUserPasswordBoolField(r *editRouterModel, dir, path, name, key, label string) tea.Cmd {
 	return r.transitionTo(newSelectModelWithScreenID("roster.user.field_password_bool", label, rosterBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
 		}
@@ -803,7 +804,7 @@ func pushRosterUserSSHKeysListScreen(r *editRouterModel, dir, path, name string,
 	items = append(items, "➕ 新增公鑰", "↩  返回")
 	title := fmt.Sprintf("%s 的 ssh_keys.values", name)
 	return r.transitionTo(newSelectModelWithScreenID("roster.user.ssh_keys.list", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserDetail(r, dir, path, name, "")
 		}
@@ -826,7 +827,7 @@ func pushRosterUserSSHKeysAdd(r *editRouterModel, dir, path, name string, values
 		return nil
 	}
 	return r.transitionTo(newTextInputModelWithScreenID("roster.user.ssh_keys.add", "新公鑰(ssh-ed25519/ssh-rsa ...)", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserSSHKeysListScreen(r, dir, path, name, values, "")
 		}
@@ -838,7 +839,7 @@ func pushRosterUserSSHKeysAdd(r *editRouterModel, dir, path, name string, values
 func pushRosterUserSSHKeysItemAction(r *editRouterModel, dir, path, name string, values []string, idx int) tea.Cmd {
 	items := []string{"修改值", "移除", "返回"}
 	return r.transitionTo(newSelectModelWithScreenID("roster.user.ssh_keys.item_action", fmt.Sprintf("公鑰 %d：%s", idx+1, values[idx]), items), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterUserSSHKeysListScreen(r, dir, path, name, values, "")
 		}
@@ -863,7 +864,7 @@ func pushRosterUserSSHKeysEditItem(r *editRouterModel, dir, path, name string, v
 		return nil
 	}
 	return r.transitionTo(newTextInputModelWithScreenID("roster.user.ssh_keys.edit_item", "新值", values[idx], validate), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterUserSSHKeysItemAction(r, dir, path, name, values, idx)
 		}
@@ -960,7 +961,7 @@ func pushRosterGroupDetail(r *editRouterModel, dir, path, name, banner string) t
 		"↩  返回",
 	}
 	return r.transitionTo(newSelectModelWithScreenID("roster.group.detail", fmt.Sprintf("Group %q — %s", name, path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupsMenu(r, dir, path, "")
 		}
@@ -990,7 +991,7 @@ var rosterGroupTypeChoices = []string{"posix", "nonposix", "external"}
 
 func pushRosterGroupTypeField(r *editRouterModel, dir, path, name string) tea.Cmd {
 	return r.transitionTo(newSelectModelWithScreenID("roster.group.field_type", "type", rosterGroupTypeChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
 		}
@@ -1001,7 +1002,7 @@ func pushRosterGroupTypeField(r *editRouterModel, dir, path, name string) tea.Cm
 
 func pushRosterGroupTextField(r *editRouterModel, dir, path, name, key, label, current string) tea.Cmd {
 	return r.transitionTo(newTextInputModelWithScreenID("roster.group.field_text", label, current, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
 		}
@@ -1012,7 +1013,7 @@ func pushRosterGroupTextField(r *editRouterModel, dir, path, name, key, label, c
 
 func pushRosterGroupIntField(r *editRouterModel, dir, path, name, key, current string) tea.Cmd {
 	return r.transitionTo(newTextInputModelWithScreenID("roster.group.field_int", key+"(留空 = 未設定)", current, rosterIntValidator), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
 		}
@@ -1030,7 +1031,7 @@ func pushRosterGroupIntField(r *editRouterModel, dir, path, name, key, current s
 
 func pushRosterGroupMembershipAuthoritative(r *editRouterModel, dir, path, name string) tea.Cmd {
 	return r.transitionTo(newSelectModelWithScreenID("roster.group.field_authoritative", "membership.authoritative", rosterBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
 		}
@@ -1069,7 +1070,7 @@ func pushRosterGroupMembershipUsers(r *editRouterModel, dir, path, name string) 
 	}
 	title := fmt.Sprintf("%s 的 membership.users(space 勾選、enter 完成)", name)
 	return r.transitionTo(newMultiSelectModelWithScreenID("roster.group.members_users", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(multiSelectModel)
+		m := s.(tui.MultiSelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
 		}
@@ -1113,7 +1114,7 @@ func pushRosterGroupMembershipGroups(r *editRouterModel, dir, path, name string)
 	}
 	title := fmt.Sprintf("%s 的 membership.groups(不含自己；space 勾選、enter 完成)", name)
 	return r.transitionTo(newMultiSelectModelWithScreenID("roster.group.members_groups", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(multiSelectModel)
+		m := s.(tui.MultiSelectScreen)
 		if m.Canceled() {
 			return pushRosterGroupDetail(r, dir, path, name, "")
 		}

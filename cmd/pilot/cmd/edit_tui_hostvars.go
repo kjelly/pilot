@@ -26,6 +26,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/groupvars"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/tui"
 )
 
 func hostVarsPath(dir, name string) string {
@@ -166,7 +167,7 @@ func pushForcedHostVarsPromptChain(r *editRouterModel, dir, path string, hf *inv
 		prompt := strings.TrimSpace(banner + "\n" + e.Description)
 		label := fmt.Sprintf("角色需要新設定：%s 的新值", e.Key)
 		return r.transitionTo(newTextInputModelWithScreenID(forcedHostVarsPromptScreenID(e.Key), label, e.Value, nil), prompt, func(r *editRouterModel, s screen) tea.Cmd {
-			m := s.(textInputModel)
+			m := s.(tui.InputScreen)
 			if !m.Canceled() {
 				if err := doc.SetValue(e.Line, m.Value()); err != nil {
 					r.err = err
@@ -217,7 +218,7 @@ func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventor
 
 	title := fmt.Sprintf("編輯 %s", hvPath)
 	return r.transitionTo(newSelectModelWithScreenID("host_vars.entries", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "🚪 不存檔離開" exactly, including its dirty gate.
 			if !dirty {
@@ -246,7 +247,7 @@ func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventor
 
 func pushConfirmDiscardHostVars(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, hvPath string, doc *groupvars.Doc) tea.Cmd {
 	return r.transitionTo(newConfirmModelWithScreenID("confirm.discard", "有未存檔的修改，確定要放棄離開嗎？", false), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(confirmModel)
+		m := s.(tui.ConfirmScreen)
 		if m.Value() {
 			return pushHostMenu(r, dir, path, hf, name)
 		}
@@ -262,7 +263,7 @@ func pushHostVarsEntryMenu(r *editRouterModel, dir, path string, hf *inventory.H
 	}
 	items := []string{"修改值", "返回"}
 	return r.transitionTo(newSelectModelWithScreenID("host_vars.entry_action", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(selectModel)
+		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "返回" (case 1).
 			return pushHostVarsEditorScreen(r, dir, path, hf, name, hvPath, doc, dirty, "")
@@ -280,7 +281,7 @@ func pushHostVarsEntryMenu(r *editRouterModel, dir, path string, hf *inventory.H
 func pushHostVarsEditValue(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, hvPath string, doc *groupvars.Doc, e groupvars.Entry, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 的新值", e.Key)
 	return r.transitionTo(newTextInputModel(label, e.Value, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(textInputModel)
+		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushHostVarsEntryMenu(r, dir, path, hf, name, hvPath, doc, e, dirty)
 		}

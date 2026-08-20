@@ -44,8 +44,8 @@ func TestSelectModel_AutomationStateReflectsFilterAndFocus(t *testing.T) {
 	if st.FocusedIndex != 1 {
 		t.Fatalf("expected focus to follow cursor, got %d", st.FocusedIndex)
 	}
-	if m.SelectedIndex() != 1 || m.SelectedID() != "host-b" {
-		t.Fatalf("expected SelectedID/-Index to resolve host-b, got %q/%d", m.SelectedID(), m.SelectedIndex())
+	if m.Selected() != 1 || m.SelectedID() != "host-b" {
+		t.Fatalf("expected SelectedID/Selected to resolve host-b, got %q/%d", m.SelectedID(), m.Selected())
 	}
 }
 
