@@ -71,23 +71,35 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 		}
 	}
 
-	items := make([]string, 0, len(existing)+len(nestedExisting)+len(missingExamples)+len(nestedMissing)+1)
+	// An openable file's own workspace-relative name is its stable identity —
+	// it is exactly what the callback joins onto targetDir — so it is also the
+	// row's Choice.ID. The "create from example" rows describe an action on a
+	// file that does not exist yet, so they are namespaced under this screen to
+	// keep them distinct from the openable rows.
+	choices := make([]tui.Choice, 0, len(existing)+len(nestedExisting)+len(missingExamples)+len(nestedMissing)+1)
 	for _, f := range existing {
-		items = append(items, "📝 "+f)
+		choices = append(choices, tui.Choice{ID: f, Label: "📝 " + f})
 	}
 	for _, ex := range nestedExisting {
-		items = append(items, "📝 "+ex.DestRel)
+		choices = append(choices, tui.Choice{ID: ex.DestRel, Label: "📝 " + ex.DestRel})
 	}
 	for _, stem := range missingExamples {
-		items = append(items, fmt.Sprintf("➕ 從範例建立 %s.yml", stem))
+		choices = append(choices, tui.Choice{
+			ID:    "group_vars.files.create:" + stem,
+			Label: fmt.Sprintf("➕ 從範例建立 %s.yml", stem),
+		})
 	}
 	for _, ex := range nestedMissing {
-		items = append(items, fmt.Sprintf("➕ 從範例建立 %s", ex.DestRel))
+		choices = append(choices, tui.Choice{
+			ID:    "group_vars.files.create:" + ex.DestRel,
+			Label: fmt.Sprintf("➕ 從範例建立 %s", ex.DestRel),
+		})
 	}
-	items = append(items, "↩  返回")
+	choices = append(choices, tui.Choice{ID: "group_vars.files.back", Label: "↩  返回"})
 
 	title := fmt.Sprintf("選一個 %s 底下的檔案", targetDir)
-	return r.transitionTo(newSelectModelWithScreenID("group_vars.files", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "group_vars.files", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -95,7 +107,7 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 		}
 		idx := m.Selected()
 		switch {
-		case idx == len(items)-1:
+		case idx == len(choices)-1:
 			return pushTopMenu(r, dir, "")
 		case idx < len(existing):
 			return pushGroupVarsEditor(r, dir, filepath.Join(targetDir, existing[idx]), "")
@@ -346,22 +358,34 @@ func pushGroupVarsEditor(r *editRouterModel, dir, path, banner string) tea.Cmd {
 func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupvars.Doc, dirty bool, banner string) tea.Cmd {
 	entries := doc.Entries()
 	listEntries := doc.ListEntries()
-	items := make([]string, 0, len(entries)+len(listEntries)+2)
+	// A group_vars key is its own stable identity (it is the YAML key this row
+	// edits), so it is also the row's Choice.ID — the label additionally embeds
+	// the live value and set/unset state, which change on every edit.
+	choices := make([]tui.Choice, 0, len(entries)+len(listEntries)+2)
 	for _, e := range entries {
 		state := "已設定"
 		if !e.Active {
 			state = "未設定，使用內建預設"
 		}
-		items = append(items, fmt.Sprintf("%s = %s  [%s]", e.Key, e.Value, state))
+		choices = append(choices, tui.Choice{
+			ID:    e.Key,
+			Label: fmt.Sprintf("%s = %s  [%s]", e.Key, e.Value, state),
+		})
 	}
 	for _, e := range listEntries {
 		state := "已設定"
 		if !e.Active {
 			state = "未設定，使用內建預設"
 		}
-		items = append(items, fmt.Sprintf("%s = [%s]  [%s]", e.Key, strings.Join(e.Values, ", "), state))
+		choices = append(choices, tui.Choice{
+			ID:    e.Key,
+			Label: fmt.Sprintf("%s = [%s]  [%s]", e.Key, strings.Join(e.Values, ", "), state),
+		})
 	}
-	items = append(items, "💾 存檔並離開", "🚪 不存檔離開")
+	choices = append(choices,
+		tui.Choice{ID: "group_vars.entries.save", Label: "💾 存檔並離開"},
+		tui.Choice{ID: "group_vars.entries.discard", Label: "🚪 不存檔離開"},
+	)
 
 	// A block-scalar key (e.g. alertmanager_config: |) or a flow-map key
 	// (e.g. "labels: {a: 1}") is deliberately never offered as an item
@@ -387,7 +411,8 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 	}
 
 	title := fmt.Sprintf("編輯 %s", path)
-	return r.transitionTo(newSelectModelWithScreenID("group_vars.entries", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "group_vars.entries", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "🚪 不存檔離開" exactly, including its dirty gate.
@@ -398,13 +423,13 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 		}
 		idx := m.Selected()
 		switch {
-		case idx == len(items)-2:
+		case idx == len(choices)-2:
 			if err := os.WriteFile(path, doc.Bytes(), 0o644); err != nil {
 				r.err = fmt.Errorf("write %s: %w", path, err)
 				return nil
 			}
 			return pushGroupVarsFilePicker(r, dir, fmt.Sprintf("✅ 已存檔 %s", path))
-		case idx == len(items)-1:
+		case idx == len(choices)-1:
 			if !dirty {
 				return pushGroupVarsFilePicker(r, dir, "")
 			}
@@ -418,7 +443,8 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 }
 
 func pushConfirmDiscardGroupVars(r *editRouterModel, dir, path string, doc *groupvars.Doc) tea.Cmd {
-	return r.transitionTo(newConfirmModelWithScreenID("confirm.discard", "有未存檔的修改，確定要放棄離開嗎？", false), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.ConfirmSpec{ScreenID: "confirm.discard", Title: "有未存檔的修改，確定要放棄離開嗎？", Default: false}
+	return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.ConfirmScreen)
 		if m.Value() {
 			return pushGroupVarsFilePicker(r, dir, "")
@@ -433,8 +459,13 @@ func pushGroupVarsEntryMenu(r *editRouterModel, dir, path string, doc *groupvars
 	if e.Description != "" {
 		banner = "──────────────────────────────────\n" + e.Description + "\n──────────────────────────────────"
 	}
-	items := []string{"修改值", "還原成內建預設(取消設定)", "返回"}
-	return r.transitionTo(newSelectModelWithScreenID("group_vars.entry_action", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "group_vars.entry_action.edit", Label: "修改值"},
+		{ID: "group_vars.entry_action.reset", Label: "還原成內建預設(取消設定)"},
+		{ID: "group_vars.entry_action.back", Label: "返回"},
+	}
+	spec := tui.SelectSpec{ScreenID: "group_vars.entry_action", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "返回" (case 2).
@@ -458,7 +489,8 @@ func pushGroupVarsEntryMenu(r *editRouterModel, dir, path string, doc *groupvars
 
 func pushGroupVarsEditValue(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.Entry, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 的新值", e.Key)
-	return r.transitionTo(newTextInputModel(label, e.Value, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{Title: label, Default: e.Value}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushGroupVarsEntryMenu(r, dir, path, doc, e, dirty)
@@ -486,8 +518,13 @@ func pushGroupVarsListEntryMenu(r *editRouterModel, dir, path string, doc *group
 	if e.Description != "" {
 		banner = "──────────────────────────────────\n" + e.Description + "\n──────────────────────────────────"
 	}
-	items := []string{"編輯清單項目", "還原成內建預設(取消設定)", "返回"}
-	return r.transitionTo(newSelectModelWithScreenID("group_vars.list_entry_action", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "group_vars.list_entry_action.edit_items", Label: "編輯清單項目"},
+		{ID: "group_vars.list_entry_action.reset", Label: "還原成內建預設(取消設定)"},
+		{ID: "group_vars.list_entry_action.back", Label: "返回"},
+	}
+	spec := tui.SelectSpec{ScreenID: "group_vars.list_entry_action", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "返回" (case 2).
@@ -510,12 +547,22 @@ func pushGroupVarsListEntryMenu(r *editRouterModel, dir, path string, doc *group
 }
 
 func pushGroupVarsListItemsMenu(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, dirty bool) tea.Cmd {
-	items := make([]string, 0, len(e.Values)+2)
-	items = append(items, e.Values...)
-	items = append(items, "➕ 新增項目", "↩  返回")
+	// A flow-list row has no name field of its own; the item's value IS its
+	// identity (same reasoning as a roster user's ssh_keys.values), and unlike
+	// a positional ID it keeps designating the same item after a sibling is
+	// removed.
+	choices := make([]tui.Choice, 0, len(e.Values)+2)
+	for _, v := range e.Values {
+		choices = append(choices, tui.Choice{ID: v, Label: v})
+	}
+	choices = append(choices,
+		tui.Choice{ID: "group_vars.list_items.add", Label: "➕ 新增項目"},
+		tui.Choice{ID: "group_vars.list_items.back", Label: "↩  返回"},
+	)
 
 	title := fmt.Sprintf("%s 的項目", e.Key)
-	return r.transitionTo(newSelectModelWithScreenID("group_vars.list_items", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "group_vars.list_items", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -523,9 +570,9 @@ func pushGroupVarsListItemsMenu(r *editRouterModel, dir, path string, doc *group
 		}
 		idx := m.Selected()
 		switch {
-		case idx == len(items)-1:
+		case idx == len(choices)-1:
 			return pushGroupVarsListEntryMenu(r, dir, path, doc, e, dirty)
-		case idx == len(items)-2:
+		case idx == len(choices)-2:
 			return pushGroupVarsAddListItem(r, dir, path, doc, e, dirty)
 		default:
 			return pushGroupVarsListItemAction(r, dir, path, doc, e, idx, dirty)
@@ -534,7 +581,8 @@ func pushGroupVarsListItemsMenu(r *editRouterModel, dir, path string, doc *group
 }
 
 func pushGroupVarsAddListItem(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, dirty bool) tea.Cmd {
-	return r.transitionTo(newTextInputModel("新項目的值", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{Title: "新項目的值"}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushGroupVarsListItemsMenu(r, dir, path, doc, e, dirty)
@@ -550,8 +598,13 @@ func pushGroupVarsAddListItem(r *editRouterModel, dir, path string, doc *groupva
 
 func pushGroupVarsListItemAction(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, itemIdx int, dirty bool) tea.Cmd {
 	title := fmt.Sprintf("%s 項目：%s", e.Key, e.Values[itemIdx])
-	items := []string{"修改值", "移除", "返回"}
-	return r.transitionTo(newSelectModelWithScreenID("group_vars.list_item_action", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "group_vars.list_item_action.edit", Label: "修改值"},
+		{ID: "group_vars.list_item_action.remove", Label: "移除"},
+		{ID: "group_vars.list_item_action.back", Label: "返回"},
+	}
+	spec := tui.SelectSpec{ScreenID: "group_vars.list_item_action", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "返回" (case 2).
@@ -576,7 +629,8 @@ func pushGroupVarsListItemAction(r *editRouterModel, dir, path string, doc *grou
 
 func pushGroupVarsEditListItemValue(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, itemIdx int, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 第 %d 項的新值", e.Key, itemIdx+1)
-	return r.transitionTo(newTextInputModel(label, e.Values[itemIdx], nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{Title: label, Default: e.Values[itemIdx]}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushGroupVarsListItemAction(r, dir, path, doc, e, itemIdx, dirty)

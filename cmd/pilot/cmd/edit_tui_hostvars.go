@@ -166,7 +166,8 @@ func pushForcedHostVarsPromptChain(r *editRouterModel, dir, path string, hf *inv
 		}
 		prompt := strings.TrimSpace(banner + "\n" + e.Description)
 		label := fmt.Sprintf("角色需要新設定：%s 的新值", e.Key)
-		return r.transitionTo(newTextInputModelWithScreenID(forcedHostVarsPromptScreenID(e.Key), label, e.Value, nil), prompt, func(r *editRouterModel, s screen) tea.Cmd {
+		spec := tui.InputSpec{ScreenID: forcedHostVarsPromptScreenID(e.Key), Title: label, Default: e.Value}
+		return r.transitionTo(r.uiFactory().Input(spec), prompt, func(r *editRouterModel, s screen) tea.Cmd {
 			m := s.(tui.InputScreen)
 			if !m.Canceled() {
 				if err := doc.SetValue(e.Line, m.Value()); err != nil {
@@ -201,7 +202,11 @@ func pushHostVarsEditor(r *editRouterModel, dir, path string, hf *inventory.Host
 
 func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, hvPath string, doc *groupvars.Doc, dirty bool, banner string) tea.Cmd {
 	entries := doc.Entries()
-	items := make([]string, 0, len(entries)+2)
+	// A host_vars key is its own stable identity (it is the YAML key this row
+	// edits — the same key forcedHostVarsPromptScreenID already keys off), so
+	// it is also the row's Choice.ID; the label embeds the live value and
+	// filled/unfilled state, which change on every edit.
+	choices := make([]tui.Choice, 0, len(entries)+2)
 	for _, e := range entries {
 		// These keys have no built-in default (that's why they live in
 		// host_vars, not group_vars), so — unlike the group_vars editor —
@@ -212,12 +217,19 @@ func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventor
 		if e.Value == "" {
 			state = "尚未填寫，必填！"
 		}
-		items = append(items, fmt.Sprintf("%s = %s  [%s]", e.Key, e.Value, state))
+		choices = append(choices, tui.Choice{
+			ID:    e.Key,
+			Label: fmt.Sprintf("%s = %s  [%s]", e.Key, e.Value, state),
+		})
 	}
-	items = append(items, "💾 存檔並離開", "🚪 不存檔離開")
+	choices = append(choices,
+		tui.Choice{ID: "host_vars.entries.save", Label: "💾 存檔並離開"},
+		tui.Choice{ID: "host_vars.entries.discard", Label: "🚪 不存檔離開"},
+	)
 
 	title := fmt.Sprintf("編輯 %s", hvPath)
-	return r.transitionTo(newSelectModelWithScreenID("host_vars.entries", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "host_vars.entries", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "🚪 不存檔離開" exactly, including its dirty gate.
@@ -228,13 +240,13 @@ func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventor
 		}
 		idx := m.Selected()
 		switch {
-		case idx == len(items)-2:
+		case idx == len(choices)-2:
 			if err := os.WriteFile(hvPath, doc.Bytes(), 0o644); err != nil {
 				r.err = fmt.Errorf("write %s: %w", hvPath, err)
 				return nil
 			}
 			return pushHostMenu(r, dir, path, hf, name)
-		case idx == len(items)-1:
+		case idx == len(choices)-1:
 			if !dirty {
 				return pushHostMenu(r, dir, path, hf, name)
 			}
@@ -246,7 +258,8 @@ func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventor
 }
 
 func pushConfirmDiscardHostVars(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, hvPath string, doc *groupvars.Doc) tea.Cmd {
-	return r.transitionTo(newConfirmModelWithScreenID("confirm.discard", "有未存檔的修改，確定要放棄離開嗎？", false), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.ConfirmSpec{ScreenID: "confirm.discard", Title: "有未存檔的修改，確定要放棄離開嗎？", Default: false}
+	return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.ConfirmScreen)
 		if m.Value() {
 			return pushHostMenu(r, dir, path, hf, name)
@@ -261,8 +274,12 @@ func pushHostVarsEntryMenu(r *editRouterModel, dir, path string, hf *inventory.H
 	if e.Description != "" {
 		banner = "──────────────────────────────────\n" + e.Description + "\n──────────────────────────────────"
 	}
-	items := []string{"修改值", "返回"}
-	return r.transitionTo(newSelectModelWithScreenID("host_vars.entry_action", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "host_vars.entry_action.edit", Label: "修改值"},
+		{ID: "host_vars.entry_action.back", Label: "返回"},
+	}
+	spec := tui.SelectSpec{ScreenID: "host_vars.entry_action", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "返回" (case 1).
@@ -280,7 +297,8 @@ func pushHostVarsEntryMenu(r *editRouterModel, dir, path string, hf *inventory.H
 
 func pushHostVarsEditValue(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, hvPath string, doc *groupvars.Doc, e groupvars.Entry, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 的新值", e.Key)
-	return r.transitionTo(newTextInputModel(label, e.Value, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{Title: label, Default: e.Value}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushHostVarsEntryMenu(r, dir, path, hf, name, hvPath, doc, e, dirty)

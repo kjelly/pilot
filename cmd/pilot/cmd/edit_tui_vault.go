@@ -30,14 +30,24 @@ func pushVaultFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 		return nil
 	}
 
-	items := make([]string, 0, len(files)+2)
+	// A vault file's own name under .vault/ is its stable identity — it is
+	// exactly what the callback joins onto targetDir, and what a scenario
+	// step's `file:` names — so it is also the row's Choice.ID. The two fixed
+	// trailing rows are namespaced under this screen. This screen deliberately
+	// keeps its (unset) screen ID, so automationScreenID() still reports the
+	// generic "select" exactly as before.
+	choices := make([]tui.Choice, 0, len(files)+2)
 	for _, f := range files {
-		items = append(items, "📝 "+f)
+		choices = append(choices, tui.Choice{ID: f, Label: "📝 " + f})
 	}
-	items = append(items, "📍 輸入其他 vault 檔路徑", "↩  返回")
+	choices = append(choices,
+		tui.Choice{ID: "vault.files.other_path", Label: "📍 輸入其他 vault 檔路徑"},
+		tui.Choice{ID: "vault.files.back", Label: "↩  返回"},
+	)
 
 	title := fmt.Sprintf("選一個 %s 底下的 vault 檔", targetDir)
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors the trailing "↩ 返回" item.
@@ -45,7 +55,7 @@ func pushVaultFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 		}
 		idx := m.Selected()
 		switch {
-		case idx == len(items)-1:
+		case idx == len(choices)-1:
 			return pushTopMenu(r, dir, "")
 		case idx < len(files):
 			return pushVaultOpen(r, dir, filepath.Join(targetDir, files[idx]))
@@ -57,7 +67,8 @@ func pushVaultFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 
 func pushVaultPathPrompt(r *editRouterModel, dir, targetDir string) tea.Cmd {
 	def := filepath.Join(targetDir, "main.yaml")
-	return r.transitionTo(newTextInputModel("vault 檔路徑", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{Title: "vault 檔路徑", Default: def}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushVaultFilePicker(r, dir, "")
@@ -78,7 +89,8 @@ func pushVaultOpen(r *editRouterModel, dir, path string) tea.Cmd {
 			return nil
 		}
 		question := fmt.Sprintf("%s 不存在，要建立新的明文 vault 檔嗎？", path)
-		return r.transitionTo(newConfirmModel(question, true), "", func(r *editRouterModel, s screen) tea.Cmd {
+		spec := tui.ConfirmSpec{Title: question, Default: true}
+		return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 			m := s.(tui.ConfirmScreen)
 			if !m.Value() {
 				return pushVaultFilePicker(r, dir, "")
@@ -247,14 +259,25 @@ func pushAnsibleVaultShellout(r *editRouterModel, dir, path string) tea.Cmd {
 
 func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.Doc, dirty bool, banner string) tea.Cmd {
 	entries := doc.Entries()
-	items := make([]string, 0, len(entries)+3)
+	// A vault key's own name is its stable identity — it's exactly what
+	// doc.Add/Set/Delete already key on, so it doubles as the row's
+	// Choice.ID. The three fixed trailing rows are namespaced under this
+	// screen; the screen itself deliberately keeps its (unset) screen ID,
+	// matching pushVaultFilePicker, so automationScreenID() still reports
+	// the generic "select" exactly as before.
+	choices := make([]tui.Choice, 0, len(entries)+3)
 	for _, e := range entries {
-		items = append(items, fmt.Sprintf("%s = %s", e.Key, displayVaultValue(e.DisplayValue(), 80)))
+		choices = append(choices, tui.Choice{ID: e.Key, Label: fmt.Sprintf("%s = %s", e.Key, displayVaultValue(e.DisplayValue(), 80))})
 	}
-	items = append(items, "➕ 新增 key", "💾 存檔並離開", "🚪 不存檔離開")
+	choices = append(choices,
+		tui.Choice{ID: "vault.editor.add_key", Label: "➕ 新增 key"},
+		tui.Choice{ID: "vault.editor.save", Label: "💾 存檔並離開"},
+		tui.Choice{ID: "vault.editor.discard", Label: "🚪 不存檔離開"},
+	)
 
 	title := fmt.Sprintf("編輯 %s", path)
-	return r.transitionTo(newSelectModel(title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "🚪 不存檔離開" exactly, including its dirty gate.
@@ -265,9 +288,9 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 		}
 		idx := m.Selected()
 		switch {
-		case idx == len(items)-3:
+		case idx == len(choices)-3:
 			return pushVaultAddKey(r, dir, path, doc, dirty)
-		case idx == len(items)-2:
+		case idx == len(choices)-2:
 			if merr := os.MkdirAll(filepath.Dir(path), 0o700); merr != nil {
 				r.err = fmt.Errorf("mkdir %s: %w", filepath.Dir(path), merr)
 				return nil
@@ -277,7 +300,7 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 				return nil
 			}
 			return pushVaultFilePicker(r, dir, fmt.Sprintf("✅ 已存檔 %s", path))
-		case idx == len(items)-1:
+		case idx == len(choices)-1:
 			if !dirty {
 				return pushVaultFilePicker(r, dir, "")
 			}
@@ -302,7 +325,8 @@ func displayVaultValue(value string, limit int) string {
 }
 
 func pushConfirmDiscardVault(r *editRouterModel, dir, path string, doc *vaultfile.Doc) tea.Cmd {
-	return r.transitionTo(newConfirmModel("有未存檔的修改，確定要放棄離開嗎？", false), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.ConfirmSpec{Title: "有未存檔的修改，確定要放棄離開嗎？", Default: false}
+	return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.ConfirmScreen)
 		if m.Value() {
 			return pushVaultFilePicker(r, dir, "")
@@ -322,7 +346,8 @@ func pushVaultAddKey(r *editRouterModel, dir, path string, doc *vaultfile.Doc, d
 		}
 		return nil
 	}
-	return r.transitionTo(newTextInputModel("新的 key 名稱", "", validate), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{Title: "新的 key 名稱", Validate: validate}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushVaultEditorScreen(r, dir, path, doc, dirty, "")
@@ -333,7 +358,8 @@ func pushVaultAddKey(r *editRouterModel, dir, path string, doc *vaultfile.Doc, d
 }
 
 func pushVaultAddKeyValue(r *editRouterModel, dir, path string, doc *vaultfile.Doc, key string, dirty bool) tea.Cmd {
-	return r.transitionTo(newSecretTextInputModel("值（多行請直接輸入 \\n）", "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{Title: "值（多行請直接輸入 \\n）", Secret: true}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushVaultAddKey(r, dir, path, doc, dirty)
@@ -345,8 +371,13 @@ func pushVaultAddKeyValue(r *editRouterModel, dir, path string, doc *vaultfile.D
 
 func pushVaultEntryMenu(r *editRouterModel, dir, path string, doc *vaultfile.Doc, entry vaultfile.Entry, dirty bool) tea.Cmd {
 	title := fmt.Sprintf("%s 目前值：%s", entry.Key, displayVaultValue(entry.DisplayValue(), 120))
-	items := []string{"修改值", "刪除", "返回"}
-	return r.transitionTo(newSelectModel(title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "vault.entry.edit", Label: "修改值"},
+		{ID: "vault.entry.delete", Label: "刪除"},
+		{ID: "vault.entry.back", Label: "返回"},
+	}
+	spec := tui.SelectSpec{Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			// mirrors "返回" (case 2).
@@ -367,7 +398,8 @@ func pushVaultEntryMenu(r *editRouterModel, dir, path string, doc *vaultfile.Doc
 
 func pushVaultEditValue(r *editRouterModel, dir, path string, doc *vaultfile.Doc, entry vaultfile.Entry, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 的新值（多行請直接輸入 \\n）", entry.Key)
-	return r.transitionTo(newSecretTextInputModel(label, entry.EditValue(), nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{Title: label, Default: entry.EditValue(), Secret: true}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushVaultEntryMenu(r, dir, path, doc, entry, dirty)
