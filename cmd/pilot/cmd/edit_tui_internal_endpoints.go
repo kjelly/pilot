@@ -47,7 +47,8 @@ import (
 
 func pushInternalEndpointManifestPathPrompt(r *editRouterModel, dir string) tea.Cmd {
 	def := filepath.Join(dir, "internal-endpoints.yaml")
-	return r.transitionTo(newTextInputModelWithScreenID("iep.path", "internal-endpoints manifest 檔路徑", def, nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.path", Title: "internal-endpoints manifest 檔路徑", Default: def}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
@@ -68,13 +69,14 @@ func pushInternalEndpointManifestManager(r *editRouterModel, dir, path, banner s
 		return nil
 	}
 
-	items := []string{
-		"🔌 Endpoints",
-		"📋 顯示 normalized preview(套用後的最終 desired state)",
-		"↩  返回",
+	choices := []tui.Choice{
+		{ID: "iep.manager.endpoints", Label: "🔌 Endpoints"},
+		{ID: "iep.manager.preview", Label: "📋 顯示 normalized preview(套用後的最終 desired state)"},
+		{ID: "iep.manager.back", Label: "↩  返回"},
 	}
 	title := fmt.Sprintf("管理 %s", path)
-	return r.transitionTo(newSelectModelWithScreenID("iep.manager", title, items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.manager", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushTopMenu(r, dir, "")
@@ -98,7 +100,8 @@ func pushInternalEndpointManifestManager(r *editRouterModel, dir, path, banner s
 // DNS) — this manifest declares no freeipa identity block.
 func pushInternalEndpointManifestCreateConfirm(r *editRouterModel, dir, path string) tea.Cmd {
 	question := fmt.Sprintf("%s 不存在，要建立最小 internal-endpoints manifest 骨架嗎？", path)
-	return r.transitionTo(newConfirmModelWithScreenID("iep.create_confirm", question, true), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.ConfirmSpec{ScreenID: "iep.create_confirm", Title: question, Default: true}
+	return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.ConfirmScreen)
 		if !m.Value() {
 			return pushTopMenu(r, dir, "")
@@ -130,13 +133,21 @@ func pushInternalEndpointsMenu(r *editRouterModel, dir, path, banner string) tea
 		banner += "\n" + note
 	}
 
-	items := make([]string, 0, len(fqdns)+3)
+	// An endpoint's fqdn is the manifest's declared primary key (see
+	// pushInternalEndpointDetail's "唯讀，主鍵" row) and what every other
+	// screen addresses it by, so it is also this row's Choice.ID.
+	choices := make([]tui.Choice, 0, len(fqdns)+3)
 	for _, f := range fqdns {
-		items = append(items, "🔌 "+f)
+		choices = append(choices, tui.Choice{ID: f, Label: "🔌 " + f})
 	}
-	items = append(items, "➕ 新增 endpoint", "🔎 從已部署服務建議 endpoint", "↩  返回")
+	choices = append(choices,
+		tui.Choice{ID: "iep.list.add", Label: "➕ 新增 endpoint"},
+		tui.Choice{ID: "iep.list.suggest", Label: "🔎 從已部署服務建議 endpoint"},
+		tui.Choice{ID: "iep.list.back", Label: "↩  返回"},
+	)
 
-	return r.transitionTo(newSelectModelWithScreenID("iep.list", fmt.Sprintf("Endpoints — %s", path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.list", Title: fmt.Sprintf("Endpoints — %s", path), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointManifestManager(r, dir, path, "")
@@ -216,19 +227,25 @@ func pushInternalEndpointSuggestMenu(r *editRouterModel, dir, path string) tea.C
 		return pushInternalEndpointsMenu(r, dir, path, banner)
 	}
 
+	// Each candidate's FQDN is its stable identity — the manifest key it
+	// would be written under, and unique across candidates by construction
+	// (SuggestInternalEndpoints' claimedSubdomains gate rejects a second
+	// candidate claiming the same subdomain within the single resolved
+	// zone). Every row starts unchecked, as before.
 	byLabel := make(map[string]inventory.InternalEndpointCandidate, len(result.Candidates))
-	items := make([]multiSelectItem, len(result.Candidates))
+	choices := make([]tui.MultiSelectChoice, len(result.Candidates))
 	for i, c := range result.Candidates {
 		route := iepMapField(c.Manifest, "route")
 		upstream := iepMapField(route, "upstream")
 		label := fmt.Sprintf("%s  [%s/%s → %s:%s]", c.FQDN, c.Component, c.Endpoint,
 			iepStringValue(upstream, "inventory_host"), iepIntDisplay(upstream, "port", ""))
 		byLabel[label] = c
-		items[i] = multiSelectItem{Label: label}
+		choices[i] = tui.MultiSelectChoice{Choice: tui.Choice{ID: c.FQDN, Label: label}}
 	}
 
 	title := "選要建立的 endpoint（space 勾選、enter 確認）"
-	return r.transitionTo(newMultiSelectModelWithScreenID("iep.suggest.pick", title, items), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.MultiSelectSpec{ScreenID: "iep.suggest.pick", Title: title, Choices: choices}
+	return r.transitionTo(r.uiFactory().MultiSelect(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.MultiSelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointsMenu(r, dir, path, "")
@@ -277,7 +294,8 @@ func pushInternalEndpointSuggestMenu(r *editRouterModel, dir, path string) tea.C
 // the way pushDNSZoneAddName is.
 func pushInternalEndpointAddFQDN(r *editRouterModel, dir, path string) tea.Cmd {
 	label := "新 endpoint 的 FQDN(例如 grafana.linker.internal)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.add.fqdn", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.add.fqdn", Title: label, Validate: nonBlank}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointsMenu(r, dir, path, "")
@@ -315,7 +333,8 @@ func iepDefaultZoneForFQDN(dir, fqdn string) string {
 func pushInternalEndpointAddZone(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
 	def := iepDefaultZoneForFQDN(dir, fqdn)
 	label := "dns.zone(絕對 FQDN，必須是 endpoint fqdn 本身或其上層 zone，例如 linker.internal.)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.add.zone", label, def, nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.add.zone", Title: label, Default: def, Validate: nonBlank}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointsMenu(r, dir, path, "")
@@ -335,7 +354,8 @@ func pushInternalEndpointAddTargetHost(r *editRouterModel, dir, path, fqdn, zone
 		return pushInternalEndpointsMenu(r, dir, path, "⚠️  hosts.yml 沒有任何主機可選；請先在 hosts.yml 新增主機")
 	}
 	title := "route.target.inventory_host(direct route 的目標 inventory host；之後可在 detail 畫面改成 reverse_proxy)"
-	return r.transitionTo(newSelectModelWithScreenID("iep.add.target_host", title, names), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.add.target_host", Title: title, Choices: iepHostChoices(names)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointsMenu(r, dir, path, "")
@@ -385,15 +405,18 @@ func pushInternalEndpointDetail(r *editRouterModel, dir, path, fqdn, banner stri
 	route := iepMapField(fields, "route")
 	tls := iepMapField(fields, "tls")
 
-	items := []string{
-		fmt.Sprintf("fqdn：%s（唯讀，主鍵）", fqdn),
-		fmt.Sprintf("state：%s", iepStringOr(fields, "state", "present")),
-		fmt.Sprintf("dns：zone=%s ttl=%s", iepStringValue(dns, "zone"), iepIntDisplay(dns, "ttl", "(manifest 預設)")),
-		fmt.Sprintf("route：%s", iepRouteSummary(route)),
-		fmt.Sprintf("tls：%s", iepTLSSummary(tls)),
-		"↩  返回",
+	// Fixed field menu: one namespaced ID per endpoint field, so a row's
+	// stable identity survives its label (which embeds the live value).
+	choices := []tui.Choice{
+		{ID: "iep.detail.fqdn", Label: fmt.Sprintf("fqdn：%s（唯讀，主鍵）", fqdn)},
+		{ID: "iep.detail.state", Label: fmt.Sprintf("state：%s", iepStringOr(fields, "state", "present"))},
+		{ID: "iep.detail.dns", Label: fmt.Sprintf("dns：zone=%s ttl=%s", iepStringValue(dns, "zone"), iepIntDisplay(dns, "ttl", "(manifest 預設)"))},
+		{ID: "iep.detail.route", Label: fmt.Sprintf("route：%s", iepRouteSummary(route))},
+		{ID: "iep.detail.tls", Label: fmt.Sprintf("tls：%s", iepTLSSummary(tls))},
+		{ID: "iep.detail.back", Label: "↩  返回"},
 	}
-	return r.transitionTo(newSelectModelWithScreenID("iep.detail", fmt.Sprintf("Endpoint %q — %s", fqdn, path), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.detail", Title: fmt.Sprintf("Endpoint %q — %s", fqdn, path), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointsMenu(r, dir, path, "")
@@ -456,7 +479,8 @@ var iepStateChoices = []string{"present", "absent"}
 
 func pushInternalEndpointStateField(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
 	title := "state（absent 代表要求 reconciler 刪除這個 endpoint；實際刪除仍受 apply 端 safety.allow_endpoint_delete + confirm_endpoint_delete 雙重確認保護，這裡寫入 absent 本身是安全的）"
-	return r.transitionTo(newSelectModelWithScreenID("iep.field.state", title, iepStateChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.field.state", Title: title, Choices: iepEnumChoices("iep.field.state", iepStateChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -477,7 +501,8 @@ func pushInternalEndpointDNSZoneField(r *editRouterModel, dir, path, fqdn string
 	}
 	def := iepStringValue(iepMapField(fields, "dns"), "zone")
 	label := "dns.zone(絕對 FQDN，必須是 endpoint fqdn 本身或其上層 zone)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.field.dns_zone", label, def, nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.field.dns_zone", Title: label, Default: def, Validate: nonBlank}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -497,7 +522,8 @@ func pushInternalEndpointDNSTTLField(r *editRouterModel, dir, path, fqdn, zone s
 	}
 	def := iepIntValue(iepMapField(fields, "dns"), "ttl")
 	label := "dns.ttl(留空使用 manifest 的 defaults.dns.ttl)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.field.dns_ttl", label, def, iepOptionalInt), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.field.dns_ttl", Title: label, Default: def, Validate: iepOptionalInt}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -521,7 +547,8 @@ var iepRouteModeChoices = []string{"direct", "reverse_proxy"}
 
 func pushInternalEndpointRouteMenu(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
 	title := "route.mode（direct/reverse_proxy 之間切換屬於 route owner migration，實際套用時 v1 一律拒絕就地遷移 — 這裡的寫入只影響 manifest 意圖，之後 apply 會依 spec.md §30 檢查）"
-	return r.transitionTo(newSelectModelWithScreenID("iep.route.menu", title, iepRouteModeChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.route.menu", Title: title, Choices: iepEnumChoices("iep.route.menu", iepRouteModeChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -535,8 +562,21 @@ func pushInternalEndpointRouteMenu(r *editRouterModel, dir, path, fqdn string) t
 
 var iepTargetSourceChoices = []string{"從 inventory host 解析", "手動輸入 IP"}
 
+// iepTargetSourceChoicesFor is the one enum in this file offered by more than
+// one screen (iep.route.direct.source and iep.route.upstream.source), so —
+// like edit_tui_dns.go's dnsValueSourceChoicesFor — its IDs are namespaced by
+// the owning screen rather than shared, and use the manifest field each
+// option writes (inventory_host / address) instead of the Chinese label text.
+func iepTargetSourceChoicesFor(screenID string) []tui.Choice {
+	return []tui.Choice{
+		{ID: screenID + ".inventory_host", Label: iepTargetSourceChoices[0]},
+		{ID: screenID + ".address", Label: iepTargetSourceChoices[1]},
+	}
+}
+
 func pushInternalEndpointRouteDirectSource(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
-	return r.transitionTo(newSelectModelWithScreenID("iep.route.direct.source", "route.target 的值來源", iepTargetSourceChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.route.direct.source", Title: "route.target 的值來源", Choices: iepTargetSourceChoicesFor("iep.route.direct.source")}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -562,7 +602,8 @@ func pushInternalEndpointRouteDirectHostPicker(r *editRouterModel, dir, path, fq
 	if len(names) == 0 {
 		return pushInternalEndpointDetail(r, dir, path, fqdn, "⚠️  hosts.yml 沒有任何主機可選；請改用「手動輸入 IP」")
 	}
-	return r.transitionTo(newSelectModelWithScreenID("iep.route.direct.host", "route.target.inventory_host", names), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.route.direct.host", Title: "route.target.inventory_host", Choices: iepHostChoices(names)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -576,7 +617,8 @@ func pushInternalEndpointRouteDirectHostPicker(r *editRouterModel, dir, path, fq
 
 func pushInternalEndpointRouteDirectAddress(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
 	label := "route.target.address(literal IP)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.route.direct.address", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.route.direct.address", Title: label, Validate: nonBlank}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -606,7 +648,8 @@ func iepDefaultReverseProxyHost(dir string) string {
 func pushInternalEndpointRouteProxyHost(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
 	def := iepDefaultReverseProxyHost(dir)
 	label := "route.proxy.inventory_host(必須是有 reverse-proxy role 的 host)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.route.proxy.host", label, def, nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.route.proxy.host", Title: label, Default: def, Validate: nonBlank}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -618,7 +661,8 @@ func pushInternalEndpointRouteProxyHost(r *editRouterModel, dir, path, fqdn stri
 var iepUpstreamSchemeChoices = []string{"http", "https"}
 
 func pushInternalEndpointRouteUpstreamScheme(r *editRouterModel, dir, path, fqdn, proxyHost string) tea.Cmd {
-	return r.transitionTo(newSelectModelWithScreenID("iep.route.upstream.scheme", "upstream.scheme（省略即 fail — spec.md §12.3 必填）", iepUpstreamSchemeChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.route.upstream.scheme", Title: "upstream.scheme（省略即 fail — spec.md §12.3 必填）", Choices: iepEnumChoices("iep.route.upstream.scheme", iepUpstreamSchemeChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -628,7 +672,8 @@ func pushInternalEndpointRouteUpstreamScheme(r *editRouterModel, dir, path, fqdn
 }
 
 func pushInternalEndpointRouteUpstreamSource(r *editRouterModel, dir, path, fqdn, proxyHost, scheme string) tea.Cmd {
-	return r.transitionTo(newSelectModelWithScreenID("iep.route.upstream.source", "upstream 的值來源", iepTargetSourceChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.route.upstream.source", Title: "upstream 的值來源", Choices: iepTargetSourceChoicesFor("iep.route.upstream.source")}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -653,7 +698,8 @@ func pushInternalEndpointRouteUpstreamHostPicker(r *editRouterModel, dir, path, 
 	if len(names) == 0 {
 		return pushInternalEndpointDetail(r, dir, path, fqdn, "⚠️  hosts.yml 沒有任何主機可選；請改用「手動輸入 IP」")
 	}
-	return r.transitionTo(newSelectModelWithScreenID("iep.route.upstream.host", "upstream.inventory_host", names), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.route.upstream.host", Title: "upstream.inventory_host", Choices: iepHostChoices(names)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -664,7 +710,8 @@ func pushInternalEndpointRouteUpstreamHostPicker(r *editRouterModel, dir, path, 
 
 func pushInternalEndpointRouteUpstreamAddress(r *editRouterModel, dir, path, fqdn, proxyHost, scheme string) tea.Cmd {
 	label := "upstream.address(literal IP)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.route.upstream.address", label, "", nonBlank), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.route.upstream.address", Title: label, Validate: nonBlank}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -676,7 +723,8 @@ func pushInternalEndpointRouteUpstreamAddress(r *editRouterModel, dir, path, fqd
 
 func pushInternalEndpointRouteUpstreamPort(r *editRouterModel, dir, path, fqdn, proxyHost, scheme, upstreamHost, upstreamAddress string) tea.Cmd {
 	label := "upstream.port(1..65535)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.route.upstream.port", label, "", iepValidPort), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.route.upstream.port", Title: label, Validate: iepValidPort}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -693,7 +741,8 @@ var iepBoolChoices = []string{"true", "false"}
 
 func pushInternalEndpointRouteUpstreamVerify(r *editRouterModel, dir, path, fqdn, proxyHost, scheme, upstreamHost, upstreamAddress string, port int) tea.Cmd {
 	title := "upstream.tls.verify（https upstream 必填，明確表示是否驗證 upstream 憑證 — false 仍然是加密 TLS，只是不驗證身分，spec.md §12.4.3）"
-	return r.transitionTo(newSelectModelWithScreenID("iep.route.upstream.verify", title, iepBoolChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.route.upstream.verify", Title: title, Choices: iepEnumChoices("iep.route.upstream.verify", iepBoolChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -705,7 +754,8 @@ func pushInternalEndpointRouteUpstreamVerify(r *editRouterModel, dir, path, fqdn
 
 func pushInternalEndpointRouteUpstreamSNI(r *editRouterModel, dir, path, fqdn, proxyHost, scheme, upstreamHost, upstreamAddress string, port int, verify bool) tea.Cmd {
 	label := "upstream.tls.server_name(SNI；upstream.address 或 verify=true 時建議明確填寫，留空由 inventory host 的 canonical FQDN 推導，spec.md §12.4.6)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.route.upstream.sni", label, "", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.route.upstream.sni", Title: label}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -757,13 +807,14 @@ func pushInternalEndpointTLSMenu(r *editRouterModel, dir, path, fqdn, banner str
 	isDirect := iepStringValue(route, "mode") == "direct"
 	isFreeIPA := iepStringValue(tls, "mode") == "freeipa"
 
-	items := []string{
-		fmt.Sprintf("mode：%s", iepStringOr(tls, "mode", "disabled")),
-		fmt.Sprintf("port：%s（僅 freeipa 適用）", iepIntDisplay(tls, "port", "(使用預設 443)")),
-		"sink（cert_file/key_file/reload...；僅 direct route 適用）",
-		"↩  返回",
+	choices := []tui.Choice{
+		{ID: "iep.tls.menu.mode", Label: fmt.Sprintf("mode：%s", iepStringOr(tls, "mode", "disabled"))},
+		{ID: "iep.tls.menu.port", Label: fmt.Sprintf("port：%s（僅 freeipa 適用）", iepIntDisplay(tls, "port", "(使用預設 443)"))},
+		{ID: "iep.tls.menu.sink", Label: "sink（cert_file/key_file/reload...；僅 direct route 適用）"},
+		{ID: "iep.tls.menu.back", Label: "↩  返回"},
 	}
-	return r.transitionTo(newSelectModelWithScreenID("iep.tls.menu", fmt.Sprintf("Endpoint %q tls", fqdn), items), banner, func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.tls.menu", Title: fmt.Sprintf("Endpoint %q tls", fqdn), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointDetail(r, dir, path, fqdn, "")
@@ -796,7 +847,8 @@ func pushInternalEndpointTLSMenu(r *editRouterModel, dir, path, fqdn, banner str
 
 func pushInternalEndpointTLSModeField(r *editRouterModel, dir, path, fqdn string) tea.Cmd {
 	title := "tls.mode（freeipa 需要 route owner host 已有 live FreeIPA enrollment，套用時才會檢查 — spec.md §16）"
-	return r.transitionTo(newSelectModelWithScreenID("iep.tls.field_mode", title, iepTLSModeChoices), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.SelectSpec{ScreenID: "iep.tls.field_mode", Title: title, Choices: iepEnumChoices("iep.tls.field_mode", iepTLSModeChoices)}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return pushInternalEndpointTLSMenu(r, dir, path, fqdn, "")
@@ -844,7 +896,8 @@ func pushInternalEndpointTLSPortField(r *editRouterModel, dir, path, fqdn string
 	}
 	def := iepIntValue(iepMapField(fields, "tls"), "port")
 	label := "tls.port(留空使用 scheme 預設 443)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.tls.field_port", label, def, iepOptionalPort), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.tls.field_port", Title: label, Default: def, Validate: iepOptionalPort}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointTLSMenu(r, dir, path, fqdn, "")
@@ -868,7 +921,8 @@ func pushInternalEndpointTLSSinkCertFile(r *editRouterModel, dir, path, fqdn str
 	fields, _, _ := inventory.InternalEndpointManifestEndpoint(path, fqdn)
 	sink := iepMapField(iepMapField(fields, "tls"), "sink")
 	label := "tls.sink.cert_file(絕對路徑)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.tls.sink.cert_file", label, iepStringValue(sink, "cert_file"), iepAbsolutePath), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.tls.sink.cert_file", Title: label, Default: iepStringValue(sink, "cert_file"), Validate: iepAbsolutePath}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointTLSMenu(r, dir, path, fqdn, "")
@@ -881,7 +935,8 @@ func pushInternalEndpointTLSSinkKeyFile(r *editRouterModel, dir, path, fqdn, cer
 	fields, _, _ := inventory.InternalEndpointManifestEndpoint(path, fqdn)
 	sink := iepMapField(iepMapField(fields, "tls"), "sink")
 	label := "tls.sink.key_file(絕對路徑，不可與 cert_file 相同)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.tls.sink.key_file", label, iepStringValue(sink, "key_file"), iepAbsolutePath), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.tls.sink.key_file", Title: label, Default: iepStringValue(sink, "key_file"), Validate: iepAbsolutePath}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointTLSMenu(r, dir, path, fqdn, "")
@@ -892,7 +947,8 @@ func pushInternalEndpointTLSSinkKeyFile(r *editRouterModel, dir, path, fqdn, cer
 
 func pushInternalEndpointTLSSinkKeyOwner(r *editRouterModel, dir, path, fqdn, certFile, keyFile string) tea.Cmd {
 	label := "tls.sink.key_owner(預設 root)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.tls.sink.key_owner", label, "root", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.tls.sink.key_owner", Title: label, Default: "root"}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointTLSMenu(r, dir, path, fqdn, "")
@@ -903,7 +959,8 @@ func pushInternalEndpointTLSSinkKeyOwner(r *editRouterModel, dir, path, fqdn, ce
 
 func pushInternalEndpointTLSSinkKeyGroup(r *editRouterModel, dir, path, fqdn, certFile, keyFile, keyOwner string) tea.Cmd {
 	label := "tls.sink.key_group(預設 root)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.tls.sink.key_group", label, "root", nil), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.tls.sink.key_group", Title: label, Default: "root"}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointTLSMenu(r, dir, path, fqdn, "")
@@ -914,7 +971,8 @@ func pushInternalEndpointTLSSinkKeyGroup(r *editRouterModel, dir, path, fqdn, ce
 
 func pushInternalEndpointTLSSinkKeyMode(r *editRouterModel, dir, path, fqdn, certFile, keyFile, keyOwner, keyGroup string) tea.Cmd {
 	label := "tls.sink.key_mode(預設 0600)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.tls.sink.key_mode", label, "0600", iepOctalMode), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.tls.sink.key_mode", Title: label, Default: "0600", Validate: iepOctalMode}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointTLSMenu(r, dir, path, fqdn, "")
@@ -925,7 +983,8 @@ func pushInternalEndpointTLSSinkKeyMode(r *editRouterModel, dir, path, fqdn, cer
 
 func pushInternalEndpointTLSSinkReloadUnit(r *editRouterModel, dir, path, fqdn, certFile, keyFile, keyOwner, keyGroup, keyMode string) tea.Cmd {
 	label := "tls.sink.reload.unit(systemd unit 名稱，例如 myapp.service；v1 只支援 systemd，spec.md §23)"
-	return r.transitionTo(newTextInputModelWithScreenID("iep.tls.sink.reload_unit", label, "", iepSystemdUnitName), "", func(r *editRouterModel, s screen) tea.Cmd {
+	spec := tui.InputSpec{ScreenID: "iep.tls.sink.reload_unit", Title: label, Validate: iepSystemdUnitName}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
 			return pushInternalEndpointTLSMenu(r, dir, path, fqdn, "")
@@ -992,6 +1051,35 @@ func formatIEPPreview(m inventory.NormalizedInternalEndpointManifest) string {
 }
 
 // ---- shared helpers ---------------------------------------------------------
+
+// iepEnumChoices turns one of this file's fixed enum option slices
+// (iepStateChoices, iepRouteModeChoices, iepUpstreamSchemeChoices,
+// iepBoolChoices, iepTLSModeChoices) into tui.Choices whose stable IDs are
+// the owning screen's ID plus the option's own value —
+// "iep.field.state.absent" and so on — so the screens sharing an option set
+// don't collide on a shared ID. The label is the bare value exactly as
+// before, and the option order (which every one of these screens' callbacks
+// reads back via Selected()) is preserved. Mirrors edit_tui_dns.go's
+// dnsEnumChoices / edit_tui_roster.go's rosterEnumChoices.
+func iepEnumChoices(screenID string, values []string) []tui.Choice {
+	out := make([]tui.Choice, len(values))
+	for i, v := range values {
+		out[i] = tui.Choice{ID: screenID + "." + v, Label: v}
+	}
+	return out
+}
+
+// iepHostChoices renders hosts.yml entries for the three inventory_host
+// picker screens. An inventory host's own name is its stable identity — it is
+// exactly the string written into route.target/upstream.inventory_host — so
+// it is also the row's Choice.ID.
+func iepHostChoices(names []string) []tui.Choice {
+	out := make([]tui.Choice, len(names))
+	for i, n := range names {
+		out[i] = tui.Choice{ID: n, Label: n}
+	}
+	return out
+}
 
 func formatIEPViolations(violations []inventory.InternalEndpointViolation) string {
 	lines := make([]string, 0, len(violations)+1)
