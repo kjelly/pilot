@@ -33,3 +33,39 @@ func TestFailureSummaryEmptyWhenNoFailure(t *testing.T) {
 		t.Fatalf("FailureSummary() = %q, want empty", got)
 	}
 }
+
+func TestFailureSummarySurfacesPerItemErrorsForLoopTask(t *testing.T) {
+	out := `TASK [Refresh SSSD caches on enrolled FreeIPA clients] ********
+fatal: [freeipa -> {{ item }}]: FAILED! => {"msg": "All items completed", "results": [` +
+		`{"item": "client-1.example.com", "failed": true, "msg": "ssh: connect to host client-1.example.com port 22: Connection refused"}, ` +
+		`{"item": "client-2.example.com", "failed": false, "msg": "cache refreshed"}` +
+		`]}
+`
+	got := FailureSummary(out)
+	if strings.Contains(got, "{{ item }}") {
+		t.Fatalf("FailureSummary() = %q, should not leak unresolved {{ item }} template", got)
+	}
+	if !strings.Contains(got, "host=freeipa (fatal)") {
+		t.Fatalf("FailureSummary() = %q, missing clean host= line", got)
+	}
+	if !strings.Contains(got, "item=client-1.example.com") {
+		t.Fatalf("FailureSummary() = %q, missing failing item", got)
+	}
+	if !strings.Contains(got, "msg=ssh: connect to host client-1.example.com port 22: Connection refused") {
+		t.Fatalf("FailureSummary() = %q, missing real per-item msg", got)
+	}
+	if strings.Contains(got, "client-2.example.com") {
+		t.Fatalf("FailureSummary() = %q, should not report the item that succeeded", got)
+	}
+	if strings.Contains(got, "msg=All items completed") {
+		t.Fatalf("FailureSummary() = %q, should not print the uninformative aggregate msg", got)
+	}
+}
+
+func TestFailureSummaryKeepsResolvedDelegateHost(t *testing.T) {
+	out := "TASK [Check] ********\nfatal: [ctrl -> node-3.example.com]: FAILED! => {\"msg\": \"boom\"}\n"
+	got := FailureSummary(out)
+	if !strings.Contains(got, "host=ctrl -> node-3.example.com") {
+		t.Fatalf("FailureSummary() = %q, should keep a resolved delegate host", got)
+	}
+}
