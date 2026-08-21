@@ -89,27 +89,27 @@ func resolveDiagnoseInventory(ctx context.Context, opts diagnoseMCPToolsOptions)
 }
 
 func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_sudo",
 		Description: "run fixed, read-only ansible ad-hoc commands against one real inventory host to diagnose why a specific user can/cannot sudo there: sssd status, kerberos machine identity, account resolution, sssd access_provider, nsswitch sudoers routing, and whether a central FreeIPA sudo rule grants access (`sudo -l -U <user>`). Cross-reference the username against pilot://roster/effective-access's effective_sudo_access for the config-level (not live) view.",
 	}, diagnoseSudoHandler(opts))
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_dns",
 		Description: "run fixed, read-only ansible ad-hoc commands against one real inventory host to diagnose DNS resolution problems there: /etc/resolv.conf's nameserver, whether systemd-resolved is active, whether a local (non-stub) DNS daemon is listening on :53 and installed, and — when a name is supplied — whether it resolves both via NSS (getent hosts) and a direct query against the loopback resolver (dig @127.0.0.1), which separates an NSS/nsswitch misconfiguration from an unreachable/non-authoritative upstream.",
 	}, diagnoseDNSHandler(opts))
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_logs",
 		Description: "run a LogQL query against Loki (the dashboard host's log store) via an ansible ad-hoc curl against its own loopback — no host parameter, since dashboard is this deployment's singleton central role. start/end accept RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; when either is supplied pilot makes both UTC boundaries explicit and rejects start >= end before querying Loki. Omit both for Loki's default last hour. Returns the raw Loki JSON response body plus its HTTP status.",
 	}, diagnoseLogsHandler(opts))
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_metrics",
 		Description: "run a PromQL query against Thanos Query (the cross-site metrics aggregator) via an ansible ad-hoc curl against its own loopback — no host parameter, since thanos-query is this deployment's singleton central role. Supplying both start and end runs a range query (/api/v1/query_range, with optional step); otherwise an instant query (/api/v1/query, with optional time). No range cap — the caller decides. Returns the raw Prometheus-compatible JSON response body plus its HTTP status.",
 	}, diagnoseMetricsHandler(opts))
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_security_logs",
 		Description: "convenience wrapper over pilot_diagnose_logs for security/audit events specifically: automatically scopes the Loki query to job=\"pilot-siem\", which — by this deployment's own design — already covers nothing but security/audit-relevant log lines, from EITHER log-server's forwarded auth/authpriv/local6(auditd) logs OR a co-located wazuh-manager's alerts (whichever this deployment ships; both land under the same job label, no source parameter needed). host and search are both optional plain-substring filters against the log line content (not a regex, and not a precise scope like pilot_diagnose_sudo/dns's host — wazuh's JSON alerts carry the source agent's identity inside the line itself, not in a per-host file path, so a content search is the one mechanism that finds a host either way). start/end accept RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; when either is supplied pilot makes both UTC boundaries explicit and rejects start >= end. Returns the raw Loki JSON response body plus its HTTP status and the exact LogQL query that was run.",
 	}, diagnoseSecurityLogsHandler(opts))
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_login",
 		Description: "one-call composite for \"why can't these users log in / sudo on this host\": runs fixed, read-only ansible ad-hoc commands against one real inventory host for sssd status, sssd domain backend online/offline, Kerberos machine identity, and this host's own DNS self-resolution (a broken forward/reverse record here commonly breaks Kerberos), then for each user in users: NSS passwd resolution (getent passwd) and whether a live central FreeIPA sudo rule grants access (sudo -l -U). Also reads the workspace's FreeIPA roster (config-level, not live) to report each user's declared HBAC/sudo authorization on this host and flags any drift against what was just observed live (e.g. roster declares sudo but the live host has no rule yet, or vice versa). Best-effort also queries recent SSH/PAM login records for these users from Loki (job=\"pilot-siem\", like pilot_diagnose_security_logs, same default ansible-noise exclusion) over the last `lookback` (a Go duration, default 24h) — skipped with a note if the dashboard role isn't deployed in this inventory, never a hard failure. Replaces the usual manual sequence of pilot_diagnose_sudo/dns/security_logs plus a separate roster lookup with one call.",
 	}, diagnoseLoginHandler(opts))
@@ -190,6 +190,41 @@ func parseLokiTime(value string, now time.Time, isStart bool) (time.Time, error)
 }
 
 // ---- shared plumbing --------------------------------------------------
+
+// scopedDiagnoseAnsibleRuntime derives a copy of base whose SSH
+// ControlPath is unique to this one diagnose tool call. Every
+// pilot_diagnose_* handler calls this exactly once per invocation and
+// reuses the resulting runtime (via ctx) for every ad-hoc step that one
+// call makes, so a single call's own sequential steps against the same
+// host still share one multiplexed SSH connection (ControlPersist=60s).
+//
+// base's ControlPath is shared for the whole server's lifetime
+// (prepareDeployAnsibleRuntime is called once, in mcp.go). Two DIFFERENT
+// pilot_diagnose_* calls targeting the same host would otherwise race two
+// independent `ansible` processes over the exact same control socket
+// path — confirmed 2026-08-21 that these calls really do run
+// concurrently (go-sdk dispatches every tool call in its own goroutine).
+// OpenSSH's own control-socket creation is not guaranteed atomic across
+// two unrelated processes hitting it at once, so this scopes the path
+// per call instead of trying to prove that race is always benign.
+func scopedDiagnoseAnsibleRuntime(base deployAnsibleRuntime) deployAnsibleRuntime {
+	scope, err := newID()
+	if err != nil {
+		// crypto/rand failure isn't realistically recoverable here; fall
+		// back to the shared ControlPath rather than failing the call.
+		return base
+	}
+	env := make([]string, 0, len(base.Env))
+	for _, kv := range base.Env {
+		if strings.HasPrefix(kv, "ANSIBLE_SSH_ARGS=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	controlPath := filepath.Join(base.SSHControlDir, "pilot-"+scope+"-%r@%h:%p")
+	env = append(env, "ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath="+strconv.Quote(controlPath)+" -o ControlPersist=60s")
+	return deployAnsibleRuntime{TempDir: base.TempDir, SSHControlDir: base.SSHControlDir, Env: env}
+}
 
 // realDiagnoseAdHocRunner adapts deployAnsibleCommand (the same
 // ANSIBLE_HOME-isolated exec.Cmd builder every other ansible invocation in
@@ -353,7 +388,7 @@ func diagnoseSudoHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("user %q is not a valid username", in.User)}), diagnoseSudoOutput{}, nil
 		}
 
-		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseSudoOutput{}, nil
@@ -433,7 +468,7 @@ func diagnoseDNSHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("name %q is not a valid DNS record name", in.Name)}), diagnoseDNSOutput{}, nil
 		}
 
-		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseDNSOutput{}, nil
@@ -525,7 +560,7 @@ func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseLogsOutput{}, nil
 		}
 
-		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseLogsOutput{}, nil
@@ -623,7 +658,7 @@ func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFo
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseSecurityLogsOutput{}, nil
 		}
-		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseSecurityLogsOutput{}, nil
@@ -817,7 +852,7 @@ func diagnoseLoginHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagn
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("invalid lookback: %v", err)}), diagnoseLoginOutput{}, nil
 		}
 
-		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseLoginOutput{}, nil
@@ -972,7 +1007,7 @@ func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[dia
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "start and end must both be set together, or both omitted"}), diagnoseMetricsOutput{}, nil
 		}
 
-		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseMetricsOutput{}, nil
@@ -1037,7 +1072,7 @@ func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[dia
 // tool is not a fixed allow-list: it runs whatever command string the
 // caller supplies.
 func registerDiagnoseRunTool(server *mcp.Server, opts diagnoseMCPToolsOptions) {
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_run",
 		Description: "run a caller-supplied command against one real inventory host via ansible's `command` module (argv is exec'd directly — no shell, so pipes/redirects/chaining/expansion are not interpreted). UNLIKE pilot_diagnose_sudo/pilot_diagnose_dns this is NOT a fixed read-only allow-list: it runs anything the connecting ansible_user (and become, if the inventory configures it) is permitted to run, including commands that mutate the target. Only registered when the server was started with --enable-diagnose-raw. Every call is logged to the audit directory. Prefer pilot_diagnose_sudo/pilot_diagnose_dns when they already answer the question.",
 	}, diagnoseRunHandler(opts))
@@ -1065,7 +1100,7 @@ func diagnoseRunHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "command must not be empty"}), diagnoseRunOutput{}, nil
 		}
 
-		ctx = withDeployAnsibleRuntime(ctx, opts.AnsibleRuntime)
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseRunOutput{}, nil

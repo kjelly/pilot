@@ -114,20 +114,20 @@ type editMCPToolsOptions struct {
 // listing one that always errors, matching spec's "Read-only default"
 // section.
 func registerEditTools(server *mcp.Server, opts editMCPToolsOptions) {
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_edit_capabilities",
 		Description: "list the semantic *edit* (mutation) actions this MCP server currently allows, reflecting real server policy (not just the global action registry); read-only queries are served by pilot_edit_inspect, not by an action here",
 	}, capabilitiesHandler(opts))
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_edit_inspect",
 		Description: "read-only query over the workspace's non-secret configuration: inventory hosts (name/IP/roles), role presets, and — via opt-in flags — group_vars, vault metadata, the FreeIPA roster (users, groups, hostgroups, HBAC rules, sudo rules, plus server-resolved effective_hbac_access/effective_sudo_access that answer \"which users can log in to / run sudo on which hosts\" with nested group membership already expanded), and DNS zones/records with resolved IPs, and internal-endpoint manifest entries (dns/route/tls) with resolved IPs",
 	}, inspectHandler(opts))
-	mcp.AddTool(server, &mcp.Tool{
+	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_edit_plan",
 		Description: "validate and rehearse a semantic action scenario against a temporary copy of the workspace, through the real pilot edit TUI, without touching the real workspace",
 	}, planHandler(opts))
 	if opts.WriteEnabled {
-		mcp.AddTool(server, &mcp.Tool{
+		addRecoveredTool(server, &mcp.Tool{
 			Name:        "pilot_edit_apply",
 			Description: "apply a previously-created plan's exact scenario to the real workspace through the real pilot edit TUI, under a mutation lock with automatic rollback on failure",
 		}, applyHandler(opts))

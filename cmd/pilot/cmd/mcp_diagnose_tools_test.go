@@ -108,6 +108,66 @@ func baseDiagnoseOpts(t *testing.T, inventory string, runner diagnose.AdHocRunne
 	}
 }
 
+// ---- scopedDiagnoseAnsibleRuntime ---------------------------------------
+
+// findEnv returns the value of the first entry in env with the given
+// KEY= prefix, or "" if absent.
+func findEnv(env []string, prefix string) string {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return kv
+		}
+	}
+	return ""
+}
+
+func TestScopedDiagnoseAnsibleRuntime_TwoCallsGetDistinctControlPaths(t *testing.T) {
+	base, err := prepareDeployAnsibleRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := scopedDiagnoseAnsibleRuntime(base)
+	second := scopedDiagnoseAnsibleRuntime(base)
+
+	firstArgs := findEnv(first.Env, "ANSIBLE_SSH_ARGS=")
+	secondArgs := findEnv(second.Env, "ANSIBLE_SSH_ARGS=")
+	if firstArgs == "" || secondArgs == "" {
+		t.Fatalf("expected both scoped runtimes to carry ANSIBLE_SSH_ARGS, got first=%q second=%q", firstArgs, secondArgs)
+	}
+	if firstArgs == secondArgs {
+		t.Fatalf("two independent diagnose calls got the identical ANSIBLE_SSH_ARGS (%q) — concurrent calls to the same host would share one SSH ControlPath again", firstArgs)
+	}
+	if !strings.Contains(firstArgs, base.SSHControlDir) || !strings.Contains(secondArgs, base.SSHControlDir) {
+		t.Fatalf("expected both ControlPaths to stay rooted under %q, got first=%q second=%q", base.SSHControlDir, firstArgs, secondArgs)
+	}
+
+	// Only ANSIBLE_SSH_ARGS should change — everything else base set up
+	// (ANSIBLE_HOME, temp dir, fact cache, etc.) must survive untouched.
+	for _, prefix := range []string{"ANSIBLE_HOME=", "ANSIBLE_LOCAL_TEMP=", "ANSIBLE_CACHE_PLUGIN_CONNECTION=", "ANSIBLE_LOG_PATH=", "ANSIBLE_FORKS="} {
+		baseVal := findEnv(base.Env, prefix)
+		scopedVal := findEnv(first.Env, prefix)
+		if baseVal == "" || baseVal != scopedVal {
+			t.Fatalf("expected %s to be preserved unchanged, base=%q scoped=%q", prefix, baseVal, scopedVal)
+		}
+	}
+	if first.TempDir != base.TempDir || first.SSHControlDir != base.SSHControlDir {
+		t.Fatalf("expected TempDir/SSHControlDir to be preserved, got %+v want TempDir=%q SSHControlDir=%q", first, base.TempDir, base.SSHControlDir)
+	}
+
+	// No duplicate ANSIBLE_SSH_ARGS entries — the old one must actually be
+	// removed, not just shadowed by a second, later entry.
+	var count int
+	for _, kv := range first.Env {
+		if strings.HasPrefix(kv, "ANSIBLE_SSH_ARGS=") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one ANSIBLE_SSH_ARGS entry, got %d in %v", count, first.Env)
+	}
+}
+
 func TestResolveDiagnoseInventory_RefreshFailureIsNotSilentlyIgnored(t *testing.T) {
 	// A bad sibling hosts.yml must not leave a live diagnostic using a stale
 	// inventory whose hosts could now point to a different machine.

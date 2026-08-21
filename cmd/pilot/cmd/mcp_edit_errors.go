@@ -53,6 +53,11 @@ const (
 	// validator, are rejected before any ad-hoc command is ever run.
 	mcpErrHostNotFound = "host_not_found"
 	mcpErrInvalidParam = "invalid_param"
+
+	// mcpErrInternal is produced only by addRecoveredTool's panic
+	// recovery (mcp_tool_recovery.go) — a tool handler panicked instead
+	// of returning normally.
+	mcpErrInternal = "internal_error"
 )
 
 // toolErrorResult builds the CallToolResult a handler returns for a

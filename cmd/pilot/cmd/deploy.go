@@ -49,6 +49,13 @@ var deployForceFlag bool
 type deployAnsibleRuntime struct {
 	Env     []string
 	TempDir string
+
+	// SSHControlDir is the directory Env's ANSIBLE_SSH_ARGS points its
+	// ControlPath at. Exposed separately (not just baked into Env) so a
+	// caller that needs a *scoped* ControlPath (see
+	// scopedDiagnoseAnsibleRuntime) can rebuild ANSIBLE_SSH_ARGS without
+	// parsing it back out of the opaque Env string.
+	SSHControlDir string
 }
 
 type deployAnsibleEnvKey struct{}
@@ -68,7 +75,8 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 		}
 	}
 	return deployAnsibleRuntime{
-		TempDir: tmp,
+		TempDir:       tmp,
+		SSHControlDir: sshControl,
 		Env: []string{
 			"ANSIBLE_HOME=" + home,
 			"ANSIBLE_LOCAL_TEMP=" + tmp,
