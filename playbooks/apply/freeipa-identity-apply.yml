@@ -584,7 +584,7 @@
     - name: "Select legacy admin settings"
       ansible.builtin.set_fact:
         identity_admin_principal: admin
-        identity_admin_password: "{{ ipa_admin_password }}"
+        identity_admin_password: "{{ ipa_admin_password | default('') }}"
       when: freeipa_roster.schema_version is not defined
       no_log: true
       tags: [always]
@@ -717,6 +717,22 @@
         - ipa_group_mod.rc != 0
         - "'no modifications to be performed' not in (ipa_group_mod.stderr | default(''))"
       tags: [identity, groups, C11, C12]
+
+    # Every applied group gets a durable, deterministic history marker
+    # (spec.md §4, §9.5) — the union of "actual group exists" OR "marker
+    # exists" is what makes `pilot roster remove-group`'s ever-applied
+    # guard hold even after a later `state: absent` deletes the actual
+    # group. This runs only after "Ensure IPA groups exist" above, so a
+    # failed group creation never produces a false "applied" marker.
+    - name: "Ensure durable history marker for every applied group"
+      ansible.builtin.include_tasks: tasks/freeipa-group-history-marker.yml
+      loop: "{{ ipa_active_groups }}"
+      loop_control:
+        loop_var: pilot_group_history_loop_item
+        label: "{{ pilot_group_history_loop_item.name }}"
+      vars:
+        pilot_group_history_name: "{{ pilot_group_history_loop_item.name }}"
+      tags: [identity, groups]
 
     # ── Users ──────────────────────────────────────────────────────────
     - name: "Ensure IPA users exist"
@@ -1069,6 +1085,37 @@
         - "'not found' not in (canonical_user_delete.stderr | default(''))"
       when: freeipa_roster.schema_version is defined
       tags: [identity, users]
+
+    - name: "Look up actual FreeIPA group before deleting"
+      ansible.builtin.command:
+        argv: [ipa, group-show, "{{ item.name }}"]
+      loop: "{{ ipa_groups | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: canonical_group_absent_show
+      changed_when: false
+      failed_when: false
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, groups]
+
+    # A group's history marker must exist BEFORE it is ever deleted
+    # (spec.md §4.8, §9.6) — group-del must never run ahead of a verified
+    # marker, or the historical guard on this group is lost forever. Only
+    # groups group-show just proved still exist need this: an
+    # already-absent group keeps whatever marker it already has (or lacks)
+    # untouched, per §4.9's "history is ambiguous" legacy rule.
+    - name: "Ensure durable history marker before deleting an existing group"
+      ansible.builtin.include_tasks: tasks/freeipa-group-history-marker.yml
+      loop: "{{ canonical_group_absent_show.results | default([]) }}"
+      loop_control:
+        loop_var: pilot_group_history_loop_item
+        label: "{{ pilot_group_history_loop_item.item.name }}"
+      vars:
+        pilot_group_history_name: "{{ pilot_group_history_loop_item.item.name }}"
+      when:
+        - freeipa_roster.schema_version is defined
+        - pilot_group_history_loop_item.rc == 0
+      tags: [identity, groups]
 
     - name: "Delete canonical groups explicitly marked absent"
       ansible.builtin.command:

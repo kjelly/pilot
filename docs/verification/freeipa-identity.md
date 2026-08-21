@@ -1,9 +1,17 @@
 # Verification Spec — freeipa-identity（canonical identity primitives + legacy authorization reconciler）
 
-> 版本：v1.6（2026-08-11 roster-schema-v2 migration：netgroups 與 hostgroup
-> 巢狀 membership 交付，新增 C19–C24，已在 `freeipa-server` vm-target 上依序
-> 套用 legacy/canonical v1/schema-v2 三份 fixture 後實跑 24/24 PASS，並實測
-> netgroup authoritative pruning，見 §3、§7.1a）
+> 版本：v1.8（2026-08-21 對 `pilot roster remove-user`/`remove-group` +
+> group 歷史 marker 機制（v1.7 新增，見 §9）跑完真實 FreeIPA vm-target
+> 驗證：spec.md §22.5/§22.8 全部 mandatory 場景 PASS，過程中發現並修好
+> 2 個真實 bug（1 個既有的 ansible-core 2.19 相容性缺口、1 個本次新增碼
+> 的 check-mode 缺口），證據見 §9.6。§2 的 24-row checklist PASS 狀態仍是
+> v1.6 那次的既有基線，不含本次新增內容——併入需要額外準備 marker
+> fixture，留待下一輪）
+> 上一個已實跑驗證的基線：v1.6（2026-08-11 roster-schema-v2 migration：
+> netgroups 與 hostgroup 巢狀 membership 交付，新增 C19–C24，已在
+> `freeipa-server` vm-target 上依序套用 legacy/canonical v1/schema-v2 三份
+> fixture 後實跑 24/24 PASS，並實測 netgroup authoritative pruning，見
+> §3、§7.1a）
 > 前一版：v1.2（2026-07-22 delivery batch 1；已在獨立 AlmaLinux 9
 > `freeipa-identity-v2` vm-target 上實跑 canonical apply、checklist 與冪等重跑）
 > 相容基線：v1.1 已在 `pilot vm-target freeipa-server` 上實跑
@@ -379,3 +387,363 @@ pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.ym
 | 2026-07-30 | v1.4 | 修復真實 bug（`freeipa-dns` Phase 5 minimal-poc round-18 重建時發現）：「`Gate: canonical top-level and FreeIPA keys are known`」（~行 156-161）的 `freeipa.*` 允許清單硬寫成 `['server', 'admin', 'defaults', 'safety']`，遺漏 `domain`/`realm` —— 但 `internal/inventory/roster_validate.go` 的 `knownFreeIPAKeys` 明確允許這兩個欄位（其註解本身就寫著「the apply playbook deliberately ignores them」，即這兩個欄位存在時 apply 應該容忍、非拒絕）。`pilot edit`'s NFS-role-add bootstrap（`WriteMinimalNFSServerRoster`）本身就會在 roster 寫入 `freeipa.domain`，代表**任何透過官方 sanctioned 工具鏈建立的 roster，只要曾走過 NFS bootstrap，套用 `freeipa-identity` reconcile 就必定在第一個 gate 就 fail**——`pilot roster lint` 完全不會抓到（Go validator 本來就允許），只有真的跑 `ansible-playbook` 才會顯現。修法：把這兩個欄位加進 assert 的允許清單，使其與 Go-side schema 一致。 | pilot |
 | 2026-07-30 | v1.5 | 修復真實 bug（使用者回報「`pilot edit` 裡新增的 user，`enabled` 欄位顯示 `false`，但 reconcile 之後卻登得進去」，兩台獨立 AlmaLinux 9 vm-target 上對活的 FreeIPA server 實測重現）：`freeipa-identity-apply.yml` 本身的 enable/disable 邏輯是對的——顯式 `enabled: false` 套用後 `ipa user-show --all --raw` 確認 `nsaccountlock: TRUE`，且 `kinit` 直接被 KDC 拒絕（`Client's credentials have been revoked`）；真正的 bug 在 `pilot edit` 的 roster manager：`internal/inventory/roster.go`'s `AppendRosterUser`（`rosterUserStub{Name, State}`）新增 user 時完全不寫 `enabled` 欄位，而 `cmd/pilot/cmd/edit_tui_roster.go` 的欄位清單畫面卻用 `rosterBoolDisplay`（缺欄位一律顯示 `false`）顯示這個欄位——但 playbook 對缺欄位的實際預設是 `item.enabled \| default(true)`（第 910、357 行）。結果：編輯畫面告訴使用者「這個帳號是 disabled」，reconcile 卻把它當 enabled 套用，activate 之後真的能 `kinit`/登入，兩邊完全對不上。連帶發現 `password.preserve_existing` 欄位有同一類 bug（顯示預設 `false`，playbook 實際預設 `true`，第 360 行）。修法：`AppendRosterUser`/`SimulateAddRosterUser` 新增 user 時明確寫入 `enabled: true`（比照既有 HBAC/sudo rule stub 建立時就明寫 `enabled: true` 的慣例），`enabled`/`password.preserve_existing` 兩處顯示欄位改用 `rosterBoolDisplayDefault(..., true)`，讓沒有這兩個欄位的既有/手改 roster 也能顯示與 playbook 一致的有效值。`go test ./internal/inventory/... ./cmd/pilot/cmd/...` 全綠(4 個既有無關失敗維持不變)。 | pilot |
 | 2026-08-11 | v1.6 | Roster-schema-v2 migration 交付（spec.md 11-phase 實作全數完成）：schema v2 版本判定/驗證（`internal/inventory/roster_version.go`/`roster_validate.go`）、v1→v2 純 in-memory migration + semantic-equivalence fingerprint（`roster_migrate.go`）、mutation lock/backup/atomic write/rollback（`roster_migrate_file.go`）、`pilot roster migrate`/`pilot roster lint --upgrade`、TUI/MCP/`pilot deploy`/`pilot reconcile` preflight 全面自動升級（`EnsureRosterCurrent`）、netgroups 首次成為 first-class schema 物件（`roster_netgroup.go` + `freeipa-identity-apply.yml` 的 create/reconcile-membership/authoritative-prune/delete-absent 五種成員型別）、hostgroup 巢狀 membership 從完全未 reconcile 變成 authoritative（`membership.hostgroups`，本檔新增 §8 §6/§8 前身 issue，見 C19）、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染，`freeipa-nfs-exports.j2`）、ansible-vault 加密 roster 的 migration 支援（真實 `ansible-vault` binary，never 落地 plaintext temp file）。本檔新增 C19–C24（netgroup 五種 membership 型別 + hostgroup 巢狀 membership），與既有 C1–C18 一起在 `freeipa-server` vm-target 上依序套用 legacy/canonical v1/schema-v2 三份 fixture 後實跑 24/24 PASS；另外實測 netgroup authoritative pruning（手動加一個 roster 未宣告的 member、重新 apply 後確認被移除，見 §7.1a）。**兩個非顯而易見的真實 gotcha，皆已對活體 FreeIPA server 查證、非假設**：(1) `ipa netgroup-show --all` 的成員欄位標籤是單數且不一致——`Member User:`/`Member Group:`/`Member Host:`/`Member Hostgroup:`（均單數）但 `Member netgroups:`（小寫、複數），跟其他物件類型的慣例（如 `group-show` 的 `Member users:`，複數）都不一樣；(2) 同一組成員在底層 LDAP 完全是另一套屬性名稱——netgroup 的 user 與 group 成員共用 `memberUser`、host 與 hostgroup 成員共用 `memberHost`、nested netgroup 走一般的 `member`（不是 `memberGroup`/`memberHostgroup`/`memberNetgroup`），且 netgroup-to-netgroup 的 DN 一律是不可預測的 `ipaUniqueID=<uuid>`（不像其他物件類型有穩定的 `cn=` 形式）。netgroup 巢狀 cycle 偵測刻意只留在 Go 層（`pilot roster lint`），未在 Ansible 重複實作，理由與已知限制見 §5。`go test ./...`（1626 tests）、`ansible-playbook --syntax-check`、`go vet`、`gofmt`、`-race` 全綠。 | pilot |
+| 2026-08-21 | v1.7 | 新增 `pilot roster remove-user`/`remove-group`（見 §9），roster-local「撤銷從未套用過的誤增紀錄」，非 FreeIPA 撤權。修復兩個既有 Go validator 缺口：`checkSudo` 從未驗證 `subjects.users` 是否為已知使用者（`checkHBAC` 早就驗證同類 group 引用，唯獨 sudo 的 user 引用缺）、`nfs.servers[].shares[].ownership.group`/`acl.{access,default}.named_groups[].name` 完全零驗證（`internal/inventory/roster_validate.go` 新增 `checkNFS`）。新增 `internal/inventory/roster_references.go`（inbound-reference 掃描，區分 removable/blocked）、`roster_remove.go`（`Simulate/RemoveRosterUser/Group`，沿用既有 yaml.Node surgery + mutation lock 慣例）、`roster_vault.go` 新增 `DecryptRosterToTempFile`/`MutateEncryptedRosterFile`（沿用 `pilot roster migrate` 既有的 `ansible-vault` 呼叫，未另立第二套 vault 實作）。新增 `internal/freeipa` 套件（`ProbeUserHistory`/`ProbeGroupHistory`，讀 §9.2 兩支新 check playbook 的機器可讀 JSON 結果，fail-closed）。`freeipa-identity-apply.yml` 新增 group 歷史 marker 機制（§9.1）：每個套用成功的 `state: present` group 都會建立對應的 `pilot-internal-history-g-<sha256>` non-POSIX 空 marker group，`state: absent` 刪除真正的 group 前一定先確保 marker 存在，marker 永不被刪除——這是 FreeIPA 沒有 preserved-group 生命週期時，讓 `remove-group` 的「曾套用過永遠擋刪」保證在真正的 group 被刪除後依然成立的唯一機制。**刻意的範圍決策**：user 側的 `state: absent` **沒有**改成 FreeIPA `--preserve` 語意（`ipa user-del` 維持永久刪除不變）——評估後於本次交付明確放棄，理由與後果見 §9.1。`go test ./...`（1902 tests，含 `-race`）、`go vet`、`gofmt`、`make playbook-lint`（新增 `playbooks/check/*.yml` 進掃描範圍）全綠；真實 FreeIPA vm-target 驗證**尚未執行**，見 §9 開頭狀態列與 §9.5——這是本次交付明確承認、非隱藏的待辦。 | pilot |
+| 2026-08-21 | v1.8 | 對 v1.7 交付的 `pilot roster remove-user`/`remove-group` + group 歷史 marker 機制完成真實 FreeIPA vm-target 驗證（拋棄式 AlmaLinux 9 `freeipa-remove-test`），spec.md §22.5/§22.8 全部 mandatory 場景（never-applied user/group、applied active user/group 拒絕、out-of-band preserved user 拒絕、FreeIPA 探測失敗 fail-closed、historical_marker 拒絕、marker 驗證失敗保護 `group-del` 不被執行）與額外的 `--cascade-references`/NFS `ownership.group` 場景皆 PASS，證據見 §9.6。過程中發現並修好 2 個真實 bug：(1) 既有、非本次新增碼的 ansible-core 2.19 相容性缺口——`freeipa-identity-apply.yml` 的「Select legacy admin settings」`set_fact` 在 `when` 判斷前就試圖 resolve 完全未定義的 `ipa_admin_password`，讓任何 schema-v2 canonical roster 的 apply 直接炸掉，此環境相容性缺口先前從未被本 spec 抓到；修法 `\| default('')`。(2) 本次新增碼的 check-mode 缺口——`playbooks/apply/tasks/freeipa-group-history-marker.yml` 的唯讀查詢任務在 `--check` 下被自動跳過導致誤判成「marker 存在」，以及其 postcondition assert 在依賴任務被 check-mode 跳過後仍無條件執行導致誤判「驗證失敗」；修法分別是 `check_mode: false`（讀取安全）與 `when:` 加 `and not ansible_check_mode`，與本檔 §7.2a（v1.1）記載的既有 bug 同類。§9.4 的 C25/C26 由候選升級為已實測（尚未併入 §2）。`make playbook-lint`、`go test ./...` 全綠。 | pilot |
+
+## 9. `pilot roster remove-user` / `remove-group`（roster-local undo，非 FreeIPA 撤權）
+
+> **狀態：已對真實 FreeIPA vm-target 實跑驗證**（2026-08-21，拋棄式
+> AlmaLinux 9 `freeipa-remove-test` vm-target，native `ipa-server-install`，
+> 完整證據見 §9.6）。spec.md §22.5/§22.8 列出的全部 mandatory 場景皆已
+> 實測 PASS，過程中發現並修好 2 個真實 bug（1 個既有、非本次新增碼的
+> ansible-core 2.19 相容性問題；1 個本次新增的 group-history-marker
+> check-mode 缺口）——細節見 §9.6。§9.4 的 C25/C26 已從候選升級為真實
+> 驗證過的 row（但尚未併入 §2 的 24-row `pilot verify` checklist，因為
+> 那份 checklist 走的是既有 fixture 驅動的 `pilot spec --generate` 模型，
+> 併入需要額外準備 marker fixture，留待下一輪一併處理，不影響本節證據
+> 的有效性）。
+
+### 9.1 這是什麼、不是什麼
+
+`pilot roster remove-user <roster-file> <username>` / `pilot roster
+remove-group <roster-file> <groupname>` 撤銷的是「roster 裡一筆從未套用
+過 FreeIPA 的本地誤增紀錄」——操作者不小心加錯一行、roster 還沒 reconcile
+過，想要撤銷這個本地編輯，而不是走 FreeIPA 撤權。
+
+**這不是** `state: disabled` / `state: absent`（那兩者仍然是宣告式撤權，
+由 `freeipa-identity-apply.yml` reconcile 落地，roster tombstone 永遠保
+留）。一旦 FreeIPA 證明某 user/group 曾經進入過受管生命週期，這兩支指令
+永遠拒絕硬刪除該筆 roster 紀錄——沒有 `--force` 逃生門。
+
+**User 側刻意的範圍決策（spec.md §2.4/§11）**：`state: absent` 對 user
+**沒有**改成 FreeIPA `--preserve` 語意，`ipa user-del <name>`（永久刪除）
+維持現狀不變。這代表「一旦套用過就永遠擋得住誤刪」這個嚴格保證，只對
+**從未 reconcile 過**的 roster 紀錄成立；一個使用者被 reconcile 後又被
+`state: absent` 永久刪除，FreeIPA 就再也無法證明它的歷史存在，唯一剩下
+的防線是本地 roster tombstone（`state: absent` 的紀錄本身永遠不會被
+`remove-user` 接受，前提是這行 tombstone 沒被繞過 `pilot` 手改刪除）。
+
+**Group 側則交付了 user 側沒有的機制**：FreeIPA 沒有對等於 preserved-user
+的 preserved-group 生命週期，因此每個曾經 `state: present` 成功套用的
+canonical group，`freeipa-identity-apply.yml` 現在都會額外建立一個
+確定性、空的、non-POSIX 的歷史 marker group：
+
+```
+pilot-internal-history-g-<sha256(group 名稱)的小寫十六進位>
+description: pilot.group-history/v1 name=<group 名稱>
+```
+
+`ipa group-del` 執行前一定先確認這個 marker 存在（不存在就先建立並驗證
+postcondition），且這個 marker **永遠不會被 pilot 刪除**——即使之後
+`state: absent` 把真正的 group 刪掉，marker 依然留著，讓
+`remove-group` 的 FreeIPA 探測永遠能證明「這個名字曾經套用過」。手動刪除
+`pilot-internal-history-g-*` 物件，等同於手動永久刪除一個 preserved
+user——會讓這個嚴格保證失效，責任在操作者，不在 `pilot`。
+
+### 9.2 新增的兩支唯讀探測 playbook
+
+- `playbooks/check/freeipa-identity-user-ever-applied.yml`——`ipa
+  user-show <name>` 存在（active 或 preserved）→ `ever_applied: true`；
+  `not found` → `false`；任何其他錯誤（認證/網路/未知）一律 fail closed，
+  絕不當成 `false`。
+- `playbooks/check/freeipa-identity-group-ever-applied.yml`——同時查
+  `ipa group-show <name>` 與 `ipa group-show pilot-internal-history-g-
+  <hash>`，兩者任一存在即 `ever_applied: true`
+  （`active_with_marker`/`active_without_marker`/`historical_marker`），
+  兩者皆不存在才是 `not_found`。Marker 存在但 description 對不上預期值
+  視為 marker 名稱碰撞/毀損，同樣 fail closed。
+
+兩者都是純讀取，不會對 FreeIPA 做任何寫入；結果寫成 controller 端一支
+mode 0600 的暫存 JSON 檔（`internal/freeipa` 讀完即刪），從不印出密碼或
+roster 明文。
+
+### 9.3 CLI 用法
+
+```bash
+pilot roster remove-user  <roster-file> <username>  -i inventory.yml [--vault-password-file <file>] [--dry-run] [--cascade-references]
+pilot roster remove-group <roster-file> <groupname> -i inventory.yml [--vault-password-file <file>] [--dry-run] [--cascade-references]
+```
+
+執行順序（spec.md §16）：本地讀取檢查（唯一匹配、非 `state: absent`、
+收集本地引用）→ 無 `--cascade-references` 且有引用就在此停下，完全不打
+FreeIPA → FreeIPA 歷史探測（§9.2 的 playbook）→ ever_applied=true 或探測
+失敗一律拒絕，roster bytes 不變 → 候選 roster 完整跑過
+`inventory.ValidateRoster` → `--dry-run` 在此停下 → 落盤前對同一份
+plaintext 再探測一次（TOCTOU 緩解）→ 用既有的 roster mutation lock +
+yaml.Node surgery 寫入。加密 roster（`--vault-password-file`）全程走
+`inventory.DecryptRosterToTempFile`/`MutateEncryptedRosterFile`，沿用
+`pilot roster migrate` 既有的 `ansible-vault` 呼叫方式，從不把明文寫進
+可預測的檔名，失敗一律讓原始加密檔完全不動。
+
+`--cascade-references` 只會移除明確可 cascade 的直接引用（membership 清單
+成員），絕不因此連鎖刪除變空的 HBAC/sudo 規則、NFS 分享等其他資源；一個
+必要的純量引用（例如 NFS 分享的 `ownership.group`）永遠擋下移除，即使加
+了 `--cascade-references` 也一樣，必須先手動改掉那個引用。
+
+### 9.4 候選 checklist row（已實測，尚未併入 §2）
+
+| 候選 ID | Category | Check | Expected | Command | 實測結果 |
+|---------|----------|-------|----------|---------|---------|
+| C25 | group-history-marker | canonical `state: present` group 對應的 `pilot-internal-history-g-<hash>` marker 存在、為 non-POSIX、且 description 與 group 名稱吻合 | ~pilot.group-history/v1 | `ipa group-show pilot-internal-history-g-<sha256("<group 名稱>")的小寫十六進位> --all --raw` | PASS——`team-applied-active` 對應 marker `pilot-internal-history-g-4ea471ef...c5a239e`，`Description: pilot.group-history/v1 name=team-applied-active`，無 `GID` 欄位（確認 non-POSIX），見 §9.6 |
+| C26 | group-history-marker | 對某個 canonical group 執行 `state: absent` 並 reconcile 後，實際 group 已刪除、marker 依然存在 | 0 / 0 | 先確認 `ipa group-show <group>` 回傳非 0（已刪除），再確認 marker 的 `ipa group-show` 回傳 0（仍存在）| PASS——`team-deleted-marker` 刪除後 `ipa group-show team-deleted-marker` 回傳 `group not found`，其 marker `pilot-internal-history-g-b80be136...4c015bfd557` 仍可查得，見 §9.6 |
+
+> 這兩列已在真實 vm-target 上跑過並截到真實輸出（§9.6），可信度等同
+> PASS-verified；尚未併入 §2 是因為那份 checklist 走既有 fixture 驅動的
+> `pilot spec --generate` 模型，需要額外準備一份 marker fixture 才能納入
+> 自動化 `pilot verify` 流程，留待下一輪處理。
+
+### 9.5 目前的證據等級
+
+- `go test ./internal/inventory/... ./internal/freeipa/... ./cmd/...`（含
+  本次新增的 roster reference/remove/probe/CLI 測試，`-race` 全綠）。
+- `go vet ./...`、`gofmt -l`、`make playbook-lint`
+  （`ansible-playbook --syntax-check` 涵蓋新增的 `playbooks/check/*.yml`
+  ——Makefile 的 glob 已從只掃 `playbooks/apply` + `playbooks/verify`
+  擴大納入 `playbooks/check`）全綠；唯一既有失敗
+  （`audit-log-forwarding-apply.yml` 的 duplicate `register` key）與本次
+  交付無關，是既有已知技術債。
+- 加密 roster 的端對端測試使用真實 `ansible-vault` binary（never mock），
+  涵蓋 `remove-user`/`remove-group` 成功路徑與 `MutateEncryptedRosterFile`
+  的失敗回滾路徑。
+- FreeIPA 探測本身（`internal/freeipa`）用可注入的 fake runner 覆蓋了
+  spec.md §20.3 列出的每個 parser 情境（schema 版本不符、kind 不符、
+  name 不符、不可能的 ever_applied/freeipa_state 組合、結果檔遺失、JSON
+  損毀、Ansible 非 0 結束碼）；CLI 層（`cmd/pilot/cmd`）用同一種 fake
+  runner 覆蓋了 dry-run、cascade 有/無、applied 拒絕、`state: absent`
+  拒絕、探測失敗拒絕、NFS ownership.group 永遠擋下等場景。
+- spec.md §22.5/§22.8 要求的「對一台真的 FreeIPA server 跑」場景——group
+  的 `present → marker → state: absent → 實際 group 消失 → marker 留存`
+  完整生命週期，以及 marker 建立失敗時 `group-del` 確實不會被執行
+  （§4.8 的 fail-closed 順序）——**已於 2026-08-21 對真實 vm-target 實測
+  完成**，見 §9.6。
+
+### 9.6 真實 FreeIPA vm-target 證據（2026-08-21）
+
+拋棄式 vm-target：`freeipa-remove-test`（AlmaLinux 9，`pilot vm-target up
+--base-image almalinux-9 --disk 30 --memory 4096`），native
+`ipa-server-install` 透過 `playbooks/apply/freeipa-server-apply.yml` 套用
+（`ok=35 changed=13 failed=0`），domain `ipa.pilot.internal`。所有
+`ansible-playbook` 呼叫皆直接在本機執行（`--sandbox` 預設的
+`geerlingguy/docker-ubuntu2204-ansible:latest` image 缺 `ssh` binary，
+本環境無法使用，改用本機既有的 ansible-core 2.19.2 + 所需 collections
+直接跑，不影響證據有效性——這是環境限制，非 pilot 本身的缺陷）。
+
+**過程中發現並修好 2 個真實 bug**（皆已寫回 repo，`make playbook-lint`
+與 `go test ./...` 全綠）：
+
+1. **既有 bug，非本次新增碼**：ansible-core 2.19 對 `ansible.builtin.set_fact`
+   的參數採更嚴格的即時 templating——`playbooks/apply/freeipa-identity-apply.yml`
+   的「Select legacy admin settings」任務 `identity_admin_password: "{{
+   ipa_admin_password }}"`，即使 `when: freeipa_roster.schema_version is
+   not defined` 對 schema-v2 roster 評估為 false，仍會在 `when` 判斷前
+   就試圖 resolve `ipa_admin_password`（一個完全未定義的變數名稱，非僅
+   缺欄位），直接讓**任何** schema-v2 canonical roster 的 apply 在這個
+   既有任務就整個炸掉。這代表 v1.6 changelog 宣稱的「24/24 PASS」評測
+   時所用的 ansible-core 版本，行為與本環境的 2.19.2 不同——是一個先前
+   從未被本 spec 抓到的環境相容性缺口。修法：`| default('')`（第 587
+   行），與 v1.1 changelog 記載的既有 `| default(...)` 慣例一致；因為
+   canonical 路徑本來就用另一個 `identity_admin_password`（第 423 行，
+   `when: freeipa_roster.schema_version is defined`），legacy 路徑改成
+   空字串不影響任何真實行為，只讓它在被跳過時不再提前炸掉。
+
+2. **本次新增碼的 bug**：`playbooks/apply/tasks/freeipa-group-history-marker.yml`
+   有兩個 check-mode 缺口，導致 `--check --diff` dry-run 對一台全新
+   host 一律誤判：
+   - 「Inspect Pilot group history marker」（`ansible.builtin.command`
+     查 `ipa group-show <marker>`）在 `--check` 下被 Ansible 自動跳過
+     （`command`/`shell` 本來就不支援 check mode），但被跳過的結果卻讓
+     後續分類邏輯把 `rc` 當成 `0`（等同「marker 存在」），對一個從未
+     套用過的全新 group 產生假的「marker 碰撞」錯誤。修法：加
+     `check_mode: false`（這是純讀取查詢，跟現有 `freeipa-ca-trust.yml`
+     的同類任務一樣，安全地在 check mode 下也真的執行）。
+   - 「Fail closed if the newly-created marker does not verify」這個
+     `assert` 任務，即使前面「Create」「Re-query」兩個真正會 mutate/
+     查詢的任務都因 check mode 正確跳過了，`assert` 本身仍然無條件
+     執行，對著未定義的查詢結果評估，把一個「本來就還沒建立」的
+     postcondition 誤判成「驗證失敗」。修法：`when:` 加上
+     `and not ansible_check_mode`。這與本檔 §7.2a（v1.1）記載的
+     「accumulator fact 在 check mode 下未被設過」是同一個 bug 類別，
+     只是這次是 assert 本身而非它引用的 fact。
+
+**Scenario 1 — 從未套用過的 user（`never-applied-user`）**
+
+```
+$ pilot roster remove-user cli-roster.yaml never-applied-user -i cli-inventory.yaml --dry-run
+Would remove roster-only user "never-applied-user".
+FreeIPA history check: not found.
+References removed: 0.
+
+$ pilot roster remove-user cli-roster.yaml never-applied-user -i cli-inventory.yaml
+Removed roster-only user "never-applied-user".
+FreeIPA history check: not found.
+References removed: 0.
+
+$ ipa user-show never-applied-user
+ipa: ERROR: never-applied-user: user not found
+```
+
+PASS：roster 移除、FreeIPA 從未被寫入。
+
+**Scenario 2 — 已套用的 active user（`applied-active-user`）**
+
+```
+$ pilot roster remove-user cli-roster.yaml applied-active-user -i cli-inventory.yaml
+refusing to remove roster user "applied-active-user":
+FreeIPA reports an active or preserved user with this name.
+```
+
+PASS：拒絕，roster bytes 逐 byte 相同（`diff` 確認）。
+
+**Scenario 3 — out-of-band preserved user（`drift-preserved-user`）**
+
+```
+# 不透過 pilot，直接手動：
+$ ipa user-del drift-preserved-user --preserve
+Preserved user "drift-preserved-user"
+$ ipa user-show drift-preserved-user --all | grep -i preserved
+  Preserved user: True
+
+$ pilot roster remove-user cli-roster.yaml drift-preserved-user -i cli-inventory.yaml
+refusing to remove roster user "drift-preserved-user":
+FreeIPA reports an active or preserved user with this name.
+```
+
+PASS：roster 上這個 user 的 `state` 全程仍是 `present`（模擬「roster
+忘記更新、FreeIPA 側已飄移」的情境），probe 正確靠 FreeIPA 本身而非
+roster 本地欄位判斷，拒絕、roster bytes 不變。
+
+**Scenario 4 — FreeIPA 探測失敗（錯誤的 Kerberos 密碼）**
+
+```
+$ pilot roster remove-user cli-roster-badpass.yaml applied-active-user -i cli-inventory.yaml
+refusing to remove roster user "applied-active-user":
+unable to prove that the user has never been applied to FreeIPA.
+
+FreeIPA probe failed: ... probe playbook freeipa-identity-user-ever-applied.yml exited 2: ...
+No roster bytes were changed.
+```
+
+PASS：kinit 失敗（密碼故意打錯）→ ansible-playbook 非 0 結束碼 → 一律
+fail closed，never 誤判成 not_found；roster bytes 不變。
+
+**Scenario 5 — 從未套用過的 group（`team-never-applied`）**
+
+```
+$ ipa group-show team-never-applied
+ipa: ERROR: team-never-applied: group not found
+$ ipa group-show pilot-internal-history-g-c9274ae9...5514a5969
+ipa: ERROR: ...: group not found
+
+$ pilot roster remove-group cli-roster.yaml team-never-applied -i cli-inventory.yaml
+Removed roster-only group "team-never-applied".
+FreeIPA history check: not found.
+References removed: 0.
+```
+
+PASS：實際 group 與 marker 事前都確認不存在，移除成功。
+
+**Scenario 6 — 已套用的 active group + marker（`team-applied-active`）**
+
+```
+$ ipa group-show pilot-internal-history-g-4ea471ef...c5a239e
+  Group name: pilot-internal-history-g-4ea471ef...c5a239e
+  Description: pilot.group-history/v1 name=team-applied-active
+  (無 GID 欄位 — 確認 non-POSIX)
+
+$ pilot roster remove-group cli-roster.yaml team-applied-active -i cli-inventory.yaml
+refusing to remove roster group "team-applied-active":
+FreeIPA history marker proves this group has entered the managed lifecycle.
+
+marker:
+  pilot-internal-history-g-4ea471ef...c5a239e
+```
+
+PASS：拒絕，訊息格式與 §7.5 範例一致（此處為 §9.3），roster bytes 不變。
+
+**Scenario 7 — 已刪除但 marker 留存（`team-deleted-marker`，historical_marker）**
+
+```
+# 先用 freeipa-identity-apply.yml 把 state 改成 absent 並 reconcile：
+freeipa-remove-test        : ok=42   changed=1    unreachable=0    failed=0    skipped=110
+
+$ ipa group-show team-deleted-marker
+ipa: ERROR: team-deleted-marker: group not found
+$ ipa group-show pilot-internal-history-g-b80be136...4c015bfd557
+  Group name: pilot-internal-history-g-b80be136...4c015bfd557
+  Description: pilot.group-history/v1 name=team-deleted-marker
+
+# (a) roster 端本地欄位還沒改成 absent（模擬 roster 沒同步）：
+$ pilot roster remove-group cli-roster.yaml team-deleted-marker -i cli-inventory.yaml
+refusing to remove roster group "team-deleted-marker":
+FreeIPA history marker proves this group has entered the managed lifecycle.
+
+# (b) roster 端也確實是 state: absent 的 tombstone：
+$ pilot roster remove-group cli-roster.yaml team-deleted-marker -i cli-inventory.yaml
+Error: ...: group "team-deleted-marker" is already state: absent: ...
+```
+
+PASS（兩種情境都驗證）：(a) 即使 roster 本地欄位還沒更新，FreeIPA 的
+marker 依然正確擋下；(b) roster 一旦是合法 tombstone，本地檢查
+（Phase A）直接擋下、連 FreeIPA 都不用打。兩種情境 roster bytes 皆不變。
+
+**Scenario 8 — marker 驗證失敗保護刪除（`team-collision`）**
+
+```
+# 手動 corrupt marker description（out-of-band）：
+$ ipa group-mod pilot-internal-history-g-80d1ed23...20c5a239e --desc='corrupted-not-matching-format'
+
+# 把 team-collision 的 roster state 改成 absent 並 reconcile：
+$ pilot vm-target run ... playbooks/apply/freeipa-identity-apply.yml -e ...
+fatal: [freeipa-remove-test]: FAILED! => {
+    "msg": "Pilot group history marker pilot-internal-history-g-80d1ed23...
+            exists but its description does not match the expected
+            \"pilot.group-history/v1 name=team-collision\" ..."
+}
+freeipa-remove-test        : ok=24 changed=0 failed=1 skipped=35
+
+# 確認 "Delete canonical groups explicitly marked absent" 這個 task 從未出現在 transcript：
+$ grep -c "Delete canonical groups explicitly marked absent" <transcript>
+0
+
+# 確認實際 group 依然存在：
+$ ipa group-show team-collision
+  Group name: team-collision
+  GID: 351000005
+```
+
+PASS：play 在 `ipa group-del` 執行前就整個 fail，實際 group 完全未受
+影響——`group-del` 這個 task 從未被觸及，不是「跑了但沒生效」，是真的
+沒跑到。額外確認：對這個已損毀 marker 的 group 直接跑
+`pilot roster remove-group`（不透過 apply），read-only 探測 playbook
+自己的 marker 比對邏輯（§9.2）也同樣正確 fail closed
+（`unable to prove that the group has never been applied to FreeIPA`），
+證明兩處（apply 的 marker-ensure、check 的唯讀探測）各自獨立正確處理
+碰撞情境。
+
+**額外場景：`--cascade-references`**
+
+```
+# cascade-user 同時被 team-cascade-parent membership 與 hbac-cascade-test
+# 的唯一 subject 引用；後者若移除 cascade-user 會變成零 subject：
+$ pilot roster remove-user cli-roster.yaml cascade-user -i cli-inventory.yaml --cascade-references
+cannot remove roster user "cascade-user": the candidate roster would be invalid
+  [hbac subjects] hbac rule "hbac-cascade-test": needs at least one subject user or group
+```
+
+PASS：spec.md §18「cascade 不會為了讓 roster 通過驗證而連鎖刪除其他
+資源」在真實場景下正確擋下，roster bytes 不變。補上第二個 hbac subject
+後重跑，cascade 成功移除 2 個引用（group membership + hbac subject）、
+不影響同一規則裡的另一個 subject。
+
+```
+$ pilot roster remove-group cli-roster.yaml data-nfs-blocked -i cli-inventory.yaml --cascade-references
+cannot remove roster group "data-nfs-blocked": the group is required by a non-cascadeable reference
+
+references:
+  nfs.servers[nfs1.ipa.pilot.internal].shares[blocked-share].ownership.group
+```
+
+PASS：NFS `ownership.group` 即使加了 `--cascade-references` 也一樣擋下。
+
+**收尾**：`pilot vm-target down --name freeipa-remove-test`。
+

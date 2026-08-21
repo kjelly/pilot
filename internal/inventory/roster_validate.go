@@ -113,6 +113,7 @@ func validateRosterCommon(root map[string]any) []RosterViolation {
 	v = append(v, checkUniqueAndReferences(users, groups)...)
 	v = append(v, checkHBAC(root, groups, hostgroups)...)
 	v = append(v, checkSudo(root, groups)...)
+	v = append(v, checkNFS(root, groups)...)
 	return v
 }
 
@@ -446,6 +447,7 @@ func checkSudo(root map[string]any, groups []any) []RosterViolation {
 	var out []RosterViolation
 	sudo := mapField(root, "sudo")
 	roleGroupNames := namesWithCategory(groups, "role")
+	allowedUsers := append(namesOf(listField(root, "users")), "admin")
 	rules := listField(sudo, "rules")
 	commandGroups := listField(sudo, "command_groups")
 	commandGroupNames := namesOf(commandGroups)
@@ -474,6 +476,11 @@ func checkSudo(root map[string]any, groups []any) []RosterViolation {
 		for _, g := range subjGroups {
 			if !contains(roleGroupNames, g) {
 				out = append(out, RosterViolation{Rule: "sudo subject group category", Detail: fmt.Sprintf("sudo rule %q: subjects.groups %q must be a group with category: role", label, g)})
+			}
+		}
+		for _, u := range subjUsers {
+			if !contains(allowedUsers, u) {
+				out = append(out, RosterViolation{Rule: "sudo subject user reference", Detail: fmt.Sprintf("sudo rule %q: subjects.users references unknown user %q", label, u)})
 			}
 		}
 
@@ -518,6 +525,48 @@ func checkSudo(root map[string]any, groups []any) []RosterViolation {
 			out = append(out, RosterViolation{Rule: "sudo command denylist", Detail: fmt.Sprintf("sudo command %q is a shell-escape binary, not allowed", cmd)})
 		case sudoDenylistMetaRe.MatchString(cmd):
 			out = append(out, RosterViolation{Rule: "sudo command denylist", Detail: fmt.Sprintf("sudo command %q contains a shell metacharacter, not allowed", cmd)})
+		}
+	}
+	return out
+}
+
+// ---- Gate: canonical NFS ownership/ACL group references are resolvable --
+//
+// This only checks that nfs.servers[].shares[].ownership.group and
+// acl.{access,default}.named_groups[].name resolve to a canonical group
+// with category: filesystem — the same referential-integrity posture as
+// checkUniqueAndReferences/checkHBAC/checkSudo. It does not replicate the
+// rest of freeipa-nfs-server-apply.yml's "Gate: exports, ownership, and
+// ACL policy are safe" assert (mode regex, export options, ...) — that
+// remains an Ansible-only gate; only the group-reference half was
+// previously unvalidated in Go (see spec.md §13.2/§13.4).
+func checkNFS(root map[string]any, groups []any) []RosterViolation {
+	var out []RosterViolation
+	filesystemGroupNames := namesWithCategory(groups, "filesystem")
+
+	for _, rawServer := range listField(mapField(root, "nfs"), "servers") {
+		server := asMap(rawServer)
+		serverLabel := stringField(server, "host")
+		if serverLabel == "" {
+			serverLabel = "unnamed"
+		}
+		for _, rawShare := range listField(server, "shares") {
+			share := asMap(rawShare)
+			shareLabel := labelOf(share)
+
+			if g := stringField(mapField(share, "ownership"), "group"); g != "" && !contains(filesystemGroupNames, g) {
+				out = append(out, RosterViolation{Rule: "nfs ownership group reference", Detail: fmt.Sprintf("nfs server %q share %q: ownership.group %q must be a group with category: filesystem", serverLabel, shareLabel, g)})
+			}
+
+			acl := mapField(share, "acl")
+			for _, section := range []string{"access", "default"} {
+				for _, rawNamedGroup := range listField(mapField(acl, section), "named_groups") {
+					name := stringField(asMap(rawNamedGroup), "name")
+					if name != "" && !contains(filesystemGroupNames, name) {
+						out = append(out, RosterViolation{Rule: "nfs acl named_group reference", Detail: fmt.Sprintf("nfs server %q share %q: acl.%s.named_groups references %q, which must be a group with category: filesystem", serverLabel, shareLabel, section, name)})
+					}
+				}
+			}
 		}
 	}
 	return out

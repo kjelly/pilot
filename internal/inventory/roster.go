@@ -233,8 +233,14 @@ func mappingChild(mapNode *yaml.Node, key string, kind yaml.Kind, tag string) *y
 
 // findMappingChild is mappingChild's read-only sibling: it never creates a
 // missing key, since replaceTopLevelRosterEntry treats "nothing to replace"
-// as an error, not something to scaffold.
+// as an error, not something to scaffold. mapNode may be nil (e.g. a
+// roster that has never had an "hbac"/"sudo"/"nfs" section at all) — the
+// roster_remove.go cascade walkers chain this off other findMappingChild
+// calls that can themselves return nil, so this must not panic on that.
 func findMappingChild(mapNode *yaml.Node, key string) *yaml.Node {
+	if mapNode == nil {
+		return nil
+	}
 	for i := 0; i+1 < len(mapNode.Content); i += 2 {
 		if mapNode.Content[i].Value == key {
 			return mapNode.Content[i+1]

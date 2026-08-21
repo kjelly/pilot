@@ -233,6 +233,53 @@ func TestValidateRoster_GroupMembershipReferencesUnknownUser(t *testing.T) {
 	}
 }
 
+// TestValidateRoster_SudoSubjectUserReferenceUnknown pins the fix for the
+// dangling sudo-user reference gap spec.md §13.4 calls out: checkSudo used
+// to validate subjects.groups against category: role but never checked
+// subjects.users against the known user set at all.
+func TestValidateRoster_SudoSubjectUserReferenceUnknown(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, "schema_version: 1\nsudo:\n  rules:\n    - name: sudo-bad-user\n      subjects: {users: [does-not-exist], groups: []}\n      targets: {hostcat: all}\n"))
+	if !contains(ruleNames(v), "sudo subject user reference") {
+		t.Fatalf("expected a dangling sudo subject user reference violation, got: %v", v)
+	}
+}
+
+func TestValidateRoster_SudoSubjectAdminUserAlwaysAllowed(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, "schema_version: 1\nsudo:\n  rules:\n    - name: sudo-admin\n      subjects: {users: [admin], groups: []}\n      targets: {hostcat: all}\n"))
+	if contains(ruleNames(v), "sudo subject user reference") {
+		t.Fatalf("expected admin to be an always-allowed sudo subject user, got: %v", v)
+	}
+}
+
+func TestValidateRoster_NFSOwnershipGroupWrongCategory(t *testing.T) {
+	doc := "schema_version: 1\n" +
+		"groups:\n  - name: team-not-filesystem\n    category: team\n" +
+		"nfs:\n  servers:\n    - host: nfs1.ipa.pilot.internal\n      shares:\n        - name: share1\n          ownership: {group: team-not-filesystem}\n"
+	v := ValidateRoster(mustParseRoster(t, doc))
+	if !contains(ruleNames(v), "nfs ownership group reference") {
+		t.Fatalf("expected an nfs ownership group reference violation, got: %v", v)
+	}
+}
+
+func TestValidateRoster_NFSOwnershipGroupCorrectCategoryPasses(t *testing.T) {
+	doc := "schema_version: 1\n" +
+		"groups:\n  - name: data-project-alpha-rw\n    category: filesystem\n" +
+		"nfs:\n  servers:\n    - host: nfs1.ipa.pilot.internal\n      shares:\n        - name: share1\n          ownership: {group: data-project-alpha-rw}\n          acl: {access: {named_groups: [{name: data-project-alpha-rw}]}, default: {named_groups: []}}\n"
+	v := ValidateRoster(mustParseRoster(t, doc))
+	if contains(ruleNames(v), "nfs ownership group reference") || contains(ruleNames(v), "nfs acl named_group reference") {
+		t.Fatalf("expected a correctly-categorized nfs group reference to pass clean, got: %v", v)
+	}
+}
+
+func TestValidateRoster_NFSACLNamedGroupUnknown(t *testing.T) {
+	doc := "schema_version: 1\n" +
+		"nfs:\n  servers:\n    - host: nfs1.ipa.pilot.internal\n      shares:\n        - name: share1\n          acl: {access: {named_groups: [{name: ghost-group}]}}\n"
+	v := ValidateRoster(mustParseRoster(t, doc))
+	if !contains(ruleNames(v), "nfs acl named_group reference") {
+		t.Fatalf("expected an nfs acl named_group reference violation, got: %v", v)
+	}
+}
+
 func TestValidateRoster_HostInvalidFQDNAndIP(t *testing.T) {
 	v := ValidateRoster(mustParseRoster(t, "schema_version: 1\nhosts:\n  - name: not-an-fqdn\n    ip_address: not-an-ip\n"))
 	names := ruleNames(v)

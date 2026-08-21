@@ -1,0 +1,161 @@
+---
+# Read-only, fail-closed probe: has the roster user pilot_identity_name
+# ever entered the FreeIPA lifecycle (active OR preserved)? Backs `pilot
+# roster remove-user`'s historical guard (spec.md §2, §8) — it never
+# mutates FreeIPA and never treats an ambiguous/failed query as
+# "not found".
+#
+# Required extra-vars:
+#   freeipa_roster_file          -- canonical roster path (for admin creds)
+#   pilot_identity_name          -- roster username to probe
+#   pilot_identity_probe_output  -- controller-side path this writes
+#                                    schema_version-1 JSON to
+#   target_group                 -- optional, default freeipa-server
+#
+# Output contract (spec.md §8.2):
+#   {"schema_version": 1, "kind": "user", "name": "...",
+#    "ever_applied": bool, "freeipa_state": "active_or_preserved"|"not_found"}
+#
+# Unknown FreeIPA state (auth/network/query error, or any command failure
+# that isn't the exact "not found" condition) fails the play instead of
+# producing a result file — see the "Classify FreeIPA probe" /
+# "Fail closed" tasks below.
+
+- name: Probe whether a roster user has ever entered the FreeIPA lifecycle
+  hosts: "{{ target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+
+  vars:
+    freeipa_roster: {}
+
+  pre_tasks:
+    - name: "Gate: probe input is complete"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster_file is defined
+          - freeipa_roster_file | string | trim | length > 0
+          - pilot_identity_name is defined
+          - pilot_identity_name is match('^[a-z_][a-z0-9_.-]*$')
+          - pilot_identity_probe_output is defined
+          - pilot_identity_probe_output | string | trim | length > 0
+        fail_msg: >-
+          freeipa_roster_file, pilot_identity_name, and
+          pilot_identity_probe_output are required.
+      run_once: true
+      tags: [always]
+
+    - name: "Load canonical roster under a namespace"
+      ansible.builtin.include_vars:
+        file: "{{ freeipa_roster_file }}"
+        name: freeipa_roster
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: canonical roster is available"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster.schema_version is defined
+          - freeipa_roster.freeipa is defined
+          - freeipa_roster.freeipa.admin is defined
+          - freeipa_roster.freeipa.admin.password is defined
+          - freeipa_roster.freeipa.admin.password | length >= 8
+        fail_msg: >-
+          Canonical roster with FreeIPA admin credentials is required
+          for an authoritative ever-applied probe.
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Normalize FreeIPA probe settings"
+      ansible.builtin.set_fact:
+        ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+        ipa_realm: >-
+          {{ freeipa_realm |
+             default((freeipa_domain | default('ipa.pilot.internal')) | upper) }}
+        identity_admin_principal: >-
+          {{ freeipa_roster.freeipa.admin.principal | default('admin') }}
+        identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Kinit admin for read-only identity probe"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          printf %s "{{ identity_admin_password }}" |
+            kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      run_once: true
+      tags: [identity, probe]
+
+  tasks:
+    - name: "Probe active or preserved FreeIPA user"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - user-show
+          - "{{ pilot_identity_name }}"
+          - --all
+          - --raw
+      register: pilot_identity_user_show
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      run_once: true
+      tags: [identity, probe]
+
+    - name: "Classify FreeIPA probe"
+      ansible.builtin.set_fact:
+        pilot_identity_probe_class: >-
+          {% if pilot_identity_user_show.rc == 0 %}
+          active_or_preserved
+          {% elif 'not found' in
+                  (pilot_identity_user_show.stderr | default('') | lower) %}
+          not_found
+          {% else %}
+          unknown
+          {% endif %}
+      changed_when: false
+      run_once: true
+      tags: [identity, probe]
+
+    - name: "Fail closed when FreeIPA history cannot be determined"
+      ansible.builtin.assert:
+        that:
+          - pilot_identity_probe_class | trim != 'unknown'
+        fail_msg: >-
+          Unable to determine whether user {{ pilot_identity_name }} has
+          ever entered the FreeIPA lifecycle. The probe failed with rc
+          {{ pilot_identity_user_show.rc }}. Refusing to classify this
+          user as never-applied.
+      run_once: true
+      tags: [identity, probe]
+
+    - name: "Build machine-readable probe result"
+      ansible.builtin.set_fact:
+        pilot_identity_probe_result:
+          schema_version: 1
+          kind: user
+          name: "{{ pilot_identity_name }}"
+          ever_applied: >-
+            {{ (pilot_identity_probe_class | trim) == 'active_or_preserved' }}
+          freeipa_state: "{{ pilot_identity_probe_class | trim }}"
+      changed_when: false
+      run_once: true
+      tags: [identity, probe]
+
+    - name: "Write probe result on the Ansible controller"
+      ansible.builtin.copy:
+        dest: "{{ pilot_identity_probe_output }}"
+        mode: "0600"
+        content: "{{ pilot_identity_probe_result | to_nice_json }}\n"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      tags: [identity, probe]

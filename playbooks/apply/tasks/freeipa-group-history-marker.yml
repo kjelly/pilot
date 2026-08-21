@@ -1,0 +1,127 @@
+---
+# Shared task: ensure a durable, deterministic FreeIPA history marker
+# exists for the canonical group named pilot_group_history_name
+# (spec.md §9). Included from freeipa-identity-apply.yml for every group
+# whose target state is present (marker created only after the actual
+# group is confirmed to exist — §9.5), and for every group about to be
+# deleted under state: absent, before ipa group-del ever runs (§9.6).
+#
+# FreeIPA has no preserved-group lifecycle equivalent to preserved users
+# (spec.md §4.2), so this empty, non-POSIX marker group is the only
+# durable signal `pilot roster remove-group`'s FreeIPA probe
+# (playbooks/check/freeipa-identity-group-ever-applied.yml) can rely on
+# to prove a group has ever entered the managed lifecycle, even after the
+# real group is later deleted.
+#
+# Requires the including play to already have kinit'd as the FreeIPA
+# admin, and to define:
+#   pilot_group_history_name  -- the canonical roster group name
+
+- name: "Calculate deterministic Pilot group history marker"
+  ansible.builtin.set_fact:
+    pilot_group_history_marker: "pilot-internal-history-g-{{ pilot_group_history_name | hash('sha256') }}"
+    pilot_group_history_description: "pilot.group-history/v1 name={{ pilot_group_history_name }}"
+  changed_when: false
+
+- name: "Inspect Pilot group history marker"
+  ansible.builtin.command:
+    argv:
+      - ipa
+      - group-show
+      - "{{ pilot_group_history_marker }}"
+      - --all
+      - --raw
+      - --no-members
+  register: pilot_group_history_marker_show
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  environment:
+    LC_ALL: C
+
+- name: "Classify Pilot group history marker probe"
+  ansible.builtin.set_fact:
+    pilot_group_history_marker_class: >-
+      {% if pilot_group_history_marker_show.rc == 0 %}
+      exists
+      {% elif 'not found' in (pilot_group_history_marker_show.stderr | default('') | lower) %}
+      missing
+      {% else %}
+      unknown
+      {% endif %}
+  changed_when: false
+
+- name: "Fail closed when the marker probe result is unknown"
+  ansible.builtin.assert:
+    that:
+      - pilot_group_history_marker_class | trim != 'unknown'
+    fail_msg: >-
+      Unable to determine whether the Pilot group history marker for
+      {{ pilot_group_history_name }} exists. group-show failed with rc
+      {{ pilot_group_history_marker_show.rc }}: refusing to guess (a
+      generic non-zero exit is never treated as "missing" — spec.md
+      §9.2).
+
+- name: "Fail closed on a marker-name collision or corrupted marker"
+  ansible.builtin.assert:
+    that:
+      - "pilot_group_history_marker_class | trim != 'exists' or pilot_group_history_description in (pilot_group_history_marker_show.stdout | default(''))"
+    fail_msg: >-
+      Pilot group history marker {{ pilot_group_history_marker }} exists
+      but its description does not match the expected
+      "{{ pilot_group_history_description }}". This is a deterministic
+      marker-name collision, a manually repurposed object, or a
+      corrupted marker — refusing to proceed (spec.md §9.3).
+
+- name: "Create durable Pilot group history marker"
+  ansible.builtin.command:
+    argv:
+      - ipa
+      - group-add
+      - "{{ pilot_group_history_marker }}"
+      - --nonposix
+      - "--desc={{ pilot_group_history_description }}"
+  register: pilot_group_history_marker_add
+  when: pilot_group_history_marker_class | trim == 'missing'
+  changed_when: pilot_group_history_marker_add.rc == 0
+  environment:
+    LC_ALL: C
+
+# Postcondition re-verify: a successful `ipa group-add` exit code alone is
+# not sufficient proof the marker exists in the form later probes expect
+# (spec.md §9.4) — this closes that gap with one more read-only round trip.
+- name: "Re-query marker after creation to verify the postcondition"
+  ansible.builtin.command:
+    argv:
+      - ipa
+      - group-show
+      - "{{ pilot_group_history_marker }}"
+      - --all
+      - --raw
+      - --no-members
+  register: pilot_group_history_marker_verify
+  when: pilot_group_history_marker_class | trim == 'missing' and not ansible_check_mode
+  changed_when: false
+  environment:
+    LC_ALL: C
+
+# `not ansible_check_mode` on both this and the re-query above: under
+# --check, "Create durable Pilot group history marker" is correctly
+# skipped (it's a real mutation) — verifying its postcondition anyway
+# would evaluate an unset pilot_group_history_marker_verify and fail a
+# dry run for a marker that was never supposed to be created yet. Same
+# fresh-host check-mode gap class as docs/verification/freeipa-identity.md
+# §7.2a's `| default(...)` accumulator-fact fix — an assert (unlike
+# command/shell) always runs under --check regardless of a prior task's
+# check-mode skip, so it needs its own explicit guard.
+- name: "Fail closed if the newly-created marker does not verify"
+  ansible.builtin.assert:
+    that:
+      - pilot_group_history_marker_verify.rc == 0
+      - pilot_group_history_description in (pilot_group_history_marker_verify.stdout | default(''))
+    fail_msg: >-
+      Pilot group history marker {{ pilot_group_history_marker }} was
+      created but does not verify against the expected description
+      "{{ pilot_group_history_description }}" — refusing to treat
+      creation as successful.
+  when: pilot_group_history_marker_class | trim == 'missing' and not ansible_check_mode

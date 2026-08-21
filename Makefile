@@ -73,7 +73,7 @@ test-prereq: ## Check go / docker / ansible availability
 
 playbook-lint: ## L1 syntax (blocking) + L2 lint (advisory) over ALL playbooks — no VM needed
 	@fail=0; \
-	for pb in playbooks/apply/*.yml playbooks/verify/*.yml; do \
+	for pb in playbooks/apply/*.yml playbooks/verify/*.yml playbooks/check/*.yml; do \
 	  [ -e "$$pb" ] || continue; \
 	  printf '── syntax-check %s\n' "$$pb"; \
 	  ansible-playbook --syntax-check "$$pb" || fail=1; \
