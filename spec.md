@@ -1,2422 +1,2336 @@
-Pilot Roster Safe User & Group Removal — Coding Agent Implementation Spec
+Pilot Optional-Host Deployment Availability Specification
 
-Repository: https://github.com/kjelly/pilot
-
-Baseline inspected: main at commit 521366e899561f7e38edc012fc88339742382468
-
+Repository: kjelly/pilot
+Target branch: main
+Document purpose: implementation specification for a coding agent
+Status: Proposed
 Date: 2026-08-21
 
-Status: implementation specification
+1. Executive summary
 
-Primary goal: add safe commands for removing accidentally-created local roster user/group definitions that have never been applied to FreeIPA.
+Pilot must support environments where many managed VMs are powered on and off by external personnel outside Pilot's control.
 
-Safety invariant: once a user or group has ever been applied to FreeIPA, Pilot must never hard-remove that resource entry from the roster.
+A VM being intentionally powered off must not cause pilot deploy or pilot reconcile to fail when that host is explicitly declared as allowed to be unavailable.
 
-1. Problem statement
+Pilot MUST NOT manage VM power state. It MUST NOT add pilot host start, pilot host stop, libvirt power management, Proxmox power management, or equivalent lifecycle commands as part of this work.
 
-Pilot currently supports adding and editing canonical FreeIPA roster users/groups, but intentionally does not expose a safe hard-delete operation for roster resources.
+The required architecture is:
 
-The missing workflow is:
+Keep the complete desired topology in the canonical inventory at all times.
 
-An operator accidentally adds a user to the roster.
+Add a per-host deployment availability policy:
 
-The roster has not yet been reconciled to FreeIPA.
+required
 
-The operator wants to undo the bad local edit.
+optional
 
-The operator must have a sanctioned Pilot command instead of manually editing YAML.
+Before remote Ansible execution, Pilot calculates an effective execution scope.
 
-The command must not allow the same operation after the user has entered the FreeIPA lifecycle.
+required hosts that are unavailable block deployment before mutation.
 
-This feature is not FreeIPA user/group deprovisioning.
+optional hosts that are unavailable are deferred and excluded from the effective Ansible --limit.
 
-These are different operations:
+Pilot still validates the full inventory statically, including offline optional hosts.
 
-Operation
+Pilot must also tolerate the race where an optional host becomes transport-unreachable after the initial availability probe but while Ansible is running.
 
-Meaning
+Only transport-style UNREACHABLE results on optional hosts may be downgraded to "deferred". Normal task failures, authentication failures, host-key failures, malformed inventory, controller errors, and unreachable required hosts remain fatal.
 
-FreeIPA side effect
+Contract/provider dependencies must be considered before mutation so Pilot does not attempt a consumer deployment that is guaranteed to fail because a required provider endpoint is unavailable.
 
-pilot roster remove-user
+The canonical inventory MUST NOT be rewritten to contain only online hosts.
 
-Undo a never-applied local user definition
+This feature is an execution-scope layer above the desired inventory. It is not a power-management subsystem and it is not an Ansible ignore_unreachable workaround.
 
-None
+2. Repository baseline and current behavior
 
-pilot roster remove-group
+The implementation must start by re-reading the current main branch before editing. The following observations were verified against main while this specification was prepared.
 
-Undo a never-applied local group definition
+Relevant current files include:
 
-None
+internal/inventory/inventory.go
 
-user state: disabled
+simplified hosts.yml model
 
-Keep account but disable it
+Host
 
-FreeIPA user disabled
+Parse
 
-user state: absent
+Lint
 
-Deprovision an applied user
+Generate
 
-User is permanently deleted from FreeIPA (existing behavior, unchanged by this feature)
+current inspected blob SHA: 7d9c36f522e3f6595279c0b417ee119444b7acc6
 
-group state: absent
+hosts.example.yml
 
-Deprovision an applied group
+canonical simplified-host example
 
-FreeIPA group is deleted, history marker remains
+current inspected blob SHA: e0f6158b5a20749dc897cb73a05617f177438283
 
-Manual permanent deletion of preserved users/history markers
+cmd/pilot/cmd/deploy.go
 
-Unsupported
+deploy wizard
 
-Breaks the historical safety invariant
+inventory resolution
 
-The implementation must keep these lifecycle concepts separate.
+runPreflight
 
-2. Non-negotiable safety invariant
+resolvePatternHosts
 
-2.1 Core invariant
+resolveInventoryVariables
 
-If a roster user has ever existed in FreeIPA as either an active user or a preserved user, pilot roster remove-user MUST refuse to hard-remove the roster entry forever.
+site and component deployment funnels
 
-If a roster group has ever existed in FreeIPA, pilot roster remove-group MUST refuse to hard-remove the roster entry forever, even after the actual FreeIPA group is deleted.
+current inspected blob SHA: fd34e6b289bd107c2bf65defb7e02387238829b7
 
-For groups, this requires a separate durable FreeIPA-side history marker because FreeIPA does not provide a preserved-group lifecycle equivalent to preserved users.
+playbooks/preflight.yml
 
-This is stricter than:
+static validation play
 
-“The user does not currently exist.”
+remote ansible.builtin.ping play
 
-The implementation must establish a durable FreeIPA-side historical signal.
+current inspected blob SHA: 0b805dc447d90ad1cc295dd758c0d1c450d35517
 
-2.2 Why current ipa user-show alone is not enough
+playbooks/site.yml
 
-A query such as:
+aggregate site entry point
 
-ipa user-show alice
+imports preflight.yml
 
-can prove that a user currently exists in FreeIPA.
+explicitly recommends --limit for host restriction
 
-It cannot prove historical existence after a permanent LDAP deletion.
+has a localhost safety play that must not be accidentally excluded
 
-Therefore the strict invariant is only implementable if Pilot changes its user deprovision lifecycle so that a Pilot-managed user is never permanently deleted from FreeIPA.
+current inspected blob SHA: 33fda1c30d406af3ce18760a9ee41418a200f53f
 
-2.3 Required historical model: FreeIPA preserved users
+internal/delivery/component_plan.go
 
-FreeIPA supports preserved users:
+contract dependency planning
 
-ipa user-del alice --preserve
+internal/delivery/preflight.go
 
-A preserved user is moved to the FreeIPA deleted-user container instead of being permanently removed.
+contract-aware preflight logic
 
-FreeIPA documents that ipa user-show <name> can retrieve both:
+internal/delivery/transaction.go
 
-an active user; and
+deployment transaction/rollback semantics
 
-a preserved/deleted user.
+cmd/pilot/cmd/ansible_json_result.go
 
-Therefore Pilot must treat the union:
+existing structured Ansible per-host stats model:
 
-Active FreeIPA user
-    OR
-Preserved FreeIPA user
+Failures
 
-as:
+Unreachable
 
-ever_applied = true
+other recap fields
 
-This would make FreeIPA itself the authoritative historical registry for Pilot-managed users, but only if Pilot actually adopted preserve semantics for its own deprovisioning. See §2.4.
+current inspected blob SHA: c58842e3756963e6597a54ecf6d1eb794159e5f0
 
-2.4 Required operational policy (revised: preserve NOT adopted)
+ansible_callback/
 
-Decision: this feature does not change user deprovisioning. state: absent continues to call ipa user-del <name> without --preserve, exactly as today.
+existing Ansible callback plugin infrastructure
 
-This was evaluated during spec review and explicitly rejected for this iteration, to keep the change scoped to roster-local mutation plus read-only FreeIPA probes rather than altering the live deprovisioning lifecycle.
+ansible.cfg
 
-Consequences:
+current Ansible runtime defaults
 
-Pilot may still observe a preserved user if one exists for any reason (e.g. created manually, outside Pilot, via ipa user-del --preserve), and must block remove-user in that case (§8).
+current inspected blob SHA: cca1e2d7d0c1b2caae7bd81ea09ada6201abf004
 
-Pilot MUST NOT expose a command that permanently deletes a preserved Pilot user, whether or not Pilot itself ever creates one.
+2.1 Current failure mode
 
-Because Pilot does not create preserved users, the strict "ever_applied" guarantee holds only for roster entries that have never been reconciled at all. Once a user is deprovisioned through state: absent and permanently deleted, FreeIPA can no longer prove that user's history — see §2.5.
+playbooks/preflight.yml currently has:
 
-Documentation MUST state that this is a deliberate, permanent scope limitation, not a transitional one.
+- name: "Preflight B — 連線檢查(SSH 是否通)"
+  hosts: all
+  gather_facts: false
+  tags: [connect]
+  tasks:
+    - name: "[{{ inventory_hostname }}] ping(確認 SSH/帳號/金鑰)"
+      ansible.builtin.ping:
 
-2.5 Permanent limitation (not just legacy — preserve was not adopted)
+Therefore an intentionally powered-off VM that remains in the inventory is seen as Ansible UNREACHABLE.
 
-Because §2.4 keeps ipa user-del <name> as a permanent deletion (no --preserve), this limitation applies to every user Pilot ever deprovisions, forever — not only to data predating this feature.
+playbooks/site.yml imports preflight.yml, so a normal site deployment can also encounter the same host even if the wizard previously ran a separate preflight.
 
-For any user that:
+2.2 Existing mechanisms that MUST be reused
 
-was applied (reconciled into FreeIPA) at some point, and
+Do not create parallel targeting systems when existing mechanisms already provide the required semantics.
 
-was later permanently deleted via state: absent,
+Pilot already has:
 
-FreeIPA cannot reconstruct that history reliably once the deletion succeeds.
+--limit propagation in deployment transactions.
 
-Do not attempt to infer this from:
+resolvePatternHosts(...).
 
-missing local Pilot run history;
+resolveInventoryVariables(...), backed by ansible-inventory --list.
 
-filesystem timestamps;
+contract dependency metadata.
 
-Ansible output files;
+component/site tag metadata.
 
-rotated FreeIPA logs;
+structured Ansible host-stat parsing.
 
-absence from the current FreeIPA LDAP tree.
+deployment transaction and rollback infrastructure.
 
-Apply these rules, permanently:
+The new feature should extend these funnels instead of bypassing them.
 
-A roster user whose current roster state is absent is never eligible for remove-user. This is the sole remaining safeguard once a user has been permanently deleted from FreeIPA — it depends entirely on that roster tombstone row never being purged (§3.2: purge-user is out of scope).
+3. Problem statement
 
-A currently active/preserved user is never eligible.
+The managed environment will contain many VMs with the following operational characteristics:
 
-A present/disabled roster user missing from FreeIPA can be removed. The implementation documentation must state plainly that the “ever applied” guarantee is provable by FreeIPA only for entries that were never reconciled at all — it does not extend across a permanent deletion, now or in the future, because Pilot does not adopt preserve semantics for users.
+Pilot owns their desired configuration.
 
-There must be no --force flag to bypass this guard.
+Pilot does not own their power lifecycle.
 
-3. Scope
+External personnel may power them on or off at any time.
 
-3.1 In scope
+A powered-off VM must remain part of the desired topology.
 
-Implement:
+When the VM is powered back on, the next applicable Pilot deployment must be able to configure it without requiring the host to be re-added to inventory.
 
-pilot roster remove-user <roster-file> <username>
-pilot roster remove-group <roster-file> <groupname>
+Core infrastructure hosts may still need to be mandatory.
 
-with:
+The current model treats every unreachable host as an infrastructure/deployment failure. This is incorrect for intentionally offline on-demand VMs.
 
---inventory, -i
---vault-password-file
---dry-run
---cascade-references
+4. Goals
 
-Both commands must:
+The implementation MUST satisfy all of the following.
 
-inspect the roster;
+G1. Preserve desired topology
 
-verify that the target resource exists exactly once in the roster;
+Offline hosts remain present in:
 
-reject a target already in state: absent;
+hosts.yml
 
-query the real FreeIPA server through an Ansible playbook;
+generated inventory.yml
 
-reject hard removal if FreeIPA proves the resource has entered its managed lifecycle;
+inventory role groups
 
-reject on any unknown/unqueryable FreeIPA state;
+topology graph
 
-detect inbound roster references;
+contract calculations
 
-optionally remove only explicitly cascadeable local references when --cascade-references is set;
+static validation
 
-block on non-cascadeable references such as an NFS share's required ownership.group;
+G2. Explicit availability policy
 
-validate the complete candidate roster;
+Every host resolves to one of:
 
-mutate YAML with the existing yaml.Node surgery pattern;
+required
+optional
 
-preserve unrelated formatting/content as far as the existing roster mutation layer permits;
+If no policy is specified, the effective policy MUST be:
 
-support encrypted roster input through the existing vault conventions;
+required
 
-never call ipa user-del or ipa group-del from the roster hard-remove commands.
+This default is mandatory for backward compatibility and safety.
 
-Additional user rule:
+Existing inventories must not silently become permissive.
 
-active or preserved FreeIPA user => hard-remove denied.
+G3. Optional offline hosts do not fail Pilot-managed deployment
 
-Additional group rule:
+If an optional host is transport-unavailable before mutation:
 
-active FreeIPA group OR durable Pilot group-history marker => hard-remove denied.
+it is excluded from the effective execution scope,
 
-3.2 Out of scope
+no remote Ansible task is intentionally sent to it,
 
-Do not implement in this phase:
+it is reported as deferred,
 
-pilot roster purge-user
-pilot roster purge-group
+deployment may still return exit code 0.
 
-Do not add:
+G4. Required offline hosts block before mutation
 
---force
---ignore-freeipa
---assume-never-applied
+If a required host in the selected deployment scope is transport-unavailable:
 
-Do not use Pilot local run history as the authoritative ever-applied signal.
+Pilot stops before any apply/check mutation against the selected scope,
 
-4. Group lifecycle and permanent history marker
+Pilot returns non-zero,
 
-4.1 remove-group is required
+output identifies the blocking host(s).
 
-Implement:
+G5. Handle shutdown races
 
-pilot roster remove-group <roster-file> <groupname>
+If an optional host was reachable during the initial probe but becomes transport-unreachable during Ansible execution:
 
-Its semantics are identical in spirit to remove-user:
+remaining reachable hosts continue using normal Ansible behavior,
 
-remove-group == undo a never-applied local roster edit
+Pilot records that host as deferred,
 
-It is not a remote FreeIPA group deletion command.
+Pilot may reclassify the Ansible non-zero result as semantic success only when the structured result proves there were no real task failures or other fatal errors.
 
-A group that has ever been applied must never be hard-removed from the roster.
+G6. Do not hide configuration defects
 
-4.2 Why ipa group-show alone is insufficient
+The following MUST remain fatal even for an optional host:
 
-For an active group:
+task/module failure,
 
-ipa group-show team-platform
+assertion failure,
 
-proves the group exists now.
+failed validation,
 
-After:
+SSH authentication failure,
 
-ipa group-del team-platform
+host-key verification failure,
 
-FreeIPA does not provide a preserved-group lifecycle equivalent to preserved users. Therefore group-show cannot prove historical existence after deletion.
+invalid identity/key configuration,
 
-The implementation needs an independent durable history marker stored inside FreeIPA.
+malformed inventory,
 
-4.3 Do not add custom LDAP objects
+invalid Ansible options,
 
-Do not create a Pilot-specific LDAP schema or directly write arbitrary entries below cn=etc.
+syntax/parser errors,
 
-FreeIPA documentation recommends using its supported CLI/API for object mutation instead of custom LDAP writes because bypassing IPA plugins can produce inconsistent entries.
+controller-side failures,
 
-Use a standard FreeIPA object for the marker.
+callback/result corruption,
 
-4.4 Marker design
+unknown UNREACHABLE reason that is not safely classified as an offline transport failure.
 
-For every Pilot-managed group that successfully enters FreeIPA, create a dedicated empty non-POSIX FreeIPA group whose only purpose is to record history.
+G7. Dependency-safe execution
 
-Marker name:
+Pilot must not execute a consumer component when a required provider endpoint is known to be unavailable and the consumer cannot safely deploy without it.
 
-pilot-internal-history-g-<sha256(group-name)>
+For v1, conservative whole-host deferral is acceptable and preferred over unsafe component execution.
+
+G8. No new power-management commands
+
+No hypervisor lifecycle API is required or desired.
+
+G9. No new mandatory interactive prompt
+
+Availability resolution must be deterministic from inventory policy and observed reachability.
+
+Existing --actions / prompt automation flows must not require a new availability prompt.
+
+5. Non-goals
+
+The following are explicitly out of scope.
+
+Starting VMs.
+
+Stopping VMs.
+
+Rebooting VMs.
+
+Querying libvirt/Proxmox/vSphere power state.
+
+Adding a hypervisor provider abstraction.
+
+Wake-on-LAN.
+
+Scheduling VM power operations.
+
+Removing offline hosts from canonical inventory.
+
+Maintaining inventory-online.yml as a second canonical inventory.
+
+Treating every Ansible failure on an optional host as ignorable.
+
+Globally adding ignore_unreachable: true.
+
+Rewriting every playbook with when: host_is_online.
+
+Guaranteeing success if a host experiences an actual task failure during shutdown; only safely recognized transport-unreachable outcomes may be deferred.
+
+Changing direct, manually invoked ansible-playbook behavior outside Pilot-managed deploy/reconcile flows.
+
+6. Terminology
+
+Desired host
+
+A host present in the canonical inventory.
+
+Deployment availability
+
+A policy declaring whether inability to reach a host should block the selected deployment.
+
+Required host
+
+A selected host whose deployment availability is required.
+
+Optional host
+
+A selected host whose deployment availability is optional.
+
+Candidate host
+
+A host selected by:
+
+deployment scope,
+
+component role membership,
+
+site tags,
+
+user --limit,
+
+current contract plan.
+
+It has not yet passed availability filtering.
+
+Support host
+
+A provider/dependency host that may not itself be mutated in the current run but whose endpoint availability is required by a selected consumer.
 
 Example:
 
-logical group:
-  team-platform
+deploy only web-01/freeipa-client
 
-history marker:
-  pilot-internal-history-g-<64-lowercase-hex-sha256>
+ipa-1/freeipa-server can be a support host even if --limit web-01 prevents Pilot from applying the FreeIPA server playbook.
 
-Marker properties:
+Effective execution scope
 
-type: non-POSIX
-members: none
-description:
-  pilot.group-history/v1 name=team-platform
+The final set of managed hosts that may receive Ansible tasks in the current invocation.
 
-Requirements:
+Deferred host
 
-marker name is deterministic;
+An optional host omitted or removed from this run because it is currently unavailable or because its required provider endpoint is unavailable.
 
-hash input is the exact canonical roster group name encoded as UTF-8;
+Deferred is not the same as successfully converged.
 
-SHA-256 output is lowercase hexadecimal;
+Fatal host
 
-marker never receives users/groups/services;
+A host whose current condition requires Pilot to fail the deployment.
 
-marker is never added to the roster;
+7. Inventory schema
 
-marker is never deleted by Pilot;
+7.1 Simplified hosts.yml
 
-marker is created through ipa group-add --nonposix;
+Add a first-class host field:
 
-marker is queried through ipa group-show;
-
-an existing marker with a non-matching description is a collision/corruption condition and must fail closed.
-
-Current roster group category prefixes (team-, data-, access-, role-) naturally prevent this internal marker prefix from being authored as a normal canonical roster group.
-
-4.5 Marker safety invariant
-
-After the marker system is deployed:
-
-actual group exists
-  OR
-valid deterministic history marker exists
-
-means:
-
-ever_applied = true
-
-Therefore:
-
-pilot roster remove-group
-
-may proceed only when:
-
-actual group == not found
-AND
-history marker == not found
-AND
-roster state != absent
-
-Every other state denies hard removal.
-
-4.6 Why one marker group per logical group
-
-Do not store all historical names in one marker group's description/membership.
-
-One deterministic marker object per group provides:
-
-O(1) lookup;
-
-no unbounded multivalue attribute;
-
-no read-modify-write race on a shared marker object;
-
-independent corruption detection;
-
-simple idempotent Ansible behavior;
-
-no dependency on KRA, DNS, or custom LDAP schema.
-
-The cost is additional hidden-by-convention FreeIPA group objects. This is acceptable because they are non-POSIX and empty.
-
-4.7 Marker deletion policy
-
-Pilot must never delete these marker groups.
-
-Documentation must explicitly state:
-
-Manually deleting pilot-internal-history-g-* objects invalidates the strict historical guarantee, just as permanently deleting a preserved Pilot user does.
-
-No Pilot command may expose marker deletion.
-
-4.8 Applied group deletion
-
-The existing declarative lifecycle remains:
-
-groups:
-  - name: team-platform
-    state: absent
-
-This still means the actual FreeIPA group should be deleted.
-
-Before ipa group-del, however, the apply playbook must guarantee that a valid history marker exists.
-
-Required lifecycle:
-
-state: present
-    |
-    v
-ensure actual group exists
-    |
-    v
-ensure history marker exists
-    |
-    v
-normal membership/policy reconciliation
-
-state: absent
-    |
-    v
-query actual group
-    |
-    +-- exists --> ensure history marker --> ipa group-del
-    |
-    +-- absent --> no remote group deletion
-
-If an actual group exists but the history marker cannot be created/validated, deletion must fail closed.
-
-4.9 Legacy groups
-
-For a legacy roster entry with:
-
-state: absent
-
-and both:
-
-actual group missing
-history marker missing
-
-history is ambiguous.
-
-The group entry must remain a roster tombstone and remove-group must reject it.
-
-Do not infer “never applied” from missing FreeIPA state for a legacy state: absent group.
-
-4.10 Backfill
-
-On the first successful identity reconcile after this feature is deployed:
-
-every canonical group in state: present that exists/was created must receive its history marker;
-
-every canonical group in state: absent that still exists must receive its marker before deletion.
-
-This backfills active Pilot-managed groups without requiring Pilot local run history.
-
-5. Existing code that this feature must reuse
-
-5.1 Existing roster command
-
-Current command tree includes:
-
-pilot roster lint
-pilot roster migrate
-
-The new command belongs under the same rosterCmd.
-
-Recommended file:
-
-cmd/pilot/cmd/roster_remove_user.go
-
-5.2 Existing roster mutation pattern
-
-internal/inventory/roster.go already follows this pattern:
-
-SimulateAddRosterUser
-AppendRosterUser
-
-SimulateSetRosterUser
-SetRosterUser
-
-The new delete path must mirror it:
-
-SimulateRemoveRosterUser
-RemoveRosterUser
-
-Do not perform direct YAML mutation inside Cobra handlers.
-
-5.3 Existing mutation lock
-
-internal/inventory/roster_lock.go already provides a file mutation lock.
-
-The final roster mutation must use the same locking discipline used by other destructive roster operations.
-
-5.4 Existing validation
-
-The candidate roster must pass the same complete validator:
-
-inventory.ValidateRoster(...)
-
-before bytes are replaced on disk.
-
-5.5 Existing ansible runner
-
-Reuse internal/ansible.Runner and the same deployment runtime preparation used by deploy/reconcile.
-
-Do not shell out from the CLI implementation with an ad-hoc exec.Command("ansible-playbook", ...) if an existing runner abstraction already covers the required invocation.
-
-6. CLI contract
-
-6.1 Commands
-
-pilot roster remove-user <roster-file> <username> \
-  --inventory inventory.yml \
-  --vault-password-file ~/.vault/vault-pass
-
-pilot roster remove-group <roster-file> <groupname> \
-  --inventory inventory.yml \
-  --vault-password-file ~/.vault/vault-pass
-
-6.2 Flags
-
---inventory, -i
-
-Default:
-
-inventory.yml
-
-Required because the command must resolve and contact the real FreeIPA server.
-
---vault-password-file
-
-Required when the roster is ansible-vault encrypted.
-
-Follow the same user-facing conventions as:
-
-pilot roster migrate --vault-password-file ...
-
---dry-run
-
-Performs every read/probe/validation step but does not mutate the roster.
-
---cascade-references
-
-Allows removal of local inbound references to the target user.
-
-It must not bypass the FreeIPA historical guard.
-
-6.3 No force bypass
-
-There must be no flag that converts:
-
-ever_applied=true
+deployment_availability: required
 
 or:
 
-probe_status=unknown
-
-into an allowed hard removal.
-
-7. Command result semantics
-
-7.1 Safe removal
+deployment_availability: optional
 
 Example:
 
-Removed roster-only user "typo-user".
-FreeIPA history check: not found.
-References removed: 0.
+vars:
+  ansible_user: ubuntu
+  ansible_ssh_private_key_file: ~/.ssh/id_ed25519
 
-7.2 Applied user
+hosts:
+  ipa-1:
+    ansible_host: 10.10.0.10
+    roles:
+      - freeipa-server
+      - dns
+      - ntp
+    env: prod
+    deployment_availability: required
 
-Example:
+  dev-vm-01:
+    ansible_host: 10.10.10.21
+    roles:
+      - freeipa-client
+      - freeipa-dns-client
+      - linux-servers
+      - host-monitoring
+    env: prod
+    deployment_availability: optional
 
-refusing to remove roster user "alice":
-FreeIPA reports an active or preserved user with this name.
+  dev-vm-02:
+    ansible_host: 10.10.10.22
+    roles:
+      - freeipa-client
+      - linux-servers
+    env: prod
+    deployment_availability: optional
 
-This user has entered the FreeIPA lifecycle and must remain represented
-in the roster. Use state: disabled or state: absent instead.
+Required semantics
 
-7.3 Unknown FreeIPA state
+Missing field => effective required.
 
-Example:
+required => unavailability blocks if this host is part of the selected deployment requirement.
 
-refusing to remove roster user "alice":
-unable to prove that the user has never been applied to FreeIPA.
+optional => transport unavailability may defer it.
 
-FreeIPA probe failed: authentication/network/server query error.
-No roster bytes were changed.
+Do not add always-on, on-demand, stopped, running, or power_policy; Pilot is not a power controller and cannot authoritatively observe power state.
 
-7.4 Referenced user
+7.2 internal/inventory.Host
 
-Without --cascade-references:
+Modify the typed model.
 
-cannot remove roster user "typo-user": resource is still referenced
+Suggested shape:
 
-references:
-  groups[team-platform].membership.users
-  hbac.rules[ssh-platform].subjects.users
-  sudo.rules[sudo-build].subjects.users
-  netgroups[ng-build].membership.users
-
-rerun with --cascade-references to remove these local references
-
-7.5 Applied group
-
-Example:
-
-refusing to remove roster group "team-platform":
-FreeIPA history marker proves this group has entered the managed lifecycle.
-
-marker:
-  pilot-internal-history-g-...
-
-Use state: absent for declarative FreeIPA deletion.
-The roster tombstone must remain.
-
-7.6 Non-cascadeable group reference
-
-Example:
-
-cannot remove roster group "data-project-alpha-rw":
-the group is required by a non-cascadeable reference
-
-references:
-  nfs.servers[nfs1].shares[project-alpha].ownership.group
-
-Change the owning group explicitly before removing this roster group.
-
-8. FreeIPA user ever-applied probe playbook
-
-Add:
-
-playbooks/check/freeipa-identity-user-ever-applied.yml
-
-The playbook must be:
-
-read-only;
-
-fail-closed;
-
-machine-readable;
-
-safe for active and preserved users;
-
-consistent with current canonical roster credential loading.
-
-8.1 Required input variables
-
-freeipa_roster_file
-pilot_identity_name
-pilot_identity_probe_output
-target_group              optional, default freeipa-server
-
-The CLI should create pilot_identity_probe_output as a temporary controller-side file and remove it after parsing.
-
-8.2 Required output contract
-
-JSON schema version 1:
-
-{
-  "schema_version": 1,
-  "kind": "user",
-  "name": "alice",
-  "ever_applied": true,
-  "freeipa_state": "active_or_preserved"
+type Host struct {
+    Name                   string
+    AnsibleHost            string
+    AnsibleUser            string
+    SSHKeyFile             string
+    Roles                  []string
+    Env                    string
+    DeploymentAvailability string
+    Extra                  map[string]string
 }
 
-Allowed freeipa_state values:
+A named type is preferred:
 
-active_or_preserved
-not_found
-
-Do not encode unknown as a successful JSON result.
-
-Unknown state must fail the playbook.
-
-8.3 Complete proposed playbook
-
----
-- name: Probe whether a roster user has ever entered the FreeIPA lifecycle
-  hosts: "{{ target_group | default('freeipa-server') }}"
-  become: false
-  gather_facts: false
-
-  vars:
-    freeipa_roster: {}
-
-  pre_tasks:
-    - name: "Gate: probe input is complete"
-      ansible.builtin.assert:
-        that:
-          - freeipa_roster_file is defined
-          - freeipa_roster_file | string | trim | length > 0
-          - pilot_identity_name is defined
-          - pilot_identity_name is match('^[a-z_][a-z0-9_.-]*$')
-          - pilot_identity_probe_output is defined
-          - pilot_identity_probe_output | string | trim | length > 0
-        fail_msg: >-
-          freeipa_roster_file, pilot_identity_name, and
-          pilot_identity_probe_output are required.
-      run_once: true
-      tags: [always]
-
-    - name: "Load canonical roster under a namespace"
-      ansible.builtin.include_vars:
-        file: "{{ freeipa_roster_file }}"
-        name: freeipa_roster
-      no_log: true
-      run_once: true
-      tags: [always]
-
-    - name: "Gate: canonical roster is available"
-      ansible.builtin.assert:
-        that:
-          - freeipa_roster.schema_version is defined
-          - freeipa_roster.freeipa is defined
-          - freeipa_roster.freeipa.admin is defined
-          - freeipa_roster.freeipa.admin.password is defined
-          - freeipa_roster.freeipa.admin.password | length >= 8
-        fail_msg: >-
-          Canonical roster with FreeIPA admin credentials is required
-          for an authoritative ever-applied probe.
-      no_log: true
-      run_once: true
-      tags: [always]
-
-    - name: "Normalize FreeIPA probe settings"
-      ansible.builtin.set_fact:
-        ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
-        ipa_realm: >-
-          {{ freeipa_realm |
-             default((freeipa_domain | default('ipa.pilot.internal')) | upper) }}
-        identity_admin_principal: >-
-          {{ freeipa_roster.freeipa.admin.principal | default('admin') }}
-        identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
-      no_log: true
-      run_once: true
-      tags: [always]
-
-    - name: "Kinit admin for read-only identity probe"
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          printf %s "{{ identity_admin_password }}" |
-            kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
-        executable: /bin/bash
-      changed_when: false
-      no_log: true
-      run_once: true
-      tags: [identity, probe]
-
-  tasks:
-    - name: "Probe active or preserved FreeIPA user"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - user-show
-          - "{{ pilot_identity_name }}"
-          - --all
-          - --raw
-      register: pilot_identity_user_show
-      changed_when: false
-      failed_when: false
-      environment:
-        LC_ALL: C
-      run_once: true
-      tags: [identity, probe]
-
-    - name: "Classify FreeIPA probe"
-      ansible.builtin.set_fact:
-        pilot_identity_probe_class: >-
-          {% if pilot_identity_user_show.rc == 0 %}
-          active_or_preserved
-          {% elif 'not found' in
-                  (pilot_identity_user_show.stderr | default('') | lower) %}
-          not_found
-          {% else %}
-          unknown
-          {% endif %}
-      changed_when: false
-      run_once: true
-      tags: [identity, probe]
-
-    - name: "Fail closed when FreeIPA history cannot be determined"
-      ansible.builtin.assert:
-        that:
-          - pilot_identity_probe_class | trim != 'unknown'
-        fail_msg: >-
-          Unable to determine whether user {{ pilot_identity_name }} has
-          ever entered the FreeIPA lifecycle. The probe failed with rc
-          {{ pilot_identity_user_show.rc }}. Refusing to classify this
-          user as never-applied.
-      run_once: true
-      tags: [identity, probe]
-
-    - name: "Build machine-readable probe result"
-      ansible.builtin.set_fact:
-        pilot_identity_probe_result:
-          schema_version: 1
-          kind: user
-          name: "{{ pilot_identity_name }}"
-          ever_applied: >-
-            {{ (pilot_identity_probe_class | trim) == 'active_or_preserved' }}
-          freeipa_state: "{{ pilot_identity_probe_class | trim }}"
-      changed_when: false
-      run_once: true
-      tags: [identity, probe]
-
-    - name: "Write probe result on the Ansible controller"
-      ansible.builtin.copy:
-        dest: "{{ pilot_identity_probe_output }}"
-        mode: "0600"
-        content: "{{ pilot_identity_probe_result | to_nice_json }}\n"
-      delegate_to: localhost
-      become: false
-      run_once: true
-      tags: [identity, probe]
-
-8.4 Playbook rules
-
-The coding agent must not weaken these properties:
-
-changed_when: false for all FreeIPA probe operations.
-
-Unknown command failure is not “not found”.
-
-Network failure is not “not found”.
-
-Kerberos failure is not “not found”.
-
-Permission failure is not “not found”.
-
-Timeout is not “not found”.
-
-No FreeIPA stdout containing user profile fields is persisted into the result JSON.
-
-The result file is mode 0600.
-
-The CLI removes the temporary result file after use.
-
-9. FreeIPA group history marker playbook/tasks
-
-Add a reusable task file:
-
-playbooks/apply/tasks/freeipa-group-history-marker.yml
-
-Required inputs:
-
-pilot_group_history_name
-
-The task file runs after admin kinit.
-
-9.1 Marker calculation
-
-- name: "Calculate deterministic Pilot group history marker"
-  ansible.builtin.set_fact:
-    pilot_group_history_marker: >-
-      pilot-internal-history-g-{{
-        pilot_group_history_name | hash('sha256')
-      }}
-    pilot_group_history_description: >-
-      pilot.group-history/v1 name={{ pilot_group_history_name }}
-  changed_when: false
-
-9.2 Marker query
-
-- name: "Inspect Pilot group history marker"
-  ansible.builtin.command:
-    argv:
-      - ipa
-      - group-show
-      - "{{ pilot_group_history_marker }}"
-      - --all
-      - --raw
-      - --no-members
-  register: pilot_group_history_marker_show
-  changed_when: false
-  failed_when: false
-  environment:
-    LC_ALL: C
-
-Classify:
-
-rc == 0
-    => marker exists
-
-rc != 0 and stderr contains exact FreeIPA not-found condition
-    => marker missing
-
-anything else
-    => unknown => fail closed
-
-Do not treat a generic non-zero exit as missing.
-
-9.3 Verify existing marker
-
-If marker exists, verify that its raw output contains the exact expected description:
-
-pilot.group-history/v1 name=<canonical-group-name>
-
-If it does not match:
-
-FAIL CLOSED
-
-Reason:
-
-deterministic marker-name collision;
-
-manually repurposed object;
-
-corrupted marker;
-
-wrong hashing/canonicalization implementation.
-
-9.4 Create missing marker
-
-If the marker is missing:
-
-- name: "Create durable Pilot group history marker"
-  ansible.builtin.command:
-    argv:
-      - ipa
-      - group-add
-      - "{{ pilot_group_history_marker }}"
-      - --nonposix
-      - "--desc={{ pilot_group_history_description }}"
-  register: pilot_group_history_marker_add
-  changed_when: pilot_group_history_marker_add.rc == 0
-  environment:
-    LC_ALL: C
-
-Creation failure must fail the play.
-
-After creation, query the marker again and verify its description.
-
-Do not assume successful command exit is sufficient without postcondition verification.
-
-9.5 Present-group integration
-
-For every canonical group whose target state is present:
-
-ensure group
-    -> verify group exists
-    -> ensure history marker
-    -> continue membership reconciliation
-
-Marker creation happens only after the actual group exists so a failed group creation does not create a false “applied” marker.
-
-9.6 Absent-group integration
-
-For every canonical group whose target state is absent:
-
-query actual group
-    |
-    +-- not found:
-    |      no group-del
-    |      keep any existing marker
-    |
-    +-- exists:
-           ensure/verify marker
-           ONLY THEN group-del
-
-Never execute group-del if marker creation/verification fails.
-
-10. FreeIPA group ever-applied probe playbook
-
-Add:
-
-playbooks/check/freeipa-identity-group-ever-applied.yml
-
-It follows the same credential-loading and fail-closed conventions as the user probe.
-
-Inputs:
-
-freeipa_roster_file
-pilot_identity_name
-pilot_identity_probe_output
-target_group              optional, default freeipa-server
-
-10.1 Output contract
-
-{
-  "schema_version": 1,
-  "kind": "group",
-  "name": "team-platform",
-  "ever_applied": true,
-  "freeipa_state": "active_with_marker",
-  "history_marker": "pilot-internal-history-g-..."
-}
-
-Allowed freeipa_state values:
-
-active_with_marker
-active_without_marker
-historical_marker
-not_found
-
-Meaning:
-
-active_with_marker:
-  actual group exists
-  marker exists and is valid
-  ever_applied=true
-
-active_without_marker:
-  actual group exists
-  marker missing
-  ever_applied=true
-  remove-group denied
-  reconcile should backfill marker
-
-historical_marker:
-  actual group missing
-  marker exists and is valid
-  ever_applied=true
-
-not_found:
-  actual group missing
-  marker missing
-  ever_applied=false
-
-An invalid marker or any unknown query error fails the playbook and produces no successful classification.
-
-10.2 Proposed playbook skeleton
-
----
-- name: Probe whether a roster group has ever entered the FreeIPA lifecycle
-  hosts: "{{ target_group | default('freeipa-server') }}"
-  become: false
-  gather_facts: false
-
-  vars:
-    freeipa_roster: {}
-
-  pre_tasks:
-    - name: "Gate: group history probe input"
-      ansible.builtin.assert:
-        that:
-          - freeipa_roster_file is defined
-          - pilot_identity_name is defined
-          - pilot_identity_name | string | trim | length > 0
-          - pilot_identity_probe_output is defined
-      run_once: true
-
-    - name: "Load canonical roster"
-      ansible.builtin.include_vars:
-        file: "{{ freeipa_roster_file }}"
-        name: freeipa_roster
-      no_log: true
-      run_once: true
-
-    - name: "Normalize admin credentials"
-      ansible.builtin.set_fact:
-        ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
-        ipa_realm: >-
-          {{ freeipa_realm |
-             default((freeipa_domain | default('ipa.pilot.internal')) | upper) }}
-        identity_admin_principal: >-
-          {{ freeipa_roster.freeipa.admin.principal | default('admin') }}
-        identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
-        pilot_group_history_marker: >-
-          pilot-internal-history-g-{{
-            pilot_identity_name | hash('sha256')
-          }}
-        pilot_group_history_description: >-
-          pilot.group-history/v1 name={{ pilot_identity_name }}
-      no_log: true
-      run_once: true
-
-    - name: "Kinit admin"
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          printf %s "{{ identity_admin_password }}" |
-            kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
-        executable: /bin/bash
-      changed_when: false
-      no_log: true
-      run_once: true
-
-  tasks:
-    - name: "Probe actual FreeIPA group"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - group-show
-          - "{{ pilot_identity_name }}"
-          - --all
-          - --raw
-          - --no-members
-      register: pilot_actual_group_show
-      changed_when: false
-      failed_when: false
-      environment:
-        LC_ALL: C
-      run_once: true
-
-    - name: "Probe durable Pilot group history marker"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - group-show
-          - "{{ pilot_group_history_marker }}"
-          - --all
-          - --raw
-          - --no-members
-      register: pilot_group_marker_show
-      changed_when: false
-      failed_when: false
-      environment:
-        LC_ALL: C
-      run_once: true
-
-    # Coding agent:
-    # classify each query using exact known "not found" semantics.
-    # Any other non-zero state must fail closed.
-
-    - name: "Verify matching marker when present"
-      ansible.builtin.assert:
-        that:
-          - >-
-            pilot_group_marker_show.rc != 0 or
-            pilot_group_history_description in
-              (pilot_group_marker_show.stdout | default(''))
-        fail_msg: >-
-          Pilot group history marker exists but does not match the
-          requested canonical group. Refusing to determine history.
-      run_once: true
-
-    # Build one of:
-    # active_with_marker / active_without_marker /
-    # historical_marker / not_found
-
-    - name: "Write machine-readable group history result"
-      ansible.builtin.copy:
-        dest: "{{ pilot_identity_probe_output }}"
-        mode: "0600"
-        content: "{{ pilot_identity_probe_result | to_nice_json }}\n"
-      delegate_to: localhost
-      become: false
-      run_once: true
-
-The coding agent must finish the classification with explicit Ansible tasks instead of a shell script that swallows return codes.
-
-10.3 Group probe safety rules
-
-Existing actual group always means ever_applied=true, even if no marker exists yet.
-
-Valid marker always means ever_applied=true, even if actual group is absent.
-
-Actual missing + marker missing is the only successful false state.
-
-Existing malformed marker is unknown/failure.
-
-Query/auth/network error is unknown/failure.
-
-No --force bypass.
-
-11. freeipa-identity-apply.yml — user deletion behavior is unchanged
-
-Current behavior:
-
-- name: "Delete canonical users explicitly marked absent"
-  ansible.builtin.command:
-    argv: [ipa, user-del, "{{ item.name }}"]
-
-Decision: this feature does NOT modify this task. state: absent continues to permanently delete the user via plain ipa user-del, exactly as today.
-
-Rationale: adopting --preserve semantics for users was evaluated during spec review and explicitly rejected for this iteration. The blast radius of this feature is intentionally limited to:
-
-roster-local mutation (remove-user / remove-group), and
-
-new read-only FreeIPA probes (§8, §10).
-
-It deliberately does not alter the live user-deprovisioning lifecycle.
-
-Consequence (see §2.4/§2.5): the strict "ever applied, therefore never hard-removable" guarantee for users is fully provable only for roster entries that were never reconciled. Once a user is deprovisioned and permanently deleted, the roster tombstone (state: absent, rejected by remove-user per §16 Phase A) is the only remaining safeguard.
-
-No real-FreeIPA repeated-preserve integration test is required by this feature, because Pilot never creates a preserved user. If a preserved user exists for any other reason (e.g. an operator manually ran ipa user-del --preserve outside Pilot), the probe in §8 must still detect it and remove-user must still refuse — see the revised "Preserved user" scenario in §22.5.
-
-12. Go-side FreeIPA probe integration
-
-Recommended new internal package boundary:
-
-internal/freeipa/
-  identity_probe.go
-  identity_probe_test.go
-  group_history.go
-  group_history_test.go
-
-Suggested API:
-
-type UserHistoryState string
+type DeploymentAvailability string
 
 const (
-    UserHistoryActiveOrPreserved UserHistoryState = "active_or_preserved"
-    UserHistoryNotFound          UserHistoryState = "not_found"
+    DeploymentAvailabilityRequired DeploymentAvailability = "required"
+    DeploymentAvailabilityOptional DeploymentAvailability = "optional"
 )
 
-type UserHistoryProbe struct {
-    SchemaVersion int              `json:"schema_version"`
-    Kind          string           `json:"kind"`
-    Name          string           `json:"name"`
-    EverApplied   bool             `json:"ever_applied"`
-    FreeIPAState  UserHistoryState `json:"freeipa_state"`
-}
+Provide an effective-value helper:
 
-type UserHistoryProbeOptions struct {
-    Inventory         string
-    RosterFile        string
-    VaultPasswordFile string
-}
-
-func ProbeUserHistory(
-    ctx context.Context,
-    name string,
-    opts UserHistoryProbeOptions,
-) (UserHistoryProbe, error)
-
-
-
-Add a parallel group API:
-
-type GroupHistoryState string
-
-const (
-    GroupHistoryActiveWithMarker    GroupHistoryState = "active_with_marker"
-    GroupHistoryActiveWithoutMarker GroupHistoryState = "active_without_marker"
-    GroupHistoryMarkerOnly          GroupHistoryState = "historical_marker"
-    GroupHistoryNotFound            GroupHistoryState = "not_found"
-)
-
-type GroupHistoryProbe struct {
-    SchemaVersion int               `json:"schema_version"`
-    Kind          string            `json:"kind"`
-    Name          string            `json:"name"`
-    EverApplied   bool              `json:"ever_applied"`
-    FreeIPAState  GroupHistoryState `json:"freeipa_state"`
-    HistoryMarker string            `json:"history_marker"`
-}
-
-func ProbeGroupHistory(
-    ctx context.Context,
-    name string,
-    opts UserHistoryProbeOptions,
-) (GroupHistoryProbe, error)
-
-Parser validation must reject impossible combinations.
-
-Examples:
-
-active_with_marker + ever_applied=false => reject
-active_without_marker + ever_applied=false => reject
-historical_marker + ever_applied=false => reject
-not_found + ever_applied=true => reject
-marker hash does not match returned name => reject
-
-Requirements:
-
-Use the corresponding user/group probe playbook.
-
-Create probe output with os.CreateTemp.
-
-Mode must be 0600.
-
-Remove it with defer os.Remove(...).
-
-Parse strict JSON.
-
-Reject unknown schema_version.
-
-Reject mismatched kind.
-
-Reject mismatched returned name.
-
-Reject impossible combinations such as:
-
-ever_applied=true + freeipa_state=not_found
-
-ever_applied=false + freeipa_state=active_or_preserved
-
-If Ansible exits non-zero, return an error.
-
-Do not reinterpret Ansible failure as “not found”.
-
-13. Roster inbound-reference scanner
-
-Add:
-
-internal/inventory/roster_references.go
-
-Suggested types:
-
-type RosterReferenceCascade string
-
-const (
-    RosterReferenceCascadeRemovable RosterReferenceCascade = "removable"
-    RosterReferenceCascadeBlocked   RosterReferenceCascade = "blocked"
-)
-
-type RosterReference struct {
-    Kind        string
-    Path        string
-    Cascade     RosterReferenceCascade
-    Explanation string
-}
-
-func RosterUserReferences(
-    root map[string]any,
-    username string,
-) []RosterReference
-
-func RosterGroupReferences(
-    root map[string]any,
-    groupname string,
-) []RosterReference
-
-Sort output deterministically by Path.
-
-13.1 User references
-
-At minimum scan:
-
-groups[].membership.users
-hbac.rules[].subjects.users
-sudo.rules[].subjects.users
-netgroups[].membership.users
-
-These are normally removable list references, subject to final full-roster validation.
-
-13.2 Group references
-
-At minimum scan all canonical roster locations that semantically refer to FreeIPA groups:
-
-groups[].membership.groups
-hbac.rules[].subjects.groups
-sudo.rules[].subjects.groups
-sudo.rules[].run_as.groups
-netgroups[].membership.groups
-
-nfs.servers[].shares[].ownership.group
-nfs.servers[].shares[].acl.access.named_groups[].name
-nfs.servers[].shares[].acl.default.named_groups[].name
-
-If current schema or playbooks contain additional group-bearing fields, include them. The coding agent must search the current repository before finalizing the scanner.
-
-13.3 Cascadeable versus blocking group references
-
-List references can be removed when --cascade-references is set:
-
-groups[].membership.groups
-hbac.rules[].subjects.groups
-sudo.rules[].subjects.groups
-sudo.rules[].run_as.groups
-netgroups[].membership.groups
-nfs...acl...named_groups[]
-
-They are still subject to complete validation afterward.
-
-Required scalar references are not cascadeable.
-
-At minimum:
-
-nfs.servers[].shares[].ownership.group
-
-must be classified:
-
-CascadeBlocked
-
-The user must explicitly assign a replacement owning group before remove-group.
-
-Do not delete the scalar field and do not guess another group.
-
-13.4 Validator coverage
-
-The base validator must reject dangling user/group references independently of the remove commands.
-
-The previously identified sudo user-reference gap must be fixed.
-
-Also verify that all group-bearing paths above are validated against the canonical group set with the correct required category where applicable.
-
-Examples:
-
-HBAC subject group -> category access
-sudo subject group -> category role
-NFS ownership/ACL group -> category filesystem
-nested group -> existing canonical group
-netgroup group member -> existing canonical group
-
-If current validation does not cover one of these paths, add the missing rule as part of this feature.
-
-14. Roster simulation API
-
-Add:
-
-type RemoveRosterUserOptions struct {
-    CascadeReferences bool
-}
-
-type RemoveRosterUserSimulation struct {
-    Found              bool
-    References         []RosterReference
-    RemovedReferences  []RosterReference
-    Violations         []RosterViolation
-}
-
-Suggested functions:
-
-func SimulateRemoveRosterUser(
-    path string,
-    name string,
-    opts RemoveRosterUserOptions,
-) (RemoveRosterUserSimulation, error)
-
-func SimulateRemoveRosterGroup(
-    path string,
-    name string,
-    opts RemoveRosterGroupOptions,
-) (RemoveRosterGroupSimulation, error)
-
-Both simulations follow the same structural behavior.
+func (h Host) EffectiveDeploymentAvailability() DeploymentAvailability
 
 Behavior:
 
-Read roster.
+""         -> required
+"required" -> required
+"optional" -> optional
 
-Reject encrypted input through the existing encrypted-roster path unless the caller has already provided decrypted bytes through an existing sanctioned abstraction.
+Unknown values are validation errors.
 
-Reject ambiguous duplicate username.
+7.3 Parser behavior
 
-If user not found:
+Parse(...) must recognize deployment_availability as a first-class field rather than leaving it in Extra.
 
-Found=false
+7.4 Lint behavior
 
-no mutation.
+Lint(...) must emit an error for values outside:
 
-Read target user state.
+required
+optional
 
-If state is absent, return a dedicated lifecycle error.
+Empty is valid and means default required.
 
-Collect inbound references.
+7.5 Generate behavior
 
-If references exist and cascade is false:
+Generate(...) must preserve the field into full Ansible inventory when explicitly present.
 
-return them;
+Example output:
 
-do not create a valid mutation candidate.
+all:
+  hosts:
+    dev-vm-01:
+      ansible_host: "10.10.10.21"
+      deployment_availability: "optional"
 
-If cascade is true:
+Do not force-render required for old hosts that omitted the field unless doing so is necessary for an existing stable-output convention.
 
-remove only references to this user;
+The effective default belongs in Pilot logic, not in a destructive inventory rewrite.
 
-remove the user entry;
+7.6 Full/manual inventory.yml
 
-validate the whole candidate using ValidateRoster.
+This feature must also work when the operator does not use simplified hosts.yml.
 
-Return all violations.
+Resolve policy using the effective host variables returned by:
 
-15. Roster mutation API
+ansible-inventory -i <inventory> --list
 
-Add:
+Use the existing resolveInventoryVariables(...) path rather than adding a second YAML parser for runtime inventory behavior.
 
-func RemoveRosterUser(
-    path string,
-    name string,
-    opts RemoveRosterUserOptions,
-) error
+This also permits normal Ansible inheritance if an operator deliberately sets the variable through a group.
 
-func RemoveRosterGroup(
-    path string,
-    name string,
-    opts RemoveRosterGroupOptions,
-) error
+Unknown runtime policy value MUST fail before mutation even if the input bypassed hosts.yml lint.
+
+8. Execution architecture
+
+The required execution pipeline is:
+
+canonical desired inventory
+          |
+          v
+static validation of desired topology
+          |
+          v
+resolve requested deployment scope
+(component/site/tags/user limit)
+          |
+          v
+resolve candidate mutation hosts
+          |
+          +--------------------------+
+          |                          |
+          v                          v
+resolve dependency support hosts   load effective host vars
+          |                          |
+          +------------+-------------+
+                       |
+                       v
+             parallel TCP availability probe
+                       |
+             +---------+----------+
+             |                    |
+             v                    v
+      required unavailable   optional unavailable
+             |                    |
+           BLOCK                DEFER
+                                  |
+                                  v
+                       effective execution scope
+                                  |
+                                  v
+                     Ansible --limit <hosts>
+                                  |
+                                  v
+                      structured run outcome
+                                  |
+                     +------------+-------------+
+                     |                          |
+                     v                          v
+             real failure/fatal       optional transport race
+                     |                          |
+                   FAIL                       DEFER
+
+Availability filtering is mandatory for Pilot-managed remote deployment. It is not part of the optional preflight prompt.
+
+9. Availability probe
+
+9.1 Probe definition
+
+v1 uses TCP reachability to the effective Ansible SSH endpoint.
+
+Resolve from host vars:
+
+ansible_host
+ansible_port
+ansible_connection
+
+Defaults:
+
+ansible_port = 22
+ansible_connection = ssh when omitted
+
+The probe target is:
+
+<ansible_host>:<ansible_port>
+
+Do not use ICMP ping as the primary signal.
+
+9.2 Interpretation
+
+A successful TCP connection means:
+
+candidate transport is reachable enough to let Ansible perform authoritative SSH/auth/module validation
+
+It does not mean the host is fully valid.
+
+This distinction is important:
+
+TCP probe filters expected unavailable machines cheaply.
+
+Ansible still detects credentials, host keys, Python/module issues, privilege escalation problems, etc.
+
+9.3 Connection types
+
+v1 only defines optional-host filtering for normal SSH-managed hosts.
 
 Rules:
 
-Must not perform the FreeIPA probe itself.
+implicit SSH => probe.
 
-Must assume the caller has already passed the historical guard.
+explicit ansible_connection: ssh => probe.
 
-Must still enforce structural safety:
+localhost / local controller play => never remote-probe.
 
-exactly one target resource matches;
+unsupported non-SSH connection declared optional => fail validation with a clear message until a safe prober exists for that connection type.
 
-target resource is not state: absent;
+unsupported non-SSH connection declared/missing required => do not silently mark optional; normal execution behavior remains authoritative.
 
-reference behavior matches opts;
+9.4 Concurrency
 
-final roster validates.
+Probes MUST run concurrently.
 
-Use yaml.Node surgery.
+Do not perform:
 
-Do not full-remarshal the roster as a fixed Go struct.
+N hosts * sequential SSH timeout
 
-Preserve unrelated top-level sections.
+Suggested initial constants:
 
-Remove the exact sequence element.
+probe timeout: 2 seconds
+max concurrent probes: 32
 
-With cascade, edit the exact referring sequences.
+These should be internal/testable defaults in v1, not necessarily new CLI flags.
 
-Use atomic file replacement if the existing roster mutation layer can support it.
+The implementation must:
 
-Use the roster mutation lock.
+bound concurrency,
 
-The command must call:
+respect context cancellation,
 
-SimulateRemoveRosterUser
+close successful sockets immediately,
 
-before:
+produce deterministic sorted output independent of completion order.
 
-RemoveRosterUser
+9.5 Test seam
 
-matching the existing Simulate* then mutate convention.
+Do not hard-wire net.DialTimeout directly into orchestration logic.
 
-16. Exact command algorithm
+Use a small interface/function seam such as:
 
-The Cobra command must execute in this order.
+type Prober interface {
+    Probe(ctx context.Context, endpoint Endpoint) ProbeResult
+}
 
-Phase A — local read-only checks
+or inject a dial function.
 
-Resolve arguments and flags.
+Unit tests must not depend on real network timing.
 
-Validate inventory path exists.
+10. Candidate scope resolution
 
-Validate roster path exists.
+Availability must only block hosts relevant to the selected operation.
 
-Load/inspect the roster using sanctioned vault handling.
-
-Require current supported roster schema, or run the same current-schema path already used by roster-edit/migrate.
-
-Find exactly one target user/group.
-
-Reject duplicate/ambiguous names.
-
-Reject target state: absent.
-
-Collect inbound references.
-
-If references exist and --cascade-references is absent:
-
-print references;
-
-exit non-zero;
-
-do not contact FreeIPA unnecessarily if the command has already failed locally.
-
-Phase B — authoritative FreeIPA historical probe
-
-Run the resource-specific probe:
-
-user: playbooks/check/freeipa-identity-user-ever-applied.yml
-
-group: playbooks/check/freeipa-identity-group-ever-applied.yml
-
-Parse its temporary JSON output.
-
-If the playbook fails:
-
-abort;
-
-no mutation.
-
-If ever_applied=true:
-
-abort;
-
-no mutation.
-
-Only ever_applied=false + freeipa_state=not_found may continue for either resource kind.
-
-Phase C — candidate validation
-
-Call SimulateRemoveRosterUser or SimulateRemoveRosterGroup.
-
-Require:
-
-found;
-
-zero final violations.
-
-If --dry-run:
-
-print what would be removed;
-
-exit 0;
-
-no mutation.
-
-Phase D — mutation
-
-Acquire the roster mutation lock.
-
-Re-read/revalidate enough state under lock to avoid acting on a stale local roster.
-
-Apply RemoveRosterUser or RemoveRosterGroup.
-
-Validate the written result.
-
-Release lock.
-
-Print a concise success report.
-
-TOCTOU rule
-
-The FreeIPA probe occurs before local mutation, so a concurrent actor could theoretically create a same-named FreeIPA user between the probe and the local write.
-
-To fail closed, the implementation should perform a second FreeIPA probe immediately before the final write if the interval contains any operation that can materially delay execution.
-
-Preferred sequence:
-
-local simulation
-FreeIPA probe #1
-acquire roster lock
-local re-read/simulation
-FreeIPA probe #2
-write
-release lock
-
-Both probes must report not_found.
-
-Do not hold the roster file lock while a potentially long Ansible run if doing so would unnecessarily block unrelated roster work; if that is a concern, use a local revision/hash compare after probe #2 and fail if the roster changed.
-
-17. Encrypted roster behavior
-
-Encrypted roster handling must be first-class.
-
-The command must support the same workflow as current roster migration:
-
-pilot roster remove-user ... \
-  --vault-password-file ~/.vault/vault-pass
-
-Requirements:
-
-Never write decrypted roster bytes to a predictable filename.
-
-Temporary plaintext files, if unavoidable, must:
-
-be created with 0600;
-
-be removed with defer;
-
-not be placed inside the repo/workspace unless an existing secure vault helper already does so.
-
-Re-encrypt using the existing sanctioned vault implementation.
-
-Never print:
-
-admin password;
-
-initial user password;
-
-roster plaintext;
-
-decrypted temporary path when it would reveal sensitive layout unnecessarily.
-
-Prefer reusing the encrypted-roster mutation machinery already established by pilot roster migrate instead of inventing a second vault implementation.
-
-18. --cascade-references rules
-
-Cascade is intentionally narrow.
-
-Allowed removals:
-
-groups[].membership.users == username
-hbac.rules[].subjects.users == username
-sudo.rules[].subjects.users == username
-netgroups[].membership.users == username
-
-Not allowed:
-
-deleting a group because its membership becomes empty;
-
-deleting an HBAC rule because its subjects become empty;
-
-deleting a sudo rule because its subjects become empty;
-
-deleting a netgroup because its membership becomes empty;
-
-rewriting unrelated rules to make validation pass.
-
-If cascade makes another resource structurally invalid, the command must fail with validator output and make no changes.
+An unrelated required host that is offline MUST NOT block a deployment that cannot target or depend on it.
 
 Example:
 
-hbac:
-  rules:
-    - name: ssh-one-user
-      subjects:
-        users: [typo-user]
-        groups: []
+ipa-2 is required but belongs only to an unrelated component
+operator deploys dashboard only
+dashboard does not depend on ipa-2
 
-Removing typo-user would leave the HBAC rule with zero subjects.
+ipa-2 must not block that deployment merely because it exists in inventory.
+
+10.1 User limit
+
+Honor existing --limit semantics.
+
+Do not string-intersect arbitrary Ansible patterns manually.
+
+Use existing Ansible-backed resolution helpers such as resolvePatternHosts(...) or equivalent established scope machinery to expand the requested limit into concrete host names.
+
+The resulting effective limit passed to the actual run should be a deterministic list of concrete host names.
+
+10.2 Site tags
+
+For site.yml, availability checking must respect selected tags.
+
+Do not block on a host belonging only to components outside the selected tag scope.
+
+Use the contract catalog as the source of truth for:
+
+component IDs,
+
+roles,
+
+site.include,
+
+site.tags,
+
+dependency relationships.
+
+Do not add a second hard-coded role/tag table.
+
+10.3 Single component / reconcile
+
+Use the already selected contract plan and role scope.
+
+Required contract dependencies included by current planning remain part of scope calculations.
+
+11. Effective execution scope model
+
+Add a pure model in an appropriate package, preferably internal/delivery for policy resolution and a small internal/availability package for transport probing.
+
+Suggested types:
+
+type HostAvailabilityPolicy string
+
+const (
+    HostRequired HostAvailabilityPolicy = "required"
+    HostOptional HostAvailabilityPolicy = "optional"
+)
+
+type ProbeState string
+
+const (
+    ProbeReachable   ProbeState = "reachable"
+    ProbeUnreachable ProbeState = "unreachable"
+)
+
+type ProbeResult struct {
+    Host     string
+    Endpoint string
+    State    ProbeState
+    Err      error
+}
+
+type DeferredReason string
+
+const (
+    DeferredUnavailable          DeferredReason = "unavailable"
+    DeferredDependencyUnavailable DeferredReason = "dependency_unavailable"
+    DeferredRuntimeUnreachable   DeferredReason = "runtime_unreachable"
+)
+
+type DeferredHost struct {
+    Host       string
+    Policy     HostAvailabilityPolicy
+    Reason     DeferredReason
+    Dependency string
+}
+
+type ExecutionScope struct {
+    Candidates []string
+    Included   []string
+    Deferred   []DeferredHost
+    Blocking   []string
+}
+
+Names may differ, but the responsibilities and semantics must remain.
+
+Pure resolver functions must be unit-testable without invoking Ansible or opening sockets.
+
+12. Required vs optional decision table
+
+12.1 Initial probe
+
+Policy
+
+Probe
+
+Result
+
+required
+
+reachable
+
+include
+
+required
+
+unavailable
+
+block
+
+optional
+
+reachable
+
+include
+
+optional
+
+unavailable
+
+defer
+
+missing
+
+reachable
+
+include as required
+
+missing
+
+unavailable
+
+block as required
+
+invalid
+
+any
+
+fail validation
+
+12.2 No remaining mutation hosts
+
+If all selected mutation hosts are optional and currently unavailable:
+
+Nothing to deploy.
+Deferred:
+  dev-vm-01 — unavailable
+  dev-vm-02 — unavailable
+
+Return exit code:
+
+0
+
+Do not invoke the apply playbook.
+
+This is a successful no-op, not a claim that those hosts are converged.
+
+12.3 Explicit single-host limit
+
+If the user explicitly limits to an optional offline host:
+
+pilot deploy ... --limit dev-vm-01
+
+Pilot still follows policy:
+
+optional + unavailable => deferred
+
+Do not turn this into an implicit power-management request.
+
+Do not add an interactive "start the VM" prompt.
+
+13. Site localhost safety requirement
+
+playbooks/site.yml contains a controller-side safety play on localhost.
+
+An automatically generated effective limit MUST NOT accidentally exclude it.
+
+For aggregate site deployment:
+
+effective remote hosts:
+  ipa-1
+  dev-vm-02
+
+the actual limit must include localhost, for example:
+
+localhost,ipa-1,dev-vm-02
+
+Use a dedicated helper and regression tests.
+
+Do not add localhost to ordinary single-component playbook limits unless that playbook's existing scope requires it.
+
+14. Static preflight behavior
+
+Offline optional hosts MUST remain part of static validation.
+
+The static portion of playbooks/preflight.yml already does not require remote connectivity.
+
+Preserve this property.
+
+Desired behavior:
+
+all desired hosts
+    |
+    v
+preflight --tags static
+
+before remote availability filtering when the operator selected a preflight mode that includes static validation.
+
+Static validation must still detect errors on an offline optional host, including:
+
+malformed/empty connection fields,
+
+placeholders,
+
+duplicate IPs,
+
+bad inventory membership,
+
+invalid deployment availability policy,
+
+other existing static checks.
+
+14.1 Availability resolution is not skippable
+
+The existing preflight prompt may remain optional/skippable.
+
+However:
+
+deployment availability filtering
+
+is execution safety and MUST run regardless of the user's preflight choice.
+
+Do not couple availability filtering to "完整前置檢查".
+
+14.2 Refactor recommendation
+
+Current runPreflight(...) mixes:
+
+user choice,
+
+static validation,
+
+connect validation.
+
+Refactor it into concepts such as:
+
+type preflightMode int
+
+const (
+    preflightFull preflightMode = iota
+    preflightStaticOnly
+    preflightSkip
+)
+
+func promptPreflightMode(...) (preflightMode, error)
+func runStaticPreflight(...)
+func runConnectPreflight(..., effectiveLimit string)
+
+Keep the existing prompt position and choices if possible so automation traces do not need gratuitous renumbering.
+
+Remote connect preflight must use the effective limit.
+
+15. Embedded site preflight
+
+site.yml imports preflight.yml.
+
+Do not remove this safety mechanism merely to implement optional hosts.
+
+Because the aggregate site run receives the effective --limit, its embedded remote preflight will naturally avoid hosts filtered before execution.
+
+It is acceptable that an explicitly requested wizard "full preflight" results in a pre-check plus the site's own embedded preflight, because similar duplication already exists in the current flow.
+
+The correctness requirement is:
+
+site.yml never receives the pre-probe optional-offline hosts in its effective remote limit
+
+and the localhost site safety play remains executable.
+
+16. Dependency availability
+
+Simple host reachability filtering is insufficient.
+
+Example:
+
+ipa-1:
+  component: freeipa-server
+  state: unavailable
+
+dev-vm-02:
+  component: freeipa-client
+  state: reachable
+
+The FreeIPA client contract has a required provider endpoint dependency on the FreeIPA server.
+
+Running the client because its own SSH port is reachable can still produce a guaranteed failure.
+
+16.1 Dependencies considered by availability gating
+
+v1 MUST gate dependencies that represent runtime provider endpoints, especially relationships expressed through:
+
+required dependency
++
+relation: providerEndpoint
+
+and/or a contract binding sourced from a provider endpoint.
+
+Do not assume every required dependency necessarily means a separately reachable remote provider; same-host/software ordering dependencies must continue to use existing contract planning semantics.
+
+16.2 Support-host probing
+
+A provider host may need to be probed even when it is not a mutation target.
+
+Example:
+
+user --limit dev-vm-02
+freeipa-client on dev-vm-02 requires freeipa-server on ipa-1
+
+Pilot may probe ipa-1 as a support host without adding ipa-1 to the mutation limit.
+
+16.3 Conservative v1 deferral
+
+The current main execution primitive is host-level --limit.
+
+Therefore v1 may conservatively defer an entire optional host if any selected component on that host has a required provider endpoint that is unavailable.
+
+Example:
+
+dev-vm-02:
+  freeipa-client      -> dependency unavailable
+  host-monitoring     -> otherwise runnable
+
+v1 may output:
+
+dev-vm-02 deferred — required provider freeipa-server unavailable
+
+and skip the whole host.
+
+This is intentionally conservative.
+
+Do not create a complex runtime inventory/group rewrite in v1 solely to run the unrelated component on the same host.
+
+A future component-by-host execution-unit implementation may refine this behavior.
+
+16.4 Dependency failure policy
+
+If a selected consumer cannot run because its required provider endpoint is unavailable:
+
+consumer host policy optional => defer consumer host.
+
+consumer host policy required => block deployment before mutation.
+
+16.5 Provider cardinality
+
+Reuse existing contract/binding source-selection semantics where available.
+
+Do not invent provider choice rules that contradict:
+
+hostCardinality
+
+binding sourceSelection
+
+existing topology resolution.
+
+If a dependency permits multiple equivalent providers, a reachable valid provider may satisfy availability according to the existing contract semantics.
+
+17. Mid-run shutdown race
+
+Pre-run probing alone cannot satisfy the operational requirement.
+
+An external operator can power off an optional VM after the probe but during:
+
+preflight,
+
+check/diff,
+
+apply,
+
+verification.
+
+Pilot must distinguish:
+
+optional host became transport-unreachable
+
+from:
+
+optional host encountered a real configuration failure
+
+17.1 Do not solve this with global ignore_unreachable
+
+Do not add:
+
+ignore_unreachable: true
+
+globally.
+
+Reasons:
+
+it obscures required-host failures,
+
+it does not distinguish authentication/configuration errors,
+
+it makes playbook output harder to reason about,
+
+it pushes policy into every play rather than the Pilot execution layer.
+
+17.2 Structured callback
+
+Add a lightweight Ansible notification callback dedicated to machine-readable run outcomes.
+
+Suggested files:
+
+ansible_callback/pilot_result.py
+ansible_callback/test_pilot_result.py
+
+Use Python standard library only.
+
+The callback MUST NOT replace the current stdout callback.
+
+The operator must continue to receive normal streaming Ansible output.
+
+The callback writes a per-invocation event file selected by an environment variable such as:
+
+PILOT_ANSIBLE_RESULT_FILE
+
+Pilot-managed runs create the file under the existing private Ansible runtime directory.
+
+Permissions must be restrictive.
+
+17.3 Callback events
+
+Record at least:
+
+{"event":"unreachable","host":"dev-vm-01","reason":"connection_timeout"}
+{"event":"failed","host":"dev-vm-02"}
+{"event":"stats","hosts":{"dev-vm-01":{"failures":0,"unreachable":1}}}
+
+Exact schema may differ but MUST include enough information to safely classify the final process result.
+
+Do not record:
+
+module arguments,
+
+secret values,
+
+task result payloads,
+
+vault content,
+
+environment secrets.
+
+17.4 Unreachable reason classification
+
+Only known transport-offline classes may be tolerated for optional hosts.
+
+Suggested safe reason codes:
+
+connection_refused
+connection_timeout
+network_unreachable
+host_unreachable
+no_route
+connection_reset
+connection_closed
+
+Explicitly non-tolerable examples:
+
+authentication_failed
+host_key_verification_failed
+identity_file_error
+permission_denied
+unsupported_connection
+unknown
+
+Classification should be conservative.
+
+Unknown text => fatal.
+
+Do not downgrade an error merely because Ansible labels it UNREACHABLE.
+
+17.5 Final stats are mandatory for downgrade
+
+Pilot may reclassify a non-zero Ansible process result to semantic success only if:
+
+the structured callback produced a valid final stats event,
+
+stats show zero task failures on every host,
+
+every host with unreachable > 0 is policy optional,
+
+every unreachable event for those hosts is classified as a tolerated transport-offline reason,
+
+no required host was unreachable,
+
+there is no global/controller/callback parsing error,
+
+there is no non-host fatal condition.
+
+If these conditions are not provably true:
+
+fail closed
+
+17.6 Reuse existing stats concepts
+
+cmd/pilot/cmd/ansible_json_result.go already models:
+
+type AnsibleHostStats struct {
+    Ok          int
+    Changed     int
+    Failures    int
+    Unreachable int
+    Skipped     int
+    Rescued     int
+    Ignored     int
+}
+
+Reuse or move/share this type rather than creating incompatible duplicate recap semantics.
+
+18. Semantic deployment result
+
+Introduce a result layer separate from raw process exit code.
+
+Suggested shape:
+
+type DeploymentOutcome struct {
+    RawExitCode   int
+    Success       bool
+    DeferredHosts []DeferredHost
+    Fatal         []string
+}
+
+18.1 Raw exit 0
+
+Normal success.
+
+18.2 Raw non-zero with only tolerated optional transport unreachable
+
+Semantic result:
+
+success with deferred hosts
+
+Pilot command exit:
+
+0
+
+18.3 Any task failure
+
+Semantic result:
+
+failure
+
+even if the failing host is optional.
+
+18.4 Required unreachable
+
+Semantic result:
+
+failure
+
+18.5 Unknown/non-host failure
+
+Semantic result:
+
+failure
+
+18.6 Rollback
+
+Rollback must be driven by semantic failure, not raw Ansible non-zero alone.
+
+If the only issue is tolerated optional-host transport disappearance:
+
+do not initiate rollback merely because Ansible returned a raw unreachable exit code.
+
+If there is a real semantic failure:
+
+preserve current rollback behavior.
+
+an optional host becoming unreachable during rollback must never erase or convert the original failure.
+
+19. Deployment output
+
+Output must clearly distinguish "not run" from "successfully converged".
+
+Suggested pre-run output:
+
+═══ Deployment availability ═══
+
+Required
+  ✓ ipa-1        reachable
+
+Optional
+  ✓ dev-vm-02    reachable
+  ○ dev-vm-01    unavailable — deferred
+  ○ dev-vm-03    unavailable — deferred
+
+Effective deployment scope: 2 managed hosts
+
+Dependency example:
+
+Optional
+  ○ dev-vm-02    deferred — required provider freeipa-server@ipa-1 unavailable
+
+Blocking example:
+
+Deployment blocked before mutation.
+
+Required host unavailable:
+  ipa-1 (10.10.0.10:22)
+
+Final successful result with deferral:
+
+Deployment successful with deferred hosts.
+
+Applied/reached:
+  ipa-1
+  dev-vm-02
+
+Deferred:
+  dev-vm-01 — unavailable before execution
+  dev-vm-03 — became unreachable during execution
+
+Do not print:
+
+all hosts successfully converged
+
+when some hosts were deferred.
+
+Output order must be deterministic.
+
+20. Deploy integration
+
+20.1 Shared funnel
+
+Do not implement availability only in one TUI branch.
+
+It must apply to every Pilot-managed deployment path that uses the same deployment transaction, including as applicable:
+
+interactive pilot deploy
+
+site deploy
+
+single-component deploy
+
+pilot reconcile
+
+automation-driven deploy prompts
+
+check/diff stage
+
+apply stage
+
+automatic verification where the verification is scoped to the deployment hosts
+
+Prefer one shared availability/semantic-result funnel.
+
+20.2 Current runSiteDeploy
+
+Today runSiteDeploy(...) collects:
+
+stage,
+
+user --limit,
+
+tags,
+
+vault,
+
+extra vars,
+
+then calls the recorded deployment path.
+
+Availability resolution must occur after enough scope information exists to know which hosts/components/tags are relevant, but before preview/apply mutation.
+
+Conceptual order:
+
+collect site inputs
+resolve selected components/tags
+resolve user-limited candidate hosts
+resolve policies and support dependencies
+probe availability
+block/defer
+build effective limit
+run connect preflight if requested
+execute recorded deployment using effective limit
+classify runtime outcome
+
+20.3 Current single-component flow
+
+Apply the same semantics after the selected contract/dependency plan and user limit are known.
+
+Do not pre-probe every inventory host for a single-component deployment.
+
+20.4 Reconcile
+
+pilot reconcile is a day-2 deployment path and must use the same availability semantics.
+
+An offline optional reconciler target is deferred, not a deployment failure.
+
+21. Effective limit construction
+
+Create one helper responsible for building the final Ansible limit.
+
+Requirements:
+
+sorted deterministic host names,
+
+no duplicate hosts,
+
+intersected with user-requested scope,
+
+pre-probe optional-offline hosts removed,
+
+dependency-deferred hosts removed,
+
+localhost added for aggregate site.yml,
+
+no mutation of canonical inventory.
+
+Suggested API:
+
+func BuildEffectiveLimit(playbook string, includedHosts []string) string
+
+or equivalent.
+
+Examples:
+
+site:
+localhost,ipa-1,dev-vm-02
+
+single component:
+dev-vm-02
+
+If no managed hosts remain for site:
+
+do not run site merely with localhost and claim deployment happened,
+
+return successful no-op with deferred summary before launching apply.
+
+22. Runtime inventory variable resolution
+
+Use one ansible-inventory --list call per resolved inventory snapshot where practical.
+
+Build a runtime view containing at least:
+
+type RuntimeHost struct {
+    Name                   string
+    AnsibleHost            string
+    AnsiblePort            int
+    AnsibleConnection      string
+    DeploymentAvailability HostAvailabilityPolicy
+}
+
+Do not independently parse generated inventory.yml with ad-hoc YAML logic just to obtain host vars.
+
+This feature must respect Ansible's resolved host-var precedence.
+
+23. Interaction with topology and graphs
+
+Topology output represents desired topology, not current availability.
 
 Therefore:
 
-pilot roster remove-user ... typo-user --cascade-references
+pilot deploy graph
 
-must fail and tell the user that the remaining HBAC rule is invalid.
+must continue to show offline optional hosts.
 
-It must not silently delete the HBAC rule.
+Do not remove optional-offline hosts from topology projection.
 
-18.1 Group-specific cascade rule
+It is acceptable to later annotate availability in the graph, but that is not required in v1.
 
-For remove-group, --cascade-references removes only references marked CascadeRemovable.
+24. Interaction with monitoring and other generated configuration
 
-Example removable references:
+An offline host being deferred from the current Ansible execution does not mean it ceases to exist.
 
-groups[team-parent].membership.groups
-hbac.rules[ssh-platform].subjects.groups
-sudo.rules[sudo-platform].subjects.groups
-netgroups[ng-platform].membership.groups
-nfs...acl.access.named_groups[]
-nfs...acl.default.named_groups[]
+Therefore do not automatically remove it from:
 
-Example blocking reference:
+monitoring target definitions,
 
-nfs.servers[nfs1].shares[project-alpha].ownership.group
+FreeIPA desired membership,
 
-A blocking reference aborts the command even when --cascade-references is supplied.
+DNS desired records,
 
-The command must print the path and require an explicit replacement edit.
+NFS desired topology,
 
-19. TUI behavior
+backup desired topology,
 
-Do not add roster hard-delete to pilot edit in the first implementation.
+any configuration derived from desired inventory,
 
-Reason:
+unless the existing component's declarative semantics independently say to do so.
 
-the current roster editor intentionally excludes declarative delete;
+Availability filtering controls where Ansible executes now, not what the desired topology contains.
 
-a remote FreeIPA historical probe introduces a different UX and failure model;
+25. Security and failure-closed requirements
 
-the CLI command is easier to audit and automate safely.
+25.1 Default required
 
-A later TUI integration may call the same command/service layer, but must not reimplement the safety logic.
+Missing/unknown policy must never silently become optional.
 
-20. Structured-action / MCP behavior
+25.2 Event file
 
-If the project exposes roster mutations through structured actions, add a semantic action only after the CLI/core implementation is complete.
+Structured result event files must:
 
-Suggested actions:
+live under Pilot's private data/runtime directory,
 
-remove_roster_user
-remove_roster_group
+use restrictive permissions,
 
-Input:
+be cleaned after processing where consistent with existing evidence retention,
 
-{
-  "name": "typo-user",
-  "cascade_references": false
+contain no secrets.
+
+25.3 Callback failure
+
+If Pilot needs structured result data to decide whether a non-zero Ansible exit may be tolerated, but:
+
+callback file is missing,
+
+JSON is malformed,
+
+final stats are missing,
+
+schema is inconsistent,
+
+Pilot MUST treat the run as failed.
+
+25.4 No message-string-only global success rule
+
+Do not implement:
+
+if strings.Contains(stdout, "UNREACHABLE") {
+    return nil
 }
 
-The action must route through the exact same:
+Human output parsing is not sufficient for semantic success.
 
-FreeIPA probe
-+
-simulation
-+
-mutation
+25.5 Auth failures
 
-service path.
+Optional policy is not permission to hide broken credentials.
 
-Do not add an MCP-only bypass.
+Tests must explicitly cover:
 
-21. Error taxonomy
+optional host + TCP reachable + SSH permission denied => FAIL
 
-Add typed/sentinel errors where useful.
+26. Recommended file changes
 
-Suggested errors:
+The coding agent should verify exact current file layout before implementation.
 
-var ErrRosterUserAlreadyApplied = errors.New(
-    "roster user has entered the FreeIPA lifecycle",
-)
+Expected changes/new files are approximately:
 
-var ErrRosterGroupAlreadyApplied = errors.New(
-    "roster group has entered the FreeIPA lifecycle",
-)
+internal/inventory/inventory.go
+internal/inventory/*_test.go
 
-var ErrRosterUserAbsentLifecycle = errors.New(
-    "roster user is already in state: absent lifecycle",
-)
+hosts.example.yml
+inventory.example.yml
+DELIVERY.md
 
-var ErrRosterUserReferenced = errors.New(
-    "roster user still has inbound references",
-)
+internal/availability/probe.go
+internal/availability/probe_test.go
 
-var ErrFreeIPAHistoryUnknown = errors.New(
-    "unable to determine FreeIPA user history",
-)
+internal/delivery/availability_scope.go
+internal/delivery/availability_scope_test.go
 
-User-facing command errors should include the username and remediation.
+cmd/pilot/cmd/deploy.go
+cmd/pilot/cmd/reconcile.go
+cmd/pilot/cmd/deploy_availability.go
+cmd/pilot/cmd/deploy_availability_test.go
 
-22. Test plan
+internal/ansible/runner.go
+internal/ansible/*_test.go
 
-20.1 Inventory unit tests
+ansible_callback/pilot_result.py
+ansible_callback/test_pilot_result.py
 
-Add tests for:
+playbooks/preflight.yml
+playbooks/site.yml
 
-remove unreferenced user;
+preflight.yml and site.yml may need only documentation/comment adjustments if command-side effective limits fully preserve their behavior.
 
-remove first/middle/last sequence item;
+Do not change playbook task semantics unnecessarily.
 
-preserve other user entries;
+27. Implementation phases
 
-preserve comments/unrelated sections according to current mutation guarantees;
+The coding agent should implement in dependency order and keep each phase green.
 
-missing user;
+Phase 1 — Inventory policy
 
-duplicate/ambiguous user;
+Implement:
 
-state: absent rejected;
+typed deployment availability field,
 
-group membership reference detected;
+parser,
 
-HBAC subject reference detected;
+lint,
 
-sudo subject reference detected;
+generator,
 
-netgroup reference detected;
+examples,
 
-cascade removes every direct user reference;
+round-trip tests,
 
-cascade that invalidates HBAC fails;
+default-required semantics.
 
-cascade that invalidates sudo fails;
+Acceptance:
 
-final candidate always runs full validation.
+old hosts.yml without field => same effective behavior as before
+optional field survives generation
+invalid value is rejected
 
-20.2 Validator regression test
+Phase 2 — Runtime host view and probe
 
-Add a roster with:
+Implement:
 
-sudo:
-  rules:
-    - name: sudo-bad-user
-      subjects:
-        users: [does-not-exist]
+resolved hostvar loader using existing Ansible inventory path,
 
-The validator must reject it.
+SSH endpoint resolution,
 
-20.3 Probe parser tests
+concurrent bounded TCP prober,
 
-Test JSON:
+deterministic results,
 
-active/preserved + true;
+fake-dial test seam.
 
-not_found + false;
+Acceptance:
 
-mismatched name;
+optional offline can be detected without invoking ansible-playbook
+required/optional policy is resolved from full inventory hostvars
 
-wrong kind;
+Phase 3 — Pure execution-scope resolver
 
-unsupported schema;
+Implement:
 
-impossible boolean/state combination;
+candidate list input,
 
-missing result file;
+policy decisions,
 
-malformed JSON;
+included/deferred/blocking output,
 
-Ansible non-zero exit.
+no-op behavior,
 
-20.4 CLI tests
+effective limit helper,
 
-Test:
+site localhost preservation.
 
-remove-user --dry-run
-remove-user success
-remove-user referenced without cascade
-remove-user referenced with cascade
-remove-user applied user denied
-remove-user state: absent denied
-probe failure denied
-encrypted roster
-lock contention
+Acceptance:
 
-20.5 Real FreeIPA tests
+all decision-table unit tests pass without shell/network dependencies.
 
-Mandatory scenarios:
+Phase 4 — Contract dependency availability
 
-Never-applied user
+Implement:
 
-Put pilot-never-applied into roster.
+support-host discovery using contract/provider endpoint metadata,
 
-Confirm ipa user-show pilot-never-applied reports not found.
+support-host probing,
 
-Run pilot roster remove-user.
+conservative host-level dependency deferral/blocking.
 
-Confirm roster user is removed.
+Acceptance:
 
-Confirm no FreeIPA mutation occurred.
+reachable freeipa-client + unavailable required freeipa provider
+optional client => deferred
+required client => block
 
-Applied active user
+Phase 5 — Deploy/reconcile integration
 
-Reconcile pilot-applied.
+Implement:
 
-Confirm ipa user-show pilot-applied succeeds.
+refactored preflight mode,
 
-Run pilot roster remove-user.
+mandatory availability resolution after requested scope is known,
 
-Command must fail.
+effective limit passed through current transaction path,
 
-Roster bytes must remain unchanged.
+no new prompt,
 
-Preserved user (created out-of-band, not by Pilot)
+stable automation behavior where possible.
 
-Create pilot-preserved in FreeIPA and manually run ipa user-del pilot-preserved --preserve directly (not through Pilot, since Pilot no longer creates preserved users — §11).
+Acceptance:
 
-Confirm ipa user-show pilot-preserved still succeeds and reports preserved.
+offline optional hosts never reach initial remote preflight/apply argument scope.
 
-Run pilot roster remove-user against a roster entry for pilot-preserved.
+Phase 6 — Runtime race classification
 
-Command must fail.
+Implement:
 
-Roster bytes must remain unchanged.
+structured callback,
 
-(The "repeated absent reconcile / preserve idempotency" scenario is removed: not applicable, since this feature keeps state: absent as a permanent ipa user-del — §11.)
+final stats,
 
-FreeIPA unavailable
+transport reason classification,
 
-Make target unreachable or use an invalid Kerberos credential.
+semantic deployment outcome,
 
-Run pilot roster remove-user.
+rollback gating based on semantic failure.
 
-Command must fail closed.
+Acceptance:
 
-Roster bytes must remain unchanged.
+optional host disconnects mid-run => semantic success with deferred host
+optional host task fails => failure
+optional host auth fails => failure
+required host disconnects => failure
+non-host Ansible error => failure
 
-22.6 Group history-marker unit tests
+Phase 7 — Regression/evidence/documentation
 
-Test:
+Run full suite and add end-to-end evidence.
 
-deterministic SHA-256 marker name;
+28. Required tests
 
-marker description matches exact group;
+28.1 Inventory unit tests
 
-valid marker;
+Must cover:
 
-missing marker;
+no availability field => effective required,
 
-malformed marker description;
+explicit required,
 
-active group without marker => ever_applied=true;
+explicit optional,
 
-marker without active group => ever_applied=true;
+invalid value,
 
-both missing => ever_applied=false;
+generate preserves optional,
 
-query error => fail closed.
+unknown extra fields still preserved,
 
-22.7 remove-group CLI tests
+existing inventory snapshots remain stable except intentional new fixture changes.
 
-Test:
+28.2 Probe unit tests
 
-remove-group --dry-run
-remove-group never-applied success
-remove-group active group denied
-remove-group historical marker denied
-remove-group state: absent denied
-remove-group nested membership ref
-remove-group HBAC ref
-remove-group sudo ref
-remove-group netgroup ref
-remove-group NFS ACL ref
-remove-group NFS ownership.group always blocked
-remove-group cascade producing invalid roster denied
-remove-group encrypted roster
+Must cover:
 
-22.8 Real FreeIPA group tests
+connection succeeds,
 
-Mandatory:
+connection refused,
 
-Never-applied group
+timeout,
 
-Put team-never-applied in the roster.
+context cancellation,
 
-Confirm actual group is absent.
+bounded concurrency,
 
-Confirm deterministic history marker is absent.
+deterministic output order,
 
-Run pilot roster remove-group.
+non-default ansible_port,
 
-Confirm roster group is hard-removed.
+unsupported optional non-SSH connection.
 
-Confirm no FreeIPA mutation occurred.
+28.3 Scope resolver unit tests
 
-Applied active group
+Must cover:
 
-Reconcile team-applied.
+required reachable => include,
 
-Confirm actual group exists.
+required unavailable => block,
 
-Confirm history marker exists and is non-POSIX.
+optional reachable => include,
 
-Run pilot roster remove-group.
+optional unavailable => defer,
 
-Command must fail.
+missing policy unavailable => block,
 
-Roster bytes remain unchanged.
+all optional unavailable => success no-op,
 
-Deleted applied group
+user limit excludes unrelated required offline host,
 
-Reconcile team-deleted.
+site limit contains localhost,
 
-Confirm group + marker exist.
+no duplicate host names,
 
-Change roster group to state: absent.
+stable ordering.
 
-Reconcile.
+28.4 Dependency tests
 
-Confirm actual group is gone.
+Must cover at least:
 
-Confirm marker remains.
+required provider endpoint reachable,
 
-Run pilot roster remove-group.
+required provider endpoint unavailable + optional consumer,
 
-Command must fail.
+required provider endpoint unavailable + required consumer,
 
-Roster state: absent tombstone remains.
+provider is support-only because user limit selects consumer,
 
-Marker creation failure protects deletion
+unrelated offline provider does not block unrelated component,
 
-Arrange a marker-name collision or simulated marker validation failure.
+multiple providers according to existing source-selection/cardinality semantics.
 
-Keep the actual target group present.
+Use real contract fixtures where practical, especially freeipa-client.
 
-Reconcile state: absent.
+28.5 Structured callback tests
 
-The playbook must fail before ipa group-del.
+Pure Python tests, no external libraries.
 
-Confirm actual group still exists.
+Must cover classification of representative messages for:
 
-23. Acceptance criteria
+tolerated transport classes
 
-AC1 — New commands exist
+connection refused,
 
-pilot roster remove-user <roster-file> <username>
-pilot roster remove-group <roster-file> <groupname>
+connection timed out,
 
-AC2 — Never-applied user can be removed
+no route to host,
 
-A roster user missing from active/preserved FreeIPA can be hard-removed when the local candidate is valid.
+network unreachable,
 
-AC3 — Active user can never be hard-removed
+connection reset,
 
-If ipa user-show succeeds, the command fails without changing the roster.
+connection closed.
 
-AC4 — Preserved user can never be hard-removed
+fatal unreachable classes
 
-If ipa user-show resolves a preserved user, the command fails without changing the roster.
+permission denied,
 
-AC5 — Unknown FreeIPA state fails closed
+publickey/authentication failure,
 
-Auth/network/query errors never become “not found”.
+host key verification failed,
 
-AC6 — state: absent is never hard-removed
+missing identity file,
 
-The command rejects a roster user already in declarative deprovision state.
+unknown message.
 
-AC7 — User deprovision behavior is intentionally unchanged
+Also test:
 
-freeipa-identity-apply.yml continues to permanently delete canonical users marked absent via plain ipa user-del; this is a documented, deliberate scope decision (§11), not an oversight.
+failed task event,
 
-AC8 — (removed)
+final stats emission,
 
-No longer applicable: this criterion existed only to prove idempotency of preserve semantics, which this feature does not implement.
+event file unavailable => callback degrades in a way Pilot can detect safely,
 
-AC9 — References are safe
+no secret/task-arg serialization.
 
-Without cascade, inbound references block removal.
+28.6 Semantic result tests
 
-With cascade, only direct username references are removed.
+Must cover:
 
-AC10 — Cascade cannot delete dependent resources
+raw exit 0 => success,
 
-The command never silently removes groups/HBAC/sudo/netgroups to make the roster valid.
+raw nonzero + final stats + only optional tolerated unreachable => success/deferred,
 
-AC11 — Full roster validation gates every write
+same unreachable on required => fail,
 
-No invalid candidate is persisted.
+optional unreachable with auth reason => fail,
 
-AC12 — Encrypted roster is supported safely
+optional host failures > 0 => fail,
 
-No secret/plaintext leakage.
+missing final stats => fail,
 
-AC13 — No force bypass
+malformed callback JSON => fail,
 
-No command flag can override the ever-applied guard.
+global error with no host events => fail,
 
-AC14 — remove-group exists and is safe
+optional pre-probe deferred plus runtime optional deferred are merged/deduplicated.
 
-pilot roster remove-group hard-removes only a group proven never-applied.
+28.7 Command-level tests
 
-AC15 — Group history survives remote deletion
+Use shims/fakes rather than real infrastructure.
 
-Every applied group receives a deterministic non-POSIX FreeIPA history marker, and the marker remains after state: absent deletes the real group.
+Verify command argv:
 
-AC16 — Group marker gates deletion
+site
 
-An active group or valid marker permanently blocks remove-group.
+ansible-playbook playbooks/site.yml ...
+--limit localhost,ipa-1,dev-vm-02
 
-AC17 — Group deletion cannot outrun marker creation
+and never includes known pre-probe optional-offline hosts.
 
-ipa group-del is never executed for a present actual group until its history marker has been created and verified.
+single component
 
-AC18 — Required group references cannot be cascaded
+Only relevant reachable hosts are limited.
 
-nfs...ownership.group and any equivalent required scalar reference block hard removal until explicitly reassigned.
+required unavailable
 
-AC19 — Real FreeIPA evidence exists
+Apply command must not be invoked.
 
-The integration suite proves:
+no-op
 
-remove-user rejects an active user, and rejects a user found in a preserved state (created out-of-band — Pilot itself does not create preserved users; see §11).
+Apply command must not be invoked and command exits cleanly.
 
-The same integration suite also proves:
+reconcile
 
-group present -> history marker -> state: absent -> actual group deleted -> marker retained
+Same availability semantics as deploy.
 
-and proves remove-group rejects both active groups and marker-only historical groups.
+28.8 Race integration test
 
-24. Files expected to change
+Provide at least one integration-style test using a deterministic Ansible/callback shim or controlled fixture:
 
-Minimum expected set:
+host optional
+pre-probe reachable
+Ansible structured result reports transport unreachable
+no task failures
+final stats present
 
-cmd/pilot/cmd/roster_remove_user.go
-cmd/pilot/cmd/roster_remove_user_test.go
-cmd/pilot/cmd/roster_remove_group.go
-cmd/pilot/cmd/roster_remove_group_test.go
+Expected:
 
-internal/inventory/roster.go
-internal/inventory/roster_references.go
-internal/inventory/roster_remove_test.go
-internal/inventory/roster_validate.go
-internal/inventory/roster_validate_test.go
+Pilot exit 0
+host reported deferred
+no rollback
 
-internal/freeipa/identity_probe.go
-internal/freeipa/identity_probe_test.go
-internal/freeipa/group_history.go
-internal/freeipa/group_history_test.go
+A second test must use the same setup with a real task failure and expect non-zero.
 
-playbooks/check/freeipa-identity-user-ever-applied.yml
-playbooks/check/freeipa-identity-group-ever-applied.yml
-playbooks/apply/tasks/freeipa-group-history-marker.yml
-playbooks/apply/freeipa-identity-apply.yml (group history-marker integration only — user deletion path is unchanged, §11)
+29. Acceptance scenarios
 
-docs/verification/freeipa-identity.md
+The entire feature is not complete until all scenarios below behave exactly as specified.
 
-If encrypted roster mutation requires reusable extraction, add a focused helper instead of duplicating migration code.
+Scenario A — ordinary mixed fleet
 
-25. Implementation order
+Inventory:
 
-Implement in this order:
+ipa-1      required
+vm-01      optional
+vm-02      optional
+vm-03      optional
 
-Audit and fix all user/group reference validation gaps.
+Observed:
 
-Add combined roster inbound-reference scanner with cascadeable/blocking classifications.
+ipa-1      reachable
+vm-01      unavailable
+vm-02      reachable
+vm-03      unavailable
 
-Add pure in-memory user/group removal simulations.
+Expected:
 
-Add user/group YAML mutation primitives.
+included: ipa-1, vm-02
+deferred: vm-01, vm-03
+Pilot deployment exit: 0 if reachable hosts succeed
 
-Add FreeIPA user read-only history probe.
+Scenario B — required infrastructure unavailable
 
-Add deterministic FreeIPA group history-marker task.
+Observed:
 
-Add FreeIPA group read-only history probe.
+ipa-1 required unavailable
 
-Add Go probe wrappers/parsers.
+Expected:
 
-(User state: absent is intentionally NOT modified — preserve semantics were evaluated and rejected; see §11.)
+blocked before mutation
+apply not invoked
+Pilot exit non-zero
 
-Integrate group-marker creation into present-group reconciliation.
+Scenario C — optional host explicitly limited
 
-Gate group state: absent deletion on verified marker creation.
+Requested:
 
-Add the real-FreeIPA group-marker lifecycle test, plus a lighter preserved-user detection test using an out-of-band preserved user (§22.5).
+limit vm-01
 
-Add Cobra remove-user and remove-group.
+Observed:
 
-Add encrypted-roster paths.
+vm-01 optional unavailable
 
-Add CLI/integration tests.
+Expected:
 
-Update verification docs.
+successful no-op
+vm-01 deferred
+no apply
+exit 0
 
-Only then consider structured-action/MCP exposure.
+Scenario D — optional host has bad credentials
 
-The safety-critical group-marker lifecycle change must not be shipped without the real FreeIPA group-marker test (§22.8).
+Observed:
 
-26. Explicit design decisions
+TCP 22 reachable
+Ansible SSH authentication fails
 
-Decision A
+Expected:
 
-remove-user means:
+FAIL
 
-remove a never-applied local definition
+Do not classify this as expected offline.
 
-It does not mean:
+Scenario E — optional host powers off after probe
 
-delete user from FreeIPA
+Observed:
 
-Decision B
+initial probe reachable
+during Ansible connection is closed/times out
+structured stats failures=0, unreachable>0
+reason classified as tolerated transport offline
 
-FreeIPA active + preserved user namespace is the historical registry for the new invariant.
+Expected:
 
-Decision C (revised)
+host deferred
+other hosts continue
+semantic success if nothing else failed
+exit 0
 
-state: absent for users continues to use permanent deletion (ipa user-del, no --preserve), unchanged from current behavior. Adopting preserve semantics for users was evaluated and explicitly rejected for this iteration; see §2.4/§2.5/§11.
+Scenario F — optional host task failure
 
-Decision D
+Observed:
 
-Applied/preserved users remain in the roster forever unless a future explicit archival design is approved.
+task executes and fails
 
-Decision E
+Expected:
 
-Groups use a deterministic empty non-POSIX FreeIPA history-marker group because FreeIPA has no native preserved-group lifecycle.
+FAIL
 
-Decision F
+Scenario G — unavailable provider
 
-state: absent may delete the actual FreeIPA group only after a valid history marker exists.
+Topology:
 
-Decision G
+ipa-1:
+  freeipa-server
+  unavailable
 
-An applied group's marker is permanent from Pilot's perspective; Pilot never deletes it.
+vm-02:
+  freeipa-client
+  reachable
+  optional
 
-Decision H
+Expected:
 
-No local Pilot history, run DB, receipt DB, or missing receipt is sufficient to authorize hard removal.
+vm-02 deferred due required provider endpoint unavailable
+do not run freeipa-client against vm-02
 
-Decision I
+Scenario H — required consumer with unavailable provider
 
-No --force escape hatch.
+Same as G but:
 
-27. External behavior summary
+vm-02 deployment_availability=required
 
-The resulting lifecycle should be:
+Expected:
 
-                    add roster user
-                          |
-                          v
-                 +------------------+
-                 | local definition |
-                 | never applied    |
-                 +------------------+
-                    |            |
-       remove-user  |            | reconcile
-         allowed    |            v
-                    |     +----------------+
-                    +---->| active FreeIPA |
-                          | user           |
-                          +----------------+
-                                  |
-                    state: disabled / absent
-                                  |
-                                  v
-                         +-------------------+
-                         | user permanently  |
-                         | deleted (unchanged|
-                         | behavior)         |
-                         +-------------------+
-                                  |
-                                  v
-                     remove-user ALWAYS DENIED
-                     (enforced by the local roster
-                      tombstone, state: absent —
-                      not by durable FreeIPA history,
-                      since preserve was not adopted)
+block before mutation
+exit non-zero
 
-Once a user is permanently deleted, FreeIPA can no longer prove that user's history. The roster tombstone row is the only remaining safeguard, and it depends on that row never being purged (purge-user is out of scope, §3.2).
+Scenario I — unrelated required host offline
 
-Group lifecycle:
+Operator deploys a component with no dependency on ipa-2.
 
-                    add roster group
-                          |
-                          v
-                 +------------------+
-                 | local definition |
-                 | never applied    |
-                 +------------------+
-                    |            |
-       remove-group |            | reconcile
-         allowed    |            v
-                    |     +----------------+
-                    +---->| active FreeIPA |
-                          | group          |
-                          +----------------+
-                                  |
-                                  v
-                         create permanent
-                         history marker
-                                  |
-                         state: absent
-                                  |
-                                  v
-                    +--------------------------+
-                    | actual group deleted     |
-                    | history marker retained  |
-                    +--------------------------+
-                                  |
-                                  v
-                     remove-group ALWAYS DENIED
+ipa-2 is required but outside selected component/tag/limit/dependency scope and is offline.
 
-28. Reference notes for the coding agent
+Expected:
 
-Repository behavior inspected:
+ipa-2 does not block this run
 
-internal/inventory/roster.go
+Scenario J — all optional hosts offline
 
-existing SimulateAdd/SetRosterUser
+Selected deployment contains only optional offline VMs.
 
-existing Append/SetRosterUser
+Expected:
 
-YAML node mutation pattern
+Nothing to deploy
+all selected hosts listed as deferred
+exit 0
+no ansible-playbook apply invocation
 
-internal/inventory/roster_validate.go
+30. CLI and compatibility requirements
 
-canonical roster validation
+Do not add a new power-management CLI.
 
-user/group/HBAC/sudo checks
+No mandatory new deployment flag is required for v1.
 
-internal/inventory/roster_netgroup.go
+Existing user-facing deploy choices should remain as stable as practical.
 
-netgroup user/group reference validation
+If a future strict override is desired, it may later add something like:
 
-internal/inventory/roster_lock.go
+--strict-availability
 
-mutation flock
+but it is not required by this specification and should not distract from the core policy.
 
-cmd/pilot/cmd/roster_lint.go
+Backward compatibility
 
-current pilot roster command root
+An inventory with no new field must behave as if every host were:
 
-cmd/pilot/cmd/roster_migrate.go
+required
 
-encrypted roster/vault-password CLI precedent
+Therefore existing users continue to receive failure on unreachable hosts unless they explicitly opt a host into optional availability.
 
-cmd/pilot/cmd/edit_tui_roster.go
+31. Automation compatibility
 
-delete intentionally excluded from current roster editor
+The repository now has Huh-backed prompt automation and --actions workflows.
 
-playbooks/apply/freeipa-identity-apply.yml
+Availability resolution must not introduce a new interactive choice for each unavailable host.
 
-current canonical user/group reconciliation
+Required behavior:
 
-current user permanent deletion must be changed
+optional unavailable => deterministic defer
+required unavailable => deterministic error
 
-FreeIPA behavior relied upon:
+If prompt-related function signatures change:
 
-FreeIPA supports ipa user-del <name> --preserve.
+update automation tests,
 
-Preserved users are disabled and kept in the deleted-user container.
+preserve screen IDs/choice IDs where unrelated,
 
-ipa user-show <name> can retrieve active or preserved/deleted users.
+do not rename existing prompt labels unnecessarily,
 
-FreeIPA supports user-find --preserved=true.
+do not make availability depend on cursor-driven confirmation.
 
-A preserved user can later be permanently deleted by FreeIPA administrators — not directly relevant here, since this feature does not adopt preserve semantics for users (§11).
+Availability decisions should be visible in normal output and evidence, not represented as a prompt.
 
-FreeIPA group deletion does not have the equivalent preserved-user lifecycle; deleting group-dependent delegations can be irreversible.
+32. Evidence and observability
 
-FreeIPA group_add supports nonposix, so history markers can use a supported API object without allocating POSIX GIDs.
+A successful run with deferred hosts must leave enough information to understand what happened.
 
-FreeIPA recommends supported IPA CLI/API mutation rather than arbitrary custom LDAP writes.
+At minimum, normal output must include:
 
-Primary official references:
+included hosts,
 
-FreeIPA User Life-Cycle Management
+pre-run deferred hosts,
 
-https://www.freeipa.org/page/V4/User_Life-Cycle_Management.html
+dependency-deferred hosts,
 
-FreeIPA user management API
+runtime-deferred hosts,
 
-https://freeipa.readthedocs.io/en/latest/api/user_management.html
+fatal hosts if any.
 
-ansible-freeipa user plugin documentation
+If the existing recorded deployment evidence format has an extensible metadata area, add:
 
-https://www.freeipa.org/ansible-freeipa.github.io/documentation/plugins/user.html
+effective hosts
+deferred hosts + reason
+raw Ansible exit code
+semantic result
 
-FreeIPA group_add API
+Do not place secrets or raw unreachable payloads in evidence.
 
-https://freeipa.readthedocs.io/en/latest/api/group_add.html
+If extending evidence schema would create disproportionate unrelated work, normal deterministic output plus unit/integration evidence is acceptable for v1, but document the limitation.
 
-FreeIPA group management examples
+33. Documentation updates
 
-https://freeipa.readthedocs.io/en/latest/api/group_management.html
+Update at least:
 
-FreeIPA LDAP guidance
+hosts.example.yml
 
-https://www.freeipa.org/page/HowTo/LDAP
+inventory.example.yml
 
-29. Definition of done
+DELIVERY.md
 
-The work is complete only when all of the following are true:
+relevant runbook/preflight comments
 
-[ ] pilot roster remove-user exists
-[ ] pilot roster remove-group exists
-[ ] active user blocks hard removal
-[ ] preserved user blocks hard removal
-[ ] unknown FreeIPA state blocks hard removal
-[ ] state: absent blocks hard removal
-[ ] state: absent for users remains a permanent ipa user-del (unchanged; preserve intentionally not adopted, §11)
-[ ] inbound references are reported
-[ ] cascade removes only explicitly cascadeable user/group references
-[ ] invalid cascades are rejected
-[ ] sudo dangling-user validation is fixed
-[ ] encrypted roster works
-[ ] no --force bypass exists
-[ ] active FreeIPA group blocks hard removal
-[ ] historical group marker blocks hard removal
-[ ] every applied present group receives a history marker
-[ ] group state: absent cannot delete an existing group before marker verification
-[ ] history marker remains after group deletion
-[ ] NFS ownership.group blocks cascade until explicitly reassigned
-[ ] unit tests pass
-[ ] real FreeIPA integration tests pass
-[ ] go test ./... passes
-[ ] go test -race on touched Go packages passes
-[ ] go vet ./... passes
-[ ] gofmt is clean
-[ ] Ansible syntax-check passes
-[ ] verification documentation is updated
+Documentation must explain:
+
+deployment_availability is deployment reachability policy, not VM power policy.
+
+default is required.
+
+use optional for externally controlled/on-demand VMs.
+
+optional offline hosts remain part of desired inventory.
+
+Pilot skips/defer unavailable optional hosts during Pilot-managed deployment.
+
+configuration/authentication failures are not ignored.
+
+direct manual ansible-playbook calls do not automatically receive Pilot's availability resolver unless the operator manually provides an equivalent limit.
+
+Suggested example:
+
+dev-vm-01:
+  ansible_host: "10.10.10.21"
+  roles: [freeipa-client, linux-servers, host-monitoring]
+  deployment_availability: optional
+
+34. Prohibited implementations
+
+A coding agent MUST NOT complete this task by doing only any of the following:
+
+P1
+
+ignore_unreachable: true
+
+P2
+
+Adding ignore_errors.
+
+P3
+
+Adding when: around every playbook task.
+
+P4
+
+Deleting offline hosts from hosts.yml.
+
+P5
+
+Generating a second persistent "online-only canonical inventory".
+
+P6
+
+Treating every non-zero result from an optional host as success.
+
+P7
+
+Treating SSH auth failure as expected offline.
+
+P8
+
+Adding hypervisor start/stop logic.
+
+P9
+
+Only modifying preflight.yml while leaving the actual site/apply execution scope unchanged.
+
+P10
+
+Only doing a pre-run probe and ignoring the mid-run shutdown race.
+
+P11
+
+Parsing human PLAY RECAP text as the sole basis for downgrading a non-zero apply.
+
+P12
+
+Defaulting missing policy to optional.
+
+35. Coding quality requirements
+
+Follow existing Pilot package boundaries and naming conventions.
+
+Prefer pure decision functions for policy/scope logic.
+
+Inject network seams in tests.
+
+Keep output deterministic.
+
+Preserve context cancellation.
+
+Avoid goroutine leaks.
+
+Avoid unbounded concurrency.
+
+Do not add external Python dependencies for callback code.
+
+Do not add a new Go dependency unless the standard library/existing dependencies are insufficient.
+
+Keep Ansible as the authoritative validator after initial reachability filtering.
+
+Fail closed whenever semantic success cannot be proven.
+
+Keep normal Ansible output streaming.
+
+Reuse existing contract and transaction abstractions instead of adding a second deployment engine.
+
+36. Verification commands
+
+The coding agent must adapt to current repository targets, but the completed work should pass the repository's normal quality gates.
+
+At minimum run:
+
+gofmt -w <changed-go-files>
+go test ./...
+go vet ./...
+go build ./cmd/pilot
+
+Run callback tests using the repository's established Python/callback test command, for example:
+
+make test-callback
+
+if that target remains current.
+
+Also run any relevant focused tests while iterating:
+
+go test ./internal/inventory/...
+go test ./internal/availability/...
+go test ./internal/delivery/...
+go test ./cmd/pilot/cmd/...
+
+Do not claim completion if the full test suite is red for changes caused by this implementation.
+
+37. Definition of done
+
+This work is done only when all of the following are true.
+
+deployment_availability exists with required|optional.
+
+Missing policy defaults to required.
+
+Simplified and full inventories both work.
+
+Canonical inventory always retains offline hosts.
+
+Optional pre-run unavailable hosts are excluded from the actual remote Ansible scope.
+
+Required selected unavailable hosts block before mutation.
+
+Availability is resolved only for relevant selected/dependency scope, not every unrelated host.
+
+site.yml effective limit preserves localhost.
+
+Contract provider-endpoint availability prevents guaranteed consumer failures.
+
+Mid-run optional transport disappearance is detected through structured results.
+
+Optional transport disappearance may produce success-with-deferred.
+
+Optional task failures remain fatal.
+
+Optional auth/host-key/key errors remain fatal.
+
+Required unreachable remains fatal.
+
+Missing/corrupt structured result data fails closed.
+
+Semantic success prevents unnecessary rollback on tolerated optional disappearance.
+
+Real failures preserve existing rollback behavior.
+
+No new VM power-management commands exist.
+
+No global ignore_unreachable.
+
+Existing automation flows do not gain per-host availability prompts.
+
+Documentation/examples are updated.
+
+Focused tests pass.
+
+Full Go tests pass.
+
+Vet/build pass.
+
+Callback tests pass.
+
+End-to-end evidence demonstrates at least one mixed online/offline optional-host deployment completing successfully.
+
+38. Coding-agent execution instruction
+
+Before changing code:
+
+Re-read AGENTS.md.
+
+Re-read the current versions of every file named in this specification.
+
+Inspect recent commits touching deploy/TUI/inventory code so this implementation does not regress the Huh v2 migration or automation contracts.
+
+Identify the current single shared transaction funnel and integrate there rather than patching only one entry point.
+
+Write focused failing tests first for:
+
+default-required policy,
+
+optional pre-probe deferral,
+
+required blocking,
+
+localhost preservation,
+
+runtime optional disconnect downgrade,
+
+optional auth/task failure remaining fatal.
+
+Implement in the phases listed above.
+
+Run focused tests after each phase.
+
+Run the full repository gates before declaring completion.
+
+If the current main implementation has moved since the baseline recorded here, preserve the behavioral requirements of this specification and adapt file/function names to the new structure instead of mechanically forcing old line-level assumptions.

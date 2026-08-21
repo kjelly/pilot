@@ -63,7 +63,7 @@ uninstall-callback: ## Remove installed callback plugin
 	@echo "✓ Removed"
 
 test-callback: ## Run Python callback unit tests
-	cd ansible_callback && python3 -m unittest test_pilot_diagnose.py -v
+	cd ansible_callback && python3 -m unittest test_pilot_diagnose.py test_pilot_result.py -v
 
 test-prereq: ## Check go / docker / ansible availability
 	@command -v go >/dev/null              && echo "go OK"              || (echo "go MISSING"; exit 1)

@@ -145,6 +145,22 @@ func (r *Runner) RunWithTimeout(ctx context.Context, timeout time.Duration, args
 	return r.Run(ctx, args...)
 }
 
+// RunWithExtraEnv is a one-shot invocation that appends extraEnv on top of
+// the Runner's configured Env for this call only, then restores Env
+// before returning — mirroring RunWithTimeout's save/restore pattern
+// rather than writing extraEnv into r.Env permanently (AGENTS.md §5.2: a
+// long-lived, reused object must not have per-call options written back
+// onto its own fields beyond the call that needed them).
+func (r *Runner) RunWithExtraEnv(ctx context.Context, extraEnv []string, args ...string) (*Result, error) {
+	if len(extraEnv) == 0 {
+		return r.Run(ctx, args...)
+	}
+	saved := r.Env
+	r.Env = append(append([]string{}, saved...), extraEnv...)
+	defer func() { r.Env = saved }()
+	return r.Run(ctx, args...)
+}
+
 // PlaybookArgs is a typed bag of every ansible-playbook option that
 // pilot exposes through the run_ansible / apply_patch tools and the
 // pilot run CLI. The zero value is valid and produces the bare

@@ -54,6 +54,14 @@ all:
     web-2:
       ansible_host: "<FILL-ME>"        # IP,例 10.0.0.22
 
+    # 範例:一台由外部人員隨時開關的機器。deployment_availability 是「佈署時
+    # 連不到要不要擋」的政策,不是電源政策——pilot 不會幫你開機/關機。沒填
+    # 這行等於 required(連不到就擋佈署);optional 離線時佈署會把它跳過
+    # (deferred)並在結果裡列出,其餘機器照常佈署。
+    dev-vm-01:
+      ansible_host: "<FILL-ME>"        # IP,例 10.0.0.31
+      deployment_availability: "optional"
+
     # 需要更多機器就照上面格式往下加。key(短名)自己取,全域唯一即可。
 
   # ── 2. 共用連線設定:填一次,全部主機套用 ──────────────────────────────

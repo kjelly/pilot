@@ -254,6 +254,50 @@ docker run --rm pilot-cli:latest cat group_vars/restic-backup.example.yml  > gro
 > 兩者分開後 inventory 保持精簡、設定集中一處，兩邊都更難填錯。
 > 機密（密碼）仍走 ansible-vault，別寫進 group_vars 明文（見「關於機密」段落）。
 
+### 1.6 （需要時）標記外部人員隨時會關機的機器 → `deployment_availability: optional`
+
+`deployment_availability` 是**部署可用性政策**，不是 VM 電源政策——pilot 不會、也不
+負責開機/關機任何機器（沒有、也不會加 `pilot host start/stop` 之類的指令）。它回答
+的問題是：「這台機器現在連不上時，這次 `pilot deploy`／`pilot reconcile` 該不該因此
+失敗？」
+
+在 `hosts.yml` 的機器條目底下加一行：
+
+```yaml
+hosts:
+  ipa-1:
+    ansible_host: 10.10.0.10
+    roles: [freeipa-server, dns, ntp]
+    deployment_availability: required   # 預設值，可省略不寫
+
+  dev-vm-01:
+    ansible_host: 10.10.10.21
+    roles: [freeipa-client, linux-servers, host-monitoring]
+    deployment_availability: optional   # 這台由外部人員自行開關機
+```
+
+規則：
+
+- **沒填這個欄位 = `required`**——跟目前既有行為完全一樣，現有 inventory 不會因為
+  升級就悄悄變寬鬆。要「這台連不上不算失敗」必須自己明確標成 `optional`。
+- `required` 的機器如果在這次選定的部署範圍內連不上，`pilot deploy`／`reconcile`
+  會在套用任何變更**之前**中止，回報是哪台機器連不上，指令回非零結束碼。
+- `optional` 的機器如果連不上，會被**排除**在這次實際執行的 Ansible 範圍之外並回報
+  為「deferred（已延後）」，其他機器照常套用，指令仍回傳 0——但這不代表那台機器
+  「已經是期望狀態」，只代表這次沒能碰到它。它仍然留在 `hosts.yml`／
+  `inventory.yml`、topology graph 與所有既有設定裡；等它重新開機後，下一次
+  `pilot deploy`／`reconcile` 會自動把它接回來，不需要重新加進 inventory。
+- 佈署途中（preflight 通過後、apply 進行中）才斷線的 `optional` 機器，只有在
+  Ansible 回報「純連線層失敗、沒有任何真正的 task 失敗」時才會被視為同一種
+  deferred；帳號/金鑰/權限錯誤或任何真正的設定失敗，不論該機器是不是
+  `optional`，一律還是視為失敗。
+- 只有真正由外部人員隨時開關的機器才標 `optional`；核心基礎設施
+  （FreeIPA server、資料庫…）通常應該維持預設的 `required`。
+
+這一層只影響 pilot 管理的部署路徑（`pilot deploy`／`pilot reconcile`）；直接手動執行
+`ansible-playbook`（不經過 pilot）不會自動套用這個過濾，除非你自己在指令上加對等的
+`--limit`。
+
 ## 2. 跑前置檢查（會告訴你哪裡填錯、連不連得到）
 
 ```bash

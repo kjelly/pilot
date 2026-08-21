@@ -16,6 +16,15 @@
 #
 #  想只做靜態檢查(還沒開機、只想檢查填寫)可以:
 #    ansible-playbook -i inventory.yml playbooks/preflight.yml --tags static
+#
+#  deployment_availability: optional 的機器(外部人員自行開關機,見 DELIVERY.md
+#  §1.6):這支 playbook 本身沒有、也不需要知道這個政策——它照樣對 `hosts: all`
+#  的每一台做連線檢查。經 `pilot deploy`/`pilot reconcile` 執行時,實際套用的
+#  ansible-playbook 呼叫(包含這支被 site.yml import 進去的 Preflight B)已經
+#  帶了排除掉目前連不上的 optional 機器的 --limit,所以那些機器不會讓這一步
+#  失敗。直接手動執行這支 playbook(不經過 pilot、沒帶對等的 --limit)則會照
+#  Ansible 原生行為,對每一台(包含 optional、目前故意關機的機器)做 ping,連
+#  不上就是 UNREACHABLE——這是預期行為,不是 bug。
 # ============================================================================
 
 - name: "Preflight A — 靜態檢查 inventory 填寫(不連線)"

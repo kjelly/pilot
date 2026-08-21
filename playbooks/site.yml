@@ -18,6 +18,13 @@
 #     所以你只填了哪些角色、就只會跑哪些元件——沒填的元件連 secret 都不用給。
 #   * 需要密碼的元件(Keycloak / FreeIPA identity)才需要額外帶 -e / vault 檔,
 #     且『只有當該 group 有 host 時』才會被要求。見 DELIVERY.md。
+#   * 標了 `deployment_availability: optional` 的機器(見 DELIVERY.md §1.6)
+#     若目前連不上,經 `pilot deploy`/`pilot reconcile` 執行時不會讓這次全站
+#     部署失敗——實際套用的 --limit 已經把它們排除,包含這支被 import 進來的
+#     preflight play,所以它們不會讓上一條「preflight 沒過就全部跳過」的規則
+#     誤殺其他本來連得到的機器。直接手動執行這支 site.yml(不經過 pilot、沒帶
+#     對等的 --limit)則不會有這層過濾,行為與過去相同。localhost 本身(下方
+#     的 target_group 安全閥)永遠不受這個過濾影響。
 #
 #  ── 相依順序 ────────────────────────────────────────────────────────────
 #     核心服務(dns/ntp)→ FreeIPA server → FreeIPA client → NFS server → NFS client

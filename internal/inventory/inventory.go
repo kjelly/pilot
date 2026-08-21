@@ -8,16 +8,66 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// DeploymentAvailability is a host's deployment-reachability policy: whether
+// pilot-managed deploy/reconcile must block when the host is transport-
+// unreachable (required) or may defer it and continue (optional). It has no
+// bearing on VM power management — pilot never starts, stops, or observes
+// hypervisor power state.
+type DeploymentAvailability string
+
+const (
+	// DeploymentAvailabilityRequired blocks deployment before mutation when
+	// the host is transport-unreachable.
+	DeploymentAvailabilityRequired DeploymentAvailability = "required"
+	// DeploymentAvailabilityOptional lets deployment defer the host and
+	// continue when it is transport-unreachable.
+	DeploymentAvailabilityOptional DeploymentAvailability = "optional"
+)
+
 // Host is one machine from the source file, after normalizing its
 // YAML mapping into typed fields plus a passthrough Extra bag.
 type Host struct {
-	Name        string
-	AnsibleHost string
-	AnsibleUser string
-	SSHKeyFile  string
-	Roles       []string
-	Env         string
-	Extra       map[string]string // preserved as strings for stable, quoted YAML output
+	Name                   string
+	AnsibleHost            string
+	AnsibleUser            string
+	SSHKeyFile             string
+	Roles                  []string
+	Env                    string
+	DeploymentAvailability DeploymentAvailability
+	Extra                  map[string]string // preserved as strings for stable, quoted YAML output
+}
+
+// EffectiveDeploymentAvailability returns h's deployment availability
+// policy, defaulting to required when the field was left empty — an
+// inventory that predates this field, or a host that never set it,
+// must keep failing on unreachable exactly as before this feature existed.
+func (h Host) EffectiveDeploymentAvailability() DeploymentAvailability {
+	return h.DeploymentAvailability.Effective()
+}
+
+// Effective returns d's effective policy, defaulting to required when d is
+// empty. Unlike Host.EffectiveDeploymentAvailability, this works on a bare
+// value — e.g. one resolved from raw `ansible-inventory --list` hostvars
+// rather than a parsed Host — so callers outside the simplified hosts.yml
+// path (spec §7.6) get the same default-required semantics.
+func (d DeploymentAvailability) Effective() DeploymentAvailability {
+	if d == "" {
+		return DeploymentAvailabilityRequired
+	}
+	return d
+}
+
+// Valid reports whether d is a recognized policy value: empty (meaning the
+// default, required) or one of the named constants. Any other value is a
+// validation error wherever it is encountered, whether from hosts.yml lint
+// or from a runtime inventory hostvar that bypassed it (spec §7.6).
+func (d DeploymentAvailability) Valid() bool {
+	switch d {
+	case "", DeploymentAvailabilityRequired, DeploymentAvailabilityOptional:
+		return true
+	default:
+		return false
+	}
 }
 
 // HostsFile is the parsed simple source file: `vars:` (fleet-wide
@@ -62,6 +112,8 @@ func Parse(data []byte) (*HostsFile, error) {
 				h.SSHKeyFile = fmt.Sprint(v)
 			case "env":
 				h.Env = fmt.Sprint(v)
+			case "deployment_availability":
+				h.DeploymentAvailability = DeploymentAvailability(fmt.Sprint(v))
 			case "roles":
 				list, ok := v.([]interface{})
 				if !ok {
@@ -145,6 +197,10 @@ func Lint(hf *HostsFile) []Issue {
 		if h.Env != "" && !validEnvs[h.Env] {
 			issues = append(issues, Issue{h.Name, "error", fmt.Sprintf("unknown env %q (must be one of prod|staging|sandbox, or omitted)", h.Env)})
 		}
+
+		if !h.DeploymentAvailability.Valid() {
+			issues = append(issues, Issue{h.Name, "error", fmt.Sprintf("unknown deployment_availability %q (must be required|optional, or omitted)", h.DeploymentAvailability)})
+		}
 	}
 	return issues
 }
@@ -221,6 +277,9 @@ func Generate(hf *HostsFile) (string, error) {
 		}
 		if h.SSHKeyFile != "" {
 			fmt.Fprintf(&sb, "      ansible_ssh_private_key_file: %s\n", quoteScalar(h.SSHKeyFile))
+		}
+		if h.DeploymentAvailability != "" {
+			fmt.Fprintf(&sb, "      deployment_availability: %s\n", quoteScalar(string(h.DeploymentAvailability)))
 		}
 		extraKeys := make([]string, 0, len(h.Extra))
 		for k := range h.Extra {

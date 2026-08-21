@@ -881,6 +881,27 @@ type deploymentTransactionOptions struct {
 	Stage          string
 	Idempotency    delivery.IdempotencyPolicy
 	RollbackPolicy delivery.RollbackPolicy
+	// RuntimeRace enables Phase 6's mid-run shutdown-race classifier (spec
+	// §17/§18) for the apply step only — never preview, never the
+	// idempotency re-apply. Its zero value disables reclassification
+	// entirely: the apply step's raw exit code decides pass/fail exactly
+	// as it did before this feature existed.
+	RuntimeRace deploymentRuntimeRaceOptions
+}
+
+// deploymentRuntimeRaceOptions carries what executeDeploymentTransaction's
+// apply step needs to tell "an optional host went transport-unreachable
+// mid-run" apart from a real failure. ResultPath empty means disabled.
+type deploymentRuntimeRaceOptions struct {
+	// OptionalHosts is the set of hosts in the current run's effective
+	// scope whose deployment_availability policy is optional (spec
+	// §17.5 "every host with unreachable > 0 is policy optional").
+	OptionalHosts map[string]bool
+	// ResultPath is the JSON-lines file ansible_callback/pilot_result.py
+	// appends to for this one apply invocation.
+	ResultPath string
+	// CallbackPluginsDir is the directory containing pilot_result.py.
+	CallbackPluginsDir string
 }
 
 // executeDeploymentTransaction is the single preview→apply→verify path for
@@ -922,6 +943,10 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		if confirm && !confirmDeployment(question, true) {
 			return nil, delivery.ErrCancelled
 		}
+		if !check && options.RuntimeRace.ResultPath != "" {
+			env := resultCallbackEnv(options.RuntimeRace.CallbackPluginsDir, options.RuntimeRace.ResultPath)
+			return runner.RunWithExtraEnv(ctx, env, args...)
+		}
 		return runner.Run(ctx, args...)
 	}
 
@@ -960,6 +985,16 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		}
 		fmt.Fprintln(out)
 		if res.ExitCode != 0 {
+			if options.RuntimeRace.ResultPath != "" {
+				outcome := ansible.ClassifyDeploymentOutcome(res.ExitCode, options.RuntimeRace.ResultPath, options.RuntimeRace.OptionalHosts)
+				if outcome.Success {
+					if len(outcome.DeferredHosts) > 0 {
+						fmt.Fprintf(out, "⚠️  套用途中以下 optional 主機變成無法連線，視為 deferred（非錯誤，spec.md §17）：%s\n", strings.Join(outcome.DeferredHosts, ", "))
+					}
+					fmt.Fprintln(out, "✅ 套用完成。")
+					return nil
+				}
+			}
 			return fmt.Errorf("❌ 套用失敗(結束碼 %d)，請看上面的輸出", res.ExitCode)
 		}
 		fmt.Fprintln(out, "✅ 套用完成。")
@@ -1030,6 +1065,27 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 		return err
 	}
 	components = contractIDs(applied)
+
+	// Deployment availability: an optional host an external operator
+	// intentionally powered off must not fail this deployment (spec.md
+	// §3/§12). This must run unconditionally, before any mutation, for
+	// every path that reaches executeRecordedDeployment — see
+	// deploy_availability.go.
+	execScope, invalidReasons, optionalHosts, err := resolveDeploymentAvailability(ctx, inv, hosts, selected, scope, extraVars, vault)
+	if err != nil {
+		return err
+	}
+	if len(execScope.Blocking) > 0 {
+		printAvailabilityBlocked(out, execScope.Blocking, invalidReasons)
+		return deploymentBlockedError(execScope.Blocking, invalidReasons)
+	}
+	if !execScope.HasManagedHosts() {
+		printAvailabilityNoOp(out, execScope.Deferred)
+		return nil
+	}
+	printAvailabilitySummary(out, execScope)
+	limit = effectiveDeploymentLimit(playbook, limit, execScope.Candidates, execScope.Included)
+
 	extraVars, err = autoFillFreeIPARosterFile(ctx, out, selected, scope, inv, extraVars, vault)
 	if err != nil {
 		return err
@@ -1053,7 +1109,7 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	}
 	writer, err := store.StartRun(ctx, st, store.RunStarted{
 		Stage: stage, Component: components[0], Components: components, Playbook: playbook,
-		Inventory: inv, Hosts: hosts, Metadata: deploymentMetadata(root, playbook, components, extraVars, vault, tags),
+		Inventory: inv, Hosts: hosts, Metadata: deploymentMetadata(root, playbook, components, extraVars, vault, tags, execScope.Deferred),
 	})
 	if err != nil {
 		_ = st.Close()
@@ -1082,9 +1138,34 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 		}
 	}
 	rollback, rollbackPolicy := deploymentRollbackStep(runner, out, applied, inv, limit, extraVars, vault)
+
+	// Mid-run shutdown race (spec §17/§18): an optional host that was
+	// reachable at Phase 5's pre-run probe but disconnects while
+	// ansible-playbook is actually applying must not fail this
+	// deployment either. resultPath empty (on prepare failure) leaves
+	// RuntimeRace at its zero value, which disables reclassification —
+	// the apply step then behaves exactly as it did before this feature
+	// existed, so a result-file setup failure degrades to the pre-Phase-6
+	// behavior rather than blocking deployment outright.
+	resultPath, cleanupResult, resultErr := prepareDeploymentResultFile(ctx)
+	if resultErr != nil {
+		fmt.Fprintf(out, "⚠️  無法建立部署結果事件檔，套用途中的 optional 主機斷線將視為一般失敗：%v\n", resultErr)
+	} else {
+		defer cleanupResult()
+	}
+	runtimeRace := deploymentRuntimeRaceOptions{}
+	if resultPath != "" {
+		runtimeRace = deploymentRuntimeRaceOptions{
+			OptionalHosts:      optionalHosts,
+			ResultPath:         resultPath,
+			CallbackPluginsDir: filepath.Join(root, "ansible_callback"),
+		}
+	}
+
 	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{
 		Writer: writer, Preflight: preflight, Verify: verify, Rollback: rollback,
 		Stage: stage, Idempotency: delivery.IdempotencyStageGTEStaging, RollbackPolicy: rollbackPolicy,
+		RuntimeRace: runtimeRace,
 	})
 	closeErr := st.Close()
 	if err != nil {
@@ -1685,7 +1766,7 @@ func contractIDs(contracts []contract.Contract) []string {
 	return ids
 }
 
-func deploymentMetadata(root, playbook string, components, extraVars []string, vault vaultInput, tags string) map[string]any {
+func deploymentMetadata(root, playbook string, components, extraVars []string, vault vaultInput, tags string, deferred []delivery.DeferredHost) map[string]any {
 	keys := make([]string, 0, len(extraVars))
 	for _, extra := range extraVars {
 		key, _, found := strings.Cut(extra, "=")
@@ -1708,6 +1789,9 @@ func deploymentMetadata(root, playbook string, components, extraVars []string, v
 	}
 	if vault.AskBecomePass {
 		metadata["become_password_prompted"] = true
+	}
+	if entries := deferredHostsMetadata(deferred); len(entries) > 0 {
+		metadata["deferred_hosts"] = entries
 	}
 	digests := make(map[string]string)
 	if digest, err := fileSHA256(filepath.Join(root, playbook)); err == nil {

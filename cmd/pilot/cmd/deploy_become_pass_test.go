@@ -131,11 +131,11 @@ func TestResolveInventoryVariables_NeverPassesBecomeFlagToAnsibleInventory(t *te
 
 func TestDeploymentMetadata_RecordsBecomePasswordPrompted(t *testing.T) {
 	root := repoRootForTest(t)
-	metadata := deploymentMetadata(root, "playbooks/apply/docker-apply.yml", []string{"docker"}, nil, vaultInput{AskBecomePass: true}, "")
+	metadata := deploymentMetadata(root, "playbooks/apply/docker-apply.yml", []string{"docker"}, nil, vaultInput{AskBecomePass: true}, "", nil)
 	if metadata["become_password_prompted"] != true {
 		t.Fatalf("metadata = %+v, want become_password_prompted=true", metadata)
 	}
-	metadataOff := deploymentMetadata(root, "playbooks/apply/docker-apply.yml", []string{"docker"}, nil, vaultInput{}, "")
+	metadataOff := deploymentMetadata(root, "playbooks/apply/docker-apply.yml", []string{"docker"}, nil, vaultInput{}, "", nil)
 	if _, ok := metadataOff["become_password_prompted"]; ok {
 		t.Fatalf("metadata = %+v, want no become_password_prompted key when not requested", metadataOff)
 	}

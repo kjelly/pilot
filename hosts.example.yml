@@ -53,5 +53,19 @@ hosts:
     roles: [freeipa-client, freeipa-dns-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]
     env: staging
 
+  # 範例:兩台由外部人員隨時開關的機器(deployment_availability: optional)。
+  # pilot 不管電源(不會幫你開機/關機),但 optional 機器離線時佈署會把它
+  # 跳過(deferred)而不是整批失敗;沒填這個欄位等於 required —— 離線就擋。
+  dev-vm-01:
+    ansible_host: "<FILL-ME>"        # 例 10.0.0.31
+    roles: [freeipa-client, freeipa-dns-client, linux-servers, host-monitoring]
+    env: prod
+    deployment_availability: optional
+  dev-vm-02:
+    ansible_host: "<FILL-ME>"        # 例 10.0.0.32
+    roles: [freeipa-client, linux-servers]
+    env: prod
+    deployment_availability: optional
+
   # 需要更多機器就照上面格式往下加;key(短名)自己取,全域唯一即可。
   # 用不到某個角色就別把它列進 roles —— 不用像 inventory.yml 那樣整段刪。

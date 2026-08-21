@@ -54,6 +54,7 @@ printf '{"plays":[{"tasks":[{"hosts":{"host-a":{"stdout":"%s","rc":0}}}]}]}\n' "
 	runner.Timeout = 5 * time.Second
 	restore := stubDeploymentConfirm(t, false, true)
 	defer restore()
+	stubDeploymentAvailabilityAllReachable(t)
 	if err := executeRecordedDeployment(context.Background(), runner, &bytes.Buffer{}, "playbooks/apply/docker-apply.yml", inv, "", "", []string{"stage=sandbox", "example=value"}, vaultInput{}, "sandbox", []string{"docker"}); err != nil {
 		t.Fatal(err)
 	}
