@@ -59,3 +59,19 @@ freeipa_domain: ipa.pilot.internal
 # ipa-server-install 用的 --ntp-server 清單。預設是台灣的公開時間伺服器;
 # 其他地區請覆寫成該地區慣用的 NTP server。
 # freeipa_ntp_servers: [tock.stdtime.gov.tw, watch.stdtime.gov.tw]
+
+# freeipa-client 是否在 enrollment 時自動在 FreeIPA authoritative DNS 建立
+# 本 client 的 A/AAAA record(freeipa-client-apply.yml,見 docs/verification/
+# freeipa-client.md C11)。不填時 effective 值繼承 selected FreeIPA server
+# 的 freeipa_setup_dns(上面那個,預設 true)——通常不用填。只有想強制
+# 開/關(且與 server 的 freeipa_setup_dns 不一致會直接 fail,不會 silent
+# skip)才需要覆寫:
+# freeipa_client_register_dns: true
+
+# 明確指定要寫入 DNS 的 address(IPv4/IPv6 皆可)。不填時 fallback 為這台
+# host 的 ansible_default_ipv4.address。注意:此處第一個 IPv4 必須與
+# ansible_default_ipv4.address 一致,本 pilot 尚未支援 multi-NIC 的
+# DNS//etc/hosts 分歧位址(fail-closed,見 spec.md §10):
+# freeipa_client_dns_addresses:
+#   - 10.20.30.41
+#   - 2001:db8:30::41

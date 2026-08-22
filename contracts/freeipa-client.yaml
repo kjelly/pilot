@@ -24,6 +24,13 @@ groupVars:
   # overrides that inventory default.
   - {name: freeipa_server_ip, type: string, required: false, secret: false}
   - {name: ipa_admin_password, type: string, required: true, secret: true}
+  # Host DNS registration (spec.md: freeipa-client-host-dns-registration).
+  # Effective default when unset: inherit the selected freeipa-server host's
+  # own freeipa_setup_dns (contract schema has no cross-component conditional
+  # default expression, so this is enforced in the apply playbook and locked
+  # by internal/spec/freeipa_client_regression_test.go, per spec.md §19).
+  - {name: freeipa_client_register_dns, type: boolean, required: false, secret: false}
+  - {name: freeipa_client_dns_addresses, type: stringList, required: false, secret: false}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:

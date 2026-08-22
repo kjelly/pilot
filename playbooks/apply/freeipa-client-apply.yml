@@ -16,11 +16,25 @@
 # enrollment + SSSD wiring is identical, so this playbook gates on the OS
 # family and installs the right package.
 #
-# NO built-in DNS in this pilot (the server runs with --no-host-dns): the
-# client cannot discover the KDC via SRV records, so we (a) pass --server /
-# --domain / --realm explicitly and (b) pin the server FQDN in /etc/hosts.
+# No SRV-based KDC discovery in this pilot: we always pass --server /
+# --domain / --realm explicitly and pin the server FQDN in /etc/hosts,
+# whether or not the selected FreeIPA server runs native DNS.
 # NO NTP here (--no-ntp): time sync is owned by the existing `ntp`(chrony)
 # role; Kerberos needs clock skew < 5 min — asserted/warned below.
+#
+# Host DNS registration (spec.md: freeipa-client-host-dns-registration):
+# when the selected FreeIPA server provides native DNS (freeipa_setup_dns,
+# see freeipa-dns-client-apply.yml's own hostvars-walk convention), this
+# playbook also registers this client's own A/AAAA record in FreeIPA's
+# authoritative DNS as part of enrollment (--ip-address=) or, for an
+# already-enrolled host, backfills it via an idempotent kinit + dnsrecord-add
+# (tasks/freeipa-client-host-dns.yml, tagged C11). This is host-enrollment
+# lifecycle DNS, not the freeipa-dns.yaml service-DNS manifest — do not add
+# per-client entries there (spec.md §2.3).
+#   freeipa_client_register_dns    : bool, default = selected server's
+#                                    freeipa_setup_dns when unset
+#   freeipa_client_dns_addresses   : explicit address list; falls back to
+#                                    ansible_default_ipv4.address
 #
 # Secrets: ipa_admin_password (the enrollment principal's password) comes from
 # a vault file, NEVER hard-coded (and the enroll task is no_log):
@@ -86,6 +100,16 @@
 
     ipa_config_marker: /etc/ipa/default.conf   # created iff already enrolled
     ipa_enroll_timeout_s: 300
+
+    # Host DNS registration inputs (spec.md freeipa-client-host-dns-registration).
+    # freeipa_client_register_dns left UNSET on purpose: the effective value is
+    # computed in pre_tasks from the selected FreeIPA server's freeipa_setup_dns
+    # when the operator hasn't set it explicitly (spec.md §4.2/§7).
+    freeipa_client_dns_addresses: []
+    # Record name relative to the zone (`dnsrecord-add <zone> <name> ...` wants
+    # the short label, not the FQDN) — reused by both enrollment planning and
+    # the existing-client backfill path below.
+    ipa_client_dns_record_name: "{{ ipa_client_fqdn | regex_replace('\\.' ~ (ipa_domain | regex_escape) ~ '$', '') }}"
 
     # Ubuntu package that provides ipa-client-install (EL uses ipa-client).
     ipa_client_packages_debian: [freeipa-client]
@@ -160,6 +184,15 @@
           auth will fail on clock skew (> 5 min).
       when: "'active' not in (ipa_ntp_check.stdout | default(''))"
       tags: [always]
+
+    # Host DNS registration preflight (spec.md freeipa-client-host-dns-registration
+    # §9/§16: "DNS preflight" must run before ANY mutation, including the
+    # /etc/hosts pin below — hence pre_tasks, not tasks. All read-only.
+    - name: "FreeIPA client DNS — resolve + preflight (plan, no mutation)"
+      ansible.builtin.include_tasks: tasks/freeipa-client-host-dns.yml
+      vars:
+        freeipa_client_dns_phase: plan
+      tags: [freeipa-client, C11]
 
   tasks:
     # ipa-client-install needs this host's own FQDN to resolve to a
@@ -265,13 +298,35 @@
     #   --server/--domain/--realm : explicit (no DNS SRV discovery in this pilot)
     #   --mkhomedir               : create home dirs for IPA users on first login
     #   --no-ntp                  : time sync owned by the ntp role
-    #   --no-dns-sshfp            : we don't manage DNS, so don't publish SSHFP
+    #   --no-dns-sshfp            : SSHFP publication stays out of scope regardless
+    #                               of A/AAAA host DNS registration (spec.md §3.2)
     #   --force-join              : recover cleanly if a stale host entry exists
+    #
+    # Deliberately does NOT pass --ip-address, contrary to spec.md §9.1's
+    # original design. Live vm-target testing (2026-08-21) found that
+    # --ip-address does NOT register DNS via a server-side host-add call —
+    # it makes ipa-client-install itself attempt a client-side `nsupdate`
+    # GSS-TSIG dynamic-DNS update (functionally the same class of mechanism
+    # as the always-on dynamic-DNS-updates flag this feature deliberately
+    # never defaults to — spec.md §2.2 — just scoped to these addresses
+    # instead of every interface). That update requires the
+    # client's OS resolver to already point at FreeIPA DNS to find the
+    # authoritative server via SOA lookup — a DIFFERENT component's job
+    # (freeipa-dns-client-apply.yml), which spec.md §18 explicitly keeps
+    # independent of enrollment. Without it, nsupdate's SOA discovery walks
+    # up to the real internet root servers and times out (~37s), logs
+    # "ERROR Failed to update DNS records.", and creates nothing — confirmed
+    # via `ipa dnsrecord-find` and `ipa host-show` showing no IP recorded at
+    # all. So DNS registration always goes through the admin-kinit +
+    # `dnsrecord-add` path below (tasks/freeipa-client-host-dns.yml, apply
+    # phase) for BOTH a fresh enroll and an already-enrolled host — there is
+    # no functional difference between "new" and "existing" once enrollment
+    # itself has completed, so both converge on one registration mechanism.
     - name: "FreeIPA client — run ipa-client-install (enroll into {{ ipa_realm }})"
       ansible.builtin.command:
         argv:
           - ipa-client-install
-          - "-U"                                       # unattended
+          - "-U"
           - "--server={{ ipa_server_fqdn }}"
           - "--domain={{ ipa_domain }}"
           - "--realm={{ ipa_realm }}"
@@ -526,3 +581,16 @@
               /etc/hosts has "{{ ipa_server_ip }} {{ ipa_server_fqdn }}"); clock skew
               (apply ntp role — Kerberos needs < 5 min); a half-finished prior enroll
               (run `ipa-client-install --uninstall -U` then rerun).
+
+    # Host DNS registration apply + verify (spec.md §11/§16): runs AFTER
+    # enrollment/health succeeds, whether this host was freshly enrolled this
+    # run (--ip-address already registered it) or was already enrolled
+    # (ipa_cfg.stat.exists, captured before ipa-client-install ran — the
+    # existing-client backfill path). Either way, ends by re-querying
+    # authoritative DNS and failing loudly (never rolling back enrollment) if
+    # it still doesn't match desired.
+    - name: "FreeIPA client DNS — existing-client backfill + post-apply verify"
+      ansible.builtin.include_tasks: tasks/freeipa-client-host-dns.yml
+      vars:
+        freeipa_client_dns_phase: apply
+      tags: [freeipa-client, C11]

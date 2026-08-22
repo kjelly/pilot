@@ -9,7 +9,7 @@ import (
 )
 
 // TestRegression_FreeipaClientSpec locks the structural contract of
-// docs/verification/freeipa-client.md: 10 rows C1..C10, lint-clean, and a
+// docs/verification/freeipa-client.md: 11 rows C1..C11, lint-clean, and a
 // generated verify playbook that covers every row.
 //
 // Note on inventory alignment: like freeipa-server.md, this spec's §1 Targets
@@ -25,13 +25,13 @@ func TestRegression_FreeipaClientSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	// 1. Row count is locked at 10.
-	if len(s.Rows) != 10 {
-		t.Fatalf("rows=%d want=10 (spec must cover C1..C10 inclusive)", len(s.Rows))
+	// 1. Row count is locked at 11.
+	if len(s.Rows) != 11 {
+		t.Fatalf("rows=%d want=11 (spec must cover C1..C11 inclusive)", len(s.Rows))
 	}
 
-	// 2. IDs are C1..C10 with no gaps and no duplicates.
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"}
+	// 2. IDs are C1..C11 with no gaps and no duplicates.
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11"}
 	gotIDs := make([]string, 0, len(s.Rows))
 	seen := map[string]bool{}
 	for _, r := range s.Rows {
@@ -149,7 +149,7 @@ func TestRegression_FreeipaClientSpec_EnrollBeforeAAA(t *testing.T) {
 			t.Fatalf("%s row missing", base)
 		}
 	}
-	for _, aaa := range []string{"C4", "C5", "C6", "C7", "C8", "C9", "C10"} {
+	for _, aaa := range []string{"C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11"} {
 		if lineOf["C1"] >= lineOf[aaa] {
 			t.Errorf("ordering: C1 (enrolled) at line %d must precede %s at line %d",
 				lineOf["C1"], aaa, lineOf[aaa])
@@ -157,6 +157,108 @@ func TestRegression_FreeipaClientSpec_EnrollBeforeAAA(t *testing.T) {
 		if lineOf["C2"] >= lineOf[aaa] {
 			t.Errorf("ordering: C2 (sssd active) at line %d must precede %s at line %d",
 				lineOf["C2"], aaa, lineOf[aaa])
+		}
+	}
+}
+
+// TestRegression_FreeipaClientSpec_C11QueriesAuthoritativeDNS locks spec.md
+// §17: C11 must directly query authoritative FreeIPA DNS, never fall back to
+// getent/ping (which would false-positive off /etc/hosts pins C1/C3 already
+// write).
+func TestRegression_FreeipaClientSpec_C11QueriesAuthoritativeDNS(t *testing.T) {
+	const specPath = "../../docs/verification/freeipa-client.md"
+	s, err := Parse(specPath)
+	if err != nil {
+		t.Fatalf("parse %s: %v", specPath, err)
+	}
+	var c11 string
+	for _, r := range s.Rows {
+		if r.ID == "C11" {
+			c11 = r.Command
+		}
+	}
+	if c11 == "" {
+		t.Fatal("C11 row missing")
+	}
+	if !strings.HasPrefix(strings.TrimSpace(c11), "dig ") {
+		t.Errorf("C11 must query DNS directly via `dig`, got %q", c11)
+	}
+	if !strings.Contains(c11, "@") {
+		t.Errorf("C11 must target an explicit DNS server (@server), got %q", c11)
+	}
+	for _, forbidden := range []string{"getent", "ping "} {
+		if strings.Contains(c11, forbidden) {
+			t.Errorf("C11 must not use %q — that reads /etc/hosts, not authoritative DNS (spec.md §17), got %q", forbidden, c11)
+		}
+	}
+}
+
+// TestRegression_FreeipaClientApplyPlaybook_HostDNSSafety locks the
+// non-negotiable safety rules from spec.md §27/§28 for the host DNS
+// registration feature: no --all-ip-addresses, no default dynamic DNS
+// updates, and the shared DNS task file is wired in before AND after
+// ipa-client-install (plan preflight before mutation, apply+verify after).
+func TestRegression_FreeipaClientApplyPlaybook_HostDNSSafety(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-client-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	if strings.Contains(playbook, "--all-ip-addresses") {
+		t.Error("playbook must never use --all-ip-addresses (spec.md §4.5)")
+	}
+	if strings.Contains(playbook, "--enable-dns-updates") {
+		t.Error("playbook must not default to --enable-dns-updates (spec.md §2.2)")
+	}
+
+	planIdx := strings.Index(playbook, "freeipa_client_dns_phase: plan")
+	installIdx := strings.Index(playbook, "run ipa-client-install")
+	applyIdx := strings.Index(playbook, "freeipa_client_dns_phase: apply")
+	if planIdx < 0 || installIdx < 0 || applyIdx < 0 {
+		t.Fatalf("playbook must include tasks/freeipa-client-host-dns.yml in both plan and apply phases, around ipa-client-install")
+	}
+	if !(planIdx < installIdx && installIdx < applyIdx) {
+		t.Errorf("DNS preflight (plan) must run before ipa-client-install, and backfill+verify (apply) must run after it: planIdx=%d installIdx=%d applyIdx=%d", planIdx, installIdx, applyIdx)
+	}
+
+	// The plan phase must be reachable from pre_tasks (before ANY mutation,
+	// including the /etc/hosts pin) — spec.md §16's "DNS preflight" step.
+	preTasksIdx := strings.Index(playbook, "pre_tasks:")
+	hostsPinIdx := strings.Index(playbook, "pin this host")
+	if preTasksIdx < 0 || hostsPinIdx < 0 || !(preTasksIdx < planIdx && planIdx < hostsPinIdx) {
+		t.Errorf("DNS plan-phase include must sit inside pre_tasks, before the /etc/hosts self-pin task")
+	}
+}
+
+// TestRegression_FreeipaClientHostDNSTask_NoLog locks spec.md §12: the
+// dedicated-ccache kinit task in the DNS backfill path must be no_log, same
+// convention as the main enrollment task and freeipa-dns-apply.yml.
+func TestRegression_FreeipaClientHostDNSTask_NoLog(t *testing.T) {
+	const taskPath = "../../playbooks/apply/tasks/freeipa-client-host-dns.yml"
+	raw, err := os.ReadFile(taskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", taskPath, err)
+	}
+	task := string(raw)
+
+	kinitIdx := strings.Index(task, "kinit admin into the dedicated ccache")
+	if kinitIdx < 0 {
+		t.Fatal("expected a kinit task for the DNS backfill ccache")
+	}
+	// Look for no_log: true within a reasonable window after the task name.
+	window := task[kinitIdx:]
+	if end := strings.Index(window, "\n\n"); end > 0 {
+		window = window[:end]
+	}
+	if !strings.Contains(window, "no_log: true") {
+		t.Error("DNS backfill kinit task must be no_log: true — it pipes ipa_enroll_password")
+	}
+
+	for _, forbidden := range []string{"--all-ip-addresses", "--enable-dns-updates"} {
+		if strings.Contains(task, forbidden) {
+			t.Errorf("shared DNS task file must not contain %q", forbidden)
 		}
 	}
 }

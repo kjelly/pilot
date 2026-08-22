@@ -1,0 +1,332 @@
+# Shared task file: FreeIPA client host DNS registration
+# (spec.md: freeipa-client-host-dns-registration).
+#
+# Included TWICE from freeipa-client-apply.yml with a different
+# `freeipa_client_dns_phase`:
+#
+#   phase: plan   — pre_tasks, BEFORE any mutation (including the /etc/hosts
+#                   pin). Resolves effective desired state, validates it, and
+#                   queries authoritative DNS read-only to compute a
+#                   create/no-op/conflict plan (spec.md §9 "Prepare",
+#                   §13 check-mode preview). Fails closed on any conflict —
+#                   never mutates.
+#   phase: apply  — tasks:, AFTER ipa-client-install and the post-enroll
+#                   health checks. Idempotently registers any missing
+#                   address via kinit + dnsrecord-add (spec.md §11), for BOTH
+#                   a fresh enroll and an already-enrolled host — live
+#                   vm-target testing (2026-08-21) found ipa-client-install's
+#                   --ip-address does not actually register DNS (it only
+#                   attempts a client-side nsupdate GSS-TSIG update, which
+#                   needs the OS resolver already pointed at FreeIPA DNS —
+#                   see the comment on the ipa-client-install task in
+#                   freeipa-client-apply.yml), so there is no separate
+#                   "new enrollment already did it" case to skip. Re-queries
+#                   authoritative DNS afterward and fails (not silently) if
+#                   it still doesn't match desired (spec.md §16 — no
+#                   destructive rollback; next rerun re-enters this path).
+#
+# Both phases are read facts set once in the plan phase (set_fact persists
+# for the rest of the play), so the apply phase does not recompute them.
+---
+- name: "FreeIPA client DNS (plan) — resolve native-DNS capability of the selected FreeIPA server"
+  ansible.builtin.set_fact:
+    # Same hostvars-walk convention as freeipa-dns-client-apply.yml: read
+    # freeipa_setup_dns from the SAME host used to resolve ipa_server_ip/fqdn
+    # above (groups['freeipa-server'][0]), not any other host — that host is
+    # "the selected server". If this inventory has no freeipa-server group at
+    # all (server referenced only via an explicit IP), capability cannot be
+    # detected from inventory, so default to false rather than guess
+    # (spec.md §7: "不應以 client 本機猜測").
+    ipa_server_native_dns: >-
+      {{ (hostvars[groups['freeipa-server'][0]].freeipa_setup_dns | default(true) | bool)
+         if (groups['freeipa-server'] | default([]) | length > 0) else false }}
+  when: freeipa_client_dns_phase == 'plan'
+
+- name: "FreeIPA client DNS (plan) — resolve effective register_dns"
+  ansible.builtin.set_fact:
+    freeipa_client_register_dns_effective: >-
+      {{ (freeipa_client_register_dns | bool) if freeipa_client_register_dns is defined
+         else ipa_server_native_dns }}
+  when: freeipa_client_dns_phase == 'plan'
+
+- name: "Gate: DNS registration requested but selected FreeIPA server has no native DNS (spec.md §7)"
+  ansible.builtin.assert:
+    that:
+      - not ((freeipa_client_register_dns is defined) and (freeipa_client_register_dns | bool) and not ipa_server_native_dns)
+    fail_msg: >-
+      FreeIPA client DNS registration requested but selected FreeIPA server
+      does not provide native DNS.
+  when: freeipa_client_dns_phase == 'plan'
+
+- name: "FreeIPA client DNS (plan) — resolve effective DNS addresses"
+  ansible.builtin.set_fact:
+    ipa_client_dns_addresses_effective: >-
+      {{ (freeipa_client_dns_addresses | default([]) | list)
+         if (freeipa_client_dns_addresses | default([]) | length > 0)
+         else ([ansible_default_ipv4.address] if (ansible_default_ipv4.address | default('') | length > 0) else []) }}
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "Gate: effective DNS address list must not be empty when registration is enabled (spec.md §6)"
+  ansible.builtin.assert:
+    that:
+      - (ipa_client_dns_addresses_effective | default([]) | length) > 0
+    fail_msg: >-
+      freeipa_client_register_dns is enabled but no effective DNS address
+      could be determined (neither freeipa_client_dns_addresses nor
+      ansible_default_ipv4.address is set).
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "Gate: client FQDN is well-formed for DNS registration (spec.md §5.1)"
+  ansible.builtin.assert:
+    that:
+      - (ipa_client_fqdn | default('', true) | length) > 0
+      - (ipa_client_fqdn | lower) != 'localhost'
+      - ipa_client_fqdn == (ipa_client_fqdn | lower)
+      - ipa_client_fqdn != ipa_domain
+      - ipa_client_fqdn.endswith('.' ~ ipa_domain)
+      - ipa_client_fqdn != ipa_server_fqdn
+    fail_msg: >-
+      ipa_client_fqdn ({{ ipa_client_fqdn | default('') }}) is not a valid DNS
+      owner: must be non-empty, lowercase, not localhost, a subdomain of
+      {{ ipa_domain }}, and not equal to the FreeIPA server FQDN
+      ({{ ipa_server_fqdn }}).
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — validate each effective DNS address (format + policy, spec.md §6)"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import ipaddress, sys
+        ip = ipaddress.ip_address(sys.argv[1])
+        bad = ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local
+        print('BAD' if bad else 'OK')
+        sys.exit(1 if bad else 0)
+      - "{{ item }}"
+  loop: "{{ ipa_client_dns_addresses_effective | default([]) }}"
+  loop_control: {label: "{{ item }}"}
+  register: ipa_client_dns_addr_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "Gate: every effective DNS address is a valid, non-reserved IP literal (spec.md §6)"
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+    fail_msg: >-
+      Invalid or disallowed DNS address {{ item.item }}: must be a valid
+      IPv4/IPv6 literal and not loopback/unspecified/multicast/link-local
+      (spec.md §6). rc={{ item.rc }} stdout={{ item.stdout | default('') }}
+      stderr={{ item.stderr | default('') }}
+  loop: "{{ ipa_client_dns_addr_check.results | default([]) }}"
+  loop_control: {label: "{{ item.item | default('unknown') }}"}
+  when: freeipa_client_dns_phase == 'plan' and (ipa_client_dns_addr_check.results | default([]) | length) > 0
+
+- name: "FreeIPA client DNS (plan) — dedupe effective DNS addresses (preserve order, spec.md §6)"
+  ansible.builtin.set_fact:
+    ipa_client_dns_addresses_effective: "{{ ipa_client_dns_addresses_effective | unique }}"
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "Gate: explicit DNS IPv4 must match this host's /etc/hosts canonical IPv4 (spec.md §10, fail-closed v1)"
+  ansible.builtin.assert:
+    that:
+      - not (ipa_client_dns_explicit_ipv4 is not none and ipa_client_dns_explicit_ipv4 != ansible_default_ipv4.address)
+    fail_msg: >-
+      freeipa_client_dns_addresses declares IPv4 {{ ipa_client_dns_explicit_ipv4 }}
+      but this host's /etc/hosts canonical IPv4 (ansible_default_ipv4.address) is
+      {{ ansible_default_ipv4.address }}. This pilot does not yet support
+      divergent DNS/etc-hosts addresses on the same host (multi-NIC policy is
+      out of scope — spec.md §10); pass a freeipa_client_dns_addresses IPv4
+      that matches ansible_default_ipv4.address, or omit it to use the default.
+  vars:
+    ipa_client_dns_explicit_ipv4: >-
+      {{ (freeipa_client_dns_addresses | default([])
+          | select('match', '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') | list | first)
+         if (freeipa_client_dns_addresses | default([])
+             | select('match', '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') | list | length > 0)
+         else None }}
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+# ── Authoritative-DNS preflight (read-only; uses ipa_server_ip, not
+#    ipa_server_fqdn — /etc/hosts has not been pinned yet at plan time) ─────
+- name: "FreeIPA client DNS (plan) — query authoritative DNS: current A records"
+  ansible.builtin.command:
+    argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", A]
+  register: ipa_client_dns_current_a
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — query authoritative DNS: current AAAA records"
+  ansible.builtin.command:
+    argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", AAAA]
+  register: ipa_client_dns_current_aaaa
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — query authoritative DNS: CNAME at owner"
+  ansible.builtin.command:
+    argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", CNAME]
+  register: ipa_client_dns_current_cname
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "Gate: DNS owner must not already have a CNAME (spec.md §8.2)"
+  ansible.builtin.assert:
+    that:
+      - (ipa_client_dns_current_cname.stdout | default('') | trim | length) == 0
+    fail_msg: >-
+      {{ ipa_client_fqdn }} already has a CNAME record in authoritative
+      FreeIPA DNS; A/AAAA registration cannot coexist with a CNAME at the
+      same owner (spec.md §8.2).
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — compute current authoritative addresses"
+  ansible.builtin.set_fact:
+    ipa_client_dns_current_addresses: >-
+      {{ ((ipa_client_dns_current_a.stdout | default('')).splitlines()
+          + (ipa_client_dns_current_aaaa.stdout | default('')).splitlines())
+         | map('trim') | reject('equalto', '') | list | unique }}
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — compute extra/missing sets against desired"
+  ansible.builtin.set_fact:
+    ipa_client_dns_extra: "{{ ipa_client_dns_current_addresses | default([]) | difference(ipa_client_dns_addresses_effective) }}"
+    ipa_client_dns_missing: "{{ ipa_client_dns_addresses_effective | difference(ipa_client_dns_current_addresses | default([])) }}"
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "Gate: authoritative DNS must not conflict with desired addresses (spec.md §8.2/§8.3, fail-closed, no implicit takeover)"
+  ansible.builtin.assert:
+    that:
+      - (ipa_client_dns_extra | default([]) | length) == 0
+    fail_msg: >-
+      {{ ipa_client_fqdn }} already has authoritative DNS address(es)
+      {{ ipa_client_dns_extra }} not present in the desired set
+      {{ ipa_client_dns_addresses_effective }}. No implicit takeover
+      (spec.md §8.3) — resolve the conflict manually or adjust
+      freeipa_client_dns_addresses.
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — report plan (spec.md §13.2)"
+  ansible.builtin.debug:
+    msg: |
+      FreeIPA client DNS plan:
+        fqdn: {{ ipa_client_fqdn }}
+        registration: {{ 'ENABLED' if freeipa_client_register_dns_effective | bool else 'DISABLED' }}
+        current A/AAAA: {{ ipa_client_dns_current_addresses | default([]) }}
+        desired: {{ ipa_client_dns_addresses_effective | default([]) }}
+        action: {{ 'NOOP' if (ipa_client_dns_missing | default([]) | length) == 0 else 'CREATE_OR_ADD' }}
+  when: freeipa_client_dns_phase == 'plan'
+
+# ── Apply phase: DNS registration (kinit + idempotent dnsrecord-add) + verify
+# Runs for BOTH a fresh enroll and an already-enrolled host — there is no
+# --ip-address-based server-side registration to fall back on (live testing
+# 2026-08-21 found ipa-client-install's --ip-address only attempts a
+# client-side nsupdate GSS-TSIG update, which needs the OS resolver already
+# pointed at FreeIPA DNS; see the long comment on the ipa-client-install task
+# in freeipa-client-apply.yml). So this kinit+dnsrecord-add path is the ONLY
+# DNS-registration mechanism, gated purely on "anything missing" rather than
+# on ipa_cfg.stat.exists (spec.md §11's "new vs existing" distinction).
+- name: "FreeIPA client DNS (apply) — register/backfill missing addresses (kinit + idempotent dnsrecord-add, spec.md §9/§11)"
+  when:
+    - freeipa_client_dns_phase == 'apply'
+    - not ansible_check_mode
+    - freeipa_client_register_dns_effective | bool
+    - (ipa_client_dns_missing | default([]) | length) > 0
+  block:
+    - name: "FreeIPA client DNS backfill — create a dedicated Kerberos credential cache path"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: pilot-freeipa-client-dns-
+        suffix: .ccache
+      register: ipa_client_dns_ccache_file
+      changed_when: false
+      check_mode: false
+
+    - name: "FreeIPA client DNS backfill — kinit admin into the dedicated ccache"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          printf %s "{{ ipa_enroll_password }}" | KRB5CCNAME="{{ ipa_client_dns_ccache_file.path }}" kinit {{ ipa_enroll_principal }}@{{ ipa_realm }}
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      check_mode: false
+
+    - name: "FreeIPA client DNS backfill — add each missing address to authoritative DNS"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - dnsrecord-add
+          - "{{ ipa_domain }}"
+          - "{{ ipa_client_dns_record_name }}"
+          - "--{{ 'aaaa' if (':' in item) else 'a' }}-rec={{ item }}"
+      environment:
+        KRB5CCNAME: "{{ ipa_client_dns_ccache_file.path }}"
+      loop: "{{ ipa_client_dns_missing | default([]) }}"
+      loop_control: {label: "{{ item }}"}
+      register: ipa_client_dns_add
+      # Confirmed via live testing (2026-08-21) against a real FreeIPA
+      # server: re-adding a value the RRset already contains does NOT print
+      # "already contains" (the guessed string) — the real ipa CLI error is
+      # "ipa: ERROR: no modifications to be performed", rc=1. The `when:` on
+      # the parent block already filters the loop down to addresses the
+      # plan-phase diff confirmed missing, so this failed_when is a
+      # belt-and-suspenders guard against a same-run race (another process
+      # adding the same value between the plan-phase read and this write),
+      # not the primary idempotency mechanism.
+      changed_when: ipa_client_dns_add.rc | default(1) == 0
+      failed_when:
+        - ipa_client_dns_add.rc | default(0) != 0
+        - "'no modifications to be performed' not in (ipa_client_dns_add.stdout | default('') + ipa_client_dns_add.stderr | default(''))"
+  always:
+    - name: "FreeIPA client DNS backfill — destroy the Kerberos ticket in the dedicated ccache"
+      ansible.builtin.command:
+        argv: [kdestroy, -c, "{{ ipa_client_dns_ccache_file.path }}"]
+      changed_when: false
+      failed_when: false
+      when: ipa_client_dns_ccache_file is defined and ipa_client_dns_ccache_file.path is defined
+
+- name: "FreeIPA client DNS (apply) — post-apply authoritative DNS verification (spec.md §9/§14/§16)"
+  when:
+    - freeipa_client_dns_phase == 'apply'
+    - not ansible_check_mode
+    - freeipa_client_register_dns_effective | bool
+  block:
+    - name: "FreeIPA client DNS verify — query authoritative DNS: A records (post-apply)"
+      ansible.builtin.command:
+        argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", A]
+      register: ipa_client_dns_verify_a
+      changed_when: false
+      failed_when: false
+
+    - name: "FreeIPA client DNS verify — query authoritative DNS: AAAA records (post-apply)"
+      ansible.builtin.command:
+        argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", AAAA]
+      register: ipa_client_dns_verify_aaaa
+      changed_when: false
+      failed_when: false
+
+    - name: "Gate: authoritative DNS matches desired addresses exactly after apply (spec.md §9/§14)"
+      ansible.builtin.assert:
+        that:
+          - (ipa_client_dns_addresses_effective | difference(ipa_client_dns_verify_current) | length) == 0
+        fail_msg: >-
+          Authoritative FreeIPA DNS for {{ ipa_client_fqdn }} does not yet
+          contain all desired addresses {{ ipa_client_dns_addresses_effective }}
+          (observed: {{ ipa_client_dns_verify_current }}). Enrollment/backfill
+          ran but DNS verification failed (spec.md §16) — this is NOT rolled
+          back; rerun will re-enter the backfill path above.
+      vars:
+        ipa_client_dns_verify_current: >-
+          {{ ((ipa_client_dns_verify_a.stdout | default('')).splitlines()
+              + (ipa_client_dns_verify_aaaa.stdout | default('')).splitlines())
+             | map('trim') | reject('equalto', '') | list | unique }}
