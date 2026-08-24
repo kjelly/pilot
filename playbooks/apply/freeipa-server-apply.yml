@@ -133,6 +133,11 @@
     ipa_config_marker: /var/lib/ipa/.pilot-freeipa-installed
     ipa_install_timeout_s: 900                       # first install runs 8–12 min
 
+    # The packaged FreeIPA WSGI configuration defaults this to an effectively
+    # infinite value.  A stuck GSSAPI/LDAP/PKI request must not permanently
+    # consume one of the four single-threaded IPA WSGI workers.
+    ipa_httpd_wsgi_socket_timeout: 300
+
     # DM password defaults to the admin password unless explicitly given
     ipa_dm_password: "{{ ipa_admin_password }}"
 
@@ -517,6 +522,31 @@
       when: not ansible_check_mode
       tags: [freeipa, freeipa-service]
 
+    # /etc/httpd/conf.d/ipa.conf is package-owned and may be rewritten by a
+    # FreeIPA upgrade.  Reconcile the bounded timeout on every apply and keep
+    # a one-time local snapshot before changing it.  A full restart is
+    # intentional: a graceful reload cannot reliably clear WSGI workers that
+    # are already stuck in an old generation.
+    - name: "FreeIPA — snapshot packaged IPA HTTPD configuration"
+      ansible.builtin.copy:
+        src: /etc/httpd/conf.d/ipa.conf
+        dest: /etc/httpd/conf.d/ipa.conf.pre-freeipa-wsgi-timeout.bak
+        remote_src: true
+        force: false
+        mode: "0644"
+      when: not ansible_check_mode
+      tags: [freeipa, freeipa-service]
+
+    - name: "FreeIPA — bound WSGI socket timeout (avoid permanently stuck workers)"
+      ansible.builtin.replace:
+        path: /etc/httpd/conf.d/ipa.conf
+        regexp: '(?ms)(^WSGIDaemonProcess ipa\b.*?socket-timeout=)\d+'
+        replace: '\g<1>{{ ipa_httpd_wsgi_socket_timeout }}'
+      register: ipa_httpd_wsgi_timeout
+      when: not ansible_check_mode
+      notify: restart httpd after FreeIPA WSGI timeout change
+      tags: [freeipa, freeipa-service]
+
     - name: "FreeIPA — bring-up health + LDAP checks"
       when: not ansible_check_mode
       tags: [freeipa, freeipa-verify]
@@ -714,6 +744,19 @@
           no_log: true
 
   handlers:
+    - name: "Validate httpd configuration after FreeIPA WSGI timeout change"
+      ansible.builtin.command: httpd -t
+      changed_when: false
+      when: not ansible_check_mode
+      listen: restart httpd after FreeIPA WSGI timeout change
+
+    - name: "Restart httpd after FreeIPA WSGI timeout change"
+      ansible.builtin.systemd_service:
+        name: httpd
+        state: restarted
+      when: not ansible_check_mode
+      listen: restart httpd after FreeIPA WSGI timeout change
+
     # Same "validate before reload, never take down an already-running
     # service" convention as reverse-proxy-apply.yml's nginx handlers.
     # `rndc reconfig` (not a service restart) re-reads named.conf's options
