@@ -42,7 +42,19 @@
 #
 #   -e @host_vars/<hostname>.yml  # with prometheus_alert_rules: |
 #
-# Variables: see docs/verification/prometheus.md §1.5.
+# External monitoring targets (docs/verification/prometheus-external-targets.md,
+# spec.md §7-24) — scrape a third-party exporter Pilot doesn't manage via
+# Ansible, without touching prometheus_scrape_configs:
+#
+#   -e monitoring_targets_file=monitoring/targets.yml \
+#   -e monitoring_profiles_file=monitoring/scrape-profiles.yml \
+#   -e '{"monitoring_auth": {"my-auth-ref": {"type": "basic", "username": "...", "password": "..."}}}'
+#   (paths are relative to this playbook's own directory, same convention
+#   as prometheus_alert_rules_file above; monitoring_auth only needed when
+#   a profile declares an authRef)
+#
+# Variables: see docs/verification/prometheus.md §1.5 and
+# docs/verification/prometheus-external-targets.md §1.5.
 #
 # Stage gating (same convention as freeipa-server-apply.yml):
 #   sandbox  default; runs immediately
@@ -116,6 +128,26 @@
     # the trade-off taken for `prometheus_scrape_configs` would clash
     # with Jinja on the `{{ ... }}` inside alert annotations).
     prometheus_alert_rules_file: files/pilot-alert-rules-seed.yml
+
+    # ---- External monitoring targets (docs/verification/
+    # prometheus-external-targets.md, spec.md §7-24) ----
+    # monitoring_targets_file/monitoring_profiles_file point at workspace
+    # YAML files (same relative-to-this-playbook-directory convention as
+    # prometheus_alert_rules_file above), NOT inline -e JSON — operators
+    # edit real files instead of hand-quoting YAML. Left as empty strings
+    # (the default) this whole feature is a no-op: no directory, no scrape
+    # block, no volume mount — existing deployments with no monitoring/
+    # directory apply exactly as they did before this feature existed
+    # (spec.md §64, AC12/AC13/AC14).
+    monitoring_targets_file: ""
+    monitoring_profiles_file: ""
+    # monitoring_auth (authRef -> {type, username, password}) is
+    # DELIBERATELY NOT declared here — same undeclared-secret convention as
+    # thanos_aws_secret_access_key above.
+    prometheus_targets_host_dir: "{{ prometheus_config_dir }}/targets"
+    prometheus_targets_container_dir: /etc/prometheus/targets
+    monitoring_secrets_host_dir: "{{ prometheus_config_dir }}/monitoring-secrets"
+    monitoring_secrets_container_dir: /etc/prometheus/monitoring-secrets
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -258,6 +290,175 @@
           -e thanos_s3_endpoint=... to a fully externally-resolvable
           host:port.
 
+    # ---- External monitoring targets: load, validate, compile ----
+    # (docs/verification/prometheus-external-targets.md, spec.md §7-24).
+    # This is pure computation (no host mutation) so it belongs in
+    # pre_tasks, mirroring the node-exporter target-resolution block above
+    # (prometheus_node_exporter_scrape_block). Actual file writes happen
+    # later in tasks:, inside the same not-ansible_check_mode block as
+    # every other artifact this playbook renders.
+    - name: "Load monitoring target registry file (empty string when unset/missing)"
+      ansible.builtin.set_fact:
+        monitoring_targets_raw: >-
+          {{ lookup('file', monitoring_targets_file, errors='ignore')
+             if (monitoring_targets_file | default('', true) | length > 0)
+             else '' }}
+      tags: [always]
+
+    - name: "Load scrape profiles file (empty string when unset/missing)"
+      ansible.builtin.set_fact:
+        monitoring_profiles_raw: >-
+          {{ lookup('file', monitoring_profiles_file, errors='ignore')
+             if (monitoring_profiles_file | default('', true) | length > 0)
+             else '' }}
+      tags: [always]
+
+    # An unset/missing file resolves to schemaVersion:1, targets:[] (empty
+    # list/dict) — spec.md §64: no monitoring/ directory must be exactly
+    # equivalent to an empty registry, not an error.
+    - name: "Parse monitoring target registry"
+      ansible.builtin.set_fact:
+        monitoring_targets_resolved: >-
+          {{ ((monitoring_targets_raw | from_yaml).targets | default([], true))
+             if (monitoring_targets_raw | length > 0) else [] }}
+      tags: [always]
+
+    - name: "Parse scrape profiles"
+      ansible.builtin.set_fact:
+        monitoring_profiles_resolved: >-
+          {{ ((monitoring_profiles_raw | from_yaml).profiles | default({}, true))
+             if (monitoring_profiles_raw | length > 0) else {} }}
+      tags: [always]
+
+    # `selectattr('enabled', 'default', true)` is NOT valid Jinja — 'default'
+    # is a FILTER, not a selectattr TEST name ("No test named 'default'" at
+    # apply time, found via a real vm-target run). Normalize once, here, into
+    # a real boolean on every item (spec.md §8.5: default true when unset) so
+    # every later `selectattr('enabled')` downstream is a plain truthy check
+    # with no missing-key ambiguity. Accumulates into a DIFFERENT variable
+    # (monitoring_targets_normalized) than the loop source
+    # (monitoring_targets_resolved) — reusing one name for both would make
+    # the source list a moving target as the loop reassigns it — then
+    # overwrites monitoring_targets_resolved once at the end, same two-step
+    # shape as monitoring_scrape_jobs below (loop source there is
+    # monitoring_profiles_resolved, a different variable than the
+    # accumulator monitoring_scrape_jobs).
+    - name: "Normalize each monitoring target's 'enabled' (spec.md §8.5 default: true)"
+      ansible.builtin.set_fact:
+        monitoring_targets_normalized: >-
+          {{ (monitoring_targets_normalized | default([]))
+             + [ ({'enabled': true} | combine(item)) ] }}
+      loop: "{{ monitoring_targets_resolved }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "Replace monitoring_targets_resolved with its normalized form"
+      ansible.builtin.set_fact:
+        monitoring_targets_resolved: "{{ monitoring_targets_normalized | default([]) }}"
+
+    # Gate placed right after parsing (same "resolve then gate" ordering as
+    # the node-exporter basic-auth gate above). These are static properties
+    # of the two registry files themselves — no live Prometheus/network
+    # state needed — so they stand in for the `pilot monitoring validate`
+    # Go CLI described in spec.md §22/§32, which does not exist yet (see
+    # this spec's §1.5 DRAFT note).
+    - name: "Gate: every enabled monitoring target references an existing scrape profile"
+      ansible.builtin.assert:
+        that:
+          - item.profile in monitoring_profiles_resolved
+        fail_msg: >-
+          monitoring target "{{ item.name }}" references unknown scrape
+          profile "{{ item.profile }}" (see {{ monitoring_targets_file }} /
+          {{ monitoring_profiles_file }}).
+      loop: "{{ monitoring_targets_resolved | selectattr('enabled') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "Gate: scrape profile jobName values are unique"
+      ansible.builtin.assert:
+        that:
+          - (monitoring_profiles_resolved.values() | map(attribute='jobName') | list | length)
+            == (monitoring_profiles_resolved.values() | map(attribute='jobName') | unique | list | length)
+        fail_msg: >-
+          two or more profiles in {{ monitoring_profiles_file }} declare the
+          same jobName — spec.md §18 requires jobName to be unique across
+          profiles.
+
+    - name: "Gate: profile jobName must not use a reserved name (prometheus/node)"
+      ansible.builtin.assert:
+        that:
+          - (monitoring_profiles_resolved.values() | map(attribute='jobName')
+             | select('in', ['prometheus', 'node']) | list | length) == 0
+        fail_msg: >-
+          a profile in {{ monitoring_profiles_file }} uses a reserved
+          jobName ("prometheus" or "node" — spec.md §63); rename it.
+
+    - name: "Gate: every profile authRef resolves to a complete basic-auth credential"
+      ansible.builtin.assert:
+        that:
+          - item in (monitoring_auth | default({}, true))
+          - (monitoring_auth | default({}, true))[item].type | default('') == 'basic'
+          - (monitoring_auth | default({}, true))[item].username | default('') | length > 0
+          - (monitoring_auth | default({}, true))[item].password | default('') | length > 0
+        fail_msg: >-
+          profile authRef "{{ item }}" is not defined in monitoring_auth as
+          a complete basic-auth credential (type/username/password) —
+          spec.md §46; monitoring_auth must be supplied via vault/-e, never
+          committed plaintext.
+      loop: "{{ monitoring_profiles_resolved.values() | selectattr('authRef', 'defined') | map(attribute='authRef') | unique | list }}"
+      no_log: true
+
+    # Warning, not fail (spec.md §40) — an external target address that
+    # coincides with a host-monitoring-managed node_exporter is allowed
+    # (different job/profile/auth is a legitimate reason).
+    - name: "Warn if an external target's address overlaps a host-monitoring managed endpoint"
+      ansible.builtin.debug:
+        msg: "warning: endpoint {{ item }} is also managed by host-monitoring"
+      loop: >-
+        {{ (monitoring_targets_resolved | selectattr('enabled')
+            | map(attribute='address') | list)
+           | intersect(prometheus_node_exporter_targets) }}
+
+    # One Prometheus scrape job per profile (jobName uniqueness is already
+    # gated above, so this is a 1:1 mapping — no groupby needed). Built via
+    # Ansible's own `loop:` iterating simple per-item `{{ }}` expressions,
+    # not a Jinja `{% for %}` block — same "native list/dict via filters,
+    # never hand-built control-flow strings" discipline as
+    # prometheus_node_exporter_scrape_block above (see that task's comment
+    # on the \n-escaping trap).
+    - name: "Accumulate one Prometheus scrape job dict per scrape profile (spec.md §17)"
+      ansible.builtin.set_fact:
+        monitoring_scrape_jobs: >-
+          {{ (monitoring_scrape_jobs | default([]))
+             + [ ({'job_name': item.value.jobName,
+                   'scheme': item.value.scheme | default('http', true),
+                   'metrics_path': item.value.metricsPath | default('/metrics', true),
+                   'file_sd_configs': [{'files': [prometheus_targets_container_dir ~ '/' ~ item.value.jobName ~ '.json']}]}
+                  | combine({'scrape_interval': item.value.scrapeInterval}
+                            if (item.value.scrapeInterval | default('', true) | length > 0) else {})
+                  | combine({'scrape_timeout': item.value.scrapeTimeout}
+                            if (item.value.scrapeTimeout | default('', true) | length > 0) else {})
+                  | combine({'basic_auth': {'username': monitoring_auth[item.value.authRef].username,
+                                             'password_file': monitoring_secrets_container_dir ~ '/' ~ item.value.authRef ~ '.password'}}
+                            if (item.value.authRef | default('', true) | length > 0) else {})
+                  | combine({'tls_config': ({'server_name': item.value.tls.serverName}
+                                             if (item.value.tls.serverName | default('', true) | length > 0) else {})
+                                            | combine({'insecure_skip_verify': item.value.tls.insecureSkipVerify | default(false, true)})}
+                            if (item.value.tls is defined) else {}) ) ] }}
+      loop: "{{ monitoring_profiles_resolved | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    # Empty string (not an empty list rendered by to_nice_yaml, which would
+    # emit "[]" — an invalid extra scrape_configs entry) when there are no
+    # profiles at all, same convention as prometheus_node_exporter_scrape_block.
+    - name: "Render the external monitoring scrape block (spec.md §17/§20; empty string when no profiles)"
+      ansible.builtin.set_fact:
+        prometheus_external_scrape_block: >-
+          {{ (monitoring_scrape_jobs | default([]) | to_nice_yaml(indent=2))
+             if (monitoring_scrape_jobs | default([]) | length > 0) else '' }}
+      tags: [always, ext-target, ext-target-C3]
+
   tasks:
     - name: "Pin {{ thanos_s3_alias }} -> {{ thanos_s3_target_host | default('', true) }} in /etc/hosts"
       ansible.builtin.lineinfile:
@@ -306,6 +507,19 @@
             - "{{ prometheus_config_dir }}"
             - "{{ thanos_config_dir }}"
 
+        # Only created when at least one scrape profile is declared — an
+        # always-present-but-empty directory would still be harmless, but
+        # scoping it to "feature actually in use" keeps an unconfigured
+        # deployment's filesystem footprint identical to before this
+        # feature existed (spec.md §64).
+        - name: "Ensure file_sd target directory exists (docs/verification/prometheus-external-targets.md C1)"
+          tags: [ext-target, ext-target-C1]
+          ansible.builtin.file:
+            path: "{{ prometheus_targets_host_dir }}"
+            state: directory
+            mode: "0755"
+          when: monitoring_profiles_resolved | length > 0
+
         # Spec: docs/verification/prometheus.md C8, C11
         # --storage.tsdb.min-block-duration/max-block-duration are both
         # pinned to 2h below (not just retention): this disables
@@ -314,7 +528,7 @@
         # object storage — Thanos Compactor (on the thanos-query host) owns
         # compaction/downsampling/retention from that point on.
         - name: "Render prometheus.yml (with alerting.alertmanagers)"
-          tags: [C8, C11, C13]
+          tags: [C8, C11, C13, ext-target, ext-target-C3]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -333,11 +547,12 @@
               scrape_configs:
               {{ prometheus_scrape_configs }}
               {{ prometheus_node_exporter_scrape_block }}
+              {{ prometheus_external_scrape_block }}
           register: prometheus_yml_with_am
           when: alertmanager_target_host | default('', true) | length > 0
 
         - name: "Render prometheus.yml (without alerting — alertmanager_target_host empty)"
-          tags: [C8, C13]
+          tags: [C8, C13, ext-target, ext-target-C3]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -351,6 +566,7 @@
               scrape_configs:
               {{ prometheus_scrape_configs }}
               {{ prometheus_node_exporter_scrape_block }}
+              {{ prometheus_external_scrape_block }}
           register: prometheus_yml_no_am
           when: alertmanager_target_host | default('', true) | length == 0
 
@@ -378,6 +594,94 @@
           when: prometheus_node_exporter_targets | length > 0
           no_log: true
           register: node_exporter_password_file_result
+
+        # ---- External monitoring targets: secrets + file_sd JSON + GC ----
+        # (docs/verification/prometheus-external-targets.md, spec.md §12/
+        # §15/§16/§46/§47/§49).
+        - name: "Ensure monitoring secrets directory exists (only when a profile references authRef)"
+          ansible.builtin.file:
+            path: "{{ monitoring_secrets_host_dir }}"
+            state: directory
+            mode: "0755"
+          when: (monitoring_profiles_resolved.values() | selectattr('authRef', 'defined') | list | length) > 0
+
+        # mode 0644 (not 0600) is the SAME deliberate tradeoff as
+        # node_exporter_basic_auth_password above and Thanos objstore.yml's
+        # secret_key below — prom/prometheus reads this via a bind-mount as
+        # its own fixed uid (65534), which a stricter 0600 (owned by
+        # whichever uid this playbook runs as) would leave unreadable.
+        - name: "Render monitoring basic-auth password files (spec.md §46/§47)"
+          ansible.builtin.copy:
+            dest: "{{ monitoring_secrets_host_dir }}/{{ item }}.password"
+            mode: "0644"
+            content: "{{ monitoring_auth[item].password | default('', true) }}"
+          loop: "{{ monitoring_profiles_resolved.values() | selectattr('authRef', 'defined') | map(attribute='authRef') | unique | list }}"
+          no_log: true
+          register: monitoring_secret_files_result
+
+        # One file per scrape profile/jobName, one JSON entry per enabled
+        # target in that profile (spec.md §16 — entries stay separate so
+        # per-target labels never bleed into each other). Built with a
+        # Jinja `{% for %}` text loop (not a native set_fact list) because
+        # the output IS the file content, not an intermediate Ansible
+        # value — to_json per-field sidesteps hand-escaping addresses/labels.
+        - name: "Render file_sd JSON — one file per scrape profile/jobName (docs/verification/prometheus-external-targets.md C2)"
+          tags: [ext-target, ext-target-C2]
+          ansible.builtin.copy:
+            dest: "{{ prometheus_targets_host_dir }}/{{ item.value.jobName }}.json"
+            mode: "0644"
+            content: |
+              [
+              {% for t in (monitoring_targets_resolved | selectattr('enabled') | selectattr('profile', 'equalto', item.key) | list) %}
+                {
+                  "targets": [{{ t.address | to_json }}],
+                  "labels": {{ ({'pilot_target': t.name, 'pilot_source': 'external'}
+                                 | combine({'site': t.site} if (t.site | default('', true) | length > 0) else {})
+                                 | combine(t.labels | default({}, true))) | to_json }}
+                }{{ "," if not loop.last else "" }}
+              {% endfor %}
+              ]
+          loop: "{{ monitoring_profiles_resolved | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+          register: monitoring_file_sd_result
+
+        - name: "Check whether the file_sd target directory exists (GC path-safety, spec.md §49)"
+          ansible.builtin.stat:
+            path: "{{ prometheus_targets_host_dir }}"
+          register: monitoring_targets_dir_stat
+
+        - name: "Discover existing generated file_sd JSON files (for GC of removed profiles)"
+          ansible.builtin.find:
+            paths: "{{ prometheus_targets_host_dir }}"
+            patterns: "*.json"
+          register: monitoring_existing_target_files
+          when: monitoring_targets_dir_stat.stat.exists
+
+        # GC only ever removes files under prometheus_targets_host_dir whose
+        # basename doesn't match a currently-declared jobName — this whole
+        # directory is 100% Pilot-generated (spec.md §49's "only allowed to
+        # delete Pilot-owned generated files" exception), never
+        # user-authored, so per-file removal here is safe.
+        - name: "Remove stale file_sd JSON for profiles no longer declared"
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: absent
+          loop: "{{ monitoring_existing_target_files.files | default([]) }}"
+          loop_control:
+            label: "{{ item.path | basename }}"
+          when: >-
+            (monitoring_existing_target_files is defined) and
+            ((item.path | basename | regex_replace('\.json$', ''))
+             not in (monitoring_profiles_resolved.values() | map(attribute='jobName') | list))
+          register: monitoring_gc_result
+
+        - name: "Consolidate monitoring file_sd/GC/secret change flags (for unified restart-gate below)"
+          ansible.builtin.set_fact:
+            monitoring_files_changed: >-
+              {{ (monitoring_file_sd_result is defined and monitoring_file_sd_result is changed)
+                 or (monitoring_gc_result is defined and monitoring_gc_result is changed)
+                 or (monitoring_secret_files_result is defined and monitoring_secret_files_result is changed) }}
 
         # Spec: docs/verification/prometheus.md C10
         # Use `copy: src:` (not `content:`) because Prometheus rules files
@@ -482,7 +786,8 @@
             restart: >-
               {{ prometheus_yml_result is changed
                  or alert_rules_result is changed
-                 or node_exporter_password_file_result is changed }}
+                 or node_exporter_password_file_result is changed
+                 or monitoring_files_changed | default(false) }}
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -507,7 +812,11 @@
                    prometheus_config_dir ~ '/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro',
                    prometheus_host_data_dir ~ ':/prometheus'
                  ] + ([node_exporter_basic_auth_password_host_path ~ ':' ~ node_exporter_basic_auth_password_container_path ~ ':ro']
-                      if (prometheus_node_exporter_targets | length > 0) else []) }}
+                      if (prometheus_node_exporter_targets | length > 0) else [])
+                   + ([prometheus_targets_host_dir ~ ':' ~ prometheus_targets_container_dir ~ ':ro']
+                      if (monitoring_profiles_resolved | length > 0) else [])
+                   + ([monitoring_secrets_host_dir ~ ':' ~ monitoring_secrets_container_dir ~ ':ro']
+                      if ((monitoring_profiles_resolved.values() | selectattr('authRef', 'defined') | list | length) > 0) else []) }}
             ports:
               - "9090:9090"
 
@@ -558,6 +867,16 @@
         - name: "ROLLBACK — remove the objstore config file (contains S3 secret)"
           ansible.builtin.file:
             path: "{{ thanos_config_dir }}/objstore.yml"
+            state: absent
+
+        # Same "don't leave a secret file behind after a failed apply"
+        # posture as the objstore.yml cleanup above — this does NOT attempt
+        # to roll back the file_sd JSON or prometheus.yml content itself
+        # (neither does the existing rescue, for objstore.yml's own
+        # config), only the credential material.
+        - name: "ROLLBACK — remove monitoring basic-auth password files (contain secrets)"
+          ansible.builtin.file:
+            path: "{{ monitoring_secrets_host_dir }}"
             state: absent
 
         - name: "ROLLBACK — surface the original failure"

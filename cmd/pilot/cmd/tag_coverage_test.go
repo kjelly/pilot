@@ -163,6 +163,15 @@ var specTagMap = []specTagMapping{
 		exemptRows: map[string]string{
 			"C14": "up{job=\"node\"}==1 probe — verify-only outcome of the node-exporter scrape job rendered for C13 actually authenticating and succeeding",
 		}},
+	{spec: "prometheus-external-targets.md", playbook: "prometheus-apply.yml",
+		prefixes: []string{"ext-target"},
+		exemptRows: map[string]string{
+			"C4": "Prometheus targets-API visibility is a verify-only outcome of the ext-target-C3 scrape-config render actually being loaded",
+			"C5": "successful scrape (up==1) is a verify-only outcome of the ext-target-C3 job reaching a real reachable target",
+			"C6": "promtool check config is a post-apply, read-only pilot verify check (spec.md §22 correction) — no apply-time task invokes promtool",
+			"C7": "directory permission is a property of the ext-target-C1 directory-creation task's explicit mode: 0755",
+			"C8": "no-plaintext-password is an architectural invariant of the scrape-job compiler always emitting password_file, never password — no dedicated task",
+		}},
 	{spec: "restic-backup.md", playbook: "restic-backup-apply.yml"},
 	{spec: "seaweedfs-s3.md", playbook: "seaweedfs-s3-apply.yml", prefixes: []string{"s3"},
 		exemptRows: map[string]string{
