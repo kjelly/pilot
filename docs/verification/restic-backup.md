@@ -1,13 +1,14 @@
 # Verification Spec — restic-backup（跨主機通用 restic 備份到 S3，涵蓋本專案各軟體的資料/設定檔）
 
-> 版本：v1.4（v1.0 的通用骨架已於 vm-target 沙盒實測；v1.1 用真實的 FreeIPA
+> 版本：v1.5（v1.0 的通用骨架已於 vm-target 沙盒實測；v1.1 用真實的 FreeIPA
 > server/client 做完整備份/故障/還原演練，修好 3 個真事故，見 §8 與
 > `docs/runbooks/restic-backup.md` §5–§6；v1.2 讓多主機共用 repository 的並行驗證
 > 以有界 lock 等待安全完成；v1.3 用 `> 驗證逾時：` 讓這份 spec 自己宣告所需的
 > 逾時秒數，`pilot verify` 會自動套用——不用再靠操作者記得手動加 `--timeout 180`，
 > 見 round 13 教訓 `docs/runbooks/minimal-poc-architecture.md`；v1.4 不在 apply
 > 期間同步建立 snapshot，避免同 repository 的 timer/host 併發互鎖；timer 以隨機
-> 延遲錯峰，repository 寫入以有界 lock 等待完成。）
+> 延遲錯峰，repository 寫入以有界 lock 等待完成；v1.5 補完 v1.4 遺漏的
+> traceability exemption bookkeeping，見 §8。）
 > 對齊規範：pilot 通用 config-only 服務規範；備份目的地預設指向本專案自建的
 > `docs/verification/seaweedfs-s3.md`（SeaweedFS S3 gateway），亦可透過變數
 > 切換到外部/獨立 S3（AWS S3、另一台 MinIO 等）。
@@ -140,6 +141,7 @@
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
 | C10 | 若套用時**沒有**填 `restic_s3_target_host`（即改用完全外部覆寫的 `restic_repository`，目的地本身有真實 DNS，不需要靠 `/etc/hosts` 別名），這條會合理 fail——此時應只看 C1–C9 是否全 pass，C10 視為不適用 | 使用外部 S3（真實 DNS）的部署 | 無（設計如此，非暫時偏差） |
+| C4, C5, C6 | v1.4 起 apply **不會**在套用期間同步觸發第一次備份（避免共用同一個 repository 的多台主機在 apply 當下互搶 lock）；剛 apply 完、timer 還沒到下一個排程窗口（`RandomizedDelaySec` 錯峰後）的主機上，這三條 row 會合理 fail——這是預期的 eventually-consistent 狀態，不是 apply 失敗。等 timer 至少觸發一次後重新 `pilot verify` 即可轉 pass；vm-target 測試想立即驗證可手動 `systemctl start restic-backup.service` | 所有環境 | 無（設計如此，非暫時偏差） |
 | — | `restic_backup_paths` 預設只有 `/etc`；這是通用、對任何主機都安全的最小備份範圍（設定檔），**不是**針對本專案各軟體資料的完整備份。要備份 FreeIPA/Keycloak/log-server/Wazuh 的實際資料，必須在該主機的 `host_vars` 補上對應路徑與（需要的話）`restic_backup_pre_hook`，見 §1.5 與 `group_vars/restic-backup.example.yml` 的範例——這些範例路徑/指令**未在本 repo 的 vm-target 沙盒實測**（沙盒測的是通用骨架本身，見 `docs/runbooks/restic-backup.md` §2），套用到正式主機前建議先在 staging 跑過一次確認 | 所有環境 | 無（設計如此的範圍界定） |
 | — | `restic check`（C6）只做 metadata/tree 完整性檢查，不加 `--read-data`（會把整個 repository 內容重新讀一次驗 checksum，資料量大時非常耗時），日常排程/verify 不適合每次都做 | 所有環境 | 建議另外排一個較低頻率（如每月）的 `--read-data` 全量檢查，不在本 spec 範圍 |
 
@@ -155,7 +157,7 @@
 | C2, C3 | `template`/`copy` 產生 `/etc/pilot/restic-env`（`mode: '0600'`，`no_log: true`） | 內含 S3 credentials 與 repository 密碼 |
 | C7 | `copy` 產生 `/usr/local/bin/pilot-restic-backup.sh`（`mode: '0700'`） | 內含 `restic init`（僅未初始化時）、`restic backup`、`restic forget --prune` |
 | C8, C9 | `copy` 產生 `restic-backup.service`/`.timer`，`systemd: enabled+started` | timer 觸發 service；service 是 `Type=oneshot` |
-| C4, C5, C6 | 先查現有快照（`restic snapshots --json`），只在「還沒有任何快照」或「env/腳本剛變更」時才 `systemd: name=restic-backup.service state=started` 觸發一次同步執行 | oneshot service 的 `systemctl start` 會等到執行完才回，不需額外 poll；有條件觸發是為了讓「同樣變數重跑」維持 changed=0（見 §7.1 冪等檢查）；備份腳本開頭 `export HOME=/root`——systemd 起的 oneshot service 預設不帶 `$HOME`，`restic` 找不到本機 metadata cache 目錄會直接失敗（實測踩過，見 `docs/runbooks/restic-backup.md` §5）|
+| C4, C5, C6 | **無對應 apply task（verify-only，見 contract traceability exemptions）**：v1.4 起 apply 只查現有快照（`restic snapshots --json`，僅供日誌/除錯用），**不再**觸發 `systemd: name=restic-backup.service state=started` 同步跑一次備份——避免多台主機共用同一個 repository 時，apply 期間同時搶 lock 互鎖。C4–C6 改成純粹由 `restic-backup.timer`（`RandomizedDelaySec`錯峰觸發）自己的排程視窗產生快照，apply 完成當下這三條 row 預期 fail，屬正常狀態，見 §5 | 備份腳本開頭 `export HOME=/root`——systemd 起的 oneshot service 預設不帶 `$HOME`，`restic` 找不到本機 metadata cache 目錄會直接失敗（實測踩過，見 `docs/runbooks/restic-backup.md` §5）；如需立即驗證 C4–C6（例如 vm-target 測試），可手動 `systemctl start restic-backup.service`（oneshot，`systemctl start` 會等到執行完才回）強制跑一次，而不是靠 apply 本身 |
 | C10 | `lineinfile /etc/hosts` pin `s3-backup-server`（`when: restic_s3_target_host | length > 0`）| 必須在備份腳本第一次執行（觸發 restic init）之前 |
 
 ## 7. SOP
@@ -179,13 +181,17 @@ go run ./cmd/pilot vm-target run --name restic-backup \
     -e restic_aws_secret_access_key=sandbox-secret-key \
     -e restic_password=sandbox-repo-password-123
 
-# 3. verify
+# 3. verify — C4-C6 will legitimately FAIL here (v1.4: apply no longer
+#    triggers a synchronous first backup, see §5/§6). To verify them
+#    immediately instead of waiting for the timer's next randomized-delay
+#    window, manually trigger one run first (oneshot service; blocks until done):
+#      go run ./cmd/pilot vm-target exec --name restic-backup -- \
+#          sudo systemctl start restic-backup.service
 go run ./cmd/pilot vm-target verify --name restic-backup \
     docs/verification/restic-backup.md
 
-# 4. 冪等檢查（同樣的變數再跑一次，應 changed=0；restic-backup.service 只在
-#    「還沒有任何快照」或「env/腳本剛變更」時才觸發，見 §6，避免
-#    `systemd: state: started` 套在 oneshot service 上變成每次都 changed）
+# 4. 冪等檢查（同樣的變數再跑一次，應 changed=0；v1.4 起 apply 不再觸發
+#    restic-backup.service 本身，見 §6，這一步天生冪等）
 go run ./cmd/pilot vm-target run --name restic-backup \
     playbooks/apply/restic-backup-apply.yml \
     -e restic_s3_target_host=$S3_IP \
@@ -223,3 +229,5 @@ go run ./cmd/pilot vm-target run --name restic-backup \
 | 2026-07-06 | v1.1 | 用真實的 FreeIPA server（EL9）跑一次完整備份/故障/還原演練，發現並修正三個真事故：(1) apply playbook 原本只支援 Debian `apt`，補上 EL 系 `dnf`+EPEL 分流，C1 checklist 從 `dpkg -s` 改成套件管理器中立的 `command -v restic`；(2) 備份腳本在 systemd oneshot service 底下缺 `$HOME`，補 `export HOME=/root`；(3) 目的地 SeaweedFS bucket 若從未存在，`restic snapshots` 對「bucket does not exist」的重試退避會拖非常久、看起來像卡死，非 playbook bug 但記錄於 runbook 供排查。演練成功：刪除 389-ds 設定檔造成 server 故障、client 登入失敗，restic restore 還原後系統恢復正常，見 `docs/runbooks/restic-backup.md` §7 | sre |
 | 2026-07-22 | v1.2 | C6 加入 `--retry-lock 30s`，使多台 host 共用 repository 時的並行 verifier 保留 lock 保護並有界等待；group 驗證明確使用 `--timeout 60` | sre |
 | 2026-07-22 | v1.3 | C6 的 lock 等待延長為 `--retry-lock 120s`，group verifier timeout 同步為 180 秒；三台 host 共用 signed S3 repository 的並行 probe 實測全數通過 | sre |
+| 2026-08-24 | v1.4 | apply 不再於套用期間同步觸發第一次備份（移除舊的「Run one backup now if needed」task），避免多主機共用同一個 repository 時 apply 期間互搶 lock；timer 改以 `RandomizedDelaySec=1h` 錯峰、預設不 `Persistent`；`restic backup`/`forget`/`snapshots` 一律帶 `--retry-lock` | sre |
+| 2026-08-24 | v1.5 | 補完 v1.4 遺漏的 bookkeeping：`contracts/restic-backup.yaml` 與 `tag_coverage_test.go` 加上 C4/C5/C6 的 `verifyOnly` traceability exemption（移除觸發 task 後這三條 row 沒有對應 tagged task，CI 的 tag-coverage/contract-fixture 測試因此開始 FAIL）；§6 對應表與 §7.1 SOP 註解更新成反映新設計（不再描述已移除的同步觸發行為），§5 補上對應例外列 | sre |

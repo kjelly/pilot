@@ -56,7 +56,10 @@ lifecycle:
 traceability:
   mode: rowTags
   tag: {kind: bare}
-  exemptions: {}
+  exemptions:
+    "docs/verification/restic-backup.md#C4": {kind: verifyOnly, reason: "repository connectivity probe — v1.4 deliberately stopped triggering a synchronous first backup during apply (avoids apply-time lock contention across hosts sharing one repository); satisfied once the timer fires on its own randomized-delay schedule, not by any apply task"}
+    "docs/verification/restic-backup.md#C5": {kind: verifyOnly, reason: "at-least-one-snapshot probe — same v1.4 deferred-snapshot design as C4; expected to fail until the timer's next scheduled window, not an apply bug"}
+    "docs/verification/restic-backup.md#C6": {kind: verifyOnly, reason: "restic check integrity probe — verify-only outcome of a snapshot existing (C5), which itself only arrives via the timer's own schedule under the v1.4 deferred-snapshot design"}
 verification: {autoDeploy: false}
 site:
   include: true

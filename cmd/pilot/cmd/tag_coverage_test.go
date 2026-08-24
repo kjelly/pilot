@@ -176,7 +176,12 @@ var specTagMap = []specTagMapping{
 			"C7": "directory permission is a property of the ext-target-C1 directory-creation task's explicit mode: 0755",
 			"C8": "no-plaintext-password is an architectural invariant of the scrape-job compiler always emitting password_file, never password — no dedicated task",
 		}},
-	{spec: "restic-backup.md", playbook: "restic-backup-apply.yml"},
+	{spec: "restic-backup.md", playbook: "restic-backup-apply.yml",
+		exemptRows: map[string]string{
+			"C4": "repository connectivity probe — v1.4 deliberately stopped triggering a synchronous first backup during apply (avoids apply-time lock contention across hosts sharing one repository); satisfied by the timer's own randomized-delay schedule, not an apply task",
+			"C5": "at-least-one-snapshot probe — same v1.4 deferred-snapshot design as C4; expected to fail until the timer's next scheduled window, not an apply bug",
+			"C6": "restic check integrity probe — verify-only outcome of a snapshot existing (C5), which itself only arrives via the timer's own schedule under the v1.4 deferred-snapshot design",
+		}},
 	{spec: "seaweedfs-s3.md", playbook: "seaweedfs-s3-apply.yml", prefixes: []string{"s3"},
 		exemptRows: map[string]string{
 			"C8": "anonymous DELETE + GET-404 probe — verify-only outcome of the gateway config (s3-C1..C7)",
