@@ -1,0 +1,366 @@
+# Apply playbook for docs/verification/dcgm-exporter.md v1.0
+#
+# Cross-cutting per-host GPU monitoring agent role (like host-monitoring /
+# wazuh-fim / audit-log-forwarding): runs NVIDIA's official dcgm-exporter
+# Docker image, wired to the host's GPU via the NVIDIA Container Toolkit's
+# `nvidia` docker runtime, exposing GPU utilization/memory/temperature/power
+# metrics on :9400 for a future prometheus.md GPU scrape job (see
+# docs/verification/dcgm-exporter.md §5 for that known gap).
+#
+# Unlike host-monitoring-apply.yml (pinned upstream release BINARY),
+# dcgm-exporter has no such distribution — it links against libdcgm.so and
+# is only officially published as a Docker image (nvidia/dcgm-exporter), so
+# this playbook depends on docs/verification/docker.md being applied first
+# (see contracts/dcgm-exporter.yaml's `dependencies`).
+#
+# This playbook does NOT install the NVIDIA GPU driver — that is a
+# host-provisioning-time prerequisite, same responsibility boundary as
+# host-monitoring-apply.yml not installing Kubernetes. `nvidia-smi -L` is
+# used purely to detect whether that prerequisite already holds; if it
+# doesn't (no GPU, or a GPU but no working driver), this play skips the
+# entire native install gracefully rather than failing (see
+# docs/verification/dcgm-exporter.md §1.5/§5) — this lets a `dcgm-exporter`
+# inventory group be populated with a mixed batch of candidate hosts without
+# having to pre-filter which ones actually have a GPU.
+#
+# Kubernetes GPU Operator auto-detection (same convention as
+# host-monitoring-apply.yml's Kubernetes DaemonSet detection) — a GPU host
+# may already run dcgm-exporter via the NVIDIA GPU Operator's own DaemonSet.
+# Before touching anything, this play checks whether dcgm_exporter_port is
+# already listening AND isn't our own managed container; if so, it skips
+# the native install entirely for that host.
+#
+# Usage (dry run):
+#   go run ./cmd/pilot vm-target run --name dcgm-exporter \
+#       playbooks/apply/dcgm-exporter-apply.yml --check --diff
+#
+# Real apply:
+#   go run ./cmd/pilot vm-target run --name dcgm-exporter \
+#       playbooks/apply/dcgm-exporter-apply.yml
+#
+# Variables: see docs/verification/dcgm-exporter.md §1.5.
+#
+# Stage gating (same convention as freeipa-server-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+- name: Apply dcgm-exporter (NVIDIA GPU metrics agent, official Docker image)
+  hosts: "{{ target_group | default('dcgm-exporter') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    dcgm_exporter_version: "3.3.9-3.6.1-ubuntu22.04"
+    dcgm_exporter_port: 9400
+    dcgm_exporter_webconfig_path: /etc/dcgm-exporter/web-config.yml
+    dcgm_exporter_container_name: pilot-dcgm-exporter
+    # dcgm_exporter_basic_auth_user has a sane default (not a secret).
+    # dcgm_exporter_basic_auth_password is DELIBERATELY NOT declared here —
+    # same "don't shadow group_vars/host_vars with a hardcoded default"
+    # reasoning as host-monitoring-apply.yml's node_exporter_basic_auth_password.
+    dcgm_exporter_basic_auth_user: prometheus
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
+          target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
+          且要跟這台機器所屬的環境 group 一致。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    # GPU detection runs BEFORE every other gate on purpose — a host with no
+    # GPU (or a GPU but no working driver) is simply out of scope for this
+    # component, not a failure, and must not be blocked by an unrelated
+    # OS/arch/secret gate (see docs/verification/dcgm-exporter.md §0/§5).
+    # check_mode: false forces this read-only probe to run for real even
+    # under --check — command/shell modules have no check-mode simulation
+    # of their own, so ansible-core skips them under --check and
+    # synthesizes a fake rc=0/stdout="" result instead of leaving them
+    # undefined. Without this override, `--check --diff` would ALWAYS
+    # observe rc=0 here regardless of the real host, misreporting every
+    # dry-run as "GPU present" (and, further down, "port occupied by
+    # other") even on a host with no GPU at all — discovered empirically
+    # running --check against a real GPU host during development. Same
+    # convention as audit-log-forwarding-apply.yml's read-only probes.
+    - name: "Detect a working NVIDIA GPU + driver (nvidia-smi -L)"
+      ansible.builtin.command: nvidia-smi -L
+      register: dcgm_exporter_nvidia_smi
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: "Determine whether this host has a usable GPU"
+      ansible.builtin.set_fact:
+        dcgm_exporter_gpu_present: "{{ (dcgm_exporter_nvidia_smi.rc | default(1)) == 0 }}"
+
+    - name: "Report: skipping (no usable GPU detected)"
+      ansible.builtin.debug:
+        msg: >-
+          nvidia-smi -L 沒有成功(no GPU, or a GPU without a working driver)
+          ——跳過 dcgm-exporter 原生安裝。GPU 驅動由主機佈建階段負責,不屬於
+          這支 playbook 的套用範圍(見 docs/verification/dcgm-exporter.md §1.5)。
+      when: not dcgm_exporter_gpu_present
+
+    # Same "occupied by something we don't manage" pattern as
+    # host-monitoring-apply.yml (there: a Kubernetes DaemonSet; here: the
+    # NVIDIA GPU Operator's own dcgm-exporter DaemonSet) — only meaningful
+    # once we know the host actually has a GPU.
+    - name: "Check whether {{ dcgm_exporter_port }}/tcp is already listening"
+      ansible.builtin.shell: "ss -ltn '( sport = :{{ dcgm_exporter_port }} )' | grep -q LISTEN"
+      register: dcgm_exporter_port_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: dcgm_exporter_gpu_present
+
+    - name: "Check whether our own {{ dcgm_exporter_container_name }} container is already running"
+      ansible.builtin.command: "docker ps --filter name=^{{ dcgm_exporter_container_name }}$ --filter status=running -q"
+      register: dcgm_exporter_own_container_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: dcgm_exporter_gpu_present
+
+    - name: "Determine whether the port is already served by something we don't manage"
+      ansible.builtin.set_fact:
+        dcgm_exporter_port_occupied_by_other: >-
+          {{ dcgm_exporter_gpu_present and
+             (dcgm_exporter_port_check.rc | default(1)) == 0 and
+             (dcgm_exporter_own_container_check.stdout | default('')) | trim | length == 0 }}
+
+    - name: "Report: skipping native install (port already served by something else)"
+      ansible.builtin.debug:
+        msg: >-
+          {{ dcgm_exporter_port }}/tcp 已經被監聽,且不是本 playbook 管理的
+          {{ dcgm_exporter_container_name }} 容器——跳過原生安裝以避免搶
+          port。這台主機很可能已經透過 Kubernetes NVIDIA GPU Operator 的
+          DaemonSet 部署了自己的 dcgm-exporter(見 spec §5)。
+      when: dcgm_exporter_port_occupied_by_other
+
+    - name: "Gate: supported OS (Ubuntu/Debian — NVIDIA Container Toolkit repo only validated for this family)"
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: >-
+          dcgm-exporter-apply only supports Debian/Ubuntu (see
+          docs/verification/dcgm-exporter.md §1.5). Detected
+          {{ ansible_distribution }} {{ ansible_distribution_version }}
+          ({{ ansible_os_family }}).
+      when: dcgm_exporter_gpu_present and not dcgm_exporter_port_occupied_by_other
+      tags: [always]
+
+    - name: "Gate: supported CPU architecture (x86_64 only — see spec §5)"
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == 'x86_64'
+        fail_msg: >-
+          dcgm-exporter-apply only supports x86_64 (the pinned image tag is
+          x86_64-specific); arm64/Jetson hosts need a different tag and are
+          not yet supported (see spec §5). Detected {{ ansible_architecture }}.
+      when: dcgm_exporter_gpu_present and not dcgm_exporter_port_occupied_by_other
+      tags: [always]
+
+    - name: "Gate: required basic-auth password present (fail early, before any mutation)"
+      ansible.builtin.assert:
+        that:
+          - dcgm_exporter_basic_auth_password is defined
+          - dcgm_exporter_basic_auth_password | length > 0
+        fail_msg: >-
+          dcgm_exporter_basic_auth_password is required — dcgm-exporter must
+          not serve :9400/metrics without a credential (see spec §1.5). Pass
+          -e dcgm_exporter_basic_auth_password=... (vault file recommended
+          over -e in real inventories).
+      when: dcgm_exporter_gpu_present and not dcgm_exporter_port_occupied_by_other
+      tags: [always]
+
+  tasks:
+    - name: "dcgm-exporter install + container"
+      when: dcgm_exporter_gpu_present and not dcgm_exporter_port_occupied_by_other
+      block:
+        - name: "Step 1: Add NVIDIA Container Toolkit apt signing key"
+          tags: [C1]
+          ansible.builtin.get_url:
+            url: https://nvidia.github.io/libnvidia-container/gpgkey
+            dest: /tmp/nvidia-container-toolkit.asc
+            mode: "0644"
+          register: dcgm_exporter_toolkit_key_download
+
+        - name: "Step 1: Dearmor the NVIDIA Container Toolkit signing key"
+          tags: [C1]
+          ansible.builtin.command: >-
+            gpg --yes --dearmor
+            -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            /tmp/nvidia-container-toolkit.asc
+          when: dcgm_exporter_toolkit_key_download is changed
+
+        - name: "Step 1: Add NVIDIA Container Toolkit apt repository"
+          tags: [C1]
+          ansible.builtin.copy:
+            dest: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+            mode: "0644"
+            content: >-
+              deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg]
+              https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /
+          register: dcgm_exporter_toolkit_repo
+
+        - name: "Step 1: Install nvidia-container-toolkit (spec C1)"
+          tags: [C1]
+          ansible.builtin.apt:
+            name: nvidia-container-toolkit
+            state: present
+            update_cache: "{{ dcgm_exporter_toolkit_repo is changed }}"
+
+        - name: "Step 2: Configure the docker nvidia runtime (spec C2)"
+          tags: [C2]
+          ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker
+          register: dcgm_exporter_runtime_configure
+          changed_when: "'Wrote updated config' in dcgm_exporter_runtime_configure.stdout"
+
+        - name: "Step 2: Restart docker if the runtime config changed"
+          ansible.builtin.systemd:
+            name: docker
+            state: restarted
+          when: dcgm_exporter_runtime_configure is changed
+
+        - name: "Step 3: Install htpasswd (apache2-utils) — generates the bcrypt hash below, not a web server"
+          ansible.builtin.apt:
+            name: apache2-utils
+            state: present
+
+        - name: "Step 4: Ensure {{ dcgm_exporter_webconfig_path | dirname }} exists"
+          ansible.builtin.file:
+            path: "{{ dcgm_exporter_webconfig_path | dirname }}"
+            state: directory
+            mode: "0750"
+
+        # bcrypt hashing is non-deterministic (random salt per call), so
+        # re-hashing the same password on every apply would rewrite
+        # web-config.yml — and thrash the container restart below — on
+        # every single run even when nothing changed. Track a fingerprint
+        # of the plaintext instead (not reversible, not the password
+        # itself) and only touch the hash/file when it actually changes —
+        # same convention as host-monitoring-apply.yml Step 7.
+        - name: "Step 5: Compute a change-detection fingerprint for the basic-auth credential"
+          ansible.builtin.set_fact:
+            dcgm_exporter_basic_auth_fingerprint: "{{ (dcgm_exporter_basic_auth_user ~ ':' ~ dcgm_exporter_basic_auth_password) | hash('sha256') }}"
+          no_log: true
+
+        - name: "Step 5: Read the previously stored fingerprint, if any"
+          ansible.builtin.slurp:
+            src: "{{ dcgm_exporter_webconfig_path | dirname }}/.basic_auth.fingerprint"
+          register: dcgm_exporter_stored_fingerprint_raw
+          failed_when: false
+          no_log: true
+
+        - name: "Step 5: Determine whether the basic-auth credential changed"
+          ansible.builtin.set_fact:
+            dcgm_exporter_basic_auth_changed: >-
+              {{ (dcgm_exporter_stored_fingerprint_raw.content is not defined) or
+                 ((dcgm_exporter_stored_fingerprint_raw.content | b64decode) != dcgm_exporter_basic_auth_fingerprint) }}
+          no_log: true
+
+        # Step 3's htpasswd package install is only SIMULATED under --check
+        # on a from-scratch host (the apt task above doesn't set
+        # check_mode: false), so the binary genuinely isn't there yet here;
+        # deferred to the real apply, same pattern as
+        # host-monitoring-apply.yml's Step 8.
+        - name: "Step 6: Generate bcrypt hash for basic auth (spec C9; only when the credential changed)"
+          ansible.builtin.command: "htpasswd -nbBC 10 {{ dcgm_exporter_basic_auth_user }} {{ dcgm_exporter_basic_auth_password }}"
+          register: dcgm_exporter_htpasswd_result
+          changed_when: false
+          no_log: true
+          when: dcgm_exporter_basic_auth_changed and not ansible_check_mode
+
+        # Depends on Step 6's real .stdout — deferred alongside it under
+        # check mode (same reasoning as Step 6).
+        - name: "Step 7: Render web-config.yml (spec C9; only when the credential changed)"
+          tags: [C9]
+          ansible.builtin.copy:
+            dest: "{{ dcgm_exporter_webconfig_path }}"
+            mode: "0644"
+            content: |
+              basic_auth_users:
+                {{ dcgm_exporter_htpasswd_result.stdout.split(':', 1)[0] }}: {{ dcgm_exporter_htpasswd_result.stdout.split(':', 1)[1] }}
+          when: dcgm_exporter_basic_auth_changed and not ansible_check_mode
+          no_log: true
+          register: dcgm_exporter_webconfig_result
+
+        - name: "Step 7: Persist the basic-auth fingerprint for future idempotency checks"
+          ansible.builtin.copy:
+            dest: "{{ dcgm_exporter_webconfig_path | dirname }}/.basic_auth.fingerprint"
+            content: "{{ dcgm_exporter_basic_auth_fingerprint }}"
+            mode: "0600"
+          when: dcgm_exporter_basic_auth_changed and not ansible_check_mode
+          no_log: true
+
+        # No --cap-add SYS_ADMIN by default (see spec §5): without it,
+        # DCP-profiling metrics are unavailable, but core GPU utilization/
+        # memory/temperature/power metrics work fine — a deliberate
+        # least-privilege default for a monitoring agent.
+        - name: "Step 8: Run pilot-dcgm-exporter container (spec C3, C4, C5, C6, C7)"
+          tags: [C3, C4, C5, C6, C7]
+          community.docker.docker_container:
+            name: "{{ dcgm_exporter_container_name }}"
+            image: "nvidia/dcgm-exporter:{{ dcgm_exporter_version }}"
+            state: started
+            restart_policy: unless-stopped
+            restart: "{{ dcgm_exporter_webconfig_result is changed }}"
+            runtime: nvidia
+            ports:
+              - "{{ dcgm_exporter_port }}:9400"
+            volumes:
+              - "{{ dcgm_exporter_webconfig_path }}:/etc/dcgm-exporter/web-config.yml:ro"
+            command:
+              - "-f"
+              - "/etc/dcgm-exporter/default-counters.csv"
+              - "--web-config-file=/etc/dcgm-exporter/web-config.yml"
+          register: dcgm_exporter_container_result
+
+        - name: "Wait for dcgm-exporter to become ready (401 without credentials proves the process is up and auth is wired)"
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ dcgm_exporter_port }}/metrics"
+            status_code: 401
+          register: dcgm_exporter_ready
+          until: dcgm_exporter_ready.status == 401
+          retries: 30
+          delay: 2
+
+      rescue:
+        - name: "ROLLBACK — remove the dcgm-exporter container"
+          community.docker.docker_container:
+            name: "{{ dcgm_exporter_container_name }}"
+            state: absent
+          failed_when: false
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              dcgm-exporter apply FAILED (see task output above); the
+              container was removed. nvidia-container-toolkit and
+              web-config.yml are left in place for inspection.

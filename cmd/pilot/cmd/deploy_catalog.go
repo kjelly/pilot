@@ -180,6 +180,11 @@ var deployCatalog = []deployPlaybook{
 		Note: "裝在任何被監控主機上,兩種 distro(Ubuntu/AlmaLinux)都走同一份 pinned 官方 release binary;prometheus 會自動從 inventory 的 host-monitoring group 展開 scrape target,不需要額外設定。",
 	},
 	{
+		Key: "dcgm-exporter", Label: "GPU 主機的監控 agent(NVIDIA dcgm-exporter)",
+		Playbook: "playbooks/apply/dcgm-exporter-apply.yml", DefaultGroup: "dcgm-exporter", StageVar: "stage",
+		Note: "依賴 docker,官方 Docker image + NVIDIA Container Toolkit;沒有 GPU 或驅動未裝好的主機會被自動偵測並優雅跳過原生安裝,不會 fail。",
+	},
+	{
 		Key: "prometheus", Label: "Prometheus + Thanos Sidecar",
 		Playbook: "playbooks/apply/prometheus-apply.yml", DefaultGroup: "prometheus", StageVar: "stage",
 		AutoHostVars: []autoHostVar{

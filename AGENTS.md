@@ -436,14 +436,14 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 30 支**都有 `stage`/`confirm_staging`/
+`playbooks/apply/*.yml` 現在**全部 31 支**都有 `stage`/`confirm_staging`/
 `confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`docker`、
 `freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
 `freeipa-dns-client`、`freeipa-ca-trust`、`freeipa-nfs-server`、
 `freeipa-nfs-client`、`freeipa-server-replica`、`freeipa-realm-replacement`、
 `keycloak`、`keycloak-db`、`seaweedfs-s3`、`pam-oidc-sshd`、`log-server`、
 `audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
-`os-patch-sla`(用 `patch_stage`)、`host-monitoring`、`prometheus`、`thanos-query`、
+`os-patch-sla`(用 `patch_stage`)、`host-monitoring`、`dcgm-exporter`、`prometheus`、`thanos-query`、
 `alertmanager`、`dashboard`、`log-shipping`、`reverse-proxy`、`internal-endpoint`)。
 `freeipa-server-replica`、
 `freeipa-realm-replacement`、
@@ -728,3 +728,4 @@ git status --short
 | 2026-07-23 | v1.17 | 新增 committed-document link rule：tracked 文件的 repository-relative Markdown link 必須指向 Git 追蹤檔；不得連到 `.verification/`、暫存、vault、generated local-only、ignored 或不存在的檔案。一次性驗收改以 sanitized candidate/tree、target 與 verdict 摘要表達 | pilot |
 | 2026-08-03 | v1.19 | 新增 per-run wizard driver 與路徑刪除規則：agent 依當前環境產生暫存 driver，不提交、不當作 runbook 契約；刪除／搬移 tracked path 前後必須盤點並清除引用 | pilot |
 | 2026-07-31 | v1.18 | 新增第 25 支 apply playbook `freeipa-dns-client-apply.yml`(目標主機把 DNS resolver 指向已經在跑 DNS 的 FreeIPA server/replica;與 `freeipa-client` AAA 納管互不相依,day-2/opt-in,不接進 `site.yml`,比照 `freeipa-server-replica`/`freeipa-dns`);§4.3 playbook 清點更新為 25 支,補上先前清點漏掉的 `freeipa-dns` | pilot |
+| 2026-08-24 | v1.20 | 新增 `dcgm-exporter` apply playbook(GPU 主機的 NVIDIA dcgm-exporter 監控 agent,獨立於 `host-monitoring` 之外的 component,依賴 `docker`;已接進 `site.yml`);§4.3 playbook 清點更新為 31 支 | sre |

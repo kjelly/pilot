@@ -17,7 +17,7 @@ func TestLintContractsLoadsCanonicalDirectory(t *testing.T) {
 	}
 	got := out.String()
 	for _, component := range []string{
-		"alertmanager", "audit-log-forwarding", "dashboard", "dns", "docker",
+		"alertmanager", "audit-log-forwarding", "dashboard", "dcgm-exporter", "dns", "docker",
 		"freeipa-ca-trust",
 		"freeipa-client", "freeipa-dns-client", "freeipa-dns", "freeipa-identity", "freeipa-nfs-client", "freeipa-nfs-server",
 		"freeipa-realm-replacement", "freeipa-server-replica",
@@ -30,7 +30,7 @@ func TestLintContractsLoadsCanonicalDirectory(t *testing.T) {
 			t.Fatalf("output missing component %q:\n%s", component, got)
 		}
 	}
-	if !strings.Contains(got, "contracts: 31 component(s) loaded from") {
+	if !strings.Contains(got, "contracts: 32 component(s) loaded from") {
 		t.Fatalf("output missing summary:\n%s", got)
 	}
 }

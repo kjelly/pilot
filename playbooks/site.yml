@@ -178,6 +178,8 @@
 #     inventory group 的內容無影響(group 是靜態的),放前面純粹是可讀性。
 - import_playbook: apply/host-monitoring-apply.yml
   tags: [observability, host-monitoring]
+- import_playbook: apply/dcgm-exporter-apply.yml
+  tags: [observability, dcgm-exporter]
 - import_playbook: apply/alertmanager-apply.yml
   tags: [observability, alertmanager]
 - import_playbook: apply/prometheus-apply.yml

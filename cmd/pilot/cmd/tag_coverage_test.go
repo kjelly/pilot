@@ -129,6 +129,10 @@ var specTagMap = []specTagMapping{
 			"C8": "port-listening probe — verify-only outcome of the service actually running (C7)",
 			"C9": "unauthenticated-request-rejected probe — verify-only outcome of the web-config.yml render (C10) actually being enforced by the running service (C7)",
 		}},
+	{spec: "dcgm-exporter.md", playbook: "dcgm-exporter-apply.yml",
+		exemptRows: map[string]string{
+			"C8": "unauthenticated-request-rejected probe — verify-only outcome of the container running (C3) and the web-config.yml render (C9) actually being enforced",
+		}},
 	{spec: "freeipa-identity.md", playbook: "freeipa-identity-apply.yml",
 		exemptRows: map[string]string{
 			"C1": "legacy data-driven membership row predates row tags",

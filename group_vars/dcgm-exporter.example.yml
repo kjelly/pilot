@@ -1,0 +1,22 @@
+# ============================================================================
+#  group_vars/dcgm-exporter.example.yml —— dcgm-exporter（NVIDIA GPU 監控）設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/dcgm-exporter.yml
+#    cp group_vars/dcgm-exporter.example.yml <inventory 目錄>/group_vars/dcgm-exporter.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/dcgm-exporter.md
+#  只有 group 內真的有 GPU 且驅動已裝好的主機會實際安裝;沒有 GPU 的主機會
+#  被 apply playbook 自動偵測並優雅跳過(見 spec §0/§5)。
+# ============================================================================
+
+# HTTP Basic Auth 密碼 —— 必填,沒有預設值(dcgm-exporter 不允許匿名讀取
+# GPU 硬體使用細節,見 spec §1.5)。一律用 ansible-vault 加密檔帶入,不要明文
+# 寫在這裡或用 -e 帶(除了拋棄式沙盒測試)。
+# dcgm_exporter_basic_auth_password: ""
+
+# 以下通常不用填,會沿用 playbook 內建預設:
+# dcgm_exporter_basic_auth_user: prometheus
+# dcgm_exporter_version: "3.3.9-3.6.1-ubuntu22.04"
+# dcgm_exporter_port: 9400

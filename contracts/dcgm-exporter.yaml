@@ -1,0 +1,35 @@
+schemaVersion: 1
+id: dcgm-exporter
+role: dcgm-exporter
+specs:
+  - path: docs/verification/dcgm-exporter.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/dcgm-exporter-apply.yml
+regressionTests:
+  - internal/spec/dcgm_exporter_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: docker, required: true, relation: sameHosts}
+conflicts: []
+bindings: []
+os:
+  - {distro: ubuntu, versions: ["22.04", "24.04"]}
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
+groupVars:
+  - {name: dcgm_exporter_version, type: string, required: false, default: "3.3.9-3.6.1-ubuntu22.04", secret: false}
+  - {name: dcgm_exporter_port, type: string, required: false, default: "9400", secret: false}
+  - {name: dcgm_exporter_basic_auth_user, type: string, required: false, default: "prometheus", secret: false}
+  - {name: dcgm_exporter_basic_auth_password, type: string, required: true, secret: true}
+endpoints:
+  - {name: metrics, scheme: http, port: 9400}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions:
+    "docs/verification/dcgm-exporter.md#C8": {kind: verifyOnly, reason: "unauthenticated-request-rejected probe — verify-only outcome of the container running (C3) and the web-config.yml render (C9) actually being enforced"}
+verification: {autoDeploy: false}
+site: {include: true, order: 96, vars: {}, tags: [observability, dcgm-exporter], optIn: false}
