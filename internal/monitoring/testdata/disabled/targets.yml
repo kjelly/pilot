@@ -1,0 +1,10 @@
+schemaVersion: 1
+targets:
+  - name: nas01
+    address: 10.0.0.1:9633
+    profile: storage-exporter
+    enabled: true
+  - name: nas02
+    address: 10.0.0.2:9633
+    profile: storage-exporter
+    enabled: false

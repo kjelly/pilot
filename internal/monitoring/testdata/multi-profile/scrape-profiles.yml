@@ -1,0 +1,6 @@
+schemaVersion: 1
+profiles:
+  storage-exporter:
+    jobName: storage
+  postgres:
+    jobName: postgres-exporter

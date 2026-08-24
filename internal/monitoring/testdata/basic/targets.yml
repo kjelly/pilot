@@ -1,0 +1,8 @@
+schemaVersion: 1
+targets:
+  - name: nas01
+    address: nas01.pilot.internal:9633
+    profile: storage-exporter
+    site: taipei
+    labels:
+      owner: storage

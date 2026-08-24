@@ -1,0 +1,24 @@
+{
+  "postgres-exporter": [
+    {
+      "targets": [
+        "10.0.0.2:9187"
+      ],
+      "labels": {
+        "pilot_source": "external",
+        "pilot_target": "db01"
+      }
+    }
+  ],
+  "storage": [
+    {
+      "targets": [
+        "10.0.0.1:9633"
+      ],
+      "labels": {
+        "pilot_source": "external",
+        "pilot_target": "nas01"
+      }
+    }
+  ]
+}

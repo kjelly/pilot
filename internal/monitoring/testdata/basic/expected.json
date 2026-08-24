@@ -1,0 +1,15 @@
+{
+  "storage": [
+    {
+      "targets": [
+        "nas01.pilot.internal:9633"
+      ],
+      "labels": {
+        "owner": "storage",
+        "pilot_source": "external",
+        "pilot_target": "nas01",
+        "site": "taipei"
+      }
+    }
+  ]
+}

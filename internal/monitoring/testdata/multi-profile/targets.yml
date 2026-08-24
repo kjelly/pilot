@@ -1,0 +1,8 @@
+schemaVersion: 1
+targets:
+  - name: nas01
+    address: 10.0.0.1:9633
+    profile: storage-exporter
+  - name: db01
+    address: 10.0.0.2:9187
+    profile: postgres

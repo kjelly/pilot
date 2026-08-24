@@ -34,6 +34,7 @@
 | **跨主機通用備份到 S3（restic），含 FreeIPA 災難復原(DR)演練** | [`runbooks/restic-backup.md`](./runbooks/restic-backup.md) |
 | **被監控主機的監控 agent（node_exporter，強制 Basic Auth）** | [`runbooks/host-monitoring.md`](./runbooks/host-monitoring.md) |
 | **跨機房指標彙總 + 中央告警（Prometheus + Thanos 全局查詢 + Alertmanager）** | [`runbooks/metrics-alerting.md`](./runbooks/metrics-alerting.md) |
+| **Prometheus 監控 Pilot 不管理的第三方 exporter（NAS/UPS/switch...）** | [`runbooks/prometheus-external-targets.md`](./runbooks/prometheus-external-targets.md) |
 | **觀測畫面（Grafana + Loki 看 Prometheus/log-server 資料）** | [`runbooks/dashboard.md`](./runbooks/dashboard.md) |
 | 開發 ansible playbook 的心法 | [`ansible-playbook-development.md`](./ansible-playbook-development.md) |
 | 跑測試 | [`../TESTING.md`](../TESTING.md) |

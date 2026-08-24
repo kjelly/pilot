@@ -1,0 +1,4 @@
+[
+  "monitoring target \"bad\" references unknown scrape profile \"does-not-exist\"",
+  "profile \"broken\": jobName \"node\" is reserved (spec.md §63)"
+]

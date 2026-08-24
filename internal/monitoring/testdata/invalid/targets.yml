@@ -1,0 +1,5 @@
+schemaVersion: 1
+targets:
+  - name: bad
+    address: 10.0.0.1:9100
+    profile: does-not-exist
