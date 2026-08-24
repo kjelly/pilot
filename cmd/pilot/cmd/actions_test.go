@@ -26,6 +26,13 @@ func TestSemanticActionCatalogIsStable(t *testing.T) {
 		"create_internal_endpoint_manifest", "create_internal_endpoint", "set_internal_endpoint_state",
 		"set_internal_endpoint_dns", "set_internal_endpoint_route_direct", "set_internal_endpoint_route_proxy",
 		"set_internal_endpoint_tls_disabled", "set_internal_endpoint_tls_freeipa", "set_internal_endpoint_tls_sink",
+		"create_monitoring_target", "set_monitoring_target_address", "set_monitoring_target_profile",
+		"set_monitoring_target_site", "set_monitoring_target_label", "enable_monitoring_target",
+		"disable_monitoring_target", "delete_monitoring_target",
+		"create_monitoring_profile", "set_monitoring_profile_job_name", "set_monitoring_profile_scheme",
+		"set_monitoring_profile_metrics_path", "set_monitoring_profile_scrape_interval",
+		"set_monitoring_profile_scrape_timeout", "set_monitoring_profile_auth_ref", "set_monitoring_profile_tls",
+		"delete_monitoring_profile",
 		"save_hosts", "deploy", "reconcile",
 	}
 	specs := semanticActionSpecs()
@@ -74,7 +81,7 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	if schema.PilotVersion == "" {
 		t.Error("pilot_version is empty")
 	}
-	if schema.SchemaVersion != 1 || len(schema.Actions) != 67 {
+	if schema.SchemaVersion != 1 || len(schema.Actions) != 84 {
 		t.Fatalf("schema metadata = schema_version %d, actions %d", schema.SchemaVersion, len(schema.Actions))
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {

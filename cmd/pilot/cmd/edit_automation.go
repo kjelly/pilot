@@ -129,6 +129,32 @@ type editAction struct {
 	KeyGroup   string `json:"key_group,omitempty"`
 	KeyMode    string `json:"key_mode,omitempty"`
 	ReloadUnit string `json:"reload_unit,omitempty"`
+	// Monitoring target/scrape-profile fields (spec.md §7-24). Name is
+	// reused as the target's or profile's own primary key (same
+	// "Name is entity-kind-safe because the action name determines which
+	// kind" convention as the roster actions above) — create/set/enable/
+	// disable/delete_monitoring_target and create/set/delete_monitoring_profile
+	// all key off it. A target label's key/value reuse Key/Value above
+	// (same "generic key name"/"generic new value" fields every other
+	// single-field set-action already uses) rather than a dedicated pair.
+	// Address/Profile/Site are a target's own fields; JobName/Scheme/
+	// MetricsPath/ScrapeInterval/ScrapeTimeout/AuthRef/TLSServerName/
+	// TLSInsecureSkipVerify are a profile's. TLSInsecureSkipVerify is
+	// "true"/"false" like UpstreamTLSVerify above, not a bool — every
+	// string-typed boolean action field in this struct is parsed at Run
+	// time, never json.Unmarshal'd as bool, so a scenario author can't
+	// accidentally omit it and get a silent `false`.
+	Address               string `json:"address,omitempty"`
+	Profile               string `json:"profile,omitempty"`
+	Site                  string `json:"site,omitempty"`
+	JobName               string `json:"job_name,omitempty"`
+	Scheme                string `json:"scheme,omitempty"`
+	MetricsPath           string `json:"metrics_path,omitempty"`
+	ScrapeInterval        string `json:"scrape_interval,omitempty"`
+	ScrapeTimeout         string `json:"scrape_timeout,omitempty"`
+	AuthRef               string `json:"auth_ref,omitempty"`
+	TLSServerName         string `json:"tls_server_name,omitempty"`
+	TLSInsecureSkipVerify string `json:"tls_insecure_skip_verify,omitempty"`
 }
 
 // validateValueOrEnv enforces that exactly one of Value/ValueEnv is set,

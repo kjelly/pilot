@@ -120,7 +120,7 @@ func registerEditTools(server *mcp.Server, opts editMCPToolsOptions) {
 	}, capabilitiesHandler(opts))
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_edit_inspect",
-		Description: "read-only query over the workspace's non-secret configuration: inventory hosts (name/IP/roles), role presets, and — via opt-in flags — group_vars, vault metadata, the FreeIPA roster (users, groups, hostgroups, HBAC rules, sudo rules, plus server-resolved effective_hbac_access/effective_sudo_access that answer \"which users can log in to / run sudo on which hosts\" with nested group membership already expanded), and DNS zones/records with resolved IPs, and internal-endpoint manifest entries (dns/route/tls) with resolved IPs",
+		Description: "read-only query over the workspace's non-secret configuration: inventory hosts (name/IP/roles), role presets, and — via opt-in flags — group_vars, vault metadata, the FreeIPA roster (users, groups, hostgroups, HBAC rules, sudo rules, plus server-resolved effective_hbac_access/effective_sudo_access that answer \"which users can log in to / run sudo on which hosts\" with nested group membership already expanded), and DNS zones/records with resolved IPs, and internal-endpoint manifest entries (dns/route/tls) with resolved IPs, and external Prometheus monitoring targets/scrape-profiles (endpoints Pilot does not manage via Ansible)",
 	}, inspectHandler(opts))
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_edit_plan",
@@ -199,6 +199,7 @@ type inspectInput struct {
 	IncludeRoster            bool `json:"include_roster,omitempty" jsonschema:"also return the FreeIPA roster: users, groups, hostgroups, HBAC rules, sudo command groups and rules, plus effective_hbac_access/effective_sudo_access — per-rule lists of concrete usernames and host FQDNs with nested group/hostgroup membership already expanded, answering 'which users can log in to / run sudo on which hosts'"`
 	IncludeDNS               bool `json:"include_dns,omitempty" jsonschema:"also return FreeIPA DNS zones and records, each record's target_host cross-resolved to its inventory IP (resolved_ip)"`
 	IncludeInternalEndpoints bool `json:"include_internal_endpoints,omitempty" jsonschema:"also return internal-endpoint manifest entries (dns/route/tls), every inventory_host reference cross-resolved to its inventory IP (resolved_ip)"`
+	IncludeMonitoring        bool `json:"include_monitoring,omitempty" jsonschema:"also return external Prometheus monitoring targets and their scrape profiles (spec.md §7-11) — endpoints Pilot does not manage via Ansible/SSH"`
 }
 
 type inspectHost struct {
@@ -338,6 +339,8 @@ type inspectOutput struct {
 	EffectiveSudoAccess []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
 	DNSZones            []inspectDNSZone                `json:"dns_zones,omitempty"`
 	InternalEndpoints   []inspectInternalEndpoint       `json:"internal_endpoints,omitempty"`
+	MonitoringTargets   []inspectMonitoringTarget       `json:"monitoring_targets,omitempty"`
+	MonitoringProfiles  []inspectMonitoringProfile      `json:"monitoring_profiles,omitempty"`
 	Completeness        validationSummary               `json:"completeness"`
 }
 
@@ -419,6 +422,13 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			internalEndpoints = buildInspectInternalEndpoints(opts.Dir, hosts)
 		}
 
+		var monitoringTargets []inspectMonitoringTarget
+		var monitoringProfiles []inspectMonitoringProfile
+		if in.IncludeMonitoring {
+			monitoringTargets = buildInspectMonitoringTargets(opts.Dir)
+			monitoringProfiles = buildInspectMonitoringProfiles(opts.Dir)
+		}
+
 		var blocking []string
 		for _, c := range checkWorkspaceCompleteness(opts.Dir) {
 			if c.OK {
@@ -445,6 +455,8 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			EffectiveSudoAccess: roster.EffectiveSudoAccess,
 			DNSZones:            dnsZones,
 			InternalEndpoints:   internalEndpoints,
+			MonitoringTargets:   monitoringTargets,
+			MonitoringProfiles:  monitoringProfiles,
 			Completeness:        validationSummary{Blocking: blocking},
 		}
 		return nil, out, nil

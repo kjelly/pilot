@@ -13,10 +13,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 
 	"github.com/kjelly/pilot/internal/groupvars"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/monitoring"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -484,12 +486,91 @@ func buildInspectGroupVars(dir string) map[string]map[string]string {
 // ---- pilot:// resources ------------------------------------------------
 
 const (
-	resourceURIHosts             = "pilot://hosts"
-	resourceURIRoster            = "pilot://roster"
-	resourceURIEffectiveAccess   = "pilot://roster/effective-access"
-	resourceURIDNS               = "pilot://dns"
-	resourceURIInternalEndpoints = "pilot://internal-endpoints"
+	resourceURIHosts              = "pilot://hosts"
+	resourceURIRoster             = "pilot://roster"
+	resourceURIEffectiveAccess    = "pilot://roster/effective-access"
+	resourceURIDNS                = "pilot://dns"
+	resourceURIInternalEndpoints  = "pilot://internal-endpoints"
+	resourceURIMonitoringTargets  = "pilot://monitoring/targets"
+	resourceURIMonitoringProfiles = "pilot://monitoring/scrape-profiles"
 )
+
+// inspectMonitoringTarget/-Profile mirror internal/monitoring.Target/Profile
+// field-for-field (see spec.md §8/§10) rather than reusing those types
+// directly: an MCP output type is a public wire contract this package owns
+// independently of internal/monitoring's own struct tags, same posture as
+// every other inspect* type in this file.
+type inspectMonitoringTarget struct {
+	Name    string            `json:"name"`
+	Address string            `json:"address"`
+	Profile string            `json:"profile"`
+	Site    string            `json:"site,omitempty"`
+	Enabled bool              `json:"enabled"`
+	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+type inspectMonitoringProfile struct {
+	JobName        string `json:"job_name"`
+	Scheme         string `json:"scheme"`
+	MetricsPath    string `json:"metrics_path"`
+	ScrapeInterval string `json:"scrape_interval,omitempty"`
+	ScrapeTimeout  string `json:"scrape_timeout,omitempty"`
+	AuthRef        string `json:"auth_ref,omitempty"`
+	// TLS is omitted entirely (not even an empty struct) when the profile
+	// declares none — same "omit the whole nested block, not just zero its
+	// fields" convention as inspectInternalEndpoint's own TLS handling.
+	Name string                       `json:"name"`
+	TLS  *inspectMonitoringProfileTLS `json:"tls,omitempty"`
+}
+
+type inspectMonitoringProfileTLS struct {
+	ServerName         string `json:"server_name,omitempty"`
+	InsecureSkipVerify bool   `json:"insecure_skip_verify,omitempty"`
+}
+
+// buildInspectMonitoringTargets/-Profiles read straight through
+// internal/monitoring's own typed Load functions — unlike
+// buildInspectInternalEndpoints, this feature has no raw-map/yaml.Node
+// parsing step to duplicate here at all.
+func buildInspectMonitoringTargets(dir string) []inspectMonitoringTarget {
+	tf, err := monitoring.LoadTargets(monitoringTargetsPath(dir))
+	if err != nil {
+		return nil
+	}
+	out := make([]inspectMonitoringTarget, 0, len(tf.Targets))
+	for _, t := range tf.Targets {
+		out = append(out, inspectMonitoringTarget{
+			Name: t.Name, Address: t.Address, Profile: t.Profile, Site: t.Site,
+			Enabled: t.IsEnabled(), Labels: t.Labels,
+		})
+	}
+	return out
+}
+
+func buildInspectMonitoringProfiles(dir string) []inspectMonitoringProfile {
+	pf, err := monitoring.LoadProfiles(monitoringProfilesPath(dir))
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(pf.Profiles))
+	for name := range pf.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]inspectMonitoringProfile, 0, len(names))
+	for _, name := range names {
+		p := pf.Profiles[name]
+		item := inspectMonitoringProfile{
+			Name: name, JobName: p.JobName, Scheme: p.EffectiveScheme(), MetricsPath: p.EffectiveMetricsPath(),
+			ScrapeInterval: p.ScrapeInterval, ScrapeTimeout: p.ScrapeTimeout, AuthRef: p.AuthRef,
+		}
+		if p.TLS != nil {
+			item.TLS = &inspectMonitoringProfileTLS{ServerName: p.TLS.ServerName, InsecureSkipVerify: p.TLS.InsecureSkipVerify}
+		}
+		out = append(out, item)
+	}
+	return out
+}
 
 // effectiveAccessResource is pilot://roster/effective-access's payload —
 // just the two server-resolved views, for callers that only want the
@@ -543,4 +624,10 @@ func registerEditResources(server *mcp.Server, opts editMCPToolsOptions) {
 	add(resourceURIInternalEndpoints, "internal-endpoints",
 		"internal-endpoint manifest entries (dns/route/tls), every inventory_host reference cross-resolved to its inventory IP (resolved_ip)",
 		func() any { return buildInspectInternalEndpoints(opts.Dir, buildInspectHosts(opts.Dir)) })
+	add(resourceURIMonitoringTargets, "monitoring-targets",
+		"external Prometheus monitoring targets Pilot does not manage via Ansible (spec.md §7-8)",
+		func() any { return buildInspectMonitoringTargets(opts.Dir) })
+	add(resourceURIMonitoringProfiles, "monitoring-scrape-profiles",
+		"scrape profiles referenced by name from monitoring targets (spec.md §9-11)",
+		func() any { return buildInspectMonitoringProfiles(opts.Dir) })
 }

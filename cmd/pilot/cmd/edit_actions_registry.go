@@ -1305,6 +1305,336 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "create_monitoring_target",
+				Description:              "add an external monitoring target — an address Prometheus scrapes that Pilot does not manage via Ansible/SSH (spec.md §2/§8); profile must already exist (spec.md §35)",
+				Required:                 []string{"name", "address", "profile"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/targets.yml",
+					Assertion: "target appears in the registry with the requested address/profile",
+				},
+			},
+			Validate: validateCreateMonitoringTarget,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createMonitoringTarget(r, step.Name, step.Address, step.Profile)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_target_address",
+				Description:              "change a monitoring target's address (host:port)",
+				Required:                 []string{"name", "address"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/targets.yml",
+					Assertion: "target address updated",
+				},
+			},
+			Validate: validateMonitoringTargetNameAnd("address"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringTargetAddress(r, step.Name, step.Address)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_target_profile",
+				Description:              "change which scrape profile a monitoring target uses (must already exist, spec.md §35)",
+				Required:                 []string{"name", "profile"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/targets.yml",
+					Assertion: "target profile updated",
+				},
+			},
+			Validate: validateMonitoringTargetNameAnd("profile"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringTargetProfile(r, step.Name, step.Profile)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_target_site",
+				Description:              "set a monitoring target's logical site label (spec.md §8.4); value may be empty to clear it",
+				Required:                 []string{"name"},
+				Optional:                 []string{"site"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/targets.yml",
+					Assertion: "target site updated",
+				},
+			},
+			Validate: validateEntityNameOnly("set_monitoring_target_site"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringTargetSite(r, step.Name, step.Site)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_target_label",
+				Description:              "add or update one label on a monitoring target (key/value reuse the generic key/value fields); reserved keys pilot_target/pilot_source are rejected at validate time (spec.md §8.6)",
+				Required:                 []string{"name", "key", "value"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/targets.yml",
+					Assertion: "target label added/updated with the requested key/value",
+				},
+			},
+			Validate: validateSetMonitoringTargetLabel,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringTargetLabel(r, step.Name, step.Key, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "enable_monitoring_target",
+				Description:              "enable a monitoring target (default state; makes it appear in Prometheus file_sd output, spec.md §8.5)",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/targets.yml",
+					Assertion: "target enabled",
+				},
+			},
+			Validate: validateEntityNameOnly("enable_monitoring_target"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringTargetEnabled(r, step.Name, true)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "disable_monitoring_target",
+				Description:              "disable a monitoring target — kept in the registry, excluded from Prometheus file_sd output (spec.md §8.5)",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/targets.yml",
+					Assertion: "target disabled",
+				},
+			},
+			Validate: validateEntityNameOnly("disable_monitoring_target"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringTargetEnabled(r, step.Name, false)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "delete_monitoring_target",
+				Description:              "remove a monitoring target from the registry (registry only — no remote host action, spec.md §28)",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectDestructive,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/targets.yml",
+					Assertion: "target no longer present in the registry",
+				},
+			},
+			Validate: validateEntityNameOnly("delete_monitoring_target"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deleteMonitoringTarget(r, step.Name)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "create_monitoring_profile",
+				Description:              "add a scrape profile (shared scrape behavior referenced by name from monitoring targets, spec.md §9-11)",
+				Required:                 []string{"name", "job_name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/scrape-profiles.yml",
+					Assertion: "profile appears in the registry with the requested jobName",
+				},
+			},
+			Validate: validateCreateMonitoringProfile,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createMonitoringProfile(r, step.Name, step.JobName)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_profile_job_name",
+				Description:              "rename a scrape profile's Prometheus job_name (must stay globally unique and non-reserved: prometheus/node, spec.md §18/§63)",
+				Required:                 []string{"name", "job_name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/scrape-profiles.yml",
+					Assertion: "profile jobName updated",
+				},
+			},
+			Validate: validateMonitoringProfileNameAnd("job_name"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringProfileJobName(r, step.Name, step.JobName)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_profile_scheme",
+				Description:              "set a scrape profile's scheme",
+				Required:                 []string{"name", "scheme"},
+				Values:                   map[string][]string{"scheme": {"http", "https"}},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/scrape-profiles.yml",
+					Assertion: "profile scheme updated",
+				},
+			},
+			Validate: validateSetMonitoringProfileScheme,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringProfileScheme(r, step.Name, step.Scheme)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_profile_metrics_path",
+				Description:              "set a scrape profile's metrics HTTP path (default /metrics, spec.md §10)",
+				Required:                 []string{"name", "metrics_path"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/scrape-profiles.yml",
+					Assertion: "profile metricsPath updated",
+				},
+			},
+			Validate: validateMonitoringProfileNameAnd("metrics_path"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringProfileTextField(r, step.Name, "metricsPath", step.MetricsPath)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_profile_scrape_interval",
+				Description:              "set a scrape profile's scrape interval (e.g. 15s; empty uses the Prometheus global default, spec.md §10)",
+				Required:                 []string{"name"},
+				Optional:                 []string{"scrape_interval"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/scrape-profiles.yml",
+					Assertion: "profile scrapeInterval updated",
+				},
+			},
+			Validate: validateEntityNameOnly("set_monitoring_profile_scrape_interval"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringProfileTextField(r, step.Name, "scrapeInterval", step.ScrapeInterval)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_profile_scrape_timeout",
+				Description:              "set a scrape profile's scrape timeout (e.g. 10s; empty uses the Prometheus global default, spec.md §10)",
+				Required:                 []string{"name"},
+				Optional:                 []string{"scrape_timeout"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/scrape-profiles.yml",
+					Assertion: "profile scrapeTimeout updated",
+				},
+			},
+			Validate: validateEntityNameOnly("set_monitoring_profile_scrape_timeout"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringProfileTextField(r, step.Name, "scrapeTimeout", step.ScrapeTimeout)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_profile_auth_ref",
+				Description:              "set a scrape profile's authRef — a reference into the monitoring_auth vault-backed secret map (spec.md §12/§46); this action never carries a secret value itself",
+				Required:                 []string{"name"},
+				Optional:                 []string{"auth_ref"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/scrape-profiles.yml",
+					Assertion: "profile authRef updated",
+				},
+			},
+			Validate: validateEntityNameOnly("set_monitoring_profile_auth_ref"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringProfileTextField(r, step.Name, "authRef", step.AuthRef)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_monitoring_profile_tls",
+				Description:              "set a scrape profile's TLS options; tls_server_name and/or tls_insecure_skip_verify may be given independently (spec.md §44) — insecureSkipVerify:true is flagged as a warning, not blocked, at validate time",
+				Required:                 []string{"name"},
+				Optional:                 []string{"tls_server_name", "tls_insecure_skip_verify"},
+				Values:                   map[string][]string{"tls_insecure_skip_verify": {"true", "false"}},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/scrape-profiles.yml",
+					Assertion: "profile tls settings updated",
+				},
+			},
+			Validate: validateSetMonitoringProfileTLS,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setMonitoringProfileTLS(r, step.Name, step.TLSServerName, step.TLSInsecureSkipVerify)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "delete_monitoring_profile",
+				Description:              "remove a scrape profile — refused if any target still references it (spec.md §50, no cascade delete)",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectDestructive,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/scrape-profiles.yml",
+					Assertion: "profile no longer present in the registry",
+				},
+			},
+			Validate: validateEntityNameOnly("delete_monitoring_profile"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deleteMonitoringProfile(r, step.Name)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "save_hosts",
 				Description:              "save hosts.yml and finish the edit TUI",
 				ExecutionMode:            ExecutionModeStructured,
@@ -1518,6 +1848,114 @@ func validateEntityNameOnly(name string) func(editAction) error {
 		}
 		return nil
 	}
+}
+
+func validateCreateMonitoringTarget(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("create_monitoring_target requires name")
+	}
+	if strings.TrimSpace(step.Address) == "" {
+		return fmt.Errorf("create_monitoring_target requires address")
+	}
+	if strings.TrimSpace(step.Profile) == "" {
+		return fmt.Errorf("create_monitoring_target requires profile")
+	}
+	return nil
+}
+
+// validateMonitoringTargetNameAnd is set_monitoring_target_address/-profile's
+// shared validator factory: name plus exactly one other named field, both
+// required — the monitoring counterpart to validateFQDNOnly's single-field
+// pattern, generalized to two fields since these two actions (unlike
+// set_monitoring_target_site, which allows an empty value to clear the
+// field) always require a real replacement value.
+func validateMonitoringTargetNameAnd(field string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.Name) == "" {
+			return fmt.Errorf("set_monitoring_target_%s requires name", field)
+		}
+		var value string
+		switch field {
+		case "address":
+			value = step.Address
+		case "profile":
+			value = step.Profile
+		}
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("set_monitoring_target_%s requires %s", field, field)
+		}
+		return nil
+	}
+}
+
+func validateSetMonitoringTargetLabel(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("set_monitoring_target_label requires name")
+	}
+	if strings.TrimSpace(step.Key) == "" {
+		return fmt.Errorf("set_monitoring_target_label requires key")
+	}
+	if step.Value == "" {
+		return fmt.Errorf("set_monitoring_target_label requires value")
+	}
+	return nil
+}
+
+func validateCreateMonitoringProfile(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("create_monitoring_profile requires name")
+	}
+	if strings.TrimSpace(step.JobName) == "" {
+		return fmt.Errorf("create_monitoring_profile requires job_name")
+	}
+	return nil
+}
+
+// validateMonitoringProfileNameAnd mirrors validateMonitoringTargetNameAnd
+// for the profile fields that always require a real replacement value
+// (job_name, metrics_path) rather than allowing an empty clear
+// (scrape_interval/scrape_timeout/auth_ref use validateEntityNameOnly
+// instead, since "" is a legitimate "use the default" value for those).
+func validateMonitoringProfileNameAnd(field string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.Name) == "" {
+			return fmt.Errorf("set_monitoring_profile_%s requires name", field)
+		}
+		var value string
+		switch field {
+		case "job_name":
+			value = step.JobName
+		case "metrics_path":
+			value = step.MetricsPath
+		}
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("set_monitoring_profile_%s requires %s", field, field)
+		}
+		return nil
+	}
+}
+
+func validateSetMonitoringProfileScheme(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("set_monitoring_profile_scheme requires name")
+	}
+	if step.Scheme != "http" && step.Scheme != "https" {
+		return fmt.Errorf(`set_monitoring_profile_scheme requires scheme "http" or "https"`)
+	}
+	return nil
+}
+
+func validateSetMonitoringProfileTLS(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("set_monitoring_profile_tls requires name")
+	}
+	if step.TLSServerName == "" && step.TLSInsecureSkipVerify == "" {
+		return fmt.Errorf("set_monitoring_profile_tls requires tls_server_name and/or tls_insecure_skip_verify")
+	}
+	if step.TLSInsecureSkipVerify != "" && step.TLSInsecureSkipVerify != "true" && step.TLSInsecureSkipVerify != "false" {
+		return fmt.Errorf(`set_monitoring_profile_tls requires tls_insecure_skip_verify "true" or "false"`)
+	}
+	return nil
 }
 
 func validateHostgroupField(step editAction) error {
