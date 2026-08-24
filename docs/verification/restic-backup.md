@@ -1,11 +1,13 @@
 # Verification Spec — restic-backup（跨主機通用 restic 備份到 S3，涵蓋本專案各軟體的資料/設定檔）
 
-> 版本：v1.3（v1.0 的通用骨架已於 vm-target 沙盒實測；v1.1 用真實的 FreeIPA
+> 版本：v1.4（v1.0 的通用骨架已於 vm-target 沙盒實測；v1.1 用真實的 FreeIPA
 > server/client 做完整備份/故障/還原演練，修好 3 個真事故，見 §8 與
 > `docs/runbooks/restic-backup.md` §5–§6；v1.2 讓多主機共用 repository 的並行驗證
 > 以有界 lock 等待安全完成；v1.3 用 `> 驗證逾時：` 讓這份 spec 自己宣告所需的
 > 逾時秒數，`pilot verify` 會自動套用——不用再靠操作者記得手動加 `--timeout 180`，
-> 見 round 13 教訓 `docs/runbooks/minimal-poc-architecture.md`）
+> 見 round 13 教訓 `docs/runbooks/minimal-poc-architecture.md`；v1.4 不在 apply
+> 期間同步建立 snapshot，避免同 repository 的 timer/host 併發互鎖；timer 以隨機
+> 延遲錯峰，repository 寫入以有界 lock 等待完成。）
 > 對齊規範：pilot 通用 config-only 服務規範；備份目的地預設指向本專案自建的
 > `docs/verification/seaweedfs-s3.md`（SeaweedFS S3 gateway），亦可透過變數
 > 切換到外部/獨立 S3（AWS S3、另一台 MinIO 等）。
@@ -56,6 +58,9 @@
 | `restic_backup_paths` | 這台主機要備份的路徑清單（list）——逐主機可覆寫，比照 `wazuh_fim_directories` 的 pattern | 否 | `["/etc"]` |
 | `restic_backup_pre_hook` | 備份前執行的一行 shell 指令（例：先 `pg_dump` 到檔案、或跑 `ipa-backup`），執行完才跑 `restic backup`；逐主機可覆寫 | 否 | 空字串（不執行）|
 | `restic_backup_schedule` | `systemd` timer 的 `OnCalendar=` 排程字串 | 否 | `*-*-* 02:00:00`（每日 02:00）|
+| `restic_backup_timer_persistent` | 是否在 timer 啟用後立刻補跑離線期間錯過的排程；預設關閉，確保 apply 不會觸發 snapshot | 否 | `false` |
+| `restic_backup_randomized_delay` | 每次 timer 觸發前的隨機延遲，用來錯開共用 repository 的多台主機 | 否 | `1h` |
+| `restic_lock_retry` | restic repository 寫入／查詢遇到其他主機活躍 lock 時的最長等待時間 | 否 | `120s` |
 | `restic_retention_daily` / `restic_retention_weekly` / `restic_retention_monthly` | `restic forget --prune` 的保留份數 | 否 | `7` / `4` / `6` |
 
 > `restic_s3_target_host` 沿用 `siem_forward_host`/`wazuh_manager_host` 同一種
@@ -80,7 +85,7 @@
 | C2  | file     | 機密/設定檔 `/etc/pilot/restic-env` 存在                       | 0        | test -f /etc/pilot/restic-env; echo $? |
 | C3  | file     | `/etc/pilot/restic-env` 權限為 `0600`（內含 S3 credentials 與 repository 密碼）| 600 | stat -c '%a' /etc/pilot/restic-env |
 | C4  | config   | repository 可連線且已初始化（`restic snapshots` 執行成功）      | 0        | sh -c '. /etc/pilot/restic-env && restic snapshots >/dev/null 2>&1; echo $?' |
-| C5  | data     | 至少已有一筆快照（首次 apply 已觸發一次備份）                    | 0        | sh -c '. /etc/pilot/restic-env && restic snapshots --json 2>/dev/null | grep -q "short_id" && echo 0 || echo 1' |
+| C5  | data     | 至少已有一筆快照（timer 在下一個排程窗口執行後）                  | 0        | sh -c '. /etc/pilot/restic-env && restic snapshots --retry-lock 120s --json 2>/dev/null | grep -q "short_id" && echo 0 || echo 1' |
 | C6  | data     | `restic check` 完整性驗證通過                                  | 0        | sh -c '. /etc/pilot/restic-env && restic check --retry-lock 120s >/dev/null 2>&1; echo $?' |
 | C7  | config   | 備份腳本含保留策略旗標（`--keep-daily`）                        | 0        | grep -q -- '--keep-daily' /usr/local/bin/pilot-restic-backup.sh; echo $? |
 | C8  | service  | `restic-backup.timer` 為 enabled                              | 0        | systemctl is-enabled restic-backup.timer >/dev/null 2>&1; echo $? |
@@ -99,9 +104,9 @@
 > `inactive` 的子字串，見模板陷阱 3）。對 `.timer` unit，`is-active` 在
 > timer 被 `systemctl start` 後立刻回 `active (waiting)`，不需要等到下一次
 > `OnCalendar` 觸發。
-> C4–C6 依賴 apply 已經執行過至少一次 `restic-backup.service`（見 §6）—— 若
-> 只裝好 timer、還沒真的跑過一次備份，C5/C6 會因為 repository 剛
-> `restic init` 完、裡面真的沒有任何快照而合理 fail，這不是誤判。
+> Apply 只安裝並啟用 timer，**不會**在 playbook 執行期間同步建立 snapshot。
+> C5/C6 要在下一個 timer 排程窗口結束後驗證；新 repository 在首次 timer run
+> 前沒有快照而讓 C5/C6 fail 是預期狀態，不是 apply 失敗。
 > C1 用 `command -v restic`（查 `$PATH` 是否有這個執行檔）而不是
 > `dpkg -s restic`——後者在 EL 系（AlmaLinux/RHEL/Rocky）上因為沒有 `dpkg`
 > 指令會直接以 rc=127 misreport 成「沒裝」，即使套件（EPEL 的 `restic.rpm`）

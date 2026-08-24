@@ -50,6 +50,14 @@
     restic_backup_paths: ["/etc"]
     restic_backup_pre_hook: ""
     restic_backup_schedule: "*-*-* 02:00:00"
+    # Do not catch up a missed timer invocation as soon as the playbook enables
+    # it: that would run a real snapshot while apply is still configuring every
+    # host in this shared repository.  Normal runs are spread over this window.
+    restic_backup_timer_persistent: false
+    restic_backup_randomized_delay: 1h
+    # Every repository-writing command waits for a concurrent host instead of
+    # treating its live restic lock as an apply failure.
+    restic_lock_retry: 120s
     restic_retention_daily: 7
     restic_retention_weekly: 4
     restic_retention_monthly: 6
@@ -256,6 +264,7 @@
               export RESTIC_PASSWORD='{{ restic_password }}'
               export RESTIC_BACKUP_PATHS='{{ restic_backup_paths | join(" ") }}'
               export RESTIC_BACKUP_PRE_HOOK='{{ restic_backup_pre_hook }}'
+              export RESTIC_LOCK_RETRY='{{ restic_lock_retry }}'
               export RESTIC_RETENTION_DAILY='{{ restic_retention_daily }}'
               export RESTIC_RETENTION_WEEKLY='{{ restic_retention_weekly }}'
               export RESTIC_RETENTION_MONTHLY='{{ restic_retention_monthly }}'
@@ -306,9 +315,10 @@
               timeout 60 restic unlock || true
 
               # shellcheck disable=SC2086
-              restic backup ${RESTIC_BACKUP_PATHS}
+              restic backup --retry-lock "${RESTIC_LOCK_RETRY}" ${RESTIC_BACKUP_PATHS}
 
               restic forget \
+                --retry-lock "${RESTIC_LOCK_RETRY}" \
                 --keep-daily "${RESTIC_RETENTION_DAILY}" \
                 --keep-weekly "${RESTIC_RETENTION_WEEKLY}" \
                 --keep-monthly "${RESTIC_RETENTION_MONTHLY}" \
@@ -338,7 +348,10 @@
 
               [Timer]
               OnCalendar={{ restic_backup_schedule }}
-              Persistent=true
+              # A missed schedule must not start a backup while an apply is
+              # still running.  The next scheduled window handles it instead.
+              Persistent={{ restic_backup_timer_persistent | ternary('true', 'false') }}
+              RandomizedDelaySec={{ restic_backup_randomized_delay }}
 
               [Install]
               WantedBy=timers.target
@@ -369,7 +382,7 @@
           ansible.builtin.shell: |
             . {{ restic_env_path }}
             export HOME=/root
-            timeout 60 restic snapshots --json
+            timeout 60 restic snapshots --retry-lock "{{ restic_lock_retry }}" --json
           register: restic_existing_snapshots
           changed_when: false
           failed_when: false
@@ -398,28 +411,6 @@
           run_once: true
           delegate_to: "{{ ansible_play_hosts_all | first }}"
           when: not ansible_check_mode
-
-        # restic-backup.service is Type=oneshot: `systemctl start` blocks
-        # until it finishes, so this task IS the "run one backup now" step —
-        # not a fire-and-forget trigger. Only runs when needed (no snapshot
-        # yet, or the env/script just changed) so a genuine no-op rerun
-        # stays changed=0 — `ansible.builtin.systemd: state: started` on a
-        # oneshot service is otherwise never idempotent, same pitfall as
-        # `state: restarted` (see spec-driven-feature-workflow skill §3).
-        - name: "Step 11: Run one backup now if needed (spec C4, C5, C6)"
-          tags: [C4, C5, C6]
-          ansible.builtin.systemd:
-            name: restic-backup.service
-            state: started
-          throttle: 1
-          when:
-            - not ansible_check_mode
-            - >-
-                restic_existing_snapshots.rc != 0
-                or '"short_id"' not in restic_existing_snapshots.stdout
-                or restic_env_result is changed
-                or restic_script_result is changed
-          register: restic_backup_run_result
 
       rescue:
         - name: "ROLLBACK — stop and disable the timer"
