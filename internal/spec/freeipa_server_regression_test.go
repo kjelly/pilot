@@ -268,3 +268,31 @@ func TestRegression_FreeipaServerApplyPlaybook_OpensRecursionToAnyClient(t *test
 		t.Errorf("named reload must be handler-driven (listen: reload named for open recursion), not an inline command task")
 	}
 }
+
+// TestRegression_FreeipaServerApplyPlaybook_BoundsWsgiSocketTimeout locks the
+// operational safeguard for the FreeIPA Web layer: the packaged ipa.conf uses
+// an effectively infinite WSGI socket timeout, so the apply playbook must
+// reconcile a finite value and restart httpd when it changes.
+func TestRegression_FreeipaServerApplyPlaybook_BoundsWsgiSocketTimeout(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-server-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	for _, want := range []string{
+		"ipa_httpd_wsgi_socket_timeout: 300",
+		"ipa.conf.pre-freeipa-wsgi-timeout.bak",
+		"socket-timeout=)\\d+",
+		"restart httpd after FreeIPA WSGI timeout change",
+		"state: restarted",
+	} {
+		if !strings.Contains(playbook, want) {
+			t.Errorf("freeipa-server-apply.yml must contain %q", want)
+		}
+	}
+	if strings.Contains(playbook, "socket-timeout=2147483647") {
+		t.Error("freeipa-server-apply.yml must not restore the effectively infinite WSGI socket timeout")
+	}
+}
