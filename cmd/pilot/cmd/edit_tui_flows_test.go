@@ -68,9 +68,9 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save and return to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
-	// 7 快速建立最小 workspace, 8 離開
-	for i := 0; i < 8; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
+	// 7 檢查設定完整性, 8 快速建立最小 workspace, 9 離開
+	for i := 0; i < 9; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
@@ -129,9 +129,9 @@ func TestEditRouter_Teatest_MinimalWorkspaceRequiresHostsBeforeScaffolding(t *te
 	}
 
 	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
-	// 7 快速建立最小 workspace, 8 離開
-	for i := 0; i < 7; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
+	// 7 檢查設定完整性, 8 快速建立最小 workspace, 9 離開
+	for i := 0; i < 8; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -162,9 +162,9 @@ func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksAndOffersRoute(t *tes
 	}
 
 	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
-	// 7 快速建立最小 workspace, 8 離開
-	for i := 0; i < 7; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
+	// 7 檢查設定完整性, 8 快速建立最小 workspace, 9 離開
+	for i := 0; i < 8; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -1075,9 +1075,9 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
-	// 7 快速建立最小 workspace, 8 離開
-	for i := 0; i < 8; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
+	// 7 檢查設定完整性, 8 快速建立最小 workspace, 9 離開
+	for i := 0; i < 9; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
@@ -1276,9 +1276,9 @@ func TestEditRouter_Teatest_VaultFlow_CreateAddKeyAndSave(t *testing.T) {
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to top menu
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 檢查設定完整性,
-	// 7 快速建立最小 workspace, 8 離開
-	for i := 0; i < 8; i++ {
+	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
+	// 7 檢查設定完整性, 8 快速建立最小 workspace, 9 離開
+	for i := 0; i < 9; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit

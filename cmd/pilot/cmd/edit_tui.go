@@ -255,6 +255,7 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		{ID: "top.roster", Label: "roster — FreeIPA users/groups/sudo(canonical roster，可預覽/編輯/新增)"},
 		{ID: "top.dns", Label: "freeipa-dns manifest — DNS zones/records(day-2 reconciler，可預覽/編輯/新增)"},
 		{ID: "top.internal_endpoints", Label: "internal-endpoints manifest — internal DNS/TLS/routes(day-2 reconciler，可預覽/編輯/新增)"},
+		{ID: "top.monitoring", Label: "monitoring — Prometheus external exporter targets/profiles(可預覽/編輯/新增)"},
 		{ID: "top.completeness_check", Label: "🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則"},
 		{ID: "top.minimal_workspace", Label: "快速建立最小 workspace — 引導式設定並驗證可部署性"},
 		{ID: "top.quit", Label: "離開"},
@@ -280,10 +281,12 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		case 5:
 			return pushInternalEndpointManifestPathPrompt(r, dir)
 		case 6:
-			return pushConfigCompletenessCheck(r, dir)
+			return pushMonitoringManager(r, dir, "")
 		case 7:
-			return pushMinimalWorkspaceWizard(r, dir, "")
+			return pushConfigCompletenessCheck(r, dir)
 		case 8:
+			return pushMinimalWorkspaceWizard(r, dir, "")
+		case 9:
 			r.quit = true
 			return nil
 		}
