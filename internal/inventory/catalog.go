@@ -42,6 +42,7 @@ var topLevelOrder = []string{
 	"seaweedfs-s3",
 	"restic-backup",
 	"host-monitoring",
+	"dcgm-exporter",
 	"prometheus",
 	"thanos-query",
 	"alertmanager",

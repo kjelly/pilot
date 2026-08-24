@@ -758,8 +758,9 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 	for i := 0; i < len(inventory.Roles()); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyUp})
 	}
-	// roleContracts order: 0 freeipa-server .. 19 host-monitoring .. 20 prometheus.
-	for i := 0; i < 20; i++ {
+	// roleContracts order: 0 freeipa-server .. 19 host-monitoring ..
+	// 20 dcgm-exporter .. 21 prometheus.
+	for i := 0; i < 21; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // toggle prometheus on

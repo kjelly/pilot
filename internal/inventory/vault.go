@@ -137,6 +137,17 @@ var vaultSections = map[string]vaultSection{
 			},
 		},
 	},
+	"dcgm-exporter-auth": {
+		Title: "dcgm-exporter Basic Auth 相關",
+		Note:  "dcgm-exporter 自己的 HTTP Basic Auth 密碼；跟 node_exporter 的密碼是獨立的一組，不需要相同。",
+		Keys: []vaultField{
+			{
+				Name:    "dcgm_exporter_basic_auth_password",
+				Value:   "CHANGE-ME-dcgm-exporter-basic-auth-password",
+				Comment: "dcgm-exporter Basic Auth 密碼（必填）",
+			},
+		},
+	},
 	"alertmanager": {
 		Title: "Alertmanager 相關",
 		Note:  "這不是密碼，但正式環境通常會把完整 receiver config 跟 secret webhook 一起放進 vault。",
@@ -167,6 +178,7 @@ var vaultSectionOrder = []string{
 	"restic-backup",
 	"thanos-s3",
 	"node-exporter-auth",
+	"dcgm-exporter-auth",
 	"alertmanager",
 }
 
