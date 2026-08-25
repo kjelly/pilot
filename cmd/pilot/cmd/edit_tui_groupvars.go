@@ -125,7 +125,7 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 				r.err = fmt.Errorf("read %s: %w", src, rerr)
 				return nil
 			}
-			data = autofillCrossRoleHostVars(hf, data)
+			data = autofillCrossRoleHostVars(dir, hf, data)
 			if merr := os.MkdirAll(targetDir, 0o755); merr != nil {
 				r.err = fmt.Errorf("mkdir %s: %w", targetDir, merr)
 				return nil
@@ -202,12 +202,14 @@ func groupVarsAutoHostVars() []autoHostVar {
 	}, siteAutoHostVars()...)
 }
 
-// resolveSingleRoleHost returns the sole host in hf carrying role, or
-// ("", false) if zero or more than one host has it — an ambiguous match is
-// left blank for a human to fill in rather than guessed.
-func resolveSingleRoleHost(hf *inventory.HostsFile, role string) (string, bool) {
+// resolveSingleRoleHostEntry returns the sole host in hf carrying role, or
+// (nil, false) if zero or more than one host has it — an ambiguous match is
+// left blank for a human to fill in rather than guessed. Split out from
+// resolveSingleRoleHost so fqdnForRoleHost can inspect the matched host's
+// own Roles (e.g. freeipa-client membership) without re-walking hf.Hosts.
+func resolveSingleRoleHostEntry(hf *inventory.HostsFile, role string) (*inventory.Host, bool) {
 	if hf == nil {
-		return "", false
+		return nil, false
 	}
 	var match *inventory.Host
 	for i := range hf.Hosts {
@@ -215,14 +217,74 @@ func resolveSingleRoleHost(hf *inventory.HostsFile, role string) (string, bool) 
 			continue
 		}
 		if match != nil {
-			return "", false // ambiguous: more than one candidate host
+			return nil, false // ambiguous: more than one candidate host
 		}
 		match = &hf.Hosts[i]
 	}
 	if match == nil || match.AnsibleHost == "" {
+		return nil, false
+	}
+	return match, true
+}
+
+// resolveSingleRoleHost returns the sole host in hf carrying role, or
+// ("", false) if zero or more than one host has it — an ambiguous match is
+// left blank for a human to fill in rather than guessed.
+func resolveSingleRoleHost(hf *inventory.HostsFile, role string) (string, bool) {
+	match, ok := resolveSingleRoleHostEntry(hf, role)
+	if !ok {
 		return "", false
 	}
 	return match.AnsibleHost, true
+}
+
+// readFreeIPADomain returns the workspace's configured freeipa_domain — the
+// zone fqdnForRoleHost needs to turn a resolved hostname into a resolvable
+// FQDN — by reading group_vars/freeipa.yml the same line-oriented way
+// groupVarsKeyAlreadyConfigured does. A missing file means no FreeIPA role
+// is even part of this workspace (so no host could pass the freeipa-client
+// check either), which the empty return communicates as "ineligible" to
+// every caller. A present file with the key left at its commented-out
+// example value falls back to the same default every apply playbook
+// already assumes (freeipa-client-apply.yml's
+// `freeipa_domain | default('ipa.pilot.internal')`).
+func readFreeIPADomain(baseDir string) string {
+	data, err := os.ReadFile(filepath.Join(baseDir, "group_vars", "freeipa.yml"))
+	if err != nil {
+		return ""
+	}
+	for _, entry := range groupvars.Parse(data).Entries() {
+		if entry.Key == "freeipa_domain" && entry.Active && strings.TrimSpace(entry.Value) != "" {
+			return strings.TrimSpace(entry.Value)
+		}
+	}
+	return "ipa.pilot.internal"
+}
+
+// fqdnForRoleHost is autofillCrossRoleHostVars's FQDN-upgrade counterpart
+// to resolveSingleRoleHost: it upgrades role's resolved host to its
+// FreeIPA FQDN only when doing so is safe — role's sole host is itself
+// enrolled as freeipa-client (so it actually has an A record) and every
+// host in the whole fleet is enrolled as freeipa-dns-client. The
+// fleet-wide (rather than per-consumer-group) check is deliberate: a
+// freshly scaffolded group_vars file doesn't pin down which host will end
+// up reading this value, unlike deploy.go's fqdnForGroupHost where the
+// consumer group is already known.
+func fqdnForRoleHost(hf *inventory.HostsFile, role, baseDir string) (fqdn string, ok bool) {
+	match, ok := resolveSingleRoleHostEntry(hf, role)
+	if !ok || !hasRole(match.Roles, freeipaClientGroup) {
+		return "", false
+	}
+	for i := range hf.Hosts {
+		if !hasRole(hf.Hosts[i].Roles, freeipaDNSClientGroup) {
+			return "", false
+		}
+	}
+	domain := readFreeIPADomain(baseDir)
+	if domain == "" {
+		return "", false
+	}
+	return match.Name + "." + domain, true
 }
 
 // autofillCrossRoleHostVars pre-fills any commented-out example line whose
@@ -230,8 +292,11 @@ func resolveSingleRoleHost(hf *inventory.HostsFile, role string) (string, bool) 
 // target role resolves unambiguously in hf — the one case safe to write for
 // real, since the value is fully derived, not guessed. Every other line —
 // including that same key when its role is ambiguous or absent — is left
-// exactly as the shipped example wrote it.
-func autofillCrossRoleHostVars(hf *inventory.HostsFile, data []byte) []byte {
+// exactly as the shipped example wrote it. baseDir is the workspace root
+// (used to look up freeipa_domain for the IP->FQDN upgrade — see
+// fqdnForRoleHost); pass "" where no real workspace exists yet, which just
+// keeps every upgrade ineligible and falls back to the plain IP.
+func autofillCrossRoleHostVars(baseDir string, hf *inventory.HostsFile, data []byte) []byte {
 	if hf == nil {
 		return data
 	}
@@ -246,6 +311,12 @@ func autofillCrossRoleHostVars(hf *inventory.HostsFile, data []byte) []byte {
 		for _, av := range groupVarsAutoHostVars() {
 			if av.Var != entry.Key {
 				continue
+			}
+			if !noFQDNUpgradeVars[av.Var] {
+				if fqdn, ok := fqdnForRoleHost(hf, av.Group, baseDir); ok {
+					_ = doc.SetValue(entry.Line, fqdn)
+					continue
+				}
 			}
 			if host, ok := resolveSingleRoleHost(hf, av.Group); ok {
 				_ = doc.SetValue(entry.Line, host)

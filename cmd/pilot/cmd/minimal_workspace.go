@@ -54,7 +54,7 @@ func autofillMinimalWorkspaceGroupVars(dir string, hf *inventory.HostsFile) erro
 		if err != nil {
 			return fmt.Errorf("read %s: %w", path, err)
 		}
-		updated := autofillCrossRoleHostVars(hf, data)
+		updated := autofillCrossRoleHostVars(dir, hf, data)
 		if string(updated) == string(data) {
 			continue
 		}

@@ -182,7 +182,7 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "dcgm-exporter", Label: "GPU 主機的監控 agent(NVIDIA dcgm-exporter)",
 		Playbook: "playbooks/apply/dcgm-exporter-apply.yml", DefaultGroup: "dcgm-exporter", StageVar: "stage",
-		Note: "依賴 docker,官方 Docker image + NVIDIA Container Toolkit;沒有 GPU 或驅動未裝好的主機會被自動偵測並優雅跳過原生安裝,不會 fail。",
+		Note: "使用官方 Docker image + NVIDIA Container Toolkit；目標主機需要既有 Docker Engine，但不要求指派 docker role。沒有 GPU 或驅動未裝好的主機會被自動偵測並優雅跳過原生安裝,不會 fail。",
 	},
 	{
 		Key: "prometheus", Label: "Prometheus + Thanos Sidecar",

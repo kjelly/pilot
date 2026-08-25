@@ -223,7 +223,7 @@ func copyMissingGroupVars(w io.Writer, baseDir string, stems []string, hf *inven
 		// commented out even when it resolves unambiguously, which is why
 		// `pilot deploy`'s auto-detect prompt for it fired on every single
 		// run of a workspace built this way.
-		if err := os.WriteFile(dst, autofillCrossRoleHostVars(hf, data), 0o644); err != nil {
+		if err := os.WriteFile(dst, autofillCrossRoleHostVars(baseDir, hf, data), 0o644); err != nil {
 			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
 			continue
 		}

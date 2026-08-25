@@ -638,14 +638,29 @@ func promptSeaweedfsS3Config(out io.Writer, stage string) ([]string, error) {
 // cleanly — missing ansible-inventory, an empty/absent group, unparseable
 // JSON — since the caller's fallback (ask the user directly) covers all of
 // those.
-func resolveGroupHost(ctx context.Context, inv, group string) (host string, ok bool) {
+//
+// When varName isn't in noFQDNUpgradeVars, the returned value is upgraded
+// from the target's ansible_host IP to its FreeIPA FQDN whenever
+// fqdnForGroupHost finds it safe to (target enrolled as freeipa-client,
+// every one of consumerGroups already resolving via freeipa-dns-client) —
+// see that function's doc comment for the exact eligibility rule.
+func resolveGroupHost(ctx context.Context, inv, group, varName string, consumerGroups []string) (host string, ok bool) {
 	r := ansible.NewRunner()
 	r.Binary = "ansible-inventory"
 	res, err := r.Run(ctx, "-i", inv, "--list")
 	if err != nil || res.ExitCode != 0 {
 		return "", false
 	}
-	return parseGroupHostFromInventoryList(res.Stdout, group)
+	ip, ipOK := parseGroupHostFromInventoryList(res.Stdout, group)
+	if !ipOK {
+		return "", false
+	}
+	if !noFQDNUpgradeVars[varName] {
+		if fqdn, fqdnOK := fqdnForGroupHost(res.Stdout, group, consumerGroups); fqdnOK {
+			return fqdn, true
+		}
+	}
+	return ip, true
 }
 
 // parseGroupHostFromInventoryList pulls the first host of the named group
@@ -682,6 +697,152 @@ func parseGroupHostFromInventoryList(listJSON, group string) (host string, ok bo
 	return groupData.Hosts[0], true
 }
 
+// freeipaClientGroup / freeipaDNSClientGroup name the two independent
+// inventory groups (contracts.go: "互不相依") a cross-role host var's FQDN
+// upgrade depends on: the target must actually carry a FreeIPA A record
+// (freeipa-client) and every consumer of the value must already resolve it
+// (freeipa-dns-client). Neither membership implies the other.
+const (
+	freeipaClientGroup    = "freeipa-client"
+	freeipaDNSClientGroup = "freeipa-dns-client"
+)
+
+// noFQDNUpgradeVars lists cross-role host vars that must always stay an IP
+// even when fqdnForGroupHost/fqdnForRoleHost would otherwise allow it.
+// freeipa_server_ip feeds freeipa-client-apply.yml's own enrollment
+// bootstrap (kinit against the server) — on a host whose inventory entry
+// already declares freeipa-dns-client but hasn't actually finished
+// applying that playbook yet, resolving the server by its FreeIPA FQDN
+// would fail before FreeIPA DNS itself is reachable. Keeping this one var
+// IP-only sidesteps that chicken-and-egg case entirely.
+var noFQDNUpgradeVars = map[string]bool{
+	"freeipa_server_ip": true,
+}
+
+// fqdnForGroupHost upgrades targetGroup's resolved host to its FreeIPA FQDN
+// when — and only when — it's safe to: the target host is itself a
+// freeipa-client (so an A record actually exists) and every host in every
+// one of consumerGroups (the group(s) whose group_vars/-e will receive
+// this value) already has freeipa-dns-client (so whoever reads the value
+// can actually resolve it). An empty consumerGroups, an unresolvable
+// consumer group, or a missing freeipa_domain hostvar all conservatively
+// return ok=false — the caller falls back to the plain IP exactly as
+// before this upgrade existed.
+func fqdnForGroupHost(listJSON, targetGroup string, consumerGroups []string) (fqdn string, ok bool) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(listJSON), &raw); err != nil {
+		return "", false
+	}
+	targetHost, ok := firstGroupHost(raw, targetGroup)
+	if !ok {
+		return "", false
+	}
+	if !inventoryGroupContains(raw, freeipaClientGroup, targetHost) {
+		return "", false
+	}
+	if len(consumerGroups) == 0 {
+		return "", false
+	}
+	for _, cg := range consumerGroups {
+		if !inventoryGroupIsSubsetOf(raw, cg, freeipaDNSClientGroup) {
+			return "", false
+		}
+	}
+
+	var meta struct {
+		HostVars map[string]map[string]any `json:"hostvars"`
+	}
+	if err := json.Unmarshal(raw["_meta"], &meta); err != nil {
+		return "", false
+	}
+	domain, _ := meta.HostVars[targetHost]["freeipa_domain"].(string)
+	if domain == "" {
+		return "", false
+	}
+	return targetHost + "." + domain, true
+}
+
+// firstGroupHost returns the first host listed under group in raw (an
+// already-unmarshaled `ansible-inventory --list` top level), or ok=false
+// for an absent or empty group.
+func firstGroupHost(raw map[string]json.RawMessage, group string) (host string, ok bool) {
+	var data struct {
+		Hosts []string `json:"hosts"`
+	}
+	if err := json.Unmarshal(raw[group], &data); err != nil || len(data.Hosts) == 0 {
+		return "", false
+	}
+	return data.Hosts[0], true
+}
+
+func inventoryGroupHosts(raw map[string]json.RawMessage, group string) []string {
+	var data struct {
+		Hosts []string `json:"hosts"`
+	}
+	if err := json.Unmarshal(raw[group], &data); err != nil {
+		return nil
+	}
+	return data.Hosts
+}
+
+func inventoryGroupContains(raw map[string]json.RawMessage, group, host string) bool {
+	for _, h := range inventoryGroupHosts(raw, group) {
+		if h == host {
+			return true
+		}
+	}
+	return false
+}
+
+// inventoryGroupIsSubsetOf reports whether every host in group is also a
+// member of supersetGroup. An absent/empty group is treated as NOT a
+// subset — resolveGroupHost only calls this once it already knows
+// consumerGroups is non-empty, so an empty membership here means the named
+// group doesn't actually resolve in this inventory, which must decline the
+// upgrade rather than vacuously approve it.
+func inventoryGroupIsSubsetOf(raw map[string]json.RawMessage, group, supersetGroup string) bool {
+	members := inventoryGroupHosts(raw, group)
+	if len(members) == 0 {
+		return false
+	}
+	superset := make(map[string]bool, len(members))
+	for _, h := range inventoryGroupHosts(raw, supersetGroup) {
+		superset[h] = true
+	}
+	for _, h := range members {
+		if !superset[h] {
+			return false
+		}
+	}
+	return true
+}
+
+// autoHostVarConsumerGroups returns the DefaultGroup of every deployCatalog
+// entry that auto-detects varName, deduped in catalog order. A var can be
+// consumed by more than one component (e.g. siem_forward_host by both
+// audit-log-forwarding and wazuh-manager) — a site-wide deploy's
+// FQDN-eligibility check for it must hold for every one of them, not just
+// the first, so callers must NOT stop at one match. Entries with no
+// DefaultGroup set are skipped; inventoryGroupIsSubsetOf already treats an
+// absent group as ineligible, so omitting it here just keeps the IP
+// fallback instead of asserting a false negative some other way.
+func autoHostVarConsumerGroups(varName string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, p := range deployCatalog {
+		if p.DefaultGroup == "" {
+			continue
+		}
+		for _, av := range p.AutoHostVars {
+			if av.Var == varName && !seen[p.DefaultGroup] {
+				seen[p.DefaultGroup] = true
+				out = append(out, p.DefaultGroup)
+			}
+		}
+	}
+	return out
+}
+
 // siteAutoHostVars returns every distinct cross-role host variable the
 // deploy catalog knows how to auto-detect, deduped by Var in catalog order
 // (siem_forward_host and thanos_s3_target_host each appear under two
@@ -711,12 +872,15 @@ func siteAutoHostVars() []autoHostVar {
 // does today — a hard gate failure for a required destination, or a silent
 // feature-skip for an optional one). Asks nothing at all when workspaceDir's
 // group_vars already has a real value for av.Var — see
-// groupVarsKeyAlreadyConfigured.
-func promptAutoHostVar(ctx context.Context, out io.Writer, inv, workspaceDir string, av autoHostVar) ([]string, error) {
+// groupVarsKeyAlreadyConfigured. consumerGroups names the inventory
+// group(s) that will actually receive this value (usually just the
+// component being deployed) — see resolveGroupHost/fqdnForGroupHost for
+// how it gates the IP->FQDN upgrade.
+func promptAutoHostVar(ctx context.Context, out io.Writer, inv, workspaceDir string, av autoHostVar, consumerGroups []string) ([]string, error) {
 	if configured, err := groupVarsKeyAlreadyConfigured(workspaceDir, av.Var); err == nil && configured {
 		return nil, nil
 	}
-	if host, ok := resolveGroupHost(ctx, inv, av.Group); ok {
+	if host, ok := resolveGroupHost(ctx, inv, av.Group, av.Var, consumerGroups); ok {
 		q := fmt.Sprintf("偵測到這份 inventory 的 %s：%s，這次要用它嗎？(-e %s=%s)", av.Label, host, av.Var, host)
 		if runConfirmProgram(q, true) {
 			return []string{av.Var + "=" + host}, nil
@@ -2057,7 +2221,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	workspaceDir := filepath.Dir(inv)
 	var acceptedAutoHostVars []acceptedAutoHostVar
 	for _, av := range siteAutoHostVars() {
-		host, ok := resolveGroupHost(ctx, inv, av.Group)
+		host, ok := resolveGroupHost(ctx, inv, av.Group, av.Var, autoHostVarConsumerGroups(av.Var))
 		if !ok {
 			continue
 		}
@@ -2266,9 +2430,22 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 	}
 
 	workspaceDir := filepath.Dir(inv)
+	// The consumer of these cross-role vars is whichever group actually
+	// receives -e/target_group for this run: an explicit targetGroup
+	// override if the operator gave one, else the catalog's own
+	// DefaultGroup (not the display-only defaultGroup above, which may
+	// hold placeholder text like "(見上方提示)" instead of a real group).
+	consumerGroup := targetGroup
+	if consumerGroup == "" {
+		consumerGroup = entry.DefaultGroup
+	}
+	var consumerGroups []string
+	if consumerGroup != "" {
+		consumerGroups = []string{consumerGroup}
+	}
 	var acceptedAutoHostVars []acceptedAutoHostVar
 	for _, av := range entry.AutoHostVars {
-		hostVars, err := promptAutoHostVar(ctx, out, inv, workspaceDir, av)
+		hostVars, err := promptAutoHostVar(ctx, out, inv, workspaceDir, av, consumerGroups)
 		if err != nil {
 			return err
 		}

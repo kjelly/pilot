@@ -442,6 +442,135 @@ func TestParseGroupHostFromInventoryList(t *testing.T) {
 	}
 }
 
+// TestFqdnForGroupHost fixes the behavior spec for upgrading a cross-role
+// host var from the target's ansible_host IP to its FreeIPA FQDN: it must
+// only fire when the target actually has a FreeIPA A record
+// (freeipa-client membership) AND every consumer group that will read the
+// resulting value can actually resolve it (freeipa-dns-client membership).
+// Either check failing must fall back to "" / false so the caller keeps
+// using the plain IP — never a guess that could resolve to nothing.
+func TestFqdnForGroupHost(t *testing.T) {
+	baseJSON := `{
+		"log-server": {"hosts": ["log1"]},
+		"audit-log-forwarding": {"hosts": ["audit1"]},
+		"wazuh-manager": {"hosts": ["wazuh1"]},
+		"freeipa-client": {"hosts": ["log1", "audit1", "wazuh1"]},
+		"freeipa-dns-client": {"hosts": ["log1", "audit1", "wazuh1"]},
+		"_meta": {"hostvars": {
+			"log1": {"ansible_host": "10.1.1.1", "freeipa_domain": "ipa.pilot.internal"},
+			"audit1": {"ansible_host": "10.1.1.2"},
+			"wazuh1": {"ansible_host": "10.1.1.3"}
+		}}
+	}`
+
+	cases := []struct {
+		name           string
+		json           string
+		targetGroup    string
+		consumerGroups []string
+		wantFQDN       string
+		wantOK         bool
+	}{
+		{
+			name:           "eligible: target enrolled, sole consumer group fully dns-covered",
+			json:           baseJSON,
+			targetGroup:    "log-server",
+			consumerGroups: []string{"audit-log-forwarding"},
+			wantFQDN:       "log1.ipa.pilot.internal",
+			wantOK:         true,
+		},
+		{
+			name: "target not a freeipa-client -> stays ineligible",
+			json: `{
+				"log-server": {"hosts": ["log1"]},
+				"audit-log-forwarding": {"hosts": ["audit1"]},
+				"freeipa-client": {"hosts": ["audit1"]},
+				"freeipa-dns-client": {"hosts": ["log1", "audit1"]},
+				"_meta": {"hostvars": {"log1": {"ansible_host": "10.1.1.1", "freeipa_domain": "ipa.pilot.internal"}}}
+			}`,
+			targetGroup:    "log-server",
+			consumerGroups: []string{"audit-log-forwarding"},
+			wantOK:         false,
+		},
+		{
+			name: "consumer group has a host missing freeipa-dns-client -> ineligible",
+			json: `{
+				"log-server": {"hosts": ["log1"]},
+				"audit-log-forwarding": {"hosts": ["audit1"]},
+				"freeipa-client": {"hosts": ["log1", "audit1"]},
+				"freeipa-dns-client": {"hosts": ["log1"]},
+				"_meta": {"hostvars": {"log1": {"ansible_host": "10.1.1.1", "freeipa_domain": "ipa.pilot.internal"}}}
+			}`,
+			targetGroup:    "log-server",
+			consumerGroups: []string{"audit-log-forwarding"},
+			wantOK:         false,
+		},
+		{
+			name:           "one of several consumer groups fails coverage -> whole upgrade declines",
+			json:           baseJSON,
+			targetGroup:    "log-server",
+			consumerGroups: []string{"audit-log-forwarding", "keycloak"}, // "keycloak" group absent -> empty membership -> fails
+			wantOK:         false,
+		},
+		{
+			name:           "no known consumer group -> conservative decline",
+			json:           baseJSON,
+			targetGroup:    "log-server",
+			consumerGroups: nil,
+			wantOK:         false,
+		},
+		{
+			name: "target has no freeipa_domain hostvar -> ineligible",
+			json: `{
+				"log-server": {"hosts": ["log1"]},
+				"audit-log-forwarding": {"hosts": ["audit1"]},
+				"freeipa-client": {"hosts": ["log1", "audit1"]},
+				"freeipa-dns-client": {"hosts": ["log1", "audit1"]},
+				"_meta": {"hostvars": {"log1": {"ansible_host": "10.1.1.1"}}}
+			}`,
+			targetGroup:    "log-server",
+			consumerGroups: []string{"audit-log-forwarding"},
+			wantOK:         false,
+		},
+		{
+			name:           "target group absent -> ineligible, mirrors parseGroupHostFromInventoryList",
+			json:           baseJSON,
+			targetGroup:    "does-not-exist",
+			consumerGroups: []string{"audit-log-forwarding"},
+			wantOK:         false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fqdn, ok := fqdnForGroupHost(c.json, c.targetGroup, c.consumerGroups)
+			if fqdn != c.wantFQDN || ok != c.wantOK {
+				t.Errorf("fqdnForGroupHost() = (%q, %v), want (%q, %v)", fqdn, ok, c.wantFQDN, c.wantOK)
+			}
+		})
+	}
+}
+
+// TestAutoHostVarConsumerGroups fixes which DefaultGroups a site-wide
+// deploy must treat as "consumers" of a given cross-role var — a var can
+// be auto-detected by more than one deployCatalog component (e.g.
+// siem_forward_host by both audit-log-forwarding and wazuh-manager), and
+// the FQDN-upgrade decision for a site-wide deploy must hold for every one
+// of them, not just the first found.
+func TestAutoHostVarConsumerGroups(t *testing.T) {
+	if got := autoHostVarConsumerGroups("siem_forward_host"); !slices.Equal(got, []string{"audit-log-forwarding", "wazuh-manager"}) {
+		t.Errorf("autoHostVarConsumerGroups(siem_forward_host) = %v, want [audit-log-forwarding wazuh-manager]", got)
+	}
+	if got := autoHostVarConsumerGroups("thanos_s3_target_host"); !slices.Equal(got, []string{"prometheus", "thanos-query"}) {
+		t.Errorf("autoHostVarConsumerGroups(thanos_s3_target_host) = %v, want [prometheus thanos-query]", got)
+	}
+	if got := autoHostVarConsumerGroups("wazuh_manager_host"); !slices.Equal(got, []string{"wazuh-fim"}) {
+		t.Errorf("autoHostVarConsumerGroups(wazuh_manager_host) = %v, want [wazuh-fim]", got)
+	}
+	if got := autoHostVarConsumerGroups("no-such-var"); len(got) != 0 {
+		t.Errorf("autoHostVarConsumerGroups(no-such-var) = %v, want empty", got)
+	}
+}
+
 func TestDefaultVaultFile(t *testing.T) {
 	dir := t.TempDir()
 	inv := filepath.Join(dir, "inventory.yml")

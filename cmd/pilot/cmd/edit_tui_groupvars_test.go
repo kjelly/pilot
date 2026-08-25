@@ -50,6 +50,100 @@ func TestResolveSingleRoleHost_FalseWhenAnsibleHostEmpty(t *testing.T) {
 	}
 }
 
+// TestReadFreeIPADomain fixes the behavior spec for looking up the
+// workspace's configured FreeIPA zone: a missing group_vars/freeipa.yml
+// means FreeIPA isn't even part of this workspace (so no host could pass
+// the freeipa-client eligibility check either), an active explicit value
+// wins, and a present-but-commented-out key falls back to the same default
+// every apply playbook already assumes ("ipa.pilot.internal" |
+// freeipa-client-apply.yml's `ipa_domain` default).
+func TestReadFreeIPADomain(t *testing.T) {
+	t.Run("missing file returns empty", func(t *testing.T) {
+		if got := readFreeIPADomain(t.TempDir()); got != "" {
+			t.Fatalf("readFreeIPADomain() = %q, want empty for a workspace with no freeipa.yml", got)
+		}
+	})
+	t.Run("active explicit value wins", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWriteFile(t, filepath.Join(dir, "group_vars", "freeipa.yml"), "freeipa_domain: corp.example.com\n")
+		if got := readFreeIPADomain(dir); got != "corp.example.com" {
+			t.Fatalf("readFreeIPADomain() = %q, want corp.example.com", got)
+		}
+	})
+	t.Run("commented-out key falls back to the shipped default", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWriteFile(t, filepath.Join(dir, "group_vars", "freeipa.yml"), "# freeipa_domain: ipa.pilot.internal\n")
+		if got := readFreeIPADomain(dir); got != "ipa.pilot.internal" {
+			t.Fatalf("readFreeIPADomain() = %q, want the shipped default ipa.pilot.internal", got)
+		}
+	})
+}
+
+// TestFqdnForRoleHost fixes the behavior spec for edit-time group_vars
+// scaffolding's FQDN upgrade: role's sole host must itself be a
+// freeipa-client (a real A record exists) and — since a freshly scaffolded
+// file doesn't pin down which host will actually read this value — every
+// host in the fleet must already be a freeipa-dns-client, or the upgrade
+// conservatively declines and the caller keeps the plain IP.
+func TestFqdnForRoleHost(t *testing.T) {
+	freeIPADomainDir := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		mustWriteFile(t, filepath.Join(dir, "group_vars", "freeipa.yml"), "freeipa_domain: ipa.pilot.internal\n")
+		return dir
+	}
+
+	t.Run("eligible: target enrolled, whole fleet dns-covered", func(t *testing.T) {
+		hf := &inventory.HostsFile{Hosts: []inventory.Host{
+			{Name: "ipa-1", AnsibleHost: "10.0.0.5", Roles: []string{"freeipa-server", "freeipa-client", "freeipa-dns-client"}},
+			{Name: "client-1", AnsibleHost: "10.0.0.6", Roles: []string{"freeipa-client", "freeipa-dns-client"}},
+		}}
+		got, ok := fqdnForRoleHost(hf, "freeipa-server", freeIPADomainDir(t))
+		if !ok || got != "ipa-1.ipa.pilot.internal" {
+			t.Fatalf("fqdnForRoleHost() = (%q, %v), want (ipa-1.ipa.pilot.internal, true)", got, ok)
+		}
+	})
+
+	t.Run("target lacks freeipa-client role -> ineligible", func(t *testing.T) {
+		hf := &inventory.HostsFile{Hosts: []inventory.Host{
+			{Name: "ipa-1", AnsibleHost: "10.0.0.5", Roles: []string{"freeipa-server", "freeipa-dns-client"}},
+			{Name: "client-1", AnsibleHost: "10.0.0.6", Roles: []string{"freeipa-client", "freeipa-dns-client"}},
+		}}
+		if _, ok := fqdnForRoleHost(hf, "freeipa-server", freeIPADomainDir(t)); ok {
+			t.Fatalf("fqdnForRoleHost() ok = true, want false when the target has no A record")
+		}
+	})
+
+	t.Run("some other fleet host lacks freeipa-dns-client -> ineligible", func(t *testing.T) {
+		hf := &inventory.HostsFile{Hosts: []inventory.Host{
+			{Name: "ipa-1", AnsibleHost: "10.0.0.5", Roles: []string{"freeipa-server", "freeipa-client", "freeipa-dns-client"}},
+			{Name: "client-1", AnsibleHost: "10.0.0.6", Roles: []string{"freeipa-client"}},
+		}}
+		if _, ok := fqdnForRoleHost(hf, "freeipa-server", freeIPADomainDir(t)); ok {
+			t.Fatalf("fqdnForRoleHost() ok = true, want false when any fleet host can't resolve FreeIPA DNS")
+		}
+	})
+
+	t.Run("no freeipa.yml in workspace -> domain unresolved -> ineligible", func(t *testing.T) {
+		hf := &inventory.HostsFile{Hosts: []inventory.Host{
+			{Name: "ipa-1", AnsibleHost: "10.0.0.5", Roles: []string{"freeipa-server", "freeipa-client", "freeipa-dns-client"}},
+		}}
+		if _, ok := fqdnForRoleHost(hf, "freeipa-server", t.TempDir()); ok {
+			t.Fatalf("fqdnForRoleHost() ok = true, want false with no configured freeipa_domain")
+		}
+	})
+
+	t.Run("ambiguous role match -> ineligible", func(t *testing.T) {
+		hf := &inventory.HostsFile{Hosts: []inventory.Host{
+			{Name: "ipa-1", AnsibleHost: "10.0.0.5", Roles: []string{"freeipa-server", "freeipa-client", "freeipa-dns-client"}},
+			{Name: "ipa-2", AnsibleHost: "10.0.0.6", Roles: []string{"freeipa-server", "freeipa-client", "freeipa-dns-client"}},
+		}}
+		if _, ok := fqdnForRoleHost(hf, "freeipa-server", freeIPADomainDir(t)); ok {
+			t.Fatalf("fqdnForRoleHost() ok = true, want false for an ambiguous (2-host) role")
+		}
+	})
+}
+
 func TestFilterStemsToUsedRoles_KeepsOnlyUsedRoleStems(t *testing.T) {
 	hf := &inventory.HostsFile{Hosts: []inventory.Host{
 		{Name: "ipa-1", Roles: []string{"freeipa-server"}},
@@ -66,7 +160,7 @@ func TestAutofillCrossRoleHostVars_FillsUnambiguousMatch(t *testing.T) {
 	}}
 	data := []byte("---\n# freeipa_server_ip: \"192.0.2.10\"\nfreeipa_domain: ipa.pilot.internal\n")
 
-	got := autofillCrossRoleHostVars(hf, data)
+	got := autofillCrossRoleHostVars(t.TempDir(), hf, data)
 	if !strings.Contains(string(got), "freeipa_server_ip: 10.0.0.5") {
 		t.Fatalf("autofillCrossRoleHostVars() = %q, want an uncommented freeipa_server_ip: 10.0.0.5", got)
 	}
@@ -79,7 +173,7 @@ func TestAutofillCrossRoleHostVars_LeavesAmbiguousRoleCommentedOut(t *testing.T)
 	}}
 	data := []byte("---\n# freeipa_server_ip: \"192.0.2.10\"\nfreeipa_domain: ipa.pilot.internal\n")
 
-	got := autofillCrossRoleHostVars(hf, data)
+	got := autofillCrossRoleHostVars(t.TempDir(), hf, data)
 	if string(got) != string(data) {
 		t.Fatalf("autofillCrossRoleHostVars() = %q, want unchanged (ambiguous role)", got)
 	}
@@ -91,7 +185,7 @@ func TestAutofillCrossRoleHostVars_NeverOverwritesAlreadyActiveValue(t *testing.
 	}}
 	data := []byte("---\nfreeipa_server_ip: \"10.9.9.9\"\nfreeipa_domain: ipa.pilot.internal\n")
 
-	got := autofillCrossRoleHostVars(hf, data)
+	got := autofillCrossRoleHostVars(t.TempDir(), hf, data)
 	if string(got) != string(data) {
 		t.Fatalf("autofillCrossRoleHostVars() = %q, want unchanged (already active)", got)
 	}
@@ -103,7 +197,7 @@ func TestAutofillCrossRoleHostVars_FillsActiveEmptyValue(t *testing.T) {
 	}}
 	data := []byte("---\nthanos_s3_target_host: \"\"\n")
 
-	got := autofillCrossRoleHostVars(hf, data)
+	got := autofillCrossRoleHostVars(t.TempDir(), hf, data)
 	if !strings.Contains(string(got), "thanos_s3_target_host: 10.0.0.8") {
 		t.Fatalf("autofillCrossRoleHostVars() = %q, want an active derived thanos S3 host", got)
 	}
@@ -111,7 +205,7 @@ func TestAutofillCrossRoleHostVars_FillsActiveEmptyValue(t *testing.T) {
 
 func TestAutofillCrossRoleHostVars_NilHostsFileIsNoop(t *testing.T) {
 	data := []byte("---\n# freeipa_server_ip: \"192.0.2.10\"\n")
-	got := autofillCrossRoleHostVars(nil, data)
+	got := autofillCrossRoleHostVars("", nil, data)
 	if string(got) != string(data) {
 		t.Fatalf("autofillCrossRoleHostVars(nil, ...) = %q, want unchanged", got)
 	}
@@ -129,7 +223,7 @@ func TestAutofillCrossRoleHostVars_RealFreeIPAExampleFile(t *testing.T) {
 	hf := &inventory.HostsFile{Hosts: []inventory.Host{
 		{Name: "ipa-1", AnsibleHost: "10.0.0.9", Roles: []string{"freeipa-server"}},
 	}}
-	got := autofillCrossRoleHostVars(hf, data)
+	got := autofillCrossRoleHostVars(t.TempDir(), hf, data)
 	if !strings.Contains(string(got), "freeipa_server_ip: 10.0.0.9") {
 		t.Fatalf("autofill against the real freeipa.example.yml did not produce freeipa_server_ip: 10.0.0.9:\n%s", got)
 	}
