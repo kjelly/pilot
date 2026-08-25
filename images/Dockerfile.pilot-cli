@@ -68,6 +68,14 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/pilot ./cmd/pilot
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
 
+# Passed by `make pilot-cli-image`.  Keep this on the runtime stage so the
+# resulting image can be traced with `docker image inspect` without adding git
+# or the source worktree to the final image.
+ARG PILOT_GIT_SHA=unknown
+ARG PILOT_GIT_DIRTY=unknown
+LABEL org.opencontainers.image.revision="${PILOT_GIT_SHA}" \
+      io.pilot.git.dirty="${PILOT_GIT_DIRTY}"
+
 # openssh-client / sshpass: reaching real hosts over SSH.
 # git: ansible.builtin.git tasks (e.g. FreeIPA/Keycloak fetch steps).
 # ca-certificates: HTTPS (get_url/uri tasks, pip, ansible-galaxy).

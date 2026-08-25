@@ -4,6 +4,11 @@ BIN := pilot
 PKG := ./cmd/pilot
 CALLBACK_SRC := ansible_callback/pilot_diagnose.py
 PILOT_CLI_IMAGE ?= pilot-cli:latest
+# OCI build provenance for `make pilot-cli-image`.  Callers can override these
+# (for example a CI checkout that already has its revision as an environment
+# variable), while local builds derive them from this worktree.
+PILOT_GIT_SHA ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)
+PILOT_GIT_DIRTY ?= $(shell if git diff --quiet --ignore-submodules HEAD -- 2>/dev/null; then echo false; else echo true; fi)
 
 USER_CALLBACK_DIR := $(HOME)/.ansible/plugins/callback
 SYSTEM_CALLBACK_DIR := /etc/ansible/plugins/callback
@@ -16,7 +21,10 @@ build:         	## Compile the binary (with debug info, for local dev)
 	go build -o $(BIN) $(PKG)
 
 pilot-cli-image: ## Build the deployment/control-node Docker image
-	docker build -t $(PILOT_CLI_IMAGE) -f images/Dockerfile.pilot-cli .
+	docker build \
+		--build-arg PILOT_GIT_SHA=$(PILOT_GIT_SHA) \
+		--build-arg PILOT_GIT_DIRTY=$(PILOT_GIT_DIRTY) \
+		-t $(PILOT_CLI_IMAGE) -f images/Dockerfile.pilot-cli .
 
 release:       	## Compile stripped release binary
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) $(PKG)
