@@ -333,14 +333,6 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(out)
 	}
 
-	ok, err := runPreflight(ctx, runner, out, inv)
-	if err != nil {
-		return abortOrErr(err)
-	}
-	if !ok {
-		return errPreflightRejected
-	}
-
 	scopeIdx, err := runSelectProgram("要佈署什麼？", []string{
 		"全站部署(site.yml) — 一次套用 inventory 裡已經填好機器的所有元件",
 		"單一元件 — 從清單挑一支 apply playbook",
@@ -495,7 +487,10 @@ func previewInventoryGraph(ctx context.Context, out io.Writer, inv string) {
 // runPreflight offers to run playbooks/preflight.yml before anything
 // else is applied. Returns ok=false when the user chose to stop
 // instead of continuing past a failed (or skipped) preflight.
-func runPreflight(ctx context.Context, runner *ansible.Runner, out io.Writer, inv string) (bool, error) {
+// runPreflight runs against the already-resolved execution limit. Callers must
+// resolve deployment availability first, so an offline optional host cannot
+// fail the SSH portion of a full preflight.
+func runPreflight(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, limit string) (bool, error) {
 	idx, err := runSelectProgram("要先跑前置檢查(preflight)嗎？", []string{
 		"完整前置檢查(含 SSH 連線測試)",
 		"只做靜態檢查(機器還沒開機/還連不上時用；不連線)",
@@ -509,6 +504,9 @@ func runPreflight(ctx context.Context, runner *ansible.Runner, out io.Writer, in
 	}
 	fmt.Fprintln(out, "── 執行 playbooks/preflight.yml ──")
 	args := []string{"playbooks/preflight.yml", "-i", inv}
+	if limit != "" {
+		args = append(args, "--limit", limit)
+	}
 	if idx == 1 {
 		args = append(args, "--tags", "static")
 	}
@@ -1237,13 +1235,18 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 		return err
 	}
 	components = contractIDs(applied)
+	availabilityGroups, err := resolveInventoryGroups(ctx, inv)
+	if err != nil {
+		return fmt.Errorf("resolve delegated availability candidates: %w", err)
+	}
+	availabilityHosts := availabilityCandidateHosts(hosts, selected, availabilityGroups)
 
 	// Deployment availability: an optional host an external operator
 	// intentionally powered off must not fail this deployment (spec.md
 	// §3/§12). This must run unconditionally, before any mutation, for
 	// every path that reaches executeRecordedDeployment — see
 	// deploy_availability.go.
-	execScope, invalidReasons, optionalHosts, err := resolveDeploymentAvailability(ctx, inv, hosts, selected, scope, extraVars, vault)
+	execScope, invalidReasons, optionalHosts, err := resolveDeploymentAvailability(ctx, inv, availabilityHosts, selected, scope, extraVars, vault)
 	if err != nil {
 		return err
 	}
@@ -1257,6 +1260,19 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	}
 	printAvailabilitySummary(out, execScope)
 	limit = effectiveDeploymentLimit(playbook, limit, execScope.Candidates, execScope.Included)
+
+	// The optional interactive preflight must run only after availability has
+	// resolved the effective execution scope. Previously deploy/reconcile ran
+	// it against the entire inventory before this point, so a deliberately
+	// offline optional host could fail its SSH ping despite being deferred from
+	// the apply run that followed.
+	ok, err := runPreflight(ctx, runner, out, inv, limit)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errPreflightRejected
+	}
 
 	extraVars, err = autoFillFreeIPARosterFile(ctx, out, selected, scope, inv, extraVars, vault)
 	if err != nil {
@@ -1274,6 +1290,15 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	if err != nil {
 		return err
 	}
+	// --limit protects ordinary Ansible targeting, but a playbook may make an
+	// explicit cross-host delegated connection outside that limit.  Pass the
+	// availability resolver's authoritative deferred set to the playbook so
+	// such tasks cannot re-contact an intentionally offline optional host.
+	deferredHostsExtraVar, err := deferredHostsExtraVar(execScope.Deferred)
+	if err != nil {
+		return fmt.Errorf("encode deferred deployment hosts: %w", err)
+	}
+	extraVars = append(extraVars, deferredHostsExtraVar)
 
 	st, err := openSpecStore()
 	if err != nil {
@@ -2430,6 +2455,16 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 	}
 
 	workspaceDir := filepath.Dir(inv)
+	if entry.MonitoringFiles {
+		monitoringVars, found, err := autoFillMonitoringFiles(workspaceDir)
+		if err != nil {
+			return err
+		}
+		if found {
+			extraVars = append(extraVars, monitoringVars...)
+			fmt.Fprintf(out, "已自動帶入外部 Prometheus monitoring 設定：%s、%s\n", monitoringVars[0], monitoringVars[1])
+		}
+	}
 	// The consumer of these cross-role vars is whichever group actually
 	// receives -e/target_group for this run: an explicit targetGroup
 	// override if the operator gave one, else the catalog's own
@@ -2483,6 +2518,42 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		persistAcceptedAutoHostVars(out, workspaceDir, acceptedAutoHostVars)
 	}
 	return deployErr
+}
+
+// autoFillMonitoringFiles wires the workspace-owned external monitoring
+// registry into prometheus-apply.yml. Both files must exist; missing files
+// retain the normal Prometheus-without-external-targets behavior.
+func autoFillMonitoringFiles(workspaceDir string) (vars []string, found bool, err error) {
+	targets := filepath.Join(workspaceDir, "monitoring", "targets.yml")
+	profiles := filepath.Join(workspaceDir, "monitoring", "scrape-profiles.yml")
+	targetsInfo, targetsErr := os.Stat(targets)
+	profilesInfo, profilesErr := os.Stat(profiles)
+	if targetsErr != nil && !os.IsNotExist(targetsErr) {
+		return nil, false, targetsErr
+	}
+	if profilesErr != nil && !os.IsNotExist(profilesErr) {
+		return nil, false, profilesErr
+	}
+	targetsMissing := os.IsNotExist(targetsErr)
+	profilesMissing := os.IsNotExist(profilesErr)
+	if targetsMissing != profilesMissing {
+		return nil, false, fmt.Errorf("external Prometheus monitoring registry is incomplete: both %s and %s are required", targets, profiles)
+	}
+	if targetsMissing || profilesMissing {
+		return nil, false, nil
+	}
+	if targetsInfo.IsDir() || profilesInfo.IsDir() {
+		return nil, false, fmt.Errorf("monitoring registry paths must be files: %s, %s", targets, profiles)
+	}
+	absTargets, err := filepath.Abs(targets)
+	if err != nil {
+		return nil, false, err
+	}
+	absProfiles, err := filepath.Abs(profiles)
+	if err != nil {
+		return nil, false, err
+	}
+	return []string{"monitoring_targets_file=" + absTargets, "monitoring_profiles_file=" + absProfiles}, true, nil
 }
 
 // deployMenuLabel keeps catalog-only copywriting as a presentation projection,

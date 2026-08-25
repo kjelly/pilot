@@ -104,12 +104,5 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 		previewInventoryGraph(ctx, out, inv)
 		fmt.Fprintln(out)
 	}
-	ok, err := runPreflight(ctx, runner, out, inv)
-	if err != nil {
-		return abortOrErr(err)
-	}
-	if !ok {
-		return errPreflightRejected
-	}
 	return abortOrErr(runCatalogPlaybookDeploy(ctx, runner, out, inv, "apply", true))
 }

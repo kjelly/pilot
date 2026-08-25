@@ -111,11 +111,6 @@ func TestPilotDeployPTY_DeclineAtFinalConfirmNeverRunsAnsible(t *testing.T) {
 	waitForNewDeployScreen(t, proc, "pilot deploy graph --view both")
 	proc.press(t, "n") // decline inventory graph preview — confirmModel finalizes on y/n alone, no Enter needed
 
-	waitForNewDeployScreen(t, proc, "前置檢查")
-	proc.press(t, "j")
-	proc.press(t, "j")
-	proc.press(t, "\r") // "跳過前置檢查"
-
 	waitForNewDeployScreen(t, proc, "要佈署什麼")
 	proc.press(t, "\r") // "全站部署(site.yml)"
 
@@ -136,6 +131,11 @@ func TestPilotDeployPTY_DeclineAtFinalConfirmNeverRunsAnsible(t *testing.T) {
 
 	waitForNewDeployScreen(t, proc, "還有其他 -e 變數")
 	proc.press(t, "\r") // leave extra -e vars blank
+
+	waitForNewDeployScreen(t, proc, "前置檢查")
+	proc.press(t, "j")
+	proc.press(t, "j")
+	proc.press(t, "\r") // "跳過前置檢查" after availability scope resolution
 
 	waitForNewDeployScreen(t, proc, "要先預覽")
 	proc.press(t, "n") // skip the --check --diff preview

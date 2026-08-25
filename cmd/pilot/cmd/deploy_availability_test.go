@@ -11,6 +11,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/availability"
+	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/delivery"
 	"github.com/kjelly/pilot/internal/store"
 )
@@ -63,6 +64,35 @@ func TestEffectiveDeploymentLimit_RewritesWhenHostsDeferred(t *testing.T) {
 	}
 }
 
+func TestRunPreflight_UsesResolvedAvailabilityLimit(t *testing.T) {
+	binDir := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "preflight-args")
+	t.Setenv("PILOT_PREFLIGHT_ARGS", argsPath)
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-playbook"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PILOT_PREFLIGHT_ARGS\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldPrompt := activePromptAutomation
+	activePromptAutomation = &promptAutomation{answers: []promptAnswer{{
+		Prompt: "要先跑前置檢查", Select: "完整前置檢查",
+	}}}
+	t.Cleanup(func() { activePromptAutomation = oldPrompt })
+
+	runner := ansible.NewRunner()
+	ok, err := runPreflight(context.Background(), runner, &bytes.Buffer{}, "inventory.yml", "required-host")
+	if err != nil || !ok {
+		t.Fatalf("runPreflight() = ok:%v err:%v, want successful full preflight", ok, err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(args, []byte("--limit\nrequired-host\n")) {
+		t.Fatalf("preflight argv = %q, want resolved --limit excluding deferred optional hosts", args)
+	}
+}
+
 func TestDeferredHostsMetadata(t *testing.T) {
 	deferred := []delivery.DeferredHost{
 		{Host: "vm-01", Reason: delivery.DeferredUnavailable},
@@ -80,6 +110,62 @@ func TestDeferredHostsMetadata(t *testing.T) {
 	}
 	if deferredHostsMetadata(nil) != nil {
 		t.Fatalf("deferredHostsMetadata(nil) should stay nil so callers skip the metadata key entirely")
+	}
+}
+
+func TestDeferredHostNames(t *testing.T) {
+	deferred := []delivery.DeferredHost{
+		{Host: "dt-dev", Reason: delivery.DeferredUnavailable},
+		{Host: "dependency-host", Reason: delivery.DeferredDependencyUnavailable},
+		{Host: "dt-dev", Reason: delivery.DeferredUnavailable},
+		{Host: "", Reason: delivery.DeferredUnavailable},
+	}
+	got := deferredHostNames(deferred)
+	want := []string{"dependency-host", "dt-dev"}
+	if len(got) != len(want) {
+		t.Fatalf("deferredHostNames() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("deferredHostNames()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if deferredHostNames(nil) != nil {
+		t.Fatal("deferredHostNames(nil) should be nil")
+	}
+	extraVar, err := deferredHostsExtraVar(deferred)
+	if err != nil {
+		t.Fatalf("deferredHostsExtraVar() error = %v", err)
+	}
+	if extraVar != `pilot_deferred_hosts=["dependency-host","dt-dev"]` {
+		t.Fatalf("deferredHostsExtraVar() = %q", extraVar)
+	}
+	emptyExtraVar, err := deferredHostsExtraVar(nil)
+	if err != nil {
+		t.Fatalf("deferredHostsExtraVar(nil) error = %v", err)
+	}
+	if emptyExtraVar != "pilot_deferred_hosts=[]" {
+		t.Fatalf("deferredHostsExtraVar(nil) = %q", emptyExtraVar)
+	}
+}
+
+func TestAvailabilityCandidateHostsIncludesFreeIPAIdentityDelegatees(t *testing.T) {
+	groups := map[string][]string{
+		"freeipa-client": {"dt-dev", "online-client"},
+	}
+	got := availabilityCandidateHosts([]string{"freeipa"}, []contract.Contract{{ID: "freeipa-identity"}}, groups)
+	want := []string{"dt-dev", "freeipa", "online-client"}
+	if len(got) != len(want) {
+		t.Fatalf("availabilityCandidateHosts() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("availabilityCandidateHosts()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	got = availabilityCandidateHosts([]string{"freeipa"}, []contract.Contract{{ID: "freeipa-server"}}, groups)
+	if len(got) != 1 || got[0] != "freeipa" {
+		t.Fatalf("unrelated component candidates = %v, want [freeipa]", got)
 	}
 }
 

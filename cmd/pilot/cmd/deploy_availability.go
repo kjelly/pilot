@@ -11,6 +11,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -48,6 +49,11 @@ func resolveDeploymentAvailability(ctx context.Context, inv string, hosts []stri
 	probeSet := uniqueSortedHosts(append(append([]string{}, hosts...), supportHosts...))
 
 	runtimeByHost := make(map[string]availability.RuntimeHost, len(probeSet))
+	candidateSet := make(map[string]bool, len(probeSet))
+	for _, host := range probeSet {
+		candidateSet[host] = true
+	}
+	var delegatedOptionalHosts []string
 	invalidReasons := make(map[string]string)
 	var endpoints []availability.Endpoint
 	for _, host := range probeSet {
@@ -73,6 +79,23 @@ func resolveDeploymentAvailability(ctx context.Context, inv string, hosts []stri
 			endpoints = append(endpoints, ep)
 		}
 	}
+	// A delegate_to task can name an inventory host outside the component's
+	// normal target scope. Probe every such optional host too: it can then be
+	// passed to playbooks as deferred without allowing an unrelated required
+	// host to block this deployment.
+	for host, vars := range hostVars {
+		if candidateSet[host] {
+			continue
+		}
+		rh := availability.ResolveRuntimeHost(host, vars)
+		if rh.DeploymentAvailability.Effective() != inventory.DeploymentAvailabilityOptional || !availability.ClassifyConnectionSupport(rh).Probable {
+			continue
+		}
+		if ep, ok := availability.ResolveEndpoint(rh); ok {
+			endpoints = append(endpoints, ep)
+			delegatedOptionalHosts = append(delegatedOptionalHosts, host)
+		}
+	}
 
 	results := availability.ProbeAll(ctx, deployAvailabilityProber, endpoints, availability.DefaultMaxConcurrentProbes)
 	reachable := make(map[string]bool, len(results))
@@ -89,6 +112,11 @@ func resolveDeploymentAvailability(ctx context.Context, inv string, hosts []stri
 	// from scratch there would mean a second, possibly-drifting read of the
 	// same policy this function already resolved.
 	optionalHosts := make(map[string]bool, len(hosts))
+	// Include optional delegatees in the mid-run classifier as well. They may
+	// pass the pre-run probe and power off between that probe and delegate_to.
+	for _, host := range delegatedOptionalHosts {
+		optionalHosts[host] = true
+	}
 	for _, host := range hosts {
 		if host == "localhost" {
 			continue
@@ -121,7 +149,31 @@ func resolveDeploymentAvailability(ctx context.Context, inv string, hosts []stri
 		ProviderSelection: nil,
 		Reachable:         reachable,
 	})
+	for _, host := range delegatedOptionalHosts {
+		if !reachable[host] {
+			execScope.Deferred = append(execScope.Deferred, delivery.DeferredHost{Host: host, Policy: inventory.DeploymentAvailabilityOptional, Reason: delivery.DeferredUnavailable})
+		}
+	}
+	sort.Slice(execScope.Deferred, func(i, j int) bool { return execScope.Deferred[i].Host < execScope.Deferred[j].Host })
 	return execScope, invalidReasons, optionalHosts, nil
+}
+
+// availabilityCandidateHosts includes hosts a selected playbook contacts via
+// delegate_to even though those hosts are not normal play targets.  Ansible's
+// --limit only protects normal targets; every delegated endpoint must be
+// availability-classified too so an optional host that is powered off can be
+// deferred before the task attempts its own SSH connection.
+func availabilityCandidateHosts(targetHosts []string, selected []contract.Contract, inventoryGroups map[string][]string) []string {
+	candidates := append([]string(nil), targetHosts...)
+	for _, component := range selected {
+		switch component.ID {
+		case "freeipa-identity":
+			// freeipa-identity runs on freeipa-server but refreshes SSSD
+			// through delegate_to for every enrolled freeipa-client.
+			candidates = append(candidates, inventoryGroups["freeipa-client"]...)
+		}
+	}
+	return uniqueSortedHosts(candidates)
 }
 
 // effectiveDeploymentLimit returns limit unchanged whenever every candidate
@@ -214,6 +266,41 @@ func deferredHostsMetadata(deferred []delivery.DeferredHost) []string {
 	}
 	sort.Strings(entries)
 	return entries
+}
+
+// deferredHostNames returns the inventory aliases that availability resolution
+// deliberately removed from this run.  Playbooks with cross-host delegated
+// tasks must use this value as well as Ansible's --limit: delegation can
+// otherwise reconnect to an optional host that the effective limit excluded.
+func deferredHostNames(deferred []delivery.DeferredHost) []string {
+	if len(deferred) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(deferred))
+	hosts := make([]string, 0, len(deferred))
+	for _, d := range deferred {
+		if d.Host == "" || seen[d.Host] {
+			continue
+		}
+		seen[d.Host] = true
+		hosts = append(hosts, d.Host)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+// deferredHostsExtraVar is the reserved extra variable consumed by playbooks
+// that delegate work to hosts outside Ansible's ordinary execution limit.
+func deferredHostsExtraVar(deferred []delivery.DeferredHost) (string, error) {
+	hosts := deferredHostNames(deferred)
+	if hosts == nil {
+		hosts = []string{}
+	}
+	encoded, err := json.Marshal(hosts)
+	if err != nil {
+		return "", err
+	}
+	return "pilot_deferred_hosts=" + string(encoded), nil
 }
 
 // deploymentBlockedError formats the non-zero error returned when a

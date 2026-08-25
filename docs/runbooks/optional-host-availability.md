@@ -143,14 +143,11 @@ playbook 從未被呼叫，也沒有任何評估紀錄（evidence run）被啟�
 
 ## 3. 已知限制（記錄，暫無修復需求）
 
-- **獨立的「完整前置檢查」提示（`runPreflight`）本身不吃 effective limit**：
-  `pilot deploy`/`pilot reconcile` 一開始問的「要先跑前置檢查嗎？」若選
-  「完整前置檢查」，它跑的是 `playbooks/preflight.yml` 全機連線 ping，這一步
-  發生在使用者還沒選定要部署的範圍/tags/limit 之前，所以無法套用 effective
-  limit——一台 optional 且目前離線的機器仍會讓這一步的 ping 失敗，但這一步
-  本身是既有的、可跳過的軟性提示（失敗只會問「仍要繼續嗎？」），真正的
-  required/optional 強制規則落在後面實際套用的路徑（本 runbook §2 驗證的就是
-  這條路徑），不受這個提示影響。
+- **完整前置檢查會在 availability scope 已解析後執行**：`pilot deploy`/
+  `pilot reconcile` 先解析此次元件與目標範圍、探測可用性，才顯示「要先跑前置
+  檢查嗎？」。選「完整前置檢查」時，`playbooks/preflight.yml` 收到同一份有效
+  `--limit`；目前離線的 optional 主機已被排除，因此不會因 SSH ping 失敗而使
+  preflight 出錯。required 主機仍在任何 preflight 或 mutation 前中止。
 - **冪等性重跑（第二次 apply 斷言 `changed=0`）尚未套用中途斷線的語意重分類**：
   只有主要的 apply 步驟會經過 `ClassifyDeploymentOutcome` 重新分類；冪等性
   檢查若恰好在這次重跑期間遇到 optional 機器離線，目前仍會被視為失敗。
