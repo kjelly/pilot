@@ -61,3 +61,4 @@
     - name: "Fetch and install the FreeIPA CA bundle into the OS trust store"
       tags: [C2]
       ansible.builtin.include_tasks: tasks/freeipa-ca-trust.yml
+      when: freeipa_ca_trust_source_host not in (pilot_deferred_hosts | default([]))

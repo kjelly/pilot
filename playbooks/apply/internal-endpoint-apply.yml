@@ -79,6 +79,7 @@
     - name: "Apply the FreeIPA CA trust baseline to this managed host"
       tags: [C10]
       ansible.builtin.include_tasks: tasks/freeipa-ca-trust.yml
+      when: freeipa_ca_trust_source_host not in (pilot_deferred_hosts | default([]))
 
     # Spec: docs/verification/internal-endpoint.md C9. Genuinely fleet-wide
     # (every managed host, not just the freeipa-server) — this task
@@ -412,6 +413,7 @@
       ansible.builtin.include_tasks: tasks/internal-endpoint-cert-preflight.yml
       loop: "{{ internal_endpoint_freeipa }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+      when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))
 
     # spec.md §31. No spec.md-verification-doc tag: this row (formerly C21)
     # was retired 2026-08-14 — its probe depended on a non-interactive
@@ -516,6 +518,7 @@
       ansible.builtin.include_tasks: tasks/internal-endpoint-cert-request.yml
       loop: "{{ internal_endpoint_freeipa }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+      when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))
 
     # --- Phase 6: reverse_proxy only — render nginx candidate, nginx -t, reload, local backend check (spec.md §28) ---
 
@@ -525,6 +528,7 @@
       ansible.builtin.include_tasks: tasks/internal-endpoint-reverse-proxy-vhost.yml
       loop: "{{ internal_endpoint_reverse_proxy }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+      when: iep_endpoint.route_owner_host not in (pilot_deferred_hosts | default([]))
 
     # --- Phase 7: DNS — create/update A/AAAA, changed last (spec.md §28) ---
 
@@ -551,6 +555,9 @@
       ansible.builtin.include_tasks: tasks/internal-endpoint-delete.yml
       loop: "{{ internal_endpoint_absent }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+      when:
+        - iep_endpoint.get('route_owner_host', '') not in (pilot_deferred_hosts | default([]))
+        - iep_endpoint.get('cert_owner', '') not in (pilot_deferred_hosts | default([]))
 
     # --- Phase 9: atomically update the ownership ledger (spec.md §28, §29) ---
 
@@ -558,6 +565,7 @@
       ansible.builtin.include_tasks: tasks/internal-endpoint-ledger-entry.yml
       loop: "{{ internal_endpoint_present }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+      when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))
 
     - name: "Ensure the ownership ledger's parent directory exists"
       ansible.builtin.file:
