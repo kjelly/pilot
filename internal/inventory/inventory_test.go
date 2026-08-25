@@ -3,6 +3,7 @@ package inventory
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -16,10 +17,13 @@ vars:
 hosts:
   ipa-1:
     ansible_host: "10.0.0.10"
+    ansible_user: "ipaadmin"
+    ansible_ssh_private_key_file: "~/.ssh/ipa"
     ipa_server_ip: "10.0.0.10"
     freeipa_roster_file: ".vault/ipa-identity.yaml"
     roles: [freeipa-server, dns, ntp]
     env: prod
+    deployment_availability: optional
   web-1:
     ansible_host: "10.0.0.21"
     roles: [freeipa-client, linux-servers, audit-log-forwarding]
@@ -374,11 +378,8 @@ func TestRender_RoundTrip(t *testing.T) {
 	if len(hf2.Hosts) != len(hf.Hosts) {
 		t.Fatalf("got %d hosts after round-trip, want %d", len(hf2.Hosts), len(hf.Hosts))
 	}
-	for i := range hf.Hosts {
-		a, b := hf.Hosts[i], hf2.Hosts[i]
-		if a.Name != b.Name || a.AnsibleHost != b.AnsibleHost || a.Env != b.Env || strings.Join(a.Roles, ",") != strings.Join(b.Roles, ",") {
-			t.Errorf("host %d mismatch after round-trip:\nbefore=%+v\nafter=%+v", i, a, b)
-		}
+	if !reflect.DeepEqual(hf.Hosts, hf2.Hosts) {
+		t.Errorf("hosts mismatch after round-trip:\nbefore=%+v\nafter=%+v", hf.Hosts, hf2.Hosts)
 	}
 	if hf2.Vars["ansible_user"] != hf.Vars["ansible_user"] {
 		t.Errorf("vars.ansible_user lost in round-trip: %+v", hf2.Vars)
@@ -399,6 +400,52 @@ func TestRender_EmptyRolesRendersAsEmptyList(t *testing.T) {
 func TestRender_NilHostsFileErrors(t *testing.T) {
 	if _, err := Render(nil); err == nil {
 		t.Fatal("expected an error for a nil HostsFile")
+	}
+}
+
+// TestHostTypedFieldSerializationContract makes each typed Host field's two
+// serialization contracts explicit: Render must preserve it in hosts.yml,
+// while Generate must put host variables and role/environment membership in
+// the corresponding Ansible inventory locations.
+func TestHostTypedFieldSerializationContract(t *testing.T) {
+	hf := &HostsFile{Hosts: []Host{{
+		Name:                   "sentinel",
+		AnsibleHost:            "10.0.0.42",
+		AnsibleUser:            "operator",
+		SSHKeyFile:             "~/.ssh/sentinel",
+		Roles:                  []string{"docker"},
+		Env:                    "staging",
+		DeploymentAvailability: DeploymentAvailabilityOptional,
+		Extra:                  map[string]string{},
+	}}}
+	rendered, err := Render(hf)
+	if err != nil {
+		t.Fatalf("Render() error: %v", err)
+	}
+	roundTripped, err := Parse([]byte(rendered))
+	if err != nil {
+		t.Fatalf("Parse(Render()) error: %v\n%s", err, rendered)
+	}
+	if !reflect.DeepEqual(hf.Hosts, roundTripped.Hosts) {
+		t.Fatalf("Render lost a typed Host field:\nbefore=%+v\nafter=%+v\n%s", hf.Hosts, roundTripped.Hosts, rendered)
+	}
+
+	generated, err := Generate(hf)
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	for _, want := range []string{
+		"sentinel:",
+		`ansible_host: "10.0.0.42"`,
+		`ansible_user: "operator"`,
+		`ansible_ssh_private_key_file: "~/.ssh/sentinel"`,
+		`deployment_availability: "optional"`,
+		"docker:",
+		"staging:",
+	} {
+		if !strings.Contains(generated, want) {
+			t.Errorf("Generate() omitted typed Host field contract %q:\n%s", want, generated)
+		}
 	}
 }
 

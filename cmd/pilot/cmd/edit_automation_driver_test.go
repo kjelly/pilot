@@ -505,6 +505,50 @@ func TestEditAutomationDriverSetHostFieldEnvEmptyRoundTrips(t *testing.T) {
 	}
 }
 
+// TestEditAutomationDriver_HostSettingsRoundTrip drives every editable
+// first-class host setting through the real router, saves it, then re-parses
+// hosts.yml. This is intentionally a disk assertion rather than an
+// in-memory screen assertion: Render is a separate writer from Generate and
+// previously dropped deployment_availability only at this final boundary.
+func TestEditAutomationDriver_HostSettingsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	scenario := editScenario{
+		Version: 1,
+		Steps: []editAction{
+			{Action: "create_host", Host: "sentinel"},
+			{Action: "set_host_field", Host: "sentinel", Field: "ansible_host", Value: "10.0.0.42"},
+			{Action: "set_host_field", Host: "sentinel", Field: "ansible_user", Value: "operator"},
+			{Action: "set_host_field", Host: "sentinel", Field: "ssh_key_file", Value: "~/.ssh/sentinel"},
+			{Action: "set_host_field", Host: "sentinel", Field: "env", Value: "staging"},
+			{Action: "set_host_field", Host: "sentinel", Field: "deployment_availability", Value: "optional"},
+			{Action: "enable_role", Host: "sentinel", Role: "docker"},
+			{Action: "add_extra_var", Host: "sentinel", Key: "custom_setting", Value: "preserved"},
+			{Action: "save_hosts"},
+		},
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("read hosts.yml: %v", err)
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(saved hosts.yml) error: %v\n%s", err, data)
+	}
+	if len(hf.Hosts) != 1 {
+		t.Fatalf("hosts = %+v, want one host", hf.Hosts)
+	}
+	h := hf.Hosts[0]
+	if h.AnsibleHost != "10.0.0.42" || h.AnsibleUser != "operator" || h.SSHKeyFile != "~/.ssh/sentinel" || h.Env != "staging" || h.DeploymentAvailability != inventory.DeploymentAvailabilityOptional || !hasRole(h.Roles, "docker") || h.Extra["custom_setting"] != "preserved" {
+		t.Fatalf("saved host lost a TUI setting: %+v\n%s", h, data)
+	}
+}
+
 func TestAutomationDriverConfirmYesNo(t *testing.T) {
 	r := &editRouterModel{}
 	r.current = tui.NewHuhFactory().Confirm(tui.ConfirmSpec{Title: "q?", Default: false})

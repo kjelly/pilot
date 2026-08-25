@@ -51,6 +51,9 @@ func Render(hf *HostsFile) (string, error) {
 		if h.SSHKeyFile != "" {
 			fmt.Fprintf(&sb, "    ansible_ssh_private_key_file: %s\n", quoteScalar(h.SSHKeyFile))
 		}
+		if h.DeploymentAvailability != "" {
+			fmt.Fprintf(&sb, "    deployment_availability: %s\n", quoteScalar(string(h.DeploymentAvailability)))
+		}
 		for _, k := range sortedKeys(h.Extra) {
 			fmt.Fprintf(&sb, "    %s: %s\n", k, quoteScalar(h.Extra[k]))
 		}

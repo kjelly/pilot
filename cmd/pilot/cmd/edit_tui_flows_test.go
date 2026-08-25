@@ -38,7 +38,7 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm ansible_host value -> back to host menu
 
 	// host menu items: 0 ansible_host, 1 ansible_user, 2 ssh key, 3 env,
-	// 4 roles, 5 extra vars, 6 delete, 7 back-to-list
+	// 4 roles, 5 extra vars, 6 deployment availability, 7 delete, 8 back-to-list
 	for i := 0; i < 4; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
@@ -54,8 +54,8 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "✅ 完成" -> back to host menu
 
-	// host menu again (cursor reset to 0); navigate to "↩ 返回主機清單" (index 7)
-	for i := 0; i < 7; i++ {
+	// host menu again (cursor reset to 0); navigate to "↩ 返回主機清單" (index 8)
+	for i := 0; i < 8; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to host list
@@ -98,6 +98,86 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	wantRole := inventory.Roles()[0].Name
 	if !hasRole(h.Roles, wantRole) {
 		t.Fatalf("expected role %q to be set, got %v", wantRole, h.Roles)
+	}
+}
+
+func TestEditRouter_Teatest_HostDeploymentAvailabilityOptionalAndSave(t *testing.T) {
+	dir := t.TempDir()
+	router := newEditRouterModel(dir)
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // top menu: hosts.yml
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // default path
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // start blank
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // add host
+	tm.Type("laptop-1")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // host name -> host menu
+
+	for i := 0; i < 6; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // deployment availability
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // optional -> host menu
+
+	for i := 0; i < 8; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // return to host list
+	for i := 0; i < 3; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save
+	for i := 0; i < 9; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("read hosts.yml: %v", err)
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		t.Fatalf("parse hosts.yml: %v\n%s", err, data)
+	}
+	if got := hf.Hosts[0].DeploymentAvailability; got != inventory.DeploymentAvailabilityOptional {
+		t.Fatalf("deployment_availability = %q, want optional\n%s", got, data)
+	}
+}
+
+func TestHostMenuItems_MetadataHasStableUniqueIDs(t *testing.T) {
+	h := &inventory.Host{Name: "nexus", Roles: []string{"prometheus"}}
+	items := hostMenuItems(h)
+	got := make(map[string]bool, len(items))
+	for _, item := range items {
+		if item.choice.ID == "" {
+			t.Fatal("host menu item has an empty ID")
+		}
+		if got[item.choice.ID] {
+			t.Fatalf("host menu item ID %q is duplicated", item.choice.ID)
+		}
+		got[item.choice.ID] = true
+		if item.open == nil {
+			t.Fatalf("host menu item %q has no handler", item.choice.ID)
+		}
+	}
+	for _, id := range []string{
+		"hosts.item.ansible_host",
+		"hosts.item.ansible_user",
+		"hosts.item.ssh_key_file",
+		"hosts.item.env",
+		"hosts.item.roles",
+		"hosts.item.extra_vars",
+		"hosts.item.host_vars",
+		"hosts.item.deployment_availability",
+		"hosts.item.delete",
+		"hosts.item.back",
+	} {
+		if !got[id] {
+			t.Errorf("host menu metadata is missing %q", id)
+		}
 	}
 }
 

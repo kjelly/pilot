@@ -251,7 +251,7 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 	proc.press(t, "\r") // "✅ 完成" -> back to host menu
 
 	waitForPTYOutput(t, proc.out, 5*time.Second, "選要編輯的項目")
-	for i := 0; i < 7; i++ {
+	for i := 0; i < 8; i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "↩ 返回主機清單"

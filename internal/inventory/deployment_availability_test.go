@@ -129,6 +129,28 @@ hosts:
 	}
 }
 
+func TestRender_DeploymentAvailabilityRoundTrips(t *testing.T) {
+	hf := &HostsFile{Hosts: []Host{{
+		Name:                   "laptop-1",
+		DeploymentAvailability: DeploymentAvailabilityOptional,
+		Extra:                  map[string]string{},
+	}}}
+	rendered, err := Render(hf)
+	if err != nil {
+		t.Fatalf("Render() error: %v", err)
+	}
+	if !strings.Contains(rendered, `deployment_availability: "optional"`) {
+		t.Fatalf("Render() omitted deployment_availability:\n%s", rendered)
+	}
+	parsed, err := Parse([]byte(rendered))
+	if err != nil {
+		t.Fatalf("Parse(Render()) error: %v\n%s", err, rendered)
+	}
+	if got := parsed.Hosts[0].DeploymentAvailability; got != DeploymentAvailabilityOptional {
+		t.Fatalf("Parse(Render()).DeploymentAvailability = %q, want optional", got)
+	}
+}
+
 func TestGenerate_DeploymentAvailability_PreservesUnknownExtraFields(t *testing.T) {
 	hf, err := Parse([]byte(`
 hosts:

@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // editActionDef ties one action's schema, validation, and execution
@@ -56,7 +58,7 @@ func editActionRegistry() []editActionDef {
 				Name:                     "set_host_field",
 				Description:              "set one supported non-secret host field",
 				Required:                 []string{"host", "field", "value"},
-				Values:                   map[string][]string{"field": {"ansible_host", "ansible_user", "ssh_key_file", "env"}},
+				Values:                   map[string][]string{"field": {"ansible_host", "ansible_user", "ssh_key_file", "env", "deployment_availability"}},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
 				SecretHandling:           SecretHandlingNone,
@@ -1687,6 +1689,12 @@ func validateSetHostField(step editAction) error {
 	}
 	if step.Field == "env" && !isValidEnvChoice(step.Value) {
 		return fmt.Errorf("unsupported env value %q", step.Value)
+	}
+	if step.Field == "deployment_availability" {
+		value := inventory.DeploymentAvailability(step.Value)
+		if value != inventory.DeploymentAvailabilityRequired && value != inventory.DeploymentAvailabilityOptional {
+			return fmt.Errorf("unsupported deployment_availability value %q", step.Value)
+		}
 	}
 	return nil
 }

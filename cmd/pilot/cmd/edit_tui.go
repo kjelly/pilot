@@ -554,30 +554,11 @@ func pushHostMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 	if h == nil {
 		return pushHostList(r, dir, path, hf, "") // deleted from within a sub-menu
 	}
-	choices := []tui.Choice{
-		{ID: "hosts.item.ansible_host", Label: fmt.Sprintf("ansible_host(連線位址)：%s", displayOrPlaceholder(h.AnsibleHost))},
-		{ID: "hosts.item.ansible_user", Label: fmt.Sprintf("ansible_user(登入帳號)：%s", displayOrPlaceholder(h.AnsibleUser))},
-		{ID: "hosts.item.ssh_key_file", Label: fmt.Sprintf("SSH 私鑰路徑：%s", displayOrPlaceholder(h.SSHKeyFile))},
-		{ID: "hosts.item.env", Label: fmt.Sprintf("env(環境標籤)：%s", displayOrPlaceholder(h.Env))},
-		{ID: "hosts.item.roles", Label: fmt.Sprintf("角色(roles)：%s", displayOrPlaceholder(strings.Join(h.Roles, ", ")))},
-		{ID: "hosts.item.extra_vars", Label: fmt.Sprintf("其他變數(共 %d 個)", len(h.Extra))},
+	items := hostMenuItems(h)
+	choices := make([]tui.Choice, len(items))
+	for i, item := range items {
+		choices[i] = item.choice
 	}
-	// host_vars/<name>.yml only ever appears when h's current roles
-	// actually need a var with no safe cross-host default (e.g.
-	// prometheus_site_label) — mirrors how the group_vars picker only
-	// lists stems applicable to the roles in play. Item count varies by
-	// host, so the trailing delete/return items are addressed relative
-	// to len(choices) rather than fixed indices (same pattern
-	// pushGroupVarsFilePicker already uses).
-	hostVarsIdx := -1
-	if len(inventory.HostVarsKeysForRoles(h.Roles)) > 0 {
-		hostVarsIdx = len(choices)
-		choices = append(choices, tui.Choice{ID: "hosts.item.host_vars", Label: fmt.Sprintf("host_vars/%s.yml(必填、無安全預設值的設定)", name)})
-	}
-	deleteIdx := len(choices)
-	choices = append(choices, tui.Choice{ID: "hosts.item.delete", Label: "🗑  刪除這台主機"})
-	returnIdx := len(choices)
-	choices = append(choices, tui.Choice{ID: "hosts.item.back", Label: "↩  返回主機清單"})
 
 	title := fmt.Sprintf("主機 %q — 選要編輯的項目", name)
 	spec := tui.SelectSpec{ScreenID: "hosts.item", Title: title, Choices: choices}
@@ -588,28 +569,98 @@ func pushHostMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile,
 			// (hf stays in memory regardless of which screen shows it).
 			return pushHostList(r, dir, path, hf, "")
 		}
-		switch {
-		case m.Selected() == 0:
-			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_host(可路由的 IP 或主機名)", h.AnsibleHost, func(h *inventory.Host, v string) { h.AnsibleHost = v })
-		case m.Selected() == 1:
-			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_user(登入帳號，留空 = 用 vars 裡的預設)", h.AnsibleUser, func(h *inventory.Host, v string) { h.AnsibleUser = v })
-		case m.Selected() == 2:
-			return pushHostFieldEdit(r, dir, path, hf, name, "SSH 私鑰路徑(留空 = 用 vars 裡的預設)", h.SSHKeyFile, func(h *inventory.Host, v string) { h.SSHKeyFile = v })
-		case m.Selected() == 3:
-			return pushEnvMenu(r, dir, path, hf, name)
-		case m.Selected() == 4:
-			return pushRolesMenu(r, dir, path, hf, name)
-		case m.Selected() == 5:
-			return pushExtraVarsMenu(r, dir, path, hf, name, "")
-		case hostVarsIdx >= 0 && m.Selected() == hostVarsIdx:
-			return pushHostVarsEditor(r, dir, path, hf, name)
-		case m.Selected() == deleteIdx:
-			return pushConfirmDeleteHost(r, dir, path, hf, name)
-		case m.Selected() == returnIdx:
-			return pushHostList(r, dir, path, hf, "")
+		for _, item := range items {
+			if m.SelectedID() == item.choice.ID {
+				return item.open(r, dir, path, hf, name)
+			}
 		}
 		return nil
 	})
+}
+
+// hostMenuItem is the single registry for every editable host setting. The
+// renderer and dispatcher both consume this metadata, so conditional items
+// such as host_vars can never shift an index into another field's handler.
+type hostMenuItem struct {
+	choice tui.Choice
+	open   func(*editRouterModel, string, string, *inventory.HostsFile, string) tea.Cmd
+}
+
+func hostMenuItems(h *inventory.Host) []hostMenuItem {
+	items := []hostMenuItem{
+		{tui.Choice{ID: "hosts.item.ansible_host", Label: fmt.Sprintf("ansible_host(連線位址)：%s", displayOrPlaceholder(h.AnsibleHost))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_host(可路由的 IP 或主機名)", h.AnsibleHost, func(h *inventory.Host, v string) { h.AnsibleHost = v })
+		}},
+		{tui.Choice{ID: "hosts.item.ansible_user", Label: fmt.Sprintf("ansible_user(登入帳號)：%s", displayOrPlaceholder(h.AnsibleUser))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_user(登入帳號，留空 = 用 vars 裡的預設)", h.AnsibleUser, func(h *inventory.Host, v string) { h.AnsibleUser = v })
+		}},
+		{tui.Choice{ID: "hosts.item.ssh_key_file", Label: fmt.Sprintf("SSH 私鑰路徑：%s", displayOrPlaceholder(h.SSHKeyFile))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+			return pushHostFieldEdit(r, dir, path, hf, name, "SSH 私鑰路徑(留空 = 用 vars 裡的預設)", h.SSHKeyFile, func(h *inventory.Host, v string) { h.SSHKeyFile = v })
+		}},
+		{tui.Choice{ID: "hosts.item.env", Label: fmt.Sprintf("env(環境標籤)：%s", displayOrPlaceholder(h.Env))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+			return pushEnvMenu(r, dir, path, hf, name)
+		}},
+		{tui.Choice{ID: "hosts.item.roles", Label: fmt.Sprintf("角色(roles)：%s", displayOrPlaceholder(strings.Join(h.Roles, ", ")))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+			return pushRolesMenu(r, dir, path, hf, name)
+		}},
+		{tui.Choice{ID: "hosts.item.extra_vars", Label: fmt.Sprintf("其他變數(共 %d 個)", len(h.Extra))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+			return pushExtraVarsMenu(r, dir, path, hf, name, "")
+		}},
+	}
+	if len(inventory.HostVarsKeysForRoles(h.Roles)) > 0 {
+		items = append(items, hostMenuItem{tui.Choice{ID: "hosts.item.host_vars", Label: fmt.Sprintf("host_vars/%s.yml(必填、無安全預設值的設定)", h.Name)}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+			return pushHostVarsEditor(r, dir, path, hf, name)
+		}})
+	}
+	return append(items,
+		hostMenuItem{tui.Choice{ID: "hosts.item.deployment_availability", Label: fmt.Sprintf("部署可用性(離線時)：%s", deploymentAvailabilityLabel(h.DeploymentAvailability))}, pushDeploymentAvailabilityMenu},
+		hostMenuItem{tui.Choice{ID: "hosts.item.delete", Label: "🗑  刪除這台主機"}, pushConfirmDeleteHost},
+		hostMenuItem{tui.Choice{ID: "hosts.item.back", Label: "↩  返回主機清單"}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+			return pushHostList(r, dir, path, hf, "")
+		}},
+	)
+}
+
+func deploymentAvailabilityLabel(value inventory.DeploymentAvailability) string {
+	if value == "" {
+		return "required（預設）"
+	}
+	return string(value)
+}
+
+// pushDeploymentAvailabilityMenu edits the policy Pilot uses when this host
+// cannot be reached. It deliberately changes the typed field rather than the
+// passthrough Extra map so the setting remains visible as a first-class host
+// property on future edits.
+func pushDeploymentAvailabilityMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "required", Label: "required — 主機離線時，在套用前中止部署"},
+		{ID: "optional", Label: "optional — 主機離線時延後此主機，其他主機繼續"},
+		{ID: "back", Label: "↩  返回主機設定"},
+	}
+	spec := tui.SelectSpec{
+		ScreenID:  "hosts.item.deployment_availability",
+		Title:     "部署可用性 — 主機目前無法連線時怎麼處理",
+		Choices:   choices,
+		InitialID: string(hfHostDeploymentAvailability(hf, name)),
+	}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.SelectScreen)
+		if m.Canceled() || m.SelectedID() == "back" {
+			return pushHostMenu(r, dir, path, hf, name)
+		}
+		if h := findHost(hf, name); h != nil {
+			h.DeploymentAvailability = inventory.DeploymentAvailability(m.SelectedID())
+		}
+		return pushHostMenu(r, dir, path, hf, name)
+	})
+}
+
+func hfHostDeploymentAvailability(hf *inventory.HostsFile, name string) inventory.DeploymentAvailability {
+	if h := findHost(hf, name); h != nil {
+		return h.EffectiveDeploymentAvailability()
+	}
+	return inventory.DeploymentAvailabilityRequired
 }
 
 func pushHostFieldEdit(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, label, current string, apply func(*inventory.Host, string)) tea.Cmd {

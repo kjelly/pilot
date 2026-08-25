@@ -208,6 +208,12 @@ func (d *automationDriver) setHostField(r *editRouterModel, host, field, value s
 	if err := d.ensureHostMenu(r, host); err != nil {
 		return err
 	}
+	if field == "deployment_availability" {
+		if err := d.chooseByID(r, "hosts.item", "hosts.item.deployment_availability"); err != nil {
+			return err
+		}
+		return d.chooseByID(r, "hosts.item.deployment_availability", value)
+	}
 	if field == "env" {
 		if err := d.choose(r, "env(環境標籤)"); err != nil {
 			return err
