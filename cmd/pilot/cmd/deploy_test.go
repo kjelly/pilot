@@ -165,8 +165,33 @@ func TestReconcileCatalogIsExplicitAndContractBacked(t *testing.T) {
 			t.Errorf("reconcile entry %q playbook=%q, contract apply=%q", entry.Key, entry.Playbook, component.Playbooks.Apply)
 		}
 	}
-	if want := []string{"freeipa-identity", "freeipa-dns", "internal-endpoint"}; !slices.Equal(got, want) {
+	if want := []string{
+		"freeipa-identity", "freeipa-dns", "freeipa-dns-client", "freeipa-ca-trust",
+		"freeipa-server-replica", "freeipa-realm-replacement", "internal-endpoint", "prometheus",
+	}; !slices.Equal(got, want) {
 		t.Fatalf("reconcile entries = %v, want %v; a reconcile entry must not be exposed before its contract and playbook exist", got, want)
+	}
+}
+
+func TestAutoFillMonitoringFiles(t *testing.T) {
+	dir := t.TempDir()
+	if vars, found, err := autoFillMonitoringFiles(dir); err != nil || found || vars != nil {
+		t.Fatalf("missing registry = vars %v found %v err %v", vars, found, err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "monitoring"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"targets.yml", "scrape-profiles.yml"} {
+		if err := os.WriteFile(filepath.Join(dir, "monitoring", name), []byte("schemaVersion: 1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vars, found, err := autoFillMonitoringFiles(dir)
+	if err != nil || !found || len(vars) != 2 {
+		t.Fatalf("registry = vars %v found %v err %v", vars, found, err)
+	}
+	if !strings.HasPrefix(vars[0], "monitoring_targets_file=/") || !strings.HasPrefix(vars[1], "monitoring_profiles_file=/") {
+		t.Fatalf("registry vars are not absolute: %v", vars)
 	}
 }
 

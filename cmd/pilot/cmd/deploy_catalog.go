@@ -8,17 +8,18 @@ package cmd
 // command. This mirrors DELIVERY.md's "Playbook 對照表" — update both
 // together when a playbook is added, renamed, or removed.
 type deployPlaybook struct {
-	Key            string        // stable id, unique across the catalog
-	Label          string        // shown in the menu
-	Playbook       string        // path relative to the ansible.cfg working directory
-	DefaultGroup   string        // informational only — the playbook already defaults to this
-	StageVar       string        // "stage" or "patch_stage"
-	InfraRoles     []string      // non-empty => prompt a role select, sets -e infra_role=<choice>
-	Note           string        // shown before running: prerequisites, resource sizing, draft status…
-	VaultHint      string        // shown when offering the vault-file prompt; "" skips extra context
-	PromptS3Config bool          // true => ask about signed-mode S3 identity, sets -e seaweedfs_s3_config_path=<path>
-	AutoHostVars   []autoHostVar // each => auto-detect a cross-role host address from inventory, sets -e <Var>=<ip>
-	Reconcile      bool          // true => eligible for pilot reconcile's day-2 declarative configuration flow
+	Key             string        // stable id, unique across the catalog
+	Label           string        // shown in the menu
+	Playbook        string        // path relative to the ansible.cfg working directory
+	DefaultGroup    string        // informational only — the playbook already defaults to this
+	StageVar        string        // "stage" or "patch_stage"
+	InfraRoles      []string      // non-empty => prompt a role select, sets -e infra_role=<choice>
+	Note            string        // shown before running: prerequisites, resource sizing, draft status…
+	VaultHint       string        // shown when offering the vault-file prompt; "" skips extra context
+	PromptS3Config  bool          // true => ask about signed-mode S3 identity, sets -e seaweedfs_s3_config_path=<path>
+	AutoHostVars    []autoHostVar // each => auto-detect a cross-role host address from inventory, sets -e <Var>=<ip>
+	MonitoringFiles bool          // true => auto-pass workspace monitoring registry files
+	Reconcile       bool          // true => eligible for pilot reconcile's day-2 declarative configuration flow
 }
 
 // autoHostVar describes one "-e <Var>=<ip>" pilot deploy can offer to fill
@@ -75,12 +76,14 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "freeipa-dns-client", Label: "把機器的 DNS resolver 指向 FreeIPA DNS(server/replica)",
 		Playbook: "playbooks/apply/freeipa-dns-client-apply.yml", DefaultGroup: "freeipa-dns-client", StageVar: "stage",
-		Note: "day-2/opt-in 角色(不在 site.yml);與 freeipa-client(AAA 納管)互不相依,不需先做身分 enrollment。自動從 inventory 偵測 freeipa-server/freeipa-server-replica 裡有開 DNS 的主機;也可套用到 FreeIPA server/replica 自己身上(自動優先指向自己)。支援 Debian/Ubuntu(systemd-resolved)與 EL(NetworkManager)。",
+		Note:      "day-2/opt-in 角色(不在 site.yml);與 freeipa-client(AAA 納管)互不相依,不需先做身分 enrollment。自動從 inventory 偵測 freeipa-server/freeipa-server-replica 裡有開 DNS 的主機;也可套用到 FreeIPA server/replica 自己身上(自動優先指向自己)。支援 Debian/Ubuntu(systemd-resolved)與 EL(NetworkManager)。",
+		Reconcile: true,
 	},
 	{
 		Key: "freeipa-ca-trust", Label: "把 FreeIPA integrated CA 裝進機器的 OS trust store",
 		Playbook: "playbooks/apply/freeipa-ca-trust-apply.yml", DefaultGroup: "all", StageVar: "stage",
-		Note: "day-2/opt-in 角色(不在 site.yml);與 freeipa-client(AAA 納管)互不相依,不需先做身分 enrollment。Phase-1 骨架:目前只有 placeholder task,真正的 CA fetch-and-install 邏輯待 spec.md §63 Phase 3 補上。",
+		Note:      "day-2/opt-in 角色(不在 site.yml);將 FreeIPA integrated CA 安裝到目標主機的 OS trust store，不要求該主機先完成 FreeIPA enrollment。",
+		Reconcile: true,
 	},
 	{
 		Key: "freeipa-nfs-server", Label: "FreeIPA Kerberos NFSv4 server",
@@ -98,12 +101,14 @@ var deployCatalog = []deployPlaybook{
 		Playbook: "playbooks/apply/freeipa-server-replica-apply.yml", DefaultGroup: "freeipa-server-replica", StageVar: "stage",
 		Note:      "day-2/opt-in 角色(不在 site.yml);已於三台 vm-target 全鏈路實跑過,見 docs/verification/freeipa-server-replica.md §0/§5。",
 		VaultHint: "既有 realm 的管理員密碼(ipa_admin_password)",
+		Reconcile: true,
 	},
 	{
 		Key: "freeipa-realm-replacement", Label: "把一台 FreeIPA client 換到另一個 realm(client-wave migration)",
 		Playbook: "playbooks/apply/freeipa-realm-replacement-apply.yml", DefaultGroup: "freeipa-client", StageVar: "stage",
 		Note:      "day-2/opt-in 角色(不在 site.yml);僅換 client 端 enrollment，不是 server 端 restore；舊 server 若已重裝/退役，本機 archive 只剩鑑識用途，不能拿來 rollback trust。見 docs/verification/freeipa-realm-replacement.md。",
 		VaultHint: "新 realm 的管理員密碼(ipa_admin_password)",
+		Reconcile: true,
 	},
 	{
 		Key: "reverse-proxy", Label: "Nginx reverse proxy 基礎安裝",
@@ -191,6 +196,8 @@ var deployCatalog = []deployPlaybook{
 			{Var: "thanos_s3_target_host", Group: "seaweedfs-s3", Label: "SeaweedFS S3 gateway(Thanos 物件儲存)"},
 			{Var: "alertmanager_target_host", Group: "alertmanager", Label: "中央 Alertmanager"},
 		},
+		MonitoringFiles: true,
+		Reconcile:       true,
 	},
 	{
 		Key: "thanos-query", Label: "中央 Thanos Query",
