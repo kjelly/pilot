@@ -193,12 +193,18 @@
              if siem_wazuh_container_info is not skipped
              else [] }}
 
+    - name: "Resolve loki_effective_target_host for the /etc/hosts pin"
+      ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+      vars:
+        hosts_alias_target_host: "{{ loki_effective_target_host }}"
+      when: loki_effective_target_host | length > 0
+
     - name: "Pin {{ loki_alias }} -> {{ loki_effective_target_host }} in /etc/hosts"
       tags: [C5]
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ loki_alias }}$'
-        line: "{{ loki_effective_target_host }}\t{{ loki_alias }}"
+        line: "{{ hosts_alias_resolved_ip }}\t{{ loki_alias }}"
         state: present
       when: loki_effective_target_host | length > 0
 

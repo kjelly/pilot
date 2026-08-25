@@ -186,12 +186,18 @@
         - ansible_os_family == 'RedHat'
         - not ansible_check_mode
 
+    - name: "Step 1b: Resolve restic_s3_target_host for the /etc/hosts pin (spec C10)"
+      ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+      vars:
+        hosts_alias_target_host: "{{ restic_s3_target_host | default('') }}"
+      when: restic_s3_target_host | default('') | length > 0
+
     - name: "Step 2: Pin S3 destination alias in /etc/hosts (spec C10)"
       tags: [C10]
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ restic_s3_alias }}$'
-        line: "{{ restic_s3_target_host | default('') }}\t{{ restic_s3_alias }}"
+        line: "{{ hosts_alias_resolved_ip }}\t{{ restic_s3_alias }}"
         state: present
       when: restic_s3_target_host | default('') | length > 0
 
@@ -214,6 +220,7 @@
       when: >-
         restic_s3_alias in restic_repository
         and (groups.get('seaweedfs-s3', []) | length > 0)
+        and (groups.get('seaweedfs-s3', [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
         and not ansible_check_mode
       run_once: true
       # Use the current host as a valid delegate even when the optional group

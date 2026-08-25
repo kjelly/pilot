@@ -138,11 +138,17 @@
           vault file recommended over -e in real inventories).
 
   tasks:
+    - name: "Resolve thanos_query_target_host for the /etc/hosts pin"
+      ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+      vars:
+        hosts_alias_target_host: "{{ thanos_query_target_host | default('', true) }}"
+      when: thanos_query_target_host | default('', true) | length > 0
+
     - name: "Pin {{ thanos_query_alias }} -> {{ thanos_query_target_host | default('', true) }} in /etc/hosts"
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ thanos_query_alias }}$'
-        line: "{{ thanos_query_target_host | default('', true) }}\t{{ thanos_query_alias }}"
+        line: "{{ hosts_alias_resolved_ip }}\t{{ thanos_query_alias }}"
         state: present
       when: thanos_query_target_host | default('', true) | length > 0
 

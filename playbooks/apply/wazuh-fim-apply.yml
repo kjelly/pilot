@@ -214,12 +214,24 @@
               </ossec_config>
           register: wazuh_fim_conf_result
 
+        # /etc/hosts requires a literal IP in column 1 — wazuh_manager_host is
+        # documented (wazuh-fim.example.yml) as accepting either an IP or an
+        # FQDN, so an FQDN value must be resolved before pinning here. Without
+        # this, the pin line is silently unusable (glibc's resolver ignores a
+        # non-IP first column) and Step 9's agent-auth fails to resolve the
+        # alias even though this task itself reports "changed".
+        - name: "Step 5b: Resolve wazuh_manager_host for the /etc/hosts pin (spec C7)"
+          ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+          vars:
+            hosts_alias_target_host: "{{ wazuh_manager_host | default('') }}"
+          when: wazuh_enrollment_enabled | bool
+
         - name: "Step 6: Pin {{ wazuh_manager_alias }} -> {{ wazuh_manager_host | default('') }} in /etc/hosts (spec C7)"
           tags: [C7]
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '\s{{ wazuh_manager_alias }}$'
-            line: "{{ wazuh_manager_host | default('') }}\t{{ wazuh_manager_alias }}"
+            line: "{{ hosts_alias_resolved_ip }}\t{{ wazuh_manager_alias }}"
             state: present
           when: wazuh_enrollment_enabled | bool
 

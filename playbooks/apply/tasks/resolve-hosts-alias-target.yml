@@ -1,0 +1,55 @@
+# Shared by every "pin <alias> -> <target host> in /etc/hosts" task across
+# apply/*.yml. /etc/hosts requires a literal IP in column 1, but the
+# *_target_host vars feeding these pins are documented as accepting either
+# an IP or an inventory host's own FQDN. Resolving an FQDN via the live
+# system resolver is not safe here: a play can run before freeipa-dns-client
+# has pointed this host's own resolver at FreeIPA DNS (that's a separate,
+# later single-component deploy — see
+# docs/runbooks/minimal-poc-architecture.md §3.7 — deliberately not part of
+# site.yml), so a target that is genuinely this inventory's own
+# FreeIPA-enrolled host can still fail to resolve even though Ansible
+# already knows its address. Prefer the connection address hostvars already
+# has for any inventory host whose gathered FQDN matches; only fall back to
+# a live lookup for a target that's genuinely outside this inventory.
+#
+# Caller contract:
+#   include with: vars: { hosts_alias_target_host: "<raw IP/FQDN value>" }
+#   result:       hosts_alias_resolved_ip
+- name: "Resolve {{ hosts_alias_target_host }} against this inventory's own hosts"
+  vars:
+    hosts_alias_inventory_match: >-
+      {{ hostvars.values() | selectattr('ansible_fqdn', 'defined')
+         | selectattr('ansible_fqdn', 'equalto', hosts_alias_target_host | default(''))
+         | list }}
+  ansible.builtin.set_fact:
+    hosts_alias_resolved_ip: "{{ hosts_alias_inventory_match[0].ansible_host }}"
+  when:
+    - hosts_alias_target_host | default('') | length > 0
+    - hosts_alias_inventory_match | length > 0
+
+- name: "Resolve {{ hosts_alias_target_host }} via DNS/hosts (only when it is not this inventory's own FQDN)"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import ipaddress, socket, sys
+        host = sys.argv[1]
+        try:
+            ipaddress.ip_address(host)
+            print(host)
+        except ValueError:
+            print(socket.gethostbyname(host))
+      - "{{ hosts_alias_target_host | default('') }}"
+  register: hosts_alias_dns_lookup
+  changed_when: false
+  when:
+    - hosts_alias_target_host | default('') | length > 0
+    - hosts_alias_resolved_ip is not defined
+
+- name: "Consolidate the resolved alias target IP"
+  ansible.builtin.set_fact:
+    hosts_alias_resolved_ip: "{{ hosts_alias_dns_lookup.stdout | trim }}"
+  when:
+    - hosts_alias_target_host | default('') | length > 0
+    - hosts_alias_resolved_ip is not defined

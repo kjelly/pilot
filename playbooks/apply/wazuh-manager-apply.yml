@@ -225,12 +225,18 @@
     # convention as wazuh-fim-apply.yml's post-install config block.
     - when: not ansible_check_mode
       block:
+        - name: "Step 5b: Resolve siem_forward_host for the /etc/hosts pin (spec C10)"
+          ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+          vars:
+            hosts_alias_target_host: "{{ siem_forward_host | default('') }}"
+          when: siem_forwarding_enabled | bool
+
         - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C10)"
           tags: [C10]
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '\s{{ siem_forward_alias }}$'
-            line: "{{ siem_forward_host | default('') }}\t{{ siem_forward_alias }}"
+            line: "{{ hosts_alias_resolved_ip }}\t{{ siem_forward_alias }}"
             state: present
           when: siem_forwarding_enabled | bool
 

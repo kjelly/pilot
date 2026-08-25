@@ -139,11 +139,17 @@
           site(s): {{ groups[thanos_query_store_group] | default([]) }}
 
   tasks:
+    - name: "Resolve thanos_s3_target_host for the /etc/hosts pin"
+      ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+      vars:
+        hosts_alias_target_host: "{{ thanos_s3_target_host | default('', true) }}"
+      when: thanos_s3_target_host | default('', true) | length > 0
+
     - name: "Pin {{ thanos_s3_alias }} -> {{ thanos_s3_target_host | default('', true) }} in /etc/hosts"
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '\s{{ thanos_s3_alias }}$'
-        line: "{{ thanos_s3_target_host | default('', true) }}\t{{ thanos_s3_alias }}"
+        line: "{{ hosts_alias_resolved_ip }}\t{{ thanos_s3_alias }}"
         state: present
       when: thanos_s3_target_host | default('', true) | length > 0
 
@@ -187,6 +193,7 @@
           when: >-
             thanos_s3_alias in thanos_s3_endpoint
             and (groups.get('seaweedfs-s3', []) | length > 0)
+            and (groups.get('seaweedfs-s3', [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
           run_once: true
           delegate_to: "{{ groups.get('seaweedfs-s3', [inventory_hostname]) | first }}"
           block:
