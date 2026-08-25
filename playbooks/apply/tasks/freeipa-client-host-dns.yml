@@ -182,7 +182,14 @@
 - name: "Gate: DNS owner must not already have a CNAME (spec.md §8.2)"
   ansible.builtin.assert:
     that:
-      - (ipa_client_dns_current_cname.stdout | default('') | trim | length) == 0
+      # dig prints its own "communications error"/"no servers could be
+      # reached" diagnostics to STDOUT, not stderr (confirmed live) — so a
+      # server that refused/timed out (rc != 0, e.g. a freshly-provisioned
+      # FreeIPA host that hasn't actually run ipa-server-install yet, as in
+      # any --check preview of a genuinely fresh clean-room topology) must
+      # not have its stdout treated as "found a CNAME". Only a completed
+      # query (rc == 0) with non-empty output is evidence of a real record.
+      - (ipa_client_dns_current_cname.rc | default(1) != 0) or (ipa_client_dns_current_cname.stdout | default('') | trim | length) == 0
     fail_msg: >-
       {{ ipa_client_fqdn }} already has a CNAME record in authoritative
       FreeIPA DNS; A/AAAA registration cannot coexist with a CNAME at the
@@ -191,9 +198,13 @@
 
 - name: "FreeIPA client DNS (plan) — compute current authoritative addresses"
   ansible.builtin.set_fact:
+    # Same rc guard as the CNAME gate above: an unreachable/refused dig
+    # (rc != 0) means "unknown", not "these diagnostic lines are addresses" —
+    # treat it as no current addresses rather than feeding dig's own error
+    # text into the extra/missing diff below.
     ipa_client_dns_current_addresses: >-
-      {{ ((ipa_client_dns_current_a.stdout | default('')).splitlines()
-          + (ipa_client_dns_current_aaaa.stdout | default('')).splitlines())
+      {{ ((ipa_client_dns_current_a.stdout | default('') if (ipa_client_dns_current_a.rc | default(1)) == 0 else '').splitlines()
+          + (ipa_client_dns_current_aaaa.stdout | default('') if (ipa_client_dns_current_aaaa.rc | default(1)) == 0 else '').splitlines())
          | map('trim') | reject('equalto', '') | list | unique }}
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
 
