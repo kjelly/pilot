@@ -45,6 +45,10 @@ import (
 //     apply (bcrypt salts are non-deterministic per call).
 //   - The plaintext password must never be logged (no_log on every task
 //     that touches it).
+//   - An active MIG instance must be detected from nvidia-smi -L and receive
+//     the narrowly-scoped SYS_ADMIN + seccomp=unconfined exception required
+//     for DCGM CacheManager initialization; non-MIG GPU hosts retain the
+//     least-privilege configuration.
 //   - The container restart must be idempotency-gated on the web-config
 //     actually changing, never run unconditionally.
 //   - The GPU/port/own-container read-only probes must set
@@ -91,6 +95,15 @@ func TestRegression_DcgmExporterSpec(t *testing.T) {
 	// C3 must be an rc/count-based container-running check.
 	if !strings.Contains(cmd["C3"], "docker ps") || !strings.Contains(cmd["C3"], "status=running") {
 		t.Errorf("C3 must check docker ps --filter status=running, got %q", cmd["C3"])
+	}
+	// C2 must prove the runtime was loaded by the running Docker daemon. A
+	// daemon.json grep is only declarative and can pass while dockerd still
+	// has no nvidia runtime (dt-dev, 2026-08-25).
+	if !strings.Contains(cmd["C2"], "docker info") || !strings.Contains(cmd["C2"], "Runtimes:") || !strings.Contains(cmd["C2"], "grep -qw nvidia") {
+		t.Errorf("C2 must inspect docker info's active Runtimes line and require nvidia, got %q", cmd["C2"])
+	}
+	if exp["C2"] != "0" {
+		t.Errorf("C2 expected must be rc-based `0`, got %q", exp["C2"])
 	}
 
 	// C4 must pin the version tag (image version drift check).
@@ -199,11 +212,28 @@ func TestRegression_DcgmExporterSpec(t *testing.T) {
 	if !strings.Contains(applyRaw, "runtime: nvidia") {
 		t.Errorf("dcgm-exporter-apply.yml container task must set runtime: nvidia (GPU passthrough)")
 	}
+	if !strings.Contains(applyRaw, "Read the active Docker runtimes before configuration") ||
+		!strings.Contains(applyRaw, "dcgm_exporter_docker_runtimes_before") ||
+		!strings.Contains(applyRaw, "'nvidia' not in dcgm_exporter_docker_runtimes_before.stdout.split()") {
+		t.Errorf("dcgm-exporter-apply.yml must detect a missing active nvidia runtime before deciding whether to restart Docker")
+	}
+	if !strings.Contains(applyRaw, "Assert the running Docker daemon accepts the nvidia runtime") ||
+		!strings.Contains(applyRaw, "dcgm_exporter_docker_runtimes_after") {
+		t.Errorf("dcgm-exporter-apply.yml must verify the running Docker daemon loaded nvidia after configuration")
+	}
 
 	// GPU detection must gate everything else, evaluated before any
 	// OS/arch/secret gate.
 	if !strings.Contains(applyRaw, "nvidia-smi -L") {
 		t.Errorf("dcgm-exporter-apply.yml must detect a usable GPU via nvidia-smi -L")
+	}
+	migFactIdx := strings.Index(applyRaw, "dcgm_exporter_mig_enabled:")
+	if migFactIdx < 0 {
+		t.Fatalf("dcgm-exporter-apply.yml must derive dcgm_exporter_mig_enabled from nvidia-smi -L output")
+	}
+	migFact := applyRaw[migFactIdx : migFactIdx+450]
+	if !strings.Contains(migFact, "dcgm_exporter_nvidia_smi.stdout") || !strings.Contains(migFact, "MIG") {
+		t.Errorf("dcgm_exporter_mig_enabled must be based on a MIG device reported by nvidia-smi -L, got:\n%s", migFact)
 	}
 
 	// The GPU/port/own-container read-only probes must force real
@@ -322,11 +352,13 @@ func TestRegression_DcgmExporterSpec(t *testing.T) {
 		t.Errorf("dcgm-exporter-apply.yml container restart must be gated on dcgm_exporter_webconfig_result is changed, not run unconditionally")
 	}
 
-	// No cap_add/capabilities escalation by default (deliberate
-	// least-privilege default, see spec §5) — a comment explaining the
-	// omission is fine; an actual docker_container cap_add/capabilities
-	// key is not.
-	if strings.Contains(applyRaw, "cap_add") || strings.Contains(applyRaw, "capabilities:") {
-		t.Errorf("dcgm-exporter-apply.yml must not add container capabilities by default (spec §5 deliberate least-privilege default)")
+
+	// DCGM's CacheManager needs these two privileges for active MIG instances,
+	// but they are a deliberate exception, not a global privilege escalation.
+	if !strings.Contains(applyRaw, "capabilities: \"{{ ['SYS_ADMIN'] if (dcgm_exporter_mig_enabled | bool) else omit }}\"") {
+		t.Errorf("dcgm-exporter-apply.yml must add SYS_ADMIN only when dcgm_exporter_mig_enabled")
+	}
+	if !strings.Contains(applyRaw, "security_opts: \"{{ ['seccomp=unconfined'] if (dcgm_exporter_mig_enabled | bool) else omit }}\"") {
+		t.Errorf("dcgm-exporter-apply.yml must set seccomp=unconfined only when dcgm_exporter_mig_enabled")
 	}
 }

@@ -10,8 +10,9 @@
 # Unlike host-monitoring-apply.yml (pinned upstream release BINARY),
 # dcgm-exporter has no such distribution — it links against libdcgm.so and
 # is only officially published as a Docker image (nvidia/dcgm-exporter), so
-# this playbook depends on docs/verification/docker.md being applied first
-# (see contracts/dcgm-exporter.yaml's `dependencies`).
+# this playbook requires a working Docker Engine, but does not require the
+# host to be assigned the pilot `docker` role: an existing externally-managed
+# Docker installation is supported.
 #
 # This playbook does NOT install the NVIDIA GPU driver — that is a
 # host-provisioning-time prerequisite, same responsibility boundary as
@@ -118,6 +119,18 @@
     - name: "Determine whether this host has a usable GPU"
       ansible.builtin.set_fact:
         dcgm_exporter_gpu_present: "{{ (dcgm_exporter_nvidia_smi.rc | default(1)) == 0 }}"
+
+    # DCGM exporter 3.6.1 fails its CacheManager initialization on a host
+    # with an active MIG instance unless it has SYS_ADMIN and an unrestricted
+    # seccomp profile.  nvidia-smi -L prints an indented "MIG ..." device for
+    # that state, so derive the narrow privilege exception from the same
+    # read-only probe used for the GPU-present gate.  Ordinary GPU hosts keep
+    # the least-privilege container configuration below.
+    - name: "Detect active NVIDIA MIG instances"
+      ansible.builtin.set_fact:
+        dcgm_exporter_mig_enabled: >-
+          {{ dcgm_exporter_gpu_present and
+             ('MIG' in (dcgm_exporter_nvidia_smi.stdout | default(''))) }}
 
     - name: "Report: skipping (no usable GPU detected)"
       ansible.builtin.debug:
@@ -236,17 +249,51 @@
             state: present
             update_cache: "{{ dcgm_exporter_toolkit_repo is changed }}"
 
+        # /etc/docker/daemon.json is only declarative input.  Docker does
+        # not reload it automatically, so its contents are not proof that
+        # the running daemon accepts runtime=nvidia.  Restrict the probe to
+        # the one active-runtime line: Docker info can mention NVIDIA again
+        # under CDI discovered devices even when no nvidia runtime is loaded.
+        - name: "Step 2: Read the active Docker runtimes before configuration"
+          tags: [C2]
+          ansible.builtin.shell: "docker info 2>/dev/null | sed -n '/^ Runtimes:/p'"
+          register: dcgm_exporter_docker_runtimes_before
+          changed_when: false
+          check_mode: false
+
         - name: "Step 2: Configure the docker nvidia runtime (spec C2)"
           tags: [C2]
           ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker
           register: dcgm_exporter_runtime_configure
           changed_when: "'Wrote updated config' in dcgm_exporter_runtime_configure.stdout"
 
-        - name: "Step 2: Restart docker if the runtime config changed"
+        - name: "Step 2: Restart docker when configuration changed or runtime is not active"
+          tags: [C2]
           ansible.builtin.systemd:
             name: docker
             state: restarted
-          when: dcgm_exporter_runtime_configure is changed
+          when: >-
+            dcgm_exporter_runtime_configure is changed or
+            'nvidia' not in dcgm_exporter_docker_runtimes_before.stdout.split()
+
+        # Keep this behavior check after the restart, rather than trusting
+        # daemon.json (which was the cause of dt-dev's false C2 PASS).
+        - name: "Step 2: Read the active Docker runtimes after configuration"
+          tags: [C2]
+          ansible.builtin.shell: "docker info 2>/dev/null | sed -n '/^ Runtimes:/p'"
+          register: dcgm_exporter_docker_runtimes_after
+          changed_when: false
+          check_mode: false
+
+        - name: "Step 2: Assert the running Docker daemon accepts the nvidia runtime (spec C2)"
+          tags: [C2]
+          ansible.builtin.assert:
+            that:
+              - "'nvidia' in dcgm_exporter_docker_runtimes_after.stdout.split()"
+            fail_msg: >-
+              Docker daemon did not load the nvidia runtime after configuration
+              and restart. Active runtimes: {{ dcgm_exporter_docker_runtimes_after.stdout }}
+          when: not ansible_check_mode
 
         - name: "Step 3: Install htpasswd (apache2-utils) — generates the bcrypt hash below, not a web server"
           ansible.builtin.apt:
@@ -319,10 +366,9 @@
           when: dcgm_exporter_basic_auth_changed and not ansible_check_mode
           no_log: true
 
-        # No --cap-add SYS_ADMIN by default (see spec §5): without it,
-        # DCP-profiling metrics are unavailable, but core GPU utilization/
-        # memory/temperature/power metrics work fine — a deliberate
-        # least-privilege default for a monitoring agent.
+        # Active MIG instances require SYS_ADMIN plus an unrestricted seccomp
+        # profile for DCGM CacheManager initialization.  Do not grant either
+        # privilege on ordinary GPU hosts (see spec §5).
         - name: "Step 8: Run pilot-dcgm-exporter container (spec C3, C4, C5, C6, C7)"
           tags: [C3, C4, C5, C6, C7]
           community.docker.docker_container:
@@ -332,6 +378,8 @@
             restart_policy: unless-stopped
             restart: "{{ dcgm_exporter_webconfig_result is changed }}"
             runtime: nvidia
+            capabilities: "{{ ['SYS_ADMIN'] if (dcgm_exporter_mig_enabled | bool) else omit }}"
+            security_opts: "{{ ['seccomp=unconfined'] if (dcgm_exporter_mig_enabled | bool) else omit }}"
             ports:
               - "{{ dcgm_exporter_port }}:9400"
             volumes:

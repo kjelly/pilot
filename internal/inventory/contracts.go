@@ -38,7 +38,7 @@ var roleContracts = []roleContract{
 	{Name: "seaweedfs-s3", Description: "S3 相容物件儲存，需先過 docker (seaweedfs-s3-apply.yml)"},
 	{Name: "restic-backup", Description: "跨主機備份到 S3，見 docs/runbooks/restic-backup.md §5 (restic-backup-apply.yml)", GroupVarsStem: "restic-backup", VaultSections: []string{"restic-backup"}},
 	{Name: "host-monitoring", Description: "被監控主機的監控 agent，node_exporter 強制 Basic Auth (host-monitoring-apply.yml)", GroupVarsStem: "host-monitoring", VaultSections: []string{"node-exporter-auth"}},
-	{Name: "dcgm-exporter", Description: "GPU 主機的監控 agent，NVIDIA dcgm-exporter，需先過 docker，沒有 GPU 的主機自動優雅跳過 (dcgm-exporter-apply.yml)", GroupVarsStem: "dcgm-exporter", VaultSections: []string{"dcgm-exporter-auth"}},
+	{Name: "dcgm-exporter", Description: "GPU 主機的監控 agent，NVIDIA dcgm-exporter；需要既有 Docker Engine、但不要求 docker role，沒有 GPU 的主機自動優雅跳過 (dcgm-exporter-apply.yml)", GroupVarsStem: "dcgm-exporter", VaultSections: []string{"dcgm-exporter-auth"}},
 	{Name: "prometheus", Description: "每站 Prometheus + Thanos Sidecar，自動從 host-monitoring group 展開 scrape target (prometheus-apply.yml)", GroupVarsStem: "prometheus", VaultSections: []string{"thanos-s3", "node-exporter-auth"}, HostVarsKeys: []string{"prometheus_site_label"}},
 	{Name: "thanos-query", Description: "中央 Thanos Query，只需一台 (thanos-query-apply.yml)", GroupVarsStem: "thanos-query", VaultSections: []string{"thanos-s3"}},
 	{Name: "alertmanager", Description: "中央 Alertmanager，只需一台 (alertmanager-apply.yml)", GroupVarsStem: "alertmanager", VaultSections: []string{"alertmanager"}},

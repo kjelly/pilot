@@ -9,8 +9,10 @@ playbooks:
 regressionTests:
   - internal/spec/dcgm_exporter_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
-dependencies:
-  - {component: docker, required: true, relation: sameHosts}
+# Docker Engine is an execution prerequisite, but it may be installed and
+# operated outside pilot.  Do not pull the docker component into a deployment
+# plan or require this host to be assigned the docker role.
+dependencies: []
 conflicts: []
 bindings: []
 os:

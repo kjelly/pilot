@@ -164,8 +164,11 @@ gpu-1                       : ok=8    changed=0    unreachable=0    failed=0    
   `node_exporter_targets` 自動展開）尚未實作。
 - 只驗證過 x86_64 + Ubuntu 24.04；`arm64`（Jetson）與其他 distro 家族未測試
   （見 spec §5）。
-- 預設不帶 `--cap-add SYS_ADMIN`，DCP profiling 類 metrics 不會出現在
-  `/metrics`（見 spec §5 的刻意 least-privilege 預設）。
+- 非 MIG GPU 主機維持不帶 `SYS_ADMIN`、Docker 預設 seccomp 的最小權限設定。
+  但偵測到 active MIG instance 時，playbook 會自動加入 `SYS_ADMIN` 與
+  `seccomp=unconfined`；否則 DCGM 3.6.1 的 CacheManager 會以 `Error: -17`
+  退出，9400 不會監聽。這是已在 RTX PRO 6000 Blackwell MIG host 實測的相容性
+  例外，不是為了啟用 profiling metrics。
 
 ## 6. Teardown
 

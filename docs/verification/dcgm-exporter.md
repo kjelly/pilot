@@ -53,9 +53,10 @@
 > binary + 官方 checksum 直接下載驗證的發佈形式——官方唯一穩定支援的發佈
 > 管道就是 Docker/OCI image（`nvidia/dcgm-exporter`），版本標籤本身已經
 > 固定了 DCGM/driver toolkit 組合，等同於 `node_exporter_checksums` 那種
-> 版本鎖定的角色。因此本 component 依賴 `docker`（見 contract
-> `dependencies`），是這個 repo 少數 docker-based 而非 binary-based 的
-> per-host agent。
+> 版本鎖定的角色。它需要目標主機已有可用的 Docker Engine，但**不**依賴
+> pilot 的 `docker` component，也不要求該主機被放進 `docker` inventory group：
+> 已由既有環境管理的 Docker 可以直接使用。這是本 repo 少數 docker-based
+> 而非 binary-based 的 per-host agent。
 >
 > **NVIDIA Container Toolkit**：讓 `docker run --runtime nvidia` 能把 GPU
 > 裝置節點/驅動函式庫正確 bind 進容器，是 GPU 監控容器化的必要中介層，屬於
@@ -82,7 +83,7 @@
 | ID  | Category | Check                                             | Expected  | Command |
 |-----|----------|----------------------------------------------------|-----------|---------|
 | C1  | pkg      | `nvidia-container-toolkit`（`nvidia-ctk` CLI）已安裝  | present   | nvidia-ctk --version |
-| C2  | config   | Docker daemon 已註冊 `nvidia` runtime                | 0         | grep -qE '"nvidia"' /etc/docker/daemon.json; echo $? |
+| C2  | config   | **運行中的** Docker daemon 已註冊 `nvidia` runtime（不是只檢查 `daemon.json` 文字） | 0 | sh -c 'docker info | sed -n "/^ Runtimes:/p" | grep -qw nvidia; echo $?' |
 | C3  | container| `pilot-dcgm-exporter` 容器為 running                 | 1         | docker ps --filter name=pilot-dcgm-exporter --filter status=running -q | wc -l |
 | C4  | version  | 容器 image 符合固定版本標籤                            | ~nvidia/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04 | docker ps --filter name=pilot-dcgm-exporter --no-trunc | grep -m1 -oE 'nvidia/dcgm-exporter:[^ ]+' |
 | C5  | config   | 容器實際掛載 `nvidia` runtime（GPU 裝置真的有傳進去）    | ~nvidia   | docker inspect pilot-dcgm-exporter | grep -m1 -oE '"Runtime": *"[^"]+"' |
@@ -131,8 +132,9 @@
 - 任一 `status=fail` → **FAIL**，常見修法：
   - C1 fail → NVIDIA Container Toolkit 沒裝上；檢查 apt repo 是否加成功
     （`apt-cache policy nvidia-container-toolkit`）
-  - C2 fail → `nvidia-ctk runtime configure --runtime=docker` 沒跑或 docker
-    沒重啟套用設定
+  - C2 fail → `nvidia-ctk runtime configure --runtime=docker` 沒跑、docker
+    沒重啟套用設定，或 daemon 實際使用的設定來源不是 `/etc/docker/daemon.json`；
+    以 `docker info` 的 `Runtimes:` 為準，不要只 grep 設定檔
   - C3 fail → 容器沒啟動；`docker logs pilot-dcgm-exporter`，常見原因是
     GPU 未偵測到或 `nvidia_exporter_gpu_present` 判斷成 false
   - C4 fail → image tag 跑掉；檢查 `dcgm_exporter_version`
@@ -152,11 +154,13 @@
 | C1–C9 | 目標主機沒有 GPU（`nvidia-smi -L` 探測失敗）時，apply 會整段跳過原生安裝，本檔全部 row 都不適用於這台主機而必定 fail——這是**預期行為，不是 bug**，讓 `dcgm-exporter` inventory group 可以跟其他候選 GPU 主機混編而不必逐台先篩選 | 沒有 GPU 或 GPU 驅動未安裝的主機 | 不會解除——這種主機不屬於本 spec 範圍 |
 | C1, C3–C6, C8, C9 | 當 `dcgm_exporter_port` 已被非本 playbook 管理的程式佔用（常見於 Kubernetes NVIDIA GPU Operator 已部署自己的 `dcgm-exporter` DaemonSet），apply 會整段跳過原生安裝；C7（port 監聽）通常仍會 pass（有別的東西在 serve），C8 視現有 exporter 是否有自己的認證機制而定 | 由 Kubernetes GPU Operator（或任何其他機制）自行管理 dcgm-exporter 的主機 | 不會解除——這種主機的健康狀態改由該機制自己的健康檢查負責 |
 | — | 只驗證過 `x86_64`；`arm64`（如 NVIDIA Jetson）需要不同的 image tag 後綴，目前 pre_tasks gate 直接 fail 非 x86_64 架構 | 非 x86_64 主機 | 需要時在 apply playbook 補上 arm64 對應的 image tag 與架構分支 |
-| — | 預設**不**帶 `--cap-add SYS_ADMIN`，因此 DCP profiling 類 metrics（部分進階 GPU 使用率細節）不會出現在 `/metrics`；基礎 GPU 使用率/記憶體/溫度/功耗類 metrics 不受影響。這是刻意的安全預設（避免監控 agent 額外要求敏感 capability），不是遺漏 | 全部部署 | 若確實需要 profiling metrics，之後可新增 `dcgm_exporter_enable_profiling_metrics` 選填變數，預設仍為 false |
+| — | 預設不給 `SYS_ADMIN` 且維持 Docker 預設 seccomp，以最小權限執行；但 `nvidia-smi -L` 偵測到**已建立的 MIG instance** 時，DCGM 3.6.1 的 CacheManager 否則會以 `Error: -17` 退出，playbook 因此只對該情境加入 `SYS_ADMIN` 與 `seccomp=unconfined`。這是 MIG 初始化相容性例外，不是為了開啟 DCP profiling。 | 有 active MIG instance 的 GPU 主機 | 未來 DCGM/NVIDIA 修正此相容性問題時，重新實測後再評估移除例外；非 MIG 主機始終維持最小權限。 |
 | — | 這份 spec 只驗證 exporter 本身；把 `dcgm-exporter` group 接進 `prometheus.md` 的 scrape 設定（比照 `host-monitoring.md` 的 `node_exporter_targets` 自動展開）尚未實作，屬已知留白 | 全部部署 | 待實作：`prometheus.md` 新增對應的 GPU scrape job |
 
 ## 6. 變更紀錄
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-08-25 | v1.0 | C2 改驗證 running dockerd 的 `docker info` runtime list；dt-dev 證實 `daemon.json` 有 `nvidia`、但 service 尚未載入而建立容器失敗。apply 會在設定變更**或**有效 runtime 缺少時重啟 Docker，並於重啟後 assert。 | pilot |
+| 2026-08-25 | v1.0 | MIG 相容性修正：真實 RTX PRO 6000 Blackwell MIG host 實測，原本最小權限容器以 `CacheManager Init Failed. Error: -17` 退出、9400 connection refused；僅在 `nvidia-smi -L` 回報 MIG instance 時加入 `SYS_ADMIN` + `seccomp=unconfined` 後 DCGM 初始化成功且未認證 `/metrics` 回 401。 | pilot |
 | 2026-08-24 | v1.0 | 初版：`dcgm-exporter` 官方 Docker image + NVIDIA Container Toolkit + 強制 HTTP Basic Auth；GPU 自動偵測（無 GPU 優雅跳過）；Kubernetes GPU Operator 自動偵測（DaemonSet 已管理時跳過原生安裝）。真實 GPU 主機（Ubuntu 24.04 + NVIDIA RTX PRO 6000 Blackwell）`pilot verify` 實測跑過；C1/C4/C5 因 Docker Go template `{{...}}` 撞上 ansible ad-hoc 的 Jinja finalization（跟 `dashboard.md` C14 同一個坑）改用純文字輸出寫法 | sre |
