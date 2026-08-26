@@ -165,6 +165,17 @@ hbac:
   services:
     - {name: sshd, state: present}
   rules:
+    # A team is only an identity set — login is granted only because this
+    # enabled rule explicitly references it. HBAC subjects.groups accepts
+    # team/role groups directly (and legacy access-category groups, for
+    # rosters that still have them); no access-*/wrapper group is needed.
+    - name: developer-ssh
+      state: present
+      enabled: true
+      subjects: {users: [], groups: [team-developers]}
+      targets: {hosts: [], hostgroups: [web-servers]}
+      services: [sshd]
+
     - name: breakglass-admin-access
       state: present
       enabled: true

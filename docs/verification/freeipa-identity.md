@@ -28,6 +28,23 @@
 > `docs/verification/freeipa-server.md`。本檔是**授權資料本身**（誰在哪個群組、
 > 哪條 HBAC/sudo 規則授權了誰）是否確實反映 roster 的驗證。
 
+> 2026-08-26 補充（HBAC 授權簡化，見 spec.md「Pilot HBAC Authorization
+> Simplification」）：`freeipa-identity-apply.yml` 的 HBAC group 閘門已從
+> 「僅接受 `category: access`」放寬為「接受 `team`/`role`/（相容）
+> `access`」，`ipa_hbac_rules[].users`/`.hosts` 的直接 user/host 語意本來
+> 就已支援，現在 `pilot edit`/structured actions/MCP 也能直接編輯它們（見
+> §2 的 C13 行——目前該行驗證的仍是既有 legacy access-group 路徑）。這一批
+> 變更本身已有 Go 單元測試與 driver 整合測試覆蓋
+> （`internal/inventory/group_category_test.go`、
+> `cmd/pilot/cmd/edit_tui_roster_hbac_test.go`、
+> `cmd/pilot/cmd/edit_automation_driver_roster_access_test.go` 的
+> `TestCreateHBACRule_*`/`TestSetHBACUsers_*`/`TestSetHBACTargets_*`），但
+> **尚未**在真實 FreeIPA vm-target 上針對 team/role 直接引用或
+> direct users/hosts 這幾條新路徑跑過 §0 要求的 actual-run 驗證；下面 §2
+> 的 24-row checklist 仍是既有 legacy-access 基線，未包含這批新路徑。下一
+> 輪對本檔做 vm-target 重跑時，應補上對應的 C25+ row 再據實記錄，不要用
+> 這段說明頂替真正的 actual-run 證據。
+
 ## 0. 這份檔的狀態（先讀）
 
 依 `AGENTS.md` §1「actual-run 規則」：寫進 `docs/verification/*.md` 步驟區塊的指令，

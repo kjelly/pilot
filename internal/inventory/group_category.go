@@ -1,5 +1,7 @@
 package inventory
 
+import "fmt"
+
 // This file is the single source of truth for group-category policy
 // (spec.md §6.3/§21.1): which categories exist, what name prefix each
 // requires, which may be newly created by sanctioned authoring surfaces,
@@ -57,6 +59,50 @@ func IsSudoSubjectGroupCategory(category string) bool {
 // backward compatibility with rosters authored before this policy existed.
 func IsDeprecatedGroupCategory(category string) bool {
 	return category == "access"
+}
+
+// RosterWarning is a non-fatal, non-blocking observation about a roster.
+// Unlike RosterViolation, a RosterWarning never fails validation or lint
+// (spec.md §8) — it exists purely to surface a deprecation notice that
+// structural validation deliberately keeps accepting.
+type RosterWarning struct {
+	Rule   string
+	Detail string
+}
+
+func (w RosterWarning) String() string {
+	return fmt.Sprintf("[%s] %s", w.Rule, w.Detail)
+}
+
+// RosterDeprecationWarnings returns one warning per category: access group
+// in root, in file order (deterministic) — the only sanctioned-authoring
+// deprecation this delivery reports (spec.md §1/§6.2/§8). Callers should
+// only call this on a roster that has already passed ValidateRoster; it
+// does not itself re-run structural validation.
+func RosterDeprecationWarnings(root map[string]any) []RosterWarning {
+	var out []RosterWarning
+	for _, raw := range listField(root, "groups") {
+		g := asMap(raw)
+		category := stringField(g, "category")
+		if !IsDeprecatedGroupCategory(category) {
+			continue
+		}
+		out = append(out, RosterWarning{
+			Rule:   "deprecated group category",
+			Detail: fmt.Sprintf("group %q uses deprecated category %q; new HBAC policies should reference team-/role- groups or direct users instead", labelOf(g), category),
+		})
+	}
+	return out
+}
+
+// RosterDeprecationWarningsFile is RosterDeprecationWarnings' file-reading
+// counterpart, mirroring ValidateRosterFile's read/parse/dispatch shape.
+func RosterDeprecationWarningsFile(path string) ([]RosterWarning, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	return RosterDeprecationWarnings(root), nil
 }
 
 // namesWithCategoryFunc returns the names of every group in items whose

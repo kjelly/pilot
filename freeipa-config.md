@@ -72,6 +72,16 @@ role-web-service-admin
 
 禁止使用單一群組同時承擔資料權限、登入權限與 sudo 權限。
 
+> **2026-08 簡化（見 spec.md「Pilot HBAC Authorization Simplification」）**：
+> `access-` 群組類別已改為僅供舊 roster 相容，**新授權不再需要建立
+> `access-*` 群組**。HBAC `subjects.groups` 現在可以直接引用 `team-*` 或
+> `role-*` 群組，也可以直接列出 `subjects.users`（不需包一層 access
+> group）；`targets.hosts` 同樣可以直接列出已 enroll 的主機 FQDN，不必
+> 每次都新建 hostgroup。既有的 `access-*` 群組仍完全有效、仍會被
+> reconcile，也仍可作為 HBAC subject——本節之後所有提到「HBAC 必須經由
+> access group」的內容，請理解成「舊模型／相容模式」，不是唯一合法寫法。
+> `filesystem`（`data-*`）群組仍然不得作為 HBAC subject。
+
 ---
 
 ## 2.3 Declarative ownership
@@ -1044,7 +1054,10 @@ role-breakglass-admin
 * subjects 至少有一個 user 或 group。
 * targets 必須指定 host、hostgroup 或 hostcat。
 * services 不得為空。
-* HBAC group 預設必須是 `access` category。
+* `subjects.groups` 必須是 `team`、`role`，或（相容用途）`access` category；
+  `filesystem` 與未知群組一律拒絕（見 2.2 節簡化說明，2026-08 起 `access`
+  僅供既有 roster 相容，新授權應直接用 `team-*`/`role-*` 或
+  `subjects.users`）。
 
 ---
 

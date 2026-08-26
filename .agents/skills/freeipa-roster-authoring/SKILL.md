@@ -50,8 +50,22 @@ open it. Use `pilot roster migrate <roster-file>` to upgrade one explicitly
 4. Enforce these invariants:
 
    - User names match `^[a-z_][a-z0-9_.-]*$`; user/group names are unique.
-   - Group categories are `team`, `filesystem`, `access`, or `role`, with
-     prefixes `team-`, `data-`, `access-`, or `role-` respectively.
+   - New groups use category `team`, `filesystem`, or `role`, with prefixes
+     `team-`, `data-`, or `role-` respectively. Never generate a new
+     `category: access` group — it is deprecated compatibility data only.
+     An existing roster's `access-*` group may be preserved as-is when
+     editing (do not rename, delete, or reclassify it); just never author a
+     new one.
+   - HBAC `subjects.groups` accepts `team-*` and `role-*` groups directly
+     (no wrapper `access-*` group needed), plus legacy `access-*` groups
+     already present in the roster for backward compatibility. It rejects
+     `filesystem` (`data-*`) groups and any unknown group name.
+   - HBAC `subjects.users` and direct HBAC users are first-class: list a
+     roster user name (or `admin`) directly in `subjects.users` instead of
+     wrapping them in a group. HBAC `targets.hosts` accepts direct already-
+     enrolled host FQDNs the same way, alongside or instead of
+     `targets.hostgroups` — useful for a one-off/exception grant that
+     doesn't warrant a new hostgroup.
    - Group membership references existing users/groups and never itself.
    - Hosts use the real FQDN and IPv4 address; do not turn an inventory alias
      into an FQDN without checking target facts.

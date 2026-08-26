@@ -180,6 +180,86 @@ func TestRosterLintCmd_BrokenRosterReportsViolationsAndFails(t *testing.T) {
 	}
 }
 
+const rosterLintFixtureNoAccessGroups = `
+schema_version: 1
+freeipa:
+  domain: ipa.pilot.internal
+users:
+  - name: alice
+    ssh_keys: {authoritative: true, values: []}
+groups:
+  - {name: team-x, category: team}
+`
+
+const rosterLintFixtureTwoAccessGroups = `
+schema_version: 1
+freeipa:
+  domain: ipa.pilot.internal
+users:
+  - name: alice
+    ssh_keys: {authoritative: true, values: []}
+groups:
+  - {name: team-x, category: team}
+  - {name: access-a, category: access}
+  - {name: access-b, category: access}
+`
+
+func TestRosterLintCmd_NoWarningWithoutAccessGroups(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(path, []byte(rosterLintFixtureNoAccessGroups), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"roster", "lint", path})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	defer rootCmd.SetArgs(nil)
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
+	}
+	if strings.Contains(out.String(), "warning:") {
+		t.Fatalf("output = %q, did not expect a deprecation warning without any access group", out.String())
+	}
+}
+
+// TestRosterLintCmd_OneDeterministicWarningPerAccessGroup covers spec.md
+// §8/§18.2: one warning per category: access group, in deterministic
+// (file) order, and the warnings never change lint's exit status.
+func TestRosterLintCmd_OneDeterministicWarningPerAccessGroup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(path, []byte(rosterLintFixtureTwoAccessGroups), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"roster", "lint", path})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	defer rootCmd.SetArgs(nil)
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v (warnings must not change exit status), output: %s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "ok: schema v1 is valid") {
+		t.Fatalf("output = %q, want the normal ok line alongside the warnings", out.String())
+	}
+	firstIdx := strings.Index(out.String(), `warning: group "access-a" uses deprecated category "access"`)
+	secondIdx := strings.Index(out.String(), `warning: group "access-b" uses deprecated category "access"`)
+	if firstIdx < 0 || secondIdx < 0 {
+		t.Fatalf("output = %q, want one warning line per access group", out.String())
+	}
+	if firstIdx >= secondIdx {
+		t.Fatalf("output = %q, want access-a's warning before access-b's (file order)", out.String())
+	}
+	if got := strings.Count(out.String(), "warning:"); got != 2 {
+		t.Fatalf("warning count = %d, want exactly 2 (one per access group)", got)
+	}
+}
+
 func TestRosterLintCmd_EncryptedRosterReportsAClearError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")

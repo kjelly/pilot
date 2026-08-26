@@ -52,6 +52,22 @@ reporting.`,
 			return fmt.Errorf("%d issue(s) found", len(violations))
 		}
 
+		// Deprecation warnings never affect exit status or violate lint
+		// (spec.md §8) — printWarnings runs after every "ok:"/notice line
+		// below, exactly like the freeipa-identity.md example output.
+		// --upgrade remains purely about schema migration; it does not
+		// touch or remove deprecated-category groups, so the warning
+		// still applies just as much after upgrading.
+		warnings, err := inventory.RosterDeprecationWarningsFile(path)
+		if err != nil {
+			return err
+		}
+		printWarnings := func() {
+			for _, w := range warnings {
+				fmt.Fprintf(cmd.OutOrStdout(), "warning: %s\n", w.Detail)
+			}
+		}
+
 		// No structural violations: report which schema version passed
 		// and, for v1, nudge toward `pilot roster migrate`. This re-reads
 		// the file only to detect its declared version for display — it
@@ -66,6 +82,7 @@ reporting.`,
 			// Violations were already empty, so this shouldn't happen in
 			// practice; fall back rather than fail oddly on a race.
 			fmt.Fprintln(cmd.OutOrStdout(), "ok: no issues found")
+			printWarnings()
 			return nil
 		}
 
@@ -75,6 +92,7 @@ reporting.`,
 				return err
 			}
 			printRosterMigrationResult(cmd.OutOrStdout(), path, result, false)
+			printWarnings()
 			return nil
 		}
 
@@ -87,6 +105,7 @@ reporting.`,
 		default:
 			fmt.Fprintf(cmd.OutOrStdout(), "ok: schema v%d is valid\n", version)
 		}
+		printWarnings()
 		return nil
 	},
 }
