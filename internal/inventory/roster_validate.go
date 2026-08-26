@@ -361,7 +361,7 @@ func checkHBAC(root map[string]any, groups, hostgroups []any) []RosterViolation 
 	var out []RosterViolation
 	hbac := mapField(root, "hbac")
 	rules := listField(hbac, "rules")
-	accessGroupNames := namesWithCategory(groups, "access")
+	hbacSubjectGroupNames := namesWithCategoryFunc(groups, IsHBACSubjectGroupCategory)
 	hostgroupNames := namesOf(hostgroups)
 	allowedUsers := append(namesOf(listField(root, "users")), "admin")
 
@@ -403,8 +403,8 @@ func checkHBAC(root map[string]any, groups, hostgroups []any) []RosterViolation 
 		}
 
 		for _, g := range subjGroups {
-			if !contains(accessGroupNames, g) {
-				out = append(out, RosterViolation{Rule: "hbac subject group category", Detail: fmt.Sprintf("hbac rule %q: subjects.groups %q must be a group with category: access", label, g)})
+			if !contains(hbacSubjectGroupNames, g) {
+				out = append(out, RosterViolation{Rule: "hbac subject group category", Detail: fmt.Sprintf("hbac rule %q: subjects.groups %q must be a group with category team, role, or (legacy) access", label, g)})
 			}
 		}
 		for _, u := range subjUsers {
@@ -446,7 +446,7 @@ var (
 func checkSudo(root map[string]any, groups []any) []RosterViolation {
 	var out []RosterViolation
 	sudo := mapField(root, "sudo")
-	roleGroupNames := namesWithCategory(groups, "role")
+	roleGroupNames := namesWithCategoryFunc(groups, IsSudoSubjectGroupCategory)
 	allowedUsers := append(namesOf(listField(root, "users")), "admin")
 	rules := listField(sudo, "rules")
 	commandGroups := listField(sudo, "command_groups")

@@ -292,17 +292,78 @@ func TestValidateRoster_HBACSubjectGroupWrongCategory(t *testing.T) {
 	v := ValidateRoster(mustParseRoster(t, `
 schema_version: 1
 groups:
-  - name: team-x
-    category: team
+  - name: data-x
+    category: filesystem
 hbac:
   rules:
     - name: r1
-      subjects: {groups: [team-x]}
+      subjects: {groups: [data-x]}
       targets: {hostcat: all}
       services: [sshd]
 `))
 	if !contains(ruleNames(v), "hbac subject group category") {
 		t.Fatalf("expected an hbac subject group category violation, got: %v", v)
+	}
+}
+
+func TestValidateRoster_HBACSubjectGroupUnknownName(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+hbac:
+  rules:
+    - name: r1
+      subjects: {groups: [no-such-group]}
+      targets: {hostcat: all}
+      services: [sshd]
+`))
+	if !contains(ruleNames(v), "hbac subject group category") {
+		t.Fatalf("expected an hbac subject group category violation for an unknown group, got: %v", v)
+	}
+}
+
+func TestValidateRoster_HBACSubjectGroupAllowedCategories(t *testing.T) {
+	cases := []struct {
+		category, groupName string
+	}{
+		{"team", "team-x"},
+		{"role", "role-x"},
+		{"access", "access-x"},
+	}
+	for _, c := range cases {
+		roster := `
+schema_version: 1
+groups:
+  - name: ` + c.groupName + `
+    category: ` + c.category + `
+hbac:
+  rules:
+    - name: r1
+      subjects: {groups: [` + c.groupName + `]}
+      targets: {hostcat: all}
+      services: [sshd]
+`
+		v := ValidateRoster(mustParseRoster(t, roster))
+		if contains(ruleNames(v), "hbac subject group category") {
+			t.Fatalf("category %q: expected no hbac subject group category violation, got: %v", c.category, v)
+		}
+	}
+}
+
+func TestValidateRoster_HBACSubjectGroupRejectsFilesystem(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+groups:
+  - name: data-fs
+    category: filesystem
+hbac:
+  rules:
+    - name: r1
+      subjects: {groups: [data-fs]}
+      targets: {hostcat: all}
+      services: [sshd]
+`))
+	if !contains(ruleNames(v), "hbac subject group category") {
+		t.Fatalf("expected filesystem group to be rejected as an hbac subject, got: %v", v)
 	}
 }
 
