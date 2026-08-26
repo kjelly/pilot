@@ -207,6 +207,12 @@ func parseLokiTime(value string, now time.Time, isStart bool) (time.Time, error)
 // OpenSSH's own control-socket creation is not guaranteed atomic across
 // two unrelated processes hitting it at once, so this scopes the path
 // per call instead of trying to prove that race is always benign.
+//
+// Keep the scoped socket under /tmp and use %C for the host tuple. Adding a
+// per-call ID to the normal data-dir path can exceed OpenSSH's 108-byte
+// Unix-domain socket limit. The full random scope remains in the path, so
+// concurrent calls still get distinct sockets without embedding user, host,
+// and port in the path a second time.
 func scopedDiagnoseAnsibleRuntime(base deployAnsibleRuntime) deployAnsibleRuntime {
 	scope, err := newID()
 	if err != nil {
@@ -221,7 +227,7 @@ func scopedDiagnoseAnsibleRuntime(base deployAnsibleRuntime) deployAnsibleRuntim
 		}
 		env = append(env, kv)
 	}
-	controlPath := filepath.Join(base.SSHControlDir, "pilot-"+scope+"-%r@%h:%p")
+	controlPath := filepath.Join("/tmp", "pilot-"+scope+"-%C")
 	env = append(env, "ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath="+strconv.Quote(controlPath)+" -o ControlPersist=60s")
 	return deployAnsibleRuntime{TempDir: base.TempDir, SSHControlDir: base.SSHControlDir, Env: env}
 }

@@ -138,8 +138,16 @@ func TestScopedDiagnoseAnsibleRuntime_TwoCallsGetDistinctControlPaths(t *testing
 	if firstArgs == secondArgs {
 		t.Fatalf("two independent diagnose calls got the identical ANSIBLE_SSH_ARGS (%q) — concurrent calls to the same host would share one SSH ControlPath again", firstArgs)
 	}
-	if !strings.Contains(firstArgs, base.SSHControlDir) || !strings.Contains(secondArgs, base.SSHControlDir) {
-		t.Fatalf("expected both ControlPaths to stay rooted under %q, got first=%q second=%q", base.SSHControlDir, firstArgs, secondArgs)
+	if !strings.Contains(firstArgs, "/tmp/pilot-") || !strings.Contains(secondArgs, "/tmp/pilot-") {
+		t.Fatalf("expected both ControlPaths to use the short /tmp/pilot-* prefix, got first=%q second=%q", firstArgs, secondArgs)
+	}
+	if !strings.Contains(firstArgs, "-%C") || !strings.Contains(secondArgs, "-%C") {
+		t.Fatalf("expected both ControlPaths to use OpenSSH's hashed host tuple, got first=%q second=%q", firstArgs, secondArgs)
+	}
+	firstPath := quotedControlPath(firstArgs)
+	secondPath := quotedControlPath(secondArgs)
+	if len(firstPath) > 108 || len(secondPath) > 108 {
+		t.Fatalf("scoped ControlPath template exceeds OpenSSH's 108-byte limit: first=%d second=%d", len(firstPath), len(secondPath))
 	}
 
 	// Only ANSIBLE_SSH_ARGS should change — everything else base set up
@@ -166,6 +174,20 @@ func TestScopedDiagnoseAnsibleRuntime_TwoCallsGetDistinctControlPaths(t *testing
 	if count != 1 {
 		t.Fatalf("expected exactly one ANSIBLE_SSH_ARGS entry, got %d in %v", count, first.Env)
 	}
+}
+
+func quotedControlPath(sshArgs string) string {
+	const marker = `ControlPath="`
+	start := strings.Index(sshArgs, marker)
+	if start < 0 {
+		return ""
+	}
+	start += len(marker)
+	end := strings.IndexByte(sshArgs[start:], '"')
+	if end < 0 {
+		return ""
+	}
+	return sshArgs[start : start+end]
 }
 
 func TestResolveDiagnoseInventory_RefreshFailureIsNotSilentlyIgnored(t *testing.T) {
