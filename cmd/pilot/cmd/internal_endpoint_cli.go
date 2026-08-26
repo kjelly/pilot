@@ -13,6 +13,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -23,6 +24,7 @@ import (
 )
 
 var (
+	iepValidateDir             string
 	iepValidateManifestFlag    string
 	iepValidateFreeIPADNSFlag  string
 	iepValidatePrintNormalized bool
@@ -63,18 +65,17 @@ var internalEndpointSuggestCmd = &cobra.Command{
 }
 
 func init() {
-	internalEndpointValidateCmd.Flags().StringVar(&iepValidateManifestFlag, "manifest", "", "path to internal-endpoints.yaml (required)")
-	internalEndpointValidateCmd.Flags().StringVar(&iepValidateFreeIPADNSFlag, "freeipa-dns-manifest", "", "path to freeipa-dns.yaml, for DNS-zone-existence and ownership-collision checks (spec.md §11)")
+	internalEndpointValidateCmd.Flags().StringVar(&iepValidateDir, "dir", ".", "workspace directory containing internal-endpoints.yaml and freeipa-dns.yaml (default: current directory)")
+	internalEndpointValidateCmd.Flags().StringVar(&iepValidateManifestFlag, "manifest", "internal-endpoints.yaml", "path to internal-endpoints.yaml (relative to --dir unless absolute)")
+	internalEndpointValidateCmd.Flags().StringVar(&iepValidateFreeIPADNSFlag, "freeipa-dns-manifest", "freeipa-dns.yaml", "path to freeipa-dns.yaml (relative to --dir unless absolute)")
 	internalEndpointValidateCmd.Flags().BoolVar(&iepValidatePrintNormalized, "print-normalized", false, "print the normalized endpoint list (one 'dns_owner fqdn' line per endpoint) instead of a violation report")
-	_ = internalEndpointValidateCmd.MarkFlagRequired("manifest")
 	internalEndpointCmd.AddCommand(internalEndpointValidateCmd)
 
-	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestInventoryFlag, "inventory", "", "path to the ansible inventory (hosts.yml) describing this topology (required)")
-	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestManifestFlag, "manifest", "", "path to the existing internal-endpoints.yaml, to skip already-published upstreams (optional; omit for a brand-new manifest)")
-	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestFreeIPADNSManifestFlag, "freeipa-dns-manifest", "", "path to freeipa-dns.yaml, to auto-resolve the zone when it declares exactly one (ignored if --zone is set)")
+	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestInventoryFlag, "inventory", "hosts.yml", "path to the ansible inventory (default: hosts.yml)")
+	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestManifestFlag, "manifest", "internal-endpoints.yaml", "path to the existing internal-endpoints.yaml (default: internal-endpoints.yaml; missing file is treated as empty)")
+	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestFreeIPADNSManifestFlag, "freeipa-dns-manifest", "freeipa-dns.yaml", "path to freeipa-dns.yaml used to auto-resolve the zone (default: freeipa-dns.yaml)")
 	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestZoneFlag, "zone", "", "dns zone to publish suggested endpoints under (overrides --freeipa-dns-manifest auto-detection); required if that manifest declares zero or more than one zone")
 	internalEndpointSuggestCmd.Flags().StringVar(&iepSuggestProxyHostFlag, "proxy-host", "", "inventory_host to use as route.proxy (overrides auto-detection from the reverse-proxy group); required if that group has more than one host")
-	_ = internalEndpointSuggestCmd.MarkFlagRequired("inventory")
 	internalEndpointCmd.AddCommand(internalEndpointSuggestCmd)
 
 	rootCmd.AddCommand(internalEndpointCmd)
@@ -168,16 +169,25 @@ func runInternalEndpointSuggestCmd(cmd *cobra.Command, _ []string) error {
 }
 
 func runInternalEndpointValidateCmd(cmd *cobra.Command, _ []string) error {
-	root, err := inventory.LoadInternalEndpointManifest(iepValidateManifestFlag)
+	manifestPath := workspacePath(iepValidateDir, iepValidateManifestFlag)
+	dnsManifestPath := workspacePath(iepValidateDir, iepValidateFreeIPADNSFlag)
+	root, err := inventory.LoadInternalEndpointManifest(manifestPath)
 	if err != nil {
 		return err
 	}
 
 	opts := inventory.InternalEndpointValidateOptions{}
-	if iepValidateFreeIPADNSFlag != "" {
-		zones, err := loadFreeIPADNSZonesForCLIValidate(iepValidateFreeIPADNSFlag)
+	if dnsManifestPath != "" {
+		zones, err := loadFreeIPADNSZonesForCLIValidate(dnsManifestPath)
 		if err != nil {
-			return fmt.Errorf("load --freeipa-dns-manifest: %w", err)
+			// The workspace-root default is optional: validation can still
+			// perform all manifest-local checks before freeipa-dns.yaml exists.
+			// An explicitly supplied missing path remains an error.
+			if !cmd.Flags().Changed("freeipa-dns-manifest") && os.IsNotExist(err) {
+				zones = nil
+			} else {
+				return fmt.Errorf("load --freeipa-dns-manifest: %w", err)
+			}
 		}
 		opts.FreeIPADNSZones = zones
 	}
@@ -200,6 +210,13 @@ func runInternalEndpointValidateCmd(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintln(cmd.OutOrStdout(), "manifest OK")
 	return nil
+}
+
+func workspacePath(dir, path string) string {
+	if filepath.IsAbs(path) || dir == "" {
+		return path
+	}
+	return filepath.Join(dir, path)
 }
 
 // loadFreeIPADNSZonesForCLIValidate reads path's zones/records the same way

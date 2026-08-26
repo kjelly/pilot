@@ -10,6 +10,7 @@ import (
 )
 
 var (
+	reconcileDirFlag       string
 	reconcileInventoryFlag string
 	reconcileTimeoutFlag   string
 	reconcileActionsPath   string
@@ -33,6 +34,7 @@ var reconcileCmd = &cobra.Command{
 }
 
 func init() {
+	reconcileCmd.Flags().StringVar(&reconcileDirFlag, "dir", ".", "workspace directory containing inventory.yml and hosts.yml (default: current directory)")
 	reconcileCmd.Flags().StringVarP(&reconcileInventoryFlag, "inventory", "i", "inventory.yml", "預先填入的 inventory 路徑(精靈仍會再問一次，可直接按 Enter 採用)")
 	reconcileCmd.Flags().StringVar(&reconcileTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限")
 	reconcileCmd.Flags().StringVar(&reconcileActionsPath, "actions", "", "以 JSON scenario 自動回答 reconcile TUI prompts")
@@ -71,10 +73,14 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	fmt.Fprintln(out, "═══ pilot reconcile — 互動式 day-2 設定調和精靈 ═══")
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
 	fmt.Fprintln(out)
-	inv, err := runTextProgram("Inventory 檔路徑", reconcileInventoryFlag, validateFileExists)
+	inventoryDefault := workspacePath(reconcileDirFlag, reconcileInventoryFlag)
+	invInput, err := runTextProgram("Inventory 檔路徑", inventoryDefault, func(path string) error {
+		return validateFileExists(workspacePath(reconcileDirFlag, path))
+	})
 	if err != nil {
 		return abortOrErr(err)
 	}
+	inv := workspacePath(reconcileDirFlag, invInput)
 
 	// Best-effort: keep inv fresh relative to a sibling hosts.yml (edited
 	// via `pilot edit`) before anything below reads it — see

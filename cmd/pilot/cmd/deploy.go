@@ -37,6 +37,7 @@ import (
 )
 
 var deployInventoryFlag string
+var deployDirFlag string
 var deployTimeoutFlag string
 var deployActionFlag string
 var deployShowExperimental bool
@@ -129,6 +130,7 @@ gate、同一份 Playbook 對照表)——熟悉 Ansible 的人仍可以照 DELI
 }
 
 func init() {
+	deployCmd.Flags().StringVar(&deployDirFlag, "dir", ".", "workspace directory containing inventory.yml and hosts.yml (default: current directory)")
 	deployCmd.Flags().StringVarP(&deployInventoryFlag, "inventory", "i", "inventory.yml", "預先填入的 inventory 路徑(精靈仍會再問一次，可直接按 Enter 採用)")
 	deployCmd.Flags().StringVar(&deployTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限，Go duration 格式(例如 45m、1h30m)；跑得比這個久會被強制中止")
 	deployCmd.Flags().StringVar(&deployActionFlag, "action", "apply", "contract lifecycle action: apply, upgrade, or decommission (only declared actions may run)")
@@ -139,6 +141,7 @@ func init() {
 	deployCmd.Flags().BoolVar(&deployForceFlag, "force", false, "不顯示互動提示；所有欄位採用精靈顯示的預設值")
 	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
 	deployCmd.AddCommand(deployPlanCmd)
+	deployGraphCmd.Flags().StringVar(&deployGraphDirFlag, "dir", ".", "workspace directory containing inventory.yml (default: current directory)")
 	deployGraphCmd.Flags().StringVarP(&deployGraphInventoryFlag, "inventory", "i", "inventory.yml", "inventory 路徑，用來解析每個角色 group 有哪些主機")
 	deployGraphCmd.Flags().StringVar(&deployGraphViewFlag, "view", "component", "拓樸圖視角：component（元件依賴樹）、host（以主機為主，含跨主機依賴）、both（兩者都印）")
 	deployCmd.AddCommand(deployGraphCmd)
@@ -146,6 +149,7 @@ func init() {
 }
 
 var (
+	deployGraphDirFlag       string
 	deployGraphInventoryFlag string
 	deployGraphViewFlag      string
 )
@@ -189,7 +193,8 @@ func runDeployGraph(cmd *cobra.Command, _ []string) error {
 	}
 	ctx := withDeployAnsibleRuntime(cmd.Context(), runtime)
 	out := cmd.OutOrStdout()
-	resolvedInv, notice, cleanup, err := expandIfSimplifiedHosts(deployGraphInventoryFlag)
+	graphInventory := workspacePath(deployGraphDirFlag, deployGraphInventoryFlag)
+	resolvedInv, notice, cleanup, err := expandIfSimplifiedHosts(graphInventory)
 	if err != nil {
 		return err
 	}
@@ -203,7 +208,7 @@ func runDeployGraph(cmd *cobra.Command, _ []string) error {
 	}
 	topo := buildInventoryTopology(catalog, groups)
 	if deployGraphViewFlag == "component" || deployGraphViewFlag == "both" {
-		renderInventoryTopology(out, topo, deployGraphInventoryFlag)
+		renderInventoryTopology(out, topo, graphInventory)
 	}
 	if warning := siemReceiverWarning(topo); warning != "" {
 		fmt.Fprintf(out, "⚠️  %s\n", warning)
@@ -212,7 +217,7 @@ func runDeployGraph(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(out)
 	}
 	if deployGraphViewFlag == "host" || deployGraphViewFlag == "both" {
-		renderHostTopology(out, topo, deployGraphInventoryFlag)
+		renderHostTopology(out, topo, graphInventory)
 	}
 	return nil
 }
@@ -300,10 +305,14 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
 	fmt.Fprintln(out)
 
-	inv, err := runTextProgram("Inventory 檔路徑", deployInventoryFlag, validateFileExists)
+	inventoryDefault := workspacePath(deployDirFlag, deployInventoryFlag)
+	invInput, err := runTextProgram("Inventory 檔路徑", inventoryDefault, func(path string) error {
+		return validateFileExists(workspacePath(deployDirFlag, path))
+	})
 	if err != nil {
 		return abortOrErr(err)
 	}
+	inv := workspacePath(deployDirFlag, invInput)
 
 	// Best-effort: keep inv fresh relative to a sibling hosts.yml (edited
 	// via `pilot edit`) before anything below reads it — see
