@@ -367,7 +367,7 @@
           - >-
             item.subjects.groups | default([]) |
             difference(freeipa_roster.groups | default([]) |
-            selectattr('category', 'equalto', 'access') |
+            selectattr('category', 'in', ['team', 'role', 'access']) |
             map(attribute='name') | list) | length == 0
           - item.subjects.users | default([]) | difference((freeipa_roster.users | default([]) | map(attribute='name') | list) + ['admin']) | length == 0
           - item.targets.hostgroups | default([]) | difference(freeipa_roster.hostgroups | default([]) | map(attribute='name') | list) | length == 0

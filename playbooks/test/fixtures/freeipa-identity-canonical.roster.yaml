@@ -103,6 +103,12 @@ hbac:
       subjects: {users: [], groups: [access-fixture-canonical-ssh]}
       targets: {hostcat: all, hosts: [], hostgroups: []}
       services: [sshd]
+    - name: fixture-canonical-hbac-modern
+      state: present
+      enabled: true
+      subjects: {users: [fixture-canonical-user-a], groups: [team-fixture-canonical, role-fixture-canonical-ops]}
+      targets: {hostcat: all, hosts: [], hostgroups: []}
+      services: [sshd]
     - name: fixture-canonical-breakglass
       state: present
       enabled: true
