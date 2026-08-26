@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -11,10 +12,11 @@ import (
 )
 
 type promptAnswer struct {
-	Prompt  string `json:"prompt"`
-	Select  string `json:"select,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Confirm *bool  `json:"confirm,omitempty"`
+	Prompt  string   `json:"prompt"`
+	Select  string   `json:"select,omitempty"`
+	Selects []string `json:"selects,omitempty"`
+	Text    string   `json:"text,omitempty"`
+	Confirm *bool    `json:"confirm,omitempty"`
 }
 
 // promptAutomation answers the existing one-shot deploy/reconcile prompts by
@@ -22,11 +24,13 @@ type promptAnswer struct {
 type promptAutomation struct {
 	answers      []promptAnswer
 	events       []automationTraceEvent
+	reusable     map[string]promptAnswer
 	err          error
 	presentation bool
 	out          io.Writer
 	useDefaults  bool
 	forceApply   bool
+	reuseAnswers bool
 }
 
 func validatePromptAnswers(answers []promptAnswer) error {
@@ -42,6 +46,9 @@ func validatePromptAnswers(answers []promptAnswer) error {
 		if hasSecretName(answer.Prompt) || hasSecretName(answer.Text) {
 			return fmt.Errorf("secret values are not accepted in prompt answers")
 		}
+		if answer.Select != "" && len(answer.Selects) > 0 {
+			return fmt.Errorf("prompt answer cannot contain both select and selects")
+		}
 	}
 	return nil
 }
@@ -52,6 +59,17 @@ func (p *promptAutomation) answer(kind, prompt string) (promptAnswer, bool) {
 	for i, answer := range p.answers {
 		if answer.Prompt == prompt || strings.Contains(prompt, answer.Prompt) {
 			p.answers = append(p.answers[:i], p.answers[i+1:]...)
+			if p.reuseAnswers {
+				if p.reusable == nil {
+					p.reusable = make(map[string]promptAnswer)
+				}
+				p.reusable[prompt] = answer
+			}
+			return answer, true
+		}
+	}
+	if p.reuseAnswers && p.reusable != nil {
+		if answer, ok := p.reusable[prompt]; ok {
 			return answer, true
 		}
 	}
@@ -95,6 +113,65 @@ func (p *promptAutomation) selectPrompt(prompt string, items []string) (int, err
 		return 0, p.err
 	}
 	return m.s.(tui.SelectScreen).Selected(), nil
+}
+
+func (p *promptAutomation) multiSelectPrompt(prompt string, items []string) ([]int, error) {
+	if p.useDefaults {
+		return []int{0}, nil
+	}
+	answer, ok := p.answer("multi-select", prompt)
+	if !ok {
+		return nil, fmt.Errorf("no automation answer for multi-select prompt")
+	}
+	labels := append([]string(nil), answer.Selects...)
+	if len(labels) == 0 && answer.Select != "" {
+		// Keep existing single-select scenario files valid when they are used
+		// against a reconcile wizard that now has one checklist prompt.
+		labels = []string{answer.Select}
+	}
+	if len(labels) == 0 {
+		return nil, fmt.Errorf("multi-select prompt requires select or selects")
+	}
+	// A batch repeats common prompts (limit, tags, vault choice, and final
+	// confirmations) for each component. Reusing an answer for the same
+	// literal prompt keeps --actions scenarios concise while component-specific
+	// prompts, such as stage decisions, can still be answered independently.
+	p.reuseAnswers = len(labels) > 1
+	indexes := make([]int, 0, len(labels))
+	checked := make(map[int]bool, len(labels))
+	for _, label := range labels {
+		index, err := uniqueItemIndex(items, label)
+		if err != nil {
+			return nil, err
+		}
+		if checked[index] {
+			return nil, fmt.Errorf("multi-select item %q was selected more than once", label)
+		}
+		checked[index] = true
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	choices := make([]tui.MultiSelectChoice, len(items))
+	for i, item := range items {
+		choices[i] = tui.MultiSelectChoice{
+			Choice:  tui.Choice{ID: fmt.Sprintf("%d", i), Label: item},
+			Checked: checked[i],
+		}
+	}
+	m := standaloneScreen{s: deployUIFactory.MultiSelect(tui.MultiSelectSpec{
+		Title:   prompt + "（space 勾選、enter 完成）",
+		Choices: choices,
+	})}
+	if err := initStandaloneScreen(&m); err != nil {
+		return nil, err
+	}
+	p.render(prompt, viewContent(m.View()))
+	if err := applyStandaloneKey(&m, keyEnter()); err != nil {
+		return nil, err
+	}
+	p.tracePrompt("multi-select", prompt, viewContent(m.View()), []string{"enter"}, "ok")
+	p.render(prompt, viewContent(m.View()))
+	return indexes, nil
 }
 
 func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) error) (string, error) {

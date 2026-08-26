@@ -51,6 +51,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -86,6 +87,47 @@ func runSelectProgram(label string, items []string) (int, error) {
 		return 0, errDeployAborted
 	}
 	return fm.Selected(), nil
+}
+
+// runMultiSelectProgram is the checklist counterpart to runSelectProgram.
+// It returns the selected item indexes in their original menu order so the
+// caller can keep its catalog ordering deterministic while still letting the
+// operator select several actions in one wizard.
+func runMultiSelectProgram(label string, items []string) ([]int, error) {
+	if activePromptAutomation != nil {
+		return activePromptAutomation.multiSelectPrompt(label, items)
+	}
+	choices := make([]tui.MultiSelectChoice, len(items))
+	for i, item := range items {
+		choices[i] = tui.MultiSelectChoice{
+			Choice: tui.Choice{ID: strconv.Itoa(i), Label: item},
+		}
+	}
+	m := standaloneScreen{s: deployUIFactory.MultiSelect(tui.MultiSelectSpec{
+		Title:   label + "（space 勾選、enter 完成）",
+		Choices: choices,
+	})}
+	final, err := tea.NewProgram(m, tea.WithOutput(os.Stdout)).Run()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errDeployAborted, err)
+	}
+	fm := final.(standaloneScreen).s.(tui.MultiSelectScreen)
+	if fm.Canceled() {
+		return nil, errDeployAborted
+	}
+	selected := fm.CheckedIDs()
+	indexes := make([]int, 0, len(selected))
+	for _, id := range selected {
+		index, err := strconv.Atoi(id)
+		if err != nil {
+			return nil, fmt.Errorf("invalid multi-select item index %q: %w", id, err)
+		}
+		if index < 0 || index >= len(items) {
+			return nil, fmt.Errorf("multi-select item index %d is out of range", index)
+		}
+		indexes = append(indexes, index)
+	}
+	return indexes, nil
 }
 
 // runTextProgram is promptText's Bubble Tea equivalent.

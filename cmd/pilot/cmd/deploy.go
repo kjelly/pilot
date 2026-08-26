@@ -2324,7 +2324,7 @@ func printSiteTopology(ctx context.Context, out io.Writer, inv string) {
 	fmt.Fprintln(out)
 }
 
-// ---- single-playbook flow ---------------------------------------------------
+// ---- catalog playbook flow --------------------------------------------------
 
 func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, reconcileOnly bool) error {
 	if action != "apply" && action != "upgrade" && action != "decommission" {
@@ -2360,16 +2360,38 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		}
 		return fmt.Errorf("no contract components are available; use --show-experimental only after reviewing their evidence requirements")
 	}
-	prompt := "挑一個要佈署的元件 (contract 驅動)"
+	var selectedIndexes []int
 	if reconcileOnly {
-		prompt = "挑一個要調和的 day-2 設定元件 (contract 驅動)"
+		selectedIndexes, err = runMultiSelectProgram("挑選要調和的 day-2 設定元件", labels)
+		if err != nil {
+			return err
+		}
+		if len(selectedIndexes) == 0 {
+			return fmt.Errorf("至少要選擇一個 day-2 reconcile 元件")
+		}
+		fmt.Fprintf(out, "已選擇 %d 個 day-2 reconcile 元件，將依序執行。\n", len(selectedIndexes))
+	} else {
+		idx, selectErr := runSelectProgram("挑一個要佈署的元件 (contract 驅動)", labels)
+		if selectErr != nil {
+			return selectErr
+		}
+		selectedIndexes = []int{idx}
 	}
-	idx, err := runSelectProgram(prompt, labels)
-	if err != nil {
-		return err
+	for i, idx := range selectedIndexes {
+		if idx < 0 || idx >= len(entries) {
+			return fmt.Errorf("selected reconcile component index %d is out of range", idx)
+		}
+		if len(selectedIndexes) > 1 {
+			fmt.Fprintf(out, "\n── 執行第 %d/%d 個元件 ──\n", i+1, len(selectedIndexes))
+		}
+		if err := runCatalogPlaybookDeployEntry(ctx, runner, out, inv, action, catalog, entries[idx]); err != nil {
+			return err
+		}
 	}
-	entry := entries[idx]
+	return nil
+}
 
+func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, catalog contract.Catalog, entry deployPlaybook) error {
 	if entry.Note != "" {
 		fmt.Fprintf(out, "ℹ️  %s\n", entry.Note)
 	}

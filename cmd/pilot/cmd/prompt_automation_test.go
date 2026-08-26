@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,54 @@ func TestPromptAutomationSelectTextAndConfirm(t *testing.T) {
 	}
 	if len(p.events) != 3 {
 		t.Fatalf("events = %d, want 3", len(p.events))
+	}
+}
+
+func TestPromptAutomationMultiSelectSupportsSeveralItems(t *testing.T) {
+	p := &promptAutomation{answers: []promptAnswer{{
+		Prompt:  "components",
+		Selects: []string{"gamma", "alpha"},
+	}}}
+
+	indexes, err := p.multiSelectPrompt("components", []string{"alpha", "beta", "gamma"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := indexes, []int{0, 2}; !slices.Equal(got, want) {
+		t.Fatalf("multiSelectPrompt() = %v, want %v", got, want)
+	}
+	if len(p.events) != 1 || p.events[0].Action != "prompt.multi-select" {
+		t.Fatalf("events = %+v, want one multi-select trace event", p.events)
+	}
+}
+
+func TestPromptAutomationMultiSelectKeepsLegacySingleSelectionAnswer(t *testing.T) {
+	p := &promptAutomation{answers: []promptAnswer{{Prompt: "components", Select: "beta"}}}
+	indexes, err := p.multiSelectPrompt("components", []string{"alpha", "beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := indexes, []int{1}; !slices.Equal(got, want) {
+		t.Fatalf("multiSelectPrompt() = %v, want %v", got, want)
+	}
+}
+
+func TestPromptAutomationMultiSelectReusesCommonBatchAnswers(t *testing.T) {
+	p := &promptAutomation{answers: []promptAnswer{
+		{Prompt: "components", Selects: []string{"alpha", "beta"}},
+		{Prompt: "limit", Text: "host-a"},
+	}}
+	if _, err := p.multiSelectPrompt("components", []string{"alpha", "beta"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		got, err := p.textPrompt("limit", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "host-a" {
+			t.Fatalf("textPrompt() = %q, want host-a", got)
+		}
 	}
 }
 
