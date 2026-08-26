@@ -68,6 +68,41 @@ func TestPrepareDeployAnsibleRuntimeKeepsControllerArtifactsInDataDir(t *testing
 	}
 }
 
+func TestPromptCatalogBatchInputsCollectsSharedQuestionsOnce(t *testing.T) {
+	no := false
+	p := &promptAutomation{answers: []promptAnswer{
+		{Prompt: "要限定只套用到某台主機嗎？", Text: "host-a"},
+		{Prompt: "要只跑某幾個檢查項目嗎？"},
+		{Prompt: "這次佈署需要密碼變數嗎？", Select: "不需要"},
+		{Prompt: "這次套用要手動輸入 sudo(become)密碼嗎？", Confirm: &no},
+		{Prompt: "還有其他 -e 變數要帶嗎？", Text: "foo=bar"},
+	}}
+	oldPrompt := activePromptAutomation
+	activePromptAutomation = p
+	defer func() { activePromptAutomation = oldPrompt }()
+
+	inputs, err := promptCatalogBatchInputs(&bytes.Buffer{}, filepath.Join(t.TempDir(), "inventory.yml"), []deployPlaybook{
+		{VaultHint: "first hint"},
+		{VaultHint: "first hint"},
+		{VaultHint: "second hint"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputs.limit != "host-a" || inputs.tags != "" {
+		t.Fatalf("batch inputs = %+v, want shared limit/tags", inputs)
+	}
+	if got, want := inputs.extraVars, []string{"foo=bar"}; !slices.Equal(got, want) {
+		t.Fatalf("extra vars = %v, want %v", got, want)
+	}
+	if inputs.vault.AskBecomePass {
+		t.Fatal("AskBecomePass = true, want false")
+	}
+	if len(p.answers) != 0 {
+		t.Fatalf("shared prompt answers left unused: %+v", p.answers)
+	}
+}
+
 func TestDeployAnsibleCommandUsesRuntimeEnvironment(t *testing.T) {
 	runtime, err := prepareDeployAnsibleRuntime(t.TempDir())
 	if err != nil {

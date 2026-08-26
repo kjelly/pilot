@@ -2377,6 +2377,21 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		}
 		selectedIndexes = []int{idx}
 	}
+	var batchInputs *catalogBatchInputs
+	if reconcileOnly && len(selectedIndexes) > 1 {
+		selectedEntries := make([]deployPlaybook, 0, len(selectedIndexes))
+		for _, idx := range selectedIndexes {
+			if idx < 0 || idx >= len(entries) {
+				return fmt.Errorf("selected reconcile component index %d is out of range", idx)
+			}
+			selectedEntries = append(selectedEntries, entries[idx])
+		}
+		inputs, inputErr := promptCatalogBatchInputs(out, inv, selectedEntries)
+		if inputErr != nil {
+			return inputErr
+		}
+		batchInputs = &inputs
+	}
 	for i, idx := range selectedIndexes {
 		if idx < 0 || idx >= len(entries) {
 			return fmt.Errorf("selected reconcile component index %d is out of range", idx)
@@ -2384,14 +2399,64 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		if len(selectedIndexes) > 1 {
 			fmt.Fprintf(out, "\n── 執行第 %d/%d 個元件 ──\n", i+1, len(selectedIndexes))
 		}
-		if err := runCatalogPlaybookDeployEntry(ctx, runner, out, inv, action, catalog, entries[idx]); err != nil {
+		if err := runCatalogPlaybookDeployEntry(ctx, runner, out, inv, action, catalog, entries[idx], batchInputs); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, catalog contract.Catalog, entry deployPlaybook) error {
+// catalogBatchInputs contains prompts whose answer applies to every selected
+// reconcile component. Component-specific target/stage/host questions remain
+// in runCatalogPlaybookDeployEntry because their values can legitimately
+// differ between entries.
+type catalogBatchInputs struct {
+	limit     string
+	tags      string
+	vault     vaultInput
+	extraVars []string
+}
+
+func promptCatalogBatchInputs(out io.Writer, inv string, entries []deployPlaybook) (catalogBatchInputs, error) {
+	limit, err := runTextProgram("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+	if err != nil {
+		return catalogBatchInputs{}, err
+	}
+	tags, err := runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", validateOptionalKV)
+	if err != nil {
+		return catalogBatchInputs{}, err
+	}
+	vault, err := promptVault(out, inv, catalogBatchVaultHint(entries))
+	if err != nil {
+		return catalogBatchInputs{}, err
+	}
+	vault.AskBecomePass = promptBecome()
+	extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
+	if err != nil {
+		return catalogBatchInputs{}, err
+	}
+	return catalogBatchInputs{
+		limit:     limit,
+		tags:      tags,
+		vault:     vault,
+		extraVars: strings.Fields(extra),
+	}, nil
+}
+
+func catalogBatchVaultHint(entries []deployPlaybook) string {
+	seen := make(map[string]bool)
+	hints := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.VaultHint == "" || seen[entry.VaultHint] {
+			continue
+		}
+		seen[entry.VaultHint] = true
+		hints = append(hints, entry.VaultHint)
+	}
+	return strings.Join(hints, "；")
+}
+
+func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, catalog contract.Catalog, entry deployPlaybook, batchInputs *catalogBatchInputs) error {
 	if entry.Note != "" {
 		fmt.Fprintf(out, "ℹ️  %s\n", entry.Note)
 	}
@@ -2523,26 +2588,40 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		}
 	}
 
-	limit, err := runTextProgram("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
-	if err != nil {
-		return err
-	}
-	tags, err := runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", validateOptionalKV)
-	if err != nil {
-		return err
+	var limit, tags string
+	var vault vaultInput
+	if batchInputs != nil {
+		limit = batchInputs.limit
+		tags = batchInputs.tags
+		vault = batchInputs.vault
+	} else {
+		limit, err = runTextProgram("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+		if err != nil {
+			return err
+		}
+		tags, err = runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", validateOptionalKV)
+		if err != nil {
+			return err
+		}
+
+		vault, err = promptVault(out, inv, entry.VaultHint)
+		if err != nil {
+			return err
+		}
+		vault.AskBecomePass = promptBecome()
 	}
 
-	vault, err := promptVault(out, inv, entry.VaultHint)
-	if err != nil {
-		return err
+	if batchInputs != nil {
+		// Append batch-level extra vars after component-specific stage and
+		// auto-host vars, matching the ordering of the single-component flow.
+		extraVars = append(extraVars, batchInputs.extraVars...)
+	} else {
+		extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
+		if err != nil {
+			return err
+		}
+		extraVars = append(extraVars, strings.Fields(extra)...)
 	}
-	vault.AskBecomePass = promptBecome()
-
-	extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
-	if err != nil {
-		return err
-	}
-	extraVars = append(extraVars, strings.Fields(extra)...)
 
 	deployErr := executeRecordedDeployment(ctx, runner, out, actionPlaybook, inv, limit, tags, extraVars, vault, decision.Stage, componentHints)
 	if deployErr == nil {

@@ -132,10 +132,10 @@ func (p *promptAutomation) multiSelectPrompt(prompt string, items []string) ([]i
 	if len(labels) == 0 {
 		return nil, fmt.Errorf("multi-select prompt requires select or selects")
 	}
-	// A batch repeats common prompts (limit, tags, vault choice, and final
-	// confirmations) for each component. Reusing an answer for the same
-	// literal prompt keeps --actions scenarios concise while component-specific
-	// prompts, such as stage decisions, can still be answered independently.
+	// Keep compatibility with component-specific prompts that may still recur
+	// during a multi-component workflow. Batch-wide inputs are collected once
+	// by the reconcile flow itself; this fallback is only for prompts whose
+	// literal text is repeated by a component-specific path.
 	p.reuseAnswers = len(labels) > 1
 	indexes := make([]int, 0, len(labels))
 	checked := make(map[int]bool, len(labels))
