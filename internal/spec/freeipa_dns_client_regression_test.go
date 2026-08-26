@@ -259,6 +259,10 @@ func TestRegression_FreeipaDNSClientApplyPlaybook_DebianDisablesDHCPPerLinkDNS(t
 	for _, required := range []string{
 		"ansible_distribution == 'Ubuntu'",
 		"/etc/netplan/99-pilot-freeipa-dns-client.yaml",
+		"ip",
+		"-d",
+		"freeipa_dns_client_netplan_interface_section",
+		"'vlans'",
 		"dhcp4-overrides",
 		"use-dns: false",
 		"netplan apply",

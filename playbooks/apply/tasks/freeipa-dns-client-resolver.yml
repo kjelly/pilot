@@ -222,6 +222,42 @@
     # above): there is no prior version to restore to, and reverting it
     # after a later step fails would just silently re-enable the exact
     # DHCP-DNS masking this task exists to prevent.
+    - name: "Debian(Ubuntu) — inspect the active interface kind for netplan"
+      ansible.builtin.command:
+        argv:
+          - ip
+          - -o
+          - -d
+          - link
+          - show
+          - dev
+          - "{{ ansible_default_ipv4.interface }}"
+      register: freeipa_dns_client_netplan_interface_details
+      check_mode: false
+      changed_when: false
+      when:
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+        - ansible_default_ipv4.interface is defined
+
+    - name: "Debian(Ubuntu) — select the netplan interface section"
+      ansible.builtin.set_fact:
+        freeipa_dns_client_netplan_interface_section: >-
+          {{
+            'vlans'
+            if (freeipa_dns_client_netplan_interface_details.stdout is search('(^| )vlan protocol '))
+            else 'bonds'
+            if (freeipa_dns_client_netplan_interface_details.stdout is search('(^| )bond '))
+            else 'bridges'
+            if (freeipa_dns_client_netplan_interface_details.stdout is search('(^| )bridge '))
+            else 'ethernets'
+          }}
+      when:
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+        - ansible_default_ipv4.interface is defined
+        - freeipa_dns_client_netplan_interface_details.rc == 0
+
     - name: "Debian(Ubuntu) — write netplan drop-in disabling DHCP-supplied per-link DNS"
       ansible.builtin.copy:
         dest: /etc/netplan/99-pilot-freeipa-dns-client.yaml
@@ -232,7 +268,7 @@
           # {{ freeipa_dns_client_resolv_conf_marker }}: managed by tasks/freeipa-dns-client-resolver.yml — DO NOT EDIT BY HAND
           network:
             version: 2
-            ethernets:
+            {{ freeipa_dns_client_netplan_interface_section }}:
               {{ ansible_default_ipv4.interface }}:
                 dhcp4-overrides:
                   use-dns: false
