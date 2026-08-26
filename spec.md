@@ -1,2925 +1,2007 @@
-# Pilot External Prometheus Exporter Target 實作規格
+Pilot HBAC Authorization Simplification Specification
 
-## 1. 文件目的
+Status: Implementation specification
+Target repository: kjelly/pilot
+Baseline: main at 521366e899561f7e38edc012fc88339742382468
+Date: 2026-08-21
+Audience: Coding agent / maintainer implementing the change
 
-本規格定義 Pilot 如何支援：
+1. Executive decision
 
-> **Prometheus scrape 非 Pilot / Ansible 管理之 exporter endpoint。**
+Pilot SHALL simplify its FreeIPA HBAC authoring model so that an HBAC rule can directly reference:
 
-目前 Pilot 的 `host-monitoring` 機制會從 inventory 中的 `host-monitoring` group 自動產生 `node_exporter` targets，而 Prometheus 亦支援透過 `prometheus_scrape_configs` 直接覆寫任意 scrape configuration。
+roster users;
 
-現行架構存在以下限制：
+team-* groups;
 
-1. 外部 exporter 必須透過自由格式 `prometheus_scrape_configs` 管理。
-2. Pilot 無法理解這些 exporter 的結構與生命週期。
-3. Pilot CLI/TUI 無法列出、驗證、修改這些 exporter。
-4. Agent 若要新增 exporter，只能修改任意 Prometheus YAML。
-5. `prometheus_scrape_configs` 是整段覆寫，容易誤刪 Prometheus self-scrape 或其他 jobs。
-6. 無法清楚區分：
+role-* groups;
 
-   * Pilot managed host
-   * Prometheus monitored endpoint
-7. 不適合 NAS、UPS、switch、VMware、資料庫 appliance、第三方服務等「可監控但不可由 Pilot 管理」的設備。
+legacy access-* groups for backward compatibility only;
 
-本次改版必須建立正式的 **Monitoring Target Model**，並使用 Prometheus `file_sd_configs` 將 target registry 與 Prometheus 主設定解耦。
+direct enrolled host FQDNs;
 
----
+hostgroups;
 
-# 2. 核心設計原則
+PAM services.
 
-Pilot 必須明確區分兩種概念：
+category: access SHALL no longer be required to author HBAC access.
 
-```text
-Managed Host
-    =
-Pilot 可以透過 Ansible / structured action 管理其 OS 或服務
+Sanctioned Pilot authoring surfaces SHALL stop creating new access-* groups:
 
-Monitoring Target
-    =
-Prometheus 可以 scrape 的 endpoint
-```
+pilot edit;
 
-兩者：
+structured --actions;
 
-* 可以同時存在；
-* 可以互相對應；
-* 但不得互相依賴。
+MCP edit tools;
 
-例如：
+examples;
 
-```text
-Linux Server
-├── Managed Host: yes
-└── Monitoring Target: yes
+agent authoring guidance.
 
-NAS
-├── Managed Host: no
-└── Monitoring Target: yes
+Existing rosters containing category: access SHALL continue to validate and reconcile. This delivery SHALL not bump the roster schema version and SHALL not automatically delete, rename, or convert existing FreeIPA access-* groups.
 
-UPS
-├── Managed Host: no
-└── Monitoring Target: yes
+The target authorization model is:
 
-Prometheus Server
-├── Managed Host: yes
-└── Monitoring Target: self
-```
+Subjects                                  Targets
 
-Ansible lifecycle 與 monitoring lifecycle 必須分離。
+User --------------------┐          ┌---- Host
+                         │          │
+Team --------------------┼-> HBAC <-┼---- Hostgroup
+                         │          │
+Role --------------------┘          │
+                                    └---- hostcat: all
 
----
+Role ---------------------------> sudo
+Filesystem group ---------------> POSIX/NFS only
 
-# 3. 非目標
+The resulting semantics are:
 
-本階段不實作以下功能：
+team-*: organizational identity set; may be referenced directly by HBAC.
 
-1. 不自動安裝 external exporter。
-2. 不透過 SSH 管理 external target。
-3. 不替 external target 建立 Ansible inventory host。
-4. 不實作 Kubernetes service discovery。
-5. 不實作 Consul service discovery。
-6. 不實作 FreeIPA DNS SRV discovery。
-7. 不實作 Prometheus HTTP SD。
-8. 不建立 exporter marketplace。
-9. 不自動推論 exporter 類型。
-10. 不允許 Monitoring Target 觸發 arbitrary Ansible playbook。
-11. 不移除既有 `host-monitoring` role。
-12. 不移除既有 `node_exporter_targets`。
-13. 不完全移除 `prometheus_scrape_configs`。
+role-*: reusable authorization/principal set; may be referenced by HBAC and sudo.
 
-`prometheus_scrape_configs` 必須保留作為 advanced escape hatch。
+data-*: filesystem/POSIX/NFS authorization only; MUST NOT be accepted as an HBAC subject group.
 
----
+access-*: deprecated compatibility group; existing declarations remain valid but sanctioned tooling MUST NOT create new ones.
 
-# 4. 現行架構相容性
+direct HBAC users/hosts: first-class supported subjects/targets, useful for one-off or exception access.
 
-目前 Prometheus contract 已定義：
+2. Why this change exists
 
-```yaml
-dependencies:
-  - component: host-monitoring
-    required: false
-    relation: providerEndpoint
-```
+The current authoring model commonly creates two names for effectively the same login intent:
 
-並透過：
+access-webhosts-ssh
+        |
+        v
+webhosts-ssh-access (HBAC rule)
 
-```yaml
-bindings:
-  - input: node_exporter_targets
-    requiredWhenDependencySelected: false
-    sourceSelection: all
-    from:
-      component: host-monitoring
-      endpoint: metrics
-```
+Typical current roster shape:
 
-自動取得由 Pilot 管理之 node exporter。此行為必須保留。
+groups:
+  - name: team-developers
+    category: team
+    membership:
+      users: [alice, bob]
+      groups: []
 
-目前 playbook 亦會將：
+  - name: access-webhosts-ssh
+    category: access
+    membership:
+      users: []
+      groups: [team-developers]
 
-```yaml
-prometheus_scrape_configs
-```
+hbac:
+  rules:
+    - name: webhosts-ssh-access
+      subjects:
+        users: []
+        groups: [access-webhosts-ssh]
+      targets:
+        hosts: []
+        hostgroups: [webhosts]
+      services: [sshd]
 
-與：
+The access-* group carries only the subject membership set. The actual authorization decision is the HBAC rule because only the HBAC rule defines all of:
 
-```yaml
-prometheus_node_exporter_scrape_block
-```
+who;
 
-一起放入：
+where;
 
-```yaml
-scrape_configs:
-```
+which PAM service;
 
-新的 external monitoring target 機制不得破壞此行為。
+enabled/disabled state.
 
----
+Pilot's backend already models HBAC generically:
 
-# 5. 最終架構
-
-目標架構：
-
-```text
-                         Pilot Workspace
-                              │
-              ┌───────────────┴────────────────┐
-              │                                │
-          hosts.yml                       monitoring/
-              │                                │
-        Managed Hosts                  External Targets
-              │                                │
-        host-monitoring                       │
-              │                                │
-     node_exporter targets                     │
-              │                                │
-              └──────────────┬─────────────────┘
-                             │
-                     Target Compiler
-                             │
-                       file_sd JSON
-                             │
-                             ▼
-                        Prometheus
-                             │
-                             ▼
-                           Thanos
-```
-
----
-
-# 6. Workspace 結構
-
-新增：
-
-```text
-<workspace>/
-├── hosts.yml
-├── group_vars/
-├── host_vars/
-├── monitoring/
-│   ├── targets.yml
-│   └── scrape-profiles.yml
-└── ...
-```
-
-未啟用 external monitoring target 時：
-
-```text
-monitoring/
-```
-
-可以不存在。
-
-不能因為檔案不存在而造成既有 workspace 無法使用。
-
----
-
-# 7. Monitoring Target Schema
-
-## 7.1 檔案
-
-```text
-monitoring/targets.yml
-```
-
-Schema version：
-
-```yaml
-schemaVersion: 1
-```
-
-基本格式：
-
-```yaml
-schemaVersion: 1
+subjects:
+  users: [...]
+  groups: [...]
 
 targets:
-  - name: nas01
-    address: nas01.pilot.internal:9633
-    profile: storage-exporter
-    site: taipei
+  hosts: [...]
+  hostgroups: [...]
+
+The effective-access resolver also expands arbitrary referenced group membership and merges direct users/hosts. The main restriction is currently imposed by validator/UI policy, not by FreeIPA or Pilot's underlying reconciler.
+
+The desired normal case therefore becomes:
+
+groups:
+  - name: team-developers
+    category: team
+    membership:
+      users: [alice, bob]
+      groups: []
+
+hbac:
+  rules:
+    - name: webhosts-ssh-access
+      subjects:
+        users: []
+        groups: [team-developers]
+      targets:
+        hosts: []
+        hostgroups: [webhosts]
+      services: [sshd]
+
+A reusable operational role can serve both HBAC and sudo:
+
+groups:
+  - name: role-production-operator
+    category: role
+    membership:
+      users: [contractor01]
+      groups: [team-sre]
+
+hbac:
+  rules:
+    - name: production-ssh
+      subjects:
+        users: []
+        groups: [role-production-operator]
+      targets:
+        hosts: []
+        hostgroups: [production]
+      services: [sshd]
+
+sudo:
+  rules:
+    - name: production-administration
+      subjects:
+        users: []
+        groups: [role-production-operator]
+      targets:
+        hosts: []
+        hostgroups: [production]
+      allow:
+        command_groups: [production-admin]
+        commands: []
+
+A one-off exception can be expressed without creating a wrapper group:
+
+hbac:
+  rules:
+    - name: vendor-db-maintenance
+      subjects:
+        users: [vendor01]
+        groups: []
+      targets:
+        hosts: [db-special.ipa.pilot.internal]
+        hostgroups: []
+      services: [sshd]
+
+3. Current code facts that the implementation MUST preserve
+
+The implementation SHALL work with the code structure present at the baseline commit.
+
+3.1 Roster schema version
+
+Current code defines:
+
+RosterSchemaV1 = 1
+RosterSchemaV2 = 2
+CurrentRosterSchemaVersion = RosterSchemaV2
+
+This change MUST NOT introduce RosterSchemaV3.
+
+Do not modify migration behavior solely for this feature.
+
+In particular, do not change:
+
+CurrentRosterSchemaVersion;
+
+the v1 -> v2 automatic migration contract;
+
+encrypted roster migration behavior;
+
+semantic fingerprint guarantees.
+
+3.2 Existing backend capability
+
+The existing model already supports:
+
+hbac.rules[].subjects.users
+hbac.rules[].subjects.groups
+hbac.rules[].targets.hosts
+hbac.rules[].targets.hostgroups
+
+The Ansible reconciler already has direct user/group and host/hostgroup add/remove operations.
+
+The effective HBAC resolver already:
+
+adds direct subjects.users;
+
+recursively expands subjects.groups;
+
+adds direct targets.hosts;
+
+recursively expands targets.hostgroups.
+
+Do not replace that resolver with a second authorization engine.
+
+3.3 Current UI restriction
+
+At baseline:
+
+HBAC creation selects only access groups;
+
+HBAC creation selects only hostgroups;
+
+created rules explicitly set subjects.users: [];
+
+created rules explicitly set targets.hosts: [];
+
+editing targets.hostgroups currently clears targets.hosts.
+
+The last behavior is a data-loss bug once direct hosts are exposed and MUST be fixed.
+
+3.4 Current structured action restriction
+
+At baseline:
+
+create_hbac_rule
+  optional: groups, hostgroups, services
+
+set_hbac_groups
+set_hbac_targets
+set_hbac_services
+
+editAction.Users already exists.
+
+A plural direct-host field does not exist yet; the singular Host field is already used for inventory-host actions and MUST NOT be repurposed.
+
+4. Goals
+
+This delivery MUST accomplish all of the following.
+
+A new HBAC rule can be authored with any valid non-empty combination of:
+
+direct users;
+
+allowed subject groups;
+
+direct hosts;
+
+hostgroups;
+
+services.
+
+HBAC subject groups accept:
+
+team;
+
+role;
+
+legacy access.
+
+HBAC subject groups reject:
+
+filesystem;
+
+unknown group names.
+
+New access groups cannot be created through sanctioned Pilot authoring surfaces.
+
+Existing access groups:
+
+remain valid;
+
+remain editable as existing group objects;
+
+remain reconciled by Ansible;
+
+remain valid HBAC subject references;
+
+generate a deprecation notice/warning in lint output.
+
+Direct HBAC users are editable from the TUI and structured automation.
+
+Direct HBAC hosts are editable from the TUI and structured automation.
+
+Editing one HBAC relationship field MUST preserve all sibling relationship fields.
+
+Existing v1/v2 rosters continue working without migration.
+
+pilot_edit_inspect / MCP roster resources continue exposing the full non-secret HBAC graph and effective access.
+
+5. Non-goals
+
+This delivery MUST NOT do any of the following.
+
+5.1 No hard deletion of access groups
+
+Do not automatically:
+
+rename access-* to role-*;
+
+delete access-* from the roster;
+
+emit state: absent;
+
+delete live FreeIPA groups;
+
+flatten access-group membership into static direct-user lists;
+
+rewrite an existing access group into another category.
+
+Reason: an access group is a real FreeIPA group and may be referenced outside HBAC, including nested group membership, netgroups, or systems not represented in the roster. Automatic transformation cannot prove that deletion or rename is safe.
+
+5.2 No schema v3
+
+Do not introduce a schema version only to express deprecation.
+
+The current schema can safely become less restrictive for HBAC group categories while remaining backward compatible.
+
+5.3 No host enrollment from HBAC editor
+
+targets.hosts means an already enrolled FreeIPA host FQDN.
+
+The HBAC editor MUST NOT:
+
+create a FreeIPA host;
+
+run enrollment;
+
+change DNS;
+
+manage host principals.
+
+5.4 No user creation from HBAC editor
+
+The HBAC editor selects existing roster users, plus the built-in FreeIPA admin principal where currently supported.
+
+Identity lifecycle remains in the user editor.
+
+5.5 No filesystem group reuse for login
+
+data-* groups SHALL remain a distinct privilege domain.
+
+Do not make HBAC accept filesystem groups for convenience.
+
+6. Group-category policy
+
+6.1 Active authoring categories
+
+Sanctioned creation surfaces SHALL expose exactly:
+
+team
+filesystem
+role
+
+Corresponding prefixes remain:
+
+team       -> team-
+filesystem -> data-
+role       -> role-
+
+6.2 Legacy compatibility category
+
+access remains valid only for backward compatibility:
+
+access -> access-
+
+Global roster validation SHALL continue accepting existing category: access.
+
+This is intentional.
+
+The validator cannot reliably distinguish "legacy object already present" from "new hand-authored object". Preventing new creation belongs to Pilot authoring surfaces, while lint reports the deprecation.
+
+6.3 HBAC subject-group policy
+
+Implement one canonical policy function/source of truth equivalent to:
+
+HBAC-allowed:
+  team
+  role
+  access (legacy)
+
+HBAC-forbidden:
+  filesystem
+
+Do not duplicate this policy independently in:
+
+Go validator;
+
+TUI;
+
+structured actions;
+
+Ansible gate;
+
+without a test proving synchronization.
+
+Where practical, centralize Go-side category policy in internal/inventory.
+
+Suggested API shape; exact names may vary:
+
+func GroupCategoryPrefix(category string) (string, bool)
+func IsCreatableGroupCategory(category string) bool
+func IsHBACSubjectGroupCategory(category string) bool
+func IsSudoSubjectGroupCategory(category string) bool
+func IsDeprecatedGroupCategory(category string) bool
+
+Required semantics:
+
+IsCreatableGroupCategory:
+  team=true
+  filesystem=true
+  role=true
+  access=false
+
+IsHBACSubjectGroupCategory:
+  team=true
+  role=true
+  access=true
+  filesystem=false
+
+IsSudoSubjectGroupCategory:
+  role=true
+  all others=false
+
+IsDeprecatedGroupCategory:
+  access=true
+
+The existing access group must still pass structural validation.
+
+7. Go roster validation changes
+
+Primary file:
+
+internal/inventory/roster_validate.go
+
+7.1 Group validation
+
+Keep access in the structural category/prefix allowlist so legacy rosters validate.
+
+Do not remove:
+
+access -> access-
+
+from compatibility validation.
+
+7.2 HBAC group validation
+
+Replace the current effective rule:
+
+subjects.groups must be category: access
+
+with:
+
+subjects.groups must be category: team, role, or legacy access
+
+Expected test cases:
+
+team-*         PASS
+role-*         PASS
+access-*       PASS + deprecation warning at lint layer
+data-*         FAIL
+unknown group  FAIL
+
+7.3 HBAC users
+
+Preserve the current rule:
+
+subjects.users must reference a declared roster user or "admin"
+
+No weakening of user reference validation.
+
+7.4 HBAC targets
+
+Preserve:
+
+hostcat: all
+
+as mutually exclusive with explicit:
+
+hosts
+hostgroups
+
+A rule without hostcat: all MUST have at least one direct host or hostgroup.
+
+7.5 Direct-host authoring validation
+
+Because direct host targets will become user-facing, sanctioned authoring SHOULD reject obviously invalid direct host strings before writing.
+
+Use the same FQDN-shaped expectation already used elsewhere for FreeIPA hosts.
+
+Do not make a new direct-host roster reference rule requiring the target to be present in top-level hosts:. Pilot already allows enrolled host FQDNs that are not roster-declared in hostgroup membership, and HBAC direct-host semantics should remain consistent with that model.
+
+Recommended behavior:
+
+TUI/action input:
+  require non-empty FQDN-shaped values
+  trim whitespace
+  deduplicate
+  sort deterministically
+
+global legacy roster validation:
+  do not introduce a breaking "must exist in roster.hosts" constraint
+
+8. Lint deprecation reporting
+
+Primary file:
+
+cmd/pilot/cmd/roster_lint.go
+
+Add a non-fatal deprecation report for every category: access group.
+
+Example output after the existing successful result:
+
+ok: schema v2; no issues found
+warning: group "access-webhosts-ssh" uses deprecated category "access"; new HBAC policies should reference team-/role- groups or direct users instead
+
+Requirements:
+
+exit status remains success when there are only deprecation warnings;
+
+warnings MUST NOT be returned as RosterViolation;
+
+invalid rosters still fail exactly as before;
+
+--upgrade remains about schema migration only;
+
+do not imply that pilot roster migrate removes access groups;
+
+warning order is deterministic.
+
+Prefer an inventory helper returning structured warnings, e.g.:
+
+type RosterWarning struct {
+    Rule   string
+    Detail string
+}
+
+or a narrower deprecation helper if adding a generic warning framework would be excessive.
+
+At minimum test:
+
+no warning without access groups;
+
+one warning per access group;
+
+multiple warning order deterministic;
+
+warnings do not change exit status.
+
+9. Ansible canonical gate changes
+
+Primary file:
+
+playbooks/apply/freeipa-identity-apply.yml
+
+The Go validator and Ansible gate MUST continue to agree.
+
+Change canonical HBAC group validation from:
+
+selectattr('category', 'equalto', 'access')
+
+to semantics equivalent to:
+
+category in [team, role, access]
+
+Do not allow filesystem.
+
+Do not remove group reconciliation for access.
+
+Do not change direct user/host normalization: it already maps:
+
+subjects.users  -> ipa_hbac_rules[].users
+subjects.groups -> ipa_hbac_rules[].groups
+targets.hosts   -> ipa_hbac_rules[].hosts
+targets.hostgroups -> ipa_hbac_rules[].hostgroups
+
+Preserve authoritative removal:
+
+hbacrule-remove-user --users
+hbacrule-remove-user --groups
+hbacrule-remove-host --hosts
+hbacrule-remove-host --hostgroups
+
+Update comments that claim HBAC is necessarily:
+
+access group -> hostgroup
+
+to the generic model:
+
+users/groups -> hosts/hostgroups
+
+10. TUI group creation changes
+
+Primary file:
+
+cmd/pilot/cmd/edit_tui_roster.go
+
+At baseline rosterGroupCategories contains:
+
+team
+filesystem
+access
+role
+
+Change sanctioned add-group UI to:
+
+team
+filesystem
+role
+
+Update labels:
+
+team-*(團隊/team)
+data-*(檔案系統存取/filesystem)
+role-*(授權角色/role，可供 HBAC / sudo 使用)
+
+Do not display an "access" creation option.
+
+Existing access-* groups MUST remain visible in the Groups list and editable in their existing detail screen.
+
+Do not silently reclassify them.
+
+If a user opens an existing access group, its category remains read-only and the screen SHOULD show a short deprecation note, for example:
+
+category：access（legacy；新 HBAC 不再需要 access group）
+
+This note is presentation only.
+
+11. HBAC TUI redesign
+
+Primary file:
+
+cmd/pilot/cmd/edit_tui_roster_access.go
+
+11.1 Terminology
+
+Change titles/comments that imply:
+
+group -> hostgroup
+
+to:
+
+users/groups -> hosts/hostgroups
+
+Suggested list title:
+
+HBAC rules — 誰可以透過哪些服務登入哪些主機
+
+11.2 Replace accessGroupChoices
+
+Replace the access-only helper with a helper that returns HBAC-valid group choices:
+
+team
+role
+legacy access
+
+Do not include filesystem groups.
+
+The UI SHOULD distinguish legacy access groups visually, without changing their underlying stable ID.
+
+Example label:
+
+access-webhosts-ssh [legacy access]
+
+Stable Choice ID MUST remain the actual group name.
+
+11.3 HBAC creation flow
+
+The creation wizard SHALL collect:
+
+rule name;
+
+subject groups;
+
+direct subject users;
+
+target hostgroups;
+
+direct target hosts;
+
+services.
+
+A valid rule needs:
+
+len(users) + len(groups) > 0
+
+and either:
+
+hostcat: all
+
+or:
+
+len(hosts) + len(hostgroups) > 0
+
+The normal interactive creation flow does not need to expose hostcat: all in this delivery if it currently does not; existing break-glass/manual support remains unchanged.
+
+Suggested screens and stable IDs:
+
+roster.hbac.add_name
+roster.hbac.add_groups
+roster.hbac.add_users
+roster.hbac.add_hostgroups
+roster.hbac.add_hosts
+roster.hbac.add_services
+
+Subject groups
+
+Multi-select HBAC-valid groups:
+
+team-*
+role-*
+legacy access-*
+
+Empty selection is allowed because users may satisfy the subject requirement later.
+
+Subject users
+
+Multi-select:
+
+admin
+<all roster users>
+
+Requirements:
+
+no duplicate admin;
+
+deterministic ordering;
+
+use user name as stable choice ID;
+
+empty selection allowed if groups are non-empty.
+
+Hostgroups
+
+Use existing roster-declared hostgroups.
+
+Empty selection allowed because direct hosts may satisfy target requirement.
+
+Direct hosts
+
+Use a free-form comma-separated enrolled-FQDN input, consistent with the hostgroup member-host editor.
+
+Example title:
+
+Direct hosts / exceptions（可留空；逗號分隔已 enroll FQDN）
+
+Normalize:
+
+split on comma;
+
+trim;
+
+remove empty values;
+
+validate FQDN shape;
+
+deduplicate;
+
+sort.
+
+Services
+
+Keep the existing configured/default PAM-service choice logic.
+
+Default sshd remains appropriate.
+
+11.4 HBAC detail screen
+
+The detail screen SHALL expose all four relationship dimensions independently:
+
+subjects.groups
+subjects.users
+targets.hostgroups
+targets.hosts
+services
+
+Suggested stable IDs:
+
+roster.hbac.detail.subjects_groups
+roster.hbac.detail.subjects_users
+roster.hbac.detail.targets_hostgroups
+roster.hbac.detail.targets_hosts
+roster.hbac.detail.services
+roster.hbac.detail.back
+
+11.5 Sibling-preservation invariant
+
+This is mandatory.
+
+Editing:
+
+subjects.groups
+
+MUST preserve:
+
+subjects.users
+
+Editing:
+
+subjects.users
+
+MUST preserve:
+
+subjects.groups
+
+Editing:
+
+targets.hostgroups
+
+MUST preserve:
+
+targets.hosts
+
+Editing:
+
+targets.hosts
+
+MUST preserve:
+
+targets.hostgroups
+
+The current behavior that sets:
+
+t["hosts"] = []string{}
+
+when editing hostgroups MUST be removed.
+
+Do not replace one target dimension as a side effect of editing the other.
+
+11.6 Simulation before write
+
+Every TUI mutation must continue using the existing pattern:
+
+read current rule
+-> clone/mutate field
+-> SimulateSetRosterHBACRule
+-> only write if validation passes
+-> SetRosterHBACRule
+
+Do not bypass the roster validator.
+
+12. Structured --actions contract
+
+Primary files:
+
+cmd/pilot/cmd/edit_automation.go
+cmd/pilot/cmd/edit_actions_registry.go
+cmd/pilot/cmd/edit_automation_driver_roster_access.go
+
+12.1 Add plural hosts field
+
+Add a new edit-action field:
+
+Hosts []string `json:"hosts,omitempty"`
+
+Do not reuse:
+
+Host string `json:"host,omitempty"`
+
+The singular Host has existing inventory semantics.
+
+Update comments documenting the shared action fields.
+
+12.2 Extend create_hbac_rule
+
+New contract:
+
+{
+  "action": "create_hbac_rule",
+  "name": "production-ssh",
+  "users": ["alice"],
+  "groups": ["team-sre", "role-production-operator"],
+  "hosts": ["db-special.ipa.pilot.internal"],
+  "hostgroups": ["production"],
+  "services": ["sshd"]
+}
+
+Required:
+
+name
+
+Optional:
+
+users
+groups
+hosts
+hostgroups
+services
+
+The driver MUST replay the same TUI flow and must not directly mutate YAML behind the router.
+
+Update the semantic action description from:
+
+access group -> hostgroup -> PAM service
+
+to generic HBAC semantics.
+
+12.3 Add set_hbac_users
+
+Add:
+
+set_hbac_users
+
+Contract:
+
+{
+  "action": "set_hbac_users",
+  "name": "production-ssh",
+  "users": ["alice", "bob"]
+}
+
+Semantics:
+
+bulk replace the complete subjects.users set;
+
+preserve subjects.groups;
+
+validation occurs against the resulting whole rule.
+
+12.4 Keep and generalize set_hbac_groups
+
+Keep the existing action name for compatibility.
+
+Update description/behavior to accept:
+
+team
+role
+legacy access
+
+and reject filesystem groups.
+
+It continues to bulk replace only subjects.groups and MUST preserve subjects.users.
+
+12.5 Extend set_hbac_targets
+
+The existing action is already generically named and may be extended without introducing another action.
+
+New contract:
+
+{
+  "action": "set_hbac_targets",
+  "name": "production-ssh",
+  "hosts": ["db-special.ipa.pilot.internal"],
+  "hostgroups": ["production"]
+}
+
+Semantics:
+
+bulk replace both explicit target collections:
+
+targets.hosts;
+
+targets.hostgroups;
+
+remove hostcat when explicit target lists are being set;
+
+validate the resulting whole rule.
+
+Backward compatibility:
+
+Existing action input containing only:
+
+{"hostgroups": [...]}
+
+continues to produce the same explicit hostgroup-only target set it produced previously.
+
+12.6 Action validation
+
+Action-level validation SHALL reject obvious malformed direct-host values before driving the TUI.
+
+Entity/referential validation remains authoritative in Simulate* / roster validation.
+
+12.7 Scenario version
+
+Do not bump edit scenario version.
+
+This is a backward-compatible expansion of optional action fields/actions.
+
+Existing scenario v1 files must continue to load.
+
+13. Automation driver requirements
+
+Primary file:
+
+cmd/pilot/cmd/edit_automation_driver_roster_access.go
+
+Update navigation for the new Huh-backed screens.
+
+The baseline repository has already migrated production TUI construction to tui.Factory and stable choice IDs. New automation SHOULD prefer stable IDs over label substring matching when selecting:
+
+users;
+
+groups;
+
+hostgroups;
+
+services.
+
+Direct-host input is text input and should submit normalized comma-separated content.
+
+Required driver behavior:
+
+createHBACRule(...)
+  name
+  -> groups
+  -> users
+  -> hostgroups
+  -> hosts
+  -> services
+
+Update method signature to include direct users/hosts.
+
+Example:
+
+createHBACRule(
+    r,
+    name,
+    users,
+    groups,
+    hosts,
+    hostgroups,
+    services,
+)
+
+Exact argument ordering is implementation-defined, but tests must make it unambiguous.
+
+14. MCP behavior
+
+Relevant files include:
+
+cmd/pilot/cmd/mcp_edit_resources.go
+cmd/pilot/cmd/mcp_edit_tools.go
+cmd/pilot/cmd/mcp_edit_tools_test.go
+cmd/pilot/cmd/mcp_test.go
+
+14.1 Read side
+
+The inspect/resource model already exposes:
+
+SubjectUsers
+SubjectGroups
+TargetHosts
+TargetHostgroups
+EffectiveHBACAccess
+
+Preserve this.
+
+Do not create a second "simplified" HBAC representation.
+
+14.2 Write side
+
+Because MCP edit actions are derived from the semantic action registry, ensure new/extended action fields are reflected in the published action specs and tool schema.
+
+Required MCP-visible capability:
+
+create_hbac_rule(users, groups, hosts, hostgroups, services)
+set_hbac_users(users)
+set_hbac_groups(groups)
+set_hbac_targets(hosts, hostgroups)
+set_hbac_services(services)
+
+No secret-bearing fields are introduced.
+
+15. Effective-access behavior
+
+Primary file:
+
+internal/inventory/roster_effective.go
+
+No semantic redesign is needed.
+
+The existing algorithm already represents the desired model:
+
+effective users =
+  direct subjects.users
+  UNION recursively expanded subjects.groups
+
+effective hosts =
+  direct targets.hosts
+  UNION recursively expanded targets.hostgroups
+
+Add/adjust tests to prove the resolver works when HBAC references:
+
+a team-* group directly;
+
+a role-* group directly;
+
+a legacy access-* group;
+
+direct users plus groups;
+
+direct hosts plus hostgroups.
+
+Do not special-case access groups in the resolver.
+
+16. Example roster after implementation
+
+The primary example SHOULD demonstrate the new model without creating any access-* group.
+
+Recommended shape:
+
+schema_version: 2
+
+users:
+  - name: alice
+    state: present
+    first: Alice
+    last: Wang
     enabled: true
-    labels:
-      owner: storage
-      environment: prod
-```
 
----
+  - name: vendor01
+    state: present
+    first: Vendor
+    last: Operator
+    enabled: true
+
+groups:
+  - name: team-developers
+    state: present
+    category: team
+    type: posix
+    description: Application development team
+    membership:
+      authoritative: true
+      users: [alice]
+      groups: []
+
+  - name: role-production-operator
+    state: present
+    category: role
+    type: posix
+    description: Production operators
+    membership:
+      authoritative: true
+      users: []
+      groups: [team-developers]
+
+  - name: data-project-alpha-rw
+    state: present
+    category: filesystem
+    type: posix
+    description: Project Alpha filesystem access
+    membership:
+      authoritative: true
+      users: []
+      groups: [team-developers]
+
+hostgroups:
+  - name: production-web
+    state: present
+    description: Production web hosts
+    membership:
+      authoritative: true
+      hosts:
+        - web01.ipa.pilot.internal
+        - web02.ipa.pilot.internal
+      hostgroups: []
+
+hbac:
+  disable_allow_all: true
+  services:
+    - {name: sshd, state: present}
+
+  rules:
+    - name: production-web-ssh
+      state: present
+      enabled: true
+      subjects:
+        users: []
+        groups:
+          - team-developers
+      targets:
+        hosts: []
+        hostgroups:
+          - production-web
+      services:
+        - sshd
+
+    - name: vendor-emergency-maintenance
+      state: present
+      enabled: true
+      subjects:
+        users:
+          - vendor01
+        groups: []
+      targets:
+        hosts:
+          - db-special.ipa.pilot.internal
+        hostgroups: []
+      services:
+        - sshd
+
+    - name: breakglass-admin-access
+      state: present
+      enabled: true
+      subjects:
+        users:
+          - admin
+        groups: []
+      targets:
+        hostcat: all
+        hosts: []
+        hostgroups: []
+      services:
+        - sshd
 
-# 8. Monitoring Target 欄位
+The example MUST NOT imply that team membership itself grants login.
 
-每個 target：
+Documentation wording must say:
 
-```yaml
-name: string
-address: string
-profile: string
-site: string
-enabled: bool
-labels:
-  string: string
-```
+A team is only an identity set. Login is granted only when an enabled HBAC rule explicitly references that team.
 
-## 8.1 `name`
+17. Documentation changes
 
-必填。
+Update every maintained document that states or strongly implies:
 
-必須：
+HBAC requires access-* groups
 
-* 非空；
-* workspace 內唯一；
-* 建議只接受：
+or:
 
-```regex
-^[A-Za-z0-9][A-Za-z0-9._-]*$
-```
+access group -> hostgroup
 
-例如：
+At minimum inspect/update:
 
-```text
-nas01
-ups-a
-postgres.accounting
-legacy_server_01
-```
+playbooks/apply/freeipa-identity.roster.example.yaml
+docs/runbooks/freeipa-identity.md
+docs/verification/freeipa-identity.md
+freeipa-config.md
+.agents/skills/freeipa-roster-authoring/SKILL.md
+contracts/freeipa-identity.yaml
 
----
+17.1 Agent authoring skill
 
-## 8.2 `address`
+The FreeIPA roster authoring skill SHALL say:
 
-必填。
+new groups use team, filesystem, role;
 
-格式：
+never generate a new category: access;
 
-```text
-host:port
-```
+legacy access groups may be preserved when editing existing rosters;
 
-合法：
+HBAC group subjects may reference team or role;
 
-```text
-10.0.0.20:9100
-nas01.pilot.internal:9633
-db01.example.internal:9187
-[2001:db8::1]:9100
-```
+legacy access references may be retained;
 
-不合法：
+direct HBAC users are valid;
 
-```text
-https://10.0.0.20:9100
-10.0.0.20
-nas01
-```
+direct HBAC hosts are valid enrolled FQDN targets;
 
-scheme 必須由 scrape profile 決定。
+filesystem groups remain forbidden as HBAC subjects.
 
----
+17.2 Verification contract
 
-## 8.3 `profile`
+Verification docs SHALL explicitly cover direct-user and direct-host HBAC membership, not only group/hostgroup membership.
 
-必填。
+Do not claim a test was executed on a live VM unless it actually was.
 
-必須指向：
+18. Tests
 
-```text
-monitoring/scrape-profiles.yml
-```
+The change is incomplete without regression coverage.
 
-內已存在的 profile。
+18.1 Validator tests
 
-不存在時：
+Add table-driven tests for:
 
-```text
-pilot validate
-```
+HBAC team group                 PASS
+HBAC role group                 PASS
+HBAC legacy access group        PASS
+HBAC filesystem group           FAIL
+HBAC unknown group              FAIL
+HBAC direct known user          PASS
+HBAC unknown direct user        FAIL
+HBAC users + groups             PASS
+HBAC hosts + hostgroups         PASS
+hostcat all + explicit host     FAIL
+hostcat all + hostgroup         FAIL
 
-必須失敗。
+Existing legacy access tests MUST continue passing.
 
----
+18.2 Lint tests
 
-## 8.4 `site`
+Test:
 
-選填。
+legacy access group -> warning + exit success
+no access group     -> no warning
+invalid roster      -> violation/failure unchanged
 
-表示此 exporter 所屬邏輯 site。
+18.3 TUI tests
 
-例如：
+Add coverage proving:
 
-```yaml
-site: taipei
-```
+group creation no longer offers access;
 
-Target compiler 必須將其轉為 Prometheus label：
+existing access group remains visible/editable;
 
-```yaml
-site: taipei
-```
+HBAC group picker includes team;
 
-若 target 沒有指定 `site`：
+HBAC group picker includes role;
 
-不得自動套用 Prometheus server 的 `prometheus_site_label`。
+HBAC group picker includes legacy access;
 
-原因：
+HBAC group picker excludes filesystem;
 
-```text
-Prometheus site
-≠
-exporter physical/logical site
-```
+HBAC user picker includes roster users and admin;
 
-除非未來另有明確繼承規則。
+direct-host input round-trips;
 
----
+editing groups does not erase direct users;
 
-## 8.5 `enabled`
+editing users does not erase groups;
 
-選填。
+editing hostgroups does not erase direct hosts;
 
-預設：
+editing hosts does not erase hostgroups.
 
-```yaml
-enabled: true
-```
+18.4 Structured action tests
 
-若：
+Add scenarios for:
 
-```yaml
-enabled: false
-```
-
-則 target：
-
-* 保留在 registry；
-* 不輸出至 Prometheus `file_sd`；
-* `pilot monitoring target list` 必須顯示 disabled 狀態。
-
----
-
-## 8.6 `labels`
-
-選填。
-
-型別：
-
-```yaml
-map[string]string
-```
-
-例如：
-
-```yaml
-labels:
-  environment: prod
-  owner: storage
-  device_type: nas
-```
-
-系統保留 label：
-
-```text
-pilot_target
-pilot_source
-```
-
-使用者不得覆寫。
-
-Target compiler 必須自動加入：
-
-```yaml
-pilot_target: nas01
-pilot_source: external
-```
-
-若有 site：
-
-```yaml
-site: taipei
-```
-
----
-
-# 9. Scrape Profile Schema
-
-檔案：
-
-```text
-monitoring/scrape-profiles.yml
-```
-
-範例：
-
-```yaml
-schemaVersion: 1
-
-profiles:
-  external-node:
-    jobName: external-node
-    scheme: https
-    metricsPath: /metrics
-    scrapeInterval: 15s
-    authRef: external-node-auth
-
-  postgres:
-    jobName: postgres-exporter
-    scheme: http
-    metricsPath: /metrics
-
-  storage-exporter:
-    jobName: storage
-    scheme: https
-    metricsPath: /metrics
-    tls:
-      caRef: pilot-root-ca
-```
-
----
-
-# 10. Scrape Profile 欄位
-
-第一版至少支援：
-
-```yaml
-jobName: string
-scheme: http|https
-metricsPath: string
-scrapeInterval: duration
-scrapeTimeout: duration
-
-authRef: string
-
-tls:
-  caRef: string
-  serverName: string
-  insecureSkipVerify: bool
-```
-
-其中只有：
-
-```text
-jobName
-```
-
-必填。
-
-其餘預設：
-
-```yaml
-scheme: http
-metricsPath: /metrics
-```
-
-`scrapeInterval`、`scrapeTimeout` 未指定時使用 Prometheus global 設定。
-
----
-
-# 11. Profile 設計原則
-
-禁止把完整 Prometheus scrape job YAML 塞入 profile，例如禁止：
-
-```yaml
-rawConfig: |
-  static_configs:
-    ...
-```
-
-也禁止 target 自己攜帶：
-
-```yaml
-scheme:
-basic_auth:
-tls_config:
-relabel_configs:
-```
-
-Target 只能引用 profile。
-
-目的：
-
-```text
-target = endpoint instance
-
-profile = scrape behavior
-```
-
-避免 target registry 演變成第二份任意 `prometheus.yml`。
-
----
-
-# 12. Credential Model
-
-本階段不得在：
-
-```text
-monitoring/targets.yml
-monitoring/scrape-profiles.yml
-```
-
-直接保存 password/token。
-
-必須透過 reference。
-
-例如：
-
-```yaml
-authRef: external-node-auth
-```
-
-第一版可先支援 Basic Auth。
-
-建議新增：
-
-```text
-group_vars/prometheus.yml
-```
-
-或 vault-backed monitoring secrets：
-
-```yaml
-monitoring_auth:
-  external-node-auth:
-    type: basic
-    username: prometheus
-    password: ...
-```
-
-其中 password 必須符合 Pilot 現有 secret / Ansible Vault 慣例。
-
-不得產生：
-
-```yaml
-password: plaintext
-```
-
-到 git-tracked monitoring YAML。
-
----
-
-# 13. Target Compiler
-
-新增內部模組，建議：
-
-```text
-internal/monitoring/
-```
-
-大致結構：
-
-```text
-internal/monitoring/
-├── model.go
-├── load.go
-├── validate.go
-├── compiler.go
-├── file_sd.go
-└── *_test.go
-```
-
----
-
-# 14. Go Domain Model
-
-建議資料結構：
-
-```go
-type TargetFile struct {
-    SchemaVersion int      `yaml:"schemaVersion"`
-    Targets       []Target `yaml:"targets"`
+{
+  "action": "create_hbac_rule",
+  "name": "mixed",
+  "users": ["alice"],
+  "groups": ["team-developers", "role-ops"],
+  "hosts": ["special.ipa.pilot.internal"],
+  "hostgroups": ["production"],
+  "services": ["sshd"]
 }
 
-type Target struct {
-    Name    string            `yaml:"name"`
-    Address string            `yaml:"address"`
-    Profile string            `yaml:"profile"`
-    Site    string            `yaml:"site,omitempty"`
-    Enabled *bool             `yaml:"enabled,omitempty"`
-    Labels  map[string]string `yaml:"labels,omitempty"`
+Verify resulting roster contains all requested dimensions.
+
+Test set_hbac_users.
+
+Test generalized set_hbac_groups.
+
+Test extended set_hbac_targets.
+
+Test old create_hbac_rule scenarios containing only groups/hostgroups/services still pass unchanged.
+
+18.5 Effective access tests
+
+Expected example:
+
+team-developers -> alice
+role-ops -> team-developers + bob
+
+rule subjects:
+  users: [carol]
+  groups: [role-ops]
+
+effective users:
+  alice
+  bob
+  carol
+
+Target equivalent:
+
+direct host + nested hostgroup -> union of all FQDNs
+
+18.6 Ansible tests
+
+Update canonical fixtures so the main modern fixture uses direct team/role HBAC references.
+
+Keep at least one explicit legacy access-group fixture proving backward compatibility.
+
+The compatibility fixture MUST be real coverage, not dead example data.
+
+19. Compatibility matrix
+
+Input / behavior
+
+Before
+
+After
+
+Existing category: access roster
+
+valid
+
+valid + deprecation warning
+
+New access group via TUI
+
+allowed
+
+not offered
+
+New access group via structured action
+
+allowed
+
+rejected
+
+HBAC references access group
+
+valid
+
+valid, legacy
+
+HBAC references team group
+
+rejected
+
+valid
+
+HBAC references role group
+
+rejected
+
+valid
+
+HBAC references filesystem group
+
+rejected
+
+rejected
+
+HBAC direct user in raw roster
+
+supported backend
+
+supported backend + TUI/actions
+
+HBAC direct host in raw roster
+
+supported backend
+
+supported backend + TUI/actions
+
+Editing HBAC hostgroups with direct hosts present
+
+direct hosts cleared
+
+direct hosts preserved
+
+Roster schema
+
+v1/v2
+
+unchanged v1/v2
+
+v1 -> v2 migration
+
+automatic/current
+
+unchanged
+
+20. Structured action compatibility details
+
+20.1 create_group
+
+If structured actions currently accept:
+
+category=access
+
+change action-level validation to reject it with a useful message:
+
+create_group: category "access" is deprecated and cannot be created; use team or role for HBAC subjects
+
+Do not make ValidateRoster reject an existing access group.
+
+20.2 Existing action replay
+
+Existing scenarios must not break.
+
+For example:
+
+{
+  "action": "create_hbac_rule",
+  "name": "legacy-flow",
+  "groups": ["access-old"],
+  "hostgroups": ["webhosts"],
+  "services": ["sshd"]
 }
 
-type ProfileFile struct {
-    SchemaVersion int                `yaml:"schemaVersion"`
-    Profiles      map[string]Profile `yaml:"profiles"`
-}
+remains valid if access-old already exists in the roster.
 
-type Profile struct {
-    JobName        string     `yaml:"jobName"`
-    Scheme         string     `yaml:"scheme,omitempty"`
-    MetricsPath    string     `yaml:"metricsPath,omitempty"`
-    ScrapeInterval string     `yaml:"scrapeInterval,omitempty"`
-    ScrapeTimeout  string     `yaml:"scrapeTimeout,omitempty"`
-    AuthRef        string     `yaml:"authRef,omitempty"`
-    TLS            *TLSConfig `yaml:"tls,omitempty"`
-}
+The goal is to stop new access-group creation, not to make existing authorization uneditable.
 
-type TLSConfig struct {
-    CARef              string `yaml:"caRef,omitempty"`
-    ServerName         string `yaml:"serverName,omitempty"`
-    InsecureSkipVerify bool   `yaml:"insecureSkipVerify,omitempty"`
-}
-```
+21. Source-of-truth and duplication constraints
 
-實際命名可依 repository coding convention 調整。
+This change specifically removes an unnecessary authorization abstraction. Do not replace it with new duplicated policy tables.
 
----
+21.1 Go category policy
 
-# 15. File SD 輸出
+Prefer one Go source of truth for:
 
-Prometheus target 不直接寫死進主 `prometheus.yml`。
+known category;
 
-Pilot 必須產生：
+prefix;
 
-```text
-/etc/pilot/prometheus/targets/
-```
+creatable status;
 
-建議每個 profile/job 一個檔案：
+HBAC allowed status;
 
-```text
-/etc/pilot/prometheus/targets/
-├── external-node.json
-├── postgres-exporter.json
-└── storage.json
-```
+sudo allowed status;
 
----
+deprecation status.
 
-# 16. File SD JSON 格式
+TUI and structured-action validation should consume that policy rather than hand-maintaining separate category arrays where practical.
 
-例如 registry：
+21.2 Go / Ansible synchronization
 
-```yaml
+The Ansible gate must independently enforce the same final policy because users can run the playbook without first invoking the Go CLI.
+
+Add regression tests or comments tying the two together.
+
+A roster accepted by Go must not be rejected by the equivalent Ansible HBAC category gate.
+
+22. Safety properties
+
+The final implementation MUST preserve these properties.
+
+22.1 Fail before write
+
+Any invalid TUI/structured action:
+
+filesystem group as HBAC subject
+unknown user
+unknown HBAC group
+empty subject set
+empty target set
+hostcat collision
+empty services
+
+must fail simulation before roster mutation.
+
+22.2 No accidental revocation
+
+Editing one part of a rule must not erase another valid access path.
+
+This is particularly important for:
+
+direct user + group
+direct host + hostgroup
+
+22.3 No accidental privilege widening
+
+Do not permit data-* in HBAC.
+
+Do not interpret omission of all explicit targets as hostcat: all inside the editor unless that behavior is explicitly requested through the existing supported mechanism.
+
+22.4 Break-glass invariant
+
+Keep the current invariant:
+
+hbac.disable_allow_all: true
+
+requires an enabled admin break-glass rule targeting:
+
+hostcat: all
+
+No changes in this feature may weaken it.
+
+23. Implementation phases
+
+The coding agent SHOULD implement in this order so every phase has a coherent test boundary.
+
+Phase 1 — Central category policy + validator
+
+Introduce/refactor centralized Go group-category policy.
+
+Keep access structurally valid but mark deprecated.
+
+Allow team/role/access in HBAC subjects.
+
+Keep filesystem rejected.
+
+Add validator unit tests.
+
+Exit criterion:
+
+go test ./internal/inventory/...
+
+passes with new category tests.
+
+Phase 2 — Ansible gate alignment
+
+Update canonical HBAC group gate.
+
+Update comments.
+
+Preserve direct user/host reconciliation.
+
+Update fixture coverage.
+
+Exit criterion:
+
+Go and Ansible rules match;
+
+syntax check passes;
+
+legacy access fixture remains accepted.
+
+Phase 3 — TUI
+
+Remove access from new-group choices.
+
+Generalize HBAC group picker.
+
+Add direct-user screen.
+
+Add direct-host screen.
+
+Add fields to HBAC detail.
+
+Fix sibling-preservation bug.
+
+Add TUI tests.
+
+Exit criterion:
+
+go test ./cmd/pilot/cmd/...
+
+passes.
+
+Phase 4 — Structured actions / MCP
+
+Add Hosts []string.
+
+Extend create_hbac_rule.
+
+Add set_hbac_users.
+
+Generalize set_hbac_groups.
+
+Extend set_hbac_targets.
+
+Update automation driver.
+
+Update action specs/MCP tests.
+
+Exit criterion:
+
+Existing and new scenario tests pass.
+
+Phase 5 — Lint deprecation + docs
+
+Add non-fatal access warning.
+
+Remove access from modern example authoring.
+
+Keep explicit legacy compatibility fixture.
+
+Update runbook/spec/agent skill.
+
+Exit criterion:
+
+No maintained documentation instructs users to create an access group merely to use HBAC.
+
+Phase 6 — Full regression/evidence
+
+Run repository-required regression and inspect changed behavior.
+
+At minimum:
+
+go test ./...
+go vet ./...
+go build ./cmd/pilot
+
+Also run repository-prescribed formatting/static checks.
+
+If a real FreeIPA test target is available, run the canonical apply/check/verify flow against it and capture actual evidence per repository documentation rules.
+
+Do not fabricate live-run evidence.
+
+24. Acceptance scenarios
+
+Scenario A — Team directly grants login
+
+Input:
+
+groups:
+  - name: team-dev
+    category: team
+    membership:
+      users: [alice]
+      groups: []
+
+hbac:
+  rules:
+    - name: dev-ssh
+      subjects:
+        users: []
+        groups: [team-dev]
+      targets:
+        hosts: []
+        hostgroups: [dev-hosts]
+      services: [sshd]
+
+Expected:
+
+valid
+effective users includes alice
+
+Scenario B — Role reused by HBAC and sudo
+
+Input:
+
+role-ops -> [team-sre]
+HBAC -> role-ops
+sudo -> role-ops
+
+Expected:
+
+valid
+same role can be used by both policy types
+
+Scenario C — Direct exception
+
+Input:
+
+subjects.users: [vendor01]
+targets.hosts: [db-special.ipa.pilot.internal]
+
+Expected:
+
+valid
+no wrapper access group required
+
+Scenario D — Mixed normal + exception
+
+Input:
+
+subjects:
+  users: [vendor01]
+  groups: [team-sre]
+
 targets:
-  - name: nas01
-    address: nas01.pilot.internal:9633
-    profile: storage-exporter
-    site: taipei
-    labels:
-      environment: prod
+  hosts: [db-special.ipa.pilot.internal]
+  hostgroups: [production-db]
 
-  - name: nas02
-    address: nas02.pilot.internal:9633
-    profile: storage-exporter
-    site: taipei
-```
+Expected:
 
-應編譯成：
+valid
+effective result is union
+editing any one list preserves the other three lists
 
-```json
-[
-  {
-    "targets": [
-      "nas01.pilot.internal:9633"
-    ],
-    "labels": {
-      "pilot_target": "nas01",
-      "pilot_source": "external",
-      "site": "taipei",
-      "environment": "prod"
-    }
-  },
-  {
-    "targets": [
-      "nas02.pilot.internal:9633"
-    ],
-    "labels": {
-      "pilot_target": "nas02",
-      "pilot_source": "external",
-      "site": "taipei"
-    }
-  }
-]
-```
+Scenario E — Filesystem group rejected
 
-每個 target 獨立 entry，以保證 labels 不互相污染。
+Input:
 
----
+subjects.groups: [data-project-alpha-rw]
 
-# 17. Prometheus Scrape Config
+Expected:
 
-Target compiler 必須依據 profiles 自動建立 scrape jobs。
+validation failure before write
 
-例如：
+Scenario F — Legacy access survives
 
-```yaml
-profiles:
-  storage-exporter:
-    jobName: storage
-    scheme: https
-    metricsPath: /metrics
-```
+Input:
 
-Prometheus：
+groups:
+  - name: access-webhosts-ssh
+    category: access
 
-```yaml
-- job_name: storage
-  scheme: https
-  metrics_path: /metrics
-  file_sd_configs:
-    - files:
-        - /etc/prometheus/targets/storage.json
-```
+hbac:
+  rules:
+    - subjects:
+        groups: [access-webhosts-ssh]
 
----
+Expected:
 
-# 18. Job Grouping
+validation passes
+lint emits deprecation warning
+apply still reconciles
+TUI can edit existing rule/group
+new-group UI does not offer category access
 
-多個 profile 可以：
+25. Definition of done
 
-```yaml
-jobName: storage
-```
+The change is DONE only when all of the following are true.
 
-但第一版建議要求：
+New HBAC rules can use direct roster users.
 
-> `jobName` 必須在 profiles 中唯一。
+New HBAC rules can use direct enrolled host FQDNs.
 
-否則：
+HBAC can directly reference team-*.
 
-```text
-profile-a:
-  jobName: storage
-  scheme: http
+HBAC can directly reference role-*.
 
-profile-b:
-  jobName: storage
-  scheme: https
-```
+HBAC still accepts legacy access-*.
 
-會產生語意衝突。
+HBAC rejects data-*.
 
-Validator 必須拒絕此情況。
+New group TUI does not offer access.
 
----
+create_group structured action rejects new access.
 
-# 19. Docker Volume
+Existing access groups remain editable and reconcilable.
 
-現有 Prometheus container 必須增加 read-only bind mount：
+Lint reports access deprecation without failing.
 
-```text
-/etc/pilot/prometheus/targets
-    ->
-/etc/prometheus/targets
-```
+Editing HBAC groups preserves users.
 
-Docker 內：
+Editing HBAC users preserves groups.
 
-```text
-/etc/prometheus/targets/*.json
-```
+Editing HBAC hostgroups preserves direct hosts.
 
-Prometheus `file_sd_configs` 使用 container path。
+Editing HBAC direct hosts preserves hostgroups.
 
-Host path / container path 必須分開定義，避免重複目前 password file path 類似問題。
+create_hbac_rule supports users/groups/hosts/hostgroups/services.
 
-建議變數：
+set_hbac_users exists.
 
-```yaml
-prometheus_targets_host_dir: /etc/pilot/prometheus/targets
-prometheus_targets_container_dir: /etc/prometheus/targets
-```
+set_hbac_groups accepts team/role/legacy access.
 
----
+set_hbac_targets supports hosts + hostgroups.
 
-# 20. Config Render 順序
+MCP action/tool schemas expose the new behavior.
 
-最終：
+Effective access tests cover mixed direct/nested relationships.
 
-```yaml
-scrape_configs:
+Modern examples create no access groups.
 
-  # existing advanced/manual block
-  {{ prometheus_scrape_configs }}
+At least one legacy access fixture remains as compatibility coverage.
 
-  # existing Pilot managed node exporters
-  {{ prometheus_node_exporter_scrape_block }}
+Roster schema version remains unchanged.
 
-  # new external monitoring profiles
-  {{ prometheus_external_scrape_block }}
-```
+Existing v1 -> v2 migration tests remain green.
 
-不得改變既有：
+go test ./... passes.
 
-```text
-prometheus_scrape_configs
-node_exporter
-```
+go vet ./... passes.
 
-行為。
+go build ./cmd/pilot passes.
 
----
+No fake live-environment evidence is added.
 
-# 21. `prometheus_scrape_configs` 定位
+26. Explicitly deferred follow-up
 
-保留：
+A future, separate specification may remove category: access from the schema entirely.
 
-```yaml
-prometheus_scrape_configs
-```
+That future migration must first solve all of:
 
-但文件必須明確標示：
+detecting access-group references outside HBAC;
 
-```text
-Advanced escape hatch
-```
+nested access-group dependencies;
 
-正常 external exporter 不再推薦使用它。
+netgroup references;
 
-推薦順序：
+live FreeIPA group cleanup;
 
-```text
-Pilot managed node exporter
+external/unmanaged consumers;
+
+preserving dynamic team/role membership semantics;
+
+safe rollback;
+
+encrypted roster migration;
+
+semantic-equivalence proof.
+
+Until that exists, the correct lifecycle is:
+
+now:
+  access = deprecated compatibility
+
+new authoring:
+  team / role / direct user -> HBAC
+
+later:
+  explicit audited access-group retirement workflow
+
+Do not fold that destructive migration into this implementation.
+
+27. Integration contract with the Pilot v3 specification set
+
+This specification is a v2-compatible prerequisite to the v3 work. It deliberately does not bump the roster schema.
+
+The integrated delivery order is:
+
+v2 HBAC authorization simplification
         ↓
-host-monitoring
-
-External exporter
+v2 -> v3 migration
         ↓
-monitoring/targets.yml
-
-特殊 Prometheus 功能
+v3.0 lifecycle-aware grants / policy
         ↓
-prometheus_scrape_configs
-```
+v3.1 security operations
+        ↓
+v3.2 identity hardening
+        ↓
+optional forced Approval gate
 
----
+The following rules are binding on all later v3 specifications.
 
-# 22. Target Generation Ownership
+27.1 Static login authorization
 
-> 本節已依 `playbooks/apply/prometheus-apply.yml` 現況修正。原稿假設 apply
-> playbook 有一道「render 到暫存 → `promtool check config` → 驗證通過才裝上
-> 正式路徑/才 restart」的既有機制可以沿用；現況調查後確認**這個機制不存在**。
-> 現有檔案裡每個 artifact（`prometheus.yml`、`alert-rules.yml`、
-> `objstore.yml`、node-exporter password file）都是直接 `ansible.builtin.copy`
-> 到最終路徑、`register:` 記 `changed`，再把這些 `changed` 旗標併成單一布林值
-> 餵給 `pilot-prometheus` container 的 `restart:` 判斷式（見該檔第 482-485
-> 行）；失敗處理是檔案級的 `rescue:`（只刪掉含密碼的 `objstore.yml`、把原始
-> 錯誤 fail 出來，容器保留原狀供 `docker logs` 除錯），不是整份 config 的
-> 原子安裝或 rollback。因此 external target 這個功能必須套用**同一種**現有
-> 模式，而不是引入一套只有這個功能才有的驗證關卡。
+A static login authorization is an HBAC rule.
 
-Prometheus apply 時：
+The modern static authoring model is:
 
-1. `pilot monitoring validate`（純 Go、離線、見 §32）必須先跑過且 PASS，
-   涵蓋 schema、`profile` 是否存在、`jobName` 是否唯一/保留字、`address`
-   格式、`authRef`/TLS 參照等所有靜態正確性——這些原本就是 registry 檔案
-   自身的屬性，不需要啟動 Prometheus 或呼叫 `promtool` 就能驗證完畢。
-2. Ansible apply 只做「渲染 + 交給既有 restart/health-check 機制把關」：
-   1. 讀取 target registry + profiles（已通過步驟 1，不重新驗證）。
-   2. 在記憶體中編譯成每個 `jobName` 一份 file_sd JSON。
-   3. 用 `ansible.builtin.copy`（`dest=.../targets/<jobName>.json`）逐檔
-      寫到最終路徑並各自 `register` 一個 changed 旗標——`copy` 模組本身
-      已對單一檔案做「寫暫存檔 → rename」，§23 要求的 atomic update 不需要
-      再另外實作。
-   4. 若某個 `jobName` 已不再有任何 target（profile 被刪除或全部
-      target 移除），用 `ansible.builtin.file: state=absent` 清掉對應舊
-      JSON（§49 的 GC），同樣各自 `register`。
-   5. 依 §20 的順序，把 external scrape block 併進既有 render
-      `prometheus.yml` 那兩個任務（有/無 alertmanager 各一份，第 316/339
-      行）的 `scrape_configs:`，接在 `prometheus_node_exporter_scrape_block`
-      之後。
-   6. 把步驟 3-5 新增的所有 changed 旗標，併入現有
-      `prometheus_yml_result is changed or alert_rules_result is changed or
-      node_exporter_password_file_result is changed`（第 482-485 行）這個
-      既有的單一 restart 判斷式，而不是另建一套獨立的 restart 邏輯。
-   7. 沿用既有「Wait for Prometheus to become ready」（`/-/ready`，
-      retries 30、delay 2，第 514-521 行）當作這次改動唯一的 runtime 把關：
-      任何步驟 1 沒抓到的錯誤（例如 compiler 本身有 bug），要嘛在這裡讓
-      Prometheus 進程真的啟動失敗、apply 直接 fail，要嘛應該更早在 §71
-      的 golden test 被抓到——這條 wait 迴圈不是為本功能新增的，是既有
-      "有沒有把 Prometheus 弄壞" 的唯一訊號來源，本功能沿用它。
-   8. `rescue:` 延用現有模式（第 557-569 行）：只多一步——若這次 apply
-      有渲染 `monitoring_auth` 對應的 password file，一併刪除（跟現有刪除
-      `objstore.yml` 的理由相同：含密碼的檔案不留在失敗現場），然後照舊
-      `fail` 出原始錯誤、容器維持原狀。**不**嘗試回滾已寫入的 file_sd
-      JSON 或 `prometheus.yml` 內容——現有 rescue 本來就不做這件事，本功能
-      沒有理由自己發明一套更強的保證。
+direct user ─┐
+team-*      ─┼──> HBAC ──> direct host
+role-*      ─┘          └─> hostgroup
 
-3. **刻意不引入 apply-time 的 `promtool check config` 前置關卡。**
-   全 repo 目前唯一使用 `promtool` 的地方是
-   `docs/verification/prometheus.md` 的 C10（`promtool check rules`），而
-   且是**套用後、唯讀**的驗證 row（`docker exec pilot-prometheus promtool
-   check rules ...`），不是 apply playbook 裡的前置 gate。若要對
-   `prometheus.yml` 的語法正確性有同等保證，應該比照 C10 的姿勢新增一條
-   **套用後、唯讀**的驗證 row（見 §56 新增的 Cxx 建議：
-   `docker exec pilot-prometheus promtool check config
-   /etc/prometheus/prometheus.yml`），而不是在 playbook 裡插入一個目前
-   repo 完全沒有先例的「渲染到暫存 → 跑 promtool → 決定要不要正式安裝」
-   機制。若未來確實需要 apply-time hard fail（而非套用後才發現 config
-   壞掉），那是一個獨立的新基礎設施項目（需要一次性容器或背景 exec 呼叫
-   `promtool`、外加暫存路徑與正式路徑的切換邏輯），依 §80 的原則列為明確
-   follow-up，不在本次範圍內實作。
+access-* is not a normal v3 entitlement abstraction. It is deprecated compatibility data only.
 
-不得：
+27.2 Modern group meanings
 
-```text
-先覆蓋 production config
-→ 再發現 invalid config
-```
+team-*  = organizational identity set; may be an HBAC subject
+role-*  = reusable authorization/principal set; may be used by HBAC and sudo
+data-*  = filesystem/POSIX/NFS only
+access-* = deprecated compatibility category; never newly authored
 
-但「不得」的實際落地方式是：把所有能在 Go 端靜態驗證的錯誤在步驟 1 擋掉，
-其餘交給既有 render-then-health-check-then-rescue 流程，而非假裝 repo 裡
-存在一個尚未建置的 validate-before-restart 前置關卡。
+Team membership by itself never grants login. Only an enabled HBAC rule referencing that team grants login.
 
----
+27.3 Temporary authorization
 
-# 23. Atomic Update
+v3 grants[] MUST NOT recreate the removed wrapper abstraction.
 
-所有產生檔案應採：
+Login grants SHALL use the same relationship geometry as HBAC:
 
-```text
-temporary file
-→ validate
-→ atomic rename
-```
+subjects:
+  users: [...]
+  groups: [...]
 
-或等效 Ansible-safe 實作。
+targets:
+  hosts: [...]
+  hostgroups: [...]
 
-不得讓 Prometheus 在 target JSON 寫一半時讀到 malformed JSON。
+For login grants:
 
----
+team, role, and legacy access groups are accepted;
 
-# 24. Prometheus Reload
+filesystem groups are forbidden;
 
-如果目前 Pilot Prometheus 使用 container restart 作為 config change mechanism，可先延用。
+direct users are first-class;
 
-但 external `file_sd` target JSON 本身不應要求 restart。
+direct enrolled host FQDNs are first-class.
 
-Prometheus 原生會自動重新讀取 `file_sd`。
+For sudo grants:
 
-因此期望：
+direct users are accepted;
 
-### profile 改變
+subject groups must remain role;
 
-例如：
+direct hosts and hostgroups are accepted.
 
-```text
-http → https
-```
+27.4 Migration
 
-需要：
+The v2 -> v3 schema migration MUST NOT:
 
-```text
-render prometheus.yml
-→ validate
-→ reload/restart
-```
+create access-*;
 
-### target add/remove
+convert access-* to role-*;
 
-只有：
+flatten legacy access membership;
 
-```text
-targets/*.json
-```
+rewrite static HBAC into grants;
 
-改變時：
+delete legacy access groups.
 
-```text
-不應 restart Prometheus
-```
+Both of these v2 shapes must migrate with identical authorization semantics:
 
-除非現有 playbook 架構暫時無法避免。
+HBAC -> team/role/direct user
+HBAC -> legacy access group
 
-第一版如果仍 restart，必須在 TODO / follow-up 明確標記優化。
+27.5 Explain / inspection
 
----
+v3 access explanation MUST distinguish at least:
 
-# 25. CLI
+static_hbac
+temporary_grant
+breakglass
+sudo_grant
 
-新增：
+and preserve the actual provenance path through direct users/groups and direct hosts/hostgroups.
 
-```text
-pilot monitoring
-```
+27.6 Approval independence
 
-至少提供：
-
-```text
-pilot monitoring target list
-pilot monitoring target add
-pilot monitoring target edit
-pilot monitoring target remove
-pilot monitoring target enable
-pilot monitoring target disable
-pilot monitoring target test
-
-pilot monitoring profile list
-pilot monitoring profile add
-pilot monitoring profile edit
-pilot monitoring profile remove
-
-pilot monitoring validate
-```
-
----
-
-# 26. `target list`
-
-例如：
-
-```bash
-pilot monitoring target list
-```
-
-輸出：
-
-```text
-NAME        ADDRESS                         PROFILE           SITE      STATUS
-nas01       nas01.pilot.internal:9633       storage-exporter  taipei    enabled
-legacy01    10.20.30.40:9100                external-node     taipei    enabled
-db01        db01.pilot.internal:9187        postgres          taipei    disabled
-```
-
-如可合理提供，可額外顯示：
-
-```text
-JOB
-SCHEME
-```
-
-但不得讓 output 過度寬。
-
----
-
-# 27. `target add`
-
-例如：
-
-```bash
-pilot monitoring target add \
-  --name nas01 \
-  --address nas01.pilot.internal:9633 \
-  --profile storage-exporter \
-  --site taipei
-```
-
-支援 labels：
-
-```bash
-pilot monitoring target add \
-  --name nas01 \
-  --address nas01.pilot.internal:9633 \
-  --profile storage-exporter \
-  --label environment=prod \
-  --label owner=storage
-```
-
-CLI 寫入：
-
-```text
-monitoring/targets.yml
-```
-
-必須保證：
-
-* schema valid；
-* target name 不重複；
-* profile 存在；
-* address valid。
-
----
-
-# 28. `target remove`
-
-例如：
-
-```bash
-pilot monitoring target remove nas01
-```
-
-必須：
-
-1. 顯示要刪除 target。
-2. interactive shell 下要求 confirmation。
-3. automation / MCP structured action 應提供 explicit confirmation field 或相同 safety contract。
-4. 只移除 target registry。
-5. 不執行任何 remote host action。
-
----
-
-# 29. `target test`
-
-這是此功能的重要能力。
-
-例如：
-
-```bash
-pilot monitoring target test nas01
-```
-
-測試 pipeline：
-
-```text
-Resolve target
-      ↓
-Resolve profile
-      ↓
-DNS resolution
-      ↓
-TCP connection
-      ↓
-TLS handshake（若 https）
-      ↓
-Authentication
-      ↓
-GET metricsPath
-      ↓
-HTTP status validation
-      ↓
-Prometheus/OpenMetrics payload validation
-```
-
-輸出例如：
-
-```text
-Target: nas01
-Address: nas01.pilot.internal:9633
-Profile: storage-exporter
-
-[PASS] profile exists
-[PASS] DNS nas01.pilot.internal -> 10.20.10.15
-[PASS] TCP 10.20.10.15:9633
-[PASS] TLS certificate
-[PASS] GET /metrics -> 200
-[PASS] metrics payload
-
-Result: PASS
-```
-
----
-
-# 30. `target test` 安全限制
-
-必須：
-
-* 設 connect timeout；
-* 設 HTTP timeout；
-* 限制 response body 大小；
-* 不 follow 任意跨 host redirect；
-* 不印出 Authorization header；
-* 不印 password/token；
-* 不把 credential 放入 process argv；
-* TLS error 必須完整報告但不可輸出 secret。
-
-建議：
-
-```text
-connect timeout: 5s
-request timeout: 10s
-max response: 8 MiB
-```
-
-實際值可調整。
-
----
-
-# 31. Metrics Validation
-
-不要自行實作完整 Prometheus parser。
-
-優先考慮：
-
-```text
-Prometheus 官方 parser library
-```
-
-若依賴不合理，第一版至少驗證：
-
-* HTTP 2xx；
-* response body 非空；
-* Content-Type 為 Prometheus/OpenMetrics 常見格式；
-* body 可被 Prometheus parser 解析。
-
-避免只檢查：
-
-```text
-HTTP 200
-```
-
-因為這可能只是 HTML login page。
-
----
-
-# 32. `pilot monitoring validate`
-
-必須執行 pure local validation。
-
-不得連 remote endpoint。
-
-檢查：
-
-```text
-targets.yml schema
-profiles.yml schema
-duplicate target names
-unknown profiles
-duplicate jobName
-invalid host:port
-reserved labels
-invalid scheme
-invalid duration
-unknown authRef
-invalid TLS reference
-```
-
----
-
-# 33. Pilot Workspace Validate 整合
-
-若 Pilot 已有全 workspace validation：
-
-```text
-pilot validate
-```
-
-或同等機制，必須把 monitoring validation 接進去。
-
-因此：
-
-```text
-pilot validate
-```
-
-應能發現：
-
-```text
-external monitoring target references unknown profile
-```
-
-而不必等到 Prometheus apply。
-
----
-
-# 34. TUI 整合
-
-> 本節已依 `pilot edit` 現況修正。`pilot edit` 早已不是舊的
-> promptui 巢狀迴圈架構——現行是單一長駐的 Bubble Tea
-> `editRouterModel`（`cmd/pilot/cmd/edit_tui.go`），每個畫面用注入的
-> `tui.Factory`（production 用 Huh v2，`tui.NewHuhFactory()`）產生
-> `tui.SelectSpec` / `tui.InputSpec` / `tui.ConfirmSpec` /
-> `tui.MultiSelectSpec`，畫面之間靠 `r.transitionTo(...)` 換頁、
-> callback 決定下一步。原稿的樹狀選單只是概念，沒有對應到任何實際的
-> API 呼叫方式；以下改成直接對應現有程式的做法。
-
-在 `pushTopMenu`（`cmd/pilot/cmd/edit_tui.go`）的 `choices` slice 裡新增
-一項（目前已有 9 項：hosts.yml、group_vars、vault、roster、
-freeipa-dns、internal-endpoints、完整性檢查、快速建立、離開），並在同一
-函式的 `switch m.Selected()` 補上對應 case，指到新檔案
-`edit_tui_monitoring.go` 的入口函式。
-
-新畫面群組的檔案結構、資料流、存檔慣例，直接照抄最近一個同類功能
-`edit_tui_internal_endpoints.go`（internal-endpoints manifest 編輯器，
-1279 行）已經驗證過的模式，而不是重新設計：
-
-```text
-pushMonitoringManifestPathPrompt(r, dir)
-  — 問 monitoring/targets.yml 路徑（比照 pushInternalEndpointManifestPathPrompt）
-      ↓
-pushMonitoringManifestManager(r, dir, path, banner)
-  — 檔案不存在 → 問要不要建立最小骨架（schemaVersion:1, targets:[]，
-    比照 inventory.CreateMinimalInternalEndpointManifest 新增一個對應 helper）
-  — 檔案存在 → 選單：Exporter Targets / Scrape Profiles / 返回
-      ↓
-pushMonitoringTargetsMenu(r, dir, path, banner)
-  — 每個 target 的 name 是它在 registry 裡的主鍵，也是這一列的 Choice.ID
-    （比照 pushInternalEndpointsMenu 用 fqdn 當 ID 的作法）
-  — 加上「➕ 新增 target」「↩ 返回」
-      ↓
-pushMonitoringTargetDetail(r, dir, path, name, banner)
-  — 逐欄位一列：address / profile / site / enabled / labels（共 N 個）
-  — profile 欄位必須是 pushMonitoringTargetProfileSelect（tui.SelectSpec，
-    列出 scrape-profiles.yml 現有 profile），不是 tui.InputSpec 自由輸入
-    ——直接對應 §35 原本就要求的「不可讓使用者輸入 arbitrary profile
-    string 而不驗證」
-  — enabled 欄位用 tui.ConfirmSpec 或兩選項 tui.SelectSpec
-  — labels 是巢狀 CRUD，比照 pushExtraVarsMenu（edit_tui.go）／
-    pushFleetVarsMenu 現成的「key=value 清單 + 新增/編輯/刪除」模式，
-    不需要另外發明
-      ↓
-pushMonitoringProfilesMenu / pushMonitoringProfileDetail
-  — 結構同上，欄位為 §10 定義的 jobName/scheme/metricsPath/…
-```
-
-**每個新畫面都要有穩定、唯一的 `ScreenID`**（`tui.SelectSpec.ScreenID` /
-`InputSpec.ScreenID` / `ConfirmSpec.ScreenID`），不可留空。理由不是風格
-偏好，是既有程式碼自己註記的教訓（見 `edit_tui.go` 裡
-`nfsRosterBootstrapPasswordScreenID` 的註解）：沒有穩定 ID，
-`--actions` JSON scenario（automation driver）就無法對到這個畫面、
-`pilot-trec-verification` 之類靠腳本驅動 TUI 的錄影驗收也會失敗。
-
-**這代表 §77「預期至少涉及」清單漏了一項必要交付物**：每個既有功能都有
-自己的 `cmd/pilot/cmd/edit_automation_driver_<feature>.go`（例如
-`edit_automation_driver_internal_endpoint.go`），把 `--actions` scenario
-的動作對應到上面這些 `ScreenID`；還有
-`cmd/pilot/cmd/edit_automation_driver_screenid_test.go` 這類回歸測試，
-專門檢查「TUI 用到的每個 `ScreenID` 都有 driver 支援」。本功能必須同時
-新增 `edit_automation_driver_monitoring.go`（+ 對應 test），否則新畫面
-群組上不了非互動路徑，且很可能直接讓既有的 screenid 覆蓋率測試 fail。
-
-**存檔慣例**：比照 `edit_tui_internal_endpoints.go` 檔頭註解的作法——
-每次寫入前先呼叫 `internal/inventory` 對應的 `Simulate{Add,Set}...`
-做 dry-run 驗證，通過才呼叫 `Append/Set...` 真的寫檔（用 `yaml.Node`
-局部改寫，不是整份 struct 重新 marshal）。§51「save 前必須重新
-validate」「不因單一 field edit 大幅重排整份檔案」直接繼承這個既有機制，
-不需要另外設計一套。
-
-**回歸測試提醒**：`pushTopMenu` 的選單順序曾經因為插入新項目，讓既有
-4 個依 index 導航的測試靜默壞掉（已修復，但這是真實發生過的坑，非假設
-風險）。本功能改動 `pushTopMenu` 後必須跑全套 `go test`，不能只測
-monitoring 相關的新測試。
-
----
-
-# 35. TUI Target Editor
-
-Target 表單：
-
-```text
-Name
-Address
-Profile
-Site
-Enabled
-Labels
-```
-
-Profile 必須：
-
-```text
-select list
-```
-
-不可讓使用者輸入 arbitrary profile string 而不驗證。
-
----
-
-# 36. TUI Profile Editor
-
-欄位：
-
-```text
-Name
-Job Name
-Scheme
-Metrics Path
-Scrape Interval
-Scrape Timeout
-Auth Reference
-TLS configuration
-```
-
-第一版若 TLS/Auth editor 複雜，可允許：
-
-```text
-CLI / YAML advanced configuration
-```
-
-但 load/save schema 必須完整支援。
-
----
-
-# 37. Contract Model
-
-Monitoring target 不得成為新的 inventory role，例如禁止：
-
-```text
-external-monitoring
-external-host
-monitoring-target
-```
-
-因為 inventory role 代表：
-
-```text
-Pilot 可以對 host 套用 component lifecycle
-```
-
-Monitoring target 是 reference/resource。
-
----
-
-# 38. Prometheus Contract 修改
-
-目前：
-
-```text
-contracts/prometheus.yaml
-```
-
-需要新增外部 monitoring 資料來源的描述。
-
-但不要偽裝成 component dependency。
-
-推薦新增 generic resource input，例如若 contract schema 可擴展：
-
-```yaml
-resourceInputs:
-  - type: monitoringTargets
-    source: monitoring/targets.yml
-    required: false
-```
-
-若現有 contract schema 不適合，第一版可以只在 Prometheus component implementation 處理，並建立 follow-up contract schema。
-
-禁止把它寫成：
-
-```yaml
-dependencies:
-  - component: external-monitoring
-```
-
-因為 external target 不是 component。
-
----
-
-# 39. Managed Node Exporter 與 External Target
-
-既有：
-
-```text
-host-monitoring
-    ↓
-node_exporter_targets
-```
-
-必須保留。
-
-最終 Prometheus target sources：
-
-```text
-Source A
-Pilot managed host-monitoring
-
-Source B
-external monitoring target registry
-
-Source C
-advanced prometheus_scrape_configs
-```
-
----
-
-# 40. 重複 Endpoint 處理
-
-可能發生：
-
-```text
-host-monitoring
-    10.0.0.10:9100
-
-external target
-    10.0.0.10:9100
-```
-
-第一版應允許，因為：
-
-* job 可以不同；
-* profile 可以不同；
-* authentication 可以不同。
-
-但：
-
-```text
-pilot monitoring validate
-```
-
-應產生 warning：
-
-```text
-warning: endpoint 10.0.0.10:9100 is also managed by host-monitoring
-```
-
-不得直接 fail。
-
----
-
-# 41. Target Label
-
-External target 自動加：
-
-```yaml
-pilot_source: external
-pilot_target: <target name>
-```
-
-Managed host-monitoring 建議也逐步補：
-
-```yaml
-pilot_source: managed
-```
-
-但如果這會造成 breaking change，可留待後續。
-
-不得覆蓋 Prometheus built-in：
-
-```text
-job
-instance
-```
-
-除非有明確設計。
-
----
-
-# 42. DNS
-
-Target `address` 可使用：
-
-```text
-IP
-FQDN
-```
-
-例如：
-
-```text
-nas01.pilot.internal:9633
-```
-
-Pilot 不需要在 registry 展開 IP。
-
-Prometheus 應直接使用 hostname，以允許 DNS address change。
-
-`target test` 時可以顯示目前 DNS resolution。
-
----
-
-# 43. IPv6
-
-address parser 必須使用標準 Go `net.SplitHostPort` 或相同 semantics。
-
-支援：
-
-```text
-[2001:db8::1]:9100
-```
-
-不得自行用：
-
-```text
-strings.Split(address, ":")
-```
-
----
-
-# 44. TLS
-
-HTTPS profile：
-
-```yaml
-scheme: https
-```
-
-至少支援：
-
-```yaml
-tls:
-  serverName: exporter.example.internal
-  insecureSkipVerify: false
-```
-
-如果：
-
-```yaml
-insecureSkipVerify: true
-```
-
-`pilot monitoring validate` 必須顯示 security warning，但第一版可允許。
-
-例如：
-
-```text
-warning: profile storage-exporter disables TLS certificate verification
-```
-
----
-
-# 45. CA Reference
-
-若 Pilot 已有 FreeIPA CA / CA distribution model，profile 的：
-
-```yaml
-tls:
-  caRef: pilot-root-ca
-```
-
-未來可整合。
-
-第一版若無 generic CA registry，允許：
-
-```text
-caRef
-```
-
-只接受既有定義，或先不實作 `caRef` 實際解析。
-
-不能把 arbitrary local path 作為預設 public schema，例如避免：
-
-```yaml
-caFile: ../../secret.pem
-```
-
-若第一版無法完整實作 `caRef`：
-
-* schema 可以暫不加入；
-* 不得留下半實作 credential path injection。
-
----
-
-# 46. Authentication
-
-至少考慮：
-
-```text
-none
-basic
-bearer
-```
-
-第一版最低要求：
-
-```text
-none
-basic
-```
-
-Profile：
-
-```yaml
-authRef: external-node-auth
-```
-
-Secret registry：
-
-```yaml
-monitoring_auth:
-  external-node-auth:
-    type: basic
-    username: prometheus
-    password: ...
-```
-
-Prometheus config 應使用：
-
-```yaml
-basic_auth:
-  username: prometheus
-  password_file: ...
-```
-
-而非直接 render password。
-
----
-
-# 47. Secret File
-
-如果需要 password file：
-
-```text
-/etc/pilot/prometheus/secrets/
-```
-
-container：
-
-```text
-/etc/prometheus/secrets/
-```
-
-permission：
-
-```text
-0600
-```
-
-不得放在：
-
-```text
-targets/*.json
-```
-
-File SD JSON 必須完全不含 secret。
-
----
-
-# 48. Generated File Ownership
-
-推薦：
-
-```text
-/etc/pilot/prometheus/targets/*.json
-```
-
-owner/group 應符合 Prometheus container 能讀取的權限。
-
-不可 world-writable。
-
----
-
-# 49. Garbage Collection
-
-若 profile 被刪除，例如原有：
-
-```text
-storage.json
-```
-
-新 configuration 不再包含 storage profile：
-
-Pilot apply 必須移除舊：
-
-```text
-/etc/pilot/prometheus/targets/storage.json
-```
-
-否則會留下 stale generated files。
-
-只允許刪除：
-
-```text
-Pilot-owned generated target files
-```
-
-不能：
-
-```text
-rm -rf /etc/pilot/prometheus/targets/*
-```
-
-除非整個 directory 已定義為 100% Pilot generated ownership。
-
-推薦在檔案加入 generated manifest 或全 directory ownership。
-
----
-
-# 50. Profile Remove Safety
-
-執行：
-
-```bash
-pilot monitoring profile remove storage-exporter
-```
-
-如果仍有 target：
-
-```yaml
-profile: storage-exporter
-```
-
-必須拒絕。
-
-例如：
-
-```text
-cannot remove profile "storage-exporter":
-used by targets: nas01, nas02
-```
-
-不可 cascade delete。
-
----
-
-# 51. Serialization
-
-CLI/TUI 更新 YAML 時：
-
-* 保持 deterministic ordering；
-* 不因單一 field edit 大幅重排整份檔案；
-* 不產生重複 keys；
-* save 前必須重新 validate。
-
-如果既有 Pilot 有 YAML persistence helper，優先重用。
-
----
-
-# 52. Structured Actions / Agent Support
-
-此功能必須設計成 Agent 不需要修改 raw YAML。
-
-未來或本次直接提供 structured actions：
-
-```text
-monitoring.target.list
-monitoring.target.get
-monitoring.target.add
-monitoring.target.update
-monitoring.target.remove
-monitoring.target.test
-
-monitoring.profile.list
-monitoring.profile.get
-monitoring.profile.add
-monitoring.profile.update
-monitoring.profile.remove
-
-monitoring.validate
-```
-
----
-
-# 53. Structured Action Safety
-
-以下：
-
-```text
-list
-get
-validate
-test
-```
-
-為 read-only。
-
-以下：
-
-```text
-add
-update
-enable
-disable
-```
-
-為 workspace mutation。
-
-以下：
-
-```text
-remove
-```
-
-為 destructive workspace mutation。
-
-必須套用 Pilot 現有 structured action confirmation / receipt / evidence 慣例。
-
-不得因 external target 是「非 managed」就跳過 audit。
-
----
-
-# 54. MCP / Agent 重要限制
-
-Agent 不應：
-
-```text
-直接 edit prometheus.yml
-直接修改 generated file_sd JSON
-直接寫 /etc/pilot/prometheus/targets/*
-```
-
-Agent 應只改：
-
-```text
-monitoring/targets.yml
-monitoring/scrape-profiles.yml
-```
-
-或使用 structured actions。
-
-Generated artifacts 永遠由 Pilot compiler 產生。
-
----
-
-# 55. Apply Workflow
-
-> 已依 §22 的修正同步調整：拿掉 §22 原本假設、但現況不存在的
-> 「暫存檔 + `promtool check config` 前置關卡」，改成
-> `playbooks/apply/prometheus-apply.yml` 現有的「直接渲染到最終路徑
-> → changed 旗標併入既有單一 restart 判斷式 → `/-/ready` 健康檢查 →
-> `rescue:` 只清密碼檔並 fail-loud」模式。這不是把驗證拿掉，是把「language
-> 驗證」（pure Go、apply 前）跟「有沒有把 Prometheus 弄壞」（既有
-> health-check、apply 中）兩件事對應到 repo 已經在用的兩個不同機制，而不是
-> 發明一個兩者都做、但目前不存在的第三種機制。
-
-Prometheus apply 最終流程：
-
-```text
-Prepare
-  ↓
-`pilot monitoring validate`（純 Go、apply 前、離線）
-— schema、profile 存在、jobName 唯一/非保留字、address 格式、
-  authRef/TLS 參照 全部在這一步擋掉；未通過就不進入 Ansible apply
-  ↓
-Load workspace monitoring config（Ansible 讀取，不重新驗證）
-  ↓
-Compile profiles and targets（記憶體內）
-  ↓
-Render file_sd JSON 直接到 {{ prometheus_targets_host_dir }}/*.json
-（ansible.builtin.copy，逐檔 register changed；copy 本身即
- write-temp-then-rename，不需要另外的暫存路徑步驟）
-  ↓
-移除不再有 target 的舊 file_sd JSON（ansible.builtin.file: state=absent，
-GC，§49；同樣 register changed）
-  ↓
-把 external scrape block 併入既有 render prometheus.yml 任務
-（§20 順序：prometheus_scrape_configs → prometheus_node_exporter_scrape_block
- → 新的 external block；一樣直接渲染到最終路徑，非暫存）
-  ↓
-把以上所有 changed 旗標併入既有的單一 restart 判斷式
-（pilot-prometheus docker_container 任務的 restart: 條件）
-  ↓
-既有 Wait for Prometheus /-/ready 健康檢查
-— 這是本功能唯一可用的 apply-time runtime 把關，取代原本設想的
-  「apply 前 promtool」
-  ↓
-既有 rescue:（清掉 monitoring_auth 產生的 password file，理由同既有
-  objstore.yml 清理；fail-loud，不 rollback 已寫入的 config 內容）
-  ↓
-Verify targets（`pilot verify` 的套用後、唯讀新增 checks，見 §56 C15-C18
-  以及本節新增的 promtool-check-config row，同款姿勢比照既有 C10）
-```
-
----
-
-# 56. Runtime Verification
-
-新增 verification checks。
-
-例如：
-
-## C15 — external scrape config
-
-如果存在 external target：
-
-```text
-prometheus.yml
-```
-
-必須包含：
-
-```text
-file_sd_configs
-```
-
----
-
-## C16 — file_sd generated
-
-例如：
-
-```text
-/etc/pilot/prometheus/targets/*.json
-```
-
-存在且合法 JSON。
-
----
-
-## C17 — external target visible
-
-Prometheus API：
-
-```text
-/api/v1/targets
-```
-
-必須可以找到：
-
-```text
-pilot_source="external"
-```
-
-至少一筆 target。
-
----
-
-## C18 — enabled external target UP
-
-若測試環境有已知 exporter：
-
-```promql
-up{pilot_source="external"} == 1
-```
-
-必須成功。
-
-此 check 若 deployment 沒設定 external target，應：
-
-```text
-N/A
-```
-
-而非 fail。
-
----
-
-## C-new — prometheus.yml 語法有效（promtool check config）
-
-> 見 §22/§55 的修正：apply playbook 本身不跑 `promtool`；語法正確性改成
-> 這裡——套用後、唯讀的驗證 row，姿勢完全比照
-> `docs/verification/prometheus.md` 既有的 C10（`promtool check rules`）。
-> 實際編號併入該文件時，由既有序號延伸決定，這裡先用 `C-new` 佔位，不假裝
-> 已知道會排到第幾號。
-
-```bash
-docker exec pilot-prometheus promtool check config /etc/prometheus/prometheus.yml
-```
-
-exit code 必須為 0。這一條同時涵蓋 external scrape block 本身的語法正確性，
-以及它跟既有 `prometheus_scrape_configs`/`prometheus_node_exporter_scrape_block`
-組合後的整份 `prometheus.yml` 是否仍然合法——是本功能對「config 語法正確」
-這件事唯一的把關點，取代原本設想、但不存在的 apply-time 前置關卡。
-
----
-
-# 57. Validation Scope
-
-Verification spec 必須明確區分：
-
-### configuration correctness
-
-```text
-targets.yml valid
-profile valid
-file_sd generated
-Prometheus config valid
-```
-
-### connectivity correctness
-
-```text
-target reachable
-metrics response valid
-Prometheus scrape UP
-```
-
-External target unavailable 不應造成：
-
-```text
-prometheus container apply impossible
-```
-
-除非 target 明確標示為 required，第一版不提供 required semantics。
-
----
-
-# 58. Failure Semantics
-
-若 external exporter unreachable：
-
-Prometheus 本身仍應成功部署。
-
-例如：
-
-```text
-nas01 DOWN
-```
-
-不得讓：
-
-```text
-pilot deploy prometheus
-```
-
-fail 在 config render 階段。
-
-但：
-
-```text
-pilot monitoring target test nas01
-```
-
-必須 fail。
-
-Prometheus runtime：
-
-```text
-up{pilot_target="nas01"} = 0
-```
-
-由 alerts 處理。
-
----
-
-# 59. Optional Required Target
-
-第一版不要加入：
-
-```yaml
-required: true
-```
-
-避免 deployment availability 與 third-party endpoint availability 綁死。
-
-如果未來需要再另案設計。
-
----
-
-# 60. Alert Rules
-
-本次不自動建立 exporter-specific alert rules。
-
-但應確保使用者可以寫：
-
-```promql
-up{
-  pilot_source="external",
-  pilot_target="nas01"
-} == 0
-```
-
-未來可以新增 generic：
-
-```text
-ExternalTargetDown
-```
-
-但不是本規格必要項。
-
----
-
-# 61. Default Generic External Target Alert
-
-若本次實作成本低，可新增：
-
-```yaml
-- alert: ExternalTargetDown
-  expr: up{pilot_source="external"} == 0
-  for: 5m
-```
-
-但需注意：
-
-* 不是所有 exporter 都是 critical；
-* 第三方 maintenance 可能造成 alert noise。
-
-因此建議本次 **不自動加入**。
-
----
-
-# 62. File Naming
-
-不要直接用 target name 作 file name。
-
-應使用：
-
-```text
-jobName
-```
-
-並做安全 sanitize。
-
-例如：
-
-```text
-postgres-exporter
-```
-
-→
-
-```text
-postgres-exporter.json
-```
-
-profile name 與 job name 不一致時，以 compiler internal deterministic mapping 為準。
-
----
-
-# 63. Reserved Names
-
-建議禁止 profile jobName：
-
-```text
-prometheus
-node
-```
-
-因為目前：
-
-```text
-job="prometheus"
-job="node"
-```
-
-已有既有語意。
-
-除非明確允許 override。
-
-第一版應直接 validator fail。
-
----
-
-# 64. Compatibility
-
-既有 workspace：
-
-```text
-沒有 monitoring/targets.yml
-```
-
-必須等效於：
-
-```yaml
-schemaVersion: 1
-targets: []
-```
-
-既有：
-
-```text
-prometheus_scrape_configs
-```
-
-不得失效。
-
-既有：
-
-```text
-host-monitoring
-```
-
-不得改變。
-
----
-
-# 65. Migration
-
-不需要 migration existing configuration。
-
-如果使用者現在已在：
-
-```yaml
-prometheus_scrape_configs:
-```
-
-手動定義 external exporters：
-
-Pilot 不自動轉換。
-
-文件提供人工 migration guide：
-
-```text
-raw scrape job
-    ↓
-scrape profile
-+
-monitoring targets
-```
-
----
-
-# 66. Documentation
-
-新增：
-
-```text
-docs/verification/prometheus-external-targets.md
-```
-
-或整合至：
-
-```text
-docs/verification/prometheus.md
-```
-
-建議獨立文件，Prometheus spec 再引用。
-
-新增 runbook：
-
-```text
-docs/runbooks/prometheus-external-targets.md
-```
-
-內容至少包括：
-
-1. architecture
-2. add exporter
-3. add profile
-4. authentication
-5. TLS
-6. target test
-7. Prometheus query
-8. troubleshooting
-9. migration from `prometheus_scrape_configs`
-
----
-
-# 67. CLI Help
-
-例如：
-
-```bash
-pilot monitoring target add --help
-```
-
-必須清楚說明：
-
-> This registers a Prometheus scrape endpoint. It does not enroll or configure the remote host through Ansible.
-
-避免使用者誤認 Pilot 會管理遠端設備。
-
----
-
-# 68. Testing
-
-至少新增以下 unit tests。
-
-## Target parsing
-
-* valid targets
-* empty file
-* missing file
-* invalid schema version
-* duplicate name
-* invalid address
-* IPv6
-* missing profile
-
-## Profile parsing
-
-* valid profile
-* invalid scheme
-* duplicate job name
-* invalid duration
-* reserved job name
-
-## Compiler
-
-* one target
-* multiple targets same profile
-* multiple profiles
-* labels
-* site
-* disabled target
-* deterministic output
-
-## file_sd
-
-* JSON valid
-* one entry per target
-* reserved labels protected
-* secret never rendered
-
----
-
-# 69. CLI Tests
-
-至少：
-
-```text
-target list
-target add
-target edit
-target remove
-target enable
-target disable
-profile add
-profile remove
-validate
-```
-
-並測試：
-
-```text
-profile still in use → remove rejected
-```
-
----
-
-# 70. Prometheus Regression Tests
-
-修改既有：
-
-```text
-internal/spec/prometheus_regression_test.go
-```
-
-或新增適當 regression tests。
-
-至少驗證：
-
-1. node exporter 原行為仍存在。
-2. self scrape 原行為仍存在。
-3. custom `prometheus_scrape_configs` 仍存在。
-4. external file_sd scrape block 正確。
-5. target directory mount 正確。
-6. empty external targets 不產生 invalid config。
-
----
-
-# 71. Golden Test
-
-建議建立 golden fixtures：
-
-```text
-testdata/monitoring/
-├── basic/
-├── multi-profile/
-├── disabled/
-├── tls/
-└── invalid/
-```
-
-Compiler output 使用 golden test。
-
-避免未來小改動無意間改變 Prometheus config。
-
----
-
-# 72. Idempotency
-
-同一份：
-
-```text
-targets.yml
-scrape-profiles.yml
-```
-
-連續 apply：
-
-第二次必須：
-
-```text
-changed=0
-```
-
-或符合 Pilot 現有 idempotency contract。
-
-Generated JSON serialization 必須 deterministic，不能因 map iteration 順序每次改變。
-
----
-
-# 73. Security Tests
-
-至少驗證：
-
-```text
-password 不出現在 file_sd JSON
-password 不出現在 prometheus.yml
-password 不出現在 CLI logs
-password 不出現在 target test output
-```
-
-若使用 password_file：
-
-驗證：
-
-```text
-file permission
-container mount
-path correctness
-```
-
----
-
-# 74. Error Messages
-
-錯誤必須帶 actionable context。
-
-錯誤：
-
-```text
-unknown profile
-```
-
-應為：
-
-```text
-monitoring target "nas01" references unknown scrape profile
-"storage-exporter"
-```
-
-錯誤：
-
-```text
-invalid address
-```
-
-應為：
-
-```text
-monitoring target "nas01":
-address "nas01.pilot.internal" must include an explicit port
-```
-
----
-
-# 75. CLI Exit Code
-
-以下必須 non-zero：
-
-```text
-pilot monitoring validate
-pilot monitoring target test
-```
-
-發生 failure 時。
-
-`target list` 即使 registry 為空仍 exit 0。
-
----
-
-# 76. Empty State
-
-```bash
-pilot monitoring target list
-```
-
-沒有 targets 時：
-
-```text
-No external monitoring targets configured.
-```
-
-不要視為 error。
-
----
-
-# 77. Repository Suggested Changes
-
-> 已依 §34 的修正補上原本漏列的 automation driver 交付物——`pilot edit`
-> 的每個既有功能都是「`edit_tui_<feature>.go`（畫面）+
-> `edit_automation_driver_<feature>.go`（把 `--actions` JSON scenario 對應
-> 到畫面的 `ScreenID`）+ 對應 test」三件一組（例如
-> `edit_tui_internal_endpoints.go` +
-> `edit_automation_driver_internal_endpoint.go` +
-> `edit_automation_driver_internal_endpoint_test.go`）。只列 TUI 畫面、
-> 漏掉 driver，這個功能就進不了 `--actions` 非互動路徑，且很可能讓既有的
-> `edit_automation_driver_screenid_test.go`（檢查「TUI 用到的每個
-> `ScreenID` 都有 driver 支援」）直接 fail。
-
-預期至少涉及：
-
-```text
-internal/monitoring/
-cmd/pilot/cmd/edit_tui_monitoring.go
-cmd/pilot/cmd/edit_automation_driver_monitoring.go
-cmd/pilot/cmd/edit_automation_driver_monitoring_test.go
-cmd/pilot/cmd/                                            # 其餘：CLI 子命令、pushTopMenu 選單項目、MCP tool 註冊
-playbooks/apply/prometheus-apply.yml
-contracts/prometheus.yaml
-docs/verification/
-docs/runbooks/
-internal/spec/
-```
-
-以及相關 TUI/MCP structured-action 程式碼——尤其是上面明列的 automation
-driver 檔案，不得只完成 `edit_tui_monitoring.go` 就視為 TUI 整合已完成。
-
-Coding agent 必須先搜尋 repository 現行：
-
-```text
-workspace loading
-YAML editing
-structured actions
-TUI edit routing
-contract parsing
-secret handling
-```
-
-的既有 pattern，再決定實際 file placement。
-
-禁止為本功能建立一套平行 framework。
-
----
-
-# 78. 實作順序
-
-## Phase 1 — Domain Model
-
-完成：
-
-```text
-internal/monitoring
-targets.yml
-scrape-profiles.yml
-validation
-compiler
-tests
-```
-
-完成條件：
-
-```text
-pure Go tests pass
-```
-
----
-
-## Phase 2 — Prometheus Integration
-
-完成：
-
-```text
-file_sd JSON generation
-scrape block generation
-Docker volume
-promtool validation
-garbage collection
-```
-
-完成條件：
-
-```text
-external target 可出現在 Prometheus targets API
-```
-
----
-
-## Phase 3 — CLI
-
-完成：
-
-```text
-list
-add
-edit
-remove
-enable
-disable
-test
-validate
-```
-
----
-
-## Phase 4 — TUI
-
-完成：
-
-```text
-Pilot edit Monitoring
-Target editor
-Profile editor
-```
-
----
-
-## Phase 5 — Agent / Structured Actions
-
-完成：
-
-```text
-structured monitoring operations
-audit/receipt
-MCP exposure where appropriate
-```
-
----
-
-## Phase 6 — Verification / Documentation
-
-完成：
-
-```text
-verification spec
-runbook
-regression tests
-idempotency
-```
-
----
-
-# 79. Acceptance Criteria
-
-整體功能必須符合以下條件。
-
-## AC1
-
-一台完全不存在於 Pilot `hosts.yml` 的 exporter：
-
-```text
-10.20.30.40:9100
-```
-
-可以被加入：
-
-```text
-monitoring/targets.yml
-```
-
-並由 Prometheus scrape。
-
----
-
-## AC2
-
-Pilot 不會嘗試 SSH/Ansible 到該 target。
-
----
-
-## AC3
-
-使用者不需要修改：
-
-```text
-prometheus_scrape_configs
-```
-
-即可新增 exporter。
-
----
-
-## AC4
-
-增加 target 不會覆蓋：
-
-```text
-Prometheus self scrape
-Pilot managed node exporter
-```
-
----
-
-## AC5
-
-`pilot monitoring target test` 可以獨立測試 exporter。
-
----
-
-## AC6
-
-Target 可使用：
-
-```text
-IPv4
-IPv6
-FQDN
-```
-
----
-
-## AC7
-
-Target labels 正確出現在 Prometheus。
-
----
-
-## AC8
-
-Disabled target 不會出現在 Prometheus。
-
----
-
-## AC9
-
-不存在 profile 時 validation fail。
-
----
-
-## AC10
-
-刪除仍被 target 使用的 profile 必須被阻止。
-
----
-
-## AC11
-
-Secrets 不得出現在：
-
-```text
-targets.yml
-file_sd JSON
-prometheus.yml
-logs
-```
-
----
-
-## AC12
-
-既有沒有 monitoring config 的 workspace 行為完全不變。
-
----
-
-## AC13
-
-既有：
-
-```text
-host-monitoring -> node_exporter_targets
-```
-
-行為完全不變。
-
----
-
-## AC14
-
-既有：
-
-```text
-prometheus_scrape_configs
-```
-
-仍可使用。
-
----
-
-## AC15
-
-重複 apply 必須符合 Pilot idempotency requirement。
-
----
-
-# 80. Completion Definition
-
-Coding agent 不得只完成資料結構或 CLI。
-
-功能完成必須同時包含：
-
-```text
-Schema
-    +
-Validation
-    +
-Compiler
-    +
-Prometheus integration
-    +
-CLI
-    +
-TUI
-    +
-Tests
-    +
-Verification
-    +
-Documentation
-```
-
-若 repository 目前某一層架構尚不足，例如 structured action contract 無 generic resource 支援：
-
-不得用不合理 hack 強行塞進 existing component dependency。
-
-應：
-
-1. 保持 domain model 正確；
-2. 完成本次可安全完成的 integration；
-3. 建立明確 TODO / follow-up；
-4. 在 implementation report 說明限制。
-
----
-
-# 81. Coding Agent 執行要求
-
-正式修改前，Coding Agent 必須先調查：
-
-```text
-internal/inventory
-contracts/
-prometheus contract
-prometheus apply playbook
-pilot edit TUI
-structured actions
-MCP edit tools
-secret/vault implementation
-verification specs
-regression tests
-```
-
-不得只根據本規格推測 API。
-
-如本規格中的建議 file path、type name、CLI routing 與 repository 現有 abstraction 衝突：
-
-> 優先沿用 repository 現有 abstraction，但不得改變本規格定義的 domain boundary 與使用者行為。
-
-尤其不得為了少改程式而把：
-
-```text
-Monitoring Target
-```
-
-重新包裝成：
-
-```text
-Inventory Host / Role
-```
-
----
-
-# 82. 最重要的不變量
-
-實作完成後，以下敘述必須成立：
-
-> **Pilot inventory 描述「Pilot 管理什麼主機」；Monitoring Target Registry 描述「Prometheus 要監控什麼 endpoint」。**
-
-以及：
-
-> **Prometheus target discovery 不得依賴 Ansible lifecycle。**
-
-以及：
-
-> **Agent 新增 external exporter 時，不需要也不應直接修改 arbitrary Prometheus YAML。**
-
-這三項為本改版最主要的架構約束。
-
+The optional forced Approval mechanism MUST wrap mutation/activation plans. It MUST NOT reintroduce access-* or require changes to the HBAC/grant subject-target model.

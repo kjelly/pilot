@@ -30,8 +30,8 @@
 > **已部署服務的 day-2 宣告式設定**（例如 FreeIPA 使用者、群組、HBAC 與 sudo
 > roster）改用 `pilot reconcile`。它和 `pilot deploy` 共用 preflight、stage gate、
 > preview 與確認機制，但只列出已具 contract、apply playbook、schema 與驗證證據的
-> reconciler；目前可用項目是 `freeipa-identity`。未來 Nginx config 也必須先具備這些
-> 交付物才會出現在清單中。
+> reconciler；可在清單中用 Space 複選多個 day-2 元件，按 Enter 後依序執行。未來
+> Nginx config 也必須先具備這些交付物才會出現在清單中。
 
 ---
 
@@ -532,6 +532,8 @@ pilot edit --actions scenario.json --presentation --trace-out edit-workflow.json
 
 scenario 的 `steps` 先放 edit actions，最後可放 `deploy`／`reconcile` action；
 每個後續 action 透過 `answers` 提供 prompt 的可見 label、文字或確認答案。
+reconcile 的元件清單支援 `{ "prompt": "...", "selects": ["元件 A", "元件 B"] }`
+一次選取多個元件；舊的單一 `{ "select": "元件" }` 仍相容。
 這條路徑仍會經過 deploy/reconcile 原有的 preflight、preview、stage gate、
 confirmation 與 transaction。`--presentation` 會把每個高階 edit action 展開成
 邏輯上的鍵盤指令（例如 `↓ × 2 → Enter`）。但它是 process 內的 Tea model
