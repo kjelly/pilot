@@ -279,11 +279,34 @@ func (d *automationDriver) setMonitoringProfileScheme(r *editRouterModel, name, 
 	return d.choose(r, scheme)
 }
 
-// setMonitoringProfileTextField shares one implementation for the four
-// plain-text profile fields (metricsPath/scrapeInterval/scrapeTimeout/
-// authRef) — label is the detail screen's row label to select
-// (e.g. "metricsPath"), matching pushMonitoringProfileFieldText's own
-// single shared TUI implementation for the same four fields.
+func (d *automationDriver) setMonitoringProfileMetricsPath(r *editRouterModel, name, metricsPath string) error {
+	if err := d.ensureMonitoringProfileDetail(r, name); err != nil {
+		return err
+	}
+	if err := d.choose(r, "metricsPath"); err != nil {
+		return err
+	}
+	switch metricsPath {
+	case "/pve":
+		return d.choose(r, "PVE exporter：/pve")
+	case "/metrics":
+		return d.choose(r, "一般 Prometheus exporter：/metrics")
+	default:
+		if err := d.choose(r, "自訂 metricsPath…"); err != nil {
+			return err
+		}
+		if err := d.typeText(r, metricsPath, true); err != nil {
+			return err
+		}
+		return d.enter(r)
+	}
+}
+
+// setMonitoringProfileTextField shares one implementation for the three
+// plain-text profile fields (scrapeInterval/scrapeTimeout/authRef) — label is
+// the detail screen's row label to select
+// (e.g. "scrapeInterval"), matching pushMonitoringProfileFieldText's own
+// single shared TUI implementation for these fields.
 func (d *automationDriver) setMonitoringProfileTextField(r *editRouterModel, name, label, value string) error {
 	if err := d.ensureMonitoringProfileDetail(r, name); err != nil {
 		return err

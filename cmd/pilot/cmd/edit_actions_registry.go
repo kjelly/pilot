@@ -1552,7 +1552,7 @@ func editActionRegistry() []editActionDef {
 			},
 			Validate: validateMonitoringProfileNameAnd("metrics_path"),
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
-				return d.setMonitoringProfileTextField(r, step.Name, "metricsPath", step.MetricsPath)
+				return d.setMonitoringProfileMetricsPath(r, step.Name, step.MetricsPath)
 			},
 		},
 		{

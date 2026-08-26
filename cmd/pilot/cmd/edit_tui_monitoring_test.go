@@ -42,6 +42,14 @@ func TestEditRouter_Teatest_MonitoringFlow_AddProfileAddTargetAndSave(t *testing
 
 	// profile detail: 0 jobname,1 scheme,2 metricspath,3 scrapeinterval,
 	// 4 scrapetimeout,5 authref,6 tls,7 delete,8 back
+	for i := 0; i < 2; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> metricsPath choices
+	// metricsPath choices: 0 PVE exporter (/pve), 1 generic (/metrics),
+	// 2 custom, 3 back
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // choose PVE exporter path
+
 	for i := 0; i < 8; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
@@ -106,7 +114,7 @@ func TestEditRouter_Teatest_MonitoringFlow_AddProfileAddTargetAndSave(t *testing
 		t.Fatalf("LoadProfiles: %v", err)
 	}
 	p, ok := pf.Profiles["storage-exporter"]
-	if !ok || p.JobName != "storage" {
+	if !ok || p.JobName != "storage" || p.MetricsPath != "/pve" {
 		t.Fatalf("unexpected scrape-profiles.yml content: %+v", pf.Profiles)
 	}
 }

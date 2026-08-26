@@ -154,7 +154,7 @@ func pushMonitoringProfileDetail(r *editRouterModel, dir, name, banner string) t
 		case 1:
 			return pushMonitoringProfileFieldScheme(r, dir, name)
 		case 2:
-			return pushMonitoringProfileFieldText(r, dir, name, "metrics-path", "metricsPath(留空使用預設 /metrics)", func(p *monitoring.Profile) *string { return &p.MetricsPath })
+			return pushMonitoringProfileMetricsPathMenu(r, dir, name, "")
 		case 3:
 			return pushMonitoringProfileFieldText(r, dir, name, "scrape-interval", "scrapeInterval(例如 15s；留空使用 Prometheus global 設定)", func(p *monitoring.Profile) *string { return &p.ScrapeInterval })
 		case 4:
@@ -169,6 +169,37 @@ func pushMonitoringProfileDetail(r *editRouterModel, dir, name, banner string) t
 			return pushMonitoringProfilesMenu(r, dir, "")
 		}
 		return nil
+	})
+}
+
+// pushMonitoringProfileMetricsPathMenu makes the two exporter conventions
+// visible instead of forcing operators to remember that the Proxmox VE
+// exporter serves data from /pve while its /metrics endpoint only exposes
+// the exporter's own process metrics. Custom paths remain available for
+// every other exporter.
+func pushMonitoringProfileMetricsPathMenu(r *editRouterModel, dir, name, banner string) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: "mon.profile.metrics-path.pve", Label: "PVE exporter：/pve"},
+		{ID: "mon.profile.metrics-path.metrics", Label: "一般 Prometheus exporter：/metrics"},
+		{ID: "mon.profile.metrics-path.custom", Label: "自訂 metricsPath…"},
+		{ID: "mon.profile.metrics-path.back", Label: "↩  返回"},
+	}
+	spec := tui.SelectSpec{ScreenID: "mon.profile.metrics-path", Title: fmt.Sprintf("Profile %q — 選 metricsPath", name), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.SelectScreen)
+		if m.Canceled() {
+			return pushMonitoringProfileDetail(r, dir, name, "")
+		}
+		switch m.Selected() {
+		case 0:
+			return commitMonitoringProfileMutation(r, dir, name, "", func(p *monitoring.Profile) { p.MetricsPath = "/pve" })
+		case 1:
+			return commitMonitoringProfileMutation(r, dir, name, "", func(p *monitoring.Profile) { p.MetricsPath = "/metrics" })
+		case 2:
+			return pushMonitoringProfileFieldText(r, dir, name, "metrics-path.custom", "自訂 metricsPath(例如 /metrics 或 /pve)", func(p *monitoring.Profile) *string { return &p.MetricsPath })
+		default:
+			return pushMonitoringProfileDetail(r, dir, name, "")
+		}
 	})
 }
 

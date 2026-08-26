@@ -27,6 +27,7 @@ func TestEditAutomationDriverMonitoringFlow(t *testing.T) {
 			{Action: "enable_monitoring_target", Name: "nas01"},
 			{Action: "set_monitoring_profile_scheme", Name: "storage-exporter", Scheme: "https"},
 			{Action: "set_monitoring_profile_metrics_path", Name: "storage-exporter", MetricsPath: "/custom-metrics"},
+			{Action: "set_monitoring_profile_metrics_path", Name: "storage-exporter", MetricsPath: "/pve"},
 			{Action: "set_monitoring_profile_scrape_interval", Name: "storage-exporter", ScrapeInterval: "30s"},
 			{Action: "set_monitoring_profile_auth_ref", Name: "storage-exporter", AuthRef: "storage-auth"},
 			{Action: "set_monitoring_profile_tls", Name: "storage-exporter", TLSServerName: "exporter.pilot.internal", TLSInsecureSkipVerify: "true"},
@@ -53,7 +54,7 @@ func TestEditAutomationDriverMonitoringFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("expected profile storage-exporter to exist")
 	}
-	if p.Scheme != "https" || p.MetricsPath != "/custom-metrics" || p.ScrapeInterval != "30s" || p.AuthRef != "storage-auth" {
+	if p.Scheme != "https" || p.MetricsPath != "/pve" || p.ScrapeInterval != "30s" || p.AuthRef != "storage-auth" {
 		t.Fatalf("unexpected profile fields: %+v", p)
 	}
 	if p.TLS == nil || p.TLS.ServerName != "exporter.pilot.internal" || !p.TLS.InsecureSkipVerify {
