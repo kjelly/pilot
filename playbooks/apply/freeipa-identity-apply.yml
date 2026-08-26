@@ -175,10 +175,16 @@
           # `pilot roster lint` could not catch it because the Go side already
           # permitted the shape. Found live round 18 (2026-07-30).
           # `grants` (schema v3, roster-v2-to-v3 migration spec §5) is
-          # accepted here but not otherwise consumed by this playbook yet —
-          # v3.0 only makes it a recognized, always-empty schema section;
-          # nothing reconciles populated grants entries against FreeIPA
-          # until a later v3.x delivers that.
+          # accepted here. Its `temporary_grant`/`sudo_grant` entries are
+          # NOT reconciled by loading `freeipa_roster.grants` directly —
+          # that would require duplicating this file's lifecycle math in
+          # Jinja. Instead `pilot access reconcile --once`
+          # (internal/inventory's injected-clock lifecycle evaluator/
+          # compiler, spec.md §8/§9/§10) decides what should exist and
+          # feeds the result in via the `pilot_compiled_grant_*` extra-vars
+          # this file's "Append v3.0 compiled grant ... rules" tasks below
+          # read — see those tasks for the exact shape. `kind: breakglass`
+          # entries are Phase 3 (spec.md §14) and are not compiled here.
           - >-
             ((freeipa_roster.freeipa | default({})).keys() | list |
              difference(['domain', 'realm', 'server', 'admin', 'defaults', 'safety'])) | length == 0
@@ -586,6 +592,25 @@
         - freeipa_roster.schema_version is defined
         - item.state | default('present') == 'present'
       tags: [always, C15, C16, C17]
+
+    # v3.0 grants compiled rules (spec.md §9/§10): `pilot access reconcile
+    # --once` already decided, in Go with an injected clock, exactly what
+    # should exist right now — these two tasks just append that decision
+    # onto the same ipa_hbac_rules/ipa_sudo_rules lists the tasks above
+    # build from hand-authored hbac.rules/sudo.rules, so every
+    # create/attach/detach/enable-disable task below this point handles a
+    # compiled grant rule identically to a hand-authored one, with zero
+    # new Jinja reconcile logic. Absent when this playbook is invoked any
+    # other way (default([]) keeps that a no-op, not an error).
+    - name: "Append v3.0 compiled grant HBAC rules (spec.md §9)"
+      ansible.builtin.set_fact:
+        ipa_hbac_rules: "{{ ipa_hbac_rules + (pilot_compiled_grant_hbac_rules | default([])) }}"
+      tags: [always, identity, hbac]
+
+    - name: "Append v3.0 compiled grant sudo rules (spec.md §10)"
+      ansible.builtin.set_fact:
+        ipa_sudo_rules: "{{ ipa_sudo_rules + (pilot_compiled_grant_sudo_rules | default([])) }}"
+      tags: [always, identity, sudo]
 
     - name: "Select legacy admin settings"
       ansible.builtin.set_fact:
@@ -1867,6 +1892,23 @@
          'Enabled: False' not in ipa_hbacrule_show.results[ipa_hbac_enabled_index].stdout)
       tags: [identity, hbac, C14]
 
+    # Pilot may safely delete these specific rules (unlike any
+    # hand-authored hbac.rules entry) because their names live entirely in
+    # pilot's own deterministic namespace (CompiledLoginRuleName,
+    # internal/inventory/grant_compile.go) — a grant whose `state` went to
+    # `absent` compiled to Present=false, landing its name here instead of
+    # in ipa_hbac_rules (spec.md §9's `absent -> absent` row).
+    - name: "Prune v3.0 grant HBAC rules whose grant is now absent (spec.md §9)"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-del, "{{ item }}"]
+      loop: "{{ pilot_compiled_grant_hbac_prune | default([]) }}"
+      register: ipa_grant_hbac_prune
+      changed_when: "'Deleted HBAC rule' in (ipa_grant_hbac_prune.stdout | default(''))"
+      failed_when:
+        - ipa_grant_hbac_prune.rc != 0
+        - "'not found' not in (ipa_grant_hbac_prune.stderr | default(''))"
+      tags: [identity, hbac]
+
     - name: "Inspect default allow_all HBAC state"
       ansible.builtin.command:
         argv: [ipa, hbacrule-show, allow_all, --all]
@@ -2363,6 +2405,45 @@
         (not item.enabled | default(true) and
          'Enabled: False' not in ipa_sudorule_show.results[ipa_sudo_enabled_index].stdout)
       tags: [identity, sudo, C17]
+
+    # v3.0 sudo_grant native timed attributes (spec.md §10). FreeIPA sudo
+    # rules have no native enable/disable the task above ever actually
+    # flips for these (they always compile Present+enabled=true — see
+    # CompileSudoGrant's doc comment, internal/inventory/grant_compile.go)
+    # — sudoNotBefore/sudoNotAfter are what actually gate access outside
+    # the grant's validity window; FreeIPA/SSSD enforces that natively,
+    # not pilot. sudo_not_after is always set on every compiled sudo_grant
+    # rule (§7 requires validity.not_after), so selecting on it alone is
+    # enough to find exactly the grant-compiled entries in ipa_sudo_rules
+    # — no hand-authored sudo.rules entry ever has this key.
+    - name: "Set native timed-sudo attributes for v3.0 sudo grants (spec.md §10)"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'sudorule-mod', item.name]
+             + (['--setattr=sudonotbefore=' ~ item.sudo_not_before] if item.sudo_not_before is defined else [])
+             + (['--setattr=sudonotafter=' ~ item.sudo_not_after] if item.sudo_not_after is defined else []) }}
+      loop: "{{ ipa_sudo_rules | selectattr('sudo_not_after', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: ipa_grant_sudo_timed
+      changed_when: "'Modified Sudo Rule' in (ipa_grant_sudo_timed.stdout | default(''))"
+      failed_when:
+        - ipa_grant_sudo_timed.rc != 0
+        - "'no modifications to be performed' not in (ipa_grant_sudo_timed.stderr | default(''))"
+      tags: [identity, sudo]
+
+    # Same pilot-owned-namespace safety as the HBAC prune task above
+    # (CompiledSudoRuleName's names are entirely pilot's own).
+    - name: "Prune v3.0 sudo grant rules whose grant is now absent (spec.md §10)"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-del, "{{ item }}"]
+      loop: "{{ pilot_compiled_grant_sudo_prune | default([]) }}"
+      register: ipa_grant_sudo_prune
+      changed_when: "'Deleted Sudo Rule' in (ipa_grant_sudo_prune.stdout | default(''))"
+      failed_when:
+        - ipa_grant_sudo_prune.rc != 0
+        - "'not found' not in (ipa_grant_sudo_prune.stderr | default(''))"
+      tags: [identity, sudo]
 
     # ── FreeIPA automount control plane for canonical NFS shares ───────
     - name: "Ensure canonical automount locations exist"
