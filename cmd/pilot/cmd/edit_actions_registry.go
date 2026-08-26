@@ -1800,6 +1800,9 @@ func validateCreateGroup(step editAction) error {
 	if hasSecretName(step.Name) {
 		return fmt.Errorf("secret-like group names are not allowed")
 	}
+	if inventory.IsDeprecatedGroupCategory(step.Category) {
+		return fmt.Errorf("create_group: category %q is deprecated and cannot be created; use team or role for HBAC subjects", step.Category)
+	}
 	valid := false
 	for _, c := range rosterGroupCategories {
 		if step.Category == c.Category {

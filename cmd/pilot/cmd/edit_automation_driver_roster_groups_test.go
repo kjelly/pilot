@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kjelly/pilot/internal/inventory"
@@ -73,6 +74,15 @@ func TestEditAutomationDriverRosterGroupsFlow_ValidationRejectsBadInput(t *testi
 	}
 	if err := validateCreateGroup(editAction{Action: "create_group", Name: "x", Category: "not-a-category"}); err == nil {
 		t.Fatal("expected validateCreateGroup to reject an unknown category")
+	}
+	// spec.md §20.1: create_group must reject the deprecated access
+	// category with a message pointing authors at team/role instead.
+	err := validateCreateGroup(editAction{Action: "create_group", Name: "access-new", Category: "access"})
+	if err == nil {
+		t.Fatal("expected validateCreateGroup to reject the deprecated access category")
+	}
+	if !strings.Contains(err.Error(), "deprecated") || !strings.Contains(err.Error(), "team or role") {
+		t.Fatalf("validateCreateGroup(access) error = %q, want it to mention deprecated + team or role", err)
 	}
 	cases := []editAction{
 		{Action: "set_group_field", Name: "x", Field: "not_a_real_field", Value: "y"},
