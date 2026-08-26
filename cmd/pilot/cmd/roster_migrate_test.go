@@ -28,7 +28,7 @@ func TestRosterMigrateCmd_MigratesV1RosterAndPrintsReport(t *testing.T) {
 		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
 	}
 	output := out.String()
-	for _, want := range []string{"Roster migrated successfully", "schema:", "1 -> 2", "backup:", "original_sha256:", "new_sha256:", "HBAC effective access:", "unchanged"} {
+	for _, want := range []string{"Roster migrated successfully", "schema:", "1 -> 3", "backup:", "original_sha256:", "new_sha256:", "HBAC effective access:", "unchanged"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want it to contain %q", output, want)
 		}
@@ -43,12 +43,38 @@ func TestRosterMigrateCmd_MigratesV1RosterAndPrintsReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(migrated), "schema_version: 2") {
-		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 2", migrated)
+	if !strings.Contains(string(migrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 3", migrated)
 	}
 }
 
 func TestRosterMigrateCmd_AlreadyCurrentIsANoOp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	v3 := strings.Replace(rosterLintFixtureValid, "schema_version: 1", "schema_version: 3\nnetgroups: []\ngrants: []", 1)
+	if err := os.WriteFile(path, []byte(v3), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"roster", "migrate", path})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	defer rootCmd.SetArgs(nil)
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "already schema v3") {
+		t.Fatalf("output = %q, want an already-current message", out.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != v3 {
+		t.Fatalf("an already-current migrate call modified the roster (err=%v)", err)
+	}
+}
+
+func TestRosterMigrateCmd_MigratesV2RosterToCurrent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
 	v2 := strings.Replace(rosterLintFixtureValid, "schema_version: 1", "schema_version: 2\nnetgroups: []", 1)
@@ -65,12 +91,12 @@ func TestRosterMigrateCmd_AlreadyCurrentIsANoOp(t *testing.T) {
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
 	}
-	if !strings.Contains(out.String(), "already schema v2") {
-		t.Fatalf("output = %q, want an already-current message", out.String())
+	if !strings.Contains(out.String(), "schema:\n  2 -> 3") {
+		t.Fatalf("output = %q, want a v2->v3 migration report", out.String())
 	}
-	got, err := os.ReadFile(path)
-	if err != nil || string(got) != v2 {
-		t.Fatalf("an already-current migrate call modified the roster (err=%v)", err)
+	migrated, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(migrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, err = %v, want it upgraded to schema_version: 3", migrated, err)
 	}
 }
 
@@ -120,7 +146,7 @@ func TestRosterMigrateCmd_RejectsUnsupportedTargetVersion(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	rootCmd.SetArgs([]string{"roster", "migrate", "--to", "3", path})
+	rootCmd.SetArgs([]string{"roster", "migrate", "--to", "99", path})
 	rootCmd.SetOut(&out)
 	rootCmd.SetErr(&out)
 	defer rootCmd.SetArgs(nil)
@@ -129,7 +155,7 @@ func TestRosterMigrateCmd_RejectsUnsupportedTargetVersion(t *testing.T) {
 	defer func() { rosterMigrateTargetVersion = int(inventory.CurrentRosterSchemaVersion) }()
 
 	if err := rootCmd.Execute(); err == nil {
-		t.Fatalf("expected an error for --to 3, output: %s", out.String())
+		t.Fatalf("expected an error for --to 99, output: %s", out.String())
 	}
 }
 
@@ -258,7 +284,7 @@ func TestRosterMigrateCmd_EncryptedRosterMigratesSuccessfully(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ansible-vault view (test verification) failed: %v", err)
 	}
-	if !strings.Contains(string(viewOut), "schema_version: 2") {
-		t.Fatalf("decrypted roster = %q, want schema_version: 2", viewOut)
+	if !strings.Contains(string(viewOut), "schema_version: 3") {
+		t.Fatalf("decrypted roster = %q, want schema_version: 3", viewOut)
 	}
 }

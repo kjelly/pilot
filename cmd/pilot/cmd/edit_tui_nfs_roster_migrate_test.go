@@ -37,7 +37,7 @@ func TestAutofixNFSRosterEntry_MigratesV1RosterBeforeAppending(t *testing.T) {
 	h := inventory.Host{Name: "nfs-demo", Extra: map[string]string{"freeipa_roster_file": rosterPath}}
 
 	banner := autofixNFSRosterEntry(dir, h)
-	if !strings.Contains(banner, "Automatically upgraded to schema v2") {
+	if !strings.Contains(banner, "Automatically upgraded to schema v3") {
 		t.Fatalf("banner = %q, want an auto-upgrade notice", banner)
 	}
 
@@ -45,8 +45,8 @@ func TestAutofixNFSRosterEntry_MigratesV1RosterBeforeAppending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(migrated), "schema_version: 2") {
-		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 2", migrated)
+	if !strings.Contains(string(migrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 3", migrated)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestWriteMissingNFSRosterEntries_MigratesV1RosterBeforeAppending(t *testing
 	var out strings.Builder
 	writeMissingNFSRosterEntries(&out, dir, hf)
 
-	if !strings.Contains(out.String(), "auto-upgraded schema v1 -> v2") {
+	if !strings.Contains(out.String(), "auto-upgraded schema v1 -> v3") {
 		t.Fatalf("output = %q, want an auto-upgrade notice", out.String())
 	}
 	if !strings.Contains(out.String(), "appended nfs.servers entry") {
@@ -81,8 +81,8 @@ func TestWriteMissingNFSRosterEntries_MigratesV1RosterBeforeAppending(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(migrated), "schema_version: 2") {
-		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 2", migrated)
+	if !strings.Contains(string(migrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 3", migrated)
 	}
 }
 
@@ -101,22 +101,22 @@ func TestPushRosterManager_ShowsAutoMigrationNotice(t *testing.T) {
 	var router editRouterModel
 	pushRosterManager(&router, dir, path, "")
 
-	if !strings.Contains(router.banner, "Automatically upgraded to schema v2") {
+	if !strings.Contains(router.banner, "Automatically upgraded to schema v3") {
 		t.Fatalf("banner = %q, want an auto-upgrade notice", router.banner)
 	}
 	rosterMigrated, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(rosterMigrated), "schema_version: 2") {
-		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 2", rosterMigrated)
+	if !strings.Contains(string(rosterMigrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 3", rosterMigrated)
 	}
 }
 
 func TestPushRosterManager_NoNoticeForAlreadyCurrentRoster(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
-	if err := os.WriteFile(path, []byte("schema_version: 2\nfreeipa:\n  admin: {principal: admin, password: x}\nnetgroups: []\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("schema_version: 3\nfreeipa:\n  admin: {principal: admin, password: x}\nnetgroups: []\ngrants: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -138,7 +138,7 @@ func TestPushRosterManager_PreservesExistingBannerAlongsideMigrationNotice(t *te
 	var router editRouterModel
 	pushRosterManager(&router, dir, path, "some other banner")
 
-	if !strings.Contains(router.banner, "Automatically upgraded to schema v2") || !strings.Contains(router.banner, "some other banner") {
+	if !strings.Contains(router.banner, "Automatically upgraded to schema v3") || !strings.Contains(router.banner, "some other banner") {
 		t.Fatalf("banner = %q, want both the migration notice and the caller's own banner", router.banner)
 	}
 }

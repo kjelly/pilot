@@ -31,10 +31,10 @@ A roster that passes this should also pass those Ansible gates; this does
 not replace running a real --check apply, since it only checks the
 roster's own structure, not the rest of the inventory.
 
-A structurally valid schema-v1 roster passes with a notice pointing at
-` + "`pilot roster migrate`" + `; pass --upgrade to have lint perform that
-upgrade itself (via the same migration engine, not a second one) before
-reporting.`,
+A structurally valid roster below the current schema version passes with a
+notice pointing at ` + "`pilot roster migrate`" + `; pass --upgrade to have
+lint perform that upgrade itself (via the same migration engine, not a
+second one) before reporting.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := args[0]
@@ -96,12 +96,12 @@ reporting.`,
 			return nil
 		}
 
-		switch version {
-		case inventory.RosterSchemaV1:
-			fmt.Fprintln(cmd.OutOrStdout(), "ok: schema v1 is valid")
-			fmt.Fprintf(cmd.OutOrStdout(), "notice: current schema is v%d; run `pilot roster migrate %s`\n", inventory.CurrentRosterSchemaVersion, path)
-		case inventory.CurrentRosterSchemaVersion:
+		switch {
+		case version == inventory.CurrentRosterSchemaVersion:
 			fmt.Fprintf(cmd.OutOrStdout(), "ok: schema v%d; no issues found\n", version)
+		case version < inventory.CurrentRosterSchemaVersion:
+			fmt.Fprintf(cmd.OutOrStdout(), "ok: schema v%d is valid\n", version)
+			fmt.Fprintf(cmd.OutOrStdout(), "notice: current schema is v%d; run `pilot roster migrate %s`\n", inventory.CurrentRosterSchemaVersion, path)
 		default:
 			fmt.Fprintf(cmd.OutOrStdout(), "ok: schema v%d is valid\n", version)
 		}

@@ -17,11 +17,108 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// rosterMigrationStep is one schema hop in the migration chain: From must
+// equal a document's detected schema_version for Transform to run, and it
+// produces a candidate valid under Validate. rosterMigrationSteps chains
+// these into whatever multi-hop path a source version needs (e.g.
+// v1 -> v2 -> v3) — see rosterMigrationPath.
+type rosterMigrationStep struct {
+	From      RosterSchemaVersion
+	To        RosterSchemaVersion
+	Transform func(*yaml.Node) (*yaml.Node, error)
+	Validate  func(map[string]any) []RosterViolation
+}
+
+// rosterMigrationSteps is the complete, ordered set of schema hops this
+// pilot knows how to perform. It MUST stay contiguous (each step's From
+// equal to the previous step's To) — rosterMigrationPath walks it as a
+// single linear chain, not a graph.
+var rosterMigrationSteps = []rosterMigrationStep{
+	{From: RosterSchemaV1, To: RosterSchemaV2, Transform: MigrateRosterV1ToV2, Validate: ValidateRosterV2},
+	{From: RosterSchemaV2, To: RosterSchemaV3, Transform: MigrateRosterV2ToV3, Validate: ValidateRosterV3},
+}
+
+// rosterSourceValidators validates a document against the schema version it
+// itself declares (checked once, before any step's Transform runs) — the
+// same "validate as v1 before migrating" MigrateRosterFile always did,
+// generalized to whatever version the chain starts from.
+var rosterSourceValidators = map[RosterSchemaVersion]func(map[string]any) []RosterViolation{
+	RosterSchemaV1: ValidateRosterV1,
+	RosterSchemaV2: ValidateRosterV2,
+	RosterSchemaV3: ValidateRosterV3,
+}
+
+// rosterMigrationPath returns the ordered steps that carry a document from
+// "from" to "to", or an error if "to" isn't reachable — either because
+// "from" isn't a known step's From (an unsupported/future source version)
+// or because no chain of steps reaches exactly "to" (an unsupported
+// target, including any downgrade). from == to is the caller's job to
+// short-circuit as a no-op before calling this; it always returns an error
+// here (an empty chain can't prove anything about validity).
+func rosterMigrationPath(from, to RosterSchemaVersion) ([]rosterMigrationStep, error) {
+	var path []rosterMigrationStep
+	cur := from
+	for _, step := range rosterMigrationSteps {
+		if step.From != cur {
+			continue
+		}
+		path = append(path, step)
+		cur = step.To
+		if cur == to {
+			return path, nil
+		}
+	}
+	return nil, fmt.Errorf("no migration path from schema v%d to v%d", from, to)
+}
+
+// runRosterMigrationChain transforms node (already parsed from a document
+// detected as steps[0].From) through every step in steps in order,
+// validating each intermediate candidate against its own step's target
+// schema before continuing — so a v1 -> v3 request never skips straight
+// past an invalid v2 shape. It never touches the filesystem and never
+// checks the overall semantic fingerprint; callers do that once, comparing
+// the very first parse against the very last candidate. It returns the
+// final candidate's rendered bytes and its parsed map[string]any (for the
+// fingerprint/backup steps that follow), alongside the mutated node itself.
+func runRosterMigrationChain(node *yaml.Node, steps []rosterMigrationStep) (*yaml.Node, []byte, map[string]any, error) {
+	var (
+		candidateBytes []byte
+		candidateRoot  map[string]any
+		err            error
+	)
+	for _, step := range steps {
+		node, err = step.Transform(node)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		candidateBytes, err = yaml.Marshal(node)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("render migrated roster: %w", err)
+		}
+		candidateRoot = nil
+		if err := yaml.Unmarshal(candidateBytes, &candidateRoot); err != nil {
+			return nil, nil, nil, fmt.Errorf("parse migrated roster: %w", err)
+		}
+		if v := step.Validate(candidateRoot); len(v) != 0 {
+			return nil, nil, nil, fmt.Errorf("candidate fails schema v%d validation: %v", step.To, v)
+		}
+	}
+	return node, candidateBytes, candidateRoot, nil
+}
+
+// rosterMigrationStepNames renders path as CLI/dry-run-friendly step labels
+// ("v1->v2"), in order.
+func rosterMigrationStepNames(path []rosterMigrationStep) []string {
+	names := make([]string, len(path))
+	for i, step := range path {
+		names[i] = fmt.Sprintf("v%d->v%d", step.From, step.To)
+	}
+	return names
+}
+
 // RosterMigrationOptions configures a MigrateRosterFile call.
 type RosterMigrationOptions struct {
-	// TargetVersion defaults to CurrentRosterSchemaVersion when zero. No
-	// other value is currently supported — MigrateRosterFile only knows
-	// how to migrate v1 -> v2.
+	// TargetVersion defaults to CurrentRosterSchemaVersion when zero.
 	TargetVersion int
 	// VaultPasswordFile, if set, lets MigrateRosterFile handle an
 	// ansible-vault-encrypted roster: it decrypts using this file, migrates
@@ -47,10 +144,13 @@ type RosterMigrationResult struct {
 	BackupPath     string
 	OriginalSHA256 string
 	NewSHA256      string
+	// Steps lists the schema hops actually applied, e.g. ["v1->v2",
+	// "v2->v3"] for a chained migration — empty for a no-op.
+	Steps []string
 }
 
-// MigrateRosterFile upgrades the roster at path to opts.TargetVersion (v2
-// if unset), as one transaction:
+// MigrateRosterFile upgrades the roster at path to opts.TargetVersion
+// (CurrentRosterSchemaVersion if unset), as one transaction:
 //
 //  1. acquire the mutation lock (fails fast if another process holds it —
 //     no backup, no read past this point)
@@ -59,15 +159,20 @@ type RosterMigrationResult struct {
 //     closed (ErrRosterEncrypted); with one, control passes to
 //     migrateEncryptedRosterFile instead of the steps below
 //  4. detect schema version; already-current is a no-op (Changed: false,
-//     no backup); anything but v1 -> target v2 is an error
-//  5. validate the original as v1, build the v2 candidate in memory
-//     (MigrateRosterV1ToV2), validate the candidate as v2, and check the
+//     no backup); anything with no chain of rosterMigrationSteps reaching
+//     exactly the target (an unknown source version, or an unsupported
+//     target, including any downgrade) is an error
+//  5. validate the original against its own declared version, then run
+//     runRosterMigrationChain — every hop's candidate is validated against
+//     that hop's own target schema — and check the overall
 //     semantic-equivalence fingerprint (ComputeRosterSemanticFingerprint)
-//     — any failure here stops before anything is written
+//     between the original and the final candidate — any failure here
+//     stops before anything is written
 //  6. (unless DryRun) create the persistent backup, then atomically
 //     replace the roster; if the replace fails, roll back to the exact
 //     backed-up bytes and report the failure
-//  7. reopen and re-validate the installed result
+//  7. reopen and re-validate the installed result against the target
+//     schema
 //
 // A failure before backup creation leaves the original file completely
 // untouched. A failure after backup creation is rolled back to the exact
@@ -76,9 +181,6 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 	targetVersion := opts.TargetVersion
 	if targetVersion == 0 {
 		targetVersion = int(CurrentRosterSchemaVersion)
-	}
-	if targetVersion != int(RosterSchemaV2) {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: unsupported target schema version %d (only %d is supported)", path, targetVersion, RosterSchemaV2)
 	}
 
 	lock, err := acquireMutationLock(path + ".pilot-migrate.lock")
@@ -119,7 +221,9 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 			NewSHA256:      originalSHA,
 		}, nil
 	}
-	if detected != RosterSchemaV1 {
+
+	sourceValidator, ok := rosterSourceValidators[detected]
+	if !ok {
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: no migration path from schema v%d to v%d", path, detected, targetVersion)
 	}
 
@@ -127,36 +231,31 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 	if err := yaml.Unmarshal(original, &originalRoot); err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("parse roster %s: %w", path, err)
 	}
-	if v := ValidateRosterV1(originalRoot); len(v) != 0 {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: original document fails schema v1 validation: %v", path, v)
+	if v := sourceValidator(originalRoot); len(v) != 0 {
+		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: original document fails schema v%d validation: %v", path, detected, v)
+	}
+
+	migrationPath, err := rosterMigrationPath(detected, RosterSchemaVersion(targetVersion))
+	if err != nil {
+		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
 	}
 
 	originalNode := &yaml.Node{}
 	if err := yaml.Unmarshal(original, originalNode); err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("parse roster %s: %w", path, err)
 	}
-	migratedNode, err := MigrateRosterV1ToV2(originalNode)
+	_, candidate, candidateRoot, err := runRosterMigrationChain(originalNode, migrationPath)
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
 	}
-	candidate, err := yaml.Marshal(migratedNode)
-	if err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("render migrated roster %s: %w", path, err)
-	}
 
-	var candidateRoot map[string]any
-	if err := yaml.Unmarshal(candidate, &candidateRoot); err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("parse migrated roster %s: %w", path, err)
-	}
-	if v := ValidateRosterV2(candidateRoot); len(v) != 0 {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: candidate fails schema v2 validation: %v", path, v)
-	}
 	before := ComputeRosterSemanticFingerprint(originalRoot)
 	after := ComputeRosterSemanticFingerprint(candidateRoot)
 	if !RosterSemanticFingerprintsEqual(before, after) {
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: candidate would change authorization-affecting content, refusing to migrate", path)
 	}
 
+	steps := rosterMigrationStepNames(migrationPath)
 	newSHA := sha256Hex(candidate)
 	if opts.DryRun {
 		return RosterMigrationResult{
@@ -165,6 +264,7 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 			Changed:        true,
 			OriginalSHA256: originalSHA,
 			NewSHA256:      newSHA,
+			Steps:          steps,
 		}, nil
 	}
 
@@ -185,7 +285,7 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 	if err == nil {
 		err = yaml.Unmarshal(reopened, &reopenedRoot)
 	}
-	if err != nil || len(ValidateRosterV2(reopenedRoot)) != 0 {
+	if err != nil || len(rosterSourceValidators[RosterSchemaVersion(targetVersion)](reopenedRoot)) != 0 {
 		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation AND rollback failed (%v); restore manually from backup %s", path, restoreErr, backupPath)
 		}
@@ -199,6 +299,7 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 		BackupPath:     backupPath,
 		OriginalSHA256: originalSHA,
 		NewSHA256:      newSHA,
+		Steps:          steps,
 	}, nil
 }
 
@@ -208,8 +309,9 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 //
 //	decrypt into memory (ansibleVaultView; never a plaintext temp file)
 //	    -> detect version (already-current is a no-op, same as plaintext)
-//	    -> validate original as v1, migrate, validate candidate as v2,
-//	       check the semantic fingerprint (identical to the plaintext path)
+//	    -> validate original against its own version, run the migration
+//	       chain, check the semantic fingerprint (identical to the
+//	       plaintext path)
 //	    -> write the candidate plaintext to a mode-0600 temp file
 //	    -> ansible-vault encrypt that temp file in place
 //	    -> atomically install the now-encrypted result
@@ -240,7 +342,8 @@ func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, origin
 			NewSHA256:      originalSHA,
 		}, nil
 	}
-	if detected != RosterSchemaV1 {
+	sourceValidator, ok := rosterSourceValidators[detected]
+	if !ok {
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: no migration path from schema v%d to v%d", path, detected, targetVersion)
 	}
 
@@ -248,36 +351,31 @@ func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, origin
 	if err := yaml.Unmarshal(plaintext, &originalRoot); err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("parse roster %s: %w", path, err)
 	}
-	if v := ValidateRosterV1(originalRoot); len(v) != 0 {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: original document fails schema v1 validation: %v", path, v)
+	if v := sourceValidator(originalRoot); len(v) != 0 {
+		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: original document fails schema v%d validation: %v", path, detected, v)
+	}
+
+	migrationPath, err := rosterMigrationPath(detected, RosterSchemaVersion(targetVersion))
+	if err != nil {
+		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
 	}
 
 	plaintextNode := &yaml.Node{}
 	if err := yaml.Unmarshal(plaintext, plaintextNode); err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("parse roster %s: %w", path, err)
 	}
-	migratedNode, err := MigrateRosterV1ToV2(plaintextNode)
+	_, candidatePlaintext, candidateRoot, err := runRosterMigrationChain(plaintextNode, migrationPath)
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
 	}
-	candidatePlaintext, err := yaml.Marshal(migratedNode)
-	if err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("render migrated roster %s: %w", path, err)
-	}
 
-	var candidateRoot map[string]any
-	if err := yaml.Unmarshal(candidatePlaintext, &candidateRoot); err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("parse migrated roster %s: %w", path, err)
-	}
-	if v := ValidateRosterV2(candidateRoot); len(v) != 0 {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: candidate fails schema v2 validation: %v", path, v)
-	}
 	before := ComputeRosterSemanticFingerprint(originalRoot)
 	after := ComputeRosterSemanticFingerprint(candidateRoot)
 	if !RosterSemanticFingerprintsEqual(before, after) {
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: candidate would change authorization-affecting content, refusing to migrate", path)
 	}
 
+	steps := rosterMigrationStepNames(migrationPath)
 	if opts.DryRun {
 		return RosterMigrationResult{
 			FromVersion:    int(detected),
@@ -289,6 +387,7 @@ func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, origin
 			// plaintext twice never produces the same ciphertext bytes —
 			// unlike the plaintext path, a dry run has no way to predict
 			// what NewSHA256 a real run would produce.
+			Steps: steps,
 		}, nil
 	}
 
@@ -336,7 +435,7 @@ func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, origin
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation (not ansible-vault encrypted), rolled back to the original (backup at %s)", path, backupPath)
 	}
 	reopenedPlaintext, err := ansibleVaultView(path, opts.VaultPasswordFile)
-	if err != nil || len(ValidateRosterV2(mustYAMLMapOrNil(reopenedPlaintext))) != 0 {
+	if err != nil || len(rosterSourceValidators[RosterSchemaVersion(targetVersion)](mustYAMLMapOrNil(reopenedPlaintext))) != 0 {
 		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation AND rollback failed; restore manually from backup %s", path, backupPath)
 		}
@@ -350,6 +449,7 @@ func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, origin
 		BackupPath:     backupPath,
 		OriginalSHA256: originalSHA,
 		NewSHA256:      newSHA,
+		Steps:          steps,
 	}, nil
 }
 

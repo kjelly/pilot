@@ -138,8 +138,11 @@ func TestMigrateRosterFile_MinimalDocumentEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrateRosterFile() error = %v", err)
 	}
-	if !result.Changed || result.FromVersion != 1 || result.ToVersion != 2 {
-		t.Fatalf("result = %+v, want a changed v1->v2 migration", result)
+	if !result.Changed || result.FromVersion != 1 || result.ToVersion != 3 {
+		t.Fatalf("result = %+v, want a changed v1->v3 migration", result)
+	}
+	if len(result.Steps) != 2 || result.Steps[0] != "v1->v2" || result.Steps[1] != "v2->v3" {
+		t.Fatalf("result.Steps = %v, want [v1->v2 v2->v3]", result.Steps)
 	}
 	if result.OriginalSHA256 == "" || result.NewSHA256 == "" || result.OriginalSHA256 == result.NewSHA256 {
 		t.Fatalf("result SHA fields look wrong: %+v", result)
@@ -150,11 +153,11 @@ func TestMigrateRosterFile_MinimalDocumentEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := mustParseRoster(t, string(migrated))
-	if n, _ := toInt(root["schema_version"]); n != 2 {
-		t.Fatalf("schema_version = %v, want 2", root["schema_version"])
+	if n, _ := toInt(root["schema_version"]); n != 3 {
+		t.Fatalf("schema_version = %v, want 3", root["schema_version"])
 	}
-	if v := ValidateRosterV2(root); len(v) != 0 {
-		t.Fatalf("migrated roster failed ValidateRosterV2: %v", v)
+	if v := ValidateRosterV3(root); len(v) != 0 {
+		t.Fatalf("migrated roster failed ValidateRosterV3: %v", v)
 	}
 
 	info, err := os.Stat(path)
@@ -231,8 +234,8 @@ func TestMigrateRosterFile_RepeatedMigrationIsIdempotentWithoutExtraBackup(t *te
 	if err != nil {
 		t.Fatalf("first MigrateRosterFile() error = %v", err)
 	}
-	if !first.Changed || first.FromVersion != 1 || first.ToVersion != 2 || first.BackupPath == "" {
-		t.Fatalf("first result = %+v, want a changed v1->v2 migration with a backup", first)
+	if !first.Changed || first.FromVersion != 1 || first.ToVersion != 3 || first.BackupPath == "" {
+		t.Fatalf("first result = %+v, want a changed v1->v3 migration with a backup", first)
 	}
 	if _, err := os.Stat(first.BackupPath); err != nil {
 		t.Fatalf("backup file missing: %v", err)
@@ -245,8 +248,8 @@ func TestMigrateRosterFile_RepeatedMigrationIsIdempotentWithoutExtraBackup(t *te
 	if second.Changed || second.BackupPath != "" {
 		t.Fatalf("second result = %+v, want changed=false and no new backup", second)
 	}
-	if second.FromVersion != 2 || second.ToVersion != 2 {
-		t.Fatalf("second result = %+v, want a v2->v2 no-op", second)
+	if second.FromVersion != 3 || second.ToVersion != 3 {
+		t.Fatalf("second result = %+v, want a v3->v3 no-op", second)
 	}
 
 	backups, err := filepath.Glob(path + ".v*.bak")
@@ -278,6 +281,54 @@ func TestMigrateRosterFile_InvalidV1DocumentFailsWithoutMutation(t *testing.T) {
 	assertNoBackupFiles(t, dir)
 }
 
+// TestMigrateRosterFile_InvalidV2DocumentFailsWithoutMutation is required
+// test #13 ("invalid v2 fails before backup") from the roster-v2-to-v3
+// migration spec.
+func TestMigrateRosterFile_InvalidV2DocumentFailsWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	original := []byte("schema_version: 2\nnetgroups: []\nusers:\n  - name: Alice\n") // uppercase name fails checkUsers
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := MigrateRosterFile(path, RosterMigrationOptions{}); err == nil {
+		t.Fatal("expected an error migrating a document that fails schema v2 validation")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("roster was modified despite failing v2 validation (err=%v)", err)
+	}
+	assertNoBackupFiles(t, dir)
+}
+
+// TestMigrateRosterFile_ConflictingGrantsNodeFailsWithoutMutation is
+// required test #14: a v2 roster that already has a top-level grants:
+// node must fail before backup rather than silently proceed. grants isn't
+// a known v2 key at all (it's v3-only), so source validation is what
+// rejects this through the full MigrateRosterFile transaction — the
+// non-sequence-specific "fail rather than overwrite conflicting nodes"
+// check (§7) lives in MigrateRosterV2ToV3 itself, as defense-in-depth for
+// a direct caller that bypasses source validation; see
+// TestMigrateRosterV2ToV3_RejectsConflictingNonSequenceGrants for that.
+func TestMigrateRosterFile_ConflictingGrantsNodeFailsWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	original := []byte("schema_version: 2\nfreeipa: {admin: {principal: admin, password: x}}\nnetgroups: []\ngrants: not-a-list\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := MigrateRosterFile(path, RosterMigrationOptions{}); err == nil {
+		t.Fatal("expected an error migrating a document with a conflicting non-sequence grants: node")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("roster was modified despite the conflicting grants: node (err=%v)", err)
+	}
+	assertNoBackupFiles(t, dir)
+}
+
 // ---- M12: future schema version fails closed, no mutation -----------------
 
 func TestMigrateRosterFile_FutureSchemaVersionFailsClosedWithoutMutation(t *testing.T) {
@@ -304,7 +355,7 @@ func TestMigrateRosterFile_RejectsUnsupportedTargetVersion(t *testing.T) {
 	if err := os.WriteFile(path, []byte(minimalValidRoster), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MigrateRosterFile(path, RosterMigrationOptions{TargetVersion: 3}); err == nil {
+	if _, err := MigrateRosterFile(path, RosterMigrationOptions{TargetVersion: 99}); err == nil {
 		t.Fatal("expected an error for an unsupported TargetVersion")
 	}
 	assertNoBackupFiles(t, dir)
@@ -375,16 +426,41 @@ func TestEnsureRosterCurrent_MigratesV1Roster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureRosterCurrent() error = %v", err)
 	}
-	if !result.Changed || result.FromVersion != 1 || result.ToVersion != 2 || result.BackupPath == "" {
-		t.Fatalf("result = %+v, want a changed v1->v2 migration with a backup", result)
+	if !result.Changed || result.FromVersion != 1 || result.ToVersion != 3 || result.BackupPath == "" {
+		t.Fatalf("result = %+v, want a changed v1->v3 migration with a backup", result)
+	}
+}
+
+// TestEnsureRosterCurrent_UpgradesV2Roster locks in that a schema-v2
+// roster (no longer current now that v3 exists) still gets carried the
+// rest of the way to current — the "detected == target" no-op check must
+// never short-circuit just because a document happens to be internally
+// consistent at some older schema version.
+func TestEnsureRosterCurrent_UpgradesV2Roster(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	v2 := strings.Replace(minimalValidRoster, "schema_version: 1", "schema_version: 2\nnetgroups: []", 1)
+	if err := os.WriteFile(path, []byte(v2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := EnsureRosterCurrent(path, RosterMigrationOptions{})
+	if err != nil {
+		t.Fatalf("EnsureRosterCurrent() error = %v", err)
+	}
+	if !result.Changed || result.FromVersion != 2 || result.ToVersion != 3 || result.BackupPath == "" {
+		t.Fatalf("result = %+v, want a changed v2->v3 migration with a backup", result)
+	}
+	if len(result.Steps) != 1 || result.Steps[0] != "v2->v3" {
+		t.Fatalf("result.Steps = %v, want [v2->v3]", result.Steps)
 	}
 }
 
 func TestEnsureRosterCurrent_NoOpOnCurrentSchema(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
-	v2 := strings.Replace(minimalValidRoster, "schema_version: 1", "schema_version: 2\nnetgroups: []", 1)
-	if err := os.WriteFile(path, []byte(v2), 0o600); err != nil {
+	v3 := strings.Replace(minimalValidRoster, "schema_version: 1", "schema_version: 3\nnetgroups: []\ngrants: []", 1)
+	if err := os.WriteFile(path, []byte(v3), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -418,8 +494,8 @@ func TestEnsureRosterCurrent_IgnoresDryRunAndTargetVersionOptions(t *testing.T) 
 		t.Fatalf("result = %+v, want a real (non-dry-run) migration despite opts.DryRun/TargetVersion", result)
 	}
 	migrated, err := os.ReadFile(path)
-	if err != nil || !strings.Contains(string(migrated), "schema_version: 2") {
-		t.Fatalf("roster on disk = %q, err = %v, want it actually upgraded to schema_version: 2", migrated, err)
+	if err != nil || !strings.Contains(string(migrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, err = %v, want it actually upgraded to schema_version: 3", migrated, err)
 	}
 }
 
@@ -494,10 +570,10 @@ func viewFileForTest(t *testing.T, path, vaultPasswordFile string) []byte {
 	return out
 }
 
-// TestMigrateRosterFile_EncryptedRoster_MigratesV1ToV2 is M6: backup must
-// be byte-identical to the encrypted input, and the result must remain
-// ansible-vault encrypted (never left as plaintext).
-func TestMigrateRosterFile_EncryptedRoster_MigratesV1ToV2(t *testing.T) {
+// TestMigrateRosterFile_EncryptedRoster_MigratesV1ToCurrent is M6: backup
+// must be byte-identical to the encrypted input, and the result must
+// remain ansible-vault encrypted (never left as plaintext).
+func TestMigrateRosterFile_EncryptedRoster_MigratesV1ToCurrent(t *testing.T) {
 	requireAnsibleVault(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
@@ -515,8 +591,8 @@ func TestMigrateRosterFile_EncryptedRoster_MigratesV1ToV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrateRosterFile() error = %v", err)
 	}
-	if !result.Changed || result.FromVersion != 1 || result.ToVersion != 2 || result.BackupPath == "" {
-		t.Fatalf("result = %+v, want a changed v1->v2 migration with a backup", result)
+	if !result.Changed || result.FromVersion != 1 || result.ToVersion != 3 || result.BackupPath == "" {
+		t.Fatalf("result = %+v, want a changed v1->v3 migration with a backup", result)
 	}
 
 	backupBytes, err := os.ReadFile(result.BackupPath)
@@ -541,11 +617,11 @@ func TestMigrateRosterFile_EncryptedRoster_MigratesV1ToV2(t *testing.T) {
 
 	plaintext := viewFileForTest(t, path, pwFile)
 	root := mustParseRoster(t, string(plaintext))
-	if n, _ := toInt(root["schema_version"]); n != 2 {
-		t.Fatalf("decrypted schema_version = %v, want 2", root["schema_version"])
+	if n, _ := toInt(root["schema_version"]); n != 3 {
+		t.Fatalf("decrypted schema_version = %v, want 3", root["schema_version"])
 	}
-	if v := ValidateRosterV2(root); len(v) != 0 {
-		t.Fatalf("decrypted migrated roster failed ValidateRosterV2: %v", v)
+	if v := ValidateRosterV3(root); len(v) != 0 {
+		t.Fatalf("decrypted migrated roster failed ValidateRosterV3: %v", v)
 	}
 }
 
@@ -581,12 +657,12 @@ func TestMigrateRosterFile_EncryptedRoster_WrongPasswordFailsWithoutMutation(t *
 	assertNoBackupFiles(t, dir)
 }
 
-func TestMigrateRosterFile_EncryptedRoster_AlreadyV2IsNoOp(t *testing.T) {
+func TestMigrateRosterFile_EncryptedRoster_AlreadyCurrentIsNoOp(t *testing.T) {
 	requireAnsibleVault(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
-	v2 := strings.Replace(minimalValidRoster, "schema_version: 1", "schema_version: 2\nnetgroups: []", 1)
-	if err := os.WriteFile(path, []byte(v2), 0o600); err != nil {
+	v3 := strings.Replace(minimalValidRoster, "schema_version: 1", "schema_version: 3\nnetgroups: []\ngrants: []", 1)
+	if err := os.WriteFile(path, []byte(v3), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	pwFile := writeVaultPasswordFile(t, filepath.Join(dir, "vault-pass"), "a-password")
@@ -608,6 +684,39 @@ func TestMigrateRosterFile_EncryptedRoster_AlreadyV2IsNoOp(t *testing.T) {
 		t.Fatalf("already-current encrypted roster was modified (err=%v)", err)
 	}
 	assertNoBackupFiles(t, dir)
+}
+
+// TestMigrateRosterFile_EncryptedRoster_UpgradesV2ToV3 is required test #9
+// ("encrypted v2->v3") from the roster-v2-to-v3 migration spec — an
+// encrypted v2 roster (no longer current) must still upgrade, entirely in
+// memory, without ever writing decrypted plaintext to disk.
+func TestMigrateRosterFile_EncryptedRoster_UpgradesV2ToV3(t *testing.T) {
+	requireAnsibleVault(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	v2 := strings.Replace(minimalValidRoster, "schema_version: 1", "schema_version: 2\nnetgroups: []", 1)
+	if err := os.WriteFile(path, []byte(v2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pwFile := writeVaultPasswordFile(t, filepath.Join(dir, "vault-pass"), "a-password")
+	encryptFileForTest(t, path, pwFile)
+
+	result, err := MigrateRosterFile(path, RosterMigrationOptions{VaultPasswordFile: pwFile})
+	if err != nil {
+		t.Fatalf("MigrateRosterFile() error = %v", err)
+	}
+	if !result.Changed || result.FromVersion != 2 || result.ToVersion != 3 || result.BackupPath == "" {
+		t.Fatalf("result = %+v, want a changed v2->v3 migration with a backup", result)
+	}
+	if len(result.Steps) != 1 || result.Steps[0] != "v2->v3" {
+		t.Fatalf("result.Steps = %v, want [v2->v3]", result.Steps)
+	}
+
+	plaintext := viewFileForTest(t, path, pwFile)
+	root := mustParseRoster(t, string(plaintext))
+	if v := ValidateRosterV3(root); len(v) != 0 {
+		t.Fatalf("decrypted migrated roster failed ValidateRosterV3: %v", v)
+	}
 }
 
 func TestMigrateRosterFile_EncryptedRoster_DryRunDoesNotWrite(t *testing.T) {

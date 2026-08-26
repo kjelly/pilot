@@ -19,8 +19,9 @@ func TestWriteMinimalNFSServerRosterCreatesDemoSkeleton(t *testing.T) {
 	}
 	content := string(data)
 	for _, want := range []string{
-		"schema_version: 2",
+		"schema_version: 3",
 		"netgroups: []",
+		"grants: []",
 		"principal: admin",
 		"password: a-real-password",
 		"host: nfs-demo.ipa.example.test",
@@ -32,19 +33,19 @@ func TestWriteMinimalNFSServerRosterCreatesDemoSkeleton(t *testing.T) {
 		}
 	}
 	if strings.Contains(content, "domain:") {
-		t.Fatalf("a new schema-v2 roster must not generate freeipa.domain:\n%s", content)
+		t.Fatalf("a new schema-v3 roster must not generate freeipa.domain:\n%s", content)
 	}
 	if mode := dataMode(t, path); mode.Perm() != 0o600 {
 		t.Fatalf("roster mode = %o, want 600", mode.Perm())
 	}
 
 	root := mustParseRoster(t, content)
-	if v := ValidateRosterV2(root); len(v) != 0 {
-		t.Fatalf("generated skeleton failed ValidateRosterV2: %v", v)
+	if v := ValidateRosterV3(root); len(v) != 0 {
+		t.Fatalf("generated skeleton failed ValidateRosterV3: %v", v)
 	}
 }
 
-func TestWriteMinimalRosterSkeletonCreatesSchemaV2(t *testing.T) {
+func TestWriteMinimalRosterSkeletonCreatesCurrentSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".vault", "ipa-identity.yaml")
 	if err := WriteMinimalRosterSkeleton(path, "admin", "a-real-password"); err != nil {
 		t.Fatalf("WriteMinimalRosterSkeleton() error = %v", err)
@@ -55,18 +56,18 @@ func TestWriteMinimalRosterSkeletonCreatesSchemaV2(t *testing.T) {
 		t.Fatalf("read roster: %v", err)
 	}
 	content := string(data)
-	for _, want := range []string{"schema_version: 2", "netgroups: []", "principal: admin", "password: a-real-password"} {
+	for _, want := range []string{"schema_version: 3", "netgroups: []", "grants: []", "principal: admin", "password: a-real-password"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("roster missing %q:\n%s", want, content)
 		}
 	}
 	if strings.Contains(content, "domain:") {
-		t.Fatalf("a new schema-v2 roster must not generate freeipa.domain:\n%s", content)
+		t.Fatalf("a new schema-v3 roster must not generate freeipa.domain:\n%s", content)
 	}
 
 	root := mustParseRoster(t, content)
-	if v := ValidateRosterV2(root); len(v) != 0 {
-		t.Fatalf("generated skeleton failed ValidateRosterV2: %v", v)
+	if v := ValidateRosterV3(root); len(v) != 0 {
+		t.Fatalf("generated skeleton failed ValidateRosterV3: %v", v)
 	}
 }
 

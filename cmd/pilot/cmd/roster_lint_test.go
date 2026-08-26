@@ -51,7 +51,7 @@ func TestRosterLintCmd_CleanV1RosterPrintsMigrateNotice(t *testing.T) {
 	}
 }
 
-func TestRosterLintCmd_CleanV2RosterPrintsSchemaV2OK(t *testing.T) {
+func TestRosterLintCmd_CleanV2RosterPrintsMigrateNotice(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
 	v2 := strings.Replace(rosterLintFixtureValid, "schema_version: 1", "schema_version: 2\nnetgroups: []", 1)
@@ -68,11 +68,36 @@ func TestRosterLintCmd_CleanV2RosterPrintsSchemaV2OK(t *testing.T) {
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
 	}
-	if !strings.Contains(out.String(), "ok: schema v2; no issues found") {
-		t.Fatalf("output = %q, want ok: schema v2; no issues found", out.String())
+	if !strings.Contains(out.String(), "ok: schema v2 is valid") {
+		t.Fatalf("output = %q, want ok: schema v2 is valid", out.String())
+	}
+	if !strings.Contains(out.String(), "pilot roster migrate "+path) {
+		t.Fatalf("output = %q, want a notice pointing at `pilot roster migrate %s`", out.String(), path)
+	}
+}
+
+func TestRosterLintCmd_CleanCurrentRosterPrintsOKWithoutNotice(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	v3 := strings.Replace(rosterLintFixtureValid, "schema_version: 1", "schema_version: 3\nnetgroups: []\ngrants: []", 1)
+	if err := os.WriteFile(path, []byte(v3), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"roster", "lint", path})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	defer rootCmd.SetArgs(nil)
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "ok: schema v3; no issues found") {
+		t.Fatalf("output = %q, want ok: schema v3; no issues found", out.String())
 	}
 	if strings.Contains(out.String(), "notice:") {
-		t.Fatalf("output = %q, did not expect a migrate notice for an already-v2 roster", out.String())
+		t.Fatalf("output = %q, did not expect a migrate notice for an already-current roster", out.String())
 	}
 }
 
@@ -126,12 +151,12 @@ func TestRosterLintCmd_UpgradeFlagMigratesV1RosterInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(migrated), "schema_version: 2") {
-		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 2", migrated)
+	if !strings.Contains(string(migrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 3", migrated)
 	}
 }
 
-func TestRosterLintCmd_UpgradeFlagNoOpOnV2Roster(t *testing.T) {
+func TestRosterLintCmd_UpgradeFlagMigratesV2RosterInPlace(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
 	v2 := strings.Replace(rosterLintFixtureValid, "schema_version: 1", "schema_version: 2\nnetgroups: []", 1)
@@ -149,12 +174,39 @@ func TestRosterLintCmd_UpgradeFlagNoOpOnV2Roster(t *testing.T) {
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
 	}
-	if !strings.Contains(out.String(), "ok: schema v2; no issues found") {
-		t.Fatalf("output = %q, want the plain v2 ok message, not a migration report", out.String())
+	if !strings.Contains(out.String(), "Roster migrated successfully") || !strings.Contains(out.String(), "schema:\n  2 -> 3") {
+		t.Fatalf("output = %q, want a v2->v3 migration success report", out.String())
+	}
+	migrated, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(migrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, err = %v, want it upgraded to schema_version: 3", migrated, err)
+	}
+}
+
+func TestRosterLintCmd_UpgradeFlagNoOpOnCurrentRoster(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	v3 := strings.Replace(rosterLintFixtureValid, "schema_version: 1", "schema_version: 3\nnetgroups: []\ngrants: []", 1)
+	if err := os.WriteFile(path, []byte(v3), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"roster", "lint", "--upgrade", path})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	defer rootCmd.SetArgs(nil)
+	defer func() { rosterLintUpgrade = false }()
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "ok: schema v3; no issues found") {
+		t.Fatalf("output = %q, want the plain v3 ok message, not a migration report", out.String())
 	}
 	got, err := os.ReadFile(path)
-	if err != nil || string(got) != v2 {
-		t.Fatalf("--upgrade modified an already-v2 roster (err=%v)", err)
+	if err != nil || string(got) != v3 {
+		t.Fatalf("--upgrade modified an already-current roster (err=%v)", err)
 	}
 }
 

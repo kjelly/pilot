@@ -62,6 +62,8 @@ func ValidateRoster(root map[string]any) []RosterViolation {
 		return ValidateRosterV1(root)
 	case RosterSchemaV2:
 		return ValidateRosterV2(root)
+	case RosterSchemaV3:
+		return ValidateRosterV3(root)
 	}
 	if n > int(CurrentRosterSchemaVersion) {
 		return []RosterViolation{{Rule: "schema_version", Detail: fmt.Sprintf("roster schema v%d is newer than this pilot supports (max v%d)", n, CurrentRosterSchemaVersion)}}
@@ -94,6 +96,21 @@ func ValidateRosterV2(root map[string]any) []RosterViolation {
 	v = append(v, checkMigration(root)...)
 	v = append(v, validateRosterCommon(root)...)
 	v = append(v, checkNetgroups(root)...)
+	return v
+}
+
+// ValidateRosterV3 validates a schema-v3 roster document. It runs the same
+// checks as v2 against the same wider top-level key set (adding grants),
+// plus grants[]'s own structural validation (checkGrants, roster_grants.go)
+// — v1/v2 never had grants at all, so none of that applies there.
+func ValidateRosterV3(root map[string]any) []RosterViolation {
+	var v []RosterViolation
+	v = append(v, checkSchemaVersionExact(root, RosterSchemaV3)...)
+	v = append(v, checkTopLevelKeys(root, knownTopLevelKeysV3)...)
+	v = append(v, checkMigration(root)...)
+	v = append(v, validateRosterCommon(root)...)
+	v = append(v, checkNetgroups(root)...)
+	v = append(v, checkGrants(root)...)
 	return v
 }
 
@@ -144,6 +161,13 @@ var (
 	// (see docs/verification/freeipa-identity.md's roster-schema-v2 spec,
 	// "netgroups currently fails closed under v1").
 	knownTopLevelKeysV2 = append(append([]string{}, knownTopLevelKeysV1...), "netgroups")
+	// knownTopLevelKeysV3 adds first-class grants on top of the v2 set; see
+	// checkGrants (roster_grants.go) for its structural shape. Per the v2 ->
+	// v3 migration spec §5, no other v3 section (auth_policies, security.*,
+	// account_policies, ...) is a known key yet — those are out of scope
+	// until their own v3.x spec defines a shape, and an unknown top-level
+	// key on a v3 document still fails closed exactly like it always has.
+	knownTopLevelKeysV3 = append(append([]string{}, knownTopLevelKeysV2...), "grants")
 
 	// domain/realm remain accepted while old encrypted rosters are migrated,
 	// but the apply playbook deliberately ignores them. New rosters must keep

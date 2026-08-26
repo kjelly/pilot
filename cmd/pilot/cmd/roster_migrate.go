@@ -19,14 +19,17 @@ var (
 var rosterMigrateCmd = &cobra.Command{
 	Use:   "migrate <roster-file>",
 	Short: "Upgrade a canonical roster to the current schema version",
-	Long: `pilot roster migrate upgrades a schema-v1 roster to schema v2 in place.
+	Long: `pilot roster migrate upgrades a roster to the current schema version
+in place, chaining as many schema hops as the source version needs (e.g.
+v1 -> v2 -> v3).
 
-It validates the original as v1, builds the v2 candidate entirely in
-memory, checks that HBAC/sudo effective access and rendered NFS client
-selectors come out exactly unchanged, writes a persistent backup of the
-exact original bytes, then atomically replaces the roster. A roster
-already at the target schema is left untouched: nothing is written, no
-backup is created, and the command still exits 0.
+It validates the original against its own declared schema, builds each
+hop's candidate entirely in memory, checks that HBAC/sudo effective
+access and rendered NFS client selectors come out exactly unchanged
+end-to-end, writes a persistent backup of the exact original bytes, then
+atomically replaces the roster. A roster already at the target schema is
+left untouched: nothing is written, no backup is created, and the command
+still exits 0.
 
 The backup is never deleted automatically — it is the only place the
 pre-migration roster is recoverable from, so its path is always printed

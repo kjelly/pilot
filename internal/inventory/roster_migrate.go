@@ -60,6 +60,58 @@ func MigrateRosterV1ToV2(root *yaml.Node) (*yaml.Node, error) {
 	return root, nil
 }
 
+// MigrateRosterV2ToV3 converts a parsed schema-v2 roster document into
+// schema v3, in memory only. The only structural change is:
+//
+//	schema_version: 2 -> 3
+//	grants: [] appended if absent
+//
+// grants[] is a first-class v3 section per the HBAC simplification spec
+// §27.3/§27.5 (temporary_grant/breakglass login and sudo authorization,
+// same subjects/targets geometry as HBAC) — but this migration never
+// synthesizes any grants entries; v2 has no equivalent concept to carry
+// over, so the appended section is always empty. If the roster already
+// has a `grants` key, it is left untouched unless it conflicts with the
+// expected shape (see mappingChild/appendMissingSequence below), in which
+// case migration fails rather than silently overwriting it. Every other
+// node is left exactly as parsed, mutating the existing yaml.Node tree in
+// place rather than remarshaling through map[string]any, so comments,
+// anchors/aliases, scalar style, and section/list order all survive
+// untouched. Callers should validate root as v2 (ValidateRosterV2) before
+// calling this, and the result as v3 (ValidateRosterV3) after.
+func MigrateRosterV2ToV3(root *yaml.Node) (*yaml.Node, error) {
+	top, err := rosterDocumentTop(root)
+	if err != nil {
+		return nil, fmt.Errorf("migrate roster: %w", err)
+	}
+
+	versionNode := findMappingChild(top, "schema_version")
+	if versionNode == nil {
+		return nil, fmt.Errorf("migrate roster: schema_version is missing")
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(versionNode.Value))
+	if err != nil {
+		return nil, fmt.Errorf("migrate roster: schema_version %q is not an integer", versionNode.Value)
+	}
+	if RosterSchemaVersion(n) != RosterSchemaV2 {
+		return nil, fmt.Errorf("migrate roster: MigrateRosterV2ToV3 requires schema_version: %d, got %d", RosterSchemaV2, n)
+	}
+
+	if existing := findMappingChild(top, "grants"); existing != nil && existing.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("migrate roster: existing top-level %q is %v, not a sequence — refusing to overwrite", "grants", existing.Kind)
+	}
+
+	versionNode.Value = strconv.Itoa(int(RosterSchemaV3))
+	versionNode.Tag = "!!int"
+	versionNode.Style = 0
+
+	// mappingChild no-ops if grants already exists (and, per the check
+	// above, is already a sequence) rather than duplicating the key.
+	mappingChild(top, "grants", yaml.SequenceNode, "!!seq")
+
+	return root, nil
+}
+
 // rosterDocumentTop returns doc's top-level mapping node, the same
 // "document node -> mapping node" unwrap AppendMissingNFSServerStub and
 // loadDNSYAMLDoc each inline for themselves.

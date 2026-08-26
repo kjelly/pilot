@@ -135,15 +135,15 @@
     - name: "Gate: canonical roster version and legacy fields are mutually exclusive"
       ansible.builtin.assert:
         that:
-          - freeipa_roster.schema_version | int in [1, 2]
+          - freeipa_roster.schema_version | int in [1, 2, 3]
           - ipa_users | length == 0
           - ipa_groups | length == 0
           - ipa_hostgroups | length == 0
           - ipa_hbac_rules | length == 0
           - ipa_sudo_rules | length == 0
         fail_msg: >-
-          Canonical rosters require schema_version: 1 or 2 and must not mix
-          users/groups/hostgroups/hbac/sudo with legacy ipa_* lists.
+          Canonical rosters require schema_version: 1, 2, or 3 and must not
+          mix users/groups/hostgroups/hbac/sudo with legacy ipa_* lists.
       when: freeipa_roster.schema_version is defined
       tags: [always]
 
@@ -165,7 +165,8 @@
               'schema_version', 'freeipa', 'users', 'groups', 'hosts',
               'hostgroups', 'hbac', 'sudo', 'nfs', 'nfs_clients',
               'migration', 'policy_exceptions'
-            ] + (['netgroups'] if freeipa_roster.schema_version | int >= 2 else []))) | length == 0
+            ] + (['netgroups'] if freeipa_roster.schema_version | int >= 2 else [])
+              + (['grants'] if freeipa_roster.schema_version | int >= 3 else []))) | length == 0
           # This allowlist MUST stay in sync with `knownFreeIPAKeys` in
           # internal/inventory/roster_validate.go. `domain`/`realm` were omitted
           # here once while the Go validator allowed them, so this gate rejected
@@ -173,6 +174,11 @@
           # `WriteMinimalNFSServerRoster` always writes `freeipa.domain`, and
           # `pilot roster lint` could not catch it because the Go side already
           # permitted the shape. Found live round 18 (2026-07-30).
+          # `grants` (schema v3, roster-v2-to-v3 migration spec §5) is
+          # accepted here but not otherwise consumed by this playbook yet —
+          # v3.0 only makes it a recognized, always-empty schema section;
+          # nothing reconciles populated grants entries against FreeIPA
+          # until a later v3.x delivers that.
           - >-
             ((freeipa_roster.freeipa | default({})).keys() | list |
              difference(['domain', 'realm', 'server', 'admin', 'defaults', 'safety'])) | length == 0

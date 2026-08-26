@@ -13,7 +13,7 @@ import (
 
 // minimalRosterBase is the smallest canonical roster common to every
 // "create a fresh roster from within pilot edit" flow: schema_version,
-// freeipa.admin, and an empty netgroups list. WriteMinimalNFSServerRoster
+// freeipa.admin, and empty netgroups/grants lists. WriteMinimalNFSServerRoster
 // adds an nfs.servers entry on top of this for the NFS-role bootstrap
 // case; WriteMinimalRosterSkeleton uses it as-is for the generic
 // "roster — FreeIPA" entry point, which isn't tied to any specific host.
@@ -32,6 +32,7 @@ func minimalRosterBase(adminPrincipal, adminPassword string) map[string]any {
 			},
 		},
 		"netgroups": []any{},
+		"grants":    []any{},
 	}
 }
 

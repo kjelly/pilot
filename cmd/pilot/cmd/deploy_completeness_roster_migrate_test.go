@@ -51,7 +51,7 @@ func TestEnsureFreeIPARostersCurrent_MigratesV1RosterOnce(t *testing.T) {
 	if err := ensureFreeIPARostersCurrent(context.Background(), &out, inv); err != nil {
 		t.Fatalf("ensureFreeIPARostersCurrent() error = %v", err)
 	}
-	if !strings.Contains(out.String(), "Automatically upgraded to schema v2") {
+	if !strings.Contains(out.String(), "Automatically upgraded to schema v3") {
 		t.Fatalf("output = %q, want an auto-upgrade notice", out.String())
 	}
 
@@ -59,8 +59,8 @@ func TestEnsureFreeIPARostersCurrent_MigratesV1RosterOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(migrated), "schema_version: 2") {
-		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 2", migrated)
+	if !strings.Contains(string(migrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, want it upgraded to schema_version: 3", migrated)
 	}
 
 	// Shared by both ipa1 and ipa2 — must migrate exactly once, not twice
@@ -106,9 +106,9 @@ func TestEnsureFreeIPARostersCurrent_InvalidV1RosterWarnsWithoutBlocking(t *test
 	}
 }
 
-func TestEnsureFreeIPARostersCurrent_AlreadyV2IsSilentNoOp(t *testing.T) {
-	v2 := strings.Replace(rosterWithDomainOnly, "schema_version: 1", "schema_version: 2\nnetgroups: []", 1)
-	_, inv, _ := writeFreeIPARosterMigrateFixture(t, v2)
+func TestEnsureFreeIPARostersCurrent_AlreadyCurrentIsSilentNoOp(t *testing.T) {
+	v3 := strings.Replace(rosterWithDomainOnly, "schema_version: 1", "schema_version: 3\nnetgroups: []\ngrants: []", 1)
+	_, inv, _ := writeFreeIPARosterMigrateFixture(t, v3)
 
 	var out bytes.Buffer
 	if err := ensureFreeIPARostersCurrent(context.Background(), &out, inv); err != nil {
@@ -116,5 +116,22 @@ func TestEnsureFreeIPARostersCurrent_AlreadyV2IsSilentNoOp(t *testing.T) {
 	}
 	if out.String() != "" {
 		t.Fatalf("output = %q, want no output for an already-current roster", out.String())
+	}
+}
+
+func TestEnsureFreeIPARostersCurrent_UpgradesV2Roster(t *testing.T) {
+	v2 := strings.Replace(rosterWithDomainOnly, "schema_version: 1", "schema_version: 2\nnetgroups: []", 1)
+	_, inv, rosterPath := writeFreeIPARosterMigrateFixture(t, v2)
+
+	var out bytes.Buffer
+	if err := ensureFreeIPARostersCurrent(context.Background(), &out, inv); err != nil {
+		t.Fatalf("ensureFreeIPARostersCurrent() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "Roster schema v2 detected") || !strings.Contains(out.String(), "Automatically upgraded to schema v3") {
+		t.Fatalf("output = %q, want a v2->v3 auto-upgrade notice", out.String())
+	}
+	migrated, err := os.ReadFile(rosterPath)
+	if err != nil || !strings.Contains(string(migrated), "schema_version: 3") {
+		t.Fatalf("roster on disk = %q, err = %v, want it upgraded to schema_version: 3", migrated, err)
 	}
 }

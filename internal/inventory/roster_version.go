@@ -14,10 +14,11 @@ type RosterSchemaVersion int
 const (
 	RosterSchemaV1 RosterSchemaVersion = 1
 	RosterSchemaV2 RosterSchemaVersion = 2
+	RosterSchemaV3 RosterSchemaVersion = 3
 
 	// CurrentRosterSchemaVersion is the version new rosters are created as
 	// and the version `pilot roster migrate` upgrades existing rosters to.
-	CurrentRosterSchemaVersion = RosterSchemaV2
+	CurrentRosterSchemaVersion = RosterSchemaV3
 )
 
 // DetectRosterSchemaVersion reads the declared schema_version out of raw

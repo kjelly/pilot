@@ -372,6 +372,353 @@ nfs:
 
 // ---- RenderNFSClientSelector unit coverage -------------------------------
 
+// ---- V2 -> V3 ---------------------------------------------------------
+//
+// Required tests per the roster-v2-to-v3 migration spec §13, items 1-7:
+// modern team/role/mixed-subject/mixed-target/legacy-access HBAC geometry
+// all survive migration with identical effective access, migration never
+// creates an access-* group, and migration never rewrites static HBAC as
+// grants (grants[] stays empty).
+
+func TestMigrateRosterV2ToV3_MinimalDocument(t *testing.T) {
+	migrated, err := MigrateRosterV2ToV3(mustParseRosterNode(t, `
+schema_version: 2
+freeipa:
+  admin:
+    principal: admin
+    password: secret123
+netgroups: []
+`))
+	if err != nil {
+		t.Fatalf("MigrateRosterV2ToV3() error = %v", err)
+	}
+	root := mustParseRoster(t, string(marshalNode(t, migrated)))
+
+	if n, _ := toInt(root["schema_version"]); n != 3 {
+		t.Fatalf("schema_version = %v, want 3", root["schema_version"])
+	}
+	grants, ok := root["grants"].([]any)
+	if !ok || len(grants) != 0 {
+		t.Fatalf("grants = %#v, want an empty list", root["grants"])
+	}
+	if v := ValidateRosterV3(root); len(v) != 0 {
+		t.Fatalf("migrated result failed ValidateRosterV3: %v", v)
+	}
+}
+
+func TestMigrateRosterV2ToV3_RejectsNonV2SchemaVersion(t *testing.T) {
+	if _, err := MigrateRosterV2ToV3(mustParseRosterNode(t, "schema_version: 3\n")); err == nil {
+		t.Fatal("expected an error migrating a document that already declares schema_version: 3")
+	}
+}
+
+func TestMigrateRosterV2ToV3_RejectsMissingSchemaVersion(t *testing.T) {
+	if _, err := MigrateRosterV2ToV3(mustParseRosterNode(t, "users: []\n")); err == nil {
+		t.Fatal("expected an error migrating a document with no schema_version")
+	}
+}
+
+func TestMigrateRosterV2ToV3_RejectsNonMappingDocument(t *testing.T) {
+	if _, err := MigrateRosterV2ToV3(mustParseRosterNode(t, "- just\n- a\n- list\n")); err == nil {
+		t.Fatal("expected an error migrating a document whose top level isn't a mapping")
+	}
+}
+
+func TestMigrateRosterV2ToV3_GrantsIdempotentIfAlreadyPresent(t *testing.T) {
+	node := mustParseRosterNode(t, `
+schema_version: 2
+freeipa: {admin: {principal: admin, password: x}}
+netgroups: []
+grants: []
+`)
+	migrated, err := MigrateRosterV2ToV3(node)
+	if err != nil {
+		t.Fatalf("MigrateRosterV2ToV3() error = %v", err)
+	}
+	out := string(marshalNode(t, migrated))
+	if strings.Count(out, "grants:") != 1 {
+		t.Fatalf("expected exactly one grants: key, got:\n%s", out)
+	}
+}
+
+// TestMigrateRosterV2ToV3_RejectsConflictingNonSequenceGrants is required
+// test #14: a v2 document that already has a malformed (non-sequence)
+// top-level grants: node must fail the migration rather than silently
+// overwrite it — MigrateRosterV2ToV3's "fail rather than overwrite
+// conflicting nodes" contract (§7).
+func TestMigrateRosterV2ToV3_RejectsConflictingNonSequenceGrants(t *testing.T) {
+	if _, err := MigrateRosterV2ToV3(mustParseRosterNode(t, `
+schema_version: 2
+freeipa: {admin: {principal: admin, password: x}}
+netgroups: []
+grants: not-a-list
+`)); err == nil {
+		t.Fatal("expected an error migrating a document whose existing grants: isn't a sequence")
+	}
+}
+
+func TestMigrateRosterV2ToV3_PreservesComments(t *testing.T) {
+	migrated, err := MigrateRosterV2ToV3(mustParseRosterNode(t, `schema_version: 2
+freeipa:
+  admin: {principal: admin, password: x}
+netgroups: []
+users:
+  - name: alice # keep this human note
+`))
+	if err != nil {
+		t.Fatalf("MigrateRosterV2ToV3() error = %v", err)
+	}
+	out := string(marshalNode(t, migrated))
+	if !strings.Contains(out, "keep this human note") {
+		t.Fatalf("migrated output lost a comment:\n%s", out)
+	}
+}
+
+func TestMigrateRosterV2ToV3_PreservesAnchorsAndAliases(t *testing.T) {
+	migrated, err := MigrateRosterV2ToV3(mustParseRosterNode(t, `schema_version: 2
+freeipa:
+  admin: {principal: admin, password: x}
+netgroups: []
+groups:
+  - name: team-devs
+    category: team
+    membership: &shared_membership {authoritative: true, users: [], groups: []}
+  - name: role-devs
+    category: role
+    membership: *shared_membership
+`))
+	if err != nil {
+		t.Fatalf("MigrateRosterV2ToV3() error = %v", err)
+	}
+	out := string(marshalNode(t, migrated))
+	if !strings.Contains(out, "&shared_membership") || !strings.Contains(out, "*shared_membership") {
+		t.Fatalf("migrated output lost the anchor/alias:\n%s", out)
+	}
+}
+
+// mustMigrateV2ToV3ForTest validates doc as v2, migrates it, and validates
+// the result as v3 — the shared before/after pair every HBAC-geometry
+// preservation test below needs.
+func mustMigrateV2ToV3ForTest(t *testing.T, doc string) (before, after map[string]any) {
+	t.Helper()
+	before = mustParseRoster(t, doc)
+	if v := ValidateRosterV2(before); len(v) != 0 {
+		t.Fatalf("fixture failed ValidateRosterV2: %v", v)
+	}
+	migrated, err := MigrateRosterV2ToV3(mustParseRosterNode(t, doc))
+	if err != nil {
+		t.Fatalf("MigrateRosterV2ToV3() error = %v", err)
+	}
+	after = mustParseRoster(t, string(marshalNode(t, migrated)))
+	if v := ValidateRosterV3(after); len(v) != 0 {
+		t.Fatalf("migrated fixture failed ValidateRosterV3: %v", v)
+	}
+	return before, after
+}
+
+// required test #1: modern v2 team HBAC -> v3, effective access identical.
+func TestMigrateRosterV2ToV3_TeamHBACEffectiveAccessUnchanged(t *testing.T) {
+	before, after := mustMigrateV2ToV3ForTest(t, `
+schema_version: 2
+freeipa: {admin: {principal: admin, password: x}}
+netgroups: []
+users:
+  - name: alice
+groups:
+  - name: team-devs
+    category: team
+    membership: {authoritative: true, users: [alice], groups: []}
+hosts:
+  - name: app1.ipa.pilot.internal
+    ip_address: 192.168.122.61
+hbac:
+  rules:
+    - name: devs-to-app1
+      subjects: {users: [], groups: [team-devs]}
+      targets: {hosts: [app1.ipa.pilot.internal], hostgroups: []}
+      services: [sshd]
+`)
+	if !reflect.DeepEqual(EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after)) {
+		t.Fatalf("effective HBAC access changed by migration:\nbefore: %+v\nafter:  %+v",
+			EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after))
+	}
+}
+
+// required test #2: modern v2 role HBAC -> v3, effective access identical.
+func TestMigrateRosterV2ToV3_RoleHBACEffectiveAccessUnchanged(t *testing.T) {
+	before, after := mustMigrateV2ToV3ForTest(t, `
+schema_version: 2
+freeipa: {admin: {principal: admin, password: x}}
+netgroups: []
+users:
+  - name: bob
+groups:
+  - name: role-dba
+    category: role
+    membership: {authoritative: true, users: [bob], groups: []}
+hostgroups:
+  - name: hostgroup-db
+    membership: {authoritative: true, hosts: [], hostgroups: []}
+hbac:
+  rules:
+    - name: dba-to-db
+      subjects: {users: [], groups: [role-dba]}
+      targets: {hosts: [], hostgroups: [hostgroup-db]}
+      services: [sshd]
+`)
+	if !reflect.DeepEqual(EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after)) {
+		t.Fatalf("effective HBAC access changed by migration:\nbefore: %+v\nafter:  %+v",
+			EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after))
+	}
+}
+
+// required test #3: mixed direct user + group HBAC subject -> v3, identical.
+func TestMigrateRosterV2ToV3_MixedDirectUserAndGroupSubjectUnchanged(t *testing.T) {
+	before, after := mustMigrateV2ToV3ForTest(t, `
+schema_version: 2
+freeipa: {admin: {principal: admin, password: x}}
+netgroups: []
+users:
+  - name: alice
+  - name: carol
+groups:
+  - name: team-devs
+    category: team
+    membership: {authoritative: true, users: [alice], groups: []}
+hosts:
+  - name: app1.ipa.pilot.internal
+    ip_address: 192.168.122.61
+hbac:
+  rules:
+    - name: mixed-subjects
+      subjects: {users: [carol], groups: [team-devs]}
+      targets: {hosts: [app1.ipa.pilot.internal], hostgroups: []}
+      services: [sshd]
+`)
+	if !reflect.DeepEqual(EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after)) {
+		t.Fatalf("effective HBAC access changed by migration:\nbefore: %+v\nafter:  %+v",
+			EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after))
+	}
+}
+
+// required test #4: mixed direct host + hostgroup HBAC target -> v3, identical.
+func TestMigrateRosterV2ToV3_MixedDirectHostAndHostgroupTargetUnchanged(t *testing.T) {
+	before, after := mustMigrateV2ToV3ForTest(t, `
+schema_version: 2
+freeipa: {admin: {principal: admin, password: x}}
+netgroups: []
+users:
+  - name: alice
+groups:
+  - name: team-devs
+    category: team
+    membership: {authoritative: true, users: [alice], groups: []}
+hosts:
+  - name: app1.ipa.pilot.internal
+    ip_address: 192.168.122.61
+hostgroups:
+  - name: hostgroup-web
+    membership: {authoritative: true, hosts: [], hostgroups: []}
+hbac:
+  rules:
+    - name: mixed-targets
+      subjects: {users: [], groups: [team-devs]}
+      targets: {hosts: [app1.ipa.pilot.internal], hostgroups: [hostgroup-web]}
+      services: [sshd]
+`)
+	if !reflect.DeepEqual(EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after)) {
+		t.Fatalf("effective HBAC access changed by migration:\nbefore: %+v\nafter:  %+v",
+			EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after))
+	}
+}
+
+// required test #5: legacy access-category HBAC subject -> v3, identical
+// effective access, and the access-* group itself survives unchanged.
+func TestMigrateRosterV2ToV3_LegacyAccessGroupHBACPreserved(t *testing.T) {
+	doc := `
+schema_version: 2
+freeipa: {admin: {principal: admin, password: x}}
+netgroups: []
+users:
+  - name: dave
+groups:
+  - name: access-legacy-ssh
+    category: access
+    membership: {authoritative: true, users: [dave], groups: []}
+hbac:
+  rules:
+    - name: legacy-ssh-access
+      subjects: {users: [], groups: [access-legacy-ssh]}
+      targets: {hostcat: all}
+      services: [sshd]
+`
+	before, after := mustMigrateV2ToV3ForTest(t, doc)
+	if !reflect.DeepEqual(EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after)) {
+		t.Fatalf("effective HBAC access changed by migration:\nbefore: %+v\nafter:  %+v",
+			EffectiveHBACAccessFromRoster(before), EffectiveHBACAccessFromRoster(after))
+	}
+	afterGroups := namesOf(listField(after, "groups"))
+	if !contains(afterGroups, "access-legacy-ssh") {
+		t.Fatalf("legacy access group did not survive migration: groups = %v", afterGroups)
+	}
+}
+
+// required test #6: migration never creates an access-* group.
+func TestMigrateRosterV2ToV3_NeverCreatesAccessGroups(t *testing.T) {
+	_, after := mustMigrateV2ToV3ForTest(t, `
+schema_version: 2
+freeipa: {admin: {principal: admin, password: x}}
+netgroups: []
+users:
+  - name: alice
+groups:
+  - name: team-devs
+    category: team
+    membership: {authoritative: true, users: [alice], groups: []}
+hosts:
+  - name: app1.ipa.pilot.internal
+    ip_address: 192.168.122.61
+hbac:
+  rules:
+    - name: devs-to-app1
+      subjects: {users: [], groups: [team-devs]}
+      targets: {hosts: [app1.ipa.pilot.internal], hostgroups: []}
+      services: [sshd]
+`)
+	if got := namesWithCategory(listField(after, "groups"), "access"); len(got) != 0 {
+		t.Fatalf("migration created access group(s) out of nowhere: %v", got)
+	}
+}
+
+// required test #7: migration never rewrites static HBAC as grants —
+// grants[] stays empty even when hbac.rules is populated.
+func TestMigrateRosterV2ToV3_NeverRewritesHBACAsGrants(t *testing.T) {
+	_, after := mustMigrateV2ToV3ForTest(t, `
+schema_version: 2
+freeipa: {admin: {principal: admin, password: x}}
+netgroups: []
+users:
+  - name: alice
+groups:
+  - name: team-devs
+    category: team
+    membership: {authoritative: true, users: [alice], groups: []}
+hosts:
+  - name: app1.ipa.pilot.internal
+    ip_address: 192.168.122.61
+hbac:
+  rules:
+    - name: devs-to-app1
+      subjects: {users: [], groups: [team-devs]}
+      targets: {hosts: [app1.ipa.pilot.internal], hostgroups: []}
+      services: [sshd]
+`)
+	grants, ok := after["grants"].([]any)
+	if !ok || len(grants) != 0 {
+		t.Fatalf("grants = %#v, want it to stay empty — static HBAC must never be rewritten as grants", after["grants"])
+	}
+}
+
 func TestRenderNFSClientSelector(t *testing.T) {
 	cases := []struct{ clientType, value, want string }{
 		{"network", "192.168.1.0/24", "192.168.1.0/24"},
