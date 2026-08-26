@@ -26,7 +26,8 @@ args = [ "ubuntu@infra-deploy",
         "--enable-diagnose",
         "--enable-diagnose-raw",
         "--diagnose-inventory",
-        "/pilot/config/inventory.yml"
+        "/pilot/config/inventory.yml",
+        "--allow-write"
 ]
 env = { PROJECT_ROOT = "${workspaceFolder}" }
 
