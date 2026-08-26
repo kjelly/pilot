@@ -1699,6 +1699,15 @@ If a real FreeIPA test target is available, run the canonical apply/check/verify
 
 Do not fabricate live-run evidence.
 
+Phase 6 evidence (2026-08-26, no live FreeIPA target available — `pilot vm-target list` showed none up, and standing one up was out of scope for this pass; no live-run evidence is claimed for the new team/role/direct-user/direct-host HBAC paths, matching docs/verification/freeipa-identity.md's added status note):
+
+- `go test ./...`: 2105 passed, 4 failed, 1 skipped — all 4 failures are pre-existing and unrelated (confirmed via `git stash`/`git log`-scoped diff): 3 are `bubbletea: error opening TTY` failures in `cmd/pilot/cmd/deploy_outcome_test.go`/`deploy_transaction_test.go` (this sandbox has no TTY), 1 is `spec/TestRegression_LogShippingPlaybookAutoDetectsDashboardHost` (unrelated to freeipa-identity/HBAC).
+- `go vet ./...`: clean.
+- `go build ./cmd/pilot`: clean.
+- `gofmt -l` over every `.go` file touched by this delivery: clean.
+- `make playbook-lint` (L1 syntax-check over all playbooks): `playbooks/apply/freeipa-identity-apply.yml` syntax-checks clean; the overall target still fails on a pre-existing, unrelated duplicate `register:` key in `audit-log-forwarding-apply.yml` (already a known issue, not introduced here).
+- `make lint` (golangci-lint): could not run — the installed golangci-lint binary was built with an older Go toolchain than this repo's go.mod targets; pre-existing environment limitation, not evaluated as part of this delivery.
+
 24. Acceptance scenarios
 
 Scenario A — Team directly grants login
