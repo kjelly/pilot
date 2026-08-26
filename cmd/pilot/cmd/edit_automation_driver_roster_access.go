@@ -9,6 +9,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
@@ -167,11 +168,11 @@ func (d *automationDriver) ensureRosterHBACList(r *editRouterModel) error {
 	return fmt.Errorf("could not resolve navigation to roster HBAC list")
 }
 
-// createHBACRule replays the full 3-checklist creation wizard
-// (pushRosterAddHBACGroups -> ...Hostgroups -> ...Services) in one
+// createHBACRule replays the full groups -> users -> hostgroups -> hosts ->
+// services creation wizard (pushRosterAddHBACGroups and its chain) in one
 // atomic step, matching the TUI: there is no "create an empty rule"
 // primitive to decouple creation from these selections.
-func (d *automationDriver) createHBACRule(r *editRouterModel, name string, groups, hostgroups, services []string) error {
+func (d *automationDriver) createHBACRule(r *editRouterModel, name string, groups, users, hostgroups, hosts, services []string) error {
 	if err := d.ensureRosterHBACList(r); err != nil {
 		return err
 	}
@@ -184,13 +185,68 @@ func (d *automationDriver) createHBACRule(r *editRouterModel, name string, group
 	if err := d.enter(r); err != nil {
 		return err
 	}
-	if err := d.setChecklistSelection(r, groups); err != nil {
+	if err := d.setChecklistSelectionByID(r, groups); err != nil {
+		return err
+	}
+	if err := d.setChecklistSelection(r, users); err != nil {
 		return err
 	}
 	if err := d.setChecklistSelection(r, hostgroups); err != nil {
 		return err
 	}
+	if err := d.setDirectHostsInput(r, hosts); err != nil {
+		return err
+	}
 	return d.setChecklistSelection(r, services)
+}
+
+// setChecklistSelectionByID is setChecklistSelection's counterpart for a
+// checklist whose displayed Label may differ from its stable ID — the HBAC
+// subject-groups screen decorates legacy access groups with a
+// "[legacy access]" suffix (spec.md §11.2) — so it matches want against
+// item.ID instead of item.Label. A decorated label must never leak into
+// what automation replay treats as the selected entity name.
+func (d *automationDriver) setChecklistSelectionByID(r *editRouterModel, want []string) error {
+	wantSet := make(map[string]bool, len(want))
+	for _, w := range want {
+		wantSet[w] = true
+	}
+	for {
+		st := automationState(r)
+		if st.Kind != tui.ScreenMultiSelect {
+			return fmt.Errorf("expected a checklist screen, got %s", automationScreenID(r))
+		}
+		mismatch := -1
+		for i, item := range st.Items {
+			if item.Checked != wantSet[item.ID] {
+				mismatch = i
+				break
+			}
+		}
+		if mismatch < 0 {
+			break
+		}
+		if err := d.moveCursor(r, mismatch); err != nil {
+			return err
+		}
+		if err := d.send(r, keySpace()); err != nil {
+			return err
+		}
+	}
+	return d.enter(r)
+}
+
+// setDirectHostsInput drives an HBAC direct-host free-text screen (add or
+// detail flavor) by replacing its contents with a normalized
+// comma-separated join of hosts, then committing with Enter.
+func (d *automationDriver) setDirectHostsInput(r *editRouterModel, hosts []string) error {
+	if automationState(r).Kind != tui.ScreenInput {
+		return fmt.Errorf("expected a direct-hosts input screen, got %s", automationScreenID(r))
+	}
+	if err := d.typeText(r, strings.Join(hosts, ", "), true); err != nil {
+		return err
+	}
+	return d.enter(r)
 }
 
 func (d *automationDriver) ensureRosterHBACDetail(r *editRouterModel, name string) error {
@@ -215,7 +271,7 @@ func (d *automationDriver) setHBACGroups(r *editRouterModel, name string, groups
 	if err := d.choose(r, "subjects.groups"); err != nil {
 		return err
 	}
-	return d.setChecklistSelection(r, groups)
+	return d.setChecklistSelectionByID(r, groups)
 }
 
 func (d *automationDriver) setHBACTargets(r *editRouterModel, name string, hostgroups []string) error {

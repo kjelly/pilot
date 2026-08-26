@@ -766,7 +766,7 @@ func editActionRegistry() []editActionDef {
 			},
 			Validate: validateEntityNameOnly("create_hbac_rule"),
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
-				return d.createHBACRule(r, step.Name, step.Groups, step.Hostgroups, step.Services)
+				return d.createHBACRule(r, step.Name, step.Groups, nil, step.Hostgroups, nil, step.Services)
 			},
 		},
 		{

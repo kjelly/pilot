@@ -525,9 +525,9 @@ func TestMCPServe_Integration_RosterAccessAndSudoRoundTrip(t *testing.T) {
 	defer session.Close()
 
 	scenario := editScenario{Version: 1, Title: "roster access + sudo mcp round trip", Steps: []editAction{
-		{Action: "create_group", Name: "access-web", Category: "access"},
+		{Action: "create_group", Name: "team-web", Category: "team"},
 		{Action: "create_hostgroup", Name: "webhosts"},
-		{Action: "create_hbac_rule", Name: "web-login", Groups: []string{"access-web"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
+		{Action: "create_hbac_rule", Name: "web-login", Groups: []string{"team-web"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
 		{Action: "create_group", Name: "role-web", Category: "role"},
 		{Action: "create_sudo_command_group", Name: "web-restart", Value: "systemctl restart nginx"},
 		{Action: "create_sudo_rule", Name: "web-sudo", Groups: []string{"role-web"}, CommandGroups: []string{"web-restart"}},
@@ -563,7 +563,7 @@ func TestMCPServe_Integration_RosterAccessAndSudoRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected the real roster file to exist after apply: %v", err)
 	}
-	for _, want := range []string{"access-web", "webhosts", "web-login", "role-web", "web-restart", "web-sudo"} {
+	for _, want := range []string{"team-web", "webhosts", "web-login", "role-web", "web-restart", "web-sudo"} {
 		if !strings.Contains(string(rosterData), want) {
 			t.Fatalf("expected the real roster file to contain %q, got:\n%s", want, rosterData)
 		}

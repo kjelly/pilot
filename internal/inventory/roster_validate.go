@@ -300,6 +300,14 @@ var (
 	knownHostKeys = []string{"name", "state", "ip_address", "description"}
 )
 
+// ValidRosterHostFQDN reports whether s is FQDN-shaped for a roster host
+// reference — the same expectation checkHosts already applies to
+// hosts[].name, reused by HBAC direct-host authoring (spec.md §7.5) so both
+// layers reject the same malformed strings before they ever reach FreeIPA.
+func ValidRosterHostFQDN(s string) bool {
+	return hostFQDNRe.MatchString(s)
+}
+
 func checkHosts(hosts []any) []RosterViolation {
 	var out []RosterViolation
 	for _, raw := range hosts {

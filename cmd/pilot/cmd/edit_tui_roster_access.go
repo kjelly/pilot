@@ -257,7 +257,7 @@ func pushRosterHBACMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		tui.Choice{ID: "roster.hbac.list.add", Label: "➕ 新增登入規則"},
 		tui.Choice{ID: "roster.hbac.list.back", Label: "↩  返回"},
 	)
-	spec := tui.SelectSpec{ScreenID: "roster.hbac.list", Title: "HBAC rules — group → hostgroup", Choices: choices}
+	spec := tui.SelectSpec{ScreenID: "roster.hbac.list", Title: "HBAC rules — 誰可以透過哪些服務登入哪些主機", Choices: choices}
 	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() || m.Selected() == len(choices)-1 {
@@ -286,22 +286,110 @@ func pushRosterAddHBACRuleName(r *editRouterModel, dir, path string) tea.Cmd {
 	})
 }
 
-func accessGroupChoices(path string) ([]string, error) {
+// hbacSubjectGroupChoices returns every roster group valid as an HBAC
+// subject — team, role, or legacy access (inventory.IsHBACSubjectGroupCategory)
+// — labeling legacy access groups distinctly without changing their stable
+// choice ID, which stays the actual group name (spec.md §11.2).
+func hbacSubjectGroupChoices(path string) ([]tui.MultiSelectChoice, error) {
 	names, err := inventory.RosterGroupNames(path)
 	if err != nil {
 		return nil, err
 	}
-	out := []string{}
+	choices := []tui.MultiSelectChoice{}
 	for _, n := range names {
 		f, ok, err := inventory.RosterGroup(path, n)
 		if err != nil {
 			return nil, err
 		}
-		if ok && rosterStringOr(f, "category", "") == "access" {
+		category := rosterStringOr(f, "category", "")
+		if !ok || !inventory.IsHBACSubjectGroupCategory(category) {
+			continue
+		}
+		label := n
+		if inventory.IsDeprecatedGroupCategory(category) {
+			label = n + " [legacy access]"
+		}
+		choices = append(choices, tui.MultiSelectChoice{Choice: tui.Choice{ID: n, Label: label}})
+	}
+	return choices, nil
+}
+
+// hbacSubjectUserChoices returns every valid HBAC direct-user subject:
+// the built-in admin principal plus every roster user, in deterministic
+// order with no duplicate admin (spec.md §11.3).
+func hbacSubjectUserChoices(path string) ([]string, error) {
+	names, err := inventory.RosterUserNames(path)
+	if err != nil {
+		return nil, err
+	}
+	out := []string{"admin"}
+	for _, n := range names {
+		if n != "admin" {
 			out = append(out, n)
 		}
 	}
 	return out, nil
+}
+
+// markChecked sets Checked on every choice whose ID is in current — used by
+// HBAC/sudo detail screens that need custom per-choice labels (so they build
+// choices via hbacSubjectGroupChoices instead of the checklist() helper) but
+// still need to preselect the rule's current values.
+func markChecked(choices []tui.MultiSelectChoice, current []string) []tui.MultiSelectChoice {
+	for i := range choices {
+		choices[i].Checked = hasRole(current, choices[i].ID)
+	}
+	return choices
+}
+
+// validateDirectHostsInput is the InputSpec.Validate for every HBAC
+// direct-host field: each comma-separated, trimmed entry must be
+// FQDN-shaped, but the field as a whole may be empty (spec.md §7.5, §11.3).
+func validateDirectHostsInput(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !inventory.ValidRosterHostFQDN(part) {
+			return fmt.Errorf("%q 不是合法的 FQDN", part)
+		}
+	}
+	return nil
+}
+
+// normalizeDirectHosts splits a comma-separated direct-host input into a
+// trimmed, deduplicated, deterministically sorted list — the same
+// normalization every HBAC direct-host field applies before it's ever
+// written to the roster (spec.md §7.5, §11.3).
+func normalizeDirectHosts(v string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			continue
+		}
+		seen[part] = true
+		out = append(out, part)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// checklistIDs is checklist's counterpart for callers that need a per-choice
+// display label distinct from the stable ID (e.g. flagging a legacy access
+// group) — it reads back CheckedIDs() rather than CheckedLabels() so a
+// decorated label can never leak into roster data.
+func checklistIDs(r *editRouterModel, screenID, title string, choices []tui.MultiSelectChoice, next func(*editRouterModel, []string) tea.Cmd, cancel func(*editRouterModel) tea.Cmd) tea.Cmd {
+	spec := tui.MultiSelectSpec{ScreenID: screenID, Title: title + "（space 勾選、enter 完成）", Choices: choices}
+	return r.transitionTo(r.uiFactory().MultiSelect(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.MultiSelectScreen)
+		if m.Canceled() {
+			return cancel(r)
+		}
+		return next(r, m.CheckedIDs())
+	})
 }
 
 // checklist is the shared multi-select used by every roster relationship
@@ -325,30 +413,56 @@ func checklist(r *editRouterModel, screenID, title string, options, current []st
 }
 
 func pushRosterAddHBACGroups(r *editRouterModel, dir, path, name string) tea.Cmd {
-	groups, err := accessGroupChoices(path)
+	choices, err := hbacSubjectGroupChoices(path)
 	if err != nil {
 		r.err = err
 		return nil
 	}
-	return checklist(r, "roster.hbac.add_groups", "允許登入的 access group", groups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
-		return pushRosterAddHBACHostgroups(r, dir, path, name, selected)
+	return checklistIDs(r, "roster.hbac.add_groups", "允許登入的 group（team/role/legacy access）", choices, func(r *editRouterModel, selected []string) tea.Cmd {
+		return pushRosterAddHBACUsers(r, dir, path, name, selected)
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACMenu(r, dir, path, "") })
 }
 
-func pushRosterAddHBACHostgroups(r *editRouterModel, dir, path, name string, groups []string) tea.Cmd {
+func pushRosterAddHBACUsers(r *editRouterModel, dir, path, name string, groups []string) tea.Cmd {
+	users, err := hbacSubjectUserChoices(path)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	return checklist(r, "roster.hbac.add_users", "允許登入的使用者", users, nil, func(r *editRouterModel, selected []string) tea.Cmd {
+		return pushRosterAddHBACHostgroups(r, dir, path, name, groups, selected)
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACMenu(r, dir, path, "") })
+}
+
+func pushRosterAddHBACHostgroups(r *editRouterModel, dir, path, name string, groups, users []string) tea.Cmd {
 	hostgroups, err := inventory.RosterHostgroupNames(path)
 	if err != nil {
 		r.err = err
 		return nil
 	}
 	return checklist(r, "roster.hbac.add_hostgroups", "允許登入的 hostgroup", hostgroups, nil, func(r *editRouterModel, selected []string) tea.Cmd {
-		return pushRosterAddHBACServices(r, dir, path, name, groups, selected)
+		return pushRosterAddHBACHosts(r, dir, path, name, groups, users, selected)
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACMenu(r, dir, path, "") })
 }
 
-func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, groups, hostgroups []string) tea.Cmd {
+func pushRosterAddHBACHosts(r *editRouterModel, dir, path, name string, groups, users, hostgroups []string) tea.Cmd {
+	spec := tui.InputSpec{
+		ScreenID: "roster.hbac.add_hosts",
+		Title:    "Direct hosts / exceptions（可留空；逗號分隔已 enroll FQDN）",
+		Validate: validateDirectHostsInput,
+	}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.InputScreen)
+		if m.Canceled() {
+			return pushRosterHBACMenu(r, dir, path, "")
+		}
+		return pushRosterAddHBACServices(r, dir, path, name, groups, users, hostgroups, normalizeDirectHosts(m.Value()))
+	})
+}
+
+func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, groups, users, hostgroups, hosts []string) tea.Cmd {
 	return checklist(r, "roster.hbac.add_services", "允許的 PAM service", rosterHBACServiceChoices(), []string{"sshd"}, func(r *editRouterModel, services []string) tea.Cmd {
-		rule := map[string]any{"name": name, "state": "present", "enabled": true, "subjects": map[string]any{"users": []string{}, "groups": groups}, "targets": map[string]any{"hosts": []string{}, "hostgroups": hostgroups}, "services": services}
+		rule := map[string]any{"name": name, "state": "present", "enabled": true, "subjects": map[string]any{"users": users, "groups": groups}, "targets": map[string]any{"hosts": hosts, "hostgroups": hostgroups}, "services": services}
 		v, err := inventory.SimulateAddRosterHBACRule(path, rule)
 		if err != nil {
 			r.err = err
@@ -378,22 +492,28 @@ func pushRosterHBACDetail(r *editRouterModel, dir, path, name, banner string) te
 	tar := rosterSubmap(f, "targets")
 	choices := []tui.Choice{
 		{ID: "roster.hbac.detail.subjects_groups", Label: fmt.Sprintf("subjects.groups（%v）", rosterStringSlice(sub, "groups"))},
+		{ID: "roster.hbac.detail.subjects_users", Label: fmt.Sprintf("subjects.users（%v）", rosterStringSlice(sub, "users"))},
 		{ID: "roster.hbac.detail.targets_hostgroups", Label: fmt.Sprintf("targets.hostgroups（%v）", rosterStringSlice(tar, "hostgroups"))},
+		{ID: "roster.hbac.detail.targets_hosts", Label: fmt.Sprintf("targets.hosts（%v）", rosterStringSlice(tar, "hosts"))},
 		{ID: "roster.hbac.detail.services", Label: fmt.Sprintf("services（%v）", rosterStringSlice(f, "services"))},
 		{ID: "roster.hbac.detail.back", Label: "↩  返回"},
 	}
 	spec := tui.SelectSpec{ScreenID: "roster.hbac.detail", Title: "HBAC rule " + name, Choices: choices}
 	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
-		if m.Canceled() || m.Selected() == 3 {
+		if m.Canceled() || m.Selected() == 5 {
 			return pushRosterHBACMenu(r, dir, path, "")
 		}
 		switch m.Selected() {
 		case 0:
 			return pushRosterHBACGroups(r, dir, path, name)
 		case 1:
-			return pushRosterHBACTargets(r, dir, path, name)
+			return pushRosterHBACUsers(r, dir, path, name)
 		case 2:
+			return pushRosterHBACTargets(r, dir, path, name)
+		case 3:
+			return pushRosterHBACHosts(r, dir, path, name)
+		case 4:
 			return pushRosterHBACServices(r, dir, path, name)
 		}
 		return nil
@@ -402,15 +522,33 @@ func pushRosterHBACDetail(r *editRouterModel, dir, path, name, banner string) te
 
 func pushRosterHBACGroups(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
-	groups, err := accessGroupChoices(path)
+	choices, err := hbacSubjectGroupChoices(path)
 	if err != nil {
 		r.err = err
 		return nil
 	}
-	return checklist(r, "roster.hbac.groups", "access groups", groups, rosterStringSlice(rosterSubmap(f, "subjects"), "groups"), func(r *editRouterModel, v []string) tea.Cmd {
+	current := rosterStringSlice(rosterSubmap(f, "subjects"), "groups")
+	return checklistIDs(r, "roster.hbac.detail.subjects_groups", "subjects.groups（team/role/legacy access）", markChecked(choices, current), func(r *editRouterModel, v []string) tea.Cmd {
+		// Cloning "subjects" and setting only "groups" preserves the
+		// sibling subjects.users field untouched (spec.md §11.5).
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { s := rosterSubmapClone(x, "subjects"); s["groups"] = v; x["subjects"] = s })
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
+
+func pushRosterHBACUsers(r *editRouterModel, dir, path, name string) tea.Cmd {
+	f, _, _ := inventory.RosterHBACRule(path, name)
+	users, err := hbacSubjectUserChoices(path)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	return checklist(r, "roster.hbac.detail.subjects_users", "subjects.users", users, rosterStringSlice(rosterSubmap(f, "subjects"), "users"), func(r *editRouterModel, v []string) tea.Cmd {
+		// Cloning "subjects" and setting only "users" preserves the
+		// sibling subjects.groups field untouched (spec.md §11.5).
+		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { s := rosterSubmapClone(x, "subjects"); s["users"] = v; x["subjects"] = s })
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
+}
+
 func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
 	hgs, err := inventory.RosterHostgroupNames(path)
@@ -418,16 +556,45 @@ func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 		r.err = err
 		return nil
 	}
-	return checklist(r, "roster.hbac.targets", "hostgroups", hgs, rosterStringSlice(rosterSubmap(f, "targets"), "hostgroups"), func(r *editRouterModel, v []string) tea.Cmd {
+	return checklist(r, "roster.hbac.detail.targets_hostgroups", "targets.hostgroups", hgs, rosterStringSlice(rosterSubmap(f, "targets"), "hostgroups"), func(r *editRouterModel, v []string) tea.Cmd {
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) {
+			// Cloning "targets" and setting only "hostgroups" preserves
+			// the sibling targets.hosts field untouched — this used to
+			// zero it out, a data-loss bug fixed by spec.md §3.3/§11.5.
 			t := rosterSubmapClone(x, "targets")
 			t["hostgroups"] = v
-			t["hosts"] = []string{}
 			delete(t, "hostcat")
 			x["targets"] = t
 		})
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
+
+func pushRosterHBACHosts(r *editRouterModel, dir, path, name string) tea.Cmd {
+	f, _, _ := inventory.RosterHBACRule(path, name)
+	current := rosterStringSlice(rosterSubmap(f, "targets"), "hosts")
+	spec := tui.InputSpec{
+		ScreenID: "roster.hbac.detail.targets_hosts",
+		Title:    "Direct hosts / exceptions（可留空；逗號分隔已 enroll FQDN）",
+		Default:  strings.Join(current, ", "),
+		Validate: validateDirectHostsInput,
+	}
+	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.InputScreen)
+		if m.Canceled() {
+			return pushRosterHBACDetail(r, dir, path, name, "")
+		}
+		hosts := normalizeDirectHosts(m.Value())
+		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) {
+			// Cloning "targets" and setting only "hosts" preserves the
+			// sibling targets.hostgroups field untouched (spec.md §11.5).
+			t := rosterSubmapClone(x, "targets")
+			t["hosts"] = hosts
+			delete(t, "hostcat")
+			x["targets"] = t
+		})
+	})
+}
+
 func pushRosterHBACServices(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
 	return checklist(r, "roster.hbac.services", "services", rosterHBACServiceChoices(), rosterStringSlice(f, "services"), func(r *editRouterModel, v []string) tea.Cmd {

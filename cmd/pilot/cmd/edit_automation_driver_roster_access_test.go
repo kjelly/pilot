@@ -14,11 +14,11 @@ func TestEditAutomationDriverRosterAccessFlow_HostgroupAndHBAC(t *testing.T) {
 	scenario := editScenario{
 		Version: 1,
 		Steps: []editAction{
-			{Action: "create_group", Name: "access-web", Category: "access"},
+			{Action: "create_group", Name: "team-web", Category: "team"},
 			{Action: "create_hostgroup", Name: "webhosts"},
 			{Action: "set_hostgroup_field", Name: "webhosts", Field: "description", Value: "web tier"},
 			{Action: "set_hostgroup_field", Name: "webhosts", Field: "membership.hosts", Value: "web1.ipa.pilot.internal, web2.ipa.pilot.internal"},
-			{Action: "create_hbac_rule", Name: "web-login", Groups: []string{"access-web"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
+			{Action: "create_hbac_rule", Name: "web-login", Groups: []string{"team-web"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
 			{Action: "set_hbac_services", Name: "web-login", Services: []string{"sshd", "sudo"}},
 			{Action: "set_hbac_disable_allow_all", Value: "true"},
 			{Action: "set_hbac_disable_allow_all", Value: "true"}, // idempotent: already true, must not toggle back
@@ -62,8 +62,8 @@ func TestEditAutomationDriverRosterAccessFlow_HostgroupAndHBAC(t *testing.T) {
 	}
 	subjects, _ := rule["subjects"].(map[string]any)
 	groups, _ := subjects["groups"].([]any)
-	if len(groups) != 1 || groups[0] != "access-web" {
-		t.Fatalf("subjects.groups = %+v, want [access-web]", groups)
+	if len(groups) != 1 || groups[0] != "team-web" {
+		t.Fatalf("subjects.groups = %+v, want [team-web]", groups)
 	}
 	targets, _ := rule["targets"].(map[string]any)
 	hostgroups, _ := targets["hostgroups"].([]any)

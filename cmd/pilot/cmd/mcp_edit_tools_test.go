@@ -236,7 +236,7 @@ func TestInspectHandler_OmitsRosterWhenNotRequested(t *testing.T) {
 // "can alice reach web1.ipa.pilot.internal over ssh, and sudo-restart nginx
 // there" must be answerable straight from EffectiveHBACAccess/
 // EffectiveSudoAccess, without itself re-walking group/hostgroup nesting —
-// access-web/role-web only reach alice and webhosts only reaches
+// team-web/role-web only reach alice and webhosts only reaches
 // web1.ipa.pilot.internal through membership.groups/membership.hosts, which
 // this test exercises via the real semantic actions (not a hand-written
 // fixture) to also prove the whole registry-to-inspect pipeline agrees.
@@ -246,11 +246,11 @@ func TestInspectHandler_RosterGraphAndEffectiveAccessAnswerCanUserReachHost(t *t
 
 	scenario := editScenario{Version: 1, Steps: []editAction{
 		{Action: "create_user", User: "alice"},
-		{Action: "create_group", Name: "access-web", Category: "access"},
-		{Action: "set_group_members_users", Name: "access-web", Users: []string{"alice"}},
+		{Action: "create_group", Name: "team-web", Category: "team"},
+		{Action: "set_group_members_users", Name: "team-web", Users: []string{"alice"}},
 		{Action: "create_hostgroup", Name: "webhosts"},
 		{Action: "set_hostgroup_field", Name: "webhosts", Field: "membership.hosts", Value: "web1.ipa.pilot.internal"},
-		{Action: "create_hbac_rule", Name: "web-login", Groups: []string{"access-web"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
+		{Action: "create_hbac_rule", Name: "web-login", Groups: []string{"team-web"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
 		{Action: "create_group", Name: "role-web", Category: "role"},
 		{Action: "set_group_members_users", Name: "role-web", Users: []string{"alice"}},
 		{Action: "create_sudo_command_group", Name: "web-restart", Value: "systemctl restart nginx"},

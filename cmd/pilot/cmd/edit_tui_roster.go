@@ -385,18 +385,20 @@ func pushRosterGroupsMenu(r *editRouterModel, dir, path, banner string) tea.Cmd 
 	})
 }
 
-// rosterGroupCategories pairs each canonical group category with the name
-// prefix freeipa-identity-apply.yml's "Gate: canonical group objects and
-// category prefixes are valid" requires — kept in sync by hand with
-// internal/inventory/roster_validate.go's groupCategoryPrefix (unexported,
-// so duplicated here rather than shared).
+// rosterGroupCategories lists the group categories sanctioned authoring
+// surfaces may create. "access" is deliberately absent: it is a deprecated
+// compatibility category (inventory.IsDeprecatedGroupCategory) that
+// existing rosters may still reference, but nothing new may create it
+// (spec.md §1, §6.1, §10). edit_tui_roster_test.go's
+// TestRosterGroupCategories_MatchIsCreatableGroupCategory proves this list
+// stays in sync with internal/inventory.IsCreatableGroupCategory, the
+// canonical policy source of truth.
 var rosterGroupCategories = []struct {
 	Category, Label string
 }{
 	{"team", "team-*(團隊/team)"},
 	{"filesystem", "data-*(檔案系統存取/filesystem)"},
-	{"access", "access-*(存取權限/access，給 HBAC 用)"},
-	{"role", "role-*(職務角色/role，給 sudo 用)"},
+	{"role", "role-*(授權角色/role，可供 HBAC / sudo 使用)"},
 }
 
 func pushRosterAddGroupCategory(r *editRouterModel, dir, path string) tea.Cmd {
@@ -1017,10 +1019,16 @@ func pushRosterGroupDetail(r *editRouterModel, dir, path, name, banner string) t
 	users := rosterStringSlice(mem, "users")
 	groups := rosterStringSlice(mem, "groups")
 
+	categoryLabel := fmt.Sprintf("category：%s（唯讀，決定名稱前綴規則）", rosterStringOr(fields, "category", ""))
+	if inventory.IsDeprecatedGroupCategory(rosterStringOr(fields, "category", "")) {
+		// Presentation only (spec.md §10) — the category itself stays
+		// read-only and reconciled exactly like any other group.
+		categoryLabel = "category：access（legacy；新 HBAC 不再需要 access group）"
+	}
 	choices := []tui.Choice{
 		{ID: "roster.group.detail.name", Label: fmt.Sprintf("name：%s（唯讀，其他規則會用名稱互相參照）", name)},
 		{ID: "roster.group.detail.state", Label: fmt.Sprintf("state：%s（唯讀，這個精靈不支援刪除/absent）", rosterStringOr(fields, "state", "present"))},
-		{ID: "roster.group.detail.category", Label: fmt.Sprintf("category：%s（唯讀，決定名稱前綴規則）", rosterStringOr(fields, "category", ""))},
+		{ID: "roster.group.detail.category", Label: categoryLabel},
 		{ID: "roster.group.detail.type", Label: fmt.Sprintf("type：%s", rosterStringOr(fields, "type", "posix"))},
 		{ID: "roster.group.detail.description", Label: fmt.Sprintf("description：%s", rosterDisplay(fields, "description"))},
 		{ID: "roster.group.detail.gid", Label: fmt.Sprintf("gid：%s", rosterIntDisplay(fields, "gid"))},

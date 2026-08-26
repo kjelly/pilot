@@ -65,13 +65,17 @@ func TestRosterChecklistEscapeRoutesEveryChecklist(t *testing.T) {
 		wantTitle string
 	}{
 		{"add HBAC access groups", func(r *editRouterModel) { pushRosterAddHBACGroups(r, dir, path, "new-rule") }, "HBAC rules"},
+		{"add HBAC users", func(r *editRouterModel) {
+			pushRosterAddHBACUsers(r, dir, path, "new-rule", []string{"access-infra"})
+		}, "HBAC rules"},
 		{"add HBAC hostgroups", func(r *editRouterModel) {
-			pushRosterAddHBACHostgroups(r, dir, path, "new-rule", []string{"access-infra"})
+			pushRosterAddHBACHostgroups(r, dir, path, "new-rule", []string{"access-infra"}, nil)
 		}, "HBAC rules"},
 		{"add HBAC services", func(r *editRouterModel) {
-			pushRosterAddHBACServices(r, dir, path, "new-rule", []string{"access-infra"}, []string{"infra-hosts"})
+			pushRosterAddHBACServices(r, dir, path, "new-rule", []string{"access-infra"}, nil, []string{"infra-hosts"}, nil)
 		}, "HBAC rules"},
 		{"edit HBAC access groups", func(r *editRouterModel) { pushRosterHBACGroups(r, dir, path, "infra-ssh") }, "HBAC rule infra-ssh"},
+		{"edit HBAC users", func(r *editRouterModel) { pushRosterHBACUsers(r, dir, path, "infra-ssh") }, "HBAC rule infra-ssh"},
 		{"edit HBAC hostgroups", func(r *editRouterModel) { pushRosterHBACTargets(r, dir, path, "infra-ssh") }, "HBAC rule infra-ssh"},
 		{"edit HBAC services", func(r *editRouterModel) { pushRosterHBACServices(r, dir, path, "infra-ssh") }, "HBAC rule infra-ssh"},
 		{"add sudo role groups", func(r *editRouterModel) { pushRosterAddSudoRuleGroups(r, dir, path, "new-sudo") }, "Sudo rules"},
