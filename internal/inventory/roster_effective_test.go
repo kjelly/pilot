@@ -33,6 +33,10 @@ groups:
     state: present
     category: role
     membership: {authoritative: true, users: [dave], groups: []}
+  - name: team-x
+    state: present
+    category: team
+    membership: {authoritative: true, users: [frank], groups: []}
 hostgroups:
   - name: webhosts
     state: present
@@ -53,6 +57,12 @@ hbac:
       enabled: true
       subjects: {users: [admin], groups: []}
       targets: {hostcat: all}
+      services: [sshd]
+    - name: mixed-direct-and-nested
+      state: present
+      enabled: true
+      subjects: {users: [eve], groups: [team-x, role-deploy]}
+      targets: {hosts: [db-special.ipa.pilot.internal], hostgroups: [webhosts]}
       services: [sshd]
     - name: absent-rule
       state: absent
@@ -147,8 +157,8 @@ func TestEffectiveHBACAccessList_ResolvesNestedGroupsAndHostgroupsAndSkipsAbsent
 	if err != nil {
 		t.Fatalf("EffectiveHBACAccessList() error = %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("EffectiveHBACAccessList() = %+v, want exactly 2 entries (absent-rule must be skipped)", got)
+	if len(got) != 3 {
+		t.Fatalf("EffectiveHBACAccessList() = %+v, want exactly 3 entries (absent-rule must be skipped)", got)
 	}
 
 	byRule := map[string]EffectiveHBACAccess{}
@@ -182,6 +192,23 @@ func TestEffectiveHBACAccessList_ResolvesNestedGroupsAndHostgroupsAndSkipsAbsent
 	}
 	if want := []string{"admin"}; !reflect.DeepEqual(adminAll.Users, want) {
 		t.Fatalf("allow-admin-all.Users = %v, want %v", adminAll.Users, want)
+	}
+
+	// spec.md §15/§18.5: the resolver must work unchanged when HBAC mixes
+	// a direct user with a team-* group and a role-* group, and a direct
+	// host with a hostgroup, all in the same rule.
+	mixed, ok := byRule["mixed-direct-and-nested"]
+	if !ok {
+		t.Fatalf("expected rule mixed-direct-and-nested in %+v", got)
+	}
+	if want := []string{"dave", "eve", "frank"}; !reflect.DeepEqual(mixed.Users, want) {
+		t.Fatalf("mixed-direct-and-nested.Users = %v, want %v (direct subjects.users union team-x + role-deploy membership)", mixed.Users, want)
+	}
+	if mixed.AllHosts {
+		t.Fatal("mixed-direct-and-nested.AllHosts = true, want false")
+	}
+	if want := []string{"db-special.ipa.pilot.internal", "web1.ipa.pilot.internal", "web2.ipa.pilot.internal"}; !reflect.DeepEqual(mixed.Hosts, want) {
+		t.Fatalf("mixed-direct-and-nested.Hosts = %v, want %v (direct targets.hosts union webhosts hostgroup expansion)", mixed.Hosts, want)
 	}
 }
 
