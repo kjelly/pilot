@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kjelly/pilot/internal/inventory"
@@ -270,5 +271,181 @@ func TestEditAutomationDriverRosterAccessFlow_ValidationRejectsBadInput(t *testi
 	}
 	if err := validateSudoRuleAllowMode(editAction{Action: "set_sudo_rule_allow_mode", Name: "x", Value: "everything"}); err == nil {
 		t.Fatal("expected validateSudoRuleAllowMode to reject an unsupported value")
+	}
+	if err := validateEntityNameAndHosts("create_hbac_rule")(editAction{Action: "create_hbac_rule", Name: "x", Hosts: []string{"not-an-fqdn"}}); err == nil {
+		t.Fatal("expected validateEntityNameAndHosts to reject a non-FQDN hosts entry")
+	}
+}
+
+// TestCreateHBACRule_MixedUsersGroupsHostsHostgroups is spec.md §18.4's
+// scenario: create_hbac_rule must accept and persist every relationship
+// dimension (direct users, subject groups, direct hosts, hostgroups,
+// services) in one structured action.
+func TestCreateHBACRule_MixedUsersGroupsHostsHostgroups(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMinimalRosterFixture(t, dir)
+
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_user", User: "alice"},
+		{Action: "create_group", Name: "team-developers", Category: "team"},
+		{Action: "create_group", Name: "role-ops", Category: "role"},
+		{Action: "create_hostgroup", Name: "production"},
+		{
+			Action:     "create_hbac_rule",
+			Name:       "mixed",
+			Users:      []string{"alice"},
+			Groups:     []string{"team-developers", "role-ops"},
+			Hosts:      []string{"special.ipa.pilot.internal"},
+			Hostgroups: []string{"production"},
+			Services:   []string{"sshd"},
+		},
+	}}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	rule, found, err := inventory.RosterHBACRule(path, "mixed")
+	if err != nil || !found {
+		t.Fatalf("read HBAC rule mixed: found=%t err=%v", found, err)
+	}
+	sub := rosterSubmap(rule, "subjects")
+	tar := rosterSubmap(rule, "targets")
+	if got := sortedCopy(rosterStringSlice(sub, "users")); strings.Join(got, ",") != "alice" {
+		t.Errorf("subjects.users = %v, want [alice]", got)
+	}
+	if got := sortedCopy(rosterStringSlice(sub, "groups")); strings.Join(got, ",") != "role-ops,team-developers" {
+		t.Errorf("subjects.groups = %v, want [role-ops team-developers]", got)
+	}
+	if got := rosterStringSlice(tar, "hosts"); len(got) != 1 || got[0] != "special.ipa.pilot.internal" {
+		t.Errorf("targets.hosts = %v, want [special.ipa.pilot.internal]", got)
+	}
+	if got := rosterStringSlice(tar, "hostgroups"); len(got) != 1 || got[0] != "production" {
+		t.Errorf("targets.hostgroups = %v, want [production]", got)
+	}
+}
+
+// TestCreateHBACRule_LegacyGroupsHostgroupsOnlyScenarioStillPasses locks
+// spec.md §12.7/§20.2: an old scenario that only ever populated
+// groups/hostgroups/services (no users/hosts fields existed yet) must
+// still replay unchanged, including a reference to a pre-existing legacy
+// access-category group that sanctioned creation can no longer author.
+func TestCreateHBACRule_LegacyGroupsHostgroupsOnlyScenarioStillPasses(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMinimalRosterFixture(t, dir)
+	if err := inventory.AppendRosterGroup(path, "access-old", "access"); err != nil {
+		t.Fatalf("seed legacy access-old group: %v", err)
+	}
+
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_hostgroup", Name: "webhosts"},
+		{Action: "create_hbac_rule", Name: "legacy-flow", Groups: []string{"access-old"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
+	}}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	rule, found, err := inventory.RosterHBACRule(path, "legacy-flow")
+	if err != nil || !found {
+		t.Fatalf("read HBAC rule legacy-flow: found=%t err=%v", found, err)
+	}
+	sub := rosterSubmap(rule, "subjects")
+	if got := rosterStringSlice(sub, "groups"); len(got) != 1 || got[0] != "access-old" {
+		t.Fatalf("subjects.groups = %v, want [access-old]", got)
+	}
+	if got := rosterStringSlice(sub, "users"); len(got) != 0 {
+		t.Fatalf("subjects.users = %v, want empty", got)
+	}
+}
+
+// TestSetHBACUsers_BulkReplacesUsersPreservesGroups covers the new
+// set_hbac_users action (spec.md §12.3).
+func TestSetHBACUsers_BulkReplacesUsersPreservesGroups(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMinimalRosterFixture(t, dir)
+
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_user", User: "alice"},
+		{Action: "create_user", User: "bob"},
+		{Action: "create_group", Name: "team-x", Category: "team"},
+		{Action: "create_hostgroup", Name: "webhosts"},
+		{Action: "create_hbac_rule", Name: "r1", Groups: []string{"team-x"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
+		{Action: "set_hbac_users", Name: "r1", Users: []string{"alice", "bob"}},
+	}}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	rule, found, err := inventory.RosterHBACRule(path, "r1")
+	if err != nil || !found {
+		t.Fatalf("read HBAC rule r1: found=%t err=%v", found, err)
+	}
+	sub := rosterSubmap(rule, "subjects")
+	if got := sortedCopy(rosterStringSlice(sub, "users")); strings.Join(got, ",") != "alice,bob" {
+		t.Fatalf("subjects.users = %v, want [alice bob]", got)
+	}
+	if got := rosterStringSlice(sub, "groups"); len(got) != 1 || got[0] != "team-x" {
+		t.Fatalf("set_hbac_users must preserve subjects.groups, got %v", got)
+	}
+}
+
+// TestSetHBACTargets_ExtendedBulkReplacesHostsAndHostgroups covers the
+// extended set_hbac_targets action (spec.md §12.5): passing both hosts and
+// hostgroups bulk-replaces both, and passing only hostgroups still resets
+// hosts to empty — the same explicit hostgroup-only target set this action
+// produced before hosts existed as a field.
+func TestSetHBACTargets_ExtendedBulkReplacesHostsAndHostgroups(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMinimalRosterFixture(t, dir)
+
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_group", Name: "team-x", Category: "team"},
+		{Action: "create_hostgroup", Name: "webhosts"},
+		{Action: "create_hbac_rule", Name: "r1", Groups: []string{"team-x"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
+		{Action: "set_hbac_targets", Name: "r1", Hostgroups: []string{"webhosts"}, Hosts: []string{"extra.ipa.pilot.internal"}},
+	}}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	rule, found, err := inventory.RosterHBACRule(path, "r1")
+	if err != nil || !found {
+		t.Fatalf("read HBAC rule r1: found=%t err=%v", found, err)
+	}
+	tar := rosterSubmap(rule, "targets")
+	if got := rosterStringSlice(tar, "hosts"); len(got) != 1 || got[0] != "extra.ipa.pilot.internal" {
+		t.Fatalf("targets.hosts = %v, want [extra.ipa.pilot.internal]", got)
+	}
+
+	// A second call passing only hostgroups (the pre-existing contract)
+	// must reset hosts back to empty.
+	scenario2 := editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_hbac_targets", Name: "r1", Hostgroups: []string{"webhosts"}},
+	}}
+	r2 := newEditRouterModel(dir)
+	if err := d.run(&r2, scenario2); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	rule, found, err = inventory.RosterHBACRule(path, "r1")
+	if err != nil || !found {
+		t.Fatalf("read HBAC rule r1 after hostgroups-only replay: found=%t err=%v", found, err)
+	}
+	tar = rosterSubmap(rule, "targets")
+	if got := rosterStringSlice(tar, "hosts"); len(got) != 0 {
+		t.Fatalf("hostgroups-only set_hbac_targets must reset targets.hosts to empty, got %v", got)
+	}
+	if got := rosterStringSlice(tar, "hostgroups"); len(got) != 1 || got[0] != "webhosts" {
+		t.Fatalf("targets.hostgroups = %v, want [webhosts]", got)
 	}
 }

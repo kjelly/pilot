@@ -61,18 +61,22 @@ type editAction struct {
 	// and no validator ever reads it across two different kinds.
 	// Category is create_group's category (team/filesystem/access/role),
 	// which also determines the required name prefix. Users/Groups/
-	// Hostgroups/Services/CommandGroups are bulk checklist-replace
+	// Hostgroups/Hosts/Services/CommandGroups are bulk checklist-replace
 	// selections (never toggle-one-item — matching the interactive TUI's
 	// own "pick the whole set, then Enter" checklists): Users is a
-	// group's membership.users; Groups is a group's membership.groups OR
-	// an HBAC rule's/sudo rule's subjects.groups; Hostgroups is an HBAC
-	// rule's targets.hostgroups; Services is an HBAC rule's services;
-	// CommandGroups is a sudo rule's allow.command_groups.
+	// group's membership.users OR an HBAC rule's subjects.users; Groups is
+	// a group's membership.groups OR an HBAC rule's/sudo rule's
+	// subjects.groups; Hostgroups is an HBAC rule's targets.hostgroups;
+	// Hosts is an HBAC rule's targets.hosts (a deliberately separate field
+	// from the singular Host above, which inventory-host actions already
+	// own); Services is an HBAC rule's services; CommandGroups is a sudo
+	// rule's allow.command_groups.
 	Name          string   `json:"name,omitempty"`
 	Category      string   `json:"category,omitempty"`
 	Users         []string `json:"users,omitempty"`
 	Groups        []string `json:"groups,omitempty"`
 	Hostgroups    []string `json:"hostgroups,omitempty"`
+	Hosts         []string `json:"hosts,omitempty"`
 	Services      []string `json:"services,omitempty"`
 	CommandGroups []string `json:"command_groups,omitempty"`
 	// Domain/Realm/Server are create_dns_manifest's freeipa.{domain,realm,server}

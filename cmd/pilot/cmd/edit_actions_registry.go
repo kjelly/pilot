@@ -752,9 +752,9 @@ func editActionRegistry() []editActionDef {
 		{
 			Spec: semanticActionSpec{
 				Name:                     "create_hbac_rule",
-				Description:              "create an HBAC login rule (access group -> hostgroup -> PAM service), replaying the full creation wizard in one step",
+				Description:              "create an HBAC login rule (users/groups -> hosts/hostgroups -> PAM service), replaying the full creation wizard in one step. groups accepts team/role/legacy-access category groups",
 				Required:                 []string{"name"},
-				Optional:                 []string{"groups", "hostgroups", "services"},
+				Optional:                 []string{"groups", "users", "hostgroups", "hosts", "services"},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
 				SecretHandling:           SecretHandlingNone,
@@ -764,15 +764,15 @@ func editActionRegistry() []editActionDef {
 					Assertion: "HBAC rule appears in roster with the requested subjects/targets/services",
 				},
 			},
-			Validate: validateEntityNameOnly("create_hbac_rule"),
+			Validate: validateEntityNameAndHosts("create_hbac_rule"),
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
-				return d.createHBACRule(r, step.Name, step.Groups, nil, step.Hostgroups, nil, step.Services)
+				return d.createHBACRule(r, step.Name, step.Groups, step.Users, step.Hostgroups, step.Hosts, step.Services)
 			},
 		},
 		{
 			Spec: semanticActionSpec{
 				Name:                     "set_hbac_groups",
-				Description:              "bulk-replace an HBAC rule's subjects.groups (the whole set — access-category groups only)",
+				Description:              "bulk-replace an HBAC rule's subjects.groups (the whole set — team/role/legacy-access category groups only); preserves subjects.users",
 				Required:                 []string{"name"},
 				Optional:                 []string{"groups"},
 				ExecutionMode:            ExecutionModeStructured,
@@ -791,22 +791,42 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
-				Name:                     "set_hbac_targets",
-				Description:              "bulk-replace an HBAC rule's targets.hostgroups (the whole set)",
+				Name:                     "set_hbac_users",
+				Description:              "bulk-replace an HBAC rule's subjects.users (the whole set — roster users or admin); preserves subjects.groups",
 				Required:                 []string{"name"},
-				Optional:                 []string{"hostgroups"},
+				Optional:                 []string{"users"},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
 				SecretHandling:           SecretHandlingNone,
 				Verification: &verificationSpec{
 					Method:    verificationMethodFileContent,
 					Path:      ".vault/ipa-identity.yaml",
-					Assertion: "HBAC rule's targets.hostgroups matches the requested set",
+					Assertion: "HBAC rule's subjects.users matches the requested set",
 				},
 			},
-			Validate: validateEntityNameOnly("set_hbac_targets"),
+			Validate: validateEntityNameOnly("set_hbac_users"),
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
-				return d.setHBACTargets(r, step.Name, step.Hostgroups)
+				return d.setHBACUsers(r, step.Name, step.Users)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_hbac_targets",
+				Description:              "bulk-replace both of an HBAC rule's explicit target collections — targets.hostgroups and targets.hosts — clearing hostcat; omitting hosts defaults it to empty, matching this action's pre-existing hostgroups-only behavior",
+				Required:                 []string{"name"},
+				Optional:                 []string{"hostgroups", "hosts"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "HBAC rule's targets.hostgroups and targets.hosts match the requested sets",
+				},
+			},
+			Validate: validateEntityNameAndHosts("set_hbac_targets"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setHBACTargets(r, step.Name, step.Hostgroups, step.Hosts)
 			},
 		},
 		{
@@ -1853,6 +1873,26 @@ func validateEntityNameOnly(name string) func(editAction) error {
 	return func(step editAction) error {
 		if strings.TrimSpace(step.Name) == "" {
 			return fmt.Errorf("%s requires name", name)
+		}
+		return nil
+	}
+}
+
+// validateEntityNameAndHosts is validateEntityNameOnly plus a check that
+// every entry in step.Hosts is FQDN-shaped — the action-level rejection
+// spec.md §7.5/§12.6 requires for obviously malformed direct-host values
+// before ever driving the TUI with them. Entity/referential validation
+// (e.g. whether the host is actually enrolled) remains authoritative in
+// Simulate*/roster validation, not here.
+func validateEntityNameAndHosts(name string) func(editAction) error {
+	return func(step editAction) error {
+		if err := validateEntityNameOnly(name)(step); err != nil {
+			return err
+		}
+		for _, h := range step.Hosts {
+			if !inventory.ValidRosterHostFQDN(h) {
+				return fmt.Errorf("%s: hosts entry %q is not FQDN-shaped", name, h)
+			}
 		}
 		return nil
 	}

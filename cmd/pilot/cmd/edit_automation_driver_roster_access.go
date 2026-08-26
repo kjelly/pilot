@@ -274,14 +274,38 @@ func (d *automationDriver) setHBACGroups(r *editRouterModel, name string, groups
 	return d.setChecklistSelectionByID(r, groups)
 }
 
-func (d *automationDriver) setHBACTargets(r *editRouterModel, name string, hostgroups []string) error {
+func (d *automationDriver) setHBACUsers(r *editRouterModel, name string, users []string) error {
+	if err := d.ensureRosterHBACDetail(r, name); err != nil {
+		return err
+	}
+	if err := d.choose(r, "subjects.users"); err != nil {
+		return err
+	}
+	return d.setChecklistSelection(r, users)
+}
+
+// setHBACTargets bulk-replaces both explicit target collections in one
+// atomic step (spec.md §12.5): it drives the hostgroups checklist and then
+// the direct-hosts input in sequence, so an omitted hosts (nil) commits as
+// empty — matching this action's pre-existing hostgroups-only behavior —
+// while an explicit hosts list is a real bulk replace of both dimensions.
+func (d *automationDriver) setHBACTargets(r *editRouterModel, name string, hostgroups, hosts []string) error {
 	if err := d.ensureRosterHBACDetail(r, name); err != nil {
 		return err
 	}
 	if err := d.choose(r, "targets.hostgroups"); err != nil {
 		return err
 	}
-	return d.setChecklistSelection(r, hostgroups)
+	if err := d.setChecklistSelection(r, hostgroups); err != nil {
+		return err
+	}
+	if err := d.ensureRosterHBACDetail(r, name); err != nil {
+		return err
+	}
+	if err := d.choose(r, "targets.hosts"); err != nil {
+		return err
+	}
+	return d.setDirectHostsInput(r, hosts)
 }
 
 func (d *automationDriver) setHBACServices(r *editRouterModel, name string, services []string) error {
