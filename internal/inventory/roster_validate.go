@@ -125,6 +125,7 @@ func ValidateRosterV3(root map[string]any) []RosterViolation {
 	v = append(v, checkSoDConflicts(root)...)
 	v = append(v, checkAccountPolicies(root)...)
 	v = append(v, checkPasswordPolicies(root)...)
+	v = append(v, checkPrivilegedIdentity(root)...)
 	return v
 }
 
@@ -222,7 +223,7 @@ func checkMigration(root map[string]any) []RosterViolation {
 
 var (
 	userNameRe            = regexp.MustCompile(`^[a-z_][a-z0-9_.-]*$`)
-	knownUserKeys         = []string{"name", "state", "first", "last", "display_name", "email", "uid", "gid", "login_shell", "home_directory", "password", "ssh_keys", "enabled"}
+	knownUserKeys         = []string{"name", "state", "first", "last", "display_name", "email", "uid", "gid", "login_shell", "home_directory", "password", "ssh_keys", "enabled", "authentication"}
 	knownUserPasswordKeys = []string{"initial", "force_change", "preserve_existing"}
 	knownUserSSHKeysKeys  = []string{"authoritative", "values"}
 
@@ -278,6 +279,7 @@ func checkUsers(users []any) []RosterViolation {
 		if state == "disabled" && boolFieldDefault(u, "enabled", false) {
 			out = append(out, RosterViolation{Rule: "user disabled+enabled", Detail: fmt.Sprintf("user %q: state: disabled requires enabled to not be true", label)})
 		}
+		out = append(out, checkUserAuthentication(u, label)...)
 	}
 	return out
 }

@@ -98,6 +98,12 @@ type Plan struct {
 	// PasswordPolicies is v3.2 §7's compiled group password policies
 	// (password_policies:), applied via `ipa pwpolicy-add/mod/remove`.
 	PasswordPolicies []inventory.CompiledPasswordPolicy
+	// UserAuthTypes is v3.2 §8's compiled per-user authentication.allowed
+	// (users[].authentication:), applied via `ipa user-mod
+	// --user-auth-type=`. Only users that declare an explicit
+	// authentication: block are present here (see CompiledUserAuthType's
+	// doc comment).
+	UserAuthTypes []inventory.CompiledUserAuthType
 }
 
 // PolicyGate is the result of spec.md §18 steps 4/5 — Separation of Duties
@@ -109,11 +115,18 @@ type PolicyGate struct {
 	SoDConflicts               []inventory.SoDConflict
 	GrantPolicyViolations      []inventory.GrantPolicyViolation
 	AccountLifecycleViolations []inventory.AccountLifecycleViolation
+	// PrivilegedIdentityViolations is v3.2 §9's fail-before-write
+	// baseline: an effectively-privileged user (security.
+	// privileged_identity.match_groups, resolved through nested
+	// membership) whose own authentication.allowed does not meet
+	// require.auth_types/no_password_only.
+	PrivilegedIdentityViolations []inventory.PrivilegedIdentityViolation
 }
 
 // Empty reports whether the gate found nothing to block on.
 func (g PolicyGate) Empty() bool {
-	return len(g.SoDConflicts) == 0 && len(g.GrantPolicyViolations) == 0 && len(g.AccountLifecycleViolations) == 0
+	return len(g.SoDConflicts) == 0 && len(g.GrantPolicyViolations) == 0 &&
+		len(g.AccountLifecycleViolations) == 0 && len(g.PrivilegedIdentityViolations) == 0
 }
 
 // String renders every violation as one line, for an error message or log.
@@ -128,10 +141,13 @@ func (g PolicyGate) String() string {
 	for _, v := range g.AccountLifecycleViolations {
 		fmt.Fprintf(&b, "account lifecycle: grant %q reaches user %q whose account is %s (account_policy %q); ", v.GrantName, v.User, v.AccountLifecycle, v.AccountPolicyName)
 	}
+	for _, v := range g.PrivilegedIdentityViolations {
+		fmt.Fprintf(&b, "privileged_identity: user %q %s; ", v.User, v.Detail)
+	}
 	return strings.TrimSuffix(b.String(), "; ")
 }
 
-// EvaluatePolicyGate runs all three semantic checks against the roster at
+// EvaluatePolicyGate runs all four semantic checks against the roster at
 // rosterFile, evaluated against now. Callers MUST have already run
 // inventory.ValidateRosterFile successfully.
 func EvaluatePolicyGate(rosterFile string, now time.Time) (PolicyGate, error) {
@@ -147,7 +163,14 @@ func EvaluatePolicyGate(rosterFile string, now time.Time) (PolicyGate, error) {
 	if err != nil {
 		return PolicyGate{}, err
 	}
-	return PolicyGate{SoDConflicts: conflicts, GrantPolicyViolations: violations, AccountLifecycleViolations: accountViolations}, nil
+	privilegedIdentityViolations, err := inventory.EvaluatePrivilegedIdentityBaselineFile(rosterFile)
+	if err != nil {
+		return PolicyGate{}, err
+	}
+	return PolicyGate{
+		SoDConflicts: conflicts, GrantPolicyViolations: violations,
+		AccountLifecycleViolations: accountViolations, PrivilegedIdentityViolations: privilegedIdentityViolations,
+	}, nil
 }
 
 // BuildPlan runs inventory.CompileGrants against the roster at rosterFile.
@@ -169,9 +192,14 @@ func BuildPlan(rosterFile string, now time.Time) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
+	userAuthTypes, err := inventory.CompileUserAuthTypesFile(rosterFile)
+	if err != nil {
+		return Plan{}, err
+	}
 	return Plan{
 		HBACRules: hbac, SudoRules: sudo, AuthPolicyHosts: authPolicyHosts,
 		AccountExpirations: accountExpirations, PasswordPolicies: passwordPolicies,
+		UserAuthTypes: userAuthTypes,
 	}, nil
 }
 
@@ -240,6 +268,14 @@ type extraVarsPasswordPolicy struct {
 	LockoutDurationSeconds     *int   `json:"lockout_duration_seconds,omitempty"`
 }
 
+// extraVarsUserAuthType is the exact JSON shape playbooks/apply/
+// freeipa-identity-apply.yml's `pilot_compiled_user_auth_types` extra-var
+// expects.
+type extraVarsUserAuthType struct {
+	User    string   `json:"user"`
+	Allowed []string `json:"allowed"`
+}
+
 type extraVars struct {
 	FreeIPARosterFile               string                       `json:"freeipa_roster_file"`
 	PilotCompiledGrantHBACRules     []extraVarsHBACRule          `json:"pilot_compiled_grant_hbac_rules"`
@@ -249,6 +285,7 @@ type extraVars struct {
 	PilotCompiledAuthPolicyHosts    []extraVarsAuthPolicyHost    `json:"pilot_compiled_auth_policy_hosts"`
 	PilotCompiledAccountExpirations []extraVarsAccountExpiration `json:"pilot_compiled_account_expirations"`
 	PilotCompiledPasswordPolicies   []extraVarsPasswordPolicy    `json:"pilot_compiled_password_policies"`
+	PilotCompiledUserAuthTypes      []extraVarsUserAuthType      `json:"pilot_compiled_user_auth_types"`
 }
 
 // buildExtraVars separates each compiled rule into either its
@@ -264,6 +301,7 @@ func buildExtraVars(rosterFile string, plan Plan) extraVars {
 		PilotCompiledAuthPolicyHosts:    []extraVarsAuthPolicyHost{},
 		PilotCompiledAccountExpirations: []extraVarsAccountExpiration{},
 		PilotCompiledPasswordPolicies:   []extraVarsPasswordPolicy{},
+		PilotCompiledUserAuthTypes:      []extraVarsUserAuthType{},
 	}
 	for _, h := range plan.AuthPolicyHosts {
 		ev.PilotCompiledAuthPolicyHosts = append(ev.PilotCompiledAuthPolicyHosts, extraVarsAuthPolicyHost{Host: h.Host, Indicators: emptyOr(h.Indicators)})
@@ -279,6 +317,9 @@ func buildExtraVars(rosterFile string, plan Plan) extraVars {
 			LockoutMaxFailures: p.LockoutMaxFailures, LockoutFailureResetSeconds: p.LockoutFailureResetSeconds,
 			LockoutDurationSeconds: p.LockoutDurationSeconds,
 		})
+	}
+	for _, a := range plan.UserAuthTypes {
+		ev.PilotCompiledUserAuthTypes = append(ev.PilotCompiledUserAuthTypes, extraVarsUserAuthType{User: a.User, Allowed: emptyOr(a.Allowed)})
 	}
 	for _, r := range plan.HBACRules {
 		if !r.Present {
@@ -355,6 +396,15 @@ func ReconcileOnce(ctx context.Context, opts ReconcileOptions) (Plan, *ansible.R
 
 	plan, err := BuildPlan(opts.RosterFile, now)
 	if err != nil {
+		return Plan{}, nil, err
+	}
+
+	// spec.md §13/§21.1: a capability-gated control (group password
+	// policy, its lockout fields, or user auth types) may only be applied
+	// once a live probe confirms FreeIPA actually supports it — an
+	// unknown capability state fails closed exactly like a confirmed
+	// unsupported one, never silently skipped.
+	if err := requireFreeIPACapabilities(ctx, opts, plan); err != nil {
 		return Plan{}, nil, err
 	}
 

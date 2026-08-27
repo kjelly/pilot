@@ -225,7 +225,7 @@
             (item.keys() | list | difference([
               'name', 'state', 'first', 'last', 'display_name', 'email',
               'uid', 'gid', 'login_shell', 'home_directory', 'password',
-              'ssh_keys', 'enabled'
+              'ssh_keys', 'enabled', 'authentication'
             ])) | length == 0
           - >-
             ((item.password | default({})).keys() | list |
@@ -235,6 +235,14 @@
              difference(['authoritative', 'values'])) | length == 0
           - (item.ssh_keys | default({})).authoritative | default(true) | bool
           - item.state | default('present') != 'disabled' or not (item.enabled | default(false) | bool)
+          # v3.2 §8 (Phase 3): per-user authentication.allowed — see
+          # internal/inventory/user_authentication.go's knownUserAuthTypes.
+          - >-
+            ((item.authentication | default({})).keys() | list |
+             difference(['allowed'])) | length == 0
+          - >-
+            (((item.authentication | default({})).allowed | default([])) |
+             difference(['password', 'otp', 'pkinit', 'radius'])) | length == 0
         fail_msg: "Invalid or unknown field in canonical user {{ item.name | default('unnamed') }}."
       loop: "{{ freeipa_roster.users | default([]) }}"
       loop_control:
@@ -2650,6 +2658,29 @@
         - pilot_pwpolicy_remove.rc != 0
         - "'not found' not in (pilot_pwpolicy_remove.stderr | default(''))"
       tags: [identity, password_policy]
+
+    # v3.2 user authentication types (spec.md §8): sets FreeIPA's native
+    # ipauserauthtype via `ipa user-mod --user-auth-type=`. Only users
+    # that declared an explicit authentication: block compile an entry at
+    # all (internal/inventory's CompileUserAuthTypes) — a user with none
+    # is never touched by this task, matching that compiler's own
+    # "omission means no opinion, not an implicit clear" contract.
+    # Repeated --user-auth-type=X flags fully replace the set, mirroring
+    # the --auth-ind= convention already confirmed live for hosts above.
+    - name: "Reconcile v3.2 per-user authentication types (spec.md §8)"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'user-mod', item.user]
+             + (item.allowed | map('regex_replace', '^', '--user-auth-type=') | list) }}
+      loop: "{{ pilot_compiled_user_auth_types | default([]) }}"
+      loop_control:
+        label: "{{ item.user }}"
+      register: pilot_user_auth_type
+      changed_when: "'Modified user' in (pilot_user_auth_type.stdout | default(''))"
+      failed_when:
+        - pilot_user_auth_type.rc != 0
+        - "'no modifications to be performed' not in (pilot_user_auth_type.stderr | default(''))"
+      tags: [identity, user_auth_type]
 
     # ── FreeIPA automount control plane for canonical NFS shares ───────
     - name: "Ensure canonical automount locations exist"

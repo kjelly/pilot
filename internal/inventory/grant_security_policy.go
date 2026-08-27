@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-var knownSecurityTopLevelKeys = []string{"grant_policies", "conflicts"}
+var knownSecurityTopLevelKeys = []string{"grant_policies", "conflicts", "privileged_identity"}
 
 // checkSecurityTopLevelKeys rejects any security.* key besides the two
 // Phase 2 defines, the same fail-closed posture checkTopLevelKeys already
