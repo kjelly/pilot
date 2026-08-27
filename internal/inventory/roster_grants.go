@@ -22,6 +22,7 @@ package inventory
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 const (
@@ -39,8 +40,13 @@ var (
 	// kinds (temporary_grant, breakglass).
 	grantCommonKeys      = []string{"name", "kind", "state", "subjects", "targets"}
 	knownGrantKeysByKind = map[string][]string{
-		grantKindTemporary:  append(append([]string{}, grantCommonKeys...), "services", "validity", "justification"),
-		grantKindSudo:       append(append([]string{}, grantCommonKeys...), "validity", "justification", "privilege", "run_as", "options"),
+		// "review" (v3.1 §14) is optional recertification metadata/
+		// reporting — allowed on the two validity-bearing kinds only.
+		// breakglass has no ongoing validity window to recertify (§6.3):
+		// its access question is "is it currently activated", answered by
+		// runtime activation state, not a roster-declared review cadence.
+		grantKindTemporary:  append(append([]string{}, grantCommonKeys...), "services", "validity", "justification", "review"),
+		grantKindSudo:       append(append([]string{}, grantCommonKeys...), "validity", "justification", "privilege", "run_as", "options", "review"),
 		grantKindBreakglass: append(append([]string{}, grantCommonKeys...), "services", "activation", "auth_policy"),
 	}
 	// knownGrantKeysUnion is used only when kind itself is invalid, so an
@@ -145,6 +151,7 @@ func checkGrants(root map[string]any) []RosterViolation {
 			}
 			out = append(out, checkGrantServices(item, label)...)
 			out = append(out, checkGrantTimedFields(item, label)...)
+			out = append(out, checkGrantReview(item, label, allowedUsers)...)
 		case grantKindSudo:
 			for _, g := range subjGroups {
 				if !contains(sudoSubjectGroupNames, g) {
@@ -153,6 +160,7 @@ func checkGrants(root map[string]any) []RosterViolation {
 			}
 			out = append(out, checkGrantTimedFields(item, label)...)
 			out = append(out, checkGrantSudoPrivilege(root, item, label)...)
+			out = append(out, checkGrantReview(item, label, allowedUsers)...)
 		case grantKindBreakglass:
 			if len(subjGroups) > 0 {
 				out = append(out, RosterViolation{Rule: "grant subject group category", Detail: fmt.Sprintf("grant %q: breakglass subjects.groups must be empty — only direct named users are accepted", label)})
@@ -284,6 +292,48 @@ func checkGrantActivation(item map[string]any, label string) []RosterViolation {
 				out = append(out, RosterViolation{Rule: "grant activation flag", Detail: fmt.Sprintf("grant %q: activation.%s must be a boolean", label, key)})
 			}
 		}
+	}
+	return out
+}
+
+var knownReviewKeys = []string{"interval", "last_reviewed_at", "reviewed_by"}
+
+// checkGrantReview validates an optional review: block (v3.1 §14): review
+// is opt-in metadata/reporting, so its absence is never a violation —
+// only a malformed one is. interval is required (shared duration grammar,
+// access_duration.go); last_reviewed_at, if present, must be RFC3339;
+// reviewed_by, if present, must reference a known roster user (same
+// pattern as account_policies' sponsor). There is deliberately no
+// on_overdue key here at all — v3.1 §14.2 requires automatic-suspension
+// semantics to fail closed, and the simplest way to guarantee that is to
+// never accept the key in the first place: any roster author who writes
+// on_overdue gets the same "unknown field" rejection as a typo, rather
+// than a special-cased warning that risks reading as "recognized but
+// ignored".
+func checkGrantReview(item map[string]any, label string, allowedUsers []string) []RosterViolation {
+	var out []RosterViolation
+
+	review, hasReview := item["review"]
+	if !hasReview {
+		return out
+	}
+	r := asMap(review)
+	if unk := unknownKeys(r, knownReviewKeys); len(unk) > 0 {
+		out = append(out, RosterViolation{Rule: "grant review keys", Detail: fmt.Sprintf("grant %q: unknown review field(s) %s", label, strings.Join(unk, ", "))})
+	}
+	interval := stringField(r, "interval")
+	if interval == "" {
+		out = append(out, RosterViolation{Rule: "grant review interval", Detail: fmt.Sprintf("grant %q: review.interval is required", label)})
+	} else if !ValidAccessDuration(interval) {
+		out = append(out, RosterViolation{Rule: "grant review interval", Detail: fmt.Sprintf("grant %q: review.interval %q is not a valid duration (e.g. 30d, 90d)", label, interval)})
+	}
+	if lastReviewedAt := stringField(r, "last_reviewed_at"); lastReviewedAt != "" {
+		if _, err := time.Parse(time.RFC3339, lastReviewedAt); err != nil {
+			out = append(out, RosterViolation{Rule: "grant review last_reviewed_at", Detail: fmt.Sprintf("grant %q: review.last_reviewed_at %q must be RFC3339: %v", label, lastReviewedAt, err)})
+		}
+	}
+	if reviewedBy := stringField(r, "reviewed_by"); reviewedBy != "" && !contains(allowedUsers, reviewedBy) {
+		out = append(out, RosterViolation{Rule: "grant review reviewed_by reference", Detail: fmt.Sprintf("grant %q: review.reviewed_by references unknown roster user %q", label, reviewedBy)})
 	}
 	return out
 }

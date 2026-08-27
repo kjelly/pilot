@@ -32,13 +32,15 @@ type AccessAuditEvent struct {
 
 // §15.1's minimum event action vocabulary this delivery emits. Not every
 // action §15.1 lists is wired to an emission point yet — see
-// ReconcileOnce/DriftOnce/RepairManaged's callers for what actually fires
-// today; this const block exists so every caller spells the action the
-// same way rather than hand-typing strings that can silently drift apart.
+// ReconcileOnce/DriftOnce/RepairManaged/cmd's `pilot access review mark`
+// for what actually fires today; this const block exists so every caller
+// spells the action the same way rather than hand-typing strings that can
+// silently drift apart.
 const (
 	AuditActionAccessDriftDetected     = "access_drift_detected"
 	AuditActionAccessDriftRepaired     = "access_drift_repaired"
 	AuditActionExplicitAccessReconcile = "explicit_access_reconcile"
+	AuditActionAccessReviewMarked      = "access_review_marked"
 )
 
 const auditLogFilename = "audit.jsonl"
