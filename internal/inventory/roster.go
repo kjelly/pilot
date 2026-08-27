@@ -268,6 +268,15 @@ func readRosterAsMap(path string) (map[string]any, error) {
 	return root, nil
 }
 
+// ReadRosterAsMapFile reads and generically decodes the roster at path as
+// a plain map — the exported counterpart of readRosterAsMap, for callers
+// outside this package (internal/accessgrants' Explain needs the raw root
+// to pass to more than one of this package's Explain* functions without
+// re-reading the file for each).
+func ReadRosterAsMapFile(path string) (map[string]any, error) {
+	return readRosterAsMap(path)
+}
+
 // RosterUserNames returns every user name in the roster at path, in file
 // order — for display only (see ValidateRosterFile for real validation).
 func RosterUserNames(path string) ([]string, error) {

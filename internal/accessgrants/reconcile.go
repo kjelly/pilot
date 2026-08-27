@@ -85,17 +85,19 @@ type Plan struct {
 }
 
 // PolicyGate is the result of spec.md §18 steps 4/5 — Separation of Duties
-// and grant security policy evaluation — the two semantic checks that MUST
-// fail before any mutation, run independently of the purely structural
+// and grant security policy evaluation — plus §15's account-lifecycle
+// dominance rule. All three are semantic checks that MUST fail before any
+// mutation, run independently of the purely structural
 // inventory.ValidateRosterFile gate.
 type PolicyGate struct {
-	SoDConflicts          []inventory.SoDConflict
-	GrantPolicyViolations []inventory.GrantPolicyViolation
+	SoDConflicts               []inventory.SoDConflict
+	GrantPolicyViolations      []inventory.GrantPolicyViolation
+	AccountLifecycleViolations []inventory.AccountLifecycleViolation
 }
 
 // Empty reports whether the gate found nothing to block on.
 func (g PolicyGate) Empty() bool {
-	return len(g.SoDConflicts) == 0 && len(g.GrantPolicyViolations) == 0
+	return len(g.SoDConflicts) == 0 && len(g.GrantPolicyViolations) == 0 && len(g.AccountLifecycleViolations) == 0
 }
 
 // String renders every violation as one line, for an error message or log.
@@ -107,10 +109,13 @@ func (g PolicyGate) String() string {
 	for _, v := range g.GrantPolicyViolations {
 		fmt.Fprintf(&b, "grant_policy %q: grant %q: %s; ", v.PolicyName, v.GrantName, v.Detail)
 	}
+	for _, v := range g.AccountLifecycleViolations {
+		fmt.Fprintf(&b, "account lifecycle: grant %q reaches user %q whose account is %s (account_policy %q); ", v.GrantName, v.User, v.AccountLifecycle, v.AccountPolicyName)
+	}
 	return strings.TrimSuffix(b.String(), "; ")
 }
 
-// EvaluatePolicyGate runs both semantic checks against the roster at
+// EvaluatePolicyGate runs all three semantic checks against the roster at
 // rosterFile, evaluated against now. Callers MUST have already run
 // inventory.ValidateRosterFile successfully.
 func EvaluatePolicyGate(rosterFile string, now time.Time) (PolicyGate, error) {
@@ -122,7 +127,11 @@ func EvaluatePolicyGate(rosterFile string, now time.Time) (PolicyGate, error) {
 	if err != nil {
 		return PolicyGate{}, err
 	}
-	return PolicyGate{SoDConflicts: conflicts, GrantPolicyViolations: violations}, nil
+	accountViolations, err := inventory.EvaluateAccountLifecycleFile(rosterFile, now)
+	if err != nil {
+		return PolicyGate{}, err
+	}
+	return PolicyGate{SoDConflicts: conflicts, GrantPolicyViolations: violations, AccountLifecycleViolations: accountViolations}, nil
 }
 
 // BuildPlan runs inventory.CompileGrants against the roster at rosterFile.

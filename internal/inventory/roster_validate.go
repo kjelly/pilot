@@ -123,6 +123,7 @@ func ValidateRosterV3(root map[string]any) []RosterViolation {
 	v = append(v, checkSecurityTopLevelKeys(root)...)
 	v = append(v, checkGrantPolicies(root)...)
 	v = append(v, checkSoDConflicts(root)...)
+	v = append(v, checkAccountPolicies(root)...)
 	return v
 }
 
@@ -177,12 +178,12 @@ var (
 	// checkGrants (roster_grants.go) for its structural shape. Per the v2 ->
 	// v3 migration spec §5, no other v3 section was a known key at first —
 	// those were deliberately deferred until their own v3.x spec defined a
-	// shape. The v3.0 Core Access Governance spec (spec.md) Phase 2 is that
-	// definition for auth_policies and security.{grant_policies,conflicts}
-	// (auth_policy.go, grant_security_policy.go, sod.go) — added here
-	// additively, same schema_version 3, per spec.md §5/§21's phased
-	// delivery. account_policies (Phase 3) remains out of scope.
-	knownTopLevelKeysV3 = append(append([]string{}, knownTopLevelKeysV2...), "grants", "auth_policies", "security")
+	// shape. The v3.0 Core Access Governance spec (spec.md) Phase 2 added
+	// auth_policies and security.{grant_policies,conflicts} (auth_policy.go,
+	// grant_security_policy.go, sod.go); Phase 3 added account_policies
+	// (account_policy.go) — all additive, same schema_version 3, per
+	// spec.md §5/§21's phased delivery.
+	knownTopLevelKeysV3 = append(append([]string{}, knownTopLevelKeysV2...), "grants", "auth_policies", "security", "account_policies")
 
 	// domain/realm remain accepted while old encrypted rosters are migrated,
 	// but the apply playbook deliberately ignores them. New rosters must keep

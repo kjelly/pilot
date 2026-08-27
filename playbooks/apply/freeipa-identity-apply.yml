@@ -166,13 +166,14 @@
               'hostgroups', 'hbac', 'sudo', 'nfs', 'nfs_clients',
               'migration', 'policy_exceptions'
             ] + (['netgroups'] if freeipa_roster.schema_version | int >= 2 else [])
-              + (['grants', 'auth_policies', 'security'] if freeipa_roster.schema_version | int >= 3 else []))) | length == 0
+              + (['grants', 'auth_policies', 'security', 'account_policies'] if freeipa_roster.schema_version | int >= 3 else []))) | length == 0
           # This allowlist MUST stay in sync with `knownFreeIPAKeys` in
           # internal/inventory/roster_validate.go — `auth_policies`/`security`
-          # (v3.0 Core Access Governance spec.md §5/§21 Phase 2) were added
-          # here alongside `grants` for the same reason: a roster the Go
-          # validator accepts must not be rejected by this Ansible-side gate
-          # at real-apply time. `domain`/`realm` were omitted here once while
+          # (v3.0 Core Access Governance spec.md §5/§21 Phase 2) and
+          # `account_policies` (Phase 3) were added here alongside `grants`
+          # for the same reason: a roster the Go validator accepts must not
+          # be rejected by this Ansible-side gate at real-apply time.
+          # `domain`/`realm` were omitted here once while
           # the Go validator allowed them, so this gate rejected every roster
           # the sanctioned tooling produced —
           # `WriteMinimalNFSServerRoster` always writes `freeipa.domain`, and

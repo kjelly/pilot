@@ -149,6 +149,30 @@ func CompileTemporaryGrant(grant map[string]any, lifecycle GrantLifecycleState) 
 	return rule
 }
 
+// CompileBreakglassActivation compiles a kind: breakglass grant's
+// definition into the same managed-HBAC-rule shape and naming convention
+// (CompiledLoginRuleName) a temporary_grant compiles to — spec.md §14
+// explicitly specifies reusing "the same mechanism as the temporary_grant
+// compiler (§9)". Unlike CompileTemporaryGrant there is no pending/expired
+// distinction here: a breakglass definition has no validity window of its
+// own (§6.3/§8) — active is a binary runtime activation-state fact the
+// caller (breakglass.go's Activate/Deactivate) already resolved, not
+// something this function evaluates.
+func CompileBreakglassActivation(breakglassGrant map[string]any, active bool) CompiledHBACRule {
+	subjects := mapField(breakglassGrant, "subjects")
+	targets := mapField(breakglassGrant, "targets")
+	return CompiledHBACRule{
+		Name:       CompiledLoginRuleName(stringField(breakglassGrant, "name")),
+		Users:      stringListField(subjects, "users"),
+		Groups:     stringListField(subjects, "groups"), // always empty per checkGrants — kept for shape parity with CompileTemporaryGrant
+		Hosts:      stringListField(targets, "hosts"),
+		Hostgroups: stringListField(targets, "hostgroups"),
+		Services:   stringListField(breakglassGrant, "services"),
+		Present:    active,
+		Enabled:    active,
+	}
+}
+
 // CompileSudoGrant compiles a single kind: sudo_grant roster entry into
 // its managed sudo rule (§10). lifecycle only ever gates Present here (via
 // GrantAbsent) — see CompiledSudoRule's doc comment for why pending/active/
@@ -192,6 +216,19 @@ func CompileSudoGrant(grant map[string]any, lifecycle GrantLifecycleState, valid
 	return rule
 }
 
+// FindGrant returns the grants[] entry named name, if any. Callers MUST
+// have already run ValidateRosterV3 (which guarantees grant names are
+// unique) — the first match is returned without checking for duplicates.
+func FindGrant(root map[string]any, name string) (map[string]any, bool) {
+	for _, raw := range listField(root, "grants") {
+		grant := asMap(raw)
+		if stringField(grant, "name") == name {
+			return grant, true
+		}
+	}
+	return nil, false
+}
+
 // CompileGrants walks root's grants[] and compiles every temporary_grant
 // and sudo_grant entry against now (spec.md §18 step 9). kind: breakglass
 // entries are intentionally skipped here — a breakglass definition never
@@ -224,6 +261,17 @@ func CompileGrants(root map[string]any, now time.Time) (hbacRules []CompiledHBAC
 		}
 	}
 	return hbacRules, sudoRules, nil
+}
+
+// FindGrantFile is FindGrant's file-reading counterpart, mirroring
+// RosterUserNames' read/parse/dispatch shape (roster.go).
+func FindGrantFile(path, name string) (map[string]any, bool, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	grant, ok := FindGrant(root, name)
+	return grant, ok, nil
 }
 
 // CompileGrantsFile is CompileGrants' file-reading counterpart, mirroring
