@@ -175,6 +175,38 @@ func TestCompileSudoGrant_AbsentIsNotPresent(t *testing.T) {
 	}
 }
 
+// v3.1 §8/§24.2: "no later Pilot invocation required" — a sudo_grant's
+// native validity attributes must compile identically across every
+// lifecycle state except Absent, since FreeIPA/SSSD (not Pilot) is what
+// actually gates access at SudoNotBefore/SudoNotAfter. If this ever
+// started varying by lifecycle, that would mean Pilot had grown a
+// side-channel enable/disable simulation for sudo — exactly what
+// CompileSudoGrant's own doc comment says it deliberately does not do.
+func TestCompileSudoGrant_NativeAttributesIdenticalAcrossLifecycleStates(t *testing.T) {
+	grant := mustGrant(t, `
+  - name: alice-prod-nginx
+    kind: sudo_grant
+    subjects: {users: [alice], groups: []}
+    targets: {hosts: [], hostgroups: [prod-web]}
+`)
+	validity := GrantValidity{
+		NotBefore: mustParseTime(t, "2026-08-21T15:00:00Z"),
+		NotAfter:  mustParseTime(t, "2026-08-21T19:00:00Z"),
+	}
+	pending := CompileSudoGrant(grant, GrantPending, validity)
+	active := CompileSudoGrant(grant, GrantActive, validity)
+	expired := CompileSudoGrant(grant, GrantExpired, validity)
+
+	for name, rule := range map[string]CompiledSudoRule{"pending": pending, "active": active, "expired": expired} {
+		if !rule.Present {
+			t.Fatalf("%s: expected Present=true (only Absent clears a compiled sudo rule)", name)
+		}
+		if rule.SudoNotBefore != "20260821150000Z" || rule.SudoNotAfter != "20260821190000Z" {
+			t.Fatalf("%s: expected native validity attributes regardless of lifecycle, got before=%q after=%q", name, rule.SudoNotBefore, rule.SudoNotAfter)
+		}
+	}
+}
+
 func TestCompileGrants_IdempotentAcrossRepeatedCompiles(t *testing.T) {
 	root := grantsRoster(t, `
 grants:

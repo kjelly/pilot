@@ -2423,6 +2423,18 @@
     # rule (§7 requires validity.not_after), so selecting on it alone is
     # enough to find exactly the grant-compiled entries in ipa_sudo_rules
     # — no hand-authored sudo.rules entry ever has this key.
+    #
+    # v3.1 §24.2 SSSD cache-propagation note: a client's SSSD sudo-provider
+    # cache does NOT necessarily reflect a rule mutation the instant this
+    # task applies it — confirmed live on a two-node fixture
+    # (docs/runbooks/archived/freeipa-hostauthz-test-plan.md §5.2): after
+    # the server-side rule changed, `sudo -n` on the client kept hitting
+    # the stale cached decision until `systemctl restart sssd` (or the
+    # cache's own natural expiry). The same propagation delay applies to a
+    # sudoNotBefore/sudoNotAfter boundary crossing, not just an
+    # enable/disable flip — a sudo command issued exactly at the boundary
+    # may observe the previous decision for a short window. This is SSSD
+    # cache behavior, not a Pilot defect, and is out of Pilot's control.
     - name: "Set native timed-sudo attributes for v3.0 sudo grants (spec.md §10)"
       ansible.builtin.command:
         argv: >-

@@ -17,6 +17,14 @@ type GrantStatus struct {
 	// (breakglass — see §6.3/§8) as well as once a temporary_grant/
 	// sudo_grant has expired or is absent.
 	NextTransition *time.Time
+	// NativeSudoNotBefore/NativeSudoNotAfter are the LDAP generalized-time
+	// values (v3.1 §8) a Kind == "sudo_grant" entry compiles to on the
+	// FreeIPA backend right now — what actually enforces the window,
+	// independent of whether/when `pilot access reconcile` next runs
+	// (v3.1 §19's "native enforced" vs "reconcile required" distinction).
+	// Both are empty for any other kind, or when State is absent.
+	NativeSudoNotBefore string
+	NativeSudoNotAfter  string
 }
 
 // EvaluateGrantStatuses reports a GrantStatus for every grants[] entry in
@@ -45,6 +53,13 @@ func EvaluateGrantStatuses(root map[string]any, now time.Time) ([]GrantStatus, e
 			}
 			status.Lifecycle = EvaluateGrantLifecycle(status.State, validity, now)
 			status.NextTransition = NextGrantTransition(status.State, validity, now)
+
+			if status.Kind == grantKindSudo && status.State != "absent" {
+				if !validity.NotBefore.IsZero() {
+					status.NativeSudoNotBefore = GeneralizedTime(validity.NotBefore)
+				}
+				status.NativeSudoNotAfter = GeneralizedTime(validity.NotAfter)
+			}
 		}
 		out = append(out, status)
 	}

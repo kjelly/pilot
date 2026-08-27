@@ -133,7 +133,13 @@ func runAccessStatusCmd(cmd *cobra.Command, args []string) error {
 		if lifecycle == "" {
 			lifecycle = "n/a (breakglass has no validity-driven lifecycle)"
 		}
-		fmt.Fprintf(out, "%s\tkind=%s\tstate=%s\tlifecycle=%s\tnext_transition_at=%s\n", s.Name, s.Kind, s.State, lifecycle, next)
+		fmt.Fprintf(out, "%s\tkind=%s\tstate=%s\tlifecycle=%s\tnext_transition_at=%s", s.Name, s.Kind, s.State, lifecycle, next)
+		if s.Kind == "sudo_grant" && s.State != "absent" {
+			fmt.Fprintf(out, "\tnative_enforced=[%s,%s)", orNA(s.NativeSudoNotBefore), orNA(s.NativeSudoNotAfter))
+		} else if s.Kind == "temporary_grant" && s.State != "absent" {
+			fmt.Fprint(out, "\ttiming_enforcement=reconcile_required")
+		}
+		fmt.Fprintln(out)
 	}
 	for _, s := range accountStatuses {
 		next := "n/a"
@@ -188,6 +194,15 @@ func runAccessReconcileCmd(cmd *cobra.Command, args []string) error {
 		fmt.Fprint(out, result.Stdout)
 	}
 	return err
+}
+
+// orNA returns s, or "n/a" for an empty string — used for table-output
+// fields that are legitimately unset (e.g. an omitted sudo not_before).
+func orNA(s string) string {
+	if s == "" {
+		return "n/a"
+	}
+	return s
 }
 
 // resolveGrantsReadPath returns a plaintext path to read grants from: path

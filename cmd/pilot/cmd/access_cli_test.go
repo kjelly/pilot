@@ -33,6 +33,12 @@ grants:
     services: [sshd]
     validity: {not_after: "2099-08-31T18:00:00Z"}
     justification: {reason: "Project X maintenance"}
+  - name: vendor-project-x-sudo
+    kind: sudo_grant
+    subjects: {users: [vendor01], groups: []}
+    targets: {hosts: [db-special.ipa.pilot.internal], hostgroups: []}
+    validity: {not_before: "2099-08-21T15:00:00Z", not_after: "2099-08-31T18:00:00Z"}
+    justification: {reason: "Project X sudo maintenance"}
 account_policies:
   - name: vendor01-contract
     user: vendor01
@@ -84,6 +90,12 @@ func TestAccessStatusCmd_TableReportsLifecycle(t *testing.T) {
 	if !strings.Contains(got, "vendor01-contract") || !strings.Contains(got, "native_expiration=20991231235959Z") {
 		t.Fatalf("expected table output to report the account_policy's native expiration, got: %s", got)
 	}
+	if !strings.Contains(got, "vendor-project-x-sudo") || !strings.Contains(got, "native_enforced=[20990821150000Z,20990831180000Z)") {
+		t.Fatalf("expected table output to report the sudo grant's native-enforced validity window, got: %s", got)
+	}
+	if !strings.Contains(got, "vendor-project-x\tkind=temporary_grant") || !strings.Contains(got, "timing_enforcement=reconcile_required") {
+		t.Fatalf("expected table output to classify the temporary_grant as timing_enforcement=reconcile_required (spec.md v3.1 §10.3), got: %s", got)
+	}
 }
 
 func TestAccessStatusCmd_JSONFormat(t *testing.T) {
@@ -103,6 +115,9 @@ func TestAccessStatusCmd_JSONFormat(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"NativeExpiration": "20991231235959Z"`) {
 		t.Fatalf("expected JSON output to include the account_policy's compiled native expiration, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), `"NativeSudoNotBefore": "20990821150000Z"`) || !strings.Contains(out.String(), `"NativeSudoNotAfter": "20990831180000Z"`) {
+		t.Fatalf("expected JSON output to include the sudo grant's compiled native validity window, got: %s", out.String())
 	}
 }
 
