@@ -20,6 +20,18 @@ func TestStandalonePromptWorkflowRejectsWrongActionBeforeTTY(t *testing.T) {
 	}
 }
 
+func TestStandalonePromptWorkflowRejectsUnknownPromptIDBeforeTTY(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scenario.json")
+	contents := `{"version":1,"steps":[{"action":"deploy","inventory":"inventory.yml","answers":[{"prompt_id":"localized.inventory","text":"inventory.yml"}]}]}`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runStandalonePromptWorkflow(&cobra.Command{}, "deploy", path, false, "")
+	if err == nil || !strings.Contains(err.Error(), "unknown prompt_id") {
+		t.Fatalf("error = %v, want unknown prompt_id before workflow execution", err)
+	}
+}
+
 func TestDeployAndReconcileExposeAutomationFlags(t *testing.T) {
 	for _, command := range []*cobra.Command{deployCmd, reconcileCmd} {
 		for _, name := range []string{"actions", "presentation", "trace-out", "force"} {

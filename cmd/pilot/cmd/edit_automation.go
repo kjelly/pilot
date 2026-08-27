@@ -293,7 +293,7 @@ func validateEditAction(step editAction) error {
 		if len(step.Answers) == 0 {
 			return fmt.Errorf("%s requires prompt answers", step.Action)
 		}
-		return validatePromptAnswers(step.Answers)
+		return validatePromptAnswers(step.Action, step.Answers)
 	default:
 		return fmt.Errorf("action is not executable by the edit workflow")
 	}

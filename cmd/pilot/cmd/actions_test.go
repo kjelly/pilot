@@ -64,8 +64,16 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 		PilotVersion  string `json:"pilot_version"`
 		SchemaVersion int    `json:"schema_version"`
 		Actions       []struct {
-			Name     string   `json:"name"`
-			Required []string `json:"required"`
+			Name         string   `json:"name"`
+			Required     []string `json:"required"`
+			PromptSchema *struct {
+				Version int `json:"version"`
+				Prompts []struct {
+					ID          string `json:"id"`
+					Kind        string `json:"kind"`
+					Requirement string `json:"requirement"`
+				} `json:"prompts"`
+			} `json:"prompt_schema"`
 		} `json:"actions"`
 		SupportedRoutingModes []string `json:"supported_routing_modes"`
 		UnsupportedOperations []struct {
@@ -92,6 +100,26 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {
 		t.Fatalf("schema omitted deploy answer contract:\n%s", out.String())
+	}
+	for _, action := range schema.Actions {
+		if action.Name != "deploy" && action.Name != "reconcile" {
+			continue
+		}
+		if action.PromptSchema == nil || action.PromptSchema.Version != 1 {
+			t.Fatalf("%s omitted prompt schema", action.Name)
+		}
+		seen := map[string]bool{}
+		for _, prompt := range action.PromptSchema.Prompts {
+			if prompt.ID == "" || prompt.Kind == "" || prompt.Requirement == "" || seen[prompt.ID] {
+				t.Fatalf("%s has invalid prompt definition %+v", action.Name, prompt)
+			}
+			seen[prompt.ID] = true
+		}
+		for _, id := range []string{promptInventory, promptTargetGroup, promptExecutionPreview, promptExecutionConfirmApply} {
+			if !seen[id] {
+				t.Fatalf("%s prompt schema omitted %q", action.Name, id)
+			}
+		}
 	}
 	if len(schema.SupportedRoutingModes) == 0 {
 		t.Error("supported_routing_modes is empty")

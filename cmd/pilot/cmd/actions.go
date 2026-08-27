@@ -74,6 +74,7 @@ type semanticActionSpec struct {
 	SideEffectClassification SideEffectClassification `json:"side_effect_classification"`
 	SecretHandling           SecretHandling           `json:"secret_handling,omitempty"`
 	Answer                   *semanticPromptSpec      `json:"answer,omitempty"`
+	PromptSchema             *promptWorkflowSchema    `json:"prompt_schema,omitempty"`
 	Verification             *verificationSpec        `json:"verification,omitempty"`
 }
 
@@ -142,7 +143,8 @@ func semanticActionSpecs() []semanticActionSpec {
 			ExecutionMode:            ExecutionModePromptAnswers,
 			SideEffectClassification: SideEffectDestructive,
 			SecretHandling:           SecretHandlingNone,
-			Answer:                   &semanticPromptSpec{Required: []string{"prompt"}, ExactlyOneOf: []string{"select", "text", "confirm"}, SecretAllowed: false},
+			Answer:                   &semanticPromptSpec{Required: []string{"prompt_id"}, ExactlyOneOf: []string{"select", "text", "confirm"}, SecretAllowed: false},
+			PromptSchema:             ptrPromptSchema(promptSchemaFor("deploy")),
 			Verification: &verificationSpec{
 				Method:    verificationMethodExitCode,
 				Assertion: "deployment playbook executed successfully",
@@ -156,7 +158,8 @@ func semanticActionSpecs() []semanticActionSpec {
 			ExecutionMode:            ExecutionModePromptAnswers,
 			SideEffectClassification: SideEffectWrite,
 			SecretHandling:           SecretHandlingNone,
-			Answer:                   &semanticPromptSpec{Required: []string{"prompt"}, ExactlyOneOf: []string{"select", "text", "confirm"}, SecretAllowed: false},
+			Answer:                   &semanticPromptSpec{Required: []string{"prompt_id"}, ExactlyOneOf: []string{"select", "text", "confirm"}, SecretAllowed: false},
+			PromptSchema:             ptrPromptSchema(promptSchemaFor("reconcile")),
 			Verification: &verificationSpec{
 				Method:    verificationMethodExitCode,
 				Assertion: "reconciliation completed; idempotent nature verified",
@@ -165,6 +168,8 @@ func semanticActionSpecs() []semanticActionSpec {
 	)
 	return specs
 }
+
+func ptrPromptSchema(schema promptWorkflowSchema) *promptWorkflowSchema { return &schema }
 
 func semanticActionSpecFor(name string) (semanticActionSpec, bool) {
 	for _, spec := range semanticActionSpecs() {

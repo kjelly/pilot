@@ -70,8 +70,12 @@ var deployUIFactory tui.Factory = tui.NewHuhFactory()
 // (or, here, standaloneScreen standing in for one) decides when a
 // one-shot prompt's Program should actually exit.
 func runSelectProgram(label string, items []string) (int, error) {
+	return runSelectPrompt("", label, items)
+}
+
+func runSelectPrompt(id, label string, items []string) (int, error) {
 	if activePromptAutomation != nil {
-		return activePromptAutomation.selectPrompt(label, items)
+		return activePromptAutomation.selectPrompt(id, label, items)
 	}
 	choices := make([]tui.Choice, len(items))
 	for i, it := range items {
@@ -132,8 +136,12 @@ func runMultiSelectProgram(label string, items []string) ([]int, error) {
 
 // runTextProgram is promptText's Bubble Tea equivalent.
 func runTextProgram(label, def string, validate func(string) error) (string, error) {
+	return runTextPrompt("", label, def, validate)
+}
+
+func runTextPrompt(id, label, def string, validate func(string) error) (string, error) {
 	if activePromptAutomation != nil {
-		return activePromptAutomation.textPrompt(label, def, validate)
+		return activePromptAutomation.textPrompt(id, label, def, validate)
 	}
 	m := standaloneScreen{s: deployUIFactory.Input(tui.InputSpec{Title: label, Default: def, Validate: validate})}
 	final, err := tea.NewProgram(m, tea.WithOutput(os.Stdout)).Run()
@@ -153,8 +161,12 @@ func runTextProgram(label, def string, validate func(string) error) (string, err
 // is always false; see tui_confirm.go's doc comment), not a
 // wizard-level abort.
 func runConfirmProgram(question string, defaultYes bool) bool {
+	return runConfirmPrompt("", question, defaultYes)
+}
+
+func runConfirmPrompt(id, question string, defaultYes bool) bool {
 	if activePromptAutomation != nil {
-		return activePromptAutomation.confirmPrompt(question, defaultYes)
+		return activePromptAutomation.confirmPrompt(id, question, defaultYes)
 	}
 	m := standaloneScreen{s: deployUIFactory.Confirm(tui.ConfirmSpec{Title: question, Default: defaultYes})}
 	final, err := tea.NewProgram(m, tea.WithOutput(os.Stdout)).Run()
