@@ -167,17 +167,26 @@
               'migration', 'policy_exceptions'
             ] + (['netgroups'] if freeipa_roster.schema_version | int >= 2 else [])
               + (['grants', 'auth_policies', 'security', 'account_policies',
-                  'password_policies'] if freeipa_roster.schema_version | int >= 3 else []))) | length == 0
+                  'password_policies', 'credential_policies'] if freeipa_roster.schema_version | int >= 3 else []))) | length == 0
           # This allowlist MUST stay in sync with `knownFreeIPAKeys` in
           # internal/inventory/roster_validate.go — `auth_policies`/`security`
           # (v3.0 Core Access Governance spec.md §5/§21 Phase 2),
-          # `account_policies` (Phase 3), and `password_policies` (v3.2
-          # Identity & Credential Hardening spec.md §7 Phase 2) were added
-          # here alongside `grants` for the same reason: a roster the Go
+          # `account_policies` (Phase 3), `password_policies` (v3.2
+          # Identity & Credential Hardening spec.md §7 Phase 2), and
+          # `credential_policies` (v3.2 §10/§11 Phase 4) were added here
+          # alongside `grants` for the same reason: a roster the Go
           # validator accepts must not be rejected by this Ansible-side gate
           # at real-apply time. See
           # internal/inventory/roster_validate_playbook_sync_test.go, which
           # fails the build if these two lists ever drift apart again.
+          # credential_policies itself is never consumed by any task in
+          # this playbook — every control it governs is report-only/
+          # validation-only (spec.md §6's capability matrix), evaluated
+          # entirely in Go (internal/inventory/credential_policy_evaluate.go)
+          # with no FreeIPA-native backend to apply. Its keys still need
+          # to clear this structural gate so a roster carrying it can be
+          # deployed for its OTHER sections (grants, auth_policies, ...)
+          # without being rejected outright.
           # `domain`/`realm` were omitted here once while
           # the Go validator allowed them, so this gate rejected every roster
           # the sanctioned tooling produced —

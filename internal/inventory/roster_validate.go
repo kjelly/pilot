@@ -126,6 +126,7 @@ func ValidateRosterV3(root map[string]any) []RosterViolation {
 	v = append(v, checkAccountPolicies(root)...)
 	v = append(v, checkPasswordPolicies(root)...)
 	v = append(v, checkPrivilegedIdentity(root)...)
+	v = append(v, checkCredentialPolicies(root)...)
 	return v
 }
 
@@ -185,7 +186,7 @@ var (
 	// grant_security_policy.go, sod.go); Phase 3 added account_policies
 	// (account_policy.go) — all additive, same schema_version 3, per
 	// spec.md §5/§21's phased delivery.
-	knownTopLevelKeysV3 = append(append([]string{}, knownTopLevelKeysV2...), "grants", "auth_policies", "security", "account_policies", "password_policies")
+	knownTopLevelKeysV3 = append(append([]string{}, knownTopLevelKeysV2...), "grants", "auth_policies", "security", "account_policies", "password_policies", "credential_policies")
 
 	// domain/realm remain accepted while old encrypted rosters are migrated,
 	// but the apply playbook deliberately ignores them. New rosters must keep

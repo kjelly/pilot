@@ -88,30 +88,42 @@ func EvaluateReviewStatuses(root map[string]any, now time.Time) ([]ReviewStatus,
 			lastReviewedAt = &t
 		}
 
-		status := ReviewStatus{
+		nextDueAt, state := classifyReviewState(interval, lastReviewedAt, now)
+		out = append(out, ReviewStatus{
 			Name:           name,
 			Kind:           kind,
 			Interval:       stringField(review, "interval"),
 			LastReviewedAt: lastReviewedAt,
 			ReviewedBy:     stringField(review, "reviewed_by"),
-		}
-		if lastReviewedAt == nil {
-			status.State = ReviewOverdue
-		} else {
-			status.NextDueAt = lastReviewedAt.Add(interval)
-			dueSoonAt := status.NextDueAt.Add(-interval / reviewDueSoonFraction)
-			switch {
-			case !now.Before(status.NextDueAt):
-				status.State = ReviewOverdue
-			case !now.Before(dueSoonAt):
-				status.State = ReviewDue
-			default:
-				status.State = ReviewCurrent
-			}
-		}
-		out = append(out, status)
+			NextDueAt:      nextDueAt,
+			State:          state,
+		})
 	}
 	return out, nil
+}
+
+// classifyReviewState is EvaluateReviewStatuses' and v3.2 §11's shared
+// current/due/overdue classifier: a review with no prior last_reviewed_at
+// is always ReviewOverdue (never-reviewed is the most urgent case to
+// recertify, not a settled one — the zero NextDueAt returned alongside it
+// is meaningless and callers must not render it). Otherwise nextDueAt is
+// lastReviewedAt+interval, and the last 1/5 of the interval before that
+// counts as "coming due" (reviewDueSoonFraction) rather than still
+// current — a documented judgment call spec.md does not itself define.
+func classifyReviewState(interval time.Duration, lastReviewedAt *time.Time, now time.Time) (nextDueAt time.Time, state ReviewState) {
+	if lastReviewedAt == nil {
+		return time.Time{}, ReviewOverdue
+	}
+	nextDueAt = lastReviewedAt.Add(interval)
+	dueSoonAt := nextDueAt.Add(-interval / reviewDueSoonFraction)
+	switch {
+	case !now.Before(nextDueAt):
+		return nextDueAt, ReviewOverdue
+	case !now.Before(dueSoonAt):
+		return nextDueAt, ReviewDue
+	default:
+		return nextDueAt, ReviewCurrent
+	}
 }
 
 // EvaluateReviewStatusesFile is EvaluateReviewStatuses' file-reading

@@ -20,12 +20,6 @@ var (
 
 // checkPrivilegedIdentity validates security.privileged_identity per
 // spec.md §9. Absent entirely is not an error — the baseline is opt-in.
-//
-// require.ssh_key_policy is intentionally NOT existence-checked against
-// credential_policies here: that section does not exist until Phase 4
-// (spec.md §10) lands. Phase 4 adds the cross-reference check once it
-// does, rather than this file forward-referencing a section that isn't
-// implemented yet.
 func checkPrivilegedIdentity(root map[string]any) []RosterViolation {
 	security := mapField(root, "security")
 	if _, has := security["privileged_identity"]; !has {
@@ -60,6 +54,14 @@ func checkPrivilegedIdentity(root map[string]any) []RosterViolation {
 	if v, ok := require["no_password_only"]; ok {
 		if _, isBool := v.(bool); !isBool {
 			out = append(out, RosterViolation{Rule: "privileged_identity require no_password_only", Detail: "privileged_identity.require.no_password_only must be a boolean"})
+		}
+	}
+	// Added in v3.2 Phase 4 alongside credential_policy.go — Phase 3
+	// deliberately deferred this cross-reference check because
+	// credential_policies did not exist yet.
+	if sshKeyPolicy := stringField(require, "ssh_key_policy"); sshKeyPolicy != "" {
+		if !contains(namesOf(listField(root, "credential_policies")), sshKeyPolicy) {
+			out = append(out, RosterViolation{Rule: "privileged_identity require ssh_key_policy reference", Detail: fmt.Sprintf("privileged_identity.require.ssh_key_policy references unknown credential_policy %q", sshKeyPolicy)})
 		}
 	}
 	return out
