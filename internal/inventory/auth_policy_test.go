@@ -54,6 +54,37 @@ auth_policies:
 	}
 }
 
+// TestValidateRoster_AuthPolicyTargetHostNotRequiredInRosterHosts locks in
+// a fix for a real bug found live on a vm-target: an auth_policy
+// targeting a directly-enrolled FQDN that was never redeclared under this
+// roster's own top-level `hosts:` list was wrongly rejected — the same
+// bug class already fixed for grants (roster_grants.go). Direct hosts
+// only need to be FQDN-shaped, matching checkHBAC/checkGrants.
+func TestValidateRoster_AuthPolicyTargetHostNotRequiredInRosterHosts(t *testing.T) {
+	root := grantsRoster(t, `
+auth_policies:
+  - name: production-strong-auth
+    targets: {hosts: [ipa1.ipa.pilot.internal], hostgroups: []}
+    require_any: [otp]
+`)
+	if v := ValidateRosterV3(root); len(v) != 0 {
+		t.Fatalf("expected a directly-enrolled FQDN not in top-level hosts: to pass clean, got: %v", v)
+	}
+}
+
+func TestValidateRoster_AuthPolicyTargetHostMustBeFQDNShaped(t *testing.T) {
+	root := grantsRoster(t, `
+auth_policies:
+  - name: bad-policy
+    targets: {hosts: [not-an-fqdn], hostgroups: []}
+    require_any: [otp]
+`)
+	v := ValidateRosterV3(root)
+	if !contains(ruleNames(v), "auth_policy target host FQDN") {
+		t.Fatalf("expected a non-FQDN-shaped host to be rejected, got: %v", v)
+	}
+}
+
 func TestValidateRoster_AuthPolicyUnknownHostgroupReferenceRejected(t *testing.T) {
 	root := grantsRoster(t, `
 auth_policies:

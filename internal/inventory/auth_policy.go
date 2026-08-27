@@ -21,7 +21,6 @@ var knownAuthPolicyKeys = []string{"name", "state", "targets", "require_any"}
 func checkAuthPolicies(root map[string]any) []RosterViolation {
 	var out []RosterViolation
 
-	hostNames := namesOf(listField(root, "hosts"))
 	hostgroupNames := namesOf(listField(root, "hostgroups"))
 
 	names := namesOf(listField(root, "auth_policies"))
@@ -48,9 +47,17 @@ func checkAuthPolicies(root map[string]any) []RosterViolation {
 		if len(targetHosts)+len(targetHostgroups) == 0 {
 			out = append(out, RosterViolation{Rule: "auth_policy targets", Detail: fmt.Sprintf("auth_policy %q: needs at least one target host or hostgroup", label)})
 		}
+		// Per spec.md §7's convention (already applied to grants,
+		// roster_grants.go) and checkHBAC's existing posture: direct
+		// hosts are FQDN-shaped enrolled host names — they do NOT have
+		// to also appear in this roster's own top-level `hosts:` list.
+		// Found live on a vm-target: an auth_policy targeting the
+		// FreeIPA server's own already-enrolled host was rejected by
+		// the old top-level-hosts-membership check, which this roster
+		// has no reason to redeclare under `hosts:`.
 		for _, h := range targetHosts {
-			if !contains(hostNames, h) {
-				out = append(out, RosterViolation{Rule: "auth_policy target host reference", Detail: fmt.Sprintf("auth_policy %q: targets.hosts references unknown host %q", label, h)})
+			if !ValidRosterHostFQDN(h) {
+				out = append(out, RosterViolation{Rule: "auth_policy target host FQDN", Detail: fmt.Sprintf("auth_policy %q: targets.hosts %q must be FQDN-shaped", label, h)})
 			}
 		}
 		for _, hg := range targetHostgroups {

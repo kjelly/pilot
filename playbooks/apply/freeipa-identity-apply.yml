@@ -659,12 +659,14 @@
             or (ipa_hostgroups | length > 0)
             or (ipa_hbac_rules | length > 0)
             or (ipa_sudo_rules | length > 0)
+            or (pilot_compiled_auth_policy_hosts | default([]) | length > 0)
         fail_msg: >-
-          ipa_users/ipa_groups/ipa_hostgroups/ipa_hbac_rules/ipa_sudo_rules
-          are all empty, so this apply would do nothing but still report
-          success (every loop below simply skips). This is virtually always
-          a sign the wrong -e file was passed — e.g. a group_vars file that
-          only sets ipa_admin_password, instead of the roster
+          ipa_users/ipa_groups/ipa_hostgroups/ipa_hbac_rules/ipa_sudo_rules/
+          pilot_compiled_auth_policy_hosts are all empty, so this apply
+          would do nothing but still report success (every loop below
+          simply skips). This is virtually always a sign the wrong -e file
+          was passed — e.g. a group_vars file that only sets
+          ipa_admin_password, instead of the roster
           (playbooks/apply/freeipa-identity.roster.example.yaml's schema)
           that actually declares users/groups/rules. A partial roster
           (e.g. only ipa_users, nothing else) is fine and stays past this
