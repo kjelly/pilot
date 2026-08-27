@@ -840,12 +840,24 @@ func vtRunViaContainer(cmd *cobra.Command, keyTargets []*vmtarget.Target, playbo
 		return fmt.Errorf("rewrite inventory for copied key: %w", err)
 	}
 
-	// 7. docker cp playbook + inventory into the container
-	pbCnt := "/tmp/pilot-playbook.yml"
-	cpPb := newCmd(ctx, "docker", "cp", playbookPath, containerID+":"+pbCnt)
+	// 7. docker cp the playbook's whole containing directory (not just the
+	//    single file) into the container, then reference the playbook at
+	//    its same relative position inside the copy. A playbook's
+	//    include_tasks/import_tasks/template references resolve relative
+	//    to the playbook's OWN directory (not the ansible-playbook
+	//    process's cwd), so copying only the .yml file breaks any
+	//    playbook using a sibling tasks/templates/vars/files/handlers
+	//    directory — confirmed live: freeipa-server-apply.yml's
+	//    `include_tasks: tasks/cloud-init-etc-hosts-guard.yml` failed
+	//    with "Could not find or access '/tmp/tasks/...'" under the old
+	//    single-file copy.
+	pbDir := filepath.Dir(playbookPath)
+	pbCntDir := "/tmp/pilot-playbook-dir"
+	cpPb := newCmd(ctx, "docker", "cp", pbDir+"/.", containerID+":"+pbCntDir)
 	if out, err := cpPb.CombinedOutput(); err != nil {
-		return fmt.Errorf("docker cp playbook: %w\n%s", err, string(out))
+		return fmt.Errorf("docker cp playbook directory %s: %w\n%s", pbDir, err, string(out))
 	}
+	pbCnt := pbCntDir + "/" + filepath.Base(playbookPath)
 
 	invCnt := "/tmp/pilot-inventory.yaml"
 	cpInv := newCmd(ctx, "docker", "cp", cntInvPath, containerID+":"+invCnt)
