@@ -346,6 +346,22 @@ func RosterGrant(path, name string) (fields map[string]any, found bool, err erro
 	return asMap(grants[idx]), true, nil
 }
 
+// RosterCredentialPolicy returns one credential_policies[] entry, exactly
+// as readRosterAsMap already decodes it. found=false when no such policy
+// exists — v3.2 §11's `RosterGrant` counterpart.
+func RosterCredentialPolicy(path, name string) (fields map[string]any, found bool, err error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	policies := listField(root, "credential_policies")
+	idx, _ := findNamedEntry(policies, name)
+	if idx < 0 {
+		return nil, false, nil
+	}
+	return asMap(policies[idx]), true, nil
+}
+
 // SimulateAddRosterGrant reports what validating the roster at path would
 // say if grant were appended to grants[], without writing anything.
 // Callers should only call AppendRosterGrant once this reports no

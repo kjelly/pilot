@@ -27,6 +27,14 @@ import (
 // structural list does not attempt to provide.
 var knownUserAuthTypes = []string{"password", "otp", "pkinit", "radius"}
 
+// KnownUserAuthTypes returns spec.md §8's supported authentication-type
+// set, for callers (TUI, structured actions) that need the same list
+// checkUserAuthentication validates against rather than hand-maintaining
+// a second copy.
+func KnownUserAuthTypes() []string {
+	return append([]string(nil), knownUserAuthTypes...)
+}
+
 var knownUserAuthenticationKeys = []string{"allowed"}
 
 // checkUserAuthentication validates one user's authentication: block. An
