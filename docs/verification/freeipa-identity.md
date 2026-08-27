@@ -406,6 +406,7 @@ pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.ym
 | 2026-08-11 | v1.6 | Roster-schema-v2 migration 交付（spec.md 11-phase 實作全數完成）：schema v2 版本判定/驗證（`internal/inventory/roster_version.go`/`roster_validate.go`）、v1→v2 純 in-memory migration + semantic-equivalence fingerprint（`roster_migrate.go`）、mutation lock/backup/atomic write/rollback（`roster_migrate_file.go`）、`pilot roster migrate`/`pilot roster lint --upgrade`、TUI/MCP/`pilot deploy`/`pilot reconcile` preflight 全面自動升級（`EnsureRosterCurrent`）、netgroups 首次成為 first-class schema 物件（`roster_netgroup.go` + `freeipa-identity-apply.yml` 的 create/reconcile-membership/authoritative-prune/delete-absent 五種成員型別）、hostgroup 巢狀 membership 從完全未 reconcile 變成 authoritative（`membership.hostgroups`，本檔新增 §8 §6/§8 前身 issue，見 C19）、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染，`freeipa-nfs-exports.j2`）、ansible-vault 加密 roster 的 migration 支援（真實 `ansible-vault` binary，never 落地 plaintext temp file）。本檔新增 C19–C24（netgroup 五種 membership 型別 + hostgroup 巢狀 membership），與既有 C1–C18 一起在 `freeipa-server` vm-target 上依序套用 legacy/canonical v1/schema-v2 三份 fixture 後實跑 24/24 PASS；另外實測 netgroup authoritative pruning（手動加一個 roster 未宣告的 member、重新 apply 後確認被移除，見 §7.1a）。**兩個非顯而易見的真實 gotcha，皆已對活體 FreeIPA server 查證、非假設**：(1) `ipa netgroup-show --all` 的成員欄位標籤是單數且不一致——`Member User:`/`Member Group:`/`Member Host:`/`Member Hostgroup:`（均單數）但 `Member netgroups:`（小寫、複數），跟其他物件類型的慣例（如 `group-show` 的 `Member users:`，複數）都不一樣；(2) 同一組成員在底層 LDAP 完全是另一套屬性名稱——netgroup 的 user 與 group 成員共用 `memberUser`、host 與 hostgroup 成員共用 `memberHost`、nested netgroup 走一般的 `member`（不是 `memberGroup`/`memberHostgroup`/`memberNetgroup`），且 netgroup-to-netgroup 的 DN 一律是不可預測的 `ipaUniqueID=<uuid>`（不像其他物件類型有穩定的 `cn=` 形式）。netgroup 巢狀 cycle 偵測刻意只留在 Go 層（`pilot roster lint`），未在 Ansible 重複實作，理由與已知限制見 §5。`go test ./...`（1626 tests）、`ansible-playbook --syntax-check`、`go vet`、`gofmt`、`-race` 全綠。 | pilot |
 | 2026-08-21 | v1.7 | 新增 `pilot roster remove-user`/`remove-group`（見 §9），roster-local「撤銷從未套用過的誤增紀錄」，非 FreeIPA 撤權。修復兩個既有 Go validator 缺口：`checkSudo` 從未驗證 `subjects.users` 是否為已知使用者（`checkHBAC` 早就驗證同類 group 引用，唯獨 sudo 的 user 引用缺）、`nfs.servers[].shares[].ownership.group`/`acl.{access,default}.named_groups[].name` 完全零驗證（`internal/inventory/roster_validate.go` 新增 `checkNFS`）。新增 `internal/inventory/roster_references.go`（inbound-reference 掃描，區分 removable/blocked）、`roster_remove.go`（`Simulate/RemoveRosterUser/Group`，沿用既有 yaml.Node surgery + mutation lock 慣例）、`roster_vault.go` 新增 `DecryptRosterToTempFile`/`MutateEncryptedRosterFile`（沿用 `pilot roster migrate` 既有的 `ansible-vault` 呼叫，未另立第二套 vault 實作）。新增 `internal/freeipa` 套件（`ProbeUserHistory`/`ProbeGroupHistory`，讀 §9.2 兩支新 check playbook 的機器可讀 JSON 結果，fail-closed）。`freeipa-identity-apply.yml` 新增 group 歷史 marker 機制（§9.1）：每個套用成功的 `state: present` group 都會建立對應的 `pilot-internal-history-g-<sha256>` non-POSIX 空 marker group，`state: absent` 刪除真正的 group 前一定先確保 marker 存在，marker 永不被刪除——這是 FreeIPA 沒有 preserved-group 生命週期時，讓 `remove-group` 的「曾套用過永遠擋刪」保證在真正的 group 被刪除後依然成立的唯一機制。**刻意的範圍決策**：user 側的 `state: absent` **沒有**改成 FreeIPA `--preserve` 語意（`ipa user-del` 維持永久刪除不變）——評估後於本次交付明確放棄，理由與後果見 §9.1。`go test ./...`（1902 tests，含 `-race`）、`go vet`、`gofmt`、`make playbook-lint`（新增 `playbooks/check/*.yml` 進掃描範圍）全綠；真實 FreeIPA vm-target 驗證**尚未執行**，見 §9 開頭狀態列與 §9.5——這是本次交付明確承認、非隱藏的待辦。 | pilot |
 | 2026-08-21 | v1.8 | 對 v1.7 交付的 `pilot roster remove-user`/`remove-group` + group 歷史 marker 機制完成真實 FreeIPA vm-target 驗證（拋棄式 AlmaLinux 9 `freeipa-remove-test`），spec.md §22.5/§22.8 全部 mandatory 場景（never-applied user/group、applied active user/group 拒絕、out-of-band preserved user 拒絕、FreeIPA 探測失敗 fail-closed、historical_marker 拒絕、marker 驗證失敗保護 `group-del` 不被執行）與額外的 `--cascade-references`/NFS `ownership.group` 場景皆 PASS，證據見 §9.6。過程中發現並修好 2 個真實 bug：(1) 既有、非本次新增碼的 ansible-core 2.19 相容性缺口——`freeipa-identity-apply.yml` 的「Select legacy admin settings」`set_fact` 在 `when` 判斷前就試圖 resolve 完全未定義的 `ipa_admin_password`，讓任何 schema-v2 canonical roster 的 apply 直接炸掉，此環境相容性缺口先前從未被本 spec 抓到；修法 `\| default('')`。(2) 本次新增碼的 check-mode 缺口——`playbooks/apply/tasks/freeipa-group-history-marker.yml` 的唯讀查詢任務在 `--check` 下被自動跳過導致誤判成「marker 存在」，以及其 postcondition assert 在依賴任務被 check-mode 跳過後仍無條件執行導致誤判「驗證失敗」；修法分別是 `check_mode: false`（讀取安全）與 `when:` 加 `and not ansible_check_mode`，與本檔 §7.2a（v1.1）記載的既有 bug 同類。§9.4 的 C25/C26 由候選升級為已實測（尚未併入 §2）。`make playbook-lint`、`go test ./...` 全綠。 | pilot |
+| 2026-08-27 | v1.9 | v3.2 Identity & Credential Hardening 交付（`password_policies`/`credential_policies`/`security.privileged_identity`/`users[].authentication` 四個新 roster 欄位）對真實 FreeIPA vm-target（拋棄式 AlmaLinux 9 `freeipa-v32-test`）完成端對端驗證，見 §10：privileged_identity fail-before-write gate、password_policy 建立/修改/刪除、user auth types 建立、兩者的冪等性、`pilot identity drift`/`--repair-managed`、`freeipa-capability-probe.yml`、`pilot identity hygiene` 全數 PASS。過程中發現並修好 3 個本次交付新增碼的真實 bug（單元測試用的假資料自洽但假資料本身錯，只有對真的 server 跑才會露餡）：(1) `freeipa-identity-apply.yml` 的 `ipa pwpolicy-add/-mod/-del` 三個 `changed_when` 字串比對全部落空（這三個指令成功時的真實輸出裡根本沒有被比對的字串），改用 `rc == 0`；(2) `freeipa-access-drift-probe.yml` 的 `max_life_days`/`min_life_hours` 漏了秒→天/小時換算，導致任何真的套用成功、毫無 drift 的 policy 都被永遠誤報成 drift；(3) `internal/accessgrants/hygiene.go` 把純資訊性的 `max_age_unknown` finding 誤算進 SSH compliance 判定，任何有設定 `ssh.max_age`（report-only）的 policy 底下的使用者都會被誤判 `ssh_key_compliance: fail`，即使金鑰完全乾淨。三者詳細修法與 §10.4 候選 checklist row（C27–C29）見 §10。`go test ./...`、`go vet`、`gofmt`、`ansible-playbook --syntax-check`、`ansible-lint` 全綠。 | pilot |
 
 ## 9. `pilot roster remove-user` / `remove-group`（roster-local undo，非 FreeIPA 撤權）
 
@@ -763,4 +764,130 @@ references:
 PASS：NFS `ownership.group` 即使加了 `--cascade-references` 也一樣擋下。
 
 **收尾**：`pilot vm-target down --name freeipa-remove-test`。
+
+## 10. v3.2 Identity & Credential Hardening — 真實 FreeIPA vm-target 證據（2026-08-27）
+
+### 10.1 環境
+
+拋棄式 vm-target：`freeipa-v32-test`（AlmaLinux 9 golden image，
+`pilot vm-target up --ssh-user root --disk 30 --memory 4096`）。先跑
+`playbooks/apply/freeipa-server-apply.yml`（native EL9 install，
+`failed=0`）+ `playbooks/test/fixtures/freeipa-identity-fixtures.yml`
+（baseline，`failed=0`），再用一份獨立測試 roster（`role-v32-privileged`
+role group、兩個 user、`password_policies`/`credential_policies`/
+`security.privileged_identity`/`users[].authentication` 四個 v3.2 欄位
+都有內容）驗證。`pilot roster lint` 先過。
+
+### 10.2 實測結果總覽
+
+| 場景 | 指令 | 結果 |
+|------|------|------|
+| §9 privileged_identity fail-before-write | `pilot access reconcile` 對一個特權群組裡沒宣告 `authentication:` 的 user | **PASS**——`accessgrants: refusing to reconcile: privileged_identity: user "v32bob" does not allow any of the required strong authentication types otp/pkinit; ... violating require.no_password_only`，整個 reconcile 被擋下、零 mutation |
+| §7 password_policy 建立 | 補上 `authentication:` 後重跑 reconcile | **PASS**——`ipa pwpolicy-add` 成功，`ipa pwpolicy-show --raw` 確認全部欄位（見 10.3） |
+| §8 user auth types 建立 | 同一次 reconcile | **PASS**——`ipa user-mod --user-auth-type=otp` 套用，`User authentication types: otp` |
+| 冪等性 | 立即重跑同一份 roster | **PASS**——`changed=0`（password_policy 與 user_auth_type 兩個 task 皆是） |
+| §12 drift 偵測（policy 值 drift） | 手動 `ipa pwpolicy-del` 後跑 `pilot identity drift` | **PASS**——正確回報 `password_policy_missing` |
+| §12 drift 偵測（user auth type drift） | 手動多加一個 `--user-auth-type=pkinit`（roster 只宣告 `otp`）後跑 `pilot identity drift` | **PASS**——正確回報 `user_auth_type` 欄位不符（`desired [otp], live [otp pkinit]`）|
+| §13 explicit repair | `pilot identity drift --repair-managed` | **PASS**——兩項 drift 都被修回 roster 宣告的狀態，重跑 drift 顯示 `no drift found` |
+| password_policy `state: absent` | reconcile | **PASS**——`ipa pwpolicy-del` 成功，`ipa pwpolicy-show` 確認 `password policy not found` |
+| §13 capability probe | `ansible-playbook playbooks/check/freeipa-capability-probe.yml` | **PASS**——`group_password_policy`/`password_lockout_policy`/`user_auth_types`/`authentication_indicator`/`principal_expiration` 皆回報 `supported`；`sudo_not_before_after` 回報 `unknown`（尚無任何 sudo rule 設過 sudoNotBefore/After，屬正確的「無證據不猜」行為，非 bug） |
+| §14 hygiene 報告 | `pilot identity hygiene --inventory ...` | **PASS**——per-user 報告、SSH finding、capability 區塊皆正確反映活體狀態 |
+
+### 10.3 真實 LDAP 屬性值（供 checklist 候選列引用）
+
+```
+$ ipa pwpolicy-show role-v32-privileged --raw
+  cn: role-v32-privileged
+  krbmaxpwdlife: 7776000
+  krbminpwdlife: 3600
+  krbpwdhistorylength: 5
+  krbpwdminlength: 12
+  cospriority: 10
+  krbpwdmaxfailure: 5
+  krbpwdfailurecountinterval: 900
+  krbpwdlockoutduration: 900
+```
+
+roster 宣告 `max_life: 90d` / `min_life: 1h` / `lockout.failure_reset_interval: 15m` /
+`lockout.lockout_duration: 15m`；**`krbmaxpwdlife`/`krbminpwdlife` 這兩個屬性是用「秒」儲存**
+（90d = 7776000 秒、1h = 3600 秒），不是 `ipa pwpolicy-add --maxlife`/`--minlife`
+CLI flag 本身接受的天/小時單位——這兩者不是同一個單位，只是巧合地都叫「life」。
+`krbpwdfailurecountinterval`/`krbpwdlockoutduration` 則本來就是秒，與
+`internal/inventory.CompiledPasswordPolicy` 的 `LockoutFailureResetSeconds`/
+`LockoutDurationSeconds` 直接一致，不需要轉換。
+
+透過 root SASL EXTERNAL bind（`ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket`）
+直接查 pwpolicy 物件時，DN 是
+`cn=<group>,cn=<REALM>,cn=kerberos,dc=ipa,dc=pilot,dc=internal`——注意 REALM
+容器名稱用的是**帶點**的完整 realm 字串（如 `cn=IPA.PILOT.INTERNAL`），不是本檔
+其他 rows 慣用的、SASL socket 路徑那種帶橫線寫法（`IPA-PILOT-INTERNAL`）。
+這個 DN 下可直接讀到 `krbMaxPwdLife`/`krbMinPwdLife`/`krbPwdHistoryLength`/
+`krbPwdMinLength`/`krbPwdMaxFailure`/`krbPwdFailureCountInterval`/
+`krbPwdLockoutDuration`；**`cospriority` 這個透過 `ipa pwpolicy-show --raw`
+（經由 IPA API／Kerberos 驗證的連線）看得到的欄位，透過純 SASL EXTERNAL
+ldapsearch 對同一個 DN 直接查詢卻讀不到**——尚未查出根本原因（可能是
+COS/virtual-attribute 需要走 IPA framework 本身的存取路徑才能算出，不是這個
+entry 上的一般靜態屬性），因此本節候選 checklist row 刻意不含 priority 驗證，
+避免用未查證清楚的機制寫進 spec。
+
+```
+$ ldapsearch ... -b "uid=v32alice,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal" ipauserauthtype
+ipauserauthtype: otp
+```
+
+### 10.4 候選 checklist row（已實測，尚未併入 §2 ── 理由同 §9.4：目前用一份獨立測試
+roster 而非 `freeipa-identity-fixtures.yml` 既有 fixture，需要先把
+`password_policies`/`credential_policies`/`security.privileged_identity`/
+`users[].authentication` 併入該 fixture 才能納入 `pilot spec --generate` 的
+自動化 `pilot verify` 流程，留待下一輪處理）
+
+| 候選 ID | Category | Check | Expected | Command | 實測結果 |
+|---------|----------|-------|----------|---------|---------|
+| C27 | password-policy | canonical `password_policies[]` 的 `max_life`/`lockout.*` 已收斂到即時 pwpolicy 物件 | ~krbMaxPwdLife: 7776000 | `ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=<group>,cn=<REALM>,cn=kerberos,dc=ipa,dc=pilot,dc=internal" krbMaxPwdLife` | PASS，見 §10.3 |
+| C28 | password-policy | 同上，`lockout.max_failures` 已收斂 | ~krbPwdMaxFailure: 5 | 同上，查 `krbPwdMaxFailure` | PASS，見 §10.3 |
+| C29 | user-auth-type | canonical `users[].authentication.allowed` 已收斂到 `ipaUserAuthType` | ~ipauserauthtype: otp | `ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "uid=<user>,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal" ipauserauthtype` | PASS，見 §10.3 |
+
+### 10.5 過程中發現並修好的真實 bug（本次交付新增碼，非既有技術債）
+
+三個都是「單元測試用假資料自洽但假資料本身錯」的類型——canned `LiveState`/
+手寫的預期字串都是我自己編的，只有對著真的 FreeIPA server 跑才會露餡：
+
+1. **`playbooks/apply/freeipa-identity-apply.yml` 的 `changed_when`
+   字串比對全部落空**：`ipa pwpolicy-add`/`-mod` 成功時只印欄位表
+   （`Group: <name>` 開頭），從來沒有 "Added policy"/"Modified policy"
+   這種字串；`ipa pwpolicy-del` 成功時完全不印任何東西。三個 task 原本
+   都因為字串比對不到而被 Ansible 標成 `ok`（非 `changed`），冪等性/稽核
+   追蹤會失準（功能本身沒錯——policy 真的有建立/修改/刪除，只是
+   changed-tracking 錯）。修法：三個都改成 `changed_when: <register>.rc
+   == 0`，配合各自的 `when:`/`failed_when:` 已經確保只有「真的需要且
+   真的成功」時才會走到這行。
+2. **`playbooks/check/freeipa-access-drift-probe.yml` 的
+   `max_life_days`/`min_life_hours` 單位換算缺漏**：即時 `krbmaxpwdlife`/
+   `krbminpwdlife` 是用秒儲存（見 §10.3），但 desired 值
+   （`CompiledPasswordPolicy.MaxLifeDays`/`MinLifeHours`）是天/小時，drift
+   probe 原本直接拿秒數去比對天數/小時數，**任何真的套用成功、完全沒有
+   drift 的 policy 都會被永遠誤報成 drift**（`max_life_days: desired 90,
+   live 7776000`）。修法：正規化那一步除以 86400/3600 換回天/小時再比較。
+3. **`internal/accessgrants/hygiene.go` 把 `max_age_unknown` 這個純資讯性
+   finding 誤算進 SSH compliance 判定**：只要一個 credential_policy 設了
+   `ssh.max_age`（report-only，永遠回報 unknown，見 spec.md §10），該
+   policy 涵蓋到的每個使用者都會被判定 `ssh_key_compliance: fail`，即使
+   他的金鑰完全乾淨、演算法在允許清單內、有 comment。修法：`hygiene.go`
+   聚合時明確排除 `SSHFindingMaxAgeUnknown`，只有真正的 hygiene 違規
+   （blank/malformed/disallowed_algorithm/missing_comment/
+   duplicate_material）才算進 compliance 判定。已補回歸測試
+   （`TestEvaluateIdentityHygiene_MaxAgeUnknownNeverCountsAsSSHFailure`）。
+
+### 10.6 已知、非本次範圍的既有缺口（觀察到但未修）
+
+`--check --diff` 模式下，對一個「roster 裡全新、FreeIPA 上還不存在」的
+role group 跑 `freeipa-identity-apply.yml`，`freeipa-group-history-marker.yml`
+的 marker 探測任務回報 `unknown` 導致整個 play fail closed——這與 v1.8
+（§8 changelog）記載過的 check-mode gap 是同一類問題，但這裡命中的是
+role-category group 而非 v1.8 當時測的情境，判斷是既有機制在 check-mode
+下的殘餘限制，與 v3.2 新增碼（password_policies/credential_policies/
+privileged_identity/user auth types）無關，未在本輪修復；真正的
+（非 `--check`）apply 完全不受影響（見 §10.2）。
+
+**收尾**：`pilot vm-target down --name freeipa-v32-test`。
 

@@ -116,7 +116,16 @@ func EvaluateIdentityHygiene(ctx context.Context, opts HygieneOptions) (HygieneR
 	sshFindings := inventory.EvaluateSSHKeyHygiene(root)
 	sshIssueUsers := make(map[string]bool)
 	for _, f := range sshFindings {
-		if f.User != "" {
+		// SSHFindingMaxAgeUnknown is purely informational (spec.md §10:
+		// max_age is report-only, and "unknown" is the honest answer
+		// this delivery always gives, never a guess) — it must NOT
+		// count as a compliance failure, or every user covered by any
+		// policy that configures max_age would always show "fail" here
+		// regardless of their key's actual hygiene. Found live while
+		// testing this against a real FreeIPA target (v32alice's
+		// otherwise-clean key showed ssh_key_compliance: fail solely
+		// because her policy set ssh.max_age).
+		if f.User != "" && f.Issue != inventory.SSHFindingMaxAgeUnknown {
 			sshIssueUsers[f.User] = true
 		}
 	}

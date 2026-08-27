@@ -2628,7 +2628,13 @@
         label: "{{ item.item.group }}"
       register: pilot_pwpolicy_add
       when: item.rc != 0
-      changed_when: "'Added policy' in (pilot_pwpolicy_add.stdout | default(''))"
+      # Confirmed live (vm-target, 2026-08-27): `ipa pwpolicy-add` prints
+      # only the field dump ("Group: <name>", ...) on success — there is
+      # no "Added policy" (or any other fixed marker) string in its
+      # stdout to match on. This task only ever runs when item.rc != 0
+      # (no existing policy), so a successful add (rc==0) is
+      # unconditionally a real creation.
+      changed_when: pilot_pwpolicy_add.rc == 0
       failed_when:
         - pilot_pwpolicy_add.rc != 0
       tags: [identity, password_policy]
@@ -2649,7 +2655,13 @@
         label: "{{ item.item.group }}"
       register: pilot_pwpolicy_mod
       when: item.rc == 0
-      changed_when: "'Modified policy' in (pilot_pwpolicy_mod.stdout | default(''))"
+      # Confirmed live (vm-target, 2026-08-27): `ipa pwpolicy-mod` also
+      # prints only the field dump on success, no "Modified policy"
+      # marker — and a genuine no-op mod returns rc!=0 with "no
+      # modifications to be performed" (caught by failed_when's
+      # exception below, not this task's success path), so rc==0 here
+      # is unconditionally a real modification.
+      changed_when: pilot_pwpolicy_mod.rc == 0
       failed_when:
         - pilot_pwpolicy_mod.rc != 0
         - "'no modifications to be performed' not in (pilot_pwpolicy_mod.stderr | default(''))"
@@ -2662,7 +2674,13 @@
       loop_control:
         label: "{{ item.group }}"
       register: pilot_pwpolicy_remove
-      changed_when: "'Deleted policy' in (pilot_pwpolicy_remove.stdout | default(''))"
+      # Confirmed live (vm-target, 2026-08-27): `ipa pwpolicy-del` prints
+      # NOTHING at all on success (empty stdout) — no "Deleted policy"
+      # marker exists to match on. rc==0 unconditionally means the
+      # policy existed and was actually removed (a not-found target
+      # returns rc!=0 with "password policy not found", handled by
+      # failed_when's exception below, not this success path).
+      changed_when: pilot_pwpolicy_remove.rc == 0
       failed_when:
         - pilot_pwpolicy_remove.rc != 0
         - "'not found' not in (pilot_pwpolicy_remove.stderr | default(''))"

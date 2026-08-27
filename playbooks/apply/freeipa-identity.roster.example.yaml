@@ -262,3 +262,54 @@ nfs_clients:
     state: present
     automount: {location: default, enable_service: true}
     verification_mounts: [/projects/alpha]
+
+# ---------------------------------------------------------------------------
+# v3.2 Identity & Credential Hardening fields — password_policies,
+# credential_policies, security.privileged_identity, users[].authentication
+# — are schema_version: 3 only, so they are commented out here rather than
+# live YAML (this file is schema_version: 2 above; grafting v3-only fields
+# into it live would make the example fail its own declared schema). Field
+# names/units below are confirmed against a real FreeIPA server, not
+# guessed — see docs/verification/freeipa-identity.md §10 for the full
+# vm-target evidence (2026-08-27) this was verified against, including the
+# real `ipa pwpolicy-show --raw` output these values compile to.
+#
+# password_policies:
+#   - name: privileged-users
+#     state: present
+#     group: role-privileged          # MUST be an existing role-*/team-* group; never access-*
+#     priority: 10                     # required; FreeIPA requires this unique across all group policies
+#     min_length: 16
+#     history_size: 24
+#     max_life: 90d                    # ipa pwpolicy-add --maxlife (days); stored live as krbmaxpwdlife in SECONDS
+#     min_life: 1h                     # ipa pwpolicy-add --minlife (hours); stored live as krbminpwdlife in SECONDS
+#     lockout:
+#       max_failures: 5
+#       failure_reset_interval: 15m    # stored live as krbpwdfailurecountinterval, already in seconds
+#       lockout_duration: 15m          # stored live as krbpwdlockoutduration, already in seconds
+#
+# users:
+#   - name: alice
+#     authentication:
+#       allowed: [otp, pkinit]         # -> ipa user-mod --user-auth-type=otp --user-auth-type=pkinit
+#
+# security:
+#   privileged_identity:
+#     match_groups: [role-privileged]  # effective membership, nested groups included
+#     require:
+#       auth_types: [otp, pkinit]      # any ONE satisfies (same convention as auth_policies[].require_any)
+#       no_password_only: true
+#       ssh_key_policy: privileged-ssh # must reference an existing credential_policies[].name
+#
+# credential_policies:
+#   - name: privileged-ssh
+#     state: present
+#     match:
+#       users: []
+#       groups: [role-privileged]
+#     ssh:
+#       allowed_algorithms: [ssh-ed25519, ecdsa-sha2-nistp256]  # unset = no algorithm restriction at all
+#       require_comment: true
+#       max_age: 365d                  # report-only — pilot never derives real key age; always reports "unknown"
+#     review:                          # optional; managed via `pilot identity review list/mark`, never this file
+#       interval: 180d

@@ -137,6 +137,48 @@ func TestEvaluateIdentityHygiene_NeverMutatesRoster(t *testing.T) {
 	}
 }
 
+// TestEvaluateIdentityHygiene_MaxAgeUnknownNeverCountsAsSSHFailure locks
+// in a bug found live against a real FreeIPA target: a user with a
+// perfectly clean, allowed-algorithm SSH key still showed
+// ssh_key_compliance: fail purely because their covering credential_policy
+// configured ssh.max_age (report-only, always "unknown" — never a real
+// compliance signal).
+func TestEvaluateIdentityHygiene_MaxAgeUnknownNeverCountsAsSSHFailure(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.yaml")
+	roster := `
+schema_version: 3
+freeipa:
+  domain: ipa.pilot.internal
+  admin: {principal: admin, password: x}
+users:
+  - name: alice
+    ssh_keys: {authoritative: true, values: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE+W2fUehVce+VbyNG5lfFmw3Mbfo3VDY4jJgIOynSoH alice@example.com"]}
+groups:
+  - name: role-privileged
+    category: role
+    membership: {users: [alice], groups: []}
+hosts: []
+hostgroups: []
+hbac: {rules: []}
+sudo: {rules: []}
+credential_policies:
+  - name: privileged-ssh
+    match: {users: [], groups: [role-privileged]}
+    ssh: {max_age: 365d}
+`
+	if err := os.WriteFile(rosterPath, []byte(roster), 0o600); err != nil {
+		t.Fatalf("write roster: %v", err)
+	}
+	report, err := EvaluateIdentityHygiene(context.Background(), HygieneOptions{RosterFile: rosterPath, Now: time.Now()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(report.Users) != 1 || report.Users[0].SSHKeyCompliance != "pass" {
+		t.Fatalf("expected alice's clean key (only a max_age_unknown finding) to report ssh_key_compliance=pass, got: %+v", report.Users)
+	}
+}
+
 func TestEvaluateIdentityHygiene_CapabilityProbeSkippedWithoutInventory(t *testing.T) {
 	rosterPath := writeHygieneTestRoster(t)
 	report, err := EvaluateIdentityHygiene(context.Background(), HygieneOptions{RosterFile: rosterPath, Now: time.Now()})

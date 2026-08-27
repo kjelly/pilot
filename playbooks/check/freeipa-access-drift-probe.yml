@@ -317,6 +317,20 @@
     # non-empty one to a real int and every empty one to JSON null so
     # Go's *int fields unmarshal correctly (empty string is NOT a valid
     # int and would otherwise fail json.Unmarshal outright).
+    #
+    # Confirmed live (vm-target, 2026-08-27): the raw LDAP attributes
+    # krbmaxpwdlife/krbminpwdlife are stored in SECONDS
+    # (krbmaxpwdlife: 7776000 for a 90-day `--maxlife=90`), not the
+    # days/hours unit `ipa pwpolicy-add/mod`'s CLI flags accept as
+    # input — CompiledPasswordPolicy.MaxLifeDays/MinLifeHours
+    # (password_policy_compile.go) are in days/hours to match those CLI
+    # flags directly, so this is the one place that must convert back
+    # from the raw LDAP seconds representation for the comparison in
+    # internal/accessgrants.comparePasswordPolicyFields to be apples-
+    # to-apples. Every other field here is already unit-identical
+    # between the raw LDAP attribute and the compiled value (both
+    # plain counts, or both already in seconds for the lockout fields),
+    # so only these two need the extra division.
     - name: "Normalize live group password policy fields to int-or-null"
       ansible.builtin.set_fact:
         pilot_drift_password_policy: >-
@@ -325,8 +339,8 @@
                  'priority': (item.value.priority | int if item.value.priority != '' else none),
                  'min_length': (item.value.min_length | int if item.value.min_length != '' else none),
                  'history_size': (item.value.history_size | int if item.value.history_size != '' else none),
-                 'max_life_days': (item.value.max_life_days | int if item.value.max_life_days != '' else none),
-                 'min_life_hours': (item.value.min_life_hours | int if item.value.min_life_hours != '' else none),
+                 'max_life_days': ((item.value.max_life_days | int // 86400) if item.value.max_life_days != '' else none),
+                 'min_life_hours': ((item.value.min_life_hours | int // 3600) if item.value.min_life_hours != '' else none),
                  'lockout_max_failures': (item.value.lockout_max_failures | int if item.value.lockout_max_failures != '' else none),
                  'lockout_failure_reset_seconds': (item.value.lockout_failure_reset_seconds | int if item.value.lockout_failure_reset_seconds != '' else none),
                  'lockout_duration_seconds': (item.value.lockout_duration_seconds | int if item.value.lockout_duration_seconds != '' else none),
