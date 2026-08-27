@@ -31,6 +31,14 @@ groupVars:
   # by internal/spec/freeipa_client_regression_test.go, per spec.md §19).
   - {name: freeipa_client_register_dns, type: boolean, required: false, secret: false}
   - {name: freeipa_client_dns_addresses, type: stringList, required: false, secret: false}
+  # v3.2 §16 persistent SSSD client hardening (offline/cached
+  # authentication policy) — both optional; unset leaves sssd.conf's
+  # existing value untouched. Live IdM-unavailable outage behavior is
+  # NOT verified by this delivery, only that the lines land in
+  # sssd.conf and SSSD restarts cleanly — see docs/verification/
+  # freeipa-client.md's changelog for the explicit scope note.
+  - {name: freeipa_client_sssd_cache_credentials, type: boolean, required: false, secret: false}
+  - {name: freeipa_client_sssd_offline_credentials_expiration, type: integer, required: false, secret: false}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:

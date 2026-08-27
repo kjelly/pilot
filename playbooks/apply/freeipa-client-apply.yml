@@ -447,6 +447,52 @@
       when: not ansible_check_mode
       tags: [freeipa-client, C8]
 
+    # v3.2 §16 persistent SSSD client hardening: offline/cached
+    # authentication policy. Both are optional host_vars (undefined ->
+    # task skipped entirely, existing sssd.conf value left untouched —
+    # matching this playbook's own "MAY be included" posture rather than
+    # forcing an opinion every client must adopt). Persistent after one
+    # shot: sssd.conf is a plain file SSSD itself enforces from then on,
+    # no Pilot loop involved (spec.md §16's own "Allowed: Pilot applies
+    # config once -> host service persistently enforces it" framing).
+    #
+    # Live IdM-unavailable verification (spec.md §16.3's "confirm the
+    # outage behavior, not just the file content") is NOT part of this
+    # delivery — same blocker v3.1 §17 hit and deferred (docs/superpowers/
+    # specs/2026-08-27-pilot-roster-v3.2-identity-credential-hardening-spec.md
+    # §16), and the same one this repo's own drift/hygiene work already
+    # flagged as out of scope for a single-VM session. Confirmed live
+    # ONLY that these lines land correctly in sssd.conf and SSSD restarts
+    # cleanly with them present — not that a real network-partition
+    # actually behaves as configured.
+    - name: "FreeIPA client — set SSSD offline credential caching policy"
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: '^cache_credentials\s*='
+        line: "cache_credentials = {{ freeipa_client_sssd_cache_credentials | bool | ternary('True', 'False') }}"
+        insertafter: '^ipa_domain\s*='
+        state: present
+        create: false
+      register: ipa_sssd_cache_credentials
+      when:
+        - not ansible_check_mode
+        - freeipa_client_sssd_cache_credentials is defined
+      tags: [freeipa-client, sssd_hardening]
+
+    - name: "FreeIPA client — set SSSD offline credentials expiration (days)"
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: '^offline_credentials_expiration\s*='
+        line: "offline_credentials_expiration = {{ freeipa_client_sssd_offline_credentials_expiration | int }}"
+        insertafter: '^ipa_domain\s*='
+        state: present
+        create: false
+      register: ipa_sssd_offline_credentials_expiration
+      when:
+        - not ansible_check_mode
+        - freeipa_client_sssd_offline_credentials_expiration is defined
+      tags: [freeipa-client, sssd_hardening]
+
     - name: "FreeIPA client — restart SSSD after wiring responders"
       ansible.builtin.systemd:
         name: sssd
@@ -456,6 +502,8 @@
         - >-
           ipa_sssd_services is changed or
           ipa_sssd_sudo_provider is changed or
+          ipa_sssd_cache_credentials is changed or
+          ipa_sssd_offline_credentials_expiration is changed or
           (ipa_sssd_explicit_responder_sockets.results | default([]) |
            selectattr('changed', 'defined') | selectattr('changed') | list | length > 0)
       tags: [freeipa-client, C8]
