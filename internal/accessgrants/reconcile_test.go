@@ -120,6 +120,58 @@ func TestReconcileOnce_ReportsPlaybookFailure(t *testing.T) {
 	}
 }
 
+const reconcileTestRosterWithSoDConflict = `
+schema_version: 3
+freeipa:
+  domain: ipa.pilot.internal
+  admin: {principal: admin, password: x}
+users:
+  - name: bob
+    ssh_keys: {authoritative: true, values: []}
+groups:
+  - name: role-payment-create
+    category: role
+    membership: {users: [bob], groups: []}
+  - name: role-payment-approve
+    category: role
+    membership: {users: [bob], groups: []}
+hosts: []
+hostgroups: []
+hbac:
+  rules: []
+sudo:
+  rules: []
+security:
+  conflicts:
+    - name: payment-create-vs-approve
+      mutually_exclusive: [role-payment-create, role-payment-approve]
+`
+
+func TestReconcileOnce_RefusesWhenSoDConflictExists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(path, []byte(reconcileTestRosterWithSoDConflict), 0o600); err != nil {
+		t.Fatalf("write roster: %v", err)
+	}
+	runner := &fakeRunner{exitCode: 0}
+
+	_, _, err := ReconcileOnce(context.Background(), ReconcileOptions{
+		RosterFile: path,
+		Inventory:  "inv.yml",
+		Now:        time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC),
+		Runner:     runner,
+	})
+	if err == nil {
+		t.Fatal("expected an error when a SoD conflict exists")
+	}
+	if !strings.Contains(err.Error(), "payment-create-vs-approve") {
+		t.Fatalf("expected the error to name the conflicting rule, got: %v", err)
+	}
+	if runner.lastArgs != nil {
+		t.Fatalf("expected ansible-playbook to never run when the policy gate fails, but it was invoked with: %v", runner.lastArgs)
+	}
+}
+
 func TestBuildExtraVars_SeparatesPresentFromPrune(t *testing.T) {
 	rosterPath := writeReconcileTestRoster(t)
 	// Active grant at "now" -> present; the same roster evaluated well

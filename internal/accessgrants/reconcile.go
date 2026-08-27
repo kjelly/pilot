@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/kjelly/pilot/internal/ansible"
@@ -58,8 +59,15 @@ type ReconcileOptions struct {
 }
 
 func (o ReconcileOptions) runner() playbookRunner {
-	if o.Runner != nil {
-		return o.Runner
+	return resolveRunner(o.Runner)
+}
+
+// resolveRunner returns r if non-nil, otherwise a production
+// ansible.NewRunner() — the shared "nil means real ansible-playbook"
+// default every options struct in this package uses.
+func resolveRunner(r playbookRunner) playbookRunner {
+	if r != nil {
+		return r
 	}
 	return ansible.NewRunner()
 }
@@ -70,6 +78,51 @@ func (o ReconcileOptions) runner() playbookRunner {
 type Plan struct {
 	HBACRules []inventory.CompiledHBACRule
 	SudoRules []inventory.CompiledSudoRule
+	// AuthPolicyHosts is spec.md §11's compiled per-host authentication-
+	// indicator requirement (auth_policies:), applied via `ipa host-mod
+	// --auth-ind=`.
+	AuthPolicyHosts []inventory.CompiledAuthPolicyHost
+}
+
+// PolicyGate is the result of spec.md §18 steps 4/5 — Separation of Duties
+// and grant security policy evaluation — the two semantic checks that MUST
+// fail before any mutation, run independently of the purely structural
+// inventory.ValidateRosterFile gate.
+type PolicyGate struct {
+	SoDConflicts          []inventory.SoDConflict
+	GrantPolicyViolations []inventory.GrantPolicyViolation
+}
+
+// Empty reports whether the gate found nothing to block on.
+func (g PolicyGate) Empty() bool {
+	return len(g.SoDConflicts) == 0 && len(g.GrantPolicyViolations) == 0
+}
+
+// String renders every violation as one line, for an error message or log.
+func (g PolicyGate) String() string {
+	var b strings.Builder
+	for _, c := range g.SoDConflicts {
+		fmt.Fprintf(&b, "SoD conflict %q: user %q is in %v; ", c.RuleName, c.User, c.Groups)
+	}
+	for _, v := range g.GrantPolicyViolations {
+		fmt.Fprintf(&b, "grant_policy %q: grant %q: %s; ", v.PolicyName, v.GrantName, v.Detail)
+	}
+	return strings.TrimSuffix(b.String(), "; ")
+}
+
+// EvaluatePolicyGate runs both semantic checks against the roster at
+// rosterFile, evaluated against now. Callers MUST have already run
+// inventory.ValidateRosterFile successfully.
+func EvaluatePolicyGate(rosterFile string, now time.Time) (PolicyGate, error) {
+	conflicts, err := inventory.EvaluateSoDFile(rosterFile)
+	if err != nil {
+		return PolicyGate{}, err
+	}
+	violations, err := inventory.EvaluateGrantPoliciesFile(rosterFile, now)
+	if err != nil {
+		return PolicyGate{}, err
+	}
+	return PolicyGate{SoDConflicts: conflicts, GrantPolicyViolations: violations}, nil
 }
 
 // BuildPlan runs inventory.CompileGrants against the roster at rosterFile.
@@ -79,7 +132,11 @@ func BuildPlan(rosterFile string, now time.Time) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	return Plan{HBACRules: hbac, SudoRules: sudo}, nil
+	authPolicyHosts, err := inventory.CompileAuthPoliciesFile(rosterFile)
+	if err != nil {
+		return Plan{}, err
+	}
+	return Plan{HBACRules: hbac, SudoRules: sudo, AuthPolicyHosts: authPolicyHosts}, nil
 }
 
 // extraVarsHBACRule/extraVarsSudoRule/extraVars are the exact JSON shape
@@ -112,12 +169,18 @@ type extraVarsSudoRule struct {
 	SudoNotAfter       string   `json:"sudo_not_after"`
 }
 
+type extraVarsAuthPolicyHost struct {
+	Host       string   `json:"host"`
+	Indicators []string `json:"indicators"`
+}
+
 type extraVars struct {
-	FreeIPARosterFile           string              `json:"freeipa_roster_file"`
-	PilotCompiledGrantHBACRules []extraVarsHBACRule `json:"pilot_compiled_grant_hbac_rules"`
-	PilotCompiledGrantHBACPrune []string            `json:"pilot_compiled_grant_hbac_prune"`
-	PilotCompiledGrantSudoRules []extraVarsSudoRule `json:"pilot_compiled_grant_sudo_rules"`
-	PilotCompiledGrantSudoPrune []string            `json:"pilot_compiled_grant_sudo_prune"`
+	FreeIPARosterFile            string                    `json:"freeipa_roster_file"`
+	PilotCompiledGrantHBACRules  []extraVarsHBACRule       `json:"pilot_compiled_grant_hbac_rules"`
+	PilotCompiledGrantHBACPrune  []string                  `json:"pilot_compiled_grant_hbac_prune"`
+	PilotCompiledGrantSudoRules  []extraVarsSudoRule       `json:"pilot_compiled_grant_sudo_rules"`
+	PilotCompiledGrantSudoPrune  []string                  `json:"pilot_compiled_grant_sudo_prune"`
+	PilotCompiledAuthPolicyHosts []extraVarsAuthPolicyHost `json:"pilot_compiled_auth_policy_hosts"`
 }
 
 // buildExtraVars separates each compiled rule into either its
@@ -125,11 +188,15 @@ type extraVars struct {
 // per spec.md §9/§10's `absent -> absent` row.
 func buildExtraVars(rosterFile string, plan Plan) extraVars {
 	ev := extraVars{
-		FreeIPARosterFile:           rosterFile,
-		PilotCompiledGrantHBACRules: []extraVarsHBACRule{},
-		PilotCompiledGrantHBACPrune: []string{},
-		PilotCompiledGrantSudoRules: []extraVarsSudoRule{},
-		PilotCompiledGrantSudoPrune: []string{},
+		FreeIPARosterFile:            rosterFile,
+		PilotCompiledGrantHBACRules:  []extraVarsHBACRule{},
+		PilotCompiledGrantHBACPrune:  []string{},
+		PilotCompiledGrantSudoRules:  []extraVarsSudoRule{},
+		PilotCompiledGrantSudoPrune:  []string{},
+		PilotCompiledAuthPolicyHosts: []extraVarsAuthPolicyHost{},
+	}
+	for _, h := range plan.AuthPolicyHosts {
+		ev.PilotCompiledAuthPolicyHosts = append(ev.PilotCompiledAuthPolicyHosts, extraVarsAuthPolicyHost{Host: h.Host, Indicators: emptyOr(h.Indicators)})
 	}
 	for _, r := range plan.HBACRules {
 		if !r.Present {
@@ -193,11 +260,29 @@ func ReconcileOnce(ctx context.Context, opts ReconcileOptions) (Plan, *ansible.R
 		playbook = DefaultPlaybook
 	}
 
+	// spec.md §18 steps 4/5 ("SoD evaluation", "grant policy evaluation")
+	// are a hard gate before any mutation — a violation here MUST stop the
+	// whole reconcile, not just the offending grant.
+	gate, err := EvaluatePolicyGate(opts.RosterFile, now)
+	if err != nil {
+		return Plan{}, nil, err
+	}
+	if !gate.Empty() {
+		return Plan{}, nil, fmt.Errorf("accessgrants: refusing to reconcile: %s", gate.String())
+	}
+
 	plan, err := BuildPlan(opts.RosterFile, now)
 	if err != nil {
 		return Plan{}, nil, err
 	}
 
+	result, err := applyPlan(ctx, opts.RosterFile, playbook, opts.Inventory, opts.VaultPasswordFile, opts.runner(), plan)
+	return plan, result, err
+}
+
+// applyPlan is ReconcileOnce's and ApplyAdHocHBACRule's shared "turn a Plan
+// into extra-vars and invoke ansible-playbook" tail.
+func applyPlan(ctx context.Context, rosterFile, playbook, inventoryPath, vaultPasswordFile string, runner playbookRunner, plan Plan) (*ansible.Result, error) {
 	// freeipa_roster_file MUST be absolute: the apply playbook's own
 	// `include_vars` resolves a relative path against the playbook file's
 	// own directory, not this process's cwd (documented in
@@ -205,9 +290,9 @@ func ReconcileOnce(ctx context.Context, opts ReconcileOptions) (Plan, *ansible.R
 	// comment, "-e freeipa_roster_file=/absolute/path") — confirmed live
 	// on a vm-target, where a relative RosterFile made that task fail with
 	// its no_log-censored error.
-	absRosterFile, err := filepath.Abs(opts.RosterFile)
+	absRosterFile, err := filepath.Abs(rosterFile)
 	if err != nil {
-		return plan, nil, fmt.Errorf("accessgrants: resolve roster file path: %w", err)
+		return nil, fmt.Errorf("accessgrants: resolve roster file path: %w", err)
 	}
 	ev := buildExtraVars(absRosterFile, plan)
 	// Extra-vars go through a JSON @file, never a bare `-e k=v` command
@@ -215,28 +300,28 @@ func ReconcileOnce(ctx context.Context, opts ReconcileOptions) (Plan, *ansible.R
 	// `-e k=v` (see internal/freeipa/probe.go's identical precaution).
 	extraVarsFile, err := os.CreateTemp("", "pilot-access-reconcile-vars-*.json")
 	if err != nil {
-		return plan, nil, fmt.Errorf("accessgrants: create extra-vars file: %w", err)
+		return nil, fmt.Errorf("accessgrants: create extra-vars file: %w", err)
 	}
 	extraVarsPath := extraVarsFile.Name()
 	defer os.Remove(extraVarsPath)
 	if err := json.NewEncoder(extraVarsFile).Encode(ev); err != nil {
 		_ = extraVarsFile.Close()
-		return plan, nil, fmt.Errorf("accessgrants: encode extra-vars: %w", err)
+		return nil, fmt.Errorf("accessgrants: encode extra-vars: %w", err)
 	}
 	if err := extraVarsFile.Close(); err != nil {
-		return plan, nil, fmt.Errorf("accessgrants: write extra-vars: %w", err)
+		return nil, fmt.Errorf("accessgrants: write extra-vars: %w", err)
 	}
 
-	args := []string{playbook, "-i", opts.Inventory, "-e", "@" + extraVarsPath}
-	if opts.VaultPasswordFile != "" {
-		args = append(args, "--vault-password-file", opts.VaultPasswordFile)
+	args := []string{playbook, "-i", inventoryPath, "-e", "@" + extraVarsPath}
+	if vaultPasswordFile != "" {
+		args = append(args, "--vault-password-file", vaultPasswordFile)
 	}
-	result, runErr := opts.runner().Run(ctx, args...)
+	result, runErr := runner.Run(ctx, args...)
 	if runErr != nil {
-		return plan, result, fmt.Errorf("accessgrants: ansible-playbook did not run: %w", runErr)
+		return result, fmt.Errorf("accessgrants: ansible-playbook did not run: %w", runErr)
 	}
 	if result.ExitCode != 0 {
-		return plan, result, fmt.Errorf("accessgrants: apply playbook %s exited %d", playbook, result.ExitCode)
+		return result, fmt.Errorf("accessgrants: apply playbook %s exited %d", playbook, result.ExitCode)
 	}
-	return plan, result, nil
+	return result, nil
 }

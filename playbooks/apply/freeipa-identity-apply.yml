@@ -166,11 +166,15 @@
               'hostgroups', 'hbac', 'sudo', 'nfs', 'nfs_clients',
               'migration', 'policy_exceptions'
             ] + (['netgroups'] if freeipa_roster.schema_version | int >= 2 else [])
-              + (['grants'] if freeipa_roster.schema_version | int >= 3 else []))) | length == 0
+              + (['grants', 'auth_policies', 'security'] if freeipa_roster.schema_version | int >= 3 else []))) | length == 0
           # This allowlist MUST stay in sync with `knownFreeIPAKeys` in
-          # internal/inventory/roster_validate.go. `domain`/`realm` were omitted
-          # here once while the Go validator allowed them, so this gate rejected
-          # every roster the sanctioned tooling produced —
+          # internal/inventory/roster_validate.go — `auth_policies`/`security`
+          # (v3.0 Core Access Governance spec.md §5/§21 Phase 2) were added
+          # here alongside `grants` for the same reason: a roster the Go
+          # validator accepts must not be rejected by this Ansible-side gate
+          # at real-apply time. `domain`/`realm` were omitted here once while
+          # the Go validator allowed them, so this gate rejected every roster
+          # the sanctioned tooling produced —
           # `WriteMinimalNFSServerRoster` always writes `freeipa.domain`, and
           # `pilot roster lint` could not catch it because the Go side already
           # permitted the shape. Found live round 18 (2026-07-30).
@@ -2444,6 +2448,30 @@
         - ipa_grant_sudo_prune.rc != 0
         - "'not found' not in (ipa_grant_sudo_prune.stderr | default(''))"
       tags: [identity, sudo]
+
+    # v3.0 auth_policies (spec.md §11): sets FreeIPA's native per-host
+    # Kerberos authentication-indicator requirement via `ipa host-mod
+    # --auth-ind=`. --auth-ind is a plain multivalued host attribute (not
+    # a membership relationship), so — unlike the HBAC/sudo attach tasks
+    # above — one host-mod call with one repeated flag per indicator fully
+    # replaces the set; there is no separate attach/detach pair. Exact
+    # flag repetition behavior on this FreeIPA version MUST be verified
+    # live (spec.md §11) — no prior task in this file has ever set
+    # --auth-ind before.
+    - name: "Reconcile v3.0 authentication-indicator requirements for hosts (spec.md §11)"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'host-mod', item.host]
+             + (item.indicators | map('regex_replace', '^', '--auth-ind=') | list) }}
+      loop: "{{ pilot_compiled_auth_policy_hosts | default([]) }}"
+      loop_control:
+        label: "{{ item.host }}"
+      register: ipa_auth_policy_host
+      changed_when: "'Modified host' in (ipa_auth_policy_host.stdout | default(''))"
+      failed_when:
+        - ipa_auth_policy_host.rc != 0
+        - "'no modifications to be performed' not in (ipa_auth_policy_host.stderr | default(''))"
+      tags: [identity, auth_policy]
 
     # ── FreeIPA automount control plane for canonical NFS shares ───────
     - name: "Ensure canonical automount locations exist"
