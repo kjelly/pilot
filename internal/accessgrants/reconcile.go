@@ -95,6 +95,9 @@ type Plan struct {
 	// FreeIPA/Kerberos principal-expiration state (account_policies:),
 	// applied via `ipa user-mod --setattr=krbprincipalexpiration=`.
 	AccountExpirations []inventory.CompiledAccountExpiration
+	// PasswordPolicies is v3.2 §7's compiled group password policies
+	// (password_policies:), applied via `ipa pwpolicy-add/mod/remove`.
+	PasswordPolicies []inventory.CompiledPasswordPolicy
 }
 
 // PolicyGate is the result of spec.md §18 steps 4/5 — Separation of Duties
@@ -162,7 +165,14 @@ func BuildPlan(rosterFile string, now time.Time) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	return Plan{HBACRules: hbac, SudoRules: sudo, AuthPolicyHosts: authPolicyHosts, AccountExpirations: accountExpirations}, nil
+	passwordPolicies, err := inventory.CompilePasswordPoliciesFile(rosterFile)
+	if err != nil {
+		return Plan{}, err
+	}
+	return Plan{
+		HBACRules: hbac, SudoRules: sudo, AuthPolicyHosts: authPolicyHosts,
+		AccountExpirations: accountExpirations, PasswordPolicies: passwordPolicies,
+	}, nil
 }
 
 // extraVarsHBACRule/extraVarsSudoRule/extraVars are the exact JSON shape
@@ -209,6 +219,27 @@ type extraVarsAccountExpiration struct {
 	Expiration string `json:"expiration"`
 }
 
+// extraVarsPasswordPolicy is the exact JSON shape playbooks/apply/
+// freeipa-identity-apply.yml's `pilot_compiled_password_policies`
+// extra-var expects. Every optional field uses a nil-omitting pointer
+// (json:",omitempty" on *int omits only on a nil pointer, never on a
+// pointer to zero) so the playbook can tell "absent from the roster"
+// (item.history_size is not defined) apart from "explicitly set to zero"
+// (item.history_size == 0) — see CompiledPasswordPolicy's doc comment.
+type extraVarsPasswordPolicy struct {
+	Name                       string `json:"name"`
+	State                      string `json:"state"`
+	Group                      string `json:"group"`
+	Priority                   *int   `json:"priority,omitempty"`
+	MinLength                  *int   `json:"min_length,omitempty"`
+	HistorySize                *int   `json:"history_size,omitempty"`
+	MaxLifeDays                *int   `json:"max_life_days,omitempty"`
+	MinLifeHours               *int   `json:"min_life_hours,omitempty"`
+	LockoutMaxFailures         *int   `json:"lockout_max_failures,omitempty"`
+	LockoutFailureResetSeconds *int   `json:"lockout_failure_reset_seconds,omitempty"`
+	LockoutDurationSeconds     *int   `json:"lockout_duration_seconds,omitempty"`
+}
+
 type extraVars struct {
 	FreeIPARosterFile               string                       `json:"freeipa_roster_file"`
 	PilotCompiledGrantHBACRules     []extraVarsHBACRule          `json:"pilot_compiled_grant_hbac_rules"`
@@ -217,6 +248,7 @@ type extraVars struct {
 	PilotCompiledGrantSudoPrune     []string                     `json:"pilot_compiled_grant_sudo_prune"`
 	PilotCompiledAuthPolicyHosts    []extraVarsAuthPolicyHost    `json:"pilot_compiled_auth_policy_hosts"`
 	PilotCompiledAccountExpirations []extraVarsAccountExpiration `json:"pilot_compiled_account_expirations"`
+	PilotCompiledPasswordPolicies   []extraVarsPasswordPolicy    `json:"pilot_compiled_password_policies"`
 }
 
 // buildExtraVars separates each compiled rule into either its
@@ -231,12 +263,22 @@ func buildExtraVars(rosterFile string, plan Plan) extraVars {
 		PilotCompiledGrantSudoPrune:     []string{},
 		PilotCompiledAuthPolicyHosts:    []extraVarsAuthPolicyHost{},
 		PilotCompiledAccountExpirations: []extraVarsAccountExpiration{},
+		PilotCompiledPasswordPolicies:   []extraVarsPasswordPolicy{},
 	}
 	for _, h := range plan.AuthPolicyHosts {
 		ev.PilotCompiledAuthPolicyHosts = append(ev.PilotCompiledAuthPolicyHosts, extraVarsAuthPolicyHost{Host: h.Host, Indicators: emptyOr(h.Indicators)})
 	}
 	for _, a := range plan.AccountExpirations {
 		ev.PilotCompiledAccountExpirations = append(ev.PilotCompiledAccountExpirations, extraVarsAccountExpiration{User: a.User, Expiration: a.Expiration})
+	}
+	for _, p := range plan.PasswordPolicies {
+		ev.PilotCompiledPasswordPolicies = append(ev.PilotCompiledPasswordPolicies, extraVarsPasswordPolicy{
+			Name: p.Name, State: p.State, Group: p.Group,
+			Priority: p.Priority, MinLength: p.MinLength, HistorySize: p.HistorySize,
+			MaxLifeDays: p.MaxLifeDays, MinLifeHours: p.MinLifeHours,
+			LockoutMaxFailures: p.LockoutMaxFailures, LockoutFailureResetSeconds: p.LockoutFailureResetSeconds,
+			LockoutDurationSeconds: p.LockoutDurationSeconds,
+		})
 	}
 	for _, r := range plan.HBACRules {
 		if !r.Present {

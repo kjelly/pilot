@@ -260,6 +260,89 @@ func TestBuildExtraVars_ThreadsAccountExpirations(t *testing.T) {
 	}
 }
 
+const reconcileTestRosterWithPasswordPolicies = `
+schema_version: 3
+freeipa:
+  domain: ipa.pilot.internal
+  admin: {principal: admin, password: x}
+users: []
+groups:
+  - name: role-privileged
+    category: role
+    membership: {users: [], groups: []}
+hosts: []
+hostgroups: []
+hbac:
+  rules: []
+sudo:
+  rules: []
+password_policies:
+  - name: privileged-users
+    group: role-privileged
+    priority: 10
+    min_length: 16
+    history_size: 0
+    max_life: 90d
+    min_life: 1h
+    lockout:
+      max_failures: 5
+      failure_reset_interval: 15m
+      lockout_duration: 15m
+  - name: retired-policy
+    state: absent
+    group: role-privileged
+`
+
+// TestBuildExtraVars_ThreadsPasswordPolicies exercises v3.2 §7's wiring
+// end to end (BuildPlan -> buildExtraVars): unit conversion (days/hours/
+// seconds) survives the round trip, history_size: 0 stays a non-nil
+// pointer to zero (not omitted as "unset"), and an absent entry carries
+// no optional fields at all.
+func TestBuildExtraVars_ThreadsPasswordPolicies(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(rosterPath, []byte(reconcileTestRosterWithPasswordPolicies), 0o600); err != nil {
+		t.Fatalf("write roster: %v", err)
+	}
+
+	plan, err := BuildPlan(rosterPath, time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ev := buildExtraVars(rosterPath, plan)
+	if len(ev.PilotCompiledPasswordPolicies) != 2 {
+		t.Fatalf("expected two compiled password_policy entries, got: %+v", ev.PilotCompiledPasswordPolicies)
+	}
+
+	present := ev.PilotCompiledPasswordPolicies[0]
+	if present.Group != "role-privileged" || present.State != "present" {
+		t.Fatalf("unexpected present entry: %+v", present)
+	}
+	if present.Priority == nil || *present.Priority != 10 {
+		t.Errorf("Priority = %v, want 10", present.Priority)
+	}
+	if present.HistorySize == nil || *present.HistorySize != 0 {
+		t.Errorf("HistorySize = %v, want pointer to 0", present.HistorySize)
+	}
+	if present.MaxLifeDays == nil || *present.MaxLifeDays != 90 {
+		t.Errorf("MaxLifeDays = %v, want 90", present.MaxLifeDays)
+	}
+	if present.MinLifeHours == nil || *present.MinLifeHours != 1 {
+		t.Errorf("MinLifeHours = %v, want 1", present.MinLifeHours)
+	}
+	if present.LockoutFailureResetSeconds == nil || *present.LockoutFailureResetSeconds != 900 {
+		t.Errorf("LockoutFailureResetSeconds = %v, want 900", present.LockoutFailureResetSeconds)
+	}
+
+	absent := ev.PilotCompiledPasswordPolicies[1]
+	if absent.State != "absent" || absent.Group != "role-privileged" {
+		t.Fatalf("unexpected absent entry: %+v", absent)
+	}
+	if absent.Priority != nil {
+		t.Errorf("absent entry Priority = %v, want nil", absent.Priority)
+	}
+}
+
 const reconcileTestRosterWithAuthPolicy = `
 schema_version: 3
 freeipa:

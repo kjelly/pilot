@@ -166,13 +166,18 @@
               'hostgroups', 'hbac', 'sudo', 'nfs', 'nfs_clients',
               'migration', 'policy_exceptions'
             ] + (['netgroups'] if freeipa_roster.schema_version | int >= 2 else [])
-              + (['grants', 'auth_policies', 'security', 'account_policies'] if freeipa_roster.schema_version | int >= 3 else []))) | length == 0
+              + (['grants', 'auth_policies', 'security', 'account_policies',
+                  'password_policies'] if freeipa_roster.schema_version | int >= 3 else []))) | length == 0
           # This allowlist MUST stay in sync with `knownFreeIPAKeys` in
           # internal/inventory/roster_validate.go — `auth_policies`/`security`
-          # (v3.0 Core Access Governance spec.md §5/§21 Phase 2) and
-          # `account_policies` (Phase 3) were added here alongside `grants`
-          # for the same reason: a roster the Go validator accepts must not
-          # be rejected by this Ansible-side gate at real-apply time.
+          # (v3.0 Core Access Governance spec.md §5/§21 Phase 2),
+          # `account_policies` (Phase 3), and `password_policies` (v3.2
+          # Identity & Credential Hardening spec.md §7 Phase 2) were added
+          # here alongside `grants` for the same reason: a roster the Go
+          # validator accepts must not be rejected by this Ansible-side gate
+          # at real-apply time. See
+          # internal/inventory/roster_validate_playbook_sync_test.go, which
+          # fails the build if these two lists ever drift apart again.
           # `domain`/`realm` were omitted here once while
           # the Go validator allowed them, so this gate rejected every roster
           # the sanctioned tooling produced —
@@ -2557,6 +2562,94 @@
         - ipa_account_expiration.rc != 0
         - "'no modifications to be performed' not in (ipa_account_expiration.stderr | default(''))"
       tags: [identity, account_policy]
+
+    # v3.2 password_policies (spec.md §7): FreeIPA group password
+    # policies. `ipa pwpolicy-add`/`ipa pwpolicy-mod` are NOT
+    # interchangeable — -add fails if the group already has a policy,
+    # -mod fails if it doesn't — so existence must be checked first
+    # (mirrors the sudorule-enable/disable task's own show-then-act
+    # shape above). This schema always carries a `group:`, so the global
+    # default policy (`ipa pwpolicy-show` with no group argument) is
+    # never a possible target here — §7's "never silently overwrite the
+    # global default policy" requirement is met structurally, not by a
+    # runtime check.
+    #
+    # Unit-mapping caveat (see freeipa-capability-probe.yml's own header
+    # note for the same practice): the exact `ipa pwpolicy-mod` flag
+    # names below are FreeIPA's documented CLI convention
+    # (internal/inventory/password_policy_compile.go's own header
+    # comment), not something this delivery confirmed against a live
+    # FreeIPA target. Confirm on a vm-target before relying on this for
+    # a real apply gate.
+    - name: "Check existence of each desired password_policy's group policy"
+      ansible.builtin.command:
+        argv: [ipa, pwpolicy-show, "{{ item.group }}"]
+      loop: "{{ pilot_compiled_password_policies | default([]) | selectattr('state', 'equalto', 'present') | list }}"
+      loop_control:
+        label: "{{ item.group }}"
+        index_var: pilot_pwpolicy_show_index
+      register: pilot_pwpolicy_show
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      tags: [identity, password_policy]
+
+    - name: "Create group password policies that don't exist yet"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'pwpolicy-add', item.item.group, '--priority=' ~ (item.item.priority | default(1))]
+             + (['--minlength=' ~ item.item.min_length] if item.item.min_length is defined else [])
+             + (['--history=' ~ item.item.history_size] if item.item.history_size is defined else [])
+             + (['--maxlife=' ~ item.item.max_life_days] if item.item.max_life_days is defined else [])
+             + (['--minlife=' ~ item.item.min_life_hours] if item.item.min_life_hours is defined else [])
+             + (['--maxfail=' ~ item.item.lockout_max_failures] if item.item.lockout_max_failures is defined else [])
+             + (['--failinterval=' ~ item.item.lockout_failure_reset_seconds] if item.item.lockout_failure_reset_seconds is defined else [])
+             + (['--lockouttime=' ~ item.item.lockout_duration_seconds] if item.item.lockout_duration_seconds is defined else []) }}
+      loop: "{{ pilot_pwpolicy_show.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.group }}"
+      register: pilot_pwpolicy_add
+      when: item.rc != 0
+      changed_when: "'Added policy' in (pilot_pwpolicy_add.stdout | default(''))"
+      failed_when:
+        - pilot_pwpolicy_add.rc != 0
+      tags: [identity, password_policy]
+
+    - name: "Modify group password policies that already exist"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'pwpolicy-mod', item.item.group, '--priority=' ~ (item.item.priority | default(1))]
+             + (['--minlength=' ~ item.item.min_length] if item.item.min_length is defined else [])
+             + (['--history=' ~ item.item.history_size] if item.item.history_size is defined else [])
+             + (['--maxlife=' ~ item.item.max_life_days] if item.item.max_life_days is defined else [])
+             + (['--minlife=' ~ item.item.min_life_hours] if item.item.min_life_hours is defined else [])
+             + (['--maxfail=' ~ item.item.lockout_max_failures] if item.item.lockout_max_failures is defined else [])
+             + (['--failinterval=' ~ item.item.lockout_failure_reset_seconds] if item.item.lockout_failure_reset_seconds is defined else [])
+             + (['--lockouttime=' ~ item.item.lockout_duration_seconds] if item.item.lockout_duration_seconds is defined else []) }}
+      loop: "{{ pilot_pwpolicy_show.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.group }}"
+      register: pilot_pwpolicy_mod
+      when: item.rc == 0
+      changed_when: "'Modified policy' in (pilot_pwpolicy_mod.stdout | default(''))"
+      failed_when:
+        - pilot_pwpolicy_mod.rc != 0
+        - "'no modifications to be performed' not in (pilot_pwpolicy_mod.stderr | default(''))"
+      tags: [identity, password_policy]
+
+    - name: "Remove group password policies now marked absent"
+      ansible.builtin.command:
+        argv: [ipa, pwpolicy-del, "{{ item.group }}"]
+      loop: "{{ pilot_compiled_password_policies | default([]) | selectattr('state', 'equalto', 'absent') | list }}"
+      loop_control:
+        label: "{{ item.group }}"
+      register: pilot_pwpolicy_remove
+      changed_when: "'Deleted policy' in (pilot_pwpolicy_remove.stdout | default(''))"
+      failed_when:
+        - pilot_pwpolicy_remove.rc != 0
+        - "'not found' not in (pilot_pwpolicy_remove.stderr | default(''))"
+      tags: [identity, password_policy]
 
     # ── FreeIPA automount control plane for canonical NFS shares ───────
     - name: "Ensure canonical automount locations exist"
