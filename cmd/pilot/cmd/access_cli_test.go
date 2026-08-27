@@ -33,6 +33,11 @@ grants:
     services: [sshd]
     validity: {not_after: "2099-08-31T18:00:00Z"}
     justification: {reason: "Project X maintenance"}
+account_policies:
+  - name: vendor01-contract
+    user: vendor01
+    type: contractor
+    validity: {not_after: "2099-12-31T23:59:59Z"}
 `
 
 const accessCLIFixtureBrokenRoster = `
@@ -76,6 +81,9 @@ func TestAccessStatusCmd_TableReportsLifecycle(t *testing.T) {
 	if !strings.Contains(got, "vendor-project-x") || !strings.Contains(got, "lifecycle=active") {
 		t.Fatalf("expected table output to report the grant as active, got: %s", got)
 	}
+	if !strings.Contains(got, "vendor01-contract") || !strings.Contains(got, "native_expiration=20991231235959Z") {
+		t.Fatalf("expected table output to report the account_policy's native expiration, got: %s", got)
+	}
 }
 
 func TestAccessStatusCmd_JSONFormat(t *testing.T) {
@@ -92,6 +100,9 @@ func TestAccessStatusCmd_JSONFormat(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"Kind": "temporary_grant"`) {
 		t.Fatalf("expected JSON output to include the grant's kind, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), `"NativeExpiration": "20991231235959Z"`) {
+		t.Fatalf("expected JSON output to include the account_policy's compiled native expiration, got: %s", out.String())
 	}
 }
 

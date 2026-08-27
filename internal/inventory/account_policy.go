@@ -210,3 +210,164 @@ func AccountActiveForUserFile(path, user string, now time.Time) (active bool, po
 	}
 	return AccountActiveForUser(root, user, now)
 }
+
+// CompiledAccountExpiration is one roster user's desired FreeIPA/Kerberos
+// principal-expiration state, compiled from account_policies[] (spec.md
+// v3.1 §7). Present distinguishes "apply Expiration" from "explicitly
+// clear" — see CompileAccountPolicies for exactly when each applies.
+// Unlike a compiled grant, this carries no Name of its own: User is the
+// only stable key krbPrincipalExpiration has (one attribute per account).
+type CompiledAccountExpiration struct {
+	User string
+	// Expiration is an LDAP/FreeIPA generalized-time string
+	// (GeneralizedTime), set only when Present is true.
+	Expiration string
+	Present    bool
+}
+
+// CompileAccountPolicies walks root's account_policies[] and compiles, per
+// referenced user, the single native FreeIPA principal-expiration value
+// that SHALL govern that account (§7). validity.not_before is
+// intentionally never consulted here: §7.7 defers automatic not_before
+// enforcement (no native backend mechanism is assumed), so only not_after
+// ever reaches the compiled value.
+//
+// A user compiles to Present == true when at least one of their
+// account_policies entries has state != absent — Expiration is the LATEST
+// not_after among those present entries. FreeIPA has exactly one
+// krbPrincipalExpiration attribute per account, so multiple concurrent
+// entries for the same user (e.g. an original engagement plus a renewal)
+// must collapse to one deterministic value; the latest not_after is the
+// only choice that keeps the account valid through every entry's window.
+//
+// A user compiles to Present == false — the explicit clear path §7.4
+// requires — only when they have at least one account_policies entry and
+// EVERY one of them is state: absent. A user with NO account_policies
+// entries at all is skipped entirely: omission is not clearance (§7.4,
+// "do not silently remove ... because a field was omitted ambiguously") —
+// this mirrors accountLifecycleForUser's "no entries -> unconstrained"
+// treatment.
+//
+// Callers MUST have already run ValidateRoster (checkAccountPolicies)
+// first; this does not re-validate.
+func CompileAccountPolicies(root map[string]any) ([]CompiledAccountExpiration, error) {
+	byUser := indexAccountPoliciesByUser(root)
+
+	var order []string
+	seen := map[string]bool{}
+	for _, raw := range listField(root, "account_policies") {
+		user := stringField(asMap(raw), "user")
+		if user != "" && !seen[user] {
+			seen[user] = true
+			order = append(order, user)
+		}
+	}
+
+	out := make([]CompiledAccountExpiration, 0, len(order))
+	for _, user := range order {
+		var latestNotAfter time.Time
+		anyPresent := false
+		for _, policy := range byUser[user] {
+			if stateOrDefault(policy, "present") == "absent" {
+				continue
+			}
+			anyPresent = true
+			validity, err := ParseGrantValidity(mapField(policy, "validity"))
+			if err != nil {
+				return nil, fmt.Errorf("account_policy %q: %w", stringField(policy, "name"), err)
+			}
+			if validity.NotAfter.After(latestNotAfter) {
+				latestNotAfter = validity.NotAfter
+			}
+		}
+		if anyPresent {
+			out = append(out, CompiledAccountExpiration{User: user, Expiration: GeneralizedTime(latestNotAfter), Present: true})
+		} else {
+			out = append(out, CompiledAccountExpiration{User: user, Present: false})
+		}
+	}
+	return out, nil
+}
+
+// CompileAccountPoliciesFile is CompileAccountPolicies' file-reading
+// counterpart, mirroring RosterUserNames' read/parse/dispatch shape
+// (roster.go).
+func CompileAccountPoliciesFile(path string) ([]CompiledAccountExpiration, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	return CompileAccountPolicies(root)
+}
+
+// AccountPolicyStatus is one account_policies[] entry's current lifecycle
+// snapshot plus the native FreeIPA expiration its user actually compiles
+// to right now — the shape `pilot access status` reports (spec.md §7's
+// "explain/health visibility" requirement), without touching FreeIPA at
+// all.
+type AccountPolicyStatus struct {
+	Name           string
+	User           string
+	State          string // this entry's own state: present|absent
+	Lifecycle      GrantLifecycleState
+	NextTransition *time.Time
+	// NativeExpiration is the LDAP generalized-time value
+	// CompileAccountPolicies would apply as this entry's user's
+	// krbPrincipalExpiration right now — empty when the user's compiled
+	// state is Present == false (every entry for them is absent). Because
+	// krbPrincipalExpiration is one value per account, two entries for the
+	// same user report the same NativeExpiration (§7's "latest not_after
+	// wins" rule), even if this entry's own NextTransition differs.
+	NativeExpiration string
+}
+
+// EvaluateAccountPolicyStatuses reports an AccountPolicyStatus for every
+// account_policies[] entry in root, evaluated against the injected clock
+// now (mirroring EvaluateGrantStatuses).
+func EvaluateAccountPolicyStatuses(root map[string]any, now time.Time) ([]AccountPolicyStatus, error) {
+	compiled, err := CompileAccountPolicies(root)
+	if err != nil {
+		return nil, err
+	}
+	nativeByUser := map[string]string{}
+	for _, c := range compiled {
+		if c.Present {
+			nativeByUser[c.User] = c.Expiration
+		}
+	}
+
+	var out []AccountPolicyStatus
+	for _, raw := range listField(root, "account_policies") {
+		policy := asMap(raw)
+		state := stateOrDefault(policy, "present")
+		user := stringField(policy, "user")
+
+		var validity GrantValidity
+		if state != "absent" {
+			validity, err = ParseGrantValidity(mapField(policy, "validity"))
+			if err != nil {
+				return nil, fmt.Errorf("account_policy %q: %w", stringField(policy, "name"), err)
+			}
+		}
+		out = append(out, AccountPolicyStatus{
+			Name:             stringField(policy, "name"),
+			User:             user,
+			State:            state,
+			Lifecycle:        EvaluateGrantLifecycle(state, validity, now),
+			NextTransition:   NextGrantTransition(state, validity, now),
+			NativeExpiration: nativeByUser[user],
+		})
+	}
+	return out, nil
+}
+
+// EvaluateAccountPolicyStatusesFile is EvaluateAccountPolicyStatuses'
+// file-reading counterpart, mirroring RosterUserNames' read/parse/dispatch
+// shape (roster.go).
+func EvaluateAccountPolicyStatusesFile(path string, now time.Time) ([]AccountPolicyStatus, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	return EvaluateAccountPolicyStatuses(root, now)
+}

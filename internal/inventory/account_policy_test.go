@@ -198,6 +198,168 @@ grants:
 	}
 }
 
+func TestCompileAccountPolicies_PresentEntryCompilesNotAfter(t *testing.T) {
+	root := grantsRoster(t, `
+account_policies:
+  - name: vendor01-contract
+    user: vendor01
+    type: contractor
+    validity: {not_after: "2026-12-31T23:59:59Z"}
+`)
+	compiled, err := CompileAccountPolicies(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(compiled) != 1 {
+		t.Fatalf("expected exactly one compiled entry, got: %+v", compiled)
+	}
+	got := compiled[0]
+	if got.User != "vendor01" || !got.Present || got.Expiration != "20261231235959Z" {
+		t.Fatalf("expected present vendor01 expiring 20261231235959Z, got: %+v", got)
+	}
+}
+
+// §7.7: validity.not_before is never consulted by the compiler — a
+// currently-pending entry still compiles Present with its not_after, since
+// native enforcement has no not-before mechanism to defer to.
+func TestCompileAccountPolicies_NotBeforeNeverConsulted(t *testing.T) {
+	root := grantsRoster(t, `
+account_policies:
+  - name: vendor01-not-yet-started
+    user: vendor01
+    type: contractor
+    validity: {not_before: "2099-01-01T00:00:00Z", not_after: "2099-12-31T23:59:59Z"}
+`)
+	compiled, err := CompileAccountPolicies(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(compiled) != 1 || !compiled[0].Present || compiled[0].Expiration != "20991231235959Z" {
+		t.Fatalf("expected a pending entry to still compile Present with its not_after, got: %+v", compiled)
+	}
+}
+
+// FreeIPA has exactly one krbPrincipalExpiration attribute per account —
+// two present entries for the same user (e.g. original + renewal) must
+// collapse to the LATEST not_after, regardless of roster order.
+func TestCompileAccountPolicies_MultipleEntriesUseLatestNotAfter(t *testing.T) {
+	root := grantsRoster(t, `
+account_policies:
+  - name: vendor01-renewed-contract
+    user: vendor01
+    type: contractor
+    validity: {not_before: "2026-06-01T00:00:00Z", not_after: "2026-12-31T23:59:59Z"}
+  - name: vendor01-first-contract
+    user: vendor01
+    type: contractor
+    validity: {not_after: "2026-06-01T00:00:00Z"}
+`)
+	compiled, err := CompileAccountPolicies(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(compiled) != 1 || compiled[0].Expiration != "20261231235959Z" {
+		t.Fatalf("expected the later renewal's not_after to win, got: %+v", compiled)
+	}
+}
+
+// §7.4's explicit clear path: every entry for the user is state: absent.
+func TestCompileAccountPolicies_AllAbsentEntriesCompileToExplicitClear(t *testing.T) {
+	root := grantsRoster(t, `
+account_policies:
+  - name: vendor01-contract
+    user: vendor01
+    state: absent
+    type: contractor
+    validity: {not_after: "2026-12-31T23:59:59Z"}
+`)
+	compiled, err := CompileAccountPolicies(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(compiled) != 1 || compiled[0].Present || compiled[0].Expiration != "" {
+		t.Fatalf("expected an all-absent user to compile to explicit clear (Present=false), got: %+v", compiled)
+	}
+}
+
+// A mix of absent and present entries for the same user must NOT clear —
+// the present entry's not_after still governs (only omission entirely, or
+// every entry being absent, clears — §7.4).
+func TestCompileAccountPolicies_MixedPresentAndAbsentKeepsPresentValue(t *testing.T) {
+	root := grantsRoster(t, `
+account_policies:
+  - name: vendor01-old-contract
+    user: vendor01
+    state: absent
+    type: contractor
+    validity: {not_after: "2026-06-01T00:00:00Z"}
+  - name: vendor01-current-contract
+    user: vendor01
+    type: contractor
+    validity: {not_after: "2026-12-31T23:59:59Z"}
+`)
+	compiled, err := CompileAccountPolicies(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(compiled) != 1 || !compiled[0].Present || compiled[0].Expiration != "20261231235959Z" {
+		t.Fatalf("expected the present entry's not_after to govern, got: %+v", compiled)
+	}
+}
+
+// §7.4: "do not silently remove ... because a field was omitted
+// ambiguously" — a user with NO account_policies entries at all is
+// skipped entirely, not compiled to an explicit clear.
+func TestCompileAccountPolicies_NoEntriesSkipsUserEntirely(t *testing.T) {
+	root := grantsRoster(t, `grants: []`)
+	compiled, err := CompileAccountPolicies(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(compiled) != 0 {
+		t.Fatalf("expected no compiled entries when account_policies is absent, got: %+v", compiled)
+	}
+}
+
+func TestEvaluateAccountPolicyStatuses_ReportsLifecycleAndNativeExpiration(t *testing.T) {
+	root := grantsRoster(t, `
+account_policies:
+  - name: vendor01-contract
+    user: vendor01
+    type: contractor
+    validity: {not_after: "2026-12-31T23:59:59Z"}
+`)
+	statuses, err := EvaluateAccountPolicyStatuses(root, mustParseTime(t, "2026-09-01T00:00:00Z"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("expected one status, got: %+v", statuses)
+	}
+	got := statuses[0]
+	if got.Lifecycle != GrantActive || got.NativeExpiration != "20261231235959Z" {
+		t.Fatalf("expected active lifecycle with the compiled native expiration, got: %+v", got)
+	}
+}
+
+func TestEvaluateAccountPolicyStatuses_ClearedEntryReportsEmptyNativeExpiration(t *testing.T) {
+	root := grantsRoster(t, `
+account_policies:
+  - name: vendor01-contract
+    user: vendor01
+    state: absent
+    type: contractor
+    validity: {not_after: "2026-12-31T23:59:59Z"}
+`)
+	statuses, err := EvaluateAccountPolicyStatuses(root, mustParseTime(t, "2026-09-01T00:00:00Z"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0].NativeExpiration != "" {
+		t.Fatalf("expected an absent entry to report empty native expiration, got: %+v", statuses)
+	}
+}
+
 func TestEvaluateAccountLifecycle_RenewalEntryKeepsAccountActive(t *testing.T) {
 	root := grantsRoster(t, `
 account_policies:

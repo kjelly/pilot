@@ -91,6 +91,10 @@ type Plan struct {
 	// indicator requirement (auth_policies:), applied via `ipa host-mod
 	// --auth-ind=`.
 	AuthPolicyHosts []inventory.CompiledAuthPolicyHost
+	// AccountExpirations is v3.1 §7's compiled per-user native
+	// FreeIPA/Kerberos principal-expiration state (account_policies:),
+	// applied via `ipa user-mod --setattr=krbprincipalexpiration=`.
+	AccountExpirations []inventory.CompiledAccountExpiration
 }
 
 // PolicyGate is the result of spec.md §18 steps 4/5 — Separation of Duties
@@ -154,7 +158,11 @@ func BuildPlan(rosterFile string, now time.Time) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	return Plan{HBACRules: hbac, SudoRules: sudo, AuthPolicyHosts: authPolicyHosts}, nil
+	accountExpirations, err := inventory.CompileAccountPoliciesFile(rosterFile)
+	if err != nil {
+		return Plan{}, err
+	}
+	return Plan{HBACRules: hbac, SudoRules: sudo, AuthPolicyHosts: authPolicyHosts, AccountExpirations: accountExpirations}, nil
 }
 
 // extraVarsHBACRule/extraVarsSudoRule/extraVars are the exact JSON shape
@@ -192,13 +200,23 @@ type extraVarsAuthPolicyHost struct {
 	Indicators []string `json:"indicators"`
 }
 
+// extraVarsAccountExpiration mirrors extraVarsAuthPolicyHost's clear
+// convention: an empty Expiration is the explicit-clear signal the apply
+// playbook's task keys off, rather than a separate boolean field on the
+// wire (§7.4).
+type extraVarsAccountExpiration struct {
+	User       string `json:"user"`
+	Expiration string `json:"expiration"`
+}
+
 type extraVars struct {
-	FreeIPARosterFile            string                    `json:"freeipa_roster_file"`
-	PilotCompiledGrantHBACRules  []extraVarsHBACRule       `json:"pilot_compiled_grant_hbac_rules"`
-	PilotCompiledGrantHBACPrune  []string                  `json:"pilot_compiled_grant_hbac_prune"`
-	PilotCompiledGrantSudoRules  []extraVarsSudoRule       `json:"pilot_compiled_grant_sudo_rules"`
-	PilotCompiledGrantSudoPrune  []string                  `json:"pilot_compiled_grant_sudo_prune"`
-	PilotCompiledAuthPolicyHosts []extraVarsAuthPolicyHost `json:"pilot_compiled_auth_policy_hosts"`
+	FreeIPARosterFile               string                       `json:"freeipa_roster_file"`
+	PilotCompiledGrantHBACRules     []extraVarsHBACRule          `json:"pilot_compiled_grant_hbac_rules"`
+	PilotCompiledGrantHBACPrune     []string                     `json:"pilot_compiled_grant_hbac_prune"`
+	PilotCompiledGrantSudoRules     []extraVarsSudoRule          `json:"pilot_compiled_grant_sudo_rules"`
+	PilotCompiledGrantSudoPrune     []string                     `json:"pilot_compiled_grant_sudo_prune"`
+	PilotCompiledAuthPolicyHosts    []extraVarsAuthPolicyHost    `json:"pilot_compiled_auth_policy_hosts"`
+	PilotCompiledAccountExpirations []extraVarsAccountExpiration `json:"pilot_compiled_account_expirations"`
 }
 
 // buildExtraVars separates each compiled rule into either its
@@ -206,15 +224,19 @@ type extraVars struct {
 // per spec.md §9/§10's `absent -> absent` row.
 func buildExtraVars(rosterFile string, plan Plan) extraVars {
 	ev := extraVars{
-		FreeIPARosterFile:            rosterFile,
-		PilotCompiledGrantHBACRules:  []extraVarsHBACRule{},
-		PilotCompiledGrantHBACPrune:  []string{},
-		PilotCompiledGrantSudoRules:  []extraVarsSudoRule{},
-		PilotCompiledGrantSudoPrune:  []string{},
-		PilotCompiledAuthPolicyHosts: []extraVarsAuthPolicyHost{},
+		FreeIPARosterFile:               rosterFile,
+		PilotCompiledGrantHBACRules:     []extraVarsHBACRule{},
+		PilotCompiledGrantHBACPrune:     []string{},
+		PilotCompiledGrantSudoRules:     []extraVarsSudoRule{},
+		PilotCompiledGrantSudoPrune:     []string{},
+		PilotCompiledAuthPolicyHosts:    []extraVarsAuthPolicyHost{},
+		PilotCompiledAccountExpirations: []extraVarsAccountExpiration{},
 	}
 	for _, h := range plan.AuthPolicyHosts {
 		ev.PilotCompiledAuthPolicyHosts = append(ev.PilotCompiledAuthPolicyHosts, extraVarsAuthPolicyHost{Host: h.Host, Indicators: emptyOr(h.Indicators)})
+	}
+	for _, a := range plan.AccountExpirations {
+		ev.PilotCompiledAccountExpirations = append(ev.PilotCompiledAccountExpirations, extraVarsAccountExpiration{User: a.User, Expiration: a.Expiration})
 	}
 	for _, r := range plan.HBACRules {
 		if !r.Present {

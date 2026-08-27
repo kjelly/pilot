@@ -103,11 +103,18 @@ func runAccessStatusCmd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	accountStatuses, err := inventory.EvaluateAccountPolicyStatusesFile(readPath, time.Now())
+	if err != nil {
+		return err
+	}
 
 	if accessStatusFormat == "json" {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		return enc.Encode(statuses)
+		return enc.Encode(struct {
+			Grants          []inventory.GrantStatus         `json:"grants"`
+			AccountPolicies []inventory.AccountPolicyStatus `json:"account_policies"`
+		}{Grants: statuses, AccountPolicies: accountStatuses})
 	}
 	if accessStatusFormat != "table" {
 		return fmt.Errorf("--format must be table or json, got %q", accessStatusFormat)
@@ -116,7 +123,6 @@ func runAccessStatusCmd(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	if len(statuses) == 0 {
 		fmt.Fprintln(out, "no grants defined")
-		return nil
 	}
 	for _, s := range statuses {
 		next := "n/a"
@@ -128,6 +134,17 @@ func runAccessStatusCmd(cmd *cobra.Command, args []string) error {
 			lifecycle = "n/a (breakglass has no validity-driven lifecycle)"
 		}
 		fmt.Fprintf(out, "%s\tkind=%s\tstate=%s\tlifecycle=%s\tnext_transition_at=%s\n", s.Name, s.Kind, s.State, lifecycle, next)
+	}
+	for _, s := range accountStatuses {
+		next := "n/a"
+		if s.NextTransition != nil {
+			next = s.NextTransition.Format(time.RFC3339)
+		}
+		nativeExpiration := s.NativeExpiration
+		if nativeExpiration == "" {
+			nativeExpiration = "n/a (cleared or no present entry)"
+		}
+		fmt.Fprintf(out, "%s\tuser=%s\tstate=%s\tlifecycle=%s\tnext_transition_at=%s\tnative_expiration=%s\n", s.Name, s.User, s.State, s.Lifecycle, next, nativeExpiration)
 	}
 	return nil
 }
@@ -166,7 +183,7 @@ func runAccessReconcileCmd(cmd *cobra.Command, args []string) error {
 		Now:        time.Now(),
 	})
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "compiled %d hbac rule(s), %d sudo rule(s)\n", len(plan.HBACRules), len(plan.SudoRules))
+	fmt.Fprintf(out, "compiled %d hbac rule(s), %d sudo rule(s), %d account expiration(s)\n", len(plan.HBACRules), len(plan.SudoRules), len(plan.AccountExpirations))
 	if result != nil {
 		fmt.Fprint(out, result.Stdout)
 	}

@@ -195,6 +195,69 @@ func TestBuildExtraVars_SeparatesPresentFromPrune(t *testing.T) {
 	if ev.PilotCompiledGrantSudoRules == nil || ev.PilotCompiledGrantSudoPrune == nil {
 		t.Fatalf("expected non-nil empty sudo lists, got: %+v / %v", ev.PilotCompiledGrantSudoRules, ev.PilotCompiledGrantSudoPrune)
 	}
+	if ev.PilotCompiledAccountExpirations == nil || len(ev.PilotCompiledAccountExpirations) != 0 {
+		t.Fatalf("expected an empty, non-nil account-expirations list when the roster has none, got: %v", ev.PilotCompiledAccountExpirations)
+	}
+}
+
+const reconcileTestRosterWithAccountPolicies = `
+schema_version: 3
+freeipa:
+  domain: ipa.pilot.internal
+  admin: {principal: admin, password: x}
+users:
+  - name: vendor01
+    ssh_keys: {authoritative: true, values: []}
+  - name: vendor02
+    ssh_keys: {authoritative: true, values: []}
+groups: []
+hosts: []
+hostgroups: []
+hbac:
+  rules: []
+sudo:
+  rules: []
+account_policies:
+  - name: vendor01-contract
+    user: vendor01
+    type: contractor
+    validity: {not_after: "2026-12-31T23:59:59Z"}
+  - name: vendor02-contract
+    user: vendor02
+    state: absent
+    type: contractor
+    validity: {not_after: "2026-12-31T23:59:59Z"}
+`
+
+// TestBuildExtraVars_ThreadsAccountExpirations exercises v3.1 §7's wiring
+// end to end (BuildPlan -> buildExtraVars): a present account_policy
+// compiles to a set entry, and an all-absent one compiles to the explicit
+// clear entry (empty Expiration) the apply playbook's task keys off.
+func TestBuildExtraVars_ThreadsAccountExpirations(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(rosterPath, []byte(reconcileTestRosterWithAccountPolicies), 0o600); err != nil {
+		t.Fatalf("write roster: %v", err)
+	}
+
+	plan, err := BuildPlan(rosterPath, time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ev := buildExtraVars(rosterPath, plan)
+	if len(ev.PilotCompiledAccountExpirations) != 2 {
+		t.Fatalf("expected two compiled account-expiration entries, got: %+v", ev.PilotCompiledAccountExpirations)
+	}
+	byUser := map[string]string{}
+	for _, a := range ev.PilotCompiledAccountExpirations {
+		byUser[a.User] = a.Expiration
+	}
+	if byUser["vendor01"] != "20261231235959Z" {
+		t.Fatalf("expected vendor01 to compile to its not_after, got: %q", byUser["vendor01"])
+	}
+	if exp, ok := byUser["vendor02"]; !ok || exp != "" {
+		t.Fatalf("expected vendor02 (all entries absent) to compile to an explicit clear (empty expiration), got: %q (present=%v)", exp, ok)
+	}
 }
 
 const reconcileTestRosterWithAuthPolicy = `

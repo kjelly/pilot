@@ -2518,6 +2518,34 @@
         - "'no modifications to be performed' not in (ipa_auth_policy_host.stderr | default(''))"
       tags: [identity, auth_policy]
 
+    # v3.1 account_policies native principal expiration (spec.md §7).
+    # krbPrincipalExpiration is a plain single-valued Kerberos attribute —
+    # `--setattr` sets it directly. item.expiration == "" is the
+    # explicit-clear path (§7.4): every account_policies entry for this
+    # user compiled to state: absent (internal/inventory's
+    # CompileAccountPolicies). The empty-value-clears convention mirrors
+    # the auth-ind task immediately above, but UNLIKE --auth-ind this has
+    # not yet been confirmed live against a real FreeIPA server — an empty
+    # --setattr=krbprincipalexpiration= may need to become an explicit
+    # `--delattr` instead if FreeIPA rejects it. Verify on a vm-target
+    # before relying on the clear path in production.
+    - name: "Reconcile v3.1 native account principal expiration (spec.md §7)"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - user-mod
+          - "{{ item.user }}"
+          - "--setattr=krbprincipalexpiration={{ item.expiration }}"
+      loop: "{{ pilot_compiled_account_expirations | default([]) }}"
+      loop_control:
+        label: "{{ item.user }}"
+      register: ipa_account_expiration
+      changed_when: "'Modified user' in (ipa_account_expiration.stdout | default(''))"
+      failed_when:
+        - ipa_account_expiration.rc != 0
+        - "'no modifications to be performed' not in (ipa_account_expiration.stderr | default(''))"
+      tags: [identity, account_policy]
+
     # ── FreeIPA automount control plane for canonical NFS shares ───────
     - name: "Ensure canonical automount locations exist"
       ansible.builtin.command:
