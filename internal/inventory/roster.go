@@ -320,6 +320,78 @@ func RosterHostgroup(path, name string) (map[string]any, bool, error) {
 	return asMap(entries[idx]), true, nil
 }
 
+// RosterGrantNames returns every grants[] entry name in file order (v3.0
+// Core Access Governance spec.md §17).
+func RosterGrantNames(path string) ([]string, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	return namesOf(listField(root, "grants")), nil
+}
+
+// RosterGrant returns one grants[] entry, exactly as readRosterAsMap
+// already decodes it (the shape roster_grants.go's checkGrants reads).
+// found=false when no such grant exists.
+func RosterGrant(path, name string) (fields map[string]any, found bool, err error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, false, err
+	}
+	grants := listField(root, "grants")
+	idx, _ := findNamedEntry(grants, name)
+	if idx < 0 {
+		return nil, false, nil
+	}
+	return asMap(grants[idx]), true, nil
+}
+
+// SimulateAddRosterGrant reports what validating the roster at path would
+// say if grant were appended to grants[], without writing anything.
+// Callers should only call AppendRosterGrant once this reports no
+// violations.
+func SimulateAddRosterGrant(path string, grant map[string]any) ([]RosterViolation, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return nil, err
+	}
+	root["grants"] = append(listField(root, "grants"), grant)
+	return ValidateRoster(root), nil
+}
+
+// AppendRosterGrant appends grant — already fully constructed by the
+// caller, since grants[]'s shape is too kind-conditional (temporary_grant/
+// sudo_grant/breakglass each require different fields — see
+// roster_grants.go) for a single minimal stub the way
+// AppendRosterUser/Group/Hostgroup use — to the roster's grants[] list via
+// yaml.Node surgery, the same technique appendTopLevelRosterEntry's other
+// callers use: only this one node is added, nothing else in the file is
+// disturbed. Callers should run SimulateAddRosterGrant first and only call
+// this once it reports no violations — this function does not validate
+// anything itself.
+func AppendRosterGrant(path string, grant map[string]any) error {
+	return appendTopLevelRosterEntry(path, "grants", grant)
+}
+
+// SimulateSetRosterGrant reports what validating the roster at path would
+// say if the grants[] entry named name were replaced with updated,
+// without writing anything.
+func SimulateSetRosterGrant(path, name string, updated map[string]any) ([]RosterViolation, bool, error) {
+	return simulateSetRosterNested(path, "grants", name, updated, "grant")
+}
+
+// SetRosterGrant replaces the named grants[] entry with updated —
+// deleting a grant is SetRosterGrant with updated["state"] = "absent"
+// (grants are declarative and soft-deleted via state, like hosts/hbac
+// rules/sudo rules elsewhere in this schema — there is no separate
+// "physical removal" primitive). Callers should run SimulateSetRosterGrant
+// first and only call this once it reports no violations — this function
+// does not validate anything itself, and errors rather than guessing if
+// name doesn't exist or is ambiguous.
+func SetRosterGrant(path, name string, updated map[string]any) error {
+	return replaceTopLevelRosterEntry(path, "grants", name, updated)
+}
+
 // RosterHBACRuleNames returns canonical HBAC rule names in file order.
 func RosterHBACRuleNames(path string) ([]string, error) {
 	root, err := readRosterAsMap(path)

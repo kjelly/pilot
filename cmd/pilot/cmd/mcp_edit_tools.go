@@ -200,6 +200,15 @@ type inspectInput struct {
 	IncludeDNS               bool `json:"include_dns,omitempty" jsonschema:"also return FreeIPA DNS zones and records, each record's target_host cross-resolved to its inventory IP (resolved_ip)"`
 	IncludeInternalEndpoints bool `json:"include_internal_endpoints,omitempty" jsonschema:"also return internal-endpoint manifest entries (dns/route/tls), every inventory_host reference cross-resolved to its inventory IP (resolved_ip)"`
 	IncludeMonitoring        bool `json:"include_monitoring,omitempty" jsonschema:"also return external Prometheus monitoring targets and their scrape profiles (spec.md §7-11) — endpoints Pilot does not manage via Ansible/SSH"`
+	IncludeBreakglass        bool `json:"include_breakglass,omitempty" jsonschema:"also return every kind: breakglass grant's activation history (local runtime state, spec.md §14) — independent of include_roster, which returns the grant definitions themselves"`
+
+	// ExplainUser/ExplainHost/ExplainService together drive spec.md §16's
+	// access explain — all three MUST be set for a query to run; any
+	// subset yields an empty explain_access with no error, matching every
+	// other inspect flag's lenient posture.
+	ExplainUser    string `json:"explain_user,omitempty" jsonschema:"with explain_host and explain_service, ask which access sources (static_hbac/temporary_grant/sudo_grant/breakglass) currently grant this user access, and through what provenance (spec.md §16) — all three explain_* fields are required together"`
+	ExplainHost    string `json:"explain_host,omitempty" jsonschema:"see explain_user — the target host FQDN"`
+	ExplainService string `json:"explain_service,omitempty" jsonschema:"see explain_user — the PAM service name (e.g. sshd); ignored for sudo_grant sources, which have no service concept"`
 }
 
 type inspectHost struct {
@@ -335,12 +344,15 @@ type inspectOutput struct {
 	HBACRules           []inspectHBACRule               `json:"hbac_rules,omitempty"`
 	SudoCommandGroups   []inspectSudoCommandGroup       `json:"sudo_command_groups,omitempty"`
 	SudoRules           []inspectSudoRule               `json:"sudo_rules,omitempty"`
+	Grants              []inspectRosterGrant            `json:"grants,omitempty"`
 	EffectiveHBACAccess []inventory.EffectiveHBACAccess `json:"effective_hbac_access,omitempty"`
 	EffectiveSudoAccess []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
 	DNSZones            []inspectDNSZone                `json:"dns_zones,omitempty"`
 	InternalEndpoints   []inspectInternalEndpoint       `json:"internal_endpoints,omitempty"`
 	MonitoringTargets   []inspectMonitoringTarget       `json:"monitoring_targets,omitempty"`
 	MonitoringProfiles  []inspectMonitoringProfile      `json:"monitoring_profiles,omitempty"`
+	BreakglassStatus    []inspectBreakglassStatus       `json:"breakglass_status,omitempty"`
+	ExplainAccess       []inspectExplainSource          `json:"explain_access,omitempty"`
 	Completeness        validationSummary               `json:"completeness"`
 }
 
@@ -429,6 +441,16 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			monitoringProfiles = buildInspectMonitoringProfiles(opts.Dir)
 		}
 
+		var breakglassStatus []inspectBreakglassStatus
+		if in.IncludeBreakglass {
+			breakglassStatus = buildInspectBreakglassStatus(opts.Dir)
+		}
+
+		var explainAccess []inspectExplainSource
+		if in.ExplainUser != "" && in.ExplainHost != "" && in.ExplainService != "" {
+			explainAccess = buildInspectExplain(opts.Dir, in.ExplainUser, in.ExplainHost, in.ExplainService)
+		}
+
 		var blocking []string
 		for _, c := range checkWorkspaceCompleteness(opts.Dir) {
 			if c.OK {
@@ -451,12 +473,15 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			HBACRules:           roster.HBACRules,
 			SudoCommandGroups:   roster.SudoCommandGroups,
 			SudoRules:           roster.SudoRules,
+			Grants:              roster.Grants,
 			EffectiveHBACAccess: roster.EffectiveHBACAccess,
 			EffectiveSudoAccess: roster.EffectiveSudoAccess,
 			DNSZones:            dnsZones,
 			InternalEndpoints:   internalEndpoints,
 			MonitoringTargets:   monitoringTargets,
 			MonitoringProfiles:  monitoringProfiles,
+			BreakglassStatus:    breakglassStatus,
+			ExplainAccess:       explainAccess,
 			Completeness:        validationSummary{Blocking: blocking},
 		}
 		return nil, out, nil

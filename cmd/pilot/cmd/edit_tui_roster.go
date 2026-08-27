@@ -90,6 +90,7 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		{ID: "roster.top.groups", Label: "👥 Groups"},
 		{ID: "roster.top.host_access", Label: "🔐 Host access"},
 		{ID: "roster.top.sudo", Label: "🛡️  Sudo commands & rules"},
+		{ID: "roster.top.access_governance", Label: "🏛️  Access governance"},
 		{ID: "roster.top.back", Label: "↩  返回"},
 	}
 	title := fmt.Sprintf("管理 %s", path)
@@ -110,6 +111,8 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		case 3:
 			return pushRosterSudoMenu(r, dir, path, "")
 		case 4:
+			return pushAccessGovernanceMenu(r, dir, path, "")
+		case 5:
 			return pushTopMenu(r, dir, "")
 		}
 		return nil

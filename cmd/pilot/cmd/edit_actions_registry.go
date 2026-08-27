@@ -871,6 +871,205 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "create_grant",
+				Description:              "create a v3.0 access-governance grant (temporary_grant/sudo_grant/breakglass — spec.md §6), replaying the full kind-branching creation wizard in one step. breakglass forbids groups (a breakglass subject is always a direct named user) and services/validity/justification are kind-conditional per roster_grants.go's checkGrants",
+				Required:                 []string{"name", "kind"},
+				Optional:                 []string{"groups", "users", "hostgroups", "hosts", "services", "not_before", "not_after", "reason", "ticket", "max_duration"},
+				Values:                   map[string][]string{"kind": {"temporary_grant", "sudo_grant", "breakglass"}},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "grant appears in roster with the requested kind/subjects/targets and kind-conditional fields",
+				},
+			},
+			Validate: validateCreateGrant,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createGrant(r, step.Kind, step.Name, step.Groups, step.Users, step.Hostgroups, step.Hosts, step.Services, step.NotBefore, step.NotAfter, step.Reason, step.Ticket, step.MaxDuration)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_grant_subjects",
+				Description:              "bulk-replace a grant's subjects.users and subjects.groups (both sets, in one step — a breakglass grant's groups must stay empty)",
+				Required:                 []string{"name"},
+				Optional:                 []string{"users", "groups"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "grant's subjects.users/subjects.groups match the requested sets",
+				},
+			},
+			Validate: validateEntityNameOnly("set_grant_subjects"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGrantSubjects(r, step.Name, step.Users, step.Groups)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_grant_targets",
+				Description:              "bulk-replace a grant's targets.hostgroups and targets.hosts (both sets, in one step)",
+				Required:                 []string{"name"},
+				Optional:                 []string{"hostgroups", "hosts"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "grant's targets.hostgroups/targets.hosts match the requested sets",
+				},
+			},
+			Validate: validateEntityNameAndHosts("set_grant_targets"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGrantTargets(r, step.Name, step.Hostgroups, step.Hosts)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_grant_validity",
+				Description:              "set a temporary_grant/sudo_grant's validity.not_before (optional, RFC3339) and validity.not_after (required, RFC3339) — not applicable to breakglass, which has no validity window (spec.md §6.3)",
+				Required:                 []string{"name", "not_after"},
+				Optional:                 []string{"not_before"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "grant's validity.not_before/not_after match the requested values",
+				},
+			},
+			Validate: validateSetGrantValidity,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGrantValidity(r, step.Name, step.NotBefore, step.NotAfter)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_grant_justification",
+				Description:              "set a temporary_grant/sudo_grant's justification.reason (required) and justification.ticket (optional) — not applicable to breakglass",
+				Required:                 []string{"name", "reason"},
+				Optional:                 []string{"ticket"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "grant's justification.reason/justification.ticket match the requested values",
+				},
+			},
+			Validate: validateSetGrantJustification,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGrantJustification(r, step.Name, step.Reason, step.Ticket)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_grant_privilege",
+				Description:              "bulk-replace a sudo_grant's privilege.command_groups (an empty set compiles to command_category: all, matching create_grant's own default — see CompileSudoGrant); free-form privilege.commands is out of this action's scope, author those directly in the roster",
+				Required:                 []string{"name"},
+				Optional:                 []string{"command_groups"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "grant's privilege.command_groups matches the requested set",
+				},
+			},
+			Validate: validateEntityNameOnly("set_grant_privilege"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGrantPrivilege(r, step.Name, step.CommandGroups)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_grant_activation",
+				Description:              "set a kind: breakglass grant's activation.max_duration (spec.md §6.3/§17: `set_grant_activation`, breakglass only — the runtime-window cap enforced by activate_breakglass; not applicable to temporary_grant/sudo_grant, which use set_grant_validity instead)",
+				Required:                 []string{"name", "max_duration"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "grant's activation.max_duration matches the requested value",
+				},
+			},
+			Validate: validateSetGrantActivation,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGrantActivation(r, step.Name, step.MaxDuration)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "delete_grant",
+				Description:              "soft-delete a grant (state: absent — grants are declarative like every other roster entity here, never physically removed by this action)",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectDestructive,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "grant's state is absent",
+				},
+			},
+			Validate: validateEntityNameOnly("delete_grant"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deleteGrant(r, step.Name)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "activate_breakglass",
+				Description:              "activate a kind: breakglass grant for a bounded duration (spec.md §14) — duration must not exceed the grant's own activation.max_duration; reason/ticket are required unless the grant's activation explicitly disables require_reason/require_ticket. Applies one compiled HBAC rule immediately (not a full grants reconcile) and records the activation in local state — never rewrites the grant definition",
+				Required:                 []string{"name", "duration"},
+				Optional:                 []string{"reason", "ticket", "inventory"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "breakglass grant definition is unchanged; activation is recorded in local state, not the roster",
+				},
+			},
+			Validate: validateActivateBreakglass,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.activateBreakglass(r, step.Name, step.Duration, step.Reason, step.Ticket)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "deactivate_breakglass",
+				Description:              "end a breakglass grant's active authorization early (idempotent — a no-op if nothing is currently active)",
+				Required:                 []string{"name"},
+				Optional:                 []string{"inventory"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectDestructive,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "breakglass grant's activation is marked deactivated in local state",
+				},
+			},
+			Validate: validateEntityNameOnly("deactivate_breakglass"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deactivateBreakglass(r, step.Name)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "create_sudo_command_group",
 				Description:              "create a reusable sudo command group; value is a comma-separated list of full sudo commands",
 				Required:                 []string{"name"},
@@ -1899,6 +2098,63 @@ func validateEntityNameAndHosts(name string) func(editAction) error {
 		}
 		return nil
 	}
+}
+
+// validateCreateGrant checks create_grant's structural preconditions
+// (name, kind enum, FQDN-shaped hosts) before ever driving the TUI —
+// roster_grants.go's checkGrants remains authoritative for the
+// kind-conditional field requirements (e.g. temporary_grant/sudo_grant
+// needing validity/justification) once the write actually happens.
+func validateCreateGrant(step editAction) error {
+	if err := validateEntityNameAndHosts("create_grant")(step); err != nil {
+		return err
+	}
+	switch step.Kind {
+	case "temporary_grant", "sudo_grant", "breakglass":
+	default:
+		return fmt.Errorf("create_grant requires kind to be one of temporary_grant/sudo_grant/breakglass, got %q", step.Kind)
+	}
+	return nil
+}
+
+func validateSetGrantValidity(step editAction) error {
+	if err := validateEntityNameOnly("set_grant_validity")(step); err != nil {
+		return err
+	}
+	if strings.TrimSpace(step.NotAfter) == "" {
+		return fmt.Errorf("set_grant_validity requires not_after")
+	}
+	return nil
+}
+
+func validateSetGrantJustification(step editAction) error {
+	if err := validateEntityNameOnly("set_grant_justification")(step); err != nil {
+		return err
+	}
+	if strings.TrimSpace(step.Reason) == "" {
+		return fmt.Errorf("set_grant_justification requires reason")
+	}
+	return nil
+}
+
+func validateSetGrantActivation(step editAction) error {
+	if err := validateEntityNameOnly("set_grant_activation")(step); err != nil {
+		return err
+	}
+	if !inventory.ValidAccessDuration(strings.TrimSpace(step.MaxDuration)) {
+		return fmt.Errorf("set_grant_activation requires max_duration in <count>m|h|d form (e.g. 30m, 1h, 7d), got %q", step.MaxDuration)
+	}
+	return nil
+}
+
+func validateActivateBreakglass(step editAction) error {
+	if err := validateEntityNameOnly("activate_breakglass")(step); err != nil {
+		return err
+	}
+	if !inventory.ValidAccessDuration(strings.TrimSpace(step.Duration)) {
+		return fmt.Errorf("activate_breakglass requires duration in <count>m|h|d form (e.g. 30m, 1h, 7d), got %q", step.Duration)
+	}
+	return nil
 }
 
 func validateCreateMonitoringTarget(step editAction) error {

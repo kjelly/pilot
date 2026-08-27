@@ -159,6 +159,33 @@ type editAction struct {
 	AuthRef               string `json:"auth_ref,omitempty"`
 	TLSServerName         string `json:"tls_server_name,omitempty"`
 	TLSInsecureSkipVerify string `json:"tls_insecure_skip_verify,omitempty"`
+	// v3.0 Core Access Governance grant fields (spec.md §17). Name is
+	// reused as the grant's own primary key (same convention as every
+	// other roster entity action above); Users/Groups/Hostgroups/Hosts/
+	// Services are reused for subjects.{users,groups}/targets.
+	// {hostgroups,hosts}/services — a grant's relationship shape
+	// deliberately mirrors an HBAC rule's (spec.md §6), so the same
+	// bulk-checklist-replace fields apply unchanged. Kind selects which
+	// of temporary_grant/sudo_grant/breakglass create_grant makes.
+	// NotBefore/NotAfter are validity.{not_before,not_after} (RFC3339,
+	// NotBefore optional); Reason/Ticket are justification.
+	// {reason,ticket} — both only meaningful for temporary_grant/
+	// sudo_grant (roster_grants.go's checkGrantTimedFields). MaxDuration
+	// is a breakglass grant's own activation.max_duration (a definition
+	// field, set once at create_grant time) — distinct from Duration
+	// below, which is a specific activate_breakglass call's requested
+	// runtime window and must not exceed it.
+	Kind        string `json:"kind,omitempty"`
+	NotBefore   string `json:"not_before,omitempty"`
+	NotAfter    string `json:"not_after,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Ticket      string `json:"ticket,omitempty"`
+	MaxDuration string `json:"max_duration,omitempty"`
+	// Duration is activate_breakglass's requested activation window
+	// (--duration). Inventory is reused from the role-preset fields above
+	// for the target inventory activate/deactivate_breakglass apply
+	// compiled rules against.
+	Duration string `json:"duration,omitempty"`
 }
 
 // validateValueOrEnv enforces that exactly one of Value/ValueEnv is set,

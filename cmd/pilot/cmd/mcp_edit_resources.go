@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"time"
 
+	"github.com/kjelly/pilot/internal/accessgrants"
 	"github.com/kjelly/pilot/internal/groupvars"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/monitoring"
@@ -55,6 +57,7 @@ type inspectRosterData struct {
 	HBACRules           []inspectHBACRule               `json:"hbac_rules,omitempty"`
 	SudoCommandGroups   []inspectSudoCommandGroup       `json:"sudo_command_groups,omitempty"`
 	SudoRules           []inspectSudoRule               `json:"sudo_rules,omitempty"`
+	Grants              []inspectRosterGrant            `json:"grants,omitempty"`
 	EffectiveHBACAccess []inventory.EffectiveHBACAccess `json:"effective_hbac_access,omitempty"`
 	EffectiveSudoAccess []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
 }
@@ -199,6 +202,8 @@ func buildInspectRoster(dir string) inspectRosterData {
 			}
 		}
 
+		out.Grants = buildInspectGrantsFromFile(fullPath)
+
 		if resolved, err := inventory.EffectiveHBACAccessList(fullPath); err == nil {
 			out.EffectiveHBACAccess = resolved
 		}
@@ -209,6 +214,225 @@ func buildInspectRoster(dir string) inspectRosterData {
 		break // only one roster file is expected per workspace
 	}
 	return out
+}
+
+// inspectRosterGrant is one grants[] entry (spec.md §5/§6) — the v3.0
+// access-governance analog of inspectHBACRule/inspectSudoRule. Fields are
+// kind-conditional in the roster itself (roster_grants.go's checkGrants);
+// here they are simply omitted (via omitempty) when the grant's kind
+// doesn't carry them, e.g. MaxDuration is only ever non-empty for
+// kind: breakglass. Lifecycle/NextTransition mirror `pilot access status`
+// (inventory.EvaluateGrantStatuses) — empty/nil for breakglass, which has
+// no validity-driven lifecycle (§6.3/§8); breakglass's actual
+// currently-granting-or-not state is separate runtime activation state,
+// see inspectBreakglassStatus/buildInspectBreakglassStatus instead.
+type inspectRosterGrant struct {
+	Name                   string     `json:"name"`
+	State                  string     `json:"state"`
+	Kind                   string     `json:"kind"`
+	SubjectUsers           []string   `json:"subject_users,omitempty"`
+	SubjectGroups          []string   `json:"subject_groups,omitempty"`
+	TargetHosts            []string   `json:"target_hosts,omitempty"`
+	TargetHostgroups       []string   `json:"target_hostgroups,omitempty"`
+	Services               []string   `json:"services,omitempty"`
+	ValidityNotBefore      string     `json:"validity_not_before,omitempty"`
+	ValidityNotAfter       string     `json:"validity_not_after,omitempty"`
+	JustificationReason    string     `json:"justification_reason,omitempty"`
+	JustificationTicket    string     `json:"justification_ticket,omitempty"`
+	PrivilegeCommandGroups []string   `json:"privilege_command_groups,omitempty"`
+	MaxDuration            string     `json:"max_duration,omitempty"`
+	Lifecycle              string     `json:"lifecycle,omitempty"`
+	NextTransition         *time.Time `json:"next_transition,omitempty"`
+}
+
+// buildInspectGrantsFromFile reads every grants[] entry from an already-
+// located roster file. Like every other inspect builder it is lenient: an
+// unreadable/unparsable roster yields an empty list rather than an error.
+func buildInspectGrantsFromFile(fullPath string) []inspectRosterGrant {
+	names, err := inventory.RosterGrantNames(fullPath)
+	if err != nil {
+		return nil
+	}
+	statusByName := map[string]inventory.GrantStatus{}
+	if statuses, err := inventory.EvaluateGrantStatusesFile(fullPath, time.Now()); err == nil {
+		for _, s := range statuses {
+			statusByName[s.Name] = s
+		}
+	}
+	var out []inspectRosterGrant
+	for _, name := range names {
+		f, found, err := inventory.RosterGrant(fullPath, name)
+		if err != nil || !found {
+			continue
+		}
+		subjects := rosterSubmap(f, "subjects")
+		targets := rosterSubmap(f, "targets")
+		validity := rosterSubmap(f, "validity")
+		justification := rosterSubmap(f, "justification")
+		privilege := rosterSubmap(f, "privilege")
+		activation := rosterSubmap(f, "activation")
+		g := inspectRosterGrant{
+			Name:                   name,
+			State:                  rosterStringOr(f, "state", "present"),
+			Kind:                   rosterStringValue(f, "kind"),
+			SubjectUsers:           rosterStringSlice(subjects, "users"),
+			SubjectGroups:          rosterStringSlice(subjects, "groups"),
+			TargetHosts:            rosterStringSlice(targets, "hosts"),
+			TargetHostgroups:       rosterStringSlice(targets, "hostgroups"),
+			Services:               rosterStringSlice(f, "services"),
+			ValidityNotBefore:      rosterStringValue(validity, "not_before"),
+			ValidityNotAfter:       rosterStringValue(validity, "not_after"),
+			JustificationReason:    rosterStringValue(justification, "reason"),
+			JustificationTicket:    rosterStringValue(justification, "ticket"),
+			PrivilegeCommandGroups: rosterStringSlice(privilege, "command_groups"),
+			MaxDuration:            rosterStringValue(activation, "max_duration"),
+		}
+		if status, ok := statusByName[name]; ok {
+			g.Lifecycle = string(status.Lifecycle)
+			g.NextTransition = status.NextTransition
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+// inspectBreakglassActivation is one recorded activate (and, if it
+// happened, deactivate) event — accessgrants.Activation's MCP-facing
+// mirror, adding the server-computed Active flag so a caller never needs
+// to reimplement Activation.IsActive(now) itself.
+type inspectBreakglassActivation struct {
+	ActivatedAt time.Time `json:"activated_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	Reason      string    `json:"reason,omitempty"`
+	Ticket      string    `json:"ticket,omitempty"`
+	ActivatedBy string    `json:"activated_by,omitempty"`
+	Deactivated bool      `json:"deactivated"`
+	Active      bool      `json:"active"`
+}
+
+// inspectBreakglassStatus is one kind: breakglass grant's full activation
+// history (most recent last, matching accessgrants' own append-only
+// statefile ordering) — the MCP-facing counterpart of
+// `pilot access breakglass status`.
+type inspectBreakglassStatus struct {
+	Name        string                        `json:"name"`
+	Activations []inspectBreakglassActivation `json:"activations,omitempty"`
+}
+
+// buildInspectBreakglassStatus reports activation history for every
+// kind: breakglass grant in the roster. Unlike buildInspectGrantsFromFile,
+// this reads local activation state (internal/accessgrants' statefile,
+// under dataDir) rather than the roster itself — see breakglass.go's own
+// "activation MUST NOT rewrite the definition" invariant for why the two
+// are deliberately separate stores.
+func buildInspectBreakglassStatus(dir string) []inspectBreakglassStatus {
+	grants := buildInspectGrants(dir)
+	dataDir := resolveDataDir()
+	var out []inspectBreakglassStatus
+	for _, g := range grants {
+		if g.Kind != "breakglass" {
+			continue
+		}
+		activations, err := accessgrants.Status(dataDir, g.Name)
+		if err != nil {
+			continue
+		}
+		now := time.Now()
+		entry := inspectBreakglassStatus{Name: g.Name}
+		for _, a := range activations {
+			entry.Activations = append(entry.Activations, inspectBreakglassActivation{
+				ActivatedAt: a.ActivatedAt,
+				ExpiresAt:   a.ExpiresAt,
+				Reason:      a.Reason,
+				Ticket:      a.Ticket,
+				ActivatedBy: a.ActivatedBy,
+				Deactivated: a.Deactivated,
+				Active:      a.IsActive(now),
+			})
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// buildInspectGrants locates the roster file the same way buildInspectRoster
+// does and returns its grants — a standalone entry point for callers (like
+// buildInspectBreakglassStatus) that want only the grants, not the full
+// roster graph.
+func buildInspectGrants(dir string) []inspectRosterGrant {
+	entries, err := managedFileEntries(dir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if !e.IsSecret || !looksLikeRosterFile(e.Content) {
+			continue
+		}
+		return buildInspectGrantsFromFile(filepath.Join(dir, filepath.FromSlash(e.RelPath)))
+	}
+	return nil
+}
+
+// inspectExplainSource mirrors inventory.ExplainSource field-for-field
+// with proper JSON tags (that type has none — it's an internal domain
+// type, not a wire contract) — same posture as inspectMonitoringTarget.
+// See spec.md §16: static_hbac/temporary_grant/sudo_grant/breakglass are
+// the only four Kind values.
+type inspectExplainSource struct {
+	Kind           string     `json:"kind"`
+	Rule           string     `json:"rule"`
+	DirectUserHit  bool       `json:"direct_user_hit"`
+	GroupPath      []string   `json:"group_path,omitempty"`
+	DirectHostHit  bool       `json:"direct_host_hit"`
+	HostgroupPath  []string   `json:"hostgroup_path,omitempty"`
+	AllHosts       bool       `json:"all_hosts"`
+	Service        string     `json:"service,omitempty"`
+	Lifecycle      string     `json:"lifecycle,omitempty"`
+	ValidityAfter  *time.Time `json:"validity_after,omitempty"`
+	NextTransition *time.Time `json:"next_transition,omitempty"`
+}
+
+// buildInspectExplain answers spec.md §16's "which sources currently grant
+// (user, host, service), and through what provenance" for the located
+// roster file. Unlike every other inspect builder, an invalid roster
+// yields an empty list rather than being silently skipped — explain's
+// accessgrants.Explain requires an already-validated roster file, so this
+// validates first rather than letting a malformed roster panic deeper in
+// the call chain.
+func buildInspectExplain(dir, user, host, service string) []inspectExplainSource {
+	entries, err := managedFileEntries(dir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if !e.IsSecret || !looksLikeRosterFile(e.Content) {
+			continue
+		}
+		fullPath := filepath.Join(dir, filepath.FromSlash(e.RelPath))
+		if violations, err := inventory.ValidateRosterFile(fullPath); err != nil || len(violations) > 0 {
+			return nil
+		}
+		sources, err := accessgrants.Explain(fullPath, resolveDataDir(), user, host, service, time.Now())
+		if err != nil {
+			return nil
+		}
+		out := make([]inspectExplainSource, 0, len(sources))
+		for _, s := range sources {
+			item := inspectExplainSource{
+				Kind: s.Kind, Rule: s.Rule,
+				DirectUserHit: s.DirectUserHit, GroupPath: s.GroupPath,
+				DirectHostHit: s.DirectHostHit, HostgroupPath: s.HostgroupPath, AllHosts: s.AllHosts,
+				Service: s.Service, Lifecycle: string(s.Lifecycle), NextTransition: s.NextTransition,
+			}
+			if !s.ValidityAfter.IsZero() {
+				validityAfter := s.ValidityAfter
+				item.ValidityAfter = &validityAfter
+			}
+			out = append(out, item)
+		}
+		return out
+	}
+	return nil
 }
 
 // buildInspectDNSZones reads the freeipa-dns.yaml manifest, cross-resolving
@@ -489,6 +713,8 @@ const (
 	resourceURIHosts              = "pilot://hosts"
 	resourceURIRoster             = "pilot://roster"
 	resourceURIEffectiveAccess    = "pilot://roster/effective-access"
+	resourceURIGrants             = "pilot://roster/grants"
+	resourceURIBreakglass         = "pilot://roster/breakglass"
 	resourceURIDNS                = "pilot://dns"
 	resourceURIInternalEndpoints  = "pilot://internal-endpoints"
 	resourceURIMonitoringTargets  = "pilot://monitoring/targets"
@@ -618,6 +844,12 @@ func registerEditResources(server *mcp.Server, opts editMCPToolsOptions) {
 				EffectiveSudoAccess: roster.EffectiveSudoAccess,
 			}
 		})
+	add(resourceURIGrants, "roster-grants",
+		"v3.0 access-governance grants[] (temporary_grant/sudo_grant/breakglass — spec.md §6), each with its lifecycle (pending/active/expired) and next_transition where applicable",
+		func() any { return buildInspectGrants(opts.Dir) })
+	add(resourceURIBreakglass, "roster-breakglass-status",
+		"every kind: breakglass grant's activation history (spec.md §14) — local runtime state, never the roster definition itself",
+		func() any { return buildInspectBreakglassStatus(opts.Dir) })
 	add(resourceURIDNS, "dns",
 		"FreeIPA DNS zones and records, each record's target_host cross-resolved to its inventory IP (resolved_ip)",
 		func() any { return buildInspectDNSZones(opts.Dir, buildInspectHosts(opts.Dir)) })
