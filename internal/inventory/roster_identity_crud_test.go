@@ -89,6 +89,75 @@ func TestCredentialPolicyCRUD_AppendGetSimulateSet(t *testing.T) {
 	}
 }
 
+func TestPrivilegedIdentityCRUD_SetOnFreshRosterCreatesSecurityMapping(t *testing.T) {
+	path := writeRosterToTempFile(t)
+
+	if _, found, err := RosterPrivilegedIdentity(path); err != nil || found {
+		t.Fatalf("expected found=false on a fresh roster, got found=%v err=%v", found, err)
+	}
+
+	updated := map[string]any{
+		"match_groups": []string{"role-production-operator"},
+		"require":      map[string]any{"no_password_only": true},
+	}
+	violations, err := SimulateSetRosterPrivilegedIdentity(path, updated)
+	if err != nil || len(violations) != 0 {
+		t.Fatalf("SimulateSetRosterPrivilegedIdentity() violations=%v, err=%v", violations, err)
+	}
+	if err := SetRosterPrivilegedIdentity(path, updated); err != nil {
+		t.Fatalf("SetRosterPrivilegedIdentity() error = %v", err)
+	}
+
+	f, found, err := RosterPrivilegedIdentity(path)
+	if err != nil || !found {
+		t.Fatalf("RosterPrivilegedIdentity() after set: found=%v err=%v", found, err)
+	}
+	groups := rosterStringSliceForTest(f["match_groups"])
+	if len(groups) != 1 || groups[0] != "role-production-operator" {
+		t.Fatalf("match_groups = %v, want [role-production-operator]", groups)
+	}
+
+	if v, err := ValidateRosterFile(path); err != nil || len(v) != 0 {
+		t.Fatalf("expected the roster to validate clean after set, got: %v, err=%v", v, err)
+	}
+}
+
+func TestPrivilegedIdentityCRUD_SetTwiceReplacesRatherThanDuplicates(t *testing.T) {
+	path := writeRosterToTempFile(t)
+	first := map[string]any{"match_groups": []string{"role-production-operator"}, "require": map[string]any{}}
+	if err := SetRosterPrivilegedIdentity(path, first); err != nil {
+		t.Fatalf("first SetRosterPrivilegedIdentity() error = %v", err)
+	}
+	second := map[string]any{"match_groups": []string{"team-sre"}, "require": map[string]any{"no_password_only": true}}
+	if err := SetRosterPrivilegedIdentity(path, second); err != nil {
+		t.Fatalf("second SetRosterPrivilegedIdentity() error = %v", err)
+	}
+
+	f, found, err := RosterPrivilegedIdentity(path)
+	if err != nil || !found {
+		t.Fatalf("RosterPrivilegedIdentity(): found=%v err=%v", found, err)
+	}
+	groups := rosterStringSliceForTest(f["match_groups"])
+	if len(groups) != 1 || groups[0] != "team-sre" {
+		t.Fatalf("expected the second set to fully replace the first, got match_groups=%v", groups)
+	}
+}
+
+// rosterStringSliceForTest decodes a []any of strings the way readRosterAsMap
+// (yaml.Unmarshal into map[string]any) actually represents a YAML list —
+// tests can't reuse cmd/pilot/cmd's rosterStringSlice (different package),
+// so this is the minimal equivalent.
+func rosterStringSliceForTest(v any) []string {
+	raw, _ := v.([]any)
+	out := make([]string, 0, len(raw))
+	for _, x := range raw {
+		if s, ok := x.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func TestKnownUserAuthTypes_ReturnsSpecSet(t *testing.T) {
 	got := KnownUserAuthTypes()
 	if len(got) != 4 || !contains(got, "otp") || !contains(got, "pkinit") {

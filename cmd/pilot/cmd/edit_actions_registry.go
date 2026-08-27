@@ -1872,6 +1872,155 @@ func editActionRegistry() []editActionDef {
 				return d.saveHosts(r)
 			},
 		},
+		// ---- v3.2 Identity & Credential Hardening (spec.md §18) --------
+		{
+			Spec: semanticActionSpec{
+				Name:                     "create_password_policy",
+				Description:              "create a FreeIPA group password policy (spec.md §7) — group/priority are co-required and set together at creation, since a password_policy missing either never passes roster validation",
+				Required:                 []string{"name", "group", "priority"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "password_policy appears in roster with group/priority set",
+				},
+			},
+			Validate: validateCreatePasswordPolicy,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createPasswordPolicy(r, step.Name, step.Group, step.Priority)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_password_policy_field",
+				Description: "set one password_policies[] field",
+				Required:    []string{"name", "field", "value"},
+				Values: map[string][]string{"field": {
+					"state", "group", "priority", "min_length", "history_size", "max_life", "min_life",
+					"lockout.max_failures", "lockout.failure_reset_interval", "lockout.lockout_duration",
+				}},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "field value updated for password_policy",
+				},
+			},
+			Validate: validateSetPasswordPolicyField,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setPasswordPolicyField(r, step.Name, step.Field, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "delete_password_policy",
+				Description:              "soft-delete a password_policy (state: absent — never physically removed by this action)",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectDestructive,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "password_policy's state is absent",
+				},
+			},
+			Validate: validateEntityNameOnly("delete_password_policy"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deletePasswordPolicy(r, step.Name)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "set_user_authentication_types",
+				Description:              "bulk-replace a user's authentication.allowed (spec.md §8) — the whole set, not one item; empty clears the authentication: block entirely",
+				Required:                 []string{"user"},
+				Optional:                 []string{"users"},
+				Values:                   map[string][]string{"users": inventory.KnownUserAuthTypes()},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "user's authentication.allowed matches the requested set",
+				},
+			},
+			Validate: validateSetUserAuthenticationTypes,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setUserAuthenticationTypes(r, step.User, step.Users)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "create_credential_policy",
+				Description:              "create a credential_policy (spec.md §10/§11 SSH hygiene + review) — match.users/match.groups are required before it can pass validation",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "credential_policy appears in roster",
+				},
+			},
+			Validate: validateEntityNameOnly("create_credential_policy"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.createCredentialPolicy(r, step.Name)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:        "set_credential_policy_field",
+				Description: "set one credential_policy field, or bulk-replace match.users/match.groups (Users/Groups, not Value, for those two)",
+				Required:    []string{"name", "field"},
+				Values: map[string][]string{"field": {
+					"state", "match.users", "match.groups", "ssh.allowed_algorithms", "ssh.require_comment", "ssh.max_age",
+				}},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "field value updated for credential_policy",
+				},
+			},
+			Validate: validateSetCredentialPolicyField,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				if step.Field == "match.users" {
+					return d.setCredentialPolicyMembers(r, step.Name, step.Field, step.Users)
+				}
+				if step.Field == "match.groups" {
+					return d.setCredentialPolicyMembers(r, step.Name, step.Field, step.Groups)
+				}
+				return d.setCredentialPolicyField(r, step.Name, step.Field, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "delete_credential_policy",
+				Description:              "soft-delete a credential_policy (state: absent — never physically removed by this action)",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectDestructive,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "credential_policy's state is absent",
+				},
+			},
+			Validate: validateEntityNameOnly("delete_credential_policy"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deleteCredentialPolicy(r, step.Name)
+			},
+		},
 	}
 }
 
@@ -2827,4 +2976,97 @@ func validateNoParamsAction(name string) func(editAction) error {
 		}
 		return nil
 	}
+}
+
+// ---- v3.2 Identity & Credential Hardening validators (spec.md §18) -----
+
+func validateCreatePasswordPolicy(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("create_password_policy requires name")
+	}
+	if strings.TrimSpace(step.Group) == "" {
+		return fmt.Errorf("create_password_policy requires group")
+	}
+	if strings.TrimSpace(step.Priority) == "" {
+		return fmt.Errorf("create_password_policy requires priority")
+	}
+	if n, err := strconv.Atoi(step.Priority); err != nil || n <= 0 {
+		return fmt.Errorf("create_password_policy: priority must be a positive integer")
+	}
+	return nil
+}
+
+func validateSetPasswordPolicyField(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("set_password_policy_field requires name")
+	}
+	if strings.TrimSpace(step.Field) == "" {
+		return fmt.Errorf("set_password_policy_field requires field")
+	}
+	spec, _ := semanticActionSpecFor("set_password_policy_field")
+	allowed := false
+	for _, field := range spec.Values["field"] {
+		if step.Field == field {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("unsupported password_policy field %q", step.Field)
+	}
+	if step.Field != "state" && step.Value == "" && step.ValueEnv == "" {
+		return fmt.Errorf("set_password_policy_field requires value (or value_env)")
+	}
+	return nil
+}
+
+func validateSetUserAuthenticationTypes(step editAction) error {
+	if strings.TrimSpace(step.User) == "" {
+		return fmt.Errorf("set_user_authentication_types requires user")
+	}
+	spec, _ := semanticActionSpecFor("set_user_authentication_types")
+	for _, t := range step.Users {
+		allowed := false
+		for _, known := range spec.Values["users"] {
+			if t == known {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("set_user_authentication_types: unsupported authentication type %q", t)
+		}
+	}
+	return nil
+}
+
+func validateSetCredentialPolicyField(step editAction) error {
+	if strings.TrimSpace(step.Name) == "" {
+		return fmt.Errorf("set_credential_policy_field requires name")
+	}
+	if strings.TrimSpace(step.Field) == "" {
+		return fmt.Errorf("set_credential_policy_field requires field")
+	}
+	spec, _ := semanticActionSpecFor("set_credential_policy_field")
+	allowed := false
+	for _, field := range spec.Values["field"] {
+		if step.Field == field {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("unsupported credential_policy field %q", step.Field)
+	}
+	switch step.Field {
+	case "match.users", "match.groups":
+		// Users/Groups carries the bulk-replace selection for these two —
+		// an empty selection (clearing membership down to nothing) is
+		// valid, so no non-empty check here.
+	default:
+		if step.Value == "" && step.ValueEnv == "" {
+			return fmt.Errorf("set_credential_policy_field requires value (or value_env) for field %q", step.Field)
+		}
+	}
+	return nil
 }

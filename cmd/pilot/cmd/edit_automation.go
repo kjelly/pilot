@@ -186,6 +186,17 @@ type editAction struct {
 	// for the target inventory activate/deactivate_breakglass apply
 	// compiled rules against.
 	Duration string `json:"duration,omitempty"`
+	// Group/Priority are create_password_policy's required fields
+	// (spec.md v3.2 §7) — set together, not via a separate
+	// set_password_policy_field call, because they are co-required: a
+	// password_policy with only one of the two set never passes roster
+	// validation, so an incremental single-field edit would silently
+	// fail simulate-then-write on whichever one lands first (found live
+	// while testing this action — see edit_actions_registry.go's
+	// create_password_policy entry). create_grant's own kind-branching
+	// required-field-set is the same pattern for the same reason.
+	Group    string `json:"group,omitempty"`
+	Priority string `json:"priority,omitempty"`
 }
 
 // validateValueOrEnv enforces that exactly one of Value/ValueEnv is set,

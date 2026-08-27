@@ -91,6 +91,7 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		{ID: "roster.top.host_access", Label: "🔐 Host access"},
 		{ID: "roster.top.sudo", Label: "🛡️  Sudo commands & rules"},
 		{ID: "roster.top.access_governance", Label: "🏛️  Access governance"},
+		{ID: "roster.top.identity_hardening", Label: "🔒 Identity hardening"},
 		{ID: "roster.top.back", Label: "↩  返回"},
 	}
 	title := fmt.Sprintf("管理 %s", path)
@@ -113,6 +114,8 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 		case 4:
 			return pushAccessGovernanceMenu(r, dir, path, "")
 		case 5:
+			return pushIdentityHardeningMenu(r, dir, path, "")
+		case 6:
 			return pushTopMenu(r, dir, "")
 		}
 		return nil
@@ -690,6 +693,7 @@ func pushRosterUserDetail(r *editRouterModel, dir, path, name, banner string) te
 		{ID: "roster.user.detail.password_force_change", Label: fmt.Sprintf("password.force_change：%s", rosterBoolDisplay(pw, "force_change"))},
 		{ID: "roster.user.detail.password_preserve_existing", Label: fmt.Sprintf("password.preserve_existing：%s", rosterBoolDisplayDefault(pw, "preserve_existing", true))},
 		{ID: "roster.user.detail.ssh_keys", Label: fmt.Sprintf("ssh_keys.values（共 %d 支公鑰）", len(values))},
+		{ID: "roster.user.detail.authentication", Label: fmt.Sprintf("authentication.allowed（v3.2 §8；%s）", rosterAuthAllowedSummary(fields))},
 		{ID: "roster.user.detail.back", Label: "↩  返回"},
 	}
 	spec := tui.SelectSpec{ScreenID: "roster.user.detail", Title: fmt.Sprintf("User %q — %s", name, path), Choices: choices}
@@ -730,10 +734,44 @@ func pushRosterUserDetail(r *editRouterModel, dir, path, name, banner string) te
 		case 14:
 			return pushRosterUserSSHKeysList(r, dir, path, name)
 		case 15:
+			return pushRosterUserAuthenticationField(r, dir, path, name, rosterStringSlice(rosterSubmap(fields, "authentication"), "allowed"))
+		case 16:
 			return pushRosterUsersMenu(r, dir, path, "")
 		}
 		return nil
 	})
+}
+
+// rosterAuthAllowedSummary renders users[].authentication.allowed for the
+// detail-menu row label — "(未設定)" when the user declares no
+// authentication: block at all (spec.md §8: omission means no opinion,
+// never an implicit password-only lock-in — see CompileUserAuthTypes'
+// doc comment).
+func rosterAuthAllowedSummary(fields map[string]any) string {
+	allowed := rosterStringSlice(rosterSubmap(fields, "authentication"), "allowed")
+	if len(allowed) == 0 {
+		return "(未設定)"
+	}
+	return strings.Join(allowed, ", ")
+}
+
+// pushRosterUserAuthenticationField edits users[].authentication.allowed
+// via a checklist over inventory.KnownUserAuthTypes() — the same set
+// checkUserAuthentication validates against, so nothing can be selected
+// here that the roster would then reject. Selecting zero entries clears
+// the whole authentication: block (an empty allowed: [] would itself be
+// rejected by checkUserAuthentication, so "no opinion" must mean "no
+// block at all", matching CompileUserAuthTypes' skip-if-absent contract).
+func pushRosterUserAuthenticationField(r *editRouterModel, dir, path, name string, current []string) tea.Cmd {
+	return checklist(r, "roster.user.field_authentication", "authentication.allowed（強驗證方式；不選 = 清空整個 authentication 區塊）", inventory.KnownUserAuthTypes(), current, func(r *editRouterModel, v []string) tea.Cmd {
+		return pushRosterEditUser(r, dir, path, name, func(f map[string]any) {
+			if len(v) == 0 {
+				delete(f, "authentication")
+				return
+			}
+			f["authentication"] = map[string]any{"allowed": v}
+		})
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterUserDetail(r, dir, path, name, "") })
 }
 
 func pushRosterUserTextField(r *editRouterModel, dir, path, name, key, label, current string) tea.Cmd {

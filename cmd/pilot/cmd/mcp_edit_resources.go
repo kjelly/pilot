@@ -60,6 +60,15 @@ type inspectRosterData struct {
 	Grants              []inspectRosterGrant            `json:"grants,omitempty"`
 	EffectiveHBACAccess []inventory.EffectiveHBACAccess `json:"effective_hbac_access,omitempty"`
 	EffectiveSudoAccess []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
+	// PasswordPolicies/CredentialPolicies/PrivilegedIdentity are v3.2's
+	// identity-hardening sections (spec.md §7/§10/§11/§9, Phase 6 read
+	// side) — structural roster data only, the same posture as Grants
+	// above; live capability/hygiene/drift data needs a real FreeIPA
+	// probe and stays CLI-only (`pilot identity hygiene`/`drift`) rather
+	// than joining this roster-file-only read path.
+	PasswordPolicies   []inspectPasswordPolicy    `json:"password_policies,omitempty"`
+	CredentialPolicies []inspectCredentialPolicy  `json:"credential_policies,omitempty"`
+	PrivilegedIdentity *inspectPrivilegedIdentity `json:"privileged_identity,omitempty"`
 }
 
 // buildInspectRoster locates the roster file among the workspace's managed
@@ -203,6 +212,9 @@ func buildInspectRoster(dir string) inspectRosterData {
 		}
 
 		out.Grants = buildInspectGrantsFromFile(fullPath)
+		out.PasswordPolicies = buildInspectPasswordPoliciesFromFile(fullPath)
+		out.CredentialPolicies = buildInspectCredentialPoliciesFromFile(fullPath)
+		out.PrivilegedIdentity = buildInspectPrivilegedIdentityFromFile(fullPath)
 
 		if resolved, err := inventory.EffectiveHBACAccessList(fullPath); err == nil {
 			out.EffectiveHBACAccess = resolved
@@ -294,6 +306,150 @@ func buildInspectGrantsFromFile(fullPath string) []inspectRosterGrant {
 		out = append(out, g)
 	}
 	return out
+}
+
+// inspectPasswordPolicy is one password_policies[] entry (spec.md v3.2
+// §7). Int fields are pointers so an unset field (no opinion — see
+// CompiledPasswordPolicy's doc comment, internal/inventory/
+// password_policy_compile.go) renders as JSON `null`/absent rather than a
+// fabricated zero.
+type inspectPasswordPolicy struct {
+	Name                        string `json:"name"`
+	State                       string `json:"state"`
+	Group                       string `json:"group,omitempty"`
+	Priority                    *int   `json:"priority,omitempty"`
+	MinLength                   *int   `json:"min_length,omitempty"`
+	HistorySize                 *int   `json:"history_size,omitempty"`
+	MaxLife                     string `json:"max_life,omitempty"`
+	MinLife                     string `json:"min_life,omitempty"`
+	LockoutMaxFailures          *int   `json:"lockout_max_failures,omitempty"`
+	LockoutFailureResetInterval string `json:"lockout_failure_reset_interval,omitempty"`
+	LockoutLockoutDuration      string `json:"lockout_lockout_duration,omitempty"`
+}
+
+// buildInspectPasswordPoliciesFromFile reads every password_policies[]
+// entry from an already-located roster file. Lenient like every other
+// inspect builder: an unreadable/unparsable roster yields nil.
+func buildInspectPasswordPoliciesFromFile(fullPath string) []inspectPasswordPolicy {
+	names, err := inventory.RosterPasswordPolicyNames(fullPath)
+	if err != nil {
+		return nil
+	}
+	var out []inspectPasswordPolicy
+	for _, name := range names {
+		f, found, err := inventory.RosterPasswordPolicy(fullPath, name)
+		if err != nil || !found {
+			continue
+		}
+		lockout := rosterSubmap(f, "lockout")
+		out = append(out, inspectPasswordPolicy{
+			Name:                        name,
+			State:                       rosterStringOr(f, "state", "present"),
+			Group:                       rosterStringValue(f, "group"),
+			Priority:                    rosterIntPtr(f, "priority"),
+			MinLength:                   rosterIntPtr(f, "min_length"),
+			HistorySize:                 rosterIntPtr(f, "history_size"),
+			MaxLife:                     rosterStringValue(f, "max_life"),
+			MinLife:                     rosterStringValue(f, "min_life"),
+			LockoutMaxFailures:          rosterIntPtr(lockout, "max_failures"),
+			LockoutFailureResetInterval: rosterStringValue(lockout, "failure_reset_interval"),
+			LockoutLockoutDuration:      rosterStringValue(lockout, "lockout_duration"),
+		})
+	}
+	return out
+}
+
+// rosterIntPtr is rosterIntValue's pointer-returning counterpart, for a
+// JSON payload where "field not set" (nil, omitted) must be distinct from
+// "field set to a value" — rosterIntDisplay/rosterIntValue's string
+// return can't represent that distinction cleanly.
+func rosterIntPtr(m map[string]any, key string) *int {
+	switch v := m[key].(type) {
+	case int:
+		return &v
+	case int64:
+		n := int(v)
+		return &n
+	case float64:
+		n := int(v)
+		return &n
+	}
+	return nil
+}
+
+// inspectCredentialPolicy is one credential_policies[] entry (spec.md
+// v3.2 §10/§11). ReviewInterval/ReviewLastReviewedAt/ReviewReviewedBy are
+// exposed for visibility only — `pilot identity review mark` remains the
+// sanctioned way to update them (§11), never a structured write action.
+type inspectCredentialPolicy struct {
+	Name                 string   `json:"name"`
+	State                string   `json:"state"`
+	MatchUsers           []string `json:"match_users,omitempty"`
+	MatchGroups          []string `json:"match_groups,omitempty"`
+	SSHAllowedAlgorithms []string `json:"ssh_allowed_algorithms,omitempty"`
+	SSHRequireComment    bool     `json:"ssh_require_comment,omitempty"`
+	SSHMaxAge            string   `json:"ssh_max_age,omitempty"`
+	ReviewInterval       string   `json:"review_interval,omitempty"`
+	ReviewLastReviewedAt string   `json:"review_last_reviewed_at,omitempty"`
+	ReviewReviewedBy     string   `json:"review_reviewed_by,omitempty"`
+}
+
+func buildInspectCredentialPoliciesFromFile(fullPath string) []inspectCredentialPolicy {
+	names, err := inventory.RosterCredentialPolicyNames(fullPath)
+	if err != nil {
+		return nil
+	}
+	var out []inspectCredentialPolicy
+	for _, name := range names {
+		f, found, err := inventory.RosterCredentialPolicy(fullPath, name)
+		if err != nil || !found {
+			continue
+		}
+		match := rosterSubmap(f, "match")
+		ssh := rosterSubmap(f, "ssh")
+		review := rosterSubmap(f, "review")
+		out = append(out, inspectCredentialPolicy{
+			Name:                 name,
+			State:                rosterStringOr(f, "state", "present"),
+			MatchUsers:           rosterStringSlice(match, "users"),
+			MatchGroups:          rosterStringSlice(match, "groups"),
+			SSHAllowedAlgorithms: rosterStringSlice(ssh, "allowed_algorithms"),
+			SSHRequireComment:    ssh["require_comment"] == true,
+			SSHMaxAge:            rosterStringValue(ssh, "max_age"),
+			ReviewInterval:       rosterStringValue(review, "interval"),
+			ReviewLastReviewedAt: rosterStringValue(review, "last_reviewed_at"),
+			ReviewReviewedBy:     rosterStringValue(review, "reviewed_by"),
+		})
+	}
+	return out
+}
+
+// inspectPrivilegedIdentity is security.privileged_identity (spec.md v3.2
+// §9) — a singleton, unlike every other inspect list above, since the
+// roster declares at most one baseline.
+type inspectPrivilegedIdentity struct {
+	MatchGroups    []string `json:"match_groups,omitempty"`
+	AuthTypes      []string `json:"auth_types,omitempty"`
+	NoPasswordOnly bool     `json:"no_password_only,omitempty"`
+	SSHKeyPolicy   string   `json:"ssh_key_policy,omitempty"`
+}
+
+// buildInspectPrivilegedIdentityFromFile returns nil when the roster
+// declares no privileged_identity block — matching PrivilegedIdentity's
+// nil-able *inspectPrivilegedIdentity field on inspectRosterData (opt-in,
+// spec.md §9).
+func buildInspectPrivilegedIdentityFromFile(fullPath string) *inspectPrivilegedIdentity {
+	f, found, err := inventory.RosterPrivilegedIdentity(fullPath)
+	if err != nil || !found {
+		return nil
+	}
+	require := rosterSubmap(f, "require")
+	return &inspectPrivilegedIdentity{
+		MatchGroups:    rosterStringSlice(f, "match_groups"),
+		AuthTypes:      rosterStringSlice(require, "auth_types"),
+		NoPasswordOnly: require["no_password_only"] == true,
+		SSHKeyPolicy:   rosterStringValue(require, "ssh_key_policy"),
+	}
 }
 
 // inspectBreakglassActivation is one recorded activate (and, if it

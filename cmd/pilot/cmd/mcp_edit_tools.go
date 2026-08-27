@@ -345,6 +345,9 @@ type inspectOutput struct {
 	SudoCommandGroups   []inspectSudoCommandGroup       `json:"sudo_command_groups,omitempty"`
 	SudoRules           []inspectSudoRule               `json:"sudo_rules,omitempty"`
 	Grants              []inspectRosterGrant            `json:"grants,omitempty"`
+	PasswordPolicies    []inspectPasswordPolicy         `json:"password_policies,omitempty"`
+	CredentialPolicies  []inspectCredentialPolicy       `json:"credential_policies,omitempty"`
+	PrivilegedIdentity  *inspectPrivilegedIdentity      `json:"privileged_identity,omitempty"`
 	EffectiveHBACAccess []inventory.EffectiveHBACAccess `json:"effective_hbac_access,omitempty"`
 	EffectiveSudoAccess []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
 	DNSZones            []inspectDNSZone                `json:"dns_zones,omitempty"`
@@ -474,6 +477,9 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			SudoCommandGroups:   roster.SudoCommandGroups,
 			SudoRules:           roster.SudoRules,
 			Grants:              roster.Grants,
+			PasswordPolicies:    roster.PasswordPolicies,
+			CredentialPolicies:  roster.CredentialPolicies,
+			PrivilegedIdentity:  roster.PrivilegedIdentity,
 			EffectiveHBACAccess: roster.EffectiveHBACAccess,
 			EffectiveSudoAccess: roster.EffectiveSudoAccess,
 			DNSZones:            dnsZones,
