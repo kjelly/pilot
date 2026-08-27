@@ -2457,15 +2457,57 @@
     # --auth-ind=`. --auth-ind is a plain multivalued host attribute (not
     # a membership relationship), so — unlike the HBAC/sudo attach tasks
     # above — one host-mod call with one repeated flag per indicator fully
-    # replaces the set; there is no separate attach/detach pair. Exact
-    # flag repetition behavior on this FreeIPA version MUST be verified
-    # live (spec.md §11) — no prior task in this file has ever set
-    # --auth-ind before.
+    # replaces the set; there is no separate attach/detach pair.
+    #
+    # Confirmed live on a two-node fixture (FreeIPA server + a separately
+    # enrolled client): --auth-ind is only rejected on the host/* (and
+    # cifs/ldap/HTTP) principal of an IPA server/replica itself
+    # (ipaserver/plugins/service.py's validate_auth_indicator, gated by
+    # `server_find()`) — an ordinary enrolled client's host/ principal
+    # accepts it fine, and repeated --auth-ind=X flags additively store
+    # each indicator (confirmed via `ipa host-show --all --raw`). The
+    # guardrail task below fails closed before any host-mod mutation if a
+    # compiled target happens to be an IPA server/replica, instead of
+    # relying on FreeIPA's own cryptic rejection mid-loop.
+    - name: "Query FreeIPA servers/replicas for the auth-ind guardrail (spec.md §11)"
+      ansible.builtin.command:
+        argv: [ipa, server-find, --raw]
+      register: ipa_server_find_auth_ind_guard
+      changed_when: false
+      when: (pilot_compiled_auth_policy_hosts | default([]) | length) > 0
+      tags: [identity, auth_policy]
+
+    - name: "Fail closed if an auth_policies target is an IPA server/replica (spec.md §11)"
+      ansible.builtin.fail:
+        msg: >-
+          auth_policies target "{{ item.host }}" is a FreeIPA server/replica.
+          FreeIPA forbids authentication indicators (krbPrincipalAuthInd) on
+          the host/* principal of an IPA master or replica — remove it from
+          auth_policies[].targets, or target a specific enrolled client
+          instead.
+      loop: "{{ pilot_compiled_auth_policy_hosts | default([]) }}"
+      loop_control:
+        label: "{{ item.host }}"
+      when:
+        - (item.indicators | default([]) | length) > 0
+        - item.host in (ipa_server_find_auth_ind_guard.stdout | default('') | regex_findall('(?m)^\s*cn:\s*(\S+)\s*$'))
+      tags: [identity, auth_policy]
+
+    # item.indicators == [] means this host was compiled as a *prune*
+    # entry (internal/accessgrants' auth-policy-hosts.json diff — see
+    # auth_policy_state.go): a host Pilot previously set indicators on
+    # that is no longer covered by any enabled auth_policies entry. A
+    # bare host-mod call with NO --auth-ind flag at all leaves the
+    # attribute untouched (that was the original bug — see spec.md §11's
+    # test case "policy removal"); an explicit `--auth-ind=` with an
+    # empty value is what actually clears it (confirmed live).
     - name: "Reconcile v3.0 authentication-indicator requirements for hosts (spec.md §11)"
       ansible.builtin.command:
         argv: >-
           {{ ['ipa', 'host-mod', item.host]
-             + (item.indicators | map('regex_replace', '^', '--auth-ind=') | list) }}
+             + ((item.indicators | map('regex_replace', '^', '--auth-ind=') | list)
+                if (item.indicators | length > 0)
+                else ['--auth-ind=']) }}
       loop: "{{ pilot_compiled_auth_policy_hosts | default([]) }}"
       loop_control:
         label: "{{ item.host }}"

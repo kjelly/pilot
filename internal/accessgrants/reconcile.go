@@ -49,6 +49,15 @@ type ReconcileOptions struct {
 	// VaultPasswordFile is required when RosterFile is ansible-vault
 	// encrypted.
 	VaultPasswordFile string
+	// StateDir enables spec.md §11's auth_policies prune tracking
+	// (auth_policy_state.go) — a host Pilot previously set
+	// krbPrincipalAuthInd on that drops out of the current roster's
+	// auth_policies gets its indicators explicitly cleared. Empty skips
+	// prune tracking entirely (no error) rather than failing the whole
+	// reconcile — callers that only care about HBAC/sudo grants (or tests
+	// with no auth_policies at all) are unaffected either way.
+	StateDir string
+
 	// Now is the injected clock CompileGrants evaluates lifecycle against
 	// (spec.md §8). Zero selects time.Now().
 	Now time.Time
@@ -285,7 +294,28 @@ func ReconcileOnce(ctx context.Context, opts ReconcileOptions) (Plan, *ansible.R
 		return Plan{}, nil, err
 	}
 
+	// spec.md §11 prune: diff this reconcile's desired auth-policy hosts
+	// against what Pilot last recorded, and append explicit-clear entries
+	// for hosts that dropped out — captured before merging so
+	// recordAuthPolicyState below persists only the true desired state,
+	// not the temporary clear entries.
+	desiredAuthPolicyHosts := plan.AuthPolicyHosts
+	if opts.StateDir != "" {
+		pruneHosts, err := planAuthPolicyPrune(opts.StateDir, desiredAuthPolicyHosts)
+		if err != nil {
+			return Plan{}, nil, err
+		}
+		if len(pruneHosts) > 0 {
+			plan.AuthPolicyHosts = append(append([]inventory.CompiledAuthPolicyHost{}, desiredAuthPolicyHosts...), pruneHosts...)
+		}
+	}
+
 	result, err := applyPlan(ctx, opts.RosterFile, playbook, opts.Inventory, opts.VaultPasswordFile, opts.runner(), plan)
+	if err == nil && opts.StateDir != "" {
+		if serr := recordAuthPolicyState(opts.StateDir, desiredAuthPolicyHosts); serr != nil {
+			return plan, result, fmt.Errorf("accessgrants: reconcile applied but recording auth-policy state failed: %w", serr)
+		}
+	}
 	return plan, result, err
 }
 

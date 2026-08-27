@@ -196,3 +196,104 @@ func TestBuildExtraVars_SeparatesPresentFromPrune(t *testing.T) {
 		t.Fatalf("expected non-nil empty sudo lists, got: %+v / %v", ev.PilotCompiledGrantSudoRules, ev.PilotCompiledGrantSudoPrune)
 	}
 }
+
+const reconcileTestRosterWithAuthPolicy = `
+schema_version: 3
+freeipa:
+  domain: ipa.pilot.internal
+  admin: {principal: admin, password: x}
+users: []
+groups: []
+hosts: []
+hostgroups: []
+hbac:
+  rules: []
+sudo:
+  rules: []
+auth_policies:
+  - name: gpu-strong-auth
+    state: present
+    targets: {hosts: [gpu01.ipa.pilot.internal], hostgroups: []}
+    require_any: [otp, pkinit]
+`
+
+const reconcileTestRosterWithAuthPolicyRemoved = `
+schema_version: 3
+freeipa:
+  domain: ipa.pilot.internal
+  admin: {principal: admin, password: x}
+users: []
+groups: []
+hosts: []
+hostgroups: []
+hbac:
+  rules: []
+sudo:
+  rules: []
+auth_policies: []
+`
+
+// TestReconcileOnce_AuthPolicyPruneAcrossTwoRuns exercises the real
+// prune-tracking wiring end to end: a first reconcile with an
+// auth_policies entry (StateDir set) records gpu01 as Pilot-managed;
+// removing that entry from the roster and reconciling again must append
+// an explicit-clear entry for gpu01 (Indicators empty) — the fix for the
+// live-confirmed bug where a removed auth_policies entry left its host's
+// krbPrincipalAuthInd stale forever (playbooks/apply/
+// freeipa-identity-apply.yml's host-mod task never touches a host that
+// simply isn't in pilot_compiled_auth_policy_hosts anymore).
+func TestReconcileOnce_AuthPolicyPruneAcrossTwoRuns(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.yaml")
+	stateDir := t.TempDir()
+	now := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+
+	if err := os.WriteFile(rosterPath, []byte(reconcileTestRosterWithAuthPolicy), 0o600); err != nil {
+		t.Fatalf("write roster: %v", err)
+	}
+	runner := &fakeRunner{exitCode: 0}
+	plan, _, err := ReconcileOnce(context.Background(), ReconcileOptions{
+		RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: runner, StateDir: stateDir,
+	})
+	if err != nil {
+		t.Fatalf("first ReconcileOnce() error = %v", err)
+	}
+	if len(plan.AuthPolicyHosts) != 1 || plan.AuthPolicyHosts[0].Host != "gpu01.ipa.pilot.internal" {
+		t.Fatalf("first plan.AuthPolicyHosts = %+v, want exactly gpu01 with indicators", plan.AuthPolicyHosts)
+	}
+	store, err := openAuthPolicyStore(stateDir)
+	if err != nil {
+		t.Fatalf("openAuthPolicyStore() error = %v", err)
+	}
+	recorded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(recorded) != 1 || recorded[0].Host != "gpu01.ipa.pilot.internal" || len(recorded[0].Indicators) != 2 {
+		t.Fatalf("recorded state = %+v, want gpu01 with 2 indicators", recorded)
+	}
+
+	if err := os.WriteFile(rosterPath, []byte(reconcileTestRosterWithAuthPolicyRemoved), 0o600); err != nil {
+		t.Fatalf("rewrite roster: %v", err)
+	}
+	plan2, _, err := ReconcileOnce(context.Background(), ReconcileOptions{
+		RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: runner, StateDir: stateDir,
+	})
+	if err != nil {
+		t.Fatalf("second ReconcileOnce() error = %v", err)
+	}
+	if len(plan2.AuthPolicyHosts) != 1 || plan2.AuthPolicyHosts[0].Host != "gpu01.ipa.pilot.internal" {
+		t.Fatalf("second plan.AuthPolicyHosts = %+v, want exactly one prune entry for gpu01", plan2.AuthPolicyHosts)
+	}
+	if len(plan2.AuthPolicyHosts[0].Indicators) != 0 {
+		t.Fatalf("prune entry Indicators = %v, want empty (explicit clear)", plan2.AuthPolicyHosts[0].Indicators)
+	}
+
+	recorded2, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(recorded2) != 0 {
+		t.Fatalf("recorded state after removal = %+v, want empty — gpu01 is no longer Pilot-managed", recorded2)
+	}
+}

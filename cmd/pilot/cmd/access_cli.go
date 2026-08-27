@@ -162,6 +162,7 @@ func runAccessReconcileCmd(cmd *cobra.Command, args []string) error {
 		RosterFile: readPath,
 		Inventory:  accessReconcileInventory,
 		Playbook:   accessReconcilePlaybook,
+		StateDir:   resolveDataDir(),
 		Now:        time.Now(),
 	})
 	out := cmd.OutOrStdout()
