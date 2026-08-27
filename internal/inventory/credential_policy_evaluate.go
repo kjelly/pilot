@@ -136,6 +136,35 @@ func EvaluateSSHKeyHygiene(root map[string]any) []SSHHygieneFinding {
 	return out
 }
 
+// CredentialPolicyCoverage returns, for every present credential_policies[]
+// entry, the users it matches (direct + nested group membership) — the
+// same resolution EvaluateSSHKeyHygiene performs internally, exposed
+// separately so a caller building a per-user hygiene summary (spec.md
+// §14) can tell "no credential_policy covers this user at all" (report
+// n/a) apart from "a policy covers them and found no issues" (report
+// pass), which EvaluateSSHKeyHygiene's findings-only return value cannot
+// distinguish on its own.
+func CredentialPolicyCoverage(root map[string]any) map[string][]string {
+	groupsByName := rosterGroupsByName(root)
+	out := map[string][]string{}
+	for _, raw := range listField(root, "credential_policies") {
+		policy := asMap(raw)
+		if stateOrDefault(policy, "present") == "absent" {
+			continue
+		}
+		match := mapField(policy, "match")
+		matched := map[string]bool{}
+		for _, u := range stringListField(match, "users") {
+			matched[u] = true
+		}
+		for _, g := range stringListField(match, "groups") {
+			expandGroupMembers(groupsByName, g, map[string]bool{}, matched)
+		}
+		out[stringField(policy, "name")] = sortedSetKeys(matched)
+	}
+	return out
+}
+
 // EvaluateSSHKeyHygieneFile is EvaluateSSHKeyHygiene's file-reading
 // counterpart, mirroring EvaluateGrantPoliciesFile's read/parse/dispatch
 // shape.

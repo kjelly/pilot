@@ -189,6 +189,29 @@ security:
 	}
 }
 
+func TestPrivilegedUsers_ReturnsFullSetRegardlessOfCompliance(t *testing.T) {
+	root := grantsRoster(t, `
+security:
+  privileged_identity:
+    match_groups: [role-production-operator]
+    require: {no_password_only: true}
+`)
+	// alice (grantsRosterBase's direct role-production-operator member)
+	// declares no authentication: block — non-compliant, but must still
+	// appear in the full privileged set.
+	got := PrivilegedUsers(root)
+	if len(got) != 1 || got[0] != "alice" {
+		t.Fatalf("expected [alice], got: %v", got)
+	}
+}
+
+func TestPrivilegedUsers_AbsentBlockReturnsNil(t *testing.T) {
+	root := grantsRoster(t, ``)
+	if got := PrivilegedUsers(root); got != nil {
+		t.Fatalf("expected nil for no privileged_identity block, got: %v", got)
+	}
+}
+
 func TestEvaluatePrivilegedIdentityBaseline_AbsentBlockIsNoop(t *testing.T) {
 	root := grantsRoster(t, ``)
 	if v := EvaluatePrivilegedIdentityBaseline(root); len(v) != 0 {

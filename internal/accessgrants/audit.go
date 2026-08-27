@@ -41,6 +41,14 @@ const (
 	AuditActionAccessDriftRepaired     = "access_drift_repaired"
 	AuditActionExplicitAccessReconcile = "explicit_access_reconcile"
 	AuditActionAccessReviewMarked      = "access_review_marked"
+	// AuditActionIdentityHygieneRun is v3.2 §14/§15's one-shot identity
+	// hygiene report action — see hygiene.go's EvaluateIdentityHygiene.
+	// §12.2/§14 reuse the existing AuditActionAccessDriftDetected/
+	// AuditActionAccessDriftRepaired actions above rather than forking a
+	// parallel identity-specific vocabulary: drift is drift regardless
+	// of which axis (grants vs. password_policies/user_auth_type) it
+	// covers, and DriftOnce/RepairManaged already emit those generically.
+	AuditActionIdentityHygieneRun = "identity_hygiene_run"
 )
 
 const auditLogFilename = "audit.jsonl"

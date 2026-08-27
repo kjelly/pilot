@@ -13,8 +13,14 @@
 #                              check existence for (pilot-grant-login-*)
 #   pilot_drift_sudo_names -- list of desired compiled sudo rule names to
 #                              check existence for (pilot-grant-sudo-*)
-#   pilot_drift_users      -- list of usernames to read krbPrincipalExpiration for
+#   pilot_drift_users      -- list of usernames to read krbPrincipalExpiration
+#                              and ipaUserAuthType for (v3.1 §7 / v3.2 §8 —
+#                              read together from one `ipa user-show` call
+#                              per user rather than two round trips)
 #   pilot_drift_hosts      -- list of hostnames to read krbPrincipalAuthInd for
+#   pilot_drift_password_policy_groups
+#                          -- list of group names to read live `ipa
+#                              pwpolicy-show --raw` state for (v3.2 §7/§12)
 #   target_group           -- optional, default freeipa-server
 #
 # Output contract (schema_version 1):
@@ -24,7 +30,18 @@
 #    "hbac_exists": {"<name>": bool, ...},
 #    "sudo_exists": {"<name>": bool, ...},
 #    "user_expiration": {"<user>": "<GeneralizedTime or empty>", ...},
-#    "host_auth_ind": {"<host>": ["otp", "pkinit", ...], ...}}
+#    "host_auth_ind": {"<host>": ["otp", "pkinit", ...], ...},
+#    "user_auth_type": {"<user>": ["otp", "pkinit", ...], ...},
+#    "password_policy": {"<group>": {"exists": bool, "priority": int,
+#       "min_length": int, "history_size": int, "max_life_days": int,
+#       "min_life_hours": int, "lockout_max_failures": int,
+#       "lockout_failure_reset_seconds": int,
+#       "lockout_duration_seconds": int}, ...}}
+#
+# v3.2 field-mapping caveat (same practice as freeipa-capability-probe.yml
+# and password_policy_compile.go's own header notes): the `ipa
+# pwpolicy-show --raw` attribute names below have not been confirmed
+# against a live FreeIPA target in this delivery.
 #
 # Scope note (v3.1 §12, Phase 4): this probe deliberately does NOT attempt
 # a full per-rule attribute parse (subjects/targets/services) of HBAC/sudo
@@ -183,6 +200,19 @@
         LC_ALL: C
       tags: [identity, drift]
 
+    - name: "Read live group password policies (v3.2 §7/§12)"
+      ansible.builtin.command:
+        argv: [ipa, pwpolicy-show, "{{ item }}", --raw]
+      loop: "{{ pilot_drift_password_policy_groups | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      register: pilot_drift_pwpolicy_show
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      tags: [identity, drift]
+
     # Built incrementally via `combine`, one dict entry per loop iteration,
     # rather than a single dense zip/dict one-liner: `regex_findall` always
     # returns a list (possibly empty), which sidesteps regex_search's
@@ -194,6 +224,8 @@
         pilot_drift_sudo_exists: {}
         pilot_drift_user_expiration: {}
         pilot_drift_host_auth_ind: {}
+        pilot_drift_user_auth_type: {}
+        pilot_drift_password_policy: {}
       run_once: true
       tags: [identity, drift]
 
@@ -239,6 +271,73 @@
       run_once: true
       tags: [identity, drift]
 
+    # v3.2 §8: reads the SAME `ipa user-show --all --raw` output the
+    # account-expiration accumulator above already fetched — no second
+    # per-user API round trip.
+    - name: "Accumulate live authentication types per user (v3.2 §8)"
+      ansible.builtin.set_fact:
+        pilot_drift_user_auth_type: >-
+          {{ pilot_drift_user_auth_type | combine({item.item:
+             (item.stdout | default('') |
+              regex_findall('(?m)^\s*ipauserauthtype:\s*(\S+)\s*$'))}) }}
+      loop: "{{ pilot_drift_user_show.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      run_once: true
+      tags: [identity, drift]
+
+    # v3.2 §7/§12: only fields desired actually configures are ever
+    # compared (internal/accessgrants.comparePasswordPolicyFields), so a
+    # missing/unparseable raw attribute here safely renders as JSON null
+    # (Go's *int unmarshals null to a nil pointer) rather than a
+    # fabricated zero.
+    - name: "Accumulate live group password policy state (v3.2 §7/§12)"
+      ansible.builtin.set_fact:
+        pilot_drift_password_policy: >-
+          {{ pilot_drift_password_policy | combine({item.item: {
+               'exists': (item.rc == 0),
+               'priority': (((item.stdout | default('') | regex_findall('(?m)^\s*cospriority:\s*(\S+)\s*$')) + [''])[0] | trim),
+               'min_length': (((item.stdout | default('') | regex_findall('(?m)^\s*krbpwdminlength:\s*(\S+)\s*$')) + [''])[0] | trim),
+               'history_size': (((item.stdout | default('') | regex_findall('(?m)^\s*krbpwdhistorylength:\s*(\S+)\s*$')) + [''])[0] | trim),
+               'max_life_days': (((item.stdout | default('') | regex_findall('(?m)^\s*krbmaxpwdlife:\s*(\S+)\s*$')) + [''])[0] | trim),
+               'min_life_hours': (((item.stdout | default('') | regex_findall('(?m)^\s*krbminpwdlife:\s*(\S+)\s*$')) + [''])[0] | trim),
+               'lockout_max_failures': (((item.stdout | default('') | regex_findall('(?m)^\s*krbpwdmaxfailure:\s*(\S+)\s*$')) + [''])[0] | trim),
+               'lockout_failure_reset_seconds': (((item.stdout | default('') |
+                 regex_findall('(?m)^\s*krbpwdfailurecountinterval:\s*(\S+)\s*$')) + [''])[0] | trim),
+               'lockout_duration_seconds': (((item.stdout | default('') | regex_findall('(?m)^\s*krbpwdlockoutduration:\s*(\S+)\s*$')) + [''])[0] | trim),
+             } }) }}
+      loop: "{{ pilot_drift_pwpolicy_show.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      run_once: true
+      tags: [identity, drift]
+
+    # The numeric fields above are collected as trimmed strings (Jinja has
+    # no clean inline "int-or-null" ternary); this pass converts every
+    # non-empty one to a real int and every empty one to JSON null so
+    # Go's *int fields unmarshal correctly (empty string is NOT a valid
+    # int and would otherwise fail json.Unmarshal outright).
+    - name: "Normalize live group password policy fields to int-or-null"
+      ansible.builtin.set_fact:
+        pilot_drift_password_policy: >-
+          {{ pilot_drift_password_policy | combine({
+               item.key: (item.value | combine({
+                 'priority': (item.value.priority | int if item.value.priority != '' else none),
+                 'min_length': (item.value.min_length | int if item.value.min_length != '' else none),
+                 'history_size': (item.value.history_size | int if item.value.history_size != '' else none),
+                 'max_life_days': (item.value.max_life_days | int if item.value.max_life_days != '' else none),
+                 'min_life_hours': (item.value.min_life_hours | int if item.value.min_life_hours != '' else none),
+                 'lockout_max_failures': (item.value.lockout_max_failures | int if item.value.lockout_max_failures != '' else none),
+                 'lockout_failure_reset_seconds': (item.value.lockout_failure_reset_seconds | int if item.value.lockout_failure_reset_seconds != '' else none),
+                 'lockout_duration_seconds': (item.value.lockout_duration_seconds | int if item.value.lockout_duration_seconds != '' else none),
+               }))
+             }) }}
+      loop: "{{ pilot_drift_password_policy | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      run_once: true
+      tags: [identity, drift]
+
     - name: "Build machine-readable drift-probe result"
       ansible.builtin.set_fact:
         pilot_drift_result:
@@ -253,6 +352,8 @@
           sudo_exists: "{{ pilot_drift_sudo_exists }}"
           user_expiration: "{{ pilot_drift_user_expiration }}"
           host_auth_ind: "{{ pilot_drift_host_auth_ind }}"
+          user_auth_type: "{{ pilot_drift_user_auth_type }}"
+          password_policy: "{{ pilot_drift_password_policy }}"
       changed_when: false
       run_once: true
       tags: [identity, drift]

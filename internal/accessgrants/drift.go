@@ -43,17 +43,36 @@ const (
 	pilotGrantSudoPrefix = "pilot-grant-sudo-"
 )
 
+// LivePasswordPolicy is one group's live `ipa pwpolicy-show --raw` state,
+// in the same units CompiledPasswordPolicy already compiles to (spec.md
+// v3.2 §7/§12). Exists is false when the group has no password policy at
+// all live — every other field is then meaningless and callers must not
+// read them.
+type LivePasswordPolicy struct {
+	Exists                     bool `json:"exists"`
+	Priority                   *int `json:"priority,omitempty"`
+	MinLength                  *int `json:"min_length,omitempty"`
+	HistorySize                *int `json:"history_size,omitempty"`
+	MaxLifeDays                *int `json:"max_life_days,omitempty"`
+	MinLifeHours               *int `json:"min_life_hours,omitempty"`
+	LockoutMaxFailures         *int `json:"lockout_max_failures,omitempty"`
+	LockoutFailureResetSeconds *int `json:"lockout_failure_reset_seconds,omitempty"`
+	LockoutDurationSeconds     *int `json:"lockout_duration_seconds,omitempty"`
+}
+
 // LiveState is freeipa-access-drift-probe.yml's parsed result — real
 // FreeIPA state at probe time, for internal/inventory's desired state to
 // be diffed against.
 type LiveState struct {
-	SchemaVersion  int                 `json:"schema_version"`
-	LiveHBACNames  []string            `json:"live_hbac_names"`
-	LiveSudoNames  []string            `json:"live_sudo_names"`
-	HBACExists     map[string]bool     `json:"hbac_exists"`
-	SudoExists     map[string]bool     `json:"sudo_exists"`
-	UserExpiration map[string]string   `json:"user_expiration"`
-	HostAuthInd    map[string][]string `json:"host_auth_ind"`
+	SchemaVersion  int                           `json:"schema_version"`
+	LiveHBACNames  []string                      `json:"live_hbac_names"`
+	LiveSudoNames  []string                      `json:"live_sudo_names"`
+	HBACExists     map[string]bool               `json:"hbac_exists"`
+	SudoExists     map[string]bool               `json:"sudo_exists"`
+	UserExpiration map[string]string             `json:"user_expiration"`
+	HostAuthInd    map[string][]string           `json:"host_auth_ind"`
+	UserAuthType   map[string][]string           `json:"user_auth_type"`
+	PasswordPolicy map[string]LivePasswordPolicy `json:"password_policy"`
 }
 
 // DriftProbeOptions configures a single live-state probe.
@@ -72,13 +91,15 @@ type DriftProbeOptions struct {
 	// group ("freeipa-server").
 	TargetGroup string
 
-	// HBACNames/SudoNames/Users/Hosts are the desired-state identifiers to
-	// probe existence/value for — the caller (DriftOnce) derives these
-	// from internal/inventory's compilers before calling DriftProbe.
-	HBACNames []string
-	SudoNames []string
-	Users     []string
-	Hosts     []string
+	// HBACNames/SudoNames/Users/Hosts/PasswordPolicyGroups are the
+	// desired-state identifiers to probe existence/value for — the
+	// caller (DriftOnce) derives these from internal/inventory's
+	// compilers before calling DriftProbe.
+	HBACNames            []string
+	SudoNames            []string
+	Users                []string
+	PasswordPolicyGroups []string
+	Hosts                []string
 
 	// Now is the injected clock DriftOnce evaluates grant lifecycle
 	// against when building the desired plan. Zero selects time.Now().
@@ -121,12 +142,13 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 	defer os.Remove(outputPath)
 
 	extraVars := map[string]any{
-		"freeipa_roster_file":    absRosterFile,
-		"pilot_drift_output":     outputPath,
-		"pilot_drift_hbac_names": emptyOr(opts.HBACNames),
-		"pilot_drift_sudo_names": emptyOr(opts.SudoNames),
-		"pilot_drift_users":      emptyOr(opts.Users),
-		"pilot_drift_hosts":      emptyOr(opts.Hosts),
+		"freeipa_roster_file":                absRosterFile,
+		"pilot_drift_output":                 outputPath,
+		"pilot_drift_hbac_names":             emptyOr(opts.HBACNames),
+		"pilot_drift_sudo_names":             emptyOr(opts.SudoNames),
+		"pilot_drift_users":                  emptyOr(opts.Users),
+		"pilot_drift_hosts":                  emptyOr(opts.Hosts),
+		"pilot_drift_password_policy_groups": emptyOr(opts.PasswordPolicyGroups),
 	}
 	if opts.TargetGroup != "" {
 		extraVars["target_group"] = opts.TargetGroup
@@ -217,7 +239,7 @@ func (r DriftReport) CountByCategory() map[string]int {
 // this function was never asked to probe is invisible to it except via
 // the orphan check, which uses live.LiveHBACNames/LiveSudoNames
 // independently of what was probed.
-func ComputeDrift(desiredHBAC []inventory.CompiledHBACRule, desiredSudo []inventory.CompiledSudoRule, desiredAuth []inventory.CompiledAuthPolicyHost, desiredAccounts []inventory.CompiledAccountExpiration, live LiveState) DriftReport {
+func ComputeDrift(desiredHBAC []inventory.CompiledHBACRule, desiredSudo []inventory.CompiledSudoRule, desiredAuth []inventory.CompiledAuthPolicyHost, desiredAccounts []inventory.CompiledAccountExpiration, desiredPasswordPolicies []inventory.CompiledPasswordPolicy, desiredUserAuthTypes []inventory.CompiledUserAuthType, live LiveState) DriftReport {
 	var items []DriftItem
 
 	desiredHBACNames := map[string]bool{}
@@ -271,7 +293,65 @@ func ComputeDrift(desiredHBAC []inventory.CompiledHBACRule, desiredSudo []invent
 		}
 	}
 
+	for _, a := range desiredUserAuthTypes {
+		want := append([]string{}, a.Allowed...)
+		sort.Strings(want)
+		got := append([]string{}, live.UserAuthType[a.User]...)
+		sort.Strings(got)
+		if !stringSlicesEqual(want, got) {
+			items = append(items, DriftItem{Category: "user_auth_type", Name: a.User, Detail: fmt.Sprintf("desired ipaUserAuthType %v, live %v", want, got)})
+		}
+	}
+
+	for _, p := range desiredPasswordPolicies {
+		got := live.PasswordPolicy[p.Group]
+		if p.State == "absent" {
+			if got.Exists {
+				items = append(items, DriftItem{Category: "password_policy_orphan", Name: p.Group, Detail: "password_policy is state: absent but a live group password policy still exists"})
+			}
+			continue
+		}
+		if !got.Exists {
+			items = append(items, DriftItem{Category: "password_policy_missing", Name: p.Group, Detail: "desired group password policy does not exist live"})
+			continue
+		}
+		for _, mismatch := range comparePasswordPolicyFields(p, got) {
+			items = append(items, DriftItem{Category: "password_policy_field", Name: p.Group, Detail: mismatch})
+		}
+	}
+
 	return DriftReport{Items: items}
+}
+
+// comparePasswordPolicyFields compares only the fields desired actually
+// configures — a field desired leaves unset carries no Pilot opinion, so
+// its live value (whatever it is) is never reported as drift.
+func comparePasswordPolicyFields(desired inventory.CompiledPasswordPolicy, got LivePasswordPolicy) []string {
+	var out []string
+	check := func(field string, want, have *int) {
+		if want == nil {
+			return
+		}
+		if have == nil || *want != *have {
+			out = append(out, fmt.Sprintf("%s: desired %s, live %s", field, intPtrLabel(want), intPtrLabel(have)))
+		}
+	}
+	check("priority", desired.Priority, got.Priority)
+	check("min_length", desired.MinLength, got.MinLength)
+	check("history_size", desired.HistorySize, got.HistorySize)
+	check("max_life_days", desired.MaxLifeDays, got.MaxLifeDays)
+	check("min_life_hours", desired.MinLifeHours, got.MinLifeHours)
+	check("lockout_max_failures", desired.LockoutMaxFailures, got.LockoutMaxFailures)
+	check("lockout_failure_reset_seconds", desired.LockoutFailureResetSeconds, got.LockoutFailureResetSeconds)
+	check("lockout_duration_seconds", desired.LockoutDurationSeconds, got.LockoutDurationSeconds)
+	return out
+}
+
+func intPtrLabel(p *int) string {
+	if p == nil {
+		return "(unset)"
+	}
+	return fmt.Sprintf("%d", *p)
 }
 
 func orEmptyLabel(s string) string {
@@ -323,12 +403,18 @@ func DriftOnce(ctx context.Context, opts DriftProbeOptions) (DriftReport, error)
 	for _, h := range plan.AuthPolicyHosts {
 		probeOpts.Hosts = append(probeOpts.Hosts, h.Host)
 	}
+	for _, a := range plan.UserAuthTypes {
+		probeOpts.Users = append(probeOpts.Users, a.User)
+	}
+	for _, p := range plan.PasswordPolicies {
+		probeOpts.PasswordPolicyGroups = append(probeOpts.PasswordPolicyGroups, p.Group)
+	}
 
 	live, err := DriftProbe(ctx, probeOpts)
 	if err != nil {
 		return DriftReport{}, err
 	}
-	report := ComputeDrift(plan.HBACRules, plan.SudoRules, plan.AuthPolicyHosts, plan.AccountExpirations, live)
+	report := ComputeDrift(plan.HBACRules, plan.SudoRules, plan.AuthPolicyHosts, plan.AccountExpirations, plan.PasswordPolicies, plan.UserAuthTypes, live)
 
 	if opts.StateDir != "" {
 		if auditErr := AppendAuditEvent(opts.StateDir, AccessAuditEvent{

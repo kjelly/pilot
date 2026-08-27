@@ -299,6 +299,32 @@ func hasSSHFinding(findings []SSHHygieneFinding, user, issue string) bool {
 	return false
 }
 
+func TestCredentialPolicyCoverage_ResolvesNestedGroupMembership(t *testing.T) {
+	root := grantsRoster(t, `
+credential_policies:
+  - name: privileged-ssh
+    match: {users: [vendor01], groups: [role-production-operator]}
+`)
+	got := CredentialPolicyCoverage(root)
+	users := got["privileged-ssh"]
+	if len(users) != 2 || users[0] != "alice" || users[1] != "vendor01" {
+		t.Fatalf("expected [alice vendor01] (role member + direct user, sorted), got: %v", users)
+	}
+}
+
+func TestCredentialPolicyCoverage_AbsentPolicyExcluded(t *testing.T) {
+	root := grantsRoster(t, `
+credential_policies:
+  - name: retired
+    state: absent
+    match: {users: [], groups: [role-production-operator]}
+`)
+	got := CredentialPolicyCoverage(root)
+	if _, has := got["retired"]; has {
+		t.Fatalf("expected an absent policy to be excluded from coverage, got: %v", got)
+	}
+}
+
 func TestEvaluateCredentialReviewStatuses_NeverReviewedIsOverdue(t *testing.T) {
 	root := grantsRoster(t, `
 credential_policies:

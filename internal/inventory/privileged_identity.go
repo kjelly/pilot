@@ -139,6 +139,25 @@ func EvaluatePrivilegedIdentityBaseline(root map[string]any) []PrivilegedIdentit
 	return out
 }
 
+// PrivilegedUsers returns every user security.privileged_identity.
+// match_groups reaches (direct + nested membership), regardless of
+// whether they comply with require — the full privileged set, not just
+// the non-compliant ones EvaluatePrivilegedIdentityBaseline reports.
+// Empty (nil) when no privileged_identity block is declared.
+func PrivilegedUsers(root map[string]any) []string {
+	security := mapField(root, "security")
+	if _, has := security["privileged_identity"]; !has {
+		return nil
+	}
+	pi := mapField(security, "privileged_identity")
+	groupsByName := rosterGroupsByName(root)
+	privileged := map[string]bool{}
+	for _, g := range stringListField(pi, "match_groups") {
+		expandGroupMembers(groupsByName, g, map[string]bool{}, privileged)
+	}
+	return sortedSetKeys(privileged)
+}
+
 // EvaluatePrivilegedIdentityBaselineFile is
 // EvaluatePrivilegedIdentityBaseline's file-reading counterpart,
 // mirroring EvaluateGrantPoliciesFile's read/parse/dispatch shape.
