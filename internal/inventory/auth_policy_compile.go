@@ -5,6 +5,20 @@
 // these indicators satisfies the requirement" — exactly require_any's
 // meaning — so compiling multiple policies covering the same host is just
 // a set union, no additional Go-side OR/AND logic needed.
+//
+// v3.1 §9 classification: once `pilot access reconcile` applies a host's
+// krbPrincipalAuthInd, enforcement belongs entirely to FreeIPA/Kerberos —
+// this is native persistent enforcement (§5's category 3), not a
+// reconcile-dependent timing (unlike a temporary_grant's HBAC window,
+// §10.2). No periodic Pilot run is required to keep it active. The
+// capability/safety guardrail that rejects an IPA server/replica target
+// before mutation (§9.2) lives entirely in the apply playbook (it needs a
+// live `ipa server-find`, not just roster content) — see
+// playbooks/apply/freeipa-identity-apply.yml's "Fail closed if an
+// auth_policies target is an IPA server/replica" task, confirmed live on
+// a two-node fixture. One-shot drift inspection for this axis
+// (auth-policy drift) is deferred to §12.4/Phase 4 — §9.3 explicitly
+// scopes it out of this file.
 package inventory
 
 import "sort"
