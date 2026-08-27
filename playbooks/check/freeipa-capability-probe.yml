@@ -1,0 +1,222 @@
+---
+# Read-only, fail-closed probe backing internal/freeipa's
+# ProbeCapabilities (spec.md v3.2 §13). It never mutates FreeIPA — every
+# task below is an `ipa help *` / `ipa *-show` / `ipa *-find` read, mirrors
+# playbooks/check/freeipa-access-drift-probe.yml's structure (kinit
+# read-only, run a handful of `ipa` queries, write one controller-side
+# JSON result file for Go to parse).
+#
+# Required extra-vars:
+#   freeipa_roster_file     -- canonical roster path (for admin creds)
+#   pilot_capability_output -- controller-side path this writes JSON to
+#   target_group            -- optional, default freeipa-server
+#
+# Output contract (schema_version 1):
+#   {"schema_version": 1,
+#    "capabilities": {"group_password_policy": "supported"|"unsupported"|"unknown",
+#                      "password_lockout_policy": ...,
+#                      "user_auth_types": ...,
+#                      "authentication_indicator": ...,
+#                      "principal_expiration": ...,
+#                      "sudo_not_before_after": ...}}
+#
+# Detection strategy per control (never guesses "supported" without
+# positive evidence — an ambiguous/failed read reports "unknown", the
+# same fail-closed default internal/freeipa's unknownCapabilities() uses):
+#   group_password_policy / password_lockout_policy
+#     -- `ipa pwpolicy-show --raw` against the always-present global
+#        policy. rc==0 and the specific krb* raw attribute is present in
+#        the output -> supported. rc==0 but the attribute is absent ->
+#        unknown (a populated global policy should carry FreeIPA's own
+#        defaults for these; absence is unusual enough not to assume
+#        "not in schema" from it alone). rc!=0 -> unsupported (the
+#        command itself failed against an object that always exists).
+#   user_auth_types / principal_expiration
+#     -- `ipa help user-mod` text-scanned for the "--user-auth-type" /
+#        "--principal-expiration" flag names. Both are already-shipped,
+#        native CLI flags (principal_expiration since v3.1 §7), so
+#        presence/absence in help text is a direct, reliable signal.
+#   authentication_indicator
+#     -- `ipa help host-mod` text-scanned for "--auth-ind" (already
+#        shipped and verified live — v3.1 §9/§11). Kept as a probe
+#        (rather than hardcoded "supported") for a consistent, uniform
+#        contract across all six controls.
+#   sudo_not_before_after
+#     -- sudoNotBefore/sudoNotAfter (v3.1 §8) are plain passthrough
+#        attributes set via `--setattr=`, not dedicated CLI flags, so
+#        `ipa help sudorule-mod` cannot prove support either way.
+#        Instead this scans `ipa sudorule-find --all --raw` for any
+#        existing rule already carrying a live `sudonotbefore:` or
+#        `sudonotafter:` value as positive evidence the attribute is
+#        schema-defined here. No existing rule has one set ->
+#        unknown (absence of evidence is not evidence of absence) —
+#        NOT unsupported, since v3.1 §8 already proves this attribute
+#        works when Pilot's own compiled sudo grants populate it.
+#
+# Caveat (documented per this repo's convention of flagging unverified
+# live behavior rather than claiming false verification — see
+# freeipa-access-drift-probe.yml's own header note): the exact `ipa help
+# user-mod`/`ipa help host-mod` flag-name text and `ipa pwpolicy-show
+# --raw` attribute-key formatting have NOT been confirmed against a live
+# FreeIPA target in this delivery. The detection logic above is derived
+# from documented FreeIPA CLI conventions used elsewhere in this
+# codebase (raw ldap attribute names, `ipa help` flag listings), not from
+# an observed live run. Confirm on a vm-target before relying on this
+# playbook's verdicts for a real apply gate.
+
+- name: Probe live FreeIPA capability support for identity-hardening controls
+  hosts: "{{ target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+
+  vars:
+    freeipa_roster: {}
+
+  pre_tasks:
+    - name: "Gate: capability probe input is complete"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster_file is defined
+          - freeipa_roster_file | string | trim | length > 0
+          - pilot_capability_output is defined
+          - pilot_capability_output | string | trim | length > 0
+        fail_msg: "freeipa_roster_file and pilot_capability_output are required."
+      run_once: true
+      tags: [always]
+
+    - name: "Load canonical roster under a namespace"
+      ansible.builtin.include_vars:
+        file: "{{ freeipa_roster_file }}"
+        name: freeipa_roster
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: canonical roster is available"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster.schema_version is defined
+          - freeipa_roster.freeipa is defined
+          - freeipa_roster.freeipa.admin is defined
+          - freeipa_roster.freeipa.admin.password is defined
+          - freeipa_roster.freeipa.admin.password | length >= 8
+        fail_msg: >-
+          Canonical roster with FreeIPA admin credentials is required for
+          an authoritative capability probe.
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Normalize FreeIPA probe settings"
+      ansible.builtin.set_fact:
+        ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+        ipa_realm: >-
+          {{ freeipa_realm |
+             default((freeipa_domain | default('ipa.pilot.internal')) | upper) }}
+        identity_admin_principal: >-
+          {{ freeipa_roster.freeipa.admin.principal | default('admin') }}
+        identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Kinit admin for read-only capability probe"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          printf %s "{{ identity_admin_password }}" |
+            kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      run_once: true
+      tags: [identity, capability]
+
+  tasks:
+    - name: "Read global password policy (raw attributes)"
+      ansible.builtin.command:
+        argv: [ipa, pwpolicy-show, --raw]
+      register: pilot_cap_pwpolicy
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      run_once: true
+      tags: [identity, capability]
+
+    - name: "Read ipa help for user-mod flags"
+      ansible.builtin.command:
+        argv: [ipa, help, user-mod]
+      register: pilot_cap_help_user_mod
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      run_once: true
+      tags: [identity, capability]
+
+    - name: "Read ipa help for host-mod flags"
+      ansible.builtin.command:
+        argv: [ipa, help, host-mod]
+      register: pilot_cap_help_host_mod
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      run_once: true
+      tags: [identity, capability]
+
+    - name: "List live sudo rules (raw attributes) for sudoNotBefore/After evidence"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-find, --all, --raw]
+      register: pilot_cap_sudorule_find
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      run_once: true
+      tags: [identity, capability]
+
+    - name: "Build machine-readable capability-probe result"
+      ansible.builtin.set_fact:
+        pilot_capability_result:
+          schema_version: 1
+          capabilities:
+            group_password_policy: >-
+              {{ 'supported' if (pilot_cap_pwpolicy.rc == 0 and
+                                  'krbmaxpwdlife:' in (pilot_cap_pwpolicy.stdout | default('')))
+                 else ('unknown' if pilot_cap_pwpolicy.rc == 0 else 'unsupported') }}
+            password_lockout_policy: >-
+              {{ 'supported' if (pilot_cap_pwpolicy.rc == 0 and
+                                  'krbpwdmaxfailure:' in (pilot_cap_pwpolicy.stdout | default('')))
+                 else ('unknown' if pilot_cap_pwpolicy.rc == 0 else 'unsupported') }}
+            user_auth_types: >-
+              {{ 'supported' if (pilot_cap_help_user_mod.rc == 0 and
+                                  'user-auth-type' in (pilot_cap_help_user_mod.stdout | default('')))
+                 else ('unsupported' if pilot_cap_help_user_mod.rc == 0 else 'unknown') }}
+            principal_expiration: >-
+              {{ 'supported' if (pilot_cap_help_user_mod.rc == 0 and
+                                  'principal-expiration' in (pilot_cap_help_user_mod.stdout | default('')))
+                 else ('unsupported' if pilot_cap_help_user_mod.rc == 0 else 'unknown') }}
+            authentication_indicator: >-
+              {{ 'supported' if (pilot_cap_help_host_mod.rc == 0 and
+                                  'auth-ind' in (pilot_cap_help_host_mod.stdout | default('')))
+                 else ('unsupported' if pilot_cap_help_host_mod.rc == 0 else 'unknown') }}
+            sudo_not_before_after: >-
+              {{ 'supported' if (pilot_cap_sudorule_find.rc == 0 and
+                                  ('sudonotbefore:' in (pilot_cap_sudorule_find.stdout | default('')) or
+                                   'sudonotafter:' in (pilot_cap_sudorule_find.stdout | default(''))))
+                 else 'unknown' }}
+      changed_when: false
+      run_once: true
+      tags: [identity, capability]
+
+    - name: "Write capability-probe result on the Ansible controller"
+      ansible.builtin.copy:
+        dest: "{{ pilot_capability_output }}"
+        mode: "0600"
+        content: "{{ pilot_capability_result | to_nice_json }}\n"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      tags: [identity, capability]
