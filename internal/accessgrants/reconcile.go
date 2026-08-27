@@ -338,6 +338,27 @@ func ReconcileOnce(ctx context.Context, opts ReconcileOptions) (Plan, *ansible.R
 			return plan, result, fmt.Errorf("accessgrants: reconcile applied but recording auth-policy state failed: %w", serr)
 		}
 	}
+
+	// spec.md v3.1 §15: record this explicit reconcile regardless of
+	// outcome. A failed audit write on an otherwise-successful reconcile
+	// is itself worth surfacing (a gap in the audit trail); a failed audit
+	// write on an already-failing reconcile must not mask the original
+	// error — best-effort only in that branch.
+	if opts.StateDir != "" {
+		outcome := "success"
+		if err != nil {
+			outcome = "failure"
+		}
+		auditErr := AppendAuditEvent(opts.StateDir, AccessAuditEvent{
+			Action:     AuditActionExplicitAccessReconcile,
+			SourceKind: "temporary_grant,sudo_grant,auth_policy,account_policy",
+			Resource:   opts.RosterFile,
+			Outcome:    outcome,
+		})
+		if auditErr != nil && err == nil {
+			return plan, result, fmt.Errorf("accessgrants: reconcile applied but recording the audit event failed: %w", auditErr)
+		}
+	}
 	return plan, result, err
 }
 

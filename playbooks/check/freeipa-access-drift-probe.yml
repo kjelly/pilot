@@ -1,0 +1,268 @@
+---
+# Read-only, fail-closed probe backing `pilot access drift` (spec.md v3.1
+# §12). It never mutates FreeIPA — mirrors probe.go's ever-applied probes
+# (playbooks/check/freeipa-identity-user-ever-applied.yml) in structure:
+# kinit read-only, run a handful of `ipa *-show`/`*-find` queries, write one
+# controller-side JSON result file for Go (internal/accessgrants/drift.go)
+# to parse and diff against desired state.
+#
+# Required extra-vars:
+#   freeipa_roster_file    -- canonical roster path (for admin creds)
+#   pilot_drift_output     -- controller-side path this writes JSON to
+#   pilot_drift_hbac_names -- list of desired compiled HBAC rule names to
+#                              check existence for (pilot-grant-login-*)
+#   pilot_drift_sudo_names -- list of desired compiled sudo rule names to
+#                              check existence for (pilot-grant-sudo-*)
+#   pilot_drift_users      -- list of usernames to read krbPrincipalExpiration for
+#   pilot_drift_hosts      -- list of hostnames to read krbPrincipalAuthInd for
+#   target_group           -- optional, default freeipa-server
+#
+# Output contract (schema_version 1):
+#   {"schema_version": 1,
+#    "live_hbac_names": ["pilot-grant-login-...", "allow_all", ...],
+#    "live_sudo_names": ["pilot-grant-sudo-...", ...],
+#    "hbac_exists": {"<name>": bool, ...},
+#    "sudo_exists": {"<name>": bool, ...},
+#    "user_expiration": {"<user>": "<GeneralizedTime or empty>", ...},
+#    "host_auth_ind": {"<host>": ["otp", "pkinit", ...], ...}}
+#
+# Scope note (v3.1 §12, Phase 4): this probe deliberately does NOT attempt
+# a full per-rule attribute parse (subjects/targets/services) of HBAC/sudo
+# rules — FreeIPA CLI's `--all`/`--raw` field labels for that would be a
+# genuinely unverified assumption in this delivery (no live FreeIPA target
+# was available to confirm exact output format). It sticks to what is
+# either already proven live in this codebase (`cn:` extraction via the
+# same regex the auth-ind guardrail task already uses — see
+# freeipa-identity-apply.yml) or a simple rc==0/!=0 existence check (the
+# same "not found" convention playbooks/check/
+# freeipa-identity-user-ever-applied.yml already relies on). Full
+# subject/target/service drift for HBAC/sudo rules remains a follow-up.
+
+- name: Probe live FreeIPA access-governance state for drift inspection
+  hosts: "{{ target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+
+  vars:
+    freeipa_roster: {}
+    pilot_drift_hbac_names: []
+    pilot_drift_sudo_names: []
+    pilot_drift_users: []
+    pilot_drift_hosts: []
+
+  pre_tasks:
+    - name: "Gate: drift probe input is complete"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster_file is defined
+          - freeipa_roster_file | string | trim | length > 0
+          - pilot_drift_output is defined
+          - pilot_drift_output | string | trim | length > 0
+        fail_msg: "freeipa_roster_file and pilot_drift_output are required."
+      run_once: true
+      tags: [always]
+
+    - name: "Load canonical roster under a namespace"
+      ansible.builtin.include_vars:
+        file: "{{ freeipa_roster_file }}"
+        name: freeipa_roster
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: canonical roster is available"
+      ansible.builtin.assert:
+        that:
+          - freeipa_roster.schema_version is defined
+          - freeipa_roster.freeipa is defined
+          - freeipa_roster.freeipa.admin is defined
+          - freeipa_roster.freeipa.admin.password is defined
+          - freeipa_roster.freeipa.admin.password | length >= 8
+        fail_msg: >-
+          Canonical roster with FreeIPA admin credentials is required for
+          an authoritative drift probe.
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Normalize FreeIPA probe settings"
+      ansible.builtin.set_fact:
+        ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+        ipa_realm: >-
+          {{ freeipa_realm |
+             default((freeipa_domain | default('ipa.pilot.internal')) | upper) }}
+        identity_admin_principal: >-
+          {{ freeipa_roster.freeipa.admin.principal | default('admin') }}
+        identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Kinit admin for read-only drift probe"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          printf %s "{{ identity_admin_password }}" |
+            kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      run_once: true
+      tags: [identity, drift]
+
+  tasks:
+    - name: "List live HBAC rule names"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-find, --raw]
+      register: pilot_drift_hbac_find
+      changed_when: false
+      environment:
+        LC_ALL: C
+      run_once: true
+      tags: [identity, drift]
+
+    - name: "List live sudo rule names"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-find, --raw]
+      register: pilot_drift_sudo_find
+      changed_when: false
+      environment:
+        LC_ALL: C
+      run_once: true
+      tags: [identity, drift]
+
+    - name: "Check existence of each desired compiled HBAC rule"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-show, "{{ item }}"]
+      loop: "{{ pilot_drift_hbac_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: pilot_drift_hbac_show
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      tags: [identity, drift]
+
+    - name: "Check existence of each desired compiled sudo rule"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-show, "{{ item }}"]
+      loop: "{{ pilot_drift_sudo_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: pilot_drift_sudo_show
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      tags: [identity, drift]
+
+    - name: "Read live account principal expiration per user"
+      ansible.builtin.command:
+        argv: [ipa, user-show, "{{ item }}", --all, --raw]
+      loop: "{{ pilot_drift_users }}"
+      loop_control:
+        label: "{{ item }}"
+      register: pilot_drift_user_show
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      tags: [identity, drift]
+
+    - name: "Read live authentication indicators per host"
+      ansible.builtin.command:
+        argv: [ipa, host-show, "{{ item }}", --all, --raw]
+      loop: "{{ pilot_drift_hosts }}"
+      loop_control:
+        label: "{{ item }}"
+      register: pilot_drift_host_show
+      changed_when: false
+      failed_when: false
+      environment:
+        LC_ALL: C
+      tags: [identity, drift]
+
+    # Built incrementally via `combine`, one dict entry per loop iteration,
+    # rather than a single dense zip/dict one-liner: `regex_findall` always
+    # returns a list (possibly empty), which sidesteps regex_search's
+    # riskier "no match" behavior with a capture-group reference — the
+    # `+ ['']` / `[0]` trick below can never index an empty list.
+    - name: "Initialize drift-probe accumulators"
+      ansible.builtin.set_fact:
+        pilot_drift_hbac_exists: {}
+        pilot_drift_sudo_exists: {}
+        pilot_drift_user_expiration: {}
+        pilot_drift_host_auth_ind: {}
+      run_once: true
+      tags: [identity, drift]
+
+    - name: "Accumulate compiled HBAC rule existence"
+      ansible.builtin.set_fact:
+        pilot_drift_hbac_exists: "{{ pilot_drift_hbac_exists | combine({item.item: (item.rc == 0)}) }}"
+      loop: "{{ pilot_drift_hbac_show.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      run_once: true
+      tags: [identity, drift]
+
+    - name: "Accumulate compiled sudo rule existence"
+      ansible.builtin.set_fact:
+        pilot_drift_sudo_exists: "{{ pilot_drift_sudo_exists | combine({item.item: (item.rc == 0)}) }}"
+      loop: "{{ pilot_drift_sudo_show.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      run_once: true
+      tags: [identity, drift]
+
+    - name: "Accumulate live account principal expiration per user"
+      ansible.builtin.set_fact:
+        pilot_drift_user_expiration: >-
+          {{ pilot_drift_user_expiration | combine({item.item:
+             ((item.stdout | default('') |
+               regex_findall('(?m)^\s*krbprincipalexpiration:\s*(\S+)\s*$')) + [''])[0]}) }}
+      loop: "{{ pilot_drift_user_show.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      run_once: true
+      tags: [identity, drift]
+
+    - name: "Accumulate live authentication indicators per host"
+      ansible.builtin.set_fact:
+        pilot_drift_host_auth_ind: >-
+          {{ pilot_drift_host_auth_ind | combine({item.item:
+             (item.stdout | default('') |
+              regex_findall('(?m)^\s*krbprincipalauthind:\s*(\S+)\s*$'))}) }}
+      loop: "{{ pilot_drift_host_show.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      run_once: true
+      tags: [identity, drift]
+
+    - name: "Build machine-readable drift-probe result"
+      ansible.builtin.set_fact:
+        pilot_drift_result:
+          schema_version: 1
+          live_hbac_names: >-
+            {{ pilot_drift_hbac_find.stdout | default('') |
+               regex_findall('(?m)^\s*cn:\s*(\S+)\s*$') }}
+          live_sudo_names: >-
+            {{ pilot_drift_sudo_find.stdout | default('') |
+               regex_findall('(?m)^\s*cn:\s*(\S+)\s*$') }}
+          hbac_exists: "{{ pilot_drift_hbac_exists }}"
+          sudo_exists: "{{ pilot_drift_sudo_exists }}"
+          user_expiration: "{{ pilot_drift_user_expiration }}"
+          host_auth_ind: "{{ pilot_drift_host_auth_ind }}"
+      changed_when: false
+      run_once: true
+      tags: [identity, drift]
+
+    - name: "Write drift-probe result on the Ansible controller"
+      ansible.builtin.copy:
+        dest: "{{ pilot_drift_output }}"
+        mode: "0600"
+        content: "{{ pilot_drift_result | to_nice_json }}\n"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      tags: [identity, drift]
