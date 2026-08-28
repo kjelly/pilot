@@ -15,6 +15,19 @@
 # Caller contract:
 #   include with: vars: { hosts_alias_target_host: "<raw IP/FQDN value>" }
 #   result:       hosts_alias_resolved_ip
+#
+# This file is included more than once per play by several apply
+# playbooks (e.g. prometheus-apply.yml pins thanos_s3_target_host then
+# alertmanager_target_host; detection-engine-apply.yml pins its Thanos
+# and Alertmanager aliases). `hosts_alias_resolved_ip` is a *fact* —
+# once set_fact'd on a host it stays defined for the rest of the play,
+# so a second inclusion's `is not defined` guards below would silently
+# skip resolution and reuse the FIRST call's IP for the SECOND alias.
+# Always reset it before resolving.
+- name: "Reset hosts_alias_resolved_ip before resolving {{ hosts_alias_target_host }}"
+  ansible.builtin.set_fact:
+    hosts_alias_resolved_ip: ""
+
 - name: "Resolve {{ hosts_alias_target_host }} against this inventory's own hosts"
   vars:
     hosts_alias_inventory_match: >-
@@ -45,11 +58,11 @@
   changed_when: false
   when:
     - hosts_alias_target_host | default('') | length > 0
-    - hosts_alias_resolved_ip is not defined
+    - hosts_alias_resolved_ip | default('') | length == 0
 
 - name: "Consolidate the resolved alias target IP"
   ansible.builtin.set_fact:
     hosts_alias_resolved_ip: "{{ hosts_alias_dns_lookup.stdout | trim }}"
   when:
     - hosts_alias_target_host | default('') | length > 0
-    - hosts_alias_resolved_ip is not defined
+    - hosts_alias_resolved_ip | default('') | length == 0

@@ -126,11 +126,17 @@
       register: detection_textfile_dir_stat
       tags: [always]
 
+    # dot-notation on a stat result that doesn't exist (`.stat.isdir` when
+    # `.stat == {"exists": false}`) raises a real AttributeError instead of
+    # becoming Undefined — a repo-wide known Jinja gotcha (see the
+    # freeipa-dns/internal-endpoint history). `.get(key, default)` avoids
+    # it, and matters here specifically because the whole POINT of this
+    # gate is to give a clean error on exactly the missing-directory case.
     - name: "Gate: assert host-monitoring's textfile directory is present and a directory"
       ansible.builtin.assert:
         that:
-          - detection_textfile_dir_stat.stat.exists
-          - detection_textfile_dir_stat.stat.isdir
+          - detection_textfile_dir_stat.stat.get('exists', false)
+          - detection_textfile_dir_stat.stat.get('isdir', false)
         fail_msg: >-
           /var/lib/node_exporter/textfile does not exist. detection-engine
           depends on host-monitoring being applied on this SAME host (spec
@@ -175,11 +181,11 @@
     - name: "Gate: controller-side artifact exists and its SHA256 matches"
       ansible.builtin.assert:
         that:
-          - detection_engine_artifact_stat.stat.exists
-          - detection_engine_artifact_stat.stat.checksum == detection_engine_artifact_sha256
+          - detection_engine_artifact_stat.stat.get('exists', false)
+          - detection_engine_artifact_stat.stat.get('checksum', '') == detection_engine_artifact_sha256
         fail_msg: >-
           controller artifact {{ detection_engine_artifact_abs_path }} is
-          missing or its SHA256 ({{ detection_engine_artifact_stat.stat.checksum | default('MISSING') }})
+          missing or its SHA256 ({{ detection_engine_artifact_stat.stat.get('checksum', 'MISSING') }})
           does not match detection_engine_artifact_sha256
           ({{ detection_engine_artifact_sha256 }}).
       run_once: true
@@ -193,6 +199,12 @@
       run_once: true
       register: detection_engine_artifact_version
       changed_when: false
+      # command has no native check-mode support, so without this it would
+      # be SIMULATED (not actually run) under --check, leaving .stdout
+      # empty and failing the assert below on every dry-run. Safe to force
+      # real execution regardless of check mode: this only reads the
+      # controller's own local binary, no target-host mutation at all.
+      check_mode: false
       tags: [always]
 
     - name: "Gate: version output matches the binary contract (`pilot-detection-engine <version> (<commit>)`)"
@@ -298,10 +310,17 @@
       retries: 3
       delay: 5
       until: detection_thanos_probe.status is defined and detection_thanos_probe.status == 200
+      # Matching one exact concatenated substring here (no whitespace)
+      # broke against a real server: Python's json.dumps (this repo's own
+      # fake-lane fixture — see playbooks/test/detection-engine-
+      # fixtures.yml) emits `"resultType": "vector"` WITH a space after
+      # the colon by default, not `"resultType":"vector"`. Two separate,
+      # whitespace-tolerant substring checks instead.
       failed_when: >-
         detection_thanos_probe.status is not defined
         or detection_thanos_probe.status != 200
-        or '"resultType":"vector"' not in detection_thanos_probe.content
+        or '"resultType"' not in detection_thanos_probe.content
+        or '"vector"' not in detection_thanos_probe.content
 
     - name: "Gate: Alertmanager is ready"
       ansible.builtin.uri:
@@ -412,15 +431,21 @@
             checksum_algorithm: sha256
           register: detection_engine_target_binary_stat
 
+        # Step 6's copy is only SIMULATED under --check (the file isn't
+        # really written), so on a from-scratch host stat's result here
+        # has no `.checksum` key at all (`stat.exists: false`) — asserting
+        # on it would crash the dry-run, not just fail it. Same "defer to
+        # the real apply" convention as Steps 15-17 below.
         - name: "Step 7: assert target-side SHA256 matches"
           ansible.builtin.assert:
             that:
-              - detection_engine_target_binary_stat.stat.checksum == detection_engine_artifact_sha256
+              - detection_engine_target_binary_stat.stat.get('checksum', '') == detection_engine_artifact_sha256
             fail_msg: >-
               target binary SHA256
-              ({{ detection_engine_target_binary_stat.stat.checksum }}) does
+              ({{ detection_engine_target_binary_stat.stat.get('checksum', 'MISSING') }}) does
               not match detection_engine_artifact_sha256
               ({{ detection_engine_artifact_sha256 }}) after copy.
+          when: not ansible_check_mode
 
         - name: "Step 8: copy the feature profile to the target"
           ansible.builtin.copy:
@@ -505,12 +530,17 @@
             daemon_reload: true
           when: detection_engine_unit_result is changed
 
+        # Step 11's unit-file render is only simulated under --check (the
+        # file isn't really written on a from-scratch host), so `systemd`
+        # here would fail with "Could not find the requested service" —
+        # same check-mode gap as host-monitoring-apply.yml's own Step 12.
         - name: "Step 13: ensure pilot-detection-engine.service enabled+started"
           tags: [detection-engine-C2, detection-engine-C8]
           ansible.builtin.systemd:
             name: pilot-detection-engine.service
             state: started
             enabled: true
+          when: not ansible_check_mode
 
         # `state: restarted` is never idempotent — only restart when
         # something that actually affects the running process changed, so
@@ -521,12 +551,21 @@
             name: pilot-detection-engine.service
             state: restarted
           when: >-
-            detection_engine_binary_result is changed
+            not ansible_check_mode
+            and (detection_engine_binary_result is changed
             or detection_engine_feature_profile_result is changed
             or detection_engine_config_result is changed
             or detection_engine_unit_result is changed
-            or detection_engine_provider_env_result is changed
+            or detection_engine_provider_env_result is changed)
 
+        # Steps 15-17 all depend on Steps 9-14's mutations having REALLY
+        # happened (service actually (re)started with the real config/
+        # binary) — under --check those are only simulated, so these
+        # three would either spin out their full retry budget for nothing
+        # or assert against a simulated result's undefined rc. Skipping
+        # them outright under check mode is the same "defer to the real
+        # apply" convention host-monitoring-apply.yml/prometheus-apply.yml
+        # already use for this exact class of check-mode gap.
         - name: "Step 15: wait for the service to report active"
           ansible.builtin.command:
             argv: [systemctl, is-active, pilot-detection-engine.service]
@@ -535,6 +574,7 @@
           retries: 10
           delay: 2
           until: detection_engine_active_check.rc == 0
+          when: not ansible_check_mode
 
         - name: "Step 16: wait for status.json to report healthy (spec §37 — first cycle needs at least one cycle_interval)"
           tags: [detection-engine-C9]
@@ -546,6 +586,7 @@
           retries: 20
           delay: 5
           until: detection_engine_status_check.rc == 0
+          when: not ansible_check_mode
 
         - name: "Step 16: assert status.json was reachable"
           ansible.builtin.assert:
@@ -555,6 +596,7 @@
               status.json never became readable at
               {{ detection_engine_status_path }} — check
               `journalctl -u detection-engine`.
+          when: not ansible_check_mode
 
         - name: "Step 17: verify database integrity"
           tags: [detection-engine-C4]
@@ -562,6 +604,16 @@
             argv: ["{{ detection_engine_bin_dest }}", "db", "check", "--db", "{{ detection_engine_db_path }}"]
           register: detection_engine_db_check
           changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Step 17b: enforce state.db ownership/mode (spec §8/C4 — the sqlite driver creates it 0644 by default)"
+          tags: [detection-engine-C4]
+          ansible.builtin.file:
+            path: "{{ detection_engine_db_path }}"
+            owner: pilot-detect
+            group: pilot-detect
+            mode: "0600"
+          when: not ansible_check_mode
 
       rescue:
         - name: "ROLLBACK — stop the newly (mis)configured service"

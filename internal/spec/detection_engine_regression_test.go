@@ -111,6 +111,24 @@ func TestRegression_DetectionEngineSpec(t *testing.T) {
 		}
 	}
 
+	// The Thanos reachability gate's failed_when must not use a single
+	// concatenated no-whitespace JSON substring — a real server's
+	// json.dumps (this repo's own fake-lane fixture included) emits
+	// `"resultType": "vector"` WITH a space, which a `"resultType":"vector"`
+	// match silently fails against (found via a real vm-target topology
+	// test run against the fake fixture). Only non-comment lines count —
+	// this exact substring legitimately appears in the explanatory
+	// comment above the fix.
+	for _, line := range strings.Split(applyRaw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, `"resultType":"vector"`) {
+			t.Errorf(`detection-engine-apply.yml must not match the no-space substring "resultType":"vector" — a real json.dumps response has a space after the colon; got line %q`, trimmed)
+		}
+	}
+
 	// spec §6.3: controller-side artifact existence/SHA256/version must be
 	// gated before any mutation, and re-verified again on the target after
 	// copy.

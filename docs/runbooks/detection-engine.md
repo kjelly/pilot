@@ -200,18 +200,100 @@ verdict: FAIL  (pass=9 fail=1 skip=0)    # C8 fail：同一個假 S3 endpoint �
 
 ## 6. 已知限制 / 尚未完成
 
-- **Fake-protocol topology lane（spec §49 C11）尚未實跑**——
-  `playbooks/test/detection-engine-fixtures.yml` 已經寫好（fake Thanos
-  Query stub :10912 + fake Alertmanager stub :9093，皆為 stdlib-only
-  Python + systemd），但尚未真的跑過 `vm-target topology test` 驗證整條
-  lifecycle/escalation/resolution/outbox-ordering 情境。這條鏈路目前的
-  證據是 `internal/detection` 的 Go 單元測試（`lifecycle_test.go`/
-  `outbox_test.go`/`store_test.go`），已經逐一鎖住每個轉移規則，但沒有
-  對應的活體 VM 執行記錄。
+- ~~Fake-protocol topology lane（spec §49 C11）尚未實跑~~ — **已於
+  2026-08-28 補跑**，見下方 §6.1。C11 現在有真實 VM 執行記錄，不再只靠
+  `internal/detection` 的單元測試。
 - 沒有逼出真正的 SignalEvent firing（見 §4 說明，這個拓樸的設計目的
   就不是拿來測這個）。
 - Provider（Stage B）完全沒有涉及，`provider probe` 只確認回報
   disabled，沒有真的接過 OpenAI/Ollama。
+
+## 6.1 Fake-protocol topology lane 實跑證據（2026-08-28）
+
+拓樸：`tmp/detection-engine-fake-topology.example.yaml`
+（`detection-engine-fixture` 跑 apply 目標 + `detection-fixture-source`
+跑 fake Thanos stub :10912 + `detection-fixture-sink` 跑 fake
+Alertmanager stub :9093，皆由 `playbooks/test/detection-engine-fixtures.yml`
+佈署）。指令：
+
+```bash
+go run ./cmd/pilot vm-target topology test \
+  --topology tmp/detection-engine-fake-topology.example.yaml \
+  --playbook playbooks/apply/detection-engine-apply.yml \
+  --verify docs/verification/detection-engine.md=detection-engine \
+  --verify-timeout 40 \
+  -- -e detection_engine_artifact_path=dist/pilot-detection-engine-linux-amd64 \
+     -e detection_engine_artifact_sha256=25cb971b05e68dcbda326d2505aaab2b16ad30c3b0148fd6e61d1a2161a1c806 \
+     -e detection_metrics_source_host=192.168.122.3 \
+     -e detection_alertmanager_target_host=192.168.122.2
+```
+
+真實輸出（第三次乾淨全綠的一輪；前兩輪各抓到一個真 bug，見下）：
+
+```
+=== [Step 1/6] L1 Syntax Check ===
+✓ Syntax check passed
+=== [Step 2/6] L3 Dry-run (--check --diff) ===
+PLAY RECAP: ok=36 changed=2 unreachable=0 failed=0 skipped=22 rescued=0 ignored=0
+✓ Check-mode dry-run passed
+=== [Step 3/6] Cluster snapshot: 3 node(s) (tag: pre-test-1787892816) ===
+✓ Cluster snapshot created
+=== [Step 4/6] L4 Apply Playbook (topology inventory) ===
+PLAY RECAP: ok=49 changed=0 unreachable=0 failed=0 skipped=9 rescued=0 ignored=0
+✓ Playbook apply completed
+=== [Step 5/6] L5 Verification Specs (1) ===
+✔ Report:   .verification/detection-engine-20260828-045359.md
+verdict: **PASS**  (pass=12 fail=0 skip=0)
+✓ Verification checks passed
+=== [Step 6/6] L6 Idempotency Check ===
+PLAY RECAP: ok=49 changed=0 unreachable=0 failed=0 skipped=9 rescued=0 ignored=0
+✓ Idempotency check passed (changed=0)
+🎉 ALL TESTS PASSED SUCCESSFULLY!
+```
+
+### 實跑中發現並修好的 2 個真 bug
+
+1. **`tasks/resolve-hosts-alias-target.yml` 的 `hosts_alias_resolved_ip`
+   fact 跨 include 洩漏（repo-wide，非 detection-engine 獨有）**——
+   這支共用 task file 被 `detection-engine-apply.yml`
+   在同一個 play 裡 include 兩次（先解析 Thanos alias 再解析
+   Alertmanager alias）；`prometheus-apply.yml` 也是同樣模式
+   （`thanos_s3_target_host` 再 `alertmanager_target_host`）。原本兩個
+   DNS 解析 task 都用 `when: hosts_alias_resolved_ip is not defined`
+   把關，但這是一個 **fact**，第一次 include 已經把它設成 Thanos 的
+   IP，第二次 include 時它「已經 defined」，DNS 解析與
+   consolidate 兩個 task 直接被跳過，於是 Alertmanager alias 被錯誤
+   pin 成 Thanos 節點的 IP。結果：`Gate: Alertmanager is ready`
+   對著一個沒有人在監聽 9093 的 IP 連線，穩定重現
+   `Connection refused`（連兩輪皆同一失敗點；手動直連
+   `detection-fixture-sink:9093` 當下確認服務本身健康，排除了
+   fake-alertmanager 本身的問題）。修法：在共用 task file最前面加一個
+   無條件重置 `hosts_alias_resolved_ip: ""` 的 task，並把後兩個
+   `is not defined` guard 改成 `| default('') | length == 0`
+   （與檔案裡其他既有 guard 風格一致）。
+2. **state.db 落地權限是 `0644` 而非 spec 要求的 `0600`（C4 真失敗）**——
+   sqlite driver 第一次建立 `state.db` 時用預設 umask，不會自己收緊到
+   `0600`；`/var/lib/pilot/detection-engine` 目錄本身是 `0700`
+   擋掉了其他使用者，但 spec C4 明確要求檔案自己也要是
+   `pilot-detect:pilot-detect 600`（defense-in-depth）。修法：在
+   Step 17（`db check`）後加 Step 17b，用
+   `ansible.builtin.file` 顯式把 `state.db` 的 owner/group/mode 收緊到
+   `pilot-detect:pilot-detect 0600`（`not ansible_check_mode` 保護，
+   對已經是 600 的情況冪等）。
+
+兩個 bug 都已回歸鎖定：`internal/spec/detection_engine_regression_test.go`
+新增了對 `resultType:vector` 無空白子字串誤判的鎖（§49 之前 C7 那個
+substring bug 的回歸測試），`docs/verification/host-monitoring.md`/
+`prometheus.md` 系列既有的 dot-notation/`.get()` 慣例延伸套用到這兩處
+修法上。
+
+拓樸曾兩次在 rollback 之後、緊接著重跑時，在第一個真正需要連線的
+remote task（`stat` 模組）卡在
+`Timeout (32s) waiting for privilege escalation prompt`；VM 直接手動
+連線（`vm-target exec`、原始 `ssh` 重現同樣的
+ControlMaster/ControlPath 參數）都證實服務與 SSH 本身健康、連線通常
+< 1s 完成 —— 判定為 rollback 後 libvirt snapshot-revert 造成的短暫
+guest 端延遲（非邏輯 bug），單純重跑即恢復正常，未改動任何程式碼。
 
 ## 7. Teardown
 
@@ -226,3 +308,4 @@ go run ./cmd/pilot vm-target down --name monitored-subject-1
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
 | 2026-08-28 | v1.0 | Stage A-2 首次實跑：3-VM 真實拓樸（monitored-subject-1 + prom-site + detect-central），完整部署鏈 + §51 real metrics-chain 證據 + Spec v2 12/12 PASS + 冪等重跑 changed=0；找到並修好 4 個真 bug（host-monitoring 缺 textfile collector、subjects/signals 計數從未寫回、SQLite VACUUM INTO 檔案已存在導致 upgrade rollback、`signals list` 空陣列序列化成 null） | sre |
+| 2026-08-28 | v1.1 | Fake-protocol topology lane（spec §49 C11）補跑：`vm-target topology test` 對 fake Thanos/Alertmanager fixture 全綠（L1/L3/L4/L5 12-12 PASS/L6 changed=0）；找到並修好 2 個真 bug（`resolve-hosts-alias-target.yml` 的 fact 跨 include 洩漏，repo-wide，`prometheus-apply.yml` 同樣受影響；state.db 落地權限 0644 應為 0600）；Stage A 達成 VERIFICATION_READY | sre |
