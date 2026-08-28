@@ -565,22 +565,60 @@ baseline/cohort）驅動這個 episode；`category_hint=known_critical_pattern`
 `firing`/`critical`（episode 只在真正跨過閾值時才第一次落地寫入 DB，
 不代表繞過了 hysteresis）。
 
-**已知限制（沿用既有、非本次新增的 gap）**：outbox row 停在
-`status=pending, attempts=0` 沒有被送到 fake Alertmanager
-（`received-alerts.ndjson` 全空，即使雙向 `curl /-/ready` 都回
-200）。查證後確認 `cmd/pilot-detection-engine/main.go` 的 `runServe`
-scheduler callback 從來沒有呼叫 `ClaimOutboxItem`/對
-`alertmanagerBaseUrl` 發 HTTP POST——整個 `serve` daemon 目前沒有接上
-outbox 遞送 worker，這是既存於 Stage A 的落差（`docs/verification/detection-engine.md`
-C11 exemption 早就寫明「outbox 機制只驗結構完整，scenario 證據來自
-fake-protocol topology lane」，並非本次 log pipeline 造成）。不在本次
-scope 內修。
+**發現當時的已知限制（已於 §6.7 修復，此處保留原始踏查記錄）**：outbox
+row 當時停在 `status=pending, attempts=0` 沒有被送到 fake
+Alertmanager（`received-alerts.ndjson` 全空，即使雙向 `curl /-/ready`
+都回 200）。查證後確認 `cmd/pilot-detection-engine/main.go` 的
+`runServe` scheduler callback 從來沒有呼叫 `ClaimOutboxItem`/對
+`alertmanagerBaseUrl` 發 HTTP POST——整個 `serve` daemon 當時沒有接上
+outbox 遞送 worker，這是既存於 Stage A 的落差，並非本次 log pipeline
+造成。
 
 冪等重跑（同一組 `-e`，含 log source）：
 
 ```
 PLAY RECAP: detection-engine-fixture ok=55 changed=0 failed=0 unreachable=0 skipped=10
 ```
+
+## 6.7 Outbox 遞送 worker 接上 serve daemon（2026-08-28）
+
+補上 §6.6 發現的 gap：新增 `internal/detection/outbox_deliver.go`
+的 `AlertmanagerSender`，`runServe` 的 scheduler callback 每個 cycle
+在 `RunCycle` 之後（同一 goroutine，非另開 worker）呼叫
+`DrainOutbox`，迴圈 `ClaimOutboxItem` → `POST {baseUrl}/api/v2/alerts`
+（body 包成 JSON array，符合 Alertmanager 真實 API v2 契約，`payload_json`
+本身只存單一物件）→ `CompleteOutboxItem`，直到沒有可 claim 的 row 為止
+（上限 `maxOutboxDrainPerCycle=100` 防止病態 backlog 卡住 cycle
+scheduler）。retry/dead 分類完全沿用既有 `ClassifyDeliveryOutcome`/
+backoff ladder，沒有新發明語義。`AlertmanagerSendFailureTotal`
+（reason→count）比照 `ModelRequestTotal` 現有慣例，走「這個 cycle 的
+snapshot」而非跨 process 累加。新增 5 個 Go 單元測試
+（`outbox_deliver_test.go`：200 送達、network error 進 retry、4xx 進
+dead、同一 pass 送多筆、沒東西可送時完全不撥網路），第一次跑就全綠。
+
+實測：重跑同一個 5-VM fake-topology + log hard-trigger 場景（重 build
+binary，sha256 `055b542b7...`），90 秒後：
+
+```
+$ sudo sqlite3 state.db "SELECT id,status,attempts,last_error_code FROM outbox;"
+01M13T0CKENPEP51M28GYSAA4J|delivered|0|
+
+$ sudo cat /var/lib/node_exporter/textfile/pilot_detection_engine.prom | grep outbox
+pilot_detection_outbox_pending 0
+
+$ ssh detection-fixture-sink sudo cat /opt/pilot-fixtures/received-alerts.ndjson
+[{"labels": {"alertname": "PilotAdaptiveAnomaly", "pilot_host": "fixture-host-1", "severity": "critical",
+  "site": "fixture-site", "source": "detection-engine"}, "annotations": {"category_hint": "known_critical_pattern",
+  "confidence": "1", "profile": "linux-host-v1", "score": "1", "signal_id": "01M13T0CKE2K94S1S80FQH3N6M",
+  "top_contributors": "[\"log:0d5293c46997\"]"}, "startsAt": "2026-08-28T09:07:30Z", "endsAt": "2026-08-28T09:10:30Z"}]
+```
+
+這是第一次真的看到 alert body 落到 fake Alertmanager 的 `received-alerts.ndjson`
+（body 是 JSON array，證實走了真實 `/api/v2/alerts` 契約，不是原本存的單一物件）。
+`outbox.status=delivered` + `pilot_detection_outbox_pending=0` 雙重確認。
+冪等重跑 `changed=0`。C11 exemption 的措辭（「outbox 機制只驗結構完整，
+scenario 證據來自 fake-protocol topology lane」）現在完全站得住腳——
+這次的 fake-protocol topology lane 實跑本身就是那個 scenario 證據。
 
 ## 7. Teardown
 
@@ -599,4 +637,5 @@ go run ./cmd/pilot vm-target down --name monitored-subject-1
 | 2026-08-28 | v1.2 | Stage B-1 全部落地：engine core（OpenAI/Ollama adapter、batch、fusion、retry/circuit）+ contract/inventory/playbook delivery（provider group vars、`detection-model-provider` Vault section、apply-time gates、provider.env/systemd EnvironmentFile）+ provider-verification lane（新增 `detection-fixture-provider` fake Ollama Chat fixture，`docs/verification/detection-engine-model-provider.md` M1-M5 全 PASS、冪等 changed=0，第一次跑就全綠，未發現新 bug） | sre |
 | 2026-08-28 | v1.3 | Stage B-2 real-provider evidence（Ollama native）：同拓樸把 provider base_url 換成真實 `10.1.80.71:11434`/`gemma4:e4b`，M1-M5 全 PASS、冪等 changed=0；順手記錄 gemma4:e4b 跨 host 不一致（host/build-specific，非 v1 prompt 通用缺陷）與 qwen3.5-2b-FLM（Lemonade）回傳格式不穩定的踏查結果 | sre |
 | 2026-08-28 | v1.4 | Stage C-1：新增 `flm` protocol（pipe-delimited text 契約，取代 FastFlowLM 不支援的 JSON schema 強制）+ NPU-primary-with-fallback（`FallbackProvider`，任一 protocol 組合皆可當 primary/fallback）。實測 `qwen3.5-2b-FLM` 從完全不能用變 3/3 成功；實測 fallback 真的透過 primary-fail→fallback-succeed 全路徑（含一次因忘記重 build binary 觸發的自動 rollback，正確運作），apply/冪等皆 PASS | sre |
-| 2026-08-28 | v1.5 | Stage C-2/C-3/C-4：Log/Loki pipeline（npu-detect-engine spec §14-18），reconcile 成 baseline/cohort 的第三個對等 detector；known-critical-pattern hard trigger 用選項 B（該 cycle 直接 Score=1.0，仍走既有 lifecycle hysteresis，非繞過）。新增 `detection-fixture-logs` fake Loki fixture 節點，5-VM 拓樸實跑：找到並修好 1 個真 fixture bug（fake Thanos 忽略 `time=`/`end=` 參數固定回傳當下牆鐘時間，配合預設 20s evaluation_delay 讓每個 cycle 的樣本都被判 `future_sample`，導致整條 metrics 鏈永遠無效，log pipeline 沒機會被跑到）；修完後拿到真實持久化的 `signal_episodes` row（`state=firing, severity=critical, category_hint=known_critical_pattern, last_score=1.0`）與對應 outbox `fire` 事件（`top_contributors` 含 `log:` 前綴證實由 log detector 驅動），冪等重跑 changed=0。已知既存限制：outbox 遞送 worker 本來就沒接上 `serve` daemon（Stage A 就有的 gap，非本次造成），本次不修 | sre |
+| 2026-08-28 | v1.5 | Stage C-2/C-3/C-4：Log/Loki pipeline（npu-detect-engine spec §14-18），reconcile 成 baseline/cohort 的第三個對等 detector；known-critical-pattern hard trigger 用選項 B（該 cycle 直接 Score=1.0，仍走既有 lifecycle hysteresis，非繞過）。新增 `detection-fixture-logs` fake Loki fixture 節點，5-VM 拓樸實跑：找到並修好 1 個真 fixture bug（fake Thanos 忽略 `time=`/`end=` 參數固定回傳當下牆鐘時間，配合預設 20s evaluation_delay 讓每個 cycle 的樣本都被判 `future_sample`，導致整條 metrics 鏈永遠無效，log pipeline 沒機會被跑到）；修完後拿到真實持久化的 `signal_episodes` row（`state=firing, severity=critical, category_hint=known_critical_pattern, last_score=1.0`）與對應 outbox `fire` 事件（`top_contributors` 含 `log:` 前綴證實由 log detector 驅動），冪等重跑 changed=0。已知既存限制：outbox 遞送 worker 本來就沒接上 `serve` daemon（Stage A 就有的 gap，非本次造成）——已於 v1.6 補上 | sre |
+| 2026-08-28 | v1.6 | 把 outbox 遞送 worker 接上 `serve` daemon：新增 `AlertmanagerSender.DrainOutbox`，`runServe` 每個 cycle 在 `RunCycle` 後 claim+POST+complete 直到沒有可送的 row（`maxOutboxDrainPerCycle=100` 防病態 backlog），沿用既有 retry/dead/backoff 語義，5 個新 Go 單元測試第一次全綠。重跑同一個 5-VM fake-topology + log hard-trigger 場景，第一次真的在 fake Alertmanager 的 `received-alerts.ndjson` 看到送達的 alert body（JSON array，符合真實 `/api/v2/alerts` 契約），`outbox.status=delivered`、`pilot_detection_outbox_pending=0`，冪等重跑 changed=0 | sre |

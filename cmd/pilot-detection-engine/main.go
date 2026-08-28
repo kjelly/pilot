@@ -132,6 +132,8 @@ func runServe(ctx context.Context, configPath string) error {
 		}
 	}
 
+	alertmanagerSender := detection.NewAlertmanagerSender(cfg.AlertmanagerBaseURL, detection.AlertmanagerTimeout)
+
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -144,6 +146,16 @@ func runServe(ctx context.Context, configPath string) error {
 		success := err == nil
 		if success {
 			lastSuccess = evaluationTime
+		}
+
+		// Outbox delivery (spec §27): drained once per cycle, strictly
+		// after RunCycle's own transaction(s) already committed (spec
+		// §25 — no HTTP delivery before commit). A drain error never
+		// fails the cycle; every row it already resolved this pass stays
+		// resolved, and undelivered rows simply retry next cycle.
+		_, sendFailures, drainErr := alertmanagerSender.DrainOutbox(cycleCtx, store, time.Now())
+		if drainErr != nil {
+			sendFailures = map[string]int64{"drain_error": 1}
 		}
 
 		pending, _ := store.OutboxPendingCount()
@@ -190,19 +202,20 @@ func runServe(ctx context.Context, configPath string) error {
 			}
 		}
 		metrics := detection.MetricsSnapshot{
-			Up:                          success,
-			CycleDurationSeconds:        duration,
-			CycleOverrunTotal:           scheduler.Overruns.Load(),
-			LastSuccessTimestampSeconds: lastSuccess,
-			SubjectsTotal:               len(outcomes),
-			AnomalyScore:                anomalyScore,
-			OutboxPending:               pending,
-			ModelProviderUp:             modelStats.ProviderUp,
-			ModelRequestTotal:           modelStats.RequestTotal,
-			ModelRequestDurationSeconds: modelStats.RequestDuration,
-			ModelCandidatesTotal:        modelStats.CandidatesTotal,
-			ModelCandidatesDroppedTotal: modelStats.DroppedTotal,
-			ModelCircuitOpen:            modelStats.CircuitOpen,
+			Up:                           success,
+			CycleDurationSeconds:         duration,
+			CycleOverrunTotal:            scheduler.Overruns.Load(),
+			LastSuccessTimestampSeconds:  lastSuccess,
+			SubjectsTotal:                len(outcomes),
+			AnomalyScore:                 anomalyScore,
+			OutboxPending:                pending,
+			ModelProviderUp:              modelStats.ProviderUp,
+			ModelRequestTotal:            modelStats.RequestTotal,
+			ModelRequestDurationSeconds:  modelStats.RequestDuration,
+			ModelCandidatesTotal:         modelStats.CandidatesTotal,
+			ModelCandidatesDroppedTotal:  modelStats.DroppedTotal,
+			ModelCircuitOpen:             modelStats.CircuitOpen,
+			AlertmanagerSendFailureTotal: sendFailures,
 		}
 		_ = metrics.WriteTextfile(cfg.TextfileMetricsPath)
 	})
