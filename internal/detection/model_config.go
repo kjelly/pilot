@@ -13,6 +13,8 @@ func protocolTimeout(protocol string) (time.Duration, error) {
 		return OpenAITimeout, nil
 	case "ollama-chat":
 		return OllamaTimeout, nil
+	case "flm":
+		return FLMTimeout, nil
 	default:
 		return 0, fmt.Errorf("unknown model provider protocol %q", protocol)
 	}
@@ -46,6 +48,8 @@ func NewManagedProviderFromConfig(cfg ModelProviderConfig) (*ManagedProvider, er
 		base = &OpenAIProvider{BaseURL: cfg.BaseURL, Model: cfg.Model, APIKey: apiKey}
 	case "ollama-chat":
 		base = &OllamaProvider{BaseURL: cfg.BaseURL, Model: cfg.Model}
+	case "flm":
+		base = &FLMProvider{BaseURL: cfg.BaseURL, Model: cfg.Model, APIKey: apiKey}
 	default:
 		return nil, fmt.Errorf("unknown model provider protocol %q", cfg.Protocol)
 	}

@@ -169,7 +169,7 @@ func TestRegression_DetectionEngineSpec(t *testing.T) {
 	// below is required; none of these existed before Stage B-1b.
 	for _, want := range []string{
 		// preflight gates
-		"protocol in ['openai-responses', 'ollama-chat']",
+		"protocol in ['openai-responses', 'ollama-chat', 'flm']",
 		"detection_model_provider_api_key is defined and detection_model_provider_api_key | length > 0",
 		"detection_allow_external_provider | bool",
 		// config.yaml carries the provider shape but never the secret value

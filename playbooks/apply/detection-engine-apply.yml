@@ -283,14 +283,14 @@
       ansible.builtin.assert:
         that:
           - detection_model_provider_auth in ['none', 'bearer']
-          - not (detection_model_provider_enabled | bool) or (detection_model_provider_protocol in ['openai-responses', 'ollama-chat'])
+          - not (detection_model_provider_enabled | bool) or (detection_model_provider_protocol in ['openai-responses', 'ollama-chat', 'flm'])
           - not (detection_model_provider_enabled | bool) or (detection_model_provider_base_url | default('') | length > 0)
           - not (detection_model_provider_enabled | bool) or (detection_model_provider_model | default('') | length > 0)
         fail_msg: >-
           an enabled model provider requires protocol in
-          [openai-responses, ollama-chat], a non-empty base_url and model,
-          and auth in [none, bearer] (spec §41.1 inputRules) — Stage A's
-          default (enabled=false) always passes this gate untouched.
+          [openai-responses, ollama-chat, flm], a non-empty base_url and
+          model, and auth in [none, bearer] (spec §41.1 inputRules) —
+          Stage A's default (enabled=false) always passes this gate untouched.
       tags: [always]
 
     - name: "Gate: Stage B enabled+bearer provider requires a non-empty API key (spec §33/§41.1)"

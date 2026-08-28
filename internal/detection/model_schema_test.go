@@ -35,6 +35,14 @@ func TestModelSchema_EmbeddedCopyMatchesMonitoringTarget(t *testing.T) {
 	if string(wantPrompt) != hostAnomalyPromptV1 {
 		t.Error("monitoring/detection/model-prompts/host-anomaly-v1.txt diverges from its embedded internal/detection/prompts copy")
 	}
+
+	wantFLMPrompt, err := os.ReadFile("../../monitoring/detection/model-prompts/host-anomaly-flm-v1.txt")
+	if err != nil {
+		t.Fatalf("read flm prompt target: %v", err)
+	}
+	if string(wantFLMPrompt) != hostAnomalyFLMPromptV1 {
+		t.Error("monitoring/detection/model-prompts/host-anomaly-flm-v1.txt diverges from its embedded internal/detection/prompts copy")
+	}
 }
 
 func validRequest() ModelBatchRequest {

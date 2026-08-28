@@ -77,8 +77,8 @@ func (m ModelProviderConfig) validate() error {
 		// Stage A: disabled provider requires nothing else — spec §33/§41.1.
 		return nil
 	}
-	if m.Protocol != "openai-responses" && m.Protocol != "ollama-chat" {
-		return fmt.Errorf("config: modelProvider.protocol must be openai-responses or ollama-chat, got %q", m.Protocol)
+	if m.Protocol != "openai-responses" && m.Protocol != "ollama-chat" && m.Protocol != "flm" {
+		return fmt.Errorf("config: modelProvider.protocol must be openai-responses, ollama-chat, or flm, got %q", m.Protocol)
 	}
 	if m.BaseURL == "" {
 		return fmt.Errorf("config: modelProvider.baseUrl is required when enabled")

@@ -42,7 +42,7 @@ groupVars:
   # Stage B contract delta (spec §41.1) — provider always disabled by
   # default; none of these are required for a Stage A apply.
   - {name: detection_model_provider_enabled, type: boolean, required: false, default: false, secret: false}
-  - {name: detection_model_provider_protocol, type: string, required: false, default: "openai-responses", secret: false, validation: "^(openai-responses|ollama-chat)$"}
+  - {name: detection_model_provider_protocol, type: string, required: false, default: "openai-responses", secret: false, validation: "^(openai-responses|ollama-chat|flm)$"}
   - {name: detection_model_provider_base_url, type: string, required: false, default: "", secret: false}
   - {name: detection_model_provider_model, type: string, required: false, default: "", secret: false}
   - {name: detection_model_provider_auth, type: string, required: false, default: "none", secret: false, validation: "^(none|bearer)$"}
