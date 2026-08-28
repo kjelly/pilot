@@ -36,7 +36,10 @@ func NewHostBaselineStore() *HostBaselineStore {
 	return &HostBaselineStore{hosts: map[string]map[string]map[int64]float64{}}
 }
 
-func bucketOf(evaluationTime int64) int64 {
+// BucketOf rounds evaluationTime down to its containing one-minute bucket
+// — exported so callers persisting samples (Store.SaveBaselineSamples) use
+// the exact same bucketing Observe does.
+func BucketOf(evaluationTime int64) int64 {
 	return (evaluationTime / 60) * 60
 }
 
@@ -61,7 +64,7 @@ func (s *HostBaselineStore) featureBuckets(host, feature string) map[int64]float
 func (s *HostBaselineStore) Bootstrap(host, feature string, samples []RawSample) {
 	buckets := s.featureBuckets(host, feature)
 	for _, sm := range samples {
-		buckets[bucketOf(sm.Timestamp)] = sm.Value
+		buckets[BucketOf(sm.Timestamp)] = sm.Value
 	}
 	// Bound to the newest maxHistoryBuckets entries in case the caller
 	// handed us more than 24h of samples.
@@ -86,7 +89,7 @@ func (s *HostBaselineStore) Bootstrap(host, feature string, samples []RawSample)
 // separately. Callers must gate this behind the contamination-protection
 // check in ShouldUpdateBaseline (spec §16) themselves.
 func (s *HostBaselineStore) Observe(host, feature string, evaluationTime int64, value float64) {
-	s.featureBuckets(host, feature)[bucketOf(evaluationTime)] = value
+	s.featureBuckets(host, feature)[BucketOf(evaluationTime)] = value
 }
 
 // Evict drops buckets older than 24h relative to evaluationTime (spec §14.2).
@@ -98,6 +101,15 @@ func (s *HostBaselineStore) Evict(host, feature string, evaluationTime int64) {
 			delete(buckets, ts)
 		}
 	}
+}
+
+// LoadSample directly sets one bucket's value — the warm-start path
+// (Store.LoadBaselineHistory) that repopulates a fresh HostBaselineStore
+// from persisted baseline_samples rows after a process restart, so
+// robust-baseline-v1 doesn't cold-start its 120-bucket requirement (spec
+// §14.1) every time the daemon restarts.
+func (s *HostBaselineStore) LoadSample(host, feature string, bucketTS int64, value float64) {
+	s.featureBuckets(host, feature)[bucketTS] = value
 }
 
 // History returns the current history values for (host, feature) in no

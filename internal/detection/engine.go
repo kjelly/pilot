@@ -194,6 +194,7 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 
 	var outcomes []HostCycleOutcome
 	var pending []pendingHost
+	var baselineSamples []BaselineSampleRecord
 	for _, snap := range snapshots {
 		key := SeriesKey{PilotHost: snap.Host, Site: siteByHost[snap.Host]}
 		results := perHost[key]
@@ -219,6 +220,34 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 		outcome.LocalScore = local
 
 		if !local.Valid {
+			// This host will never reach `pending`, so the usual
+			// post-Advance Observe/Evict step below never runs for it
+			// either — a real cold-start deadlock without this: baseline
+			// only ever becomes Valid after 120 buckets of history (spec
+			// §14.1), production wires no cohort assignment at all
+			// (Cohorts is always nil, so cohort-outlier-v1 is
+			// permanently Valid=false), and the log source is commonly
+			// disabled — so local.Valid could otherwise never become
+			// true even once, and the detector that's supposed to warm
+			// baseline up could never run. Seed history here using the
+			// lifecycle's current (pre-this-cycle) state and the raw
+			// local score (0 when nothing is Valid — trivially "below
+			// threshold", exactly ShouldUpdateBaseline's "no signal yet,
+			// treat as normal enough to learn from" case).
+			lc := e.lifecycleFor(snap.Host)
+			if ShouldUpdateBaseline(lc.State, local.Score, true) {
+				bucketTS := BucketOf(evaluationTime)
+				for name, value := range snap.Current {
+					e.Baselines.Observe(snap.Host, name, evaluationTime, value)
+					baselineSamples = append(baselineSamples, BaselineSampleRecord{
+						PilotHost: snap.Host, Feature: name, BucketTS: bucketTS, Value: value,
+					})
+				}
+			}
+			for name := range snap.Current {
+				e.Baselines.Evict(snap.Host, name, evaluationTime)
+			}
+
 			outcomes = append(outcomes, outcome)
 			continue // both detectors invalid -> host cycle invalid (spec §18)
 		}
@@ -268,13 +297,24 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 		}
 
 		if ShouldUpdateBaseline(lc.State, ph.local.Score, true) {
+			bucketTS := BucketOf(evaluationTime)
 			for name, value := range ph.snap.Current {
 				e.Baselines.Observe(ph.snap.Host, name, evaluationTime, value)
+				baselineSamples = append(baselineSamples, BaselineSampleRecord{
+					PilotHost: ph.snap.Host, Feature: name, BucketTS: bucketTS, Value: value,
+				})
 			}
 		}
 		for name := range ph.snap.Current {
 			e.Baselines.Evict(ph.snap.Host, name, evaluationTime)
 		}
+	}
+	if len(baselineSamples) > 0 {
+		// Best-effort: a persistence hiccup here must never fail the
+		// cycle — the in-memory Observe already happened, so this
+		// cycle's own scoring is already correct either way (same
+		// "degrade silently" convention the optional log source uses).
+		_ = e.Store.SaveBaselineSamples(baselineSamples, evaluationTime)
 	}
 	return outcomes, nil
 }

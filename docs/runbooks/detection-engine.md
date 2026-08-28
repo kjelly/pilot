@@ -620,6 +620,64 @@ $ ssh detection-fixture-sink sudo cat /opt/pilot-fixtures/received-alerts.ndjson
 scenario 證據來自 fake-protocol topology lane」）現在完全站得住腳——
 這次的 fake-protocol topology lane 實跑本身就是那個 scenario 證據。
 
+## 6.8 baseline_samples 接上持久化 + 一個真的冷啟動死結 bug（2026-08-28）
+
+使用者想事先為「排除假警報」備妥回測資料，要求（1）把一直是死表的
+`baseline_samples` 接起來、（2）先寫一個離線 replay 雛形。實作過程中在
+`replay.go` 自己的邏輯裡踩到一個問題，往回追查發現這其實是
+**production `internal/detection/engine.go` 本來就有的真 bug**，不是
+replay 工具自己的錯：
+
+**問題**：`e.Baselines.Observe`（把這個 cycle 的原始 feature 值餵進歷史
+buffer）只在 `pending`（`local.Valid==true`）的 host 身上跑。但
+baseline detector 要有 120 個 bucket 歷史才會 `Ready`（spec §14.1），
+而 `Cohorts` 在 `runServe` 裡永遠是 `nil`（沒有任何 cohort 指派機制被
+接上，`cohort-outlier-v1` 永遠 `Valid=false`）。log source 預設也是
+關的。也就是說：**在沒開 log source 的標準 Stage A 部署下，
+`local.Valid` 永遠不會變成 true，因為唯一能讓它變 true 的 baseline
+detector，永遠等不到讓它變 Ready 所需要的歷史資料** —— 一個真正的
+雞生蛋死結，這個 session 之前所有「real firing episode」證據其實全部
+是靠 log hard-trigger（直接 `Score=1.0` 短路）才繞過去的，從沒有純
+baseline 路徑真的被驗證過。
+
+**修法**：`engine.go` 的 baseline 累積（`Observe`/`Evict`/
+`SaveBaselineSamples`）現在移到 `!local.Valid` 分支裡也會執行（用 raw
+local score，`local.Valid=false` 時就是 0，天生 `< ModelTriggerThreshold`，
+符合 `ShouldUpdateBaseline` 本來的「還沒有訊號就當作夠正常可以學」語意）；
+`pending` 路徑（已經有效的 host，用 post-`Advance` state）維持原樣不動，
+只新增冷啟動這條路徑，不改動已經正確的熱路徑行為。新增
+`TestEngine_RunCycle_BaselineWarmsUpWithoutCohortOrLog`（**回退到修復前
+會真的 FAIL**，已驗證過）：跑 120 次安靜 cycle（cohorts=nil、無 log
+source）確認第 121 次 `LocalScore.Valid` 才變 true，再餵一個尖峰確認
+分數正確算出來。
+
+`baseline_samples` 持久化：新增 `Store.SaveBaselineSamples`（batch
+upsert + 針對這批涉及的 (host,feature) 順手 prune 掉 24h 前的舊
+bucket，跟 `HostBaselineStore.Evict` 的 eviction horizon 保持一致）與
+`Store.LoadBaselineHistory`（daemon 啟動時讀回填 `Engine.Baselines`，
+不再每次 restart 都冷啟動 120 分鐘）。5 個新 Go 單元測試全綠。
+
+實測（5-VM fake-topology，`detection_cycle_interval=5s`
+`detection_evaluation_delay=2s` 加速驗證）：apply 後 30 秒即看到
+`baseline_samples` 有 6 筆真實 row（5 個 feature × 1 個 bucket），2 分鐘
+後累積到 3 個不同 bucket；`systemctl restart` 服務後 healthy 且
+`baseline_samples` 完整保留（`LoadBaselineHistory` 沒有在真實
+0600-permission 的 state.db 上炸掉）；冪等重跑 `changed=0`。這個
+fixture 的值恆定（永遠 `"1"`），沒有走到真的 anomaly 尖峰，尖峰路徑的
+證據來自上面的 Go 單元測試。
+
+**離線 replay 工具雛形**：新增 `pilot-detection-engine replay --thanos
+<url> --profile <feature-profile.yaml> --start <RFC3339> --end
+<RFC3339>`。重用跟正式引擎完全相同的 pure function
+（`ComputeBaselineHostScore`/`ComputeLocalScore`/`FuseLocalOnly`/
+`HostLifecycle.Advance`/`ShouldUpdateBaseline`），對歷史 Thanos range
+data 重新跑一次 baseline + lifecycle，輸出每個會觸發的 transition +
+最後的 action 統計。已知、刻意的 v1 缺口（都寫在 `replay.go` 檔頭）：
+不重播 cohort（production 本來就沒接）、不重播 log detector（需要額外
+的歷史 windowed Loki 查詢）、不重播 Model Provider fusion。3 個 Go
+單元測試全綠（含一次先踩到跟 production 一模一樣的冷啟動死結，同一手法
+修好）。**尚未對真實 Thanos 長期資料實跑過**——這是下一步。
+
 ## 7. Teardown
 
 ```bash
@@ -639,3 +697,4 @@ go run ./cmd/pilot vm-target down --name monitored-subject-1
 | 2026-08-28 | v1.4 | Stage C-1：新增 `flm` protocol（pipe-delimited text 契約，取代 FastFlowLM 不支援的 JSON schema 強制）+ NPU-primary-with-fallback（`FallbackProvider`，任一 protocol 組合皆可當 primary/fallback）。實測 `qwen3.5-2b-FLM` 從完全不能用變 3/3 成功；實測 fallback 真的透過 primary-fail→fallback-succeed 全路徑（含一次因忘記重 build binary 觸發的自動 rollback，正確運作），apply/冪等皆 PASS | sre |
 | 2026-08-28 | v1.5 | Stage C-2/C-3/C-4：Log/Loki pipeline（npu-detect-engine spec §14-18），reconcile 成 baseline/cohort 的第三個對等 detector；known-critical-pattern hard trigger 用選項 B（該 cycle 直接 Score=1.0，仍走既有 lifecycle hysteresis，非繞過）。新增 `detection-fixture-logs` fake Loki fixture 節點，5-VM 拓樸實跑：找到並修好 1 個真 fixture bug（fake Thanos 忽略 `time=`/`end=` 參數固定回傳當下牆鐘時間，配合預設 20s evaluation_delay 讓每個 cycle 的樣本都被判 `future_sample`，導致整條 metrics 鏈永遠無效，log pipeline 沒機會被跑到）；修完後拿到真實持久化的 `signal_episodes` row（`state=firing, severity=critical, category_hint=known_critical_pattern, last_score=1.0`）與對應 outbox `fire` 事件（`top_contributors` 含 `log:` 前綴證實由 log detector 驅動），冪等重跑 changed=0。已知既存限制：outbox 遞送 worker 本來就沒接上 `serve` daemon（Stage A 就有的 gap，非本次造成）——已於 v1.6 補上 | sre |
 | 2026-08-28 | v1.6 | 把 outbox 遞送 worker 接上 `serve` daemon：新增 `AlertmanagerSender.DrainOutbox`，`runServe` 每個 cycle 在 `RunCycle` 後 claim+POST+complete 直到沒有可送的 row（`maxOutboxDrainPerCycle=100` 防病態 backlog），沿用既有 retry/dead/backoff 語義，5 個新 Go 單元測試第一次全綠。重跑同一個 5-VM fake-topology + log hard-trigger 場景，第一次真的在 fake Alertmanager 的 `received-alerts.ndjson` 看到送達的 alert body（JSON array，符合真實 `/api/v2/alerts` 契約），`outbox.status=delivered`、`pilot_detection_outbox_pending=0`，冪等重跑 changed=0 | sre |
+| 2026-08-28 | v1.7 | `baseline_samples` 接上持久化（`SaveBaselineSamples`/`LoadBaselineHistory`，daemon restart 不再冷啟動）+ 離線 backtest replay 工具雛形（`pilot-detection-engine replay`）。過程中發現並修好一個**真正嚴重的 production bug**：`engine.go` 的 baseline 歷史累積本來被鎖在 `pending`（`local.Valid`）之後才會跑，但 baseline 要 Ready 又得先靠這個累積——在沒開 log source、且 production 從未接過 cohort 指派（`Cohorts` 永遠 nil）的標準 Stage A 部署下，這是一個死結，baseline detector 永遠學不會，等於核心異常偵測從未真的能動起來；本 session 之前所有「real firing」證據其實都是靠 log hard-trigger 短路繞過的。新增回歸測試鎖住（退回修復前確認真的 FAIL），5-VM 實測 baseline_samples 真的落地累積、restart 後存活、冪等 changed=0 | sre |

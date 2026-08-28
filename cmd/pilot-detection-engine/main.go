@@ -42,6 +42,7 @@ func main() {
 		newDBCmd(),
 		newSignalsCmd(),
 		newProviderCmd(),
+		newReplayCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -110,6 +111,14 @@ func runServe(ctx context.Context, configPath string) error {
 
 	client := detection.NewThanosClient(cfg.MetricsSourceBaseURL, detection.QueryTimeout)
 	engine := detection.NewEngine(profile, client, store, nil)
+	// Warm-start robust-baseline-v1's history from whatever this host has
+	// already persisted (spec §14.1/§14.2) — without this, a plain
+	// restart cold-starts the 120-bucket requirement even though the host
+	// has been observed for hours. A query error just leaves the engine
+	// on NewEngine's empty default, identical to today's behavior.
+	if warm, warmErr := store.LoadBaselineHistory(time.Now()); warmErr == nil {
+		engine.Baselines = warm
+	}
 
 	provider, err := detection.NewManagedProviderFromConfig(cfg.ModelProvider)
 	if err != nil {
