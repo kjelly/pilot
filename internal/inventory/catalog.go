@@ -43,9 +43,9 @@ var topLevelOrder = []string{
 	"restic-backup",
 	"host-monitoring",
 	"dcgm-exporter",
+	"alertmanager",
 	"prometheus",
 	"thanos-query",
-	"alertmanager",
 	"dashboard",
 }
 

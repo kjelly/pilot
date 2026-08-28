@@ -50,6 +50,7 @@ var deployForceFlag bool
 type deployAnsibleRuntime struct {
 	Env     []string
 	TempDir string
+	LogPath string
 
 	// SSHControlDir is the directory Env's ANSIBLE_SSH_ARGS points its
 	// ControlPath at. Exposed separately (not just baked into Env) so a
@@ -70,6 +71,13 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 	tmp := filepath.Join(root, "tmp")
 	factCache := filepath.Join(root, "fact-cache")
 	sshControl := filepath.Join(root, "ssh-control")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return deployAnsibleRuntime{}, fmt.Errorf("create Ansible data directory %s: %w", root, err)
+	}
+	logPath := filepath.Join(root, "ansible.log")
+	if err := ansible.MaintainLog(logPath); err != nil {
+		return deployAnsibleRuntime{}, fmt.Errorf("maintain Ansible log: %w", err)
+	}
 	for _, path := range []string{home, tmp, factCache, sshControl} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return deployAnsibleRuntime{}, fmt.Errorf("create Ansible data directory %s: %w", path, err)
@@ -78,12 +86,13 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 	return deployAnsibleRuntime{
 		TempDir:       tmp,
 		SSHControlDir: sshControl,
+		LogPath:       logPath,
 		Env: []string{
 			"ANSIBLE_HOME=" + home,
 			"ANSIBLE_LOCAL_TEMP=" + tmp,
 			"ANSIBLE_CACHE_PLUGIN=jsonfile",
 			"ANSIBLE_CACHE_PLUGIN_CONNECTION=" + factCache,
-			"ANSIBLE_LOG_PATH=" + filepath.Join(root, "ansible.log"),
+			"ANSIBLE_LOG_PATH=" + logPath,
 			"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath=" + strconv.Quote(filepath.Join(sshControl, "pilot-%r@%h:%p")) + " -o ControlPersist=60s",
 			"ANSIBLE_RETRY_FILES_ENABLED=False",
 			// Collapses each task to one SSH round-trip instead of a
@@ -291,6 +300,7 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	runner := ansible.NewRunner()
 	runner.Timeout = timeout
 	runner.Env = runtime.Env
+	runner.LogPath = runtime.LogPath
 	runner.StdoutWriter = out
 	runner.StderrWriter = cmd.ErrOrStderr()
 

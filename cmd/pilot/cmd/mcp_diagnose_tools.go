@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/diagnose"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/networkcheck"
@@ -229,7 +230,7 @@ func scopedDiagnoseAnsibleRuntime(base deployAnsibleRuntime) deployAnsibleRuntim
 	}
 	controlPath := filepath.Join("/tmp", "pilot-"+scope+"-%C")
 	env = append(env, "ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath="+strconv.Quote(controlPath)+" -o ControlPersist=60s")
-	return deployAnsibleRuntime{TempDir: base.TempDir, SSHControlDir: base.SSHControlDir, Env: env}
+	return deployAnsibleRuntime{TempDir: base.TempDir, SSHControlDir: base.SSHControlDir, LogPath: base.LogPath, Env: env}
 }
 
 // realDiagnoseAdHocRunner adapts deployAnsibleCommand (the same
@@ -239,7 +240,15 @@ func scopedDiagnoseAnsibleRuntime(base deployAnsibleRuntime) deployAnsibleRuntim
 // itself exit nonzero — that's expected and informative here (e.g.
 // "systemctl is-active sssd" on a stopped service), not a run failure.
 func realDiagnoseAdHocRunner() diagnose.AdHocRunner {
-	return func(ctx context.Context, args []string, timeoutSeconds int) (string, int, error) {
+	return func(ctx context.Context, args []string, timeoutSeconds int) (stdoutText string, exitCode int, runErr error) {
+		logPath := deployAnsibleRuntimeFromContext(ctx).LogPath
+		defer func() {
+			if err := ansible.MaintainLog(logPath); err != nil && runErr == nil {
+				runErr = fmt.Errorf("maintain Ansible log: %w", err)
+			}
+		}()
+		releaseLog := ansible.HoldLogUse(logPath)
+		defer releaseLog()
 		cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 		defer cancel()
 		command := deployAnsibleCommand(cctx, "ansible", args...)
@@ -256,7 +265,7 @@ func realDiagnoseAdHocRunner() diagnose.AdHocRunner {
 		command.Stdout = &stdout
 		command.Stderr = &stderr
 		err := command.Run()
-		exitCode := 0
+		exitCode = 0
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()

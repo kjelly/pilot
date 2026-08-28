@@ -181,6 +181,10 @@ all:
     dcgm-exporter:
       hosts: {}                 # 例:有 GPU 的主機 → hosts: { gpu-1: }
 
+    # -- 告警:中央 Alertmanager,只需一台(典型跟 thanos-query 共置)--------
+    alertmanager:
+      hosts: {}                 # 例:跟 thanos-query 同台 → hosts: { metrics-central-1: }
+
     # -- 指標:每站 Prometheus + Thanos Sidecar(prometheus-apply.yml)-------
     prometheus:
       hosts: {}                 # 例:兩站 → hosts: { site-a: , site-b: }
@@ -188,10 +192,6 @@ all:
     # -- 指標:中央 Thanos Query + Store Gateway + Compactor,只需一台 ------
     thanos-query:
       hosts: {}                 # 例:專門一台 → hosts: { metrics-central-1: }
-
-    # -- 告警:中央 Alertmanager,只需一台(典型跟 thanos-query 共置)--------
-    alertmanager:
-      hosts: {}                 # 例:跟 thanos-query 同台 → hosts: { metrics-central-1: }
 
     # -- 觀測畫面:Grafana + Loki(dashboard-apply.yml),只需一台 -----------
     dashboard:

@@ -66,6 +66,7 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	runner := ansible.NewRunner()
 	runner.Timeout = timeout
 	runner.Env = runtime.Env
+	runner.LogPath = runtime.LogPath
 	runner.StdoutWriter = cmd.OutOrStdout()
 	runner.StderrWriter = cmd.ErrOrStderr()
 	out := cmd.OutOrStdout()

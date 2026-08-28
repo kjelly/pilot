@@ -55,6 +55,15 @@ Global options available across commands include `--config`, `--data-dir`, and
 target binary overrides are available through `PILOT_SSH_BIN`,
 `PILOT_VIRSH_BIN`, `PILOT_DOCKER_BIN`, and `PILOT_PODMAN_BIN`.
 
+Pilot's controller-side Ansible log is stored below the selected data
+directory as `ansible/ansible.log`. Pilot redacts common password, secret,
+token, API-key, authorization, and private-key forms, restricts log files to
+mode `0600`, and rotates the active log after 100 MiB while retaining three
+rotated files. Override the limits with `PILOT_ANSIBLE_LOG_MAX_BYTES` and
+`PILOT_ANSIBLE_LOG_RETENTION` (set retention to `0` to discard rotated logs).
+This is defense in depth; playbooks must still use Ansible `no_log: true` for
+secret-bearing tasks.
+
 ## Command map
 
 ### Authoring, inventory, and delivery

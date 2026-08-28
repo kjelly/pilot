@@ -31,6 +31,9 @@ type Runner struct {
 	StdoutWriter io.Writer     // if set, stdout is streamed in real-time here
 	StderrWriter io.Writer     // if set, stderr is streamed in real-time here
 	Stdin        io.Reader     // if set, connects to ansible-playbook's stdin (needed for --ask-vault-pass / --ask-become-pass)
+	// LogPath is the controller-side Ansible log configured for this runner.
+	// When set, Pilot redacts and applies retention after each invocation.
+	LogPath string
 }
 
 func NewRunner(defaults ...string) *Runner {
@@ -70,8 +73,11 @@ func (r *Runner) Run(ctx context.Context, args ...string) (*Result, error) {
 	}
 
 	start := time.Now()
+	releaseLog := HoldLogUse(r.LogPath)
 	err := cmd.Run()
+	releaseLog()
 	dur := time.Since(start)
+	logErr := MaintainLog(r.LogPath)
 
 	res := &Result{
 		Stdout:   stdout.String(),
@@ -88,6 +94,9 @@ func (r *Runner) Run(ctx context.Context, args ...string) (*Result, error) {
 		return res, fmt.Errorf("ansible run failed: %w", err)
 	} else {
 		res.ExitCode = 0
+	}
+	if logErr != nil {
+		return res, fmt.Errorf("maintain Ansible log: %w", logErr)
 	}
 	return res, nil
 }
