@@ -15,9 +15,10 @@
 #  下游告警:  docs/verification/alertmanager.md（同上，
 #              detection_alertmanager_target_host 也是自動偵測）
 #
-#  Stage A（本範本涵蓋的範圍）永遠是 Model Provider disabled——這裡沒有
-#  provider 相關變數，也不需要 provider Vault section。Provider 只有在
-#  Stage B 才會新增，屆時會是另一批獨立的變數與 Vault key。
+#  預設（下面留白/註解掉的部分）永遠是 Model Provider disabled——套用行為
+#  與 Stage A 完全一致。要啟用 Stage B 才需要打開下方 provider 區塊；API
+#  key 一律走 Vault 的 detection-model-provider section
+#  （detection_model_provider_api_key），不要直接寫在這個檔案裡。
 # ============================================================================
 
 # 控制端已建置好的 pilot-detection-engine 二進位檔路徑（相對於 repo root，
@@ -43,3 +44,21 @@ detection_alertmanager_target_host: ""
 # 通常不用改，會沿用 playbook 內建預設（spec §11 的 scheduler 常數）：
 # detection_cycle_interval: 15s
 # detection_evaluation_delay: 20s
+
+# ----------------------------------------------------------------------
+#  Stage B — Model Provider（spec §33/§41.1，預設 disabled，全部留白）
+# ----------------------------------------------------------------------
+# detection_model_provider_enabled: false
+# detection_model_provider_protocol: "openai-responses"   # 或 "ollama-chat"
+# detection_model_provider_base_url: ""                    # 例：http://ollama-host:11434（ollama-chat 免 auth 時可留 auth: none）
+# detection_model_provider_model: ""
+# detection_model_provider_auth: "none"                    # 或 "bearer"
+#
+# auth=bearer 才需要 API key；一律走 Vault，不要寫在這個檔案：
+#   vault key: detection_model_provider_api_key（見
+#   internal/inventory/vault.go 的 detection-model-provider section）
+#
+# 只有「provider 啟用 + 是外部/SaaS 服務 + stage=prod」才會被下面兩個變數
+# 擋下（spec §33/§41.1 的 production 允許邊界，不是 schema 驗證能取代的）：
+# detection_model_provider_external: false
+# detection_allow_external_provider: false

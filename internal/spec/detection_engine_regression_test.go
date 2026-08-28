@@ -163,4 +163,38 @@ func TestRegression_DetectionEngineSpec(t *testing.T) {
 	if strings.Contains(applyRaw, "state: restarted\n          when: not ansible_check_mode\n") {
 		t.Error("pilot-detection-engine.service restart must be gated on an actual change, not unconditional")
 	}
+
+	// Stage B (spec §33/§41.1/§44/§45): the playbook must actually support
+	// an enabled provider now, not just assert it's off. Every marker
+	// below is required; none of these existed before Stage B-1b.
+	for _, want := range []string{
+		// preflight gates
+		"protocol in ['openai-responses', 'ollama-chat']",
+		"detection_model_provider_api_key is defined and detection_model_provider_api_key | length > 0",
+		"detection_allow_external_provider | bool",
+		// config.yaml carries the provider shape but never the secret value
+		"apiKeyEnv: \"DETECTION_MODEL_API_KEY\"",
+		// provider.env: create (enabled+bearer) and remove (otherwise), both no_log/0600-owned where it matters
+		"DETECTION_MODEL_API_KEY={{ detection_model_provider_api_key }}",
+		"provider.env",
+		// systemd unit sources it
+		"EnvironmentFile=-{{ detection_engine_config_dir }}/provider.env",
+	} {
+		if !strings.Contains(applyRaw, want) {
+			t.Errorf("detection-engine-apply.yml must contain %q (Stage B provider support, spec §33/§41.1/§44/§45)", want)
+		}
+	}
+
+	// The provider.env-rendering task (the one place the real secret
+	// value is templated) must be no_log — never the case for Stage A's
+	// old absent-only task, so this specifically locks the NEW create path.
+	if !strings.Contains(applyRaw, "content: \"DETECTION_MODEL_API_KEY={{ detection_model_provider_api_key }}\\n\"\n          no_log: true") {
+		t.Error("provider.env's create task must be no_log: true immediately after its content (never logs the real secret value)")
+	}
+
+	// Stage A default (no -e overrides at all) must still run
+	// provider-disabled — the Stage B delta must not change this default.
+	if !strings.Contains(applyRaw, "detection_model_provider_enabled: false") {
+		t.Error("detection-engine-apply.yml's vars: block must still default detection_model_provider_enabled to false")
+	}
 }

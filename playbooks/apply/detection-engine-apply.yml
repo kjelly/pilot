@@ -15,11 +15,13 @@
 # and the central Alertmanager at :9093. It never scrapes/SSHes/execs a
 # managed host directly (spec §2 Non-Goals).
 #
-# Provider (Stage B) is always disabled here — this playbook renders
-# config.yaml with modelProvider.enabled hardcoded false and never touches
-# a provider secret. Stage B will extend this file with provider group
-# vars, provider.env rendering, and the provider Vault section; none of
-# that exists yet (spec §33/§41.1/§45).
+# Provider (Stage B, spec §33/§41.1/§45) defaults to disabled — every
+# Stage-A-style apply (no -e overrides) renders modelProvider.enabled:
+# false and never touches a provider secret, byte-identical to before
+# Stage B support existed. Passing -e detection_model_provider_enabled=true
+# (+ protocol/base_url/model, and the API key when auth=bearer) enables it;
+# the API key itself only ever lands in provider.env (root:root 0600,
+# no_log), never in config.yaml or this playbook's own output.
 #
 # Usage (dry run):
 #   go run ./cmd/pilot vm-target run --name detection --sandbox \
@@ -64,6 +66,21 @@
     # normal operation, but exposed for testing/tuning.
     detection_cycle_interval: 15s
     detection_evaluation_delay: 20s
+
+    # Stage B provider vars (spec §33/§41.1) — defaults exactly match the
+    # contract delta's groupVars defaults, so a Stage-A-style apply (no -e
+    # overrides at all) still runs provider-disabled, byte-identical to
+    # Stage A. detection_model_provider_api_key is a SECRET and
+    # deliberately has NO default here (same convention as
+    # restic_password/thanos_aws_secret_access_key elsewhere in this repo)
+    # — it must come from -e or a vault file, and is gated below.
+    detection_model_provider_enabled: false
+    detection_model_provider_protocol: openai-responses
+    detection_model_provider_base_url: ""
+    detection_model_provider_model: ""
+    detection_model_provider_auth: none
+    detection_model_provider_external: false
+    detection_allow_external_provider: false
 
     # detection_engine_artifact_path / detection_engine_artifact_sha256 are
     # DELIBERATELY NOT declared here (same "no shadowing default" reasoning
@@ -262,13 +279,45 @@
           -e detection_alertmanager_target_host=<ip> explicitly in that case.
       tags: [always]
 
-    - name: "Gate: Stage B provider vars are not set (Stage A owns no provider Vault section)"
+    - name: "Gate: Stage B enabled provider requires protocol/base_url/model (spec §41.1/§44)"
       ansible.builtin.assert:
         that:
-          - detection_model_provider_enabled | default(false) | bool == false
+          - detection_model_provider_auth in ['none', 'bearer']
+          - not (detection_model_provider_enabled | bool) or (detection_model_provider_protocol in ['openai-responses', 'ollama-chat'])
+          - not (detection_model_provider_enabled | bool) or (detection_model_provider_base_url | default('') | length > 0)
+          - not (detection_model_provider_enabled | bool) or (detection_model_provider_model | default('') | length > 0)
         fail_msg: >-
-          Stage A always runs with the model provider disabled — this
-          playbook has no Stage B provider support yet (spec §33/§45).
+          an enabled model provider requires protocol in
+          [openai-responses, ollama-chat], a non-empty base_url and model,
+          and auth in [none, bearer] (spec §41.1 inputRules) — Stage A's
+          default (enabled=false) always passes this gate untouched.
+      tags: [always]
+
+    - name: "Gate: Stage B enabled+bearer provider requires a non-empty API key (spec §33/§41.1)"
+      ansible.builtin.assert:
+        that:
+          - >-
+            not ((detection_model_provider_enabled | bool) and detection_model_provider_auth == 'bearer')
+            or (detection_model_provider_api_key is defined and detection_model_provider_api_key | length > 0)
+        fail_msg: >-
+          an enabled bearer-auth model provider requires a non-empty
+          detection_model_provider_api_key (spec §33/§41.1) — pass via
+          -e detection_model_provider_api_key=... (a vault file is
+          recommended over -e for a real secret, same as restic_password).
+      no_log: true
+      tags: [always]
+
+    - name: "Gate: prod requires explicit allow for an external model provider (spec §33/§41.1)"
+      ansible.builtin.assert:
+        that:
+          - >-
+            not ((detection_model_provider_enabled | bool) and (detection_model_provider_external | bool) and stage == 'prod')
+            or (detection_allow_external_provider | bool)
+        fail_msg: >-
+          stage=prod with an external model provider (detection_model_provider_external=true)
+          requires -e detection_allow_external_provider=true — this is the
+          production permission boundary spec §33/§41.1 owns; it is not
+          replaced by any schema/inputRules validation.
       tags: [always]
 
   tasks:
@@ -454,7 +503,7 @@
             mode: "0644"
           register: detection_engine_feature_profile_result
 
-        - name: "Step 9: render config.yaml (provider always disabled in Stage A, spec §33)"
+        - name: "Step 9: render config.yaml (spec §33/§41.1 — modelProvider block never contains the secret itself)"
           ansible.builtin.copy:
             dest: "{{ detection_engine_config_path }}"
             mode: "0644"
@@ -466,21 +515,40 @@
               statusPath: "{{ detection_engine_status_path }}"
               textfileMetricsPath: "{{ detection_engine_textfile_path }}"
               modelProvider:
-                enabled: false
+                enabled: {{ detection_model_provider_enabled | bool | to_json }}
+                protocol: "{{ detection_model_provider_protocol }}"
+                baseUrl: "{{ detection_model_provider_base_url }}"
+                model: "{{ detection_model_provider_model }}"
+                auth: "{{ detection_model_provider_auth }}"
+                apiKeyEnv: "DETECTION_MODEL_API_KEY"
           register: detection_engine_config_result
 
-        # Stage A always runs provider-disabled — spec §33: "disabled/auth
-        # none: provider.env absent. 若上一版存在: delete residual secret
-        # file, restart service." Removing this unconditionally on every
-        # apply (not just "if it happens to exist") is what makes C12 an
-        # ACTIVE guarantee rather than an accident of Stage A never having
-        # created one.
-        - name: "Step 9b: ensure provider.env is absent (Stage A: provider always disabled, spec §33/§45)"
+        # spec §45: enabled+bearer renders provider.env (root:root 0600,
+        # no_log — the only place the real secret value ever lands).
+        - name: "Step 9b: render provider.env (Stage B enabled+bearer only, spec §45)"
+          tags: [detection-engine-C12]
+          ansible.builtin.copy:
+            dest: "{{ detection_engine_config_dir }}/provider.env"
+            owner: root
+            group: root
+            mode: "0600"
+            content: "DETECTION_MODEL_API_KEY={{ detection_model_provider_api_key }}\n"
+          no_log: true
+          when: (detection_model_provider_enabled | bool) and detection_model_provider_auth == 'bearer'
+          register: detection_engine_provider_env_create_result
+
+        # spec §33: "disabled/auth none: provider.env absent. 若上一版存在:
+        # delete residual secret file, restart service." Running this
+        # unconditionally whenever Step 9b's condition does NOT hold (not
+        # just "if it happens to exist") is what makes C12 an ACTIVE
+        # guarantee rather than an accident of never having created one.
+        - name: "Step 9c: ensure provider.env is absent (disabled or non-bearer, spec §33/§45)"
           tags: [detection-engine-C12]
           ansible.builtin.file:
             path: "{{ detection_engine_config_dir }}/provider.env"
             state: absent
-          register: detection_engine_provider_env_result
+          when: not ((detection_model_provider_enabled | bool) and detection_model_provider_auth == 'bearer')
+          register: detection_engine_provider_env_absent_result
 
         - name: "Step 10: validate the rendered config (spec §44 config schema gate, before any restart)"
           tags: [detection-engine-C3]
@@ -503,6 +571,7 @@
               User={{ detection_engine_user }}
               Group={{ detection_engine_user }}
               Type=simple
+              EnvironmentFile=-{{ detection_engine_config_dir }}/provider.env
               ExecStart={{ detection_engine_bin_dest }} serve --config {{ detection_engine_config_path }}
               Restart=on-failure
               RuntimeDirectory=pilot/detection-engine
@@ -556,7 +625,8 @@
             or detection_engine_feature_profile_result is changed
             or detection_engine_config_result is changed
             or detection_engine_unit_result is changed
-            or detection_engine_provider_env_result is changed)
+            or detection_engine_provider_env_create_result is changed
+            or detection_engine_provider_env_absent_result is changed)
 
         # Steps 15-17 all depend on Steps 9-14's mutations having REALLY
         # happened (service actually (re)started with the real config/

@@ -98,6 +98,27 @@ func TestExpectedVaultKeysForRoles_ExcludesOptionalKeys(t *testing.T) {
 	}
 }
 
+// TestExpectedVaultKeysForRoles_DetectionModelProviderKeyIsOptional locks
+// spec §41.1/§42.1's Stage B requirement: detection-model-provider's one
+// key (detection_model_provider_api_key) must never be demanded by the
+// completeness gate just because detection-engine is deployed — it is
+// only actually required when the role's own apply-time gate sees
+// enabled=true and auth=bearer (a runtime/group-vars concern the static
+// vault-completeness check can't see), not merely "role selected".
+func TestExpectedVaultKeysForRoles_DetectionModelProviderKeyIsOptional(t *testing.T) {
+	got := ExpectedVaultKeysForRoles([]string{"detection-engine"})
+	for _, key := range got {
+		if key == "detection_model_provider_api_key" {
+			t.Fatalf("ExpectedVaultKeysForRoles(detection-engine) = %v, must not require the Optional detection_model_provider_api_key", got)
+		}
+	}
+
+	skeleton := GenerateVaultSkeleton(&HostsFile{Hosts: []Host{{Name: "detect-1", Roles: []string{"detection-engine"}}}})
+	if !strings.Contains(skeleton, "# detection_model_provider_api_key:") {
+		t.Fatalf("GenerateVaultSkeleton(detection-engine) must still offer detection_model_provider_api_key commented-out:\n%s", skeleton)
+	}
+}
+
 func TestGenerateVaultSkeleton_ContainsExactlyExpectedKeysForRoles(t *testing.T) {
 	roles := []string{"freeipa-server", "keycloak", "alertmanager"}
 	hf := &HostsFile{Hosts: []Host{{Name: "node-1", Roles: roles}}}

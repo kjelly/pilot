@@ -42,7 +42,7 @@ var roleContracts = []roleContract{
 	{Name: "alertmanager", Description: "中央 Alertmanager，只需一台 (alertmanager-apply.yml)", GroupVarsStem: "alertmanager", VaultSections: []string{"alertmanager"}},
 	{Name: "prometheus", Description: "每站 Prometheus + Thanos Sidecar，自動從 host-monitoring group 展開 scrape target (prometheus-apply.yml)", GroupVarsStem: "prometheus", VaultSections: []string{"thanos-s3", "node-exporter-auth"}, HostVarsKeys: []string{"prometheus_site_label"}},
 	{Name: "thanos-query", Description: "中央 Thanos Query，只需一台 (thanos-query-apply.yml)", GroupVarsStem: "thanos-query", VaultSections: []string{"thanos-s3"}},
-	{Name: "detection-engine", Description: "中央 Detection Plane：從 Thanos metrics 建立 adaptive SignalEvent (detection-engine-apply.yml)", GroupVarsStem: "detection-engine", VaultSections: []string{}},
+	{Name: "detection-engine", Description: "中央 Detection Plane：從 Thanos metrics 建立 adaptive SignalEvent (detection-engine-apply.yml)", GroupVarsStem: "detection-engine", VaultSections: []string{"detection-model-provider"}},
 	{Name: "dashboard", Description: "Grafana + Loki，只需一台 (dashboard-apply.yml)", GroupVarsStem: "dashboard", VaultSections: []string{"dashboard"}},
 }
 

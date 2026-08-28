@@ -168,6 +168,18 @@ var vaultSections = map[string]vaultSection{
 			},
 		},
 	},
+	"detection-model-provider": {
+		Title: "Detection Engine Model Provider 相關（Stage B，預設不啟用）",
+		Note:  "只有 detection_model_provider_enabled=true 且 auth=bearer 時才需要真的填值；provider disabled（Stage A 預設）完全不會用到這把 key，也不會被 completeness 檢查要求。",
+		Keys: []vaultField{
+			{
+				Name:     "detection_model_provider_api_key",
+				Value:    "CHANGE-ME-if-bearer-auth-enabled",
+				Comment:  "Optional：只有 detection_model_provider_enabled=true 且 auth=bearer 時才必填",
+				Optional: true,
+			},
+		},
+	},
 }
 
 var vaultSectionOrder = []string{
@@ -180,6 +192,7 @@ var vaultSectionOrder = []string{
 	"node-exporter-auth",
 	"dcgm-exporter-auth",
 	"alertmanager",
+	"detection-model-provider",
 }
 
 // VaultSectionExpectedKeys returns one vault section's *required* key

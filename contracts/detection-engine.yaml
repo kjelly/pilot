@@ -35,7 +35,30 @@ groupVars:
   - {name: detection_alertmanager_target_host, type: string, required: true, secret: false}
   - {name: detection_cycle_interval, type: duration, required: false, default: "15s", secret: false}
   - {name: detection_evaluation_delay, type: duration, required: false, default: "20s", secret: false}
-inputRules: []
+  # Stage B contract delta (spec §41.1) — provider always disabled by
+  # default; none of these are required for a Stage A apply.
+  - {name: detection_model_provider_enabled, type: boolean, required: false, default: false, secret: false}
+  - {name: detection_model_provider_protocol, type: string, required: false, default: "openai-responses", secret: false, validation: "^(openai-responses|ollama-chat)$"}
+  - {name: detection_model_provider_base_url, type: string, required: false, default: "", secret: false}
+  - {name: detection_model_provider_model, type: string, required: false, default: "", secret: false}
+  - {name: detection_model_provider_auth, type: string, required: false, default: "none", secret: false, validation: "^(none|bearer)$"}
+  - {name: detection_model_provider_api_key, type: string, required: false, secret: true}
+  - {name: detection_model_provider_external, type: boolean, required: false, default: false, secret: false}
+  - {name: detection_allow_external_provider, type: boolean, required: false, default: false, secret: false}
+inputRules:
+  - any:
+      - {input: detection_model_provider_enabled, operator: equals, value: false}
+      - {input: detection_model_provider_base_url, operator: nonEmpty}
+    reason: "an enabled model provider requires a non-empty base URL (spec §41.1)"
+  - any:
+      - {input: detection_model_provider_enabled, operator: equals, value: false}
+      - {input: detection_model_provider_model, operator: nonEmpty}
+    reason: "an enabled model provider requires a non-empty model (spec §41.1)"
+  - any:
+      - {input: detection_model_provider_enabled, operator: equals, value: false}
+      - {input: detection_model_provider_auth, operator: notEquals, value: bearer}
+      - {input: detection_model_provider_api_key, operator: nonEmpty}
+    reason: "an enabled bearer-auth model provider requires a non-empty API key (spec §33/§41.1)"
 endpoints: []
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false
