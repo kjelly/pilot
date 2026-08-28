@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -39,6 +40,24 @@ type ModelProviderFallbackConfig struct {
 	APIKeyEnv string `yaml:"apiKeyEnv"`
 }
 
+// LogSourceConfig is the optional log pipeline block (spec1.md §14) — a
+// third, equally-weighted peer to baseline/cohort, not part of the
+// original detection-engine spec (whose Non-Goals excludes logs
+// entirely). Disabled by default; every existing Stage A/B behavior stays
+// byte-identical when Enabled is false.
+type LogSourceConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	BaseURL string `yaml:"baseUrl"`
+	// Query is a raw LogQL selector (spec1.md §14) — this package assumes
+	// no particular label scheme beyond requiring a pilot_host label (and
+	// optional site/level) on whatever streams it matches.
+	Query string `yaml:"query"`
+	// CurrentWindow/BaselineWindow are Go duration strings (e.g. "10m",
+	// "6h"); empty defaults to DefaultLogCurrentWindow/DefaultLogBaselineWindow.
+	CurrentWindow  string `yaml:"currentWindow"`
+	BaselineWindow string `yaml:"baselineWindow"`
+}
+
 // Config is the Detection Engine's config.yaml shape (spec §8, §33: the
 // file itself never contains a secret — only api_key_env, the name of an
 // environment variable the secret arrives through).
@@ -50,6 +69,7 @@ type Config struct {
 	StatusPath           string              `yaml:"statusPath"`
 	TextfileMetricsPath  string              `yaml:"textfileMetricsPath"`
 	ModelProvider        ModelProviderConfig `yaml:"modelProvider"`
+	LogSource            LogSourceConfig     `yaml:"logSource"`
 }
 
 // LoadConfig reads and validates config.yaml.
@@ -86,7 +106,33 @@ func (c Config) Validate() error {
 	if c.DBPath == "" {
 		return fmt.Errorf("config: dbPath is required")
 	}
-	return c.ModelProvider.validate()
+	if err := c.ModelProvider.validate(); err != nil {
+		return err
+	}
+	return c.LogSource.validate()
+}
+
+func (l LogSourceConfig) validate() error {
+	if !l.Enabled {
+		return nil
+	}
+	if l.BaseURL == "" {
+		return fmt.Errorf("config: logSource.baseUrl is required when enabled")
+	}
+	if l.Query == "" {
+		return fmt.Errorf("config: logSource.query is required when enabled")
+	}
+	if l.CurrentWindow != "" {
+		if _, err := time.ParseDuration(l.CurrentWindow); err != nil {
+			return fmt.Errorf("config: logSource.currentWindow: %w", err)
+		}
+	}
+	if l.BaselineWindow != "" {
+		if _, err := time.ParseDuration(l.BaselineWindow); err != nil {
+			return fmt.Errorf("config: logSource.baselineWindow: %w", err)
+		}
+	}
+	return nil
 }
 
 func (m ModelProviderConfig) validate() error {

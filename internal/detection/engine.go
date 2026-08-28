@@ -82,6 +82,20 @@ type Engine struct {
 	// Provider is nil.
 	LastModelStats ModelCycleStats
 
+	// LogSource is nil when the log pipeline is disabled (spec1.md's log
+	// detectors are an OPTIONAL third peer to baseline/cohort — the
+	// original detection-engine spec's own Non-Goals excludes logs
+	// entirely, so every existing Stage A/B behavior must stay
+	// byte-identical when this is nil). LogQuery is a raw LogQL selector
+	// (spec1.md §14) — this package does not assume any particular label
+	// scheme beyond requiring a `pilot_host` (and optional `site`/`level`)
+	// label on the returned streams, since it groups lines by whichever
+	// host each stream's labels name, not by a pre-known host list.
+	LogSource         *LokiClient
+	LogQuery          string
+	LogCurrentWindow  time.Duration
+	LogBaselineWindow time.Duration
+
 	lifecycles map[string]*HostLifecycle
 }
 
@@ -170,6 +184,8 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 		})
 	}
 
+	currentLogByHost, baselineLogByHost, logScale := e.queryLogWindows(ctx, evaluationTime)
+
 	type pendingHost struct {
 		snap  HostCycleSnapshot
 		site  string
@@ -195,7 +211,11 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 		}
 		baselineResult := ComputeBaselineHostScore(e.Profile, history, snap.Current)
 		cohortResult := ComputeCohortHostScore(e.Profile, snap, snapshots)
-		local := ComputeLocalScore(baselineResult, cohortResult)
+		logResult := HostFeatureScoreResult{Valid: false}
+		if currentLogByHost != nil {
+			logResult = ComputeLogHostScore(currentLogByHost[snap.Host], baselineLogByHost[snap.Host], logScale)
+		}
+		local := ComputeLocalScore(baselineResult, cohortResult, logResult)
 		outcome.LocalScore = local
 
 		if !local.Valid {

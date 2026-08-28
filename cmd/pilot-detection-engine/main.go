@@ -121,6 +121,17 @@ func runServe(ctx context.Context, configPath string) error {
 		engine.RateLimiter = detection.NewRateLimiter(detection.GlobalRateLimit)
 	}
 
+	if cfg.LogSource.Enabled {
+		engine.LogSource = detection.NewLokiClient(cfg.LogSource.BaseURL, detection.LokiTimeout)
+		engine.LogQuery = cfg.LogSource.Query
+		if cfg.LogSource.CurrentWindow != "" {
+			engine.LogCurrentWindow, _ = time.ParseDuration(cfg.LogSource.CurrentWindow)
+		}
+		if cfg.LogSource.BaselineWindow != "" {
+			engine.LogBaselineWindow, _ = time.ParseDuration(cfg.LogSource.BaselineWindow)
+		}
+	}
+
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
