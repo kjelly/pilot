@@ -111,6 +111,16 @@ func runServe(ctx context.Context, configPath string) error {
 	client := detection.NewThanosClient(cfg.MetricsSourceBaseURL, detection.QueryTimeout)
 	engine := detection.NewEngine(profile, client, store, nil)
 
+	provider, err := detection.NewManagedProviderFromConfig(cfg.ModelProvider)
+	if err != nil {
+		return fmt.Errorf("model provider: %w", err)
+	}
+	if provider != nil {
+		engine.Provider = provider
+		engine.ProviderProtocol = cfg.ModelProvider.Protocol
+		engine.RateLimiter = detection.NewRateLimiter(detection.GlobalRateLimit)
+	}
+
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -130,12 +140,24 @@ func runServe(ctx context.Context, configPath string) error {
 		if episodes, err := store.ListActiveEpisodes(); err == nil {
 			activeSignals = len(episodes)
 		}
+
+		modelStats := engine.LastModelStats
+		modelStatus := detection.NewDisabledProviderStatus()
+		if engine.Provider != nil {
+			modelStatus = detection.StatusModelProvider{
+				Enabled:  true,
+				Healthy:  modelStats.ProviderUp,
+				Protocol: engine.ProviderProtocol,
+				Circuit:  engine.Provider.CircuitState(time.Now()),
+			}
+		}
+
 		status := detection.Status{
 			SchemaVersion: 1,
 			State:         "healthy",
 			Source:        detection.StatusSource{Healthy: success},
 			Subjects:      detection.StatusSubjects{Active: len(outcomes)},
-			ModelProvider: detection.NewDisabledProviderStatus(),
+			ModelProvider: modelStatus,
 			Signals:       detection.StatusSignals{Active: activeSignals},
 			LastCycle:     detection.StatusLastCycle{Success: success},
 		}
@@ -158,6 +180,12 @@ func runServe(ctx context.Context, configPath string) error {
 			SubjectsTotal:               len(outcomes),
 			AnomalyScore:                anomalyScore,
 			OutboxPending:               pending,
+			ModelProviderUp:             modelStats.ProviderUp,
+			ModelRequestTotal:           modelStats.RequestTotal,
+			ModelRequestDurationSeconds: modelStats.RequestDuration,
+			ModelCandidatesTotal:        modelStats.CandidatesTotal,
+			ModelCandidatesDroppedTotal: modelStats.DroppedTotal,
+			ModelCircuitOpen:            modelStats.CircuitOpen,
 		}
 		_ = metrics.WriteTextfile(cfg.TextfileMetricsPath)
 	})
@@ -345,6 +373,39 @@ func newSignalsCmd() *cobra.Command {
 	return signalsCmd
 }
 
+// runProviderProbe exercises the real wire protocol (spec §31/§32) with a
+// single synthetic candidate — no Pilot host data, no telemetry, no
+// mutation — and reports the outcome. It never prints the API key or any
+// request/response body (spec §33: no secret in evidence/diagnose output).
+func runProviderProbe(ctx context.Context, provider *detection.ManagedProvider, protocol string) error {
+	requestID, err := detection.NewULID()
+	if err != nil {
+		return fmt.Errorf("generate probe request_id: %w", err)
+	}
+	req := detection.ModelBatchRequest{
+		SchemaVersion: 1,
+		RequestID:     requestID,
+		PromptVersion: detection.PromptVersion,
+		WindowSeconds: 600,
+		Candidates: []detection.ModelCandidateRequest{{
+			CandidateID:    "probe",
+			PilotHost:      "probe",
+			Site:           "probe",
+			EvaluationTime: time.Now().Unix(),
+			Current:        map[string]float64{"probe_metric": 0},
+		}},
+	}
+
+	start := time.Now()
+	resp, err := provider.Score(ctx, req)
+	elapsed := time.Since(start)
+	if err != nil {
+		return fmt.Errorf("provider probe failed (protocol=%s, %s): %w", protocol, elapsed.Round(time.Millisecond), err)
+	}
+	fmt.Printf("provider probe ok: protocol=%s status=%s elapsed=%s\n", protocol, resp.Status, elapsed.Round(time.Millisecond))
+	return nil
+}
+
 func newProviderCmd() *cobra.Command {
 	providerCmd := &cobra.Command{Use: "provider", Short: "Model provider operations (Stage B)"}
 	var configPath string
@@ -360,7 +421,11 @@ func newProviderCmd() *cobra.Command {
 				fmt.Println("model provider disabled (Stage A)")
 				return nil
 			}
-			return fmt.Errorf("model provider probe is not implemented in Stage A (protocol=%s)", cfg.ModelProvider.Protocol)
+			provider, err := detection.NewManagedProviderFromConfig(cfg.ModelProvider)
+			if err != nil {
+				return err
+			}
+			return runProviderProbe(cmd.Context(), provider, cfg.ModelProvider.Protocol)
 		},
 	}
 	probe.Flags().StringVar(&configPath, "config", "", "path to config.yaml (required)")

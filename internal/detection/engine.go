@@ -64,6 +64,20 @@ type Engine struct {
 	// cohort and cohort-outlier-v1 is not applicable for it.
 	Cohorts map[string]string
 
+	// Provider is nil for Stage A (provider disabled): every host is then
+	// fused via FuseLocalOnly, byte-identical to pre-Stage-B behavior.
+	// ProviderProtocol labels observability output ("openai-responses" |
+	// "ollama-chat"); RateLimiter is the global token bucket (spec §35),
+	// also nil-safe (nil == unlimited, used only when Provider is nil).
+	Provider         *ManagedProvider
+	ProviderProtocol string
+	RateLimiter      *RateLimiter
+
+	// LastModelStats is this Engine's most recent RunCycle's model-
+	// provider observability (spec §37/§38) — always the zero value while
+	// Provider is nil.
+	LastModelStats ModelCycleStats
+
 	lifecycles map[string]*HostLifecycle
 }
 
@@ -95,6 +109,11 @@ type HostCycleOutcome struct {
 	Host       string
 	Valid      bool
 	LocalScore LocalScoreResult
+	// Fused is the score/category/contributors actually used to advance
+	// the lifecycle this cycle (spec §19): equal to LocalScore when the
+	// provider is disabled/unavailable/insufficient_data, model-escalated
+	// otherwise. Zero value when Valid is false.
+	Fused      FusedResult
 	Transition Transition
 }
 
@@ -147,7 +166,14 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 		})
 	}
 
+	type pendingHost struct {
+		snap  HostCycleSnapshot
+		site  string
+		local LocalScoreResult
+	}
+
 	var outcomes []HostCycleOutcome
+	var pending []pendingHost
 	for _, snap := range snapshots {
 		key := SeriesKey{PilotHost: snap.Host, Site: siteByHost[snap.Host]}
 		results := perHost[key]
@@ -173,25 +199,58 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 			continue // both detectors invalid -> host cycle invalid (spec §18)
 		}
 
-		lc := e.lifecycleFor(snap.Host)
-		transition := lc.Advance(local.Score)
-		outcome.Transition = transition
+		outcomes = append(outcomes, outcome)
+		pending = append(pending, pendingHost{snap: snap, site: key.Site, local: local})
+	}
 
-		if err := e.persistTransition(snap.Host, key.Site, local, transition, evaluationTime); err != nil {
-			return outcomes, fmt.Errorf("persist transition for %s: %w", snap.Host, err)
+	// Model-assisted fusion (spec §19/§35): disabled/unavailable candidates
+	// and every non-candidate host fuse to local-only, byte-identical to
+	// Stage A. Only score>=CandidateThreshold hosts ever reach the
+	// provider, batched and rate/circuit-limited.
+	fused := make(map[string]FusedResult, len(pending))
+	var candidates []Candidate
+	for _, ph := range pending {
+		if e.Provider != nil && IsCandidate(ph.local.Score) {
+			candidates = append(candidates, Candidate{Host: ph.snap.Host, Site: ph.site, LocalScore: ph.local, Current: ph.snap.Current})
+			continue
+		}
+		fused[ph.snap.Host] = FuseLocalOnly(ph.local)
+	}
+	if e.Provider != nil {
+		e.LastModelStats = e.scoreCandidatesWithProvider(ctx, candidates, evaluationTime, fused)
+	} else {
+		e.LastModelStats = ModelCycleStats{}
+	}
+
+	// Advance lifecycle for every pending host, in the same deterministic
+	// order as before, using its fused (not raw local) score/category —
+	// baseline learning below still uses the RAW local score, since a
+	// model's influence must never bias the statistical baseline itself.
+	outcomeIdx := make(map[string]int, len(outcomes))
+	for i, o := range outcomes {
+		outcomeIdx[o.Host] = i
+	}
+	for _, ph := range pending {
+		fr := fused[ph.snap.Host]
+		lc := e.lifecycleFor(ph.snap.Host)
+		transition := lc.Advance(fr.Score)
+
+		idx := outcomeIdx[ph.snap.Host]
+		outcomes[idx].Fused = fr
+		outcomes[idx].Transition = transition
+
+		if err := e.persistTransition(ph.snap.Host, ph.site, fr, transition, evaluationTime); err != nil {
+			return outcomes, fmt.Errorf("persist transition for %s: %w", ph.snap.Host, err)
 		}
 
-		allRequiredValid := valid
-		if ShouldUpdateBaseline(lc.State, local.Score, allRequiredValid) {
-			for name, value := range snap.Current {
-				e.Baselines.Observe(snap.Host, name, evaluationTime, value)
+		if ShouldUpdateBaseline(lc.State, ph.local.Score, true) {
+			for name, value := range ph.snap.Current {
+				e.Baselines.Observe(ph.snap.Host, name, evaluationTime, value)
 			}
 		}
-		for name := range snap.Current {
-			e.Baselines.Evict(snap.Host, name, evaluationTime)
+		for name := range ph.snap.Current {
+			e.Baselines.Evict(ph.snap.Host, name, evaluationTime)
 		}
-
-		outcomes = append(outcomes, outcome)
 	}
 	return outcomes, nil
 }
@@ -199,8 +258,11 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 // persistTransition maps one lifecycle Transition onto the SQLite
 // episode/history/outbox write (spec §25) and, for warning->critical
 // escalation, enqueues the two outbox rows in the resolve-then-fire order
-// spec §22.2 requires.
-func (e *Engine) persistTransition(host, site string, local LocalScoreResult, tr Transition, evaluationTime int64) error {
+// spec §22.2 requires. `fused` is the score/category/contributors that
+// actually drove this transition — local-only for Stage A/non-candidates,
+// model-escalated per spec §19 otherwise.
+func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Transition, evaluationTime int64) error {
+	local := fused
 	if tr.Action == ActionNone {
 		return nil
 	}
