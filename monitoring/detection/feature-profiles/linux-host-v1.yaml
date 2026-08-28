@@ -1,0 +1,117 @@
+# Detection Engine MVP feature profile (detection-engine spec §12).
+# id/version are part of the SignalEvent fingerprint (spec §21) — changing
+# either changes the fingerprint of every host using this profile.
+id: linux-host-v1
+version: 1
+features:
+  - name: cpu_utilization
+    required: true
+    category: cpu
+    scaleFloor: 0.02
+    cohort: true
+    validMin: 0
+    validMax: 1.05
+    promql: |
+      1 - avg by (pilot_host, site) (
+        rate(node_cpu_seconds_total{
+          job="node",
+          mode="idle",
+          pilot_host!=""
+        }[1m])
+      )
+
+  - name: load1_per_cpu
+    required: true
+    category: cpu
+    scaleFloor: 0.05
+    cohort: true
+    validMin: 0
+    validMax: 64
+    promql: |
+      max by (pilot_host, site) (
+        node_load1{job="node",pilot_host!=""}
+      )
+      /
+      on (pilot_host, site)
+      count by (pilot_host, site) (
+        node_cpu_seconds_total{
+          job="node",
+          mode="idle",
+          pilot_host!=""
+        }
+      )
+
+  - name: memory_used_ratio
+    required: true
+    category: memory
+    scaleFloor: 0.02
+    cohort: true
+    validMin: 0
+    validMax: 1
+    promql: |
+      1 -
+      max by (pilot_host, site) (
+        node_memory_MemAvailable_bytes{job="node",pilot_host!=""}
+      )
+      /
+      max by (pilot_host, site) (
+        node_memory_MemTotal_bytes{job="node",pilot_host!=""}
+      )
+
+  - name: rootfs_used_ratio
+    required: true
+    category: storage
+    scaleFloor: 0.01
+    cohort: true
+    validMin: 0
+    validMax: 1
+    promql: |
+      1 -
+      max by (pilot_host, site) (
+        node_filesystem_avail_bytes{
+          job="node",
+          pilot_host!="",
+          mountpoint="/",
+          fstype!~"tmpfs|overlay"
+        }
+      )
+      /
+      max by (pilot_host, site) (
+        node_filesystem_size_bytes{
+          job="node",
+          pilot_host!="",
+          mountpoint="/",
+          fstype!~"tmpfs|overlay"
+        }
+      )
+
+  - name: disk_io_busy
+    required: true
+    category: storage
+    scaleFloor: 0.05
+    cohort: true
+    validMin: 0
+    validMax: 64
+    promql: |
+      sum by (pilot_host, site) (
+        rate(node_disk_io_time_seconds_total{
+          job="node",
+          pilot_host!="",
+          device!~"^(loop|ram|fd|sr)[0-9]*$"
+        }[1m])
+      )
+
+  - name: thermal_max_celsius
+    required: false
+    category: thermal
+    scaleFloor: 2.0
+    cohort: true
+    validMin: -50
+    validMax: 200
+    promql: |
+      max by (pilot_host, site) (
+        node_hwmon_temp_celsius{
+          job="node",
+          pilot_host!=""
+        }
+      )
