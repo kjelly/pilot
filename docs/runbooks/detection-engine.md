@@ -358,8 +358,74 @@ $ sudo pilot-detection-engine status --json
 ```
 
 Stage B-1（engine core + contract/inventory/playbook delivery +
-provider-verification lane）至此全部有真實證據；Stage B-2（真實
-OpenAI/Ollama 帳號的 real-provider evidence）仍未開始。
+provider-verification lane）至此全部有真實證據。
+
+## 6.3 Stage B-2 real-provider evidence（Ollama native，2026-08-28）
+
+同一套拓樸，把 `detection_model_provider_base_url` 從 fake fixture
+（`detection-fixture-provider:11434`）換成一台真實 Ollama server
+（`http://10.1.80.71:11434`，`model: gemma4:e4b`），其餘完全比照 §6.2：
+
+```bash
+go run ./cmd/pilot vm-target topology test \
+  --topology tmp/detection-engine-fake-topology.example.yaml \
+  --playbook playbooks/apply/detection-engine-apply.yml \
+  --verify docs/verification/detection-engine.md=detection-engine \
+  --verify docs/verification/detection-engine-model-provider.md=detection-engine \
+  --verify-timeout 40 \
+  -- -e detection_engine_artifact_path=dist/pilot-detection-engine-linux-amd64 \
+     -e detection_engine_artifact_sha256=<sha256> \
+     -e detection_metrics_source_host=<source IP> \
+     -e detection_alertmanager_target_host=<sink IP> \
+     -e detection_model_provider_enabled=true \
+     -e detection_model_provider_protocol=ollama-chat \
+     -e detection_model_provider_model=gemma4:e4b \
+     -e detection_model_provider_auth=none \
+     -e detection_model_provider_base_url=http://10.1.80.71:11434
+```
+
+真實輸出（第一次就全綠）：
+
+```
+=== [Step 4/6] L4 Apply Playbook ===
+PLAY RECAP: ok=53 changed=11 unreachable=0 failed=0 skipped=8
+✓ Playbook apply completed
+=== [Step 5/6] L5 Verification Specs (2) ===
+verdict: **PASS**  (pass=12 fail=0 skip=0)   # detection-engine.md
+verdict: **PASS**  (pass=5  fail=0 skip=0)   # detection-engine-model-provider.md — M1-M5
+=== [Step 6/6] L6 Idempotency Check ===
+PLAY RECAP: ok=51 changed=0 unreachable=0 failed=0 skipped=10
+✓ Idempotency check passed (changed=0)
+```
+
+目標主機上直接確認（真實模型，非 fixture）：
+
+```
+$ pilot-detection-engine provider probe --config /etc/pilot/detection-engine/config.yaml
+provider probe ok: protocol=ollama-chat status=insufficient_data elapsed=9.161s
+
+$ sudo pilot-detection-engine status --json
+{
+  "model_provider": {"enabled": true, "healthy": true, "protocol": "ollama-chat", "circuit": "closed"},
+  "last_cycle": {"success": true}
+}
+```
+
+背景踏查（跟這次實跑本身無關，但值得記錄）：同一顆 `gemma4:e4b` tag
+在**不同 Ollama host** 上結果不一致——`10.1.80.43:11434` 那台會回傳缺
+envelope 的扁平 JSON（client-side validation 正確擋下，fallback
+local）；`10.1.80.71:11434` 這台（本次實跑所用）用同一份 v1 prompt 就
+正確回完整 envelope。根因已隔離到 prompt 內容本身（拿掉 format schema
+的 `$schema` 欄位單獨測試無效，加一句明確要求「回完整 envelope」才有
+用）而非 client 端序列化問題；因為 spec §36 的 prompt 是
+version-locked（prompt_version=1），且問題本身是 host/build-specific
+而非 v1 prompt 通用缺陷，暫不修改 prompt。另外實測
+`qwen3.5-2b-FLM`（Lemonade Server, `10.1.80.71:13305`）：連線正常，但
+同一份請求重跑多次回傳格式不穩定（有時缺 envelope、有時根本不是合法
+JSON），client-side validation 同樣正確全部擋下；判斷為該 2B 模型
+/FLM runtime 本身的可靠度限制，非 pilot 這邊的 bug。
+
+Stage B-2 的「至少一個：Ollama native」要求至此有真實證據滿足。
 
 ## 7. Teardown
 
@@ -376,3 +442,4 @@ go run ./cmd/pilot vm-target down --name monitored-subject-1
 | 2026-08-28 | v1.0 | Stage A-2 首次實跑：3-VM 真實拓樸（monitored-subject-1 + prom-site + detect-central），完整部署鏈 + §51 real metrics-chain 證據 + Spec v2 12/12 PASS + 冪等重跑 changed=0；找到並修好 4 個真 bug（host-monitoring 缺 textfile collector、subjects/signals 計數從未寫回、SQLite VACUUM INTO 檔案已存在導致 upgrade rollback、`signals list` 空陣列序列化成 null） | sre |
 | 2026-08-28 | v1.1 | Fake-protocol topology lane（spec §49 C11）補跑：`vm-target topology test` 對 fake Thanos/Alertmanager fixture 全綠（L1/L3/L4/L5 12-12 PASS/L6 changed=0）；找到並修好 2 個真 bug（`resolve-hosts-alias-target.yml` 的 fact 跨 include 洩漏，repo-wide，`prometheus-apply.yml` 同樣受影響；state.db 落地權限 0644 應為 0600）；Stage A 達成 VERIFICATION_READY | sre |
 | 2026-08-28 | v1.2 | Stage B-1 全部落地：engine core（OpenAI/Ollama adapter、batch、fusion、retry/circuit）+ contract/inventory/playbook delivery（provider group vars、`detection-model-provider` Vault section、apply-time gates、provider.env/systemd EnvironmentFile）+ provider-verification lane（新增 `detection-fixture-provider` fake Ollama Chat fixture，`docs/verification/detection-engine-model-provider.md` M1-M5 全 PASS、冪等 changed=0，第一次跑就全綠，未發現新 bug） | sre |
+| 2026-08-28 | v1.3 | Stage B-2 real-provider evidence（Ollama native）：同拓樸把 provider base_url 換成真實 `10.1.80.71:11434`/`gemma4:e4b`，M1-M5 全 PASS、冪等 changed=0；順手記錄 gemma4:e4b 跨 host 不一致（host/build-specific，非 v1 prompt 通用缺陷）與 qwen3.5-2b-FLM（Lemonade）回傳格式不穩定的踏查結果 | sre |

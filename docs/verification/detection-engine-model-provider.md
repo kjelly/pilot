@@ -130,6 +130,15 @@ $ sudo pilot-detection-engine status --json
 }
 ```
 
+**Stage B-2 real-provider evidence (Ollama native)** — recorded the same
+day, same topology and procedure, with `base_url` pointed at a real
+Ollama server (`http://10.1.80.71:11434`, `model: gemma4:e4b`) instead of
+the fake fixture: M1-M5 all PASS again, idempotent changed=0,
+`provider probe` and `status --json` both healthy against the real
+model (`elapsed=9.161s`). See `docs/runbooks/detection-engine.md` §6.3 for
+the full transcript — this satisfies spec §58's Stage B-2 "at least one:
+Ollama native" requirement.
+
 No bugs found in this run (unlike C11's fake-lane closure, which found 3)
 — Stage B-1b/B-1c's playbook/contract/inventory work was correct on the
 first real attempt. See `docs/runbooks/detection-engine.md` §6.2 for the
