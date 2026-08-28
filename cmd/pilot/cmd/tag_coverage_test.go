@@ -67,6 +67,13 @@ var specTagMap = []specTagMapping{
 			"C11": "capacity guard (DB size < 10 GiB) — verify-only",
 		}},
 	{spec: "dashboard.md", playbook: "dashboard-apply.yml"},
+	{spec: "detection-engine.md", playbook: "detection-engine-apply.yml",
+		prefixes: []string{"detection-engine"},
+		exemptRows: map[string]string{
+			"C6":  "status.json/textfile carrying no secret is a Go-code-level guarantee (internal/detection/status.go, metrics.go never define a secret field) — no apply task produces or could break this",
+			"C10": "cold-start no-false-anomaly is an internal/detection algorithm property (baseline_test.go's 120-bucket gate) — no apply task implements it",
+			"C11": "lifecycle/escalation/resolution/outbox-ordering SCENARIO evidence comes from the fake-protocol topology lane (spec §49), not a single already-applied host — this row is verifyOnly",
+		}},
 	{spec: "docker.md", playbook: "docker-apply.yml", prefixes: []string{"docker"},
 		exemptRows: map[string]string{
 			"C3": "docker --version probe — side effect of the engine install (docker-C1)",

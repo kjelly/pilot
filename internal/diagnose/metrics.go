@@ -11,9 +11,9 @@ const ThanosQueryGroup = "thanos-query"
 
 // thanosQueryPort is Thanos Query's Prometheus-compatible HTTP API port
 // on its own loopback — docs/verification/thanos-query.md v1.1 (the
-// 2026-07-17 port fix) and docs/network-firewall-matrix.md both confirm
-// 10912. NOT contracts/thanos-query.yaml's `endpoints` list, which still
-// says 10902 (stale — do not use it as the source here).
+// 2026-07-17 port fix), docs/network-firewall-matrix.md, and (since the
+// detection-engine spec's Stage A-0 fix) contracts/thanos-query.yaml's
+// own `endpoints` list all confirm 10912.
 const thanosQueryPort = 10912
 
 // MetricsSteps returns the single ad-hoc step that queries Thanos Query's

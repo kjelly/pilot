@@ -1,0 +1,23 @@
+# Detection Engine fake-protocol topology lane — prerequisite stage
+# (detection-engine spec §49). Run this ONCE against a freshly-provisioned
+# fake topology (tmp/detection-engine-fake-topology.example.yaml) to bring
+# up the fixture stub services BEFORE running the actual apply+verify test.
+#
+#   go run ./cmd/pilot vm-target topology up \
+#     --topology tmp/detection-engine-fake-topology.example.yaml
+#   go run ./cmd/pilot vm-target run \
+#     --group detection-fixture-source=<node> --group detection-fixture-sink=<node> \
+#     --sandbox playbooks/test/detection-engine-fake-topology.yml
+#   go run ./cmd/pilot vm-target topology test \
+#     --topology tmp/detection-engine-fake-topology.example.yaml \
+#     --playbook playbooks/apply/detection-engine-apply.yml \
+#     --verify docs/verification/detection-engine.md=detection-engine \
+#     -- -e detection_metrics_source_host=<detection-fixture-source IP> \
+#        -e detection_alertmanager_target_host=<detection-fixture-sink IP> \
+#        -e detection_engine_artifact_path=... -e detection_engine_artifact_sha256=...
+#
+# This file does not itself apply detection-engine — that is
+# playbooks/apply/detection-engine-apply.yml's job, run separately (per the
+# `--playbook` argument above), so its own idempotency (changed=0 on rerun)
+# is exercised in isolation from this one-time fixture setup.
+- import_playbook: detection-engine-fixtures.yml

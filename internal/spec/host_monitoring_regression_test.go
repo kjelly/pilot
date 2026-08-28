@@ -23,6 +23,8 @@ import (
 //	C9     an UNauthenticated request to /metrics (9100) is rejected (401) —
 //	       proves auth is actually enforced, not just configured
 //	C10    web-config.yml declares basic_auth_users for the configured user
+//	C11    textfile collector directory exists with sticky-bit mode 1777
+//	       (detection-engine spec §5.3/§38 depends on this — v1.3)
 //
 // Cross-row invariants locked below:
 //
@@ -78,7 +80,7 @@ func TestRegression_HostMonitoringSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -143,6 +145,16 @@ func TestRegression_HostMonitoringSpec(t *testing.T) {
 	}
 	if exp["C10"] != "0" {
 		t.Errorf("C10 expected must be rc-based `0`, got %q", exp["C10"])
+	}
+
+	// C11 must assert the exact sticky-bit mode (1777), not just directory
+	// existence — a world-writable-without-sticky directory would let one
+	// writer clobber another's metric file.
+	if !strings.Contains(cmd["C11"], "/var/lib/node_exporter/textfile") {
+		t.Errorf("C11 must stat /var/lib/node_exporter/textfile, got %q", cmd["C11"])
+	}
+	if exp["C11"] != "~1777" {
+		t.Errorf("C11 expected must be ~1777, got %q", exp["C11"])
 	}
 
 	// No credentials belong in a spec (AGENTS.md) — this spec's whole point

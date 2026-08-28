@@ -209,6 +209,14 @@ var deployCatalog = []deployPlaybook{
 		Playbook: "playbooks/apply/alertmanager-apply.yml", DefaultGroup: "alertmanager", StageVar: "stage",
 	},
 	{
+		Key: "detection-engine", Label: "中央 Detection Engine(adaptive anomaly detection)",
+		Playbook: "playbooks/apply/detection-engine-apply.yml", DefaultGroup: "detection-engine", StageVar: "stage",
+		AutoHostVars: []autoHostVar{
+			{Var: "detection_metrics_source_host", Group: "thanos-query", Label: "中央 Thanos Query"},
+			{Var: "detection_alertmanager_target_host", Group: "alertmanager", Label: "中央 Alertmanager"},
+		},
+	},
+	{
 		Key: "dashboard", Label: "觀測畫面(Grafana + Loki)",
 		Playbook: "playbooks/apply/dashboard-apply.yml", DefaultGroup: "dashboard", StageVar: "stage",
 		AutoHostVars: []autoHostVar{{Var: "thanos_query_target_host", Group: "thanos-query", Label: "中央 Thanos Query"}},

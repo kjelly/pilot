@@ -1,0 +1,31 @@
+# Detection Engine Stage A fake-protocol topology lane (spec §49).
+# Committed as an example despite living under tmp/ (see .gitignore's
+# negation entry) — copy it to a real scenario file before use if you want
+# to keep local edits out of git.
+#
+# Proves only the C rows assigned to the fake protocol/fixture lane
+# (contracts/detection-engine.yaml's C11 exemption). Never apply the real
+# thanos-query/alertmanager/monitored-subject components against this
+# topology — the fixture groups below stand in for them.
+nodes:
+  - name: detection-engine-fixture
+    base_image: ubuntu-24.04
+    ssh_user: ubuntu
+    vcpus: 2
+    memory: 2048
+    disk: 20
+    groups: [detection-engine, host-monitoring]
+  - name: detection-fixture-source
+    base_image: ubuntu-24.04
+    ssh_user: ubuntu
+    vcpus: 1
+    memory: 1024
+    disk: 10
+    groups: [detection-fixture-source]
+  - name: detection-fixture-sink
+    base_image: ubuntu-24.04
+    ssh_user: ubuntu
+    vcpus: 1
+    memory: 1024
+    disk: 10
+    groups: [detection-fixture-sink]

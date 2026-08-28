@@ -45,7 +45,7 @@ func TestMCPServe_Integration_DiagnoseToolsGatedByEnableDiagnoseFlag(t *testing.
 	}
 	for _, tool := range toolsResult.Tools {
 		switch tool.Name {
-		case "pilot_diagnose_sudo", "pilot_diagnose_dns", "pilot_diagnose_logs", "pilot_diagnose_metrics", "pilot_diagnose_security_logs":
+		case "pilot_diagnose_sudo", "pilot_diagnose_dns", "pilot_diagnose_logs", "pilot_diagnose_metrics", "pilot_diagnose_security_logs", "pilot_diagnose_detection":
 			t.Fatalf("ListTools() included %q without --enable-diagnose, got %+v", tool.Name, toolsResult.Tools)
 		}
 	}
@@ -79,6 +79,7 @@ func TestMCPServe_Integration_DiagnoseToolsListedWhenEnabled(t *testing.T) {
 		"pilot_diagnose_logs":          false,
 		"pilot_diagnose_metrics":       false,
 		"pilot_diagnose_security_logs": false,
+		"pilot_diagnose_detection":     false,
 	}
 	for _, tool := range toolsResult.Tools {
 		if _, ok := wantTools[tool.Name]; ok {
@@ -292,6 +293,84 @@ func TestMCPServe_Integration_DiagnoseMetricsStartWithoutEndReturnsStructuredErr
 	}
 	if !result.IsError {
 		t.Fatalf("pilot_diagnose_metrics with start but no end did not return an error: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("error content = %T, want *mcp.TextContent", result.Content[0])
+	}
+	var toolErr mcpToolError
+	if err := json.Unmarshal([]byte(text.Text), &toolErr); err != nil {
+		t.Fatalf("parse structured error: %v\nraw: %s", err, text.Text)
+	}
+	if toolErr.Code != mcpErrInvalidParam {
+		t.Fatalf("error code = %q, want %q", toolErr.Code, mcpErrInvalidParam)
+	}
+}
+
+func TestMCPServe_Integration_DiagnoseDetectionRequiresSignalIDOrPilotHost(t *testing.T) {
+	requireRealAnsible(t)
+	binary := buildPilotBinary(t)
+	inv := writeDiagnoseFixtureInventory(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-integration-test", Version: "0.0.1"}, nil)
+	transport := &mcp.CommandTransport{Command: exec.Command(binary, "mcp", "serve", "--dir", t.TempDir(), "--audit-dir", t.TempDir(), "--enable-diagnose", "--diagnose-inventory", inv)}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "pilot_diagnose_detection",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_diagnose_detection) error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("pilot_diagnose_detection with neither signal_id nor pilot_host did not return an error: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("error content = %T, want *mcp.TextContent", result.Content[0])
+	}
+	var toolErr mcpToolError
+	if err := json.Unmarshal([]byte(text.Text), &toolErr); err != nil {
+		t.Fatalf("parse structured error: %v\nraw: %s", err, text.Text)
+	}
+	if toolErr.Code != mcpErrInvalidParam {
+		t.Fatalf("error code = %q, want %q", toolErr.Code, mcpErrInvalidParam)
+	}
+}
+
+func TestMCPServe_Integration_DiagnoseDetectionMalformedSignalIDReturnsStructuredError(t *testing.T) {
+	requireRealAnsible(t)
+	binary := buildPilotBinary(t)
+	inv := writeDiagnoseFixtureInventory(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-integration-test", Version: "0.0.1"}, nil)
+	transport := &mcp.CommandTransport{Command: exec.Command(binary, "mcp", "serve", "--dir", t.TempDir(), "--audit-dir", t.TempDir(), "--enable-diagnose", "--diagnose-inventory", inv)}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer session.Close()
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "pilot_diagnose_detection",
+		Arguments: map[string]any{"signal_id": "not-a-valid-ulid; rm -rf /"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(pilot_diagnose_detection) error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("pilot_diagnose_detection with a malformed signal_id did not return an error: %+v", result.Content)
 	}
 	text, ok := result.Content[0].(*mcp.TextContent)
 	if !ok {

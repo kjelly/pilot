@@ -186,6 +186,8 @@
   tags: [observability, prometheus]
 - import_playbook: apply/thanos-query-apply.yml
   tags: [observability, thanos-query]
+- import_playbook: apply/detection-engine-apply.yml
+  tags: [observability, detection-engine]
 - import_playbook: apply/dashboard-apply.yml
   tags: [observability, dashboard]
 

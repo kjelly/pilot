@@ -1,0 +1,45 @@
+---
+# ============================================================================
+#  group_vars/detection-engine.example.yml —— 中央 Detection Engine 設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/detection-engine.yml
+#    cp group_vars/detection-engine.example.yml <inventory 目錄>/group_vars/detection-engine.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/detection-engine.md
+#  詳細設計:docs/superpowers/specs/2026-08-28-detection-engine-spec.md
+#  上游 metrics:docs/verification/thanos-query.md(中央 Thanos Query，
+#              detection_metrics_source_host 通常由 deploy catalog 自動從
+#              inventory 的 thanos-query group 偵測，這裡留空即可）
+#  下游告警:  docs/verification/alertmanager.md（同上，
+#              detection_alertmanager_target_host 也是自動偵測）
+#
+#  Stage A（本範本涵蓋的範圍）永遠是 Model Provider disabled——這裡沒有
+#  provider 相關變數，也不需要 provider Vault section。Provider 只有在
+#  Stage B 才會新增，屆時會是另一批獨立的變數與 Vault key。
+# ============================================================================
+
+# 控制端已建置好的 pilot-detection-engine 二進位檔路徑（相對於 repo root，
+# 或絕對路徑）。必填——套用前會先在控制端驗證這個檔案存在、SHA256 跟下面
+# 的 detection_engine_artifact_sha256 相符，套用後再對目標主機上的檔案驗
+# 一次（見 spec §6.3）。
+detection_engine_artifact_path: "dist/pilot-detection-engine-linux-amd64"
+
+# 上面那個二進位檔的 SHA256（`scripts/build-detection-engine.sh` 建置後會
+# 一併產生 <binary>.sha256）。必填、不得留空。
+detection_engine_artifact_sha256: ""
+
+# 中央 Thanos Query 主機的 IP 或 FQDN。留空時 deploy catalog 會自動從
+# inventory 的 thanos-query group 偵測（見 §43.1）；只有明確要 override
+# 成別的位址時才需要手動填。Detection Engine 永遠連 :10912，never :10902
+# （見 spec §9/§10——10902 只是 Thanos Sidecar 的 container-internal port）。
+detection_metrics_source_host: ""
+
+# 中央 Alertmanager 主機的 IP 或 FQDN。留空時同樣會自動從 inventory 的
+# alertmanager group 偵測。
+detection_alertmanager_target_host: ""
+
+# 通常不用改，會沿用 playbook 內建預設（spec §11 的 scheduler 常數）：
+# detection_cycle_interval: 15s
+# detection_evaluation_delay: 20s

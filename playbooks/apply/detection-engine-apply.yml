@@ -1,0 +1,615 @@
+# Apply playbook for docs/verification/detection-engine.md (Stage A-2).
+#
+# Deploys the pilot-detection-engine binary (built by
+# scripts/build-detection-engine.sh, NOT downloaded or `go install`ed —
+# see spec §6.3) as a systemd service on a dedicated central host. Unlike
+# host-monitoring/dcgm-exporter, this is a controller-built artifact copied
+# from THIS repo's dist/ directory, not an upstream release or a Docker
+# image — spec §6.3 requires controller-side SHA256 verification before the
+# copy and a target-side re-verification after.
+#
+# Detection Engine only ever talks to two already-deployed central roles
+# (spec §9/§10): the central Thanos Query at :10912 (NEVER :10902 — that is
+# the per-site Thanos Sidecar's container-internal port and colliding with
+# it is the exact regression Stage A-0 fixed in contracts/thanos-query.yaml)
+# and the central Alertmanager at :9093. It never scrapes/SSHes/execs a
+# managed host directly (spec §2 Non-Goals).
+#
+# Provider (Stage B) is always disabled here — this playbook renders
+# config.yaml with modelProvider.enabled hardcoded false and never touches
+# a provider secret. Stage B will extend this file with provider group
+# vars, provider.env rendering, and the provider Vault section; none of
+# that exists yet (spec §33/§41.1/§45).
+#
+# Usage (dry run):
+#   go run ./cmd/pilot vm-target run --name detection --sandbox \
+#       playbooks/apply/detection-engine-apply.yml --check --diff \
+#       -e detection_engine_artifact_path=dist/pilot-detection-engine-linux-amd64 \
+#       -e detection_engine_artifact_sha256=<sha256> \
+#       -e detection_metrics_source_host=<thanos-query IP> \
+#       -e detection_alertmanager_target_host=<alertmanager IP>
+#
+# Variables: see docs/verification/detection-engine.md §1.5.
+#
+# Stage gating (same convention as host-monitoring-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+- name: Apply detection-engine (central adaptive anomaly detection plane)
+  hosts: "{{ target_group | default('detection-engine') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    detection_engine_user: pilot-detect
+    detection_engine_bin_dest: /usr/local/bin/pilot-detection-engine
+    detection_engine_config_dir: /etc/pilot/detection-engine
+    detection_engine_config_path: /etc/pilot/detection-engine/config.yaml
+    detection_engine_feature_profile_dest: /etc/pilot/detection-engine/feature-profile.yaml
+    detection_engine_feature_profile_src: "{{ playbook_dir }}/../../monitoring/detection/feature-profiles/linux-host-v1.yaml"
+    detection_engine_data_dir: /var/lib/pilot/detection-engine
+    detection_engine_db_path: /var/lib/pilot/detection-engine/state.db
+    detection_engine_status_path: /run/pilot/detection-engine/status.json
+    detection_engine_textfile_path: /var/lib/node_exporter/textfile/pilot_detection_engine.prom
+    detection_engine_backup_dir: /var/backups/pilot-detection-engine
+
+    detection_metrics_source_alias: detection-thanos-query-backend
+    detection_alertmanager_alias: detection-alertmanager-backend
+
+    # spec §11 scheduler constants — not expected to be overridden in
+    # normal operation, but exposed for testing/tuning.
+    detection_cycle_interval: 15s
+    detection_evaluation_delay: 20s
+
+    # detection_engine_artifact_path / detection_engine_artifact_sha256 are
+    # DELIBERATELY NOT declared here (same "no shadowing default" reasoning
+    # as prometheus-apply.yml's thanos_s3_target_host) — both are required
+    # and gated below; a hardcoded default here would silently defeat that
+    # gate.
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Gate: supported OS is Ubuntu 24.04 (spec §5.1)"
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_version == '24.04'
+        fail_msg: >-
+          detection-engine only supports Ubuntu 24.04 (spec §5.1 — no
+          actual-run evidence exists for any other OS). Detected
+          {{ ansible_distribution }} {{ ansible_distribution_version }}.
+      tags: [always]
+
+    - name: "Gate: supported CPU architecture is x86_64/amd64 (spec §5.1)"
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == 'x86_64'
+        fail_msg: >-
+          detection-engine only supports amd64 (spec §5.1). Detected
+          {{ ansible_architecture }}.
+      tags: [always]
+
+    - name: "Gate: host-monitoring textfile collector directory exists on this host"
+      ansible.builtin.stat:
+        path: /var/lib/node_exporter/textfile
+      register: detection_textfile_dir_stat
+      tags: [always]
+
+    - name: "Gate: assert host-monitoring's textfile directory is present and a directory"
+      ansible.builtin.assert:
+        that:
+          - detection_textfile_dir_stat.stat.exists
+          - detection_textfile_dir_stat.stat.isdir
+        fail_msg: >-
+          /var/lib/node_exporter/textfile does not exist. detection-engine
+          depends on host-monitoring being applied on this SAME host (spec
+          §5.3/contract dependency host-monitoring/sameHosts) — it only
+          reuses host-monitoring's textfile collector to publish its OWN
+          health metrics, not as a managed-host telemetry path. Apply
+          playbooks/apply/host-monitoring-apply.yml on this host first.
+      tags: [always]
+
+    - name: "Gate: artifact path/sha256 are supplied"
+      ansible.builtin.assert:
+        that:
+          - detection_engine_artifact_path is defined
+          - detection_engine_artifact_path | length > 0
+          - detection_engine_artifact_sha256 is defined
+          - detection_engine_artifact_sha256 | length > 0
+        fail_msg: >-
+          detection_engine_artifact_path and detection_engine_artifact_sha256
+          are both required (spec §6.3) — build with
+          scripts/build-detection-engine.sh first, then pass its output path
+          and the accompanying .sha256.
+      tags: [always]
+
+    - name: "Resolve detection_engine_artifact_path to an absolute controller path (spec §6.3: relative = repo-root relative)"
+      ansible.builtin.set_fact:
+        detection_engine_artifact_abs_path: >-
+          {{ detection_engine_artifact_path
+             if (detection_engine_artifact_path is match('^/'))
+             else (playbook_dir ~ '/../../' ~ detection_engine_artifact_path) }}
+      tags: [always]
+
+    - name: "Gate: artifact exists on the controller"
+      ansible.builtin.stat:
+        path: "{{ detection_engine_artifact_abs_path }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: detection_engine_artifact_stat
+      tags: [always]
+
+    - name: "Gate: controller-side artifact exists and its SHA256 matches"
+      ansible.builtin.assert:
+        that:
+          - detection_engine_artifact_stat.stat.exists
+          - detection_engine_artifact_stat.stat.checksum == detection_engine_artifact_sha256
+        fail_msg: >-
+          controller artifact {{ detection_engine_artifact_abs_path }} is
+          missing or its SHA256 ({{ detection_engine_artifact_stat.stat.checksum | default('MISSING') }})
+          does not match detection_engine_artifact_sha256
+          ({{ detection_engine_artifact_sha256 }}).
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: controller artifact's own `version` subcommand succeeds (binary contract, spec §6.3/§7)"
+      ansible.builtin.command:
+        argv: ["{{ detection_engine_artifact_abs_path }}", "version"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: detection_engine_artifact_version
+      changed_when: false
+      tags: [always]
+
+    - name: "Gate: version output matches the binary contract (`pilot-detection-engine <version> (<commit>)`)"
+      ansible.builtin.assert:
+        that:
+          - detection_engine_artifact_version.stdout is match('^pilot-detection-engine \S+ \(\S+\)')
+        fail_msg: >-
+          unexpected version output: {{ detection_engine_artifact_version.stdout }}
+      run_once: true
+      tags: [always]
+
+    - name: "Auto-detect Thanos Query host from this inventory's thanos-query group"
+      ansible.builtin.set_fact:
+        detection_metrics_source_host: >-
+          {{ hostvars[(groups.get('thanos-query', []) | first)]['ansible_host']
+             | default(groups.get('thanos-query', []) | first, true) }}
+      when: >-
+        (detection_metrics_source_host | default('') | length == 0)
+        and (groups.get('thanos-query', []) | length > 0)
+      tags: [always]
+
+    - name: "Gate: exactly-one Thanos Query source binding (contract §41 sourceSelection: exactlyOne)"
+      ansible.builtin.assert:
+        that:
+          - detection_metrics_source_host | default('') | length > 0
+          - groups.get('thanos-query', []) | length <= 1
+        fail_msg: >-
+          detection-engine requires exactly one thanos-query binding.
+          Either detection_metrics_source_host could not be resolved (no
+          -e override and no thanos-query group host in inventory), or the
+          thanos-query group has more than one host (ambiguous
+          auto-detect) — pass -e detection_metrics_source_host=<ip>
+          explicitly in that case.
+      tags: [always]
+
+    - name: "Auto-detect Alertmanager host from this inventory's alertmanager group"
+      ansible.builtin.set_fact:
+        detection_alertmanager_target_host: >-
+          {{ hostvars[(groups.get('alertmanager', []) | first)]['ansible_host']
+             | default(groups.get('alertmanager', []) | first, true) }}
+      when: >-
+        (detection_alertmanager_target_host | default('') | length == 0)
+        and (groups.get('alertmanager', []) | length > 0)
+      tags: [always]
+
+    - name: "Gate: exactly-one Alertmanager binding (contract §41 sourceSelection: exactlyOne)"
+      ansible.builtin.assert:
+        that:
+          - detection_alertmanager_target_host | default('') | length > 0
+          - groups.get('alertmanager', []) | length <= 1
+        fail_msg: >-
+          detection-engine requires exactly one alertmanager binding.
+          Either detection_alertmanager_target_host could not be resolved,
+          or the alertmanager group has more than one host — pass
+          -e detection_alertmanager_target_host=<ip> explicitly in that case.
+      tags: [always]
+
+    - name: "Gate: Stage B provider vars are not set (Stage A owns no provider Vault section)"
+      ansible.builtin.assert:
+        that:
+          - detection_model_provider_enabled | default(false) | bool == false
+        fail_msg: >-
+          Stage A always runs with the model provider disabled — this
+          playbook has no Stage B provider support yet (spec §33/§45).
+      tags: [always]
+
+  tasks:
+    - name: "Resolve detection_metrics_source_host for the /etc/hosts pin"
+      ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+      vars:
+        hosts_alias_target_host: "{{ detection_metrics_source_host }}"
+
+    - name: "Pin {{ detection_metrics_source_alias }} -> {{ detection_metrics_source_host }} in /etc/hosts"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ detection_metrics_source_alias }}$'
+        line: "{{ hosts_alias_resolved_ip }}\t{{ detection_metrics_source_alias }}"
+        state: present
+
+    - name: "Resolve detection_alertmanager_target_host for the /etc/hosts pin"
+      ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+      vars:
+        hosts_alias_target_host: "{{ detection_alertmanager_target_host }}"
+
+    - name: "Pin {{ detection_alertmanager_alias }} -> {{ detection_alertmanager_target_host }} in /etc/hosts"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ detection_alertmanager_alias }}$'
+        line: "{{ hosts_alias_resolved_ip }}\t{{ detection_alertmanager_alias }}"
+        state: present
+
+    # Live reachability, run from THIS host (the network path that
+    # actually matters — not the controller's). spec §10/§44: the
+    # Detection-facing endpoint is always :10912, never the Sidecar's
+    # container-internal :10902.
+    - name: "Gate: Thanos Query source is reachable and returns vector(1) (spec §44, never :10902)"
+      tags: [detection-engine-C7]
+      ansible.builtin.uri:
+        url: "http://{{ detection_metrics_source_alias }}:10912/api/v1/query?query=vector(1)"
+        return_content: true
+        status_code: 200
+      register: detection_thanos_probe
+      retries: 3
+      delay: 5
+      until: detection_thanos_probe.status is defined and detection_thanos_probe.status == 200
+      failed_when: >-
+        detection_thanos_probe.status is not defined
+        or detection_thanos_probe.status != 200
+        or '"resultType":"vector"' not in detection_thanos_probe.content
+
+    - name: "Gate: Alertmanager is ready"
+      ansible.builtin.uri:
+        url: "http://{{ detection_alertmanager_alias }}:9093/-/ready"
+        status_code: 200
+      register: detection_alertmanager_probe
+      retries: 3
+      delay: 5
+      until: detection_alertmanager_probe.status is defined and detection_alertmanager_probe.status == 200
+
+    - name: "Gate: feature profile file exists on the controller and is non-empty"
+      ansible.builtin.stat:
+        path: "{{ detection_engine_feature_profile_src }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: detection_feature_profile_stat
+
+    - name: "Gate: assert feature profile is present"
+      ansible.builtin.assert:
+        that:
+          - detection_feature_profile_stat.stat.exists
+          - detection_feature_profile_stat.stat.size > 0
+        fail_msg: "missing or empty {{ detection_engine_feature_profile_src }}"
+      run_once: true
+
+    - name: "Detection Engine install + systemd service"
+      block:
+        - name: "Step 1: create dedicated system user (spec §8)"
+          tags: [detection-engine-C2]
+          ansible.builtin.user:
+            name: "{{ detection_engine_user }}"
+            system: true
+            shell: /usr/sbin/nologin
+            create_home: false
+
+        - name: "Step 2: ensure config/data/backup directories exist (spec §8)"
+          tags: [detection-engine-C4]
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: directory
+            owner: "{{ item.owner }}"
+            group: "{{ item.group }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - { path: "{{ detection_engine_config_dir }}", owner: root, group: root, mode: "0755" }
+            - { path: "{{ detection_engine_config_dir }}/schemas", owner: root, group: root, mode: "0755" }
+            - { path: "{{ detection_engine_data_dir }}", owner: "{{ detection_engine_user }}", group: "{{ detection_engine_user }}", mode: "0700" }
+            - { path: "{{ detection_engine_backup_dir }}", owner: root, group: root, mode: "0700" }
+
+        - name: "Step 3: check whether a previous state.db exists (spec §26: skip backup on first install)"
+          ansible.builtin.stat:
+            path: "{{ detection_engine_db_path }}"
+          register: detection_engine_existing_db
+
+        - name: "Step 3b: check whether a previous binary exists and would actually change (spec §26 upgrade detection)"
+          ansible.builtin.stat:
+            path: "{{ detection_engine_bin_dest }}"
+            checksum_algorithm: sha256
+          register: detection_engine_existing_binary_stat
+
+        # Only a REAL upgrade (binary content will actually change) counts
+        # as changed — a no-op re-apply must stay changed=0 (spec §44's
+        # "second apply: changed=0"), so this must not be true just
+        # because a previous binary happens to exist.
+        - name: "Step 3c: determine whether this apply is an upgrade"
+          ansible.builtin.set_fact:
+            detection_engine_is_upgrade: >-
+              {{ detection_engine_existing_binary_stat.stat.exists
+                 and detection_engine_existing_binary_stat.stat.checksum != detection_engine_artifact_sha256 }}
+
+        - name: "Step 4: back up state.db before an upgrade (SQLite consistent snapshot via VACUUM INTO, spec §26/§40)"
+          ansible.builtin.command:
+            argv:
+              - "{{ detection_engine_bin_dest }}"
+              - db
+              - backup
+              - --db
+              - "{{ detection_engine_db_path }}"
+              - --output
+              - "{{ detection_engine_backup_dir }}/pre-upgrade.db"
+          when: detection_engine_is_upgrade and detection_engine_existing_db.stat.exists
+          changed_when: true
+
+        - name: "Step 5: snapshot the previously installed binary (rollback material, spec §26)"
+          ansible.builtin.copy:
+            src: "{{ detection_engine_bin_dest }}"
+            dest: "{{ detection_engine_backup_dir }}/pilot-detection-engine.prev"
+            remote_src: true
+            mode: "0755"
+          when: detection_engine_is_upgrade
+          failed_when: false
+
+        - name: "Step 6: copy the pinned binary to the target"
+          tags: [detection-engine-C1]
+          ansible.builtin.copy:
+            src: "{{ detection_engine_artifact_abs_path }}"
+            dest: "{{ detection_engine_bin_dest }}"
+            mode: "0755"
+            owner: root
+            group: root
+          register: detection_engine_binary_result
+
+        - name: "Step 7: verify the target-side binary SHA256 (spec §6.3: verify again after copy)"
+          tags: [detection-engine-C1]
+          ansible.builtin.stat:
+            path: "{{ detection_engine_bin_dest }}"
+            checksum_algorithm: sha256
+          register: detection_engine_target_binary_stat
+
+        - name: "Step 7: assert target-side SHA256 matches"
+          ansible.builtin.assert:
+            that:
+              - detection_engine_target_binary_stat.stat.checksum == detection_engine_artifact_sha256
+            fail_msg: >-
+              target binary SHA256
+              ({{ detection_engine_target_binary_stat.stat.checksum }}) does
+              not match detection_engine_artifact_sha256
+              ({{ detection_engine_artifact_sha256 }}) after copy.
+
+        - name: "Step 8: copy the feature profile to the target"
+          ansible.builtin.copy:
+            src: "{{ detection_engine_feature_profile_src }}"
+            dest: "{{ detection_engine_feature_profile_dest }}"
+            mode: "0644"
+          register: detection_engine_feature_profile_result
+
+        - name: "Step 9: render config.yaml (provider always disabled in Stage A, spec §33)"
+          ansible.builtin.copy:
+            dest: "{{ detection_engine_config_path }}"
+            mode: "0644"
+            content: |
+              metricsSourceBaseUrl: "http://{{ detection_metrics_source_alias }}:10912"
+              alertmanagerBaseUrl: "http://{{ detection_alertmanager_alias }}:9093"
+              featureProfilePath: "{{ detection_engine_feature_profile_dest }}"
+              dbPath: "{{ detection_engine_db_path }}"
+              statusPath: "{{ detection_engine_status_path }}"
+              textfileMetricsPath: "{{ detection_engine_textfile_path }}"
+              modelProvider:
+                enabled: false
+          register: detection_engine_config_result
+
+        # Stage A always runs provider-disabled — spec §33: "disabled/auth
+        # none: provider.env absent. 若上一版存在: delete residual secret
+        # file, restart service." Removing this unconditionally on every
+        # apply (not just "if it happens to exist") is what makes C12 an
+        # ACTIVE guarantee rather than an accident of Stage A never having
+        # created one.
+        - name: "Step 9b: ensure provider.env is absent (Stage A: provider always disabled, spec §33/§45)"
+          tags: [detection-engine-C12]
+          ansible.builtin.file:
+            path: "{{ detection_engine_config_dir }}/provider.env"
+            state: absent
+          register: detection_engine_provider_env_result
+
+        - name: "Step 10: validate the rendered config (spec §44 config schema gate, before any restart)"
+          tags: [detection-engine-C3]
+          ansible.builtin.command:
+            argv: ["{{ detection_engine_bin_dest }}", "config", "validate", "--config", "{{ detection_engine_config_path }}"]
+          changed_when: false
+
+        - name: "Step 11: render pilot-detection-engine.service (spec §8 systemd hardening)"
+          tags: [detection-engine-C5]
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/pilot-detection-engine.service
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Pilot Detection Engine
+              Wants=network-online.target
+              After=network-online.target
+
+              [Service]
+              User={{ detection_engine_user }}
+              Group={{ detection_engine_user }}
+              Type=simple
+              ExecStart={{ detection_engine_bin_dest }} serve --config {{ detection_engine_config_path }}
+              Restart=on-failure
+              RuntimeDirectory=pilot/detection-engine
+              RuntimeDirectoryMode=0755
+              NoNewPrivileges=yes
+              PrivateTmp=yes
+              ProtectHome=yes
+              ProtectSystem=strict
+              ProtectKernelTunables=yes
+              ProtectKernelModules=yes
+              ProtectControlGroups=yes
+              RestrictSUIDSGID=yes
+              CapabilityBoundingSet=
+              AmbientCapabilities=
+              ReadWritePaths={{ detection_engine_data_dir }}
+              ReadWritePaths=/run/pilot/detection-engine
+              ReadWritePaths=/var/lib/node_exporter/textfile
+
+              [Install]
+              WantedBy=multi-user.target
+          register: detection_engine_unit_result
+
+        - name: "Step 12: reload systemd if the unit file changed"
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when: detection_engine_unit_result is changed
+
+        - name: "Step 13: ensure pilot-detection-engine.service enabled+started"
+          tags: [detection-engine-C2, detection-engine-C8]
+          ansible.builtin.systemd:
+            name: pilot-detection-engine.service
+            state: started
+            enabled: true
+
+        # `state: restarted` is never idempotent — only restart when
+        # something that actually affects the running process changed, so
+        # a genuine no-op rerun stays changed=0 (same convention as
+        # host-monitoring-apply.yml Step 13).
+        - name: "Step 14: restart if the binary, feature profile, config, or unit changed"
+          ansible.builtin.systemd:
+            name: pilot-detection-engine.service
+            state: restarted
+          when: >-
+            detection_engine_binary_result is changed
+            or detection_engine_feature_profile_result is changed
+            or detection_engine_config_result is changed
+            or detection_engine_unit_result is changed
+            or detection_engine_provider_env_result is changed
+
+        - name: "Step 15: wait for the service to report active"
+          ansible.builtin.command:
+            argv: [systemctl, is-active, pilot-detection-engine.service]
+          register: detection_engine_active_check
+          changed_when: false
+          retries: 10
+          delay: 2
+          until: detection_engine_active_check.rc == 0
+
+        - name: "Step 16: wait for status.json to report healthy (spec §37 — first cycle needs at least one cycle_interval)"
+          tags: [detection-engine-C9]
+          ansible.builtin.command:
+            argv: ["{{ detection_engine_bin_dest }}", "status", "--status-path", "{{ detection_engine_status_path }}", "--field", "state"]
+          register: detection_engine_status_check
+          changed_when: false
+          failed_when: false
+          retries: 20
+          delay: 5
+          until: detection_engine_status_check.rc == 0
+
+        - name: "Step 16: assert status.json was reachable"
+          ansible.builtin.assert:
+            that:
+              - detection_engine_status_check.rc == 0
+            fail_msg: >-
+              status.json never became readable at
+              {{ detection_engine_status_path }} — check
+              `journalctl -u detection-engine`.
+
+        - name: "Step 17: verify database integrity"
+          tags: [detection-engine-C4]
+          ansible.builtin.command:
+            argv: ["{{ detection_engine_bin_dest }}", "db", "check", "--db", "{{ detection_engine_db_path }}"]
+          register: detection_engine_db_check
+          changed_when: false
+
+      rescue:
+        - name: "ROLLBACK — stop the newly (mis)configured service"
+          ansible.builtin.systemd:
+            name: pilot-detection-engine.service
+            state: stopped
+            enabled: false
+          failed_when: false
+
+        - name: "ROLLBACK — restore the previous binary, if one was snapshotted"
+          ansible.builtin.copy:
+            src: "{{ detection_engine_backup_dir }}/pilot-detection-engine.prev"
+            dest: "{{ detection_engine_bin_dest }}"
+            remote_src: true
+            mode: "0755"
+          when: detection_engine_is_upgrade | default(false)
+          failed_when: false
+
+        - name: "ROLLBACK — restore the pre-upgrade database, if one was backed up"
+          ansible.builtin.copy:
+            src: "{{ detection_engine_backup_dir }}/pre-upgrade.db"
+            dest: "{{ detection_engine_db_path }}"
+            remote_src: true
+            mode: "0600"
+            owner: "{{ detection_engine_user }}"
+            group: "{{ detection_engine_user }}"
+          when: detection_engine_is_upgrade | default(false)
+          failed_when: false
+
+        - name: "ROLLBACK — restart with the restored previous binary, if any"
+          ansible.builtin.systemd:
+            name: pilot-detection-engine.service
+            state: restarted
+            enabled: true
+          when: detection_engine_is_upgrade | default(false)
+          failed_when: false
+
+        - name: "ROLLBACK — surface the original failure (evidence preserved, spec §26)"
+          ansible.builtin.fail:
+            msg: >-
+              detection-engine apply FAILED (see task output above). If a
+              previous install existed, its binary/state.db were restored
+              and the service was restarted with them; otherwise the
+              service was stopped/disabled and left in place for
+              inspection.
+
+    - name: "Publish detection-engine health metrics via the textfile collector"
+      ansible.builtin.wait_for:
+        path: "{{ detection_engine_textfile_path }}"
+        timeout: 60
+      changed_when: false

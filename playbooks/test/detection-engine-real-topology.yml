@@ -1,0 +1,28 @@
+# Detection Engine real-provider topology lane — prerequisite stage
+# (detection-engine spec §49/§51). Applies every REAL dependency Detection
+# Engine needs (docker, seaweedfs-s3, host-monitoring, prometheus,
+# thanos-query, alertmanager) in dependency order, against a real topology
+# (tmp/detection-engine-real-topology.example.yaml). Deliberately does NOT
+# apply detection-engine itself or dashboard — those are exercised
+# separately (playbooks/apply/detection-engine-apply.yml directly, or the
+# combined pass via `--playbook playbooks/site.yml`, per spec §49's real-
+# lane example), so each one's own idempotency is provable in isolation.
+#
+#   go run ./cmd/pilot vm-target topology up \
+#     --topology tmp/detection-engine-real-topology.example.yaml
+#   go run ./cmd/pilot vm-target topology inventory \
+#     --topology tmp/detection-engine-real-topology.example.yaml
+#   go run ./cmd/pilot vm-target run --sandbox \
+#     playbooks/test/detection-engine-real-topology.yml -- <thanos/S3 vars>
+#   go run ./cmd/pilot vm-target topology test \
+#     --topology tmp/detection-engine-real-topology.example.yaml \
+#     --playbook playbooks/site.yml \
+#     --verify docs/verification/detection-engine.md=detection-engine \
+#     --verify docs/verification/prometheus.md=prometheus \
+#     --verify docs/verification/thanos-query.md=thanos-query
+- import_playbook: ../apply/docker-apply.yml
+- import_playbook: ../apply/seaweedfs-s3-apply.yml
+- import_playbook: ../apply/host-monitoring-apply.yml
+- import_playbook: ../apply/alertmanager-apply.yml
+- import_playbook: ../apply/prometheus-apply.yml
+- import_playbook: ../apply/thanos-query-apply.yml

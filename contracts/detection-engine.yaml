@@ -1,0 +1,64 @@
+schemaVersion: 1
+id: detection-engine
+role: detection-engine
+specs:
+  - path: docs/verification/detection-engine.md
+    rows: {all: true} # C1-C12
+playbooks:
+  apply: playbooks/apply/detection-engine-apply.yml
+regressionTests:
+  - internal/spec/detection_engine_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+conflicts: []
+dependencies:
+  - {component: host-monitoring, required: true, relation: sameHosts,
+     reason: "Detection host uses node_exporter textfile collector only for engine health; managed-host telemetry still comes from Thanos."}
+  - {component: thanos-query, required: true, relation: providerEndpoint}
+  - {component: alertmanager, required: true, relation: providerEndpoint}
+bindings:
+  - input: detection_metrics_source_host
+    requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
+    from: {component: thanos-query, endpoint: query}
+  - input: detection_alertmanager_target_host
+    requiredWhenDependencySelected: true
+    sourceSelection: exactlyOne
+    from: {component: alertmanager, endpoint: api}
+os:
+  - {distro: ubuntu, versions: ["24.04"]}
+hostCardinality: exactly-one
+resources: {minCPU: 2, minRAMMiB: 512, minDiskGiB: 5}
+groupVars:
+  - {name: detection_engine_artifact_path, type: string, required: true, secret: false}
+  - {name: detection_engine_artifact_sha256, type: string, required: true, secret: false, validation: "^[a-f0-9]{64}$"}
+  - {name: detection_metrics_source_host, type: string, required: true, secret: false}
+  - {name: detection_alertmanager_target_host, type: string, required: true, secret: false}
+  - {name: detection_cycle_interval, type: duration, required: false, default: "15s", secret: false}
+  - {name: detection_evaluation_delay, type: duration, required: false, default: "20s", secret: false}
+inputRules: []
+endpoints: []
+stagePolicy: {variable: stage, default: sandbox}
+experimental: false
+evidenceRequirement: {targetTest: topology, idempotency: required}
+lifecycle:
+  backup:
+    provider: restic
+    preHook: >-
+      install -d -m 0700 /var/backups/pilot-detection-engine &&
+      /usr/local/bin/pilot-detection-engine db backup
+      --db /var/lib/pilot/detection-engine/state.db
+      --output /var/backups/pilot-detection-engine/state.db
+    paths:
+      - /etc/pilot/detection-engine
+      - /var/backups/pilot-detection-engine
+  upgrade: null
+  decommission: null
+traceability:
+  mode: rowTags
+  tag: {kind: rolePrefixed, prefix: detection-engine}
+  exemptions:
+    "docs/verification/detection-engine.md#C6": {kind: verifyOnly, reason: "status.json/textfile carrying no secret is a Go-code-level guarantee (internal/detection/status.go, metrics.go never define a secret field) — no apply task produces or could break this"}
+    "docs/verification/detection-engine.md#C10": {kind: verifyOnly, reason: "cold-start no-false-anomaly is an internal/detection algorithm property (baseline_test.go's 120-bucket gate) — no apply task implements it"}
+    "docs/verification/detection-engine.md#C11": {kind: verifyOnly, reason: "lifecycle/escalation/resolution/outbox-ordering scenario evidence comes from the fake-protocol topology lane (spec §49), not a single already-applied host"}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

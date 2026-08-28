@@ -2,6 +2,7 @@ package detection
 
 import (
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -89,6 +90,29 @@ func TestStore_SignalHistoryAndOutboxAreAtomic(t *testing.T) {
 	}
 	if ep.Revision != 2 {
 		t.Fatalf("episode revision = %d, want still 2 (the failed transaction must not have advanced it to 3)", ep.Revision)
+	}
+}
+
+// TestStore_ListActiveEpisodesJSONMarshalsEmptyAsArray guards against the
+// classic Go nil-slice gotcha: `pilot-detection-engine signals list --json`
+// on a fresh host with no episodes must produce the literal JSON "[]", not
+// "null" — found via a real vm-target run (docs/verification/
+// detection-engine.md's C10 expects "[]" exactly).
+func TestStore_ListActiveEpisodesJSONMarshalsEmptyAsArray(t *testing.T) {
+	s := openTestStore(t)
+	episodes, err := s.ListActiveEpisodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(episodes) != 0 {
+		t.Fatalf("expected zero episodes on a fresh store, got %d", len(episodes))
+	}
+	data, err := json.Marshal(episodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "[]" {
+		t.Fatalf("json.Marshal(empty ListActiveEpisodes result) = %q, want \"[]\" (a nil slice marshals to \"null\" instead)", data)
 	}
 }
 

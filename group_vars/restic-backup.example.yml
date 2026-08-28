@@ -101,6 +101,20 @@ restic_s3_target_host: ""
 #     - "/opt/pilot/wazuh-docker"
 #     - "/var/lib/docker/volumes/single-node_wazuh_etc/_data"
 #
+#   # host_vars/detection-1.yml(中央 Detection Engine：不能直接複製執行中
+#   # 的 state.db，用 binary 自己的 `db backup`（SQLite VACUUM INTO 一致性
+#   # 快照，見 docs/superpowers/specs/2026-08-28-detection-engine-spec.md
+#   # §26/§40）先產生靜態備份檔，再讓 restic 備份那個檔案；provider 在
+#   # Stage A 永遠 disabled，/etc/pilot/detection-engine 底下不會有 secret）
+#   restic_backup_paths:
+#     - "/etc/pilot/detection-engine"
+#     - "/var/backups/pilot-detection-engine"
+#   restic_backup_pre_hook: >-
+#     install -d -m 0700 /var/backups/pilot-detection-engine &&
+#     /usr/local/bin/pilot-detection-engine db backup
+#     --db /var/lib/pilot/detection-engine/state.db
+#     --output /var/backups/pilot-detection-engine/state.db
+#
 # ansible 的 host_vars 優先權高於這份 group_vars,單一主機的覆寫不影響同
 # group 其他主機。驗證時 docs/verification/restic-backup.md 的 C1-C9 都跟
 # 具體路徑無關(只檢查「至少一份快照」「完整性驗證通過」等通用條件),所以

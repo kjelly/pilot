@@ -839,8 +839,10 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyUp})
 	}
 	// roleContracts order: 0 freeipa-server .. 19 host-monitoring ..
-	// 20 dcgm-exporter .. 21 prometheus.
-	for i := 0; i < 21; i++ {
+	// 20 dcgm-exporter .. 21 alertmanager .. 22 prometheus (detection-engine
+	// spec Stage A-2 moved alertmanager before prometheus to match
+	// site.yml's execution order, shifting prometheus's index by one).
+	for i := 0; i < 22; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // toggle prometheus on

@@ -118,7 +118,7 @@ func runServe(ctx context.Context, configPath string) error {
 	var lastSuccess int64
 	scheduler.Run(ctx, func(cycleCtx context.Context, evaluationTime int64) {
 		start := time.Now()
-		_, err := engine.RunCycle(cycleCtx, evaluationTime)
+		outcomes, err := engine.RunCycle(cycleCtx, evaluationTime)
 		duration := time.Since(start).Seconds()
 		success := err == nil
 		if success {
@@ -126,11 +126,17 @@ func runServe(ctx context.Context, configPath string) error {
 		}
 
 		pending, _ := store.OutboxPendingCount()
+		activeSignals := 0
+		if episodes, err := store.ListActiveEpisodes(); err == nil {
+			activeSignals = len(episodes)
+		}
 		status := detection.Status{
 			SchemaVersion: 1,
 			State:         "healthy",
 			Source:        detection.StatusSource{Healthy: success},
+			Subjects:      detection.StatusSubjects{Active: len(outcomes)},
 			ModelProvider: detection.NewDisabledProviderStatus(),
+			Signals:       detection.StatusSignals{Active: activeSignals},
 			LastCycle:     detection.StatusLastCycle{Success: success},
 		}
 		if !success {
@@ -138,11 +144,19 @@ func runServe(ctx context.Context, configPath string) error {
 		}
 		_ = detection.WriteStatus(cfg.StatusPath, status)
 
+		anomalyScore := map[[2]string]float64{}
+		for _, o := range outcomes {
+			if o.Valid && o.LocalScore.Valid {
+				anomalyScore[[2]string{o.Host, o.LocalScore.Source}] = o.LocalScore.Score
+			}
+		}
 		metrics := detection.MetricsSnapshot{
 			Up:                          success,
 			CycleDurationSeconds:        duration,
 			CycleOverrunTotal:           scheduler.Overruns.Load(),
 			LastSuccessTimestampSeconds: lastSuccess,
+			SubjectsTotal:               len(outcomes),
+			AnomalyScore:                anomalyScore,
 			OutboxPending:               pending,
 		}
 		_ = metrics.WriteTextfile(cfg.TextfileMetricsPath)
@@ -240,6 +254,16 @@ func newDBCmd() *cobra.Command {
 			if _, err := os.Stat(backupSrc); os.IsNotExist(err) {
 				fmt.Println("source database does not exist; nothing to back up")
 				return nil
+			}
+			// VACUUM INTO refuses to overwrite an existing file (spec §26
+			// always backs up to the same fixed pre-upgrade.db path, so a
+			// second upgrade's backup would otherwise fail on the first
+			// upgrade's leftover snapshot — found via a real vm-target
+			// upgrade run). This command's whole purpose is "the most
+			// recent pre-upgrade snapshot", so removing a stale one here
+			// is correct, not merely permissive.
+			if err := os.Remove(backupDst); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove stale backup %s: %w", backupDst, err)
 			}
 			db, err := sql.Open("sqlite", backupSrc)
 			if err != nil {

@@ -1,6 +1,6 @@
 # Verification Spec — host-monitoring（被監控主機的監控 agent：node_exporter）
 
-> 版本：v1.2
+> 版本：v1.3
 > 對齊規範：pilot 通用「每台受管主機都裝一份」agent 規範，跟
 > `wazuh-fim.md`/`audit-log-forwarding.md` 同一類 Shape（cross-cutting agent
 > role，可疊加到任何既有主機上，不擁有專屬 role 之外的意義）。
@@ -99,6 +99,7 @@
 | C8  | port     | `9100/tcp` 有在監聽                                  | present   | ss -tln 'sport = :9100' |
 | C9  | http     | 未帶認證的 `/metrics`（9100）請求被拒絕（驗證確實有生效，不是設定了但沒生效） | ~401 | curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9100/metrics |
 | C10 | config   | `web-config.yml` 已宣告 `basic_auth_users` 且含指定的使用者名稱             | 0    | grep -qE '^\s*prometheus:' /etc/node_exporter/web-config.yml; echo $? |
+| C11 | config   | textfile collector 目錄已建立且 mode 正確（sticky bit，允許多個不相關系統帳號各自寫入、互不能刪對方的檔）| ~1777 | stat -c '%a' /var/lib/node_exporter/textfile |
 
 > C2 只驗證「這個版本號的 binary 確實被裝上」，不是重新做一次 checksum
 > 比對——checksum 驗證已經在 apply 當下由 `get_url` 的 `checksum:` 參數強制
@@ -117,16 +118,19 @@
 > 且回傳的是真正的 node_exporter metrics」，不需要在這份 spec 裡重複驗證，
 > 跟 `wazuh-fim.md` 把「FIM+who-data 端到端證明」交給 runbook 層 cross-check
 > 是同一種設計（見該檔 §5）。
+> C11 只驗證目錄本身的存在與 mode——`ExecStart` 是否真的帶對
+> `--collector.textfile.directory` 這個 flag 是效果性證明，靠 C7（服務仍
+> active）間接保證：flag 打錯會讓 node_exporter 啟動失敗，C7 會先 fail。
 
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/host-monitoring.md -i <inventory> -l host-monitoring`
 - 輸出格式：`.verification/host-monitoring-<UTC>.{ndjson,md}`
-- 預期 row 數：10
+- 預期 row 數：11
 
 ## 4. PASS / FAIL 規則
 
-- C1–C10 全部 `status=pass` → **PASS**
+- C1–C11 全部 `status=pass` → **PASS**
 - 任一 `status=fail` → **FAIL**，常見修法：
   - C1/C2 fail → binary 沒裝上或版本不符；重跑 apply，檢查 `node_exporter_version`/架構是否在支援清單內
   - C3 fail → 專屬帳號沒建立成功或 shell 不是 nologin
@@ -138,13 +142,15 @@
   - C10 fail → `web-config.yml` 沒渲染成功或找不到指定使用者；檢查
     `node_exporter_basic_auth_password` 是否有帶、`htpasswd`（`apache2-utils`/
     `httpd-tools`）是否安裝成功
+  - C11 fail → 目錄沒建立或 mode 跑掉；重跑 apply，檢查
+    `node_exporter_textfile_dir` 是否被覆寫成別的路徑
 
 ## 5. 例外與已知偏差
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
 | — | 目前只預先內建 `linux-amd64`/`linux-arm64` 兩種架構的 release checksum；其他架構（例：`386`、`ppc64le`）會在 pre_tasks gate 直接 fail，不會裝出未驗證 checksum 的 binary | 非 amd64/arm64 主機 | 需要時在 apply playbook 的 `node_exporter_checksums` 補上對應架構與其官方 sha256sums.txt 的值 |
-| C1, C3–C7, C9, C10 | 當 `node_exporter_port` 已被非本 playbook 管理的程式佔用（常見於 Kubernetes DaemonSet 已部署 node_exporter，見 §0），apply 會整段跳過原生安裝，本檔全部 row 都不適用於這台主機——C1/C3–C7/C10 因為沒有真的裝任何東西必定 fail；C8（port 監聽）通常仍會 pass（有別的東西在 serve）；C9（未認證應回 401）視現有 exporter 是否有自己的認證機制而定，Kubernetes 版 node_exporter 預設沒有認證，通常會回 200 而 fail，這是**預期行為，不是 bug** | 由 Kubernetes（或任何其他機制）自行管理 node_exporter 的主機 | 不會解除——這種主機的 node_exporter 健康狀態改由該機制自己的健康檢查（例如 `kubectl` 查 DaemonSet/Pod 狀態）負責，不屬於本 spec 範圍 |
+| C1, C3–C7, C9, C10, C11 | 當 `node_exporter_port` 已被非本 playbook 管理的程式佔用（常見於 Kubernetes DaemonSet 已部署 node_exporter，見 §0），apply 會整段跳過原生安裝，本檔全部 row 都不適用於這台主機——C1/C3–C7/C10/C11 因為沒有真的裝任何東西必定 fail；C8（port 監聽）通常仍會 pass（有別的東西在 serve）；C9（未認證應回 401）視現有 exporter 是否有自己的認證機制而定，Kubernetes 版 node_exporter 預設沒有認證，通常會回 200 而 fail，這是**預期行為，不是 bug** | 由 Kubernetes（或任何其他機制）自行管理 node_exporter 的主機 | 不會解除——這種主機的 node_exporter 健康狀態改由該機制自己的健康檢查（例如 `kubectl` 查 DaemonSet/Pod 狀態）負責，不屬於本 spec 範圍 |
 
 ## 6. 變更紀錄
 
@@ -153,3 +159,4 @@
 | 2026-08-10 | v1.0 | 初版：node_exporter，兩種 distro（Ubuntu apt 版本過舊、AlmaLinux 9 無套件）統一走固定版本官方 release binary + systemd | sre |
 | 2026-08-10 | v1.1 | 新增強制 HTTP Basic Auth（`--web.config.file` + bcrypt hash，密碼不落地/不進 log）；C9 從「未認證回 200」改成「未認證回 401」（驗證認證真的生效，不只是設定存在）；C10 從「exposition 含 node_uname_info」改成「web-config.yml 已宣告 basic_auth_users」，含認證的內容驗證改交給 `prometheus.md` 的 `up{job="node"}==1` | sre |
 | 2026-08-10 | v1.2 | 新增 Kubernetes 自動偵測：`node_exporter_port` 已被非本 playbook 管理的程式佔用時（例如 DaemonSet），整段跳過原生安裝，不搶 port、不要求密碼；Prometheus 仍照常把該主機當 scrape target（純靠 inventory group 成員資格）；新增對應 §5 例外列 | sre |
+| 2026-08-28 | v1.3 | Detection Engine Stage A-2 實跑（`docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §5.3/§38）發現真事故：本檔從未真的啟用 textfile collector（`ExecStart` 沒有 `--collector.textfile.directory`，`/var/lib/node_exporter` 根本不存在），但 detection-engine 的 contract dependency 假設它已經存在——新增 `node_exporter_textfile_dir`（預設 `/var/lib/node_exporter/textfile`，mode `1777` sticky bit）+ 對應 `ExecStart` flag + C11 | sre |

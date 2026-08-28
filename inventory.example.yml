@@ -193,6 +193,13 @@ all:
     thanos-query:
       hosts: {}                 # 例:專門一台 → hosts: { metrics-central-1: }
 
+    # -- 偵測:中央 Detection Engine，從 Thanos metrics 建立 adaptive
+    #    SignalEvent(detection-engine-apply.yml），只需一台，且必須跟一台
+    #    host-monitoring 主機同機(只借用它的 textfile collector 發布自己
+    #    的健康指標，不是 managed-host telemetry 路徑）------------------
+    detection-engine:
+      hosts: {}                 # 例:跟 thanos-query 同台 → hosts: { metrics-central-1: }
+
     # -- 觀測畫面:Grafana + Loki(dashboard-apply.yml),只需一台 -----------
     dashboard:
       hosts: {}                 # 例:專門一台 → hosts: { dashboard-1: }

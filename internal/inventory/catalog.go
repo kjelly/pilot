@@ -46,6 +46,7 @@ var topLevelOrder = []string{
 	"alertmanager",
 	"prometheus",
 	"thanos-query",
+	"detection-engine",
 	"dashboard",
 }
 

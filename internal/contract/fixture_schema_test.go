@@ -202,8 +202,8 @@ func TestFinalContractFixturesStrictAndSemanticallyValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("production loader rejected final fixtures: %v", err)
 	}
-	if len(loaded) != 32 {
-		t.Fatalf("production loader contract count = %d, want 32", len(loaded))
+	if len(loaded) != 33 {
+		t.Fatalf("production loader contract count = %d, want 33", len(loaded))
 	}
 	paths, err := filepath.Glob(filepath.Join(root, "docs", "tmp", "future", "contracts", "*.yaml"))
 	if err != nil {

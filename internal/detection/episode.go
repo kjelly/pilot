@@ -216,7 +216,12 @@ func (s *Store) ListActiveEpisodes() ([]EpisodeRecord, error) {
 	}
 	defer rows.Close()
 
-	var out []EpisodeRecord
+	// Initialized (not nil) so an empty result JSON-marshals to `[]`, not
+	// `null` — `pilot-detection-engine signals list` on a fresh host with
+	// no episodes must produce valid, directly-comparable empty-array
+	// JSON (found via a real vm-target run: docs/verification/
+	// detection-engine.md's C10 expects the literal string "[]").
+	out := []EpisodeRecord{}
 	for rows.Next() {
 		var e EpisodeRecord
 		var severity sql.NullString

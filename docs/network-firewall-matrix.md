@@ -33,6 +33,8 @@ If these roles are split across hosts later, allow these additional flows:
 | Prometheus | Alertmanager | TCP `9093` | Alert delivery |
 | Grafana | Thanos Query | TCP `10912` | Prometheus-compatible dashboard queries |
 | Thanos Query | Each Prometheus sidecar | TCP `10901` | Thanos StoreAPI discovery/query |
+| Detection Engine | Thanos Query | TCP `10912` | Adaptive anomaly detection metrics ingestion (never `10902` — see below) |
+| Detection Engine | Alertmanager | TCP `9093` | SignalEvent delivery |
 | Promtail | Loki | TCP `3100` | Log shipping |
 | Metrics/backup clients | SeaweedFS | TCP `8333` | S3 API |
 

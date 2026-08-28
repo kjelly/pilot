@@ -1,0 +1,33 @@
+# Detection Engine Stage A real-provider topology lane (spec §49/§51).
+# Committed as an example despite living under tmp/ (see .gitignore's
+# negation entry) — copy it to a real scenario file before use if you want
+# to keep local edits out of git.
+#
+# Supplies the §51 real metrics-chain evidence: inventory hostname ->
+# Prometheus pilot_host label -> real Thanos Query :10912 -> Detection
+# Engine. No fake source/sink/provider listeners exist in this topology —
+# never mix this with the fake-topology example's groups.
+nodes:
+  - name: detection-provider
+    base_image: ubuntu-24.04
+    ssh_user: ubuntu
+    vcpus: 4
+    memory: 6144
+    disk: 40
+    groups:
+      - detection-engine
+      - host-monitoring
+      - prometheus
+      - thanos-query
+      - alertmanager
+      - docker
+      - seaweedfs-s3
+  - name: monitored-subject-1
+    base_image: ubuntu-24.04
+    ssh_user: ubuntu
+    vcpus: 2
+    memory: 2048
+    disk: 20
+    groups:
+      - monitored-subject
+      - host-monitoring

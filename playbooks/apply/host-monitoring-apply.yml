@@ -66,6 +66,12 @@
     node_exporter_port: 9100
     node_exporter_user: node_exporter
     node_exporter_webconfig_path: /etc/node_exporter/web-config.yml
+    # Textfile collector directory (spec C11/C12): lets OTHER services on
+    # this same host (e.g. detection-engine's own health metrics — see
+    # docs/superpowers/specs/2026-08-28-detection-engine-spec.md §5.3/§38)
+    # publish extra Prometheus metrics through node_exporter's :9100
+    # endpoint without node_exporter needing to know anything about them.
+    node_exporter_textfile_dir: /var/lib/node_exporter/textfile
     # node_exporter_basic_auth_user has a sane default (not a secret).
     # node_exporter_basic_auth_password is DELIBERATELY NOT declared here —
     # same "don't shadow group_vars/host_vars with a hardcoded default"
@@ -368,8 +374,25 @@
           when: node_exporter_basic_auth_changed and not ansible_check_mode
           no_log: true
 
-        - name: "Step 10: Render node_exporter.service (spec C4, C5, C6)"
-          tags: [C4, C5, C6]
+        # World-writable + sticky bit (not group-owned by node_exporter):
+        # the set of things that may want to drop a textfile metric here
+        # (this same host-monitoring package's own future collectors, a
+        # co-located detection-engine, an ad-hoc cron job) run as
+        # different, unrelated system users — the sticky bit stops one
+        # writer from deleting/renaming another's file, which is the usual
+        # concern with a world-writable directory. node_exporter itself
+        # only ever READS here, so ProtectSystem=strict on its own unit
+        # below is unaffected (that directive only restricts writes).
+        - name: "Step 9b: Ensure the node_exporter textfile collector directory exists"
+          ansible.builtin.file:
+            path: "{{ node_exporter_textfile_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "1777"
+
+        - name: "Step 10: Render node_exporter.service (spec C4, C5, C6, C11)"
+          tags: [C4, C5, C6, C11]
           ansible.builtin.copy:
             dest: /etc/systemd/system/node_exporter.service
             mode: "0644"
@@ -383,7 +406,7 @@
               User={{ node_exporter_user }}
               Group={{ node_exporter_user }}
               Type=simple
-              ExecStart=/usr/local/bin/node_exporter --web.listen-address=:{{ node_exporter_port }} --web.config.file={{ node_exporter_webconfig_path }}
+              ExecStart=/usr/local/bin/node_exporter --web.listen-address=:{{ node_exporter_port }} --web.config.file={{ node_exporter_webconfig_path }} --collector.textfile.directory={{ node_exporter_textfile_dir }}
               Restart=on-failure
               NoNewPrivileges=true
               ProtectSystem=strict

@@ -71,7 +71,17 @@ inventories/*
 /group_vars/dns/*.yaml
 !/group_vars/dns/zones.example.yaml
 workspace
-tmp/
+# tmp/ as a bare directory pattern would make a later `!` re-inclusion
+# impossible (git cannot look inside an excluded directory) — tmp/*
+# excludes the same direct contents by pattern instead, which DOES allow
+# the two Detection Engine topology examples below to be re-included.
+tmp/*
+# ...except the committed Detection Engine topology examples (spec §49) —
+# tmp/ is the canonical home for vm-target topology scenario files, and
+# these two are schema examples meant to be copied, same reasoning as
+# inventory.example.yml/group_vars/*.example.yml above.
+!/tmp/detection-engine-fake-topology.example.yaml
+!/tmp/detection-engine-real-topology.example.yaml
 docs/tmp
 
 # trec teaching/evidence recordings (minimal-poc-update and friends) — one-time

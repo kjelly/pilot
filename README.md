@@ -158,7 +158,7 @@ touches a live host. Two additional, independently-gated flags register a
 separate tool family that runs real Ansible ad-hoc commands against a real
 inventory host:
 
-- `--enable-diagnose` (requires `--diagnose-inventory`) registers six
+- `--enable-diagnose` (requires `--diagnose-inventory`) registers seven
   **fixed, code-defined, read-only** tools:
   - `pilot_diagnose_sudo` / `pilot_diagnose_dns` — a command allow-list
     (mirroring `docs/verification/freeipa-client.md` and
@@ -212,6 +212,16 @@ inventory host:
     to replace the usual manual sequence of `pilot_diagnose_sudo`/`dns`/
     `security_logs` plus a separate roster lookup — a real investigation
     that took 17 separate tool calls to assemble by hand collapses to one.
+  - `pilot_diagnose_detection` — engine status, the active SignalEvent
+    episode list, and a bounded (`-n 200`) journal tail from the central
+    Detection Engine host (auto-resolved singleton `detection-engine`
+    group, no `host` argument), plus that one episode's detail when
+    `signal_id` (a 26-character ULID) is supplied. At least one of
+    `signal_id` or `pilot_host` is required; `pilot_host` is not a command
+    parameter (the engine CLI has no per-host filter) — it's recorded for
+    audit/correlation against the returned signals list's own `pilot_host`
+    fields. See
+    `docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §46.
   - Both `pilot_diagnose_logs` and `pilot_diagnose_security_logs`
     **exclude pilot's own ansible-generated log noise by default** —
     ansible's `BECOME-SUCCESS-` become/sudo marker, and any line

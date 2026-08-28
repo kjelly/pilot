@@ -1,6 +1,6 @@
 // mcp_diagnose_tools.go implements pilot_diagnose_sudo/pilot_diagnose_dns/
 // pilot_diagnose_logs/pilot_diagnose_metrics/pilot_diagnose_security_logs/
-// pilot_diagnose_login: live-host diagnostics,
+// pilot_diagnose_login/pilot_diagnose_detection: live-host diagnostics,
 // separate from the pilot_edit_* family (which is local-workspace-file
 // read/write only and explicitly excludes any Ansible invocation — see
 // docs/superpowers/specs/2026-08-04-pilot-edit-mcp-semantic-tui-design.md's
@@ -114,6 +114,10 @@ func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 		Name:        "pilot_diagnose_login",
 		Description: "one-call composite for \"why can't these users log in / sudo on this host\": runs fixed, read-only ansible ad-hoc commands against one real inventory host for sssd status, sssd domain backend online/offline, Kerberos machine identity, and this host's own DNS self-resolution (a broken forward/reverse record here commonly breaks Kerberos), then for each user in users: NSS passwd resolution (getent passwd) and whether a live central FreeIPA sudo rule grants access (sudo -l -U). Also reads the workspace's FreeIPA roster (config-level, not live) to report each user's declared HBAC/sudo authorization on this host and flags any drift against what was just observed live (e.g. roster declares sudo but the live host has no rule yet, or vice versa). Best-effort also queries recent SSH/PAM login records for these users from Loki (job=\"pilot-siem\", like pilot_diagnose_security_logs, same default ansible-noise exclusion) over the last `lookback` (a Go duration, default 24h) — skipped with a note if the dashboard role isn't deployed in this inventory, never a hard failure. Replaces the usual manual sequence of pilot_diagnose_sudo/dns/security_logs plus a separate roster lookup with one call.",
 	}, diagnoseLoginHandler(opts))
+	addRecoveredTool(server, &mcp.Tool{
+		Name:        "pilot_diagnose_detection",
+		Description: "run fixed, read-only ansible ad-hoc commands against the central Detection Engine host (no host parameter — detection-engine is this deployment's singleton central role): engine status (`status --json`), the active SignalEvent episode list (`signals list --json`), and a bounded (`-n 200`) journal tail. At least one of signal_id or pilot_host must be supplied; when signal_id is given (must be a well-formed 26-character ULID) an additional `signals show <signal_id> --json` call returns that one episode's full detail. pilot_host is not a command parameter — the engine's CLI has no per-host filter — it is only recorded for audit/correlation against the returned signals_list_json's own pilot_host fields. Never accepts an arbitrary command.",
+	}, diagnoseDetectionHandler(opts))
 }
 
 // normalizeLokiRange makes every caller-supplied log time unambiguous before
@@ -1074,6 +1078,101 @@ func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[dia
 				out.HTTPStatus = status
 			} else {
 				out.ResultJSON = strings.TrimSpace(result.Stdout)
+			}
+		}
+		return nil, out, nil
+	}
+}
+
+// ---- pilot_diagnose_detection -----------------------------------------------
+
+type diagnoseDetectionInput struct {
+	SignalID  string `json:"signal_id,omitempty" jsonschema:"optional ULID signal_id (26-character Crockford base32) — adds a signals-show call for this one episode"`
+	PilotHost string `json:"pilot_host,omitempty" jsonschema:"optional subject hostname — recorded for audit/correlation only; the engine CLI has no per-host filter, so cross-reference it against signals_list_json yourself"`
+}
+
+type diagnoseDetectionOutput struct {
+	Host            string `json:"host"`
+	ResolvedAddr    string `json:"resolved_addr,omitempty"`
+	StatusJSON      string `json:"status_json,omitempty"`
+	SignalsListJSON string `json:"signals_list_json,omitempty"`
+	JournalTail     string `json:"journal_tail,omitempty"`
+	SignalShowJSON  string `json:"signal_show_json,omitempty"`
+	Unreachable     bool   `json:"unreachable,omitempty"`
+	Error           string `json:"error,omitempty"`
+	AuditDirectory  string `json:"audit_directory"`
+}
+
+// diagnoseDetectionHandler auto-resolves diagnose.DetectionEngineGroup's
+// singleton host, same reasoning as diagnoseMetricsHandler.
+func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseDetectionInput, diagnoseDetectionOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseDetectionInput) (*mcp.CallToolResult, diagnoseDetectionOutput, error) {
+		signalID := strings.TrimSpace(in.SignalID)
+		pilotHost := strings.TrimSpace(in.PilotHost)
+		if signalID == "" && pilotHost == "" {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "at least one of signal_id or pilot_host is required"}), diagnoseDetectionOutput{}, nil
+		}
+		if signalID != "" && !diagnose.SignalIDPattern.MatchString(signalID) {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("signal_id %q is not a well-formed 26-character ULID", signalID)}), diagnoseDetectionOutput{}, nil
+		}
+
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
+		resolved, err := resolveDiagnoseInventory(ctx, opts)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseDetectionOutput{}, nil
+		}
+		host, err := diagnose.ResolveSingletonGroupHost(resolved, diagnose.DetectionEngineGroup)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseDetectionOutput{}, nil
+		}
+
+		sessionID, err := newID()
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseDetectionOutput{}, nil
+		}
+		start := time.Now()
+		auditDir, err := prepareDiagnoseAuditDir(opts, "detection", sessionID, start)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseDetectionOutput{}, nil
+		}
+
+		runner := opts.AdHocRunner
+		if runner == nil {
+			runner = realDiagnoseAdHocRunner()
+		}
+		steps := diagnose.DetectionSteps(signalID)
+		results := diagnose.RunSteps(ctx, runner, opts.Inventory, host, steps, opts.StepTimeout)
+
+		rec := diagnoseAuditRecord{
+			SessionID: sessionID, Check: "detection", PilotVersion: rootCmd.Version,
+			GitRevision: gitRevision(filepath.Dir(opts.Inventory)), MCPClient: mcpClientString(req),
+			Inventory: opts.Inventory, Host: host,
+			Params: map[string]string{"signal_id": signalID, "pilot_host": pilotHost},
+			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
+		}
+		_ = writeDiagnoseAudit(auditDir, rec)
+
+		out := diagnoseDetectionOutput{Host: host, ResolvedAddr: resolved.HostAddr(host), AuditDirectory: auditDir}
+		for _, sr := range results {
+			switch {
+			case sr.Result.RunErr != nil:
+				if out.Error == "" {
+					out.Error = fmt.Sprintf("%s: %v", sr.Step.ID, sr.Result.RunErr)
+				}
+			case sr.Result.Unreachable:
+				out.Unreachable = true
+			default:
+				text := strings.TrimSpace(sr.Result.Stdout)
+				switch sr.Step.ID {
+				case "status":
+					out.StatusJSON = text
+				case "signals_list":
+					out.SignalsListJSON = text
+				case "journal":
+					out.JournalTail = text
+				case "signal_show":
+					out.SignalShowJSON = text
+				}
 			}
 		}
 		return nil, out, nil

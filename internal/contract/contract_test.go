@@ -24,7 +24,7 @@ func TestLoaderLoadsFinalFixtureDirectoryInStableOrder(t *testing.T) {
 		got = append(got, contract.ID)
 	}
 	want := []string{
-		"alertmanager", "audit-log-forwarding", "dashboard", "dcgm-exporter", "dns", "docker",
+		"alertmanager", "audit-log-forwarding", "dashboard", "dcgm-exporter", "detection-engine", "dns", "docker",
 		"freeipa-ca-trust",
 		"freeipa-client", "freeipa-dns-client", "freeipa-dns", "freeipa-identity", "freeipa-nfs-client", "freeipa-nfs-server",
 		"freeipa-realm-replacement", "freeipa-server-replica",
