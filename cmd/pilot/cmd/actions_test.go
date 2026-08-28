@@ -35,7 +35,11 @@ func TestSemanticActionCatalogIsStable(t *testing.T) {
 		"set_monitoring_profile_metrics_path", "set_monitoring_profile_scrape_interval",
 		"set_monitoring_profile_scrape_timeout", "set_monitoring_profile_auth_ref", "set_monitoring_profile_tls",
 		"delete_monitoring_profile",
-		"save_hosts", "deploy", "reconcile",
+		"save_hosts",
+		"create_password_policy", "set_password_policy_field", "delete_password_policy",
+		"set_user_authentication_types",
+		"create_credential_policy", "set_credential_policy_field", "delete_credential_policy",
+		"deploy", "reconcile",
 	}
 	specs := semanticActionSpecs()
 	if len(specs) != len(want) {
@@ -83,7 +87,7 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	if schema.PilotVersion == "" {
 		t.Error("pilot_version is empty")
 	}
-	if schema.SchemaVersion != 1 || len(schema.Actions) != 95 {
+	if schema.SchemaVersion != 1 || len(schema.Actions) != 102 {
 		t.Fatalf("schema metadata = schema_version %d, actions %d", schema.SchemaVersion, len(schema.Actions))
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {

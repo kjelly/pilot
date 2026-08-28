@@ -59,6 +59,15 @@ groupVars:
   - {name: detection_model_provider_fallback_model, type: string, required: false, default: "", secret: false}
   - {name: detection_model_provider_fallback_auth, type: string, required: false, default: "none", secret: false, validation: "^(none|bearer)$"}
   - {name: detection_model_provider_fallback_api_key, type: string, required: false, secret: true}
+  # Optional log pipeline (docs/superpowers/specs/2026-08-28-npu-detect-engine-spec.md
+  # §14-18) — a third, equally-weighted peer to baseline/cohort. Disabled
+  # by default; the original detection-engine spec's own Non-Goals
+  # excludes logs entirely, so a Stage A/B apply is unaffected.
+  - {name: detection_log_source_enabled, type: boolean, required: false, default: false, secret: false}
+  - {name: detection_log_source_base_url, type: string, required: false, default: "", secret: false}
+  - {name: detection_log_source_query, type: string, required: false, default: "", secret: false}
+  - {name: detection_log_source_current_window, type: duration, required: false, default: "10m", secret: false}
+  - {name: detection_log_source_baseline_window, type: duration, required: false, default: "6h", secret: false}
 inputRules:
   - any:
       - {input: detection_model_provider_enabled, operator: equals, value: false}
@@ -90,6 +99,14 @@ inputRules:
       - {input: detection_model_provider_fallback_auth, operator: notEquals, value: bearer}
       - {input: detection_model_provider_fallback_api_key, operator: nonEmpty}
     reason: "an enabled bearer-auth fallback provider requires a non-empty API key"
+  - any:
+      - {input: detection_log_source_enabled, operator: equals, value: false}
+      - {input: detection_log_source_base_url, operator: nonEmpty}
+    reason: "an enabled log source requires a non-empty base URL"
+  - any:
+      - {input: detection_log_source_enabled, operator: equals, value: false}
+      - {input: detection_log_source_query, operator: nonEmpty}
+    reason: "an enabled log source requires a non-empty LogQL query"
 endpoints: []
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false
@@ -114,5 +131,10 @@ traceability:
     "docs/verification/detection-engine.md#C6": {kind: verifyOnly, reason: "status.json/textfile carrying no secret is a Go-code-level guarantee (internal/detection/status.go, metrics.go never define a secret field) — no apply task produces or could break this"}
     "docs/verification/detection-engine.md#C10": {kind: verifyOnly, reason: "cold-start no-false-anomaly is an internal/detection algorithm property (baseline_test.go's 120-bucket gate) — no apply task implements it"}
     "docs/verification/detection-engine.md#C11": {kind: verifyOnly, reason: "lifecycle/escalation/resolution/outbox-ordering scenario evidence comes from the fake-protocol topology lane (spec §49), not a single already-applied host"}
+    "docs/verification/detection-engine-model-provider.md#M1": {kind: verifyOnly, reason: "config validate's pass/fail is a Go-code-level guarantee (cmd/pilot-detection-engine's config package) — no single apply task IS this behavior, it's a property of the already-deployed binary"}
+    "docs/verification/detection-engine-model-provider.md#M2": {kind: verifyOnly, reason: "provider probe issuing a real batch round-trip is Go-code-level behavior (internal/detection provider adapters) — no apply task performs this call, it's invoked post-apply against the deployed binary"}
+    "docs/verification/detection-engine-model-provider.md#M3": {kind: verifyOnly, reason: "status --field model_provider.protocol reads Go-rendered status.json — no apply task itself performs this classification, it's the running daemon's own output"}
+    "docs/verification/detection-engine-model-provider.md#M4": {kind: verifyOnly, reason: "circuit breaker state is Go-code-level (internal/detection retry/circuit breaker) — no apply task can break or fix this independent of the deployed binary's code"}
+    "docs/verification/detection-engine-model-provider.md#M5": {kind: verifyOnly, reason: "secret-leak absence is a Go-code-level guarantee (status.go/metrics.go never define a secret field) spanning every apply outcome (bearer vs none), not one specific apply task"}
 verification: {autoDeploy: false}
 site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

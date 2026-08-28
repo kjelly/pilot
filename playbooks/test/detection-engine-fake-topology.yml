@@ -7,7 +7,7 @@
 #     --topology tmp/detection-engine-fake-topology.example.yaml
 #   go run ./cmd/pilot vm-target run \
 #     --group detection-fixture-source=<node> --group detection-fixture-sink=<node> \
-#     --group detection-fixture-provider=<node> \
+#     --group detection-fixture-provider=<node> --group detection-fixture-logs=<node> \
 #     --sandbox playbooks/test/detection-engine-fake-topology.yml
 #   go run ./cmd/pilot vm-target topology test \
 #     --topology tmp/detection-engine-fake-topology.example.yaml \
@@ -24,6 +24,11 @@
 #     -e detection_model_provider_auth=none \
 #     -e detection_model_provider_base_url=http://<detection-fixture-provider IP>:11434 \
 #     --verify docs/verification/detection-engine-model-provider.md=detection-engine
+#
+# For the log pipeline (NPU-detect-engine spec §14-18) add:
+#     -e detection_log_source_enabled=true \
+#     -e detection_log_source_base_url=http://<detection-fixture-logs IP>:3100 \
+#     -e detection_log_source_query='{job=~".+"}'
 #
 # This file does not itself apply detection-engine — that is
 # playbooks/apply/detection-engine-apply.yml's job, run separately (per the

@@ -505,6 +505,83 @@ via ollama-chat 的結果完全吻合（primary 失敗重試 1s+2s 退避＋fall
 名稱，即使實際由 fallback 服務也一樣——這是 v1 的可接受簡化，不影響
 正確性。
 
+## 6.6 Stage C-2/C-3/C-4 — Log pipeline 實跑證據（2026-08-28）
+
+docs/superpowers/specs/2026-08-28-npu-detect-engine-spec.md §14-18 的
+Log/Loki pipeline，reconcile 成既有 `internal/detection` 的第三個對等
+detector（baseline/cohort/log 三選一 max，非另立 schema）。Hard trigger
+（known-critical-pattern，如 OOM/kernel panic/segfault）採**選項
+B**：偵測器該 cycle 直接回報 `Score=1.0`，不繞過既有 lifecycle
+hysteresis（3-of-4 warning / 2-consecutive critical）——`ComputeLocalScore`
+的 max() 自然讓 1.0 主導，`HostLifecycle.Advance` 完全不用改。
+
+拓樸新增第 5 個節點 `detection-fixture-logs`（fake Loki `query_range`
+API，`/opt/pilot-fixtures/fake-loki.py`，固定回傳一行
+`pilot_host=fixture-host-1` 的 OOM 訊息，不理會 query 的時間窗）：
+
+```bash
+go run ./cmd/pilot vm-target run --name detection-engine-fixture \
+  playbooks/apply/detection-engine-apply.yml -e target_group=all \
+  -e detection_engine_artifact_path=dist/pilot-detection-engine-linux-amd64 \
+  -e detection_engine_artifact_sha256=6d148270b36b018ff9cffc812a524fe8f060f722504f991a2974fa5ab6299f8a \
+  -e detection_metrics_source_host=192.168.122.4 \
+  -e detection_alertmanager_target_host=192.168.122.7 \
+  -e detection_log_source_enabled=true \
+  -e detection_log_source_base_url=http://192.168.122.6:3100 \
+  -e 'detection_log_source_query={job=~".+"}'
+```
+
+### 實跑中發現並修好的真 bug：fake Thanos fixture 忽略 `time=`/`end=` 參數
+
+第一次全綠 apply（`ok=57 changed=11`）後，等了超過 8 分鐘（cycle_interval
+15s，約 32 個 cycle），`status --json` 的 `signals.active` 始終是 0，
+`state.db` 的 `signal_episodes`/`baseline_samples` 全空。追查發現：
+`fake-thanos-query.py` 無論 request 帶的 `time=`/`end=` 參數是什麼，一律
+回傳 `time.time()`（真實牆鐘時間）當樣本時間戳。真正的 engine 是用
+`evaluationTime = wall_clock - detection_evaluation_delay`（contract
+預設 20s）去查詢，而 `source.go` 的 `ClassifySample` 對超前
+`evaluationTime` 5 秒以上的樣本一律判成 `future_sample`——所以每個
+required feature 每個 cycle 都被判無效，`HostCycleValid` 永遠 false，
+根本沒機會跑到 baseline/cohort/log 三選一那一段。這是既存的 fixture bug
+（無關本次 Stage C-2/3/4 的邏輯，之前的 fake-lane 用法都沒有等到真的靠
+`serve` 常駐 loop 產生一個持久 episode，只有透過 Go unit test 才驗證過
+lifecycle），修法：讓 fixture 改讀 request 的 `time=`（vector）/`end=`
+（matrix）參數當回傳時間戳，不理會就 fallback 真實時間。修完重跑
+`detection-engine-fixtures.yml` 重啟 fixture 後，等待 90 秒即拿到：
+
+```
+$ sudo sqlite3 state.db "SELECT signal_id,state,severity,category_hint,last_score,critical_streak FROM signal_episodes;"
+01M13QDC5E308NGDKD6G9ND93Q|firing|critical|known_critical_pattern|1.0|0
+
+$ sudo sqlite3 state.db "SELECT * FROM outbox;"
+...|fire|{"labels":{"alertname":"PilotAdaptiveAnomaly","pilot_host":"fixture-host-1","severity":"critical","site":"fixture-site",...},
+   "annotations":{"category_hint":"known_critical_pattern","confidence":"1","score":"1",
+   "top_contributors":"[\"log:0d5293c46997\"]"},...}|pending|0|...
+```
+
+`top_contributors` 的 `log:0d5293c46997` 證實真的是 log detector（不是
+baseline/cohort）驅動這個 episode；`category_hint=known_critical_pattern`
++ `last_score=1.0` 精確對上選項 B 的預期行為，且 revision=1 就直接是
+`firing`/`critical`（episode 只在真正跨過閾值時才第一次落地寫入 DB，
+不代表繞過了 hysteresis）。
+
+**已知限制（沿用既有、非本次新增的 gap）**：outbox row 停在
+`status=pending, attempts=0` 沒有被送到 fake Alertmanager
+（`received-alerts.ndjson` 全空，即使雙向 `curl /-/ready` 都回
+200）。查證後確認 `cmd/pilot-detection-engine/main.go` 的 `runServe`
+scheduler callback 從來沒有呼叫 `ClaimOutboxItem`/對
+`alertmanagerBaseUrl` 發 HTTP POST——整個 `serve` daemon 目前沒有接上
+outbox 遞送 worker，這是既存於 Stage A 的落差（`docs/verification/detection-engine.md`
+C11 exemption 早就寫明「outbox 機制只驗結構完整，scenario 證據來自
+fake-protocol topology lane」，並非本次 log pipeline 造成）。不在本次
+scope 內修。
+
+冪等重跑（同一組 `-e`，含 log source）：
+
+```
+PLAY RECAP: detection-engine-fixture ok=55 changed=0 failed=0 unreachable=0 skipped=10
+```
+
 ## 7. Teardown
 
 ```bash
@@ -522,3 +599,4 @@ go run ./cmd/pilot vm-target down --name monitored-subject-1
 | 2026-08-28 | v1.2 | Stage B-1 全部落地：engine core（OpenAI/Ollama adapter、batch、fusion、retry/circuit）+ contract/inventory/playbook delivery（provider group vars、`detection-model-provider` Vault section、apply-time gates、provider.env/systemd EnvironmentFile）+ provider-verification lane（新增 `detection-fixture-provider` fake Ollama Chat fixture，`docs/verification/detection-engine-model-provider.md` M1-M5 全 PASS、冪等 changed=0，第一次跑就全綠，未發現新 bug） | sre |
 | 2026-08-28 | v1.3 | Stage B-2 real-provider evidence（Ollama native）：同拓樸把 provider base_url 換成真實 `10.1.80.71:11434`/`gemma4:e4b`，M1-M5 全 PASS、冪等 changed=0；順手記錄 gemma4:e4b 跨 host 不一致（host/build-specific，非 v1 prompt 通用缺陷）與 qwen3.5-2b-FLM（Lemonade）回傳格式不穩定的踏查結果 | sre |
 | 2026-08-28 | v1.4 | Stage C-1：新增 `flm` protocol（pipe-delimited text 契約，取代 FastFlowLM 不支援的 JSON schema 強制）+ NPU-primary-with-fallback（`FallbackProvider`，任一 protocol 組合皆可當 primary/fallback）。實測 `qwen3.5-2b-FLM` 從完全不能用變 3/3 成功；實測 fallback 真的透過 primary-fail→fallback-succeed 全路徑（含一次因忘記重 build binary 觸發的自動 rollback，正確運作），apply/冪等皆 PASS | sre |
+| 2026-08-28 | v1.5 | Stage C-2/C-3/C-4：Log/Loki pipeline（npu-detect-engine spec §14-18），reconcile 成 baseline/cohort 的第三個對等 detector；known-critical-pattern hard trigger 用選項 B（該 cycle 直接 Score=1.0，仍走既有 lifecycle hysteresis，非繞過）。新增 `detection-fixture-logs` fake Loki fixture 節點，5-VM 拓樸實跑：找到並修好 1 個真 fixture bug（fake Thanos 忽略 `time=`/`end=` 參數固定回傳當下牆鐘時間，配合預設 20s evaluation_delay 讓每個 cycle 的樣本都被判 `future_sample`，導致整條 metrics 鏈永遠無效，log pipeline 沒機會被跑到）；修完後拿到真實持久化的 `signal_episodes` row（`state=firing, severity=critical, category_hint=known_critical_pattern, last_score=1.0`）與對應 outbox `fire` 事件（`top_contributors` 含 `log:` 前綴證實由 log detector 驅動），冪等重跑 changed=0。已知既存限制：outbox 遞送 worker 本來就沒接上 `serve` daemon（Stage A 就有的 gap，非本次造成），本次不修 | sre |

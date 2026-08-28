@@ -36,3 +36,10 @@ nodes:
     memory: 1024
     disk: 10
     groups: [detection-fixture-provider]
+  - name: detection-fixture-logs
+    base_image: ubuntu-24.04
+    ssh_user: ubuntu
+    vcpus: 1
+    memory: 1024
+    disk: 10
+    groups: [detection-fixture-logs]

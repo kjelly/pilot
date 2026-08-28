@@ -94,6 +94,17 @@
     detection_model_provider_fallback_model: ""
     detection_model_provider_fallback_auth: none
 
+    # Optional log pipeline (docs/superpowers/specs/2026-08-28-npu-detect-
+    # engine-spec.md §14-18) — a third, equally-weighted peer to baseline/
+    # cohort. Disabled by default; the original detection-engine spec's
+    # own Non-Goals excludes logs entirely, so a Stage A/B apply (no -e
+    # overrides at all) is completely unaffected.
+    detection_log_source_enabled: false
+    detection_log_source_base_url: ""
+    detection_log_source_query: ""
+    detection_log_source_current_window: 10m
+    detection_log_source_baseline_window: 6h
+
     # detection_engine_artifact_path / detection_engine_artifact_sha256 are
     # DELIBERATELY NOT declared here (same "no shadowing default" reasoning
     # as prometheus-apply.yml's thanos_s3_target_host) — both are required
@@ -369,6 +380,17 @@
       no_log: true
       tags: [always]
 
+    - name: "Gate: enabled log source requires base_url/query (NPU-detect-engine spec §14)"
+      ansible.builtin.assert:
+        that:
+          - not (detection_log_source_enabled | bool) or (detection_log_source_base_url | default('') | length > 0)
+          - not (detection_log_source_enabled | bool) or (detection_log_source_query | default('') | length > 0)
+        fail_msg: >-
+          an enabled log source requires a non-empty
+          detection_log_source_base_url and detection_log_source_query —
+          disabled (the default) always passes this gate untouched.
+      tags: [always]
+
   tasks:
     - name: "Resolve detection_metrics_source_host for the /etc/hosts pin"
       ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
@@ -577,6 +599,12 @@
                   model: "{{ detection_model_provider_fallback_model }}"
                   auth: "{{ detection_model_provider_fallback_auth }}"
                   apiKeyEnv: "DETECTION_MODEL_FALLBACK_API_KEY"
+              logSource:
+                enabled: {{ detection_log_source_enabled | bool | to_json }}
+                baseUrl: "{{ detection_log_source_base_url }}"
+                query: {{ detection_log_source_query | to_json }}
+                currentWindow: "{{ detection_log_source_current_window }}"
+                baselineWindow: "{{ detection_log_source_baseline_window }}"
           register: detection_engine_config_result
 
         # spec §45 (+ NPU-detect-engine spec §35 for the fallback): a
