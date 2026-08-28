@@ -49,6 +49,16 @@ groupVars:
   - {name: detection_model_provider_api_key, type: string, required: false, secret: true}
   - {name: detection_model_provider_external, type: boolean, required: false, default: false, secret: false}
   - {name: detection_allow_external_provider, type: boolean, required: false, default: false, secret: false}
+  # Optional second provider (docs/superpowers/specs/2026-08-28-npu-detect-engine-spec.md
+  # §35's alternate-backend fallback, generalized to any protocol pair):
+  # tried only after the primary fails. Same shape as the primary block,
+  # minus its own nested fallback.
+  - {name: detection_model_provider_fallback_enabled, type: boolean, required: false, default: false, secret: false}
+  - {name: detection_model_provider_fallback_protocol, type: string, required: false, default: "openai-responses", secret: false, validation: "^(openai-responses|ollama-chat|flm)$"}
+  - {name: detection_model_provider_fallback_base_url, type: string, required: false, default: "", secret: false}
+  - {name: detection_model_provider_fallback_model, type: string, required: false, default: "", secret: false}
+  - {name: detection_model_provider_fallback_auth, type: string, required: false, default: "none", secret: false, validation: "^(none|bearer)$"}
+  - {name: detection_model_provider_fallback_api_key, type: string, required: false, secret: true}
 inputRules:
   - any:
       - {input: detection_model_provider_enabled, operator: equals, value: false}
@@ -63,6 +73,23 @@ inputRules:
       - {input: detection_model_provider_auth, operator: notEquals, value: bearer}
       - {input: detection_model_provider_api_key, operator: nonEmpty}
     reason: "an enabled bearer-auth model provider requires a non-empty API key (spec §33/§41.1)"
+  - any:
+      - {input: detection_model_provider_fallback_enabled, operator: equals, value: false}
+      - {input: detection_model_provider_enabled, operator: equals, value: true}
+    reason: "a fallback provider requires the primary provider to be enabled — there is nothing for it to fall back from otherwise"
+  - any:
+      - {input: detection_model_provider_fallback_enabled, operator: equals, value: false}
+      - {input: detection_model_provider_fallback_base_url, operator: nonEmpty}
+    reason: "an enabled fallback provider requires a non-empty base URL"
+  - any:
+      - {input: detection_model_provider_fallback_enabled, operator: equals, value: false}
+      - {input: detection_model_provider_fallback_model, operator: nonEmpty}
+    reason: "an enabled fallback provider requires a non-empty model"
+  - any:
+      - {input: detection_model_provider_fallback_enabled, operator: equals, value: false}
+      - {input: detection_model_provider_fallback_auth, operator: notEquals, value: bearer}
+      - {input: detection_model_provider_fallback_api_key, operator: nonEmpty}
+    reason: "an enabled bearer-auth fallback provider requires a non-empty API key"
 endpoints: []
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false

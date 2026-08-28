@@ -144,11 +144,17 @@ func runServe(ctx context.Context, configPath string) error {
 		modelStats := engine.LastModelStats
 		modelStatus := detection.NewDisabledProviderStatus()
 		if engine.Provider != nil {
+			circuit := "closed"
+			if cr, ok := engine.Provider.(interface {
+				CircuitState(time.Time) string
+			}); ok {
+				circuit = cr.CircuitState(time.Now())
+			}
 			modelStatus = detection.StatusModelProvider{
 				Enabled:  true,
 				Healthy:  modelStats.ProviderUp,
 				Protocol: engine.ProviderProtocol,
-				Circuit:  engine.Provider.CircuitState(time.Now()),
+				Circuit:  circuit,
 			}
 		}
 
@@ -377,7 +383,7 @@ func newSignalsCmd() *cobra.Command {
 // single synthetic candidate — no Pilot host data, no telemetry, no
 // mutation — and reports the outcome. It never prints the API key or any
 // request/response body (spec §33: no secret in evidence/diagnose output).
-func runProviderProbe(ctx context.Context, provider *detection.ManagedProvider, protocol string) error {
+func runProviderProbe(ctx context.Context, provider detection.ModelProvider, protocol string) error {
 	requestID, err := detection.NewULID()
 	if err != nil {
 		return fmt.Errorf("generate probe request_id: %w", err)

@@ -427,6 +427,84 @@ JSON），client-side validation 同樣正確全部擋下；判斷為該 2B 模�
 
 Stage B-2 的「至少一個：Ollama native」要求至此有真實證據滿足。
 
+## 6.4 Stage C-1 — flm protocol（2026-08-28）
+
+背景：`docs/superpowers/specs/2026-08-28-npu-detect-engine-spec.md`（NPU
+Detect Engine 新 spec，非本文件主 spec）驅動了這個追加工作。實測發現
+`gemma4:e4b`（`10.1.80.43:11434`）跟 `qwen3.5-2b-FLM`（Lemonade Server,
+`10.1.80.71:13305`）都對 Ollama 的 `format` JSON Schema 提示不理不睬
+——直接打底層 NPU backend（`127.0.0.1:8001`，繞過 Lemonade 的 Ollama-API
+轉譯層）送一個 `required` schema 給它，它完全無視、直接用自然語言回答
+"OK"，證實 FastFlowLM 這條推論引擎本身不支援 grammar-constrained
+decoding。
+
+拍板決議：不建立平行的 `internal/detect` package，而是在既有
+`ModelProvider` interface 上新增第三種 protocol `flm`——沿用既有
+`ManagedProvider`（retry/circuit breaker）與 batch envelope，只新增
+pipe-delimited text 契約（`VERDICT|SEVERITY|CATEGORY|CONFIDENCE`）取代
+JSON。過程中還抓到一個真的 prompt bug：沒給具體範例時，
+`qwen3.5-2b-FLM` 會把「VERDICT」這個**欄位名稱**字面輸出當成答案；補上
+「不要照抄欄位名稱」的明確提示後穩定修好。
+
+實測（透過 `provider probe`，`protocol: flm`）：
+- `qwen3.5-2b-FLM`（原本經 ollama-chat/JSON 完全不能用）→ 3/3 連續成功。
+- 真的送一批 3 個 candidate：正確分辨 CPU 過熱（score=0.75,
+  category=cpu_utilization）、正常主機（score=0，不升級）、記憶體壓力
+  （score=0.75, category=memory_pressure），3.5 秒跑完整批。
+
+## 6.5 Stage C-1 追加 — NPU-primary-with-fallback（2026-08-28）
+
+使用者需求：NPU（flm）優先，失敗時可 fallback 到 ollama-chat 或
+openai-responses。實作為通用、protocol-agnostic 的
+`FallbackProvider{Primary, Fallback *ManagedProvider}`（兩個各自獨立的
+retry/circuit breaker），`config.yaml` 新增 `modelProvider.fallback.*`
+巢狀區塊，`Engine.Provider` 型別從 `*ManagedProvider` 改成 `ModelProvider`
+interface 以容納兩種形狀。
+
+實測（`detection_model_provider_protocol=flm` 指向刻意錯誤的 port
+19999，`fallback.protocol=ollama-chat` 指向真實 `10.1.80.71:11434`
+`gemma4:e4b`）：
+
+```bash
+go run ./cmd/pilot vm-target run --name detection-engine-fixture \
+  playbooks/apply/detection-engine-apply.yml -e target_group=all \
+  ... \
+  -e detection_model_provider_enabled=true \
+  -e detection_model_provider_protocol=flm \
+  -e detection_model_provider_model=qwen3.5-2b-FLM \
+  -e detection_model_provider_base_url=http://10.1.80.71:19999 \
+  -e detection_model_provider_fallback_enabled=true \
+  -e detection_model_provider_fallback_protocol=ollama-chat \
+  -e detection_model_provider_fallback_model=gemma4:e4b \
+  -e detection_model_provider_fallback_base_url=http://10.1.80.71:11434
+```
+
+真實輸出（第一次因 dist/ binary 忘記重 build 而失敗——`config validate`
+正確拋出 `field fallback not found`，自動 rollback 正確運作、把之前的
+binary/service 復原；重 build 後第二次全綠）：
+
+```
+PLAY RECAP: ok=57 changed=6 unreachable=0 failed=0 skipped=7    # 首次 apply
+PLAY RECAP: ok=54 changed=0 unreachable=0 failed=0 skipped=10   # 冪等重跑
+```
+
+目標主機上直接確認（真的透過完整 primary-fail→fallback-succeed 路徑）：
+
+```
+$ sudo pilot-detection-engine status --json
+{"model_provider": {"enabled": true, "healthy": true, "protocol": "flm", "circuit": "closed"}, ...}
+
+$ pilot-detection-engine provider probe --config /etc/pilot/detection-engine/config.yaml
+provider probe ok: protocol=flm status=insufficient_data elapsed=12.192s
+```
+
+`elapsed=12.192s` 與 `status=insufficient_data` 跟先前單獨測 gemma4:e4b
+via ollama-chat 的結果完全吻合（primary 失敗重試 1s+2s 退避＋fallback
+真實呼叫約 9s），證實 fallback 真的接手，不是巧合。已知簡化：
+`status.json`/metrics 的 `protocol` 欄位固定回報 primary 的 protocol
+名稱，即使實際由 fallback 服務也一樣——這是 v1 的可接受簡化，不影響
+正確性。
+
 ## 7. Teardown
 
 ```bash
@@ -443,3 +521,4 @@ go run ./cmd/pilot vm-target down --name monitored-subject-1
 | 2026-08-28 | v1.1 | Fake-protocol topology lane（spec §49 C11）補跑：`vm-target topology test` 對 fake Thanos/Alertmanager fixture 全綠（L1/L3/L4/L5 12-12 PASS/L6 changed=0）；找到並修好 2 個真 bug（`resolve-hosts-alias-target.yml` 的 fact 跨 include 洩漏，repo-wide，`prometheus-apply.yml` 同樣受影響；state.db 落地權限 0644 應為 0600）；Stage A 達成 VERIFICATION_READY | sre |
 | 2026-08-28 | v1.2 | Stage B-1 全部落地：engine core（OpenAI/Ollama adapter、batch、fusion、retry/circuit）+ contract/inventory/playbook delivery（provider group vars、`detection-model-provider` Vault section、apply-time gates、provider.env/systemd EnvironmentFile）+ provider-verification lane（新增 `detection-fixture-provider` fake Ollama Chat fixture，`docs/verification/detection-engine-model-provider.md` M1-M5 全 PASS、冪等 changed=0，第一次跑就全綠，未發現新 bug） | sre |
 | 2026-08-28 | v1.3 | Stage B-2 real-provider evidence（Ollama native）：同拓樸把 provider base_url 換成真實 `10.1.80.71:11434`/`gemma4:e4b`，M1-M5 全 PASS、冪等 changed=0；順手記錄 gemma4:e4b 跨 host 不一致（host/build-specific，非 v1 prompt 通用缺陷）與 qwen3.5-2b-FLM（Lemonade）回傳格式不穩定的踏查結果 | sre |
+| 2026-08-28 | v1.4 | Stage C-1：新增 `flm` protocol（pipe-delimited text 契約，取代 FastFlowLM 不支援的 JSON schema 強制）+ NPU-primary-with-fallback（`FallbackProvider`，任一 protocol 組合皆可當 primary/fallback）。實測 `qwen3.5-2b-FLM` 從完全不能用變 3/3 成功；實測 fallback 真的透過 primary-fail→fallback-succeed 全路徑（含一次因忘記重 build binary 觸發的自動 rollback，正確運作），apply/冪等皆 PASS | sre |

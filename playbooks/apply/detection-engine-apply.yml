@@ -82,6 +82,18 @@
     detection_model_provider_external: false
     detection_allow_external_provider: false
 
+    # Optional second provider (docs/superpowers/specs/2026-08-28-npu-detect-
+    # engine-spec.md §35's alternate-backend fallback, generalized to any
+    # protocol pair — e.g. flm primary for local NPU inference, ollama-chat
+    # or openai-responses fallback for when the NPU backend is unavailable).
+    # detection_model_provider_fallback_api_key is a SECRET, same
+    # no-default convention as the primary's own API key.
+    detection_model_provider_fallback_enabled: false
+    detection_model_provider_fallback_protocol: openai-responses
+    detection_model_provider_fallback_base_url: ""
+    detection_model_provider_fallback_model: ""
+    detection_model_provider_fallback_auth: none
+
     # detection_engine_artifact_path / detection_engine_artifact_sha256 are
     # DELIBERATELY NOT declared here (same "no shadowing default" reasoning
     # as prometheus-apply.yml's thanos_s3_target_host) — both are required
@@ -320,6 +332,43 @@
           replaced by any schema/inputRules validation.
       tags: [always]
 
+    - name: "Gate: a fallback provider requires the primary provider enabled (NPU-detect-engine spec §35)"
+      ansible.builtin.assert:
+        that:
+          - not (detection_model_provider_fallback_enabled | bool) or (detection_model_provider_enabled | bool)
+        fail_msg: >-
+          detection_model_provider_fallback_enabled=true has nothing to
+          fall back FROM — enable detection_model_provider_enabled too.
+      tags: [always]
+
+    - name: "Gate: enabled fallback provider requires protocol/base_url/model (NPU-detect-engine spec §35)"
+      ansible.builtin.assert:
+        that:
+          - detection_model_provider_fallback_auth in ['none', 'bearer']
+          - not (detection_model_provider_fallback_enabled | bool) or (detection_model_provider_fallback_protocol in ['openai-responses', 'ollama-chat', 'flm'])
+          - not (detection_model_provider_fallback_enabled | bool) or (detection_model_provider_fallback_base_url | default('') | length > 0)
+          - not (detection_model_provider_fallback_enabled | bool) or (detection_model_provider_fallback_model | default('') | length > 0)
+        fail_msg: >-
+          an enabled fallback provider requires protocol in
+          [openai-responses, ollama-chat, flm], a non-empty base_url and
+          model, and auth in [none, bearer] — fallback disabled (the
+          default) always passes this gate untouched.
+      tags: [always]
+
+    - name: "Gate: enabled+bearer fallback provider requires a non-empty API key (NPU-detect-engine spec §35)"
+      ansible.builtin.assert:
+        that:
+          - >-
+            not ((detection_model_provider_fallback_enabled | bool) and detection_model_provider_fallback_auth == 'bearer')
+            or (detection_model_provider_fallback_api_key is defined and detection_model_provider_fallback_api_key | length > 0)
+        fail_msg: >-
+          an enabled bearer-auth fallback provider requires a non-empty
+          detection_model_provider_fallback_api_key — pass via
+          -e detection_model_provider_fallback_api_key=... (a vault file is
+          recommended over -e for a real secret).
+      no_log: true
+      tags: [always]
+
   tasks:
     - name: "Resolve detection_metrics_source_host for the /etc/hosts pin"
       ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
@@ -521,20 +570,38 @@
                 model: "{{ detection_model_provider_model }}"
                 auth: "{{ detection_model_provider_auth }}"
                 apiKeyEnv: "DETECTION_MODEL_API_KEY"
+                fallback:
+                  enabled: {{ detection_model_provider_fallback_enabled | bool | to_json }}
+                  protocol: "{{ detection_model_provider_fallback_protocol }}"
+                  baseUrl: "{{ detection_model_provider_fallback_base_url }}"
+                  model: "{{ detection_model_provider_fallback_model }}"
+                  auth: "{{ detection_model_provider_fallback_auth }}"
+                  apiKeyEnv: "DETECTION_MODEL_FALLBACK_API_KEY"
           register: detection_engine_config_result
 
-        # spec §45: enabled+bearer renders provider.env (root:root 0600,
-        # no_log — the only place the real secret value ever lands).
-        - name: "Step 9b: render provider.env (Stage B enabled+bearer only, spec §45)"
+        # spec §45 (+ NPU-detect-engine spec §35 for the fallback): a
+        # provider needing bearer auth renders its own line into the same
+        # provider.env (root:root 0600, no_log — the only place either
+        # real secret value ever lands). Primary and fallback are
+        # independent: either, both, or neither may need this file.
+        - name: "Step 9b: render provider.env (any enabled+bearer provider, spec §45)"
           tags: [detection-engine-C12]
           ansible.builtin.copy:
             dest: "{{ detection_engine_config_dir }}/provider.env"
             owner: root
             group: root
             mode: "0600"
-            content: "DETECTION_MODEL_API_KEY={{ detection_model_provider_api_key }}\n"
+            content: |
+              {% if (detection_model_provider_enabled | bool) and detection_model_provider_auth == 'bearer' %}
+              DETECTION_MODEL_API_KEY={{ detection_model_provider_api_key }}
+              {% endif %}
+              {% if (detection_model_provider_fallback_enabled | bool) and detection_model_provider_fallback_auth == 'bearer' %}
+              DETECTION_MODEL_FALLBACK_API_KEY={{ detection_model_provider_fallback_api_key }}
+              {% endif %}
           no_log: true
-          when: (detection_model_provider_enabled | bool) and detection_model_provider_auth == 'bearer'
+          when: >-
+            ((detection_model_provider_enabled | bool) and detection_model_provider_auth == 'bearer')
+            or ((detection_model_provider_fallback_enabled | bool) and detection_model_provider_fallback_auth == 'bearer')
           register: detection_engine_provider_env_create_result
 
         # spec §33: "disabled/auth none: provider.env absent. 若上一版存在:
@@ -542,12 +609,14 @@
         # unconditionally whenever Step 9b's condition does NOT hold (not
         # just "if it happens to exist") is what makes C12 an ACTIVE
         # guarantee rather than an accident of never having created one.
-        - name: "Step 9c: ensure provider.env is absent (disabled or non-bearer, spec §33/§45)"
+        - name: "Step 9c: ensure provider.env is absent (neither provider needs bearer auth, spec §33/§45)"
           tags: [detection-engine-C12]
           ansible.builtin.file:
             path: "{{ detection_engine_config_dir }}/provider.env"
             state: absent
-          when: not ((detection_model_provider_enabled | bool) and detection_model_provider_auth == 'bearer')
+          when: >-
+            not (((detection_model_provider_enabled | bool) and detection_model_provider_auth == 'bearer')
+            or ((detection_model_provider_fallback_enabled | bool) and detection_model_provider_fallback_auth == 'bearer'))
           register: detection_engine_provider_env_absent_result
 
         - name: "Step 10: validate the rendered config (spec §44 config schema gate, before any restart)"

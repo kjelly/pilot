@@ -115,7 +115,9 @@ func (e *Engine) scoreCandidatesWithProvider(ctx context.Context, candidates []C
 	}
 	wg.Wait()
 
-	stats.CircuitOpen = e.Provider.CircuitState(e.Provider.Now()) == "open"
+	if cr, ok := e.Provider.(circuitReporter); ok {
+		stats.CircuitOpen = cr.CircuitState(time.Now()) == "open"
+	}
 	// "Up" mirrors the circuit breaker's own health judgment (spec §34's
 	// rolling health-failure window) — the definitive reachability signal
 	// this package already computes, rather than a second ad hoc heuristic.

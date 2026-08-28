@@ -65,11 +65,15 @@ type Engine struct {
 	Cohorts map[string]string
 
 	// Provider is nil for Stage A (provider disabled): every host is then
-	// fused via FuseLocalOnly, byte-identical to pre-Stage-B behavior.
+	// fused via FuseLocalOnly, byte-identical to pre-Stage-B behavior. It
+	// is a *ManagedProvider for a single-protocol deployment, or a
+	// *FallbackProvider composing two of them (spec1.md §35's alternate-
+	// backend fallback) — both satisfy ModelProvider and circuitReporter.
 	// ProviderProtocol labels observability output ("openai-responses" |
-	// "ollama-chat"); RateLimiter is the global token bucket (spec §35),
-	// also nil-safe (nil == unlimited, used only when Provider is nil).
-	Provider         *ManagedProvider
+	// "ollama-chat" | "flm"); RateLimiter is the global token bucket
+	// (spec §35), also nil-safe (nil == unlimited, used only when
+	// Provider is nil).
+	Provider         ModelProvider
 	ProviderProtocol string
 	RateLimiter      *RateLimiter
 

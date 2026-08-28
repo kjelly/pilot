@@ -170,12 +170,18 @@ var vaultSections = map[string]vaultSection{
 	},
 	"detection-model-provider": {
 		Title: "Detection Engine Model Provider 相關（Stage B，預設不啟用）",
-		Note:  "只有 detection_model_provider_enabled=true 且 auth=bearer 時才需要真的填值；provider disabled（Stage A 預設）完全不會用到這把 key，也不會被 completeness 檢查要求。",
+		Note:  "只有 detection_model_provider_enabled=true 且 auth=bearer 時才需要真的填值；provider disabled（Stage A 預設）完全不會用到這把 key，也不會被 completeness 檢查要求。fallback key 同理，只有 detection_model_provider_fallback_enabled=true 且 fallback auth=bearer 時才需要。",
 		Keys: []vaultField{
 			{
 				Name:     "detection_model_provider_api_key",
 				Value:    "CHANGE-ME-if-bearer-auth-enabled",
 				Comment:  "Optional：只有 detection_model_provider_enabled=true 且 auth=bearer 時才必填",
+				Optional: true,
+			},
+			{
+				Name:     "detection_model_provider_fallback_api_key",
+				Value:    "CHANGE-ME-if-fallback-bearer-auth-enabled",
+				Comment:  "Optional：只有 detection_model_provider_fallback_enabled=true 且 fallback auth=bearer 時才必填（NPU-primary-with-fallback，見 docs/superpowers/specs/2026-08-28-npu-detect-engine-spec.md §35）",
 				Optional: true,
 			},
 		},

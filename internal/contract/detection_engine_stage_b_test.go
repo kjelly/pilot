@@ -35,6 +35,15 @@ func TestDetectionEngineContract_StageBDelta(t *testing.T) {
 		"detection_model_provider_api_key":  {"string", false, true},
 		"detection_model_provider_external": {"boolean", false, false},
 		"detection_allow_external_provider": {"boolean", false, false},
+		// Optional second provider (NPU-primary-with-fallback: spec1.md
+		// §35's alternate-backend fallback, generalized to any protocol
+		// pair) — same Stage-A-safe shape as the primary block.
+		"detection_model_provider_fallback_enabled":  {"boolean", false, false},
+		"detection_model_provider_fallback_protocol": {"string", false, false},
+		"detection_model_provider_fallback_base_url": {"string", false, false},
+		"detection_model_provider_fallback_model":    {"string", false, false},
+		"detection_model_provider_fallback_auth":     {"string", false, false},
+		"detection_model_provider_fallback_api_key":  {"string", false, true},
 	}
 	for name, want := range wantDefaults {
 		gv, ok := byName[name]

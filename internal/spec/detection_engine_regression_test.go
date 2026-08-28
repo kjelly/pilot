@@ -185,11 +185,22 @@ func TestRegression_DetectionEngineSpec(t *testing.T) {
 		}
 	}
 
-	// The provider.env-rendering task (the one place the real secret
-	// value is templated) must be no_log — never the case for Stage A's
-	// old absent-only task, so this specifically locks the NEW create path.
-	if !strings.Contains(applyRaw, "content: \"DETECTION_MODEL_API_KEY={{ detection_model_provider_api_key }}\\n\"\n          no_log: true") {
-		t.Error("provider.env's create task must be no_log: true immediately after its content (never logs the real secret value)")
+	// The provider.env-rendering task (the one place either real secret
+	// value — primary or fallback — is templated) must be no_log: true
+	// somewhere within its own task body, before the next task starts.
+	if idx := strings.Index(applyRaw, `"Step 9b: render provider.env`); idx < 0 {
+		t.Error(`detection-engine-apply.yml missing the "Step 9b: render provider.env" task`)
+	} else {
+		rest := applyRaw[idx:]
+		nextTask := strings.Index(rest[1:], "\n        - name:")
+		if nextTask < 0 {
+			nextTask = len(rest)
+		} else {
+			nextTask++
+		}
+		if !strings.Contains(rest[:nextTask], "no_log: true") {
+			t.Error("provider.env's create task must be no_log: true within its own task body (never logs a real secret value)")
+		}
 	}
 
 	// Stage A default (no -e overrides at all) must still run

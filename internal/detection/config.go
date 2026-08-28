@@ -13,13 +13,30 @@ import (
 // (spec §41.1's inputRules, mirrored here for the binary's own config
 // validation).
 type ModelProviderConfig struct {
+	Enabled   bool                        `yaml:"enabled"`
+	Protocol  string                      `yaml:"protocol"`
+	BaseURL   string                      `yaml:"baseUrl"`
+	Model     string                      `yaml:"model"`
+	Auth      string                      `yaml:"auth"`
+	APIKeyEnv string                      `yaml:"apiKeyEnv"`
+	External  bool                        `yaml:"external"`
+	Fallback  ModelProviderFallbackConfig `yaml:"fallback"`
+}
+
+// ModelProviderFallbackConfig is an optional second provider (spec1.md
+// §35's "Level 2: alternate backend" — not required by that spec's own
+// v1, but reconciled here as a generic, protocol-agnostic primary+
+// fallback mechanism: any protocol may be primary or fallback, an
+// operator just happens to configure flm as primary with
+// ollama-chat/openai-responses as fallback for an NPU-first deployment).
+// It never nests a fallback of its own.
+type ModelProviderFallbackConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	Protocol  string `yaml:"protocol"`
 	BaseURL   string `yaml:"baseUrl"`
 	Model     string `yaml:"model"`
 	Auth      string `yaml:"auth"`
 	APIKeyEnv string `yaml:"apiKeyEnv"`
-	External  bool   `yaml:"external"`
 }
 
 // Config is the Detection Engine's config.yaml shape (spec §8, §33: the
@@ -75,22 +92,41 @@ func (c Config) Validate() error {
 func (m ModelProviderConfig) validate() error {
 	if !m.Enabled {
 		// Stage A: disabled provider requires nothing else — spec §33/§41.1.
+		// A disabled primary can't have an enabled fallback either — there
+		// would be nothing for it to be a fallback FROM.
+		if m.Fallback.Enabled {
+			return fmt.Errorf("config: modelProvider.fallback.enabled requires modelProvider.enabled")
+		}
 		return nil
 	}
-	if m.Protocol != "openai-responses" && m.Protocol != "ollama-chat" && m.Protocol != "flm" {
-		return fmt.Errorf("config: modelProvider.protocol must be openai-responses, ollama-chat, or flm, got %q", m.Protocol)
+	if err := validateProviderProtocolAuth(m.Protocol, m.BaseURL, m.Model, m.Auth, m.APIKeyEnv); err != nil {
+		return fmt.Errorf("config: modelProvider.%w", err)
 	}
-	if m.BaseURL == "" {
-		return fmt.Errorf("config: modelProvider.baseUrl is required when enabled")
+	if m.Fallback.Enabled {
+		if err := validateProviderProtocolAuth(m.Fallback.Protocol, m.Fallback.BaseURL, m.Fallback.Model, m.Fallback.Auth, m.Fallback.APIKeyEnv); err != nil {
+			return fmt.Errorf("config: modelProvider.fallback.%w", err)
+		}
 	}
-	if m.Model == "" {
-		return fmt.Errorf("config: modelProvider.model is required when enabled")
+	return nil
+}
+
+// validateProviderProtocolAuth is shared by the primary and fallback
+// provider blocks — same shape, same rules.
+func validateProviderProtocolAuth(protocol, baseURL, model, auth, apiKeyEnv string) error {
+	if protocol != "openai-responses" && protocol != "ollama-chat" && protocol != "flm" {
+		return fmt.Errorf("protocol must be openai-responses, ollama-chat, or flm, got %q", protocol)
 	}
-	if m.Auth != "none" && m.Auth != "bearer" {
-		return fmt.Errorf("config: modelProvider.auth must be none or bearer, got %q", m.Auth)
+	if baseURL == "" {
+		return fmt.Errorf("baseUrl is required when enabled")
 	}
-	if m.Auth == "bearer" && m.APIKeyEnv == "" {
-		return fmt.Errorf("config: modelProvider.apiKeyEnv is required when auth=bearer")
+	if model == "" {
+		return fmt.Errorf("model is required when enabled")
+	}
+	if auth != "none" && auth != "bearer" {
+		return fmt.Errorf("auth must be none or bearer, got %q", auth)
+	}
+	if auth == "bearer" && apiKeyEnv == "" {
+		return fmt.Errorf("apiKeyEnv is required when auth=bearer")
 	}
 	return nil
 }
