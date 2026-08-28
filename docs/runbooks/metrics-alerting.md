@@ -494,6 +494,153 @@ go run ./cmd/pilot vm-target down --name hm-ubuntu
 
 ---
 
+## 7b. Detection Engine Stage A-0：`pilot_host` canonical identity 實測（2026-08-28）
+
+### 背景
+
+`docs/superpowers/specs/2026-08-28-detection-engine-spec.md`（Detection Engine
+implementation-ready spec）§9 要求 `prometheus-apply.yml` 的 node-exporter
+auto-discovery 改成逐 host render，每個 `host-monitoring` 主機各自一個
+`static_configs` 項目並帶 `labels.pilot_host = inventory_hostname`——這是未來
+Detection Engine 從 Thanos 端辨識 subject 身分的唯一依據。同時修正
+`contracts/thanos-query.yaml` 的 `query` endpoint 一直宣告成 `10902`（應為
+`10912`，跟 §7a/§9 已知的 port 事故是同一個根因，只是這次是 contract 檔沒跟
+著改）。本節是這兩個改動的 Stage A-0 real-metrics-chain 證據：**inventory
+hostname → Prometheus `pilot_host` label → 真實中央 Thanos Query `:10912`**。
+
+### 事實快照（2026-08-28T02:27–02:33 UTC）
+
+- `pilot vm-target list`（測試前）：空（前一個 workstream 已全部 teardown）。
+- 本次新建 3 台，皆 Ubuntu 24.04：`hm-ubuntu`（host-monitoring）、
+  `prom-test`（prometheus，`--group host-monitoring=hm-ubuntu` 自動探索）、
+  `nexus`（thanos-query，`--group prometheus=prom-test` 自動探索站台）。
+- Tested revision：本次 Stage A-0 工作樹（`git status` 當時為
+  `playbooks/apply/prometheus-apply.yml`、`contracts/thanos-query.yaml`、
+  `docs/verification/{prometheus,thanos-query}.md`、
+  `internal/spec/{prometheus,thanos_query}_regression_test.go` 六個檔案修改，
+  尚未 commit）。
+- S3 endpoint 全程用假位址（`203.0.113.1:9000`，同 §7a 的模式）——本節目的
+  是驗證 pilot_host/site 身分鏈路，不是 Thanos object storage 上傳鏈路，
+  跟 §2/§5 的真 SeaweedFS 測試互補而非取代。
+
+### 部署鏈
+
+```bash
+go run ./cmd/pilot vm-target up --name hm-ubuntu --ssh-user ubuntu \
+    --disk 20 --memory 2048 --vcpus 2 --ssh-timeout 8m --boot-timeout 8m --services local
+go run ./cmd/pilot vm-target run --name hm-ubuntu --skip-lint \
+    playbooks/apply/host-monitoring-apply.yml -e target_group=hm-ubuntu \
+    -e node_exporter_basic_auth_password=<password>
+# PLAY RECAP: ok=28 changed=11 failed=0 skipped=3
+
+go run ./cmd/pilot vm-target up --name prom-test --ssh-user ubuntu \
+    --disk 20 --memory 3072 --vcpus 2 --ssh-timeout 8m --boot-timeout 8m --services local
+go run ./cmd/pilot vm-target run --name prom-test --skip-lint \
+    playbooks/apply/docker-apply.yml -e target_group=prom-test
+go run ./cmd/pilot vm-target run \
+    --group host-monitoring=hm-ubuntu --group prometheus=prom-test --skip-lint \
+    playbooks/apply/prometheus-apply.yml -e target_group=prometheus \
+    -e prometheus_site_label=test-site -e thanos_s3_endpoint=203.0.113.1:9000 \
+    -e thanos_aws_access_key_id=fakekey -e thanos_aws_secret_access_key=fakesecret \
+    -e node_exporter_basic_auth_password=<同一組password>
+# PLAY RECAP: ok=34 changed=9 failed=0 skipped=21
+# 冪等重跑：ok=34 changed=0 failed=0 skipped=21
+
+go run ./cmd/pilot vm-target up --name nexus --ssh-user ubuntu \
+    --disk 30 --memory 4096 --vcpus 2 --ssh-timeout 8m --boot-timeout 8m --services local
+go run ./cmd/pilot vm-target run --name nexus --skip-lint \
+    playbooks/apply/docker-apply.yml -e target_group=nexus
+go run ./cmd/pilot vm-target run --name nexus \
+    --group prometheus=prom-test --group thanos-query=nexus --skip-lint \
+    playbooks/apply/thanos-query-apply.yml -e target_group=thanos-query \
+    -e thanos_s3_target_host=203.0.113.1 -e thanos_s3_endpoint=203.0.113.1:9000 \
+    -e thanos_aws_access_key_id=fakekey -e thanos_aws_secret_access_key=fakesecret
+# ok: [nexus] => {"msg": "thanos_query_store_group=prometheus; discovered 1 site(s): ['prom-test']"}
+# PLAY RECAP: ok=18 changed=5 failed=0 skipped=5
+# 冪等重跑：ok=18 changed=0 failed=0 skipped=5
+```
+
+**第一次跑 `thanos-query-apply.yml` 真的 FAIL**（本次實測發現的操作性坑，
+不是 playbook bug）：`nexus` 忘了先套 `docker-apply.yml`，`Ensure docker
+network pilot-metrics exists` task 直接報
+`Error connecting: ... FileNotFoundError(2, 'No such file or directory')`，
+playbook 自己的 rollback 機制正確地清掉了 objstore secret 檔並 surface 原始
+錯誤。補跑 `docker-apply.yml` 後乾淨重跑即通過，如上。
+
+### 渲染結果：`prom-test` 上的 `prometheus.yml`（節錄）
+
+```yaml
+scrape_configs:
+- job_name: prometheus
+  static_configs:
+    - targets: ["localhost:9090"]
+
+- basic_auth:
+    password_file: /etc/prometheus/node-exporter-basic-auth-password
+    username: prometheus
+  job_name: node
+  static_configs:
+  - labels:
+      pilot_host: hm-ubuntu
+    targets:
+    - 192.168.122.2:9100
+```
+
+`192.168.122.2` 是 `hm-ubuntu` 的真實 IP（`hostvars.ansible_host`），
+`pilot_host: hm-ubuntu` 是 `hm-ubuntu` 的真實 inventory hostname——不是猜的、
+不是 IP 反查，符合 spec §9.2 的 canonical producer 規則。
+
+### 端到端證明 1：`prom-test` 本機 Prometheus 已經帶著 label 抓到資料
+
+```bash
+$ curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22node%22%7D'
+{"status":"success","data":{"resultType":"vector","result":[{"metric":
+{"__name__":"up","instance":"192.168.122.2:9100","job":"node","pilot_host":"hm-ubuntu"},
+"value":[1787884115.904,"1"]}]}}
+```
+
+`docs/verification/prometheus.md` 新增的 C15
+（`grep -qE "^[[:space:]]*pilot_host:" /etc/pilot/prometheus/prometheus.yml`）
+直接對 `prom-test` 跑：`C15_PASS`。全 15 rows 用
+`pilot verify docs/verification/prometheus.md -i <combined-inv> -l prometheus`
+跑（`vm-target verify --name` 對單一 vm-target 無法解析 `prometheus` group，
+是既有的 `pilot-verify-single-vm-targetgroup-gap`，跟本次改動無關，繞法跟
+§7a 一致）：**`pass=13 fail=2`**——fail 的只有 C9（假 S3 endpoint 連不到）跟
+C11（沒接 alertmanager），都是 §5 已知例外；`C13`/`C14`/`C15` 全 pass。
+
+### 端到端證明 2：真實中央 Thanos Query `:10912` 帶著 `pilot_host`/`site` 兩個 label
+
+這是 spec §51 real metrics chain 的 canonical acceptance——`inventory
+hostname → Prometheus pilot_host label → real Thanos Query :10912`：
+
+```bash
+$ curl -fsS 'http://127.0.0.1:10912/api/v1/query?query=up'
+{"status":"success","data":{"resultType":"vector","result":[
+{"metric":{"__name__":"up","instance":"192.168.122.2:9100","job":"node","pilot_host":"hm-ubuntu","site":"test-site"},"value":[1787884345.379,"1"]},
+{"metric":{"__name__":"up","instance":"localhost:9090","job":"prometheus","site":"test-site"},"value":[1787884345.379,"1"]}
+],"analysis":{}}}
+```
+
+`pilot_host=hm-ubuntu`（真實 inventory hostname，經 Prometheus 逐一 scrape
+label 傳遞）與 `site=test-site`（Thanos Sidecar 的 `external_labels`）同時
+出現在**中央**查詢結果上——證明這條鏈路真的接起來了，不是只在站台本機看得到。
+`docs/verification/thanos-query.md` 對 `nexus` 跑（同樣繞過
+single-vm-targetgroup-gap）：**`pass=9 fail=1`**——fail 的只有 C8（Thanos
+Store Gateway 讀假 S3 bucket，跟本次改動無關，§5 已知例外）；直接相關的
+**C9**（發現 `sidecar` StoreAPI）與 **C10**（全局查詢帶 `site` label）皆
+pass。
+
+### 完成後：teardown
+
+```bash
+go run ./cmd/pilot vm-target down --name nexus
+go run ./cmd/pilot vm-target down --name prom-test
+go run ./cmd/pilot vm-target down --name hm-ubuntu
+go run ./cmd/pilot vm-target list   # 確認為空
+```
+
+---
+
 ## 8. 各角色 Verify / Idempotency 總表
 
 | 角色 | target | verify | 冪等重跑 |
@@ -504,6 +651,8 @@ go run ./cmd/pilot vm-target down --name hm-ubuntu
 | `host-monitoring`（Ubuntu 24.04） | hm-ubuntu | PASS pass=10 fail=0 skip=0 | changed=0 |
 | `host-monitoring`（AlmaLinux 9） | hm-el9 | PASS pass=10 fail=0 skip=0 | changed=0 |
 | `prometheus`（+ node-exporter 自動探索，§7a） | prom-test + hm-ubuntu | pass=12 fail=2（C9/C11，跟本次改動無關，見 §7a） | changed=0 |
+| `prometheus`（+ `pilot_host` canonical identity，§7b） | prom-test + hm-ubuntu | pass=13 fail=2（C9/C11，跟本次改動無關；C13/C14/C15 全 pass，見 §7b） | changed=0 |
+| `thanos-query`（+ `pilot_host`/`site` real chain，§7b） | nexus + prom-test | pass=9 fail=1（C8，跟本次改動無關；C9/C10 全 pass，見 §7b） | changed=0 |
 
 三份原始 spec 全數 PASS；`host-monitoring` 兩種 distro 皆 PASS；`prometheus`
 的 node-exporter 整合相關 rows（C13/C14）皆 PASS。所有 apply 的第二次
@@ -555,3 +704,4 @@ go run ./cmd/pilot vm-target list   # 確認為空
 | 2026-07-14 | v1.1 | 更正舊版 `vm-target up` state-file race 說明：不同名稱 VM 現可平行建立 | Codex |
 | 2026-07-17 | v2.0 | 文件整併：`docs/runbooks/alertmanager.md` 併入本檔（該檔已歸檔），檔名由 `prometheus-thanos.md` 改為 `metrics-alerting.md`。用同一次四主機環境（`prometheus`/`thanos-query`/`alertmanager`/S3 目的地）重新實跑三個角色的 apply/verify/idempotency，新增 Prometheus→Alertmanager 端到端證明（含有界測試告警 firing→resolved 的完整生命週期）。改用 `vm-target run --group` 取代舊版手動合併 inventory + raw `ansible-playbook` 的探索測試方式。發現並修好 `docs/verification/thanos-query.md` 的 port 10902→10912 真事故（規格落後於 playbook 早先的預設值變更）。發現一個範圍外的真實環境限制：`core-infra-provider-apply.yml` 的 RHEL family docker 安裝缺 `docker-compose` 套件來源（AlmaLinux 9），未修 | sre |
 | 2026-08-10 | v2.1 | 新增 §7a：`prometheus` 自動從 inventory 的 `host-monitoring` group 展開 node_exporter scrape target（新元件，見 `docs/runbooks/host-monitoring.md`），強制 HTTP Basic Auth。3 台新 vm-target（Ubuntu + AlmaLinux 9 + prometheus）實跑：`host-monitoring` 兩種 distro 各自 apply/verify（10/10 PASS）/冪等重跑（changed=0）；`prometheus` 用 `--group` 跟 `host-monitoring` 組合 inventory，端到端證明 `up{job="node"}==1`（認證通過）與未認證 401/認證後 200 兩條路徑。實跑中發現並修好 4 個真 bug：`unarchive`/`htpasswd` 在 check-mode 對「同一次 apply 裡才會建立的前提條件」處理不當（兩處）、`prometheus_scrape_configs` 手動拼 `\n` 在 `>-` YAML scalar 下沒被展開成真換行（改用 `to_nice_yaml`）、改用 `to_nice_yaml` 後 spec C13 原本錨定的 `^-\s*job_name:` 因為 key 依字母序排列而抓不到（改成不錨 `^-`）——後兩個是本機模擬/真機分別抓到的，見 §9 表格 | sre |
+| 2026-08-28 | v2.2 | 新增 §7b：Detection Engine Stage A-0（`docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §9/§51）——`prometheus-apply.yml` 的 node-exporter auto-discovery 改成逐 host render `labels.pilot_host = inventory_hostname`，並修正 `contracts/thanos-query.yaml` 的 `query` endpoint port（10902→10912，跟 §7a/§9 同一類、但這次是 contract 檔沒跟上）。3 台新 vm-target 實測全鏈路：`prom-test` 的 `prometheus.yml` 正確渲染 `pilot_host: hm-ubuntu`（新增 spec row C15 PASS），真實中央 Thanos Query `:10912` 的 `/api/v1/query?query=up` 回傳結果同時帶 `pilot_host=hm-ubuntu` 與 `site=test-site`（`thanos-query.md` C9/C10 PASS）。兩份 apply 冪等重跑皆 `changed=0`。實跑中踩到一個操作性坑（非 playbook bug）：`nexus` 忘了先套用 `docker-apply.yml` 就直接跑 `thanos-query-apply.yml`，`Ensure docker network pilot-metrics exists` 失敗，playbook 自己的 rollback 正確清掉 objstore secret 檔 | sre |

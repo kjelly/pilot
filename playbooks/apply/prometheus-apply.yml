@@ -220,6 +220,41 @@
                    | list) }}
       tags: [always]
 
+    # Detection Engine spec §9: an explicit node_exporter_targets override has
+    # no inventory-hostname mapping, so it keeps the old flat (unlabeled)
+    # static_configs shape unchanged (§9.3 — no reverse DNS, no guessing an
+    # inventory hostname from a bare address). Auto-discovery from
+    # host-monitoring, by contrast, walks real inventory_hostname values and
+    # must render one static_configs entry PER HOST carrying
+    # labels.pilot_host = inventory_hostname (§9.2) — this is the only
+    # subject identity Detection Engine's Thanos-side discovery can trust.
+    # Hosts are sorted ASC so the rendered config is deterministic (§9.2).
+    - name: "Auto-discover host-monitoring hosts, sorted ASC for deterministic rendering (spec §9.2)"
+      ansible.builtin.set_fact:
+        prometheus_node_exporter_auto_hosts: "{{ groups.get('host-monitoring', []) | sort }}"
+      when: (node_exporter_targets | default([], true)) | length == 0
+      tags: [always]
+
+    - name: "Build one static_configs entry per auto-discovered host, labelled pilot_host=inventory_hostname (spec §9.2)"
+      ansible.builtin.set_fact:
+        prometheus_node_exporter_auto_static_configs: >-
+          {{ (prometheus_node_exporter_auto_static_configs | default([]))
+             + [ {'targets': [ (hostvars[item].ansible_host | default(item, true)) ~ ':9100' ],
+                  'labels': {'pilot_host': item}} ] }}
+      loop: "{{ prometheus_node_exporter_auto_hosts | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when: (node_exporter_targets | default([], true)) | length == 0
+      tags: [always]
+
+    - name: "Resolve node-exporter static_configs shape: explicit override stays flat/unlabeled, auto-discovery gets per-host pilot_host labels (spec §9.2/§9.3)"
+      ansible.builtin.set_fact:
+        prometheus_node_exporter_static_configs: >-
+          {{ [{'targets': prometheus_node_exporter_targets}]
+             if ((node_exporter_targets | default([], true)) | length > 0)
+             else (prometheus_node_exporter_auto_static_configs | default([])) }}
+      tags: [always]
+
     # Built as a native list/dict and serialized with to_nice_yaml, not
     # hand-concatenated with literal "\n" — Jinja string literals here do
     # NOT unescape \n inside a `>-` folded scalar (verified: it comes
@@ -232,7 +267,7 @@
           {{ ([{'job_name': 'node',
                 'basic_auth': {'username': node_exporter_basic_auth_user | default('', true),
                                 'password_file': node_exporter_basic_auth_password_container_path},
-                'static_configs': [{'targets': prometheus_node_exporter_targets}]}]
+                'static_configs': prometheus_node_exporter_static_configs}]
              | to_nice_yaml(indent=2))
              if (prometheus_node_exporter_targets | length > 0) else '' }}
       tags: [always]
@@ -540,7 +575,7 @@
         # object storage — Thanos Compactor (on the thanos-query host) owns
         # compaction/downsampling/retention from that point on.
         - name: "Render prometheus.yml (with alerting.alertmanagers)"
-          tags: [C8, C11, C13, ext-target, ext-target-C3]
+          tags: [C8, C11, C13, C15, ext-target, ext-target-C3]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -564,7 +599,7 @@
           when: alertmanager_target_host | default('', true) | length > 0
 
         - name: "Render prometheus.yml (without alerting — alertmanager_target_host empty)"
-          tags: [C8, C13, ext-target, ext-target-C3]
+          tags: [C8, C13, C15, ext-target, ext-target-C3]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"

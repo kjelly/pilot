@@ -1,8 +1,11 @@
 package spec
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestRegression_ThanosQuerySpec locks the structure of
@@ -176,5 +179,42 @@ func TestRegression_ThanosQuerySpec(t *testing.T) {
 		if !covered[id] {
 			t.Errorf("spec row %s is not covered by any generated task", id)
 		}
+	}
+}
+
+// TestRegression_ThanosQueryContractQueryEndpointIs10912 locks the
+// provider-owned contracts/thanos-query.yaml "query" endpoint at the real
+// Detection-facing host port 10912 (detection-engine spec §9/§10/§57): 10902
+// is the Thanos Sidecar's container-internal http-address only and must
+// never be the contract's advertised endpoint port, since a downstream
+// consumer contract (e.g. Detection Engine) binds against this declaration.
+// Parses the YAML directly (not via internal/contract) to avoid that
+// package's own import of internal/spec, which would be a cycle.
+func TestRegression_ThanosQueryContractQueryEndpointIs10912(t *testing.T) {
+	data, err := os.ReadFile("../../contracts/thanos-query.yaml")
+	if err != nil {
+		t.Fatalf("read contracts/thanos-query.yaml: %v", err)
+	}
+	var doc struct {
+		Endpoints []struct {
+			Name string `yaml:"name"`
+			Port int    `yaml:"port"`
+		} `yaml:"endpoints"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal contracts/thanos-query.yaml: %v", err)
+	}
+	var found bool
+	for _, ep := range doc.Endpoints {
+		if ep.Name != "query" {
+			continue
+		}
+		found = true
+		if ep.Port != 10912 {
+			t.Errorf("contracts/thanos-query.yaml query endpoint port = %d, want 10912 (10902 is Thanos Sidecar's container-internal port only)", ep.Port)
+		}
+	}
+	if !found {
+		t.Fatalf("contracts/thanos-query.yaml has no %q endpoint", "query")
 	}
 }

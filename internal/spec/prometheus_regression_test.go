@@ -32,6 +32,10 @@ import (
 //	       authenticated) scraped (up{job="node"}==1) — proves the Basic
 //	       Auth credential wiring actually works end to end, not just that
 //	       the scrape job is present in config
+//	C15    prometheus.yml's node-exporter scrape job carries a pilot_host
+//	       label (Detection Engine spec §9 canonical subject identity;
+//	       auto-discovery only — an explicit node_exporter_targets override
+//	       has no inventory-hostname mapping and renders no label)
 //
 // Cross-row invariants locked below:
 //
@@ -76,7 +80,7 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -220,6 +224,24 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		}
 	}
 
+	// C15 must assert on a pilot_host: line — Detection Engine's canonical
+	// subject identity (spec §9). It must not anchor on a leading `^-`
+	// either, for the same to_nice_yaml key-alphabetization reason as C13.
+	for _, r := range s.Rows {
+		if r.ID != "C15" {
+			continue
+		}
+		if !strings.Contains(r.Command, "pilot_host") {
+			t.Errorf("C15 must assert on a pilot_host: line; got %q", r.Command)
+		}
+		if strings.Contains(r.Command, `^-`) {
+			t.Errorf("C15 must not anchor on a leading ^- (to_nice_yaml alphabetizes keys); got %q", r.Command)
+		}
+		if r.Expected != "0" {
+			t.Errorf("C15 expected must be rc-based \"0\"; got %q", r.Expected)
+		}
+	}
+
 	// No credentials belong in a spec (AGENTS.md).
 	for _, r := range s.Rows {
 		lower := strings.ToLower(r.Command)
@@ -309,5 +331,23 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 	// rotation), on top of the existing prometheus.yml/alert-rules gates.
 	if !strings.Contains(applyRaw, "node_exporter_password_file_result is changed") {
 		t.Errorf("prometheus-apply.yml's container restart condition must include node_exporter_password_file_result is changed")
+	}
+
+	// Detection Engine spec §9: auto-discovery from host-monitoring must
+	// build one static_configs entry per host with labels.pilot_host =
+	// inventory_hostname (the loop variable), sorted ASC for a
+	// deterministic render — never guessed from the bare scrape address.
+	if !strings.Contains(applyRaw, "groups.get('host-monitoring', []) | sort") {
+		t.Errorf("prometheus-apply.yml must sort host-monitoring hosts ASC before building per-host pilot_host static_configs (spec §9.2 determinism)")
+	}
+	if !strings.Contains(applyRaw, "'labels': {'pilot_host': item}") {
+		t.Errorf("prometheus-apply.yml must label each auto-discovered static_configs entry with labels.pilot_host = inventory_hostname (spec §9.2)")
+	}
+
+	// §9.3: an explicit node_exporter_targets override has no
+	// inventory-hostname mapping and must keep the old flat/unlabeled
+	// static_configs shape — never synthesize a pilot_host label for it.
+	if !strings.Contains(applyRaw, "[{'targets': prometheus_node_exporter_targets}]") {
+		t.Errorf("prometheus-apply.yml must keep the explicit-override static_configs shape flat and unlabeled (spec §9.3)")
 	}
 }

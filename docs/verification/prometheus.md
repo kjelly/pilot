@@ -105,6 +105,7 @@
 | C12 | http          | Prometheus 已載入 rules（`/api/v1/rules` 回含 `"name":` 的 group/rules 列表） | 0 | sh -c 'curl -fsS http://127.0.0.1:9090/api/v1/rules | grep -q "\"name\":"' |
 | C13 | config        | `prometheus.yml` 含自動探索到的 node-exporter scrape job（僅在 inventory 有 `host-monitoring` 主機、或明確帶 `node_exporter_targets` 時 render） | 0 | sh -c 'grep -qE "^[[:space:]]*job_name:[[:space:]]*node$" /etc/pilot/prometheus/prometheus.yml' |
 | C14 | metrics       | 至少一個 node-exporter target 被成功（認證通過）scrape（`up{job="node"}==1`；僅在有 node-exporter target 時適用） | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22node%22%7D' | grep -o '"value":\[[0-9.]*,"1"\]' |
+| C15 | config        | `prometheus.yml` 的 node-exporter scrape job 帶 `pilot_host` label（僅在 auto-discovery 情境下 render；明確帶 `node_exporter_targets` override 時沒有此 label，見 §5） | 0 | sh -c 'grep -qE "^[[:space:]]*pilot_host:" /etc/pilot/prometheus/prometheus.yml' |
 
 > C7 只驗證「Prometheus 有沒有成功 scrape 到至少一個 target」，不綁定
 > 特定 job 名稱字面值以外的東西——`up` 查詢不加 label matcher，因為
@@ -128,16 +129,23 @@
 > 該 filter 預設會把 key 依字母序排列，所以真實輸出是 `- basic_auth:` 開頭、
 > `job_name: node` 變成清單項目裡的第二行（不是第一行）。只錨 `^\s*job_name:`
 > 對 key 順序無感，兩種排法都抓得到。
+> C15 驗證的是 pilot Detection Engine 的 canonical subject identity 前提
+> （見 `detection-engine` spec §9）：auto-discovery 從 `host-monitoring` group
+> 展開時，每個 host 各自一個 `static_configs` 項目、帶
+> `labels.pilot_host = <inventory_hostname>`；`node_exporter_targets` 明確
+> override 時沒有這個 label（沒有 hostname 映射可用，見 §9.3），所以本行跟
+> C13/C14 一樣需要 escape hatch，但條件更窄——即使 `host-monitoring` 有主機，
+> 只要當次套用帶了 `node_exporter_targets` override，本行也預期 fail。
 
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
-- 預期 row 數：14
+- 預期 row 數：15
 
 ## 4. PASS / FAIL 規則
 
-- C1–C14 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路、node-exporter scrape 鏈路都通
+- C1–C15 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路、node-exporter scrape 鏈路、pilot_host canonical identity 都通
 - 任一 fail → **FAIL**，常見修法：
   - C1/C2 fail → container 沒起；`docker ps -a` / `docker logs pilot-prometheus` / `docker logs pilot-thanos-sidecar`
   - C3/C4 fail → Prometheus 還沒 ready 或設定檔有誤；`docker logs pilot-prometheus`
@@ -152,6 +160,7 @@
     `groups['host-monitoring']` 是否真的有機器，C14 fail（但 C13 pass）通常是
     `node_exporter_basic_auth_user`/`password` 跟 `host-monitoring.md` 那邊不一致
     （401）——`docker logs pilot-prometheus | grep -i node` 看 scrape 錯誤訊息
+  - C15 fail → 預期 fail 見 §5（inventory 沒有 `host-monitoring` 主機，或本次套用帶了 `node_exporter_targets` override）；若非預期，檢查 `prometheus-apply.yml` 的 auto-discovery 迴圈是否真的走到（`groups['host-monitoring']` 非空且未 override）
 
 ## 5. 例外與已知偏差
 
@@ -160,6 +169,7 @@
 | C9 | SeaweedFS 不會自動生出不存在的 bucket，套用前需手動 `weed shell` 建好 `thanos_s3_bucket`（跟 `restic-backup.md` §5 Bug 5 同一個坑），否則本行 fail 且 sidecar log 會顯示 retry | SeaweedFS 目的地 | 無（預建 bucket 是常態操作） |
 | C11 | `alertmanager_target_host` 未填或中央 Alertmanager 尚未套用完成時，本行預期 fail（apply playbook 不會 render `alerting.alertmanagers` 區塊） | Alertmanager 尚未部署的環境 | 直到 `alertmanager.md` PASS 為止 |
 | C13, C14 | inventory 沒有 `host-monitoring` group 主機、且未明確帶 `node_exporter_targets` 時，這兩行預期 fail（apply playbook 不會 render node-exporter scrape job） | 尚未部署 `host-monitoring` 的環境 | 直到至少一台 `host-monitoring.md` PASS 為止 |
+| C15 | 同上，或本次套用明確帶了 `node_exporter_targets` override（該情況下 C13/C14 仍可能 PASS，但 C15 預期 fail——explicit override 沒有 inventory hostname 映射，見 §9.3） | 尚未部署 `host-monitoring` 的環境，或使用 `node_exporter_targets` override 的環境 | 直到 auto-discovery 情境下至少一台 `host-monitoring.md` PASS 為止 |
 
 ## 6. 變更紀錄
 
@@ -168,3 +178,4 @@
 | 2026-07-06 | v1.0 | 初版 | sre |
 | 2026-07-07 | v1.1 | 新增 C10–C12：seed alert rules + alerting.alertmanagers 區塊（escape hatch 跟 `alertmanager_target_host` 連動） | sre |
 | 2026-08-10 | v1.2 | 新增 C13–C14：自動從 inventory 的 `host-monitoring` group 展開 node-exporter scrape target（`node_exporter_targets`，escape hatch 跟 `alertmanager_target_host` 同一種模式），並對認證後成功 scrape 做端到端驗證（node_exporter 強制 Basic Auth，見 `host-monitoring.md` v1.1） | sre |
+| 2026-08-28 | v1.3 | 新增 C15：Detection Engine Stage A-0（見 `docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §9）需要 canonical `pilot_host` producer——auto-discovery 從 `host-monitoring` group 展開時，每個 host 改成各自一個 `static_configs` 項目並帶 `labels.pilot_host = inventory_hostname`；`node_exporter_targets` explicit override 行為不變（無 label） | sre |

@@ -22,7 +22,12 @@ resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 10}
 groupVars:
   - {name: thanos_s3_target_host, type: string, required: true, secret: false}
 endpoints:
-  - {name: query, scheme: http, port: 10902, autoPublish: {eligible: false, reason: "no auth of its own; same operational-surface exclusion as prometheus"}}
+  # 10902 is the Thanos Sidecar's container-internal http-address (collides
+  # with every site's own Sidecar on the shared host network); the real
+  # detection-engine-spec §9/§10 host-facing port is 10912
+  # (thanos_query_http_port default in thanos-query-apply.yml). Detection
+  # Engine and any other consumer must connect to 10912, never 10902.
+  - {name: query, scheme: http, port: 10912, autoPublish: {eligible: false, reason: "no auth of its own; same operational-surface exclusion as prometheus"}}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:

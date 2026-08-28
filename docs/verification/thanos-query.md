@@ -1,6 +1,6 @@
 # Verification Spec — thanos-query (central Thanos Query + Store Gateway + Compactor)
 
-> 版本：v1.1（2026-07-17：C4/C5/C9/C10 的 port 從 10902 改成 10912，見 §6）
+> 版本：v1.2（2026-08-28：`contracts/thanos-query.yaml` 的 `query` endpoint port 同步修正為 10912，見 §6）
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -106,3 +106,4 @@
 |------|------|------|--------|
 | 2026-07-06 | v1.0 | 初版 | sre |
 | 2026-07-17 | v1.1 | 修正 C4/C5/C9/C10：`thanos-query-apply.yml` 的 `thanos_query_http_port` 早已預設改成 `10912`（避開跟站台 Thanos Sidecar 的 10902 collide），本規格的 checklist command 沒跟著更新，導致這 4 條在真實環境上必定 fail（`curl` 打 10902 拿到 000/connection refused）。`docs/runbooks/metrics-alerting.md` 整併重測時發現。若套用時有覆寫 `-e thanos_query_http_port=<其他值>`，這 4 條也要跟著改 | sre |
+| 2026-08-28 | v1.2 | Detection Engine Stage A-0（見 `docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §9/§57）：`contracts/thanos-query.yaml` 的 `query` endpoint 一直沒跟著 v1.1 這次修正同步，仍宣告 port `10902`（跟本檔實際驗證的 `10912` 不一致，一個下游 consumer contract 若照著 `contracts/thanos-query.yaml` 綁定會連錯 port）；已修正成 `10912` 並補上 `internal/spec/thanos_query_regression_test.go` 的 `TestRegression_ThanosQueryContractQueryEndpointIs10912` 鎖住。本檔 checklist 本身不變 | sre |
