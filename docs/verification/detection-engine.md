@@ -29,8 +29,8 @@ here are exactly `docs/superpowers/specs/2026-08-28-detection-engine-spec.md`
 Provider (Stage B) is always disabled for Stage A: C12 verifies that fact
 structurally (no secret file, no secret substring anywhere observable).
 `docs/verification/detection-engine-model-provider.md` (M1-M5) is a
-separate, not-yet-authored Stage B document — it does not exist yet and
-these C rows do not depend on it.
+separate Stage B document — these C rows do not depend on it, and it does
+not affect this document's own PASS/FAIL.
 
 C9 and C10 assert the OBSERVABLE effect of the statistical engine (no false
 anomaly on a fresh/cold-start host, at least one successful cycle) — the
@@ -158,16 +158,17 @@ never makes a row PASS.
 
 ## Actual-run evidence
 
-Not yet recorded. Target evidence for every row (fake-lane C11, real-lane
-C1-C10/C12, and the §51 real metrics-chain cross-check) must come from
-actually running `pilot vm-target topology test` against the fake and real
-topology artifacts in `tmp/detection-engine-{fake,real}-topology.example.yaml`
-(spec §49) before this document — or the spec's `VERIFICATION_READY` status
-— can claim to be satisfied. Do not backfill this section with anything
-that was not actually executed.
+Recorded in `docs/runbooks/detection-engine.md`: real-lane C1-C10/C12
+evidence in §2-§5 (Stage A-2 real 3-VM deployment, 12/12 Spec v2 PASS,
+idempotent changed=0), and fake-lane C11 evidence in §6.1 (fake-protocol
+topology lane, `vm-target topology test` against
+`tmp/detection-engine-fake-topology.example.yaml`, full L1-L6 PASS). See
+that runbook for the actual captured PLAY RECAP/verdict output — this spec
+does not duplicate it.
 
 ## Change record
 
 | Date | Version | Change |
 |---|---|---|
 | 2026-08-28 | DRAFT | Stage A-2: initial Spec v2 authoring per spec §47's C1-C12. No actual-run evidence yet. |
+| 2026-08-28 | v1.0 | Real-lane + fake-lane actual-run evidence recorded (see docs/runbooks/detection-engine.md §2-§6.1); Stage A reaches VERIFICATION_READY. |

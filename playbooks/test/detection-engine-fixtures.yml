@@ -15,10 +15,20 @@
 #   alert (so a fake-lane test can assert on delivery ORDER, not just
 #   "some request arrived").
 #
+# detection-fixture-provider: a fake native Ollama Chat API on :11434
+#   (spec §32 protocol shape) — POST /api/chat parses the user message's
+#   ModelDetectionBatchRequest JSON and echoes back a schema/semantically
+#   valid ModelDetectionBatchResponse (status=ok, one candidate per
+#   candidate_id, empty contributors so it's valid regardless of which
+#   features the real request happened to carry). Used by Stage B's
+#   provider-verification lane (spec §60 M1-M5) to prove the real
+#   ollama-chat wire protocol end to end without a real Ollama install.
+#
 # Usage:
 #   go run ./cmd/pilot vm-target run \
 #     --group detection-fixture-source=<source-vm> \
 #     --group detection-fixture-sink=<sink-vm> \
+#     --group detection-fixture-provider=<provider-vm> \
 #     --sandbox playbooks/test/detection-engine-fixtures.yml
 - name: Install fake Thanos-compatible Query fixture
   hosts: detection-fixture-source
@@ -220,3 +230,101 @@
         name: fake-alertmanager.service
         state: restarted
       when: detection_fixture_alertmanager_script is changed or detection_fixture_alertmanager_unit is changed
+
+- name: Install fake native Ollama Chat API fixture (spec §32/§60 provider verification)
+  hosts: detection-fixture-provider
+  become: true
+  tasks:
+    - name: Ensure fixture directory exists
+      ansible.builtin.file:
+        path: /opt/pilot-fixtures
+        state: directory
+        mode: "0755"
+
+    - name: Render the fake Ollama Chat stub server
+      ansible.builtin.copy:
+        dest: /opt/pilot-fixtures/fake-ollama-chat.py
+        mode: "0755"
+        content: |
+          #!/usr/bin/env python3
+          # Fake native Ollama Chat API (spec §32) — Detection Engine
+          # Stage B provider-verification lane. Always answers a
+          # schema/semantically-valid ModelDetectionBatchResponse
+          # (status=ok, one candidate per request candidate_id, empty
+          # contributors — valid regardless of which features the real
+          # request happened to carry, spec §30's contributor-feature rule).
+          import json
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  if self.path != "/api/chat":
+                      self.send_response(404)
+                      self.end_headers()
+                      return
+                  length = int(self.headers.get("Content-Length", "0"))
+                  body = json.loads(self.rfile.read(length))
+                  user_msg = next(m["content"] for m in body["messages"] if m["role"] == "user")
+                  batch_req = json.loads(user_msg)
+                  resp = {
+                      "schema_version": 1,
+                      "request_id": batch_req["request_id"],
+                      "status": "ok",
+                      "candidates": [
+                          {
+                              "candidate_id": c["candidate_id"],
+                              "score": 0.5,
+                              "confidence": 0.9,
+                              "category_hint": "fixture-provider-baseline",
+                              "contributors": [],
+                          }
+                          for c in batch_req["candidates"]
+                      ],
+                  }
+                  payload = json.dumps({"message": {"role": "assistant", "content": json.dumps(resp)}}).encode()
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(payload)))
+                  self.end_headers()
+                  self.wfile.write(payload)
+
+              def log_message(self, fmt, *args):
+                  pass
+
+          if __name__ == "__main__":
+              ThreadingHTTPServer(("0.0.0.0", 11434), Handler).serve_forever()
+      register: detection_fixture_provider_script
+
+    - name: Render the fake-ollama-chat systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/fake-ollama-chat.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Fake Ollama Chat fixture (Detection Engine test lane)
+          After=network.target
+
+          [Service]
+          ExecStart=/usr/bin/env python3 /opt/pilot-fixtures/fake-ollama-chat.py
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      register: detection_fixture_provider_unit
+
+    - name: Reload systemd if the fixture unit changed
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: detection_fixture_provider_unit is changed
+
+    - name: Ensure fake-ollama-chat.service enabled+started
+      ansible.builtin.systemd:
+        name: fake-ollama-chat.service
+        state: started
+        enabled: true
+
+    - name: Restart if the stub script or unit changed
+      ansible.builtin.systemd:
+        name: fake-ollama-chat.service
+        state: restarted
+      when: detection_fixture_provider_script is changed or detection_fixture_provider_unit is changed

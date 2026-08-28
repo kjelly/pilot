@@ -295,6 +295,72 @@ ControlMaster/ControlPath 參數）都證實服務與 SSH 本身健康、連線�
 < 1s 完成 —— 判定為 rollback 後 libvirt snapshot-revert 造成的短暫
 guest 端延遲（非邏輯 bug），單純重跑即恢復正常，未改動任何程式碼。
 
+## 6.2 Stage B Model Provider 實跑證據（2026-08-28）
+
+拓樸：`tmp/detection-engine-fake-topology.example.yaml`（4 節點：新增
+`detection-fixture-provider` 跑 fake native Ollama Chat API :11434，回應
+一個 schema/語意皆合法的 ModelDetectionBatchResponse——`status:ok`、每個
+candidate_id 各回一筆、`contributors:[]`）。指令：
+
+```bash
+go run ./cmd/pilot vm-target topology test \
+  --topology tmp/detection-engine-fake-topology.example.yaml \
+  --playbook playbooks/apply/detection-engine-apply.yml \
+  --verify docs/verification/detection-engine.md=detection-engine \
+  --verify docs/verification/detection-engine-model-provider.md=detection-engine \
+  --verify-timeout 40 \
+  -- -e detection_engine_artifact_path=dist/pilot-detection-engine-linux-amd64 \
+     -e detection_engine_artifact_sha256=<sha256> \
+     -e detection_metrics_source_host=<source IP> \
+     -e detection_alertmanager_target_host=<sink IP> \
+     -e detection_model_provider_enabled=true \
+     -e detection_model_provider_protocol=ollama-chat \
+     -e detection_model_provider_model=fake-model \
+     -e detection_model_provider_auth=none \
+     -e detection_model_provider_base_url=http://<provider IP>:11434
+```
+
+（跑之前先對 `detection-engine-fixture` 套用一次
+`host-monitoring-apply.yml -e target_group=all -e node_exporter_basic_auth_password=...`——
+全新拓樸沒有 textfile collector 目錄，detection-engine 的既有 preflight
+gate 會擋下。）
+
+真實輸出（**第一次就全綠**，不像 C11 fake-lane 補跑時踩過 3 個真 bug）：
+
+```
+=== [Step 2/6] L3 Dry-run (--check --diff) ===
+PLAY RECAP: ok=39 changed=8 unreachable=0 failed=0 skipped=22
+✓ Check-mode dry-run passed
+=== [Step 3/6] Cluster snapshot: 4 node(s) ===
+✓ Cluster snapshot created
+=== [Step 4/6] L4 Apply Playbook ===
+PLAY RECAP: ok=53 changed=11 unreachable=0 failed=0 skipped=8
+✓ Playbook apply completed
+=== [Step 5/6] L5 Verification Specs (2) ===
+verdict: **PASS**  (pass=12 fail=0 skip=0)   # detection-engine.md
+verdict: **PASS**  (pass=5  fail=0 skip=0)   # detection-engine-model-provider.md — M1-M5
+=== [Step 6/6] L6 Idempotency Check ===
+PLAY RECAP: ok=51 changed=0 unreachable=0 failed=0 skipped=10
+✓ Idempotency check passed (changed=0)
+```
+
+目標主機上直接確認：
+
+```
+$ pilot-detection-engine provider probe --config /etc/pilot/detection-engine/config.yaml
+provider probe ok: protocol=ollama-chat status=ok elapsed=2ms
+
+$ sudo pilot-detection-engine status --json
+{
+  "model_provider": {"enabled": true, "healthy": true, "protocol": "ollama-chat", "circuit": "closed"},
+  "subjects": {"active": 1}, "signals": {"active": 0}, "last_cycle": {"success": true}
+}
+```
+
+Stage B-1（engine core + contract/inventory/playbook delivery +
+provider-verification lane）至此全部有真實證據；Stage B-2（真實
+OpenAI/Ollama 帳號的 real-provider evidence）仍未開始。
+
 ## 7. Teardown
 
 ```bash
@@ -309,3 +375,4 @@ go run ./cmd/pilot vm-target down --name monitored-subject-1
 |------|------|------|--------|
 | 2026-08-28 | v1.0 | Stage A-2 首次實跑：3-VM 真實拓樸（monitored-subject-1 + prom-site + detect-central），完整部署鏈 + §51 real metrics-chain 證據 + Spec v2 12/12 PASS + 冪等重跑 changed=0；找到並修好 4 個真 bug（host-monitoring 缺 textfile collector、subjects/signals 計數從未寫回、SQLite VACUUM INTO 檔案已存在導致 upgrade rollback、`signals list` 空陣列序列化成 null） | sre |
 | 2026-08-28 | v1.1 | Fake-protocol topology lane（spec §49 C11）補跑：`vm-target topology test` 對 fake Thanos/Alertmanager fixture 全綠（L1/L3/L4/L5 12-12 PASS/L6 changed=0）；找到並修好 2 個真 bug（`resolve-hosts-alias-target.yml` 的 fact 跨 include 洩漏，repo-wide，`prometheus-apply.yml` 同樣受影響；state.db 落地權限 0644 應為 0600）；Stage A 達成 VERIFICATION_READY | sre |
+| 2026-08-28 | v1.2 | Stage B-1 全部落地：engine core（OpenAI/Ollama adapter、batch、fusion、retry/circuit）+ contract/inventory/playbook delivery（provider group vars、`detection-model-provider` Vault section、apply-time gates、provider.env/systemd EnvironmentFile）+ provider-verification lane（新增 `detection-fixture-provider` fake Ollama Chat fixture，`docs/verification/detection-engine-model-provider.md` M1-M5 全 PASS、冪等 changed=0，第一次跑就全綠，未發現新 bug） | sre |

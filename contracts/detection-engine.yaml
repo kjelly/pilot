@@ -4,10 +4,14 @@ role: detection-engine
 specs:
   - path: docs/verification/detection-engine.md
     rows: {all: true} # C1-C12
+  - path: docs/verification/detection-engine-model-provider.md
+    rows: {all: true} # M1-M5, Stage B only — not applicable while provider disabled
 playbooks:
   apply: playbooks/apply/detection-engine-apply.yml
 regressionTests:
   - internal/spec/detection_engine_regression_test.go
+  - internal/spec/detection_engine_model_provider_regression_test.go
+  - internal/contract/detection_engine_stage_b_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 conflicts: []
 dependencies:

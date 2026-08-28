@@ -74,6 +74,8 @@ var specTagMap = []specTagMapping{
 			"C10": "cold-start no-false-anomaly is an internal/detection algorithm property (baseline_test.go's 120-bucket gate) — no apply task implements it",
 			"C11": "lifecycle/escalation/resolution/outbox-ordering SCENARIO evidence comes from the fake-protocol topology lane (spec §49), not a single already-applied host — this row is verifyOnly",
 		}},
+	{spec: "detection-engine-model-provider.md", playbook: "detection-engine-apply.yml",
+		noRowTags: "Stage B provider verification: M1 shares the same config-validate task as C3 (detection-engine-C3); M2-M5 are pure diagnostic CLI checks (provider probe/status field reads) with no dedicated mutating task to tag — spec §60"},
 	{spec: "docker.md", playbook: "docker-apply.yml", prefixes: []string{"docker"},
 		exemptRows: map[string]string{
 			"C3": "docker --version probe — side effect of the engine install (docker-C1)",
