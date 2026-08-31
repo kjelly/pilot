@@ -676,7 +676,64 @@ data 重新跑一次 baseline + lifecycle，輸出每個會觸發的 transition 
 不重播 cohort（production 本來就沒接）、不重播 log detector（需要額外
 的歷史 windowed Loki 查詢）、不重播 Model Provider fusion。3 個 Go
 單元測試全綠（含一次先踩到跟 production 一模一樣的冷啟動死結，同一手法
-修好）。**尚未對真實 Thanos 長期資料實跑過**——這是下一步。
+修好）。**尚未對真實 Thanos 長期資料實跑過**——這是下一步（已於 §6.9 補上）。
+
+## 6.9 Replay 對真實 Thanos 資料實跑（2026-08-31）
+
+用 `tmp/detection-engine-real-topology.example.yaml`（2-VM 真實鏈路：
+`monitored-subject-1` 只跑 `host-monitoring`；`detection-provider` 跑
+`host-monitoring`+`docker`+`prometheus`+`thanos-query`，跳過
+alertmanager/detection-engine/seaweedfs-s3——replay 只需要讀 Thanos，
+不需要真的跑 daemon）驗證 `pilot-detection-engine replay` 對**真實**
+Thanos 長期資料的效果，不是 fake fixture。
+
+真實鏈路確認（host 端直接連,不透過 vm-target exec）：
+
+```
+$ curl -fsS 'http://192.168.122.3:10912/api/v1/query?query=up'
+{"status":"success","data":{"resultType":"vector","result":[
+{"metric":{...,"pilot_host":"monitored-subject-1","site":"replay-test-site"},...},
+{"metric":{...,"job":"prometheus","site":"replay-test-site"},...}
+]}}
+```
+
+流程：先讓真實環境安靜收集 123 分鐘（湊滿 baseline 120-bucket 門檻），
+接著在 `monitored-subject-1` 上用 `stress-ng --cpu 2 --timeout 600s`
+真的把兩顆 vCPU 都跑滿 10 分鐘（期間直接查詢 Thanos 確認
+`cpu_utilization=1.0`，證實尖峰真的進了資料鏈路），再等 15 分鐘讓它
+自然退燒，最後對整段 142 分鐘窗口跑：
+
+```bash
+go run ./cmd/pilot-detection-engine replay \
+  --thanos http://192.168.122.3:10912 \
+  --profile monitoring/detection/feature-profiles/linux-host-v1.yaml \
+  --start 2026-08-31T01:39:18Z --end 2026-08-31T04:01:00Z
+```
+
+真實輸出：
+
+```
+replay window: 2026-08-31T01:39:18Z .. 2026-08-31T04:01:00Z (142 buckets, 1 hosts)
+
+2026-08-31T03:45:00Z  monitored-subject-1  create_critical      score=1.000 category="cpu" candidate -> firing (severity=critical)
+2026-08-31T03:55:00Z  monitored-subject-1  enter_recovering     score=0.000 category="unknown" firing -> recovering (severity=critical)
+2026-08-31T03:58:00Z  monitored-subject-1  resolve              score=0.000 category="unknown" recovering -> normal (severity=critical)
+
+summary:
+  create_warning       0
+  create_critical      1
+  escalate_critical    0
+  enter_recovering     1
+  return_to_firing     0
+  resolve              1
+```
+
+三點對上真實時間軸：`create_critical` 在 03:45（stress-ng 03:43:25 開始
+後第一個完整 1 分鐘 bucket）、`enter_recovering` 在 03:55（stress-ng
+03:53:25 結束後）、`resolve` 在 03:58（完全退燒）。**121 分鐘的真實安靜
+背景資料全程 `create_warning=0`**——這正是使用者關心的「排除假警報」
+問題的第一手真實證據：在沒有人為擾動的情況下，這套 baseline+lifecycle
+組合對這台機器的真實背景雜訊沒有產生任何假警報。
 
 ## 7. Teardown
 
@@ -698,3 +755,4 @@ go run ./cmd/pilot vm-target down --name monitored-subject-1
 | 2026-08-28 | v1.5 | Stage C-2/C-3/C-4：Log/Loki pipeline（npu-detect-engine spec §14-18），reconcile 成 baseline/cohort 的第三個對等 detector；known-critical-pattern hard trigger 用選項 B（該 cycle 直接 Score=1.0，仍走既有 lifecycle hysteresis，非繞過）。新增 `detection-fixture-logs` fake Loki fixture 節點，5-VM 拓樸實跑：找到並修好 1 個真 fixture bug（fake Thanos 忽略 `time=`/`end=` 參數固定回傳當下牆鐘時間，配合預設 20s evaluation_delay 讓每個 cycle 的樣本都被判 `future_sample`，導致整條 metrics 鏈永遠無效，log pipeline 沒機會被跑到）；修完後拿到真實持久化的 `signal_episodes` row（`state=firing, severity=critical, category_hint=known_critical_pattern, last_score=1.0`）與對應 outbox `fire` 事件（`top_contributors` 含 `log:` 前綴證實由 log detector 驅動），冪等重跑 changed=0。已知既存限制：outbox 遞送 worker 本來就沒接上 `serve` daemon（Stage A 就有的 gap，非本次造成）——已於 v1.6 補上 | sre |
 | 2026-08-28 | v1.6 | 把 outbox 遞送 worker 接上 `serve` daemon：新增 `AlertmanagerSender.DrainOutbox`，`runServe` 每個 cycle 在 `RunCycle` 後 claim+POST+complete 直到沒有可送的 row（`maxOutboxDrainPerCycle=100` 防病態 backlog），沿用既有 retry/dead/backoff 語義，5 個新 Go 單元測試第一次全綠。重跑同一個 5-VM fake-topology + log hard-trigger 場景，第一次真的在 fake Alertmanager 的 `received-alerts.ndjson` 看到送達的 alert body（JSON array，符合真實 `/api/v2/alerts` 契約），`outbox.status=delivered`、`pilot_detection_outbox_pending=0`，冪等重跑 changed=0 | sre |
 | 2026-08-28 | v1.7 | `baseline_samples` 接上持久化（`SaveBaselineSamples`/`LoadBaselineHistory`，daemon restart 不再冷啟動）+ 離線 backtest replay 工具雛形（`pilot-detection-engine replay`）。過程中發現並修好一個**真正嚴重的 production bug**：`engine.go` 的 baseline 歷史累積本來被鎖在 `pending`（`local.Valid`）之後才會跑，但 baseline 要 Ready 又得先靠這個累積——在沒開 log source、且 production 從未接過 cohort 指派（`Cohorts` 永遠 nil）的標準 Stage A 部署下，這是一個死結，baseline detector 永遠學不會，等於核心異常偵測從未真的能動起來；本 session 之前所有「real firing」證據其實都是靠 log hard-trigger 短路繞過的。新增回歸測試鎖住（退回修復前確認真的 FAIL），5-VM 實測 baseline_samples 真的落地累積、restart 後存活、冪等 changed=0 | sre |
+| 2026-08-31 | v1.8 | Replay 工具對**真實** Thanos 長期資料首次實跑：2-VM 真實鏈路（`host-monitoring`+`docker`+`prometheus`+`thanos-query`，非 fake fixture），121 分鐘真實安靜背景（`create_warning=0`，零假警報）+ 用 `stress-ng` 真的把 2 vCPU 跑滿 10 分鐘當真實異常，replay 正確產生 `create_critical`→`enter_recovering`→`resolve` 完整生命週期，三個時間點都精確對上 stress-ng 實際啟停時刻 | sre |
