@@ -263,6 +263,38 @@ func TestRegression_FreeipaClientHostDNSTask_NoLog(t *testing.T) {
 	}
 }
 
+// TestRegression_FreeipaClientHostDNSTask_FailClosedAuthoritativeQueries
+// prevents DNS transport diagnostics from being mistaken for either a CNAME
+// or an existing A/AAAA address.  `dig +short` can emit a UDP timeout message
+// on stdout even with rc=0, so the preflight must require a parsed DNS header
+// before it decides whether registration is safe.
+func TestRegression_FreeipaClientHostDNSTask_FailClosedAuthoritativeQueries(t *testing.T) {
+	const taskPath = "../../playbooks/apply/tasks/freeipa-client-host-dns.yml"
+	raw, err := os.ReadFile(taskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", taskPath, err)
+	}
+	task := string(raw)
+
+	if strings.Contains(task, "+short") {
+		t.Error("authoritative DNS preflight must not use dig +short: diagnostics can be misclassified as records")
+	}
+	for _, required := range []string{
+		"Gate: authoritative DNS queries must return a usable response",
+		"+noall", "+comments", "+answer",
+		"(?m)^;; Got answer:$",
+		"status:[ ]+(NOERROR|NXDOMAIN),",
+		"ipa_client_dns_current_cname_records",
+		"select('match', '^\\S+\\s+\\d+\\s+IN\\s+CNAME",
+		"select('match', '^\\S+\\s+\\d+\\s+IN\\s+A",
+		"select('match', '^\\S+\\s+\\d+\\s+IN\\s+AAAA",
+	} {
+		if !strings.Contains(task, required) {
+			t.Errorf("DNS preflight must contain %q", required)
+		}
+	}
+}
+
 // TestRegression_FreeipaClientApplyPlaybook_HasCloudInitEtcHostsGuard locks
 // the 2026-08-18 fix for cloud-init-freeipa-incident-report.md:
 // yk-pro6k-dev-01/02/03 all lost their FreeIPA server /etc/hosts pin on

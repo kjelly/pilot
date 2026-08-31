@@ -1702,10 +1702,10 @@
           {{ (ipa_hbac_removals | default([])) + [{
                'name': item.item.name,
                'hosts': (live_hosts | difference(roster_hosts)),
-               'hostgroups': (live_hostgroups | difference(item.item.hostgroups | default([]))),
-               'services': (live_services | difference(item.item.services | default([]))),
-               'users': (live_users | difference(item.item.users | default([]))),
-               'groups': (live_groups | difference(item.item.groups | default([]))),
+               'hostgroups': (live_hostgroups | difference(roster_hostgroups)),
+               'services': (live_services | difference(roster_services)),
+               'users': (live_users | difference(roster_users)),
+               'groups': (live_groups | difference(roster_groups)),
           }] }}
       vars:
         stdout: "{{ item.stdout | default('') }}"
@@ -1715,12 +1715,23 @@
         users_line: "{{ ((stdout | regex_findall('^  Users: (.*)$', multiline=True)) + ['']) | first | trim }}"
         groups_line: "{{ ((stdout | regex_findall('^  User Groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
         live_hosts_fqdn: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
-        live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | list }}"
-        roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | list }}"
-        live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') }}"
-        live_services: "{{ [] if services_line == '' else services_line.split(', ') }}"
-        live_users: "{{ [] if users_line == '' else users_line.split(', ') }}"
-        live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') }}"
+        # FreeIPA canonicalizes host, group, hostgroup, service, and user
+        # identifiers case-insensitively (typically to lowercase), whereas
+        # a human-authored roster can retain mixed case.  Compare canonical
+        # forms only: commands below still use the roster's original spelling.
+        # Without this, a harmless spelling difference is falsely treated as
+        # stale, causing remove→add churn and a policy outage if a later task
+        # aborts between the two phases.
+        live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
+        roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
+        live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') | map('lower') | list }}"
+        roster_hostgroups: "{{ (item.item.hostgroups | default([])) | map('lower') | list }}"
+        live_services: "{{ [] if services_line == '' else services_line.split(', ') | map('lower') | list }}"
+        roster_services: "{{ (item.item.services | default([])) | map('lower') | list }}"
+        live_users: "{{ [] if users_line == '' else users_line.split(', ') | map('lower') | list }}"
+        roster_users: "{{ (item.item.users | default([])) | map('lower') | list }}"
+        live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') | map('lower') | list }}"
+        roster_groups: "{{ (item.item.groups | default([])) | map('lower') | list }}"
       loop: "{{ ipa_hbacrule_show.results }}"
       loop_control:
         label: "{{ item.item.name | default('n/a') }}"

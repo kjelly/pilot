@@ -154,7 +154,7 @@
 #    ipa_server_fqdn — /etc/hosts has not been pinned yet at plan time) ─────
 - name: "FreeIPA client DNS (plan) — query authoritative DNS: current A records"
   ansible.builtin.command:
-    argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", A]
+    argv: [dig, "@{{ ipa_server_ip }}", "+noall", "+comments", "+answer", "{{ ipa_client_fqdn }}", A]
   register: ipa_client_dns_current_a
   changed_when: false
   check_mode: false
@@ -163,7 +163,7 @@
 
 - name: "FreeIPA client DNS (plan) — query authoritative DNS: current AAAA records"
   ansible.builtin.command:
-    argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", AAAA]
+    argv: [dig, "@{{ ipa_server_ip }}", "+noall", "+comments", "+answer", "{{ ipa_client_fqdn }}", AAAA]
   register: ipa_client_dns_current_aaaa
   changed_when: false
   check_mode: false
@@ -172,24 +172,48 @@
 
 - name: "FreeIPA client DNS (plan) — query authoritative DNS: CNAME at owner"
   ansible.builtin.command:
-    argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", CNAME]
+    argv: [dig, "@{{ ipa_server_ip }}", "+noall", "+comments", "+answer", "{{ ipa_client_fqdn }}", CNAME]
   register: ipa_client_dns_current_cname
   changed_when: false
   check_mode: false
   failed_when: false
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
 
+- name: "Gate: authoritative DNS queries must return a usable response (spec.md §8.2/§8.3, fail-closed)"
+  ansible.builtin.assert:
+    that:
+      # `dig` can print a UDP timeout diagnostic to STDOUT while returning
+      # rc=0.  A valid authoritative response must therefore include both
+      # dig's answer marker and an unambiguous terminal DNS status.  Do not
+      # treat an unavailable authority as an empty record set: that would
+      # allow an implicit takeover after an unverified preflight.
+      - (ipa_client_dns_current_a.rc | default(1)) == 0
+      - (ipa_client_dns_current_aaaa.rc | default(1)) == 0
+      - (ipa_client_dns_current_cname.rc | default(1)) == 0
+      - (ipa_client_dns_current_a.stdout | default('')) is search('(?m)^;; Got answer:$')
+      - (ipa_client_dns_current_aaaa.stdout | default('')) is search('(?m)^;; Got answer:$')
+      - (ipa_client_dns_current_cname.stdout | default('')) is search('(?m)^;; Got answer:$')
+      - (ipa_client_dns_current_a.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
+      - (ipa_client_dns_current_aaaa.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
+      - (ipa_client_dns_current_cname.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
+    fail_msg: >-
+      Cannot verify the authoritative DNS state for {{ ipa_client_fqdn }}
+      from {{ ipa_server_ip }}. Refusing DNS registration rather than
+      interpreting a timeout, SERVFAIL, or malformed dig output as an empty
+      record set (spec.md §8.2/§8.3, fail-closed).
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — extract authoritative CNAME answers"
+  ansible.builtin.set_fact:
+    ipa_client_dns_current_cname_records: >-
+      {{ ipa_client_dns_current_cname.stdout_lines | default([])
+         | select('match', '^\S+\s+\d+\s+IN\s+CNAME\s+\S+\.?$') | list }}
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
 - name: "Gate: DNS owner must not already have a CNAME (spec.md §8.2)"
   ansible.builtin.assert:
     that:
-      # dig prints its own "communications error"/"no servers could be
-      # reached" diagnostics to STDOUT, not stderr (confirmed live) — so a
-      # server that refused/timed out (rc != 0, e.g. a freshly-provisioned
-      # FreeIPA host that hasn't actually run ipa-server-install yet, as in
-      # any --check preview of a genuinely fresh clean-room topology) must
-      # not have its stdout treated as "found a CNAME". Only a completed
-      # query (rc == 0) with non-empty output is evidence of a real record.
-      - (ipa_client_dns_current_cname.rc | default(1) != 0) or (ipa_client_dns_current_cname.stdout | default('') | trim | length) == 0
+      - (ipa_client_dns_current_cname_records | default([]) | length) == 0
     fail_msg: >-
       {{ ipa_client_fqdn }} already has a CNAME record in authoritative
       FreeIPA DNS; A/AAAA registration cannot coexist with a CNAME at the
@@ -198,13 +222,15 @@
 
 - name: "FreeIPA client DNS (plan) — compute current authoritative addresses"
   ansible.builtin.set_fact:
-    # Same rc guard as the CNAME gate above: an unreachable/refused dig
-    # (rc != 0) means "unknown", not "these diagnostic lines are addresses" —
-    # treat it as no current addresses rather than feeding dig's own error
-    # text into the extra/missing diff below.
+    # Only resource-record lines are addresses.  Header/diagnostic text and a
+    # CNAME followed by its A/AAAA target cannot enter the conflict diff.
     ipa_client_dns_current_addresses: >-
-      {{ ((ipa_client_dns_current_a.stdout | default('') if (ipa_client_dns_current_a.rc | default(1)) == 0 else '').splitlines()
-          + (ipa_client_dns_current_aaaa.stdout | default('') if (ipa_client_dns_current_aaaa.rc | default(1)) == 0 else '').splitlines())
+      {{ ((ipa_client_dns_current_a.stdout_lines | default([])
+           | select('match', '^\S+\s+\d+\s+IN\s+A\s+\S+$')
+           | map('regex_replace', '^.*\s+A\s+', '') | list)
+          + (ipa_client_dns_current_aaaa.stdout_lines | default([])
+             | select('match', '^\S+\s+\d+\s+IN\s+AAAA\s+\S+$')
+             | map('regex_replace', '^.*\s+AAAA\s+', '') | list))
          | map('trim') | reject('equalto', '') | list | unique }}
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
 
@@ -314,17 +340,32 @@
   block:
     - name: "FreeIPA client DNS verify — query authoritative DNS: A records (post-apply)"
       ansible.builtin.command:
-        argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", A]
+        argv: [dig, "@{{ ipa_server_ip }}", "+noall", "+comments", "+answer", "{{ ipa_client_fqdn }}", A]
       register: ipa_client_dns_verify_a
       changed_when: false
       failed_when: false
 
     - name: "FreeIPA client DNS verify — query authoritative DNS: AAAA records (post-apply)"
       ansible.builtin.command:
-        argv: [dig, "@{{ ipa_server_ip }}", "+short", "{{ ipa_client_fqdn }}", AAAA]
+        argv: [dig, "@{{ ipa_server_ip }}", "+noall", "+comments", "+answer", "{{ ipa_client_fqdn }}", AAAA]
       register: ipa_client_dns_verify_aaaa
       changed_when: false
       failed_when: false
+
+    - name: "Gate: post-apply authoritative DNS queries must return a usable response (spec.md §9/§14, fail-closed)"
+      ansible.builtin.assert:
+        that:
+          - (ipa_client_dns_verify_a.rc | default(1)) == 0
+          - (ipa_client_dns_verify_aaaa.rc | default(1)) == 0
+          - (ipa_client_dns_verify_a.stdout | default('')) is search('(?m)^;; Got answer:$')
+          - (ipa_client_dns_verify_aaaa.stdout | default('')) is search('(?m)^;; Got answer:$')
+          - (ipa_client_dns_verify_a.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
+          - (ipa_client_dns_verify_aaaa.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
+        fail_msg: >-
+          Cannot verify post-apply authoritative DNS state for
+          {{ ipa_client_fqdn }} from {{ ipa_server_ip }}. DNS registration
+          may have completed, but its result is unverified because the
+          authoritative query timed out, returned SERVFAIL, or was malformed.
 
     - name: "Gate: authoritative DNS matches desired addresses exactly after apply (spec.md §9/§14)"
       ansible.builtin.assert:
@@ -338,6 +379,10 @@
           back; rerun will re-enter the backfill path above.
       vars:
         ipa_client_dns_verify_current: >-
-          {{ ((ipa_client_dns_verify_a.stdout | default('')).splitlines()
-              + (ipa_client_dns_verify_aaaa.stdout | default('')).splitlines())
+          {{ ((ipa_client_dns_verify_a.stdout_lines | default([])
+               | select('match', '^\S+\s+\d+\s+IN\s+A\s+\S+$')
+               | map('regex_replace', '^.*\s+A\s+', '') | list)
+              + (ipa_client_dns_verify_aaaa.stdout_lines | default([])
+                 | select('match', '^\S+\s+\d+\s+IN\s+AAAA\s+\S+$')
+                 | map('regex_replace', '^.*\s+AAAA\s+', '') | list))
              | map('trim') | reject('equalto', '') | list | unique }}

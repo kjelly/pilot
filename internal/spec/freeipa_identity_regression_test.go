@@ -139,6 +139,35 @@ func TestRegression_FreeipaIdentityAllowAllUsesCommandCategory(t *testing.T) {
 	}
 }
 
+// TestRegression_FreeipaIdentityHBACReconciliationCanonicalizesMemberNames
+// locks the comparison boundary between a human-authored roster and FreeIPA's
+// lowercase canonical member names.  A mixed-case roster name must not cause
+// the reconciliation's remove phase to detach an otherwise desired member.
+func TestRegression_FreeipaIdentityHBACReconciliationCanonicalizesMemberNames(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-identity-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	for _, want := range []string{
+		"live_hosts_fqdn | map('regex_replace', '\\\\..*$', '') | map('lower') | list",
+		"item.item.hostgroups | default([])) | map('lower') | list",
+		"item.item.services | default([])) | map('lower') | list",
+		"item.item.users | default([])) | map('lower') | list",
+		"item.item.groups | default([])) | map('lower') | list",
+		"'hostgroups': (live_hostgroups | difference(roster_hostgroups))",
+		"'services': (live_services | difference(roster_services))",
+		"'users': (live_users | difference(roster_users))",
+		"'groups': (live_groups | difference(roster_groups))",
+	} {
+		if !strings.Contains(playbook, want) {
+			t.Errorf("HBAC reconciliation must canonicalize and compare %q", want)
+		}
+	}
+}
+
 // TestRegression_FreeipaIdentityRefreshesClientSSSDCache locks the post-
 // reconcile hand-off: FreeIPA authorization changes must not remain hidden
 // behind stale client-side SSSD caches.
