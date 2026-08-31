@@ -295,6 +295,34 @@ func TestRegression_FreeipaClientHostDNSTask_FailClosedAuthoritativeQueries(t *t
 	}
 }
 
+// TestRegression_FreeipaClientHostDNSTask_FailClosedGateSkipsCheckMode locks
+// the 2026-08-31 fix: a genuinely fresh FreeIPA host has no DNS service to
+// answer this preflight query at all during a `--check` preview, because
+// ipa-server-install (a real mutation) is correctly skipped there. The
+// fail-closed assert must therefore only apply to a real (non-check) run —
+// otherwise every `--check --diff` preview of a fresh clean-room topology
+// hard-fails before any host has actually been provisioned.
+func TestRegression_FreeipaClientHostDNSTask_FailClosedGateSkipsCheckMode(t *testing.T) {
+	const taskPath = "../../playbooks/apply/tasks/freeipa-client-host-dns.yml"
+	raw, err := os.ReadFile(taskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", taskPath, err)
+	}
+	task := string(raw)
+
+	gateIdx := strings.Index(task, "Gate: authoritative DNS queries must return a usable response")
+	if gateIdx < 0 {
+		t.Fatal("expected the plan-phase authoritative DNS response gate")
+	}
+	window := task[gateIdx:]
+	if end := strings.Index(window, "\n\n"); end > 0 {
+		window = window[:end]
+	}
+	if !strings.Contains(window, "not ansible_check_mode") {
+		t.Error("plan-phase fail-closed gate must be skipped in check mode (a fresh host's DNS server isn't running yet during --check)")
+	}
+}
+
 // TestRegression_FreeipaClientApplyPlaybook_HasCloudInitEtcHostsGuard locks
 // the 2026-08-18 fix for cloud-init-freeipa-incident-report.md:
 // yk-pro6k-dev-01/02/03 all lost their FreeIPA server /etc/hosts pin on

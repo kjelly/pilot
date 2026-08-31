@@ -295,3 +295,40 @@ func TestRegression_FreeIPAClientFreshPreviewDoesNotReadMissingSSSDConfig(t *tes
 		t.Fatal("fresh FreeIPA client preview must not read /etc/sssd/sssd.conf before enrollment creates it")
 	}
 }
+
+// TestRegression_FreeIPANFSServerAcceptsCurrentRosterSchema locks the
+// 2026-08-31 fix: this gate's accepted schema_version list must stay in
+// sync with freeipa-identity-apply.yml's sibling gate, which loads the same
+// roster. It hardcoded `== 1` through the v2 rollout (round 21, 2026-08-11)
+// and then missed the v3 rollout the same way — v3 is the current default
+// `pilot edit`'s NFS-server bootstrap itself writes into a brand-new
+// roster, so a stale list here rejects every freshly-created roster
+// (round 30, 2026-08-31).
+func TestRegression_FreeIPANFSServerAcceptsCurrentRosterSchema(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-nfs-server-apply.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	if !strings.Contains(playbook, "freeipa_roster.schema_version | int in [1, 2, 3]") {
+		t.Error("freeipa-nfs-server-apply.yml's roster schema gate must accept [1, 2, 3], matching freeipa-identity-apply.yml's sibling gate")
+	}
+
+	identityPath := filepath.Join("..", "..", "playbooks", "apply", "freeipa-identity-apply.yml")
+	identityData, err := os.ReadFile(identityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := string(identityData)
+	nfsIdx := strings.Index(playbook, "schema_version | int in [")
+	identityIdx := strings.Index(identity, "schema_version | int in [")
+	if nfsIdx < 0 || identityIdx < 0 {
+		t.Fatal("could not locate schema_version acceptance gate in one or both playbooks")
+	}
+	nfsList := playbook[nfsIdx : nfsIdx+strings.Index(playbook[nfsIdx:], "]")+1]
+	identityList := identity[identityIdx : identityIdx+strings.Index(identity[identityIdx:], "]")+1]
+	if nfsList != identityList {
+		t.Errorf("freeipa-nfs-server-apply.yml's schema gate (%s) must match freeipa-identity-apply.yml's (%s)", nfsList, identityList)
+	}
+}

@@ -34,8 +34,12 @@
           # freeipa-identity-apply.yml's — the sibling playbook that loads the
           # same roster. This gate hardcoded `== 1` through the whole Roster
           # Schema v2 rollout and rejected structurally valid, lint-clean v2
-          # rosters outright. Found live round 21 (2026-08-11).
-          - freeipa_roster.schema_version | int in [1, 2]
+          # rosters outright (found live round 21, 2026-08-11), then missed
+          # the v3 rollout the same way — v3 became the default schema
+          # `pilot edit`'s NFS-server bootstrap itself writes, so this gate
+          # rejected every freshly-created roster (found live round 30,
+          # 2026-08-31).
+          - freeipa_roster.schema_version | int in [1, 2, 3]
           - freeipa_roster.freeipa.admin.password | length >= 8
           # `pilot deploy` normally loads main.yaml as well as the canonical
           # roster.  Do not let a stale duplicate admin secret surface much

@@ -201,7 +201,16 @@
       from {{ ipa_server_ip }}. Refusing DNS registration rather than
       interpreting a timeout, SERVFAIL, or malformed dig output as an empty
       record set (spec.md §8.2/§8.3, fail-closed).
-  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+  # A freshly-provisioned FreeIPA host that hasn't actually run
+  # ipa-server-install yet (correctly skipped in --check mode, since it's a
+  # real mutation) has no DNS service to answer this query at all — this is
+  # the normal, expected state of any --check preview of a genuinely fresh
+  # clean-room topology, not evidence of a broken authority. Only fail
+  # closed for a real (non-check) run, where an unusable response is
+  # actually unexplained. The extraction tasks below already treat an
+  # unmatched/empty stdout as "no records", so skipping this assert in
+  # check mode does not risk misreading diagnostic text as a real record.
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool and not ansible_check_mode
 
 - name: "FreeIPA client DNS (plan) — extract authoritative CNAME answers"
   ansible.builtin.set_fact:
