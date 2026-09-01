@@ -25,6 +25,9 @@ groupVars: []
 inputRules: []
 endpoints:
   - {name: dockerSocket, scheme: unix, path: /var/run/docker.sock}
+diagnostics:
+  runtime: {kind: systemd, name: docker.service}
+  verifySpec: docs/verification/docker.md
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false
 evidenceRequirement: {targetTest: vm-or-docker, idempotency: required}

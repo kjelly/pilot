@@ -140,7 +140,11 @@ func TestLoaderRequiresV2SpecsForAutoDeploy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contractYAML := strings.Replace(string(fixture), "docs/verification/docker.md", "spec.md", 1)
+	// -1 (not 1): the fixture now references docs/verification/docker.md
+	// from BOTH specs[].path and diagnostics.verifySpec — both must move
+	// to the synthetic spec.md this test writes, or the second
+	// occurrence fails its own "must match a specs[].path" check.
+	contractYAML := strings.Replace(string(fixture), "docs/verification/docker.md", "spec.md", -1)
 	contractYAML = strings.Replace(contractYAML, "autoDeploy: false", "autoDeploy: true", 1)
 	if err := os.WriteFile(filepath.Join(root, "contract.yaml"), []byte(contractYAML), 0o600); err != nil {
 		t.Fatal(err)

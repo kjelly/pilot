@@ -273,7 +273,76 @@ var schemaV3 = migration{
 	},
 }
 
-var migrations = []migration{schemaV1, schemaV2, schemaV3}
+// schemaV4 adds Agent Monitoring Phase 5's R2 canonical-apply reapply
+// persistence — a SEPARATE table family from remediation_plans/
+// approvals/remediation_runs (R1), not an extension of them: an R1
+// approval can never authorize R2 (design doc §12), and giving R2 its
+// own tables makes that boundary structural rather than a matter of
+// application-logic discipline. There is deliberately no "policy actor"
+// path anywhere in this table family — internal/policy's EvaluatePolicy
+// already hard-denies any risk != R1 (design doc §13's guard), and this
+// package adds no auto-approve entry point for reapply_approvals at
+// all, so R2 staying human-only is enforced by the ABSENCE of a code
+// path, not just a runtime check.
+var schemaV4 = migration{
+	version: 4,
+	sql: []string{
+		`CREATE TABLE reapply_plans (
+			id TEXT PRIMARY KEY,
+			incident_id TEXT NOT NULL,
+			host TEXT NOT NULL,
+			component TEXT NOT NULL,
+			action TEXT NOT NULL,
+			risk TEXT NOT NULL,
+			playbook_path TEXT NOT NULL,
+			playbook_hash TEXT NOT NULL,
+			stage TEXT NOT NULL,
+			resolved_input_keys_json TEXT NOT NULL,
+			secret_reference_keys_json TEXT NOT NULL,
+			dependency_snapshot_json TEXT NOT NULL,
+			preview_ref TEXT NOT NULL,
+			preview_supported INTEGER NOT NULL,
+			preview_summary TEXT,
+			preview_estimated_changed INTEGER NOT NULL,
+			preview_unsupported_reason TEXT,
+			verification_spec TEXT NOT NULL,
+			inventory_revision TEXT NOT NULL,
+			contract_hash TEXT NOT NULL,
+			plan_hash TEXT NOT NULL,
+			state TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			FOREIGN KEY(incident_id) REFERENCES incidents(id)
+		)`,
+		`CREATE TABLE reapply_approvals (
+			id TEXT PRIMARY KEY,
+			plan_id TEXT NOT NULL,
+			plan_hash TEXT NOT NULL,
+			decision TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			reason TEXT,
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(plan_id) REFERENCES reapply_plans(id)
+		)`,
+		`CREATE TABLE reapply_runs (
+			id TEXT PRIMARY KEY,
+			plan_id TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			finished_at TEXT,
+			result TEXT NOT NULL,
+			changed INTEGER NOT NULL DEFAULT -1,
+			audit_ref TEXT,
+			verify_ref TEXT,
+			FOREIGN KEY(plan_id) REFERENCES reapply_plans(id)
+		)`,
+		// At most one run per plan, ever — same "replay of an already
+		// executed approved plan must fail" structural guarantee R1's
+		// remediation_runs already has.
+		`CREATE UNIQUE INDEX ux_reapply_runs_plan ON reapply_runs(plan_id)`,
+	},
+}
+
+var migrations = []migration{schemaV1, schemaV2, schemaV3, schemaV4}
 
 func (s *Store) migrate() error {
 	return s.applyMigrations(migrations)

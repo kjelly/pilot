@@ -3,6 +3,9 @@ package diagnose
 import (
 	"fmt"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/networkcheck"
 )
 
 // DependencyEndpointCheck is one TCP-reachability probe for a
@@ -24,13 +27,8 @@ type DependencyEndpointCheck struct {
 // arbitrary command to run.
 func ComponentSteps(runtimeKind, runtimeName, readinessURL, logsSource, logsRuntimeName string, dependencyChecks []DependencyEndpointCheck) []Step {
 	var steps []Step
-	switch runtimeKind {
-	case "docker":
-		steps = append(steps, Step{ID: "runtime-state", Description: "docker container present/running state", Module: "shell",
-			Command: fmt.Sprintf("docker inspect -f '{{.State.Status}}' %s 2>/dev/null || echo absent", shlexQuote(runtimeName))})
-	case "systemd":
-		steps = append(steps, Step{ID: "runtime-state", Description: "systemd unit active state", Module: "command",
-			Command: fmt.Sprintf("systemctl is-active %s", runtimeName)})
+	if rs := RuntimeStateStep(runtimeKind, runtimeName); rs != nil {
+		steps = append(steps, *rs)
 	}
 
 	if readinessURL != "" {
@@ -63,6 +61,68 @@ func ComponentSteps(runtimeKind, runtimeName, readinessURL, logsSource, logsRunt
 		})
 	}
 	return steps
+}
+
+// RuntimeStateStep builds the single "is this runtime up" ad-hoc step
+// for a docker/systemd runtime, or nil for any other kind (including
+// "none" or unrecognized). Extracted out of ComponentSteps so Agent
+// Monitoring Phase 5's dependency preflight (internal/repair) can run
+// this SAME check against a DEPENDENCY's own runtime — e.g. "is the
+// same-host docker.service healthy" ahead of a canonical_apply reapply
+// — not just a component's own runtime the way pilot_diagnose_component
+// uses it.
+func RuntimeStateStep(runtimeKind, runtimeName string) *Step {
+	switch runtimeKind {
+	case "docker":
+		return &Step{ID: "runtime-state", Description: "docker container present/running state", Module: "shell",
+			Command: fmt.Sprintf("docker inspect -f '{{.State.Status}}' %s 2>/dev/null || echo absent", shlexQuote(runtimeName))}
+	case "systemd":
+		return &Step{ID: "runtime-state", Description: "systemd unit active state", Module: "command",
+			Command: fmt.Sprintf("systemctl is-active %s", runtimeName)}
+	default:
+		return nil
+	}
+}
+
+// ResolveDependencyChecks resolves component's declared `bindings` on
+// host into concrete TCP-reachability checks — extracted from
+// `pilot_diagnose_component`'s own inline resolution (originally only in
+// cmd/pilot/cmd) so Agent Monitoring Phase 5's dependency preflight
+// (internal/repair) can reuse the EXACT SAME resolution instead of a
+// second, potentially-drifting copy: for each binding, find the
+// provider's own declared endpoint by name, then read the resolved
+// value the CURRENT host actually has for that binding's input hostvar
+// — never a caller-supplied host/port (same "no arbitrary host:port"
+// rule every other diagnostic composite follows). A binding with no
+// endpoint match or no resolved hostvar value is silently skipped, not
+// an error — an optional/unconfigured dependency is a valid state.
+func ResolveDependencyChecks(catalog contract.Catalog, resolved networkcheck.ResolvedInventory, host string, comp contract.Contract) []DependencyEndpointCheck {
+	var depChecks []DependencyEndpointCheck
+	hostVars := resolved.HostVars[host]
+	for _, binding := range comp.Bindings {
+		depComp, ok := catalog.Component(binding.From.Component)
+		if !ok {
+			continue
+		}
+		var depEndpoint contract.Endpoint
+		found := false
+		for _, e := range depComp.Endpoints {
+			if e.Name == binding.From.Endpoint {
+				depEndpoint = e
+				found = true
+			}
+		}
+		if !found {
+			continue
+		}
+		hostValue, hasHostValue := hostVars[binding.Input]
+		hostStr, isStr := hostValue.(string)
+		if !hasHostValue || !isStr || hostStr == "" {
+			continue
+		}
+		depChecks = append(depChecks, DependencyEndpointCheck{Component: binding.From.Component, Host: hostStr, Port: depEndpoint.Port})
+	}
+	return depChecks
 }
 
 // DependencyEndpointResult pairs one DependencyEndpointCheck with its

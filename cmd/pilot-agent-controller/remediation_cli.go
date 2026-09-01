@@ -14,6 +14,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/agentcontroller"
 	"github.com/kjelly/pilot/internal/policy"
+	"github.com/kjelly/pilot/internal/repair"
 	"github.com/spf13/cobra"
 )
 
@@ -78,6 +79,11 @@ func newRemediationCmd() *cobra.Command {
 		newRemediationRejectCmd(),
 		newRemediationExecuteCmd(),
 		newRemediationAutoExecuteCmd(),
+		newReapplyProposeCmd(),
+		newReapplyShowCmd(),
+		newReapplyApproveCmd(),
+		newReapplyRejectCmd(),
+		newReapplyExecuteCmd(),
 	)
 	return remediationCmd
 }
@@ -414,6 +420,214 @@ func newRemediationAutoExecuteCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&hostBudgetWindow, "host-budget-window", def.HostBudgetWindow, "window --host-budget-count is measured over")
 	cmd.Flags().IntVar(&componentBudgetCount, "component-budget-count", def.ComponentBudgetCount, "max approved actions per component within --component-budget-window")
 	cmd.Flags().DurationVar(&componentBudgetWindow, "component-budget-window", def.ComponentBudgetWindow, "window --component-budget-count is measured over")
+	flags.register(cmd)
+	return cmd
+}
+
+// ---- Agent Monitoring Phase 5: R2 canonical-apply reapply ------------
+//
+// reapply-propose/show/approve/reject/execute mirror the R1 propose/
+// show/approve/reject/execute commands exactly, on their OWN plan
+// family (reapply_plans/reapply_approvals/reapply_runs) — an R1
+// approval can never authorize R2 (design doc §12), and there is
+// deliberately no `reapply auto-execute` counterpart anywhere in this
+// binary: R2 is always human-approved, in every environment, enforced
+// by simply never having built an autonomous entry point for it.
+
+func newReapplyProposeCmd() *cobra.Command {
+	var dbPath, incidentID, host, component, action string
+	flags := &repairClientFlags{}
+	cmd := &cobra.Command{
+		Use:   "reapply-propose",
+		Short: "Resolve an incident+host+component+R2-action into an immutable canonical-apply plan and persist it as PROPOSED",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := agentcontroller.OpenStore(dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			wire, err := flags.client().ReapplyPlan(cmd.Context(), incidentID, host, component, action)
+			if err != nil {
+				return fmt.Errorf("resolve reapply plan via repair MCP: %w", err)
+			}
+			p, err := wire.ToReapplyPlan()
+			if err != nil {
+				return err
+			}
+			if err := store.CreateReapplyPlan(p); err != nil {
+				return err
+			}
+			fmt.Printf("reapply plan %s PROPOSED: %s on %s (%s), risk=%s, playbook=%s, preview_changed=%d, hash=%s, expires=%s\n",
+				p.ID, p.Action, p.Host, p.Component, p.Risk, p.Resolved.PlaybookPath, p.Resolved.PreviewEstimatedChanged, p.PlanHash, p.ExpiresAt.Format(time.RFC3339))
+			if p.Resolved.PreviewSummary != "" {
+				fmt.Printf("--- preview summary ---\n%s\n-----------------------\n", p.Resolved.PreviewSummary)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
+	cmd.MarkFlagRequired("db")
+	cmd.Flags().StringVar(&incidentID, "incident", "", "incident ID this plan is for (required)")
+	cmd.MarkFlagRequired("incident")
+	cmd.Flags().StringVar(&host, "host", "", "exact inventory hostname (required)")
+	cmd.MarkFlagRequired("host")
+	cmd.Flags().StringVar(&component, "component", "", "component ID from contracts/*.yaml (required)")
+	cmd.MarkFlagRequired("component")
+	cmd.Flags().StringVar(&action, "action", "", "R2 canonical_apply remediation action id (required)")
+	cmd.MarkFlagRequired("action")
+	flags.register(cmd)
+	return cmd
+}
+
+func newReapplyShowCmd() *cobra.Command {
+	var dbPath string
+	cmd := &cobra.Command{
+		Use:   "reapply-show <plan-id>",
+		Short: "Show one R2 reapply plan's current state, resolved metadata, and approval history",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := agentcontroller.OpenStoreReadOnly(dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			p, err := store.GetReapplyPlan(args[0])
+			if err != nil {
+				return err
+			}
+			if p == nil {
+				return fmt.Errorf("no such reapply plan: %s", args[0])
+			}
+			approvals, err := store.ListReapplyApprovals(args[0])
+			if err != nil {
+				return err
+			}
+			out := struct {
+				Plan      *agentcontroller.StoredReapplyPlan      `json:"plan"`
+				Approvals []agentcontroller.ReapplyApprovalRecord `json:"approvals"`
+			}{Plan: p, Approvals: approvals}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(out)
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
+	cmd.MarkFlagRequired("db")
+	return cmd
+}
+
+func newReapplyApproveCmd() *cobra.Command {
+	var dbPath, planHash, actor, reason string
+	cmd := &cobra.Command{
+		Use:   "reapply-approve <plan-id>",
+		Short: "Record human approval of an exact R2 plan hash — R2 is ALWAYS human-approved, in every environment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := agentcontroller.OpenStore(dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			rec, err := store.ApproveReapply(args[0], planHash, actor, reason, time.Now())
+			if err != nil {
+				return err
+			}
+			fmt.Printf("reapply plan %s APPROVED by %s at %s\n", rec.PlanID, rec.Actor, rec.CreatedAt.Format(time.RFC3339))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
+	cmd.MarkFlagRequired("db")
+	cmd.Flags().StringVar(&planHash, "plan-hash", "", "the EXACT plan_hash shown by `remediation reapply-show` — approval is rejected if this does not match (required)")
+	cmd.MarkFlagRequired("plan-hash")
+	cmd.Flags().StringVar(&actor, "actor", "", "your own operator identity — never Agent-supplied text (required)")
+	cmd.MarkFlagRequired("actor")
+	cmd.Flags().StringVar(&reason, "reason", "", "why you are approving this plan")
+	return cmd
+}
+
+func newReapplyRejectCmd() *cobra.Command {
+	var dbPath, planHash, actor, reason string
+	cmd := &cobra.Command{
+		Use:   "reapply-reject <plan-id>",
+		Short: "Record human rejection of an R2 plan — terminal; propose a new plan instead of reconsidering this one",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := agentcontroller.OpenStore(dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			rec, err := store.RejectReapply(args[0], planHash, actor, reason, time.Now())
+			if err != nil {
+				return err
+			}
+			fmt.Printf("reapply plan %s REJECTED by %s at %s\n", rec.PlanID, rec.Actor, rec.CreatedAt.Format(time.RFC3339))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
+	cmd.MarkFlagRequired("db")
+	cmd.Flags().StringVar(&planHash, "plan-hash", "", "the EXACT plan_hash shown by `remediation reapply-show` (required)")
+	cmd.MarkFlagRequired("plan-hash")
+	cmd.Flags().StringVar(&actor, "actor", "", "your own operator identity (required)")
+	cmd.MarkFlagRequired("actor")
+	cmd.Flags().StringVar(&reason, "reason", "", "why you are rejecting this plan")
+	return cmd
+}
+
+func newReapplyExecuteCmd() *cobra.Command {
+	var dbPath string
+	flags := &repairClientFlags{}
+	cmd := &cobra.Command{
+		Use:   "reapply-execute <plan-id>",
+		Short: "Execute an APPROVED R2 plan: canonical apply on one exact host, then verify — never process exit code alone",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := agentcontroller.OpenStore(dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			now := time.Now()
+			if recovered, rerr := store.RecoverOrphanedExecutingReapplyPlans(now); rerr != nil {
+				return fmt.Errorf("recover orphaned reapply plans: %w", rerr)
+			} else if recovered > 0 {
+				fmt.Printf("recovered %d orphaned EXECUTING reapply plan(s) from an unclean shutdown\n", recovered)
+			}
+
+			started := time.Now()
+			p, err := store.MarkReapplyExecuting(args[0], started)
+			if err != nil {
+				return fmt.Errorf("cannot execute: %w", err)
+			}
+
+			result, applyErr := flags.client().ReapplyApply(cmd.Context(), agentcontroller.ReapplyPlanWireFromStored(p))
+			finished := time.Now()
+			finalResult := result.Result
+			if applyErr != nil {
+				finalResult = repair.ReapplyApplyFailedPartial
+			}
+			if finalResult == "" {
+				finalResult = repair.ReapplyAppliedVerificationFailed
+			}
+			if finishErr := store.FinishReapplyRun(p.ID, finalResult, result.Changed, result.AuditDirectory, "", started, finished); finishErr != nil {
+				return fmt.Errorf("record run outcome: %w", finishErr)
+			}
+			if applyErr != nil {
+				return fmt.Errorf("reapply apply: %w", applyErr)
+			}
+			fmt.Printf("reapply plan %s -> %s (execution_ok=%v changed=%d verify_passed=%v)\n", p.ID, result.Result, result.ExecutionOK, result.Changed, result.VerifyPassed)
+			if result.Result != repair.ReapplyAppliedVerified {
+				os.Exit(1)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
+	cmd.MarkFlagRequired("db")
 	flags.register(cmd)
 	return cmd
 }

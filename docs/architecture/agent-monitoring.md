@@ -4,10 +4,11 @@
 > `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md`、
 > `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-2-structured-diagnostics-spec.md`、
 > `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-3-human-approved-r1-remediation-spec.md`、
-> `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-4-autonomous-r1-policy-spec.md`
-> （Phase 5 尚在 `docs/tmp/future/agent-monitoring/`，尚未實作 —— 完成後搬一份
-> 進來、在這裡補一段）。這份文件只整理架構全貌，不重複規格的
-> normative 細節，這裡衝突時一律以對應 phase 的 spec 為準。
+> `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-4-autonomous-r1-policy-spec.md`、
+> `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-5-controlled-r2-reapply-spec.md`
+> （全部 5 個 phase 均已實作 —— 這是原計畫的最後一個 phase；R3/R4 刻意不在
+> 這個計畫集之內,見 §9 的「After Phase 5」）。這份文件只整理架構全貌,不
+> 重複規格的 normative 細節,這裡衝突時一律以對應 phase 的 spec 為準。
 
 ## 1. 資料流（Phase 1）
 
@@ -138,9 +139,8 @@ second "resume a stale run" code path.
   mentions it as an explicit opt-in that Phase 1 does not implement).
 - No HA/active-active; exactly one controller process (spec §3
   non-goals).
-- Phase 5 (controlled R2 reapply) is not yet implemented — see
-  `docs/tmp/future/agent-monitoring/README.md` for the full plan-set
-  order and phase-exit-gate discipline.
+- All 5 planned phases are now implemented (see §9 for Phase 5). R3/R4
+  remain intentionally unsupported — see §9's "After Phase 5".
 
 ## 6. Phase 2 — structured diagnostic composites
 
@@ -483,3 +483,149 @@ adding `pilot-agent-controller autonomy kill <scope> --reason`
 `TripBreaker` on the same scope naming convention the failure path
 already used — the missing half of the kill-switch/breaker unification
 described above, not a new mechanism.
+
+## 9. Phase 5 — controlled R2 single-host reapply
+
+Adds R2: reapply one component's own canonical `playbooks.apply` to one
+exact host — packages/files/config may change, services may restart.
+Unlike R1, **R2 is always human-approved, in every environment,
+including sandbox** (design doc §12). Phase 4's policy engine already
+hard-refuses this: `EvaluatePolicy` denies any `Plan.Risk != "R1"`
+before any other guard runs (`TestEvaluatePolicy_R2NeverEligible`
+locks this in across every risk value) — Phase 5 adds no new "is this
+R2 auto-approved" check anywhere, because the guard that would deny it
+already existed a phase earlier. There is no `remediation
+reapply-auto-execute` CLI command; only the human
+propose→show→approve→reject→execute chain exists for R2, on its own
+plan-table family (`reapply_plans`/`reapply_approvals`/`reapply_runs`,
+schema v4) — an R1 approval can never authorize R2 by construction, not
+just by a runtime check, because the two plan types don't even share an
+ID namespace.
+
+```
+internal/repair.BuildReapplyPlan(catalog, resolved, deps, preview, repoRoot, ...)
+    1. resolve the canonical playbooks.apply + hash its file content
+    2. classify every declared groupVar: resolved_non_secret |
+       resolved_secret_reference (name only, NEVER the value) | missing/
+       ambiguous -> blocks planning
+    3. PreflightDependencies: sameHosts (a dependency's OWN runtime-state
+       check, e.g. docker.service) + providerEndpoint (binding-resolved
+       TCP reachability) -> any unhealthy REQUIRED dependency blocks
+       planning
+    4. sanitized check-mode preview (ansible-playbook --check --diff,
+       reusing internal/ansible.ParseDiff's existing sensitive-path
+       redaction) -> blocks planning above a 20-changed-file hard guard
+       (PREVIEW_BLOCKED)
+    5. PlanHash covers ALL of the above (playbook hash, resolved input
+       KEYS, dependency snapshot, preview content hash) — any of it
+       drifting between propose and apply invalidates the plan
+                    |
+`pilot-agent-controller remediation reapply-propose/-approve/-execute`
+    -> Store.ApproveReapply (human only — no policy-actor variant exists)
+    -> Store.MarkReapplyExecuting -> repair.ReapplyExecute (ansible-
+       playbook --limit <exact host>, PLAY RECAP changed= parsed for
+       real) -> repair.VerifyAfterExecution (SAME verify machinery R1
+       already uses) -> Store.FinishReapplyRun
+```
+
+### Two real bugs found via live testing (2026-09-01)
+
+1. **Check-mode false negative on real config drift.** The very first
+   thing this phase's evidence run tried — injecting real config drift
+   into `/etc/pilot/alertmanager/alertmanager.yml` and previewing a
+   reapply — silently reported `changed=0`, as if nothing needed fixing.
+   Cause: `alertmanager-apply.yml`'s own config-render/container tasks
+   are wrapped in `when: not ansible_check_mode` (a legitimate,
+   pre-existing pattern — those same tasks fail on a genuinely fresh
+   host with no parent directory yet, unrelated to this phase). Under
+   `--check`, ansible SKIPS them entirely instead of diffing, so real
+   drift behind a skipped task never surfaces. `runPreview` now parses
+   the PLAY RECAP's own `skipped=` count and treats any nonzero value as
+   `PreviewSupported: false` with an explicit reason, never a
+   trustworthy zero — the plan still proceeds (§9: "do not silently
+   treat check-mode failure as skip preview"), but the human approval
+   view honestly says "preview unsupported" instead of falsely "no
+   changes". Locked in by
+   `TestBuildReapplyPlan_SkippedCheckModeTaskIsUnsupportedNotZeroChanges`.
+2. **A missing negative-test fixture rendered obsolete.**
+   `TestDiagnoseComponentHandler_ComponentWithoutDiagnosticsRejected`
+   (Phase 2) asserted `docker` has no `diagnostics:` block — true until
+   this phase's own dependency preflight needed one (to check
+   `docker.service`'s runtime state for `sameHosts` dependencies) and
+   added it to `contracts/docker.yaml`. Not a design flaw in either
+   phase — just two tests that happened to share an assumption about a
+   third file. Fixed by moving that test onto a component that
+   genuinely still has no diagnostics block (`dns`), and by keeping
+   `docs/tmp/future/contracts/docker.yaml` (a local review-mirror
+   fixture, regression-checked byte-for-byte-semantically against the
+   canonical file) in sync.
+
+### Real disposable-VM evidence (2026-09-01)
+
+Same target shape as Phase 3/4 (`agentctl5`: `host-monitoring` →
+`docker` → `alertmanager`), plus a locally-run `pilot-agent-controller
+serve` for real incident creation over the same webhook path already
+proven in Phase 1/4. Every step is a real subprocess driving real
+ansible against the real VM — the only "simulated" things are the two
+fault injections (`sed` config drift, `systemctl stop docker`), which
+directly imitate the real conditions those checks exist to catch:
+
+1. **Baseline**: `pilot verify docs/verification/alertmanager.md` —
+   **7/7 PASS** before any drift.
+2. **Trigger**: real webhook → real incident (`DIAGNOSED`,
+   `host=agentctl5 component=alertmanager severity=warning`).
+3. **First propose (no drift yet)**: `reapply-propose` → real dependency
+   preflight (`docker.service: active`), real preview → `PROPOSED`,
+   `preview_changed=0` (accurate — nothing had drifted yet).
+4. **Inject real drift**: `sed` changed `resolve_timeout: 5m` →
+   `99m` directly on the VM, then `docker restart pilot-alertmanager` to
+   make it live — independently confirmed via `docker exec`/`cat`.
+5. **Second propose (drift present)**: `reapply-propose` again →
+   surfaced bug #1 above; after the fix, correctly reports
+   `PreviewSupported: false` with the skipped-task reason instead of a
+   false `changed=0`.
+6. **Human approves exact hash**: `reapply-approve --plan-hash <real
+   hash>` → `APPROVED`.
+7. **Exact-host apply**: `reapply-execute` → real `ansible-playbook
+   ... --limit agentctl5` → `APPLIED_VERIFIED (execution_ok=true
+   changed=2 verify_passed=true)`.
+8. **Verification PASS + independently re-confirmed**: `cat
+   /etc/pilot/alertmanager/alertmanager.yml` on the VM showed
+   `resolve_timeout: 5m` restored; `pilot verify` independently re-ran
+   **7/7 PASS**.
+9. **Alert resolves**: a real `status: resolved` webhook for the same
+   fingerprint flipped the incident to `RESOLVED_EXTERNAL`.
+10. **Idempotency**: a completely separate, normal `pilot vm-target run
+    ... alertmanager-apply.yml` (NOT through the reapply mechanism)
+    afterward showed `changed=0` — full convergence proven, not just
+    claimed.
+
+Negative evidence, also real: **provider dependency down blocks
+planning** — `systemctl stop docker.service` on the VM, then
+`reapply-propose` failed immediately with `"required dependencies
+unhealthy, blocking reapply: [docker]"`, before any preview or plan was
+even attempted; restarting docker and re-proposing succeeded normally
+again. Not independently re-proven on this VM (already covered
+elsewhere, not silently skipped): "missing required secret reference
+blocks planning" and "ambiguous input type blocks planning" (alertmanager's
+own contract declares no required inputs at all, so there is nothing to
+withhold on this specific target — both are proven instead by
+`TestBuildReapplyPlan_MissingRequiredSecretBlocksPlan` and
+`TestBuildReapplyPlan_AmbiguousTypeBlocksPlan` against a synthetic
+fixture contract with real GroupVars); "stale plan/tampered field never
+reaches execution" (proven by
+`TestVerifyReapplyPlanFresh_TamperedPlaybookPathNeverReachesCaller` and
+`TestRepairReapplyApplyHandler_TamperedPlaybookPathIsIgnoredNotTrusted`,
+the same defense-in-depth pattern Phase 3's real tampered-plan bug
+established for R1); "Phase 4 policy cannot auto-authorize R2" (R2 plans
+live in a disjoint ID namespace from R1's — there is no code path that
+could even look one up through the autonomous-execution CLI, and
+`EvaluatePolicy` denies non-R1 risk unconditionally regardless).
+
+### After Phase 5
+
+Per design doc §24: stop increasing authority by default. Successful R2
+does not justify autonomous FreeIPA, DNS, firewall, account access, CA,
+storage, delete, restore, or decommission operations. R3/R4 require a
+separate threat model/spec/review and are intentionally out of scope for
+this plan set.

@@ -1,6 +1,11 @@
 package diagnose
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/kjelly/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/networkcheck"
+)
 
 func TestComponentSteps_DockerWithReadinessAndDependency(t *testing.T) {
 	steps := ComponentSteps("docker", "pilot-prometheus", "http://127.0.0.1:9090/-/ready", "docker", "pilot-prometheus",
@@ -30,6 +35,50 @@ func TestComponentSteps_NoneRuntimeHasNoRuntimeStep(t *testing.T) {
 		if s.ID == "runtime-state" {
 			t.Fatal("runtime:none must not produce a runtime-state step")
 		}
+	}
+}
+
+func TestResolveDependencyChecks_ResolvesFromBindingAndSkipsUnconfigured(t *testing.T) {
+	catalog, err := contract.NewCatalog([]contract.Contract{
+		{ID: "alertmanager", Endpoints: []contract.Endpoint{{Name: "api", Port: 9093}}},
+		{ID: "prometheus", Bindings: []contract.Binding{
+			{Input: "alertmanager_target_host", From: contract.BindingFrom{Component: "alertmanager", Endpoint: "api"}},
+			{Input: "unresolved_target_host", From: contract.BindingFrom{Component: "alertmanager", Endpoint: "no-such-endpoint"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewCatalog: %v", err)
+	}
+	comp, _ := catalog.Component("prometheus")
+	resolved := networkcheck.ResolvedInventory{HostVars: map[string]map[string]any{
+		"web-1": {"alertmanager_target_host": "10.0.0.5"},
+	}}
+
+	got := ResolveDependencyChecks(catalog, resolved, "web-1", comp)
+	if len(got) != 1 {
+		t.Fatalf("got %d checks, want exactly 1 (the unmatched endpoint binding must be skipped): %+v", len(got), got)
+	}
+	if got[0] != (DependencyEndpointCheck{Component: "alertmanager", Host: "10.0.0.5", Port: 9093}) {
+		t.Errorf("got %+v", got[0])
+	}
+}
+
+func TestResolveDependencyChecks_NoHostValueYieldsNoChecks(t *testing.T) {
+	catalog, err := contract.NewCatalog([]contract.Contract{
+		{ID: "alertmanager", Endpoints: []contract.Endpoint{{Name: "api", Port: 9093}}},
+		{ID: "prometheus", Bindings: []contract.Binding{
+			{Input: "alertmanager_target_host", From: contract.BindingFrom{Component: "alertmanager", Endpoint: "api"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewCatalog: %v", err)
+	}
+	comp, _ := catalog.Component("prometheus")
+	resolved := networkcheck.ResolvedInventory{HostVars: map[string]map[string]any{"web-1": {}}}
+
+	got := ResolveDependencyChecks(catalog, resolved, "web-1", comp)
+	if len(got) != 0 {
+		t.Fatalf("got %+v, want no checks — the dependency has no resolved host value", got)
 	}
 }
 

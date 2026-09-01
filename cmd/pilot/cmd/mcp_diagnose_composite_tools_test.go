@@ -122,8 +122,10 @@ func TestDiagnoseComponentHandler_ComponentWithoutDiagnosticsRejected(t *testing
 	t.Setenv("PILOT_ROOT", repoRootForTest(t))
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
 	handler := diagnoseComponentHandler(baseDiagnoseOpts(t, writeDiagnoseFixtureInventory(t), fake.run))
-	// "docker" itself has no diagnostics block configured.
-	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseComponentInput{Host: "web1", Component: "docker"})
+	// "dns" itself has no diagnostics block configured. (Not "docker" —
+	// Agent Monitoring Phase 5 added one to contracts/docker.yaml so its
+	// own R2 reapply dependency-health preflight can check docker.service.)
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseComponentInput{Host: "web1", Component: "dns"})
 	if err != nil {
 		t.Fatalf("handler() error = %v", err)
 	}

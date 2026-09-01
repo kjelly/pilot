@@ -108,6 +108,77 @@ func TestValidateRemediation_VerificationSpecMustBelongToComponent(t *testing.T)
 	}
 }
 
+// baseCanonicalApplyAction returns a minimally-valid Phase 5 R2
+// canonical_apply action for the SAME base contract's component.
+func baseCanonicalApplyAction() RemediationAction {
+	return RemediationAction{
+		ID: "reapply", Risk: "R2", Executor: RemediationActionExecutor{Kind: "canonical_apply"},
+		MaxTargets: 1, RequiresApproval: true, Verification: RemediationVerification{Spec: "docs/verification/prometheus.md"},
+		Preflight: RemediationPreflight{RequireIdempotencyEvidence: true, RequireDependencyHealth: true},
+	}
+}
+
+func TestValidateRemediation_CanonicalApplyValidActionPasses(t *testing.T) {
+	c := baseRemediationContract()
+	c.Remediation.Actions = append(c.Remediation.Actions, baseCanonicalApplyAction())
+	if err := validateLocal(c); err != nil {
+		t.Fatalf("validateLocal: %v", err)
+	}
+}
+
+func TestValidateRemediation_CanonicalApplyRequiresR2(t *testing.T) {
+	c := baseRemediationContract()
+	a := baseCanonicalApplyAction()
+	a.Risk = "R1"
+	c.Remediation.Actions = append(c.Remediation.Actions, a)
+	if err := validateLocal(c); err == nil || !strings.Contains(err.Error(), "only valid for risk R2") {
+		t.Fatalf("err = %v, want a canonical_apply-must-be-R2 error", err)
+	}
+}
+
+func TestValidateRemediation_CanonicalApplyRequiresApprovalTrue(t *testing.T) {
+	c := baseRemediationContract()
+	a := baseCanonicalApplyAction()
+	a.RequiresApproval = false
+	c.Remediation.Actions = append(c.Remediation.Actions, a)
+	if err := validateLocal(c); err == nil || !strings.Contains(err.Error(), "requiresApproval must be true") {
+		t.Fatalf("err = %v, want a requiresApproval error", err)
+	}
+}
+
+func TestValidateRemediation_CanonicalApplyRequiresPlaybookApply(t *testing.T) {
+	c := baseRemediationContract()
+	c.Playbooks.Apply = ""
+	c.Remediation.Actions = append(c.Remediation.Actions, baseCanonicalApplyAction())
+	if err := validateLocal(c); err == nil || !strings.Contains(err.Error(), "playbooks.apply") {
+		t.Fatalf("err = %v, want a missing-playbooks.apply error", err)
+	}
+}
+
+func TestValidateRemediation_CanonicalApplyDoesNotRequireExecutorTarget(t *testing.T) {
+	c := baseRemediationContract()
+	a := baseCanonicalApplyAction()
+	a.Executor.Target = "" // canonical_apply has no fixed target — must NOT be rejected for this
+	c.Remediation.Actions = append(c.Remediation.Actions, a)
+	if err := validateLocal(c); err != nil {
+		t.Fatalf("validateLocal: %v — canonical_apply must not require executor.target", err)
+	}
+}
+
+func TestValidateRemediation_R1CanonicalApplyRejected(t *testing.T) {
+	// A non-canonical_apply R2 action (e.g. someone declares risk R2 with
+	// docker_restart) is still allowed to be DECLARED (R3/R4-style "not
+	// yet executable" — see this function's own doc comment) — only
+	// canonical_apply itself is risk-locked to R2. This test instead locks
+	// the INVERSE: an R1 action can never use canonical_apply.
+	c := baseRemediationContract()
+	c.Remediation.Actions[0].Executor.Kind = "canonical_apply"
+	c.Remediation.Actions[0].Executor.Target = ""
+	if err := validateLocal(c); err == nil || !strings.Contains(err.Error(), "only valid for risk R2") {
+		t.Fatalf("err = %v, want a canonical_apply-must-be-R2 error", err)
+	}
+}
+
 // TestRemediation_CommandFieldCannotBeRepresentedByTypedSchema locks in
 // spec §12's structural guarantee: KnownFields(true) YAML decoding
 // rejects an unknown "command" key outright — there is no way to author

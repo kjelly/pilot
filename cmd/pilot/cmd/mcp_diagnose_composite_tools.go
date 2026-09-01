@@ -258,31 +258,7 @@ func diagnoseComponentHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 			}
 		}
 
-		var depChecks []diagnose.DependencyEndpointCheck
-		hostVars := resolved.HostVars[in.Host]
-		for _, binding := range comp.Bindings {
-			depComp, ok := catalog.Component(binding.From.Component)
-			if !ok {
-				continue
-			}
-			var depEndpoint contract.Endpoint
-			found := false
-			for _, e := range depComp.Endpoints {
-				if e.Name == binding.From.Endpoint {
-					depEndpoint = e
-					found = true
-				}
-			}
-			if !found {
-				continue
-			}
-			hostValue, hasHostValue := hostVars[binding.Input]
-			hostStr, isStr := hostValue.(string)
-			if !hasHostValue || !isStr || hostStr == "" {
-				continue
-			}
-			depChecks = append(depChecks, diagnose.DependencyEndpointCheck{Component: binding.From.Component, Host: hostStr, Port: depEndpoint.Port})
-		}
+		depChecks := diagnose.ResolveDependencyChecks(catalog, resolved, in.Host, comp)
 
 		sessionID, err := newID()
 		if err != nil {

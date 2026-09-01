@@ -67,13 +67,27 @@ type Remediation struct {
 // so a bad contract fails fast at lint time.
 type RemediationAction struct {
 	ID               string                    `yaml:"id"`
-	Risk             string                    `yaml:"risk"` // R1 | R2 | R3 | R4 (only R1 usable in Phase 3)
+	Risk             string                    `yaml:"risk"` // R1 | R2 | R3 | R4 (R1 autonomous-eligible; R2 always human, canonical_apply only)
 	Executor         RemediationActionExecutor `yaml:"executor"`
 	MaxTargets       int                       `yaml:"maxTargets"`
 	RequiresApproval bool                      `yaml:"requiresApproval"`
 	Cooldown         string                    `yaml:"cooldown,omitempty"`
 	Verification     RemediationVerification   `yaml:"verification"`
 	Autonomy         RemediationAutonomy       `yaml:"autonomy,omitempty"`
+	Preflight        RemediationPreflight      `yaml:"preflight,omitempty"`
+}
+
+// RemediationPreflight is Agent Monitoring Phase 5's canonical_apply-only
+// gate (design doc §5): both flags exist so the linter can enforce that
+// an R2 action explicitly declares the evidence it depends on, rather
+// than silently assuming it. internal/repair's preflight always performs
+// the dependency-health check regardless of this flag's value (§10:
+// "resolve required dependencies... validate dependencies" is
+// unconditional) — RequireDependencyHealth exists for declarative
+// clarity in the contract, not to make the check optional.
+type RemediationPreflight struct {
+	RequireIdempotencyEvidence bool `yaml:"requireIdempotencyEvidence"`
+	RequireDependencyHealth    bool `yaml:"requireDependencyHealth"`
 }
 
 // RemediationAutonomy is Agent Monitoring Phase 4's per-environment
@@ -560,7 +574,7 @@ func validateLocal(contract Contract) error {
 	if err := validateDiagnostics(contract.Diagnostics, contract.Endpoints, contract.Specs); err != nil {
 		return err
 	}
-	if err := validateRemediation(contract.Remediation, contract.Specs); err != nil {
+	if err := validateRemediation(contract.Remediation, contract.Specs, contract.Playbooks); err != nil {
 		return err
 	}
 	if contract.StagePolicy.Variable == "" || contract.StagePolicy.Default == "" {
@@ -854,25 +868,36 @@ func validateDiagnostics(d Diagnostics, endpoints []Endpoint, specs []Spec) erro
 }
 
 // validRemediationExecutorKinds is Phase 3's first slice (design doc §4)
-// — deliberately narrow; widen only with actual reviewed evidence per
-// kind, never speculatively.
+// plus Phase 5's "canonical_apply" (design doc §5) — deliberately
+// narrow; widen only with actual reviewed evidence per kind, never
+// speculatively.
 var validRemediationExecutorKinds = map[string]bool{
 	"docker_restart":  true,
 	"systemd_restart": true,
 	"systemd_reload":  true,
+	"canonical_apply": true,
 }
 
-// validateRemediation enforces Agent Monitoring Phase 3's contract/
-// linter checks (design doc §12): no remediation block -> zero actions
-// (nothing to validate, handled by the empty-slice range below);
-// duplicate IDs rejected; invalid risk/executor enum rejected; wildcard/
-// empty executor target rejected; maxTargets != 1 rejected (Phase 3 only
-// ever executes exactly one host); verification spec must exist/belong
-// to this component. R2/R3/R4 actions may be DECLARED (a future phase
-// may read them) but Phase 3's own planner (internal/repair) refuses to
-// ever plan/execute anything but R1 — that check lives there, not here,
-// since "declared but not yet executable" is a valid contract state.
-func validateRemediation(r Remediation, specs []Spec) error {
+// validateRemediation enforces Agent Monitoring Phase 3/5's contract/
+// linter checks (design doc §12 / Phase 5 §16): no remediation block ->
+// zero actions (nothing to validate, handled by the empty-slice range
+// below); duplicate IDs rejected; invalid risk/executor enum rejected;
+// wildcard/empty executor target rejected (except "canonical_apply",
+// which has no fixed target — the real target is the host, resolved at
+// plan time, and the playbook comes from playbooks.apply, never
+// executor.target); maxTargets != 1 rejected (only ever executes
+// exactly one host); verification spec must exist/belong to this
+// component. "canonical_apply" is additionally restricted to risk R2
+// (Phase 5 §5: "canonical_apply contains no caller-configurable
+// playbook field"), requires playbooks.apply to actually exist (nothing
+// to reapply otherwise), and requires requiresApproval — R2 is never
+// autonomous in this phase, so a contract that forgets this flag still
+// fails at lint time rather than only being caught by internal/policy's
+// runtime guard. R3/R4 actions may be DECLARED (a future phase may read
+// them) but no planner in this codebase ever plans/executes anything
+// but R1/R2 — that check lives in internal/repair, not here, since
+// "declared but not yet executable" is a valid contract state.
+func validateRemediation(r Remediation, specs []Spec, playbooks Playbooks) error {
 	seen := map[string]bool{}
 	for _, a := range r.Actions {
 		if strings.TrimSpace(a.ID) == "" {
@@ -889,16 +914,25 @@ func validateRemediation(r Remediation, specs []Spec) error {
 			return fmt.Errorf("remediation action %q: risk must be R1, R2, R3, or R4, got %q", a.ID, a.Risk)
 		}
 		if !validRemediationExecutorKinds[a.Executor.Kind] {
-			return fmt.Errorf("remediation action %q: executor.kind must be docker_restart, systemd_restart, or systemd_reload, got %q", a.ID, a.Executor.Kind)
+			return fmt.Errorf("remediation action %q: executor.kind must be docker_restart, systemd_restart, systemd_reload, or canonical_apply, got %q", a.ID, a.Executor.Kind)
 		}
-		if strings.TrimSpace(a.Executor.Target) == "" {
+		if a.Executor.Kind == "canonical_apply" {
+			if a.Risk != "R2" {
+				return fmt.Errorf("remediation action %q: executor.kind canonical_apply is only valid for risk R2, got %q", a.ID, a.Risk)
+			}
+			if !a.RequiresApproval {
+				return fmt.Errorf("remediation action %q: requiresApproval must be true for canonical_apply — R2 is never autonomous", a.ID)
+			}
+			if strings.TrimSpace(playbooks.Apply) == "" {
+				return fmt.Errorf("remediation action %q: canonical_apply requires this component's own playbooks.apply to be set", a.ID)
+			}
+		} else if strings.TrimSpace(a.Executor.Target) == "" {
 			return fmt.Errorf("remediation action %q: executor.target is required", a.ID)
-		}
-		if strings.ContainsAny(a.Executor.Target, "*?") {
+		} else if strings.ContainsAny(a.Executor.Target, "*?") {
 			return fmt.Errorf("remediation action %q: executor.target %q must not be a wildcard pattern", a.ID, a.Executor.Target)
 		}
 		if a.MaxTargets != 1 {
-			return fmt.Errorf("remediation action %q: maxTargets must be exactly 1 in Phase 3, got %d", a.ID, a.MaxTargets)
+			return fmt.Errorf("remediation action %q: maxTargets must be exactly 1, got %d", a.ID, a.MaxTargets)
 		}
 		if strings.TrimSpace(a.Verification.Spec) == "" {
 			return fmt.Errorf("remediation action %q: verification.spec is required", a.ID)

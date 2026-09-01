@@ -41,6 +41,13 @@ type fixtureContract struct {
 	Traceability        fixtureTraceability `yaml:"traceability"`
 	Verification        fixtureVerification `yaml:"verification"`
 	Site                fixtureSite         `yaml:"site"`
+	// Diagnostics is decoded generically (not a typed mirror) — this
+	// fixture struct exists for traceability checks, not full schema
+	// parity with contract.Contract; a generic passthrough is enough to
+	// keep KnownFields(true) strict decoding from rejecting a contract
+	// that has this optional Agent Monitoring Phase 2 block (added to
+	// contracts/docker.yaml by Phase 5's dependency preflight, 2026-09-01).
+	Diagnostics any `yaml:"diagnostics"`
 }
 
 type fixtureSpec struct {

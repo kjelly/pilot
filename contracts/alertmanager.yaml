@@ -30,6 +30,13 @@ remediation:
       cooldown: 30m
       verification: {spec: docs/verification/alertmanager.md}
       autonomy: {sandbox: allowed, staging: allowed, prod: human}
+    - id: reapply
+      risk: R2
+      executor: {kind: canonical_apply}
+      maxTargets: 1
+      requiresApproval: true
+      verification: {spec: docs/verification/alertmanager.md}
+      preflight: {requireIdempotencyEvidence: true, requireDependencyHealth: true}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: vm, idempotency: required}
 traceability:
