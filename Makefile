@@ -1,4 +1,4 @@
-.PHONY: build test clean vet lint help install install-callback-user install-callback-system uninstall-callback test-callback test-prereq pilot-cli-image
+.PHONY: build test clean vet lint help install install-callback-user install-callback-system uninstall-callback test-callback test-prereq pilot-cli-image pilot-cli-test-image
 
 BIN := pilot
 PKG := ./cmd/pilot
@@ -25,6 +25,9 @@ pilot-cli-image: ## Build the deployment/control-node Docker image
 		--build-arg PILOT_GIT_SHA=$(PILOT_GIT_SHA) \
 		--build-arg PILOT_GIT_DIRTY=$(PILOT_GIT_DIRTY) \
 		-t $(PILOT_CLI_IMAGE) -f images/Dockerfile.pilot-cli .
+
+pilot-cli-test-image: PILOT_CLI_IMAGE := pilot-cli:test
+pilot-cli-test-image: pilot-cli-image ## Build a locally tagged test deployment/control-node image
 
 release:       	## Compile stripped release binary
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) $(PKG)
