@@ -115,7 +115,7 @@ func pushRosterHostgroupDetail(r *editRouterModel, dir, path, name, banner strin
 	choices := []tui.Choice{
 		{ID: "roster.hostgroup.detail.name", Label: "name：" + name + "（唯讀）"},
 		{ID: "roster.hostgroup.detail.description", Label: "description：" + rosterDisplay(f, "description")},
-		{ID: "roster.hostgroup.detail.membership_hosts", Label: fmt.Sprintf("membership.hosts（%d 台；輸入逗號分隔 FQDN）", len(hosts))},
+		{ID: "roster.hostgroup.detail.membership_hosts", Label: fmt.Sprintf("membership.hosts（%d 台；多選）", len(hosts))},
 		{ID: "roster.hostgroup.detail.membership_hostgroups", Label: fmt.Sprintf("membership.hostgroups（%d 個巢狀 hostgroup）", len(hostgroups))},
 		{ID: "roster.hostgroup.detail.back", Label: "↩  返回"},
 	}
@@ -151,29 +151,13 @@ func pushRosterHostgroupText(r *editRouterModel, dir, path, name, key, current s
 }
 
 func pushRosterHostgroupHosts(r *editRouterModel, dir, path, name string, current []string) tea.Cmd {
-	spec := tui.InputSpec{
-		ScreenID: "roster.hostgroup.field_hosts",
-		Title:    "已 enroll 主機 FQDN（逗號分隔；例如 web1.ipa.pilot.internal）",
-		Default:  strings.Join(current, ", "),
-	}
-	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(tui.InputScreen)
-		if m.Canceled() {
-			return pushRosterHostgroupDetail(r, dir, path, name, "")
-		}
-		var hosts []string
-		for _, v := range strings.Split(m.Value(), ",") {
-			if v = strings.TrimSpace(v); v != "" {
-				hosts = append(hosts, v)
-			}
-		}
-		sort.Strings(hosts)
+	return rosterHostChecklist(r, dir, path, "roster.hostgroup.field_hosts", "membership.hosts（已 enroll 主機 FQDN）", current, func(r *editRouterModel, hosts []string) tea.Cmd {
 		return pushRosterHostgroupEdit(r, dir, path, name, func(f map[string]any) {
 			mem := rosterSubmapClone(f, "membership")
 			mem["hosts"] = hosts
 			f["membership"] = mem
 		})
-	})
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHostgroupDetail(r, dir, path, name, "") })
 }
 
 // pushRosterHostgroupHostgroups edits membership.hostgroups (nested
@@ -446,18 +430,9 @@ func pushRosterAddHBACHostgroups(r *editRouterModel, dir, path, name string, gro
 }
 
 func pushRosterAddHBACHosts(r *editRouterModel, dir, path, name string, groups, users, hostgroups []string) tea.Cmd {
-	spec := tui.InputSpec{
-		ScreenID: "roster.hbac.add_hosts",
-		Title:    "Direct hosts / exceptions（可留空；逗號分隔已 enroll FQDN）",
-		Validate: validateDirectHostsInput,
-	}
-	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(tui.InputScreen)
-		if m.Canceled() {
-			return pushRosterHBACMenu(r, dir, path, "")
-		}
-		return pushRosterAddHBACServices(r, dir, path, name, groups, users, hostgroups, normalizeDirectHosts(m.Value()))
-	})
+	return rosterHostChecklist(r, dir, path, "roster.hbac.add_hosts", "Direct hosts / exceptions（可留空）", nil, func(r *editRouterModel, hosts []string) tea.Cmd {
+		return pushRosterAddHBACServices(r, dir, path, name, groups, users, hostgroups, hosts)
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACMenu(r, dir, path, "") })
 }
 
 func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, groups, users, hostgroups, hosts []string) tea.Cmd {
@@ -572,18 +547,7 @@ func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 func pushRosterHBACHosts(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
 	current := rosterStringSlice(rosterSubmap(f, "targets"), "hosts")
-	spec := tui.InputSpec{
-		ScreenID: "roster.hbac.detail.targets_hosts",
-		Title:    "Direct hosts / exceptions（可留空；逗號分隔已 enroll FQDN）",
-		Default:  strings.Join(current, ", "),
-		Validate: validateDirectHostsInput,
-	}
-	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(tui.InputScreen)
-		if m.Canceled() {
-			return pushRosterHBACDetail(r, dir, path, name, "")
-		}
-		hosts := normalizeDirectHosts(m.Value())
+	return rosterHostChecklist(r, dir, path, "roster.hbac.detail.targets_hosts", "Direct hosts / exceptions（可留空）", current, func(r *editRouterModel, hosts []string) tea.Cmd {
 		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) {
 			// Cloning "targets" and setting only "hosts" preserves the
 			// sibling targets.hostgroups field untouched (spec.md §11.5).
@@ -592,7 +556,7 @@ func pushRosterHBACHosts(r *editRouterModel, dir, path, name string) tea.Cmd {
 			delete(t, "hostcat")
 			x["targets"] = t
 		})
-	})
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
 
 func pushRosterHBACServices(r *editRouterModel, dir, path, name string) tea.Cmd {

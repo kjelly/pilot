@@ -112,6 +112,57 @@ func TestRosterChecklistEscapeRoutesEveryChecklist(t *testing.T) {
 	}
 }
 
+func TestRosterHostListFieldsUseMultiSelect(t *testing.T) {
+	dir, path := writeChecklistRoster(t)
+	if err := inventory.AppendRosterGrant(path, map[string]any{
+		"name":          "host-list-grant",
+		"kind":          "temporary_grant",
+		"subjects":      map[string]any{"users": []string{}, "groups": []string{}},
+		"targets":       map[string]any{"hosts": []string{"infra-1.ipa.pilot.internal"}, "hostgroups": []string{}},
+		"services":      []string{"sshd"},
+		"validity":      map[string]any{"not_after": "2099-12-31T00:00:00Z"},
+		"justification": map[string]any{"reason": "test"},
+	}); err != nil {
+		t.Fatalf("seed grant: %v", err)
+	}
+	tests := []struct {
+		name string
+		open func(*editRouterModel)
+	}{
+		{"hostgroup membership.hosts", func(r *editRouterModel) {
+			pushRosterHostgroupHosts(r, dir, path, "infra-hosts", []string{"infra-1.ipa.pilot.internal"})
+		}},
+		{"HBAC add targets.hosts", func(r *editRouterModel) {
+			pushRosterAddHBACHosts(r, dir, path, "new-rule", nil, nil, nil)
+		}},
+		{"HBAC edit targets.hosts", func(r *editRouterModel) {
+			pushRosterHBACHosts(r, dir, path, "infra-ssh")
+		}},
+		{"grant add targets.hosts", func(r *editRouterModel) {
+			pushAddGrantTargetsHosts(r, dir, path, "temporary_grant", "new-grant", nil, nil, nil)
+		}},
+		{"grant edit targets.hosts", func(r *editRouterModel) {
+			pushGrantTargetsHosts(r, dir, path, "host-list-grant")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var router editRouterModel
+			tt.open(&router)
+			if _, ok := router.current.(tui.MultiSelectScreen); !ok {
+				t.Fatalf("screen = %T, want tui.MultiSelectScreen", router.current)
+			}
+			state := automationState(&router)
+			if state.Kind != tui.ScreenMultiSelect {
+				t.Fatalf("automation screen kind = %v, want multi-select", state.Kind)
+			}
+			if len(state.Items) == 0 {
+				t.Fatal("host checklist has no choices")
+			}
+		})
+	}
+}
+
 func TestRosterServicesChecklistRawLFCompletesAndPersists(t *testing.T) {
 	dir, path := writeChecklistRoster(t)
 	var router editRouterModel

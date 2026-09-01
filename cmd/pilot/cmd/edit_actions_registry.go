@@ -712,7 +712,7 @@ func editActionRegistry() []editActionDef {
 		{
 			Spec: semanticActionSpec{
 				Name:                     "set_hostgroup_field",
-				Description:              "set one roster hostgroup field; membership.hosts's value is a comma-separated list of enrolled host FQDNs, matching the interactive text field exactly",
+				Description:              "set one roster hostgroup field; membership.hosts accepts a comma-separated list of enrolled host FQDNs for semantic automation, and the interactive editor presents the same values as a multi-select checklist",
 				Required:                 []string{"name", "field", "value"},
 				Values:                   map[string][]string{"field": {"description", "membership.hosts"}},
 				ExecutionMode:            ExecutionModeStructured,

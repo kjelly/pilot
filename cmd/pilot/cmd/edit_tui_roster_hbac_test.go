@@ -48,6 +48,9 @@ hbac:
 	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte("hosts:\n  extra: {ansible_host: 192.0.2.14}\n  second: {ansible_host: 192.0.2.15}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if v, err := inventory.ValidateRosterFile(path); err != nil || len(v) != 0 {
 		t.Fatalf("fixture must validate clean, got err=%v violations=%v", err, v)
 	}
@@ -257,22 +260,16 @@ func TestPushRosterHBACTargets_EditingHostgroupsPreservesDirectHosts(t *testing.
 }
 
 // TestPushRosterHBACHosts_EditingHostsPreservesHostgroups is targets.hosts's
-// side of the same §11.5 invariant, driven through the automationDriver's
-// typeText/enter helpers (a full clear-then-retype, exactly like real
-// automation replay) rather than raw keys, since Huh input cursor
-// positioning over a prefilled default is an implementation detail this
-// test shouldn't depend on.
+// side of the same §11.5 invariant, driven through the same checklist helper
+// used by semantic automation replay.
 func TestPushRosterHBACHosts_EditingHostsPreservesHostgroups(t *testing.T) {
 	dir, path := writeHBACPolicyRosterFixture(t)
 	var router editRouterModel
 	pushRosterHBACHosts(&router, dir, path, "r1")
 
 	d := automationDriver{}
-	if err := d.typeText(&router, "extra.ipa.pilot.internal, second.ipa.pilot.internal", true); err != nil {
-		t.Fatalf("typeText() error = %v", err)
-	}
-	if err := d.enter(&router); err != nil {
-		t.Fatalf("enter() error = %v", err)
+	if err := d.setChecklistSelection(&router, []string{"extra.ipa.pilot.internal", "second.ipa.pilot.internal"}); err != nil {
+		t.Fatalf("setChecklistSelection() error = %v", err)
 	}
 
 	rule, found, err := inventory.RosterHBACRule(path, "r1")

@@ -95,7 +95,7 @@ func (d *automationDriver) createGrant(r *editRouterModel, kind, name string, gr
 	if err := d.setChecklistSelection(r, hostgroups); err != nil {
 		return err
 	}
-	if err := d.setDirectHostsInput(r, hosts); err != nil {
+	if err := d.setChecklistSelection(r, hosts); err != nil {
 		return err
 	}
 	if kind == "sudo_grant" {
@@ -191,7 +191,7 @@ func (d *automationDriver) setGrantTargets(r *editRouterModel, name string, host
 	if err := d.choose(r, "targets.hosts"); err != nil {
 		return err
 	}
-	return d.setDirectHostsInput(r, hosts)
+	return d.setChecklistSelection(r, hosts)
 }
 
 func (d *automationDriver) setGrantValidity(r *editRouterModel, name, notBefore, notAfter string) error {

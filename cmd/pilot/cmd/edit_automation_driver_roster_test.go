@@ -19,6 +19,13 @@ func writeMinimalRosterFixture(t *testing.T, dir string) string {
 	path := filepath.Join(dir, ".vault", "ipa-identity.yaml")
 	fixture := "schema_version: 1\nfreeipa: {domain: ipa.pilot.internal}\nusers: []\n"
 	writeTestFile(t, path, fixture)
+	writeTestFile(t, filepath.Join(dir, "hosts.yml"), `hosts:
+  web1: {ansible_host: 192.0.2.11}
+  web2: {ansible_host: 192.0.2.12}
+  special: {ansible_host: 192.0.2.13}
+  extra: {ansible_host: 192.0.2.14}
+  second: {ansible_host: 192.0.2.15}
+`)
 	return path
 }
 

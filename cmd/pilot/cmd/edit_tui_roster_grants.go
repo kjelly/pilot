@@ -192,22 +192,12 @@ func pushAddGrantTargetsHostgroups(r *editRouterModel, dir, path, kind, name str
 }
 
 func pushAddGrantTargetsHosts(r *editRouterModel, dir, path, kind, name string, groups, users, hostgroups []string) tea.Cmd {
-	spec := tui.InputSpec{
-		ScreenID: "roster.grants.add_hosts",
-		Title:    "targets.hosts（可留空；逗號分隔已 enroll FQDN）",
-		Validate: validateDirectHostsInput,
-	}
-	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(tui.InputScreen)
-		if m.Canceled() {
-			return pushRosterGrantsMenu(r, dir, path, "")
-		}
-		hosts := normalizeDirectHosts(m.Value())
+	return rosterHostChecklist(r, dir, path, "roster.grants.add_hosts", "targets.hosts（可留空）", nil, func(r *editRouterModel, hosts []string) tea.Cmd {
 		if kind == "sudo_grant" {
 			return pushAddGrantValidityNotBefore(r, dir, path, kind, name, groups, users, hostgroups, hosts, nil)
 		}
 		return pushAddGrantServices(r, dir, path, kind, name, groups, users, hostgroups, hosts)
-	})
+	}, func(r *editRouterModel) tea.Cmd { return pushRosterGrantsMenu(r, dir, path, "") })
 }
 
 func pushAddGrantServices(r *editRouterModel, dir, path, kind, name string, groups, users, hostgroups, hosts []string) tea.Cmd {
@@ -593,20 +583,9 @@ func pushGrantTargetsHostgroups(r *editRouterModel, dir, path, name string) tea.
 func pushGrantTargetsHosts(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterGrant(path, name)
 	current := rosterStringSlice(rosterSubmap(f, "targets"), "hosts")
-	spec := tui.InputSpec{
-		ScreenID: "roster.grants.detail.targets_hosts",
-		Title:    "targets.hosts（可留空；逗號分隔已 enroll FQDN）",
-		Default:  strings.Join(current, ", "),
-		Validate: validateDirectHostsInput,
-	}
-	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(tui.InputScreen)
-		if m.Canceled() {
-			return pushGrantDetail(r, dir, path, name, "")
-		}
-		hosts := normalizeDirectHosts(m.Value())
+	return rosterHostChecklist(r, dir, path, "roster.grants.detail.targets_hosts", "targets.hosts（可留空）", current, func(r *editRouterModel, hosts []string) tea.Cmd {
 		return pushGrantEdit(r, dir, path, name, func(x map[string]any) { t := rosterSubmapClone(x, "targets"); t["hosts"] = hosts; x["targets"] = t })
-	})
+	}, func(r *editRouterModel) tea.Cmd { return pushGrantDetail(r, dir, path, name, "") })
 }
 
 func pushGrantServices(r *editRouterModel, dir, path, name string) tea.Cmd {

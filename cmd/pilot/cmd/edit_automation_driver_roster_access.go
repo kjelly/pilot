@@ -9,7 +9,6 @@ package cmd
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
@@ -113,6 +112,9 @@ func (d *automationDriver) setHostgroupField(r *editRouterModel, hostgroup, fiel
 	if err := d.choose(r, field); err != nil {
 		return err
 	}
+	if field == "membership.hosts" {
+		return d.setChecklistSelection(r, normalizeDirectHosts(value))
+	}
 	if err := d.typeText(r, value, true); err != nil {
 		return err
 	}
@@ -194,7 +196,7 @@ func (d *automationDriver) createHBACRule(r *editRouterModel, name string, group
 	if err := d.setChecklistSelection(r, hostgroups); err != nil {
 		return err
 	}
-	if err := d.setDirectHostsInput(r, hosts); err != nil {
+	if err := d.setChecklistSelection(r, hosts); err != nil {
 		return err
 	}
 	return d.setChecklistSelection(r, services)
@@ -236,19 +238,6 @@ func (d *automationDriver) setChecklistSelectionByID(r *editRouterModel, want []
 	return d.enter(r)
 }
 
-// setDirectHostsInput drives an HBAC direct-host free-text screen (add or
-// detail flavor) by replacing its contents with a normalized
-// comma-separated join of hosts, then committing with Enter.
-func (d *automationDriver) setDirectHostsInput(r *editRouterModel, hosts []string) error {
-	if automationState(r).Kind != tui.ScreenInput {
-		return fmt.Errorf("expected a direct-hosts input screen, got %s", automationScreenID(r))
-	}
-	if err := d.typeText(r, strings.Join(hosts, ", "), true); err != nil {
-		return err
-	}
-	return d.enter(r)
-}
-
 func (d *automationDriver) ensureRosterHBACDetail(r *editRouterModel, name string) error {
 	if automationScreenID(r) == "roster.hbac.detail" {
 		if st := automationState(r); st.Kind == tui.ScreenSelect && st.Title == "HBAC rule "+name {
@@ -286,8 +275,8 @@ func (d *automationDriver) setHBACUsers(r *editRouterModel, name string, users [
 
 // setHBACTargets bulk-replaces both explicit target collections in one
 // atomic step (spec.md §12.5): it drives the hostgroups checklist and then
-// the direct-hosts input in sequence, so an omitted hosts (nil) commits as
-// empty — matching this action's pre-existing hostgroups-only behavior —
+// the direct-hosts checklist in sequence, so an omitted hosts (nil) commits
+// as empty — matching this action's pre-existing hostgroups-only behavior —
 // while an explicit hosts list is a real bulk replace of both dimensions.
 func (d *automationDriver) setHBACTargets(r *editRouterModel, name string, hostgroups, hosts []string) error {
 	if err := d.ensureRosterHBACDetail(r, name); err != nil {
@@ -305,7 +294,7 @@ func (d *automationDriver) setHBACTargets(r *editRouterModel, name string, hostg
 	if err := d.choose(r, "targets.hosts"); err != nil {
 		return err
 	}
-	return d.setDirectHostsInput(r, hosts)
+	return d.setChecklistSelection(r, hosts)
 }
 
 func (d *automationDriver) setHBACServices(r *editRouterModel, name string, services []string) error {
