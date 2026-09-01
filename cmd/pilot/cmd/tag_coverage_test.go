@@ -206,6 +206,8 @@ var specTagMap = []specTagMapping{
 		exemptRows: map[string]string{
 			"C8": "anonymous DELETE + GET-404 probe — verify-only outcome of the gateway config (s3-C1..C7)",
 		}},
+	{spec: "snmp-exporter.md", playbook: "snmp-exporter-apply.yml",
+		noRowTags: "Phase 0 skeleton — playbook has zero tasks yet (docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md §15 Phase 1 adds the real implementation and per-row tags)"},
 	{spec: "thanos-query.md", playbook: "thanos-query-apply.yml"},
 	{spec: "wazuh-fim.md", playbook: "wazuh-fim-apply.yml"},
 	{spec: "wazuh-manager.md", playbook: "wazuh-manager-apply.yml",
@@ -218,9 +220,10 @@ var specTagMap = []specTagMapping{
 
 // Specs with no apply playbook in playbooks/apply/ at all.
 var tagCheckExemptSpecs = map[string]string{
-	"hello-localhost.md":         "smoke-test spec; its playbook lives in playbooks/test/",
-	"core-infra.md":              "composite host-baseline spec: satisfied by dns/ntp/keycloak playbooks together, no single apply playbook",
-	"sso-composition-example.md": "documentation example of the spec-supplier pattern, never applied",
+	"hello-localhost.md":             "smoke-test spec; its playbook lives in playbooks/test/",
+	"core-infra.md":                  "composite host-baseline spec: satisfied by dns/ntp/keycloak playbooks together, no single apply playbook",
+	"sso-composition-example.md":     "documentation example of the spec-supplier pattern, never applied",
+	"snmp-monitoring-integration.md": "cross-cutting spec spanning internal/monitoring, internal/detection, internal/agentcontroller, internal/repair, internal/diagnose — verified by each package's own Go tests (see the spec's Checks probes), no single apply playbook",
 }
 
 // rowShapedTag matches IDs like C1, R2, C2.5.1 — the shapes spec row IDs

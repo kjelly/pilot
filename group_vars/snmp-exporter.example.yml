@@ -1,0 +1,34 @@
+# ============================================================================
+#  group_vars/snmp-exporter.example.yml —— 每站 SNMP exporter 設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/snmp-exporter.yml
+#    cp group_vars/snmp-exporter.example.yml <inventory 目錄>/group_vars/snmp-exporter.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/snmp-exporter.md、
+#  docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md §6
+#
+#  Phase 0 skeleton:playbooks/apply/snmp-exporter-apply.yml 目前沒有任何
+#  task,這些變數還不會被實際讀取——先落地範本,Phase 1 補上真正的容器部
+#  署邏輯後才會生效。
+# ============================================================================
+
+# 以下全部有內建預設值,通常不用填:
+# snmp_exporter_version: "v0.30.1"
+# snmp_exporter_image: "quay.io/prometheus/snmp-exporter"
+# snmp_exporter_container_name: "pilot-snmp-exporter"
+# snmp_exporter_port: "9116"
+# snmp_exporter_listen_address: "127.0.0.1"
+# snmp_exporter_module_concurrency: "1"
+# snmp_exporter_config_dir: "/etc/pilot/snmp-exporter"
+# snmp_exporter_data_dir: "/var/lib/pilot/snmp-exporter"
+
+# SNMP 認證密碼一律用 ansible-vault 加密檔帶入,依
+# monitoring/snmp/catalog.yml 的 authProfile ID 動態鍵值,不要明文寫在這裡
+# (除了拋棄式沙盒測試)。範例骨架見 vault 產生器的 "snmp-exporter" 區塊。
+# snmp_exporter_credentials:
+#   core-switch-v3:
+#     username: ""
+#     authPassword: ""
+#     privPassword: ""

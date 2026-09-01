@@ -40,6 +40,7 @@ var roleContracts = []roleContract{
 	{Name: "host-monitoring", Description: "被監控主機的監控 agent，node_exporter 強制 Basic Auth (host-monitoring-apply.yml)", GroupVarsStem: "host-monitoring", VaultSections: []string{"node-exporter-auth"}},
 	{Name: "dcgm-exporter", Description: "GPU 主機的監控 agent，NVIDIA dcgm-exporter；需要既有 Docker Engine、但不要求 docker role，沒有 GPU 的主機自動優雅跳過 (dcgm-exporter-apply.yml)", GroupVarsStem: "dcgm-exporter", VaultSections: []string{"dcgm-exporter-auth"}},
 	{Name: "alertmanager", Description: "中央 Alertmanager，只需一台 (alertmanager-apply.yml)", GroupVarsStem: "alertmanager", VaultSections: []string{"alertmanager"}},
+	{Name: "snmp-exporter", Description: "每站 SNMP exporter，供該站 Prometheus scrape switch/router/UPS/PDU/BMC；Phase 0 skeleton，playbook 尚無任何 task (snmp-exporter-apply.yml)", GroupVarsStem: "snmp-exporter", VaultSections: []string{"snmp-exporter"}},
 	{Name: "prometheus", Description: "每站 Prometheus + Thanos Sidecar，自動從 host-monitoring group 展開 scrape target (prometheus-apply.yml)", GroupVarsStem: "prometheus", VaultSections: []string{"thanos-s3", "node-exporter-auth"}, HostVarsKeys: []string{"prometheus_site_label"}},
 	{Name: "thanos-query", Description: "中央 Thanos Query，只需一台 (thanos-query-apply.yml)", GroupVarsStem: "thanos-query", VaultSections: []string{"thanos-s3"}},
 	{Name: "detection-engine", Description: "中央 Detection Plane：從 Thanos metrics 建立 adaptive SignalEvent (detection-engine-apply.yml)", GroupVarsStem: "detection-engine", VaultSections: []string{"detection-model-provider"}},

@@ -816,7 +816,10 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "nexus", Roles: []string{"docker"}}}}
 	var router editRouterModel
 	pushRoleChecklist(&router, dir, path, hf, "nexus")
-	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	// 48, not the usual 40: one more role row (snmp-exporter, SNMP
+	// monitoring integration spec Phase 0) now overflows a 40-row test
+	// terminal alongside the huh MultiSelect's title line.
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 48))
 	waitFor := func(want string) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
@@ -839,10 +842,11 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyUp})
 	}
 	// roleContracts order: 0 freeipa-server .. 19 host-monitoring ..
-	// 20 dcgm-exporter .. 21 alertmanager .. 22 prometheus (detection-engine
-	// spec Stage A-2 moved alertmanager before prometheus to match
-	// site.yml's execution order, shifting prometheus's index by one).
-	for i := 0; i < 22; i++ {
+	// 20 dcgm-exporter .. 21 alertmanager .. 22 snmp-exporter ..
+	// 23 prometheus (SNMP monitoring integration spec Phase 0 inserted
+	// snmp-exporter between alertmanager and prometheus, shifting
+	// prometheus's index by one again).
+	for i := 0; i < 23; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // toggle prometheus on

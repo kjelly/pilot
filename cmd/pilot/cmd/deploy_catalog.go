@@ -209,6 +209,11 @@ var deployCatalog = []deployPlaybook{
 		Playbook: "playbooks/apply/alertmanager-apply.yml", DefaultGroup: "alertmanager", StageVar: "stage",
 	},
 	{
+		Key: "snmp-exporter", Label: "每站 SNMP exporter(switch/router/UPS/PDU/BMC 監控)",
+		Playbook: "playbooks/apply/snmp-exporter-apply.yml", DefaultGroup: "snmp-exporter", StageVar: "stage",
+		Note: "Phase 0 skeleton：contracts/snmp-exporter.yaml 與 docs/verification/snmp-exporter.md 已落地,但這支 playbook 目前沒有任何 task,套用不會改變主機任何狀態。真正的容器部署邏輯見 docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md §15 Phase 1。",
+	},
+	{
 		Key: "detection-engine", Label: "中央 Detection Engine(adaptive anomaly detection)",
 		Playbook: "playbooks/apply/detection-engine-apply.yml", DefaultGroup: "detection-engine", StageVar: "stage",
 		AutoHostVars: []autoHostVar{

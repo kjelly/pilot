@@ -168,6 +168,24 @@ var vaultSections = map[string]vaultSection{
 			},
 		},
 	},
+	"snmp-exporter": {
+		Title: "SNMP Exporter 認證相關（Phase 0 skeleton，尚無 apply 邏輯會實際讀取）",
+		Note:  "snmp_exporter_credentials 依 monitoring/snmp/catalog.yml 的 authProfiles 動態鍵值，鍵名必須與 catalog 的 authProfile ID 一致；這裡只給範例骨架，不是固定 schema，也不是必填（沒有 SNMP target 時完全不會用到）。",
+		Keys: []vaultField{
+			{
+				Name:      "snmp_exporter_credentials",
+				Comment:   "依 authProfile ID 建立對應項目；v3（authPriv）填 username/authPassword/privPassword，v2c 只填 community",
+				Optional:  true,
+				Multiline: true,
+				Value: strings.Join([]string{
+					"core-switch-v3:",
+					"  username: \"CHANGE-ME\"",
+					"  authPassword: \"CHANGE-ME\"",
+					"  privPassword: \"CHANGE-ME\"",
+				}, "\n"),
+			},
+		},
+	},
 	"detection-model-provider": {
 		Title: "Detection Engine Model Provider 相關（Stage B，預設不啟用）",
 		Note:  "只有 detection_model_provider_enabled=true 且 auth=bearer 時才需要真的填值；provider disabled（Stage A 預設）完全不會用到這把 key，也不會被 completeness 檢查要求。fallback key 同理，只有 detection_model_provider_fallback_enabled=true 且 fallback auth=bearer 時才需要。",

@@ -86,7 +86,12 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "node-1"}}}
 	var router editRouterModel
 	pushRolePresetManager(&router, dir, filepath.Join(dir, "hosts.yml"), hf, "node-1", "")
-	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+	// 48, not the usual 40: the role checklist this test drives into now
+	// renders one more row (snmp-exporter, SNMP monitoring integration
+	// spec Phase 0) than fits in a 40-row terminal alongside the huh
+	// MultiSelect's title line, pushing the title off the top of the
+	// fixed-size test terminal.
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 48))
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return strings.Contains(string(b), "管理 ")

@@ -436,7 +436,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 33 支**都有 `stage`/`confirm_staging`/
+`playbooks/apply/*.yml` 現在**全部 34 支**都有 `stage`/`confirm_staging`/
 `confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`docker`、
 `freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
 `freeipa-dns-client`、`freeipa-ca-trust`、`freeipa-nfs-server`、
@@ -444,7 +444,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 `keycloak`、`keycloak-db`、`seaweedfs-s3`、`pam-oidc-sshd`、`log-server`、
 `audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
 `os-patch-sla`(用 `patch_stage`)、`host-monitoring`、`dcgm-exporter`、`prometheus`、`thanos-query`、
-`detection-engine`、`alertmanager`、`dashboard`、`log-shipping`、`reverse-proxy`、`internal-endpoint`、
+`detection-engine`、`alertmanager`、`snmp-exporter`、`dashboard`、`log-shipping`、`reverse-proxy`、`internal-endpoint`、
 `agent-controller`)。
 `freeipa-server-replica`、
 `freeipa-realm-replacement`、
@@ -452,7 +452,11 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 `site.yml`**(前三者是刻意的:day-2、opt-in 操作,不是每個部署都要的穩態
 角色,比照 `freeipa-identity` 的待遇;`agent-controller` 是 experimental
 Phase 1(見 `docs/architecture/agent-monitoring.md`);後五支則是一開始清點時漏掉,
-2026-07-09 一併補齊)——**不要因為一支 playbook「還沒接進 site.yml」或
+2026-07-09 一併補齊;`snmp-exporter` 也是 opt-in、`site.include: false`——
+同 `prometheus`/`alertmanager`/`thanos-query`/`detection-engine`/`dashboard`,
+且 Phase 0 階段連 task 都還沒有,見
+`docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md`)——
+**不要因為一支 playbook「還沒接進 site.yml」或
 「角色感覺不重要」就假設它可以不用 gate**,新增任何 apply playbook 一律要帶。
 
 寫或改任何一支 apply playbook,`pre_tasks` 除了既有的「staging/prod 需要
@@ -733,3 +737,4 @@ git status --short
 | 2026-08-24 | v1.20 | 新增 `dcgm-exporter` apply playbook(GPU 主機的 NVIDIA dcgm-exporter 監控 agent,獨立於 `host-monitoring` 之外的 component,依賴 `docker`;已接進 `site.yml`);§4.3 playbook 清點更新為 31 支 | sre |
 | 2026-08-28 | v1.21 | Stage A-2:新增 `detection-engine` apply playbook(中央 Detection Engine,從 Thanos metrics 建立 adaptive SignalEvent,依賴 host-monitoring/thanos-query/alertmanager,已接進 `site.yml`,見 `docs/superpowers/specs/2026-08-28-detection-engine-spec.md`);§4.3 playbook 清點更新為 32 支 | sre |
 | 2026-09-01 | v1.22 | Agent Monitoring Phase 1:新增 `agent-controller` apply playbook(observe-only incident controller,接收 Alertmanager webhook、正規化成 incident、派送唯讀診斷請求給外部 Agent Runtime,零 mutation 權限,不依賴其他 component,experimental/day-2 opt-in,不接進 `site.yml`,見 `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md`、`docs/architecture/agent-monitoring.md`);§4.3 playbook 清點更新為 33 支 | pilot |
+| 2026-09-01 | v1.23 | SNMP Monitoring Integration Phase 0:新增 `snmp-exporter` contract/verification skeleton 與 apply playbook(只有 stage/confirm/inventory-group gate,`tasks: []`,尚無任何部署邏輯;day-2/opt-in,不接進 `site.yml`,見 `docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md`、`docs/architecture/snmp-monitoring.md`);§4.3 playbook 清點更新為 34 支 | pilot |

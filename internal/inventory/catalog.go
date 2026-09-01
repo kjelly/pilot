@@ -44,6 +44,7 @@ var topLevelOrder = []string{
 	"host-monitoring",
 	"dcgm-exporter",
 	"alertmanager",
+	"snmp-exporter",
 	"prometheus",
 	"thanos-query",
 	"detection-engine",

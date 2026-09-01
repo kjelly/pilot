@@ -31,7 +31,7 @@ func TestLintContractsLoadsCanonicalDirectory(t *testing.T) {
 			t.Fatalf("output missing component %q:\n%s", component, got)
 		}
 	}
-	if !strings.Contains(got, "contracts: 34 component(s) loaded from") {
+	if !strings.Contains(got, "contracts: 35 component(s) loaded from") {
 		t.Fatalf("output missing summary:\n%s", got)
 	}
 }
