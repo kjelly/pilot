@@ -90,3 +90,10 @@ docs/tmp
 # §5 assumes this is gitignored, but no rule actually enforced it before now.
 casts/
 *.drive
+
+# `pilot mcp serve`'s default --audit-dir (edit-apply AND repair-apply
+# audit trails) is <--dir>/.pilot/audit/... — running it from the repo
+# root without an explicit --audit-dir litters this at the repo root.
+# Found via a real repair-apply evidence run (2026-09-01); local scratch
+# only, never committed.
+/.pilot/

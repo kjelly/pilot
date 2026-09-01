@@ -112,6 +112,14 @@ diagnostics:
   runtime: {kind: systemd, name: pilot-detection-engine.service}
   logs: {source: systemd, lookback: 30m}
   verifySpec: docs/verification/detection-engine.md
+remediation:
+  actions:
+    - id: restart
+      risk: R1
+      executor: {kind: systemd_restart, target: pilot-detection-engine.service}
+      maxTargets: 1
+      requiresApproval: true
+      verification: {spec: docs/verification/detection-engine.md}
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false
 evidenceRequirement: {targetTest: topology, idempotency: required}

@@ -1,11 +1,18 @@
-// Command pilot-agent-controller is the Phase 1 observe-only Incident
-// Controller runtime binary
-// (docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md).
-// It receives Alertmanager webhooks, normalizes them into incidents,
-// dispatches read-only diagnosis requests to an external Agent Runtime
-// through a typed interface, and persists the result. It never execs a
-// shell, never holds an SSH credential, and never receives mutation/raw-
-// command MCP capability.
+// Command pilot-agent-controller is the Agent Monitoring incident
+// orchestrator runtime binary
+// (docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md,
+// .../2026-09-01-agent-monitoring-phase-3-human-approved-r1-remediation.md).
+// `serve` receives Alertmanager webhooks, normalizes them into
+// incidents, dispatches read-only diagnosis requests to an external
+// Agent Runtime through a typed interface, and persists the result. The
+// `serve` daemon itself never execs a shell, never holds an SSH
+// credential, and never receives mutation/raw-command MCP capability —
+// that boundary is unchanged by Phase 3. `remediation`/`incident` are
+// separate, human-operator-only CLI subcommands (never called by the
+// serve loop or the Agent) that persist R1 repair plans and record
+// explicit human approval before ever invoking pilot's own separate
+// repair MCP family (internal/agentcontroller.RepairClient) — see
+// design doc §2's authority-separation diagram.
 package main
 
 import (
@@ -51,6 +58,8 @@ func main() {
 		newServeCmd(),
 		newStatusCmd(),
 		newDBCmd(),
+		newIncidentCmd(),
+		newRemediationCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

@@ -2,8 +2,9 @@
 
 > 完整規格（依 phase 分開撰寫）：
 > `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md`、
-> `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-2-structured-diagnostics-spec.md`
-> （Phase 3-5 尚在 `docs/tmp/future/agent-monitoring/`，尚未實作 —— 完成一個
+> `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-2-structured-diagnostics-spec.md`、
+> `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-3-human-approved-r1-remediation-spec.md`
+> （Phase 4-5 尚在 `docs/tmp/future/agent-monitoring/`，尚未實作 —— 完成一個
 > phase 就搬一份進來、在這裡補一段）。這份文件只整理架構全貌，不重複規格的
 > normative 細節，這裡衝突時一律以對應 phase 的 spec 為準。
 
@@ -136,8 +137,7 @@ second "resume a stale run" code path.
   mentions it as an explicit opt-in that Phase 1 does not implement).
 - No HA/active-active; exactly one controller process (spec §3
   non-goals).
-- Phase 3 (human-approved R1 remediation), Phase 4 (policy-gated
-  autonomous R1), and Phase 5 (controlled R2 reapply) are not yet
+- Phase 4 (policy-gated autonomous R1) and Phase 5 (controlled R2 reapply) are not yet
   implemented — see `docs/tmp/future/agent-monitoring/README.md` for the
   full plan-set order and phase-exit-gate discipline.
 
@@ -187,3 +187,105 @@ TCP-handshake check, confirmed correct against both a real open port and
 a real closed one before landing. `internal/diagnose/network_path.go`
 and `component.go` both carry this fix with the same evidence noted
 inline.
+
+## 7. Phase 3 — human-approved R1 remediation
+
+The first live repair capability, hard-restricted to **R1**
+(single-host restart/reload of an explicitly opted-in stateless
+component) and requiring explicit human approval before every single
+execution. Authority separation (design doc §2):
+
+```
+Agent -> observe MCP (--enable-diagnose) -> recommendation (advisory only)
+Operator/Controller CLI -> pilot_repair_plan -> immutable, hashed Plan
+Human -> `pilot-agent-controller remediation approve <id> --plan-hash <hash>`
+Operator/Controller CLI -> pilot_repair_apply -> execute + verify
+```
+
+`internal/repair` (Pilot side) is the planning/execution/verification
+core: `ListCapabilities` (only ever returns R1), `BuildPlan` (resolves
+every executable field server-side from `contracts/*.yaml`'s new
+`remediation:` block — same `KnownFields(true)`-enforced "no command/
+shell field possible" guarantee as Phase 2's `diagnostics:` block),
+`Execute` (reuses `internal/diagnose`'s own `Step`/`RunSteps`/
+`AdHocRunner` — no second ad-hoc execution path), `VerifyAfterExecution`
+(reuses `pilot verify`'s own `tools.VerifySpecTool`, never process exit
+code alone). Three new MCP tools —
+`pilot_repair_capabilities`/`pilot_repair_plan`/`pilot_repair_apply` —
+register under a SEPARATE `--enable-repair` flag, independent of
+`--enable-diagnose`/`--enable-diagnose-raw`/`--allow-write`.
+
+`internal/agentcontroller` owns ALL stateful workflow (schema v2:
+`remediation_plans`/`approvals`/`remediation_runs`) — the repair MCP
+process itself is stateless per call, exactly like every other pilot
+MCP tool. `RepairClient` is the controller's own connection to that MCP
+family: it spawns a private `pilot mcp serve --enable-repair` subprocess
+per call (design doc §3's own recommended topology), rather than
+importing `internal/repair`'s execution path in-process — the production
+ansible-execution machinery (ControlMaster pooling, log rotation,
+timeout handling) lives as unexported internals deep in `cmd/pilot/cmd`,
+tightly coupled to that binary's own MCP server lifecycle; spawning
+`pilot` itself reuses that already-audited surface instead of
+duplicating it into a second binary.
+
+The operator-only CLI (`cmd/pilot-agent-controller/remediation_cli.go`:
+`incident show`, `remediation propose/show/approve/reject/execute`) is
+never called by `serve`'s own scheduler loop or by the Agent — approval
+`--actor` always comes from the human invoking the CLI.
+
+### Two real bugs found via live testing (2026-09-01)
+
+1. **Tampered-plan execution bug.** `VerifyPlanFresh` originally
+   returned only an error/nil — the caller then executed against the
+   CALLER-SUPPLIED plan object, not a freshly-rebuilt one. A plan whose
+   `ExecutorTarget` was tampered WITHOUT recomputing `PlanHash` still
+   passed the freshness check (the hash was never derived from the
+   tampered copy to begin with), so execution would have silently used
+   the attacker-chosen target. Caught by a test written to prove the
+   opposite ("tampering should be rejected") — the test itself revealed
+   the real gap once it passed for the wrong reason. Fixed: `apply`
+   always executes against the plan `VerifyPlanFresh` freshly re-derives
+   from the CURRENT contract/inventory, never the caller-supplied one —
+   a tampered field is simply never read by anything downstream.
+2. **Subprocess working-directory bug.** `RepairClient` spawned `pilot
+   mcp serve --dir <workspace>` without setting the child process's OWN
+   working directory. `--dir` only controls the edit-workspace root;
+   contract loading resolves from `$PILOT_ROOT` or the process's actual
+   `cwd` — a DIFFERENT root. The spawned child inherited the CONTROLLER's
+   own cwd (wherever it happened to be invoked from) and silently failed
+   to find `contracts/` at all. Found via a real spawned-subprocess test
+   connecting through the actual MCP stdio transport, not simulated.
+   Fixed: `cmd.Dir = c.Dir`.
+
+### Real disposable-VM evidence (2026-09-01)
+
+A single vm-target (`host-monitoring` + `docker` + `alertmanager` — the
+`alertmanager` contract's own R1 `docker_restart` action, chosen over
+`prometheus`'s because it needs no extra S3/Thanos-sidecar
+infrastructure to stand up for this narrow purpose and its own
+verification spec is fully self-contained). `docker stop
+pilot-alertmanager` simulated a real failure; the FULL CLI chain ran for
+real: `remediation propose` (real `pilot_repair_plan` MCP round-trip) →
+`remediation approve --plan-hash <real hash>` → `remediation execute`
+(real `docker restart` via ansible ad-hoc + real `docs/verification/
+alertmanager.md` run via `pilot verify`'s own machinery) →
+`APPLIED_VERIFIED`. Independently re-confirmed on the VM afterward:
+`docker ps` showed the container `Up 30 seconds` and `/-/healthy`
+returned `200`.
+
+Negative evidence, all real (not just unit-tested): an unapproved plan
+refuses to execute; an approval bound to the wrong plan hash is
+rejected; a second `remediation execute` against an already-terminal
+plan is rejected (replay protection). A dedicated spawned-binary test
+(`TestMCPServe_Integration_RepairToolsAbsentFromObserveOnlyDiagnoseSession`)
+proves the single most important safety invariant directly: an MCP
+session started with `--enable-diagnose` alone — exactly what an
+external Agent Runtime receives — never lists any `pilot_repair_*` tool.
+
+Not independently re-proven in this pass (both already covered
+elsewhere, not silently skipped): "Agent recommends restart" (no real
+Agent Runtime is wired into any phase yet — an operator proposed the
+plan manually, the same honest scope boundary Phase 1/2 already
+documented) and "Alertmanager resolves" (Phase 1's own evidence already
+proves the webhook delivery chain end to end; Phase 3 adds nothing new
+to that specific mechanism).

@@ -164,7 +164,64 @@ var schemaV1 = migration{
 	},
 }
 
-var migrations = []migration{schemaV1}
+// schemaV2 adds Agent Monitoring Phase 3's remediation persistence
+// (design doc §10). remediation_plans mirrors internal/repair.Plan
+// exactly, plus its own state; approvals binds a decision to
+// (plan_id, plan_hash) so an approval can never silently carry over to
+// a plan whose executable content later changed; remediation_runs
+// records the terminal outcome of exactly one execution attempt per
+// plan — "replay of an already executed approved plan must fail" (spec
+// §10) is enforced structurally by ux_remediation_runs_plan below, not
+// just by application logic.
+var schemaV2 = migration{
+	version: 2,
+	sql: []string{
+		`CREATE TABLE remediation_plans (
+			id TEXT PRIMARY KEY,
+			incident_id TEXT NOT NULL,
+			host TEXT NOT NULL,
+			component TEXT NOT NULL,
+			action TEXT NOT NULL,
+			risk TEXT NOT NULL,
+			executor_kind TEXT NOT NULL,
+			executor_target TEXT NOT NULL,
+			verification_spec TEXT NOT NULL,
+			inventory_revision TEXT NOT NULL,
+			contract_hash TEXT NOT NULL,
+			plan_hash TEXT NOT NULL,
+			state TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			FOREIGN KEY(incident_id) REFERENCES incidents(id)
+		)`,
+		`CREATE TABLE approvals (
+			id TEXT PRIMARY KEY,
+			plan_id TEXT NOT NULL,
+			plan_hash TEXT NOT NULL,
+			decision TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			reason TEXT,
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(plan_id) REFERENCES remediation_plans(id)
+		)`,
+		`CREATE TABLE remediation_runs (
+			id TEXT PRIMARY KEY,
+			plan_id TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			finished_at TEXT,
+			result TEXT NOT NULL,
+			audit_ref TEXT,
+			verify_ref TEXT,
+			FOREIGN KEY(plan_id) REFERENCES remediation_plans(id)
+		)`,
+		// At most one run per plan, ever — a second EnqueueRemediationRun
+		// for the same plan_id fails at the DB level, not just by a
+		// caller remembering to check first.
+		`CREATE UNIQUE INDEX ux_remediation_runs_plan ON remediation_runs(plan_id)`,
+	},
+}
+
+var migrations = []migration{schemaV1, schemaV2}
 
 func (s *Store) migrate() error {
 	return s.applyMigrations(migrations)

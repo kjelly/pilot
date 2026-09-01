@@ -45,6 +45,15 @@ diagnostics:
   readiness: {endpoint: prometheus, path: /-/ready}
   logs: {source: docker, lookback: 30m}
   verifySpec: docs/verification/prometheus.md
+remediation:
+  actions:
+    - id: restart
+      risk: R1
+      executor: {kind: docker_restart, target: pilot-prometheus}
+      maxTargets: 1
+      requiresApproval: true
+      cooldown: 30m
+      verification: {spec: docs/verification/prometheus.md}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:

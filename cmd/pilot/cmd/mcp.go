@@ -29,6 +29,8 @@ var (
 	mcpEnableDiagnoseRaw   bool
 	mcpDiagnoseInventory   string
 	mcpDiagnoseStepTimeout time.Duration
+
+	mcpEnableRepair bool
 )
 
 var mcpCmd = &cobra.Command{
@@ -57,6 +59,7 @@ func init() {
 	mcpServeCmd.Flags().BoolVar(&mcpEnableDiagnoseRaw, "enable-diagnose-raw", false, "register pilot_diagnose_run, which runs a caller-supplied command (ansible's command module, no shell) against --diagnose-inventory — NOT a fixed allow-list; independent of --enable-diagnose")
 	mcpServeCmd.Flags().StringVar(&mcpDiagnoseInventory, "diagnose-inventory", "", "ansible inventory path pilot_diagnose_* tools may target; defaults to <dir>/inventory.yml when --enable-diagnose or --enable-diagnose-raw is set and this is left empty")
 	mcpServeCmd.Flags().DurationVar(&mcpDiagnoseStepTimeout, "diagnose-step-timeout", 20*time.Second, "per ad-hoc step timeout for pilot_diagnose_* tools")
+	mcpServeCmd.Flags().BoolVar(&mcpEnableRepair, "enable-repair", false, "register the repair tool family (pilot_repair_capabilities/pilot_repair_plan/pilot_repair_apply) — a distinct, R1-only, human-approved-by-the-caller live remediation capability against --diagnose-inventory; independent of --enable-diagnose/--enable-diagnose-raw/--allow-write. The Agent Runtime must never receive a session with this flag set — only the Agent Controller or a trusted operator should")
 
 	mcpCmd.AddCommand(mcpServeCmd)
 	rootCmd.AddCommand(mcpCmd)
@@ -89,7 +92,7 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 		WriteEnabled: mcpAllowWrite,
 	})
 
-	if mcpEnableDiagnose || mcpEnableDiagnoseRaw {
+	if mcpEnableDiagnose || mcpEnableDiagnoseRaw || mcpEnableRepair {
 		// Same directory as --dir in every real deployment (hosts.yml and
 		// inventory.yml are sibling files there) — default to it so a
 		// flag-value-swallowing typo like `--diagnose-inventory --dir
@@ -105,7 +108,7 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 		}
 		runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
 		if err != nil {
-			return fmt.Errorf("prepare ansible runtime for --enable-diagnose/--enable-diagnose-raw: %w", err)
+			return fmt.Errorf("prepare ansible runtime for --enable-diagnose/--enable-diagnose-raw/--enable-repair: %w", err)
 		}
 		diagnoseOpts := diagnoseMCPToolsOptions{
 			Inventory:      canonicalDiagnoseInventory,
@@ -118,6 +121,20 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 		}
 		if mcpEnableDiagnoseRaw {
 			registerDiagnoseRunTool(server, diagnoseOpts)
+		}
+		if mcpEnableRepair {
+			// A SEPARATE tool family and options struct from diagnose's
+			// own (see mcp_repair_tools.go) even though it shares the
+			// same inventory/runtime — an Agent Runtime session started
+			// with --enable-diagnose alone must never gain repair
+			// capability just because the two happen to read the same
+			// inventory path.
+			registerRepairTools(server, repairMCPToolsOptions{
+				Inventory:      canonicalDiagnoseInventory,
+				AuditDir:       canonicalAuditDir,
+				StepTimeout:    mcpDiagnoseStepTimeout,
+				AnsibleRuntime: runtime,
+			})
 		}
 	}
 

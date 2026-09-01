@@ -47,6 +47,47 @@ type Contract struct {
 	Verification        Verification `yaml:"verification"`
 	Site                Site         `yaml:"site"`
 	Diagnostics         Diagnostics  `yaml:"diagnostics"`
+	Remediation         Remediation  `yaml:"remediation"`
+}
+
+// Remediation is optional component repair metadata consumed by
+// pilot_repair_* (Agent Monitoring Phase 3 §4). Absence means no repair
+// permission at all for this component. Like Diagnostics, it has no
+// "command"/"args"/"playbook"/"extra_vars"/"sudo" field —
+// KnownFields(true) decoding rejects any such key outright, so a generic
+// executor can never be smuggled in through this metadata.
+type Remediation struct {
+	Actions []RemediationAction `yaml:"actions"`
+}
+
+// RemediationAction is one typed, pre-approved repair action. Phase 3
+// only ever accepts Risk "R1" and MaxTargets 1 — R2/R3/R4 and any
+// maxTargets != 1 are rejected by the repair planner (internal/repair),
+// not just discouraged here, but the contract linter rejects them too
+// so a bad contract fails fast at lint time.
+type RemediationAction struct {
+	ID               string                    `yaml:"id"`
+	Risk             string                    `yaml:"risk"` // R1 | R2 | R3 | R4 (only R1 usable in Phase 3)
+	Executor         RemediationActionExecutor `yaml:"executor"`
+	MaxTargets       int                       `yaml:"maxTargets"`
+	RequiresApproval bool                      `yaml:"requiresApproval"`
+	Cooldown         string                    `yaml:"cooldown,omitempty"`
+	Verification     RemediationVerification   `yaml:"verification"`
+}
+
+// RemediationActionExecutor names a fixed, typed operation — never a
+// caller- or Agent-suppliable command. Target is always resolved from
+// the contract at plan time, never from Agent/MCP-caller input.
+type RemediationActionExecutor struct {
+	Kind   string `yaml:"kind"` // docker_restart | systemd_restart | systemd_reload
+	Target string `yaml:"target"`
+}
+
+// RemediationVerification names the spec a repair action's success is
+// judged against — never process exit code alone (Agent Monitoring
+// Phase 3 §9).
+type RemediationVerification struct {
+	Spec string `yaml:"spec"`
 }
 
 // Diagnostics is optional component-diagnostic metadata consumed by
@@ -505,6 +546,9 @@ func validateLocal(contract Contract) error {
 	if err := validateDiagnostics(contract.Diagnostics, contract.Endpoints, contract.Specs); err != nil {
 		return err
 	}
+	if err := validateRemediation(contract.Remediation, contract.Specs); err != nil {
+		return err
+	}
 	if contract.StagePolicy.Variable == "" || contract.StagePolicy.Default == "" {
 		return fmt.Errorf("stagePolicy variable and default are required")
 	}
@@ -790,6 +834,70 @@ func validateDiagnostics(d Diagnostics, endpoints []Endpoint, specs []Spec) erro
 		}
 		if !found {
 			return fmt.Errorf("diagnostics.verifySpec %q does not match any of this component's specs[].path", d.VerifySpec)
+		}
+	}
+	return nil
+}
+
+// validRemediationExecutorKinds is Phase 3's first slice (design doc §4)
+// — deliberately narrow; widen only with actual reviewed evidence per
+// kind, never speculatively.
+var validRemediationExecutorKinds = map[string]bool{
+	"docker_restart":  true,
+	"systemd_restart": true,
+	"systemd_reload":  true,
+}
+
+// validateRemediation enforces Agent Monitoring Phase 3's contract/
+// linter checks (design doc §12): no remediation block -> zero actions
+// (nothing to validate, handled by the empty-slice range below);
+// duplicate IDs rejected; invalid risk/executor enum rejected; wildcard/
+// empty executor target rejected; maxTargets != 1 rejected (Phase 3 only
+// ever executes exactly one host); verification spec must exist/belong
+// to this component. R2/R3/R4 actions may be DECLARED (a future phase
+// may read them) but Phase 3's own planner (internal/repair) refuses to
+// ever plan/execute anything but R1 — that check lives there, not here,
+// since "declared but not yet executable" is a valid contract state.
+func validateRemediation(r Remediation, specs []Spec) error {
+	seen := map[string]bool{}
+	for _, a := range r.Actions {
+		if strings.TrimSpace(a.ID) == "" {
+			return fmt.Errorf("remediation action id is required")
+		}
+		if seen[a.ID] {
+			return fmt.Errorf("duplicate remediation action id %q", a.ID)
+		}
+		seen[a.ID] = true
+
+		switch a.Risk {
+		case "R1", "R2", "R3", "R4":
+		default:
+			return fmt.Errorf("remediation action %q: risk must be R1, R2, R3, or R4, got %q", a.ID, a.Risk)
+		}
+		if !validRemediationExecutorKinds[a.Executor.Kind] {
+			return fmt.Errorf("remediation action %q: executor.kind must be docker_restart, systemd_restart, or systemd_reload, got %q", a.ID, a.Executor.Kind)
+		}
+		if strings.TrimSpace(a.Executor.Target) == "" {
+			return fmt.Errorf("remediation action %q: executor.target is required", a.ID)
+		}
+		if strings.ContainsAny(a.Executor.Target, "*?") {
+			return fmt.Errorf("remediation action %q: executor.target %q must not be a wildcard pattern", a.ID, a.Executor.Target)
+		}
+		if a.MaxTargets != 1 {
+			return fmt.Errorf("remediation action %q: maxTargets must be exactly 1 in Phase 3, got %d", a.ID, a.MaxTargets)
+		}
+		if strings.TrimSpace(a.Verification.Spec) == "" {
+			return fmt.Errorf("remediation action %q: verification.spec is required", a.ID)
+		}
+		found := false
+		for _, s := range specs {
+			if s.Path == a.Verification.Spec {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("remediation action %q: verification.spec %q does not match any of this component's specs[].path", a.ID, a.Verification.Spec)
 		}
 	}
 	return nil
