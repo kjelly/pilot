@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/kjelly/pilot/internal/policy"
 	"github.com/kjelly/pilot/internal/repair"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -71,6 +72,9 @@ type RepairPlan struct {
 	PlanHash          string `json:"plan_hash"`
 	CreatedAt         string `json:"created_at"`
 	ExpiresAt         string `json:"expires_at"`
+	AutonomySandbox   string `json:"autonomy_sandbox,omitempty"`
+	AutonomyStaging   string `json:"autonomy_staging,omitempty"`
+	AutonomyProd      string `json:"autonomy_prod,omitempty"`
 }
 
 // ToPlan converts the wire-format RepairPlan into a repair.Plan (parsed
@@ -89,6 +93,7 @@ func (rp RepairPlan) ToPlan() (repair.Plan, error) {
 		Action: rp.Action, Risk: rp.Risk, ExecutorKind: rp.ExecutorKind, ExecutorTarget: rp.ExecutorTarget,
 		VerificationSpec: rp.VerificationSpec, InventoryRevision: rp.InventoryRevision, ContractHash: rp.ContractHash,
 		PlanHash: rp.PlanHash, CreatedAt: created, ExpiresAt: expires,
+		AutonomySandbox: rp.AutonomySandbox, AutonomyStaging: rp.AutonomyStaging, AutonomyProd: rp.AutonomyProd,
 	}, nil
 }
 
@@ -104,6 +109,16 @@ func RepairPlanFromStored(p StoredPlan) RepairPlan {
 		VerificationSpec: p.VerificationSpec, InventoryRevision: p.InventoryRevision, ContractHash: p.ContractHash,
 		PlanHash: p.PlanHash, CreatedAt: p.CreatedAt.UTC().Format(time.RFC3339), ExpiresAt: p.ExpiresAt.UTC().Format(time.RFC3339),
 	}
+}
+
+// Autonomy converts a wire RepairPlan's resolved per-environment
+// autonomy opt-in into a policy.ComponentAutonomy — used by the
+// autonomy evaluate/auto-execute path (policy_gather.go) instead of
+// this binary loading contracts/*.yaml itself, so contract loading has
+// exactly one implementation (pilot's own, server-side, in
+// internal/repair.BuildPlan) rather than two that could drift.
+func (rp RepairPlan) Autonomy() policy.ComponentAutonomy {
+	return policy.ComponentAutonomy{Sandbox: rp.AutonomySandbox, Staging: rp.AutonomyStaging, Prod: rp.AutonomyProd}
 }
 
 // RepairApplyResult mirrors cmd/pilot/cmd's repairApplyOutput wire shape

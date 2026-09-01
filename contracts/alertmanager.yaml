@@ -29,6 +29,7 @@ remediation:
       requiresApproval: true
       cooldown: 30m
       verification: {spec: docs/verification/alertmanager.md}
+      autonomy: {sandbox: allowed, staging: allowed, prod: human}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: vm, idempotency: required}
 traceability:

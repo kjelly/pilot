@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/agentcontroller"
+	"github.com/kjelly/pilot/internal/policy"
 	"github.com/spf13/cobra"
 )
 
@@ -76,6 +77,7 @@ func newRemediationCmd() *cobra.Command {
 		newRemediationApproveCmd(),
 		newRemediationRejectCmd(),
 		newRemediationExecuteCmd(),
+		newRemediationAutoExecuteCmd(),
 	)
 	return remediationCmd
 }
@@ -264,6 +266,154 @@ func newRemediationExecuteCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
 	cmd.MarkFlagRequired("db")
+	flags.register(cmd)
+	return cmd
+}
+
+// newRemediationAutoExecuteCmd implements Agent Monitoring Phase 4's
+// unified execution path (design doc §3/§12): evaluate a PROPOSED plan
+// against the live policy facts, persist that decision unconditionally,
+// and — ONLY in enforced mode with an allow_auto decision — authorize
+// execution via the EXACT SAME Store.Approve/MarkExecuting/FinishRun
+// sequence `remediation approve` + `remediation execute` use for a
+// human, differing only in actor identity (agentcontroller.PolicyActor).
+// There is no separate "autoRestart" shortcut anywhere in this path.
+func newRemediationAutoExecuteCmd() *cobra.Command {
+	var dbPath, environment string
+	var cooldown, hostBudgetWindow, componentBudgetWindow time.Duration
+	var hostBudgetCount, componentBudgetCount int
+	flags := &repairClientFlags{}
+	cmd := &cobra.Command{
+		Use:   "auto-execute <plan-id>",
+		Short: "Policy-gated autonomous execution: evaluate a PROPOSED plan; execute only if allow_auto AND autonomy mode is enforced",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := agentcontroller.OpenStore(dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			now := time.Now()
+			if recovered, rerr := store.RecoverOrphanedExecutingPlans(now); rerr != nil {
+				return fmt.Errorf("recover orphaned plans: %w", rerr)
+			} else if recovered > 0 {
+				fmt.Printf("recovered %d orphaned EXECUTING plan(s) from an unclean shutdown\n", recovered)
+			}
+
+			p, err := store.GetPlan(args[0])
+			if err != nil {
+				return err
+			}
+			if p == nil {
+				return fmt.Errorf("no such plan: %s", args[0])
+			}
+			if p.State != agentcontroller.PlanStateProposed {
+				return fmt.Errorf("plan %s is %s, not PROPOSED — auto-execute only evaluates a freshly proposed plan", p.ID, p.State)
+			}
+
+			autonomyState, err := store.AutonomyMode()
+			if err != nil {
+				return err
+			}
+			cfg := policy.DefaultConfig()
+			cfg.AutonomyMode = autonomyState.Mode
+			// Design doc §7: "Configuration may tighten these [bounded
+			// defaults]." Flags default to DefaultConfig()'s own values
+			// (cmd.Flags().Changed checks are unnecessary — an unset flag
+			// just re-supplies the same default), so a deployment that
+			// never passes them behaves identically to before these flags
+			// existed.
+			cfg.Defaults.Cooldown = cooldown
+			cfg.Defaults.HostBudgetCount = hostBudgetCount
+			cfg.Defaults.HostBudgetWindow = hostBudgetWindow
+			cfg.Defaults.ComponentBudgetCount = componentBudgetCount
+			cfg.Defaults.ComponentBudgetWindow = componentBudgetWindow
+
+			client := flags.client()
+			in, compAutonomy, err := store.GatherPolicyInput(cmd.Context(), client, cfg, *p, environment, now)
+			if err != nil {
+				return fmt.Errorf("gather policy facts: %w", err)
+			}
+
+			decision, err := store.EvaluateAndRecord(cfg, compAutonomy, in, *p, autonomyState.Mode, now)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("policy decision: %s (mode=%s) reasons=%v\n", decision.Decision, autonomyState.Mode, decision.Reasons)
+
+			switch {
+			case autonomyState.Mode == policy.ModeDisabled:
+				fmt.Println("autonomy disabled: leaving plan PROPOSED for human review")
+				return nil
+			case autonomyState.Mode == policy.ModeShadow:
+				fmt.Println("shadow mode: decision recorded, no execution — leaving plan PROPOSED")
+				return nil
+			case decision.Decision != policy.DecisionAllowAuto:
+				fmt.Println("not allow_auto: leaving plan PROPOSED for human review")
+				return nil
+			}
+
+			actor := agentcontroller.PolicyActor(decision.PolicyID, decision.PolicyVersion)
+			reason := fmt.Sprintf("policy allow_auto: %v", decision.Reasons)
+			if _, err := store.Approve(p.ID, p.PlanHash, actor, reason, now); err != nil {
+				return fmt.Errorf("policy auto-approve: %w", err)
+			}
+
+			started := time.Now()
+			executing, err := store.MarkExecuting(p.ID, started)
+			if err != nil {
+				return fmt.Errorf("cannot execute: %w", err)
+			}
+			result, applyErr := client.Apply(cmd.Context(), agentcontroller.RepairPlanFromStored(executing))
+			finished := time.Now()
+			finalResult := result.Result
+			if applyErr != nil {
+				finalResult = agentcontroller.PlanStateExecutionFailed
+			}
+			if finalResult == "" {
+				finalResult = agentcontroller.PlanStateVerificationInconclusive
+			}
+			if finishErr := store.FinishRun(executing.ID, finalResult, result.AuditDirectory, "", started, finished); finishErr != nil {
+				return fmt.Errorf("record run outcome: %w", finishErr)
+			}
+
+			if finalResult != agentcontroller.PlanStateAppliedVerified {
+				// Design doc §8/§13: any failed/inconclusive autonomous
+				// outcome trips the affected component AND host breakers
+				// immediately (single-strike, not "repeated" — the
+				// conservative MVP choice documented in
+				// policy_evaluate.go: a tripped breaker never silently
+				// self-clears, so favoring an over-eager trip over a
+				// missed one is the safer failure mode here).
+				breakerReason := fmt.Sprintf("autonomous execution result=%s plan=%s", finalResult, executing.ID)
+				if berr := store.TripBreaker(agentcontroller.BreakerScopeComponent(executing.Component), breakerReason, finished); berr != nil {
+					fmt.Printf("warning: failed to trip component breaker: %v\n", berr)
+				}
+				if berr := store.TripBreaker(agentcontroller.BreakerScopeHost(executing.Host), breakerReason, finished); berr != nil {
+					fmt.Printf("warning: failed to trip host breaker: %v\n", berr)
+				}
+				fmt.Printf("plan %s -> %s — breakers tripped for component:%s and host:%s, operator reset required\n",
+					executing.ID, finalResult, executing.Component, executing.Host)
+				if applyErr != nil {
+					return fmt.Errorf("repair apply: %w", applyErr)
+				}
+				os.Exit(1)
+			}
+			fmt.Printf("plan %s -> %s (execution_ok=%v verify_passed=%v)\n", executing.ID, result.Result, result.ExecutionOK, result.VerifyPassed)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
+	cmd.MarkFlagRequired("db")
+	cmd.Flags().StringVar(&environment, "environment", "", "sandbox | staging | prod — this evaluation's trust tier (required)")
+	cmd.MarkFlagRequired("environment")
+	def := policy.DefaultConfig().Defaults
+	cmd.Flags().DurationVar(&cooldown, "cooldown", def.Cooldown, "minimum time between actions on the same host/component/action")
+	cmd.Flags().IntVar(&hostBudgetCount, "host-budget-count", def.HostBudgetCount, "max approved actions per host within --host-budget-window")
+	cmd.Flags().DurationVar(&hostBudgetWindow, "host-budget-window", def.HostBudgetWindow, "window --host-budget-count is measured over")
+	cmd.Flags().IntVar(&componentBudgetCount, "component-budget-count", def.ComponentBudgetCount, "max approved actions per component within --component-budget-window")
+	cmd.Flags().DurationVar(&componentBudgetWindow, "component-budget-window", def.ComponentBudgetWindow, "window --component-budget-count is measured over")
 	flags.register(cmd)
 	return cmd
 }

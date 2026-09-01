@@ -123,6 +123,9 @@ type repairPlanJSON struct {
 	PlanHash          string `json:"plan_hash"`
 	CreatedAt         string `json:"created_at"`
 	ExpiresAt         string `json:"expires_at"`
+	AutonomySandbox   string `json:"autonomy_sandbox,omitempty"`
+	AutonomyStaging   string `json:"autonomy_staging,omitempty"`
+	AutonomyProd      string `json:"autonomy_prod,omitempty"`
 }
 
 func toPlanJSON(p repair.Plan) repairPlanJSON {
@@ -131,6 +134,7 @@ func toPlanJSON(p repair.Plan) repairPlanJSON {
 		Action: p.Action, Risk: p.Risk, ExecutorKind: p.ExecutorKind, ExecutorTarget: p.ExecutorTarget,
 		VerificationSpec: p.VerificationSpec, InventoryRevision: p.InventoryRevision, ContractHash: p.ContractHash,
 		PlanHash: p.PlanHash, CreatedAt: p.CreatedAt.UTC().Format(time.RFC3339), ExpiresAt: p.ExpiresAt.UTC().Format(time.RFC3339),
+		AutonomySandbox: p.AutonomySandbox, AutonomyStaging: p.AutonomyStaging, AutonomyProd: p.AutonomyProd,
 	}
 }
 
@@ -188,6 +192,7 @@ func fromPlanJSON(pj repairPlanJSON) (repair.Plan, error) {
 		Action: pj.Action, Risk: pj.Risk, ExecutorKind: pj.ExecutorKind, ExecutorTarget: pj.ExecutorTarget,
 		VerificationSpec: pj.VerificationSpec, InventoryRevision: pj.InventoryRevision, ContractHash: pj.ContractHash,
 		PlanHash: pj.PlanHash, CreatedAt: created, ExpiresAt: expires,
+		AutonomySandbox: pj.AutonomySandbox, AutonomyStaging: pj.AutonomyStaging, AutonomyProd: pj.AutonomyProd,
 	}, nil
 }
 

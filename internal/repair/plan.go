@@ -38,6 +38,17 @@ type Plan struct {
 	PlanHash          string
 	CreatedAt         time.Time
 	ExpiresAt         time.Time
+
+	// AutonomySandbox/Staging/Prod are Agent Monitoring Phase 4's
+	// per-environment autonomy opt-in (contract.RemediationAutonomy),
+	// resolved here for display/decision purposes only — deliberately
+	// NOT part of planHashFields below, since changing who may
+	// authorize an action does not change what the action DOES. A
+	// contract edit that only touches autonomy: therefore does not
+	// invalidate an already-approved plan's hash.
+	AutonomySandbox string
+	AutonomyStaging string
+	AutonomyProd    string
 }
 
 // Expired reports whether now is past p.ExpiresAt.
@@ -153,6 +164,7 @@ func BuildPlan(catalog contract.Catalog, resolved networkcheck.ResolvedInventory
 		Action: actionID, Risk: action.Risk, ExecutorKind: action.Executor.Kind, ExecutorTarget: action.Executor.Target,
 		VerificationSpec: action.Verification.Spec, InventoryRevision: inventoryRevision, ContractHash: contractHash,
 		CreatedAt: now, ExpiresAt: now.Add(PlanTTL),
+		AutonomySandbox: action.Autonomy.Sandbox, AutonomyStaging: action.Autonomy.Staging, AutonomyProd: action.Autonomy.Prod,
 	}
 	p.PlanHash = computeHash(planHashFields{
 		SchemaVersion: p.SchemaVersion, IncidentID: p.IncidentID, Host: p.Host, Component: p.Component,

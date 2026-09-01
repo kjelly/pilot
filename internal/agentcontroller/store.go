@@ -221,7 +221,59 @@ var schemaV2 = migration{
 	},
 }
 
-var migrations = []migration{schemaV1, schemaV2}
+// schemaV3 adds Agent Monitoring Phase 4's policy persistence (design
+// doc §11). Deliberately omits the doc's suggested action_budgets
+// ledger table: budget/cooldown counts are instead DERIVED from
+// approvals+remediation_plans, which already durably and atomically
+// record every executed/approved action (Store.Approve's own
+// transaction is the "atomic reservation" — see gatherPolicyFacts in
+// policy_gather.go). A second ledger table would just be a second
+// source of truth that could drift from the approvals it's meant to be
+// counting; deriving avoids that class of bug entirely.
+var schemaV3 = migration{
+	version: 3,
+	sql: []string{
+		`CREATE TABLE policy_decisions (
+			id TEXT PRIMARY KEY,
+			incident_id TEXT NOT NULL,
+			plan_id TEXT NOT NULL,
+			plan_hash TEXT NOT NULL,
+			decision TEXT NOT NULL,
+			policy_id TEXT NOT NULL,
+			policy_version TEXT NOT NULL,
+			reasons_json TEXT NOT NULL,
+			mode TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(plan_id) REFERENCES remediation_plans(id)
+		)`,
+		`CREATE INDEX ix_policy_decisions_plan ON policy_decisions(plan_id)`,
+		`CREATE TABLE circuit_breakers (
+			scope TEXT PRIMARY KEY,
+			state TEXT NOT NULL,
+			reason TEXT,
+			tripped_at TEXT,
+			reset_at TEXT,
+			reset_actor TEXT
+		)`,
+		// Singleton row holding the operator-controlled autonomy mode
+		// (disabled|shadow|enforced, design doc §9) — DB state, not a
+		// static config file, because `autonomy enable/disable` must take
+		// effect on the NEXT auto-execute invocation without an operator
+		// hand-editing YAML. The CHECK(id=1) makes "exactly one row"
+		// a schema-level guarantee, not just an application convention.
+		`CREATE TABLE autonomy_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			mode TEXT NOT NULL,
+			actor TEXT,
+			reason TEXT,
+			updated_at TEXT NOT NULL
+		)`,
+		`INSERT INTO autonomy_state (id, mode, actor, reason, updated_at)
+			VALUES (1, 'disabled', NULL, 'initial state — fresh deployment', datetime('now'))`,
+	},
+}
+
+var migrations = []migration{schemaV1, schemaV2, schemaV3}
 
 func (s *Store) migrate() error {
 	return s.applyMigrations(migrations)

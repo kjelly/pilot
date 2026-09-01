@@ -73,6 +73,20 @@ type RemediationAction struct {
 	RequiresApproval bool                      `yaml:"requiresApproval"`
 	Cooldown         string                    `yaml:"cooldown,omitempty"`
 	Verification     RemediationVerification   `yaml:"verification"`
+	Autonomy         RemediationAutonomy       `yaml:"autonomy,omitempty"`
+}
+
+// RemediationAutonomy is Agent Monitoring Phase 4's per-environment
+// autonomy opt-in (design doc §4) — a missing block, or any field left
+// empty, means human approval is required for that environment. This is
+// a per-action, per-environment ALLOWLIST: the policy engine
+// (internal/policy) additionally requires the environment's own default
+// posture (allow_r1) and all 15 mandatory guards before this opt-in ever
+// results in autonomous execution.
+type RemediationAutonomy struct {
+	Sandbox string `yaml:"sandbox,omitempty"` // "allowed" | "human" | "" (missing = human)
+	Staging string `yaml:"staging,omitempty"`
+	Prod    string `yaml:"prod,omitempty"`
 }
 
 // RemediationActionExecutor names a fixed, typed operation — never a
@@ -898,6 +912,13 @@ func validateRemediation(r Remediation, specs []Spec) error {
 		}
 		if !found {
 			return fmt.Errorf("remediation action %q: verification.spec %q does not match any of this component's specs[].path", a.ID, a.Verification.Spec)
+		}
+		for env, v := range map[string]string{"sandbox": a.Autonomy.Sandbox, "staging": a.Autonomy.Staging, "prod": a.Autonomy.Prod} {
+			switch v {
+			case "", "allowed", "human":
+			default:
+				return fmt.Errorf("remediation action %q: autonomy.%s must be \"allowed\" or \"human\", got %q", a.ID, env, v)
+			}
 		}
 	}
 	return nil

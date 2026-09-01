@@ -60,6 +60,7 @@ func main() {
 		newDBCmd(),
 		newIncidentCmd(),
 		newRemediationCmd(),
+		newAutonomyCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

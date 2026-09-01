@@ -180,3 +180,44 @@ func (s *Store) FinishRun(planID, result, auditRef, verifyRef string, startedAt,
 	}
 	return nil
 }
+
+// RecoverOrphanedExecutingPlans closes out any plan left EXECUTING by an
+// unclean controller shutdown — mirrors RecoverInFlightRuns' own
+// reasoning exactly (no lease-timestamp arithmetic; this controller runs
+// as a single process, so anything still EXECUTING at startup was
+// definitely orphaned, never a live concurrent execution). The outcome
+// of the interrupted ansible run is genuinely unknown — it may have
+// mutated the host or not — so it is recorded as a distinct terminal
+// state (never APPLIED_VERIFIED, which would wrongly claim success) via
+// the SAME FinishRun path every other execution outcome goes through,
+// which is what makes it correctly count against budgets/breakers and
+// what makes remediation_runs' unique index permanently block any
+// future MarkExecuting for the same plan_id (design doc §17.8: "restart
+// controller -> budgets/breakers persist").
+func (s *Store) RecoverOrphanedExecutingPlans(now time.Time) (recovered int, err error) {
+	rows, queryErr := s.db.Query(`SELECT id FROM remediation_plans WHERE state = ?`, PlanStateExecuting)
+	if queryErr != nil {
+		return 0, fmt.Errorf("query executing plans: %w", queryErr)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan executing plan: %w", scanErr)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return 0, err
+	}
+
+	for _, id := range ids {
+		if finishErr := s.FinishRun(id, PlanStateExecutionFailed, "", "recovered: orphaned EXECUTING plan after unclean shutdown — outcome unknown", now, now); finishErr != nil {
+			return recovered, fmt.Errorf("recover orphaned plan %s: %w", id, finishErr)
+		}
+		recovered++
+	}
+	return recovered, nil
+}
