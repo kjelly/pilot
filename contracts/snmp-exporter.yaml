@@ -6,7 +6,9 @@ specs:
     rows: {all: true}
 playbooks:
   apply: playbooks/apply/snmp-exporter-apply.yml
-regressionTests: []
+regressionTests:
+  - internal/spec/snmp_exporter_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
 # Docker Engine is an execution prerequisite for this container-based
 # exporter (spec §6.2), declared as a real sameHosts dependency here
 # (unlike dcgm-exporter, which deliberately keeps docker external —
@@ -36,16 +38,6 @@ traceability:
   mode: rowTags
   tag: {kind: bare}
   exemptions:
-    "docs/verification/snmp-exporter.md#C1": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
-    "docs/verification/snmp-exporter.md#C2": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
-    "docs/verification/snmp-exporter.md#C3": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
-    "docs/verification/snmp-exporter.md#C4": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
-    "docs/verification/snmp-exporter.md#C5": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
-    "docs/verification/snmp-exporter.md#C6": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
-    "docs/verification/snmp-exporter.md#C7": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
-    "docs/verification/snmp-exporter.md#C8": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
-    "docs/verification/snmp-exporter.md#C9": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
-    "docs/verification/snmp-exporter.md#C10": {kind: skeleton, reason: "Phase 0 skeleton — playbooks/apply/snmp-exporter-apply.yml has zero tasks yet, see spec §15 Phase 1"}
     "docs/verification/snmp-exporter.md#C11": {kind: verifyOnly, reason: "idempotency scenario evidence — verify-only, not a tagged task"}
     "docs/verification/snmp-exporter.md#C12": {kind: verifyOnly, reason: "production version-policy scenario evidence — verify-only, not a tagged task"}
 verification: {autoDeploy: false}

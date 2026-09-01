@@ -207,7 +207,10 @@ var specTagMap = []specTagMapping{
 			"C8": "anonymous DELETE + GET-404 probe — verify-only outcome of the gateway config (s3-C1..C7)",
 		}},
 	{spec: "snmp-exporter.md", playbook: "snmp-exporter-apply.yml",
-		noRowTags: "Phase 0 skeleton — playbook has zero tasks yet (docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md §15 Phase 1 adds the real implementation and per-row tags)"},
+		exemptRows: map[string]string{
+			"C11": "idempotent-reapply probe — verify-only outcome of the real second-apply changed=0 evidence recorded in the spec, not a single tagged task",
+			"C12": "prod version-policy scenario probe — verify-only outcome of the pre_tasks assert gate (Go-level: no dedicated apply task, checked via --check with prod/exception scenarios in the spec's actual-run evidence)",
+		}},
 	{spec: "thanos-query.md", playbook: "thanos-query-apply.yml"},
 	{spec: "wazuh-fim.md", playbook: "wazuh-fim-apply.yml"},
 	{spec: "wazuh-manager.md", playbook: "wazuh-manager-apply.yml",

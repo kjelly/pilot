@@ -21,7 +21,7 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 
 # Verification Spec — snmp-exporter
 
-Phase 0/1 skeleton for the site-local `snmp_exporter` component
+Phase 1 acceptance for the site-local `snmp_exporter` component
 (`pilot-snmp-exporter` container,
 `playbooks/apply/snmp-exporter-apply.yml`). Row IDs and semantics here
 are exactly
@@ -34,12 +34,6 @@ credentials, never holds a Pilot MCP capability, and by default binds
 only to loopback so Prometheus is the only caller of `/snmp`. C1-C9
 verify the container/filesystem/network boundary; C10-C12 verify the
 non-secret catalog and production version-policy guards.
-
-**Status:** DRAFT — the apply playbook is currently a Phase 0 skeleton
-with no tasks (see `playbooks/apply/snmp-exporter-apply.yml`'s header).
-None of these rows have actual-run evidence yet; they define the target
-behavior Phase 1 must implement and this file must then be re-verified
-against.
 
 ## Checks
 
@@ -61,22 +55,27 @@ against.
 - id: C3
   category: hardening
   check: container runs with no-new-privileges and cap-drop ALL
+  # Deliberately plain `docker inspect` (JSON) piped to grep, never
+  # `docker inspect --format '{{...}}'` — ansible ad-hoc's -m command/-m
+  # shell runs Jinja finalization over the whole command string, and
+  # Docker's own Go template braces are indistinguishable from Jinja to
+  # that pass (see docs/verification/dcgm-exporter.md's C1/C4/C5 note).
   probe: |
-    docker inspect pilot-snmp-exporter --format '{{json .HostConfig.SecurityOpt}} {{json .HostConfig.CapDrop}}'
-  expect: {stdout: {contains: "no-new-privileges"}}
+    sh -c 'j=$(docker inspect pilot-snmp-exporter); echo "$j" | grep -q "no-new-privileges" && echo "$j" | grep -A2 "\"CapDrop\"" | grep -q "\"ALL\"" && echo hardened || echo not-hardened'
+  expect: {stdout: {equals: hardened}}
   tags: [C3]
 - id: C4
   category: isolation
   check: container has no Docker socket bind-mount
   probe: |
-    docker inspect pilot-snmp-exporter --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -qF '/var/run/docker.sock' && echo present || echo absent
+    docker inspect pilot-snmp-exporter | grep -qF '/var/run/docker.sock' && echo present || echo absent
   expect: {stdout: {equals: absent}}
   tags: [C4]
 - id: C5
   category: isolation
   check: container has no SSH key or Pilot vault file mounted
   probe: |
-    docker inspect pilot-snmp-exporter --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -qE '\.ssh|\.vault' && echo present || echo absent
+    docker inspect pilot-snmp-exporter | grep -qE '"Source": "[^"]*(\.ssh|\.vault)' && echo present || echo absent
   expect: {stdout: {equals: absent}}
   tags: [C5]
 - id: C6
@@ -142,20 +141,35 @@ are tracked in
 ## Traceability
 
 - C1-C10 map to their playbook tags (same names) in
-  `playbooks/apply/snmp-exporter-apply.yml`, once Phase 1 replaces the
-  current no-op skeleton with real tasks.
+  `playbooks/apply/snmp-exporter-apply.yml`.
 - C11-C12 are `verifyOnly` — idempotency and the production version-policy
   guard are scenario/apply-run evidence (spec §17.2/§17.3), not a single
   already-applied host's static probe.
 
 ## Actual-run evidence
 
-None yet. Phase 0 only lands this spec, `contracts/snmp-exporter.yaml`,
-and the inert playbook skeleton — see the spec's §15 Phase 1 exit gate
-for what "fresh VM apply PASS" evidence this file must be updated with.
+See `docs/runbooks/snmp-exporter.md` for the full disposable two-VM lane:
+a real `snmp-exporter` VM applied fresh, cross-scraping a real net-snmp
+SNMPv3 authPriv agent (read-only view) on a separate VM. Summary:
+
+- `pilot verify docs/verification/snmp-exporter.md`: **12/12 PASS**
+  (`.verification/snmp-exporter-20260901-143741.{ndjson,md}`).
+- Fresh apply: `ok=25 changed=6 failed=0`; second apply (idempotency):
+  `ok=24 changed=0 failed=0`.
+- Real SNMPv3 scrape via the deployed exporter returned genuine
+  interface counters (`ifHCInOctets`, `ifAdminStatus`, ...) from the lab
+  device — see runbook §4.
+- `snmpset` against the lab device rejected with `noAccess` (read-only
+  view, spec §13.4) — runbook §5.
+- Secret scan clean across `catalog.yml`/`modules/if_mib.yml`/`auths.yml`
+  — runbook §6.
+- Config negative lanes (missing credentialRef, secret-like key in
+  catalog, prod + v2c with no/expired/valid exception) all produced the
+  expected `assert` pass/fail — runbook §8.
 
 ## Change record
 
 | Date | Version | Change |
 |---|---|---|
 | 2026-09-01 | DRAFT | Phase 0 initial authoring per spec §6/§12/§13's C1-C12. No actual-run evidence yet; apply playbook is a no-op skeleton. |
+| 2026-09-01 | v1.0 | Phase 1: real apply implementation (catalog render, hardened container, self metrics), disposable two-VM actual-run evidence (12/12 PASS, real SNMPv3 scrape, idempotent reapply, secret scan clean, negative lanes verified) — see `docs/runbooks/snmp-exporter.md`. |

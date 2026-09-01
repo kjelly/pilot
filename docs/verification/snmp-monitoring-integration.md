@@ -7,7 +7,7 @@ intent:
   maintainer: sre
 targets:
   roles: [monitoring-registry, detection-engine, agent-controller]
-  hostScope: fleet
+  hostScope: aggregate
   platforms:
     - {os: ubuntu, versions: ["22.04", "24.04"]}
 inputs: []
@@ -104,7 +104,7 @@ as of this revision (spec §15 Phase 0 exit gate).
   verifyOnly: true
 - id: C10
   category: identity
-  check: Agent Controller normalizes a pilot_target-labeled alert into IncidentSubject{Kind: <subject_kind>, Managed: false}, never Managed=true
+  check: Agent Controller normalizes a pilot_target-labeled alert into an IncidentSubject with the subject's own kind and Managed=false, never Managed=true
   probe: |
     go test ./internal/agentcontroller/... -run NormalizeSubject -v
   expect: {stdout: {contains: "PASS"}}

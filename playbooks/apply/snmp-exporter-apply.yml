@@ -1,30 +1,67 @@
-# Apply playbook for docs/verification/snmp-exporter.md (DRAFT)
+# Apply playbook for docs/verification/snmp-exporter.md
 #
-# Phase 0 skeleton — see
+# Site-local snmp_exporter (spec
 # docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md
-# §15 Phase 1 ("SNMP Exporter Role and Catalog") for the real
-# implementation this play must grow: pilot-snmp-exporter container,
-# /etc/pilot/snmp-exporter catalog/module/env rendering, container
-# hardening, self metrics.
+# §6): reads the version-controlled, secret-free
+# monitoring/snmp/catalog.yml + its referenced module files from the
+# control node's own checkout, renders them into the exporter's native
+# config (auth secrets as `${VAR}` placeholders, never resolved values)
+# plus a root-owned env file holding the actual resolved credentials,
+# and runs the official image as a hardened, loopback-only container.
 #
-# `tasks` is intentionally empty. Only the stage/confirm/inventory-group
-# gate below runs (AGENTS.md §4.3 requires it on every apply playbook,
-# no exceptions, regardless of site.yml wiring) — running this play
-# changes nothing else on the target host.
+# Usage:
+#
+#   go run ./cmd/pilot vm-target run --name snmp-exp \
+#       playbooks/apply/snmp-exporter-apply.yml \
+#       -e target_group=snmp-exporter \
+#       -e @~/.vault/snmp-exporter-sandbox.yaml
+#
+# vault file shape (see group_vars/snmp-exporter.example.yml):
+#   snmp_exporter_credentials:
+#     lab-switch-v3:
+#       username: "..."
+#       authPassword: "..."
+#       privPassword: "..."
+#
+# Variables: see contracts/snmp-exporter.yaml groupVars.
 #
 # Stage gating (same convention as alertmanager-apply.yml):
 #   sandbox  default; runs immediately
 #   staging  requires -e confirm_staging=true
 #   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
-- name: Apply snmp-exporter (Phase 0 skeleton — no tasks yet)
+- name: Apply snmp-exporter (site-local Prometheus SNMP exporter)
   hosts: "{{ target_group | default('snmp-exporter') }}"
   become: true
-  gather_facts: false
+  gather_facts: true
   vars:
     stage: sandbox
     confirm_staging: false
     confirm_prod: false
     staging_attested_within_hours: 168
+
+    snmp_exporter_version: "v0.30.1"
+    snmp_exporter_image: "quay.io/prometheus/snmp-exporter"
+    snmp_exporter_container_name: "pilot-snmp-exporter"
+    snmp_exporter_port: "9116"
+    snmp_exporter_listen_address: "127.0.0.1"
+    snmp_exporter_module_concurrency: "1"
+    snmp_exporter_config_dir: "/etc/pilot/snmp-exporter"
+    snmp_exporter_data_dir: "/var/lib/pilot/snmp-exporter"
+
+    # Repo-relative path to the non-secret catalog (spec §6.4), read
+    # from the control node's own checkout — same convention as
+    # prometheus-apply.yml's monitoring_targets_file/monitoring_profiles_file.
+    snmp_catalog_file: "monitoring/snmp/catalog.yml"
+
+    # Vault-supplied secret input (spec §6.4): {credentialRef: {username,
+    # authPassword, privPassword}} for a v3 profile, or
+    # {credentialRef: {community: ...}} for v1/v2c. Never committed.
+    snmp_exporter_credentials: {}
+
+    # Production break-glass (spec §13.2): {authProfileID: {reason, owner,
+    # expiry: "YYYY-MM-DD"}}. Empty by default — prod fails closed on any
+    # profile that isn't v3/authPriv.
+    snmp_insecure_auth_profile_exceptions: {}
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -57,4 +94,300 @@
       when: stage == 'prod'
       tags: [always]
 
-  tasks: []
+    # ---- SNMP catalog: load, validate, render (pure computation, no
+    # host mutation — mirrors prometheus-apply.yml's monitoring registry
+    # pre_tasks block, which stands in for a not-yet-built
+    # `pilot monitoring validate` CLI, spec §11.1).
+    - name: "Load SNMP catalog file"
+      ansible.builtin.set_fact:
+        snmp_catalog_raw: "{{ lookup('file', snmp_catalog_file) }}"
+      tags: [always]
+
+    - name: "Parse SNMP catalog"
+      ansible.builtin.set_fact:
+        snmp_catalog_parsed: "{{ snmp_catalog_raw | from_yaml }}"
+      tags: [always]
+
+    - name: "Gate: catalog schemaVersion is 1"
+      ansible.builtin.assert:
+        that:
+          - (snmp_catalog_parsed.schemaVersion | default(0)) == 1
+        fail_msg: "{{ snmp_catalog_file }}: unsupported or missing schemaVersion (must be 1)."
+      tags: [always]
+
+    - name: "Gate: module and auth profile IDs match the required name pattern"
+      ansible.builtin.assert:
+        that:
+          - item is regex('^[a-z0-9][a-z0-9_-]{0,63}$')
+        fail_msg: >-
+          "{{ item }}" in {{ snmp_catalog_file }} does not match
+          ^[a-z0-9][a-z0-9_-]{0,63}$ (spec §6.4 rule 1).
+      loop: >-
+        {{ ((snmp_catalog_parsed.modules | default({})).keys() | list)
+           + ((snmp_catalog_parsed.authProfiles | default({})).keys() | list) }}
+      tags: [always]
+
+    - name: "Gate: catalog file contains no secret-like key"
+      ansible.builtin.assert:
+        that:
+          - snmp_catalog_raw is not regex('(?i)(^|[^a-z_])(community|username|password|privpassword)\s*:')
+        fail_msg: "{{ snmp_catalog_file }} must not contain community/username/password/privPassword (spec §6.4 rule 3)."
+      tags: [always]
+
+    - name: "Gate: module file paths are relative and do not escape monitoring/snmp/"
+      ansible.builtin.assert:
+        that:
+          - not item.value.file.startswith('/')
+          - "'..' not in item.value.file.split('/')"
+        fail_msg: >-
+          module "{{ item.key }}" file path "{{ item.value.file }}" must be a
+          relative path under monitoring/snmp/ with no ".." segment (spec §6.4 rule 2).
+      loop: "{{ (snmp_catalog_parsed.modules | default({})) | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+      tags: [always]
+
+    - name: "Load each module file's content"
+      ansible.builtin.set_fact:
+        snmp_module_contents: >-
+          {{ (snmp_module_contents | default({})) | combine(
+               {item.key: (lookup('file', (snmp_catalog_file | dirname) ~ '/' ~ item.value.file) | from_yaml)}
+             ) }}
+      loop: "{{ (snmp_catalog_parsed.modules | default({})) | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+      tags: [always]
+
+    - name: "Gate: each module file declares its own catalog module ID"
+      ansible.builtin.assert:
+        that:
+          - item.key in (snmp_module_contents.get(item.key, {}))
+        fail_msg: >-
+          module file for "{{ item.key }}" ({{ item.value.file }}) does not
+          declare a top-level "{{ item.key }}:" key (spec §6.4 rule 5).
+      loop: "{{ (snmp_catalog_parsed.modules | default({})) | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+      tags: [always]
+
+    - name: "Gate: module files contain no secret-like key"
+      ansible.builtin.assert:
+        that:
+          - (lookup('file', (snmp_catalog_file | dirname) ~ '/' ~ item.value.file))
+            is not regex('(?i)(^|[^a-z_])(community|username|password|privpassword)\s*:')
+        fail_msg: >-
+          module file for "{{ item.key }}" ({{ item.value.file }}) must not
+          contain community/username/password/privPassword (spec §6.4 rule 3).
+      loop: "{{ (snmp_catalog_parsed.modules | default({})) | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+      tags: [always]
+
+    - name: "Gate: every auth profile's credentialRef resolves to a complete credential"
+      ansible.builtin.assert:
+        that:
+          - (item.value.version | int == 3 and
+             (snmp_exporter_credentials.get(item.value.credentialRef, {}).get('username', '') | length > 0) and
+             (snmp_exporter_credentials.get(item.value.credentialRef, {}).get('authPassword', '') | length > 0) and
+             (snmp_exporter_credentials.get(item.value.credentialRef, {}).get('privPassword', '') | length > 0))
+            or
+            (item.value.version | int != 3 and
+             (snmp_exporter_credentials.get(item.value.credentialRef, {}).get('community', '') | length > 0))
+        fail_msg: >-
+          authProfile "{{ item.key }}" credentialRef "{{ item.value.credentialRef }}" is
+          missing or incomplete in snmp_exporter_credentials (spec §12: missing
+          SNMP credentialRef must fail preflight, never write half-set config).
+      loop: "{{ (snmp_catalog_parsed.authProfiles | default({})) | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+      no_log: true
+      tags: [always]
+
+    - name: "Gate: prod stage rejects insecure SNMP auth profiles unless an explicit reviewed exception exists"
+      ansible.builtin.assert:
+        that:
+          - (item.value.version | int == 3 and item.value.securityLevel == 'authPriv')
+            or
+            ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('reason', '') | length > 0)
+             and (snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('owner', '') | length > 0)
+             and (snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '0000-00-00') >= ansible_date_time.date))
+        fail_msg: >-
+          authProfile "{{ item.key }}" is version {{ item.value.version }}
+          / {{ item.value.securityLevel }}, which prod rejects unless
+          snmp_insecure_auth_profile_exceptions["{{ item.key }}"] has a
+          non-expired reason/owner/expiry (spec §13.2). This is not a
+          permanent global allow flag — set it per profile, with an expiry.
+      loop: "{{ (snmp_catalog_parsed.authProfiles | default({})) | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Build merged auths block (env-var placeholders, never resolved secrets)"
+      ansible.builtin.set_fact:
+        snmp_rendered_auths: >-
+          {{ (snmp_rendered_auths | default({})) | combine({
+               item.key: (
+                 {'version': item.value.version, 'security_level': item.value.securityLevel}
+                 | combine(
+                     {'username': '${SNMP_' ~ (item.value.credentialRef | upper | replace('-', '_')) ~ '_USERNAME}',
+                      'password': '${SNMP_' ~ (item.value.credentialRef | upper | replace('-', '_')) ~ '_AUTH_PASSWORD}',
+                      'auth_protocol': item.value.authProtocol | default('SHA'),
+                      'priv_protocol': item.value.privProtocol | default('AES'),
+                      'priv_password': '${SNMP_' ~ (item.value.credentialRef | upper | replace('-', '_')) ~ '_PRIV_PASSWORD}'}
+                     if (item.value.version | int == 3)
+                     else {'community': '${SNMP_' ~ (item.value.credentialRef | upper | replace('-', '_')) ~ '_COMMUNITY}'}
+                 )
+               )
+             }) }}
+      loop: "{{ (snmp_catalog_parsed.authProfiles | default({})) | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+      tags: [always]
+
+    - name: "Build merged modules block (unwrap each module file's own top-level key)"
+      ansible.builtin.set_fact:
+        snmp_rendered_modules: >-
+          {{ (snmp_rendered_modules | default({})) | combine(
+               {item.key: snmp_module_contents[item.key][item.key]}
+             ) }}
+      loop: "{{ (snmp_catalog_parsed.modules | default({})) | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+      tags: [always]
+
+    - name: "Build final rendered snmp_exporter config"
+      ansible.builtin.set_fact:
+        snmp_rendered_config:
+          auths: "{{ snmp_rendered_auths | default({}) }}"
+          modules: "{{ snmp_rendered_modules | default({}) }}"
+      tags: [always]
+
+    - name: "Build resolved env file lines (real secrets — no_log)"
+      ansible.builtin.set_fact:
+        snmp_env_lines: >-
+          {{ (snmp_env_lines | default([])) +
+             ([snmp_env_prefix ~ '_USERNAME=' ~ snmp_exporter_credentials[item.value.credentialRef].username,
+               snmp_env_prefix ~ '_AUTH_PASSWORD=' ~ snmp_exporter_credentials[item.value.credentialRef].authPassword,
+               snmp_env_prefix ~ '_PRIV_PASSWORD=' ~ snmp_exporter_credentials[item.value.credentialRef].privPassword]
+              if (item.value.version | int == 3)
+              else [snmp_env_prefix ~ '_COMMUNITY=' ~ snmp_exporter_credentials[item.value.credentialRef].community]) }}
+      vars:
+        snmp_env_prefix: "SNMP_{{ item.value.credentialRef | upper | replace('-', '_') }}"
+      loop: "{{ (snmp_catalog_parsed.authProfiles | default({})) | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+      no_log: true
+      tags: [always]
+
+  tasks:
+    - name: "Deploy pilot-snmp-exporter (skipped entirely under --check)"
+      when: not ansible_check_mode
+      block:
+        - name: "Ensure config/modules/data dirs exist"
+          tags: [C7]
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0750"
+          loop:
+            - "{{ snmp_exporter_config_dir }}"
+            - "{{ snmp_exporter_config_dir }}/modules"
+            - "{{ snmp_exporter_data_dir }}"
+
+        # Same class of bug as the Docker bind-mount rescue gotcha found
+        # in dashboard/prometheus/thanos-query (2026-07-19): a failed
+        # apply's rescue only removes the config FILE, never the
+        # container; if that leaves the bind-mount source path missing,
+        # Docker auto-creates a DIRECTORY there on the next `docker run`,
+        # permanently breaking `copy` on every retry. `stat` (not the
+        # `directory` Jinja test, which checks the control host) runs on
+        # the managed node, where this path actually lives.
+        - name: "Guard: check for stray directory left at auths.yml path"
+          ansible.builtin.stat:
+            path: "{{ snmp_exporter_config_dir }}/auths.yml"
+          register: snmp_auths_stat
+
+        - name: "Guard: clear stray directory left at auths.yml path"
+          ansible.builtin.file:
+            path: "{{ snmp_exporter_config_dir }}/auths.yml"
+            state: absent
+          when: snmp_auths_stat.stat.exists and snmp_auths_stat.stat.isdir
+
+        - name: "Copy catalog.yml (non-secret, for audit/reference)"
+          tags: [C9]
+          ansible.builtin.copy:
+            dest: "{{ snmp_exporter_config_dir }}/catalog.yml"
+            content: "{{ snmp_catalog_raw }}"
+            mode: "0644"
+
+        - name: "Copy each module file (non-secret, for audit/reference)"
+          tags: [C9]
+          ansible.builtin.copy:
+            dest: "{{ snmp_exporter_config_dir }}/modules/{{ item.key }}.yml"
+            content: "{{ lookup('file', (snmp_catalog_file | dirname) ~ '/' ~ item.value.file) }}"
+            mode: "0644"
+          loop: "{{ (snmp_catalog_parsed.modules | default({})) | dict2items }}"
+          loop_control: {label: "{{ item.key }}"}
+
+        - name: "Render auths.yml (rendered exporter config: auths + modules, env-var placeholders only)"
+          tags: [C9]
+          ansible.builtin.copy:
+            dest: "{{ snmp_exporter_config_dir }}/auths.yml"
+            content: "{{ snmp_rendered_config | to_nice_yaml }}"
+            mode: "0640"
+            owner: root
+            group: root
+          register: snmp_auths_render
+
+        - name: "Render snmp-exporter.env (resolved credentials — root:root 0600 only here)"
+          tags: [C8]
+          ansible.builtin.copy:
+            dest: "{{ snmp_exporter_config_dir }}/snmp-exporter.env"
+            content: "{{ (snmp_env_lines | default([])) | join('\n') }}\n"
+            mode: "0600"
+            owner: root
+            group: root
+          register: snmp_env_render
+          no_log: true
+
+        - name: "Run pilot-snmp-exporter container"
+          tags: [C1, C2, C3, C4, C5, C6, C10]
+          community.docker.docker_container:
+            name: "{{ snmp_exporter_container_name }}"
+            image: "{{ snmp_exporter_image }}:{{ snmp_exporter_version }}"
+            state: started
+            restart_policy: unless-stopped
+            restart: "{{ (snmp_auths_render is changed) or (snmp_env_render is changed) }}"
+            read_only: true
+            security_opts:
+              - "no-new-privileges:true"
+            cap_drop:
+              - ALL
+            env_file: "{{ snmp_exporter_config_dir }}/snmp-exporter.env"
+            volumes:
+              - "{{ snmp_exporter_config_dir }}/auths.yml:/etc/snmp_exporter/snmp.yml:ro"
+            ports:
+              - "{{ snmp_exporter_listen_address }}:{{ snmp_exporter_port }}:9116"
+            command:
+              - "--config.file=/etc/snmp_exporter/snmp.yml"
+              - "--config.expand-environment-variables"
+              - "--snmp.module-concurrency={{ snmp_exporter_module_concurrency }}"
+          register: snmp_exporter_container_result
+
+        - name: "Wait for snmp_exporter self metrics to become ready"
+          tags: [C10]
+          ansible.builtin.uri:
+            url: "http://{{ snmp_exporter_listen_address }}:{{ snmp_exporter_port }}/metrics"
+            status_code: 200
+          register: snmp_exporter_ready
+          until: snmp_exporter_ready.status == 200
+          retries: 30
+          delay: 2
+
+      rescue:
+        - name: "ROLLBACK — remove rendered auths.yml"
+          ansible.builtin.file:
+            path: "{{ snmp_exporter_config_dir }}/auths.yml"
+            state: absent
+
+        - name: "ROLLBACK — surface the original failure"
+          ansible.builtin.fail:
+            msg: >-
+              snmp-exporter apply FAILED (see task output above); the
+              rendered auths.yml was removed. Container (if created) is
+              left in place for inspection via
+              `docker logs {{ snmp_exporter_container_name }}`.

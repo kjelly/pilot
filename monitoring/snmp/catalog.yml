@@ -1,0 +1,22 @@
+# monitoring/snmp/catalog.yml — non-secret SNMP module/auth-profile registry
+# (spec docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md §6.4)
+#
+# MUST NOT contain username, password, privacy password, or community —
+# credentialRef is only a lookup key into the vault-supplied
+# snmp_exporter_credentials map (see group_vars/snmp-exporter.example.yml).
+schemaVersion: 1
+
+modules:
+  if_mib:
+    file: generated/if_mib.yml
+
+authProfiles:
+  # SHA-256/AES authPriv, verified end-to-end against a real net-snmp
+  # snmpd lab agent (see docs/verification/snmp-exporter.md's actual-run
+  # evidence) — the production baseline profile shape (spec §13.2).
+  lab-switch-v3:
+    version: 3
+    securityLevel: authPriv
+    authProtocol: SHA256
+    privProtocol: AES
+    credentialRef: lab-switch-v3

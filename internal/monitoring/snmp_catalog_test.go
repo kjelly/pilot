@@ -76,3 +76,113 @@ func TestLoadSNMPCatalog_RejectsMalformedYAML(t *testing.T) {
 		t.Fatal("LoadSNMPCatalog should reject malformed YAML")
 	}
 }
+
+func TestLoadSNMPCatalog_RejectsSecretKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "catalog.yml")
+	content := []byte(`schemaVersion: 1
+authProfiles:
+  lab-v2c:
+    version: 2
+    securityLevel: noAuthNoPriv
+    credentialRef: lab-v2c
+    community: "leaked-in-plaintext"
+`)
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("seed catalog: %v", err)
+	}
+	if _, err := LoadSNMPCatalog(path); err == nil {
+		t.Fatal("LoadSNMPCatalog should reject a catalog containing a community/secret-like key")
+	}
+}
+
+func TestLoadSNMPCatalog_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "catalog.yml")
+	if err := writeFile(path, []byte("")); err != nil {
+		t.Fatalf("seed catalog: %v", err)
+	}
+	catalog, err := LoadSNMPCatalog(path)
+	if err != nil {
+		t.Fatalf("LoadSNMPCatalog: %v", err)
+	}
+	if catalog.SchemaVersion != SNMPCatalogSchemaVersion || len(catalog.Modules) != 0 {
+		t.Fatalf("empty file should be an empty catalog, got %+v", catalog)
+	}
+}
+
+func validSNMPCatalog() SNMPCatalog {
+	return SNMPCatalog{
+		SchemaVersion: SNMPCatalogSchemaVersion,
+		Modules: map[string]SNMPModule{
+			"if_mib": {File: "generated/if_mib.yml"},
+		},
+		AuthProfiles: map[string]SNMPAuthProfile{
+			"lab-switch-v3": {
+				Version:       3,
+				SecurityLevel: "authPriv",
+				AuthProtocol:  "SHA256",
+				PrivProtocol:  "AES",
+				CredentialRef: "lab-switch-v3",
+			},
+		},
+	}
+}
+
+func TestSNMPCatalog_Validate_Valid(t *testing.T) {
+	if err := validSNMPCatalog().Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+}
+
+func TestSNMPCatalog_Validate_RejectsBadModuleName(t *testing.T) {
+	catalog := validSNMPCatalog()
+	catalog.Modules["Bad Name!"] = SNMPModule{File: "generated/x.yml"}
+	if err := catalog.Validate(); err == nil {
+		t.Fatal("Validate() should reject a module ID with invalid characters")
+	}
+}
+
+func TestSNMPCatalog_Validate_RejectsAbsoluteModulePath(t *testing.T) {
+	catalog := validSNMPCatalog()
+	catalog.Modules["if_mib"] = SNMPModule{File: "/etc/passwd"}
+	if err := catalog.Validate(); err == nil {
+		t.Fatal("Validate() should reject an absolute module file path")
+	}
+}
+
+func TestSNMPCatalog_Validate_RejectsPathTraversal(t *testing.T) {
+	catalog := validSNMPCatalog()
+	catalog.Modules["if_mib"] = SNMPModule{File: "../../etc/passwd"}
+	if err := catalog.Validate(); err == nil {
+		t.Fatal("Validate() should reject a module file path that escapes monitoring/snmp/")
+	}
+}
+
+func TestSNMPCatalog_Validate_RejectsBadSecurityLevel(t *testing.T) {
+	catalog := validSNMPCatalog()
+	auth := catalog.AuthProfiles["lab-switch-v3"]
+	auth.SecurityLevel = "superSecure"
+	catalog.AuthProfiles["lab-switch-v3"] = auth
+	if err := catalog.Validate(); err == nil {
+		t.Fatal("Validate() should reject an unknown securityLevel")
+	}
+}
+
+func TestSNMPCatalog_Validate_RejectsMissingCredentialRef(t *testing.T) {
+	catalog := validSNMPCatalog()
+	auth := catalog.AuthProfiles["lab-switch-v3"]
+	auth.CredentialRef = ""
+	catalog.AuthProfiles["lab-switch-v3"] = auth
+	if err := catalog.Validate(); err == nil {
+		t.Fatal("Validate() should reject an empty credentialRef")
+	}
+}
+
+func TestSNMPCatalog_Validate_RejectsWrongSchemaVersion(t *testing.T) {
+	catalog := validSNMPCatalog()
+	catalog.SchemaVersion = 2
+	if err := catalog.Validate(); err == nil {
+		t.Fatal("Validate() should reject an unsupported schemaVersion")
+	}
+}
