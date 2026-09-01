@@ -21,14 +21,14 @@
 #  （detection_model_provider_api_key），不要直接寫在這個檔案裡。
 # ============================================================================
 
-# 控制端已建置好的 pilot-detection-engine 二進位檔路徑（相對於 repo root，
-# 或絕對路徑）。必填——套用前會先在控制端驗證這個檔案存在、SHA256 跟下面
-# 的 detection_engine_artifact_sha256 相符，套用後再對目標主機上的檔案驗
-# 一次（見 spec §6.3）。
+# pilot-cli image 已內建的 pilot-detection-engine 二進位檔路徑（相對於
+# image 的 /pilot repo root）。一般不需要改；只有使用外部 artifact 時才
+# 覆寫成絕對路徑。
 detection_engine_artifact_path: "dist/pilot-detection-engine-linux-amd64"
 
-# 上面那個二進位檔的 SHA256（`scripts/build-detection-engine.sh` 建置後會
-# 一併產生 <binary>.sha256）。必填、不得留空。
+# image builder 會把 checksum 放在 binary 旁的 .sha256 sidecar；留空時
+# detection-engine-apply.yml 自動讀取該 sidecar。若使用外部 artifact，
+# 可在這裡填入明確的 64 位 SHA256 pin。
 detection_engine_artifact_sha256: ""
 
 # 中央 Thanos Query 主機的 IP 或 FQDN。留空時 deploy catalog 會自動從

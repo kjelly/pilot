@@ -378,7 +378,17 @@ sha256sum dist/pilot-detection-engine-linux-amd64 \
 
 6.3 Deployment Artifact
 
-production apply 不在 target build。
+production apply 不在 target build。`pilot-cli` control image 的 builder stage
+會以 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 編譯，並把下列 controller
+artifact 放在 `/pilot/dist/`：
+
+`pilot-detection-engine-linux-amd64`
+
+`pilot-detection-engine-linux-amd64.sha256`
+
+image build 的 `DETECTION_ENGINE_VERSION` 與 `PILOT_GIT_SHA` 必須寫入 binary
+version output；正式交付應使用可追溯的 image digest，不應依賴可變的 `latest`
+tag。
 
 禁止：
 
@@ -386,10 +396,14 @@ go install
 curl latest
 download unpinned release
 
-required inputs：
+required input：
 
 detection_engine_artifact_path
-detection_engine_artifact_sha256
+
+預設為 `dist/pilot-detection-engine-linux-amd64`。`detection_engine_artifact_sha256`
+可留空；此時 apply playbook 必須讀取 artifact 旁的 `.sha256` sidecar。使用
+外部 artifact 時可明確提供 SHA256；若沒有有效的 sidecar 或 explicit pin，
+apply 必須在任何 target mutation 前 fail。
 
 artifact_path：
 
@@ -400,7 +414,7 @@ mutation 前 controller-side：
 
 artifact exists。
 
-SHA256 = input。
+SHA256 = explicit input 或 packaged sidecar。
 
 <artifact> version 成功。
 
@@ -2225,7 +2239,7 @@ hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 512, minDiskGiB: 5}
 groupVars:
   - {name: detection_engine_artifact_path, type: string, required: true, secret: false}
-  - {name: detection_engine_artifact_sha256, type: string, required: true, secret: false, validation: "^[a-f0-9]{64}$"}
+  - {name: detection_engine_artifact_sha256, type: string, required: false, default: "", secret: false, validation: "^$|^[a-f0-9]{64}$"}
   - {name: detection_metrics_source_host, type: string, required: true, secret: false}
   - {name: detection_alertmanager_target_host, type: string, required: true, secret: false}
   - {name: detection_cycle_interval, type: duration, required: false, default: "15s", secret: false}

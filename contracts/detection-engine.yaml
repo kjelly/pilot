@@ -34,7 +34,7 @@ hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 512, minDiskGiB: 5}
 groupVars:
   - {name: detection_engine_artifact_path, type: string, required: true, secret: false}
-  - {name: detection_engine_artifact_sha256, type: string, required: true, secret: false, validation: "^[a-f0-9]{64}$"}
+  - {name: detection_engine_artifact_sha256, type: string, required: false, default: "", secret: false, validation: "^$|^[a-f0-9]{64}$"}
   - {name: detection_metrics_source_host, type: string, required: true, secret: false}
   - {name: detection_alertmanager_target_host, type: string, required: true, secret: false}
   - {name: detection_cycle_interval, type: duration, required: false, default: "15s", secret: false}

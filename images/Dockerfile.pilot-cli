@@ -1,6 +1,7 @@
-# Control-node image for `pilot` — bundles the compiled `pilot` binary
-# together with ansible-core, the Galaxy collections the playbooks in this
-# repo depend on, and the playbook/inventory templates themselves.
+# Control-node image for `pilot` — bundles the compiled `pilot` and
+# `pilot-detection-engine` binaries together with ansible-core, the Galaxy
+# collections the playbooks in this repo depend on, and the
+# playbook/inventory/configuration templates themselves.
 #
 # Why this exists:
 #   `pilot` is a thin Go wrapper: apply/verify ultimately shell out to
@@ -52,6 +53,9 @@ FROM golang:1.26-bookworm AS builder
 
 WORKDIR /src
 
+ARG PILOT_GIT_SHA=unknown
+ARG DETECTION_ENGINE_VERSION=0.0.0-dev
+
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -60,6 +64,20 @@ COPY internal/ internal/
 COPY images/ images/
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/pilot ./cmd/pilot
+
+# The control image is also the Ansible controller for the central Detection
+# Engine. Build the target binary in the same immutable image so a deployment
+# does not depend on a separately copied dist/ directory. Keep the checksum
+# beside the binary: detection-engine-apply.yml verifies it before any target
+# mutation and again after the copy.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${DETECTION_ENGINE_VERSION} -X main.commit=${PILOT_GIT_SHA}" \
+      -o /out/pilot-detection-engine-linux-amd64 \
+      ./cmd/pilot-detection-engine \
+ && cd /out \
+ && sha256sum pilot-detection-engine-linux-amd64 \
+      > pilot-detection-engine-linux-amd64.sha256
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime — Python + ansible-core + the collections the playbooks
@@ -120,12 +138,15 @@ RUN pip install --no-cache-dir \
         community.general
 
 COPY --from=builder /out/pilot /usr/local/bin/pilot
+COPY --from=builder /out/pilot-detection-engine-linux-amd64 /pilot/dist/pilot-detection-engine-linux-amd64
+COPY --from=builder /out/pilot-detection-engine-linux-amd64.sha256 /pilot/dist/pilot-detection-engine-linux-amd64.sha256
 
 WORKDIR /pilot
 COPY playbooks/ playbooks/
 COPY group_vars/ group_vars/
 COPY contracts/ contracts/
 COPY docs/verification/ docs/verification/
+COPY monitoring/ monitoring/
 COPY ansible.cfg ansible.cfg
 COPY inventory.example.yml inventory.example.yml
 COPY hosts.example.yml hosts.example.yml

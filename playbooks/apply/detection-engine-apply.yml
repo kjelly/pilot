@@ -1,12 +1,11 @@
 # Apply playbook for docs/verification/detection-engine.md (Stage A-2).
 #
-# Deploys the pilot-detection-engine binary (built by
-# scripts/build-detection-engine.sh, NOT downloaded or `go install`ed —
-# see spec §6.3) as a systemd service on a dedicated central host. Unlike
-# host-monitoring/dcgm-exporter, this is a controller-built artifact copied
-# from THIS repo's dist/ directory, not an upstream release or a Docker
-# image — spec §6.3 requires controller-side SHA256 verification before the
-# copy and a target-side re-verification after.
+# Deploys the pilot-detection-engine binary built into the pilot-cli
+# controller image (or an explicitly supplied external artifact) as a
+# systemd service on a dedicated central host. The image ships the binary
+# and its .sha256 sidecar under /pilot/dist; spec §6.3 still requires
+# controller-side SHA256 verification before the copy and target-side
+# re-verification after.
 #
 # Detection Engine only ever talks to two already-deployed central roles
 # (spec §9/§10): the central Thanos Query at :10912 (NEVER :10902 — that is
@@ -26,10 +25,10 @@
 # Usage (dry run):
 #   go run ./cmd/pilot vm-target run --name detection --sandbox \
 #       playbooks/apply/detection-engine-apply.yml --check --diff \
-#       -e detection_engine_artifact_path=dist/pilot-detection-engine-linux-amd64 \
-#       -e detection_engine_artifact_sha256=<sha256> \
 #       -e detection_metrics_source_host=<thanos-query IP> \
 #       -e detection_alertmanager_target_host=<alertmanager IP>
+#   # The pilot-cli image supplies dist/... and its .sha256 sidecar by default.
+#   # External artifacts may still override both values explicitly.
 #
 # Variables: see docs/verification/detection-engine.md §1.5.
 #
@@ -105,13 +104,12 @@
     detection_log_source_current_window: 10m
     detection_log_source_baseline_window: 6h
 
-    # detection_engine_artifact_path / detection_engine_artifact_sha256 are
-    # DELIBERATELY NOT declared here (same "no shadowing default" reasoning
-    # as prometheus-apply.yml's thanos_s3_target_host) — both are required
-    # and gated below; a hardcoded default here would silently defeat that
-    # gate.
-
   pre_tasks:
+    - name: "Default artifact path to the binary packaged in pilot-cli"
+      ansible.builtin.set_fact:
+        detection_engine_artifact_path: "{{ detection_engine_artifact_path | default('dist/pilot-detection-engine-linux-amd64', true) }}"
+      tags: [always]
+
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
         that:
@@ -186,18 +184,14 @@
           playbooks/apply/host-monitoring-apply.yml on this host first.
       tags: [always]
 
-    - name: "Gate: artifact path/sha256 are supplied"
+    - name: "Gate: artifact path is supplied"
       ansible.builtin.assert:
         that:
           - detection_engine_artifact_path is defined
           - detection_engine_artifact_path | length > 0
-          - detection_engine_artifact_sha256 is defined
-          - detection_engine_artifact_sha256 | length > 0
         fail_msg: >-
-          detection_engine_artifact_path and detection_engine_artifact_sha256
-          are both required (spec §6.3) — build with
-          scripts/build-detection-engine.sh first, then pass its output path
-          and the accompanying .sha256.
+          detection_engine_artifact_path is required (spec §6.3). The
+          pilot-cli image default is dist/pilot-detection-engine-linux-amd64.
       tags: [always]
 
     - name: "Resolve detection_engine_artifact_path to an absolute controller path (spec §6.3: relative = repo-root relative)"
@@ -206,6 +200,11 @@
           {{ detection_engine_artifact_path
              if (detection_engine_artifact_path is match('^/'))
              else (playbook_dir ~ '/../../' ~ detection_engine_artifact_path) }}
+      tags: [always]
+
+    - name: "Resolve the packaged artifact checksum sidecar path"
+      ansible.builtin.set_fact:
+        detection_engine_artifact_checksum_path: "{{ detection_engine_artifact_abs_path }}.sha256"
       tags: [always]
 
     - name: "Gate: artifact exists on the controller"
@@ -218,16 +217,36 @@
       register: detection_engine_artifact_stat
       tags: [always]
 
-    - name: "Gate: controller-side artifact exists and its SHA256 matches"
+    - name: "Gate: inspect the packaged artifact checksum sidecar"
+      ansible.builtin.stat:
+        path: "{{ detection_engine_artifact_checksum_path }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: detection_engine_artifact_checksum_stat
+      tags: [always]
+
+    - name: "Auto-resolve artifact SHA256 from the adjacent sidecar"
+      ansible.builtin.set_fact:
+        detection_engine_artifact_sha256: >-
+          {{ lookup('ansible.builtin.file', detection_engine_artifact_checksum_path)
+             | trim | regex_search('^[a-f0-9]{64}') | default('', true) }}
+      when:
+        - detection_engine_artifact_sha256 | default('') | length == 0
+        - detection_engine_artifact_checksum_stat.stat.get('exists', false)
+      tags: [always]
+
+    - name: "Gate: controller-side artifact exists and its SHA256 is valid"
       ansible.builtin.assert:
         that:
           - detection_engine_artifact_stat.stat.get('exists', false)
+          - (detection_engine_artifact_sha256 | default('')) is match('^[a-f0-9]{64}$')
           - detection_engine_artifact_stat.stat.get('checksum', '') == detection_engine_artifact_sha256
         fail_msg: >-
           controller artifact {{ detection_engine_artifact_abs_path }} is
-          missing or its SHA256 ({{ detection_engine_artifact_stat.stat.get('checksum', 'MISSING') }})
-          does not match detection_engine_artifact_sha256
-          ({{ detection_engine_artifact_sha256 }}).
+          missing, has no valid SHA256 pin, or its SHA256
+          ({{ detection_engine_artifact_stat.stat.get('checksum', 'MISSING') }})
+          does not match the supplied/packaged detection_engine_artifact_sha256.
       run_once: true
       tags: [always]
 

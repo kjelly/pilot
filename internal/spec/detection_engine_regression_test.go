@@ -131,9 +131,12 @@ func TestRegression_DetectionEngineSpec(t *testing.T) {
 
 	// spec §6.3: controller-side artifact existence/SHA256/version must be
 	// gated before any mutation, and re-verified again on the target after
-	// copy.
+	// copy. The pilot-cli image supplies the SHA256 through an adjacent
+	// sidecar when the operator does not explicitly pin it.
 	for _, want := range []string{
 		"detection_engine_artifact_abs_path",
+		"detection_engine_artifact_checksum_path",
+		"Auto-resolve artifact SHA256 from the adjacent sidecar",
 		"checksum_algorithm: sha256",
 		"detection_engine_artifact_sha256",
 	} {

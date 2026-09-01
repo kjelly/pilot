@@ -62,13 +62,17 @@ func TestDetectionEngineContract_StageBDelta(t *testing.T) {
 		}
 	}
 
-	// Stage A's own group vars must stay exactly as required as before —
-	// the Stage B delta must never loosen or tighten them.
-	for _, name := range []string{"detection_engine_artifact_path", "detection_engine_artifact_sha256", "detection_metrics_source_host", "detection_alertmanager_target_host"} {
+	// Stage A endpoint/path inputs remain required. The artifact checksum is
+	// optional because pilot-cli now packages the binary and adjacent SHA256
+	// sidecar; an explicit checksum remains supported for external artifacts.
+	for _, name := range []string{"detection_engine_artifact_path", "detection_metrics_source_host", "detection_alertmanager_target_host"} {
 		gv, ok := byName[name]
 		if !ok || !gv.Required {
 			t.Errorf("Stage A groupVar %q must remain required=true after the Stage B delta", name)
 		}
+	}
+	if gv, ok := byName["detection_engine_artifact_sha256"]; !ok || gv.Required {
+		t.Error("detection_engine_artifact_sha256 must be optional when pilot-cli supplies the packaged sidecar")
 	}
 
 	if len(c.InputRules) == 0 {
