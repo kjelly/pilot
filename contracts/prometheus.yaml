@@ -40,6 +40,11 @@ groupVars:
 endpoints:
   - {name: prometheus, scheme: http, port: 9090, autoPublish: {eligible: false, reason: "no auth of its own; publishing this operational surface through the shared reverse-proxy would put unauthenticated metrics on the same trust boundary as user-facing apps"}}
   - {name: sidecar, scheme: grpc, port: 10901}
+diagnostics:
+  runtime: {kind: docker, name: pilot-prometheus}
+  readiness: {endpoint: prometheus, path: /-/ready}
+  logs: {source: docker, lookback: 30m}
+  verifySpec: docs/verification/prometheus.md
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:

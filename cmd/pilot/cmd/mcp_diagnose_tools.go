@@ -118,6 +118,7 @@ func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 		Name:        "pilot_diagnose_detection",
 		Description: "run fixed, read-only ansible ad-hoc commands against the central Detection Engine host (no host parameter — detection-engine is this deployment's singleton central role): engine status (`status --json`), the active SignalEvent episode list (`signals list --json`), and a bounded (`-n 200`) journal tail. At least one of signal_id or pilot_host must be supplied; when signal_id is given (must be a well-formed 26-character ULID) an additional `signals show <signal_id> --json` call returns that one episode's full detail. pilot_host is not a command parameter — the engine's CLI has no per-host filter — it is only recorded for audit/correlation against the returned signals_list_json's own pilot_host fields. Never accepts an arbitrary command.",
 	}, diagnoseDetectionHandler(opts))
+	registerDiagnoseCompositeTools(server, opts)
 }
 
 // normalizeLokiRange makes every caller-supplied log time unambiguous before

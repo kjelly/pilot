@@ -108,6 +108,10 @@ inputRules:
       - {input: detection_log_source_query, operator: nonEmpty}
     reason: "an enabled log source requires a non-empty LogQL query"
 endpoints: []
+diagnostics:
+  runtime: {kind: systemd, name: pilot-detection-engine.service}
+  logs: {source: systemd, lookback: 30m}
+  verifySpec: docs/verification/detection-engine.md
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false
 evidenceRequirement: {targetTest: topology, idempotency: required}

@@ -45,7 +45,8 @@ func TestMCPServe_Integration_DiagnoseToolsGatedByEnableDiagnoseFlag(t *testing.
 	}
 	for _, tool := range toolsResult.Tools {
 		switch tool.Name {
-		case "pilot_diagnose_sudo", "pilot_diagnose_dns", "pilot_diagnose_logs", "pilot_diagnose_metrics", "pilot_diagnose_security_logs", "pilot_diagnose_detection":
+		case "pilot_diagnose_sudo", "pilot_diagnose_dns", "pilot_diagnose_logs", "pilot_diagnose_metrics", "pilot_diagnose_security_logs", "pilot_diagnose_detection",
+			"pilot_diagnose_host_health", "pilot_diagnose_component", "pilot_diagnose_network_path", "pilot_diagnose_recent_changes":
 			t.Fatalf("ListTools() included %q without --enable-diagnose, got %+v", tool.Name, toolsResult.Tools)
 		}
 	}
@@ -74,12 +75,16 @@ func TestMCPServe_Integration_DiagnoseToolsListedWhenEnabled(t *testing.T) {
 		t.Fatalf("ListTools() error = %v", err)
 	}
 	wantTools := map[string]bool{
-		"pilot_diagnose_sudo":          false,
-		"pilot_diagnose_dns":           false,
-		"pilot_diagnose_logs":          false,
-		"pilot_diagnose_metrics":       false,
-		"pilot_diagnose_security_logs": false,
-		"pilot_diagnose_detection":     false,
+		"pilot_diagnose_sudo":           false,
+		"pilot_diagnose_dns":            false,
+		"pilot_diagnose_logs":           false,
+		"pilot_diagnose_metrics":        false,
+		"pilot_diagnose_security_logs":  false,
+		"pilot_diagnose_detection":      false,
+		"pilot_diagnose_host_health":    false,
+		"pilot_diagnose_component":      false,
+		"pilot_diagnose_network_path":   false,
+		"pilot_diagnose_recent_changes": false,
 	}
 	for _, tool := range toolsResult.Tools {
 		if _, ok := wantTools[tool.Name]; ok {

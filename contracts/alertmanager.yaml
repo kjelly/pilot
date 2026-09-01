@@ -15,6 +15,11 @@ hostCardinality: exactly-one
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 endpoints:
   - {name: api, scheme: http, port: 9093, autoPublish: {eligible: false, reason: "no auth of its own; same operational-surface exclusion as prometheus"}}
+diagnostics:
+  runtime: {kind: docker, name: pilot-alertmanager}
+  readiness: {endpoint: api, path: /-/ready}
+  logs: {source: docker, lookback: 30m}
+  verifySpec: docs/verification/alertmanager.md
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: vm, idempotency: required}
 traceability:

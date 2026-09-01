@@ -46,6 +46,44 @@ type Contract struct {
 	Traceability        Traceability `yaml:"traceability"`
 	Verification        Verification `yaml:"verification"`
 	Site                Site         `yaml:"site"`
+	Diagnostics         Diagnostics  `yaml:"diagnostics"`
+}
+
+// Diagnostics is optional component-diagnostic metadata consumed by
+// pilot_diagnose_component (Agent Monitoring Phase 2 §4) instead of a
+// forever-growing per-component switch statement in Go. It deliberately
+// has no "command"/"shell" field — KnownFields(true) decoding rejects
+// any such key outright, so a generic executor cannot be smuggled in
+// through this metadata even by a future careless edit.
+type Diagnostics struct {
+	Runtime    DiagnosticsRuntime   `yaml:"runtime"`
+	Readiness  DiagnosticsReadiness `yaml:"readiness"`
+	Logs       DiagnosticsLogs      `yaml:"logs"`
+	VerifySpec string               `yaml:"verifySpec"`
+}
+
+// DiagnosticsRuntime names how this component's process is supervised.
+// Kind "" means no diagnostics block was configured at all — distinct
+// from Kind "none", which is an explicit "this component has no
+// supervised runtime process to check."
+type DiagnosticsRuntime struct {
+	Kind string `yaml:"kind"` // docker | systemd | none
+	Name string `yaml:"name"`
+}
+
+// DiagnosticsReadiness names an HTTP readiness probe against one of this
+// contract's own Endpoints entries — never an arbitrary caller-supplied
+// host:port.
+type DiagnosticsReadiness struct {
+	Endpoint string `yaml:"endpoint"`
+	Path     string `yaml:"path"`
+}
+
+// DiagnosticsLogs names where component_health's bounded recent-error
+// summary comes from.
+type DiagnosticsLogs struct {
+	Source   string `yaml:"source"` // docker | systemd
+	Lookback string `yaml:"lookback"`
 }
 
 // Spec selects verification rows owned by this component.
@@ -464,6 +502,9 @@ func validateLocal(contract Contract) error {
 	if err := validateEndpoints(contract.Endpoints); err != nil {
 		return err
 	}
+	if err := validateDiagnostics(contract.Diagnostics, contract.Endpoints, contract.Specs); err != nil {
+		return err
+	}
 	if contract.StagePolicy.Variable == "" || contract.StagePolicy.Default == "" {
 		return fmt.Errorf("stagePolicy variable and default are required")
 	}
@@ -700,6 +741,55 @@ func validateEndpoints(endpoints []Endpoint) error {
 		}
 		if endpoint.AutoPublish != nil && endpoint.AutoPublish.Eligible && endpoint.Scheme != "http" && endpoint.Scheme != "https" {
 			return fmt.Errorf("endpoint %s: autoPublish.eligible requires scheme http or https, got %q", endpoint.Name, endpoint.Scheme)
+		}
+	}
+	return nil
+}
+
+// validateDiagnostics enforces Agent Monitoring Phase 2's linter checks
+// (design doc §9 Task 3): runtime kind enum, runtime target non-empty
+// and no wildcard, endpoint reference exists, verification spec belongs
+// to this component. Runtime.Kind == "" means no diagnostics block was
+// configured — entirely optional, skip all checks.
+func validateDiagnostics(d Diagnostics, endpoints []Endpoint, specs []Spec) error {
+	if d.Runtime.Kind == "" {
+		return nil
+	}
+	switch d.Runtime.Kind {
+	case "docker", "systemd", "none":
+	default:
+		return fmt.Errorf("diagnostics.runtime.kind must be docker, systemd, or none, got %q", d.Runtime.Kind)
+	}
+	if d.Runtime.Kind != "none" {
+		if strings.TrimSpace(d.Runtime.Name) == "" {
+			return fmt.Errorf("diagnostics.runtime.name is required when kind is %q", d.Runtime.Kind)
+		}
+		if strings.ContainsAny(d.Runtime.Name, "*?") {
+			return fmt.Errorf("diagnostics.runtime.name %q must not be a wildcard pattern", d.Runtime.Name)
+		}
+	}
+	if d.Readiness.Endpoint != "" {
+		found := false
+		for _, e := range endpoints {
+			if e.Name == d.Readiness.Endpoint {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("diagnostics.readiness.endpoint %q does not match any endpoints[].name", d.Readiness.Endpoint)
+		}
+	}
+	if d.VerifySpec != "" {
+		found := false
+		for _, s := range specs {
+			if s.Path == d.VerifySpec {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("diagnostics.verifySpec %q does not match any of this component's specs[].path", d.VerifySpec)
 		}
 	}
 	return nil

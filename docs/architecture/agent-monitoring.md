@@ -1,8 +1,9 @@
 # Agent Monitoring Architecture
 
 > 完整規格（依 phase 分開撰寫）：
-> `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md`
-> （Phase 2-5 尚在 `docs/tmp/future/agent-monitoring/`，尚未實作 —— 完成一個
+> `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md`、
+> `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-2-structured-diagnostics-spec.md`
+> （Phase 3-5 尚在 `docs/tmp/future/agent-monitoring/`，尚未實作 —— 完成一個
 > phase 就搬一份進來、在這裡補一段）。這份文件只整理架構全貌，不重複規格的
 > normative 細節，這裡衝突時一律以對應 phase 的 spec 為準。
 
@@ -135,8 +136,54 @@ second "resume a stale run" code path.
   mentions it as an explicit opt-in that Phase 1 does not implement).
 - No HA/active-active; exactly one controller process (spec §3
   non-goals).
-- Phase 2 (structured diagnostic MCP tools + change journal), Phase 3
-  (human-approved R1 remediation), Phase 4 (policy-gated autonomous R1),
-  and Phase 5 (controlled R2 reapply) are not yet implemented — see
-  `docs/tmp/future/agent-monitoring/README.md` for the full plan-set
-  order and phase-exit-gate discipline.
+- Phase 3 (human-approved R1 remediation), Phase 4 (policy-gated
+  autonomous R1), and Phase 5 (controlled R2 reapply) are not yet
+  implemented — see `docs/tmp/future/agent-monitoring/README.md` for the
+  full plan-set order and phase-exit-gate discipline.
+
+## 6. Phase 2 — structured diagnostic composites
+
+Four bounded, read-only MCP tools (`internal/diagnose/host_health.go`,
+`component.go`, `network_path.go`; `internal/changejournal/` for the
+fourth) so the Agent asks Pilot a domain question ("is this host
+healthy?") instead of assembling low-level commands. All four register
+under the SAME `--enable-diagnose` flag and `addRecoveredTool` choke
+point as the narrow `pilot_diagnose_*` tools from Phase 1's design (spec
+§11) — there is no new capability flag.
+
+- **`pilot_diagnose_component`** is driven entirely by a new, optional
+  `diagnostics:` block in `contracts/*.yaml` (`internal/contract`'s
+  `Diagnostics` type) — `runtime.kind: docker|systemd|none`,
+  `readiness.endpoint`/`path`, `logs.source`, `verifySpec` — with no
+  `command:`/`shell:` field possible even in principle
+  (`KnownFields(true)` decoding rejects the key outright). Wired into the
+  three components the design doc names as representative:
+  `prometheus`, `alertmanager` (both docker), `detection-engine`
+  (systemd, no HTTP readiness endpoint — it has none, spec §5 non-goal).
+- **`pilot_diagnose_recent_changes`** does NOT introduce a second
+  competing change-tracking store. `internal/store`'s existing
+  `DeliveryRun`/`ListRuns` (SQLite, one row per `pilot deploy` run) is
+  already the unified journal Phase 2 §7 asks to check for before adding
+  one — `internal/changejournal.QueryDeployChanges` adapts it directly.
+  Only MCP edit-apply mutations had no queryable index (just a
+  per-invocation `metadata.json` on disk); `QueryEditApplyChanges` reads
+  those same files rather than duplicating `pilot_edit_apply`'s own write
+  path. There is still no remediation/repair mutation boundary at all —
+  `ChangeKindRemediate` exists in the enum for forward compatibility, but
+  no query function produces it until Phase 3's own executor exists.
+
+### Real bug found via live testing (2026-09-01)
+
+Both `pilot_diagnose_network_path`'s transport layer and
+`pilot_diagnose_component`'s dependency-reachability check originally
+used `timeout 2 bash -c 'cat < /dev/tcp/<host>/<port>'`. Verified against
+a real `prom/alertmanager:v0.27.0` container: `cat` blocks waiting for
+the SERVER to send data first, which no HTTP-like server ever does
+before it receives a request — so this reported `closed`/`unreachable`
+against a container that `curl` confirmed was serving `200` on the exact
+same port at the exact same moment. Fixed to `exec 3<>/dev/tcp/<host>/
+<port>` (open the descriptor read-write, never read from it) — a plain
+TCP-handshake check, confirmed correct against both a real open port and
+a real closed one before landing. `internal/diagnose/network_path.go`
+and `component.go` both carry this fix with the same evidence noted
+inline.
