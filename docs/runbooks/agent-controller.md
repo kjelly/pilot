@@ -190,4 +190,4 @@ pilot vm-target down --name agentctl
 
 | 日期 | 版本 | 變更 |
 |---|---|---|
-| 2026-09-01 | v1.0 | Phase 1 初次實跑:vm-target 四層部署鏈全綠、13/13 Spec v2 PASS、冪等 changed=0、真實 Alertmanager v0.27 webhook 遞送鏈驗證通過;實跑中發現並修好 3 個真 bug(HMAC→bearer token、C3 探針位址、C8 探針期望值反了)。tested revision: 見本次 commit(`git log` 對照)。 |
+| 2026-09-01 | v1.0 | Phase 1 初次實跑:vm-target 四層部署鏈全綠、13/13 Spec v2 PASS、冪等 changed=0、真實 Alertmanager v0.27 webhook 遞送鏈驗證通過;實跑中發現並修好 3 個真 bug(HMAC→bearer token、C3 探針位址、C8 探針期望值反了)。tested revision: `38d7ed7`(`feat(agent-monitoring): implement Phase 1 observe-only Incident Controller`)。 |
