@@ -1,5 +1,6 @@
 # Build artifacts
 /pilot
+/pilot-agent-controller
 dist/
 *.exe
 

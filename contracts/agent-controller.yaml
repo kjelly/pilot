@@ -1,0 +1,64 @@
+schemaVersion: 1
+id: agent-controller
+role: agent-controller
+specs:
+  - path: docs/verification/agent-controller.md
+    rows: {all: true} # C1-C13
+playbooks:
+  apply: playbooks/apply/agent-controller-apply.yml
+regressionTests:
+  - internal/spec/agent_controller_regression_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+conflicts: []
+dependencies: []
+endpoints:
+  - {name: webhook, scheme: http, port: 8090, autoPublish: {eligible: false, reason: "single-consumer Alertmanager webhook receiver behind its own bearer-token auth (spec §5; real Alertmanager webhook_configs can only send a static Authorization header, not compute a body HMAC), not yet a general internal-endpoint publish candidate"}}
+os:
+  - {distro: ubuntu, versions: ["24.04"]}
+hostCardinality: exactly-one
+resources: {minCPU: 1, minRAMMiB: 256, minDiskGiB: 5}
+groupVars:
+  - {name: agent_controller_artifact_path, type: string, required: true, secret: false}
+  - {name: agent_controller_artifact_sha256, type: string, required: true, secret: false, validation: "^[a-f0-9]{64}$"}
+  - {name: agent_controller_webhook_secret, type: string, required: true, secret: true}
+  - {name: agent_controller_listen_port, type: integer, required: false, default: 8090, secret: false}
+  - {name: agent_controller_max_concurrent_runs, type: integer, required: false, default: 4, secret: false}
+  - {name: agent_controller_max_runs_per_host, type: integer, required: false, default: 1, secret: false}
+  - {name: agent_controller_max_body_bytes, type: integer, required: false, default: 1048576, secret: false}
+  - {name: agent_controller_dispatcher_kind, type: string, required: false, default: "fake", secret: false, validation: "^(fake|http)$"}
+  - {name: agent_controller_dispatcher_endpoint, type: string, required: false, default: "", secret: false}
+  - {name: agent_controller_dispatcher_timeout_seconds, type: integer, required: false, default: 30, secret: false}
+inputRules:
+  - any:
+      - {input: agent_controller_dispatcher_kind, operator: notEquals, value: http}
+      - {input: agent_controller_dispatcher_endpoint, operator: nonEmpty}
+    reason: "dispatcher.kind=http requires a non-empty dispatcher endpoint (spec §12) — kind=fake (Phase 1's own disposable-lane default) always passes this gate untouched"
+stagePolicy: {variable: stage, default: sandbox}
+experimental: true
+evidenceRequirement: {targetTest: topology, idempotency: required}
+lifecycle:
+  backup:
+    provider: restic
+    preHook: >-
+      install -d -m 0700 /var/backups/pilot-agent-controller &&
+      /usr/local/bin/pilot-agent-controller db backup
+      --db /var/lib/pilot/agent-controller/state.db
+      --output /var/backups/pilot-agent-controller/state.db
+    paths:
+      - /etc/pilot/agent-controller
+      - /var/backups/pilot-agent-controller
+  upgrade: null
+  decommission: null
+traceability:
+  mode: rowTags
+  tag: {kind: rolePrefixed, prefix: agent-controller}
+  exemptions:
+    "docs/verification/agent-controller.md#C3": {kind: goCodeLevel, reason: "bearer-token verification is a Go-code-level guarantee (internal/agentcontroller/http.go's verifyBearerToken) — no apply task implements the auth check itself, only provisions the shared secret (Step 9, tagged agent-controller-C12)"}
+    "docs/verification/agent-controller.md#C7": {kind: verifyOnly, reason: "replay/escalation dedup scenario evidence comes from the disposable-lane topology test (spec §17), not a single already-applied host — mirrors detection-engine.md's C11 precedent"}
+    "docs/verification/agent-controller.md#C8": {kind: verifyOnly, reason: "the observe-only MCP capability boundary is proven by pilot's own MCP test suite (cmd/pilot/cmd/mcp*_test.go) plus the disposable-lane evidence, not a single apply task on this component's own host"}
+    "docs/verification/agent-controller.md#C9": {kind: verifyOnly, reason: "a valid-diagnosis-persists scenario requires submitting a signed webhook and inspecting the resulting row, which only the disposable-lane harness does"}
+    "docs/verification/agent-controller.md#C10": {kind: verifyOnly, reason: "malformed-output-never-persists is a Go-code-level guarantee (internal/agentcontroller/model.go's DiagnosisResult.Validate, queue.go's dispatchOne) — no apply task implements it"}
+    "docs/verification/agent-controller.md#C11": {kind: verifyOnly, reason: "restart-preserves-state scenario evidence comes from the disposable-lane topology test, not a single already-applied host"}
+    "docs/verification/agent-controller.md#C13": {kind: verifyOnly, reason: "idempotent-reapply changed=0 is proven by `pilot vm-target test`'s own apply-twice comparison, not a single probe row"}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

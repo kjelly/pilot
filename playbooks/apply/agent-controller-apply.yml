@@ -1,0 +1,514 @@
+# Apply playbook for docs/verification/agent-controller.md (Phase 1).
+#
+# Deploys the pilot-agent-controller binary (built by
+# scripts/build-agent-controller.sh, NOT downloaded or `go install`ed —
+# same controller-side SHA256 verify-before-copy + target-side
+# re-verify-after-copy convention as detection-engine-apply.yml) as a
+# systemd service on a dedicated host. It never talks outbound to any
+# other Pilot-managed role in Phase 1 — it only RECEIVES Alertmanager's
+# webhook and (via the configured dispatcher) calls out to an external
+# Agent Runtime, so unlike detection-engine-apply.yml there is no
+# upstream inventory-group auto-detect/gate here.
+#
+# The listener binds to this host's own default routed address (never
+# 0.0.0.0) — spec §5.2's "private/network-scoped" requirement — so an
+# operator who wants a different interface must override
+# agent_controller_listen_addr explicitly rather than rely on a wildcard
+# bind plus firewall-only enforcement.
+#
+# Usage (dry run):
+#   go run ./cmd/pilot vm-target run --name agentctl --sandbox \
+#       playbooks/apply/agent-controller-apply.yml --check --diff \
+#       -e agent_controller_artifact_path=dist/pilot-agent-controller-linux-amd64 \
+#       -e agent_controller_artifact_sha256=<sha256> \
+#       -e agent_controller_webhook_secret=<secret>
+#
+# Variables: see docs/verification/agent-controller.md §1.5 and
+# contracts/agent-controller.yaml's groupVars.
+#
+# Stage gating (same convention as detection-engine-apply.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+- name: Apply agent-controller (Phase 1 observe-only incident controller)
+  hosts: "{{ target_group | default('agent-controller') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    agent_controller_user: pilot-agent
+    agent_controller_bin_dest: /usr/local/bin/pilot-agent-controller
+    agent_controller_config_dir: /etc/pilot/agent-controller
+    agent_controller_config_path: /etc/pilot/agent-controller/config.yaml
+    agent_controller_data_dir: /var/lib/pilot/agent-controller
+    agent_controller_db_path: /var/lib/pilot/agent-controller/state.db
+    agent_controller_status_path: /run/pilot/agent-controller/status.json
+    agent_controller_textfile_path: /var/lib/node_exporter/textfile/pilot_agent_controller.prom
+    agent_controller_backup_dir: /var/backups/pilot-agent-controller
+
+    agent_controller_listen_port: 8090
+    # Deliberately not defaulted to 0.0.0.0 or 127.0.0.1 — resolved below
+    # from ansible_default_ipv4.address unless explicitly overridden.
+    agent_controller_listen_addr: ""
+
+    agent_controller_max_concurrent_runs: 4
+    agent_controller_max_runs_per_host: 1
+    agent_controller_max_body_bytes: 1048576
+
+    agent_controller_dispatcher_kind: fake
+    agent_controller_dispatcher_endpoint: ""
+    agent_controller_dispatcher_timeout_seconds: 30
+
+    # agent_controller_artifact_path / agent_controller_artifact_sha256 /
+    # agent_controller_webhook_secret are DELIBERATELY NOT declared here
+    # (same "no shadowing default" reasoning as detection-engine-
+    # apply.yml's own artifact vars) — all three are required and gated
+    # below; a hardcoded default here would silently defeat that gate.
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Gate: supported OS is Ubuntu 24.04"
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_version == '24.04'
+        fail_msg: >-
+          agent-controller only supports Ubuntu 24.04 (no actual-run
+          evidence exists for any other OS). Detected
+          {{ ansible_distribution }} {{ ansible_distribution_version }}.
+      tags: [always]
+
+    - name: "Gate: supported CPU architecture is x86_64/amd64"
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == 'x86_64'
+        fail_msg: "agent-controller only supports amd64. Detected {{ ansible_architecture }}."
+      tags: [always]
+
+    - name: "Gate: host-monitoring textfile collector directory exists on this host"
+      ansible.builtin.stat:
+        path: /var/lib/node_exporter/textfile
+      register: agent_controller_textfile_dir_stat
+      tags: [always]
+
+    - name: "Gate: assert host-monitoring's textfile directory is present and a directory"
+      ansible.builtin.assert:
+        that:
+          - agent_controller_textfile_dir_stat.stat.get('exists', false)
+          - agent_controller_textfile_dir_stat.stat.get('isdir', false)
+        fail_msg: >-
+          /var/lib/node_exporter/textfile does not exist. agent-controller
+          reuses host-monitoring's textfile collector to publish its OWN
+          health metrics only — apply
+          playbooks/apply/host-monitoring-apply.yml on this host first.
+      tags: [always]
+
+    - name: "Gate: artifact path/sha256/webhook secret are supplied"
+      ansible.builtin.assert:
+        that:
+          - agent_controller_artifact_path is defined
+          - agent_controller_artifact_path | length > 0
+          - agent_controller_artifact_sha256 is defined
+          - agent_controller_artifact_sha256 | length > 0
+          - agent_controller_webhook_secret is defined
+          - agent_controller_webhook_secret | length > 0
+        fail_msg: >-
+          agent_controller_artifact_path, agent_controller_artifact_sha256,
+          and agent_controller_webhook_secret are all required — build with
+          scripts/build-agent-controller.sh first; unauthenticated webhooks
+          must fail closed (spec §5), so there is no default secret.
+      no_log: true
+      tags: [always]
+
+    - name: "Gate: dispatcher.kind=http requires a non-empty endpoint"
+      ansible.builtin.assert:
+        that:
+          - agent_controller_dispatcher_kind in ['fake', 'http']
+          - agent_controller_dispatcher_kind != 'http' or (agent_controller_dispatcher_endpoint | default('') | length > 0)
+        fail_msg: >-
+          agent_controller_dispatcher_kind must be fake or http; http
+          requires a non-empty agent_controller_dispatcher_endpoint
+          (spec §12).
+      tags: [always]
+
+    - name: "Resolve agent_controller_listen_addr from this host's default route when not explicitly set"
+      ansible.builtin.set_fact:
+        agent_controller_listen_addr: "{{ ansible_default_ipv4.address }}"
+      when: agent_controller_listen_addr | default('') | length == 0
+
+    - name: "Resolve agent_controller_artifact_path to an absolute controller path (relative = repo-root relative)"
+      ansible.builtin.set_fact:
+        agent_controller_artifact_abs_path: >-
+          {{ agent_controller_artifact_path
+             if (agent_controller_artifact_path is match('^/'))
+             else (playbook_dir ~ '/../../' ~ agent_controller_artifact_path) }}
+      tags: [always]
+
+    - name: "Gate: artifact exists on the controller"
+      ansible.builtin.stat:
+        path: "{{ agent_controller_artifact_abs_path }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: agent_controller_artifact_stat
+      tags: [always]
+
+    - name: "Gate: controller-side artifact exists and its SHA256 matches"
+      ansible.builtin.assert:
+        that:
+          - agent_controller_artifact_stat.stat.get('exists', false)
+          - agent_controller_artifact_stat.stat.get('checksum', '') == agent_controller_artifact_sha256
+        fail_msg: >-
+          controller artifact {{ agent_controller_artifact_abs_path }} is
+          missing or its SHA256 ({{ agent_controller_artifact_stat.stat.get('checksum', 'MISSING') }})
+          does not match agent_controller_artifact_sha256
+          ({{ agent_controller_artifact_sha256 }}).
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: controller artifact's own `version` subcommand succeeds"
+      ansible.builtin.command:
+        argv: ["{{ agent_controller_artifact_abs_path }}", "version"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: agent_controller_artifact_version
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: version output matches the binary contract (`pilot-agent-controller <version> (<commit>)`)"
+      ansible.builtin.assert:
+        that:
+          - agent_controller_artifact_version.stdout is match('^pilot-agent-controller \S+ \(\S+\)')
+        fail_msg: "unexpected version output: {{ agent_controller_artifact_version.stdout }}"
+      run_once: true
+      tags: [always]
+
+  tasks:
+    - name: "Agent Controller install + systemd service"
+      block:
+        - name: "Step 1: create dedicated system user"
+          tags: [agent-controller-C1]
+          ansible.builtin.user:
+            name: "{{ agent_controller_user }}"
+            system: true
+            shell: /usr/sbin/nologin
+            create_home: false
+
+        - name: "Step 2: ensure config/data/backup directories exist"
+          tags: [agent-controller-C5]
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: directory
+            owner: "{{ item.owner }}"
+            group: "{{ item.group }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - { path: "{{ agent_controller_config_dir }}", owner: root, group: root, mode: "0755" }
+            - { path: "{{ agent_controller_data_dir }}", owner: "{{ agent_controller_user }}", group: "{{ agent_controller_user }}", mode: "0700" }
+            - { path: "{{ agent_controller_backup_dir }}", owner: root, group: root, mode: "0700" }
+
+        - name: "Step 3: check whether a previous state.db exists (skip backup on first install)"
+          ansible.builtin.stat:
+            path: "{{ agent_controller_db_path }}"
+          register: agent_controller_existing_db
+
+        - name: "Step 3b: check whether a previous binary exists and would actually change"
+          ansible.builtin.stat:
+            path: "{{ agent_controller_bin_dest }}"
+            checksum_algorithm: sha256
+          register: agent_controller_existing_binary_stat
+
+        - name: "Step 3c: determine whether this apply is an upgrade"
+          ansible.builtin.set_fact:
+            agent_controller_is_upgrade: >-
+              {{ agent_controller_existing_binary_stat.stat.exists
+                 and agent_controller_existing_binary_stat.stat.checksum != agent_controller_artifact_sha256 }}
+
+        - name: "Step 4: back up state.db before an upgrade (SQLite consistent snapshot via VACUUM INTO)"
+          ansible.builtin.command:
+            argv:
+              - "{{ agent_controller_bin_dest }}"
+              - db
+              - backup
+              - --db
+              - "{{ agent_controller_db_path }}"
+              - --output
+              - "{{ agent_controller_backup_dir }}/pre-upgrade.db"
+          when: agent_controller_is_upgrade and agent_controller_existing_db.stat.exists
+          changed_when: true
+
+        - name: "Step 5: snapshot the previously installed binary (rollback material)"
+          ansible.builtin.copy:
+            src: "{{ agent_controller_bin_dest }}"
+            dest: "{{ agent_controller_backup_dir }}/pilot-agent-controller.prev"
+            remote_src: true
+            mode: "0755"
+          when: agent_controller_is_upgrade
+          failed_when: false
+
+        - name: "Step 6: copy the pinned binary to the target"
+          tags: [agent-controller-C4]
+          ansible.builtin.copy:
+            src: "{{ agent_controller_artifact_abs_path }}"
+            dest: "{{ agent_controller_bin_dest }}"
+            mode: "0755"
+            owner: root
+            group: root
+          register: agent_controller_binary_result
+
+        - name: "Step 7: verify the target-side binary SHA256 (verify again after copy)"
+          ansible.builtin.stat:
+            path: "{{ agent_controller_bin_dest }}"
+            checksum_algorithm: sha256
+          register: agent_controller_target_binary_stat
+
+        - name: "Step 7: assert target-side SHA256 matches"
+          ansible.builtin.assert:
+            that:
+              - agent_controller_target_binary_stat.stat.get('checksum', '') == agent_controller_artifact_sha256
+            fail_msg: >-
+              target binary SHA256
+              ({{ agent_controller_target_binary_stat.stat.get('checksum', 'MISSING') }}) does
+              not match agent_controller_artifact_sha256
+              ({{ agent_controller_artifact_sha256 }}) after copy.
+          when: not ansible_check_mode
+
+        - name: "Step 8: render config.yaml (webhook secret is NOT here — only the env var NAME it arrives through)"
+          tags: [agent-controller-C2, agent-controller-C4]
+          ansible.builtin.copy:
+            dest: "{{ agent_controller_config_path }}"
+            mode: "0644"
+            content: |
+              listenAddr: "{{ agent_controller_listen_addr }}:{{ agent_controller_listen_port }}"
+              dbPath: "{{ agent_controller_db_path }}"
+              statusPath: "{{ agent_controller_status_path }}"
+              textfileMetricsPath: "{{ agent_controller_textfile_path }}"
+              webhookSecretEnv: "AGENT_CONTROLLER_WEBHOOK_SECRET"
+              maxBodyBytes: {{ agent_controller_max_body_bytes }}
+              maxConcurrentRuns: {{ agent_controller_max_concurrent_runs }}
+              maxRunsPerHost: {{ agent_controller_max_runs_per_host }}
+              dispatcher:
+                kind: "{{ agent_controller_dispatcher_kind }}"
+                endpoint: "{{ agent_controller_dispatcher_endpoint }}"
+                timeoutSeconds: {{ agent_controller_dispatcher_timeout_seconds }}
+          register: agent_controller_config_result
+
+        - name: "Step 8b: record the private listen port for the C3 verification probe"
+          ansible.builtin.copy:
+            dest: "{{ agent_controller_config_dir }}/listen_port"
+            mode: "0644"
+            content: "{{ agent_controller_listen_port }}"
+
+        - name: "Step 9: render webhook-secret.env (root:root 0600, no_log — the only place the real secret value lands)"
+          tags: [agent-controller-C12]
+          ansible.builtin.copy:
+            dest: "{{ agent_controller_config_dir }}/webhook-secret.env"
+            owner: root
+            group: root
+            mode: "0600"
+            content: |
+              AGENT_CONTROLLER_WEBHOOK_SECRET={{ agent_controller_webhook_secret }}
+          no_log: true
+          register: agent_controller_secret_env_result
+
+        - name: "Step 10: validate the rendered config (config schema gate, before any restart)"
+          tags: [agent-controller-C4]
+          ansible.builtin.command:
+            argv: ["{{ agent_controller_bin_dest }}", "config", "validate", "--config", "{{ agent_controller_config_path }}"]
+          changed_when: false
+
+        - name: "Step 11: render pilot-agent-controller.service"
+          tags: [agent-controller-C1]
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/pilot-agent-controller.service
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Pilot Agent Controller (Phase 1 observe-only)
+              Wants=network-online.target
+              After=network-online.target
+
+              [Service]
+              User={{ agent_controller_user }}
+              Group={{ agent_controller_user }}
+              Type=simple
+              EnvironmentFile={{ agent_controller_config_dir }}/webhook-secret.env
+              ExecStart={{ agent_controller_bin_dest }} serve --config {{ agent_controller_config_path }}
+              Restart=on-failure
+              RuntimeDirectory=pilot/agent-controller
+              RuntimeDirectoryMode=0755
+              NoNewPrivileges=yes
+              PrivateTmp=yes
+              ProtectHome=yes
+              ProtectSystem=strict
+              ProtectKernelTunables=yes
+              ProtectKernelModules=yes
+              ProtectControlGroups=yes
+              RestrictSUIDSGID=yes
+              CapabilityBoundingSet=
+              AmbientCapabilities=
+              ReadWritePaths={{ agent_controller_data_dir }}
+              ReadWritePaths=/run/pilot/agent-controller
+              ReadWritePaths=/var/lib/node_exporter/textfile
+
+              [Install]
+              WantedBy=multi-user.target
+          register: agent_controller_unit_result
+
+        - name: "Step 12: reload systemd if the unit file changed"
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when: agent_controller_unit_result is changed
+
+        - name: "Step 13: ensure pilot-agent-controller.service enabled+started"
+          tags: [agent-controller-C1]
+          ansible.builtin.systemd:
+            name: pilot-agent-controller.service
+            state: started
+            enabled: true
+          when: not ansible_check_mode
+
+        - name: "Step 14: restart if the binary, secret, config, or unit changed"
+          ansible.builtin.systemd:
+            name: pilot-agent-controller.service
+            state: restarted
+          when: >-
+            not ansible_check_mode
+            and (agent_controller_binary_result is changed
+            or agent_controller_secret_env_result is changed
+            or agent_controller_config_result is changed
+            or agent_controller_unit_result is changed)
+
+        - name: "Step 15: wait for the service to report active"
+          ansible.builtin.command:
+            argv: [systemctl, is-active, pilot-agent-controller.service]
+          register: agent_controller_active_check
+          changed_when: false
+          retries: 15
+          delay: 2
+          until: agent_controller_active_check.rc == 0
+          when: not ansible_check_mode
+
+        - name: "Step 16: wait for status.json to become readable (SQLite WAL commit can take a few seconds on a slow disk)"
+          tags: [agent-controller-C6]
+          ansible.builtin.command:
+            argv: ["{{ agent_controller_bin_dest }}", "status", "--status-path", "{{ agent_controller_status_path }}", "--field", "state"]
+          register: agent_controller_status_check
+          changed_when: false
+          failed_when: false
+          retries: 20
+          delay: 5
+          until: agent_controller_status_check.rc == 0
+          when: not ansible_check_mode
+
+        - name: "Step 16: assert status.json was reachable"
+          ansible.builtin.assert:
+            that:
+              - agent_controller_status_check.rc == 0
+            fail_msg: >-
+              status.json never became readable at
+              {{ agent_controller_status_path }} — check
+              `journalctl -u pilot-agent-controller`.
+          when: not ansible_check_mode
+
+        - name: "Step 17: verify database integrity"
+          tags: [agent-controller-C5]
+          ansible.builtin.command:
+            argv: ["{{ agent_controller_bin_dest }}", "db", "check", "--db", "{{ agent_controller_db_path }}"]
+          register: agent_controller_db_check
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Step 17b: enforce state.db ownership/mode (the sqlite driver creates it 0644 by default)"
+          tags: [agent-controller-C5]
+          ansible.builtin.file:
+            path: "{{ agent_controller_db_path }}"
+            owner: "{{ agent_controller_user }}"
+            group: "{{ agent_controller_user }}"
+            mode: "0600"
+          when: not ansible_check_mode
+
+      rescue:
+        - name: "ROLLBACK — stop the newly (mis)configured service"
+          ansible.builtin.systemd:
+            name: pilot-agent-controller.service
+            state: stopped
+            enabled: false
+          failed_when: false
+
+        - name: "ROLLBACK — restore the previous binary, if one was snapshotted"
+          ansible.builtin.copy:
+            src: "{{ agent_controller_backup_dir }}/pilot-agent-controller.prev"
+            dest: "{{ agent_controller_bin_dest }}"
+            remote_src: true
+            mode: "0755"
+          when: agent_controller_is_upgrade | default(false)
+          failed_when: false
+
+        - name: "ROLLBACK — restore the pre-upgrade database, if one was backed up"
+          ansible.builtin.copy:
+            src: "{{ agent_controller_backup_dir }}/pre-upgrade.db"
+            dest: "{{ agent_controller_db_path }}"
+            remote_src: true
+            mode: "0600"
+            owner: "{{ agent_controller_user }}"
+            group: "{{ agent_controller_user }}"
+          when: agent_controller_is_upgrade | default(false)
+          failed_when: false
+
+        - name: "ROLLBACK — restart with the restored previous binary, if any"
+          ansible.builtin.systemd:
+            name: pilot-agent-controller.service
+            state: restarted
+            enabled: true
+          when: agent_controller_is_upgrade | default(false)
+          failed_when: false
+
+        - name: "ROLLBACK — surface the original failure (evidence preserved)"
+          ansible.builtin.fail:
+            msg: >-
+              agent-controller apply FAILED (see task output above). If a
+              previous install existed, its binary/state.db were restored
+              and the service was restarted with them; otherwise the
+              service was stopped/disabled and left in place for
+              inspection.
+
+    - name: "Publish agent-controller health metrics via the textfile collector"
+      ansible.builtin.wait_for:
+        path: "{{ agent_controller_textfile_path }}"
+        timeout: 60
+      changed_when: false

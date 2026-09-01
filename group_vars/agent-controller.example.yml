@@ -1,0 +1,73 @@
+---
+# ============================================================================
+#  group_vars/agent-controller.example.yml —— Agent Controller(Phase 1)設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/agent-controller.yml
+#    cp group_vars/agent-controller.example.yml <inventory 目錄>/group_vars/agent-controller.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/agent-controller.md
+#  詳細設計:docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md
+#
+#  這是 experimental 元件(contracts/agent-controller.yaml 的 site.include=
+#  false、optIn=true),不會自動進 site-wide deploy;要單獨用
+#  `pilot deploy` 選 agent-controller 或直接跑
+#  playbooks/apply/agent-controller-apply.yml。
+#
+#  Phase 1 是零 mutation 權限的觀測用 Incident Controller——不吃 SSH 憑證、
+#  不吃 vault password、不呼叫任何 Ansible module。它只接收 Alertmanager
+#  webhook,派送唯讀診斷請求給外部 Agent Runtime(Phase 1 尚未接任何真實
+#  Runtime,預設 dispatcher.kind=fake)。
+# ============================================================================
+
+# 控制端已建置好的 pilot-agent-controller 二進位檔路徑(相對於 repo root,
+# 或絕對路徑)。必填——套用前會先在控制端驗證這個檔案存在、SHA256 跟下面
+# 的 agent_controller_artifact_sha256 相符,套用後再對目標主機上的檔案驗
+# 一次。用 scripts/build-agent-controller.sh 建置。
+agent_controller_artifact_path: "dist/pilot-agent-controller-linux-amd64"
+
+# 上面那個二進位檔的 SHA256(build script 會一併產生 <binary>.sha256)。
+# 必填、不得留空。
+agent_controller_artifact_sha256: ""
+
+# Alertmanager webhook 的 bearer token 共用密鑰。必填、不得留空(unauthenticated
+# webhook 一律 fail closed)。一律走 Vault,不要直接寫在這個檔案裡:
+#   vault key: agent_controller_webhook_secret
+agent_controller_webhook_secret: ""
+
+# 通常不用改,會沿用 playbook 內建預設:
+# agent_controller_listen_port: 8090
+# agent_controller_max_concurrent_runs: 4
+# agent_controller_max_runs_per_host: 1
+# agent_controller_max_body_bytes: 1048576
+
+# ----------------------------------------------------------------------
+#  Agent Runtime dispatcher(spec §12,預設 fake——沒有接任何真實 Runtime)
+# ----------------------------------------------------------------------
+# agent_controller_dispatcher_kind: "fake"     # 或 "http"
+# agent_controller_dispatcher_endpoint: ""      # kind=http 時必填,指向外部 Agent Runtime 的 JSON-over-HTTP 端點
+# agent_controller_dispatcher_timeout_seconds: 30
+
+# ----------------------------------------------------------------------
+#  把這台 agent-controller 接進 Alertmanager(在 alertmanager 那台主機的
+#  group_vars/alertmanager.yml 的 alertmanager_config 裡加一段
+#  webhook_configs route——真實跑過的格式,不是憑空寫的)
+# ----------------------------------------------------------------------
+# route:
+#   receiver: 'agent-controller'
+#   group_by: ['alertname']
+# receivers:
+#   - name: 'agent-controller'
+#     webhook_configs:
+#       - url: "http://<agent-controller 的 listenAddr>:<port>/webhooks/alertmanager"
+#         send_resolved: true
+#         http_config:
+#           authorization:
+#             type: Bearer
+#             credentials: "<跟 agent_controller_webhook_secret 一樣的值>"
+#
+# 注意:Alertmanager 本身沒有「對 body 算 HMAC 再送」這個功能——
+# webhook_configs 只能附一個固定的 Authorization/Basic-Auth 憑證,所以
+# agent-controller 的驗證機制是 bearer token 常數比對,不是 HMAC 簽章
+# (2026-09-01 對真實 vm-target 上的 Alertmanager v0.27 實測發現)。

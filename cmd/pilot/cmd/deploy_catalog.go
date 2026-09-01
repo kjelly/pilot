@@ -217,6 +217,11 @@ var deployCatalog = []deployPlaybook{
 		},
 	},
 	{
+		Key: "agent-controller", Label: "Agent Monitoring Phase 1(observe-only incident controller)",
+		Playbook: "playbooks/apply/agent-controller-apply.yml", DefaultGroup: "agent-controller", StageVar: "stage",
+		Note: "接收 Alertmanager webhook、正規化成 incident,派送唯讀診斷請求給外部 Agent Runtime;零 mutation 權限,不吃 SSH 憑證。experimental,預設不進 site.yml。",
+	},
+	{
 		Key: "dashboard", Label: "觀測畫面(Grafana + Loki)",
 		Playbook: "playbooks/apply/dashboard-apply.yml", DefaultGroup: "dashboard", StageVar: "stage",
 		AutoHostVars: []autoHostVar{{Var: "thanos_query_target_host", Group: "thanos-query", Label: "中央 Thanos Query"}},

@@ -186,6 +186,17 @@ var vaultSections = map[string]vaultSection{
 			},
 		},
 	},
+	"agent-controller": {
+		Title: "Agent Controller Webhook 共用密鑰（Phase 1，experimental）",
+		Note:  "unauthenticated webhook 一律 fail closed（見 docs/verification/agent-controller.md C3），這把 key 沒有預設值、必填。",
+		Keys: []vaultField{
+			{
+				Name:    "agent_controller_webhook_secret",
+				Value:   "CHANGE-ME",
+				Comment: "Alertmanager -> agent-controller webhook 的 bearer token 共用密鑰",
+			},
+		},
+	},
 }
 
 var vaultSectionOrder = []string{
@@ -199,6 +210,7 @@ var vaultSectionOrder = []string{
 	"dcgm-exporter-auth",
 	"alertmanager",
 	"detection-model-provider",
+	"agent-controller",
 }
 
 // VaultSectionExpectedKeys returns one vault section's *required* key
