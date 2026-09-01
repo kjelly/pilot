@@ -196,3 +196,31 @@ func TestRegression_FreeipaIdentityRefreshesClientSSSDCache(t *testing.T) {
 		}
 	}
 }
+
+// TestRegression_FreeipaIdentityAuthenticatesBeforeCheckModeProbes locks the
+// reconcile preview contract: pilot reconcile runs a --check --diff preview,
+// but the identity playbook still performs live IPA reads.  Kinit must run in
+// check mode, and a groups-only tagged run must not bypass authentication.
+func TestRegression_FreeipaIdentityAuthenticatesBeforeCheckModeProbes(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-identity-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+	kinitStart := strings.Index(playbook, `- name: "Kinit admin"`)
+	if kinitStart < 0 {
+		t.Fatal("identity playbook must contain the Kinit admin task")
+	}
+	kinitEnd := strings.Index(playbook[kinitStart:], "\n    # ── Groups")
+	if kinitEnd < 0 {
+		t.Fatal("could not isolate Kinit admin task")
+	}
+	kinit := playbook[kinitStart : kinitStart+kinitEnd]
+	if !strings.Contains(kinit, "check_mode: false") {
+		t.Fatal("Kinit admin must run during --check previews so live IPA probes have a fresh ticket")
+	}
+	if !strings.Contains(kinit, "tags: [identity, groups]") {
+		t.Fatal("Kinit admin must run for a groups-only tagged reconciliation")
+	}
+}

@@ -735,7 +735,13 @@
         executable: /bin/bash
       changed_when: false
       no_log: true
-      tags: [identity]
+      # `pilot reconcile` previews this playbook with --check --diff, while
+      # the read-only IPA probes below still need a live Kerberos context.
+      # Authentication only refreshes the remote credential cache; it does
+      # not mutate managed service state, so it must not be skipped in
+      # check-mode.
+      check_mode: false
+      tags: [identity, groups]
 
     # ── Groups ─────────────────────────────────────────────────────────
     - name: "Ensure IPA groups exist"
