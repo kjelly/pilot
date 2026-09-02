@@ -255,11 +255,16 @@ func (p *FLMProvider) chat(ctx context.Context, messages []ollamaChatMessage) (s
 
 // formatFLMEvidence renders a candidate's already-computed telemetry as
 // plain text lines (spec1.md §9: feed the model precomputed values, never
-// raw series, and never require it to round-trip JSON).
+// raw series, and never require it to round-trip JSON). subject_id/
+// subject_kind replace the historical pilot_host-only identity (spec
+// §9.11's FLM evidence example) — this is exactly the generic aggregate
+// evidence the model is allowed to see: no raw SNMP OID, no credential,
+// no community string, no full snmpwalk, ever.
 func formatFLMEvidence(c ModelCandidateRequest) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "candidate_id=%s\n", c.CandidateID)
-	fmt.Fprintf(&b, "pilot_host=%s\n", c.PilotHost)
+	fmt.Fprintf(&b, "subject_id=%s\n", c.SubjectID)
+	fmt.Fprintf(&b, "subject_kind=%s\n", c.SubjectKind)
 	fmt.Fprintf(&b, "site=%s\n", c.Site)
 	names := make([]string, 0, len(c.Current))
 	for name := range c.Current {

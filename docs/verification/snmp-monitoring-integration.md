@@ -156,7 +156,7 @@ PRODUCTION_READY — see spec §17.4/§18 (AC23) for the real-device gate.
 ## Traceability
 
 - C1-C6 exercise `internal/monitoring` (Phase 2 of the spec).
-- C7-C9 exercise `internal/detection`'s subject/migration generalization (Phase 4). C15 exercises the real `network-device-ifmib-v1` profile's cardinality policy (Phase 5). C14 exercises the model-provider fallback lane (Phase 6, not yet implemented).
+- C7-C9 exercise `internal/detection`'s subject/migration generalization (Phase 4). C15 exercises the real `network-device-ifmib-v1` profile's cardinality policy (Phase 5). C14 exercises the model-provider generic-subject wire and fallback lane (Phase 6).
 - C10, C13 exercise `internal/agentcontroller` (Phase 3).
 - C11 exercises the fail-closed guard at `cmd/pilot-agent-controller`'s
   `remediation propose`/`reapply-propose` choke point, the only place a
@@ -223,8 +223,24 @@ profile's own 90s/5s sampling override. One real bug was found+fixed in
 the profile's PromQL (an ambiguous `group_left` clause) via a live Thanos
 Query 400 response.
 
-**C14 (Phase 6 — model-provider fallback lane): not yet implemented.**
-This file stays DRAFT until that phase lands.
+**C14 (Phase 6 — model-provider generic-subject wire + fallback lane):
+DONE.** See `docs/runbooks/snmp-model-provider-generalization.md` —
+`Candidate`/`ModelCandidateRequest` now carry `subject_id`/`subject_kind`
+(a real wire schema v2 bump, `pilot_host` kept as an optional
+compatibility mirror); an end-to-end RunCycle test with the real
+`network-device-ifmib-v1` profile and a failing FakeModelProvider proves
+the model only ever sees named aggregate features, the local anomaly
+survives every failed model call, and the captured request never contains
+a secret-like/raw-OID substring. Ollama/OpenAI needed no code change —
+both already `json.Marshal` the shared `ModelBatchRequest` type directly.
+The pre-existing fallback-provider test suite (unchanged logic, migrated
+field names) still passes in full.
+
+With C14 done, every row in this file (C1-C15) now has actual-run
+evidence — see each phase's own runbook for the specific proof. This
+file's own PASS/FAIL verdict (§ above) still additionally requires the
+disposable-topology positive/negative lanes (spec §17.2/§17.3) before
+VERIFICATION_READY.
 
 ## Change record
 
@@ -235,3 +251,4 @@ This file stays DRAFT until that phase lands.
 | 2026-09-02 | DRAFT | Phase 3 evidence added for C10-C13 (Agent Controller subject/envelope, repair guard, diagnose) — see `docs/runbooks/agent-monitoring-snmp-subject.md`; C11 probe path corrected to `cmd/pilot-agent-controller` (actual guard location) instead of `internal/repair`. C7-C9, C14-C15 remain unimplemented; still DRAFT overall. |
 | 2026-09-02 | DRAFT | Phase 4 evidence added for C7-C9 (Detection Engine subject/migration generalization) — see `docs/runbooks/detection-engine-subject-generalization.md`; C9 probe corrected to the real ambiguous-series test name. C14-C15 remain unimplemented (Phase 5/6); still DRAFT overall. |
 | 2026-09-02 | DRAFT | Phase 5 evidence added for C15 (`network-device-ifmib-v1` cardinality policy + real disposable-VM discovery) — see `docs/runbooks/snmp-adaptive-detection.md`. C14 (model-provider fallback) remains unimplemented (Phase 6); still DRAFT overall. |
+| 2026-09-02 | DRAFT | Phase 6 evidence added for C14 (model-provider generic-subject wire, real schema v2 bump) — see `docs/runbooks/snmp-model-provider-generalization.md`. Every C1-C15 row now has actual-run evidence, but the full disposable-topology positive/negative lanes (spec §17.2/§17.3) have not been run as one continuous pass across the whole stack — each phase's evidence was gathered independently. Still DRAFT until that continuous run happens. |

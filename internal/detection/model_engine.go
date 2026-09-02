@@ -87,7 +87,7 @@ func (e *Engine) scoreCandidatesWithProvider(ctx context.Context, candidates []C
 
 	kept, dropped := SelectCandidates(candidates)
 	for _, c := range dropped {
-		fused[c.Host] = FuseLocalOnly(c.LocalScore)
+		fused[c.Subject.ID] = FuseLocalOnly(c.LocalScore)
 	}
 	if len(dropped) > 0 {
 		stats.DroppedTotal["cap"] = int64(len(dropped))
@@ -103,7 +103,7 @@ func (e *Engine) scoreCandidatesWithProvider(ctx context.Context, candidates []C
 			stats.DroppedTotal["rate_limited"] += int64(len(batch))
 			mu.Unlock()
 			for _, c := range batch {
-				fused[c.Host] = FuseLocalOnly(c.LocalScore)
+				fused[c.Subject.ID] = FuseLocalOnly(c.LocalScore)
 			}
 			continue
 		}
@@ -127,7 +127,7 @@ func (e *Engine) scoreCandidatesWithProvider(ctx context.Context, candidates []C
 
 func (e *Engine) scoreOneBatch(ctx context.Context, batch []Candidate, evaluationTime int64, fused map[string]FusedResult, stats *ModelCycleStats, mu *sync.Mutex) {
 	req := ModelBatchRequest{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		PromptVersion: PromptVersion,
 		WindowSeconds: 600,
 		Candidates:    make([]ModelCandidateRequest, 0, len(batch)),
@@ -138,10 +138,16 @@ func (e *Engine) scoreOneBatch(ctx context.Context, batch []Candidate, evaluatio
 	}
 	req.RequestID = requestID
 	for _, c := range batch {
+		pilotHost := ""
+		if c.Subject.IsManagedHost() {
+			pilotHost = c.Subject.ID
+		}
 		req.Candidates = append(req.Candidates, ModelCandidateRequest{
-			CandidateID:    c.Host,
-			PilotHost:      c.Host,
-			Site:           c.Site,
+			CandidateID:    c.Subject.ID,
+			SubjectID:      c.Subject.ID,
+			SubjectKind:    c.Subject.Kind,
+			PilotHost:      pilotHost,
+			Site:           c.Subject.Site,
 			EvaluationTime: evaluationTime,
 			Current:        c.Current,
 		})
@@ -161,7 +167,7 @@ func (e *Engine) scoreOneBatch(ctx context.Context, batch []Candidate, evaluatio
 		mu.Unlock()
 		for _, c := range batch {
 			mu.Lock()
-			fused[c.Host] = FuseLocalOnly(c.LocalScore)
+			fused[c.Subject.ID] = FuseLocalOnly(c.LocalScore)
 			mu.Unlock()
 		}
 		return
@@ -179,15 +185,15 @@ func (e *Engine) scoreOneBatch(ctx context.Context, batch []Candidate, evaluatio
 		mu.Lock()
 		switch {
 		case resp.Status == "insufficient_data":
-			fused[c.Host] = FuseInsufficientData(c.LocalScore)
+			fused[c.Subject.ID] = FuseInsufficientData(c.LocalScore)
 		default:
-			if rc, ok := byID[c.Host]; ok {
-				fused[c.Host] = FuseCandidate(c.LocalScore, rc)
+			if rc, ok := byID[c.Subject.ID]; ok {
+				fused[c.Subject.ID] = FuseCandidate(c.LocalScore, rc)
 			} else {
 				// Should not happen — ValidateBatchResponse already
 				// enforces exact candidate-ID set equality — but never
 				// suppress local detection on an unexpected gap.
-				fused[c.Host] = FuseLocalOnly(c.LocalScore)
+				fused[c.Subject.ID] = FuseLocalOnly(c.LocalScore)
 			}
 		}
 		mu.Unlock()

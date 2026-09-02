@@ -2,6 +2,8 @@ package detection
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -219,6 +221,101 @@ func TestEngine_SNMPProfile_AlertPayloadCorrelatesWithAgentControllerContract(t 
 	}
 	if labels["pilot_target"] != "core-sw-01" {
 		t.Fatalf("pilot_target = %q, want core-sw-01 (normalizeSubject's fallback case for a raw Prometheus-rule alert with no pilot_subject, e.g. SNMPTargetDown, still needs this)", labels["pilot_target"])
+	}
+}
+
+// secretLikePattern matches substrings a captured model-provider prompt/
+// request must never contain (spec §9.11's prohibited list: raw OID,
+// community string, credential, username/password) — a real OID looks
+// like a dotted numeric string (e.g. 1.3.6.1.2.1.2.2.1.14), and
+// community/credential/username/password are the literal words spec §9.11
+// bans outright.
+var secretLikePattern = regexp.MustCompile(`(?i)community|credential|username|password|\b1\.3\.6\.1\b`)
+
+// TestEngine_SNMPProfile_ModelFailurePreservesLocalAnomalyAndSeesOnlyAggregates
+// is the Phase 6 exit gate's "model sees only aggregate features",
+// "malformed FLM reply preserves local anomaly", and "no secret/raw OID in
+// captured prompts" — driven through the REAL network-device-ifmib-v1
+// profile end to end via Engine.RunCycle (not a provider-level unit test
+// in isolation), with a FakeModelProvider that always fails, capturing the
+// exact request it recieved.
+func TestEngine_SNMPProfile_ModelFailurePreservesLocalAnomalyAndSeesOnlyAggregates(t *testing.T) {
+	profile := loadNetworkDeviceProfile(t)
+
+	value := "1.0"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		at := r.URL.Query().Get("time")
+		var atInt int64
+		fmt.Sscanf(at, "%d", &atInt)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, snmpVectorResponse(atInt, "core-sw-01", "site-a", "edge-switches", value))
+	}))
+	defer server.Close()
+
+	client := NewThanosClient(server.URL, 5*time.Second)
+	store := openTestStore(t)
+	engine := NewEngine(profile, client, store, nil)
+
+	var capturedRequests []ModelBatchRequest
+	engine.Provider = &FakeModelProvider{
+		ScoreFunc: func(ctx context.Context, req ModelBatchRequest) (ModelBatchResponse, error) {
+			capturedRequests = append(capturedRequests, req)
+			return ModelBatchResponse{}, errors.New("simulated malformed/unreachable FLM response")
+		},
+	}
+	engine.ProviderProtocol = "flm"
+
+	base := time.Now().Unix()
+	for i := 0; i < minReadyBuckets; i++ {
+		if _, err := engine.RunCycle(context.Background(), base+int64(i)*60); err != nil {
+			t.Fatalf("RunCycle warm-up cycle %d: %v", i, err)
+		}
+	}
+
+	value = "500.0" // real error/discard storm -> a real candidate (score >= CandidateThreshold)
+	var err error
+	for i := 0; i < 2; i++ {
+		_, err = engine.RunCycle(context.Background(), base+int64(minReadyBuckets+i)*60)
+		if err != nil {
+			t.Fatalf("RunCycle spike cycle %d: %v", i, err)
+		}
+	}
+
+	if len(capturedRequests) == 0 {
+		t.Fatal("expected at least one request to reach the (failing) model provider — the spike should have qualified as a candidate")
+	}
+	for _, req := range capturedRequests {
+		raw, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal captured request: %v", err)
+		}
+		if secretLikePattern.Match(raw) {
+			t.Fatalf("captured model-provider request contains a secret-like/raw-OID substring: %s", raw)
+		}
+		for _, c := range req.Candidates {
+			if c.SubjectID != "core-sw-01" || c.SubjectKind != "network_device" {
+				t.Fatalf("candidate identity = (%q, %q), want (core-sw-01, network_device)", c.SubjectID, c.SubjectKind)
+			}
+			for name := range c.Current {
+				if _, ok := profile.Feature(name); !ok {
+					t.Fatalf("candidate.Current has feature %q not declared in the profile — the model must only ever see named aggregate features, never raw telemetry", name)
+				}
+			}
+		}
+	}
+
+	// Despite every model call failing, the anomaly must still have been
+	// detected and persisted via local-only fusion — never silently
+	// downgraded to normal.
+	active, err := store.ListActiveEpisodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("expected the local anomaly to still produce an active episode despite every model call failing, got %d: %+v", len(active), active)
+	}
+	if active[0].SubjectKind != "network_device" {
+		t.Fatalf("SubjectKind = %q, want network_device", active[0].SubjectKind)
 	}
 }
 

@@ -15,7 +15,7 @@ func TestModelSchema_EmbeddedCopyMatchesMonitoringTarget(t *testing.T) {
 		embedded []byte
 		target   string
 	}{
-		{modelBatchRequestSchemaJSON, "../../monitoring/detection/schemas/model-detection-batch-request-v1.json"},
+		{modelBatchRequestSchemaJSON, "../../monitoring/detection/schemas/model-detection-batch-request-v2.json"},
 		{modelBatchResponseSchemaJSON, "../../monitoring/detection/schemas/model-detection-batch-response-v1.json"},
 	}
 	for _, c := range cases {
@@ -166,10 +166,36 @@ func TestValidateBatchResponse_NonFiniteScoreRejected(t *testing.T) {
 }
 
 func TestValidateBatchRequest_AdditionalPropertiesRejected(t *testing.T) {
-	raw := []byte(`{"schema_version":1,"request_id":"r","prompt_version":1,"window_seconds":600,"candidates":[
-		{"candidate_id":"a","pilot_host":"a","site":"s","evaluation_time":1,"current":{},"unexpected_field":true}
+	raw := []byte(`{"schema_version":2,"request_id":"r","prompt_version":1,"window_seconds":600,"candidates":[
+		{"candidate_id":"a","subject_id":"a","subject_kind":"managed_host","site":"s","evaluation_time":1,"current":{},"unexpected_field":true}
 	]}`)
 	if err := ValidateBatchRequest(raw); err == nil {
 		t.Fatal("expected error for an unknown candidate field (additionalProperties: false)")
+	}
+}
+
+// TestValidateBatchRequest_SNMPSubjectOmitsPilotHost is spec §9.11's Phase
+// 6 wire-contract requirement: a non-managed-host candidate validates
+// with no pilot_host field at all (it is optional in the v2 request
+// schema), and its identity is carried entirely by subject_id/
+// subject_kind.
+func TestValidateBatchRequest_SNMPSubjectOmitsPilotHost(t *testing.T) {
+	raw := []byte(`{"schema_version":2,"request_id":"r","prompt_version":1,"window_seconds":600,"candidates":[
+		{"candidate_id":"core-sw-01","subject_id":"core-sw-01","subject_kind":"network_device","site":"hq","evaluation_time":1,"current":{"interface_error_rate":47.2}}
+	]}`)
+	if err := ValidateBatchRequest(raw); err != nil {
+		t.Fatalf("expected a pilot_host-less SNMP candidate to validate, got %v", err)
+	}
+}
+
+// TestValidateBatchRequest_RejectsOldSchemaVersion is a guard against a
+// stale receiver silently accepting a v1-shaped request that no longer
+// carries subject_id/subject_kind at all.
+func TestValidateBatchRequest_RejectsOldSchemaVersion(t *testing.T) {
+	raw := []byte(`{"schema_version":1,"request_id":"r","prompt_version":1,"window_seconds":600,"candidates":[
+		{"candidate_id":"a","pilot_host":"a","site":"s","evaluation_time":1,"current":{}}
+	]}`)
+	if err := ValidateBatchRequest(raw); err == nil {
+		t.Fatal("expected the v2 schema to reject a schema_version:1 request")
 	}
 }

@@ -17,7 +17,19 @@ import (
 // model_schema_test.go — because go:embed patterns cannot use ".." to
 // reach outside internal/detection.
 //
-//go:embed schemas/model-detection-batch-request-v1.json
+// The batch REQUEST schema is now v2 (spec
+// docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md
+// §9.11, Phase 6): candidate identity generalized from a Linux-host-only
+// pilot_host/site pair to subject_id/subject_kind/site, with pilot_host
+// kept as an optional compatibility mirror (populated only for a
+// managed_host subject). schemas/model-detection-batch-request-v1.json
+// is kept on disk, unused by this package, purely because the original
+// docs/superpowers/specs/2026-08-28-detection-engine-spec.md still
+// documents it as historical fact. The batch RESPONSE schema is
+// untouched — candidate_id there is already an opaque string, so nothing
+// about its shape needed to change.
+//
+//go:embed schemas/model-detection-batch-request-v2.json
 var modelBatchRequestSchemaJSON []byte
 
 //go:embed schemas/model-detection-batch-response-v1.json
@@ -56,9 +68,19 @@ type ModelBatchRequest struct {
 	Candidates    []ModelCandidateRequest `json:"candidates"`
 }
 
+// ModelCandidateRequest carries the generic subject identity spec §9.11
+// requires (SubjectID/SubjectKind) instead of the historical
+// Linux-host-only PilotHost/Site pair. PilotHost is kept as an optional
+// compatibility mirror (populated only when SubjectKind is
+// SubjectKindManagedHost) — an existing FLM/Ollama/OpenAI receiver that
+// only ever looked at pilot_host for a managed-host deployment keeps
+// seeing exactly what it always did; a new SNMP (or any other kind)
+// candidate simply omits it.
 type ModelCandidateRequest struct {
 	CandidateID    string             `json:"candidate_id"`
-	PilotHost      string             `json:"pilot_host"`
+	SubjectID      string             `json:"subject_id"`
+	SubjectKind    string             `json:"subject_kind"`
+	PilotHost      string             `json:"pilot_host,omitempty"`
 	Site           string             `json:"site"`
 	EvaluationTime int64              `json:"evaluation_time"`
 	Current        map[string]float64 `json:"current"`

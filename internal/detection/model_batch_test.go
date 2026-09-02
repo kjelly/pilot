@@ -13,7 +13,7 @@ func TestProvider_CandidateLimitDropsLowestScoresDeterministically(t *testing.T)
 	for i := 0; i < 20; i++ {
 		score := 1.0 - float64(i)*0.01
 		host := string(rune('a' + i))
-		all = append(all, Candidate{Host: host, LocalScore: LocalScoreResult{Valid: true, Score: score}})
+		all = append(all, Candidate{Subject: SubjectKey{ID: host}, LocalScore: LocalScoreResult{Valid: true, Score: score}})
 	}
 	// Force a tie between the 16th and 17th by score so the ASC-host
 	// tiebreak is exercised right at the cutoff boundary.
@@ -32,8 +32,8 @@ func TestProvider_CandidateLimitDropsLowestScoresDeterministically(t *testing.T)
 		if prev.LocalScore.Score < cur.LocalScore.Score {
 			t.Fatalf("kept not sorted DESC by score at %d: %v then %v", i, prev, cur)
 		}
-		if prev.LocalScore.Score == cur.LocalScore.Score && prev.Host > cur.Host {
-			t.Fatalf("tie at %d not broken host ASC: %q then %q", i, prev.Host, cur.Host)
+		if prev.LocalScore.Score == cur.LocalScore.Score && prev.Subject.ID > cur.Subject.ID {
+			t.Fatalf("tie at %d not broken host ASC: %q then %q", i, prev.Subject.ID, cur.Subject.ID)
 		}
 	}
 	for _, d := range dropped {
@@ -47,13 +47,13 @@ func TestProvider_CandidateLimitDropsLowestScoresDeterministically(t *testing.T)
 	// Re-running SelectCandidates on the same input must be deterministic.
 	kept2, dropped2 := SelectCandidates(all)
 	for i := range kept {
-		if kept[i].Host != kept2[i].Host {
-			t.Fatalf("non-deterministic kept order at %d: %q vs %q", i, kept[i].Host, kept2[i].Host)
+		if kept[i].Subject.ID != kept2[i].Subject.ID {
+			t.Fatalf("non-deterministic kept order at %d: %q vs %q", i, kept[i].Subject.ID, kept2[i].Subject.ID)
 		}
 	}
 	for i := range dropped {
-		if dropped[i].Host != dropped2[i].Host {
-			t.Fatalf("non-deterministic dropped order at %d: %q vs %q", i, dropped[i].Host, dropped2[i].Host)
+		if dropped[i].Subject.ID != dropped2[i].Subject.ID {
+			t.Fatalf("non-deterministic dropped order at %d: %q vs %q", i, dropped[i].Subject.ID, dropped2[i].Subject.ID)
 		}
 	}
 }
@@ -61,7 +61,7 @@ func TestProvider_CandidateLimitDropsLowestScoresDeterministically(t *testing.T)
 func TestChunkBatches_GroupsOfFour(t *testing.T) {
 	var candidates []Candidate
 	for i := 0; i < MaxCandidatesPerCycle; i++ {
-		candidates = append(candidates, Candidate{Host: string(rune('a' + i))})
+		candidates = append(candidates, Candidate{Subject: SubjectKey{ID: string(rune('a' + i))}})
 	}
 	batches := ChunkBatches(candidates)
 	if len(batches) != MaxBatchesPerCycle {

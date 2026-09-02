@@ -311,7 +311,10 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 	var candidates []Candidate
 	for _, ph := range pending {
 		if e.Provider != nil && IsCandidate(ph.local.Score) {
-			candidates = append(candidates, Candidate{Host: ph.snap.Host, Site: ph.site, LocalScore: ph.local, Current: ph.snap.Current})
+			candidates = append(candidates, Candidate{
+				Subject:    SubjectKey{ID: ph.snap.Host, Kind: identity.Kind, Site: ph.site},
+				LocalScore: ph.local, Current: ph.snap.Current,
+			})
 			continue
 		}
 		fused[ph.snap.Host] = FuseLocalOnly(ph.local)

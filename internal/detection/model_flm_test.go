@@ -125,7 +125,7 @@ func flmValidRequest() ModelBatchRequest {
 	return ModelBatchRequest{
 		SchemaVersion: 1, RequestID: "req-1", PromptVersion: 1, WindowSeconds: 600,
 		Candidates: []ModelCandidateRequest{
-			{CandidateID: "host-a", PilotHost: "host-a", Site: "site-1", EvaluationTime: 1000, Current: map[string]float64{"cpu": 0.9}},
+			{CandidateID: "host-a", SubjectID: "host-a", SubjectKind: SubjectKindManagedHost, PilotHost: "host-a", Site: "site-1", EvaluationTime: 1000, Current: map[string]float64{"cpu": 0.9}},
 		},
 	}
 }
@@ -193,8 +193,8 @@ func TestFLMProvider_MultiCandidateSequentialCalls(t *testing.T) {
 	provider := &FLMProvider{BaseURL: srv.URL, Model: "m", HTTPClient: srv.Client()}
 
 	req := ModelBatchRequest{RequestID: "r", Candidates: []ModelCandidateRequest{
-		{CandidateID: "host-a", PilotHost: "host-a", Site: "s", Current: map[string]float64{}},
-		{CandidateID: "host-b", PilotHost: "host-b", Site: "s", Current: map[string]float64{}},
+		{CandidateID: "host-a", SubjectID: "host-a", SubjectKind: SubjectKindManagedHost, PilotHost: "host-a", Site: "s", Current: map[string]float64{}},
+		{CandidateID: "host-b", SubjectID: "host-b", SubjectKind: SubjectKindManagedHost, PilotHost: "host-b", Site: "s", Current: map[string]float64{}},
 	}}
 	resp, err := provider.Score(context.Background(), req)
 	if err != nil {
@@ -259,8 +259,8 @@ func TestFLMProvider_DegradesSingleCandidateWithoutFailingBatch(t *testing.T) {
 	provider := &FLMProvider{BaseURL: srv.URL, Model: "m", HTTPClient: srv.Client()}
 
 	req := ModelBatchRequest{RequestID: "r", Candidates: []ModelCandidateRequest{
-		{CandidateID: "host-good", PilotHost: "host-good", Site: "s", Current: map[string]float64{}},
-		{CandidateID: "host-bad", PilotHost: "host-bad", Site: "s", Current: map[string]float64{}},
+		{CandidateID: "host-good", SubjectID: "host-good", SubjectKind: SubjectKindManagedHost, PilotHost: "host-good", Site: "s", Current: map[string]float64{}},
+		{CandidateID: "host-bad", SubjectID: "host-bad", SubjectKind: SubjectKindManagedHost, PilotHost: "host-bad", Site: "s", Current: map[string]float64{}},
 	}}
 	resp, err := provider.Score(context.Background(), req)
 	if err != nil {

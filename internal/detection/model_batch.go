@@ -2,12 +2,12 @@ package detection
 
 import "sort"
 
-// Candidate is one host selected for model-assisted scoring this cycle
-// (spec §35): local_score >= CandidateThreshold, carrying whatever this
-// cycle's valid current feature values were.
+// Candidate is one subject selected for model-assisted scoring this cycle
+// (spec §35, generalized to a generic SubjectKey by spec §9.11/Phase 6):
+// local_score >= CandidateThreshold, carrying whatever this cycle's valid
+// current feature values were.
 type Candidate struct {
-	Host       string
-	Site       string
+	Subject    SubjectKey
 	LocalScore LocalScoreResult
 	Current    map[string]float64
 }
@@ -35,7 +35,7 @@ func SelectCandidates(all []Candidate) (kept, dropped []Candidate) {
 		if sorted[i].LocalScore.Score != sorted[j].LocalScore.Score {
 			return sorted[i].LocalScore.Score > sorted[j].LocalScore.Score
 		}
-		return sorted[i].Host < sorted[j].Host
+		return sorted[i].Subject.ID < sorted[j].Subject.ID
 	})
 	if len(sorted) <= MaxCandidatesPerCycle {
 		return sorted, nil
