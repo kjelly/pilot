@@ -1,0 +1,60 @@
+# monitoring/snmp/diagnostic-profiles/network-device-ifmib-v1.yaml
+#
+# pilot_diagnose_monitoring_target's query pack for profiles whose
+# diagnosticProfile is "network-device-ifmib-v1" (spec
+# docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md
+# §10.4/§10.5). Every query is a fixed template with an exact
+# `pilot_target="<target>"` label matcher substituted at call time —
+# never arbitrary caller-supplied PromQL (that is what the existing,
+# separately-audited `pilot_diagnose_metrics` is for).
+id: network-device-ifmib-v1
+
+queries:
+  - name: target_up
+    description: Is this SNMP target currently scrapeable
+    promql: 'up{pilot_protocol="snmp",pilot_target="__TARGET__"}'
+
+  - name: scrape_duration_seconds
+    description: Most recent scrape duration for this target
+    promql: 'scrape_duration_seconds{pilot_protocol="snmp",pilot_target="__TARGET__"}'
+
+  - name: interface_count
+    description: Number of interfaces this device reports
+    promql: 'count by (pilot_target) (ifOperStatus{pilot_protocol="snmp",pilot_target="__TARGET__"})'
+
+  - name: admin_up_oper_down_interfaces
+    description: Interfaces administratively up but operationally down
+    promql: |
+      topk(__TOPN__,
+        (ifAdminStatus{pilot_protocol="snmp",pilot_target="__TARGET__"} == 1)
+        and on (pilot_target, ifIndex)
+        (ifOperStatus{pilot_protocol="snmp",pilot_target="__TARGET__"} != 1)
+      )
+
+  - name: top_input_error_rate
+    description: Top interfaces by inbound error rate over the window
+    promql: 'topk(__TOPN__, rate(ifInErrors{pilot_protocol="snmp",pilot_target="__TARGET__"}[__WINDOW__]))'
+
+  - name: top_output_error_rate
+    description: Top interfaces by outbound error rate over the window
+    promql: 'topk(__TOPN__, rate(ifOutErrors{pilot_protocol="snmp",pilot_target="__TARGET__"}[__WINDOW__]))'
+
+  - name: top_input_discard_rate
+    description: Top interfaces by inbound discard rate over the window
+    promql: 'topk(__TOPN__, rate(ifInDiscards{pilot_protocol="snmp",pilot_target="__TARGET__"}[__WINDOW__]))'
+
+  - name: top_output_discard_rate
+    description: Top interfaces by outbound discard rate over the window
+    promql: 'topk(__TOPN__, rate(ifOutDiscards{pilot_protocol="snmp",pilot_target="__TARGET__"}[__WINDOW__]))'
+
+  - name: aggregate_utilization
+    description: Aggregate interface utilization ratio for this device
+    promql: |
+      max by (pilot_target) (
+        (
+          rate(ifHCInOctets{pilot_protocol="snmp",pilot_target="__TARGET__"}[__WINDOW__])
+          + rate(ifHCOutOctets{pilot_protocol="snmp",pilot_target="__TARGET__"}[__WINDOW__])
+        ) * 8
+        / on (pilot_target, ifIndex) group_left
+        (ifHighSpeed{pilot_protocol="snmp",pilot_target="__TARGET__"} * 1000000)
+      )

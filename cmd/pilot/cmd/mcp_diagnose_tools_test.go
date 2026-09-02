@@ -1228,3 +1228,130 @@ func TestResolveDiagnoseInventory_RegeneratesFreshOnEveryCallNotJustAtStartup(t 
 		t.Fatalf("out2.Host = %q, want dash1", out2.Host)
 	}
 }
+
+// ---- pilot_diagnose_monitoring_target ---------------------------------------
+
+func writeMonitoringTargetFixtureWorkspace(t *testing.T, dir string) {
+	t.Helper()
+	monDir := filepath.Join(dir, "monitoring")
+	diagDir := filepath.Join(monDir, "snmp", "diagnostic-profiles")
+	if err := os.MkdirAll(diagDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	profiles := `schemaVersion: 2
+profiles:
+  core-switch:
+    kind: snmp
+    jobName: snmp-core-switch
+    subjectKind: network_device
+    diagnosticProfile: network-device-ifmib-v1
+    snmp: {modules: [if_mib], authProfile: lab-v3}
+`
+	targets := `schemaVersion: 2
+targets:
+  - {name: core-sw-01, address: 10.20.0.11, profile: core-switch, site: hq}
+`
+	if err := os.WriteFile(filepath.Join(monDir, "scrape-profiles.yml"), []byte(profiles), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(monDir, "targets.yml"), []byte(targets), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	diagProfile := `id: network-device-ifmib-v1
+queries:
+  - {name: target_up, description: up, promql: 'up{pilot_target="__TARGET__"}'}
+  - {name: top_input_error_rate, description: errs, promql: 'topk(__TOPN__, rate(ifInErrors{pilot_target="__TARGET__"}[__WINDOW__]))'}
+`
+	if err := os.WriteFile(filepath.Join(diagDir, "network-device-ifmib-v1.yaml"), []byte(diagProfile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDiagnoseMonitoringTargetHandler_RejectsPatternTarget(t *testing.T) {
+	inv := writeDiagnoseGroupFixtureInventory(t, "thanos-query", []string{"tq1"})
+	writeMonitoringTargetFixtureWorkspace(t, filepath.Dir(inv))
+	handler := diagnoseMonitoringTargetHandler(baseDiagnoseOpts(t, inv, (&diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}).run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMonitoringTargetInput{Target: "core-sw-*"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result for a wildcard target", result)
+	}
+}
+
+func TestDiagnoseMonitoringTargetHandler_RejectsWindowOverMax(t *testing.T) {
+	inv := writeDiagnoseGroupFixtureInventory(t, "thanos-query", []string{"tq1"})
+	writeMonitoringTargetFixtureWorkspace(t, filepath.Dir(inv))
+	handler := diagnoseMonitoringTargetHandler(baseDiagnoseOpts(t, inv, (&diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}).run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMonitoringTargetInput{Target: "core-sw-01", Window: "7h"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result for a window over the 6h max", result)
+	}
+}
+
+func TestDiagnoseMonitoringTargetHandler_UnknownTargetRejected(t *testing.T) {
+	inv := writeDiagnoseGroupFixtureInventory(t, "thanos-query", []string{"tq1"})
+	writeMonitoringTargetFixtureWorkspace(t, filepath.Dir(inv))
+	handler := diagnoseMonitoringTargetHandler(baseDiagnoseOpts(t, inv, (&diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}).run))
+	result, _, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMonitoringTargetInput{Target: "does-not-exist"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("result = %+v, want an IsError result for an unknown target", result)
+	}
+}
+
+func TestDiagnoseMonitoringTargetHandler_SuccessReturnsStructuredEvidence(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "thanos-query", []string{"tq1"})
+	dir := filepath.Dir(inv)
+	writeMonitoringTargetFixtureWorkspace(t, dir)
+
+	diagProfile, err := diagnose.LoadDiagnosticProfile(filepath.Join(dir, "monitoring", "snmp", "diagnostic-profiles", "network-device-ifmib-v1.yaml"))
+	if err != nil {
+		t.Fatalf("LoadDiagnosticProfile: %v", err)
+	}
+	steps := diagnose.MonitoringTargetDiagnosisSteps(diagProfile, "core-sw-01", "30m", 10)
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		steps[0].Command: func() (string, int, error) {
+			return diagnoseOKDoc(t, "tq1", 0, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"1"]}]}}`+"\nHTTP_STATUS:200"), 0, nil
+		},
+		steps[1].Command: func() (string, int, error) {
+			return diagnoseOKDoc(t, "tq1", 0, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"ifIndex":"47"},"value":[1,"12.5"]}]}}`+"\nHTTP_STATUS:200"), 0, nil
+		},
+	}}
+
+	handler := diagnoseMonitoringTargetHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMonitoringTargetInput{Target: "core-sw-01"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil (success)", result)
+	}
+	if !out.Diagnosis.Scrape.Up {
+		t.Errorf("Scrape.Up = false, want true")
+	}
+	if out.Diagnosis.Subject.ID != "core-sw-01" || out.Diagnosis.Subject.Managed {
+		t.Errorf("Subject = %+v, want ID=core-sw-01 Managed=false", out.Diagnosis.Subject)
+	}
+	if len(out.Diagnosis.Interfaces.TopInputErrors) != 1 || !strings.Contains(out.Diagnosis.Interfaces.TopInputErrors[0], "ifIndex=47") {
+		t.Errorf("Interfaces.TopInputErrors = %+v, want one entry naming ifIndex=47", out.Diagnosis.Interfaces.TopInputErrors)
+	}
+	if len(out.Diagnosis.Evidence) != 2 {
+		t.Fatalf("len(Evidence) = %d, want 2 (one per query)", len(out.Diagnosis.Evidence))
+	}
+	for _, ev := range out.Diagnosis.Evidence {
+		if ev.Tool != "pilot_diagnose_monitoring_target" || ev.SubjectID != "core-sw-01" {
+			t.Errorf("evidence = %+v, want tool=pilot_diagnose_monitoring_target subject_id=core-sw-01", ev)
+		}
+	}
+	if out.AuditDirectory == "" {
+		t.Error("AuditDirectory must not be empty")
+	}
+}

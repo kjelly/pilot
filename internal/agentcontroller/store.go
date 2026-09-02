@@ -342,7 +342,26 @@ var schemaV4 = migration{
 	},
 }
 
-var migrations = []migration{schemaV1, schemaV2, schemaV3, schemaV4}
+// schemaV5 adds SNMP monitoring integration spec §10.1's generic
+// IncidentSubject to incidents. subject_id/subject_kind/managed are the
+// columns dispatchOne actually reads to build IncidentEnvelopeV2 —
+// host/site/component (schemaV1) stay exactly as they are, never
+// repurposed, so an existing managed-host incident's stored identity is
+// untouched. Backfill sets every EXISTING row's subject to its own host
+// (spec §10.1: "labels.pilot_host -> kind=managed_host, managed=true"),
+// since every incident before this migration was necessarily a managed
+// host — this store has never had any other kind of subject.
+var schemaV5 = migration{
+	version: 5,
+	sql: []string{
+		`ALTER TABLE incidents ADD COLUMN subject_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE incidents ADD COLUMN subject_kind TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE incidents ADD COLUMN managed INTEGER NOT NULL DEFAULT 1`,
+		`UPDATE incidents SET subject_id = COALESCE(host, ''), subject_kind = 'managed_host', managed = 1`,
+	},
+}
+
+var migrations = []migration{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5}
 
 func (s *Store) migrate() error {
 	return s.applyMigrations(migrations)

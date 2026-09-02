@@ -117,6 +117,53 @@ func TestParseAlertmanagerWebhook_NoAlertsRejected(t *testing.T) {
 	}
 }
 
+func TestNormalizeSubject_PilotHostPrecedence(t *testing.T) {
+	sub := normalizeSubject(map[string]string{"pilot_host": "web-1", "site": "hq"})
+	want := IncidentSubject{ID: "web-1", Kind: SubjectKindManagedHost, Site: "hq", Managed: true}
+	if sub != want {
+		t.Fatalf("normalizeSubject(pilot_host) = %+v, want %+v", sub, want)
+	}
+}
+
+func TestNormalizeSubject_PilotTargetNeverManaged(t *testing.T) {
+	sub := normalizeSubject(map[string]string{
+		"pilot_target": "core-sw-01", "pilot_subject_kind": "network_device", "site": "hq",
+	})
+	want := IncidentSubject{ID: "core-sw-01", Kind: "network_device", Site: "hq", Managed: false}
+	if sub != want {
+		t.Fatalf("normalizeSubject(pilot_target) = %+v, want %+v", sub, want)
+	}
+}
+
+func TestNormalizeSubject_GenericPilotSubjectTakesPrecedence(t *testing.T) {
+	// pilot_subject must win even when pilot_host/pilot_target are ALSO
+	// present (spec §10.1's fixed precedence order — rule 1 before 2/3).
+	sub := normalizeSubject(map[string]string{
+		"pilot_subject": "custom-1", "pilot_subject_kind": "custom_kind", "site": "hq",
+		"pilot_host": "web-1", "pilot_target": "core-sw-01",
+	})
+	want := IncidentSubject{ID: "custom-1", Kind: "custom_kind", Site: "hq", Managed: false}
+	if sub != want {
+		t.Fatalf("normalizeSubject(pilot_subject) = %+v, want %+v", sub, want)
+	}
+}
+
+func TestNormalizeSubject_NoSubjectLabelsIsEmpty(t *testing.T) {
+	sub := normalizeSubject(map[string]string{"alertname": "Watchdog"})
+	if sub != (IncidentSubject{}) {
+		t.Fatalf("normalizeSubject(no subject labels) = %+v, want zero value", sub)
+	}
+}
+
+func TestNormalizeSubject_NeverInventedFromInstanceOrGeneratorURL(t *testing.T) {
+	// spec §10.1's explicit prohibition list: instance/reverse-DNS/
+	// sysName/generatorURL/annotation prose must never become a subject.
+	sub := normalizeSubject(map[string]string{"instance": "10.0.0.1:9100", "job": "node"})
+	if sub != (IncidentSubject{}) {
+		t.Fatalf("normalizeSubject must not invent a subject from instance/job, got %+v", sub)
+	}
+}
+
 func TestIdentityHash_StableAcrossReceivedAtAndLabelOrder(t *testing.T) {
 	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	a := IncidentEvent{Source: "prometheus-rule", Episode: "fp-1", Status: "firing", Severity: "critical", StartsAt: base, ReceivedAt: base}

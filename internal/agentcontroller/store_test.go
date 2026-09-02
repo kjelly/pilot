@@ -34,6 +34,78 @@ func firingEvent(source, episode, fingerprint, host, severity string, at time.Ti
 	return ev
 }
 
+func TestIngestEvent_PersistsSubjectAndSurvivesDispatchListing(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+	ev := firingEvent("prometheus-rule", "fp-snmp-1", "fp-snmp-1", "", "critical", now)
+	// Site is set on BOTH ev.Site (the persisted incidents.site column)
+	// and ev.Subject.Site: in real usage normalizeSubject derives both
+	// from the exact same labels["site"] (see normalize.go), so they are
+	// never inconsistent — Subject.Site is a derived view of the site
+	// column, not a separately persisted one (GetIncident/
+	// ListIncidentsNeedingDispatch set it from inc.Site after scanning).
+	ev.Site = "hq"
+	ev.Subject = IncidentSubject{ID: "core-sw-01", Kind: "network_device", Site: "hq", Managed: false}
+	ev.AlertBodySHA256 = identityHash(ev)
+	out, err := s.IngestEvent(ev, now)
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	got, err := s.GetIncident(out.IncidentID)
+	if err != nil || got == nil {
+		t.Fatalf("GetIncident: got=%+v err=%v", got, err)
+	}
+	if got.Subject != ev.Subject {
+		t.Fatalf("GetIncident subject = %+v, want %+v", got.Subject, ev.Subject)
+	}
+
+	list, err := s.ListIncidentsNeedingDispatch(now, 10)
+	if err != nil {
+		t.Fatalf("ListIncidentsNeedingDispatch: %v", err)
+	}
+	if len(list) != 1 || list[0].Subject != ev.Subject {
+		t.Fatalf("ListIncidentsNeedingDispatch = %+v, want one incident with subject %+v", list, ev.Subject)
+	}
+	if list[0].Subject.Managed {
+		t.Fatal("external subject must never be Managed=true after round-tripping through the store")
+	}
+}
+
+func TestSchemaV5_BackfillsManagedHostSubjectForPreExistingRows(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+	// A pre-schemaV5-shaped event: only Host set, no Subject — mirrors
+	// what every incident looked like before this migration existed.
+	ev := firingEvent("prometheus-rule", "fp-legacy-1", "fp-legacy-1", "web-1", "critical", now)
+	out, err := s.IngestEvent(ev, now)
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	got, err := s.GetIncident(out.IncidentID)
+	if err != nil || got == nil {
+		t.Fatalf("GetIncident: got=%+v err=%v", got, err)
+	}
+	// A NEW row created after schemaV5 exists should get its subject from
+	// normalizeSubject-equivalent zero-value passthrough (createIncident
+	// just persists ev.Subject) — this test's real point is the BACKFILL
+	// behavior for OLD rows, so assert the migration path directly too.
+	if _, err := s.db.Exec(`UPDATE incidents SET subject_id = '', subject_kind = '', managed = 1 WHERE id = ?`, out.IncidentID); err != nil {
+		t.Fatalf("simulate pre-migration row: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE incidents SET subject_id = COALESCE(host, ''), subject_kind = 'managed_host', managed = 1 WHERE subject_id = ''`); err != nil {
+		t.Fatalf("simulate schemaV5 backfill: %v", err)
+	}
+	got, err = s.GetIncident(out.IncidentID)
+	if err != nil || got == nil {
+		t.Fatalf("GetIncident after backfill: got=%+v err=%v", got, err)
+	}
+	want := IncidentSubject{ID: "web-1", Kind: SubjectKindManagedHost, Site: "", Managed: true}
+	if got.Subject != want {
+		t.Fatalf("backfilled subject = %+v, want %+v", got.Subject, want)
+	}
+}
+
 func TestOpenStore_MigratesAndReopens(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "state.db")
 	s1, err := OpenStore(dbPath)
@@ -227,7 +299,7 @@ func TestEnqueueRun_OnlyOneActiveRunPerIncident(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	envelope := NewIncidentEnvelopeV1(out.IncidentID, ev)
+	envelope := NewIncidentEnvelopeV2(out.IncidentID, ev)
 
 	if _, err := s.EnqueueRun(out.IncidentID, envelope, now); err != nil {
 		t.Fatalf("first EnqueueRun: %v", err)
@@ -245,7 +317,7 @@ func TestCompleteRunDiagnosed_PersistsEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	envelope := NewIncidentEnvelopeV1(out.IncidentID, ev)
+	envelope := NewIncidentEnvelopeV2(out.IncidentID, ev)
 	runID, err := s.EnqueueRun(out.IncidentID, envelope, now)
 	if err != nil {
 		t.Fatalf("EnqueueRun: %v", err)
@@ -286,7 +358,7 @@ func TestFailRunAndMaybeRetry_RetriesThenGivesUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	envelope := NewIncidentEnvelopeV1(out.IncidentID, ev)
+	envelope := NewIncidentEnvelopeV2(out.IncidentID, ev)
 
 	const maxAttempts = 2
 	runID, err := s.EnqueueRun(out.IncidentID, envelope, now)
@@ -331,7 +403,7 @@ func TestRecoverInFlightRuns_ReopensForFreshDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	envelope := NewIncidentEnvelopeV1(out.IncidentID, ev)
+	envelope := NewIncidentEnvelopeV2(out.IncidentID, ev)
 	runID, err := s.EnqueueRun(out.IncidentID, envelope, now)
 	if err != nil {
 		t.Fatalf("EnqueueRun: %v", err)

@@ -11,7 +11,7 @@ import (
 
 func TestFakeDispatcher_DefaultResponse(t *testing.T) {
 	f := &FakeDispatcher{}
-	result, err := f.Diagnose(context.Background(), IncidentEnvelopeV1{IncidentID: "inc-1"})
+	result, err := f.Diagnose(context.Background(), IncidentEnvelopeV2{IncidentID: "inc-1"})
 	if err != nil {
 		t.Fatalf("Diagnose: %v", err)
 	}
@@ -24,14 +24,14 @@ func TestFakeDispatcher_DefaultResponse(t *testing.T) {
 }
 
 func TestFakeDispatcher_CustomHandler(t *testing.T) {
-	f := &FakeDispatcher{Handler: func(in IncidentEnvelopeV1) (DiagnosisResult, error) {
+	f := &FakeDispatcher{Handler: func(in IncidentEnvelopeV2) (DiagnosisResult, error) {
 		return DiagnosisResult{
 			Verdict:    VerdictExplained,
 			Confidence: 0.8,
 			Evidence:   []DiagnosisEvidence{{Tool: "pilot_diagnose_host_health", Summary: "ok"}},
 		}, nil
 	}}
-	result, err := f.Diagnose(context.Background(), IncidentEnvelopeV1{})
+	result, err := f.Diagnose(context.Background(), IncidentEnvelopeV2{})
 	if err != nil {
 		t.Fatalf("Diagnose: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestFakeDispatcher_CustomHandler(t *testing.T) {
 }
 
 func TestHTTPDispatcher_SuccessRoundTrip(t *testing.T) {
-	var gotBody IncidentEnvelopeV1
+	var gotBody IncidentEnvelopeV2
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
@@ -57,7 +57,7 @@ func TestHTTPDispatcher_SuccessRoundTrip(t *testing.T) {
 	defer srv.Close()
 
 	d := NewHTTPDispatcher(srv.URL, time.Second)
-	result, err := d.Diagnose(context.Background(), IncidentEnvelopeV1{IncidentID: "inc-42"})
+	result, err := d.Diagnose(context.Background(), IncidentEnvelopeV2{IncidentID: "inc-42"})
 	if err != nil {
 		t.Fatalf("Diagnose: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestHTTPDispatcher_NonOKStatusIsError(t *testing.T) {
 	defer srv.Close()
 
 	d := NewHTTPDispatcher(srv.URL, time.Second)
-	if _, err := d.Diagnose(context.Background(), IncidentEnvelopeV1{}); err == nil {
+	if _, err := d.Diagnose(context.Background(), IncidentEnvelopeV2{}); err == nil {
 		t.Fatal("expected an error for a non-200 response")
 	}
 }
@@ -89,7 +89,7 @@ func TestHTTPDispatcher_TimeoutIsError(t *testing.T) {
 	defer srv.Close()
 
 	d := NewHTTPDispatcher(srv.URL, 5*time.Millisecond)
-	if _, err := d.Diagnose(context.Background(), IncidentEnvelopeV1{}); err == nil {
+	if _, err := d.Diagnose(context.Background(), IncidentEnvelopeV2{}); err == nil {
 		t.Fatal("expected a timeout error")
 	}
 }
@@ -102,7 +102,7 @@ func TestHTTPDispatcher_MalformedResponseIsError(t *testing.T) {
 	defer srv.Close()
 
 	d := NewHTTPDispatcher(srv.URL, time.Second)
-	if _, err := d.Diagnose(context.Background(), IncidentEnvelopeV1{}); err == nil {
+	if _, err := d.Diagnose(context.Background(), IncidentEnvelopeV2{}); err == nil {
 		t.Fatal("expected an error for a malformed JSON response")
 	}
 }

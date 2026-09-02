@@ -35,15 +35,20 @@ func isTerminalStatus(status string) bool {
 
 // Incident mirrors one incidents row.
 type Incident struct {
-	ID               string
-	Source           string
-	SourceIdentity   string
-	GroupKey         string
-	Status           string
-	Severity         string
-	Host             string
-	Site             string
-	Component        string
+	ID             string
+	Source         string
+	SourceIdentity string
+	GroupKey       string
+	Status         string
+	Severity       string
+	Host           string
+	Site           string
+	Component      string
+	// Subject is the generic scope/correlation identity (SNMP monitoring
+	// integration spec §10.1/schemaV5) — set once at creation, never
+	// rewritten by a later re-fire, same convention as Host/Site/
+	// Component above.
+	Subject          IncidentSubject
 	AlertName        string
 	OpenedAt         time.Time
 	UpdatedAt        time.Time
@@ -158,11 +163,12 @@ func (s *Store) createIncident(tx *sql.Tx, ev IncidentEvent, now time.Time) (Ing
 		INSERT INTO incidents (
 			id, source, source_identity, group_key, status, severity, host, site,
 			component, alert_name, opened_at, updated_at, resolved_at,
-			current_revision, last_body_sha256
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+			current_revision, last_body_sha256, subject_id, subject_kind, managed
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
 	`, id, ev.Source, ev.Episode, ev.GroupKey, status, nullableString(ev.Severity),
 		nullableString(ev.Host), nullableString(ev.Site), nullableString(ev.Component),
-		ev.AlertName, rfc3339(now), rfc3339(now), resolvedAt, ev.AlertBodySHA256); err != nil {
+		ev.AlertName, rfc3339(now), rfc3339(now), resolvedAt, ev.AlertBodySHA256,
+		ev.Subject.ID, ev.Subject.Kind, ev.Subject.Managed); err != nil {
 		return IngestOutcome{}, fmt.Errorf("insert incident: %w", err)
 	}
 	if err := insertIncidentEvent(tx, id, ev, 1, now); err != nil {
@@ -240,11 +246,12 @@ func (s *Store) recordOrphanResolve(tx *sql.Tx, ev IncidentEvent, now time.Time)
 		INSERT INTO incidents (
 			id, source, source_identity, group_key, status, severity, host, site,
 			component, alert_name, opened_at, updated_at, resolved_at,
-			current_revision, last_body_sha256
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+			current_revision, last_body_sha256, subject_id, subject_kind, managed
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
 	`, id, ev.Source, ev.Episode, ev.GroupKey, StatusResolvedExternal, nullableString(ev.Severity),
 		nullableString(ev.Host), nullableString(ev.Site), nullableString(ev.Component),
-		ev.AlertName, rfc3339(now), rfc3339(now), nullableString(rfc3339(now)), ev.AlertBodySHA256); err != nil {
+		ev.AlertName, rfc3339(now), rfc3339(now), nullableString(rfc3339(now)), ev.AlertBodySHA256,
+		ev.Subject.ID, ev.Subject.Kind, ev.Subject.Managed); err != nil {
 		return IngestOutcome{}, fmt.Errorf("insert orphan-resolved incident: %w", err)
 	}
 	if err := insertIncidentEvent(tx, id, ev, 1, now); err != nil {
@@ -273,7 +280,8 @@ func (s *Store) GetIncident(id string) (*Incident, error) {
 		SELECT id, source, source_identity, group_key, status,
 			COALESCE(severity, ''), COALESCE(host, ''), COALESCE(site, ''),
 			COALESCE(component, ''), alert_name, opened_at, updated_at,
-			resolved_at, current_revision, last_body_sha256
+			resolved_at, current_revision, last_body_sha256,
+			subject_id, subject_kind, managed
 		FROM incidents WHERE id = ?
 	`, id)
 	var inc Incident
@@ -281,12 +289,14 @@ func (s *Store) GetIncident(id string) (*Incident, error) {
 	var resolvedAt sql.NullString
 	if err := row.Scan(&inc.ID, &inc.Source, &inc.SourceIdentity, &inc.GroupKey, &inc.Status,
 		&inc.Severity, &inc.Host, &inc.Site, &inc.Component, &inc.AlertName,
-		&openedAt, &updatedAt, &resolvedAt, &inc.CurrentRevision, &inc.LastBodySHA256); err != nil {
+		&openedAt, &updatedAt, &resolvedAt, &inc.CurrentRevision, &inc.LastBodySHA256,
+		&inc.Subject.ID, &inc.Subject.Kind, &inc.Subject.Managed); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get incident %s: %w", id, err)
 	}
+	inc.Subject.Site = inc.Site
 	inc.OpenedAt, _ = time.Parse(time.RFC3339, openedAt)
 	inc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	if resolvedAt.Valid {
@@ -304,7 +314,8 @@ func (s *Store) ListIncidentsNeedingDispatch(now time.Time, limit int) ([]Incide
 		SELECT i.id, i.source, i.source_identity, i.group_key, i.status,
 			COALESCE(i.severity, ''), COALESCE(i.host, ''), COALESCE(i.site, ''),
 			COALESCE(i.component, ''), i.alert_name, i.opened_at, i.updated_at,
-			i.resolved_at, i.current_revision, i.last_body_sha256, i.dispatch_attempts
+			i.resolved_at, i.current_revision, i.last_body_sha256, i.dispatch_attempts,
+			i.subject_id, i.subject_kind, i.managed
 		FROM incidents i
 		WHERE i.status = ?
 		AND (i.next_dispatch_at = '' OR i.next_dispatch_at <= ?)
@@ -327,9 +338,11 @@ func (s *Store) ListIncidentsNeedingDispatch(now time.Time, limit int) ([]Incide
 		var resolvedAt sql.NullString
 		if err := rows.Scan(&inc.ID, &inc.Source, &inc.SourceIdentity, &inc.GroupKey, &inc.Status,
 			&inc.Severity, &inc.Host, &inc.Site, &inc.Component, &inc.AlertName,
-			&openedAt, &updatedAt, &resolvedAt, &inc.CurrentRevision, &inc.LastBodySHA256, &inc.DispatchAttempts); err != nil {
+			&openedAt, &updatedAt, &resolvedAt, &inc.CurrentRevision, &inc.LastBodySHA256, &inc.DispatchAttempts,
+			&inc.Subject.ID, &inc.Subject.Kind, &inc.Subject.Managed); err != nil {
 			return nil, fmt.Errorf("scan dispatchable incident: %w", err)
 		}
+		inc.Subject.Site = inc.Site
 		inc.OpenedAt, _ = time.Parse(time.RFC3339, openedAt)
 		inc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 		out = append(out, inc)
@@ -368,7 +381,7 @@ func (s *Store) CountActiveRunsForHost(host string) (int, error) {
 // EnqueueRun creates a new QUEUED agent_runs row for incidentID and moves
 // the incident to QUEUED. The partial unique index on agent_runs
 // guarantees this fails if one is already active for this incident.
-func (s *Store) EnqueueRun(incidentID string, envelope IncidentEnvelopeV1, now time.Time) (runID string, err error) {
+func (s *Store) EnqueueRun(incidentID string, envelope IncidentEnvelopeV2, now time.Time) (runID string, err error) {
 	runID = uuid.NewString()
 	tx, txErr := s.db.Begin()
 	if txErr != nil {

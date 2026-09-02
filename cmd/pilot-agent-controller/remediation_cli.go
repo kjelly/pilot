@@ -69,6 +69,30 @@ func (f *repairClientFlags) client() *agentcontroller.RepairClient {
 	return &agentcontroller.RepairClient{PilotBinary: f.pilotBinary, Dir: f.dir, Inventory: f.inventory}
 }
 
+// requireManagedIncidentSubject is the SNMP monitoring integration spec
+// §10.6 fail-closed guard: `remediation propose`/`reapply-propose` are
+// the ONLY two places a repair/reapply plan is ever created from an
+// incident_id (everything downstream — approve/execute/auto-execute —
+// operates on an already-PROPOSED plan, never re-derives host/subject
+// from the incident again), so refusing here is sufficient to guarantee
+// no plan is EVER created for a non-managed-host subject — there is no
+// other path into remediation_plans/reapply_plans that skips this call.
+func requireManagedIncidentSubject(store *agentcontroller.Store, incidentID string) error {
+	inc, err := store.GetIncident(incidentID)
+	if err != nil {
+		return fmt.Errorf("look up incident %s: %w", incidentID, err)
+	}
+	if inc == nil {
+		return fmt.Errorf("incident %s not found", incidentID)
+	}
+	if !inc.Subject.Managed {
+		return fmt.Errorf(
+			"incident %s subject %q (kind=%q) is not a managed host — repair/autonomy is refused for external subjects (SNMP monitoring integration spec §10.6)",
+			incidentID, inc.Subject.ID, inc.Subject.Kind)
+	}
+	return nil
+}
+
 func newRemediationCmd() *cobra.Command {
 	remediationCmd := &cobra.Command{Use: "remediation", Short: "Human-approved R1 remediation workflow (Agent Monitoring Phase 3)"}
 
@@ -100,6 +124,10 @@ func newRemediationProposeCmd() *cobra.Command {
 				return err
 			}
 			defer store.Close()
+
+			if err := requireManagedIncidentSubject(store, incidentID); err != nil {
+				return err
+			}
 
 			wire, err := flags.client().Plan(cmd.Context(), incidentID, host, component, action)
 			if err != nil {
@@ -446,6 +474,10 @@ func newReapplyProposeCmd() *cobra.Command {
 				return err
 			}
 			defer store.Close()
+
+			if err := requireManagedIncidentSubject(store, incidentID); err != nil {
+				return err
+			}
 
 			wire, err := flags.client().ReapplyPlan(cmd.Context(), incidentID, host, component, action)
 			if err != nil {

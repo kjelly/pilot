@@ -27,6 +27,12 @@ type IncidentEvent struct {
 	Site        string
 	Component   string
 	Category    string
+	// Subject is the SNMP monitoring integration spec §10.1 generalization
+	// of Host: every alert has one, computed by the same fixed label
+	// precedence normalizeAlert.go documents. Host itself is left
+	// untouched (still the managed-host identity, spec §9.8's "managed
+	// host 額外保留 pilot_host") — Subject is additive, not a replacement.
+	Subject     IncidentSubject
 	StartsAt    time.Time
 	EndsAt      *time.Time
 	Labels      map[string]string
@@ -38,6 +44,25 @@ type IncidentEvent struct {
 	// RawBodySHA256 the ingress layer logs (spec §5.7).
 	AlertBodySHA256 string
 }
+
+// IncidentSubject is the generic scope/correlation identity for an
+// incident (SNMP monitoring integration spec §10.1) — it never replaces
+// signal_id/Alertmanager-fingerprint as the EPISODE identity (spec
+// §10.3), it only names WHO the incident is about. Managed is the
+// single fact the repair/autonomy boundary gates on: only a
+// managed-host subject may ever reach internal/repair's planning path
+// (spec §10.6) — an external target's alert can win every other check
+// and still never execute anything.
+type IncidentSubject struct {
+	ID      string `json:"id,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	Site    string `json:"site,omitempty"`
+	Managed bool   `json:"managed"`
+}
+
+// SubjectKindManagedHost is the fixed Kind for the only subject kind
+// internal/repair may ever plan against.
+const SubjectKindManagedHost = "managed_host"
 
 // IncidentEnvelopeV1 is the versioned input contract handed to the
 // external Agent Runtime (spec §9). DiagnosticPolicy is always
@@ -87,6 +112,64 @@ func NewIncidentEnvelopeV1(incidentID string, ev IncidentEvent) IncidentEnvelope
 			MutationAllowed:       false,
 			RawCommandAllowed:     false,
 			WorkspaceWriteAllowed: false,
+		},
+	}
+}
+
+// IncidentEnvelopeV2 is the SNMP monitoring integration spec §10.2
+// dispatcher wire contract — Subject replaces the flat Host/Site/
+// Component identity fields V1 used (Alert keeps Component/Category as
+// alert metadata, not identity). Every new dispatcher request MUST use
+// V2 (spec §10.2); V1 stays defined above only for decode/test
+// compatibility, current repository has no real Agent Runtime bound to
+// it yet so this is a coordinated wire upgrade, not a breaking one.
+type IncidentEnvelopeV2 struct {
+	SchemaVersion    int                        `json:"schema_version"`
+	IncidentID       string                     `json:"incident_id"`
+	Source           string                     `json:"source"`
+	Status           string                     `json:"status"`
+	Subject          IncidentSubject            `json:"subject"`
+	Alert            IncidentEnvelopeAlertV2    `json:"alert"`
+	DiagnosticPolicy IncidentDiagnosticPolicyV2 `json:"diagnostic_policy"`
+}
+
+type IncidentEnvelopeAlertV2 struct {
+	Name      string `json:"name"`
+	Severity  string `json:"severity"`
+	Component string `json:"component,omitempty"`
+	Category  string `json:"category,omitempty"`
+}
+
+// IncidentDiagnosticPolicyV2 adds ExternalSubjectMutationAllowed to V1's
+// three flags (spec §10.2) — always false; there is no code path in
+// this repository that ever sets it true, by design (spec §10.6).
+type IncidentDiagnosticPolicyV2 struct {
+	MutationAllowed                bool `json:"mutation_allowed"`
+	RawCommandAllowed              bool `json:"raw_command_allowed"`
+	WorkspaceWriteAllowed          bool `json:"workspace_write_allowed"`
+	ExternalSubjectMutationAllowed bool `json:"external_subject_mutation_allowed"`
+}
+
+// NewIncidentEnvelopeV2 builds the fixed, always-zero-mutation V2
+// envelope for one incident.
+func NewIncidentEnvelopeV2(incidentID string, ev IncidentEvent) IncidentEnvelopeV2 {
+	return IncidentEnvelopeV2{
+		SchemaVersion: 2,
+		IncidentID:    incidentID,
+		Source:        ev.Source,
+		Status:        ev.Status,
+		Subject:       ev.Subject,
+		Alert: IncidentEnvelopeAlertV2{
+			Name:      ev.AlertName,
+			Severity:  ev.Severity,
+			Component: ev.Component,
+			Category:  ev.Category,
+		},
+		DiagnosticPolicy: IncidentDiagnosticPolicyV2{
+			MutationAllowed:                false,
+			RawCommandAllowed:              false,
+			WorkspaceWriteAllowed:          false,
+			ExternalSubjectMutationAllowed: false,
 		},
 	}
 }

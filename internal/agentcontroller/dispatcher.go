@@ -14,9 +14,9 @@ import (
 // AgentDispatcher is the controller's only channel to the external Agent
 // Runtime (spec §12). The incident/queue layer never talks to a Runtime
 // through anything but this interface — no protocol-specific field ever
-// leaks into IncidentEnvelopeV1 or DiagnosisResult.
+// leaks into IncidentEnvelopeV2 or DiagnosisResult.
 type AgentDispatcher interface {
-	Diagnose(ctx context.Context, in IncidentEnvelopeV1) (DiagnosisResult, error)
+	Diagnose(ctx context.Context, in IncidentEnvelopeV2) (DiagnosisResult, error)
 }
 
 // FakeDispatcher is a deterministic, in-process AgentDispatcher used by
@@ -27,11 +27,11 @@ type FakeDispatcher struct {
 	mu sync.Mutex
 	// Handler, if set, computes the response for each call. Nil returns
 	// a fixed insufficient_evidence result.
-	Handler func(IncidentEnvelopeV1) (DiagnosisResult, error)
-	calls   []IncidentEnvelopeV1
+	Handler func(IncidentEnvelopeV2) (DiagnosisResult, error)
+	calls   []IncidentEnvelopeV2
 }
 
-func (f *FakeDispatcher) Diagnose(ctx context.Context, in IncidentEnvelopeV1) (DiagnosisResult, error) {
+func (f *FakeDispatcher) Diagnose(ctx context.Context, in IncidentEnvelopeV2) (DiagnosisResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, in)
 	handler := f.Handler
@@ -52,16 +52,16 @@ func (f *FakeDispatcher) Diagnose(ctx context.Context, in IncidentEnvelopeV1) (D
 
 // Calls returns every envelope this fake has been asked to diagnose, in
 // order.
-func (f *FakeDispatcher) Calls() []IncidentEnvelopeV1 {
+func (f *FakeDispatcher) Calls() []IncidentEnvelopeV2 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]IncidentEnvelopeV1, len(f.calls))
+	out := make([]IncidentEnvelopeV2, len(f.calls))
 	copy(out, f.calls)
 	return out
 }
 
 // HTTPDispatcher is the generic, vendor-agnostic AgentDispatcher adapter
-// (spec §4/§12): POST IncidentEnvelopeV1 as JSON to a fixed, configured
+// (spec §4/§12): POST IncidentEnvelopeV2 as JSON to a fixed, configured
 // endpoint and decode a DiagnosisResult JSON response. It never execs a
 // process, opens a shell, or reads an environment variable at request
 // time, so the "no sh -c", "no string command concatenation", and
@@ -71,7 +71,7 @@ func (f *FakeDispatcher) Calls() []IncidentEnvelopeV1 {
 // No specific external Agent Runtime product is wired in yet — this is
 // intentionally the ONLY adapter Phase 1 ships; a Runtime-specific
 // adapter (see internal/agentcontroller/dispatcher.go's AgentDispatcher
-// boundary) can be added later without touching IncidentEnvelopeV1 or
+// boundary) can be added later without touching IncidentEnvelopeV2 or
 // DiagnosisResult.
 type HTTPDispatcher struct {
 	Endpoint string
@@ -88,7 +88,7 @@ func NewHTTPDispatcher(endpoint string, timeout time.Duration) *HTTPDispatcher {
 	}
 }
 
-func (d *HTTPDispatcher) Diagnose(ctx context.Context, in IncidentEnvelopeV1) (DiagnosisResult, error) {
+func (d *HTTPDispatcher) Diagnose(ctx context.Context, in IncidentEnvelopeV2) (DiagnosisResult, error) {
 	body, err := json.Marshal(in)
 	if err != nil {
 		return DiagnosisResult{}, fmt.Errorf("marshal envelope: %w", err)

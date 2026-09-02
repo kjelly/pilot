@@ -29,7 +29,7 @@ func TestScheduler_DispatchesOpenIncidentToDiagnosed(t *testing.T) {
 		t.Fatalf("ingest: %v", err)
 	}
 
-	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV1) (DiagnosisResult, error) {
+	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV2) (DiagnosisResult, error) {
 		return DiagnosisResult{Verdict: VerdictExplained, Confidence: 1, Evidence: []DiagnosisEvidence{{Tool: "t", Summary: "s"}}}, nil
 	}}
 	sched := newTestScheduler(store, fake)
@@ -51,6 +51,41 @@ func TestScheduler_DispatchesOpenIncidentToDiagnosed(t *testing.T) {
 	}
 }
 
+func TestScheduler_DispatchesIncidentEnvelopeV2WithSubject(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now()
+	ev := firingEvent("prometheus-rule", "fp-snmp-1", "fp-snmp-1", "", "critical", now)
+	ev.Site = "hq"
+	ev.Component = "snmp"
+	ev.Subject = IncidentSubject{ID: "core-sw-01", Kind: "network_device", Site: "hq", Managed: false}
+	ev.AlertBodySHA256 = identityHash(ev)
+	if _, err := store.IngestEvent(ev, now); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	fake := &FakeDispatcher{}
+	sched := newTestScheduler(store, fake)
+	if _, err := sched.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	calls := fake.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("dispatcher calls = %d, want 1", len(calls))
+	}
+	got := calls[0]
+	if got.SchemaVersion != 2 {
+		t.Errorf("schema_version = %d, want 2 (FakeDispatcher must receive V2)", got.SchemaVersion)
+	}
+	want := IncidentSubject{ID: "core-sw-01", Kind: "network_device", Site: "hq", Managed: false}
+	if got.Subject != want {
+		t.Errorf("subject = %+v, want %+v", got.Subject, want)
+	}
+	if got.DiagnosticPolicy.ExternalSubjectMutationAllowed {
+		t.Error("external_subject_mutation_allowed must be false")
+	}
+}
+
 func TestScheduler_MalformedOutputBecomesAgentFailed(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now()
@@ -61,7 +96,7 @@ func TestScheduler_MalformedOutputBecomesAgentFailed(t *testing.T) {
 	}
 
 	// Verdict "bogus" is not one of the five allowed values -> Validate() fails.
-	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV1) (DiagnosisResult, error) {
+	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV2) (DiagnosisResult, error) {
 		return DiagnosisResult{Verdict: "bogus"}, nil
 	}}
 	sched := newTestScheduler(store, fake)
@@ -90,7 +125,7 @@ func TestScheduler_InsufficientEvidenceIsNotRetried(t *testing.T) {
 	}
 
 	calls := 0
-	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV1) (DiagnosisResult, error) {
+	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV2) (DiagnosisResult, error) {
 		calls++
 		return DiagnosisResult{Verdict: VerdictInsufficientEvidence, Evidence: []DiagnosisEvidence{{Tool: "t", Summary: "s"}}}, nil
 	}}
@@ -125,7 +160,7 @@ func TestScheduler_TransportFailureRetriesThenGivesUp(t *testing.T) {
 	}
 
 	calls := 0
-	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV1) (DiagnosisResult, error) {
+	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV2) (DiagnosisResult, error) {
 		calls++
 		return DiagnosisResult{}, fmt.Errorf("simulated transport error")
 	}}
@@ -167,7 +202,7 @@ func TestScheduler_RespectsGlobalConcurrencyCap(t *testing.T) {
 	}
 
 	blocked := make(chan struct{})
-	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV1) (DiagnosisResult, error) {
+	fake := &FakeDispatcher{Handler: func(in IncidentEnvelopeV2) (DiagnosisResult, error) {
 		<-blocked
 		return DiagnosisResult{Verdict: VerdictExplained, Confidence: 1, Evidence: []DiagnosisEvidence{{Tool: "t", Summary: "s"}}}, nil
 	}}

@@ -131,6 +131,7 @@ func normalizeAlert(groupKey string, a alertmanagerAlert, receivedAt time.Time) 
 		Site:        a.Labels["site"],
 		Component:   a.Labels["component"],
 		Category:    a.Annotations["category_hint"],
+		Subject:     normalizeSubject(a.Labels),
 		StartsAt:    startsAt,
 		EndsAt:      endsAt,
 		Labels:      a.Labels,
@@ -139,6 +140,40 @@ func normalizeAlert(groupKey string, a alertmanagerAlert, receivedAt time.Time) 
 	}
 	ev.AlertBodySHA256 = identityHash(ev)
 	return ev, nil
+}
+
+// normalizeSubject applies the SNMP monitoring integration spec §10.1
+// fixed label precedence — in this exact order, first match wins.
+// Deliberately never falls back to `instance`, reverse DNS, `sysName`,
+// generatorURL, or annotation prose (spec §10.1's explicit prohibition
+// list): a subject this function cannot name from labels alone is a
+// global/service-scoped incident with no subject, not a guessed one.
+func normalizeSubject(labels map[string]string) IncidentSubject {
+	switch {
+	case labels["pilot_subject"] != "":
+		return IncidentSubject{
+			ID:      labels["pilot_subject"],
+			Kind:    labels["pilot_subject_kind"],
+			Site:    labels["site"],
+			Managed: labels["pilot_subject_kind"] == SubjectKindManagedHost,
+		}
+	case labels["pilot_host"] != "":
+		return IncidentSubject{
+			ID:      labels["pilot_host"],
+			Kind:    SubjectKindManagedHost,
+			Site:    labels["site"],
+			Managed: true,
+		}
+	case labels["pilot_target"] != "":
+		return IncidentSubject{
+			ID:      labels["pilot_target"],
+			Kind:    labels["pilot_subject_kind"],
+			Site:    labels["site"],
+			Managed: false,
+		}
+	default:
+		return IncidentSubject{}
+	}
 }
 
 // identityHash hashes exactly the fields that define "this is the same

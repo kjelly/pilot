@@ -96,7 +96,7 @@ func (q *Scheduler) RunOnce(ctx context.Context) (dispatched int, err error) {
 }
 
 func (q *Scheduler) dispatchOne(ctx context.Context, inc Incident) error {
-	envelope := NewIncidentEnvelopeV1(inc.ID, IncidentEvent{
+	envelope := NewIncidentEnvelopeV2(inc.ID, IncidentEvent{
 		Source:    inc.Source,
 		Status:    "firing",
 		AlertName: inc.AlertName,
@@ -104,6 +104,7 @@ func (q *Scheduler) dispatchOne(ctx context.Context, inc Incident) error {
 		Host:      inc.Host,
 		Site:      inc.Site,
 		Component: inc.Component,
+		Subject:   inc.Subject,
 	})
 
 	runID, err := q.Store.EnqueueRun(inc.ID, envelope, q.now())

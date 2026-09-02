@@ -113,7 +113,7 @@ as of this revision (spec §15 Phase 0 exit gate).
   category: repair-boundary
   check: a repair/autonomy request for a subject with Managed=false or Kind != managed_host is rejected before planning/execution
   probe: |
-    go test ./internal/repair/... -run ExternalSubjectRejected -v
+    go test ./cmd/pilot-agent-controller/... -run RequireManagedIncidentSubject -v
   expect: {stdout: {contains: "PASS"}}
   verifyOnly: true
 - id: C12
@@ -158,7 +158,9 @@ PRODUCTION_READY — see spec §17.4/§18 (AC23) for the real-device gate.
 - C1-C6 exercise `internal/monitoring` (Phase 2 of the spec).
 - C7-C9, C14-C15 exercise `internal/detection` (Phase 4/5).
 - C10, C13 exercise `internal/agentcontroller` (Phase 3).
-- C11 exercises `internal/repair`'s fail-closed guard (Phase 3, spec §10.6).
+- C11 exercises the fail-closed guard at `cmd/pilot-agent-controller`'s
+  `remediation propose`/`reapply-propose` choke point, the only place a
+  repair plan is built from an incident_id (Phase 3, spec §10.6).
 - C12 exercises `internal/diagnose` (Phase 3).
 
 ## Actual-run evidence
@@ -178,9 +180,23 @@ prod version-policy): DONE** via `internal/monitoring`'s own unit tests
 `TestValidate_SNMPProfile_UnknownAuthProfile`) — no disposable-topology
 run needed, these are pure schema/validate rules.
 
-**C7-C15 (Phase 3+ — Detection Engine, Agent Controller, diagnose,
-model provider): not yet implemented.** This file stays DRAFT until
-those phases land.
+**C10-C13 (Phase 3 — Agent Controller generic subject, repair
+fail-closed guard, read-only diagnose, IncidentEnvelopeV2): DONE.** See
+`docs/runbooks/agent-monitoring-snmp-subject.md` — full unit/integration
+test evidence for subject normalization precedence, SQLite schemaV5
+migration+backfill, the `requireManagedIncidentSubject` repair-boundary
+guard, `pilot_diagnose_monitoring_target`'s bounded structured output,
+and `IncidentEnvelopeV2` dispatch. That runbook also discloses a scope
+trade-off: no fresh disposable-VM run re-proves a full live
+Prometheus→Alertmanager→controller chain specifically for an
+SNMP-sourced alert in one continuous pass — Phase 1's runbook already
+proved the Alertmanager→controller webhook chain, Phase 2's runbook
+already proved `SNMPTargetDown` fires for real, and this phase's own
+tests prove subject normalization handles that exact alert shape
+correctly.
+
+**C7-C9, C14-C15 (Phase 4/5 — Detection Engine): not yet implemented.**
+This file stays DRAFT until those phases land.
 
 ## Change record
 
@@ -188,3 +204,4 @@ those phases land.
 |---|---|---|
 | 2026-09-01 | DRAFT | Phase 0 initial authoring per spec §17.2/§17.3's positive/negative lanes, reframed as C1-C15. No actual-run evidence yet. |
 | 2026-09-02 | DRAFT | Phase 2 evidence added for C1-C6 (registry v2 schema/validate/compile) — see `docs/runbooks/snmp-monitoring-registry.md`. C7-C15 remain unimplemented; still DRAFT overall. |
+| 2026-09-02 | DRAFT | Phase 3 evidence added for C10-C13 (Agent Controller subject/envelope, repair guard, diagnose) — see `docs/runbooks/agent-monitoring-snmp-subject.md`; C11 probe path corrected to `cmd/pilot-agent-controller` (actual guard location) instead of `internal/repair`. C7-C9, C14-C15 remain unimplemented; still DRAFT overall. |

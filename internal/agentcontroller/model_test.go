@@ -36,3 +36,25 @@ func TestNewIncidentEnvelopeV1_AlwaysZeroMutation(t *testing.T) {
 		t.Errorf("diagnostic_policy = %+v, want all false", envelope.DiagnosticPolicy)
 	}
 }
+
+func TestNewIncidentEnvelopeV2_CarriesSubjectAndStaysZeroMutation(t *testing.T) {
+	ev := IncidentEvent{
+		Source: "prometheus-rule", Status: "firing", AlertName: "SNMPTargetDown",
+		Severity: "critical", Component: "snmp", Category: "network_error",
+		Subject: IncidentSubject{ID: "core-sw-01", Kind: "network_device", Site: "hq", Managed: false},
+	}
+	envelope := NewIncidentEnvelopeV2("inc-1", ev)
+	if envelope.SchemaVersion != 2 {
+		t.Errorf("schema_version = %d, want 2", envelope.SchemaVersion)
+	}
+	if envelope.Subject != ev.Subject {
+		t.Errorf("subject = %+v, want %+v", envelope.Subject, ev.Subject)
+	}
+	if envelope.Subject.Managed {
+		t.Error("external subject must never be Managed=true")
+	}
+	p := envelope.DiagnosticPolicy
+	if p.MutationAllowed || p.RawCommandAllowed || p.WorkspaceWriteAllowed || p.ExternalSubjectMutationAllowed {
+		t.Errorf("diagnostic_policy = %+v, want all false", p)
+	}
+}

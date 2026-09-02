@@ -40,6 +40,7 @@ import (
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/diagnose"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/monitoring"
 	"github.com/kjelly/pilot/internal/networkcheck"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -114,6 +115,10 @@ func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 		Name:        "pilot_diagnose_login",
 		Description: "one-call composite for \"why can't these users log in / sudo on this host\": runs fixed, read-only ansible ad-hoc commands against one real inventory host for sssd status, sssd domain backend online/offline, Kerberos machine identity, and this host's own DNS self-resolution (a broken forward/reverse record here commonly breaks Kerberos), then for each user in users: NSS passwd resolution (getent passwd) and whether a live central FreeIPA sudo rule grants access (sudo -l -U). Also reads the workspace's FreeIPA roster (config-level, not live) to report each user's declared HBAC/sudo authorization on this host and flags any drift against what was just observed live (e.g. roster declares sudo but the live host has no rule yet, or vice versa). Best-effort also queries recent SSH/PAM login records for these users from Loki (job=\"pilot-siem\", like pilot_diagnose_security_logs, same default ansible-noise exclusion) over the last `lookback` (a Go duration, default 24h) — skipped with a note if the dashboard role isn't deployed in this inventory, never a hard failure. Replaces the usual manual sequence of pilot_diagnose_sudo/dns/security_logs plus a separate roster lookup with one call.",
 	}, diagnoseLoginHandler(opts))
+	addRecoveredTool(server, &mcp.Tool{
+		Name:        "pilot_diagnose_monitoring_target",
+		Description: "bounded, read-only structured diagnosis for one EXACT monitoring/targets.yml target name (SNMP monitoring integration spec §10.4) — no regex/group/wildcard, and this tool never connects to UDP 161, never touches vault, and never calls snmp_exporter's own /snmp endpoint. Resolves the target's scrape profile (must be kind: snmp) and its diagnosticProfile query pack (monitoring/snmp/diagnostic-profiles/*.yaml), then runs that pack's fixed PromQL templates — never arbitrary caller-supplied PromQL, that is pilot_diagnose_metrics's job — against Thanos Query with the target name substituted into an exact `pilot_target=\"...\"` label matcher. window defaults to 30m, max 6h; top_n defaults to 10, max 20. Returns a bounded structured report (scrape health, device-level facts, top-N interface summaries) plus one evidence entry per query naming the query-pack call, window, and subject.",
+	}, diagnoseMonitoringTargetHandler(opts))
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_detection",
 		Description: "run fixed, read-only ansible ad-hoc commands against the central Detection Engine host (no host parameter — detection-engine is this deployment's singleton central role): engine status (`status --json`), the active SignalEvent episode list (`signals list --json`), and a bounded (`-n 200`) journal tail. At least one of signal_id or pilot_host must be supplied; when signal_id is given (must be a well-formed 26-character ULID) an additional `signals show <signal_id> --json` call returns that one episode's full detail. pilot_host is not a command parameter — the engine's CLI has no per-host filter — it is only recorded for audit/correlation against the returned signals_list_json's own pilot_host fields. Never accepts an arbitrary command.",
@@ -1083,6 +1088,207 @@ func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[dia
 		}
 		return nil, out, nil
 	}
+}
+
+// ---- pilot_diagnose_monitoring_target ---------------------------------------
+
+type diagnoseMonitoringTargetInput struct {
+	Target string `json:"target" jsonschema:"exact monitoring/targets.yml target name (no regex/group/wildcard)"`
+	Window string `json:"window,omitempty" jsonschema:"lookback window for rate()-based queries, e.g. 30m (default 30m, max 6h)"`
+	TopN   int    `json:"top_n,omitempty" jsonschema:"max interfaces per top-N list (default 10, max 20)"`
+}
+
+type diagnoseMonitoringTargetOutput struct {
+	Diagnosis      diagnose.MonitoringTargetDiagnosis `json:"diagnosis"`
+	AuditDirectory string                             `json:"audit_directory"`
+}
+
+const (
+	diagnoseMonitoringTargetDefaultWindow = "30m"
+	diagnoseMonitoringTargetMaxWindow     = 6 * time.Hour
+	diagnoseMonitoringTargetDefaultTopN   = 10
+	diagnoseMonitoringTargetMaxTopN       = 20
+)
+
+// diagnoseMonitoringTargetHandler implements spec §10.4's execution
+// flow: load the Monitoring Target Registry from the workspace next to
+// opts.Inventory, resolve the exact target + its kind:snmp profile,
+// load that profile's diagnosticProfile query pack, and run it through
+// the same Thanos-query ad-hoc mechanism diagnoseMetricsHandler uses —
+// never a direct HTTP client, never the snmp_exporter /snmp endpoint,
+// never vault.
+func diagnoseMonitoringTargetHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseMonitoringTargetInput, diagnoseMonitoringTargetOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseMonitoringTargetInput) (*mcp.CallToolResult, diagnoseMonitoringTargetOutput, error) {
+		target := strings.TrimSpace(in.Target)
+		if target == "" {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "target must not be empty"}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		if strings.ContainsAny(target, "*?[]{}|^$\\") {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "target must be an exact name, not a pattern"}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		window := in.Window
+		if window == "" {
+			window = diagnoseMonitoringTargetDefaultWindow
+		}
+		windowDur, err := time.ParseDuration(window)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("invalid window %q: %v", window, err)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		if windowDur > diagnoseMonitoringTargetMaxWindow {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("window %q exceeds max %s", window, diagnoseMonitoringTargetMaxWindow)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		topN := in.TopN
+		if topN == 0 {
+			topN = diagnoseMonitoringTargetDefaultTopN
+		}
+		if topN < 0 || topN > diagnoseMonitoringTargetMaxTopN {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("top_n %d exceeds max %d", topN, diagnoseMonitoringTargetMaxTopN)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+
+		workspaceDir := filepath.Dir(opts.Inventory)
+		tf, err := monitoring.LoadTargets(filepath.Join(workspaceDir, "monitoring", "targets.yml"))
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("load monitoring targets: %v", err)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		pf, err := monitoring.LoadProfiles(filepath.Join(workspaceDir, "monitoring", "scrape-profiles.yml"))
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("load monitoring profiles: %v", err)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		resolvedTarget, ok := monitoring.Resolve(tf, pf, target)
+		if !ok {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("monitoring target %q not found", target)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		if !resolvedTarget.Profile.IsSNMP() {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("monitoring target %q's profile is not kind: snmp", target)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		diagProfileID := resolvedTarget.Profile.DiagnosticProfile
+		if diagProfileID == "" {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("monitoring target %q's profile has no diagnosticProfile configured", target)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		diagProfile, err := diagnose.LoadDiagnosticProfile(filepath.Join(workspaceDir, "monitoring", "snmp", "diagnostic-profiles", diagProfileID+".yaml"))
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("load diagnostic profile: %v", err)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
+		resolved, err := resolveDiagnoseInventory(ctx, opts)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve inventory: %v", err)}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		thanosHost, err := diagnose.ResolveSingletonGroupHost(resolved, diagnose.ThanosQueryGroup)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseMonitoringTargetOutput{}, nil
+		}
+
+		sessionID, err := newID()
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseMonitoringTargetOutput{}, nil
+		}
+		start := time.Now()
+		auditDir, err := prepareDiagnoseAuditDir(opts, "monitoring_target", sessionID, start)
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrRecordingFailed, Message: err.Error()}), diagnoseMonitoringTargetOutput{}, nil
+		}
+
+		runner := opts.AdHocRunner
+		if runner == nil {
+			runner = realDiagnoseAdHocRunner()
+		}
+		steps := diagnose.MonitoringTargetDiagnosisSteps(diagProfile, target, window, topN)
+		results := diagnose.RunSteps(ctx, runner, opts.Inventory, thanosHost, steps, opts.StepTimeout)
+
+		diagnosis := diagnose.MonitoringTargetDiagnosis{
+			Subject: diagnose.DiagnosisSubject{
+				ID: target, Kind: resolvedTarget.Profile.SubjectKind,
+				Site: resolvedTarget.Target.Site, Managed: false,
+			},
+			Profile: diagProfileID,
+			Device:  map[string]diagnose.MetricFact{},
+		}
+		for _, sr := range results {
+			ev := diagnose.DiagnosisEvidence{
+				Tool: "pilot_diagnose_monitoring_target", QueryName: sr.Step.ID,
+				Window: window, SubjectID: target,
+			}
+			switch {
+			case sr.Result.RunErr != nil:
+				ev.Summary = "error: " + sr.Result.RunErr.Error()
+				diagnosis.Warnings = append(diagnosis.Warnings, fmt.Sprintf("%s: %v", sr.Step.ID, sr.Result.RunErr))
+			case sr.Result.Unreachable:
+				ev.Summary = "thanos-query host unreachable"
+				diagnosis.Warnings = append(diagnosis.Warnings, sr.Step.ID+": thanos-query host unreachable")
+			default:
+				body, _, _ := diagnose.SplitHTTPStatus(sr.Result.Stdout)
+				if body == "" {
+					body = strings.TrimSpace(sr.Result.Stdout)
+				}
+				samples, perr := diagnose.ParsePromInstantVectorForDiagnose(body)
+				if perr != nil {
+					ev.Summary = "parse error: " + perr.Error()
+					diagnosis.Warnings = append(diagnosis.Warnings, fmt.Sprintf("%s: %v", sr.Step.ID, perr))
+					break
+				}
+				applyMonitoringTargetSample(&diagnosis, sr.Step.ID, samples, topN)
+				ev.Summary = fmt.Sprintf("%d sample(s)", len(samples))
+			}
+			diagnosis.Evidence = append(diagnosis.Evidence, ev)
+		}
+
+		rec := diagnoseAuditRecord{
+			SessionID: sessionID, Check: "monitoring_target", PilotVersion: rootCmd.Version,
+			GitRevision: gitRevision(workspaceDir), MCPClient: mcpClientString(req),
+			Inventory: opts.Inventory, Host: thanosHost,
+			Params: map[string]string{"target": target, "window": window, "top_n": strconv.Itoa(topN)},
+			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
+		}
+		_ = writeDiagnoseAudit(auditDir, rec)
+
+		return nil, diagnoseMonitoringTargetOutput{Diagnosis: diagnosis, AuditDirectory: auditDir}, nil
+	}
+}
+
+// applyMonitoringTargetSample folds one query's parsed samples into the
+// right MonitoringTargetDiagnosis field.
+func applyMonitoringTargetSample(d *diagnose.MonitoringTargetDiagnosis, queryName string, samples []diagnose.PromSample, topN int) {
+	switch queryName {
+	case "target_up":
+		if len(samples) > 0 {
+			d.Scrape.Up = samples[0].Value == 1
+		}
+	case "scrape_duration_seconds":
+		if len(samples) > 0 {
+			d.Scrape.ScrapeDurationSec = samples[0].Value
+		}
+	case "interface_count":
+		if len(samples) > 0 {
+			d.Device["interface_count"] = diagnose.MetricFact{Value: samples[0].Value}
+		}
+	case "aggregate_utilization":
+		if len(samples) > 0 {
+			d.Device["aggregate_interface_utilization_ratio"] = diagnose.MetricFact{Value: samples[0].Value, Unit: "ratio"}
+		}
+	case "admin_up_oper_down_interfaces":
+		d.Interfaces.AdminUpOperDown = renderInterfaceSamples(samples, topN)
+	case "top_input_error_rate":
+		d.Interfaces.TopInputErrors = renderInterfaceSamples(samples, topN)
+	case "top_output_error_rate":
+		d.Interfaces.TopOutputErrors = renderInterfaceSamples(samples, topN)
+	case "top_input_discard_rate":
+		d.Interfaces.TopInputDiscards = renderInterfaceSamples(samples, topN)
+	case "top_output_discard_rate":
+		d.Interfaces.TopOutputDiscards = renderInterfaceSamples(samples, topN)
+	}
+}
+
+func renderInterfaceSamples(samples []diagnose.PromSample, topN int) []string {
+	if len(samples) > topN {
+		samples = samples[:topN]
+	}
+	out := make([]string, 0, len(samples))
+	for _, s := range samples {
+		out = append(out, diagnose.FormatInterfaceSample(s.Labels, s.Value))
+	}
+	return out
 }
 
 // ---- pilot_diagnose_detection -----------------------------------------------
