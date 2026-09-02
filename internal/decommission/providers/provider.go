@@ -70,6 +70,47 @@ type Step struct {
 	Phase          string // local_cleanup | central_cleanup
 	Action         string
 	TargetIdentity string
+	// Params carries small, provider-defined, non-secret key/value data a
+	// later ExecutorForStep call needs to actually run this step for real
+	// (e.g. a resolved roster file path) — never executable content
+	// (spec.md §8.1/§31). It round-trips through Plan's persisted output
+	// (Store.SavePlan/LoadPlan), so a later `apply`/`resume` process
+	// invocation has it without re-deriving anything from a caller-
+	// supplied value.
+	Params map[string]string `json:",omitempty"`
+}
+
+// StepExecutor is one planned Step's real Inspect-then-Execute contract
+// (spec.md §27.1/§27.2, INV-9/HD18, Phase 3b). Its method set is
+// deliberately identical to internal/decommission's own StepExecutor
+// interface (same two method signatures) without importing that package
+// — providers cannot import internal/decommission, since
+// internal/decommission already imports providers; Go's structural
+// interface typing lets a providers.StepExecutor value be handed directly
+// to decommission.NewExecStep anyway.
+type StepExecutor interface {
+	// Inspect reports whether the step's target state is already
+	// converged, i.e. no execution needed. Called before Execute on every
+	// attempt, including a resume in a brand-new process — this is what
+	// makes resume-safety real: it re-queries LIVE state, never trusts
+	// in-memory/persisted Go step status alone.
+	Inspect(ctx context.Context) (converged bool, err error)
+	// Execute performs the step's one destructive action for real. Only
+	// called when Inspect just reported the step is not yet converged.
+	Execute(ctx context.Context) error
+}
+
+// StepRunner is implemented by a provider whose planned Steps (Plan's
+// output) can actually be executed for real (Phase 3+). A provider that
+// only supports read-only Plan/Verify does not need to implement it; a
+// caller that finds a Step with no corresponding StepRunner fails closed
+// (cleanup_failed_terminal at the internal/decommission call site) rather
+// than silently skipping the step.
+type StepRunner interface {
+	// ExecutorForStep returns the real Inspect/Execute pair for one
+	// specific Step this provider's own Plan returned. Returns an error
+	// if step.Action is not one this provider recognizes.
+	ExecutorForStep(step Step) (StepExecutor, error)
 }
 
 // VerifyInput is Provider.Verify's typed input.

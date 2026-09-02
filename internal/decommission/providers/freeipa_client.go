@@ -145,6 +145,16 @@ func (p *FreeIPAClientProvider) Inspect(ctx context.Context, in InspectInput) (I
 	if err != nil {
 		return Inspection{}, fmt.Errorf("freeipa-client inspect %s: %w", hostName, err)
 	}
+	// A genuinely failed ansible-playbook run (unreachable host, playbook
+	// not found, a real infrastructure error — as opposed to the
+	// "inspect" tag's own tasks, which never carry failed_when: false
+	// tolerance and so only fail on a real problem) must never be
+	// silently read as "not enrolled" (INV-10: an unverifiable check is
+	// never a pass) — Bug found via Phase 3b live-target testing: this
+	// previously ignored res.ExitCode entirely.
+	if res.ExitCode != 0 {
+		return Inspection{}, fmt.Errorf("freeipa-client inspect %s: ansible-playbook exited %d: %s", hostName, res.ExitCode, ansibleFailureDetail(res))
+	}
 	enrolled := enrolledMarkerPattern.MatchString(res.Stdout)
 	detail := "FreeIPA client enrollment not detected (IPA_CLIENT_ENROLLED=false or marker absent)"
 	if enrolled {
@@ -193,11 +203,165 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 			ErrUnknownServicePrincipal, fqdn, strings.Join(unknown, ", "))
 	}
 
+	rosterStepParams := map[string]string(nil)
+	if p.RosterPathSet(in) {
+		rosterStepParams = map[string]string{"roster_path": in.RosterPath}
+	}
+
 	return []Step{
 		{Provider: FreeIPAClientProviderID, Phase: "local_cleanup", Action: ActionFreeIPAClientUninstall, TargetIdentity: hostName},
-		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPARosterHostAbsent, TargetIdentity: hostName},
-		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: fqdn},
+		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPARosterHostAbsent, TargetIdentity: hostName, Params: rosterStepParams},
+		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: fqdn, Params: rosterStepParams},
 	}, nil
+}
+
+// ---- Execute (Phase 3b: StepRunner) -------------------------------------
+
+// ExecutorForStep implements providers.StepRunner: turns one of Plan's
+// three ordered Steps into a real Inspect/Execute pair. step.Params carries
+// the roster path Plan resolved when it built the step (see Plan above) —
+// never re-derived from a caller-supplied value here.
+func (p *FreeIPAClientProvider) ExecutorForStep(step Step) (StepExecutor, error) {
+	switch step.Action {
+	case ActionFreeIPAClientUninstall:
+		return &freeipaUninstallStep{provider: p, hostName: step.TargetIdentity}, nil
+	case ActionFreeIPARosterHostAbsent:
+		return &freeipaRosterAbsentStep{hostName: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
+	case ActionFreeIPAIdentityApplyConverge:
+		return &freeipaIdentityConvergeStep{provider: p, fqdn: step.TargetIdentity}, nil
+	default:
+		return nil, fmt.Errorf("freeipa-client: unknown planned step action %q — programming/version-skew error, not a normal runtime condition", step.Action)
+	}
+}
+
+// ---- step: local client uninstall (playbooks/decommission/freeipa-client-decommission.yml) ----
+
+type freeipaUninstallStep struct {
+	provider *FreeIPAClientProvider
+	hostName string
+}
+
+// Inspect reuses Provider.Inspect's own enrollment marker check — Found
+// means still enrolled (not converged); its absence means already
+// unenrolled (converged, e.g. a resume after this step already ran).
+func (e *freeipaUninstallStep) Inspect(ctx context.Context) (bool, error) {
+	insp, err := e.provider.Inspect(ctx, InspectInput{HostName: e.hostName})
+	if err != nil {
+		return false, err
+	}
+	return !insp.Found, nil
+}
+
+// Execute runs the real client-side uninstall playbook (no --tags
+// inspect this time — the mutating tasks are what we want).
+func (e *freeipaUninstallStep) Execute(ctx context.Context) error {
+	args := []string{e.provider.cfg.DecommissionPlaybook}
+	if e.provider.cfg.ClientInventory != "" {
+		args = append(args, "-i", e.provider.cfg.ClientInventory)
+	}
+	if e.hostName != "" {
+		args = append(args, "--limit", e.hostName)
+	}
+	args = append(args, e.provider.cfg.ExtraArgs...)
+	res, err := e.provider.exec(ctx, args)
+	if err != nil {
+		return fmt.Errorf("freeipa-client uninstall %s: %w", e.hostName, err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("freeipa-client uninstall %s: ansible-playbook exited %d: %s", e.hostName, res.ExitCode, ansibleFailureDetail(res))
+	}
+	return nil
+}
+
+// ---- step: roster host absent + reference pruning (pure Go, no ansible) ----
+
+type freeipaRosterAbsentStep struct {
+	hostName   string
+	rosterPath string
+}
+
+// Inspect reports converged when there is no roster to mutate (nothing
+// declared this host), or when the host's roster entry is already
+// state: absent with no remaining hostgroup/netgroup/HBAC/sudo direct
+// reference to it (inventory.RosterHostAbsentAndUnreferenced) — i.e.
+// RemoveRosterHostReferences + SetRosterHostAbsent already converged this
+// on a prior attempt, so re-running them would be a pure no-op; Execute
+// is skipped rather than blindly repeated (HD18).
+func (e *freeipaRosterAbsentStep) Inspect(ctx context.Context) (bool, error) {
+	if strings.TrimSpace(e.rosterPath) == "" {
+		return true, nil
+	}
+	return inventory.RosterHostAbsentAndUnreferenced(e.rosterPath, e.hostName)
+}
+
+// Execute implements spec.md §16.3/§16.4's required roster-side order:
+// prune every direct hostgroup/netgroup/HBAC/sudo reference first, THEN
+// converge the host's own entry to state: absent.
+func (e *freeipaRosterAbsentStep) Execute(ctx context.Context) error {
+	if strings.TrimSpace(e.rosterPath) == "" {
+		return nil
+	}
+	if err := inventory.RemoveRosterHostReferences(e.rosterPath, e.hostName); err != nil {
+		return fmt.Errorf("freeipa-client roster-absent %s: prune references: %w", e.hostName, err)
+	}
+	if err := inventory.SetRosterHostAbsent(e.rosterPath, e.hostName); err != nil {
+		return fmt.Errorf("freeipa-client roster-absent %s: converge host entry: %w", e.hostName, err)
+	}
+	return nil
+}
+
+// ---- step: central identity-apply convergence (playbooks/apply/freeipa-identity-apply.yml) ----
+
+type freeipaIdentityConvergeStep struct {
+	provider *FreeIPAClientProvider
+	fqdn     string
+}
+
+// Inspect reuses the same live host-object query Verify uses: converged
+// means the FreeIPA host object is already absent (e.g. a resume after
+// this step's host-del already ran).
+func (e *freeipaIdentityConvergeStep) Inspect(ctx context.Context) (bool, error) {
+	res, err := e.provider.queryHostObject(ctx, e.fqdn)
+	if err != nil {
+		return false, err
+	}
+	return notFoundPattern.MatchString(res.Stdout), nil
+}
+
+// Execute runs the real central reconciler (playbooks/apply/freeipa-
+// identity-apply.yml). This playbook's own "Hosts marked absent" section
+// is itself idempotent (host-del/dnsrecord-del both tolerate "not found"),
+// so a resume that re-runs this after a partial prior success converges
+// cleanly rather than erroring.
+func (e *freeipaIdentityConvergeStep) Execute(ctx context.Context) error {
+	args := []string{e.provider.cfg.IdentityApplyPlaybook}
+	if e.provider.cfg.ServerInventory != "" {
+		args = append(args, "-i", e.provider.cfg.ServerInventory)
+	}
+	args = append(args, e.provider.cfg.ExtraArgs...)
+	res, err := e.provider.exec(ctx, args)
+	if err != nil {
+		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("freeipa-client identity-apply-converge %s: ansible-playbook exited %d: %s", e.fqdn, res.ExitCode, ansibleFailureDetail(res))
+	}
+	return nil
+}
+
+// ansibleFailureDetail renders a short, non-secret excerpt of a failed
+// ansible-playbook run for error messages — trailing stderr, or stdout
+// when stderr is empty (ansible-playbook often reports task failures on
+// stdout, not stderr).
+func ansibleFailureDetail(res *ansible.Result) string {
+	detail := strings.TrimSpace(res.Stderr)
+	if detail == "" {
+		detail = strings.TrimSpace(res.Stdout)
+	}
+	if len(detail) > 2000 {
+		detail = detail[len(detail)-2000:]
+	}
+	return detail
 }
 
 // RosterPathSet reports whether in carries a roster path to simulate
@@ -344,7 +508,23 @@ func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*
 	args = append(args, "-e", "pilot_decommission_query="+kind)
 	args = append(args, "-e", "pilot_decommission_target_fqdn="+fqdn)
 	args = append(args, p.cfg.ExtraArgs...)
-	return p.exec(ctx, args)
+	res, err := p.exec(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	// Bug found via Phase 3b live-target testing: this used to return res
+	// unconditionally regardless of whether the ansible-playbook PLAY
+	// itself actually ran (as opposed to an individual `ipa` command
+	// inside it failing, which every read-only task here already tolerates
+	// via failed_when: false) — a genuinely failed run (unreachable host,
+	// playbook not found under the caller's cwd, a bad inventory path) was
+	// silently read as empty/no-match output, which every caller's regex
+	// then interpreted as "nothing found" — i.e. a false PASS for HD10-
+	// HD12/INV-6/INV-10's zero-residue checks. Fail closed instead.
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("freeipa-client %s query for %s: ansible-playbook exited %d: %s", kind, fqdn, res.ExitCode, ansibleFailureDetail(res))
+	}
+	return res, nil
 }
 
 func (p *FreeIPAClientProvider) exec(ctx context.Context, args []string) (*ansible.Result, error) {

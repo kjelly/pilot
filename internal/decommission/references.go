@@ -70,6 +70,17 @@ func scanHostVars(workspaceDir, hostName string) *Reference {
 // from its own inventory variable, relative to workspaceDir when not
 // absolute. Returns "" when the host declares none (most hosts don't need
 // one — see inventory.hostNeedsFreeIPARoster).
+// RosterPathFor is rosterPathFor's exported form — used by cmd/pilot/cmd
+// to resolve the SAME roster path Plan/CheckFreshness derive internally,
+// so CLI wiring that constructs a live provider (e.g.
+// providers.NewFreeIPAClientProvider's ExtraArgs) can pass
+// "-e freeipa_roster_file=<path>" pointing at exactly the file Plan's
+// RosterPath/step Params referenced (spec.md §16.4) — never a
+// independently-guessed path.
+func RosterPathFor(workspaceDir string, host inventory.Host) string {
+	return rosterPathFor(workspaceDir, host)
+}
+
 func rosterPathFor(workspaceDir string, host inventory.Host) string {
 	p := strings.TrimSpace(host.Extra["freeipa_roster_file"])
 	if p == "" {

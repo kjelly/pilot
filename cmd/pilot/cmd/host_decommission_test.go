@@ -2,16 +2,35 @@ package cmd
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/decommission/providers"
 )
 
 // writeHostDecommissionFixture builds a minimal single-component contract
 // catalog plus a matching hosts.yml, and points PILOT_ROOT/PILOT_DATA_DIR
 // at an isolated temp tree — same fixture shape as
 // writeInternalEndpointSuggestFixture (internal_endpoint_suggest_cli_test.go).
+//
+// The fixture's role/component id is deliberately "docker", NOT
+// "freeipa-client": Phase 3b (spec.md §37 Phase 3, live-target testing)
+// wired a REAL providers.FreeIPAClientProvider into
+// buildHostDecommissionProviders for any host actually named in a
+// workspace's hosts.yml with role freeipa-client — using that real role
+// name here would make this purely-CLI-shape test exercise a live
+// ansible-playbook subprocess (which fails in this fixture's fake
+// PILOT_ROOT with no real playbooks/ tree), not the "no provider
+// registered for this component" fallback path this test actually means
+// to prove. "docker" has no registered provider by construction, so it
+// stays a true external_state_unsupported case exactly like every
+// component did before Phase 3 — and, unlike an invented role name, it is
+// one of internal/inventory's compiled-in valid role names (roleContracts
+// in contracts.go), so hosts.yml still passes Lint when
+// buildHostDecommissionProviders regenerates inventory.yml.
 func writeHostDecommissionFixture(t *testing.T) (root, workspaceDir string) {
 	t.Helper()
 	root = t.TempDir()
@@ -19,9 +38,9 @@ func writeHostDecommissionFixture(t *testing.T) (root, workspaceDir string) {
 	if err := os.MkdirAll(contractsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	freeipaClient := `schemaVersion: 1
-id: freeipa-client
-role: freeipa-client
+	dockerComponent := `schemaVersion: 1
+id: docker
+role: docker
 specs: [{path: "fake.md", rows: {all: true}}]
 playbooks: {apply: "fake-apply.yml"}
 dependencies: []
@@ -32,7 +51,7 @@ evidenceRequirement: {targetTest: vm, idempotency: required}
 verification: {autoDeploy: false}
 site: {include: false, order: 1, vars: {}, tags: [], optIn: true}
 `
-	if err := os.WriteFile(filepath.Join(contractsDir, "freeipa-client.yaml"), []byte(freeipaClient), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(contractsDir, "docker.yaml"), []byte(dockerComponent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -45,7 +64,7 @@ site: {include: false, order: 1, vars: {}, tags: [], optIn: true}
     ansible_host: "10.0.0.5"
     env: sandbox
     roles:
-      - freeipa-client
+      - docker
 `
 	if err := os.WriteFile(filepath.Join(workspaceDir, "hosts.yml"), []byte(hostsYAML), 0o600); err != nil {
 		t.Fatal(err)
@@ -140,6 +159,65 @@ func TestHostDecommissionPlanCmd_JSONOutputParses(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"ID": "hd-`) {
 		t.Fatalf("--json output = %s, want an ID field starting with hd-", out.String())
+	}
+}
+
+// TestBuildHostDecommissionProviders_RegistersFreeIPAClientForMatchingHost
+// proves the CLI wiring gap Phase 3a explicitly deferred: a workspace host
+// with role freeipa-client now gets a REAL providers.FreeIPAClientProvider
+// registered under decommission.PlanInput.Providers, keyed by the exact
+// component id planner.go looks up (providers.FreeIPAClientProviderID).
+// This does not itself invoke ansible (no Plan/Verify call here) — it only
+// proves the registry is populated, which is what
+// TestHostDecommissionPlanCmd_BlockedPlanExitsNonZeroAndPersists's fixture
+// switch (role "docker", not "freeipa-client") deliberately avoids
+// exercising end to end.
+func TestBuildHostDecommissionProviders_RegistersFreeIPAClientForMatchingHost(t *testing.T) {
+	root := t.TempDir()
+	hostsYAML := `hosts:
+  client1:
+    ansible_host: "10.0.0.9"
+    env: sandbox
+    roles:
+      - freeipa-client
+    freeipa_roster_file: roster.yaml
+`
+	if err := os.WriteFile(filepath.Join(root, "hosts.yml"), []byte(hostsYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "roster.yaml"), []byte("schema_version: 2\nfreeipa: {server: ipa1.ipa.pilot.internal}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	provs, err := buildHostDecommissionProviders(root, "client1", io.Discard)
+	if err != nil {
+		t.Fatalf("buildHostDecommissionProviders: %v", err)
+	}
+	if _, ok := provs[providers.FreeIPAClientProviderID]; !ok {
+		t.Fatalf("providers = %v, want a registered %q provider", provs, providers.FreeIPAClientProviderID)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "inventory.yml")); statErr != nil {
+		t.Fatalf("expected inventory.yml to be generated alongside hosts.yml: %v", statErr)
+	}
+}
+
+// TestBuildHostDecommissionProviders_UnknownHostReturnsEmptyRegistry proves
+// buildHostDecommissionProviders degrades to an empty (non-nil) map — never
+// an error — when the named host doesn't exist in the workspace, so a
+// malformed/mismatched --host still surfaces its authoritative error from
+// decommission.PlanHost itself, not from this opportunistic helper.
+func TestBuildHostDecommissionProviders_UnknownHostReturnsEmptyRegistry(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "hosts.yml"), []byte("hosts: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	provs, err := buildHostDecommissionProviders(root, "nonexistent", io.Discard)
+	if err != nil {
+		t.Fatalf("buildHostDecommissionProviders: unexpected error %v", err)
+	}
+	if len(provs) != 0 {
+		t.Fatalf("providers = %v, want an empty registry", provs)
 	}
 }
 

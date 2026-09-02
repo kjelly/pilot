@@ -28,8 +28,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/decommission"
+	"github.com/kjelly/pilot/internal/decommission/providers"
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 var (
@@ -134,10 +137,16 @@ func runHostDecommissionPlanCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	provs, err := buildHostDecommissionProviders(dir, hostDecommissionPlanHost, cmd.ErrOrStderr())
+	if err != nil {
+		return err
+	}
+
 	plan, err := decommission.PlanHost(cmd.Context(), decommission.PlanInput{
 		WorkspaceDir: dir,
 		HostName:     hostDecommissionPlanHost,
 		Catalog:      catalog,
+		Providers:    provs,
 	})
 	if err != nil {
 		return err
@@ -366,16 +375,108 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 		}
 	}
 
-	return decommission.Finalize(ctx, decommission.FinalizeInput{
+	// The SAME provider registry `plan` used must be rebuilt here — the
+	// freshness re-derivation inside Apply/Finalize re-runs PlanHost
+	// against it, and a plan that was executable because a provider WAS
+	// registered would otherwise stale-reject as soon as that provider
+	// vanished from freshness's view (spec.md §28/INV-3).
+	provs, err := buildHostDecommissionProviders(dir, plan.Host.Name, os.Stderr)
+	if err != nil {
+		return nil, err
+	}
+
+	return decommission.Apply(ctx, decommission.ApplyInput{
 		Plan: plan,
 		PlanInputForFreshness: decommission.PlanInput{
-			WorkspaceDir: dir, HostName: plan.Host.Name, Catalog: catalog,
+			WorkspaceDir: dir, HostName: plan.Host.Name, Catalog: catalog, Providers: provs,
 		},
 		DecommissionID: plan.ID,
 		Reason:         reason,
 		StartedAt:      now,
 		Store:          ds,
 	})
+}
+
+// buildHostDecommissionProviders constructs the live decommission
+// provider registry for hostName in the workspace at dir (spec.md §8.1).
+// Phase 3a wired FreeIPAClientProvider's Go-level contract
+// (internal/decommission/providers/freeipa_client.go) but never actually
+// registered it anywhere the real CLI could reach — its own report
+// explicitly deferred "CLI-level provider registration... needs live-run
+// validation of playbook/inventory path resolution first". This is that
+// wiring: every `pilot host decommission plan|apply|resume` invocation
+// calls this to populate decommission.PlanInput.Providers, so a
+// freeipa-client host's steps actually get planned/executed instead of
+// unconditionally falling back to external_state_unsupported.
+//
+// It returns an empty (non-nil) map, never an error, whenever hostName
+// isn't found or the workspace is otherwise not ready for it (e.g. no
+// hosts.yml yet) — planning/apply then simply behaves exactly as it did
+// before this function existed (Phase 1/2's fail-closed default), rather
+// than surfacing a confusing error from a helper whose only job is to
+// opportunistically enrich the registry. PlanHost/CheckFreshness
+// themselves already produce the authoritative "workspace malformed"
+// error from the SAME hosts.yml read.
+func buildHostDecommissionProviders(dir, hostName string, out io.Writer) (map[string]providers.Provider, error) {
+	empty := map[string]providers.Provider{}
+
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		return empty, nil
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		return empty, nil
+	}
+	var host *inventory.Host
+	for i := range hf.Hosts {
+		if hf.Hosts[i].Name == hostName {
+			host = &hf.Hosts[i]
+			break
+		}
+	}
+	if host == nil {
+		return empty, nil
+	}
+
+	invPath := filepath.Join(dir, "inventory.yml")
+	if _, err := autoRegenerateInventoryFromHosts(out, invPath); err != nil {
+		return nil, fmt.Errorf("regenerate inventory.yml for host decommission: %w", err)
+	}
+	if _, statErr := os.Stat(invPath); statErr != nil {
+		return empty, nil
+	}
+
+	rosterPath := decommission.RosterPathFor(dir, *host)
+
+	runner := ansible.NewRunner()
+	runner.StdoutWriter = out
+	runner.StderrWriter = out
+
+	var extraArgs []string
+	if rosterPath != "" {
+		// Extra-vars go through a bare `-e k=v` here (not a @file), matching
+		// FreeIPAClientProvider's own existing query()/exec() call sites,
+		// which already only ever pass simple, space-free values
+		// (pilot_decommission_query, pilot_decommission_target_fqdn) this
+		// same way — a roster path containing whitespace is a pre-existing
+		// workspace-authoring assumption shared by every other caller of
+		// this same freeipa_roster_file convention.
+		extraArgs = append(extraArgs, "-e", "freeipa_roster_file="+rosterPath)
+	}
+
+	freeipaClient := providers.NewFreeIPAClientProvider(providers.FreeIPAClientProviderConfig{
+		Executor:              runner,
+		ClientInventory:       invPath,
+		ServerInventory:       invPath,
+		DecommissionPlaybook:  "playbooks/decommission/freeipa-client-decommission.yml",
+		IdentityApplyPlaybook: "playbooks/apply/freeipa-identity-apply.yml",
+		ExtraArgs:             extraArgs,
+	})
+
+	return map[string]providers.Provider{
+		providers.FreeIPAClientProviderID: freeipaClient,
+	}, nil
 }
 
 func reportHostDecommissionResult(out io.Writer, result *decommission.FinalizeResult, asJSON bool) error {

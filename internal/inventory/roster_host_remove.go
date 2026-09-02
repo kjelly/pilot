@@ -75,6 +75,63 @@ func SimulateRemoveRosterHost(path, hostName string) (violations []RosterViolati
 	return ValidateRoster(root), true, nil
 }
 
+// RosterHostAbsentAndUnreferenced reports whether hostName's roster entry
+// is already state: absent AND no hostgroup/netgroup/HBAC/sudo direct
+// reference to it remains — i.e. a prior RemoveRosterHostReferences +
+// SetRosterHostAbsent call already converged this host, so calling them
+// again would be a pure no-op. found=false (no such host entry at all)
+// also counts as converged: there is nothing left to prune. Used by host
+// decommission's step execution (internal/decommission/providers) to
+// avoid re-mutating an already-converged roster on resume (INV-9/HD18) —
+// this is a plain read, it never writes.
+func RosterHostAbsentAndUnreferenced(path, hostName string) (bool, error) {
+	root, err := readRosterAsMap(path)
+	if err != nil {
+		return false, err
+	}
+	hosts := listField(root, "hosts")
+	idx, ambiguous := findNamedEntry(hosts, hostName)
+	if ambiguous {
+		return false, fmt.Errorf("roster %s: host %q is ambiguous (more than one host entry already has it); fix the duplicate by hand first", path, hostName)
+	}
+	if idx < 0 {
+		return true, nil
+	}
+	state, _ := asMap(hosts[idx])["state"].(string)
+	if state != "absent" {
+		return false, nil
+	}
+	return !rosterHostHasAnyReference(root, hostName), nil
+}
+
+// rosterHostHasAnyReference reports whether hostName still appears in any
+// hostgroup/netgroup membership or HBAC/sudo rule target — the read-only
+// counterpart of cascadeRemoveHostReferences below (detects, never
+// mutates).
+func rosterHostHasAnyReference(root map[string]any, hostName string) bool {
+	for _, raw := range listField(root, "hostgroups") {
+		if m := mapField(asMap(raw), "membership"); m != nil && contains(stringListField(m, "hosts"), hostName) {
+			return true
+		}
+	}
+	for _, raw := range listField(root, "netgroups") {
+		if m := mapField(asMap(raw), "membership"); m != nil && contains(stringListField(m, "hosts"), hostName) {
+			return true
+		}
+	}
+	for _, raw := range listField(mapField(root, "hbac"), "rules") {
+		if t := mapField(asMap(raw), "targets"); t != nil && contains(stringListField(t, "hosts"), hostName) {
+			return true
+		}
+	}
+	for _, raw := range listField(mapField(root, "sudo"), "rules") {
+		if t := mapField(asMap(raw), "targets"); t != nil && contains(stringListField(t, "hosts"), hostName) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- map-world cascade mutation (feeds SimulateRemoveRosterHost only) ----
 
 // cascadeRemoveHostReferences prunes hostName from every hostgroup/
