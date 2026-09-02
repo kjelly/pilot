@@ -227,6 +227,7 @@ var tagCheckExemptSpecs = map[string]string{
 	"core-infra.md":                  "composite host-baseline spec: satisfied by dns/ntp/keycloak playbooks together, no single apply playbook",
 	"sso-composition-example.md":     "documentation example of the spec-supplier pattern, never applied",
 	"snmp-monitoring-integration.md": "cross-cutting spec spanning internal/monitoring, internal/detection, internal/agentcontroller, internal/repair, internal/diagnose — verified by each package's own Go tests (see the spec's Checks probes), no single apply playbook",
+	"host-decommission.md":           "cross-cutting spec spanning internal/decommission, cmd/pilot/cmd (CLI+TUI), internal/store — verified by each package's own Go tests (see the spec's Checks probes); live-provider cleanup reuses freeipa-client/freeipa-identity/internal-endpoint/wazuh-fim's own apply playbooks rather than owning a decommission-specific one",
 }
 
 // rowShapedTag matches IDs like C1, R2, C2.5.1 — the shapes spec row IDs
