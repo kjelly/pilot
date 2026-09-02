@@ -6,10 +6,19 @@ import (
 	"time"
 )
 
-// EpisodeRecord mirrors the signal_episodes row shape (spec §24).
+// EpisodeRecord mirrors the signal_episodes row shape (spec §24/§9.7).
+// SubjectID/SubjectKind are the generic subject identity added in Phase 4;
+// PilotHost/Site are kept as a compatibility mirror so existing `signals
+// list`/`signals show` JSON consumers keep working unchanged (spec §9.7
+// point 4/CLI-MCP compatibility aliases) — for a managed-host subject
+// PilotHost == SubjectID; for any other kind PilotHost is "" (spec's NULL,
+// see docs/runbooks/detection-engine-subject-generalization.md for why
+// this package uses "" rather than a literal NULL column).
 type EpisodeRecord struct {
 	SignalID             string
 	Fingerprint          string
+	SubjectID            string
+	SubjectKind          string
 	PilotHost            string
 	Site                 string
 	ProfileID            string
@@ -77,11 +86,11 @@ func (s *Store) ApplyTransition(episode EpisodeRecord, history HistoryRecord, ou
 
 	_, execErr := tx.Exec(`
 		INSERT INTO signal_episodes (
-			signal_id, fingerprint, pilot_host, site, profile_id, profile_version,
+			signal_id, fingerprint, subject_id, subject_kind, pilot_host, site, profile_id, profile_version,
 			state, severity, category_hint, created_at, updated_at, revision,
 			last_score, last_confidence, warning_bits, warning_count,
 			critical_streak, recovery_streak, candidate_clear_streak
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(signal_id) DO UPDATE SET
 			state=excluded.state,
 			severity=excluded.severity,
@@ -96,7 +105,7 @@ func (s *Store) ApplyTransition(episode EpisodeRecord, history HistoryRecord, ou
 			recovery_streak=excluded.recovery_streak,
 			candidate_clear_streak=excluded.candidate_clear_streak
 	`,
-		episode.SignalID, episode.Fingerprint, episode.PilotHost, episode.Site,
+		episode.SignalID, episode.Fingerprint, episode.SubjectID, episode.SubjectKind, episode.PilotHost, episode.Site,
 		episode.ProfileID, episode.ProfileVersion, episode.State, nullString(episode.Severity),
 		episode.CategoryHint, rfc3339(episode.CreatedAt), rfc3339(episode.UpdatedAt), episode.Revision,
 		episode.LastScore, episode.LastConfidence, episode.WarningBits, episode.WarningCount,
@@ -142,7 +151,7 @@ func (s *Store) ApplyTransition(episode EpisodeRecord, history HistoryRecord, ou
 // same fingerprint is updated in place rather than duplicated).
 func (s *Store) GetEpisodeByFingerprint(fingerprint string) (*EpisodeRecord, error) {
 	row := s.db.QueryRow(`
-		SELECT signal_id, fingerprint, pilot_host, site, profile_id, profile_version,
+		SELECT signal_id, fingerprint, subject_id, subject_kind, pilot_host, site, profile_id, profile_version,
 			state, severity, category_hint, created_at, updated_at, revision,
 			last_score, last_confidence, warning_bits, warning_count,
 			critical_streak, recovery_streak, candidate_clear_streak
@@ -153,7 +162,7 @@ func (s *Store) GetEpisodeByFingerprint(fingerprint string) (*EpisodeRecord, err
 	var severity sql.NullString
 	var createdAt, updatedAt string
 	if err := row.Scan(
-		&e.SignalID, &e.Fingerprint, &e.PilotHost, &e.Site, &e.ProfileID, &e.ProfileVersion,
+		&e.SignalID, &e.Fingerprint, &e.SubjectID, &e.SubjectKind, &e.PilotHost, &e.Site, &e.ProfileID, &e.ProfileVersion,
 		&e.State, &severity, &e.CategoryHint, &createdAt, &updatedAt, &e.Revision,
 		&e.LastScore, &e.LastConfidence, &e.WarningBits, &e.WarningCount,
 		&e.CriticalStreak, &e.RecoveryStreak, &e.CandidateClearStreak,
@@ -172,7 +181,7 @@ func (s *Store) GetEpisodeByFingerprint(fingerprint string) (*EpisodeRecord, err
 // GetEpisode returns one episode by signal_id, or nil if it does not exist.
 func (s *Store) GetEpisode(signalID string) (*EpisodeRecord, error) {
 	row := s.db.QueryRow(`
-		SELECT signal_id, fingerprint, pilot_host, site, profile_id, profile_version,
+		SELECT signal_id, fingerprint, subject_id, subject_kind, pilot_host, site, profile_id, profile_version,
 			state, severity, category_hint, created_at, updated_at, revision,
 			last_score, last_confidence, warning_bits, warning_count,
 			critical_streak, recovery_streak, candidate_clear_streak
@@ -183,7 +192,7 @@ func (s *Store) GetEpisode(signalID string) (*EpisodeRecord, error) {
 	var severity sql.NullString
 	var createdAt, updatedAt string
 	if err := row.Scan(
-		&e.SignalID, &e.Fingerprint, &e.PilotHost, &e.Site, &e.ProfileID, &e.ProfileVersion,
+		&e.SignalID, &e.Fingerprint, &e.SubjectID, &e.SubjectKind, &e.PilotHost, &e.Site, &e.ProfileID, &e.ProfileVersion,
 		&e.State, &severity, &e.CategoryHint, &createdAt, &updatedAt, &e.Revision,
 		&e.LastScore, &e.LastConfidence, &e.WarningBits, &e.WarningCount,
 		&e.CriticalStreak, &e.RecoveryStreak, &e.CandidateClearStreak,
@@ -203,7 +212,7 @@ func (s *Store) GetEpisode(signalID string) (*EpisodeRecord, error) {
 // signal_id for deterministic output (spec §7's `signals list`).
 func (s *Store) ListActiveEpisodes() ([]EpisodeRecord, error) {
 	rows, err := s.db.Query(`
-		SELECT signal_id, fingerprint, pilot_host, site, profile_id, profile_version,
+		SELECT signal_id, fingerprint, subject_id, subject_kind, pilot_host, site, profile_id, profile_version,
 			state, severity, category_hint, created_at, updated_at, revision,
 			last_score, last_confidence, warning_bits, warning_count,
 			critical_streak, recovery_streak, candidate_clear_streak
@@ -227,7 +236,7 @@ func (s *Store) ListActiveEpisodes() ([]EpisodeRecord, error) {
 		var severity sql.NullString
 		var createdAt, updatedAt string
 		if err := rows.Scan(
-			&e.SignalID, &e.Fingerprint, &e.PilotHost, &e.Site, &e.ProfileID, &e.ProfileVersion,
+			&e.SignalID, &e.Fingerprint, &e.SubjectID, &e.SubjectKind, &e.PilotHost, &e.Site, &e.ProfileID, &e.ProfileVersion,
 			&e.State, &severity, &e.CategoryHint, &createdAt, &updatedAt, &e.Revision,
 			&e.LastScore, &e.LastConfidence, &e.WarningBits, &e.WarningCount,
 			&e.CriticalStreak, &e.RecoveryStreak, &e.CandidateClearStreak,

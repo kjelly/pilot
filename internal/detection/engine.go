@@ -23,20 +23,34 @@ const (
 	alertmanagerEndsAtHorizon = 180 * time.Second
 )
 
-func buildAlertPayload(host, site, severity, signalID string, score, confidence float64, categoryHint string, contributors []Contributor, profile string, startsAt, now time.Time) AlertmanagerPayload {
+// buildAlertPayload implements spec §9.8's generic alert label set: every
+// alert always carries pilot_subject/pilot_subject_kind; a managed_host
+// subject ADDITIONALLY keeps the legacy pilot_host label (so existing
+// Alertmanager routes/silences keyed on pilot_host keep matching), and any
+// other kind additionally carries pilot_target (spec §9.8: "SNMP/external
+// target SHOULD 額外保留 pilot_target=<subject_id>" — generalized here to
+// every non-managed-host kind, not just literally "snmp").
+func buildAlertPayload(subjectID, subjectKind, site, severity, signalID string, score, confidence float64, categoryHint string, contributors []Contributor, profile string, startsAt, now time.Time) AlertmanagerPayload {
 	top := make([]string, 0, len(contributors))
 	for _, c := range contributors {
 		top = append(top, c.Feature)
 	}
 	topJSON, _ := json.Marshal(top)
+	labels := map[string]string{
+		"alertname":          "PilotAdaptiveAnomaly",
+		"source":             "detection-engine",
+		"pilot_subject":      subjectID,
+		"pilot_subject_kind": subjectKind,
+		"site":               site,
+		"severity":           severity,
+	}
+	if subjectKind == SubjectKindManagedHost {
+		labels["pilot_host"] = subjectID
+	} else {
+		labels["pilot_target"] = subjectID
+	}
 	return AlertmanagerPayload{
-		Labels: map[string]string{
-			"alertname":  "PilotAdaptiveAnomaly",
-			"source":     "detection-engine",
-			"pilot_host": host,
-			"site":       site,
-			"severity":   severity,
-		},
+		Labels: labels,
 		Annotations: map[string]string{
 			"signal_id":        signalID,
 			"score":            formatFloat(score),
@@ -111,6 +125,22 @@ func NewEngine(profile FeatureProfile, source *ThanosClient, store *Store, cohor
 	}
 }
 
+// baselineSampleRecord fills a BaselineSampleRecord for this Engine's
+// profile-fixed subject kind (spec §9.7) — every subject discovered by one
+// Engine shares the same Kind (Engine.Profile.EffectiveIdentity().Kind),
+// so it never needs to vary per call site.
+func (e *Engine) baselineSampleRecord(subjectID, site, feature string, bucketTS int64, value float64) BaselineSampleRecord {
+	kind := e.Profile.EffectiveIdentity().Kind
+	pilotHost := ""
+	if kind == SubjectKindManagedHost {
+		pilotHost = subjectID
+	}
+	return BaselineSampleRecord{
+		SubjectID: subjectID, SubjectKind: kind, Site: site, PilotHost: pilotHost,
+		Feature: feature, BucketTS: bucketTS, Value: value,
+	}
+}
+
 func (e *Engine) lifecycleFor(host string) *HostLifecycle {
 	lc, ok := e.lifecycles[host]
 	if !ok {
@@ -146,22 +176,32 @@ type HostCycleOutcome struct {
 // call HostLifecycle.Advance for a host whose cycle was invalid (spec
 // §20.7).
 func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycleOutcome, error) {
+	identity := e.Profile.EffectiveIdentity()
+	maxSampleAge := e.Profile.MaxSampleAge()
+	futureSkew := e.Profile.FutureSkewTolerance()
+
 	perHost := map[SeriesKey]map[string]FeatureSampleResult{}
 	siteByHost := map[string]string{}
+	cohortByHost := map[string]string{}
 
 	for _, feature := range e.Profile.Features {
 		metrics, samples, err := e.Source.InstantQuery(ctx, feature.PromQL, evaluationTime)
 		if err != nil {
 			return nil, fmt.Errorf("query feature %s: %w", feature.Name, err)
 		}
-		grouped := GroupSamplesByKey(metrics, samples)
+		grouped, cohorts := GroupSamplesByKey(metrics, samples, identity)
 		for key, raw := range grouped {
-			value, validity := ClassifySample(raw, evaluationTime, feature)
+			value, validity := ClassifySample(raw, evaluationTime, feature, maxSampleAge, futureSkew)
 			if perHost[key] == nil {
 				perHost[key] = map[string]FeatureSampleResult{}
 			}
 			perHost[key][feature.Name] = FeatureSampleResult{Feature: feature.Name, Value: value, Validity: validity}
 			siteByHost[key.PilotHost] = key.Site
+			if identity.CohortLabel != "" {
+				if c, ok := cohorts[key]; ok {
+					cohortByHost[key.PilotHost] = c
+				}
+			}
 		}
 	}
 
@@ -177,9 +217,18 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 	var snapshots []HostCycleSnapshot
 	for _, host := range hosts {
 		key := SeriesKey{PilotHost: host, Site: siteByHost[host]}
+		// spec §9.6: a profile with its own cohortLabel gets cohort
+		// membership from the compiler-controlled label on the sample
+		// itself (rule 4: missing label means no cohort, never a fallback
+		// guess); a profile with no cohortLabel keeps the pre-Phase-4
+		// static e.Cohorts lookup unchanged.
+		cohort := e.Cohorts[host]
+		if identity.CohortLabel != "" {
+			cohort = cohortByHost[host]
+		}
 		snapshots = append(snapshots, HostCycleSnapshot{
 			Host:    host,
-			Cohort:  e.Cohorts[host],
+			Cohort:  cohort,
 			Current: ValidCurrentValues(perHost[key]),
 		})
 	}
@@ -239,9 +288,7 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 				bucketTS := BucketOf(evaluationTime)
 				for name, value := range snap.Current {
 					e.Baselines.Observe(snap.Host, name, evaluationTime, value)
-					baselineSamples = append(baselineSamples, BaselineSampleRecord{
-						PilotHost: snap.Host, Feature: name, BucketTS: bucketTS, Value: value,
-					})
+					baselineSamples = append(baselineSamples, e.baselineSampleRecord(snap.Host, siteByHost[snap.Host], name, bucketTS, value))
 				}
 			}
 			for name := range snap.Current {
@@ -300,9 +347,7 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 			bucketTS := BucketOf(evaluationTime)
 			for name, value := range ph.snap.Current {
 				e.Baselines.Observe(ph.snap.Host, name, evaluationTime, value)
-				baselineSamples = append(baselineSamples, BaselineSampleRecord{
-					PilotHost: ph.snap.Host, Feature: name, BucketTS: bucketTS, Value: value,
-				})
+				baselineSamples = append(baselineSamples, e.baselineSampleRecord(ph.snap.Host, ph.site, name, bucketTS, value))
 			}
 		}
 		for name := range ph.snap.Current {
@@ -331,7 +376,12 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Tran
 		return nil
 	}
 	now := time.Unix(evaluationTime, 0).UTC()
-	fingerprint := Fingerprint(host, e.Profile.ID, e.Profile.Version)
+	kind := e.Profile.EffectiveIdentity().Kind
+	fingerprint := Fingerprint(host, kind, site, e.Profile.ID, e.Profile.Version)
+	pilotHost := ""
+	if kind == SubjectKindManagedHost {
+		pilotHost = host
+	}
 
 	switch tr.Action {
 	case ActionCreateWarning, ActionCreateCritical:
@@ -340,13 +390,14 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Tran
 			return err
 		}
 		episode := EpisodeRecord{
-			SignalID: signalID, Fingerprint: fingerprint, PilotHost: host, Site: site,
+			SignalID: signalID, Fingerprint: fingerprint,
+			SubjectID: host, SubjectKind: kind, PilotHost: pilotHost, Site: site,
 			ProfileID: e.Profile.ID, ProfileVersion: e.Profile.Version,
 			State: string(StateFiring), Severity: string(tr.Severity), CategoryHint: local.Category,
 			CreatedAt: now, UpdatedAt: now, Revision: 1,
 			LastScore: &local.Score,
 		}
-		payload, _ := json.Marshal(buildAlertPayload(host, site, string(tr.Severity), signalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, now, now))
+		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), signalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, now, now))
 		outboxID, err := NewULID()
 		if err != nil {
 			return err
@@ -369,8 +420,8 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Tran
 		episode.Revision = revision
 		episode.LastScore = &local.Score
 
-		resolvePayload, _ := json.Marshal(buildAlertPayload(host, site, string(SeverityWarning), existing.SignalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, existing.CreatedAt, now))
-		firePayload, _ := json.Marshal(buildAlertPayload(host, site, string(SeverityCritical), existing.SignalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, now, now))
+		resolvePayload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(SeverityWarning), existing.SignalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, existing.CreatedAt, now))
+		firePayload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(SeverityCritical), existing.SignalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, now, now))
 		resolveID, err := NewULID()
 		if err != nil {
 			return err
@@ -399,7 +450,7 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Tran
 		episode.UpdatedAt = now
 		episode.Revision = revision
 		episode.LastScore = &local.Score
-		payload, _ := json.Marshal(buildAlertPayload(host, site, string(tr.Severity), existing.SignalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, existing.CreatedAt, now))
+		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), existing.SignalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, existing.CreatedAt, now))
 		outboxID, err := NewULID()
 		if err != nil {
 			return err
@@ -420,7 +471,7 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Tran
 		episode.Severity = ""
 		episode.UpdatedAt = now
 		episode.Revision = revision
-		payload, _ := json.Marshal(map[string]any{"signal_id": existing.SignalID, "pilot_host": host, "site": site})
+		payload, _ := json.Marshal(map[string]any{"signal_id": existing.SignalID, "pilot_subject": host, "pilot_subject_kind": kind, "pilot_host": pilotHost, "site": site})
 		outboxID, err := NewULID()
 		if err != nil {
 			return err

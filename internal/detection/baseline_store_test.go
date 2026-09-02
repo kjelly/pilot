@@ -11,15 +11,15 @@ func TestStore_SaveBaselineSamples_RoundTripsThroughLoadBaselineHistory(t *testi
 	bucket := BucketOf(evaluationTime)
 
 	err := s.SaveBaselineSamples([]BaselineSampleRecord{
-		{PilotHost: "web-1", Feature: "cpu_utilization", BucketTS: bucket, Value: 0.42},
-		{PilotHost: "web-1", Feature: "memory_used_ratio", BucketTS: bucket, Value: 0.7},
-		{PilotHost: "web-2", Feature: "cpu_utilization", BucketTS: bucket, Value: 0.1},
+		{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: bucket, Value: 0.42},
+		{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "memory_used_ratio", BucketTS: bucket, Value: 0.7},
+		{SubjectID: "web-2", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: bucket, Value: 0.1},
 	}, evaluationTime)
 	if err != nil {
 		t.Fatalf("SaveBaselineSamples: %v", err)
 	}
 
-	warm, err := s.LoadBaselineHistory(time.Unix(evaluationTime, 0))
+	warm, err := s.LoadBaselineHistory(time.Unix(evaluationTime, 0), SubjectKindManagedHost)
 	if err != nil {
 		t.Fatalf("LoadBaselineHistory: %v", err)
 	}
@@ -43,17 +43,17 @@ func TestStore_SaveBaselineSamples_UpsertOverwritesSameBucket(t *testing.T) {
 	bucket := BucketOf(evaluationTime)
 
 	if err := s.SaveBaselineSamples([]BaselineSampleRecord{
-		{PilotHost: "web-1", Feature: "cpu_utilization", BucketTS: bucket, Value: 0.1},
+		{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: bucket, Value: 0.1},
 	}, evaluationTime); err != nil {
 		t.Fatalf("first save: %v", err)
 	}
 	if err := s.SaveBaselineSamples([]BaselineSampleRecord{
-		{PilotHost: "web-1", Feature: "cpu_utilization", BucketTS: bucket, Value: 0.9},
+		{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: bucket, Value: 0.9},
 	}, evaluationTime); err != nil {
 		t.Fatalf("second save: %v", err)
 	}
 
-	warm, err := s.LoadBaselineHistory(time.Unix(evaluationTime, 0))
+	warm, err := s.LoadBaselineHistory(time.Unix(evaluationTime, 0), SubjectKindManagedHost)
 	if err != nil {
 		t.Fatalf("LoadBaselineHistory: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestStore_SaveBaselineSamples_PrunesBucketsOlderThan24h(t *testing.T) {
 	oldBucket := BucketOf(oldTime)
 
 	if err := s.SaveBaselineSamples([]BaselineSampleRecord{
-		{PilotHost: "web-1", Feature: "cpu_utilization", BucketTS: oldBucket, Value: 0.5},
+		{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: oldBucket, Value: 0.5},
 	}, oldTime); err != nil {
 		t.Fatalf("save old sample: %v", err)
 	}
@@ -80,12 +80,12 @@ func TestStore_SaveBaselineSamples_PrunesBucketsOlderThan24h(t *testing.T) {
 	laterTime := oldTime + 25*60*60
 	laterBucket := BucketOf(laterTime)
 	if err := s.SaveBaselineSamples([]BaselineSampleRecord{
-		{PilotHost: "web-1", Feature: "cpu_utilization", BucketTS: laterBucket, Value: 0.6},
+		{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: laterBucket, Value: 0.6},
 	}, laterTime); err != nil {
 		t.Fatalf("save later sample: %v", err)
 	}
 
-	warm, err := s.LoadBaselineHistory(time.Unix(laterTime, 0))
+	warm, err := s.LoadBaselineHistory(time.Unix(laterTime, 0), SubjectKindManagedHost)
 	if err != nil {
 		t.Fatalf("LoadBaselineHistory: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestStore_SaveBaselineSamples_PrunesBucketsOlderThan24h(t *testing.T) {
 
 func TestStore_LoadBaselineHistory_EmptyTableYieldsEmptyStore(t *testing.T) {
 	s := openTestStore(t)
-	warm, err := s.LoadBaselineHistory(time.Unix(1_700_000_000, 0))
+	warm, err := s.LoadBaselineHistory(time.Unix(1_700_000_000, 0), SubjectKindManagedHost)
 	if err != nil {
 		t.Fatalf("LoadBaselineHistory: %v", err)
 	}

@@ -144,3 +144,132 @@ func TestEngine_RunCycle_BaselineWarmsUpWithoutCohortOrLog(t *testing.T) {
 		t.Fatalf("spike cycle: LocalScore = %+v, want Valid with a high score", outcomes[0].LocalScore)
 	}
 }
+
+// TestBuildAlertPayload_ManagedHostRetainsPilotHost is the Phase 4 exit
+// gate's "managed host alert retains pilot_host": the generic
+// pilot_subject/pilot_subject_kind labels must be present ALONGSIDE the
+// legacy pilot_host label, not instead of it, for a managed_host subject.
+func TestBuildAlertPayload_ManagedHostRetainsPilotHost(t *testing.T) {
+	now := time.Now()
+	payload := buildAlertPayload("web-1", SubjectKindManagedHost, "site-a", "critical", "sig-1", 0.9, 1, "cpu", nil, "linux-host-v1", now, now)
+	if payload.Labels["pilot_host"] != "web-1" {
+		t.Errorf("pilot_host = %q, want web-1", payload.Labels["pilot_host"])
+	}
+	if payload.Labels["pilot_subject"] != "web-1" || payload.Labels["pilot_subject_kind"] != SubjectKindManagedHost {
+		t.Errorf("generic subject labels missing/wrong: %+v", payload.Labels)
+	}
+	if _, ok := payload.Labels["pilot_target"]; ok {
+		t.Errorf("a managed_host subject must never carry pilot_target: %+v", payload.Labels)
+	}
+}
+
+// TestBuildAlertPayload_NonManagedSubjectNeverGetsPilotHost is the Phase 4
+// exit gate's "SNMP subject never gets pilot_host": any non-managed-host
+// kind gets pilot_target instead, never the legacy pilot_host label.
+func TestBuildAlertPayload_NonManagedSubjectNeverGetsPilotHost(t *testing.T) {
+	now := time.Now()
+	payload := buildAlertPayload("core-sw-01", "network_device", "site-a", "critical", "sig-1", 0.9, 1, "network_error", nil, "network-device-ifmib-v1", now, now)
+	if _, ok := payload.Labels["pilot_host"]; ok {
+		t.Errorf("a non-managed-host subject must never carry pilot_host: %+v", payload.Labels)
+	}
+	if payload.Labels["pilot_target"] != "core-sw-01" {
+		t.Errorf("pilot_target = %q, want core-sw-01", payload.Labels["pilot_target"])
+	}
+	if payload.Labels["pilot_subject"] != "core-sw-01" || payload.Labels["pilot_subject_kind"] != "network_device" {
+		t.Errorf("generic subject labels missing/wrong: %+v", payload.Labels)
+	}
+}
+
+// TestGroupSamplesByKey_SNMPSubjectKeyNeverAssignsPilotHost is
+// docs/verification/snmp-monitoring-integration.md's C7: an SNMP-shaped
+// identity profile (Label=pilot_target, Kind=network_device) must
+// classify a sample under that subject's own SubjectKey — its Kind must
+// never come out as SubjectKindManagedHost, and its own identity label
+// name is never `pilot_host`.
+func TestGroupSamplesByKey_SNMPSubjectKeyNeverAssignsPilotHost(t *testing.T) {
+	identity := IdentityProfile{Label: "pilot_target", Kind: "network_device", SiteLabel: "site"}
+	metrics := []map[string]string{{"pilot_target": "core-sw-01", "site": "site-a", "pilot_host": "should-be-ignored"}}
+	samples := []RawSample{{Timestamp: 1000, Value: 1}}
+	grouped, _ := GroupSamplesByKey(metrics, samples, identity)
+	if len(grouped) != 1 {
+		t.Fatalf("expected exactly one subject, got %+v", grouped)
+	}
+	for key := range grouped {
+		if key.PilotHost != "core-sw-01" {
+			t.Fatalf("subject ID = %q, want core-sw-01 (from pilot_target, not the stray pilot_host label)", key.PilotHost)
+		}
+	}
+	subject := SubjectKey{ID: "core-sw-01", Kind: identity.Kind, Site: "site-a"}
+	if subject.IsManagedHost() {
+		t.Fatal("an SNMP profile's SubjectKey must never classify as managed_host")
+	}
+}
+
+// TestFingerprint_DifferentKindsNeverCollide guards spec §9.8's
+// requirement that subject_kind participate in the fingerprint — without
+// it, a managed host and an SNMP device that happened to share an ID
+// string would silently alias the same SignalEvent/episode.
+func TestFingerprint_DifferentKindsNeverCollide(t *testing.T) {
+	a := Fingerprint("core-sw-01", SubjectKindManagedHost, "site-a", "linux-host-v1", 1)
+	b := Fingerprint("core-sw-01", "network_device", "site-a", "linux-host-v1", 1)
+	if a == b {
+		t.Fatal("fingerprints for the same ID string under different subject kinds must never collide")
+	}
+}
+
+// TestGroupSamplesByKey_MissingIdentityLabelIsDropped is spec §9.4 rule 1:
+// a series whose identity label is empty can never be attributed to any
+// subject.
+func TestGroupSamplesByKey_MissingIdentityLabelIsDropped(t *testing.T) {
+	identity := defaultIdentityProfile()
+	metrics := []map[string]string{{"site": "site-a"}} // no pilot_host label at all
+	samples := []RawSample{{Timestamp: 1000, Value: 1}}
+	grouped, _ := GroupSamplesByKey(metrics, samples, identity)
+	if len(grouped) != 0 {
+		t.Fatalf("expected the identity-less series to be dropped, got %+v", grouped)
+	}
+}
+
+// TestGroupSamplesByKey_NonManagedHostRequiresSiteLabel is spec §9.4 rule
+// 2: an empty site is only tolerated for legacy managed-host
+// compatibility — any other kind must treat a missing site as invalid.
+func TestGroupSamplesByKey_NonManagedHostRequiresSiteLabel(t *testing.T) {
+	identity := IdentityProfile{Label: "pilot_target", Kind: "network_device", SiteLabel: "site"}
+	metrics := []map[string]string{{"pilot_target": "core-sw-01"}} // no site label
+	samples := []RawSample{{Timestamp: 1000, Value: 1}}
+	grouped, _ := GroupSamplesByKey(metrics, samples, identity)
+	if len(grouped) != 0 {
+		t.Fatalf("expected the site-less non-managed-host series to be dropped, got %+v", grouped)
+	}
+
+	managedIdentity := defaultIdentityProfile()
+	metricsManaged := []map[string]string{{"pilot_host": "web-1"}} // no site label either
+	groupedManaged, _ := GroupSamplesByKey(metricsManaged, samples, managedIdentity)
+	if len(groupedManaged) != 1 {
+		t.Fatalf("a managed-host series with an empty site must still be kept (legacy compatibility), got %+v", groupedManaged)
+	}
+}
+
+// TestGroupSamplesByKey_CohortComesFromCompilerControlledLabel is spec
+// §9.6: when a profile configures a cohortLabel, cohort membership comes
+// directly from that label's value on the sample, never a static lookup.
+func TestGroupSamplesByKey_CohortComesFromCompilerControlledLabel(t *testing.T) {
+	identity := IdentityProfile{Label: "pilot_target", Kind: "network_device", SiteLabel: "site", CohortLabel: "detection_cohort"}
+	metrics := []map[string]string{
+		{"pilot_target": "core-sw-01", "site": "site-a", "detection_cohort": "edge-switches"},
+		{"pilot_target": "core-sw-02", "site": "site-a"}, // no cohort label value at all
+	}
+	samples := []RawSample{{Timestamp: 1000, Value: 1}, {Timestamp: 1000, Value: 2}}
+	grouped, cohorts := GroupSamplesByKey(metrics, samples, identity)
+	if len(grouped) != 2 {
+		t.Fatalf("expected both subjects kept, got %+v", grouped)
+	}
+	key1 := SeriesKey{PilotHost: "core-sw-01", Site: "site-a"}
+	if cohorts[key1] != "edge-switches" {
+		t.Errorf("cohort for core-sw-01 = %q, want edge-switches", cohorts[key1])
+	}
+	key2 := SeriesKey{PilotHost: "core-sw-02", Site: "site-a"}
+	if _, ok := cohorts[key2]; ok {
+		t.Errorf("a missing cohort label must never be guessed/defaulted, got %q", cohorts[key2])
+	}
+}

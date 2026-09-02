@@ -21,7 +21,8 @@ type MetricsSnapshot struct {
 	SubjectsTotal                int
 	SubjectSkippedTotal          map[string]int64      // reason -> count
 	FeatureInvalidTotal          map[[2]string]int64   // [feature, reason] -> count
-	AnomalyScore                 map[[2]string]float64 // [pilot_host, detector] -> score
+	AnomalyScore                 map[[2]string]float64 // [pilot_host, detector] -> score (managed_host only, spec §9.9 compat release)
+	SubjectAnomalyScore          map[[3]string]float64 // [subject_id, subject_kind, detector] -> score (spec §9.9, every kind)
 	ActiveSignals                map[string]int64      // severity -> count
 	SignalTotal                  map[string]int64      // transition -> count
 	ModelProviderUp              bool
@@ -68,6 +69,22 @@ func sortedPairKeys[V any](m map[[2]string]V) [][2]string {
 	return keys
 }
 
+func sortedTripleKeys[V any](m map[[3]string]V) [][3]string {
+	keys := make([][3]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		for p := 0; p < 3; p++ {
+			if keys[i][p] != keys[j][p] {
+				return keys[i][p] < keys[j][p]
+			}
+		}
+		return false
+	})
+	return keys
+}
+
 // Render produces the Prometheus text exposition format for this snapshot
 // (spec §38's required metric set).
 func (m MetricsSnapshot) Render() string {
@@ -94,6 +111,9 @@ func (m MetricsSnapshot) Render() string {
 	}
 	for _, k := range sortedPairKeys(m.AnomalyScore) {
 		labeled("pilot_detection_anomaly_score", fmt.Sprintf("pilot_host=%q,detector=%q", k[0], k[1]), formatFloat(m.AnomalyScore[k]))
+	}
+	for _, k := range sortedTripleKeys(m.SubjectAnomalyScore) {
+		labeled("pilot_detection_subject_anomaly_score", fmt.Sprintf("pilot_subject=%q,pilot_subject_kind=%q,detector=%q", k[0], k[1], k[2]), formatFloat(m.SubjectAnomalyScore[k]))
 	}
 	for _, sev := range sortedStringKeys(m.ActiveSignals) {
 		labeled("pilot_detection_active_signals", fmt.Sprintf("severity=%q", sev), strconv.FormatInt(m.ActiveSignals[sev], 10))

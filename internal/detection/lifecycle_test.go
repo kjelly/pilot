@@ -118,7 +118,7 @@ func TestLifecycle_CriticalNeverDowngradesWithinEpisode(t *testing.T) {
 
 func TestLifecycle_ResolvedThenRefireGetsNewSignalID(t *testing.T) {
 	const host, profileID, profileVersion = "web-1", "linux-host-v1", 1
-	fp1 := Fingerprint(host, profileID, profileVersion)
+	fp1 := Fingerprint(host, SubjectKindManagedHost, "", profileID, profileVersion)
 
 	lc := NewHostLifecycle()
 	lc.Advance(0.97)
@@ -138,7 +138,7 @@ func TestLifecycle_ResolvedThenRefireGetsNewSignalID(t *testing.T) {
 		t.Fatalf("expected resolved back to normal, got %s", lc.State)
 	}
 
-	fp2 := Fingerprint(host, profileID, profileVersion)
+	fp2 := Fingerprint(host, SubjectKindManagedHost, "", profileID, profileVersion)
 	if fp1 != fp2 {
 		t.Fatal("fingerprint must be identical across resolve+refire (spec §21)")
 	}

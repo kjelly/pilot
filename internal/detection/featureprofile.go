@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,12 +26,103 @@ type Feature struct {
 	PromQL     string  `yaml:"promql"`
 }
 
+// IdentityProfile names which PromQL result label identifies a subject for
+// this feature profile (spec §9.3) — generalizing the historical hard-coded
+// assumption that every subject is a `pilot_host`-labeled managed Linux
+// host. Kind becomes the subject's SubjectKey.Kind and the persisted
+// subject_kind column/label everywhere a SignalEvent from this profile
+// flows; it is never inferred from the label VALUE, only fixed per profile.
+type IdentityProfile struct {
+	Label       string `yaml:"label"`
+	Kind        string `yaml:"kind"`
+	SiteLabel   string `yaml:"siteLabel"`
+	CohortLabel string `yaml:"cohortLabel,omitempty"`
+}
+
+// SamplingProfile overrides the classification windows spec §13 originally
+// hard-coded as global constants (45s/5s) — a profile whose PromQL source
+// has different natural staleness (e.g. an SNMP device polled less
+// frequently than a Linux node_exporter scrape) needs its own tolerance,
+// not the Linux-host-tuned default.
+type SamplingProfile struct {
+	MaxSampleAge        string `yaml:"maxSampleAge,omitempty"`
+	FutureSkewTolerance string `yaml:"futureSkewTolerance,omitempty"`
+}
+
+// defaultMaxSampleAge/defaultFutureSkewTolerance are spec §9.3's
+// backward-compatible defaults — identical to the pre-Phase-4 hard-coded
+// maxSampleAgeSeconds/futureSkewToleranceSeconds constants, so a profile
+// that never sets `sampling` behaves byte-identically to before.
+const (
+	defaultMaxSampleAge        = "45s"
+	defaultFutureSkewTolerance = "5s"
+)
+
+func defaultIdentityProfile() IdentityProfile {
+	return IdentityProfile{Label: "pilot_host", Kind: SubjectKindManagedHost, SiteLabel: "site"}
+}
+
+// EffectiveIdentity returns p.Identity with spec §9.3's managed-host
+// defaults filled in for any field a profile YAML left unset — so a
+// profile constructed without an explicit `identity:` block (every
+// existing linux-host fixture, and any FeatureProfile{} built directly in
+// a test) behaves exactly as it did before this field existed.
+func (p FeatureProfile) EffectiveIdentity() IdentityProfile {
+	id := p.Identity
+	def := defaultIdentityProfile()
+	if id.Label == "" {
+		id.Label = def.Label
+	}
+	if id.Kind == "" {
+		id.Kind = def.Kind
+	}
+	if id.SiteLabel == "" {
+		id.SiteLabel = def.SiteLabel
+	}
+	return id
+}
+
+// EffectiveSampling returns p.Sampling with spec §9.3's defaults filled in.
+func (p FeatureProfile) EffectiveSampling() SamplingProfile {
+	s := p.Sampling
+	if s.MaxSampleAge == "" {
+		s.MaxSampleAge = defaultMaxSampleAge
+	}
+	if s.FutureSkewTolerance == "" {
+		s.FutureSkewTolerance = defaultFutureSkewTolerance
+	}
+	return s
+}
+
+// MaxSampleAge parses EffectiveSampling().MaxSampleAge, falling back to the
+// spec §9.3 default if the profile was constructed with an invalid string
+// bypassing Validate (e.g. directly in a test).
+func (p FeatureProfile) MaxSampleAge() time.Duration {
+	if d, err := time.ParseDuration(p.EffectiveSampling().MaxSampleAge); err == nil {
+		return d
+	}
+	d, _ := time.ParseDuration(defaultMaxSampleAge)
+	return d
+}
+
+// FutureSkewTolerance parses EffectiveSampling().FutureSkewTolerance, with
+// the same fallback behavior as MaxSampleAge.
+func (p FeatureProfile) FutureSkewTolerance() time.Duration {
+	if d, err := time.ParseDuration(p.EffectiveSampling().FutureSkewTolerance); err == nil {
+		return d
+	}
+	d, _ := time.ParseDuration(defaultFutureSkewTolerance)
+	return d
+}
+
 // FeatureProfile is the parsed contents of a feature-profiles/*.yaml file.
 // ID and Version together are part of the SignalEvent fingerprint (spec §21).
 type FeatureProfile struct {
-	ID       string    `yaml:"id"`
-	Version  int       `yaml:"version"`
-	Features []Feature `yaml:"features"`
+	ID       string          `yaml:"id"`
+	Version  int             `yaml:"version"`
+	Identity IdentityProfile `yaml:"identity,omitempty"`
+	Sampling SamplingProfile `yaml:"sampling,omitempty"`
+	Features []Feature       `yaml:"features"`
 }
 
 // LoadFeatureProfile parses and validates a feature profile file.
@@ -67,6 +159,16 @@ func (p FeatureProfile) Validate() error {
 	}
 	if len(p.Features) == 0 {
 		return fmt.Errorf("feature profile: at least one feature is required")
+	}
+	if p.Sampling.MaxSampleAge != "" {
+		if _, err := time.ParseDuration(p.Sampling.MaxSampleAge); err != nil {
+			return fmt.Errorf("feature profile: sampling.maxSampleAge: %w", err)
+		}
+	}
+	if p.Sampling.FutureSkewTolerance != "" {
+		if _, err := time.ParseDuration(p.Sampling.FutureSkewTolerance); err != nil {
+			return fmt.Errorf("feature profile: sampling.futureSkewTolerance: %w", err)
+		}
 	}
 	seen := make(map[string]bool, len(p.Features))
 	haveRequired := false

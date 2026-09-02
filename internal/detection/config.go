@@ -58,18 +58,48 @@ type LogSourceConfig struct {
 	BaselineWindow string `yaml:"baselineWindow"`
 }
 
+// FeatureProfileEntry is one row of the multi-profile `featureProfiles`
+// list (spec §9.5) — the generalization of the single `featureProfilePath`
+// string, letting one Detection Engine process run more than one feature
+// profile (e.g. linux-host-v1 alongside network-device-ifmib-v1), each
+// with its own independent baseline/fingerprint/lifecycle/episode state
+// (spec §9.5: "不同 profile MUST 維持獨立...").
+type FeatureProfileEntry struct {
+	Path    string `yaml:"path"`
+	Enabled bool   `yaml:"enabled"`
+}
+
 // Config is the Detection Engine's config.yaml shape (spec §8, §33: the
 // file itself never contains a secret — only api_key_env, the name of an
 // environment variable the secret arrives through).
 type Config struct {
-	MetricsSourceBaseURL string              `yaml:"metricsSourceBaseUrl"`
-	AlertmanagerBaseURL  string              `yaml:"alertmanagerBaseUrl"`
-	FeatureProfilePath   string              `yaml:"featureProfilePath"`
-	DBPath               string              `yaml:"dbPath"`
-	StatusPath           string              `yaml:"statusPath"`
-	TextfileMetricsPath  string              `yaml:"textfileMetricsPath"`
-	ModelProvider        ModelProviderConfig `yaml:"modelProvider"`
-	LogSource            LogSourceConfig     `yaml:"logSource"`
+	MetricsSourceBaseURL string                `yaml:"metricsSourceBaseUrl"`
+	AlertmanagerBaseURL  string                `yaml:"alertmanagerBaseUrl"`
+	FeatureProfilePath   string                `yaml:"featureProfilePath"`
+	FeatureProfiles      []FeatureProfileEntry `yaml:"featureProfiles,omitempty"`
+	DBPath               string                `yaml:"dbPath"`
+	StatusPath           string                `yaml:"statusPath"`
+	TextfileMetricsPath  string                `yaml:"textfileMetricsPath"`
+	ModelProvider        ModelProviderConfig   `yaml:"modelProvider"`
+	LogSource            LogSourceConfig       `yaml:"logSource"`
+}
+
+// ResolveFeatureProfilePaths implements spec §9.5's compatibility rule:
+// only featureProfilePath set -> single-profile mode (one-element slice);
+// featureProfiles non-empty -> multi-profile mode (its enabled entries'
+// paths, in file order); both/neither set is rejected by Validate before
+// this is ever called.
+func (c Config) ResolveFeatureProfilePaths() []string {
+	if len(c.FeatureProfiles) > 0 {
+		var paths []string
+		for _, p := range c.FeatureProfiles {
+			if p.Enabled {
+				paths = append(paths, p.Path)
+			}
+		}
+		return paths
+	}
+	return []string{c.FeatureProfilePath}
 }
 
 // LoadConfig reads and validates config.yaml.
@@ -100,8 +130,16 @@ func (c Config) Validate() error {
 	if c.AlertmanagerBaseURL == "" {
 		return fmt.Errorf("config: alertmanagerBaseUrl is required")
 	}
-	if c.FeatureProfilePath == "" {
-		return fmt.Errorf("config: featureProfilePath is required")
+	if c.FeatureProfilePath != "" && len(c.FeatureProfiles) > 0 {
+		return fmt.Errorf("config: featureProfilePath and featureProfiles are mutually exclusive (spec §9.5)")
+	}
+	if c.FeatureProfilePath == "" && len(c.FeatureProfiles) == 0 {
+		return fmt.Errorf("config: featureProfilePath or featureProfiles is required")
+	}
+	for i, p := range c.FeatureProfiles {
+		if p.Path == "" {
+			return fmt.Errorf("config: featureProfiles[%d].path is required", i)
+		}
 	}
 	if c.DBPath == "" {
 		return fmt.Errorf("config: dbPath is required")

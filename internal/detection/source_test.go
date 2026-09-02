@@ -3,6 +3,7 @@ package detection
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 func testProfile() FeatureProfile {
@@ -43,7 +44,7 @@ func TestSource_OptionalThermalMissingDoesNotInvalidateCore(t *testing.T) {
 func TestSource_DuplicateSeriesIsInvalid(t *testing.T) {
 	feature := cpuFeature()
 	samples := []RawSample{{Timestamp: 1000, Value: 0.5}, {Timestamp: 1000, Value: 0.6}}
-	_, validity := ClassifySample(samples, 1000, feature)
+	_, validity := ClassifySample(samples, 1000, feature, 45*time.Second, 5*time.Second)
 	if validity != ValidityAmbiguousSeries {
 		t.Fatalf("validity = %q, want ambiguous_series for >1 sample", validity)
 	}
@@ -55,12 +56,12 @@ func TestSource_StaleAfter45Seconds(t *testing.T) {
 
 	// evaluation - timestamp == 45 exactly: spec uses strict ">45", so
 	// this must still be valid.
-	_, validity := ClassifySample([]RawSample{{Timestamp: evalTime - 45, Value: 0.5}}, evalTime, feature)
+	_, validity := ClassifySample([]RawSample{{Timestamp: evalTime - 45, Value: 0.5}}, evalTime, feature, 45*time.Second, 5*time.Second)
 	if validity != ValidityValid {
 		t.Errorf("exactly 45s old = %q, want valid (boundary is strict >45)", validity)
 	}
 
-	_, validity = ClassifySample([]RawSample{{Timestamp: evalTime - 46, Value: 0.5}}, evalTime, feature)
+	_, validity = ClassifySample([]RawSample{{Timestamp: evalTime - 46, Value: 0.5}}, evalTime, feature, 45*time.Second, 5*time.Second)
 	if validity != ValidityStale {
 		t.Errorf("46s old = %q, want stale", validity)
 	}
@@ -72,12 +73,12 @@ func TestSource_FutureMoreThan5SecondsInvalid(t *testing.T) {
 
 	// timestamp == evaluation + 5 exactly: spec uses strict ">5", so this
 	// must still be valid.
-	_, validity := ClassifySample([]RawSample{{Timestamp: evalTime + 5, Value: 0.5}}, evalTime, feature)
+	_, validity := ClassifySample([]RawSample{{Timestamp: evalTime + 5, Value: 0.5}}, evalTime, feature, 45*time.Second, 5*time.Second)
 	if validity != ValidityValid {
 		t.Errorf("exactly 5s in the future = %q, want valid (boundary is strict >5)", validity)
 	}
 
-	_, validity = ClassifySample([]RawSample{{Timestamp: evalTime + 6, Value: 0.5}}, evalTime, feature)
+	_, validity = ClassifySample([]RawSample{{Timestamp: evalTime + 6, Value: 0.5}}, evalTime, feature, 45*time.Second, 5*time.Second)
 	if validity != ValidityFutureSample {
 		t.Errorf("6s in the future = %q, want future_sample", validity)
 	}
@@ -87,12 +88,12 @@ func TestSource_NaNInfInvalid(t *testing.T) {
 	feature := cpuFeature()
 	const evalTime = int64(1_000_000)
 
-	_, validity := ClassifySample([]RawSample{{Timestamp: evalTime, Value: math.NaN()}}, evalTime, feature)
+	_, validity := ClassifySample([]RawSample{{Timestamp: evalTime, Value: math.NaN()}}, evalTime, feature, 45*time.Second, 5*time.Second)
 	if validity != ValidityNonFinite {
 		t.Errorf("NaN = %q, want non_finite", validity)
 	}
 
-	_, validity = ClassifySample([]RawSample{{Timestamp: evalTime, Value: math.Inf(1)}}, evalTime, feature)
+	_, validity = ClassifySample([]RawSample{{Timestamp: evalTime, Value: math.Inf(1)}}, evalTime, feature, 45*time.Second, 5*time.Second)
 	if validity != ValidityNonFinite {
 		t.Errorf("+Inf = %q, want non_finite", validity)
 	}

@@ -99,7 +99,7 @@ as of this revision (spec §15 Phase 0 exit gate).
   category: correctness
   check: multiple unaggregated series for the same (subject, site, feature) in one cycle are classified ambiguous_series, never an arbitrarily picked winner
   probe: |
-    go test ./internal/detection/... -run Ambiguous -v
+    go test ./internal/detection/... -run DuplicateSeriesIsInvalid -v
   expect: {stdout: {contains: "PASS"}}
   verifyOnly: true
 - id: C10
@@ -156,7 +156,7 @@ PRODUCTION_READY — see spec §17.4/§18 (AC23) for the real-device gate.
 ## Traceability
 
 - C1-C6 exercise `internal/monitoring` (Phase 2 of the spec).
-- C7-C9, C14-C15 exercise `internal/detection` (Phase 4/5).
+- C7-C9 exercise `internal/detection`'s subject/migration generalization (Phase 4). C14-C15 exercise the SNMP-specific detection profile and model-provider fallback lane (Phase 5/6, not yet implemented).
 - C10, C13 exercise `internal/agentcontroller` (Phase 3).
 - C11 exercises the fail-closed guard at `cmd/pilot-agent-controller`'s
   `remediation propose`/`reapply-propose` choke point, the only place a
@@ -195,8 +195,21 @@ already proved `SNMPTargetDown` fires for real, and this phase's own
 tests prove subject normalization handles that exact alert shape
 correctly.
 
-**C7-C9, C14-C15 (Phase 4/5 — Detection Engine): not yet implemented.**
-This file stays DRAFT until those phases land.
+**C7-C9 (Phase 4 — Detection Engine subject/migration generalization):
+DONE.** See `docs/runbooks/detection-engine-subject-generalization.md` —
+`GroupSamplesByKey` now takes a profile `IdentityProfile` and classifies
+SNMP-shaped samples under `SubjectKey{Kind=network_device}` without ever
+touching `pilot_host` (C7); a real schemaV2 SQLite migration backfills
+legacy `pilot_host` rows into `subject_id`/`subject_kind`/`site` across
+BOTH `signal_episodes` and `baseline_samples`, verified via
+`PRAGMA integrity_check` (C8); the pre-existing ambiguous-series
+classification (unchanged by Phase 4) is re-confirmed still passing, and
+C9's probe corrected to the test's real name (C9). C10-C13 remain the
+Phase 3 rows (Agent Controller); see
+`docs/runbooks/agent-monitoring-snmp-subject.md`.
+
+**C14-C15 (Phase 5/6 — SNMP feature profile, model-provider fallback):
+not yet implemented.** This file stays DRAFT until those phases land.
 
 ## Change record
 
@@ -205,3 +218,4 @@ This file stays DRAFT until those phases land.
 | 2026-09-01 | DRAFT | Phase 0 initial authoring per spec §17.2/§17.3's positive/negative lanes, reframed as C1-C15. No actual-run evidence yet. |
 | 2026-09-02 | DRAFT | Phase 2 evidence added for C1-C6 (registry v2 schema/validate/compile) — see `docs/runbooks/snmp-monitoring-registry.md`. C7-C15 remain unimplemented; still DRAFT overall. |
 | 2026-09-02 | DRAFT | Phase 3 evidence added for C10-C13 (Agent Controller subject/envelope, repair guard, diagnose) — see `docs/runbooks/agent-monitoring-snmp-subject.md`; C11 probe path corrected to `cmd/pilot-agent-controller` (actual guard location) instead of `internal/repair`. C7-C9, C14-C15 remain unimplemented; still DRAFT overall. |
+| 2026-09-02 | DRAFT | Phase 4 evidence added for C7-C9 (Detection Engine subject/migration generalization) — see `docs/runbooks/detection-engine-subject-generalization.md`; C9 probe corrected to the real ambiguous-series test name. C14-C15 remain unimplemented (Phase 5/6); still DRAFT overall. |

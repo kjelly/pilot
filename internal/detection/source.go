@@ -26,24 +26,20 @@ const (
 	ValidityOutOfRange      SampleValidity = "out_of_range"
 )
 
-// maxSampleAgeSeconds and futureSkewToleranceSeconds are the scheduler
-// constants from spec §11 that §13's stale/future_sample checks use.
-const (
-	maxSampleAgeSeconds        = 45
-	futureSkewToleranceSeconds = 5
-)
-
 // RawSample is one Prometheus-compatible instant-query sample for a single
-// logical (pilot_host, site) key, already extracted from the JSON response.
+// logical subject key, already extracted from the JSON response.
 type RawSample struct {
 	Timestamp int64 // unix seconds
 	Value     float64
 }
 
 // ClassifySample implements spec §13's normalization table for one
-// (pilot_host, site, feature) key given however many raw samples the query
-// returned for it this cycle.
-func ClassifySample(samples []RawSample, evaluationTime int64, feature Feature) (float64, SampleValidity) {
+// (subject, site, feature) key given however many raw samples the query
+// returned for it this cycle. maxSampleAge/futureSkewTolerance come from
+// the feature profile's own SamplingProfile (spec §9.3) — no longer a
+// single global constant, since a non-Linux-host profile's natural PromQL
+// staleness may differ.
+func ClassifySample(samples []RawSample, evaluationTime int64, feature Feature, maxSampleAge, futureSkewTolerance time.Duration) (float64, SampleValidity) {
 	switch len(samples) {
 	case 0:
 		return 0, ValidityMissing
@@ -55,10 +51,10 @@ func ClassifySample(samples []RawSample, evaluationTime int64, feature Feature) 
 		if math.IsNaN(s.Value) || math.IsInf(s.Value, 0) {
 			return s.Value, ValidityNonFinite
 		}
-		if s.Timestamp > evaluationTime+futureSkewToleranceSeconds {
+		if s.Timestamp > evaluationTime+int64(futureSkewTolerance.Seconds()) {
 			return s.Value, ValidityFutureSample
 		}
-		if evaluationTime-s.Timestamp > maxSampleAgeSeconds {
+		if evaluationTime-s.Timestamp > int64(maxSampleAge.Seconds()) {
 			return s.Value, ValidityStale
 		}
 		if s.Value < feature.ValidMin || s.Value > feature.ValidMax {
@@ -107,22 +103,54 @@ func ValidCurrentValues(results map[string]FeatureSampleResult) map[string]float
 }
 
 // SeriesKey identifies one detection subject at one Thanos query layer
-// (spec §13's logical key).
+// (spec §13's logical key). PilotHost holds the subject's ID under
+// whichever identity label the active FeatureProfile configured (spec
+// §9.2/§9.3) — for the default managed-host profile that is literally the
+// `pilot_host` label value, but for e.g. an SNMP profile it holds the
+// Monitoring Target Registry name instead. The field keeps its historical
+// name because within one Engine/RunCycle call every subject shares the
+// same profile-fixed Kind (Engine.Profile.EffectiveIdentity().Kind), so
+// Kind never needs to vary per-key here — callers that persist or label a
+// subject read Kind from the profile, not from SeriesKey.
 type SeriesKey struct {
 	PilotHost string
 	Site      string
 }
 
-// GroupSamplesByKey buckets raw metric/value pairs from one query result
-// by (pilot_host, site), so ClassifySample can see how many series (0, 1,
-// or >1) matched each logical key.
-func GroupSamplesByKey(metrics []map[string]string, samples []RawSample) map[SeriesKey][]RawSample {
+// GroupSamplesByKey buckets raw metric/value pairs from one query result by
+// the profile's identity label (spec §9.2/§9.4), so ClassifySample can see
+// how many series (0, 1, or >1) matched each logical key. It also returns
+// each key's cohort membership, read directly from identity.CohortLabel
+// when the profile configures one (spec §9.6: SNMP cohort membership is
+// compiler-controlled metadata on the sample itself, never a static
+// managed-host-style lookup table).
+//
+// A series whose identity label is empty can never be attributed to any
+// subject (spec §9.4 rule 1, "missing_identity") and is dropped. A series
+// whose site label is empty is dropped too for any non-managed-host kind
+// (spec §9.4 rule 2 — empty site is only tolerated for legacy managed-host
+// compatibility).
+func GroupSamplesByKey(metrics []map[string]string, samples []RawSample, identity IdentityProfile) (map[SeriesKey][]RawSample, map[SeriesKey]string) {
 	out := map[SeriesKey][]RawSample{}
+	cohorts := map[SeriesKey]string{}
 	for i, m := range metrics {
-		key := SeriesKey{PilotHost: m["pilot_host"], Site: m["site"]}
+		id := m[identity.Label]
+		if id == "" {
+			continue
+		}
+		site := m[identity.SiteLabel]
+		if site == "" && identity.Kind != SubjectKindManagedHost {
+			continue
+		}
+		key := SeriesKey{PilotHost: id, Site: site}
 		out[key] = append(out[key], samples[i])
+		if identity.CohortLabel != "" {
+			if c := m[identity.CohortLabel]; c != "" {
+				cohorts[key] = c
+			}
+		}
 	}
-	return out
+	return out, cohorts
 }
 
 // ThanosClient queries a Prometheus-compatible instant/range API — the

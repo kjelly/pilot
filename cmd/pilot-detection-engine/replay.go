@@ -90,6 +90,7 @@ const replayStep = 60
 type hostSeries map[string]map[string]map[int64]float64 // host -> feature -> bucket -> value
 
 func runReplay(ctx context.Context, out io.Writer, client *detection.ThanosClient, profile detection.FeatureProfile, start, end time.Time) error {
+	identity := profile.EffectiveIdentity()
 	series := hostSeries{}
 	siteByHost := map[string]string{}
 	bucketSet := map[int64]bool{}
@@ -100,11 +101,11 @@ func runReplay(ctx context.Context, out io.Writer, client *detection.ThanosClien
 			return fmt.Errorf("range query feature %s: %w", feature.Name, err)
 		}
 		for _, rs := range rangeSeries {
-			host := rs.Metric["pilot_host"]
+			host := rs.Metric[identity.Label]
 			if host == "" {
 				continue
 			}
-			siteByHost[host] = rs.Metric["site"]
+			siteByHost[host] = rs.Metric[identity.SiteLabel]
 			if series[host] == nil {
 				series[host] = map[string]map[int64]float64{}
 			}

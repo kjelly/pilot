@@ -94,35 +94,28 @@ func newServeCmd() *cobra.Command {
 	return cmd
 }
 
-func runServe(ctx context.Context, configPath string) error {
-	cfg, err := detection.LoadConfig(configPath)
+// buildEngine constructs one profile's Engine (spec §9.5: multi-profile
+// mode runs one independent Engine per enabled feature profile, each with
+// its own baseline/lifecycle/fingerprint/episode state, sharing only the
+// Thanos client and SQLite store).
+func buildEngine(cfg detection.Config, profilePath string, client *detection.ThanosClient, store *detection.Store) (*detection.Engine, error) {
+	profile, err := detection.LoadFeatureProfile(profilePath)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return nil, fmt.Errorf("load feature profile %s: %w", profilePath, err)
 	}
-	profile, err := detection.LoadFeatureProfile(cfg.FeatureProfilePath)
-	if err != nil {
-		return fmt.Errorf("load feature profile: %w", err)
-	}
-	store, err := detection.OpenStore(cfg.DBPath)
-	if err != nil {
-		return fmt.Errorf("open store: %w", err)
-	}
-	defer store.Close()
-
-	client := detection.NewThanosClient(cfg.MetricsSourceBaseURL, detection.QueryTimeout)
 	engine := detection.NewEngine(profile, client, store, nil)
-	// Warm-start robust-baseline-v1's history from whatever this host has
-	// already persisted (spec §14.1/§14.2) — without this, a plain
-	// restart cold-starts the 120-bucket requirement even though the host
-	// has been observed for hours. A query error just leaves the engine
-	// on NewEngine's empty default, identical to today's behavior.
-	if warm, warmErr := store.LoadBaselineHistory(time.Now()); warmErr == nil {
+	// Warm-start robust-baseline-v1's history from whatever this subject
+	// kind has already persisted (spec §14.1/§14.2) — without this, a
+	// plain restart cold-starts the 120-bucket requirement even though the
+	// subject has been observed for hours. A query error just leaves the
+	// engine on NewEngine's empty default, identical to today's behavior.
+	if warm, warmErr := store.LoadBaselineHistory(time.Now(), profile.EffectiveIdentity().Kind); warmErr == nil {
 		engine.Baselines = warm
 	}
 
 	provider, err := detection.NewManagedProviderFromConfig(cfg.ModelProvider)
 	if err != nil {
-		return fmt.Errorf("model provider: %w", err)
+		return nil, fmt.Errorf("model provider: %w", err)
 	}
 	if provider != nil {
 		engine.Provider = provider
@@ -140,6 +133,30 @@ func runServe(ctx context.Context, configPath string) error {
 			engine.LogBaselineWindow, _ = time.ParseDuration(cfg.LogSource.BaselineWindow)
 		}
 	}
+	return engine, nil
+}
+
+func runServe(ctx context.Context, configPath string) error {
+	cfg, err := detection.LoadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	store, err := detection.OpenStore(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer store.Close()
+
+	client := detection.NewThanosClient(cfg.MetricsSourceBaseURL, detection.QueryTimeout)
+
+	var engines []*detection.Engine
+	for _, path := range cfg.ResolveFeatureProfilePaths() {
+		engine, err := buildEngine(cfg, path, client, store)
+		if err != nil {
+			return err
+		}
+		engines = append(engines, engine)
+	}
 
 	alertmanagerSender := detection.NewAlertmanagerSender(cfg.AlertmanagerBaseURL, detection.AlertmanagerTimeout)
 
@@ -150,9 +167,38 @@ func runServe(ctx context.Context, configPath string) error {
 	var lastSuccess int64
 	scheduler.Run(ctx, func(cycleCtx context.Context, evaluationTime int64) {
 		start := time.Now()
-		outcomes, err := engine.RunCycle(cycleCtx, evaluationTime)
+		// Every enabled profile's Engine runs its own RunCycle this tick
+		// (spec §9.5) — each keeps fully independent baseline/lifecycle/
+		// fingerprint/episode state; only the outcome/metric aggregation
+		// below combines their results into the one shared status.json/
+		// textfile-metrics output.
+		var allOutcomes []detection.HostCycleOutcome
+		success := true
+		anomalyScore := map[[2]string]float64{}
+		subjectAnomalyScore := map[[3]string]float64{}
+		for _, engine := range engines {
+			outcomes, err := engine.RunCycle(cycleCtx, evaluationTime)
+			if err != nil {
+				success = false
+				continue
+			}
+			kind := engine.Profile.EffectiveIdentity().Kind
+			for _, o := range outcomes {
+				if o.Valid && o.LocalScore.Valid {
+					subjectAnomalyScore[[3]string{o.Host, kind, o.LocalScore.Source}] = o.LocalScore.Score
+					// spec §9.9: the legacy pilot_host-labeled metric is a
+					// managed-host-only compatibility release — an SNMP
+					// (or any other non-managed-host) subject must never
+					// populate it.
+					if kind == detection.SubjectKindManagedHost {
+						anomalyScore[[2]string{o.Host, o.LocalScore.Source}] = o.LocalScore.Score
+					}
+				}
+			}
+			allOutcomes = append(allOutcomes, outcomes...)
+		}
+		outcomes := allOutcomes
 		duration := time.Since(start).Seconds()
-		success := err == nil
 		if success {
 			lastSuccess = evaluationTime
 		}
@@ -173,9 +219,19 @@ func runServe(ctx context.Context, configPath string) error {
 			activeSignals = len(episodes)
 		}
 
-		modelStats := engine.LastModelStats
+		// Model-provider status/stats are reported from the first engine
+		// that has one configured — every engine shares the same
+		// cfg.ModelProvider block (there is no per-profile model-provider
+		// config), so in the only configuration this actually supports
+		// today (at most one profile with Stage B enabled) this is exact,
+		// not an approximation.
+		modelStats := detection.ModelCycleStats{}
 		modelStatus := detection.NewDisabledProviderStatus()
-		if engine.Provider != nil {
+		for _, engine := range engines {
+			if engine.Provider == nil {
+				continue
+			}
+			modelStats = engine.LastModelStats
 			circuit := "closed"
 			if cr, ok := engine.Provider.(interface {
 				CircuitState(time.Time) string
@@ -188,6 +244,7 @@ func runServe(ctx context.Context, configPath string) error {
 				Protocol: engine.ProviderProtocol,
 				Circuit:  circuit,
 			}
+			break
 		}
 
 		status := detection.Status{
@@ -204,12 +261,6 @@ func runServe(ctx context.Context, configPath string) error {
 		}
 		_ = detection.WriteStatus(cfg.StatusPath, status)
 
-		anomalyScore := map[[2]string]float64{}
-		for _, o := range outcomes {
-			if o.Valid && o.LocalScore.Valid {
-				anomalyScore[[2]string{o.Host, o.LocalScore.Source}] = o.LocalScore.Score
-			}
-		}
 		metrics := detection.MetricsSnapshot{
 			Up:                           success,
 			CycleDurationSeconds:         duration,
@@ -217,6 +268,7 @@ func runServe(ctx context.Context, configPath string) error {
 			LastSuccessTimestampSeconds:  lastSuccess,
 			SubjectsTotal:                len(outcomes),
 			AnomalyScore:                 anomalyScore,
+			SubjectAnomalyScore:          subjectAnomalyScore,
 			OutboxPending:                pending,
 			ModelProviderUp:              modelStats.ProviderUp,
 			ModelRequestTotal:            modelStats.RequestTotal,

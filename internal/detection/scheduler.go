@@ -12,8 +12,13 @@ const (
 	EvaluationDelay     = 20 * time.Second
 	QueryTimeout        = 5 * time.Second
 	QueryConcurrency    = 8
-	MaxSampleAge        = maxSampleAgeSeconds * time.Second
-	FutureSkewTolerance = futureSkewToleranceSeconds * time.Second
+	// MaxSampleAge/FutureSkewTolerance are the spec §9.3 backward-compatible
+	// defaults for a feature profile that never sets `sampling:` — see
+	// FeatureProfile.MaxSampleAge()/FutureSkewTolerance(), which every
+	// caller actually uses since Phase 4 (these two constants are kept
+	// only as the historical spec §11 reference values).
+	MaxSampleAge        = 45 * time.Second
+	FutureSkewTolerance = 5 * time.Second
 )
 
 // EvaluationTime implements spec §11.1: the evaluation timestamp for a
