@@ -39,12 +39,12 @@ func stubDeploymentAvailabilityAllReachable(t *testing.T) {
 
 func TestEffectiveDeploymentLimit_UnchangedWhenNothingDeferred(t *testing.T) {
 	candidates := []string{"a", "b", "c"}
-	got := effectiveDeploymentLimit("playbooks/site.yml", "orig-limit", candidates, candidates)
+	got := effectiveDeploymentLimit("playbooks/site.yml", "orig-limit", candidates, candidates, false)
 	if got != "orig-limit" {
 		t.Fatalf("effectiveDeploymentLimit() = %q, want unchanged %q", got, "orig-limit")
 	}
 	// Including the "caller passed no limit at all" case explicitly.
-	if got := effectiveDeploymentLimit("playbooks/site.yml", "", candidates, candidates); got != "" {
+	if got := effectiveDeploymentLimit("playbooks/site.yml", "", candidates, candidates, false); got != "" {
 		t.Fatalf("effectiveDeploymentLimit() = %q, want empty string preserved", got)
 	}
 }
@@ -52,15 +52,22 @@ func TestEffectiveDeploymentLimit_UnchangedWhenNothingDeferred(t *testing.T) {
 func TestEffectiveDeploymentLimit_RewritesWhenHostsDeferred(t *testing.T) {
 	candidates := []string{"vm-01", "vm-02", "vm-03"}
 	included := []string{"vm-02"}
-	got := effectiveDeploymentLimit("playbooks/site.yml", "orig-limit", candidates, included)
+	got := effectiveDeploymentLimit("playbooks/site.yml", "orig-limit", candidates, included, false)
 	want := "localhost,vm-02"
 	if got != want {
 		t.Fatalf("effectiveDeploymentLimit() = %q, want %q", got, want)
 	}
 	// A single-component playbook must not gain localhost.
-	got = effectiveDeploymentLimit("playbooks/apply/docker-apply.yml", "orig-limit", candidates, included)
+	got = effectiveDeploymentLimit("playbooks/apply/docker-apply.yml", "orig-limit", candidates, included, false)
 	if got != "vm-02" {
 		t.Fatalf("effectiveDeploymentLimit() = %q, want %q", got, "vm-02")
+	}
+}
+
+func TestEffectiveDeploymentLimit_RewritesWhenDependencyExpandedLimit(t *testing.T) {
+	got := effectiveDeploymentLimit("playbooks/site.yml", "client-a", []string{"client-a", "server-a"}, []string{"client-a", "server-a"}, true)
+	if want := "localhost,client-a,server-a"; got != want {
+		t.Fatalf("effectiveDeploymentLimit() = %q, want %q", got, want)
 	}
 }
 

@@ -1231,7 +1231,7 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	if err != nil {
 		return err
 	}
-	applied, selected, scope, hosts, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, playbook == "playbooks/site.yml")
+	applied, selected, scope, hosts, dependencyExpandedLimit, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, playbook == "playbooks/site.yml")
 	if err != nil {
 		return err
 	}
@@ -1260,7 +1260,8 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 		return nil
 	}
 	printAvailabilitySummary(out, execScope)
-	limit = effectiveDeploymentLimit(playbook, limit, execScope.Candidates, execScope.Included)
+	limit = effectiveDeploymentLimit(playbook, limit, execScope.Candidates, execScope.Included, dependencyExpandedLimit)
+	tags = effectiveDeploymentTags(playbook, tags, applied, selected, dependencyExpandedLimit)
 
 	// The optional interactive preflight must run only after availability has
 	// resolved the effective execution scope. Previously deploy/reconcile ran
@@ -1451,7 +1452,35 @@ func componentMatchesTags(component contract.Contract, requested map[string]bool
 	return false
 }
 
-func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, componentIDs []string, inventory, limit string, extraVars []string, allowEmpty bool) ([]contract.Contract, []contract.Contract, delivery.Scope, []string, error) {
+// effectiveDeploymentTags confines a site-wide dependency expansion to the
+// components selected on the caller's original hosts plus their required
+// providers. Without this, adding a provider host to --limit would let every
+// unrelated site play that happens to target that host run as well.
+func effectiveDeploymentTags(playbook, requestedTags string, applied, selected []contract.Contract, dependencyExpandedLimit bool) string {
+	if playbook != "playbooks/site.yml" || !dependencyExpandedLimit {
+		return requestedTags
+	}
+
+	tags := csvSet(requestedTags)
+	appliedIDs := make(map[string]bool, len(applied))
+	for _, component := range applied {
+		appliedIDs[component.ID] = true
+	}
+	for _, component := range selected {
+		if requestedTags == "" || !appliedIDs[component.ID] {
+			tags[component.ID] = true
+		}
+	}
+
+	resolved := make([]string, 0, len(tags))
+	for tag := range tags {
+		resolved = append(resolved, tag)
+	}
+	sort.Strings(resolved)
+	return strings.Join(resolved, ",")
+}
+
+func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, componentIDs []string, inventory, limit string, extraVars []string, allowEmpty bool) ([]contract.Contract, []contract.Contract, delivery.Scope, []string, bool, error) {
 	targetOverride := extraVarValue(extraVars, "target_group")
 	scope := delivery.Scope{HostsByRole: make(map[string][]string)}
 	applied := make([]contract.Contract, 0, len(componentIDs))
@@ -1459,10 +1488,19 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 	allHosts := make(map[string]struct{})
 	inventoryGroups, err := resolveInventoryGroups(ctx, inventory)
 	if err != nil {
-		return nil, nil, scope, nil, err
+		return nil, nil, scope, nil, false, err
 	}
 
-	resolve := func(component contract.Contract, override string) ([]string, error) {
+	resolve := func(component contract.Contract, override string, includeWholeRole bool) ([]string, error) {
+		// A user-supplied --limit selects the primary mutation targets. A
+		// required provider is different: it must retain every host in its
+		// declared role so the deployment can establish and validate the
+		// dependency instead of failing before Ansible runs.
+		if override == "" && includeWholeRole {
+			hosts := append([]string(nil), inventoryGroups[component.Role]...)
+			scope.HostsByRole[component.Role] = hosts
+			return hosts, nil
+		}
 		if hosts, ok := scope.HostsByRole[component.Role]; ok && override == "" {
 			return hosts, nil
 		}
@@ -1488,17 +1526,17 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 	for _, id := range componentIDs {
 		component, ok := catalog.Component(id)
 		if !ok {
-			return nil, nil, scope, nil, fmt.Errorf("component %q is absent from contract catalog", id)
+			return nil, nil, scope, nil, false, fmt.Errorf("component %q is absent from contract catalog", id)
 		}
-		hosts, err := resolve(component, targetOverride)
+		hosts, err := resolve(component, targetOverride, false)
 		if err != nil {
-			return nil, nil, scope, nil, err
+			return nil, nil, scope, nil, false, err
 		}
 		if len(hosts) == 0 && allowEmpty {
 			continue
 		}
 		if len(hosts) == 0 {
-			return nil, nil, scope, nil, fmt.Errorf("component %q role %q resolves no hosts", component.ID, component.Role)
+			return nil, nil, scope, nil, false, fmt.Errorf("component %q role %q resolves no hosts", component.ID, component.Role)
 		}
 		scope.HostsByRole[component.Role] = hosts
 		applied = append(applied, component)
@@ -1508,9 +1546,10 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 		}
 	}
 	if len(applied) == 0 {
-		return nil, nil, scope, nil, fmt.Errorf("selected deployment resolves no active component hosts")
+		return nil, nil, scope, nil, false, fmt.Errorf("selected deployment resolves no active component hosts")
 	}
 
+	dependencyExpandedLimit := false
 	var addDependencies func(contract.Contract) error
 	addDependencies = func(component contract.Contract) error {
 		for _, dependency := range component.Dependencies {
@@ -1524,7 +1563,7 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 			if !ok {
 				return fmt.Errorf("component %q dependency %q is absent from catalog", component.ID, dependency.Component)
 			}
-			hosts, err := resolve(provider, "")
+			hosts, err := resolve(provider, "", true)
 			if err != nil {
 				return err
 			}
@@ -1532,6 +1571,12 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 				return fmt.Errorf("component %q requires dependency %q but role %q resolves no hosts", component.ID, provider.ID, provider.Role)
 			}
 			byID[provider.ID] = provider
+			for _, host := range hosts {
+				if _, alreadySelected := allHosts[host]; !alreadySelected && limit != "" {
+					dependencyExpandedLimit = true
+				}
+				allHosts[host] = struct{}{}
+			}
 			if err := addDependencies(provider); err != nil {
 				return err
 			}
@@ -1540,7 +1585,7 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 	}
 	for _, component := range applied {
 		if err := addDependencies(component); err != nil {
-			return nil, nil, scope, nil, err
+			return nil, nil, scope, nil, false, err
 		}
 	}
 
@@ -1554,7 +1599,7 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 		hosts = append(hosts, host)
 	}
 	sort.Strings(hosts)
-	return applied, selected, scope, hosts, nil
+	return applied, selected, scope, hosts, dependencyExpandedLimit, nil
 }
 
 // deployInventorySnapshot is one resolved ansible-inventory --list document

@@ -978,7 +978,7 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	applied, _, _, hosts, err := resolveDeploymentScope(context.Background(), catalog, []string{"dns", "docker"}, "fake-inventory.yml", "host-a", nil, true)
+	applied, _, _, hosts, _, err := resolveDeploymentScope(context.Background(), catalog, []string{"dns", "docker"}, "fake-inventory.yml", "host-a", nil, true)
 	if err != nil {
 		t.Fatalf("site-wide deploy with --limit must skip the zero-host dns role, not abort: %v", err)
 	}
@@ -987,5 +987,77 @@ esac
 	}
 	if !slices.Equal(hosts, []string{"host-a"}) {
 		t.Fatalf("hosts = %v, want [host-a]", hosts)
+	}
+}
+
+// TestResolveDeploymentScope_LimitAutoIncludesRequiredDependencyHost locks the
+// common FreeIPA shape: the requested client host is in --limit while its
+// required server is not. The dependency must supplement the effective limit
+// instead of making deployment fail before Ansible can run.
+func TestResolveDeploymentScope_LimitAutoIncludesRequiredDependencyHost(t *testing.T) {
+	catalog, err := contract.NewCatalog([]contract.Contract{
+		{ID: "client", Role: "freeipa-client", Dependencies: []contract.Dependency{{Component: "server", Required: true}}},
+		{ID: "server", Role: "freeipa-server"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	invJSON := `{"_meta":{"hostvars":{"client-a":{},"server-a":{}}},"freeipa-client":{"hosts":["client-a"]},"freeipa-server":{"hosts":["server-a"]}}`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '"+invJSON+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ansibleFixture := `#!/bin/sh
+case "$1" in
+  freeipa-client)
+    printf '%s\n' '  hosts (1):' '    client-a'
+    ;;
+  *)
+    echo "unexpected pattern: $1" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	applied, selected, scope, hosts, expanded, err := resolveDeploymentScope(context.Background(), catalog, []string{"client"}, "fake-inventory.yml", "client-a", nil, false)
+	if err != nil {
+		t.Fatalf("resolveDeploymentScope() error = %v", err)
+	}
+	if len(applied) != 1 || applied[0].ID != "client" {
+		t.Fatalf("applied = %#v, want only client", applied)
+	}
+	if got := contractIDs(selected); !slices.Equal(got, []string{"client", "server"}) {
+		t.Fatalf("selected = %v, want [client server]", got)
+	}
+	if !slices.Equal(scope.HostsByRole["freeipa-client"], []string{"client-a"}) {
+		t.Fatalf("client scope = %v, want [client-a]", scope.HostsByRole["freeipa-client"])
+	}
+	if !slices.Equal(scope.HostsByRole["freeipa-server"], []string{"server-a"}) {
+		t.Fatalf("server scope = %v, want [server-a]", scope.HostsByRole["freeipa-server"])
+	}
+	if !slices.Equal(hosts, []string{"client-a", "server-a"}) {
+		t.Fatalf("hosts = %v, want [client-a server-a]", hosts)
+	}
+	if !expanded {
+		t.Fatal("dependencyExpandedLimit = false, want true when the provider is outside --limit")
+	}
+	if got := effectiveDeploymentTags("playbooks/site.yml", "", applied, selected, expanded); got != "client,server" {
+		t.Fatalf("effectiveDeploymentTags() = %q, want client,server", got)
+	}
+}
+
+func TestEffectiveDeploymentTags_PreservesRequestedTagsAndAddsOnlyProvider(t *testing.T) {
+	applied := []contract.Contract{{ID: "client", Role: "clients"}}
+	selected := append(append([]contract.Contract{}, applied...), contract.Contract{ID: "server", Role: "servers"})
+	if got := effectiveDeploymentTags("playbooks/site.yml", "custom,client", applied, selected, true); got != "client,custom,server" {
+		t.Fatalf("effectiveDeploymentTags() = %q, want client,custom,server", got)
+	}
+	if got := effectiveDeploymentTags("playbooks/apply/client.yml", "client", applied, selected, true); got != "client" {
+		t.Fatalf("single-playbook effectiveDeploymentTags() = %q, want client unchanged", got)
 	}
 }

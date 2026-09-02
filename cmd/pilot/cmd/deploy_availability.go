@@ -177,13 +177,12 @@ func availabilityCandidateHosts(targetHosts []string, selected []contract.Contra
 }
 
 // effectiveDeploymentLimit returns limit unchanged whenever every candidate
-// host stayed included — the common case where nothing is offline — so a
-// run with no optional-offline hosts produces byte-identical
-// ansible-playbook argv to before this feature existed. Only when
-// includedHosts is a strict subset of candidateHosts does it synthesize a
-// fresh --limit value via delivery.BuildEffectiveLimit.
-func effectiveDeploymentLimit(playbook, limit string, candidateHosts, includedHosts []string) string {
-	if len(includedHosts) == len(candidateHosts) {
+// host stayed included and dependency resolution did not add a provider host.
+// A required provider added outside the caller's --limit must be rendered in
+// the effective limit even when every host is reachable. Otherwise only an
+// optional-host deferral causes a fresh limit via delivery.BuildEffectiveLimit.
+func effectiveDeploymentLimit(playbook, limit string, candidateHosts, includedHosts []string, dependencyExpandedLimit bool) string {
+	if len(includedHosts) == len(candidateHosts) && !dependencyExpandedLimit {
 		return limit
 	}
 	return delivery.BuildEffectiveLimit(playbook, includedHosts)
