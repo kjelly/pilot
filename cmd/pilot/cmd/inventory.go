@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
@@ -87,7 +88,7 @@ var inventoryGenerateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		rendered, err := inventory.Generate(hf)
+		rendered, err := generateInventoryFromHosts(hf)
 		if err != nil {
 			return err
 		}
@@ -408,6 +409,64 @@ func writeMissingNFSRosterEntries(w io.Writer, dir string, hf *inventory.HostsFi
 	}
 }
 
+// generateInventoryFromHosts renders hf the same way inventory.Generate
+// does, except each host's roles are first extended with the transitive
+// closure of any required "sameHosts" contract dependency (e.g.
+// wazuh-manager implies docker, since Wazuh's own manager runs as
+// Docker containers on the same host — see
+// inventory.SameHostsDependencyRoles) — so hosts.yml only needs to name
+// the "leaf" role; the co-located prerequisite no longer needs to be
+// hand-listed too. Falls back to inventory.Generate(hf) unchanged (same
+// as if this feature didn't exist) whenever the contract catalog can't
+// be loaded, matching this file's existing best-effort conventions
+// (autoRegenerateInventoryFromHosts below).
+func generateInventoryFromHosts(hf *inventory.HostsFile) (string, error) {
+	return inventory.Generate(expandHostsFileSameHostsRoles(hf))
+}
+
+// expandHostsFileSameHostsRoles returns hf unchanged, or a shallow copy
+// whose Hosts carry the sameHosts dependency closure (see
+// generateInventoryFromHosts), depending on whether the contract catalog
+// could be loaded. The input hf (and its Hosts) is never mutated, so
+// group_vars/vault/host_vars scaffolding that runs against the original
+// hf alongside a generateInventoryFromHosts call keeps seeing only the
+// roles the operator actually declared.
+func expandHostsFileSameHostsRoles(hf *inventory.HostsFile) *inventory.HostsFile {
+	catalog, ok := loadContractCatalogBestEffort()
+	if !ok {
+		return hf
+	}
+	deps := inventory.SameHostsDependencyRoles(catalog.Components())
+	if len(deps) == 0 {
+		return hf
+	}
+	expanded := *hf
+	expanded.Hosts = inventory.ExpandSameHostsRoles(hf.Hosts, deps)
+	return &expanded
+}
+
+// loadContractCatalogBestEffort loads the default contract catalog from
+// the current working directory (or $PILOT_ROOT), reporting ok=false on
+// any error instead of failing — for callers where the contract catalog
+// is an optional enhancement (e.g. sameHosts role expansion), not a hard
+// requirement, so a workspace without a contracts/ directory keeps
+// working exactly as it did before that enhancement existed.
+func loadContractCatalogBestEffort() (contract.Catalog, bool) {
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return contract.Catalog{}, false
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		return contract.Catalog{}, false
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		return contract.Catalog{}, false
+	}
+	return catalog, true
+}
+
 // autoRegenerateInventoryFromHosts refreshes invPath from a sibling
 // hosts.yml in the same directory, if one exists — the same core logic
 // `pilot inventory generate` runs manually (Parse -> Generate -> the
@@ -448,7 +507,7 @@ func autoRegenerateInventoryFromHosts(stderr io.Writer, invPath string) (regener
 	if err != nil {
 		return false, err
 	}
-	rendered, err := inventory.Generate(hf)
+	rendered, err := generateInventoryFromHosts(hf)
 	if err != nil {
 		return false, err
 	}

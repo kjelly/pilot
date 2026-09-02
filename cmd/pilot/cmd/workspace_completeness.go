@@ -97,7 +97,7 @@ func checkPathExists(label, path string) completenessCheck {
 }
 
 // checkInventoryYmlFresh reports whether inventory.yml matches what
-// inventory.Generate(hf) would produce from hosts.yml right now.
+// generateInventoryFromHosts(hf) would produce from hosts.yml right now.
 // inventory.yml's content is exactly that render's output byte-for-byte
 // (see inventoryGenerateCmd) with no timestamps or other non-determinism,
 // so any difference means hosts.yml changed (or inventory.yml was hand-
@@ -110,7 +110,7 @@ func checkInventoryYmlFresh(dir string, hf *inventory.HostsFile) completenessChe
 	if err != nil {
 		return completenessCheck{Label: label, OK: false, Details: []string{"不存在"}}
 	}
-	fresh, err := inventory.Generate(hf)
+	fresh, err := generateInventoryFromHosts(hf)
 	if err != nil {
 		return completenessCheck{Label: label, OK: false, Details: []string{
 			fmt.Sprintf("目前的 hosts.yml 有錯誤，無法比對是否過期(%v)；先跑 `pilot inventory lint`", err),

@@ -51,7 +51,7 @@ func expandIfSimplifiedHosts(inv string) (path, notice string, cleanup func(), e
 		// top-level hosts: entries carrying a roles: list.
 		return inv, "", cleanup, nil
 	}
-	rendered, genErr := inventory.Generate(hf)
+	rendered, genErr := generateInventoryFromHosts(hf)
 	if genErr != nil {
 		return inv, "", cleanup, fmt.Errorf(
 			"%s 看起來是 pilot 的 hosts.yml 簡表，但展開失敗：\n%w\n先修好後用 `pilot inventory generate --in %s --out <inventory.yml>`",

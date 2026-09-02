@@ -33,7 +33,7 @@ func prepareMinimalWorkspace(dir string) error {
 		return err
 	}
 
-	rendered, err := inventory.Generate(hf)
+	rendered, err := generateInventoryFromHosts(hf)
 	if err != nil {
 		return err
 	}

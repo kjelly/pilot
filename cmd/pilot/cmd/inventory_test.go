@@ -4,10 +4,82 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/kjelly/pilot/internal/inventory"
 )
+
+// TestGenerateInventoryFromHosts_ExpandsSameHostsDependencyRole exercises
+// the real contract catalog (not a fixture): a host that only declares
+// wazuh-manager must land in the generated inventory's docker group too,
+// since wazuh-manager.yaml declares a required sameHosts dependency on
+// docker — see internal/inventory.SameHostsDependencyRoles.
+func TestGenerateInventoryFromHosts_ExpandsSameHostsDependencyRole(t *testing.T) {
+	t.Setenv("PILOT_ROOT", repoRootForTest(t))
+
+	hf, err := inventory.Parse([]byte(`
+vars:
+  ansible_user: "ubuntu"
+  ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+hosts:
+  siem-1:
+    ansible_host: "10.0.0.50"
+    roles: [wazuh-manager]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rendered, err := generateInventoryFromHosts(hf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(rendered, "    docker:\n      hosts:\n        siem-1:\n") {
+		t.Fatalf("rendered inventory does not put siem-1 in the docker group:\n%s", rendered)
+	}
+	// The original hf passed to callers alongside generateInventoryFromHosts
+	// (e.g. group_vars/vault/host_vars scaffolding) must keep seeing only
+	// the operator-declared role, never the implied one.
+	if got := hf.Hosts[0].Roles; !slices.Equal(got, []string{"wazuh-manager"}) {
+		t.Fatalf("input hf.Hosts[0].Roles mutated: %v", got)
+	}
+}
+
+// TestGenerateInventoryFromHosts_NoContractCatalogFallsBackUnchanged
+// confirms the best-effort fallback: without a resolvable contract
+// catalog, generateInventoryFromHosts behaves exactly like plain
+// inventory.Generate (no expansion, no error).
+func TestGenerateInventoryFromHosts_NoContractCatalogFallsBackUnchanged(t *testing.T) {
+	t.Setenv("PILOT_ROOT", t.TempDir()) // no contracts/ directory here
+
+	hf, err := inventory.Parse([]byte(`
+vars:
+  ansible_user: "ubuntu"
+  ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+hosts:
+  siem-1:
+    ansible_host: "10.0.0.50"
+    roles: [wazuh-manager]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := generateInventoryFromHosts(hf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := inventory.Generate(hf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("generateInventoryFromHosts() diverged from inventory.Generate() with no catalog available:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
 
 func TestCopyMissingGroupVars_CopiesExampleForUsedStemOnly(t *testing.T) {
 	t.Chdir(t.TempDir())
