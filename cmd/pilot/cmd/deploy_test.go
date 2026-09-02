@@ -994,9 +994,9 @@ esac
 // common FreeIPA shape: the requested client host is in --limit while its
 // required server is not. The dependency must supplement the effective limit
 // instead of making deployment fail before Ansible can run.
-func TestResolveDeploymentScope_LimitAutoIncludesRequiredDependencyHost(t *testing.T) {
+func TestResolveDeploymentScope_LimitAutoIncludesRequiredProviderEndpointHost(t *testing.T) {
 	catalog, err := contract.NewCatalog([]contract.Contract{
-		{ID: "client", Role: "freeipa-client", Dependencies: []contract.Dependency{{Component: "server", Required: true}}},
+		{ID: "client", Role: "freeipa-client", Dependencies: []contract.Dependency{{Component: "server", Required: true, Relation: "providerEndpoint"}}},
 		{ID: "server", Role: "freeipa-server"},
 	})
 	if err != nil {
@@ -1048,6 +1048,61 @@ esac
 	}
 	if got := effectiveDeploymentTags("playbooks/site.yml", "", applied, selected, expanded); got != "client,server" {
 		t.Fatalf("effectiveDeploymentTags() = %q, want client,server", got)
+	}
+}
+
+// A sameHosts dependency is a local prerequisite, not a remote provider. It
+// must preserve the operator's --limit, otherwise a targeted deployment of a
+// component such as alertmanager would add every Docker host to contract
+// preflight and fail on an unrelated host's resource minimums.
+func TestResolveDeploymentScope_LimitKeepsSameHostsDependencyScoped(t *testing.T) {
+	catalog, err := contract.NewCatalog([]contract.Contract{
+		{ID: "consumer", Role: "consumer", Dependencies: []contract.Dependency{{Component: "docker", Required: true, Relation: "sameHosts"}}},
+		{ID: "docker", Role: "docker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	invJSON := `{"_meta":{"hostvars":{"target-a":{},"unrelated-docker":{}}},"consumer":{"hosts":["target-a"]},"docker":{"hosts":["target-a","unrelated-docker"]}}`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '"+invJSON+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ansibleFixture := `#!/bin/sh
+case "$1" in
+  consumer|docker)
+    printf '%s\n' '  hosts (1):' '    target-a'
+    ;;
+  *)
+    echo "unexpected pattern: $1" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	applied, selected, scope, hosts, expanded, err := resolveDeploymentScope(context.Background(), catalog, []string{"consumer"}, "fake-inventory.yml", "target-a", nil, false)
+	if err != nil {
+		t.Fatalf("resolveDeploymentScope() error = %v", err)
+	}
+	if len(applied) != 1 || applied[0].ID != "consumer" {
+		t.Fatalf("applied = %#v, want only consumer", applied)
+	}
+	if got := contractIDs(selected); !slices.Equal(got, []string{"consumer", "docker"}) {
+		t.Fatalf("selected = %v, want [consumer docker]", got)
+	}
+	if !slices.Equal(scope.HostsByRole["docker"], []string{"target-a"}) {
+		t.Fatalf("docker scope = %v, want only the limited target", scope.HostsByRole["docker"])
+	}
+	if !slices.Equal(hosts, []string{"target-a"}) {
+		t.Fatalf("hosts = %v, want [target-a]", hosts)
+	}
+	if expanded {
+		t.Fatal("dependencyExpandedLimit = true, want false for sameHosts dependency")
 	}
 }
 

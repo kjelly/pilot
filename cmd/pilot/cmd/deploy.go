@@ -1492,10 +1492,12 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 	}
 
 	resolve := func(component contract.Contract, override string, includeWholeRole bool) ([]string, error) {
-		// A user-supplied --limit selects the primary mutation targets. A
-		// required provider is different: it must retain every host in its
-		// declared role so the deployment can establish and validate the
-		// dependency instead of failing before Ansible runs.
+		// A user-supplied --limit selects the primary mutation targets. Only
+		// a providerEndpoint dependency may need a host outside that limit:
+		// its provider serves consumers on different hosts. sameHosts and
+		// planOnly dependencies deliberately retain the limit. In particular,
+		// expanding a sameHosts dependency such as Docker would pull every
+		// Docker host into a narrowly targeted deployment and preflight.
 		if override == "" && includeWholeRole {
 			hosts := append([]string(nil), inventoryGroups[component.Role]...)
 			scope.HostsByRole[component.Role] = hosts
@@ -1563,7 +1565,8 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 			if !ok {
 				return fmt.Errorf("component %q dependency %q is absent from catalog", component.ID, dependency.Component)
 			}
-			hosts, err := resolve(provider, "", true)
+			includeWholeRole := dependency.Relation == "providerEndpoint"
+			hosts, err := resolve(provider, "", includeWholeRole)
 			if err != nil {
 				return err
 			}
