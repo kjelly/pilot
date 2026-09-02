@@ -31,6 +31,15 @@ groupVars:
   # by internal/spec/freeipa_client_regression_test.go, per spec.md §19).
   - {name: freeipa_client_register_dns, type: boolean, required: false, secret: false}
   - {name: freeipa_client_dns_addresses, type: stringList, required: false, secret: false}
+  # Day-2 IP replacement expected-old CAS token (docs/superpowers/specs/
+  # 2026-09-02-freeipa-client-host-dns-ip-replacement-spec.md). Optional;
+  # unset means no replacement authorization — any authoritative DNS
+  # address not in the desired set still fails closed (no implicit
+  # takeover). When set, authorizes removing EXACTLY this one stale address
+  # from authoritative DNS, and only for an already-enrolled host that can
+  # prove it holds that host's own FreeIPA keytab — never a permanent
+  # "allow replace" flag.
+  - {name: freeipa_client_dns_replace_from_address, type: string, required: false, secret: false}
   # v3.2 §16 persistent SSSD client hardening (offline/cached
   # authentication policy) — both optional; unset leaves sssd.conf's
   # existing value untouched. Live IdM-unavailable outage behavior is

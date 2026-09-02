@@ -75,3 +75,16 @@ freeipa_domain: ipa.pilot.internal
 # freeipa_client_dns_addresses:
 #   - 10.20.30.41
 #   - 2001:db8:30::41
+
+# Day-2 IP migration: authorizes Pilot to replace an already-enrolled
+# client's authoritative DNS when the host's ansible_host IP changes
+# (docs/superpowers/specs/2026-09-02-freeipa-client-host-dns-ip-replacement-
+# spec.md). This is a per-HOST setting, not a group setting — put it in the
+# individual host's host_vars, never here. `pilot edit` sets it
+# automatically when you confirm an IP change on a freeipa-client host; set
+# it manually only if you're not going through `pilot edit`. It authorizes
+# removing exactly ONE stale address (the value below) and only for a host
+# that can still prove it holds that host's existing FreeIPA keytab — it is
+# NOT a permanent "allow DNS takeover" flag, and a mismatched/stale value
+# fails closed rather than silently doing nothing:
+# freeipa_client_dns_replace_from_address: 10.20.30.41

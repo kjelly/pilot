@@ -61,7 +61,20 @@
 - name: FreeIPA client enroll
   hosts: "{{ target_group | default('freeipa-client') }}"
   become: true
-  gather_facts: true
+  # Deliberately NOT `gather_facts: true`: this repo's ansible.cfg enables
+  # fact_caching (jsonfile, 1h TTL) for speed across ordinary site-wide
+  # deploys. That is fine for most roles, but this playbook's whole Day-2
+  # IP-replacement premise (docs/superpowers/specs/2026-09-02-freeipa-
+  # client-host-dns-ip-replacement-spec.md) is detecting the host's
+  # CURRENT ansible_default_ipv4.address — a stale cache entry from a
+  # pre-migration run would silently make "desired" equal the OLD address
+  # again, masking a real IP change instead of detecting it (confirmed
+  # live: a rerun against a freshly-migrated host reused the prior IP from
+  # cache and produced a false NOOP). An explicit `setup` task always
+  # executes for real (unlike the implicit gather-facts optimization, it is
+  # never skipped by the fact cache), so this play always sees the host's
+  # true current state.
+  gather_facts: false
   vars:
     stage: sandbox
     confirm_staging: false
@@ -119,6 +132,10 @@
     ipa_audit_packages_redhat: [audit]
 
   pre_tasks:
+    - name: "FreeIPA client — gather fresh facts (bypasses fact_caching; see gather_facts: false note above)"
+      ansible.builtin.setup:
+      tags: [always]
+
     - name: "Gate: required vars present (fail early, before any mutation)"
       ansible.builtin.assert:
         that:
@@ -184,6 +201,25 @@
           auth will fail on clock skew (> 5 min).
       when: "'active' not in (ipa_ntp_check.stdout | default(''))"
       tags: [always]
+
+    # Enrollment + keytab probe, moved here (ahead of both the DNS plan
+    # include below and the /etc/hosts pin) per docs/superpowers/specs/
+    # 2026-09-02-freeipa-client-host-dns-ip-replacement-spec.md §6.2: the
+    # Day-2 replacement identity proof needs to know whether this host is
+    # already enrolled BEFORE the DNS plan phase decides whether a
+    # replacement is even a candidate, and the installer gate later in
+    # tasks: reuses this SAME registered result rather than probing twice.
+    - name: "FreeIPA client — detect prior enrollment ({{ ipa_config_marker }})"
+      ansible.builtin.stat:
+        path: "{{ ipa_config_marker }}"
+      register: ipa_cfg
+      tags: [freeipa-client, C1]
+
+    - name: "FreeIPA client — detect host Kerberos keytab presence (read-only, Day-2 spec §6.1)"
+      ansible.builtin.stat:
+        path: /etc/krb5.keytab
+      register: ipa_client_dns_keytab_stat
+      tags: [freeipa-client, C1]
 
     # Host DNS registration preflight (spec.md freeipa-client-host-dns-registration
     # §9/§16: "DNS preflight" must run before ANY mutation, including the
@@ -283,12 +319,6 @@
         - not ansible_check_mode
         - ansible_os_family == 'RedHat'
       tags: [freeipa-client, C8]
-
-    - name: "FreeIPA client — detect prior enrollment ({{ ipa_config_marker }})"
-      ansible.builtin.stat:
-        path: "{{ ipa_config_marker }}"
-      register: ipa_cfg
-      tags: [freeipa-client, C1]
 
     # ipa-client-install is NOT idempotent (re-running on an enrolled host errors
     # "IPA client is already configured"). `creates:` makes this a no-op once

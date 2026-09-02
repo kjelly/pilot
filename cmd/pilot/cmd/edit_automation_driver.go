@@ -204,7 +204,7 @@ func (d *automationDriver) createHost(r *editRouterModel, host string) error {
 	return d.enter(r)
 }
 
-func (d *automationDriver) setHostField(r *editRouterModel, host, field, value string) error {
+func (d *automationDriver) setHostField(r *editRouterModel, host, field, value, confirm string) error {
 	if err := d.ensureHostMenu(r, host); err != nil {
 		return err
 	}
@@ -248,7 +248,26 @@ func (d *automationDriver) setHostField(r *editRouterModel, host, field, value s
 	if err := d.typeText(r, value, true); err != nil {
 		return err
 	}
-	return d.enter(r)
+	if err := d.enter(r); err != nil {
+		return err
+	}
+	// ansible_host on a freeipa-client host, changing between two IP
+	// literals, detours through pushFreeipaClientDNSReplaceConfirm
+	// (edit_tui_freeipa_client.go) instead of returning straight to the
+	// host menu. Automation must answer that confirm as explicitly as
+	// the interactive TUI does — never guess "yes" just because the
+	// caller supplied a new IP (spec.md §11.7).
+	if field != "ansible_host" || automationState(r).Kind != tui.ScreenConfirm {
+		return nil
+	}
+	switch confirm {
+	case "yes":
+		return d.confirmYesNo(r, true)
+	case "no":
+		return d.confirmYesNo(r, false)
+	default:
+		return fmt.Errorf("ansible_host change on a freeipa-client host requires an explicit DNS-replacement acknowledgement; set confirm to \"yes\" or \"no\" on this set_host_field step")
+	}
 }
 
 // setRoleChecked drives the role checklist so role ends up with

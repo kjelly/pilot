@@ -1,5 +1,6 @@
 # Shared task file: FreeIPA client host DNS registration
-# (spec.md: freeipa-client-host-dns-registration).
+# (spec.md: freeipa-client-host-dns-registration; Day-2 IP replacement:
+# docs/superpowers/specs/2026-09-02-freeipa-client-host-dns-ip-replacement-spec.md).
 #
 # Included TWICE from freeipa-client-apply.yml with a different
 # `freeipa_client_dns_phase`:
@@ -7,26 +8,38 @@
 #   phase: plan   — pre_tasks, BEFORE any mutation (including the /etc/hosts
 #                   pin). Resolves effective desired state, validates it, and
 #                   queries authoritative DNS read-only to compute a
-#                   create/no-op/conflict plan (spec.md §9 "Prepare",
-#                   §13 check-mode preview). Fails closed on any conflict —
-#                   never mutates.
+#                   create/no-op/conflict/replace plan (spec.md §9 "Prepare",
+#                   §13 check-mode preview; Day-2 spec §5 state model). Fails
+#                   closed on any unauthorized conflict — never mutates.
+#                   Requires `ipa_cfg` (stat of /etc/ipa/default.conf) and
+#                   `ipa_client_dns_keytab_stat` (stat of /etc/krb5.keytab)
+#                   to already be registered by the parent play's pre_tasks,
+#                   BEFORE this file is included (Day-2 spec §6.2) — this
+#                   file does not stat them itself, to avoid a second
+#                   "is this host enrolled" probe.
 #   phase: apply  — tasks:, AFTER ipa-client-install and the post-enroll
-#                   health checks. Idempotently registers any missing
-#                   address via kinit + dnsrecord-add (spec.md §11), for BOTH
-#                   a fresh enroll and an already-enrolled host — live
-#                   vm-target testing (2026-08-21) found ipa-client-install's
-#                   --ip-address does not actually register DNS (it only
-#                   attempts a client-side nsupdate GSS-TSIG update, which
-#                   needs the OS resolver already pointed at FreeIPA DNS —
-#                   see the comment on the ipa-client-install task in
-#                   freeipa-client-apply.yml), so there is no separate
-#                   "new enrollment already did it" case to skip. Re-queries
-#                   authoritative DNS afterward and fails (not silently) if
-#                   it still doesn't match desired (spec.md §16 — no
+#                   health checks. For action=ADD, idempotently registers
+#                   any missing address via kinit + dnsrecord-add (spec.md
+#                   §11), for BOTH a fresh enroll and an already-enrolled
+#                   host — live vm-target testing (2026-08-21) found
+#                   ipa-client-install's --ip-address does not actually
+#                   register DNS (it only attempts a client-side nsupdate
+#                   GSS-TSIG update, which needs the OS resolver already
+#                   pointed at FreeIPA DNS — see the comment on the
+#                   ipa-client-install task in freeipa-client-apply.yml), so
+#                   there is no separate "new enrollment already did it" case
+#                   to skip. For action=REPLACE, re-verifies the CAS
+#                   (compare-and-swap) authorization against a FRESH
+#                   authoritative-DNS read (TOCTOU guard, Day-2 spec §8)
+#                   before converging each RR family to its exact desired
+#                   value set. Either way, ends by re-querying authoritative
+#                   DNS and failing (not silently) if it does not EXACTLY
+#                   match desired — no extra, no missing (spec.md §16 — no
 #                   destructive rollback; next rerun re-enters this path).
 #
 # Both phases are read facts set once in the plan phase (set_fact persists
-# for the rest of the play), so the apply phase does not recompute them.
+# for the rest of the play), so the apply phase does not recompute them
+# (other than the apply-time CAS re-read, which is deliberately fresh).
 ---
 - name: "FreeIPA client DNS (plan) — resolve native-DNS capability of the selected FreeIPA server"
   ansible.builtin.set_fact:
@@ -92,18 +105,27 @@
       ({{ ipa_server_fqdn }}).
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
 
-- name: "FreeIPA client DNS (plan) — validate each effective DNS address (format + policy, spec.md §6)"
+# The same canonicalize-or-reject script is reused for: each desired
+# address, each authoritative current address (dig output), and the
+# replace-from CAS token — so an IPv6 literal always compares in `.compressed`
+# canonical form regardless of which of the three inputs it came from
+# (Day-2 spec §4.3). Prints the canonical literal on success (rc=0); prints
+# BAD and exits 1 on a reserved/disallowed address; a malformed literal makes
+# ipaddress.ip_address() raise, which also exits non-zero. stdlib only — no
+# new Python dependency (Day-2 spec §4.3/§18.1).
+- name: "FreeIPA client DNS (plan) — define the shared IP canonicalize+policy script"
+  ansible.builtin.set_fact:
+    ipa_client_dns_canon_script: |
+      import ipaddress, sys
+      ip = ipaddress.ip_address(sys.argv[1])
+      bad = ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local
+      print('BAD' if bad else ip.compressed)
+      sys.exit(1 if bad else 0)
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — validate + canonicalize each effective DNS address (spec.md §6)"
   ansible.builtin.command:
-    argv:
-      - python3
-      - -c
-      - |
-        import ipaddress, sys
-        ip = ipaddress.ip_address(sys.argv[1])
-        bad = ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local
-        print('BAD' if bad else 'OK')
-        sys.exit(1 if bad else 0)
-      - "{{ item }}"
+    argv: [python3, -c, "{{ ipa_client_dns_canon_script }}", "{{ item }}"]
   loop: "{{ ipa_client_dns_addresses_effective | default([]) }}"
   loop_control: {label: "{{ item }}"}
   register: ipa_client_dns_addr_check
@@ -125,9 +147,11 @@
   loop_control: {label: "{{ item.item | default('unknown') }}"}
   when: freeipa_client_dns_phase == 'plan' and (ipa_client_dns_addr_check.results | default([]) | length) > 0
 
-- name: "FreeIPA client DNS (plan) — dedupe effective DNS addresses (preserve order, spec.md §6)"
+- name: "FreeIPA client DNS (plan) — replace canonicalized, deduped desired addresses (preserve order)"
   ansible.builtin.set_fact:
-    ipa_client_dns_addresses_effective: "{{ ipa_client_dns_addresses_effective | unique }}"
+    ipa_client_dns_addresses_effective: >-
+      {{ ipa_client_dns_addr_check.results | default([])
+         | map(attribute='stdout') | map('trim') | list | unique }}
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
 
 - name: "Gate: explicit DNS IPv4 must match this host's /etc/hosts canonical IPv4 (spec.md §10, fail-closed v1)"
@@ -149,6 +173,48 @@
              | select('match', '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') | list | length > 0)
          else None }}
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+# ── Replacement CAS token (expected-old acknowledgement) — read-only,
+#    canonicalized, policy-checked exactly like a desired address (Day-2
+#    spec §4.2/§4.4). Empty/unset means "no replacement authorization" —
+#    represented internally as an empty string throughout this file so
+#    Jinja truthiness ("" is falsy) can gate the rest of the state machine
+#    without a separate `is defined` check at every use site.
+- name: "FreeIPA client DNS (plan) — resolve raw replace-from acknowledgement"
+  ansible.builtin.set_fact:
+    ipa_client_dns_replace_from_raw: "{{ freeipa_client_dns_replace_from_address | default('', true) | trim }}"
+  when: freeipa_client_dns_phase == 'plan'
+
+- name: "FreeIPA client DNS (plan) — validate + canonicalize replace-from acknowledgement (spec.md Day-2 §4.3/§4.4)"
+  ansible.builtin.command:
+    argv: [python3, -c, "{{ ipa_client_dns_canon_script }}", "{{ ipa_client_dns_replace_from_raw }}"]
+  register: ipa_client_dns_replace_from_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool and (ipa_client_dns_replace_from_raw | length) > 0
+
+- name: "Gate: replace-from acknowledgement, if set, must be a valid non-reserved IP literal (spec.md Day-2 §4.4)"
+  ansible.builtin.assert:
+    that:
+      - ipa_client_dns_replace_from_check.rc == 0
+    fail_msg: >-
+      freeipa_client_dns_replace_from_address ({{ ipa_client_dns_replace_from_raw }})
+      is not a valid, non-reserved IP literal (Day-2 spec §4.4). Malformed or
+      reserved acknowledgements are rejected before any mutation is
+      considered. rc={{ ipa_client_dns_replace_from_check.rc | default('') }}
+      stdout={{ ipa_client_dns_replace_from_check.stdout | default('') }}
+  when:
+    - freeipa_client_dns_phase == 'plan'
+    - freeipa_client_register_dns_effective | bool
+    - (ipa_client_dns_replace_from_raw | length) > 0
+    - ipa_client_dns_replace_from_check is not skipped
+
+- name: "FreeIPA client DNS (plan) — set effective replace-from acknowledgement ('' means unset)"
+  ansible.builtin.set_fact:
+    ipa_client_dns_replace_from_effective: >-
+      {{ (ipa_client_dns_replace_from_check.stdout | default('') | trim) if (ipa_client_dns_replace_from_raw | length) > 0 else '' }}
+  when: freeipa_client_dns_phase == 'plan'
 
 # ── Authoritative-DNS preflight (read-only; uses ipa_server_ip, not
 #    ipa_server_fqdn — /etc/hosts has not been pinned yet at plan time) ─────
@@ -197,20 +263,34 @@
       - (ipa_client_dns_current_aaaa.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
       - (ipa_client_dns_current_cname.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
     fail_msg: >-
-      Cannot verify the authoritative DNS state for {{ ipa_client_fqdn }}
-      from {{ ipa_server_ip }}. Refusing DNS registration rather than
-      interpreting a timeout, SERVFAIL, or malformed dig output as an empty
-      record set (spec.md §8.2/§8.3, fail-closed).
+      {{ ('Cannot verify authoritative DNS for requested replacement of '
+          ~ ipa_client_fqdn ~
+          ' — refusing to authorize a REPLACE without a verified read of the'
+          ~ ' live authoritative state (Day-2 spec §13.1).')
+         if (ipa_client_dns_replace_from_raw | default('', true) | length) > 0
+         else
+         ('Cannot verify the authoritative DNS state for ' ~ ipa_client_fqdn
+          ~ ' from ' ~ ipa_server_ip ~
+          '. Refusing DNS registration rather than interpreting a timeout,'
+          ~ ' SERVFAIL, or malformed dig output as an empty record set'
+          ~ ' (spec.md §8.2/§8.3, fail-closed).') }}
   # A freshly-provisioned FreeIPA host that hasn't actually run
   # ipa-server-install yet (correctly skipped in --check mode, since it's a
   # real mutation) has no DNS service to answer this query at all — this is
   # the normal, expected state of any --check preview of a genuinely fresh
   # clean-room topology, not evidence of a broken authority. Only fail
   # closed for a real (non-check) run, where an unusable response is
-  # actually unexplained. The extraction tasks below already treat an
+  # actually unexplained — UNLESS a replacement acknowledgement is present,
+  # in which case a --check preview of a Day-2 replacement MUST still be
+  # able to verify live authoritative state before claiming a safe REPLACE
+  # preview (Day-2 spec §13.1): the fresh-topology exemption only covers the
+  # no-replacement-intent case. The extraction tasks below already treat an
   # unmatched/empty stdout as "no records", so skipping this assert in
-  # check mode does not risk misreading diagnostic text as a real record.
-  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool and not ansible_check_mode
+  # check mode (when there is no replacement intent) does not risk
+  # misreading diagnostic text as a real record.
+  when: >-
+    freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+    and (not ansible_check_mode or (ipa_client_dns_replace_from_raw | default('', true) | length) > 0)
 
 - name: "FreeIPA client DNS (plan) — extract authoritative CNAME answers"
   ansible.builtin.set_fact:
@@ -226,14 +306,15 @@
     fail_msg: >-
       {{ ipa_client_fqdn }} already has a CNAME record in authoritative
       FreeIPA DNS; A/AAAA registration cannot coexist with a CNAME at the
-      same owner (spec.md §8.2).
+      same owner (spec.md §8.2). No replacement acknowledgement can
+      override this (Day-2 spec §14 CONFLICT_CNAME / L8).
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
 
-- name: "FreeIPA client DNS (plan) — compute current authoritative addresses"
+- name: "FreeIPA client DNS (plan) — compute current authoritative addresses (raw)"
   ansible.builtin.set_fact:
     # Only resource-record lines are addresses.  Header/diagnostic text and a
     # CNAME followed by its A/AAAA target cannot enter the conflict diff.
-    ipa_client_dns_current_addresses: >-
+    ipa_client_dns_current_addresses_raw: >-
       {{ ((ipa_client_dns_current_a.stdout_lines | default([])
            | select('match', '^\S+\s+\d+\s+IN\s+A\s+\S+$')
            | map('regex_replace', '^.*\s+A\s+', '') | list)
@@ -243,44 +324,232 @@
          | map('trim') | reject('equalto', '') | list | unique }}
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
 
-- name: "FreeIPA client DNS (plan) — compute extra/missing sets against desired"
+- name: "FreeIPA client DNS (plan) — canonicalize current authoritative addresses (Day-2 spec §4.3)"
+  ansible.builtin.command:
+    argv: [python3, -c, "{{ ipa_client_dns_canon_script }}", "{{ item }}"]
+  loop: "{{ ipa_client_dns_current_addresses_raw | default([]) }}"
+  loop_control: {label: "{{ item }}"}
+  register: ipa_client_dns_current_addr_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "Gate: every authoritative current address parses as a valid IP literal (fail-closed, not silently dropped)"
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+    fail_msg: >-
+      Authoritative DNS for {{ ipa_client_fqdn }} returned an address that
+      does not parse as a valid IP literal: {{ item.item }}. Refusing to
+      silently exclude it from the conflict diff (an unparsed value could
+      hide a real conflict) — resolve the record manually.
+  loop: "{{ ipa_client_dns_current_addr_check.results | default([]) }}"
+  loop_control: {label: "{{ item.item | default('unknown') }}"}
+  when: freeipa_client_dns_phase == 'plan' and (ipa_client_dns_current_addr_check.results | default([]) | length) > 0
+
+- name: "FreeIPA client DNS (plan) — replace with canonicalized current authoritative addresses"
+  ansible.builtin.set_fact:
+    ipa_client_dns_current_addresses: >-
+      {{ ipa_client_dns_current_addr_check.results | default([])
+         | map(attribute='stdout') | map('trim') | list | unique }}
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — compute extra/missing sets against desired (canonicalized)"
   ansible.builtin.set_fact:
     ipa_client_dns_extra: "{{ ipa_client_dns_current_addresses | default([]) | difference(ipa_client_dns_addresses_effective) }}"
     ipa_client_dns_missing: "{{ ipa_client_dns_addresses_effective | difference(ipa_client_dns_current_addresses | default([])) }}"
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
 
-- name: "Gate: authoritative DNS must not conflict with desired addresses (spec.md §8.2/§8.3, fail-closed, no implicit takeover)"
-  ansible.builtin.assert:
-    that:
-      - (ipa_client_dns_extra | default([]) | length) == 0
-    fail_msg: >-
-      {{ ipa_client_fqdn }} already has authoritative DNS address(es)
-      {{ ipa_client_dns_extra }} not present in the desired set
-      {{ ipa_client_dns_addresses_effective }}. No implicit takeover
-      (spec.md §8.3) — resolve the conflict manually or adjust
-      freeipa_client_dns_addresses.
+# ── Day-2 IP replacement CAS + identity-proof state machine
+#    (docs/superpowers/specs/2026-09-02-freeipa-client-host-dns-ip-
+#    replacement-spec.md §5/§6). A "replacement candidate" is the ONLY
+#    situation where identity proof (an expensive, credential-bearing
+#    operation) runs at all: exactly one authoritative extra address, an
+#    acknowledgement is set, and it matches that extra exactly. Every other
+#    combination of extra/acknowledgement is already fully decidable without
+#    touching Kerberos (spec §5.1's table).
+- name: "FreeIPA client DNS (plan) — determine whether this is a replacement candidate (spec Day-2 §5.1)"
+  ansible.builtin.set_fact:
+    ipa_client_dns_replace_candidate: >-
+      {{ (ipa_client_dns_extra | default([]) | length) == 1
+         and (ipa_client_dns_replace_from_effective | default('') | length) > 0
+         and (ipa_client_dns_extra[0] == ipa_client_dns_replace_from_effective) }}
   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
 
-- name: "FreeIPA client DNS (plan) — report plan (spec.md §13.2)"
+# ── Identity proof (spec Day-2 §6): proves the target currently reachable
+#    at the NEW ansible_host is the SAME already-enrolled host that owns the
+#    stale DNS address being authorized for removal — never that it merely
+#    shares a hostname. All three checks (config file exists, config
+#    host/realm match, keytab kinit succeeds) are independent and every one
+#    of them MUST pass; a fresh/unenrolled host fails at the first.
+- name: "FreeIPA client DNS (plan) — read-only host/realm match against /etc/ipa/default.conf (spec Day-2 §6.3)"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import configparser, sys
+        cp = configparser.ConfigParser()
+        cp.read(sys.argv[1])
+        host = cp.get('global', 'host', fallback='')
+        realm = cp.get('global', 'realm', fallback='')
+        ok = (host == sys.argv[2]) and (realm == sys.argv[3])
+        print('MATCH' if ok else ('MISMATCH host=%s realm=%s' % (host, realm)))
+        sys.exit(0 if ok else 1)
+      - /etc/ipa/default.conf
+      - "{{ ipa_client_fqdn }}"
+      - "{{ ipa_realm }}"
+  register: ipa_client_dns_identity_config_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: >-
+    freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+    and ipa_client_dns_replace_candidate | bool and (ipa_cfg.stat.exists | default(false))
+
+- name: "FreeIPA client DNS (plan) — prove ownership of the exact host keytab principal (spec Day-2 §6.4)"
+  when: >-
+    freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+    and ipa_client_dns_replace_candidate | bool
+    and (ipa_cfg.stat.exists | default(false)) and (ipa_client_dns_keytab_stat.stat.exists | default(false))
+  block:
+    - name: "FreeIPA client DNS identity proof — create a dedicated Kerberos credential cache path"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: pilot-freeipa-client-dns-identity-
+        suffix: .ccache
+      register: ipa_client_dns_identity_ccache_file
+      changed_when: false
+      check_mode: false
+
+    - name: "FreeIPA client DNS identity proof — kinit the exact host keytab principal into the dedicated ccache"
+      ansible.builtin.command:
+        argv: [kinit, -k, -t, /etc/krb5.keytab, "host/{{ ipa_client_fqdn }}@{{ ipa_realm }}"]
+      environment:
+        KRB5CCNAME: "{{ ipa_client_dns_identity_ccache_file.path }}"
+      register: ipa_client_dns_identity_kinit
+      changed_when: false
+      failed_when: false
+      no_log: true
+      check_mode: false
+  always:
+    - name: "FreeIPA client DNS identity proof — destroy the Kerberos ticket in the dedicated ccache"
+      ansible.builtin.command:
+        argv: [kdestroy, -c, "{{ ipa_client_dns_identity_ccache_file.path }}"]
+      changed_when: false
+      failed_when: false
+      when: ipa_client_dns_identity_ccache_file is defined and ipa_client_dns_identity_ccache_file.path is defined
+
+- name: "FreeIPA client DNS (plan) — set identity_proven (AND of every independent check, spec Day-2 §6)"
+  ansible.builtin.set_fact:
+    ipa_client_dns_identity_proven: >-
+      {{ ipa_client_dns_replace_candidate | bool
+         and (ipa_cfg.stat.exists | default(false))
+         and (ipa_client_dns_keytab_stat.stat.exists | default(false))
+         and (ipa_client_dns_identity_config_check.rc | default(1)) == 0
+         and (ipa_client_dns_identity_kinit.rc | default(1)) == 0 }}
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "FreeIPA client DNS (plan) — decide the plan action (spec Day-2 §5.1 state table)"
+  ansible.builtin.set_fact:
+    ipa_client_dns_plan_action: >-
+      {{
+        ('NOOP_STALE_ACK' if (ipa_client_dns_replace_from_effective | default('') | length) > 0 else 'NOOP')
+        if ((ipa_client_dns_extra | default([]) | length) == 0 and (ipa_client_dns_missing | default([]) | length) == 0)
+        else 'ADD'
+        if ((ipa_client_dns_extra | default([]) | length) == 0)
+        else 'CONFLICT_UNAUTHORIZED'
+        if ((ipa_client_dns_replace_from_effective | default('') | length) == 0)
+        else 'CONFLICT_MULTI_EXTRA'
+        if ((ipa_client_dns_extra | default([]) | length) > 1)
+        else 'CONFLICT_CAS_MISMATCH'
+        if (ipa_client_dns_extra[0] != ipa_client_dns_replace_from_effective)
+        else ('REPLACE' if (ipa_client_dns_identity_proven | default(false) | bool) else 'CONFLICT_IDENTITY_UNPROVEN')
+      }}
+  when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool
+
+- name: "Gate: unauthorized DNS conflict — no acknowledgement present (spec Day-2 §12.1 / S1)"
+  ansible.builtin.assert:
+    that: [false]
+    fail_msg: >-
+      {{ ipa_client_fqdn }}: authoritative DNS has address(es)
+      {{ ipa_client_dns_extra }} not present in desired {{ ipa_client_dns_addresses_effective }}.
+      No implicit takeover. If this is the same already-enrolled host doing
+      a legitimate Day-2 IP migration, set
+      freeipa_client_dns_replace_from_address: {{ (ipa_client_dns_extra | default([]))[0] | default('<stale-ip>') }}
+      to authorize removing exactly that stale address. If this is NOT the
+      same host, resolve the DNS/ownership conflict manually — do not set
+      an acknowledgement.
+  when: freeipa_client_dns_phase == 'plan' and (ipa_client_dns_plan_action | default('') == 'CONFLICT_UNAUTHORIZED')
+
+- name: "Gate: DNS conflict has more than one stale address — V1 non-goal (spec Day-2 §3.3 / S3)"
+  ansible.builtin.assert:
+    that: [false]
+    fail_msg: >-
+      {{ ipa_client_fqdn }}: authoritative DNS has {{ ipa_client_dns_extra | default([]) | length }}
+      stale addresses {{ ipa_client_dns_extra }} not present in desired
+      {{ ipa_client_dns_addresses_effective }}. This pilot only authorizes
+      replacing a SINGLE stale address per run (Day-2 spec §3.3) — resolve
+      the extra conflicting addresses manually.
+  when: freeipa_client_dns_phase == 'plan' and (ipa_client_dns_plan_action | default('') == 'CONFLICT_MULTI_EXTRA')
+
+- name: "Gate: replacement authorization does not match live authoritative DNS — stale CAS (spec Day-2 §12.2 / S2)"
+  ansible.builtin.assert:
+    that: [false]
+    fail_msg: >-
+      replacement authorization is stale / does not match live authoritative
+      DNS for {{ ipa_client_fqdn }}: expected old {{ ipa_client_dns_replace_from_effective }},
+      live extra {{ ipa_client_dns_extra }}, desired {{ ipa_client_dns_addresses_effective }}.
+      Update freeipa_client_dns_replace_from_address to the CURRENT stale
+      address before retrying.
+  when: freeipa_client_dns_phase == 'plan' and (ipa_client_dns_plan_action | default('') == 'CONFLICT_CAS_MISMATCH')
+
+- name: "Gate: replacement requires proof of an already-enrolled client with the exact host keytab principal (spec Day-2 §6/§21.2 / S4)"
+  ansible.builtin.assert:
+    that: [false]
+    fail_msg: >-
+      {{ ipa_client_fqdn }}: replacement authorization
+      ({{ ipa_client_dns_replace_from_effective }}) matches the sole
+      authoritative extra address, but this target could not prove it is
+      the same already-enrolled host: replacement requires proof of an
+      already-enrolled client with the exact host keytab principal
+      (existing /etc/ipa/default.conf host/realm match + a successful
+      `kinit -k -t /etc/krb5.keytab host/{{ ipa_client_fqdn }}@{{ ipa_realm }}`).
+      A fresh or unenrolled host can never take over an existing DNS owner
+      this way (Day-2 spec §S4/L5), regardless of acknowledgement.
+  when: freeipa_client_dns_phase == 'plan' and (ipa_client_dns_plan_action | default('') == 'CONFLICT_IDENTITY_UNPROVEN')
+
+- name: "FreeIPA client DNS (plan) — compute identity_proof display label for the debug report"
+  ansible.builtin.set_fact:
+    ipa_client_dns_identity_proof_display: >-
+      {{ 'PASS' if (ipa_client_dns_identity_proven | default(false) | bool)
+         else ('N/A' if not (ipa_client_dns_replace_candidate | default(false) | bool) else 'FAIL') }}
+  when: freeipa_client_dns_phase == 'plan'
+
+- name: "FreeIPA client DNS (plan) — report plan (spec.md §13.2; Day-2 spec §7.2)"
   ansible.builtin.debug:
     msg: |
       FreeIPA client DNS plan:
-        fqdn: {{ ipa_client_fqdn }}
         registration: {{ 'ENABLED' if freeipa_client_register_dns_effective | bool else 'DISABLED' }}
-        current A/AAAA: {{ ipa_client_dns_current_addresses | default([]) }}
+        fqdn: {{ ipa_client_fqdn }}
+        current: {{ ipa_client_dns_current_addresses | default([]) }}
         desired: {{ ipa_client_dns_addresses_effective | default([]) }}
-        action: {{ 'NOOP' if (ipa_client_dns_missing | default([]) | length) == 0 else 'CREATE_OR_ADD' }}
+        extra: {{ ipa_client_dns_extra | default([]) }}
+        missing: {{ ipa_client_dns_missing | default([]) }}
+        replace_from: {{ ipa_client_dns_replace_from_effective | default('') }}
+        action: {{ ipa_client_dns_plan_action | default('NOOP') }}
+        identity_proof: {{ ipa_client_dns_identity_proof_display }}
   when: freeipa_client_dns_phase == 'plan'
 
-# ── Apply phase: DNS registration (kinit + idempotent dnsrecord-add) + verify
+# ── Apply phase: DNS registration/replacement + verify
 # Runs for BOTH a fresh enroll and an already-enrolled host — there is no
 # --ip-address-based server-side registration to fall back on (live testing
 # 2026-08-21 found ipa-client-install's --ip-address only attempts a
 # client-side nsupdate GSS-TSIG update, which needs the OS resolver already
 # pointed at FreeIPA DNS; see the long comment on the ipa-client-install task
-# in freeipa-client-apply.yml). So this kinit+dnsrecord-add path is the ONLY
-# DNS-registration mechanism, gated purely on "anything missing" rather than
-# on ipa_cfg.stat.exists (spec.md §11's "new vs existing" distinction).
+# in freeipa-client-apply.yml). So this kinit-based path is the ONLY
+# DNS-mutation mechanism.
 - name: "FreeIPA client DNS (apply) — register/backfill missing addresses (kinit + idempotent dnsrecord-add, spec.md §9/§11)"
   when:
     - freeipa_client_dns_phase == 'apply'
@@ -341,7 +610,268 @@
       failed_when: false
       when: ipa_client_dns_ccache_file is defined and ipa_client_dns_ccache_file.path is defined
 
-- name: "FreeIPA client DNS (apply) — post-apply authoritative DNS verification (spec.md §9/§14/§16)"
+# ── Day-2 IP replacement mutation (action=REPLACE only). Never trusts the
+#    plan-phase snapshot as apply truth (Day-2 spec §8.2): re-reads
+#    authoritative DNS fresh, right here, and re-validates the exact same
+#    CAS/identity/CNAME conditions before the first write. Any change since
+#    planning (another operator, automation, or replica propagation) fails
+#    closed instead of being silently overwritten.
+- name: "FreeIPA client DNS (apply) — Day-2 replacement: re-check + mutate (spec Day-2 §8/§9)"
+  when:
+    - freeipa_client_dns_phase == 'apply'
+    - not ansible_check_mode
+    - freeipa_client_register_dns_effective | bool
+    - (ipa_client_dns_plan_action | default('') == 'REPLACE')
+  block:
+    - name: "FreeIPA client DNS replace — create a dedicated Kerberos credential cache path"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: pilot-freeipa-client-dns-replace-
+        suffix: .ccache
+      register: ipa_client_dns_replace_ccache_file
+      changed_when: false
+      check_mode: false
+
+    - name: "FreeIPA client DNS replace — kinit admin into the dedicated ccache"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          printf %s "{{ ipa_enroll_password }}" | KRB5CCNAME="{{ ipa_client_dns_replace_ccache_file.path }}" kinit {{ ipa_enroll_principal }}@{{ ipa_realm }}
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      check_mode: false
+
+    # ── TOCTOU re-read: fresh authoritative query, BEFORE the first write ──
+    - name: "FreeIPA client DNS replace — re-query authoritative DNS: A records (apply-time CAS re-read)"
+      ansible.builtin.command:
+        argv: [dig, "@{{ ipa_server_ip }}", "+noall", "+comments", "+answer", "{{ ipa_client_fqdn }}", A]
+      register: ipa_client_dns_apply_a
+      changed_when: false
+      failed_when: false
+
+    - name: "FreeIPA client DNS replace — re-query authoritative DNS: AAAA records (apply-time CAS re-read)"
+      ansible.builtin.command:
+        argv: [dig, "@{{ ipa_server_ip }}", "+noall", "+comments", "+answer", "{{ ipa_client_fqdn }}", AAAA]
+      register: ipa_client_dns_apply_aaaa
+      changed_when: false
+      failed_when: false
+
+    - name: "FreeIPA client DNS replace — re-query authoritative DNS: CNAME at owner (apply-time CAS re-read)"
+      ansible.builtin.command:
+        argv: [dig, "@{{ ipa_server_ip }}", "+noall", "+comments", "+answer", "{{ ipa_client_fqdn }}", CNAME]
+      register: ipa_client_dns_apply_cname
+      changed_when: false
+      failed_when: false
+
+    - name: "Gate: apply-time authoritative DNS re-read must be usable (spec Day-2 §8.1)"
+      ansible.builtin.assert:
+        that:
+          - (ipa_client_dns_apply_a.rc | default(1)) == 0
+          - (ipa_client_dns_apply_aaaa.rc | default(1)) == 0
+          - (ipa_client_dns_apply_cname.rc | default(1)) == 0
+          - (ipa_client_dns_apply_a.stdout | default('')) is search('(?m)^;; Got answer:$')
+          - (ipa_client_dns_apply_aaaa.stdout | default('')) is search('(?m)^;; Got answer:$')
+          - (ipa_client_dns_apply_cname.stdout | default('')) is search('(?m)^;; Got answer:$')
+          - (ipa_client_dns_apply_a.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
+          - (ipa_client_dns_apply_aaaa.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
+          - (ipa_client_dns_apply_cname.stdout | default('')) is search('status:[ ]+(NOERROR|NXDOMAIN),')
+        fail_msg: >-
+          FAIL CLOSED — cannot re-verify authoritative DNS for
+          {{ ipa_client_fqdn }} immediately before a replacement write.
+          Refusing to mutate on an unverified read (Day-2 spec §8.1).
+
+    - name: "FreeIPA client DNS replace — extract apply-time CNAME answers"
+      ansible.builtin.set_fact:
+        ipa_client_dns_apply_cname_records: >-
+          {{ ipa_client_dns_apply_cname.stdout_lines | default([])
+             | select('match', '^\S+\s+\d+\s+IN\s+CNAME\s+\S+\.?$') | list }}
+
+    - name: "FreeIPA client DNS replace — compute apply-time current authoritative addresses (raw)"
+      ansible.builtin.set_fact:
+        ipa_client_dns_apply_current_raw: >-
+          {{ ((ipa_client_dns_apply_a.stdout_lines | default([])
+               | select('match', '^\S+\s+\d+\s+IN\s+A\s+\S+$')
+               | map('regex_replace', '^.*\s+A\s+', '') | list)
+              + (ipa_client_dns_apply_aaaa.stdout_lines | default([])
+                 | select('match', '^\S+\s+\d+\s+IN\s+AAAA\s+\S+$')
+                 | map('regex_replace', '^.*\s+AAAA\s+', '') | list))
+             | map('trim') | reject('equalto', '') | list | unique }}
+
+    - name: "FreeIPA client DNS replace — canonicalize apply-time current authoritative addresses"
+      ansible.builtin.command:
+        argv: [python3, -c, "{{ ipa_client_dns_canon_script }}", "{{ item }}"]
+      loop: "{{ ipa_client_dns_apply_current_raw | default([]) }}"
+      loop_control: {label: "{{ item }}"}
+      register: ipa_client_dns_apply_current_check
+      changed_when: false
+      failed_when: false
+
+    - name: "Gate: every apply-time authoritative address parses as a valid IP literal"
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+        fail_msg: >-
+          FAIL CLOSED — authoritative DNS for {{ ipa_client_fqdn }} returned
+          an unparseable address ({{ item.item }}) on the apply-time re-read.
+      loop: "{{ ipa_client_dns_apply_current_check.results | default([]) }}"
+      loop_control: {label: "{{ item.item | default('unknown') }}"}
+      when: (ipa_client_dns_apply_current_check.results | default([]) | length) > 0
+
+    - name: "FreeIPA client DNS replace — set canonicalized apply-time current authoritative addresses"
+      ansible.builtin.set_fact:
+        ipa_client_dns_apply_current_addresses: >-
+          {{ ipa_client_dns_apply_current_check.results | default([])
+             | map(attribute='stdout') | map('trim') | list | unique }}
+
+    - name: "FreeIPA client DNS replace — recompute extra against desired (apply-time)"
+      ansible.builtin.set_fact:
+        ipa_client_dns_apply_extra: "{{ ipa_client_dns_apply_current_addresses | default([]) | difference(ipa_client_dns_addresses_effective) }}"
+
+    - name: "Gate: apply-time CAS still exactly matches — authoritative state changed after planning (spec Day-2 §8.1/§8.2 / S5)"
+      ansible.builtin.assert:
+        that:
+          - (ipa_client_dns_apply_cname_records | default([]) | length) == 0
+          - (ipa_client_dns_apply_extra | default([]) | length) == 1
+          - ipa_client_dns_apply_extra[0] == ipa_client_dns_replace_from_effective
+          - (ipa_client_dns_identity_proven | default(false) | bool)
+        fail_msg: >-
+          FAIL CLOSED — authoritative state changed after planning for
+          {{ ipa_client_fqdn }}: apply-time extra {{ ipa_client_dns_apply_extra | default([]) }}
+          vs authorized {{ ipa_client_dns_replace_from_effective }}
+          (CNAME present: {{ (ipa_client_dns_apply_cname_records | default([]) | length) > 0 }}).
+          Not mutating on a stale plan snapshot (Day-2 spec §8.2/L9).
+
+    # ── Mutation, family by family. Every A/AAAA record for this owner
+    #    already exists (extra was non-empty, so current was non-empty, so
+    #    the owner entry exists) — same live-tested convention as
+    #    freeipa-dns-apply.yml's own record reconciler: once an owner entry
+    #    exists, dnsrecord-mod (not dnsrecord-add) both creates a
+    #    previously-unset attribute type on that entry AND replaces an
+    #    existing one, so a single dnsrecord-mod per family converges that
+    #    whole family's RRset to the FULL desired value list in one command
+    #    (Day-2 spec §9.3/§9.4/§9.6 — same-family swap, old+new coexist
+    #    prune, and multi-value convergence are all the same code path).
+    - name: "FreeIPA client DNS replace — reconcile each RR family to its full desired value set"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['ipa', 'dnsrecord-mod', ipa_domain, ipa_client_dns_record_name] +
+             (item.desired | map('regex_replace', '^(.*)$', '--' ~ item.flag ~ '=\1') | list) }}
+      environment:
+        KRB5CCNAME: "{{ ipa_client_dns_replace_ccache_file.path }}"
+      loop:
+        - type: A
+          flag: a-rec
+          desired: "{{ ipa_client_dns_addresses_effective | reject('search', ':') | list }}"
+          current: "{{ ipa_client_dns_apply_current_addresses | reject('search', ':') | list }}"
+        - type: AAAA
+          flag: aaaa-rec
+          desired: "{{ ipa_client_dns_addresses_effective | select('search', ':') | list }}"
+          current: "{{ ipa_client_dns_apply_current_addresses | select('search', ':') | list }}"
+      loop_control: {label: "{{ item.type }}"}
+      when: (item.desired | length) > 0 and ((item.desired | sort) != (item.current | sort))
+      register: ipa_client_dns_replace_reconcile
+      changed_when: true
+      failed_when:
+        - ipa_client_dns_replace_reconcile.rc | default(0) != 0
+        - >-
+          'no modifications to be performed' not in
+          (ipa_client_dns_replace_reconcile.stdout | default('') +
+           ipa_client_dns_replace_reconcile.stderr | default(''))
+
+    - name: "Report DNS replace reconciliation"
+      ansible.builtin.debug:
+        msg: "REPLACE_FAMILY {{ item.item.type }} {{ ipa_client_fqdn }} -> {{ item.item.desired }}"
+      loop: "{{ ipa_client_dns_replace_reconcile.results | default([]) }}"
+      loop_control: {label: "{{ item.item.type | default('unknown') }}"}
+      when: not (item.skipped | default(false))
+
+    # ── Cross-family stale removal (Day-2 spec §9.5): only reached when the
+    #    authorized stale address's OWN family has zero desired addresses —
+    #    i.e. the family-reconcile task above never touched it, because it
+    #    only mutates families with a non-empty desired list. Runs AFTER
+    #    the family-reconcile task above so a new family is always
+    #    established before the old one is torn down (no empty-owner
+    #    window). Deletion is value-scoped to exactly the authorized stale
+    #    address — never an owner-wide delete (spec §9.1/S6), so any
+    #    foreign record at this owner (e.g. TXT) survives untouched (S7).
+    #
+    # FreeIPA/LDAP stores a record's value EXACTLY as it was entered — it
+    # does not normalize an IPv6 literal to compressed form the way `dig`'s
+    # display output does. `dnsrecord-del --aaaa-rec=<value>` matches by
+    # exact string, so passing our own canonicalized (compressed)
+    # ipa_client_dns_replace_from_effective fails with "AAAA record does
+    # not contain '<value>'" whenever the stale record happened to be
+    # stored in expanded form (confirmed live, Day-2 spec §19 L11) — the
+    # comparison logic above is correctly canonical-aware, but a delete
+    # needs the record's actual as-stored bytes, not our normalized view of
+    # it. Resolve that exact raw value via --all --raw (the same
+    # convention freeipa-dns-apply.yml uses for the same reason) before
+    # deleting.
+    - name: "FreeIPA client DNS replace — read the record's raw stored values (for an exact-match delete)"
+      ansible.builtin.command:
+        argv: [ipa, dnsrecord-show, "{{ ipa_domain }}", "{{ ipa_client_dns_record_name }}", --all, --raw]
+      environment:
+        KRB5CCNAME: "{{ ipa_client_dns_replace_ccache_file.path }}"
+      register: ipa_client_dns_apply_raw_show
+      changed_when: false
+
+    - name: "FreeIPA client DNS replace — extract raw A/AAAA values as LDAP actually stores them"
+      ansible.builtin.set_fact:
+        ipa_client_dns_apply_raw_values: >-
+          {{ (ipa_client_dns_apply_raw_show.stdout | default('') | regex_findall('(?im)^[ \t]*arecord: (.+)$'))
+             + (ipa_client_dns_apply_raw_show.stdout | default('') | regex_findall('(?im)^[ \t]*aaaarecord: (.+)$')) }}
+
+    - name: "FreeIPA client DNS replace — canonicalize each raw stored value (to match it against the authorized stale address)"
+      ansible.builtin.command:
+        argv: [python3, -c, "{{ ipa_client_dns_canon_script }}", "{{ item }}"]
+      loop: "{{ ipa_client_dns_apply_raw_values | default([]) }}"
+      loop_control: {label: "{{ item }}"}
+      register: ipa_client_dns_apply_raw_check
+      changed_when: false
+      failed_when: false
+
+    - name: "FreeIPA client DNS replace — resolve the exact as-stored value for the authorized stale address"
+      ansible.builtin.set_fact:
+        ipa_client_dns_apply_stale_raw_value: >-
+          {{ (ipa_client_dns_apply_raw_check.results | default([])
+              | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+              | selectattr('stdout', 'defined') | selectattr('stdout', 'equalto', ipa_client_dns_replace_from_effective)
+              | map(attribute='item') | list | first)
+             | default(ipa_client_dns_replace_from_effective, true) }}
+
+    - name: "FreeIPA client DNS replace — value-scoped removal of the authorized stale address (cross-family only)"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - dnsrecord-del
+          - "{{ ipa_domain }}"
+          - "{{ ipa_client_dns_record_name }}"
+          - "--{{ 'aaaa-rec' if (':' in ipa_client_dns_replace_from_effective) else 'a-rec' }}={{ ipa_client_dns_apply_stale_raw_value }}"
+      environment:
+        KRB5CCNAME: "{{ ipa_client_dns_replace_ccache_file.path }}"
+      when: >-
+        (':' in ipa_client_dns_replace_from_effective
+         and (ipa_client_dns_addresses_effective | select('search', ':') | list | length) == 0)
+        or
+        (':' not in ipa_client_dns_replace_from_effective
+         and (ipa_client_dns_addresses_effective | reject('search', ':') | list | length) == 0)
+      register: ipa_client_dns_replace_delete_stale
+      changed_when: true
+
+    - name: "Report DNS replace cross-family stale removal"
+      ansible.builtin.debug:
+        msg: "PRUNE_STALE {{ ipa_client_fqdn }} {{ ipa_client_dns_replace_from_effective }}"
+      when: not (ipa_client_dns_replace_delete_stale.skipped | default(false))
+  always:
+    - name: "FreeIPA client DNS replace — destroy the Kerberos ticket in the dedicated ccache"
+      ansible.builtin.command:
+        argv: [kdestroy, -c, "{{ ipa_client_dns_replace_ccache_file.path }}"]
+      changed_when: false
+      failed_when: false
+      when: ipa_client_dns_replace_ccache_file is defined and ipa_client_dns_replace_ccache_file.path is defined
+
+- name: "FreeIPA client DNS (apply) — post-apply authoritative DNS verification (spec.md §9/§14/§16; Day-2 §10)"
   when:
     - freeipa_client_dns_phase == 'apply'
     - not ansible_check_mode
@@ -376,16 +906,23 @@
           may have completed, but its result is unverified because the
           authoritative query timed out, returned SERVFAIL, or was malformed.
 
-    - name: "Gate: authoritative DNS matches desired addresses exactly after apply (spec.md §9/§14)"
+    # Day-2 spec §10.1/S8: fixes the pre-existing gap where this gate only
+    # checked desired-minus-post (missing-only), never post-minus-desired,
+    # despite being named/labeled as an exact-match check.
+    - name: "Gate: authoritative DNS matches desired addresses EXACTLY after apply (spec.md §9/§14)"
       ansible.builtin.assert:
         that:
           - (ipa_client_dns_addresses_effective | difference(ipa_client_dns_verify_current) | length) == 0
+          - (ipa_client_dns_verify_current | difference(ipa_client_dns_addresses_effective) | length) == 0
         fail_msg: >-
-          Authoritative FreeIPA DNS for {{ ipa_client_fqdn }} does not yet
-          contain all desired addresses {{ ipa_client_dns_addresses_effective }}
-          (observed: {{ ipa_client_dns_verify_current }}). Enrollment/backfill
-          ran but DNS verification failed (spec.md §16) — this is NOT rolled
-          back; rerun will re-enter the backfill path above.
+          Authoritative FreeIPA DNS for {{ ipa_client_fqdn }} does not exactly
+          match desired addresses {{ ipa_client_dns_addresses_effective }}
+          (observed: {{ ipa_client_dns_verify_current }}; missing:
+          {{ ipa_client_dns_addresses_effective | difference(ipa_client_dns_verify_current) }};
+          extra: {{ ipa_client_dns_verify_current | difference(ipa_client_dns_addresses_effective) }}).
+          Enrollment/backfill/replace ran but exact-state verification
+          failed (spec.md §16) — this is NOT rolled back; rerun will
+          re-enter the plan above.
       vars:
         ipa_client_dns_verify_current: >-
           {{ ((ipa_client_dns_verify_a.stdout_lines | default([])

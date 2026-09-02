@@ -56,8 +56,9 @@ func editActionRegistry() []editActionDef {
 		{
 			Spec: semanticActionSpec{
 				Name:                     "set_host_field",
-				Description:              "set one supported non-secret host field",
+				Description:              "set one supported non-secret host field; ansible_host on a freeipa-client host, changing between two IP literals, requires confirm (spec.md §11.7 — the Day-2 DNS-replacement acknowledgement)",
 				Required:                 []string{"host", "field", "value"},
+				Optional:                 []string{"confirm"},
 				Values:                   map[string][]string{"field": {"ansible_host", "ansible_user", "ssh_key_file", "env", "deployment_availability"}},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
@@ -70,7 +71,7 @@ func editActionRegistry() []editActionDef {
 			},
 			Validate: validateSetHostField,
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
-				return d.setHostField(r, step.Host, step.Field, step.Value)
+				return d.setHostField(r, step.Host, step.Field, step.Value, step.Confirm)
 			},
 		},
 		{
@@ -2063,6 +2064,9 @@ func validateSetHostField(step editAction) error {
 		if value != inventory.DeploymentAvailabilityRequired && value != inventory.DeploymentAvailabilityOptional {
 			return fmt.Errorf("unsupported deployment_availability value %q", step.Value)
 		}
+	}
+	if step.Confirm != "" && step.Confirm != "yes" && step.Confirm != "no" {
+		return fmt.Errorf("set_host_field confirm must be %q or %q", "yes", "no")
 	}
 	return nil
 }

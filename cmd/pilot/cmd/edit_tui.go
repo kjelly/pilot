@@ -589,7 +589,7 @@ type hostMenuItem struct {
 func hostMenuItems(h *inventory.Host) []hostMenuItem {
 	items := []hostMenuItem{
 		{tui.Choice{ID: "hosts.item.ansible_host", Label: fmt.Sprintf("ansible_host(連線位址)：%s", displayOrPlaceholder(h.AnsibleHost))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
-			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_host(可路由的 IP 或主機名)", h.AnsibleHost, func(h *inventory.Host, v string) { h.AnsibleHost = v })
+			return pushAnsibleHostFieldEdit(r, dir, path, hf, name)
 		}},
 		{tui.Choice{ID: "hosts.item.ansible_user", Label: fmt.Sprintf("ansible_user(登入帳號)：%s", displayOrPlaceholder(h.AnsibleUser))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
 			return pushHostFieldEdit(r, dir, path, hf, name, "ansible_user(登入帳號，留空 = 用 vars 裡的預設)", h.AnsibleUser, func(h *inventory.Host, v string) { h.AnsibleUser = v })

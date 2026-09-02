@@ -197,6 +197,17 @@ type editAction struct {
 	// required-field-set is the same pattern for the same reason.
 	Group    string `json:"group,omitempty"`
 	Priority string `json:"priority,omitempty"`
+	// Confirm answers a yes/no confirmation dialog that set_host_field's
+	// ansible_host case can trigger: changing ansible_host between two
+	// IP literals on a host with the freeipa-client role detours
+	// through pushFreeipaClientDNSReplaceConfirm's Day-2 DNS-replacement
+	// acknowledgement (spec.md §11.7's automation-parity requirement —
+	// the driver refuses to guess an answer, so this is required exactly
+	// when that confirm screen appears). "yes" authorizes writing
+	// freeipa_client_dns_replace_from_address alongside the new
+	// ansible_host; "no" changes only ansible_host. Unused by every
+	// other set_host_field field and by every other action.
+	Confirm string `json:"confirm,omitempty"`
 }
 
 // validateValueOrEnv enforces that exactly one of Value/ValueEnv is set,
