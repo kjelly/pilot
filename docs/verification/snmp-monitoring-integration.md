@@ -156,7 +156,7 @@ PRODUCTION_READY — see spec §17.4/§18 (AC23) for the real-device gate.
 ## Traceability
 
 - C1-C6 exercise `internal/monitoring` (Phase 2 of the spec).
-- C7-C9 exercise `internal/detection`'s subject/migration generalization (Phase 4). C14-C15 exercise the SNMP-specific detection profile and model-provider fallback lane (Phase 5/6, not yet implemented).
+- C7-C9 exercise `internal/detection`'s subject/migration generalization (Phase 4). C15 exercises the real `network-device-ifmib-v1` profile's cardinality policy (Phase 5). C14 exercises the model-provider fallback lane (Phase 6, not yet implemented).
 - C10, C13 exercise `internal/agentcontroller` (Phase 3).
 - C11 exercises the fail-closed guard at `cmd/pilot-agent-controller`'s
   `remediation propose`/`reapply-propose` choke point, the only place a
@@ -208,8 +208,23 @@ C9's probe corrected to the test's real name (C9). C10-C13 remain the
 Phase 3 rows (Agent Controller); see
 `docs/runbooks/agent-monitoring-snmp-subject.md`.
 
-**C14-C15 (Phase 5/6 — SNMP feature profile, model-provider fallback):
-not yet implemented.** This file stays DRAFT until those phases land.
+**C15 (Phase 5 — `network-device-ifmib-v1` cardinality policy): DONE.**
+See `docs/runbooks/snmp-adaptive-detection.md` — the real feature profile
+(`monitoring/detection/feature-profiles/network-device-ifmib-v1.yaml`)
+groups every feature's PromQL by `pilot_target` and never `ifIndex`, and a
+real 3-VM disposable-topology run confirmed the Detection Engine's live
+Thanos chain actually discovers `pilot_target` (a real snmpd → real
+snmp-exporter → real Prometheus → real Thanos Query chain), producing a
+`subject_kind=network_device` row with `pilot_host` empty — matching
+Phase 4's design. Fixture tests (not a real-device fault) additionally
+prove a warm-up + spike sequence produces a correctly-labeled SignalEvent,
+and the four normal/stale/missing/ambiguous negative lanes pass using the
+profile's own 90s/5s sampling override. One real bug was found+fixed in
+the profile's PromQL (an ambiguous `group_left` clause) via a live Thanos
+Query 400 response.
+
+**C14 (Phase 6 — model-provider fallback lane): not yet implemented.**
+This file stays DRAFT until that phase lands.
 
 ## Change record
 
@@ -219,3 +234,4 @@ not yet implemented.** This file stays DRAFT until those phases land.
 | 2026-09-02 | DRAFT | Phase 2 evidence added for C1-C6 (registry v2 schema/validate/compile) — see `docs/runbooks/snmp-monitoring-registry.md`. C7-C15 remain unimplemented; still DRAFT overall. |
 | 2026-09-02 | DRAFT | Phase 3 evidence added for C10-C13 (Agent Controller subject/envelope, repair guard, diagnose) — see `docs/runbooks/agent-monitoring-snmp-subject.md`; C11 probe path corrected to `cmd/pilot-agent-controller` (actual guard location) instead of `internal/repair`. C7-C9, C14-C15 remain unimplemented; still DRAFT overall. |
 | 2026-09-02 | DRAFT | Phase 4 evidence added for C7-C9 (Detection Engine subject/migration generalization) — see `docs/runbooks/detection-engine-subject-generalization.md`; C9 probe corrected to the real ambiguous-series test name. C14-C15 remain unimplemented (Phase 5/6); still DRAFT overall. |
+| 2026-09-02 | DRAFT | Phase 5 evidence added for C15 (`network-device-ifmib-v1` cardinality policy + real disposable-VM discovery) — see `docs/runbooks/snmp-adaptive-detection.md`. C14 (model-provider fallback) remains unimplemented (Phase 6); still DRAFT overall. |

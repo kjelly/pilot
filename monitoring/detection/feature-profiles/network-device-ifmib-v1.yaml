@@ -1,0 +1,88 @@
+# Detection Engine SNMP network-device feature profile (spec
+# docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md
+# §9.10, Phase 5). id/version are part of the SignalEvent fingerprint
+# (spec §9.8/§21) — changing either changes the fingerprint of every
+# subject using this profile. Only generic IF-MIB, device-level aggregate
+# features — no vendor-specific OID, no per-interface subject (spec §9.10/
+# Appendix B: aggregation MUST happen in PromQL before a sample ever
+# reaches GroupSamplesByKey).
+id: network-device-ifmib-v1
+version: 1
+
+identity:
+  label: pilot_target
+  kind: network_device
+  siteLabel: site
+  cohortLabel: detection_cohort
+
+sampling:
+  maxSampleAge: 90s
+  futureSkewTolerance: 5s
+
+features:
+  - name: interface_error_rate
+    required: true
+    category: network_error
+    scaleFloor: 0.01
+    cohort: true
+    validMin: 0
+    validMax: 1000000
+    promql: |
+      sum by (pilot_target, site, detection_cohort) (
+        rate(ifInErrors{pilot_protocol="snmp",pilot_target!=""}[5m])
+        +
+        rate(ifOutErrors{pilot_protocol="snmp",pilot_target!=""}[5m])
+      )
+
+  - name: interface_discard_rate
+    required: true
+    category: network_discard
+    scaleFloor: 0.01
+    cohort: true
+    validMin: 0
+    validMax: 1000000
+    promql: |
+      sum by (pilot_target, site, detection_cohort) (
+        rate(ifInDiscards{pilot_protocol="snmp",pilot_target!=""}[5m])
+        +
+        rate(ifOutDiscards{pilot_protocol="snmp",pilot_target!=""}[5m])
+      )
+
+  - name: admin_up_oper_down_ratio
+    required: false
+    category: link_state
+    scaleFloor: 0.01
+    cohort: true
+    validMin: 0
+    validMax: 1
+    promql: |
+      sum by (pilot_target, site, detection_cohort) (
+        (ifAdminStatus{pilot_protocol="snmp",pilot_target!=""} == 1)
+        and on (pilot_target, site, detection_cohort, ifIndex)
+        (ifOperStatus{pilot_protocol="snmp",pilot_target!=""} != 1)
+      )
+      /
+      clamp_min(
+        sum by (pilot_target, site, detection_cohort) (
+          ifAdminStatus{pilot_protocol="snmp",pilot_target!=""} == 1
+        ),
+        1
+      )
+
+  - name: aggregate_interface_utilization_ratio
+    required: false
+    category: network_utilization
+    scaleFloor: 0.05
+    cohort: true
+    validMin: 0
+    validMax: 2
+    promql: |
+      max by (pilot_target, site, detection_cohort) (
+        (
+          rate(ifHCInOctets{pilot_protocol="snmp",pilot_target!=""}[5m])
+          +
+          rate(ifHCOutOctets{pilot_protocol="snmp",pilot_target!=""}[5m])
+        ) * 8
+        / on (pilot_target, site, detection_cohort, ifIndex) group_left()
+        (ifHighSpeed{pilot_protocol="snmp",pilot_target!=""} * 1000000)
+      )
