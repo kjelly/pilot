@@ -672,7 +672,7 @@ func TestEditRouter_Teatest_HostVarsFlow_NotOfferedWithoutApplicableRole(t *test
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return strings.Contains(string(b), "🗑  刪除這台主機")
+		return strings.Contains(string(b), "🗑  下架 / Decommission 主機")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 
 	// Esc here now steps back to the host list rather than quitting (see

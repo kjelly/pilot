@@ -419,15 +419,35 @@ func (d *automationDriver) disableRole(r *editRouterModel, host, role string) er
 	return d.setRoleChecked(r, host, role, false, editAction{})
 }
 
+// deleteHost drives the same decommission flow the interactive TUI's
+// "🗑 下架 / Decommission 主機" menu item enters (spec.md §7.2/§11) — it
+// no longer performs a direct in-memory delete. Because decommission
+// planning re-reads hosts.yml from disk (INV-2/INV-3), the target host
+// must already be persisted on disk before this step runs; a host only
+// created earlier in the same unsaved session (never written to disk
+// yet) correctly cannot be decommissioned here, exactly as the
+// interactive wizard would behave.
 func (d *automationDriver) deleteHost(r *editRouterModel, host string) error {
 	if err := d.ensureHostMenu(r, host); err != nil {
 		return err
 	}
-	if err := d.choose(r, "刪除這台主機"); err != nil {
+	if err := d.choose(r, "下架"); err != nil {
 		return err
 	}
-	// The confirm defaults to No; an explicit "y" is required to actually delete.
-	return d.confirmYesNo(r, true)
+	// Plan summary screen (spec.md §11.1/§11.2): a blocked plan offers no
+	// destructive control at all, so trying to choose the exact "continue"
+	// item surfaces a clear error here rather than silently doing nothing.
+	if err := d.chooseByID(r, "hosts.decommission.plan", decommissionChoiceConfirm); err != nil {
+		return fmt.Errorf("decommission plan for host %q did not offer to continue (likely blocked, or planning failed): %w", host, err)
+	}
+	// Exact-host-name confirmation (spec.md §11.3) — no generic yes/no.
+	if automationState(r).Kind != tui.ScreenInput {
+		return fmt.Errorf("expected the exact-host-name decommission confirmation screen, got %s", automationScreenID(r))
+	}
+	if err := d.typeText(r, host, true); err != nil {
+		return err
+	}
+	return d.enter(r)
 }
 
 func (d *automationDriver) discardHosts(r *editRouterModel) error {

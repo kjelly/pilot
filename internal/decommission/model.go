@@ -100,6 +100,11 @@ type PlanStatus string
 const (
 	PlanStatusExecutable PlanStatus = "executable"
 	PlanStatusBlocked    PlanStatus = "blocked"
+	// PlanStatusCompleted is set only by Finalize on success (spec.md §23
+	// step 10) — never by PlanHost. A persisted plan in this state is
+	// replay-safe: a repeated apply/resume returns already_completed plus
+	// the plan's Receipt (INV-15/HD24), never re-touching the workspace.
+	PlanStatusCompleted PlanStatus = "completed"
 )
 
 // HostSnapshot is the frozen, plan-bound copy of the target host's
@@ -170,6 +175,12 @@ type Plan struct {
 
 	CreatedAt string // RFC3339Nano
 	ExpiresAt string // RFC3339Nano
+
+	// Receipt is set only once Finalize completes this plan successfully
+	// (spec.md §26). It round-trips through Store.SavePlan/LoadPlan (the
+	// whole Plan, receipt included, is one JSON blob — see store.go) so a
+	// later replay attempt can return it without re-deriving anything.
+	Receipt *Receipt
 }
 
 // Blocked reports whether the plan has at least one blocker (plan- or

@@ -573,12 +573,29 @@ func TestAutomationDriverConfirmYesNo(t *testing.T) {
 }
 
 func TestEditAutomationDriverDeleteHost(t *testing.T) {
+	// delete_host now drives the decommission flow (spec.md §7.2/§11),
+	// which plans from hosts.yml as it exists ON DISK (INV-2/INV-3) — it
+	// is no longer a pure in-memory mutation deferred to a later
+	// save_hosts step. So this fixture seeds hosts.yml directly (as if a
+	// prior session had already saved it), rather than creating the hosts
+	// in-memory first: a host created earlier in the SAME unsaved session
+	// cannot be decommissioned before it has ever been persisted, exactly
+	// like the interactive wizard.
 	dir := t.TempDir()
+	t.Setenv("PILOT_DATA_DIR", filepath.Join(t.TempDir(), "pilot-data"))
+	origDataDir := dataDir
+	dataDir = ""
+	t.Cleanup(func() { dataDir = origDataDir })
+
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(
+		"hosts:\n  web-1:\n    ansible_host: \"10.0.0.1\"\n  web-2:\n    ansible_host: \"10.0.0.2\"\n",
+	), 0o644); err != nil {
+		t.Fatalf("seed hosts.yml: %v", err)
+	}
+
 	scenario := editScenario{
 		Version: 1,
 		Steps: []editAction{
-			{Action: "create_host", Host: "web-1"},
-			{Action: "create_host", Host: "web-2"},
 			{Action: "delete_host", Host: "web-1"},
 			{Action: "save_hosts"},
 		},

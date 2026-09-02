@@ -100,3 +100,9 @@ func (s *Store) ApprovedForHash(planID, planHash string) (bool, error) {
 	}
 	return found && decision == "approve", nil
 }
+
+// SaveRetiredHost writes the retirement marker (spec.md §22/§23 step 9) —
+// Finalize's only write beyond the plan row itself on success.
+func (s *Store) SaveRetiredHost(host, fqdn, decommissionID, reason string, retiredAt time.Time, finalInventoryRevision string) error {
+	return s.db.SaveRetiredHost(host, fqdn, decommissionID, reason, retiredAt.Format(time.RFC3339Nano), finalInventoryRevision)
+}

@@ -614,7 +614,7 @@ func hostMenuItems(h *inventory.Host) []hostMenuItem {
 	}
 	return append(items,
 		hostMenuItem{tui.Choice{ID: "hosts.item.deployment_availability", Label: fmt.Sprintf("部署可用性(離線時)：%s", deploymentAvailabilityLabel(h.DeploymentAvailability))}, pushDeploymentAvailabilityMenu},
-		hostMenuItem{tui.Choice{ID: "hosts.item.delete", Label: "🗑  刪除這台主機"}, pushConfirmDeleteHost},
+		hostMenuItem{tui.Choice{ID: "hosts.item.delete", Label: "🗑  下架 / Decommission 主機"}, pushDecommissionFlow},
 		hostMenuItem{tui.Choice{ID: "hosts.item.back", Label: "↩  返回主機清單"}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
 			return pushHostList(r, dir, path, hf, "")
 		}},
@@ -673,18 +673,6 @@ func pushHostFieldEdit(r *editRouterModel, dir, path string, hf *inventory.Hosts
 			apply(h, strings.TrimSpace(m.Value()))
 		}
 		return pushHostMenu(r, dir, path, hf, name)
-	})
-}
-
-func pushConfirmDeleteHost(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
-	question := fmt.Sprintf("確定要刪除主機 %q 嗎？", name)
-	return r.transitionTo(r.uiFactory().Confirm(tui.ConfirmSpec{Title: question, Default: false}), "", func(r *editRouterModel, s screen) tea.Cmd {
-		m := s.(tui.ConfirmScreen)
-		if !m.Value() {
-			return pushHostMenu(r, dir, path, hf, name)
-		}
-		removeHost(hf, name)
-		return pushHostList(r, dir, path, hf, fmt.Sprintf("已刪除主機 %q(還沒存檔)。", name))
 	})
 }
 
