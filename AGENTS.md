@@ -287,6 +287,7 @@ group == inventory 的一般情形）與 `freeipa_client_regression_test.go`（�
 | 路徑 | 放什麼 | 性質 |
 |---|---|---|
 | `playbooks/apply/*.yml` | coding agent 依已確認 spec 直接撰寫、經 review 的真實安裝/設定 playbook（含 snapshot→rollback 安全網；不是 pilot generator 產物） | **真實** |
+| `playbooks/decommission/*.yml` | 單一元件的 host decommission 清理 playbook（例：`freeipa-client-decommission.yml`）——one host at a time、idempotent、decommission 專用的 mutation playbook，只由 `internal/decommission/providers` 呼叫，不准 operator 直接跑；不准把每個元件的 product-specific 行為塞進單一 monolithic `host-decommission.yml`（docs/superpowers/specs/2026-09-02-host-decommission-spec.md §15） | **真實** |
 | `playbooks/verify/*.yml` | **已棄用（2026-07-17，見該目錄 README.md）**：舊 generator 產物，僅存檔參考。**不要新增、更新或執行**；驗收一律 `pilot verify docs/verification/<x>.md`，`--generate` 也已拒絕輸出到這裡 | **棄用** |
 | `playbooks/site.yml`、`playbooks/preflight.yml` | 全站入口與前置檢查 | **真實** |
 | `playbooks/test/fixtures/*.yml` | 跨 host 前置狀態、demo / sim / user-setup 等測試前置（見 §4.1） | **測試** |

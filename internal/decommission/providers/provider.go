@@ -51,6 +51,14 @@ type PlanInput struct {
 	HostName           string
 	FQDN               string
 	OfflineDisposition string
+	// RosterPath is the resolved (absolute, or already relative to the
+	// planning caller's own workspace) path to the canonical FreeIPA
+	// roster declaring this host, when the host has one — "" when it
+	// doesn't. Server-resolved by the caller (planner.go), never a raw
+	// caller-supplied file the provider blindly trusts as executable
+	// content — it is only ever read, never written, during Plan (spec.md
+	// §10.1: planning itself must not mutate anything).
+	RosterPath string
 }
 
 // Step is one planned, typed provider action (spec.md §8.1). It

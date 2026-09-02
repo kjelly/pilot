@@ -220,7 +220,12 @@ func TestRegression_FreeipaIdentityAuthenticatesBeforeCheckModeProbes(t *testing
 	if !strings.Contains(kinit, "check_mode: false") {
 		t.Fatal("Kinit admin must run during --check previews so live IPA probes have a fresh ticket")
 	}
-	if !strings.Contains(kinit, "tags: [identity, groups]") {
+	// Host decommission (spec.md 2026-09-02 §16.3) added a third tag,
+	// freeipa_host_absent_inspect, onto this SAME task so a caller can
+	// restrict a run to just the read-only absent-host inspection query
+	// plus authentication — "identity, groups" must still both be
+	// present so a groups-only tagged reconciliation still authenticates.
+	if !strings.Contains(kinit, "tags: [identity, groups") {
 		t.Fatal("Kinit admin must run for a groups-only tagged reconciliation")
 	}
 }

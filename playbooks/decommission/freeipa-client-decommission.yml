@@ -1,0 +1,228 @@
+# FreeIPA client host decommission — local cleanup only.
+#
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §16.2/§15:
+# this playbook owns ONLY the client-side half of FreeIPA client
+# decommission (remove the enrollment, verify it's really gone, clean up
+# the Pilot-managed local pins/config freeipa-client-apply.yml itself
+# created). It deliberately does NOT touch anything central — no
+# hostgroup/netgroup/HBAC/sudo pruning, no DNS deletion, no service-
+# principal check, no `ipa host-del` — that is
+# playbooks/apply/freeipa-identity-apply.yml's job (its "Hosts marked
+# absent" section, driven by the canonical roster's `state: absent`,
+# spec.md §16.3). Per spec.md §15's explicit instruction, this is NOT a
+# monolithic host-decommission.yml — it is FreeIPA-client-specific only.
+#
+# Invoked ONLY by internal/decommission/providers.FreeIPAClientProvider —
+# never directly by an operator (see AGENTS.md §4.0's playbooks/
+# decommission/ row and contracts/freeipa-client.yaml's
+# playbooks.decommission comment).
+#
+# Reuses the exact working uninstall primitive already proven in this
+# repo (`ipa-client-install --uninstall -U`, see
+# playbooks/apply/freeipa-realm-replacement-apply.yml's "Realm
+# replacement — remove old client enrollment" task) rather than
+# reinventing it.
+#
+# Idempotent, one host at a time:
+#   - already-unenrolled host: the uninstall task is skipped (guarded by
+#     the "detect prior enrollment" stat, mirroring
+#     freeipa-client-apply.yml's own `ipa_cfg`/`ipa_config_marker`
+#     convention exactly so both playbooks agree on what "enrolled" means)
+#     and every subsequent cleanup task is naturally a no-op (`state:
+#     absent` on something already absent, `lineinfile: state: absent`
+#     against a line that doesn't exist).
+#   - re-running after a successful decommission is a clean no-op.
+#
+# `--tags inspect` restricts execution to the two read-only tasks in
+# pre_tasks (stat + a debug print of the result) — no mutating task
+# carries that tag — so a caller (internal/decommission/providers'
+# Provider.Inspect) can safely query current enrollment state without
+# risking the real uninstall running.
+#
+# Usage:
+#
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/freeipa-client-decommission.yml \
+#       --limit <retiring-host>
+#
+#   # read-only enrollment check only (never mutates):
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/freeipa-client-decommission.yml \
+#       --limit <retiring-host> --tags inspect
+#
+# Stage gating (same convention as every other playbooks/apply/*.yml —
+# applied here too for defense in depth, even though this directory isn't
+# covered by AGENTS.md §4.3's apply-playbook enumeration: host
+# decommission is inherently destructive, and INV-4's human-approval gate
+# already lives at the Go layer, but this Ansible-layer gate is cheap
+# insurance against an accidental direct invocation):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: FreeIPA client decommission — local enrollment removal
+  hosts: "{{ target_group | default('freeipa-client') }}"
+  become: true
+  gather_facts: false
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+    ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
+    # Matches freeipa-client-apply.yml's own default exactly — same
+    # derivation, so this playbook agrees with what enrollment actually
+    # pinned in /etc/hosts and can remove precisely that line.
+    freeipa_decommission_client_fqdn: "{{ ansible_hostname | lower }}.{{ ipa_domain }}"
+
+    ipa_config_marker: /etc/ipa/default.conf # created iff enrolled — identical marker to freeipa-client-apply.yml
+
+  pre_tasks:
+    - name: "FreeIPA client decommission — gather fresh facts"
+      ansible.builtin.setup:
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    # Read-only detection, identical marker to freeipa-client-apply.yml's
+    # own "detect prior enrollment" task — both playbooks must agree on
+    # what "enrolled" means. This is the ONLY thing --tags inspect runs
+    # (plus the debug print below); no mutating task carries this tag.
+    - name: "FreeIPA client decommission — detect current enrollment (read-only)"
+      ansible.builtin.stat:
+        path: "{{ ipa_config_marker }}"
+      register: freeipa_decom_cfg
+      tags: [inspect]
+
+    - name: "FreeIPA client decommission — report enrollment state for external tooling"
+      ansible.builtin.debug:
+        msg: "IPA_CLIENT_ENROLLED={{ freeipa_decom_cfg.stat.exists | ternary('true', 'false') }}"
+      tags: [inspect]
+
+  tasks:
+    - name: "FreeIPA client decommission — local removal, with diagnostics on failure"
+      block:
+        # ipa-client-install --uninstall is NOT idempotent against an
+        # already-unenrolled host (it errors "IPA client is not
+        # configured"), so guard it exactly the way freeipa-client-
+        # apply.yml's enrollment task guards the opposite direction
+        # (`creates:` there, `when: ...exists` here).
+        - name: "FreeIPA client decommission — remove FreeIPA client enrollment"
+          ansible.builtin.command:
+            argv: [ipa-client-install, --uninstall, -U]
+          when:
+            - not ansible_check_mode
+            - freeipa_decom_cfg.stat.exists
+          register: freeipa_decom_uninstall
+          changed_when: true
+          no_log: true
+
+        - name: "FreeIPA client decommission — verify no longer an active IPA client (inverse of freeipa-client-apply.yml's own enrollment marker)"
+          ansible.builtin.stat:
+            path: "{{ ipa_config_marker }}"
+          register: freeipa_decom_cfg_after
+          when: not ansible_check_mode
+
+        - name: "Gate: local machine must no longer be an active IPA client"
+          ansible.builtin.assert:
+            that:
+              - not freeipa_decom_cfg_after.stat.exists
+            fail_msg: >-
+              {{ ipa_config_marker }} still exists after ipa-client-install
+              --uninstall — the host still looks like an active IPA
+              client; refusing to report local cleanup as complete.
+          when: not ansible_check_mode
+
+        # Only the two /etc/hosts pins freeipa-client-apply.yml itself
+        # wrote (see that playbook's "pin this host" / "pin the FreeIPA
+        # server" tasks) — never any other, administrator-managed
+        # /etc/hosts entry (spec.md §16.2's explicit boundary). Matched by
+        # the EXACT same regexp those tasks used to write them.
+        - name: "FreeIPA client decommission — remove this host's own /etc/hosts pin (Pilot-managed, written by freeipa-client-apply.yml)"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '(?i)\s{{ freeipa_decommission_client_fqdn | regex_escape }}(\s|$)'
+            state: absent
+          when: not ansible_check_mode
+
+        - name: "FreeIPA client decommission — remove the FreeIPA server /etc/hosts pin (Pilot-managed, written by freeipa-client-apply.yml)"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '\s{{ ipa_server_fqdn | regex_escape }}(\s|$)'
+            state: absent
+          when: not ansible_check_mode
+
+        # The one Pilot-managed sshd drop-in freeipa-client-apply.yml
+        # itself writes ("FreeIPA client — allow password/keyboard-
+        # interactive SSH"). Nothing else under sshd_config.d/ is Pilot's
+        # to remove.
+        - name: "FreeIPA client decommission — remove the Pilot-managed sshd password-auth drop-in"
+          ansible.builtin.file:
+            path: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+            state: absent
+          register: freeipa_decom_sshd_dropin
+          when: not ansible_check_mode
+
+        - name: "FreeIPA client decommission — restart sshd after removing the password-auth drop-in"
+          ansible.builtin.systemd:
+            name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - freeipa_decom_sshd_dropin.changed | default(false)
+
+      rescue:
+        - name: "FreeIPA client decommission — rescue: dump SSSD status"
+          ansible.builtin.command: sssctl domain-status "{{ ipa_domain }}"
+          register: freeipa_decom_rescue_sssd
+          changed_when: false
+          failed_when: false
+
+        - name: "FreeIPA client decommission — rescue: tail client-install log"
+          ansible.builtin.command: tail -n 60 /var/log/ipaclient-install.log
+          register: freeipa_decom_rescue_log
+          changed_when: false
+          failed_when: false
+
+        - name: "FreeIPA client decommission — rescue: surface diagnostics and fail"
+          ansible.builtin.fail:
+            msg: |
+              FreeIPA client local decommission FAILED. Diagnostics:
+              --- sssctl domain-status {{ ipa_domain }} ---
+              {{ freeipa_decom_rescue_sssd.stdout | default('(unavailable)') }}
+              {{ freeipa_decom_rescue_sssd.stderr | default('') }}
+              --- /var/log/ipaclient-install.log (tail 60) ---
+              {{ freeipa_decom_rescue_log.stdout | default('(unavailable)') }}
+              This host's decommission is resumable: no central FreeIPA
+              state (roster, host object, DNS, hostgroup/HBAC/sudo
+              membership) has been touched by this playbook — only local
+              client state was attempted. Resume via `pilot host
+              decommission resume` once the underlying issue is fixed.

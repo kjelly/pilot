@@ -13,6 +13,8 @@ package decommission
 import (
 	"crypto/rand"
 	"encoding/hex"
+
+	"github.com/kjelly/pilot/internal/decommission/providers"
 )
 
 // ReferenceClassification is how one discovered workspace reference to the
@@ -125,11 +127,24 @@ type ComponentPlan struct {
 	ComponentID          string // "" when no contract matched the role
 	HasContract          bool
 	DeclaresDecommission bool // Playbooks.Decommission != nil
-	RetentionRequired    bool
-	RetentionSatisfied   bool
-	LocalCleanupStatus   LocalCleanupStatus
-	Blockers             []Blocker
-	Warnings             []Warning
+	// ProviderRegistered is true when a live Provider (providers.Provider)
+	// is registered for this component in the PlanInput.Providers
+	// registry (Phase 3+) — the presence of a registered provider is what
+	// stops planComponent from unconditionally emitting an
+	// external_state_unsupported blocker (spec.md §37 Phase 3); it may
+	// still legitimately block for other reasons the provider itself
+	// reports (retention, unreachable, unknown service principal, ...).
+	ProviderRegistered bool
+	RetentionRequired  bool
+	RetentionSatisfied bool
+	LocalCleanupStatus LocalCleanupStatus
+	// Steps is the registered provider's planned ordered actions for this
+	// component (providers.Provider.Plan's output) — empty when no
+	// provider is registered, or when the provider itself blocked (see
+	// Blockers instead).
+	Steps    []providers.Step
+	Blockers []Blocker
+	Warnings []Warning
 }
 
 // Blocked reports whether c currently blocks planning.

@@ -6,6 +6,14 @@ specs:
     rows: {all: true}
 playbooks:
   apply: playbooks/apply/freeipa-client-apply.yml
+  # Host decommission Phase 3 (docs/superpowers/specs/2026-09-02-host-
+  # decommission-spec.md §16): local client enrollment removal, invoked
+  # only by internal/decommission/providers.FreeIPAClientProvider — never
+  # directly by an operator (see AGENTS.md §4.0's playbooks/decommission/
+  # row). Central roster-driven convergence (host-del, DNS, service-
+  # principal check) reuses playbooks/apply/freeipa-identity-apply.yml's
+  # own state:absent handling instead of a second decommission playbook.
+  decommission: playbooks/decommission/freeipa-client-decommission.yml
 regressionTests:
   - internal/spec/freeipa_client_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go

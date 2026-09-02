@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/decommission/providers"
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
@@ -36,6 +38,17 @@ type PlanInput struct {
 	// RetentionDispositions maps component ID -> the operator's explicit
 	// retention disposition for that component (spec.md §20.1).
 	RetentionDispositions map[string]RetentionDisposition
+
+	// Providers is the registry of live decommission providers, keyed by
+	// component ID (spec.md §8.1) — e.g. Providers["freeipa-client"].
+	// Nil/empty (the Phase 1/2 default — every existing caller/test that
+	// never sets this field keeps their exact prior behavior unchanged)
+	// means no provider is registered for ANY component, so every
+	// component with a matched contract is still classified
+	// external_state_unsupported (INV-7's fail-closed default). A
+	// registered provider's Plan is consulted instead of that unconditional
+	// blocker (Phase 3+) — see planComponent.
+	Providers map[string]providers.Provider
 
 	// Now overrides time.Now for deterministic tests. Nil means time.Now.
 	Now func() time.Time
@@ -133,7 +146,7 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 
 	var componentIDs []string
 	for _, role := range sortedRoles {
-		cp := planComponent(role, in.Catalog, in.RetentionDispositions)
+		cp := planComponent(ctx, role, in.Catalog, in.RetentionDispositions, in.Providers, *target, in.WorkspaceDir, in.OfflineDisposition)
 		if cp.RetentionRequired {
 			plan.RetentionRequirements = append(plan.RetentionRequirements, RetentionRequirement{
 				ComponentID: cp.ComponentID,
@@ -199,12 +212,18 @@ func extractDecommissionPolicy(v any) (decommissionPolicyShape, bool) {
 }
 
 // planComponent resolves one role to its contract (if any) and classifies
-// it (spec.md §10.1 INV-7): every component is external_state_unsupported
-// in Phase 1 (no provider is registered — see providers/provider.go), but
-// the blocker detail distinguishes "declares a decommission playbook" from
-// "declares nothing" per the task brief, and the retention gate (INV-8) is
-// evaluated regardless of provider support.
-func planComponent(role string, catalog contract.Catalog, dispositions map[string]RetentionDisposition) ComponentPlan {
+// it (spec.md §10.1 INV-7). When no live Provider is registered for the
+// matched component (providers is nil, or has no entry for this
+// component ID — the Phase 1/2 default), every component is
+// external_state_unsupported exactly as before, with the blocker detail
+// distinguishing "declares a decommission playbook" from "declares
+// nothing" per the task brief. Starting Phase 3 (spec.md §37), a
+// component WITH a registered provider consults that provider's Plan
+// instead of the unconditional blocker — the provider may still block for
+// its own reasons (retention below is independent either way; an
+// unsupported/unproven service principal, a roster validation failure,
+// etc. surface as a provider-specific blocker, never silently ignored).
+func planComponent(ctx context.Context, role string, catalog contract.Catalog, dispositions map[string]RetentionDisposition, provs map[string]providers.Provider, host inventory.Host, workspaceDir string, offline OfflineDisposition) ComponentPlan {
 	cp := ComponentPlan{Role: role}
 
 	matches := catalog.ComponentsForRole(role)
@@ -220,21 +239,36 @@ func planComponent(role string, catalog contract.Catalog, dispositions map[strin
 	cp.ComponentID = matched.ID
 	cp.DeclaresDecommission = matched.Playbooks.Decommission != nil
 
-	detail := fmt.Sprintf(
-		"component %q declares no decommission playbook and no registered decommission provider exists yet (Phase 1 is planning-only, zero live providers) — fail-closed per INV-7",
-		matched.ID,
-	)
-	if cp.DeclaresDecommission {
-		detail = fmt.Sprintf(
-			"component %q declares playbooks.decommission=%q but no executor is registered yet (Phase 1 is planning-only) — fail-closed per INV-7",
-			matched.ID, *matched.Playbooks.Decommission,
+	if provider, ok := provs[matched.ID]; ok && provider != nil {
+		cp.ProviderRegistered = true
+		steps, err := provider.Plan(ctx, providers.PlanInput{
+			HostName:           host.Name,
+			FQDN:               firstNonEmpty(host.AnsibleHost, host.Name),
+			OfflineDisposition: string(offline),
+			RosterPath:         rosterPathFor(workspaceDir, host),
+		})
+		if err != nil {
+			cp.Blockers = append(cp.Blockers, Blocker{Code: classifyProviderPlanError(err), Detail: err.Error()})
+		} else {
+			cp.Steps = steps
+		}
+	} else {
+		detail := fmt.Sprintf(
+			"component %q declares no decommission playbook and no registered decommission provider exists yet (zero live providers registered for this plan) — fail-closed per INV-7",
+			matched.ID,
 		)
+		if cp.DeclaresDecommission {
+			detail = fmt.Sprintf(
+				"component %q declares playbooks.decommission=%q but no executor is registered yet — fail-closed per INV-7",
+				matched.ID, *matched.Playbooks.Decommission,
+			)
+		}
+		cp.Blockers = append(cp.Blockers, Blocker{Code: ErrExternalStateUnsupported, Detail: detail})
 	}
-	cp.Blockers = append(cp.Blockers, Blocker{Code: ErrExternalStateUnsupported, Detail: detail})
 
 	// Retention gate (spec.md §20, INV-8, HD15) — independent of provider
-	// support: a component can be BOTH unsupported AND stateful-retention-
-	// gated; both blockers are reported.
+	// support: a component can be BOTH unsupported/blocked AND stateful-
+	// retention-gated; both blockers are reported.
 	if req, ok := extractDecommissionPolicy(matched.Lifecycle.Decommission); ok && req.Class == "stateful" && req.Retention == "required" {
 		cp.RetentionRequired = true
 		disposition := dispositions[matched.ID]
@@ -249,6 +283,20 @@ func planComponent(role string, catalog contract.Catalog, dispositions map[strin
 	}
 
 	return cp
+}
+
+// classifyProviderPlanError maps a providers.Provider.Plan error to a
+// decommission ErrorClass. A known unproven/unknown service principal
+// (spec.md §16.6, HD12) is ownership_unknown — every other provider Plan
+// failure (a live query error, a roster-validation failure the provider
+// itself detected, ...) is cleanup_failed_terminal: planning could not be
+// completed for this component, not "unsupported" (a provider IS
+// registered) and not a specific known taxonomy entry.
+func classifyProviderPlanError(err error) ErrorClass {
+	if errors.Is(err, providers.ErrUnknownServicePrincipal) {
+		return ErrOwnershipUnknown
+	}
+	return ErrCleanupFailedTerminal
 }
 
 // applyUnreachablePolicy implements spec.md §21/HD16/HD17. Phase 1 never
