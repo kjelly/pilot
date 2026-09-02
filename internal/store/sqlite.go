@@ -16,7 +16,7 @@ type Store struct {
 // migration is added to migrateSteps. PRAGMA user_version is used to
 // record the installed version on disk so that startup is idempotent
 // and free of swallowed errors.
-const SchemaVersion = 14
+const SchemaVersion = 15
 
 const schema = `
 -- The base schema is the FINAL shape only. The agent-loop tables that
@@ -126,6 +126,68 @@ CREATE TRIGGER IF NOT EXISTS evidence_admin_events_no_update
 BEFORE UPDATE ON evidence_admin_events BEGIN SELECT RAISE(ABORT, 'evidence_admin_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS evidence_admin_events_no_delete
 BEFORE DELETE ON evidence_admin_events BEGIN SELECT RAISE(ABORT, 'evidence_admin_events is append-only'); END;
+
+-- Host decommission saga (docs/superpowers/specs/2026-09-02-host-decommission-spec.md
+-- section 9.1). plan_json carries the full internal/decommission.Plan as an
+-- opaque JSON blob -- this package deliberately has no domain import, so
+-- the scalar columns duplicate the handful of fields callers need to
+-- list/filter without deserializing the blob. host_decommission_steps has
+-- no writer yet (Phase 1 ships no executor); it exists now so show and
+-- the Phase 2+ executor share one read/write path from day one.
+CREATE TABLE IF NOT EXISTS host_decommission_plans (
+    id                  TEXT PRIMARY KEY,
+    host                TEXT NOT NULL,
+    fqdn                TEXT NOT NULL DEFAULT '',
+    environment         TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL,
+    plan_hash           TEXT NOT NULL,
+    inventory_revision  TEXT NOT NULL,
+    plan_json           TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    expires_at          TEXT NOT NULL,
+    completed_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_host_decommission_plans_host ON host_decommission_plans(host);
+
+CREATE TABLE IF NOT EXISTS host_decommission_steps (
+    id              TEXT PRIMARY KEY,
+    plan_id         TEXT NOT NULL,
+    seq             INTEGER NOT NULL,
+    component       TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
+    phase           TEXT NOT NULL DEFAULT '',
+    action          TEXT NOT NULL DEFAULT '',
+    target_identity TEXT NOT NULL DEFAULT '',
+    state           TEXT NOT NULL DEFAULT 'pending',
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    started_at      TEXT,
+    finished_at     TEXT,
+    error_class     TEXT,
+    error_text      TEXT,
+    result_json     TEXT,
+    UNIQUE(plan_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_host_decommission_steps_plan ON host_decommission_steps(plan_id);
+
+CREATE TABLE IF NOT EXISTS host_decommission_approvals (
+    id         TEXT PRIMARY KEY,
+    plan_id    TEXT NOT NULL,
+    plan_hash  TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    decision   TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_host_decommission_approvals_plan ON host_decommission_approvals(plan_id, plan_hash);
+
+CREATE TABLE IF NOT EXISTS retired_hosts (
+    host                     TEXT PRIMARY KEY,
+    fqdn                     TEXT NOT NULL DEFAULT '',
+    decommission_id          TEXT NOT NULL,
+    reason                   TEXT NOT NULL DEFAULT '',
+    retired_at               TEXT NOT NULL,
+    final_inventory_revision TEXT NOT NULL DEFAULT ''
+);
 `
 
 // migration is one ALTER TABLE statement. Bump SchemaVersion when
@@ -358,6 +420,69 @@ var migrateSteps = []migration{
 				BEGIN SELECT RAISE(ABORT, 'verify_evidence is append-only'); END;
 			CREATE TRIGGER IF NOT EXISTS evidence_admin_events_no_update BEFORE UPDATE ON evidence_admin_events BEGIN SELECT RAISE(ABORT, 'evidence_admin_events is append-only'); END;
 			CREATE TRIGGER IF NOT EXISTS evidence_admin_events_no_delete BEFORE DELETE ON evidence_admin_events BEGIN SELECT RAISE(ABORT, 'evidence_admin_events is append-only'); END;`,
+	},
+	{
+		// Identical SQL to the host decommission tables in the base
+		// schema string above — kept byte-for-byte the same on purpose
+		// (this repo has been bitten before by base-schema and migration
+		// diverging; see this file's package doc / AGENTS.md §5) so a
+		// legacy DB walking forward converges on exactly the same shape a
+		// fresh install gets directly.
+		Description: "create host decommission saga tables (plans, steps, approvals, retired_hosts)",
+		SQL: `CREATE TABLE IF NOT EXISTS host_decommission_plans (
+				id                  TEXT PRIMARY KEY,
+				host                TEXT NOT NULL,
+				fqdn                TEXT NOT NULL DEFAULT '',
+				environment         TEXT NOT NULL DEFAULT '',
+				status              TEXT NOT NULL,
+				plan_hash           TEXT NOT NULL,
+				inventory_revision  TEXT NOT NULL,
+				plan_json           TEXT NOT NULL,
+				created_at          TEXT NOT NULL,
+				expires_at          TEXT NOT NULL,
+				completed_at        TEXT
+			);
+			CREATE INDEX IF NOT EXISTS idx_host_decommission_plans_host ON host_decommission_plans(host);
+
+			CREATE TABLE IF NOT EXISTS host_decommission_steps (
+				id              TEXT PRIMARY KEY,
+				plan_id         TEXT NOT NULL,
+				seq             INTEGER NOT NULL,
+				component       TEXT NOT NULL DEFAULT '',
+				provider        TEXT NOT NULL DEFAULT '',
+				phase           TEXT NOT NULL DEFAULT '',
+				action          TEXT NOT NULL DEFAULT '',
+				target_identity TEXT NOT NULL DEFAULT '',
+				state           TEXT NOT NULL DEFAULT 'pending',
+				attempts        INTEGER NOT NULL DEFAULT 0,
+				started_at      TEXT,
+				finished_at     TEXT,
+				error_class     TEXT,
+				error_text      TEXT,
+				result_json     TEXT,
+				UNIQUE(plan_id, seq)
+			);
+			CREATE INDEX IF NOT EXISTS idx_host_decommission_steps_plan ON host_decommission_steps(plan_id);
+
+			CREATE TABLE IF NOT EXISTS host_decommission_approvals (
+				id         TEXT PRIMARY KEY,
+				plan_id    TEXT NOT NULL,
+				plan_hash  TEXT NOT NULL,
+				actor      TEXT NOT NULL,
+				decision   TEXT NOT NULL,
+				reason     TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_host_decommission_approvals_plan ON host_decommission_approvals(plan_id, plan_hash);
+
+			CREATE TABLE IF NOT EXISTS retired_hosts (
+				host                     TEXT PRIMARY KEY,
+				fqdn                     TEXT NOT NULL DEFAULT '',
+				decommission_id          TEXT NOT NULL,
+				reason                   TEXT NOT NULL DEFAULT '',
+				retired_at               TEXT NOT NULL,
+				final_inventory_revision TEXT NOT NULL DEFAULT ''
+			);`,
 	},
 }
 
