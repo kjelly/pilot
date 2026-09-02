@@ -1684,21 +1684,66 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 	}
 
 	dependencyExpandedLimit := false
+	mergeScopeHosts := func(role string, hosts []string) []string {
+		set := make(map[string]struct{}, len(scope.HostsByRole[role])+len(hosts))
+		for _, host := range scope.HostsByRole[role] {
+			set[host] = struct{}{}
+		}
+		for _, host := range hosts {
+			set[host] = struct{}{}
+		}
+		merged := make([]string, 0, len(set))
+		for host := range set {
+			merged = append(merged, host)
+		}
+		sort.Strings(merged)
+		scope.HostsByRole[role] = merged
+		return merged
+	}
+	resolveDependencyHosts := func(consumer, provider contract.Contract, dependency contract.Dependency) ([]string, error) {
+		if dependency.Relation == "providerEndpoint" {
+			// A provider endpoint may live outside --limit: the selected
+			// consumer needs to contact it remotely.
+			return resolve(provider, "", true)
+		}
+		if dependency.Relation != "sameHosts" {
+			return resolve(provider, "", false)
+		}
+
+		// A sameHosts dependency must follow the consumer's *resolved*
+		// hosts. This is distinct from blindly reusing the original limit:
+		// a providerEndpoint may first have expanded the graph to another
+		// host, whose own sameHosts prerequisite belongs on that provider
+		// host (wazuh-fim@p6k -> wazuh-manager@it-core -> docker@it-core).
+		consumerHosts := scope.HostsByRole[consumer.Role]
+		providerSet := make(map[string]bool, len(inventoryGroups[provider.Role]))
+		for _, host := range inventoryGroups[provider.Role] {
+			providerSet[host] = true
+		}
+		missing := make([]string, 0)
+		for _, host := range consumerHosts {
+			if !providerSet[host] {
+				missing = append(missing, host)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			return nil, fmt.Errorf("component %q requires same-host dependency %q but role %q excludes selected host(s): %s", consumer.ID, provider.ID, provider.Role, strings.Join(missing, ", "))
+		}
+		return mergeScopeHosts(provider.Role, consumerHosts), nil
+	}
 	var addDependencies func(contract.Contract) error
 	addDependencies = func(component contract.Contract) error {
 		for _, dependency := range component.Dependencies {
 			if !dependency.Required {
 				continue
 			}
-			if _, present := byID[dependency.Component]; present {
-				continue
-			}
 			provider, ok := catalog.Component(dependency.Component)
 			if !ok {
 				return fmt.Errorf("component %q dependency %q is absent from catalog", component.ID, dependency.Component)
 			}
-			includeWholeRole := dependency.Relation == "providerEndpoint"
-			hosts, err := resolve(provider, "", includeWholeRole)
+			_, alreadySelected := byID[provider.ID]
+			hosts, err := resolveDependencyHosts(component, provider, dependency)
 			if err != nil {
 				return err
 			}
@@ -1712,8 +1757,10 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 				}
 				allHosts[host] = struct{}{}
 			}
-			if err := addDependencies(provider); err != nil {
-				return err
+			if !alreadySelected {
+				if err := addDependencies(provider); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

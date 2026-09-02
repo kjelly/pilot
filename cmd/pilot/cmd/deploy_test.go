@@ -1106,6 +1106,69 @@ esac
 	}
 }
 
+// A limited site deployment can select an agent on one host while its
+// providerEndpoint lives on another. The provider's own sameHosts dependency
+// must then follow the provider host, rather than being incorrectly narrowed
+// by the agent's original --limit. This mirrors p6k-vlm-inference's
+// wazuh-fim -> wazuh-manager@it-core -> docker@it-core topology.
+func TestResolveDeploymentScope_LimitFollowsProviderSameHostsDependency(t *testing.T) {
+	catalog, err := contract.NewCatalog([]contract.Contract{
+		{ID: "wazuh-fim", Role: "wazuh-fim", Dependencies: []contract.Dependency{{Component: "wazuh-manager", Required: true, Relation: "providerEndpoint"}}},
+		{ID: "wazuh-manager", Role: "wazuh-manager", Dependencies: []contract.Dependency{{Component: "docker", Required: true, Relation: "sameHosts"}}},
+		{ID: "docker", Role: "docker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	invJSON := `{"_meta":{"hostvars":{"p6k-vlm-inference":{},"it-core":{}}},"wazuh-fim":{"hosts":["p6k-vlm-inference"]},"wazuh-manager":{"hosts":["it-core"]},"docker":{"hosts":["it-core"]}}`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '"+invJSON+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ansibleFixture := `#!/bin/sh
+case "$1" in
+  wazuh-fim)
+    printf '%s\n' '  hosts (1):' '    p6k-vlm-inference'
+    ;;
+  *)
+    echo "unexpected pattern: $1" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	applied, selected, scope, hosts, expanded, err := resolveDeploymentScope(context.Background(), catalog, []string{"wazuh-fim"}, "fake-inventory.yml", "p6k-vlm-inference", nil, false)
+	if err != nil {
+		t.Fatalf("resolveDeploymentScope() error = %v", err)
+	}
+	if got := contractIDs(applied); !slices.Equal(got, []string{"wazuh-fim"}) {
+		t.Fatalf("applied = %v, want [wazuh-fim]", got)
+	}
+	if got := contractIDs(selected); !slices.Equal(got, []string{"docker", "wazuh-fim", "wazuh-manager"}) {
+		t.Fatalf("selected = %v, want [docker wazuh-fim wazuh-manager]", got)
+	}
+	if !slices.Equal(scope.HostsByRole["wazuh-manager"], []string{"it-core"}) {
+		t.Fatalf("wazuh-manager scope = %v, want [it-core]", scope.HostsByRole["wazuh-manager"])
+	}
+	if !slices.Equal(scope.HostsByRole["docker"], []string{"it-core"}) {
+		t.Fatalf("docker scope = %v, want [it-core]", scope.HostsByRole["docker"])
+	}
+	if !slices.Equal(hosts, []string{"it-core", "p6k-vlm-inference"}) {
+		t.Fatalf("hosts = %v, want [it-core p6k-vlm-inference]", hosts)
+	}
+	if !expanded {
+		t.Fatal("dependencyExpandedLimit = false, want true for the remote provider host")
+	}
+	if got := effectiveDeploymentTags("playbooks/site.yml", "", applied, selected, expanded); got != "docker,wazuh-fim,wazuh-manager" {
+		t.Fatalf("effectiveDeploymentTags() = %q, want docker,wazuh-fim,wazuh-manager", got)
+	}
+}
+
 func TestEffectiveDeploymentTags_PreservesRequestedTagsAndAddsOnlyProvider(t *testing.T) {
 	applied := []contract.Contract{{ID: "client", Role: "clients"}}
 	selected := append(append([]contract.Contract{}, applied...), contract.Contract{ID: "server", Role: "servers"})
