@@ -129,6 +129,11 @@
     # Talos...). We want to detect and gracefully skip THOSE hosts before
     # any OS-family assumption could hard-fail them for an irrelevant
     # reason — see docs/verification/host-monitoring.md §5.
+    # This version check only controls whether we need to download the
+    # pinned release.  A correct binary on disk is not evidence that its
+    # systemd service owns :9100: a previous native deployment can leave
+    # /usr/local/bin/node_exporter behind after another operator replaces it
+    # with a DaemonSet or another node_exporter.
     - name: "Check currently installed node_exporter version"
       ansible.builtin.command: /usr/local/bin/node_exporter --version
       register: node_exporter_current_version
@@ -144,24 +149,51 @@
                ~ (node_exporter_current_version.stderr | default(''))
              ) }}
 
-    - name: "Check whether {{ node_exporter_port }}/tcp is already listening"
-      ansible.builtin.shell: "ss -ltn '( sport = :{{ node_exporter_port }} )' | grep -q LISTEN"
+    # `ss -p` runs as root (the play uses become) and reports the process PID
+    # behind the listener.  That lets us distinguish the active native
+    # systemd service from a stale binary plus a foreign exporter; checking
+    # only the installed binary version caused the latter transition to try
+    # a restart and fail with "address already in use".
+    - name: "Inspect the node_exporter TCP listener (port {{ node_exporter_port }})"
+      ansible.builtin.command: "ss -ltnp '( sport = :{{ node_exporter_port }} )'"
       register: node_exporter_port_check
       changed_when: false
       failed_when: false
+      check_mode: false
+      # noqa command-instead-of-module
 
-    # Purely informational — does NOT gate the skip decision (that's based
-    # solely on "is the port already taken by something that isn't our own
-    # pinned binary"), only makes the report message below more useful when
-    # it happens to be true.
+    - name: "Read managed node_exporter service state"
+      ansible.builtin.systemd_service:
+        name: node_exporter.service
+      register: node_exporter_managed_service
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # Purely informational — does NOT gate the skip decision (which is based
+    # on the listener PID rather than the presence of our binary on disk),
+    # only makes the report message below more useful when it happens to be
+    # true.
     - name: "Detect kubelet (informational — common reason a foreign exporter already owns this port)"
       ansible.builtin.stat:
         path: /var/lib/kubelet
       register: node_exporter_kubelet_stat
 
-    # If something is already listening on this port AND it isn't the
-    # pinned binary we manage, treat this host as externally monitored and
-    # skip the native install entirely rather than fighting over the port.
+    - name: "Determine managed node_exporter ownership (port {{ node_exporter_port }})"
+      ansible.builtin.set_fact:
+        node_exporter_port_owned_by_managed_service: >-
+          {{
+            'LISTEN' in (node_exporter_port_check.stdout | default('')) and
+            (node_exporter_managed_service.status.MainPID | default('0') | int) > 0 and
+            ('pid=' ~ (node_exporter_managed_service.status.MainPID | default('0')) ~ ',')
+            in (node_exporter_port_check.stdout | default(''))
+          }}
+
+    # If something is already listening on this port AND the listener is not
+    # our managed systemd service, treat this host as externally monitored
+    # and skip the native install entirely rather than fighting over the
+    # port.  This deliberately handles a host where we installed the binary
+    # in an earlier run but a later operator replaced the listener.
     # Prometheus still scrapes this host regardless — its auto-discovery
     # (docs/verification/prometheus.md §1.5) is driven purely by inventory
     # `host-monitoring` group membership, not by whether this play actually
@@ -169,13 +201,17 @@
     - name: "Determine whether the port is already served by something we don't manage"
       ansible.builtin.set_fact:
         node_exporter_port_occupied_by_other: >-
-          {{ (node_exporter_port_check.rc | default(1)) == 0 and not node_exporter_version_ok }}
+          {{
+            'LISTEN' in (node_exporter_port_check.stdout | default('')) and
+            not node_exporter_port_owned_by_managed_service
+          }}
 
     - name: "Report: skipping native install (port already served by something else)"
       ansible.builtin.debug:
         msg: >-
-          {{ node_exporter_port }}/tcp is already listening and is not our
-          own pinned node_exporter binary — skipping native install on this
+          {{ node_exporter_port }}/tcp is already listening and is not owned
+          by this playbook's managed node_exporter.service — skipping native
+          install on this
           host to avoid a port conflict.
           {{ '偵測到 /var/lib/kubelet 存在,這台主機很可能是 Kubernetes node,
           node_exporter 大概是透過叢集的 DaemonSet(例如

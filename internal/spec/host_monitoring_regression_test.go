@@ -53,11 +53,12 @@ import (
 //     Kubernetes DaemonSet) — that host should skip natively-installing
 //     rather than fighting for the port or demanding a secret it will
 //     never use.
-//   - The occupied-by-other detection must be based on "port already
-//     listening AND not our own pinned binary", not merely "port
-//     listening" — otherwise a normal idempotent rerun (our own
-//     node_exporter still bound to the port from a prior apply) would
-//     misfire as a foreign occupant and skip forever.
+//   - The occupied-by-other detection must establish that the port listener
+//     belongs to this playbook's active systemd service, not merely that the
+//     pinned binary still exists on disk.  The binary can remain after a
+//     later Kubernetes DaemonSet (or another node_exporter) takes :9100;
+//     that transition must skip instead of attempting a restart.  A normal
+//     idempotent rerun still recognises its own active service and proceeds.
 //   - The OS-family and CPU-architecture gates must also be skipped when
 //     occupied-by-other — a host already running node_exporter via
 //     Kubernetes may run an OS this playbook doesn't otherwise support at
@@ -278,20 +279,26 @@ func TestRegression_HostMonitoringSpec(t *testing.T) {
 		t.Errorf("host-monitoring-apply.yml's restart task must be gated on the binary, unit, or web-config credential actually changing, not run unconditionally")
 	}
 
-	// Kubernetes/foreign-exporter detection (spec v1.2, §0/§5): the port
-	// must be checked, and "occupied by other" must require BOTH the port
-	// listening AND the binary not being our own pinned install — port
-	// alone would misfire against our own idempotent rerun.
-	if !strings.Contains(applyRaw, "ss -ltn") {
-		t.Errorf("host-monitoring-apply.yml must check whether node_exporter_port is already listening (ss -ltn)")
+	// Kubernetes/foreign-exporter detection (spec v1.2, §0/§5): verify the
+	// actual listener PID belongs to node_exporter.service.  Presence of the
+	// pinned binary alone cannot distinguish a healthy native service from a
+	// stale native install after an external exporter took over :9100.
+	if !strings.Contains(applyRaw, "ss -ltnp") {
+		t.Errorf("host-monitoring-apply.yml must inspect the node_exporter_port listener and its PID (ss -ltnp)")
+	}
+	if !strings.Contains(applyRaw, "ansible.builtin.systemd_service") || !strings.Contains(applyRaw, "node_exporter_managed_service.status.MainPID") {
+		t.Errorf("host-monitoring-apply.yml must read node_exporter.service MainPID before deciding port ownership")
+	}
+	if !strings.Contains(applyRaw, "node_exporter_port_owned_by_managed_service") {
+		t.Errorf("host-monitoring-apply.yml must derive whether the :9100 listener belongs to the managed service")
 	}
 	occupiedIdx := strings.Index(applyRaw, "node_exporter_port_occupied_by_other:")
 	if occupiedIdx < 0 {
 		t.Fatalf("host-monitoring-apply.yml must compute a node_exporter_port_occupied_by_other fact")
 	}
 	occupiedExpr := applyRaw[occupiedIdx : occupiedIdx+300]
-	if !strings.Contains(occupiedExpr, "node_exporter_port_check.rc") || !strings.Contains(occupiedExpr, "not node_exporter_version_ok") {
-		t.Errorf("node_exporter_port_occupied_by_other must require BOTH the port listening AND the binary not being our own pinned install (port-only would misfire on our own idempotent rerun), got %q", occupiedExpr)
+	if !strings.Contains(occupiedExpr, "'LISTEN' in") || !strings.Contains(occupiedExpr, "not node_exporter_port_owned_by_managed_service") {
+		t.Errorf("node_exporter_port_occupied_by_other must require a listener AND prove it is not owned by node_exporter.service, got %q", occupiedExpr)
 	}
 
 	// The OS-family and CPU-architecture gates, and the password gate,
