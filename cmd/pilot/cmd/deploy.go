@@ -1211,10 +1211,142 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 	return nil
 }
 
-// executeRecordedDeployment starts the append-only run before transaction
-// preflight. Its evidence scope is the exact contract role/limit selected for
-// apply, not every host that happens to exist in the inventory.
+// executeRecordedDeployment applies playbook's required sameHosts
+// dependency chain first (see applySameHostsDependencyChain), then
+// applies playbook itself via executeRecordedDeploymentCore. Splitting
+// the cascade from the core apply keeps the cascade a single,
+// non-recursive walk of the contract graph: each dependency is applied
+// through executeRecordedDeploymentCore directly, which never cascades
+// again, so there is no risk of runaway recursion even if the contract
+// catalog ever grows a sameHosts cycle (defensively rejected by
+// sameHostsDependencyChain instead).
 func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) error {
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return err
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		return err
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		return fmt.Errorf("load contract catalog before deployment: %w", err)
+	}
+	components, err := componentsForPlaybook(catalog, playbook, tags, componentHints)
+	if err != nil {
+		return err
+	}
+	if err := applySameHostsDependencyChain(ctx, runner, out, catalog, components, playbook, inv, limit, extraVars, vault, stage); err != nil {
+		return err
+	}
+	return executeRecordedDeploymentCore(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints)
+}
+
+// sameHostsDependencyChain returns componentIDs' required sameHosts
+// contract dependencies (e.g. docker for wazuh-manager — Wazuh's own
+// manager runs as Docker containers on the same host), transitively,
+// each appearing once, in dependency-first order. A component already
+// in componentIDs is never itself returned (it's already being applied
+// directly by the caller). Only sameHosts is walked: a providerEndpoint
+// (or any other relation) dependency may already exist elsewhere in the
+// fleet and must stay something the operator binds to explicitly, not
+// something a deploy auto-installs on their behalf. Detects a cycle
+// (which would only ever mean an authoring bug in the contract catalog
+// itself, never real topology) and reports it as an error instead of
+// recursing forever.
+func sameHostsDependencyChain(catalog contract.Catalog, componentIDs []string) ([]contract.Contract, error) {
+	done := make(map[string]bool, len(componentIDs))
+	for _, id := range componentIDs {
+		done[id] = true
+	}
+	visiting := make(map[string]bool)
+	var chain []contract.Contract
+	var visit func(contract.Contract) error
+	visit = func(c contract.Contract) error {
+		visiting[c.ID] = true
+		defer delete(visiting, c.ID)
+		for _, dep := range c.Dependencies {
+			if !dep.Required || dep.Relation != "sameHosts" {
+				continue
+			}
+			if done[dep.Component] {
+				continue
+			}
+			if visiting[dep.Component] {
+				return fmt.Errorf("sameHosts dependency cycle detected at component %q", dep.Component)
+			}
+			provider, ok := catalog.Component(dep.Component)
+			if !ok {
+				return fmt.Errorf("component %q dependency %q is absent from catalog", c.ID, dep.Component)
+			}
+			if err := visit(provider); err != nil {
+				return err
+			}
+			done[dep.Component] = true
+			chain = append(chain, provider)
+		}
+		return nil
+	}
+	for _, id := range componentIDs {
+		c, ok := catalog.Component(id)
+		if !ok {
+			return nil, fmt.Errorf("component %q is absent from contract catalog", id)
+		}
+		if err := visit(c); err != nil {
+			return nil, err
+		}
+	}
+	return chain, nil
+}
+
+// applySameHostsDependencyChain makes sure every required sameHosts
+// dependency of components has actually been applied to inv/limit
+// before the caller's own playbook runs — resolveDeploymentScope only
+// ever checked that the dependency's inventory group was non-empty, not
+// that the dependency was ever really installed. Each dependency is
+// applied through its own full executeRecordedDeploymentCore call
+// (preflight/preview/apply/idempotency/evidence-run, exactly like a
+// standalone deploy of that component), reusing this run's vault and
+// stage/extraVars but never its --tags: a dependency's own spec rows
+// use a different tag namespace (e.g. docker's are "docker-C1", not
+// wazuh-manager's bare "C1"), so reusing tags here would silently skip
+// its tasks instead of installing it. Every apply playbook in this
+// catalog carries a required idempotency guarantee
+// (evidenceRequirement.idempotency), so re-applying an already-
+// satisfied dependency is expected to be a safe no-op. A no-op when
+// playbook isn't actually an apply playbook for any of components (e.g.
+// a decommission or rollback run must never re-provision a dependency).
+func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, out io.Writer, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string, vault vaultInput, stage string) error {
+	isApply := false
+	for _, id := range components {
+		if c, ok := catalog.Component(id); ok && c.Playbooks.Apply == playbook {
+			isApply = true
+			break
+		}
+	}
+	if !isApply {
+		return nil
+	}
+	chain, err := sameHostsDependencyChain(catalog, components)
+	if err != nil {
+		return err
+	}
+	for _, dep := range chain {
+		fmt.Fprintf(out, "\n── 依賴串接：先套用 %s（%s 的必要 sameHosts 依賴）──\n", dep.ID, strings.Join(components, ", "))
+		if err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, limit, "", extraVars, vault, stage, []string{dep.ID}); err != nil {
+			return fmt.Errorf("apply required sameHosts dependency %q: %w", dep.ID, err)
+		}
+	}
+	return nil
+}
+
+// executeRecordedDeploymentCore starts the append-only run before
+// transaction preflight. Its evidence scope is the exact contract
+// role/limit selected for apply, not every host that happens to exist
+// in the inventory. Never cascades sameHosts dependencies itself — see
+// executeRecordedDeployment, which always calls this.
+func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) error {
 	root, err := resolveContractRoot("")
 	if err != nil {
 		return err
