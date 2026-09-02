@@ -97,19 +97,23 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	// FreeIPA target cannot load the canonical roster. Otherwise
 	// freeipa-identity-apply.yml reaches its late empty-data gate after all
 	// earlier checks have passed, which obscures the actual inventory defect.
-	violations, err := validateDeploymentCompleteness(ctx, inv)
+	snapshot, err := loadDeployInventorySnapshot(ctx, inv)
+	if err != nil {
+		return err
+	}
+	violations, err := validateDeploymentCompletenessSnapshot(inv, snapshot)
 	if err != nil {
 		return err
 	}
 	if len(violations) > 0 {
 		return formatCompletenessViolations(violations)
 	}
-	if err := ensureFreeIPARostersCurrent(ctx, out, inv); err != nil {
+	if err := ensureFreeIPARostersCurrentSnapshot(out, inv, snapshot); err != nil {
 		return err
 	}
 	if runConfirmProgram("要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
-		previewInventoryGraph(ctx, out, inv)
+		previewInventoryGraph(out, inv, snapshot)
 		fmt.Fprintln(out)
 	}
-	return abortOrErr(runCatalogPlaybookDeploy(ctx, runner, out, inv, "apply", true))
+	return abortOrErr(runCatalogPlaybookDeploy(ctx, runner, out, inv, "apply", true, snapshot))
 }

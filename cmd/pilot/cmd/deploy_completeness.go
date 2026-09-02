@@ -53,14 +53,19 @@ func (v completenessViolation) String() string {
 // (host_vars/group_vars never carry real secrets by convention — only
 // .vault/main.yaml does), so this never prompts and never touches any file.
 func validateDeploymentCompleteness(ctx context.Context, inv string) ([]completenessViolation, error) {
-	groups, err := resolveInventoryGroups(ctx, inv)
+	snapshot, err := loadDeployInventorySnapshot(ctx, inv)
 	if err != nil {
 		return nil, err
 	}
-	hostVars, err := resolveInventoryVariables(ctx, inv, nil, vaultInput{})
-	if err != nil {
-		return nil, err
-	}
+	return validateDeploymentCompletenessSnapshot(inv, snapshot)
+}
+
+// validateDeploymentCompletenessSnapshot is the wizard-entry variant of the
+// hard gate. It shares the same resolved inventory with topology previews and
+// auto-host prompts instead of starting further ansible-inventory processes.
+func validateDeploymentCompletenessSnapshot(inv string, snapshot deployInventorySnapshot) ([]completenessViolation, error) {
+	groups := snapshot.Groups
+	hostVars := snapshot.HostVars
 
 	var violations []completenessViolation
 
@@ -228,14 +233,16 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 // violation — the real ansible-playbook apply's own canonical gates catch
 // a genuinely broken roster exactly as they always have.
 func ensureFreeIPARostersCurrent(ctx context.Context, out io.Writer, inv string) error {
-	groups, err := resolveInventoryGroups(ctx, inv)
+	snapshot, err := loadDeployInventorySnapshot(ctx, inv)
 	if err != nil {
 		return err
 	}
-	hostVars, err := resolveInventoryVariables(ctx, inv, nil, vaultInput{})
-	if err != nil {
-		return err
-	}
+	return ensureFreeIPARostersCurrentSnapshot(out, inv, snapshot)
+}
+
+func ensureFreeIPARostersCurrentSnapshot(out io.Writer, inv string, snapshot deployInventorySnapshot) error {
+	groups := snapshot.Groups
+	hostVars := snapshot.HostVars
 
 	seen := map[string]bool{}
 	for _, role := range []string{"freeipa-server", "freeipa-server-replica"} {

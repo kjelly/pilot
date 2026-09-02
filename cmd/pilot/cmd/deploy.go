@@ -336,19 +336,23 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 
 	// Hard, unskippable gate — runs before even the optional ansible-side
 	// preflight below, let alone a real apply. See deploy_completeness.go.
-	violations, err := validateDeploymentCompleteness(ctx, inv)
+	snapshot, err := loadDeployInventorySnapshot(ctx, inv)
+	if err != nil {
+		return err
+	}
+	violations, err := validateDeploymentCompletenessSnapshot(inv, snapshot)
 	if err != nil {
 		return err
 	}
 	if len(violations) > 0 {
 		return formatCompletenessViolations(violations)
 	}
-	if err := ensureFreeIPARostersCurrent(ctx, out, inv); err != nil {
+	if err := ensureFreeIPARostersCurrentSnapshot(out, inv, snapshot); err != nil {
 		return err
 	}
 
 	if runConfirmProgram("要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
-		previewInventoryGraph(ctx, out, inv)
+		previewInventoryGraph(out, inv, snapshot)
 		fmt.Fprintln(out)
 	}
 
@@ -361,9 +365,9 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	}
 
 	if scopeIdx == 0 {
-		err = runSiteDeploy(ctx, runner, out, inv)
+		err = runSiteDeploy(ctx, runner, out, inv, snapshot)
 	} else {
-		err = runCatalogPlaybookDeploy(ctx, runner, out, inv, deployActionFlag, false)
+		err = runCatalogPlaybookDeploy(ctx, runner, out, inv, deployActionFlag, false, snapshot)
 	}
 	return abortOrErr(err)
 }
@@ -464,7 +468,7 @@ func validateHoursWithinWeek(s string) error {
 // `pilot deploy graph --view both` for the wizard's chosen inventory, so the
 // preview a deploy/reconcile operator sees before committing to anything
 // matches what they'd get by running that command directly.
-func previewInventoryGraph(ctx context.Context, out io.Writer, inv string) {
+func previewInventoryGraph(out io.Writer, inv string, snapshot deployInventorySnapshot) {
 	root, err := resolveContractRoot("")
 	if err != nil {
 		fmt.Fprintf(out, "(無法載入 contracts：%v)\n", err)
@@ -480,21 +484,7 @@ func previewInventoryGraph(ctx context.Context, out io.Writer, inv string) {
 		fmt.Fprintf(out, "(無法載入 contracts：%v)\n", err)
 		return
 	}
-	resolvedInv, notice, cleanup, err := expandIfSimplifiedHosts(inv)
-	if err != nil {
-		fmt.Fprintf(out, "(無法解析 inventory：%v)\n", err)
-		return
-	}
-	defer cleanup()
-	if notice != "" {
-		fmt.Fprintln(out, notice)
-	}
-	groups, err := resolveInventoryGroups(ctx, resolvedInv)
-	if err != nil {
-		fmt.Fprintf(out, "(無法解析 inventory：%v)\n", err)
-		return
-	}
-	topo := buildInventoryTopology(catalog, groups)
+	topo := buildInventoryTopology(catalog, snapshot.Groups)
 	renderInventoryTopology(out, topo, inv)
 	if warning := siemReceiverWarning(topo); warning != "" {
 		fmt.Fprintf(out, "⚠️  %s\n", warning)
@@ -648,32 +638,24 @@ func promptSeaweedfsS3Config(out io.Writer, stage string) ([]string, error) {
 // below is the one mechanism deployCatalog's autoHostVar entries drive,
 // rather than one bespoke resolver per role.
 
-// resolveGroupHost asks ansible-inventory for the first host in inv's named
-// group and its ansible_host, so `pilot deploy` can default a variable like
-// restic_s3_target_host to it instead of making the user look the address
-// up themselves. Returns ok=false for anything that stops it from resolving
-// cleanly — missing ansible-inventory, an empty/absent group, unparseable
-// JSON — since the caller's fallback (ask the user directly) covers all of
-// those.
+// resolveGroupHost reads the wizard's already-resolved inventory snapshot for
+// the first host in a named group and its ansible_host. That keeps every
+// auto-host prompt consistent with the topology preview without launching a
+// new ansible-inventory process for each prompt. Returns ok=false when the
+// group is absent or empty; the caller then offers its manual fallback.
 //
 // When varName isn't in noFQDNUpgradeVars, the returned value is upgraded
 // from the target's ansible_host IP to its FreeIPA FQDN whenever
 // fqdnForGroupHost finds it safe to (target enrolled as freeipa-client,
 // every one of consumerGroups already resolving via freeipa-dns-client) —
 // see that function's doc comment for the exact eligibility rule.
-func resolveGroupHost(ctx context.Context, inv, group, varName string, consumerGroups []string) (host string, ok bool) {
-	r := ansible.NewRunner()
-	r.Binary = "ansible-inventory"
-	res, err := r.Run(ctx, "-i", inv, "--list")
-	if err != nil || res.ExitCode != 0 {
-		return "", false
-	}
-	ip, ipOK := parseGroupHostFromInventoryList(res.Stdout, group)
+func resolveGroupHost(snapshot deployInventorySnapshot, group, varName string, consumerGroups []string) (host string, ok bool) {
+	ip, ipOK := parseGroupHostFromInventoryList(snapshot.Raw, group)
 	if !ipOK {
 		return "", false
 	}
 	if !noFQDNUpgradeVars[varName] {
-		if fqdn, fqdnOK := fqdnForGroupHost(res.Stdout, group, consumerGroups); fqdnOK {
+		if fqdn, fqdnOK := fqdnForGroupHost(snapshot.Raw, group, consumerGroups); fqdnOK {
 			return fqdn, true
 		}
 	}
@@ -893,11 +875,11 @@ func siteAutoHostVars() []autoHostVar {
 // group(s) that will actually receive this value (usually just the
 // component being deployed) — see resolveGroupHost/fqdnForGroupHost for
 // how it gates the IP->FQDN upgrade.
-func promptAutoHostVar(ctx context.Context, out io.Writer, inv, workspaceDir string, av autoHostVar, consumerGroups []string) ([]string, error) {
+func promptAutoHostVar(out io.Writer, snapshot deployInventorySnapshot, workspaceDir string, av autoHostVar, consumerGroups []string) ([]string, error) {
 	if configured, err := groupVarsKeyAlreadyConfigured(workspaceDir, av.Var); err == nil && configured {
 		return nil, nil
 	}
-	if host, ok := resolveGroupHost(ctx, inv, av.Group, av.Var, consumerGroups); ok {
+	if host, ok := resolveGroupHost(snapshot, av.Group, av.Var, consumerGroups); ok {
 		q := fmt.Sprintf("偵測到這份 inventory 的 %s：%s，這次要用它嗎？(-e %s=%s)", av.Label, host, av.Var, host)
 		if runConfirmProgram(q, true) {
 			return []string{av.Var + "=" + host}, nil
@@ -1575,22 +1557,60 @@ func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, compo
 	return applied, selected, scope, hosts, nil
 }
 
-func resolveInventoryGroups(ctx context.Context, inventory string) (map[string][]string, error) {
+// deployInventorySnapshot is one resolved ansible-inventory --list document
+// captured at wizard entry. It is deliberately immutable: prompt choices use
+// a coherent view of inventory while later deployment execution re-resolves
+// with its chosen -e/vault inputs where that is semantically required.
+type deployInventorySnapshot struct {
+	Raw      string
+	Groups   map[string][]string
+	HostVars map[string]map[string]any
+}
+
+func loadDeployInventorySnapshot(ctx context.Context, inventory string) (deployInventorySnapshot, error) {
 	command := deployAnsibleCommand(ctx, "ansible-inventory", "-i", inventory, "--list")
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		return nil, fmt.Errorf("ansible-inventory --list: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return deployInventorySnapshot{}, fmt.Errorf("ansible-inventory --list: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	var raw map[string]struct {
+	return parseDeployInventorySnapshot(stdout.String())
+}
+
+func parseDeployInventorySnapshot(rawOutput string) (deployInventorySnapshot, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(rawOutput), &raw); err != nil {
+		return deployInventorySnapshot{}, fmt.Errorf("parse ansible-inventory output: %w", err)
+	}
+	var meta struct {
+		HostVars map[string]map[string]any `json:"hostvars"`
+	}
+	if metaRaw, ok := raw["_meta"]; ok {
+		if err := json.Unmarshal(metaRaw, &meta); err != nil {
+			return deployInventorySnapshot{}, fmt.Errorf("parse ansible-inventory hostvars: %w", err)
+		}
+	}
+	if meta.HostVars == nil {
+		meta.HostVars = make(map[string]map[string]any)
+	}
+
+	type group struct {
 		Hosts    []string `json:"hosts"`
 		Children []string `json:"children"`
 	}
-	if err := json.Unmarshal([]byte(stdout.String()), &raw); err != nil {
-		return nil, fmt.Errorf("parse ansible-inventory output: %w", err)
+	groupsRaw := make(map[string]group, len(raw))
+	for name, value := range raw {
+		if name == "_meta" {
+			continue
+		}
+		var entry group
+		if err := json.Unmarshal(value, &entry); err != nil {
+			return deployInventorySnapshot{}, fmt.Errorf("parse inventory group %q: %w", name, err)
+		}
+		groupsRaw[name] = entry
 	}
-	resolved := make(map[string][]string, len(raw))
+	resolved := make(map[string][]string, len(groupsRaw))
 	visiting := make(map[string]bool)
 	var expand func(string) ([]string, error)
 	expand = func(group string) ([]string, error) {
@@ -1602,7 +1622,7 @@ func resolveInventoryGroups(ctx context.Context, inventory string) (map[string][
 		}
 		visiting[group] = true
 		set := make(map[string]struct{})
-		entry := raw[group]
+		entry := groupsRaw[group]
 		for _, host := range entry.Hosts {
 			set[host] = struct{}{}
 		}
@@ -1624,15 +1644,20 @@ func resolveInventoryGroups(ctx context.Context, inventory string) (map[string][
 		resolved[group] = hosts
 		return hosts, nil
 	}
-	for group := range raw {
-		if group == "_meta" {
-			continue
-		}
+	for group := range groupsRaw {
 		if _, err := expand(group); err != nil {
-			return nil, err
+			return deployInventorySnapshot{}, err
 		}
 	}
-	return resolved, nil
+	return deployInventorySnapshot{Raw: rawOutput, Groups: resolved, HostVars: meta.HostVars}, nil
+}
+
+func resolveInventoryGroups(ctx context.Context, inventory string) (map[string][]string, error) {
+	snapshot, err := loadDeployInventorySnapshot(ctx, inventory)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.Groups, nil
 }
 
 func resolvePatternHosts(ctx context.Context, inventory, pattern, limit string) ([]string, error) {
@@ -2217,7 +2242,7 @@ func contractRowTags(component contract.Contract, specPath, rowID string) ([]str
 
 // ---- full-site flow ---------------------------------------------------------
 
-func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv string) error {
+func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv string, snapshot deployInventorySnapshot) error {
 	fmt.Fprintln(out, "全站部署會套用 inventory 裡每一個已經填了機器的角色 group；")
 	fmt.Fprintln(out, "沒填機器的角色會自動跳過，不需要為它們準備 group_vars/vault。")
 	fmt.Fprintln(out)
@@ -2225,7 +2250,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	// Show the topology this run will apply before asking anything, so the
 	// operator can eyeball component placement and dependencies. Best-effort:
 	// a failure to build it must never block the deploy.
-	printSiteTopology(ctx, out, inv)
+	printSiteTopology(out, inv, snapshot)
 
 	decision, err := promptStageDecision(out, "site.yml")
 	if err != nil {
@@ -2265,7 +2290,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	workspaceDir := filepath.Dir(inv)
 	var acceptedAutoHostVars []acceptedAutoHostVar
 	for _, av := range siteAutoHostVars() {
-		host, ok := resolveGroupHost(ctx, inv, av.Group, av.Var, autoHostVarConsumerGroups(av.Var))
+		host, ok := resolveGroupHost(snapshot, av.Group, av.Var, autoHostVarConsumerGroups(av.Var))
 		if !ok {
 			continue
 		}
@@ -2296,7 +2321,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 // best-effort preview. Any error (missing ansible-inventory, unreadable
 // contracts) is surfaced as a one-line notice and swallowed — the deploy
 // itself is authoritative and must not be gated on this read-only view.
-func printSiteTopology(ctx context.Context, out io.Writer, inv string) {
+func printSiteTopology(out io.Writer, inv string, snapshot deployInventorySnapshot) {
 	root, err := resolveContractRoot("")
 	if err != nil {
 		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
@@ -2312,21 +2337,7 @@ func printSiteTopology(ctx context.Context, out io.Writer, inv string) {
 		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
 		return
 	}
-	resolvedInv, notice, cleanup, err := expandIfSimplifiedHosts(inv)
-	if err != nil {
-		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
-		return
-	}
-	defer cleanup()
-	if notice != "" {
-		fmt.Fprintln(out, notice)
-	}
-	groups, err := resolveInventoryGroups(ctx, resolvedInv)
-	if err != nil {
-		fmt.Fprintf(out, "（略過拓樸圖：%v）\n\n", err)
-		return
-	}
-	topo := buildInventoryTopology(catalog, groups)
+	topo := buildInventoryTopology(catalog, snapshot.Groups)
 	renderInventoryTopology(out, topo, inv)
 	if warning := siemReceiverWarning(topo); warning != "" {
 		fmt.Fprintf(out, "⚠️  %s\n", warning)
@@ -2336,7 +2347,7 @@ func printSiteTopology(ctx context.Context, out io.Writer, inv string) {
 
 // ---- catalog playbook flow --------------------------------------------------
 
-func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, reconcileOnly bool) error {
+func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, reconcileOnly bool, snapshot deployInventorySnapshot) error {
 	if action != "apply" && action != "upgrade" && action != "decommission" {
 		return fmt.Errorf("--action must be apply, upgrade, or decommission")
 	}
@@ -2409,7 +2420,7 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		if len(selectedIndexes) > 1 {
 			fmt.Fprintf(out, "\n── 執行第 %d/%d 個元件 ──\n", i+1, len(selectedIndexes))
 		}
-		if err := runCatalogPlaybookDeployEntry(ctx, runner, out, inv, action, catalog, entries[idx], batchInputs); err != nil {
+		if err := runCatalogPlaybookDeployEntry(ctx, runner, out, inv, action, catalog, entries[idx], batchInputs, snapshot); err != nil {
 			return err
 		}
 	}
@@ -2466,7 +2477,7 @@ func catalogBatchVaultHint(entries []deployPlaybook) string {
 	return strings.Join(hints, "；")
 }
 
-func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, catalog contract.Catalog, entry deployPlaybook, batchInputs *catalogBatchInputs) error {
+func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, catalog contract.Catalog, entry deployPlaybook, batchInputs *catalogBatchInputs, snapshot deployInventorySnapshot) error {
 	if entry.Note != "" {
 		fmt.Fprintf(out, "ℹ️  %s\n", entry.Note)
 	}
@@ -2586,7 +2597,7 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 	}
 	var acceptedAutoHostVars []acceptedAutoHostVar
 	for _, av := range entry.AutoHostVars {
-		hostVars, err := promptAutoHostVar(ctx, out, inv, workspaceDir, av, consumerGroups)
+		hostVars, err := promptAutoHostVar(out, snapshot, workspaceDir, av, consumerGroups)
 		if err != nil {
 			return err
 		}

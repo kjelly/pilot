@@ -119,6 +119,48 @@ func TestDeployAnsibleCommandUsesRuntimeEnvironment(t *testing.T) {
 	}
 }
 
+func TestDeployInventorySnapshotReusesOneRuntimeBackedInventoryLoadForAutoHosts(t *testing.T) {
+	binDir := t.TempDir()
+	callsPath := filepath.Join(t.TempDir(), "inventory-calls")
+	script := `#!/bin/sh
+if [ -z "$ANSIBLE_LOCAL_TEMP" ]; then
+  exit 41
+fi
+printf x >> "$PILOT_TEST_INVENTORY_CALLS"
+printf '%s\n' '{"_meta":{"hostvars":{"log-1":{"ansible_host":"10.0.0.10"}}},"all":{"children":["log-server"]},"log-server":{"hosts":["log-1"]}}'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PILOT_TEST_INVENTORY_CALLS", callsPath)
+
+	runtime, err := prepareDeployAnsibleRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loadDeployInventorySnapshot(withDeployAnsibleRuntime(context.Background(), runtime), "inventory.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := snapshot.Groups["all"], []string{"log-1"}; !slices.Equal(got, want) {
+		t.Fatalf("snapshot all hosts = %v, want %v", got, want)
+	}
+	for _, variable := range []string{"siem_forward_host", "restic_s3_target_host", "loki_target_host"} {
+		host, ok := resolveGroupHost(snapshot, "log-server", variable, []string{"audit-log-forwarding"})
+		if !ok || host != "10.0.0.10" {
+			t.Fatalf("resolveGroupHost(%s) = (%q, %v), want (10.0.0.10, true)", variable, host, ok)
+		}
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(calls); got != "x" {
+		t.Fatalf("ansible-inventory calls = %q, want exactly one initial snapshot load", got)
+	}
+}
+
 func TestContractMenuAndActionPlanFailClosed(t *testing.T) {
 	upgrade := "playbooks/apply/worker-upgrade.yml"
 	catalog, err := contract.NewCatalog([]contract.Contract{{
