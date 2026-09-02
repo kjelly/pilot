@@ -31,7 +31,7 @@ func TestFindHost_AndRemoveHost(t *testing.T) {
 func TestHostSummary_ShowsPlaceholdersForEmptyFields(t *testing.T) {
 	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "web-1"}}}
 	got := hostSummary(hf, "web-1")
-	if got != "web-1 — (尚未填 ansible_host) — (尚未選角色)" {
+	if got != "web-1 — (尚未填 ansible_host)" {
 		t.Fatalf("hostSummary = %q", got)
 	}
 }

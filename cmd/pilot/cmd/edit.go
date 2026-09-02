@@ -63,11 +63,7 @@ func hostSummary(hf *inventory.HostsFile, name string) string {
 	if host == "" {
 		host = "(尚未填 ansible_host)"
 	}
-	roles := "(尚未選角色)"
-	if len(h.Roles) > 0 {
-		roles = strings.Join(h.Roles, ", ")
-	}
-	return fmt.Sprintf("%s — %s — %s", name, host, roles)
+	return fmt.Sprintf("%s — %s", name, host)
 }
 
 func findHost(hf *inventory.HostsFile, name string) *inventory.Host {
