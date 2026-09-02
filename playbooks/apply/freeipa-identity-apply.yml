@@ -2879,6 +2879,81 @@
       when: not (item.skipped | default(false))
       tags: [identity, hosts, freeipa_host_absent_inspect]
 
+    # Phase 3b (docs/superpowers/specs/2026-09-02-host-decommission-spec.md
+    # §16.7/§25.1): three more read-only discovery queries
+    # internal/decommission/providers.FreeIPAClientProvider.Verify already
+    # sends (-e pilot_decommission_query=host_dns|hbac_references|
+    # sudo_references) but that Phase 3a code left as "a Phase 3b contract"
+    # — until these existed, Verify's regex matchers ran against whatever
+    # the host_object query above happened to print instead, which never
+    # matches, so these three checks always reported a false "pass"
+    # (zero residue) regardless of live state (INV-10 violation). Each is
+    # keyed off pilot_decommission_target_fqdn directly (not the roster's
+    # freeipa_absent_hosts list), so Verify can run standalone against any
+    # host regardless of that host's current roster state.
+    - name: "Look up the current live DNS A record for the query target host (read-only, decommission verify)"
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - dnsrecord-show
+          - "{{ ipa_domain }}"
+          - "{{ pilot_decommission_target_fqdn | default('') | regex_replace('\\.' + (ipa_domain | regex_escape) + '$', '') }}"
+          - --all
+          - --raw
+      register: freeipa_decom_query_dns
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_decommission_query | default('') == 'host_dns'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
+    - name: "Print DNS inspection for external tooling (read-only)"
+      ansible.builtin.debug:
+        msg: "HOST_INSPECT[{{ pilot_decommission_target_fqdn }}]: {{ (freeipa_decom_query_dns.stdout | default('')) ~ ' ' ~ (freeipa_decom_query_dns.stderr | default('')) }}"
+      when:
+        - pilot_decommission_query | default('') == 'host_dns'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
+    - name: "Look up direct HBAC rules referencing the query target host (read-only, decommission verify)"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-find, "--host={{ pilot_decommission_target_fqdn | default('') }}"]
+      register: freeipa_decom_query_hbac
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_decommission_query | default('') == 'hbac_references'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
+    - name: "Print HBAC reference inspection for external tooling (read-only)"
+      ansible.builtin.debug:
+        msg: "HOST_INSPECT[{{ pilot_decommission_target_fqdn }}]: {{ freeipa_decom_query_hbac.stdout | default('') }}"
+      when:
+        - pilot_decommission_query | default('') == 'hbac_references'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
+    - name: "Look up direct sudo rules referencing the query target host (read-only, decommission verify)"
+      ansible.builtin.command:
+        argv: [ipa, sudorule-find, "--host={{ pilot_decommission_target_fqdn | default('') }}"]
+      register: freeipa_decom_query_sudo
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_decommission_query | default('') == 'sudo_references'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
+    - name: "Print sudo reference inspection for external tooling (read-only)"
+      ansible.builtin.debug:
+        msg: "HOST_INSPECT[{{ pilot_decommission_target_fqdn }}]: {{ freeipa_decom_query_sudo.stdout | default('') }}"
+      when:
+        - pilot_decommission_query | default('') == 'sudo_references'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
     # spec.md §16.6: a service principal managed by this host OTHER than
     # its own host/<fqdn> Kerberos identity is either a known Pilot-owned
     # principal cleaned by its OWNING component (HTTP/<fqdn> via internal
