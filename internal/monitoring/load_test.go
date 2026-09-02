@@ -89,6 +89,147 @@ func TestLoadProfiles_MissingFile(t *testing.T) {
 	}
 }
 
+func TestLoadTargets_RejectsSecretKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "targets.yml")
+	content := []byte(`schemaVersion: 1
+targets:
+  - name: nas01
+    address: nas01.pilot.internal:9633
+    profile: storage-exporter
+    password: leaked-in-plaintext
+`)
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if _, err := LoadTargets(path); err == nil {
+		t.Fatal("LoadTargets should reject a target containing an unknown/secret-like key")
+	}
+}
+
+func TestLoadProfiles_RejectsSecretKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scrape-profiles.yml")
+	content := []byte(`schemaVersion: 1
+profiles:
+  p:
+    jobName: j
+    community: leaked-in-plaintext
+`)
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if _, err := LoadProfiles(path); err == nil {
+		t.Fatal("LoadProfiles should reject a profile containing an unknown/secret-like key")
+	}
+}
+
+func TestLoadProfiles_V2SNMPFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scrape-profiles.yml")
+	content := []byte(`schemaVersion: 2
+profiles:
+  core-switch:
+    kind: snmp
+    jobName: snmp-core-switch
+    subjectKind: network_device
+    diagnosticProfile: network-device-ifmib-v1
+    snmp:
+      modules: [if_mib, vendor_core_switch]
+      authProfile: core-switch-v3
+`)
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	pf, err := LoadProfiles(path)
+	if err != nil {
+		t.Fatalf("LoadProfiles: %v", err)
+	}
+	if pf.SchemaVersion != 2 {
+		t.Fatalf("SchemaVersion = %d, want 2", pf.SchemaVersion)
+	}
+	p, ok := pf.Profiles["core-switch"]
+	if !ok || !p.IsSNMP() || p.SubjectKind != "network_device" || p.DiagnosticProfile != "network-device-ifmib-v1" {
+		t.Fatalf("unexpected parse result: %+v (ok=%v)", p, ok)
+	}
+	if p.SNMP == nil || len(p.SNMP.Modules) != 2 || p.SNMP.AuthProfile != "core-switch-v3" {
+		t.Fatalf("unexpected snmp block: %+v", p.SNMP)
+	}
+}
+
+func TestLoadTargets_V2DetectionCohort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "targets.yml")
+	content := []byte(`schemaVersion: 2
+targets:
+  - name: core-sw-01
+    address: 10.20.0.11
+    profile: core-switch
+    site: hq
+    detectionCohort: arista-core-7050
+`)
+	if err := writeFile(path, content); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	tf, err := LoadTargets(path)
+	if err != nil {
+		t.Fatalf("LoadTargets: %v", err)
+	}
+	if len(tf.Targets) != 1 || tf.Targets[0].DetectionCohort != "arista-core-7050" {
+		t.Fatalf("unexpected parse result: %+v", tf)
+	}
+}
+
+func TestSaveTargets_V1FieldsOnlyStaysV1(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "targets.yml")
+	tf := TargetFile{Targets: []Target{{Name: "a", Address: "1.2.3.4:9100", Profile: "p"}}}
+	if err := SaveTargets(path, tf); err != nil {
+		t.Fatalf("SaveTargets: %v", err)
+	}
+	got, err := LoadTargets(path)
+	if err != nil {
+		t.Fatalf("LoadTargets: %v", err)
+	}
+	if got.SchemaVersion != 1 {
+		t.Fatalf("SchemaVersion = %d, want 1 (no v2-only fields used)", got.SchemaVersion)
+	}
+}
+
+func TestSaveTargets_DetectionCohortForcesV2(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "targets.yml")
+	tf := TargetFile{Targets: []Target{{Name: "a", Address: "1.2.3.4", Profile: "p", DetectionCohort: "cohort-1"}}}
+	if err := SaveTargets(path, tf); err != nil {
+		t.Fatalf("SaveTargets: %v", err)
+	}
+	got, err := LoadTargets(path)
+	if err != nil {
+		t.Fatalf("LoadTargets: %v", err)
+	}
+	if got.SchemaVersion != 2 {
+		t.Fatalf("SchemaVersion = %d, want 2 (detectionCohort is a v2-only field)", got.SchemaVersion)
+	}
+}
+
+func TestSaveProfiles_SNMPKindForcesV2(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scrape-profiles.yml")
+	pf := ProfileFile{Profiles: map[string]Profile{
+		"core-switch": {Kind: "snmp", JobName: "j", SubjectKind: "network_device", SNMP: &SNMPProfile{Modules: []string{"if_mib"}, AuthProfile: "a"}},
+	}}
+	if err := SaveProfiles(path, pf); err != nil {
+		t.Fatalf("SaveProfiles: %v", err)
+	}
+	got, err := LoadProfiles(path)
+	if err != nil {
+		t.Fatalf("LoadProfiles: %v", err)
+	}
+	if got.SchemaVersion != 2 {
+		t.Fatalf("SchemaVersion = %d, want 2 (kind:snmp is a v2-only field)", got.SchemaVersion)
+	}
+}
+
 func TestSaveTargets_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "targets.yml")

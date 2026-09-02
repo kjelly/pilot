@@ -1,0 +1,21 @@
+groups:
+  - name: pilot-snmp-seed
+    rules:
+      - alert: SNMPTargetDown
+        expr: up{pilot_protocol="snmp"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          source: prometheus-rule
+          component: snmp
+        annotations:
+          summary: "SNMP target is not scrapeable"
+      - alert: SNMPExporterDown
+        expr: up{job="snmp-exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          source: prometheus-rule
+          component: snmp-exporter
+        annotations:
+          summary: "SNMP exporter is not scrapeable"

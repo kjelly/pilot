@@ -1,0 +1,37 @@
+{
+  "external-linux": [],
+  "snmp-core-switch": [
+    {
+      "targets": [
+        "10.20.0.11"
+      ],
+      "labels": {
+        "detection_cohort": "arista-core-7050",
+        "device_role": "core_switch",
+        "model": "7050",
+        "pilot_protocol": "snmp",
+        "pilot_source": "external",
+        "pilot_subject_kind": "network_device",
+        "pilot_target": "core-sw-01",
+        "site": "hq",
+        "vendor": "arista"
+      }
+    },
+    {
+      "targets": [
+        "udp://10.20.0.12:161"
+      ],
+      "labels": {
+        "detection_cohort": "arista-core-7050",
+        "device_role": "core_switch",
+        "model": "7050",
+        "pilot_protocol": "snmp",
+        "pilot_source": "external",
+        "pilot_subject_kind": "network_device",
+        "pilot_target": "core-sw-02",
+        "site": "hq",
+        "vendor": "arista"
+      }
+    }
+  ]
+}

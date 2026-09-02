@@ -25,12 +25,13 @@ func init() {
 var (
 	monDir string
 
-	monTargetName    string
-	monTargetAddress string
-	monTargetProfile string
-	monTargetSite    string
-	monTargetLabels  []string
-	monTargetYes     bool
+	monTargetName            string
+	monTargetAddress         string
+	monTargetProfile         string
+	monTargetSite            string
+	monTargetDetectionCohort string
+	monTargetLabels          []string
+	monTargetYes             bool
 
 	monTargetTestAuthUser string
 )
@@ -95,7 +96,8 @@ func init() {
 	c.Flags().StringVar(&monTargetName, "name", "", "target name, unique within the workspace (required)")
 	c.Flags().StringVar(&monTargetAddress, "address", "", "host:port to scrape (required)")
 	c.Flags().StringVar(&monTargetProfile, "profile", "", "scrape profile name, must already exist (required)")
-	c.Flags().StringVar(&monTargetSite, "site", "", "logical site label (optional)")
+	c.Flags().StringVar(&monTargetSite, "site", "", "logical site label (optional; required for an enabled kind:snmp target)")
+	c.Flags().StringVar(&monTargetDetectionCohort, "detection-cohort", "", "Detection Engine cohort ID (kind:snmp targets only; a v2-only field)")
 	addFlagTargetLabel(c, &monTargetLabels)
 	_ = c.MarkFlagRequired("name")
 	_ = c.MarkFlagRequired("address")
@@ -119,14 +121,18 @@ func runMonitoringTargetAdd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	tf.Targets = append(tf.Targets, monitoring.Target{
-		Name:    monTargetName,
-		Address: monTargetAddress,
-		Profile: monTargetProfile,
-		Site:    monTargetSite,
-		Labels:  labels,
+		Name:            monTargetName,
+		Address:         monTargetAddress,
+		Profile:         monTargetProfile,
+		Site:            monTargetSite,
+		DetectionCohort: monTargetDetectionCohort,
+		Labels:          labels,
 	})
 
-	r := monitoring.Validate(tf, pf)
+	r, err := validateWorkspace(ws, tf, pf)
+	if err != nil {
+		return err
+	}
 	printViolations(cmd.OutOrStdout(), r)
 	if !r.OK() {
 		return fmt.Errorf("target %q not saved: validation failed", monTargetName)
@@ -154,6 +160,7 @@ func init() {
 	c.Flags().StringVar(&monTargetAddress, "address", "", "new host:port")
 	c.Flags().StringVar(&monTargetProfile, "profile", "", "new scrape profile name")
 	c.Flags().StringVar(&monTargetSite, "site", "", "new site label")
+	c.Flags().StringVar(&monTargetDetectionCohort, "detection-cohort", "", "new Detection Engine cohort ID (kind:snmp targets only)")
 	addFlagTargetLabel(c, &monTargetLabels)
 	_ = c.MarkFlagRequired("name")
 	monitoringTargetCmd.AddCommand(c)
@@ -170,7 +177,7 @@ func init() {
 // `pilot` usage (every invocation is a fresh process) but silently corrupts
 // a test suite that calls rootCmd.Execute() more than once in one process
 // and trusts Changed() to reflect only the current call.
-func targetFromFlags(changed func(string) bool, base monitoring.Target, address, profile, site string, labels []string) (monitoring.Target, error) {
+func targetFromFlags(changed func(string) bool, base monitoring.Target, address, profile, site, detectionCohort string, labels []string) (monitoring.Target, error) {
 	if changed("address") {
 		base.Address = address
 	}
@@ -179,6 +186,9 @@ func targetFromFlags(changed func(string) bool, base monitoring.Target, address,
 	}
 	if changed("site") {
 		base.Site = site
+	}
+	if changed("detection-cohort") {
+		base.DetectionCohort = detectionCohort
 	}
 	if changed("label") {
 		parsed, err := parseLabelFlags(labels)
@@ -200,13 +210,16 @@ func runMonitoringTargetEdit(cmd *cobra.Command, _ []string) error {
 	if idx < 0 {
 		return fmt.Errorf("target %q not found", monTargetName)
 	}
-	updated, err := targetFromFlags(cmd.Flags().Changed, tf.Targets[idx], monTargetAddress, monTargetProfile, monTargetSite, monTargetLabels)
+	updated, err := targetFromFlags(cmd.Flags().Changed, tf.Targets[idx], monTargetAddress, monTargetProfile, monTargetSite, monTargetDetectionCohort, monTargetLabels)
 	if err != nil {
 		return err
 	}
 	tf.Targets[idx] = updated
 
-	r := monitoring.Validate(tf, pf)
+	r, err := validateWorkspace(ws, tf, pf)
+	if err != nil {
+		return err
+	}
 	printViolations(cmd.OutOrStdout(), r)
 	if !r.OK() {
 		return fmt.Errorf("target %q not saved: validation failed", monTargetName)

@@ -30,6 +30,9 @@ func monitoringTargetsPath(dir string) string { return filepath.Join(dir, "monit
 func monitoringProfilesPath(dir string) string {
 	return filepath.Join(dir, "monitoring", "scrape-profiles.yml")
 }
+func monitoringSNMPCatalogPath(dir string) string {
+	return filepath.Join(dir, "monitoring", "snmp", "catalog.yml")
+}
 
 func loadMonitoring(dir string) (monitoring.TargetFile, monitoring.ProfileFile, error) {
 	tf, err := monitoring.LoadTargets(monitoringTargetsPath(dir))
@@ -43,11 +46,26 @@ func loadMonitoring(dir string) (monitoring.TargetFile, monitoring.ProfileFile, 
 	return tf, pf, nil
 }
 
+// validateMonitoring loads this workspace's SNMP catalog and runs
+// monitoring.Validate — every TUI mutation path shares this so a caller
+// can never forget to pass the catalog (spec §7.4's module/auth
+// cross-reference checks would otherwise silently no-op).
+func validateMonitoring(dir string, tf monitoring.TargetFile, pf monitoring.ProfileFile) (monitoring.Result, error) {
+	catalog, err := monitoring.LoadSNMPCatalog(monitoringSNMPCatalogPath(dir))
+	if err != nil {
+		return monitoring.Result{}, err
+	}
+	return monitoring.Validate(tf, pf, catalog), nil
+}
+
 // saveMonitoringTargets validates the FULL registry (tf against pf) before
 // writing tf — an edit to one target can only be judged valid in the
 // context of every other target/profile, so Validate always takes both.
 func saveMonitoringTargets(dir string, tf monitoring.TargetFile, pf monitoring.ProfileFile) (monitoring.Result, error) {
-	r := monitoring.Validate(tf, pf)
+	r, err := validateMonitoring(dir, tf, pf)
+	if err != nil {
+		return monitoring.Result{}, err
+	}
 	if !r.OK() {
 		return r, nil
 	}
@@ -55,7 +73,10 @@ func saveMonitoringTargets(dir string, tf monitoring.TargetFile, pf monitoring.P
 }
 
 func saveMonitoringProfiles(dir string, tf monitoring.TargetFile, pf monitoring.ProfileFile) (monitoring.Result, error) {
-	r := monitoring.Validate(tf, pf)
+	r, err := validateMonitoring(dir, tf, pf)
+	if err != nil {
+		return monitoring.Result{}, err
+	}
 	if !r.OK() {
 		return r, nil
 	}
@@ -110,7 +131,10 @@ func pushMonitoringValidateReport(r *editRouterModel, dir string) tea.Cmd {
 	if err != nil {
 		return pushMonitoringManager(r, dir, fmt.Sprintf("⚠️  無法讀取 monitoring 設定：%v", err))
 	}
-	res := monitoring.Validate(tf, pf)
+	res, err := validateMonitoring(dir, tf, pf)
+	if err != nil {
+		return pushMonitoringManager(r, dir, fmt.Sprintf("⚠️  無法讀取 SNMP catalog：%v", err))
+	}
 	banner := "✅ monitoring/targets.yml + scrape-profiles.yml 驗證通過。"
 	if !res.OK() || len(res.Warnings) > 0 {
 		banner = formatViolations(res)

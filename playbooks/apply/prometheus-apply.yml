@@ -128,6 +128,13 @@
     # the trade-off taken for `prometheus_scrape_configs` would clash
     # with Jinja on the `{{ ... }}` inside alert annotations).
     prometheus_alert_rules_file: files/pilot-alert-rules-seed.yml
+    # SNMPTargetDown/SNMPExporterDown seed (SNMP monitoring integration
+    # spec §8.4) — a second, independently overridable rule_files entry so
+    # it never has to be hand-merged into prometheus_alert_rules_file.
+    # Only ever loaded when at least one kind:snmp profile is declared
+    # (see prometheus_has_snmp_profile below); a no-SNMP deployment's
+    # rendered prometheus.yml is byte-for-byte what it was before (AC1).
+    prometheus_snmp_alert_rules_file: files/pilot-snmp-alert-rules-seed.yml
 
     # ---- External monitoring targets (docs/verification/
     # prometheus-external-targets.md, spec.md §7-24) ----
@@ -148,6 +155,22 @@
     prometheus_targets_container_dir: /etc/prometheus/targets
     monitoring_secrets_host_dir: "{{ prometheus_config_dir }}/monitoring-secrets"
     monitoring_secrets_container_dir: /etc/prometheus/monitoring-secrets
+
+    # ---- kind:snmp scrape profiles (SNMP monitoring integration spec §8) ----
+    # snmp_exporter_endpoint is the co-located default (spec §5.1): the
+    # exporter's fixed container name (snmp-exporter-apply.yml's
+    # snmp_exporter_container_name default) over the SAME docker_network_name
+    # ("pilot-metrics") this playbook already joins — NOT 127.0.0.1, which
+    # inside this container's own network namespace is this container's
+    # loopback, not the host's (a same-host 127.0.0.1 assumption only holds
+    # for two processes sharing one network namespace; two sibling Docker
+    # containers do not, confirmed via a real disposable-VM run: "connection
+    # refused" scraping "127.0.0.1:9116" from inside pilot-prometheus). MUST
+    # be set explicitly when the exporter runs on a different host, or under
+    # a different container name/network (spec §5.1 point 1 — no site-based
+    # auto-guessing, fail closed on a typo rather than silently scraping
+    # nothing).
+    snmp_exporter_endpoint: "pilot-snmp-exporter:9116"
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -483,16 +506,82 @@
       loop: "{{ monitoring_profiles_resolved | dict2items }}"
       loop_control:
         label: "{{ item.key }}"
+      when: (item.value.kind | default('prometheus', true)) != 'snmp'
+
+    # SNMP monitoring integration spec §8.2: a completely different job
+    # shape from the direct-HTTP one above (metrics_path /snmp, module/auth
+    # query params, relabel chain redirecting the actual scrape to the
+    # site-local snmp_exporter) — kept as its own accumulator/task rather
+    # than folded into the loop above so kind:prometheus's byte-for-byte
+    # output (AC1) can never be perturbed by an unrelated kind:snmp change.
+    - name: "Accumulate one SNMP scrape job dict per kind:snmp scrape profile (SNMP monitoring integration spec §8.2)"
+      ansible.builtin.set_fact:
+        monitoring_snmp_scrape_jobs: >-
+          {{ (monitoring_snmp_scrape_jobs | default([]))
+             + [ ({'job_name': item.value.jobName,
+                   'metrics_path': '/snmp',
+                   'params': {'module': item.value.snmp.modules, 'auth': [item.value.snmp.authProfile]},
+                   'file_sd_configs': [{'files': [prometheus_targets_container_dir ~ '/' ~ item.value.jobName ~ '.json']}],
+                   'relabel_configs': [
+                     {'source_labels': ['__address__'], 'target_label': '__param_target'},
+                     {'source_labels': ['__param_target'], 'target_label': 'instance'},
+                     {'target_label': '__address__', 'replacement': snmp_exporter_endpoint}]}
+                  | combine({'scrape_interval': item.value.scrapeInterval}
+                            if (item.value.scrapeInterval | default('', true) | length > 0) else {})
+                  | combine({'scrape_timeout': item.value.scrapeTimeout}
+                            if (item.value.scrapeTimeout | default('', true) | length > 0) else {}) ) ] }}
+      loop: "{{ monitoring_profiles_resolved | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: (item.value.kind | default('prometheus', true)) == 'snmp'
+
+    # snmp_exporter's own /metrics (spec §8.3) — a separate job from every
+    # device-scrape job above so `up{job="snmp-exporter"}` never collides
+    # in meaning with `up{pilot_protocol="snmp"}` (a device being down is
+    # not the same fact as the exporter process being down).
+    - name: "Add the snmp_exporter self-scrape job when any kind:snmp profile is declared (spec §8.3)"
+      ansible.builtin.set_fact:
+        monitoring_snmp_scrape_jobs: >-
+          {{ (monitoring_snmp_scrape_jobs | default([]))
+             + [{'job_name': 'snmp-exporter',
+                 'static_configs': [{'targets': [snmp_exporter_endpoint], 'labels': {'site': prometheus_site_label, 'component': 'snmp-exporter'}}]}] }}
+      when: (monitoring_profiles_resolved.values() | selectattr('kind', 'defined') | selectattr('kind', 'equalto', 'snmp') | list | length) > 0
 
     # Empty string (not an empty list rendered by to_nice_yaml, which would
     # emit "[]" — an invalid extra scrape_configs entry) when there are no
     # profiles at all, same convention as prometheus_node_exporter_scrape_block.
+    - name: "Combine direct-Prometheus and SNMP scrape job lists"
+      ansible.builtin.set_fact:
+        monitoring_all_scrape_jobs: "{{ (monitoring_scrape_jobs | default([])) + (monitoring_snmp_scrape_jobs | default([])) }}"
+
     - name: "Render the external monitoring scrape block (spec.md §17/§20; empty string when no profiles)"
       ansible.builtin.set_fact:
         prometheus_external_scrape_block: >-
-          {{ (monitoring_scrape_jobs | default([]) | to_nice_yaml(indent=2))
-             if (monitoring_scrape_jobs | default([]) | length > 0) else '' }}
+          {{ (monitoring_all_scrape_jobs | to_nice_yaml(indent=2))
+             if (monitoring_all_scrape_jobs | length > 0) else '' }}
       tags: [always, ext-target, ext-target-C3]
+
+    # Built as a real Jinja list + to_nice_yaml (never hand-formatted
+    # text with an embedded newline escape — that was tried first and
+    # broke: `>-` folding plus set_fact's own YAML/Jinja double-templating
+    # turned a literal "\n" into the two characters backslash-n instead of
+    # an actual newline, so promtool saw one bogus multi-line filename
+    # instead of two rule_files entries. Same class of trap as
+    # prometheus_node_exporter_scrape_block's documented \n-escaping
+    # warning — never hand-build YAML structure as an interpolated string).
+    - name: "Compute the rule_files list (spec §8.4; only alert-rules.yml when no kind:snmp profile is declared)"
+      ansible.builtin.set_fact:
+        prometheus_rule_files_list: >-
+          {{ ['/etc/prometheus/alert-rules.yml']
+             + (['/etc/prometheus/snmp-alert-rules.yml']
+                if ((monitoring_profiles_resolved.values() | selectattr('kind', 'defined') | selectattr('kind', 'equalto', 'snmp') | list | length) > 0)
+                else []) }}
+      tags: [always]
+
+    - name: "Has any kind:snmp profile been declared? (gates snmp-alert-rules.yml rendering below)"
+      ansible.builtin.set_fact:
+        prometheus_has_snmp_profile: "{{ (monitoring_profiles_resolved.values() | selectattr('kind', 'defined') | selectattr('kind', 'equalto', 'snmp') | list | length) > 0 }}"
+      tags: [always]
 
   tasks:
     - name: "Resolve thanos_s3_target_host for the /etc/hosts pin"
@@ -585,7 +674,7 @@
                 external_labels:
                   site: {{ prometheus_site_label }}
               rule_files:
-                - /etc/prometheus/alert-rules.yml
+              {{ prometheus_rule_files_list | to_nice_yaml(indent=2) }}
               alerting:
                 alertmanagers:
                   - static_configs:
@@ -609,7 +698,7 @@
                 external_labels:
                   site: {{ prometheus_site_label }}
               rule_files:
-                - /etc/prometheus/alert-rules.yml
+              {{ prometheus_rule_files_list | to_nice_yaml(indent=2) }}
               scrape_configs:
               {{ prometheus_scrape_configs }}
               {{ prometheus_node_exporter_scrape_block }}
@@ -672,19 +761,35 @@
         # Jinja `{% for %}` text loop (not a native set_fact list) because
         # the output IS the file content, not an intermediate Ansible
         # value — to_json per-field sidesteps hand-escaping addresses/labels.
-        - name: "Render file_sd JSON — one file per scrape profile/jobName (docs/verification/prometheus-external-targets.md C2)"
+        # kind:snmp targets are additionally site-scoped (SNMP monitoring
+        # integration spec §8.1 rules 2/3: no cross-site fallback) and get
+        # the SNMP label shape (pilot_protocol/pilot_subject_kind/
+        # detection_cohort) instead of the plain direct-Prometheus one —
+        # the `else` branch below is byte-for-byte the pre-SNMP template
+        # (AC1), never touched by the `if` branch.
+        - name: "Render file_sd JSON — one file per scrape profile/jobName (prometheus-external-targets.md C2; SNMP spec §8.1)"
           tags: [ext-target, ext-target-C2]
           ansible.builtin.copy:
             dest: "{{ prometheus_targets_host_dir }}/{{ item.value.jobName }}.json"
             mode: "0644"
             content: |
               [
-              {% for t in (monitoring_targets_resolved | selectattr('enabled') | selectattr('profile', 'equalto', item.key) | list) %}
+              {% set is_snmp = (item.value.kind | default('prometheus', true)) == 'snmp' %}
+              {% set candidates = (monitoring_targets_resolved | selectattr('enabled') | selectattr('profile', 'equalto', item.key) | list) %}
+              {% set site_scoped = (candidates | selectattr('site', 'equalto', prometheus_site_label) | list) if is_snmp else candidates %}
+              {% for t in site_scoped %}
                 {
                   "targets": [{{ t.address | to_json }}],
-                  "labels": {{ ({'pilot_target': t.name, 'pilot_source': 'external'}
-                                 | combine({'site': t.site} if (t.site | default('', true) | length > 0) else {})
-                                 | combine(t.labels | default({}, true))) | to_json }}
+                  "labels": {{ (
+                    ({'pilot_target': t.name, 'pilot_source': 'external', 'pilot_protocol': 'snmp',
+                      'pilot_subject_kind': item.value.subjectKind, 'site': t.site}
+                     | combine({'detection_cohort': t.detectionCohort} if (t.detectionCohort | default('', true) | length > 0) else {})
+                     | combine(t.labels | default({}, true)))
+                    if is_snmp else
+                    ({'pilot_target': t.name, 'pilot_source': 'external'}
+                     | combine({'site': t.site} if (t.site | default('', true) | length > 0) else {})
+                     | combine(t.labels | default({}, true)))
+                  ) | to_json }}
                 }{{ "," if not loop.last else "" }}
               {% endfor %}
               ]
@@ -742,6 +847,18 @@
             dest: "{{ prometheus_config_dir }}/alert-rules.yml"
             mode: "0644"
           register: alert_rules_result
+
+        # Only rendered when at least one kind:snmp profile is declared
+        # (prometheus_has_snmp_profile's own gate) — a no-SNMP
+        # deployment's config directory footprint stays exactly as it was
+        # before this feature existed (spec §8.4, AC1).
+        - name: "Render snmp-alert-rules.yml (SNMPTargetDown/SNMPExporterDown seed, spec §8.4)"
+          ansible.builtin.copy:
+            src: "{{ prometheus_snmp_alert_rules_file }}"
+            dest: "{{ prometheus_config_dir }}/snmp-alert-rules.yml"
+            mode: "0644"
+          register: snmp_alert_rules_result
+          when: prometheus_has_snmp_profile | bool
 
         # SeaweedFS never implicitly creates a bucket on PutObject, so a
         # fresh destination makes the Thanos sidecar's upload (and, once
@@ -834,6 +951,7 @@
             restart: >-
               {{ prometheus_yml_result is changed
                  or alert_rules_result is changed
+                 or (snmp_alert_rules_result is defined and snmp_alert_rules_result is changed)
                  or node_exporter_password_file_result is changed
                  or monitoring_files_changed | default(false) }}
             networks:
@@ -864,7 +982,9 @@
                    + ([prometheus_targets_host_dir ~ ':' ~ prometheus_targets_container_dir ~ ':ro']
                       if (monitoring_profiles_resolved | length > 0) else [])
                    + ([monitoring_secrets_host_dir ~ ':' ~ monitoring_secrets_container_dir ~ ':ro']
-                      if ((monitoring_profiles_resolved.values() | selectattr('authRef', 'defined') | list | length) > 0) else []) }}
+                      if ((monitoring_profiles_resolved.values() | selectattr('authRef', 'defined') | list | length) > 0) else [])
+                   + ([prometheus_config_dir ~ '/snmp-alert-rules.yml:/etc/prometheus/snmp-alert-rules.yml:ro']
+                      if (prometheus_has_snmp_profile | bool) else []) }}
             ports:
               - "9090:9090"
 

@@ -47,6 +47,19 @@
     snmp_exporter_module_concurrency: "1"
     snmp_exporter_config_dir: "/etc/pilot/snmp-exporter"
     snmp_exporter_data_dir: "/var/lib/pilot/snmp-exporter"
+    # Shared with prometheus-apply.yml/alertmanager-apply.yml/
+    # thanos-query-apply.yml's own docker_network_name (same default,
+    # same variable name — deliberately, not a coincidence): a co-located
+    # Prometheus reaches this exporter by container name over this
+    # network (prometheus-apply.yml's snmp_exporter_endpoint default),
+    # NOT via the host-published loopback port below — 127.0.0.1 inside
+    # Prometheus's OWN container is that container's loopback, not the
+    # host's (found via a real disposable-VM run: "connection refused"
+    # from inside pilot-prometheus scraping "127.0.0.1:9116"). The
+    # loopback port publish is kept too, for host-level tools/tests
+    # (`pilot monitoring target test`, manual curl) — this network
+    # membership is additive, not a replacement.
+    docker_network_name: pilot-metrics
 
     # Repo-relative path to the non-secret catalog (spec §6.4), read
     # from the control node's own checkout — same convention as
@@ -344,6 +357,11 @@
           register: snmp_env_render
           no_log: true
 
+        - name: "Ensure docker network {{ docker_network_name }} exists"
+          community.docker.docker_network:
+            name: "{{ docker_network_name }}"
+            state: present
+
         - name: "Run pilot-snmp-exporter container"
           tags: [C1, C2, C3, C4, C5, C6, C10]
           community.docker.docker_container:
@@ -358,6 +376,8 @@
             cap_drop:
               - ALL
             env_file: "{{ snmp_exporter_config_dir }}/snmp-exporter.env"
+            networks:
+              - name: "{{ docker_network_name }}"
             volumes:
               - "{{ snmp_exporter_config_dir }}/auths.yml:/etc/snmp_exporter/snmp.yml:ro"
             ports:

@@ -1,0 +1,21 @@
+schemaVersion: 2
+
+profiles:
+  core-switch:
+    kind: snmp
+    jobName: snmp-core-switch
+    subjectKind: network_device
+    diagnosticProfile: network-device-ifmib-v1
+    scrapeInterval: 30s
+    scrapeTimeout: 20s
+    snmp:
+      modules:
+        - if_mib
+        - vendor_core_switch
+      authProfile: core-switch-v3
+
+  external-linux:
+    kind: prometheus
+    jobName: external-linux
+    scheme: https
+    metricsPath: /metrics

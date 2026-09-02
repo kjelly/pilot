@@ -17,18 +17,31 @@ var monitoringValidateCmd = &cobra.Command{
 	RunE:  runMonitoringValidate,
 }
 
+var monValidateSNMPCatalog string
+
 func init() {
 	addMonitoringDirFlag(monitoringValidateCmd)
+	monitoringValidateCmd.Flags().StringVar(&monValidateSNMPCatalog, "snmp-catalog", "", "override the workspace's monitoring/snmp/catalog.yml path (default: <dir>/monitoring/snmp/catalog.yml)")
 	monitoringCmd.AddCommand(monitoringValidateCmd)
 }
 
 func runMonitoringValidate(cmd *cobra.Command, _ []string) error {
 	ws := resolveMonitoringWorkspace(monDir)
+	if monValidateSNMPCatalog != "" {
+		ws.SNMPCatalogPath = monValidateSNMPCatalog
+	}
 	tf, pf, err := ws.load()
 	if err != nil {
 		return err
 	}
-	r := monitoring.Validate(tf, pf)
+	catalog, err := ws.loadSNMPCatalog()
+	if err != nil {
+		return err
+	}
+	if err := catalog.Validate(); err != nil {
+		return fmt.Errorf("snmp catalog %s: %w", ws.SNMPCatalogPath, err)
+	}
+	r := monitoring.Validate(tf, pf, catalog)
 	printViolations(cmd.OutOrStdout(), r)
 	if !r.OK() {
 		// Non-zero exit on failure (spec.md §75); `target list`/`profile

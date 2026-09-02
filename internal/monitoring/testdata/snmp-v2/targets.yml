@@ -1,0 +1,32 @@
+schemaVersion: 2
+
+targets:
+  - name: core-sw-01
+    address: 10.20.0.11
+    profile: core-switch
+    site: hq
+    detectionCohort: arista-core-7050
+    labels:
+      vendor: arista
+      model: "7050"
+      device_role: core_switch
+
+  - name: core-sw-02
+    address: udp://10.20.0.12:161
+    profile: core-switch
+    site: hq
+    detectionCohort: arista-core-7050
+    labels:
+      vendor: arista
+      model: "7050"
+      device_role: core_switch
+
+  - name: core-sw-03
+    address: 10.20.1.11
+    profile: core-switch
+    site: branch-1
+    detectionCohort: arista-core-7050
+    labels:
+      vendor: arista
+      model: "7050"
+      device_role: core_switch

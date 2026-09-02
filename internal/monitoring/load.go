@@ -1,6 +1,7 @@
 package monitoring
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +14,10 @@ import (
 // workspace with no monitoring/ directory must behave exactly as it did
 // before this feature existed, not error. An empty path is likewise treated
 // as "no targets declared" so callers don't need a separate branch for
-// "monitoring not configured at all".
+// "monitoring not configured at all". Decoding rejects any unknown field —
+// including community/username/password/privPassword — so a secret
+// accidentally pasted into the registry fails to load rather than being
+// silently dropped (SNMP monitoring integration spec §7.4 rule 10).
 func LoadTargets(path string) (TargetFile, error) {
 	if path == "" {
 		return TargetFile{SchemaVersion: SchemaVersion}, nil
@@ -25,8 +29,13 @@ func LoadTargets(path string) (TargetFile, error) {
 		}
 		return TargetFile{}, fmt.Errorf("read %s: %w", path, err)
 	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return TargetFile{SchemaVersion: SchemaVersion}, nil
+	}
 	var tf TargetFile
-	if err := yaml.Unmarshal(data, &tf); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&tf); err != nil {
 		return TargetFile{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if tf.SchemaVersion == 0 {
@@ -36,7 +45,8 @@ func LoadTargets(path string) (TargetFile, error) {
 }
 
 // LoadProfiles reads path and returns its parsed ProfileFile, with the same
-// missing-file/empty-path-is-empty-registry semantics as LoadTargets.
+// missing-file/empty-path-is-empty-registry/strict-decode semantics as
+// LoadTargets.
 func LoadProfiles(path string) (ProfileFile, error) {
 	if path == "" {
 		return ProfileFile{SchemaVersion: SchemaVersion, Profiles: map[string]Profile{}}, nil
@@ -48,8 +58,13 @@ func LoadProfiles(path string) (ProfileFile, error) {
 		}
 		return ProfileFile{}, fmt.Errorf("read %s: %w", path, err)
 	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return ProfileFile{SchemaVersion: SchemaVersion, Profiles: map[string]Profile{}}, nil
+	}
 	var pf ProfileFile
-	if err := yaml.Unmarshal(data, &pf); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&pf); err != nil {
 		return ProfileFile{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if pf.SchemaVersion == 0 {
@@ -63,10 +78,20 @@ func LoadProfiles(path string) (ProfileFile, error) {
 
 // SaveTargets writes tf to path as YAML, creating parent directories as
 // needed. Used by the CLI/TUI mutation paths (Phase 3/4) — always preceded
-// by Validate so an invalid registry is never persisted.
+// by Validate so an invalid registry is never persisted. schemaVersion is
+// left at 1 if every target only uses v1 fields, and forced to 2 the
+// moment any target uses a v2-only field (SNMP monitoring integration
+// spec §7.1's writer rule) — never silently downgraded once a caller
+// explicitly set 2.
 func SaveTargets(path string, tf TargetFile) error {
 	if tf.SchemaVersion == 0 {
 		tf.SchemaVersion = SchemaVersion
+	}
+	for _, t := range tf.Targets {
+		if t.UsesV2Fields() {
+			tf.SchemaVersion = MaxSchemaVersion
+			break
+		}
 	}
 	data, err := yaml.Marshal(tf)
 	if err != nil {
@@ -75,10 +100,17 @@ func SaveTargets(path string, tf TargetFile) error {
 	return writeFile(path, data)
 }
 
-// SaveProfiles writes pf to path as YAML, same conventions as SaveTargets.
+// SaveProfiles writes pf to path as YAML, same v1/v2 writer conventions as
+// SaveTargets.
 func SaveProfiles(path string, pf ProfileFile) error {
 	if pf.SchemaVersion == 0 {
 		pf.SchemaVersion = SchemaVersion
+	}
+	for _, p := range pf.Profiles {
+		if p.UsesV2Fields() {
+			pf.SchemaVersion = MaxSchemaVersion
+			break
+		}
 	}
 	data, err := yaml.Marshal(pf)
 	if err != nil {

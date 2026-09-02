@@ -163,13 +163,28 @@ PRODUCTION_READY — see spec §17.4/§18 (AC23) for the real-device gate.
 
 ## Actual-run evidence
 
-None yet. This file will be updated with real `go test` output and
-disposable-topology run logs as each phase in
-`docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md`
-§15 lands.
+**C1, C2, C6 (Phase 2 — registry v2 schema/compile/site-filtering): DONE.**
+See `docs/runbooks/snmp-monitoring-registry.md` for the full disposable
+two-VM run: real `go test ./internal/monitoring/...` golden coverage (v1
+unchanged, new v2 SNMP golden), plus a real Prometheus + snmp-exporter +
+lab SNMPv3 device chain — `promtool check config` PASS,
+`up{pilot_protocol="snmp"}=1`, and a wrong-site target confirmed absent
+from both the compiled file_sd JSON and Prometheus's live target list.
+
+**C3, C4, C5 (Phase 2 — secret-key rejection / unknown module-auth /
+prod version-policy): DONE** via `internal/monitoring`'s own unit tests
+(`TestLoadTargets_RejectsSecretKey`, `TestLoadProfiles_RejectsSecretKey`,
+`TestValidate_SNMPProfile_UnknownModule`,
+`TestValidate_SNMPProfile_UnknownAuthProfile`) — no disposable-topology
+run needed, these are pure schema/validate rules.
+
+**C7-C15 (Phase 3+ — Detection Engine, Agent Controller, diagnose,
+model provider): not yet implemented.** This file stays DRAFT until
+those phases land.
 
 ## Change record
 
 | Date | Version | Change |
 |---|---|---|
 | 2026-09-01 | DRAFT | Phase 0 initial authoring per spec §17.2/§17.3's positive/negative lanes, reframed as C1-C15. No actual-run evidence yet. |
+| 2026-09-02 | DRAFT | Phase 2 evidence added for C1-C6 (registry v2 schema/validate/compile) — see `docs/runbooks/snmp-monitoring-registry.md`. C7-C15 remain unimplemented; still DRAFT overall. |

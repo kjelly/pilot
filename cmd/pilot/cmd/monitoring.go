@@ -32,14 +32,16 @@ func init() {
 	rootCmd.AddCommand(monitoringCmd)
 }
 
-// monitoringWorkspace resolves --dir into the two fixed file paths spec.md
-// §6 declares (monitoring/targets.yml, monitoring/scrape-profiles.yml) —
-// these are NOT caller-chosen manifest paths like internal-endpoint's
-// --manifest flag, because spec.md's workspace layout fixes both names.
+// monitoringWorkspace resolves --dir into the fixed file paths spec.md §6
+// declares (monitoring/targets.yml, monitoring/scrape-profiles.yml,
+// monitoring/snmp/catalog.yml) — these are NOT caller-chosen manifest
+// paths like internal-endpoint's --manifest flag, because spec.md's
+// workspace layout fixes all three names.
 type monitoringWorkspace struct {
-	Dir          string
-	TargetsPath  string
-	ProfilesPath string
+	Dir             string
+	TargetsPath     string
+	ProfilesPath    string
+	SNMPCatalogPath string
 }
 
 func resolveMonitoringWorkspace(dir string) monitoringWorkspace {
@@ -47,9 +49,10 @@ func resolveMonitoringWorkspace(dir string) monitoringWorkspace {
 		dir = "."
 	}
 	return monitoringWorkspace{
-		Dir:          dir,
-		TargetsPath:  filepath.Join(dir, "monitoring", "targets.yml"),
-		ProfilesPath: filepath.Join(dir, "monitoring", "scrape-profiles.yml"),
+		Dir:             dir,
+		TargetsPath:     filepath.Join(dir, "monitoring", "targets.yml"),
+		ProfilesPath:    filepath.Join(dir, "monitoring", "scrape-profiles.yml"),
+		SNMPCatalogPath: filepath.Join(dir, "monitoring", "snmp", "catalog.yml"),
 	}
 }
 
@@ -63,6 +66,25 @@ func (w monitoringWorkspace) load() (monitoring.TargetFile, monitoring.ProfileFi
 		return monitoring.TargetFile{}, monitoring.ProfileFile{}, err
 	}
 	return tf, pf, nil
+}
+
+// loadSNMPCatalog loads this workspace's non-secret SNMP catalog (spec
+// §6.4), or an empty catalog if none is declared — a workspace with no
+// SNMP profiles at all is not required to have one.
+func (w monitoringWorkspace) loadSNMPCatalog() (monitoring.SNMPCatalog, error) {
+	return monitoring.LoadSNMPCatalog(w.SNMPCatalogPath)
+}
+
+// validateWorkspace loads tf/pf's SNMP catalog and runs monitoring.Validate
+// — the one place every CLI/TUI mutation path shares so a caller can never
+// forget to pass the catalog (spec §7.4's module/auth cross-reference
+// checks would otherwise silently no-op against an empty catalog).
+func validateWorkspace(w monitoringWorkspace, tf monitoring.TargetFile, pf monitoring.ProfileFile) (monitoring.Result, error) {
+	catalog, err := w.loadSNMPCatalog()
+	if err != nil {
+		return monitoring.Result{}, err
+	}
+	return monitoring.Validate(tf, pf, catalog), nil
 }
 
 // printViolations renders a monitoring.Result the same way for every

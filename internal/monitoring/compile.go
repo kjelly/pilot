@@ -12,16 +12,23 @@ type FileSDEntry struct {
 
 // Compile turns an enabled target's own address/labels plus its profile's
 // jobName into the file_sd payload every scrape profile's *.json file
-// should contain (spec.md §15/§16). The returned map is keyed by jobName
-// (unique per Validate) so it can be written straight to
-// "<jobName>.json" per spec.md §62. Output ordering is fully deterministic
-// (map iteration is never relied on) to satisfy spec.md §72's idempotency
-// requirement — this is the Go-side counterpart to
-// playbooks/apply/prometheus-apply.yml's own
+// should contain (spec.md §15/§16; SNMP monitoring integration spec §8.1
+// for kind:snmp profiles). The returned map is keyed by jobName (unique
+// per Validate) so it can be written straight to "<jobName>.json" per
+// spec.md §62. Output ordering is fully deterministic (map iteration is
+// never relied on) to satisfy spec.md §72's idempotency requirement — this
+// is the Go-side counterpart to playbooks/apply/prometheus-apply.yml's own
 // "Render file_sd JSON" task, and MUST stay in parity with it; see
 // internal/monitoring/testdata/ golden fixtures and
 // internal/spec/prometheus_external_targets_regression_test.go.
-func Compile(tf TargetFile, pf ProfileFile) map[string][]FileSDEntry {
+//
+// localSite is this Prometheus host's own prometheus_site_label. It is
+// used ONLY to filter kind:snmp targets (spec §8.1 rule 2: a site-wide
+// registry is shared across every site's Prometheus, but each compiles
+// only the SNMP targets that belong to it — direct-Prometheus targets have
+// no such filter and keep their pre-SNMP behavior unchanged regardless of
+// localSite's value, preserving AC1 byte-for-byte).
+func Compile(tf TargetFile, pf ProfileFile, localSite string) map[string][]FileSDEntry {
 	byJob := map[string][]FileSDEntry{}
 	// Every declared profile gets an entry in the map even with zero
 	// targets (an empty JSON array is valid file_sd input, and lets a
@@ -44,12 +51,29 @@ func Compile(tf TargetFile, pf ProfileFile) map[string][]FileSDEntry {
 		if !ok || p.JobName == "" {
 			continue // Validate should already have rejected this; compile stays defensive, not authoritative.
 		}
-		labels := map[string]string{
-			"pilot_target": t.Name,
-			"pilot_source": "external",
+		if p.IsSNMP() && t.Site != localSite {
+			continue // spec §8.1 rule 2/3: SNMP targets are site-scoped, no cross-site fallback.
 		}
-		if t.Site != "" {
-			labels["site"] = t.Site
+		var labels map[string]string
+		if p.IsSNMP() {
+			labels = map[string]string{
+				"pilot_target":       t.Name,
+				"pilot_source":       "external",
+				"pilot_protocol":     "snmp",
+				"pilot_subject_kind": p.SubjectKind,
+				"site":               t.Site,
+			}
+			if t.DetectionCohort != "" {
+				labels["detection_cohort"] = t.DetectionCohort
+			}
+		} else {
+			labels = map[string]string{
+				"pilot_target": t.Name,
+				"pilot_source": "external",
+			}
+			if t.Site != "" {
+				labels["site"] = t.Site
+			}
 		}
 		for k, v := range t.Labels {
 			labels[k] = v
