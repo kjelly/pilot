@@ -162,9 +162,11 @@ func diagnoseHostHealthHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[
 		if detHost, detErr := diagnose.ResolveSingletonGroupHost(resolved, diagnose.DetectionEngineGroup); detErr != nil {
 			out.DetectionNote = detErr.Error()
 		} else {
-			detSteps := diagnose.DetectionSteps("")
-			detResults := diagnose.RunSteps(ctx, runner, opts.Inventory, detHost, detSteps, opts.StepTimeout)
+			detResults, detPathErr := runDetectionSteps(ctx, runner, opts.Inventory, detHost, "", opts.StepTimeout)
 			allResults = append(allResults, detResults...)
+			if detPathErr != nil {
+				out.DetectionNote = detPathErr.Error()
+			}
 			for _, r := range detResults {
 				if r.Step.ID != "signals_list" {
 					continue

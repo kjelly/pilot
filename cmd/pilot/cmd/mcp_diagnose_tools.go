@@ -121,7 +121,7 @@ func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 	}, diagnoseMonitoringTargetHandler(opts))
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_detection",
-		Description: "run fixed, read-only ansible ad-hoc commands against the central Detection Engine host (no host parameter — detection-engine is this deployment's singleton central role): engine status (`status --json`), the active SignalEvent episode list (`signals list --json`), and a bounded (`-n 200`) journal tail. At least one of signal_id or pilot_host must be supplied; when signal_id is given (must be a well-formed 26-character ULID) an additional `signals show <signal_id> --json` call returns that one episode's full detail. pilot_host is not a command parameter — the engine's CLI has no per-host filter — it is only recorded for audit/correlation against the returned signals_list_json's own pilot_host fields. Never accepts an arbitrary command.",
+		Description: "run fixed, read-only ansible ad-hoc commands against the central Detection Engine host (no host parameter — detection-engine is this deployment's singleton central role): it reads only the apply-managed config's dbPath, then runs status (`status --json`) and SignalEvent episode queries as the `pilot-detect` service account, plus a bounded (`-n 200`) journal tail. At least one of signal_id or pilot_host must be supplied; when signal_id is given (must be a well-formed 26-character ULID) an additional `signals show <signal_id>` call returns that one episode's JSON detail. pilot_host is not a command parameter — the engine's CLI has no per-host filter — it is only recorded for audit/correlation against the returned signals_list_json's own pilot_host fields. Never accepts an arbitrary command.",
 	}, diagnoseDetectionHandler(opts))
 	registerDiagnoseCompositeTools(server, opts)
 }
@@ -1310,6 +1310,35 @@ type diagnoseDetectionOutput struct {
 	AuditDirectory  string `json:"audit_directory"`
 }
 
+// runDetectionSteps resolves the database path before building the commands
+// that inspect it. The resolver returns only the dbPath line from config.yaml;
+// config.yaml is an apply-managed, secret-free file, while provider secrets
+// live in the separately protected provider.env. A malformed/unreadable path
+// does not suppress the independent status and journal evidence.
+func runDetectionSteps(ctx context.Context, runner diagnose.AdHocRunner, inventory, host string, signalID string, timeout time.Duration) ([]diagnose.StepResult, error) {
+	pathResults := diagnose.RunSteps(ctx, runner, inventory, host, []diagnose.Step{diagnose.DetectionConfigDBPathStep()}, timeout)
+	if len(pathResults) != 1 {
+		return pathResults, fmt.Errorf("internal error: expected one Detection Engine db-path result, got %d", len(pathResults))
+	}
+
+	dbPath := ""
+	var pathErr error
+	pathResult := pathResults[0].Result
+	switch {
+	case pathResult.RunErr != nil:
+		pathErr = fmt.Errorf("read configured Detection Engine dbPath: %w", pathResult.RunErr)
+	case pathResult.Unreachable:
+		pathErr = fmt.Errorf("Detection Engine host unreachable while reading configured dbPath")
+	case pathResult.RC != 0:
+		pathErr = fmt.Errorf("read configured Detection Engine dbPath exited with rc %d", pathResult.RC)
+	default:
+		dbPath, pathErr = diagnose.DetectionDBPath(pathResult.Stdout)
+	}
+
+	results := append(pathResults, diagnose.RunSteps(ctx, runner, inventory, host, diagnose.DetectionSteps(dbPath, signalID), timeout)...)
+	return results, pathErr
+}
+
 // diagnoseDetectionHandler auto-resolves diagnose.DetectionEngineGroup's
 // singleton host, same reasoning as diagnoseMetricsHandler.
 func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseDetectionInput, diagnoseDetectionOutput] {
@@ -1347,8 +1376,7 @@ func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 		if runner == nil {
 			runner = realDiagnoseAdHocRunner()
 		}
-		steps := diagnose.DetectionSteps(signalID)
-		results := diagnose.RunSteps(ctx, runner, opts.Inventory, host, steps, opts.StepTimeout)
+		results, dbPathErr := runDetectionSteps(ctx, runner, opts.Inventory, host, signalID, opts.StepTimeout)
 
 		rec := diagnoseAuditRecord{
 			SessionID: sessionID, Check: "detection", PilotVersion: rootCmd.Version,
@@ -1360,6 +1388,9 @@ func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 		_ = writeDiagnoseAudit(auditDir, rec)
 
 		out := diagnoseDetectionOutput{Host: host, ResolvedAddr: resolved.HostAddr(host), AuditDirectory: auditDir}
+		if dbPathErr != nil {
+			out.Error = dbPathErr.Error()
+		}
 		for _, sr := range results {
 			switch {
 			case sr.Result.RunErr != nil:

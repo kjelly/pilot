@@ -1088,6 +1088,53 @@ func TestDiagnoseMetricsHandler_SuccessRangeQueryPassesStartEndStepThrough(t *te
 	}
 }
 
+// ---- pilot_diagnose_detection ------------------------------------------
+
+func TestDiagnoseDetectionHandler_SuccessReadsConfiguredDBAsServiceUser(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseGroupFixtureInventory(t, "detection-engine", []string{"detect1"})
+	const dbPath = "/var/lib/pilot/detection-engine/state.db"
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		"sudo -n -u pilot-detect /usr/bin/grep -m 1 ^dbPath: /etc/pilot/detection-engine/config.yaml": func() (string, int, error) {
+			return diagnoseOKDoc(t, "detect1", 0, `dbPath: "`+dbPath+`"`), 0, nil
+		},
+		"sudo -n -u pilot-detect /usr/local/bin/pilot-detection-engine status --json": func() (string, int, error) {
+			return diagnoseOKDoc(t, "detect1", 0, `{"state":"healthy"}`), 0, nil
+		},
+		"sudo -n -u pilot-detect /usr/local/bin/pilot-detection-engine signals list --db " + dbPath: func() (string, int, error) {
+			return diagnoseOKDoc(t, "detect1", 0, `[]`), 0, nil
+		},
+		"journalctl -u pilot-detection-engine --no-pager -n 200": func() (string, int, error) {
+			return diagnoseOKDoc(t, "detect1", 0, "service started"), 0, nil
+		},
+	}}
+	handler := diagnoseDetectionHandler(baseDiagnoseOpts(t, inv, fake.run))
+	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseDetectionInput{PilotHost: "web1"})
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if out.Error != "" || out.StatusJSON != `{"state":"healthy"}` || out.SignalsListJSON != "[]" || out.JournalTail != "service started" {
+		t.Fatalf("out = %+v, want complete healthy evidence without errors", out)
+	}
+	if len(fake.calls) != 4 {
+		t.Fatalf("calls = %v, want config-path, status, signals-list, journal", fake.calls)
+	}
+	data, err := os.ReadFile(filepath.Join(out.AuditDirectory, "record.json"))
+	if err != nil {
+		t.Fatalf("read audit record: %v", err)
+	}
+	var rec diagnoseAuditRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse audit record: %v", err)
+	}
+	if len(rec.Steps) != 4 || rec.Steps[0].ID != "db_path" {
+		t.Fatalf("audit steps = %+v, want audited db_path plus three diagnostic steps", rec.Steps)
+	}
+}
+
 // ---- pilot_diagnose_run --------------------------------------------------
 
 func TestDiagnoseRunHandler_EmptyCommandRejectedBeforeAnyCall(t *testing.T) {
