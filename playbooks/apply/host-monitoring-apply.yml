@@ -154,12 +154,26 @@
     # systemd service from a stale binary plus a foreign exporter; checking
     # only the installed binary version caused the latter transition to try
     # a restart and fail with "address already in use".
+    # tags: [always] on this probe and the three tasks that derive from it
+    # below (down to "Determine whether the port is already served by
+    # something we don't manage") is load-bearing, not decorative: a
+    # site-wide deploy can pass Ansible a synthetic --tags list even when
+    # the operator leaves --tags empty (dependency-driven --limit
+    # expansion, cmd/pilot/cmd/deploy.go's effectiveDeploymentTags). The
+    # "Gate: ..." tasks further down are tags: [always] so they still
+    # enforce OS/arch/secret requirements in that mode — but Ansible then
+    # also skips every task NOT covered by the selected tags, so
+    # node_exporter_port_occupied_by_other must be guaranteed to actually
+    # get set whenever those gates run, or their `when:` conditions crash
+    # on an undefined variable (the same class of bug fixed for
+    # prometheus-apply.yml in 2abb6fd).
     - name: "Inspect the node_exporter TCP listener (port {{ node_exporter_port }})"
       ansible.builtin.command: "ss -ltnp '( sport = :{{ node_exporter_port }} )'"
       register: node_exporter_port_check
       changed_when: false
       failed_when: false
       check_mode: false
+      tags: [always]
       # noqa command-instead-of-module
 
     - name: "Read managed node_exporter service state"
@@ -169,6 +183,7 @@
       changed_when: false
       failed_when: false
       check_mode: false
+      tags: [always]
 
     # Purely informational — does NOT gate the skip decision (which is based
     # on the listener PID rather than the presence of our binary on disk),
@@ -188,6 +203,7 @@
             ('pid=' ~ (node_exporter_managed_service.status.MainPID | default('0')) ~ ',')
             in (node_exporter_port_check.stdout | default(''))
           }}
+      tags: [always]
 
     # If something is already listening on this port AND the listener is not
     # our managed systemd service, treat this host as externally monitored
@@ -205,6 +221,7 @@
             'LISTEN' in (node_exporter_port_check.stdout | default('')) and
             not node_exporter_port_owned_by_managed_service
           }}
+      tags: [always]
 
     - name: "Report: skipping native install (port already served by something else)"
       ansible.builtin.debug:

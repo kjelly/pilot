@@ -225,8 +225,16 @@ func TestRegression_LogShippingPlaybookAutoDetectsDashboardHost(t *testing.T) {
 			t.Errorf("log-shipping playbook must contain inventory auto-detection fragment %q", required)
 		}
 	}
-	if !strings.Contains(s, `line: "{{ loki_effective_target_host }}\t{{ loki_alias }}"`) {
-		t.Error("/etc/hosts pin must use the effective Loki target")
+	// 338bf83 made every /etc/hosts pin resolve its raw target to a
+	// concrete IP via the shared tasks/resolve-hosts-alias-target.yml
+	// first (glibc's /etc/hosts requires a literal IP in column 1; an
+	// unresolved FQDN silently produced an unusable pin line). The pin
+	// itself must therefore use the resolved hosts_alias_resolved_ip, not
+	// loki_effective_target_host directly — the resolve step's own input
+	// var is what's still checked against loki_effective_target_host
+	// above (the "vars: hosts_alias_target_host: ..." line).
+	if !strings.Contains(s, `line: "{{ hosts_alias_resolved_ip }}\t{{ loki_alias }}"`) {
+		t.Error("/etc/hosts pin must use the resolved Loki target IP (hosts_alias_resolved_ip), not the raw effective target")
 	}
 }
 

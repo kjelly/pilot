@@ -109,16 +109,29 @@
     # other") even on a host with no GPU at all — discovered empirically
     # running --check against a real GPU host during development. Same
     # convention as audit-log-forwarding-apply.yml's read-only probes.
+    # tags: [always] on this probe and the set_fact below it is load-bearing,
+    # not decorative: a site-wide deploy can pass Ansible a synthetic --tags
+    # list even when the operator leaves --tags empty (dependency-driven
+    # --limit expansion, cmd/pilot/cmd/deploy.go's effectiveDeploymentTags).
+    # The three "Gate: ..." tasks further down are tags: [always] so they
+    # still enforce OS/arch/secret requirements in that mode — but Ansible
+    # then also skips every task NOT covered by the selected tags, so
+    # dcgm_exporter_gpu_present must be guaranteed to actually get set
+    # whenever those gates run, or their `when:` conditions crash on an
+    # undefined variable (the same class of bug fixed for
+    # prometheus-apply.yml in 2abb6fd).
     - name: "Detect a working NVIDIA GPU + driver (nvidia-smi -L)"
       ansible.builtin.command: nvidia-smi -L
       register: dcgm_exporter_nvidia_smi
       changed_when: false
       failed_when: false
       check_mode: false
+      tags: [always]
 
     - name: "Determine whether this host has a usable GPU"
       ansible.builtin.set_fact:
         dcgm_exporter_gpu_present: "{{ (dcgm_exporter_nvidia_smi.rc | default(1)) == 0 }}"
+      tags: [always]
 
     # DCGM exporter 3.6.1 fails its CacheManager initialization on a host
     # with an active MIG instance unless it has SYS_ADMIN and an unrestricted
@@ -144,6 +157,10 @@
     # host-monitoring-apply.yml (there: a Kubernetes DaemonSet; here: the
     # NVIDIA GPU Operator's own dcgm-exporter DaemonSet) — only meaningful
     # once we know the host actually has a GPU.
+    # Same tags: [always] reasoning as the GPU-present probe above —
+    # dcgm_exporter_port_occupied_by_other is read by the always-tagged
+    # Gates below and must not silently go undefined under a tag-scoped
+    # apply.
     - name: "Check whether {{ dcgm_exporter_port }}/tcp is already listening"
       ansible.builtin.shell: "ss -ltn '( sport = :{{ dcgm_exporter_port }} )' | grep -q LISTEN"
       register: dcgm_exporter_port_check
@@ -151,6 +168,7 @@
       failed_when: false
       check_mode: false
       when: dcgm_exporter_gpu_present
+      tags: [always]
 
     - name: "Check whether our own {{ dcgm_exporter_container_name }} container is already running"
       ansible.builtin.command: "docker ps --filter name=^{{ dcgm_exporter_container_name }}$ --filter status=running -q"
@@ -159,6 +177,7 @@
       failed_when: false
       check_mode: false
       when: dcgm_exporter_gpu_present
+      tags: [always]
 
     - name: "Determine whether the port is already served by something we don't manage"
       ansible.builtin.set_fact:
@@ -166,6 +185,7 @@
           {{ dcgm_exporter_gpu_present and
              (dcgm_exporter_port_check.rc | default(1)) == 0 and
              (dcgm_exporter_own_container_check.stdout | default('')) | trim | length == 0 }}
+      tags: [always]
 
     - name: "Report: skipping native install (port already served by something else)"
       ansible.builtin.debug:
