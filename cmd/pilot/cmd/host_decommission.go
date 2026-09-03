@@ -36,9 +36,10 @@ import (
 )
 
 var (
-	hostDecommissionPlanDir  string
-	hostDecommissionPlanHost string
-	hostDecommissionPlanJSON bool
+	hostDecommissionPlanDir       string
+	hostDecommissionPlanHost      string
+	hostDecommissionPlanJSON      bool
+	hostDecommissionPlanRetention []string
 
 	hostDecommissionShowID   string
 	hostDecommissionShowJSON bool
@@ -95,6 +96,7 @@ func init() {
 	hostDecommissionPlanCmd.Flags().StringVar(&hostDecommissionPlanDir, "dir", ".", "workspace directory containing hosts.yml")
 	hostDecommissionPlanCmd.Flags().StringVar(&hostDecommissionPlanHost, "host", "", "host name to plan decommission for (required)")
 	hostDecommissionPlanCmd.Flags().BoolVar(&hostDecommissionPlanJSON, "json", false, "print the plan as JSON")
+	hostDecommissionPlanCmd.Flags().StringArrayVar(&hostDecommissionPlanRetention, "retention", nil, "explicit retention disposition for a stateful component, repeatable: --retention <component-id>=<exported|migrated|retain_on_disk|destroy_authorized> (spec.md §20.1, INV-8)")
 	hostDecommissionCmd.AddCommand(hostDecommissionPlanCmd)
 
 	hostDecommissionShowCmd.Flags().StringVar(&hostDecommissionShowID, "id", "", "plan id to show (required)")
@@ -142,11 +144,17 @@ func runHostDecommissionPlanCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	retentionDispositions, err := parseRetentionDispositionFlags(hostDecommissionPlanRetention)
+	if err != nil {
+		return err
+	}
+
 	plan, err := decommission.PlanHost(cmd.Context(), decommission.PlanInput{
-		WorkspaceDir: dir,
-		HostName:     hostDecommissionPlanHost,
-		Catalog:      catalog,
-		Providers:    provs,
+		WorkspaceDir:          dir,
+		HostName:              hostDecommissionPlanHost,
+		Catalog:               catalog,
+		Providers:             provs,
+		RetentionDispositions: retentionDispositions,
 	})
 	if err != nil {
 		return err
@@ -210,6 +218,65 @@ func loadHostDecommissionCatalog() (contract.Catalog, error) {
 		return contract.Catalog{}, fmt.Errorf("load contract catalog: %w", err)
 	}
 	return catalog, nil
+}
+
+// validRetentionDispositions is the CLI-facing string form of
+// decommission.RetentionDisposition's non-empty values (spec.md §20.1) —
+// kept as an explicit allowlist here (rather than accepting any string)
+// so a typo produces a clear error at plan time instead of a silently
+// unsatisfied retention gate.
+var validRetentionDispositions = map[string]decommission.RetentionDisposition{
+	"exported":           decommission.RetentionDispositionExported,
+	"migrated":           decommission.RetentionDispositionMigrated,
+	"retain_on_disk":     decommission.RetentionDispositionRetainOnDisk,
+	"destroy_authorized": decommission.RetentionDispositionDestroyAuthorized,
+}
+
+// parseRetentionDispositionFlags parses repeated --retention
+// <component-id>=<disposition> flags into the map PlanInput.
+// RetentionDispositions expects (spec.md §20.1, INV-8). nil input yields
+// a nil (not empty) map — every stateful/retention:required component
+// simply stays gated exactly as it was before this flag existed.
+func parseRetentionDispositionFlags(raw []string) (map[string]decommission.RetentionDisposition, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]decommission.RetentionDisposition, len(raw))
+	for _, entry := range raw {
+		componentID, value, ok := strings.Cut(entry, "=")
+		componentID = strings.TrimSpace(componentID)
+		value = strings.TrimSpace(value)
+		if !ok || componentID == "" || value == "" {
+			return nil, fmt.Errorf("--retention %q: expected <component-id>=<disposition>", entry)
+		}
+		disposition, ok := validRetentionDispositions[value]
+		if !ok {
+			return nil, fmt.Errorf("--retention %q: unknown disposition %q (want one of exported, migrated, retain_on_disk, destroy_authorized)", entry, value)
+		}
+		out[componentID] = disposition
+	}
+	return out, nil
+}
+
+// retentionDispositionsFromPlan recovers the SAME retention dispositions
+// a persisted plan's RetentionRequirements already recorded (spec.md
+// §9.1) — apply/resume must rebuild the exact same
+// PlanInput.RetentionDispositions the original `plan` command used (same
+// reasoning as buildHostDecommissionProviders's own doc comment: the
+// freshness re-derivation inside Apply/Finalize re-runs PlanHost against
+// it), without requiring the operator to repeat --retention flags they
+// already supplied once at plan time.
+func retentionDispositionsFromPlan(plan *decommission.Plan) map[string]decommission.RetentionDisposition {
+	if len(plan.RetentionRequirements) == 0 {
+		return nil
+	}
+	out := make(map[string]decommission.RetentionDisposition, len(plan.RetentionRequirements))
+	for _, r := range plan.RetentionRequirements {
+		if r.Disposition != decommission.RetentionDispositionNone {
+			out[r.ComponentID] = r.Disposition
+		}
+	}
+	return out
 }
 
 func printHostDecommissionPlan(out io.Writer, plan *decommission.Plan, asJSON bool) error {
@@ -389,6 +456,14 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 		Plan: plan,
 		PlanInputForFreshness: decommission.PlanInput{
 			WorkspaceDir: dir, HostName: plan.Host.Name, Catalog: catalog, Providers: provs,
+			// Recovered from the plan itself (spec.md §9.1) — see
+			// retentionDispositionsFromPlan's own doc comment: the
+			// operator supplied these once at `plan` time; apply/resume
+			// must not require repeating them, and re-deriving from a
+			// caller-supplied flag here would risk apply/resume silently
+			// using a DIFFERENT disposition than what was actually
+			// approved.
+			RetentionDispositions: retentionDispositionsFromPlan(plan),
 		},
 		DecommissionID: plan.ID,
 		Reason:         reason,
@@ -505,10 +580,24 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		},
 	})
 
+	// FreeIPA NFS server (spec.md §37 Phase 6, §20.2) — role-driven, single
+	// identity, same shape as freeipaClient above. Reuses the SAME roster
+	// path resolution (a host with role freeipa-nfs-server always also
+	// carries freeipa-client via the contract's sameHosts dependency, so
+	// its freeipa_roster_file extra var is the same one freeipaClient
+	// already resolved).
+	freeipaNFSServer := providers.NewFreeIPANFSServerProvider(providers.FreeIPANFSServerProviderConfig{
+		Executor:             runner,
+		Inventory:            invPath,
+		DecommissionPlaybook: "playbooks/decommission/freeipa-nfs-server-decommission.yml",
+		ExtraArgs:            extraArgs,
+	})
+
 	result := map[string]providers.Provider{
 		providers.FreeIPAClientProviderID:    freeipaClient,
 		providers.WazuhAgentProviderID:       wazuhAgent,
 		providers.InternalEndpointProviderID: internalEndpoint,
+		providers.FreeIPANFSServerProviderID: freeipaNFSServer,
 	}
 
 	// Generic contract-driven components (spec.md §37 Phase 5, §15): every

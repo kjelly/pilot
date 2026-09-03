@@ -4,7 +4,15 @@ role: freeipa-nfs-server
 specs:
   - path: docs/verification/freeipa-nfs-server.md
     rows: {all: true}
-playbooks: {apply: playbooks/apply/freeipa-nfs-server-apply.yml}
+playbooks:
+  apply: playbooks/apply/freeipa-nfs-server-apply.yml
+  # Host decommission Phase 6 (docs/superpowers/specs/2026-09-02-host-
+  # decommission-spec.md §37, §20.2): removes the nfs/<fqdn> service
+  # principal and this host's own managed exports fragment ONLY — never
+  # any actual NFS share/export data (spec.md §20.2/§20.3, explicitly out
+  # of scope for v1 regardless of retention disposition). Invoked only by
+  # internal/decommission/providers.FreeIPANFSServerProvider.
+  decommission: playbooks/decommission/freeipa-nfs-server-decommission.yml
 regressionTests:
   - cmd/pilot/cmd/tag_coverage_test.go
   - internal/spec/freeipa_nfs_regression_test.go
@@ -25,6 +33,14 @@ endpoints:
   - {name: nfs, scheme: tcp, port: 2049}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
+lifecycle:
+  decommission:
+    class: stateful
+    scope: both
+    externalState: true
+    requiresReachableHost: true
+    retention: required
+    dataPaths: []
 traceability:
   mode: rowTags
   tag: {kind: bare}

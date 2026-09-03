@@ -1,0 +1,207 @@
+# FreeIPA Kerberos NFSv4 server decommission — local + central, one host.
+#
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §37 Phase 6
+# (§20.2 NFS): removes the nfs/<fqdn> service principal and this host's
+# own managed exports fragment — it does NOT touch, move, or delete any
+# actual NFS share/export data directory (spec.md §4 non-goal 5, §20.2/
+# §20.3: "do not automatically delete share data... removing a component
+# package/container is not authorization to delete its data directory").
+# Whatever underlying storage backed this host's shares is the operator's
+# to handle separately, regardless of which retention disposition was
+# recorded for this component (exported/migrated/retain_on_disk/
+# destroy_authorized) — none of those dispositions make this playbook
+# delete data; they only unblock planning (spec.md §20.1, INV-8).
+#
+# Unlike freeipa-client-decommission.yml, this is a SINGLE self-contained
+# play (no separate central playbook) — freeipa-nfs-server-apply.yml's own
+# design already kinits as the roster admin directly on this host (it is
+# a required freeipa-client-role sibling, but authenticates via the
+# roster's own admin credential, not this host's own Kerberos identity),
+# so the same host can run both the local (exports fragment) and central
+# (ipa service-del) cleanup itself. Teardown ordering already guarantees
+# this runs BEFORE freeipa-client's own local uninstall on the same host
+# (spec.md §13: consumers before providers — freeipa-nfs-server depends
+# on freeipa-client via a sameHosts relation), so krb5.conf/enrollment is
+# still intact when this kinits.
+#
+# Invoked ONLY by
+# internal/decommission/providers.FreeIPANFSServerProvider — never
+# directly by an operator.
+#
+# `--tags inspect` restricts execution to the read-only tasks in
+# pre_tasks (a live ipa service-show query + exports-fragment stat) and
+# prints NFS_SERVER_DECOMMISSIONED=true|false — no mutating task carries
+# that tag.
+#
+# Usage:
+#
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/freeipa-nfs-server-decommission.yml \
+#       --limit <retiring-host> -e freeipa_roster_file=<path>
+#
+#   # read-only check only (never mutates):
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/freeipa-nfs-server-decommission.yml \
+#       --limit <retiring-host> -e freeipa_roster_file=<path> --tags inspect
+#
+# Stage gating (same convention as every other playbooks/decommission/*.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: FreeIPA NFS server decommission — service principal + local exports removal
+  hosts: "{{ target_group | default('freeipa-nfs-server') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    nfs_exports_fragment: /etc/exports.d/90-freeipa-managed.exports
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Load canonical roster under a namespace"
+      ansible.builtin.include_vars:
+        file: "{{ freeipa_roster_file }}"
+        name: freeipa_roster
+      no_log: true
+      tags: [always]
+
+    - name: "Discover this NFS server's operating-system FQDN"
+      ansible.builtin.command: hostname --fqdn
+      check_mode: false
+      changed_when: false
+      register: nfs_decom_hostname_fqdn
+      tags: [always]
+
+    - name: "Use the operating-system FQDN for this decommission run"
+      ansible.builtin.set_fact:
+        nfs_decom_server_fqdn: "{{ nfs_decom_hostname_fqdn.stdout | trim }}"
+      tags: [always]
+
+    - name: "Kinit as IPA admin (roster credential — same as freeipa-nfs-server-apply.yml)"
+      ansible.builtin.shell: |
+        set -o pipefail
+        printf '%s' "{{ freeipa_roster.freeipa.admin.password }}" | kinit {{ freeipa_roster.freeipa.admin.principal | default('admin') }}
+      no_log: true
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [always]
+
+    # Read-only detection: does a service principal for this host's own
+    # nfs/<fqdn> identity still exist centrally?
+    - name: "Check whether the nfs/<fqdn> service principal still exists (read-only)"
+      ansible.builtin.command: ipa service-show "nfs/{{ nfs_decom_server_fqdn }}"
+      register: nfs_decom_service_show
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [inspect]
+
+    - name: "Check whether the local managed exports fragment still exists (read-only)"
+      ansible.builtin.stat:
+        path: "{{ nfs_exports_fragment }}"
+      register: nfs_decom_exports_stat
+      tags: [inspect]
+
+    - name: "Report decommission state for external tooling"
+      ansible.builtin.debug:
+        msg: >-
+          NFS_SERVER_DECOMMISSIONED={{
+            ((nfs_decom_service_show.rc | default(1) != 0) and (not nfs_decom_exports_stat.stat.exists))
+            | ternary('true', 'false') }}
+      tags: [inspect]
+
+  tasks:
+    - name: "FreeIPA NFS server decommission — removal, with diagnostics on failure"
+      block:
+        - name: "Remove the nfs/<fqdn> service principal, if it exists (idempotent)"
+          ansible.builtin.command: ipa service-del "nfs/{{ nfs_decom_server_fqdn }}"
+          register: nfs_decom_service_del
+          when:
+            - not ansible_check_mode
+            - nfs_decom_service_show.rc | default(1) == 0
+          changed_when: nfs_decom_service_del.rc == 0
+          failed_when:
+            - nfs_decom_service_del.rc | default(0) != 0
+            - "'not found' not in (nfs_decom_service_del.stderr | default(''))"
+
+        - name: "Remove this host's own managed exports fragment"
+          ansible.builtin.file:
+            path: "{{ nfs_exports_fragment }}"
+            state: absent
+          register: nfs_decom_exports_removed
+          when: not ansible_check_mode
+
+        - name: "Reload nfs exports after removing the managed fragment"
+          ansible.builtin.command: exportfs -ra
+          when:
+            - not ansible_check_mode
+            - nfs_decom_exports_removed.changed | default(false)
+          changed_when: true
+
+        - name: "Verify the service principal is really gone"
+          ansible.builtin.command: ipa service-show "nfs/{{ nfs_decom_server_fqdn }}"
+          register: nfs_decom_service_show_after
+          changed_when: false
+          failed_when: false
+          check_mode: false
+          when: not ansible_check_mode
+
+        - name: "Gate: nfs/<fqdn> service principal must no longer exist"
+          ansible.builtin.assert:
+            that:
+              - nfs_decom_service_show_after.rc | default(1) != 0
+            fail_msg: >-
+              nfs/{{ nfs_decom_server_fqdn }} still exists after ipa
+              service-del — refusing to report central cleanup as
+              complete.
+          when: not ansible_check_mode
+
+      rescue:
+        - name: "Rescue: dump exportfs state"
+          ansible.builtin.command: exportfs -v
+          register: nfs_decom_rescue_exportfs
+          changed_when: false
+          failed_when: false
+
+        - name: "Rescue: surface diagnostics and fail"
+          ansible.builtin.fail:
+            msg: |
+              FreeIPA NFS server decommission FAILED. Diagnostics:
+              --- exportfs -v ---
+              {{ nfs_decom_rescue_exportfs.stdout | default('(unavailable)') }}
+              {{ nfs_decom_rescue_exportfs.stderr | default('') }}
+              No NFS share/export DATA was touched by this playbook
+              (spec.md §20.2/§20.3 — that is explicitly out of scope).
+              Resume via `pilot host decommission resume` once the
+              underlying issue is fixed.

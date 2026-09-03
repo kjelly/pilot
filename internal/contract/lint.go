@@ -303,9 +303,10 @@ func valueOrEmpty(value *string) string {
 // without adding its component ID here would make this lint wrongly
 // demand a playbooks.decommission entry that provider doesn't need.
 var componentsWithBespokeDecommissionProvider = map[string]bool{
-	"freeipa-client":    true,
-	"wazuh-fim":         true,
-	"internal-endpoint": true,
+	"freeipa-client":     true,
+	"wazuh-fim":          true,
+	"internal-endpoint":  true,
+	"freeipa-nfs-server": true,
 }
 
 // validateDecommissionPolicy implements spec.md §14.1's contract linter

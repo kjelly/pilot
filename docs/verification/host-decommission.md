@@ -33,8 +33,8 @@ to be wrong once real code/hosts exist, fix the spec and this file
 together with a stated reason (AGENTS.md §0.2 responsibility split), not
 just this file alone.
 
-**Status: DRAFT — Phase 5 (typed lifecycle + contract lint + generic
-contract-driven executor, code + fixture tests, no live evidence yet)
+**Status: DRAFT — Phase 6 (retention dispositions reachable via CLI +
+freeipa-nfs-server provider, code + fixture tests, no live evidence yet)
 landed 2026-09-03.** Phase 1 makes
 HD1, HD3, HD4, HD6, HD7, HD8, HD15, HD16, HD17, HD26, HD27, HD28
 executable (planner is read-only, no live provider needed). Phase 2 makes
@@ -84,6 +84,24 @@ HD7 (`TestPlanner_UnsupportedExternalStateBlocks`) and HD8
 (dependency ordering) already cover the generic path's acceptance
 criteria; Phase 5 only fills in what made "declares a decommission
 playbook" actually executable instead of still fail-closed.
+
+Phase 6 (this round) closes a real gap Phase 1's own HD15
+(`TestPlanner_StatefulRetentionRequired`) never exercised: no CLI flag
+ever populated `PlanInput.RetentionDispositions`, so a genuinely stateful
+component could be BLOCKED by the retention gate but never UNBLOCKED
+through the real `pilot host decommission plan/apply/resume` commands —
+only a Go-level test could ever supply a disposition. `pilot host
+decommission plan` now accepts repeatable `--retention
+<component-id>=<disposition>`; `apply`/`resume` recover the SAME
+dispositions from the persisted plan's own `RetentionRequirements`
+(`retentionDispositionsFromPlan`) rather than requiring the flag again.
+Phase 6 also adds `freeipa-nfs-server`'s bespoke provider (spec.md
+§20.2) — the feature's one real retention-gated component — removing
+only the `nfs/<fqdn>` service principal and this host's own local
+managed exports fragment; per spec.md §20.3 (and non-goal §4.4/§4.5),
+NO disposition, including `destroy_authorized`, makes this provider
+touch actual NFS share/export data — that remains entirely out of scope
+for v1. Code + fixture tests only, same posture as every prior phase.
 
 **Scope split.** Every HD1-HD28 row above is `scope: aggregate`: it runs Go
 tests against `internal/decommission` fixture workspaces (synthetic

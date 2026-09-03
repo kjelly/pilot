@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kjelly/pilot/internal/contract"
+	"github.com/kjelly/pilot/internal/decommission"
 	"github.com/kjelly/pilot/internal/decommission/providers"
 )
 
@@ -237,4 +238,69 @@ func extractPlanID(t *testing.T, printed string) string {
 		t.Fatalf("could not parse plan id out of %q", rest)
 	}
 	return rest[:sp]
+}
+
+// TestParseRetentionDispositionFlags_ValidAndInvalid proves the
+// --retention <component-id>=<disposition> CLI flag (spec.md §20.1,
+// Phase 6) parses valid dispositions and rejects typos/malformed entries
+// with a clear error rather than silently leaving a stateful component
+// gated.
+func TestParseRetentionDispositionFlags_ValidAndInvalid(t *testing.T) {
+	t.Run("nil input yields nil map", func(t *testing.T) {
+		got, err := parseRetentionDispositionFlags(nil)
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if got != nil {
+			t.Fatalf("got = %v, want nil", got)
+		}
+	})
+
+	t.Run("valid entries", func(t *testing.T) {
+		got, err := parseRetentionDispositionFlags([]string{
+			"seaweedfs-s3=retain_on_disk",
+			"freeipa-nfs-server=destroy_authorized",
+		})
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if got["seaweedfs-s3"] != decommission.RetentionDispositionRetainOnDisk {
+			t.Errorf("seaweedfs-s3 = %v, want retain_on_disk", got["seaweedfs-s3"])
+		}
+		if got["freeipa-nfs-server"] != decommission.RetentionDispositionDestroyAuthorized {
+			t.Errorf("freeipa-nfs-server = %v, want destroy_authorized", got["freeipa-nfs-server"])
+		}
+	})
+
+	for _, bad := range []string{"no-equals-sign", "=missing-component", "component=", "component=not-a-real-disposition"} {
+		t.Run("rejects "+bad, func(t *testing.T) {
+			if _, err := parseRetentionDispositionFlags([]string{bad}); err == nil {
+				t.Fatalf("expected an error for malformed/unknown entry %q", bad)
+			}
+		})
+	}
+}
+
+// TestRetentionDispositionsFromPlan_RecoversPersistedDispositions proves
+// apply/resume can rebuild the SAME retention dispositions the operator
+// supplied at plan time without repeating the --retention flag (spec.md
+// §9.1).
+func TestRetentionDispositionsFromPlan_RecoversPersistedDispositions(t *testing.T) {
+	plan := &decommission.Plan{
+		RetentionRequirements: []decommission.RetentionRequirement{
+			{ComponentID: "freeipa-nfs-server", Required: true, Disposition: decommission.RetentionDispositionRetainOnDisk, Satisfied: true},
+			{ComponentID: "unsatisfied-component", Required: true, Disposition: decommission.RetentionDispositionNone, Satisfied: false},
+		},
+	}
+	got := retentionDispositionsFromPlan(plan)
+	if got["freeipa-nfs-server"] != decommission.RetentionDispositionRetainOnDisk {
+		t.Errorf("freeipa-nfs-server = %v, want retain_on_disk", got["freeipa-nfs-server"])
+	}
+	if _, ok := got["unsatisfied-component"]; ok {
+		t.Errorf("unsatisfied-component should not appear at all (disposition was RetentionDispositionNone), got %v", got["unsatisfied-component"])
+	}
+
+	if got := retentionDispositionsFromPlan(&decommission.Plan{}); got != nil {
+		t.Errorf("expected nil for a plan with no retention requirements, got %v", got)
+	}
 }
