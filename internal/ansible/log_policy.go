@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -178,6 +179,52 @@ func preserveLineEnding(line, replacement string) string {
 	return replacement
 }
 
+// logTempPrefix names below are per-PID and deterministic, not
+// os.CreateTemp's random suffix, so a caller killed mid-write (SIGKILL —
+// e.g. a context.WithTimeout expiry, which skips every defer) always
+// leaves behind an orphan identifiable by the PID that made it. Nothing
+// could tell a random-named orphan apart from a still-running peer's own
+// in-flight temp file, so the old scheme could never safely self-clean;
+// this one lets sweepStaleLogTemp remove only orphans whose owning PID has
+// verifiably exited, without racing a live peer's write. This is what
+// found (and, going forward, prevents re-accumulating) 436 leaked
+// .ansible-log-redacted-* files / 76 GB under
+// ~/.local/share/pilot/ansible/ from repeated SIGKILL'd `pilot mcp serve`
+// subprocesses.
+const (
+	logRedactedTempPrefix = ".ansible-log-redacted"
+	logTrimmedTempPrefix  = ".ansible-log-trimmed"
+)
+
+// sweepStaleLogTemp removes dir's <prefix>-<pid> temp files left by a
+// process that no longer exists. A file named after a still-live PID
+// (including this process's own) is left alone — it may be a peer's
+// legitimate in-flight write.
+func sweepStaleLogTemp(dir, prefix string) {
+	matches, err := filepath.Glob(filepath.Join(dir, prefix+"-*"))
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	for _, m := range matches {
+		pid, err := strconv.Atoi(strings.TrimPrefix(filepath.Base(m), prefix+"-"))
+		if err != nil || pid == self || processAlive(pid) {
+			continue
+		}
+		_ = os.Remove(m)
+	}
+}
+
+// processAlive reports whether pid names a live process, via a signal-0
+// probe (delivers nothing, only checks existence/permission).
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
 func redactFile(path string) error {
 	input, err := os.Open(path)
 	if err != nil {
@@ -185,11 +232,13 @@ func redactFile(path string) error {
 	}
 	defer input.Close()
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".ansible-log-redacted-*")
+	dir := filepath.Dir(path)
+	sweepStaleLogTemp(dir, logRedactedTempPrefix)
+	tmpPath := filepath.Join(dir, fmt.Sprintf("%s-%d", logRedactedTempPrefix, os.Getpid()))
+	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
@@ -255,11 +304,13 @@ func trimFileToTail(path string, maxBytes int64) error {
 		return err
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".ansible-log-trimmed-*")
+	dir := filepath.Dir(path)
+	sweepStaleLogTemp(dir, logTrimmedTempPrefix)
+	tmpPath := filepath.Join(dir, fmt.Sprintf("%s-%d", logTrimmedTempPrefix, os.Getpid()))
+	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
