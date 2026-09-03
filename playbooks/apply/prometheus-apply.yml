@@ -409,10 +409,16 @@
       loop: "{{ monitoring_targets_resolved }}"
       loop_control:
         label: "{{ item.name }}"
+      # This compiler pipeline must remain atomic with the always-tagged
+      # render below.  A site deploy may add internal component tags while
+      # the operator leaves --tags empty; without this tag, Ansible runs the
+      # render but skips this prerequisite and can silently render no jobs.
+      tags: [always, ext-target, ext-target-C3]
 
     - name: "Replace monitoring_targets_resolved with its normalized form"
       ansible.builtin.set_fact:
         monitoring_targets_resolved: "{{ monitoring_targets_normalized | default([]) }}"
+      tags: [always, ext-target, ext-target-C3]
 
     # Gate placed right after parsing (same "resolve then gate" ordering as
     # the node-exporter basic-auth gate above). These are static properties
@@ -431,6 +437,7 @@
       loop: "{{ monitoring_targets_resolved | selectattr('enabled') | list }}"
       loop_control:
         label: "{{ item.name }}"
+      tags: [always, ext-target, ext-target-C3]
 
     - name: "Gate: scrape profile jobName values are unique"
       ansible.builtin.assert:
@@ -441,6 +448,7 @@
           two or more profiles in {{ monitoring_profiles_file }} declare the
           same jobName — spec.md §18 requires jobName to be unique across
           profiles.
+      tags: [always, ext-target, ext-target-C3]
 
     - name: "Gate: profile jobName must not use a reserved name (prometheus/node)"
       ansible.builtin.assert:
@@ -450,6 +458,7 @@
         fail_msg: >-
           a profile in {{ monitoring_profiles_file }} uses a reserved
           jobName ("prometheus" or "node" — spec.md §63); rename it.
+      tags: [always, ext-target, ext-target-C3]
 
     - name: "Gate: every profile authRef resolves to a complete basic-auth credential"
       ansible.builtin.assert:
@@ -465,6 +474,7 @@
           committed plaintext.
       loop: "{{ monitoring_profiles_resolved.values() | selectattr('authRef', 'defined') | map(attribute='authRef') | unique | list }}"
       no_log: true
+      tags: [always, ext-target, ext-target-C3]
 
     # Warning, not fail (spec.md §40) — an external target address that
     # coincides with a host-monitoring-managed node_exporter is allowed
@@ -476,6 +486,7 @@
         {{ (monitoring_targets_resolved | selectattr('enabled')
             | map(attribute='address') | list)
            | intersect(prometheus_node_exporter_targets) }}
+      tags: [always, ext-target, ext-target-C3]
 
     # One Prometheus scrape job per profile (jobName uniqueness is already
     # gated above, so this is a 1:1 mapping — no groupby needed). Built via
@@ -507,6 +518,7 @@
       loop_control:
         label: "{{ item.key }}"
       when: (item.value.kind | default('prometheus', true)) != 'snmp'
+      tags: [always, ext-target, ext-target-C3]
 
     # SNMP monitoring integration spec §8.2: a completely different job
     # shape from the direct-HTTP one above (metrics_path /snmp, module/auth
@@ -534,6 +546,7 @@
       loop_control:
         label: "{{ item.key }}"
       when: (item.value.kind | default('prometheus', true)) == 'snmp'
+      tags: [always, ext-target, ext-target-C3]
 
     # snmp_exporter's own /metrics (spec §8.3) — a separate job from every
     # device-scrape job above so `up{job="snmp-exporter"}` never collides
@@ -546,6 +559,7 @@
              + [{'job_name': 'snmp-exporter',
                  'static_configs': [{'targets': [snmp_exporter_endpoint], 'labels': {'site': prometheus_site_label, 'component': 'snmp-exporter'}}]}] }}
       when: (monitoring_profiles_resolved.values() | selectattr('kind', 'defined') | selectattr('kind', 'equalto', 'snmp') | list | length) > 0
+      tags: [always, ext-target, ext-target-C3]
 
     # Empty string (not an empty list rendered by to_nice_yaml, which would
     # emit "[]" — an invalid extra scrape_configs entry) when there are no
@@ -553,6 +567,7 @@
     - name: "Combine direct-Prometheus and SNMP scrape job lists"
       ansible.builtin.set_fact:
         monitoring_all_scrape_jobs: "{{ (monitoring_scrape_jobs | default([])) + (monitoring_snmp_scrape_jobs | default([])) }}"
+      tags: [always, ext-target, ext-target-C3]
 
     - name: "Render the external monitoring scrape block (spec.md §17/§20; empty string when no profiles)"
       ansible.builtin.set_fact:

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -140,6 +141,49 @@ func TestRegression_PrometheusExternalTargetsSpec(t *testing.T) {
 			if !strings.Contains(r.Command, "!") {
 				t.Errorf("C8 must assert absence (negated grep), not presence; got %q", r.Command)
 			}
+		}
+	}
+}
+
+// TestRegression_PrometheusExternalTargetCompilerAlwaysRuns locks the
+// dependency between the always-tagged renderer and every task that builds
+// its input. Site deploy can add internal Ansible component tags even when an
+// operator leaves --tags empty. In that mode Ansible still runs `always`
+// tasks; all compiler tasks therefore have to be `always` too, otherwise a
+// renderer can run with skipped prerequisites and erase external jobs.
+func TestRegression_PrometheusExternalTargetCompilerAlwaysRuns(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/prometheus-apply.yml"
+	b, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(b)
+
+	for _, task := range []string{
+		"Normalize each monitoring target's 'enabled'",
+		"Replace monitoring_targets_resolved with its normalized form",
+		"Gate: every enabled monitoring target references an existing scrape profile",
+		"Gate: scrape profile jobName values are unique",
+		"Gate: profile jobName must not use a reserved name",
+		"Gate: every profile authRef resolves to a complete basic-auth credential",
+		"Warn if an external target's address overlaps a host-monitoring managed endpoint",
+		"Accumulate one Prometheus scrape job dict per scrape profile",
+		"Accumulate one SNMP scrape job dict per kind:snmp scrape profile",
+		"Add the snmp_exporter self-scrape job when any kind:snmp profile is declared",
+		"Combine direct-Prometheus and SNMP scrape job lists",
+	} {
+		start := strings.Index(playbook, "- name: \""+task)
+		if start < 0 {
+			t.Errorf("compiler task %q is missing", task)
+			continue
+		}
+		next := strings.Index(playbook[start+1:], "\n    - name: ")
+		end := len(playbook)
+		if next >= 0 {
+			end = start + 1 + next
+		}
+		if !strings.Contains(playbook[start:end], "tags: [always,") {
+			t.Errorf("compiler task %q must be always-tagged with its renderer", task)
 		}
 	}
 }
