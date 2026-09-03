@@ -57,6 +57,27 @@ type SNMPAuthProfile struct {
 	CredentialRef string `yaml:"credentialRef"`
 }
 
+// ValidSNMPCatalogName reports whether id matches the required module/auth
+// profile name pattern (spec §6.4 rule 1) — exported so `pilot edit`'s SNMP
+// catalog screens can validate a name inline, before it ever reaches a full
+// SNMPCatalog.Validate() call.
+func ValidSNMPCatalogName(id string) bool {
+	return snmpCatalogNamePattern.MatchString(id)
+}
+
+// ValidateSNMPModuleFilePath is the exported form of
+// validateSNMPCatalogRelativePath, for the same inline-validation reason as
+// ValidSNMPCatalogName.
+func ValidateSNMPModuleFilePath(rel string) error {
+	return validateSNMPCatalogRelativePath(rel)
+}
+
+// SNMPAuthSecurityLevels lists the securityLevel values Validate accepts,
+// in the fixed display order `pilot edit`'s auth profile screens offer them.
+func SNMPAuthSecurityLevels() []string {
+	return []string{"noAuthNoPriv", "authNoPriv", "authPriv"}
+}
+
 // LoadSNMPCatalog reads path and returns its parsed SNMPCatalog. A
 // missing file is equivalent to schemaVersion:1 with no modules/auth
 // profiles declared, matching LoadTargets/LoadProfiles' empty-workspace
@@ -123,6 +144,21 @@ func (c SNMPCatalog) Validate() error {
 		}
 	}
 	return nil
+}
+
+// SaveSNMPCatalog writes c to path as YAML, creating parent directories as
+// needed. Used by `pilot edit`'s SNMP catalog screens — always preceded by
+// Validate so an invalid catalog is never persisted (same Simulate-then-
+// write discipline as SaveTargets/SaveProfiles).
+func SaveSNMPCatalog(path string, c SNMPCatalog) error {
+	if c.SchemaVersion == 0 {
+		c.SchemaVersion = SNMPCatalogSchemaVersion
+	}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal snmp catalog: %w", err)
+	}
+	return writeFile(path, data)
 }
 
 // validateSNMPCatalogRelativePath rejects an absolute path, a `..`
