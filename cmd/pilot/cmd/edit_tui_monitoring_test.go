@@ -84,8 +84,9 @@ func TestEditRouter_Teatest_MonitoringFlow_AddProfileAddTargetAndSave(t *testing
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> back to manager
 
-	// manager: 0 Targets, 1 Profiles, 2 Validate, 3 Back
-	for i := 0; i < 3; i++ {
+	// manager: 0 Targets, 1 Profiles, 2 Validate, 3 SNMP Catalog,
+	// 4 SNMP 認證, 5 Back
+	for i := 0; i < 5; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> back to top menu
@@ -133,8 +134,9 @@ func TestEditRouter_Teatest_MonitoringFlow_EmptyWorkspaceHasNoMonitoringFiles(t 
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> monitoring manager
 
-	// manager: 0 Targets, 1 Profiles, 2 Validate, 3 Back
-	for i := 0; i < 3; i++ {
+	// manager: 0 Targets, 1 Profiles, 2 Validate, 3 SNMP Catalog,
+	// 4 SNMP 認證, 5 Back
+	for i := 0; i < 5; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> back to top menu

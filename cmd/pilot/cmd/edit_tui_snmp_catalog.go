@@ -154,10 +154,7 @@ func pushSNMPModuleAddFile(r *editRouterModel, dir, id string) tea.Cmd {
 			c.Modules = map[string]monitoring.SNMPModule{}
 		}
 		c.Modules[id] = monitoring.SNMPModule{File: strings.TrimSpace(m.Value())}
-		banner, ok := saveSNMPCatalogOrBanner(dir, c)
-		if !ok {
-			return pushSNMPModulesMenu(r, dir, banner)
-		}
+		banner, _ := saveSNMPCatalogOrBanner(dir, c)
 		return pushSNMPModulesMenu(r, dir, banner)
 	})
 }

@@ -238,10 +238,21 @@ wrapper 的 group 推導。
 
 ## 10. 已知留白（不在 Phase 1 範圍）
 
-- `snmp_catalog_file` 目前需要呼叫端自己組出絕對路徑（`-e
-  snmp_catalog_file=$(pwd)/monitoring/snmp/catalog.yml`）；`pilot
-  deploy`/`vm-target run` 尚未有類似 `autoFillMonitoringFiles` 的自動
-  補完 wiring。Phase 2 的 CLI/TUI 落地時一併補上較合理。
+- （已補，2026-09-03）`snmp_catalog_file` 曾需要呼叫端自己組出絕對路徑；
+  `pilot deploy` 現在對 `snmp-exporter` 這個 catalog entry 設了
+  `SNMPCatalogFile: true`（`autoFillSNMPCatalogFile`，鏡射
+  `autoFillMonitoringFiles` 的既有慣例），只要 `monitoring/snmp/catalog.yml`
+  存在就會自動帶入 `-e snmp_catalog_file=<絕對路徑>`。同批也把
+  `monitoring/snmp/catalog.yml`（modules/authProfiles）與 vault 裡的
+  `snmp_exporter_credentials`（credentialRef → username/authPassword/
+  privPassword 或 community）都接進了 `pilot edit` → Monitoring →
+  「SNMP Catalog」/「SNMP 認證(vault)」，不用再手動編輯這兩個檔案；catalog
+  端的 Simulate-then-write 沿用 `saveMonitoringTargets`/`saveMonitoringProfiles`
+  的既有折律，credentials 端沿用 `pushVaultEditorScreen` 的「doc 只在進入時
+  load 一次、之後全程用同一份 in-memory doc」折律（第一版曾誤把
+  `pushSNMPCredentialsEditor` 寫成每次都從磁碟重新 load，導致存檔前新增的
+  credentialRef 全部憑空消失——headless `editRouterModel.Update` 逐鍵重放
+  抓到，已修好並補了 teatest 回歸）。
 - 真實廠牌設備（非 lab snmpd）與 24h staging soak 屬於 spec §17.4/§18
   (AC23) 的 production gate，明確不在本 Phase 1 範圍內。
 - （已補）`internal/spec/snmp_exporter_regression_test.go` 鎖定 row ID

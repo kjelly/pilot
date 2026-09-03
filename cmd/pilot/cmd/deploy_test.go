@@ -272,6 +272,26 @@ func TestAutoFillMonitoringFiles(t *testing.T) {
 	}
 }
 
+func TestAutoFillSNMPCatalogFile(t *testing.T) {
+	dir := t.TempDir()
+	if v, found, err := autoFillSNMPCatalogFile(dir); err != nil || found || v != "" {
+		t.Fatalf("missing catalog = v %q found %v err %v", v, found, err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "monitoring", "snmp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "monitoring", "snmp", "catalog.yml"), []byte("schemaVersion: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v, found, err := autoFillSNMPCatalogFile(dir)
+	if err != nil || !found {
+		t.Fatalf("catalog = v %q found %v err %v", v, found, err)
+	}
+	if !strings.HasPrefix(v, "snmp_catalog_file=/") {
+		t.Fatalf("catalog var is not absolute: %v", v)
+	}
+}
+
 // TestDumpMenuDebug covers the PILOT_DEBUG_MENU=1 escape hatch used by
 // trec-scripted runs to read a promptui.Select menu's real, live item
 // list (and 0-based DOWN <n> index) from the recorded terminal output,

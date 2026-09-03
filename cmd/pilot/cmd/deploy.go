@@ -2970,6 +2970,16 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 			fmt.Fprintf(out, "已自動帶入外部 Prometheus monitoring 設定：%s、%s\n", monitoringVars[0], monitoringVars[1])
 		}
 	}
+	if entry.SNMPCatalogFile {
+		snmpVar, found, err := autoFillSNMPCatalogFile(workspaceDir)
+		if err != nil {
+			return err
+		}
+		if found {
+			extraVars = append(extraVars, snmpVar)
+			fmt.Fprintf(out, "已自動帶入 SNMP catalog 設定：%s\n", snmpVar)
+		}
+	}
 	// The consumer of these cross-role vars is whichever group actually
 	// receives -e/target_group for this run: an explicit targetGroup
 	// override if the operator gave one, else the catalog's own
@@ -3130,6 +3140,30 @@ func autoFillMonitoringFiles(workspaceDir string) (vars []string, found bool, er
 		return nil, false, err
 	}
 	return []string{"monitoring_targets_file=" + absTargets, "monitoring_profiles_file=" + absProfiles}, true, nil
+}
+
+// autoFillSNMPCatalogFile wires the workspace-owned monitoring/snmp/catalog.yml
+// into snmp-exporter-apply.yml's snmp_catalog_file variable, the same
+// control-node-checkout convention as autoFillMonitoringFiles — a missing
+// file just falls back to the playbook's own default (no modules/auth
+// profiles declared).
+func autoFillSNMPCatalogFile(workspaceDir string) (v string, found bool, err error) {
+	catalog := filepath.Join(workspaceDir, "monitoring", "snmp", "catalog.yml")
+	info, statErr := os.Stat(catalog)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			return "", false, nil
+		}
+		return "", false, statErr
+	}
+	if info.IsDir() {
+		return "", false, fmt.Errorf("snmp catalog path must be a file: %s", catalog)
+	}
+	abs, err := filepath.Abs(catalog)
+	if err != nil {
+		return "", false, err
+	}
+	return "snmp_catalog_file=" + abs, true, nil
 }
 
 // deployMenuLabel keeps catalog-only copywriting as a presentation projection,

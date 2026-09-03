@@ -101,6 +101,8 @@ func pushMonitoringManager(r *editRouterModel, dir, banner string) tea.Cmd {
 		{ID: "mon.manager.targets", Label: "🎯 Exporter Targets"},
 		{ID: "mon.manager.profiles", Label: "📋 Scrape Profiles"},
 		{ID: "mon.manager.validate", Label: "🔍 驗證 monitoring/targets.yml + scrape-profiles.yml"},
+		{ID: "mon.manager.snmp_catalog", Label: "🧩 SNMP Catalog(modules/authProfiles)"},
+		{ID: "mon.manager.snmp_credentials", Label: "🔑 SNMP 認證(vault)"},
 		{ID: "mon.manager.back", Label: "↩  返回"},
 	}
 	spec := tui.SelectSpec{ScreenID: "mon.manager", Title: "Monitoring — Prometheus external exporter targets", Choices: choices}
@@ -117,6 +119,10 @@ func pushMonitoringManager(r *editRouterModel, dir, banner string) tea.Cmd {
 		case 2:
 			return pushMonitoringValidateReport(r, dir)
 		case 3:
+			return pushSNMPCatalogMenu(r, dir, "")
+		case 4:
+			return pushSNMPCredentialFilePicker(r, dir, "")
+		case 5:
 			return pushTopMenu(r, dir, "")
 		}
 		return nil

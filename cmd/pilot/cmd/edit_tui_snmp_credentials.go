@@ -8,11 +8,17 @@
 // credentialRef's value is itself a nested map (username/authPassword/
 // privPassword, or community) — a shape vaultfile.Doc deliberately refuses
 // to touch (see internal/vaultfile's package doc).
+//
+// doc is loaded exactly once, by pushSNMPCredentialsEditor's first call for
+// a given file, and threaded as a parameter through every mutation screen
+// from there — never reloaded from disk mid-session (that would silently
+// drop whatever the in-memory doc already holds, the same discipline
+// edit_tui_vault.go's pushVaultEditorScreen/doc follows for its own
+// scalar-only vault editor).
 package cmd
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -51,7 +57,7 @@ func pushSNMPCredentialFilePicker(r *editRouterModel, dir, banner string) tea.Cm
 		case idx == len(choices)-1:
 			return pushMonitoringManager(r, dir, "")
 		case idx < len(files):
-			return pushSNMPCredentialsEditor(r, dir, filepath.Join(targetDir, files[idx]), "")
+			return pushSNMPCredentialOpen(r, dir, filepath.Join(targetDir, files[idx]))
 		default:
 			return pushSNMPCredentialFilePathPrompt(r, dir, targetDir)
 		}
@@ -66,28 +72,27 @@ func pushSNMPCredentialFilePathPrompt(r *editRouterModel, dir, targetDir string)
 		if m.Canceled() {
 			return pushSNMPCredentialFilePicker(r, dir, "")
 		}
-		return pushSNMPCredentialsEditor(r, dir, strings.TrimSpace(m.Value()), "")
+		return pushSNMPCredentialOpen(r, dir, strings.TrimSpace(m.Value()))
 	})
 }
 
-func loadSNMPCredentialDocOrBanner(r *editRouterModel, path string) (*monitoring.SNMPCredentialDoc, string, bool) {
+// pushSNMPCredentialOpen is the one place that loads a file into a fresh
+// SNMPCredentialDoc — every other screen in this file receives doc as a
+// parameter instead of reloading it.
+func pushSNMPCredentialOpen(r *editRouterModel, dir, path string) tea.Cmd {
 	doc, err := monitoring.LoadSNMPCredentialDoc(path)
 	if err != nil {
-		return nil, fmt.Sprintf("⚠️  %s 讀取失敗：%v", path, err), false
+		return pushSNMPCredentialFilePicker(r, dir, fmt.Sprintf("⚠️  %s 讀取失敗：%v", path, err))
 	}
 	for _, key := range doc.OtherTopLevelKeys() {
 		if rosterShapedKeys[key] {
-			return nil, fmt.Sprintf("⚠️  %s 看起來是 FreeIPA roster 檔，請改從主選單選「roster — FreeIPA」編輯；不要在這裡動它。", path), false
+			return pushSNMPCredentialFilePicker(r, dir, fmt.Sprintf("⚠️  %s 看起來是 FreeIPA roster 檔，請改從主選單選「roster — FreeIPA」編輯；不要在這裡動它。", path))
 		}
 	}
-	return doc, "", true
+	return pushSNMPCredentialsEditor(r, dir, path, doc, "")
 }
 
-func pushSNMPCredentialsEditor(r *editRouterModel, dir, path, banner string) tea.Cmd {
-	doc, errBanner, ok := loadSNMPCredentialDocOrBanner(r, path)
-	if !ok {
-		return pushSNMPCredentialFilePicker(r, dir, errBanner)
-	}
+func pushSNMPCredentialsEditor(r *editRouterModel, dir, path string, doc *monitoring.SNMPCredentialDoc, banner string) tea.Cmd {
 	refs := doc.Refs()
 	note := "選一個查看/編輯，或新增一個。密碼值不會顯示在畫面上。"
 	if len(refs) == 0 {
@@ -122,7 +127,7 @@ func pushSNMPCredentialsEditor(r *editRouterModel, dir, path, banner string) tea
 			return pushSNMPCredentialAddRefID(r, dir, path, doc)
 		case idx == len(choices)-2:
 			if err := monitoring.WriteSNMPCredentialDoc(path, doc); err != nil {
-				return pushSNMPCredentialsEditor(r, dir, path, fmt.Sprintf("⚠️  存檔失敗：%v", err))
+				return pushSNMPCredentialsEditor(r, dir, path, doc, fmt.Sprintf("⚠️  存檔失敗：%v", err))
 			}
 			return pushSNMPCredentialFilePicker(r, dir, fmt.Sprintf("✅ 已存檔 %s", path))
 		case idx == len(choices)-1:
@@ -148,7 +153,7 @@ func pushSNMPCredentialAddRefID(r *editRouterModel, dir, path string, doc *monit
 	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
-			return pushSNMPCredentialsEditor(r, dir, path, "")
+			return pushSNMPCredentialsEditor(r, dir, path, doc, "")
 		}
 		return pushSNMPCredentialAddKind(r, dir, path, doc, strings.TrimSpace(m.Value()))
 	})
@@ -179,7 +184,7 @@ func pushSNMPCredentialAddKind(r *editRouterModel, dir, path string, doc *monito
 func pushSNMPCredentialFieldPrompt(r *editRouterModel, dir, path string, doc *monitoring.SNMPCredentialDoc, ref string, fields monitoring.SNMPCredentialFields, fieldOrder []string, i int) tea.Cmd {
 	if i >= len(fieldOrder) {
 		doc.Set(ref, fields)
-		return pushSNMPCredentialsEditor(r, dir, path, fmt.Sprintf("✅ credentialRef %q 已在記憶體中更新，記得選「存檔並離開」。", ref))
+		return pushSNMPCredentialsEditor(r, dir, path, doc, fmt.Sprintf("✅ credentialRef %q 已在記憶體中更新，記得選「存檔並離開」。", ref))
 	}
 	field := fieldOrder[i]
 	validate := func(s string) error {
@@ -192,7 +197,7 @@ func pushSNMPCredentialFieldPrompt(r *editRouterModel, dir, path string, doc *mo
 	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
-			return pushSNMPCredentialsEditor(r, dir, path, "")
+			return pushSNMPCredentialsEditor(r, dir, path, doc, "")
 		}
 		fields[field] = m.Value()
 		return pushSNMPCredentialFieldPrompt(r, dir, path, doc, ref, fields, fieldOrder, i+1)
@@ -215,7 +220,7 @@ func pushSNMPCredentialRefMenu(r *editRouterModel, dir, path string, doc *monito
 	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
-			return pushSNMPCredentialsEditor(r, dir, path, "")
+			return pushSNMPCredentialsEditor(r, dir, path, doc, "")
 		}
 		switch m.Selected() {
 		case 0:
@@ -226,11 +231,9 @@ func pushSNMPCredentialRefMenu(r *editRouterModel, dir, path string, doc *monito
 			return pushSNMPCredentialFieldPrompt(r, dir, path, doc, ref, monitoring.SNMPCredentialFields{}, []string{"community"}, 0)
 		case 1:
 			doc.Delete(ref)
-			return pushSNMPCredentialsEditor(r, dir, path, fmt.Sprintf("credentialRef %q 已在記憶體中刪除，記得選「存檔並離開」。", ref))
+			return pushSNMPCredentialsEditor(r, dir, path, doc, fmt.Sprintf("credentialRef %q 已在記憶體中刪除，記得選「存檔並離開」。", ref))
 		default:
-			return pushSNMPCredentialsEditor(r, dir, path, "")
+			return pushSNMPCredentialsEditor(r, dir, path, doc, "")
 		}
 	})
 }
-
-var _ = os.IsNotExist // keep os imported for future error-path parity with edit_tui_vault.go
