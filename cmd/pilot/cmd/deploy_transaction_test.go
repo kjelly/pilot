@@ -108,3 +108,30 @@ func TestScopeVerificationPlansUsesContractTraceability(t *testing.T) {
 		t.Fatal("unknown tag unexpectedly broadened verification scope")
 	}
 }
+
+func TestAutoDeployVerify_UsesOperatorTagsNotGeneratedApplyTags(t *testing.T) {
+	root := repoRootForTest(t)
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A limited site deployment can add a provider component tag solely to
+	// constrain Ansible's apply scope. That provider may not opt in to automatic
+	// verification, so its generated tag must not be treated as a requested
+	// verification-row selector.
+	tagScopes := effectiveDeploymentTagScopes("playbooks/site.yml", "", []contract.Contract{{ID: "docker"}}, []contract.Contract{{ID: "docker"}, {ID: "thanos-query"}}, true)
+	if tagScopes.Apply != "docker,thanos-query" || tagScopes.Verification != "" {
+		t.Fatalf("effectiveDeploymentTagScopes() = %+v, want apply=docker,thanos-query verification empty", tagScopes)
+	}
+	if _, err := autoDeployVerify(root, catalog, []string{"docker"}, "inventory.yml", "", tagScopes.Verification, "sandbox", vaultInput{}, nil); err != nil {
+		t.Fatalf("autoDeployVerify() with operator tags = %q: %v", tagScopes.Verification, err)
+	}
+	if _, err := autoDeployVerify(root, catalog, []string{"docker"}, "inventory.yml", "", tagScopes.Apply, "sandbox", vaultInput{}, nil); err == nil {
+		t.Fatalf("autoDeployVerify() unexpectedly accepted generated apply tags %q", tagScopes.Apply)
+	}
+}

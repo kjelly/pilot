@@ -37,15 +37,21 @@ func stubDeploymentAvailabilityAllReachable(t *testing.T) {
 	t.Cleanup(func() { deployAvailabilityProber = original })
 }
 
-func TestEffectiveDeploymentLimit_UnchangedWhenNothingDeferred(t *testing.T) {
+func TestEffectiveDeploymentLimit_ExplicitLimitUnchangedWhenNothingDeferred(t *testing.T) {
 	candidates := []string{"a", "b", "c"}
 	got := effectiveDeploymentLimit("playbooks/site.yml", "orig-limit", candidates, candidates, false)
 	if got != "orig-limit" {
 		t.Fatalf("effectiveDeploymentLimit() = %q, want unchanged %q", got, "orig-limit")
 	}
-	// Including the "caller passed no limit at all" case explicitly.
-	if got := effectiveDeploymentLimit("playbooks/site.yml", "", candidates, candidates, false); got != "" {
-		t.Fatalf("effectiveDeploymentLimit() = %q, want empty string preserved", got)
+}
+
+func TestEffectiveDeploymentLimit_EmptyLimitScopesPreflightToResolvedHosts(t *testing.T) {
+	candidates := []string{"it-core"}
+	if got := effectiveDeploymentLimit("playbooks/apply/prometheus-apply.yml", "", candidates, candidates, false); got != "it-core" {
+		t.Fatalf("effectiveDeploymentLimit() = %q, want selected host only", got)
+	}
+	if got := effectiveDeploymentLimit("playbooks/site.yml", "", candidates, candidates, false); got != "localhost,it-core" {
+		t.Fatalf("effectiveDeploymentLimit() = %q, want site controller plus selected host", got)
 	}
 }
 

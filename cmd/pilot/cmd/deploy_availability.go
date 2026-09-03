@@ -176,13 +176,15 @@ func availabilityCandidateHosts(targetHosts []string, selected []contract.Contra
 	return uniqueSortedHosts(candidates)
 }
 
-// effectiveDeploymentLimit returns limit unchanged whenever every candidate
-// host stayed included and dependency resolution did not add a provider host.
-// A required provider added outside the caller's --limit must be rendered in
-// the effective limit even when every host is reachable. Otherwise only an
-// optional-host deferral causes a fresh limit via delivery.BuildEffectiveLimit.
+// effectiveDeploymentLimit preserves an explicit caller limit whenever every
+// candidate host stayed included and dependency resolution did not add a
+// provider host.  An empty caller limit is different: preflight.yml targets
+// hosts: all, so preserving it would make a single-component reconcile probe
+// unrelated hosts outside the resolved deployment scope.  Always render the
+// resolved candidates in that case; otherwise an offline optional host outside
+// the selected component could still fail the preflight SSH ping.
 func effectiveDeploymentLimit(playbook, limit string, candidateHosts, includedHosts []string, dependencyExpandedLimit bool) string {
-	if len(includedHosts) == len(candidateHosts) && !dependencyExpandedLimit {
+	if limit != "" && len(includedHosts) == len(candidateHosts) && !dependencyExpandedLimit {
 		return limit
 	}
 	return delivery.BuildEffectiveLimit(playbook, includedHosts)

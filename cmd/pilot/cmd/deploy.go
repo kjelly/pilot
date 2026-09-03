@@ -1529,7 +1529,8 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	}
 	printAvailabilitySummary(out, execScope)
 	limit = effectiveDeploymentLimit(playbook, limit, execScope.Candidates, execScope.Included, dependencyExpandedLimit)
-	tags = effectiveDeploymentTags(playbook, tags, applied, selected, dependencyExpandedLimit)
+	tagScopes := effectiveDeploymentTagScopes(playbook, tags, applied, selected, dependencyExpandedLimit)
+	tags = tagScopes.Apply
 
 	// The optional interactive preflight must run only after availability has
 	// resolved the effective execution scope. Previously deploy/reconcile ran
@@ -1602,7 +1603,7 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	}
 	var verify delivery.StepFunc
 	if !isDecommissionPlaybook(applied, playbook) {
-		verify, err = autoDeployVerify(root, catalog, components, inv, limit, tags, stage, vault, writer)
+		verify, err = autoDeployVerify(root, catalog, components, inv, limit, tagScopes.Verification, stage, vault, writer)
 		if err != nil {
 			_ = writer.Finish(ctx, store.RunFinished{Outcome: string(delivery.OutcomeFailed), ExitCode: 1})
 			_ = st.Close()
@@ -1725,13 +1726,24 @@ func componentMatchesTags(component contract.Contract, requested map[string]bool
 	return false
 }
 
-// effectiveDeploymentTags confines a site-wide dependency expansion to the
-// components selected on the caller's original hosts plus their required
+// deploymentTagScopes keeps Ansible task selection separate from verification
+// row selection. Apply may need extra coarse component tags when a limited
+// site deploy brings in provider hosts; those implementation tags are not an
+// operator request to select verification rows.
+type deploymentTagScopes struct {
+	Apply        string
+	Verification string
+}
+
+// effectiveDeploymentTagScopes confines a site-wide dependency expansion to
+// the components selected on the caller's original hosts plus their required
 // providers. Without this, adding a provider host to --limit would let every
-// unrelated site play that happens to target that host run as well.
-func effectiveDeploymentTags(playbook, requestedTags string, applied, selected []contract.Contract, dependencyExpandedLimit bool) string {
+// unrelated site play that happens to target that host run as well. The
+// automatic tags affect only Ansible apply; verification retains the tags the
+// operator originally requested.
+func effectiveDeploymentTagScopes(playbook, requestedTags string, applied, selected []contract.Contract, dependencyExpandedLimit bool) deploymentTagScopes {
 	if playbook != "playbooks/site.yml" || !dependencyExpandedLimit {
-		return requestedTags
+		return deploymentTagScopes{Apply: requestedTags, Verification: requestedTags}
 	}
 
 	tags := csvSet(requestedTags)
@@ -1750,7 +1762,7 @@ func effectiveDeploymentTags(playbook, requestedTags string, applied, selected [
 		resolved = append(resolved, tag)
 	}
 	sort.Strings(resolved)
-	return strings.Join(resolved, ",")
+	return deploymentTagScopes{Apply: strings.Join(resolved, ","), Verification: requestedTags}
 }
 
 func resolveDeploymentScope(ctx context.Context, catalog contract.Catalog, componentIDs []string, inventory, limit string, extraVars []string, allowEmpty bool) ([]contract.Contract, []contract.Contract, delivery.Scope, []string, bool, error) {

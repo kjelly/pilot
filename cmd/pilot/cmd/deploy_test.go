@@ -1066,8 +1066,8 @@ esac
 	if !expanded {
 		t.Fatal("dependencyExpandedLimit = false, want true when the provider is outside --limit")
 	}
-	if got := effectiveDeploymentTags("playbooks/site.yml", "", applied, selected, expanded); got != "client,server" {
-		t.Fatalf("effectiveDeploymentTags() = %q, want client,server", got)
+	if got := effectiveDeploymentTagScopes("playbooks/site.yml", "", applied, selected, expanded); got.Apply != "client,server" || got.Verification != "" {
+		t.Fatalf("effectiveDeploymentTagScopes() = %+v, want apply=client,server verification empty", got)
 	}
 }
 
@@ -1184,18 +1184,18 @@ esac
 	if !expanded {
 		t.Fatal("dependencyExpandedLimit = false, want true for the remote provider host")
 	}
-	if got := effectiveDeploymentTags("playbooks/site.yml", "", applied, selected, expanded); got != "docker,wazuh-fim,wazuh-manager" {
-		t.Fatalf("effectiveDeploymentTags() = %q, want docker,wazuh-fim,wazuh-manager", got)
+	if got := effectiveDeploymentTagScopes("playbooks/site.yml", "", applied, selected, expanded); got.Apply != "docker,wazuh-fim,wazuh-manager" || got.Verification != "" {
+		t.Fatalf("effectiveDeploymentTagScopes() = %+v, want apply=docker,wazuh-fim,wazuh-manager verification empty", got)
 	}
 }
 
-func TestEffectiveDeploymentTags_PreservesRequestedTagsAndAddsOnlyProvider(t *testing.T) {
+func TestEffectiveDeploymentTagScopes_PreservesVerificationTagsAndAddsOnlyApplyProviderTags(t *testing.T) {
 	applied := []contract.Contract{{ID: "client", Role: "clients"}}
 	selected := append(append([]contract.Contract{}, applied...), contract.Contract{ID: "server", Role: "servers"})
-	if got := effectiveDeploymentTags("playbooks/site.yml", "custom,client", applied, selected, true); got != "client,custom,server" {
-		t.Fatalf("effectiveDeploymentTags() = %q, want client,custom,server", got)
+	if got := effectiveDeploymentTagScopes("playbooks/site.yml", "custom,client", applied, selected, true); got.Apply != "client,custom,server" || got.Verification != "custom,client" {
+		t.Fatalf("effectiveDeploymentTagScopes() = %+v, want apply=client,custom,server verification=custom,client", got)
 	}
-	if got := effectiveDeploymentTags("playbooks/apply/client.yml", "client", applied, selected, true); got != "client" {
-		t.Fatalf("single-playbook effectiveDeploymentTags() = %q, want client unchanged", got)
+	if got := effectiveDeploymentTagScopes("playbooks/apply/client.yml", "client", applied, selected, true); got.Apply != "client" || got.Verification != "client" {
+		t.Fatalf("single-playbook effectiveDeploymentTagScopes() = %+v, want client unchanged", got)
 	}
 }
