@@ -1308,7 +1308,7 @@ func prepareReconcileExecutionPlan(ctx context.Context, playbook, inv, limit, ta
 	if err != nil {
 		return reconcileExecutionPlan{}, fmt.Errorf("load contract catalog before reconcile: %w", err)
 	}
-	components, err := componentsForPlaybook(catalog, playbook, tags, componentHints)
+	components, err := componentsForPlaybook(ctx, catalog, playbook, inv, limit, tags, componentHints)
 	if err != nil {
 		return reconcileExecutionPlan{}, err
 	}
@@ -1365,7 +1365,7 @@ func executeRecordedDeploymentWithAuthorization(ctx context.Context, runner *ans
 	if err != nil {
 		return fmt.Errorf("load contract catalog before deployment: %w", err)
 	}
-	components, err := componentsForPlaybook(catalog, playbook, tags, componentHints)
+	components, err := componentsForPlaybook(ctx, catalog, playbook, inv, limit, tags, componentHints)
 	if err != nil {
 		return err
 	}
@@ -1495,7 +1495,7 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	if err != nil {
 		return fmt.Errorf("load contract catalog before deployment: %w", err)
 	}
-	components, err := componentsForPlaybook(catalog, playbook, tags, componentHints)
+	components, err := componentsForPlaybook(ctx, catalog, playbook, inv, limit, tags, componentHints)
 	if err != nil {
 		return err
 	}
@@ -1656,7 +1656,20 @@ func isDecommissionPlaybook(components []contract.Contract, playbook string) boo
 	return false
 }
 
-func componentsForPlaybook(catalog contract.Catalog, playbook, requestedTags string, hints []string) ([]string, error) {
+// componentsForPlaybook resolves which components a deploy run actually
+// applies. For playbooks/site.yml with no explicit hints, an opt-in
+// component (Site.Include: false) is included exactly when a host within
+// inv/limit's scope has actually been assigned its role — not just when
+// requestedTags happens to name it. Site.Include: true components were
+// already unconditionally in scope; without this, a site-wide "全部部署"
+// run silently skipped any opt-in component even when the operator's
+// inventory explicitly assigned it to a --limit-selected host, with no
+// error or warning (see review.md: it-core was assigned snmp-exporter,
+// but a site-wide `--limit it-core` deploy never applied it — the operator
+// had no way to discover the gap short of deploying it as its own
+// single-component menu entry, which never goes through this branch at
+// all because that path always supplies non-empty hints).
+func componentsForPlaybook(ctx context.Context, catalog contract.Catalog, playbook, inv, limit, requestedTags string, hints []string) ([]string, error) {
 	if len(hints) > 0 {
 		components := append([]string(nil), hints...)
 		sort.Strings(components)
@@ -1672,9 +1685,17 @@ func componentsForPlaybook(catalog contract.Catalog, playbook, requestedTags str
 		return components, nil
 	}
 	requested := csvSet(requestedTags)
+	var assignedOptInRoles map[string]bool
+	if playbook == "playbooks/site.yml" {
+		var err error
+		assignedOptInRoles, err = optInRolesAssignedInScope(ctx, catalog, inv, limit)
+		if err != nil {
+			return nil, fmt.Errorf("resolve opt-in role assignment for site-wide deployment: %w", err)
+		}
+	}
 	components := make([]string, 0)
 	for _, component := range catalog.Components() {
-		if playbook == "playbooks/site.yml" && component.Site.Include {
+		if playbook == "playbooks/site.yml" && (component.Site.Include || assignedOptInRoles[component.Role]) {
 			if len(requested) > 0 && !componentMatchesTags(component, requested) {
 				continue
 			}
@@ -1690,6 +1711,46 @@ func componentsForPlaybook(catalog contract.Catalog, playbook, requestedTags str
 		return nil, fmt.Errorf("deployment playbook %s and tags %q resolve no component contract", playbook, requestedTags)
 	}
 	return components, nil
+}
+
+// optInRolesAssignedInScope returns the set of roles belonging to an
+// opt-in (Site.Include: false) component that have at least one inventory
+// host within inv/limit's scope. Reuses resolveInventoryGroups (raw role
+// membership) and resolvePatternHosts (the same --limit pattern-matching
+// ansible itself uses, including "all" as a real pattern) rather than
+// reimplementing --limit's comma/wildcard/negation syntax.
+func optInRolesAssignedInScope(ctx context.Context, catalog contract.Catalog, inv, limit string) (map[string]bool, error) {
+	groups, err := resolveInventoryGroups(ctx, inv)
+	if err != nil {
+		return nil, err
+	}
+	scopeHosts, err := resolvePatternHosts(ctx, inv, "all", limit)
+	if err != nil {
+		return nil, err
+	}
+	inScope := make(map[string]bool, len(scopeHosts))
+	for _, host := range scopeHosts {
+		inScope[host] = true
+	}
+	roles := make(map[string]bool)
+	for _, component := range catalog.Components() {
+		if component.Site.Include || roles[component.Role] {
+			continue
+		}
+		if roleHasHostInScope(groups, inScope, component.Role) {
+			roles[component.Role] = true
+		}
+	}
+	return roles, nil
+}
+
+func roleHasHostInScope(groups map[string][]string, inScope map[string]bool, role string) bool {
+	for _, host := range groups[role] {
+		if inScope[host] {
+			return true
+		}
+	}
+	return false
 }
 
 func contractOwnsPlaybook(component contract.Contract, playbook string) bool {

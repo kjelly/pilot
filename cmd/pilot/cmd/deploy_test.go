@@ -381,7 +381,15 @@ func TestNFSSiteDeploymentProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	components, err := componentsForPlaybook(catalog, "playbooks/site.yml", "", nil)
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"_meta\":{\"hostvars\":{}}}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte("#!/bin/sh\nprintf '%s\\n' '  hosts (0):'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	components, err := componentsForPlaybook(context.Background(), catalog, "playbooks/site.yml", "inventory.yml", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,6 +397,102 @@ func TestNFSSiteDeploymentProjection(t *testing.T) {
 		if !slices.Contains(components, want) {
 			t.Errorf("full-site deployment contracts omit %q: %v", want, components)
 		}
+	}
+}
+
+// componentsForPlaybookOptInFixture wires a two-host inventory where only
+// host-a is assigned the opt-in-assigned-role group, matching the shape of
+// the real incident in review.md (it-core was assigned snmp-exporter's
+// role but a site-wide --limit it-core deploy never applied it).
+func componentsForPlaybookOptInFixture(t *testing.T) (catalog contract.Catalog, invPath string) {
+	t.Helper()
+	catalog, err := contract.NewCatalog([]contract.Contract{
+		{ID: "always-on", Role: "always-on-role", Site: contract.Site{Include: true}, Playbooks: contract.Playbooks{Apply: "playbooks/apply/always-on-apply.yml"}},
+		{ID: "opt-in-assigned", Role: "opt-in-assigned-role", Site: contract.Site{Include: false, OptIn: true}, Playbooks: contract.Playbooks{Apply: "playbooks/apply/opt-in-assigned-apply.yml"}},
+		{ID: "opt-in-unassigned", Role: "opt-in-unassigned-role", Site: contract.Site{Include: false, OptIn: true}, Playbooks: contract.Playbooks{Apply: "playbooks/apply/opt-in-unassigned-apply.yml"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	invJSON := `{"_meta":{"hostvars":{"host-a":{},"host-b":{}}},"opt-in-assigned-role":{"hosts":["host-a"]}}`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '"+invJSON+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ansibleFixture := `#!/bin/sh
+case "$*" in
+  *"--limit host-a"*) printf '%s\n' '  hosts (1):' '    host-a' ;;
+  *"--limit host-b"*) printf '%s\n' '  hosts (1):' '    host-b' ;;
+  *) printf '%s\n' '  hosts (2):' '    host-a' '    host-b' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return catalog, "inventory.yml"
+}
+
+// TestComponentsForPlaybook_SiteWideIncludesOptInComponentAssignedInScope
+// is the regression lock for review.md's incident: a site-wide deploy must
+// fold in an opt-in component whenever a --limit-scoped host has actually
+// been assigned its role, and must still leave an opt-in component with no
+// assigned host in scope excluded — Site.Include: true components are
+// unaffected either way.
+func TestComponentsForPlaybook_SiteWideIncludesOptInComponentAssignedInScope(t *testing.T) {
+	catalog, inv := componentsForPlaybookOptInFixture(t)
+
+	components, err := componentsForPlaybook(context.Background(), catalog, "playbooks/site.yml", inv, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(components, "always-on") {
+		t.Errorf("Site.Include: true component must always be present: %v", components)
+	}
+	if !slices.Contains(components, "opt-in-assigned") {
+		t.Errorf("opt-in component with an inventory-assigned host in scope must be included: %v", components)
+	}
+	if slices.Contains(components, "opt-in-unassigned") {
+		t.Errorf("opt-in component with no assigned host anywhere must stay excluded: %v", components)
+	}
+}
+
+// TestComponentsForPlaybook_SiteWideOptInRespectsLimitScope confirms the
+// inventory-assignment check honors --limit, not just "does this role have
+// a host somewhere in the whole inventory" — the assigned opt-in
+// component's only host is host-a, so limiting the run to host-b must
+// leave it excluded even though the role assignment exists elsewhere.
+func TestComponentsForPlaybook_SiteWideOptInRespectsLimitScope(t *testing.T) {
+	catalog, inv := componentsForPlaybookOptInFixture(t)
+
+	components, err := componentsForPlaybook(context.Background(), catalog, "playbooks/site.yml", inv, "host-b", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(components, "opt-in-assigned") {
+		t.Errorf("opt-in component assigned only to a host OUTSIDE --limit must stay excluded: %v", components)
+	}
+}
+
+// TestComponentsForPlaybook_SiteWideOptInStillRespectsExplicitTags confirms
+// an operator-provided --tags filter still narrows an opt-in component
+// that inventory-assignment would otherwise include, matching how
+// Site.Include: true components already behave — inventory assignment
+// only removes the old blanket exclusion, it does not bypass an explicit
+// narrower request.
+func TestComponentsForPlaybook_SiteWideOptInStillRespectsExplicitTags(t *testing.T) {
+	catalog, inv := componentsForPlaybookOptInFixture(t)
+
+	components, err := componentsForPlaybook(context.Background(), catalog, "playbooks/site.yml", inv, "", "always-on", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(components, "always-on") {
+		t.Errorf("requested tag must still select its own component: %v", components)
+	}
+	if slices.Contains(components, "opt-in-assigned") {
+		t.Errorf("an explicit --tags request that doesn't name the opt-in component must still exclude it: %v", components)
 	}
 }
 
