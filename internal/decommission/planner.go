@@ -161,6 +161,27 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 		}
 	}
 
+	// Reverse-reference scan (spec.md §12, INV-6) — read-only, best-effort
+	// for optional manifests. Runs BEFORE dependency ordering below (moved
+	// here in Phase 4) so a reference-driven provider component
+	// (internal-endpoint) can be added to componentIDs in time to
+	// participate in that same ordering pass.
+	refs, refWarnings := ScanReferences(in.WorkspaceDir, *target)
+	plan.Warnings = append(plan.Warnings, refWarnings...)
+
+	// Reference-driven components (spec.md §37 Phase 4, HD13): unlike
+	// every ComponentPlan built by the roles loop above, internal-endpoint
+	// is keyed off a REFERENCE to this host (route.target/route.proxy
+	// inventory_host in internal-endpoints.yaml), not one of the host's
+	// own roles — contracts/internal-endpoint.yaml's role: freeipa-server
+	// means the retiring host itself is never the one carrying that role.
+	if cp := planInternalEndpointReferences(ctx, in.Providers, refs, target.Name, providerFQDN(*target)); cp != nil {
+		plan.Components = append(plan.Components, *cp)
+		if cp.ComponentID != "" {
+			componentIDs = append(componentIDs, cp.ComponentID)
+		}
+	}
+
 	// Dependency ordering (spec.md §13, HD8): consumers before providers;
 	// a cycle fails planning closed.
 	depResult := resolveTeardownOrder(dedupeSortedStrings(componentIDs), in.Catalog)
@@ -171,11 +192,7 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 		plan.TeardownOrder = depResult.TeardownOrder
 	}
 
-	// Reverse-reference scan (spec.md §12, INV-6) — read-only, best-effort
-	// for optional manifests.
-	refs, refWarnings := ScanReferences(in.WorkspaceDir, *target)
 	plan.References = refs
-	plan.Warnings = append(plan.Warnings, refWarnings...)
 
 	// Unreachable-host disposition (spec.md §21, HD16/HD17).
 	applyUnreachablePolicy(plan, in.Reachability, in.OfflineDisposition)
@@ -295,6 +312,9 @@ func planComponent(ctx context.Context, role string, catalog contract.Catalog, d
 func classifyProviderPlanError(err error) ErrorClass {
 	if errors.Is(err, providers.ErrUnknownServicePrincipal) {
 		return ErrOwnershipUnknown
+	}
+	if errors.Is(err, providers.ErrInternalEndpointDeleteNotAllowed) {
+		return ErrReferenceRequiresAuthorization
 	}
 	return ErrCleanupFailedTerminal
 }

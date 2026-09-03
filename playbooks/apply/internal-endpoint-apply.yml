@@ -583,3 +583,83 @@
         group: root
         mode: "0600"
       when: not ansible_check_mode
+
+    # --- Phase 10: read-only decommission verify query (spec.md §37 Phase
+    #     4, HD13) ---
+    #
+    # internal/decommission/providers.InternalEndpointProvider.Verify calls
+    # this independently AFTER the delete sequence above already ran (or
+    # even standalone, e.g. a plan-time check) — it must never trust the
+    # delete sequence's own task results (INV-10). Reuses
+    # internal_endpoint_normalized (computed by pre_tasks above from the
+    # SAME manifest file, regardless of query mode) purely to recover the
+    # target fqdn's own dns_zone/dns_owner — the manifest's entry (state:
+    # absent doesn't remove it, only the ledger drops it, per
+    # tasks/internal-endpoint-delete.yml's own header comment) is the only
+    # remaining source for that once this endpoint's ledger entry is gone.
+    # Mirrors freeipa-identity-apply.yml's own
+    # pilot_decommission_query/pilot_decommission_target_fqdn convention
+    # (its "freeipa_host_absent_inspect" read-only query block) exactly,
+    # keyed off a fqdn directly rather than any roster/manifest state, so
+    # it works whether or not this endpoint was ever actually deleted yet.
+
+    - name: "Kinit as IPA admin (decommission verify query)"
+      tags: [iep_decommission_verify]
+      ansible.builtin.shell: |
+        set -o pipefail
+        printf '%s' "{{ ipa_admin_password }}" | kinit admin
+      no_log: true
+      changed_when: false
+      when:
+        - not ansible_check_mode
+        - pilot_decommission_query | default('') == 'endpoint_object'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+
+    - name: "Resolve the query target fqdn's own manifest entry (dns_zone/dns_owner), if it still exists"
+      ansible.builtin.set_fact:
+        iep_decom_query_entry: >-
+          {{ (internal_endpoint_normalized | selectattr('fqdn', 'equalto', pilot_decommission_target_fqdn | default(''))
+              | list | first)
+             if (internal_endpoint_normalized | selectattr('fqdn', 'equalto', pilot_decommission_target_fqdn | default(''))
+                 | list | length > 0)
+             else {} }}
+      when:
+        - pilot_decommission_query | default('') == 'endpoint_object'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [iep_decommission_verify]
+
+    - name: "Look up the current live host object for the query target endpoint (read-only, decommission verify)"
+      ansible.builtin.command:
+        argv: [ipa, host-show, "{{ pilot_decommission_target_fqdn | default('') }}"]
+      register: iep_decom_query_host
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_decommission_query | default('') == 'endpoint_object'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [iep_decommission_verify]
+
+    - name: "Look up the current live DNS A/AAAA record for the query target endpoint (read-only, decommission verify)"
+      ansible.builtin.command:
+        argv: [ipa, dnsrecord-show, "{{ iep_decom_query_entry.get('dns_zone', '') }}", "{{ iep_decom_query_entry.get('dns_owner', '') }}"]
+      register: iep_decom_query_dns
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_decommission_query | default('') == 'endpoint_object'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+        - iep_decom_query_entry.get('dns_zone', '') | length > 0
+      tags: [iep_decommission_verify]
+
+    - name: "Print endpoint_object query inspection for external tooling (read-only)"
+      ansible.builtin.debug:
+        msg: >-
+          ENDPOINT_INSPECT[{{ pilot_decommission_target_fqdn }}]
+          HOST_RESULT: {{ (iep_decom_query_host.stdout | default('')) ~ ' ' ~ (iep_decom_query_host.stderr | default('')) }}
+          DNS_RESULT: {{ (iep_decom_query_dns.stdout | default('')) ~ ' ' ~ (iep_decom_query_dns.stderr | default(''))
+                          if (iep_decom_query_entry.get('dns_zone', '') | default('') | length > 0)
+                          else 'skipped (no manifest entry — cannot resolve dns_zone/dns_owner)' }}
+      when:
+        - pilot_decommission_query | default('') == 'endpoint_object'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [iep_decommission_verify]

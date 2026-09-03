@@ -30,6 +30,16 @@ const (
 	ErrActiveResidue                 ErrorClass = "active_residue"
 	ErrFinalizationFailed            ErrorClass = "finalization_failed"
 	ErrAlreadyCompleted              ErrorClass = "already_completed"
+	// ErrReferenceRequiresAuthorization is Phase 4's addition to spec.md
+	// §41's "suggested, not exhaustive" list: a reference-driven provider
+	// (e.g. internal-endpoint) found something it CAN safely remove, but
+	// an explicit operator-owned authorization it never grants itself is
+	// missing (e.g. internal-endpoints.yaml's own safety.
+	// allow_endpoint_delete flag, spec.md §32) — distinct from
+	// ownership_unknown (ownership IS known here) and from
+	// external_state_unsupported (a provider IS registered and DOES know
+	// how to clean this up).
+	ErrReferenceRequiresAuthorization ErrorClass = "reference_requires_authorization"
 	// ErrWorkspaceMalformed is not part of spec.md §41's taxonomy (that
 	// list is about lifecycle/blocker outcomes); it covers the CLI's
 	// third `plan` exit case — "malformed workspace: error" (spec.md

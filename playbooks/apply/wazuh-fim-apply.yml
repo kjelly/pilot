@@ -259,9 +259,22 @@
         # `creates:` idempotency guard (freeipa-client-apply.yml), just
         # expressed as an explicit `when:` since agent-auth has no native
         # `creates:` semantics.
+        #
+        # `-A {{ inventory_hostname }}` (docs/superpowers/specs/2026-09-02-
+        # host-decommission-spec.md §5.6/HD14): without an explicit -A,
+        # agent-auth defaults the registered agent Name to the OS's own
+        # `hostname` output, which is not guaranteed to match the name Pilot
+        # itself tracks this host by (inventory_hostname) — leaving host
+        # decommission's manager-side agent lookup no reliable exact
+        # identity to match against, only a hostname GUESS (fuzzy/
+        # substring matching is explicitly disallowed, spec.md §5.6).
+        # Pinning -A here makes the registered agent Name always exactly
+        # equal to inventory_hostname, so
+        # internal/decommission/providers.WazuhAgentProvider can find it
+        # later by an EXACT string match, never a substring one.
         - name: "Step 9: Register with the manager via agent-auth (only once; spec C9)"
           tags: [C9]
-          ansible.builtin.command: "/var/ossec/bin/agent-auth -m {{ wazuh_manager_alias }}"
+          ansible.builtin.command: "/var/ossec/bin/agent-auth -m {{ wazuh_manager_alias }} -A {{ inventory_hostname }}"
           when:
             - wazuh_enrollment_enabled | bool
             - not wazuh_client_keys_stat.stat.exists or wazuh_client_keys_stat.stat.size == 0

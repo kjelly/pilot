@@ -1,0 +1,167 @@
+# Wazuh FIM agent host decommission — local cleanup only.
+#
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §37 Phase 4:
+# this playbook owns ONLY the agent-side half of Wazuh agent decommission
+# (stop/disable the local agent, remove its enrollment key so a future
+# re-enroll starts clean, verify it's really gone). It deliberately does
+# NOT touch the manager's own agent registration — that is
+# playbooks/decommission/wazuh-manager-agent-deregister.yml's job, run
+# against the wazuh-manager host, exactly mirroring the FreeIPA-client /
+# freeipa-identity-apply.yml local/central split (freeipa-client-
+# decommission.yml's own doc comment).
+#
+# Invoked ONLY by internal/decommission/providers.WazuhAgentProvider —
+# never directly by an operator.
+#
+# `--tags inspect` restricts execution to the two read-only tasks in
+# pre_tasks (stat + a debug print of the result) — no mutating task
+# carries that tag — so a caller (internal/decommission/providers'
+# Provider.Inspect) can safely query current enrollment state without
+# risking the real uninstall running.
+#
+# Usage:
+#
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/wazuh-agent-decommission.yml \
+#       --limit <retiring-host>
+#
+#   # read-only enrollment check only (never mutates):
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/wazuh-agent-decommission.yml \
+#       --limit <retiring-host> --tags inspect
+#
+# Stage gating (same convention as freeipa-client-decommission.yml — host
+# decommission is inherently destructive, and INV-4's human-approval gate
+# already lives at the Go layer, but this Ansible-layer gate is cheap
+# insurance against an accidental direct invocation):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: Wazuh agent decommission — local agent removal
+  hosts: "{{ target_group | default('wazuh-fim') }}"
+  become: true
+  gather_facts: false
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    wazuh_client_keys: /var/ossec/etc/client.keys
+
+  pre_tasks:
+    - name: "Wazuh agent decommission — gather fresh facts"
+      ansible.builtin.setup:
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    # Read-only detection: client.keys populated means this host still
+    # holds a manager-issued enrollment key (mirrors wazuh-fim-apply.yml's
+    # own "Step 8: Check whether this agent is already enrolled" stat —
+    # both playbooks must agree on what "enrolled" means).
+    - name: "Wazuh agent decommission — detect current enrollment (read-only)"
+      ansible.builtin.stat:
+        path: "{{ wazuh_client_keys }}"
+      register: wazuh_decom_keys_stat
+      tags: [inspect]
+
+    - name: "Wazuh agent decommission — report enrollment state for external tooling"
+      ansible.builtin.set_fact:
+        wazuh_decom_keys_populated: >-
+          {{ (wazuh_decom_keys_stat.stat.exists) and (wazuh_decom_keys_stat.stat.size | default(0) > 0) }}
+      tags: [inspect]
+
+    - name: "Wazuh agent decommission — print enrollment state for external tooling"
+      ansible.builtin.debug:
+        msg: "WAZUH_AGENT_ENROLLED={{ wazuh_decom_keys_populated | ternary('true', 'false') }}"
+      tags: [inspect]
+
+  tasks:
+    - name: "Wazuh agent decommission — local removal, with diagnostics on failure"
+      block:
+        - name: "Wazuh agent decommission — stop and disable the local agent"
+          ansible.builtin.systemd:
+            name: wazuh-agent
+            state: stopped
+            enabled: false
+          when: not ansible_check_mode
+          register: wazuh_decom_agent_stop
+          failed_when: false
+
+        # Removing client.keys (rather than uninstalling the wazuh-agent
+        # package) leaves the FIM/whodata configuration and the package
+        # itself in place — matching this feature's non-goal list
+        # (spec.md §4: no package purge/data wipe implied by decommission)
+        # while still guaranteeing the local half of "zero active residue"
+        # (INV-11): an agent with no client.keys cannot reconnect to the
+        # manager, and re-registering (a fresh agent-auth) after this is a
+        # normal clean-slate enrollment, not a stale-key conflict.
+        - name: "Wazuh agent decommission — remove the local enrollment key"
+          ansible.builtin.file:
+            path: "{{ wazuh_client_keys }}"
+            state: absent
+          when: not ansible_check_mode
+          register: wazuh_decom_keys_removed
+
+        - name: "Wazuh agent decommission — verify no longer enrolled"
+          ansible.builtin.stat:
+            path: "{{ wazuh_client_keys }}"
+          register: wazuh_decom_keys_stat_after
+          when: not ansible_check_mode
+
+        - name: "Gate: local agent must no longer hold an enrollment key"
+          ansible.builtin.assert:
+            that:
+              - not wazuh_decom_keys_stat_after.stat.exists
+            fail_msg: >-
+              {{ wazuh_client_keys }} still exists after removal — the
+              agent still looks enrolled; refusing to report local
+              cleanup as complete.
+          when: not ansible_check_mode
+
+      rescue:
+        - name: "Wazuh agent decommission — rescue: dump wazuh-agent status"
+          ansible.builtin.command: systemctl status wazuh-agent --no-pager
+          register: wazuh_decom_rescue_status
+          changed_when: false
+          failed_when: false
+
+        - name: "Wazuh agent decommission — rescue: surface diagnostics and fail"
+          ansible.builtin.fail:
+            msg: |
+              Wazuh agent local decommission FAILED. Diagnostics:
+              --- systemctl status wazuh-agent ---
+              {{ wazuh_decom_rescue_status.stdout | default('(unavailable)') }}
+              {{ wazuh_decom_rescue_status.stderr | default('') }}
+              This host's decommission is resumable: no manager-side
+              agent registration has been touched by this playbook — only
+              local agent state was attempted. Resume via `pilot host
+              decommission resume` once the underlying issue is fixed.

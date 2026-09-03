@@ -33,7 +33,8 @@ to be wrong once real code/hosts exist, fix the spec and this file
 together with a stated reason (AGENTS.md §0.2 responsibility split), not
 just this file alone.
 
-**Status: DRAFT — Phase 3 live evidence landed 2026-09-03.** Phase 1 makes
+**Status: DRAFT — Phase 4 (code + fixture tests, no live evidence yet) landed
+2026-09-03.** Phase 1 makes
 HD1, HD3, HD4, HD6, HD7, HD8, HD15, HD16, HD17, HD26, HD27, HD28
 executable (planner is read-only, no live provider needed). Phase 2 makes
 HD2, HD5, HD18-HD22, HD24 executable (finalizer + TUI refactor, still no
@@ -54,9 +55,17 @@ issue that silently defeated every anchored regex this feature reads)
 are recorded in `docs/evidence/host-decommission/2026-09-03-3b4ef4d.md` —
 read that note before treating HD9-HD12 (the fixture-only rows above) as
 having ever been "verified against a real FreeIPA server" on their own;
-they were not, until HD9-LIVE-HD12-LIVE existed. Phase 4 still needs
-disposable-target evidence for HD13/HD14 (internal-endpoint/Wazuh,
-explicitly out of scope for this round). HD23 and HD25 are pure static/
+they were not, until HD9-LIVE-HD12-LIVE existed. Phase 4 (this round)
+adds the internal-endpoint and Wazuh-agent providers (HD13/HD14) — code +
+fixture tests only, same posture Phase 3a took before Phase 3b: no
+disposable-target evidence for HD13/HD14 exists yet (the new
+`internal-endpoint-apply.yml`/`wazuh-manager-agent-deregister.yml`
+read-only query blocks and the Wazuh `manage_agents -l`/`-r` central
+mutation are unvalidated against a real Wazuh manager or a real
+internal-endpoint at this point) — treat "PASS" on HD13/HD14 below as "the
+Go-level provider contract behaves correctly against fixtures", not
+"verified against a live Wazuh manager or FreeIPA server", until a
+Phase-4b-style live evidence pass lands. HD23 and HD25 are pure static/
 registry checks and are executable as soon as the relevant code exists,
 with no live host.
 

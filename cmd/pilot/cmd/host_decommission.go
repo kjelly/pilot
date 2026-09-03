@@ -474,8 +474,41 @@ func buildHostDecommissionProviders(dir, hostName string, out io.Writer) (map[st
 		ExtraArgs:             extraArgs,
 	})
 
+	// Wazuh agent (spec.md §37 Phase 4, HD14) — registered unconditionally,
+	// same posture as freeipaClient above: the map KEY is what gates
+	// whether planComponent's role-match ever consults it, so registering
+	// here regardless of whether hostName actually carries role wazuh-fim
+	// is harmless (planner.go only calls Plan() when a role resolved to
+	// this exact component ID).
+	wazuhAgent := providers.NewWazuhAgentProvider(providers.WazuhAgentProviderConfig{
+		Executor:                  runner,
+		AgentInventory:            invPath,
+		ServerInventory:           invPath,
+		AgentDecommissionPlaybook: "playbooks/decommission/wazuh-agent-decommission.yml",
+		ManagerDeregisterPlaybook: "playbooks/decommission/wazuh-manager-agent-deregister.yml",
+	})
+
+	// Internal-endpoint (spec.md §37 Phase 4, HD13) — reference-driven, not
+	// role-driven (see internal/decommission/internal_endpoint_component.go's
+	// doc comment): registered unconditionally too, gated instead by
+	// whether internal-endpoints.yaml even exists and references hostName
+	// at all (InternalEndpointProvider.Plan's own no-op-when-nothing-
+	// references-this-host behavior).
+	internalEndpoint := providers.NewInternalEndpointProvider(providers.InternalEndpointProviderConfig{
+		Executor:        runner,
+		ManifestPath:    filepath.Join(dir, "internal-endpoints.yaml"),
+		ServerInventory: invPath,
+		ApplyPlaybook:   "playbooks/apply/internal-endpoint-apply.yml",
+		ExtraArgs: []string{
+			"-e", "internal_endpoint_manifest_file=" + filepath.Join(dir, "internal-endpoints.yaml"),
+			"-e", "freeipa_dns_manifest_file=" + filepath.Join(dir, "freeipa-dns.yaml"),
+		},
+	})
+
 	return map[string]providers.Provider{
-		providers.FreeIPAClientProviderID: freeipaClient,
+		providers.FreeIPAClientProviderID:    freeipaClient,
+		providers.WazuhAgentProviderID:       wazuhAgent,
+		providers.InternalEndpointProviderID: internalEndpoint,
 	}, nil
 }
 

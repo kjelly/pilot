@@ -6,6 +6,14 @@ specs:
     rows: {all: true}
 playbooks:
   apply: playbooks/apply/wazuh-fim-apply.yml
+  # Host decommission Phase 4 (docs/superpowers/specs/2026-09-02-host-
+  # decommission-spec.md §37, HD14): local agent stop/key-removal, invoked
+  # only by internal/decommission/providers.WazuhAgentProvider — never
+  # directly by an operator (see AGENTS.md §4.0's playbooks/decommission/
+  # row). Central manager-side deregistration reuses a separate dedicated
+  # playbook (playbooks/decommission/wazuh-manager-agent-deregister.yml,
+  # run against the wazuh-manager host), not this apply playbook.
+  decommission: playbooks/decommission/wazuh-agent-decommission.yml
 regressionTests:
   - internal/spec/wazuh_fim_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go

@@ -205,38 +205,66 @@ func executeComponents(ctx context.Context, plan *Plan, provs map[string]provide
 
 // collectVerifications independently re-collects every registered
 // provider's Verify results for components this plan selected (INV-10) —
-// once per unique component/provider ID, never trusting the steps that
-// were just executed. A component that was ProviderRegistered at plan
-// time but somehow has no provider in provs now is a caller error (a
+// once per unique (component, identity) pair, never trusting the steps
+// that were just executed. A component that was ProviderRegistered at
+// plan time but somehow has no provider in provs now is a caller error (a
 // different Providers map than `plan` used) and fails closed rather than
 // silently treating a missing check as zero residue.
+//
+// Identity is derived from the component's OWN planned Steps
+// (distinctStepIdentities), not unconditionally from plan.Host — most
+// providers (FreeIPA client, Wazuh agent) plan every step against the
+// retiring host itself, so this collapses to exactly one call with that
+// identity, identical to pre-Phase-4 behavior. A reference-driven
+// provider (internal-endpoint, Phase 4) plans steps against a DIFFERENT
+// identity per referenced endpoint fqdn — this generalization is what
+// lets Verify be called once per actual referenced endpoint instead of
+// once against the wrong (the retiring host's own) identity.
 func collectVerifications(ctx context.Context, plan *Plan, provs map[string]providers.Provider) ([]providers.Verification, error) {
 	var out []providers.Verification
-	seen := map[string]bool{}
+	seenComponent := map[string]bool{}
 	for _, c := range plan.Components {
-		if c.ComponentID == "" || !c.ProviderRegistered || seen[c.ComponentID] {
+		if c.ComponentID == "" || !c.ProviderRegistered || seenComponent[c.ComponentID] {
 			continue
 		}
-		seen[c.ComponentID] = true
+		seenComponent[c.ComponentID] = true
 		provider := provs[c.ComponentID]
 		if provider == nil {
 			return nil, newError(ErrCleanupFailedTerminal, "component %s was planned against a registered provider but none is registered now — refusing to treat missing verification as zero residue", c.ComponentID)
 		}
-		verifs, err := provider.Verify(ctx, providers.VerifyInput{
-			HostName: plan.Host.Name,
-			// Same FQDN precedence bug/fix as planner.go's providerFQDN:
-			// host.Name (this repo's roster convention: hosts[] entries are
-			// named by FQDN) over AnsibleHost (often just a bare
-			// connection IP, never the FreeIPA/DNS identity).
-			FQDN: firstNonEmpty(plan.Host.Name, plan.Host.AnsibleHost),
-		})
-		if err != nil {
-			return nil, newError(ErrCleanupFailedTerminal, "component %s: verify: %v", c.ComponentID, err)
+
+		identities := distinctStepIdentities(c.Steps)
+		if len(identities) == 0 {
+			// No steps recorded an identity (should not normally happen —
+			// every provider's Plan sets TargetIdentity) — fall back to the
+			// host's own identity, matching pre-Phase-4 behavior exactly.
+			identities = []string{firstNonEmpty(plan.Host.Name, plan.Host.AnsibleHost)}
 		}
-		out = append(out, verifs...)
+		for _, identity := range identities {
+			verifs, err := provider.Verify(ctx, providers.VerifyInput{HostName: identity, FQDN: identity})
+			if err != nil {
+				return nil, newError(ErrCleanupFailedTerminal, "component %s: verify %s: %v", c.ComponentID, identity, err)
+			}
+			out = append(out, verifs...)
+		}
 	}
-	if len(seen) > 0 && len(out) == 0 {
-		return nil, newError(ErrCleanupFailedTerminal, "expected verification results from %d registered provider(s) but got none — refusing to treat as zero residue", len(seen))
+	if len(seenComponent) > 0 && len(out) == 0 {
+		return nil, newError(ErrCleanupFailedTerminal, "expected verification results from %d registered provider(s) but got none — refusing to treat as zero residue", len(seenComponent))
 	}
 	return out, nil
+}
+
+// distinctStepIdentities returns each distinct, non-empty Step.TargetIdentity
+// across steps, in first-seen order.
+func distinctStepIdentities(steps []providers.Step) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range steps {
+		if s.TargetIdentity == "" || seen[s.TargetIdentity] {
+			continue
+		}
+		seen[s.TargetIdentity] = true
+		out = append(out, s.TargetIdentity)
+	}
+	return out
 }

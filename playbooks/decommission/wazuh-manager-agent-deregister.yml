@@ -1,0 +1,143 @@
+# Wazuh manager-side agent deregistration — central cleanup only.
+#
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §37 Phase 4
+# (HD14): removes a retired agent's registration from the Wazuh manager's
+# own agent list, matched by an EXACT agent Name (never a hostname
+# substring, spec.md §5.6) — the agent Name this looks for is exactly
+# what wazuh-fim-apply.yml's Step 9 now pins via `agent-auth -A
+# {{ inventory_hostname }}` (see that playbook's own comment), so an
+# agent registered by this repo's own apply playbook always has a Name
+# identical to the Pilot inventory hostname this playbook is called with.
+#
+# Deliberately narrow and separate from wazuh-manager-apply.yml itself
+# (which owns the manager's own docker-compose lifecycle) — same
+# separation-of-concerns freeipa-client-decommission.yml documents
+# between local playbook and the SEPARATE central apply playbook it
+# reuses, except here there is no existing central apply-time query
+# mechanism to extend (wazuh-manager-apply.yml has no host-scoped
+# per-agent action at all), so this is a new, dedicated, minimal
+# playbook rather than new tags bolted onto the manager's own apply file.
+#
+# Invoked ONLY by internal/decommission/providers.WazuhAgentProvider —
+# never directly by an operator.
+#
+# Query modes (read-only, -e pilot_decommission_query=agent_list):
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/wazuh-manager-agent-deregister.yml \
+#       -e pilot_decommission_query=agent_list \
+#       -e pilot_decommission_target_hostname=<retiring-host>
+#
+# Deregister (mutating, -e pilot_decommission_action=deregister):
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/wazuh-manager-agent-deregister.yml \
+#       -e pilot_decommission_action=deregister \
+#       -e pilot_decommission_target_hostname=<retiring-host>
+#
+# Stage gating only applies to the mutating (deregister) action — the
+# read-only query never mutates anything, so it is safe to run
+# regardless of stage (same posture as freeipa-identity-apply.yml's own
+# freeipa_host_absent_inspect tag).
+---
+- name: Wazuh manager — deregister a retired agent by exact stable identity
+  hosts: "{{ target_group | default('wazuh-manager') }}"
+  become: true
+  gather_facts: false
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    # Deterministic container name for the official wazuh-docker
+    # single-node bundle (wazuh-manager-apply.yml's own
+    # wazuh_compose_project: single-node) — same literal that playbook's
+    # own C11 drift-probe tasks already hard-code.
+    wazuh_manager_container: single-node-wazuh.manager-1
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm (deregister action only)"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      when: pilot_decommission_action | default('') == 'deregister'
+      tags: [agent_deregister]
+
+    - name: "Gate: prod requires recent staging attestation (deregister action only)"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when:
+        - pilot_decommission_action | default('') == 'deregister'
+        - stage == 'prod'
+      tags: [agent_deregister]
+
+  tasks:
+    # --- read-only: list agents, find the exact-name match, print it ----
+    - name: "List all registered agents (read-only)"
+      ansible.builtin.command: "docker exec {{ wazuh_manager_container }} /var/ossec/bin/manage_agents -l"
+      register: wazuh_decom_agent_list
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when:
+        - pilot_decommission_query | default('') == 'agent_list'
+        - pilot_decommission_target_hostname | default('') | length > 0
+      tags: [agent_query]
+
+    # manage_agents -l prints one line per agent, e.g.
+    #   "   ID: 001, Name: client1.example.com, IP: any"
+    # — a real newline per entry (this is a plain ansible.builtin.command
+    # result, not re-rendered through ansible.builtin.debug's own \n
+    # escaping, per the lesson in
+    # internal/decommission/providers/freeipa_client.go's fieldPattern
+    # doc comment) but printed below through debug for a uniform Go-side
+    # parsing contract regardless — so the SAME \n-tolerant extraction the
+    # Go side already uses for FreeIPA applies here too, defensively.
+    - name: "Print agent list for external tooling (read-only)"
+      ansible.builtin.debug:
+        msg: "AGENT_LIST[{{ pilot_decommission_target_hostname }}]: {{ wazuh_decom_agent_list.stdout | default('') }}"
+      when:
+        - pilot_decommission_query | default('') == 'agent_list'
+        - pilot_decommission_target_hostname | default('') | length > 0
+      tags: [agent_query]
+
+    # --- mutating: deregister by an ALREADY-KNOWN exact agent ID --------
+    # The Go caller (WazuhAgentProvider) is the one that parses the
+    # agent_list query above to find pilot_decommission_target_agent_id —
+    # this task never itself resolves a hostname to an ID, so there is no
+    # possibility of this task silently falling back to a fuzzy/substring
+    # match (spec.md §5.6, HD14): if the caller didn't resolve a real ID,
+    # this whole block is simply never reached (empty when-guard below).
+    - name: "Deregister the retired agent by exact recorded ID"
+      ansible.builtin.shell: |
+        set -o pipefail
+        printf 'y\n' | docker exec -i {{ wazuh_manager_container }} /var/ossec/bin/manage_agents -r {{ pilot_decommission_target_agent_id }}
+      register: wazuh_decom_agent_remove
+      when:
+        - not ansible_check_mode
+        - pilot_decommission_action | default('') == 'deregister'
+        - pilot_decommission_target_agent_id | default('') | length > 0
+      changed_when: "'Agent' in (wazuh_decom_agent_remove.stdout | default('')) and 'removed' in (wazuh_decom_agent_remove.stdout | default(''))"
+      failed_when:
+        - wazuh_decom_agent_remove.rc | default(0) != 0
+        - "'does not exist' not in (wazuh_decom_agent_remove.stdout | default(''))"
+      tags: [agent_deregister]
+
+    - name: "Gate: pilot_decommission_target_agent_id is required for the deregister action"
+      ansible.builtin.assert:
+        that:
+          - pilot_decommission_target_agent_id | default('') | length > 0
+        fail_msg: >-
+          pilot_decommission_action=deregister requires
+          pilot_decommission_target_agent_id — this playbook never
+          resolves a hostname to an agent ID itself (spec.md §5.6, no
+          fuzzy/substring matching); the caller must resolve it first
+          via the agent_list query.
+      when:
+        - not ansible_check_mode
+        - pilot_decommission_action | default('') == 'deregister'
+      tags: [agent_deregister]
