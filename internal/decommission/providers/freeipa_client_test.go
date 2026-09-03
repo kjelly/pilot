@@ -48,26 +48,42 @@ func queryKind(args []string) string {
 	return ""
 }
 
+// These fixtures mirror the REAL combined HOST_INSPECT text
+// freeipa-identity-apply.yml's "Print live host inspection" task now
+// prints (Phase 3b live-target testing bug fix): plain (non-raw) `ipa
+// host-show` output — which always carries its OWN "Principal name:
+// host/<fqdn>@REALM" line — concatenated with a separate `ipa
+// service-find --man-by-hosts=<fqdn>` result. There is no
+// "managedby_service:"/"memberof_hostgroup:"/"memberof_netgroup:"
+// attribute in real output at all; those never matched anything before
+// this fix (see freeipa_client.go's package/pattern doc comments).
 const hostShowClean = `
   Host name: web1.ipa.pilot.internal
   Principal name: host/web1.ipa.pilot.internal@IPA.PILOT.INTERNAL
-  managedby_service: host/web1.ipa.pilot.internal@IPA.PILOT.INTERNAL
+----------------------
+0 services matched
+----------------------
 `
 
 const hostShowUnknownService = `
   Host name: web1.ipa.pilot.internal
   Principal name: host/web1.ipa.pilot.internal@IPA.PILOT.INTERNAL
-  managedby_service: host/web1.ipa.pilot.internal@IPA.PILOT.INTERNAL
-  managedby_service: HTTP/web1.ipa.pilot.internal@IPA.PILOT.INTERNAL
+-----------------
+1 service matched
+-----------------
+  Principal name: HTTP/web1.ipa.pilot.internal@IPA.PILOT.INTERNAL
 `
 
 const hostShowNotFound = `ipa: ERROR: web1.ipa.pilot.internal: host not found`
 
 const hostShowWithMembership = `
   Host name: web1.ipa.pilot.internal
-  managedby_service: host/web1.ipa.pilot.internal@IPA.PILOT.INTERNAL
-  memberof_hostgroup: web-servers
-  memberof_netgroup: ng-web
+  Principal name: host/web1.ipa.pilot.internal@IPA.PILOT.INTERNAL
+  Member of host-groups: web-servers
+  Member of netgroups: ng-web
+----------------------
+0 services matched
+----------------------
 `
 
 func testProvider(t *testing.T, fn func(args []string) (*ansible.Result, error)) (*FreeIPAClientProvider, *fakeAnsibleExecutor) {

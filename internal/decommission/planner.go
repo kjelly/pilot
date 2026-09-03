@@ -243,7 +243,7 @@ func planComponent(ctx context.Context, role string, catalog contract.Catalog, d
 		cp.ProviderRegistered = true
 		steps, err := provider.Plan(ctx, providers.PlanInput{
 			HostName:           host.Name,
-			FQDN:               firstNonEmpty(host.AnsibleHost, host.Name),
+			FQDN:               providerFQDN(host),
 			OfflineDisposition: string(offline),
 			RosterPath:         rosterPathFor(workspaceDir, host),
 		})
@@ -491,4 +491,22 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// providerFQDN resolves the identity a registered live provider should use
+// as "this host's FQDN" (providers.PlanInput.FQDN) — Bug found via Phase 3b
+// live-target testing: this used to be firstNonEmpty(host.AnsibleHost,
+// host.Name), which silently prefers host.AnsibleHost even when it is
+// nothing more than the SSH connection address (very commonly a bare IP —
+// every vm-target-provisioned host, most cloud/DHCP-assigned hosts, ...),
+// producing a value that is not the host's real FreeIPA/DNS identity at
+// all. host.Name is the workspace author's own chosen identity for this
+// host and, by this repo's own roster convention (every canonical roster
+// example names hosts[] entries by FQDN), is what a FreeIPA-integrated
+// workspace is expected to set to the real FQDN when it matters — prefer
+// it over the connection address, falling back to AnsibleHost only when
+// Name is somehow empty (should not happen for a matched host, but keeps
+// this total rather than ever returning "").
+func providerFQDN(host inventory.Host) string {
+	return firstNonEmpty(host.Name, host.AnsibleHost)
 }

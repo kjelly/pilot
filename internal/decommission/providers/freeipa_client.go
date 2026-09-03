@@ -440,20 +440,59 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 
 // ---- shared live-query plumbing -----------------------------------------
 
+// fieldPattern builds a regex that extracts the value of "<label>:" from
+// the console text ansible.Result.Stdout carries. Two compounding bugs
+// found via Phase 3b live-target testing shape this:
+//
+//  1. `ipa host-show --all --raw` never actually exposes
+//     "managedby_service:"/"memberof_hostgroup:"/"memberof_netgroup:"
+//     attributes at all (those names never existed as real FreeIPA raw
+//     output — the real raw attribute is a single generic `memberof:` DN,
+//     and services are not listed by host-show at all, raw or not). Fixed
+//     on the ansible side by switching to plain (non-raw) `ipa host-show`
+//     for group membership ("Member of host-groups:"/"Member of
+//     netgroups:") and a separate `ipa service-find --man-by-hosts=<fqdn>`
+//     query for services ("Principal name:" lines).
+//  2. Independently, `ansible.builtin.debug`'s default callback renders a
+//     string `msg:` value with literal two-character `\n` ESCAPE TEXT
+//     (backslash + 'n'), not real newline bytes, when printing it to the
+//     console — confirmed by capturing raw ansible-playbook stdout to a
+//     file and inspecting it byte-for-byte. Every field-extraction regex
+//     here used to be anchored with `^`/`(?m)$`, which can only match at a
+//     REAL line boundary — against this console text they never matched
+//     ANYTHING, so every field this package reads from a debug-printed
+//     HOST_INSPECT blob (service principals, hostgroup/netgroup
+//     membership, DNS A records, HBAC/sudo rule names) silently found
+//     zero matches regardless of live state, i.e. Verify() and
+//     discoverUnknownServicePrincipals always reported "nothing found"
+//     even when the real answer was "still there" — a false PASS for
+//     HD10/HD11/HD12/INV-6/INV-10's zero-residue checks that unit-test
+//     fixtures (built from what Phase 3a assumed real output looked like,
+//     not from bytes an actual ansible-playbook run produced) could never
+//     have caught. fieldPattern stops a match at whichever comes first: a
+//     literal `\n` escape, a real newline, or end of string — correct
+//     whether the text has real line breaks (e.g. a value read directly
+//     from a registered command result, not a re-rendered debug message)
+//     or not.
+func fieldPattern(label string) *regexp.Regexp {
+	return regexp.MustCompile(`(?i)` + regexp.QuoteMeta(label) + `:\s*(.*?)(?:\\n|\n|$)`)
+}
+
 var (
-	managedByServicePattern  = regexp.MustCompile(`(?im)^[ \t]*managedby_service:\s*(.+)$`)
-	memberOfHostgroupPattern = regexp.MustCompile(`(?im)^[ \t]*memberof_hostgroup:\s*(.+)$`)
-	memberOfNetgroupPattern  = regexp.MustCompile(`(?im)^[ \t]*memberof_netgroup:\s*(.+)$`)
-	aRecordPattern           = regexp.MustCompile(`(?im)^[ \t]*arecord:\s*(.+)$`)
-	ruleNamePattern          = regexp.MustCompile(`(?im)^[ \t]*Rule name:\s*(.+)$`)
-	notFoundPattern          = regexp.MustCompile(`(?i)not found`)
+	servicePrincipalNamePattern = fieldPattern("Principal name")
+	memberOfHostgroupPattern    = fieldPattern("Member of host-groups")
+	memberOfNetgroupPattern     = fieldPattern("Member of netgroups")
+	aRecordPattern              = fieldPattern("arecord")
+	ruleNamePattern             = fieldPattern("Rule name")
+	notFoundPattern             = regexp.MustCompile(`(?i)not found`)
 )
 
 // discoverUnknownServicePrincipals runs the same read-only host_object
-// query Verify uses and classifies every managedby_service entry other
-// than this host's own host/<fqdn> identity as unknown (spec.md §16.6) —
-// Phase 3a has no other component's ownership ledger available to it, so
-// there is no "known-owned, clean it up" branch yet (Phase 4/5).
+// query Verify uses and classifies every service principal managed by
+// this host OTHER than its own host/<fqdn> identity as unknown (spec.md
+// §16.6) — Phase 3a has no other component's ownership ledger available
+// to it, so there is no "known-owned, clean it up" branch yet (Phase
+// 4/5).
 func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Context, fqdn string) ([]string, error) {
 	res, err := p.queryHostObject(ctx, fqdn)
 	if err != nil {
@@ -468,15 +507,21 @@ func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Con
 func unknownServicePrincipals(stdout, fqdn string) []string {
 	hostPrincipal := "host/" + fqdn
 	var unknown []string
-	for _, m := range managedByServicePattern.FindAllStringSubmatch(stdout, -1) {
+	// The combined HOST_INSPECT text this scans carries BOTH host-show's
+	// own "Principal name: host/<fqdn>@REALM" line AND service-find's
+	// "Principal name: <service>@REALM" line(s) — the host's own
+	// identity must be excluded here (service-find itself never returns
+	// it, but this parses the concatenated blob, not service-find's
+	// output alone).
+	for _, m := range servicePrincipalNamePattern.FindAllStringSubmatch(stdout, -1) {
 		svc := strings.TrimSpace(m[1])
 		if svc == "" {
 			continue
 		}
-		// Real `ipa host-show --raw` values carry the Kerberos realm
-		// suffix (e.g. "host/web1.example.com@EXAMPLE.COM") — compare
-		// only the principal identity, not the realm, against this
-		// host's own expected host/<fqdn> identity.
+		// Real `ipa` output carries the Kerberos realm suffix (e.g.
+		// "host/web1.example.com@EXAMPLE.COM") — compare only the
+		// principal identity, not the realm, against this host's own
+		// expected host/<fqdn> identity.
 		canon := svc
 		if idx := strings.Index(canon, "@"); idx >= 0 {
 			canon = canon[:idx]

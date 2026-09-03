@@ -148,8 +148,20 @@ func TestRegression_FreeIPAIdentityHostAbsent_UnknownServiceReferencesBlock(t *t
 		t.Fatal("could not find the end of the service-principal gate task")
 	}
 	body := raw[idx : idx+1+nextTask]
-	if !strings.Contains(body, "managedby_service") {
-		t.Fatal("expected the gate to inspect managedby_service entries")
+	// Phase 3b (host-decommission Phase 3b, live-target testing) found
+	// this gate's original "managedby_service" attribute never existed in
+	// real `ipa host-show` output at all (raw or not) — it never matched
+	// anything on a real FreeIPA server, permanently disabling this gate.
+	// Fixed to inspect a SEPARATE `ipa service-find --man-by-hosts=<fqdn>`
+	// query's "Principal name:" lines instead (registered earlier in this
+	// same file as freeipa_absent_host_services; see
+	// internal/decommission/providers/freeipa_client.go for the matching
+	// Go-side fix).
+	if !strings.Contains(body, "Principal name") {
+		t.Fatal("expected the gate to inspect service-find's Principal name entries")
+	}
+	if !strings.Contains(raw, `name: "Look up services managed by each absent host`) {
+		t.Fatal("expected a dedicated ipa service-find task discovering services managed by each absent host (host-show never lists them)")
 	}
 	if !strings.Contains(body, "freeipa_absent_host_unknown_services | length == 0") {
 		t.Fatal("expected the gate to assert zero unknown service principals before proceeding")

@@ -98,8 +98,35 @@ func Apply(ctx context.Context, in ApplyInput) (*FinalizeResult, error) {
 		return nil, err
 	}
 
+	// Bug found via Phase 3b live-target testing: central/local cleanup
+	// steps just intentionally mutated live state (e.g. the roster's
+	// hostgroup/netgroup/HBAC/sudo membership and its host entry's own
+	// state: absent) as their whole purpose — but Finalize's own internal
+	// freshness re-check (defense in depth, spec.md §23 step 2) compares
+	// against in.Plan.PlanHash, the PRE-cleanup snapshot. Passing the
+	// original in.Plan straight through made that re-check compare
+	// "roster now shows zero references" against a hash computed when the
+	// roster still showed 3 references, always reporting plan_stale even
+	// though nothing UNEXPECTED changed — the decommission's own intended
+	// progress was indistinguishable from external drift. Re-derive once
+	// more here (server-side, same as every other freshness step, INV-3)
+	// so Finalize's internal re-check compares against what the situation
+	// legitimately is right now, post-cleanup — and persist it, so a crash
+	// between here and Finalize still resumes from the post-cleanup state
+	// rather than trying to redo already-completed destructive work.
+	postCleanup, err := PlanHost(ctx, in.PlanInputForFreshness)
+	if err != nil {
+		return nil, fmt.Errorf("decommission: re-derive plan after cleanup steps: %w", err)
+	}
+	postCleanup.ID = in.Plan.ID
+	if in.Store != nil {
+		if err := in.Store.SavePlan(postCleanup); err != nil {
+			return nil, fmt.Errorf("decommission: persist post-cleanup plan: %w", err)
+		}
+	}
+
 	return Finalize(ctx, FinalizeInput{
-		Plan:                  in.Plan,
+		Plan:                  postCleanup,
 		PlanInputForFreshness: in.PlanInputForFreshness,
 		Verifications:         verifications,
 		DecommissionID:        in.DecommissionID,
@@ -197,7 +224,11 @@ func collectVerifications(ctx context.Context, plan *Plan, provs map[string]prov
 		}
 		verifs, err := provider.Verify(ctx, providers.VerifyInput{
 			HostName: plan.Host.Name,
-			FQDN:     firstNonEmpty(plan.Host.AnsibleHost, plan.Host.Name),
+			// Same FQDN precedence bug/fix as planner.go's providerFQDN:
+			// host.Name (this repo's roster convention: hosts[] entries are
+			// named by FQDN) over AnsibleHost (often just a bare
+			// connection IP, never the FreeIPA/DNS identity).
+			FQDN: firstNonEmpty(plan.Host.Name, plan.Host.AnsibleHost),
 		})
 		if err != nil {
 			return nil, newError(ErrCleanupFailedTerminal, "component %s: verify: %v", c.ComponentID, err)

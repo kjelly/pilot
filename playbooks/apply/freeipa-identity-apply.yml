@@ -2851,17 +2851,27 @@
         freeipa_absent_hosts: "{{ freeipa_roster.hosts | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list }}"
       tags: [identity, hosts, freeipa_host_absent_inspect]
 
-    # Single combined read-only lookup: host existence, hostgroup/netgroup
-    # membership (memberof_hostgroup/memberof_netgroup), and every service
-    # principal managed by this host (managedby_service) all come from one
-    # `ipa host-show --all --raw` call. `--tags freeipa_host_absent_inspect`
-    # restricts a caller (internal/decommission/providers'
-    # FreeIPAClientProvider) to just this lookup plus "Kinit admin" above —
-    # no mutating task in this file carries that tag, so this can be run
-    # standalone as a live, read-only discovery/verification query.
+    # Bug found via Phase 3b live-target testing: `ipa host-show --all
+    # --raw` does NOT expose per-service "managedby_service:" or per-group
+    # "memberof_hostgroup:"/"memberof_netgroup:" attributes at all — real
+    # raw output only has a generic `memberof:` (mixed DNs for hostgroups/
+    # netgroups/HBAC/sudo alike, some keyed by ipaUniqueID, not a bare
+    # name) and a singular `managedby:` (the host's own self-management
+    # back-reference, unrelated to services). This made the "unknown
+    # service principal"/"residual hostgroup or netgroup membership"
+    # gates below permanently unable to match anything, in BOTH this
+    # playbook's own mutating gates and
+    # internal/decommission/providers.FreeIPAClientProvider.Verify — a
+    # silent HD11/HD12/INV-6 safety hole only a real FreeIPA server
+    # could expose. Fixed by switching to plain (non-raw) `ipa host-show`
+    # for group membership (real field names: "Member of host-groups:",
+    # "Member of netgroups:") and adding a SEPARATE `ipa service-find
+    # --man-by-hosts=<fqdn>` query for services (host-show never lists
+    # them, raw or not — that relationship is only queryable from the
+    # service side).
     - name: "Look up the current live host object for each absent roster host (spec.md §16.6/§16.7)"
       ansible.builtin.command:
-        argv: [ipa, host-show, "{{ item.name }}", --all, --raw]
+        argv: [ipa, host-show, "{{ item.name }}"]
       loop: "{{ freeipa_absent_hosts }}"
       loop_control:
         label: "{{ item.name }}"
@@ -2870,13 +2880,84 @@
       failed_when: false
       tags: [identity, hosts, freeipa_host_absent_inspect]
 
+    - name: "Look up services managed by each absent host (spec.md §16.6) — separate from host-show, which never lists them"
+      ansible.builtin.command:
+        argv: [ipa, service-find, "--man-by-hosts={{ item.name }}"]
+      loop: "{{ freeipa_absent_hosts }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: freeipa_absent_host_services
+      changed_when: false
+      failed_when: false
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
     - name: "Print live host inspection for external tooling (read-only)"
       ansible.builtin.debug:
-        msg: "HOST_INSPECT[{{ item.item.name }}]: {{ item.stdout | default('') }}"
-      loop: "{{ freeipa_absent_host_show.results }}"
+        # Bug found via Phase 3b live-target testing: `ipa host-show` on an
+        # already-absent host prints "... host not found" to STDERR, not
+        # stdout — this task used to print item.stdout only, so a
+        # genuinely-absent host produced an EMPTY message here, and
+        # internal/decommission/providers.FreeIPAClientProvider.Verify's
+        # notFoundPattern (which only scanned this printed text) never
+        # matched, reporting a false active_residue for a host that was
+        # actually already gone. Concatenate stderr too, plus the
+        # matching service-find result (same loop index) so a single
+        # HOST_INSPECT blob carries host existence, hostgroup/netgroup
+        # membership, AND service principals together.
+        msg: >-
+          HOST_INSPECT[{{ item.0.item.name }}]:
+          {{ (item.0.stdout | default('')) ~ ' ' ~ (item.0.stderr | default('')) }}
+          {{ (item.1.stdout | default('')) ~ ' ' ~ (item.1.stderr | default('')) }}
+      loop: "{{ freeipa_absent_host_show.results | zip(freeipa_absent_host_services.results) | list }}"
       loop_control:
-        label: "{{ item.item.name | default('n/a') }}"
-      when: not (item.skipped | default(false))
+        label: "{{ item.0.item.name | default('n/a') }}"
+      when: not (item.0.skipped | default(false))
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
+    # Bug found via Phase 3b live-target testing: the "Look up the
+    # current live host object..."/service lookup tasks above are keyed
+    # off freeipa_absent_hosts (derived from the ROSTER's current
+    # state: absent list) — which is EMPTY at normal plan time, since
+    # the roster still shows state: present until the central-cleanup
+    # step actually converges it. This silently made
+    # discoverUnknownServicePrincipals's live query a no-op on a fresh
+    # plan (HD12's "unknown service principal blocks deletion" gate
+    # never actually fired on a FIRST attempt — only accidentally on a
+    # resume after the roster had already flipped). Add a query-kind-
+    # driven host_object pair here too, keyed off
+    # pilot_decommission_target_fqdn directly like the three below, so
+    # Plan()/Verify() get a real answer regardless of roster state.
+    - name: "Look up the current live host object for the query target host (read-only, decommission verify)"
+      ansible.builtin.command:
+        argv: [ipa, host-show, "{{ pilot_decommission_target_fqdn | default('') }}"]
+      register: freeipa_decom_query_host
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_decommission_query | default('') == 'host_object'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
+    - name: "Look up services managed by the query target host (read-only, decommission verify)"
+      ansible.builtin.command:
+        argv: [ipa, service-find, "--man-by-hosts={{ pilot_decommission_target_fqdn | default('') }}"]
+      register: freeipa_decom_query_host_services
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_decommission_query | default('') == 'host_object'
+        - pilot_decommission_target_fqdn | default('') | length > 0
+      tags: [identity, hosts, freeipa_host_absent_inspect]
+
+    - name: "Print host_object query inspection for external tooling (read-only)"
+      ansible.builtin.debug:
+        msg: >-
+          HOST_INSPECT[{{ pilot_decommission_target_fqdn }}]:
+          {{ (freeipa_decom_query_host.stdout | default('')) ~ ' ' ~ (freeipa_decom_query_host.stderr | default('')) }}
+          {{ (freeipa_decom_query_host_services.stdout | default('')) ~ ' ' ~ (freeipa_decom_query_host_services.stderr | default('')) }}
+      when:
+        - pilot_decommission_query | default('') == 'host_object'
+        - pilot_decommission_target_fqdn | default('') | length > 0
       tags: [identity, hosts, freeipa_host_absent_inspect]
 
     # Phase 3b (docs/superpowers/specs/2026-09-02-host-decommission-spec.md
@@ -2975,13 +3056,17 @@
           HTTP/<fqdn>, NFS nfs/<fqdn>) before retrying host decommission
           (spec.md §16.6).
       vars:
+        # `ipa service-find --man-by-hosts=<fqdn>` (a SEPARATE query from
+        # host-show, see the read-only lookup section above) only ever
+        # returns actual services — never the host object's own host/
+        # principal — so every "Principal name:" match here is already a
+        # candidate for this gate; no self-exclusion needed.
         freeipa_absent_host_unknown_services: >-
           {{ (item.stdout | default(''))
-             | regex_findall('(?im)^[ \t]*managedby_service: (.+)$')
+             | regex_findall('(?im)^[ \t]*Principal name:\s*(.+)$')
              | map('regex_replace', '@.*$', '')
-             | reject('equalto', 'host/' ~ item.item.name)
              | list }}
-      loop: "{{ freeipa_absent_host_show.results }}"
+      loop: "{{ freeipa_absent_host_services.results }}"
       loop_control:
         label: "{{ item.item.name | default('n/a') }}"
       when:
@@ -3009,8 +3094,17 @@
           before this playbook ran; refusing to delete the host object
           while a reference remains attached (spec.md §16.3 step 4).
       vars:
-        freeipa_absent_host_stale_hostgroups: "{{ (item.stdout | default('')) | regex_findall('(?im)^[ \t]*memberof_hostgroup: (.+)$') }}"
-        freeipa_absent_host_stale_netgroups: "{{ (item.stdout | default('')) | regex_findall('(?im)^[ \t]*memberof_netgroup: (.+)$') }}"
+        # Bug found via Phase 3b live-target testing: plain (non-raw)
+        # `ipa host-show` prints "Member of host-groups: a, b" / "Member
+        # of netgroups: x, y" (comma-joined on one line), not the
+        # per-line "memberof_hostgroup:"/"memberof_netgroup:" raw
+        # attribute names this used to look for (which don't exist at
+        # all — see the read-only lookup section's comment above).
+        # regex_findall's list length alone (0 vs >=1 matching lines) is
+        # enough for this gate's presence check; it does not need to
+        # enumerate each individual group name.
+        freeipa_absent_host_stale_hostgroups: "{{ (item.stdout | default('')) | regex_findall('(?im)^[ \t]*Member of host-groups:\\s*(.+)$') }}"
+        freeipa_absent_host_stale_netgroups: "{{ (item.stdout | default('')) | regex_findall('(?im)^[ \t]*Member of netgroups:\\s*(.+)$') }}"
       loop: "{{ freeipa_absent_host_show.results }}"
       loop_control:
         label: "{{ item.item.name | default('n/a') }}"
