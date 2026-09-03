@@ -21,9 +21,16 @@ func TestRegression_HostDecommissionSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := make([]string, 0, 28)
+	wantIDs := make([]string, 0, 32)
 	for i := 1; i <= 28; i++ {
 		wantIDs = append(wantIDs, "HD"+strconv.Itoa(i))
+	}
+	// Phase 3b appended real disposable-target counterparts for HD9-HD12
+	// (scope: per-host, real ipa/ssh probes) — see
+	// docs/evidence/host-decommission/2026-09-03-3b4ef4d.md. These are
+	// additive, not a renumbering of HD1-HD28 above.
+	for i := 9; i <= 12; i++ {
+		wantIDs = append(wantIDs, "HD"+strconv.Itoa(i)+"-LIVE")
 	}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
@@ -54,12 +61,19 @@ func TestRegression_HostDecommissionSpec(t *testing.T) {
 		}
 	}
 
-	// Every probe must invoke `go test -run <name>` against a real,
-	// distinct Go test name in internal/decommission or cmd/pilot/cmd —
-	// this is a Go-feature spec (like snmp-monitoring-integration.md),
-	// not an infra-role spec with shell/ansible probes.
+	// Every scope:aggregate probe must invoke `go test -run <name>`
+	// against a real, distinct Go test name in internal/decommission or
+	// cmd/pilot/cmd — this is a Go-feature spec (like
+	// snmp-monitoring-integration.md), not an infra-role spec with
+	// shell/ansible probes. HD9-LIVE..HD12-LIVE are the deliberate
+	// exception: scope:per-host real ipa/ssh probes against a live
+	// FreeIPA server (spec.md §35.1), mirroring
+	// docs/verification/internal-endpoint.md's per-host rows.
 	seenTestNames := map[string]string{}
 	for _, r := range s.Rows {
+		if r.Scope == "per-host" {
+			continue
+		}
 		if !strings.Contains(r.Command, "go test") || !strings.Contains(r.Command, "-run") {
 			t.Errorf("row %s probe must run `go test ... -run <TestName>`, got %q", r.ID, r.Command)
 			continue

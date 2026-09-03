@@ -356,7 +356,7 @@ that decommission *reuses* those paths safely.
   check: an unknown/unproven service principal on the target host actually hard-blocks `pilot host decommission plan` against a real FreeIPA server, without cascade-deleting the service or the host object
   probe: |
     ssh -i <server-key> root@<server-ip> "kinit admin <<< '<admin-password>' >/dev/null 2>&1; ipa service-add HTTP/<client-fqdn> --force"
-    go run ./cmd/pilot host decommission plan --dir <workspace> --host <client-fqdn>
+    go run ./cmd/pilot host decommission plan --dir "<workspace>" --host "<client-fqdn>"
   expect: {stdout: {contains: "ownership_unknown"}}
   scope: per-host
   action:
