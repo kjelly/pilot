@@ -73,6 +73,80 @@ func TestUnreachable_TemporaryBlocksLocalCleanup(t *testing.T) {
 	})
 }
 
+// TestUnreachable_RequiresReachableHostFalseSkipsBlock proves spec.md
+// §14.1 rule 4 (Phase 5): a component whose matched contract's typed
+// Lifecycle.Decommission explicitly declares requiresReachableHost: false
+// is NOT blocked by temporarily_unreachable and does NOT get
+// local_cleanup_unavailable_attested for permanently_lost — its cleanup
+// is entirely central, so host reachability is irrelevant to it, unlike
+// the fail-closed default every other component (nil Decommission) still
+// gets.
+func TestUnreachable_RequiresReachableHostFalseSkipsBlock(t *testing.T) {
+	centralOnly := &contract.DecommissionPolicy{Class: "stateless", RequiresReachableHost: false}
+	dir := t.TempDir()
+	writeWorkspaceFile(t, dir, "hosts.yml", simpleHostsYAML("h1", "10.0.0.1", []string{"central-only-role", "freeipa-client"}, ""))
+	catalog := newCatalog(t,
+		contract.Contract{ID: "central-only", Role: "central-only-role", Lifecycle: contract.Lifecycle{Decommission: centralOnly}},
+		contract.Contract{ID: "freeipa-client", Role: "freeipa-client"},
+	)
+
+	t.Run("temporarily_unreachable does not block the central-only component", func(t *testing.T) {
+		plan, err := PlanHost(context.Background(), PlanInput{
+			WorkspaceDir: dir, HostName: "h1", Catalog: catalog, Now: fixedNow,
+			Reachability:       ReachabilityUnreachable,
+			OfflineDisposition: OfflineDispositionTemporarilyUnreachable,
+		})
+		if err != nil {
+			t.Fatalf("PlanHost() error = %v", err)
+		}
+		var centralOnlyCP, freeipaCP *ComponentPlan
+		for i := range plan.Components {
+			switch plan.Components[i].ComponentID {
+			case "central-only":
+				centralOnlyCP = &plan.Components[i]
+			case "freeipa-client":
+				freeipaCP = &plan.Components[i]
+			}
+		}
+		if centralOnlyCP == nil || freeipaCP == nil {
+			t.Fatalf("expected both components in plan, got %+v", plan.Components)
+		}
+		for _, b := range centralOnlyCP.Blockers {
+			if b.Code == ErrHostUnreachable {
+				t.Fatalf("central-only component (requiresReachableHost:false) blockers = %+v, want no host_unreachable blocker", centralOnlyCP.Blockers)
+			}
+		}
+		found := false
+		for _, b := range freeipaCP.Blockers {
+			if b.Code == ErrHostUnreachable {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("freeipa-client component (fail-closed default) blockers = %+v, want a host_unreachable blocker", freeipaCP.Blockers)
+		}
+	})
+
+	t.Run("permanently_lost does not mark the central-only component unavailable-attested", func(t *testing.T) {
+		plan, err := PlanHost(context.Background(), PlanInput{
+			WorkspaceDir: dir, HostName: "h1", Catalog: catalog, Now: fixedNow,
+			Reachability:       ReachabilityUnreachable,
+			OfflineDisposition: OfflineDispositionPermanentlyLost,
+		})
+		if err != nil {
+			t.Fatalf("PlanHost() error = %v", err)
+		}
+		for _, c := range plan.Components {
+			if c.ComponentID == "central-only" && c.LocalCleanupStatus == LocalCleanupUnavailableAttested {
+				t.Fatalf("central-only component (requiresReachableHost:false) LocalCleanupStatus = %q, want unset (its cleanup never needed local host access)", c.LocalCleanupStatus)
+			}
+			if c.ComponentID == "freeipa-client" && c.LocalCleanupStatus != LocalCleanupUnavailableAttested {
+				t.Fatalf("freeipa-client component (fail-closed default) LocalCleanupStatus = %q, want %q", c.LocalCleanupStatus, LocalCleanupUnavailableAttested)
+			}
+		}
+	})
+}
+
 // TestUnreachable_PermanentlyLostRecordsUnattested proves HD17/spec.md
 // §21.2: a permanently-lost host records local cleanup as
 // local_cleanup_unavailable_attested — never a fabricated "verified"

@@ -137,7 +137,13 @@ type ComponentPlan struct {
 	ProviderRegistered bool
 	RetentionRequired  bool
 	RetentionSatisfied bool
-	LocalCleanupStatus LocalCleanupStatus
+	// RequiresReachableHost governs applyUnreachablePolicy (spec.md §14.1
+	// rule 4, §21/HD16/HD17): true (the default, set even when no
+	// contract matched) unless the matched contract's typed
+	// Lifecycle.Decommission explicitly declares
+	// requiresReachableHost: false.
+	RequiresReachableHost bool
+	LocalCleanupStatus    LocalCleanupStatus
 	// Steps is the registered provider's planned ordered actions for this
 	// component (providers.Provider.Plan's output) — empty when no
 	// provider is registered, or when the provider itself blocked (see

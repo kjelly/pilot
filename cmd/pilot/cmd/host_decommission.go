@@ -137,7 +137,7 @@ func runHostDecommissionPlanCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	provs, err := buildHostDecommissionProviders(dir, hostDecommissionPlanHost, cmd.ErrOrStderr())
+	provs, err := buildHostDecommissionProviders(dir, hostDecommissionPlanHost, catalog, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -380,7 +380,7 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 	// against it, and a plan that was executable because a provider WAS
 	// registered would otherwise stale-reject as soon as that provider
 	// vanished from freshness's view (spec.md §28/INV-3).
-	provs, err := buildHostDecommissionProviders(dir, plan.Host.Name, os.Stderr)
+	provs, err := buildHostDecommissionProviders(dir, plan.Host.Name, catalog, os.Stderr)
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 // opportunistically enrich the registry. PlanHost/CheckFreshness
 // themselves already produce the authoritative "workspace malformed"
 // error from the SAME hosts.yml read.
-func buildHostDecommissionProviders(dir, hostName string, out io.Writer) (map[string]providers.Provider, error) {
+func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catalog, out io.Writer) (map[string]providers.Provider, error) {
 	empty := map[string]providers.Provider{}
 
 	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
@@ -505,11 +505,37 @@ func buildHostDecommissionProviders(dir, hostName string, out io.Writer) (map[st
 		},
 	})
 
-	return map[string]providers.Provider{
+	result := map[string]providers.Provider{
 		providers.FreeIPAClientProviderID:    freeipaClient,
 		providers.WazuhAgentProviderID:       wazuhAgent,
 		providers.InternalEndpointProviderID: internalEndpoint,
-	}, nil
+	}
+
+	// Generic contract-driven components (spec.md §37 Phase 5, §15): every
+	// OTHER component with a declared playbooks.decommission gets one
+	// GenericComponentProvider instance, keyed by its own contract ID —
+	// never for a component already covered by a bespoke provider above
+	// (registering both would be harmless in practice, since planComponent
+	// only ever consults ONE map entry per component ID, but skipping them
+	// keeps this list the single source of truth for "which components
+	// have a hand-written provider", matching
+	// internal/contract/lint.go's componentsWithBespokeDecommissionProvider).
+	for _, comp := range catalog.Components() {
+		if _, bespoke := result[comp.ID]; bespoke {
+			continue
+		}
+		if comp.Playbooks.Decommission == nil {
+			continue
+		}
+		result[comp.ID] = providers.NewGenericComponentProvider(providers.GenericComponentProviderConfig{
+			Executor:             runner,
+			ComponentID:          comp.ID,
+			Inventory:            invPath,
+			DecommissionPlaybook: *comp.Playbooks.Decommission,
+		})
+	}
+
+	return result, nil
 }
 
 func reportHostDecommissionResult(out io.Writer, result *decommission.FinalizeResult, asJSON bool) error {

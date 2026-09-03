@@ -266,7 +266,7 @@ func TestPlanner_UnsupportedExternalStateBlocks(t *testing.T) {
 // with retention=required blocks planning until an explicit retention
 // disposition is supplied.
 func TestPlanner_StatefulRetentionRequired(t *testing.T) {
-	statefulPolicy := map[string]any{"class": "stateful", "retention": "required"}
+	statefulPolicy := &contract.DecommissionPolicy{Class: "stateful", Retention: "required"}
 	catalog := newCatalog(t, contract.Contract{
 		ID: "seaweedfs-s3", Role: "seaweedfs-s3",
 		Lifecycle: contract.Lifecycle{Decommission: statefulPolicy},

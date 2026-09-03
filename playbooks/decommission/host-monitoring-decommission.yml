@@ -1,0 +1,177 @@
+# host-monitoring (node_exporter) decommission — local cleanup only.
+#
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §37 Phase 5:
+# the first "initial stateless component decommission playbook" (§15) —
+# proves internal/decommission/providers.GenericComponentProvider's
+# generic contract-driven executor against a real, simple, purely local
+# component (no external/central registration, unlike FreeIPA/Wazuh/
+# internal-endpoint's bespoke providers).
+#
+# Deliberately leaves node_exporter_textfile_dir alone: that directory is
+# explicitly SHARED with other services on the same host (see
+# playbooks/apply/host-monitoring-apply.yml's own comment — e.g.
+# detection-engine's health metrics publish through it too) — removing it
+# would delete data this component does not own (spec.md §15's "avoid
+# hidden broad cleanup outside the component's ownership"). Also leaves
+# the node_exporter system user/group in place — removing a UID/GID is
+# not required for zero active residue and risks colliding with anything
+# else that might still reference it.
+#
+# Invoked ONLY by internal/decommission/providers.GenericComponentProvider
+# — never directly by an operator.
+#
+# `--tags inspect` restricts execution to the two read-only tasks in
+# pre_tasks (stat + a debug pair) — no mutating task carries that tag —
+# and prints the standardized marker every generic decommission playbook
+# must print (spec.md §15, GenericComponentProvider's own doc comment):
+# PILOT_COMPONENT_DECOMMISSIONED=true|false.
+#
+# Usage:
+#
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/host-monitoring-decommission.yml \
+#       --limit <retiring-host>
+#
+#   # read-only enrollment check only (never mutates):
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/host-monitoring-decommission.yml \
+#       --limit <retiring-host> --tags inspect
+#
+# Stage gating (same convention as every other playbooks/decommission/*.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: Host-monitoring decommission — local node_exporter removal
+  hosts: "{{ target_group | default('host-monitoring') }}"
+  become: true
+  gather_facts: false
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    node_exporter_binary: /usr/local/bin/node_exporter
+    node_exporter_unit: /etc/systemd/system/node_exporter.service
+    node_exporter_webconfig_path: /etc/node_exporter/web-config.yml
+
+  pre_tasks:
+    - name: "Host-monitoring decommission — gather fresh facts"
+      ansible.builtin.setup:
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    # Read-only detection: the systemd unit file existing is this
+    # component's own enrollment marker (mirrors wazuh-agent-
+    # decommission.yml's client.keys stat / freeipa-client-
+    # decommission.yml's ipa config-marker stat convention).
+    - name: "Host-monitoring decommission — detect current install (read-only)"
+      ansible.builtin.stat:
+        path: "{{ node_exporter_unit }}"
+      register: host_monitoring_decom_unit_stat
+      tags: [inspect]
+
+    - name: "Host-monitoring decommission — print decommission state for external tooling"
+      ansible.builtin.debug:
+        msg: "PILOT_COMPONENT_DECOMMISSIONED={{ (not host_monitoring_decom_unit_stat.stat.exists) | ternary('true', 'false') }}"
+      tags: [inspect]
+
+  tasks:
+    - name: "Host-monitoring decommission — local removal, with diagnostics on failure"
+      block:
+        - name: "Host-monitoring decommission — stop and disable node_exporter"
+          ansible.builtin.systemd:
+            name: node_exporter
+            state: stopped
+            enabled: false
+          when: not ansible_check_mode
+          register: host_monitoring_decom_stop
+          failed_when: false
+
+        - name: "Host-monitoring decommission — remove the systemd unit file"
+          ansible.builtin.file:
+            path: "{{ node_exporter_unit }}"
+            state: absent
+          when: not ansible_check_mode
+          register: host_monitoring_decom_unit_removed
+
+        - name: "Host-monitoring decommission — reload systemd after removing the unit file"
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when:
+            - not ansible_check_mode
+            - host_monitoring_decom_unit_removed.changed | default(false)
+
+        - name: "Host-monitoring decommission — remove the node_exporter binary"
+          ansible.builtin.file:
+            path: "{{ node_exporter_binary }}"
+            state: absent
+          when: not ansible_check_mode
+
+        - name: "Host-monitoring decommission — remove the web-config file and its parent directory"
+          ansible.builtin.file:
+            path: "{{ node_exporter_webconfig_path | dirname }}"
+            state: absent
+          when: not ansible_check_mode
+
+        - name: "Host-monitoring decommission — verify the unit file is gone"
+          ansible.builtin.stat:
+            path: "{{ node_exporter_unit }}"
+          register: host_monitoring_decom_unit_stat_after
+          when: not ansible_check_mode
+
+        - name: "Gate: node_exporter must no longer be installed"
+          ansible.builtin.assert:
+            that:
+              - not host_monitoring_decom_unit_stat_after.stat.exists
+            fail_msg: >-
+              {{ node_exporter_unit }} still exists after removal —
+              node_exporter still looks installed; refusing to report
+              local cleanup as complete.
+          when: not ansible_check_mode
+
+      rescue:
+        - name: "Host-monitoring decommission — rescue: dump node_exporter status"
+          ansible.builtin.command: systemctl status node_exporter --no-pager
+          register: host_monitoring_decom_rescue_status
+          changed_when: false
+          failed_when: false
+
+        - name: "Host-monitoring decommission — rescue: surface diagnostics and fail"
+          ansible.builtin.fail:
+            msg: |
+              host-monitoring local decommission FAILED. Diagnostics:
+              --- systemctl status node_exporter ---
+              {{ host_monitoring_decom_rescue_status.stdout | default('(unavailable)') }}
+              {{ host_monitoring_decom_rescue_status.stderr | default('') }}
+              This component has no central/external state — resume via
+              `pilot host decommission resume` once the underlying issue
+              is fixed.

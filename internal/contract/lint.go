@@ -26,6 +26,9 @@ func ValidateBundleReferences(root string, catalog Catalog) error {
 		if err != nil {
 			return fmt.Errorf("component %q: %w", component.ID, err)
 		}
+		if err := validateDecommissionPolicy(component); err != nil {
+			return fmt.Errorf("component %q: %w", component.ID, err)
+		}
 		for _, row := range ownedRows {
 			if owner, exists := rowOwners[row]; exists {
 				return fmt.Errorf("verification row %s is owned by both %q and %q", row, owner, component.ID)
@@ -286,6 +289,64 @@ func valueOrEmpty(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+// componentsWithBespokeDecommissionProvider is the fixed, compile-time-
+// known set of component IDs that have a hand-written Go
+// internal/decommission/providers.Provider (Phase 3/4) rather than
+// relying on the generic playbooks.decommission executor (Phase 5). Lint
+// runs statically over the contract catalog alone, with no access to a
+// live CLI provider registry — spec.md §14.1 rule 1's "or a registered
+// central decommission provider exists" clause is checked against this
+// list instead. Keep it in sync with cmd/pilot/cmd/host_decommission.go's
+// buildHostDecommissionProviders: adding a new bespoke provider there
+// without adding its component ID here would make this lint wrongly
+// demand a playbooks.decommission entry that provider doesn't need.
+var componentsWithBespokeDecommissionProvider = map[string]bool{
+	"freeipa-client":    true,
+	"wazuh-fim":         true,
+	"internal-endpoint": true,
+}
+
+// validateDecommissionPolicy implements spec.md §14.1's contract linter
+// rules for the typed Lifecycle.Decommission (rules 1-3; rule 4 is a
+// planner-time requirement — see internal/decommission's
+// applyUnreachablePolicy/ComponentPlan.RequiresReachableHost — not a
+// static lint; rule 5 is already covered by validateContractFiles's
+// requireFile call over every Playbooks field including Decommission;
+// rule 6, "null lifecycle remains valid", is true by construction — a nil
+// Decommission trivially skips every check below).
+func validateDecommissionPolicy(component Contract) error {
+	policy := component.Lifecycle.Decommission
+	if policy == nil {
+		return nil
+	}
+
+	// Rule 1: ExternalState=true requires a real removal path — either a
+	// declared decommission playbook, or one of the fixed bespoke Go
+	// providers above.
+	if policy.ExternalState &&
+		component.Playbooks.Decommission == nil &&
+		!componentsWithBespokeDecommissionProvider[component.ID] {
+		return fmt.Errorf("lifecycle.decommission.externalState=true requires playbooks.decommission to be set, or a registered bespoke decommission provider (spec.md §14.1 rule 1)")
+	}
+
+	// Rule 2: a stateful component cannot declare retention=none — if it
+	// truly manages no persistent data it should not be marked stateful at
+	// all (spec.md §14.1 rule 2).
+	if policy.Class == "stateful" && (policy.Retention == "" || policy.Retention == "none") {
+		return fmt.Errorf("lifecycle.decommission.class=stateful cannot declare retention=%q — a stateful component must declare retention: required or operator_choice (spec.md §14.1 rule 2)", policy.Retention)
+	}
+
+	// Rule 3: control_plane components cannot expose a generic removal
+	// path — a dedicated, separately-designed workflow is required
+	// (mirrors INV-13's hard FreeIPA server/replica exclusion; a future
+	// phase may introduce one, but it is never this generic executor).
+	if policy.Class == "control_plane" && component.Playbooks.Decommission != nil {
+		return fmt.Errorf("lifecycle.decommission.class=control_plane cannot also declare playbooks.decommission — control-plane components require a dedicated decommission workflow, never the generic executor (spec.md §14.1 rule 3)")
+	}
+
+	return nil
 }
 
 func requireFile(root, path string) error {

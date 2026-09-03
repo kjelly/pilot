@@ -273,9 +273,45 @@ type Evidence struct {
 
 // Lifecycle records data-handling policy that is not an executable playbook path.
 type Lifecycle struct {
-	Backup       *Backup `yaml:"backup"`
-	Upgrade      any     `yaml:"upgrade"`
-	Decommission any     `yaml:"decommission"`
+	Backup       *Backup             `yaml:"backup"`
+	Upgrade      any                 `yaml:"upgrade"`
+	Decommission *DecommissionPolicy `yaml:"decommission"`
+}
+
+// DecommissionPolicy is a component's typed host-decommission lifecycle
+// declaration (docs/superpowers/specs/2026-09-02-host-decommission-spec.md
+// §14, Phase 5). A nil Decommission (the pre-Phase-5 default — "null
+// lifecycle remains valid for legacy components", spec.md §14.1 rule 6)
+// means internal/decommission's planner falls back to its own fail-closed
+// defaults (assume external state unless a provider says otherwise, assume
+// a reachable host is required) rather than reading any field here.
+type DecommissionPolicy struct {
+	// Class is "stateless", "stateful", or "control_plane" (spec.md §14.1
+	// rules 2/3).
+	Class string `yaml:"class"`
+	// Scope is "local", "central", or "both" — which side(s) of cleanup
+	// this component's decommission playbook/provider performs.
+	Scope string `yaml:"scope"`
+	// ExternalState is true when this component creates/owns state outside
+	// the retiring host itself (a central registration, a DNS record, a
+	// service principal, ...) — spec.md §14.1 rule 1 requires either
+	// Playbooks.Decommission or a registered central provider when true.
+	ExternalState bool `yaml:"externalState"`
+	// RequiresReachableHost is honored by internal/decommission's
+	// applyUnreachablePolicy (spec.md §14.1 rule 4, §21/HD16/HD17): when
+	// Decommission is non-nil, this field's plain value (including its
+	// zero value, false) is authoritative — a component whose cleanup is
+	// entirely central (ExternalState with Scope: central) can therefore
+	// explicitly opt OUT of the "every component needs a reachable host"
+	// fail-closed default a nil Decommission still gets.
+	RequiresReachableHost bool `yaml:"requiresReachableHost"`
+	// Retention is "none", "required", or "operator_choice" (spec.md §14.1
+	// rule 2 — a stateful component cannot declare "none").
+	Retention string `yaml:"retention"`
+	// DataPaths lists the persistent-data paths a "stateful"/retention:
+	// required component's cleanup must not silently destroy without an
+	// explicit disposition (Phase 6).
+	DataPaths []string `yaml:"dataPaths,omitempty"`
 }
 
 // Backup describes a component backup policy.

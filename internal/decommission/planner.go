@@ -204,28 +204,16 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 	return plan, nil
 }
 
-// decommissionPolicyShape is Phase 1's minimal, defensive read of the
-// still-untyped contract.Lifecycle.Decommission field (`any`, decoded by
-// yaml.v3 into map[string]any for a mapping). The fully typed
-// contract.DecommissionPolicy (spec.md §14) is Phase 5's job; this only
-// reads `class`/`retention` well enough to enforce the stateful-retention
-// gate (INV-8) now, without waiting for that typed contract.
-type decommissionPolicyShape struct {
-	Class     string
-	Retention string
-}
-
-func extractDecommissionPolicy(v any) (decommissionPolicyShape, bool) {
-	m, ok := v.(map[string]any)
-	if !ok {
-		return decommissionPolicyShape{}, false
+// extractDecommissionPolicy reads contract.Lifecycle.Decommission (spec.md
+// §14, typed since Phase 5) for the fields planComponent's retention gate
+// (INV-8) needs. ok=false for a nil Decommission (the common "null
+// lifecycle" case, spec.md §14.1 rule 6) — callers must not assume any
+// gate applies in that case.
+func extractDecommissionPolicy(v *contract.DecommissionPolicy) (contract.DecommissionPolicy, bool) {
+	if v == nil {
+		return contract.DecommissionPolicy{}, false
 	}
-	class, _ := m["class"].(string)
-	retention, _ := m["retention"].(string)
-	if class == "" && retention == "" {
-		return decommissionPolicyShape{}, false
-	}
-	return decommissionPolicyShape{Class: class, Retention: retention}, true
+	return *v, true
 }
 
 // planComponent resolves one role to its contract (if any) and classifies
@@ -241,7 +229,12 @@ func extractDecommissionPolicy(v any) (decommissionPolicyShape, bool) {
 // unsupported/unproven service principal, a roster validation failure,
 // etc. surface as a provider-specific blocker, never silently ignored).
 func planComponent(ctx context.Context, role string, catalog contract.Catalog, dispositions map[string]RetentionDisposition, provs map[string]providers.Provider, host inventory.Host, workspaceDir string, offline OfflineDisposition) ComponentPlan {
-	cp := ComponentPlan{Role: role}
+	// Fail-closed default (spec.md §14.1 rule 4): every component is
+	// assumed to need a reachable host unless a matched contract's typed
+	// Lifecycle.Decommission explicitly says otherwise below — set first
+	// so every return path (no matched contract, no registered provider,
+	// or the full happy path) carries the safe default.
+	cp := ComponentPlan{Role: role, RequiresReachableHost: true}
 
 	matches := catalog.ComponentsForRole(role)
 	if len(matches) == 0 {
@@ -286,7 +279,8 @@ func planComponent(ctx context.Context, role string, catalog contract.Catalog, d
 	// Retention gate (spec.md §20, INV-8, HD15) — independent of provider
 	// support: a component can be BOTH unsupported/blocked AND stateful-
 	// retention-gated; both blockers are reported.
-	if req, ok := extractDecommissionPolicy(matched.Lifecycle.Decommission); ok && req.Class == "stateful" && req.Retention == "required" {
+	policy, hasPolicy := extractDecommissionPolicy(matched.Lifecycle.Decommission)
+	if hasPolicy && policy.Class == "stateful" && policy.Retention == "required" {
 		cp.RetentionRequired = true
 		disposition := dispositions[matched.ID]
 		if disposition == RetentionDispositionNone {
@@ -297,6 +291,16 @@ func planComponent(ctx context.Context, role string, catalog contract.Catalog, d
 		} else {
 			cp.RetentionSatisfied = true
 		}
+	}
+
+	// requiresReachableHost (spec.md §14.1 rule 4, §21/HD16/HD17): cp
+	// already defaults to true (set at the top of this function); an
+	// explicit typed policy's plain RequiresReachableHost value overrides
+	// it, including its zero value (false) — a component whose cleanup is
+	// entirely central can opt OUT of applyUnreachablePolicy's
+	// temporarily_unreachable block by declaring so.
+	if hasPolicy {
+		cp.RequiresReachableHost = policy.RequiresReachableHost
 	}
 
 	return cp
@@ -322,10 +326,13 @@ func classifyProviderPlanError(err error) ErrorClass {
 // applyUnreachablePolicy implements spec.md §21/HD16/HD17. Phase 1 never
 // probes reachability itself — Reachability is caller-supplied — but the
 // state machine here is real: a temporarily-unreachable host blocks every
-// component that would need local cleanup (Phase 1 fail-closed default:
-// every component needs it, since none has yet declared otherwise), and a
-// permanently-lost host records local cleanup as attested-unavailable,
-// never as a fabricated "verified_removed".
+// component that would need local cleanup (fail-closed default: every
+// component needs it, unless its matched contract's typed
+// Lifecycle.Decommission explicitly declares requiresReachableHost: false
+// — spec.md §14.1 rule 4, Phase 5 — see ComponentPlan.RequiresReachableHost),
+// and a permanently-lost host records local cleanup as attested-
+// unavailable, never as a fabricated "verified_removed", for exactly the
+// same subset of components.
 func applyUnreachablePolicy(plan *Plan, reach Reachability, disposition OfflineDisposition) {
 	if reach != ReachabilityUnreachable {
 		return
@@ -339,6 +346,9 @@ func applyUnreachablePolicy(plan *Plan, reach Reachability, disposition OfflineD
 	}
 	for i := range plan.Components {
 		c := &plan.Components[i]
+		if !c.RequiresReachableHost {
+			continue
+		}
 		switch disposition {
 		case OfflineDispositionTemporarilyUnreachable:
 			c.Blockers = append(c.Blockers, Blocker{

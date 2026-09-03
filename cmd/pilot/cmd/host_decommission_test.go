@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/decommission/providers"
 )
 
@@ -189,7 +190,7 @@ func TestBuildHostDecommissionProviders_RegistersFreeIPAClientForMatchingHost(t 
 		t.Fatal(err)
 	}
 
-	provs, err := buildHostDecommissionProviders(root, "client1", io.Discard)
+	provs, err := buildHostDecommissionProviders(root, "client1", contract.Catalog{}, io.Discard)
 	if err != nil {
 		t.Fatalf("buildHostDecommissionProviders: %v", err)
 	}
@@ -212,7 +213,7 @@ func TestBuildHostDecommissionProviders_UnknownHostReturnsEmptyRegistry(t *testi
 		t.Fatal(err)
 	}
 
-	provs, err := buildHostDecommissionProviders(root, "nonexistent", io.Discard)
+	provs, err := buildHostDecommissionProviders(root, "nonexistent", contract.Catalog{}, io.Discard)
 	if err != nil {
 		t.Fatalf("buildHostDecommissionProviders: unexpected error %v", err)
 	}

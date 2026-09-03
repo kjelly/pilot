@@ -33,8 +33,9 @@ to be wrong once real code/hosts exist, fix the spec and this file
 together with a stated reason (AGENTS.md §0.2 responsibility split), not
 just this file alone.
 
-**Status: DRAFT — Phase 4 (code + fixture tests, no live evidence yet) landed
-2026-09-03.** Phase 1 makes
+**Status: DRAFT — Phase 5 (typed lifecycle + contract lint + generic
+contract-driven executor, code + fixture tests, no live evidence yet)
+landed 2026-09-03.** Phase 1 makes
 HD1, HD3, HD4, HD6, HD7, HD8, HD15, HD16, HD17, HD26, HD27, HD28
 executable (planner is read-only, no live provider needed). Phase 2 makes
 HD2, HD5, HD18-HD22, HD24 executable (finalizer + TUI refactor, still no
@@ -67,7 +68,22 @@ Go-level provider contract behaves correctly against fixtures", not
 "verified against a live Wazuh manager or FreeIPA server", until a
 Phase-4b-style live evidence pass lands. HD23 and HD25 are pure static/
 registry checks and are executable as soon as the relevant code exists,
-with no live host.
+with no live host. Phase 5 (this round) types `contract.Lifecycle.
+Decommission` (spec.md §14, `internal/contract/contract.go`'s
+`DecommissionPolicy`), adds its three static lint rules
+(`internal/contract/lint.go`'s `validateDecommissionPolicy`), makes
+`ComponentPlan.RequiresReachableHost` an explicit per-component
+override of `applyUnreachablePolicy`'s fail-closed default (spec.md
+§14.1 rule 4), and adds the generic contract-driven executor
+(`internal/decommission/providers.GenericComponentProvider`) plus its
+first real example — `host-monitoring`'s new `playbooks/decommission/
+host-monitoring-decommission.yml` (a purely local, stateless component:
+no external/central registration, so no live-evidence caveat like
+HD13/HD14's central mutations carry). This does not add a new HD row —
+HD7 (`TestPlanner_UnsupportedExternalStateBlocks`) and HD8
+(dependency ordering) already cover the generic path's acceptance
+criteria; Phase 5 only fills in what made "declares a decommission
+playbook" actually executable instead of still fail-closed.
 
 **Scope split.** Every HD1-HD28 row above is `scope: aggregate`: it runs Go
 tests against `internal/decommission` fixture workspaces (synthetic

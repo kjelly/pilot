@@ -6,10 +6,23 @@ specs:
     rows: {all: true}
 playbooks:
   apply: playbooks/apply/host-monitoring-apply.yml
+  # Host decommission Phase 5 (docs/superpowers/specs/2026-09-02-host-
+  # decommission-spec.md §37, §15): the first "initial stateless
+  # component decommission playbook" — invoked only by
+  # internal/decommission/providers.GenericComponentProvider (the
+  # generic contract-driven executor), never directly by an operator.
+  decommission: playbooks/decommission/host-monitoring-decommission.yml
 regressionTests:
   - internal/spec/host_monitoring_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies: []
+lifecycle:
+  decommission:
+    class: stateless
+    scope: local
+    externalState: false
+    requiresReachableHost: true
+    retention: none
 conflicts: []
 bindings: []
 os:
