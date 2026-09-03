@@ -33,33 +33,49 @@ to be wrong once real code/hosts exist, fix the spec and this file
 together with a stated reason (AGENTS.md §0.2 responsibility split), not
 just this file alone.
 
-**Status: DRAFT — Phase 0 only.** No mutation implementation exists yet
-(spec.md §37 Phase 0 explicitly forbids it). None of the Go test names
-referenced by the probes below exist yet either; every row is a real,
-intended acceptance check, not a placeholder, and every row is currently
-`FAIL` (test not found) by construction. Phase 1 makes HD1, HD3, HD4,
-HD6, HD7, HD8, HD15, HD16, HD17, HD26, HD27, HD28 executable (planner is
-read-only, no live provider needed). Phase 2 makes HD2, HD5, HD18-HD22,
-HD24 executable (finalizer + TUI refactor, still no live provider
-required to *unit*-test the boundary). Phase 3 is the first phase that
-requires disposable-target evidence per spec.md §35.1 for HD9-HD12;
-Phase 4 requires it for HD13/HD14. HD23 and HD25 are pure static/registry
-checks and are executable as soon as the relevant code exists, with no
-live host.
+**Status: DRAFT — Phase 3 live evidence landed 2026-09-03.** Phase 1 makes
+HD1, HD3, HD4, HD6, HD7, HD8, HD15, HD16, HD17, HD26, HD27, HD28
+executable (planner is read-only, no live provider needed). Phase 2 makes
+HD2, HD5, HD18-HD22, HD24 executable (finalizer + TUI refactor, still no
+live provider required to *unit*-test the boundary). Phase 3 wired the
+FreeIPA client provider into the CLI (`cmd/pilot/cmd/host_decommission.go`
+— Phase 3a had left this unwired) and, per spec.md §35.1, ran a real
+disposable 2-VM `pilot vm-target` topology (`hd-ipa1` freeipa-server +
+`hd-client1` freeipa-client) through the full plan → apply → verify (×2,
+independent passes) → idempotent-replay → stale-plan → partial-failure/
+resume → HD12-service-principal-block cycle. **HD9-HD12's real-host
+counterpart now exists as `HD9-LIVE`-`HD12-LIVE` below** (`scope:
+per-host`, real `ipa`/ssh probes, not `go test` fixture probes); the
+five real bugs that live run found and fixed (a bad FQDN-derivation
+precedence, an Apply/Finalize freshness-check interaction, ansible
+stdout/stderr conflation, two independently-wrong assumptions about real
+FreeIPA CLI output shape, and an `ansible.builtin.debug` message-escaping
+issue that silently defeated every anchored regex this feature reads)
+are recorded in `docs/evidence/host-decommission/2026-09-03-3b4ef4d.md` —
+read that note before treating HD9-HD12 (the fixture-only rows above) as
+having ever been "verified against a real FreeIPA server" on their own;
+they were not, until HD9-LIVE-HD12-LIVE existed. Phase 4 still needs
+disposable-target evidence for HD13/HD14 (internal-endpoint/Wazuh,
+explicitly out of scope for this round). HD23 and HD25 are pure static/
+registry checks and are executable as soon as the relevant code exists,
+with no live host.
 
-**Scope split.** Every row below is `scope: aggregate`: it runs Go tests
-against `internal/decommission` fixture workspaces (synthetic
+**Scope split.** Every HD1-HD28 row above is `scope: aggregate`: it runs Go
+tests against `internal/decommission` fixture workspaces (synthetic
 `hosts.yml`/roster/manifest trees under `t.TempDir()`), never against a
 live host, because the planner itself must never touch a live system
 (spec.md §10.1) and HD1-HD28 as written are observable *saga/store/CLI*
-behavior, not per-host effective state. This intentionally does **not**
-yet satisfy spec.md §35's disposable-target requirement for HD9-HD14/
-HD16/HD17/HD19 — those rows get a *second*, host-scoped verification
-pass (new row IDs, e.g. `HD9-LIVE`) appended to this file once Phase 3/4
-lands real FreeIPA/Wazuh disposable-target evidence (spec.md §36); until
-then, "PASS" on HD9-HD14 here means "the Go-level provider contract and
-blocker logic behave correctly against fixtures", not "verified against
-a real FreeIPA server" — do not read it as the latter.
+behavior, not per-host effective state. That intentionally did **not**
+satisfy spec.md §35's disposable-target requirement for HD9-HD12 on its
+own — "PASS" on HD9-HD12 above means "the Go-level provider contract and
+blocker logic behave correctly against fixtures", not "verified against a
+real FreeIPA server"; do not read it as the latter. `HD9-LIVE`-`HD12-LIVE`
+(scope: per-host, appended below) are that promised second, host-scoped
+verification pass for FreeIPA — landed 2026-09-03 against a real 2-VM
+`pilot vm-target` topology (see
+`docs/evidence/host-decommission/2026-09-03-3b4ef4d.md`). HD13/HD14's
+own live-host pass (internal-endpoint/Wazuh) remains Phase 4's job, not
+done here.
 
 **Why `go test -run` probes instead of shell/ansible probes.** This
 feature's primary observable surface is a Go CLI + SQLite saga store +
@@ -271,5 +287,86 @@ that decommission *reuses* those paths safely.
   probe: |
     go test ./internal/decommission/... -run TestOwnership_ForeignUnknownNeverAutoDeleted -v
   expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
+
+# ── Phase 3 live disposable-target evidence (HD9-HD12's real-host pass) ──
+#
+# The four rows below are HD9-HD12's promised second, host-scoped
+# verification pass (spec.md §35.1/§36), run 2026-09-03 against a real
+# 2-VM `pilot vm-target` topology (`hd-ipa1` freeipa-server + `hd-client1`
+# freeipa-client, almalinux-9 + ubuntu-24.04) — see
+# docs/evidence/host-decommission/2026-09-03-3b4ef4d.md for the full
+# session log, tested revision, and the five real bugs this pass found and
+# fixed. Unlike HD1-HD28 above, these are `scope: per-host` real shell/
+# `ipa`/direct-SSH probes (mirroring docs/verification/internal-endpoint.md's
+# per-host rows), not `go test` fixture probes — "PASS" here means
+# "independently confirmed against a live FreeIPA server", not "the Go
+# contract behaves correctly against a synthetic fixture". The exact
+# `ipa`/host commands shown were actually executed against that disposable
+# topology this session (torn down afterward, per AGENTS.md's evidence
+# conventions) — reproduce with your own equivalently-named `vm-target`
+# pair (server-side `kinit admin` via the roster's own admin credential
+# first).
+- id: HD9-LIVE
+  category: freeipa-client
+  check: a reachable, enrolled host's FreeIPA client local enrollment is actually removed by `pilot host decommission apply` against a real FreeIPA server
+  probe: |
+    ssh -i <client-key> ubuntu@<client-ip> 'test -f /etc/ipa/default.conf && echo ENROLLED || echo UNINSTALLED'
+  expect: {stdout: {equals: "UNINSTALLED"}}
+  scope: per-host
+  verifyOnly: true
+- id: HD10-LIVE
+  category: freeipa-client
+  check: the FreeIPA host object and Pilot-owned DNS A record are actually absent on the real server after `pilot host decommission apply`, confirmed on an independent second pass
+  probe: |
+    ssh -i <server-key> root@<server-ip> \
+      "kinit admin <<< '<admin-password>' >/dev/null 2>&1; ipa host-show <client-fqdn> 2>&1; ipa dnsrecord-show <domain> <client-short-name> 2>&1"
+  expect: {stdout: {contains: "host not found"}}
+  scope: per-host
+  action:
+    mode: isolatedMutation
+    authorization: explicit
+    residualRisk: a Kerberos ticket for admin remains cached in the shell's default credential cache until it expires or is destroyed
+    cleanup:
+      required: true
+      probe: |
+        ssh -i <server-key> root@<server-ip> kdestroy
+      expect: {exitCode: 0}
+  verifyOnly: true
+- id: HD11-LIVE
+  category: freeipa-client
+  check: the host's direct hostgroup/netgroup membership is actually pruned on the real server (the containing hostgroup/netgroup object itself survives; only the host's membership is gone)
+  probe: |
+    ssh -i <server-key> root@<server-ip> \
+      "kinit admin <<< '<admin-password>' >/dev/null 2>&1; ipa hostgroup-show <hostgroup-name>"
+  expect: {stdout: {notContains: "Member hosts:"}}
+  scope: per-host
+  action:
+    mode: isolatedMutation
+    authorization: explicit
+    residualRisk: a Kerberos ticket for admin remains cached in the shell's default credential cache until it expires or is destroyed
+    cleanup:
+      required: true
+      probe: |
+        ssh -i <server-key> root@<server-ip> kdestroy
+      expect: {exitCode: 0}
+  verifyOnly: true
+- id: HD12-LIVE
+  category: freeipa-client
+  check: an unknown/unproven service principal on the target host actually hard-blocks `pilot host decommission plan` against a real FreeIPA server, without cascade-deleting the service or the host object
+  probe: |
+    ssh -i <server-key> root@<server-ip> "kinit admin <<< '<admin-password>' >/dev/null 2>&1; ipa service-add HTTP/<client-fqdn> --force"
+    go run ./cmd/pilot host decommission plan --dir <workspace> --host <client-fqdn>
+  expect: {stdout: {contains: "ownership_unknown"}}
+  scope: per-host
+  action:
+    mode: isolatedMutation
+    authorization: explicit
+    residualRisk: a lingering HTTP/<client-fqdn> service principal object on the FreeIPA server if cleanup fails
+    cleanup:
+      required: true
+      probe: |
+        ssh -i <server-key> root@<server-ip> "kinit admin <<< '<admin-password>' >/dev/null 2>&1; ipa service-del HTTP/<client-fqdn>"
+      expect: {exitCode: 0}
   verifyOnly: true
 ```
