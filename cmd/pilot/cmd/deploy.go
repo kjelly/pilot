@@ -499,16 +499,48 @@ func previewInventoryGraph(out io.Writer, inv string, snapshot deployInventorySn
 // runPreflight runs against the already-resolved execution limit. Callers must
 // resolve deployment availability first, so an offline optional host cannot
 // fail the SSH portion of a full preflight.
-func runPreflight(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, limit string) (bool, error) {
+type preflightMode uint8
+
+const (
+	preflightFull preflightMode = iota
+	preflightStatic
+	preflightSkip
+)
+
+// deploymentAuthorization is collected once for a reconcile execution plan.
+// Its presence means every child deployment has already been authorized by the
+// operator and must not open another interactive prompt.
+type deploymentAuthorization struct {
+	Preflight preflightMode
+	Preview   bool
+}
+
+func promptPreflightMode() (preflightMode, error) {
 	idx, err := runSelectProgram("要先跑前置檢查(preflight)嗎？", []string{
 		"完整前置檢查(含 SSH 連線測試)",
 		"只做靜態檢查(機器還沒開機/還連不上時用；不連線)",
 		"跳過前置檢查",
 	})
 	if err != nil {
+		return preflightSkip, err
+	}
+	return preflightMode(idx), nil
+}
+
+func runPreflight(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, limit string) (bool, error) {
+	mode, err := promptPreflightMode()
+	if err != nil {
 		return false, err
 	}
-	if idx == 2 {
+	return runPreflightMode(ctx, runner, out, inv, limit, mode, true)
+}
+
+// runPreflightMode performs a preselected preflight mode. Reconcile batches
+// pass promptOnFailure=false because the operator already authorized the full
+// plan; a failed preflight then fails closed instead of pausing between two
+// dependency applies for another question.
+func runPreflightMode(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, limit string, mode preflightMode, promptOnFailure bool) (bool, error) {
+	if mode == preflightSkip {
 		return true, nil
 	}
 	fmt.Fprintln(out, "── 執行 playbooks/preflight.yml ──")
@@ -516,7 +548,7 @@ func runPreflight(ctx context.Context, runner *ansible.Runner, out io.Writer, in
 	if limit != "" {
 		args = append(args, "--limit", limit)
 	}
-	if idx == 1 {
+	if mode == preflightStatic {
 		args = append(args, "--tags", "static")
 	}
 	res, err := runner.Run(ctx, args...)
@@ -529,6 +561,9 @@ func runPreflight(ctx context.Context, runner *ansible.Runner, out io.Writer, in
 		return true, nil
 	}
 	fmt.Fprintf(out, "❌ 前置檢查沒有全過(結束碼 %d)\n", res.ExitCode)
+	if !promptOnFailure {
+		return false, nil
+	}
 	return runConfirmProgram("仍要繼續佈署嗎？(不建議 — 上面的錯誤通常代表 inventory 填錯或連不上機器)", false), nil
 }
 
@@ -1058,6 +1093,10 @@ type deploymentTransactionOptions struct {
 	// entirely: the apply step's raw exit code decides pass/fail exactly
 	// as it did before this feature existed.
 	RuntimeRace deploymentRuntimeRaceOptions
+	// Authorization is supplied by reconcile's batch planner after it has
+	// collected every operator decision. A non-nil value prevents each
+	// dependency transaction from reopening preflight/preview/apply prompts.
+	Authorization *deploymentAuthorization
 }
 
 // deploymentRuntimeRaceOptions carries what executeDeploymentTransaction's
@@ -1097,7 +1136,12 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		runner.Stdin = os.Stdin
 	}
 
-	dryRunFirst := confirmDeployment("要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
+	dryRunFirst := false
+	if options.Authorization != nil {
+		dryRunFirst = options.Authorization.Preview
+	} else {
+		dryRunFirst = confirmDeployment("要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
+	}
 
 	runOnce := func(check, confirm bool) (*ansible.Result, error) {
 		mode := "套用"
@@ -1111,7 +1155,7 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		if check {
 			question = "確定要執行預覽指令嗎？"
 		}
-		if confirm && !confirmDeployment(question, true) {
+		if confirm && options.Authorization == nil && !confirmDeployment(question, true) {
 			return nil, delivery.ErrCancelled
 		}
 		if !check && options.RuntimeRace.ResultPath != "" {
@@ -1137,7 +1181,10 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		}
 	}
 	apply := func(ctx context.Context) error {
-		if dryRunFirst {
+		if options.Authorization != nil {
+			// The parent reconcile plan already received one explicit approval
+			// for every dependency and the selected component.
+		} else if dryRunFirst {
 			if !confirmDeployment("預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
 				fmt.Fprintln(out, "先在這裡停下來，沒有套用任何變更。")
 				return delivery.ErrCancelled
@@ -1221,6 +1268,91 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 // catalog ever grows a sameHosts cycle (defensively rejected by
 // sameHostsDependencyChain instead).
 func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) error {
+	return executeRecordedDeploymentWithAuthorization(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, nil, nil)
+}
+
+// executeRecordedReconcileDeployment turns a selected reconcile component and
+// its required sameHosts dependencies into one operator-approved execution
+// plan. The plan deliberately collects every interactive decision before the
+// first preflight or apply starts; individual dependency transactions then run
+// unattended in dependency-first order.
+func executeRecordedReconcileDeployment(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) error {
+	plan, err := prepareReconcileExecutionPlan(ctx, playbook, inv, limit, tags, extraVars, componentHints)
+	if err != nil {
+		return err
+	}
+	renderReconcileExecutionPlan(out, plan)
+	authorization, err := promptReconcileExecutionAuthorization(len(plan.Chain) + 1)
+	if err != nil {
+		return err
+	}
+	return executeRecordedDeploymentWithAuthorization(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, authorization, plan.DependencyLimits)
+}
+
+type reconcileExecutionPlan struct {
+	Components       []string
+	Chain            []contract.Contract
+	DependencyLimits map[string]string
+}
+
+func prepareReconcileExecutionPlan(ctx context.Context, playbook, inv, limit, tags string, extraVars []string, componentHints []string) (reconcileExecutionPlan, error) {
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return reconcileExecutionPlan{}, err
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		return reconcileExecutionPlan{}, err
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		return reconcileExecutionPlan{}, fmt.Errorf("load contract catalog before reconcile: %w", err)
+	}
+	components, err := componentsForPlaybook(catalog, playbook, tags, componentHints)
+	if err != nil {
+		return reconcileExecutionPlan{}, err
+	}
+	_, _, scope, _, _, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, playbook == "playbooks/site.yml")
+	if err != nil {
+		return reconcileExecutionPlan{}, err
+	}
+	chain, err := sameHostsDependencyChain(catalog, components)
+	if err != nil {
+		return reconcileExecutionPlan{}, err
+	}
+	dependencyLimits := make(map[string]string, len(chain))
+	for _, dependency := range chain {
+		hosts := scope.HostsByRole[dependency.Role]
+		if len(hosts) == 0 {
+			return reconcileExecutionPlan{}, fmt.Errorf("reconcile dependency %q has no resolved sameHosts scope", dependency.ID)
+		}
+		dependencyLimits[dependency.ID] = strings.Join(hosts, ",")
+	}
+	return reconcileExecutionPlan{Components: components, Chain: chain, DependencyLimits: dependencyLimits}, nil
+}
+
+func renderReconcileExecutionPlan(out io.Writer, plan reconcileExecutionPlan) {
+	fmt.Fprintln(out, "═══ Reconcile execution plan ═══")
+	for i, dependency := range plan.Chain {
+		fmt.Fprintf(out, "  %d. %s — %s — hosts: %s\n", i+1, dependency.ID, dependency.Playbooks.Apply, plan.DependencyLimits[dependency.ID])
+	}
+	fmt.Fprintf(out, "  %d. %s\n", len(plan.Chain)+1, strings.Join(plan.Components, ", "))
+}
+
+func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAuthorization, error) {
+	preflight, err := promptPreflightMode()
+	if err != nil {
+		return nil, err
+	}
+	preview := runConfirmProgram("要先對此計畫中的所有 playbook 預覽(--check --diff)嗎？", true)
+	question := fmt.Sprintf("確認：若所有前置檢查與預覽都成功，將不再詢問並依序正式套用計畫中的 %d 支 playbook。", plannedPlaybooks)
+	if !runConfirmProgram(question, false) {
+		return nil, errDeployAborted
+	}
+	return &deploymentAuthorization{Preflight: preflight, Preview: preview}, nil
+}
+
+func executeRecordedDeploymentWithAuthorization(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, dependencyLimits map[string]string) error {
 	root, err := resolveContractRoot("")
 	if err != nil {
 		return err
@@ -1237,10 +1369,10 @@ func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out 
 	if err != nil {
 		return err
 	}
-	if err := applySameHostsDependencyChain(ctx, runner, out, catalog, components, playbook, inv, limit, extraVars, vault, stage); err != nil {
+	if err := applySameHostsDependencyChain(ctx, runner, out, catalog, components, playbook, inv, limit, extraVars, vault, stage, authorization, dependencyLimits); err != nil {
 		return err
 	}
-	return executeRecordedDeploymentCore(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints)
+	return executeRecordedDeploymentCore(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, authorization)
 }
 
 // sameHostsDependencyChain returns componentIDs' required sameHosts
@@ -1317,7 +1449,7 @@ func sameHostsDependencyChain(catalog contract.Catalog, componentIDs []string) (
 // satisfied dependency is expected to be a safe no-op. A no-op when
 // playbook isn't actually an apply playbook for any of components (e.g.
 // a decommission or rollback run must never re-provision a dependency).
-func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, out io.Writer, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string, vault vaultInput, stage string) error {
+func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, out io.Writer, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string, vault vaultInput, stage string, authorization *deploymentAuthorization, dependencyLimits map[string]string) error {
 	isApply := false
 	for _, id := range components {
 		if c, ok := catalog.Component(id); ok && c.Playbooks.Apply == playbook {
@@ -1334,7 +1466,11 @@ func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, 
 	}
 	for _, dep := range chain {
 		fmt.Fprintf(out, "\n── 依賴串接：先套用 %s（%s 的必要 sameHosts 依賴）──\n", dep.ID, strings.Join(components, ", "))
-		if err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, limit, "", extraVars, vault, stage, []string{dep.ID}); err != nil {
+		dependencyLimit := limit
+		if resolved, ok := dependencyLimits[dep.ID]; ok {
+			dependencyLimit = resolved
+		}
+		if err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, dependencyLimit, "", extraVars, vault, stage, []string{dep.ID}, authorization); err != nil {
 			return fmt.Errorf("apply required sameHosts dependency %q: %w", dep.ID, err)
 		}
 	}
@@ -1346,7 +1482,7 @@ func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, 
 // role/limit selected for apply, not every host that happens to exist
 // in the inventory. Never cascades sameHosts dependencies itself — see
 // executeRecordedDeployment, which always calls this.
-func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) error {
+func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization) error {
 	root, err := resolveContractRoot("")
 	if err != nil {
 		return err
@@ -1400,7 +1536,12 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	// it against the entire inventory before this point, so a deliberately
 	// offline optional host could fail its SSH ping despite being deferred from
 	// the apply run that followed.
-	ok, err := runPreflight(ctx, runner, out, inv, limit)
+	var ok bool
+	if authorization != nil {
+		ok, err = runPreflightMode(ctx, runner, out, inv, limit, authorization.Preflight, false)
+	} else {
+		ok, err = runPreflight(ctx, runner, out, inv, limit)
+	}
 	if err != nil {
 		return err
 	}
@@ -1496,7 +1637,7 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{
 		Writer: writer, Preflight: preflight, Verify: verify, Rollback: rollback,
 		Stage: stage, Idempotency: delivery.IdempotencyStageGTEStaging, RollbackPolicy: rollbackPolicy,
-		RuntimeRace: runtimeRace,
+		RuntimeRace: runtimeRace, Authorization: authorization,
 	})
 	closeErr := st.Close()
 	if err != nil {
@@ -2640,6 +2781,7 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		}
 		batchInputs = &inputs
 	}
+	var reconcileRequests []catalogDeploymentRequest
 	for i, idx := range selectedIndexes {
 		if idx < 0 || idx >= len(entries) {
 			return fmt.Errorf("selected reconcile component index %d is out of range", idx)
@@ -2647,9 +2789,12 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		if len(selectedIndexes) > 1 {
 			fmt.Fprintf(out, "\n── 執行第 %d/%d 個元件 ──\n", i+1, len(selectedIndexes))
 		}
-		if err := runCatalogPlaybookDeployEntry(ctx, runner, out, inv, action, catalog, entries[idx], batchInputs, snapshot); err != nil {
+		if err := runCatalogPlaybookDeployEntry(ctx, runner, out, inv, action, catalog, entries[idx], batchInputs, snapshot, reconcileOnly, &reconcileRequests); err != nil {
 			return err
 		}
+	}
+	if reconcileOnly {
+		return executeCatalogReconcileBatch(ctx, runner, out, reconcileRequests)
 	}
 	return nil
 }
@@ -2663,6 +2808,22 @@ type catalogBatchInputs struct {
 	tags      string
 	vault     vaultInput
 	extraVars []string
+}
+
+// catalogDeploymentRequest is the fully answered, but not yet executed,
+// payload for one catalog entry. Reconcile collects every selected request
+// first so one authorization can cover the complete dependency plan.
+type catalogDeploymentRequest struct {
+	playbook             string
+	inv                  string
+	limit                string
+	tags                 string
+	extraVars            []string
+	vault                vaultInput
+	stage                string
+	componentHints       []string
+	workspaceDir         string
+	acceptedAutoHostVars []acceptedAutoHostVar
 }
 
 func promptCatalogBatchInputs(out io.Writer, inv string, entries []deployPlaybook) (catalogBatchInputs, error) {
@@ -2704,7 +2865,7 @@ func catalogBatchVaultHint(entries []deployPlaybook) string {
 	return strings.Join(hints, "；")
 }
 
-func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, catalog contract.Catalog, entry deployPlaybook, batchInputs *catalogBatchInputs, snapshot deployInventorySnapshot) error {
+func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, catalog contract.Catalog, entry deployPlaybook, batchInputs *catalogBatchInputs, snapshot deployInventorySnapshot, reconcileOnly bool, reconcileRequests *[]catalogDeploymentRequest) error {
 	if entry.Note != "" {
 		fmt.Fprintf(out, "ℹ️  %s\n", entry.Note)
 	}
@@ -2871,11 +3032,68 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		extraVars = append(extraVars, strings.Fields(extra)...)
 	}
 
-	deployErr := executeRecordedDeployment(ctx, runner, out, actionPlaybook, inv, limit, tags, extraVars, vault, decision.Stage, componentHints)
+	request := catalogDeploymentRequest{
+		playbook:             actionPlaybook,
+		inv:                  inv,
+		limit:                limit,
+		tags:                 tags,
+		extraVars:            append([]string(nil), extraVars...),
+		vault:                vault,
+		stage:                decision.Stage,
+		componentHints:       append([]string(nil), componentHints...),
+		workspaceDir:         workspaceDir,
+		acceptedAutoHostVars: append([]acceptedAutoHostVar(nil), acceptedAutoHostVars...),
+	}
+	if reconcileOnly {
+		if reconcileRequests == nil {
+			return fmt.Errorf("internal error: reconcile request collector is nil")
+		}
+		*reconcileRequests = append(*reconcileRequests, request)
+		return nil
+	}
+
+	deployErr := executeRecordedDeployment(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints)
 	if deployErr == nil {
-		persistAcceptedAutoHostVars(out, workspaceDir, acceptedAutoHostVars)
+		persistAcceptedAutoHostVars(out, request.workspaceDir, request.acceptedAutoHostVars)
 	}
 	return deployErr
+}
+
+func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, out io.Writer, requests []catalogDeploymentRequest) error {
+	if len(requests) == 0 {
+		return fmt.Errorf("internal error: reconcile batch has no selected requests")
+	}
+	plans := make([]reconcileExecutionPlan, len(requests))
+	plannedPlaybooks := 0
+	for i, request := range requests {
+		plan, err := prepareReconcileExecutionPlan(ctx, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.componentHints)
+		if err != nil {
+			return err
+		}
+		plans[i] = plan
+		plannedPlaybooks += len(plan.Chain) + 1
+	}
+
+	fmt.Fprintln(out, "═══ Reconcile batch execution plan ═══")
+	for i, plan := range plans {
+		fmt.Fprintf(out, "── 選取項目 %d/%d ──\n", i+1, len(plans))
+		renderReconcileExecutionPlan(out, plan)
+	}
+	authorization, err := promptReconcileExecutionAuthorization(plannedPlaybooks)
+	if err != nil {
+		return err
+	}
+
+	for i, request := range requests {
+		if len(requests) > 1 {
+			fmt.Fprintf(out, "\n── 執行已授權項目 %d/%d ──\n", i+1, len(requests))
+		}
+		if err := executeRecordedDeploymentWithAuthorization(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints, authorization, plans[i].DependencyLimits); err != nil {
+			return err
+		}
+		persistAcceptedAutoHostVars(out, request.workspaceDir, request.acceptedAutoHostVars)
+	}
+	return nil
 }
 
 // autoFillMonitoringFiles wires the workspace-owned external monitoring

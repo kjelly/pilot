@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,6 +174,88 @@ esac
 	}
 }
 
+// TestExecuteCatalogReconcileBatch_CollectsAuthorizationOnceAndScopesDependency
+// locks the reconcile-specific behavior introduced after the original cascade:
+// a selected consumer may still apply its required sameHosts dependency first,
+// but every question is answered before either apply runs and the dependency is
+// limited to the consumer's resolved host instead of the whole dependency role.
+func TestExecuteCatalogReconcileBatch_CollectsAuthorizationOnceAndScopesDependency(t *testing.T) {
+	root := writeSameHostsCascadeFixture(t)
+	t.Chdir(root)
+	testDataDir := t.TempDir()
+	dataDir = testDataDir
+	t.Cleanup(func() { dataDir = "" })
+
+	binDir := t.TempDir()
+	invJSON := `{"_meta":{"hostvars":{"host-a":{},"host-b":{}}},"leaf":{"hosts":["host-a","host-b"]},"consumer":{"hosts":["host-a"]}}`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '"+invJSON+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ansibleFixture := `#!/bin/sh
+case "$*" in
+  *--list-hosts*) printf '%s\n' '  hosts (1):' '    host-a'; exit 0 ;;
+  *) printf '{"plays":[{"tasks":[{"hosts":{"host-a":{"stdout":"unknown","rc":0}}}]}]}\n' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	inv := filepath.Join(t.TempDir(), "inventory.yml")
+	if err := os.WriteFile(inv, []byte("all:\n  hosts:\n    host-a: {}\n    host-b: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	argsPath := filepath.Join(t.TempDir(), "ansible-playbook-args")
+	runner := ansible.NewRunner()
+	runner.Binary = writeArgsFixture(t, argsPath)
+	runner.Timeout = 5 * time.Second
+
+	yes := true
+	no := false
+	oldPrompt := activePromptAutomation
+	activePromptAutomation = &promptAutomation{answers: []promptAnswer{
+		{Prompt: "要先跑前置檢查(preflight)嗎？", Select: "跳過前置檢查"},
+		{Prompt: "要先對此計畫中的所有 playbook 預覽", Confirm: &no},
+		{Prompt: "確認：若所有前置檢查與預覽都成功", Confirm: &yes},
+	}}
+	t.Cleanup(func() { activePromptAutomation = oldPrompt })
+	stubDeploymentAvailabilityAllReachable(t)
+
+	var out bytes.Buffer
+	request := catalogDeploymentRequest{
+		playbook:       "consumer-apply.yml",
+		inv:            inv,
+		extraVars:      []string{"stage=sandbox"},
+		stage:          "sandbox",
+		componentHints: []string{"consumer"},
+	}
+	if err := executeCatalogReconcileBatch(context.Background(), runner, &out, []catalogDeploymentRequest{request, request}); err != nil {
+		t.Fatal(err)
+	}
+	if len(activePromptAutomation.answers) != 0 || activePromptAutomation.err != nil {
+		t.Fatalf("reconcile consumed unexpected prompts: remaining=%+v err=%v", activePromptAutomation.answers, activePromptAutomation.err)
+	}
+	if !strings.Contains(out.String(), "leaf — leaf-apply.yml — hosts: host-a") {
+		t.Fatalf("reconcile plan did not expose scoped dependency:\n%s", out.String())
+	}
+
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(args)), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("ansible-playbook runs = %q, want leaf then consumer apply for both selected requests", args)
+	}
+	if !strings.Contains(lines[0], "leaf-apply.yml") || !strings.Contains(lines[0], "--limit host-a") || strings.Contains(lines[0], "host-b") {
+		t.Fatalf("dependency args = %q, want leaf limited to host-a", lines[0])
+	}
+	if !strings.Contains(lines[1], "consumer-apply.yml") || !strings.Contains(lines[2], "leaf-apply.yml") || !strings.Contains(lines[3], "consumer-apply.yml") {
+		t.Fatalf("execution order = %q, want leaf then consumer for each selected request", lines)
+	}
+}
+
 // TestApplySameHostsDependencyChain_NoOpForNonApplyPlaybook confirms a
 // decommission/rollback/upgrade run never re-provisions a sameHosts
 // dependency — only an apply playbook triggers the cascade.
@@ -188,7 +272,7 @@ func TestApplySameHostsDependencyChain_NoOpForNonApplyPlaybook(t *testing.T) {
 	// A rollback/decommission playbook path never equals any component's
 	// Playbooks.Apply, so this must return immediately without touching
 	// runner/out/inv/limit/vault at all.
-	err = applySameHostsDependencyChain(context.Background(), nil, nil, catalog, []string{"consumer"}, "consumer-decommission.yml", "unused-inv.yml", "", nil, vaultInput{}, "sandbox")
+	err = applySameHostsDependencyChain(context.Background(), nil, nil, catalog, []string{"consumer"}, "consumer-decommission.yml", "unused-inv.yml", "", nil, vaultInput{}, "sandbox", nil, nil)
 	if err != nil {
 		t.Fatalf("applySameHostsDependencyChain() error = %v, want nil (no-op)", err)
 	}
@@ -241,4 +325,14 @@ site: {include: false, order: 1, vars: {}, tags: [], optIn: true}
 	}
 	t.Setenv("PILOT_ROOT", root)
 	return root
+}
+
+func writeArgsFixture(t *testing.T, argsPath string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ansible-playbook")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + argsPath + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
