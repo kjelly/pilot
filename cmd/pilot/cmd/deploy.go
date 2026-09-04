@@ -1734,7 +1734,14 @@ func optInRolesAssignedInScope(ctx context.Context, catalog contract.Catalog, in
 	}
 	roles := make(map[string]bool)
 	for _, component := range catalog.Components() {
-		if component.Site.Include || roles[component.Role] {
+		// "all" is the pseudo-role every host belongs to, not an operator
+		// explicitly assigning a host to this component — resolving it
+		// as "assigned" would auto-include the component in literally
+		// every site-wide deploy regardless of inventory (found live on
+		// vm-target: freeipa-ca-trust, the one opt-in component with
+		// role "all", started hard-failing every non-FreeIPA site-wide
+		// deploy this way, since it also requires freeipa-server).
+		if component.Site.Include || component.Role == "all" || roles[component.Role] {
 			continue
 		}
 		if roleHasHostInScope(groups, inScope, component.Role) {
@@ -2707,7 +2714,11 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	if err != nil {
 		return err
 	}
-	tags, err := runTextProgram("要只跑某幾類元件嗎？(--tags，例如 freeipa,keycloak；留空 = 全部)", "", validateOptionalKV)
+	// nil, not validateOptionalKV: tags are bare comma/space-separated
+	// identifiers (component IDs, roles, or check-row IDs like "C1"),
+	// never key=value — the wrong validator here rejected the prompt's
+	// own example input.
+	tags, err := runTextProgram("要只跑某幾類元件嗎？(--tags，例如 freeipa,keycloak；留空 = 全部)", "", nil)
 	if err != nil {
 		return err
 	}
@@ -2904,7 +2915,9 @@ func promptCatalogBatchInputs(out io.Writer, inv string, entries []deployPlayboo
 	if err != nil {
 		return catalogBatchInputs{}, err
 	}
-	tags, err := runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", validateOptionalKV)
+	// nil, not validateOptionalKV: tags are bare comma/space-separated
+	// identifiers, never key=value.
+	tags, err := runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", nil)
 	if err != nil {
 		return catalogBatchInputs{}, err
 	}
@@ -3091,7 +3104,9 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		if err != nil {
 			return err
 		}
-		tags, err = runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", validateOptionalKV)
+		// nil, not validateOptionalKV: tags are bare comma/space-separated
+		// identifiers, never key=value.
+		tags, err = runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", nil)
 		if err != nil {
 			return err
 		}
