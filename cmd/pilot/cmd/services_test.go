@@ -33,6 +33,8 @@ func TestServicesPurgeRequiresConfirmFlag(t *testing.T) {
 	rootCmd.SetArgs([]string{"services", "purge", "--data-dir", t.TempDir()})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
+	defer rootCmd.SetArgs(nil)
+	t.Cleanup(func() { dataDir = "" })
 	svcConfirm = false
 	err := rootCmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "confirmation") {

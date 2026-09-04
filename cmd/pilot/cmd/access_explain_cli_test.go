@@ -45,6 +45,7 @@ func TestAccessExplainCmd_ReportsStaticHBACSource(t *testing.T) {
 	rootCmd.SetOut(&out)
 	rootCmd.SetErr(&out)
 	defer rootCmd.SetArgs(nil)
+	t.Cleanup(func() { dataDir = "" })
 
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
@@ -66,6 +67,7 @@ func TestAccessExplainCmd_RequiresUserAndHost(t *testing.T) {
 	rootCmd.SetOut(&out)
 	rootCmd.SetErr(&out)
 	defer rootCmd.SetArgs(nil)
+	t.Cleanup(func() { dataDir = "" })
 
 	err := rootCmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "--user") {

@@ -45,6 +45,7 @@ func TestAccessBreakglassActivateCmd_RequiresDuration(t *testing.T) {
 	rootCmd.SetOut(&out)
 	rootCmd.SetErr(&out)
 	defer rootCmd.SetArgs(nil)
+	t.Cleanup(func() { dataDir = "" })
 
 	err := rootCmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "--duration") {
@@ -58,6 +59,7 @@ func TestAccessBreakglassStatusCmd_NoActivationsRecorded(t *testing.T) {
 	rootCmd.SetOut(&out)
 	rootCmd.SetErr(&out)
 	defer rootCmd.SetArgs(nil)
+	t.Cleanup(func() { dataDir = "" })
 
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
