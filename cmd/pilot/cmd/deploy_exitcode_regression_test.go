@@ -170,6 +170,30 @@ func stubDeploymentConfirm(t *testing.T, answers ...bool) func() {
 	}
 }
 
+// stubDeploymentSkipPreflight answers executeRecordedDeploymentCore's
+// preflight-mode select (added in fb5842b's promptPreflightMode) with
+// "跳過前置檢查" so tests that exercise the apply/runtime-race path never
+// launch a real bubbletea Program — activePromptAutomation is the ONLY
+// thing runSelectProgram (called directly by promptPreflightMode, never
+// through the confirmDeployment var) checks before falling back to a real
+// TTY-backed Program.Run(), so stubDeploymentConfirm alone is never
+// sufficient for any test that calls executeRecordedDeployment with a nil
+// authorization (every direct call does — reconcile batch's Authorization
+// wiring only ever originates from executeCatalogReconcileBatch's own
+// flow). Skip, not useDefaults' index-0 "full preflight", so these tests
+// never run playbooks/preflight.yml through their own apply-focused
+// ansible-playbook fixture.
+func stubDeploymentSkipPreflight(t *testing.T) func() {
+	t.Helper()
+	original := activePromptAutomation
+	activePromptAutomation = &promptAutomation{answers: []promptAnswer{
+		{Prompt: "要先跑前置檢查(preflight)嗎？", Select: "跳過前置檢查"},
+	}}
+	return func() {
+		activePromptAutomation = original
+	}
+}
+
 func writeExitFixture(t *testing.T, exitCode int) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ansible-playbook")

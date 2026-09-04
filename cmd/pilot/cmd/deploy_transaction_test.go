@@ -19,8 +19,16 @@ import (
 func TestExecuteRecordedDeploymentPersistsTransactionAfterAuthorization(t *testing.T) {
 	root := repoRootForTest(t)
 	t.Chdir(root)
-	dataDir := t.TempDir()
-	t.Setenv("PILOT_DATA_DIR", dataDir)
+	// Named to avoid shadowing the package-level dataDir flag var — this
+	// test sets THAT var directly below (see
+	// pilot-cobra-pflag-changed-state-persists-test-hazard: an earlier
+	// test's rootCmd.Execute() with --data-dir can leave it non-empty for
+	// the rest of this test binary, and resolvePilotDataDir() checks it
+	// before $PILOT_DATA_DIR).
+	txnDataDir := t.TempDir()
+	dataDir = txnDataDir
+	t.Cleanup(func() { dataDir = "" })
+	t.Setenv("PILOT_DATA_DIR", txnDataDir)
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"_meta\": {\"hostvars\": {\"host-a\": {}}}, \"docker\": {\"hosts\": [\"host-a\"]}}'\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -54,11 +62,13 @@ printf '{"plays":[{"tasks":[{"hosts":{"host-a":{"stdout":"%s","rc":0}}}]}]}\n' "
 	runner.Timeout = 5 * time.Second
 	restore := stubDeploymentConfirm(t, false, true)
 	defer restore()
+	restorePrompt := stubDeploymentSkipPreflight(t)
+	defer restorePrompt()
 	stubDeploymentAvailabilityAllReachable(t)
 	if err := executeRecordedDeployment(context.Background(), runner, &bytes.Buffer{}, "playbooks/apply/docker-apply.yml", inv, "", "", []string{"stage=sandbox", "example=value"}, vaultInput{}, "sandbox", []string{"docker"}); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(filepath.Join(dataDir, "history.db"))
+	s, err := store.Open(filepath.Join(txnDataDir, "history.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

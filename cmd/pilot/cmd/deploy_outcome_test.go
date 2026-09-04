@@ -40,12 +40,23 @@ func writeRaceResultFixture(t *testing.T, exitCode int, resultLines ...string) s
 // following the same convention as
 // TestExecuteRecordedDeploymentPersistsTransactionAfterAuthorization, and
 // returns the resolved inventory path plus the run-history data dir.
-func setUpRaceDeploymentFixtures(t *testing.T, policy string) (inv, dataDir string) {
+func setUpRaceDeploymentFixtures(t *testing.T, policy string) (inv, dataDirPath string) {
 	t.Helper()
 	root := repoRootForTest(t)
 	t.Chdir(root)
-	dataDir = t.TempDir()
-	t.Setenv("PILOT_DATA_DIR", dataDir)
+	dataDirPath = t.TempDir()
+	// Set the package-level dataDir var directly, not just $PILOT_DATA_DIR
+	// — resolvePilotDataDir() checks dataDir first, and it's a
+	// package-level var bound to --data-dir that an earlier test's
+	// rootCmd.Execute() can leave non-empty for the rest of this test
+	// binary (the pilot-cobra-pflag-changed-state-persists-test-hazard
+	// pattern, already used by TestExecuteRecordedDeployment_CascadesSameHostsDependencyFirst).
+	// Without this, the deployment's actual store.Open ends up under a
+	// stale leftover path while this test reads back from dataDirPath,
+	// making the run look like it silently vanished (runs = []).
+	dataDir = dataDirPath
+	t.Cleanup(func() { dataDir = "" })
+	t.Setenv("PILOT_DATA_DIR", dataDirPath)
 	binDir := t.TempDir()
 	hostvars := `{}`
 	if policy != "" {
@@ -83,7 +94,7 @@ printf '{"plays":[{"tasks":[{"hosts":{"host-a":{"stdout":"%s","rc":0}}}]}]}\n' "
 	if err := os.WriteFile(inv, []byte("all:\n  hosts:\n    host-a: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return inv, dataDir
+	return inv, dataDirPath
 }
 
 // ctxWithAnsibleRuntime wraps context.Background() with a real
@@ -123,6 +134,8 @@ func TestExecuteRecordedDeployment_RuntimeUnreachableOptionalHostIsDeferred(t *t
 	runner.Timeout = 5 * time.Second
 	restore := stubDeploymentConfirm(t, false, true)
 	defer restore()
+	restorePrompt := stubDeploymentSkipPreflight(t)
+	defer restorePrompt()
 
 	err := executeRecordedDeployment(ctxWithAnsibleRuntime(t), runner, &bytes.Buffer{}, "playbooks/apply/docker-apply.yml", inv, "", "", []string{"stage=sandbox"}, vaultInput{}, "sandbox", []string{"docker"})
 	if err != nil {
@@ -159,6 +172,8 @@ func TestExecuteRecordedDeployment_RuntimeTaskFailureRemainsFatal(t *testing.T) 
 	runner.Timeout = 5 * time.Second
 	restore := stubDeploymentConfirm(t, false, true)
 	defer restore()
+	restorePrompt := stubDeploymentSkipPreflight(t)
+	defer restorePrompt()
 
 	err := executeRecordedDeployment(ctxWithAnsibleRuntime(t), runner, &bytes.Buffer{}, "playbooks/apply/docker-apply.yml", inv, "", "", []string{"stage=sandbox"}, vaultInput{}, "sandbox", []string{"docker"})
 	if err == nil {
