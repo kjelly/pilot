@@ -83,13 +83,18 @@ func TestAccessReviewMarkCmd_RequiresReviewer(t *testing.T) {
 
 func TestAccessReviewMarkCmd_UpdatesRosterAndRecordsAudit(t *testing.T) {
 	path := writeAccessReviewCLIFixture(t)
-	dataDir := t.TempDir()
+	// Named to avoid shadowing the package-level dataDir flag var (bound to
+	// --data-dir on rootCmd) — this test needs to reset THAT var in
+	// t.Cleanup below, which a shadowing local declaration would make
+	// impossible to reach from this scope.
+	reviewDataDir := t.TempDir()
 
 	var out bytes.Buffer
-	rootCmd.SetArgs([]string{"--data-dir", dataDir, "access", "review", "mark", path, "vendor-project-x", "--reviewer", "alice", "--reason", "still required"})
+	rootCmd.SetArgs([]string{"--data-dir", reviewDataDir, "access", "review", "mark", path, "vendor-project-x", "--reviewer", "alice", "--reason", "still required"})
 	rootCmd.SetOut(&out)
 	rootCmd.SetErr(&out)
 	defer rootCmd.SetArgs(nil)
+	t.Cleanup(func() { dataDir = "" })
 
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v, output: %s", err, out.String())
@@ -106,7 +111,7 @@ func TestAccessReviewMarkCmd_UpdatesRosterAndRecordsAudit(t *testing.T) {
 		t.Fatalf("expected the mark to be reflected on next list, got: %s", listOut.String())
 	}
 
-	auditPath := filepath.Join(dataDir, "access", "audit.jsonl")
+	auditPath := filepath.Join(reviewDataDir, "access", "audit.jsonl")
 	data, err := os.ReadFile(auditPath)
 	if err != nil {
 		t.Fatalf("expected an audit log to be written: %v", err)
