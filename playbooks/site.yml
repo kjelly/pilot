@@ -180,6 +180,8 @@
   tags: [observability, host-monitoring]
 - import_playbook: apply/dcgm-exporter-apply.yml
   tags: [observability, dcgm-exporter]
+- import_playbook: apply/snmp-exporter-apply.yml
+  tags: [observability, snmp-exporter]
 - import_playbook: apply/alertmanager-apply.yml
   tags: [observability, alertmanager]
 - import_playbook: apply/prometheus-apply.yml
