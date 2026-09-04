@@ -410,6 +410,7 @@ func componentsForPlaybookOptInFixture(t *testing.T) (catalog contract.Catalog, 
 		{ID: "always-on", Role: "always-on-role", Site: contract.Site{Include: true}, Playbooks: contract.Playbooks{Apply: "playbooks/apply/always-on-apply.yml"}},
 		{ID: "opt-in-assigned", Role: "opt-in-assigned-role", Site: contract.Site{Include: false, OptIn: true}, Playbooks: contract.Playbooks{Apply: "playbooks/apply/opt-in-assigned-apply.yml"}},
 		{ID: "opt-in-unassigned", Role: "opt-in-unassigned-role", Site: contract.Site{Include: false, OptIn: true}, Playbooks: contract.Playbooks{Apply: "playbooks/apply/opt-in-unassigned-apply.yml"}},
+		{ID: "opt-in-all-role", Role: "all", Site: contract.Site{Include: false, OptIn: true}, Playbooks: contract.Playbooks{Apply: "playbooks/apply/opt-in-all-role-apply.yml"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -455,6 +456,27 @@ func TestComponentsForPlaybook_SiteWideIncludesOptInComponentAssignedInScope(t *
 	}
 	if slices.Contains(components, "opt-in-unassigned") {
 		t.Errorf("opt-in component with no assigned host anywhere must stay excluded: %v", components)
+	}
+}
+
+// TestComponentsForPlaybook_SiteWideOptInExcludesAllPseudoRole is the
+// regression lock for a real vm-target finding: freeipa-ca-trust is the one
+// opt-in component whose Role is "all" (every host belongs to it), and its
+// required dependency on freeipa-server. Treating "all" as an explicit
+// inventory assignment auto-included it in literally every site-wide
+// deploy regardless of topology, hard-failing any deploy with no
+// freeipa-server host at all — a real regression, not hypothetical. "all"
+// is a pseudo-role, not an operator assigning a specific host to this
+// component, so it must never trigger opt-in inclusion.
+func TestComponentsForPlaybook_SiteWideOptInExcludesAllPseudoRole(t *testing.T) {
+	catalog, inv := componentsForPlaybookOptInFixture(t)
+
+	components, err := componentsForPlaybook(context.Background(), catalog, "playbooks/site.yml", inv, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(components, "opt-in-all-role") {
+		t.Errorf("an opt-in component whose Role is the \"all\" pseudo-role must never be auto-included: %v", components)
 	}
 }
 
@@ -514,6 +536,37 @@ func TestValidateOptionalKV(t *testing.T) {
 		if (err != nil) != c.wantErr {
 			t.Errorf("validateOptionalKV(%q) error=%v, wantErr=%v", c.in, err, c.wantErr)
 		}
+	}
+}
+
+// TestDeployTagsPrompts_NeverUseKeyValueValidator locks a real bug found
+// via vm-target verification: all three --tags prompts (site-wide deploy,
+// reconcile catalog batch input, single reconcile input) were wired to
+// validateOptionalKV, which requires every whitespace-separated token to
+// contain "=" — silently rejecting the prompt's own example input
+// ("freeipa,keycloak", "C1,C2") since --tags values are bare comma/space-
+// separated identifiers (component IDs, roles, or check-row IDs), never
+// key=value. validateOptionalKV is correct for the SEPARATE "-e key=value"
+// extra-vars prompts a few lines below each of these — this only asserts
+// no runTextProgram call whose prompt text mentions --tags reuses it.
+func TestDeployTagsPrompts_NeverUseKeyValueValidator(t *testing.T) {
+	root := repoRootForTest(t)
+	src, err := os.ReadFile(filepath.Join(root, "cmd", "pilot", "cmd", "deploy.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, line := range strings.Split(string(src), "\n") {
+		if !strings.Contains(line, "runTextProgram(") || !strings.Contains(line, "--tags") {
+			continue
+		}
+		found++
+		if strings.Contains(line, "validateOptionalKV") {
+			t.Errorf("--tags prompt must not validate with validateOptionalKV (rejects bare comma-separated tags like the prompt's own example): %s", strings.TrimSpace(line))
+		}
+	}
+	if found == 0 {
+		t.Fatal("no --tags prompt found in deploy.go — this test's search pattern is stale")
 	}
 }
 
