@@ -97,6 +97,7 @@ func TestRepairClient_CapabilitiesAndPlan_RealSubprocess(t *testing.T) {
 		t.Fatal(err)
 	}
 	inv := writeRepairClientFixtureInventory(t, map[string]string{"prometheus": "web1"})
+	isolateRepairClientDataDir(t)
 
 	client := &RepairClient{PilotBinary: binary, Dir: repoRoot, Inventory: inv}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -138,6 +139,7 @@ func TestRepairClient_Plan_UnknownComponentSurfacesAsError(t *testing.T) {
 		t.Fatal(err)
 	}
 	inv := writeRepairClientFixtureInventory(t, map[string]string{"prometheus": "web1"})
+	isolateRepairClientDataDir(t)
 	client := &RepairClient{PilotBinary: binary, Dir: repoRoot, Inventory: inv}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -145,4 +147,22 @@ func TestRepairClient_Plan_UnknownComponentSurfacesAsError(t *testing.T) {
 	if _, err := client.Plan(ctx, "inc-1", "web1", "not-a-real-component", "restart"); err == nil {
 		t.Fatal("expected an error for an unknown component")
 	}
+}
+
+// isolateRepairClientDataDir points the spawned `pilot mcp serve`
+// subprocess's PILOT_DATA_DIR at a fresh temp dir instead of the real
+// shared ~/.local/share/pilot default. Without this, every RealSubprocess
+// test both mutates the operator's actual production Ansible log (via
+// runMCPServe's unconditional prepareDeployAnsibleRuntime/MaintainLog
+// call) and, once that log has grown to real size, pays its full
+// redact-the-whole-file cost (~15s once ansible.log nears its 100MB
+// DefaultLogMaxBytes cap — timed with a standalone instrumented probe) on
+// EVERY subprocess spawn. Two sequential spawns in one 30s test ctx then
+// sit right on the edge of the ctx deadline. Setting PILOT_DATA_DIR here
+// (inherited by exec.CommandContext's default env) gives each subprocess
+// an empty log, making startup near-instant and — independently of
+// timing — stops these tests from touching real user data at all.
+func isolateRepairClientDataDir(t *testing.T) {
+	t.Helper()
+	t.Setenv("PILOT_DATA_DIR", t.TempDir())
 }
