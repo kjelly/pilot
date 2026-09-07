@@ -76,15 +76,29 @@ make test-prereq     # go / docker / ansible 一鍵檢查
 ./pilot doctor       # ansible 工具鏈 + vm-target（KVM/virt-customize）前置
 ```
 
-## 3. 新增功能的測試 checklist
+## 3. 交付前 SOP checklist（新增/修改功能一律照跑）
 
 ```bash
 go build ./...                      # 1) 編譯
 go vet ./...                        # 2) 靜態分析
 CI=1 go test ./... -count=1         # 3) 全部測試
+make test-race                      # 3b) race detector（碰共用/並行 state 的改動必跑）
 make playbook-lint                  # 4) playbook 有動的話
 # 5) spec/playbook 有動的話：vm-target test 真跑一輪（見 AGENTS.md §1.4）
 ```
+
+以上 5 項是底線，一定要過。踩到下表任一種情境時**額外**做對應那一項——
+這張表是 2026-09 兩週 22 個 fix commit 回顧後整理的高風險清單，細節見
+AGENTS.md 對應章節。「自動化程度」欄老實標出哪些是一個指令就能查、哪些
+仍要人判斷：
+
+| 你動到的東西 | 指令 | 自動化程度 |
+|---|---|---|
+| `playbooks/apply/*.yml` 裡任何 `tags: [always]` 的 task | `go test ./internal/spec/ -run TestRegression_AlwaysTaggedTasksHaveAllPrerequisitesAlways -v`（全 repo 靜態掃描，`CI=1 go test ./...` 已經跑得到，不用另外加） | **多數情況全自動**。它只做靜態 data-flow 分析，看不穿 `include_tasks`/role 邊界（跨檔案讀變數）——這種情況要手動對「空 `--tags`」與「單一元件 tag」各跑一次 `ansible-playbook --check --diff`（AGENTS.md §4.4） |
+| `cmd/pilot/cmd/deploy.go` 的 `--limit`/依賴展開/`effectiveDeploymentTags` | 1) `go test ./cmd/pilot/cmd/ -run TestResolveDeploymentScope -v` 先確認既有場景沒回歸；2) 針對這次改動手寫一個新的跨兩跳依賴 regression test；3) `go run ./cmd/pilot vm-target topology test --topology <多跳依賴topology.yaml> --ephemeral -- -e target_group=all --limit <部分host>` | **半自動**。第 1 步是指令；第 2、3 步要自己準備案例與 topology，無法一鍵生成（AGENTS.md §5.5） |
+| 解析 `ipa`/`dig`/`docker` 等外部 CLI 輸出的程式碼或 task | 沒有指令能自動判斷「fixture 是不是真的擷取的」；手動 SSH 進 vm-target 跑一次真實指令，把 stdout **和** stderr 存下來，再對照程式裡的 fixture/regex | **純手動判斷**。檢查重點：訊息在哪個串流、換行是否為字面 `\n`、單位是否一致（AGENTS.md §5.6） |
+| 新增/改一個 gate/探測 task | `make poc-checkmode-test VAULT=<path>`（預設跑 minimal-poc topology + `site.yml`；用 `TOPOLOGY=`/`PLAYBOOK=` 覆寫成你要測的那支） | **全自動**，一鍵指令（AGENTS.md §4.0 round-13） |
+| 改到測試共用的 package-level 變數（如 `dataDir`） | `go test ./cmd/pilot/cmd/ -run <你的新測試> -v` 單獨跑一次，再 `CI=1 go test ./cmd/pilot/cmd/... -v` 整包跑一次——兩次結果不一致就是有殘留 state | **指令現成，但要記得手動跑兩次比對**；CI 預設只跑整包，不會主動幫你做這個對照 |
 
 ## 4. 相關檔案
 
