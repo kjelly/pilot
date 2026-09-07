@@ -1,12 +1,14 @@
 # Verification Spec — freeipa-identity（canonical identity primitives + legacy authorization reconciler）
 
-> 版本：v1.8（2026-08-21 對 `pilot roster remove-user`/`remove-group` +
-> group 歷史 marker 機制（v1.7 新增，見 §9）跑完真實 FreeIPA vm-target
-> 驗證：spec.md §22.5/§22.8 全部 mandatory 場景 PASS，過程中發現並修好
-> 2 個真實 bug（1 個既有的 ansible-core 2.19 相容性缺口、1 個本次新增碼
-> 的 check-mode 缺口），證據見 §9.6。§2 的 24-row checklist PASS 狀態仍是
-> v1.6 那次的既有基線，不含本次新增內容——併入需要額外準備 marker
-> fixture，留待下一輪）
+> 版本：v1.10（2026-09-07 交付 static HBAC rule 刪除生命週期
+> （`hbac.rules[].state: absent` → 真的 `ipa hbacrule-del`），對真實
+> FreeIPA vm-target 完成 Case A（真實刪除）/Case B（冪等 no-op）/
+> Case D（check-mode 預覽）/`allow_all` Ansible 層防護驗證，見 §7.5、
+> 候選 row C30 見 §9.4。§2 的 24-row checklist PASS 狀態仍是 v1.6 那次
+> 的既有基線，不含本次新增內容——併入需要 fixture roster 在兩態間切換，
+> 留待下一輪）
+> 上一版：v1.9（2026-08-27 v3.2 Identity & Credential Hardening 對真實
+> FreeIPA vm-target 完成端對端驗證，見 §10）
 > 上一個已實跑驗證的基線：v1.6（2026-08-11 roster-schema-v2 migration：
 > netgroups 與 hostgroup 巢狀 membership 交付，新增 C19–C24，已在
 > `freeipa-server` vm-target 上依序套用 legacy/canonical v1/schema-v2 三份
@@ -393,6 +395,89 @@ pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.ym
 #    2026-07-16（demo 環境 alice：兩次查詢皆為 20260716064701Z，密碼確實沒被動）。
 ```
 
+### 7.5 驗證「static HBAC rule 刪除」（`state: absent` → 真的 `ipa hbacrule-del`）
+
+對應 `docs/superpowers/specs/2026-09-07-pilot-hbac-rule-deletion-spec.md` Phase 1。
+`freeipa-identity-canonical.roster.yaml` 新增了永久 fixture rule
+`fixture-hbac-delete-target`（固定 `state: present`），其 state 在下列
+測試中被暫時改成 `absent`（用一份 scratch 副本，never 直接改動已提交的
+fixture 檔）：
+
+```bash
+# 0. 先跑一次既有 §7.1/§7.1a SOP 建立 baseline（含 fixture-hbac-delete-target
+#    state: present），再確認它活著：
+pilot vm-target run --name <server-vm> playbooks/test/fixtures/freeipa-identity-fixtures.yml \
+    -e fixtures_target_group=all -e @~/.vault/main.yaml
+pilot vm-target run --name <server-vm> playbooks/test/fixtures/freeipa-identity-canonical-fixtures.yml \
+    -e fixtures_target_group=all -e @~/.vault/main.yaml
+
+# 1. 複製 canonical fixture roster 到 scratch，把 fixture-hbac-delete-target
+#    的 state 改成 absent（其餘欄位、其他 rule 全部不動）：
+cp playbooks/test/fixtures/freeipa-identity-canonical.roster.yaml /tmp/hbac-delete-test.roster.yaml
+# (edit /tmp/hbac-delete-test.roster.yaml: fixture-hbac-delete-target state -> absent)
+
+# 2. Case D — check-mode 預覽（不得真的刪除）：
+pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.yml \
+    -e target_group=all -e freeipa_roster_file=/tmp/hbac-delete-test.roster.yaml \
+    -e @~/.vault/main.yaml --check --diff
+
+# 3. Case A — 真實 apply（應該真的刪除）：
+pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.yml \
+    -e target_group=all -e freeipa_roster_file=/tmp/hbac-delete-test.roster.yaml \
+    -e @~/.vault/main.yaml
+
+# 4. Case B — 冪等重跑（roster 仍是 absent，live 已經不存在）：
+pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.yml \
+    -e target_group=all -e freeipa_roster_file=/tmp/hbac-delete-test.roster.yaml \
+    -e @~/.vault/main.yaml
+```
+
+實測於 2026-09-07（拋棄式 AlmaLinux 9 `freeipa-server` vm-target）：
+
+- **Case D（check-mode）**：`PLAY RECAP freeipa-server: ok=61 changed=0 failed=0`。
+  `"Delete static HBAC rules explicitly marked absent"` 該筆 `skipping`（真的沒執行），
+  緊接的 `"Report pending static HBAC rule deletions in check mode"` debug task
+  印出 `"would delete HBAC rule fixture-hbac-delete-target (check mode, not executed)"`。
+  事後查 `ipa hbacrule-show fixture-hbac-delete-target --all` 仍 `rc=0`（活著）。
+- **Case A（真實刪除）**：`PLAY RECAP freeipa-server: ok=101 changed=1 failed=0`
+  （唯一 changed 就是這個 delete task）。事後查
+  `ipa hbacrule-show fixture-hbac-delete-target` → `rc=2`，
+  `stderr="ipa: ERROR: fixture-hbac-delete-target: HBAC rule not found"`，
+  確認真的被刪除。
+- **Case B（冪等重跑）**：`PLAY RECAP freeipa-server: ok=101 changed=0 failed=0`；
+  delete task 該筆結果為 `ok`（非 `changed`），符合「已經不存在＝no-op 成功」。
+- **`allow_all` 保護（Ansible 層 defense-in-depth，繞過 Go validator 直接對
+  hand-edited roster 跑）**：另建一份 scratch roster，加入
+  `{name: allow_all, state: absent}`。`PLAY RECAP freeipa-server: ok=76
+  changed=0 failed=1`，play 在到達任何 delete task 之前就在
+  `"Gate: refuse to delete allow_all via the static HBAC rule lifecycle"`
+  assert 失敗：`"allow_all is a FreeIPA built-in safety rule and cannot be
+  removed via hbac.rules[].state: absent. Use hbac.disable_allow_all
+  instead."`；事後查 `ipa hbacrule-show allow_all` 確認 rule 仍存在
+  （未被刪除）。
+- **Case C（FreeIPA 因為被引用而拒絕刪除）：未執行**。查證後認為 FreeIPA
+  的 `hbacrule-del` 對一般 login rule 沒有內建的 referential-integrity
+  阻擋（不像 hostgroup/netgroup 有 membership 依賴會擋刪）——換言之，
+  spec §15.2/§16.5 Case C 假設的「FreeIPA 因為仍被引用而拒絕刪除」這個
+  觸發條件，在目前的 FreeIPA 資料模型下沒有找到可重現的真實建構方式。
+  `failed_when: rc != 0 and 'not found' not in stderr` 這個判斷邏輯本身
+  已透過 Case A 的真實 `stderr`（`"HBAC rule not found"`，確認字串比對
+  命中）與既有 `netgroup-del`/grant-HBAC-prune 兩個同構的 production
+  path 佐證，僅 Case C 的「其他錯誤」分支未經活體觸發驗證。
+
+過程中另外發現並修好兩個與本功能無關、影響任何 vm-target 真實測試的既有
+pilot 缺陷：(1) `pilot vm-target run --sandbox` 對 `-e @~/.vault/...` 形式
+的 extra-vars-file 引用不會展開 `~`（`cmd/pilot/cmd/vm_target.go` 的
+`os.Stat`/`docker cp` 直接吃字面路徑），導致沙箱容器內的 ansible 把
+`~` 解成容器自己的 `/root` 而找不到檔案；已加
+`expandHomeDir`（`TestExpandHomeDir` 鎖回歸）。(2)
+`playbooks/test/fixtures/freeipa-identity-canonical.roster.yaml` 的
+`freeipa-nfs-v2.ipa.pilot.internal` fixture host 硬編碼 IP
+`192.168.122.5`，撞上本次新建 vm-target 剛好被 DHCP 分到的同一個
+IP（libvirt `default` network 的 dhcp-range 從 `.2` 遞增分配），
+導致 `ipa host-add` 因 IP 衝突而失敗；已改為 `192.168.122.250`（同一
+range 高位、與遞增分配序列碰撞機率低很多，見檔案內註解）。
+
 ## 8. 變更紀錄
 
 | 日期 | 版本 | 變更 | 變更者 |
@@ -407,6 +492,7 @@ pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.ym
 | 2026-08-21 | v1.7 | 新增 `pilot roster remove-user`/`remove-group`（見 §9），roster-local「撤銷從未套用過的誤增紀錄」，非 FreeIPA 撤權。修復兩個既有 Go validator 缺口：`checkSudo` 從未驗證 `subjects.users` 是否為已知使用者（`checkHBAC` 早就驗證同類 group 引用，唯獨 sudo 的 user 引用缺）、`nfs.servers[].shares[].ownership.group`/`acl.{access,default}.named_groups[].name` 完全零驗證（`internal/inventory/roster_validate.go` 新增 `checkNFS`）。新增 `internal/inventory/roster_references.go`（inbound-reference 掃描，區分 removable/blocked）、`roster_remove.go`（`Simulate/RemoveRosterUser/Group`，沿用既有 yaml.Node surgery + mutation lock 慣例）、`roster_vault.go` 新增 `DecryptRosterToTempFile`/`MutateEncryptedRosterFile`（沿用 `pilot roster migrate` 既有的 `ansible-vault` 呼叫，未另立第二套 vault 實作）。新增 `internal/freeipa` 套件（`ProbeUserHistory`/`ProbeGroupHistory`，讀 §9.2 兩支新 check playbook 的機器可讀 JSON 結果，fail-closed）。`freeipa-identity-apply.yml` 新增 group 歷史 marker 機制（§9.1）：每個套用成功的 `state: present` group 都會建立對應的 `pilot-internal-history-g-<sha256>` non-POSIX 空 marker group，`state: absent` 刪除真正的 group 前一定先確保 marker 存在，marker 永不被刪除——這是 FreeIPA 沒有 preserved-group 生命週期時，讓 `remove-group` 的「曾套用過永遠擋刪」保證在真正的 group 被刪除後依然成立的唯一機制。**刻意的範圍決策**：user 側的 `state: absent` **沒有**改成 FreeIPA `--preserve` 語意（`ipa user-del` 維持永久刪除不變）——評估後於本次交付明確放棄，理由與後果見 §9.1。`go test ./...`（1902 tests，含 `-race`）、`go vet`、`gofmt`、`make playbook-lint`（新增 `playbooks/check/*.yml` 進掃描範圍）全綠；真實 FreeIPA vm-target 驗證**尚未執行**，見 §9 開頭狀態列與 §9.5——這是本次交付明確承認、非隱藏的待辦。 | pilot |
 | 2026-08-21 | v1.8 | 對 v1.7 交付的 `pilot roster remove-user`/`remove-group` + group 歷史 marker 機制完成真實 FreeIPA vm-target 驗證（拋棄式 AlmaLinux 9 `freeipa-remove-test`），spec.md §22.5/§22.8 全部 mandatory 場景（never-applied user/group、applied active user/group 拒絕、out-of-band preserved user 拒絕、FreeIPA 探測失敗 fail-closed、historical_marker 拒絕、marker 驗證失敗保護 `group-del` 不被執行）與額外的 `--cascade-references`/NFS `ownership.group` 場景皆 PASS，證據見 §9.6。過程中發現並修好 2 個真實 bug：(1) 既有、非本次新增碼的 ansible-core 2.19 相容性缺口——`freeipa-identity-apply.yml` 的「Select legacy admin settings」`set_fact` 在 `when` 判斷前就試圖 resolve 完全未定義的 `ipa_admin_password`，讓任何 schema-v2 canonical roster 的 apply 直接炸掉，此環境相容性缺口先前從未被本 spec 抓到；修法 `\| default('')`。(2) 本次新增碼的 check-mode 缺口——`playbooks/apply/tasks/freeipa-group-history-marker.yml` 的唯讀查詢任務在 `--check` 下被自動跳過導致誤判成「marker 存在」，以及其 postcondition assert 在依賴任務被 check-mode 跳過後仍無條件執行導致誤判「驗證失敗」；修法分別是 `check_mode: false`（讀取安全）與 `when:` 加 `and not ansible_check_mode`，與本檔 §7.2a（v1.1）記載的既有 bug 同類。§9.4 的 C25/C26 由候選升級為已實測（尚未併入 §2）。`make playbook-lint`、`go test ./...` 全綠。 | pilot |
 | 2026-08-27 | v1.9 | v3.2 Identity & Credential Hardening 交付（`password_policies`/`credential_policies`/`security.privileged_identity`/`users[].authentication` 四個新 roster 欄位）對真實 FreeIPA vm-target（拋棄式 AlmaLinux 9 `freeipa-v32-test`）完成端對端驗證，見 §10：privileged_identity fail-before-write gate、password_policy 建立/修改/刪除、user auth types 建立、兩者的冪等性、`pilot identity drift`/`--repair-managed`、`freeipa-capability-probe.yml`、`pilot identity hygiene` 全數 PASS。過程中發現並修好 3 個本次交付新增碼的真實 bug（單元測試用的假資料自洽但假資料本身錯，只有對真的 server 跑才會露餡）：(1) `freeipa-identity-apply.yml` 的 `ipa pwpolicy-add/-mod/-del` 三個 `changed_when` 字串比對全部落空（這三個指令成功時的真實輸出裡根本沒有被比對的字串），改用 `rc == 0`；(2) `freeipa-access-drift-probe.yml` 的 `max_life_days`/`min_life_hours` 漏了秒→天/小時換算，導致任何真的套用成功、毫無 drift 的 policy 都被永遠誤報成 drift；(3) `internal/accessgrants/hygiene.go` 把純資訊性的 `max_age_unknown` finding 誤算進 SSH compliance 判定，任何有設定 `ssh.max_age`（report-only）的 policy 底下的使用者都會被誤判 `ssh_key_compliance: fail`，即使金鑰完全乾淨。三者詳細修法與 §10.4 候選 checklist row（C27–C29）見 §10。`go test ./...`、`go vet`、`gofmt`、`ansible-playbook --syntax-check`、`ansible-lint` 全綠。 | pilot |
+| 2026-09-07 | v1.10 | 交付 `docs/superpowers/specs/2026-09-07-pilot-hbac-rule-deletion-spec.md` Phase 1（static HBAC rule 刪除生命週期）：`freeipa-identity-apply.yml` 新增 `ipa_hbac_rules_absent` 分流 + 單一 task 刪除（複用既有 `netgroup-del`/grant-HBAC-prune 的 `failed_when` 慣例，見 spec §6.2）+ check-mode preview debug 訊息 + `allow_all` Ansible 層防護；Go validator（`checkHBAC`）新增拒絕 `allow_all` + `state: absent` 的違規。新增永久 fixture rule `fixture-hbac-delete-target`。真實 vm-target 驗證見 §7.5、候選 row C30 見 §9.4：Case A（真實刪除）/Case B（冪等 no-op）/Case D（check-mode 預覽）/`allow_all` 防護皆 PASS；Case C（FreeIPA 因引用拒絕刪除）查證後認為此資料模型下不可重現，未執行，見 §7.5 說明。過程中順手修好兩個既有、與本功能無關的 pilot 缺陷：`vm-target run --sandbox` 的 `-e @~/...` vault 檔案路徑未展開 `~`（`expandHomeDir`，`TestExpandHomeDir` 鎖回歸）、canonical fixture 的硬編碼 IP 撞上新建 vm-target 的 DHCP 分配。`go test ./...`、`go vet`、`make playbook-lint`（此次修改的檔案部分；既有 `audit-log-forwarding-apply.yml` 的 duplicate-key 問題與本次改動無關，未修）全綠 | pilot |
 
 ## 9. `pilot roster remove-user` / `remove-group`（roster-local undo，非 FreeIPA 撤權）
 
@@ -504,11 +590,14 @@ yaml.Node surgery 寫入。加密 roster（`--vault-password-file`）全程走
 |---------|----------|-------|----------|---------|---------|
 | C25 | group-history-marker | canonical `state: present` group 對應的 `pilot-internal-history-g-<hash>` marker 存在、為 non-POSIX、且 description 與 group 名稱吻合 | ~pilot.group-history/v1 | `ipa group-show pilot-internal-history-g-<sha256("<group 名稱>")的小寫十六進位> --all --raw` | PASS——`team-applied-active` 對應 marker `pilot-internal-history-g-4ea471ef...c5a239e`，`Description: pilot.group-history/v1 name=team-applied-active`，無 `GID` 欄位（確認 non-POSIX），見 §9.6 |
 | C26 | group-history-marker | 對某個 canonical group 執行 `state: absent` 並 reconcile 後，實際 group 已刪除、marker 依然存在 | 0 / 0 | 先確認 `ipa group-show <group>` 回傳非 0（已刪除），再確認 marker 的 `ipa group-show` 回傳 0（仍存在）| PASS——`team-deleted-marker` 刪除後 `ipa group-show team-deleted-marker` 回傳 `group not found`，其 marker `pilot-internal-history-g-b80be136...4c015bfd557` 仍可查得，見 §9.6 |
+| C30 | hbac-rule-deletion | 對 `hbac.rules[]` 裡某條 rule 設 `state: absent` 並 reconcile 後，該 rule 真的從 FreeIPA 消失，且 roster 仍保留該筆宣告 | non-zero rc / not found | `ipa hbacrule-show <rule>` | PASS——`fixture-hbac-delete-target`：apply 前 `rc=0`（存在），apply 後 `rc=2` `stderr="...: HBAC rule not found"`；重跑冪等（`changed=0`）；`--check` 模式下不執行、僅印出 preview 訊息，見 §7.5 |
 
-> 這兩列已在真實 vm-target 上跑過並截到真實輸出（§9.6），可信度等同
-> PASS-verified；尚未併入 §2 是因為那份 checklist 走既有 fixture 驅動的
-> `pilot spec --generate` 模型，需要額外準備一份 marker fixture 才能納入
-> 自動化 `pilot verify` 流程，留待下一輪處理。
+> 這三列已在真實 vm-target 上跑過並截到真實輸出（§9.6／§7.5），可信度
+> 等同 PASS-verified；尚未併入 §2 是因為那份 checklist 走既有 fixture
+> 驅動的 `pilot spec --generate` 模型，C25/C26 需要額外準備一份 marker
+> fixture、C30 需要 fixture roster 在「本來就 present」與「先前已被本
+> 檔驗證流程刪除」兩態間切換，才能納入自動化 `pilot verify` 流程，留待
+> 下一輪處理。
 
 ### 9.5 目前的證據等級
 
