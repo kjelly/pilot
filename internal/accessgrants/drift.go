@@ -205,7 +205,8 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 // DriftItem is one detected mismatch between desired and live state.
 type DriftItem struct {
 	// Category is one of: hbac_orphan, sudo_orphan, hbac_missing,
-	// sudo_missing, account_expiration, auth_indicator.
+	// sudo_missing, hbac_should_be_absent, account_expiration,
+	// auth_indicator.
 	Category string
 	// Name is the compiled rule name, username, or hostname the drift
 	// concerns.
@@ -234,12 +235,16 @@ func (r DriftReport) CountByCategory() map[string]int {
 
 // ComputeDrift diffs desired compiled state against live, per this file's
 // documented scope. desiredHBAC/desiredSudo are Present==true entries a
-// caller wants to exist; live is DriftProbe's result for the SAME set of
-// names/users/hosts the caller asked DriftProbeOptions to probe — a name
-// this function was never asked to probe is invisible to it except via
-// the orphan check, which uses live.LiveHBACNames/LiveSudoNames
+// caller wants to exist; desiredAbsentStaticHBAC is spec.md's HBAC-
+// deletion-lifecycle §14 addition — hand-authored roster hbac.rules[]
+// entries with state: absent, which the reconciler should have deleted
+// live via `ipa hbacrule-del` — flagged as hbac_should_be_absent if a
+// probed name still exists. live is DriftProbe's result for the SAME set
+// of names/users/hosts the caller asked DriftProbeOptions to probe — a
+// name this function was never asked to probe is invisible to it except
+// via the orphan check, which uses live.LiveHBACNames/LiveSudoNames
 // independently of what was probed.
-func ComputeDrift(desiredHBAC []inventory.CompiledHBACRule, desiredSudo []inventory.CompiledSudoRule, desiredAuth []inventory.CompiledAuthPolicyHost, desiredAccounts []inventory.CompiledAccountExpiration, desiredPasswordPolicies []inventory.CompiledPasswordPolicy, desiredUserAuthTypes []inventory.CompiledUserAuthType, live LiveState) DriftReport {
+func ComputeDrift(desiredHBAC []inventory.CompiledHBACRule, desiredSudo []inventory.CompiledSudoRule, desiredAuth []inventory.CompiledAuthPolicyHost, desiredAccounts []inventory.CompiledAccountExpiration, desiredPasswordPolicies []inventory.CompiledPasswordPolicy, desiredUserAuthTypes []inventory.CompiledUserAuthType, desiredAbsentStaticHBAC []string, live LiveState) DriftReport {
 	var items []DriftItem
 
 	desiredHBACNames := map[string]bool{}
@@ -254,6 +259,17 @@ func ComputeDrift(desiredHBAC []inventory.CompiledHBACRule, desiredSudo []invent
 	for _, name := range live.LiveHBACNames {
 		if strings.HasPrefix(name, pilotGrantHBACPrefix) && !desiredHBACNames[name] {
 			items = append(items, DriftItem{Category: "hbac_orphan", Name: name, Detail: "Pilot-managed HBAC rule exists live but no current grant compiles to it"})
+		}
+	}
+	// hbac_should_be_absent covers a different object than hbac_orphan
+	// above: a hand-authored static hbac.rules[] entry the roster itself
+	// declares state: absent (never an unmanaged rule Pilot has no
+	// opinion on — see §4.2's "never prune unknown rules" principle,
+	// which is why this only ever checks names the roster explicitly
+	// listed, not every live.LiveHBACNames entry).
+	for _, name := range desiredAbsentStaticHBAC {
+		if live.HBACExists[name] {
+			items = append(items, DriftItem{Category: "hbac_should_be_absent", Name: name, Detail: "static roster HBAC rule is declared absent but still exists in FreeIPA"})
 		}
 	}
 
@@ -373,6 +389,34 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
+// staticAbsentHBACRuleNames reads roster hbac.rules[] entries whose state
+// is absent — spec.md's HBAC-deletion-lifecycle §6.1's ipa_hbac_rules_absent
+// normalize, mirrored here for drift's read-only purposes. allow_all can
+// never legitimately reach this list (roster_validate.go's checkHBAC
+// rejects it at the Go-validator layer before a roster with it ever
+// passes ValidateRosterFile), so no special-case exclusion is needed.
+func staticAbsentHBACRuleNames(rosterFile string) ([]string, error) {
+	names, err := inventory.RosterHBACRuleNames(rosterFile)
+	if err != nil {
+		return nil, err
+	}
+	var absent []string
+	for _, name := range names {
+		rule, found, err := inventory.RosterHBACRule(rosterFile, name)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		state, _ := rule["state"].(string)
+		if state == "absent" {
+			absent = append(absent, name)
+		}
+	}
+	return absent, nil
+}
+
 // DriftOnce is the top-level entry point `pilot access drift` uses: build
 // the desired plan (same compilers §18's apply path uses), probe live
 // state for exactly those names/users/hosts, and diff.
@@ -410,11 +454,21 @@ func DriftOnce(ctx context.Context, opts DriftProbeOptions) (DriftReport, error)
 		probeOpts.PasswordPolicyGroups = append(probeOpts.PasswordPolicyGroups, p.Group)
 	}
 
+	// BuildPlan's HBACRules are grant-COMPILED rules only (CompileGrantsFile)
+	// — hand-authored roster hbac.rules[] static entries are a separate
+	// object this package never compiles, so their state: absent lifecycle
+	// (spec.md's HBAC-deletion-lifecycle §14) has to be read directly.
+	staticAbsentHBAC, err := staticAbsentHBACRuleNames(opts.RosterFile)
+	if err != nil {
+		return DriftReport{}, err
+	}
+	probeOpts.HBACNames = append(probeOpts.HBACNames, staticAbsentHBAC...)
+
 	live, err := DriftProbe(ctx, probeOpts)
 	if err != nil {
 		return DriftReport{}, err
 	}
-	report := ComputeDrift(plan.HBACRules, plan.SudoRules, plan.AuthPolicyHosts, plan.AccountExpirations, plan.PasswordPolicies, plan.UserAuthTypes, live)
+	report := ComputeDrift(plan.HBACRules, plan.SudoRules, plan.AuthPolicyHosts, plan.AccountExpirations, plan.PasswordPolicies, plan.UserAuthTypes, staticAbsentHBAC, live)
 
 	if opts.StateDir != "" {
 		if auditErr := AppendAuditEvent(opts.StateDir, AccessAuditEvent{

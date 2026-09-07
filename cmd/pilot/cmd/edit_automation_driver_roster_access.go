@@ -307,6 +307,33 @@ func (d *automationDriver) setHBACServices(r *editRouterModel, name string, serv
 	return d.setChecklistSelection(r, services)
 }
 
+// deleteHBACRule drives the detail screen's "Delete login rule" choice
+// then the impact-summary confirm screen (pushRosterHBACDeleteConfirm)
+// with an explicit "y" — the screen defaults to "no" since this is a
+// SideEffectDestructive action. allow_all never offers this choice
+// (edit_tui_roster_access.go's pushRosterHBACDetail), so driving this
+// against allow_all fails closed with "not found" from choose(), the
+// same protection the interactive TUI gets.
+func (d *automationDriver) deleteHBACRule(r *editRouterModel, name string) error {
+	if err := d.ensureRosterHBACDetail(r, name); err != nil {
+		return err
+	}
+	if err := d.choose(r, "Delete login rule"); err != nil {
+		return err
+	}
+	return d.confirmYesNo(r, true)
+}
+
+// restoreHBACRule reverses a soft delete (state: present) — no
+// confirmation screen, matching the interactive TUI: restoring access
+// intent is reversible and re-selects the same rule, unlike delete.
+func (d *automationDriver) restoreHBACRule(r *editRouterModel, name string) error {
+	if err := d.ensureRosterHBACDetail(r, name); err != nil {
+		return err
+	}
+	return d.choose(r, "Restore login rule")
+}
+
 // setHBACDisableAllowAll toggles the global hbac.disable_allow_all flag
 // only when it doesn't already match want — selecting the menu item
 // flips the current value directly (pushRosterHostAccessMenu case 2),

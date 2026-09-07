@@ -449,3 +449,78 @@ func TestSetHBACTargets_ExtendedBulkReplacesHostsAndHostgroups(t *testing.T) {
 		t.Fatalf("targets.hostgroups = %v, want [webhosts]", got)
 	}
 }
+
+// TestEditAutomationDriverRosterAccessFlow_DeleteAndRestoreHBACRule covers
+// the HBAC-deletion-lifecycle spec's Phase 2 structured actions end to
+// end: delete_hbac_rule only sets state: absent (the rule and its
+// subjects/targets/services survive in the roster), and restore_hbac_rule
+// reverses it.
+func TestEditAutomationDriverRosterAccessFlow_DeleteAndRestoreHBACRule(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMinimalRosterFixture(t, dir)
+
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_group", Name: "team-web", Category: "team"},
+		{Action: "create_hostgroup", Name: "webhosts"},
+		{Action: "create_hbac_rule", Name: "web-login", Groups: []string{"team-web"}, Hostgroups: []string{"webhosts"}, Services: []string{"sshd"}},
+		{Action: "delete_hbac_rule", Name: "web-login"},
+	}}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	rule, found, err := inventory.RosterHBACRule(path, "web-login")
+	if err != nil || !found {
+		t.Fatalf("expected the soft-deleted rule to still exist in the roster: found=%t err=%v", found, err)
+	}
+	if rule["state"] != "absent" {
+		t.Fatalf("state = %v, want absent", rule["state"])
+	}
+	sub, _ := rule["subjects"].(map[string]any)
+	groups, _ := sub["groups"].([]any)
+	if len(groups) != 1 || groups[0] != "team-web" {
+		t.Fatalf("delete_hbac_rule must preserve subjects.groups, got %+v", groups)
+	}
+
+	restoreScenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "restore_hbac_rule", Name: "web-login"},
+	}}
+	r2 := newEditRouterModel(dir)
+	if err := d.run(&r2, restoreScenario); err != nil {
+		t.Fatalf("driver.run() restore error = %v", err)
+	}
+	rule, found, err = inventory.RosterHBACRule(path, "web-login")
+	if err != nil || !found {
+		t.Fatalf("read web-login after restore: found=%t err=%v", found, err)
+	}
+	if rule["state"] != "present" {
+		t.Fatalf("state = %v, want present after restore", rule["state"])
+	}
+}
+
+// TestEditAutomationDriverRosterAccessFlow_DeleteHBACRuleRejectsAllowAll
+// proves delete_hbac_rule fails closed against allow_all through the same
+// mechanism the interactive TUI uses (pushRosterHBACDetail never offers
+// the Delete choice for it), not a separate allow-list the two surfaces
+// could drift apart on.
+func TestEditAutomationDriverRosterAccessFlow_DeleteHBACRuleRejectsAllowAll(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMinimalRosterFixture(t, dir)
+	if err := inventory.AppendRosterHBACRule(path, map[string]any{
+		"name": "allow_all", "state": "present", "enabled": true,
+	}); err != nil {
+		t.Fatalf("seed allow_all rule: %v", err)
+	}
+
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "delete_hbac_rule", Name: "allow_all"},
+	}}
+	r := newEditRouterModel(dir)
+	d := automationDriver{}
+	if err := d.run(&r, scenario); err == nil {
+		t.Fatal("expected delete_hbac_rule against allow_all to fail — the TUI never offers that choice")
+	}
+}

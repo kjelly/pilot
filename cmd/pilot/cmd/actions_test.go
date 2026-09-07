@@ -19,6 +19,7 @@ func TestSemanticActionCatalogIsStable(t *testing.T) {
 		"create_group", "set_group_field", "set_group_members_users", "set_group_members_groups",
 		"create_hostgroup", "set_hostgroup_field", "set_hostgroup_hostgroups",
 		"create_hbac_rule", "set_hbac_groups", "set_hbac_users", "set_hbac_targets", "set_hbac_services", "set_hbac_disable_allow_all",
+		"delete_hbac_rule", "restore_hbac_rule",
 		"create_grant", "set_grant_subjects", "set_grant_targets", "set_grant_validity", "set_grant_justification",
 		"set_grant_privilege", "set_grant_activation", "delete_grant", "activate_breakglass", "deactivate_breakglass",
 		"create_sudo_command_group", "set_sudo_command_group_commands",
@@ -95,7 +96,7 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	if schema.PilotVersion == "" {
 		t.Error("pilot_version is empty")
 	}
-	if schema.SchemaVersion != 1 || len(schema.Actions) != 102 {
+	if schema.SchemaVersion != 1 || len(schema.Actions) != 104 {
 		t.Fatalf("schema metadata = schema_version %d, actions %d", schema.SchemaVersion, len(schema.Actions))
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {
@@ -197,6 +198,7 @@ func TestActionsListIncludesEverySemanticAction(t *testing.T) {
 		"create_group", "set_group_field", "set_group_members_users", "set_group_members_groups",
 		"create_hostgroup", "set_hostgroup_field", "set_hostgroup_hostgroups",
 		"create_hbac_rule", "set_hbac_groups", "set_hbac_users", "set_hbac_targets", "set_hbac_services", "set_hbac_disable_allow_all",
+		"delete_hbac_rule", "restore_hbac_rule",
 		"create_grant", "set_grant_subjects", "set_grant_targets", "set_grant_validity", "set_grant_justification",
 		"set_grant_privilege", "set_grant_activation", "delete_grant", "activate_breakglass", "deactivate_breakglass",
 		"create_sudo_command_group", "set_sudo_command_group_commands",

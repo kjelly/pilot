@@ -235,7 +235,14 @@ func pushRosterHBACMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	// The HBAC rule's own name is its stable identity.
 	choices := make([]tui.Choice, 0, len(names)+2)
 	for _, n := range names {
-		choices = append(choices, tui.Choice{ID: n, Label: "🔑 " + n})
+		label := "🔑 " + n
+		// A soft-deleted rule (state: absent) stays listed — spec.md's
+		// HBAC-deletion-lifecycle §9.3 — so the operator can tell it apart
+		// from one still granting access, and reach its Restore option.
+		if f, found, _ := inventory.RosterHBACRule(path, n); found && rosterStringOr(f, "state", "present") == "absent" {
+			label += " [absent]"
+		}
+		choices = append(choices, tui.Choice{ID: n, Label: label})
 	}
 	choices = append(choices,
 		tui.Choice{ID: "roster.hbac.list.add", Label: "➕ 新增登入規則"},
@@ -465,18 +472,34 @@ func pushRosterHBACDetail(r *editRouterModel, dir, path, name, banner string) te
 	}
 	sub := rosterSubmap(f, "subjects")
 	tar := rosterSubmap(f, "targets")
+	absent := rosterStringOr(f, "state", "present") == "absent"
 	choices := []tui.Choice{
 		{ID: "roster.hbac.detail.subjects_groups", Label: fmt.Sprintf("subjects.groups（%v）", rosterStringSlice(sub, "groups"))},
 		{ID: "roster.hbac.detail.subjects_users", Label: fmt.Sprintf("subjects.users（%v）", rosterStringSlice(sub, "users"))},
 		{ID: "roster.hbac.detail.targets_hostgroups", Label: fmt.Sprintf("targets.hostgroups（%v）", rosterStringSlice(tar, "hostgroups"))},
 		{ID: "roster.hbac.detail.targets_hosts", Label: fmt.Sprintf("targets.hosts（%v）", rosterStringSlice(tar, "hosts"))},
 		{ID: "roster.hbac.detail.services", Label: fmt.Sprintf("services（%v）", rosterStringSlice(f, "services"))},
-		{ID: "roster.hbac.detail.back", Label: "↩  返回"},
 	}
+	// allow_all is FreeIPA's built-in safety rule and can never be
+	// deleted through this lifecycle (roster_validate.go's checkHBAC
+	// already rejects state: absent for it) — offering "Delete" here
+	// would just bounce back with a validation error, so it's omitted
+	// outright (spec.md's HBAC-deletion-lifecycle §16.3).
+	lifecycleIdx := -1
+	switch {
+	case absent:
+		lifecycleIdx = len(choices)
+		choices = append(choices, tui.Choice{ID: "roster.hbac.detail.restore", Label: "♻️  Restore login rule"})
+	case name != "allow_all":
+		lifecycleIdx = len(choices)
+		choices = append(choices, tui.Choice{ID: "roster.hbac.detail.delete", Label: "🗑  Delete login rule"})
+	}
+	backIdx := len(choices)
+	choices = append(choices, tui.Choice{ID: "roster.hbac.detail.back", Label: "↩  返回"})
 	spec := tui.SelectSpec{ScreenID: "roster.hbac.detail", Title: "HBAC rule " + name, Choices: choices}
 	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
-		if m.Canceled() || m.Selected() == 5 {
+		if m.Canceled() || m.Selected() == backIdx {
 			return pushRosterHBACMenu(r, dir, path, "")
 		}
 		switch m.Selected() {
@@ -491,7 +514,47 @@ func pushRosterHBACDetail(r *editRouterModel, dir, path, name, banner string) te
 		case 4:
 			return pushRosterHBACServices(r, dir, path, name)
 		}
+		if m.Selected() == lifecycleIdx {
+			if absent {
+				return pushRosterHBACEdit(r, dir, path, name, "✅ 已還原登入規則", func(x map[string]any) { x["state"] = "present" })
+			}
+			return pushRosterHBACDeleteConfirm(r, dir, path, name)
+		}
 		return nil
+	})
+}
+
+// pushRosterHBACDeleteConfirm shows the deletion's impact summary
+// (spec.md's HBAC-deletion-lifecycle §9.2) and, once confirmed, only ever
+// sets state: absent — the rule, its subjects/targets/services, stay in
+// the roster (§4.1: delete MUST mean declarative absent, never a YAML
+// removal) so Ansible can reconcile the real `ipa hbacrule-del` and the
+// operator can Restore it later.
+func pushRosterHBACDeleteConfirm(r *editRouterModel, dir, path, name string) tea.Cmd {
+	f, found, err := inventory.RosterHBACRule(path, name)
+	if err != nil {
+		r.err = err
+		return nil
+	}
+	if !found {
+		return pushRosterHBACMenu(r, dir, path, "rule 已不存在")
+	}
+	sub := rosterSubmap(f, "subjects")
+	tar := rosterSubmap(f, "targets")
+	question := fmt.Sprintf(
+		"確定要刪除 HBAC rule %q 嗎？\n\nsubjects.groups: %v\nsubjects.users: %v\ntargets.hostgroups: %v\ntargets.hosts: %v\nservices: %v\n\n這會撤銷這條規則授予的存取權限；其他 HBAC rule 可能仍授予相同存取，刪除後可用 pilot access explain 確認。",
+		name, rosterStringSlice(sub, "groups"), rosterStringSlice(sub, "users"),
+		rosterStringSlice(tar, "hostgroups"), rosterStringSlice(tar, "hosts"), rosterStringSlice(f, "services"),
+	)
+	spec := tui.ConfirmSpec{ScreenID: "roster.hbac.delete.confirm", Title: question, Default: false}
+	return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.ConfirmScreen)
+		if !m.Value() {
+			return pushRosterHBACDetail(r, dir, path, name, "")
+		}
+		return pushRosterHBACEdit(r, dir, path, name,
+			fmt.Sprintf("✅ 已刪除登入規則 %q。這條規則授予的存取權限已撤銷；其他 HBAC rule 可能仍授予相同存取，可用 `pilot access explain` 確認實際生效的授權來源。", name),
+			func(x map[string]any) { x["state"] = "absent" })
 	})
 }
 
@@ -506,7 +569,7 @@ func pushRosterHBACGroups(r *editRouterModel, dir, path, name string) tea.Cmd {
 	return checklistIDs(r, "roster.hbac.detail.subjects_groups", "subjects.groups（team/role/legacy access）", markChecked(choices, current), func(r *editRouterModel, v []string) tea.Cmd {
 		// Cloning "subjects" and setting only "groups" preserves the
 		// sibling subjects.users field untouched (spec.md §11.5).
-		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { s := rosterSubmapClone(x, "subjects"); s["groups"] = v; x["subjects"] = s })
+		return pushRosterHBACEdit(r, dir, path, name, "✅ 已更新", func(x map[string]any) { s := rosterSubmapClone(x, "subjects"); s["groups"] = v; x["subjects"] = s })
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
 
@@ -520,7 +583,7 @@ func pushRosterHBACUsers(r *editRouterModel, dir, path, name string) tea.Cmd {
 	return checklist(r, "roster.hbac.detail.subjects_users", "subjects.users", users, rosterStringSlice(rosterSubmap(f, "subjects"), "users"), func(r *editRouterModel, v []string) tea.Cmd {
 		// Cloning "subjects" and setting only "users" preserves the
 		// sibling subjects.groups field untouched (spec.md §11.5).
-		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { s := rosterSubmapClone(x, "subjects"); s["users"] = v; x["subjects"] = s })
+		return pushRosterHBACEdit(r, dir, path, name, "✅ 已更新", func(x map[string]any) { s := rosterSubmapClone(x, "subjects"); s["users"] = v; x["subjects"] = s })
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
 
@@ -532,7 +595,7 @@ func pushRosterHBACTargets(r *editRouterModel, dir, path, name string) tea.Cmd {
 		return nil
 	}
 	return checklist(r, "roster.hbac.detail.targets_hostgroups", "targets.hostgroups", hgs, rosterStringSlice(rosterSubmap(f, "targets"), "hostgroups"), func(r *editRouterModel, v []string) tea.Cmd {
-		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) {
+		return pushRosterHBACEdit(r, dir, path, name, "✅ 已更新", func(x map[string]any) {
 			// Cloning "targets" and setting only "hostgroups" preserves
 			// the sibling targets.hosts field untouched — this used to
 			// zero it out, a data-loss bug fixed by spec.md §3.3/§11.5.
@@ -548,7 +611,7 @@ func pushRosterHBACHosts(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
 	current := rosterStringSlice(rosterSubmap(f, "targets"), "hosts")
 	return rosterHostChecklist(r, dir, path, "roster.hbac.detail.targets_hosts", "Direct hosts / exceptions（可留空）", current, func(r *editRouterModel, hosts []string) tea.Cmd {
-		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) {
+		return pushRosterHBACEdit(r, dir, path, name, "✅ 已更新", func(x map[string]any) {
 			// Cloning "targets" and setting only "hosts" preserves the
 			// sibling targets.hostgroups field untouched (spec.md §11.5).
 			t := rosterSubmapClone(x, "targets")
@@ -562,10 +625,10 @@ func pushRosterHBACHosts(r *editRouterModel, dir, path, name string) tea.Cmd {
 func pushRosterHBACServices(r *editRouterModel, dir, path, name string) tea.Cmd {
 	f, _, _ := inventory.RosterHBACRule(path, name)
 	return checklist(r, "roster.hbac.services", "services", rosterHBACServiceChoices(), rosterStringSlice(f, "services"), func(r *editRouterModel, v []string) tea.Cmd {
-		return pushRosterHBACEdit(r, dir, path, name, func(x map[string]any) { x["services"] = v })
+		return pushRosterHBACEdit(r, dir, path, name, "✅ 已更新", func(x map[string]any) { x["services"] = v })
 	}, func(r *editRouterModel) tea.Cmd { return pushRosterHBACDetail(r, dir, path, name, "") })
 }
-func pushRosterHBACEdit(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
+func pushRosterHBACEdit(r *editRouterModel, dir, path, name, banner string, mutate func(map[string]any)) tea.Cmd {
 	f, ok, err := inventory.RosterHBACRule(path, name)
 	if err != nil {
 		r.err = err
@@ -587,5 +650,5 @@ func pushRosterHBACEdit(r *editRouterModel, dir, path, name string, mutate func(
 		r.err = err
 		return nil
 	}
-	return pushRosterHBACDetail(r, dir, path, name, "✅ 已更新")
+	return pushRosterHBACDetail(r, dir, path, name, banner)
 }

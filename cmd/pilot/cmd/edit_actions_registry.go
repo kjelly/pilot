@@ -872,6 +872,44 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "delete_hbac_rule",
+				Description:              "soft-delete a static HBAC rule (state: absent — Ansible reconciles this into a real `ipa hbacrule-del`; the roster entry and its subjects/targets/services are preserved, not removed. The built-in allow_all rule cannot be deleted this way; see hbac.disable_allow_all)",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectDestructive,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "HBAC rule's state is absent",
+				},
+			},
+			Validate: validateEntityNameOnly("delete_hbac_rule"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deleteHBACRule(r, step.Name)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "restore_hbac_rule",
+				Description:              "restore a soft-deleted static HBAC rule (state: present)",
+				Required:                 []string{"name"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/ipa-identity.yaml",
+					Assertion: "HBAC rule's state is present",
+				},
+			},
+			Validate: validateEntityNameOnly("restore_hbac_rule"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.restoreHBACRule(r, step.Name)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "create_grant",
 				Description:              "create a v3.0 access-governance grant (temporary_grant/sudo_grant/breakglass — spec.md §6), replaying the full kind-branching creation wizard in one step. breakglass forbids groups (a breakglass subject is always a direct named user) and services/validity/justification are kind-conditional per roster_grants.go's checkGrants",
 				Required:                 []string{"name", "kind"},

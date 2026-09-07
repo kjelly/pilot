@@ -1,7 +1,7 @@
 # Pilot HBAC Rule 刪除功能實作規格
 
-**文件狀態：** `IMPLEMENTATION_READY`（Phase 1 已完成真實 vm-target 驗證；Phase 2/3 尚未開始）
-**規格版本：** v1.3
+**文件狀態：** `IMPLEMENTATION_READY`（Phase 1-3 全數完成，含 Case C 真實重現驗證，見 v1.6 變更記錄）
+**規格版本：** v1.6
 **日期：** 2026-09-07
 **目標 Repository：** `kjelly/pilot`
 **事實快照基準：** `main@01e85ee48e6e9c2cca882783b276299c461832f5`
@@ -33,6 +33,66 @@
 > （`cmd/pilot/cmd/vm_target.go` 新增 `expandHomeDir`，`TestExpandHomeDir` 鎖回歸）、
 > `freeipa-identity-canonical.roster.yaml` 的 fixture host 硬編碼 IP 撞上新建 vm-target 的 DHCP
 > 分配。`go test ./...`、`go vet`、`make playbook-lint` 全綠。
+>
+> v1.4 變更：Phase 2（TUI Delete/Restore、absent 顯示、`delete_hbac_rule`/`restore_hbac_rule`
+> structured actions）完成實作。`edit_tui_roster_access.go`：detail 畫面新增條件式 lifecycle
+> 選項（present rule 顯示「Delete login rule」，`allow_all` 例外不提供；absent rule 顯示
+> 「Restore login rule」），Delete 走新的 `pushRosterHBACDeleteConfirm` 確認畫面（§9.2 的 impact
+> summary），Confirm/Cancel 都只可能改動 `state` 欄位，其餘 subjects/targets/services 不變；
+> list 畫面（`pushRosterHBACMenu`）為 absent rule 加 `[absent]` 後綴（§9.3）。
+> `edit_automation_driver_roster_access.go` 新增 `deleteHBACRule`/`restoreHBACRule`；兩者透過
+> `editActionRegistry()`（`edit_actions_registry.go`）註冊為 `delete_hbac_rule`/`restore_hbac_rule`
+> structured actions —— 這是 spec/scenario 驗證/driver 執行三者的唯一真相來源，新增後自動被
+> 既有 generic `pilot edit plan`/`apply` MCP tool（已走 `addRecoveredTool`，見 §11.1）曝光，
+> 不需要另外註冊 MCP tool；MCP `inspect` 的 `inspectHBACRule.State` 欄位本來就沒有過濾 absent
+> rule，§11 的「不得隱藏 absent rule」要求已自動滿足，未改動。`allow_all` 保護對 TUI 與
+> structured action 走同一份程式碼路徑（detail 畫面本來就不建這個選項），故意不做第二層
+> 獨立檢查，兩個介面永遠不會分岔。新增/更新 16 個 Go 測試（TUI 層 5 個、driver/結構化
+> action 層 2 個，另外同步更新 `actions_test.go` 兩個 catalog-stability golden 測試的 action
+> 計數 102→104）。`go build`、`go vet`、`CI=1 go test ./...`（含 race）全綠。Phase 2 純
+> Go/TUI 變更，未動 Ansible/FreeIPA 行為，因此不需要額外的 vm-target 實跑證據——真實
+> `ipa hbacrule-del` 行為仍由 Phase 1 的 vm-target 證據涵蓋。
+>
+> v1.5 變更：Phase 3（drift 偵測 + access explain 訊息整合）完成。
+> `internal/accessgrants/drift.go`：`ComputeDrift` 新增 `desiredAbsentStaticHBAC []string`
+> 參數與 `hbac_should_be_absent` drift category（§14）——roster 明確宣告 `state: absent`
+> 的靜態 HBAC rule，若 probe 回報 live 仍存在就標記；只檢查呼叫端明確列出的名稱，
+> 不會把「roster 從未管過」的其他 live rule 一併掃進來（§4.2 的 never-prune 原則）。
+> `DriftOnce` 新增 `staticAbsentHBACRuleNames` 直接讀 roster 的 `hbac.rules[]`（`BuildPlan`/
+> `CompileGrantsFile` 只編譯 grant 衍生規則，從不知道這些手寫靜態規則的存在），把名稱併入
+> 既有的 `pilot_drift_hbac_names` probe 清單——沿用同一支 `freeipa-access-drift-probe.yml`，
+> 沒有新增 playbook 或新的 probe 邏輯。7 個新測試（3 個 `ComputeDrift` 純函式層級對應
+> §16.6 的三個案例、2 個 `DriftOnce` 端對端含 fake runner、加上既有 14 個呼叫點機械式補
+> 新參數）。`pilot access explain`（`internal/inventory/explain.go`）本來就在
+> `ExplainStaticHBAC` 過濾掉 `state: absent` 的規則——刪除一條規則後它會自動從「目前授予
+> 存取」的來源清單消失，其他規則的說明不受影響，§13/驗收準則 #12 的核心語意（不誤報單一
+> 規則授予了絕對存取、其他規則仍要能正確列出）在讀碼確認後屬於既有行為，本輪未新增獨立的
+> 「before/after 差異」工具——§17 原文的 before/after 是這個 phase 唯一沒有具體規格細節的
+> 一句話（§13 只寫了下方那句完成訊息文字，沒有再定義 diff 輸出格式），刻意不做未經明確
+> 規格的臆測性功能。TUI 側（`edit_tui_roster_access.go`）：`pushRosterHBACEdit` 新增
+> `banner string` 參數（原本寫死 `"✅ 已更新"`），刪除確認成功後改顯示 §13 建議的完成訊息
+> （提示其他規則可能仍授予相同存取，引導跑 `pilot access explain`），Restore 顯示
+> 「✅ 已還原登入規則」；其餘 5 個既有欄位編輯呼叫點維持原本的 `"✅ 已更新"`。新增 1 個
+> TUI 斷言（刪除完成訊息含 `pilot access explain`）。`go build`、`go vet`、
+> `CI=1 go test ./...`（含 `internal/accessgrants`、`cmd/pilot/cmd` 兩個套件的 `-race`）全綠。
+>
+> v1.6 變更：對真實 FreeIPA vm-target（新建拋棄式 `hbac-delete-verify`，AlmaLinux 9，
+> 與 v1.3/文件頂端記錄的那次是不同 VM）完整重跑一次 Phase 1 的 Case A/B/D/`allow_all`，
+> 數字與 v1.3 記錄完全一致（無回歸）。**更正 v1.3 對 Case C 的誤診**：v1.3 記錄「FreeIPA
+> 對一般 HBAC login rule 沒有內建的 referential-integrity 阻擋，找不到可重現的真實
+> 觸發條件」——這個結論是錯的。真實建構方式：`ipa selinuxusermap-add
+> --hbacrule=<rule> --selinuxuser=<ctx> <name>` 建立一個引用該 HBAC rule 的
+> SELinux User Map 後，`ipa hbacrule-del <rule>` 會真的失敗：`rc=1`，
+> `stderr="ipa: ERROR: <rule> cannot be deleted because SELinux User Map <name>
+> requires it"`。透過 roster `state: absent` 觸發完整的 `freeipa-identity-apply.yml`
+> apply（未改動任何程式碼）：`PLAY RECAP ok=77 changed=0 failed=1`，失敗於
+> 「Delete static HBAC rules explicitly marked absent」，`failed_when_result: true`
+> （stderr 不含 "not found"，正確歸類為真實錯誤），play fail closed，事後確認 rule
+> 仍存在、無其他物件被動到——§4.3/§15.2/§15.3 的要求**零程式碼改動**即滿足。
+> §16.5 Case C、§18 驗收準則 #4 已同步更新；`docs/verification/freeipa-identity.md`
+> 同步更新至 v1.11。教訓：「沒找到重現方式」不等於「不可重現」，尤其涉及 FreeIPA 這種
+> 有大量物件間隱性依賴的系統，下次類似的「查證後認為不可重現」結論應該更保守地標記
+> 為「本次未找到，不代表窮盡」而非直接下「不會發生」的結論。
 
 ## 1. Executive Summary
 
@@ -924,7 +984,7 @@ unmanaged live rule
 
 ## 17. Recommended Delivery Phases
 
-### Phase 1 — Backend correctness
+### Phase 1 — Backend correctness（已完成，v1.6 起含 Case C 真實重現）
 
 實作：
 
@@ -932,7 +992,7 @@ unmanaged live rule
 - `hbacrule-del`（單一 task 設計 + 6.4 的 not-found vs. 其他錯誤判斷；複用既有 netgroup-del／grant-HBAC-prune pattern，見 6.2）
 - check-mode 可觀測性（6.3）
 - `allow_all` protection
-- dependency error fail-closed
+- dependency error fail-closed ✅ v1.6：SELinux User Map 引用觸發的真實 FreeIPA 拒絕，對 vm-target 重現並確認 zero-code-change 即 fail closed
 - tag coverage 相容性（6.5）
 - tests（含 16.5 Case D check-mode）
 
@@ -940,26 +1000,30 @@ Phase 1 是最重要部分，因為這直接修正 authorization lifecycle gap�
 
 ---
 
-### Phase 2 — Authoring surfaces
+### Phase 2 — Authoring surfaces（已完成，v1.4）
 
 實作：
 
-- TUI Delete
-- absent display
-- Restore
-- `delete_hbac_rule`
-- `restore_hbac_rule`
-- MCP surface（新 tool MUST 走 11.1 的 `addRecoveredTool`）
+- TUI Delete ✅
+- absent display ✅
+- Restore ✅
+- `delete_hbac_rule` ✅
+- `restore_hbac_rule` ✅
+- MCP surface ✅（沒有新增 MCP tool——既有 generic `plan`/`apply` tool 已走 `addRecoveredTool`，
+  透過 `editActionRegistry()` 自動曝光新 action，見文件頂端 v1.4 變更記錄）
 
 ---
 
-### Phase 3 — Observability
+### Phase 3 — Observability（已完成，v1.5）
 
 實作：
 
-- `hbac_should_be_absent` drift
-- improved access explain output
-- before/after effective authorization reporting
+- `hbac_should_be_absent` drift ✅
+- improved access explain output ✅（`ExplainStaticHBAC` 本來就過濾 `state: absent`，
+  刪除後自動不再列為授權來源，其他規則不受影響；讀碼確認，未改動程式）
+- before/after effective authorization reporting ⬜ 刻意不做——spec.md 全文只在 §13 給了
+  完成訊息文字，從未定義這個「diff 報告」的輸出格式/觸發點，屬於臆測性功能，見文件頂端
+  v1.5 變更記錄
 
 ---
 
@@ -967,18 +1031,22 @@ Phase 1 是最重要部分，因為這直接修正 authorization lifecycle gap�
 
 功能完成需同時滿足：
 
-1. Static `hbac.rules[].state: absent` 會真正刪除 FreeIPA HBAC rule。
-2. Repeated apply 完全 idempotent。
-3. FreeIPA rule 已不存在時不報錯。
-4. FreeIPA 拒絕 deletion 時 apply 必須 fail。
-5. 不會刪除 roster 未管理的 HBAC rule。
-6. 不可透過普通 delete lifecycle 刪除 `allow_all`。
-7. TUI delete 只會把 `state` 改成 `absent`。
-8. Structured action 提供 `delete_hbac_rule`。
-9. Absent rule 仍保留在 roster。
-10. SSSD cache 在 reconcile 後被刷新。
-11. Drift 能辨識 `state: absent` 但 live rule 仍存在。
-12. `pilot access explain` 仍能正確說明其他可能授權來源。
+1. Static `hbac.rules[].state: absent` 會真正刪除 FreeIPA HBAC rule。✅ Phase 1（vm-target Case A）
+2. Repeated apply 完全 idempotent。✅ Phase 1（vm-target Case B）
+3. FreeIPA rule 已不存在時不報錯。✅ Phase 1（vm-target Case B）
+4. FreeIPA 拒絕 deletion 時 apply 必須 fail。✅ Phase 1，Case C 已於 v1.6 對真實 vm-target
+   重現並驗證通過（SELinux User Map 引用觸發真實拒絕，`failed_when` 零改動即正確
+   fail closed，見文件頂端 v1.6 記錄）
+5. 不會刪除 roster 未管理的 HBAC rule。✅ Phase 1（§4.2 設計原則，未實作 live-vs-roster 反向 prune）
+6. 不可透過普通 delete lifecycle 刪除 `allow_all`。✅ Phase 1 Go validator + Ansible gate；Phase 2 TUI/
+   structured action 也同路徑擋下（見 v1.4 記錄）
+7. TUI delete 只會把 `state` 改成 `absent`。✅ Phase 2
+8. Structured action 提供 `delete_hbac_rule`。✅ Phase 2（連同 `restore_hbac_rule`）
+9. Absent rule 仍保留在 roster。✅ Phase 2
+10. SSSD cache 在 reconcile 後被刷新。✅ Phase 1（沿用既有 `sss_cache -E`）
+11. Drift 能辨識 `state: absent` 但 live rule 仍存在。✅ Phase 3（`hbac_should_be_absent`）
+12. `pilot access explain` 仍能正確說明其他可能授權來源。✅ Phase 3（`ExplainStaticHBAC`
+    既有行為即滿足；未新增 before/after diff 工具，見 §17 Phase 3 記錄）
 
 ---
 

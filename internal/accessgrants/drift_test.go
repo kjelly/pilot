@@ -26,7 +26,7 @@ func TestComputeDrift_NoDriftWhenLiveMatchesDesired(t *testing.T) {
 		UserExpiration: map[string]string{"vendor01": "20261231235959Z"},
 		HostAuthInd:    map[string][]string{"db1": {"pkinit", "otp"}},
 	}
-	report := ComputeDrift(desiredHBAC, desiredSudo, desiredAuth, desiredAccounts, nil, nil, live)
+	report := ComputeDrift(desiredHBAC, desiredSudo, desiredAuth, desiredAccounts, nil, nil, nil, live)
 	if !report.Empty() {
 		t.Fatalf("expected no drift, got: %+v", report.Items)
 	}
@@ -35,7 +35,7 @@ func TestComputeDrift_NoDriftWhenLiveMatchesDesired(t *testing.T) {
 func TestComputeDrift_HBACMissingWhenDesiredButNotLive(t *testing.T) {
 	desiredHBAC := []inventory.CompiledHBACRule{{Name: "pilot-grant-login-x-1", Present: true}}
 	live := LiveState{HBACExists: map[string]bool{}}
-	report := ComputeDrift(desiredHBAC, nil, nil, nil, nil, nil, live)
+	report := ComputeDrift(desiredHBAC, nil, nil, nil, nil, nil, nil, live)
 	if len(report.Items) != 1 || report.Items[0].Category != "hbac_missing" || report.Items[0].Name != "pilot-grant-login-x-1" {
 		t.Fatalf("expected exactly one hbac_missing item, got: %+v", report.Items)
 	}
@@ -43,9 +43,48 @@ func TestComputeDrift_HBACMissingWhenDesiredButNotLive(t *testing.T) {
 
 func TestComputeDrift_HBACOrphanWhenLiveButNotDesired(t *testing.T) {
 	live := LiveState{LiveHBACNames: []string{"pilot-grant-login-orphaned-old-9999zzzz", "allow_all"}}
-	report := ComputeDrift(nil, nil, nil, nil, nil, nil, live)
+	report := ComputeDrift(nil, nil, nil, nil, nil, nil, nil, live)
 	if len(report.Items) != 1 || report.Items[0].Category != "hbac_orphan" || report.Items[0].Name != "pilot-grant-login-orphaned-old-9999zzzz" {
 		t.Fatalf("expected exactly one hbac_orphan item (and no item for the hand-authored allow_all rule), got: %+v", report.Items)
+	}
+}
+
+// TestComputeDrift_StaticHBACShouldBeAbsentWhenStillLive covers spec.md's
+// HBAC-deletion-lifecycle §16.6's first case: a roster hbac.rules[] entry
+// declared state: absent that still exists live must be flagged.
+func TestComputeDrift_StaticHBACShouldBeAbsentWhenStillLive(t *testing.T) {
+	live := LiveState{HBACExists: map[string]bool{"production-ssh": true}}
+	report := ComputeDrift(nil, nil, nil, nil, nil, nil, []string{"production-ssh"}, live)
+	if len(report.Items) != 1 || report.Items[0].Category != "hbac_should_be_absent" || report.Items[0].Name != "production-ssh" {
+		t.Fatalf("expected exactly one hbac_should_be_absent item, got: %+v", report.Items)
+	}
+}
+
+// TestComputeDrift_StaticHBACAbsentAndAlreadyGoneNoDrift covers §16.6's
+// second case: once the reconciler has actually deleted it live, there is
+// no drift left to report.
+func TestComputeDrift_StaticHBACAbsentAndAlreadyGoneNoDrift(t *testing.T) {
+	live := LiveState{HBACExists: map[string]bool{}}
+	report := ComputeDrift(nil, nil, nil, nil, nil, nil, []string{"production-ssh"}, live)
+	if !report.Empty() {
+		t.Fatalf("expected no drift once the rule is already gone live, got: %+v", report.Items)
+	}
+}
+
+// TestComputeDrift_StaticHBACUnmanagedLiveRuleNotAutoFlagged covers §16.6's
+// third case: a live HBAC rule the roster never declared absent (e.g. an
+// administrator-created rule, or one Pilot manages via a different
+// lifecycle) must never be swept into hbac_should_be_absent just because
+// it exists live — only names explicitly passed as desiredAbsentStaticHBAC
+// are ever checked (see §4.2's "never prune unknown rules" principle).
+func TestComputeDrift_StaticHBACUnmanagedLiveRuleNotAutoFlagged(t *testing.T) {
+	live := LiveState{
+		LiveHBACNames: []string{"admin-created-rule"},
+		HBACExists:    map[string]bool{"admin-created-rule": true},
+	}
+	report := ComputeDrift(nil, nil, nil, nil, nil, nil, nil, live)
+	if !report.Empty() {
+		t.Fatalf("expected no drift for a live rule never declared absent by the roster, got: %+v", report.Items)
 	}
 }
 
@@ -55,7 +94,7 @@ func TestComputeDrift_SudoOrphanAndMissing(t *testing.T) {
 		LiveSudoNames: []string{"pilot-grant-sudo-orphan-2"},
 		SudoExists:    map[string]bool{},
 	}
-	report := ComputeDrift(nil, desiredSudo, nil, nil, nil, nil, live)
+	report := ComputeDrift(nil, desiredSudo, nil, nil, nil, nil, nil, live)
 	var gotMissing, gotOrphan bool
 	for _, item := range report.Items {
 		if item.Category == "sudo_missing" && item.Name == "pilot-grant-sudo-wanted-1" {
@@ -73,7 +112,7 @@ func TestComputeDrift_SudoOrphanAndMissing(t *testing.T) {
 func TestComputeDrift_AccountExpirationMismatch(t *testing.T) {
 	desired := []inventory.CompiledAccountExpiration{{User: "vendor01", Present: true, Expiration: "20261231235959Z"}}
 	live := LiveState{UserExpiration: map[string]string{"vendor01": "20270101000000Z"}}
-	report := ComputeDrift(nil, nil, nil, desired, nil, nil, live)
+	report := ComputeDrift(nil, nil, nil, desired, nil, nil, nil, live)
 	if len(report.Items) != 1 || report.Items[0].Category != "account_expiration" || report.Items[0].Name != "vendor01" {
 		t.Fatalf("expected exactly one account_expiration item, got: %+v", report.Items)
 	}
@@ -82,7 +121,7 @@ func TestComputeDrift_AccountExpirationMismatch(t *testing.T) {
 func TestComputeDrift_AccountExpirationClearedDesiredButLiveStillSet(t *testing.T) {
 	desired := []inventory.CompiledAccountExpiration{{User: "vendor02", Present: false}}
 	live := LiveState{UserExpiration: map[string]string{"vendor02": "20261231235959Z"}}
-	report := ComputeDrift(nil, nil, nil, desired, nil, nil, live)
+	report := ComputeDrift(nil, nil, nil, desired, nil, nil, nil, live)
 	if len(report.Items) != 1 || report.Items[0].Category != "account_expiration" {
 		t.Fatalf("expected drift when desired clear but live still set, got: %+v", report.Items)
 	}
@@ -91,12 +130,12 @@ func TestComputeDrift_AccountExpirationClearedDesiredButLiveStillSet(t *testing.
 func TestComputeDrift_AuthIndicatorMismatchIgnoresOrder(t *testing.T) {
 	desired := []inventory.CompiledAuthPolicyHost{{Host: "db1", Indicators: []string{"otp", "pkinit"}}}
 	live := LiveState{HostAuthInd: map[string][]string{"db1": {"pkinit", "otp"}}}
-	if report := ComputeDrift(nil, nil, desired, nil, nil, nil, live); !report.Empty() {
+	if report := ComputeDrift(nil, nil, desired, nil, nil, nil, nil, live); !report.Empty() {
 		t.Fatalf("expected order-independent equality to produce no drift, got: %+v", report.Items)
 	}
 
 	live2 := LiveState{HostAuthInd: map[string][]string{"db1": {"otp"}}}
-	report2 := ComputeDrift(nil, nil, desired, nil, nil, nil, live2)
+	report2 := ComputeDrift(nil, nil, desired, nil, nil, nil, nil, live2)
 	if len(report2.Items) != 1 || report2.Items[0].Category != "auth_indicator" {
 		t.Fatalf("expected an auth_indicator drift item, got: %+v", report2.Items)
 	}
@@ -237,6 +276,90 @@ func TestDriftOnce_ReportsMissingCompiledRule(t *testing.T) {
 	}
 }
 
+const driftTestRosterWithAbsentStaticHBAC = `
+schema_version: 3
+freeipa:
+  domain: ipa.pilot.internal
+  admin: {principal: admin, password: x}
+users: []
+groups: []
+hosts: []
+hostgroups: []
+hbac:
+  rules:
+    - name: production-ssh
+      state: absent
+      subjects: {users: [], groups: []}
+      targets: {hosts: [], hostgroups: []}
+      services: [sshd]
+sudo:
+  rules: []
+grants: []
+`
+
+func writeDriftTestRosterWithAbsentStaticHBAC(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(path, []byte(driftTestRosterWithAbsentStaticHBAC), 0o600); err != nil {
+		t.Fatalf("write roster: %v", err)
+	}
+	return path
+}
+
+// TestDriftOnce_FlagsStaticAbsentHBACRuleStillLive is the end-to-end
+// (roster-read + probe-var-wiring) counterpart of
+// TestComputeDrift_StaticHBACShouldBeAbsentWhenStillLive: it proves
+// DriftOnce actually reads the roster's static hbac.rules[] itself
+// (BuildPlan/CompileGrantsFile never sees these — they're not
+// grant-compiled) and asks the probe to check the right name.
+func TestDriftOnce_FlagsStaticAbsentHBACRuleStillLive(t *testing.T) {
+	rosterPath := writeDriftTestRosterWithAbsentStaticHBAC(t)
+	now := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)
+
+	runner := &fakeDriftRunner{live: LiveState{
+		LiveHBACNames: []string{"production-ssh"},
+		HBACExists:    map[string]bool{"production-ssh": true},
+	}}
+	report, err := DriftOnce(context.Background(), DriftProbeOptions{
+		RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: runner,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Category != "hbac_should_be_absent" || report.Items[0].Name != "production-ssh" {
+		t.Fatalf("expected exactly one hbac_should_be_absent item, got: %+v", report.Items)
+	}
+	probedNames, _ := runner.capturedVars["pilot_drift_hbac_names"].([]any)
+	found := false
+	for _, n := range probedNames {
+		if n == "production-ssh" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the probe to be asked about production-ssh, captured vars: %+v", runner.capturedVars)
+	}
+}
+
+// TestDriftOnce_StaticAbsentHBACRuleAlreadyGoneNoDrift is DriftOnce's
+// counterpart of TestComputeDrift_StaticHBACAbsentAndAlreadyGoneNoDrift.
+func TestDriftOnce_StaticAbsentHBACRuleAlreadyGoneNoDrift(t *testing.T) {
+	rosterPath := writeDriftTestRosterWithAbsentStaticHBAC(t)
+	now := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)
+
+	runner := &fakeDriftRunner{live: LiveState{HBACExists: map[string]bool{}}}
+	report, err := DriftOnce(context.Background(), DriftProbeOptions{
+		RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: runner,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !report.Empty() {
+		t.Fatalf("expected no drift once the rule is already gone live, got: %+v", report.Items)
+	}
+}
+
 func TestDriftOnce_RecordsAuditEventWhenStateDirSet(t *testing.T) {
 	rosterPath := writeDriftTestRoster(t)
 	stateDir := t.TempDir()
@@ -318,7 +441,7 @@ func intPtr(n int) *int { return &n }
 func TestComputeDrift_PasswordPolicyMissingLiveDetected(t *testing.T) {
 	desired := []inventory.CompiledPasswordPolicy{{Group: "role-privileged", State: "present", Priority: intPtr(10)}}
 	live := LiveState{PasswordPolicy: map[string]LivePasswordPolicy{}}
-	report := ComputeDrift(nil, nil, nil, nil, desired, nil, live)
+	report := ComputeDrift(nil, nil, nil, nil, desired, nil, nil, live)
 	if len(report.Items) != 1 || report.Items[0].Category != "password_policy_missing" {
 		t.Fatalf("expected a password_policy_missing item, got: %+v", report.Items)
 	}
@@ -331,7 +454,7 @@ func TestComputeDrift_PasswordPolicyFieldMismatchOnlyForConfiguredFields(t *test
 	live := LiveState{PasswordPolicy: map[string]LivePasswordPolicy{
 		"role-privileged": {Exists: true, Priority: intPtr(20), MinLength: intPtr(4)},
 	}}
-	report := ComputeDrift(nil, nil, nil, nil, desired, nil, live)
+	report := ComputeDrift(nil, nil, nil, nil, desired, nil, nil, live)
 	if len(report.Items) != 1 || report.Items[0].Category != "password_policy_field" || !strings.Contains(report.Items[0].Detail, "priority") {
 		t.Fatalf("expected exactly one priority field-mismatch item, got: %+v", report.Items)
 	}
@@ -342,7 +465,7 @@ func TestComputeDrift_PasswordPolicyNoDriftWhenConfiguredFieldsMatch(t *testing.
 	live := LiveState{PasswordPolicy: map[string]LivePasswordPolicy{
 		"role-privileged": {Exists: true, Priority: intPtr(10), MinLength: intPtr(16), HistorySize: intPtr(99)},
 	}}
-	report := ComputeDrift(nil, nil, nil, nil, desired, nil, live)
+	report := ComputeDrift(nil, nil, nil, nil, desired, nil, nil, live)
 	if !report.Empty() {
 		t.Fatalf("expected no drift (HistorySize is unconfigured, live-only), got: %+v", report.Items)
 	}
@@ -351,7 +474,7 @@ func TestComputeDrift_PasswordPolicyNoDriftWhenConfiguredFieldsMatch(t *testing.
 func TestComputeDrift_PasswordPolicyOrphanDetected(t *testing.T) {
 	desired := []inventory.CompiledPasswordPolicy{{Group: "role-retired", State: "absent"}}
 	live := LiveState{PasswordPolicy: map[string]LivePasswordPolicy{"role-retired": {Exists: true, Priority: intPtr(5)}}}
-	report := ComputeDrift(nil, nil, nil, nil, desired, nil, live)
+	report := ComputeDrift(nil, nil, nil, nil, desired, nil, nil, live)
 	if len(report.Items) != 1 || report.Items[0].Category != "password_policy_orphan" {
 		t.Fatalf("expected a password_policy_orphan item, got: %+v", report.Items)
 	}
@@ -360,7 +483,7 @@ func TestComputeDrift_PasswordPolicyOrphanDetected(t *testing.T) {
 func TestComputeDrift_UserAuthTypeMismatchDetected(t *testing.T) {
 	desired := []inventory.CompiledUserAuthType{{User: "alice", Allowed: []string{"otp", "pkinit"}}}
 	live := LiveState{UserAuthType: map[string][]string{"alice": {"password"}}}
-	report := ComputeDrift(nil, nil, nil, nil, nil, desired, live)
+	report := ComputeDrift(nil, nil, nil, nil, nil, desired, nil, live)
 	if len(report.Items) != 1 || report.Items[0].Category != "user_auth_type" {
 		t.Fatalf("expected a user_auth_type item, got: %+v", report.Items)
 	}
@@ -369,7 +492,7 @@ func TestComputeDrift_UserAuthTypeMismatchDetected(t *testing.T) {
 func TestComputeDrift_UserAuthTypeNoDriftWhenMatchingIgnoringOrder(t *testing.T) {
 	desired := []inventory.CompiledUserAuthType{{User: "alice", Allowed: []string{"otp", "pkinit"}}}
 	live := LiveState{UserAuthType: map[string][]string{"alice": {"pkinit", "otp"}}}
-	if report := ComputeDrift(nil, nil, nil, nil, nil, desired, live); !report.Empty() {
+	if report := ComputeDrift(nil, nil, nil, nil, nil, desired, nil, live); !report.Empty() {
 		t.Fatalf("expected no drift for the same set in a different order, got: %+v", report.Items)
 	}
 }

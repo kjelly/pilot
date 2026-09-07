@@ -317,3 +317,141 @@ func TestPushRosterGroupDetail_AccessGroupRemainsEditableWithDeprecationNote(t *
 		t.Fatalf("access-z category = %q, must remain access (unchanged)", got)
 	}
 }
+
+// TestPushRosterHBACMenu_ShowsAbsentSuffix covers the HBAC-deletion-lifecycle
+// spec's §9.3: a soft-deleted rule must stay listed, marked so it's not
+// mistaken for one still granting access.
+func TestPushRosterHBACMenu_ShowsAbsentSuffix(t *testing.T) {
+	dir, path := writeHBACPolicyRosterFixture(t)
+	rule, found, err := inventory.RosterHBACRule(path, "r1")
+	if err != nil || !found {
+		t.Fatalf("read r1: found=%t err=%v", found, err)
+	}
+	rule["state"] = "absent"
+	if err := inventory.SetRosterHBACRule(path, "r1", rule); err != nil {
+		t.Fatal(err)
+	}
+
+	var router editRouterModel
+	pushRosterHBACMenu(&router, dir, path, "")
+	view := viewContent(router.View())
+	if !strings.Contains(view, "r1 [absent]") {
+		t.Fatalf("expected the list to mark r1 as [absent], got:\n%s", view)
+	}
+}
+
+// TestPushRosterHBACDetail_AllowAllHasNoDeleteOption locks spec.md's
+// HBAC-deletion-lifecycle §16.3: allow_all is FreeIPA's built-in safety
+// rule (roster_validate.go's checkHBAC already rejects state: absent for
+// it) and must never be offered a Delete choice.
+func TestPushRosterHBACDetail_AllowAllHasNoDeleteOption(t *testing.T) {
+	dir, path := writeHBACPolicyRosterFixture(t)
+	if err := inventory.AppendRosterHBACRule(path, map[string]any{
+		"name": "allow_all", "state": "present", "enabled": true,
+	}); err != nil {
+		t.Fatalf("seed allow_all rule: %v", err)
+	}
+
+	var router editRouterModel
+	pushRosterHBACDetail(&router, dir, path, "allow_all", "")
+	view := viewContent(router.View())
+	if strings.Contains(view, "Delete login rule") {
+		t.Fatalf("allow_all must never offer Delete, got:\n%s", view)
+	}
+}
+
+// TestPushRosterHBACDeleteConfirm_CancelPreservesPresent covers the
+// confirm screen's Cancel path (spec.md §9.2): the rule must stay present.
+func TestPushRosterHBACDeleteConfirm_CancelPreservesPresent(t *testing.T) {
+	dir, path := writeHBACPolicyRosterFixture(t)
+	var router editRouterModel
+	pushRosterHBACDetail(&router, dir, path, "r1", "")
+	d := automationDriver{}
+	if err := d.choose(&router, "Delete login rule"); err != nil {
+		t.Fatalf("choose Delete login rule: %v", err)
+	}
+	if err := d.confirmYesNo(&router, false); err != nil {
+		t.Fatalf("confirmYesNo(false): %v", err)
+	}
+
+	rule, found, err := inventory.RosterHBACRule(path, "r1")
+	if err != nil || !found {
+		t.Fatalf("read r1: found=%t err=%v", found, err)
+	}
+	if got := rosterStringOr(rule, "state", "present"); got != "present" {
+		t.Fatalf("state = %q, want present (cancel must not delete)", got)
+	}
+}
+
+// TestPushRosterHBACDeleteConfirm_ConfirmSetsAbsentPreservesFields covers
+// the confirm screen's Confirm path: only state changes (spec.md §4.1 —
+// delete MUST mean declarative absent, never a roster removal), every
+// sibling field is untouched.
+func TestPushRosterHBACDeleteConfirm_ConfirmSetsAbsentPreservesFields(t *testing.T) {
+	dir, path := writeHBACPolicyRosterFixture(t)
+	var router editRouterModel
+	pushRosterHBACDetail(&router, dir, path, "r1", "")
+	d := automationDriver{}
+	if err := d.choose(&router, "Delete login rule"); err != nil {
+		t.Fatalf("choose Delete login rule: %v", err)
+	}
+	if err := d.confirmYesNo(&router, true); err != nil {
+		t.Fatalf("confirmYesNo(true): %v", err)
+	}
+
+	rule, found, err := inventory.RosterHBACRule(path, "r1")
+	if err != nil || !found {
+		t.Fatalf("expected the soft-deleted rule to still exist in the roster: found=%t err=%v", found, err)
+	}
+	if got := rosterStringOr(rule, "state", "present"); got != "absent" {
+		t.Fatalf("state = %q, want absent", got)
+	}
+	sub := rosterSubmap(rule, "subjects")
+	if got := rosterStringSlice(sub, "users"); len(got) != 1 || got[0] != "bob" {
+		t.Fatalf("delete must preserve subjects.users, got %v", got)
+	}
+	tar := rosterSubmap(rule, "targets")
+	if got := rosterStringSlice(tar, "hosts"); len(got) != 1 || got[0] != "extra.ipa.pilot.internal" {
+		t.Fatalf("delete must preserve targets.hosts, got %v", got)
+	}
+	// spec.md's HBAC-deletion-lifecycle §13: the completion message must
+	// point at pilot access explain for the real authorization picture,
+	// never assert a blanket "access revoked".
+	view := viewContent(router.View())
+	if !strings.Contains(view, "pilot access explain") {
+		t.Fatalf("delete completion banner must point to pilot access explain, got:\n%s", view)
+	}
+}
+
+// TestPushRosterHBACDetail_RestoreSetsPresentPreservesFields covers
+// spec.md §9.4: Restore only flips state back to present.
+func TestPushRosterHBACDetail_RestoreSetsPresentPreservesFields(t *testing.T) {
+	dir, path := writeHBACPolicyRosterFixture(t)
+	rule, found, err := inventory.RosterHBACRule(path, "r1")
+	if err != nil || !found {
+		t.Fatalf("read r1: found=%t err=%v", found, err)
+	}
+	rule["state"] = "absent"
+	if err := inventory.SetRosterHBACRule(path, "r1", rule); err != nil {
+		t.Fatal(err)
+	}
+
+	var router editRouterModel
+	pushRosterHBACDetail(&router, dir, path, "r1", "")
+	d := automationDriver{}
+	if err := d.choose(&router, "Restore login rule"); err != nil {
+		t.Fatalf("choose Restore login rule: %v", err)
+	}
+
+	updated, found, err := inventory.RosterHBACRule(path, "r1")
+	if err != nil || !found {
+		t.Fatalf("read r1: found=%t err=%v", found, err)
+	}
+	if got := rosterStringOr(updated, "state", "present"); got != "present" {
+		t.Fatalf("state = %q, want present", got)
+	}
+	sub := rosterSubmap(updated, "subjects")
+	if got := rosterStringSlice(sub, "groups"); len(got) != 1 || got[0] != "team-x" {
+		t.Fatalf("restore must preserve subjects.groups, got %v", got)
+	}
+}
