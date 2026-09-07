@@ -430,6 +430,29 @@ func extractValueFlag(args []string, flag string) ([]string, string) {
 // returns the literal prefix to preserve plus the host path referenced.
 // ok is false for anything else (a plain key=value extra-var, a flag,
 // etc.), so callers can skip those without a false-positive file lookup.
+// expandHomeDir resolves a leading "~" or "~/" the way a login shell
+// would, since ansible's own "-e @path" file lookup expands it (via
+// Python's os.path.expanduser) but the argv this function receives
+// never passes through a shell a second time — "-e" and "@~/..." arrive
+// as separate, already-tokenized argv entries, so no shell ever sees a
+// bare "~..." word to expand. Left unexpanded, a docker-cp of the
+// literal path fails and ansible-playbook inside the sandbox container
+// resolves "~" against the container's own root home instead of the
+// host user's, silently reading (or failing to find) the wrong file.
+func expandHomeDir(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+}
+
 func extraVarsFileArg(a string) (glue, path string, ok bool) {
 	switch {
 	case strings.HasPrefix(a, "--extra-vars=@"):
@@ -893,6 +916,7 @@ func vtRunViaContainer(cmd *cobra.Command, keyTargets []*vmtarget.Target, playbo
 		if !ok {
 			continue
 		}
+		hostPath = expandHomeDir(hostPath)
 		if info, statErr := os.Stat(hostPath); statErr != nil || info.IsDir() {
 			continue
 		}

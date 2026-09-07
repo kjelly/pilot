@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -94,6 +96,27 @@ func TestExtraVarsFileArg_RecognizesAllThreeForms(t *testing.T) {
 		if ok != tc.wantOK || glue != tc.wantGlue || path != tc.wantPath {
 			t.Errorf("extraVarsFileArg(%q) = (%q,%q,%v), want (%q,%q,%v)",
 				tc.arg, glue, path, ok, tc.wantGlue, tc.wantPath, tc.wantOK)
+		}
+	}
+}
+
+func TestExpandHomeDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir: %v", err)
+	}
+	cases := []struct {
+		path string
+		want string
+	}{
+		{"~/.vault/main.yaml", filepath.Join(home, ".vault/main.yaml")},
+		{"~", home},
+		{"/tmp/vault.yaml", "/tmp/vault.yaml"},
+		{"~notauser/.vault/main.yaml", "~notauser/.vault/main.yaml"},
+	}
+	for _, tc := range cases {
+		if got := expandHomeDir(tc.path); got != tc.want {
+			t.Errorf("expandHomeDir(%q) = %q, want %q", tc.path, got, tc.want)
 		}
 	}
 }
