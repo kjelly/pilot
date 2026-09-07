@@ -128,7 +128,14 @@ type Diagnostics struct {
 	Runtime    DiagnosticsRuntime   `yaml:"runtime"`
 	Readiness  DiagnosticsReadiness `yaml:"readiness"`
 	Logs       DiagnosticsLogs      `yaml:"logs"`
+	Artifacts  []DiagnosticArtifact `yaml:"artifacts"`
 	VerifySpec string               `yaml:"verifySpec"`
+}
+
+type DiagnosticArtifact struct {
+	Path        string `yaml:"path"`
+	Kind        string `yaml:"kind"`
+	Sensitivity string `yaml:"sensitivity"`
 }
 
 // DiagnosticsRuntime names how this component's process is supervised.
@@ -860,8 +867,25 @@ func validateEndpoints(endpoints []Endpoint) error {
 // to this component. Runtime.Kind == "" means no diagnostics block was
 // configured — entirely optional, skip all checks.
 func validateDiagnostics(d Diagnostics, endpoints []Endpoint, specs []Spec) error {
+	for i, artifact := range d.Artifacts {
+		if strings.TrimSpace(artifact.Path) == "" || !filepath.IsAbs(artifact.Path) {
+			return fmt.Errorf("diagnostics.artifacts[%d].path must be an absolute path", i)
+		}
+		switch artifact.Kind {
+		case "file", "directory":
+		default:
+			return fmt.Errorf("diagnostics.artifacts[%d].kind must be file or directory, got %q", i, artifact.Kind)
+		}
+		switch artifact.Sensitivity {
+		case "metadata_only", "non_secret", "sensitive":
+		default:
+			return fmt.Errorf("diagnostics.artifacts[%d].sensitivity must be metadata_only, non_secret, or sensitive", i)
+		}
+	}
 	if d.Runtime.Kind == "" {
-		return nil
+		if len(d.Artifacts) == 0 {
+			return nil
+		}
 	}
 	switch d.Runtime.Kind {
 	case "docker", "systemd", "none":

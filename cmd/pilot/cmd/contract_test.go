@@ -34,6 +34,17 @@ func TestLintContractsLoadsCanonicalDirectory(t *testing.T) {
 	if !strings.Contains(got, "contracts: 35 component(s) loaded from") {
 		t.Fatalf("output missing summary:\n%s", got)
 	}
+	if !strings.Contains(got, "diagnostics coverage: 5/35 component(s)") {
+		t.Fatalf("output missing diagnostics coverage summary:\n%s", got)
+	}
+}
+
+func TestLintContractsRequireDiagnosticsFailsClosed(t *testing.T) {
+	var out bytes.Buffer
+	err := lintContractsWithOptions(repoRootForTest(t), &out, true)
+	if err == nil || !strings.Contains(err.Error(), "diagnostics coverage incomplete") {
+		t.Fatalf("error = %v, want diagnostics coverage failure", err)
+	}
 }
 
 func TestValidateDeployCatalogProjectionRejectsStageDrift(t *testing.T) {

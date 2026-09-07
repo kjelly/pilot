@@ -144,3 +144,38 @@ func TestSplitHTTPStatus_NonNumericStatusFails(t *testing.T) {
 		t.Fatal("SplitHTTPStatus() ok = true, want false when the status isn't a valid integer")
 	}
 }
+
+func TestSNMPExporterProbeSteps_UsesFixedBoundedRequest(t *testing.T) {
+	steps := SNMPExporterProbeSteps("10.0.0.5:161", "if_mib")
+	if len(steps) != 1 {
+		t.Fatalf("SNMPExporterProbeSteps() returned %d steps, want 1", len(steps))
+	}
+	step := steps[0]
+	if step.Module != "command" || step.ID != "snmp_probe" {
+		t.Fatalf("probe step = %#v, want fixed command step", step)
+	}
+	if !strings.Contains(step.Command, "--max-time 5") || !strings.Contains(step.Command, "127.0.0.1:9116/snmp") || !strings.Contains(step.Command, "target=10.0.0.5:161") || !strings.Contains(step.Command, "module=if_mib") {
+		t.Fatalf("probe command = %q, want exporter endpoint and registry-resolved parameters", step.Command)
+	}
+	if strings.Contains(step.Command, "password") || strings.Contains(step.Command, "credential") {
+		t.Fatalf("probe command exposes credential material: %q", step.Command)
+	}
+}
+
+func TestArtifactSteps_OnlyCollectMetadata(t *testing.T) {
+	steps := ArtifactSteps([]string{"/etc/pilot/snmp exporter"})
+	if len(steps) != 3 {
+		t.Fatalf("ArtifactSteps() returned %d steps, want stat/hash/entries", len(steps))
+	}
+	for _, step := range steps {
+		if step.Module != "command" {
+			t.Fatalf("artifact step module = %q, want command", step.Module)
+		}
+		if strings.Contains(step.Command, "cat ") || strings.Contains(step.Command, " -o ") {
+			t.Fatalf("artifact step may expose content: %q", step.Command)
+		}
+	}
+	if !strings.Contains(steps[0].Command, "stat") || !strings.Contains(steps[1].Command, "sha256sum") || !strings.Contains(steps[2].Command, "find") {
+		t.Fatalf("artifact steps = %#v, want stat/hash/find", steps)
+	}
+}

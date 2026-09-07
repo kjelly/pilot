@@ -47,6 +47,36 @@ func curlQueryCommand(url string, params [][2]string) string {
 	return b.String()
 }
 
+// SNMPExporterProbeSteps is the only active network probe exposed by the
+// structured diagnosis surface.  The target and module have already been
+// resolved from the workspace registry by the caller; the exporter resolves
+// credentials from its server-side configuration.
+func SNMPExporterProbeSteps(target, module string) []Step {
+	return []Step{{
+		ID:          "snmp_probe",
+		Description: "bounded SNMP exporter probe using the registered target and module",
+		Module:      "command",
+		Command:     "curl --max-time 5 -sS -G http://127.0.0.1:9116/snmp --data-urlencode " + shlexQuote("target="+target) + " --data-urlencode " + shlexQuote("module="+module) + " -w " + shlexQuote("\\n"+httpStatusMarker+"%{http_code}"),
+	}}
+}
+
+// ArtifactSteps returns fixed metadata-only commands for contract-declared
+// paths. Content is never requested. The caller bounds directory output when
+// converting the command results into the MCP response.
+func ArtifactSteps(paths []string) []Step {
+	steps := make([]Step, 0, len(paths)*3)
+	for i, path := range paths {
+		quoted := shlexQuote(path)
+		prefix := "artifact_" + strconv.Itoa(i)
+		steps = append(steps,
+			Step{ID: prefix + "_stat", Description: "artifact metadata", Module: "command", Command: "stat -c '%F\\t%Y\\t%s' -- " + quoted},
+			Step{ID: prefix + "_hash", Description: "artifact sha256 metadata", Module: "command", Command: "sha256sum -- " + quoted},
+			Step{ID: prefix + "_entries", Description: "bounded artifact directory entry sample", Module: "command", Command: "find " + quoted + " -maxdepth 1 -mindepth 1 -printf '%f\\n' -quit"},
+		)
+	}
+	return steps
+}
+
 // SplitHTTPStatus extracts the "\nHTTP_STATUS:nnn" suffix
 // curlQueryCommand's -w appends (curl itself turns the literal "\n" it
 // was given into a real newline before writing this), returning the

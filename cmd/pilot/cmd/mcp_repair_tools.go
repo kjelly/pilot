@@ -189,6 +189,7 @@ type repairApplyInput struct {
 }
 
 type repairApplyOutput struct {
+	diagnoseAuditStatus
 	Result         string                 `json:"result"` // APPLIED_VERIFIED | APPLIED_ALERT_STILL_FIRING | EXECUTION_FAILED | VERIFICATION_FAILED | VERIFICATION_INCONCLUSIVE | PLAN_STALE
 	ExecutionOK    bool                   `json:"execution_ok"`
 	ExecutionRC    int                    `json:"execution_rc,omitempty"`
@@ -261,7 +262,7 @@ func repairApplyHandler(opts repairMCPToolsOptions) mcp.ToolHandlerFor[repairApp
 		out := repairApplyOutput{AuditDirectory: auditDir}
 		if err != nil {
 			out.Result, out.ExecutionError = "EXECUTION_FAILED", err.Error()
-			writeRepairAuditRecord(auditDir, sessionID, req, opts, p, start, []diagnose.StepResult{})
+			out.diagnoseAuditStatus = auditStatusFor(writeRepairAuditRecord(auditDir, sessionID, req, opts, p, start, []diagnose.StepResult{}))
 			return nil, out, nil
 		}
 		out.ExecutionRC = execResult.Result.RC
@@ -270,7 +271,7 @@ func repairApplyHandler(opts repairMCPToolsOptions) mcp.ToolHandlerFor[repairApp
 			if execResult.Result.RunErr != nil {
 				out.ExecutionError = execResult.Result.RunErr.Error()
 			}
-			writeRepairAuditRecord(auditDir, sessionID, req, opts, p, start, []diagnose.StepResult{execResult})
+			out.diagnoseAuditStatus = auditStatusFor(writeRepairAuditRecord(auditDir, sessionID, req, opts, p, start, []diagnose.StepResult{execResult}))
 			return nil, out, nil
 		}
 		out.ExecutionOK = true
@@ -280,7 +281,7 @@ func repairApplyHandler(opts repairMCPToolsOptions) mcp.ToolHandlerFor[repairApp
 			verifyTool = &tools.VerifySpecTool{Inventory: opts.Inventory, Host: p.Host}
 		}
 		verifyOutcome, verr := repair.VerifyAfterExecution(ctx, verifyTool, p.VerificationSpec, p.Host, int(opts.StepTimeout.Seconds()))
-		writeRepairAuditRecord(auditDir, sessionID, req, opts, p, start, []diagnose.StepResult{execResult})
+		out.diagnoseAuditStatus = auditStatusFor(writeRepairAuditRecord(auditDir, sessionID, req, opts, p, start, []diagnose.StepResult{execResult}))
 		if verr != nil {
 			out.Result = "VERIFICATION_INCONCLUSIVE"
 			return nil, out, nil
@@ -298,7 +299,7 @@ func repairApplyHandler(opts repairMCPToolsOptions) mcp.ToolHandlerFor[repairApp
 	}
 }
 
-func writeRepairAuditRecord(auditDir, sessionID string, req *mcp.CallToolRequest, opts repairMCPToolsOptions, p repair.Plan, start time.Time, steps []diagnose.StepResult) {
+func writeRepairAuditRecord(auditDir, sessionID string, req *mcp.CallToolRequest, opts repairMCPToolsOptions, p repair.Plan, start time.Time, steps []diagnose.StepResult) error {
 	rec := diagnoseAuditRecord{
 		SessionID: sessionID, Check: "repair_apply", PilotVersion: rootCmd.Version,
 		GitRevision: gitRevision(filepath.Dir(opts.Inventory)), MCPClient: mcpClientString(req),
@@ -306,7 +307,7 @@ func writeRepairAuditRecord(auditDir, sessionID string, req *mcp.CallToolRequest
 		Params: map[string]string{"plan_id": p.ID, "plan_hash": p.PlanHash, "component": p.Component, "action": p.Action},
 		Start:  start, Finish: time.Now(), Steps: stepAuditList(steps),
 	}
-	_ = writeDiagnoseAudit(auditDir, rec)
+	return writeDiagnoseAudit(auditDir, rec)
 }
 
 // loadRepairCatalogAndInventory resolves the current contract catalog
@@ -542,6 +543,7 @@ type reapplyApplyInput struct {
 }
 
 type reapplyApplyOutput struct {
+	diagnoseAuditStatus
 	Result         string                 `json:"result"` // PREVIEW_BLOCKED | PLAN_STALE | APPLY_FAILED_PARTIAL | APPLIED_VERIFIED | APPLIED_VERIFICATION_FAILED
 	ExecutionOK    bool                   `json:"execution_ok"`
 	Changed        int                    `json:"changed"`
@@ -594,7 +596,7 @@ func repairReapplyApplyHandler(opts repairMCPToolsOptions) mcp.ToolHandlerFor[re
 
 		execResult := repair.ReapplyExecute(ctx, reapplyExecuteRunner(opts), opts.Inventory, p)
 		out := reapplyApplyOutput{AuditDirectory: auditDir, Changed: execResult.Changed}
-		writeReapplyAuditRecord(auditDir, sessionID, req, opts, p, start)
+		out.diagnoseAuditStatus = auditStatusFor(writeReapplyAuditRecord(auditDir, sessionID, req, opts, p, start))
 		if execResult.Result != "" {
 			out.Result, out.ExecutionError = execResult.Result, execResult.Error
 			return nil, out, nil
@@ -624,7 +626,7 @@ func repairReapplyApplyHandler(opts repairMCPToolsOptions) mcp.ToolHandlerFor[re
 	}
 }
 
-func writeReapplyAuditRecord(auditDir, sessionID string, req *mcp.CallToolRequest, opts repairMCPToolsOptions, p repair.ReapplyPlan, start time.Time) {
+func writeReapplyAuditRecord(auditDir, sessionID string, req *mcp.CallToolRequest, opts repairMCPToolsOptions, p repair.ReapplyPlan, start time.Time) error {
 	rec := diagnoseAuditRecord{
 		SessionID: sessionID, Check: "reapply_apply", PilotVersion: rootCmd.Version,
 		GitRevision: gitRevision(filepath.Dir(opts.Inventory)), MCPClient: mcpClientString(req),
@@ -635,5 +637,5 @@ func writeReapplyAuditRecord(auditDir, sessionID string, req *mcp.CallToolReques
 		},
 		Start: start, Finish: time.Now(),
 	}
-	_ = writeDiagnoseAudit(auditDir, rec)
+	return writeDiagnoseAudit(auditDir, rec)
 }

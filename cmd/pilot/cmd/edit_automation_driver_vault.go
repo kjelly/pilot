@@ -31,12 +31,40 @@ import (
 // checkVaultCompleteness, `pilot inventory generate`'s --vault-out default,
 // pushNFSRoleBootstrap's own ipa_admin_password reuse) then fails to find.
 func normalizeVaultFileName(file string) string {
+	if canonical, err := canonicalVaultFileName(file); err == nil {
+		return canonical
+	}
 	switch strings.ToLower(filepath.Ext(file)) {
 	case ".yaml", ".yml":
 		return file
 	default:
 		return file + ".yaml"
 	}
+}
+
+// canonicalVaultFileName converts the user-facing vault file spelling into a
+// filename relative to .vault. It is intentionally strict because scenario
+// files are agent-authored and must not escape the workspace.
+func canonicalVaultFileName(file string) (string, error) {
+	file = strings.TrimSpace(filepath.ToSlash(file))
+	if file == "" || filepath.IsAbs(file) {
+		return "", fmt.Errorf("vault file must be a relative path")
+	}
+	file = strings.TrimPrefix(file, "./")
+	if strings.HasPrefix(file, ".vault/") {
+		file = strings.TrimPrefix(file, ".vault/")
+	}
+	clean := filepath.Clean(filepath.FromSlash(file))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("vault file path escapes .vault: %s", file)
+	}
+	if strings.Contains(clean, string(filepath.Separator)+".vault"+string(filepath.Separator)) || clean == ".vault" {
+		return "", fmt.Errorf("vault file path must name a file inside .vault: %s", file)
+	}
+	if ext := strings.ToLower(filepath.Ext(clean)); ext != ".yaml" && ext != ".yml" {
+		clean += ".yaml"
+	}
+	return filepath.ToSlash(clean), nil
 }
 
 // openVaultFile resolves the router to the vault key-list editor screen
@@ -47,7 +75,11 @@ func normalizeVaultFileName(file string) string {
 // on the caller's behalf (that file may hold unsaved changes) rather than
 // guessing a discard confirm's answer.
 func (d *automationDriver) openVaultFile(r *editRouterModel, file string) error {
-	file = normalizeVaultFileName(file)
+	canonical, err := canonicalVaultFileName(file)
+	if err != nil {
+		return err
+	}
+	file = canonical
 	base := filepath.Base(file)
 	for attempts := 0; attempts < 6; attempts++ {
 		if automationState(r).Kind == tui.ScreenConfirm {

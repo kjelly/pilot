@@ -49,11 +49,26 @@ import (
 // diagnose tool handlers close over. AdHocRunner is nil in production —
 // each call builds a real adapter — and injected only by tests.
 type diagnoseMCPToolsOptions struct {
+	WorkspaceDir   string
 	Inventory      string
 	AuditDir       string
 	StepTimeout    time.Duration
 	AnsibleRuntime deployAnsibleRuntime
 	AdHocRunner    diagnose.AdHocRunner
+}
+
+func diagnoseWorkspaceRoot(opts diagnoseMCPToolsOptions) string {
+	if opts.WorkspaceDir != "" {
+		return opts.WorkspaceDir
+	}
+	// Unit callers historically supplied only an inventory fixture while
+	// contracts lived in the process working tree.  Preserve that contract
+	// root fallback; production mcp serve always fills WorkspaceDir with the
+	// canonical --dir value.
+	if root, err := resolveContractRoot(""); err == nil {
+		return root
+	}
+	return filepath.Dir(opts.Inventory)
 }
 
 // resolveDiagnoseInventory best-effort refreshes opts.Inventory from a
@@ -90,6 +105,22 @@ func resolveDiagnoseInventory(ctx context.Context, opts diagnoseMCPToolsOptions)
 	return resolveNetworkCheckInventory(resolveCtx, opts.Inventory)
 }
 
+// resolveDiagnoseInventoryReadOnly is used by the structured delivery and
+// monitoring surfaces. Unlike the legacy live-host tools it never regenerates
+// inventory from hosts.yml, so a diagnosis cannot mutate the workspace while
+// answering a read-only question.
+func resolveDiagnoseInventoryReadOnly(ctx context.Context, opts diagnoseMCPToolsOptions) (networkcheck.ResolvedInventory, error) {
+	if _, err := os.Stat(opts.Inventory); err != nil {
+		if os.IsNotExist(err) {
+			return networkcheck.ResolvedInventory{}, fmt.Errorf("inventory file not found: %s", opts.Inventory)
+		}
+		return networkcheck.ResolvedInventory{}, fmt.Errorf("stat inventory file %s: %w", opts.Inventory, err)
+	}
+	resolveCtx, cancel := context.WithTimeout(ctx, opts.StepTimeout)
+	defer cancel()
+	return resolveNetworkCheckInventory(resolveCtx, opts.Inventory)
+}
+
 func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_sudo",
@@ -101,11 +132,11 @@ func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 	}, diagnoseDNSHandler(opts))
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_logs",
-		Description: "run a LogQL query against Loki (the dashboard host's log store) via an ansible ad-hoc curl against its own loopback — no host parameter, since dashboard is this deployment's singleton central role. start/end accept RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; when either is supplied pilot makes both UTC boundaries explicit and rejects start >= end before querying Loki. Omit both for Loki's default last hour. Returns the raw Loki JSON response body plus its HTTP status.",
+		Description: "run a bounded LogQL query against Loki (the dashboard host's log store) via an ansible ad-hoc curl against its own loopback — no host parameter, since dashboard is this deployment's singleton central role. start/end accept RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; when either is supplied pilot makes both UTC boundaries explicit, rejects start >= end, and caps the range at six hours before querying Loki. Explicit limit values are capped at 200 and the response body at 64 KiB. Omit both for Loki's default last hour. Returns the response body plus its HTTP status and a truncation flag when bounded.",
 	}, diagnoseLogsHandler(opts))
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_metrics",
-		Description: "run a PromQL query against Thanos Query (the cross-site metrics aggregator) via an ansible ad-hoc curl against its own loopback — no host parameter, since thanos-query is this deployment's singleton central role. Supplying both start and end runs a range query (/api/v1/query_range, with optional step); otherwise an instant query (/api/v1/query, with optional time). No range cap — the caller decides. Returns the raw Prometheus-compatible JSON response body plus its HTTP status.",
+		Description: "run a bounded PromQL query against Thanos Query (the cross-site metrics aggregator) via an ansible ad-hoc curl against its own loopback — no host parameter, since thanos-query is this deployment's singleton central role. Supplying both start and end runs a range query (/api/v1/query_range, with optional step), capped at 24 hours; otherwise an instant query (/api/v1/query, with optional time). The response body is capped at 64 KiB and reports when truncated.",
 	}, diagnoseMetricsHandler(opts))
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_security_logs",
@@ -124,6 +155,7 @@ func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 		Description: "run fixed, read-only ansible ad-hoc commands against the central Detection Engine host (no host parameter — detection-engine is this deployment's singleton central role): it reads only the apply-managed config's dbPath, then runs status (`status --json`) and SignalEvent episode queries as the `pilot-detect` service account, plus a bounded (`-n 200`) journal tail. At least one of signal_id or pilot_host must be supplied; when signal_id is given (must be a well-formed 26-character ULID) an additional `signals show <signal_id>` call returns that one episode's JSON detail. pilot_host is not a command parameter — the engine's CLI has no per-host filter — it is only recorded for audit/correlation against the returned signals_list_json's own pilot_host fields. Never accepts an arbitrary command.",
 	}, diagnoseDetectionHandler(opts))
 	registerDiagnoseCompositeTools(server, opts)
+	registerDeliveryTools(server, opts)
 }
 
 // normalizeLokiRange makes every caller-supplied log time unambiguous before
@@ -198,6 +230,62 @@ func parseLokiTime(value string, now time.Time, isStart bool) (time.Time, error)
 	default:
 		return time.Unix(0, n).UTC(), nil
 	}
+}
+
+const (
+	maxDiagnosticResponseBytes = 64 * 1024
+	maxLokiEntries             = 200
+)
+
+// boundedLokiLimit keeps a caller-controlled Loki query from requesting an
+// unbounded response. Empty remains empty so Loki's documented default stays
+// compatible with existing callers; any explicit value is clamped by policy.
+func boundedLokiLimit(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 1 {
+		return "", fmt.Errorf("limit must be a positive integer no greater than %d", maxLokiEntries)
+	}
+	if n > maxLokiEntries {
+		n = maxLokiEntries
+	}
+	return strconv.Itoa(n), nil
+}
+
+// boundDiagnosticResponse prevents raw Loki/Thanos payloads from becoming an
+// MCP response-size escape hatch. The caller receives an explicit truncation
+// marker instead of an apparently complete but silently clipped document.
+func boundDiagnosticResponse(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) <= maxDiagnosticResponseBytes {
+		return value, false
+	}
+	marker := "\n[response truncated by pilot after 65536 bytes]"
+	limit := maxDiagnosticResponseBytes - len(marker)
+	return value[:limit] + marker, true
+}
+
+func enforceQueryRange(start, end string, max time.Duration) error {
+	if start == "" || end == "" {
+		return nil
+	}
+	startTime, startErr := parseLokiTime(start, time.Now().UTC(), true)
+	endTime, endErr := parseLokiTime(end, time.Now().UTC(), false)
+	if startErr != nil || endErr != nil {
+		// Preserve the upstream timestamp grammar when it is not understood
+		// locally; only reject ranges that Pilot can prove exceed the bound.
+		return nil
+	}
+	if !startTime.Before(endTime) {
+		return errors.New("query range start must be before end")
+	}
+	if endTime.Sub(startTime) > max {
+		return fmt.Errorf("query range exceeds the %s bound", max)
+	}
+	return nil
 }
 
 // ---- shared plumbing --------------------------------------------------
@@ -312,7 +400,7 @@ func stepEvidenceList(results []diagnose.StepResult) []diagnoseStepEvidence {
 		} else {
 			ev.RC = r.Result.RC
 			ev.OK = r.Result.RC == 0 && !r.Result.Failed && !r.Result.Unreachable
-			ev.Stdout = strings.TrimSpace(r.Result.Stdout)
+			ev.Stdout, _ = boundDiagnosticResponse(r.Result.Stdout)
 		}
 		out[i] = ev
 	}
@@ -378,6 +466,18 @@ func writeDiagnoseAudit(auditDir string, rec diagnoseAuditRecord) error {
 	return writeJSONFile(filepath.Join(auditDir, "record.json"), rec)
 }
 
+type diagnoseAuditStatus struct {
+	AuditStatus string `json:"audit_status"`
+	AuditError  string `json:"audit_error,omitempty"`
+}
+
+func auditStatusFor(err error) diagnoseAuditStatus {
+	if err != nil {
+		return diagnoseAuditStatus{AuditStatus: "failed", AuditError: err.Error()}
+	}
+	return diagnoseAuditStatus{AuditStatus: "persisted"}
+}
+
 func mcpClientString(req *mcp.CallToolRequest) string {
 	if client := req.ClientInfo(); client != nil {
 		return fmt.Sprintf("%s/%s", client.Name, client.Version)
@@ -393,6 +493,7 @@ type diagnoseSudoInput struct {
 }
 
 type diagnoseSudoOutput struct {
+	diagnoseAuditStatus
 	Host                        string                 `json:"host"`
 	ResolvedAddr                string                 `json:"resolved_addr,omitempty"`
 	User                        string                 `json:"user"`
@@ -446,10 +547,11 @@ func diagnoseSudoHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 			Inventory: opts.Inventory, Host: in.Host, Params: map[string]string{"user": in.User},
 			Start: start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		out := diagnoseSudoOutput{
-			Host: in.Host, ResolvedAddr: resolved.HostAddr(in.Host), User: in.User,
+			diagnoseAuditStatus: auditState,
+			Host:                in.Host, ResolvedAddr: resolved.HostAddr(in.Host), User: in.User,
 			SssdActive:                  sudoOut.SssdActive,
 			HasKerberosMachineIdentity:  sudoOut.HasKerberosMachineIdentity,
 			AccountResolvesViaSSSD:      sudoOut.AccountResolvesViaSSSD,
@@ -472,6 +574,7 @@ type diagnoseDNSInput struct {
 }
 
 type diagnoseDNSOutput struct {
+	diagnoseAuditStatus
 	Host                   string                 `json:"host"`
 	ResolvedAddr           string                 `json:"resolved_addr,omitempty"`
 	Name                   string                 `json:"name,omitempty"`
@@ -530,10 +633,11 @@ func diagnoseDNSHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 			Inventory: opts.Inventory, Host: in.Host, Params: params,
 			Start: start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		out := diagnoseDNSOutput{
-			Host: in.Host, ResolvedAddr: resolved.HostAddr(in.Host), Name: in.Name,
+			diagnoseAuditStatus: auditState,
+			Host:                in.Host, ResolvedAddr: resolved.HostAddr(in.Host), Name: in.Name,
 			Nameserver:             dnsOut.Nameserver,
 			SystemdResolvedActive:  dnsOut.SystemdResolvedActive,
 			LocalDaemonListening:   dnsOut.LocalDaemonListening,
@@ -555,20 +659,22 @@ type diagnoseLogsInput struct {
 	Query               string `json:"query" jsonschema:"LogQL query, e.g. {job=\"pilot-siem\"} |= \"error\""`
 	Start               string `json:"start,omitempty" jsonschema:"optional range start: RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; a duration such as 1h means that far before now"`
 	End                 string `json:"end,omitempty" jsonschema:"optional range end: RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; now is accepted"`
-	Limit               string `json:"limit,omitempty" jsonschema:"optional max entries, passed through verbatim to Loki — omit for Loki's default (100)"`
+	Limit               string `json:"limit,omitempty" jsonschema:"optional max entries, capped at 200; omit for Loki's default (100)"`
 	Direction           string `json:"direction,omitempty" jsonschema:"optional forward|backward, passed through verbatim to Loki — omit for Loki's default (backward)"`
 	IncludeAnsibleNoise bool   `json:"include_ansible_noise,omitempty" jsonschema:"set true to include log lines generated by pilot's own ansible activity (BECOME-SUCCESS sudo/become markers, SSH logins by this inventory's ansible_user automation accounts) — excluded by default since it is noise from pilot itself, not the system/user activity being investigated"`
 }
 
 type diagnoseLogsOutput struct {
-	Host           string `json:"host"`
-	ResolvedAddr   string `json:"resolved_addr,omitempty"`
-	Query          string `json:"query"`
-	HTTPStatus     int    `json:"http_status,omitempty"`
-	ResultJSON     string `json:"result_json,omitempty"`
-	Unreachable    bool   `json:"unreachable,omitempty"`
-	Error          string `json:"error,omitempty"`
-	AuditDirectory string `json:"audit_directory"`
+	diagnoseAuditStatus
+	Host            string `json:"host"`
+	ResolvedAddr    string `json:"resolved_addr,omitempty"`
+	Query           string `json:"query"`
+	HTTPStatus      int    `json:"http_status,omitempty"`
+	ResultJSON      string `json:"result_json,omitempty"`
+	Unreachable     bool   `json:"unreachable,omitempty"`
+	Error           string `json:"error,omitempty"`
+	ResultTruncated bool   `json:"result_truncated,omitempty"`
+	AuditDirectory  string `json:"audit_directory"`
 }
 
 // diagnoseLogsHandler auto-resolves diagnose.DashboardGroup's singleton
@@ -581,6 +687,13 @@ func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "query must not be empty"}), diagnoseLogsOutput{}, nil
 		}
 		queryStart, queryEnd, err := normalizeLokiRange(in.Start, in.End, time.Now())
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseLogsOutput{}, nil
+		}
+		if err := enforceQueryRange(queryStart, queryEnd, 6*time.Hour); err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseLogsOutput{}, nil
+		}
+		limit, err := boundedLokiLimit(in.Limit)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseLogsOutput{}, nil
 		}
@@ -614,20 +727,21 @@ func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 		if runner == nil {
 			runner = realDiagnoseAdHocRunner()
 		}
-		steps := diagnose.LogsSteps(query, queryStart, queryEnd, in.Limit, in.Direction)
+		steps := diagnose.LogsSteps(query, queryStart, queryEnd, limit, in.Direction)
 		results := diagnose.RunSteps(ctx, runner, opts.Inventory, host, steps, opts.StepTimeout)
 
 		rec := diagnoseAuditRecord{
 			SessionID: sessionID, Check: "logs", PilotVersion: rootCmd.Version,
 			GitRevision: gitRevision(filepath.Dir(opts.Inventory)), MCPClient: mcpClientString(req),
 			Inventory: opts.Inventory, Host: host,
-			Params: map[string]string{"query": query, "start": queryStart, "end": queryEnd, "limit": in.Limit, "direction": in.Direction},
+			Params: map[string]string{"query": query, "start": queryStart, "end": queryEnd, "limit": limit, "direction": in.Direction},
 			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		out := diagnoseLogsOutput{
-			Host: host, ResolvedAddr: resolved.HostAddr(host), Query: query,
+			diagnoseAuditStatus: auditState,
+			Host:                host, ResolvedAddr: resolved.HostAddr(host), Query: query,
 			AuditDirectory: auditDir,
 		}
 		result := results[0].Result
@@ -638,10 +752,10 @@ func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 			out.Unreachable = true
 		default:
 			if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
-				out.ResultJSON = body
+				out.ResultJSON, out.ResultTruncated = boundDiagnosticResponse(body)
 				out.HTTPStatus = status
 			} else {
-				out.ResultJSON = strings.TrimSpace(result.Stdout)
+				out.ResultJSON, out.ResultTruncated = boundDiagnosticResponse(result.Stdout)
 			}
 		}
 		return nil, out, nil
@@ -655,20 +769,22 @@ type diagnoseSecurityLogsInput struct {
 	Search              string `json:"search,omitempty" jsonschema:"optional substring to filter log lines by — plain text match, not a regex (e.g. \"Failed password\", \"sudo\", a rule ID)"`
 	Start               string `json:"start,omitempty" jsonschema:"optional range start: RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; a duration such as 1h means that far before now"`
 	End                 string `json:"end,omitempty" jsonschema:"optional range end: RFC3339 or Unix seconds/milliseconds/microseconds/nanoseconds; now is accepted"`
-	Limit               string `json:"limit,omitempty" jsonschema:"max entries, passed through verbatim — omit for Loki's default (100)"`
+	Limit               string `json:"limit,omitempty" jsonschema:"max entries, capped at 200; omit for Loki's default (100)"`
 	Direction           string `json:"direction,omitempty" jsonschema:"forward|backward, passed through verbatim — omit for Loki's default (backward)"`
 	IncludeAnsibleNoise bool   `json:"include_ansible_noise,omitempty" jsonschema:"set true to include log lines generated by pilot's own ansible activity (BECOME-SUCCESS sudo/become markers, SSH logins by this inventory's ansible_user automation accounts) — excluded by default since it is noise from pilot itself, not a real security/audit event. Turning this on is useful when auditing pilot's own deploy/reconcile/diagnose activity specifically."`
 }
 
 type diagnoseSecurityLogsOutput struct {
-	Host           string `json:"host"` // resolved dashboard-group host, informational only
-	ResolvedAddr   string `json:"resolved_addr,omitempty"`
-	Query          string `json:"query"` // the composed LogQL, so the caller can see/iterate on it
-	HTTPStatus     int    `json:"http_status,omitempty"`
-	ResultJSON     string `json:"result_json,omitempty"`
-	Unreachable    bool   `json:"unreachable,omitempty"`
-	Error          string `json:"error,omitempty"`
-	AuditDirectory string `json:"audit_directory"`
+	diagnoseAuditStatus
+	Host            string `json:"host"` // resolved dashboard-group host, informational only
+	ResolvedAddr    string `json:"resolved_addr,omitempty"`
+	Query           string `json:"query"` // the composed LogQL, so the caller can see/iterate on it
+	HTTPStatus      int    `json:"http_status,omitempty"`
+	ResultJSON      string `json:"result_json,omitempty"`
+	Unreachable     bool   `json:"unreachable,omitempty"`
+	Error           string `json:"error,omitempty"`
+	ResultTruncated bool   `json:"result_truncated,omitempty"`
+	AuditDirectory  string `json:"audit_directory"`
 }
 
 // diagnoseSecurityLogsHandler is structurally identical to
@@ -680,6 +796,13 @@ type diagnoseSecurityLogsOutput struct {
 func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseSecurityLogsInput, diagnoseSecurityLogsOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseSecurityLogsInput) (*mcp.CallToolResult, diagnoseSecurityLogsOutput, error) {
 		queryStart, queryEnd, err := normalizeLokiRange(in.Start, in.End, time.Now())
+		if err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseSecurityLogsOutput{}, nil
+		}
+		if err := enforceQueryRange(queryStart, queryEnd, 6*time.Hour); err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseSecurityLogsOutput{}, nil
+		}
+		limit, err := boundedLokiLimit(in.Limit)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseSecurityLogsOutput{}, nil
 		}
@@ -712,7 +835,7 @@ func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFo
 		if runner == nil {
 			runner = realDiagnoseAdHocRunner()
 		}
-		steps := diagnose.LogsSteps(query, queryStart, queryEnd, in.Limit, in.Direction)
+		steps := diagnose.LogsSteps(query, queryStart, queryEnd, limit, in.Direction)
 		results := diagnose.RunSteps(ctx, runner, opts.Inventory, host, steps, opts.StepTimeout)
 
 		rec := diagnoseAuditRecord{
@@ -721,14 +844,15 @@ func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFo
 			Inventory: opts.Inventory, Host: host,
 			Params: map[string]string{
 				"host": in.Host, "search": in.Search, "start": queryStart, "end": queryEnd,
-				"limit": in.Limit, "direction": in.Direction, "query": query,
+				"limit": limit, "direction": in.Direction, "query": query,
 			},
 			Start: start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		out := diagnoseSecurityLogsOutput{
-			Host: host, ResolvedAddr: resolved.HostAddr(host), Query: query,
+			diagnoseAuditStatus: auditState,
+			Host:                host, ResolvedAddr: resolved.HostAddr(host), Query: query,
 			AuditDirectory: auditDir,
 		}
 		result := results[0].Result
@@ -739,10 +863,10 @@ func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFo
 			out.Unreachable = true
 		default:
 			if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
-				out.ResultJSON = body
+				out.ResultJSON, out.ResultTruncated = boundDiagnosticResponse(body)
 				out.HTTPStatus = status
 			} else {
-				out.ResultJSON = strings.TrimSpace(result.Stdout)
+				out.ResultJSON, out.ResultTruncated = boundDiagnosticResponse(result.Stdout)
 			}
 		}
 		return nil, out, nil
@@ -776,15 +900,17 @@ type diagnoseLoginUserOutput struct {
 // whole pilot_diagnose_login call over a section that only ever
 // supplements the host/user-level findings above it.
 type diagnoseLoginSecurityLogs struct {
-	Query         string `json:"query,omitempty"`
-	HTTPStatus    int    `json:"http_status,omitempty"`
-	ResultJSON    string `json:"result_json,omitempty"`
-	Unreachable   bool   `json:"unreachable,omitempty"`
-	Error         string `json:"error,omitempty"`
-	SkippedReason string `json:"skipped_reason,omitempty"`
+	Query           string `json:"query,omitempty"`
+	HTTPStatus      int    `json:"http_status,omitempty"`
+	ResultJSON      string `json:"result_json,omitempty"`
+	Unreachable     bool   `json:"unreachable,omitempty"`
+	Error           string `json:"error,omitempty"`
+	ResultTruncated bool   `json:"result_truncated,omitempty"`
+	SkippedReason   string `json:"skipped_reason,omitempty"`
 }
 
 type diagnoseLoginOutput struct {
+	diagnoseAuditStatus
 	Host                       string                    `json:"host"`
 	ResolvedAddr               string                    `json:"resolved_addr,omitempty"`
 	SssdActive                 bool                      `json:"sssd_active"`
@@ -965,10 +1091,10 @@ func diagnoseLoginHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagn
 				secLogs.Unreachable = true
 			default:
 				if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
-					secLogs.ResultJSON = body
+					secLogs.ResultJSON, secLogs.ResultTruncated = boundDiagnosticResponse(body)
 					secLogs.HTTPStatus = status
 				} else {
-					secLogs.ResultJSON = strings.TrimSpace(result.Stdout)
+					secLogs.ResultJSON, secLogs.ResultTruncated = boundDiagnosticResponse(result.Stdout)
 				}
 			}
 		}
@@ -980,10 +1106,11 @@ func diagnoseLoginHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagn
 			Params: map[string]string{"users": strings.Join(in.Users, ","), "lookback": lookback},
 			Start:  start, Finish: time.Now(), Steps: stepAuditList(allResults),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		out := diagnoseLoginOutput{
-			Host: in.Host, ResolvedAddr: resolved.HostAddr(in.Host),
+			diagnoseAuditStatus: auditState,
+			Host:                in.Host, ResolvedAddr: resolved.HostAddr(in.Host),
 			SssdActive: hostOut.SssdActive, HasKerberosMachineIdentity: hostOut.HasKerberosMachineIdentity,
 			SssdDomainStatusChecked: hostOut.SssdDomainStatusChecked, SssdDomainOnline: hostOut.SssdDomainOnline,
 			SssdDomainStatusRaw:       hostOut.SssdDomainStatusRaw,
@@ -1011,14 +1138,16 @@ type diagnoseMetricsInput struct {
 }
 
 type diagnoseMetricsOutput struct {
-	Host           string `json:"host"`
-	ResolvedAddr   string `json:"resolved_addr,omitempty"`
-	Query          string `json:"query"`
-	HTTPStatus     int    `json:"http_status,omitempty"`
-	ResultJSON     string `json:"result_json,omitempty"`
-	Unreachable    bool   `json:"unreachable,omitempty"`
-	Error          string `json:"error,omitempty"`
-	AuditDirectory string `json:"audit_directory"`
+	diagnoseAuditStatus
+	Host            string `json:"host"`
+	ResolvedAddr    string `json:"resolved_addr,omitempty"`
+	Query           string `json:"query"`
+	HTTPStatus      int    `json:"http_status,omitempty"`
+	ResultJSON      string `json:"result_json,omitempty"`
+	Unreachable     bool   `json:"unreachable,omitempty"`
+	Error           string `json:"error,omitempty"`
+	ResultTruncated bool   `json:"result_truncated,omitempty"`
+	AuditDirectory  string `json:"audit_directory"`
 }
 
 // diagnoseMetricsHandler auto-resolves diagnose.ThanosQueryGroup's
@@ -1030,6 +1159,9 @@ func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[dia
 		}
 		if (in.Start == "") != (in.End == "") {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "start and end must both be set together, or both omitted"}), diagnoseMetricsOutput{}, nil
+		}
+		if err := enforceQueryRange(in.Start, in.End, 24*time.Hour); err != nil {
+			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseMetricsOutput{}, nil
 		}
 
 		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
@@ -1066,10 +1198,11 @@ func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[dia
 			Params: map[string]string{"query": in.Query, "time": in.Time, "start": in.Start, "end": in.End, "step": in.Step},
 			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		out := diagnoseMetricsOutput{
-			Host: host, ResolvedAddr: resolved.HostAddr(host), Query: in.Query,
+			diagnoseAuditStatus: auditState,
+			Host:                host, ResolvedAddr: resolved.HostAddr(host), Query: in.Query,
 			AuditDirectory: auditDir,
 		}
 		result := results[0].Result
@@ -1080,10 +1213,10 @@ func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[dia
 			out.Unreachable = true
 		default:
 			if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
-				out.ResultJSON = body
+				out.ResultJSON, out.ResultTruncated = boundDiagnosticResponse(body)
 				out.HTTPStatus = status
 			} else {
-				out.ResultJSON = strings.TrimSpace(result.Stdout)
+				out.ResultJSON, out.ResultTruncated = boundDiagnosticResponse(result.Stdout)
 			}
 		}
 		return nil, out, nil
@@ -1099,6 +1232,7 @@ type diagnoseMonitoringTargetInput struct {
 }
 
 type diagnoseMonitoringTargetOutput struct {
+	diagnoseAuditStatus
 	Diagnosis      diagnose.MonitoringTargetDiagnosis `json:"diagnosis"`
 	AuditDirectory string                             `json:"audit_directory"`
 }
@@ -1145,7 +1279,7 @@ func diagnoseMonitoringTargetHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandl
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("top_n %d exceeds max %d", topN, diagnoseMonitoringTargetMaxTopN)}), diagnoseMonitoringTargetOutput{}, nil
 		}
 
-		workspaceDir := filepath.Dir(opts.Inventory)
+		workspaceDir := diagnoseWorkspaceRoot(opts)
 		tf, err := monitoring.LoadTargets(filepath.Join(workspaceDir, "monitoring", "targets.yml"))
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("load monitoring targets: %v", err)}), diagnoseMonitoringTargetOutput{}, nil
@@ -1241,9 +1375,9 @@ func diagnoseMonitoringTargetHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandl
 			Params: map[string]string{"target": target, "window": window, "top_n": strconv.Itoa(topN)},
 			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
-		return nil, diagnoseMonitoringTargetOutput{Diagnosis: diagnosis, AuditDirectory: auditDir}, nil
+		return nil, diagnoseMonitoringTargetOutput{diagnoseAuditStatus: auditState, Diagnosis: diagnosis, AuditDirectory: auditDir}, nil
 	}
 }
 
@@ -1299,6 +1433,7 @@ type diagnoseDetectionInput struct {
 }
 
 type diagnoseDetectionOutput struct {
+	diagnoseAuditStatus
 	Host            string `json:"host"`
 	ResolvedAddr    string `json:"resolved_addr,omitempty"`
 	StatusJSON      string `json:"status_json,omitempty"`
@@ -1385,9 +1520,9 @@ func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 			Params: map[string]string{"signal_id": signalID, "pilot_host": pilotHost},
 			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
-		out := diagnoseDetectionOutput{Host: host, ResolvedAddr: resolved.HostAddr(host), AuditDirectory: auditDir}
+		out := diagnoseDetectionOutput{diagnoseAuditStatus: auditState, Host: host, ResolvedAddr: resolved.HostAddr(host), AuditDirectory: auditDir}
 		if dbPathErr != nil {
 			out.Error = dbPathErr.Error()
 		}
@@ -1403,13 +1538,13 @@ func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 				text := strings.TrimSpace(sr.Result.Stdout)
 				switch sr.Step.ID {
 				case "status":
-					out.StatusJSON = text
+					out.StatusJSON, _ = boundDiagnosticResponse(text)
 				case "signals_list":
-					out.SignalsListJSON = text
+					out.SignalsListJSON, _ = boundDiagnosticResponse(text)
 				case "journal":
-					out.JournalTail = text
+					out.JournalTail, _ = boundDiagnosticResponse(text)
 				case "signal_show":
-					out.SignalShowJSON = text
+					out.SignalShowJSON, _ = boundDiagnosticResponse(text)
 				}
 			}
 		}
@@ -1436,6 +1571,7 @@ type diagnoseRunInput struct {
 }
 
 type diagnoseRunOutput struct {
+	diagnoseAuditStatus
 	Host           string `json:"host"`
 	ResolvedAddr   string `json:"resolved_addr,omitempty"`
 	Command        string `json:"command"`
@@ -1484,10 +1620,11 @@ func diagnoseRunHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 			Inventory: opts.Inventory, Host: in.Host, Params: map[string]string{"command": in.Command},
 			Start: start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		out := diagnoseRunOutput{
-			Host: in.Host, ResolvedAddr: resolved.HostAddr(in.Host), Command: in.Command,
+			diagnoseAuditStatus: auditState,
+			Host:                in.Host, ResolvedAddr: resolved.HostAddr(in.Host), Command: in.Command,
 			AuditDirectory: auditDir,
 		}
 		result := results[0].Result

@@ -32,6 +32,12 @@ groupVars:
   - {name: snmp_exporter_data_dir, type: string, required: false, default: "/var/lib/pilot/snmp-exporter", secret: false}
 endpoints:
   - {name: metrics, scheme: http, port: 9116, autoPublish: {eligible: false, reason: "loopback-only exporter surface by default (spec §5.1/§13.3); /snmp?target= has proxy/scan semantics stricter than an ordinary /metrics endpoint and must never be reverse-proxy-published"}}
+diagnostics:
+  runtime: {kind: docker, name: pilot-snmp-exporter}
+  artifacts:
+    - {path: /etc/pilot/snmp-exporter, kind: directory, sensitivity: metadata_only}
+    - {path: /etc/pilot/snmp-exporter/catalog.yml, kind: file, sensitivity: non_secret}
+    - {path: /etc/pilot/snmp-exporter/modules, kind: directory, sensitivity: metadata_only}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: vm, idempotency: required}
 traceability:

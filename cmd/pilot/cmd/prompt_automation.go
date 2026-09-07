@@ -12,11 +12,12 @@ import (
 )
 
 type promptAnswer struct {
-	Prompt  string   `json:"prompt"`
-	Select  string   `json:"select,omitempty"`
-	Selects []string `json:"selects,omitempty"`
-	Text    string   `json:"text,omitempty"`
-	Confirm *bool    `json:"confirm,omitempty"`
+	PromptID string   `json:"prompt_id,omitempty"`
+	Prompt   string   `json:"prompt"`
+	Select   string   `json:"select,omitempty"`
+	Selects  []string `json:"selects,omitempty"`
+	Text     string   `json:"text,omitempty"`
+	Confirm  *bool    `json:"confirm,omitempty"`
 }
 
 // promptAutomation answers the existing one-shot deploy/reconcile prompts by
@@ -33,9 +34,23 @@ type promptAutomation struct {
 	reuseAnswers bool
 }
 
-func validatePromptAnswers(answers []promptAnswer) error {
+func validatePromptAnswers(action string, answers []promptAnswer) error {
 	seen := make(map[string]bool, len(answers))
 	for _, answer := range answers {
+		if answer.PromptID != "" {
+			definition, ok := promptDefinitionFor(action, answer.PromptID)
+			if !ok {
+				return fmt.Errorf("unknown prompt_id %q", answer.PromptID)
+			}
+			if seen[answer.PromptID] {
+				return fmt.Errorf("duplicate prompt_id %q", answer.PromptID)
+			}
+			seen[answer.PromptID] = true
+			if err := validatePromptAnswerKind(definition, answer); err != nil {
+				return err
+			}
+			continue
+		}
 		if strings.TrimSpace(answer.Prompt) == "" {
 			return fmt.Errorf("prompt answer requires prompt")
 		}
@@ -50,14 +65,53 @@ func validatePromptAnswers(answers []promptAnswer) error {
 			return fmt.Errorf("prompt answer cannot contain both select and selects")
 		}
 	}
+	if action == "deploy" {
+		for _, id := range []string{promptInventory, promptTopologyPreview, promptPreflight, promptScope, promptStage, promptLimit, promptTags, promptBecomePassword, promptExtraVars, promptExecutionPreview} {
+			if !seen[id] {
+				return fmt.Errorf("missing required prompt_id %q", id)
+			}
+		}
+	}
+	return nil
+}
+
+func validatePromptAnswerKind(def promptDefinition, answer promptAnswer) error {
+	switch def.Kind {
+	case "confirm":
+		if answer.Confirm == nil {
+			return fmt.Errorf("prompt_id %q requires confirm", def.ID)
+		}
+	case "text":
+		if answer.Confirm != nil || answer.Select != "" || len(answer.Selects) > 0 {
+			return fmt.Errorf("prompt_id %q requires text", def.ID)
+		}
+	case "select":
+		if answer.Confirm != nil || (answer.Select == "" && len(answer.Selects) == 0) {
+			return fmt.Errorf("prompt_id %q requires select", def.ID)
+		}
+	}
+	if answer.Select != "" && len(answer.Selects) > 0 {
+		return fmt.Errorf("prompt answer cannot contain both select and selects")
+	}
+	if answer.PromptID != "" && hasSecretName(answer.Text) {
+		return fmt.Errorf("secret values are not accepted in prompt answers")
+	}
+	if len(def.AcceptedValues) > 0 && answer.Select != "" {
+		for _, value := range def.AcceptedValues {
+			if value == answer.Select {
+				return nil
+			}
+		}
+		return fmt.Errorf("prompt_id %q does not accept %q", def.ID, answer.Select)
+	}
 	return nil
 }
 
 var activePromptAutomation *promptAutomation
 
-func (p *promptAutomation) answer(kind, prompt string) (promptAnswer, bool) {
+func (p *promptAutomation) answer(kind, id, prompt string) (promptAnswer, bool) {
 	for i, answer := range p.answers {
-		if answer.Prompt == prompt || strings.Contains(prompt, answer.Prompt) {
+		if (id != "" && answer.PromptID == id) || answer.Prompt == prompt || (answer.Prompt != "" && strings.Contains(prompt, answer.Prompt)) {
 			p.answers = append(p.answers[:i], p.answers[i+1:]...)
 			if p.reuseAnswers {
 				if p.reusable == nil {
@@ -76,17 +130,17 @@ func (p *promptAutomation) answer(kind, prompt string) (promptAnswer, bool) {
 	return promptAnswer{}, false
 }
 
-func (p *promptAutomation) selectPrompt(prompt string, items []string) (int, error) {
+func (p *promptAutomation) selectPrompt(id, prompt string, items []string) (int, error) {
 	if p.useDefaults {
 		return 0, nil
 	}
-	answer, ok := p.answer("select", prompt)
+	answer, ok := p.answer("select", id, prompt)
 	if !ok {
 		return 0, fmt.Errorf("no automation answer for select prompt")
 	}
 	index, err := uniqueItemIndex(items, answer.Select)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("cannot choose %q: %w", answer.Select, err)
 	}
 	choices := make([]tui.Choice, len(items))
 	for i, it := range items {
@@ -119,7 +173,7 @@ func (p *promptAutomation) multiSelectPrompt(prompt string, items []string) ([]i
 	if p.useDefaults {
 		return []int{0}, nil
 	}
-	answer, ok := p.answer("multi-select", prompt)
+	answer, ok := p.answer("multi-select", "", prompt)
 	if !ok {
 		return nil, fmt.Errorf("no automation answer for multi-select prompt")
 	}
@@ -142,7 +196,7 @@ func (p *promptAutomation) multiSelectPrompt(prompt string, items []string) ([]i
 	for _, label := range labels {
 		index, err := uniqueItemIndex(items, label)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("cannot choose %q: %w", label, err)
 		}
 		if checked[index] {
 			return nil, fmt.Errorf("multi-select item %q was selected more than once", label)
@@ -174,11 +228,26 @@ func (p *promptAutomation) multiSelectPrompt(prompt string, items []string) ([]i
 	return indexes, nil
 }
 
-func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) error) (string, error) {
+func (p *promptAutomation) textPrompt(args ...any) (string, error) {
+	var id, prompt, def string
+	var validate func(string) error
+	if len(args) == 4 {
+		id, _ = args[0].(string)
+		prompt, _ = args[1].(string)
+		def, _ = args[2].(string)
+		validate, _ = args[3].(func(string) error)
+	} else if len(args) == 3 {
+		// Legacy tests/callers omitted the stable ID; match by label.
+		prompt, _ = args[0].(string)
+		def, _ = args[1].(string)
+		validate, _ = args[2].(func(string) error)
+	} else {
+		return "", fmt.Errorf("text prompt requires id, prompt, default, validator")
+	}
 	if p.useDefaults {
 		return def, nil
 	}
-	answer, ok := p.answer("text", prompt)
+	answer, ok := p.answer("text", id, prompt)
 	if !ok {
 		return "", fmt.Errorf("no automation answer for text prompt")
 	}
@@ -211,14 +280,14 @@ func (p *promptAutomation) textPrompt(prompt, def string, validate func(string) 
 	return value, nil
 }
 
-func (p *promptAutomation) confirmPrompt(prompt string, defaultYes bool) bool {
-	if p.forceApply && strings.Contains(prompt, "預覽看起來沒問題，要接著套用真正的變更嗎？") {
+func (p *promptAutomation) confirmPrompt(id, prompt string, defaultYes bool) bool {
+	if p.forceApply && (id == promptExecutionApplyAfterPreview || strings.Contains(prompt, "預覽看起來沒問題，要接著套用真正的變更嗎？")) {
 		return true
 	}
 	if p.useDefaults {
 		return defaultYes
 	}
-	answer, ok := p.answer("confirm", prompt)
+	answer, ok := p.answer("confirm", id, prompt)
 	if !ok || answer.Confirm == nil {
 		p.err = fmt.Errorf("no automation answer for confirm prompt")
 		return false

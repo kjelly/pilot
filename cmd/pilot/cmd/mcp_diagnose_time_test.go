@@ -44,3 +44,22 @@ func TestNormalizeLokiRange_RejectsFutureOrBackwardsRange(t *testing.T) {
 		t.Fatalf("normalizeLokiRange() error = %v, want actionable start/end error", err)
 	}
 }
+
+func TestBoundedLokiLimit(t *testing.T) {
+	if got, err := boundedLokiLimit(""); err != nil || got != "" {
+		t.Fatalf("empty limit = %q, %v", got, err)
+	}
+	if got, err := boundedLokiLimit("999"); err != nil || got != "200" {
+		t.Fatalf("large limit = %q, %v, want 200", got, err)
+	}
+	if _, err := boundedLokiLimit("0"); err == nil {
+		t.Fatal("zero limit unexpectedly accepted")
+	}
+}
+
+func TestBoundDiagnosticResponseMarksTruncation(t *testing.T) {
+	got, truncated := boundDiagnosticResponse(strings.Repeat("x", maxDiagnosticResponseBytes+10))
+	if !truncated || len(got) > maxDiagnosticResponseBytes || !strings.Contains(got, "response truncated") {
+		t.Fatalf("bounded response truncated=%v len=%d", truncated, len(got))
+	}
+}

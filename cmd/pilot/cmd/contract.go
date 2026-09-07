@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -12,6 +13,7 @@ import (
 )
 
 var contractRoot string
+var contractRequireDiagnostics bool
 
 var contractCmd = &cobra.Command{
 	Use:   "contract",
@@ -27,6 +29,7 @@ var contractLintCmd = &cobra.Command{
 
 func init() {
 	contractLintCmd.Flags().StringVar(&contractRoot, "root", "", "repository root containing contracts/ (default: current directory)")
+	contractLintCmd.Flags().BoolVar(&contractRequireDiagnostics, "require-diagnostics", false, "fail when a component contract has no structured diagnostics metadata")
 	contractCmd.AddCommand(contractLintCmd)
 	rootCmd.AddCommand(contractCmd)
 }
@@ -36,10 +39,14 @@ func runContractLint(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return lintContracts(root, cmd.OutOrStdout())
+	return lintContractsWithOptions(root, cmd.OutOrStdout(), contractRequireDiagnostics)
 }
 
 func lintContracts(root string, out io.Writer) error {
+	return lintContractsWithOptions(root, out, false)
+}
+
+func lintContractsWithOptions(root string, out io.Writer, requireDiagnostics bool) error {
 	loader, err := contract.NewLoader(root)
 	if err != nil {
 		return err
@@ -55,11 +62,27 @@ func lintContracts(root string, out io.Writer) error {
 		return err
 	}
 	components := catalog.Components()
+	covered := 0
+	missingDiagnostics := make([]string, 0)
 	for _, component := range components {
+		if contractHasStructuredDiagnostics(component) {
+			covered++
+		} else {
+			missingDiagnostics = append(missingDiagnostics, component.ID)
+		}
 		fmt.Fprintf(out, "✓ %s\trole=%s\n", component.ID, component.Role)
+	}
+	fmt.Fprintf(out, "diagnostics coverage: %d/%d component(s)\n", covered, len(components))
+	if requireDiagnostics && len(missingDiagnostics) > 0 {
+		return fmt.Errorf("diagnostics coverage incomplete: %d/%d components lack structured diagnostics: %s", len(missingDiagnostics), len(components), strings.Join(missingDiagnostics, ", "))
 	}
 	fmt.Fprintf(out, "contracts: %d component(s) loaded from %s\n", len(components), filepath.Join(root, contract.DefaultDirectory))
 	return nil
+}
+
+func contractHasStructuredDiagnostics(component contract.Contract) bool {
+	d := component.Diagnostics
+	return d.Runtime.Kind != "" || d.Readiness.Endpoint != "" || d.Logs.Source != "" || d.VerifySpec != "" || len(d.Artifacts) > 0
 }
 
 func validateDeployCatalogProjection(catalog contract.Catalog) error {

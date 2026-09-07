@@ -2465,10 +2465,24 @@ func deploymentMetadata(root, playbook string, components, extraVars []string, v
 	}
 	sort.Strings(keys)
 	metadata := map[string]any{
-		"extra_var_keys": keys,
-		"tags":           tags,
-		"authorization":  "interactive-stage-confirmed",
-		"authorized_at":  time.Now().UTC().Format(time.RFC3339Nano),
+		"extra_var_keys":   keys,
+		"tags":             tags,
+		"selection_mode":   "site",
+		"selection_reason": "selected",
+		"authorization":    "interactive-stage-confirmed",
+		"authorized_at":    time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if tags != "" {
+		selectedTags := make([]string, 0)
+		for _, tag := range strings.Split(tags, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				selectedTags = append(selectedTags, tag)
+			}
+		}
+		if len(selectedTags) > 0 {
+			metadata["selected_tags"] = selectedTags
+		}
 	}
 	if vault.ExtraVarsFile != "" {
 		metadata["vault_reference"] = filepath.Base(vault.ExtraVarsFile)

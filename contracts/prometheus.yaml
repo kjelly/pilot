@@ -44,6 +44,9 @@ diagnostics:
   runtime: {kind: docker, name: pilot-prometheus}
   readiness: {endpoint: prometheus, path: /-/ready}
   logs: {source: docker, lookback: 30m}
+  artifacts:
+    - {path: /etc/pilot/prometheus/prometheus.yml, kind: file, sensitivity: non_secret}
+    - {path: /etc/pilot/prometheus/targets, kind: directory, sensitivity: metadata_only}
   verifySpec: docs/verification/prometheus.md
 remediation:
   actions:

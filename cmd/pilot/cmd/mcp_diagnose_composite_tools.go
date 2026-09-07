@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,7 @@ type diagnoseHostHealthInput struct {
 }
 
 type diagnoseHostHealthOutput struct {
+	diagnoseAuditStatus
 	Host                 string                     `json:"host"`
 	ResolvedAddr         string                     `json:"resolved_addr,omitempty"`
 	Reachable            bool                       `json:"reachable"`
@@ -147,9 +149,9 @@ func diagnoseHostHealthHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[
 					out.ThanosNote = "thanos-query host unreachable"
 				default:
 					if body, _, split := diagnose.SplitHTTPStatus(r.Stdout); split {
-						out.ThanosCPUTrendJSON = body
+						out.ThanosCPUTrendJSON, _ = boundDiagnosticResponse(body)
 					} else {
-						out.ThanosCPUTrendJSON = strings.TrimSpace(r.Stdout)
+						out.ThanosCPUTrendJSON, _ = boundDiagnosticResponse(r.Stdout)
 					}
 				}
 			}
@@ -177,7 +179,7 @@ func diagnoseHostHealthHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[
 				case r.Result.Unreachable:
 					out.DetectionNote = "detection-engine host unreachable"
 				case strings.Contains(r.Result.Stdout, in.Host):
-					out.DetectionSignalsJSON = strings.TrimSpace(r.Result.Stdout)
+					out.DetectionSignalsJSON, _ = boundDiagnosticResponse(r.Result.Stdout)
 				default:
 					out.DetectionNote = "no active signal mentions this host"
 				}
@@ -190,7 +192,8 @@ func diagnoseHostHealthHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[
 			Inventory: opts.Inventory, Host: in.Host, Params: map[string]string{"lookback": lookback},
 			Start: start, Finish: time.Now(), Steps: stepAuditList(allResults),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
+		out.diagnoseAuditStatus = auditState
 		out.Steps = stepEvidenceList(allResults)
 		return nil, out, nil
 	}
@@ -204,6 +207,7 @@ type diagnoseComponentInput struct {
 }
 
 type diagnoseComponentOutput struct {
+	diagnoseAuditStatus
 	Host                string                              `json:"host"`
 	Component           string                              `json:"component"`
 	RuntimeConfigured   bool                                `json:"runtime_configured"`
@@ -218,6 +222,65 @@ type diagnoseComponentOutput struct {
 	Verdict             string                              `json:"verdict"`
 	Steps               []diagnoseStepEvidence              `json:"steps"`
 	AuditDirectory      string                              `json:"audit_directory"`
+	Artifacts           []diagnosticArtifactOutput          `json:"artifacts,omitempty"`
+}
+
+type diagnosticArtifactOutput struct {
+	Path        string   `json:"path"`
+	Kind        string   `json:"kind"`
+	Sensitivity string   `json:"sensitivity"`
+	Status      string   `json:"status"`
+	Exists      bool     `json:"exists"`
+	Type        string   `json:"type,omitempty"`
+	Mtime       string   `json:"mtime,omitempty"`
+	Size        int64    `json:"size,omitempty"`
+	SHA256      string   `json:"sha256,omitempty"`
+	Entries     []string `json:"entries,omitempty"`
+}
+
+func artifactOutputs(specs []contract.DiagnosticArtifact, results []diagnose.StepResult) []diagnosticArtifactOutput {
+	out := make([]diagnosticArtifactOutput, len(specs))
+	for i, spec := range specs {
+		out[i] = diagnosticArtifactOutput{Path: spec.Path, Kind: spec.Kind, Sensitivity: spec.Sensitivity, Status: "missing"}
+		base := i * 3
+		if base >= len(results) {
+			continue
+		}
+		stat := results[base].Result
+		if stat.RC != 0 || stat.RunErr != nil || stat.Unreachable {
+			continue
+		}
+		fields := strings.Split(strings.TrimSpace(stat.Stdout), "\t")
+		if len(fields) != 3 {
+			out[i].Status = "parse_error"
+			continue
+		}
+		seconds, secErr := strconv.ParseInt(fields[1], 10, 64)
+		size, sizeErr := strconv.ParseInt(fields[2], 10, 64)
+		if secErr != nil || sizeErr != nil {
+			out[i].Status = "parse_error"
+			continue
+		}
+		out[i].Exists, out[i].Status, out[i].Type = true, "ok", fields[0]
+		if (spec.Kind == "file" && fields[0] != "regular file") || (spec.Kind == "directory" && fields[0] != "directory") {
+			out[i].Status = "type_mismatch"
+		}
+		out[i].Mtime = time.Unix(seconds, 0).UTC().Format(time.RFC3339)
+		out[i].Size = size
+		if base+1 < len(results) && results[base+1].Result.RC == 0 {
+			if fields := strings.Fields(results[base+1].Result.Stdout); len(fields) > 0 {
+				out[i].SHA256 = fields[0]
+			}
+		}
+		if base+2 < len(results) && results[base+2].Result.RC == 0 {
+			for _, entry := range strings.Split(strings.TrimSpace(results[base+2].Result.Stdout), "\n") {
+				if entry != "" && len(out[i].Entries) < 20 {
+					out[i].Entries = append(out[i].Entries, entry)
+				}
+			}
+		}
+	}
+	return out
 }
 
 func diagnoseComponentHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseComponentInput, diagnoseComponentOutput] {
@@ -231,10 +294,7 @@ func diagnoseComponentHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 			return toolErrorResult(mcpToolError{Code: mcpErrHostNotFound, Message: err.Error()}), diagnoseComponentOutput{}, nil
 		}
 
-		root, err := resolveContractRoot("")
-		if err != nil {
-			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve contract root: %v", err)}), diagnoseComponentOutput{}, nil
-		}
+		root := diagnoseWorkspaceRoot(opts)
 		loader, err := contract.NewLoader(root)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseComponentOutput{}, nil
@@ -247,7 +307,7 @@ func diagnoseComponentHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 		if !ok {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("unknown component %q", in.Component)}), diagnoseComponentOutput{}, nil
 		}
-		if comp.Diagnostics.Runtime.Kind == "" {
+		if comp.Diagnostics.Runtime.Kind == "" && len(comp.Diagnostics.Artifacts) == 0 {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("component %q has no diagnostics block configured", in.Component)}), diagnoseComponentOutput{}, nil
 		}
 
@@ -279,6 +339,11 @@ func diagnoseComponentHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 		steps := diagnose.ComponentSteps(comp.Diagnostics.Runtime.Kind, comp.Diagnostics.Runtime.Name, readinessURL,
 			comp.Diagnostics.Logs.Source, comp.Diagnostics.Runtime.Name, depChecks)
 		results := diagnose.RunSteps(ctx, runner, opts.Inventory, in.Host, steps, opts.StepTimeout)
+		artifactStart := len(results)
+		if len(comp.Diagnostics.Artifacts) > 0 {
+			artifactResults := diagnose.RunSteps(ctx, runner, opts.Inventory, in.Host, diagnose.ArtifactSteps(artifactPaths(comp.Diagnostics.Artifacts)), opts.StepTimeout)
+			results = append(results, artifactResults...)
+		}
 
 		reachable := true
 		for _, r := range results {
@@ -294,17 +359,29 @@ func diagnoseComponentHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 			Inventory: opts.Inventory, Host: in.Host, Params: map[string]string{"component": in.Component},
 			Start: start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		out := diagnoseComponentOutput{
-			Host: in.Host, Component: in.Component,
+			diagnoseAuditStatus: auditState,
+			Host:                in.Host, Component: in.Component,
 			RuntimeConfigured: compOut.RuntimeConfigured, RuntimePresent: compOut.RuntimePresent, RuntimeRunning: compOut.RuntimeRunning,
 			ReadinessConfigured: compOut.ReadinessConfigured, ReadinessHTTPStatus: compOut.ReadinessHTTPStatus, ReadinessOK: compOut.ReadinessOK,
 			RecentErrorLines: compOut.RecentErrorLines, DependencyResults: compOut.DependencyResults,
 			VerifySpec: compOut.VerifySpec, Verdict: compOut.Verdict, Steps: stepEvidenceList(results), AuditDirectory: auditDir,
 		}
+		if len(comp.Diagnostics.Artifacts) > 0 {
+			out.Artifacts = artifactOutputs(comp.Diagnostics.Artifacts, results[artifactStart:])
+		}
 		return nil, out, nil
 	}
+}
+
+func artifactPaths(specs []contract.DiagnosticArtifact) []string {
+	paths := make([]string, len(specs))
+	for i := range specs {
+		paths[i] = specs[i].Path
+	}
+	return paths
 }
 
 // ---- pilot_diagnose_network_path -----------------------------------------
@@ -317,6 +394,7 @@ type diagnoseNetworkPathInput struct {
 }
 
 type diagnoseNetworkPathOutput struct {
+	diagnoseAuditStatus
 	SourceHost     string                            `json:"source_host"`
 	DestHost       string                            `json:"dest_host"`
 	DestPort       int                               `json:"dest_port"`
@@ -338,10 +416,7 @@ func diagnoseNetworkPathHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor
 			return toolErrorResult(mcpToolError{Code: mcpErrHostNotFound, Message: err.Error()}), diagnoseNetworkPathOutput{}, nil
 		}
 
-		root, err := resolveContractRoot("")
-		if err != nil {
-			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("resolve contract root: %v", err)}), diagnoseNetworkPathOutput{}, nil
-		}
+		root := diagnoseWorkspaceRoot(opts)
 		loader, err := contract.NewLoader(root)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseNetworkPathOutput{}, nil
@@ -419,10 +494,11 @@ func diagnoseNetworkPathHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor
 			Params: map[string]string{"component": in.Component, "endpoint": in.Endpoint, "dest_host": destHost},
 			Start:  start, Finish: time.Now(), Steps: stepAuditList(results),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		out := diagnoseNetworkPathOutput{
-			SourceHost: in.SourceHost, DestHost: destAddr, DestPort: destEndpoint.Port, Scheme: destEndpoint.Scheme,
+			diagnoseAuditStatus: auditState,
+			SourceHost:          in.SourceHost, DestHost: destAddr, DestPort: destEndpoint.Port, Scheme: destEndpoint.Scheme,
 			Layers: pathOut.Layers, Verdict: pathOut.Verdict, Steps: stepEvidenceList(results), AuditDirectory: auditDir,
 		}
 		return nil, out, nil
@@ -440,6 +516,7 @@ type diagnoseRecentChangesInput struct {
 }
 
 type diagnoseRecentChangesOutput struct {
+	diagnoseAuditStatus
 	Records        []diagnoseChangeRecordJSON `json:"records"`
 	AuditDirectory string                     `json:"audit_directory"`
 }
@@ -525,9 +602,9 @@ func diagnoseRecentChangesHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerF
 			Params: map[string]string{"component": in.Component, "start": in.Start, "end": in.End},
 			Start:  start, Finish: time.Now(),
 		}
-		_ = writeDiagnoseAudit(auditDir, rec)
+		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
-		out := diagnoseRecentChangesOutput{AuditDirectory: auditDir}
+		out := diagnoseRecentChangesOutput{diagnoseAuditStatus: auditState, AuditDirectory: auditDir}
 		for _, r := range records {
 			out.Records = append(out.Records, diagnoseChangeRecordJSON{
 				ID: r.ID, Kind: string(r.Kind), StartedAt: r.StartedAt.Format(time.RFC3339),

@@ -133,6 +133,7 @@ func registerEditTools(server *mcp.Server, opts editMCPToolsOptions) {
 		}, applyHandler(opts))
 	}
 	registerEditResources(server, opts)
+	registerWorkspaceTools(server, opts)
 }
 
 // ---- pilot_edit_capabilities ------------------------------------------------
@@ -333,30 +334,32 @@ type inspectDNSZone struct {
 }
 
 type inspectOutput struct {
-	WorkspaceRevision   string                          `json:"workspace_revision"`
-	Hosts               []inspectHost                   `json:"hosts"`
-	RolePresets         []inspectRolePreset             `json:"role_presets"`
-	GroupVars           map[string]map[string]string    `json:"group_vars,omitempty"`
-	VaultFiles          []inspectVaultFile              `json:"vault_files,omitempty"`
-	RosterUsers         []inspectRosterUser             `json:"roster_users,omitempty"`
-	RosterGroups        []inspectRosterGroup            `json:"roster_groups,omitempty"`
-	RosterHostgroups    []inspectRosterHostgroup        `json:"roster_hostgroups,omitempty"`
-	HBACRules           []inspectHBACRule               `json:"hbac_rules,omitempty"`
-	SudoCommandGroups   []inspectSudoCommandGroup       `json:"sudo_command_groups,omitempty"`
-	SudoRules           []inspectSudoRule               `json:"sudo_rules,omitempty"`
-	Grants              []inspectRosterGrant            `json:"grants,omitempty"`
-	PasswordPolicies    []inspectPasswordPolicy         `json:"password_policies,omitempty"`
-	CredentialPolicies  []inspectCredentialPolicy       `json:"credential_policies,omitempty"`
-	PrivilegedIdentity  *inspectPrivilegedIdentity      `json:"privileged_identity,omitempty"`
-	EffectiveHBACAccess []inventory.EffectiveHBACAccess `json:"effective_hbac_access,omitempty"`
-	EffectiveSudoAccess []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
-	DNSZones            []inspectDNSZone                `json:"dns_zones,omitempty"`
-	InternalEndpoints   []inspectInternalEndpoint       `json:"internal_endpoints,omitempty"`
-	MonitoringTargets   []inspectMonitoringTarget       `json:"monitoring_targets,omitempty"`
-	MonitoringProfiles  []inspectMonitoringProfile      `json:"monitoring_profiles,omitempty"`
-	BreakglassStatus    []inspectBreakglassStatus       `json:"breakglass_status,omitempty"`
-	ExplainAccess       []inspectExplainSource          `json:"explain_access,omitempty"`
-	Completeness        validationSummary               `json:"completeness"`
+	WorkspaceRevision      string                          `json:"workspace_revision"`
+	Hosts                  []inspectHost                   `json:"hosts"`
+	RolePresets            []inspectRolePreset             `json:"role_presets"`
+	GroupVars              map[string]map[string]string    `json:"group_vars,omitempty"`
+	VaultFiles             []inspectVaultFile              `json:"vault_files,omitempty"`
+	RosterUsers            []inspectRosterUser             `json:"roster_users,omitempty"`
+	RosterGroups           []inspectRosterGroup            `json:"roster_groups,omitempty"`
+	RosterHostgroups       []inspectRosterHostgroup        `json:"roster_hostgroups,omitempty"`
+	HBACRules              []inspectHBACRule               `json:"hbac_rules,omitempty"`
+	SudoCommandGroups      []inspectSudoCommandGroup       `json:"sudo_command_groups,omitempty"`
+	SudoRules              []inspectSudoRule               `json:"sudo_rules,omitempty"`
+	Grants                 []inspectRosterGrant            `json:"grants,omitempty"`
+	PasswordPolicies       []inspectPasswordPolicy         `json:"password_policies,omitempty"`
+	CredentialPolicies     []inspectCredentialPolicy       `json:"credential_policies,omitempty"`
+	PrivilegedIdentity     *inspectPrivilegedIdentity      `json:"privileged_identity,omitempty"`
+	EffectiveHBACAccess    []inventory.EffectiveHBACAccess `json:"effective_hbac_access,omitempty"`
+	EffectiveSudoAccess    []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
+	DNSZones               []inspectDNSZone                `json:"dns_zones,omitempty"`
+	InternalEndpoints      []inspectInternalEndpoint       `json:"internal_endpoints,omitempty"`
+	MonitoringTargets      []inspectMonitoringTarget       `json:"monitoring_targets,omitempty"`
+	MonitoringProfiles     []inspectMonitoringProfile      `json:"monitoring_profiles,omitempty"`
+	MonitoringSourceStatus map[string]string               `json:"monitoring_source_status,omitempty"`
+	MonitoringSourceErrors map[string]string               `json:"monitoring_source_errors,omitempty"`
+	BreakglassStatus       []inspectBreakglassStatus       `json:"breakglass_status,omitempty"`
+	ExplainAccess          []inspectExplainSource          `json:"explain_access,omitempty"`
+	Completeness           validationSummary               `json:"completeness"`
 }
 
 // looksLikeRosterFile distinguishes the roster file from other
@@ -439,9 +442,13 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 
 		var monitoringTargets []inspectMonitoringTarget
 		var monitoringProfiles []inspectMonitoringProfile
+		var monitoringSourceStatus map[string]string
+		var monitoringSourceErrors map[string]string
 		if in.IncludeMonitoring {
 			monitoringTargets = buildInspectMonitoringTargets(opts.Dir)
 			monitoringProfiles = buildInspectMonitoringProfiles(opts.Dir)
+			monitoringSourceStatus = buildMonitoringSourceStatus(opts.Dir)
+			monitoringSourceErrors = buildMonitoringSourceErrors(opts.Dir)
 		}
 
 		var breakglassStatus []inspectBreakglassStatus
@@ -465,30 +472,32 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 		}
 
 		out := inspectOutput{
-			WorkspaceRevision:   revision,
-			Hosts:               hosts,
-			RolePresets:         presets,
-			GroupVars:           groupVars,
-			VaultFiles:          vaultFiles,
-			RosterUsers:         roster.Users,
-			RosterGroups:        roster.Groups,
-			RosterHostgroups:    roster.Hostgroups,
-			HBACRules:           roster.HBACRules,
-			SudoCommandGroups:   roster.SudoCommandGroups,
-			SudoRules:           roster.SudoRules,
-			Grants:              roster.Grants,
-			PasswordPolicies:    roster.PasswordPolicies,
-			CredentialPolicies:  roster.CredentialPolicies,
-			PrivilegedIdentity:  roster.PrivilegedIdentity,
-			EffectiveHBACAccess: roster.EffectiveHBACAccess,
-			EffectiveSudoAccess: roster.EffectiveSudoAccess,
-			DNSZones:            dnsZones,
-			InternalEndpoints:   internalEndpoints,
-			MonitoringTargets:   monitoringTargets,
-			MonitoringProfiles:  monitoringProfiles,
-			BreakglassStatus:    breakglassStatus,
-			ExplainAccess:       explainAccess,
-			Completeness:        validationSummary{Blocking: blocking},
+			WorkspaceRevision:      revision,
+			Hosts:                  hosts,
+			RolePresets:            presets,
+			GroupVars:              groupVars,
+			VaultFiles:             vaultFiles,
+			RosterUsers:            roster.Users,
+			RosterGroups:           roster.Groups,
+			RosterHostgroups:       roster.Hostgroups,
+			HBACRules:              roster.HBACRules,
+			SudoCommandGroups:      roster.SudoCommandGroups,
+			SudoRules:              roster.SudoRules,
+			Grants:                 roster.Grants,
+			PasswordPolicies:       roster.PasswordPolicies,
+			CredentialPolicies:     roster.CredentialPolicies,
+			PrivilegedIdentity:     roster.PrivilegedIdentity,
+			EffectiveHBACAccess:    roster.EffectiveHBACAccess,
+			EffectiveSudoAccess:    roster.EffectiveSudoAccess,
+			DNSZones:               dnsZones,
+			InternalEndpoints:      internalEndpoints,
+			MonitoringTargets:      monitoringTargets,
+			MonitoringProfiles:     monitoringProfiles,
+			MonitoringSourceStatus: monitoringSourceStatus,
+			MonitoringSourceErrors: monitoringSourceErrors,
+			BreakglassStatus:       breakglassStatus,
+			ExplainAccess:          explainAccess,
+			Completeness:           validationSummary{Blocking: blocking},
 		}
 		return nil, out, nil
 	}
