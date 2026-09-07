@@ -102,6 +102,7 @@ func pushMonitoringManager(r *editRouterModel, dir, banner string) tea.Cmd {
 		{ID: "mon.manager.profiles", Label: "📋 Scrape Profiles"},
 		{ID: "mon.manager.validate", Label: "🔍 驗證 monitoring/targets.yml + scrape-profiles.yml"},
 		{ID: "mon.manager.snmp_catalog", Label: "🧩 SNMP Catalog(modules/authProfiles)"},
+		{ID: "mon.manager.snmp_bootstrap", Label: "🛠️ 建立標準 SNMP 基線(if_mib module)"},
 		{ID: "mon.manager.snmp_credentials", Label: "🔑 SNMP 認證(vault)"},
 		{ID: "mon.manager.back", Label: "↩  返回"},
 	}
@@ -121,8 +122,10 @@ func pushMonitoringManager(r *editRouterModel, dir, banner string) tea.Cmd {
 		case 3:
 			return pushSNMPCatalogMenu(r, dir, "")
 		case 4:
-			return pushSNMPCredentialFilePicker(r, dir, "")
+			return pushSNMPBootstrapConfirm(r, dir)
 		case 5:
+			return pushSNMPCredentialFilePicker(r, dir, "")
+		case 6:
 			return pushTopMenu(r, dir, "")
 		}
 		return nil

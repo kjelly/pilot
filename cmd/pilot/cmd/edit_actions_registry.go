@@ -1565,6 +1565,24 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "bootstrap_snmp_baseline",
+				Description:              "create only the missing non-secret SNMP baseline files: monitoring/snmp/catalog.yml and the embedded official if_mib module; preserves existing custom catalog/module content and creates no credentials",
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "monitoring/snmp/catalog.yml; monitoring/snmp/generated/if_mib.yml",
+					Assertion: "catalog declares if_mib and the standard generated module exists",
+				},
+			},
+			Validate: validateNoParamsAction("bootstrap_snmp_baseline"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.bootstrapSNMPBaseline(r)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "create_monitoring_target",
 				Description:              "add an external monitoring target — an address Prometheus scrapes that Pilot does not manage via Ansible/SSH (spec.md §2/§8); profile must already exist (spec.md §35)",
 				Required:                 []string{"name", "address", "profile"},

@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/kjelly/pilot/internal/monitoring"
@@ -110,6 +112,28 @@ func TestEditAutomationDriverMonitoringFlow(t *testing.T) {
 	}
 	if len(pf.Profiles) != 0 {
 		t.Fatalf("expected no profiles after delete_monitoring_profile, got %+v", pf.Profiles)
+	}
+}
+
+// TestEditAutomationDriverMonitoring_BootstrapSNMPBaseline proves the
+// semantic action drives the real confirmation screen and materializes both
+// non-secret assets required by snmp-exporter before deployment.
+func TestEditAutomationDriverMonitoring_BootstrapSNMPBaseline(t *testing.T) {
+	dir := t.TempDir()
+	r := newEditRouterModel(dir)
+	d := automationDriver{trace: func(automationTraceEvent) {}}
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{{Action: "bootstrap_snmp_baseline"}}}); err != nil {
+		t.Fatalf("bootstrap scenario error = %v", err)
+	}
+	catalog, err := monitoring.LoadSNMPCatalog(filepath.Join(dir, "monitoring", "snmp", "catalog.yml"))
+	if err != nil {
+		t.Fatalf("LoadSNMPCatalog() error = %v", err)
+	}
+	if got := catalog.Modules["if_mib"].File; got != "generated/if_mib.yml" {
+		t.Fatalf("catalog if_mib = %q, want generated/if_mib.yml", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "monitoring", "snmp", "generated", "if_mib.yml")); err != nil {
+		t.Fatalf("generated if_mib missing: %v", err)
 	}
 }
 

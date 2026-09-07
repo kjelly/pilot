@@ -15,6 +15,7 @@ package cmd
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -68,6 +69,34 @@ func pushSNMPCatalogMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		default:
 			return pushMonitoringManager(r, dir, "")
 		}
+	})
+}
+
+// pushSNMPBootstrapConfirm creates the standard non-secret if_mib baseline
+// from assets embedded in the pilot binary. Existing workspace files are
+// preserved; a conflicting if_mib declaration fails closed rather than being
+// silently replaced.
+func pushSNMPBootstrapConfirm(r *editRouterModel, dir string) tea.Cmd {
+	catalogPath := monitoringSNMPCatalogPath(dir)
+	modulePath := filepath.Join(dir, "monitoring", "snmp", "generated", "if_mib.yml")
+	question := fmt.Sprintf(
+		"建立標準 SNMP 基線？\n%s\n%s\n只建立缺少檔案；不會覆寫既有 catalog/module，也不會建立認證。",
+		catalogPath, modulePath,
+	)
+	spec := tui.ConfirmSpec{ScreenID: "mon.snmp.bootstrap.confirm", Title: question, Default: true}
+	return r.transitionTo(r.uiFactory().Confirm(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.ConfirmScreen)
+		if !m.Value() {
+			return pushMonitoringManager(r, dir, "已取消建立標準 SNMP 基線。")
+		}
+		result, err := monitoring.BootstrapSNMPBaseline(dir)
+		if err != nil {
+			return pushMonitoringManager(r, dir, fmt.Sprintf("⚠️  建立 SNMP 基線失敗：%v", err))
+		}
+		if !result.CatalogCreated && !result.CatalogUpdated && !result.IFMIBCreated {
+			return pushMonitoringManager(r, dir, "✅ 標準 SNMP 基線已存在，未覆寫任何檔案。")
+		}
+		return pushMonitoringManager(r, dir, "✅ 已建立/補齊標準 SNMP 基線：catalog.yml + generated/if_mib.yml。")
 	})
 }
 

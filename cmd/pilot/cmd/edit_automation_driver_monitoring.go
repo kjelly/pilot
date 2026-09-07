@@ -77,6 +77,18 @@ func (d *automationDriver) ensureMonitoringProfilesList(r *editRouterModel) erro
 	return fmt.Errorf("could not resolve navigation to monitoring profiles list")
 }
 
+// bootstrapSNMPBaseline drives the same confirmation screen a human sees in
+// pilot edit; it does not call the file-writing helper directly.
+func (d *automationDriver) bootstrapSNMPBaseline(r *editRouterModel) error {
+	if err := d.ensureMonitoringManager(r); err != nil {
+		return err
+	}
+	if err := d.choose(r, "建立標準 SNMP 基線"); err != nil {
+		return err
+	}
+	return d.confirmYesNo(r, true)
+}
+
 // titleNamesMonitoringEntity reports whether title is pushMonitoringTarget-
 // /ProfileDetail's title for exactly this name — `<kind> "name" — ...`.
 func titleNamesMonitoringEntity(title, kind, name string) bool {
