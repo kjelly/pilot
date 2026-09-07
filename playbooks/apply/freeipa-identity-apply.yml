@@ -82,6 +82,10 @@
     # Schema-v2-only: netgroups have no legacy ipa_* equivalent, so this is
     # never populated via -e — only by canonical roster normalization below.
     ipa_netgroups: []
+    # Schema-canonical-only, same reasoning as ipa_netgroups above: static
+    # HBAC rules explicitly marked `state: absent` in the roster (spec
+    # 2026-09-07-pilot-hbac-rule-deletion §6.1). Plain rule-name strings.
+    ipa_hbac_rules_absent: []
 
     # Canonical roster schema (schema_version: 1 or 2).  The legacy ipa_* lists
     # above remain accepted during the compatibility window, but a roster may
@@ -467,6 +471,7 @@
         ipa_hbac_rules: []
         ipa_sudo_rules: []
         ipa_netgroups: []
+        ipa_hbac_rules_absent: []
         ipa_hbac_services: "{{ (freeipa_roster.hbac | default({})).services | default([]) }}"
         ipa_sudo_command_groups: "{{ (freeipa_roster.sudo | default({})).command_groups | default([]) }}"
         ipa_hbac_disable_allow_all: "{{ (freeipa_roster.hbac | default({})).disable_allow_all | default(false) }}"
@@ -586,6 +591,26 @@
       when:
         - freeipa_roster.schema_version is defined
         - item.state | default('present') == 'present'
+      tags: [always, C13, C14]
+
+    # Static HBAC rule deletion (spec 2026-09-07-pilot-hbac-rule-deletion
+    # §6.1): a roster author cannot revoke a static HBAC rule by removing
+    # its YAML entry — that would erase lifecycle intent/audit history and
+    # is indistinguishable from "never declared". The sanctioned way to
+    # revoke is `state: absent`, routed here into its own list so the
+    # create/attach/enable tasks above never see it, and reconciled by the
+    # delete task below (mirroring "Delete netgroups explicitly marked
+    # absent" and "Prune v3.0 grant HBAC rules"). Only the name is needed —
+    # `ipa hbacrule-del` takes no other arguments.
+    - name: "Normalize absent static HBAC rules for deletion (spec 2026-09-07 §6.1)"
+      ansible.builtin.set_fact:
+        ipa_hbac_rules_absent: "{{ ipa_hbac_rules_absent + [item.name] }}"
+      loop: "{{ (freeipa_roster.hbac | default({})).rules | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - freeipa_roster.schema_version is defined
+        - item.state | default('present') == 'absent'
       tags: [always, C13, C14]
 
     - name: "Normalize canonical sudo rules for the compatibility reconciler"
@@ -1937,6 +1962,54 @@
         (not item.enabled | default(true) and
          'Enabled: False' not in ipa_hbacrule_show.results[ipa_hbac_enabled_index].stdout)
       tags: [identity, hbac, C14]
+
+    # Defense in depth: the Go validator (internal/inventory/roster_validate.go
+    # checkHBAC) already rejects a roster with `name: allow_all, state:
+    # absent` before this playbook is ever invoked, but a hand-edited
+    # roster or a direct ansible-playbook invocation could bypass that
+    # gate. allow_all is FreeIPA's shipped built-in, not a Pilot-managed
+    # object — hbac.disable_allow_all is the sanctioned, audited way to
+    # neutralize it (spec 2026-09-07-pilot-hbac-rule-deletion §7).
+    - name: "Gate: refuse to delete allow_all via the static HBAC rule lifecycle (spec 2026-09-07 §7)"
+      ansible.builtin.assert:
+        that:
+          - "'allow_all' not in ipa_hbac_rules_absent"
+        fail_msg: >-
+          allow_all is a FreeIPA built-in safety rule and cannot be removed via
+          hbac.rules[].state: absent. Use hbac.disable_allow_all instead.
+      tags: [always, identity, hbac]
+
+    # Deliberately mirrors "Delete netgroups explicitly marked absent"
+    # above: a single idempotent ipa CLI call whose failed_when tolerates
+    # "already gone" (not found) but fails closed on every other error
+    # (spec 2026-09-07-pilot-hbac-rule-deletion §4.3/§6.3) — no separate
+    # pre-delete lookup or post-delete verification step is needed because
+    # `ipa hbacrule-del`'s own rc/stdout/stderr already distinguish
+    # deleted / already-absent / blocked-by-reference, exactly like the
+    # v3.0 grant HBAC prune task directly below.
+    - name: "Delete static HBAC rules explicitly marked absent (spec 2026-09-07 §6.3)"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-del, "{{ item }}"]
+      loop: "{{ ipa_hbac_rules_absent }}"
+      register: ipa_hbac_rule_delete
+      changed_when: "'Deleted HBAC rule' in (ipa_hbac_rule_delete.stdout | default(''))"
+      failed_when:
+        - ipa_hbac_rule_delete.rc != 0
+        - "'not found' not in (ipa_hbac_rule_delete.stderr | default(''))"
+      tags: [identity, hbac]
+
+    # ansible.builtin.command has no meaningful diff/check-mode support of
+    # its own, so under --check the delete task above is simply skipped
+    # (never executed — this is the safe default, not a gap: it's the same
+    # behavior already relied on by netgroup-del and the grant HBAC prune
+    # task). This debug task exists only to make an otherwise-silent
+    # check-mode run legible (spec 2026-09-07-pilot-hbac-rule-deletion §6.5).
+    - name: "Report pending static HBAC rule deletions in check mode (spec 2026-09-07 §6.5)"
+      ansible.builtin.debug:
+        msg: "would delete HBAC rule {{ item }} (check mode, not executed)"
+      loop: "{{ ipa_hbac_rules_absent }}"
+      when: ansible_check_mode
+      tags: [identity, hbac]
 
     # Pilot may safely delete these specific rules (unlike any
     # hand-authored hbac.rules entry) because their names live entirely in

@@ -89,7 +89,17 @@ groups:
 hosts:
   - name: freeipa-nfs-v2.ipa.pilot.internal
     state: present
-    ip_address: 192.168.122.5
+    # High end of the libvirt `default` network's DHCP range (§0.1 host
+    # services, dhcp-range .2-.254): vm-target's own static reservations
+    # are handed out ascending from .2, so a low fixed IP here collides
+    # with whatever real vm-target happens to boot next in the same
+    # session (hit during 2026-09-07-pilot-hbac-rule-deletion vm-target
+    # testing — a fresh freeipa-server VM was reserved .5, the same
+    # literal address this fictitious host used, and `ipa host-add`
+    # failed with "IP address ... already assigned"). This host is never
+    # actually booted, so any address works; picking one from the far
+    # end of the range makes a repeat collision far less likely.
+    ip_address: 192.168.122.250
     description: Canonical fixture NFS server
 hostgroups: []
 hbac:
@@ -113,6 +123,17 @@ hbac:
       state: present
       enabled: true
       subjects: {users: [admin], groups: []}
+      targets: {hostcat: all, hosts: [], hostgroups: []}
+      services: [sshd]
+    # Dedicated to docs/superpowers/specs/2026-09-07-pilot-hbac-rule-deletion
+    # -spec.md §16.5 real vm-target evidence: this rule's own state is
+    # flipped present <-> absent across test runs (see
+    # docs/verification/freeipa-identity.md §7.5), unlike the other fixture
+    # rules above which stay permanently present.
+    - name: fixture-hbac-delete-target
+      state: present
+      enabled: true
+      subjects: {users: [], groups: [team-fixture-canonical]}
       targets: {hostcat: all, hosts: [], hostgroups: []}
       services: [sshd]
 sudo:

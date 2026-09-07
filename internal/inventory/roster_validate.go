@@ -433,6 +433,18 @@ func checkHBAC(root map[string]any, groups, hostgroups []any) []RosterViolation 
 			out = append(out, RosterViolation{Rule: "hbac state", Detail: fmt.Sprintf("hbac rule %q: state %q must be present/absent", label, state)})
 		}
 
+		// allow_all is FreeIPA's shipped built-in rule, not a Pilot-managed
+		// object; a normal delete lifecycle (state: absent) cannot prove the
+		// caller meant to disable it rather than simply forgetting it's
+		// built-in. hbac.disable_allow_all (checked above) is the sanctioned,
+		// audited path for that (spec 2026-09-07-pilot-hbac-rule-deletion §7).
+		if label == "allow_all" && state == "absent" {
+			out = append(out, RosterViolation{
+				Rule:   "hbac allow_all protection",
+				Detail: `hbac rule "allow_all" is a FreeIPA built-in safety rule and cannot be deleted via state: absent; use hbac.disable_allow_all instead`,
+			})
+		}
+
 		subjects := mapField(item, "subjects")
 		subjUsers := stringListField(subjects, "users")
 		subjGroups := stringListField(subjects, "groups")

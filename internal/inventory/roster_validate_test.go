@@ -428,6 +428,82 @@ hbac:
 	}
 }
 
+func TestValidateRoster_HBACRuleState(t *testing.T) {
+	present := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+hbac:
+  rules:
+    - name: production-ssh
+      state: present
+      subjects: {users: [alice]}
+      targets: {hostcat: all}
+      services: [sshd]
+`))
+	if contains(ruleNames(present), "hbac state") {
+		t.Fatalf("state: present must be valid, got: %v", present)
+	}
+
+	absent := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+hbac:
+  rules:
+    - name: production-ssh
+      state: absent
+      subjects: {users: [alice]}
+      targets: {hostcat: all}
+      services: [sshd]
+`))
+	if contains(ruleNames(absent), "hbac state") {
+		t.Fatalf("state: absent must be valid, got: %v", absent)
+	}
+
+	invalid := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+hbac:
+  rules:
+    - name: production-ssh
+      state: disabled
+      subjects: {users: [alice]}
+      targets: {hostcat: all}
+      services: [sshd]
+`))
+	if !contains(ruleNames(invalid), "hbac state") {
+		t.Fatalf("expected an hbac state violation for state: disabled, got: %v", invalid)
+	}
+}
+
+func TestValidateRoster_HBACAllowAllCannotBeDeleted(t *testing.T) {
+	v := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+hbac:
+  rules:
+    - name: allow_all
+      state: absent
+      subjects: {users: [alice]}
+      targets: {hostcat: all}
+      services: [sshd]
+`))
+	if !contains(ruleNames(v), "hbac allow_all protection") {
+		t.Fatalf("expected an hbac allow_all protection violation, got: %v", v)
+	}
+
+	// A present allow_all entry (e.g. mirroring the built-in for
+	// documentation purposes) is not itself a deletion attempt.
+	present := ValidateRoster(mustParseRoster(t, `
+schema_version: 1
+hbac:
+  rules:
+    - name: allow_all
+      state: present
+      subjects: {users: [alice]}
+      targets: {hostcat: all}
+      services: [sshd]
+`))
+	if contains(ruleNames(present), "hbac allow_all protection") {
+		t.Fatalf("did not expect allow_all protection violation for state: present, got: %v", present)
+	}
+}
+
 func TestValidateRoster_SudoSubjectGroupWrongCategory(t *testing.T) {
 	v := ValidateRoster(mustParseRoster(t, `
 schema_version: 1
