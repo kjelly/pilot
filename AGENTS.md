@@ -507,6 +507,31 @@ playbook 讀 `group_names` 去反推 `stage`,導致「機器已經歸進 `stagin
 `hosts:` 也走 `target_group` 覆寫慣例,要確保它只在「單獨執行」時被 override,
 不依賴 site.yml 幫忙擋。
 
+### 4.4 `always` tag 的前置探測/set_fact task 要跟著標 `always`
+
+Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍會
+合成內部依賴 tags 餵給 Ansible;即使如此,一支 playbook 裡 `tags: [always]`
+的 task **永遠會跑**,但它讀取的前置 fact/探測 task 如果沒有同樣標 `always`,
+在 tag-scoped apply 下會被跳過——結果是 `always` task 在讀一個從沒被設過的
+變數,要嘛 undefined-variable 崩潰,要嘛靜默吃到預設值、漏資料。
+
+2026-09-03 這個模式在同一天連續咬了三支 playbook:`prometheus-apply.yml`
+(外部 scrape target 編譯任務,commit `2abb6fd`)、`dcgm-exporter-apply.yml`/
+`host-monitoring-apply.yml`(GPU/port 探測 pre_tasks,commit `dada083`)。
+`af239e3` 已加入 repo 全域 regression lint 鎖住這個不變量,但第一版**只掃了
+`tasks:` 區塊,漏掃 `pre_tasks:`**,導致同一天又多抓到 2 個真 bug 才補齊。
+
+新增或修改任何一支 `playbooks/apply/*.yml`:
+
+- 只要某個 task 標了 `tags: [always]`,**回頭檢查它讀的每一個變數**是從哪個
+  task 的 `set_fact`/`register` 來的,那個來源 task 也必須標 `always`(跨
+  `tasks:` 與 `pre_tasks:` 都要檢查)。
+- 對「`--tags` 留空」與「只給該元件自己的單一 tag」兩種情境各跑一次該
+  playbook(見 §4.0 的 `--check --diff` 要求),不要只驗證「有帶完整 tags」
+  的那條路徑。
+- 跑 `internal/spec` 裡名稱含 `AlwaysTagPrerequisite` 的 regression lint,
+  確認新 task 沒有漏掛。
+
 ---
 
 ## 5. 寫 / 改 Go code 時
@@ -576,6 +601,80 @@ pilot 有三種輸出，**不要混用**：
 
 判斷：**使用者為了完成任務需要看到的 → UX；操作者 debug 時才需要的 → slog。**
 
+### 5.5 site-wide `--limit` / 依賴展開 / tags 篩選是目前最高風險的核心邏輯
+
+`cmd/pilot/cmd/deploy.go` 裡「`--limit` 如何展開 `sameHosts`/`providerEndpoint`
+依賴主機、opt-in component 要不要自動納入、apply 用的 tags 跟 verification
+用的 tags 該不該共用」這一整塊,2026-09-02~09-04 三天內連續修了 6 次
+(`4920694`、`2d5cedb`、`e22907c`、`394fa77`、`e75c321`,加上多跳 provider
+chain 那個真因見 [[pilot-deploy-limit-sameHosts-dependency-not-autocascaded]]
+的 `1f4f77d`)。每一次都是「單元測試綠燈」之後才在更複雜的真實 topology
+(多跳依賴、opt-in component、`--limit` 只框一部分主機)上現形——其中一次
+甚至是使用者在正式 infra-deploy 環境自己撞到、自己修的。
+
+已經沉澱成規則的具體不變量:
+
+- `sameHosts` 依賴的 host 解析要跟著 **consumer 自己解析出來的 host** 走,
+  不能沿用最外層原始的 `--limit` 字串重查一次(多跳 provider chain 會失真)。
+- opt-in(`Site.Include: false`)component **只要有 inventory host 落在
+  `--limit` 的解析範圍內就要納入**,不能因為它是 opt-in 就整批排除;
+  `'all'` 這個 pseudo-role 本身不算「有指定 opt-in component」,不能觸發
+  納入。
+- apply 用的 tags(給 Ansible 篩選任務)跟 verification 用的 tags(給
+  `pilot verify` 篩選驗收行)是**兩件事**,依賴帶進來的 provider 可能有
+  apply tag 但不該被拉進 verification 篩選範圍。
+
+改動這塊邏輯(`resolveDeploymentScope`/`addDependencies`/
+`effectiveDeploymentTags`/`effectiveDeploymentLimit`/`componentsForPlaybook`
+任一個)**不能只跑 `deploy_test.go` 既有的 mock 案例**:至少要新增一個涵蓋
+「跨兩跳依賴 + `--limit` 只框其中一段」的 regression test(範本見
+`TestResolveDeploymentScope_LimitFollowsProviderSameHostsDependency`),且
+合併前對一個真的有多跳依賴的 topology(`vm-target`/`docker-target` 皆可)
+跑一次真實 `--limit` 部署,不能只憑 mock 通過就當作驗證完成。
+
+### 5.6 解析外部 CLI(`ipa`/`dig`/`docker` 等)輸出的 fixture 必須來自真實擷取
+
+2026-08-27~09-03 這一週,FreeIPA/identity/decommission 相關程式碼在真實
+vm-target 上跑出至少 11 個之前所有單元測試都是綠燈的真 bug(`0bb39cc`、
+`f05bb01`、`783a6cd`、`3b4ef4d`、`3f29243`、`b2425e0`)。commit message 原話:
+「單元測試裡手寫的 expected string 是 self-consistent 但錯的,剛好跟 bug
+本身互相印證」。具體踩過的坑:
+
+- `ipa host-show` 對已刪除主機印 "not found" 在 **stderr**,程式只掃了
+  stdout,永遠比對不到。
+- `ansible.builtin.debug` 印出字面兩個字元 `\n`,不是真正的換行 byte;用
+  `^`/`(?m)$` 錨定的 regex 對這種文字永遠比對不到,卻不會報錯,靜默變成
+  假陽性 PASS。
+- `dig +short` 在 UDP timeout/communication error 時仍以 rc=0 印一段診斷
+  字串到 stdout,跟「查無紀錄」的空字串無法用 rc 區分——必須改用
+  `+noall +comments +answer` 並顯式解析 `;; Got answer:`/NOERROR 狀態。
+- `changed_when` 用字串比對 `ipa pwpolicy-add`/`-mod`/`-del` 的輸出,但那些
+  字串在真實輸出裡根本不存在(add/mod 只印欄位 dump,del 什麼都不印),
+  永遠回報 `ok` 而非 `changed`。
+- FreeIPA 的 `krbmaxpwdlife`/`krbminpwdlife` 在 LDAP 裡存的單位是秒,
+  `ipa pwpolicy-add --maxlife`/`--minlife` 的 CLI 輸入單位是天/小時——drift
+  probe 兩邊沒換算直接比較,永遠誤判成 drift。
+
+**新規則**:任何 Go 程式碼或 Ansible task 需要解析外部 CLI 的輸出(比對
+字串、用 regex 抓欄位、判斷 changed/failed)時:
+
+1. 先在一台真實 vm-target(或等效環境)上實際跑一次那個外部指令,把
+   **真實的 stdout 和 stderr 都存下來**,fixture/expected string 只能從
+   這份真實擷取轉錄,不准手寫猜測格式。
+2. 特別檢查:訊息是印在 stdout 還是 stderr?印出來的換行是不是字面
+   `\n`?單位是什麼(秒/天/相對值)?「沒有變化」跟「操作失敗」的輸出
+   是否可以用 rc 以外的東西區分?
+3. 這類程式碼的驗收不能只靠 unit test 過就算數,必須有一次對應的
+   `pilot vm-target test`/`topology test` 真實執行證據(見 §1.4),理由是
+   這批 bug 全部是「unit test 早就綠燈」但真機執行才現形。
+
+**測試共用狀態的附帶教訓**:同一時期有 3 個獨立 commit 專門修測試間互相
+污染的 package-level 變數(如 `dataDir` 沒有在測試間重置,見
+[[pilot-cobra-pflag-changed-state-persists-test-hazard]])。任何會被
+`t.Setenv`/命令列旗標覆寫的 package-level 變數,新測試都要直接設該
+package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下個測試
+看不到殘留。
+
 ---
 
 ## 6. 不要做的事
@@ -596,6 +695,9 @@ pilot 有三種輸出，**不要混用**：
 - ❌ 新增或移除會產生資料/設定檔的軟體角色時，不要漏改 `group_vars/restic-backup.example.yml` 的對應備份範例（見 §4.2）
 - ❌ 新增/改 stage gate 時，不要只做「confirm 旗標」檢查而漏掉「host 的環境 group 是否與 stage 一致」的 cross-check（見 §4.3）——否則機器已歸類進 `staging`/`prod`，但指令忘了帶 `-e stage=`，會靜默用 `sandbox` 門檻套用
 - ❌ 不要移除或繞過 `playbooks/site.yml` 開頭的 `target_group` 安全閥（見 §4.3）——它擋的是「全站入口誤帶 `-e target_group=` 同時覆寫全部子 playbook 目標」的事故
+- ❌ 新增/改 `playbooks/apply/*.yml` 的 task 標 `tags: [always]` 時，不要漏查它依賴的前置 fact/探測 task 是否也標了 `always`（見 §4.4）——`pre_tasks:` 跟 `tasks:` 都要檢查
+- ❌ 改動 `deploy.go` 的 `--limit`/依賴展開/tags 篩選邏輯時，不要只憑既有 mock 測試綠燈就合併；至少要有一個跨兩跳依賴的 regression test + 一次真實 topology 部署證據（見 §5.5）
+- ❌ 撰寫解析外部 CLI 輸出的程式碼或 task 時，不要手寫猜測的 expected string 當 fixture——必須來自真實 vm-target 擷取的 stdout/stderr（見 §5.6）
 
 ---
 
@@ -739,3 +841,4 @@ git status --short
 | 2026-08-28 | v1.21 | Stage A-2:新增 `detection-engine` apply playbook(中央 Detection Engine,從 Thanos metrics 建立 adaptive SignalEvent,依賴 host-monitoring/thanos-query/alertmanager,已接進 `site.yml`,見 `docs/superpowers/specs/2026-08-28-detection-engine-spec.md`);§4.3 playbook 清點更新為 32 支 | sre |
 | 2026-09-01 | v1.22 | Agent Monitoring Phase 1:新增 `agent-controller` apply playbook(observe-only incident controller,接收 Alertmanager webhook、正規化成 incident、派送唯讀診斷請求給外部 Agent Runtime,零 mutation 權限,不依賴其他 component,experimental/day-2 opt-in,不接進 `site.yml`,見 `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md`、`docs/architecture/agent-monitoring.md`);§4.3 playbook 清點更新為 33 支 | pilot |
 | 2026-09-01 | v1.23 | SNMP Monitoring Integration Phase 0:新增 `snmp-exporter` contract/verification skeleton 與 apply playbook(只有 stage/confirm/inventory-group gate,`tasks: []`,尚無任何部署邏輯;day-2/opt-in,不接進 `site.yml`,見 `docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md`、`docs/architecture/snmp-monitoring.md`);§4.3 playbook 清點更新為 34 支 | pilot |
+| 2026-09-07 | v1.24 | 兩週 22 個 fix commit 回顧後新增三條硬規則:§4.4(`always` tag 前置任務要跟著標,起因 `2abb6fd`/`dada083` 連續咬 3 支 playbook,`af239e3` lint 第一版還漏掃 `pre_tasks`)、§5.5(`deploy.go` 的 `--limit`/依賴展開/tags 篩選是高風險核心邏輯,3 天內修 6 次)、§5.6(解析外部 CLI 輸出的 fixture 必須來自真實擷取,起因 FreeIPA/decommission 一週內抓到 11 個「unit test 早就綠燈但真機才現形」的真 bug,附帶 package-level 測試狀態污染的教訓);§6 補三條對應 ❌ 提醒 | pilot |
