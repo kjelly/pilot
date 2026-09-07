@@ -292,6 +292,41 @@ func TestAutoFillSNMPCatalogFile(t *testing.T) {
 	}
 }
 
+func TestAutoFillSNMPCatalogForSelected_CoversSiteDeploymentRoute(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "monitoring", "snmp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	catalog := filepath.Join(workspace, "monitoring", "snmp", "catalog.yml")
+	if err := os.WriteFile(catalog, []byte("schemaVersion: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	got, err := autoFillSNMPCatalogForSelected(&out, []contract.Contract{
+		{ID: "dcgm-exporter"},
+		{ID: "snmp-exporter"},
+	}, filepath.Join(workspace, "inventory.yml"), []string{"stage=sandbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"stage=sandbox", "snmp_catalog_file=" + catalog}
+	if !slices.Equal(got, want) {
+		t.Fatalf("extra vars = %v, want %v", got, want)
+	}
+	if !strings.Contains(out.String(), want[1]) {
+		t.Fatalf("operator output = %q, want auto-fill announcement for %q", out.String(), want[1])
+	}
+
+	got, err = autoFillSNMPCatalogForSelected(io.Discard, []contract.Contract{{ID: "snmp-exporter"}}, filepath.Join(workspace, "inventory.yml"), []string{"snmp_catalog_file=/custom/catalog.yml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"snmp_catalog_file=/custom/catalog.yml"}; !slices.Equal(got, want) {
+		t.Fatalf("explicit catalog var was overwritten: got %v, want %v", got, want)
+	}
+}
+
 // TestDumpMenuDebug covers the PILOT_DEBUG_MENU=1 escape hatch used by
 // trec-scripted runs to read a promptui.Select menu's real, live item
 // list (and 0-based DOWN <n> index) from the recorded terminal output,

@@ -1562,6 +1562,10 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	if err != nil {
 		return err
 	}
+	extraVars, err = autoFillSNMPCatalogForSelected(out, selected, inv, extraVars)
+	if err != nil {
+		return err
+	}
 	inputs, err := resolveDeploymentInputs(ctx, selected, scope, inv, extraVars, vault)
 	if err != nil {
 		return err
@@ -3070,16 +3074,6 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 			fmt.Fprintf(out, "已自動帶入外部 Prometheus monitoring 設定：%s、%s\n", monitoringVars[0], monitoringVars[1])
 		}
 	}
-	if entry.SNMPCatalogFile {
-		snmpVar, found, err := autoFillSNMPCatalogFile(workspaceDir)
-		if err != nil {
-			return err
-		}
-		if found {
-			extraVars = append(extraVars, snmpVar)
-			fmt.Fprintf(out, "已自動帶入 SNMP catalog 設定：%s\n", snmpVar)
-		}
-	}
 	// The consumer of these cross-role vars is whichever group actually
 	// receives -e/target_group for this run: an explicit targetGroup
 	// override if the operator gave one, else the catalog's own
@@ -3266,6 +3260,38 @@ func autoFillSNMPCatalogFile(workspaceDir string) (v string, found bool, err err
 		return "", false, err
 	}
 	return "snmp_catalog_file=" + abs, true, nil
+}
+
+// autoFillSNMPCatalogForSelected makes the workspace-owned SNMP catalog
+// available to every deployment route that selects snmp-exporter.  This must
+// live in executeRecordedDeploymentCore rather than the catalog-menu flow:
+// a full-site deployment reaches the same snmp-exporter playbook but has no
+// individual deployCatalogEntry from which to derive the extra var.  Ansible's
+// file lookup runs from the controller's playbook directory, so the playbook's
+// relative default cannot discover a catalog mounted at <workspace>/monitoring.
+//
+// An operator-provided -e snmp_catalog_file always wins.  This also preserves
+// the existing single-component behavior while avoiding a duplicate extra var
+// in routes that collect a manual -e value after their component selection.
+func autoFillSNMPCatalogForSelected(out io.Writer, selected []contract.Contract, inv string, extraVars []string) ([]string, error) {
+	if extraVarValue(extraVars, "snmp_catalog_file") != "" {
+		return extraVars, nil
+	}
+	for _, component := range selected {
+		if component.ID != "snmp-exporter" {
+			continue
+		}
+		snmpVar, found, err := autoFillSNMPCatalogFile(filepath.Dir(inv))
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			fmt.Fprintf(out, "已自動帶入 SNMP catalog 設定：%s\n", snmpVar)
+			return append(extraVars, snmpVar), nil
+		}
+		break
+	}
+	return extraVars, nil
 }
 
 // deployMenuLabel keeps catalog-only copywriting as a presentation projection,

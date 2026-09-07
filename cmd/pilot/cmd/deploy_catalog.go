@@ -19,7 +19,6 @@ type deployPlaybook struct {
 	PromptS3Config  bool          // true => ask about signed-mode S3 identity, sets -e seaweedfs_s3_config_path=<path>
 	AutoHostVars    []autoHostVar // each => auto-detect a cross-role host address from inventory, sets -e <Var>=<ip>
 	MonitoringFiles bool          // true => auto-pass workspace monitoring registry files
-	SNMPCatalogFile bool          // true => auto-pass monitoring/snmp/catalog.yml as snmp_catalog_file
 	Reconcile       bool          // true => eligible for pilot reconcile's day-2 declarative configuration flow
 }
 
@@ -212,8 +211,7 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "snmp-exporter", Label: "每站 SNMP exporter(switch/router/UPS/PDU/BMC 監控)",
 		Playbook: "playbooks/apply/snmp-exporter-apply.yml", DefaultGroup: "snmp-exporter", StageVar: "stage",
-		Note:            "目標主機需要既有 Docker Engine(sameHosts 依賴)。SNMP module/authProfile 設定(monitoring/snmp/catalog.yml)與對應密碼(vault 的 snmp_exporter_credentials)請先到 `pilot edit` → Monitoring → SNMP Catalog / SNMP 認證(vault) 建立,套用時會自動帶入 catalog 檔路徑。",
-		SNMPCatalogFile: true,
+		Note: "目標主機需要既有 Docker Engine(sameHosts 依賴)。SNMP module/authProfile 設定(monitoring/snmp/catalog.yml)與對應密碼(vault 的 snmp_exporter_credentials)請先到 `pilot edit` → Monitoring → SNMP Catalog / SNMP 認證(vault) 建立,套用時會自動帶入 catalog 檔路徑。",
 	},
 	{
 		Key: "detection-engine", Label: "中央 Detection Engine(adaptive anomaly detection)",
