@@ -522,23 +522,33 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		return empty, nil
 	}
 
-	rosterPath := decommission.RosterPathFor(dir, *host)
+	rosterPath := decommission.RosterPathFor(dir, hf.Hosts, *host)
 
+	// Every other ansible.Runner caller (pilot deploy/reconcile/edit/mcp)
+	// goes through prepareDeployAnsibleRuntime first, which MkdirAlls a
+	// scratch ansible/{home,tmp,fact-cache,ssh-control} tree and points
+	// ANSIBLE_SSH_ARGS' ControlPath at it. Skipping that here left this
+	// runner relying on ansible.cfg's default `~/.ansible/cp/...`
+	// ControlPath, which silently doesn't exist in a fresh/ephemeral
+	// container (`docker run --rm ... pilot host decommission plan`) — the
+	// very first SSH connection then fails with "unix_listener: cannot
+	// bind to path ...: No such file or directory", which Ansible reports
+	// as UNREACHABLE on whatever task happens to run first, and no_log (as
+	// on freeipa-identity-apply.yml's "Kinit admin" task) censors that
+	// real reason into an opaque "censored" blob that looks like a
+	// Kerberos/credential failure. Found via a live decommission-plan
+	// repro against p6k-baremetal (2026-09-11).
+	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
+	if err != nil {
+		return nil, fmt.Errorf("prepare ansible runtime for host decommission: %w", err)
+	}
 	runner := ansible.NewRunner()
+	runner.Env = runtime.Env
+	runner.LogPath = runtime.LogPath
 	runner.StdoutWriter = out
 	runner.StderrWriter = out
 
-	var extraArgs []string
-	if rosterPath != "" {
-		// Extra-vars go through a bare `-e k=v` here (not a @file), matching
-		// FreeIPAClientProvider's own existing query()/exec() call sites,
-		// which already only ever pass simple, space-free values
-		// (pilot_decommission_query, pilot_decommission_target_fqdn) this
-		// same way — a roster path containing whitespace is a pre-existing
-		// workspace-authoring assumption shared by every other caller of
-		// this same freeipa_roster_file convention.
-		extraArgs = append(extraArgs, "-e", "freeipa_roster_file="+rosterPath)
-	}
+	extraArgs := hostDecommissionFreeIPAExtraArgs(invPath, rosterPath)
 
 	freeipaClient := providers.NewFreeIPAClientProvider(providers.FreeIPAClientProviderConfig{
 		Executor:              runner,
@@ -625,6 +635,29 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 	}
 
 	return result, nil
+}
+
+// hostDecommissionFreeIPAExtraArgs passes only FILE REFERENCES to Ansible;
+// it never reads, serializes, or persists a secret value.  The workspace's
+// conventional main vault is the authoritative source of ipa_admin_password.
+// The canonical roster remains the source of identity declarations and is a
+// compatibility fallback for older workspaces that still carry its duplicate
+// freeipa.admin.password field.
+func hostDecommissionFreeIPAExtraArgs(inventoryPath, rosterPath string) []string {
+	var extraArgs []string
+	if rosterPath == "" {
+		return extraArgs
+	}
+
+	// Extra-vars go through a bare `-e k=v` here (not a @file), matching
+	// FreeIPAClientProvider's own existing query()/exec() call sites, which
+	// already only ever pass simple, space-free values. A roster path with
+	// whitespace is a pre-existing workspace-authoring constraint.
+	extraArgs = append(extraArgs, "-e", "freeipa_roster_file="+rosterPath)
+	if vaultPath := defaultVaultFile(inventoryPath); vaultPath != "" {
+		extraArgs = append(extraArgs, "-e", "@"+vaultPath)
+	}
+	return extraArgs
 }
 
 func reportHostDecommissionResult(out io.Writer, result *decommission.FinalizeResult, asJSON bool) error {

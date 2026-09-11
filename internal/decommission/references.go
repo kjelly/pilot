@@ -3,6 +3,7 @@ package decommission
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kjelly/pilot/internal/inventory"
@@ -26,7 +27,7 @@ import (
 // a per-host inventory variable (host.Extra["freeipa_roster_file"], see
 // internal/inventory/inventory.go's hostNeedsFreeIPARoster/Lint), resolved
 // relative to workspaceDir when not absolute.
-func ScanReferences(workspaceDir string, host inventory.Host) ([]Reference, []Warning) {
+func ScanReferences(workspaceDir string, hosts []inventory.Host, host inventory.Host) ([]Reference, []Warning) {
 	var refs []Reference
 	var warnings []Warning
 
@@ -34,7 +35,7 @@ func ScanReferences(workspaceDir string, host inventory.Host) ([]Reference, []Wa
 		refs = append(refs, *hv)
 	}
 
-	rosterRefs, rosterWarnings := scanFreeIPARoster(workspaceDir, host)
+	rosterRefs, rosterWarnings := scanFreeIPARoster(workspaceDir, hosts, host)
 	refs = append(refs, rosterRefs...)
 	warnings = append(warnings, rosterWarnings...)
 
@@ -66,10 +67,25 @@ func scanHostVars(workspaceDir, hostName string) *Reference {
 	}
 }
 
-// rosterPathFor resolves the target host's canonical FreeIPA roster path
-// from its own inventory variable, relative to workspaceDir when not
-// absolute. Returns "" when the host declares none (most hosts don't need
-// one — see inventory.hostNeedsFreeIPARoster).
+// rosterPathFor resolves the workspace's canonical FreeIPA roster path.
+// host's own inventory variable wins when set; otherwise this falls back
+// to whichever OTHER host in the workspace declares one (sorted by name,
+// first match) — the same "look at whatever any host already carries"
+// convention checkRosterCompleteness/discoverRosterFilePath/
+// autoFillFreeIPARosterFile (cmd/pilot/cmd) already use, since the
+// canonical roster is a workspace-wide file, not a per-host one: only the
+// FreeIPA server (or an nfs-server/nfs-client host) conventionally
+// declares freeipa_roster_file, while an ordinary freeipa-client host —
+// the overwhelmingly common decommission target — normally does not. Bug
+// found live via a real vm-target `pilot host decommission apply` run
+// (2026-09-11): without this fallback, a plain client host's roster
+// references were silently never scanned (ScanReferences) and its central
+// roster-absent/host-del step was a silent no-op (freeipaRosterAbsentStep
+// short-circuits on an empty roster path) — the plan looked clean but the
+// FreeIPA host object and roster entry were never actually removed, and
+// `apply` deadlocked forever at "active_residue" with no way to progress.
+// Returns "" when NO host in the workspace declares one (most workspaces
+// without any FreeIPA integration — see inventory.hostNeedsFreeIPARoster).
 // RosterPathFor is rosterPathFor's exported form — used by cmd/pilot/cmd
 // to resolve the SAME roster path Plan/CheckFreshness derive internally,
 // so CLI wiring that constructs a live provider (e.g.
@@ -77,12 +93,15 @@ func scanHostVars(workspaceDir, hostName string) *Reference {
 // "-e freeipa_roster_file=<path>" pointing at exactly the file Plan's
 // RosterPath/step Params referenced (spec.md §16.4) — never a
 // independently-guessed path.
-func RosterPathFor(workspaceDir string, host inventory.Host) string {
-	return rosterPathFor(workspaceDir, host)
+func RosterPathFor(workspaceDir string, hosts []inventory.Host, host inventory.Host) string {
+	return rosterPathFor(workspaceDir, hosts, host)
 }
 
-func rosterPathFor(workspaceDir string, host inventory.Host) string {
+func rosterPathFor(workspaceDir string, hosts []inventory.Host, host inventory.Host) string {
 	p := strings.TrimSpace(host.Extra["freeipa_roster_file"])
+	if p == "" {
+		p = discoverRosterFileFromHosts(hosts)
+	}
 	if p == "" {
 		return ""
 	}
@@ -92,8 +111,23 @@ func rosterPathFor(workspaceDir string, host inventory.Host) string {
 	return filepath.Join(workspaceDir, p)
 }
 
-func scanFreeIPARoster(workspaceDir string, host inventory.Host) ([]Reference, []Warning) {
-	path := rosterPathFor(workspaceDir, host)
+// discoverRosterFileFromHosts finds the first (sorted by name, for
+// determinism) freeipa_roster_file value declared by any host in hosts —
+// mirrors cmd/pilot/cmd's discoverRosterFilePath, operating on
+// inventory.Host.Extra instead of an already-resolved ansible hostvars map.
+func discoverRosterFileFromHosts(hosts []inventory.Host) string {
+	sorted := append([]inventory.Host(nil), hosts...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	for _, h := range sorted {
+		if p := strings.TrimSpace(h.Extra["freeipa_roster_file"]); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+func scanFreeIPARoster(workspaceDir string, hosts []inventory.Host, host inventory.Host) ([]Reference, []Warning) {
+	path := rosterPathFor(workspaceDir, hosts, host)
 	if path == "" {
 		return nil, nil
 	}

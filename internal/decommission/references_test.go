@@ -77,7 +77,7 @@ sudo:
 	}
 	writeWorkspaceFile(t, dir, "host_vars/web1.yml", "some_var: 1\n")
 
-	refs, warnings := ScanReferences(dir, host)
+	refs, warnings := ScanReferences(dir, []inventory.Host{host}, host)
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %+v, want none for a fully-readable set of manifests", warnings)
 	}
@@ -136,11 +136,68 @@ sudo:
 func TestReferences_AbsentOptionalManifestsAreNotErrors(t *testing.T) {
 	dir := t.TempDir()
 	host := inventory.Host{Name: "bare1", AnsibleHost: "10.0.0.9"}
-	refs, warnings := ScanReferences(dir, host)
+	refs, warnings := ScanReferences(dir, []inventory.Host{host}, host)
 	if len(refs) != 0 {
 		t.Fatalf("refs = %+v, want none", refs)
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %+v, want none", warnings)
+	}
+}
+
+// TestReferences_RosterPathFallsBackToAnotherHostInWorkspace is a
+// regression test for a real bug found via a live vm-target `pilot host
+// decommission apply` run (2026-09-11): the overwhelmingly common case is
+// a freeipa-CLIENT host with no freeipa_roster_file of its own (only the
+// FreeIPA server, or an nfs-server/nfs-client host, conventionally
+// declares one — see checkRosterCompleteness/discoverRosterFilePath in
+// cmd/pilot/cmd). Scanning references (and, via RosterPathFor, wiring the
+// roster-absent/identity-apply-converge steps) using ONLY the target
+// host's own inventory var silently found nothing for such a host — the
+// plan looked clean, but the central roster-absent step was a no-op and
+// the FreeIPA host object was never actually deleted, so `apply` deadlocked
+// forever at "active_residue". Confirms the fallback: when the DECOMMISSION
+// TARGET declares no roster path, scanning still finds the one declared by
+// a DIFFERENT host in the same workspace.
+func TestReferences_RosterPathFallsBackToAnotherHostInWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := writeWorkspaceFile(t, dir, "roster.yaml", `schema_version: 2
+freeipa:
+  server: ipa1.example.internal
+hosts:
+  - name: client1
+    state: present
+hostgroups:
+  - name: client-hosts
+    state: present
+    membership: {authoritative: true, hosts: [client1]}
+`)
+
+	server := inventory.Host{Name: "ipa1", AnsibleHost: "10.0.0.1", Extra: map[string]string{"freeipa_roster_file": "roster.yaml"}}
+	target := inventory.Host{Name: "client1", AnsibleHost: "10.0.0.5"} // no freeipa_roster_file of its own
+
+	if got := RosterPathFor(dir, []inventory.Host{server, target}, target); got != rosterPath {
+		t.Fatalf("RosterPathFor = %q, want %q (fallback to the server host's declared roster)", got, rosterPath)
+	}
+
+	refs, warnings := ScanReferences(dir, []inventory.Host{server, target}, target)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none", warnings)
+	}
+	byKey := map[string]Reference{}
+	for _, r := range refs {
+		byKey[r.Source+"/"+r.Kind+"/"+r.Identity] = r
+	}
+	want := "freeipa-roster/canonical_host_declaration/" + rosterPath
+	r, ok := byKey[want]
+	if !ok {
+		t.Fatalf("missing expected reference %q via fallback roster path; got refs=%+v", want, refs)
+	}
+	if r.Classification != AutoRemove {
+		t.Fatalf("reference %q classification = %s, want AUTO_REMOVE", want, r.Classification)
+	}
+	hg := "freeipa-roster/hostgroup_membership/client-hosts"
+	if _, ok := byKey[hg]; !ok {
+		t.Fatalf("missing expected hostgroup reference %q via fallback roster path; got refs=%+v", hg, refs)
 	}
 }

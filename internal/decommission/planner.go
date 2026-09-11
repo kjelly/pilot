@@ -146,7 +146,7 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 
 	var componentIDs []string
 	for _, role := range sortedRoles {
-		cp := planComponent(ctx, role, in.Catalog, in.RetentionDispositions, in.Providers, *target, in.WorkspaceDir, in.OfflineDisposition)
+		cp := planComponent(ctx, role, in.Catalog, in.RetentionDispositions, in.Providers, *target, hf.Hosts, in.WorkspaceDir, in.OfflineDisposition)
 		if cp.RetentionRequired {
 			plan.RetentionRequirements = append(plan.RetentionRequirements, RetentionRequirement{
 				ComponentID: cp.ComponentID,
@@ -166,7 +166,7 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 	// here in Phase 4) so a reference-driven provider component
 	// (internal-endpoint) can be added to componentIDs in time to
 	// participate in that same ordering pass.
-	refs, refWarnings := ScanReferences(in.WorkspaceDir, *target)
+	refs, refWarnings := ScanReferences(in.WorkspaceDir, hf.Hosts, *target)
 	plan.Warnings = append(plan.Warnings, refWarnings...)
 
 	// Reference-driven components (spec.md §37 Phase 4, HD13): unlike
@@ -228,7 +228,7 @@ func extractDecommissionPolicy(v *contract.DecommissionPolicy) (contract.Decommi
 // its own reasons (retention below is independent either way; an
 // unsupported/unproven service principal, a roster validation failure,
 // etc. surface as a provider-specific blocker, never silently ignored).
-func planComponent(ctx context.Context, role string, catalog contract.Catalog, dispositions map[string]RetentionDisposition, provs map[string]providers.Provider, host inventory.Host, workspaceDir string, offline OfflineDisposition) ComponentPlan {
+func planComponent(ctx context.Context, role string, catalog contract.Catalog, dispositions map[string]RetentionDisposition, provs map[string]providers.Provider, host inventory.Host, hosts []inventory.Host, workspaceDir string, offline OfflineDisposition) ComponentPlan {
 	// Fail-closed default (spec.md §14.1 rule 4): every component is
 	// assumed to need a reachable host unless a matched contract's typed
 	// Lifecycle.Decommission explicitly says otherwise below — set first
@@ -255,7 +255,7 @@ func planComponent(ctx context.Context, role string, catalog contract.Catalog, d
 			HostName:           host.Name,
 			FQDN:               providerFQDN(host),
 			OfflineDisposition: string(offline),
-			RosterPath:         rosterPathFor(workspaceDir, host),
+			RosterPath:         rosterPathFor(workspaceDir, hosts, host),
 		})
 		if err != nil {
 			cp.Blockers = append(cp.Blockers, Blocker{Code: classifyProviderPlanError(err), Detail: err.Error()})
