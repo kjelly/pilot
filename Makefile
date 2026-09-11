@@ -5,6 +5,7 @@ PKG := ./cmd/pilot
 CALLBACK_SRC := ansible_callback/pilot_diagnose.py
 PILOT_CLI_IMAGE ?= pilot-cli:latest
 DETECTION_ENGINE_VERSION ?= 0.0.0-dev
+AGENT_CONTROLLER_VERSION ?= 0.0.0-dev
 # OCI build provenance for `make pilot-cli-image`.  Callers can override these
 # (for example a CI checkout that already has its revision as an environment
 # variable), while local builds derive them from this worktree.
@@ -25,6 +26,7 @@ pilot-cli-image: ## Build the deployment/control-node Docker image
 	docker build \
 		--build-arg PILOT_GIT_SHA=$(PILOT_GIT_SHA) \
 		--build-arg DETECTION_ENGINE_VERSION=$(DETECTION_ENGINE_VERSION) \
+		--build-arg AGENT_CONTROLLER_VERSION=$(AGENT_CONTROLLER_VERSION) \
 		--build-arg PILOT_GIT_DIRTY=$(PILOT_GIT_DIRTY) \
 		-t $(PILOT_CLI_IMAGE) -f images/Dockerfile.pilot-cli .
 

@@ -55,6 +55,7 @@ WORKDIR /src
 
 ARG PILOT_GIT_SHA=unknown
 ARG DETECTION_ENGINE_VERSION=0.0.0-dev
+ARG AGENT_CONTROLLER_VERSION=0.0.0-dev
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -79,6 +80,19 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
  && cd /out \
  && sha256sum pilot-detection-engine-linux-amd64 \
       > pilot-detection-engine-linux-amd64.sha256
+
+# The Phase-1 incident controller is deployed by the same control image. Its
+# apply playbook verifies this exact controller-side SHA256 before copying, so
+# ship the binary and sidecar together rather than requiring each operator to
+# build an out-of-band dist/ artifact that this image cannot see.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${AGENT_CONTROLLER_VERSION} -X main.commit=${PILOT_GIT_SHA}" \
+      -o /out/pilot-agent-controller-linux-amd64 \
+      ./cmd/pilot-agent-controller \
+ && cd /out \
+ && sha256sum pilot-agent-controller-linux-amd64 \
+      > pilot-agent-controller-linux-amd64.sha256
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime — Python + ansible-core + the collections the playbooks
@@ -148,6 +162,8 @@ RUN uv pip install --system --no-cache \
 COPY --from=builder /out/pilot /usr/local/bin/pilot
 COPY --from=builder /out/pilot-detection-engine-linux-amd64 /pilot/dist/pilot-detection-engine-linux-amd64
 COPY --from=builder /out/pilot-detection-engine-linux-amd64.sha256 /pilot/dist/pilot-detection-engine-linux-amd64.sha256
+COPY --from=builder /out/pilot-agent-controller-linux-amd64 /pilot/dist/pilot-agent-controller-linux-amd64
+COPY --from=builder /out/pilot-agent-controller-linux-amd64.sha256 /pilot/dist/pilot-agent-controller-linux-amd64.sha256
 
 WORKDIR /pilot
 COPY playbooks/ playbooks/
