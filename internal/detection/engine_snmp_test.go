@@ -197,7 +197,8 @@ func TestEngine_SNMPProfile_NegativeLanes(t *testing.T) {
 func TestEngine_SNMPProfile_AlertPayloadCorrelatesWithAgentControllerContract(t *testing.T) {
 	profile := loadNetworkDeviceProfile(t)
 	kind := profile.EffectiveIdentity().Kind
-	payload := buildAlertPayload("core-sw-01", kind, "site-a", "critical", "sig-1", 0.97, 1, "network_error", nil, profile.ID, time.Now(), time.Now())
+	evidence := buildAlertEvidence(FusedResult{Score: 0.97, Category: "network_error", Source: "local", DetectorSource: "baseline"}, nil)
+	payload := buildAlertPayload("core-sw-01", kind, "site-a", "critical", "sig-1", evidence, profile.ID, time.Now(), time.Now())
 	labels := payload.Labels
 
 	if labels["pilot_subject"] == "" {

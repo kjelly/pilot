@@ -1,5 +1,7 @@
 package detection
 
+import "fmt"
+
 // LifecycleState is one host's adaptive-anomaly state (spec §20).
 type LifecycleState string
 
@@ -32,6 +34,51 @@ const (
 	RecoveryThreshold     = 0.60
 )
 
+// LifecyclePolicy controls the temporal evidence required before a profile
+// creates or resolves an episode. Zero values retain the historic policy.
+type LifecyclePolicy struct {
+	WarningWindowCycles       int `yaml:"warningWindowCycles,omitempty"`
+	WarningRequiredCycles     int `yaml:"warningRequiredCycles,omitempty"`
+	CriticalConsecutiveCycles int `yaml:"criticalConsecutiveCycles,omitempty"`
+	RecoveryConsecutiveCycles int `yaml:"recoveryConsecutiveCycles,omitempty"`
+}
+
+const (
+	defaultWarningWindowCycles       = 4
+	defaultWarningRequiredCycles     = 3
+	defaultCriticalConsecutiveCycles = 2
+	defaultRecoveryConsecutiveCycles = 4
+)
+
+// Effective fills omitted fields with the legacy lifecycle policy.
+func (p LifecyclePolicy) Effective() LifecyclePolicy {
+	if p.WarningWindowCycles == 0 {
+		p.WarningWindowCycles = defaultWarningWindowCycles
+	}
+	if p.WarningRequiredCycles == 0 {
+		p.WarningRequiredCycles = defaultWarningRequiredCycles
+	}
+	if p.CriticalConsecutiveCycles == 0 {
+		p.CriticalConsecutiveCycles = defaultCriticalConsecutiveCycles
+	}
+	if p.RecoveryConsecutiveCycles == 0 {
+		p.RecoveryConsecutiveCycles = defaultRecoveryConsecutiveCycles
+	}
+	return p
+}
+
+// Validate rejects an impossible trigger rule before a daemon starts.
+func (p LifecyclePolicy) Validate() error {
+	if p.WarningWindowCycles < 0 || p.WarningRequiredCycles < 0 || p.CriticalConsecutiveCycles < 0 || p.RecoveryConsecutiveCycles < 0 {
+		return fmt.Errorf("cycle counts must not be negative")
+	}
+	effective := p.Effective()
+	if effective.WarningRequiredCycles > effective.WarningWindowCycles {
+		return fmt.Errorf("warningRequiredCycles must not exceed warningWindowCycles")
+	}
+	return nil
+}
+
 // LifecycleAction is what a Transition asks the caller (the engine) to do
 // about a host's SignalEvent episode.
 type LifecycleAction string
@@ -60,6 +107,7 @@ type Transition struct {
 // HostLifecycle is one host's mutable adaptive-anomaly state machine
 // (spec §20). Zero value is not valid — use NewHostLifecycle.
 type HostLifecycle struct {
+	Policy               LifecyclePolicy
 	State                LifecycleState
 	Severity             Severity
 	PriorSeverity        Severity
@@ -69,9 +117,16 @@ type HostLifecycle struct {
 	CandidateClearStreak int
 }
 
-// NewHostLifecycle returns a fresh host starting in the normal state.
+// NewHostLifecycle returns a fresh host starting in the normal state with the
+// historic default policy.
 func NewHostLifecycle() *HostLifecycle {
-	return &HostLifecycle{State: StateNormal}
+	return NewHostLifecycleWithPolicy(LifecyclePolicy{})
+}
+
+// NewHostLifecycleWithPolicy returns a fresh host whose temporal thresholds
+// are owned by its feature profile.
+func NewHostLifecycleWithPolicy(policy LifecyclePolicy) *HostLifecycle {
+	return &HostLifecycle{Policy: policy.Effective(), State: StateNormal}
 }
 
 func countTrue(bs []bool) int {
@@ -92,8 +147,8 @@ func (h *HostLifecycle) Advance(score float64) Transition {
 	// §20.1: every valid cycle updates these three counters first,
 	// regardless of which state the host is currently in.
 	h.WarningHistory = append(h.WarningHistory, score >= WarningThreshold)
-	if len(h.WarningHistory) > 4 {
-		h.WarningHistory = h.WarningHistory[len(h.WarningHistory)-4:]
+	if len(h.WarningHistory) > h.Policy.WarningWindowCycles {
+		h.WarningHistory = h.WarningHistory[len(h.WarningHistory)-h.Policy.WarningWindowCycles:]
 	}
 	if score >= CriticalThreshold {
 		h.CriticalStreak++
@@ -121,13 +176,13 @@ func (h *HostLifecycle) Advance(score float64) Transition {
 }
 
 // checkFiringTrigger implements the priority rule shared by normal and
-// candidate (spec §20.2/§20.3): two consecutive critical-threshold cycles
-// beats three-of-last-four warning-threshold cycles.
+// candidate (spec §20.2/§20.3): the profile's critical duration wins over its
+// warning-window rule.
 func (h *HostLifecycle) checkFiringTrigger() (LifecycleAction, Severity, bool) {
-	if h.CriticalStreak >= 2 {
+	if h.CriticalStreak >= h.Policy.CriticalConsecutiveCycles {
 		return ActionCreateCritical, SeverityCritical, true
 	}
-	if countTrue(h.WarningHistory) >= 3 {
+	if countTrue(h.WarningHistory) >= h.Policy.WarningRequiredCycles {
 		return ActionCreateWarning, SeverityWarning, true
 	}
 	return ActionNone, SeverityNone, false
@@ -169,7 +224,7 @@ func (h *HostLifecycle) advanceCandidate(score float64) Transition {
 func (h *HostLifecycle) advanceFiring() Transition {
 	from := h.State
 	if h.Severity == SeverityWarning {
-		if h.CriticalStreak >= 2 {
+		if h.CriticalStreak >= h.Policy.CriticalConsecutiveCycles {
 			h.Severity = SeverityCritical
 			return Transition{Action: ActionEscalateCritical, FromState: from, ToState: h.State, Severity: SeverityCritical}
 		}
@@ -191,7 +246,7 @@ func (h *HostLifecycle) advanceFiring() Transition {
 
 func (h *HostLifecycle) advanceRecovering(score float64) Transition {
 	from := h.State
-	if h.RecoveryStreak >= 4 {
+	if h.RecoveryStreak >= h.Policy.RecoveryConsecutiveCycles {
 		resolved := h.PriorSeverity
 		h.State = StateNormal
 		h.Severity = SeverityNone

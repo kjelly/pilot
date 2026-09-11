@@ -2,6 +2,7 @@ package detection
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -151,7 +152,8 @@ func TestEngine_RunCycle_BaselineWarmsUpWithoutCohortOrLog(t *testing.T) {
 // legacy pilot_host label, not instead of it, for a managed_host subject.
 func TestBuildAlertPayload_ManagedHostRetainsPilotHost(t *testing.T) {
 	now := time.Now()
-	payload := buildAlertPayload("web-1", SubjectKindManagedHost, "site-a", "critical", "sig-1", 0.9, 1, "cpu", nil, "linux-host-v1", now, now)
+	evidence := buildAlertEvidence(FusedResult{Score: 0.9, Category: "cpu", Source: "local", DetectorSource: "baseline"}, nil)
+	payload := buildAlertPayload("web-1", SubjectKindManagedHost, "site-a", "critical", "sig-1", evidence, "linux-host-v1", now, now)
 	if payload.Labels["pilot_host"] != "web-1" {
 		t.Errorf("pilot_host = %q, want web-1", payload.Labels["pilot_host"])
 	}
@@ -168,7 +170,8 @@ func TestBuildAlertPayload_ManagedHostRetainsPilotHost(t *testing.T) {
 // kind gets pilot_target instead, never the legacy pilot_host label.
 func TestBuildAlertPayload_NonManagedSubjectNeverGetsPilotHost(t *testing.T) {
 	now := time.Now()
-	payload := buildAlertPayload("core-sw-01", "network_device", "site-a", "critical", "sig-1", 0.9, 1, "network_error", nil, "network-device-ifmib-v1", now, now)
+	evidence := buildAlertEvidence(FusedResult{Score: 0.9, Category: "network_error", Source: "local", DetectorSource: "baseline"}, nil)
+	payload := buildAlertPayload("core-sw-01", "network_device", "site-a", "critical", "sig-1", evidence, "network-device-ifmib-v1", now, now)
 	if _, ok := payload.Labels["pilot_host"]; ok {
 		t.Errorf("a non-managed-host subject must never carry pilot_host: %+v", payload.Labels)
 	}
@@ -177,6 +180,120 @@ func TestBuildAlertPayload_NonManagedSubjectNeverGetsPilotHost(t *testing.T) {
 	}
 	if payload.Labels["pilot_subject"] != "core-sw-01" || payload.Labels["pilot_subject_kind"] != "network_device" {
 		t.Errorf("generic subject labels missing/wrong: %+v", payload.Labels)
+	}
+}
+
+// TestBuildAlertEvidence_ExplainsCompositeLocalDeviation keeps the old
+// top_contributors wire contract while adding enough evidence to distinguish
+// a multi-resource baseline deviation from a single CPU-rooted alert.
+func TestBuildAlertEvidence_ExplainsCompositeLocalDeviation(t *testing.T) {
+	evidence := buildAlertEvidence(FusedResult{
+		Score:    1,
+		Category: "cpu",
+		Source:   "local", DetectorSource: "baseline",
+		Contributors: []Contributor{
+			{Feature: "cpu_utilization", Category: "cpu", Score: 1},
+			{Feature: "disk_io_busy", Category: "storage", Score: 0.88},
+			{Feature: "load1_per_cpu", Category: "cpu", Score: 0.74},
+		},
+	}, map[string]float64{
+		"cpu_utilization":   0.20,
+		"disk_io_busy":      0.88,
+		"load1_per_cpu":     0.27,
+		"memory_used_ratio": 0.16, // unrelated metrics must not be disclosed.
+	})
+	if evidence.CategoryHint != "composite_resource" {
+		t.Fatalf("category hint = %q, want composite_resource", evidence.CategoryHint)
+	}
+	if evidence.DetectorSource != "baseline" || evidence.DominantFeature != "cpu_utilization" {
+		t.Fatalf("unexpected source/dominant feature: %+v", evidence)
+	}
+
+	now := time.Now()
+	payload := buildAlertPayload("it-core", SubjectKindManagedHost, "site-a", "critical", "sig-1", evidence, "linux-host-v1", now, now)
+	if got := payload.Annotations["top_contributors"]; got != `["cpu_utilization","disk_io_busy","load1_per_cpu"]` {
+		t.Errorf("top_contributors compatibility value = %s", got)
+	}
+	if got := payload.Annotations["detector_source"]; got != "baseline" {
+		t.Errorf("detector_source = %q, want baseline", got)
+	}
+	if got := payload.Annotations["dominant_feature"]; got != "cpu_utilization" {
+		t.Errorf("dominant_feature = %q, want cpu_utilization", got)
+	}
+
+	var contributors []alertContributor
+	if err := json.Unmarshal([]byte(payload.Annotations["contributor_scores"]), &contributors); err != nil {
+		t.Fatalf("decode contributor_scores: %v", err)
+	}
+	if len(contributors) != 3 || contributors[1] != (alertContributor{Feature: "disk_io_busy", Category: "storage", Score: 0.88}) {
+		t.Fatalf("contributor_scores = %+v", contributors)
+	}
+	var featureValues map[string]float64
+	if err := json.Unmarshal([]byte(payload.Annotations["feature_values"]), &featureValues); err != nil {
+		t.Fatalf("decode feature_values: %v", err)
+	}
+	if len(featureValues) != 3 || featureValues["disk_io_busy"] != 0.88 {
+		t.Fatalf("feature_values = %+v, want only contributor values", featureValues)
+	}
+}
+
+func TestBuildAlertEvidence_ModelResultKeepsItsSpecificCategory(t *testing.T) {
+	evidence := buildAlertEvidence(FusedResult{
+		Score: 0.9, Category: "cpu_saturation", Source: "model", DetectorSource: "model",
+		Contributors: []Contributor{{Feature: "cpu_utilization", Score: 0.9}},
+	}, map[string]float64{"cpu_utilization": 0.91})
+	if evidence.CategoryHint != "cpu_saturation" {
+		t.Fatalf("model category = %q, want cpu_saturation", evidence.CategoryHint)
+	}
+	if evidence.DetectorSource != "model" {
+		t.Fatalf("detector source = %q, want model", evidence.DetectorSource)
+	}
+}
+
+// TestPersistTransition_StoresOperatorFacingCategory ensures `signals list`
+// agrees with the Alertmanager annotation. Otherwise the alert could say
+// composite_resource while the CLI continued to misleadingly report CPU.
+func TestPersistTransition_StoresOperatorFacingCategory(t *testing.T) {
+	store := openTestStore(t)
+	engine := NewEngine(testProfile(), nil, store, nil)
+	fused := FusedResult{
+		Score: 1, Category: "cpu", Source: "local", DetectorSource: "baseline",
+		Contributors: []Contributor{
+			{Feature: "cpu_utilization", Category: "cpu", Score: 1},
+			{Feature: "disk_io_busy", Category: "storage", Score: 0.9},
+		},
+	}
+	transition := Transition{Action: ActionCreateCritical, Severity: SeverityCritical}
+	if err := engine.persistTransition("it-core", "site-a", fused, map[string]float64{
+		"cpu_utilization": 0.2, "disk_io_busy": 0.88,
+	}, transition, 1_700_000_000); err != nil {
+		t.Fatalf("persist transition: %v", err)
+	}
+	active, err := store.ListActiveEpisodes()
+	if err != nil {
+		t.Fatalf("list active episodes: %v", err)
+	}
+	if len(active) != 1 || active[0].CategoryHint != "composite_resource" {
+		t.Fatalf("active episodes = %+v, want persisted composite_resource category", active)
+	}
+
+	// A later refresh can legitimately have a different ranked category. The
+	// persisted episode must follow the refresh payload instead of retaining
+	// the stale category from its creation transition.
+	if err := engine.persistTransition("it-core", "site-a", FusedResult{
+		Score: 0.7, Category: "cpu", Source: "local", DetectorSource: "baseline",
+		Contributors: []Contributor{{Feature: "cpu_utilization", Category: "cpu", Score: 0.7}},
+	}, map[string]float64{"cpu_utilization": 0.7}, Transition{
+		Action: ActionEnterRecovering, ToState: StateRecovering, Severity: SeverityCritical,
+	}, 1_700_000_060); err != nil {
+		t.Fatalf("persist recovery transition: %v", err)
+	}
+	active, err = store.ListActiveEpisodes()
+	if err != nil {
+		t.Fatalf("list active episodes after recovery: %v", err)
+	}
+	if len(active) != 1 || active[0].CategoryHint != "cpu" {
+		t.Fatalf("recovery episode = %+v, want refreshed cpu category", active)
 	}
 }
 

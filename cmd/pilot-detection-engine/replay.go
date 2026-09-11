@@ -164,7 +164,7 @@ func runReplay(ctx context.Context, out io.Writer, client *detection.ThanosClien
 
 			lc, ok := lifecycles[host]
 			if !ok {
-				lc = detection.NewHostLifecycle()
+				lc = detection.NewHostLifecycleWithPolicy(profile.EffectiveLifecyclePolicy())
 				lifecycles[host] = lc
 			}
 
@@ -189,7 +189,7 @@ func runReplay(ctx context.Context, out io.Writer, client *detection.ThanosClien
 			}
 			fused := detection.FuseLocalOnly(local)
 
-			transition := lc.Advance(fused.Score)
+			transition := lc.Advance(profile.LifecycleScore(fused, current))
 			if transition.Action != detection.ActionNone {
 				counts[transition.Action]++
 				fmt.Fprintf(out, "%s  %-20s %-20s score=%.3f category=%q %s -> %s (severity=%s)\n",

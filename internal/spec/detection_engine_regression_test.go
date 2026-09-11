@@ -206,9 +206,19 @@ func TestRegression_DetectionEngineSpec(t *testing.T) {
 		}
 	}
 
-	// Stage A default (no -e overrides at all) must still run
-	// provider-disabled — the Stage B delta must not change this default.
-	if !strings.Contains(applyRaw, "detection_model_provider_enabled: false") {
-		t.Error("detection-engine-apply.yml's vars: block must still default detection_model_provider_enabled to false")
+	// Stage A remains provider-disabled by default, but defaults must not live
+	// in play vars: play vars override group_vars and would silently discard an
+	// operator's Stage B provider configuration.
+	for _, want := range []string{
+		`name: "Resolve model provider defaults without overriding inventory or extra vars"`,
+		`detection_model_provider_enabled: "{{ detection_model_provider_enabled | default(false) | bool }}"`,
+		`detection_model_provider_fallback_enabled: "{{ detection_model_provider_fallback_enabled | default(false) | bool }}"`,
+	} {
+		if !strings.Contains(applyRaw, want) {
+			t.Errorf("detection-engine-apply.yml must contain %q", want)
+		}
+	}
+	if strings.Contains(applyRaw, "\n    detection_model_provider_enabled: false\n") {
+		t.Error("detection_model_provider_enabled must not be a play var because that overrides group_vars")
 	}
 }

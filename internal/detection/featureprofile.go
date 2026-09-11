@@ -8,6 +8,7 @@ package detection
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -21,9 +22,17 @@ type Feature struct {
 	Category   string  `yaml:"category"`
 	ScaleFloor float64 `yaml:"scaleFloor"`
 	Cohort     bool    `yaml:"cohort"`
-	ValidMin   float64 `yaml:"validMin"`
-	ValidMax   float64 `yaml:"validMax"`
-	PromQL     string  `yaml:"promql"`
+	// Critical controls whether this feature, on its own, can supply the
+	// critical-level evidence to the lifecycle. Nil preserves the historical
+	// default (allowed); false requires an independent strong symptom.
+	Critical *bool `yaml:"critical,omitempty"`
+	// CriticalMinValue is an optional absolute floor. A feature must be both
+	// statistically anomalous and at/above this value before it can authorize
+	// a critical lifecycle transition. Nil preserves historical behavior.
+	CriticalMinValue *float64 `yaml:"criticalMinValue,omitempty"`
+	ValidMin         float64  `yaml:"validMin"`
+	ValidMax         float64  `yaml:"validMax"`
+	PromQL           string   `yaml:"promql"`
 }
 
 // IdentityProfile names which PromQL result label identifies a subject for
@@ -118,11 +127,53 @@ func (p FeatureProfile) FutureSkewTolerance() time.Duration {
 // FeatureProfile is the parsed contents of a feature-profiles/*.yaml file.
 // ID and Version together are part of the SignalEvent fingerprint (spec §21).
 type FeatureProfile struct {
-	ID       string          `yaml:"id"`
-	Version  int             `yaml:"version"`
-	Identity IdentityProfile `yaml:"identity,omitempty"`
-	Sampling SamplingProfile `yaml:"sampling,omitempty"`
-	Features []Feature       `yaml:"features"`
+	ID        string          `yaml:"id"`
+	Version   int             `yaml:"version"`
+	Identity  IdentityProfile `yaml:"identity,omitempty"`
+	Sampling  SamplingProfile `yaml:"sampling,omitempty"`
+	Lifecycle LifecyclePolicy `yaml:"lifecycle,omitempty"`
+	Features  []Feature       `yaml:"features"`
+}
+
+// EffectiveLifecyclePolicy fills omitted fields with the legacy lifecycle
+// values so a profile without lifecycle: remains backward compatible.
+func (p FeatureProfile) EffectiveLifecyclePolicy() LifecyclePolicy {
+	return p.Lifecycle.Effective()
+}
+
+// LifecycleScore returns the policy-constrained value sent to the lifecycle.
+// The raw fused score remains available for alert evidence and baseline
+// contamination protection. A critical:false feature can still produce a
+// warning, but cannot alone create or escalate a critical episode. A
+// critical-eligible contributor must be at warning strength and, when it
+// declares criticalMinValue, meet that absolute current-value floor.
+func (p FeatureProfile) LifecycleScore(fused FusedResult, current map[string]float64) float64 {
+	if fused.Score < CriticalThreshold {
+		return fused.Score
+	}
+
+	blockedCritical := false
+	for _, contributor := range fused.Contributors {
+		if contributor.Score < WarningThreshold {
+			continue
+		}
+		feature, found := p.Feature(contributor.Feature)
+		if !found || feature.Critical == nil || *feature.Critical {
+			if feature.CriticalMinValue != nil {
+				value, present := current[contributor.Feature]
+				if !present || value < *feature.CriticalMinValue {
+					blockedCritical = true
+					continue
+				}
+			}
+			return fused.Score
+		}
+		blockedCritical = true
+	}
+	if blockedCritical {
+		return math.Nextafter(CriticalThreshold, 0)
+	}
+	return fused.Score
 }
 
 // LoadFeatureProfile parses and validates a feature profile file.
@@ -160,6 +211,9 @@ func (p FeatureProfile) Validate() error {
 	if len(p.Features) == 0 {
 		return fmt.Errorf("feature profile: at least one feature is required")
 	}
+	if err := p.Lifecycle.Validate(); err != nil {
+		return fmt.Errorf("feature profile: lifecycle: %w", err)
+	}
 	if p.Sampling.MaxSampleAge != "" {
 		if _, err := time.ParseDuration(p.Sampling.MaxSampleAge); err != nil {
 			return fmt.Errorf("feature profile: sampling.maxSampleAge: %w", err)
@@ -182,6 +236,14 @@ func (p FeatureProfile) Validate() error {
 		seen[f.Name] = true
 		if f.ValidMin >= f.ValidMax {
 			return fmt.Errorf("feature profile: feature %q validMin must be < validMax", f.Name)
+		}
+		if f.CriticalMinValue != nil {
+			if f.Critical != nil && !*f.Critical {
+				return fmt.Errorf("feature profile: feature %q cannot set criticalMinValue when critical is false", f.Name)
+			}
+			if *f.CriticalMinValue < f.ValidMin || *f.CriticalMinValue > f.ValidMax {
+				return fmt.Errorf("feature profile: feature %q criticalMinValue must be within valid range", f.Name)
+			}
 		}
 		if f.ScaleFloor <= 0 {
 			return fmt.Errorf("feature profile: feature %q scaleFloor must be > 0", f.Name)

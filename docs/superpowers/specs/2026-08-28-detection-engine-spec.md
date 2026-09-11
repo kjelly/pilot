@@ -786,6 +786,13 @@ storage
 
 yes
 
+Linux host profile version 3 的 `disk_io_busy` 與 `load1_per_cpu` 為
+`critical: false`：它們可作為持續 warning 的證據，但不得單獨建立或升級
+critical。`criticalMinValue` 是 critical-eligible feature 的絕對安全門檻：該
+feature 除了 score >= 0.80 外，當前值也必須達門檻才可授權 critical。Linux host
+的 CPU / memory / rootfs / thermal 門檻分別是 0.80 / 0.90 / 0.90 / 85；這避免
+僅相對基線異常、但未達資源飽和或容量壓力的短 burst 產生 critical page。
+
 thermal_max_celsius
 
 no
@@ -864,12 +871,12 @@ max by (pilot_host, site) (
 
 disk_io_busy
 
-sum by (pilot_host, site) (
+max by (pilot_host, site) (
   rate(node_disk_io_time_seconds_total{
     job="node",
     pilot_host!="",
     device!~"^(loop|ram|fd|sr)[0-9]*$"
-  }[1m])
+  }[5m])
 )
 
 thermal_max_celsius
@@ -889,7 +896,7 @@ cpu_utilization      [0, 1.05]
 load1_per_cpu        [0, 64]
 memory_used_ratio    [0, 1]
 rootfs_used_ratio    [0, 1]
-disk_io_busy         [0, 64]
+disk_io_busy         [0, 1.05]
 thermal_max_celsius  [-50, 200]
 
 13. Query Result Normalization
@@ -1215,10 +1222,15 @@ active severity:
 
 counters：
 
-warning_history: last 4 valid cycle booleans
+warning_history: profile warningWindowCycles 個 valid cycle boolean
 critical_streak
 recovery_streak
 candidate_clear_streak
+
+每個 profile 可在 `lifecycle:` 指定 `warningWindowCycles`、
+`warningRequiredCycles`、`criticalConsecutiveCycles` 與
+`recoveryConsecutiveCycles`。未指定時維持舊預設 4 / 3 / 2 / 4；Linux host
+profile version 3 使用 8 / 6 / 4 / 8，以減少短 burst 造成的開關告警。
 
 thresholds：
 
@@ -1227,12 +1239,18 @@ warning   >= 0.80
 critical  >= 0.95
 recovery  <  0.60
 
+當 raw fused score 達 critical 時，lifecycle 只接受 score >= warning threshold
+且 `critical` 不為 false 的 contributor 作為 critical 證據；若 feature 設
+`criticalMinValue`，當前值也必須不低於該絕對門檻。沒有任何合格 contributor 時，
+lifecycle score 必須 clamp 在 warning 範圍，原始 fused score 仍保留在 alert
+evidence 與 baseline contamination guard 中。
+
 20.1 Valid Cycle Counter Update
 
 每 valid fused score：
 
 warning_history.append(score >= 0.80)
-keep only latest 4
+keep only latest warningWindowCycles
 
 critical_streak =
   critical_streak + 1
@@ -1248,10 +1266,10 @@ recovery_streak =
 
 priority：
 
-critical_streak >= 2
+critical_streak >= criticalConsecutiveCycles
 → create episode → firing critical
 
-else count_true(last4 warning_history) >= 3
+else count_true(warning_history) >= warningRequiredCycles
 → create episode → firing warning
 
 else score >= .65
@@ -1283,7 +1301,7 @@ candidate不建立 SignalEvent。
 
 20.4 firing warning
 
-critical_streak >=2
+critical_streak >= criticalConsecutiveCycles
 → firing critical
 
 else recovery_streak >=1
@@ -1304,12 +1322,12 @@ remember prior severity=critical
 
 20.6 recovering
 
-recovery_streak>=4：
+recovery_streak>=recoveryConsecutiveCycles：
 
 resolve episode
 state=normal
 
-如果4次前：
+如果 recoveryConsecutiveCycles 次前：
 
 score >= .60
 
@@ -1408,6 +1426,26 @@ confidence
 category_hint
 top_contributors
 profile
+detector_source
+dominant_feature
+contributor_scores
+feature_values
+
+`top_contributors` 保持既有的 feature name JSON array，供既有
+Alertmanager template / consumer 相容使用。新增的解釋欄位定義如下：
+
+- `detector_source`：實際勝出的 detector，為 `baseline`、`cohort`、`log` 或
+  `model`；不使用資訊不足的籠統 `local`。
+- `dominant_feature`：ranked contributor 的第一個 feature。
+- `contributor_scores`：依排名排序的 JSON array；每個元素為
+  `{feature, category?, score}`。
+- `feature_values`：只含 ranked contributor feature 的當次原始數值 JSON object，
+  不是完整的 host metric snapshot。
+
+`category_hint` 仍是 investigation hint 而非 root cause。local detector 的
+contributors 橫跨兩個以上非空 resource category 時，應寫
+`composite_resource`，各別的 category 與 score 由 `contributor_scores` 提供；
+model contributor 沒有 per-feature category 時，保留 model 回傳的 category hint。
 
 22.1 Refresh
 
@@ -2688,6 +2726,9 @@ TestLifecycle_RecoveryRequiresFourBelowPoint6
 TestLifecycle_InvalidCycleDoesNotAdvanceCounters
 TestLifecycle_CriticalNeverDowngradesWithinEpisode
 TestLifecycle_ResolvedThenRefireGetsNewSignalID
+TestLifecyclePolicy_RequiresConfiguredCriticalDuration
+TestFeatureProfile_LifecycleScoreCapsUncorroboratedNonCriticalFeature
+TestLinuxHostProfile_RequiresAbsolutePressureForCritical
 
 TestFingerprint_CategoryAndSeverityDoNotChangeFingerprint
 TestFingerprint_ProfileVersionChangesFingerprint

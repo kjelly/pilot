@@ -964,9 +964,21 @@ confidence
 category_hint
 top_contributors
 profile
+detector_source
+dominant_feature
+contributor_scores
+feature_values
 ```
 
 `signal_id` 仍是 Agent Controller 對 Detection Engine warning→critical transition 的 stable episode identity。
+
+上述新增欄位與 managed-host profile 使用同一份 Alertmanager explanation
+contract：`detector_source` 為實際勝出的 `baseline`、`cohort`、`log` 或 `model`；
+`dominant_feature` 為首要 contributor；`contributor_scores` 為排序後的
+`{feature, category?, score}` JSON array；`feature_values` 只包含 contributors 的
+當次原始值。`top_contributors` 維持原本的 feature name JSON array，相容既有 consumer。
+當 local contributors 跨多個 resource category 時，`category_hint` 使用
+`composite_resource`，而非將其中一類誤作唯一根因。
 
 ### 9.9 Observability Compatibility
 
@@ -2134,4 +2146,3 @@ Agent 自動執行 snmpset
 SNMP timeout 被回報為 normal
 model malformed reply 被回報為 benign
 ```
-

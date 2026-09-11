@@ -23,6 +23,70 @@ const (
 	alertmanagerEndsAtHorizon = 180 * time.Second
 )
 
+// alertContributor is the full, structured form of one contributor. It is
+// intentionally emitted in the same ranked order as top_contributors, while
+// top_contributors itself remains for existing Alertmanager templates.
+type alertContributor struct {
+	Feature  string  `json:"feature"`
+	Category string  `json:"category,omitempty"`
+	Score    float64 `json:"score"`
+}
+
+// alertEvidence is the explanation attached to an alert and stored with its
+// transition. FeatureValues is deliberately limited to the ranked
+// contributors; it does not disclose an unrelated full host metric snapshot.
+type alertEvidence struct {
+	Score           float64
+	Confidence      float64
+	CategoryHint    string
+	DetectorSource  string
+	DominantFeature string
+	Contributors    []alertContributor
+	FeatureValues   map[string]float64
+}
+
+// buildAlertEvidence converts an internal fused score into a stable,
+// operator-facing explanation. A local detector can rank features across more
+// than one resource category. In that case a single category would be a
+// misleading root-cause label, so expose composite_resource instead; the
+// individual category and score remain in contributor_scores.
+func buildAlertEvidence(fused FusedResult, current map[string]float64) alertEvidence {
+	evidence := alertEvidence{
+		Score:          fused.Score,
+		Confidence:     1,
+		CategoryHint:   fused.Category,
+		DetectorSource: fused.DetectorSource,
+		Contributors:   make([]alertContributor, 0, len(fused.Contributors)),
+		FeatureValues:  map[string]float64{},
+	}
+	if evidence.DetectorSource == "" {
+		evidence.DetectorSource = fused.Source
+	}
+	if evidence.DetectorSource == "" {
+		evidence.DetectorSource = "unknown"
+	}
+
+	categories := map[string]struct{}{}
+	for _, contributor := range fused.Contributors {
+		evidence.Contributors = append(evidence.Contributors, alertContributor{
+			Feature: contributor.Feature, Category: contributor.Category, Score: contributor.Score,
+		})
+		if evidence.DominantFeature == "" {
+			evidence.DominantFeature = contributor.Feature
+		}
+		if contributor.Category != "" {
+			categories[contributor.Category] = struct{}{}
+		}
+		if value, ok := current[contributor.Feature]; ok {
+			evidence.FeatureValues[contributor.Feature] = value
+		}
+	}
+	if len(categories) > 1 {
+		evidence.CategoryHint = "composite_resource"
+	}
+	return evidence
+}
+
 // buildAlertPayload implements spec §9.8's generic alert label set: every
 // alert always carries pilot_subject/pilot_subject_kind; a managed_host
 // subject ADDITIONALLY keeps the legacy pilot_host label (so existing
@@ -30,12 +94,14 @@ const (
 // other kind additionally carries pilot_target (spec §9.8: "SNMP/external
 // target SHOULD 額外保留 pilot_target=<subject_id>" — generalized here to
 // every non-managed-host kind, not just literally "snmp").
-func buildAlertPayload(subjectID, subjectKind, site, severity, signalID string, score, confidence float64, categoryHint string, contributors []Contributor, profile string, startsAt, now time.Time) AlertmanagerPayload {
-	top := make([]string, 0, len(contributors))
-	for _, c := range contributors {
+func buildAlertPayload(subjectID, subjectKind, site, severity, signalID string, evidence alertEvidence, profile string, startsAt, now time.Time) AlertmanagerPayload {
+	top := make([]string, 0, len(evidence.Contributors))
+	for _, c := range evidence.Contributors {
 		top = append(top, c.Feature)
 	}
 	topJSON, _ := json.Marshal(top)
+	contributorsJSON, _ := json.Marshal(evidence.Contributors)
+	featureValuesJSON, _ := json.Marshal(evidence.FeatureValues)
 	labels := map[string]string{
 		"alertname":          "PilotAdaptiveAnomaly",
 		"source":             "detection-engine",
@@ -52,12 +118,16 @@ func buildAlertPayload(subjectID, subjectKind, site, severity, signalID string, 
 	return AlertmanagerPayload{
 		Labels: labels,
 		Annotations: map[string]string{
-			"signal_id":        signalID,
-			"score":            formatFloat(score),
-			"confidence":       formatFloat(confidence),
-			"category_hint":    categoryHint,
-			"top_contributors": string(topJSON),
-			"profile":          profile,
+			"signal_id":          signalID,
+			"score":              formatFloat(evidence.Score),
+			"confidence":         formatFloat(evidence.Confidence),
+			"category_hint":      evidence.CategoryHint,
+			"top_contributors":   string(topJSON),
+			"profile":            profile,
+			"detector_source":    evidence.DetectorSource,
+			"dominant_feature":   evidence.DominantFeature,
+			"contributor_scores": string(contributorsJSON),
+			"feature_values":     string(featureValuesJSON),
 		},
 		StartsAt: startsAt.UTC().Format(time.RFC3339),
 		EndsAt:   now.Add(alertmanagerEndsAtHorizon).UTC().Format(time.RFC3339),
@@ -144,7 +214,7 @@ func (e *Engine) baselineSampleRecord(subjectID, site, feature string, bucketTS 
 func (e *Engine) lifecycleFor(host string) *HostLifecycle {
 	lc, ok := e.lifecycles[host]
 	if !ok {
-		lc = NewHostLifecycle()
+		lc = NewHostLifecycleWithPolicy(e.Profile.EffectiveLifecyclePolicy())
 		e.lifecycles[host] = lc
 	}
 	return lc
@@ -157,12 +227,12 @@ type HostCycleOutcome struct {
 	Host       string
 	Valid      bool
 	LocalScore LocalScoreResult
-	// Fused is the score/category/contributors actually used to advance
-	// the lifecycle this cycle (spec §19): equal to LocalScore when the
-	// provider is disabled/unavailable/insufficient_data, model-escalated
-	// otherwise. Zero value when Valid is false.
-	Fused      FusedResult
-	Transition Transition
+	// Fused is the raw score/category/contributors produced by score fusion.
+	// LifecycleScore is the profile-policy-constrained value passed to the
+	// state machine. Both are zero when Valid is false.
+	Fused          FusedResult
+	LifecycleScore float64
+	Transition     Transition
 }
 
 // RunCycle executes one full evaluation cycle at evaluationTime across
@@ -336,13 +406,15 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 	for _, ph := range pending {
 		fr := fused[ph.snap.Host]
 		lc := e.lifecycleFor(ph.snap.Host)
-		transition := lc.Advance(fr.Score)
+		lifecycleScore := e.Profile.LifecycleScore(fr, ph.snap.Current)
+		transition := lc.Advance(lifecycleScore)
 
 		idx := outcomeIdx[ph.snap.Host]
 		outcomes[idx].Fused = fr
+		outcomes[idx].LifecycleScore = lifecycleScore
 		outcomes[idx].Transition = transition
 
-		if err := e.persistTransition(ph.snap.Host, ph.site, fr, transition, evaluationTime); err != nil {
+		if err := e.persistTransition(ph.snap.Host, ph.site, fr, ph.snap.Current, transition, evaluationTime); err != nil {
 			return outcomes, fmt.Errorf("persist transition for %s: %w", ph.snap.Host, err)
 		}
 
@@ -373,11 +445,12 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 // spec §22.2 requires. `fused` is the score/category/contributors that
 // actually drove this transition — local-only for Stage A/non-candidates,
 // model-escalated per spec §19 otherwise.
-func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Transition, evaluationTime int64) error {
+func (e *Engine) persistTransition(host, site string, fused FusedResult, current map[string]float64, tr Transition, evaluationTime int64) error {
 	local := fused
 	if tr.Action == ActionNone {
 		return nil
 	}
+	evidence := buildAlertEvidence(fused, current)
 	now := time.Unix(evaluationTime, 0).UTC()
 	kind := e.Profile.EffectiveIdentity().Kind
 	fingerprint := Fingerprint(host, kind, site, e.Profile.ID, e.Profile.Version)
@@ -396,11 +469,11 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Tran
 			SignalID: signalID, Fingerprint: fingerprint,
 			SubjectID: host, SubjectKind: kind, PilotHost: pilotHost, Site: site,
 			ProfileID: e.Profile.ID, ProfileVersion: e.Profile.Version,
-			State: string(StateFiring), Severity: string(tr.Severity), CategoryHint: local.Category,
+			State: string(StateFiring), Severity: string(tr.Severity), CategoryHint: evidence.CategoryHint,
 			CreatedAt: now, UpdatedAt: now, Revision: 1,
 			LastScore: &local.Score,
 		}
-		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), signalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, now, now))
+		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), signalID, evidence, e.Profile.ID, now, now))
 		outboxID, err := NewULID()
 		if err != nil {
 			return err
@@ -418,13 +491,13 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Tran
 		revision := existing.Revision + 1
 		episode := *existing
 		episode.Severity = string(SeverityCritical)
-		episode.CategoryHint = local.Category
+		episode.CategoryHint = evidence.CategoryHint
 		episode.UpdatedAt = now
 		episode.Revision = revision
 		episode.LastScore = &local.Score
 
-		resolvePayload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(SeverityWarning), existing.SignalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, existing.CreatedAt, now))
-		firePayload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(SeverityCritical), existing.SignalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, now, now))
+		resolvePayload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(SeverityWarning), existing.SignalID, evidence, e.Profile.ID, existing.CreatedAt, now))
+		firePayload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(SeverityCritical), existing.SignalID, evidence, e.Profile.ID, now, now))
 		resolveID, err := NewULID()
 		if err != nil {
 			return err
@@ -450,10 +523,11 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, tr Tran
 		episode := *existing
 		episode.State = string(tr.ToState)
 		episode.Severity = string(tr.Severity)
+		episode.CategoryHint = evidence.CategoryHint
 		episode.UpdatedAt = now
 		episode.Revision = revision
 		episode.LastScore = &local.Score
-		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), existing.SignalID, local.Score, 1, local.Category, local.Contributors, e.Profile.ID, existing.CreatedAt, now))
+		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), existing.SignalID, evidence, e.Profile.ID, existing.CreatedAt, now))
 		outboxID, err := NewULID()
 		if err != nil {
 			return err

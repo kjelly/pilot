@@ -2,11 +2,17 @@ package detection
 
 // FusedResult is a candidate's post-fusion score (spec §19). Source is
 // "local" or "model", naming which category/contributors won.
+// DetectorSource retains the concrete detector that produced a local result
+// (baseline, cohort, or log), or "model" when the model also won the
+// category/contributor decision. Source remains for compatibility with the
+// existing fusion contract; callers that explain an alert should use
+// DetectorSource rather than the overly broad "local" value.
 type FusedResult struct {
-	Score        float64
-	Category     string
-	Contributors []Contributor
-	Source       string
+	Score          float64
+	Category       string
+	Contributors   []Contributor
+	Source         string
+	DetectorSource string
 }
 
 // categoryEscalationMargin is spec §19's "effective_model_score >=
@@ -17,7 +23,13 @@ const categoryEscalationMargin = 0.05
 // unavailable, or its result was discarded for this candidate — spec §19:
 // "fused_score = local_score".
 func FuseLocalOnly(local LocalScoreResult) FusedResult {
-	return FusedResult{Score: local.Score, Category: local.Category, Contributors: local.Contributors, Source: "local"}
+	return FusedResult{
+		Score:          local.Score,
+		Category:       local.Category,
+		Contributors:   local.Contributors,
+		Source:         "local",
+		DetectorSource: local.Source,
+	}
 }
 
 // modelContributorsToContributors adapts the wire ModelContributor shape
@@ -45,13 +57,20 @@ func FuseCandidate(local LocalScoreResult, model ModelCandidateResponse) FusedRe
 	}
 	if effectiveModelScore >= local.Score+categoryEscalationMargin {
 		return FusedResult{
-			Score:        fusedScore,
-			Category:     model.CategoryHint,
-			Contributors: modelContributorsToContributors(model.Contributors),
-			Source:       "model",
+			Score:          fusedScore,
+			Category:       model.CategoryHint,
+			Contributors:   modelContributorsToContributors(model.Contributors),
+			Source:         "model",
+			DetectorSource: "model",
 		}
 	}
-	return FusedResult{Score: fusedScore, Category: local.Category, Contributors: local.Contributors, Source: "local"}
+	return FusedResult{
+		Score:          fusedScore,
+		Category:       local.Category,
+		Contributors:   local.Contributors,
+		Source:         "local",
+		DetectorSource: local.Source,
+	}
 }
 
 // FuseInsufficientData implements spec §19's status=insufficient_data
