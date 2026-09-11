@@ -672,3 +672,13 @@
       vars:
         freeipa_client_dns_phase: apply
       tags: [freeipa-client, C11]
+
+    # Host annotations projection (docs/superpowers/specs/2026-09-09-host-
+    # annotations-freeipa-sync-spec.md §9.1): runs AFTER enrollment/health
+    # succeeds, same "never mutate before the host object is confirmed to
+    # exist" rule as DNS above. Independent of DNS registration — always
+    # included, even when pilot_annotations is unset (a no-op reconcile in
+    # that case, or a prune if annotations were previously set and removed).
+    - name: "FreeIPA host annotations — reconcile pilot_annotations to FreeIPA userClass/nshostlocation"
+      ansible.builtin.include_tasks: tasks/freeipa-host-annotations.yml
+      tags: [freeipa-client, host-annotations]

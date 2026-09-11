@@ -43,11 +43,18 @@ hosts:
     roles: [freeipa-server, dns, ntp, audit-log-forwarding, wazuh-fim, restic-backup]
     env: prod
 
-  # 範例:兩台一般 Linux server。
+  # 範例:兩台一般 Linux server。annotations 只供人 / Portal / FreeIPA 查閱,
+  # 不控制 Ansible 行為(role/env/deploy/HBAC/sudo 都不受影響);禁止存
+  # password/token/key 等秘密資料。freeipa-client apply 成功 enrollment 後,
+  # 會把它們投影到該 host 的 FreeIPA userClass(pilot.annotation.<key>)。
   web-1:
     ansible_host: "<FILL-ME>"        # 例 10.0.0.21
     roles: [freeipa-client, freeipa-dns-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]
     env: prod
+    annotations:
+      location: "DC1/Rack-A03/U18"
+      project: "example-project"
+      owner: "platform-team"
   web-2:
     ansible_host: "<FILL-ME>"        # 例 10.0.0.22
     roles: [freeipa-client, freeipa-dns-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]

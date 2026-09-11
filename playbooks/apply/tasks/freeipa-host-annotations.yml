@@ -1,0 +1,515 @@
+# Shared task file: FreeIPA host annotations projection
+# (docs/superpowers/specs/2026-09-09-host-annotations-freeipa-sync-spec.md).
+#
+# Included ONCE from freeipa-client-apply.yml, AFTER enrollment + the
+# post-enroll health/AAA checks succeed (spec.md §9.3: MUST NOT mutate host
+# metadata before the host object is confirmed to exist) and after the
+# client DNS apply/verify task — DNS and annotations are independent
+# FreeIPA host attributes, so the ordering between the two is not itself
+# load-bearing; annotations simply run last.
+#
+# `hosts.yml`'s `annotations:` map projects, via `pilot inventory generate`,
+# into the `pilot_annotations` host var this file reads — descriptive,
+# non-secret host metadata (location/project/owner/...) namespaced onto the
+# host's FreeIPA `userClass` as `pilot.annotation.<key>=<value>` plus, for
+# the "location" key only, a convenience mirror onto the native
+# `nshostlocation` attribute (spec.md §7/§8). Runs unconditionally, even
+# with an empty/undefined `pilot_annotations`, so a host whose annotations
+# were all removed still gets its previously-Pilot-owned userClass values
+# pruned (spec.md §10 Phase D, declarative — not an opt-in projection).
+#
+# Foreign `userClass` values (anything not prefixed `pilot.annotation.`,
+# case-insensitively) and a foreign `nshostlocation` are NEVER touched — see
+# the ownership/adoption gate in the plan script below (spec.md §8.2) and
+# its CONFLICT_* fail-closed errors (spec.md §7.5/§7.6/§8.2/§8.3).
+---
+- name: "FreeIPA host annotations — resolve desired annotations"
+  ansible.builtin.set_fact:
+    ipa_annotations_desired: "{{ pilot_annotations | default({}) }}"
+
+# Phase A — validate desired (spec.md §10 Phase A). Reimplemented in Python
+# rather than Jinja regex, and deliberately NOT calling into Go: this is
+# the SAME contract as internal/inventory.ValidateAnnotations/
+# SerializeAnnotation, but a manually-maintained inventory.yml bypasses
+# `pilot inventory lint` entirely (spec.md §6.4), so the playbook cannot
+# assume that gate already ran. Mirrors the existing convention in this
+# same playbook (ipa_client_dns_canon_script, tasks/freeipa-client-host-
+# dns.yml) of embedding a small stdlib-only Python script for logic this
+# repo would otherwise have to duplicate as brittle Jinja regex chains. Keep
+# the two definitions in sync by hand if either changes: key contract
+# ^[a-z][a-z0-9_.-]{0,62}$, the same secret-name markers, empty/whitespace/
+# control-character value rejection, and the 256-byte
+# "pilot.annotation.<key>=<value>" FreeIPA userClass limit.
+- name: "FreeIPA host annotations — define the validation script"
+  ansible.builtin.set_fact:
+    ipa_annotations_validate_script: |
+      import json, re, sys
+      data = json.loads(sys.argv[1])
+      errors = []
+      if not isinstance(data, dict):
+          print(json.dumps({'ok': False, 'errors': ['pilot_annotations must be a mapping'], 'serialized': {}}))
+          sys.exit(1)
+      key_re = re.compile(r'^[a-z][a-z0-9_.\-]{0,62}$')
+      secret_re = re.compile(r'(?i)(password|passwd|secret|token|api[_-]?key|private[_-]?key|vault|credential)')
+      MAX_COUNT = 32
+      MAX_BYTES = 256
+      PREFIX = 'pilot.annotation.'
+      if len(data) > MAX_COUNT:
+          errors.append('host has %d annotations, exceeds max %d per host' % (len(data), MAX_COUNT))
+      serialized = {}
+      for k in sorted(data.keys()):
+          v = data[k]
+          if not isinstance(v, str):
+              errors.append('annotation %r value must be a string' % (k,))
+              continue
+          if not key_re.match(k):
+              errors.append('annotation key %r is invalid: must match ^[a-z][a-z0-9_.-]{0,62}$' % (k,))
+              continue
+          if secret_re.search(k):
+              errors.append(
+                  'annotation %r looks secret-bearing; annotations are projected to FreeIPA and must contain non-secret descriptive metadata only'
+                  % (k,)
+              )
+              continue
+          if v == '':
+              errors.append('annotation %r: value must not be empty' % (k,))
+              continue
+          if v != v.strip():
+              errors.append('annotation %r: value must not have leading/trailing whitespace' % (k,))
+              continue
+          if any(c in v for c in ('\r', '\n', '\x00')):
+              errors.append('annotation %r: value must not contain a carriage return, newline, or NUL byte' % (k,))
+              continue
+          ser = PREFIX + k + '=' + v
+          if len(ser.encode('utf-8')) > MAX_BYTES:
+              errors.append(
+                  'annotation %r serialized value is %d bytes, exceeds FreeIPA userClass limit of %d bytes'
+                  % (k, len(ser.encode('utf-8')), MAX_BYTES)
+              )
+              continue
+          serialized[k] = ser
+      print(json.dumps({'ok': len(errors) == 0, 'errors': errors, 'serialized': serialized}))
+      sys.exit(0 if len(errors) == 0 else 1)
+
+- name: "FreeIPA host annotations (Phase A) — validate desired annotations before any live read/mutation"
+  ansible.builtin.command:
+    argv: [python3, -c, "{{ ipa_annotations_validate_script }}", "{{ ipa_annotations_desired | to_json }}"]
+  register: ipa_annotations_validate
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: "FreeIPA host annotations (Phase A) — parse validation result"
+  ansible.builtin.set_fact:
+    ipa_annotations_validate_result: "{{ ipa_annotations_validate.stdout | default('{}') | from_json }}"
+
+- name: "Gate: desired annotations must pass validation (spec.md §10 Phase A, fail before any live mutation)"
+  ansible.builtin.assert:
+    that:
+      - ipa_annotations_validate_result.ok | default(false) | bool
+    fail_msg: >-
+      FreeIPA host annotations for {{ ipa_client_fqdn }} failed validation:
+      {{ ipa_annotations_validate_result.errors | default([]) }}
+
+- name: "FreeIPA host annotations — set desired serialized userClass values + desired location"
+  ansible.builtin.set_fact:
+    ipa_annotations_desired_serialized: "{{ ipa_annotations_validate_result.serialized | default({}) }}"
+    ipa_annotations_desired_location: "{{ ipa_annotations_desired.location | default('') }}"
+
+# Phase C/D — parse live userClass into Pilot-owned vs foreign, apply the
+# location ownership/adoption gate (spec.md §8.2/§8.3), and compute the
+# add/delete plan (spec.md §10 Phase C/D). One script, not chained Jinja
+# set_fact steps: the duplicate/malformed/case-insensitive-prefix/location-
+# drift rules interact enough (spec.md §7.5/§7.6/§7.7/§8.2/§8.3) that a
+# single well-tested function is far less error-prone than the Jinja
+# equivalent, and mirrors this playbook's own established convention of a
+# stdlib-only Python helper (ipa_client_dns_canon_script above it in
+# tasks/freeipa-client-host-dns.yml) for exactly this kind of logic.
+- name: "FreeIPA host annotations — define the reconcile-plan script"
+  ansible.builtin.set_fact:
+    ipa_annotations_plan_script: |
+      import json, re, sys
+      data = json.loads(sys.argv[1])
+      desired_serialized = data['desired_serialized']
+      desired_location = data['desired_location']
+      live_userclass = data['live_userclass']
+      live_location = data['live_location']
+
+      prefix_re = re.compile(r'^pilot\.annotation\.', re.IGNORECASE)
+      key_re = re.compile(r'^[a-z][a-z0-9_.\-]{0,62}$')
+
+      errors = []
+      managed = {}
+      foreign = []
+      key_counts = {}
+
+      for raw in live_userclass:
+          if not prefix_re.match(raw):
+              foreign.append(raw)
+              continue
+          rest = prefix_re.sub('', raw, count=1)
+          if '=' not in rest:
+              errors.append("CONFLICT_MALFORMED_MANAGED_VALUE: %r has the pilot.annotation. prefix but no '='" % (raw,))
+              continue
+          key, _, _value = rest.partition('=')
+          if key == '' or not key_re.match(key):
+              errors.append('CONFLICT_MALFORMED_MANAGED_VALUE: %r has an invalid key %r' % (raw, key))
+              continue
+          key_counts[key] = key_counts.get(key, 0) + 1
+          managed[key] = raw
+
+      for key, count in key_counts.items():
+          if count > 1:
+              errors.append('CONFLICT_DUPLICATE_MANAGED_KEY: %r appears %d times in live userClass' % (key, count))
+
+      if errors:
+          print(json.dumps({'ok': False, 'errors': errors}))
+          sys.exit(1)
+
+      # Diff is a byte-for-byte compare of the full serialized string, not
+      # just the value — this is deliberate (spec.md §7.7): a value that
+      # changed only in case (e.g. desired "alpha" vs live "Alpha") must
+      # still schedule a delete+add, never be mistaken for a NOOP by a
+      # case-insensitive comparison (userClass equality is case-insensitive
+      # at the LDAP layer, but Pilot's own diff must not rely on that).
+      add = []
+      delete = []
+      for key, serialized in sorted(desired_serialized.items()):
+          current = managed.get(key)
+          if current != serialized:
+              if current is not None:
+                  delete.append(current)
+              add.append(serialized)
+      for key, raw in sorted(managed.items()):
+          if key not in desired_serialized:
+              delete.append(raw)
+
+      marker_value = None
+      m = managed.get('location')
+      if m is not None:
+          _, _, marker_value = m.partition('=')
+
+      location_action = 'NOOP'
+      location_from = live_location
+      location_to = live_location
+
+      if desired_location:
+          if marker_value is None:
+              if live_location == '':
+                  location_action = 'SET'
+                  location_to = desired_location
+              elif live_location == desired_location:
+                  location_action = 'ADOPT'
+              else:
+                  errors.append(
+                      'CONFLICT_FOREIGN_LOCATION: nshostlocation is %r (non-empty, no Pilot marker) but desired location is %r'
+                      % (live_location, desired_location)
+                  )
+          else:
+              if live_location == marker_value:
+                  if marker_value != desired_location:
+                      location_action = 'SET'
+                      location_to = desired_location
+              elif live_location == desired_location:
+                  location_action = 'ADOPT'
+              else:
+                  errors.append(
+                      ('CONFLICT_LOCATION_DRIFT: Pilot marker is %r and desired location is %r, '
+                       'but live nshostlocation is %r (expected it to equal one of the first two)')
+                      % (marker_value, desired_location, live_location)
+                  )
+      else:
+          if marker_value is not None:
+              if live_location == marker_value:
+                  location_action = 'CLEAR'
+                  location_to = ''
+              else:
+                  errors.append(
+                      'CONFLICT_LOCATION_DRIFT: Pilot marker is %r but nshostlocation is %r; refusing to clear a value Pilot does not recognize'
+                      % (marker_value, live_location)
+                  )
+          # marker is None: Pilot never owned location — never touch native,
+          # regardless of its current value (spec.md §7.3/§17).
+
+      print(json.dumps({
+          'ok': len(errors) == 0,
+          'errors': errors,
+          'add': add,
+          'delete': delete,
+          'preserve_foreign': foreign,
+          'location_action': location_action,
+          'location_from': location_from,
+          'location_to': location_to,
+      }))
+      sys.exit(0 if len(errors) == 0 else 1)
+
+- name: "FreeIPA host annotations (Phase B-F) — check enrollment, then read/plan/apply/verify"
+  block:
+    # OS-level enrollment check, BEFORE any kinit attempt. `ipa-client-
+    # install` is itself a real mutation the parent playbook skips under
+    # --check, so a genuinely fresh host previewed with --check --diff has
+    # no /etc/krb5.conf realm entry at all yet — any kinit here would fail
+    # for a reason that has nothing to do with the FreeIPA host OBJECT
+    # (checked further below), only with this OS never having been enrolled
+    # this run. A REAL (non-check) run always finds this true by the time
+    # this task file runs: it is included only after ipa-client-install +
+    # the post-enroll health checks already succeeded for real, earlier in
+    # this same play — so this check never blocks a real apply, only a
+    # --check preview of a host that was never (or not yet, this run)
+    # enrolled.
+    - name: "FreeIPA host annotations — check whether this host is currently enrolled (OS level)"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: ipa_annotations_enrolled_stat
+      check_mode: false
+
+    - name: "FreeIPA host annotations — check-mode preview: host not yet enrolled, cannot authenticate"
+      ansible.builtin.debug:
+        msg: >-
+          FreeIPA host annotations plan for {{ ipa_client_fqdn }}: BLOCKED
+          (not yet enrolled) — this host has no /etc/ipa/default.conf yet in
+          this --check preview (enrollment is itself a real mutation,
+          skipped under --check), so there is no Kerberos realm
+          configuration to authenticate against FreeIPA with; annotations
+          will be reconciled once enrollment actually applies.
+      when: ansible_check_mode and not ipa_annotations_enrolled_stat.stat.exists
+
+    - name: "FreeIPA host annotations (Phase B-F, enrolled only) — read, plan, apply, verify"
+      when: ipa_annotations_enrolled_stat.stat.exists | bool
+      block:
+        - name: "FreeIPA host annotations — create a dedicated Kerberos credential cache path"
+          ansible.builtin.tempfile:
+            state: file
+            prefix: pilot-freeipa-host-annotations-
+            suffix: .ccache
+          register: ipa_annotations_ccache_file
+          changed_when: false
+          check_mode: false
+
+        - name: "FreeIPA host annotations — kinit admin into the dedicated ccache"
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              printf %s "{{ ipa_enroll_password }}" | KRB5CCNAME="{{ ipa_annotations_ccache_file.path }}" kinit {{ ipa_enroll_principal }}@{{ ipa_realm }}
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+          check_mode: false
+
+        # Phase B — read live (spec.md §10 Phase B): runs even under --check
+        # (check_mode: false) so a --check --diff preview can show the plan,
+        # as long as the host is already enrolled (the outer gate above).
+        - name: "FreeIPA host annotations (Phase B) — read the FreeIPA host object"
+          ansible.builtin.command:
+            argv: [ipa, host-show, "{{ ipa_client_fqdn }}", --all, --raw]
+          environment:
+            KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
+          register: ipa_annotations_host_show
+          changed_when: false
+          check_mode: false
+          failed_when: false
+
+        # An enrolled OS can still lack a FreeIPA host OBJECT (e.g. it was
+        # removed from FreeIPA out-of-band while local enrollment state
+        # survived) — a distinct, LDAP-level absence from the OS-level check
+        # above. Same "fresh-topology exemption" convention as the DNS plan
+        # phase's own authoritative-DNS-usable gate
+        # (tasks/freeipa-client-host-dns.yml): report BLOCKED under --check,
+        # hard-fail on a real run. This feature never creates the host
+        # object itself (spec.md §9.3/§19.8) — enrollment above must have
+        # already done that.
+        - name: "Gate: FreeIPA host object must exist before annotation reconcile (spec.md §9.3/§18 HOST_ABSENT)"
+          ansible.builtin.assert:
+            that:
+              - ipa_annotations_host_show.rc == 0
+            fail_msg: >-
+              HOST_ABSENT: FreeIPA host object {{ ipa_client_fqdn }} does not
+              exist (ipa host-show rc={{ ipa_annotations_host_show.rc }}).
+              Host annotations project onto an already-enrolled host object
+              and never create one themselves.
+          when: not ansible_check_mode
+
+        - name: "FreeIPA host annotations — check-mode preview: FreeIPA host object absent"
+          ansible.builtin.debug:
+            msg: >-
+              FreeIPA host annotations plan for {{ ipa_client_fqdn }}:
+              BLOCKED (HOST_ABSENT) — this host is OS-enrolled but its
+              FreeIPA host object does not exist in this --check preview;
+              annotations cannot be reconciled until the host object exists.
+          when: ansible_check_mode and ipa_annotations_host_show.rc != 0
+
+        - name: "FreeIPA host annotations — record whether the host object exists (gates every task below)"
+          ansible.builtin.set_fact:
+            ipa_annotations_host_exists: "{{ ipa_annotations_host_show.rc == 0 }}"
+
+        - name: "FreeIPA host annotations (Phase C) — extract live userClass values"
+          ansible.builtin.set_fact:
+            ipa_annotations_live_userclass: >-
+              {{ ipa_annotations_host_show.stdout | default('') | regex_findall('(?im)^[ \t]*userclass: (.+)$') }}
+          when: ipa_annotations_host_exists | bool
+
+        - name: "FreeIPA host annotations (Phase C) — extract live nshostlocation (first value, or empty)"
+          ansible.builtin.set_fact:
+            ipa_annotations_live_location: >-
+              {{ (ipa_annotations_host_show.stdout | default('') | regex_findall('(?im)^[ \t]*nshostlocation: (.+)$') | first | default('')) }}
+          when: ipa_annotations_host_exists | bool
+
+        - name: "FreeIPA host annotations (Phase C/D) — compute the reconcile plan"
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - "{{ ipa_annotations_plan_script }}"
+              - "{{ ipa_annotations_plan_input | to_json }}"
+          vars:
+            ipa_annotations_plan_input:
+              desired_serialized: "{{ ipa_annotations_desired_serialized }}"
+              desired_location: "{{ ipa_annotations_desired_location }}"
+              live_userclass: "{{ ipa_annotations_live_userclass }}"
+              live_location: "{{ ipa_annotations_live_location }}"
+          register: ipa_annotations_plan_raw
+          changed_when: false
+          check_mode: false
+          failed_when: false
+          when: ipa_annotations_host_exists | bool
+
+        - name: "FreeIPA host annotations — parse the reconcile plan"
+          ansible.builtin.set_fact:
+            ipa_annotations_plan: "{{ ipa_annotations_plan_raw.stdout | default('{}') | from_json }}"
+          when: ipa_annotations_host_exists | bool
+
+        - name: "Gate: reconcile plan must have no conflicts before any mutation (spec.md §10 Phase C, fail-closed)"
+          ansible.builtin.assert:
+            that:
+              - ipa_annotations_plan.ok | default(false) | bool
+            fail_msg: >-
+              FreeIPA host annotations reconcile for {{ ipa_client_fqdn }}
+              found conflicts and will not mutate anything this run:
+              {{ ipa_annotations_plan.errors | default([]) }}
+          when: ipa_annotations_host_exists | bool
+
+        - name: "FreeIPA host annotations (Phase D) — report plan (spec.md §10 Phase D)"
+          ansible.builtin.debug:
+            msg: |
+              FreeIPA host annotations plan for {{ ipa_client_fqdn }}:
+                delete: {{ ipa_annotations_plan.delete | default([]) }}
+                add: {{ ipa_annotations_plan.add | default([]) }}
+                preserve foreign userClass: {{ ipa_annotations_plan.preserve_foreign | default([]) }}
+                native location: {{ ipa_annotations_plan.location_action | default('NOOP') }}
+          when: ipa_annotations_host_exists | bool
+
+        # Phase E — apply (spec.md §10 Phase E): delete stale, then add
+        # missing, then the native location action — in that order, matching
+        # spec.md §22.
+        - name: "FreeIPA host annotations (Phase E) — delete stale Pilot-owned userClass values"
+          ansible.builtin.command:
+            argv: [ipa, host-mod, "{{ ipa_client_fqdn }}", "--delattr=userclass={{ item }}"]
+          environment:
+            KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
+          loop: "{{ ipa_annotations_plan.delete | default([]) }}"
+          loop_control: {label: "{{ item }}"}
+          when: ipa_annotations_host_exists | bool and not ansible_check_mode
+          register: ipa_annotations_delete
+          changed_when: ipa_annotations_delete.rc | default(1) == 0
+
+        - name: "FreeIPA host annotations (Phase E) — add missing desired Pilot-owned userClass values"
+          ansible.builtin.command:
+            argv: [ipa, host-mod, "{{ ipa_client_fqdn }}", "--addattr=userclass={{ item }}"]
+          environment:
+            KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
+          loop: "{{ ipa_annotations_plan.add | default([]) }}"
+          loop_control: {label: "{{ item }}"}
+          when: ipa_annotations_host_exists | bool and not ansible_check_mode
+          register: ipa_annotations_add
+          changed_when: ipa_annotations_add.rc | default(1) == 0
+
+        - name: "FreeIPA host annotations (Phase E) — set native nshostlocation (spec.md §8.4)"
+          ansible.builtin.command:
+            argv: [ipa, host-mod, "{{ ipa_client_fqdn }}", "--setattr=nshostlocation={{ ipa_annotations_plan.location_to }}"]
+          environment:
+            KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
+          when: >-
+            ipa_annotations_host_exists | bool and not ansible_check_mode
+            and (ipa_annotations_plan.location_action | default('NOOP') == 'SET')
+          register: ipa_annotations_location_set
+          changed_when: ipa_annotations_location_set.rc | default(1) == 0
+
+        - name: "FreeIPA host annotations (Phase E) — clear native nshostlocation (spec.md §8.3/§8.4)"
+          ansible.builtin.command:
+            argv: [ipa, host-mod, "{{ ipa_client_fqdn }}", "--delattr=nshostlocation={{ ipa_annotations_plan.location_from }}"]
+          environment:
+            KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
+          when: >-
+            ipa_annotations_host_exists | bool and not ansible_check_mode
+            and (ipa_annotations_plan.location_action | default('NOOP') == 'CLEAR')
+          register: ipa_annotations_location_clear
+          changed_when: ipa_annotations_location_clear.rc | default(1) == 0
+
+        # Phase F — verify (spec.md §10 Phase F/§11 idempotency): only when
+        # this run actually attempted a mutation — a converged host with
+        # nothing to do has nothing new to re-verify, and re-reading anyway
+        # would make an already-idempotent rerun look like it's still doing
+        # work.
+        - name: "FreeIPA host annotations (Phase F) — re-read live state for verification"
+          ansible.builtin.command:
+            argv: [ipa, host-show, "{{ ipa_client_fqdn }}", --all, --raw]
+          environment:
+            KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
+          register: ipa_annotations_verify_show
+          changed_when: false
+          when: >-
+            ipa_annotations_host_exists | bool and not ansible_check_mode
+            and ((ipa_annotations_plan.add | default([]) | length) > 0
+                 or (ipa_annotations_plan.delete | default([]) | length) > 0
+                 or (ipa_annotations_plan.location_action | default('NOOP') != 'NOOP'))
+
+        - name: "FreeIPA host annotations (Phase F) — extract post-apply userClass/location"
+          ansible.builtin.set_fact:
+            ipa_annotations_verify_userclass: >-
+              {{ ipa_annotations_verify_show.stdout | default('') | regex_findall('(?im)^[ \t]*userclass: (.+)$') }}
+            ipa_annotations_verify_location: >-
+              {{ (ipa_annotations_verify_show.stdout | default('') | regex_findall('(?im)^[ \t]*nshostlocation: (.+)$') | first | default('')) }}
+          when: ipa_annotations_verify_show is not skipped
+
+        - name: "Gate: post-apply Pilot-owned userClass exactly matches desired (spec.md §10 Phase F/§11 idempotency)"
+          ansible.builtin.assert:
+            that:
+              - (ipa_annotations_desired_serialized.values() | list | difference(ipa_annotations_verify_userclass | default([])) | length) == 0
+            fail_msg: >-
+              Post-apply verification FAILED for {{ ipa_client_fqdn }}:
+              desired Pilot-owned userClass values
+              {{ ipa_annotations_desired_serialized.values() | list }} not
+              fully present in live userClass
+              {{ ipa_annotations_verify_userclass | default([]) }}. Not
+              rolled back — rerun will re-enter this reconcile.
+          when: ipa_annotations_verify_show is not skipped
+
+        - name: "Gate: pre-existing foreign userClass values are all still present after apply (spec.md §7.3/§17/§10 Phase F)"
+          ansible.builtin.assert:
+            that:
+              - (ipa_annotations_plan.preserve_foreign | default([]) | difference(ipa_annotations_verify_userclass | default([])) | length) == 0
+            fail_msg: >-
+              Post-apply verification FAILED for {{ ipa_client_fqdn }}:
+              foreign (non-Pilot) userClass values
+              {{ ipa_annotations_plan.preserve_foreign | default([]) }} were
+              not all preserved. Live:
+              {{ ipa_annotations_verify_userclass | default([]) }}.
+          when: ipa_annotations_verify_show is not skipped
+
+        - name: "Gate: native nshostlocation matches the plan's intended outcome (spec.md §10 Phase F)"
+          ansible.builtin.assert:
+            that:
+              - (ipa_annotations_verify_location | default('')) == (ipa_annotations_plan.location_to | default(''))
+            fail_msg: >-
+              Post-apply verification FAILED for {{ ipa_client_fqdn }}:
+              nshostlocation is
+              {{ ipa_annotations_verify_location | default('') }}, want
+              {{ ipa_annotations_plan.location_to | default('') }}.
+          when: ipa_annotations_verify_show is not skipped
+      always:
+        - name: "FreeIPA host annotations — destroy the Kerberos ticket in the dedicated ccache"
+          ansible.builtin.command:
+            argv: [kdestroy, -c, "{{ ipa_annotations_ccache_file.path }}"]
+          changed_when: false
+          failed_when: false
+          when: ipa_annotations_ccache_file is defined and ipa_annotations_ccache_file.path is defined

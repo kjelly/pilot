@@ -12,6 +12,7 @@ type vaultField struct {
 	Comment   string
 	Optional  bool
 	Multiline bool
+	NestedMap bool
 }
 
 type vaultSection struct {
@@ -169,14 +170,14 @@ var vaultSections = map[string]vaultSection{
 		},
 	},
 	"snmp-exporter": {
-		Title: "SNMP Exporter 認證相關（Phase 0 skeleton，尚無 apply 邏輯會實際讀取）",
-		Note:  "snmp_exporter_credentials 依 monitoring/snmp/catalog.yml 的 authProfiles 動態鍵值，鍵名必須與 catalog 的 authProfile ID 一致；這裡只給範例骨架，不是固定 schema，也不是必填（沒有 SNMP target 時完全不會用到）。",
+		Title: "SNMP Exporter 認證相關",
+		Note:  "snmp_exporter_credentials 的 key 必須逐字對齊 monitoring/snmp/catalog.yml authProfile 的 credentialRef（不是 authProfile ID）。請用 `pilot edit` → Monitoring → SNMP 認證建立；這裡只提供非啟用的格式範例。",
 		Keys: []vaultField{
 			{
 				Name:      "snmp_exporter_credentials",
-				Comment:   "依 authProfile ID 建立對應項目；v3（authPriv）填 username/authPassword/privPassword，v2c 只填 community",
+				Comment:   "依 catalog authProfile 的 credentialRef 建立對應項目；v3（authPriv）填 username/authPassword/privPassword，v2c 只填 community",
 				Optional:  true,
-				Multiline: true,
+				NestedMap: true,
 				Value: strings.Join([]string{
 					"core-switch-v3:",
 					"  username: \"CHANGE-ME\"",
@@ -227,6 +228,7 @@ var vaultSectionOrder = []string{
 	"node-exporter-auth",
 	"dcgm-exporter-auth",
 	"alertmanager",
+	"snmp-exporter",
 	"detection-model-provider",
 	"agent-controller",
 }
@@ -384,7 +386,12 @@ func GenerateVaultSkeleton(hf *HostsFile) string {
 				sb.WriteString(fmt.Sprintf("# %s\n", key.Comment))
 			}
 			if key.Optional {
-				if key.Multiline {
+				if key.NestedMap {
+					sb.WriteString(fmt.Sprintf("# %s:\n", key.Name))
+					for _, line := range strings.Split(key.Value, "\n") {
+						sb.WriteString(fmt.Sprintf("#   %s\n", line))
+					}
+				} else if key.Multiline {
 					sb.WriteString(fmt.Sprintf("# %s: |\n", key.Name))
 					for _, line := range strings.Split(key.Value, "\n") {
 						sb.WriteString(fmt.Sprintf("#   %s\n", line))
@@ -394,7 +401,12 @@ func GenerateVaultSkeleton(hf *HostsFile) string {
 				}
 				continue
 			}
-			if key.Multiline {
+			if key.NestedMap {
+				sb.WriteString(fmt.Sprintf("%s:\n", key.Name))
+				for _, line := range strings.Split(key.Value, "\n") {
+					sb.WriteString(fmt.Sprintf("  %s\n", line))
+				}
+			} else if key.Multiline {
 				sb.WriteString(fmt.Sprintf("%s: |\n", key.Name))
 				for _, line := range strings.Split(key.Value, "\n") {
 					sb.WriteString(fmt.Sprintf("  %s\n", line))

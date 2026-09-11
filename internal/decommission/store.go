@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"time"
 
+	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/store"
 )
 
@@ -23,29 +23,25 @@ func NewStore(db *store.Store) *Store {
 	return &Store{db: db}
 }
 
-// secretLikeKeyPattern matches host Extra/var key names that must never be
-// persisted verbatim in a decommission plan/step/approval/receipt record
-// (spec.md §9.2/§31.1). This is a structural belt-and-suspenders check:
-// the Phase 1 Plan model carries no raw secret VALUE at all (only
-// non-secret host/contract/reference data) -- but a future field addition
-// that reused a secret-shaped key name is caught here at encode time
-// instead of shipping silently. Mirrors the same secret/vault-like naming
-// convention contracts already use (contract.GroupVar.Secret) and the
-// pattern real vault-backed vars in this repo follow (e.g.
-// ipa_admin_password, keycloak_db_password).
-var secretLikeKeyPattern = regexp.MustCompile(`(?i)(password|passwd|secret|token|api[_-]?key|private[_-]?key|vault|credential)`)
-
 // ErrSecretLikeField is returned by EncodePlanJSON when the plan's host
 // snapshot Extra map (or any other persisted string-keyed map added later)
 // contains a key name that looks like a secret -- persisting it verbatim
-// would violate spec.md §9.2's "never persist secret values" rule.
+// would violate spec.md §9.2's "never persist secret values" rule. This is
+// a structural belt-and-suspenders check: the Phase 1 Plan model carries no
+// raw secret VALUE at all (only non-secret host/contract/reference data)
+// -- but a future field addition that reused a secret-shaped key name is
+// caught here at encode time instead of shipping silently. The key-name
+// pattern itself (inventory.LooksSecretLike) mirrors the same secret/vault-
+// like naming convention contracts already use (contract.GroupVar.Secret)
+// and the pattern real vault-backed vars in this repo follow (e.g.
+// ipa_admin_password, keycloak_db_password).
 var ErrSecretLikeField = errors.New("decommission: refusing to persist a secret-shaped field")
 
 // EncodePlanJSON serializes plan for persistence, refusing (fail-closed)
 // to encode at all if any host Extra key looks secret-shaped.
 func EncodePlanJSON(plan *Plan) (string, error) {
 	for k := range plan.Host.Extra {
-		if secretLikeKeyPattern.MatchString(k) {
+		if inventory.LooksSecretLike(k) {
 			return "", fmt.Errorf("%w: host Extra key %q", ErrSecretLikeField, k)
 		}
 	}

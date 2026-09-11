@@ -201,6 +201,63 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "add_annotation",
+				Description:              "add a new host annotation — descriptive, non-secret metadata projected to pilot_annotations/FreeIPA userClass, never Ansible vars (fails if the key already exists — use edit_annotation to change one)",
+				Required:                 []string{"host", "key", "value"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "hosts.yml",
+					Assertion: "key appears in host's annotations",
+				},
+			},
+			Validate: validateAddOrEditAnnotation("add_annotation"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.addAnnotation(r, step.Host, step.Key, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "edit_annotation",
+				Description:              "change an existing host annotation's value",
+				Required:                 []string{"host", "key", "value"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "hosts.yml",
+					Assertion: "key value updated in host's annotations",
+				},
+			},
+			Validate: validateAddOrEditAnnotation("edit_annotation"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.editAnnotation(r, step.Host, step.Key, step.Value)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "delete_annotation",
+				Description:              "delete a host annotation",
+				Required:                 []string{"host", "key"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "hosts.yml",
+					Assertion: "key absent from host's annotations",
+				},
+			},
+			Validate: validateDeleteAnnotation,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deleteAnnotation(r, step.Host, step.Key)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "discard_hosts",
 				Description:              "leave the hosts.yml editor without saving, discarding every change made this session",
 				ExecutionMode:            ExecutionModeStructured,
@@ -2829,6 +2886,49 @@ func validateDeleteExtraVar(step editAction) error {
 	}
 	if strings.TrimSpace(step.Key) == "" {
 		return fmt.Errorf("delete_extra_var requires key")
+	}
+	return nil
+}
+
+// validateAddOrEditAnnotation covers add_annotation/edit_annotation.
+// Deliberately does NOT accept value_env (spec.md §14.2): annotations are
+// descriptive metadata projected in cleartext to hosts.yml, generated
+// inventory, and FreeIPA userClass — never a secret/config injection
+// channel — so every value must be spelled out in the scenario file, and
+// key/value both go through the same inventory.ValidateAnnotation*
+// functions `pilot inventory lint` and `pilot edit`'s TUI use, rather than
+// a fourth ad-hoc secret-name check.
+func validateAddOrEditAnnotation(name string) func(editAction) error {
+	return func(step editAction) error {
+		if strings.TrimSpace(step.Host) == "" {
+			return fmt.Errorf("%s requires host", name)
+		}
+		if strings.TrimSpace(step.Key) == "" {
+			return fmt.Errorf("%s requires key", name)
+		}
+		if step.ValueEnv != "" {
+			return fmt.Errorf("%s does not support value_env — annotations are not a secret/config injection channel and must be written in plain text", name)
+		}
+		if step.Value == "" {
+			return fmt.Errorf("%s requires value", name)
+		}
+		if err := inventory.ValidateAnnotationKey(step.Key); err != nil {
+			return err
+		}
+		if err := inventory.ValidateAnnotationValue(step.Value); err != nil {
+			return err
+		}
+		_, err := inventory.SerializeAnnotation(step.Key, step.Value)
+		return err
+	}
+}
+
+func validateDeleteAnnotation(step editAction) error {
+	if strings.TrimSpace(step.Host) == "" {
+		return fmt.Errorf("delete_annotation requires host")
+	}
+	if strings.TrimSpace(step.Key) == "" {
+		return fmt.Errorf("delete_annotation requires key")
 	}
 	return nil
 }

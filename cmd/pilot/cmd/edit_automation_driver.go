@@ -469,10 +469,12 @@ func (d *automationDriver) discardHosts(r *editRouterModel) error {
 // scenario ending here simply returns from d.run normally; nothing
 // downstream depends on r.quit being true.
 func (d *automationDriver) saveHosts(r *editRouterModel) error {
-	if st := automationState(r); st.Kind == tui.ScreenSelect && strings.Contains(st.Title, "選要編輯的項目") {
-		if err := d.choose(r, "返回主機清單"); err != nil {
-			return err
-		}
+	// A deploy-only scenario reaches save_hosts from the top-level "要編輯什麼？"
+	// menu, while a host-edit scenario may already be in the host list or a
+	// host detail menu.  Normalize all three states before looking for the
+	// save action; the old direct title check rejected the top-level path.
+	if err := d.ensureHostsList(r); err != nil {
+		return err
 	}
 	st := automationState(r)
 	if st.Kind != tui.ScreenSelect || !strings.Contains(st.Title, "編輯") {

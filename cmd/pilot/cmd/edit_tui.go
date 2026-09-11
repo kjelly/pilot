@@ -606,6 +606,9 @@ func hostMenuItems(h *inventory.Host) []hostMenuItem {
 		{tui.Choice{ID: "hosts.item.extra_vars", Label: fmt.Sprintf("其他變數(共 %d 個)", len(h.Extra))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
 			return pushExtraVarsMenu(r, dir, path, hf, name, "")
 		}},
+		{tui.Choice{ID: "hosts.item.annotations", Label: fmt.Sprintf("註解 / 資產資訊(共 %d 個)", len(h.Annotations))}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+			return pushAnnotationsMenu(r, dir, path, hf, name, "")
+		}},
 	}
 	if len(inventory.HostVarsKeysForRoles(h.Roles)) > 0 {
 		items = append(items, hostMenuItem{tui.Choice{ID: "hosts.item.host_vars", Label: fmt.Sprintf("host_vars/%s.yml(必填、無安全預設值的設定)", h.Name)}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
