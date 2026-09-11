@@ -25,7 +25,7 @@
 # snmp_exporter_data_dir: "/var/lib/pilot/snmp-exporter"
 
 # SNMP 認證密碼一律用 ansible-vault 加密檔帶入,依
-# monitoring/snmp/catalog.yml 的 authProfile ID 動態鍵值,不要明文寫在這裡
+# monitoring/snmp/catalog.yml authProfile 的 credentialRef 動態鍵值,不要明文寫在這裡
 # (除了拋棄式沙盒測試)。範例骨架見 vault 產生器的 "snmp-exporter" 區塊。
 # snmp_exporter_credentials:
 #   core-switch-v3:

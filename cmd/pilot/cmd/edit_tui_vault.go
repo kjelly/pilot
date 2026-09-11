@@ -18,6 +18,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/monitoring"
 	"github.com/kjelly/pilot/internal/tui"
 	"github.com/kjelly/pilot/internal/vaultfile"
 )
@@ -126,7 +127,12 @@ func pushVaultEditorFromData(r *editRouterModel, dir, path string, data []byte, 
 		// mistake in this wizard.
 		return pushVaultFilePicker(r, dir, fmt.Sprintf("⚠️  %s 解析失敗：%v", path, err))
 	}
-	if !doc.Editable() {
+	// main.yaml may contain the monitoring editor's SNMP credentials mapping.
+	// The generic editor still owns every scalar key (including generated
+	// role secrets), while the dedicated Monitoring → SNMP flow owns that one
+	// nested mapping. Keep it invisible and untouched here rather than routing
+	// a generic vault action to the incompatible SNMP screen.
+	if !doc.EditableWithPreservedNestedMappings(monitoring.SNMPCredentialsKey) {
 		return pushVaultFilePicker(r, dir, complexVaultFileBanner(path, doc))
 	}
 	dirty := false
@@ -141,7 +147,7 @@ func pushVaultEditorFromData(r *editRouterModel, dir, path string, data []byte, 
 			banner += message + "\n請填入真實值後存檔。"
 		}
 	}
-	if len(doc.Entries()) == 0 {
+	if len(doc.ScalarEntries()) == 0 {
 		empty := "目前是空的 vault 檔。先新增一個 key。"
 		if banner == "" {
 			banner = empty
@@ -258,7 +264,7 @@ func pushAnsibleVaultShellout(r *editRouterModel, dir, path string) tea.Cmd {
 }
 
 func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.Doc, dirty bool, banner string) tea.Cmd {
-	entries := doc.Entries()
+	entries := doc.ScalarEntries()
 	// A vault key's own name is its stable identity — it's exactly what
 	// doc.Add/Set/Delete already key on, so it doubles as the row's
 	// Choice.ID. The three fixed trailing rows are namespaced under this

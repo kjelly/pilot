@@ -71,6 +71,26 @@ func TestDisplayVaultValue_MasksConfiguredValues(t *testing.T) {
 	}
 }
 
+func TestGenericVaultEditorPreservesSNMPMapAndBackfillsScalarKeys(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(`hosts:
+  it-core:
+    roles: [agent-controller]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ".vault", "main.yaml")
+	data := []byte("ipa_admin_password: redacted\nsnmp_exporter_credentials:\n  switch-v3:\n    username: redacted\n    authPassword: redacted\n    privPassword: redacted\n")
+	r := newEditRouterModel(dir)
+	pushVaultEditorFromData(&r, dir, path, data, "")
+	if r.current == nil || !strings.Contains(r.current.View().Content, "agent_controller_webhook_secret") {
+		t.Fatalf("generic vault flow did not expose the backfilled scalar secret: %v", r.current)
+	}
+	if strings.Contains(r.current.View().Content, "switch-v3") || strings.Contains(r.current.View().Content, "SNMP 認證") {
+		t.Fatalf("generic vault flow exposed or routed to the nested SNMP schema: %s", r.current.View().Content)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

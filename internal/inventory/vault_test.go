@@ -58,6 +58,22 @@ func TestGenerateVaultSkeleton_NoVaultRolesReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestGenerateVaultSkeleton_SNMPUsesCredentialRefNestedMapExample(t *testing.T) {
+	skeleton := GenerateVaultSkeleton(&HostsFile{Hosts: []Host{{Name: "monitor-1", Roles: []string{"snmp-exporter"}}}})
+	for _, want := range []string{
+		"credentialRef（不是 authProfile ID）",
+		"# snmp_exporter_credentials:",
+		"#   core-switch-v3:",
+	} {
+		if !strings.Contains(skeleton, want) {
+			t.Fatalf("SNMP vault skeleton missing %q:\n%s", want, skeleton)
+		}
+	}
+	if strings.Contains(skeleton, "# snmp_exporter_credentials: |") {
+		t.Fatalf("SNMP credential skeleton must be a commented nested map, not a scalar block:\n%s", skeleton)
+	}
+}
+
 func TestVaultSectionExpectedKeys_KnownSection(t *testing.T) {
 	got := VaultSectionExpectedKeys("restic-backup")
 	want := []string{

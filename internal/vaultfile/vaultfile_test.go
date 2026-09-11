@@ -31,6 +31,50 @@ func TestParse_ComplexStructureIsNotEditable(t *testing.T) {
 	}
 }
 
+func TestDoc_HasNestedMappingIdentifiesSchemaOwnedBlock(t *testing.T) {
+	doc, err := Parse([]byte("---\nipa_admin_password: x\nsnmp_exporter_credentials:\n  switch-v3:\n    username: operator\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doc.HasNestedMapping("snmp_exporter_credentials") {
+		t.Fatal("snmp_exporter_credentials nested map was not detected")
+	}
+	if doc.HasNestedMapping("ipa_admin_password") {
+		t.Fatal("scalar vault value was reported as a nested map")
+	}
+}
+
+func TestDoc_EditableWithPreservedNestedMappings(t *testing.T) {
+	doc, err := Parse([]byte("---\nipa_admin_password: x\nsnmp_exporter_credentials:\n  switch-v3:\n    username: operator\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Editable() {
+		t.Fatal("nested mapping must not be generically editable by default")
+	}
+	if !doc.EditableWithPreservedNestedMappings("snmp_exporter_credentials") {
+		t.Fatal("named SNMP mapping should be preservable alongside scalar keys")
+	}
+	if got := doc.ScalarEntries(); len(got) != 1 || got[0].Key != "ipa_admin_password" {
+		t.Fatalf("scalar entries = %#v, want only ipa_admin_password", got)
+	}
+
+	doc.Set("snmp_exporter_credentials", "must-not-replace")
+	doc.Delete("snmp_exporter_credentials")
+	got := string(doc.Bytes())
+	if !strings.Contains(got, "snmp_exporter_credentials:") || !strings.Contains(got, "switch-v3:") {
+		t.Fatalf("generic mutation altered preserved mapping:\n%s", got)
+	}
+
+	complex, err := Parse([]byte("---\nsnmp_exporter_credentials:\n  switch-v3: {}\nother: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complex.EditableWithPreservedNestedMappings("snmp_exporter_credentials") {
+		t.Fatal("unlisted sequence must remain unsupported")
+	}
+}
+
 func TestDoc_SetAddDeleteAndBytes(t *testing.T) {
 	doc, err := Parse([]byte("---\nipa_admin_password: \"x\"\n"))
 	if err != nil {

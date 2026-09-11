@@ -192,6 +192,47 @@ func TestEditAutomationDriverVaultSetAndDeleteKey(t *testing.T) {
 	}
 }
 
+func TestEditAutomationDriverVaultSNMPMapBackfillsAndSetsAgentControllerSecret(t *testing.T) {
+	t.Setenv("PILOT_TEST_AGENT_CONTROLLER_SECRET", "agent-controller-test-secret")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(`hosts:
+  it-core:
+    roles: [agent-controller]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vaultDir := filepath.Join(dir, ".vault")
+	if err := os.MkdirAll(vaultDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(vaultDir, "main.yaml")
+	initial := "ipa_admin_password: placeholder\nsnmp_exporter_credentials:\n  switch-v3:\n    username: operator\n    authPassword: auth\n    privPassword: priv\n"
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	scenario := editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "agent_controller_webhook_secret", ValueEnv: "PILOT_TEST_AGENT_CONTROLLER_SECRET"},
+		{Action: "save_vault", File: "main.yaml"},
+	}}
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, scenario); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `agent_controller_webhook_secret: "agent-controller-test-secret"`) {
+		t.Fatalf("agent-controller secret was not saved:\n%s", data)
+	}
+	if !strings.Contains(string(data), "snmp_exporter_credentials:\n  switch-v3:\n    username: operator") {
+		t.Fatalf("SNMP credentials mapping was not preserved:\n%s", data)
+	}
+}
+
 func TestEditAutomationDriverVaultAddKeyFromValueEnv(t *testing.T) {
 	t.Setenv("PILOT_TEST_VAULT_SECRET", "s3cr3t-vault-value")
 	dir := t.TempDir()
