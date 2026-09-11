@@ -5,7 +5,19 @@
 > `nfs_clients[]` Plan B fix. Four real bugs were found and fixed live; see round 25's evidence
 > for full detail and the one known, reported-not-fixed limitation (end-to-end Kerberized NFS
 > mount between this topology's own hosts, blocked by a separate FreeIPA DNS-registration gap).**
-> Latest completed full-matrix pass: 2026-08-31 (Asia/Taipei), round 30 — another full clean-room
+> Latest completed full-matrix pass: 2026-09-10 (Asia/Taipei), round 31 — another full clean-room
+> rebuild covering the complete §0.5–§4.5 scope, including all idempotency reruns, run against the
+> entire dirty working tree (not just an isolated candidate). Found and fixed, with explicit live
+> authorization, 1 real product defect predating this round: `internal-endpoint-apply.yml`'s
+> `internal_endpoint_manifest_file`/`freeipa_dns_manifest_file` play-level `vars:` defaults
+> unconditionally shadowed the documented host_vars auto-fill convention (§3.8, added 2026-08-19),
+> breaking every reconcile that relied on it despite correctly-set inventory. `failed=0` throughout
+> the rest of the run; all idempotency reruns (including `freeipa-dns`) confirmed genuine
+> `changed=0`. See round 31's evidence for full detail, including two confirmed-not-bugs
+> (`force_password: true` re-arming a personalized password on an unrelated reconcile — by design;
+> and a self-caught MCP-driving mistake during the `freeipa-dns` idempotency check, corrected
+> in-session with no product impact).
+> Round 30 (2026-08-31) — another full clean-room
 > rebuild covering the complete §0.5–§4.5 scope, including all idempotency reruns. Found and fixed,
 > with explicit live authorization, 2 real regressions introduced by very recent unrelated work
 > landing just before the round started: a fail-closed FreeIPA-client DNS gate with no check-mode
@@ -28,6 +40,9 @@
 > clean site-wide deploy, after four earlier attempts blocked on self-inflicted/environment state
 > (not product defects — see round 28's evidence). Round 28 did not re-run the broader §4 matrix;
 > round 27 remains its reference.
+> Round 31 (1 new fix — `internal-endpoint-apply.yml` play-vars shadowing the host_vars auto-fill
+> convention; full clean-room rebuild against the entire dirty working tree, complete §0.5–§4.5
+> scope plus idempotency reruns): [`2026-09-10-round-31.md`](../evidence/minimal-poc-architecture/2026-09-10-round-31.md)
 > Round 30 (2 new fixes — DNS preflight fail-closed check-mode gate, NFS-server roster schema v3
 > gate; full clean-room rebuild, complete §0.5–§4.5 scope plus idempotency reruns):
 > [`2026-08-31-round-30.md`](../evidence/minimal-poc-architecture/2026-08-31-round-30.md)
@@ -270,7 +285,7 @@ component-specific values.
 
 | Item | Last verified value |
 |---|---|
-| Fact timestamp | 2026-08-31T09:00+08:00 (round 30; round 29's full-matrix pass was 2026-08-25) |
+| Fact timestamp | 2026-09-10T10:00+08:00 (round 31; round 30's full-matrix pass was 2026-08-31) |
 | Targets | `freeipa-server`, `nexus`, `client-vm` |
 | VM sizing | FreeIPA: 2 vCPU/**4608 MiB**/30 GiB; nexus: 6/12288/80; client: 2/2048/20 |
 | VM provisioning | `pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml` (spec's own `services: local` key); see §3.2 |
@@ -278,8 +293,8 @@ component-specific values.
 | Stage | `sandbox` |
 | Alignment | Actual hosts and populated role groups matched the intended topology, including the merged `freeipa-dns-client`/`host-monitoring`/`reverse-proxy` placements — confirmed live for the first time in round 25 (previously DRAFT). `freeipa_roster_file` is now also required on `client-vm` (Plan B — see §2) |
 | Manual extra `-e` | Empty; inventory-derived values were accepted through the wizard |
-| Tested candidate | Round 29: commits `338bf83`+`131ae5a` (full clean pass after 2 authorized fixes). Round 30: HEAD `0bb39cc` plus that session's own 2 uncommitted fixes (DNS preflight fail-closed gate skips `--check` mode; NFS-server roster schema gate accepts `schema_version: 3`) |
-| Result | Round 29 found and fixed 2 real bugs (a `dig`-diagnostic-as-stdout misread, and 8 sites writing an FQDN into `/etc/hosts`'s IP column), then passed clean. Round 30 found and fixed 2 more real bugs — both introduced by very recent unrelated work landing in between: a fail-closed DNS gate (commit `0bb39cc`) with no check-mode exemption, and an NFS-server roster schema gate that missed the `schema_version: 3` rollout. Both fixed with explicit authorization plus a regression test each; site-wide deploy, both day-2 reconcilers, all three single-component deploys, and the complete §4.1–§4.5 matrix then passed clean, `failed=0` throughout. Idempotency reruns (`freeipa-dns`+`internal-endpoint` combined, and `freeipa-dns-client`/`freeipa-ca-trust`/`reverse-proxy` individually) all confirmed `changed=0`; a full site-wide idempotency rerun hit an unrelated environment/disk-sizing gate on `nexus` (see §6.1) rather than a code defect. See [round-29](../evidence/minimal-poc-architecture/2026-08-25-round-29.md) and [round-30](../evidence/minimal-poc-architecture/2026-08-31-round-30.md) evidence for full detail |
+| Tested candidate | Round 30: HEAD `0bb39cc` plus that round's own 2 fixes (DNS preflight fail-closed gate skips `--check` mode; NFS-server roster schema gate accepts `schema_version: 3`). Round 31: the entire dirty working tree at round start (this round's own explicit scope — not an isolated candidate), plus this round's own 1 uncommitted fix (`internal-endpoint-apply.yml`'s play-vars-shadowing gate) |
+| Result | Round 30 found and fixed 2 real bugs (a fail-closed DNS gate with no check-mode exemption, and an NFS-server roster schema gate that missed the `schema_version: 3` rollout), then passed clean, `failed=0` throughout. Round 31 found and fixed 1 real bug: `internal-endpoint-apply.yml`'s second play declared `internal_endpoint_manifest_file: ""`/`freeipa_dns_manifest_file: ""` as play-level `vars:` defaults, which (per Ansible's precedence rules) unconditionally shadowed the correctly-set inventory host_vars, making the §3.8 auto-fill convention (added 2026-08-19) always fail its required-var gate. Fixed by removing both play-level defaults and aligning the gate asserts with the sibling `freeipa-dns`/`freeipa-identity` playbooks' pattern (`is defined` + `default('')`), with explicit live authorization; verified via `ansible-lint`, `--syntax-check`, `go test`, and a clean live re-run (`failed=0`, working `https://grafana.it.pilot.internal`). Site-wide deploy, both day-2 reconcilers, all three single-component deploys, and the complete §4.1–§4.5 matrix all passed clean, `failed=0` throughout. Idempotency reruns (site-wide, `freeipa-identity`, `freeipa-dns` individually) all confirmed genuine `changed=0` (or fully explained non-zero counts — see §6.1's disk-headroom/self-healing-NFS rows). Two behaviors initially suspected as bugs were confirmed intentional design instead: `force_password: true` re-arming a roster user's password on any reconcile regardless of unrelated changes (documented in the playbook's own comments), and a stray-repo-root-file deploy failure (pre-existing §6.1 environment hazard, not new). See [round-30](../evidence/minimal-poc-architecture/2026-08-31-round-30.md) and [round-31](../evidence/minimal-poc-architecture/2026-09-10-round-31.md) evidence for full detail |
 
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
@@ -1150,7 +1165,12 @@ this prompt empty now also works — `pilot reconcile` auto-fills both
 `internal_endpoint_manifest_file` (`<workspace>/internal-endpoints.yaml`) and
 `freeipa_dns_manifest_file` (`<workspace>/freeipa-dns.yaml`) from these conventional paths at
 preflight time when neither is already set elsewhere; typing them explicitly remains the clearer
-default and is what the example below still shows:
+default and is what the example below still shows. **Fixed round 31 (2026-09-10)**: this auto-fill
+had silently regressed — `internal-endpoint-apply.yml`'s second play carried play-level `vars:`
+defaults (`internal_endpoint_manifest_file: ""`, `freeipa_dns_manifest_file: ""`) that unconditionally
+shadowed the host_vars this convention relies on, so leaving the prompt empty always failed the
+required-var gate even with both host_vars genuinely set. Fixed by removing the play-level defaults
+and matching the sibling `freeipa-dns`/`freeipa-identity` playbooks' gate pattern; see §6.2.
 
 ```
 internal_endpoint_manifest_file=<absolute path to workspace>/internal-endpoints.yaml freeipa_dns_manifest_file=<absolute path to workspace>/freeipa-dns.yaml
@@ -1632,6 +1652,7 @@ checkout none of these can fire.
 | `--check --diff` (or a real apply's DNS-registration phase) on `freeipa-client-host-dns.yml` treats a genuinely fresh `freeipa-server` that hasn't finished `ipa-server-install` yet as if it already owns a conflicting CNAME/A/AAAA record for the host being registered | round 29 (2026-08-25), commit `131ae5a` | `dig` writes its own "communications error"/"no servers could be reached" diagnostics to **stdout**, not stderr; the CNAME-ownership assert and the A/AAAA current-addresses `set_fact` both read `.stdout` unconditionally, so an unreachable/refused query (`rc != 0`) got misread as "found a real record." Both now guard on `rc == 0` before trusting `.stdout` — see the fix site in `tasks/freeipa-client-host-dns.yml`. |
 | A component's apply reports `changed: true` for its "pin `<alias>` → `<target>` in `/etc/hosts`" task, but the alias still doesn't resolve afterward (`Could not resolve hostname`, or a live `dial tcp: ... server misbehaving`) | round 29 (2026-08-25), commit `338bf83` | `/etc/hosts` requires a literal IP in column 1, but every `*_target_host` var these tasks pin is documented as accepting either an IP or an inventory host's own FQDN — an FQDN written unchanged into that column is silently ignored by glibc/systemd-resolved while the task still reports `changed: true`. Hit live in 8 files (`wazuh-fim`, `restic-backup`, `audit-log-forwarding`, `wazuh-manager`, `prometheus` ×2, `thanos-query`, `dashboard`, `log-shipping`); all now `include_tasks: tasks/resolve-hosts-alias-target.yml` first, which resolves via this inventory's own `hostvars` before ever falling back to a live DNS lookup. |
 | Site-wide `--check --diff` preview fails on `client-vm`/`nexus` with "Cannot verify the authoritative DNS state ... Refusing DNS registration ... (spec.md §8.2/§8.3, fail-closed)" on any genuinely fresh clean-room topology | round 30 (2026-08-31); not yet committed at time of writing — see `playbooks/apply/tasks/freeipa-client-host-dns.yml`'s "Gate: authoritative DNS queries must return a usable response" | Introduced by the same round's own starting `HEAD` (`0bb39cc`), which added this fail-closed gate with no check-mode exemption. A `--check` preview correctly skips `ipa-server-install` (a real mutation), so FreeIPA's DNS genuinely isn't running yet and the read-only plan-phase `dig` query gets no answer — expected on a fresh topology, not evidence of a broken authority. Fixed by adding `and not ansible_check_mode` to the gate's `when:`; regression test `TestRegression_FreeipaClientHostDNSTask_FailClosedGateSkipsCheckMode` in `internal/spec/freeipa_client_regression_test.go`. |
+| §3.8's `internal-endpoint` reconcile fails "Gate: internal_endpoint_manifest_file is required" (or the equivalent `freeipa_dns_manifest_file` gate) even though both are genuinely set as host_vars on `freeipa-server`, exactly per §3.8's own documented auto-fill convention | round 31 (2026-09-10); not yet committed at time of writing — see `playbooks/apply/internal-endpoint-apply.yml` | `internal-endpoint-apply.yml`'s second play declared `internal_endpoint_manifest_file: ""` and `freeipa_dns_manifest_file: ""` as play-level `vars:` defaults. Ansible's variable-precedence order ranks play `vars:` above inventory host_vars, so these empty defaults unconditionally shadowed the correctly-set host_vars — the sibling `freeipa-dns-apply.yml`/`freeipa-identity-apply.yml` playbooks avoid this pattern (no play-level default, just an `is defined` check), which is exactly why those two reconcilers' auto-fill worked while this one silently didn't. Fixed by removing both play-level defaults and changing both gate asserts to `var is defined` + `var \| default('') \| length > 0`, matching the sibling pattern; verified via `ansible-lint --profile production`, `--syntax-check`, `go test ./internal/spec/... -run InternalEndpoint`, and a clean live re-run. |
 | `--check --diff` preview or real apply fails on `nexus`'s `freeipa-nfs-server` at "Gate: required roster and stage authorization" even though `pilot roster lint` reports the roster clean, on a roster `pilot edit`'s own NFS-server bootstrap just created | round 30 (2026-08-31); not yet committed at time of writing — see `playbooks/apply/freeipa-nfs-server-apply.yml` line 38 | The gate's `schema_version \| int in [1, 2]` (already fixed once, round 21, for the v1→v2 rollout — see the row above) missed the later v2→v3 rollout: `pilot edit`'s NFS-server bootstrap now writes a brand-new roster as `schema_version: 3` directly, and the sibling `freeipa-identity-apply.yml` gate had already been updated to `[1, 2, 3]` but this one hadn't. Fixed by matching the sibling gate exactly; regression test `TestRegression_FreeIPANFSServerAcceptsCurrentRosterSchema` in `internal/spec/freeipa_nfs_regression_test.go` also asserts both gates' lists stay identical going forward. |
 
 Two rows previously listed here now live with their component, which is

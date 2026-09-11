@@ -101,14 +101,12 @@
     confirm_prod: false
     staging_attested_within_hours: 168
     target_group: freeipa-server
-    internal_endpoint_manifest_file: ""
     confirm_endpoint_delete: false
     internal_endpoint_manifest: {}
 
     # Read-only cross-check against the freeipa-dns component's own
     # manifest (spec.md §11.1-§11.3) — internal-endpoint never mutates this
     # file, it only reads dns.zones to gate C7/C8 below.
-    freeipa_dns_manifest_file: ""
     internal_endpoint_freeipa_dns_manifest: {}
 
     # Ownership ledger (spec.md §29) — lives on this play's own host (the
@@ -139,13 +137,15 @@
     - name: "Gate: internal_endpoint_manifest_file is required"
       ansible.builtin.assert:
         that:
-          - internal_endpoint_manifest_file | length > 0
+          - internal_endpoint_manifest_file is defined
+          - internal_endpoint_manifest_file | default('') | length > 0
         fail_msg: "-e internal_endpoint_manifest_file=/absolute/path/to/internal-endpoints.yaml is required (spec.md §8)."
 
     - name: "Gate: freeipa_dns_manifest_file is required (spec.md §11.1-§11.3 cross-check)"
       ansible.builtin.assert:
         that:
-          - freeipa_dns_manifest_file | length > 0
+          - freeipa_dns_manifest_file is defined
+          - freeipa_dns_manifest_file | default('') | length > 0
         fail_msg: "-e freeipa_dns_manifest_file=/absolute/path/to/freeipa-dns.yaml is required — internal-endpoint gates every DNS write against it."
 
     - name: "Load internal-endpoints manifest under a namespace"

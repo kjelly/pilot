@@ -66,33 +66,6 @@
     detection_cycle_interval: 15s
     detection_evaluation_delay: 20s
 
-    # Stage B provider vars (spec §33/§41.1) — defaults exactly match the
-    # contract delta's groupVars defaults, so a Stage-A-style apply (no -e
-    # overrides at all) still runs provider-disabled, byte-identical to
-    # Stage A. detection_model_provider_api_key is a SECRET and
-    # deliberately has NO default here (same convention as
-    # restic_password/thanos_aws_secret_access_key elsewhere in this repo)
-    # — it must come from -e or a vault file, and is gated below.
-    detection_model_provider_enabled: false
-    detection_model_provider_protocol: openai-responses
-    detection_model_provider_base_url: ""
-    detection_model_provider_model: ""
-    detection_model_provider_auth: none
-    detection_model_provider_external: false
-    detection_allow_external_provider: false
-
-    # Optional second provider (docs/superpowers/specs/2026-08-28-npu-detect-
-    # engine-spec.md §35's alternate-backend fallback, generalized to any
-    # protocol pair — e.g. flm primary for local NPU inference, ollama-chat
-    # or openai-responses fallback for when the NPU backend is unavailable).
-    # detection_model_provider_fallback_api_key is a SECRET, same
-    # no-default convention as the primary's own API key.
-    detection_model_provider_fallback_enabled: false
-    detection_model_provider_fallback_protocol: openai-responses
-    detection_model_provider_fallback_base_url: ""
-    detection_model_provider_fallback_model: ""
-    detection_model_provider_fallback_auth: none
-
     # Optional log pipeline (docs/superpowers/specs/2026-08-28-npu-detect-
     # engine-spec.md §14-18) — a third, equally-weighted peer to baseline/
     # cohort. Disabled by default; the original detection-engine spec's
@@ -105,6 +78,25 @@
     detection_log_source_baseline_window: 6h
 
   pre_tasks:
+    - name: "Resolve model provider defaults without overriding inventory or extra vars"
+      ansible.builtin.set_fact:
+        # These are deliberately facts rather than play vars: play vars have
+        # higher precedence than group_vars and previously made an operator's
+        # Stage B provider configuration silently unreachable.
+        detection_model_provider_enabled: "{{ detection_model_provider_enabled | default(false) | bool }}"
+        detection_model_provider_protocol: "{{ detection_model_provider_protocol | default('openai-responses') }}"
+        detection_model_provider_base_url: "{{ detection_model_provider_base_url | default('') }}"
+        detection_model_provider_model: "{{ detection_model_provider_model | default('') }}"
+        detection_model_provider_auth: "{{ detection_model_provider_auth | default('none') }}"
+        detection_model_provider_external: "{{ detection_model_provider_external | default(false) | bool }}"
+        detection_allow_external_provider: "{{ detection_allow_external_provider | default(false) | bool }}"
+        detection_model_provider_fallback_enabled: "{{ detection_model_provider_fallback_enabled | default(false) | bool }}"
+        detection_model_provider_fallback_protocol: "{{ detection_model_provider_fallback_protocol | default('openai-responses') }}"
+        detection_model_provider_fallback_base_url: "{{ detection_model_provider_fallback_base_url | default('') }}"
+        detection_model_provider_fallback_model: "{{ detection_model_provider_fallback_model | default('') }}"
+        detection_model_provider_fallback_auth: "{{ detection_model_provider_fallback_auth | default('none') }}"
+      tags: [always]
+
     - name: "Default artifact path to the binary packaged in pilot-cli"
       ansible.builtin.set_fact:
         detection_engine_artifact_path: "{{ detection_engine_artifact_path | default('dist/pilot-detection-engine-linux-amd64', true) }}"
