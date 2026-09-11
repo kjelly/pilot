@@ -51,7 +51,7 @@ func runReconcile(cmd *cobra.Command, _ []string) error {
 }
 
 func runReconcileInteractive(cmd *cobra.Command) error {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !promptWorkflowAllowsNonTTY(term.IsTerminal(int(os.Stdin.Fd()))) {
 		return fmt.Errorf("pilot reconcile 需要互動式終端機(TTY)才能問問題")
 	}
 	timeout, err := parseDeployTimeout(reconcileTimeoutFlag)
@@ -75,7 +75,7 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
 	fmt.Fprintln(out)
 	inventoryDefault := workspacePath(reconcileDirFlag, reconcileInventoryFlag)
-	invInput, err := runTextProgram("Inventory 檔路徑", inventoryDefault, func(path string) error {
+	invInput, err := runTextPrompt(promptInventory, "Inventory 檔路徑", inventoryDefault, func(path string) error {
 		return validateFileExists(workspacePath(reconcileDirFlag, path))
 	})
 	if err != nil {
@@ -111,7 +111,7 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	if err := ensureFreeIPARostersCurrentSnapshot(out, inv, snapshot); err != nil {
 		return err
 	}
-	if runConfirmProgram("要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
+	if runConfirmPrompt(promptTopologyPreview, "要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
 		previewInventoryGraph(out, inv, snapshot)
 		fmt.Fprintln(out)
 	}

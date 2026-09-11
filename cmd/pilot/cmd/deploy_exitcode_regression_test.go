@@ -71,7 +71,7 @@ func TestExecuteDeployment_LabelsPreviewAndApplyConfirmations(t *testing.T) {
 	original := confirmDeployment
 	defer func() { confirmDeployment = original }()
 	var questions []string
-	confirmDeployment = func(question string, _ bool) bool {
+	confirmDeployment = func(_, question string, _ bool) bool {
 		questions = append(questions, question)
 		return true
 	}
@@ -157,7 +157,7 @@ func stubDeploymentConfirm(t *testing.T, answers ...bool) func() {
 	t.Helper()
 	original := confirmDeployment
 	next := 0
-	confirmDeployment = func(string, bool) bool {
+	confirmDeployment = func(string, string, bool) bool {
 		if next >= len(answers) {
 			t.Fatalf("confirmDeployment called %d times, only %d answers provided", next+1, len(answers))
 		}

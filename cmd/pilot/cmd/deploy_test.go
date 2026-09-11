@@ -583,7 +583,7 @@ func TestValidateOptionalKV(t *testing.T) {
 // separated identifiers (component IDs, roles, or check-row IDs), never
 // key=value. validateOptionalKV is correct for the SEPARATE "-e key=value"
 // extra-vars prompts a few lines below each of these — this only asserts
-// no runTextProgram call whose prompt text mentions --tags reuses it.
+// no runTextPrompt call whose prompt text mentions --tags reuses it.
 func TestDeployTagsPrompts_NeverUseKeyValueValidator(t *testing.T) {
 	root := repoRootForTest(t)
 	src, err := os.ReadFile(filepath.Join(root, "cmd", "pilot", "cmd", "deploy.go"))
@@ -592,7 +592,7 @@ func TestDeployTagsPrompts_NeverUseKeyValueValidator(t *testing.T) {
 	}
 	found := 0
 	for _, line := range strings.Split(string(src), "\n") {
-		if !strings.Contains(line, "runTextProgram(") || !strings.Contains(line, "--tags") {
+		if !strings.Contains(line, "runTextPrompt(") || !strings.Contains(line, "--tags") {
 			continue
 		}
 		found++

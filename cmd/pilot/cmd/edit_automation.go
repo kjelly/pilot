@@ -444,7 +444,19 @@ func runAutomatedEditWorkflow(cmd *cobra.Command, scenario editScenario, present
 }
 
 func runAutomatedDeploymentStep(cmd *cobra.Command, step editAction, presentation bool, out io.Writer, sink *automationTraceSink) error {
-	p := &promptAutomation{answers: append([]promptAnswer(nil), step.Answers...), presentation: presentation, out: out}
+	// A component deployment may first apply same-host dependencies (for
+	// example docker before alertmanager). Each child uses the ordinary deploy
+	// flow and therefore asks the same execution-safe questions. Reuse the
+	// operator's one recorded deploy decision for those repeated transactions;
+	// otherwise the dependency consumes the answers and the requested component
+	// fails before it can be applied.
+	p := &promptAutomation{
+		action:       step.Action,
+		answers:      append([]promptAnswer(nil), step.Answers...),
+		presentation: presentation,
+		out:          out,
+		reuseAnswers: step.Action == "deploy",
+	}
 	oldPrompt := activePromptAutomation
 	activePromptAutomation = p
 	defer func() { activePromptAutomation = oldPrompt }()

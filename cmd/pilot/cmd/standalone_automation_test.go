@@ -44,3 +44,20 @@ func TestDeployAndReconcileExposeAutomationFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestAutomatedDeployAndReconcileBypassTTYGate(t *testing.T) {
+	previous := activePromptAutomation
+	activePromptAutomation = &promptAutomation{action: "deploy"}
+	t.Cleanup(func() { activePromptAutomation = previous })
+
+	if !promptWorkflowAllowsNonTTY(false) {
+		t.Fatal("automated workflow must be allowed without a TTY")
+	}
+	activePromptAutomation = nil
+	if promptWorkflowAllowsNonTTY(false) {
+		t.Fatal("ordinary interactive workflow must still require a TTY")
+	}
+	if !promptWorkflowAllowsNonTTY(true) {
+		t.Fatal("interactive terminal workflow must be allowed")
+	}
+}

@@ -283,7 +283,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !promptWorkflowAllowsNonTTY(term.IsTerminal(int(os.Stdin.Fd()))) {
 		return fmt.Errorf("pilot deploy 需要互動式終端機(TTY)才能問問題；非互動場景請直接用 ansible-playbook（見 DELIVERY.md）")
 	}
 
@@ -316,7 +316,7 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(out)
 
 	inventoryDefault := workspacePath(deployDirFlag, deployInventoryFlag)
-	invInput, err := runTextProgram("Inventory 檔路徑", inventoryDefault, func(path string) error {
+	invInput, err := runTextPrompt(promptInventory, "Inventory 檔路徑", inventoryDefault, func(path string) error {
 		return validateFileExists(workspacePath(deployDirFlag, path))
 	})
 	if err != nil {
@@ -351,12 +351,12 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if runConfirmProgram("要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
+	if runConfirmPrompt(promptTopologyPreview, "要不要先看一下這份 inventory 的拓樸圖？(pilot deploy graph --view both)", true) {
 		previewInventoryGraph(out, inv, snapshot)
 		fmt.Fprintln(out)
 	}
 
-	scopeIdx, err := runSelectProgram("要佈署什麼？", []string{
+	scopeIdx, err := runSelectPrompt(promptScope, "要佈署什麼？", []string{
 		"全站部署(site.yml) — 一次套用 inventory 裡已經填好機器的所有元件",
 		"單一元件 — 從清單挑一支 apply playbook",
 	})
@@ -516,7 +516,7 @@ type deploymentAuthorization struct {
 }
 
 func promptPreflightMode() (preflightMode, error) {
-	idx, err := runSelectProgram("要先跑前置檢查(preflight)嗎？", []string{
+	idx, err := runSelectPrompt(promptPreflight, "要先跑前置檢查(preflight)嗎？", []string{
 		"完整前置檢查(含 SSH 連線測試)",
 		"只做靜態檢查(機器還沒開機/還連不上時用；不連線)",
 		"跳過前置檢查",
@@ -564,7 +564,7 @@ func runPreflightMode(ctx context.Context, runner *ansible.Runner, out io.Writer
 	if !promptOnFailure {
 		return false, nil
 	}
-	return runConfirmProgram("仍要繼續佈署嗎？(不建議 — 上面的錯誤通常代表 inventory 填錯或連不上機器)", false), nil
+	return runConfirmPrompt("preflight.continue_after_failure", "仍要繼續佈署嗎？(不建議 — 上面的錯誤通常代表 inventory 填錯或連不上機器)", false), nil
 }
 
 // ---- stage gate -------------------------------------------------------------
@@ -580,7 +580,7 @@ type stageDecision struct {
 }
 
 func promptStageDecision(out io.Writer, context string) (stageDecision, error) {
-	idx, err := runSelectProgram(fmt.Sprintf("[%s] 要套用到哪個 stage？", context), []string{
+	idx, err := runSelectPrompt(promptStage, fmt.Sprintf("[%s] 要套用到哪個 stage？", context), []string{
 		"sandbox（預設；沙盒/測試機，不需要額外確認）",
 		"staging（測試環境，需要額外確認）",
 		"prod（正式環境，需要額外確認 + 近 7 天內的 staging 驗證證明）",
@@ -593,17 +593,17 @@ func promptStageDecision(out io.Writer, context string) (stageDecision, error) {
 		return stageDecision{Stage: "sandbox"}, nil
 	case 1:
 		fmt.Fprintln(out, "⚠️  即將對已歸類進 staging 的機器套用真正的變更。")
-		if !runConfirmProgram("確定要繼續嗎？", false) {
+		if !runConfirmPrompt(promptStageConfirmStaging, "確定要繼續嗎？", false) {
 			return stageDecision{}, errDeployAborted
 		}
 		return stageDecision{Stage: "staging", ConfirmVars: []string{"confirm_staging=true"}}, nil
 	case 2:
 		fmt.Fprintln(out, "⚠️  即將對已歸類進 prod 的機器套用真正的變更。")
-		hours, err := runTextProgram("上次 staging 驗證距今幾小時？(0-168，即 7 天內)", "24", validateHoursWithinWeek)
+		hours, err := runTextPrompt(promptStageAttestationHours, "上次 staging 驗證距今幾小時？(0-168，即 7 天內)", "24", validateHoursWithinWeek)
 		if err != nil {
 			return stageDecision{}, err
 		}
-		_, err = runTextProgram(`為避免手滑，請輸入大寫 "PROD" 以確認要套用到正式環境`, "", func(s string) error {
+		_, err = runTextPrompt(promptStageConfirmProd, `為避免手滑，請輸入大寫 "PROD" 以確認要套用到正式環境`, "", func(s string) error {
 			if s != "PROD" {
 				return fmt.Errorf(`必須完全輸入 "PROD"`)
 			}
@@ -639,14 +639,14 @@ func promptSeaweedfsS3Config(out io.Writer, stage string) ([]string, error) {
 	defaultPath := defaultSeaweedfsS3ConfigPath
 	if stage == "prod" {
 		fmt.Fprintln(out, "ℹ️  stage=prod 不允許匿名 S3 存取，一定要設定簽章模式(seaweedfs_s3_config_path)。")
-		path, err := runTextProgram("s3.json 在目標主機上的路徑", defaultPath, nil)
+		path, err := runTextPrompt(promptS3ConfigPath, "s3.json 在目標主機上的路徑", defaultPath, nil)
 		if err != nil {
 			return nil, err
 		}
 		return []string{"seaweedfs_s3_config_path=" + path}, nil
 	}
 
-	idx, err := runSelectProgram("要不要啟用簽章模式 S3 存取？(sandbox 預設可以先跳過，用匿名存取)", []string{
+	idx, err := runSelectPrompt(promptS3AccessMode, "要不要啟用簽章模式 S3 存取？(sandbox 預設可以先跳過，用匿名存取)", []string{
 		"不要 — 先用匿名存取(僅適合 sandbox，不建議正式環境)",
 		"要 — 啟用簽章模式(identity 憑證沿用 restic_aws_access_key_id / restic_aws_secret_access_key，走 vault)",
 	})
@@ -656,7 +656,7 @@ func promptSeaweedfsS3Config(out io.Writer, stage string) ([]string, error) {
 	if idx == 0 {
 		return nil, nil
 	}
-	path, err := runTextProgram("s3.json 在目標主機上的路徑", defaultPath, nil)
+	path, err := runTextPrompt(promptS3ConfigPath, "s3.json 在目標主機上的路徑", defaultPath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -916,11 +916,12 @@ func promptAutoHostVar(out io.Writer, snapshot deployInventorySnapshot, workspac
 	}
 	if host, ok := resolveGroupHost(snapshot, av.Group, av.Var, consumerGroups); ok {
 		q := fmt.Sprintf("偵測到這份 inventory 的 %s：%s，這次要用它嗎？(-e %s=%s)", av.Label, host, av.Var, host)
-		if runConfirmProgram(q, true) {
+		if runConfirmPrompt("auto_host_var."+av.Var+".use_detected", q, true) {
 			return []string{av.Var + "=" + host}, nil
 		}
 	}
-	path, err := runTextProgram(
+	path, err := runTextPrompt(
+		"auto_host_var."+av.Var+".value",
 		fmt.Sprintf("%s 的 IP/FQDN(-e %s；留空 = 跳過)", av.Label, av.Var),
 		"", nil,
 	)
@@ -984,13 +985,13 @@ func promptVault(out io.Writer, inv, hint string) (vaultInput, error) {
 	varsFile := ""
 	autoFile := defaultVaultFile(inv)
 	if autoFile != "" {
-		if runConfirmProgram(fmt.Sprintf("偵測到 %s，這次佈署要用它當密碼變數檔嗎？", autoFile), true) {
+		if runConfirmPrompt(promptVaultUseDefault, fmt.Sprintf("偵測到 %s，這次佈署要用它當密碼變數檔嗎？", autoFile), true) {
 			varsFile = autoFile
 		}
 	}
 
 	if varsFile == "" {
-		idx, err := runSelectProgram("這次佈署需要密碼變數嗎？(例如 FreeIPA/Keycloak 的管理密碼，走 ansible-vault 加密檔)", []string{
+		idx, err := runSelectPrompt(promptVaultNeedFile, "這次佈署需要密碼變數嗎？(例如 FreeIPA/Keycloak 的管理密碼，走 ansible-vault 加密檔)", []string{
 			"不需要",
 			"需要 — 我有一份 ansible-vault 加密的 vars 檔",
 		})
@@ -1000,7 +1001,7 @@ func promptVault(out io.Writer, inv, hint string) (vaultInput, error) {
 		if idx == 0 {
 			return vaultInput{}, nil
 		}
-		varsFile, err = runTextProgram("vars 檔路徑(ansible-vault 加密過的 yaml)", "", validateFileExists)
+		varsFile, err = runTextPrompt(promptVaultFile, "vars 檔路徑(ansible-vault 加密過的 yaml)", "", validateFileExists)
 		if err != nil {
 			return vaultInput{}, err
 		}
@@ -1011,7 +1012,7 @@ func promptVault(out io.Writer, inv, hint string) (vaultInput, error) {
 		return vaultInput{ExtraVarsFile: varsFile}, nil
 	}
 
-	decryptIdx, err := runSelectProgram("怎麼解密？", []string{
+	decryptIdx, err := runSelectPrompt(promptVaultDecryptMethod, "怎麼解密？", []string{
 		"用密碼檔(--vault-password-file)",
 		"執行時手動輸入密碼(--ask-vault-pass)",
 	})
@@ -1021,7 +1022,7 @@ func promptVault(out io.Writer, inv, hint string) (vaultInput, error) {
 	if decryptIdx == 1 {
 		return vaultInput{ExtraVarsFile: varsFile, AskVaultPass: true}, nil
 	}
-	passFile, err := runTextProgram("vault 密碼檔路徑", "", validateFileExists)
+	passFile, err := runTextPrompt(promptVaultPasswordFile, "vault 密碼檔路徑", "", validateFileExists)
 	if err != nil {
 		return vaultInput{}, err
 	}
@@ -1058,7 +1059,8 @@ func (v vaultInput) becomeArgs() []string {
 // default: most pilot-provisioned hosts have NOPASSWD sudoers, so today's
 // passwordless behavior is unchanged unless the operator opts in here.
 func promptBecome() bool {
-	return runConfirmProgram(
+	return runConfirmPrompt(
+		promptBecomePassword,
 		"這次套用要手動輸入 sudo(become)密碼嗎？(--ask-become-pass；多數 pilot 主機 sudoers 已設 NOPASSWD，可略過)",
 		false,
 	)
@@ -1066,7 +1068,7 @@ func promptBecome() bool {
 
 // ---- execution: dry-run first, then optionally apply -----------------------
 
-var confirmDeployment = runConfirmProgram
+var confirmDeployment = runConfirmPrompt
 
 // executeDeployment builds the final ansible-playbook argv from the
 // choices gathered by the caller, offers a --check --diff preview
@@ -1140,7 +1142,7 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 	if options.Authorization != nil {
 		dryRunFirst = options.Authorization.Preview
 	} else {
-		dryRunFirst = confirmDeployment("要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
+		dryRunFirst = confirmDeployment(promptExecutionPreview, "要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
 	}
 
 	runOnce := func(check, confirm bool) (*ansible.Result, error) {
@@ -1152,10 +1154,12 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		}
 		fmt.Fprintf(out, "\n▶ %s：ansible-playbook %s\n\n", mode, strings.Join(args, " "))
 		question := "確定要執行正式套用指令嗎？"
+		questionID := promptExecutionConfirmApply
 		if check {
 			question = "確定要執行預覽指令嗎？"
+			questionID = promptExecutionConfirmPreview
 		}
-		if confirm && options.Authorization == nil && !confirmDeployment(question, true) {
+		if confirm && options.Authorization == nil && !confirmDeployment(questionID, question, true) {
 			return nil, delivery.ErrCancelled
 		}
 		if !check && options.RuntimeRace.ResultPath != "" {
@@ -1185,11 +1189,11 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 			// The parent reconcile plan already received one explicit approval
 			// for every dependency and the selected component.
 		} else if dryRunFirst {
-			if !confirmDeployment("預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
+			if !confirmDeployment(promptExecutionApplyAfterPreview, "預覽看起來沒問題，要接著套用真正的變更嗎？", false) {
 				fmt.Fprintln(out, "先在這裡停下來，沒有套用任何變更。")
 				return delivery.ErrCancelled
 			}
-		} else if !confirmDeployment("確定要執行正式套用指令嗎？", true) {
+		} else if !confirmDeployment(promptExecutionConfirmApply, "確定要執行正式套用指令嗎？", true) {
 			return delivery.ErrCancelled
 		}
 		if options.PrepareApply != nil {
@@ -1344,9 +1348,9 @@ func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAut
 	if err != nil {
 		return nil, err
 	}
-	preview := runConfirmProgram("要先對此計畫中的所有 playbook 預覽(--check --diff)嗎？", true)
+	preview := runConfirmPrompt(promptExecutionPreview, "要先對此計畫中的所有 playbook 預覽(--check --diff)嗎？", true)
 	question := fmt.Sprintf("確認：若所有前置檢查與預覽都成功，將不再詢問並依序正式套用計畫中的 %d 支 playbook。", plannedPlaybooks)
-	if !runConfirmProgram(question, false) {
+	if !runConfirmPrompt(promptExecutionConfirmApply, question, false) {
 		return nil, errDeployAborted
 	}
 	return &deploymentAuthorization{Preflight: preflight, Preview: preview}, nil
@@ -1368,6 +1372,24 @@ func executeRecordedDeploymentWithAuthorization(ctx context.Context, runner *ans
 	components, err := componentsForPlaybook(ctx, catalog, playbook, inv, limit, tags, componentHints)
 	if err != nil {
 		return err
+	}
+	// A normal deploy used to prompt once for each same-host dependency and
+	// again for the requested component.  Besides being noisy, that split
+	// transaction lets an automation run consume its confirmations while
+	// applying docker and stop before the actual alertmanager playbook.  Treat
+	// the resolved chain as one operator-approved deployment plan, matching
+	// reconcile's established execution model.
+	if authorization == nil {
+		chain, chainErr := sameHostsDependencyChain(catalog, components)
+		if chainErr != nil {
+			return chainErr
+		}
+		if len(chain) > 0 {
+			authorization, err = promptReconcileExecutionAuthorization(len(chain) + 1)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	if err := applySameHostsDependencyChain(ctx, runner, out, catalog, components, playbook, inv, limit, extraVars, vault, stage, authorization, dependencyLimits); err != nil {
 		return err
@@ -2728,7 +2750,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	extraVars := []string{"stage=" + decision.Stage, "patch_stage=" + decision.Stage}
 	extraVars = append(extraVars, decision.ConfirmVars...)
 
-	limit, err := runTextProgram("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+	limit, err := runTextPrompt(promptLimit, "要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
 	if err != nil {
 		return err
 	}
@@ -2736,7 +2758,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	// identifiers (component IDs, roles, or check-row IDs like "C1"),
 	// never key=value — the wrong validator here rejected the prompt's
 	// own example input.
-	tags, err := runTextProgram("要只跑某幾類元件嗎？(--tags，例如 freeipa,keycloak；留空 = 全部)", "", nil)
+	tags, err := runTextPrompt(promptTags, "要只跑某幾類元件嗎？(--tags，例如 freeipa,keycloak；留空 = 全部)", "", nil)
 	if err != nil {
 		return err
 	}
@@ -2768,13 +2790,13 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 			continue
 		}
 		q := fmt.Sprintf("偵測到這份 inventory 的 %s：%s，這次要用它嗎？(-e %s=%s)", av.Label, host, av.Var, host)
-		if runConfirmProgram(q, true) {
+		if runConfirmPrompt("auto_host_var."+av.Var+".use_detected", q, true) {
 			extraVars = append(extraVars, av.Var+"="+host)
 			acceptedAutoHostVars = append(acceptedAutoHostVars, acceptedAutoHostVar{Var: av.Var, Value: host})
 		}
 	}
 
-	extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
+	extra, err := runTextPrompt(promptExtraVars, "還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
 	if err != nil {
 		return err
 	}
@@ -2862,7 +2884,7 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		}
 		fmt.Fprintf(out, "已選擇 %d 個 day-2 reconcile 元件，將依序執行。\n", len(selectedIndexes))
 	} else {
-		idx, selectErr := runSelectProgram("挑一個要佈署的元件 (contract 驅動)", labels)
+		idx, selectErr := runSelectPrompt(promptComponent, "挑一個要佈署的元件 (contract 驅動)", labels)
 		if selectErr != nil {
 			return selectErr
 		}
@@ -2929,13 +2951,13 @@ type catalogDeploymentRequest struct {
 }
 
 func promptCatalogBatchInputs(out io.Writer, inv string, entries []deployPlaybook) (catalogBatchInputs, error) {
-	limit, err := runTextProgram("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+	limit, err := runTextPrompt(promptLimit, "要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
 	if err != nil {
 		return catalogBatchInputs{}, err
 	}
 	// nil, not validateOptionalKV: tags are bare comma/space-separated
 	// identifiers, never key=value.
-	tags, err := runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", nil)
+	tags, err := runTextPrompt(promptTags, "要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", nil)
 	if err != nil {
 		return catalogBatchInputs{}, err
 	}
@@ -2944,7 +2966,7 @@ func promptCatalogBatchInputs(out io.Writer, inv string, entries []deployPlayboo
 		return catalogBatchInputs{}, err
 	}
 	vault.AskBecomePass = promptBecome()
-	extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
+	extra, err := runTextPrompt(promptExtraVars, "還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
 	if err != nil {
 		return catalogBatchInputs{}, err
 	}
@@ -2977,7 +2999,7 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 	var extraVars []string
 	componentHints := []string{entry.Key}
 	if len(entry.InfraRoles) > 0 {
-		roleIdx, err := runSelectProgram("選擇角色(infra_role)", entry.InfraRoles)
+		roleIdx, err := runSelectPrompt(promptInfraRole, "選擇角色(infra_role)", entry.InfraRoles)
 		if err != nil {
 			return err
 		}
@@ -3004,7 +3026,7 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 				return fmt.Errorf("component %q has no declared data-retention/decommission policy", id)
 			}
 		}
-		if !runConfirmProgram("decommission 會移除服務；已確認 contract 的資料保留／匯出政策並授權執行嗎？", false) {
+		if !runConfirmPrompt("decommission.confirm", "decommission 會移除服務；已確認 contract 的資料保留／匯出政策並授權執行嗎？", false) {
 			return errDeployAborted
 		}
 	}
@@ -3027,7 +3049,7 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		}
 		candidates := groups[selectedContract.Role]
 		if len(candidates) > 1 {
-			hostIndex, selectErr := runSelectProgram("此元件要求 exactly-one；請明確選擇目標主機", candidates)
+			hostIndex, selectErr := runSelectPrompt("target_host", "此元件要求 exactly-one；請明確選擇目標主機", candidates)
 			if selectErr != nil {
 				return selectErr
 			}
@@ -3036,7 +3058,8 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		}
 	}
 	if targetGroup == "" {
-		targetGroup, err = runTextProgram(
+		targetGroup, err = runTextPrompt(
+			promptTargetGroup,
 			fmt.Sprintf("要限定只套用到哪個 group/host 嗎？(-e target_group=...；留空 = 用預設 group %q；可用交集語法如 'dns:&prod')", defaultGroup),
 			"", nil,
 		)
@@ -3108,13 +3131,13 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		tags = batchInputs.tags
 		vault = batchInputs.vault
 	} else {
-		limit, err = runTextProgram("要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+		limit, err = runTextPrompt(promptLimit, "要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
 		if err != nil {
 			return err
 		}
 		// nil, not validateOptionalKV: tags are bare comma/space-separated
 		// identifiers, never key=value.
-		tags, err = runTextProgram("要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", nil)
+		tags, err = runTextPrompt(promptTags, "要只跑某幾個檢查項目嗎？(--tags，例如 C1,C2；留空 = 全部)", "", nil)
 		if err != nil {
 			return err
 		}
@@ -3131,7 +3154,7 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		// auto-host vars, matching the ordering of the single-component flow.
 		extraVars = append(extraVars, batchInputs.extraVars...)
 	} else {
-		extra, err := runTextProgram("還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
+		extra, err := runTextPrompt(promptExtraVars, "還有其他 -e 變數要帶嗎？(格式 key=value，可空白分隔多個；留空 = 沒有)", "", validateOptionalKV)
 		if err != nil {
 			return err
 		}

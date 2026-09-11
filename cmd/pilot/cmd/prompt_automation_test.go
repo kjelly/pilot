@@ -78,6 +78,31 @@ func TestPromptAutomationMultiSelectReusesCommonBatchAnswers(t *testing.T) {
 	}
 }
 
+func TestPromptAutomationReusesDeployAnswersForDependencyTransactions(t *testing.T) {
+	confirmed := true
+	p := &promptAutomation{action: "deploy", reuseAnswers: true, answers: []promptAnswer{
+		{PromptID: promptPreflight, Select: "full"},
+		{PromptID: promptExecutionPreview, Confirm: &confirmed},
+	}}
+	preflightChoices := []string{
+		"完整前置檢查(含 SSH 連線測試)",
+		"只做靜態檢查(機器還沒開機/還連不上時用；不連線)",
+		"跳過前置檢查",
+	}
+	for transaction := 0; transaction < 2; transaction++ {
+		index, err := p.selectPrompt(promptPreflight, "要先跑前置檢查(preflight)嗎？", preflightChoices)
+		if err != nil || index != 0 {
+			t.Fatalf("transaction %d preflight = %d, %v; want full", transaction, index, err)
+		}
+		if !p.confirmPrompt(promptExecutionPreview, "要先預覽(--check --diff)再決定要不要真的套用嗎？", true) {
+			t.Fatalf("transaction %d preview confirmation = false, want true", transaction)
+		}
+	}
+	if len(p.answers) != 0 {
+		t.Fatalf("unconsumed answers = %d, want 0", len(p.answers))
+	}
+}
+
 func TestPromptAutomationRejectsUnknownPromptAndAmbiguousChoice(t *testing.T) {
 	p := &promptAutomation{answers: []promptAnswer{{PromptID: "choose", Select: "a"}}}
 	if _, err := p.selectPrompt("other", "other", []string{"a"}); err == nil || !strings.Contains(err.Error(), "answer") {
@@ -141,7 +166,7 @@ func TestValidatePromptAnswersByIDRejectsContractViolations(t *testing.T) {
 	}{
 		{"unknown", append(base, promptAnswer{PromptID: "translated.text", Text: ""}), "unknown prompt_id"},
 		{"duplicate", append(base, promptAnswer{PromptID: promptInventory, Text: "other.yml"}), "duplicate"},
-		{"wrong kind", append(base[:len(base)-1], promptAnswer{PromptID: promptExecutionPreview, Text: "no"}), "requires confirm"},
+		{"wrong kind", append(append([]promptAnswer(nil), base[:len(base)-1]...), promptAnswer{PromptID: promptExecutionPreview, Text: "no"}), "requires confirm"},
 		{"missing always", base[1:], "missing required"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -158,3 +183,49 @@ func TestValidatePromptAnswersByIDRejectsContractViolations(t *testing.T) {
 }
 
 func boolPtr(value bool) *bool { return &value }
+
+// TestValidatePromptAnswersAllowsLegacyPromptTextOnly guards against a
+// regression where bc4d089's "every always-prompt id must be answered"
+// completeness check ran unconditionally: every pre-existing deploy
+// automation scenario (all label-matched, none using prompt_id) failed
+// validation with "missing required prompt_id" before ever reaching a real
+// prompt, because those scripts' answers are keyed by literal label text,
+// never by the short id constants the check looked for.
+func TestValidatePromptAnswersAllowsLegacyPromptTextOnly(t *testing.T) {
+	answers := []promptAnswer{
+		{Prompt: "Inventory 檔路徑", Text: ""},
+		{Prompt: "要不要先看一下這份 inventory 的拓樸圖", Confirm: boolPtr(false)},
+		{Prompt: "要先跑前置檢查(preflight)嗎", Select: "完整前置檢查"},
+		{Prompt: "要佈署什麼？", Select: "全站部署"},
+		{Prompt: "要套用到哪個 stage", Select: "sandbox"},
+		{Prompt: "要限定只套用到某台主機嗎？(--limit", Text: ""},
+		{Prompt: "要只跑某幾類元件嗎？(--tags", Text: ""},
+		{Prompt: "這次佈署要用它當密碼變數檔嗎", Confirm: boolPtr(false)},
+		{Prompt: "這次佈署需要密碼變數嗎", Select: "不需要"},
+		{Prompt: "這次套用要手動輸入 sudo(become)密碼嗎", Confirm: boolPtr(false)},
+		{Prompt: "還有其他 -e 變數要帶嗎", Text: ""},
+	}
+	if err := validatePromptAnswers("deploy", answers); err != nil {
+		t.Fatalf("legacy label-only deploy answers rejected: %v", err)
+	}
+}
+
+// TestPromptAutomationSelectResolvesSemanticAcceptedValue proves the
+// deploy.go/reconcile.go wiring gap is closed: a prompt_id-only answer names
+// a promptDefinition.AcceptedValues term (e.g. "static"), which is not a
+// substring of the actual displayed (Chinese) choice text, so legacy
+// literal-text matching alone could never resolve it. Resolution must go
+// through the schema's accepted-value position instead.
+func TestPromptAutomationSelectResolvesSemanticAcceptedValue(t *testing.T) {
+	p := &promptAutomation{action: "deploy", answers: []promptAnswer{
+		{PromptID: promptPreflight, Select: "static"},
+	}}
+	idx, err := p.selectPrompt(promptPreflight, "要先跑前置檢查(preflight)嗎？", []string{
+		"完整前置檢查(含 SSH 連線測試)",
+		"只做靜態檢查(機器還沒開機/還連不上時用；不連線)",
+		"跳過前置檢查",
+	})
+	if err != nil || idx != 1 {
+		t.Fatalf("selectPrompt() = %d, %v, want 1 (static)", idx, err)
+	}
+}

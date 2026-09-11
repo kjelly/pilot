@@ -23,6 +23,7 @@ type promptAnswer struct {
 // promptAutomation answers the existing one-shot deploy/reconcile prompts by
 // applying ordinary key messages to the same screen models used interactively.
 type promptAutomation struct {
+	action       string // "deploy" or "reconcile"; resolves prompt_id -> promptDefinition
 	answers      []promptAnswer
 	events       []automationTraceEvent
 	reusable     map[string]promptAnswer
@@ -31,13 +32,27 @@ type promptAutomation struct {
 	out          io.Writer
 	useDefaults  bool
 	forceApply   bool
+	// reuseAnswers permits a deploy action to use the same explicit approval
+	// for repeated same-host dependency transactions. Reconcile multi-select
+	// workflows use it for the same reason.
 	reuseAnswers bool
 }
 
+// validatePromptAnswers accepts either automation contract: legacy scripts
+// that match prompts by their (localized, UI-only) label text, or scripts
+// that opt into the stable prompt_id contract. The "every always-prompt must
+// be answered" completeness check only applies once a script actually uses
+// prompt_id — a legacy label-only script is already forced to answer every
+// prompt it reaches, one at a time, by the "no automation answer for ..."
+// runtime error, so re-deriving that same completeness up front from a
+// key-space (short ids) the script never populated would just reject every
+// pre-existing legacy scenario outright.
 func validatePromptAnswers(action string, answers []promptAnswer) error {
 	seen := make(map[string]bool, len(answers))
+	usesPromptID := false
 	for _, answer := range answers {
 		if answer.PromptID != "" {
+			usesPromptID = true
 			definition, ok := promptDefinitionFor(action, answer.PromptID)
 			if !ok {
 				return fmt.Errorf("unknown prompt_id %q", answer.PromptID)
@@ -65,7 +80,7 @@ func validatePromptAnswers(action string, answers []promptAnswer) error {
 			return fmt.Errorf("prompt answer cannot contain both select and selects")
 		}
 	}
-	if action == "deploy" {
+	if action == "deploy" && usesPromptID {
 		for _, id := range []string{promptInventory, promptTopologyPreview, promptPreflight, promptScope, promptStage, promptLimit, promptTags, promptBecomePassword, promptExtraVars, promptExecutionPreview} {
 			if !seen[id] {
 				return fmt.Errorf("missing required prompt_id %q", id)
@@ -109,6 +124,14 @@ func validatePromptAnswerKind(def promptDefinition, answer promptAnswer) error {
 
 var activePromptAutomation *promptAutomation
 
+// promptWorkflowAllowsNonTTY reports whether a wizard may run without a
+// terminal attached. Normal deploy/reconcile use terminal widgets; the
+// --actions path has already installed a driver that feeds those same widgets
+// deterministically, so it must be admitted in a non-interactive process.
+func promptWorkflowAllowsNonTTY(isTerminal bool) bool {
+	return isTerminal || activePromptAutomation != nil
+}
+
 func (p *promptAutomation) answer(kind, id, prompt string) (promptAnswer, bool) {
 	for i, answer := range p.answers {
 		if (id != "" && answer.PromptID == id) || answer.Prompt == prompt || (answer.Prompt != "" && strings.Contains(prompt, answer.Prompt)) {
@@ -138,7 +161,7 @@ func (p *promptAutomation) selectPrompt(id, prompt string, items []string) (int,
 	if !ok {
 		return 0, fmt.Errorf("no automation answer for select prompt")
 	}
-	index, err := uniqueItemIndex(items, answer.Select)
+	index, err := p.resolveSelectIndex(answer, items)
 	if err != nil {
 		return 0, fmt.Errorf("cannot choose %q: %w", answer.Select, err)
 	}
@@ -167,6 +190,30 @@ func (p *promptAutomation) selectPrompt(id, prompt string, items []string) (int,
 		return 0, p.err
 	}
 	return m.s.(tui.SelectScreen).Selected(), nil
+}
+
+// resolveSelectIndex maps an answer's Select value to an item index. A
+// prompt_id-based answer names one of promptDefinition.AcceptedValues — a
+// short, stable value (e.g. "sandbox") that is not necessarily a substring
+// of the actual (localized, reworded-without-notice) displayed choice text.
+// When the schema's AcceptedValues line up 1:1 with what was actually
+// offered (same count), resolve by position in that list instead. Anything
+// else (a legacy label-matched answer, or a prompt whose live choice set can
+// shrink — e.g. experimental components filtered out) falls back to the
+// original literal-text matching, which is exactly right for those cases:
+// their Select value already is the stable identifier (a hostname, role
+// name, component key, ...) rather than a schema-declared semantic value.
+func (p *promptAutomation) resolveSelectIndex(answer promptAnswer, items []string) (int, error) {
+	if answer.PromptID != "" && p.action != "" {
+		if definition, ok := promptDefinitionFor(p.action, answer.PromptID); ok && len(definition.AcceptedValues) == len(items) {
+			for i, value := range definition.AcceptedValues {
+				if value == answer.Select {
+					return i, nil
+				}
+			}
+		}
+	}
+	return uniqueItemIndex(items, answer.Select)
 }
 
 func (p *promptAutomation) multiSelectPrompt(prompt string, items []string) ([]int, error) {
@@ -281,7 +328,7 @@ func (p *promptAutomation) textPrompt(args ...any) (string, error) {
 }
 
 func (p *promptAutomation) confirmPrompt(id, prompt string, defaultYes bool) bool {
-	if p.forceApply && (id == promptExecutionApplyAfterPreview || strings.Contains(prompt, "預覽看起來沒問題，要接著套用真正的變更嗎？")) {
+	if p.forceApply && (id == promptExecutionApplyAfterPreview || id == promptExecutionConfirmApply || strings.Contains(prompt, "預覽看起來沒問題，要接著套用真正的變更嗎？")) {
 		return true
 	}
 	if p.useDefaults {
