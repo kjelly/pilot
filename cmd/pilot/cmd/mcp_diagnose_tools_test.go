@@ -1373,7 +1373,15 @@ func TestDiagnoseMonitoringTargetHandler_SuccessReturnsStructuredEvidence(t *tes
 		},
 	}}
 
-	handler := diagnoseMonitoringTargetHandler(baseDiagnoseOpts(t, inv, fake.run))
+	opts := baseDiagnoseOpts(t, inv, fake.run)
+	// diagnoseWorkspaceRoot falls back to the process CWD (the repo root
+	// under `go test`) whenever WorkspaceDir is unset — production mcp
+	// serve always fills it in, but a unit test that (like this one) writes
+	// its own monitoring/ fixture into a temp dir must point the handler at
+	// that dir explicitly, or it silently resolves against whatever (or
+	// nothing) the real repo's monitoring/targets.yml declares instead.
+	opts.WorkspaceDir = dir
+	handler := diagnoseMonitoringTargetHandler(opts)
 	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseMonitoringTargetInput{Target: "core-sw-01"})
 	if err != nil {
 		t.Fatalf("handler() error = %v", err)
