@@ -61,10 +61,21 @@
     # membership is additive, not a replacement.
     docker_network_name: pilot-metrics
 
-    # Repo-relative path to the non-secret catalog (spec §6.4), read
-    # from the control node's own checkout — same convention as
-    # prometheus-apply.yml's monitoring_targets_file/monitoring_profiles_file.
-    snmp_catalog_file: "monitoring/snmp/catalog.yml"
+    # Absolute path to the workspace's non-secret catalog (spec §6.4),
+    # normally auto-filled by `pilot deploy`/`pilot reconcile`
+    # (autoFillSNMPCatalogFile) from <workspace>/monitoring/snmp/catalog.yml
+    # — same convention as prometheus-apply.yml's monitoring_targets_file/
+    # monitoring_profiles_file. Empty by default, NOT a repo-relative
+    # fallback path: Ansible's `lookup('file', ...)` resolves a relative
+    # path against the *playbook's own directory* (playbooks/apply/), never
+    # the repo root or the caller's cwd, so a relative default here could
+    # never actually resolve (confirmed live: fails inside the pilot-cli
+    # image, which ships monitoring/ at /pilot/monitoring, not under
+    # /pilot/playbooks/apply/). Leave unset for a workspace with no SNMP
+    # catalog yet — the "Load SNMP catalog file" task below falls back to
+    # an empty catalog (zero modules/authProfiles) instead of calling
+    # lookup() at all.
+    snmp_catalog_file: ""
 
     # Vault-supplied secret input (spec §6.4): {credentialRef: {username,
     # authPassword, privPassword}} for a v3 profile, or
@@ -113,7 +124,10 @@
     # `pilot monitoring validate` CLI, spec §11.1).
     - name: "Load SNMP catalog file"
       ansible.builtin.set_fact:
-        snmp_catalog_raw: "{{ lookup('file', snmp_catalog_file) }}"
+        snmp_catalog_raw: >-
+          {{ lookup('file', snmp_catalog_file)
+             if (snmp_catalog_file | default('', true) | length > 0)
+             else "{schemaVersion: 1, modules: {}, authProfiles: {}}" }}
       tags: [always]
 
     - name: "Parse SNMP catalog"
