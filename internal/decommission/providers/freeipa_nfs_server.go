@@ -13,8 +13,9 @@
 //
 // Unlike freeipa_client.go's local/central split across two playbooks,
 // this provider's single ansible playbook does both (the NFS server
-// authenticates as the roster admin directly, see that playbook's doc
-// comment) — but the roster-side convergence (nfs.servers[] -> state:
+// authenticates as the workspace's FreeIPA admin, sourced primarily from
+// ipa_admin_password, see that playbook's doc comment) — but the roster-side
+// convergence (nfs.servers[] -> state:
 // absent) is still its own separate, pure-Go step, mirroring
 // freeipaRosterAbsentStep exactly.
 package providers
@@ -52,9 +53,10 @@ type FreeIPANFSServerProviderConfig struct {
 	DecommissionPlaybook string // playbooks/decommission/freeipa-nfs-server-decommission.yml
 
 	// ExtraArgs is appended verbatim to every ansible-playbook invocation
-	// (must include "-e freeipa_roster_file=<path>" — this provider does
-	// not resolve that itself, matching FreeIPAClientProvider's own
-	// caller-resolves-the-roster-path convention).
+	// (must include "-e freeipa_roster_file=<path>" and may include an
+	// "-e @<workspace>/.vault/main.yaml" reference for ipa_admin_password —
+	// this provider does not resolve either itself, matching
+	// FreeIPAClientProvider's caller-resolves-input-paths convention).
 	ExtraArgs []string
 }
 

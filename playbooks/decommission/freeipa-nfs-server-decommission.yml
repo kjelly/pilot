@@ -14,9 +14,10 @@
 #
 # Unlike freeipa-client-decommission.yml, this is a SINGLE self-contained
 # play (no separate central playbook) — freeipa-nfs-server-apply.yml's own
-# design already kinits as the roster admin directly on this host (it is
-# a required freeipa-client-role sibling, but authenticates via the
-# roster's own admin credential, not this host's own Kerberos identity),
+# design already kinits as the workspace's FreeIPA admin directly on this
+# host (it is a required freeipa-client-role sibling). The standard
+# ipa_admin_password secret is preferred; the roster credential is only a
+# compatibility fallback for older workspaces,
 # so the same host can run both the local (exports fragment) and central
 # (ipa service-del) cleanup itself. Teardown ordering already guarantees
 # this runs BEFORE freeipa-client's own local uninstall on the same host
@@ -108,10 +109,27 @@
         nfs_decom_server_fqdn: "{{ nfs_decom_hostname_fqdn.stdout | trim }}"
       tags: [always]
 
-    - name: "Kinit as IPA admin (roster credential — same as freeipa-nfs-server-apply.yml)"
-      ansible.builtin.shell: |
-        set -o pipefail
-        printf '%s' "{{ freeipa_roster.freeipa.admin.password }}" | kinit {{ freeipa_roster.freeipa.admin.principal | default('admin') }}
+    - name: "Select FreeIPA admin credential from the workspace secret store"
+      ansible.builtin.set_fact:
+        nfs_decom_admin_password: "{{ ipa_admin_password | default((freeipa_roster.freeipa.admin | default({})).password | default(''), true) }}"
+      no_log: true
+      tags: [always]
+
+    - name: "Gate: FreeIPA admin credential is available"
+      ansible.builtin.assert:
+        that:
+          - nfs_decom_admin_password | length >= 8
+        fail_msg: >-
+          Missing ipa_admin_password and canonical roster fallback
+          freeipa.admin.password; cannot safely remove the NFS service principal.
+      no_log: true
+      tags: [always]
+
+    - name: "Kinit as IPA admin"
+      ansible.builtin.command:
+        argv: [kinit, "{{ freeipa_roster.freeipa.admin.principal | default('admin') }}"]
+        stdin: "{{ nfs_decom_admin_password }}"
+        stdin_add_newline: true
       no_log: true
       changed_when: false
       when: not ansible_check_mode

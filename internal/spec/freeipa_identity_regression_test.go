@@ -228,4 +228,7 @@ func TestRegression_FreeipaIdentityAuthenticatesBeforeCheckModeProbes(t *testing
 	if !strings.Contains(kinit, "tags: [identity, groups") {
 		t.Fatal("Kinit admin must run for a groups-only tagged reconciliation")
 	}
+	if !strings.Contains(playbook, `identity_admin_password: "{{ ipa_admin_password | default((freeipa_roster.freeipa.admin | default({})).password | default(''), true) }}"`) {
+		t.Fatal("identity reconciliation must prefer ipa_admin_password from the workspace secret store while retaining the roster fallback")
+	}
 }

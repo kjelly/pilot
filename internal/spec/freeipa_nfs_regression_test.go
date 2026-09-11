@@ -177,6 +177,32 @@ func TestRegression_FreeIPANFSServerSnapshotIsCreateOnce(t *testing.T) {
 	}
 }
 
+// TestRegression_FreeIPANFSServerDecommissionUsesWorkspaceAdminSecret locks
+// the decommission credential boundary: the shared workspace vault's
+// ipa_admin_password is the primary input, while the roster field is only a
+// compatibility fallback.  The password must be passed to kinit over stdin,
+// never interpolated into a shell command.
+func TestRegression_FreeIPANFSServerDecommissionUsesWorkspaceAdminSecret(t *testing.T) {
+	playbookPath := filepath.Join("..", "..", "playbooks", "decommission", "freeipa-nfs-server-decommission.yml")
+	data, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	playbook := string(data)
+	for _, required := range []string{
+		"nfs_decom_admin_password: \"{{ ipa_admin_password | default((freeipa_roster.freeipa.admin | default({})).password | default(''), true) }}\"",
+		"stdin: \"{{ nfs_decom_admin_password }}\"",
+		"stdin_add_newline: true",
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Errorf("NFS decommission credential contract missing %q", required)
+		}
+	}
+	if strings.Contains(playbook, "ansible.builtin.shell:\n        set -o pipefail") {
+		t.Error("NFS decommission must not pipe the admin password through a shell")
+	}
+}
+
 // TestRegression_FreeIPANFSClientConsumesRosterNFSClients locks the
 // 2026-08-14 fix: nfs_clients[] used to be accepted by the roster schema
 // (schema validation, migration fingerprinting) but never actually read by

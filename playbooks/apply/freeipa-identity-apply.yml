@@ -463,7 +463,10 @@
         ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
         ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
         identity_admin_principal: "{{ freeipa_roster.freeipa.admin.principal | default('admin') }}"
-        identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
+        # main.yaml is the primary operational secret source. Keeping the
+        # roster field as a fallback preserves older canonical rosters while
+        # allowing host decommission to avoid a second password declaration.
+        identity_admin_password: "{{ ipa_admin_password | default((freeipa_roster.freeipa.admin | default({})).password | default(''), true) }}"
         identity_hbac_test_host: "{{ freeipa_roster.freeipa.server | default(ipa_server_fqdn | default(inventory_hostname)) }}"
         ipa_users: []
         ipa_groups: []
@@ -694,8 +697,9 @@
         that:
           - identity_admin_password is defined and identity_admin_password | length >= 8
         fail_msg: >-
-          Missing ipa_admin_password. Pass an ansible-vault roster with the
-          admin credential, e.g. -e @~/.vault/ipa-identity.yaml
+          Missing ipa_admin_password and canonical roster fallback
+          freeipa.admin.password. Pass the workspace secret vars file (for
+          example -e @.vault/main.yaml), or retain the legacy roster field.
       tags: [always]
 
     - name: "Gate: roster supplies at least one data list (catches the wrong -e file)"

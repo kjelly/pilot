@@ -203,6 +203,47 @@ func TestBuildHostDecommissionProviders_RegistersFreeIPAClientForMatchingHost(t 
 	}
 }
 
+func TestHostDecommissionFreeIPAExtraArgsUsesExistingMainVault(t *testing.T) {
+	workspace := t.TempDir()
+	invPath := filepath.Join(workspace, "inventory.yml")
+	if err := os.WriteFile(invPath, []byte("all: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vaultPath := filepath.Join(workspace, ".vault", "main.yaml")
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultPath, []byte("ipa_admin_password: fixture-only-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := hostDecommissionFreeIPAExtraArgs(invPath, filepath.Join(workspace, ".vault", "ipa-identity.yaml"))
+	want := []string{
+		"-e", "freeipa_roster_file=" + filepath.Join(workspace, ".vault", "ipa-identity.yaml"),
+		"-e", "@" + vaultPath,
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("extra args = %q, want %q", got, want)
+	}
+	if strings.Contains(strings.Join(got, " "), "fixture-only-value") {
+		t.Fatal("extra args must carry a vault file reference, never its secret value")
+	}
+}
+
+func TestHostDecommissionFreeIPAExtraArgsDoesNotInventVault(t *testing.T) {
+	workspace := t.TempDir()
+	invPath := filepath.Join(workspace, "inventory.yml")
+	if err := os.WriteFile(invPath, []byte("all: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := hostDecommissionFreeIPAExtraArgs(invPath, "roster.yaml")
+	want := []string{"-e", "freeipa_roster_file=roster.yaml"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("extra args = %q, want %q", got, want)
+	}
+}
+
 // TestBuildHostDecommissionProviders_UnknownHostReturnsEmptyRegistry proves
 // buildHostDecommissionProviders degrades to an empty (non-nil) map — never
 // an error — when the named host doesn't exist in the workspace, so a
