@@ -35,6 +35,13 @@ type Host struct {
 	Env                    string
 	DeploymentAvailability DeploymentAvailability
 	Extra                  map[string]string // preserved as strings for stable, quoted YAML output
+	// Annotations is descriptive, non-secret host metadata (location,
+	// project, owner, ...) — a completely separate namespace from Extra.
+	// It carries no deployment semantics and MUST NOT influence role
+	// membership, host selection, or access control (spec.md §3.2); it
+	// only reaches generated inventory as `pilot_annotations` and,
+	// post-enrollment, FreeIPA `userClass`/`nshostlocation` (spec.md §6-8).
+	Annotations map[string]string
 }
 
 // EffectiveDeploymentAvailability returns h's deployment availability
@@ -101,7 +108,7 @@ func Parse(data []byte) (*HostsFile, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		fields := raw.Hosts[name]
-		h := Host{Name: name, Extra: map[string]string{}}
+		h := Host{Name: name, Extra: map[string]string{}, Annotations: map[string]string{}}
 		for k, v := range fields {
 			switch k {
 			case "ansible_host":
@@ -122,6 +129,27 @@ func Parse(data []byte) (*HostsFile, error) {
 				for _, r := range list {
 					h.Roles = append(h.Roles, fmt.Sprint(r))
 				}
+			case "annotations":
+				// `annotations` is a reserved, strictly-typed structured field
+				// (spec.md §29.3) — it MUST NOT fall into Extra like an
+				// ordinary unknown key, and MUST NOT accept anything but a
+				// flat string-valued mapping (spec.md §4.3): no implicit
+				// fmt.Sprint() coercion of ints/bools/lists/nested maps,
+				// which would break the deterministic round-trip human
+				// metadata needs (true -> "true", 0012 -> "12", ...).
+				raw, ok := v.(map[string]interface{})
+				if !ok {
+					return nil, fmt.Errorf("inventory: host %q: `annotations` must be a mapping of key: value strings", name)
+				}
+				annotations := make(map[string]string, len(raw))
+				for ak, av := range raw {
+					s, ok := av.(string)
+					if !ok {
+						return nil, fmt.Errorf("inventory: host %q: annotation %q value must be a string, got %T", name, ak, av)
+					}
+					annotations[ak] = s
+				}
+				h.Annotations = annotations
 			default:
 				h.Extra[k] = fmt.Sprint(v)
 			}
@@ -200,6 +228,10 @@ func Lint(hf *HostsFile) []Issue {
 
 		if !h.DeploymentAvailability.Valid() {
 			issues = append(issues, Issue{h.Name, "error", fmt.Sprintf("unknown deployment_availability %q (must be required|optional, or omitted)", h.DeploymentAvailability)})
+		}
+
+		for _, err := range ValidateAnnotations(h.Annotations) {
+			issues = append(issues, Issue{h.Name, "error", err.Error()})
 		}
 	}
 	return issues
@@ -288,6 +320,17 @@ func Generate(hf *HostsFile) (string, error) {
 		sort.Strings(extraKeys)
 		for _, k := range extraKeys {
 			fmt.Fprintf(&sb, "      %s: %s\n", k, quoteScalar(h.Extra[k]))
+		}
+		// Annotations project into their own namespaced host var
+		// (spec.md §6.1/§6.2) rather than flattening into top-level
+		// Ansible host vars like Extra does — mixing the two namespaces
+		// is exactly what this feature exists to avoid. An empty map
+		// renders nothing at all (spec.md §6.3), not `pilot_annotations: {}`.
+		if len(h.Annotations) > 0 {
+			sb.WriteString("      pilot_annotations:\n")
+			for _, k := range sortedKeys(h.Annotations) {
+				fmt.Fprintf(&sb, "        %s: %s\n", k, quoteScalar(h.Annotations[k]))
+			}
 		}
 	}
 

@@ -417,6 +417,7 @@ func TestHostTypedFieldSerializationContract(t *testing.T) {
 		Env:                    "staging",
 		DeploymentAvailability: DeploymentAvailabilityOptional,
 		Extra:                  map[string]string{},
+		Annotations:            map[string]string{},
 	}}}
 	rendered, err := Render(hf)
 	if err != nil {

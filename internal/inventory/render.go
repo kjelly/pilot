@@ -57,6 +57,12 @@ func Render(hf *HostsFile) (string, error) {
 		for _, k := range sortedKeys(h.Extra) {
 			fmt.Fprintf(&sb, "    %s: %s\n", k, quoteScalar(h.Extra[k]))
 		}
+		if len(h.Annotations) > 0 {
+			sb.WriteString("    annotations:\n")
+			for _, k := range sortedKeys(h.Annotations) {
+				fmt.Fprintf(&sb, "      %s: %s\n", k, quoteScalar(h.Annotations[k]))
+			}
+		}
 		if len(h.Roles) > 0 {
 			fmt.Fprintf(&sb, "    roles: [%s]\n", strings.Join(h.Roles, ", "))
 		} else {
