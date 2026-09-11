@@ -49,7 +49,11 @@
     alertmanager_host_data_dir: /var/lib/pilot/alertmanager
     alertmanager_config_dir: /etc/pilot/alertmanager
     docker_network_name: pilot-metrics
-    alertmanager_config: |
+    # Keep the safe stub separate from the operator-supplied
+    # alertmanager_config. A value in group_vars or the vault must be able to
+    # override this default; defining both under play vars makes the inventory
+    # value lose by Ansible precedence.
+    alertmanager_default_config: |
       global:
         resolve_timeout: 5m
       route:
@@ -60,8 +64,141 @@
         repeat_interval: 4h
       receivers:
         - name: 'null'
+    # Alertmanager's webhook_configs always POSTs its own fixed JSON
+    # envelope, never an Adaptive Card — a Power Automate "When a Teams
+    # webhook request is received" flow rejects that body with
+    # AdaptiveSerializationException: Property 'type' must be
+    # 'AdaptiveCard'. Point webhook_configs at the transform proxy
+    # (pilot-alertmanager-teams-proxy, started below) instead of the real
+    # Power Automate URL directly; the proxy holds the real URL in
+    # TEAMS_WEBHOOK_URL and does the transform.
+    alertmanager_teams_config: |
+      global:
+        resolve_timeout: 5m
+      route:
+        receiver: teams
+        group_by: ['alertname', 'severity', 'instance']
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+      receivers:
+        - name: teams
+          webhook_configs:
+            - url: "http://pilot-alertmanager-teams-proxy:8095/webhook"
+              send_resolved: true
+    alertmanager_teams_proxy_port: 8095
+    alertmanager_teams_proxy_image: "python:3.12-alpine"
 
   pre_tasks:
+    - name: Resolve the requested Alertmanager receiver mode
+      ansible.builtin.set_fact:
+        alertmanager_receiver_mode_effective: "{{ alertmanager_receiver_mode | default('', true) | lower }}"
+      tags: [always]
+
+    - name: Preserve legacy Alertmanager custom configuration mode
+      ansible.builtin.set_fact:
+        alertmanager_receiver_mode_effective: custom
+      when:
+        - alertmanager_receiver_mode_effective == ''
+        - alertmanager_config is defined
+        - alertmanager_config | length > 0
+      tags: [always]
+
+    - name: Default Alertmanager receiver mode to null
+      ansible.builtin.set_fact:
+        # Must be the string "null", not YAML/Jinja null (None) — every
+        # downstream check compares against the string (gate membership
+        # test, "Resolve the effective ... configuration" `== 'null'`).
+        # A real None never matches either, so this branch silently
+        # broke the (unset receiver_mode) default apply path entirely.
+        alertmanager_receiver_mode_effective: "null"
+      when: alertmanager_receiver_mode_effective == ''
+      tags: [always]
+
+    - name: "Gate: Alertmanager receiver mode is supported"
+      ansible.builtin.assert:
+        that:
+          - alertmanager_receiver_mode_effective in ['null', 'teams', 'custom']
+        fail_msg: "alertmanager_receiver_mode must be null, teams, or custom."
+      tags: [always]
+
+    - name: "Gate: Teams receiver has an HTTPS webhook"
+      ansible.builtin.assert:
+        that:
+          - alertmanager_teams_webhook_url is defined
+          - alertmanager_teams_webhook_url is match('^https://\S+$')
+        fail_msg: "Teams receiver mode requires alertmanager_teams_webhook_url as an HTTPS URL in vault."
+      when: alertmanager_receiver_mode_effective == 'teams'
+      no_log: true
+      tags: [always]
+
+    - name: "Gate: Agent Controller mirror has complete webhook credentials"
+      ansible.builtin.assert:
+        that:
+          - alertmanager_receiver_mode_effective == 'teams'
+          - alertmanager_agent_controller_webhook_url is defined
+          - alertmanager_agent_controller_webhook_url is match('^http://\\S+/webhooks/alertmanager$')
+          - agent_controller_webhook_secret is defined
+          - agent_controller_webhook_secret | length > 0
+        fail_msg: >-
+          Alertmanager agent-controller mirror requires teams mode, a controller
+          /webhooks/alertmanager HTTP URL, and agent_controller_webhook_secret in vault.
+      when: alertmanager_forward_to_agent_controller | default(false) | bool
+      no_log: true
+      tags: [always]
+
+    - name: "Gate: custom receiver has complete configuration"
+      ansible.builtin.assert:
+        that:
+          - alertmanager_config is defined
+          - alertmanager_config | length > 0
+        fail_msg: "custom receiver mode requires non-empty alertmanager_config in vault."
+      when: alertmanager_receiver_mode_effective == 'custom'
+      no_log: true
+      tags: [always]
+
+    - name: Resolve the effective Alertmanager configuration
+      ansible.builtin.set_fact:
+        alertmanager_effective_config: "{{ alertmanager_default_config }}"
+      when: alertmanager_receiver_mode_effective == 'null'
+      no_log: true
+      tags: [always]
+
+    - name: Resolve the Teams Alertmanager configuration
+      ansible.builtin.set_fact:
+        alertmanager_effective_config: "{{ alertmanager_teams_config }}"
+      when: alertmanager_receiver_mode_effective == 'teams'
+      no_log: true
+      tags: [always]
+
+    # Values held in a YAML block scalar are not recursively Jinja-rendered
+    # by Ansible.  Append this receiver at set_fact time instead of placing a
+    # conditional inside alertmanager_teams_config, otherwise a true vault
+    # flag silently leaves the controller webhook out of the effective file.
+    - name: Add Agent Controller mirror to the Teams configuration
+      ansible.builtin.set_fact:
+        # alertmanager_teams_config is a YAML block scalar. Its six-column
+        # playbook indentation is stripped from its runtime value, so the
+        # appended receiver must use the *rendered* YAML indentation (not
+        # the source-file indentation): webhook list=6, fields=8. The URL and
+        # secret go through `to_json` (a JSON string is always a valid YAML
+        # flow scalar) rather than being interpolated inside a hand-written
+        # quoted string — an unescaped `"`, backslash, or newline in either
+        # value would otherwise silently produce invalid YAML.
+        alertmanager_effective_config: "{{ alertmanager_teams_config }}\n      - url: {{ alertmanager_agent_controller_webhook_url | to_json }}\n        send_resolved: true\n        http_config:\n          authorization:\n            type: Bearer\n            credentials: {{ agent_controller_webhook_secret | to_json }}"
+      when:
+        - alertmanager_receiver_mode_effective == 'teams'
+        - alertmanager_forward_to_agent_controller | default(false) | bool
+      no_log: true
+      tags: [always]
+
+    - name: Resolve the custom Alertmanager configuration
+      ansible.builtin.set_fact:
+        alertmanager_effective_config: "{{ alertmanager_config }}"
+      when: alertmanager_receiver_mode_effective == 'custom'
+      no_log: true
+      tags: [always]
+
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
         that:
@@ -92,13 +229,11 @@
       when: stage == 'prod'
       tags: [always]
 
-    - name: "Gate: alertmanager_config non-empty"
+    - name: "Gate: effective Alertmanager configuration is non-empty"
       ansible.builtin.assert:
         that:
-          - alertmanager_config is defined and alertmanager_config | length > 0
-        fail_msg: >-
-          alertmanager_config is required (provide a full alertmanager.yml
-          string, e.g. via -e @~/.vault/alertmanager-config.yaml).
+          - alertmanager_effective_config | length > 0
+        fail_msg: "effective Alertmanager configuration must not be empty."
 
   tasks:
     # docker_container needs a live daemon to compute its diff even under
@@ -143,13 +278,61 @@
           ansible.builtin.copy:
             dest: "{{ alertmanager_config_dir }}/alertmanager.yml"
             mode: "0644"
-            content: "{{ alertmanager_config }}"
+            content: "{{ alertmanager_effective_config }}"
           register: alertmanager_yml_result
 
         - name: "Ensure docker network {{ docker_network_name }} exists"
           community.docker.docker_network:
             name: "{{ docker_network_name }}"
             state: present
+
+        - name: "Teams proxy: render relay script"
+          tags: [C8, C9]
+          ansible.builtin.copy:
+            src: files/alertmanager-teams-proxy.py
+            dest: "{{ alertmanager_config_dir }}/teams-proxy.py"
+            mode: "0644"
+          register: alertmanager_teams_proxy_script_result
+          when: alertmanager_receiver_mode_effective == 'teams'
+
+        - name: "Teams proxy: run pilot-alertmanager-teams-proxy container"
+          tags: [C8, C9]
+          community.docker.docker_container:
+            name: pilot-alertmanager-teams-proxy
+            image: "{{ alertmanager_teams_proxy_image }}"
+            state: started
+            restart_policy: unless-stopped
+            restart: "{{ alertmanager_teams_proxy_script_result is changed }}"
+            command: ["python3", "/opt/teams-proxy.py"]
+            env:
+              TEAMS_WEBHOOK_URL: "{{ alertmanager_teams_webhook_url | default('') }}"
+              LISTEN_PORT: "8095"
+            networks:
+              - name: "{{ docker_network_name }}"
+            volumes:
+              - "{{ alertmanager_config_dir }}/teams-proxy.py:/opt/teams-proxy.py:ro"
+            ports:
+              - "127.0.0.1:{{ alertmanager_teams_proxy_port }}:8095"
+          no_log: true
+          when: alertmanager_receiver_mode_effective == 'teams'
+
+        - name: "Teams proxy: ensure absent when not in teams mode"
+          tags: [C8, C9]
+          community.docker.docker_container:
+            name: pilot-alertmanager-teams-proxy
+            state: absent
+          when: alertmanager_receiver_mode_effective != 'teams'
+
+        - name: "Teams proxy: wait for /healthz"
+          tags: [C8, C9]
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ alertmanager_teams_proxy_port }}/healthz"
+            status_code: 200
+          register: alertmanager_teams_proxy_ready
+          until: alertmanager_teams_proxy_ready.status == 200
+          retries: 15
+          delay: 2
+          when: alertmanager_receiver_mode_effective == 'teams'
 
         # Spec: docs/verification/alertmanager.md C1, C2, C3, C6, C7
         - name: "Alertmanager — run pilot-alertmanager container"

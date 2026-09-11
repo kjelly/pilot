@@ -466,6 +466,31 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "configure_alertmanager_receiver",
+				Description:              "configure Alertmanager's single notification receiver as null, teams, or custom; Teams/custom values are secret and should use value_env",
+				Required:                 []string{"receiver_mode"},
+				Optional:                 []string{"value", "value_env"},
+				Values:                   map[string][]string{"receiver_mode": {alertmanagerReceiverModeNull, alertmanagerReceiverModeTeams, alertmanagerReceiverModeCustom}},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingValueEnvRecommended,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      ".vault/main.yaml",
+					Assertion: "Alertmanager receiver mode and its masked secret reference updated",
+				},
+			},
+			Validate: validateConfigureAlertmanagerReceiver,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				value, secret, err := resolveValueOrEnv(step)
+				if err != nil {
+					return err
+				}
+				return d.configureAlertmanagerReceiver(r, step.ReceiverMode, value, secret)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "add_vault_key",
 				Description:              "add a new key to a plaintext .vault/ skeleton file (creating the file first if needed); value_env is strongly recommended for real secrets",
 				Required:                 []string{"file", "key"},
@@ -3048,6 +3073,20 @@ func validateSetGroupVar(step editAction) error {
 		return fmt.Errorf("set_group_var does not accept value_env: group_vars hold non-secret role settings, not secrets")
 	}
 	return nil
+}
+
+func validateConfigureAlertmanagerReceiver(step editAction) error {
+	switch strings.TrimSpace(step.ReceiverMode) {
+	case alertmanagerReceiverModeNull:
+		if step.Value != "" || step.ValueEnv != "" {
+			return fmt.Errorf("null Alertmanager receiver does not accept value or value_env")
+		}
+		return nil
+	case alertmanagerReceiverModeTeams, alertmanagerReceiverModeCustom:
+		return validateValueOrEnv(step, "configure_alertmanager_receiver")
+	default:
+		return fmt.Errorf("configure_alertmanager_receiver receiver_mode must be null, teams, or custom")
+	}
 }
 
 func validateFileOnlyAction(name string) func(editAction) error {

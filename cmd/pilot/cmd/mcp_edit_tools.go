@@ -46,12 +46,13 @@ const (
 // are deliberately NOT here: ssh_keys.values are public keys, not
 // secrets, and the interactive TUI itself never masks them.
 var mcpSecretActionNames = map[string]bool{
-	"add_vault_key":     true,
-	"set_vault_value":   true,
-	"delete_vault_key":  true,
-	"save_vault":        true,
-	"discard_vault":     true,
-	"set_user_password": true,
+	"add_vault_key":                   true,
+	"set_vault_value":                 true,
+	"delete_vault_key":                true,
+	"save_vault":                      true,
+	"discard_vault":                   true,
+	"set_user_password":               true,
+	"configure_alertmanager_receiver": true,
 }
 
 // mcpAllowedActionNames is which editActionRegistry() action names MCP

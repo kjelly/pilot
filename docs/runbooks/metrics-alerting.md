@@ -641,6 +641,222 @@ go run ./cmd/pilot vm-target list   # 確認為空
 
 ---
 
+## 7c. `pilot-alertmanager-teams-proxy`：Adaptive Card 轉換 proxy（2026-09-08）
+
+### 背景
+
+正式環境 `alertmanager_receiver_mode=teams` 送測試訊息一直失敗，Power
+Automate flow 回報：
+
+```
+AdaptiveCards.AdaptiveSerializationException: Property 'type' must be 'AdaptiveCard'
+```
+
+在 infra-deploy 的 `pilot-cli:latest` container 上對真實 it-core
+（10.1.58.12）主機調查，確認根因：Alertmanager `webhook_configs` 一律送
+自己固定的 JSON envelope（`version`/`groupKey`/`status`/`alerts`...），
+從來不是 Adaptive Card；而這個 Power Automate flow 用的是「當收到 Teams
+webhook 要求」（flowbot）觸發器，要求整個 POST body 本身就是合法 Adaptive
+Card（頂層 `"type": "AdaptiveCard"`）。兩邊格式對不上,每次必現。原生
+`msteams_configs`（v0.26+）也救不了——它送的是舊版 O365 Connector
+`MessageCard`（`@type: MessageCard`），同樣不是 `AdaptiveCard`。
+
+修法：新增 `pilot-alertmanager-teams-proxy`（stdlib-only Python，
+`python:3.12-alpine`，不需要 build 步驟）夾在 Alertmanager 與真實 Power
+Automate URL 之間，`webhook_configs.url` 改指向這個 proxy
+（`http://pilot-alertmanager-teams-proxy:8095/webhook`），真正的
+webhook URL 改成 proxy 的 `TEAMS_WEBHOOK_URL` 環境變數，不再直接寫進
+`alertmanager.yml`。與 `alertmanager` role 同一支 apply playbook、同一個
+`pilot-metrics` docker network 安裝，只在 `alertmanager_receiver_mode=teams`
+時存在。spec 升到 v1.4，新增 C8（容器存在則需 running+`/healthz`
+200，不存在也算過）與 C9（`/render` 自我測試轉換正確性，不真的送
+Teams）。
+
+### 事實快照（2026-09-08T08:10–08:16 UTC）
+
+- 新建 1 台 vm-target：`am-teams-proxy`（Ubuntu 24.04，`--services local`）。
+- Tested revision：本次工作樹（`playbooks/apply/alertmanager-apply.yml`、
+  `playbooks/apply/files/alertmanager-teams-proxy.py`、
+  `docs/verification/alertmanager.md`、
+  `internal/spec/alertmanager_regression_test.go` 四個檔案，尚未 commit）。
+- 真實 Teams webhook URL（含簽章的 Power Automate URL）不進測試——`TEAMS_WEBHOOK_URL`
+  用 `https://httpbin.org/post`（公開 echo 端點）驗證「proxy 真的把轉換後的
+  payload 送出去、且把下游 HTTP 狀態碼原樣傳回 Alertmanager」這條路徑，不
+  依賴、也不觸碰正式環境的 signature 密鑰。
+
+### 部署鏈
+
+```bash
+go run ./cmd/pilot vm-target up --name am-teams-proxy --ssh-user ubuntu \
+    --disk 20 --memory 2048 --vcpus 2 --ssh-timeout 8m --boot-timeout 8m --services local
+go run ./cmd/pilot vm-target run --name am-teams-proxy \
+    playbooks/apply/docker-apply.yml -e target_group=am-teams-proxy
+# PLAY RECAP: ok=6 changed=2 failed=0 skipped=2
+
+# null 模式（預設）
+go run ./cmd/pilot vm-target run --name am-teams-proxy \
+    playbooks/apply/alertmanager-apply.yml -e target_group=am-teams-proxy
+# PLAY RECAP: ok=14 changed=4 failed=0 skipped=10
+
+# teams 模式
+go run ./cmd/pilot vm-target run --name am-teams-proxy \
+    playbooks/apply/alertmanager-apply.yml -e target_group=am-teams-proxy \
+    -e alertmanager_receiver_mode=teams -e alertmanager_teams_webhook_url=https://httpbin.org/post
+# PLAY RECAP: ok=16 changed=4 failed=0 skipped=8
+# 冪等重跑：ok=16 changed=0 failed=0 skipped=8
+
+# 切回 null 模式（驗證 proxy container 會被正確移除）
+go run ./cmd/pilot vm-target run --name am-teams-proxy \
+    playbooks/apply/alertmanager-apply.yml -e target_group=am-teams-proxy
+# PLAY RECAP: ok=14 changed=3 failed=0 skipped=10
+# 其中 "Teams proxy: ensure absent when not in teams mode" 為 changed
+```
+
+**第一次 `--check --diff` 就抓到一個真 bug**（跟這次新增的 proxy 無關，是
+2026-09-08 稍早同一個工作樹裡加入的 receiver_mode 三態切換本身就沒測過）：
+「Default Alertmanager receiver mode to null」這個 task 把
+`alertmanager_receiver_mode_effective` `set_fact` 成 YAML/Jinja 的
+`null`（Python `None`），但下游兩處判斷（`in ['null', 'teams', 'custom']`
+gate、`Resolve the effective ... configuration` 的 `== 'null'`）比對的都是
+**字串** `"null"`——`None` 永遠不等於字串 `"null"`，導致「不帶
+`alertmanager_receiver_mode` 也沒有 legacy `alertmanager_config`」這個
+**預設路徑本身**在全新主機上必然掛在 gate assert。修法：改成
+`set_fact: alertmanager_receiver_mode_effective: "null"`（字串）。上面
+null 模式的 apply 輸出就是修好後的結果。
+
+### 端到端證明：proxy 真的轉換 + 真的轉發 + 狀態碼原樣傳回
+
+推一筆合成告警進 Alertmanager，等 `group_wait`（30s）後看 proxy container
+日誌：
+
+```bash
+$ curl -fsS -X POST http://127.0.0.1:9093/api/v2/alerts -H 'Content-Type: application/json' \
+    -d '[{"labels":{"alertname":"pilot-teams-e2e-test","severity":"critical","instance":"am-teams-proxy"},"annotations":{"summary":"end-to-end proxy forwarding test"}}]'
+
+$ docker logs pilot-alertmanager-teams-proxy
+172.18.0.1 - "GET /healthz HTTP/1.1" 200 -
+172.18.0.1 - "POST /render HTTP/1.1" 200 -
+172.18.0.2 - "POST /webhook HTTP/1.1" 200 -
+```
+
+`172.18.0.2`（`pilot-alertmanager` 在 `pilot-metrics` network 上的位址）
+真的呼叫了 proxy 的 `/webhook`，proxy 把轉換後的 Adaptive Card 轉發給
+`https://httpbin.org/post` 並拿到 200，原樣回給 Alertmanager。另外直接對
+proxy 補一次直呼證據：
+
+```bash
+$ curl -s -o /dev/null -w 'proxy /webhook -> %{http_code}\n' -X POST http://127.0.0.1:8095/webhook \
+    -H 'Content-Type: application/json' \
+    -d '{"status":"firing","groupLabels":{"alertname":"pilot-teams-e2e-direct"},"alerts":[{"status":"firing","labels":{"alertname":"pilot-teams-e2e-direct","severity":"critical"},"annotations":{"summary":"direct proxy call evidence"}}]}'
+proxy /webhook -> 200
+```
+
+轉換函式本身（本機單元驗證，非 VM）對同樣輸入的實際輸出：
+
+```json
+{"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "version": "1.4", "body": [...]}
+```
+
+`"type": "AdaptiveCard"` 是頂層欄位——這正是修好前送進 Power Automate 會被
+拒絕的那個欄位。
+
+### Verify（null / teams 兩種模式都測，`pilot-verify-single-vm-targetgroup-gap`
+繞法同 §7a/§7b：把 `vm-target show-inventory` 的輸出補一段 `children:
+alertmanager: hosts: <vm名>: {}` 再對 `pilot verify` 帶 `-i`）
+
+| 模式 | verify | 冪等重跑 |
+|---|---|---|
+| null（proxy 不存在） | PASS pass=9 fail=0 skip=0 | changed=0 |
+| teams（proxy 存在+healthy） | PASS pass=9 fail=0 skip=0 | changed=0 |
+| 切回 null 後 | PASS pass=9 fail=0 skip=0（proxy container 確認已移除：`docker ps -a` 查無） | — |
+
+### 完成後：teardown
+
+```bash
+go run ./cmd/pilot vm-target down --name am-teams-proxy
+go run ./cmd/pilot vm-target list   # 確認為空
+```
+
+---
+
+## 7d. `alertmanager_forward_to_agent_controller` mirror：手動字串拼接洩漏成無效 YAML（2026-09-08）
+
+### 背景
+
+§7c 之後、commit 前的 code review 對 `playbooks/apply/alertmanager-apply.yml`
+的「Add Agent Controller mirror to the Teams configuration」task 提出質疑：
+`alertmanager_agent_controller_webhook_url`/`agent_controller_webhook_secret`
+是用手寫的 `"{{ ... }}"` 直接接進一段 YAML/Jinja 字串（同一類本檔 §9 已經踩過
+兩次的「手動拼接 YAML」坑），沒有任何跳脫；secret 只要含 `"`、換行或反斜線就
+會產生語法無效的 `alertmanager.yml`。§7c 的 vm-target 實測從未帶
+`alertmanager_forward_to_agent_controller=true`，這條路徑完全沒被驗證過。
+
+### 本機證明（Ansible 真實 Jinja engine，非 VM）
+
+用一支獨立 `hosts: localhost` playbook 帶入原始（未修）task 的完全相同字串
+樣板與一個刻意刁鑽的 secret（`sec"ret\nwith\backslash`，含雙引號/換行/反斜線）：
+渲染結果餵給 `yaml.safe_load` 直接炸掉 `ParserError: while parsing a block
+mapping ... expected <block end>, but found '<scalar>'`。改用
+`| to_json`（JSON 字串一定是合法的 YAML flow scalar）取代手寫的
+`\"{{ ... }}\"` 後,同一支測試 playbook 產生的內容可正確解析,且回收到的
+`credentials` 值與輸入的 secret 逐字元相同（含雙引號/換行/反斜線）。
+
+### VM 端到端證明（`am-mirror-test`，Ubuntu 24.04，`--services local`，事後已 teardown）
+
+```bash
+go run ./cmd/pilot vm-target up --name am-mirror-test --ssh-user ubuntu \
+    --disk 20 --memory 2048 --vcpus 2 --ssh-timeout 8m --boot-timeout 8m --services local
+go run ./cmd/pilot vm-target run --name am-mirror-test playbooks/apply/docker-apply.yml -e target_group=am-mirror-test
+
+# -e @vars.json 帶 alertmanager_receiver_mode=teams、
+# alertmanager_forward_to_agent_controller=true、
+# agent_controller_webhook_secret="sec\"ret\nwith\\backslash"（JSON 跳脫後的真實值）
+```
+
+**修好前**（暫時把 task 改回手寫 `\"{{ ... }}\"` 樣板重跑同一組 vars）：
+`Wait for Alertmanager to become ready` 逾時失敗（`Connection refused`），
+playbook 自己的 rollback 觸發；`docker logs pilot-alertmanager` 顯示容器真
+的因為設定檔語法錯誤反覆重啟：
+
+```
+level=error component=configuration msg="Loading configuration file failed" \
+  file=/etc/alertmanager/alertmanager.yml err="yaml: line 19: did not find expected key"
+```
+
+**改回 `to_json` 修法後**重跑：`PLAY RECAP failed=0`，
+`docker exec`/`vm-target exec` 進去讀 `/etc/pilot/alertmanager/alertmanager.yml`
+確認渲染出的內容是逐字元正確跳脫的合法 YAML：
+
+```yaml
+      - url: "http://127.0.0.1:9999/webhooks/alertmanager"
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials: "sec\"ret\nwith\\backslash"
+```
+
+`curl http://127.0.0.1:9093/-/ready` 回 200,`docker logs pilot-alertmanager`
+顯示 `"Completed loading of configuration file"`。修法：把兩個直接內插的
+`{{ alertmanager_agent_controller_webhook_url }}` / `{{
+agent_controller_webhook_secret }}` 改成 `| to_json`。
+
+一個操作性坑（非本次程式碼修改造成，屬既有 rescue 設計）：壞掉的 config 重
+跑一次後,`docker rm -f pilot-alertmanager` 手動清掉當時卡在 crash-loop 的舊
+container,下一次 apply 才順利重建——rescue 只刪設定檔、刻意保留 container
+供事後檢查（見 task 註解），這跟 §9 既有「`docker_container` 模組不會自動
+重建卡在無限重啟迴圈的舊 container」是同一類已知限制。
+
+### Verify
+
+`docs/verification/alertmanager.md` 目前沒有替這條 mirror 路徑另開檢查
+row——C8/C9 只驗 Teams proxy 本身,不驗 agent-controller mirror receiver 是
+否存在於 `alertmanager.yml`。本輪只做到「apply 成功 + 容器健康 + 檔案內容
+逐字元正確」的端到端證明,尚未新增對應 spec row（留給下次動到這個功能時
+補）。
+
+---
+
 ## 8. 各角色 Verify / Idempotency 總表
 
 | 角色 | target | verify | 冪等重跑 |
@@ -653,6 +869,8 @@ go run ./cmd/pilot vm-target list   # 確認為空
 | `prometheus`（+ node-exporter 自動探索，§7a） | prom-test + hm-ubuntu | pass=12 fail=2（C9/C11，跟本次改動無關，見 §7a） | changed=0 |
 | `prometheus`（+ `pilot_host` canonical identity，§7b） | prom-test + hm-ubuntu | pass=13 fail=2（C9/C11，跟本次改動無關；C13/C14/C15 全 pass，見 §7b） | changed=0 |
 | `thanos-query`（+ `pilot_host`/`site` real chain，§7b） | nexus + prom-test | pass=9 fail=1（C8，跟本次改動無關；C9/C10 全 pass，見 §7b） | changed=0 |
+| `alertmanager`（null 模式 + teams proxy 不存在，§7c） | am-teams-proxy | PASS pass=9 fail=0 skip=0 | changed=0 |
+| `alertmanager`（teams 模式 + proxy running，§7c） | am-teams-proxy | PASS pass=9 fail=0 skip=0 | changed=0 |
 
 三份原始 spec 全數 PASS；`host-monitoring` 兩種 distro 皆 PASS；`prometheus`
 的 node-exporter 整合相關 rows（C13/C14）皆 PASS。所有 apply 的第二次
@@ -677,6 +895,9 @@ go run ./cmd/pilot vm-target list   # 確認為空
 | （2026-08-10，§7a）同一類 check-mode 坑：`htpasswd` 這個 CLI 工具本身是**這支 playbook 自己**在同一次 apply 裡用 `apt`/`dnf` 裝的，在 `--check` 下只被模擬安裝，強制 `check_mode: false` 讓產生 bcrypt hash 的 task 真的執行,反而因為 binary 真的不存在而失敗 | `Error executing command: No such file or directory: 'htpasswd'` | 拿掉 `check_mode: false`，改成跟 `unarchive` 一樣加 `and not ansible_check_mode` 整段延後——`check_mode: false` 只適合「前提條件來自前一次 apply」的情境（例如既有 docker_container_exec 探測已存在的容器），不適合前提條件就是**同一次** check-mode run 裡才會建立的東西 |
 | （2026-08-10，§7a）`prometheus-apply.yml` 新增的 node-exporter scrape job 用 Jinja `~ "\n"` 手動拼字串塞進 `>-` YAML folded scalar，結果 `\n` 沒被展開成真正換行,渲染出無效 YAML | 本機模擬測試就抓到，未上真機（見下一條真機才抓到的坑） | 改用原生 list/dict 資料結構 + `to_nice_yaml(indent=2)` 序列化，徹底避開手動處理換行字元 |
 | （2026-08-10，§7a）改用 `to_nice_yaml` 後，spec C13 原本錨定 `^-\s*job_name:\s*node$`（假設 `job_name` 是這個 list item 的第一個 key），實測在真的 `prom-test` vm-target 上失敗 | `to_nice_yaml` 預設把 dict key 依字母序排列，真實輸出是 `- basic_auth:` 打頭，`job_name: node` 變成第二行 | C13 改成只錨 `^\s*job_name:\s*node$`（不管前面有沒有 `-`），對 key 順序無感 |
+| （2026-09-08，§7c）Alertmanager `webhook_configs` 直接指向要求 Adaptive Card 的 Power Automate flowbot URL，Teams 端必現 `AdaptiveSerializationException: Property 'type' must be 'AdaptiveCard'` | `webhook_configs` 只會送 Alertmanager 自己固定的 JSON envelope，從來不是 Adaptive Card；原生 `msteams_configs` 送的是舊版 `MessageCard`，同樣不是 `AdaptiveCard`——沒有任何 stock 設定能直接滿足這個 flowbot 觸發器 | 新增 `pilot-alertmanager-teams-proxy`（stdlib-only Python，同一個 `pilot-metrics` network）做格式轉換，`webhook_configs.url` 改指向 proxy，真正的 URL 移到 proxy 的 `TEAMS_WEBHOOK_URL` 環境變數 |
+| （2026-09-08，§7c）「Default Alertmanager receiver mode to null」`set_fact` 成 YAML `null`（Python `None`），下游 gate/resolve 兩處都比對字串 `"null"` | 全新主機不帶 `alertmanager_receiver_mode`（預設路徑）必掛在 `Gate: Alertmanager receiver mode is supported`——這個 receiver-mode 三態切換本身此前從未在乾淨主機上跑過 | `set_fact` 改成字串 `"null"` |
+| （2026-09-08，§7d）`alertmanager_forward_to_agent_controller` mirror 把 secret/URL 直接手寫內插進 YAML/Jinja 字串，沒有跳脫 | secret 含 `"`/換行/反斜線時 `alertmanager.yml` 變成無效 YAML，容器 crash-loop：`yaml: line 19: did not find expected key`（本機 Ansible 引擎與真 vm-target 皆重現） | 兩個內插值改用 `\| to_json`（JSON 字串必為合法 YAML flow scalar），vm-target 重跑確認可正確解析且逐字元還原 |
 
 ---
 
@@ -705,3 +926,5 @@ go run ./cmd/pilot vm-target list   # 確認為空
 | 2026-07-17 | v2.0 | 文件整併：`docs/runbooks/alertmanager.md` 併入本檔（該檔已歸檔），檔名由 `prometheus-thanos.md` 改為 `metrics-alerting.md`。用同一次四主機環境（`prometheus`/`thanos-query`/`alertmanager`/S3 目的地）重新實跑三個角色的 apply/verify/idempotency，新增 Prometheus→Alertmanager 端到端證明（含有界測試告警 firing→resolved 的完整生命週期）。改用 `vm-target run --group` 取代舊版手動合併 inventory + raw `ansible-playbook` 的探索測試方式。發現並修好 `docs/verification/thanos-query.md` 的 port 10902→10912 真事故（規格落後於 playbook 早先的預設值變更）。發現一個範圍外的真實環境限制：`core-infra-provider-apply.yml` 的 RHEL family docker 安裝缺 `docker-compose` 套件來源（AlmaLinux 9），未修 | sre |
 | 2026-08-10 | v2.1 | 新增 §7a：`prometheus` 自動從 inventory 的 `host-monitoring` group 展開 node_exporter scrape target（新元件，見 `docs/runbooks/host-monitoring.md`），強制 HTTP Basic Auth。3 台新 vm-target（Ubuntu + AlmaLinux 9 + prometheus）實跑：`host-monitoring` 兩種 distro 各自 apply/verify（10/10 PASS）/冪等重跑（changed=0）；`prometheus` 用 `--group` 跟 `host-monitoring` 組合 inventory，端到端證明 `up{job="node"}==1`（認證通過）與未認證 401/認證後 200 兩條路徑。實跑中發現並修好 4 個真 bug：`unarchive`/`htpasswd` 在 check-mode 對「同一次 apply 裡才會建立的前提條件」處理不當（兩處）、`prometheus_scrape_configs` 手動拼 `\n` 在 `>-` YAML scalar 下沒被展開成真換行（改用 `to_nice_yaml`）、改用 `to_nice_yaml` 後 spec C13 原本錨定的 `^-\s*job_name:` 因為 key 依字母序排列而抓不到（改成不錨 `^-`）——後兩個是本機模擬/真機分別抓到的，見 §9 表格 | sre |
 | 2026-08-28 | v2.2 | 新增 §7b：Detection Engine Stage A-0（`docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §9/§51）——`prometheus-apply.yml` 的 node-exporter auto-discovery 改成逐 host render `labels.pilot_host = inventory_hostname`，並修正 `contracts/thanos-query.yaml` 的 `query` endpoint port（10902→10912，跟 §7a/§9 同一類、但這次是 contract 檔沒跟上）。3 台新 vm-target 實測全鏈路：`prom-test` 的 `prometheus.yml` 正確渲染 `pilot_host: hm-ubuntu`（新增 spec row C15 PASS），真實中央 Thanos Query `:10912` 的 `/api/v1/query?query=up` 回傳結果同時帶 `pilot_host=hm-ubuntu` 與 `site=test-site`（`thanos-query.md` C9/C10 PASS）。兩份 apply 冪等重跑皆 `changed=0`。實跑中踩到一個操作性坑（非 playbook bug）：`nexus` 忘了先套用 `docker-apply.yml` 就直接跑 `thanos-query-apply.yml`，`Ensure docker network pilot-metrics exists` 失敗，playbook 自己的 rollback 正確清掉 objstore secret 檔 | sre |
+| 2026-09-08 | v2.3 | 新增 §7c：`pilot-alertmanager-teams-proxy`——正式環境 teams 測試訊息在 Power Automate flowbot 端必現 `Property 'type' must be 'AdaptiveCard'`，根因是 `webhook_configs` 只送 Alertmanager 自己固定的 JSON envelope，從來不是 Adaptive Card（`msteams_configs` 也不行，送的是舊版 `MessageCard`）。新增 stdlib-only Python 轉換 proxy，跟 `alertmanager` role 同一支 apply playbook、同一個 `pilot-metrics` network 安裝，只在 `alertmanager_receiver_mode=teams` 時存在；spec 升到 v1.4（新增 C8/C9）。1 台新 vm-target 實測 null/teams 兩種模式的 apply/verify/冪等重跑皆綠，並實際端到端證明 Alertmanager 真的呼叫 proxy、proxy 真的轉換+轉發+把下游狀態碼原樣傳回（`https://httpbin.org/post` 作為安全的假 Teams 端點，不觸碰正式簽章密鑰）。實跑中發現並修好一個真 bug：receiver-mode 三態切換的「預設 null 模式」`set_fact` 成 YAML `null` 而非字串 `"null"`，導致不帶任何 `-e` 的預設路徑在全新主機上必掛 gate assert | sre |
+| 2026-09-08 | v2.4 | 新增 §7d：commit 前 review 抓到 `alertmanager_forward_to_agent_controller` mirror（§7c 從未實測過的路徑）把 secret/URL 手寫內插進 YAML 字串、沒有跳脫；本機 Ansible 引擎重現＋新建 1 台 vm-target（`am-mirror-test`，事後已 teardown）端到端重現：secret 含特殊字元時容器真的 crash-loop（`yaml: ... did not find expected key`），改用 `\| to_json` 修好後重跑 `PLAY RECAP failed=0`、容器健康、渲染內容逐字元正確。同批也修正 `cmd/pilot/cmd` 因新增 Alertmanager 頂層選單項而位移、被新增前 top-menu 索引悄悄弄壞的 14 個既有 teatest/PTY 測試（`git stash` 驗證：這些測試在 main 上全綠，在本次工作樹上因索引位移而逾時失敗），以及兩個過期的 action 數量 golden test（105→106） | sre |

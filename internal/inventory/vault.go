@@ -154,8 +154,19 @@ var vaultSections = map[string]vaultSection{
 		Note:  "這不是密碼，但正式環境通常會把完整 receiver config 跟 secret webhook 一起放進 vault。",
 		Keys: []vaultField{
 			{
+				Name:     "alertmanager_receiver_mode",
+				Value:    "null",
+				Comment:  "通知 receiver 模式：null（不送通知）、teams（單一 Teams webhook）、custom（完整 alertmanager_config）",
+				Optional: true,
+			},
+			{
+				Name:     "alertmanager_teams_webhook_url",
+				Comment:  "Teams / Power Automate webhook URL；僅 receiver_mode=teams 時使用",
+				Optional: true,
+			},
+			{
 				Name:      "alertmanager_config",
-				Comment:   "完整 alertmanager.yml 內容；先放一個可用的 null receiver stub",
+				Comment:   "完整 alertmanager.yml 內容；僅 receiver_mode=custom 時使用",
 				Optional:  true,
 				Multiline: true,
 				Value: strings.Join([]string{

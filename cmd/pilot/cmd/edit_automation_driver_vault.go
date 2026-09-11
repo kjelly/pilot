@@ -157,7 +157,7 @@ func (d *automationDriver) addVaultKey(r *editRouterModel, file, key, value stri
 	if err := d.enter(r); err != nil {
 		return err
 	}
-	if err := d.typeSecretOrPlain(r, value, secret, false); err != nil {
+	if err := d.typeSecretOrPlain(r, vaultInputText(value), secret, false); err != nil {
 		return err
 	}
 	return d.enter(r)
@@ -173,10 +173,51 @@ func (d *automationDriver) setVaultValue(r *editRouterModel, file, key, value st
 	if err := d.choose(r, "修改值"); err != nil {
 		return err
 	}
-	if err := d.typeSecretOrPlain(r, value, secret, true); err != nil {
+	if err := d.typeSecretOrPlain(r, vaultInputText(value), secret, true); err != nil {
 		return err
 	}
 	return d.enter(r)
+}
+
+// vaultInputText translates a semantic action's real multiline value into
+// the literal \n notation the vault TUI deliberately uses for a single-line
+// text input. pushVaultAddKeyValue/pushVaultEditValue turn that notation back
+// into real newlines before writing YAML. Sending actual newline runes through
+// a Bubble Tea text input loses the line boundaries, producing invalid
+// block-scalar configuration such as a flattened alertmanager_config.
+func vaultInputText(value string) string {
+	return strings.ReplaceAll(value, "\n", `\n`)
+}
+
+func (d *automationDriver) configureAlertmanagerReceiver(r *editRouterModel, mode, value string, secret bool) error {
+	if automationState(r).Kind != tui.ScreenSelect || automationState(r).Title != "要編輯什麼？" {
+		return fmt.Errorf("cannot configure Alertmanager receiver from %s screen", automationScreenID(r))
+	}
+	if err := d.choose(r, "Alertmanager 通知"); err != nil {
+		return err
+	}
+	switch mode {
+	case alertmanagerReceiverModeTeams:
+		if err := d.choose(r, "設定 Teams webhook"); err != nil {
+			return err
+		}
+		if err := d.typeSecretOrPlain(r, vaultInputText(value), secret, false); err != nil {
+			return err
+		}
+		return d.enter(r)
+	case alertmanagerReceiverModeCustom:
+		if err := d.choose(r, "設定 custom Alertmanager YAML"); err != nil {
+			return err
+		}
+		if err := d.typeSecretOrPlain(r, vaultInputText(value), secret, false); err != nil {
+			return err
+		}
+		return d.enter(r)
+	case alertmanagerReceiverModeNull:
+		return d.choose(r, "使用 null receiver")
+	default:
+		return fmt.Errorf("unknown Alertmanager receiver mode %q", mode)
+	}
 }
 
 func (d *automationDriver) deleteVaultKey(r *editRouterModel, file, key string) error {

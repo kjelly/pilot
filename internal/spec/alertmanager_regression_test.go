@@ -1,12 +1,13 @@
 package spec
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
 
 // TestRegression_AlertmanagerSpec locks the structure of
-// docs/verification/alertmanager.md (v1.0 — central Alertmanager, container
+// docs/verification/alertmanager.md (v1.4 — central Alertmanager, container
 // role co-located with docs/verification/thanos-query.md and consumed by
 // docs/verification/prometheus.md per-site role):
 //
@@ -19,6 +20,18 @@ import (
 //	       (end-to-end self-test, mirrors dashboard.md C7 / Loki push-pull
 //	       pattern; isolates Alertmanager's own receive API from downstream
 //	       receiver routing which is configured via vault)
+//	C8     pilot-alertmanager-teams-proxy container running + /healthz
+//	       200 when present; absent (non-teams mode) also passes
+//	C9     proxy's Alertmanager -> Adaptive Card transform is correct
+//	       (POST /render self-test, no real Teams delivery); absent
+//	       (non-teams mode) also passes
+//
+// C8/C9 exist because Alertmanager's webhook_configs always POSTs its own
+// fixed JSON envelope, never an Adaptive Card — a Power Automate "When a
+// Teams webhook request is received" flow rejects that body with
+// AdaptiveSerializationException: Property 'type' must be 'AdaptiveCard'.
+// alertmanager_teams_config now points webhook_configs at this proxy
+// instead of the real Power Automate URL directly.
 //
 // Cross-row invariants locked below:
 //
@@ -54,7 +67,7 @@ func TestRegression_AlertmanagerSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -71,7 +84,11 @@ func TestRegression_AlertmanagerSpec(t *testing.T) {
 		}
 	}
 
-	wantContainer := map[string]string{"C1": "pilot-alertmanager"}
+	wantContainer := map[string]string{
+		"C1": "pilot-alertmanager",
+		"C8": "pilot-alertmanager-teams-proxy",
+		"C9": "pilot-alertmanager-teams-proxy",
+	}
 	for _, r := range s.Rows {
 		name, ok := wantContainer[r.ID]
 		if !ok {
@@ -152,6 +169,47 @@ func TestRegression_AlertmanagerSpec(t *testing.T) {
 		}
 	}
 
+	// C8 must be present-or-healthy (not mandatory-present) so it doesn't
+	// spuriously fail in null/custom mode, where the proxy container is
+	// legitimately absent.
+	for _, r := range s.Rows {
+		if r.ID != "C8" {
+			continue
+		}
+		if !strings.Contains(r.Command, "/healthz") {
+			t.Errorf("C8 must probe /healthz; got %q", r.Command)
+		}
+		if !strings.Contains(r.Command, "else true; fi") {
+			t.Errorf("C8 must treat proxy-absent as pass (non-teams mode); got %q", r.Command)
+		}
+		if r.Expected != "0" {
+			t.Errorf("C8 expected must be rc-based \"0\"; got %q", r.Expected)
+		}
+	}
+
+	// C9 exercises the Alertmanager -> Adaptive Card transform via the
+	// proxy's /render self-test endpoint (no live Teams delivery), and
+	// must assert on the literal AdaptiveCard type field — this is the
+	// exact defect class (missing/wrong "type") that broke real Teams
+	// delivery before this proxy existed.
+	for _, r := range s.Rows {
+		if r.ID != "C9" {
+			continue
+		}
+		if !strings.Contains(r.Command, "/render") {
+			t.Errorf("C9 must hit the proxy's /render self-test endpoint; got %q", r.Command)
+		}
+		if !strings.Contains(r.Command, `\"type\": \"AdaptiveCard\"`) {
+			t.Errorf("C9 must assert on the AdaptiveCard type field; got %q", r.Command)
+		}
+		if !strings.Contains(r.Command, "else true; fi") {
+			t.Errorf("C9 must treat proxy-absent as pass (non-teams mode); got %q", r.Command)
+		}
+		if r.Expected != "0" {
+			t.Errorf("C9 expected must be rc-based \"0\"; got %q", r.Expected)
+		}
+	}
+
 	// No credentials belong in a spec (AGENTS.md).
 	for _, r := range s.Rows {
 		lower := strings.ToLower(r.Command)
@@ -165,6 +223,32 @@ func TestRegression_AlertmanagerSpec(t *testing.T) {
 	fs := Lint(s)
 	if HasErrors(fs) {
 		t.Errorf("Lint produced errors:\n%s", joinFindings(fs))
+	}
+
+	data, err := os.ReadFile("../../playbooks/apply/alertmanager-apply.yml")
+	if err != nil {
+		t.Fatalf("read Alertmanager apply playbook: %v", err)
+	}
+	playbook := string(data)
+	for _, required := range []string{
+		"alertmanager_receiver_mode_effective",
+		"['null', 'teams', 'custom']",
+		"alertmanager_teams_webhook_url",
+		"match('^https://\\S+$')",
+		"send_resolved: true",
+		"alertmanager_config | length > 0",
+		"pilot-alertmanager-teams-proxy",
+		"http://pilot-alertmanager-teams-proxy:8095/webhook",
+		"TEAMS_WEBHOOK_URL",
+		"alertmanager-teams-proxy.py",
+		"alertmanager_forward_to_agent_controller",
+		"alertmanager_agent_controller_webhook_url",
+		"agent_controller_webhook_secret",
+		"/webhooks/alertmanager",
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Errorf("Alertmanager receiver-mode playbook missing %q", required)
+		}
 	}
 
 	pb, err := Generate(s, GenerateOptions{IncludeRaw: true})

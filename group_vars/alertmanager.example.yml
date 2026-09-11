@@ -33,3 +33,10 @@ alertmanager_config: |
     repeat_interval: 4h
   receivers:
     - name: 'null'
+
+# Optional mirror: only supported alongside alertmanager_receiver_mode=teams.
+# Preserves the Teams receiver while also delivering every Alertmanager event
+# and resolved notification to the observe-only agent controller. Keep the
+# bearer secret only in vault.
+# alertmanager_forward_to_agent_controller: true
+# alertmanager_agent_controller_webhook_url: "http://10.1.58.12:8090/webhooks/alertmanager"

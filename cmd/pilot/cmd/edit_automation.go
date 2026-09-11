@@ -133,6 +133,10 @@ type editAction struct {
 	KeyGroup   string `json:"key_group,omitempty"`
 	KeyMode    string `json:"key_mode,omitempty"`
 	ReloadUnit string `json:"reload_unit,omitempty"`
+	// ReceiverMode selects Alertmanager's notification configuration. It is
+	// distinct from Value: teams consumes a secret webhook URL, custom consumes
+	// a complete secret YAML document, and null consumes no value.
+	ReceiverMode string `json:"receiver_mode,omitempty"`
 	// Monitoring target/scrape-profile fields (spec.md §7-24). Name is
 	// reused as the target's or profile's own primary key (same
 	// "Name is entity-kind-safe because the action name determines which

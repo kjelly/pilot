@@ -279,6 +279,43 @@ func TestEditAutomationDriverVaultAddKeyFromValueEnv(t *testing.T) {
 	}
 }
 
+func TestEditAutomationDriverVaultSetValueEnvPreservesMultilineValue(t *testing.T) {
+	const envName = "PILOT_TEST_MULTILINE_VAULT_VALUE"
+	want := "global:\n  resolve_timeout: 5m\nreceivers:\n  - name: teams\n"
+	t.Setenv(envName, want)
+	dir := t.TempDir()
+	vaultDir := filepath.Join(dir, ".vault")
+	if err := os.MkdirAll(vaultDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(vaultDir, "main.yaml")
+	if err := os.WriteFile(path, []byte("alertmanager_config: initial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "alertmanager_config", ValueEnv: envName},
+		{Action: "save_vault", File: "main.yaml"},
+	}}); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := vaultfile.Parse(data)
+	if err != nil {
+		t.Fatalf("parse saved vault: %v\n%s", err, data)
+	}
+	entries := doc.ScalarEntries()
+	if len(entries) != 1 || entries[0].Key != "alertmanager_config" || entries[0].Value.Value != want {
+		t.Fatalf("multiline vault value = %#v, want %#v\n%s", entries, want, data)
+	}
+}
+
 func TestEditAutomationDriverVaultSetValueMissingEnvErrors(t *testing.T) {
 	dir := t.TempDir()
 	// Setup: create the file and persist a known baseline value.

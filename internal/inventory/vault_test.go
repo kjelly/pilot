@@ -33,6 +33,8 @@ func TestGenerateVaultSkeleton_IncludesRelevantKeysOnly(t *testing.T) {
 		"ipa_admin_password:",
 		"# ipa_dm_password:",
 		"grafana_admin_password:",
+		"# alertmanager_receiver_mode:",
+		"# alertmanager_teams_webhook_url:",
 		"alertmanager_config: |",
 		"Roles seen: freeipa-server, alertmanager, dashboard",
 	} {
@@ -160,18 +162,24 @@ func TestGenerateVaultSkeleton_ContainsExactlyExpectedKeysForRoles(t *testing.T)
 
 func TestAlertmanagerDefaultConfigIsMinimalAndOperational(t *testing.T) {
 	section := vaultSections["alertmanager"]
-	if len(section.Keys) != 1 || section.Keys[0].Name != "alertmanager_config" {
-		t.Fatalf("alertmanager fields = %+v, want one alertmanager_config field", section.Keys)
+	if len(section.Keys) != 3 {
+		t.Fatalf("alertmanager fields = %+v, want mode, Teams webhook, and custom config", section.Keys)
 	}
-	if !section.Keys[0].Optional {
-		t.Fatal("alertmanager_config must be optional so the apply playbook default can be used")
+	keys := map[string]vaultField{}
+	for _, key := range section.Keys {
+		keys[key.Name] = key
 	}
-	for _, key := range ExpectedVaultKeysForRoles([]string{"alertmanager"}) {
-		if key == "alertmanager_config" {
-			t.Fatalf("alertmanager_config must not be a required vault key")
+	for _, name := range []string{"alertmanager_receiver_mode", "alertmanager_teams_webhook_url", "alertmanager_config"} {
+		if !keys[name].Optional {
+			t.Fatalf("%s must be optional so legacy and null-receiver workspaces remain deployable", name)
 		}
 	}
-	config := section.Keys[0].Value
+	for _, key := range ExpectedVaultKeysForRoles([]string{"alertmanager"}) {
+		if strings.HasPrefix(key, "alertmanager_") {
+			t.Fatalf("%s must not be a required vault key", key)
+		}
+	}
+	config := keys["alertmanager_config"].Value
 	for _, required := range []string{
 		"global:",
 		"route:",
