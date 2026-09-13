@@ -116,6 +116,8 @@
       ansible.builtin.shell: |
         set -o pipefail
         printf 'y\n' | docker exec -i {{ wazuh_manager_container }} /var/ossec/bin/manage_agents -r {{ pilot_decommission_target_agent_id }}
+      args:
+        executable: /bin/bash
       register: wazuh_decom_agent_remove
       when:
         - not ansible_check_mode
