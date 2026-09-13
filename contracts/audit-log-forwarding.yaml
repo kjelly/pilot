@@ -6,6 +6,9 @@ specs:
     rows: {all: true}
 playbooks:
   apply: playbooks/apply/audit-log-forwarding-apply.yml
+  decommission: playbooks/decommission/audit-log-forwarding-decommission.yml
+lifecycle:
+  decommission: {class: stateless, scope: local, externalState: false, requiresReachableHost: true, retention: none}
 regressionTests:
   - internal/spec/audit_log_forwarding_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go

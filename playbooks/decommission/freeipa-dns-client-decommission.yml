@@ -1,0 +1,250 @@
+# freeipa-dns-client decommission — local resolver config removal only.
+#
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §15/§37 Phase
+# 5: a generic contract-driven decommission
+# (internal/decommission/providers.GenericComponentProvider), same shape as
+# host-monitoring-decommission.yml.
+#
+# This component owns NOTHING central: it never registers a FreeIPA DNS
+# record for itself (that is freeipa-identity-apply.yml's job, a different
+# component) — it only points this host's own OS-level resolver at a
+# FreeIPA DNS server (playbooks/apply/tasks/freeipa-dns-client-resolver.yml).
+# Decommission therefore only ever removes local resolver configuration and
+# hands DNS resolution back to whatever the host's DHCP lease already
+# supplies — it never talks to FreeIPA and never touches any other host.
+#
+# Invoked ONLY by internal/decommission/providers.GenericComponentProvider
+# — never directly by an operator.
+#
+# `--tags inspect` restricts execution to the two read-only tasks in
+# pre_tasks (stat + a debug pair) — no mutating task carries that tag — and
+# prints the standardized marker every generic decommission playbook must
+# print (spec.md §15): PILOT_COMPONENT_DECOMMISSIONED=true|false.
+#
+# Usage:
+#
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/freeipa-dns-client-decommission.yml \
+#       --limit <retiring-host>
+#
+#   # read-only enrollment check only (never mutates):
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/freeipa-dns-client-decommission.yml \
+#       --limit <retiring-host> --tags inspect
+#
+# Stage gating (same convention as every other playbooks/decommission/*.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: FreeIPA DNS client decommission — local resolver config removal
+  hosts: "{{ target_group | default('freeipa-dns-client') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    freeipa_dns_client_resolved_dropin_path: /etc/systemd/resolved.conf.d/90-pilot-freeipa-dns-client.conf
+    freeipa_dns_client_netplan_dropin_path: /etc/netplan/99-pilot-freeipa-dns-client.yaml
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    # Read-only detection: any of the drop-ins this role's apply playbook
+    # can write still being present is this component's own enrollment
+    # marker (EL's NetworkManager dns4 override has no file to stat, so on
+    # EL this reduces to "the netplan/resolved drop-ins that never applied
+    # to EL in the first place are correctly absent" — i.e. always true —
+    # and the EL-specific nmcli override, checked read-only below, drives
+    # the real signal on that OS family).
+    - name: "Check whether the systemd-resolved drop-in still exists (read-only)"
+      ansible.builtin.stat:
+        path: "{{ freeipa_dns_client_resolved_dropin_path }}"
+      register: freeipa_dns_client_decom_resolved_stat
+      tags: [inspect]
+
+    - name: "Check whether the netplan drop-in still exists (read-only)"
+      ansible.builtin.stat:
+        path: "{{ freeipa_dns_client_netplan_dropin_path }}"
+      register: freeipa_dns_client_decom_netplan_stat
+      tags: [inspect]
+
+    - name: "EL — read whether the active NetworkManager connection still ignores auto DNS (read-only)"
+      ansible.builtin.command: nmcli -t -f NAME connection show --active
+      register: freeipa_dns_client_decom_nm_active
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: ansible_os_family == 'RedHat'
+      tags: [inspect]
+
+    - name: "EL — read ignore-auto-dns for the first active connection (read-only)"
+      ansible.builtin.command: >-
+        nmcli -g ipv4.ignore-auto-dns connection show
+        "{{ (freeipa_dns_client_decom_nm_active.stdout_lines | default([]) | first) }}"
+      register: freeipa_dns_client_decom_nm_ignore_auto
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when:
+        - ansible_os_family == 'RedHat'
+        - freeipa_dns_client_decom_nm_active.stdout_lines | default([]) | length > 0
+      tags: [inspect]
+
+    - name: "Report decommission state for external tooling"
+      ansible.builtin.debug:
+        msg: >-
+          PILOT_COMPONENT_DECOMMISSIONED={{
+            ((not freeipa_dns_client_decom_resolved_stat.stat.exists)
+             and (not freeipa_dns_client_decom_netplan_stat.stat.exists)
+             and ((ansible_os_family != 'RedHat')
+                  or (freeipa_dns_client_decom_nm_ignore_auto.stdout | default('no') | trim | lower != 'yes')))
+            | ternary('true', 'false') }}
+      tags: [inspect]
+
+  tasks:
+    - name: "FreeIPA DNS client decommission — resolver removal, with diagnostics on failure"
+      block:
+        - name: "Debian — remove the systemd-resolved drop-in"
+          ansible.builtin.file:
+            path: "{{ freeipa_dns_client_resolved_dropin_path }}"
+            state: absent
+          register: freeipa_dns_client_decom_resolved_removed
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == 'Debian'
+
+        - name: "Debian — restart systemd-resolved (drop-in removed)"
+          ansible.builtin.systemd:
+            name: systemd-resolved
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == 'Debian'
+            - freeipa_dns_client_decom_resolved_removed.changed | default(false)
+
+        - name: "Debian — hand /etc/resolv.conf back to systemd-resolved's own stub resolver"
+          ansible.builtin.file:
+            src: /run/systemd/resolve/stub-resolv.conf
+            dest: /etc/resolv.conf
+            state: link
+            force: true
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == 'Debian'
+
+        - name: "Debian(Ubuntu) — remove the netplan DHCP-DNS-override drop-in"
+          ansible.builtin.file:
+            path: "{{ freeipa_dns_client_netplan_dropin_path }}"
+            state: absent
+          register: freeipa_dns_client_decom_netplan_removed
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == 'Debian'
+            - ansible_distribution == 'Ubuntu'
+
+        - name: "Debian(Ubuntu) — netplan apply (DHCP DNS override removed)"
+          ansible.builtin.command: netplan apply
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == 'Debian'
+            - ansible_distribution == 'Ubuntu'
+            - freeipa_dns_client_decom_netplan_removed.changed | default(false)
+          changed_when: true
+
+        - name: "EL — discover the active NetworkManager connection"
+          ansible.builtin.command: nmcli -t -f NAME connection show --active
+          register: freeipa_dns_client_decom_nm_active2
+          changed_when: false
+          failed_when: false
+          check_mode: false
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == 'RedHat'
+
+        - name: "EL — clear the dns4/dns4_search/dns4_ignore_auto override on every active connection"
+          community.general.nmcli:
+            conn_name: "{{ item }}"
+            dns4: []
+            dns4_search: []
+            dns4_ignore_auto: false
+            state: present
+          loop: "{{ freeipa_dns_client_decom_nm_active2.stdout_lines | default([]) }}"
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == 'RedHat'
+          register: freeipa_dns_client_decom_nm_cleared
+
+        - name: "EL — reapply the connection onto the live device"
+          ansible.builtin.command: "nmcli connection up {{ item.item }}"
+          loop: "{{ freeipa_dns_client_decom_nm_cleared.results | default([]) }}"
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == 'RedHat'
+            - item.changed | default(false)
+          changed_when: true
+
+        - name: "Verify the resolver drop-ins are really gone"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ freeipa_dns_client_resolved_dropin_path }}"
+            - "{{ freeipa_dns_client_netplan_dropin_path }}"
+          register: freeipa_dns_client_decom_stat_after
+          when: not ansible_check_mode
+
+        - name: "Gate: no resolver drop-in this component created may remain"
+          ansible.builtin.assert:
+            that:
+              - not (freeipa_dns_client_decom_stat_after.results | default([]) | selectattr('stat.exists', 'defined') | selectattr('stat.exists') | list | length > 0)
+            fail_msg: >-
+              A freeipa-dns-client resolver drop-in still exists after removal —
+              refusing to report local cleanup as complete.
+          when: not ansible_check_mode
+
+      rescue:
+        - name: "Rescue: dump the current resolver state"
+          ansible.builtin.command: resolvectl status
+          register: freeipa_dns_client_decom_rescue_status
+          changed_when: false
+          failed_when: false
+
+        - name: "Rescue: surface diagnostics and fail"
+          ansible.builtin.fail:
+            msg: |
+              freeipa-dns-client local decommission FAILED. Diagnostics:
+              --- resolvectl status ---
+              {{ freeipa_dns_client_decom_rescue_status.stdout | default('(unavailable)') }}
+              {{ freeipa_dns_client_decom_rescue_status.stderr | default('') }}
+              This component has no central/external state — resume via
+              `pilot host decommission resume` once the underlying issue
+              is fixed.

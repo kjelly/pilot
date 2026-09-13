@@ -1,0 +1,167 @@
+# freeipa-nfs-client decommission — local automount config removal only.
+#
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §15/§37 Phase
+# 5: a generic contract-driven decommission
+# (internal/decommission/providers.GenericComponentProvider), same shape as
+# host-monitoring-decommission.yml.
+#
+# NFS client access in this repo is granted via a roster hostgroup's
+# `membership.all: true` wildcard (the documented convention,
+# docs/verification/freeipa-nfs-client.md v1.3) or, less commonly, an
+# explicit hostgroup `hosts:` list — either way, this component never
+# writes a per-host roster entry of its own to clean up. And even where a
+# host WAS added to a hostgroup's explicit list, freeipa-client-
+# decommission.yml already establishes the project convention that
+# per-component decommission playbooks never touch central FreeIPA roster/
+# host-object/DNS/membership state — that is freeipa-identity-apply.yml's
+# job, run separately. This playbook therefore never authenticates to
+# FreeIPA and never invokes anything (e.g. `ipa-client-automount
+# --uninstall`) that could delete the centrally-shared IPA automount
+# location/map objects other clients still use — same "no broad cascade"
+# principle INV-14 applies to DNS. It only reverts this host's own local
+# autofs/SSSD config.
+#
+# Invoked ONLY by internal/decommission/providers.GenericComponentProvider
+# — never directly by an operator.
+#
+# `--tags inspect` restricts execution to the read-only tasks in pre_tasks
+# — no mutating task carries that tag — and prints the standardized marker
+# every generic decommission playbook must print (spec.md §15):
+# PILOT_COMPONENT_DECOMMISSIONED=true|false.
+#
+# Usage:
+#
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/freeipa-nfs-client-decommission.yml \
+#       --limit <retiring-host>
+#
+#   # read-only enrollment check only (never mutates):
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/freeipa-nfs-client-decommission.yml \
+#       --limit <retiring-host> --tags inspect
+#
+# Stage gating (same convention as every other playbooks/decommission/*.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: FreeIPA NFS client decommission — local autofs/SSSD config removal
+  hosts: "{{ target_group | default('freeipa-nfs-client') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    # Read-only detection: sssd.conf still listing autofs among its
+    # services is this component's own enrollment marker.
+    - name: "Check whether SSSD still has the autofs responder enabled (read-only)"
+      ansible.builtin.command: grep -E '^services\s*=.*autofs' /etc/sssd/sssd.conf
+      register: freeipa_nfs_client_decom_sssd_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [inspect]
+
+    - name: "Report decommission state for external tooling"
+      ansible.builtin.debug:
+        msg: >-
+          PILOT_COMPONENT_DECOMMISSIONED={{
+            (freeipa_nfs_client_decom_sssd_check.rc | default(1) != 0)
+            | ternary('true', 'false') }}
+      tags: [inspect]
+
+  tasks:
+    - name: "FreeIPA NFS client decommission — local removal, with diagnostics on failure"
+      block:
+        - name: "Stop and disable autofs"
+          ansible.builtin.systemd:
+            name: autofs
+            state: stopped
+            enabled: false
+          when: not ansible_check_mode
+          failed_when: false
+
+        - name: "Revert SSSD's services line to drop the autofs responder"
+          ansible.builtin.lineinfile:
+            path: /etc/sssd/sssd.conf
+            regexp: '^services\s*='
+            line: "services = nss, pam, ssh"
+            state: present
+            create: false
+          register: freeipa_nfs_client_decom_sssd_reverted
+          when: not ansible_check_mode
+
+        - name: "Restart SSSD (services line changed)"
+          ansible.builtin.systemd:
+            name: sssd
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - freeipa_nfs_client_decom_sssd_reverted.changed | default(false)
+
+        - name: "Verify SSSD no longer lists the autofs responder"
+          ansible.builtin.command: grep -E '^services\s*=.*autofs' /etc/sssd/sssd.conf
+          register: freeipa_nfs_client_decom_sssd_check_after
+          changed_when: false
+          failed_when: false
+          when: not ansible_check_mode
+
+        - name: "Gate: SSSD must no longer list the autofs responder"
+          ansible.builtin.assert:
+            that:
+              - freeipa_nfs_client_decom_sssd_check_after.rc | default(1) != 0
+            fail_msg: >-
+              /etc/sssd/sssd.conf still lists autofs among its services after
+              removal — refusing to report local cleanup as complete.
+          when: not ansible_check_mode
+
+      rescue:
+        - name: "Rescue: dump autofs status"
+          ansible.builtin.command: systemctl status autofs --no-pager
+          register: freeipa_nfs_client_decom_rescue_status
+          changed_when: false
+          failed_when: false
+
+        - name: "Rescue: surface diagnostics and fail"
+          ansible.builtin.fail:
+            msg: |
+              freeipa-nfs-client local decommission FAILED. Diagnostics:
+              --- systemctl status autofs ---
+              {{ freeipa_nfs_client_decom_rescue_status.stdout | default('(unavailable)') }}
+              {{ freeipa_nfs_client_decom_rescue_status.stderr | default('') }}
+              No central FreeIPA state (roster, automount location/map
+              objects) was touched by this playbook — resume via
+              `pilot host decommission resume` once the underlying issue
+              is fixed.

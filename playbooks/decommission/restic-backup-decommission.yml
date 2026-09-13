@@ -1,0 +1,199 @@
+# restic-backup decommission — local cleanup only; never touches the
+# shared S3 repository/snapshots.
+#
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §15/§20.1/§37
+# Phase 5: a generic contract-driven decommission
+# (internal/decommission/providers.GenericComponentProvider).
+#
+# restic-backup is an overlay role stacked on top of other hosts, sharing
+# ONE restic repository/S3 bucket across every host that carries it
+# (contracts/restic-backup.yaml's default restic_repository). This
+# component's contract declares lifecycle.decommission.retention: required
+# (INV-8) — planning stays blocked until an operator supplies
+# `--retention restic-backup=<exported|migrated|retain_on_disk|destroy_authorized>`
+# — but mirroring the repo's one other stateful/retention-gated component
+# (freeipa-nfs-server-decommission.yml), this playbook itself NEVER acts on
+# that disposition: it never runs `restic forget`/`prune` against the
+# shared repository. The retention flag is purely the required human
+# sign-off (INV-8); actual data disposition for this host's snapshots is
+# "the operator's to handle separately" (same wording/precedent as
+# freeipa-nfs-server's own decommission playbook).
+#
+# It is safe to delete this host's own {{ restic_env_path }} (the
+# credential/repository file): restic_password and the AWS access
+# key/secret are declared as contract groupVars (contracts/restic-backup.yaml),
+# i.e. shared across the WHOLE restic-backup group via the workspace vault,
+# not unique to this host — they remain available from every other still-
+# live host carrying this role (or the vault itself), so nothing is
+# stranded by removing the local copy.
+#
+# Invoked ONLY by internal/decommission/providers.GenericComponentProvider
+# — never directly by an operator.
+#
+# `--tags inspect` restricts execution to the read-only tasks in pre_tasks
+# — no mutating task carries that tag — and prints the standardized marker
+# every generic decommission playbook must print (spec.md §15):
+# PILOT_COMPONENT_DECOMMISSIONED=true|false.
+#
+# Usage:
+#
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/restic-backup-decommission.yml \
+#       --limit <retiring-host>
+#
+#   # read-only enrollment check only (never mutates):
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/restic-backup-decommission.yml \
+#       --limit <retiring-host> --tags inspect
+#
+# Stage gating (same convention as every other playbooks/decommission/*.yml):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: Restic-backup decommission — local timer/script/credential removal
+  hosts: "{{ target_group | default('restic-backup') }}"
+  become: true
+  gather_facts: false
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    restic_env_path: /etc/pilot/restic-env
+    restic_script_path: /usr/local/bin/pilot-restic-backup.sh
+    restic_service_unit: /etc/systemd/system/restic-backup.service
+    restic_timer_unit: /etc/systemd/system/restic-backup.timer
+
+  pre_tasks:
+    - name: "Restic-backup decommission — gather fresh facts"
+      ansible.builtin.setup:
+      tags: [always]
+
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Restic-backup decommission — detect current install (read-only)"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ restic_timer_unit }}"
+        - "{{ restic_script_path }}"
+        - "{{ restic_env_path }}"
+      register: restic_backup_decom_stat
+      tags: [inspect]
+
+    - name: "Restic-backup decommission — print decommission state for external tooling"
+      ansible.builtin.debug:
+        msg: >-
+          PILOT_COMPONENT_DECOMMISSIONED={{
+            (restic_backup_decom_stat.results | selectattr('stat.exists') | list | length == 0)
+            | ternary('true', 'false') }}
+      tags: [inspect]
+
+  tasks:
+    - name: "Restic-backup decommission — local removal, with diagnostics on failure"
+      block:
+        - name: "Stop and disable the restic-backup timer and service"
+          ansible.builtin.systemd:
+            name: "{{ item }}"
+            state: stopped
+            enabled: false
+          loop:
+            - restic-backup.timer
+            - restic-backup.service
+          when: not ansible_check_mode
+          failed_when: false
+
+        - name: "Remove the systemd unit files"
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ restic_timer_unit }}"
+            - "{{ restic_service_unit }}"
+          register: restic_backup_decom_units_removed
+          when: not ansible_check_mode
+
+        - name: "Reload systemd after removing the unit files"
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when:
+            - not ansible_check_mode
+            - restic_backup_decom_units_removed.changed | default(false)
+
+        - name: "Remove the backup script"
+          ansible.builtin.file:
+            path: "{{ restic_script_path }}"
+            state: absent
+          when: not ansible_check_mode
+
+        - name: "Remove the credential/repository env file (repository data is untouched — see header)"
+          ansible.builtin.file:
+            path: "{{ restic_env_path }}"
+            state: absent
+          when: not ansible_check_mode
+
+        - name: "Verify the timer, script, and env file are really gone"
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ restic_timer_unit }}"
+            - "{{ restic_script_path }}"
+            - "{{ restic_env_path }}"
+          register: restic_backup_decom_stat_after
+          when: not ansible_check_mode
+
+        - name: "Gate: no local restic-backup artifact may remain"
+          ansible.builtin.assert:
+            that:
+              - restic_backup_decom_stat_after.results | selectattr('stat.exists') | list | length == 0
+            fail_msg: >-
+              A restic-backup local artifact still exists after removal —
+              refusing to report local cleanup as complete.
+          when: not ansible_check_mode
+
+      rescue:
+        - name: "Rescue: dump restic-backup timer status"
+          ansible.builtin.command: systemctl status restic-backup.timer --no-pager
+          register: restic_backup_decom_rescue_status
+          changed_when: false
+          failed_when: false
+
+        - name: "Rescue: surface diagnostics and fail"
+          ansible.builtin.fail:
+            msg: |
+              restic-backup local decommission FAILED. Diagnostics:
+              --- systemctl status restic-backup.timer ---
+              {{ restic_backup_decom_rescue_status.stdout | default('(unavailable)') }}
+              {{ restic_backup_decom_rescue_status.stderr | default('') }}
+              The shared S3 repository/snapshots were NOT touched by this
+              playbook regardless of where it failed (out of scope by
+              design — see header). Resume via `pilot host decommission
+              resume` once the underlying issue is fixed.

@@ -4,7 +4,11 @@ role: freeipa-nfs-client
 specs:
   - path: docs/verification/freeipa-nfs-client.md
     rows: {all: true}
-playbooks: {apply: playbooks/apply/freeipa-nfs-client-apply.yml}
+playbooks:
+  apply: playbooks/apply/freeipa-nfs-client-apply.yml
+  decommission: playbooks/decommission/freeipa-nfs-client-decommission.yml
+lifecycle:
+  decommission: {class: stateless, scope: local, externalState: false, requiresReachableHost: true, retention: none}
 regressionTests:
   - cmd/pilot/cmd/tag_coverage_test.go
   - internal/spec/freeipa_nfs_regression_test.go

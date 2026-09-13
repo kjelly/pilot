@@ -6,6 +6,9 @@ specs:
     rows: {all: true}
 playbooks:
   apply: playbooks/apply/freeipa-dns-client-apply.yml
+  decommission: playbooks/decommission/freeipa-dns-client-decommission.yml
+lifecycle:
+  decommission: {class: stateless, scope: local, externalState: false, requiresReachableHost: true, retention: none}
 regressionTests:
   - internal/spec/freeipa_dns_client_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go

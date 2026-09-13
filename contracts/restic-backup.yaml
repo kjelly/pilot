@@ -9,7 +9,7 @@ playbooks:
   apply: playbooks/apply/restic-backup-apply.yml
   rollback: null
   upgrade: null
-  decommission: null
+  decommission: playbooks/decommission/restic-backup-decommission.yml
 regressionTests:
   - internal/spec/restic_backup_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
@@ -52,7 +52,7 @@ evidenceRequirement: {targetTest: vm, idempotency: required}
 lifecycle:
   backup: {provider: self}
   upgrade: null
-  decommission: null
+  decommission: {class: stateful, scope: local, externalState: true, requiresReachableHost: true, retention: required}
 traceability:
   mode: rowTags
   tag: {kind: bare}

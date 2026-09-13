@@ -6,10 +6,11 @@ intent:
   source: docs/superpowers/specs/2026-09-02-host-decommission-spec.md §3, §6, §32 (HD1-HD28)
   maintainer: sre
 targets:
-  roles: [freeipa-client]
+  roles: [freeipa-client, audit-log-forwarding, freeipa-dns-client, restic-backup, docker, freeipa-nfs-client, wazuh-fim]
   hostScope: aggregate
   platforms:
     - {os: almalinux, versions: ["9"]}
+    - {os: ubuntu, versions: ["24.04"]}
 inputs: []
 traceability: {components: []}
 defaults:
@@ -66,7 +67,13 @@ mutation are unvalidated against a real Wazuh manager or a real
 internal-endpoint at this point) — treat "PASS" on HD13/HD14 below as "the
 Go-level provider contract behaves correctly against fixtures", not
 "verified against a live Wazuh manager or FreeIPA server", until a
-Phase-4b-style live evidence pass lands. HD23 and HD25 are pure static/
+Phase-4b-style live evidence pass lands. **Update 2026-09-13: HD14
+(Wazuh) now has real live evidence** — see `HD14-LIVE` below and
+`docs/evidence/host-decommission/2026-09-13-ca619b9.md` (found+fixed a
+real `set -o pipefail`/`/bin/sh` bug in
+`wazuh-manager-agent-deregister.yml` along the way). HD13
+(internal-endpoint) remains fixture-only; its own live pass is still
+outstanding. HD23 and HD25 are pure static/
 registry checks and are executable as soon as the relevant code exists,
 with no live host. Phase 5 (this round) types `contract.Lifecycle.
 Decommission` (spec.md §14, `internal/contract/contract.go`'s
@@ -102,6 +109,37 @@ managed exports fragment; per spec.md §20.3 (and non-goal §4.4/§4.5),
 NO disposition, including `destroy_authorized`, makes this provider
 touch actual NFS share/export data — that remains entirely out of scope
 for v1. Code + fixture tests only, same posture as every prior phase.
+
+**Phase 7 (2026-09-13) adds decommission support for the 5 remaining
+components the minimal-poc "monitored Linux host" carries**:
+`audit-log-forwarding`, `freeipa-dns-client`, `restic-backup`, `docker`,
+`freeipa-nfs-client` — all riding the existing generic contract-driven
+`GenericComponentProvider` (spec.md §15, Phase 5's path), zero new Go
+provider code. This phase also has **real, disposable-target live
+evidence, not just fixture tests** — see `HD29-LIVE`-`HD33-LIVE` below
+and `docs/evidence/host-decommission/2026-09-13-ca619b9.md` — run against
+the full 8-role `client-vm` host out of
+`docs/topologies/minimal-poc-topology.yaml`, the real scenario that
+originally motivated this phase (a production host blocked on
+`external_state_unsupported`/`ownership_unknown` for a subset of these
+same roles). Along the way this phase found and fixed 2 real,
+pre-existing bugs in `freeipa_client.go` (both the same short-inventory-
+name-vs-FQDN root cause; see the evidence doc §4) that had been silently
+false-blocking/no-op'ing `freeipa-client` decommission on any host whose
+`hosts.yml` key isn't already FQDN-shaped — plausibly the actual
+explanation for the analogous blocker this phase's own motivating
+production case showed.
+
+**`client-vm` out of `docs/topologies/minimal-poc-topology.yaml` is now
+the canonical scenario for host-decommission revalidation.** It is the
+only scenario in this repo that exercises every currently-supported
+component (`audit-log-forwarding`, `docker`, `freeipa-client`,
+`freeipa-dns-client`, `freeipa-nfs-client`, `host-monitoring`,
+`restic-backup`, `wazuh-fim`) on one host at once, with real dependents
+(FreeIPA server, Wazuh manager) on the other two nodes. Future
+host-decommission revalidation should stand up that same topology and
+target `client-vm`, rather than assembling an ad hoc single/dual-VM pair
+per phase the way HD9-LIVE..HD12-LIVE's `hd-ipa1`/`hd-client1` pair did.
 
 **Scope split.** Every HD1-HD28 row above is `scope: aggregate`: it runs Go
 tests against `internal/decommission` fixture workspaces (synthetic
@@ -411,5 +449,68 @@ that decommission *reuses* those paths safely.
       probe: |
         ssh -i <server-key> root@<server-ip> "kinit admin <<< '<admin-password>' >/dev/null 2>&1; ipa service-del HTTP/<client-fqdn>"
       expect: {exitCode: 0}
+  verifyOnly: true
+
+# ── Phase 7 live disposable-target evidence (HD14/HD29-HD33's real-host pass) ──
+#
+# Run 2026-09-13 against the real 3-node docs/topologies/minimal-poc-
+# topology.yaml (freeipa-server + nexus + client-vm, almalinux-9 +
+# ubuntu-24.04 x2) — the newly-declared canonical scenario (see the
+# narrative above). client-vm carried all 8 currently-supported
+# components at once; `pilot host decommission plan/apply/resume` was
+# run for real against it, not simulated. See
+# docs/evidence/host-decommission/2026-09-13-ca619b9.md for the full
+# session log, the 2 freeipa_client.go bugs and 1
+# wazuh-manager-agent-deregister.yml bug this pass found and fixed, and
+# the exact commands. Like HD9-LIVE..HD12-LIVE, these are `scope:
+# per-host` real shell/ipa/docker-exec probes, not `go test` fixture
+# probes.
+- id: HD14-LIVE
+  category: wazuh
+  check: Wazuh manager-side agent registration is actually removed by `pilot host decommission apply` against a real Wazuh manager, confirmed on an independent second pass
+  probe: |
+    docker exec single-node-wazuh.manager-1 /var/ossec/bin/agent_control -l
+  expect: {stdout: {notContains: "Name: client-vm,"}}
+  scope: per-host
+  verifyOnly: true
+- id: HD29-LIVE
+  category: audit-log-forwarding
+  check: audit-log-forwarding's local rsyslog forward config and custom audit rules are actually removed by `pilot host decommission apply`
+  probe: |
+    ssh -i <client-key> root@<client-ip> 'test -f /etc/rsyslog.d/99-siem-forward.conf && echo PRESENT || echo ABSENT'
+  expect: {stdout: {equals: "ABSENT"}}
+  scope: per-host
+  verifyOnly: true
+- id: HD30-LIVE
+  category: freeipa-dns-client
+  check: freeipa-dns-client's local systemd-resolved drop-in is actually removed by `pilot host decommission apply`
+  probe: |
+    ssh -i <client-key> root@<client-ip> 'test -f /etc/systemd/resolved.conf.d/90-pilot-freeipa-dns-client.conf && echo PRESENT || echo ABSENT'
+  expect: {stdout: {equals: "ABSENT"}}
+  scope: per-host
+  verifyOnly: true
+- id: HD31-LIVE
+  category: restic-backup
+  check: restic-backup's local timer and credential env file are actually removed by `pilot host decommission apply`, with the shared S3 repository/snapshots left untouched (out of scope by design)
+  probe: |
+    ssh -i <client-key> root@<client-ip> 'systemctl is-active restic-backup.timer; test -f /etc/pilot/restic-env && echo PRESENT || echo ABSENT'
+  expect: {stdout: {contains: "ABSENT"}}
+  scope: per-host
+  verifyOnly: true
+- id: HD32-LIVE
+  category: docker
+  check: docker's engine service is stopped and its packages actually removed by `pilot host decommission apply`
+  probe: |
+    ssh -i <client-key> root@<client-ip> 'systemctl is-active docker'
+  expect: {stdout: {equals: "inactive"}}
+  scope: per-host
+  verifyOnly: true
+- id: HD33-LIVE
+  category: freeipa-nfs-client
+  check: freeipa-nfs-client's local autofs service is actually stopped and SSSD no longer lists the autofs responder after `pilot host decommission apply`
+  probe: |
+    ssh -i <client-key> root@<client-ip> 'systemctl is-active autofs; grep -E "^services\s*=.*autofs" /etc/sssd/sssd.conf || echo NOT_LISTED'
+  expect: {stdout: {contains: "NOT_LISTED"}}
+  scope: per-host
   verifyOnly: true
 ```
