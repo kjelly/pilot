@@ -1,13 +1,15 @@
 // Package decommission implements Pilot's host decommission planner: a
-// read-only, resumable saga that replaces the old unsafe "delete a host
-// from hosts.yml" action with plan -> approve -> clean -> verify ->
-// finalize (docs/superpowers/specs/2026-09-02-host-decommission-spec.md).
+// resumable saga that replaces the old unsafe "delete a host from
+// hosts.yml" action with plan -> approve -> clean -> verify -> finalize
+// (docs/superpowers/specs/2026-09-02-host-decommission-spec.md).
 //
-// Phase 1 (this package's current scope, spec.md §37) delivers only the
-// planner, the reverse-reference scanner, plan hashing/freshness, and the
-// persisted saga store. No provider executes a live mutation yet — every
-// component with external state is classified external_state_unsupported
-// until a Phase 3/4/5 provider registers (see providers/provider.go).
+// PlanHost itself is strictly read-only (the planner, the reverse-reference
+// scanner, plan hashing/freshness). Apply/Resume (execute.go/finalizer.go)
+// perform real, live mutation for every component that has a registered
+// provider (see providers/provider.go); a component with external state and
+// no registered provider is classified external_state_unsupported and
+// blocks planning until one is added (INV-7) — that is a per-component
+// coverage gap, not a phase-wide execution gate.
 package decommission
 
 import (

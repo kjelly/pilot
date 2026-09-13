@@ -32,6 +32,13 @@ func TestRegression_HostDecommissionSpec(t *testing.T) {
 	for i := 9; i <= 12; i++ {
 		wantIDs = append(wantIDs, "HD"+strconv.Itoa(i)+"-LIVE")
 	}
+	// Phase 7 appended a real disposable-target counterpart for HD14
+	// (Wazuh) plus 5 new rows for the components newly given decommission
+	// support this phase (audit-log-forwarding, freeipa-dns-client,
+	// restic-backup, docker, freeipa-nfs-client) — see
+	// docs/evidence/host-decommission/2026-09-13-ca619b9.md. Also
+	// additive, appended after HD12-LIVE in file order.
+	wantIDs = append(wantIDs, "HD14-LIVE", "HD29-LIVE", "HD30-LIVE", "HD31-LIVE", "HD32-LIVE", "HD33-LIVE")
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}

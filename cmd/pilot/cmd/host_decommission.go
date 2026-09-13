@@ -61,7 +61,7 @@ var hostCmd = &cobra.Command{
 
 var hostDecommissionCmd = &cobra.Command{
 	Use:   "decommission",
-	Short: "Plan and inspect host decommission (Phase 1: read-only plan/show — no live cleanup yet)",
+	Short: "Plan, apply, and resume host decommission (spec.md §10)",
 }
 
 var hostDecommissionPlanCmd = &cobra.Command{
@@ -80,7 +80,7 @@ var hostDecommissionShowCmd = &cobra.Command{
 
 var hostDecommissionApplyCmd = &cobra.Command{
 	Use:   "apply",
-	Short: "Apply a previously planned host decommission (spec.md §10.3). Phase 2: only a zero-blocker plan (e.g. a zero-role host) can execute — any unsupported live provider still blocks",
+	Short: "Apply a previously planned host decommission (spec.md §10.3). Only a zero-blocker plan can execute — any component with no registered decommission provider still blocks",
 	Args:  cobra.NoArgs,
 	RunE:  runHostDecommissionApplyCmd,
 }
@@ -180,7 +180,7 @@ func runHostDecommissionPlanCmd(cmd *cobra.Command, _ []string) error {
 	// only drives the exit code, it does not hide anything from the
 	// operator.
 	if plan.Blocked() {
-		return fmt.Errorf("plan %s is blocked — see blockers above; no host decommission mutation exists yet in this phase regardless", plan.ID)
+		return fmt.Errorf("plan %s is blocked — see blockers above; resolve them (e.g. register a decommission provider, supply a --retention disposition, or clean up unknown-ownership state) and plan again before apply", plan.ID)
 	}
 	return nil
 }
