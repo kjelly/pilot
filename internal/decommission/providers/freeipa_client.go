@@ -180,24 +180,31 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 	hostName := in.HostName
 	fqdn := firstNonEmpty(in.FQDN, hostName)
 
+	// Resolve the host's real, authoritative FQDN from a live query FIRST
+	// (see resolveAuthoritativeFQDN's doc comment) — fqdn above may be no
+	// more than a short inventory name (hosts.yml key), and both the
+	// roster mutation below and the ownership check need the real one to
+	// ever actually match anything.
+	unknown, resolvedFQDN, err := p.discoverUnknownServicePrincipals(ctx, fqdn)
+	if err != nil {
+		return nil, fmt.Errorf("freeipa-client plan %s: service principal discovery: %w", hostName, err)
+	}
+	fqdn = resolvedFQDN
+
 	if p.RosterPathSet(in) {
-		violations, found, err := inventory.SimulateRemoveRosterHost(in.RosterPath, hostName)
+		violations, found, err := inventory.SimulateRemoveRosterHost(in.RosterPath, fqdn)
 		if err != nil {
 			return nil, fmt.Errorf("freeipa-client plan %s: roster mutation would be invalid: %w", hostName, err)
 		}
 		// found=false just means the roster declares this host under a
-		// different name/alias than the inventory host name (or not at
-		// all) — not fatal to planning; the identity-apply convergence
-		// step below is a no-op for a host the roster never declared.
+		// different name/alias than the resolved fqdn (or not at all) —
+		// not fatal to planning; the identity-apply convergence step below
+		// is a no-op for a host the roster never declared.
 		if found && len(violations) > 0 {
 			return nil, fmt.Errorf("freeipa-client plan %s: roster would be invalid after converging this host to absent: %v", hostName, violations)
 		}
 	}
 
-	unknown, err := p.discoverUnknownServicePrincipals(ctx, fqdn)
-	if err != nil {
-		return nil, fmt.Errorf("freeipa-client plan %s: service principal discovery: %w", hostName, err)
-	}
 	if len(unknown) > 0 {
 		return nil, fmt.Errorf("%w: host %s still has service principal(s) managed by it: %s — clean them up via their owning component (e.g. internal-endpoint HTTP/<fqdn>, NFS nfs/<fqdn>) before retrying host decommission (spec.md §16.6)",
 			ErrUnknownServicePrincipal, fqdn, strings.Join(unknown, ", "))
@@ -210,7 +217,7 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 
 	return []Step{
 		{Provider: FreeIPAClientProviderID, Phase: "local_cleanup", Action: ActionFreeIPAClientUninstall, TargetIdentity: hostName},
-		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPARosterHostAbsent, TargetIdentity: hostName, Params: rosterStepParams},
+		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPARosterHostAbsent, TargetIdentity: fqdn, Params: rosterStepParams},
 		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: fqdn, Params: rosterStepParams},
 	}, nil
 }
@@ -226,7 +233,7 @@ func (p *FreeIPAClientProvider) ExecutorForStep(step Step) (StepExecutor, error)
 	case ActionFreeIPAClientUninstall:
 		return &freeipaUninstallStep{provider: p, hostName: step.TargetIdentity}, nil
 	case ActionFreeIPARosterHostAbsent:
-		return &freeipaRosterAbsentStep{hostName: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
+		return &freeipaRosterAbsentStep{fqdn: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
 	case ActionFreeIPAIdentityApplyConverge:
 		return &freeipaIdentityConvergeStep{provider: p, fqdn: step.TargetIdentity}, nil
 	default:
@@ -276,7 +283,7 @@ func (e *freeipaUninstallStep) Execute(ctx context.Context) error {
 // ---- step: roster host absent + reference pruning (pure Go, no ansible) ----
 
 type freeipaRosterAbsentStep struct {
-	hostName   string
+	fqdn       string
 	rosterPath string
 }
 
@@ -291,7 +298,7 @@ func (e *freeipaRosterAbsentStep) Inspect(ctx context.Context) (bool, error) {
 	if strings.TrimSpace(e.rosterPath) == "" {
 		return true, nil
 	}
-	return inventory.RosterHostAbsentAndUnreferenced(e.rosterPath, e.hostName)
+	return inventory.RosterHostAbsentAndUnreferenced(e.rosterPath, e.fqdn)
 }
 
 // Execute implements spec.md §16.3/§16.4's required roster-side order:
@@ -301,11 +308,11 @@ func (e *freeipaRosterAbsentStep) Execute(ctx context.Context) error {
 	if strings.TrimSpace(e.rosterPath) == "" {
 		return nil
 	}
-	if err := inventory.RemoveRosterHostReferences(e.rosterPath, e.hostName); err != nil {
-		return fmt.Errorf("freeipa-client roster-absent %s: prune references: %w", e.hostName, err)
+	if err := inventory.RemoveRosterHostReferences(e.rosterPath, e.fqdn); err != nil {
+		return fmt.Errorf("freeipa-client roster-absent %s: prune references: %w", e.fqdn, err)
 	}
-	if err := inventory.SetRosterHostAbsent(e.rosterPath, e.hostName); err != nil {
-		return fmt.Errorf("freeipa-client roster-absent %s: converge host entry: %w", e.hostName, err)
+	if err := inventory.SetRosterHostAbsent(e.rosterPath, e.fqdn); err != nil {
+		return fmt.Errorf("freeipa-client roster-absent %s: converge host entry: %w", e.fqdn, err)
 	}
 	return nil
 }
@@ -480,6 +487,7 @@ func fieldPattern(label string) *regexp.Regexp {
 
 var (
 	servicePrincipalNamePattern = fieldPattern("Principal name")
+	hostObjectNamePattern       = fieldPattern("Host name")
 	memberOfHostgroupPattern    = fieldPattern("Member of host-groups")
 	memberOfNetgroupPattern     = fieldPattern("Member of netgroups")
 	aRecordPattern              = fieldPattern("arecord")
@@ -492,20 +500,50 @@ var (
 // this host OTHER than its own host/<fqdn> identity as unknown (spec.md
 // §16.6) — Phase 3a has no other component's ownership ledger available
 // to it, so there is no "known-owned, clean it up" branch yet (Phase
-// 4/5).
-func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Context, fqdn string) ([]string, error) {
+// 4/5). Also returns this host's own authoritative FQDN as host-show
+// itself resolved it (see resolveAuthoritativeFQDN) — the caller's own
+// fqdn input may be no more than a short inventory name, and every other
+// step Plan builds downstream (roster mutation, identity-apply
+// convergence) needs the real one, not that possibly-short guess.
+func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Context, fqdn string) (unknown []string, resolvedFQDN string, err error) {
 	res, err := p.queryHostObject(ctx, fqdn)
 	if err != nil {
-		return nil, err
+		return nil, fqdn, err
 	}
 	if notFoundPattern.MatchString(res.Stdout) {
-		return nil, nil // host object already gone -- nothing to check
+		return nil, fqdn, nil // host object already gone -- nothing to check, nothing to resolve
 	}
-	return unknownServicePrincipals(res.Stdout, fqdn), nil
+	return unknownServicePrincipals(res.Stdout, fqdn), resolveAuthoritativeFQDN(res.Stdout, fqdn), nil
+}
+
+// resolveAuthoritativeFQDN prefers `ipa host-show`'s own "Host name:"
+// field over the fqdn a caller supplied when asking for this query.
+// `ipa host-show` tolerates a bare short name (FreeIPA completes it
+// against the default domain) and still resolves/prints the real host
+// object — so a caller-supplied fqdn that is only a short inventory name
+// (e.g. a hosts.yml key like "client-vm" rather than
+// "client-vm.ipa.pilot.internal") makes the query SUCCEED while every
+// downstream string built from that same short name (the service-
+// principal self-exclusion check, the roster's FQDN-keyed host entry,
+// the identity-apply convergence target) can never match the real
+// identity host-show actually printed. Found live 2026-09-13 in two
+// separate places this bit: the ownership check (falsely blocked as
+// unknown/unproven on every host whose hosts.yml key isn't already
+// FQDN-shaped) and the roster-absent step (silently matched nothing,
+// leaving the roster's host entry — and everything depending on it —
+// permanently un-converged). Falls back to fallback when the field is
+// absent (e.g. the host object is already gone).
+func resolveAuthoritativeFQDN(stdout, fallback string) string {
+	if m := hostObjectNamePattern.FindStringSubmatch(stdout); len(m) > 1 {
+		if real := strings.TrimSpace(m[1]); real != "" {
+			return real
+		}
+	}
+	return fallback
 }
 
 func unknownServicePrincipals(stdout, fqdn string) []string {
-	hostPrincipal := "host/" + fqdn
+	hostPrincipal := "host/" + resolveAuthoritativeFQDN(stdout, fqdn)
 	var unknown []string
 	// The combined HOST_INSPECT text this scans carries BOTH host-show's
 	// own "Principal name: host/<fqdn>@REALM" line AND service-find's

@@ -3,6 +3,8 @@ package providers
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -312,6 +314,28 @@ func TestFreeIPAProvider_UnknownServicePrincipalBlocks(t *testing.T) {
 		}
 	})
 
+	// Found live 2026-09-13: a hosts.yml keyed by a short inventory name
+	// (e.g. "client-vm", the natural/common authoring pattern) rather than
+	// the FQDN convention this provider's own FQDN resolution
+	// (planner.providerFQDN) assumes causes PlanInput.FQDN to be the short
+	// name too. `ipa host-show` tolerates and resolves a bare short name
+	// fine, so the query still succeeds and returns the REAL fqdn's
+	// principal — but the short name alone must never be mistaken for an
+	// unknown service principal just because it differs textually from
+	// that real principal.
+	t.Run("caller-supplied FQDN is only a short inventory name -- still not blocked", func(t *testing.T) {
+		p, _ := testProvider(t, func(args []string) (*ansible.Result, error) {
+			return &ansible.Result{Stdout: hostShowClean}, nil
+		})
+		steps, err := p.Plan(context.Background(), PlanInput{HostName: "web1", FQDN: "web1"})
+		if err != nil {
+			t.Fatalf("Plan() error = %v, want success (a short-name FQDN input must not be misread as an unknown principal)", err)
+		}
+		if len(steps) != 3 {
+			t.Fatalf("Plan() steps = %+v, want all 3 steps scheduled", steps)
+		}
+	})
+
 	// Verify() must independently surface the same finding as
 	// unknown_ownership (never simply "active_residue", so a caller can
 	// tell "needs investigation" from "definitely mine, still there").
@@ -338,6 +362,62 @@ func TestFreeIPAProvider_UnknownServicePrincipalBlocks(t *testing.T) {
 			t.Fatal("expected Active=true for an unresolved service principal finding")
 		}
 	})
+}
+
+// ---- Extra coverage: roster-absent step targets the FQDN, not hostName ----
+
+// Found live 2026-09-13: the roster's hosts[] entries are always
+// FQDN-keyed (spec/roster convention), but a workspace's hosts.yml key —
+// PlanInput.HostName — is only guaranteed to BE the FQDN when the
+// workspace author chose that convention; a short inventory name like
+// "client-vm" is common and legitimate. Plan() used to build the
+// freeipa_roster_host_absent step's TargetIdentity from the bare
+// HostName, so SimulateRemoveRosterHost/RosterHostAbsentAndUnreferenced/
+// SetRosterHostAbsent all silently matched nothing against the real
+// FQDN-keyed roster entry (found=false, treated as benign at Plan time) —
+// the roster host was NEVER converged to absent, even though the rest of
+// decommission proceeded and later blocked on permanent active_residue
+// that could never be resolved by retrying.
+func TestFreeIPAProvider_RosterAbsentStepTargetsFQDNNotHostName(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.yaml")
+	const fixture = `---
+schema_version: 2
+freeipa:
+  domain: ipa.pilot.internal
+hosts:
+  - name: web1.ipa.pilot.internal
+    state: present
+    ip_address: "10.0.0.5"
+`
+	if err := os.WriteFile(rosterPath, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p, _ := testProvider(t, func(args []string) (*ansible.Result, error) {
+		return &ansible.Result{Stdout: hostShowClean}, nil
+	})
+	steps, err := p.Plan(context.Background(), PlanInput{
+		HostName:   "web1",
+		FQDN:       "web1.ipa.pilot.internal",
+		RosterPath: rosterPath,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	var rosterStep *Step
+	for i := range steps {
+		if steps[i].Action == ActionFreeIPARosterHostAbsent {
+			rosterStep = &steps[i]
+		}
+	}
+	if rosterStep == nil {
+		t.Fatalf("Plan() steps = %+v, want a %s step", steps, ActionFreeIPARosterHostAbsent)
+	}
+	if rosterStep.TargetIdentity != "web1.ipa.pilot.internal" {
+		t.Fatalf("%s step TargetIdentity = %q, want the FQDN %q (not the bare hostName) so it actually matches the roster's FQDN-keyed entry",
+			ActionFreeIPARosterHostAbsent, rosterStep.TargetIdentity, "web1.ipa.pilot.internal")
+	}
 }
 
 // ---- Extra coverage: executor plumbing ------------------------------------
