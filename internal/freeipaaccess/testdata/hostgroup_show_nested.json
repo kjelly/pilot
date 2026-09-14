@@ -1,0 +1,53 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "ipaobject",
+        "ipahostgroup",
+        "nestedGroup",
+        "groupOfNames",
+        "top",
+        "mepOriginEntry"
+      ],
+      "ipauniqueid": [
+        "d6f60324-b008-11f1-ac05-52540048bfe0"
+      ],
+      "description": [
+        "parent"
+      ],
+      "cn": [
+        "hg-parent"
+      ],
+      "member_hostgroup": [
+        "hg-child"
+      ],
+      "memberof_hostgroup": [
+        "hg-child"
+      ],
+      "memberindirect_host": [
+        "leaf-host.ipa.pilot.internal"
+      ],
+      "memberindirect_hostgroup": [
+        "hg-parent"
+      ],
+      "dn": "cn=hg-parent,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "hg-parent",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

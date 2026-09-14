@@ -1,0 +1,99 @@
+{
+  "result": {
+    "result": {
+      "cn": [
+        "Bob Tester"
+      ],
+      "displayname": [
+        "Bob Tester"
+      ],
+      "initials": [
+        "BT"
+      ],
+      "gecos": [
+        "Bob Tester"
+      ],
+      "objectclass": [
+        "top",
+        "person",
+        "organizationalperson",
+        "inetorgperson",
+        "inetuser",
+        "posixaccount",
+        "krbprincipalaux",
+        "krbticketpolicyaux",
+        "ipaobject",
+        "ipasshuser",
+        "ipaSshGroupOfPubKeys",
+        "mepOriginEntry",
+        "ipantuserattrs"
+      ],
+      "ipauniqueid": [
+        "b0e69d10-b008-11f1-8b9c-52540048bfe0"
+      ],
+      "ipantsecurityidentifier": [
+        "S-1-5-21-4031843208-2472091620-2418347926-1008"
+      ],
+      "mail": [
+        "bob@ipa.pilot.internal"
+      ],
+      "loginshell": [
+        "/bin/sh"
+      ],
+      "homedirectory": [
+        "/home/bob"
+      ],
+      "uid": [
+        "bob"
+      ],
+      "gidnumber": [
+        "261200008"
+      ],
+      "krbcanonicalname": [
+        "bob@IPA.PILOT.INTERNAL"
+      ],
+      "sn": [
+        "Tester"
+      ],
+      "givenname": [
+        "Bob"
+      ],
+      "krbprincipalname": [
+        "bob@IPA.PILOT.INTERNAL"
+      ],
+      "uidnumber": [
+        "261200008"
+      ],
+      "nsaccountlock": false,
+      "has_password": false,
+      "has_keytab": false,
+      "preserved": false,
+      "memberof_group": [
+        "ipausers",
+        "group-c"
+      ],
+      "memberofindirect_group": [
+        "group-b",
+        "group-a"
+      ],
+      "dn": "uid=bob,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "bob",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

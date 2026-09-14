@@ -71,6 +71,33 @@ func TestParseGroup(t *testing.T) {
 	}
 }
 
+// TestParseUserIndirectGroups verifies FreeIPA's own server-computed
+// transitive group closure (memberofindirect_group) against a real
+// 3-level nested chain (bob ∈ group-c ⊂ group-b ⊂ group-a), including
+// after a deliberately-created cycle (group-a re-added under group-c).
+func TestParseUserIndirectGroups(t *testing.T) {
+	env := loadFixture(t, "user_show_nested.json")
+	m, err := decodeShow(env)
+	if err != nil {
+		t.Fatalf("decodeShow: %v", err)
+	}
+	u := parseUser(m)
+	if u.Username != "bob" {
+		t.Fatalf("Username = %q", u.Username)
+	}
+	if !stringSliceEqualUnordered(u.DirectGroups, []string{"ipausers", "group-c"}) {
+		t.Fatalf("DirectGroups = %v", u.DirectGroups)
+	}
+	if !stringSliceEqualUnordered(u.IndirectGroups, []string{"group-b", "group-a"}) {
+		t.Fatalf("IndirectGroups = %v, want [group-b group-a] (FreeIPA-computed transitive closure)", u.IndirectGroups)
+	}
+	effective := append(append([]string{}, u.DirectGroups...), u.IndirectGroups...)
+	want := []string{"ipausers", "group-c", "group-b", "group-a"}
+	if !stringSliceEqualUnordered(effective, want) {
+		t.Fatalf("DirectGroups∪IndirectGroups = %v, want %v", effective, want)
+	}
+}
+
 func TestParseHost(t *testing.T) {
 	env := loadFixture(t, "host_show.json")
 	m, err := decodeShow(env)
@@ -99,6 +126,30 @@ func TestParseHostgroup(t *testing.T) {
 	}
 	if len(hg.MemberHostgroups) != 0 {
 		t.Fatalf("MemberHostgroups = %v, want empty (no nested hostgroup in fixture)", hg.MemberHostgroups)
+	}
+}
+
+// TestParseHostgroupIndirectMembersUnderCycle verifies
+// memberindirect_host against a real, deliberately cyclic hostgroup pair
+// (hg-parent ⊂ hg-child ⊂ hg-parent) that FreeIPA does not reject. The
+// cycle must not corrupt or infinite-loop the host set — it only causes
+// hg-parent to appear in its own memberindirect_hostgroup, a field this
+// package never reads for host expansion.
+func TestParseHostgroupIndirectMembersUnderCycle(t *testing.T) {
+	env := loadFixture(t, "hostgroup_show_nested.json")
+	m, err := decodeShow(env)
+	if err != nil {
+		t.Fatalf("decodeShow: %v", err)
+	}
+	hg := parseHostgroup(m)
+	if hg.Name != "hg-parent" {
+		t.Fatalf("Name = %q", hg.Name)
+	}
+	if !stringSliceEqualUnordered(hg.MemberHostgroups, []string{"hg-child"}) {
+		t.Fatalf("MemberHostgroups = %v", hg.MemberHostgroups)
+	}
+	if !stringSliceEqualUnordered(hg.IndirectMemberHosts, []string{"leaf-host.ipa.pilot.internal"}) {
+		t.Fatalf("IndirectMemberHosts = %v, want [leaf-host.ipa.pilot.internal] despite the cycle", hg.IndirectMemberHosts)
 	}
 }
 

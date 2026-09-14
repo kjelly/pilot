@@ -128,9 +128,10 @@ func parsePing(env rpcEnvelope) (PingResult, error) {
 
 func parseUser(m map[string]any) User {
 	return User{
-		Username:     attrString(m, "uid"),
-		Enabled:      !attrBool(m, "nsaccountlock", false),
-		DirectGroups: attrStrings(m, "memberof_group"),
+		Username:       attrString(m, "uid"),
+		Enabled:        !attrBool(m, "nsaccountlock", false),
+		DirectGroups:   attrStrings(m, "memberof_group"),
+		IndirectGroups: attrStrings(m, "memberofindirect_group"),
 	}
 }
 
@@ -148,9 +149,10 @@ func parseHost(m map[string]any) Host {
 
 func parseHostgroup(m map[string]any) Hostgroup {
 	return Hostgroup{
-		Name:             attrString(m, "cn"),
-		MemberHosts:      attrStrings(m, "member_host"),
-		MemberHostgroups: attrStrings(m, "member_hostgroup"),
+		Name:                attrString(m, "cn"),
+		MemberHosts:         attrStrings(m, "member_host"),
+		MemberHostgroups:    attrStrings(m, "member_hostgroup"),
+		IndirectMemberHosts: attrStrings(m, "memberindirect_host"),
 	}
 }
 

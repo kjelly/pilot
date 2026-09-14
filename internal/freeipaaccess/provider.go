@@ -56,13 +56,23 @@ type PingResult struct {
 	ServerVersion string
 }
 
-// User is a normalized user_show(all=true) result. DirectGroups holds only
-// the groups this user is a direct member of (memberof_group) — nested
-// closure expansion is internal/accessportal's job, not this package's.
+// User is a normalized user_show(all=true) result.
+//
+// DirectGroups and IndirectGroups are two separate raw FreeIPA attributes
+// (memberof_group / memberofindirect_group) from the SAME user_show call —
+// not the result of this package walking anything. FreeIPA's own memberof
+// plugin already computes the full transitive group closure server-side
+// (verified live: a 3-level nested-group chain's leaf member shows up in
+// the top group's memberofindirect_group with no recursive lookups on our
+// part, and this holds even across a deliberately-created group cycle —
+// see docs/evidence/pilot-access-gateway/2026-09-14-phase2-accessportal.md).
+// internal/accessportal's EffectiveGroups is therefore just
+// DirectGroups ∪ IndirectGroups, not a graph walk.
 type User struct {
-	Username     string
-	Enabled      bool
-	DirectGroups []string
+	Username       string
+	Enabled        bool
+	DirectGroups   []string
+	IndirectGroups []string
 }
 
 // Group is a normalized group_show(all=true) result. MemberGroups is the
@@ -81,11 +91,24 @@ type Host struct {
 }
 
 // Hostgroup is a normalized hostgroup_show(all=true) result.
-// MemberHostgroups holds directly nested hostgroups.
+// MemberHostgroups holds directly nested hostgroups (diagnostic use only).
+//
+// IndirectMemberHosts is FreeIPA's own server-computed transitive host
+// closure (memberindirect_host) — every host reachable through any depth
+// of nested hostgroups, from this one call. spec.md §14's gateway target
+// host expansion is therefore MemberHosts ∪ IndirectMemberHosts, not a
+// recursive hostgroup_show walk with its own cycle guard: verified live
+// against a deliberately cyclic hostgroup pair (hg-parent ⊂ hg-child ⊂
+// hg-parent) that FreeIPA itself does not reject — it still computed a
+// correct, terminating memberindirect_host (the cycle only causes a
+// hostgroup to show up in its own memberindirect_hostgroup, a field this
+// package does not use for the host set). See
+// docs/evidence/pilot-access-gateway/2026-09-14-phase2-accessportal.md.
 type Hostgroup struct {
-	Name             string
-	MemberHosts      []string
-	MemberHostgroups []string
+	Name                string
+	MemberHosts         []string
+	MemberHostgroups    []string
+	IndirectMemberHosts []string
 }
 
 // HBACRule is a normalized hbacrule_show/hbacrule_find(all=true) entry.
