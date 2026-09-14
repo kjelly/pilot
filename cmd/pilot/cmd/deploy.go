@@ -315,7 +315,16 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
 	fmt.Fprintln(out)
 
-	inventoryDefault := workspacePath(deployDirFlag, deployInventoryFlag)
+	// deployInventoryFlag is already workspace-relative (or absolute) —
+	// it must NOT be pre-joined with deployDirFlag here, since the
+	// validator below and the `inv :=` line further down both apply
+	// workspacePath(deployDirFlag, ...) to whatever the user submits
+	// (which defaults to accepting this very value unchanged). Doing the
+	// join here too used to double it: with --dir foo and the default
+	// inventory.yml, accepting the shown default resolved to
+	// foo/foo/inventory.yml instead of foo/inventory.yml (found live
+	// while demoing `pilot deploy --dir` against a fresh workspace).
+	inventoryDefault := deployInventoryFlag
 	invInput, err := runTextPrompt(promptInventory, "Inventory 檔路徑", inventoryDefault, func(path string) error {
 		return validateFileExists(workspacePath(deployDirFlag, path))
 	})

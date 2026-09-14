@@ -21,11 +21,20 @@
 #  旁的 pilot-gateway-scope 說明,或 docs/verification/pilot-gateway-scope.md)。
 # ============================================================================
 
-# 這台 gateway 的 instance id,例如 "gpu-01"。必填。
-gateway_id: ""
-
-# scope 名稱,決定要吃哪個 `pilot-target-<scope>` hostgroup。必填。
-gateway_scope: ""
+# gateway_id / gateway_scope 天生就是「每台 gateway 不同」(同一個 scope
+# 也可以有多台 gateway,見 spec.md AG26;不同 scope 的 gateway 更是各自
+# 獨立)——寫在這份 group 共用檔案裡,會讓所有 pilot-access-gateway 主機拿到
+# 同一組值,那是錯的。務必放進各自的 host_vars/<主機短名>.yml(`pilot edit`
+# 把主機加進這個 role 時也會主動提示要填這兩個 key,見
+# internal/inventory.roleContract.HostVarsKeys):
+#
+#   # host_vars/gw-gpu-01.yml
+#   gateway_id: gpu-01
+#   gateway_scope: gpu
+#
+#   # host_vars/gw-dmz-01.yml
+#   gateway_id: dmz-01
+#   gateway_scope: dmz
 
 # 這台 gateway 的 FQDN。不填則沿用 ansible_fqdn。
 # gateway_fqdn: ""
