@@ -110,17 +110,14 @@
         # ── Build dependencies ───────────────────────────────────────────────
         - name: "Step 2: Install build dependencies (golang, libpam0g-dev, build-essential, git)"
           tags: [C1]
-          ansible.builtin.apt:
-            name:
-              - golang
-              - libpam0g-dev
-              - build-essential
-              - git
-            state: present
-            update_cache: true
-          register: apt_deps
-          until: apt_deps is succeeded
-          retries: 2
+          ansible.builtin.include_tasks: tasks/apt-package-install.yml
+          vars:
+            pilot_apt_packages: [golang, libpam0g-dev, build-essential, git]
+            pilot_apt_policy: tolerant
+            pilot_apt_component: pam-oidc-sshd-build-deps
+            pilot_apt_required_sources:
+              - id: ubuntu-os
+                class: os
 
         - name: "Step 3: Clone kha7iq/kc-ssh-pam source on remote"
           ansible.builtin.git:

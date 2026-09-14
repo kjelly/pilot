@@ -124,10 +124,14 @@
 
     - name: "DNS — install unbound"
       tags: [dns, dns-C1]
-      ansible.builtin.apt:
-        name: "{{ dns_provider }}"
-        state: present
-        update_cache: true
+      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: ["{{ dns_provider }}"]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: core-infra-dns
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
       when:
         - infra_role == 'dns'
         - not ansible_check_mode
@@ -229,10 +233,14 @@
     ### NTP role
     - name: "NTP — install chrony"
       tags: [ntp, ntp-C4]
-      ansible.builtin.apt:
-        name: "{{ ntp_provider }}"
-        state: present
-        update_cache: true
+      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: ["{{ ntp_provider }}"]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: core-infra-ntp
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
       when:
         - infra_role == 'ntp'
         - not ansible_check_mode

@@ -49,11 +49,14 @@
     # Spec: docs/verification/reverse-proxy.md C1
     - name: "Install nginx (Debian family)"
       tags: [C1]
-      ansible.builtin.apt:
-        name: nginx
-        state: present
-        update_cache: true
-        cache_valid_time: 3600
+      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: [nginx]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: reverse-proxy-nginx
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
       when: ansible_os_family == 'Debian'
 
     - name: "Install nginx (RedHat family)"

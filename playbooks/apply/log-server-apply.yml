@@ -101,14 +101,15 @@
     # to work around here at all.
     - name: "Step 1: Install rsyslog (Debian family)"
       tags: [C1]
-      ansible.builtin.apt:
-        name: rsyslog
-        state: present
-        update_cache: true
+      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: [rsyslog]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: log-server-rsyslog
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
       when: ansible_os_family == "Debian"
-      register: apt_rsyslog
-      until: apt_rsyslog is succeeded
-      retries: 2
 
     - name: "Step 1a: Install rsyslog (RedHat family)"
       tags: [C1]

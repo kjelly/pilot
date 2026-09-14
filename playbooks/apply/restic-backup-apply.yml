@@ -158,11 +158,14 @@
   tasks:
     - name: "Step 1: Install restic (Debian apt)"
       tags: [C1]
-      ansible.builtin.apt:
-        name: restic
-        state: present
-        update_cache: true
-        cache_valid_time: 3600
+      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: [restic]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: restic-backup
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
       when: ansible_os_family == 'Debian'
 
     # restic is not in EL9 BaseOS/AppStream; EPEL carries it.

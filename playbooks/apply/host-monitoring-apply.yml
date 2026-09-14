@@ -341,11 +341,14 @@
 
         - name: "Step 5: Install htpasswd (Debian apt) — generates the bcrypt hash below, not a web server"
           tags: [C10]
-          ansible.builtin.apt:
-            name: apache2-utils
-            state: present
-            update_cache: true
-            cache_valid_time: 3600
+          ansible.builtin.include_tasks: tasks/apt-package-install.yml
+          vars:
+            pilot_apt_packages: [apache2-utils]
+            pilot_apt_policy: tolerant
+            pilot_apt_component: host-monitoring-htpasswd
+            pilot_apt_required_sources:
+              - id: ubuntu-os
+                class: os
           when: ansible_os_family == 'Debian'
 
         - name: "Step 5: Install htpasswd (EL dnf) — generates the bcrypt hash below, not a web server"

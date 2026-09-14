@@ -67,12 +67,14 @@
     # Spec: docs/verification/docker.md C1
     - name: "Docker — install docker.io (Debian family)"
       tags: [docker, docker-C1]
-      ansible.builtin.apt:
-        name:
-          - docker.io
-          - docker-compose-v2
-        state: present
-        update_cache: true
+      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: [docker.io, docker-compose-v2]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: docker
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
       when:
         - ansible_os_family == 'Debian'
         - not ansible_check_mode
