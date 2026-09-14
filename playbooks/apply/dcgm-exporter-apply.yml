@@ -264,10 +264,15 @@
 
         - name: "Step 1: Install nvidia-container-toolkit (spec C1)"
           tags: [C1]
-          ansible.builtin.apt:
-            name: nvidia-container-toolkit
-            state: present
-            update_cache: "{{ dcgm_exporter_toolkit_repo is changed }}"
+          ansible.builtin.include_tasks: tasks/apt-package-install.yml
+          vars:
+            pilot_apt_packages: [nvidia-container-toolkit]
+            pilot_apt_policy: tolerant
+            pilot_apt_component: dcgm-exporter-nvidia-container-toolkit
+            pilot_apt_required_sources:
+              - id: pilot-nvidia-container-toolkit
+                class: pilot
+                source_file: /etc/apt/sources.list.d/nvidia-container-toolkit.list
 
         # /etc/docker/daemon.json is only declarative input.  Docker does
         # not reload it automatically, so its contents are not proof that
