@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,12 +35,17 @@ type Config struct {
 	// CAFile is the FreeIPA CA bundle path (spec.md §11: /etc/ipa/ca.crt).
 	// There is deliberately no InsecureSkipVerify escape hatch.
 	CAFile string
-	// ServicePrincipal is this gateway's own principal, e.g.
-	// "pilot-access-gateway/gw01.example.com" (without "@REALM" — Realm is
-	// supplied separately).
+	// ServicePrincipal is this gateway's own principal: either
+	// "pilot-access-gateway/gw01.example.com" (realm supplied separately
+	// via Realm or krb5.conf's default_realm) or the full
+	// "pilot-access-gateway/gw01.example.com@REALM" form spec.md §26's
+	// example config uses — an embedded "@REALM" is split out automatically.
 	ServicePrincipal string
-	Realm            string
-	KeytabPath       string
+	// Realm defaults to krb5.conf's default_realm when empty — spec.md
+	// §26's example config has no explicit realm field, and a correctly
+	// enrolled host's krb5.conf already names it authoritatively.
+	Realm      string
+	KeytabPath string
 	// Krb5ConfPath defaults to /etc/krb5.conf when empty.
 	Krb5ConfPath string
 	// RequestTimeout bounds every HTTP call (spec.md §26 default 5s).
@@ -96,7 +102,18 @@ func NewClient(cfg Config) (*Client, error) {
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("parse FreeIPA CA file %s: no certificates found", cfg.CAFile)
 	}
-	krb5Cl := client.NewWithKeytab(cfg.ServicePrincipal, cfg.Realm, kt, krb5Conf, client.DisablePAFXFAST(true))
+	principal, embeddedRealm := splitPrincipalRealm(cfg.ServicePrincipal)
+	realm := cfg.Realm
+	if realm == "" {
+		realm = embeddedRealm
+	}
+	if realm == "" {
+		realm = krb5Conf.LibDefaults.DefaultRealm
+	}
+	if realm == "" {
+		return nil, fmt.Errorf("freeipaaccess: no realm configured and %s has no default_realm", cfg.krb5ConfPath())
+	}
+	krb5Cl := client.NewWithKeytab(principal, realm, kt, krb5Conf, client.DisablePAFXFAST(true))
 	return &Client{
 		cfg:  cfg,
 		krb5: krb5Cl,
@@ -104,6 +121,16 @@ func NewClient(cfg Config) (*Client, error) {
 			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
 		},
 	}, nil
+}
+
+// splitPrincipalRealm splits an optional "@REALM" suffix off a service
+// principal (spec.md §26's example config embeds it, e.g.
+// ".../pilot-gw-gpu-01.linker.internal@LINKER.INTERNAL", matching how
+// ipa-getkeytab/klist print a full principal name). realm is "" when no
+// "@" is present.
+func splitPrincipalRealm(servicePrincipal string) (principal, realm string) {
+	name, r, _ := strings.Cut(servicePrincipal, "@")
+	return name, r
 }
 
 // errSessionExpired signals that the cached session cookie was rejected

@@ -49,10 +49,10 @@ func (r *Resolver) ResolveGatewayScope(ctx context.Context) (GatewayScope, error
 	}
 	hosts := make(map[string]struct{}, len(hg.MemberHosts)+len(hg.IndirectMemberHosts))
 	for _, h := range hg.MemberHosts {
-		hosts[canonicalizeFQDN(h)] = struct{}{}
+		hosts[CanonicalizeFQDN(h)] = struct{}{}
 	}
 	for _, h := range hg.IndirectMemberHosts {
-		hosts[canonicalizeFQDN(h)] = struct{}{}
+		hosts[CanonicalizeFQDN(h)] = struct{}{}
 	}
 	return GatewayScope{
 		GatewayID:       r.Gateway.ID,
@@ -233,10 +233,10 @@ func (r *Resolver) expandReferencedHostgroups(ctx context.Context, hbacRules []f
 		}
 		set := make(map[string]struct{}, len(hg.MemberHosts)+len(hg.IndirectMemberHosts))
 		for _, h := range hg.MemberHosts {
-			set[canonicalizeFQDN(h)] = struct{}{}
+			set[CanonicalizeFQDN(h)] = struct{}{}
 		}
 		for _, h := range hg.IndirectMemberHosts {
-			set[canonicalizeFQDN(h)] = struct{}{}
+			set[CanonicalizeFQDN(h)] = struct{}{}
 		}
 		result[name] = set
 	}
@@ -296,9 +296,9 @@ func sortedKeys(m map[string]struct{}) []string {
 	return out
 }
 
-// canonicalizeFQDN implements spec.md §14's FQDN canonicalization rule
+// CanonicalizeFQDN implements spec.md §14's FQDN canonicalization rule
 // ("lowercase, trim trailing dot for identity comparison"), applied
 // everywhere a host name enters a set this package compares against.
-func canonicalizeFQDN(fqdn string) string {
+func CanonicalizeFQDN(fqdn string) string {
 	return strings.ToLower(strings.TrimSuffix(fqdn, "."))
 }

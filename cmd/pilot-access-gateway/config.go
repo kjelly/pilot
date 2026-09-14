@@ -1,0 +1,130 @@
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config is /etc/pilot/access-gateway.yaml (spec.md §26). Unknown fields
+// are rejected — spec.md §26 explicitly forbids roster_file/
+// inventory_file/vault_password_file/state_dir/audit_db ever appearing
+// here, and KnownFields(true) enforces that for any such field, not just
+// those five.
+type Config struct {
+	Gateway GatewaySection `yaml:"gateway"`
+}
+
+// GatewaySection is this gateway instance's immutable identity plus
+// runtime settings (spec.md §10.2/§26).
+type GatewaySection struct {
+	ID              string         `yaml:"id"`
+	Scope           string         `yaml:"scope"`
+	FQDN            string         `yaml:"fqdn"`
+	TargetHostgroup string         `yaml:"target_hostgroup"`
+	SocketPath      string         `yaml:"socket_path"`
+	PortalUserGroup string         `yaml:"portal_user_group"`
+	FreeIPA         FreeIPASection `yaml:"freeipa"`
+}
+
+// FreeIPASection configures the read-only internal/freeipaaccess.Client.
+type FreeIPASection struct {
+	Servers          []string `yaml:"servers"`
+	CAFile           string   `yaml:"ca_file"`
+	ServicePrincipal string   `yaml:"service_principal"`
+	Keytab           string   `yaml:"keytab"`
+	RequestTimeout   duration `yaml:"request_timeout"`
+	CacheTTL         duration `yaml:"cache_ttl"`
+	ConnectMaxAge    duration `yaml:"connect_max_age"`
+}
+
+// duration unmarshals a Go duration string ("5s") from YAML — yaml.v3's
+// default time.Duration handling is an integer nanosecond count, not the
+// human-readable string spec.md §26's example config uses.
+type duration time.Duration
+
+func (d *duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	*d = duration(parsed)
+	return nil
+}
+
+const (
+	defaultSocketPath     = "/run/pilot/access-gateway.sock"
+	defaultRequestTimeout = 5 * time.Second
+)
+
+// LoadConfig reads and validates a gateway config file.
+func LoadConfig(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg Config
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if err := cfg.validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func (c Config) validate() error {
+	var missing []string
+	if c.Gateway.ID == "" {
+		missing = append(missing, "gateway.id")
+	}
+	if c.Gateway.Scope == "" {
+		missing = append(missing, "gateway.scope")
+	}
+	if c.Gateway.FQDN == "" {
+		missing = append(missing, "gateway.fqdn")
+	}
+	if c.Gateway.TargetHostgroup == "" {
+		missing = append(missing, "gateway.target_hostgroup")
+	}
+	if len(c.Gateway.FreeIPA.Servers) == 0 {
+		missing = append(missing, "gateway.freeipa.servers")
+	}
+	if c.Gateway.FreeIPA.CAFile == "" {
+		missing = append(missing, "gateway.freeipa.ca_file")
+	}
+	if c.Gateway.FreeIPA.ServicePrincipal == "" {
+		missing = append(missing, "gateway.freeipa.service_principal")
+	}
+	if c.Gateway.FreeIPA.Keytab == "" {
+		missing = append(missing, "gateway.freeipa.keytab")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("config missing required fields: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func (c Config) socketPath() string {
+	if c.Gateway.SocketPath != "" {
+		return c.Gateway.SocketPath
+	}
+	return defaultSocketPath
+}
+
+func (c Config) requestTimeout() time.Duration {
+	if c.Gateway.FreeIPA.RequestTimeout > 0 {
+		return time.Duration(c.Gateway.FreeIPA.RequestTimeout)
+	}
+	return defaultRequestTimeout
+}

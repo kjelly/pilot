@@ -33,7 +33,7 @@ func hostMatch(categoryAll bool, hosts, hostgroups []string, fqdn string, hostgr
 	if categoryAll {
 		return true, nil
 	}
-	fqdn = canonicalizeFQDN(fqdn)
+	fqdn = CanonicalizeFQDN(fqdn)
 	if containsFQDN(hosts, fqdn) {
 		return true, nil
 	}
@@ -53,7 +53,7 @@ func hostMatch(categoryAll bool, hosts, hostgroups []string, fqdn string, hostgr
 // §14's "lowercase, trim trailing dot" rule applies to both sides.
 func containsFQDN(hosts []string, fqdn string) bool {
 	for _, h := range hosts {
-		if canonicalizeFQDN(h) == fqdn {
+		if CanonicalizeFQDN(h) == fqdn {
 			return true
 		}
 	}
@@ -109,7 +109,7 @@ func hbacRuleGrants(
 		Rule:          rule.Name,
 		DirectUser:    slices.Contains(rule.Users, username),
 		ViaGroups:     viaGroups,
-		DirectHost:    containsFQDN(rule.Hosts, canonicalizeFQDN(fqdn)),
+		DirectHost:    containsFQDN(rule.Hosts, CanonicalizeFQDN(fqdn)),
 		ViaHostgroups: viaHostgroups,
 	}
 }
