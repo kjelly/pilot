@@ -1,0 +1,179 @@
+# Apply playbook for `pilot gateway-scope plan/reconcile` (spec.md
+# §9.6/§57, Phase 6 of docs/tmp/now/spec.md).
+#
+# Publishes ONE pilot-access-gateway scope's desired target host set into
+# FreeIPA hostgroup `pilot-target-<gateway_scope>` — add missing hosts,
+# remove stale ones, idempotently. This is management-plane code (spec.md
+# §3.1: management plane may use roster/inventory/vault/Ansible); it is
+# NOT part of pilot-access-gateway's own runtime, which never reads
+# anything this playbook writes except by querying live FreeIPA itself.
+#
+# Deliberately its own small playbook rather than another tag on
+# freeipa-identity-apply.yml: gateway-scope publication is a distinct,
+# narrow concern (one hostgroup, one flat host list, no nested nested
+# groups/HBAC/sudo/users) and spec.md §61 treats FreeIPA identity/roster
+# management as pilot's pre-existing, separate system this feature sits
+# alongside, not one it should have to grow to depend on.
+#
+# gateway_scope_plan_only controls plan vs reconcile explicitly (rather
+# than relying on ansible-playbook's own --check machinery, which by
+# default SKIPS command/shell tasks under --check unless check_mode:false
+# is set on every single one — using our own var keeps "plan" reliably
+# read-only without fighting that per-task):
+#   plan      -> -e gateway_scope_plan_only=true   (never mutates)
+#   reconcile -> -e gateway_scope_plan_only=false  (default)
+#
+# Usage:
+#
+#   pilot vm-target run --name <freeipa-server-vm> \
+#       playbooks/apply/gateway-scope-apply.yml \
+#       -e target_group=all \
+#       -e gateway_scope=gpu \
+#       -e gateway_scope_hosts='["gpu-a.example.com","gpu-b.example.com"]' \
+#       -e @~/.vault/main.yaml
+#
+# Secrets: ipa_admin_password comes from a vault file, never hard-coded
+# (matching freeipa-server-apply.yml / freeipa-identity-apply.yml).
+---
+- name: Gateway scope publication
+  hosts: "{{ target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    gateway_scope_plan_only: false
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+  pre_tasks:
+    # Same stage-gate convention as every other apply playbook (AGENTS.md
+    # §4.3: "新增 playbook 一律要帶，沒有預設豁免") — this mutates a live
+    # FreeIPA hostgroup that gates real SSH/sudo access, so it gets the
+    # same staging/prod discipline as freeipa-realm-replacement-apply.yml.
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+      when: stage == 'prod'
+      tags: [always]
+  tasks:
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that:
+          - gateway_scope is defined
+          - gateway_scope | length > 0
+          - gateway_scope_hosts is defined
+          - ipa_admin_password is defined
+        fail_msg: >-
+          Missing required vars. Pass -e gateway_scope=<scope>
+          -e gateway_scope_hosts='["host1","host2"]' and a vault file
+          defining ipa_admin_password.
+
+    - name: Compute target hostgroup name
+      ansible.builtin.set_fact:
+        gateway_target_hostgroup: "pilot-target-{{ gateway_scope }}"
+
+    - name: Kinit admin
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo '{{ ipa_admin_password }}' | kinit admin
+      args:
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+
+    # Read-only; always runs for real regardless of plan vs reconcile —
+    # rc!=0 (hostgroup doesn't exist yet) is a valid, expected state, not
+    # a failure.
+    - name: Look up current hostgroup membership (may not exist yet)
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-show, "{{ gateway_target_hostgroup }}", --all]
+      register: gateway_hostgroup_show
+      changed_when: false
+      failed_when: false
+
+    # ipa hostgroup-show reports member hosts as FQDNs even when they were
+    # added by short name (same gotcha freeipa-identity-apply.yml already
+    # documents and works around) — normalize both sides to short name
+    # before diffing, or every rerun would see the FQDN form as "extra"
+    # and flip-flop forever.
+    - name: Compute add/remove/keep diff
+      ansible.builtin.set_fact:
+        gateway_hostgroup_exists: "{{ gateway_hostgroup_show.rc == 0 }}"
+        gateway_current_hosts_short: "{{ current_hosts_fqdn | map('regex_replace', '\\..*$', '') | list }}"
+        gateway_desired_hosts_short: "{{ gateway_scope_hosts | map('regex_replace', '\\..*$', '') | list }}"
+      vars:
+        hosts_line: "{{ ((gateway_hostgroup_show.stdout | default('') | regex_findall('^  Member hosts: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        current_hosts_fqdn: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
+
+    - name: Compute add/remove/keep (short-name diff)
+      ansible.builtin.set_fact:
+        gateway_hosts_to_add: "{{ gateway_desired_hosts_short | difference(gateway_current_hosts_short) }}"
+        gateway_hosts_to_remove: "{{ gateway_current_hosts_short | difference(gateway_desired_hosts_short) }}"
+        gateway_hosts_to_keep: "{{ gateway_desired_hosts_short | intersect(gateway_current_hosts_short) }}"
+
+    - name: "Plan: add / remove / keep"
+      ansible.builtin.debug:
+        msg:
+          scope: "{{ gateway_scope }}"
+          target_hostgroup: "{{ gateway_target_hostgroup }}"
+          hostgroup_exists: "{{ gateway_hostgroup_exists }}"
+          add: "{{ gateway_hosts_to_add }}"
+          remove: "{{ gateway_hosts_to_remove }}"
+          keep: "{{ gateway_hosts_to_keep }}"
+
+    # Tags C1-C3 correspond to docs/verification/pilot-gateway-scope.md's
+    # rows for its one documented scenario (gateway_scope=gpu,
+    # gateway_scope_hosts=[gpu-a,gpu-b]); the underlying tasks are
+    # data-driven and cover any scope/host list, but these two tasks are
+    # what actually implement all three rows for that scenario.
+    - name: Ensure target hostgroup exists
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-add, "{{ gateway_target_hostgroup }}", "--desc=Pilot Access Gateway target scope: {{ gateway_scope }}"]
+      register: gateway_hostgroup_add
+      changed_when: "'Added hostgroup' in (gateway_hostgroup_add.stdout | default(''))"
+      failed_when:
+        - gateway_hostgroup_add.rc != 0
+        - "'already exists' not in (gateway_hostgroup_add.stderr | default(''))"
+      when: not gateway_scope_plan_only
+      tags: [C1]
+
+    - name: Add missing hosts to target hostgroup
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-add-member, "{{ gateway_target_hostgroup }}", "--hosts={{ item }}"]
+      loop: "{{ gateway_hosts_to_add }}"
+      register: gateway_hostgroup_member_add
+      changed_when: "'Number of members added 1' in (gateway_hostgroup_member_add.stdout | default(''))"
+      failed_when:
+        - gateway_hostgroup_member_add.rc != 0
+        - "'already a member' not in (gateway_hostgroup_member_add.stdout | default('') + gateway_hostgroup_member_add.stderr | default(''))"
+      when: not gateway_scope_plan_only
+      tags: [C2, C3]
+
+    - name: Remove stale hosts from target hostgroup
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-remove-member, "{{ gateway_target_hostgroup }}", "--hosts={{ item }}"]
+      loop: "{{ gateway_hosts_to_remove }}"
+      register: gateway_hostgroup_member_remove
+      changed_when: "'Number of members removed 1' in (gateway_hostgroup_member_remove.stdout | default(''))"
+      failed_when:
+        - gateway_hostgroup_member_remove.rc != 0
+      when: not gateway_scope_plan_only

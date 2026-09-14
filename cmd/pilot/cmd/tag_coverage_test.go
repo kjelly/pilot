@@ -144,6 +144,7 @@ var specTagMap = []specTagMapping{
 			"C10": "kernel auditing probe (auditctl -s) — verify-only outcome of the audit tasks",
 		}},
 	{spec: "freeipa-realm-replacement.md", playbook: "freeipa-realm-replacement-apply.yml"},
+	{spec: "pilot-gateway-scope.md", playbook: "gateway-scope-apply.yml"},
 	{spec: "host-monitoring.md", playbook: "host-monitoring-apply.yml",
 		exemptRows: map[string]string{
 			"C8": "port-listening probe — verify-only outcome of the service actually running (C7)",

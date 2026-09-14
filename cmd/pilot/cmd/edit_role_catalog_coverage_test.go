@@ -42,6 +42,7 @@ var editRoleCatalogExemptions = map[string]string{
 	"log-shipping":              "folded into the log-server role's checklist entry, not a separate checklist row",
 	"os-patch-sla":              "day-2/opt-in, applied via patch_stage rather than the per-host role checklist",
 	"pam-oidc-sshd":             "exposed under the \"linux-servers\" checklist entry, not its own contract-ID-named row",
+	"pilot-gateway-scope":       "day-2/opt-in reconcile-only component, no per-host checklist entry (see AGENTS.md §4.3)",
 }
 
 func TestEditRoleCatalogCoversAllContracts(t *testing.T) {

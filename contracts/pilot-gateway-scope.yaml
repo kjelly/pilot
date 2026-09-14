@@ -1,0 +1,30 @@
+schemaVersion: 1
+id: pilot-gateway-scope
+role: pilot-gateway-scope
+specs:
+  - path: docs/verification/pilot-gateway-scope.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/gateway-scope-apply.yml
+regressionTests:
+  - cmd/pilot/cmd/gateway_scope_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+dependencies:
+  - {component: freeipa-server, required: true, relation: sameHosts}
+hostCardinality: exactly-one
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
+groupVars:
+  - {name: gateway_scope, type: string, required: true, secret: false}
+  - {name: gateway_scope_hosts, type: stringList, required: true, secret: false}
+  - {name: ipa_admin_password, type: string, required: true, secret: true}
+  - {name: gateway_scope_plan_only, type: boolean, required: false, default: false, secret: false}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: vm, idempotency: required}
+traceability:
+  mode: mapped
+  rows:
+    "docs/verification/pilot-gateway-scope.md#C1": {tags: [C1], reason: hostgroup-add task creates/ensures pilot-target-<scope>}
+    "docs/verification/pilot-gateway-scope.md#C2": {tags: [C2], reason: hostgroup-add-member task adds gpu-a for the documented scenario}
+    "docs/verification/pilot-gateway-scope.md#C3": {tags: [C3], reason: same hostgroup-add-member task also adds gpu-b for the documented scenario}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

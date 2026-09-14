@@ -244,7 +244,7 @@ func TestReconcileCatalogIsExplicitAndContractBacked(t *testing.T) {
 	}
 	if want := []string{
 		"freeipa-identity", "freeipa-dns", "freeipa-dns-client", "freeipa-ca-trust",
-		"freeipa-server-replica", "freeipa-realm-replacement", "internal-endpoint", "prometheus",
+		"freeipa-server-replica", "freeipa-realm-replacement", "pilot-gateway-scope", "internal-endpoint", "prometheus",
 	}; !slices.Equal(got, want) {
 		t.Fatalf("reconcile entries = %v, want %v; a reconcile entry must not be exposed before its contract and playbook exist", got, want)
 	}
@@ -378,8 +378,8 @@ func TestDeployCatalog_PlaybooksExistAndAreWellFormed(t *testing.T) {
 	}
 	// AGENTS.md §4.3 tracks this count; keep the two in sync deliberately
 	// rather than silently drifting.
-	if len(deployCatalog) != 34 {
-		t.Fatalf("expected 34 apply playbooks in the catalog (see AGENTS.md §4.3), got %d", len(deployCatalog))
+	if len(deployCatalog) != 35 {
+		t.Fatalf("expected 35 apply playbooks in the catalog (see AGENTS.md §4.3), got %d", len(deployCatalog))
 	}
 }
 

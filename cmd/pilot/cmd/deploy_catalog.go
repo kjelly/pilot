@@ -111,6 +111,13 @@ var deployCatalog = []deployPlaybook{
 		Reconcile: true,
 	},
 	{
+		Key: "pilot-gateway-scope", Label: "發布 pilot-access-gateway scope 目標主機清單到 FreeIPA hostgroup",
+		Playbook: "playbooks/apply/gateway-scope-apply.yml", DefaultGroup: "freeipa-server", StageVar: "stage",
+		Note:      "day-2/opt-in 角色(不在 site.yml);只管理 pilot-target-<scope> 這一個 hostgroup 的成員關係，不建立/管理 gateway 主機本身。也可直接用 `pilot gateway-scope plan/reconcile` CLI(見 docs/tmp/now/spec.md §9.6/§57)。見 docs/verification/pilot-gateway-scope.md。",
+		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password)",
+		Reconcile: true,
+	},
+	{
 		Key: "reverse-proxy", Label: "Nginx reverse proxy 基礎安裝",
 		Playbook: "playbooks/apply/reverse-proxy-apply.yml", DefaultGroup: "reverse-proxy", StageVar: "stage",
 		Note: "site.yml 角色(所有 reverse-proxy group 主機都會套用);只裝 nginx、關掉 distro default site、建立 Pilot config namespace，不管任何 endpoint 的 vhost——那是 internal-endpoint 的責任。Phase-1 骨架:目前只有 placeholder task,真正的 nginx 安裝邏輯待 spec.md §63 Phase 4 補上。",
