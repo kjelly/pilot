@@ -18,14 +18,16 @@ const (
 
 var portalTopMenuItems = []string{portalMenuMyHosts, portalMenuMyIdentity, portalMenuRefresh, portalMenuLogout}
 
-// runPortal is `pilot portal`'s read-only main loop (Phase 4 — spec.md
-// §27/§60 Phase 4): Gateway/Scope/User header, My Hosts, Host Detail, My
-// Identity, Refresh, Logout. No Connect action yet — that is Phase 5's
-// controlled SSH, deliberately not built here (portalClient.ConnectAuthorize
-// already exists for it to use). Esc/ctrl+c at the top menu exits the same
-// as choosing Logout — this loop only ever leaves via one of those two
+// runPortal is `pilot portal`'s main loop (spec.md §27): Gateway/Scope/
+// User header, My Hosts, Host Detail (with Phase 5's Connect action), My
+// Identity, Refresh, Logout. Esc/ctrl+c at the top menu exits the same as
+// choosing Logout — this loop only ever leaves via one of those two
 // paths, never mid-submenu without returning here first.
 func runPortal(ctx context.Context, client *portalClient) error {
+	return runPortalWithSSHConfig(ctx, client, defaultSSHConfigPath)
+}
+
+func runPortalWithSSHConfig(ctx context.Context, client *portalClient, sshConfigPath string) error {
 	identity, err := client.Identity(ctx)
 	if err != nil {
 		return fmt.Errorf("load identity: %w", err)
@@ -42,7 +44,9 @@ func runPortal(ctx context.Context, client *portalClient) error {
 		}
 		switch portalTopMenuItems[choice] {
 		case portalMenuMyHosts:
-			runPortalMyHosts(access)
+			if err := runPortalMyHosts(ctx, client, sshConfigPath, access); err != nil {
+				return err
+			}
 		case portalMenuMyIdentity:
 			runConfirmPrompt("", portalIdentityDetail(identity), true)
 		case portalMenuRefresh:
@@ -74,10 +78,10 @@ const portalBackChoice = "« Back"
 // must: hosts already filtered server-side to "effective FreeIPA SSH
 // allow AND in gateway scope" — this function never re-filters or
 // second-guesses that list.
-func runPortalMyHosts(access gatewayapi.AccessResponse) {
+func runPortalMyHosts(ctx context.Context, client *portalClient, sshConfigPath string, access gatewayapi.AccessResponse) error {
 	if len(access.Hosts) == 0 {
 		runConfirmPrompt("", "My Hosts\n\n(no accessible hosts in this gateway's scope)", true)
-		return
+		return nil
 	}
 	items := make([]string, 0, len(access.Hosts)+1)
 	for _, h := range access.Hosts {
@@ -86,9 +90,23 @@ func runPortalMyHosts(access gatewayapi.AccessResponse) {
 	items = append(items, portalBackChoice)
 	choice, err := runSelectPrompt("", "My Hosts", items)
 	if err != nil || choice == len(access.Hosts) {
-		return
+		return nil
 	}
-	runConfirmPrompt("", portalHostDetail(access.Hosts[choice]), true)
+	return runPortalHostDetail(ctx, client, sshConfigPath, access.Hosts[choice])
+}
+
+const (
+	portalActionConnect = "Connect"
+)
+
+// runPortalHostDetail shows the host's SSH/sudo detail and offers Connect
+// (spec.md §60 Phase 5) alongside Back.
+func runPortalHostDetail(ctx context.Context, client *portalClient, sshConfigPath string, h gatewayapi.HostJSON) error {
+	choice, err := runSelectPrompt("", portalHostDetail(h), []string{portalActionConnect, portalBackChoice})
+	if err != nil || choice == 1 {
+		return nil
+	}
+	return connectToHost(ctx, client, sshConfigPath, h.FQDN)
 }
 
 func portalHostDetail(h gatewayapi.HostJSON) string {

@@ -25,7 +25,7 @@ func TestRunPortalFullMenuLoop(t *testing.T) {
 	p := &promptAutomation{answers: []promptAnswer{
 		{Prompt: "Pilot Portal", Select: portalMenuMyHosts},
 		{Prompt: "My Hosts", Select: "gpu-a.example.com"},
-		{Prompt: "Host: gpu-a.example.com", Confirm: boolPtr(true)},
+		{Prompt: "Host: gpu-a.example.com", Select: portalBackChoice},
 		{Prompt: "Pilot Portal", Select: portalMenuMyIdentity},
 		{Prompt: "My Identity", Confirm: boolPtr(true)},
 		{Prompt: "Pilot Portal", Select: portalMenuRefresh},
@@ -75,7 +75,7 @@ func TestRunPortalRefreshReflectsNewData(t *testing.T) {
 		{Prompt: "Pilot Portal", Select: portalMenuRefresh},
 		{Prompt: "Pilot Portal", Select: portalMenuMyHosts},
 		{Prompt: "My Hosts", Select: "gpu-a.example.com"},
-		{Prompt: "Host: gpu-a.example.com", Confirm: boolPtr(true)},
+		{Prompt: "Host: gpu-a.example.com", Select: portalBackChoice},
 		{Prompt: "Pilot Portal", Select: portalMenuLogout},
 	}}
 	withPromptAutomation(t, p, func() {

@@ -13,18 +13,22 @@ import (
 // /run/pilot/access-gateway.sock.
 const defaultAccessGatewaySocket = "/run/pilot/access-gateway.sock"
 
-var portalSocketFlag string
+var (
+	portalSocketFlag    string
+	portalSSHConfigFlag string
+)
 
 var portalCmd = &cobra.Command{
 	Use:   "portal",
 	Short: "Pilot Portal — view your FreeIPA-scoped SSH/sudo access on this gateway",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newPortalClient(portalSocketFlag)
-		return runPortal(cmd.Context(), client)
+		return runPortalWithSSHConfig(cmd.Context(), client, portalSSHConfigFlag)
 	},
 }
 
 func init() {
 	portalCmd.Flags().StringVar(&portalSocketFlag, "socket", defaultAccessGatewaySocket, "pilot-access-gateway Unix socket path")
+	portalCmd.Flags().StringVar(&portalSSHConfigFlag, "ssh-config", defaultSSHConfigPath, "root-owned SSH client config for Connect (spec.md §32)")
 	rootCmd.AddCommand(portalCmd)
 }
