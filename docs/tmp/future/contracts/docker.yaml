@@ -9,7 +9,7 @@ playbooks:
   apply: playbooks/apply/docker-apply.yml
   rollback: null
   upgrade: null
-  decommission: null
+  decommission: playbooks/decommission/docker-decommission.yml
 regressionTests:
   - internal/spec/docker_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
@@ -31,7 +31,10 @@ diagnostics:
 stagePolicy: {variable: stage, default: sandbox}
 experimental: false
 evidenceRequirement: {targetTest: vm-or-docker, idempotency: required}
-lifecycle: {backup: null, upgrade: null, decommission: null}
+lifecycle:
+  backup: null
+  upgrade: null
+  decommission: {class: stateless, scope: local, externalState: false, requiresReachableHost: true, retention: none}
 traceability:
   mode: rowTags
   tag: {kind: rolePrefixed, prefix: docker}
