@@ -437,7 +437,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 35 支**都有 `stage`/`confirm_staging`/
+`playbooks/apply/*.yml` 現在**全部 36 支**都有 `stage`/`confirm_staging`/
 `confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`docker`、
 `freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
 `freeipa-dns-client`、`freeipa-ca-trust`、`freeipa-nfs-server`、
@@ -446,7 +446,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 `audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
 `os-patch-sla`(用 `patch_stage`)、`host-monitoring`、`dcgm-exporter`、`prometheus`、`thanos-query`、
 `detection-engine`、`alertmanager`、`snmp-exporter`、`dashboard`、`log-shipping`、`reverse-proxy`、`internal-endpoint`、
-`agent-controller`、`gateway-scope`)。
+`agent-controller`、`gateway-scope`、`pilot-access-gateway`)。
 `freeipa-server-replica`、
 `freeipa-realm-replacement`、
 `freeipa-dns`、`freeipa-dns-client`、`freeipa-ca-trust`、`internal-endpoint`、`agent-controller` 與後五支可觀測性堆疊一樣是**還沒接進
@@ -843,3 +843,4 @@ git status --short
 | 2026-09-01 | v1.23 | SNMP Monitoring Integration Phase 0:新增 `snmp-exporter` contract/verification skeleton 與 apply playbook(只有 stage/confirm/inventory-group gate,`tasks: []`,尚無任何部署邏輯;day-2/opt-in,不接進 `site.yml`,見 `docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md`、`docs/architecture/snmp-monitoring.md`);§4.3 playbook 清點更新為 34 支 | pilot |
 | 2026-09-07 | v1.24 | 兩週 22 個 fix commit 回顧後新增三條硬規則:§4.4(`always` tag 前置任務要跟著標,起因 `2abb6fd`/`dada083` 連續咬 3 支 playbook,`af239e3` lint 第一版還漏掃 `pre_tasks`)、§5.5(`deploy.go` 的 `--limit`/依賴展開/tags 篩選是高風險核心邏輯,3 天內修 6 次)、§5.6(解析外部 CLI 輸出的 fixture 必須來自真實擷取,起因 FreeIPA/decommission 一週內抓到 11 個「unit test 早就綠燈但真機才現形」的真 bug,附帶 package-level 測試狀態污染的教訓);§6 補三條對應 ❌ 提醒 | pilot |
 | 2026-09-14 | v1.25 | pilot-access-gateway Phase 6:新增 `gateway-scope` apply playbook(`pilot gateway-scope plan/reconcile` CLI 的後端,把一個 scope 的目標主機清單發布成 FreeIPA hostgroup `pilot-target-<scope>`,day-2/opt-in、not per-host role,見 `docs/tmp/now/spec.md` §9.6/§57、`docs/verification/pilot-gateway-scope.md`);§4.3 playbook 清點更新為 35 支;活體 vm-target 測試發現 `-e gateway_scope_hosts=[...]` 這種寫法會被 Ansible 當純字串(逐字元跑 diff),必須用 `-e '{"gateway_scope_hosts": [...]}'` 的 JSON 物件形式 | pilot |
+| 2026-09-14 | v1.26 | pilot-access-gateway Phase 7:新增 `pilot-access-gateway` apply playbook(裝 stateless FreeIPA-backed SSH/sudo 存取閘道到單一 gateway 主機,含 reader service principal/keytab、systemd socket-activated API、`pilot portal` 前端;ForceCommand 步驟預設關閉,留給 Phase 8,見 `docs/tmp/now/spec.md` §55/§0 G4、`docs/verification/pilot-access-gateway.md`);§4.3 playbook 清點更新為 36 支,登記為一般 per-host 角色(`internal/inventory` topLevelOrder/roleContracts,比照 `agent-controller`/`freeipa-server-replica`,而非像 `gateway-scope` 那樣豁免);活體 vm-target 測試抓到並修正 4 個真 bug:`ipa service-add` 要求正向 DNS record 先存在、`/usr/local/libexec` 在 Ubuntu 上不存在、local fallback group 會被 nsswitch `files` 來源永久遮蔽同名 FreeIPA 群組(已改成 fail-closed 檢查,不再建 local 群組)、`RuntimeDirectory=` declare 在錯的 systemd unit(`.service`)上會讓重啟 service 把 `.socket` 建立的 socket 檔一併刪掉(已搬到 `.socket` unit);另外在定位這組 bug 過程中先誤判成「systemd 無法可靠解析 SSSD 群組」,實際重跑驗證後已回頭修正相關文件註解為正確成因(local group shadowing) | pilot |

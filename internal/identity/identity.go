@@ -37,3 +37,42 @@ func LookupUsername(ctx context.Context, uid uint32) (string, error) {
 	}
 	return fields[0], nil
 }
+
+// IsMemberOfGroup reports whether username is a member of group, via
+// `getent group <group>` (fixed argv, no shell).
+//
+// This is a defense-in-depth check for the application layer, alongside
+// (not instead of) the Unix socket's own SocketGroup= filesystem
+// permission (spec.md §29). Live vm-target testing found a real, if
+// narrower, hazard motivating it: a host-install step that creates a
+// local fallback group with the same name as an FreeIPA-managed one
+// permanently shadows the real group for every NSS lookup (nsswitch's
+// "files" source is checked before "sss", so the empty local group wins
+// silently) — see
+// docs/evidence/pilot-access-gateway/2026-09-14-phase7-deployment-integration.md.
+// Once that local group is removed, systemd's SocketGroup= DOES resolve
+// an SSSD/FreeIPA-backed group correctly and reliably (verified across
+// repeated socket restarts) — this is not compensating for a fundamental
+// systemd/SSSD timing limitation. It still earns its place as a second
+// layer: any future local `groupadd` with a colliding name (a plausible
+// operational mistake) would silently reopen the same hole at the
+// filesystem-permission layer alone.
+func IsMemberOfGroup(ctx context.Context, username, group string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "getent", "group", group)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("identity: getent group %s: %w", group, err)
+	}
+	line := strings.TrimSpace(stdout.String())
+	fields := strings.SplitN(line, ":", 4)
+	if len(fields) < 4 {
+		return false, nil
+	}
+	for _, member := range strings.Split(fields[3], ",") {
+		if member == username {
+			return true, nil
+		}
+	}
+	return false, nil
+}

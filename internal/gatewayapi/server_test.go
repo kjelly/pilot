@@ -75,6 +75,13 @@ func (f *fakeProvider) HBACTest(ctx context.Context, req freeipaaccess.HBACTestR
 // (this test process connecting to itself), not a mocked context.
 func testServer(t *testing.T, username string) (*http.Client, string) {
 	t.Helper()
+	return testServerWithConfig(t, username, nil)
+}
+
+// testServerWithConfig is testServer plus an optional hook to mutate the
+// *Server (e.g. set PortalUserGroup) before it starts serving.
+func testServerWithConfig(t *testing.T, username string, configure func(*Server)) (*http.Client, string) {
+	t.Helper()
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "gw.sock")
 	ln, err := net.Listen("unix", sockPath)
@@ -87,6 +94,9 @@ func testServer(t *testing.T, username string) (*http.Client, string) {
 	provider := &fakeProvider{username: username}
 	resolver := accessportal.NewResolver(provider, gw)
 	srv := NewServer(gw, provider, resolver, nil)
+	if configure != nil {
+		configure(srv)
+	}
 
 	go srv.Serve(ln)                                         //nolint:errcheck
 	t.Cleanup(func() { srv.Shutdown(context.Background()) }) //nolint:errcheck

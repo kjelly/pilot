@@ -1,0 +1,60 @@
+# ============================================================================
+#  group_vars/pilot-access-gateway.example.yml —— Pilot Access Gateway 設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/pilot-access-gateway.yml
+#    cp group_vars/pilot-access-gateway.example.yml <inventory 目錄>/group_vars/pilot-access-gateway.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/pilot-access-gateway.md
+#  詳細設計:docs/tmp/now/spec.md(Pilot Access Gateway — Stateless
+#  FreeIPA-backed Portal），§50-§58
+#
+#  day-2/opt-in 元件(contracts/pilot-access-gateway.yaml 的
+#  site.include=false、optIn=true),不會自動進 site-wide deploy;要單獨用
+#  `pilot deploy` 選 pilot-access-gateway 或直接跑
+#  playbooks/apply/pilot-access-gateway-apply.yml。
+#
+#  目標主機必須已經是 freeipa-client(先跑 freeipa-client-apply.yml）且已有
+#  正向 DNS record;`pilot-target-<scope>` hostgroup 需先由
+#  `pilot gateway-scope reconcile` 建立(見 group_vars/freeipa.example.yml
+#  旁的 pilot-gateway-scope 說明,或 docs/verification/pilot-gateway-scope.md)。
+# ============================================================================
+
+# 這台 gateway 的 instance id,例如 "gpu-01"。必填。
+gateway_id: ""
+
+# scope 名稱,決定要吃哪個 `pilot-target-<scope>` hostgroup。必填。
+gateway_scope: ""
+
+# 這台 gateway 的 FQDN。不填則沿用 ansible_fqdn。
+# gateway_fqdn: ""
+
+# FreeIPA server(s)FQDN 清單。必填、必須是 YAML list(不要用
+# `-e freeipa_servers=[...]` 這種寫法,Ansible 不會可靠解析成 list;CLI 呼叫
+# 要用 `-e '{"freeipa_servers": [...]}'` 的 JSON 物件形式)。
+freeipa_servers: []
+#   - ipa1.ipa.pilot.internal
+
+# Kerberos realm,例如 "IPA.PILOT.INTERNAL"。必填。
+ipa_realm: ""
+
+# 只在**安裝當下**用來建立 reader service principal + keytab;執行期完全
+# 不用。一律走 Vault,不要直接寫在這個檔案裡:
+#   vault key: ipa_admin_password(跟 freeipa-identity/freeipa-dns 共用同一份 vault 檔)
+# ipa_admin_password: ""
+
+# 控制端已建置好的兩個 binary 路徑(相對於 repo root,或絕對路徑)。必填——
+# 套用前會先在控制端驗證這兩個檔案存在、能正常執行 version 子指令。
+pilot_binary_path: "dist/pilot-linux-amd64"
+pilot_access_gateway_binary_path: "dist/pilot-access-gateway-linux-amd64"
+#   用 scripts/build-pilot-access-gateway.sh 建置 pilot-access-gateway 二進位檔。
+
+# Portal 使用者群組。必須是既有的 FreeIPA 群組——這支 playbook 不會建立
+# local fallback group(nsswitch 的 files 來源比 sss 先查,local 群組會永久
+# 遮蔽真正的 FreeIPA 群組,見 docs/verification/pilot-access-gateway.md §5)。
+# gateway_portal_user_group: "role-pilot-portal-user"
+
+# 是否安裝 sshd ForceCommand。Phase 8 前必須是 false——沒做過 vm-target
+# 鎖定回歸測試(spec.md §0 G4/§55.1)前不得對任何主機開啟。
+# pilot_access_gateway_install_forcecommand: false

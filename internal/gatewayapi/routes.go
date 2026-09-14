@@ -23,7 +23,7 @@ func (s *Server) gatewayInfo() GatewayInfo {
 
 // handleIdentity is GET /v1/identity (spec.md §22.1).
 func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
-	peer, ok := peerFromContext(r.Context())
+	peer, ok := s.authorizedPeer(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -35,7 +35,7 @@ func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
 // peer's own access; there is no ?user=/?scope=/?target_hostgroup= query
 // parameter this handler reads, by construction.
 func (s *Server) handleAccess(w http.ResponseWriter, r *http.Request) {
-	peer, ok := peerFromContext(r.Context())
+	peer, ok := s.authorizedPeer(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -55,7 +55,7 @@ func (s *Server) handleAccess(w http.ResponseWriter, r *http.Request) {
 // not allowed", so no information about which case it was leaks (spec.md
 // §14: not displayable, not detail-able, either way).
 func (s *Server) handleAccessHost(w http.ResponseWriter, r *http.Request) {
-	peer, ok := peerFromContext(r.Context())
+	peer, ok := s.authorizedPeer(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -81,7 +81,7 @@ func (s *Server) handleAccessHost(w http.ResponseWriter, r *http.Request) {
 // staleness cannot occur by construction). FreeIPA/resolve failure denies
 // rather than erroring the connect decision (spec.md §16/§34).
 func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) {
-	peer, ok := peerFromContext(r.Context())
+	peer, ok := s.authorizedPeer(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return

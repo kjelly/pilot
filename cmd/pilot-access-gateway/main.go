@@ -94,6 +94,7 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 	}
 	resolver := accessportal.NewResolver(provider, gw)
 	srv := gatewayapi.NewServer(gw, provider, resolver, logger)
+	srv.PortalUserGroup = cfg.Gateway.PortalUserGroup
 
 	ln, err := listener(cfg, systemdSocket)
 	if err != nil {

@@ -1,0 +1,58 @@
+schemaVersion: 1
+id: pilot-access-gateway
+role: pilot-access-gateway
+specs:
+  - path: docs/verification/pilot-access-gateway.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/pilot-access-gateway-apply.yml
+regressionTests:
+  - internal/freeipaaccess/normalize_test.go
+  - internal/accessportal/resolver_test.go
+  - internal/gatewayapi/server_test.go
+  - internal/gatewayapi/portal_group_test.go
+  - internal/peercred/peercred_test.go
+  - internal/identity/identity_group_test.go
+  - internal/systemdactivation/systemdactivation_test.go
+  - cmd/pilot/cmd/portal_client_test.go
+  - cmd/pilot/cmd/portal_tui_test.go
+  - cmd/pilot/cmd/portal_ssh_test.go
+  - cmd/pilot/cmd/portal_ssh_config_sync_test.go
+  - cmd/pilot-access-gateway/config_test.go
+dependencies:
+  - {component: freeipa-client, required: true, relation: sameHosts}
+conflicts: []
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
+groupVars:
+  - {name: gateway_id, type: string, required: true, secret: false}
+  - {name: gateway_scope, type: string, required: true, secret: false}
+  - {name: gateway_fqdn, type: string, required: false, secret: false}
+  - {name: freeipa_servers, type: stringList, required: true, secret: false}
+  - {name: ipa_realm, type: string, required: true, secret: false}
+  - {name: ipa_admin_password, type: string, required: true, secret: true}
+  - {name: pilot_binary_path, type: string, required: true, secret: false}
+  - {name: pilot_access_gateway_binary_path, type: string, required: true, secret: false}
+  - {name: gateway_portal_user_group, type: string, required: false, default: role-pilot-portal-user, secret: false}
+  - {name: pilot_access_gateway_install_forcecommand, type: boolean, required: false, default: false, secret: false}
+endpoints:
+  - name: gateway-socket
+    scheme: unix
+    path: /run/pilot/access-gateway.sock
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: mapped
+  rows:
+    "docs/verification/pilot-access-gateway.md#AG01": {tags: [AG01], reason: "access-gateway.yaml template task writes id/scope/target_hostgroup"}
+    "docs/verification/pilot-access-gateway.md#AG02": {tags: [AG02], reason: "pilot-gateway system user creation task"}
+    "docs/verification/pilot-access-gateway.md#AG03": {tags: [AG03], reason: "keytab ownership/mode task"}
+    "docs/verification/pilot-access-gateway.md#AG04": {tags: [AG04], reason: "FreeIPA CA presence check inherited from freeipa-client enrollment"}
+    "docs/verification/pilot-access-gateway.md#AG06": {tags: [AG06], reason: "capability probe task (step 17) exercises the same real ping the check re-verifies"}
+    "docs/verification/pilot-access-gateway.md#AG09": {tags: [AG09], reason: "systemd socket unit install + start tasks"}
+    "docs/verification/pilot-access-gateway.md#AG12": {tags: [AG12], reason: "step 18's own configured-hostgroup assertion"}
+  exemptions:
+    "docs/verification/pilot-access-gateway.md#AG19": {kind: structural-absence, tags: [], reason: "no task in this playbook ever writes under /var/lib/pilot — absence is structural, not produced by a specific task"}
+    "docs/verification/pilot-access-gateway.md#AG30": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task"}
+verification: {autoDeploy: false}
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/http"
 
 	"github.com/kjelly/pilot/internal/identity"
 	"github.com/kjelly/pilot/internal/peercred"
@@ -52,4 +53,25 @@ func connContext(logger *slog.Logger) func(ctx context.Context, c net.Conn) cont
 func peerFromContext(ctx context.Context) (Peer, bool) {
 	p, ok := ctx.Value(peerCtxKey{}).(Peer)
 	return p, ok
+}
+
+// authorizedPeer is peerFromContext plus s.PortalUserGroup membership —
+// the user-facing endpoints' defense-in-depth gate alongside the
+// socket's own SocketGroup= (see Server.PortalUserGroup's doc comment).
+// When PortalUserGroup is unset, this is exactly peerFromContext (no
+// additional gate configured).
+func (s *Server) authorizedPeer(r *http.Request) (Peer, bool) {
+	peer, ok := peerFromContext(r.Context())
+	if !ok {
+		return Peer{}, false
+	}
+	if s.PortalUserGroup == "" {
+		return peer, true
+	}
+	member, err := identity.IsMemberOfGroup(r.Context(), peer.Username, s.PortalUserGroup)
+	if err != nil {
+		s.Logger.Warn("portal user group check failed", "user", peer.Username, "group", s.PortalUserGroup, "error", err)
+		return Peer{}, false
+	}
+	return peer, member
 }

@@ -1,0 +1,730 @@
+# Apply playbook for docs/verification/pilot-access-gateway.md
+# (docs/tmp/now/spec.md §50-§58, Phase 7).
+#
+# Installs pilot-access-gateway on ONE gateway host that is already a
+# FreeIPA client (playbooks/apply/freeipa-client-apply.yml) enrolled in
+# the same realm the target FreeIPA server(s) serve. Order matches
+# spec.md §55 exactly, up to and including step 18 — step 19
+# (sshd ForceCommand) is gated behind
+# pilot_access_gateway_install_forcecommand (default false) per spec.md
+# §0 G4 / §55.1: it must never run against a non-disposable host until
+# the vm-target lockout regression test in §55.1 has actually been run
+# and a human has approved it. Phase 7's own landing gate only covers
+# steps 1-18; Phase 8 owns turning this flag on for real.
+#
+# This does NOT create the FreeIPA service principal from an admin
+# session inline via kinit+shell the way freeipa-identity-apply.yml
+# does for user/group state — see the "Provision reader keytab" task
+# below for why, and why it is guarded to run at most once.
+#
+# Usage (two already-provisioned vm-targets — one FreeIPA server, one
+# FreeIPA client — see docs/evidence/pilot-access-gateway/2026-09-14-
+# phase7-deployment-integration.md for the exact commands used):
+#
+#   pilot vm-target run --name <gateway-vm> \
+#       playbooks/apply/pilot-access-gateway-apply.yml \
+#       -e target_group=all \
+#       -e gateway_id=gpu-01 -e gateway_scope=gpu \
+#       -e '{"freeipa_servers": ["ipa1.ipa.pilot.internal"]}' \
+#       -e ipa_realm=IPA.PILOT.INTERNAL \
+#       -e pilot_binary_path=dist/pilot-linux-amd64 \
+#       -e pilot_access_gateway_binary_path=dist/pilot-access-gateway-linux-amd64 \
+#       -e @~/.vault/main.yaml
+#
+# Secrets: ipa_admin_password comes from a vault file, never hard-coded
+# (matching every other FreeIPA-touching apply playbook in this repo).
+---
+- name: Pilot Access Gateway install
+  hosts: "{{ target_group | default('pilot-access-gateway') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    gateway_id: ""
+    gateway_scope: ""
+    gateway_fqdn: "{{ ansible_fqdn }}"
+    gateway_target_hostgroup: "pilot-target-{{ gateway_scope }}"
+    gateway_socket_path: /run/pilot/access-gateway.sock
+    gateway_portal_user_group: role-pilot-portal-user
+
+    freeipa_servers: []
+    ipa_realm: ""
+    ipa_ca_file: /etc/ipa/ca.crt
+
+    pilot_gateway_user: pilot-gateway
+
+    pilot_binary_path: ""
+    pilot_binary_sha256: ""
+    pilot_access_gateway_binary_path: ""
+    pilot_access_gateway_binary_sha256: ""
+
+    # Gate for spec.md §55 step 19 — see the file header comment. Never
+    # flip this to true against a non-disposable host without the
+    # §55.1 lockout regression test having actually been run.
+    pilot_access_gateway_install_forcecommand: false
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Gate: required gateway identity vars"
+      ansible.builtin.assert:
+        that:
+          - gateway_id | length > 0
+          - gateway_scope | length > 0
+          - freeipa_servers | length > 0
+          - ipa_realm | length > 0
+          - ipa_admin_password is defined
+          - pilot_binary_path | length > 0
+          - pilot_access_gateway_binary_path | length > 0
+        fail_msg: >-
+          Missing required vars: gateway_id, gateway_scope, freeipa_servers
+          (list), ipa_realm, ipa_admin_password (vault), pilot_binary_path,
+          pilot_access_gateway_binary_path.
+      tags: [always]
+
+    - name: "Resolve local artifact paths (relative = repo-root relative)"
+      ansible.builtin.set_fact:
+        pilot_binary_abs_path: >-
+          {{ pilot_binary_path if (pilot_binary_path is match('^/'))
+          else (playbook_dir ~ '/../../' ~ pilot_binary_path) }}
+        pilot_access_gateway_binary_abs_path: >-
+          {{ pilot_access_gateway_binary_path if (pilot_access_gateway_binary_path is match('^/'))
+          else (playbook_dir ~ '/../../' ~ pilot_access_gateway_binary_path) }}
+      tags: [always]
+
+    # AG-artifact gates (step "before step 1" in spirit): both binaries
+    # must exist and actually run, same discipline as
+    # agent-controller-apply.yml's own artifact gate.
+    - name: "Gate: pilot binary exists on the controller"
+      ansible.builtin.stat:
+        path: "{{ pilot_binary_abs_path }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_binary_stat
+      tags: [always]
+
+    - name: "Gate: pilot binary exists"
+      ansible.builtin.assert:
+        that:
+          - pilot_binary_stat.stat.get('exists', false)
+        fail_msg: >-
+          pilot binary {{ pilot_binary_abs_path }} is missing — build it
+          first (e.g. CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o
+          dist/pilot-linux-amd64 ./cmd/pilot).
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: pilot binary's own version subcommand succeeds"
+      ansible.builtin.command:
+        argv: ["{{ pilot_binary_abs_path }}", "version"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_binary_version
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: pilot-access-gateway binary exists on the controller"
+      ansible.builtin.stat:
+        path: "{{ pilot_access_gateway_binary_abs_path }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_access_gateway_binary_stat
+      tags: [always]
+
+    - name: "Gate: pilot-access-gateway binary exists"
+      ansible.builtin.assert:
+        that:
+          - pilot_access_gateway_binary_stat.stat.get('exists', false)
+        fail_msg: >-
+          pilot-access-gateway binary {{ pilot_access_gateway_binary_abs_path }}
+          is missing — build it with scripts/build-pilot-access-gateway.sh
+          first.
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: pilot-access-gateway binary's own version subcommand succeeds and matches the contract"
+      ansible.builtin.command:
+        argv: ["{{ pilot_access_gateway_binary_abs_path }}", "version"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_access_gateway_binary_version
+      changed_when: false
+      check_mode: false
+      failed_when: pilot_access_gateway_binary_version.stdout is not match('^pilot-access-gateway \S+')
+      tags: [always]
+
+  tasks:
+    # Step 2 (spec.md §55): verify FreeIPA client enrollment.
+    - name: "Step 2: verify FreeIPA client enrollment"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: gateway_ipa_default_conf
+      tags: [AG_enrollment]
+
+    - name: "Step 2: gate — this host must already be FreeIPA-enrolled"
+      ansible.builtin.assert:
+        that:
+          - gateway_ipa_default_conf.stat.exists
+        fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
+      tags: [AG_enrollment]
+
+    # `ipa service-add` (step 8, below) requires this host to already
+    # have a forward DNS record — live testing found freeipa-client-
+    # apply.yml's own DNS auto-registration does not always fire (see
+    # docs/evidence/pilot-access-gateway/2026-09-14-phase7-deployment-
+    # integration.md). Verify it here with an actionable error rather
+    # than let service-add fail with a generic FreeIPA error message —
+    # this playbook does not attempt to register DNS itself, that
+    # remains freeipa-client-apply.yml's job.
+    - name: "Step 2: check this host resolves in FreeIPA DNS"
+      ansible.builtin.command:
+        argv: [getent, hosts, "{{ gateway_fqdn }}"]
+      register: gateway_dns_check
+      changed_when: false
+      failed_when: false
+      tags: [AG_enrollment]
+
+    - name: "Step 2: gate — this host must have a forward DNS record before FreeIPA service enrollment"
+      ansible.builtin.assert:
+        that:
+          - gateway_dns_check.rc == 0
+        fail_msg: >-
+          {{ gateway_fqdn }} does not resolve. `ipa service-add` (step 8)
+          requires a forward DNS record. Re-run freeipa-client-apply.yml
+          with DNS registration enabled, or register it manually:
+          `ipa dnsrecord-add <zone> {{ gateway_fqdn.split('.')[0] }} --a-rec=<ip>`.
+      tags: [AG_enrollment]
+
+    # Step 3 groundwork: kinit once for every FreeIPA-mutating task below.
+    - name: "Kinit admin (management-plane operations only — never shipped to this host)"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo '{{ ipa_admin_password }}' | kinit admin
+      args:
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      tags: [AG_enrollment, AG_keytab]
+
+    # Step 3 (spec.md §55, spec.md §9.1): this gateway host joins
+    # pilot-access-gateways — the hostgroup that controls who may SSH TO
+    # the gateway itself, separate from pilot-target-<scope> (which
+    # controls where the gateway may take a user). Deliberately
+    # implemented here, not in Phase 6's gateway-scope-apply.yml (spec.md
+    # §60 Phase 6 landing gate note): this is a gateway HOST's own install
+    # step, not a target-scope publication concern.
+    - name: "Step 3: ensure pilot-access-gateways hostgroup exists"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-add, pilot-access-gateways, "--desc=Pilot Access Gateway hosts"]
+      register: gateway_hostgroup_add
+      changed_when: "'Added hostgroup' in (gateway_hostgroup_add.stdout | default(''))"
+      failed_when:
+        - gateway_hostgroup_add.rc != 0
+        - "'already exists' not in (gateway_hostgroup_add.stderr | default(''))"
+      tags: [AG_enrollment]
+
+    - name: "Step 3: add this host to pilot-access-gateways"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-add-member, pilot-access-gateways, "--hosts={{ gateway_fqdn }}"]
+      register: gateway_hostgroup_member_add
+      changed_when: "'Number of members added 1' in (gateway_hostgroup_member_add.stdout | default(''))"
+      failed_when:
+        - gateway_hostgroup_member_add.rc != 0
+        - "'already a member' not in (gateway_hostgroup_member_add.stdout | default('') + gateway_hostgroup_member_add.stderr | default(''))"
+      tags: [AG_enrollment]
+
+    # Step 4 (spec.md §55): getent works via SSSD once enrolled — proven
+    # in Phase 3's evidence; a live check here just confirms this
+    # specific host, not the general mechanism.
+    - name: "Step 4: verify getent resolves the FreeIPA admin account (SSSD sanity check)"
+      ansible.builtin.command:
+        argv: [getent, passwd, admin]
+      changed_when: false
+      tags: [AG_enrollment]
+
+    # Step 5/6 (spec.md §55): sshd and systemd are both prerequisites
+    # this host already has as an ordinary Linux + FreeIPA-client host;
+    # confirm rather than assume.
+    - name: "Step 5: verify sshd is active"
+      ansible.builtin.command:
+        argv: [systemctl, is-active, ssh]
+      register: gateway_sshd_active
+      changed_when: false
+      failed_when: gateway_sshd_active.stdout not in ['active']
+      tags: [AG_enrollment]
+
+    - name: "Step 6: verify systemd is PID 1"
+      ansible.builtin.command:
+        argv: [systemctl, --version]
+      changed_when: false
+      tags: [AG_enrollment]
+
+    # Step 7 (spec.md §55): FreeIPA CA is installed by ipa-client-install.
+    - name: "Step 7: verify FreeIPA CA is present"
+      ansible.builtin.stat:
+        path: "{{ ipa_ca_file }}"
+      register: gateway_ca_stat
+      failed_when: not gateway_ca_stat.stat.exists
+      tags: [AG_enrollment, AG04]
+
+    - name: "Create pilot-gateway system user (spec.md §25)"
+      ansible.builtin.user:
+        name: "{{ pilot_gateway_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+        home: /nonexistent
+      tags: [AG_service, AG02]
+
+    # Never create gateway_portal_user_group as a local fallback group:
+    # live testing found nsswitch.conf's real order on this host is
+    # `group: files systemd sss` — a LOCAL group with the same name
+    # permanently shadows the real FreeIPA group of that name (files is
+    # checked first and NSS stops there), so a "helpful" local stand-in
+    # would silently and durably break real portal-user membership the
+    # moment someone actually creates the FreeIPA group. Fail closed
+    # instead, the same way step 18 fails closed on a missing target
+    # hostgroup.
+    - name: "Verify portal-user group resolves (must be a real FreeIPA group, never a local fallback)"
+      ansible.builtin.command:
+        argv: [getent, group, "{{ gateway_portal_user_group }}"]
+      register: gateway_portal_group_check
+      changed_when: false
+      failed_when: false
+      tags: [AG_service]
+
+    - name: "Gate: portal-user group must already exist in FreeIPA"
+      ansible.builtin.assert:
+        that:
+          - gateway_portal_group_check.rc == 0
+        fail_msg: >-
+          Group {{ gateway_portal_user_group }} does not resolve. Create
+          it in FreeIPA first (e.g. via the freeipa-identity roster) —
+          this playbook deliberately does not create a local fallback
+          group, which would silently shadow the real FreeIPA group
+          forever once one is created (nsswitch.conf's "files" source
+          is checked before "sss").
+      tags: [AG_service]
+
+    - name: "Ensure /etc/pilot exists"
+      ansible.builtin.file:
+        path: /etc/pilot
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [AG_service]
+
+    # Step 8 (spec.md §55/§56): provision the read-only reader keytab.
+    # Idempotent by construction (spec.md §56: "禁止每次 ordinary apply
+    # 無條件 rotate keytab") — ipa-getkeytab always increments kvno and
+    # invalidates the previous key material, so it must only ever run
+    # once per host; a real rotation is a deliberate, separate lifecycle
+    # operation (spec.md §47), not something an ordinary reapply does.
+    - name: "Step 8: check whether the gateway keytab already exists"
+      ansible.builtin.stat:
+        path: /etc/pilot/pilot-access-gateway.keytab
+      register: gateway_keytab_stat
+      tags: [AG_keytab]
+
+    - name: "Step 8: create the gateway service principal (idempotent)"
+      ansible.builtin.command:
+        argv: [ipa, service-add, "pilot-access-gateway/{{ gateway_fqdn }}"]
+      register: gateway_service_add
+      changed_when: "'Added service' in (gateway_service_add.stdout | default(''))"
+      failed_when:
+        - gateway_service_add.rc != 0
+        - "'already exists' not in (gateway_service_add.stderr | default(''))"
+      tags: [AG_keytab]
+
+    - name: "Step 8: fetch the gateway keytab (ONLY when it does not exist yet)"
+      ansible.builtin.command:
+        argv:
+          - ipa-getkeytab
+          - -s
+          - "{{ freeipa_servers[0] }}"
+          - -p
+          - "pilot-access-gateway/{{ gateway_fqdn }}"
+          - -k
+          - /etc/pilot/pilot-access-gateway.keytab
+      when: not gateway_keytab_stat.stat.exists
+      changed_when: true
+      tags: [AG_keytab]
+
+    - name: "Step 8: keytab ownership/mode (spec.md §10.3, AG03)"
+      ansible.builtin.file:
+        path: /etc/pilot/pilot-access-gateway.keytab
+        owner: "{{ pilot_gateway_user }}"
+        group: "{{ pilot_gateway_user }}"
+        mode: "0400"
+      tags: [AG_keytab, AG03]
+
+    # Step 11 (spec.md §55): access-gateway.yaml — matches
+    # cmd/pilot-access-gateway/config.go's Config struct exactly (kept in
+    # sync manually; see docs/evidence for the cross-check test).
+    - name: "Step 11: install access-gateway.yaml"
+      ansible.builtin.copy:
+        dest: /etc/pilot/access-gateway.yaml
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          gateway:
+            id: {{ gateway_id }}
+            scope: {{ gateway_scope }}
+            fqdn: {{ gateway_fqdn }}
+            target_hostgroup: {{ gateway_target_hostgroup }}
+            socket_path: {{ gateway_socket_path }}
+            portal_user_group: {{ gateway_portal_user_group }}
+            freeipa:
+              servers:
+          {% for server in freeipa_servers %}
+                - {{ server }}
+          {% endfor %}
+              ca_file: {{ ipa_ca_file }}
+              service_principal: pilot-access-gateway/{{ gateway_fqdn }}@{{ ipa_realm }}
+              keytab: /etc/pilot/pilot-access-gateway.keytab
+              request_timeout: 5s
+              cache_ttl: 10s
+              connect_max_age: 5s
+      register: gateway_config_copy
+      tags: [AG_config, AG01]
+
+    # Step 12 (spec.md §55/§32): root-owned SSH client config — MUST stay
+    # byte-identical to cmd/pilot/cmd/portal_ssh.go's pilotSSHConfig
+    # constant (a Go-level test in that package asserts this; see
+    # portal_ssh_config_sync_test.go).
+    - name: "Step 12: install root-owned SSH config (spec.md §32)"
+      ansible.builtin.copy:
+        dest: /etc/pilot/ssh_config
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          Host *
+              ForwardAgent no
+              ClearAllForwardings yes
+
+              PermitLocalCommand no
+              EnableEscapeCommandline no
+              EscapeChar none
+
+              ProxyJump none
+              ProxyCommand none
+
+              StrictHostKeyChecking yes
+              UserKnownHostsFile /dev/null
+              GlobalKnownHostsFile /etc/pilot/ssh_known_hosts
+
+              GSSAPIAuthentication yes
+              GSSAPIDelegateCredentials yes
+
+              KbdInteractiveAuthentication yes
+              PasswordAuthentication yes
+
+              RequestTTY force
+      tags: [AG_config]
+
+    # Step 13 (spec.md §55): trusted known_hosts for the current target
+    # scope. Best-effort per host — an unreachable/nonexistent fixture
+    # host must not fail the whole apply (spec.md §9.5 fail-closed
+    # behavior belongs to the RUNTIME decision, not to this install step;
+    # a host simply absent from known_hosts fails its own connection
+    # later at StrictHostKeyChecking, which is the correct place for that
+    # failure to surface).
+    - name: "Step 13: resolve current pilot-target-<scope> membership for known_hosts"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-show, "{{ gateway_target_hostgroup }}", --all]
+      register: gateway_target_hostgroup_show
+      changed_when: false
+      failed_when: false
+      tags: [AG_config]
+
+    - name: "Step 13: parse target hosts"
+      ansible.builtin.set_fact:
+        gateway_target_hosts: >-
+          {{ [] if hosts_line == '' else hosts_line.split(', ') }}
+      vars:
+        hosts_line: >-
+          {{ ((gateway_target_hostgroup_show.stdout | default('')
+          | regex_findall('^  Member hosts: (.*)$', multiline=True)) + [''])
+          | first | trim }}
+      tags: [AG_config]
+
+    - name: "Step 13: scan host keys for the current target scope (best-effort per host)"
+      ansible.builtin.shell: |
+        set -o pipefail
+        ssh-keyscan -T 3 {{ item | quote }} 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: gateway_keyscan
+      changed_when: false
+      loop: "{{ gateway_target_hosts }}"
+      loop_control:
+        label: "{{ item }}"
+      tags: [AG_config]
+
+    - name: "Step 13: install ssh_known_hosts from the scan results"
+      ansible.builtin.copy:
+        dest: /etc/pilot/ssh_known_hosts
+        owner: root
+        group: root
+        mode: "0644"
+        content: "{{ gateway_keyscan.results | map(attribute='stdout') | select() | join('\n') }}\n"
+      tags: [AG_config]
+
+    # Step 9/10 (spec.md §55): install both binaries.
+    - name: "Step 9: install pilot CLI"
+      ansible.builtin.copy:
+        src: "{{ pilot_binary_abs_path }}"
+        dest: /usr/bin/pilot
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [AG_service]
+
+    - name: "Ensure /usr/local/libexec exists (spec.md §25 — not all distros pre-create it)"
+      ansible.builtin.file:
+        path: /usr/local/libexec
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [AG_service]
+
+    - name: "Step 10: install pilot-access-gateway binary"
+      ansible.builtin.copy:
+        src: "{{ pilot_access_gateway_binary_abs_path }}"
+        dest: /usr/local/libexec/pilot-access-gateway
+        owner: root
+        group: root
+        mode: "0755"
+      register: gateway_binary_copy
+      tags: [AG_service]
+
+    # Step 14 (spec.md §55/§33): pilot-session ForceCommand wrapper. No
+    # portal.yaml here — Phase 4/5's `pilot portal` already defaults
+    # --socket/--ssh-config to spec.md §25/§26's own paths, so a separate
+    # config file would be pure redundancy (deliberate simplification
+    # from spec.md §33's literal script, recorded in the Phase 7
+    # evidence doc).
+    - name: "Step 14: install pilot-session"
+      ansible.builtin.copy:
+        dest: /usr/local/libexec/pilot-session
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+
+          [ -t 0 ] || exit 1
+
+          unset SSH_AUTH_SOCK
+          unset LD_PRELOAD
+          unset LD_LIBRARY_PATH
+          unset PILOT_CONFIG
+          unset PILOT_DATA_DIR
+
+          export PATH=/usr/bin:/bin
+
+          exec /usr/bin/pilot portal
+      tags: [AG_service]
+
+    # Step 15 (spec.md §55/§29/§30): systemd socket + service units.
+    - name: "Step 15: install pilot-access-gateway.socket"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pilot-access-gateway.socket
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Pilot Access Gateway Socket
+
+          [Socket]
+          ListenStream={{ gateway_socket_path }}
+          SocketUser={{ pilot_gateway_user }}
+          SocketGroup={{ gateway_portal_user_group }}
+          SocketMode=0660
+          RemoveOnStop=true
+          RuntimeDirectory=pilot
+
+          [Install]
+          WantedBy=sockets.target
+      register: gateway_socket_unit
+      tags: [AG_service, AG09]
+
+    - name: "Step 15: install pilot-access-gateway.service"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pilot-access-gateway.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Pilot Access Gateway
+          Requires=pilot-access-gateway.socket
+          After=network-online.target sssd.service
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ pilot_gateway_user }}
+          Group={{ pilot_gateway_user }}
+
+          ExecStart=/usr/local/libexec/pilot-access-gateway serve --config /etc/pilot/access-gateway.yaml --systemd-socket
+
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ProtectKernelTunables=true
+          ProtectKernelModules=true
+          ProtectControlGroups=true
+
+          ReadOnlyPaths=/etc/pilot
+          ReadOnlyPaths=/etc/ipa
+
+          [Install]
+          WantedBy=multi-user.target
+      register: gateway_service_unit
+      tags: [AG_service]
+
+    - name: "Step 15: daemon-reload"
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: gateway_socket_unit.changed or gateway_service_unit.changed
+      tags: [AG_service]
+
+    # Step 16 (spec.md §55): start the socket (not the service directly
+    # — socket activation starts the service on first connection).
+    - name: "Step 16: enable + start pilot-access-gateway.socket"
+      ansible.builtin.systemd:
+        name: pilot-access-gateway.socket
+        enabled: true
+        state: started
+      tags: [AG_service]
+
+    # `state: started` above is a no-op if the socket unit was already
+    # running under an OLDER version of its own unit file — an in-place
+    # unit-file edit needs an explicit restart to actually take effect.
+    - name: "Restart pilot-access-gateway.socket if its unit file changed"
+      ansible.builtin.systemd:
+        name: pilot-access-gateway.socket
+        state: restarted
+      when: gateway_socket_unit.changed
+      tags: [AG_service]
+
+    # A changed binary or config must actually take effect — restart the
+    # (stateless — spec.md §46) service so it re-execs with the new
+    # binary/config instead of continuing to run the old in-memory one.
+    # The socket itself is untouched (RemoveOnStop=true would drop
+    # in-flight connections pointlessly here).
+    - name: "Restart pilot-access-gateway.service if the binary or config changed"
+      ansible.builtin.systemd:
+        name: pilot-access-gateway.service
+        state: restarted
+      when: gateway_binary_copy.changed or gateway_config_copy.changed
+      tags: [AG_service]
+
+    # Step 17 (spec.md §55): capability probe — a real connection over
+    # the real socket, triggering socket activation, checked via the
+    # service's own /v1/health.
+    - name: "Step 17: capability probe FreeIPA via /v1/health"
+      ansible.builtin.command:
+        argv: [curl, --silent, --show-error, --fail, --unix-socket, "{{ gateway_socket_path }}", "http://localhost/v1/health"]
+      register: gateway_health_probe
+      changed_when: false
+      retries: 3
+      delay: 2
+      until: gateway_health_probe.rc == 0
+      tags: [AG_service, AG06]
+
+    - name: "Step 17: gate — health probe reports ok"
+      ansible.builtin.assert:
+        that:
+          - (gateway_health_probe.stdout | from_json).status == 'ok'
+        fail_msg: "health probe did not report status=ok: {{ gateway_health_probe.stdout }}"
+      tags: [AG_service]
+
+    # Step 18 (spec.md §55): configured pilot-target-<scope> must
+    # actually exist before ForceCommand is ever installed — fail closed
+    # (spec.md §9.5) rather than silently proceeding with an empty scope.
+    - name: "Step 18: verify configured pilot-target-<scope> exists"
+      ansible.builtin.assert:
+        that:
+          - gateway_target_hostgroup_show.rc == 0
+        fail_msg: "{{ gateway_target_hostgroup }} does not exist — run `pilot gateway-scope reconcile --scope {{ gateway_scope }} ...` first (spec.md Phase 6)."
+      tags: [AG_service, AG12]
+
+    # Step 19-21 (spec.md §55): sshd ForceCommand. GATED — see the file
+    # header comment and spec.md §0 G4/§55.1. Deliberately NOT exercised
+    # by Phase 7's own vm-target run; Phase 8 owns turning this on for
+    # real, only after the §55.1 lockout regression test has passed.
+    - name: "Step 19: install sshd ForceCommand drop-in (GATED — see spec.md §55.1)"
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          Match Group {{ gateway_portal_user_group }}
+              ForceCommand /usr/local/libexec/pilot-session
+              PermitTTY yes
+
+              DisableForwarding yes
+              AllowAgentForwarding no
+              AllowTcpForwarding no
+              X11Forwarding no
+              PermitTunnel no
+              PermitUserRC no
+      when: pilot_access_gateway_install_forcecommand | bool
+      register: gateway_forcecommand_dropin
+      tags: [AG_forcecommand]
+
+    - name: "Step 20: sshd -t"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+      when: pilot_access_gateway_install_forcecommand | bool and gateway_forcecommand_dropin.changed
+      changed_when: false
+      tags: [AG_forcecommand]
+
+    - name: "Step 21: reload sshd"
+      ansible.builtin.systemd:
+        name: ssh
+        state: reloaded
+      when: pilot_access_gateway_install_forcecommand | bool and gateway_forcecommand_dropin.changed
+      tags: [AG_forcecommand]

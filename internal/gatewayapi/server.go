@@ -21,6 +21,22 @@ type Server struct {
 	Resolver *accessportal.Resolver
 	Logger   *slog.Logger
 
+	// PortalUserGroup, when non-empty, restricts every user-facing
+	// endpoint (identity/access/connect — NOT health, an ops probe with
+	// no per-user concept) to callers whose resolved username is a
+	// member of this group. Set after construction so existing callers
+	// that don't need this gate (tests, Phase 3-5 fixtures) are
+	// unaffected.
+	//
+	// This is a defense-in-depth layer alongside (not a replacement for)
+	// the Unix socket's own SocketGroup= (spec.md §29's first layer),
+	// which live vm-target testing confirmed DOES reliably enforce an
+	// SSSD/FreeIPA-backed group once nothing else on the host shadows it
+	// — see internal/identity.IsMemberOfGroup's doc comment for the real
+	// hazard this compensates for (a same-named local fallback group
+	// permanently shadowing the real one via nsswitch's "files" source).
+	PortalUserGroup string
+
 	httpServer *http.Server
 }
 

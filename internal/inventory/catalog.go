@@ -50,6 +50,7 @@ var topLevelOrder = []string{
 	"detection-engine",
 	"agent-controller",
 	"dashboard",
+	"pilot-access-gateway",
 }
 
 // envOrder is the environment-dimension groups — orthogonal to role,

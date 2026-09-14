@@ -145,6 +145,11 @@ var specTagMap = []specTagMapping{
 		}},
 	{spec: "freeipa-realm-replacement.md", playbook: "freeipa-realm-replacement-apply.yml"},
 	{spec: "pilot-gateway-scope.md", playbook: "gateway-scope-apply.yml"},
+	{spec: "pilot-access-gateway.md", playbook: "pilot-access-gateway-apply.yml",
+		exemptRows: map[string]string{
+			"AG19": "no local DB/state under /var/lib/pilot is a structural absence (no task ever writes there) — nothing to tag",
+			"AG30": "idempotent second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task — same reasoning as freeipa-dns.md's own C12",
+		}},
 	{spec: "host-monitoring.md", playbook: "host-monitoring-apply.yml",
 		exemptRows: map[string]string{
 			"C8": "port-listening probe — verify-only outcome of the service actually running (C7)",

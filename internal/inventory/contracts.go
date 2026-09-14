@@ -46,6 +46,7 @@ var roleContracts = []roleContract{
 	{Name: "detection-engine", Description: "中央 Detection Plane：從 Thanos metrics 建立 adaptive SignalEvent (detection-engine-apply.yml)", GroupVarsStem: "detection-engine", VaultSections: []string{"detection-model-provider"}},
 	{Name: "agent-controller", Description: "Agent Monitoring Phase 1：observe-only incident controller，接收 Alertmanager webhook、派送唯讀診斷請求；experimental，只需一台 (agent-controller-apply.yml)", GroupVarsStem: "agent-controller", VaultSections: []string{"agent-controller"}},
 	{Name: "dashboard", Description: "Grafana + Loki，只需一台 (dashboard-apply.yml)", GroupVarsStem: "dashboard", VaultSections: []string{"dashboard"}},
+	{Name: "pilot-access-gateway", Description: "Stateless FreeIPA-backed SSH/sudo 存取閘道；day-2/opt-in，目標主機須先是 freeipa-client (pilot-access-gateway-apply.yml)", GroupVarsStem: "pilot-access-gateway", VaultSections: []string{"freeipa"}},
 }
 
 func roleContractsByName() map[string]roleContract {

@@ -118,6 +118,12 @@ var deployCatalog = []deployPlaybook{
 		Reconcile: true,
 	},
 	{
+		Key: "pilot-access-gateway", Label: "安裝 Pilot Access Gateway(stateless FreeIPA-backed SSH/sudo 存取閘道)",
+		Playbook: "playbooks/apply/pilot-access-gateway-apply.yml", DefaultGroup: "pilot-access-gateway", StageVar: "stage",
+		Note:      "day-2/opt-in 角色(不在 site.yml);目標主機必須先完成 freeipa-client enrollment 且已有正向 DNS record；`pilot-target-<scope>` hostgroup 需先由 pilot-gateway-scope 建立。sshd ForceCommand 預設關閉(pilot_access_gateway_install_forcecommand=false，Phase 8 前不得開啟)。見 docs/verification/pilot-access-gateway.md。",
+		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，僅安裝當下建立 reader service principal/keytab 用)",
+	},
+	{
 		Key: "reverse-proxy", Label: "Nginx reverse proxy 基礎安裝",
 		Playbook: "playbooks/apply/reverse-proxy-apply.yml", DefaultGroup: "reverse-proxy", StageVar: "stage",
 		Note: "site.yml 角色(所有 reverse-proxy group 主機都會套用);只裝 nginx、關掉 distro default site、建立 Pilot config namespace，不管任何 endpoint 的 vhost——那是 internal-endpoint 的責任。Phase-1 骨架:目前只有 placeholder task,真正的 nginx 安裝邏輯待 spec.md §63 Phase 4 補上。",
