@@ -131,34 +131,31 @@
         repo: "deb https://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} universe"
         filename: pilot-ubuntu-universe
         state: "{{ 'absent' if (pilot_ubuntu_universe_precheck.stdout | default('')) | length > 0 else 'present' }}"
-        update_cache: true
-      # The site deploy always runs a --check --diff preview first.  Repository
-      # metadata is a prerequisite for the following apt task, so this
-      # bootstrap must be real even during preview; it does not install or
-      # configure the service itself.
-      check_mode: false
-      when: ansible_distribution == "Ubuntu"
-
-    - name: "Step 0b: Refresh Ubuntu APT metadata after enabling universe"
-      tags: [C1, C2]
-      ansible.builtin.apt:
-        update_cache: true
-      # The following package task runs in the same --check preview.  Refresh
-      # the package index for real so a fresh target can resolve universe
-      # packages during that preview.
+        update_cache: false
+      # update_cache is deliberately false here: this module's own internal
+      # `apt-get update` would refresh (and fail loudly on) every configured
+      # source, including unrelated third-party ones that have nothing to do
+      # with universe (docs/tmp/now/spec.md — the same incident class fixed
+      # for freeipa-client). Step 1 below now goes through
+      # tasks/apt-package-install.yml, whose own cache-first state machine
+      # already refreshes (tolerantly of unrelated sources, fatal if the
+      # Ubuntu archive itself is unhealthy) exactly when audispd-plugins has
+      # no candidate yet — which is always true right after universe was
+      # just enabled — so a separate manual refresh step is redundant.
       check_mode: false
       when: ansible_distribution == "Ubuntu"
 
     - name: "Step 1: Install auditd + audispd-plugins + rsyslog (Debian family)"
       tags: [C1, C2]
-      ansible.builtin.apt:
-        name: [auditd, audispd-plugins, rsyslog]
-        state: present
-        update_cache: true
+      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: [auditd, audispd-plugins, rsyslog]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: audit-log-forwarding
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
       when: ansible_os_family == "Debian"
-      register: apt_auditd
-      until: apt_auditd is succeeded
-      retries: 2
 
     - name: "Step 1a: Install audit + audispd-plugins (RedHat family — audisp is built into audit on EL8+, but the syslog plugin is a separate package on both families)"
       tags: [C1, C2]

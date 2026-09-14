@@ -29,8 +29,7 @@ import (
 // Phase 2-4); adding to it requires a reason, same as
 // specTagMap/tagCheckExemptSpecs above.
 var aptUpdateCacheAllowlist = map[string]string{
-	"playbooks/apply/os-patch-sla-apply.yml":         "OS patch semantics require the entire configured package universe to be trustworthy, not just one required source (spec.md §17, Non-Goal 7) — never migrate to tolerant",
-	"playbooks/apply/audit-log-forwarding-apply.yml": "special Ubuntu universe repo mutation semantics, not a plain package install — not yet migrated, docs/tmp/now/spec.md §16 Phase 4",
+	"playbooks/apply/os-patch-sla-apply.yml": "OS patch semantics require the entire configured package universe to be trustworthy, not just one required source (spec.md §17, Non-Goal 7) — never migrate to tolerant",
 }
 
 var updateCacheTruePattern = regexp.MustCompile(`update_cache:\s*true\b`)

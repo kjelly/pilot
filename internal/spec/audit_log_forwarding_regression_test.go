@@ -330,7 +330,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 		t.Fatalf("audit-log-forwarding must enable Ubuntu universe before installing auditd/audispd-plugins/rsyslog")
 	}
 	installBlock := applyRaw[installIndex:]
-	if !strings.Contains(installBlock, "name: [auditd, audispd-plugins, rsyslog]") {
+	if !strings.Contains(installBlock, "pilot_apt_packages: [auditd, audispd-plugins, rsyslog]") {
 		t.Fatalf("Ubuntu audit-log-forwarding install must include rsyslog")
 	}
 	if !strings.Contains(applyRaw, "ansible.builtin.apt_repository") ||
@@ -340,9 +340,17 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	if !strings.Contains(applyRaw, "check_mode: false") {
 		t.Fatalf("universe bootstrap must run during site --check preview so apt metadata is available to the install task")
 	}
-	refreshIndex := strings.Index(applyRaw, "Step 0b: Refresh Ubuntu APT metadata after enabling universe")
-	if refreshIndex < 0 || refreshIndex > installIndex || !strings.Contains(applyRaw[refreshIndex:installIndex], "ansible.builtin.apt:") {
-		t.Fatalf("universe bootstrap must explicitly refresh APT metadata before installing audispd-plugins")
+	// v1.x (docs/tmp/now/spec.md Phase 4): the install step now routes
+	// through the shared tasks/apt-package-install.yml framework instead of
+	// a standalone "Step 0b" ansible.builtin.apt refresh — its own
+	// cache-first state machine refreshes (tolerant of unrelated external
+	// repos, fatal if the Ubuntu archive itself is unhealthy) exactly when
+	// audispd-plugins has no candidate yet, which a bare apt_repository +
+	// blanket update_cache:true refresh could not do without also failing
+	// on an unrelated broken third-party repository (the same incident
+	// class fixed for freeipa-client).
+	if !strings.Contains(installBlock, "tasks/apt-package-install.yml") {
+		t.Fatalf("Ubuntu audit-log-forwarding install must route through the shared apt-package-install.yml framework so an unrelated broken repository cannot block it")
 	}
 	for _, required := range []string{"audit_syslog_path", "/var/log/messages", "audit_syslog_group"} {
 		if !strings.Contains(applyRaw, required) {
