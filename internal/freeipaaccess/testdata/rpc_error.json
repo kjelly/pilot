@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 4001,
+    "message": "this-user-does-not-exist: user not found",
+    "data": {
+      "reason": "this-user-does-not-exist: user not found"
+    },
+    "name": "NotFound"
+  },
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

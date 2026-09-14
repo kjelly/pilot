@@ -1,0 +1,114 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "ipaassociation",
+          "ipahbacrule"
+        ],
+        "accessruletype": [
+          "allow"
+        ],
+        "ipauniqueid": [
+          "9c0c0b72-b004-11f1-a9e1-52540048bfe0"
+        ],
+        "hostcategory": [
+          "all"
+        ],
+        "description": [
+          "Allow all users to access any host from any host"
+        ],
+        "servicecategory": [
+          "all"
+        ],
+        "cn": [
+          "allow_all"
+        ],
+        "usercategory": [
+          "all"
+        ],
+        "ipaenabledflag": [
+          false
+        ],
+        "dn": "ipaUniqueID=9c0c0b72-b004-11f1-a9e1-52540048bfe0,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipaassociation",
+          "ipahbacrule"
+        ],
+        "accessruletype": [
+          "allow"
+        ],
+        "ipauniqueid": [
+          "9c0c94e8-b004-11f1-a57c-52540048bfe0"
+        ],
+        "hostcategory": [
+          "all"
+        ],
+        "description": [
+          "Allow pam_systemd to run user@.service to create a system user session"
+        ],
+        "cn": [
+          "allow_systemd-user"
+        ],
+        "usercategory": [
+          "all"
+        ],
+        "ipaenabledflag": [
+          true
+        ],
+        "memberservice_hbacsvc": [
+          "systemd-user"
+        ],
+        "dn": "ipaUniqueID=9c0c94e8-b004-11f1-a57c-52540048bfe0,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "accessruletype": [
+          "allow"
+        ],
+        "objectclass": [
+          "ipaassociation",
+          "ipahbacrule"
+        ],
+        "ipauniqueid": [
+          "37709c80-b006-11f1-97cd-52540048bfe0"
+        ],
+        "cn": [
+          "pilot-grant-login-gpu-test"
+        ],
+        "ipaenabledflag": [
+          true
+        ],
+        "memberuser_group": [
+          "gpu-users"
+        ],
+        "memberhost_hostgroup": [
+          "pilot-target-gpu"
+        ],
+        "memberservice_hbacsvc": [
+          "sshd"
+        ],
+        "dn": "ipaUniqueID=37709c80-b006-11f1-97cd-52540048bfe0,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 3,
+    "truncated": false,
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": "3 HBAC rules matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

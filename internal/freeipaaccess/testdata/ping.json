@@ -1,0 +1,20 @@
+{
+  "result": {
+    "summary": "IPA server version 4.13.1. API version 2.257",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ]
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

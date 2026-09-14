@@ -1,0 +1,107 @@
+{
+  "result": {
+    "result": {
+      "cn": [
+        "Alice Example"
+      ],
+      "displayname": [
+        "Alice Example"
+      ],
+      "initials": [
+        "AE"
+      ],
+      "gecos": [
+        "Alice Example"
+      ],
+      "objectclass": [
+        "top",
+        "person",
+        "organizationalperson",
+        "inetorgperson",
+        "inetuser",
+        "posixaccount",
+        "krbprincipalaux",
+        "krbticketpolicyaux",
+        "ipaobject",
+        "ipasshuser",
+        "ipaSshGroupOfPubKeys",
+        "mepOriginEntry",
+        "ipantuserattrs"
+      ],
+      "ipauniqueid": [
+        "14289dfe-b006-11f1-9b28-52540048bfe0"
+      ],
+      "krbpasswordexpiration": [
+        "20260914063236Z"
+      ],
+      "krblastpwdchange": [
+        "20260914063236Z"
+      ],
+      "ipantsecurityidentifier": [
+        "S-1-5-21-4031843208-2472091620-2418347926-1004"
+      ],
+      "gidnumber": [
+        "261200004"
+      ],
+      "mail": [
+        "alice@ipa.pilot.internal"
+      ],
+      "homedirectory": [
+        "/home/alice"
+      ],
+      "uid": [
+        "alice"
+      ],
+      "sn": [
+        "Example"
+      ],
+      "loginshell": [
+        "/bin/sh"
+      ],
+      "krbcanonicalname": [
+        "alice@IPA.PILOT.INTERNAL"
+      ],
+      "krbprincipalname": [
+        "alice@IPA.PILOT.INTERNAL"
+      ],
+      "uidnumber": [
+        "261200004"
+      ],
+      "givenname": [
+        "Alice"
+      ],
+      "nsaccountlock": false,
+      "has_password": true,
+      "has_keytab": true,
+      "preserved": false,
+      "memberof_group": [
+        "ipausers",
+        "gpu-users"
+      ],
+      "memberofindirect_sudorule": [
+        "pilot-grant-sudo-gpu-test"
+      ],
+      "memberofindirect_hbacrule": [
+        "pilot-grant-login-gpu-test"
+      ],
+      "dn": "uid=alice,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "alice",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

@@ -1,0 +1,39 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "ipaobject",
+        "ipahbacservicegroup",
+        "groupOfNames",
+        "top"
+      ],
+      "ipauniqueid": [
+        "50396396-b006-11f1-84f1-52540048bfe0"
+      ],
+      "cn": [
+        "test-svc-group"
+      ],
+      "member_hbacsvc": [
+        "sshd"
+      ],
+      "dn": "cn=test-svc-group,cn=hbacservicegroups,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "test-svc-group",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

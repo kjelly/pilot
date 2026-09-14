@@ -1,0 +1,170 @@
+// Package freeipaaccess is the read-only FreeIPA JSON-RPC/Kerberos client
+// for pilot-access-gateway (spec.md §11). It never reads roster, inventory,
+// or any local persistent state (SI-01/SI-02/SI-03) — every fact it returns
+// comes from a live call against a real FreeIPA server.
+//
+// This package deliberately stays at the "one object per call" level: it
+// does not walk group/hostgroup membership closures, and it does not
+// intersect HBAC/sudo data with a gateway's target scope. That resolution
+// logic belongs to internal/accessportal (Phase 2, spec.md §36 package
+// layout) and is built on top of the Provider interface below. Spec.md §11
+// originally sketched a higher-level Provider (LoadUserContext /
+// LoadAccessSnapshot / CheckSSH returning fully-resolved data) — Phase 1
+// splits that into these primitives instead, so this package's tests never
+// need a live FreeIPA server (only the fixtures in testdata/), and the
+// closure/graph logic (which does need cycle guards, dedupe, etc.) lives
+// in one place. See docs/evidence/pilot-access-gateway/ for the Phase 1
+// evidence recording this deviation.
+package freeipaaccess
+
+import (
+	"context"
+	"time"
+)
+
+// Provider is the FreeIPA read surface every caller in this repo must use —
+// never a raw HTTP/JSON-RPC call built ad hoc elsewhere. It mirrors exactly
+// the operations spec.md §10.3 lists for the "Pilot Access Gateway Reader"
+// FreeIPA role; anything not listed here has no business being called by
+// pilot-access-gateway.
+type Provider interface {
+	// Ping verifies Kerberos auth and connectivity without touching any
+	// application data (spec.md §10.3, §58 doctor).
+	Ping(ctx context.Context) (PingResult, error)
+
+	UserShow(ctx context.Context, username string) (User, error)
+	GroupShow(ctx context.Context, name string) (Group, error)
+	HostShow(ctx context.Context, fqdn string) (Host, error)
+	HostgroupShow(ctx context.Context, name string) (Hostgroup, error)
+
+	// HBACRuleFind returns every HBAC rule (spec.md §15: hbacrule_find(all=true)).
+	HBACRuleFind(ctx context.Context) ([]HBACRule, error)
+	HBACServiceGroupShow(ctx context.Context, name string) (HBACServiceGroup, error)
+
+	// SudoRuleFind returns every sudo rule (spec.md §17: sudorule_find(all=true)).
+	SudoRuleFind(ctx context.Context) ([]SudoRule, error)
+	SudoCommandShow(ctx context.Context, name string) (SudoCommand, error)
+	SudoCommandGroupShow(ctx context.Context, name string) (SudoCommandGroup, error)
+
+	// HBACTest is the optional fresh-connect verification path (spec.md §16).
+	HBACTest(ctx context.Context, req HBACTestRequest) (HBACTestResult, error)
+}
+
+// PingResult is a minimal liveness/version signal, never anything from
+// which access policy could be derived.
+type PingResult struct {
+	ServerVersion string
+}
+
+// User is a normalized user_show(all=true) result. DirectGroups holds only
+// the groups this user is a direct member of (memberof_group) — nested
+// closure expansion is internal/accessportal's job, not this package's.
+type User struct {
+	Username     string
+	Enabled      bool
+	DirectGroups []string
+}
+
+// Group is a normalized group_show(all=true) result. MemberGroups is the
+// set of other groups directly nested inside this one (for closure
+// resolution in Phase 2); it is empty whenever a group has no nested-group
+// members, which is the common case and not itself an error.
+type Group struct {
+	Name         string
+	MemberUsers  []string
+	MemberGroups []string
+}
+
+// Host is a normalized host_show(all=true) result.
+type Host struct {
+	FQDN string
+}
+
+// Hostgroup is a normalized hostgroup_show(all=true) result.
+// MemberHostgroups holds directly nested hostgroups.
+type Hostgroup struct {
+	Name             string
+	MemberHosts      []string
+	MemberHostgroups []string
+}
+
+// HBACRule is a normalized hbacrule_show/hbacrule_find(all=true) entry.
+// Deliberately parsed from FreeIPA's non-raw representation (member*_user,
+// member*_group, ... suffixed fields with plain resolved names), not
+// raw=true LDAP DNs — see normalize.go's doc comment for why.
+type HBACRule struct {
+	Name    string
+	Enabled bool
+
+	UserCategoryAll bool
+	Users           []string
+	Groups          []string
+
+	HostCategoryAll bool
+	Hosts           []string
+	Hostgroups      []string
+
+	ServiceCategoryAll bool
+	Services           []string
+	ServiceGroups      []string
+}
+
+// HBACServiceGroup is a normalized hbacsvcgroup_show(all=true) result.
+type HBACServiceGroup struct {
+	Name     string
+	Services []string
+}
+
+// SudoRule is a normalized sudorule_show/sudorule_find(all=true) entry.
+//
+// RunAsUsers/RunAsGroups/Options from spec.md §17 are intentionally
+// omitted here: Phase 1's live capture never exercised them, and per this
+// repo's fixture-must-be-real-capture rule they are not being guessed at.
+// Add them (and a testdata fixture) when a phase actually needs them.
+type SudoRule struct {
+	Name    string
+	Enabled bool
+
+	UserCategoryAll bool
+	Users           []string
+	Groups          []string
+
+	HostCategoryAll bool
+	Hosts           []string
+	Hostgroups      []string
+
+	CommandCategoryAll bool
+	AllowCommands      []string
+	AllowCommandGroups []string
+	DenyCommands       []string
+	DenyCommandGroups  []string
+
+	NotBefore *time.Time
+	NotAfter  *time.Time
+}
+
+// SudoCommand is a normalized sudocmd_show(all=true) result.
+type SudoCommand struct {
+	Command string
+}
+
+// SudoCommandGroup is a normalized sudocmdgroup_show(all=true) result.
+type SudoCommandGroup struct {
+	Name     string
+	Commands []string
+}
+
+// HBACTestRequest mirrors the subset of the hbactest RPC this package uses
+// (spec.md §16): a specific user/host/service triple, never a caller-
+// controlled rule list — every enabled rule is always considered.
+type HBACTestRequest struct {
+	User       string
+	TargetHost string
+	Service    string
+}
+
+// HBACTestResult is a normalized hbactest response.
+type HBACTestResult struct {
+	Access  bool
+	Matched []string
+}

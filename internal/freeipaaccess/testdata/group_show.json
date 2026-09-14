@@ -1,0 +1,57 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "top",
+        "groupofnames",
+        "nestedgroup",
+        "ipausergroup",
+        "ipaobject",
+        "posixgroup",
+        "ipantgroupattrs"
+      ],
+      "ipauniqueid": [
+        "13bfc180-b006-11f1-9d7b-52540048bfe0"
+      ],
+      "ipantsecurityidentifier": [
+        "S-1-5-21-4031843208-2472091620-2418347926-1003"
+      ],
+      "cn": [
+        "gpu-users"
+      ],
+      "description": [
+        "GPU access group"
+      ],
+      "gidnumber": [
+        "261200003"
+      ],
+      "member_user": [
+        "alice"
+      ],
+      "memberof_sudorule": [
+        "pilot-grant-sudo-gpu-test"
+      ],
+      "memberof_hbacrule": [
+        "pilot-grant-login-gpu-test"
+      ],
+      "dn": "cn=gpu-users,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "gpu-users",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

@@ -1,0 +1,37 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "ipaobject",
+        "ipasudocmd"
+      ],
+      "ipauniqueid": [
+        "41c1bc78-b006-11f1-ad81-52540048bfe0"
+      ],
+      "sudocmd": [
+        "/usr/bin/systemctl status nginx"
+      ],
+      "memberof_sudocmdgroup": [
+        "test-sudocmdgroup"
+      ],
+      "dn": "ipaUniqueID=41c1bc78-b006-11f1-ad81-52540048bfe0,cn=sudocmds,cn=sudo,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "/usr/bin/systemctl status nginx",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

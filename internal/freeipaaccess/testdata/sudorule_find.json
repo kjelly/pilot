@@ -1,0 +1,61 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "ipaassociation",
+          "ipasudorule"
+        ],
+        "ipauniqueid": [
+          "3a42d0fe-b006-11f1-af70-52540048bfe0"
+        ],
+        "sudonotafter": [
+          "20270101000000Z"
+        ],
+        "sudonotbefore": [
+          "20260101000000Z"
+        ],
+        "ipaenabledflag": [
+          true
+        ],
+        "cn": [
+          "pilot-grant-sudo-gpu-test"
+        ],
+        "memberuser_group": [
+          "gpu-users"
+        ],
+        "memberhost_hostgroup": [
+          "pilot-target-gpu"
+        ],
+        "memberallowcmd_sudocmd": [
+          "/usr/bin/systemctl status nginx"
+        ],
+        "memberallowcmd_sudocmdgroup": [
+          "test-sudocmdgroup"
+        ],
+        "memberdenycmd_sudocmd": [
+          "/usr/bin/reboot"
+        ],
+        "dn": "ipaUniqueID=3a42d0fe-b006-11f1-af70-52540048bfe0,cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 1,
+    "truncated": false,
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": "1 Sudo Rule matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

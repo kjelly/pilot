@@ -1,0 +1,49 @@
+{
+  "result": {
+    "result": {
+      "accessruletype": [
+        "allow"
+      ],
+      "objectclass": [
+        "ipaassociation",
+        "ipahbacrule"
+      ],
+      "ipauniqueid": [
+        "37709c80-b006-11f1-97cd-52540048bfe0"
+      ],
+      "ipaenabledflag": [
+        true
+      ],
+      "cn": [
+        "pilot-grant-login-gpu-test"
+      ],
+      "memberuser_group": [
+        "gpu-users"
+      ],
+      "memberhost_hostgroup": [
+        "pilot-target-gpu"
+      ],
+      "memberservice_hbacsvc": [
+        "sshd"
+      ],
+      "dn": "ipaUniqueID=37709c80-b006-11f1-97cd-52540048bfe0,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "pilot-grant-login-gpu-test",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

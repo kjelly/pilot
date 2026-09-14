@@ -1,0 +1,75 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "ipaobject",
+        "nshost",
+        "ipahost",
+        "pkiuser",
+        "ipaservice",
+        "krbprincipalaux",
+        "krbprincipal",
+        "ieee802device",
+        "ipasshhost",
+        "top",
+        "ipaSshGroupOfPubKeys"
+      ],
+      "cn": [
+        "gpu-a.ipa.pilot.internal"
+      ],
+      "serverhostname": [
+        "gpu-a"
+      ],
+      "ipauniqueid": [
+        "1353ff18-b006-11f1-9b28-52540048bfe0"
+      ],
+      "krbprincipalname": [
+        "host/gpu-a.ipa.pilot.internal@IPA.PILOT.INTERNAL"
+      ],
+      "krbcanonicalname": [
+        "host/gpu-a.ipa.pilot.internal@IPA.PILOT.INTERNAL"
+      ],
+      "fqdn": [
+        "gpu-a.ipa.pilot.internal"
+      ],
+      "has_password": false,
+      "has_keytab": false,
+      "ipakrbrequirespreauth": true,
+      "ipakrbokasdelegate": false,
+      "ipakrboktoauthasdelegate": false,
+      "memberof_hostgroup": [
+        "pilot-target-gpu"
+      ],
+      "managedby_host": [
+        "gpu-a.ipa.pilot.internal"
+      ],
+      "managing_host": [
+        "gpu-a.ipa.pilot.internal"
+      ],
+      "memberofindirect_sudorule": [
+        "pilot-grant-sudo-gpu-test"
+      ],
+      "memberofindirect_hbacrule": [
+        "pilot-grant-login-gpu-test"
+      ],
+      "dn": "fqdn=gpu-a.ipa.pilot.internal,cn=computers,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "gpu-a.ipa.pilot.internal",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}
