@@ -68,42 +68,70 @@ func (c Config) krb5ConfPath() string {
 
 // Client is the live FreeIPA JSON-RPC Provider.
 type Client struct {
-	cfg       Config
-	krb5      *client.Client
-	transport http.RoundTripper
+	cfg Config
 
-	mu      sync.Mutex
-	server  string
-	session *spnego.Client // nil until a session is established
+	mu        sync.Mutex
+	krb5      *client.Client    // nil until buildCredentialsLocked succeeds
+	transport http.RoundTripper // nil until buildCredentialsLocked succeeds
+	server    string
+	session   *spnego.Client // nil until a session is established
 }
 
 var _ Provider = (*Client)(nil)
 
-// NewClient builds a Client. It loads the krb5 config, keytab, and CA
-// bundle but does not contact FreeIPA yet — the session is established
-// lazily, with failover across cfg.Servers, on the first call.
+// NewClient builds a Client. It validates cfg.Servers but does NOT load
+// the krb5 config, keytab, or CA bundle yet, and does not contact FreeIPA
+// — those all happen lazily inside ensureSession, on the first call.
+//
+// This used to load the keytab/CA/krb5.conf eagerly here. A Phase 8 live
+// vm-target test (docs/evidence/pilot-access-gateway/2026-09-14-phase8-
+// multi-gateway-e2e.md) found that made a missing/corrupt keytab far
+// worse than a FreeIPA network outage: NewClient's error made
+// cmd/pilot-access-gateway's runServe exit before the HTTP server ever
+// started listening, and because the systemd unit is socket-activated,
+// every subsequent connection re-triggered a doomed service start —
+// tripping systemd's start-rate-limit and wedging the *socket* unit
+// itself into `failed`, offline even after the keytab was restored,
+// until an operator ran `systemctl reset-failed`. Loading these lazily
+// (and retrying on every call while they haven't succeeded yet, exactly
+// like the network-level session retry already does) makes a bad keytab
+// degrade to the same fail-closed 503 the FreeIPA-outage path already
+// returns, self-healing on the next call once it's fixed — matching
+// spec.md §34's "service keytab invalid" error text, which assumes the
+// service is still up and answering, not crashed.
 func NewClient(cfg Config) (*Client, error) {
 	if len(cfg.Servers) == 0 {
 		return nil, fmt.Errorf("freeipaaccess: at least one server is required")
 	}
-	krb5Conf, err := config.Load(cfg.krb5ConfPath())
-	if err != nil {
-		return nil, fmt.Errorf("load krb5 config: %w", err)
+	return &Client{cfg: cfg}, nil
+}
+
+// buildCredentialsLocked loads the krb5 config, keytab, and CA bundle and
+// builds the Kerberos client + TLS transport, caching them on c. Callers
+// must hold c.mu. A no-op once c.krb5 is set; every failure leaves c.krb5
+// nil so the next call retries the load from scratch.
+func (c *Client) buildCredentialsLocked() error {
+	if c.krb5 != nil {
+		return nil
 	}
-	kt, err := keytab.Load(cfg.KeytabPath)
+	krb5Conf, err := config.Load(c.cfg.krb5ConfPath())
 	if err != nil {
-		return nil, fmt.Errorf("load keytab: %w", err)
+		return fmt.Errorf("load krb5 config: %w", err)
 	}
-	caPEM, err := os.ReadFile(cfg.CAFile)
+	kt, err := keytab.Load(c.cfg.KeytabPath)
 	if err != nil {
-		return nil, fmt.Errorf("read FreeIPA CA file: %w", err)
+		return fmt.Errorf("load keytab: %w", err)
+	}
+	caPEM, err := os.ReadFile(c.cfg.CAFile)
+	if err != nil {
+		return fmt.Errorf("read FreeIPA CA file: %w", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("parse FreeIPA CA file %s: no certificates found", cfg.CAFile)
+		return fmt.Errorf("parse FreeIPA CA file %s: no certificates found", c.cfg.CAFile)
 	}
-	principal, embeddedRealm := splitPrincipalRealm(cfg.ServicePrincipal)
-	realm := cfg.Realm
+	principal, embeddedRealm := splitPrincipalRealm(c.cfg.ServicePrincipal)
+	realm := c.cfg.Realm
 	if realm == "" {
 		realm = embeddedRealm
 	}
@@ -111,16 +139,13 @@ func NewClient(cfg Config) (*Client, error) {
 		realm = krb5Conf.LibDefaults.DefaultRealm
 	}
 	if realm == "" {
-		return nil, fmt.Errorf("freeipaaccess: no realm configured and %s has no default_realm", cfg.krb5ConfPath())
+		return fmt.Errorf("freeipaaccess: no realm configured and %s has no default_realm", c.cfg.krb5ConfPath())
 	}
-	krb5Cl := client.NewWithKeytab(principal, realm, kt, krb5Conf, client.DisablePAFXFAST(true))
-	return &Client{
-		cfg:  cfg,
-		krb5: krb5Cl,
-		transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-		},
-	}, nil
+	c.krb5 = client.NewWithKeytab(principal, realm, kt, krb5Conf, client.DisablePAFXFAST(true))
+	c.transport = &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	}
+	return nil
 }
 
 // splitPrincipalRealm splits an optional "@REALM" suffix off a service
@@ -174,6 +199,9 @@ func (c *Client) ensureSession(ctx context.Context) (*spnego.Client, string, err
 	defer c.mu.Unlock()
 	if c.session != nil {
 		return c.session, c.server, nil
+	}
+	if err := c.buildCredentialsLocked(); err != nil {
+		return nil, "", err
 	}
 	var lastErr error
 	for _, server := range c.cfg.Servers {

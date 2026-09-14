@@ -728,3 +728,31 @@
         state: reloaded
       when: pilot_access_gateway_install_forcecommand | bool and gateway_forcecommand_dropin.changed
       tags: [AG_forcecommand]
+
+    # Rollback path (spec.md §55.1 step 3): flipping the flag back to
+    # false and re-applying must actually remove the drop-in, not just
+    # skip re-installing it — otherwise an operator has no declarative
+    # way to undo step 19 short of hand-editing the host, which defeats
+    # the point of gating this behind a variable at all. Verified live
+    # as part of the §55.1 lockout regression test (Phase 8 evidence).
+    - name: "Step 19 rollback: remove sshd ForceCommand drop-in when disabled"
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
+        state: absent
+      when: not (pilot_access_gateway_install_forcecommand | bool)
+      register: gateway_forcecommand_dropin_removed
+      tags: [AG_forcecommand]
+
+    - name: "Step 20 rollback: sshd -t after removing the drop-in"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+      when: not (pilot_access_gateway_install_forcecommand | bool) and gateway_forcecommand_dropin_removed.changed
+      changed_when: false
+      tags: [AG_forcecommand]
+
+    - name: "Step 21 rollback: reload sshd after removing the drop-in"
+      ansible.builtin.systemd:
+        name: ssh
+        state: reloaded
+      when: not (pilot_access_gateway_install_forcecommand | bool) and gateway_forcecommand_dropin_removed.changed
+      tags: [AG_forcecommand]
