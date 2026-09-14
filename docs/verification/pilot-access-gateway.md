@@ -1,6 +1,6 @@
 # Verification Spec — Pilot Access Gateway
 
-> 版本：DRAFT v0.2（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5）
+> 版本：DRAFT v0.3（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`，見 §5）
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md（Pilot Access Gateway — Stateless FreeIPA-backed Portal），§50-§58
 > 維護者：sre
 
@@ -11,8 +11,8 @@
 | Inventory group | `pilot-access-gateway`（或明確 `target_group`） |
 | 角色 | stateless、read-only、FreeIPA-backed SSH/sudo access gateway 後端（`pilot-access-gateway.service`）+ 使用者 TUI 入口（`pilot portal`） |
 | 前置需求 | 已是 FreeIPA client（`freeipa-client-apply.yml`）且有轉發 DNS 記錄；`pilot-target-<scope>` hostgroup 已由 `pilot gateway-scope reconcile` 建立（Phase 6） |
-| 套用範圍 | 單一 gateway 主機的安裝；`pilot_access_gateway_install_forcecommand` 預設仍是 `false`——§55.1 的鎖定回歸測試已在 Phase 8 對 disposable vm-target 跑過並取得核准，但正式環境每次啟用仍需要重新走一次人員核准（spec.md §0 G4 rule 3），不會因為這裡驗證過就自動視為已核准 |
-| 風險等級 | Medium（讀取真實 FreeIPA 存取資料）；一旦 `pilot_access_gateway_install_forcecommand=true` 則為 High（登入路徑劫持等級變更，見 §4） |
+| 套用範圍 | 單一 gateway 主機的安裝；`pilot_access_gateway_install_forcecommand` **預設已改為 `true`**（2026-09-14，在 §55.1 鎖定回歸測試已於 Phase 8 對 disposable vm-target 跑過並取得核准之後）——沒有明確帶 `-e pilot_access_gateway_install_forcecommand=false` 就會安裝 ForceCommand。正式環境每次啟用仍需要重新走一次人員核准（spec.md §0 G4 rule 3），**改預設值不能取代這個核准**，只是改變「忘記帶這個旗標」時的結果 |
+| 風險等級 | **High（預設即安裝 ForceCommand，登入路徑劫持等級變更）**——要暫時退回舊的 opt-in 行為，明確帶 `-e pilot_access_gateway_install_forcecommand=false` |
 
 ## 1.5 依賴變數契約
 
@@ -26,7 +26,7 @@
 | `ipa_admin_password` | 只在**安裝當下**用來建立 reader service principal + keytab；只能來自 vault，執行期完全不用 | 是 |
 | `pilot_binary_path` / `pilot_access_gateway_binary_path` | 本機已建置好的兩個 binary 路徑 | 是 |
 | `gateway_portal_user_group` | Portal 使用者群組；**必須是既有的 FreeIPA 群組**，本 playbook 不建立 local fallback（見 §2 gotcha） | 否，預設 `role-pilot-portal-user` |
-| `pilot_access_gateway_install_forcecommand` | 是否安裝 sshd ForceCommand；**Phase 8 前必須是 false** | 否，預設 `false` |
+| `pilot_access_gateway_install_forcecommand` | 是否安裝 sshd ForceCommand；§55.1 鎖定回歸測試通過前必須是 `false` | 否，**預設 `true`**（2026-09-14 起；§55.1 已在 Phase 8 通過） |
 
 ## 2. Checklist
 
@@ -71,6 +71,8 @@
 - **Gateway 主機自己也需要一條 HBAC rule 才能讓 portal 使用者登入**：`pilot-access-gateways` hostgroup 只是 management inventory classification（spec.md §57 明文說它不代表 target 存取權），實際上 SSH 登入 gateway 主機本身（觸發 ForceCommand 之前，PAM/SSSD 的 account 階段就會先檢查）也需要一條 HBAC rule 授權——這是站台/`freeipa-identity` 該預先建立好的前置條件，不是這支 apply playbook 的責任（比照 `gateway_portal_user_group` 必須先在 FreeIPA 存在的處理原則）。Phase 8 測試時額外建了 `pilot-access-gateway-login`（`role-pilot-portal-user` → `pilot-access-gateways` → `sshd`）才能讓 §55.1 的鎖定回歸測試跑起來。
 - libvirt 的 vm-target IP 會被回收重用：舊 VM 留下的 `~/.ssh/known_hosts` host key 換了新 VM 但 IP 相同時，SSH 會直接拒絕（`REMOTE HOST IDENTIFICATION HAS CHANGED`），要先 `ssh-keygen -R <ip>` 清掉舊條目。
 - FreeIPA 使用者密碼被 admin 用 `ipa passwd` 重設後會進入「must change at next login」狀態；`ssh user@host`（純 `password`/`keyboard-interactive` 認證）在這個狀態下會被 sshd 直接斷線（`monitor_read: unpermitted request 104`），不會進入互動改密碼流程——要先用 `kinit <user>`（透過任一台已 enroll 的主機）做一次改密碼，之後 SSH 才能正常登入（同一份 v5.1 舊教訓，這次換成 SSH 層再踩一次）。
+- **`pilot_access_gateway_install_forcecommand` 預設在 2026-09-14 從 `false` 改成 `true`**（§55.1 已在 Phase 8 通過之後的政策決定）——這代表沒有明確帶 `-e pilot_access_gateway_install_forcecommand=false` 的每一次 apply（包含任何未來新裝的 gateway 主機）都會安裝 ForceCommand。§0 G4/§55.1 的規則本身沒有改變：不得對非 disposable 主機部署、正式環境每次啟用都要人員明確核准——**改預設值不會、也不能取代這個核准**，只是把「忘記帶旗標」的結果從「安全」變成「危險」。對任何非 disposable 主機套用這支 playbook 前，務必先確認這一點，必要時明確帶 `-e pilot_access_gateway_install_forcecommand=false`。
+- 曾意外發現另一個真的 bug（已修）：選到沒有真實機器的 placeholder fixture host（`gpu-a`/`gpu-b`）按 Connect，SSH 解析失敗的錯誤會直接把整個 `pilot portal` process 炸掉、退回 shell（`connectToHost` 把 `sshLauncher` 的 error 原樣往上丟，一路 unwind 出 `runPortal`）——跟 spec.md 「退出 remote SSH 後回到同一個 pilot portal」的設計意圖相反。已修成：Connect 失敗（無論是 authorize API 錯誤或 ssh 本身失敗）一律顯示訊息並回到 portal 選單，永不往外拋（見 `cmd/pilot/cmd/portal_ssh_test.go` 的 `TestConnectToHostSSHFailureReturnsToPortal`）。
 
 ## 6. 明確不在本 repo 範圍的項目
 

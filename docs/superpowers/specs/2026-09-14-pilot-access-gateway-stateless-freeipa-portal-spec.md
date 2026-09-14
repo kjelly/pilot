@@ -31,6 +31,8 @@ gotcha/deviation/bug（含幾個修正過的自我誤判，見 Phase 7 的 syste
 本文件其餘內容維持實作前的原始規格文字（含 §0 的 gate/修正記錄、§51 的 contract schema 修正說明），供之後回頭查證設計意圖時參照；
 以上 Implementation Status 只是事後補記的完成度總覽，不是本文件唯一的真相來源——各 evidence doc 與 `docs/verification/`
 才是逐項驗收結果的權威記錄。
+
+**2026-09-14 事後政策變更**：`pilot_access_gateway_install_forcecommand` 的預設值已從本文件原訂的 `false` 改成 `true`（在 §55.1 鎖定回歸測試已於 Phase 8 對 disposable vm-target 通過並取得核准之後，由使用者明確決定）。§0 G4/§55.1 的規則本身沒有改變——任何環境都不得對非 disposable 主機部署 ForceCommand，除非鎖定回歸測試已在 vm-target 上跑過；正式環境每次啟用都需要人員明確核准，**改預設值不能取代這個核准**，只是把「呼叫端忘記帶這個旗標」時的結果從安全變成危險。見 `docs/verification/pilot-access-gateway.md` §5、`playbooks/apply/pilot-access-gateway-apply.yml` 的 vars 區塊。
 > Date: 2026-09-08
 > Revised: 2026-09-14 — 加入 §0 Implementation Readiness Gates，修正 §51 contract 欄位以符合 `internal/contract.Contract` 實際 schema，補 §11.1/§55/§60 的驗收門檻
 > Repository: `https://github.com/kjelly/pilot`

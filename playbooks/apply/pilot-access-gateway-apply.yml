@@ -6,11 +6,17 @@
 # the same realm the target FreeIPA server(s) serve. Order matches
 # spec.md §55 exactly, up to and including step 18 — step 19
 # (sshd ForceCommand) is gated behind
-# pilot_access_gateway_install_forcecommand (default false) per spec.md
-# §0 G4 / §55.1: it must never run against a non-disposable host until
-# the vm-target lockout regression test in §55.1 has actually been run
-# and a human has approved it. Phase 7's own landing gate only covers
-# steps 1-18; Phase 8 owns turning this flag on for real.
+# pilot_access_gateway_install_forcecommand (default TRUE — changed from
+# spec.md §0 G4/§55.1's originally-specified default of false on
+# 2026-09-14, after the §55.1 lockout regression test had already passed
+# on vm-target). §55.1's rules still apply in full: never run this
+# against a non-disposable host without the lockout regression test
+# having actually been run there, and production deployment still needs
+# explicit per-deployment human approval — the changed default does NOT
+# substitute for that approval, it only changes what happens if a caller
+# forgets to pass the flag at all. Pass
+# `-e pilot_access_gateway_install_forcecommand=false` explicitly to get
+# the old opt-in behavior.
 #
 # This does NOT create the FreeIPA service principal from an admin
 # session inline via kinit+shell the way freeipa-identity-apply.yml
@@ -62,10 +68,12 @@
     pilot_access_gateway_binary_path: ""
     pilot_access_gateway_binary_sha256: ""
 
-    # Gate for spec.md §55 step 19 — see the file header comment. Never
-    # flip this to true against a non-disposable host without the
-    # §55.1 lockout regression test having actually been run.
-    pilot_access_gateway_install_forcecommand: false
+    # Gate for spec.md §55 step 19 — see the file header comment.
+    # Default TRUE as of 2026-09-14. Pass
+    # -e pilot_access_gateway_install_forcecommand=false to opt out.
+    # Never let this install against a non-disposable host without the
+    # §55.1 lockout regression test having actually been run there.
+    pilot_access_gateway_install_forcecommand: true
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"

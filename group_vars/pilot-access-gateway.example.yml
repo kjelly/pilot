@@ -55,6 +55,7 @@ pilot_access_gateway_binary_path: "dist/pilot-access-gateway-linux-amd64"
 # 遮蔽真正的 FreeIPA 群組,見 docs/verification/pilot-access-gateway.md §5)。
 # gateway_portal_user_group: "role-pilot-portal-user"
 
-# 是否安裝 sshd ForceCommand。Phase 8 前必須是 false——沒做過 vm-target
-# 鎖定回歸測試(spec.md §0 G4/§55.1)前不得對任何主機開啟。
-# pilot_access_gateway_install_forcecommand: false
+# 是否安裝 sshd ForceCommand。2026-09-14 起預設為 true——沒做過 vm-target
+# 鎖定回歸測試(spec.md §0 G4/§55.1)前不得對非 disposable 主機開啟;要暫時
+# 關閉請明確取消註解設成 false。
+# pilot_access_gateway_install_forcecommand: true
