@@ -1,0 +1,155 @@
+---
+# Shared task: `apt-get update` restricted to ONLY the declared required
+# sources (docs/tmp/now/spec.md §12), so an unrelated broken external
+# repository — never edited, never re-pointed, never deleted — cannot
+# block metadata refresh for the sources this capability actually needs.
+#
+# Builds a throwaway execution view under /run/pilot/apt/<id>/
+# (owner=root group=root mode=0700) and ALWAYS removes it afterward,
+# success or failure — cleanup lives in a block's `always:` so a mid-way
+# fail (e.g. the required-OS-source gate below) can never leak a stray
+# directory (the docker bind-mount rescue incident taught us "only clean
+# up on the happy path" is the same bug in disguise).
+#
+# Requires _pilot_apt_required_sources (from apt-package-install.yml).
+# Output fact: pilot_apt_scoped_refresh_result
+#   status: healthy | degraded
+#   mode: scoped
+#   errors: [...]
+#   required_sources_healthy: bool
+#
+# Never touches /etc/apt/sources.list* — only reads from it (for the "os"
+# class) or from the caller-declared source_file (for the "pilot" class)
+# to populate the scoped view. Never uses trusted=yes /
+# allow_unauthenticated / Acquire::AllowInsecureRepositories.
+
+- name: "APT scoped refresh — allocate execution-scoped temp directory"
+  ansible.builtin.tempfile:
+    state: directory
+    path: /run/pilot/apt
+  register: _pilot_apt_scoped_dir
+  changed_when: false
+  check_mode: false
+
+- name: "APT scoped refresh — scoped-view lifecycle (temp dir always cleaned up)"
+  block:
+    - name: "APT scoped refresh — lock down execution directory (root:root 0700)"
+      ansible.builtin.file:
+        path: "{{ _pilot_apt_scoped_dir.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      changed_when: false
+
+    - name: "APT scoped refresh — create empty sourceparts directory"
+      ansible.builtin.file:
+        path: "{{ _pilot_apt_scoped_dir.path }}/sources.list.d"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      changed_when: false
+
+    - name: "APT scoped refresh — render OS-archive entries into the scoped view (read-only copy)"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          cat /etc/apt/sources.list 2>/dev/null > "{{ _pilot_apt_scoped_dir.path }}/sources.list" || true
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            cp /etc/apt/sources.list.d/ubuntu.sources "{{ _pilot_apt_scoped_dir.path }}/sources.list.d/ubuntu.sources"
+          fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+      when: _pilot_apt_required_sources | selectattr('class', 'equalto', 'os') | list | length > 0
+
+    - name: "APT scoped refresh — read back the rendered OS-archive scoped view"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          cat "{{ _pilot_apt_scoped_dir.path }}/sources.list" \
+              "{{ _pilot_apt_scoped_dir.path }}/sources.list.d/ubuntu.sources" 2>/dev/null \
+            | grep -Ev '^\s*#|^\s*$' | grep -Eo 'https?://[^ ]+' || true
+      args:
+        executable: /bin/bash
+      register: _pilot_apt_os_view_check
+      changed_when: false
+      check_mode: false
+      when: _pilot_apt_required_sources | selectattr('class', 'equalto', 'os') | list | length > 0
+
+    - name: "APT scoped refresh — FATAL(required_os_source_unresolvable)"
+      ansible.builtin.fail:
+        msg: >-
+          FATAL reason=required_os_source_unresolvable — no resolvable
+          Ubuntu archive entry found in /etc/apt/sources.list or
+          /etc/apt/sources.list.d/ubuntu.sources.
+      when:
+        - _pilot_apt_required_sources | selectattr('class', 'equalto', 'os') | list | length > 0
+        - _pilot_apt_os_view_check.stdout_lines | default([]) | length == 0
+
+    - name: "APT scoped refresh — copy pilot-owned required source files into the scoped view"
+      ansible.builtin.copy:
+        src: "{{ item.source_file }}"
+        dest: "{{ _pilot_apt_scoped_dir.path }}/sources.list.d/{{ item.source_file | basename }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ _pilot_apt_required_sources | selectattr('class', 'equalto', 'pilot') | list }}"
+      loop_control:
+        label: "{{ item.id }}"
+      changed_when: false
+
+    - name: "APT scoped refresh — run apt-get update against the scoped view only"  # noqa: command-instead-of-module
+      # ansible.builtin.apt has no way to override Dir::Etc::sourcelist/
+      # sourceparts, which is the only way to make apt-get read ONLY the
+      # required sources without touching the real /etc/apt/sources.list*
+      # files (spec.md §12.3) — a raw apt-get invocation is required here.
+      ansible.builtin.command:
+        cmd: >-
+          apt-get
+          -o Dir::Etc::sourcelist={{ _pilot_apt_scoped_dir.path }}/sources.list
+          -o Dir::Etc::sourceparts={{ _pilot_apt_scoped_dir.path }}/sources.list.d
+          -o APT::Get::List-Cleanup=0
+          update
+      register: _pilot_apt_scoped_run
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      until: >-
+        (_pilot_apt_scoped_run.rc | default(1)) == 0 or
+        not ((_pilot_apt_scoped_run.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
+      retries: "{{ pilot_apt_lock_retries | default(6) }}"
+      delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+
+    - name: "APT scoped refresh — classify scoped refresh output"
+      ansible.builtin.include_tasks: apt-classify-failure.yml
+      vars:
+        pilot_apt_classify_stdout: "{{ _pilot_apt_scoped_run.stdout | default('') }}"
+        pilot_apt_classify_stderr: "{{ _pilot_apt_scoped_run.stderr | default('') }}"
+        pilot_apt_classify_required_sources: "{{ _pilot_apt_required_sources }}"
+
+    - name: "APT scoped refresh — required-source health for this scoped run"
+      ansible.builtin.set_fact:
+        _pilot_apt_scoped_required_healthy: >-
+          {{ (_pilot_apt_scoped_run.rc | default(1)) == 0 and
+             (pilot_apt_classification_result.errors
+              | selectattr('required', 'equalto', true) | list | length) == 0 }}
+
+    - name: "APT scoped refresh — set pilot_apt_scoped_refresh_result"
+      ansible.builtin.set_fact:
+        pilot_apt_scoped_refresh_result:
+          status: "{{ 'healthy' if _pilot_apt_scoped_required_healthy else 'degraded' }}"
+          mode: scoped
+          errors: "{{ pilot_apt_classification_result.errors }}"
+          required_sources_healthy: "{{ _pilot_apt_scoped_required_healthy }}"
+  always:
+    - name: "APT scoped refresh — cleanup execution-scoped temp directory"
+      ansible.builtin.file:
+        path: "{{ _pilot_apt_scoped_dir.path }}"
+        state: absent
+      changed_when: false

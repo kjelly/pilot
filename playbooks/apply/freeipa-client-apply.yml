@@ -271,12 +271,14 @@
       tags: [freeipa-client, C1]
 
     - name: "FreeIPA client — install ipa-client package (apt freeipa-client on Ubuntu)"
-      ansible.builtin.apt:
-        name: "{{ ipa_client_packages_debian }}"
-        state: present
-        update_cache: true
-      environment:
-        DEBIAN_FRONTEND: noninteractive
+      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: "{{ ipa_client_packages_debian }}"
+        pilot_apt_policy: tolerant
+        pilot_apt_component: freeipa-client
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
       when:
         - not ansible_check_mode
         - ansible_os_family == 'Debian'
@@ -302,10 +304,14 @@
       tags: [freeipa-client, C9]
 
     - name: "FreeIPA client — install SSSD cache tools (Debian)"
-      ansible.builtin.apt:
-        name: sssd-tools
-        state: present
-        update_cache: true
+      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: [sssd-tools]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: freeipa-client-sssd-tools
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
       when:
         - not ansible_check_mode
         - ansible_os_family == 'Debian'

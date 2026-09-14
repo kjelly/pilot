@@ -1,0 +1,170 @@
+---
+# Shared task: classify raw `apt-get update` output into structured failure
+# records and decide, per error line, whether it affects a *required*
+# source (docs/verification/apt-repository-tolerance.md §4). Included by
+# apt-cache-refresh.yml and apt-scoped-refresh.yml only — never called
+# directly by a capability playbook.
+#
+# Inputs:
+#   pilot_apt_classify_stdout           : str
+#   pilot_apt_classify_stderr           : str
+#   pilot_apt_classify_required_sources : list of
+#       {id, class(os|pilot), source_file(pilot only)}
+#
+# Output fact: pilot_apt_classification_result
+#   errors: [{source, type, key_id, required, required_source_id, raw}]
+#   has_unknown: bool -- true if any apt error/warning line matched none of
+#     the known patterns (an unknown install-blocking error must never be
+#     silently classified as harmless — see MUST NOT §25).
+#
+# Text pattern matching in Jinja cannot cleanly extract per-line hostnames
+# *and* look them up against required-source hostnames *and* track an
+# "unknown pattern" fallback without becoming an unreadable filter chain,
+# so the actual classification runs as a small stdlib-only Python script
+# (no third-party deps, no shell interpolation of untrusted apt output —
+# stdout/stderr/required-sources all cross the process boundary via
+# environment variables, read with os.environ, never substituted into the
+# script text itself).
+#
+# Required-source hostnames are never guessed for the "os" class: they
+# come only from /etc/apt/sources.list and
+# /etc/apt/sources.list.d/ubuntu.sources — the two locations Ubuntu's own
+# installer ever writes the official archive into. Third-party installers
+# (HashiCorp, Docker, NVIDIA, Wazuh, ...) always write their own separate
+# *.list/*.sources file, never edit these two, so this distinguishes
+# "official Ubuntu archive" from "vendor repository" without hard-coding a
+# mirror URL (spec.md §12.4).
+
+- name: "APT classify failure — run classifier"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "{{ _pilot_apt_classify_py }}"
+  environment:
+    PILOT_APT_REQUIRED_SOURCES: "{{ pilot_apt_classify_required_sources | default([]) | to_json }}"
+    PILOT_APT_STDOUT: "{{ pilot_apt_classify_stdout | default('') }}"
+    PILOT_APT_STDERR: "{{ pilot_apt_classify_stderr | default('') }}"
+  register: _pilot_apt_classify_run
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  vars:
+    _pilot_apt_classify_py: |
+      import json
+      import os
+      import re
+
+
+      def hosts_from_file(path):
+          try:
+              with open(path, "r", errors="ignore") as f:
+                  text = f.read()
+          except OSError:
+              return set()
+          return {m.group(1) for m in re.finditer(r"https?://([^/\s]+)", text)}
+
+
+      def os_hosts():
+          return hosts_from_file("/etc/apt/sources.list") | hosts_from_file(
+              "/etc/apt/sources.list.d/ubuntu.sources"
+          )
+
+
+      required_sources = json.loads(os.environ.get("PILOT_APT_REQUIRED_SOURCES", "[]"))
+      stdout = os.environ.get("PILOT_APT_STDOUT", "")
+      stderr = os.environ.get("PILOT_APT_STDERR", "")
+
+      required_hostmap = []
+      for src in required_sources:
+          cls = src.get("class")
+          if cls == "os":
+              hosts = os_hosts()
+          elif cls == "pilot":
+              hosts = hosts_from_file(src.get("source_file", ""))
+          else:
+              hosts = set()
+          required_hostmap.append({"id": src.get("id"), "hosts": hosts})
+
+      PATTERNS = [
+          ("gpg_no_pubkey", re.compile(r"NO_PUBKEY")),
+          ("gpg_invalid_signature", re.compile(r"invalid signature|BADSIG|EXPKEYSIG", re.I)),
+          ("release_missing", re.compile(r"does not have a Release file")),
+          ("wrong_distribution", re.compile(r"Invalid record|unable to find expected entry|is not valid yet", re.I)),
+          ("tls_failure", re.compile(r"certificate verif|SSL certificate|TLS", re.I)),
+          ("dns_failure", re.compile(r"Temporary failure resolving", re.I)),
+          ("connect_timeout", re.compile(r"Connection timed out|Could not connect|Failed to connect", re.I)),
+          ("http_404", re.compile(r"404\s+(File )?[Nn]ot [Ff]ound")),
+          ("apt_lock", re.compile(r"Could not (get|open) lock|Unable to lock", re.I)),
+          ("dpkg_interrupted", re.compile(r"dpkg was interrupted", re.I)),
+          ("dependency_broken", re.compile(r"unmet dependencies", re.I)),
+          ("package_no_candidate", re.compile(r"Unable to locate package|has no installation candidate", re.I)),
+      ]
+
+      # A single apt-get failure is not one line: e.g. a 404 on a Release
+      # file prints as "Err:N <url> <suite> Release" followed by an
+      # UNPREFIXED continuation line "  404  File not found [IP: ...]"
+      # (real apt wording — confirmed against a live apt-get on an Ubuntu
+      # 24.04 host; it is "File not found", not "Not Found", and the 404
+      # detail line itself carries no "W:"/"E:"/"Err:" prefix, so a naive
+      # per-line prefix filter silently drops it — see
+      # docs/verification/apt-repository-tolerance.md). We therefore:
+      #   * track the most recently seen source URL across lines
+      #     (last_host), so a prefix-less detail line inherits the host
+      #     from the "Err:"/"Ign:" header line just above it;
+      #   * only ever emit an entry for a line that either matches a known
+      #     PATTERNS entry, or begins with "E:" (apt's own hard-error
+      #     marker) — "W:"/"Err:"/"Ign:" status lines that match nothing
+      #     are routing noise, not failures, and the real failure detail
+      #     always resurfaces as a matching line or a final "E:" summary.
+      errors = []
+      has_unknown = False
+      combined = stdout + "\n" + stderr
+      last_host = None
+      for line in combined.splitlines():
+          stripped = line.strip()
+          if not stripped:
+              continue
+          m = re.search(r"https?://([^/\s]+)", stripped)
+          if m:
+              last_host = m.group(1)
+          is_hard_error_line = stripped.startswith("E:")
+          matched_type = None
+          for type_name, pat in PATTERNS:
+              if pat.search(stripped):
+                  matched_type = type_name
+                  break
+          if matched_type is None and not is_hard_error_line:
+              continue
+          host = m.group(1) if m else last_host
+          key_id = None
+          km = re.search(r"NO_PUBKEY\s+([0-9A-Fa-f]+)", stripped)
+          if km:
+              key_id = km.group(1)
+          required = False
+          required_source_id = None
+          if host:
+              for entry in required_hostmap:
+                  if host in entry["hosts"]:
+                      required = True
+                      required_source_id = entry["id"]
+                      break
+          if matched_type is None:
+              matched_type = "unknown"
+              has_unknown = True
+          errors.append(
+              {
+                  "source": host or "unknown",
+                  "type": matched_type,
+                  "key_id": key_id,
+                  "required": required,
+                  "required_source_id": required_source_id,
+                  "raw": stripped,
+              }
+          )
+
+      print(json.dumps({"errors": errors, "has_unknown": has_unknown}))
+
+- name: "APT classify failure — set pilot_apt_classification_result"
+  ansible.builtin.set_fact:
+    pilot_apt_classification_result: "{{ _pilot_apt_classify_run.stdout | from_json }}"

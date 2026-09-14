@@ -1,0 +1,81 @@
+---
+# Shared task: global (all configured sources) `apt-get update` probe.
+# Only reached from apt-package-install.yml when the cache-first check
+# found no installable candidate for a requested package — this file is
+# never invoked directly by a capability playbook
+# (docs/tmp/now/spec.md §9).
+#
+# Inputs (from the including apt-package-install.yml scope):
+#   _pilot_apt_policy           : tolerant|strict (offline never reaches here)
+#   _pilot_apt_required_sources : list of {id, class, source_file}
+#   pilot_apt_refresh_reason    : str, free-form label for evidence/logs
+#   pilot_apt_lock_retries      : int, default 6  (spec.md §11)
+#   pilot_apt_lock_delay_seconds: int, default 10
+#
+# Output fact: pilot_apt_refresh_result
+#   status: healthy | degraded
+#   mode: global
+#   errors: [...]
+#   required_sources_healthy: bool
+#
+# tolerant: `changed_when: false` / `failed_when: false` below means this
+# is a probe, not a gate — the caller (apt-package-install.yml) decides
+# whether to proceed, retry via scoped refresh, or fail. This file itself
+# only ever fails the play for `strict` (any classified error — os-patch-sla
+# and repository-lifecycle callers need the *entire* configured package
+# universe to be trustworthy, not just one required source). The retry
+# below is bounded and only fires for lock-contention-shaped failures
+# (`apt_lock`) — deterministic failures (NO_PUBKEY, invalid signature,
+# missing Release, wrong distribution, package not found) are never
+# retried (spec.md §11).
+
+- name: "APT cache refresh — global apt-get update probe ({{ pilot_apt_refresh_reason | default('unspecified') }})"
+  ansible.builtin.command:
+    cmd: apt-get update
+  register: _pilot_apt_global_refresh
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  until: >-
+    (_pilot_apt_global_refresh.rc | default(1)) == 0 or
+    not ((_pilot_apt_global_refresh.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
+  retries: "{{ pilot_apt_lock_retries | default(6) }}"
+  delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+
+- name: "APT cache refresh — classify global refresh output"
+  ansible.builtin.include_tasks: apt-classify-failure.yml
+  vars:
+    pilot_apt_classify_stdout: "{{ _pilot_apt_global_refresh.stdout | default('') }}"
+    pilot_apt_classify_stderr: "{{ _pilot_apt_global_refresh.stderr | default('') }}"
+    pilot_apt_classify_required_sources: "{{ _pilot_apt_required_sources | default([]) }}"
+
+- name: "APT cache refresh — required-source health for this refresh"
+  ansible.builtin.set_fact:
+    _pilot_apt_global_required_healthy: >-
+      {{ (_pilot_apt_global_refresh.rc | default(1)) == 0 and
+         (pilot_apt_classification_result.errors
+          | selectattr('required', 'equalto', true) | list | length) == 0 }}
+
+- name: "APT cache refresh — set pilot_apt_refresh_result"
+  ansible.builtin.set_fact:
+    pilot_apt_refresh_result:
+      status: >-
+        {{ 'healthy'
+           if ((_pilot_apt_global_refresh.rc | default(1)) == 0 and
+               (pilot_apt_classification_result.errors | length) == 0)
+           else 'degraded' }}
+      mode: global
+      errors: "{{ pilot_apt_classification_result.errors }}"
+      required_sources_healthy: "{{ _pilot_apt_global_required_healthy }}"
+
+- name: "APT cache refresh — FATAL(strict): configured package universe is not fully trustworthy"
+  ansible.builtin.fail:
+    msg: >-
+      FATAL reason=strict_repository_health_failed policy=strict
+      refresh_reason={{ pilot_apt_refresh_reason | default('unspecified') }}
+      errors={{ pilot_apt_refresh_result.errors }}
+  when:
+    - _pilot_apt_policy == 'strict'
+    - pilot_apt_refresh_result.status != 'healthy'

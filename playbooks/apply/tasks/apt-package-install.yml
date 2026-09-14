@@ -1,0 +1,199 @@
+---
+# Shared task: fault-tolerant Debian/Ubuntu package install entry point
+# (docs/tmp/now/spec.md §5, §7, §14) — the sanctioned way for an ordinary
+# apply playbook to install an apt package. Separates "is the target
+# package installable" from "are ALL configured APT repositories
+# healthy", so an unrelated third-party repository (e.g. a stale
+# HashiCorp GPG key on an otherwise-healthy host) can never fail a
+# capability that never needed that repository (the incident this
+# framework fixes: x64-deliver-bbq / freeipa-client, docs/tmp/now/spec.md
+# §0).
+#
+# Interface (docs/tmp/now/spec.md §14):
+#   pilot_apt_packages            : list[str], required
+#   pilot_apt_component            : str, required (evidence/log label only)
+#   pilot_apt_policy               : tolerant|strict|offline, default tolerant
+#   pilot_apt_required_sources     : list of
+#       {id, class(os|pilot|external), source_file(pilot only, must live
+#        under /etc/apt/sources.list.d/)}
+#   pilot_apt_allow_scoped_refresh : bool, default true
+#
+# Guarantees (spec.md §25):
+#   * cache-first — apt-get update only runs when a requested package is
+#     both missing AND has no installable candidate in the current cache.
+#   * exactly one real `ansible.builtin.apt` install task, at the bottom
+#     of this file, never wrapped in ignore_errors — an in-scope failure
+#     still fails the play.
+#   * every non-offline, non-ready path ends in either "proceed to the
+#     final install" or an explicit `ansible.builtin.fail` (never a
+#     silent fall-through) so a required-source failure is always fatal.
+#   * never disables signature verification at any stage.
+#
+# Included by: playbooks/apply/freeipa-client-apply.yml (C1 ipa-client,
+# C8 sssd-tools). Reuse this file rather than writing a second
+# update_cache:true install — that was the exact defect this replaces.
+
+- name: "APT package install ({{ pilot_apt_component | default('?') }}) — assert interface"
+  ansible.builtin.assert:
+    that:
+      - pilot_apt_packages is defined
+      - pilot_apt_packages | length > 0
+      - pilot_apt_component is defined
+      - pilot_apt_component | length > 0
+      - (pilot_apt_policy | default('tolerant')) in ['tolerant', 'strict', 'offline']
+      - (pilot_apt_required_sources | default([]) | selectattr('class', 'equalto', 'pilot') | list
+         | rejectattr('source_file', 'defined') | list | length) == 0
+      - (pilot_apt_required_sources | default([]) | selectattr('class', 'equalto', 'pilot') | list
+         | selectattr('source_file', 'defined')
+         | rejectattr('source_file', 'match', '^/etc/apt/sources\.list\.d/')
+         | list | length) == 0
+    fail_msg: >-
+      apt-package-install: invalid inputs for component
+      {{ pilot_apt_component | default('(unset)') }} (docs/tmp/now/spec.md §14) —
+      pilot_apt_packages must be non-empty, pilot_apt_component required,
+      pilot_apt_policy must be tolerant|strict|offline, and pilot-owned
+      required sources must declare source_file under
+      /etc/apt/sources.list.d/.
+
+- name: "APT package install ({{ pilot_apt_component }}) — set effective policy facts"
+  ansible.builtin.set_fact:
+    _pilot_apt_policy: "{{ pilot_apt_policy | default('tolerant') }}"
+    _pilot_apt_required_sources: "{{ pilot_apt_required_sources | default([]) }}"
+    _pilot_apt_allow_scoped_refresh: "{{ pilot_apt_allow_scoped_refresh | default(true) }}"
+
+- name: "APT package install ({{ pilot_apt_component }}) — read installed-package facts"
+  ansible.builtin.package_facts:
+    manager: apt
+  check_mode: false
+
+- name: "APT package install ({{ pilot_apt_component }}) — compute missing packages"
+  ansible.builtin.set_fact:
+    _pilot_apt_missing: "{{ pilot_apt_packages | reject('in', ansible_facts.packages.keys() | list) | list }}"
+
+- name: "APT package install ({{ pilot_apt_component }}) — SUCCESS(already_present)"
+  ansible.builtin.debug:
+    msg: >-
+      OK component={{ pilot_apt_component }} apt_mode=already_present
+      packages={{ pilot_apt_packages }}
+  when: _pilot_apt_missing | length == 0
+
+- name: "APT package install ({{ pilot_apt_component }}) — resolve a candidate, refreshing only if required"
+  when: _pilot_apt_missing | length > 0
+  block:
+    - name: "APT package install ({{ pilot_apt_component }}) — apt-cache policy for missing packages"
+      ansible.builtin.command:
+        cmd: "apt-cache policy {{ _pilot_apt_missing | join(' ') }}"
+      register: _pilot_apt_cache_check
+      changed_when: false
+      check_mode: false
+
+    - name: "APT package install ({{ pilot_apt_component }}) — determine candidate availability"
+      ansible.builtin.set_fact:
+        _pilot_apt_has_candidate: "{{ 'Candidate: (none)' not in _pilot_apt_cache_check.stdout }}"
+        _pilot_apt_mode: cache_hit
+
+    - name: "APT package install ({{ pilot_apt_component }}) — FATAL(apt_cache_insufficient_offline)"
+      ansible.builtin.fail:
+        msg: >-
+          FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
+          reason=apt_cache_insufficient_offline policy=offline —
+          no candidate in the current cache and network refresh is
+          disallowed under the offline policy.
+      when:
+        - not _pilot_apt_has_candidate
+        - _pilot_apt_policy == 'offline'
+
+    - name: "APT package install ({{ pilot_apt_component }}) — refresh (policy={{ _pilot_apt_policy }})"
+      when: not _pilot_apt_has_candidate
+      block:
+        - name: "APT package install ({{ pilot_apt_component }}) — global refresh"
+          ansible.builtin.include_tasks: apt-cache-refresh.yml
+          vars:
+            pilot_apt_refresh_reason: package_candidate_missing
+
+        - name: "APT package install ({{ pilot_apt_component }}) — re-check candidate after global refresh"
+          ansible.builtin.command:
+            cmd: "apt-cache policy {{ _pilot_apt_missing | join(' ') }}"
+          register: _pilot_apt_cache_check
+          changed_when: false
+          check_mode: false
+
+        - name: "APT package install ({{ pilot_apt_component }}) — determine post-global-refresh candidate"
+          ansible.builtin.set_fact:
+            _pilot_apt_has_candidate: "{{ 'Candidate: (none)' not in _pilot_apt_cache_check.stdout }}"
+            _pilot_apt_mode: global_refresh
+
+        - name: "APT package install ({{ pilot_apt_component }}) — scoped refresh (tolerant only, required sources)"
+          when:
+            - not _pilot_apt_has_candidate
+            - _pilot_apt_policy == 'tolerant'
+          block:
+            - name: "APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): scoped refresh disallowed"
+              ansible.builtin.fail:
+                msg: >-
+                  FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
+                  reason=required_source_unhealthy required_sources={{ _pilot_apt_required_sources | map(attribute='id') | list }}
+                  global refresh_result={{ pilot_apt_refresh_result }} —
+                  no candidate after global refresh and
+                  pilot_apt_allow_scoped_refresh is false.
+              when: not _pilot_apt_allow_scoped_refresh
+
+            - name: "APT package install ({{ pilot_apt_component }}) — scoped refresh against required sources only"
+              ansible.builtin.include_tasks: apt-scoped-refresh.yml
+
+            - name: "APT package install ({{ pilot_apt_component }}) — re-check candidate after scoped refresh"
+              ansible.builtin.command:
+                cmd: "apt-cache policy {{ _pilot_apt_missing | join(' ') }}"
+              register: _pilot_apt_cache_check
+              changed_when: false
+              check_mode: false
+              when: pilot_apt_scoped_refresh_result.required_sources_healthy
+
+            - name: "APT package install ({{ pilot_apt_component }}) — determine post-scoped-refresh candidate"
+              ansible.builtin.set_fact:
+                _pilot_apt_has_candidate: >-
+                  {{ pilot_apt_scoped_refresh_result.required_sources_healthy and
+                     'Candidate: (none)' not in _pilot_apt_cache_check.stdout }}
+                _pilot_apt_mode: scoped_refresh
+
+            - name: "APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): scoped refresh did not recover"
+              ansible.builtin.fail:
+                msg: >-
+                  FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
+                  reason=required_source_unhealthy required_sources={{ _pilot_apt_required_sources | map(attribute='id') | list }}
+                  scoped_refresh_result={{ pilot_apt_scoped_refresh_result }}
+              when: not _pilot_apt_has_candidate
+
+        - name: "APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): no candidate, refresh exhausted"
+          ansible.builtin.fail:
+            msg: >-
+              FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
+              reason=required_source_unhealthy policy={{ _pilot_apt_policy }}
+              refresh_result={{ pilot_apt_refresh_result }}
+          when:
+            - not _pilot_apt_has_candidate
+            - not (_pilot_apt_policy == 'tolerant')
+
+    - name: "APT package install ({{ pilot_apt_component }}) — install (single sanctioned mutation point, no ignore_errors)"
+      ansible.builtin.apt:
+        name: "{{ _pilot_apt_missing }}"
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: _pilot_apt_install
+      until: >-
+        _pilot_apt_install is success or
+        not ((_pilot_apt_install.msg | default('')) is search('Could not (get|open) lock|Unable to lock'))
+      retries: "{{ pilot_apt_lock_retries | default(6) }}"
+      delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+
+    - name: "APT package install ({{ pilot_apt_component }}) — SUCCESS"
+      ansible.builtin.debug:
+        msg: >-
+          OK component={{ pilot_apt_component }} apt_mode={{ _pilot_apt_mode }}
+          packages={{ _pilot_apt_missing }}
+          required_sources_healthy={{ (pilot_apt_refresh_result.required_sources_healthy
+             if pilot_apt_refresh_result is defined else true) }}
+          unrelated_sources_degraded={{ ((pilot_apt_refresh_result.errors | default([]))
+             + (pilot_apt_scoped_refresh_result.errors | default([])))
+             | selectattr('required', 'equalto', false) | list | length }}
