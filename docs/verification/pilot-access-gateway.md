@@ -1,7 +1,7 @@
 # Verification Spec — Pilot Access Gateway
 
 > 版本：DRAFT v0.2（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5）
-> 對齊規範：docs/tmp/now/spec.md（Pilot Access Gateway — Stateless FreeIPA-backed Portal），§50-§58
+> 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md（Pilot Access Gateway — Stateless FreeIPA-backed Portal），§50-§58
 > 維護者：sre
 
 ## 1. 目標系統

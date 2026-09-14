@@ -1,6 +1,6 @@
 # Phase 8 — Multi-Gateway E2E: vm-target Evidence (2026-09-14)
 
-Scope: `docs/tmp/now/spec.md` §60 Phase 8 — the only phase allowed to turn
+Scope: `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §60 Phase 8 — the only phase allowed to turn
 on sshd ForceCommand (step 19 of §55), gated behind the §55.1 lockdown
 regression test having actually run on vm-target with evidence, plus
 human approval. Also covers the remaining live-fire verification items

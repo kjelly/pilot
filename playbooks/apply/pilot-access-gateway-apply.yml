@@ -1,5 +1,5 @@
 # Apply playbook for docs/verification/pilot-access-gateway.md
-# (docs/tmp/now/spec.md §50-§58, Phase 7).
+# (docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md §50-§58, Phase 7).
 #
 # Installs pilot-access-gateway on ONE gateway host that is already a
 # FreeIPA client (playbooks/apply/freeipa-client-apply.yml) enrolled in

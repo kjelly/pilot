@@ -1,5 +1,5 @@
 # Apply playbook for `pilot gateway-scope plan/reconcile` (spec.md
-# §9.6/§57, Phase 6 of docs/tmp/now/spec.md).
+# §9.6/§57, Phase 6 of docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md).
 #
 # Publishes ONE pilot-access-gateway scope's desired target host set into
 # FreeIPA hostgroup `pilot-target-<gateway_scope>` — add missing hosts,

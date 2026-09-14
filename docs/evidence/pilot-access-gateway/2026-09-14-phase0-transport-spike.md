@@ -1,6 +1,6 @@
 # pilot-access-gateway Phase 0 — FreeIPA transport spike evidence — 2026-09-14
 
-- Spec: `docs/tmp/now/spec.md` §0 G1 / §11.1 (exit criteria) / §60 Phase 0
+- Spec: `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §0 G1 / §11.1 (exit criteria) / §60 Phase 0
 - Operator: Claude Code (kjelly, jellykao@linkervision.com)
 - Target: `pilot vm-target` `ag-spike-ipa`, AlmaLinux 9, `playbooks/apply/freeipa-server-apply.yml`
   applied via `-e target_group=all -e ipa_server_ip=192.168.122.2 -e @~/.vault/main.yaml`

@@ -1,15 +1,15 @@
 ---
 # Shared task: fault-tolerant Debian/Ubuntu package install entry point
-# (docs/tmp/now/spec.md §5, §7, §14) — the sanctioned way for an ordinary
+# (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §5, §7, §14) — the sanctioned way for an ordinary
 # apply playbook to install an apt package. Separates "is the target
 # package installable" from "are ALL configured APT repositories
 # healthy", so an unrelated third-party repository (e.g. a stale
 # HashiCorp GPG key on an otherwise-healthy host) can never fail a
 # capability that never needed that repository (the incident this
-# framework fixes: x64-deliver-bbq / freeipa-client, docs/tmp/now/spec.md
+# framework fixes: x64-deliver-bbq / freeipa-client, docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md
 # §0).
 #
-# Interface (docs/tmp/now/spec.md §14):
+# Interface (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §14):
 #   pilot_apt_packages            : list[str], required
 #   pilot_apt_component            : str, required (evidence/log label only)
 #   pilot_apt_policy               : tolerant|strict|offline, default tolerant
@@ -49,7 +49,7 @@
          | list | length) == 0
     fail_msg: >-
       apt-package-install: invalid inputs for component
-      {{ pilot_apt_component | default('(unset)') }} (docs/tmp/now/spec.md §14) —
+      {{ pilot_apt_component | default('(unset)') }} (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §14) —
       pilot_apt_packages must be non-empty, pilot_apt_component required,
       pilot_apt_policy must be tolerant|strict|offline, and pilot-owned
       required sources must declare source_file under

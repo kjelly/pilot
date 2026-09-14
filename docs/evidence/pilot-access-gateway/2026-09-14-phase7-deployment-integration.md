@@ -1,6 +1,6 @@
 # Phase 7 — Deployment Integration: vm-target Evidence (2026-09-14)
 
-Scope: `docs/tmp/now/spec.md` §55 steps 1-18 (installing `pilot-access-gateway`
+Scope: `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §55 steps 1-18 (installing `pilot-access-gateway`
 on a single gateway host), plus the repo's own governance registration
 (contract/spec/tag-coverage/deploy-catalog/role-catalog/AGENTS.md). Step 19-21
 (sshd ForceCommand) stay off (`pilot_access_gateway_install_forcecommand:

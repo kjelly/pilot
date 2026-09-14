@@ -135,7 +135,7 @@
       # update_cache is deliberately false here: this module's own internal
       # `apt-get update` would refresh (and fail loudly on) every configured
       # source, including unrelated third-party ones that have nothing to do
-      # with universe (docs/tmp/now/spec.md — the same incident class fixed
+      # with universe (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md — the same incident class fixed
       # for freeipa-client). Step 1 below now goes through
       # tasks/apt-package-install.yml, whose own cache-first state machine
       # already refreshes (tolerantly of unrelated sources, fatal if the

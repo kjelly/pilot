@@ -1,6 +1,6 @@
 # pilot-access-gateway Phase 1 — internal/freeipaaccess evidence — 2026-09-14
 
-- Spec: `docs/tmp/now/spec.md` §11-§21, §36, §37, §60 Phase 1
+- Spec: `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §11-§21, §36, §37, §60 Phase 1
 - Operator: Claude Code (kjelly, jellykao@linkervision.com)
 - Target: same `ag-spike-ipa` vm-target as Phase 0 (reused, not rebuilt)
 - Package: `internal/freeipaaccess` (`provider.go`, `jsonrpc.go`, `kerberos.go`,

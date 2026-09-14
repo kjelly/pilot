@@ -1,7 +1,7 @@
 package cmd
 
 // TestAptUpdateCacheAllowlist, TestAptNoInsecureFlags, and
-// TestAptClassifyFailureScript machine-enforce docs/tmp/now/spec.md §21.2
+// TestAptClassifyFailureScript machine-enforce docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §21.2
 // / §21.3: ordinary apply playbooks must install Debian/Ubuntu packages
 // through playbooks/apply/tasks/apt-package-install.yml instead of a bare
 // `ansible.builtin.apt` + `update_cache: true`, so an unrelated broken
@@ -69,7 +69,7 @@ func TestAptPackageInstallCallSitesUseApplyTags(t *testing.T) {
 // must still exist on disk AND still contain a bare `update_cache: true`
 // — a stale entry (the file was migrated but the allowance never
 // dropped) fails just as loudly as an unlisted new one. Migrating a file
-// off this list is the expected way it shrinks (docs/tmp/now/spec.md §16
+// off this list is the expected way it shrinks (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §16
 // Phase 2-4); adding to it requires a reason, same as
 // specTagMap/tagCheckExemptSpecs above.
 var aptUpdateCacheAllowlist = map[string]string{
@@ -117,7 +117,7 @@ func TestAptUpdateCacheAllowlist(t *testing.T) {
 		if hit {
 			found[rel] = true
 			if _, ok := aptUpdateCacheAllowlist[rel]; !ok {
-				t.Errorf("playbook %s has a bare `update_cache: true` install — route it through playbooks/apply/tasks/apt-package-install.yml instead (docs/tmp/now/spec.md §21.3), or add it to aptUpdateCacheAllowlist here with a reason", rel)
+				t.Errorf("playbook %s has a bare `update_cache: true` install — route it through playbooks/apply/tasks/apt-package-install.yml instead (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §21.3), or add it to aptUpdateCacheAllowlist here with a reason", rel)
 			}
 		}
 	}
@@ -171,7 +171,7 @@ func TestAptNoInsecureFlags(t *testing.T) {
 			}
 			for _, pat := range insecureAptPatterns {
 				if strings.Contains(line, pat) {
-					t.Errorf("%s:%d uses forbidden insecure APT flag %q (docs/tmp/now/spec.md §25 MUST NOT) — never disable APT signature verification", rel, i+1, pat)
+					t.Errorf("%s:%d uses forbidden insecure APT flag %q (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §25 MUST NOT) — never disable APT signature verification", rel, i+1, pat)
 				}
 			}
 		}
@@ -321,7 +321,7 @@ func TestAptClassifyFailureScriptRealCaptures(t *testing.T) {
 }
 
 // TestAptClassifyFailureScriptGPGNoPubkey uses the exact incident text
-// from docs/tmp/now/spec.md (host x64-deliver-bbq, HashiCorp repository,
+// from docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md (host x64-deliver-bbq, HashiCorp repository,
 // key FC9CA96ACA026560) — real reported evidence, not a guess — wrapped
 // in the well-known, version-stable apt-get "GPG error" line shape.
 func TestAptClassifyFailureScriptGPGNoPubkey(t *testing.T) {
@@ -403,7 +403,7 @@ func TestAptClassifyFailureScriptRequiredSourceMatching(t *testing.T) {
 
 // TestAptClassifyFailureScriptUnknown ensures a genuinely unrecognized
 // hard apt error is surfaced as "unknown" rather than silently dropped
-// (docs/tmp/now/spec.md §10: "Classification 不得把未知 package install
+// (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §10: "Classification 不得把未知 package install
 // error 靜默降級").
 func TestAptClassifyFailureScriptUnknown(t *testing.T) {
 	script := loadClassifyScript(t)

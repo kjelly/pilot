@@ -1,6 +1,6 @@
 # pilot-access-gateway Phase 4 — Portal read UI evidence — 2026-09-14
 
-- Spec: `docs/tmp/now/spec.md` §27, §28, §36, §60 Phase 4
+- Spec: `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §27, §28, §36, §60 Phase 4
 - Operator: Claude Code (kjelly, jellykao@linkervision.com)
 - Target: same `ag-spike-ipa` vm-target as Phase 0-3 (reused, real `pilot-access-gateway`
   from Phase 3 still running against the real FreeIPA data)

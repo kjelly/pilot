@@ -1,7 +1,7 @@
 # Verification Spec — Pilot Gateway Scope Publication
 
 > 版本：DRAFT v0.1（vm-target 已實測；尚未正式站台驗收）
-> 對齊規範：docs/tmp/now/spec.md §9.6/§57（Phase 6 — Gateway scope publication）
+> 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md §9.6/§57（Phase 6 — Gateway scope publication）
 > 維護者：sre
 
 ## 1. 目標系統

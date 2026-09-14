@@ -1,5 +1,5 @@
 // Command pilot-access-gateway is the stateless, read-only FreeIPA-backed
-// access gateway backend (docs/tmp/now/spec.md). It never reads roster,
+// access gateway backend (docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md). It never reads roster,
 // inventory, or any local persistent application state — every access
 // decision comes from a live FreeIPA query, scoped to this gateway's own
 // gateway.target_hostgroup.

@@ -3,7 +3,7 @@
 # Only reached from apt-package-install.yml when the cache-first check
 # found no installable candidate for a requested package — this file is
 # never invoked directly by a capability playbook
-# (docs/tmp/now/spec.md §9).
+# (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §9).
 #
 # Inputs (from the including apt-package-install.yml scope):
 #   _pilot_apt_policy           : tolerant|strict (offline never reaches here)

@@ -7,7 +7,7 @@
 #  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
 #
 #  對應 spec:docs/verification/pilot-access-gateway.md
-#  詳細設計:docs/tmp/now/spec.md(Pilot Access Gateway — Stateless
+#  詳細設計:docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md(Pilot Access Gateway — Stateless
 #  FreeIPA-backed Portal），§50-§58
 #
 #  day-2/opt-in 元件(contracts/pilot-access-gateway.yaml 的

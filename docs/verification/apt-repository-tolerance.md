@@ -3,7 +3,7 @@ schemaVersion: 2
 compatibility: {minPilotVersion: "0.9"}
 intent:
   summary: APT package-install fault tolerance — an unrelated/broken third-party APT repository must never block a capability that never needed it, while required-source and Pilot-owned-source failures stay fatal
-  source: docs/tmp/now/spec.md (Pilot APT Repository Fault-Tolerance 修正計畫)
+  source: docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md (Pilot APT Repository Fault-Tolerance 修正計畫)
   maintainer: sre
 targets:
   roles: [freeipa-client]
@@ -28,7 +28,7 @@ framework (`playbooks/apply/tasks/apt-package-install.yml`,
 `apt-classify-failure.yml`) that every ordinary Debian/Ubuntu package
 install in `playbooks/apply/*.yml` is expected to route through instead
 of a bare `ansible.builtin.apt: update_cache: true`. Row IDs and
-semantics here mirror `docs/tmp/now/spec.md` §21 (T1-T10) and §22
+semantics here mirror `docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md` §21 (T1-T10) and §22
 (Scenario A/B/C).
 
 **Incident this framework fixes:** host `x64-deliver-bbq`, task
@@ -40,7 +40,7 @@ own archive already provides), the *entire* capability deploy failed
 even though nothing about `freeipa-client` depended on the HashiCorp
 repository.
 
-## Policy semantics (docs/tmp/now/spec.md §5)
+## Policy semantics (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §5)
 
 - `tolerant` (ordinary capability installs): cache-first — only refreshes
   when a requested package is missing AND has no candidate in the
@@ -110,7 +110,7 @@ unknown `NO_PUBKEY`.
 
 ## Notes
 
-- T1/T3/T7 correspond to `docs/tmp/now/spec.md` §22 Scenario A/B/C and
+- T1/T3/T7 correspond to `docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md` §22 Scenario A/B/C and
   were live-verified 2026-09-14 on a disposable `pilot vm-target`
   (`apt-tolerance-test`, ubuntu-24.04) per `AGENTS.md` §1.1 — not
   reasoned about, actually run, with the VM's own captured output

@@ -1,6 +1,6 @@
 # pilot-access-gateway Phase 3 — peer identity + Gateway API evidence — 2026-09-14
 
-- Spec: `docs/tmp/now/spec.md` §10.1, §22, §26, §29, §30, §36, §60 Phase 3
+- Spec: `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §10.1, §22, §26, §29, §30, §36, §60 Phase 3
 - Operator: Claude Code (kjelly, jellykao@linkervision.com)
 - Target: same `ag-spike-ipa` vm-target as Phase 0/1/2 (reused)
 - Packages: `internal/peercred`, `internal/identity`, `internal/systemdactivation`,

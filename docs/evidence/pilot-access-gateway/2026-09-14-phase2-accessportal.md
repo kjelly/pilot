@@ -1,6 +1,6 @@
 # pilot-access-gateway Phase 2 — internal/accessportal evidence — 2026-09-14
 
-- Spec: `docs/tmp/now/spec.md` §13, §14, §15, §17, §21, §36, §38, §60 Phase 2
+- Spec: `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §13, §14, §15, §17, §21, §36, §38, §60 Phase 2
 - Operator: Claude Code (kjelly, jellykao@linkervision.com)
 - Target: same `ag-spike-ipa` vm-target as Phase 0/1 (reused)
 - Package: `internal/accessportal` (`model.go`, `resolver.go`, `hbac.go`, `sudo.go`)

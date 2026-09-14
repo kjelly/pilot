@@ -1,6 +1,6 @@
 # pilot-access-gateway Phase 5 — controlled SSH evidence — 2026-09-14
 
-- Spec: `docs/tmp/now/spec.md` §16, §25, §31, §32, §36, §40 (S2, S5), §60 Phase 5
+- Spec: `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §16, §25, §31, §32, §36, §40 (S2, S5), §60 Phase 5
 - Operator: Claude Code (kjelly, jellykao@linkervision.com)
 - Files: `cmd/pilot/cmd/portal_ssh.go` (+ test), `portal_tui.go` (Connect wiring)
 

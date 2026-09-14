@@ -1,6 +1,6 @@
 ---
 # Shared task: `apt-get update` restricted to ONLY the declared required
-# sources (docs/tmp/now/spec.md §12), so an unrelated broken external
+# sources (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §12), so an unrelated broken external
 # repository — never edited, never re-pointed, never deleted — cannot
 # block metadata refresh for the sources this capability actually needs.
 #

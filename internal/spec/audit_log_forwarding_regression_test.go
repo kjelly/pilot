@@ -340,7 +340,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	if !strings.Contains(applyRaw, "check_mode: false") {
 		t.Fatalf("universe bootstrap must run during site --check preview so apt metadata is available to the install task")
 	}
-	// v1.x (docs/tmp/now/spec.md Phase 4): the install step now routes
+	// v1.x (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md Phase 4): the install step now routes
 	// through the shared tasks/apt-package-install.yml framework instead of
 	// a standalone "Step 0b" ansible.builtin.apt refresh — its own
 	// cache-first state machine refreshes (tolerant of unrelated external
