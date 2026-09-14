@@ -1,6 +1,7 @@
 package detection
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,6 +30,13 @@ func TestMetricsSnapshot_RenderAndWriteTextfile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pilot_detection_engine.prom")
 	if err := snap.WriteTextfile(path); err != nil {
 		t.Fatalf("WriteTextfile: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat metrics file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("metrics file mode = %o, want 644", got)
 	}
 }
 

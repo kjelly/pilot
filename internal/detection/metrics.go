@@ -152,6 +152,15 @@ func (m MetricsSnapshot) WriteTextfile(path string) error {
 		return fmt.Errorf("create metrics temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
+	// The textfile collector runs as node_exporter, while this file is
+	// written by pilot-detect. os.CreateTemp deliberately starts at 0600;
+	// make the non-secret Prometheus exposition readable before the atomic
+	// rename, otherwise node_exporter reports permission denied forever.
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod metrics temp file: %w", err)
+	}
 	if _, err := tmp.WriteString(m.Render()); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
