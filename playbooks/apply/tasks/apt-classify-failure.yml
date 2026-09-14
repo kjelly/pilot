@@ -92,7 +92,7 @@
           ("release_missing", re.compile(r"does not have a Release file")),
           ("wrong_distribution", re.compile(r"Invalid record|unable to find expected entry|is not valid yet", re.I)),
           ("tls_failure", re.compile(r"certificate verif|SSL certificate|TLS", re.I)),
-          ("dns_failure", re.compile(r"Temporary failure resolving", re.I)),
+          ("dns_failure", re.compile(r"Temporary failure resolving|Could not resolve", re.I)),
           ("connect_timeout", re.compile(r"Connection timed out|Could not connect|Failed to connect", re.I)),
           ("http_404", re.compile(r"404\s+(File )?[Nn]ot [Ff]ound")),
           ("apt_lock", re.compile(r"Could not (get|open) lock|Unable to lock", re.I)),

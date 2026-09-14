@@ -124,7 +124,10 @@
 
     - name: "DNS — install unbound"
       tags: [dns, dns-C1]
-      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [dns, dns-C1]
       vars:
         pilot_apt_packages: ["{{ dns_provider }}"]
         pilot_apt_policy: tolerant
@@ -233,7 +236,10 @@
     ### NTP role
     - name: "NTP — install chrony"
       tags: [ntp, ntp-C4]
-      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [ntp, ntp-C4]
       vars:
         pilot_apt_packages: ["{{ ntp_provider }}"]
         pilot_apt_policy: tolerant

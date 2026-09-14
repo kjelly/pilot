@@ -271,7 +271,16 @@
       tags: [freeipa-client, C1]
 
     - name: "FreeIPA client — install ipa-client package (apt freeipa-client on Ubuntu)"
-      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        # `apply` is required: tags on a dynamic include_tasks gate only the
+        # include statement itself, they are NOT inherited by the tasks it
+        # pulls in (unlike a static import_tasks) — without this, running
+        # `--tags C1` alone (a common per-row dev workflow, AGENTS.md §4)
+        # silently skips the entire framework and installs nothing, with no
+        # error (found via a live vm-target run testing this exact spec).
+        apply:
+          tags: [freeipa-client, C1]
       vars:
         pilot_apt_packages: "{{ ipa_client_packages_debian }}"
         pilot_apt_policy: tolerant
@@ -304,7 +313,10 @@
       tags: [freeipa-client, C9]
 
     - name: "FreeIPA client — install SSSD cache tools (Debian)"
-      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [freeipa-client, C8]
       vars:
         pilot_apt_packages: [sssd-tools]
         pilot_apt_policy: tolerant

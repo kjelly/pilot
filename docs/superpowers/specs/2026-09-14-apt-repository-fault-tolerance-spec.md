@@ -20,6 +20,7 @@ Phase 1-5 已依 §16 Migration Plan 全數實作完成，分 5 個 commit：
    commit 一併加入，並在 Phase 2-4 過程中隨每次遷移縮小 allowlist（現僅剩
    `playbooks/apply/os-patch-sla-apply.yml` 一筆合法例外）；兩者都在既有
    `.github/workflows/ci.yml` 的 `go test -race -count=1 ./...` 步驟下自動跑，未額外新增 CI job。
+6. **`fix(apt): fix 4 bugs found via live vm-target testing`** — 2026-09-14 補測，見下方。
 
 **驗證完成度**：
 - `ansible-playbook --syntax-check` / `ansible-lint`（advisory）/ `go build ./...` /
@@ -27,11 +28,37 @@ Phase 1-5 已依 §16 Migration Plan 全數實作完成，分 5 個 commit：
 - Classifier（`apt-classify-failure.yml`）的單元測試改用本機真實 Ubuntu 24.04
   `apt-get` 擷取的輸出當 fixture（非手寫猜測），過程中就抓到 2 個真 bug 並已修正
   （見 `docs/verification/apt-repository-tolerance.md`、`cmd/pilot/cmd/apt_policy_test.go`）。
-- **尚未完成**：§22 disposable VM 上的 T1/T3/T7 live scenario（Scenario A/B/C）。這是本次
-  實作唯一未達成的驗收項——未在磁碟 VM 上重現原始 incident 並證明修復。
-  `docs/verification/apt-repository-tolerance.md` 的 T1/T3/T7 rows 誠實標記
-  `NOT YET LIVE-VERIFIED`，不得被誤讀為已 live 驗證。之後若要補齊，走
-  `vm-target-spec-testing` skill 對一台全新 Ubuntu vm-target 執行 §22 三個 scenario。
+- **§22 disposable VM live scenario T1/T3/T7 — 已於 2026-09-14 在 `pilot vm-target`
+  （`apt-tolerance-test`, ubuntu-24.04）上實跑完成**（`vm-target-spec-testing` skill）：
+  - **T1**（無關 HashiCorp repo 壞掉不擋 freeipa-client/sssd-tools 安裝）：真實重現
+    incident 錯誤（`NO_PUBKEY FC9CA96ACA026560`），`apt_mode=global_refresh`，
+    `required_sources_healthy=True`，`unrelated_sources_degraded=3`，`dpkg -l` 確認兩個
+    package 真的裝上。
+  - **T3**（required source 本身壞掉 → fatal）：破壞 `/etc/apt/sources.list.d/ubuntu.sources`
+    指向不存在的 host，playbook 正確以 `FATAL(required_source_unhealthy)` 中止
+    （`reason=required_source_unhealthy required_sources=['ubuntu-os']`），`dpkg -l`
+    確認兩個 package 都沒裝上,`/run/pilot/apt/` 清乾淨(block/always cleanup 有跑)。
+  - **T7**（pilot-owned repo 簽章壞掉 → fatal,不降級成 unauthenticated）：用
+    `wazuh-fim-apply.yml` 實測(它是唯一真的宣告 `class: pilot` required source 的
+    playbook)——先正常裝一次(`apt_mode=global_refresh`,容忍同一個壞掉的 HashiCorp
+    repo),再故意弄壞 `/usr/share/keyrings/wazuh.gpg`,重跑正確 fatal
+    (`required_source_id=pilot-wazuh`),`dpkg -l` 確認沒有 fallback 成功安裝。
+  - **實測過程中額外抓到並修好 4 個真 bug**(單元測試沒抓到):
+    1. dynamic `include_tasks` 的 `tags:` 不會自動傳給被 include 進來的 task——
+       `--tags C1`(常見的單一 row 開發流程,AGENTS.md §4)靜默裝不上任何東西、
+       完全不報錯。改成 `include_tasks: {file:..., apply: {tags:[...]}}`,並新增
+       `TestAptPackageInstallCallSitesUseApplyTags` 鎖死不能再用裸 `include_tasks:` 形式。
+    2. `apt-cache-refresh.yml` 的 `required_sources_healthy` 誤把 `apt-get update`
+       的整體 exit code(任何一個來源壞掉就非0)跟「required source 是否健康」掛勾,
+       導致無關 repo 壞掉時這個欄位會誤報 false。
+    3. `ansible.builtin.tempfile` 的 `path: /run/pilot/apt` 在該目錄從未存在過的
+       host 上直接炸掉(module 不會自己建父目錄)。
+    4. `apt-cache policy pkg1 pkg2` 對完全沒聽過的 package 會整段從輸出省略(不是
+       印 `Candidate: (none)`),導致跟已知 package 合併查詢時被誤判成「已有 candidate」。
+       改成每個 missing package 各自呼叫一次 `apt-cache policy`。
+  這 4 個加上先前 classifier 的 2 個 wording bug,總共 6 個 bug 都是「只靠單元測試/推理
+  絕對抓不到,只有真的跑一次 vm-target 才會暴露」的類型,完整證明了 AGENTS.md §1.1
+  actual-run 規則的價值。
 - 目標專案：`https://github.com/kjelly/pilot`
 - 基準版本：`main@8283056081ba19b9e7f9e4059aa269f5cad4a72a`
 - 主要事故：非 Pilot 所需的第三方 APT repository 發生 GPG / TLS / timeout / metadata 錯誤，導致 `ansible.builtin.apt(update_cache=true)` 讓整個 Pilot deploy fatal。
@@ -1333,7 +1360,7 @@ CI policy guard final enforcement
 - [x] `go build ./...` PASS。
 - [x] `go vet ./...` PASS。
 - [x] `go test ./...` PASS。(含 `-race -count=1`,3380+ 全過)
-- [ ] disposable VM 上完成 T1/T3/T7 三個關鍵 live scenarios。**唯一未完成項**——`docs/verification/apt-repository-tolerance.md` 誠實標記 `NOT YET LIVE-VERIFIED`,不得誤讀成已驗證。
+- [x] disposable VM 上完成 T1/T3/T7 三個關鍵 live scenarios。2026-09-14 於 `pilot vm-target apt-tolerance-test`(ubuntu-24.04)全數實跑通過,過程中另外抓到並修好 4 個真 bug(見上方 Implementation Status);`docs/verification/apt-repository-tolerance.md` 已更新為真實擷取的 evidence,不再是 `NOT YET LIVE-VERIFIED`。
 - [x] CI 可阻止普通 playbook 未來重新引入裸 `update_cache: true`。(`TestAptUpdateCacheAllowlist`,隨既有 `go test` CI job 自動跑)
 
 ---

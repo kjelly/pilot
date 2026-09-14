@@ -166,7 +166,10 @@
     # C5/C6/C7 guards.
     - name: "Step 4: Install wazuh-agent + auditd (Debian apt; spec C1, C2)"
       tags: [C1, C2]
-      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [C1, C2]
       vars:
         pilot_apt_packages: [wazuh-agent, auditd]
         pilot_apt_policy: tolerant

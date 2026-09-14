@@ -52,11 +52,22 @@
     pilot_apt_classify_required_sources: "{{ _pilot_apt_required_sources | default([]) }}"
 
 - name: "APT cache refresh — required-source health for this refresh"
+  # Deliberately NOT `rc == 0 and no required-flagged errors`: apt-get
+  # update's overall exit code is non-zero whenever ANY configured source
+  # fails, including an unrelated external one — ANDing on it would make
+  # required_sources_healthy false on exactly the case this framework
+  # exists to tolerate (found live: a vm-target run with only an unrelated
+  # broken HashiCorp repo reported required_sources_healthy=false despite
+  # the Ubuntu archive itself refreshing cleanly). A non-zero rc still
+  # counts against health when the classifier found ZERO errors at all —
+  # an unclassified, silent failure must never read as healthy (spec.md
+  # §10: unknown errors must not be silently downgraded).
   ansible.builtin.set_fact:
     _pilot_apt_global_required_healthy: >-
-      {{ (_pilot_apt_global_refresh.rc | default(1)) == 0 and
-         (pilot_apt_classification_result.errors
-          | selectattr('required', 'equalto', true) | list | length) == 0 }}
+      {{ (pilot_apt_classification_result.errors
+          | selectattr('required', 'equalto', true) | list | length) == 0
+         and not ((_pilot_apt_global_refresh.rc | default(1)) != 0 and
+                  (pilot_apt_classification_result.errors | length) == 0) }}
 
 - name: "APT cache refresh — set pilot_apt_refresh_result"
   ansible.builtin.set_fact:

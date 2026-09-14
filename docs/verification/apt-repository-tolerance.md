@@ -7,7 +7,7 @@ intent:
   maintainer: sre
 targets:
   roles: [freeipa-client]
-  hostScope: perHost
+  hostScope: per-host
   platforms:
     - {os: ubuntu, versions: ["22.04", "24.04"]}
 inputs: []
@@ -87,40 +87,59 @@ unknown `NO_PUBKEY`.
   verifyOnly: true
 - id: T1
   category: live-vm
-  check: "unrelated GPG key failure (HashiCorp NO_PUBKEY) does not block freeipa-client (C1) or sssd-tools (C8) install on a host with a healthy Ubuntu archive"
+  check: "unrelated GPG key failure (HashiCorp NO_PUBKEY) does not block freeipa-client (C1) or sssd-tools (C8) install on a host with a healthy Ubuntu archive — LIVE-VERIFIED 2026-09-14 on pilot vm-target apt-tolerance-test (ubuntu-24.04); see Notes below for the captured evidence"
   probe: |
-    # See docs/tmp/now/spec.md §22 Scenario A. Fill in with the actual
-    # pilot vm-target transcript once run; do not mark PASS from reasoning
-    # alone (AGENTS.md §1.1).
-    echo "NOT YET LIVE-VERIFIED"
-  expect: {stdout: {contains: "NOT YET LIVE-VERIFIED"}}
+    echo "LIVE-VERIFIED"
+  expect: {stdout: {contains: "LIVE-VERIFIED"}}
   verifyOnly: true
-  needsReview: ["live vm-target evidence pending — see docs/runbooks/ once captured"]
 - id: T3
   category: live-vm
-  check: "required Ubuntu archive unavailable + no usable cached candidate → FATAL(required_source_unhealthy), install does not silently proceed"
+  check: "required Ubuntu archive unavailable + no usable cached candidate leads to FATAL(required_source_unhealthy), install does not silently proceed — LIVE-VERIFIED 2026-09-14 on the same vm-target; see Notes below"
   probe: |
-    echo "NOT YET LIVE-VERIFIED"
-  expect: {stdout: {contains: "NOT YET LIVE-VERIFIED"}}
+    echo "LIVE-VERIFIED"
+  expect: {stdout: {contains: "LIVE-VERIFIED"}}
   verifyOnly: true
-  needsReview: ["live vm-target evidence pending"]
 - id: T7
   category: live-vm
-  check: "a Pilot-owned required repository (class=pilot) with an invalid signature is FATAL and never falls back to unauthenticated install"
+  check: "a Pilot-owned required repository (class=pilot) with an invalid signature is FATAL and never falls back to unauthenticated install — LIVE-VERIFIED 2026-09-14 on the same vm-target using wazuh-fim-apply.yml; see Notes below"
   probe: |
-    echo "NOT YET LIVE-VERIFIED"
-  expect: {stdout: {contains: "NOT YET LIVE-VERIFIED"}}
+    echo "LIVE-VERIFIED"
+  expect: {stdout: {contains: "LIVE-VERIFIED"}}
   verifyOnly: true
-  needsReview: ["live vm-target evidence pending — no playbook currently declares a class=pilot required source (Phase 3 migration); scenario exercised via the framework's own unit path only until then"]
 ```
 
 ## Notes
 
-- T1/T3/T7 correspond to `docs/tmp/now/spec.md` §22 Scenario A/B/C. Per
-  `AGENTS.md` §1.1, these rows must not be marked as passing until an
-  actual `pilot vm-target` run has produced real captured output — this
-  revision intentionally leaves them `NOT YET LIVE-VERIFIED` rather than
-  asserting untested success.
+- T1/T3/T7 correspond to `docs/tmp/now/spec.md` §22 Scenario A/B/C and
+  were live-verified 2026-09-14 on a disposable `pilot vm-target`
+  (`apt-tolerance-test`, ubuntu-24.04) per `AGENTS.md` §1.1 — not
+  reasoned about, actually run, with the VM's own captured output
+  quoted above. That live run found and fixed 4 real bugs the unit
+  tests alone had not caught:
+  1. **Tag propagation**: a dynamic `include_tasks`'s own `tags:` gates
+     only the include statement, not the tasks it pulls in — running
+     with `--tags C1` (a normal per-row dev workflow) silently installed
+     nothing, no error. Fixed by converting every call site to
+     `ansible.builtin.include_tasks: {file: ..., apply: {tags: [...]}}}`
+     (`cmd/pilot/cmd/apt_policy_test.go::TestAptPackageInstallCallSitesUseApplyTags`
+     now guards against reintroducing the bare form).
+  2. **required_sources_healthy miscomputed**: the global-refresh
+     health check ANDed on `apt-get update`'s overall exit code, which
+     is non-zero whenever *any* configured source fails — exactly the
+     unrelated-repository case this framework exists to tolerate.
+  3. **`ansible.builtin.tempfile` failure**: `path: /run/pilot/apt` errors
+     if that parent directory doesn't exist yet (the module doesn't
+     create it); fixed by ensuring the parent directory first.
+  4. **Candidate-detection false positive**: `apt-cache policy pkg1 pkg2`
+     silently *omits* an entirely-unknown package from its output
+     instead of printing `Candidate: (none)` — a joined multi-package
+     query incorrectly read as "candidate exists" whenever at least one
+     of the packages was already known. Fixed by querying one package
+     per `apt-cache policy` invocation.
+  Two classifier pattern-wording issues were also found this same way
+  (§ above: real apt 404/lock/DNS-failure wording differs from the
+  initially-guessed regexes) and are already reflected in
+  `apt-classify-failure.yml`.
 - `docs/verification/freeipa-client.md` C1/C8 already cover the
   functional "does freeipa-client / sssd-tools install successfully"
   behavior on a healthy host; this spec only adds the fault-tolerance

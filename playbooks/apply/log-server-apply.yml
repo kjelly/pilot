@@ -101,7 +101,10 @@
     # to work around here at all.
     - name: "Step 1: Install rsyslog (Debian family)"
       tags: [C1]
-      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [C1]
       vars:
         pilot_apt_packages: [rsyslog]
         pilot_apt_policy: tolerant

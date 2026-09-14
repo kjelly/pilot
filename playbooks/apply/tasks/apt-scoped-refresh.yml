@@ -23,6 +23,23 @@
 # to populate the scoped view. Never uses trusted=yes /
 # allow_unauthenticated / Acquire::AllowInsecureRepositories.
 
+- name: "APT scoped refresh — ensure /run/pilot/apt parent directory exists"
+  # ansible.builtin.tempfile's `path:` is where to create the tempdir IN,
+  # not a directory it creates itself — on a host where no apt scoped
+  # refresh has ever run before, /run/pilot/apt doesn't exist yet and
+  # tempfile fails outright ([Errno 2] No such file or directory) instead
+  # of allocating anything (found live: a vm-target run with a genuinely
+  # broken required source hit this before ever reaching the intended
+  # FATAL(required_source_unhealthy) message).
+  ansible.builtin.file:
+    path: /run/pilot/apt
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  changed_when: false
+  check_mode: false
+
 - name: "APT scoped refresh — allocate execution-scoped temp directory"
   ansible.builtin.tempfile:
     state: directory

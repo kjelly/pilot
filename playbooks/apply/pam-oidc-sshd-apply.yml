@@ -110,7 +110,10 @@
         # ── Build dependencies ───────────────────────────────────────────────
         - name: "Step 2: Install build dependencies (golang, libpam0g-dev, build-essential, git)"
           tags: [C1]
-          ansible.builtin.include_tasks: tasks/apt-package-install.yml
+          ansible.builtin.include_tasks:
+            file: tasks/apt-package-install.yml
+            apply:
+              tags: [C1]
           vars:
             pilot_apt_packages: [golang, libpam0g-dev, build-essential, git]
             pilot_apt_policy: tolerant

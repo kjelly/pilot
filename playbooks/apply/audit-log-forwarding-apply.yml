@@ -147,7 +147,10 @@
 
     - name: "Step 1: Install auditd + audispd-plugins + rsyslog (Debian family)"
       tags: [C1, C2]
-      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [C1, C2]
       vars:
         pilot_apt_packages: [auditd, audispd-plugins, rsyslog]
         pilot_apt_policy: tolerant

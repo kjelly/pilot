@@ -67,7 +67,10 @@
     # Spec: docs/verification/docker.md C1
     - name: "Docker — install docker.io (Debian family)"
       tags: [docker, docker-C1]
-      ansible.builtin.include_tasks: tasks/apt-package-install.yml
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [docker, docker-C1]
       vars:
         pilot_apt_packages: [docker.io, docker-compose-v2]
         pilot_apt_policy: tolerant

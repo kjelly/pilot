@@ -21,6 +21,50 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// bareAptPackageInstallInclude matches a plain-string
+// `ansible.builtin.include_tasks: tasks/apt-package-install.yml` (or the
+// nested-block equivalent) with no `file:`/`apply:` form. Found live
+// (2026-09-14, vm-target apt-tolerance-test): a dynamic include_tasks's
+// own `tags:` gates only the include statement itself — it is NOT
+// inherited by the tasks it pulls in (unlike a static import_tasks),
+// which import_tasks itself can't be used for here since several task
+// `name:` fields template a variable set earlier in the same file
+// (`_pilot_apt_policy`), which import_tasks tries to resolve at parse
+// time, before any task has run. Running `pilot vm-target run ... --tags
+// C1` (a normal per-row dev workflow, AGENTS.md §4) against
+// freeipa-client-apply.yml silently completed with ok=0 failures and
+// installed nothing — no error, just a no-op — until every call site
+// was converted to the `file: ... / apply: {tags: [...]}` form.
+var bareAptPackageInstallInclude = regexp.MustCompile(`include_tasks:\s*tasks/apt-package-install\.yml\s*$`)
+
+func TestAptPackageInstallCallSitesUseApplyTags(t *testing.T) {
+	root := "../../.."
+	paths, err := filepath.Glob(filepath.Join(root, "playbooks", "apply", "*.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel = filepath.ToSlash(rel)
+		for i, line := range strings.Split(string(data), "\n") {
+			if bareAptPackageInstallInclude.MatchString(line) {
+				t.Errorf("%s:%d: bare `include_tasks: tasks/apt-package-install.yml` with no apply.tags — "+
+					"a caller-scoped --tags filter (e.g. --tags C1) will silently skip every task inside it "+
+					"and install nothing, with no error. Use the `file: .../ apply: {tags: [...]}` form "+
+					"(see any existing call site, e.g. playbooks/apply/docker-apply.yml) with apply.tags "+
+					"matching this task's own tags.", rel, i+1)
+			}
+		}
+	}
+}
+
 // aptUpdateCacheAllowlist is a ratchet, not an escape hatch: every entry
 // must still exist on disk AND still contain a bare `update_cache: true`
 // — a stale entry (the file was migrated but the allowance never
