@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,28 @@ func TestConnectToHostRejectsAlternateUserAndIPTargets(t *testing.T) {
 			t.Fatalf("ssh must not be launched for target %q", target)
 		}
 	}
+}
+
+// TestConnectToHostSSHFailureReturnsToPortal proves a failed ssh launch
+// (host unreachable, name resolution failure, wrong host key, ...) is
+// reported to the user and returns control to the portal loop — it must
+// never propagate as an error, which used to unwind all the way out of
+// runPortal and kill the whole interactive session (found live: picking
+// a placeholder demo host with no real machine behind it crashed the
+// entire `pilot portal` process with a raw ssh exit-status error and
+// cobra's usage dump instead of just failing that one Connect attempt).
+func TestConnectToHostSSHFailureReturnsToPortal(t *testing.T) {
+	client := startFakeGateway(t, currentOSUsername(t))
+	withSSHLauncher(t, func(cmd *exec.Cmd) error {
+		return errors.New("ssh: Could not resolve hostname gpu-b.ipa.pilot.internal: Name or service not known")
+	})
+	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
+		{Prompt: "SSH session ended with an error", Confirm: boolPtr(true)},
+	}}, func() {
+		if err := connectToHost(context.Background(), client, "/etc/pilot/ssh_config", "gpu-a.example.com"); err != nil {
+			t.Fatalf("connectToHost must return nil on an ssh launch failure, got: %v", err)
+		}
+	})
 }
 
 // TestPortalHostDetailConnectFlow drives the actual TUI: My Hosts -> host

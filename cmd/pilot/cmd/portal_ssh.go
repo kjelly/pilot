@@ -71,11 +71,20 @@ var sshLauncher = func(cmd *exec.Cmd) error { return cmd.Run() }
 // 每次 fresh authorize" — never reusing My Hosts' cached SSH.Allowed as
 // the connect decision), then launches the controlled OpenSSH client.
 //
-// It returns once the ssh process exits, back into runPortal's own loop
-// (spec.md §2: "退出 remote SSH 後回到同一個 pilot portal"). Note this
-// package's Portal is NOT one continuous Bubble Tea Program (unlike
-// spec.md §60 Phase 5's "tea.ExecProcess" wording assumes) — it is a
-// sequence of short-lived one-shot Programs, the same pattern
+// It always returns nil, back into runPortal's own loop (spec.md §2:
+// "退出 remote SSH 後回到同一個 pilot portal") — a failed authorize call or
+// a nonzero ssh exit (host unreachable, connection refused, wrong host
+// key, the user just detaching, ...) are all completely ordinary outcomes
+// here, not fatal errors: propagating them used to unwind all the way out
+// of runPortal and kill the whole interactive session with a raw exec
+// error and cobra's usage dump — the opposite of "return to portal"
+// (found live: selecting one of the placeholder fixture hosts in a demo
+// environment, which has no real machine behind it, crashed the entire
+// TUI instead of just failing that one Connect attempt).
+//
+// Note this package's Portal is NOT one continuous Bubble Tea Program
+// (unlike spec.md §60 Phase 5's "tea.ExecProcess" wording assumes) — it
+// is a sequence of short-lived one-shot Programs, the same pattern
 // deploy_tui.go already uses (see its own package doc comment for why).
 // Between any two prompts there is no active raw-mode Program to suspend,
 // so a plain blocking exec.Cmd.Run() here already leaves the terminal in
@@ -85,11 +94,15 @@ var sshLauncher = func(cmd *exec.Cmd) error { return cmd.Run() }
 func connectToHost(ctx context.Context, client *portalClient, sshConfigPath, fqdn string) error {
 	authz, err := client.ConnectAuthorize(ctx, fqdn)
 	if err != nil {
-		return fmt.Errorf("connect authorize: %w", err)
+		runConfirmPrompt("", fmt.Sprintf("Connect failed.\n\n%v", err), true)
+		return nil
 	}
 	if !authz.Allowed {
 		runConfirmPrompt("", "Access changed.\nConnection was not started.", true)
 		return nil
 	}
-	return sshLauncher(buildConnectSSHCmd(sshConfigPath, authz.Target))
+	if err := sshLauncher(buildConnectSSHCmd(sshConfigPath, authz.Target)); err != nil {
+		runConfirmPrompt("", fmt.Sprintf("SSH session ended with an error.\n\n%v", err), true)
+	}
+	return nil
 }
