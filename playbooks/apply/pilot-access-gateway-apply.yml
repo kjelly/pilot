@@ -395,16 +395,88 @@
         home: /nonexistent
       tags: [AG_service, AG02]
 
-    # Never create gateway_effective_portal_user_group as a local fallback group:
-    # live testing found nsswitch.conf's real order on this host is
-    # `group: files systemd sss` — a LOCAL group with the same name
-    # permanently shadows the real FreeIPA group of that name (files is
-    # checked first and NSS stops there), so a "helpful" local stand-in
-    # would silently and durably break real portal-user membership the
-    # moment someone actually creates the FreeIPA group. Fail closed
-    # instead, the same way step 18 fails closed on a missing target
-    # hostgroup.
-    - name: "Verify portal-user group resolves (must be a real FreeIPA group, never a local fallback)"
+    # gateway_effective_portal_user_group and the pilot-access-gateway-login
+    # HBAC rule that lets its members reach this host over sshd are
+    # structural FreeIPA scaffolding this component needs to function —
+    # no different in kind from the pilot-access-gateways hostgroup Step 3
+    # above already self-manages. Self-provision them here (idempotent,
+    # same command+register+changed_when+failed_when idiom as Step 3)
+    # instead of hard-failing and telling an operator to go hand-edit the
+    # freeipa-identity roster out of band: found live 2026-09-15, every
+    # site-wide deploy touching a freshly-added gateway host failed here
+    # until someone did exactly that.
+    #
+    # This does NOT reintroduce the local-fallback-group incident this
+    # block used to warn about: `ipa group-add` creates the REAL FreeIPA
+    # group (resolved via SSSD, identical to what freeipa-identity's
+    # roster would have created) — the incident was creating a LOCAL Unix
+    # group of the same name as a substitute, a different operation this
+    # playbook still never performs.
+    #
+    # Group MEMBERSHIP (which humans get portal access) is deliberately
+    # NOT managed here — that stays roster-owned identity data (see
+    # docs/verification/pilot-access-gateway.md §5), the same split
+    # gateway-scope-apply.yml already draws for pilot-target-<scope>
+    # ("pre-provision scaffolding, never human identity/membership").
+    # Likewise, changing gateway_portal_user_group later does not retract
+    # the HBAC rule's authorization of the old group name — only additive
+    # reconciliation is done here, matching Step 3's own scope.
+    - name: "Ensure portal-user group exists"
+      ansible.builtin.command:
+        argv: [ipa, group-add, "{{ gateway_effective_portal_user_group }}", "--desc=Pilot Access Gateway portal users"]
+      register: gateway_portal_group_add
+      changed_when: "'Added group' in (gateway_portal_group_add.stdout | default(''))"
+      failed_when:
+        - gateway_portal_group_add.rc != 0
+        - "'already exists' not in (gateway_portal_group_add.stderr | default(''))"
+      tags: [AG_service]
+
+    - name: "Ensure pilot-access-gateway-login HBAC rule exists"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-add, pilot-access-gateway-login]
+      register: gateway_login_hbac_add
+      changed_when: "'Added HBAC rule' in (gateway_login_hbac_add.stdout | default(''))"
+      failed_when:
+        - gateway_login_hbac_add.rc != 0
+        - "'already exists' not in (gateway_login_hbac_add.stderr | default(''))"
+      tags: [AG_service]
+
+    - name: "Ensure pilot-access-gateway-login targets pilot-access-gateways"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-add-host, pilot-access-gateway-login, --hostgroups=pilot-access-gateways]
+      register: gateway_login_hbac_hostgroup
+      changed_when: "'Number of members added 1' in (gateway_login_hbac_hostgroup.stdout | default(''))"
+      failed_when:
+        - gateway_login_hbac_hostgroup.rc != 0
+        - "'already a member' not in (gateway_login_hbac_hostgroup.stdout | default('') + gateway_login_hbac_hostgroup.stderr | default(''))"
+      tags: [AG_service]
+
+    - name: "Ensure pilot-access-gateway-login allows sshd"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-add-service, pilot-access-gateway-login, --hbacsvcs=sshd]
+      register: gateway_login_hbac_service
+      changed_when: "'Number of members added 1' in (gateway_login_hbac_service.stdout | default(''))"
+      failed_when:
+        - gateway_login_hbac_service.rc != 0
+        - "'already a member' not in (gateway_login_hbac_service.stdout | default('') + gateway_login_hbac_service.stderr | default(''))"
+      tags: [AG_service]
+
+    - name: "Ensure pilot-access-gateway-login authorizes the portal-user group"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-add-user, pilot-access-gateway-login, "--groups={{ gateway_effective_portal_user_group }}"]
+      register: gateway_login_hbac_group
+      changed_when: "'Number of members added 1' in (gateway_login_hbac_group.stdout | default(''))"
+      failed_when:
+        - gateway_login_hbac_group.rc != 0
+        - "'already a member' not in (gateway_login_hbac_group.stdout | default('') + gateway_login_hbac_group.stderr | default(''))"
+      tags: [AG_service]
+
+    # Now a genuine SSSD-visibility sanity check (Step 4's getent-admin
+    # check above proves SSSD works in general; this proves it specifically
+    # for the group this playbook just created/confirmed above) rather than
+    # "an operator forgot to run the roster" — the group-add task above
+    # already fails closed on any error `already exists` doesn't explain.
+    - name: "Verify portal-user group resolves via SSSD (never a local fallback)"
       ansible.builtin.command:
         argv: [getent, group, "{{ gateway_effective_portal_user_group }}"]
       register: gateway_portal_group_check
@@ -412,17 +484,18 @@
       failed_when: false
       tags: [AG_service]
 
-    - name: "Gate: portal-user group must already exist in FreeIPA"
+    - name: "Gate: portal-user group must resolve via SSSD"
       ansible.builtin.assert:
         that:
           - gateway_portal_group_check.rc == 0
         fail_msg: >-
-          Group {{ gateway_effective_portal_user_group }} does not resolve. Create
-          it in FreeIPA first (e.g. via the freeipa-identity roster) —
-          this playbook deliberately does not create a local fallback
-          group, which would silently shadow the real FreeIPA group
-          forever once one is created (nsswitch.conf's "files" source
-          is checked before "sss").
+          Group {{ gateway_effective_portal_user_group }} was just
+          created/confirmed in FreeIPA above but does not resolve locally
+          via getent. This points at an SSSD/enrollment problem on this
+          host, not a missing group — this playbook deliberately never
+          creates a local fallback group, which would silently shadow the
+          real FreeIPA group forever once SSSD does catch up
+          (nsswitch.conf's "files" source is checked before "sss").
       tags: [AG_service]
 
     - name: "Ensure /etc/pilot exists"
