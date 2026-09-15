@@ -56,6 +56,7 @@ WORKDIR /src
 ARG PILOT_GIT_SHA=unknown
 ARG DETECTION_ENGINE_VERSION=0.0.0-dev
 ARG AGENT_CONTROLLER_VERSION=0.0.0-dev
+ARG PILOT_ACCESS_GATEWAY_VERSION=0.0.0-dev
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -66,6 +67,34 @@ COPY images/ images/
 COPY monitoring/ monitoring/
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/pilot ./cmd/pilot
+
+# playbooks/apply/pilot-access-gateway-apply.yml copies pilot_binary_path
+# onto every managed gateway host as the on-host `pilot` CLI (Step 9), and
+# pilot_access_gateway_binary_path as the gateway daemon itself (Step 10).
+# Both group_vars defaults (group_vars/pilot-access-gateway.example.yml)
+# point at dist/pilot-linux-amd64 and dist/pilot-access-gateway-linux-amd64
+# relative to the repo root the ansible-playbook process runs from — which,
+# inside this image, is /pilot. Bake both the same way the detection-engine
+# and agent-controller targets already are below: a separately-run
+# scripts/build-pilot-access-gateway.sh is not enough, because the deploy
+# that needs these artifacts runs from *inside* this container and cannot
+# see an out-of-band dist/ directory on the host. Missing this blocked
+# every site-wide deploy touching a pilot-access-gateway host once the
+# component's contract switched to site.include:true (2026-09-15) — see
+# "Gate: pilot binary exists" in the apply playbook.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" \
+      -o /out/pilot-linux-amd64 \
+      ./cmd/pilot
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${PILOT_ACCESS_GATEWAY_VERSION} -X main.commit=${PILOT_GIT_SHA}" \
+      -o /out/pilot-access-gateway-linux-amd64 \
+      ./cmd/pilot-access-gateway \
+ && cd /out \
+ && sha256sum pilot-access-gateway-linux-amd64 \
+      > pilot-access-gateway-linux-amd64.sha256
 
 # The control image is also the Ansible controller for the central Detection
 # Engine. Build the target binary in the same immutable image so a deployment
@@ -164,6 +193,9 @@ COPY --from=builder /out/pilot-detection-engine-linux-amd64 /pilot/dist/pilot-de
 COPY --from=builder /out/pilot-detection-engine-linux-amd64.sha256 /pilot/dist/pilot-detection-engine-linux-amd64.sha256
 COPY --from=builder /out/pilot-agent-controller-linux-amd64 /pilot/dist/pilot-agent-controller-linux-amd64
 COPY --from=builder /out/pilot-agent-controller-linux-amd64.sha256 /pilot/dist/pilot-agent-controller-linux-amd64.sha256
+COPY --from=builder /out/pilot-linux-amd64 /pilot/dist/pilot-linux-amd64
+COPY --from=builder /out/pilot-access-gateway-linux-amd64 /pilot/dist/pilot-access-gateway-linux-amd64
+COPY --from=builder /out/pilot-access-gateway-linux-amd64.sha256 /pilot/dist/pilot-access-gateway-linux-amd64.sha256
 
 WORKDIR /pilot
 COPY playbooks/ playbooks/
