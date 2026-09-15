@@ -39,14 +39,19 @@
 # 這台 gateway 的 FQDN。不填則沿用 ansible_fqdn。
 # gateway_fqdn: ""
 
-# FreeIPA server(s)FQDN 清單。必填、必須是 YAML list(不要用
+# FreeIPA server(s)FQDN 清單。不填的話(2026-09-15 起)會自動從
+# group_vars/freeipa.yml 的 freeipa_domain 推導成 ["ipa1.<domain>"]——
+# 跟 freeipa-client-apply.yml 自己的推導慣例一致,同一份 inventory 上其他
+# freeipa-client 主機已經用這個慣例 enroll 成功,通常不用填。只有伺服器
+# 主機名不照這個慣例時才需要明確覆寫,而且必須是 YAML list(不要用
 # `-e freeipa_servers=[...]` 這種寫法,Ansible 不會可靠解析成 list;CLI 呼叫
 # 要用 `-e '{"freeipa_servers": [...]}'` 的 JSON 物件形式)。
-freeipa_servers: []
+# freeipa_servers:
 #   - ipa1.ipa.pilot.internal
 
-# Kerberos realm,例如 "IPA.PILOT.INTERNAL"。必填。
-ipa_realm: ""
+# Kerberos realm,例如 "IPA.PILOT.INTERNAL"。不填的話(2026-09-15 起)會自動
+# 從 freeipa_domain 推導成大寫,同上,通常不用填。
+# ipa_realm: "IPA.PILOT.INTERNAL"
 
 # 只在**安裝當下**用來建立 reader service principal + keytab;執行期完全
 # 不用。一律走 Vault,不要直接寫在這個檔案裡:

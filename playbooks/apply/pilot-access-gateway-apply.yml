@@ -50,21 +50,20 @@
     confirm_prod: false
     staging_attested_within_hours: 168
 
-    # gateway_id / gateway_scope / freeipa_servers / ipa_realm /
-    # pilot_binary_path / pilot_access_gateway_binary_path are contracts/
-    # pilot-access-gateway.yaml's required groupVars — deliberately NOT
-    # given a play-vars entry here. Ansible's precedence puts play vars
-    # ABOVE inventory group_vars/host_vars, so declaring them here (even
-    # as "" placeholders) would silently shadow whatever `pilot deploy`'s
-    # inventory-driven contract actually supplies, and the assert right
-    # below would always see the placeholder instead (found live
-    # 2026-09-15: a fully-populated host_vars/group_vars deployment still
-    # failed "Missing required vars" because of exactly this shadowing —
-    # `ansible-inventory` showed the real values, the play never saw
-    # them). Leaving them undeclared lets normal inventory precedence
-    # resolve them, and "Gate: required gateway identity vars" below is
-    # still what actually enforces their presence before anything uses
-    # them.
+    # gateway_id / gateway_scope / pilot_binary_path / pilot_access_gateway_
+    # binary_path are contracts/pilot-access-gateway.yaml's required
+    # groupVars — deliberately NOT given a play-vars entry here. Ansible's
+    # precedence puts play vars ABOVE inventory group_vars/host_vars, so
+    # declaring them here (even as "" placeholders) would silently shadow
+    # whatever `pilot deploy`'s inventory-driven contract actually supplies,
+    # and the assert right below would always see the placeholder instead
+    # (found live 2026-09-15: a fully-populated host_vars/group_vars
+    # deployment still failed "Missing required vars" because of exactly
+    # this shadowing — `ansible-inventory` showed the real values, the play
+    # never saw them). Leaving them undeclared lets normal inventory
+    # precedence resolve them, and "Gate: required gateway identity vars"
+    # below is still what actually enforces their presence before anything
+    # uses them.
     gateway_target_hostgroup: "pilot-target-{{ gateway_scope }}"
     gateway_socket_path: /run/pilot/access-gateway.sock
     ipa_ca_file: /etc/ipa/ca.crt
@@ -82,6 +81,32 @@
     # use below reads the _effective_ name, never the raw one.
     gateway_effective_fqdn: "{{ gateway_fqdn | default(ansible_fqdn) }}"
     gateway_effective_portal_user_group: "{{ gateway_portal_user_group | default('role-pilot-portal-user') }}"
+
+    # freeipa_servers / ipa_realm auto-derive from the shared realm config
+    # (group_vars/freeipa.yml: freeipa_domain, and optionally freeipa_realm/
+    # freeipa_server_fqdn — the same override vars freeipa-client-apply.yml
+    # already reads) using freeipa-client-apply.yml's own established
+    # convention (realm = upper(domain), server = "ipa1.<domain>"),
+    # matching the pattern every other freeipa-client host on the same
+    # inventory already enrolled with. An explicit freeipa_servers/ipa_realm
+    # in group_vars/pilot-access-gateway.yml still wins (checked first).
+    # `default(X, true)` treats an explicitly-empty value (freeipa_servers:
+    # [], ipa_realm: "" — what an un-filled-in group_vars/pilot-access-
+    # gateway.example.yml copy leaves behind) the same as unset, not a real
+    # override to an empty value (found live 2026-09-15: a real site's
+    # group_vars/pilot-access-gateway.yml still had the example's literal
+    # `freeipa_servers: []`/`ipa_realm: ""`, both contracts/pilot-access-
+    # gateway.yaml required=true, so `pilot deploy` refused to even start —
+    # the contract now marks both required=false and documents this
+    # fallback instead).
+    gateway_effective_ipa_realm: >-
+      {{ (ipa_realm | default('', true))
+         or (freeipa_realm | default('', true))
+         or ((freeipa_domain | default('ipa.pilot.internal', true)) | upper) }}
+    gateway_effective_freeipa_servers: >-
+      {{ (freeipa_servers | default([], true))
+         or [ (freeipa_server_fqdn | default('', true))
+              or ('ipa1.' ~ (freeipa_domain | default('ipa.pilot.internal', true))) ] }}
 
     # Gate for spec.md §55 step 19 — see the file header comment.
     # Default TRUE as of 2026-09-14. Pass
@@ -122,15 +147,18 @@
         that:
           - gateway_id | length > 0
           - gateway_scope | length > 0
-          - freeipa_servers | length > 0
-          - ipa_realm | length > 0
+          - gateway_effective_freeipa_servers | length > 0
+          - gateway_effective_ipa_realm | length > 0
           - ipa_admin_password is defined
           - pilot_binary_path | length > 0
           - pilot_access_gateway_binary_path | length > 0
         fail_msg: >-
-          Missing required vars: gateway_id, gateway_scope, freeipa_servers
-          (list), ipa_realm, ipa_admin_password (vault), pilot_binary_path,
-          pilot_access_gateway_binary_path.
+          Missing required vars: gateway_id, gateway_scope, ipa_admin_password
+          (vault), pilot_binary_path, pilot_access_gateway_binary_path.
+          freeipa_servers/ipa_realm auto-derive from group_vars/freeipa.yml's
+          freeipa_domain if not set — this only fires if freeipa_domain is
+          ALSO missing (see gateway_effective_freeipa_servers/
+          gateway_effective_ipa_realm above).
       tags: [always]
 
     - name: "Resolve local artifact paths (relative = repo-root relative)"
@@ -433,7 +461,7 @@
         argv:
           - ipa-getkeytab
           - -s
-          - "{{ freeipa_servers[0] }}"
+          - "{{ gateway_effective_freeipa_servers[0] }}"
           - -p
           - "pilot-access-gateway/{{ gateway_effective_fqdn }}"
           - -k
@@ -469,11 +497,11 @@
             portal_user_group: {{ gateway_effective_portal_user_group }}
             freeipa:
               servers:
-          {% for server in freeipa_servers %}
+          {% for server in gateway_effective_freeipa_servers %}
                 - {{ server }}
           {% endfor %}
               ca_file: {{ ipa_ca_file }}
-              service_principal: pilot-access-gateway/{{ gateway_effective_fqdn }}@{{ ipa_realm }}
+              service_principal: pilot-access-gateway/{{ gateway_effective_fqdn }}@{{ gateway_effective_ipa_realm }}
               keytab: /etc/pilot/pilot-access-gateway.keytab
               request_timeout: 5s
               cache_ttl: 10s

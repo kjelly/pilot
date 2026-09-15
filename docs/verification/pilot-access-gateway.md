@@ -21,8 +21,8 @@
 | `gateway_id` | 這台 gateway 的 instance id，例如 `gpu-01` | 是 |
 | `gateway_scope` | scope 名稱，決定 `pilot-target-<scope>` | 是 |
 | `gateway_fqdn` | 這台 gateway 的 FQDN；預設 `ansible_fqdn` | 否 |
-| `freeipa_servers` | FreeIPA server FQDN 清單（JSON list，見下方 gotcha） | 是 |
-| `ipa_realm` | Kerberos realm，例如 `IPA.PILOT.INTERNAL` | 是 |
+| `freeipa_servers` | FreeIPA server FQDN 清單（JSON list，見下方 gotcha） | 否，**2026-09-15 起自動從 `group_vars/freeipa.yml` 的 `freeipa_domain`（或 `freeipa_server_fqdn`）推導**，慣例是 `ipa1.<domain>`——跟 `freeipa-client-apply.yml` 自己用的推導慣例一致（同一份 inventory 上其他 freeipa-client 主機已經用這個慣例 enroll 成功，代表這個值對這個站台是對的）；只有主機名不照慣例時才需要明確填 |
+| `ipa_realm` | Kerberos realm，例如 `IPA.PILOT.INTERNAL` | 否，**2026-09-15 起自動從 `freeipa_domain`（或 `freeipa_realm`）推導成大寫**，同上 |
 | `ipa_admin_password` | 只在**安裝當下**用來建立 reader service principal + keytab；只能來自 vault，執行期完全不用 | 是 |
 | `pilot_binary_path` / `pilot_access_gateway_binary_path` | 本機已建置好的兩個 binary 路徑 | 是 |
 | `gateway_portal_user_group` | Portal 使用者群組；**必須是既有的 FreeIPA 群組**，本 playbook 不建立 local fallback（見 §2 gotcha） | 否，預設 `role-pilot-portal-user` |
@@ -65,6 +65,7 @@
 
 ## 5. Gotcha 記錄
 
+- **2026-09-15：`freeipa_servers`/`ipa_realm` 改成 `required: false`，會自動推導**——真實站台實測時發現：`group_vars/pilot-access-gateway.yml` 若還是原始範本的 `freeipa_servers: []`/`ipa_realm: ""`，contract 的 `required: true` 會讓 `pilot deploy` 在連 ansible 都還沒跑之前就直接擋下（`requires input "freeipa_servers"`），即使該站台的 `group_vars/freeipa.yml` 早就正確設好 `freeipa_domain`。已改成比照 `freeipa-client-apply.yml` 自己的既有慣例：`gateway_effective_ipa_realm`/`gateway_effective_freeipa_servers` 依序檢查「明確填的 `ipa_realm`/`freeipa_servers`」→「`freeipa_realm`/`freeipa_server_fqdn`」→「`freeipa_domain` 推導成 `大寫(domain)`/`ipa1.<domain>`」，跟同一份 inventory 上其他 freeipa-client 主機使用的是同一條推導路徑，不需要重複填一次已經在 `group_vars/freeipa.yml` 設定過的資訊。`default(X, true)` 讓「明確設成空字串/空陣列」（範本沒填完就直接套用的常見情況）也一起走推導，不會被誤判成「使用者刻意覆寫成空」。
 - `-e freeipa_servers=[...]` 這種寫法 Ansible 不會可靠解析成 list（同 Phase 6 發現的坑），必須用 `-e '{"freeipa_servers": [...]}'` 的 JSON 物件形式。
 - `ipa service-add` 要求目標主機已有正向 DNS record；`freeipa-client-apply.yml` 的自動 DNS 註冊在本次實測未必觸發，需要先確認（`getent hosts <fqdn>`）或手動 `ipa dnsrecord-add`。
 - **不要**建一個跟 FreeIPA 群組同名的 local fallback group（例如 `gateway_portal_user_group`）——nsswitch 的 `files` 來源比 `sss` 先查，會讓 local 群組永久遮蔽真正的 FreeIPA 群組。

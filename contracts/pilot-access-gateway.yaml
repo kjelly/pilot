@@ -28,8 +28,8 @@ groupVars:
   - {name: gateway_id, type: string, required: true, secret: false}
   - {name: gateway_scope, type: string, required: true, secret: false}
   - {name: gateway_fqdn, type: string, required: false, secret: false}
-  - {name: freeipa_servers, type: stringList, required: true, secret: false}
-  - {name: ipa_realm, type: string, required: true, secret: false}
+  - {name: freeipa_servers, type: stringList, required: false, secret: false}
+  - {name: ipa_realm, type: string, required: false, secret: false}
   - {name: ipa_admin_password, type: string, required: true, secret: true}
   - {name: pilot_binary_path, type: string, required: true, secret: false}
   - {name: pilot_access_gateway_binary_path, type: string, required: true, secret: false}

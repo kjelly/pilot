@@ -33,6 +33,8 @@ gotcha/deviation/bug（含幾個修正過的自我誤判，見 Phase 7 的 syste
 才是逐項驗收結果的權威記錄。
 
 **2026-09-14 事後政策變更**：`pilot_access_gateway_install_forcecommand` 的預設值已從本文件原訂的 `false` 改成 `true`（在 §55.1 鎖定回歸測試已於 Phase 8 對 disposable vm-target 通過並取得核准之後，由使用者明確決定）。§0 G4/§55.1 的規則本身沒有改變——任何環境都不得對非 disposable 主機部署 ForceCommand，除非鎖定回歸測試已在 vm-target 上跑過；正式環境每次啟用都需要人員明確核准，**改預設值不能取代這個核准**，只是把「呼叫端忘記帶這個旗標」時的結果從安全變成危險。見 `docs/verification/pilot-access-gateway.md` §5、`playbooks/apply/pilot-access-gateway-apply.yml` 的 vars 區塊。
+
+**2026-09-15 事後 bug 修正**：`freeipa_servers`/`ipa_realm` 這兩個 contract groupVar 從 `required: true` 改成 `required: false`。真實站台（非 vm-target demo）實測時發現：`group_vars/pilot-access-gateway.yml` 若還是複製自 `.example.yml` 但沒填完的狀態（`freeipa_servers: []`/`ipa_realm: ""`），`pilot deploy` 的 contract 完整性檢查會直接擋下（連 ansible 都還沒跑），即使該站台的 `group_vars/freeipa.yml` 早就有正確的 `freeipa_domain`。現在比照 `freeipa-client-apply.yml` 自己既有的推導慣例（`realm = 大寫(domain)`、`server = ipa1.<domain>`）自動推導，同一份 inventory 上其他 freeipa-client 主機已經用同一套慣例 enroll 成功，代表這個推導對該站台是可信的。明確填值仍然優先。見 `docs/verification/pilot-access-gateway.md` §5、`playbooks/apply/pilot-access-gateway-apply.yml` 的 `gateway_effective_ipa_realm`/`gateway_effective_freeipa_servers`。
 > Date: 2026-09-08
 > Revised: 2026-09-14 — 加入 §0 Implementation Readiness Gates，修正 §51 contract 欄位以符合 `internal/contract.Contract` 實際 schema，補 §11.1/§55/§60 的驗收門檻
 > Repository: `https://github.com/kjelly/pilot`
