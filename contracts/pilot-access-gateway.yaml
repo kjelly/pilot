@@ -55,4 +55,11 @@ traceability:
     "docs/verification/pilot-access-gateway.md#AG19": {kind: structural-absence, tags: [], reason: "no task in this playbook ever writes under /var/lib/pilot — absence is structural, not produced by a specific task"}
     "docs/verification/pilot-access-gateway.md#AG30": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task"}
 verification: {autoDeploy: false}
-site: {include: false, order: 0, vars: {}, tags: [], optIn: true}
+# 2026-09-15 起 site.include:true(不再是 optIn/single-component-only)——
+# 使用者明確決定「把 pilot-access-gateway 加進 hosts.yml 的 roles 清單」本身
+# 就是核准動作,之後每次全站部署都會照常套用這個角色,跟其他角色的語意
+# 一致。order 52 放在 freeipa-client(50)之後、freeipa-nfs-server(55)之前,
+# 對應 dependencies 的 sameHosts 要求。§0 G4/§55.1 的鎖定回歸測試規則本身
+# 沒有變——只是核准時機點從「每次部署都要重新確認」改成「第一次把 role
+# 加進某台主機的當下」。
+site: {include: true, order: 52, vars: {}, tags: [pilot-access-gateway], optIn: false}

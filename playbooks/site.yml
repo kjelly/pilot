@@ -133,6 +133,13 @@
   tags: [freeipa, freeipa-server]
 - import_playbook: apply/freeipa-client-apply.yml
   tags: [freeipa, freeipa-client]
+# 2026-09-15 起不再是 single-component-only:「把 pilot-access-gateway 加進
+# hosts.yml 的 roles 清單」本身就是操作者的核准動作(使用者明確決定),之後
+# 每次全站部署都會照常套用,跟其他角色的語意一致——不需要每次額外打
+# --tags pilot-access-gateway。§0 G4/§55.1 的鎖定回歸測試仍然只在「第一次
+# 把這個 role 加進某台主機」前需要做過,不是每次部署都要重新核准。
+- import_playbook: apply/pilot-access-gateway-apply.yml
+  tags: [freeipa, pilot-access-gateway]
 - import_playbook: apply/freeipa-nfs-server-apply.yml
   tags: [freeipa, freeipa-nfs-server]
 - import_playbook: apply/freeipa-nfs-client-apply.yml

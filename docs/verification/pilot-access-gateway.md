@@ -1,6 +1,6 @@
 # Verification Spec — Pilot Access Gateway
 
-> 版本：DRAFT v0.3（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`，見 §5）
+> 版本：DRAFT v0.4（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5）
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md（Pilot Access Gateway — Stateless FreeIPA-backed Portal），§50-§58
 > 維護者：sre
 
@@ -11,7 +11,7 @@
 | Inventory group | `pilot-access-gateway`（或明確 `target_group`） |
 | 角色 | stateless、read-only、FreeIPA-backed SSH/sudo access gateway 後端（`pilot-access-gateway.service`）+ 使用者 TUI 入口（`pilot portal`） |
 | 前置需求 | 已是 FreeIPA client（`freeipa-client-apply.yml`）且有轉發 DNS 記錄；`pilot-target-<scope>` hostgroup 已由 `pilot gateway-scope reconcile` 建立（Phase 6） |
-| 套用範圍 | 單一 gateway 主機的安裝；`pilot_access_gateway_install_forcecommand` **預設已改為 `true`**（2026-09-14，在 §55.1 鎖定回歸測試已於 Phase 8 對 disposable vm-target 跑過並取得核准之後）——沒有明確帶 `-e pilot_access_gateway_install_forcecommand=false` 就會安裝 ForceCommand。正式環境每次啟用仍需要重新走一次人員核准（spec.md §0 G4 rule 3），**改預設值不能取代這個核准**，只是改變「忘記帶這個旗標」時的結果 |
+| 套用範圍 | 單一 gateway 主機的安裝；`pilot_access_gateway_install_forcecommand` **預設已改為 `true`**（2026-09-14，在 §55.1 鎖定回歸測試已於 Phase 8 對 disposable vm-target 跑過並取得核准之後）——沒有明確帶 `-e pilot_access_gateway_install_forcecommand=false` 就會安裝 ForceCommand。**2026-09-15 起 `site.include: true`，不再是 single-component-only**：把 `pilot-access-gateway` 加進某台主機 `hosts.yml` 的 roles 清單，本身就是操作者的核准動作，之後每次全站部署（`playbooks/site.yml`）都會照常套用這個角色，跟其他角色（`docker`/`freeipa-client`……）的語意一致，不需要每次額外打 `--tags pilot-access-gateway`。§0 G4/§55.1 的規則本身沒有變——**只是核准時機點從「每次部署都要重新確認」改成「第一次把這個 role 加進某台主機的當下」**：把 role 加進 `hosts.yml` 之前，仍然要先在該主機（或同等的 disposable vm-target）跑過鎖定回歸測試，之後才能放心讓它隨全站部署自動套用 |
 | 風險等級 | **High（預設即安裝 ForceCommand，登入路徑劫持等級變更）**——要暫時退回舊的 opt-in 行為，明確帶 `-e pilot_access_gateway_install_forcecommand=false` |
 
 ## 1.5 依賴變數契約
@@ -65,6 +65,7 @@
 
 ## 5. Gotcha 記錄
 
+- **2026-09-15：`site.include` 改成 `true`，`pilot-access-gateway` 不再是 single-component-only**——一路上發現兩次真的問題：全站部署（`playbooks/site.yml`）從架構上就無法跑到這個元件（從沒被 `import_playbook` 進去），`pilot deploy` 的 wizard 卻仍然把它列進「已選擇/已部署」，一次還被記成 delivery 歷史的 `success` run，實際上主機從沒被真的套用過。討論後拍板：與其永遠維持「single-component-only、每次都要單獨呼叫」，改成跟其他角色一致的語意——`hosts.yml` 把 `pilot-access-gateway` 加進某台主機的 roles 清單，本身就是操作者的核准動作,之後每次全站部署都會照常套用。`site.yml` 已補上 `import_playbook: apply/pilot-access-gateway-apply.yml`（`tags: [freeipa, pilot-access-gateway]`，緊接在 `freeipa-client` 之後,對應 sameHosts 依賴）;`contracts/pilot-access-gateway.yaml` 的 `site` 區塊改成 `{include: true, order: 52, tags: [pilot-access-gateway], optIn: false}`。**§0 G4/§55.1 的規則沒有變，只是核准時機點改變**：把 role 加進 `hosts.yml` 之前,仍然要先在該主機或同等 disposable vm-target 上跑過鎖定回歸測試——加了 role 之後,之後每次全站部署都不會再重新問一次。`cmd/pilot/cmd/site_yml_consistency_test.go` 的 `TestSiteYMLImportsEveryReachableComponent` 會鎖住這個 `site.include`/`site.yml` 一致性,避免第三次重演同一種落差。
 - **2026-09-15：`freeipa_servers`/`ipa_realm` 改成 `required: false`，會自動推導**——真實站台實測時發現：`group_vars/pilot-access-gateway.yml` 若還是原始範本的 `freeipa_servers: []`/`ipa_realm: ""`，contract 的 `required: true` 會讓 `pilot deploy` 在連 ansible 都還沒跑之前就直接擋下（`requires input "freeipa_servers"`），即使該站台的 `group_vars/freeipa.yml` 早就正確設好 `freeipa_domain`。已改成比照 `freeipa-client-apply.yml` 自己的既有慣例：`gateway_effective_ipa_realm`/`gateway_effective_freeipa_servers` 依序檢查「明確填的 `ipa_realm`/`freeipa_servers`」→「`freeipa_realm`/`freeipa_server_fqdn`」→「`freeipa_domain` 推導成 `大寫(domain)`/`ipa1.<domain>`」，跟同一份 inventory 上其他 freeipa-client 主機使用的是同一條推導路徑，不需要重複填一次已經在 `group_vars/freeipa.yml` 設定過的資訊。`default(X, true)` 讓「明確設成空字串/空陣列」（範本沒填完就直接套用的常見情況）也一起走推導，不會被誤判成「使用者刻意覆寫成空」。
 - `-e freeipa_servers=[...]` 這種寫法 Ansible 不會可靠解析成 list（同 Phase 6 發現的坑），必須用 `-e '{"freeipa_servers": [...]}'` 的 JSON 物件形式。
 - `ipa service-add` 要求目標主機已有正向 DNS record；`freeipa-client-apply.yml` 的自動 DNS 註冊在本次實測未必觸發，需要先確認（`getent hosts <fqdn>`）或手動 `ipa dnsrecord-add`。

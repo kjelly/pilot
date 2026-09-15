@@ -549,6 +549,48 @@ func TestComponentsForPlaybook_SiteWideExcludesComponentMissingFromSiteYML(t *te
 	})
 }
 
+// TestComponentsForPlaybook_SiteWideExplicitTagForUnreachableComponentGetsClearError
+// is the regression lock for the exact confusion this caused live 2026-09-15:
+// an operator, right after the siteYMLImportedPlaybooks fix started
+// correctly refusing to run a component that was never reachable via
+// site.yml, explicitly typed --tags naming that component for a site-wide
+// deploy and got a bare "resolve no component contract" error with no way
+// to tell "this tag matches nothing at all" apart from "this is a real
+// component that simply can't run this way". The error must name the
+// matched component and say why.
+func TestComponentsForPlaybook_SiteWideExplicitTagForUnreachableComponentGetsClearError(t *testing.T) {
+	catalog, inv := componentsForPlaybookOptInFixtureWithSiteImports(t, []string{
+		"playbooks/apply/always-on-apply.yml",
+		// opt-in-assigned-apply.yml deliberately omitted: its role IS in
+		// scope (host-a), so it would be swept in if reachable at all.
+	})
+
+	_, err := componentsForPlaybook(context.Background(), catalog, "playbooks/site.yml", inv, "", "opt-in-assigned", nil)
+	if err == nil {
+		t.Fatal("expected an error requesting a tag for a component missing from site.yml")
+	}
+	for _, want := range []string{"opt-in-assigned", "site.yml", "single-component"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must mention %q so the operator knows this is a real component that can't run site-wide, not a typo", err.Error(), want)
+		}
+	}
+}
+
+// TestComponentsForPlaybook_SiteWideExplicitTagForUnknownNameKeepsGenericError
+// confirms the generic error is unchanged for an actual typo/unknown tag,
+// so the improved diagnosis above doesn't mask that different case.
+func TestComponentsForPlaybook_SiteWideExplicitTagForUnknownNameKeepsGenericError(t *testing.T) {
+	catalog, inv := componentsForPlaybookOptInFixture(t)
+
+	_, err := componentsForPlaybook(context.Background(), catalog, "playbooks/site.yml", inv, "", "totally-unknown-tag", nil)
+	if err == nil {
+		t.Fatal("expected an error for a tag matching nothing")
+	}
+	if !strings.Contains(err.Error(), "resolve no component contract") {
+		t.Errorf("error %q should keep the generic message when nothing at all matches the requested tag", err.Error())
+	}
+}
+
 // TestComponentsForPlaybook_SiteWideIncludesOptInComponentAssignedInScope
 // is the regression lock for review.md's incident: a site-wide deploy must
 // fold in an opt-in component whenever a --limit-scoped host has actually

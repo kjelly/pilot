@@ -1757,6 +1757,33 @@ func componentsForPlaybook(ctx context.Context, catalog contract.Catalog, playbo
 	}
 	sort.Strings(components)
 	if len(components) == 0 {
+		// A clearer diagnosis for the single most confusing case this can
+		// happen for: the requested tag names a real, valid component, but
+		// it (or everything it could have matched) is single-component-
+		// only — never reachable via playbooks/site.yml at all (found live
+		// 2026-09-15: an operator explicitly requesting --tags pilot-
+		// access-gateway for a site-wide deploy, right after the
+		// siteYMLImportedPlaybooks fix correctly started refusing to
+		// pretend that ever worked, had no way to tell "this tag is
+		// meaningless" apart from "this component genuinely can't run
+		// this way" from the bare error below alone).
+		if playbook == "playbooks/site.yml" && len(requested) > 0 {
+			var unreachable []string
+			for _, component := range catalog.Components() {
+				if componentMatchesTags(component, requested) {
+					unreachable = append(unreachable, component.ID)
+				}
+			}
+			if len(unreachable) > 0 {
+				sort.Strings(unreachable)
+				return nil, fmt.Errorf(
+					"tags %q match %s, but none of their apply playbooks are import_playbook'd into "+
+						"playbooks/site.yml — this component can only be deployed via pilot deploy's "+
+						"單一元件/single-component mode (or, if it's meant to run site-wide, add the "+
+						"import to playbooks/site.yml first)",
+					requestedTags, strings.Join(unreachable, ", "))
+			}
+		}
 		return nil, fmt.Errorf("deployment playbook %s and tags %q resolve no component contract", playbook, requestedTags)
 	}
 	return components, nil

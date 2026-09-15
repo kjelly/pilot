@@ -120,7 +120,7 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "pilot-access-gateway", Label: "安裝 Pilot Access Gateway(stateless FreeIPA-backed SSH/sudo 存取閘道)",
 		Playbook: "playbooks/apply/pilot-access-gateway-apply.yml", DefaultGroup: "pilot-access-gateway", StageVar: "stage",
-		Note:      "day-2/opt-in 角色(不在 site.yml);目標主機必須先完成 freeipa-client enrollment 且已有正向 DNS record；`pilot-target-<scope>` hostgroup 需先由 pilot-gateway-scope 建立。⚠️ sshd ForceCommand 預設「開啟」(pilot_access_gateway_install_forcecommand=true，2026-09-14 起)——沒特別覆寫的話，登入這台主機的 portal 使用者會直接被導進 pilot portal、拿不到一般 shell；要暫時關閉請明確帶 -e pilot_access_gateway_install_forcecommand=false。對非 disposable 主機套用前務必先確認這一點。見 docs/verification/pilot-access-gateway.md。",
+		Note:      "2026-09-15 起 site.include:true(已在 site.yml,把這個角色加進 hosts.yml 本身就是核准動作,之後每次全站部署都會照常套用);目標主機必須先完成 freeipa-client enrollment 且已有正向 DNS record；`pilot-target-<scope>` hostgroup 需先由 pilot-gateway-scope 建立。⚠️ sshd ForceCommand 預設「開啟」(pilot_access_gateway_install_forcecommand=true，2026-09-14 起)——沒特別覆寫的話，登入這台主機的 portal 使用者會直接被導進 pilot portal、拿不到一般 shell；要暫時關閉請明確帶 -e pilot_access_gateway_install_forcecommand=false。加進 hosts.yml 前務必先在該主機(或同等 disposable vm-target)跑過 §55.1 鎖定回歸測試。見 docs/verification/pilot-access-gateway.md。",
 		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，僅安裝當下建立 reader service principal/keytab 用)",
 	},
 	{
