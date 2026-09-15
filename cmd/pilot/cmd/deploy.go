@@ -2971,6 +2971,16 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		if reconcileOnly && !p.Reconcile {
 			continue
 		}
+		// Day-2 reconcilers only ever show up under `pilot reconcile` (or
+		// their own dedicated CLI, e.g. `pilot gateway-scope`) — never under
+		// `pilot deploy`'s single-component menu. Surfacing the same entry
+		// under both wizards is what let an operator run
+		// pilot-gateway-scope's free-form -e prompt instead of the
+		// dedicated CLI's list-safe flag handling; see DELIVERY.md's
+		// "day-2 宣告式設定...改用 pilot reconcile" guidance.
+		if !reconcileOnly && p.Reconcile {
+			continue
+		}
 		if !deployShowExperimental && deployEntryExperimental(p, catalog) {
 			continue
 		}

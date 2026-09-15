@@ -36,8 +36,14 @@ type autoHostVar struct {
 	Label string // human description shown in the prompt, e.g. "SeaweedFS S3 gateway(備份目的地)"
 }
 
-// deployCatalog is every playbooks/apply/*.yml entry `pilot deploy` can
+// deployCatalog is every playbooks/apply/*.yml entry the pilot CLI can
 // drive in "single component" mode. Order matches DELIVERY.md's table.
+// Entries with Reconcile:true are day-2 declarative reconcilers and are
+// exposed ONLY via `pilot reconcile` (and, where one exists, their own
+// dedicated CLI, e.g. `pilot gateway-scope`) — `pilot deploy`'s
+// single-component menu filters them out (see deploy.go's
+// runCatalogPlaybookDeploy), so the same playbook is never reachable
+// through two different question flows.
 var deployCatalog = []deployPlaybook{
 	{
 		Key: "core-infra-provider", Label: "核心基礎服務 — DNS / NTP",

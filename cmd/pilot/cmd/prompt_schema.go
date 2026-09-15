@@ -93,6 +93,9 @@ func deployComponentIDs(action string) []string {
 		if action == "reconcile" && !entry.Reconcile {
 			continue
 		}
+		if action == "deploy" && entry.Reconcile {
+			continue
+		}
 		ids = append(ids, entry.Key)
 	}
 	return ids
