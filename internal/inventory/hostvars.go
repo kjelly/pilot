@@ -29,6 +29,14 @@ type hostVarsKey struct {
 }
 
 var hostVarsKeyCatalog = map[string]hostVarsKey{
+	"gateway_id": {
+		Name:    "gateway_id",
+		Comment: "這台 Pilot Access Gateway 的唯一 instance id;每台 gateway 必須不同,不能放在 group_vars 共用。",
+	},
+	"gateway_scope": {
+		Name:    "gateway_scope",
+		Comment: "這台 gateway 對應的 scope 名稱;它會使用 pilot-target-<scope> hostgroup。",
+	},
 	"prometheus_site_label": {
 		Name:  "prometheus_site_label",
 		Value: "",
@@ -42,6 +50,8 @@ var hostVarsKeyCatalog = map[string]hostVarsKey{
 // hostVarsKeyOrder pins deterministic rendering order for keys that appear
 // together, independent of the order roles happen to be listed in.
 var hostVarsKeyOrder = []string{
+	"gateway_id",
+	"gateway_scope",
 	"prometheus_site_label",
 }
 

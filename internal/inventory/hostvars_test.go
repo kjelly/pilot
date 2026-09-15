@@ -18,6 +18,30 @@ func TestExpectedHostVarsKeysForRoles_KnownRole(t *testing.T) {
 	}
 }
 
+func TestExpectedHostVarsKeysForRoles_PilotAccessGateway(t *testing.T) {
+	got := ExpectedHostVarsKeysForRoles([]string{"pilot-access-gateway"})
+	want := []string{"gateway_id", "gateway_scope"}
+	if len(got) != len(want) {
+		t.Fatalf("ExpectedHostVarsKeysForRoles() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ExpectedHostVarsKeysForRoles() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestHostVarsKeyCatalogCoversRoleContractKeys(t *testing.T) {
+	for _, contract := range roleContracts {
+		for _, name := range contract.HostVarsKeys {
+			key, ok := hostVarsKeyCatalog[name]
+			if !ok || key.Name != name {
+				t.Errorf("role %q host_vars key %q has no matching catalog entry", contract.Name, name)
+			}
+		}
+	}
+}
+
 func TestExpectedHostVarsKeysForRoles_UnknownRoleIsEmpty(t *testing.T) {
 	got := ExpectedHostVarsKeysForRoles([]string{"docker", "wazuh-fim"})
 	if len(got) != 0 {
@@ -40,6 +64,26 @@ func TestGenerateHostVarsSkeleton_HasRequiredKeys(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("GenerateHostVarsSkeleton() missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestGenerateHostVarsSkeleton_PilotAccessGatewayHasNamedKeys(t *testing.T) {
+	h := Host{Name: "gateway-1", Roles: []string{"pilot-access-gateway"}}
+
+	got, ok := GenerateHostVarsSkeleton(h)
+	if !ok {
+		t.Fatalf("GenerateHostVarsSkeleton() ok = false, want true")
+	}
+	for _, want := range []string{
+		`gateway_id: ""`,
+		`gateway_scope: ""`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("GenerateHostVarsSkeleton() missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `\n: ""`) || strings.Contains(got, "\n: \"\"") {
+		t.Fatalf("GenerateHostVarsSkeleton() rendered an empty YAML key:\n%s", got)
 	}
 }
 

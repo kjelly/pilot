@@ -23,6 +23,31 @@
 #   plan      -> -e gateway_scope_plan_only=true   (never mutates)
 #   reconcile -> -e gateway_scope_plan_only=false  (default)
 #
+# gateway_scope_automember_action (2026-09-15, `pilot gateway-scope enable-
+# auto`/`disable-auto`) controls the FreeIPA automember rule that keeps a
+# scope's hostgroup in sync with new enrollments automatically, without a
+# human having to rerun `--hosts all` by hand every time a host joins:
+#   none    -> (default) no automember change; ordinary plan/reconcile.
+#   enable  -> ensure the hostgroup exists, reconcile it to gateway_scope_hosts
+#              right now (the CLI always passes the "all" expansion for this
+#              action — see cmd/pilot/cmd/gateway_scope.go), THEN ensure an
+#              automember rule + inclusive fqdn=.* condition exists so every
+#              FUTURE freeipa-client enrollment joins this hostgroup at
+#              `ipa-client-install` time, with zero further reconcile calls.
+#   disable -> remove the automember rule only; existing hostgroup membership
+#              is left untouched (gateway_scope_hosts is not required/used).
+#
+# Automember conditions are evaluated once, at host-object creation time —
+# they cannot know in advance that a host will later become a pilot-access-
+# gateway host (that's usually installed as a separate, later step), so
+# `enable`'s inclusive fqdn=.* condition WILL transiently sweep future
+# gateways in too. This is intentional and safe: pilot-access-gateway-
+# apply.yml's own Step 3b unconditionally scrubs its host out of every
+# pilot-target-<scope> hostgroup on every apply, so a host that later
+# becomes a gateway gets removed the moment the gateway component is
+# actually installed on it. The two mechanisms are deliberately independent
+# and complementary — see docs/verification/pilot-gateway-scope.md §1.6.
+#
 # Usage:
 #
 #   pilot vm-target run --name <freeipa-server-vm> \
@@ -31,6 +56,11 @@
 #       -e gateway_scope=gpu \
 #       -e gateway_scope_hosts='["gpu-a.example.com","gpu-b.example.com"]' \
 #       -e @~/.vault/main.yaml
+#
+# `pilot gateway-scope plan/reconcile --hosts all` is a controller-side
+# convenience that expands the inventory's freeipa-client group before this
+# playbook is invoked. This playbook intentionally accepts only the expanded
+# non-empty list; direct callers must not pass the literal `all`.
 #
 # Secrets: ipa_admin_password comes from a vault file, never hard-coded
 # (matching freeipa-server-apply.yml / freeipa-identity-apply.yml).
@@ -41,6 +71,7 @@
   gather_facts: false
   vars:
     gateway_scope_plan_only: false
+    gateway_scope_automember_action: none
     stage: sandbox
     confirm_staging: false
     confirm_prod: false
@@ -75,17 +106,34 @@
       when: stage == 'prod'
       tags: [always]
   tasks:
-    - name: Validate required vars
+    - name: Validate required vars (common)
       ansible.builtin.assert:
         that:
           - gateway_scope is defined
           - gateway_scope | length > 0
-          - gateway_scope_hosts is defined
           - ipa_admin_password is defined
+          - gateway_scope_automember_action in ['none', 'enable', 'disable']
         fail_msg: >-
-          Missing required vars. Pass -e gateway_scope=<scope>
-          -e gateway_scope_hosts='["host1","host2"]' and a vault file
-          defining ipa_admin_password.
+          Missing required vars. Pass -e gateway_scope=<scope> and a vault
+          file defining ipa_admin_password. gateway_scope_automember_action
+          must be one of none/enable/disable if set at all.
+
+    # disable-auto only removes the automember rule — it never touches
+    # hostgroup membership, so gateway_scope_hosts is neither required nor
+    # read on that path (see the file header comment).
+    - name: Validate required vars (host list; not needed for disable-auto)
+      ansible.builtin.assert:
+        that:
+          - gateway_scope_hosts is defined
+          - gateway_scope_hosts is sequence
+          - gateway_scope_hosts is not string
+          - gateway_scope_hosts | length > 0
+          - (gateway_scope_hosts | map('trim') | select('equalto', 'all') | list | length) == 0
+        fail_msg: >-
+          Missing gateway_scope_hosts='["host1","host2"]'. The literal `all`
+          is only supported by the pilot gateway-scope CLI, which expands
+          the inventory freeipa-client group before invoking this playbook.
+      when: gateway_scope_automember_action != 'disable'
 
     - name: Compute target hostgroup name
       ansible.builtin.set_fact:
@@ -102,19 +150,24 @@
 
     # Read-only; always runs for real regardless of plan vs reconcile —
     # rc!=0 (hostgroup doesn't exist yet) is a valid, expected state, not
-    # a failure.
+    # a failure. Skipped for disable-auto, which never touches membership.
     - name: Look up current hostgroup membership (may not exist yet)
       ansible.builtin.command:
         argv: [ipa, hostgroup-show, "{{ gateway_target_hostgroup }}", --all]
       register: gateway_hostgroup_show
       changed_when: false
       failed_when: false
+      when: gateway_scope_automember_action != 'disable'
 
     # ipa hostgroup-show reports member hosts as FQDNs even when they were
     # added by short name (same gotcha freeipa-identity-apply.yml already
     # documents and works around) — normalize both sides to short name
     # before diffing, or every rerun would see the FQDN form as "extra"
-    # and flip-flop forever.
+    # and flip-flop forever. Skipped for disable-auto: gateway_hostgroup_show
+    # would be the bare {"skipped": true} dict a `when:false` skip produces
+    # (no rc/stdout keys at all — this class of bare-dot-access-on-a-missing-
+    # key crash is the same one freeipa-dns-apply.yml/internal-endpoint hit
+    # before), so this must never evaluate .rc/.stdout on that path.
     - name: Compute add/remove/keep diff
       ansible.builtin.set_fact:
         gateway_hostgroup_exists: "{{ gateway_hostgroup_show.rc == 0 }}"
@@ -123,12 +176,14 @@
       vars:
         hosts_line: "{{ ((gateway_hostgroup_show.stdout | default('') | regex_findall('^  Member hosts: (.*)$', multiline=True)) + ['']) | first | trim }}"
         current_hosts_fqdn: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
+      when: gateway_scope_automember_action != 'disable'
 
     - name: Compute add/remove/keep (short-name diff)
       ansible.builtin.set_fact:
         gateway_hosts_to_add: "{{ gateway_desired_hosts_short | difference(gateway_current_hosts_short) }}"
         gateway_hosts_to_remove: "{{ gateway_current_hosts_short | difference(gateway_desired_hosts_short) }}"
         gateway_hosts_to_keep: "{{ gateway_desired_hosts_short | intersect(gateway_current_hosts_short) }}"
+      when: gateway_scope_automember_action != 'disable'
 
     - name: "Plan: add / remove / keep"
       ansible.builtin.debug:
@@ -139,6 +194,7 @@
           add: "{{ gateway_hosts_to_add }}"
           remove: "{{ gateway_hosts_to_remove }}"
           keep: "{{ gateway_hosts_to_keep }}"
+      when: gateway_scope_automember_action != 'disable'
 
     # Tags C1-C3 correspond to docs/verification/pilot-gateway-scope.md's
     # rows for its one documented scenario (gateway_scope=gpu,
@@ -153,7 +209,7 @@
       failed_when:
         - gateway_hostgroup_add.rc != 0
         - "'already exists' not in (gateway_hostgroup_add.stderr | default(''))"
-      when: not gateway_scope_plan_only
+      when: not gateway_scope_plan_only and gateway_scope_automember_action != 'disable'
       tags: [C1]
 
     - name: Add missing hosts to target hostgroup
@@ -165,7 +221,7 @@
       failed_when:
         - gateway_hostgroup_member_add.rc != 0
         - "'already a member' not in (gateway_hostgroup_member_add.stdout | default('') + gateway_hostgroup_member_add.stderr | default(''))"
-      when: not gateway_scope_plan_only
+      when: not gateway_scope_plan_only and gateway_scope_automember_action != 'disable'
       tags: [C2, C3]
 
     - name: Remove stale hosts from target hostgroup
@@ -176,4 +232,43 @@
       changed_when: "'Number of members removed 1' in (gateway_hostgroup_member_remove.stdout | default(''))"
       failed_when:
         - gateway_hostgroup_member_remove.rc != 0
-      when: not gateway_scope_plan_only
+      when: not gateway_scope_plan_only and gateway_scope_automember_action != 'disable'
+
+    # --- Automember (2026-09-15, `pilot gateway-scope enable-auto`/
+    # `disable-auto`) — see the file header comment for the full design
+    # rationale and pilot-access-gateway-apply.yml's Step 3b for the
+    # complementary gateway-side scrub. ---
+
+    - name: "Automember: ensure rule exists for this scope's hostgroup"
+      ansible.builtin.command:
+        argv: [ipa, automember-add, "{{ gateway_target_hostgroup }}", --type=hostgroup, "--desc=Pilot Access Gateway auto-sync for scope {{ gateway_scope }}"]
+      register: gateway_automember_add
+      changed_when: "'Added automember rule' in (gateway_automember_add.stdout | default(''))"
+      failed_when:
+        - gateway_automember_add.rc != 0
+        - "'already exists' not in (gateway_automember_add.stderr | default(''))"
+      when: gateway_scope_automember_action == 'enable' and not gateway_scope_plan_only
+      tags: [AG_automember]
+
+    - name: "Automember: ensure inclusive fqdn=.* condition exists"
+      ansible.builtin.command:
+        argv: [ipa, automember-add-condition, "{{ gateway_target_hostgroup }}", --type=hostgroup, --key=fqdn, "--inclusive-regex=.*"]
+      register: gateway_automember_condition
+      changed_when: "'Number of conditions added 1' in (gateway_automember_condition.stdout | default(''))"
+      failed_when: gateway_automember_condition.rc != 0
+      when: gateway_scope_automember_action == 'enable' and not gateway_scope_plan_only
+      tags: [AG_automember]
+
+    # `ipa automember-del` exits 2 with "not found" when the rule was never
+    # created (or already removed) — that is the common, expected steady
+    # state for disable-auto run twice, not a failure.
+    - name: "Automember: remove rule for this scope's hostgroup"
+      ansible.builtin.command:
+        argv: [ipa, automember-del, "{{ gateway_target_hostgroup }}", --type=hostgroup]
+      register: gateway_automember_del
+      changed_when: "'Deleted automember rule' in (gateway_automember_del.stdout | default(''))"
+      failed_when:
+        - gateway_automember_del.rc != 0
+        - "'not found' not in (gateway_automember_del.stderr | default(''))"
+      when: gateway_scope_automember_action == 'disable' and not gateway_scope_plan_only
+      tags: [AG_automember]
