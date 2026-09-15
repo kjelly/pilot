@@ -127,7 +127,9 @@ func TestPortalHostDetailConnectFlow(t *testing.T) {
 		{Prompt: "Pilot Portal", Select: portalMenuMyHosts},
 		{Prompt: "My Hosts", Select: "gpu-a.example.com"},
 		{Prompt: "Host: gpu-a.example.com", Select: portalActionConnect},
+		{Prompt: "Connect to gpu-a.example.com", Confirm: boolPtr(true)},
 		{Prompt: "Pilot Portal", Select: portalMenuLogout},
+		{Prompt: "Log out", Confirm: boolPtr(true)},
 	}}
 	withPromptAutomation(t, p, func() {
 		if err := runPortal(context.Background(), client); err != nil {

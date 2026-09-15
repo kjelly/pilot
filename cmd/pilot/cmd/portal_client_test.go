@@ -106,6 +106,15 @@ func startFakeGateway(t *testing.T, username string) *portalClient {
 	go srv.Serve(ln)                                         //nolint:errcheck
 	t.Cleanup(func() { srv.Shutdown(context.Background()) }) //nolint:errcheck
 
+	// Portal tests must not depend on real DNS/network access — stub every
+	// host as resolvable by default. A test exercising the unresolved-host
+	// UI itself overrides this again after startFakeGateway returns; t.Cleanup
+	// unwinds LIFO, so that override is restored back to this stub, never to
+	// the real net.DefaultResolver.
+	oldResolve := portalResolveHost
+	portalResolveHost = func(ctx context.Context, host string) ([]string, error) { return []string{"127.0.0.1"}, nil }
+	t.Cleanup(func() { portalResolveHost = oldResolve })
+
 	return newPortalClient(sockPath)
 }
 
