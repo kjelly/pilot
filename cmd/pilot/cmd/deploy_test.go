@@ -385,6 +385,7 @@ func TestDeployCatalog_PlaybooksExistAndAreWellFormed(t *testing.T) {
 
 func TestNFSSiteDeploymentProjection(t *testing.T) {
 	root := repoRootForTest(t)
+	t.Setenv("PILOT_ROOT", root) // componentsForPlaybook now reads playbooks/site.yml via resolveContractRoot
 	data, err := os.ReadFile(filepath.Join(root, "playbooks", "site.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -441,6 +442,28 @@ func TestNFSSiteDeploymentProjection(t *testing.T) {
 // role but a site-wide --limit it-core deploy never applied it).
 func componentsForPlaybookOptInFixture(t *testing.T) (catalog contract.Catalog, invPath string) {
 	t.Helper()
+	// Every fake component's playbook is "in site.yml" here by default —
+	// these tests exercise the role/scope/tag filtering dimension only.
+	// TestComponentsForPlaybook_SiteWideExcludesComponentMissingFromSiteYML
+	// below is the dedicated regression lock for the site.yml-import
+	// dimension itself.
+	return componentsForPlaybookOptInFixtureWithSiteImports(t, []string{
+		"playbooks/apply/always-on-apply.yml",
+		"playbooks/apply/opt-in-assigned-apply.yml",
+		"playbooks/apply/opt-in-unassigned-apply.yml",
+		"playbooks/apply/opt-in-all-role-apply.yml",
+	})
+}
+
+// componentsForPlaybookOptInFixtureWithSiteImports is
+// componentsForPlaybookOptInFixture but lets a test control exactly which
+// fake components' apply playbooks a synthetic playbooks/site.yml (under a
+// PILOT_ROOT temp dir, not the real repo) actually `import_playbook`s —
+// regression coverage for the 2026-09-15 fix: a component must never be
+// listed as part of the site-wide plan when Ansible has no play to run for
+// it, regardless of Site.Include/opt-in role assignment.
+func componentsForPlaybookOptInFixtureWithSiteImports(t *testing.T, siteImportedPlaybooks []string) (catalog contract.Catalog, invPath string) {
+	t.Helper()
 	catalog, err := contract.NewCatalog([]contract.Contract{
 		{ID: "always-on", Role: "always-on-role", Site: contract.Site{Include: true}, Playbooks: contract.Playbooks{Apply: "playbooks/apply/always-on-apply.yml"}},
 		{ID: "opt-in-assigned", Role: "opt-in-assigned-role", Site: contract.Site{Include: false, OptIn: true}, Playbooks: contract.Playbooks{Apply: "playbooks/apply/opt-in-assigned-apply.yml"}},
@@ -450,6 +473,19 @@ func componentsForPlaybookOptInFixture(t *testing.T) (catalog contract.Catalog, 
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "playbooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var siteYML strings.Builder
+	for _, pb := range siteImportedPlaybooks {
+		siteYML.WriteString("- import_playbook: " + strings.TrimPrefix(pb, "playbooks/") + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(root, "playbooks", "site.yml"), []byte(siteYML.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PILOT_ROOT", root)
 
 	binDir := t.TempDir()
 	invJSON := `{"_meta":{"hostvars":{"host-a":{},"host-b":{}}},"opt-in-assigned-role":{"hosts":["host-a"]}}`
@@ -468,6 +504,49 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return catalog, "inventory.yml"
+}
+
+// TestComponentsForPlaybook_SiteWideExcludesComponentMissingFromSiteYML is
+// the regression lock for the 2026-09-15 finding: a real site-wide deploy
+// recorded "success" and listed pilot-access-gateway as a selected
+// component while playbooks/site.yml never actually import_playbook'd its
+// apply playbook, so nothing was ever really applied. Both an opt-in
+// component whose role is in scope AND a Site.Include:true component must
+// be excluded from the site-wide plan when their playbook isn't part of
+// site.yml's own import list — sweeping them in would misrepresent them as
+// deployed.
+func TestComponentsForPlaybook_SiteWideExcludesComponentMissingFromSiteYML(t *testing.T) {
+	t.Run("Site.Include:true component", func(t *testing.T) {
+		// opt-in-assigned stays present so the overall plan isn't empty
+		// (an empty plan is its own, unrelated error path) — this
+		// isolates "always-on missing from site.yml" as the only variable.
+		catalog, inv := componentsForPlaybookOptInFixtureWithSiteImports(t, []string{
+			"playbooks/apply/opt-in-assigned-apply.yml",
+			// Deliberately omitted: always-on-apply.yml.
+		})
+		components, err := componentsForPlaybook(context.Background(), catalog, "playbooks/site.yml", inv, "", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(components, "always-on") {
+			t.Errorf("Site.Include:true component missing from site.yml's import list must be excluded: %v", components)
+		}
+	})
+
+	t.Run("opt-in component with role in scope", func(t *testing.T) {
+		// always-on stays present for the same reason.
+		catalog, inv := componentsForPlaybookOptInFixtureWithSiteImports(t, []string{
+			"playbooks/apply/always-on-apply.yml",
+			// Deliberately omitted: opt-in-assigned-apply.yml.
+		})
+		components, err := componentsForPlaybook(context.Background(), catalog, "playbooks/site.yml", inv, "", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(components, "opt-in-assigned") {
+			t.Errorf("opt-in component missing from site.yml's import list must be excluded even with its role in scope: %v", components)
+		}
+	})
 }
 
 // TestComponentsForPlaybook_SiteWideIncludesOptInComponentAssignedInScope

@@ -144,6 +144,15 @@
 - import_playbook: apply/keycloak-apply.yml
   tags: [keycloak]
 
+# ── 3a. Nginx reverse proxy 基礎安裝 ────────────────────────────────────
+# contracts/reverse-proxy.yaml 宣告 site.include:true(order 65),但這個
+# import_playbook 一直沒有真的寫進來——2026-09-15 發現：`pilot deploy` 的
+# site-wide 元件清單一直把 reverse-proxy 算進「已部署」,實際上 ansible 從
+# 沒有這個 play 可以執行,is-a-component-but-site.yml-never-imports-it 的
+# 同一類問題(見下面 optInRolesAssignedInScope 的修正說明)。
+- import_playbook: apply/reverse-proxy-apply.yml
+  tags: [reverse-proxy]
+
 # ── 4. SSH 走 OIDC 登入(需先有 Keycloak)────────────────────────────────
 - import_playbook: apply/pam-oidc-sshd-apply.yml
   tags: [pam, oidc, pam-oidc-sshd]

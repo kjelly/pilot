@@ -1721,16 +1721,30 @@ func componentsForPlaybook(ctx context.Context, catalog contract.Catalog, playbo
 	}
 	requested := csvSet(requestedTags)
 	var assignedOptInRoles map[string]bool
+	var siteImported map[string]bool
 	if playbook == "playbooks/site.yml" {
 		var err error
 		assignedOptInRoles, err = optInRolesAssignedInScope(ctx, catalog, inv, limit)
 		if err != nil {
 			return nil, fmt.Errorf("resolve opt-in role assignment for site-wide deployment: %w", err)
 		}
+		siteImported, err = siteYMLImportedPlaybooks()
+		if err != nil {
+			return nil, fmt.Errorf("resolve playbooks/site.yml's own import list: %w", err)
+		}
 	}
 	components := make([]string, 0)
 	for _, component := range catalog.Components() {
 		if playbook == "playbooks/site.yml" && (component.Site.Include || assignedOptInRoles[component.Role]) {
+			// Defense in depth beyond the opt-in sweep's own check
+			// (optInRolesAssignedInScope already filters those): a
+			// Site.Include:true component whose apply playbook was never
+			// actually added to playbooks/site.yml (found live 2026-09-15:
+			// reverse-proxy) must not be listed as part of the site-wide
+			// plan either — it would never really run.
+			if !siteImported[component.Playbooks.Apply] {
+				continue
+			}
 			if len(requested) > 0 && !componentMatchesTags(component, requested) {
 				continue
 			}
@@ -1748,12 +1762,65 @@ func componentsForPlaybook(ctx context.Context, catalog contract.Catalog, playbo
 	return components, nil
 }
 
+// siteYMLImportedPlaybooks returns the set of apply-playbook paths (in the
+// same "playbooks/apply/<x>.yml" form contract.Playbooks.Apply uses) that
+// playbooks/site.yml actually `import_playbook`s. A component whose own
+// apply playbook is NOT in this set can never run via site-wide deploy no
+// matter what --tags/--limit is given — Ansible has nothing to match a tag
+// against if the play was never parsed into the aggregate playbook file in
+// the first place.
+//
+// Found live 2026-09-15: a real site-wide deploy with --limit <a
+// pilot-access-gateway host> and explicit --tags naming that component
+// recorded a "success" run — the delivery metadata even listed the
+// component as selected — while the gateway service was never installed.
+// playbooks/site.yml simply has no `import_playbook: apply/pilot-access-
+// gateway-apply.yml` line (it's a deliberately day-2/opt-in component,
+// spec'd to be deployed via its own single-component menu entry), so
+// Ansible silently had nothing to run for that tag and the overall
+// site.yml invocation still exited 0. The same investigation also found
+// `reverse-proxy` — a Site.Include:true component, not even opt-in —
+// missing from site.yml's import list entirely (fixed alongside this).
+func siteYMLImportedPlaybooks() (map[string]bool, error) {
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return nil, err
+	}
+	siteYMLPath := filepath.Join(root, "playbooks", "site.yml")
+	data, err := os.ReadFile(siteYMLPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", siteYMLPath, err)
+	}
+	var entries []map[string]any
+	if err := yaml.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", siteYMLPath, err)
+	}
+	imported := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		raw, ok := entry["import_playbook"]
+		if !ok {
+			continue
+		}
+		rel, ok := raw.(string)
+		if !ok || rel == "" {
+			continue
+		}
+		imported["playbooks/"+rel] = true
+	}
+	return imported, nil
+}
+
 // optInRolesAssignedInScope returns the set of roles belonging to an
-// opt-in (Site.Include: false) component that have at least one inventory
-// host within inv/limit's scope. Reuses resolveInventoryGroups (raw role
-// membership) and resolvePatternHosts (the same --limit pattern-matching
-// ansible itself uses, including "all" as a real pattern) rather than
-// reimplementing --limit's comma/wildcard/negation syntax.
+// opt-in (Site.Include: false) component that (a) have at least one
+// inventory host within inv/limit's scope, AND (b) are actually reachable
+// via playbooks/site.yml (see siteYMLImportedPlaybooks) — sweeping in a
+// component site.yml can never execute would only misrepresent it as
+// "selected"/"deployed" in the wizard's own summary and delivery-run
+// metadata without ever touching a host. Reuses resolveInventoryGroups
+// (raw role membership) and resolvePatternHosts (the same --limit
+// pattern-matching ansible itself uses, including "all" as a real
+// pattern) rather than reimplementing --limit's comma/wildcard/negation
+// syntax.
 func optInRolesAssignedInScope(ctx context.Context, catalog contract.Catalog, inv, limit string) (map[string]bool, error) {
 	groups, err := resolveInventoryGroups(ctx, inv)
 	if err != nil {
@@ -1767,6 +1834,10 @@ func optInRolesAssignedInScope(ctx context.Context, catalog contract.Catalog, in
 	for _, host := range scopeHosts {
 		inScope[host] = true
 	}
+	imported, err := siteYMLImportedPlaybooks()
+	if err != nil {
+		return nil, fmt.Errorf("resolve playbooks/site.yml's own import list: %w", err)
+	}
 	roles := make(map[string]bool)
 	for _, component := range catalog.Components() {
 		// "all" is the pseudo-role every host belongs to, not an operator
@@ -1777,6 +1848,9 @@ func optInRolesAssignedInScope(ctx context.Context, catalog contract.Catalog, in
 		// role "all", started hard-failing every non-FreeIPA site-wide
 		// deploy this way, since it also requires freeipa-server).
 		if component.Site.Include || component.Role == "all" || roles[component.Role] {
+			continue
+		}
+		if !imported[component.Playbooks.Apply] {
 			continue
 		}
 		if roleHasHostInScope(groups, inScope, component.Role) {
