@@ -50,30 +50,46 @@
     confirm_prod: false
     staging_attested_within_hours: 168
 
-    gateway_id: ""
-    gateway_scope: ""
-    gateway_fqdn: "{{ ansible_fqdn }}"
+    # gateway_id / gateway_scope / freeipa_servers / ipa_realm /
+    # pilot_binary_path / pilot_access_gateway_binary_path are contracts/
+    # pilot-access-gateway.yaml's required groupVars — deliberately NOT
+    # given a play-vars entry here. Ansible's precedence puts play vars
+    # ABOVE inventory group_vars/host_vars, so declaring them here (even
+    # as "" placeholders) would silently shadow whatever `pilot deploy`'s
+    # inventory-driven contract actually supplies, and the assert right
+    # below would always see the placeholder instead (found live
+    # 2026-09-15: a fully-populated host_vars/group_vars deployment still
+    # failed "Missing required vars" because of exactly this shadowing —
+    # `ansible-inventory` showed the real values, the play never saw
+    # them). Leaving them undeclared lets normal inventory precedence
+    # resolve them, and "Gate: required gateway identity vars" below is
+    # still what actually enforces their presence before anything uses
+    # them.
     gateway_target_hostgroup: "pilot-target-{{ gateway_scope }}"
     gateway_socket_path: /run/pilot/access-gateway.sock
-    gateway_portal_user_group: role-pilot-portal-user
-
-    freeipa_servers: []
-    ipa_realm: ""
     ipa_ca_file: /etc/ipa/ca.crt
 
     pilot_gateway_user: pilot-gateway
 
-    pilot_binary_path: ""
     pilot_binary_sha256: ""
-    pilot_access_gateway_binary_path: ""
     pilot_access_gateway_binary_sha256: ""
+
+    # gateway_fqdn / gateway_portal_user_group / pilot_access_gateway_
+    # install_forcecommand are optional groupVars with a real default —
+    # same shadowing hazard as above, but a bare self-referencing default
+    # (`x: "{{ x | default(...) }}"`) recurses infinitely under this
+    # ansible-core, so each gets its own "_effective_" name instead; every
+    # use below reads the _effective_ name, never the raw one.
+    gateway_effective_fqdn: "{{ gateway_fqdn | default(ansible_fqdn) }}"
+    gateway_effective_portal_user_group: "{{ gateway_portal_user_group | default('role-pilot-portal-user') }}"
 
     # Gate for spec.md §55 step 19 — see the file header comment.
     # Default TRUE as of 2026-09-14. Pass
-    # -e pilot_access_gateway_install_forcecommand=false to opt out.
-    # Never let this install against a non-disposable host without the
-    # §55.1 lockout regression test having actually been run there.
-    pilot_access_gateway_install_forcecommand: true
+    # -e pilot_access_gateway_install_forcecommand=false, or set it in
+    # group_vars/host_vars, to opt out. Never let this install against a
+    # non-disposable host without the §55.1 lockout regression test
+    # having actually been run there.
+    pilot_access_gateway_effective_install_forcecommand: "{{ pilot_access_gateway_install_forcecommand | default(true) }}"
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -218,7 +234,7 @@
     # remains freeipa-client-apply.yml's job.
     - name: "Step 2: check this host resolves in FreeIPA DNS"
       ansible.builtin.command:
-        argv: [getent, hosts, "{{ gateway_fqdn }}"]
+        argv: [getent, hosts, "{{ gateway_effective_fqdn }}"]
       register: gateway_dns_check
       changed_when: false
       failed_when: false
@@ -229,10 +245,10 @@
         that:
           - gateway_dns_check.rc == 0
         fail_msg: >-
-          {{ gateway_fqdn }} does not resolve. `ipa service-add` (step 8)
+          {{ gateway_effective_fqdn }} does not resolve. `ipa service-add` (step 8)
           requires a forward DNS record. Re-run freeipa-client-apply.yml
           with DNS registration enabled, or register it manually:
-          `ipa dnsrecord-add <zone> {{ gateway_fqdn.split('.')[0] }} --a-rec=<ip>`.
+          `ipa dnsrecord-add <zone> {{ gateway_effective_fqdn.split('.')[0] }} --a-rec=<ip>`.
       tags: [AG_enrollment]
 
     # Step 3 groundwork: kinit once for every FreeIPA-mutating task below.
@@ -265,12 +281,47 @@
 
     - name: "Step 3: add this host to pilot-access-gateways"
       ansible.builtin.command:
-        argv: [ipa, hostgroup-add-member, pilot-access-gateways, "--hosts={{ gateway_fqdn }}"]
+        argv: [ipa, hostgroup-add-member, pilot-access-gateways, "--hosts={{ gateway_effective_fqdn }}"]
       register: gateway_hostgroup_member_add
       changed_when: "'Number of members added 1' in (gateway_hostgroup_member_add.stdout | default(''))"
       failed_when:
         - gateway_hostgroup_member_add.rc != 0
         - "'already a member' not in (gateway_hostgroup_member_add.stdout | default('') + gateway_hostgroup_member_add.stderr | default(''))"
+      tags: [AG_enrollment]
+
+    # Step 3b (defense-in-depth, spec.md §9.1/§57): a gateway host must
+    # never itself be a member of any pilot-target-<scope> hostgroup —
+    # that hostgroup means "somewhere a portal user may be taken", and any
+    # sudo/HBAC rule later scoped to it (the established pilot-grant-
+    # sudo-<scope>/pilot-grant-login-<scope> convention) would otherwise
+    # silently apply to this gateway too, the opposite of the separation
+    # this file's own Step 3 above establishes (gateway login authorization
+    # lives in pilot-access-gateways, never pilot-target-<scope>). Since
+    # contracts/pilot-access-gateway.yaml requires freeipa-client as a
+    # sameHosts dependency, every gateway is always ALSO a freeipa-client
+    # host — anything that treats "every freeipa-client host" as a target
+    # set (e.g. `pilot gateway-scope reconcile --hosts all` before its own
+    # 2026-09-15 fix) can publish a gateway as one of its own targets.
+    # Scrubbed idempotently on every (re)apply; `ipa hostgroup-find` exits
+    # 1 on zero matches (the common case), hence failed_when: false.
+    - name: "Step 3b: discover any pilot-target-<scope> hostgroups this host is wrongly a member of"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-find, "--hosts={{ gateway_effective_fqdn }}", --raw]
+      register: gateway_stale_target_memberships
+      changed_when: false
+      failed_when: false
+      tags: [AG_enrollment]
+
+    - name: "Step 3b: remove this host from every stale pilot-target-<scope> hostgroup"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-remove-member, "{{ item }}", "--hosts={{ gateway_effective_fqdn }}"]
+      loop: >-
+        {{ gateway_stale_target_memberships.stdout | default('')
+           | regex_findall('^  cn: (.*)$', multiline=True)
+           | select('match', '^pilot-target-') | list }}
+      register: gateway_stale_target_removed
+      changed_when: "'Number of members removed 1' in (gateway_stale_target_removed.stdout | default(''))"
+      failed_when: gateway_stale_target_removed.rc != 0
       tags: [AG_enrollment]
 
     # Step 4 (spec.md §55): getent works via SSSD once enrolled — proven
@@ -316,7 +367,7 @@
         home: /nonexistent
       tags: [AG_service, AG02]
 
-    # Never create gateway_portal_user_group as a local fallback group:
+    # Never create gateway_effective_portal_user_group as a local fallback group:
     # live testing found nsswitch.conf's real order on this host is
     # `group: files systemd sss` — a LOCAL group with the same name
     # permanently shadows the real FreeIPA group of that name (files is
@@ -327,7 +378,7 @@
     # hostgroup.
     - name: "Verify portal-user group resolves (must be a real FreeIPA group, never a local fallback)"
       ansible.builtin.command:
-        argv: [getent, group, "{{ gateway_portal_user_group }}"]
+        argv: [getent, group, "{{ gateway_effective_portal_user_group }}"]
       register: gateway_portal_group_check
       changed_when: false
       failed_when: false
@@ -338,7 +389,7 @@
         that:
           - gateway_portal_group_check.rc == 0
         fail_msg: >-
-          Group {{ gateway_portal_user_group }} does not resolve. Create
+          Group {{ gateway_effective_portal_user_group }} does not resolve. Create
           it in FreeIPA first (e.g. via the freeipa-identity roster) —
           this playbook deliberately does not create a local fallback
           group, which would silently shadow the real FreeIPA group
@@ -369,7 +420,7 @@
 
     - name: "Step 8: create the gateway service principal (idempotent)"
       ansible.builtin.command:
-        argv: [ipa, service-add, "pilot-access-gateway/{{ gateway_fqdn }}"]
+        argv: [ipa, service-add, "pilot-access-gateway/{{ gateway_effective_fqdn }}"]
       register: gateway_service_add
       changed_when: "'Added service' in (gateway_service_add.stdout | default(''))"
       failed_when:
@@ -384,7 +435,7 @@
           - -s
           - "{{ freeipa_servers[0] }}"
           - -p
-          - "pilot-access-gateway/{{ gateway_fqdn }}"
+          - "pilot-access-gateway/{{ gateway_effective_fqdn }}"
           - -k
           - /etc/pilot/pilot-access-gateway.keytab
       when: not gateway_keytab_stat.stat.exists
@@ -412,17 +463,17 @@
           gateway:
             id: {{ gateway_id }}
             scope: {{ gateway_scope }}
-            fqdn: {{ gateway_fqdn }}
+            fqdn: {{ gateway_effective_fqdn }}
             target_hostgroup: {{ gateway_target_hostgroup }}
             socket_path: {{ gateway_socket_path }}
-            portal_user_group: {{ gateway_portal_user_group }}
+            portal_user_group: {{ gateway_effective_portal_user_group }}
             freeipa:
               servers:
           {% for server in freeipa_servers %}
                 - {{ server }}
           {% endfor %}
               ca_file: {{ ipa_ca_file }}
-              service_principal: pilot-access-gateway/{{ gateway_fqdn }}@{{ ipa_realm }}
+              service_principal: pilot-access-gateway/{{ gateway_effective_fqdn }}@{{ ipa_realm }}
               keytab: /etc/pilot/pilot-access-gateway.keytab
               request_timeout: 5s
               cache_ttl: 10s
@@ -585,7 +636,7 @@
           [Socket]
           ListenStream={{ gateway_socket_path }}
           SocketUser={{ pilot_gateway_user }}
-          SocketGroup={{ gateway_portal_user_group }}
+          SocketGroup={{ gateway_effective_portal_user_group }}
           SocketMode=0660
           RemoveOnStop=true
           RuntimeDirectory=pilot
@@ -670,7 +721,15 @@
 
     # Step 17 (spec.md §55): capability probe — a real connection over
     # the real socket, triggering socket activation, checked via the
-    # service's own /v1/health.
+    # service's own /v1/health. Both this and its gate below are
+    # skipped under --check: the systemd tasks above that would actually
+    # start/restart the service are themselves simulated (not real) in
+    # check mode, so on a genuinely fresh bootstrap the socket doesn't
+    # exist yet to probe — `command` isn't check_mode-aware by default,
+    # so without this guard the task silently no-ops and the gate then
+    # crashes trying to from_json an empty stdout instead of skipping
+    # cleanly (found live 2026-09-15, first --check --diff preview of a
+    # from-scratch pilot-access-gateway install).
     - name: "Step 17: capability probe FreeIPA via /v1/health"
       ansible.builtin.command:
         argv: [curl, --silent, --show-error, --fail, --unix-socket, "{{ gateway_socket_path }}", "http://localhost/v1/health"]
@@ -679,6 +738,7 @@
       retries: 3
       delay: 2
       until: gateway_health_probe.rc == 0
+      when: not ansible_check_mode
       tags: [AG_service, AG06]
 
     - name: "Step 17: gate — health probe reports ok"
@@ -686,16 +746,26 @@
         that:
           - (gateway_health_probe.stdout | from_json).status == 'ok'
         fail_msg: "health probe did not report status=ok: {{ gateway_health_probe.stdout }}"
+      when: not ansible_check_mode
       tags: [AG_service]
 
     # Step 18 (spec.md §55): configured pilot-target-<scope> must
     # actually exist before ForceCommand is ever installed — fail closed
     # (spec.md §9.5) rather than silently proceeding with an empty scope.
+    # Skipped under --check: gateway_target_hostgroup_show comes from
+    # Step 13's `command` task, itself skipped in check mode (not
+    # check_mode-aware by default), so `.rc` doesn't exist on the
+    # skipped-task dict there — a bare dot-access on a missing key raises
+    # a real AttributeError rather than evaluating Undefined/falsy (the
+    # same `x.key` vs. `x.get(key, default)` gotcha already hit in
+    # freeipa-dns-apply.yml and internal-endpoint), so this must not run
+    # against that placeholder during a preview.
     - name: "Step 18: verify configured pilot-target-<scope> exists"
       ansible.builtin.assert:
         that:
           - gateway_target_hostgroup_show.rc == 0
         fail_msg: "{{ gateway_target_hostgroup }} does not exist — run `pilot gateway-scope reconcile --scope {{ gateway_scope }} ...` first (spec.md Phase 6)."
+      when: not ansible_check_mode
       tags: [AG_service, AG12]
 
     # Step 19-21 (spec.md §55): sshd ForceCommand. GATED — see the file
@@ -709,7 +779,7 @@
         group: root
         mode: "0644"
         content: |
-          Match Group {{ gateway_portal_user_group }}
+          Match Group {{ gateway_effective_portal_user_group }}
               ForceCommand /usr/local/libexec/pilot-session
               PermitTTY yes
 
@@ -719,14 +789,14 @@
               X11Forwarding no
               PermitTunnel no
               PermitUserRC no
-      when: pilot_access_gateway_install_forcecommand | bool
+      when: pilot_access_gateway_effective_install_forcecommand | bool
       register: gateway_forcecommand_dropin
       tags: [AG_forcecommand]
 
     - name: "Step 20: sshd -t"
       ansible.builtin.command:
         argv: [sshd, -t]
-      when: pilot_access_gateway_install_forcecommand | bool and gateway_forcecommand_dropin.changed
+      when: pilot_access_gateway_effective_install_forcecommand | bool and gateway_forcecommand_dropin.changed
       changed_when: false
       tags: [AG_forcecommand]
 
@@ -734,7 +804,7 @@
       ansible.builtin.systemd:
         name: ssh
         state: reloaded
-      when: pilot_access_gateway_install_forcecommand | bool and gateway_forcecommand_dropin.changed
+      when: pilot_access_gateway_effective_install_forcecommand | bool and gateway_forcecommand_dropin.changed
       tags: [AG_forcecommand]
 
     # Rollback path (spec.md §55.1 step 3): flipping the flag back to
@@ -747,14 +817,14 @@
       ansible.builtin.file:
         path: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
         state: absent
-      when: not (pilot_access_gateway_install_forcecommand | bool)
+      when: not (pilot_access_gateway_effective_install_forcecommand | bool)
       register: gateway_forcecommand_dropin_removed
       tags: [AG_forcecommand]
 
     - name: "Step 20 rollback: sshd -t after removing the drop-in"
       ansible.builtin.command:
         argv: [sshd, -t]
-      when: not (pilot_access_gateway_install_forcecommand | bool) and gateway_forcecommand_dropin_removed.changed
+      when: not (pilot_access_gateway_effective_install_forcecommand | bool) and gateway_forcecommand_dropin_removed.changed
       changed_when: false
       tags: [AG_forcecommand]
 
@@ -762,5 +832,5 @@
       ansible.builtin.systemd:
         name: ssh
         state: reloaded
-      when: not (pilot_access_gateway_install_forcecommand | bool) and gateway_forcecommand_dropin_removed.changed
+      when: not (pilot_access_gateway_effective_install_forcecommand | bool) and gateway_forcecommand_dropin_removed.changed
       tags: [AG_forcecommand]
