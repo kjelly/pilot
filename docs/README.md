@@ -21,6 +21,7 @@
 | 看一份完整的「spec → apply → verify → 失敗 → 修」| [`runbooks/pam-oidc-sshd.md`](./runbooks/pam-oidc-sshd.md) |
 | spec-to-spec supplier pattern（同一 host 多 spec 如何 cross-check）| [`runbooks/sso-composition.md`](./runbooks/sso-composition.md) |
 | **管 FreeIPA 使用者/權限（名冊與機密不進 git）** | [`runbooks/freeipa-identity.md`](./runbooks/freeipa-identity.md)；已部署後以 `pilot reconcile` 調和 roster |
+| **SSH key 進 Portal、由 Portal 取得短期 Kerberos ticket 後純 GSSAPI 連目標** | [`runbooks/pilot-access-gateway.md`](./runbooks/pilot-access-gateway.md) |
 | **將既有 client 切換到已重建的 FreeIPA realm/server** | [`runbooks/freeipa-realm-replacement.md`](./runbooks/freeipa-realm-replacement.md)；目前為 DRAFT，完成三節點實跑與 evidence 前不可用於正式變更 |
 | **把目標主機的 DNS resolver 指向 FreeIPA DNS（server/replica）** | [`runbooks/freeipa-dns-client.md`](./runbooks/freeipa-dns-client.md)；與 `freeipa-client`（AAA 納管）互不相依，day-2/opt-in，已對 Ubuntu(systemd-resolved)與 EL9(NetworkManager，含 FreeIPA server 自我指向)兩台 vm-target 實跑驗證 |
 | **把 FreeIPA NFS clients 接到 NetApp、Synology 或 QNAP** | [`external-nfs-provider-integration.md`](./external-nfs-provider-integration.md)；未經硬體實跑的 provider readiness 與安全邊界指南 |
