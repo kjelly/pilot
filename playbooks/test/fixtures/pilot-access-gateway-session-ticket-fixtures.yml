@@ -1,0 +1,120 @@
+---
+# Test-only setup for the Portal session-ticket E2E:
+#
+#   gateway: allow a disposable controller key to authenticate as the IPA user
+#   target:  disable password / keyboard-interactive SSH while preserving the
+#            vm-target root public-key management path
+#
+# Always run this fixture again with fixture_state=absent after the test.
+- name: Pilot Access Gateway session-ticket fixtures
+  hosts: "{{ target_group | default('all') }}"
+  become: true
+  gather_facts: false
+  vars:
+    fixture_state: present
+    fixture_role: ""
+    portal_fixture_user: alice
+    portal_fixture_public_key_file: ""
+    portal_fixture_key_dir: /etc/ssh/pilot-portal-fixture-authorized-keys
+    portal_fixture_sshd_dropin: /etc/ssh/sshd_config.d/00-pilot-portal-session-ticket-fixture.conf
+
+  pre_tasks:
+    - name: Gate fixture inputs
+      ansible.builtin.assert:
+        that:
+          - fixture_state in ['present', 'absent']
+          - fixture_role in ['gateway', 'target']
+          - fixture_state == 'absent' or fixture_role != 'gateway' or portal_fixture_public_key_file | length > 0
+        fail_msg: >-
+          fixture_state must be present/absent; fixture_role must be
+          gateway/target; a present gateway fixture also requires
+          portal_fixture_public_key_file.
+
+  tasks:
+    - name: Create test-only authorized-key directory on the gateway
+      ansible.builtin.file:
+        path: "{{ portal_fixture_key_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when:
+        - fixture_state == 'present'
+        - fixture_role == 'gateway'
+
+    - name: Install test-only public key for the Portal user
+      ansible.builtin.copy:
+        dest: "{{ portal_fixture_key_dir }}/{{ portal_fixture_user }}"
+        content: "{{ lookup('ansible.builtin.file', portal_fixture_public_key_file) | trim }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - fixture_state == 'present'
+        - fixture_role == 'gateway'
+
+    - name: Install gateway first-hop public-key fixture policy
+      ansible.builtin.copy:
+        dest: "{{ portal_fixture_sshd_dropin }}"
+        content: |
+          # Test-only; managed by pilot-access-gateway-session-ticket-fixtures.yml.
+          AuthorizedKeysFile {{ portal_fixture_key_dir }}/%u .ssh/authorized_keys .ssh/authorized_keys2
+        owner: root
+        group: root
+        mode: "0644"
+      register: portal_fixture_gateway_policy
+      when:
+        - fixture_state == 'present'
+        - fixture_role == 'gateway'
+
+    - name: Install target no-password fixture policy
+      ansible.builtin.copy:
+        dest: "{{ portal_fixture_sshd_dropin }}"
+        content: |
+          # Test-only; managed by pilot-access-gateway-session-ticket-fixtures.yml.
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          ChallengeResponseAuthentication no
+        owner: root
+        group: root
+        mode: "0644"
+      register: portal_fixture_target_policy
+      when:
+        - fixture_state == 'present'
+        - fixture_role == 'target'
+
+    - name: Remove test-only sshd policy
+      ansible.builtin.file:
+        path: "{{ portal_fixture_sshd_dropin }}"
+        state: absent
+      register: portal_fixture_policy_removed
+      when: fixture_state == 'absent'
+
+    - name: Remove test-only Portal user key
+      ansible.builtin.file:
+        path: "{{ portal_fixture_key_dir }}/{{ portal_fixture_user }}"
+        state: absent
+      when:
+        - fixture_state == 'absent'
+        - fixture_role == 'gateway'
+
+    - name: Remove empty test-only authorized-key directory
+      ansible.builtin.file:
+        path: "{{ portal_fixture_key_dir }}"
+        state: absent
+      when:
+        - fixture_state == 'absent'
+        - fixture_role == 'gateway'
+
+    - name: Validate effective sshd configuration
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    - name: Restart sshd after fixture policy changes
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted
+      when: >-
+        (portal_fixture_gateway_policy is defined and portal_fixture_gateway_policy is changed)
+        or (portal_fixture_target_policy is defined and portal_fixture_target_policy is changed)
+        or (portal_fixture_policy_removed is defined and portal_fixture_policy_removed is changed)
