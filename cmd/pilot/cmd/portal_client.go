@@ -15,7 +15,9 @@ import (
 
 // portalClient is `pilot portal`'s only allowed dependency (spec.md §28):
 // it talks to pilot-access-gateway over its Unix socket and nothing else
-// — no roster, no inventory, no FreeIPA credential of its own.
+// — no roster, no inventory, and no Gateway service credential. The separate
+// Portal credential session may hold one ephemeral end-user ccache for
+// controlled SSH; it is never part of this API client.
 type portalClient struct {
 	httpClient *http.Client
 }

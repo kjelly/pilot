@@ -17,17 +17,33 @@ func withSSHLauncher(t *testing.T, fn func(cmd *exec.Cmd) error) {
 	t.Cleanup(func() { sshLauncher = old })
 }
 
+type fakePortalCredentialSession struct {
+	cache  string
+	err    error
+	users  []string
+	closed bool
+}
+
+func (f *fakePortalCredentialSession) Ensure(_ context.Context, username string) (string, error) {
+	f.users = append(f.users, username)
+	return f.cache, f.err
+}
+
+func (f *fakePortalCredentialSession) Close() { f.closed = true }
+
 // TestConnectToHostAllowed verifies a fresh, allowed authorize launches
 // ssh with exactly the fixed argv spec.md §31 requires — no user/port/
 // options/remote-command, target only from the ConnectAuthorize response.
 func TestConnectToHostAllowed(t *testing.T) {
-	client := startFakeGateway(t, currentOSUsername(t))
+	username := currentOSUsername(t)
+	client := startFakeGateway(t, username)
+	credentials := &fakePortalCredentialSession{cache: "FILE:/run/user/1000/pilot-test/krb5cc"}
 	var launched *exec.Cmd
 	withSSHLauncher(t, func(cmd *exec.Cmd) error {
 		launched = cmd
 		return nil
 	})
-	if err := connectToHost(context.Background(), client, "/etc/pilot/ssh_config", "gpu-a.example.com"); err != nil {
+	if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, "gpu-a.example.com"); err != nil {
 		t.Fatalf("connectToHost: %v", err)
 	}
 	if launched == nil {
@@ -37,6 +53,12 @@ func TestConnectToHostAllowed(t *testing.T) {
 	if strings.Join(launched.Args, " ") != strings.Join(wantArgs, " ") {
 		t.Fatalf("Args = %v, want %v", launched.Args, wantArgs)
 	}
+	if len(credentials.users) != 1 || credentials.users[0] != username {
+		t.Fatalf("credential users = %v, want [%s]", credentials.users, username)
+	}
+	if got := envValue(launched.Env, "KRB5CCNAME"); got != credentials.cache {
+		t.Fatalf("KRB5CCNAME = %q, want %q", got, credentials.cache)
+	}
 }
 
 // TestConnectToHostDenied verifies a fresh denial (target outside gateway
@@ -44,7 +66,9 @@ func TestConnectToHostAllowed(t *testing.T) {
 // instead — this is the fresh-authorize path, independent of whatever
 // My Hosts displayed earlier.
 func TestConnectToHostDenied(t *testing.T) {
-	client := startFakeGateway(t, currentOSUsername(t))
+	username := currentOSUsername(t)
+	client := startFakeGateway(t, username)
+	credentials := &fakePortalCredentialSession{cache: "FILE:/should-not-be-used"}
 	launched := false
 	withSSHLauncher(t, func(cmd *exec.Cmd) error {
 		launched = true
@@ -53,12 +77,15 @@ func TestConnectToHostDenied(t *testing.T) {
 	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 		{Prompt: "Access changed", Confirm: boolPtr(true)},
 	}}, func() {
-		if err := connectToHost(context.Background(), client, "/etc/pilot/ssh_config", "not-in-scope.example.com"); err != nil {
+		if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, "not-in-scope.example.com"); err != nil {
 			t.Fatalf("connectToHost: %v", err)
 		}
 	})
 	if launched {
 		t.Fatalf("ssh must not be launched for a denied target")
+	}
+	if len(credentials.users) != 0 {
+		t.Fatalf("credentials must not be requested before authorization, got users %v", credentials.users)
 	}
 }
 
@@ -71,8 +98,10 @@ func TestConnectToHostDenied(t *testing.T) {
 // case. No special-case parsing of "user@host" or IP syntax exists
 // anywhere in this path — there is nothing to bypass.
 func TestConnectToHostRejectsAlternateUserAndIPTargets(t *testing.T) {
-	client := startFakeGateway(t, currentOSUsername(t))
+	username := currentOSUsername(t)
+	client := startFakeGateway(t, username)
 	for _, target := range []string{"root@gpu-a.ipa.pilot.internal", "10.0.0.1"} {
+		credentials := &fakePortalCredentialSession{cache: "FILE:/should-not-be-used"}
 		launched := false
 		withSSHLauncher(t, func(cmd *exec.Cmd) error {
 			launched = true
@@ -81,12 +110,15 @@ func TestConnectToHostRejectsAlternateUserAndIPTargets(t *testing.T) {
 		withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 			{Prompt: "Access changed", Confirm: boolPtr(true)},
 		}}, func() {
-			if err := connectToHost(context.Background(), client, "/etc/pilot/ssh_config", target); err != nil {
+			if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, target); err != nil {
 				t.Fatalf("connectToHost(%q): %v", target, err)
 			}
 		})
 		if launched {
 			t.Fatalf("ssh must not be launched for target %q", target)
+		}
+		if len(credentials.users) != 0 {
+			t.Fatalf("credentials must not be requested for denied target %q", target)
 		}
 	}
 }
@@ -100,17 +132,40 @@ func TestConnectToHostRejectsAlternateUserAndIPTargets(t *testing.T) {
 // entire `pilot portal` process with a raw ssh exit-status error and
 // cobra's usage dump instead of just failing that one Connect attempt).
 func TestConnectToHostSSHFailureReturnsToPortal(t *testing.T) {
-	client := startFakeGateway(t, currentOSUsername(t))
+	username := currentOSUsername(t)
+	client := startFakeGateway(t, username)
+	credentials := &fakePortalCredentialSession{cache: "FILE:/run/user/1000/pilot-test/krb5cc"}
 	withSSHLauncher(t, func(cmd *exec.Cmd) error {
 		return errors.New("ssh: Could not resolve hostname gpu-b.ipa.pilot.internal: Name or service not known")
 	})
 	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 		{Prompt: "SSH session ended with an error", Confirm: boolPtr(true)},
 	}}, func() {
-		if err := connectToHost(context.Background(), client, "/etc/pilot/ssh_config", "gpu-a.example.com"); err != nil {
+		if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, "gpu-a.example.com"); err != nil {
 			t.Fatalf("connectToHost must return nil on an ssh launch failure, got: %v", err)
 		}
 	})
+}
+
+func TestConnectToHostCredentialFailureReturnsToPortal(t *testing.T) {
+	username := currentOSUsername(t)
+	client := startFakeGateway(t, username)
+	credentials := &fakePortalCredentialSession{err: errors.New("ticket unavailable")}
+	launched := false
+	withSSHLauncher(t, func(cmd *exec.Cmd) error {
+		launched = true
+		return nil
+	})
+	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
+		{Prompt: "Kerberos authentication failed", Confirm: boolPtr(true)},
+	}}, func() {
+		if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, "gpu-a.example.com"); err != nil {
+			t.Fatalf("connectToHost must return nil on credential failure, got: %v", err)
+		}
+	})
+	if launched {
+		t.Fatal("ssh must not launch without a valid Kerberos credential")
+	}
 }
 
 // TestPortalHostDetailConnectFlow drives the actual TUI: My Hosts -> host
@@ -118,6 +173,7 @@ func TestConnectToHostSSHFailureReturnsToPortal(t *testing.T) {
 // reaches connectToHost with the right target.
 func TestPortalHostDetailConnectFlow(t *testing.T) {
 	client := startFakeGateway(t, currentOSUsername(t))
+	credentials := &fakePortalCredentialSession{cache: "FILE:/run/user/1000/pilot-test/krb5cc"}
 	var launchedTarget string
 	withSSHLauncher(t, func(cmd *exec.Cmd) error {
 		launchedTarget = cmd.Args[len(cmd.Args)-1]
@@ -132,7 +188,7 @@ func TestPortalHostDetailConnectFlow(t *testing.T) {
 		{Prompt: "Log out", Confirm: boolPtr(true)},
 	}}
 	withPromptAutomation(t, p, func() {
-		if err := runPortal(context.Background(), client); err != nil {
+		if err := runPortalWithCredentials(context.Background(), client, credentials, defaultSSHConfigPath); err != nil {
 			t.Fatalf("runPortal: %v", err)
 		}
 	})
@@ -150,7 +206,7 @@ func TestPortalHostDetailConnectFlow(t *testing.T) {
 // opaque (and, for ssh, simply invalid/nonexistent) hostname argument —
 // never interpreted.
 func TestBuildConnectSSHCmdNeverUsesAShell(t *testing.T) {
-	cmd := buildConnectSSHCmd("/etc/pilot/ssh_config", "gpu01.example.com; rm -rf /tmp/x")
+	cmd := buildConnectSSHCmd("/etc/pilot/ssh_config", "gpu01.example.com; rm -rf /tmp/x", "FILE:/run/user/1000/pilot-test/krb5cc")
 	if filepath.Base(cmd.Path) == "sh" || filepath.Base(cmd.Path) == "bash" {
 		t.Fatalf("Path = %q, must never be a shell", cmd.Path)
 	}
@@ -215,9 +271,12 @@ func TestPilotSSHConfigDirectives(t *testing.T) {
 		"proxycommand":                 "/usr/bin/sss_ssh_knownhostsproxy -p %p %h",
 		"globalknownhostsfile":         "/var/lib/sss/pubconf/known_hosts",
 		"gssapiauthentication":         "yes",
-		"gssapidelegatecredentials":    "yes",
-		"kbdinteractiveauthentication": "yes",
-		"passwordauthentication":       "yes",
+		"gssapidelegatecredentials":    "no",
+		"preferredauthentications":     "gssapi-with-mic",
+		"batchmode":                    "yes",
+		"pubkeyauthentication":         "false", // ssh -G normalizes "no" -> "false"
+		"kbdinteractiveauthentication": "no",
+		"passwordauthentication":       "no",
 		"requesttty":                   "force",
 	}
 	for key, wantValue := range want {
@@ -239,4 +298,14 @@ func TestPilotSSHConfigDirectives(t *testing.T) {
 	if v, ok := effective["proxyjump"]; ok {
 		t.Errorf("proxyjump = %q, want absent (none)", v)
 	}
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }

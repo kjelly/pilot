@@ -52,6 +52,12 @@ func runPortal(ctx context.Context, client *portalClient) error {
 }
 
 func runPortalWithSSHConfig(ctx context.Context, client *portalClient, sshConfigPath string) error {
+	credentials := newPortalKerberosSession()
+	defer credentials.Close()
+	return runPortalWithCredentials(ctx, client, credentials, sshConfigPath)
+}
+
+func runPortalWithCredentials(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath string) error {
 	identity, err := client.Identity(ctx)
 	if err != nil {
 		return fmt.Errorf("load identity: %w", err)
@@ -68,7 +74,7 @@ func runPortalWithSSHConfig(ctx context.Context, client *portalClient, sshConfig
 		}
 		switch portalTopMenuItems[choice] {
 		case portalMenuMyHosts:
-			if err := runPortalMyHosts(ctx, client, sshConfigPath, access); err != nil {
+			if err := runPortalMyHosts(ctx, client, credentials, sshConfigPath, access); err != nil {
 				return err
 			}
 		case portalMenuMyIdentity:
@@ -193,7 +199,7 @@ func portalAnnotationsSummary(annotations map[string]string) string {
 // second-guesses that list. It does add a live, client-side DNS
 // reachability hint per host (see portalHostEntry) since that is real
 // signal the gateway's authorization data can't express.
-func runPortalMyHosts(ctx context.Context, client *portalClient, sshConfigPath string, access gatewayapi.AccessResponse) error {
+func runPortalMyHosts(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath string, access gatewayapi.AccessResponse) error {
 	if len(access.Hosts) == 0 {
 		runAcknowledgePrompt("My Hosts\n\n(no accessible hosts in this gateway's scope)")
 		return nil
@@ -208,7 +214,7 @@ func runPortalMyHosts(ctx context.Context, client *portalClient, sshConfigPath s
 	if err != nil || choice == len(entries) {
 		return nil
 	}
-	return runPortalHostDetail(ctx, client, sshConfigPath, entries[choice].host)
+	return runPortalHostDetail(ctx, client, credentials, sshConfigPath, access.User, entries[choice].host)
 }
 
 const (
@@ -220,7 +226,7 @@ const (
 // confirmation first — defaulting to "no" when the host's sudo scope is
 // broad (root-equivalent) — since a single wrong row picked from My Hosts
 // used to drop straight into a live session with no chance to back out.
-func runPortalHostDetail(ctx context.Context, client *portalClient, sshConfigPath string, h gatewayapi.HostJSON) error {
+func runPortalHostDetail(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath, username string, h gatewayapi.HostJSON) error {
 	choice, err := runSelectPrompt("", portalHostDetail(h), []string{portalActionConnect, portalBackChoice})
 	if err != nil || choice == 1 {
 		return nil
@@ -228,7 +234,7 @@ func runPortalHostDetail(ctx context.Context, client *portalClient, sshConfigPat
 	if !runConfirmPrompt("", portalConnectConfirmQuestion(h), !portalSudoScopeIsBroad(h.Sudo.Scope)) {
 		return nil
 	}
-	return connectToHost(ctx, client, sshConfigPath, h.FQDN)
+	return connectToHost(ctx, client, credentials, sshConfigPath, username, h.FQDN)
 }
 
 // portalSudoScopeIsBroad reports whether scope grants root-equivalent

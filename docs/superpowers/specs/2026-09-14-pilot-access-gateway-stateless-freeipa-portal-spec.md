@@ -37,6 +37,8 @@ gotcha/deviation/bug（含幾個修正過的自我誤判，見 Phase 7 的 syste
 **2026-09-15 事後政策變更**：`pilot-access-gateway` 的 contract `site.include` 從本文件原訂的 `false`（single-component-only/opt-in）改成 `true`，`playbooks/site.yml` 也補上對應的 `import_playbook`。使用者明確決定：把 `pilot-access-gateway` 加進某台主機 `hosts.yml` 的 roles 清單，本身就是操作者的核准動作，之後每次全站部署都會照常套用這個角色，跟其他角色的語意一致，不用每次額外單獨呼叫。§0 G4/§55.1 的鎖定回歸測試規則本身沒有改變——**只是核准時機點從「每次部署都要重新確認」改成「第一次把這個 role 加進某台主機的當下」**。起因是兩次真的事故：全站部署從架構上就無法跑到這個元件（`site.yml` 從沒 import 過），但 `pilot deploy` wizard 仍把它列為「已部署」，一次還被記成 delivery 歷史的 `success` run。見 `docs/verification/pilot-access-gateway.md` §5、`cmd/pilot/cmd/site_yml_consistency_test.go`。
 
 **2026-09-15 事後 bug 修正**：`freeipa_servers`/`ipa_realm` 這兩個 contract groupVar 從 `required: true` 改成 `required: false`。真實站台（非 vm-target demo）實測時發現：`group_vars/pilot-access-gateway.yml` 若還是複製自 `.example.yml` 但沒填完的狀態（`freeipa_servers: []`/`ipa_realm: ""`），`pilot deploy` 的 contract 完整性檢查會直接擋下（連 ansible 都還沒跑），即使該站台的 `group_vars/freeipa.yml` 早就有正確的 `freeipa_domain`。現在比照 `freeipa-client-apply.yml` 自己既有的推導慣例（`realm = 大寫(domain)`、`server = ipa1.<domain>`）自動推導，同一份 inventory 上其他 freeipa-client 主機已經用同一套慣例 enroll 成功，代表這個推導對該站台是可信的。明確填值仍然優先。見 `docs/verification/pilot-access-gateway.md` §5、`playbooks/apply/pilot-access-gateway-apply.yml` 的 `gateway_effective_ipa_realm`/`gateway_effective_freeipa_servers`。
+
+**2026-09-16 credential policy 追加**：第一跳允許使用 SSH public key 進入 ForceCommand Portal。當 Portal session 沒有可用的使用者 Kerberos cache 時，`pilot portal` 會在 TTY 以不回顯方式要求該 SSH 使用者的 FreeIPA/Kerberos 密碼，用 fixed-argv `kinit` 在 user-owned runtime temp dir 建立 session-scoped ccache，再以 GSSAPI-only 的受控 SSH 連 target。密碼不得進 argv/env/log；Portal 結束清除自己建立的 ccache；cache 遺失或逾期則重新要求。這仍符合 stateless：允許的是 `/run`/`/tmp` 的 ephemeral credential，不新增 DB 或 persistent application state。代價是 Portal 從 credential-blind 改為短暫處理使用者密碼與 TGT，威脅模型以本段為準。
 > Date: 2026-09-08
 > Revised: 2026-09-14 — 加入 §0 Implementation Readiness Gates，修正 §51 contract 欄位以符合 `internal/contract.Contract` 實際 schema，補 §11.1/§55/§60 的驗收門檻
 > Repository: `https://github.com/kjelly/pilot`
@@ -227,6 +229,8 @@ My Hosts / sudo
        |
        v
 Connect
+       |
+       +-- valid user TGT? no -> masked Kerberos password -> session kinit
        |
        v
 /usr/bin/ssh -F /etc/pilot/ssh_config <fqdn>
@@ -2063,7 +2067,7 @@ scope override
 
 target只來自 `pilot-access-gateway` response。
 
-Portal不使用 Gateway service keytab作 onward SSH。
+Portal不使用 Gateway service keytab作 onward SSH。Portal 只可使用 SSH session 已委派的使用者 credential，或以該 SSH 使用者自己輸入的 Kerberos 密碼建立 session-scoped ccache；不得用 service principal impersonate 使用者。
 
 Remote identity必須仍為：
 
@@ -2119,10 +2123,13 @@ Host *
     GlobalKnownHostsFile /etc/pilot/ssh_known_hosts
 
     GSSAPIAuthentication yes
-    GSSAPIDelegateCredentials yes
+    GSSAPIDelegateCredentials no
+    PreferredAuthentications gssapi-with-mic
 
-    KbdInteractiveAuthentication yes
-    PasswordAuthentication yes
+    BatchMode yes
+    PubkeyAuthentication no
+    KbdInteractiveAuthentication no
+    PasswordAuthentication no
 
     RequestTTY force
 ```
@@ -2142,6 +2149,24 @@ StrictHostKeyChecking yes
 ```
 
 Production不做 runtime TOFU。
+
+### 32.1 Session-scoped Kerberos credential
+
+Portal Connect 在 fresh authorize 成功後、啟動 SSH 前：
+
+```text
+1. 檢查目前 ccache 是否有效且 principal 屬於目前 SSH 使用者
+2. 有效：直接重用
+3. 無效/不存在：遮罩提示 Kerberos 密碼
+4. fixed argv 執行 /usr/bin/kinit -F -l 1h -c FILE:<session-cache> <ssh-user>
+5. child ssh 只取得 KRB5CCNAME=FILE:<session-cache>，不取得密碼
+6. cache 逾期/遺失：下一次 Connect 重新提示
+7. Portal 離開：kdestroy + 移除 Portal 自建 runtime dir
+```
+
+密碼不得出現在 command argv、environment、audit、trace 或錯誤訊息。principal 必須由 Gateway API 回傳的 peer identity 固定，使用者不能輸入另一個 principal。Portal 不得刪除繼承進來、不是自己建立的 delegated ccache。
+
+`sshd PasswordAuthentication no` 與此流程不衝突：`kinit` 直接和 KDC 溝通，不是 SSH password authentication。Portal→target 的 client policy 必須 fail closed；GSSAPI 失敗時直接回 Portal，不得顯示 target password prompt。
 
 ---
 
@@ -3833,5 +3858,3 @@ EffectiveMembers(gateway.target_hostgroup)
 一句話：
 
 > **每台 `pilot-access-gateway` 都是一個可隨時替換的 stateless access gateway；同 scope 的多台節點共享同一 FreeIPA target hostgroup，不同 scope 的節點彼此隔離。使用者看到的是「這個 Gateway 能帶他去哪裡」，而不是整個公司的所有 FreeIPA 權限。**
-
-

@@ -1,8 +1,10 @@
 // portal.go implements `pilot portal` — the user-facing TUI entry point
-// for pilot-access-gateway (spec.md §27/§28). It never reads roster,
-// inventory, or a FreeIPA credential itself; it only ever talks to
-// pilot-access-gateway over its local Unix socket, and never as a
-// different Gateway/scope than whichever gateway that socket belongs to.
+// for pilot-access-gateway (spec.md §27/§28). It never reads roster or
+// inventory; its only FreeIPA credential is an ephemeral user ccache used by
+// controlled Connect sessions (spec.md §32.1). Authorization still comes
+// exclusively from pilot-access-gateway over its local Unix socket, and never
+// from a different Gateway/scope than whichever gateway that socket belongs
+// to.
 package cmd
 
 import (

@@ -70,6 +70,14 @@
 
     pilot_gateway_user: pilot-gateway
 
+    # `pilot portal` obtains a short-lived user TGT when an SSH-key login did
+    # not delegate one. These packages provide the fixed-argv kinit/klist/
+    # kdestroy binaries used by that session-scoped helper. freeipa-client
+    # normally brings them in already; declaring them here keeps this role's
+    # runtime dependency explicit and self-healing.
+    gateway_kerberos_client_packages_debian: [krb5-user]
+    gateway_kerberos_client_packages_redhat: [krb5-workstation]
+
     pilot_binary_sha256: ""
     pilot_access_gateway_binary_sha256: ""
 
@@ -250,6 +258,32 @@
       tags: [always]
 
   tasks:
+    - name: "Install Portal Kerberos client tools (Debian)"
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [AG33]
+      vars:
+        pilot_apt_packages: "{{ gateway_kerberos_client_packages_debian }}"
+        pilot_apt_policy: tolerant
+        pilot_apt_component: pilot-access-gateway-kerberos-client
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
+      tags: [AG33]
+
+    - name: "Install Portal Kerberos client tools (RedHat)"
+      ansible.builtin.dnf:
+        name: "{{ gateway_kerberos_client_packages_redhat }}"
+        state: present
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'RedHat'
+      tags: [AG33]
+
     # Step 2 (spec.md §55): verify FreeIPA client enrollment.
     - name: "Step 2: verify FreeIPA client enrollment"
       ansible.builtin.stat:
@@ -715,13 +749,17 @@
               GlobalKnownHostsFile /var/lib/sss/pubconf/known_hosts
 
               GSSAPIAuthentication yes
-              GSSAPIDelegateCredentials yes
+              GSSAPIDelegateCredentials no
+              PreferredAuthentications gssapi-with-mic
 
-              KbdInteractiveAuthentication yes
-              PasswordAuthentication yes
+              BatchMode yes
+              PubkeyAuthentication no
+              KbdInteractiveAuthentication no
+              PasswordAuthentication no
 
               RequestTTY force
-      tags: [AG_config]
+        validate: '/usr/bin/ssh -G -F %s target.invalid'
+      tags: [AG_config, AG32]
 
     # Remove the stale ssh-keyscan snapshot an older version of this
     # playbook installed — /etc/pilot/ssh_config no longer references it

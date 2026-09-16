@@ -55,10 +55,13 @@ const pilotSSHConfig = `Host *
     GlobalKnownHostsFile /var/lib/sss/pubconf/known_hosts
 
     GSSAPIAuthentication yes
-    GSSAPIDelegateCredentials yes
+    GSSAPIDelegateCredentials no
+    PreferredAuthentications gssapi-with-mic
 
-    KbdInteractiveAuthentication yes
-    PasswordAuthentication yes
+    BatchMode yes
+    PubkeyAuthentication no
+    KbdInteractiveAuthentication no
+    PasswordAuthentication no
 
     RequestTTY force
 `
@@ -69,8 +72,11 @@ const pilotSSHConfig = `Host *
 // only caller (connectToHost, below) only ever passes the Target field
 // of a fresh ConnectAuthorize response — never anything the user typed
 // directly into a prompt.
-func buildConnectSSHCmd(sshConfigPath, target string) *exec.Cmd {
+func buildConnectSSHCmd(sshConfigPath, target, credentialCache string) *exec.Cmd {
 	cmd := exec.Command(sshBinaryPath, "-F", sshConfigPath, target)
+	if credentialCache != "" {
+		cmd.Env = replaceProcessEnv(os.Environ(), "KRB5CCNAME", credentialCache)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -107,7 +113,7 @@ var sshLauncher = func(cmd *exec.Cmd) error { return cmd.Run() }
 // the right state for the next prompt's Program to start — no
 // suspend/resume machinery is needed, and adding tea.ExecProcess would
 // only reintroduce complexity this architecture doesn't have a use for.
-func connectToHost(ctx context.Context, client *portalClient, sshConfigPath, fqdn string) error {
+func connectToHost(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath, username, fqdn string) error {
 	authz, err := client.ConnectAuthorize(ctx, fqdn)
 	if err != nil {
 		runConfirmPrompt("", fmt.Sprintf("Connect failed.\n\n%v", err), true)
@@ -117,7 +123,12 @@ func connectToHost(ctx context.Context, client *portalClient, sshConfigPath, fqd
 		runConfirmPrompt("", "Access changed.\nConnection was not started.", true)
 		return nil
 	}
-	if err := sshLauncher(buildConnectSSHCmd(sshConfigPath, authz.Target)); err != nil {
+	cache, err := credentials.Ensure(ctx, username)
+	if err != nil {
+		runConfirmPrompt("", fmt.Sprintf("Kerberos authentication failed.\n\n%v", err), true)
+		return nil
+	}
+	if err := sshLauncher(buildConnectSSHCmd(sshConfigPath, authz.Target, cache)); err != nil {
 		runConfirmPrompt("", fmt.Sprintf("SSH session ended with an error.\n\n%v", err), true)
 	}
 	return nil

@@ -1,6 +1,6 @@
 # Verification Spec — Pilot Access Gateway
 
-> 版本：DRAFT v0.4（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5）
+> 版本：DRAFT v0.5（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；AG32-AG33 為 2026-09-16 新增的 Portal session-scoped `kinit` / GSSAPI-only Connect 契約，待本次 vm-target 實測後補 evidence；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5）
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md（Pilot Access Gateway — Stateless FreeIPA-backed Portal），§50-§58
 > 維護者：sre
 
@@ -9,8 +9,8 @@
 | 項目 | 值 |
 |------|----|
 | Inventory group | `pilot-access-gateway`（或明確 `target_group`） |
-| 角色 | stateless、read-only、FreeIPA-backed SSH/sudo access gateway 後端（`pilot-access-gateway.service`）+ 使用者 TUI 入口（`pilot portal`） |
-| 前置需求 | 已是 FreeIPA client（`freeipa-client-apply.yml`）且有轉發 DNS 記錄；`pilot-target-<scope>` hostgroup 已由 `pilot gateway-scope reconcile` 建立（Phase 6）。Portal 使用者群組（`gateway_portal_user_group`）與 `pilot-access-gateway-login` HBAC rule **不再需要操作者手動用 freeipa-identity roster 預先建立**——2026-09-15 起本 playbook 自己 idempotent 建立兩者（見 §5 gotcha），只有「群組成員（誰是 portal user）」仍是 roster 管的身分資料 |
+| 角色 | stateless、read-only、FreeIPA-backed SSH/sudo access gateway 後端（`pilot-access-gateway.service`）+ 使用者 TUI 入口（`pilot portal`）；Portal 可在 session 內短暫取得使用者 TGT，但不得保存密碼或 persistent ccache |
+| 前置需求 | 已是 FreeIPA client（`freeipa-client-apply.yml`）且有轉發 DNS 記錄；主機具備 `kinit`/`klist`/`kdestroy`；`pilot-target-<scope>` hostgroup 已由 `pilot gateway-scope reconcile` 建立（Phase 6）。Portal 使用者群組（`gateway_portal_user_group`）與 `pilot-access-gateway-login` HBAC rule **不再需要操作者手動用 freeipa-identity roster 預先建立**——2026-09-15 起本 playbook 自己 idempotent 建立兩者（見 §5 gotcha），只有「群組成員（誰是 portal user）」仍是 roster 管的身分資料 |
 | 套用範圍 | 單一 gateway 主機的安裝；`pilot_access_gateway_install_forcecommand` **預設已改為 `true`**（2026-09-14，在 §55.1 鎖定回歸測試已於 Phase 8 對 disposable vm-target 跑過並取得核准之後）——沒有明確帶 `-e pilot_access_gateway_install_forcecommand=false` 就會安裝 ForceCommand。**2026-09-15 起 `site.include: true`，不再是 single-component-only**：把 `pilot-access-gateway` 加進某台主機 `hosts.yml` 的 roles 清單，本身就是操作者的核准動作，之後每次全站部署（`playbooks/site.yml`）都會照常套用這個角色，跟其他角色（`docker`/`freeipa-client`……）的語意一致，不需要每次額外打 `--tags pilot-access-gateway`。§0 G4/§55.1 的規則本身沒有變——**只是核准時機點從「每次部署都要重新確認」改成「第一次把這個 role 加進某台主機的當下」**：把 role 加進 `hosts.yml` 之前，仍然要先在該主機（或同等的 disposable vm-target）跑過鎖定回歸測試，之後才能放心讓它隨全站部署自動套用 |
 | 風險等級 | **High（預設即安裝 ForceCommand，登入路徑劫持等級變更；2026-09-16 起 `pilot_access_gateway_portal_automember` 也預設 `true`，兩者相加代表「每個 FreeIPA 帳號」預設都會被劫持進 portal，不再只有 roster 明確列名的人）**——要暫時退回舊的 opt-in 行為，明確帶 `-e pilot_access_gateway_install_forcecommand=false` 和/或 `-e pilot_access_gateway_portal_automember=false` |
 
@@ -43,6 +43,8 @@
 | AG12 | scope | configured target hostgroup存在 | 0 | curl -s --unix-socket /run/pilot/access-gateway.sock http://localhost/v1/health \| grep -q '"target_scope":"ok"' |
 | AG19 | stateless | 沒有 local DB/state | 0 (empty) | test ! -d /var/lib/pilot |
 | AG30 | idempotency | 第二次 apply changed=0(多次重跑的性質,由 evidence doc 記錄,非單一 shell 指令可驗證) | 0 | true |
+| AG32 | ssh-policy | Portal Connect 只允許 GSSAPI，不委派 TGT 到 target，也不退回 password/kbd-interactive/pubkey | 0 | sh -c 'v="$(ssh -G -F /etc/pilot/ssh_config target.invalid 2>/dev/null)"; printf "%s\n" "$v" \| grep -qx "gssapiauthentication yes" && printf "%s\n" "$v" \| grep -qx "gssapidelegatecredentials no" && printf "%s\n" "$v" \| grep -qx "preferredauthentications gssapi-with-mic" && printf "%s\n" "$v" \| grep -qx "batchmode yes" && printf "%s\n" "$v" \| grep -qx "passwordauthentication no" && printf "%s\n" "$v" \| grep -qx "kbdinteractiveauthentication no" && printf "%s\n" "$v" \| grep -qx "pubkeyauthentication false"' |
+| AG33 | kerberos | Portal session ticket helper 依賴的 Kerberos client binaries存在 | 0 | test -x /usr/bin/kinit && test -x /usr/bin/klist && test -x /usr/bin/kdestroy |
 
 ## 3. 不在這份 checklist 逐行覆蓋、但已用其他方式驗證過的項目
 
@@ -59,6 +61,8 @@
 ## 4. Phase 8 完成的項目（多主機/多 session 性質，非單一 host 的 shell checklist row）
 
 - **AG20 portal ForceCommand / AG21 admin shell unaffected / AG25 remote whoami == portal user**：spec.md §55.1 的 3 步鎖定回歸測試已對 `ag-gw01`（disposable vm-target）完整跑過並取得人員核准（見 Phase 8 evidence doc）：(1) `alice`（`role-pilot-portal-user` 成員）SSH 登入直接進入 `pilot portal` TUI，畫面顯示 `User alice`，Ctrl+C 結束整個連線而非取得 shell，`ssh alice@host whoami`（無 PTY）不執行請求的指令、exit 1；(2) `root`（非 portal-user）SSH 登入拿到完全正常的 interactive shell（`whoami` → `root`）；(3) 把旗標設回 `false` 重新 apply，drop-in 被移除、sshd reload，兩種帳號都恢復正常 shell（`alice` 的 `whoami` → `alice`）。過程中還發現並修正一個真的可用性 gap：新增了 rollback 用的 Step 19/20/21 對應任務，讓旗標從 `true` 改回 `false` 時 playbook 會真的移除 drop-in，而不是只是跳過重新安裝。
+
+- **AG32/AG33 session-scoped Kerberos login E2E**：第一跳用 SSH key 進 Portal；Connect 時由 Portal 以遮罩輸入取得該 SSH 使用者的 Kerberos 密碼，固定 principal 為該使用者、以 fixed argv `kinit -F -l 1h` 取得不可轉送的一小時 TGT、把 ccache 放在 user-owned runtime temp dir；同一 Portal session 重用有效 TGT，失效/遺失後重新提示；Portal 結束只清理自己建立的 ccache。目標主機停用 password/kbd-interactive 時仍須以 GSSAPI 成功，且失敗時不得出現 target password prompt。本項需以互動 TUI vm-target evidence 驗證，不能只靠 checklist 靜態設定。
 
   **2026-09-15 補充（`scripts/pilot-access-gateway-lockout-test.sh`）**：上面 3 步測試只涵蓋「無 PTY 時指令不執行」跟「root 不受影響」，沒有涵蓋其他標準的 restricted-shell 逃逸手法。已把當天對 `ag-gw01`/`ag-gw02` 活體驗證過的 5 類額外探測寫成可重跑腳本（假設 ForceCommand 已經是啟用狀態，純讀取、不會 mutate 任何東西）：(1) `ssh -tt` 帶指令注入，用 gateway 上的即時 process tree 證明注入的指令從未執行、只跑了 `pilot-session`→`pilot portal`；(2) client 端 `-o RemoteCommand=...` 覆寫；(3) local port forwarding，用 server 端真的回傳 `administratively prohibited` 的 channel 拒絕證明，不只是 client 行為；(4) SFTP subsystem 請求；(5) `sshd -T -C` 對 portal group 實際生效的 `ForceCommand`/`DisableForwarding`/`PermitUserRC`/`X11Forwarding`/`AllowTcpForwarding`/`AllowAgentForwarding`/`PermitTunnel`。對 `ag-gw01`/`ag-gw02` 兩台都跑過，11 項全過。
 - **AG26 same-scope gateways return equivalent target set / AG27 different-scope gateways return isolated target sets**：新增第二台 gateway `ag-gw02`。先設成與 `ag-gw01` 相同的 `scope=gpu`（`gateway_id=gpu-02`），對 `alice` 查詢 `/v1/access`，兩台回傳的 `hosts` 陣列（`gpu-a`/`gpu-b`，含相同 HBAC/sudo rule 名稱）逐字元相同，只有 `gateway.id` 不同（AG26）。接著把 `ag-gw02` 重新設成 `scope=dmz`（新建的 `pilot-target-dmz` hostgroup，成員 `dmz-a`），並額外幫 `alice` 建一條真的 HBAC rule（`pilot-grant-login-dmz-test`）授予她對 `dmz-a` 的 sshd 存取——此時 `ag-gw01`（`scope=gpu`）完全看不到 `dmz-a`（即使 alice 對它有真實權限），`ag-gw02`（`scope=dmz`）也完全看不到 `gpu-a`/`gpu-b`，證明每台 gateway 的交集運算只吃自己的 `target_hostgroup`，不會因為使用者在別的 scope 有權限就外溢（見 Phase 8 evidence doc 的完整 curl 輸出）。

@@ -53,6 +53,8 @@ traceability:
     "docs/verification/pilot-access-gateway.md#AG06": {tags: [AG06], reason: "capability probe task (step 17) exercises the same real ping the check re-verifies"}
     "docs/verification/pilot-access-gateway.md#AG09": {tags: [AG09], reason: "systemd socket unit install + start tasks"}
     "docs/verification/pilot-access-gateway.md#AG12": {tags: [AG12], reason: "step 18's own configured-hostgroup assertion"}
+    "docs/verification/pilot-access-gateway.md#AG32": {tags: [AG32], reason: "root-owned Portal SSH config enforces GSSAPI-only target authentication with no credential delegation or fallback"}
+    "docs/verification/pilot-access-gateway.md#AG33": {tags: [AG33], reason: "Kerberos client package tasks install kinit, klist, and kdestroy for session-scoped Portal credentials"}
   exemptions:
     "docs/verification/pilot-access-gateway.md#AG19": {kind: structural-absence, tags: [], reason: "no task in this playbook ever writes under /var/lib/pilot — absence is structural, not produced by a specific task"}
     "docs/verification/pilot-access-gateway.md#AG30": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task"}
