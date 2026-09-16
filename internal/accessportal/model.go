@@ -46,9 +46,10 @@ type UserAccess struct {
 
 // HostAccess is one host's SSH/sudo access summary within this gateway's scope.
 type HostAccess struct {
-	FQDN string
-	SSH  SSHAccess
-	Sudo SudoAccess
+	FQDN        string
+	SSH         SSHAccess
+	Sudo        SudoAccess
+	Annotations map[string]string
 }
 
 // SSHAccess reports HBAC(sshd)-derived access to one host.

@@ -15,6 +15,8 @@ import (
 // docs/evidence/pilot-access-gateway/2026-09-14-phase2-accessportal.md.
 type fakeProvider struct {
 	users             map[string]freeipaaccess.User
+	hosts             map[string]freeipaaccess.Host
+	hostShowErr       map[string]error
 	hostgroups        map[string]freeipaaccess.Hostgroup
 	hbacRules         []freeipaaccess.HBACRule
 	hbacServiceGroups map[string]freeipaaccess.HBACServiceGroup
@@ -45,6 +47,12 @@ func (f *fakeProvider) GroupShow(ctx context.Context, name string) (freeipaacces
 }
 
 func (f *fakeProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
+	if err, ok := f.hostShowErr[fqdn]; ok {
+		return freeipaaccess.Host{}, err
+	}
+	if h, ok := f.hosts[fqdn]; ok {
+		return h, nil
+	}
 	return freeipaaccess.Host{FQDN: fqdn}, nil
 }
 

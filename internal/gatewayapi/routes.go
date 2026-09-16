@@ -155,8 +155,9 @@ func toHostJSON(h accessportal.HostAccess) HostJSON {
 		sudoRules = append(sudoRules, r.Rule)
 	}
 	return HostJSON{
-		FQDN: h.FQDN,
-		SSH:  SSHJSON{Allowed: h.SSH.Allowed, Rules: sshRules},
-		Sudo: SudoJSON{Scope: h.Sudo.Scope, AllowCommands: h.Sudo.AllowCommands, DenyCommands: h.Sudo.DenyCommands, Rules: sudoRules},
+		FQDN:        h.FQDN,
+		SSH:         SSHJSON{Allowed: h.SSH.Allowed, Rules: sshRules},
+		Sudo:        SudoJSON{Scope: h.Sudo.Scope, AllowCommands: h.Sudo.AllowCommands, DenyCommands: h.Sudo.DenyCommands, Rules: sudoRules},
+		Annotations: h.Annotations,
 	}
 }

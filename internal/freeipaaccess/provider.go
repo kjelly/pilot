@@ -86,8 +86,18 @@ type Group struct {
 }
 
 // Host is a normalized host_show(all=true) result.
+//
+// Annotations is parsed from the host's userClass values that carry the
+// "pilot.annotation." prefix (docs/superpowers/specs/2026-09-09-host-
+// annotations-freeipa-sync-spec.md) — non-secret asset metadata like
+// owner/project/location an operator attached via `pilot edit`. This
+// package deliberately does not import internal/inventory (spec.md §17/
+// §18: pilot-access-gateway has no roster/inventory dependency), so the
+// prefix and parsing are duplicated locally in normalize.go rather than
+// shared with internal/inventory.SerializeAnnotation's counterpart.
 type Host struct {
-	FQDN string
+	FQDN        string
+	Annotations map[string]string
 }
 
 // Hostgroup is a normalized hostgroup_show(all=true) result.

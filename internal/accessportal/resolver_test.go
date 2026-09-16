@@ -163,6 +163,75 @@ func TestLoadUserAccess_GPUScenario(t *testing.T) {
 // to hostcategory=all (which would match literally any host) while the
 // gateway's own target hostgroup still only contains gpu-a/gpu-b: the
 // unmanaged host must still never appear.
+// TestLoadUserAccess_Annotations proves LoadUserAccess enriches each
+// allowed host with its host_show-derived annotations (docs/superpowers/
+// specs/2026-09-09-host-annotations-freeipa-sync-spec.md), and that a host
+// with none gets a nil map rather than an error.
+func TestLoadUserAccess_Annotations(t *testing.T) {
+	p := gpuScenarioProvider()
+	p.hosts = map[string]freeipaaccess.Host{
+		"gpu-a.ipa.pilot.internal": {
+			FQDN:        "gpu-a.ipa.pilot.internal",
+			Annotations: map[string]string{"owner": "ai-platform-team", "project": "alpha"},
+		},
+	}
+	r := &Resolver{
+		Provider: p,
+		Gateway:  GatewayConfig{ID: "gpu-01", Scope: "gpu", TargetHostgroup: "pilot-target-gpu"},
+		Now:      func() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) },
+	}
+	access, err := r.LoadUserAccess(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LoadUserAccess: %v", err)
+	}
+	byFQDN := map[string]HostAccess{}
+	for _, h := range access.Hosts {
+		byFQDN[h.FQDN] = h
+	}
+	gotA := byFQDN["gpu-a.ipa.pilot.internal"].Annotations
+	wantA := map[string]string{"owner": "ai-platform-team", "project": "alpha"}
+	if len(gotA) != len(wantA) || gotA["owner"] != wantA["owner"] || gotA["project"] != wantA["project"] {
+		t.Fatalf("gpu-a Annotations = %v, want %v", gotA, wantA)
+	}
+	if got := byFQDN["gpu-b.ipa.pilot.internal"].Annotations; len(got) != 0 {
+		t.Fatalf("gpu-b Annotations = %v, want none (host_show returned no userclass)", got)
+	}
+}
+
+// TestLoadUserAccess_HostShowFailureDoesNotBreakListing proves annotations
+// are enrichment, not an authorization input: a host_show error for one
+// host must not take down the whole My Hosts listing the way an HBAC/sudo
+// resolution failure would (host still appears, SSH/Sudo access intact,
+// simply no Annotations).
+func TestLoadUserAccess_HostShowFailureDoesNotBreakListing(t *testing.T) {
+	p := gpuScenarioProvider()
+	p.hostShowErr = map[string]error{
+		"gpu-a.ipa.pilot.internal": &freeipaaccess.RPCError{Name: "NotFound", Message: "transient"},
+	}
+	r := &Resolver{
+		Provider: p,
+		Gateway:  GatewayConfig{ID: "gpu-01", Scope: "gpu", TargetHostgroup: "pilot-target-gpu"},
+		Now:      func() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) },
+	}
+	access, err := r.LoadUserAccess(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LoadUserAccess: %v, want no error despite host_show failing for one host", err)
+	}
+	if len(access.Hosts) != 2 {
+		t.Fatalf("Hosts = %+v, want 2 (host_show failure must not drop the host)", access.Hosts)
+	}
+	for _, h := range access.Hosts {
+		if h.FQDN == "gpu-a.ipa.pilot.internal" {
+			if len(h.Annotations) != 0 {
+				t.Fatalf("gpu-a Annotations = %v, want none after host_show error", h.Annotations)
+			}
+			if !h.SSH.Allowed {
+				t.Fatalf("gpu-a SSH.Allowed = false, want true — host_show failure must not affect authorization")
+			}
+		}
+	}
+}
+
 func TestLoadUserAccess_UnmanagedHostExcludedEvenWithHostCategoryAll(t *testing.T) {
 	p := gpuScenarioProvider()
 	p.hbacRules[0].HostCategoryAll = true

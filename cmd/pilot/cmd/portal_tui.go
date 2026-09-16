@@ -152,13 +152,39 @@ func resolvePortalHostEntries(ctx context.Context, hosts []gatewayapi.HostJSON) 
 }
 
 func portalHostListLabel(e portalHostEntry) string {
-	if e.resolvable && len(e.addresses) > 0 {
-		return fmt.Sprintf("%s  [IP: %s]", e.host.FQDN, strings.Join(e.addresses, ", "))
+	label := e.host.FQDN
+	switch {
+	case e.resolvable && len(e.addresses) > 0:
+		label += fmt.Sprintf("  [IP: %s]", strings.Join(e.addresses, ", "))
+	case !e.resolvable:
+		label += "  ⚠ DNS lookup failed"
 	}
-	if e.resolvable {
-		return e.host.FQDN
+	if summary := portalAnnotationsSummary(e.host.Annotations); summary != "" {
+		label += "  [" + summary + "]"
 	}
-	return e.host.FQDN + "  ⚠ DNS lookup failed"
+	return label
+}
+
+// portalAnnotationsSummary renders a host's annotations (owner/project/
+// location/... — docs/superpowers/specs/2026-09-09-host-annotations-
+// freeipa-sync-spec.md) as a compact, deterministically ordered one-line
+// hint for the My Hosts list row. The full key/value block lives in
+// portalHostDetail; this is purely a "does this host have notes worth
+// opening the detail screen for" signal.
+func portalAnnotationsSummary(annotations map[string]string) string {
+	if len(annotations) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(annotations))
+	for k := range annotations {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+annotations[k])
+	}
+	return strings.Join(parts, ", ")
 }
 
 // runPortalMyHosts lists exactly the hosts spec.md §9.3 says My Hosts
@@ -169,7 +195,7 @@ func portalHostListLabel(e portalHostEntry) string {
 // signal the gateway's authorization data can't express.
 func runPortalMyHosts(ctx context.Context, client *portalClient, sshConfigPath string, access gatewayapi.AccessResponse) error {
 	if len(access.Hosts) == 0 {
-		runConfirmPrompt("", "My Hosts\n\n(no accessible hosts in this gateway's scope)", true)
+		runAcknowledgePrompt("My Hosts\n\n(no accessible hosts in this gateway's scope)")
 		return nil
 	}
 	entries := resolvePortalHostEntries(ctx, access.Hosts)
@@ -244,6 +270,17 @@ func portalHostDetail(h gatewayapi.HostJSON) string {
 	}
 	if len(h.Sudo.Rules) > 0 {
 		fmt.Fprintf(&b, "Sudo rules: %s\n", strings.Join(h.Sudo.Rules, ", "))
+	}
+	if len(h.Annotations) > 0 {
+		b.WriteString("\nAnnotations:\n")
+		keys := make([]string, 0, len(h.Annotations))
+		for k := range h.Annotations {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&b, "  %s: %s\n", k, h.Annotations[k])
+		}
 	}
 	return b.String()
 }

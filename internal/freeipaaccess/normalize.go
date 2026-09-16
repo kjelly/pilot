@@ -3,8 +3,39 @@ package freeipaaccess
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
+
+// pilotAnnotationPrefix mirrors internal/inventory.AnnotationUserClassPrefix
+// verbatim (see Host's doc comment for why it is duplicated rather than
+// imported).
+const pilotAnnotationPrefix = "pilot.annotation."
+
+// parseAnnotations extracts "pilot.annotation.<key>=<value>" entries from a
+// host's raw userClass values. Malformed entries (no "=", or an empty key)
+// are silently skipped rather than erroring — this is a read-only display
+// path, not the write-side validator (internal/inventory.ValidateAnnotations
+// already gates what can be written), and a stray foreign or hand-edited
+// userClass value must never break the portal.
+func parseAnnotations(userClass []string) map[string]string {
+	var out map[string]string
+	for _, uc := range userClass {
+		rest, ok := strings.CutPrefix(uc, pilotAnnotationPrefix)
+		if !ok {
+			continue
+		}
+		key, value, ok := strings.Cut(rest, "=")
+		if !ok || key == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[key] = value
+	}
+	return out
+}
 
 // This file parses FreeIPA's non-raw (all=true, no raw=true) *_show/*_find
 // attribute maps into this package's normalized types.
@@ -144,7 +175,10 @@ func parseGroup(m map[string]any) Group {
 }
 
 func parseHost(m map[string]any) Host {
-	return Host{FQDN: attrString(m, "fqdn")}
+	return Host{
+		FQDN:        attrString(m, "fqdn"),
+		Annotations: parseAnnotations(attrStrings(m, "userclass")),
+	}
 }
 
 func parseHostgroup(m map[string]any) Hostgroup {

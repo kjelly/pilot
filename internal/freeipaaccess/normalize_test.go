@@ -108,6 +108,49 @@ func TestParseHost(t *testing.T) {
 	if h.FQDN != "gpu-a.ipa.pilot.internal" {
 		t.Fatalf("FQDN = %q", h.FQDN)
 	}
+	if len(h.Annotations) != 0 {
+		t.Fatalf("Annotations = %v, want empty (fixture has no userclass)", h.Annotations)
+	}
+}
+
+// TestParseAnnotations is a pure unit test of this package's own
+// userClass-splitting logic, not a captured-fixture test (there is no
+// external CLI/API output being simulated here — attrStrings already
+// normalizes FreeIPA's wire format into a plain []string, and this
+// function's whole job is splitting "pilot.annotation.<key>=<value>"
+// entries out of that, which live-captured coverage is at TestParseHost
+// and the vm-target evidence doc, not here).
+func TestParseAnnotations(t *testing.T) {
+	got := parseAnnotations([]string{
+		"pilot.annotation.owner=ai-platform-team",
+		"pilot.annotation.project=alpha",
+		"some-foreign-userclass-value",  // no prefix at all
+		"pilot.annotation.",             // prefix with nothing after it (no "=")
+		"pilot.annotation.=orphan-value", // empty key
+		"pilot.annotation.note=has=equals=signs",
+	})
+	want := map[string]string{
+		"owner":   "ai-platform-team",
+		"project": "alpha",
+		"note":    "has=equals=signs",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parseAnnotations = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("parseAnnotations[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+func TestParseAnnotationsEmpty(t *testing.T) {
+	if got := parseAnnotations(nil); got != nil {
+		t.Fatalf("parseAnnotations(nil) = %v, want nil", got)
+	}
+	if got := parseAnnotations([]string{"no-prefix-here"}); got != nil {
+		t.Fatalf("parseAnnotations(no matching prefix) = %v, want nil", got)
+	}
 }
 
 func TestParseHostgroup(t *testing.T) {

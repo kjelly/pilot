@@ -30,9 +30,10 @@ type AccessResponse struct {
 
 // HostJSON is one host entry in AccessResponse / the GET /v1/access/{fqdn} response.
 type HostJSON struct {
-	FQDN string   `json:"fqdn"`
-	SSH  SSHJSON  `json:"ssh"`
-	Sudo SudoJSON `json:"sudo"`
+	FQDN        string            `json:"fqdn"`
+	SSH         SSHJSON           `json:"ssh"`
+	Sudo        SudoJSON          `json:"sudo"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type SSHJSON struct {

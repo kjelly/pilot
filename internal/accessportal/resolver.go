@@ -140,7 +140,16 @@ func (r *Resolver) LoadUserAccess(ctx context.Context, username string) (UserAcc
 			continue
 		}
 		sudo := resolveSudoAccess(sudoRules, now, username, effectiveGroups, fqdn, hostgroupHosts, commandGroupCommands)
-		result.Hosts = append(result.Hosts, HostAccess{FQDN: fqdn, SSH: ssh, Sudo: sudo})
+		// Annotations are display-only asset metadata, never an
+		// authorization input — a host_show failure (host deleted
+		// mid-session, transient LDAP hiccup, ...) must not take down the
+		// whole My Hosts listing the way an HBAC/sudo resolution failure
+		// would; the host just shows with no annotations.
+		var annotations map[string]string
+		if host, err := r.Provider.HostShow(ctx, fqdn); err == nil {
+			annotations = host.Annotations
+		}
+		result.Hosts = append(result.Hosts, HostAccess{FQDN: fqdn, SSH: ssh, Sudo: sudo, Annotations: annotations})
 	}
 	return result, nil
 }

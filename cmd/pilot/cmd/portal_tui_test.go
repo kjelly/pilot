@@ -180,6 +180,55 @@ func TestPortalHostListLabelShowsAllResolvedIPs(t *testing.T) {
 	}
 }
 
+// TestPortalHostListLabelShowsAnnotations proves a host's annotations
+// (owner/project/... — docs/superpowers/specs/2026-09-09-host-
+// annotations-freeipa-sync-spec.md) appear in the My Hosts list row, in
+// deterministic (sorted-by-key) order regardless of map iteration order.
+func TestPortalHostListLabelShowsAnnotations(t *testing.T) {
+	e := portalHostEntry{
+		host: gatewayapi.HostJSON{
+			FQDN:        "gpu-a.example.com",
+			Annotations: map[string]string{"project": "alpha", "owner": "ai-platform-team"},
+		},
+		resolvable: true,
+	}
+	want := "gpu-a.example.com  [owner=ai-platform-team, project=alpha]"
+	if got := portalHostListLabel(e); got != want {
+		t.Fatalf("portalHostListLabel() = %q, want %q", got, want)
+	}
+}
+
+func TestPortalHostListLabelNoAnnotationsOmitsBracket(t *testing.T) {
+	e := portalHostEntry{host: gatewayapi.HostJSON{FQDN: "gpu-a.example.com"}, resolvable: true}
+	if got := portalHostListLabel(e); got != "gpu-a.example.com" {
+		t.Fatalf("portalHostListLabel() = %q, want bare FQDN with no annotation bracket", got)
+	}
+}
+
+// TestPortalHostDetailShowsAnnotations proves the host detail screen
+// renders the full annotation key/value block (not just the list's
+// compact summary), sorted by key.
+func TestPortalHostDetailShowsAnnotations(t *testing.T) {
+	h := gatewayapi.HostJSON{
+		FQDN:        "gpu-a.example.com",
+		Annotations: map[string]string{"project": "alpha", "owner": "ai-platform-team"},
+	}
+	detail := portalHostDetail(h)
+	wantLines := []string{"Annotations:", "  owner: ai-platform-team", "  project: alpha"}
+	for _, want := range wantLines {
+		if !strings.Contains(detail, want) {
+			t.Errorf("portalHostDetail() = %q, want it to contain %q", detail, want)
+		}
+	}
+}
+
+func TestPortalHostDetailNoAnnotationsOmitsSection(t *testing.T) {
+	detail := portalHostDetail(gatewayapi.HostJSON{FQDN: "gpu-a.example.com"})
+	if strings.Contains(detail, "Annotations") {
+		t.Fatalf("portalHostDetail() = %q, want no Annotations section when there are none", detail)
+	}
+}
+
 // TestRunPortalHostDetailConnectDeclined proves declining the Connect
 // confirmation never launches ssh — the confirmation must actually gate
 // the action, not just decorate it.
