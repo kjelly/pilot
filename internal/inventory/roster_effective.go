@@ -108,6 +108,17 @@ func sortedSetKeysOrNil(m map[string]bool) []string {
 	return sortedSetKeys(m)
 }
 
+// sortedCopy dedupes and sorts a string list — used for pass-through
+// fields (sudo run_as/options) that need stable, deterministic wire order
+// but were never built up as a set during resolution.
+func sortedCopy(items []string) []string {
+	set := map[string]bool{}
+	for _, s := range items {
+		set[s] = true
+	}
+	return sortedSetKeysOrNil(set)
+}
+
 // EffectiveGroupMembers returns every username that is a member of
 // groupName, directly (membership.users) or transitively through nested
 // membership.groups.
@@ -217,6 +228,14 @@ func EffectiveHBACAccessFromRoster(root map[string]any) []EffectiveHBACAccess {
 // semantics are narrower than "allow minus deny", and this function does
 // not attempt to compute a final effective-permission set beyond what the
 // roster declares.
+//
+// DeniedCommands, RunAsUsers, RunAsGroups, and Options were added for the
+// outbound webhook's user_host_access_v1 projection (design spec §12.4),
+// which needs the full sudo rule shape, not just the allow-side summary
+// this struct originally reported. DeniedCommands is the resolved union
+// of deny.commands and deny.command_groups' commands (the same resolution
+// Commands already does for the allow side) — DeniedCommandGroups (group
+// names only) is kept unchanged for existing callers.
 type EffectiveSudoAccess struct {
 	Rule                string   `json:"rule"`
 	Users               []string `json:"users"`
@@ -225,6 +244,10 @@ type EffectiveSudoAccess struct {
 	AllCommands         bool     `json:"all_commands"`
 	Commands            []string `json:"commands,omitempty"`
 	DeniedCommandGroups []string `json:"denied_command_groups,omitempty"`
+	DeniedCommands      []string `json:"denied_commands,omitempty"`
+	RunAsUsers          []string `json:"run_as_users,omitempty"`
+	RunAsGroups         []string `json:"run_as_groups,omitempty"`
+	Options             []string `json:"options,omitempty"`
 }
 
 // EffectiveSudoAccessList resolves every rule in sudo.rules. Rules with
@@ -308,6 +331,21 @@ func EffectiveSudoAccessFromRoster(root map[string]any) []EffectiveSudoAccess {
 			}
 		}
 
+		deny := mapField(item, "deny")
+		deniedCommands := map[string]bool{}
+		for _, c := range stringListField(deny, "commands") {
+			deniedCommands[c] = true
+		}
+		for _, cg := range stringListField(deny, "command_groups") {
+			if group, ok := commandGroupsByName[cg]; ok {
+				for _, c := range stringListField(group, "commands") {
+					deniedCommands[c] = true
+				}
+			}
+		}
+
+		runAs := mapField(item, "run_as")
+
 		out = append(out, EffectiveSudoAccess{
 			Rule:                stringField(item, "name"),
 			Users:               sortedSetKeys(users),
@@ -315,7 +353,11 @@ func EffectiveSudoAccessFromRoster(root map[string]any) []EffectiveSudoAccess {
 			Hosts:               sortedSetKeysOrNil(hosts),
 			AllCommands:         allCommands,
 			Commands:            sortedSetKeysOrNil(commands),
-			DeniedCommandGroups: stringListField(mapField(item, "deny"), "command_groups"),
+			DeniedCommandGroups: stringListField(deny, "command_groups"),
+			DeniedCommands:      sortedSetKeysOrNil(deniedCommands),
+			RunAsUsers:          sortedCopy(stringListField(runAs, "users")),
+			RunAsGroups:         sortedCopy(stringListField(runAs, "groups")),
+			Options:             sortedCopy(stringListField(item, "options")),
 		})
 	}
 	return out

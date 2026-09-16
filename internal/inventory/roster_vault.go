@@ -8,10 +8,13 @@ package inventory
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ansibleVaultView decrypts path's ansible-vault-encrypted content into
@@ -86,6 +89,46 @@ func DecryptRosterToTempFile(path, vaultPasswordFile string) (tempPath string, c
 		return "", func() {}, fmt.Errorf("roster %s: close temp file: %w", path, err)
 	}
 	return tmpPath, cleanup, nil
+}
+
+// ViewEncryptedRoster decrypts the ansible-vault-encrypted roster at path
+// into memory using vaultPasswordFile, without writing anything to disk
+// — the exported counterpart of ansibleVaultView. Added for the outbound
+// webhook's state projection builder (design spec §11.6), which needs a
+// read-only, zero-temp-file decrypt path from outside this package,
+// stricter than DecryptRosterToTempFile's ephemeral-but-real temp file.
+func ViewEncryptedRoster(path, vaultPasswordFile string) ([]byte, error) {
+	return ansibleVaultView(path, vaultPasswordFile)
+}
+
+// ReadRosterAsMapWithVault reads the roster at path as a plain map,
+// transparently decrypting in memory via vaultPasswordFile when the file
+// is ansible-vault-encrypted (ReadRosterAsMapFile alone returns
+// ErrRosterEncrypted for those, and never touches vaultPasswordFile).
+// vaultPasswordFile may be empty for a plaintext roster; passing it for
+// an encrypted roster with no password file returns ErrRosterEncrypted
+// unchanged, so callers can distinguish "no password available" from
+// "decrypt failed" (design spec §11.6 point 4).
+func ReadRosterAsMapWithVault(path, vaultPasswordFile string) (map[string]any, error) {
+	root, err := readRosterAsMap(path)
+	if err == nil {
+		return root, nil
+	}
+	if !errors.Is(err, ErrRosterEncrypted) {
+		return nil, err
+	}
+	if vaultPasswordFile == "" {
+		return nil, err
+	}
+	plaintext, verr := ansibleVaultView(path, vaultPasswordFile)
+	if verr != nil {
+		return nil, fmt.Errorf("decrypt roster %s: %w", path, verr)
+	}
+	var out map[string]any
+	if uerr := yaml.Unmarshal(plaintext, &out); uerr != nil {
+		return nil, fmt.Errorf("parse decrypted roster %s: %w", path, uerr)
+	}
+	return out, nil
 }
 
 // MutateEncryptedRosterFile decrypts the ansible-vault-encrypted roster

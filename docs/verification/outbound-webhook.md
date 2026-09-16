@@ -43,20 +43,44 @@ implemented.
 
 - **Phase 0** recorded the intended checks only; no unit-test or
   actual-run evidence existed for any row.
-- **Phase 1** (this revision) lands `contract.Effects` (E1-E3 in
+- **Phase 1** landed `contract.Effects` (E1-E3 in
   `internal/contract/effects_test.go`), the §6.4 component/effect-set
   cross-layer lint (E4-E7 in
   `cmd/pilot/cmd/deploy_catalog_effects_test.go`), and the
   `integrations.yaml` parser/validator (`internal/outbound/config.go`,
   CFG1-CFG13 + CFG15-CFG16 in `internal/outbound/config_test.go`). This
-  makes **C1** (config strict parse) real and passing. CFG14
+  made **C1** (config strict parse) real and passing. CFG14
   (source/name-change/disabled → orphaned/paused semantics) is
   deferred to Phase 3, where `internal/outbound`'s outbox/store exists
   to actually hold the rows being reclassified — C1's probe already
   matches it by prefix (`^TestOutboundConfig_CFG`) so no row edit is
-  needed once it lands. C2-C30 remain not-yet-executable pending Phase
-  2 (projection/diff), Phase 3 (store/outbox/HTTP), and Phase 4
-  (workflow wiring).
+  needed once it lands.
+- **Phase 2** (this revision) lands the `user_host_access_v1` projection
+  builder (`internal/outbound/projection.go`/`projection_roster.go`,
+  P1-P27 in `internal/outbound/projection_test.go`) and the diff engine
+  (`internal/outbound/diff.go`, D1-D7 + D15 in
+  `internal/outbound/diff_test.go`), plus the `internal/inventory`
+  extensions this needed: `EffectiveSudoAccess` gained
+  `DeniedCommands`/`RunAsUsers`/`RunAsGroups`/`Options`
+  (`roster_effective.go`), `ViewEncryptedRoster`/
+  `ReadRosterAsMapWithVault` (`roster_vault.go`, in-memory-only
+  decrypt), and a new `external_projection.go` exposing typed
+  `ExternalUsers`/`ExternalGroups`/`ExternalHostgroups`/
+  `ExternalRosterHosts`/`ExternalEffectiveAccess` so this package never
+  has to reach into roster internals. This makes **C2, C5, C6, C7
+  (partially — P14 only; D7's own timestamp-independence half is also
+  covered), C15 (via P7/P8 shape — the workflow-level exactly-once
+  assertion is still Phase 4), C18, C19, C21, C22, C25 (partially —
+  projection only), C26 (partially), C28** real for the projection
+  layer specifically; their full acceptance still needs Phase 4's
+  workflow wiring to be genuinely end-to-end. D8-D14 (cursor/FIFO/
+  cross-process claim semantics) and C10/C12/C23/C30 are deferred to
+  Phase 3, where the outbox/store exists to hold a cursor at all — pure
+  `Diff()` has no notion of "ACKed" or "pending". P24's projection-level
+  half (an unavailable result never fabricates an empty snapshot) is
+  covered now; its event-envelope half (an unavailable/oversized event
+  omits the `snapshot`/`diff` JSON fields entirely) is deferred to
+  Phase 3's event.go.
 
 **Why `go test -run` probes instead of shell/ansible probes.** This
 feature's primary observable surface is a Go CLI + SQLite durable
@@ -81,8 +105,8 @@ row's probe never has to be renamed once its test exists:
 - `internal/contract/effects_test.go` — `TestContractEffects_E<1-3>` (design spec §46.2, contract-loader-only checks)
 - `cmd/pilot/cmd/deploy_catalog_effects_test.go` — `TestDeployCatalogEffects_E<4-7>` (design spec §46.2, cross-layer lint)
 - `internal/outbound/effect_match_test.go` — `TestOutboundEffectMatch_*` (design spec §6.2/§31 wildcard matching, not individually numbered upstream)
-- `internal/outbound/projection_test.go` / `projection_roster_test.go` — `TestOutboundProjection_P<1-27>` (design spec §46.3)
-- `internal/outbound/diff_test.go` — `TestOutboundDiff_D<1-15>` (design spec §46.4)
+- `internal/outbound/projection_test.go` — `TestOutboundProjection_P<1-27>` (design spec §46.3); P17/P22/P27 each split into lettered sub-tests (e.g. `P22a`/`P22b`) covering distinct scenarios the design spec's single-line description bundles together
+- `internal/outbound/diff_test.go` — `TestOutboundDiff_D<1-7,15>` (design spec §46.4); `D8-D14` (cursor advance/FIFO/cross-process claim) are deferred to `internal/outbound/outbox_test.go` in Phase 3 — pure `Diff()` has no cursor/ACK/claim state to test yet
 - `internal/outbound/dispatcher_test.go` / `outbox_test.go` — `TestOutboundDispatcher_H<1-24>` (design spec §46.5)
 - `internal/outbound/secrets_test.go` — `TestOutboundSecrets_S<1-5>` (design spec §46.7 secret-sentinel regression)
 - `internal/store/webhook_outbox_test.go` — `TestWebhookOutboxSchemaMigration`, `TestWebhookOutboxFilePermissions` (design spec §22, §37)
