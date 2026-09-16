@@ -82,6 +82,18 @@
     gateway_effective_fqdn: "{{ gateway_fqdn | default(ansible_fqdn) }}"
     gateway_effective_portal_user_group: "{{ gateway_portal_user_group | default('role-pilot-portal-user') }}"
 
+    # Default TRUE (2026-09-16): every FreeIPA account automatically joins
+    # gateway_effective_portal_user_group instead of an operator having to
+    # list members in the freeipa-identity roster one at a time — combined
+    # with pilot_access_gateway_effective_install_forcecommand's own
+    # default of true, this makes "FreeIPA account gets a portal session,
+    # never a shell, on this gateway" the out-of-the-box behavior. Pass
+    # -e pilot_access_gateway_portal_automember=false to opt back into a
+    # roster-curated portal population. See the automember task block below
+    # for why the exclude list defaults to ["admin"].
+    pilot_access_gateway_effective_portal_automember: "{{ pilot_access_gateway_portal_automember | default(true) }}"
+    pilot_access_gateway_effective_portal_automember_exclude_users: "{{ pilot_access_gateway_portal_automember_exclude_users | default(['admin']) }}"
+
     # freeipa_servers / ipa_realm auto-derive from the shared realm config
     # (group_vars/freeipa.yml: freeipa_domain, and optionally freeipa_realm/
     # freeipa_server_fqdn — the same override vars freeipa-client-apply.yml
@@ -496,6 +508,73 @@
           creates a local fallback group, which would silently shadow the
           real FreeIPA group forever once SSSD does catch up
           (nsswitch.conf's "files" source is checked before "sss").
+      tags: [AG_service]
+
+    # Default TRUE (pilot_access_gateway_portal_automember): make every
+    # FreeIPA account a portal user automatically via a FreeIPA automember
+    # rule on gateway_effective_portal_user_group, instead of an operator
+    # hand-listing members in the freeipa-identity roster. Same
+    # self-provisioning principle as the group/HBAC rule above, and the
+    # same command+register+changed_when+failed_when idiom gateway-scope-
+    # apply.yml already uses for its own (hostgroup-type) automember rule.
+    - name: "Automember: ensure rule exists for the portal-user group"
+      ansible.builtin.command:
+        argv: [ipa, automember-add, "{{ gateway_effective_portal_user_group }}", --type=group, "--desc=Pilot Access Gateway: every FreeIPA account joins automatically (except excluded)"]
+      register: gateway_portal_automember_add
+      changed_when: "'Added automember rule' in (gateway_portal_automember_add.stdout | default(''))"
+      failed_when:
+        - gateway_portal_automember_add.rc != 0
+        - "'already exists' not in (gateway_portal_automember_add.stderr | default(''))"
+      when: pilot_access_gateway_effective_portal_automember | bool
+      tags: [AG_service]
+
+    - name: "Automember: ensure inclusive uid=.* condition exists (matches every FreeIPA account)"
+      ansible.builtin.command:
+        argv: [ipa, automember-add-condition, "{{ gateway_effective_portal_user_group }}", --type=group, --key=uid, --inclusive-regex=.*]
+      register: gateway_portal_automember_inclusive
+      changed_when: "'Number of conditions added 1' in (gateway_portal_automember_inclusive.stdout | default(''))"
+      failed_when: gateway_portal_automember_inclusive.rc != 0
+      when: pilot_access_gateway_effective_portal_automember | bool
+      tags: [AG_service]
+
+    # Found live on vm-target (2026-09-16): an unqualified `uid=.*`
+    # inclusive condition also sweeps in FreeIPA's own `admin` account —
+    # the same account this site's `admin-breakglass-access` HBAC rule
+    # (hostcat=all) exists to give unconditional emergency shell access to
+    # every host, including this gateway. Excluding it here keeps that
+    # break-glass path intact; pass an empty
+    # pilot_access_gateway_portal_automember_exclude_users list to opt out
+    # of this safety default and truly sweep in every account.
+    - name: "Automember: exclude break-glass accounts from auto-joining"
+      ansible.builtin.command:
+        argv: [ipa, automember-add-condition, "{{ gateway_effective_portal_user_group }}", --type=group, --key=uid, "--exclusive-regex=^{{ item }}$"]
+      register: gateway_portal_automember_exclusive
+      changed_when: "'Number of conditions added 1' in (gateway_portal_automember_exclusive.stdout | default(''))"
+      failed_when: gateway_portal_automember_exclusive.rc != 0
+      loop: "{{ pilot_access_gateway_effective_portal_automember_exclude_users }}"
+      when: pilot_access_gateway_effective_portal_automember | bool
+      tags: [AG_service]
+
+    # Automember conditions are only evaluated at object-creation time (see
+    # gateway-scope-apply.yml's own comment on the same limitation for
+    # hosts), so without a one-time backfill, accounts that existed before
+    # this rule was added would never join. MUST be the untargeted form:
+    # found live that `ipa automember-rebuild --type=group --users=<name>`
+    # silently ignores exclusive-regex conditions and re-adds an excluded
+    # account anyway, while the untargeted `automember-rebuild --type=group`
+    # (no --users/--hosts filter) correctly honors them. changed_when is
+    # deliberately false — ipa's own output only reports how many entries
+    # it evaluated, never whether membership actually changed, so treating
+    # this as always-changed would just spam the play recap; the operation
+    # itself converges to the same membership regardless of how many times
+    # it runs, so running it on every apply is safe.
+    - name: "Automember: backfill existing FreeIPA accounts into the portal-user group"
+      ansible.builtin.command:
+        argv: [ipa, automember-rebuild, --type=group]
+      register: gateway_portal_automember_rebuild
+      changed_when: false
+      failed_when: gateway_portal_automember_rebuild.rc != 0
+      when: pilot_access_gateway_effective_portal_automember | bool
       tags: [AG_service]
 
     - name: "Ensure /etc/pilot exists"
