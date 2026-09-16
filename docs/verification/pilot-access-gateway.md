@@ -38,12 +38,12 @@
 | AG02 | identity | pilot-gateway service account存在 | 0 | id pilot-gateway |
 | AG03 | keytab | service keytab owner/mode正確 | 0 | test "$(stat -c '%U:%G %a' /etc/pilot/pilot-access-gateway.keytab)" = "pilot-gateway:pilot-gateway 400" |
 | AG04 | freeipa | FreeIPA CA存在 | 0 | test -s /etc/ipa/ca.crt |
-| AG06 | freeipa | FreeIPA JSON-RPC ping（透過 /v1/health） | 0 | curl -s --unix-socket /run/pilot/access-gateway.sock http://localhost/v1/health \| grep -q '"freeipa":"reachable"' |
+| AG06 | freeipa | FreeIPA JSON-RPC ping（透過 /v1/health） | 0 | sh -c 'v="$(curl -fsS --unix-socket /run/pilot/access-gateway.sock http://localhost/v1/health)" || exit; case "$v" in *"\"freeipa\":\"reachable\""*) exit 0;; *) exit 1;; esac' |
 | AG09 | socket | Unix socket name/mode/group正確 | 0 | test "$(stat -c '%U:%G %a' /run/pilot/access-gateway.sock)" = "pilot-gateway:role-pilot-portal-user 660" |
-| AG12 | scope | configured target hostgroup存在 | 0 | curl -s --unix-socket /run/pilot/access-gateway.sock http://localhost/v1/health \| grep -q '"target_scope":"ok"' |
-| AG19 | stateless | 沒有 local DB/state | 0 (empty) | test ! -d /var/lib/pilot |
+| AG12 | scope | configured target hostgroup存在 | 0 | sh -c 'v="$(curl -fsS --unix-socket /run/pilot/access-gateway.sock http://localhost/v1/health)" || exit; case "$v" in *"\"target_scope\":\"ok\""*) exit 0;; *) exit 1;; esac' |
+| AG19 | stateless | 沒有 local DB/state | 0 | test ! -d /var/lib/pilot |
 | AG30 | idempotency | 第二次 apply changed=0(多次重跑的性質,由 evidence doc 記錄,非單一 shell 指令可驗證) | 0 | true |
-| AG32 | ssh-policy | Portal Connect 只允許 GSSAPI，不委派 TGT 到 target，也不退回 password/kbd-interactive/pubkey | 0 | sh -c 'v="$(ssh -G -F /etc/pilot/ssh_config target.invalid 2>/dev/null)"; printf "%s\n" "$v" \| grep -qx "gssapiauthentication yes" && printf "%s\n" "$v" \| grep -qx "gssapidelegatecredentials no" && printf "%s\n" "$v" \| grep -qx "preferredauthentications gssapi-with-mic" && printf "%s\n" "$v" \| grep -qx "batchmode yes" && printf "%s\n" "$v" \| grep -qx "passwordauthentication no" && printf "%s\n" "$v" \| grep -qx "kbdinteractiveauthentication no" && printf "%s\n" "$v" \| grep -qx "pubkeyauthentication false"' |
+| AG32 | ssh-policy | Portal Connect 只允許 GSSAPI，不委派 TGT 到 target，也不退回 password/kbd-interactive/pubkey | 0 | bash -c 'v="$(ssh -G -F /etc/pilot/ssh_config target.invalid 2>/dev/null)" || exit; has() { grep -qx "$1" <<< "$v"; }; has "gssapiauthentication yes" && has "gssapidelegatecredentials no" && has "preferredauthentications gssapi-with-mic" && has "batchmode yes" && has "passwordauthentication no" && has "kbdinteractiveauthentication no" && has "pubkeyauthentication false"' |
 | AG33 | kerberos | Portal session ticket helper 依賴的 Kerberos client binaries存在 | 0 | test -x /usr/bin/kinit && test -x /usr/bin/klist && test -x /usr/bin/kdestroy |
 
 ## 3. 不在這份 checklist 逐行覆蓋、但已用其他方式驗證過的項目
