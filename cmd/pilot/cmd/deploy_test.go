@@ -327,6 +327,53 @@ func TestAutoFillSNMPCatalogForSelected_CoversSiteDeploymentRoute(t *testing.T) 
 	}
 }
 
+func TestAutoFillMonitoringFilesForSelected_CoversSiteDeploymentRoute(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "monitoring"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"targets.yml", "scrape-profiles.yml"} {
+		if err := os.WriteFile(filepath.Join(workspace, "monitoring", name), []byte("schemaVersion: 1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out bytes.Buffer
+	got, err := autoFillMonitoringFilesForSelected(&out, []contract.Contract{
+		{ID: "host-monitoring"},
+		{ID: "prometheus"},
+	}, filepath.Join(workspace, "inventory.yml"), []string{"stage=sandbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := filepath.Join(workspace, "monitoring", "targets.yml")
+	profiles := filepath.Join(workspace, "monitoring", "scrape-profiles.yml")
+	want := []string{
+		"stage=sandbox",
+		"monitoring_targets_file=" + targets,
+		"monitoring_profiles_file=" + profiles,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("extra vars = %v, want %v", got, want)
+	}
+	if !strings.Contains(out.String(), "monitoring_targets_file="+targets) || !strings.Contains(out.String(), "monitoring_profiles_file="+profiles) {
+		t.Fatalf("operator output = %q, want auto-fill announcement", out.String())
+	}
+
+	// Explicit operator values must not be overwritten by the defaults.
+	explicit := []string{
+		"monitoring_targets_file=/custom/targets.yml",
+		"monitoring_profiles_file=/custom/profiles.yml",
+	}
+	got, err = autoFillMonitoringFilesForSelected(io.Discard, []contract.Contract{{ID: "prometheus"}}, filepath.Join(workspace, "inventory.yml"), explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, explicit) {
+		t.Fatalf("explicit monitoring vars were overwritten: got %v, want %v", got, explicit)
+	}
+}
+
 // TestDumpMenuDebug covers the PILOT_DEBUG_MENU=1 escape hatch used by
 // trec-scripted runs to read a promptui.Select menu's real, live item
 // list (and 0-based DOWN <n> index) from the recorded terminal output,

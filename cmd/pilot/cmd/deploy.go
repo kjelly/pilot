@@ -1597,6 +1597,10 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	if err != nil {
 		return err
 	}
+	extraVars, err = autoFillMonitoringFilesForSelected(out, selected, inv, extraVars)
+	if err != nil {
+		return err
+	}
 	inputs, err := resolveDeploymentInputs(ctx, selected, scope, inv, extraVars, vault)
 	if err != nil {
 		return err
@@ -3431,6 +3435,48 @@ func autoFillSNMPCatalogForSelected(out io.Writer, selected []contract.Contract,
 		if found {
 			fmt.Fprintf(out, "已自動帶入 SNMP catalog 設定：%s\n", snmpVar)
 			return append(extraVars, snmpVar), nil
+		}
+		break
+	}
+	return extraVars, nil
+}
+
+// autoFillMonitoringFilesForSelected makes the workspace-owned external
+// Prometheus registry available to every deployment route that selects
+// prometheus.  This belongs in executeRecordedDeploymentCore rather than only
+// in the catalog-menu flow: a full-site deployment reaches the same
+// prometheus-apply.yml but has no individual deployCatalogEntry from which to
+// derive the extra vars.  Ansible's file lookup runs on the controller, so
+// the playbook's empty defaults cannot discover files mounted at
+// <workspace>/monitoring.
+//
+// An operator-provided -e value always wins.  The registry remains optional:
+// when either file is absent, autoFillMonitoringFiles returns no vars and the
+// playbook keeps its existing no-external-targets behavior.
+func autoFillMonitoringFilesForSelected(out io.Writer, selected []contract.Contract, inv string, extraVars []string) ([]string, error) {
+	for _, component := range selected {
+		if component.ID != "prometheus" {
+			continue
+		}
+		monitoringVars, found, err := autoFillMonitoringFiles(filepath.Dir(inv))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			break
+		}
+
+		var added []string
+		for _, monitoringVar := range monitoringVars {
+			key, _, ok := strings.Cut(monitoringVar, "=")
+			if !ok || extraVarValue(extraVars, key) != "" {
+				continue
+			}
+			extraVars = append(extraVars, monitoringVar)
+			added = append(added, monitoringVar)
+		}
+		if len(added) > 0 {
+			fmt.Fprintf(out, "已自動帶入外部 Prometheus monitoring 設定：%s\n", strings.Join(added, "、"))
 		}
 		break
 	}
