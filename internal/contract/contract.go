@@ -22,11 +22,106 @@ const SchemaVersion = 1
 // DefaultDirectory is the repository-relative directory for canonical contracts.
 const DefaultDirectory = "contracts"
 
+// Effect names one semantic state domain a component's mutation may
+// change (docs/tmp/now/spec.md §6, the outbound webhook subscription
+// routing feature). Effects are additive component metadata: a
+// component that declares no Effects is simply not eligible for
+// effect-based webhook subscription routing — it is not an error for a
+// non-reconciler component to have none.
+//
+// Effect declaration rules (spec §6.2/§6.3):
+//  1. a Contract MUST use one of the exact values in KnownEffects();
+//     an unknown effect is rejected at load time so a typo never
+//     silently routes (or fails to route) a webhook subscription.
+//  2. trailing-namespace wildcards ("identity.*") exist only in user
+//     subscription config (internal/outbound), never in a Contract's
+//     own Effects.
+type Effect string
+
+// Known effects, per spec §6.3's typed registry. This set — and only
+// this set — is legal in a Contract's Effects field. Adding a new
+// effect here is a deliberate design decision (record it in
+// docs/tmp/now/spec.md §6.4 or its successor doc), not something an
+// implementer invents ad hoc to make one contract's lint pass.
+const (
+	EffectIdentityUsers           Effect = "identity.users"
+	EffectIdentityGroups          Effect = "identity.groups"
+	EffectIdentityHostgroups      Effect = "identity.hostgroups"
+	EffectIdentityNetgroups       Effect = "identity.netgroups"
+	EffectAccessHBAC              Effect = "access.hbac"
+	EffectAccessSudo              Effect = "access.sudo"
+	EffectAccessGrants            Effect = "access.grants"
+	EffectDNSZones                Effect = "dns.zones"
+	EffectDNSRecords              Effect = "dns.records"
+	EffectNetworkResolver         Effect = "network.resolver"
+	EffectNetworkEndpoints        Effect = "network.endpoints"
+	EffectTrustCA                 Effect = "trust.ca"
+	EffectTLSCertificates         Effect = "tls.certificates"
+	EffectReverseProxyRoutes      Effect = "reverse_proxy.routes"
+	EffectIdentityReplica         Effect = "identity.freeipa_replica"
+	EffectIdentityRealm           Effect = "identity.realm_membership"
+	EffectStorageNFSIdentity      Effect = "storage.nfs.identity"
+	EffectMonitoringScrapeTargets Effect = "monitoring.scrape_targets"
+)
+
+// knownEffects is the canonical, ordered set backing KnownEffects and
+// effect-load validation.
+var knownEffects = []Effect{
+	EffectIdentityUsers,
+	EffectIdentityGroups,
+	EffectIdentityHostgroups,
+	EffectIdentityNetgroups,
+	EffectAccessHBAC,
+	EffectAccessSudo,
+	EffectAccessGrants,
+	EffectDNSZones,
+	EffectDNSRecords,
+	EffectNetworkResolver,
+	EffectNetworkEndpoints,
+	EffectTrustCA,
+	EffectTLSCertificates,
+	EffectReverseProxyRoutes,
+	EffectIdentityReplica,
+	EffectIdentityRealm,
+	EffectStorageNFSIdentity,
+	EffectMonitoringScrapeTargets,
+}
+
+// KnownEffects returns every Effect a Contract may legally declare, in
+// canonical order.
+func KnownEffects() []Effect {
+	return append([]Effect(nil), knownEffects...)
+}
+
+func isKnownEffect(e Effect) bool {
+	for _, known := range knownEffects {
+		if known == e {
+			return true
+		}
+	}
+	return false
+}
+
+func validateEffects(effects []Effect) error {
+	seen := make(map[Effect]struct{}, len(effects))
+	for _, e := range effects {
+		if !isKnownEffect(e) {
+			return fmt.Errorf("unknown effect %q", e)
+		}
+		if _, exists := seen[e]; exists {
+			return fmt.Errorf("duplicate effect %q", e)
+		}
+		seen[e] = struct{}{}
+	}
+	return nil
+}
+
 // Contract is the versioned, machine-readable description of one delivery component.
 type Contract struct {
 	SchemaVersion       int          `yaml:"schemaVersion"`
 	ID                  string       `yaml:"id"`
 	Role                string       `yaml:"role"`
+	Effects             []Effect     `yaml:"effects"`
 	Specs               []Spec       `yaml:"specs"`
 	Playbooks           Playbooks    `yaml:"playbooks"`
 	RegressionTests     []string     `yaml:"regressionTests"`
@@ -572,6 +667,9 @@ func validateLocal(contract Contract) error {
 	}
 	if strings.TrimSpace(contract.ID) == "" || strings.TrimSpace(contract.Role) == "" {
 		return fmt.Errorf("id and role are required")
+	}
+	if err := validateEffects(contract.Effects); err != nil {
+		return err
 	}
 	if len(contract.Specs) == 0 {
 		return fmt.Errorf("at least one spec is required")

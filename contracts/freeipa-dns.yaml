@@ -1,6 +1,9 @@
 schemaVersion: 1
 id: freeipa-dns
 role: freeipa-server
+effects:
+  - dns.zones
+  - dns.records
 specs:
   - path: docs/verification/freeipa-dns.md
     rows: {all: true}

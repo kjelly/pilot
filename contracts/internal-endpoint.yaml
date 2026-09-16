@@ -1,6 +1,11 @@
 schemaVersion: 1
 id: internal-endpoint
 role: freeipa-server
+effects:
+  - network.endpoints
+  - dns.records
+  - tls.certificates
+  - reverse_proxy.routes
 specs:
   - path: docs/verification/internal-endpoint.md
     rows: {all: true}

@@ -1,6 +1,8 @@
 schemaVersion: 1
 id: freeipa-server-replica
 role: freeipa-server-replica
+effects:
+  - identity.freeipa_replica
 specs:
   - path: docs/verification/freeipa-server-replica.md
     rows: {all: true}

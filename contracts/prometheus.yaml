@@ -1,6 +1,8 @@
 schemaVersion: 1
 id: prometheus
 role: prometheus
+effects:
+  - monitoring.scrape_targets
 specs:
   - path: docs/verification/prometheus.md
     rows: {all: true}

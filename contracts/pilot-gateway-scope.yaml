@@ -1,6 +1,9 @@
 schemaVersion: 1
 id: pilot-gateway-scope
 role: pilot-gateway-scope
+effects:
+  - identity.hostgroups
+  - access.hbac
 specs:
   - path: docs/verification/pilot-gateway-scope.md
     rows: {all: true}

@@ -1,6 +1,15 @@
 schemaVersion: 1
 id: freeipa-identity
 role: freeipa-server
+effects:
+  - identity.users
+  - identity.groups
+  - identity.hostgroups
+  - identity.netgroups
+  - access.hbac
+  - access.sudo
+  - access.grants
+  - storage.nfs.identity
 specs:
   - path: docs/verification/freeipa-identity.md
     rows: {all: true}

@@ -35,16 +35,28 @@ or reword them independently of that spec; if a row's intended
 behavior turns out to be wrong once real code exists, fix the spec and
 this file together with a stated reason, not just this file alone.
 
-**Status: DRAFT — Phase 0 only records the intended checks.** None of
-these rows have unit-test or actual-run evidence yet. The Go types and
-packages they exercise (`internal/outbound/*`, `internal/contract`'s
-`Effects` field, `internal/store`'s `webhook_outbox` schema) do not
-exist as of this revision. This file will be amended in place as each
-implementation phase lands, exactly like
-`docs/verification/host-decommission.md`'s phase-by-phase history —
-each row goes from "not yet executable" to a real PASS as its owning
-phase (§48 Phase 1-5 of the design spec) is implemented, and this
-status paragraph will name which rows each phase made executable.
+**Status: DRAFT.** This file is amended in place as each implementation
+phase lands, exactly like `docs/verification/host-decommission.md`'s
+phase-by-phase history — each row goes from "not yet executable" to a
+real PASS as its owning phase (§48 Phase 1-5 of the design spec) is
+implemented.
+
+- **Phase 0** recorded the intended checks only; no unit-test or
+  actual-run evidence existed for any row.
+- **Phase 1** (this revision) lands `contract.Effects` (E1-E3 in
+  `internal/contract/effects_test.go`), the §6.4 component/effect-set
+  cross-layer lint (E4-E7 in
+  `cmd/pilot/cmd/deploy_catalog_effects_test.go`), and the
+  `integrations.yaml` parser/validator (`internal/outbound/config.go`,
+  CFG1-CFG13 + CFG15-CFG16 in `internal/outbound/config_test.go`). This
+  makes **C1** (config strict parse) real and passing. CFG14
+  (source/name-change/disabled → orphaned/paused semantics) is
+  deferred to Phase 3, where `internal/outbound`'s outbox/store exists
+  to actually hold the rows being reclassified — C1's probe already
+  matches it by prefix (`^TestOutboundConfig_CFG`) so no row edit is
+  needed once it lands. C2-C30 remain not-yet-executable pending Phase
+  2 (projection/diff), Phase 3 (store/outbox/HTTP), and Phase 4
+  (workflow wiring).
 
 **Why `go test -run` probes instead of shell/ansible probes.** This
 feature's primary observable surface is a Go CLI + SQLite durable
@@ -65,7 +77,7 @@ no row below claims it.
 project's later phases will create with these exact prefixes, so a
 row's probe never has to be renamed once its test exists:
 
-- `internal/outbound/config_test.go` — `TestOutboundConfig_CFG<1-16>` (design spec §46.1)
+- `internal/outbound/config_test.go` — `TestOutboundConfig_CFG<1-13,15-16>` (design spec §46.1); `CFG14` is deferred to `internal/outbound/outbox_test.go` in Phase 3 (it needs the outbox/store's identity-reconciliation logic, not just config parsing)
 - `internal/contract/effects_test.go` — `TestContractEffects_E<1-3>` (design spec §46.2, contract-loader-only checks)
 - `cmd/pilot/cmd/deploy_catalog_effects_test.go` — `TestDeployCatalogEffects_E<4-7>` (design spec §46.2, cross-layer lint)
 - `internal/outbound/effect_match_test.go` — `TestOutboundEffectMatch_*` (design spec §6.2/§31 wildcard matching, not individually numbered upstream)

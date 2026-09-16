@@ -1,6 +1,8 @@
 schemaVersion: 1
 id: freeipa-realm-replacement
 role: freeipa-realm-replacement
+effects:
+  - identity.realm_membership
 specs:
   - path: docs/verification/freeipa-realm-replacement.md
     rows: {all: true}

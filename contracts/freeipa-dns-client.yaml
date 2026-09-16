@@ -1,6 +1,8 @@
 schemaVersion: 1
 id: freeipa-dns-client
 role: freeipa-dns-client
+effects:
+  - network.resolver
 specs:
   - path: docs/verification/freeipa-dns-client.md
     rows: {all: true}
