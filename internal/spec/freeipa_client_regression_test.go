@@ -10,7 +10,7 @@ import (
 )
 
 // TestRegression_FreeipaClientSpec locks the structural contract of
-// docs/verification/freeipa-client.md: 11 rows C1..C11, lint-clean, and a
+// docs/verification/freeipa-client.md: 12 rows C1..C12, lint-clean, and a
 // generated verify playbook that covers every row.
 //
 // Note on inventory alignment: like freeipa-server.md, this spec's §1 Targets
@@ -26,13 +26,13 @@ func TestRegression_FreeipaClientSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	// 1. Row count is locked at 11.
-	if len(s.Rows) != 11 {
-		t.Fatalf("rows=%d want=11 (spec must cover C1..C11 inclusive)", len(s.Rows))
+	// 1. Row count is locked at 12.
+	if len(s.Rows) != 12 {
+		t.Fatalf("rows=%d want=12 (spec must cover C1..C12 inclusive)", len(s.Rows))
 	}
 
-	// 2. IDs are C1..C11 with no gaps and no duplicates.
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11"}
+	// 2. IDs are C1..C12 with no gaps and no duplicates.
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12"}
 	gotIDs := make([]string, 0, len(s.Rows))
 	seen := map[string]bool{}
 	for _, r := range s.Rows {

@@ -615,6 +615,45 @@
         - ipa_sshd_password_auth is changed
       tags: [freeipa-client, C8]
 
+    # ipa-client-install's own ssh_config drop-in (04-ipa.conf) sets
+    # PubkeyAuthentication + a known-hosts proxy, but never touches
+    # GSSAPIAuthentication/GSSAPIDelegateCredentials. GSSAPIAuthentication
+    # already defaults to "yes" in stock /etc/ssh/ssh_config (Ubuntu's
+    # own `Host *` block), but GSSAPIDelegateCredentials does not default
+    # on anywhere — so a client SSHing into a pilot-access-gateway host
+    # never forwards a Kerberos ticket unless something turns this on.
+    # Confirmed live on vm-target (2026-09-16, see
+    # docs/evidence/pilot-access-gateway/2026-09-16-gssapi-no-password-fallback.md):
+    # with delegation on, a client → gateway → target chain authenticates
+    # end-to-end via GSSAPI alone, with zero password/pubkey/keyboard-
+    # interactive fallback available anywhere; without it, the gateway's
+    # own onward "Connect" hop to a target fails outright (no ticket to
+    # relay). Scoped to `Host *.{{ ipa_domain }}` (not `Host *`) so this
+    # client only ever offers to delegate its ticket to hosts inside this
+    # same Kerberos realm — a foreign host wouldn't complete GSSAPI auth
+    # against this realm's KDC in the first place, but scoping by domain
+    # keeps that safe by construction rather than by accident. This makes
+    # every freeipa-client host — including a future portal user's own
+    # enrolled desktop — GSSAPI-relay-ready by default, so disabling
+    # password SSH login site-wide does not strand anyone who still needs
+    # to reach a target through a pilot-access-gateway bastion.
+    - name: "FreeIPA client — enable GSSAPI ticket delegation within the realm (SSH client)"
+      ansible.builtin.copy:
+        dest: /etc/ssh/ssh_config.d/05-freeipa-client-gssapi-delegate.conf
+        content: |
+          # Managed by freeipa-client-apply.yml — do not edit by hand.
+          # Lets this host's SSH client forward a Kerberos ticket into
+          # any host in this realm (pilot-access-gateway bastions rely on
+          # this to relay the connection onward without a password).
+          Host *.{{ ipa_domain }}
+              GSSAPIAuthentication yes
+              GSSAPIDelegateCredentials yes
+        owner: root
+        group: root
+        mode: "0644"
+      when: not ansible_check_mode
+      tags: [freeipa-client, C12]
+
     - name: "FreeIPA client — enable + start auditd (survives reboot)"
       ansible.builtin.systemd:
         name: auditd
