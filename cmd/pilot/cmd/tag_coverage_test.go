@@ -235,6 +235,7 @@ var tagCheckExemptSpecs = map[string]string{
 	"snmp-monitoring-integration.md": "cross-cutting spec spanning internal/monitoring, internal/detection, internal/agentcontroller, internal/repair, internal/diagnose — verified by each package's own Go tests (see the spec's Checks probes), no single apply playbook",
 	"host-decommission.md":           "cross-cutting spec spanning internal/decommission, cmd/pilot/cmd (CLI+TUI), internal/store — verified by each package's own Go tests (see the spec's Checks probes); live-provider cleanup reuses freeipa-client/freeipa-identity/internal-endpoint/wazuh-fim's own apply playbooks rather than owning a decommission-specific one",
 	"apt-repository-tolerance.md":    "cross-cutting spec for the shared playbooks/apply/tasks/apt-*.yml framework (docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md) — verified by this package's own static/regression Go tests (see the spec's Checks probes) plus each consuming playbook's own row tags (e.g. freeipa-client C1/C8), no single apply playbook of its own",
+	"outbound-webhook.md":            "Go CLI + SQLite durable outbox + HTTP dispatcher feature (docs/tmp/now/spec.md), not a system-service playbook — verified by internal/outbound, internal/contract, internal/store, and cmd/pilot/cmd's own Go tests (see the spec's Checks probes), no apply playbook of its own",
 }
 
 // rowShapedTag matches IDs like C1, R2, C2.5.1 — the shapes spec row IDs
