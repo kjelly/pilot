@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/kjelly/pilot/internal/gatewayapi"
@@ -41,9 +42,9 @@ func TestRunPortalFullMenuLoop(t *testing.T) {
 		{Prompt: "My Hosts", Select: "gpu-a.example.com"},
 		{Prompt: "Host: gpu-a.example.com", Select: portalBackChoice},
 		{Prompt: "Pilot Portal", Select: portalMenuMyIdentity},
-		{Prompt: "My Identity", Confirm: boolPtr(true)},
+		{Prompt: "My Identity", Select: "OK"},
 		{Prompt: "Pilot Portal", Select: portalMenuRefresh},
-		{Prompt: "Access refreshed", Confirm: boolPtr(true)},
+		{Prompt: "Access refreshed", Select: "OK"},
 		{Prompt: "Pilot Portal", Select: portalMenuLogout},
 		{Prompt: "Log out", Confirm: boolPtr(true)},
 	}}
@@ -90,7 +91,7 @@ func TestRunPortalRefreshReflectsNewData(t *testing.T) {
 	// call succeeding end-to-end is the thing worth proving at this layer.
 	p := &promptAutomation{answers: []promptAnswer{
 		{Prompt: "Pilot Portal", Select: portalMenuRefresh},
-		{Prompt: "Access refreshed", Confirm: boolPtr(true)},
+		{Prompt: "Access refreshed", Select: "OK"},
 		{Prompt: "Pilot Portal", Select: portalMenuMyHosts},
 		{Prompt: "My Hosts", Select: "gpu-a.example.com"},
 		{Prompt: "Host: gpu-a.example.com", Select: portalBackChoice},
@@ -132,7 +133,7 @@ func TestResolvePortalHostEntriesSortsUnresolvableLast(t *testing.T) {
 		if host == "dead-a.example.com" || host == "dead-b.example.com" {
 			return nil, errors.New("no such host")
 		}
-		return []string{"127.0.0.1"}, nil
+		return []string{"192.0.2.10"}, nil
 	})
 	hosts := []gatewayapi.HostJSON{
 		{FQDN: "dead-a.example.com"},
@@ -156,12 +157,26 @@ func TestResolvePortalHostEntriesSortsUnresolvableLast(t *testing.T) {
 			t.Errorf("entry %q resolvable = %v, want %v", e.host.FQDN, e.resolvable, wantResolvable)
 		}
 		label := portalHostListLabel(e)
-		if wantResolvable && label != e.host.FQDN {
-			t.Errorf("portalHostListLabel(%q) = %q, want unadorned FQDN", e.host.FQDN, label)
+		if wantResolvable {
+			if !strings.Contains(label, e.host.FQDN) || !strings.Contains(label, "IP: 192.0.2.10") {
+				t.Errorf("portalHostListLabel(%q) = %q, want FQDN and resolved IP", e.host.FQDN, label)
+			}
 		}
 		if !wantResolvable && label == e.host.FQDN {
 			t.Errorf("portalHostListLabel(%q) = %q, want a DNS-failure annotation", e.host.FQDN, label)
 		}
+	}
+}
+
+func TestPortalHostListLabelShowsAllResolvedIPs(t *testing.T) {
+	e := portalHostEntry{
+		host:       gatewayapi.HostJSON{FQDN: "gpu-a.example.com"},
+		addresses:  []string{"192.0.2.10", "2001:db8::10"},
+		resolvable: true,
+	}
+	want := "gpu-a.example.com  [IP: 192.0.2.10, 2001:db8::10]"
+	if got := portalHostListLabel(e); got != want {
+		t.Fatalf("portalHostListLabel() = %q, want %q", got, want)
 	}
 }
 

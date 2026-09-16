@@ -72,13 +72,13 @@ func runPortalWithSSHConfig(ctx context.Context, client *portalClient, sshConfig
 				return err
 			}
 		case portalMenuMyIdentity:
-			runConfirmPrompt("", portalIdentityDetail(identity), true)
+			runAcknowledgePrompt(portalIdentityDetail(identity))
 		case portalMenuRefresh:
 			access, err = client.Access(ctx)
 			if err != nil {
 				return fmt.Errorf("refresh access: %w", err)
 			}
-			runConfirmPrompt("", fmt.Sprintf("Access refreshed at %s.", time.Now().Format("15:04:05")), true)
+			runAcknowledgePrompt(fmt.Sprintf("Access refreshed at %s.", time.Now().Format("15:04:05")))
 		case portalMenuLogout:
 			if runConfirmPrompt("", "Log out of Pilot Portal?", false) {
 				return nil
@@ -99,16 +99,26 @@ func portalIdentityDetail(identity gatewayapi.IdentityResponse) string {
 		identity.Username, identity.UID, identity.Gateway.ID, identity.Gateway.Scope, identity.Gateway.TargetHostgroup)
 }
 
+// runAcknowledgePrompt shows a read-only info screen with a single
+// dismiss action. My Identity and Refresh have nothing to confirm — they
+// only ever display information — so unlike Logout (a real Yes/No
+// decision, via runConfirmPrompt) they must never offer two choices that
+// both do the same thing.
+func runAcknowledgePrompt(message string) {
+	_, _ = runSelectPrompt("", message, []string{"OK"})
+}
+
 const portalBackChoice = "« Back"
 
 // portalHostEntry pairs a My Hosts row with a live DNS reachability probe
-// (authorization != reachability: spec.md §9.3's server-side filter only
-// guarantees "SSH allowed", never that the FQDN actually resolves — found
-// live when a demo's placeholder fixture host, authorized but with no DNS
-// record, could only be told apart from a real target after a failed
-// Connect attempt).
+// and the addresses returned by that probe (authorization != reachability:
+// spec.md §9.3's server-side filter only guarantees "SSH allowed", never
+// that the FQDN actually resolves — found live when a demo's placeholder
+// fixture host, authorized but with no DNS record, could only be told apart
+// from a real target after a failed Connect attempt).
 type portalHostEntry struct {
 	host       gatewayapi.HostJSON
+	addresses  []string
 	resolvable bool
 }
 
@@ -116,7 +126,9 @@ type portalHostEntry struct {
 // portalDNSCheckTimeout each) so a handful of dead entries add at most
 // one timeout's worth of latency to the whole list, not one per host.
 // Unresolvable hosts sort after resolvable ones, stably, so a user's
-// most-likely-useful choices come first.
+// most-likely-useful choices come first. The returned addresses are kept for
+// the My Hosts label so the user can see which IP the FQDN currently resolves
+// to without changing the authorized FQDN used by Connect.
 func resolvePortalHostEntries(ctx context.Context, hosts []gatewayapi.HostJSON) []portalHostEntry {
 	entries := make([]portalHostEntry, len(hosts))
 	var wg sync.WaitGroup
@@ -127,7 +139,8 @@ func resolvePortalHostEntries(ctx context.Context, hosts []gatewayapi.HostJSON) 
 			defer wg.Done()
 			lookupCtx, cancel := context.WithTimeout(ctx, portalDNSCheckTimeout)
 			defer cancel()
-			_, err := portalResolveHost(lookupCtx, fqdn)
+			addresses, err := portalResolveHost(lookupCtx, fqdn)
+			entries[i].addresses = append([]string(nil), addresses...)
 			entries[i].resolvable = err == nil
 		}(i, h.FQDN)
 	}
@@ -139,6 +152,9 @@ func resolvePortalHostEntries(ctx context.Context, hosts []gatewayapi.HostJSON) 
 }
 
 func portalHostListLabel(e portalHostEntry) string {
+	if e.resolvable && len(e.addresses) > 0 {
+		return fmt.Sprintf("%s  [IP: %s]", e.host.FQDN, strings.Join(e.addresses, ", "))
+	}
 	if e.resolvable {
 		return e.host.FQDN
 	}

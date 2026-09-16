@@ -32,14 +32,23 @@ type GatewaySection struct {
 }
 
 // FreeIPASection configures the read-only internal/freeipaaccess.Client.
+//
+// cache_ttl/connect_max_age existed here (and in every generated
+// access-gateway.yaml) from spec.md §26's original example config, but no
+// resolver, client, or connect path in this codebase ever read them —
+// internal/accessportal.LoadUserAccess has always hit FreeIPA fresh on
+// every call, with no caching layer at any point. Removed 2026-09-16
+// rather than left in place misleading operators into believing access
+// decisions are cached (they are not — Refresh's whole reason to exist is
+// that nothing else ever re-fetches). Reintroducing real caching later is
+// a deliberate feature with real revocation-latency trade-offs to weigh,
+// not something to half-wire back in under these same field names.
 type FreeIPASection struct {
 	Servers          []string `yaml:"servers"`
 	CAFile           string   `yaml:"ca_file"`
 	ServicePrincipal string   `yaml:"service_principal"`
 	Keytab           string   `yaml:"keytab"`
 	RequestTimeout   duration `yaml:"request_timeout"`
-	CacheTTL         duration `yaml:"cache_ttl"`
-	ConnectMaxAge    duration `yaml:"connect_max_age"`
 }
 
 // duration unmarshals a Go duration string ("5s") from YAML — yaml.v3's

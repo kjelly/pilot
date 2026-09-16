@@ -633,6 +633,13 @@
     # Step 11 (spec.md §55): access-gateway.yaml — matches
     # cmd/pilot-access-gateway/config.go's Config struct exactly (kept in
     # sync manually; see docs/evidence for the cross-check test).
+    #
+    # 2026-09-16: cache_ttl/connect_max_age removed — spec.md §26's
+    # original example config had them, but no code anywhere ever read
+    # them (see FreeIPASection's own doc comment in config.go). Every
+    # gateway generated one into its config regardless, misleading an
+    # operator into thinking access decisions are cached when they never
+    # were (accessportal.LoadUserAccess always hits FreeIPA fresh).
     - name: "Step 11: install access-gateway.yaml"
       ansible.builtin.copy:
         dest: /etc/pilot/access-gateway.yaml
@@ -656,8 +663,6 @@
               service_principal: pilot-access-gateway/{{ gateway_effective_fqdn }}@{{ gateway_effective_ipa_realm }}
               keytab: /etc/pilot/pilot-access-gateway.keytab
               request_timeout: 5s
-              cache_ttl: 10s
-              connect_max_age: 5s
       register: gateway_config_copy
       tags: [AG_config, AG01]
 
@@ -665,6 +670,28 @@
     # byte-identical to cmd/pilot/cmd/portal_ssh.go's pilotSSHConfig
     # constant (a Go-level test in that package asserts this; see
     # portal_ssh_config_sync_test.go).
+    #
+    # 2026-09-16: ProxyCommand switched from "none" + a GlobalKnownHostsFile
+    # populated by ssh-keyscan at apply time (removed from Step 13 below) to
+    # sss_ssh_knownhostsproxy, the same SSSD-provided host-key resolver
+    # freeipa-client-apply.yml's own ssh_config.d/04-ipa.conf already uses
+    # for exactly this purpose. Two real problems with the old approach:
+    # (1) a host added to pilot-target-<scope> *after* this apply ran had no
+    # known_hosts entry and StrictHostKeyChecking rejected it outright until
+    # the next re-apply; (2) ssh-keyscan itself is blind TOFU — it trusts
+    # whatever key a host presents at scan time with no verification at
+    # all, weaker than resolving the host's actual ipaSshPubKey attribute
+    # (an authoritative value set at enrollment) via SSSD/FreeIPA on every
+    # connection. sss_ssh_knownhostsproxy also doubles as the actual
+    # connection relay (it is designed to be used as ProxyCommand, not just
+    # a lookup) — but it does NOT by itself satisfy StrictHostKeyChecking;
+    # GlobalKnownHostsFile still has to point at SSSD's own dynamically
+    # maintained cache (found live on vm-target: dropping
+    # GlobalKnownHostsFile entirely, on the theory that ProxyCommand alone
+    # was enough, produced "No ED25519 host key is known ... Host key
+    # verification failed" — sssd keeps /var/lib/sss/pubconf/known_hosts
+    # current as it resolves each host's ipaSshPubKey, which is what
+    # verification actually reads).
     - name: "Step 12: install root-owned SSH config (spec.md §32)"
       ansible.builtin.copy:
         dest: /etc/pilot/ssh_config
@@ -681,11 +708,11 @@
               EscapeChar none
 
               ProxyJump none
-              ProxyCommand none
+              ProxyCommand /usr/bin/sss_ssh_knownhostsproxy -p %p %h
 
               StrictHostKeyChecking yes
               UserKnownHostsFile /dev/null
-              GlobalKnownHostsFile /etc/pilot/ssh_known_hosts
+              GlobalKnownHostsFile /var/lib/sss/pubconf/known_hosts
 
               GSSAPIAuthentication yes
               GSSAPIDelegateCredentials yes
@@ -696,52 +723,28 @@
               RequestTTY force
       tags: [AG_config]
 
-    # Step 13 (spec.md §55): trusted known_hosts for the current target
-    # scope. Best-effort per host — an unreachable/nonexistent fixture
-    # host must not fail the whole apply (spec.md §9.5 fail-closed
-    # behavior belongs to the RUNTIME decision, not to this install step;
-    # a host simply absent from known_hosts fails its own connection
-    # later at StrictHostKeyChecking, which is the correct place for that
-    # failure to surface).
-    - name: "Step 13: resolve current pilot-target-<scope> membership for known_hosts"
+    # Remove the stale ssh-keyscan snapshot an older version of this
+    # playbook installed — /etc/pilot/ssh_config no longer references it
+    # (see the 2026-09-16 comment on Step 12's ProxyCommand above), and a
+    # leftover file would be a confusing dead artifact on any gateway
+    # host that was set up before this change.
+    - name: "Remove stale /etc/pilot/ssh_known_hosts snapshot (superseded by sss_ssh_knownhostsproxy)"
+      ansible.builtin.file:
+        path: /etc/pilot/ssh_known_hosts
+        state: absent
+      tags: [AG_config]
+
+    # Step 13 (spec.md §55): existence check for Step 18's gate below.
+    # Host-key trust for the target scope is Step 12's job now, not this
+    # one — see the 2026-09-16 comment on /etc/pilot/ssh_config's
+    # ProxyCommand for why the old ssh-keyscan-at-apply-time snapshot
+    # approach that used to live here was replaced.
+    - name: "Step 13: resolve current pilot-target-<scope> membership (existence check)"
       ansible.builtin.command:
         argv: [ipa, hostgroup-show, "{{ gateway_target_hostgroup }}", --all]
       register: gateway_target_hostgroup_show
       changed_when: false
       failed_when: false
-      tags: [AG_config]
-
-    - name: "Step 13: parse target hosts"
-      ansible.builtin.set_fact:
-        gateway_target_hosts: >-
-          {{ [] if hosts_line == '' else hosts_line.split(', ') }}
-      vars:
-        hosts_line: >-
-          {{ ((gateway_target_hostgroup_show.stdout | default('')
-          | regex_findall('^  Member hosts: (.*)$', multiline=True)) + [''])
-          | first | trim }}
-      tags: [AG_config]
-
-    - name: "Step 13: scan host keys for the current target scope (best-effort per host)"
-      ansible.builtin.shell: |
-        set -o pipefail
-        ssh-keyscan -T 3 {{ item | quote }} 2>/dev/null || true
-      args:
-        executable: /bin/bash
-      register: gateway_keyscan
-      changed_when: false
-      loop: "{{ gateway_target_hosts }}"
-      loop_control:
-        label: "{{ item }}"
-      tags: [AG_config]
-
-    - name: "Step 13: install ssh_known_hosts from the scan results"
-      ansible.builtin.copy:
-        dest: /etc/pilot/ssh_known_hosts
-        owner: root
-        group: root
-        mode: "0644"
-        content: "{{ gateway_keyscan.results | map(attribute='stdout') | select() | join('\n') }}\n"
       tags: [AG_config]
 
     # Step 9/10 (spec.md §55): install both binaries.

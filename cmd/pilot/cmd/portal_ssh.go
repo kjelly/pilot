@@ -23,6 +23,22 @@ const (
 // this phase's own verification test (portal_ssh_test.go actually runs
 // `ssh -G` against it — spec.md §32: "每個 option要在 supported OpenSSH
 // 執行 ssh -G -F /etc/pilot/ssh_config target 驗證").
+//
+// ProxyCommand relays the connection through SSSD's own resolver
+// (sss_ssh_knownhostsproxy — the same tool freeipa-client-apply.yml's own
+// ssh_config.d/04-ipa.conf already uses) instead of a GlobalKnownHostsFile
+// snapshot taken once at apply time: a host added to pilot-target-<scope>
+// afterward would otherwise have no entry and fail StrictHostKeyChecking
+// until the next re-apply, and the old ssh-keyscan-based snapshot trusted
+// whatever key a host presented with no verification at all (blind TOFU),
+// weaker than resolving the host's actual enrollment-time ipaSshPubKey.
+// GlobalKnownHostsFile still has to point at SSSD's own dynamically
+// maintained cache (/var/lib/sss/pubconf/known_hosts, kept current by
+// sssd itself as it resolves each host's ipaSshPubKey) — ProxyCommand
+// only relays bytes, it does not by itself satisfy StrictHostKeyChecking
+// (found live on vm-target: dropping GlobalKnownHostsFile entirely, on
+// the theory that ProxyCommand alone was enough, produced "No ED25519
+// host key is known ... Host key verification failed").
 const pilotSSHConfig = `Host *
     ForwardAgent no
     ClearAllForwardings yes
@@ -32,11 +48,11 @@ const pilotSSHConfig = `Host *
     EscapeChar none
 
     ProxyJump none
-    ProxyCommand none
+    ProxyCommand /usr/bin/sss_ssh_knownhostsproxy -p %p %h
 
     StrictHostKeyChecking yes
     UserKnownHostsFile /dev/null
-    GlobalKnownHostsFile /etc/pilot/ssh_known_hosts
+    GlobalKnownHostsFile /var/lib/sss/pubconf/known_hosts
 
     GSSAPIAuthentication yes
     GSSAPIDelegateCredentials yes

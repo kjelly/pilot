@@ -212,7 +212,8 @@ func TestPilotSSHConfigDirectives(t *testing.T) {
 		"escapechar":                   "none",
 		"stricthostkeychecking":        "true", // ssh -G normalizes "yes" -> "true"
 		"userknownhostsfile":           "/dev/null",
-		"globalknownhostsfile":         "/etc/pilot/ssh_known_hosts",
+		"proxycommand":                 "/usr/bin/sss_ssh_knownhostsproxy -p %p %h",
+		"globalknownhostsfile":         "/var/lib/sss/pubconf/known_hosts",
 		"gssapiauthentication":         "yes",
 		"gssapidelegatecredentials":    "yes",
 		"kbdinteractiveauthentication": "yes",
@@ -229,13 +230,12 @@ func TestPilotSSHConfigDirectives(t *testing.T) {
 			t.Errorf("%s = %q, want %q", key, got, wantValue)
 		}
 	}
-	// ProxyJump/ProxyCommand "none" means OpenSSH omits them from -G
-	// output entirely rather than echoing "none" — their absence IS the
-	// pass condition, and also proves the poisoned ProxyCommand did not
-	// leak through under a different key.
-	if v, ok := effective["proxycommand"]; ok {
-		t.Errorf("proxycommand = %q, want absent (none)", v)
-	}
+	// proxycommand is asserted above (want map) to be exactly
+	// sss_ssh_knownhostsproxy — never the poisoned config's
+	// "/bin/echo POISONED" (proving -F still overrides ~/.ssh/config for
+	// this directive too, now that ProxyCommand is no longer "none").
+	// ProxyJump "none" means OpenSSH omits it from -G output entirely
+	// rather than echoing "none" — its absence IS the pass condition.
 	if v, ok := effective["proxyjump"]; ok {
 		t.Errorf("proxyjump = %q, want absent (none)", v)
 	}

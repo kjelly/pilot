@@ -33,8 +33,6 @@ gateway:
     service_principal: pilot-access-gateway/pilot-gw-gpu-01.linker.internal
     keytab: /etc/pilot/pilot-access-gateway.keytab
     request_timeout: 5s
-    cache_ttl: 10s
-    connect_max_age: 5s
 `
 
 func TestLoadConfigValid(t *testing.T) {
