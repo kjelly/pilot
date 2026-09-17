@@ -1,0 +1,64 @@
+# Shared task — selects a live, reachable FreeIPA admin API endpoint for
+# Pilot's own `ipa` CLI mutations (docs/tmp/now/freeipa-client-ha-spec.md
+# §13). Even when the CLIENT runtime is HA (Phase 3/4), any `ipa ...`
+# invocation that relies on the implicit /etc/ipa/default.conf reader stays
+# pinned to a single server: Phase 0 confirmed live that
+# ipa-client-install's own default.conf always has `xmlrpc_uri =
+# https://<first-server>/ipa/xml`, even in a 2-server HA enrollment, and
+# never changes on its own. So a primary outage would still fail any Day-2
+# `ipa` mutation Pilot itself issues, independent of client-side HA.
+#
+# The fix is NON-MUTATING and per-invocation, confirmed live in Phase 0:
+# `ipa -e xmlrpc_uri=https://<fqdn>/ipa/xml <command> ...` really changes
+# which server is contacted (verified by stopping a server and confirming
+# the override targeting it fails with a real connection-refused, while
+# the default — pointing elsewhere — still succeeds). This never rewrites
+# /etc/ipa/default.conf, so there is no shared-mutable-state concurrency
+# concern to serialize around (see spec §13.1).
+#
+# Selection is cached for the WHOLE PLAY RUN (call this once, early, not
+# once per `ipa` invocation) — probing every pool member's HTTPS API
+# before every single mutation task would add needless latency across a
+# run with many such tasks.
+#
+# Inputs: freeipa_server_pool_active (from freeipa-server-pool.yml, which
+# must run before this task).
+# Outputs: freeipa_admin_server_fqdn (the selected server's FQDN — pass it
+# to consumers as `-e xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml`).
+---
+- name: "FreeIPA admin endpoint — probe each active pool member's HTTPS API (read-only)"
+  ansible.builtin.wait_for:
+    host: "{{ item.ip }}"
+    port: 443
+    timeout: 5
+    state: started
+  loop: "{{ freeipa_server_pool_active }}"
+  loop_control: {label: "{{ item.fqdn }}"}
+  register: freeipa_admin_endpoint_probe
+  ignore_errors: true
+  tags: [always]
+
+- name: "FreeIPA admin endpoint — select the first reachable pool member (desired-pool order, not reachability order)"
+  ansible.builtin.set_fact:
+    freeipa_admin_server_fqdn: >-
+      {{
+        (freeipa_server_pool_active
+         | zip(freeipa_admin_endpoint_probe.results | default([]))
+         | selectattr('1.failed', 'equalto', false)
+         | map(attribute='0.fqdn')
+         | list
+         | first)
+        | default('', true)
+      }}
+  tags: [always]
+
+- name: "Gate: at least one FreeIPA server pool member reachable for admin API calls (fail closed)"
+  ansible.builtin.assert:
+    that:
+      - (freeipa_admin_server_fqdn | length) > 0
+    fail_msg: >-
+      None of the FreeIPA server pool members
+      ({{ freeipa_server_pool_active | map(attribute='fqdn') | list }}) answered
+      on TCP/443 — cannot select a live admin API endpoint for Pilot's own
+      `ipa` CLI mutations (spec §13).
+  tags: [always]

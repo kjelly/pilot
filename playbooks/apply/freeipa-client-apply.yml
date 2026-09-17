@@ -189,6 +189,40 @@
         freeipa_domain: "{{ freeipa_server_pool_domain_input }}"
       tags: [always]
 
+    # Control-plane admin endpoint selection (spec §13): lets THIS
+    # playbook's own `ipa` CLI mutations/reads target a live, reachable
+    # pool member instead of always hitting whatever
+    # /etc/ipa/default.conf happens to point at (Phase 0 confirmed live
+    # that stays pinned to a single server even after HA client
+    # enrollment).
+    - name: "FreeIPA admin endpoint — select a live server for this playbook's own ipa CLI calls"
+      ansible.builtin.include_tasks: tasks/freeipa-admin-endpoint-select.yml
+      tags: [always]
+
+    # freeipa-client-host-dns.yml's authoritative-DNS reads (plan/apply/
+    # verify) redirect to this same selected endpoint's IP instead of
+    # always querying the primary (spec §12's "not綁死 primary" concern) —
+    # confirmed live: with the primary stopped, the OLD hard-coded
+    # `dig @{{ ipa_server_ip }}` failed the plan-phase's own fail-closed
+    # gate ("Cannot verify the authoritative DNS state"), blocking even a
+    # plain DNS backfill ADD that a surviving replica could have answered.
+    # Deliberately does NOT implement §12's full "compare >=2 authorities,
+    # fail closed on replication-lag disagreement" split-brain guard — that
+    # requires touching this file's existing CAS/TOCTOU/identity-proof
+    # state machine (Day-2 IP-replacement spec), which is a large, already
+    # heavily-tested surface; out of scope for this pass, see
+    # docs/tmp/now/freeipa-client-ha-spec.md's Phase 5 section.
+    - name: "FreeIPA client DNS — resolve which authority IP to read from (redirects off the primary-only default)"
+      ansible.builtin.set_fact:
+        freeipa_dns_read_authority_ip: >-
+          {{
+            (freeipa_server_pool_active
+             | selectattr('fqdn', 'equalto', freeipa_admin_server_fqdn)
+             | map(attribute='ip') | list | first)
+            | default(ipa_server_ip, true)
+          }}
+      tags: [always]
+
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
         that:

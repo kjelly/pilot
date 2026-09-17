@@ -324,3 +324,111 @@ func TestRegression_FreeipaClientApplyPlaybook_FailoverReconciliationWiredIn(t *
 		t.Errorf("failover reconciliation must NOT be gated on prior-enrollment detection (ipa_cfg.stat.exists) — it must run unconditionally, including right after a fresh enrollment (spec §7, Phase 0 finding)")
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 5 — Control-plane admin endpoint selection
+// (playbooks/apply/tasks/freeipa-admin-endpoint-select.yml, spec §13).
+// ─────────────────────────────────────────────────────────────────────────
+
+// TestRegression_FreeipaAdminEndpointSelectTask_FailClosedNonMutating locks
+// spec §13: the selector picks the first REACHABLE pool member (not
+// necessarily the first in desired-pool order), fails closed when none are
+// reachable, and never rewrites /etc/ipa/default.conf — confirmed live in
+// Phase 0 that `ipa -e xmlrpc_uri=<url>` is a real, non-mutating,
+// per-invocation override, so there is no shared-mutable-state
+// concurrency concern to serialize around.
+func TestRegression_FreeipaAdminEndpointSelectTask_FailClosedNonMutating(t *testing.T) {
+	const taskPath = "../../playbooks/apply/tasks/freeipa-admin-endpoint-select.yml"
+	raw, err := os.ReadFile(taskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", taskPath, err)
+	}
+	task := string(raw)
+
+	if !strings.Contains(task, "freeipa_admin_server_fqdn") {
+		t.Fatalf("task must output freeipa_admin_server_fqdn")
+	}
+	if !strings.Contains(task, "selectattr('1.failed', 'equalto', false)") {
+		t.Errorf("selection must filter to only the REACHABLE probe results before picking the first one")
+	}
+	if !strings.Contains(task, "(freeipa_admin_server_fqdn | length) > 0") {
+		t.Errorf("must fail closed when no pool member is reachable")
+	}
+	for _, mutator := range []string{"ansible.builtin.copy", "ansible.builtin.lineinfile", "ansible.builtin.blockinfile"} {
+		if strings.Contains(task, mutator) {
+			t.Errorf("selector must never mutate any file (found %q) — it is a non-mutating per-invocation override (spec §13.1)", mutator)
+		}
+	}
+}
+
+// TestRegression_FreeipaClientApplyPlaybook_AdminEndpointWiredIntoDNSBackfill
+// locks that the DNS backfill ADD task (freeipa-client-host-dns.yml) uses
+// the live-selected endpoint via `-e xmlrpc_uri=`, not a bare `ipa
+// dnsrecord-add` that would fall through to /etc/ipa/default.conf's
+// primary-only xmlrpc_uri. Confirmed live: with the primary stopped, the
+// bare form's implicit default.conf routing made even a plain DNS
+// backfill fail; the fix let it succeed via the surviving replica.
+func TestRegression_FreeipaClientApplyPlaybook_AdminEndpointWiredIntoDNSBackfill(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-client-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+	if !strings.Contains(playbook, "tasks/freeipa-admin-endpoint-select.yml") {
+		t.Fatalf("playbook must include tasks/freeipa-admin-endpoint-select.yml")
+	}
+
+	const dnsTaskPath = "../../playbooks/apply/tasks/freeipa-client-host-dns.yml"
+	dnsRaw, err := os.ReadFile(dnsTaskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", dnsTaskPath, err)
+	}
+	dnsTask := string(dnsRaw)
+	addIdx := strings.Index(dnsTask, "add each missing address to authoritative DNS")
+	if addIdx == -1 {
+		t.Fatalf("could not find the DNS backfill ADD task")
+	}
+	addBlock := dnsTask[addIdx : addIdx+400]
+	if !strings.Contains(addBlock, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml") {
+		t.Errorf("DNS backfill ADD must target the live-selected endpoint via -e xmlrpc_uri=, not fall through to /etc/ipa/default.conf's primary-only routing")
+	}
+
+	// The plan/apply/verify authoritative reads must also redirect off the
+	// primary-only default (spec §12's narrower, non-consistency-checked
+	// half — see the wiring comment in freeipa-client-apply.yml for what's
+	// deliberately still deferred).
+	if strings.Contains(dnsTask, `"@{{ ipa_server_ip }}"`) {
+		t.Errorf("authoritative DNS reads must not hard-code @{{ ipa_server_ip }} (primary-only) — use freeipa_dns_read_authority_ip, confirmed live to matter when the primary is down")
+	}
+	if !strings.Contains(dnsTask, "@{{ freeipa_dns_read_authority_ip }}") {
+		t.Errorf("authoritative DNS reads must use freeipa_dns_read_authority_ip")
+	}
+}
+
+// TestRegression_FreeipaHostAnnotationsTask_UsesAdminEndpoint locks that
+// freeipa-host-annotations.yml's `ipa host-show`/`ipa host-mod` calls also
+// use the live-selected endpoint — found live in Phase 5: with the primary
+// stopped, this task's bare `ipa host-show` (implicit default.conf
+// routing) returned a connection-refused misreported as rc=1 "host object
+// does not exist", failing the whole play even after the DNS backfill fix
+// let enrollment/DNS succeed.
+func TestRegression_FreeipaHostAnnotationsTask_UsesAdminEndpoint(t *testing.T) {
+	const taskPath = "../../playbooks/apply/tasks/freeipa-host-annotations.yml"
+	raw, err := os.ReadFile(taskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", taskPath, err)
+	}
+	task := string(raw)
+
+	for _, forbidden := range []string{
+		"[ipa, host-show,", "[ipa, host-mod,",
+	} {
+		if strings.Contains(task, forbidden) {
+			t.Errorf("found a bare %q argv — every ipa host-show/host-mod call in this file must include the -e xmlrpc_uri= admin-endpoint override", forbidden)
+		}
+	}
+	if strings.Count(task, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml") < 6 {
+		t.Errorf("expected the admin-endpoint override on all 6 ipa host-show/host-mod calls in this file, found fewer")
+	}
+}

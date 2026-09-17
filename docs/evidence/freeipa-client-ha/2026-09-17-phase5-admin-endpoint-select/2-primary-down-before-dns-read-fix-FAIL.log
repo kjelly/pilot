@@ -1,0 +1,468 @@
+  ⚠️  ansible-lint found issues in playbooks/apply/freeipa-client-apply.yml:
+    WARNING  Listing 28 violation(s) that are fatal
+    Read documentation for instructions on how to ignore specific rule violations.
+
+    # Rule Violation Summary
+
+      2 command-instead-of-module profile:basic tags:command-shell,idiom
+      3 yaml profile:basic tags:formatting,yaml
+     23 name profile:basic tags:idiom
+
+    Failed: 28 failure(s), 0 warning(s) in 12 files processed of 12 encountered. Last profile that met the validation criteria was 'min'.
+    command-instead-of-module: systemctl used in place of systemd module
+    playbooks/apply/freeipa-client-apply.yml:235 Task/Handler: Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/freeipa-client-apply.yml:296:13 Task/Handler: FreeIPA client — pin this host {{ ipa_client_fqdn }} to its own IP in /etc/hosts (FQDN canonical)
+
+    command-instead-of-module: apt-get used in place of apt-get module
+    playbooks/apply/tasks/apt-cache-refresh.yml:32 Task/Handler: APT cache refresh — global apt-get update probe ({{ pilot_apt_refresh_reason | default('unspecified') }})
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:36:9 Task/Handler: APT package install ({{ pilot_apt_component | default('?') }}) — assert interface
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:58:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — set effective policy facts
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:64:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — read installed-package facts
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:69:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — compute missing packages
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:73:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — SUCCESS(already_present)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:80:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — resolve a candidate, refreshing only if required
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:83:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — apt-cache policy for missing packages (one per package: apt-cache silently OMITS an entirely-unknown package from combined output instead of printing 'Candidate: (none)', which would false-positive a joined multi-package query)
+
+    yaml[line-length]: Line too long (291 > 160 characters)
+    playbooks/apply/tasks/apt-package-install.yml:83
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:93:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — determine candidate availability
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:102:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — FATAL(apt_cache_insufficient_offline)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:113:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — refresh (policy={{ _pilot_apt_policy }})
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:116:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — global refresh
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:121:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — re-check candidate after global refresh (one apt-cache policy per package; see cache-first check above for why)
+
+    yaml[line-length]: Line too long (179 > 160 characters)
+    playbooks/apply/tasks/apt-package-install.yml:121
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:131:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — determine post-global-refresh candidate
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:140:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — scoped refresh (tolerant only, required sources)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:145:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): scoped refresh disallowed
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:155:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — scoped refresh against required sources only
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:158:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — re-check candidate after scoped refresh (one apt-cache policy per package; see cache-first check above for why)
+
+    yaml[line-length]: Line too long (183 > 160 characters)
+    playbooks/apply/tasks/apt-package-install.yml:158
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:169:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — determine post-scoped-refresh candidate
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:179:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): scoped refresh did not recover
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:187:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): no candidate, refresh exhausted
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:197:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — install (single sanctioned mutation point, no ignore_errors)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:210:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — SUCCESS
+
+
+▶ ansible-playbook playbooks/apply/freeipa-client-apply.yml -i /tmp/pilot-inv-2727565858.yaml -e target_group=freeipa-client -e @/tmp/claude-1000/-home-kjelly-github-pilot/032b4ea6-1459-4896-b2c2-1b50071fd7c3/scratchpad/ha-test-vault.yaml
+📦 starting sandbox container (pilot-cli:latest)...
+▶ docker exec pilot-sandbox-msi-company-1789655359-8acab2 ansible-playbook /tmp/pilot-playbook-dir/freeipa-client-apply.yml -i /tmp/pilot-inventory.yaml -e target_group=freeipa-client -e @/tmp/pilot-extra-vars-6.yaml
+[1;35m[WARNING]: Invalid characters were found in group names but not replaced, use -vvvv to see details[0m
+
+PLAY [FreeIPA client enroll] ***************************************************
+
+TASK [FreeIPA client — gather fresh facts (bypasses fact_caching; see gather_facts: false note above)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: required vars present (fail early, before any mutation)] ***********
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: supported client OS (Debian/Ubuntu primary; EL also handled)] ******
+[1;35m[WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:153:19[0m
+[0;35m[0m
+[0;35m151         that:[0m
+[0;35m152           - ansible_os_family in ['Debian', 'RedHat'][0m
+[0;35m153         fail_msg: >-[0m
+[0;35m                      ^ column 19[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:152:13[0m
+[0;35m[0m
+[0;35m150       ansible.builtin.assert:[0m
+[0;35m151         that:[0m
+[0;35m152           - ansible_os_family in ['Debian', 'RedHat'][0m
+[0;35m                ^ column 13[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — resolve domain input for the shared task (avoid var-name collision)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — compute desired pool + effective topology mode] ****
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/freeipa-server-pool.yml for ipa-ha-client[0m
+
+TASK [FreeIPA server pool — normalize topology_mode input (default auto)] ******
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — gate: topology_mode is a legal value] **************
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — gate: exactly one freeipa-server host in inventory] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — build primary pool member] *************************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — gate: multiple replicas each need an explicit freeipa_replica_fqdn host var] ***
+[0;36mskipping: [ipa-ha-client] => (item=ipa-replica) [0m
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — build replica pool members] ************************
+[0;32mok: [ipa-ha-client] => (item=ipa-replica)[0m
+
+TASK [FreeIPA server pool — combine primary + replicas into the full desired pool] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — gate: no duplicate FQDNs in the pool (covers primary==replica FQDN too)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — gate: no IP reused across different FQDNs] *********
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — compute effective topology mode] *******************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — gate: ha mode requires >= 2 providers] *************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — compute active pool (single mode uses primary only, even if a replica exists)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — derive fqdns/ips/dns-provider-ips from the active pool] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — observability summary (spec §22; never logs secrets)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "msg": {[0m
+[0;32m        "dns_providers": [[0m
+[0;32m            "192.168.122.8"[0m
+[0;32m        ],[0m
+[0;32m        "effective_mode": "ha",[0m
+[0;32m        "providers": [[0m
+[0;32m            "ipa1.ipa.pilot.internal",[0m
+[0;32m            "ipa2.ipa.pilot.internal"[0m
+[0;32m        ],[0m
+[0;32m        "requested_mode": "auto"[0m
+[0;32m    }[0m
+[0;32m}[0m
+
+TASK [FreeIPA admin endpoint — select a live server for this playbook's own ipa CLI calls] ***
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/freeipa-admin-endpoint-select.yml for ipa-ha-client[0m
+
+TASK [FreeIPA admin endpoint — probe each active pool member's HTTPS API (read-only)] ***
+[0;31m[ERROR]: Task failed: Module failed: Timeout when waiting for 192.168.122.8:443[0m
+[0;31mOrigin: /tmp/pilot-playbook-dir/tasks/freeipa-admin-endpoint-select.yml:29:3[0m
+[0;31m[0m
+[0;31m27 # to consumers as `-e xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml`).[0m
+[0;31m28 ---[0m
+[0;31m29 - name: "FreeIPA admin endpoint — probe each active pool member's HTTPS API (read-only)"[0m
+[0;31m     ^ column 3[0m
+[0;31m[0m
+[0;31mfailed: [ipa-ha-client] (item=ipa1.ipa.pilot.internal) => {"ansible_loop_var": "item", "changed": false, "elapsed": 5, "item": {"dns_provider": true, "fqdn": "ipa1.ipa.pilot.internal", "inventory_host": "ipa-primary", "ip": "192.168.122.8", "kind": "primary"}, "msg": "Timeout when waiting for 192.168.122.8:443"}[0m
+[0;32mok: [ipa-ha-client] => (item=ipa2.ipa.pilot.internal)[0m
+[0;36m...ignoring[0m
+
+TASK [FreeIPA admin endpoint — select the first reachable pool member (desired-pool order, not reachability order)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: at least one FreeIPA server pool member reachable for admin API calls (fail closed)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: prod requires recent staging attestation] **************************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)] *****
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Warn if no active time sync (client enrolls with --no-ntp; ntp role must cover this)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client — detect prior enrollment (/etc/ipa/default.conf)] ********
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — detect host Kerberos keytab presence (read-only, Day-2 spec §6.1)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS — resolve + preflight (plan, no mutation)] ************
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/freeipa-client-host-dns.yml for ipa-ha-client[0m
+
+TASK [FreeIPA client DNS (plan) — resolve native-DNS capability of the selected FreeIPA server] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — resolve effective register_dns] **************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: DNS registration requested but selected FreeIPA server has no native DNS (spec.md §7)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client DNS (plan) — resolve effective DNS addresses] *************
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/tasks/freeipa-client-host-dns.yml:76:41[0m
+[0;35m[0m
+[0;35m74 - name: "FreeIPA client DNS (plan) — resolve effective DNS addresses"[0m
+[0;35m75   ansible.builtin.set_fact:[0m
+[0;35m76     ipa_client_dns_addresses_effective: >-[0m
+[0;35m                                           ^ column 41[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: effective DNS address list must not be empty when registration is enabled (spec.md §6)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: client FQDN is well-formed for DNS registration (spec.md §5.1)] ****
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:112:22[0m
+[0;35m[0m
+[0;35m110     # This client's own FQDN (must be a resolvable, non-loopback name). Default[0m
+[0;35m111     # derives from the host's short name under the realm domain.[0m
+[0;35m112     ipa_client_fqdn: "{{ ansible_hostname | lower }}.{{ ipa_domain }}"[0m
+[0;35m                         ^ column 22[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client DNS (plan) — define the shared IP canonicalize+policy script] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — validate + canonicalize each effective DNS address (spec.md §6)] ***
+[0;32mok: [ipa-ha-client] => (item=192.168.122.6)[0m
+
+TASK [Gate: every effective DNS address is a valid, non-reserved IP literal (spec.md §6)] ***
+[0;32mok: [ipa-ha-client] => (item=192.168.122.6) => {[0m
+[0;32m    "ansible_loop_var": "item",[0m
+[0;32m    "changed": false,[0m
+[0;32m    "item": {[0m
+[0;32m        "ansible_loop_var": "item",[0m
+[0;32m        "changed": false,[0m
+[0;32m        "changed_when_result": false,[0m
+[0;32m        "cmd": [[0m
+[0;32m            "python3",[0m
+[0;32m            "-c",[0m
+[0;32m            "import ipaddress, sys\nip = ipaddress.ip_address(sys.argv[1])\nbad = ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local\nprint('BAD' if bad else ip.compressed)\nsys.exit(1 if bad else 0)\n",[0m
+[0;32m            "192.168.122.6"[0m
+[0;32m        ],[0m
+[0;32m        "delta": "0:00:00.015559",[0m
+[0;32m        "end": "2026-09-17 14:29:30.180342",[0m
+[0;32m        "failed": false,[0m
+[0;32m        "failed_when_result": false,[0m
+[0;32m        "item": "192.168.122.6",[0m
+[0;32m        "msg": "",[0m
+[0;32m        "rc": 0,[0m
+[0;32m        "start": "2026-09-17 14:29:30.164783",[0m
+[0;32m        "stderr": "",[0m
+[0;32m        "stderr_lines": [],[0m
+[0;32m        "stdout": "192.168.122.6",[0m
+[0;32m        "stdout_lines": [[0m
+[0;32m            "192.168.122.6"[0m
+[0;32m        ][0m
+[0;32m    },[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client DNS (plan) — replace canonicalized, deduped desired addresses (preserve order)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: explicit DNS IPv4 must match this host's /etc/hosts canonical IPv4 (spec.md §10, fail-closed v1)] ***
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/tasks/freeipa-client-host-dns.yml:161:15[0m
+[0;35m[0m
+[0;35m159     that:[0m
+[0;35m160       - not (ipa_client_dns_explicit_ipv4 is not none and ipa_client_dns_explicit_ipv4 != ansible_default_ipv4.ad...[0m
+[0;35m161     fail_msg: >-[0m
+[0;35m                  ^ column 15[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/tasks/freeipa-client-host-dns.yml:160:9[0m
+[0;35m[0m
+[0;35m158   ansible.builtin.assert:[0m
+[0;35m159     that:[0m
+[0;35m160       - not (ipa_client_dns_explicit_ipv4 is not none and ipa_client_dns_explicit_ipv4 != ansible_default_ipv4.ad...[0m
+[0;35m            ^ column 9[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client DNS (plan) — resolve raw replace-from acknowledgement] ****
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — validate + canonicalize replace-from acknowledgement (spec.md Day-2 §4.3/§4.4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: replace-from acknowledgement, if set, must be a valid non-reserved IP literal (spec.md Day-2 §4.4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — set effective replace-from acknowledgement ('' means unset)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — query authoritative DNS: current A records] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — query authoritative DNS: current AAAA records] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — query authoritative DNS: CNAME at owner] *****
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: authoritative DNS queries must return a usable response (spec.md §8.2/§8.3, fail-closed)] ***
+[0;31m[ERROR]: Task failed: Action failed: Cannot verify the authoritative DNS state for ipa-ha-client.ipa.pilot.internal from 192.168.122.8. Refusing DNS registration rather than interpreting a timeout, SERVFAIL, or malformed dig output as an empty record set (spec.md §8.2/§8.3, fail-closed).[0m
+[0;31mOrigin: /tmp/pilot-playbook-dir/tasks/freeipa-client-host-dns.yml:248:3[0m
+[0;31m[0m
+[0;31m246   when: freeipa_client_dns_phase == 'plan' and freeipa_client_register_dns_effective | bool[0m
+[0;31m247[0m
+[0;31m248 - name: "Gate: authoritative DNS queries must return a usable response (spec.md §8.2/§8.3, fail-closed)"[0m
+[0;31m      ^ column 3[0m
+[0;31m[0m
+[0;31mfatal: [ipa-ha-client]: FAILED! => {[0m
+[0;31m    "assertion": "(ipa_client_dns_current_a.rc | default(1)) == 0",[0m
+[0;31m    "changed": false,[0m
+[0;31m    "evaluated_to": false,[0m
+[0;31m    "msg": "Cannot verify the authoritative DNS state for ipa-ha-client.ipa.pilot.internal from 192.168.122.8. Refusing DNS registration rather than interpreting a timeout, SERVFAIL, or malformed dig output as an empty record set (spec.md §8.2/§8.3, fail-closed)."[0m
+[0;31m}[0m
+
+PLAY RECAP *********************************************************************
+[0;31mipa-ha-client[0m              : [0;32mok=43  [0m changed=0    unreachable=0    [0;31mfailed=1   [0m [0;36mskipped=6   [0m rescued=0    [1;35mignored=1   [0m
+
+📦 stopping sandbox container...
+sandbox: 271 file(s) changed in pilot-sandbox-msi-company-1789655359-8acab2
+  /root
+  /root/.ansible
+  /root/.ansible/cp
+  /root/.ansible/cp/pilot-root@192.168.122.6:22
+  /root/.ansible/pilot-factcache
+  /root/.ansible/pilot-factcache/s1_ipa-ha-client
+  /root/.ssh
+  /root/.ssh/known_hosts
+  /tmp
+  /tmp/pilot-extra-vars-6.yaml
+  /tmp/pilot-inventory.yaml
+  /tmp/pilot-playbook-dir
+  /tmp/pilot-playbook-dir/agent-controller-apply.yml
+  /tmp/pilot-playbook-dir/alertmanager-apply.yml
+  /tmp/pilot-playbook-dir/audit-log-forwarding-apply.yml
+  /tmp/pilot-playbook-dir/core-infra-provider-apply.yml
+  /tmp/pilot-playbook-dir/dashboard-apply.yml
+  /tmp/pilot-playbook-dir/dcgm-exporter-apply.yml
+  /tmp/pilot-playbook-dir/detection-engine-apply.yml
+  /tmp/pilot-playbook-dir/docker-apply.yml
+  ... (251 more)
+  transcript: /var/lib/libvirt/images/pilot/ipa-ha-client/runs/20260917T142919Z-freeipa-client-apply.log
+  ✗ playbooks/apply/freeipa-client-apply.yml
+Error: exit status 2
+Usage:
+  pilot vm-target run <playbook.yml> [<extra>...] [flags]
+
+Flags:
+      --discover string     glob pattern or directory to discover playbooks
+      --fail-fast           with --from-stdin/--discover, stop on first failure
+      --from-stdin          read playbook paths from stdin (one per line)
+      --group stringArray   combine multiple already-up vm-targets into one grouped inventory: group=target1,target2 (repeatable)
+  -h, --help                help for run
+      --json                parse ansible's json callback into a structured ok/changed/failed/unreachable summary (not supported with --sandbox)
+      --name string         target name
+      --skip-lint           skip ansible-lint preflight
+      --skip-syntax-check   skip ansible-playbook --syntax-check preflight
+
+Global Flags:
+      --config string      config file (default ~/.config/pilot/config.yaml)
+      --data-dir string    data directory for the history db and target state
+      --log-level string   diagnostic log level: debug|info|warn|error (default warn; also $PILOT_LOG_LEVEL)
+
+exit status 2
+exit status 2

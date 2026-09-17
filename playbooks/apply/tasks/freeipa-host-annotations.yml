@@ -301,7 +301,7 @@
         # as long as the host is already enrolled (the outer gate above).
         - name: "FreeIPA host annotations (Phase B) — read the FreeIPA host object"
           ansible.builtin.command:
-            argv: [ipa, host-show, "{{ ipa_client_fqdn }}", --all, --raw]
+            argv: [ipa, -e, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml", host-show, "{{ ipa_client_fqdn }}", --all, --raw]
           environment:
             KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
           register: ipa_annotations_host_show
@@ -403,7 +403,7 @@
         # spec.md §22.
         - name: "FreeIPA host annotations (Phase E) — delete stale Pilot-owned userClass values"
           ansible.builtin.command:
-            argv: [ipa, host-mod, "{{ ipa_client_fqdn }}", "--delattr=userclass={{ item }}"]
+            argv: [ipa, -e, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml", host-mod, "{{ ipa_client_fqdn }}", "--delattr=userclass={{ item }}"]
           environment:
             KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
           loop: "{{ ipa_annotations_plan.delete | default([]) }}"
@@ -414,7 +414,7 @@
 
         - name: "FreeIPA host annotations (Phase E) — add missing desired Pilot-owned userClass values"
           ansible.builtin.command:
-            argv: [ipa, host-mod, "{{ ipa_client_fqdn }}", "--addattr=userclass={{ item }}"]
+            argv: [ipa, -e, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml", host-mod, "{{ ipa_client_fqdn }}", "--addattr=userclass={{ item }}"]
           environment:
             KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
           loop: "{{ ipa_annotations_plan.add | default([]) }}"
@@ -425,7 +425,13 @@
 
         - name: "FreeIPA host annotations (Phase E) — set native nshostlocation (spec.md §8.4)"
           ansible.builtin.command:
-            argv: [ipa, host-mod, "{{ ipa_client_fqdn }}", "--setattr=nshostlocation={{ ipa_annotations_plan.location_to }}"]
+            argv:
+              - ipa
+              - -e
+              - "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml"
+              - host-mod
+              - "{{ ipa_client_fqdn }}"
+              - "--setattr=nshostlocation={{ ipa_annotations_plan.location_to }}"
           environment:
             KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
           when: >-
@@ -436,7 +442,13 @@
 
         - name: "FreeIPA host annotations (Phase E) — clear native nshostlocation (spec.md §8.3/§8.4)"
           ansible.builtin.command:
-            argv: [ipa, host-mod, "{{ ipa_client_fqdn }}", "--delattr=nshostlocation={{ ipa_annotations_plan.location_from }}"]
+            argv:
+              - ipa
+              - -e
+              - "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml"
+              - host-mod
+              - "{{ ipa_client_fqdn }}"
+              - "--delattr=nshostlocation={{ ipa_annotations_plan.location_from }}"
           environment:
             KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
           when: >-
@@ -452,7 +464,7 @@
         # work.
         - name: "FreeIPA host annotations (Phase F) — re-read live state for verification"
           ansible.builtin.command:
-            argv: [ipa, host-show, "{{ ipa_client_fqdn }}", --all, --raw]
+            argv: [ipa, -e, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml", host-show, "{{ ipa_client_fqdn }}", --all, --raw]
           environment:
             KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
           register: ipa_annotations_verify_show
