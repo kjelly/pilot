@@ -1147,6 +1147,29 @@ func TestResolveRosterAutoFillValue(t *testing.T) {
 	})
 }
 
+func TestRosterCandidatePath(t *testing.T) {
+	defaultPath := "/ws/.vault/ipa-identity.yaml"
+
+	t.Run("reuses whatever a host already resolves it to", func(t *testing.T) {
+		hostVars := map[string]map[string]any{"ipa-1": {"freeipa_roster_file": "/ws/.vault/custom.yaml"}}
+		if got := rosterCandidatePath(hostVars, defaultPath, true); got != "/ws/.vault/custom.yaml" {
+			t.Fatalf("got %q, want the existing value", got)
+		}
+	})
+
+	t.Run("falls back to default path when it exists", func(t *testing.T) {
+		if got := rosterCandidatePath(nil, defaultPath, true); got != defaultPath {
+			t.Fatalf("got %q, want default path", got)
+		}
+	})
+
+	t.Run("empty when default path doesn't exist and nothing else has it", func(t *testing.T) {
+		if got := rosterCandidatePath(nil, defaultPath, false); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+}
+
 func TestAutoFillFreeIPARosterFile_SkipsWhenExplicitExtraVarAlreadySet(t *testing.T) {
 	selected := []contract.Contract{{
 		ID: "freeipa-nfs-client", Role: "freeipa-nfs-client",
@@ -1174,6 +1197,82 @@ func TestAutoFillFreeIPARosterFile_NoOpWhenNoComponentRequiresRoster(t *testing.
 	}
 	if len(got) != 0 {
 		t.Fatalf("got %v, want no extra vars appended", got)
+	}
+}
+
+func TestAnySelectedComponentHasRole(t *testing.T) {
+	selected := []contract.Contract{{ID: "freeipa-nfs-client", Role: "freeipa-nfs-client"}, {ID: "freeipa-client", Role: "freeipa-client"}}
+	if !anySelectedComponentHasRole(selected, "freeipa-client") {
+		t.Fatalf("expected freeipa-client to be found in %v", selected)
+	}
+	if anySelectedComponentHasRole(selected, "host-monitoring") {
+		t.Fatalf("did not expect host-monitoring to be found in %v", selected)
+	}
+	if anySelectedComponentHasRole(nil, "freeipa-client") {
+		t.Fatalf("expected false for an empty selection")
+	}
+}
+
+func TestAutoFillFreeIPAClientHostsIntoRoster_NoOpWithoutFreeIPAClientRole(t *testing.T) {
+	selected := []contract.Contract{{ID: "host-monitoring", Role: "host-monitoring"}}
+	if err := autoFillFreeIPAClientHostsIntoRoster(context.Background(), io.Discard, selected, "unused.yml", nil, vaultInput{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAutoFillFreeIPAClientHostsIntoRoster_AddsMissingHostsWhenRosterPathIsExplicit(t *testing.T) {
+	dir := t.TempDir()
+	hostsYML := `hosts:
+  web1:
+    ansible_host: "10.0.0.1"
+    roles: [freeipa-client]
+`
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(hostsYML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rosterPath := filepath.Join(dir, "roster.yaml")
+	roster := "schema_version: 1\nfreeipa:\n  domain: ipa.pilot.internal\nusers:\n- name: alice\n  state: present\n"
+	if err := os.WriteFile(rosterPath, []byte(roster), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	selected := []contract.Contract{{ID: "freeipa-client", Role: "freeipa-client"}}
+	inv := filepath.Join(dir, "inventory.yml") // never read: freeipa_roster_file is explicit below
+	extraVars := []string{"freeipa_roster_file=" + rosterPath}
+
+	var out bytes.Buffer
+	if err := autoFillFreeIPAClientHostsIntoRoster(context.Background(), &out, selected, inv, extraVars, vaultInput{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.String(), "web1.ipa.pilot.internal") {
+		t.Fatalf("output = %q, want a mention of the newly-added host", out.String())
+	}
+
+	data, err := os.ReadFile(rosterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "web1.ipa.pilot.internal") {
+		t.Fatalf("roster = %q, want the new host entry appended", data)
+	}
+}
+
+func TestAutoFillFreeIPAClientHostsIntoRoster_SilentlyWarnsOnUnreadableRoster(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte("hosts:\n  web1:\n    ansible_host: \"10.0.0.1\"\n    roles: [freeipa-client]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	selected := []contract.Contract{{ID: "freeipa-client", Role: "freeipa-client"}}
+	inv := filepath.Join(dir, "inventory.yml")
+	extraVars := []string{"freeipa_roster_file=" + filepath.Join(dir, "does-not-exist.yaml")}
+
+	var out bytes.Buffer
+	if err := autoFillFreeIPAClientHostsIntoRoster(context.Background(), &out, selected, inv, extraVars, vaultInput{}); err != nil {
+		t.Fatalf("a roster read failure must warn, not fail the deploy: %v", err)
+	}
+	if !strings.Contains(out.String(), "⚠") {
+		t.Fatalf("output = %q, want a warning about the unreadable roster", out.String())
 	}
 }
 

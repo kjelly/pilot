@@ -31,6 +31,7 @@ import (
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/outbound"
 	"github.com/kjelly/pilot/internal/spec"
 	"github.com/kjelly/pilot/internal/store"
@@ -1644,6 +1645,9 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	if err != nil {
 		return err
 	}
+	if err := autoFillFreeIPAClientHostsIntoRoster(ctx, out, selected, inv, extraVars, vault); err != nil {
+		return err
+	}
 	extraVars, err = autoFillWorkspaceManifestFile(ctx, out, selected, scope, inv, extraVars, vault, "freeipa_dns_manifest_file", "freeipa-dns.yaml")
 	if err != nil {
 		return err
@@ -2426,24 +2430,9 @@ func autoFillFreeIPARosterFile(ctx context.Context, out io.Writer, selected []co
 // function permanently inert for the exact "server already configured,
 // clients still need it" case it exists to solve.
 func resolveRosterAutoFillValue(rosterHosts []string, hostVars map[string]map[string]any, defaultPath string, defaultExists bool) string {
-	names := make([]string, 0, len(hostVars))
-	for name := range hostVars {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	candidate := ""
-	for _, name := range names {
-		if v, ok := hostVars[name]["freeipa_roster_file"].(string); ok && strings.TrimSpace(v) != "" {
-			candidate = v
-			break
-		}
-	}
+	candidate := rosterCandidatePath(hostVars, defaultPath, defaultExists)
 	if candidate == "" {
-		if !defaultExists {
-			return ""
-		}
-		candidate = defaultPath
+		return ""
 	}
 
 	for _, host := range rosterHosts {
@@ -2452,6 +2441,82 @@ func resolveRosterAutoFillValue(rosterHosts []string, hostVars map[string]map[st
 		}
 	}
 	return candidate
+}
+
+// rosterCandidatePath picks the roster path resolveRosterAutoFillValue and
+// autoFillFreeIPAClientHostsIntoRoster both need: whatever any host in the
+// whole inventory already resolves freeipa_roster_file to (deterministic,
+// first host in sorted name order), else defaultPath if it actually exists
+// on disk, else "" (nothing to go on).
+func rosterCandidatePath(hostVars map[string]map[string]any, defaultPath string, defaultExists bool) string {
+	names := make([]string, 0, len(hostVars))
+	for name := range hostVars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		if v, ok := hostVars[name]["freeipa_roster_file"].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	if defaultExists {
+		return defaultPath
+	}
+	return ""
+}
+
+// autoFillFreeIPAClientHostsIntoRoster keeps the roster's own hosts: list
+// in sync with every freeipa-client host actually being deployed — the
+// same authoring gap inventory.AutoFillFreeIPAClientRosterHosts fixes
+// from `pilot edit`'s roster screens, reached here too because the
+// operator adding a new freeipa-client host to hosts.yml and deploying it
+// doesn't necessarily ever open `pilot edit`'s roster manager. Silent and
+// best-effort like autoFillFreeIPARosterFile above: a roster it can't
+// read/write (encrypted, missing, locked) must not fail an otherwise
+// unrelated deploy over a convenience step.
+func autoFillFreeIPAClientHostsIntoRoster(ctx context.Context, out io.Writer, selected []contract.Contract, inv string, extraVars []string, vault vaultInput) error {
+	if !anySelectedComponentHasRole(selected, "freeipa-client") {
+		return nil
+	}
+
+	rosterPath := extraVarValue(extraVars, "freeipa_roster_file")
+	if rosterPath == "" {
+		hostVars, err := resolveInventoryVariables(ctx, inv, extraVars, vault)
+		if err != nil {
+			return err
+		}
+		def := filepath.Join(filepath.Dir(inv), ".vault", "ipa-identity.yaml")
+		abs, err := filepath.Abs(def)
+		if err != nil {
+			return err
+		}
+		_, statErr := os.Stat(abs)
+		rosterPath = rosterCandidatePath(hostVars, abs, statErr == nil)
+	}
+	if rosterPath == "" {
+		return nil
+	}
+
+	added, err := inventory.AutoFillFreeIPAClientRosterHosts(filepath.Dir(inv), rosterPath)
+	if err != nil {
+		fmt.Fprintf(out, "⚠ roster 自動補完主機失敗（不影響本次部署）: %v\n", err)
+		return nil
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	fmt.Fprintf(out, "ℹ️  roster 缺少 %d 台 freeipa-client 主機記錄，已自動加入: %s\n", len(added), strings.Join(added, ", "))
+	return nil
+}
+
+func anySelectedComponentHasRole(selected []contract.Contract, role string) bool {
+	for _, c := range selected {
+		if c.Role == role {
+			return true
+		}
+	}
+	return false
 }
 
 // autoFillWorkspaceManifestFile spares the operator from hand-typing an

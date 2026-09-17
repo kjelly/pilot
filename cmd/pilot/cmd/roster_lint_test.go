@@ -312,6 +312,39 @@ func TestRosterLintCmd_OneDeterministicWarningPerAccessGroup(t *testing.T) {
 	}
 }
 
+const rosterLintFixtureDanglingHostReference = `
+schema_version: 1
+freeipa:
+  domain: ipa.pilot.internal
+users:
+  - name: alice
+    ssh_keys: {authoritative: true, values: []}
+hostgroups:
+  - name: hg1
+    membership: {hosts: [missing.ipa.pilot.internal]}
+`
+
+func TestRosterLintCmd_WarnsOnDanglingHostReferenceWithoutFailing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(path, []byte(rosterLintFixtureDanglingHostReference), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"roster", "lint", path})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	defer rootCmd.SetArgs(nil)
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v (a dangling host reference must warn, not fail lint), output: %s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "warning: hostgroups[hg1].membership.hosts references \"missing.ipa.pilot.internal\"") {
+		t.Fatalf("output = %q, want a dangling host reference warning", out.String())
+	}
+}
+
 func TestRosterLintCmd_EncryptedRosterReportsAClearError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")

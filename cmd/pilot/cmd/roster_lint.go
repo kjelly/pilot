@@ -34,7 +34,14 @@ roster's own structure, not the rest of the inventory.
 A structurally valid roster below the current schema version passes with a
 notice pointing at ` + "`pilot roster migrate`" + `; pass --upgrade to have
 lint perform that upgrade itself (via the same migration engine, not a
-second one) before reporting.`,
+second one) before reporting.
+
+A hostgroup/netgroup membership or HBAC/sudo target naming a host with no
+present roster hosts: entry is reported as a warning, not a structural
+violation (a roster can be widely deployed with this drift already, so
+lint stays non-blocking here) — but it is exactly what makes the outbound
+webhook's snapshot fail closed (design spec §11.4), so it is worth fixing
+even though lint still exits 0.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := args[0]
@@ -62,6 +69,11 @@ second one) before reporting.`,
 		if err != nil {
 			return err
 		}
+		danglingHostWarnings, err := inventory.RosterDanglingHostReferenceWarningsFile(path)
+		if err != nil {
+			return err
+		}
+		warnings = append(warnings, danglingHostWarnings...)
 		printWarnings := func() {
 			for _, w := range warnings {
 				fmt.Fprintf(cmd.OutOrStdout(), "warning: %s\n", w.Detail)
