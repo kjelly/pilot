@@ -1,6 +1,6 @@
 # Verification Spec — alertmanager (central Alertmanager for all sites)
 
-> 版本：v1.4
+> 版本：v1.5 DRAFT
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `prometheus.md` / `thanos-query.md` 的 docker container 模式）
 > 維護者：sre
 
@@ -25,6 +25,14 @@
 | `alertmanager_host_data_dir` | Alertmanager 持久化目錄 (silences, notifications) | 否 | `/var/lib/pilot/alertmanager` |
 | `alertmanager_config_dir` | Alertmanager 設定檔目錄 | 否 | `/etc/pilot/alertmanager` |
 | `docker_network_name` | Docker network 名稱 (與 thanos-query 共用) | 否 | `pilot-metrics` |
+
+## 1.6 Teams routing contract
+
+內建 `teams` 模式以 `alertname + pilot_subject + signal_id` 分組，`repeat_interval`
+為 12 小時。只有 `severity=critical` 或明確帶 `action_required=true` 的 alert
+進 Teams；一般 warning 留在 Detection Engine dashboard/digest。Adaptive Card 必須
+顯示 reason、recommended action、runbook 與持續時間，讓收到通知的人能直接判斷
+下一步。
 
 ## 2. Checklist
 
@@ -62,6 +70,7 @@
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-09-17 | v1.5 DRAFT | Teams 僅接收 critical／明確 actionable warning；以 subject + signal 分組、12h repeat，卡片顯示行動資訊；待 candidate target evidence 後升版 | sre |
 | 2026-09-08 | v1.4 | 新增 `pilot-alertmanager-teams-proxy`：Alertmanager 原生 webhook_configs 無法直接餵給要求 Adaptive Card 的 Teams flowbot（Power Automate「當收到 Teams webhook 要求」觸發器），改成 webhook 先打內部 proxy 做格式轉換再轉發；新增 C8/C9 | sre |
 | 2026-09-08 | v1.3 | 新增 null/custom/teams receiver mode 與單一 Teams webhook vault 契約 | sre |
 | 2026-07-22 | v1.2 | C5 同時支援 Alertmanager 接受的 YAML 與 JSON config，避免合法 compact JSON 被誤判 | sre |

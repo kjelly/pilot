@@ -20,6 +20,7 @@ type AlertmanagerPayload struct {
 // alertmanagerRefreshWindow and alertmanagerEndsAtHorizon implement the
 // refresh cadence from spec §22.1: refresh every 60s, endsAt = now+180s.
 const (
+	alertmanagerRefreshWindow = 60 * time.Second
 	alertmanagerEndsAtHorizon = 180 * time.Second
 )
 
@@ -43,6 +44,14 @@ type alertEvidence struct {
 	DominantFeature string
 	Contributors    []alertContributor
 	FeatureValues   map[string]float64
+}
+
+type alertNotification struct {
+	ActionRequired    bool
+	Channel           string
+	Reason            string
+	RecommendedAction string
+	RunbookURL        string
 }
 
 // buildAlertEvidence converts an internal fused score into a stable,
@@ -87,6 +96,34 @@ func buildAlertEvidence(fused FusedResult, current map[string]float64) alertEvid
 	return evidence
 }
 
+func (p FeatureProfile) alertNotification(severity Severity, evidence alertEvidence) alertNotification {
+	policy := p.EffectiveNotifyPolicy()
+	channel := policy.Warning
+	if severity == SeverityCritical {
+		channel = policy.Critical
+	}
+	actionRequired := channel == "teams"
+	reason := fmt.Sprintf("sustained %s anomaly detected by %s", evidence.CategoryHint, evidence.DetectorSource)
+	if evidence.DominantFeature != "" {
+		reason = fmt.Sprintf("%s; primary signal %s", reason, evidence.DominantFeature)
+	}
+	recommended := policy.RecommendedAction
+	if recommended == "" {
+		if actionRequired {
+			recommended = "Inspect the ranked contributors, confirm user-visible impact, and follow the runbook before remediation."
+		} else {
+			recommended = "Review this warning in the dashboard during routine triage; no immediate user action is requested."
+		}
+	}
+	return alertNotification{
+		ActionRequired:    actionRequired,
+		Channel:           channel,
+		Reason:            reason,
+		RecommendedAction: recommended,
+		RunbookURL:        policy.RunbookURL,
+	}
+}
+
 // buildAlertPayload implements spec §9.8's generic alert label set: every
 // alert always carries pilot_subject/pilot_subject_kind; a managed_host
 // subject ADDITIONALLY keeps the legacy pilot_host label (so existing
@@ -94,7 +131,7 @@ func buildAlertEvidence(fused FusedResult, current map[string]float64) alertEvid
 // other kind additionally carries pilot_target (spec §9.8: "SNMP/external
 // target SHOULD 額外保留 pilot_target=<subject_id>" — generalized here to
 // every non-managed-host kind, not just literally "snmp").
-func buildAlertPayload(subjectID, subjectKind, site, severity, signalID string, evidence alertEvidence, profile string, startsAt, now time.Time) AlertmanagerPayload {
+func buildAlertPayload(subjectID, subjectKind, site, severity, signalID string, evidence alertEvidence, notification alertNotification, profile string, startsAt, now time.Time) AlertmanagerPayload {
 	top := make([]string, 0, len(evidence.Contributors))
 	for _, c := range evidence.Contributors {
 		top = append(top, c.Feature)
@@ -103,12 +140,15 @@ func buildAlertPayload(subjectID, subjectKind, site, severity, signalID string, 
 	contributorsJSON, _ := json.Marshal(evidence.Contributors)
 	featureValuesJSON, _ := json.Marshal(evidence.FeatureValues)
 	labels := map[string]string{
-		"alertname":          "PilotAdaptiveAnomaly",
-		"source":             "detection-engine",
-		"pilot_subject":      subjectID,
-		"pilot_subject_kind": subjectKind,
-		"site":               site,
-		"severity":           severity,
+		"alertname":            "PilotAdaptiveAnomaly",
+		"action_required":      fmt.Sprintf("%t", notification.ActionRequired),
+		"notification_channel": notification.Channel,
+		"source":               "detection-engine",
+		"signal_id":            signalID,
+		"pilot_subject":        subjectID,
+		"pilot_subject_kind":   subjectKind,
+		"site":                 site,
+		"severity":             severity,
 	}
 	if subjectKind == SubjectKindManagedHost {
 		labels["pilot_host"] = subjectID
@@ -119,6 +159,10 @@ func buildAlertPayload(subjectID, subjectKind, site, severity, signalID string, 
 		Labels: labels,
 		Annotations: map[string]string{
 			"signal_id":          signalID,
+			"reason":             notification.Reason,
+			"recommended_action": notification.RecommendedAction,
+			"runbook_url":        notification.RunbookURL,
+			"duration_seconds":   fmt.Sprintf("%d", max(int64(0), int64(now.Sub(startsAt).Seconds()))),
 			"score":              formatFloat(evidence.Score),
 			"confidence":         formatFloat(evidence.Confidence),
 			"category_hint":      evidence.CategoryHint,
@@ -132,6 +176,26 @@ func buildAlertPayload(subjectID, subjectKind, site, severity, signalID string, 
 		StartsAt: startsAt.UTC().Format(time.RFC3339),
 		EndsAt:   now.Add(alertmanagerEndsAtHorizon).UTC().Format(time.RFC3339),
 	}
+}
+
+func resolveAlertPayload(payload AlertmanagerPayload, now time.Time) AlertmanagerPayload {
+	payload.EndsAt = now.UTC().Format(time.RFC3339)
+	return updateAlertDuration(payload, now)
+}
+
+func refreshAlertPayload(payload AlertmanagerPayload, now time.Time) AlertmanagerPayload {
+	payload.EndsAt = now.Add(alertmanagerEndsAtHorizon).UTC().Format(time.RFC3339)
+	return updateAlertDuration(payload, now)
+}
+
+func updateAlertDuration(payload AlertmanagerPayload, now time.Time) AlertmanagerPayload {
+	if payload.Annotations == nil {
+		payload.Annotations = map[string]string{}
+	}
+	if started, err := time.Parse(time.RFC3339, payload.StartsAt); err == nil {
+		payload.Annotations["duration_seconds"] = fmt.Sprintf("%d", max(int64(0), int64(now.Sub(started).Seconds())))
+	}
+	return payload
 }
 
 // Engine wires the source client, feature profile, per-host baseline/
@@ -193,6 +257,148 @@ func NewEngine(profile FeatureProfile, source *ThanosClient, store *Store, cohor
 		Cohorts:    cohorts,
 		lifecycles: map[string]*HostLifecycle{},
 	}
+}
+
+func packWarningHistory(history []bool) (bits, count int) {
+	for _, value := range history {
+		bits <<= 1
+		if value {
+			bits |= 1
+		}
+		count++
+	}
+	return bits, count
+}
+
+func unpackWarningHistory(bits, count int) []bool {
+	if count <= 0 {
+		return nil
+	}
+	history := make([]bool, 0, count)
+	for shift := count - 1; shift >= 0; shift-- {
+		history = append(history, bits&(1<<shift) != 0)
+	}
+	return history
+}
+
+func (e *Engine) copyLifecycleToEpisode(episode *EpisodeRecord, host string) {
+	lifecycle := e.lifecycleFor(host)
+	episode.WarningBits, episode.WarningCount = packWarningHistory(lifecycle.WarningHistory)
+	episode.CriticalStreak = lifecycle.CriticalStreak
+	episode.RecoveryStreak = lifecycle.RecoveryStreak
+	episode.CandidateClearStreak = lifecycle.CandidateClearStreak
+}
+
+// RestoreEpisode hydrates one active episode into the in-memory lifecycle
+// state. Profile identity/version matching is owned by RestoreActiveEpisodes;
+// this method validates only state that can safely continue advancing.
+func (e *Engine) RestoreEpisode(episode EpisodeRecord) error {
+	state := LifecycleState(episode.State)
+	if state != StateFiring && state != StateRecovering {
+		return fmt.Errorf("episode %s has unrestorable state %q", episode.SignalID, episode.State)
+	}
+	severity := Severity(episode.Severity)
+	if severity != SeverityWarning && severity != SeverityCritical {
+		return fmt.Errorf("episode %s has unrestorable severity %q", episode.SignalID, episode.Severity)
+	}
+	host := episode.SubjectID
+	if host == "" {
+		host = episode.PilotHost
+	}
+	if host == "" {
+		return fmt.Errorf("episode %s has no subject identity", episode.SignalID)
+	}
+	lifecycle := NewHostLifecycleWithPolicy(e.Profile.EffectiveLifecyclePolicy())
+	lifecycle.State = state
+	lifecycle.Severity = severity
+	if state == StateRecovering {
+		lifecycle.PriorSeverity = severity
+	}
+	lifecycle.WarningHistory = unpackWarningHistory(episode.WarningBits, episode.WarningCount)
+	if len(lifecycle.WarningHistory) > lifecycle.Policy.WarningWindowCycles {
+		lifecycle.WarningHistory = lifecycle.WarningHistory[len(lifecycle.WarningHistory)-lifecycle.Policy.WarningWindowCycles:]
+	}
+	lifecycle.CriticalStreak = episode.CriticalStreak
+	lifecycle.RecoveryStreak = episode.RecoveryStreak
+	lifecycle.CandidateClearStreak = episode.CandidateClearStreak
+	e.lifecycles[host] = lifecycle
+	return nil
+}
+
+type engineProfileKey struct {
+	id      string
+	version int
+	kind    string
+}
+
+// RestoreActiveEpisodes hydrates every episode owned by an enabled profile.
+// Anything that cannot be claimed or safely restored is fail-closed resolved
+// through Alertmanager's real object shape so stale rows cannot live forever.
+func RestoreActiveEpisodes(engines []*Engine, store *Store, now time.Time) error {
+	byProfile := make(map[engineProfileKey]*Engine, len(engines))
+	for _, engine := range engines {
+		identity := engine.Profile.EffectiveIdentity()
+		byProfile[engineProfileKey{engine.Profile.ID, engine.Profile.Version, identity.Kind}] = engine
+	}
+	episodes, err := store.ListActiveEpisodes()
+	if err != nil {
+		return err
+	}
+	for _, episode := range episodes {
+		engine := byProfile[engineProfileKey{episode.ProfileID, episode.ProfileVersion, episode.SubjectKind}]
+		if engine != nil {
+			if err := engine.RestoreEpisode(episode); err == nil {
+				continue
+			}
+		}
+		if err := reconcileUnrestorableEpisode(store, episode, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reconcileUnrestorableEpisode(store *Store, episode EpisodeRecord, now time.Time) error {
+	payload, err := store.LatestAlertPayload(episode.SignalID)
+	if err != nil {
+		return err
+	}
+	if payload == nil {
+		subjectID := episode.SubjectID
+		if subjectID == "" {
+			subjectID = episode.PilotHost
+		}
+		subjectKind := episode.SubjectKind
+		if subjectKind == "" && episode.PilotHost != "" {
+			subjectKind = SubjectKindManagedHost
+		}
+		evidence := alertEvidence{CategoryHint: episode.CategoryHint, DetectorSource: "runtime_reconcile", FeatureValues: map[string]float64{}}
+		notification := (FeatureProfile{}).alertNotification(Severity(episode.Severity), evidence)
+		fallback := buildAlertPayload(subjectID, subjectKind, episode.Site, episode.Severity, episode.SignalID, evidence, notification, episode.ProfileID, episode.CreatedAt, now)
+		payload = &fallback
+	}
+	resolved := resolveAlertPayload(*payload, now)
+	raw, err := json.Marshal(resolved)
+	if err != nil {
+		return fmt.Errorf("marshal reconciled alert: %w", err)
+	}
+	outboxID, err := NewULID()
+	if err != nil {
+		return err
+	}
+	episode.State = "resolved"
+	episode.Severity = ""
+	episode.UpdatedAt = now.UTC()
+	episode.Revision++
+	episode.WarningBits = 0
+	episode.WarningCount = 0
+	episode.CriticalStreak = 0
+	episode.RecoveryStreak = 0
+	episode.CandidateClearStreak = 0
+	return store.ApplyTransition(episode,
+		HistoryRecord{SignalID: episode.SignalID, Revision: episode.Revision, EventType: "reconcile_unrestorable", PayloadJSON: string(raw), CreatedAt: now},
+		[]OutboxRecord{{ID: outboxID, SignalID: episode.SignalID, Revision: episode.Revision, Sequence: 1, Kind: "resolve", PayloadJSON: string(raw), NextAttemptAt: now}},
+	)
 }
 
 // baselineSampleRecord fills a BaselineSampleRecord for this Engine's
@@ -417,7 +623,6 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 		if err := e.persistTransition(ph.snap.Host, ph.site, fr, ph.snap.Current, transition, evaluationTime); err != nil {
 			return outcomes, fmt.Errorf("persist transition for %s: %w", ph.snap.Host, err)
 		}
-
 		if ShouldUpdateBaseline(lc.State, ph.local.Score, true) {
 			bucketTS := BucketOf(evaluationTime)
 			for name, value := range ph.snap.Current {
@@ -436,6 +641,13 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 		// "degrade silently" convention the optional log source uses).
 		_ = e.Store.SaveBaselineSamples(baselineSamples, evaluationTime)
 	}
+	// Refresh independently of this cycle's discovered/valid subjects. An
+	// active Alertmanager alert must not expire merely because Prometheus
+	// temporarily returned no series, a required feature was invalid, or
+	// the detector was still warming its baseline.
+	if err := e.refreshActiveEpisodesIfDue(evaluationTime); err != nil {
+		return outcomes, fmt.Errorf("refresh active episodes: %w", err)
+	}
 	return outcomes, nil
 }
 
@@ -451,6 +663,7 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, current
 		return nil
 	}
 	evidence := buildAlertEvidence(fused, current)
+	notification := e.Profile.alertNotification(tr.Severity, evidence)
 	now := time.Unix(evaluationTime, 0).UTC()
 	kind := e.Profile.EffectiveIdentity().Kind
 	fingerprint := Fingerprint(host, kind, site, e.Profile.ID, e.Profile.Version)
@@ -473,7 +686,8 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, current
 			CreatedAt: now, UpdatedAt: now, Revision: 1,
 			LastScore: &local.Score,
 		}
-		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), signalID, evidence, e.Profile.ID, now, now))
+		e.copyLifecycleToEpisode(&episode, host)
+		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), signalID, evidence, notification, e.Profile.ID, now, now))
 		outboxID, err := NewULID()
 		if err != nil {
 			return err
@@ -495,9 +709,13 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, current
 		episode.UpdatedAt = now
 		episode.Revision = revision
 		episode.LastScore = &local.Score
+		e.copyLifecycleToEpisode(&episode, host)
 
-		resolvePayload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(SeverityWarning), existing.SignalID, evidence, e.Profile.ID, existing.CreatedAt, now))
-		firePayload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(SeverityCritical), existing.SignalID, evidence, e.Profile.ID, now, now))
+		warningNotification := e.Profile.alertNotification(SeverityWarning, evidence)
+		warningPayload := buildAlertPayload(host, kind, site, string(SeverityWarning), existing.SignalID, evidence, warningNotification, e.Profile.ID, existing.CreatedAt, now)
+		resolvePayload, _ := json.Marshal(resolveAlertPayload(warningPayload, now))
+		criticalNotification := e.Profile.alertNotification(SeverityCritical, evidence)
+		firePayload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(SeverityCritical), existing.SignalID, evidence, criticalNotification, e.Profile.ID, now, now))
 		resolveID, err := NewULID()
 		if err != nil {
 			return err
@@ -527,14 +745,11 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, current
 		episode.UpdatedAt = now
 		episode.Revision = revision
 		episode.LastScore = &local.Score
-		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), existing.SignalID, evidence, e.Profile.ID, existing.CreatedAt, now))
-		outboxID, err := NewULID()
-		if err != nil {
-			return err
-		}
+		e.copyLifecycleToEpisode(&episode, host)
+		payload, _ := json.Marshal(buildAlertPayload(host, kind, site, string(tr.Severity), existing.SignalID, evidence, notification, e.Profile.ID, existing.CreatedAt, now))
 		return e.Store.ApplyTransition(episode,
 			HistoryRecord{SignalID: existing.SignalID, Revision: revision, EventType: string(tr.Action), PayloadJSON: string(payload), CreatedAt: now},
-			[]OutboxRecord{{ID: outboxID, SignalID: existing.SignalID, Revision: revision, Sequence: 1, Kind: "refresh", PayloadJSON: string(payload), NextAttemptAt: now}},
+			nil,
 		)
 
 	case ActionResolve:
@@ -548,7 +763,16 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, current
 		episode.Severity = ""
 		episode.UpdatedAt = now
 		episode.Revision = revision
-		payload, _ := json.Marshal(map[string]any{"signal_id": existing.SignalID, "pilot_subject": host, "pilot_subject_kind": kind, "pilot_host": pilotHost, "site": site})
+		e.copyLifecycleToEpisode(&episode, host)
+		previous, err := e.Store.LatestAlertPayload(existing.SignalID)
+		if err != nil {
+			return err
+		}
+		if previous == nil {
+			fallback := buildAlertPayload(host, kind, site, string(tr.Severity), existing.SignalID, evidence, notification, e.Profile.ID, existing.CreatedAt, now)
+			previous = &fallback
+		}
+		payload, _ := json.Marshal(resolveAlertPayload(*previous, now))
 		outboxID, err := NewULID()
 		if err != nil {
 			return err
@@ -557,6 +781,62 @@ func (e *Engine) persistTransition(host, site string, fused FusedResult, current
 			HistoryRecord{SignalID: existing.SignalID, Revision: revision, EventType: string(tr.Action), PayloadJSON: string(payload), CreatedAt: now},
 			[]OutboxRecord{{ID: outboxID, SignalID: existing.SignalID, Revision: revision, Sequence: 1, Kind: "resolve", PayloadJSON: string(payload), NextAttemptAt: now}},
 		)
+	}
+	return nil
+}
+
+func (e *Engine) refreshActiveEpisodesIfDue(evaluationTime int64) error {
+	now := time.Unix(evaluationTime, 0).UTC()
+	kind := e.Profile.EffectiveIdentity().Kind
+	episodes, err := e.Store.ListActiveEpisodes()
+	if err != nil {
+		return err
+	}
+	for _, existing := range episodes {
+		if existing.ProfileID != e.Profile.ID || existing.ProfileVersion != e.Profile.Version || existing.SubjectKind != kind {
+			continue
+		}
+		if now.Sub(existing.UpdatedAt) < alertmanagerRefreshWindow {
+			continue
+		}
+		payload, err := e.Store.LatestAlertPayload(existing.SignalID)
+		if err != nil {
+			return err
+		}
+		if payload == nil {
+			score := 0.0
+			if existing.LastScore != nil {
+				score = *existing.LastScore
+			}
+			evidence := alertEvidence{Score: score, CategoryHint: existing.CategoryHint, DetectorSource: "runtime_refresh", FeatureValues: map[string]float64{}}
+			notification := e.Profile.alertNotification(Severity(existing.Severity), evidence)
+			fallback := buildAlertPayload(existing.SubjectID, kind, existing.Site, existing.Severity, existing.SignalID, evidence, notification, e.Profile.ID, existing.CreatedAt, now)
+			payload = &fallback
+		} else {
+			refreshed := refreshAlertPayload(*payload, now)
+			payload = &refreshed
+		}
+
+		episode := existing
+		episode.UpdatedAt = now
+		episode.Revision++
+		if _, ok := e.lifecycles[episode.SubjectID]; ok {
+			e.copyLifecycleToEpisode(&episode, episode.SubjectID)
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		outboxID, err := NewULID()
+		if err != nil {
+			return err
+		}
+		if err := e.Store.ApplyTransition(episode,
+			HistoryRecord{SignalID: existing.SignalID, Revision: episode.Revision, EventType: "heartbeat_refresh", PayloadJSON: string(raw), CreatedAt: now},
+			[]OutboxRecord{{ID: outboxID, SignalID: existing.SignalID, Revision: episode.Revision, Sequence: 1, Kind: "heartbeat_refresh", PayloadJSON: string(raw), NextAttemptAt: now}},
+		); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -93,6 +93,39 @@ func TestRegression_DetectionEngineSpec(t *testing.T) {
 		t.Fatalf("read detection-engine-apply.yml: %v", err)
 	}
 	applyRaw := string(playbookRaw)
+	profileRaw, err := os.ReadFile("../../monitoring/detection/feature-profiles/linux-host-v1.yaml")
+	if err != nil {
+		t.Fatalf("read linux-host-v1 profile: %v", err)
+	}
+	for _, want := range []string{
+		"version: 4",
+		"warning: dashboard",
+		"critical: teams",
+		"warningMinValue: 0.60",
+		"warningRequireAny:",
+		"feature: disk_io_queue_depth",
+		"feature: disk_io_latency_seconds",
+	} {
+		if !strings.Contains(string(profileRaw), want) {
+			t.Errorf("linux-host-v1 actionable notification policy missing %q", want)
+		}
+	}
+	engineRaw, err := os.ReadFile("../../internal/detection/engine.go")
+	if err != nil {
+		t.Fatalf("read detection engine runtime: %v", err)
+	}
+	for _, want := range []string{
+		"alertmanagerRefreshWindow = 60 * time.Second",
+		`"action_required"`,
+		`"recommended_action"`,
+		`"duration_seconds"`,
+		"RestoreActiveEpisodes",
+		"heartbeat_refresh",
+	} {
+		if !strings.Contains(string(engineRaw), want) {
+			t.Errorf("detection runtime notification contract missing %q", want)
+		}
+	}
 
 	// spec §10: the Detection-facing Thanos endpoint is always :10912;
 	// :10902 must never appear as an actual `url:` connection target in

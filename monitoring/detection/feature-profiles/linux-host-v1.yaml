@@ -2,10 +2,9 @@
 # id/version are part of the SignalEvent fingerprint (spec §21) — changing
 # either changes the fingerprint of every host using this profile.
 id: linux-host-v1
-# Version 3 separates episodes created under the prior relative-baseline-only
-# critical policy. Critical now requires an anomalous feature to also cross
-# its host-safety absolute floor.
-version: 3
+# Version 4 separates episodes created before actionable warning floors,
+# storage corroboration, and notification routing became part of the profile.
+version: 4
 lifecycle:
   # At the normal 15s cadence this requires six high samples within an
   # eight-cycle window, four consecutive critical samples, and eight quiet
@@ -14,14 +13,20 @@ lifecycle:
   warningRequiredCycles: 6
   criticalConsecutiveCycles: 4
   recoveryConsecutiveCycles: 8
+notify:
+  warning: dashboard
+  critical: teams
+  runbookURL: docs/runbooks/detection-engine.md
+  recommendedAction: Inspect the ranked contributors, confirm user-visible impact, and follow the Detection Engine runbook before remediation.
 features:
   - name: cpu_utilization
     required: true
     category: cpu
     scaleFloor: 0.02
     cohort: true
-    # A workload change below 80% CPU is operationally useful as a warning,
-    # but it is not CPU saturation and must not page as critical.
+    warningMinValue: 0.60
+    # 60-80% CPU can open a dashboard warning; it is not CPU saturation and
+    # must not page as critical until the absolute critical floor is met.
     criticalMinValue: 0.80
     validMin: 0
     validMax: 1.05
@@ -39,6 +44,7 @@ features:
     category: cpu
     scaleFloor: 0.05
     cohort: true
+    warning: false
     # Load is a supporting pressure indicator. Without saturation, latency,
     # or queue-depth evidence it cannot independently justify a critical page.
     critical: false
@@ -63,6 +69,7 @@ features:
     category: memory
     scaleFloor: 0.02
     cohort: true
+    warningMinValue: 0.80
     criticalMinValue: 0.90
     validMin: 0
     validMax: 1
@@ -81,6 +88,7 @@ features:
     category: storage
     scaleFloor: 0.01
     cohort: true
+    warningMinValue: 0.80
     criticalMinValue: 0.90
     validMin: 0
     validMax: 1
@@ -109,8 +117,14 @@ features:
     category: storage
     scaleFloor: 0.05
     cohort: true
-    # Busy time alone lacks latency/queue-depth evidence. It can open a
-    # sustained warning, but requires another strong feature for critical.
+    warningMinValue: 0.80
+    warningRequireAny:
+      - feature: disk_io_queue_depth
+        minValue: 1.0
+      - feature: disk_io_latency_seconds
+        minValue: 0.02
+    # Busy time alone lacks latency/queue-depth evidence, so it cannot open a
+    # warning without one corroborating metric and can never page as critical.
     critical: false
     validMin: 0
     validMax: 1.05
@@ -123,11 +137,71 @@ features:
         }[5m])
       )
 
+  - name: disk_io_queue_depth
+    required: false
+    category: storage
+    scaleFloor: 0.25
+    cohort: true
+    warning: false
+    critical: false
+    validMin: 0
+    validMax: 10000
+    promql: |
+      max by (pilot_host, site) (
+        rate(node_disk_io_time_weighted_seconds_total{
+          job="node",
+          pilot_host!="",
+          device!~"^(loop|ram|fd|sr)[0-9]*$"
+        }[5m])
+      )
+
+  - name: disk_io_latency_seconds
+    required: false
+    category: storage
+    scaleFloor: 0.005
+    cohort: true
+    warning: false
+    critical: false
+    validMin: 0
+    validMax: 60
+    promql: |
+      max by (pilot_host, site) (
+        (
+          rate(node_disk_read_time_seconds_total{
+            job="node",
+            pilot_host!="",
+            device!~"^(loop|ram|fd|sr)[0-9]*$"
+          }[5m])
+          +
+          rate(node_disk_write_time_seconds_total{
+            job="node",
+            pilot_host!="",
+            device!~"^(loop|ram|fd|sr)[0-9]*$"
+          }[5m])
+        )
+        /
+        clamp_min(
+          rate(node_disk_reads_completed_total{
+            job="node",
+            pilot_host!="",
+            device!~"^(loop|ram|fd|sr)[0-9]*$"
+          }[5m])
+          +
+          rate(node_disk_writes_completed_total{
+            job="node",
+            pilot_host!="",
+            device!~"^(loop|ram|fd|sr)[0-9]*$"
+          }[5m]),
+          0.000001
+        )
+      )
+
   - name: thermal_max_celsius
     required: false
     category: thermal
     scaleFloor: 2.0
     cohort: true
+    warningMinValue: 75
     criticalMinValue: 85
     validMin: -50
     validMax: 200

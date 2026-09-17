@@ -153,7 +153,7 @@ func TestEngine_RunCycle_BaselineWarmsUpWithoutCohortOrLog(t *testing.T) {
 func TestBuildAlertPayload_ManagedHostRetainsPilotHost(t *testing.T) {
 	now := time.Now()
 	evidence := buildAlertEvidence(FusedResult{Score: 0.9, Category: "cpu", Source: "local", DetectorSource: "baseline"}, nil)
-	payload := buildAlertPayload("web-1", SubjectKindManagedHost, "site-a", "critical", "sig-1", evidence, "linux-host-v1", now, now)
+	payload := buildAlertPayload("web-1", SubjectKindManagedHost, "site-a", "critical", "sig-1", evidence, testProfile().alertNotification(SeverityCritical, evidence), "linux-host-v1", now, now)
 	if payload.Labels["pilot_host"] != "web-1" {
 		t.Errorf("pilot_host = %q, want web-1", payload.Labels["pilot_host"])
 	}
@@ -163,6 +163,25 @@ func TestBuildAlertPayload_ManagedHostRetainsPilotHost(t *testing.T) {
 	if _, ok := payload.Labels["pilot_target"]; ok {
 		t.Errorf("a managed_host subject must never carry pilot_target: %+v", payload.Labels)
 	}
+	if payload.Labels["signal_id"] != "sig-1" || payload.Labels["action_required"] != "true" || payload.Labels["notification_channel"] != "teams" {
+		t.Errorf("actionability labels missing/wrong: %+v", payload.Labels)
+	}
+	for _, key := range []string{"reason", "recommended_action", "runbook_url", "duration_seconds"} {
+		if payload.Annotations[key] == "" {
+			t.Errorf("actionability annotation %q missing: %+v", key, payload.Annotations)
+		}
+	}
+	warning := buildAlertPayload("web-1", SubjectKindManagedHost, "site-a", "warning", "sig-2", evidence, testProfile().alertNotification(SeverityWarning, evidence), "linux-host-v1", now, now)
+	if warning.Labels["action_required"] != "false" || warning.Labels["notification_channel"] != "dashboard" {
+		t.Errorf("warning routing labels = %+v, want non-actionable dashboard warning", warning.Labels)
+	}
+	resolved := resolveAlertPayload(payload, now.Add(time.Minute))
+	if resolved.EndsAt != now.Add(time.Minute).UTC().Format(time.RFC3339) {
+		t.Errorf("resolved endsAt = %q", resolved.EndsAt)
+	}
+	if fmt.Sprint(resolved.Labels) != fmt.Sprint(payload.Labels) {
+		t.Errorf("resolve changed the Alertmanager fingerprint labels: before=%v after=%v", payload.Labels, resolved.Labels)
+	}
 }
 
 // TestBuildAlertPayload_NonManagedSubjectNeverGetsPilotHost is the Phase 4
@@ -171,7 +190,7 @@ func TestBuildAlertPayload_ManagedHostRetainsPilotHost(t *testing.T) {
 func TestBuildAlertPayload_NonManagedSubjectNeverGetsPilotHost(t *testing.T) {
 	now := time.Now()
 	evidence := buildAlertEvidence(FusedResult{Score: 0.9, Category: "network_error", Source: "local", DetectorSource: "baseline"}, nil)
-	payload := buildAlertPayload("core-sw-01", "network_device", "site-a", "critical", "sig-1", evidence, "network-device-ifmib-v1", now, now)
+	payload := buildAlertPayload("core-sw-01", "network_device", "site-a", "critical", "sig-1", evidence, testProfile().alertNotification(SeverityCritical, evidence), "network-device-ifmib-v1", now, now)
 	if _, ok := payload.Labels["pilot_host"]; ok {
 		t.Errorf("a non-managed-host subject must never carry pilot_host: %+v", payload.Labels)
 	}
@@ -210,7 +229,7 @@ func TestBuildAlertEvidence_ExplainsCompositeLocalDeviation(t *testing.T) {
 	}
 
 	now := time.Now()
-	payload := buildAlertPayload("it-core", SubjectKindManagedHost, "site-a", "critical", "sig-1", evidence, "linux-host-v1", now, now)
+	payload := buildAlertPayload("it-core", SubjectKindManagedHost, "site-a", "critical", "sig-1", evidence, testProfile().alertNotification(SeverityCritical, evidence), "linux-host-v1", now, now)
 	if got := payload.Annotations["top_contributors"]; got != `["cpu_utilization","disk_io_busy","load1_per_cpu"]` {
 		t.Errorf("top_contributors compatibility value = %s", got)
 	}
@@ -294,6 +313,163 @@ func TestPersistTransition_StoresOperatorFacingCategory(t *testing.T) {
 	}
 	if len(active) != 1 || active[0].CategoryHint != "cpu" {
 		t.Fatalf("recovery episode = %+v, want refreshed cpu category", active)
+	}
+}
+
+func TestPersistTransition_RecoveryTransitionsDoNotNotify(t *testing.T) {
+	store := openTestStore(t)
+	engine := NewEngine(testProfile(), nil, store, nil)
+	base := int64(1_700_000_000)
+	fused := FusedResult{Score: 1, Category: "cpu", Source: "local", DetectorSource: "baseline", Contributors: []Contributor{{Feature: "cpu_utilization", Category: "cpu", Score: 1}}}
+	current := map[string]float64{"cpu_utilization": 1}
+	if err := engine.persistTransition("web-1", "site-a", fused, current, Transition{Action: ActionCreateWarning, ToState: StateFiring, Severity: SeverityWarning}, base); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := engine.lifecycleFor("web-1")
+	lifecycle.State = StateRecovering
+	lifecycle.Severity = SeverityWarning
+	lifecycle.PriorSeverity = SeverityWarning
+	if err := engine.persistTransition("web-1", "site-a", fused, current, Transition{Action: ActionEnterRecovering, ToState: StateRecovering, Severity: SeverityWarning}, base+15); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle.State = StateFiring
+	lifecycle.RecoveryStreak = 0
+	if err := engine.persistTransition("web-1", "site-a", fused, current, Transition{Action: ActionReturnToFiring, ToState: StateFiring, Severity: SeverityWarning}, base+30); err != nil {
+		t.Fatal(err)
+	}
+	var outboxCount, historyCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM outbox`).Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM signal_history`).Scan(&historyCount); err != nil {
+		t.Fatal(err)
+	}
+	if outboxCount != 1 || historyCount != 3 {
+		t.Fatalf("outbox/history counts = %d/%d, want 1/3 (recovery transitions persist without notifying)", outboxCount, historyCount)
+	}
+}
+
+func TestEngine_ActiveEpisodeHeartbeatRefreshesEveryMinute(t *testing.T) {
+	store := openTestStore(t)
+	engine := NewEngine(testProfile(), nil, store, nil)
+	base := int64(1_700_000_000)
+	fused := FusedResult{Score: 1, Category: "cpu", Source: "local", DetectorSource: "baseline", Contributors: []Contributor{{Feature: "cpu_utilization", Category: "cpu", Score: 1}}}
+	current := map[string]float64{"cpu_utilization": 1}
+	if err := engine.persistTransition("web-1", "site-a", fused, current, Transition{Action: ActionCreateWarning, ToState: StateFiring, Severity: SeverityWarning}, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.refreshActiveEpisodesIfDue(base + 59); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM outbox`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("outbox count before refresh window = %d, want 1", count)
+	}
+	// Refresh scans persisted episodes directly, so it remains effective
+	// even when the current Prometheus cycle discovers no subjects.
+	if err := engine.refreshActiveEpisodesIfDue(base + 60); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM outbox`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("outbox count at refresh window = %d, want 2", count)
+	}
+}
+
+func TestPersistTransition_ResolveReusesCompleteAlertLabels(t *testing.T) {
+	store := openTestStore(t)
+	engine := NewEngine(testProfile(), nil, store, nil)
+	base := int64(1_700_000_000)
+	fused := FusedResult{Score: 1, Category: "cpu", Source: "local", DetectorSource: "baseline", Contributors: []Contributor{{Feature: "cpu_utilization", Category: "cpu", Score: 1}}}
+	current := map[string]float64{"cpu_utilization": 1}
+	if err := engine.persistTransition("web-1", "site-a", fused, current, Transition{Action: ActionCreateWarning, ToState: StateFiring, Severity: SeverityWarning}, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.persistTransition("web-1", "site-a", fused, current, Transition{Action: ActionResolve, ToState: StateNormal, Severity: SeverityWarning}, base+120); err != nil {
+		t.Fatal(err)
+	}
+	var fireRaw, resolveRaw string
+	if err := store.db.QueryRow(`SELECT payload_json FROM outbox WHERE kind='fire'`).Scan(&fireRaw); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT payload_json FROM outbox WHERE kind='resolve'`).Scan(&resolveRaw); err != nil {
+		t.Fatal(err)
+	}
+	var fire, resolved AlertmanagerPayload
+	if err := json.Unmarshal([]byte(fireRaw), &fire); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(resolveRaw), &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(fire.Labels) != fmt.Sprint(resolved.Labels) || resolved.EndsAt != time.Unix(base+120, 0).UTC().Format(time.RFC3339) {
+		t.Fatalf("resolved payload does not preserve fingerprint/current endsAt: fire=%+v resolved=%+v", fire, resolved)
+	}
+}
+
+func TestRestoreActiveEpisodes_HydratesOrReconciles(t *testing.T) {
+	store := openTestStore(t)
+	profile := testProfile()
+	engine := NewEngine(profile, nil, store, nil)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	evidence := buildAlertEvidence(FusedResult{Score: 1, Category: "cpu", DetectorSource: "baseline"}, nil)
+	payload := buildAlertPayload("web-1", SubjectKindManagedHost, "site-a", "critical", "sig-hydrate", evidence, profile.alertNotification(SeverityCritical, evidence), profile.ID, now.Add(-time.Minute), now)
+	raw, _ := json.Marshal(payload)
+	episode := EpisodeRecord{
+		SignalID: "sig-hydrate", Fingerprint: Fingerprint("web-1", SubjectKindManagedHost, "site-a", profile.ID, profile.Version),
+		SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, PilotHost: "web-1", Site: "site-a",
+		ProfileID: profile.ID, ProfileVersion: profile.Version, State: string(StateRecovering), Severity: string(SeverityCritical),
+		CategoryHint: "cpu", CreatedAt: now.Add(-time.Minute), UpdatedAt: now, Revision: 1,
+		WarningBits: 3, WarningCount: 2, CriticalStreak: 4, RecoveryStreak: 1,
+	}
+	if err := store.ApplyTransition(episode, HistoryRecord{SignalID: episode.SignalID, Revision: 1, EventType: "create", PayloadJSON: string(raw), CreatedAt: now}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreActiveEpisodes([]*Engine{engine}, store, now); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := engine.lifecycleFor("web-1")
+	if lifecycle.State != StateRecovering || lifecycle.PriorSeverity != SeverityCritical || lifecycle.CriticalStreak != 4 || lifecycle.RecoveryStreak != 1 || len(lifecycle.WarningHistory) != 2 {
+		t.Fatalf("hydrated lifecycle = %+v", lifecycle)
+	}
+
+	stale := episode
+	stale.SignalID = "sig-stale"
+	stale.Fingerprint = "fp-stale"
+	stale.ProfileVersion = profile.Version - 1
+	stale.State = string(StateFiring)
+	stale.Revision = 1
+	stale.CreatedAt = now.Add(-2 * time.Minute)
+	stale.UpdatedAt = now.Add(-time.Minute)
+	stalePayload := payload
+	stalePayload.Labels["signal_id"] = stale.SignalID
+	stalePayload.Annotations["signal_id"] = stale.SignalID
+	staleRaw, _ := json.Marshal(stalePayload)
+	if err := store.ApplyTransition(stale, HistoryRecord{SignalID: stale.SignalID, Revision: 1, EventType: "create", PayloadJSON: string(staleRaw), CreatedAt: stale.CreatedAt}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreActiveEpisodes([]*Engine{engine}, store, now); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.GetEpisode(stale.SignalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.State != "resolved" {
+		t.Fatalf("unclaimed stale episode state=%q, want resolved", resolved.State)
+	}
+	var reconcilePayload string
+	if err := store.db.QueryRow(`SELECT payload_json FROM outbox WHERE signal_id=? AND kind='resolve'`, stale.SignalID).Scan(&reconcilePayload); err != nil {
+		t.Fatal(err)
+	}
+	var reconciled AlertmanagerPayload
+	if err := json.Unmarshal([]byte(reconcilePayload), &reconciled); err != nil || reconciled.Labels["alertname"] == "" {
+		t.Fatalf("reconcile payload is not a complete alert: err=%v payload=%s", err, reconcilePayload)
 	}
 }
 

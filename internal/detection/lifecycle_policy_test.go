@@ -47,6 +47,13 @@ func TestFeatureProfile_LifecycleScoreCapsUncorroboratedNonCriticalFeature(t *te
 	}
 }
 
+func TestFeatureProfile_LifecycleScoreRejectsHighScoreWithoutEvidence(t *testing.T) {
+	profile := FeatureProfile{Features: []Feature{{Name: "cpu_utilization"}}}
+	if got := profile.LifecycleScore(FusedResult{Score: 1}, nil); got >= WarningThreshold {
+		t.Fatalf("evidence-free lifecycle score=%v, want below warning threshold", got)
+	}
+}
+
 func TestLifecyclePolicy_ValidateRejectsImpossibleWarningRule(t *testing.T) {
 	policy := LifecyclePolicy{WarningWindowCycles: 4, WarningRequiredCycles: 5}
 	if err := policy.Validate(); err == nil {
@@ -59,8 +66,8 @@ func TestLinuxHostProfile_RequiresAbsolutePressureForCritical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load linux host profile: %v", err)
 	}
-	if profile.Version != 3 {
-		t.Fatalf("linux host profile version=%d, want 3 for the absolute critical floors", profile.Version)
+	if profile.Version != 4 {
+		t.Fatalf("linux host profile version=%d, want 4 for actionable warning policy", profile.Version)
 	}
 	policy := profile.EffectiveLifecyclePolicy()
 	if policy.WarningWindowCycles != 8 || policy.WarningRequiredCycles != 6 || policy.CriticalConsecutiveCycles != 4 || policy.RecoveryConsecutiveCycles != 8 {
@@ -73,13 +80,19 @@ func TestLinuxHostProfile_RequiresAbsolutePressureForCritical(t *testing.T) {
 	if disk.ValidMax != 1.05 || !strings.Contains(disk.PromQL, "max by") || !strings.Contains(disk.PromQL, "[5m]") {
 		t.Fatalf("disk_io_busy profile did not retain normalized five-minute max semantics: %+v", disk)
 	}
+	if disk.WarningMinValue == nil || *disk.WarningMinValue != 0.80 || len(disk.WarningRequireAny) != 2 {
+		t.Fatalf("disk_io_busy warning policy = %+v, want 0.80 plus queue/latency corroboration", disk)
+	}
 	load, found := profile.Feature("load1_per_cpu")
 	if !found || load.Critical == nil || *load.Critical {
 		t.Fatalf("load1_per_cpu critical policy = %+v, want explicitly false", load)
 	}
 	cpu, found := profile.Feature("cpu_utilization")
-	if !found || cpu.CriticalMinValue == nil || *cpu.CriticalMinValue != 0.80 {
-		t.Fatalf("cpu_utilization critical floor = %+v, want 0.80", cpu)
+	if !found || cpu.WarningMinValue == nil || *cpu.WarningMinValue != 0.60 || cpu.CriticalMinValue == nil || *cpu.CriticalMinValue != 0.80 {
+		t.Fatalf("cpu_utilization warning/critical floors = %+v, want 0.60/0.80", cpu)
+	}
+	if notify := profile.EffectiveNotifyPolicy(); notify.Warning != "dashboard" || notify.Critical != "teams" {
+		t.Fatalf("notification policy = %+v, want dashboard/teams", notify)
 	}
 
 	// This is the observed it-core event: statistically extreme, but only 24%
@@ -94,10 +107,14 @@ func TestLinuxHostProfile_RequiresAbsolutePressureForCritical(t *testing.T) {
 		"disk_io_busy":    0.63744,
 		"load1_per_cpu":   0.2925,
 	}
-	if got := profile.LifecycleScore(moderateCPU, current); got < WarningThreshold || got >= CriticalThreshold {
-		t.Fatalf("moderate CPU burst lifecycle score=%v, want warning-only range [%v,%v)", got, WarningThreshold, CriticalThreshold)
+	if got := profile.LifecycleScore(moderateCPU, current); got >= WarningThreshold {
+		t.Fatalf("moderate CPU burst lifecycle score=%v, want below warning threshold %v", got, WarningThreshold)
 	}
 
+	current["cpu_utilization"] = 0.60
+	if got := profile.LifecycleScore(moderateCPU, current); got < WarningThreshold || got >= CriticalThreshold {
+		t.Fatalf("actionable CPU warning lifecycle score=%v, want warning-only range [%v,%v)", got, WarningThreshold, CriticalThreshold)
+	}
 	current["cpu_utilization"] = 0.80
 	if got := profile.LifecycleScore(moderateCPU, current); got != 1 {
 		t.Fatalf("sustained CPU saturation lifecycle score=%v, want critical raw score", got)
@@ -112,5 +129,30 @@ func TestLinuxHostProfile_RequiresAbsolutePressureForCritical(t *testing.T) {
 	}
 	if err := profile.Validate(); err == nil {
 		t.Fatal("expected criticalMinValue with critical:false to be rejected")
+	}
+}
+
+func TestLinuxHostProfile_DiskWarningRequiresQueueOrLatency(t *testing.T) {
+	profile, err := LoadFeatureProfile("../../monitoring/detection/feature-profiles/linux-host-v1.yaml")
+	if err != nil {
+		t.Fatalf("load linux host profile: %v", err)
+	}
+	fused := FusedResult{Score: 1, Contributors: []Contributor{{Feature: "disk_io_busy", Score: 1}}}
+	current := map[string]float64{
+		"disk_io_busy":            0.95,
+		"disk_io_queue_depth":     0.5,
+		"disk_io_latency_seconds": 0.01,
+	}
+	if got := profile.LifecycleScore(fused, current); got >= WarningThreshold {
+		t.Fatalf("uncorroborated disk busy score=%v, want below warning threshold", got)
+	}
+	current["disk_io_queue_depth"] = 1.2
+	if got := profile.LifecycleScore(fused, current); got < WarningThreshold || got >= CriticalThreshold {
+		t.Fatalf("queue-corroborated disk busy score=%v, want warning-only range", got)
+	}
+	current["disk_io_queue_depth"] = 0.5
+	current["disk_io_latency_seconds"] = 0.025
+	if got := profile.LifecycleScore(fused, current); got < WarningThreshold || got >= CriticalThreshold {
+		t.Fatalf("latency-corroborated disk busy score=%v, want warning-only range", got)
 	}
 }

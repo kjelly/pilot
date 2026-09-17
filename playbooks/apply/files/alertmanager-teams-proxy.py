@@ -106,6 +106,7 @@ def anomaly_details(alert_annotations, common_annotations):
         ("dominant_feature", "Primary signal"),
         ("detector_source", "Detector"),
         ("profile", "Profile"),
+        ("duration_seconds", "Duration (seconds)"),
     ):
         if annotations.get(key):
             facts.append({"title": title, "value": as_text(annotations[key])})
@@ -133,6 +134,12 @@ def anomaly_details(alert_annotations, common_annotations):
             # A malformed annotation must never make an alert notification
             # fail; preserve a bounded representation for investigation.
             text.append("Observed values: {}".format(as_text(raw_values)))
+    if annotations.get("reason"):
+        text.append("Reason: {}".format(as_text(annotations["reason"])))
+    if annotations.get("recommended_action"):
+        text.append("Recommended action: {}".format(as_text(annotations["recommended_action"])))
+    if annotations.get("runbook_url"):
+        text.append("Runbook: {}".format(as_text(annotations["runbook_url"])))
     return facts, text
 
 

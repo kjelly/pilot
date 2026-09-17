@@ -786,12 +786,21 @@ storage
 
 yes
 
-Linux host profile version 3 的 `disk_io_busy` 與 `load1_per_cpu` 為
-`critical: false`：它們可作為持續 warning 的證據，但不得單獨建立或升級
-critical。`criticalMinValue` 是 critical-eligible feature 的絕對安全門檻：該
-feature 除了 score >= 0.80 外，當前值也必須達門檻才可授權 critical。Linux host
-的 CPU / memory / rootfs / thermal 門檻分別是 0.80 / 0.90 / 0.90 / 85；這避免
-僅相對基線異常、但未達資源飽和或容量壓力的短 burst 產生 critical page。
+Linux host profile version 4 的 `load1_per_cpu` 為 `warning: false`、
+`critical: false`，只作為 scorer 輸入，不可單獨建立 episode。`warningMinValue`
+是 warning-eligible feature 的絕對安全門檻；Linux host 的 CPU / memory /
+rootfs / thermal warning 門檻分別是 0.60 / 0.80 / 0.80 / 75。`disk_io_busy`
+需達 0.80，且 `disk_io_queue_depth >= 1.0` 或
+`disk_io_latency_seconds >= 0.02` 至少一項成立，才是可建立 episode 的
+actionable storage warning；queue / latency 本身只作 composite gate，不單獨
+告警。
+
+`criticalMinValue` 是 critical-eligible feature 的絕對安全門檻：該 feature
+除了 score >= 0.80 外，當前值也必須達門檻才可授權 critical。Linux host 的
+CPU / memory / rootfs / thermal critical 門檻分別是 0.80 / 0.90 / 0.90 / 85；
+`disk_io_busy` 與 `load1_per_cpu` 皆為 `critical: false`。profile 的 `notify`
+policy 預設 warning=`dashboard`、critical=`teams`，並提供 runbook 與建議動作。
+這避免僅相對基線異常、但未達資源飽和或容量壓力的短 burst 產生 page。
 
 thermal_max_celsius
 
@@ -1230,7 +1239,7 @@ candidate_clear_streak
 每個 profile 可在 `lifecycle:` 指定 `warningWindowCycles`、
 `warningRequiredCycles`、`criticalConsecutiveCycles` 與
 `recoveryConsecutiveCycles`。未指定時維持舊預設 4 / 3 / 2 / 4；Linux host
-profile version 3 使用 8 / 6 / 4 / 8，以減少短 burst 造成的開關告警。
+profile version 4 使用 8 / 6 / 4 / 8，以減少短 burst 造成的開關告警。
 
 thresholds：
 
@@ -1239,11 +1248,15 @@ warning   >= 0.80
 critical  >= 0.95
 recovery  <  0.60
 
-當 raw fused score 達 critical 時，lifecycle 只接受 score >= warning threshold
-且 `critical` 不為 false 的 contributor 作為 critical 證據；若 feature 設
-`criticalMinValue`，當前值也必須不低於該絕對門檻。沒有任何合格 contributor 時，
-lifecycle score 必須 clamp 在 warning 範圍，原始 fused score 仍保留在 alert
-evidence 與 baseline contamination guard 中。
+當 raw fused score 達 warning 時，lifecycle 只接受 `warning` 不為 false、
+符合 `warningMinValue`，且 `warningRequireAny` 非空時至少符合其中一項 composite gate
+的 contributor 作為 warning
+證據；沒有任何合格 contributor 時，lifecycle score 必須 clamp 在 warning
+threshold 以下。當 raw fused score 達 critical 時，還必須有 `critical` 不為
+false 的 contributor；若 feature 設 `criticalMinValue`，當前值也必須不低於該
+絕對門檻。沒有任何合格 critical contributor 時，lifecycle score 必須 clamp 在
+warning 範圍，原始 fused score仍保留在 alert evidence 與 baseline
+contamination guard 中。
 
 20.1 Valid Cycle Counter Update
 
@@ -1336,6 +1349,10 @@ score >= .60
 return prior firing severity
 recovery_streak=0
 
+`enter_recovering` 與相同 severity 的 `return_to_firing` 只更新 episode/history，
+不 enqueue 使用者通知。回到 firing 後由既有 active alert heartbeat 與
+Alertmanager repeat policy 決定是否再通知，不把內部抖動當成新事件。
+
 20.7 Invalid Cycle
 
 invalid telemetry/source cycle：
@@ -1412,15 +1429,24 @@ labels：
 
 alertname: PilotAdaptiveAnomaly
 source: detection-engine
-pilot_host: <host>
+signal_id: <stable episode id>
+pilot_subject: <subject id>
+pilot_subject_kind: <kind>
+pilot_host: <host> # managed_host only
 site: <site>
 severity: warning|critical
+action_required: true|false
+notification_channel: dashboard|digest|teams|none
 
 不要把 category放 label。
 
 annotations：
 
 signal_id
+reason
+recommended_action
+runbook_url
+duration_seconds
 score
 confidence
 category_hint
@@ -1458,6 +1484,10 @@ refresh：
 startsAt = original firing time
 endsAt   = now + 180s
 
+refresh 必須掃描 SQLite 中全部 active episode，不能依賴當輪 Prometheus 是否仍
+回傳該 subject、feature 是否 valid 或 baseline 是否 warm；短暫資料缺口不得讓
+Alertmanager alert 自然過期。
+
 22.2 Warning → Critical
 
 因 severity是 Alertmanager label，escalation transaction必須 enqueue：
@@ -1479,6 +1509,10 @@ enqueue：
 
 resolve current severity
 endsAt=now
+
+resolve payload 必須是完整 Alertmanager alert object，且 labels 與最後一次 fire
+完全一致；不得只送 `{signal_id, severity}` metadata map，否則 Alertmanager 會以
+HTTP 422 拒絕。
 
 delivery guarantee：
 
@@ -1611,6 +1645,11 @@ no Alertmanager POST
 restart時：
 
 DB is source of truth
+
+runtime 啟動時必須把尚未 resolved 且 profile id/version/kind 仍可匹配的 episode
+hydrate 回 lifecycle memory。無法安全恢復的 episode（例如 profile version 已被
+移除）必須以完整 alert payload reconcile/resolve，不能永久留在 SQLite 或
+Alertmanager。
 
 26. Migration / Upgrade / Rollback
 

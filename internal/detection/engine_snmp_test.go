@@ -198,7 +198,7 @@ func TestEngine_SNMPProfile_AlertPayloadCorrelatesWithAgentControllerContract(t 
 	profile := loadNetworkDeviceProfile(t)
 	kind := profile.EffectiveIdentity().Kind
 	evidence := buildAlertEvidence(FusedResult{Score: 0.97, Category: "network_error", Source: "local", DetectorSource: "baseline"}, nil)
-	payload := buildAlertPayload("core-sw-01", kind, "site-a", "critical", "sig-1", evidence, profile.ID, time.Now(), time.Now())
+	payload := buildAlertPayload("core-sw-01", kind, "site-a", "critical", "sig-1", evidence, profile.alertNotification(SeverityCritical, evidence), profile.ID, time.Now(), time.Now())
 	labels := payload.Labels
 
 	if labels["pilot_subject"] == "" {

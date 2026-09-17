@@ -85,3 +85,31 @@ features:
 		t.Fatalf("MaxSampleAge() = %v, want 90s", p.MaxSampleAge())
 	}
 }
+
+func TestFeatureProfile_ValidateWarningPolicyReferences(t *testing.T) {
+	min := 0.8
+	p := FeatureProfile{
+		ID: "x", Version: 1,
+		Features: []Feature{
+			{Name: "busy", Required: true, ScaleFloor: 0.1, WarningMinValue: &min, WarningRequireAny: []FeatureThreshold{{Feature: "queue", MinValue: 1}}, ValidMin: 0, ValidMax: 1, PromQL: "busy"},
+			{Name: "queue", ScaleFloor: 0.1, ValidMin: 0, ValidMax: 10, PromQL: "queue"},
+		},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("valid warning policy rejected: %v", err)
+	}
+	p.Features[0].WarningRequireAny[0].Feature = "missing"
+	if err := p.Validate(); err == nil {
+		t.Fatal("expected unknown warningRequireAny feature to be rejected")
+	}
+}
+
+func TestFeatureProfile_ValidateNotificationDestination(t *testing.T) {
+	p := FeatureProfile{
+		ID: "x", Version: 1, Notify: NotifyPolicy{Warning: "pager"},
+		Features: []Feature{{Name: "f", Required: true, ScaleFloor: 0.1, ValidMin: 0, ValidMax: 1, PromQL: "x"}},
+	}
+	if err := p.Validate(); err == nil {
+		t.Fatal("expected unsupported notify.warning destination to be rejected")
+	}
+}

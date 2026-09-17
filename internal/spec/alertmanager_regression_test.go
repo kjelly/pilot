@@ -7,7 +7,7 @@ import (
 )
 
 // TestRegression_AlertmanagerSpec locks the structure of
-// docs/verification/alertmanager.md (v1.4 — central Alertmanager, container
+// docs/verification/alertmanager.md (v1.5 — central Alertmanager, container
 // role co-located with docs/verification/thanos-query.md and consumed by
 // docs/verification/prometheus.md per-site role):
 //
@@ -236,6 +236,10 @@ func TestRegression_AlertmanagerSpec(t *testing.T) {
 		"alertmanager_teams_webhook_url",
 		"match('^https://\\S+$')",
 		"send_resolved: true",
+		"group_by: ['alertname', 'pilot_subject', 'signal_id']",
+		"repeat_interval: 12h",
+		`'severity="critical"'`,
+		`'action_required="true"'`,
 		"alertmanager_config | length > 0",
 		"pilot-alertmanager-teams-proxy",
 		"http://pilot-alertmanager-teams-proxy:8095/webhook",
@@ -248,6 +252,15 @@ func TestRegression_AlertmanagerSpec(t *testing.T) {
 	} {
 		if !strings.Contains(playbook, required) {
 			t.Errorf("Alertmanager receiver-mode playbook missing %q", required)
+		}
+	}
+	proxyData, err := os.ReadFile("../../playbooks/apply/files/alertmanager-teams-proxy.py")
+	if err != nil {
+		t.Fatalf("read Teams proxy: %v", err)
+	}
+	for _, required := range []string{"reason", "recommended_action", "runbook_url", "duration_seconds"} {
+		if !strings.Contains(string(proxyData), required) {
+			t.Errorf("Teams proxy actionability rendering missing %q", required)
 		}
 	}
 

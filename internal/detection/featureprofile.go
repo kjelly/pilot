@@ -22,6 +22,18 @@ type Feature struct {
 	Category   string  `yaml:"category"`
 	ScaleFloor float64 `yaml:"scaleFloor"`
 	Cohort     bool    `yaml:"cohort"`
+	// Warning controls whether this feature can authorize a warning on its
+	// own. Nil preserves the historical default (allowed); false keeps the
+	// feature available as supporting evidence only.
+	Warning *bool `yaml:"warning,omitempty"`
+	// WarningMinValue is an optional absolute floor applied after the
+	// statistical detector. A large relative deviation below this floor is
+	// retained as telemetry but cannot open a warning episode.
+	WarningMinValue *float64 `yaml:"warningMinValue,omitempty"`
+	// WarningRequireAny is an optional corroboration gate. At least one named
+	// feature must be present at or above its absolute floor before this
+	// feature can authorize a warning.
+	WarningRequireAny []FeatureThreshold `yaml:"warningRequireAny,omitempty"`
 	// Critical controls whether this feature, on its own, can supply the
 	// critical-level evidence to the lifecycle. Nil preserves the historical
 	// default (allowed); false requires an independent strong symptom.
@@ -33,6 +45,23 @@ type Feature struct {
 	ValidMin         float64  `yaml:"validMin"`
 	ValidMax         float64  `yaml:"validMax"`
 	PromQL           string   `yaml:"promql"`
+}
+
+// FeatureThreshold is one absolute corroborating metric floor used by a
+// feature's warning policy.
+type FeatureThreshold struct {
+	Feature  string  `yaml:"feature"`
+	MinValue float64 `yaml:"minValue"`
+}
+
+// NotifyPolicy selects the operator-facing destination for each severity.
+// dashboard/digest remain visible to non-paging consumers; teams is reserved
+// for alerts that explicitly require operator action.
+type NotifyPolicy struct {
+	Warning           string `yaml:"warning,omitempty"`
+	Critical          string `yaml:"critical,omitempty"`
+	RunbookURL        string `yaml:"runbookURL,omitempty"`
+	RecommendedAction string `yaml:"recommendedAction,omitempty"`
 }
 
 // IdentityProfile names which PromQL result label identifies a subject for
@@ -132,7 +161,25 @@ type FeatureProfile struct {
 	Identity  IdentityProfile `yaml:"identity,omitempty"`
 	Sampling  SamplingProfile `yaml:"sampling,omitempty"`
 	Lifecycle LifecyclePolicy `yaml:"lifecycle,omitempty"`
+	Notify    NotifyPolicy    `yaml:"notify,omitempty"`
 	Features  []Feature       `yaml:"features"`
+}
+
+// EffectiveNotifyPolicy fills omitted destinations with the safe default:
+// warnings remain dashboard-visible without paging, while critical episodes
+// are actionable Teams notifications.
+func (p FeatureProfile) EffectiveNotifyPolicy() NotifyPolicy {
+	n := p.Notify
+	if n.Warning == "" {
+		n.Warning = "dashboard"
+	}
+	if n.Critical == "" {
+		n.Critical = "teams"
+	}
+	if n.RunbookURL == "" {
+		n.RunbookURL = "docs/runbooks/detection-engine.md"
+	}
+	return n
 }
 
 // EffectiveLifecyclePolicy fills omitted fields with the legacy lifecycle
@@ -148,6 +195,22 @@ func (p FeatureProfile) EffectiveLifecyclePolicy() LifecyclePolicy {
 // critical-eligible contributor must be at warning strength and, when it
 // declares criticalMinValue, meet that absolute current-value floor.
 func (p FeatureProfile) LifecycleScore(fused FusedResult, current map[string]float64) float64 {
+	if fused.Score >= WarningThreshold {
+		warningAuthorized := false
+		for _, contributor := range fused.Contributors {
+			if contributor.Score < WarningThreshold {
+				continue
+			}
+			feature, found := p.Feature(contributor.Feature)
+			if !found || feature.allowsWarning(current) {
+				warningAuthorized = true
+				break
+			}
+		}
+		if !warningAuthorized {
+			return math.Nextafter(WarningThreshold, 0)
+		}
+	}
 	if fused.Score < CriticalThreshold {
 		return fused.Score
 	}
@@ -158,7 +221,7 @@ func (p FeatureProfile) LifecycleScore(fused FusedResult, current map[string]flo
 			continue
 		}
 		feature, found := p.Feature(contributor.Feature)
-		if !found || feature.Critical == nil || *feature.Critical {
+		if !found || ((feature.Critical == nil || *feature.Critical) && feature.allowsWarning(current)) {
 			if feature.CriticalMinValue != nil {
 				value, present := current[contributor.Feature]
 				if !present || value < *feature.CriticalMinValue {
@@ -174,6 +237,27 @@ func (p FeatureProfile) LifecycleScore(fused FusedResult, current map[string]flo
 		return math.Nextafter(CriticalThreshold, 0)
 	}
 	return fused.Score
+}
+
+func (f Feature) allowsWarning(current map[string]float64) bool {
+	if f.Warning != nil && !*f.Warning {
+		return false
+	}
+	if f.WarningMinValue != nil {
+		value, present := current[f.Name]
+		if !present || value < *f.WarningMinValue {
+			return false
+		}
+	}
+	if len(f.WarningRequireAny) == 0 {
+		return true
+	}
+	for _, requirement := range f.WarningRequireAny {
+		if value, present := current[requirement.Feature]; present && value >= requirement.MinValue {
+			return true
+		}
+	}
+	return false
 }
 
 // LoadFeatureProfile parses and validates a feature profile file.
@@ -214,6 +298,14 @@ func (p FeatureProfile) Validate() error {
 	if err := p.Lifecycle.Validate(); err != nil {
 		return fmt.Errorf("feature profile: lifecycle: %w", err)
 	}
+	allowedDestinations := map[string]bool{"none": true, "dashboard": true, "digest": true, "teams": true}
+	notify := p.EffectiveNotifyPolicy()
+	if !allowedDestinations[notify.Warning] {
+		return fmt.Errorf("feature profile: notify.warning %q is not one of none, dashboard, digest, teams", notify.Warning)
+	}
+	if !allowedDestinations[notify.Critical] {
+		return fmt.Errorf("feature profile: notify.critical %q is not one of none, dashboard, digest, teams", notify.Critical)
+	}
 	if p.Sampling.MaxSampleAge != "" {
 		if _, err := time.ParseDuration(p.Sampling.MaxSampleAge); err != nil {
 			return fmt.Errorf("feature profile: sampling.maxSampleAge: %w", err)
@@ -237,6 +329,17 @@ func (p FeatureProfile) Validate() error {
 		if f.ValidMin >= f.ValidMax {
 			return fmt.Errorf("feature profile: feature %q validMin must be < validMax", f.Name)
 		}
+		if f.Warning != nil && !*f.Warning && (f.WarningMinValue != nil || len(f.WarningRequireAny) > 0) {
+			return fmt.Errorf("feature profile: feature %q cannot set warning gates when warning is false", f.Name)
+		}
+		if f.WarningMinValue != nil {
+			if *f.WarningMinValue < f.ValidMin || *f.WarningMinValue > f.ValidMax {
+				return fmt.Errorf("feature profile: feature %q warningMinValue must be within valid range", f.Name)
+			}
+			if f.CriticalMinValue != nil && *f.CriticalMinValue < *f.WarningMinValue {
+				return fmt.Errorf("feature profile: feature %q criticalMinValue must be >= warningMinValue", f.Name)
+			}
+		}
 		if f.CriticalMinValue != nil {
 			if f.Critical != nil && !*f.Critical {
 				return fmt.Errorf("feature profile: feature %q cannot set criticalMinValue when critical is false", f.Name)
@@ -257,6 +360,20 @@ func (p FeatureProfile) Validate() error {
 	}
 	if !haveRequired {
 		return fmt.Errorf("feature profile: at least one required feature is needed")
+	}
+	for _, f := range p.Features {
+		for _, requirement := range f.WarningRequireAny {
+			if requirement.Feature == "" || requirement.Feature == f.Name {
+				return fmt.Errorf("feature profile: feature %q warningRequireAny must name another feature", f.Name)
+			}
+			requiredFeature, found := p.Feature(requirement.Feature)
+			if !found {
+				return fmt.Errorf("feature profile: feature %q warningRequireAny references unknown feature %q", f.Name, requirement.Feature)
+			}
+			if requirement.MinValue < requiredFeature.ValidMin || requirement.MinValue > requiredFeature.ValidMax {
+				return fmt.Errorf("feature profile: feature %q warningRequireAny floor for %q must be within its valid range", f.Name, requirement.Feature)
+			}
+		}
 	}
 	return nil
 }

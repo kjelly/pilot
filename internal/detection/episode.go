@@ -2,6 +2,7 @@ package detection
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -206,6 +207,41 @@ func (s *Store) GetEpisode(signalID string) (*EpisodeRecord, error) {
 	e.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	e.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return &e, nil
+}
+
+// LatestAlertPayload returns the newest history payload that is a complete
+// Alertmanager alert object. Legacy resolve history rows were bare metadata
+// maps and are deliberately skipped so reconciliation can reuse the exact
+// firing label set Alertmanager originally fingerprinted.
+func (s *Store) LatestAlertPayload(signalID string) (*AlertmanagerPayload, error) {
+	rows, err := s.db.Query(`
+		SELECT payload_json
+		FROM signal_history
+		WHERE signal_id = ?
+		ORDER BY revision DESC, id DESC
+	`, signalID)
+	if err != nil {
+		return nil, fmt.Errorf("list signal payload history: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("scan signal payload history: %w", err)
+		}
+		var payload AlertmanagerPayload
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			continue
+		}
+		if payload.Labels["alertname"] == "" || payload.StartsAt == "" {
+			continue
+		}
+		return &payload, nil
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate signal payload history: %w", err)
+	}
+	return nil, nil
 }
 
 // ListActiveEpisodes returns every non-resolved episode, ordered by

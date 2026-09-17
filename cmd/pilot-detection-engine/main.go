@@ -157,6 +157,9 @@ func runServe(ctx context.Context, configPath string) error {
 		}
 		engines = append(engines, engine)
 	}
+	if err := detection.RestoreActiveEpisodes(engines, store, time.Now()); err != nil {
+		return fmt.Errorf("restore active episodes: %w", err)
+	}
 
 	alertmanagerSender := detection.NewAlertmanagerSender(cfg.AlertmanagerBaseURL, detection.AlertmanagerTimeout)
 

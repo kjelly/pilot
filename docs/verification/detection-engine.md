@@ -46,6 +46,36 @@ scenario is proven by the fake-protocol topology lane (spec §49) instead;
 this row's own probe only confirms the outbox mechanism is structurally
 present and healthy on the host under test.
 
+### Runtime notification correctness contract
+
+C11's fake-protocol topology lane is also the acceptance boundary for the
+operator-facing notification lifecycle. A conforming runtime must prove all
+of the following against the fake Alertmanager sink; unit tests lock the same
+rules at the transition/payload level:
+
+1. Every firing Alertmanager object has stable `signal_id`, `pilot_subject`,
+   `action_required`, and `notification_channel` labels plus `reason`,
+   `recommended_action`, `runbook_url`, and `duration_seconds` annotations.
+2. An active episode is refreshed at least once per 60 seconds with an
+   `endsAt` horizon in the future, even when its lifecycle state does not
+   transition.
+3. `enter_recovering` and a same-severity `return_to_firing` persist episode
+   history but do not enqueue a user-notification outbox row. A severity
+   escalation remains independently notifyable.
+4. Resolution reuses the firing alert's exact label set and supplies a current
+   `endsAt`, so Alertmanager accepts the resolve instead of returning HTTP 422.
+5. Daemon startup hydrates recoverable active lifecycle state from SQLite.
+   An episode whose profile/version/state can no longer be restored is
+   fail-closed reconciled through the same valid resolution path.
+6. A feature cannot authorize warning merely because its relative anomaly
+   score is high when `warningMinValue` is not met. A feature declaring
+   `warningRequireAny` additionally needs at least one named corroborating
+   metric at its configured absolute floor.
+7. The production Linux profile keeps warnings in dashboard/digest handling;
+   Teams is reserved for critical or explicitly `action_required=true`
+   warnings, grouped by subject and signal rather than the absent `instance`
+   label.
+
 ## Checks
 
 ```yaml
@@ -129,7 +159,7 @@ present and healthy on the host under test.
   tags: [C10]
 - id: C11
   category: fixture
-  check: the outbox mechanism (schema, lease/retry/dead, delivery ordering) is structurally present and healthy on this host — the actual lifecycle/escalation/resolution SCENARIO evidence comes from the fake-protocol topology lane (spec §49), not a single already-applied host
+  check: the outbox and notification lifecycle (durable delivery, 60-second active refresh, restart hydration, non-notifying recovery transitions, valid resolution, actionability labels, and warning policy gates) is structurally present and healthy on this host — the actual scenario evidence comes from the fake-protocol topology lane (spec §49), not a single already-applied host
   probe: |
     /usr/local/bin/pilot-detection-engine status --field state
   expect: {stdout: {regex: '^(healthy|degraded)$'}}
@@ -172,3 +202,4 @@ does not duplicate it.
 |---|---|---|
 | 2026-08-28 | DRAFT | Stage A-2: initial Spec v2 authoring per spec §47's C1-C12. No actual-run evidence yet. |
 | 2026-08-28 | v1.0 | Real-lane + fake-lane actual-run evidence recorded (see docs/runbooks/detection-engine.md §2-§6.1); Stage A reaches VERIFICATION_READY. |
+| 2026-09-17 | v1.1 DRAFT | Extend C11's fake-lane contract with actionable notification policy, valid resolve payloads, 60-second refresh, restart hydration/reconciliation, and warning absolute/composite gates; evidence pending candidate run. |

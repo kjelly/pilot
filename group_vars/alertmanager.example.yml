@@ -27,10 +27,12 @@ alertmanager_config: |
     resolve_timeout: 5m
   route:
     receiver: 'null'
-    group_by: ['alertname']
+    group_by: ['alertname', 'pilot_subject', 'signal_id']
     group_wait: 30s
     group_interval: 5m
-    repeat_interval: 4h
+    # Longer than normal detector oscillation; actionable repeats are pages,
+    # not lifecycle heartbeat traffic.
+    repeat_interval: 12h
   receivers:
     - name: 'null'
 
