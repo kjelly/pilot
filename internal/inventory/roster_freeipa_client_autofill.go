@@ -43,7 +43,7 @@ func AutoFillFreeIPAClientRosterHosts(dir, path string) ([]string, error) {
 	existing := map[string]bool{}
 	for _, raw := range listField(root, "hosts") {
 		if name := stringField(asMap(raw), "name"); name != "" {
-			existing[name] = true
+			existing[strings.ToLower(name)] = true
 		}
 	}
 
@@ -71,6 +71,12 @@ func AutoFillFreeIPAClientRosterHosts(dir, path string) ([]string, error) {
 			}
 			fqdn = RosterHostFQDN(h.Name, domain)
 		}
+		// FQDNs are case-insensitive (and this roster's own convention is
+		// lowercase, e.g. dt-port6000.linker.internal) — lowercasing here
+		// is what stops hosts.yml's literal key casing (LKVS-B200-U05)
+		// from creating a second roster host entry for the same machine
+		// that a differently-cased existing entry already covers.
+		fqdn = strings.ToLower(fqdn)
 		if existing[fqdn] {
 			continue
 		}

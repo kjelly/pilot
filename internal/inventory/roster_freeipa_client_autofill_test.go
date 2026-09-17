@@ -106,6 +106,51 @@ func TestAutoFillFreeIPAClientRosterHosts_NeverResurrectsAbsentHost(t *testing.T
 	}
 }
 
+func TestAutoFillFreeIPAClientRosterHosts_LowercasesDerivedFQDN(t *testing.T) {
+	hostsYML := `hosts:
+  LKVS-B200-U05:
+    ansible_host: "192.168.60.20"
+    roles: [freeipa-client]
+`
+	dir, path := writeAutoFillWorkspace(t, rosterFixtureNoNFS, hostsYML)
+
+	added, err := AutoFillFreeIPAClientRosterHosts(dir, path)
+	if err != nil {
+		t.Fatalf("AutoFillFreeIPAClientRosterHosts() error = %v", err)
+	}
+	want := "lkvs-b200-u05.ipa.pilot.internal"
+	if len(added) != 1 || added[0] != want {
+		t.Fatalf("added = %v, want [%s] (hosts.yml's literal key casing must not leak into the roster FQDN)", added, want)
+	}
+}
+
+func TestAutoFillFreeIPAClientRosterHosts_CaseInsensitiveAgainstExistingEntry(t *testing.T) {
+	roster := rosterFixtureNoNFS + `hosts:
+- name: lkvs-b200-u05.ipa.pilot.internal
+  state: present
+  ip_address: 192.168.60.20
+`
+	hostsYML := `hosts:
+  LKVS-B200-U05:
+    ansible_host: "192.168.60.20"
+    roles: [freeipa-client]
+`
+	dir, path := writeAutoFillWorkspace(t, roster, hostsYML)
+
+	added, err := AutoFillFreeIPAClientRosterHosts(dir, path)
+	if err != nil {
+		t.Fatalf("AutoFillFreeIPAClientRosterHosts() error = %v", err)
+	}
+	if len(added) != 0 {
+		t.Fatalf("added = %v, want none — LKVS-B200-U05 differs only in case from the existing lowercase entry", added)
+	}
+
+	data := readFileHelper(t, path)
+	if strings.Count(strings.ToLower(data), "lkvs-b200-u05.ipa.pilot.internal") != 1 {
+		t.Fatalf("expected exactly one entry for this host (case-insensitive), got:\n%s", data)
+	}
+}
+
 func TestAutoFillFreeIPAClientRosterHosts_NoHostsYMLIsANoOp(t *testing.T) {
 	dir, path := writeAutoFillWorkspace(t, rosterFixtureNoNFS, "")
 
