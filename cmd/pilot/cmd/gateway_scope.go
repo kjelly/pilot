@@ -317,13 +317,23 @@ func runGatewayScope(cmd *cobra.Command, planOnly bool) error {
 	runner.StderrWriter = cmd.ErrOrStderr()
 
 	if planOnly {
-		_, err = runner.Run(ctx, args...)
+		res, err := runner.Run(ctx, args...)
+		if err == nil && res.ExitCode != 0 {
+			return fmt.Errorf("gateway-scope plan failed (exit=%d)", res.ExitCode)
+		}
 		return err
 	}
 
 	workflowID := newWorkflowID()
 	startedAt := time.Now()
-	_, runErr := runner.Run(ctx, args...)
+	// ansible.Runner.Run reports a genuine playbook failure (non-zero
+	// exit) through res.ExitCode, not err — err alone is nil in that
+	// case, so checking only err here would silently publish
+	// result:"success" for a real ansible failure.
+	res, runErr := runner.Run(ctx, args...)
+	if runErr == nil && res.ExitCode != 0 {
+		runErr = fmt.Errorf("gateway-scope reconcile failed (exit=%d)", res.ExitCode)
+	}
 	publishGatewayScopeWorkflow(ctx, cmd.OutOrStdout(), inventory, vaultFile, workflowID, startedAt, runErr)
 	return runErr
 }
@@ -459,7 +469,12 @@ func runGatewayScopeAutomember(cmd *cobra.Command, enable bool) error {
 
 	workflowID := newWorkflowID()
 	startedAt := time.Now()
-	_, runErr := runner.Run(ctx, args...)
+	// See runGatewayScope's identical comment: a real playbook failure
+	// surfaces as res.ExitCode != 0 with err == nil.
+	res, runErr := runner.Run(ctx, args...)
+	if runErr == nil && res.ExitCode != 0 {
+		runErr = fmt.Errorf("gateway-scope %s-auto failed (exit=%d)", action, res.ExitCode)
+	}
 	publishGatewayScopeWorkflow(ctx, cmd.OutOrStdout(), inventory, vaultFile, workflowID, startedAt, runErr)
 	return runErr
 }

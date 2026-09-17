@@ -476,3 +476,96 @@ func TestRunGatewayScopeDisableAutoNeverExpandsOrPassesHosts(t *testing.T) {
 		t.Fatalf("args = %q, disable-auto must never pass gateway_scope_hosts", joined)
 	}
 }
+
+// TestRunGatewayScopeSurfacesAnsiblePlaybookFailure locks a real bug found
+// during Phase 5 actual-run evidence: ansible.Runner.Run reports a genuine
+// playbook failure (non-zero exit) through its *Result, not through the
+// returned error — a fake ansible-playbook exiting 1 here is exactly that
+// shape (a real *exec.ExitError, not a Go-level failure). Before the fix,
+// runGatewayScope discarded the *Result and only checked err, so this
+// returned nil and silently published operation.result:"success" for a
+// reconcile that actually failed.
+func TestRunGatewayScopeSurfacesAnsiblePlaybookFailure(t *testing.T) {
+	binDir := t.TempDir()
+	// No ansible-inventory: an explicit, non-"all" host list never needs one.
+	playbookScript := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-playbook"), []byte(playbookScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	original := struct {
+		scope       string
+		hosts       []string
+		inventory   string
+		targetGroup string
+		vaultFile   string
+		timeout     time.Duration
+		dataDir     string
+	}{gatewayScopeFlag, gatewayScopeHostsFlag, gatewayScopeInventory, gatewayScopeTargetGroup, gatewayScopeVaultFile, gatewayScopeTimeout, dataDir}
+	t.Cleanup(func() {
+		gatewayScopeFlag = original.scope
+		gatewayScopeHostsFlag = original.hosts
+		gatewayScopeInventory = original.inventory
+		gatewayScopeTargetGroup = original.targetGroup
+		gatewayScopeVaultFile = original.vaultFile
+		gatewayScopeTimeout = original.timeout
+		dataDir = original.dataDir
+	})
+	dataDir = t.TempDir()
+	gatewayScopeFlag = "some-scope"
+	gatewayScopeHostsFlag = []string{"gw-host"}
+	gatewayScopeInventory = "inventory.yml"
+	gatewayScopeTargetGroup = "freeipa-server"
+	gatewayScopeVaultFile = "/vault/main.yaml"
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	if err := runGatewayScope(cmd, false); err == nil {
+		t.Fatal("runGatewayScope(reconcile) error = nil, want a non-nil error for a failed ansible-playbook run")
+	}
+}
+
+// TestRunGatewayScopeAutomemberSurfacesAnsiblePlaybookFailure is the same
+// regression as TestRunGatewayScopeSurfacesAnsiblePlaybookFailure, for
+// runGatewayScopeAutomember (enable-auto/disable-auto).
+func TestRunGatewayScopeAutomemberSurfacesAnsiblePlaybookFailure(t *testing.T) {
+	binDir := t.TempDir()
+	playbookScript := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-playbook"), []byte(playbookScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	original := struct {
+		scope       string
+		inventory   string
+		targetGroup string
+		vaultFile   string
+		timeout     time.Duration
+		dataDir     string
+	}{gatewayScopeFlag, gatewayScopeInventory, gatewayScopeTargetGroup, gatewayScopeVaultFile, gatewayScopeTimeout, dataDir}
+	t.Cleanup(func() {
+		gatewayScopeFlag = original.scope
+		gatewayScopeInventory = original.inventory
+		gatewayScopeTargetGroup = original.targetGroup
+		gatewayScopeVaultFile = original.vaultFile
+		gatewayScopeTimeout = original.timeout
+		dataDir = original.dataDir
+	})
+	dataDir = t.TempDir()
+	gatewayScopeFlag = "auto-scope"
+	gatewayScopeInventory = "inventory.yml"
+	gatewayScopeTargetGroup = "freeipa-server"
+	gatewayScopeVaultFile = "/vault/main.yaml"
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	if err := runGatewayScopeAutomember(cmd, false); err == nil {
+		t.Fatal("runGatewayScopeAutomember(disable) error = nil, want a non-nil error for a failed ansible-playbook run")
+	}
+}
