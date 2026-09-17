@@ -71,71 +71,113 @@ type Transaction struct {
 	Stage             string
 }
 
-// Run executes the transaction in order and always attempts terminal evidence
-// when a writer was provided. An applicable verify failure therefore can never
-// be reported as a successful deployment.
-func (t Transaction) Run(ctx context.Context) (outcome Outcome, err error) {
+// Result is Transaction.RunResult's structured outcome — design spec
+// docs/tmp/now/spec.md §10: a backward-compatible addition so callers
+// that need to know WHICH step failed (the outbound webhook's
+// FailureInfo.Phase, design spec §19) never have to parse an error
+// string to find out.
+type Result struct {
+	Outcome    Outcome
+	FailedStep string
+}
+
+// Run executes the transaction and returns just its Outcome — kept for
+// every existing caller. It is now a thin wrapper over RunResult.
+func (t Transaction) Run(ctx context.Context) (Outcome, error) {
+	result, err := t.RunResult(ctx)
+	return result.Outcome, err
+}
+
+// RunResult executes the transaction in order and always attempts
+// terminal evidence when a writer was provided. An applicable verify
+// failure therefore can never be reported as a successful deployment.
+func (t Transaction) RunResult(ctx context.Context) (result Result, err error) {
 	defer func() {
 		if t.Writer == nil {
 			return
 		}
-		finishErr := t.Writer.Finish(ctx, store.RunFinished{Outcome: string(outcome), ExitCode: outcomeExitCode(outcome)})
+		finishErr := t.Writer.Finish(ctx, store.RunFinished{Outcome: string(result.Outcome), ExitCode: outcomeExitCode(result.Outcome)})
 		if finishErr != nil && err == nil {
-			outcome = OutcomeEvidenceFailed
+			result.Outcome = OutcomeEvidenceFailed
+			result.FailedStep = "evidence"
 			err = fmt.Errorf("persist delivery terminal evidence: %w", finishErr)
 		}
 	}()
 	if err := t.runStep(ctx, "preflight", t.Preflight); err != nil {
+		result.FailedStep = "preflight"
 		if errors.Is(err, ErrCancelled) {
-			return OutcomeCancelled, err
+			result.Outcome = OutcomeCancelled
+			return result, err
 		}
 		if errors.Is(err, ErrAuthorizationRequired) {
-			return OutcomeAuthorizationRequired, err
+			result.Outcome = OutcomeAuthorizationRequired
+			return result, err
 		}
 		if errors.Is(err, errEvidencePersistence) {
-			return OutcomeEvidenceFailed, err
+			result.FailedStep = "evidence"
+			result.Outcome = OutcomeEvidenceFailed
+			return result, err
 		}
-		return OutcomeFailed, err
+		result.Outcome = OutcomeFailed
+		return result, err
 	}
 	if err := t.runStep(ctx, "preview", t.Preview); err != nil {
+		result.FailedStep = "preview"
 		if errors.Is(err, ErrCancelled) {
-			return OutcomeCancelled, err
+			result.Outcome = OutcomeCancelled
+			return result, err
 		}
 		if errors.Is(err, errEvidencePersistence) {
-			return OutcomeEvidenceFailed, err
+			result.FailedStep = "evidence"
+			result.Outcome = OutcomeEvidenceFailed
+			return result, err
 		}
-		return OutcomeFailed, err
+		result.Outcome = OutcomeFailed
+		return result, err
 	}
 	if err := t.runStep(ctx, "apply", t.Apply); err != nil {
 		if errors.Is(err, ErrCancelled) {
-			return OutcomeCancelled, err
+			result.FailedStep = "apply"
+			result.Outcome = OutcomeCancelled
+			return result, err
 		}
 		if errors.Is(err, errEvidencePersistence) {
-			return OutcomeEvidenceFailed, err
+			result.FailedStep = "evidence"
+			result.Outcome = OutcomeEvidenceFailed
+			return result, err
 		}
-		return t.failWithRollback(ctx, "apply", err)
+		return t.failWithRollbackResult(ctx, "apply", err)
 	}
 	if err := t.runStep(ctx, "verify", t.Verify); err != nil {
 		if errors.Is(err, ErrCancelled) {
-			return OutcomeCancelled, err
+			result.FailedStep = "verify"
+			result.Outcome = OutcomeCancelled
+			return result, err
 		}
 		if errors.Is(err, errEvidencePersistence) {
-			return OutcomeEvidenceFailed, err
+			result.FailedStep = "evidence"
+			result.Outcome = OutcomeEvidenceFailed
+			return result, err
 		}
-		return t.failWithRollback(ctx, "verify", err)
+		return t.failWithRollbackResult(ctx, "verify", err)
 	}
 	if t.shouldRunIdempotency() {
 		if err := t.runStep(ctx, "idempotency", t.Idempotency); err != nil {
 			if errors.Is(err, ErrCancelled) {
-				return OutcomeCancelled, err
+				result.FailedStep = "idempotency"
+				result.Outcome = OutcomeCancelled
+				return result, err
 			}
 			if errors.Is(err, errEvidencePersistence) {
-				return OutcomeEvidenceFailed, err
+				result.FailedStep = "evidence"
+				result.Outcome = OutcomeEvidenceFailed
+				return result, err
 			}
-			return t.failWithRollback(ctx, "idempotency", err)
+			return t.failWithRollbackResult(ctx, "idempotency", err)
 		}
 	}
-	return OutcomeSuccess, nil
+	result.Outcome = OutcomeSuccess
+	return result, nil
 }
 
 func (t Transaction) shouldRunIdempotency() bool {
@@ -149,14 +191,14 @@ func (t Transaction) shouldRunIdempotency() bool {
 	}
 }
 
-func (t Transaction) failWithRollback(ctx context.Context, step string, cause error) (Outcome, error) {
+func (t Transaction) failWithRollbackResult(ctx context.Context, step string, cause error) (Result, error) {
 	if t.RollbackPolicy == RollbackNone || t.Rollback == nil {
-		return OutcomeFailed, fmt.Errorf("%s failed: %w", step, cause)
+		return Result{Outcome: OutcomeFailed, FailedStep: step}, fmt.Errorf("%s failed: %w", step, cause)
 	}
 	if err := t.runStep(ctx, "rollback", t.Rollback); err != nil {
-		return OutcomeRollbackFailed, fmt.Errorf("%s failed: %w; rollback failed: %v", step, cause, err)
+		return Result{Outcome: OutcomeRollbackFailed, FailedStep: "rollback"}, fmt.Errorf("%s failed: %w; rollback failed: %v", step, cause, err)
 	}
-	return OutcomeRolledBack, fmt.Errorf("%s failed: %w; rollback completed", step, cause)
+	return Result{Outcome: OutcomeRolledBack, FailedStep: step}, fmt.Errorf("%s failed: %w; rollback completed", step, cause)
 }
 
 func (t Transaction) runStep(ctx context.Context, name string, fn StepFunc) error {

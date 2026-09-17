@@ -31,6 +31,7 @@ import (
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/outbound"
 	"github.com/kjelly/pilot/internal/spec"
 	"github.com/kjelly/pilot/internal/store"
 	"github.com/kjelly/pilot/internal/tools"
@@ -1098,6 +1099,12 @@ type deploymentTransactionOptions struct {
 	Stage          string
 	Idempotency    delivery.IdempotencyPolicy
 	RollbackPolicy delivery.RollbackPolicy
+	// ResultOut, if non-nil, receives the transaction's structured
+	// Result (Outcome + FailedStep) — the outbound webhook's
+	// terminal-publication step reads this instead of parsing an error
+	// string (design spec §10, §19). Every existing caller that leaves
+	// this nil is completely unaffected.
+	ResultOut *delivery.Result
 	// RuntimeRace enables Phase 6's mid-run shutdown-race classifier (spec
 	// §17/§18) for the apply step only — never preview, never the
 	// idempotency re-apply. Its zero value disables reclassification
@@ -1261,12 +1268,15 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 	if options.Writer != nil {
 		txn.Writer = options.Writer
 	}
-	outcome, err := txn.Run(ctx)
+	result, err := txn.RunResult(ctx)
+	if options.ResultOut != nil {
+		*options.ResultOut = result
+	}
 	if errors.Is(err, delivery.ErrCancelled) {
 		return errDeployAborted
 	}
 	if err != nil {
-		return fmt.Errorf("delivery transaction %s: %w", outcome, err)
+		return fmt.Errorf("delivery transaction %s: %w", result.Outcome, err)
 	}
 	return nil
 }
@@ -1281,7 +1291,17 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 // catalog ever grows a sameHosts cycle (defensively rejected by
 // sameHostsDependencyChain instead).
 func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) error {
-	return executeRecordedDeploymentWithAuthorization(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, nil, nil)
+	_, err := executeRecordedDeploymentResult(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints)
+	return err
+}
+
+// executeRecordedDeploymentResult is executeRecordedDeployment's
+// result-returning counterpart (design spec §28.3): every existing
+// caller of executeRecordedDeployment is completely unaffected; new
+// callers that need the structured DeploymentExecutionResult (the
+// outbound webhook's terminal-publication step) call this instead.
+func executeRecordedDeploymentResult(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) (DeploymentExecutionResult, error) {
+	return executeRecordedDeploymentWithAuthorizationResult(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, nil, nil)
 }
 
 // executeRecordedReconcileDeployment turns a selected reconcile component and
@@ -1366,21 +1386,34 @@ func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAut
 }
 
 func executeRecordedDeploymentWithAuthorization(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, dependencyLimits map[string]string) error {
+	_, err := executeRecordedDeploymentWithAuthorizationResult(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, authorization, dependencyLimits)
+	return err
+}
+
+// executeRecordedDeploymentWithAuthorizationResult is
+// executeRecordedDeploymentWithAuthorization's result-returning
+// counterpart (design spec §28.3's pattern): it aggregates the
+// sameHosts dependency chain's ComponentDeliveryResults with the
+// requested component's own, in execution order, for the outbound
+// webhook's terminal-publication step. On error it still returns
+// whatever DeploymentExecutionResult was accumulated so far — a partial
+// failure's completed dependencies remain visible to the caller.
+func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, dependencyLimits map[string]string) (DeploymentExecutionResult, error) {
 	root, err := resolveContractRoot("")
 	if err != nil {
-		return err
+		return DeploymentExecutionResult{}, err
 	}
 	loader, err := contract.NewLoader(root)
 	if err != nil {
-		return err
+		return DeploymentExecutionResult{}, err
 	}
 	catalog, err := loader.LoadDefaultCatalog()
 	if err != nil {
-		return fmt.Errorf("load contract catalog before deployment: %w", err)
+		return DeploymentExecutionResult{}, fmt.Errorf("load contract catalog before deployment: %w", err)
 	}
 	components, err := componentsForPlaybook(ctx, catalog, playbook, inv, limit, tags, componentHints)
 	if err != nil {
-		return err
+		return DeploymentExecutionResult{}, err
 	}
 	// A normal deploy used to prompt once for each same-host dependency and
 	// again for the requested component.  Besides being noisy, that split
@@ -1391,19 +1424,26 @@ func executeRecordedDeploymentWithAuthorization(ctx context.Context, runner *ans
 	if authorization == nil {
 		chain, chainErr := sameHostsDependencyChain(catalog, components)
 		if chainErr != nil {
-			return chainErr
+			return DeploymentExecutionResult{}, chainErr
 		}
 		if len(chain) > 0 {
 			authorization, err = promptReconcileExecutionAuthorization(len(chain) + 1)
 			if err != nil {
-				return err
+				return DeploymentExecutionResult{}, err
 			}
 		}
 	}
-	if err := applySameHostsDependencyChain(ctx, runner, out, catalog, components, playbook, inv, limit, extraVars, vault, stage, authorization, dependencyLimits); err != nil {
-		return err
+	dependencyResults, err := applySameHostsDependencyChain(ctx, runner, out, catalog, components, playbook, inv, limit, extraVars, vault, stage, authorization, dependencyLimits)
+	agg := DeploymentExecutionResult{Results: dependencyResults}
+	if err != nil {
+		return agg, err
 	}
-	return executeRecordedDeploymentCore(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, authorization)
+	var mainResult ComponentDeliveryResult
+	err = executeRecordedDeploymentCore(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, authorization, &mainResult)
+	if len(mainResult.ComponentIDs) > 0 {
+		agg.Results = append(agg.Results, mainResult)
+	}
+	return agg, err
 }
 
 // sameHostsDependencyChain returns componentIDs' required sameHosts
@@ -1480,7 +1520,12 @@ func sameHostsDependencyChain(catalog contract.Catalog, componentIDs []string) (
 // satisfied dependency is expected to be a safe no-op. A no-op when
 // playbook isn't actually an apply playbook for any of components (e.g.
 // a decommission or rollback run must never re-provision a dependency).
-func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, out io.Writer, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string, vault vaultInput, stage string, authorization *deploymentAuthorization, dependencyLimits map[string]string) error {
+// applySameHostsDependencyChain returns one ComponentDeliveryResult per
+// dependency it actually applied, in dependency-first order — even on
+// error, whatever prefix of the chain completed is returned alongside
+// it (design spec §28: a partial-failure workflow's completed
+// dependencies still need to enter the aggregate).
+func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, out io.Writer, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string, vault vaultInput, stage string, authorization *deploymentAuthorization, dependencyLimits map[string]string) ([]ComponentDeliveryResult, error) {
 	isApply := false
 	for _, id := range components {
 		if c, ok := catalog.Component(id); ok && c.Playbooks.Apply == playbook {
@@ -1489,23 +1534,29 @@ func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, 
 		}
 	}
 	if !isApply {
-		return nil
+		return nil, nil
 	}
 	chain, err := sameHostsDependencyChain(catalog, components)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	results := make([]ComponentDeliveryResult, 0, len(chain))
 	for _, dep := range chain {
 		fmt.Fprintf(out, "\n── 依賴串接：先套用 %s（%s 的必要 sameHosts 依賴）──\n", dep.ID, strings.Join(components, ", "))
 		dependencyLimit := limit
 		if resolved, ok := dependencyLimits[dep.ID]; ok {
 			dependencyLimit = resolved
 		}
-		if err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, dependencyLimit, "", extraVars, vault, stage, []string{dep.ID}, authorization); err != nil {
-			return fmt.Errorf("apply required sameHosts dependency %q: %w", dep.ID, err)
+		var depResult ComponentDeliveryResult
+		err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, dependencyLimit, "", extraVars, vault, stage, []string{dep.ID}, authorization, &depResult)
+		if len(depResult.ComponentIDs) > 0 {
+			results = append(results, depResult)
+		}
+		if err != nil {
+			return results, fmt.Errorf("apply required sameHosts dependency %q: %w", dep.ID, err)
 		}
 	}
-	return nil
+	return results, nil
 }
 
 // executeRecordedDeploymentCore starts the append-only run before
@@ -1513,7 +1564,15 @@ func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, 
 // role/limit selected for apply, not every host that happens to exist
 // in the inventory. Never cascades sameHosts dependencies itself — see
 // executeRecordedDeployment, which always calls this.
-func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization) error {
+//
+// resultOut, if non-nil, receives this call's ComponentDeliveryResult
+// once the underlying transaction actually starts (design spec §10,
+// §28) — the outbound webhook's terminal-publication step reads it.
+// Every existing caller passes nil and is completely unaffected. A
+// pre-transaction failure (contract load, preflight rejection, ...)
+// never populates it — the caller treats a nil-populated resultOut
+// alongside a non-nil error as "this component never started".
+func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, resultOut *ComponentDeliveryResult) error {
 	root, err := resolveContractRoot("")
 	if err != nil {
 		return err
@@ -1674,11 +1733,15 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 		}
 	}
 
+	var txnResult delivery.Result
 	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{
 		Writer: writer, Preflight: preflight, Verify: verify, Rollback: rollback,
 		Stage: stage, Idempotency: delivery.IdempotencyStageGTEStaging, RollbackPolicy: rollbackPolicy,
-		RuntimeRace: runtimeRace, Authorization: authorization,
+		RuntimeRace: runtimeRace, Authorization: authorization, ResultOut: &txnResult,
 	})
+	if resultOut != nil {
+		*resultOut = ComponentDeliveryResult{ComponentIDs: components, RunID: writer.RunID(), Outcome: txnResult.Outcome, FailedStep: txnResult.FailedStep}
+	}
 	closeErr := st.Close()
 	if err != nil {
 		return err
@@ -2845,6 +2908,11 @@ func contractRowTags(component contract.Contract, specPath, rowID string) ([]str
 // ---- full-site flow ---------------------------------------------------------
 
 func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv string, snapshot deployInventorySnapshot) error {
+	// Outbound webhook readiness (INV-3): an invalid integrations.yaml or
+	// unready store fails the whole site deploy before any mutation.
+	if _, err := webhookReadiness(filepath.Dir(inv)); err != nil {
+		return err
+	}
 	fmt.Fprintln(out, "全站部署會套用 inventory 裡每一個已經填了機器的角色 group；")
 	fmt.Fprintln(out, "沒填機器的角色會自動跳過，不需要為它們準備 group_vars/vault。")
 	fmt.Fprintln(out)
@@ -2916,10 +2984,46 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	}
 	extraVars = append(extraVars, strings.Fields(extra)...)
 
-	deployErr := executeRecordedDeployment(ctx, runner, out, "playbooks/site.yml", inv, limit, tags, extraVars, vault, decision.Stage, nil)
+	workflowID := newWorkflowID()
+	startedAt := time.Now()
+	execResult, deployErr := executeRecordedDeploymentResult(ctx, runner, out, "playbooks/site.yml", inv, limit, tags, extraVars, vault, decision.Stage, nil)
 	if deployErr == nil {
 		persistAcceptedAutoHostVars(out, workspaceDir, acceptedAutoHostVars)
 	}
+
+	// Site deploy's requested/executed component sets are exactly what
+	// the site.yml transaction itself resolved (design spec §28.2) —
+	// there is no separate "user selection" narrower than that.
+	resolvedComponents := componentIDsFromResults(execResult.Results)
+	var effects []string
+	if root, rerr := resolveContractRoot(""); rerr == nil {
+		if loader, lerr := contract.NewLoader(root); lerr == nil {
+			if catalog, cerr := loader.LoadDefaultCatalog(); cerr == nil {
+				effects = outboundWorkflowEffects(catalog, resolvedComponents)
+			}
+		}
+	}
+	agg := aggregateDeploymentResult(execResult.Results)
+	publishTerminalWorkflow(ctx, out, PublishTerminalWorkflowInput{
+		WorkspaceDir:           workspaceDir,
+		Inventory:              inv,
+		ExtraVars:              extraVars,
+		Vault:                  vault,
+		Operation:              outbound.OperationDeploy,
+		WorkflowID:             workflowID,
+		RequestedComponents:    resolvedComponents,
+		ExecutedComponents:     resolvedComponents,
+		CompletedComponents:    agg.CompletedComponents,
+		FailedComponent:        agg.FailedComponent,
+		Effects:                effects,
+		ConfirmedEffects:       agg.ConfirmedEffects,
+		Result:                 agg.Result,
+		ApplicationConsistency: agg.ApplicationConsistency,
+		DeliveryRuns:           agg.DeliveryRuns,
+		Failure:                agg.Failure,
+		StartedAt:              startedAt,
+		FinishedAt:             time.Now(),
+	})
 	return deployErr
 }
 
@@ -2956,6 +3060,14 @@ func printSiteTopology(out io.Writer, inv string, snapshot deployInventorySnapsh
 func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, reconcileOnly bool, snapshot deployInventorySnapshot) error {
 	if action != "apply" && action != "upgrade" && action != "decommission" {
 		return fmt.Errorf("--action must be apply, upgrade, or decommission")
+	}
+	// Outbound webhook readiness (INV-3), before any component selection
+	// prompt even starts. V1's operation types are deploy/reconcile only
+	// (design spec §1) — upgrade/decommission actions are out of scope.
+	if action == "apply" {
+		if _, err := webhookReadiness(filepath.Dir(inv)); err != nil {
+			return err
+		}
 	}
 	root, err := resolveContractRoot("")
 	if err != nil {
@@ -3305,16 +3417,44 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		return nil
 	}
 
-	deployErr := executeRecordedDeployment(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints)
+	workflowID := newWorkflowID()
+	startedAt := time.Now()
+	execResult, deployErr := executeRecordedDeploymentResult(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints)
 	if deployErr == nil {
 		persistAcceptedAutoHostVars(out, request.workspaceDir, request.acceptedAutoHostVars)
 	}
+	agg := aggregateDeploymentResult(execResult.Results)
+	publishTerminalWorkflow(ctx, out, PublishTerminalWorkflowInput{
+		WorkspaceDir:           request.workspaceDir,
+		Inventory:              request.inv,
+		ExtraVars:              request.extraVars,
+		Vault:                  request.vault,
+		Operation:              outbound.OperationDeploy,
+		WorkflowID:             workflowID,
+		RequestedComponents:    request.componentHints,
+		ExecutedComponents:     componentIDsFromResults(execResult.Results),
+		CompletedComponents:    agg.CompletedComponents,
+		FailedComponent:        agg.FailedComponent,
+		Effects:                outboundWorkflowEffects(catalog, request.componentHints),
+		ConfirmedEffects:       agg.ConfirmedEffects,
+		Result:                 agg.Result,
+		ApplicationConsistency: agg.ApplicationConsistency,
+		DeliveryRuns:           agg.DeliveryRuns,
+		Failure:                agg.Failure,
+		StartedAt:              startedAt,
+		FinishedAt:             time.Now(),
+	})
 	return deployErr
 }
 
 func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, out io.Writer, requests []catalogDeploymentRequest) error {
 	if len(requests) == 0 {
 		return fmt.Errorf("internal error: reconcile batch has no selected requests")
+	}
+	// Outbound webhook readiness (INV-3): an invalid integrations.yaml or
+	// unready store fails the whole reconcile before any mutation.
+	if _, err := webhookReadiness(requests[0].workspaceDir); err != nil {
+		return err
 	}
 	plans := make([]reconcileExecutionPlan, len(requests))
 	plannedPlaybooks := 0
@@ -3337,16 +3477,58 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 		return err
 	}
 
+	workflowID := newWorkflowID()
+	startedAt := time.Now()
+	var requestedComponents []string
+	for _, request := range requests {
+		requestedComponents = append(requestedComponents, request.componentHints...)
+	}
+	var agg DeploymentExecutionResult
+	var execErr error
 	for i, request := range requests {
 		if len(requests) > 1 {
 			fmt.Fprintf(out, "\n── 執行已授權項目 %d/%d ──\n", i+1, len(requests))
 		}
-		if err := executeRecordedDeploymentWithAuthorization(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints, authorization, plans[i].DependencyLimits); err != nil {
-			return err
+		requestResult, err := executeRecordedDeploymentWithAuthorizationResult(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints, authorization, plans[i].DependencyLimits)
+		agg = agg.merge(requestResult)
+		if err != nil {
+			execErr = err
+			break
 		}
 		persistAcceptedAutoHostVars(out, request.workspaceDir, request.acceptedAutoHostVars)
 	}
-	return nil
+
+	root, catalogErr := resolveContractRoot("")
+	var effects []string
+	if catalogErr == nil {
+		if loader, lerr := contract.NewLoader(root); lerr == nil {
+			if catalog, cerr := loader.LoadDefaultCatalog(); cerr == nil {
+				effects = outboundWorkflowEffects(catalog, requestedComponents)
+			}
+		}
+	}
+	fields := aggregateDeploymentResult(agg.Results)
+	publishTerminalWorkflow(ctx, out, PublishTerminalWorkflowInput{
+		WorkspaceDir:           requests[0].workspaceDir,
+		Inventory:              requests[0].inv,
+		ExtraVars:              requests[0].extraVars,
+		Vault:                  requests[0].vault,
+		Operation:              outbound.OperationReconcile,
+		WorkflowID:             workflowID,
+		RequestedComponents:    requestedComponents,
+		ExecutedComponents:     componentIDsFromResults(agg.Results),
+		CompletedComponents:    fields.CompletedComponents,
+		FailedComponent:        fields.FailedComponent,
+		Effects:                effects,
+		ConfirmedEffects:       fields.ConfirmedEffects,
+		Result:                 fields.Result,
+		ApplicationConsistency: fields.ApplicationConsistency,
+		DeliveryRuns:           fields.DeliveryRuns,
+		Failure:                fields.Failure,
+		StartedAt:              startedAt,
+		FinishedAt:             time.Now(),
+	})
+	return execErr
 }
 
 // autoFillMonitoringFiles wires the workspace-owned external monitoring

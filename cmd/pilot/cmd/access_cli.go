@@ -12,15 +12,26 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/kjelly/pilot/internal/accessgrants"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/outbound"
 )
+
+// accessReconcileEffects is the fixed §1 routing-effect subset for
+// `pilot access reconcile`: it only ever touches HBAC/sudo rules and the
+// grants themselves, never the full freeipa-identity effect set (that
+// would overclaim that the whole identity roster — users/groups/hostgroups
+// — was reconciled, which this command never does).
+var accessReconcileEffects = []string{"access.hbac", "access.sudo", "access.grants"}
 
 var (
 	accessStatusFormat            string
@@ -177,23 +188,89 @@ func runAccessReconcileCmd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%d roster issue(s) found; fix them before reconciling grants", len(violations))
 	}
 
+	workspaceDir := filepath.Dir(accessReconcileInventory)
+	if _, err := webhookReadiness(workspaceDir); err != nil {
+		return err
+	}
+
+	workflowID := newWorkflowID()
+	startedAt := time.Now()
+
 	// readPath (not the original, possibly-encrypted path) is what the
 	// apply playbook's own include_vars reads — Go already holds the
 	// decrypted content in hand, so there is no need for the playbook to
 	// decrypt it again (same convention internal/freeipa's probes use).
-	plan, result, err := accessgrants.ReconcileOnce(cmd.Context(), accessgrants.ReconcileOptions{
+	plan, result, reconcileErr := accessgrants.ReconcileOnce(cmd.Context(), accessgrants.ReconcileOptions{
 		RosterFile: readPath,
 		Inventory:  accessReconcileInventory,
 		Playbook:   accessReconcilePlaybook,
 		StateDir:   resolveDataDir(),
-		Now:        time.Now(),
+		Now:        startedAt,
 	})
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "compiled %d hbac rule(s), %d sudo rule(s), %d account expiration(s)\n", len(plan.HBACRules), len(plan.SudoRules), len(plan.AccountExpirations))
 	if result != nil {
 		fmt.Fprint(out, result.Stdout)
 	}
-	return err
+
+	publishAccessReconcileWorkflow(cmd.Context(), out, accessAppliedFieldsInput{
+		WorkspaceDir: workspaceDir,
+		Inventory:    accessReconcileInventory,
+		VaultFile:    accessReconcileVaultPasswordFile,
+		WorkflowID:   workflowID,
+		StartedAt:    startedAt,
+		ResultRun:    result != nil,
+		Err:          reconcileErr,
+	})
+	return reconcileErr
+}
+
+// accessAppliedFieldsInput is publishAccessReconcileWorkflow's input.
+type accessAppliedFieldsInput struct {
+	WorkspaceDir, Inventory, VaultFile, WorkflowID string
+	StartedAt                                      time.Time
+	// ResultRun is true once accessgrants.ReconcileOnce actually reached
+	// applyPlan (an *ansible.Result came back, even on failure) — it
+	// distinguishes a pre-mutation gate/plan/capability failure
+	// ("unchanged") from one where ansible itself ran and failed
+	// ("partial_or_unknown").
+	ResultRun bool
+	Err       error
+}
+
+// publishAccessReconcileWorkflow is the shared terminal-publication step
+// for `pilot access reconcile` (design spec §1/§28.2) — it mirrors
+// publishGatewayScopeWorkflow's pattern for a dedicated frontend with no
+// delivery.Transaction: RequestedComponents/ExecutedComponents name
+// freeipa-identity (the component whose apply playbook actually ran),
+// but Effects/ConfirmedEffects stay pinned to accessReconcileEffects, the
+// fixed §1 subset, never the full freeipa-identity effect set.
+func publishAccessReconcileWorkflow(ctx context.Context, out io.Writer, in accessAppliedFieldsInput) {
+	result := outbound.ResultSuccess
+	consistency := "confirmed_for_effects"
+	var failure *outbound.FailureInfo
+	confirmedEffects := accessReconcileEffects
+	if in.Err != nil {
+		result = outbound.ResultFailure
+		confirmedEffects = nil
+		if in.ResultRun {
+			consistency = "partial_or_unknown"
+			failure = &outbound.FailureInfo{Class: "apply_failed", Component: "freeipa-identity"}
+		} else {
+			consistency = "unchanged"
+			failure = &outbound.FailureInfo{Class: "preflight_failed", Component: "freeipa-identity"}
+		}
+	}
+	publishTerminalWorkflow(ctx, out, PublishTerminalWorkflowInput{
+		WorkspaceDir: in.WorkspaceDir, Inventory: in.Inventory,
+		Vault:     vaultInput{VaultPasswordFile: in.VaultFile},
+		Operation: outbound.OperationReconcile, WorkflowID: in.WorkflowID,
+		RequestedComponents: []string{"freeipa-identity"}, ExecutedComponents: []string{"freeipa-identity"},
+		CompletedComponents: completedComponentsIf(in.Err == nil, "freeipa-identity"),
+		Effects:             accessReconcileEffects, ConfirmedEffects: confirmedEffects,
+		Result: result, ApplicationConsistency: consistency, Failure: failure,
+		StartedAt: in.StartedAt, FinishedAt: time.Now(),
+	})
 }
 
 // orNA returns s, or "n/a" for an empty string — used for table-output

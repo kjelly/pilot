@@ -8,16 +8,25 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/kjelly/pilot/internal/accessgrants"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/outbound"
 )
+
+// accessBreakglassEffects is design spec §1's fixed breakglass routing
+// subset: activation only ever creates/removes a managed HBAC rule and
+// the grant itself, never sudo or the full freeipa-identity effect set.
+var accessBreakglassEffects = []string{"access.hbac", "access.grants"}
 
 var (
 	accessBreakglassActivateInventory         string
@@ -128,7 +137,14 @@ func runAccessBreakglassActivateCmd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	activation, err := accessgrants.Activate(cmd.Context(), accessgrants.ActivateOptions{
+	workspaceDir := filepath.Dir(accessBreakglassActivateInventory)
+	if _, err := webhookReadiness(workspaceDir); err != nil {
+		return err
+	}
+	workflowID := newWorkflowID()
+	startedAt := time.Now()
+
+	activation, activateErr := accessgrants.Activate(cmd.Context(), accessgrants.ActivateOptions{
 		RosterFile:        readPath,
 		Inventory:         accessBreakglassActivateInventory,
 		StateDir:          resolveDataDir(),
@@ -139,13 +155,42 @@ func runAccessBreakglassActivateCmd(cmd *cobra.Command, args []string) error {
 		ActivatedBy:       activatedByCurrentUser(),
 		Playbook:          accessBreakglassActivatePlaybook,
 		VaultPasswordFile: accessBreakglassActivateVaultPasswordFile,
-		Now:               time.Now(),
+		Now:               startedAt,
 	})
-	if err != nil {
-		return err
+	out := cmd.OutOrStdout()
+	if activateErr == nil {
+		fmt.Fprintf(out, "activated %q, expires at %s\n", name, activation.ExpiresAt.Format(time.RFC3339))
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "activated %q, expires at %s\n", name, activation.ExpiresAt.Format(time.RFC3339))
-	return nil
+	publishBreakglassWorkflow(cmd.Context(), out, workspaceDir, accessBreakglassActivateInventory, accessBreakglassActivateVaultPasswordFile, workflowID, name, startedAt, activateErr)
+	return activateErr
+}
+
+// publishBreakglassWorkflow is the shared terminal-publication step for
+// `pilot access breakglass activate/deactivate` (design spec §1/§28.2):
+// a dedicated frontend with no delivery.Transaction and, per §1's table,
+// empty component sets — the operation.subject identifies the grant by
+// name instead.
+func publishBreakglassWorkflow(ctx context.Context, out io.Writer, workspaceDir, inventoryPath, vaultFile, workflowID, name string, startedAt time.Time, runErr error) {
+	result := outbound.ResultSuccess
+	consistency := "confirmed_for_effects"
+	var failure *outbound.FailureInfo
+	confirmedEffects := accessBreakglassEffects
+	if runErr != nil {
+		result = outbound.ResultFailure
+		consistency = "partial_or_unknown"
+		confirmedEffects = nil
+		failure = &outbound.FailureInfo{Class: "apply_failed"}
+	}
+	publishTerminalWorkflow(ctx, out, PublishTerminalWorkflowInput{
+		WorkspaceDir: workspaceDir, Inventory: inventoryPath,
+		Vault:     vaultInput{VaultPasswordFile: vaultFile},
+		Operation: outbound.OperationReconcile, WorkflowID: workflowID,
+		RequestedComponents: []string{}, ExecutedComponents: []string{},
+		Effects: accessBreakglassEffects, ConfirmedEffects: confirmedEffects,
+		Result: result, ApplicationConsistency: consistency, Failure: failure,
+		StartedAt: startedAt, FinishedAt: time.Now(),
+		Subject: &outbound.WireSubject{Kind: "breakglass", Name: name},
+	})
 }
 
 func runAccessBreakglassDeactivateCmd(cmd *cobra.Command, args []string) error {
@@ -156,19 +201,28 @@ func runAccessBreakglassDeactivateCmd(cmd *cobra.Command, args []string) error {
 	}
 	defer cleanup()
 
-	if err := accessgrants.Deactivate(cmd.Context(), accessgrants.DeactivateOptions{
+	workspaceDir := filepath.Dir(accessBreakglassDeactivateInventory)
+	if _, err := webhookReadiness(workspaceDir); err != nil {
+		return err
+	}
+	workflowID := newWorkflowID()
+	startedAt := time.Now()
+
+	deactivateErr := accessgrants.Deactivate(cmd.Context(), accessgrants.DeactivateOptions{
 		RosterFile:        readPath,
 		Inventory:         accessBreakglassDeactivateInventory,
 		StateDir:          resolveDataDir(),
 		Name:              name,
 		Playbook:          accessBreakglassDeactivatePlaybook,
 		VaultPasswordFile: accessBreakglassDeactivateVaultPasswordFile,
-		Now:               time.Now(),
-	}); err != nil {
-		return err
+		Now:               startedAt,
+	})
+	out := cmd.OutOrStdout()
+	if deactivateErr == nil {
+		fmt.Fprintf(out, "deactivated %q\n", name)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "deactivated %q\n", name)
-	return nil
+	publishBreakglassWorkflow(cmd.Context(), out, workspaceDir, accessBreakglassDeactivateInventory, accessBreakglassDeactivateVaultPasswordFile, workflowID, name, startedAt, deactivateErr)
+	return deactivateErr
 }
 
 func runAccessBreakglassStatusCmd(cmd *cobra.Command, args []string) error {

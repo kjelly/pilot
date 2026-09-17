@@ -12,12 +12,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
-	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/spf13/cobra"
+
+	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/outbound"
 )
+
+// gatewayScopeEffects is design spec §1's fixed routing effect set for
+// every `pilot gateway-scope reconcile/enable-auto/disable-auto` call —
+// never derived from the pilot-gateway-scope contract dynamically,
+// since these dedicated frontends are a fixed §1 mapping, not a
+// contract-effects lookup.
+var gatewayScopeEffects = []string{"identity.hostgroups", "access.hbac"}
 
 const gatewayScopeApplyPlaybook = "playbooks/apply/gateway-scope-apply.yml"
 
@@ -272,6 +282,13 @@ func resolveGatewayScopeHosts(ctx context.Context, inventory string, requested [
 }
 
 func runGatewayScope(cmd *cobra.Command, planOnly bool) error {
+	// `plan` is read-only (design spec §1: "不形成 terminal mutation
+	// event") — no readiness check, no publication, ever.
+	if !planOnly {
+		if _, err := webhookReadiness(gatewayScopeDirFlag); err != nil {
+			return err
+		}
+	}
 	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
 	if err != nil {
 		return fmt.Errorf("prepare ansible runtime for gateway scope: %w", err)
@@ -298,8 +315,62 @@ func runGatewayScope(cmd *cobra.Command, planOnly bool) error {
 	runner.LogPath = runtime.LogPath
 	runner.StdoutWriter = cmd.OutOrStdout()
 	runner.StderrWriter = cmd.ErrOrStderr()
-	_, err = runner.Run(ctx, args...)
-	return err
+
+	if planOnly {
+		_, err = runner.Run(ctx, args...)
+		return err
+	}
+
+	workflowID := newWorkflowID()
+	startedAt := time.Now()
+	_, runErr := runner.Run(ctx, args...)
+	publishGatewayScopeWorkflow(ctx, cmd.OutOrStdout(), inventory, vaultFile, workflowID, startedAt, runErr)
+	return runErr
+}
+
+// publishGatewayScopeWorkflow is the shared terminal-publication step
+// for every gateway-scope dedicated frontend (reconcile/enable-auto/
+// disable-auto — design spec §1's table): requested/executed components
+// are both ["pilot-gateway-scope"], effects are the fixed
+// gatewayScopeEffects set, and delivery_runs is empty since none of
+// these frontends use internal/delivery.Transaction.
+func publishGatewayScopeWorkflow(ctx context.Context, out io.Writer, inventory, vaultFile, workflowID string, startedAt time.Time, runErr error) {
+	result := outbound.ResultSuccess
+	consistency := "confirmed_for_effects"
+	var failure *outbound.FailureInfo
+	if runErr != nil {
+		result = outbound.ResultFailure
+		consistency = "partial_or_unknown"
+		failure = &outbound.FailureInfo{Class: "apply_failed", Component: "pilot-gateway-scope"}
+	}
+	confirmedEffects := []string(nil)
+	if runErr == nil {
+		confirmedEffects = gatewayScopeEffects
+	}
+	publishTerminalWorkflow(ctx, out, PublishTerminalWorkflowInput{
+		WorkspaceDir:           gatewayScopeDirFlag,
+		Inventory:              inventory,
+		Vault:                  vaultInput{VaultPasswordFile: vaultFile},
+		Operation:              outbound.OperationReconcile,
+		WorkflowID:             workflowID,
+		RequestedComponents:    []string{"pilot-gateway-scope"},
+		ExecutedComponents:     []string{"pilot-gateway-scope"},
+		CompletedComponents:    completedComponentsIf(runErr == nil, "pilot-gateway-scope"),
+		Effects:                gatewayScopeEffects,
+		ConfirmedEffects:       confirmedEffects,
+		Result:                 result,
+		ApplicationConsistency: consistency,
+		Failure:                failure,
+		StartedAt:              startedAt,
+		FinishedAt:             time.Now(),
+	})
+}
+
+func completedComponentsIf(ok bool, id string) []string {
+	if ok {
+		return []string{id}
+	}
+	return nil
 }
 
 // gatewayScopeAutomemberAction values match gateway-scope-apply.yml's
@@ -347,6 +418,10 @@ func buildGatewayScopeAutomemberArgs(scope string, hosts []string, action, inven
 }
 
 func runGatewayScopeAutomember(cmd *cobra.Command, enable bool) error {
+	// Outbound webhook readiness (INV-3), before any mutation.
+	if _, err := webhookReadiness(gatewayScopeDirFlag); err != nil {
+		return err
+	}
 	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
 	if err != nil {
 		return fmt.Errorf("prepare ansible runtime for gateway scope: %w", err)
@@ -381,6 +456,10 @@ func runGatewayScopeAutomember(cmd *cobra.Command, enable bool) error {
 	runner.LogPath = runtime.LogPath
 	runner.StdoutWriter = cmd.OutOrStdout()
 	runner.StderrWriter = cmd.ErrOrStderr()
-	_, err = runner.Run(ctx, args...)
-	return err
+
+	workflowID := newWorkflowID()
+	startedAt := time.Now()
+	_, runErr := runner.Run(ctx, args...)
+	publishGatewayScopeWorkflow(ctx, cmd.OutOrStdout(), inventory, vaultFile, workflowID, startedAt, runErr)
+	return runErr
 }

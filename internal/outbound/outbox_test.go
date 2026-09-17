@@ -368,3 +368,49 @@ func TestOutboundDispatcher_H24(t *testing.T) {
 		t.Fatal("workspace-scoped claims must never return the same row")
 	}
 }
+
+// TestOutboundOutbox_EffectiveBase exercises the three cases
+// ResolveEffectiveBase's pure-function unit test already covers, but
+// through the real SQLite-backed EffectiveBase query path.
+func TestOutboundOutbox_EffectiveBase(t *testing.T) {
+	o := newTestOutbox(t)
+	ctx := context.Background()
+
+	base, bootstrap, err := o.EffectiveBase(ctx, "ws", "src", "hook", ProjectionUserHostAccessV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bootstrap || base.ID != "" {
+		t.Fatalf("with no rows at all, want bootstrap=true, got base=%+v bootstrap=%v", base, bootstrap)
+	}
+
+	draft := testDraft("wf1", "ws", "src", "hook")
+	draft.TargetSnapshotID = "sha256:pending"
+	draft.TargetSnapshotJSON = `{"users":[]}`
+	mustEnqueue(t, o, draft)
+
+	base, bootstrap, err = o.EffectiveBase(ctx, "ws", "src", "hook", ProjectionUserHostAccessV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap || base.ID != "sha256:pending" {
+		t.Fatalf("with a pending authoritative row, want base=sha256:pending, got base=%+v bootstrap=%v", base, bootstrap)
+	}
+
+	now := time.Now()
+	claimed, err := o.ClaimNextDue(ctx, ClaimRequest{WorkspaceKey: "ws", SourceID: "src", WebhookName: "hook", Now: now, Lease: time.Minute})
+	if err != nil || claimed == nil {
+		t.Fatalf("claim: %v %v", claimed, err)
+	}
+	if err := o.MarkDelivered(ctx, DeliveryACK{EventID: claimed.EventID, ClaimOwner: claimed.ClaimOwner, Authoritative: true, StateAvailable: true, SourceComplete: true, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	base, bootstrap, err = o.EffectiveBase(ctx, "ws", "src", "hook", ProjectionUserHostAccessV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap || base.ID != "sha256:pending" {
+		t.Fatalf("after ACK, want base from cursor = sha256:pending, got base=%+v bootstrap=%v", base, bootstrap)
+	}
+}

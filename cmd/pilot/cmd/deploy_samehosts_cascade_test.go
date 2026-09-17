@@ -272,9 +272,12 @@ func TestApplySameHostsDependencyChain_NoOpForNonApplyPlaybook(t *testing.T) {
 	// A rollback/decommission playbook path never equals any component's
 	// Playbooks.Apply, so this must return immediately without touching
 	// runner/out/inv/limit/vault at all.
-	err = applySameHostsDependencyChain(context.Background(), nil, nil, catalog, []string{"consumer"}, "consumer-decommission.yml", "unused-inv.yml", "", nil, vaultInput{}, "sandbox", nil, nil)
+	results, err := applySameHostsDependencyChain(context.Background(), nil, nil, catalog, []string{"consumer"}, "consumer-decommission.yml", "unused-inv.yml", "", nil, vaultInput{}, "sandbox", nil, nil)
 	if err != nil {
 		t.Fatalf("applySameHostsDependencyChain() error = %v, want nil (no-op)", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("applySameHostsDependencyChain() results = %v, want none (no-op)", results)
 	}
 }
 

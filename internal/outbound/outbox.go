@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -717,4 +718,40 @@ func (o *SQLiteOutbox) StatusCounts(ctx context.Context, workspaceKey, sourceID,
 	}
 	c.LastAckedID = snapshotID
 	return c, nil
+}
+
+// EffectiveBase implements design spec §14.7 for a caller that is about
+// to enqueue a new event for (workspaceKey, sourceID, webhookName,
+// projection): the base a new diff should chain from is this webhook's
+// last not-yet-ACKed authoritative target snapshot if one is still
+// pending, else the current cursor snapshot, else bootstrap.
+func (o *SQLiteOutbox) EffectiveBase(ctx context.Context, workspaceKey, sourceID, webhookName, projection string) (base SnapshotRef, bootstrap bool, err error) {
+	var pendingID, pendingJSON string
+	perr := o.db.QueryRowContext(ctx, `SELECT target_snapshot_id, target_snapshot_json FROM webhook_outbox
+		WHERE workspace_key=? AND source_id=? AND webhook_name=? AND projection=? AND authoritative=1
+		AND state NOT IN ('delivered','dead_letter','blocked_base_mismatch','orphaned_config')
+		ORDER BY sequence DESC LIMIT 1`,
+		workspaceKey, sourceID, webhookName, projection).Scan(&pendingID, &pendingJSON)
+	if perr != nil && perr != sql.ErrNoRows {
+		return SnapshotRef{}, false, fmt.Errorf("outbox: read pending authoritative target: %w", perr)
+	}
+	var pendingRef *SnapshotRef
+	if perr == nil {
+		pendingRef = &SnapshotRef{ID: pendingID, JSON: json.RawMessage(pendingJSON)}
+	}
+
+	var cursorID, cursorJSON string
+	cerr := o.db.QueryRowContext(ctx, `SELECT snapshot_id, snapshot_json FROM webhook_state_cursor
+		WHERE workspace_key=? AND source_id=? AND webhook_name=? AND projection=?`,
+		workspaceKey, sourceID, webhookName, projection).Scan(&cursorID, &cursorJSON)
+	if cerr != nil && cerr != sql.ErrNoRows {
+		return SnapshotRef{}, false, fmt.Errorf("outbox: read cursor: %w", cerr)
+	}
+	var cursorRef *SnapshotRef
+	if cerr == nil {
+		cursorRef = &SnapshotRef{ID: cursorID, JSON: json.RawMessage(cursorJSON)}
+	}
+
+	base, bootstrap = ResolveEffectiveBase(pendingRef, cursorRef)
+	return base, bootstrap, nil
 }

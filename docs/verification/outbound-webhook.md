@@ -114,6 +114,49 @@ implemented.
   designed for Phase 0-4 (see the rationale below); Phase 5 is the only
   phase that touches a real HTTPS receiver, a real disposable
   `vm-target`, or two real separate Pilot processes.
+- **Phase 4** (this revision) wires every terminal-publication call
+  site design spec §28.2/§41 requires: `cmd/pilot/cmd/outbound_workflow.go`
+  is the shared coordinator (`publishTerminalWorkflow`,
+  `aggregateDeploymentResult`/`aggregateWorkflowResult` implementing
+  §9's precedence table, `webhookReadiness` for the INV-3 pre-mutation
+  gate), called from `deploy.go`'s `runSiteDeploy`,
+  `runCatalogPlaybookDeployEntry`, and `executeCatalogReconcileBatch`
+  (covering `pilot deploy`/`pilot reconcile` interactive, `--force`, and
+  `--actions`, which all funnel through the same instrumented
+  entrypoints via the shared TUI/prompt-automation layer — there is no
+  separate automation code path to miss), and from the dedicated
+  frontends `gateway_scope.go` (`reconcile`/`enable-auto`/`disable-auto`),
+  `access_cli.go` (`pilot access reconcile`, routing effects pinned to
+  the §1 `access.hbac`/`access.sudo`/`access.grants` subset, never the
+  full freeipa-identity effect set), and `access_breakglass_cli.go`
+  (`activate`/`deactivate`, empty component sets plus
+  `operation.subject`). `internal/delivery/transaction.go` gained
+  `Result`/`RunResult` (backward-compatible; `Run` is now a thin
+  wrapper) so callers get `FailedStep` without parsing an error string,
+  and `internal/outbound/outbox.go` gained `EffectiveBase` (the enqueue-
+  time §14.7 base resolution `publishTerminalWorkflow` needs). This
+  makes **C3, C4, C5, C6, C15, C16, C17 (workflow half), C25, C26, C27
+  (workflow half)** real and passing — the full W1-W20 workflow
+  regression suite lives in
+  `cmd/pilot/cmd/outbound_workflow_integration_test.go` (end-to-end,
+  real fake-ansible subprocess + `httptest` HTTP dispatch) plus the
+  pure aggregation-logic tests in `cmd/pilot/cmd/outbound_workflow_test.go`.
+  W8 (verify failure) and W20 (local enqueue failure) call
+  `publishTerminalWorkflow`/`aggregateDeploymentResult` directly with a
+  synthetic `ComponentDeliveryResult`/blocked data dir rather than
+  driving a real SSH-verify failure or disk-full condition end-to-end —
+  documented in-file at each test, not silently narrowed. C2-C14,
+  C18-C24, C28-C30 are unchanged from Phase 3 (projection/dispatcher/
+  store-level, not workflow-dependent). No `docs/evidence/outbound-webhook/`
+  actual-run evidence exists yet — Phase 5 remains the only phase that
+  touches a real HTTPS receiver, a real disposable `vm-target`, or two
+  real separate Pilot processes. `pilot webhook send-test` (a fourth
+  `pilot webhook` subcommand, `cmd/pilot/cmd/webhook.go` +
+  `internal/outbound/testsend.go`) was added on top of Phase 4 as an
+  operator convenience — an unretried, non-durable one-shot HTTP POST
+  of a synthetic event for checking endpoint/auth/TLS connectivity and
+  payload shape — but it is out of design spec scope (§34 only defines
+  `lint`/`status`/`flush`) and carries no acceptance row here.
 
 **Why `go test -run` probes instead of shell/ansible probes.** This
 feature's primary observable surface is a Go CLI + SQLite durable
@@ -144,7 +187,7 @@ row's probe never has to be renamed once its test exists:
 - `internal/outbound/secrets_test.go` — `TestOutboundSecrets_S<1-5>` (design spec §46.7 secret-sentinel regression)
 - `internal/store/webhook_outbox_test.go` — `TestWebhookOutboxSchemaMigration` (design spec §22). File/WAL/SHM permission securing (design spec §37) turned out to be an `internal/outbound`-level policy (gated on "at least one webhook enabled", not a blanket `internal/store` behavior) — its tests are `TestOutboundWorkspace_WorkspaceKeyDeterministicAndDistinct` / `TestOutboundDispatcher_PermissionsNewFile` / `TestOutboundDispatcher_PermissionsNarrowsExistingFile` in `internal/outbound/workspace_test.go`, not `internal/store`.
 - `cmd/pilot/cmd/webhook_test.go` — `TestWebhookCLI_*` (design spec §34's `lint`/`status`/`flush` CLI, real HTTP delivery over `httptest`)
-- `cmd/pilot/cmd/outbound_workflow_test.go` — `TestOutboundWorkflow_W<1-20>` (design spec §46.6) — Phase 4, not yet created
+- `cmd/pilot/cmd/outbound_workflow_test.go` / `outbound_workflow_integration_test.go` — `TestOutboundWorkflow_W<1-20>` (design spec §46.6): pure aggregation-logic tests live in the former, end-to-end (real fake-ansible + `httptest` HTTP dispatch) coverage in the latter — Phase 4
 
 ## Checks
 

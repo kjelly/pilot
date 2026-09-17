@@ -115,3 +115,72 @@ func TestOutcomeExitCodeTreatsRollbackAsFailedTransaction(t *testing.T) {
 		t.Fatalf("cancelled exit=%d want 0", got)
 	}
 }
+
+// TestRunResultReportsFailedStep locks the outbound webhook's
+// FailureInfo.Phase source (design spec §19, §10): RunResult must name
+// exactly which step failed, and Run (kept for every pre-existing
+// caller) must still return the identical Outcome/error RunResult does.
+func TestRunResultReportsFailedStep(t *testing.T) {
+	failing := func(name string) error { return errors.New(name + " boom") }
+	cases := []struct {
+		name        string
+		txn         Transaction
+		wantStep    string
+		wantOutcome Outcome
+	}{
+		{
+			name:        "verify failure with no rollback",
+			txn:         Transaction{Apply: func(context.Context) error { return nil }, Verify: func(context.Context) error { return failing("verify") }},
+			wantStep:    "verify",
+			wantOutcome: OutcomeFailed,
+		},
+		{
+			name: "apply failure with rollback",
+			txn: Transaction{
+				Apply:          func(context.Context) error { return failing("apply") },
+				RollbackPolicy: RollbackSnapshot,
+				Rollback:       func(context.Context) error { return nil },
+			},
+			wantStep:    "apply",
+			wantOutcome: OutcomeRolledBack,
+		},
+		{
+			name: "rollback itself fails",
+			txn: Transaction{
+				Apply:          func(context.Context) error { return failing("apply") },
+				RollbackPolicy: RollbackSnapshot,
+				Rollback:       func(context.Context) error { return failing("rollback") },
+			},
+			wantStep:    "rollback",
+			wantOutcome: OutcomeRollbackFailed,
+		},
+		{
+			name:        "preflight failure",
+			txn:         Transaction{Preflight: func(context.Context) error { return failing("preflight") }},
+			wantStep:    "preflight",
+			wantOutcome: OutcomeFailed,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			result, err := c.txn.RunResult(context.Background())
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if result.Outcome != c.wantOutcome {
+				t.Fatalf("Outcome = %s, want %s", result.Outcome, c.wantOutcome)
+			}
+			if result.FailedStep != c.wantStep {
+				t.Fatalf("FailedStep = %q, want %q", result.FailedStep, c.wantStep)
+			}
+			// Run must return the exact same Outcome/error RunResult does.
+			outcome2, err2 := c.txn.Run(context.Background())
+			if outcome2 != c.wantOutcome {
+				t.Fatalf("Run outcome = %s, want %s", outcome2, c.wantOutcome)
+			}
+			if (err2 == nil) != (err == nil) {
+				t.Fatalf("Run err presence = %v, RunResult err presence = %v", err2 != nil, err != nil)
+			}
+		})
+	}
+}
