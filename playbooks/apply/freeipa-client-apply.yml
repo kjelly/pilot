@@ -787,6 +787,23 @@
       when: not ansible_check_mode
       tags: [freeipa-client, C9]
 
+    # Existing-client Day-2 HA reconciliation (spec §7): runs unconditionally
+    # after enrollment (fresh or a no-op on an already-enrolled host) — see
+    # tasks/freeipa-client-server-failover.yml's own header for why this is
+    # load-bearing, not just an idempotent safety net.
+    # Tagged C1 (not a new row): this keeps krb5.conf/sssd.conf's server
+    # list in the state ipa-client-install itself would have produced —
+    # squarely the same "FreeIPA client is correctly configured" concern
+    # C1 already covers, not a distinct topology-dependent behavior this
+    # single-server reference spec could give a meaningful static check
+    # (see docs/tmp/now/freeipa-client-ha-spec.md's Phase 7 acceptance
+    # matrix for where this actually gets exercised, on the dedicated HA
+    # topology).
+    - name: "FreeIPA client — Day-2 server-list reconciliation (krb5.conf + sssd.conf)"
+      ansible.builtin.include_tasks: tasks/freeipa-client-server-failover.yml
+      when: not ansible_check_mode
+      tags: [freeipa-client, C1]
+
     - name: "FreeIPA client — post-enroll health + AAA checks"
       when: not ansible_check_mode
       tags: [freeipa-client, freeipa-client-verify]

@@ -1,0 +1,176 @@
+# Shared task — Day-2 reconciliation of an already-enrolled FreeIPA
+# client's Kerberos (krb5.conf) and SSSD (sssd.conf) server lists to match
+# the CURRENT desired freeipa_server_pool_active
+# (docs/tmp/now/freeipa-client-ha-spec.md §7/§8/§9).
+#
+# Runs UNCONDITIONALLY after every ipa-client-install invocation, whether
+# it actually just enrolled this host or was a `creates:`-skipped no-op on
+# an already-enrolled one. This is NOT just an idempotent safety net: Phase
+# 0 found live that ipa-client-install's own per-server reachability probe
+# silently drops any --server unreachable at enroll time from the
+# resulting krb5.conf/sssd.conf — so even a FRESHLY enrolled client can
+# start with an incomplete pool if a member was down during enrollment,
+# and this task is what brings it back to the full desired pool once that
+# member recovers (H5 in the acceptance matrix).
+#
+# Deterministic, not blind sed (spec §9.2): computes the full desired
+# kdc/master_kdc/admin_server/kpasswd_server block for the realm from
+# freeipa_server_pool_active, then replaces ONLY that block via string
+# concatenation around two regex_search anchors (NOT regex_replace with an
+# embedded replacement string — a computed block containing anything that
+# looks like a backreference, e.g. a literal digit after a backslash,
+# would corrupt a regex_replace substitution; plain concatenation has no
+# such risk). Every other realm, `[domain_realm]`, and non-server-list
+# line is left untouched. Always backs up before mutating, writes
+# atomically (ansible.builtin.copy), and validates with a REAL `kinit -k`
+# using the host's own keytab before declaring success (spec §9.2
+# explicitly forbids "SSSD still resolves identities" as proof of a
+# correct Kerberos config — see docs/tmp/now/freeipa-client-ha-spec.md
+# §15). On validation failure: restores the backup and fails the play.
+#
+# Inputs (already computed by freeipa-server-pool.yml, which must run
+# before this task): freeipa_server_pool_active, freeipa_server_fqdns,
+# ipa_realm, ipa_client_fqdn.
+---
+# A Jinja {% for %} block (real newlines in the rendered template), NOT a
+# regex_replace with `\n` embedded in a single-quoted YAML replacement
+# string — single-quoted YAML never interprets backslash escapes, so a
+# literal two-character `\n` would land in krb5.conf instead of a real
+# newline byte (confirmed live: `kpasswd_server = ipa1...:464\n    kdc =
+# ipa2...` landed on ONE line, a verbatim backslash-n, not a line break).
+- name: "FreeIPA client failover — compute desired krb5 server-list block"
+  ansible.builtin.set_fact:
+    freeipa_client_krb5_desired_block: |-
+      {% for fqdn in (freeipa_server_pool_active | map(attribute='fqdn') | list) %}
+          kdc = {{ fqdn }}:88
+          master_kdc = {{ fqdn }}:88
+          admin_server = {{ fqdn }}:749
+          kpasswd_server = {{ fqdn }}:464
+      {% endfor %}
+  tags: [always]
+
+- name: "FreeIPA client failover — compute desired sssd ipa_server line"
+  ansible.builtin.set_fact:
+    freeipa_client_sssd_desired_ipa_server: "ipa_server = _srv_, {{ freeipa_server_fqdns | join(', ') }}"
+  tags: [always]
+
+- name: "FreeIPA client failover — read current krb5.conf"
+  ansible.builtin.slurp:
+    src: /etc/krb5.conf
+  register: freeipa_client_krb5_current_b64
+  tags: [always]
+
+- name: "FreeIPA client failover — decode + split krb5.conf around this realm's server-list block"
+  ansible.builtin.set_fact:
+    freeipa_client_krb5_current: "{{ freeipa_client_krb5_current_b64.content | b64decode }}"
+    freeipa_client_krb5_pre: >-
+      {{
+        (freeipa_client_krb5_current_b64.content | b64decode)
+        | regex_search('(?s)^.*?  ' ~ (ipa_realm | regex_escape) ~ ' = \{\n')
+      }}
+    freeipa_client_krb5_post: >-
+      {{
+        (freeipa_client_krb5_current_b64.content | b64decode)
+        | regex_search('(?s)    default_domain.*$')
+      }}
+  tags: [always]
+
+- name: "FreeIPA client failover — gate: realm stanza located in krb5.conf"
+  ansible.builtin.assert:
+    that:
+      - (freeipa_client_krb5_pre | default('', true) | length) > 0
+      - (freeipa_client_krb5_post | default('', true) | length) > 0
+    fail_msg: >-
+      Could not locate the {{ ipa_realm }} realm's kdc/admin_server block in
+      /etc/krb5.conf — refusing to reconcile a file whose structure doesn't
+      match what ipa-client-install is known to produce (spec §9.2: never
+      guess the format).
+  tags: [always]
+
+- name: "FreeIPA client failover — compute desired krb5.conf content (concatenation, no regex-backreference risk)"
+  ansible.builtin.set_fact:
+    freeipa_client_krb5_new: "{{ freeipa_client_krb5_pre }}{{ freeipa_client_krb5_desired_block }}\n{{ freeipa_client_krb5_post }}"
+  tags: [always]
+
+- name: "FreeIPA client failover — reconcile sssd.conf ipa_server line"
+  ansible.builtin.lineinfile:
+    path: /etc/sssd/sssd.conf
+    regexp: '^ipa_server\s*='
+    line: "{{ freeipa_client_sssd_desired_ipa_server }}"
+    state: present
+    create: false
+  register: freeipa_client_sssd_reconcile
+  tags: [always]
+
+- name: "FreeIPA client failover — backup current krb5.conf before mutation"
+  ansible.builtin.copy:
+    src: /etc/krb5.conf
+    dest: /etc/krb5.conf.pilot-backup
+    remote_src: true
+    mode: preserve
+  when: freeipa_client_krb5_new != freeipa_client_krb5_current
+  tags: [always]
+
+- name: "FreeIPA client failover — write reconciled krb5.conf (atomic)"
+  ansible.builtin.copy:
+    content: "{{ freeipa_client_krb5_new }}"
+    dest: /etc/krb5.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: freeipa_client_krb5_new != freeipa_client_krb5_current
+  register: freeipa_client_krb5_write
+  tags: [always]
+
+- name: "FreeIPA client failover — restart SSSD after server-list reconciliation"
+  ansible.builtin.systemd:
+    name: sssd
+    state: restarted
+  when: (freeipa_client_sssd_reconcile is changed) or (freeipa_client_krb5_write is changed)
+  tags: [always]
+
+- name: "FreeIPA client failover — sss_cache -E after reconciliation"
+  ansible.builtin.command:
+    argv: [sss_cache, -E]
+  when: (freeipa_client_sssd_reconcile is changed) or (freeipa_client_krb5_write is changed)
+  changed_when: true
+  tags: [always]
+
+- name: "FreeIPA client failover — validate: kinit with host keytab succeeds after krb5.conf mutation"  # noqa no-handler - inline rollback decision
+  ansible.builtin.command:
+    argv: [kinit, -k, -t, /etc/krb5.keytab, "host/{{ ipa_client_fqdn }}@{{ ipa_realm }}"]
+  register: freeipa_client_krb5_validate
+  changed_when: false
+  failed_when: false
+  when: freeipa_client_krb5_write is changed
+  tags: [always]
+
+- name: "FreeIPA client failover — destroy the validation ticket"  # noqa no-handler - cleanup, not a config reaction
+  ansible.builtin.command:
+    argv: [kdestroy]
+  changed_when: false
+  failed_when: false
+  when: freeipa_client_krb5_write is changed
+  tags: [always]
+
+- name: "FreeIPA client failover — rollback + fail if post-mutation validation failed"
+  when:
+    - freeipa_client_krb5_write is changed
+    - (freeipa_client_krb5_validate.rc | default(1)) != 0
+  tags: [always]
+  block:
+    - name: "FreeIPA client failover — restore krb5.conf backup after failed validation"
+      ansible.builtin.copy:
+        src: /etc/krb5.conf.pilot-backup
+        dest: /etc/krb5.conf
+        remote_src: true
+        mode: preserve
+
+    - name: "FreeIPA client failover — fail loudly after restoring backup"
+      ansible.builtin.fail:
+        msg: >-
+          krb5.conf server-list reconciliation failed validation
+          (kinit -k -t /etc/krb5.keytab host/{{ ipa_client_fqdn }}@{{ ipa_realm }}
+          did not succeed after the mutation) — restored the pre-mutation
+          backup. rc={{ freeipa_client_krb5_validate.rc | default('?') }}
+          stderr={{ freeipa_client_krb5_validate.stderr | default('') }}

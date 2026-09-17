@@ -205,3 +205,122 @@ func TestRegression_FreeipaClientContract_TopologyModeGroupVar(t *testing.T) {
 	}
 	t.Fatalf("contracts/freeipa-client.yaml groupVars is missing freeipa_client_topology_mode")
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 4 — Existing client Day-2 HA reconciliation
+// (playbooks/apply/tasks/freeipa-client-server-failover.yml, spec §7/§8/§9).
+// ─────────────────────────────────────────────────────────────────────────
+
+// TestRegression_FreeipaClientServerFailoverTask_NoEmbeddedNewlineEscape
+// locks the real bug found live in Phase 4 (2026-09-17): building the
+// krb5.conf server-list block via `regex_replace` with `\n` embedded in a
+// SINGLE-QUOTED YAML replacement string lands a literal two-character
+// backslash-n in the file, not a real newline — single-quoted YAML never
+// interprets backslash escapes. The fix uses a Jinja {% for %} template
+// (real newlines in the rendered block scalar) instead.
+func TestRegression_FreeipaClientServerFailoverTask_NoEmbeddedNewlineEscape(t *testing.T) {
+	const taskPath = "../../playbooks/apply/tasks/freeipa-client-server-failover.yml"
+	raw, err := os.ReadFile(taskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", taskPath, err)
+	}
+	task := string(raw)
+
+	if strings.Contains(task, `\1:88\n`) {
+		t.Errorf("must not build the krb5 server-list block via regex_replace with \\n embedded in a single-quoted replacement string — single-quoted YAML never interprets backslash escapes, so \\n lands as a literal 2-character sequence, not a real newline (confirmed live)")
+	}
+	if !strings.Contains(task, "{% for fqdn in") {
+		t.Errorf("krb5 server-list block must be built via a Jinja {%% for %%} template (real newlines), not a regex_replace replacement string")
+	}
+}
+
+// TestRegression_FreeipaClientServerFailoverTask_ConcatenationNotRegexReplace
+// locks that the krb5.conf server-list block is spliced in via plain
+// string concatenation around two regex_search anchors, not a
+// regex_replace with the computed block embedded in the replacement
+// string — a computed block containing anything that looks like a
+// backreference (a literal digit after a backslash) would corrupt a
+// regex_replace substitution; concatenation has no such risk.
+func TestRegression_FreeipaClientServerFailoverTask_ConcatenationNotRegexReplace(t *testing.T) {
+	const taskPath = "../../playbooks/apply/tasks/freeipa-client-server-failover.yml"
+	raw, err := os.ReadFile(taskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", taskPath, err)
+	}
+	task := string(raw)
+
+	if !strings.Contains(task, "regex_search") {
+		t.Errorf("must locate the pre/post anchors via regex_search")
+	}
+	newIdx := strings.Index(task, "freeipa_client_krb5_new:")
+	if newIdx == -1 {
+		t.Fatalf("could not find freeipa_client_krb5_new computation")
+	}
+	newLine := task[newIdx : newIdx+200]
+	if !strings.Contains(newLine, "freeipa_client_krb5_pre") || !strings.Contains(newLine, "freeipa_client_krb5_post") {
+		t.Errorf("freeipa_client_krb5_new must concatenate freeipa_client_krb5_pre + desired_block + freeipa_client_krb5_post")
+	}
+}
+
+// TestRegression_FreeipaClientServerFailoverTask_BackupAtomicValidateRollback
+// locks spec §9.2's required mutation discipline: backup before mutating,
+// atomic write (ansible.builtin.copy, not an in-place multi-line sed),
+// validate with a REAL `kinit -k` using the host's own keytab (not just
+// "SSSD still resolves identities" — spec §15 explicitly forbids that as
+// proof), and restore the backup + fail the play if validation fails.
+func TestRegression_FreeipaClientServerFailoverTask_BackupAtomicValidateRollback(t *testing.T) {
+	const taskPath = "../../playbooks/apply/tasks/freeipa-client-server-failover.yml"
+	raw, err := os.ReadFile(taskPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", taskPath, err)
+	}
+	task := string(raw)
+
+	if !strings.Contains(task, "krb5.conf.pilot-backup") {
+		t.Errorf("must back up /etc/krb5.conf before mutating it")
+	}
+	backupIdx := strings.Index(task, "backup current krb5.conf before mutation")
+	writeIdx := strings.Index(task, "write reconciled krb5.conf (atomic)")
+	validateIdx := strings.Index(task, "validate: kinit with host keytab")
+	rollbackIdx := strings.Index(task, "restore krb5.conf backup after failed validation")
+	failIdx := strings.Index(task, "fail loudly after restoring backup")
+	for name, idx := range map[string]int{
+		"backup": backupIdx, "write": writeIdx, "validate": validateIdx,
+		"rollback": rollbackIdx, "fail": failIdx,
+	} {
+		if idx == -1 {
+			t.Fatalf("could not find the %q task", name)
+		}
+	}
+	if !(backupIdx < writeIdx && writeIdx < validateIdx && validateIdx < rollbackIdx && rollbackIdx < failIdx) {
+		t.Errorf("mutation steps must run in order: backup -> write -> validate -> rollback -> fail (got backup=%d write=%d validate=%d rollback=%d fail=%d)", backupIdx, writeIdx, validateIdx, rollbackIdx, failIdx)
+	}
+	if !strings.Contains(task, "kinit, -k, -t, /etc/krb5.keytab") {
+		t.Errorf("validation must use a real kinit -k -t /etc/krb5.keytab, not an SSSD-only check (spec §15)")
+	}
+}
+
+// TestRegression_FreeipaClientApplyPlaybook_FailoverReconciliationWiredIn
+// locks that freeipa-client-apply.yml includes the failover reconciliation
+// task UNCONDITIONALLY (not gated on "was this a fresh enroll" or "is this
+// host already enrolled") — Phase 0 found live that ipa-client-install's
+// own reachability probe can leave a freshly-enrolled client with an
+// incomplete pool, so reconciliation must run every time, not just for
+// pre-existing clients.
+func TestRegression_FreeipaClientApplyPlaybook_FailoverReconciliationWiredIn(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-client-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	includeIdx := strings.Index(playbook, "tasks/freeipa-client-server-failover.yml")
+	if includeIdx == -1 {
+		t.Fatalf("playbook must include tasks/freeipa-client-server-failover.yml")
+	}
+	includeBlock := playbook[max(0, includeIdx-400) : includeIdx+200]
+	if strings.Contains(includeBlock, "ipa_cfg.stat.exists") {
+		t.Errorf("failover reconciliation must NOT be gated on prior-enrollment detection (ipa_cfg.stat.exists) — it must run unconditionally, including right after a fresh enrollment (spec §7, Phase 0 finding)")
+	}
+}
