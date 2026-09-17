@@ -157,6 +157,37 @@ implemented.
   of a synthetic event for checking endpoint/auth/TLS connectivity and
   payload shape — but it is out of design spec scope (§34 only defines
   `lint`/`status`/`flush`) and carries no acceptance row here.
+- **Phase 5** (2026-09-17 actual-run evidence, tested at candidate
+  `f3cb905`, fixed and re-verified at `df31248`) executed design spec
+  §48.1's L1-L7 plan for real: L1 (clean checkout build/test/lint/
+  fresh-DB), L2 (a local HTTPS receiver with a test CA —
+  HMAC/Bearer/429+Retry-After/503/400/redirect-rejection/timeout, all
+  real deliveries via `pilot webhook flush`), and L3 (two concurrent
+  `pilot webhook flush` processes sharing one `--data-dir` —
+  FIFO/claim-lease/crash-reclaim/monotonic-sequence/workspace-isolation)
+  are clean, real, and unconditional PASSes. L4-L6 ran against a real
+  disposable `vm-target` FreeIPA server: a real full-site deploy, a real
+  `freeipa-identity` reconcile proving disabled-user/HBAC exclusion
+  against a live server, real `access reconcile`/breakglass
+  activate+deactivate/gateway-scope reconcile — each with correct
+  effect-routing and exactly-one-event — plus several genuine real
+  ansible failures correctly published as failure events with
+  `authoritative: false`. This run also found that `gateway-scope
+  enable-auto`/`disable-auto` (and `reconcile`, by the same code path)
+  never actually detected a failed `ansible-playbook` run — a
+  pre-existing bug in `gateway_scope.go` unrelated to this candidate's
+  own diff, but directly affecting this feature's `operation.result`
+  accuracy for those three commands. It was fixed in `df31248`
+  ("fix(gateway-scope): surface ansible-playbook exit code as an
+  error") with two new regression tests, independently re-verified at
+  the unit level (judged sufficient over a second live VM run — the bug
+  is a pure Go-level exit-code-handling defect with no dependency on
+  real ansible/FreeIPA behavior; full reasoning in the evidence doc).
+  Full evidence, the reproduction, the fix, and the re-verification are
+  in
+  [`docs/evidence/outbound-webhook/2026-09-17-phase5-actual-run.md`](../evidence/outbound-webhook/2026-09-17-phase5-actual-run.md).
+  L1-L6 are now clean actual-run PASSes at `df31248`; L7 remains
+  partially unit-level-only (documented in that same evidence file).
 
 **Why `go test -run` probes instead of shell/ansible probes.** This
 feature's primary observable surface is a Go CLI + SQLite durable
