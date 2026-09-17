@@ -70,30 +70,6 @@ func (d *automationDriver) createDNSManifest(r *editRouterModel, domain, realm, 
 	return d.enter(r)
 }
 
-func (d *automationDriver) ensureDNSManifestManager(r *editRouterModel) error {
-	for attempts := 0; attempts < 8; attempts++ {
-		switch automationScreenID(r) {
-		case "dns.manager":
-			return nil
-		case "edit.top":
-			if err := d.choose(r, "freeipa-dns manifest"); err != nil {
-				return err
-			}
-		case "dns.path":
-			// Only reachable when the manifest already exists — see the
-			// package doc comment above.
-			if err := d.enter(r); err != nil {
-				return err
-			}
-		default:
-			if err := d.choose(r, "返回"); err != nil {
-				return fmt.Errorf("cannot navigate to dns manifest manager from %s screen: %w", automationScreenID(r), err)
-			}
-		}
-	}
-	return fmt.Errorf("could not resolve navigation to dns manifest manager")
-}
-
 func (d *automationDriver) ensureDNSZonesList(r *editRouterModel) error {
 	for attempts := 0; attempts < 8; attempts++ {
 		switch automationScreenID(r) {

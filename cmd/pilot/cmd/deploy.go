@@ -2728,31 +2728,6 @@ func fileSHA256(path string) (string, error) {
 	return fmt.Sprintf("%x", digest[:]), nil
 }
 
-func resolveInventoryHosts(ctx context.Context, inventory string) ([]string, error) {
-	command := deployAnsibleCommand(ctx, "ansible-inventory", "-i", inventory, "--list")
-	output, err := command.Output()
-	if err != nil {
-		return nil, fmt.Errorf("ansible-inventory --list: %w", err)
-	}
-	var raw struct {
-		Meta struct {
-			Hostvars map[string]json.RawMessage `json:"hostvars"`
-		} `json:"_meta"`
-	}
-	if err := json.Unmarshal(output, &raw); err != nil {
-		return nil, fmt.Errorf("parse ansible-inventory output: %w", err)
-	}
-	hosts := make([]string, 0, len(raw.Meta.Hostvars))
-	for host := range raw.Meta.Hostvars {
-		hosts = append(hosts, host)
-	}
-	sort.Strings(hosts)
-	if len(hosts) == 0 {
-		return nil, fmt.Errorf("inventory resolved no hosts")
-	}
-	return hosts, nil
-}
-
 func autoDeployVerify(root string, catalog contract.Catalog, components []string, inventory, limit, tags, stage string, vault vaultInput, writer *store.RunWriter) (delivery.StepFunc, error) {
 	auto := make([]string, 0, len(components))
 	for _, id := range components {
