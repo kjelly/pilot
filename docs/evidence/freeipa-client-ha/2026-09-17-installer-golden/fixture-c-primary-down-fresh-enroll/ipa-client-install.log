@@ -1,0 +1,71 @@
+Command: ipa-client-install -U --server=ipa1.ipa.pilot.internal --server=ipa2.ipa.pilot.internal \
+  --domain=ipa.pilot.internal --realm=IPA.PILOT.INTERNAL --principal=admin --password=**** \
+  --hostname=ipa-ha-client.ipa.pilot.internal --mkhomedir --no-ntp --no-dns-sshfp --force-join
+Precondition: `systemctl stop ipa` run on ipa-primary (ipa1) immediately before this enrollment;
+  ipa-replica (ipa2) left running. Client VM was rolled back to the pre-golden-fixture snapshot
+  first (fresh, unenrolled).
+
+Captured stdout:
+---
+This program will set up IPA client.
+Version 4.11.1
+
+
+Warning: Permanently added '192.168.122.6' (ED25519) to the list of known hosts.
+Skip ipa1.ipa.pilot.internal: LDAP server is not responding, unable to verify if this is an IPA server
+Client hostname: ipa-ha-client.ipa.pilot.internal
+Realm: IPA.PILOT.INTERNAL
+DNS Domain: ipa.pilot.internal
+IPA Server: ipa2.ipa.pilot.internal
+BaseDN: dc=ipa,dc=pilot,dc=internal
+Skipping chrony configuration
+Successfully retrieved CA cert
+    Subject:     CN=Certificate Authority,O=IPA.PILOT.INTERNAL
+    Issuer:      CN=Certificate Authority,O=IPA.PILOT.INTERNAL
+    Valid From:  2026-09-17 12:33:27+00:00
+    Valid Until: 2046-09-17 12:33:27+00:00
+
+Enrolled in IPA realm IPA.PILOT.INTERNAL
+Created /etc/ipa/default.conf
+Configured /etc/sssd/sssd.conf
+Systemwide CA database updated.
+Adding SSH public key from /etc/ssh/ssh_host_ed25519_key.pub
+Adding SSH public key from /etc/ssh/ssh_host_rsa_key.pub
+Adding SSH public key from /etc/ssh/ssh_host_ecdsa_key.pub
+SSSD enabled
+Configured /etc/openldap/ldap.conf
+Configured /etc/ssh/ssh_config
+Configured /etc/ssh/sshd_config.d/04-ipa.conf
+Configuring ipa.pilot.internal as NIS domain.
+Configured /etc/krb5.conf for IPA realm IPA.PILOT.INTERNAL
+Client configuration complete.
+The ipa-client-install command was successful
+---
+
+*** CRITICAL FINDING (drives spec.md §5/§7 hardening) ***
+
+The installer probes EVERY --server given, in the order given, and SILENTLY DROPS any
+unreachable one from krb5.conf/sssd.conf/default.conf entirely — it does not just reorder
+or deprioritize it. With ipa1 stopped, listing `--server=ipa1 --server=ipa2` (ipa1 first)
+still produced a client whose krb5.conf/sssd.conf/default.conf mention ONLY ipa2:
+
+  krb5.conf   [realms]: kdc/master_kdc/admin_server/kpasswd_server = ipa2 ONLY (no ipa1 lines at all)
+  sssd.conf:  ipa_server = _srv_, ipa2.ipa.pilot.internal          (no ipa1)
+  default.conf: server = ipa2.ipa.pilot.internal, xmlrpc_uri = https://ipa2.../ipa/xml
+
+This means Pilot passing a reachable-first-reordered --server list to ipa-client-install is
+NOT sufficient to satisfy spec.md's H5 acceptance criterion ("bootstrap selector 必須將 ipa2
+排第一，但 desired server pool 仍保留 [ipa1, ipa2]") — the installer's own connectivity probe,
+not argv order, decides which servers land in the resulting config, and it unconditionally
+excludes anything unreachable at enroll time. If Pilot only ran ipa-client-install and stopped,
+a client enrolled during a primary outage would NEVER get ipa1 back into its failover list even
+after ipa1 recovers, unless something reconciles it back in afterward.
+
+CONCLUSION: the Phase 4 "server-failover reconciliation" step in spec.md §7's diagram — which
+already runs right after "ipa-client-install fresh enrollment" for every enrollment, not only
+for pre-existing clients — is not just an idempotent safety net, it is LOAD-BEARING for the
+primary-down-fresh-enroll case (H5). Phase 3/4 implementation must run it unconditionally after
+every fresh enrollment and diff the resulting krb5.conf/sssd.conf against the full desired pool
+(§3's freeipa_server_pool), not just after detecting an already-enrolled host.
+
+Sanity check (kinit against the surviving ipa2, post-enrollment): PASS (`KINIT_OK`).

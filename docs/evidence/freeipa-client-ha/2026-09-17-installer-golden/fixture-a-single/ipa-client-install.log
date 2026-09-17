@@ -1,0 +1,39 @@
+This program will set up IPA client.
+Version 4.11.1
+
+
+Warning: Permanently added '192.168.122.6' (ED25519) to the list of known hosts.
+Client hostname: ipa-ha-client.ipa.pilot.internal
+Realm: IPA.PILOT.INTERNAL
+DNS Domain: ipa.pilot.internal
+IPA Server: ipa1.ipa.pilot.internal
+BaseDN: dc=ipa,dc=pilot,dc=internal
+Skipping chrony configuration
+Successfully retrieved CA cert
+    Subject:     CN=Certificate Authority,O=IPA.PILOT.INTERNAL
+    Issuer:      CN=Certificate Authority,O=IPA.PILOT.INTERNAL
+    Valid From:  2026-09-17 12:33:27+00:00
+    Valid Until: 2046-09-17 12:33:27+00:00
+
+Enrolled in IPA realm IPA.PILOT.INTERNAL
+Created /etc/ipa/default.conf
+Configured /etc/sssd/sssd.conf
+Systemwide CA database updated.
+Adding SSH public key from /etc/ssh/ssh_host_ed25519_key.pub
+Adding SSH public key from /etc/ssh/ssh_host_rsa_key.pub
+Adding SSH public key from /etc/ssh/ssh_host_ecdsa_key.pub
+SSSD enabled
+Configured /etc/openldap/ldap.conf
+Configured /etc/ssh/ssh_config
+Configured /etc/ssh/sshd_config.d/04-ipa.conf
+Configuring ipa.pilot.internal as NIS domain.
+Configured /etc/krb5.conf for IPA realm IPA.PILOT.INTERNAL
+Client configuration complete.
+The ipa-client-install command was successful
+
+Command: ipa-client-install -U --server=ipa1.ipa.pilot.internal --domain=ipa.pilot.internal \
+  --realm=IPA.PILOT.INTERNAL --principal=admin --password=**** \
+  --hostname=ipa-ha-client.ipa.pilot.internal --mkhomedir --no-ntp --no-dns-sshfp --force-join
+Client: Ubuntu 24.04 (ipa-ha-client, vm-target), ipa-client-install 4.11.1
+Server: ipa-primary (AlmaLinux 9, single node, freeipa-server-apply.yml baseline)
+Captured: 2026-09-17 (vm-target topology docs/topologies/freeipa-ha-topology.yaml)

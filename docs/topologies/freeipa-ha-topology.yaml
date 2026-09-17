@@ -6,6 +6,7 @@
 #   pilot vm-target topology status    --topology docs/topologies/freeipa-ha-topology.yaml
 #   pilot vm-target topology inventory --topology docs/topologies/freeipa-ha-topology.yaml
 #   pilot vm-target topology down      --topology docs/topologies/freeipa-ha-topology.yaml
+services: local
 nodes:
   - name: ipa-primary
     base_image: almalinux-9

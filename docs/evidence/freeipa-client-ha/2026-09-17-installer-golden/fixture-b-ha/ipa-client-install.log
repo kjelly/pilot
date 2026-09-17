@@ -1,0 +1,52 @@
+This program will set up IPA client.
+Version 4.11.1
+
+
+Warning: Permanently added '192.168.122.6' (ED25519) to the list of known hosts.
+Client hostname: ipa-ha-client.ipa.pilot.internal
+Realm: IPA.PILOT.INTERNAL
+DNS Domain: ipa.pilot.internal
+IPA Server: ipa1.ipa.pilot.internal, ipa2.ipa.pilot.internal
+BaseDN: dc=ipa,dc=pilot,dc=internal
+Skipping chrony configuration
+Successfully retrieved CA cert
+    Subject:     CN=Certificate Authority,O=IPA.PILOT.INTERNAL
+    Issuer:      CN=Certificate Authority,O=IPA.PILOT.INTERNAL
+    Valid From:  2026-09-17 12:33:27+00:00
+    Valid Until: 2046-09-17 12:33:27+00:00
+
+Enrolled in IPA realm IPA.PILOT.INTERNAL
+Created /etc/ipa/default.conf
+Configured /etc/sssd/sssd.conf
+Systemwide CA database updated.
+Adding SSH public key from /etc/ssh/ssh_host_ed25519_key.pub
+Adding SSH public key from /etc/ssh/ssh_host_rsa_key.pub
+Adding SSH public key from /etc/ssh/ssh_host_ecdsa_key.pub
+SSSD enabled
+Configured /etc/openldap/ldap.conf
+Configured /etc/ssh/ssh_config
+Configured /etc/ssh/sshd_config.d/04-ipa.conf
+Configuring ipa.pilot.internal as NIS domain.
+Configured /etc/krb5.conf for IPA realm IPA.PILOT.INTERNAL
+Client configuration complete.
+The ipa-client-install command was successful
+
+Command: ipa-client-install -U --server=ipa1.ipa.pilot.internal --server=ipa2.ipa.pilot.internal \
+  --domain=ipa.pilot.internal --realm=IPA.PILOT.INTERNAL --principal=admin --password=**** \
+  --hostname=ipa-ha-client.ipa.pilot.internal --mkhomedir --no-ntp --no-dns-sshfp --force-join
+Client: Ubuntu 24.04 (ipa-ha-client, vm-target), ipa-client-install 4.11.1
+Server: ipa-primary + ipa-replica (AlmaLinux 9, freeipa-server-apply.yml + freeipa-server-replica-apply.yml baseline)
+Captured: 2026-09-17 (vm-target topology docs/topologies/freeipa-ha-topology.yaml, rolled back to
+  the pre-golden-fixture snapshot after fixture-a-single before running this enrollment)
+
+Key findings vs spec.md §4.2/§8/§9.1 predictions:
+- sssd.conf ipa_server line matches predicted shape exactly:
+    ipa_server = _srv_, ipa1.ipa.pilot.internal, ipa2.ipa.pilot.internal
+- krb5.conf duplicates all four of kdc/master_kdc/admin_server/kpasswd_server (spec only
+  anticipated kdc/admin_server/kpasswd_server; installer also emits a second master_kdc line).
+  No --fixed-primary was passed; installer never adds it on its own.
+- default.conf's `server`/`xmlrpc_uri` fields remain PINNED TO ipa1 ONLY, even in 2-server
+  enrollment (`server = ipa1.ipa.pilot.internal`, `xmlrpc_uri = https://ipa1.ipa.pilot.internal/ipa/xml`).
+  This confirms spec.md §13's concern: any Pilot `ipa` CLI invocation that relies on
+  /etc/ipa/default.conf's default reader (no override) stays pinned to ipa1 regardless of
+  client HA state — Phase 5 admin-endpoint selection is a real, not theoretical, gap.
