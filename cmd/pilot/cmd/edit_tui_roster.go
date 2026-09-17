@@ -84,6 +84,13 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 			banner = notice + "\n" + banner
 		}
 	}
+	if notice := autoFillFreeIPAClientRosterHostsBanner(dir, path); notice != "" {
+		if banner == "" {
+			banner = notice
+		} else {
+			banner = notice + "\n" + banner
+		}
+	}
 
 	choices := []tui.Choice{
 		{ID: "roster.top.users", Label: "👤 Users"},
@@ -137,6 +144,23 @@ func ensureRosterSchemaCurrentBanner(path string) string {
 	}
 	return fmt.Sprintf("✅ Roster schema v%d detected. Automatically upgraded to schema v%d.\nBackup:\n  %s",
 		result.FromVersion, result.ToVersion, result.BackupPath)
+}
+
+// autoFillFreeIPAClientRosterHostsBanner appends a roster hosts: entry for
+// every hosts.yml host tagged freeipa-client that has no roster host entry
+// yet (inventory.AutoFillFreeIPAClientRosterHosts) and returns a banner
+// note naming what it added — "" if nothing changed. Purely additive and
+// idempotent, so — like ensureRosterSchemaCurrentBanner above — it needs
+// no confirmation prompt. Errors (e.g. an encrypted roster) are silently
+// ignored here: the roster screens below already have their own, less
+// disruptive way of reporting that once something actually tries to read
+// the file.
+func autoFillFreeIPAClientRosterHostsBanner(dir, path string) string {
+	added, err := inventory.AutoFillFreeIPAClientRosterHosts(dir, path)
+	if err != nil || len(added) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("✅ Auto-added %d freeipa-client host(s) to roster hosts: %s", len(added), strings.Join(added, ", "))
 }
 
 // rosterCreateConfirmScreenID and rosterCreatePasswordScreenID identify

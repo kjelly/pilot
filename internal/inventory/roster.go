@@ -799,6 +799,22 @@ func AppendRosterGroup(path, name, category string) error {
 	return appendTopLevelRosterEntry(path, "groups", rosterGroupStub{Name: name, State: "present", Category: category})
 }
 
+// rosterHostStub is AppendRosterHost's minimal, valid shape — name and
+// ip_address are the only fields checkHosts requires (roster_validate.go).
+type rosterHostStub struct {
+	Name      string `yaml:"name"`
+	State     string `yaml:"state"`
+	IPAddress string `yaml:"ip_address"`
+}
+
+// AppendRosterHost appends a minimal host stub to the roster's top-level
+// hosts: list, preserving all other content exactly. See AppendRosterUser's
+// doc comment for the general contract; name must be FQDN-shaped and
+// ipAddress IPv4-shaped or checkHosts will reject it.
+func AppendRosterHost(path, name, ipAddress string) error {
+	return appendTopLevelRosterEntry(path, "hosts", rosterHostStub{Name: name, State: "present", IPAddress: ipAddress})
+}
+
 func appendTopLevelRosterEntry(path, listKey string, stub any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
