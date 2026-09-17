@@ -81,6 +81,39 @@ implemented.
   covered now; its event-envelope half (an unavailable/oversized event
   omits the `snapshot`/`diff` JSON fields entirely) is deferred to
   Phase 3's event.go.
+- **Phase 3** (this revision) lands the durable outbox
+  (`internal/store/sqlite.go` schema v16: `webhook_outbox`,
+  `webhook_state_cursor`, `webhook_workspace_binding`;
+  `internal/outbound/outbox.go`'s `SQLiteOutbox` — enqueue with §31
+  idempotency-on-conflict, the cross-process claim lease via a
+  dedicated `_txlock=immediate` connection — SQLite's own
+  single-writer model is the cross-process mutex, so no extra
+  optimistic-concurrency guard was needed beyond matching on
+  `claim_owner` — mark-delivered/mark-attempt-failed, config
+  reconciliation (`ReconcileWebhookConfig`, closing CFG14) and
+  workspace/source binding (`CheckWorkspaceBinding`)), HMAC/bearer auth
+  (`auth.go`), retry classification and backoff (`retry.go`), the HTTP
+  dispatcher and bounded flush loop (`dispatcher.go`), the wire
+  envelope builder plus dead-letter base-mismatch chain safety
+  (`event.go`), history.db permission securing (`workspace.go`), and
+  `pilot webhook lint/status/flush` (`cmd/pilot/cmd/webhook.go`). This
+  makes **C10, C11, C12, C13, C14, C20, C23, C24, C29, C30** real and
+  passing, and CFG14 (deferred from Phase 1) now has a real test
+  (`internal/outbound/outbox_test.go`). **C27** is real at the
+  dispatcher/outbox level (`H18`/`H20`'s budget and
+  missing-secret-consumes-no-attempt assertions) — its workflow-level
+  half (`W20`: a *caller's* local enqueue failure never flips the
+  underlying deploy/reconcile exit code) still needs Phase 4, since
+  there is no real caller yet. **C25/C26** remain projection-level only
+  until Phase 4 wires the dedicated frontends and the real
+  `WorkflowResult` aggregation through `event.go`'s
+  `OperationMetadata`. C2-C9, C15-C19, C21, C22, C28 are unchanged from
+  Phase 2 (still projection-level, pending Phase 4 for end-to-end
+  workflow coverage). No `docs/evidence/outbound-webhook/` actual-run
+  evidence exists yet — everything above is `go test`-only, exactly as
+  designed for Phase 0-4 (see the rationale below); Phase 5 is the only
+  phase that touches a real HTTPS receiver, a real disposable
+  `vm-target`, or two real separate Pilot processes.
 
 **Why `go test -run` probes instead of shell/ansible probes.** This
 feature's primary observable surface is a Go CLI + SQLite durable
@@ -107,10 +140,11 @@ row's probe never has to be renamed once its test exists:
 - `internal/outbound/effect_match_test.go` — `TestOutboundEffectMatch_*` (design spec §6.2/§31 wildcard matching, not individually numbered upstream)
 - `internal/outbound/projection_test.go` — `TestOutboundProjection_P<1-27>` (design spec §46.3); P17/P22/P27 each split into lettered sub-tests (e.g. `P22a`/`P22b`) covering distinct scenarios the design spec's single-line description bundles together
 - `internal/outbound/diff_test.go` — `TestOutboundDiff_D<1-7,15>` (design spec §46.4); `D8-D14` (cursor advance/FIFO/cross-process claim) are deferred to `internal/outbound/outbox_test.go` in Phase 3 — pure `Diff()` has no cursor/ACK/claim state to test yet
-- `internal/outbound/dispatcher_test.go` / `outbox_test.go` — `TestOutboundDispatcher_H<1-24>` (design spec §46.5)
+- `internal/outbound/dispatcher_test.go` / `outbox_test.go` — `TestOutboundDispatcher_H<1-24>` (design spec §46.5); `H16` lives in `event_test.go` as `TestOutboundDiff_D11_H16` since it is the same base-mismatch mechanism as D11
 - `internal/outbound/secrets_test.go` — `TestOutboundSecrets_S<1-5>` (design spec §46.7 secret-sentinel regression)
-- `internal/store/webhook_outbox_test.go` — `TestWebhookOutboxSchemaMigration`, `TestWebhookOutboxFilePermissions` (design spec §22, §37)
-- `cmd/pilot/cmd/outbound_workflow_test.go` — `TestOutboundWorkflow_W<1-20>` (design spec §46.6)
+- `internal/store/webhook_outbox_test.go` — `TestWebhookOutboxSchemaMigration` (design spec §22). File/WAL/SHM permission securing (design spec §37) turned out to be an `internal/outbound`-level policy (gated on "at least one webhook enabled", not a blanket `internal/store` behavior) — its tests are `TestOutboundWorkspace_WorkspaceKeyDeterministicAndDistinct` / `TestOutboundDispatcher_PermissionsNewFile` / `TestOutboundDispatcher_PermissionsNarrowsExistingFile` in `internal/outbound/workspace_test.go`, not `internal/store`.
+- `cmd/pilot/cmd/webhook_test.go` — `TestWebhookCLI_*` (design spec §34's `lint`/`status`/`flush` CLI, real HTTP delivery over `httptest`)
+- `cmd/pilot/cmd/outbound_workflow_test.go` — `TestOutboundWorkflow_W<1-20>` (design spec §46.6) — Phase 4, not yet created
 
 ## Checks
 

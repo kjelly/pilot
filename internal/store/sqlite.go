@@ -16,7 +16,7 @@ type Store struct {
 // migration is added to migrateSteps. PRAGMA user_version is used to
 // record the installed version on disk so that startup is idempotent
 // and free of swallowed errors.
-const SchemaVersion = 15
+const SchemaVersion = 16
 
 const schema = `
 -- The base schema is the FINAL shape only. The agent-loop tables that
@@ -187,6 +187,84 @@ CREATE TABLE IF NOT EXISTS retired_hosts (
     reason                   TEXT NOT NULL DEFAULT '',
     retired_at               TEXT NOT NULL,
     final_inventory_revision TEXT NOT NULL DEFAULT ''
+);
+
+-- Outbound state webhook durable outbox (docs/tmp/now/spec.md §22). A
+-- row is one logical webhook's one terminal event; body_json/
+-- target_snapshot_json are cleared (compacted, §22.3) once the row
+-- reaches a terminal state (delivered/dead_letter/blocked_base_mismatch/
+-- orphaned_config), keeping body_sha256 and the rest for audit.
+CREATE TABLE IF NOT EXISTS webhook_outbox (
+    event_id             TEXT PRIMARY KEY,
+    workspace_key        TEXT NOT NULL,
+    source_id            TEXT NOT NULL,
+    webhook_name         TEXT NOT NULL,
+    sequence             INTEGER NOT NULL,
+
+    workflow_id          TEXT NOT NULL,
+    operation            TEXT NOT NULL,
+    result               TEXT NOT NULL,
+
+    projection           TEXT NOT NULL,
+    payload_mode         TEXT NOT NULL,
+
+    authoritative        INTEGER NOT NULL,
+    state_available      INTEGER NOT NULL,
+    source_complete      INTEGER NOT NULL,
+
+    base_snapshot_id     TEXT NOT NULL DEFAULT '',
+    target_snapshot_id   TEXT NOT NULL DEFAULT '',
+
+    body_json            TEXT NOT NULL,
+    body_sha256          TEXT NOT NULL,
+
+    -- Internal only. Needed to advance/rebuild cursor after diff-only delivery.
+    target_snapshot_json TEXT NOT NULL DEFAULT '',
+
+    state                TEXT NOT NULL,
+    attempt_count        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at      TEXT,
+
+    claim_owner          TEXT NOT NULL DEFAULT '',
+    claim_until          TEXT,
+
+    last_error_class     TEXT NOT NULL DEFAULT '',
+    last_error_text      TEXT NOT NULL DEFAULT '',
+
+    created_at           TEXT NOT NULL,
+    delivered_at         TEXT,
+
+    UNIQUE(workspace_key, source_id, webhook_name, sequence),
+    UNIQUE(workspace_key, source_id, webhook_name, workflow_id)
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_sequence ON webhook_outbox(workspace_key, source_id, webhook_name, sequence);
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_due ON webhook_outbox(workspace_key, state, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_claim ON webhook_outbox(workspace_key, state, claim_until);
+
+-- Cursor only keeps what the next diff needs: the last authoritative
+-- snapshot ACKed for (workspace_key, source_id, webhook_name, projection).
+CREATE TABLE IF NOT EXISTS webhook_state_cursor (
+    workspace_key   TEXT NOT NULL,
+    source_id       TEXT NOT NULL,
+    webhook_name    TEXT NOT NULL,
+    projection      TEXT NOT NULL,
+
+    snapshot_id     TEXT NOT NULL,
+    snapshot_json   TEXT NOT NULL,
+
+    last_event_id   TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+
+    PRIMARY KEY (workspace_key, source_id, webhook_name, projection)
+);
+
+-- One workspace binds to exactly one current source_id at a time
+-- (docs/tmp/now/spec.md §7.4.1) — a source_id/workspace rebind conflict
+-- must fail closed rather than mixing publication lineages.
+CREATE TABLE IF NOT EXISTS webhook_workspace_binding (
+    workspace_key     TEXT PRIMARY KEY,
+    current_source_id TEXT NOT NULL UNIQUE,
+    updated_at        TEXT NOT NULL
 );
 `
 
@@ -484,13 +562,86 @@ var migrateSteps = []migration{
 				final_inventory_revision TEXT NOT NULL DEFAULT ''
 			);`,
 	},
+	{
+		// Identical SQL to the webhook_outbox/webhook_state_cursor/
+		// webhook_workspace_binding tables in the base schema string above
+		// — kept byte-for-byte the same on purpose (see the host
+		// decommission migration step's comment above for why).
+		Description: "create outbound state webhook durable outbox, cursor, and workspace binding tables",
+		SQL: `CREATE TABLE IF NOT EXISTS webhook_outbox (
+				event_id             TEXT PRIMARY KEY,
+				workspace_key        TEXT NOT NULL,
+				source_id            TEXT NOT NULL,
+				webhook_name         TEXT NOT NULL,
+				sequence             INTEGER NOT NULL,
+
+				workflow_id          TEXT NOT NULL,
+				operation            TEXT NOT NULL,
+				result               TEXT NOT NULL,
+
+				projection           TEXT NOT NULL,
+				payload_mode         TEXT NOT NULL,
+
+				authoritative        INTEGER NOT NULL,
+				state_available      INTEGER NOT NULL,
+				source_complete      INTEGER NOT NULL,
+
+				base_snapshot_id     TEXT NOT NULL DEFAULT '',
+				target_snapshot_id   TEXT NOT NULL DEFAULT '',
+
+				body_json            TEXT NOT NULL,
+				body_sha256          TEXT NOT NULL,
+
+				target_snapshot_json TEXT NOT NULL DEFAULT '',
+
+				state                TEXT NOT NULL,
+				attempt_count        INTEGER NOT NULL DEFAULT 0,
+				next_attempt_at      TEXT,
+
+				claim_owner          TEXT NOT NULL DEFAULT '',
+				claim_until          TEXT,
+
+				last_error_class     TEXT NOT NULL DEFAULT '',
+				last_error_text      TEXT NOT NULL DEFAULT '',
+
+				created_at           TEXT NOT NULL,
+				delivered_at         TEXT,
+
+				UNIQUE(workspace_key, source_id, webhook_name, sequence),
+				UNIQUE(workspace_key, source_id, webhook_name, workflow_id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_webhook_outbox_sequence ON webhook_outbox(workspace_key, source_id, webhook_name, sequence);
+			CREATE INDEX IF NOT EXISTS idx_webhook_outbox_due ON webhook_outbox(workspace_key, state, next_attempt_at);
+			CREATE INDEX IF NOT EXISTS idx_webhook_outbox_claim ON webhook_outbox(workspace_key, state, claim_until);
+
+			CREATE TABLE IF NOT EXISTS webhook_state_cursor (
+				workspace_key   TEXT NOT NULL,
+				source_id       TEXT NOT NULL,
+				webhook_name    TEXT NOT NULL,
+				projection      TEXT NOT NULL,
+
+				snapshot_id     TEXT NOT NULL,
+				snapshot_json   TEXT NOT NULL,
+
+				last_event_id   TEXT NOT NULL,
+				updated_at      TEXT NOT NULL,
+
+				PRIMARY KEY (workspace_key, source_id, webhook_name, projection)
+			);
+
+			CREATE TABLE IF NOT EXISTS webhook_workspace_binding (
+				workspace_key     TEXT PRIMARY KEY,
+				current_source_id TEXT NOT NULL UNIQUE,
+				updated_at        TEXT NOT NULL
+			);`,
+	},
 }
 
 // Open opens (or creates) the SQLite database at path and applies any
 // pending migrations. Schema is tracked via PRAGMA user_version — no
 // errors are swallowed.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
