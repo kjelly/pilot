@@ -178,10 +178,11 @@ var specTagMap = []specTagMapping{
 	{spec: "freeipa-server.md", playbook: "freeipa-server-apply.yml",
 		noRowTags: "installer-shaped playbook: one ipa-server-install task satisfies most rows; feature tags (freeipa-install/-service/-audit) instead"},
 	{spec: "freeipa-server-replica.md", playbook: "freeipa-server-replica-apply.yml",
-		noRowTags: "two-stage promote playbook: stage tags R1 (client install) / R2 (replica promote); the spec's own §7 table documents the row→stage mapping",
+		noRowTags: "two-stage promote playbook: stage tags R1 (client install) / R2 (replica promote) / R3 (Day-2 DNS reconciliation); the spec's own §7 table documents the row→stage mapping",
 		stageTags: map[string]string{
 			"R1": "stage 1: hostname/hosts pin + ipa-client-install",
 			"R2": "stage 2: ipa-replica-install + service bring-up",
+			"R3": "stage 3: Day-2 DNS role reconciliation (spec §10.1) on an already-promoted replica",
 		}},
 	{spec: "keycloak.md", playbook: "keycloak-apply.yml", prefixes: []string{"keycloak"}},
 	{spec: "log-server.md", playbook: "log-server-apply.yml"},

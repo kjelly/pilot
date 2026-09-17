@@ -98,7 +98,7 @@ pilot vm-target test --name ipa-replica \
 | `ipa_server_fqdn` | **既有 primary** 的 FQDN，預設 `ipa1.{{ ipa_domain }}` | 否（有預設）|
 | `ipa_replica_fqdn` | **這台自己**的 FQDN，預設 `ipa2.{{ ipa_domain }}`（**不可**與 `ipa_server_fqdn` 或既有其它 replica 相同）| 否（有預設）|
 | `ipa_replica_setup_ca` | 這台是否同時擔任 CA replica，預設 `true`（HA 建議至少 2 台有 CA；但 CA **renewal master** 角色不會跟著轉移，見 §5）| 否（有預設）|
-| `ipa_setup_dns` | 是否啟用 FreeIPA 內建 DNS 服務（語意同 `freeipa-server.md`，**不自動跟 primary 同步**），預設 `false` | 否（有預設）|
+| `ipa_setup_dns` | 是否啟用 FreeIPA 內建 DNS 服務（語意同 `freeipa-server.md`）。預設 `true`，跟 primary 的預設值一致（docs/tmp/now/freeipa-client-ha-spec.md §10：replica 繼承 realm 的 effective DNS policy，避免只有一台 DNS provider 的 SPOF）；讀的是同一個 `freeipa_setup_dns` 來源變數，不是「即時讀 primary 的活體狀態」，兩邊各自覆寫仍會分歧 | 否（有預設）|
 | `ipa_dns_forwarders` | 當啟用 DNS 時，上游 DNS 轉發器 IP 列表，預設 `[]` | 否（有預設）|
 | `ipa_setup_ntp` | 是否由 FreeIPA 管理/啟用 NTP 同步（語意同 `freeipa-server.md`），預設 `false` | 否（有預設）|
 
@@ -111,7 +111,9 @@ pilot vm-target test --name ipa-replica \
 > C2 需 root → 用 `sudo`（target 需具備 passwordless sudo）；其餘查詢免 root。
 > C1–C13 的邏輯與 `freeipa-server.md` 的 C1–C13 完全對稱（同樣是「這台自己健康
 > 嗎」），差異只在 hostname/FQDN 換成這台自己的；C14–C15 是本檔獨有、只有
-> multi-master 拓樸才需要驗證的兩條。
+> multi-master 拓樸才需要驗證的兩條；C16 驗證 DNS role 是否依 `ipa_setup_dns`
+> 政策生效（docs/tmp/now/freeipa-client-ha-spec.md §10 的「replica DNS role
+> parity」）。
 
 | ID  | Category      | Check                                                            | Expected                       | Command |
 |-----|---------------|--------------------------------------------------------------------|---------------------------------|---------|
@@ -130,12 +132,17 @@ pilot vm-target test --name ipa-replica \
 | C13 | sudo          | sudo 規則 LDAP 子樹存在（跟 primary 複寫過來，不是本機獨立建的）    | ~ou=sudoers                     | ldapsearch -x -H ldap://localhost -b "ou=sudoers,dc=ipa,dc=pilot,dc=internal" -s base dn |
 | C14 | replication   | 這台看得到 **primary** 在 `cn=masters` 拓樸清單裡（複寫已同步 primary 的存在）| ~cn=ipa1.ipa.pilot.internal     | sudo ldapsearch -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=masters,cn=ipa,cn=etc,dc=ipa,dc=pilot,dc=internal" -s sub dn |
 | C15 | replication   | 這台自己也出現在 `cn=masters` 拓樸清單裡（不是單純 enroll 成 client 就停在那，真的升級成 replica 了）| ~cn=ipa2.ipa.pilot.internal     | sudo ldapsearch -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=masters,cn=ipa,cn=etc,dc=ipa,dc=pilot,dc=internal" -s sub dn |
+| C16 | dns           | DNS role 依 `ipa_setup_dns` 政策生效（預設 true，跟 primary 一致；`named` 對應啟動）| 0                               | systemctl is-active named.service |
 
 > **C4–C10** 都含 `|` pipeline，parser 會把後續 column 自動接回 Command（同
 > `freeipa-server.md` 的說明），並用 `":<port> "`（尾隨空白）避免 `:80` 誤命中
 > `:8080`。
 > **C2 用正邏輯**（原因與寫法完全同 `freeipa-server.md` 的 C2 註記——反邏輯 grep
 > 在 ansible ad-hoc 下 expected 永遠對不上）。
+> **C16 用數字 Expected `0`（rc-based），不用 `~active`**：`systemctl is-active`
+> 的 stdout 在服務停用時印 `inactive`，`~active` 這種 contains 比對會被
+> `inactive` 的子字串誤判成通過——本檔 lint 曾抓到這個真的會誤判的寫法（見
+> commit history），改成比對 rc（`is-active` 只有真的 active 才 exit 0）。
 > **C3/C11–C13/C14/C15 用 `~`（contains）**，不用 `^…$` regex（原因同上，ad-hoc
 > 輸出帶 wrapper 前綴，錨點對不上）。
 > **C14/C15 是本檔的核心驗證目的**：兩條都查同一個 `cn=masters,cn=ipa,cn=etc,<suffix>`

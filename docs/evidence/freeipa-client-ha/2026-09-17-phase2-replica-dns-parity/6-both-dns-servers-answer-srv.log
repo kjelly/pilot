@@ -1,0 +1,12 @@
+=== query ipa1 (primary) ===
+0 100 88 ipa1.ipa.pilot.internal.
+0 100 88 ipa2.ipa.pilot.internal.
+=== query ipa2 (replica, just reconciled via Day-2 DNS install) ===
+0 100 88 ipa2.ipa.pilot.internal.
+0 100 88 ipa1.ipa.pilot.internal.
+
+Command: dig @<server-ip> _kerberos._udp.ipa.pilot.internal SRV +short, run from ipa-ha-client
+against both 192.168.122.8 (ipa1) and 192.168.122.7 (ipa2). Both authorities return the same
+SRV RRset (both KDCs), confirming Phase 2's exit gate ("integrated DNS HA topology 兩台均可
+authoritative answer") after the Day-2 reconciliation installed DNS on ipa2 (which had never had
+it during this test's earlier freeipa_setup_dns=false step).

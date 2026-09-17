@@ -42,11 +42,17 @@
 #     NOT move it, ever — that is a deliberate, occasional operator action,
 #     not something to automate silently.
 #   * DNS / NTP consistency across nodes — `ipa_setup_dns`/`ipa_setup_ntp`
-#     here mirror the SAME two knobs on the primary (freeipa-server-apply.yml)
-#     but are NOT read from the primary automatically. If the primary runs
-#     built-in DNS and this replica doesn't (or vice versa), SRV-based
-#     discovery breaks silently for clients that rely on it. Keeping them in
-#     sync across every node in the topology is the operator's job.
+#     here read the SAME source variables as the primary
+#     (freeipa-server-apply.yml) and now DEFAULT to the same value too
+#     (both default(true) as of docs/tmp/now/freeipa-client-ha-spec.md §10 —
+#     an unset realm gets DNS on every node, not just the primary), but this
+#     host does NOT probe the primary's LIVE state at apply time. An
+#     operator who explicitly sets a DIFFERENT value per host (rather than
+#     once at the realm/group_vars level) can still create the same drift
+#     as before; keeping an intentional per-host override in sync is the
+#     operator's job. See the Day-2 DNS reconciliation task below for the
+#     "desired=true but this replica's DNS role is missing" case, which IS
+#     handled automatically now.
 #   * Client-side failover — SSSD on enrolled clients needs to know about
 #     every server (either via DNS SRV, if `ipa_setup_dns` is on everywhere,
 #     or an explicit multi-value `ipa_server` list in sssd.conf). Adding a
@@ -113,11 +119,30 @@
 
     # Replica-side options. ipa_setup_dns/ipa_setup_ntp reuse the EXACT same
     # names as freeipa-server-apply.yml (same meaning: "does THIS node run
-    # it"); they do NOT auto-inherit the primary's setting — see header note.
+    # it"). ipa_setup_dns's DEFAULT now mirrors the primary's own default
+    # (both default(true)) — docs/tmp/now/freeipa-client-ha-spec.md §10:
+    # "replica 繼承 realm 的 effective DNS policy". Before this change the
+    # replica defaulted to false while the primary defaulted to true, so an
+    # operator who only set freeipa_setup_dns=false at the realm level (to
+    # opt OUT everywhere) got the right behavior, but an operator who took
+    # every default got a single DNS provider (the primary) — a SPOF the
+    # whole point of adding a replica is supposed to remove. An explicit
+    # freeipa_setup_dns (group_vars or -e) still overrides this for BOTH
+    # roles identically, since they read the exact same source variable.
     ipa_replica_setup_ca: "{{ freeipa_replica_setup_ca | default(true) }}"
-    ipa_setup_dns: "{{ freeipa_setup_dns | default(false) }}"
+    ipa_setup_dns: "{{ freeipa_setup_dns | default(true) }}"
     ipa_dns_forwarders: "{{ freeipa_dns_forwarders | default([]) }}"
     ipa_setup_ntp: "{{ freeipa_setup_ntp | default(false) }}"
+    # Shared forwarder-argv computation — used identically by BOTH the
+    # fresh-promotion `--setup-dns`/`--forwarder=`/`--no-forwarders` args
+    # below AND the standalone `ipa-dns-install` Day-2 reconciliation task
+    # (spec §10.1), so the two paths can never drift into different
+    # forwarder policies for the same ipa_dns_forwarders input.
+    ipa_dns_forwarder_argv: >-
+      {{
+        ['--no-forwarders'] if (ipa_dns_forwarders | length == 0)
+        else (ipa_dns_forwarders | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
+      }}
 
     # Native install — same package as the primary; ipa-server already
     # depends on the client bits needed for step 1 (ipa-client-install).
@@ -312,10 +337,7 @@
         ipa_replica_install_ca_args: "{{ ['--setup-ca'] if ipa_replica_setup_ca | bool else [] }}"
         ipa_replica_install_dns_args: >-
           {{
-            ['--setup-dns'] + (
-              ['--no-forwarders'] if (ipa_dns_forwarders | length == 0)
-              else (ipa_dns_forwarders | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
-            )
+            (['--setup-dns'] + ipa_dns_forwarder_argv)
             if ipa_setup_dns | bool
             else []
           }}
@@ -325,7 +347,7 @@
       register: ipa_replica_install
       no_log: true
       when: not ansible_check_mode
-      tags: [freeipa-replica, R2]
+      tags: [freeipa-replica, R2, C16]
 
     - name: "FreeIPA replica — enable + start ipa.service (survives reboot)"
       ansible.builtin.systemd:
@@ -413,3 +435,71 @@
               < 5 min across the WHOLE realm); a half-finished prior enroll/
               promote (run `ipa-server-install --uninstall -U` then rerun this
               playbook from scratch).
+
+    # Day-2 DNS role reconciliation (spec §10.1): a replica promoted in an
+    # earlier release (or with an explicit ipa_setup_dns=false at the time)
+    # does NOT get DNS installed retroactively just because ipa_setup_dns's
+    # default flipped to true — `ipa-replica-install`'s `creates:` gate above
+    # makes the WHOLE promotion task a no-op on an already-promoted host, so
+    # `--setup-dns` never gets a second chance to run. This block runs
+    # unconditionally (fresh or existing replica) and is idempotent by
+    # construction: a fresh replica that already got `--setup-dns` during
+    # promotion already has `named` active, so the "install" task below
+    # naturally no-ops too — no separate fresh-vs-existing branching needed.
+    #
+    # Detection deliberately avoids the `ipa` CLI (`ipa dnsserver-show`/
+    # `ipa server-role-find`) — both need a Kerberos ticket, and root has
+    # none by default on a freshly-become'd task (confirmed live: `ipa
+    # dnsserver-show` fails with "did not receive Kerberos credentials").
+    # `systemctl is-active named.service` is a local, ticket-free, and
+    # accurate signal: `ipa-server-dns`/`named` are only ever installed when
+    # DNS was actually configured (see ipa_packages above), so an absent or
+    # inactive unit means DNS was never set up here.
+    - name: "FreeIPA replica — Day-2 DNS: check current DNS role (ticket-free local probe)"
+      ansible.builtin.command:
+        argv: [systemctl, is-active, named.service]
+      register: ipa_replica_named_status
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [freeipa-replica, R3, C16]
+
+    - name: "FreeIPA replica — Day-2 DNS: install ipa-server-dns package (desired=true, role currently absent)"
+      ansible.builtin.dnf:
+        name: ipa-server-dns
+        state: present
+      when:
+        - not ansible_check_mode
+        - ipa_setup_dns | bool
+        - ipa_replica_named_status.rc != 0
+      tags: [freeipa-replica, R3, C16]
+
+    - name: "FreeIPA replica — Day-2 DNS: ipa-dns-install (desired=true, role currently absent)"
+      ansible.builtin.command:
+        argv: "{{ ['ipa-dns-install', '-U'] + ipa_dns_forwarder_argv }}"
+      register: ipa_replica_dns_install
+      changed_when: true
+      when:
+        - not ansible_check_mode
+        - ipa_setup_dns | bool
+        - ipa_replica_named_status.rc != 0
+      tags: [freeipa-replica, R3, C16]
+
+    # Fail-closed, not destructive: desired=false but DNS is actually running
+    # here is drift the operator must resolve explicitly (spec §10.1 forbids
+    # an automatic `ipa-dns-install --uninstall`-equivalent — removing a live
+    # DNS provider without a deliberate decommission step could silently take
+    # down every client still resolving through this node).
+    - name: "FreeIPA replica — Day-2 DNS: warn on drift (desired=false but DNS role is active)"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: ipa_setup_dns=false for {{ ipa_replica_fqdn }}, but named.service
+          is ACTIVE (this node is still serving DNS). Pilot does NOT
+          automatically remove an existing DNS role — decide explicitly
+          (decommission this node's DNS role, or set ipa_setup_dns=true here
+          to match reality) rather than leaving this drift unresolved.
+      when:
+        - not ansible_check_mode
+        - not (ipa_setup_dns | bool)
+        - (ipa_replica_named_status.rc | default(1)) == 0
+      tags: [freeipa-replica, R3, C16]
