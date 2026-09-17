@@ -1,0 +1,23 @@
+=== fresh kinit (must FAIL) ===
+rc=1
+=== never-cached identity lookup (must FAIL) ===
+rc=1
+=== already-cached identity still answers (SSSD offline resilience, not a bug) ===
+uid=1421800004(drilluser) gid=1421800004(drilluser) groups=1421800004(drilluser)
+Matching Defaults entries for drilluser on ipa-ha-client:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User drilluser may run the following commands on ipa-ha-client:
+    (root) NOPASSWD: ALL
+=== sssctl domain-status (expect Offline) ===
+Online status: Offline
+
+Active servers:
+IPA: ipa2.ipa.pilot.internal
+
+Discovered IPA servers:
+- ipa1.ipa.pilot.internal
+- ipa2.ipa.pilot.internal
+
+kinit: Cannot contact any KDC for realm 'IPA.PILOT.INTERNAL' while getting initial credentials
+id: ‘neverseenuser@ipa.pilot.internal’: no such user

@@ -1,0 +1,24 @@
+=== id drilluser ===
+uid=1421800004(drilluser) gid=1421800004(drilluser) groups=1421800004(drilluser)
+=== sudo -l -U drilluser ===
+Matching Defaults entries for drilluser on ipa-ha-client:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User drilluser may run the following commands on ipa-ha-client:
+    (root) NOPASSWD: ALL
+=== kinit drilluser ===
+Password for drilluser@IPA.PILOT.INTERNAL: 
+KINIT_OK
+=== dig via replica ===
+0 100 88 ipa1.ipa.pilot.internal.
+0 100 88 ipa2.ipa.pilot.internal.
+=== sssctl domain-status ===
+Online status: Online
+
+Active servers:
+IPA: ipa2.ipa.pilot.internal
+
+Discovered IPA servers:
+- ipa1.ipa.pilot.internal
+- ipa2.ipa.pilot.internal
+

@@ -1,0 +1,269 @@
+▶ ansible-playbook playbooks/apply/freeipa-server-apply.yml -i /tmp/pilot-inv-2619528382.yaml -e target_group=all -e ipa_server_ip=192.168.122.8 -e @/tmp/claude-1000/-home-kjelly-github-pilot/032b4ea6-1459-4896-b2c2-1b50071fd7c3/scratchpad/ha-test-vault.yaml
+📦 starting sandbox container (pilot-cli:latest)...
+▶ docker exec pilot-sandbox-msi-company-1789656026-371933 ansible-playbook /tmp/pilot-playbook-dir/freeipa-server-apply.yml -i /tmp/pilot-inventory.yaml -e target_group=all -e ipa_server_ip=192.168.122.8 -e @/tmp/pilot-extra-vars-8.yaml
+
+PLAY [FreeIPA server apply] ****************************************************
+
+TASK [Gathering Facts] *********************************************************
+[0;32mok: [ipa-primary][0m
+
+TASK [Gate: required vars present (fail early, before any mutation)] ***********
+[0;32mok: [ipa-primary] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: this playbook installs FreeIPA NATIVELY — require EL9 host] ********
+[1;35m[WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-server-apply.yml:176:19[0m
+[0;35m[0m
+[0;35m174           - ansible_os_family == 'RedHat'[0m
+[0;35m175           - (ansible_distribution_major_version | int) >= 9[0m
+[0;35m176         fail_msg: >-[0m
+[0;35m                      ^ column 19[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-server-apply.yml:174:13[0m
+[0;35m[0m
+[0;35m172       ansible.builtin.assert:[0m
+[0;35m173         that:[0m
+[0;35m174           - ansible_os_family == 'RedHat'[0m
+[0;35m                ^ column 13[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-server-apply.yml:175:13[0m
+[0;35m[0m
+[0;35m173         that:[0m
+[0;35m174           - ansible_os_family == 'RedHat'[0m
+[0;35m175           - (ansible_distribution_major_version | int) >= 9[0m
+[0;35m                ^ column 13[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-primary] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+[0;32mok: [ipa-primary] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+[0;32mok: [ipa-primary] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: prod requires recent staging attestation] **************************
+[0;36mskipping: [ipa-primary][0m
+
+TASK [Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)] *****
+[0;32mok: [ipa-primary][0m
+
+TASK [Detect prior configuration (pre_tasks copy, for the port-53 gate below)] ***
+[0;32mok: [ipa-primary][0m
+
+TASK [Normalize DNS forwarders to a list] **************************************
+[0;32mok: [ipa-primary][0m
+
+TASK [Gate: if ipa_setup_dns=true, ensure port 53 is not in use by other services] ***
+[0;32mok: [ipa-primary][0m
+
+TASK [Warn if no active time sync (FreeIPA runs with --no-ntp; ntp role must cover this)] ***
+[0;36mskipping: [ipa-primary][0m
+
+TASK [FreeIPA — set system hostname to the FQDN] *******************************
+[0;33mchanged: [ipa-primary][0m
+
+TASK [FreeIPA — stop cloud-init from wiping our /etc/hosts pin on next boot] ***
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/cloud-init-etc-hosts-guard.yml for ipa-primary[0m
+
+TASK [Cloud-init /etc/hosts guard — detect cloud-init] *************************
+[0;32mok: [ipa-primary][0m
+
+TASK [Cloud-init /etc/hosts guard — disable manage_etc_hosts (stop future boots from wiping the FreeIPA /etc/hosts pin)] ***
+[0;33mchanged: [ipa-primary][0m
+
+TASK [Cloud-init /etc/hosts guard — no cloud-init present, guard is a no-op] ***
+[0;36mskipping: [ipa-primary][0m
+
+TASK [FreeIPA — pin server FQDN to its LAN IP (FQDN canonical) in /etc/hosts] ***
+[0;33mchanged: [ipa-primary][0m
+
+TASK [FreeIPA — install server packages (idm:DL1 module stream on EL9)] ********
+[0;33mchanged: [ipa-primary][0m
+
+TASK [FreeIPA — detect prior configuration (/var/lib/ipa/.pilot-freeipa-installed)] ***
+[0;32mok: [ipa-primary][0m
+
+TASK [FreeIPA — stop stale IPA/Dogtag services before install retry] ***********
+[0;32mok: [ipa-primary] => (item=pki-tomcatd@pki-tomcat.service)[0m
+[0;32mok: [ipa-primary] => (item=ipa-custodia.service)[0m
+[0;32mok: [ipa-primary] => (item=krb5kdc.service)[0m
+[0;32mok: [ipa-primary] => (item=ipa.service)[0m
+[0;32mok: [ipa-primary] => (item=dirsrv@IPA-PILOT-INTERNAL.service)[0m
+
+TASK [FreeIPA — reset failed state for stale IPA/Dogtag services] **************
+[0;32mok: [ipa-primary] => (item=pki-tomcatd@pki-tomcat.service)[0m
+[0;32mok: [ipa-primary] => (item=ipa-custodia.service)[0m
+[0;32mok: [ipa-primary] => (item=krb5kdc.service)[0m
+[0;32mok: [ipa-primary] => (item=ipa.service)[0m
+[0;32mok: [ipa-primary] => (item=dirsrv@IPA-PILOT-INTERNAL.service)[0m
+
+TASK [FreeIPA — remove dirsrv systemd registration for a stale instance before retry] ***
+[0;32mok: [ipa-primary] => (item=/etc/systemd/system/dirsrv@IPA-PILOT-INTERNAL.service.d)[0m
+[0;32mok: [ipa-primary] => (item=/etc/systemd/system/multi-user.target.wants/dirsrv@IPA-PILOT-INTERNAL.service)[0m
+
+TASK [FreeIPA — reload systemd after removing stale dirsrv unit registration] ***
+[0;36mskipping: [ipa-primary][0m
+
+TASK [FreeIPA — list stale certmonger tracking requests before install retry] ***
+[0;32mok: [ipa-primary][0m
+
+TASK [FreeIPA — stop stale certmonger tracking requests before install retry] ***
+[0;36mskipping: [ipa-primary][0m
+
+TASK [FreeIPA — remove residual DS/PKI state from a prior failed/partial install before retry] ***
+[0;32mok: [ipa-primary] => (item=/etc/ipa/default.conf)[0m
+[0;32mok: [ipa-primary] => (item=/etc/ipa/default.conf.ipabkp)[0m
+[0;32mok: [ipa-primary] => (item=/etc/ipa/ca.crt)[0m
+[0;33mchanged: [ipa-primary] => (item=/etc/ipa/custodia)[0m
+[0;32mok: [ipa-primary] => (item=/var/lib/ipa/ra-agent.key)[0m
+[0;32mok: [ipa-primary] => (item=/var/lib/ipa/ra-agent.pem)[0m
+[0;33mchanged: [ipa-primary] => (item=/var/lib/ipa/pki-ca)[0m
+[0;33mchanged: [ipa-primary] => (item=/var/lib/ipa-client/pki)[0m
+[0;33mchanged: [ipa-primary] => (item=/var/lib/ipa-client/sysrestore)[0m
+[0;33mchanged: [ipa-primary] => (item=/var/lib/ipa/sysrestore)[0m
+[0;33mchanged: [ipa-primary] => (item=/var/lib/ipa/sysupgrade)[0m
+[0;32mok: [ipa-primary] => (item=/etc/dirsrv/slapd-IPA-PILOT-INTERNAL)[0m
+[0;32mok: [ipa-primary] => (item=/var/lib/dirsrv/slapd-IPA-PILOT-INTERNAL)[0m
+[0;32mok: [ipa-primary] => (item=/var/log/dirsrv/slapd-IPA-PILOT-INTERNAL)[0m
+[0;32mok: [ipa-primary] => (item=/dev/shm/slapd-IPA-PILOT-INTERNAL)[0m
+[0;32mok: [ipa-primary] => (item=/var/lib/pki/pki-tomcat)[0m
+[0;32mok: [ipa-primary] => (item=/etc/pki/pki-tomcat)[0m
+[0;32mok: [ipa-primary] => (item=/etc/sysconfig/pki/tomcat/pki-tomcat)[0m
+[0;32mok: [ipa-primary] => (item=/var/log/pki/pki-tomcat)[0m
+[0;32mok: [ipa-primary] => (item=/root/.dogtag)[0m
+[0;32mok: [ipa-primary] => (item=/root/ca-agent.p12)[0m
+[0;32mok: [ipa-primary] => (item=/root/cacert.p12)[0m
+
+TASK [FreeIPA — ensure installer state directories exist] **********************
+[0;32mok: [ipa-primary] => (item={'path': '/etc/ipa', 'mode': '0755'})[0m
+[0;33mchanged: [ipa-primary] => (item={'path': '/etc/ipa/custodia', 'mode': '0755'})[0m
+[0;32mok: [ipa-primary] => (item={'path': '/var/lib/ipa', 'mode': '0755'})[0m
+[0;32mok: [ipa-primary] => (item={'path': '/var/lib/ipa-client', 'mode': '0755'})[0m
+[0;33mchanged: [ipa-primary] => (item={'path': '/var/lib/ipa-client/pki', 'mode': '0755'})[0m
+[0;33mchanged: [ipa-primary] => (item={'path': '/var/lib/ipa-client/sysrestore', 'mode': '0700'})[0m
+[0;33mchanged: [ipa-primary] => (item={'path': '/var/lib/ipa/pki-ca', 'mode': '0755'})[0m
+[0;33mchanged: [ipa-primary] => (item={'path': '/var/lib/ipa/pki-ca/publish', 'mode': '0755'})[0m
+[0;33mchanged: [ipa-primary] => (item={'path': '/var/lib/ipa/sysrestore', 'mode': '0700'})[0m
+[0;33mchanged: [ipa-primary] => (item={'path': '/var/lib/ipa/sysupgrade', 'mode': '0700'})[0m
+[0;32mok: [ipa-primary] => (item={'path': '/var/lib/ipa/gssproxy', 'mode': '0700'})[0m
+[0;32mok: [ipa-primary] => (item={'path': '/etc/systemd/system/pki-tomcatd.target.wants', 'mode': '0755'})[0m
+
+TASK [FreeIPA — run ipa-server-install (native; first run is 8–12 min)] ********
+[0;33mchanged: [ipa-primary][0m
+
+TASK [FreeIPA — enable + start ipa.service (survives reboot)] ******************
+[0;32mok: [ipa-primary][0m
+
+TASK [FreeIPA — snapshot packaged IPA HTTPD configuration] *********************
+[0;33mchanged: [ipa-primary][0m
+
+TASK [FreeIPA — bound WSGI socket timeout (avoid permanently stuck workers)] ***
+[0;33mchanged: [ipa-primary][0m
+
+TASK [FreeIPA — wait until all IPA services RUNNING (spec C2)] *****************
+[0;32mok: [ipa-primary][0m
+
+TASK [FreeIPA — show last ipactl status when still not healthy] ****************
+[0;36mskipping: [ipa-primary][0m
+
+TASK [FreeIPA — fail loudly if services never came up (spec C2)] ***************
+[0;32mok: [ipa-primary] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA — final check: LDAP rootDSE advertises realm suffix (spec C11)] ***
+[0;32mok: [ipa-primary][0m
+
+TASK [FreeIPA — mark installation complete] ************************************
+[0;33mchanged: [ipa-primary][0m
+
+TASK [Kinit admin (for dnsconfig-mod)] *****************************************
+[0;32mok: [ipa-primary][0m
+
+TASK [FreeIPA DNS — set global forwarders] *************************************
+[0;33mchanged: [ipa-primary][0m
+
+TASK [FreeIPA DNS — open allow-recursion/allow-query-cache to any client (forward arbitrary client requests upstream)] ***
+[0;33mchanged: [ipa-primary] => (item=allow-recursion)[0m
+[0;33mchanged: [ipa-primary] => (item=allow-query-cache)[0m
+
+TASK [FreeIPA — 389-ds audit log: read current logging config] *****************
+[0;32mok: [ipa-primary][0m
+
+TASK [FreeIPA — 389-ds audit log: turn on write + failed-write auditing (dynamic, no restart)] ***
+[0;33mchanged: [ipa-primary][0m
+
+TASK [FreeIPA — 389-ds audit log: write dummy description to trigger audit log (spec C16)] ***
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-server-apply.yml:732:34[0m
+[0;35m[0m
+[0;35m730[0m
+[0;35m731         - name: "FreeIPA — 389-ds audit log: write dummy description to trigger audit log (spec C16)"[0m
+[0;35m732           ansible.builtin.shell: |[0m
+[0;35m                                     ^ column 34[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;33mchanged: [ipa-primary][0m
+
+RUNNING HANDLER [Validate httpd configuration after FreeIPA WSGI timeout change] ***
+[0;32mok: [ipa-primary][0m
+
+RUNNING HANDLER [Restart httpd after FreeIPA WSGI timeout change] **************
+[0;33mchanged: [ipa-primary][0m
+
+RUNNING HANDLER [Validate named.conf before reload for open recursion] *********
+[0;32mok: [ipa-primary][0m
+
+RUNNING HANDLER [Reload named for open recursion] ******************************
+[0;33mchanged: [ipa-primary][0m
+
+PLAY RECAP *********************************************************************
+[0;33mipa-primary[0m                : [0;32mok=40  [0m [0;33mchanged=16  [0m unreachable=0    failed=0    [0;36mskipped=6   [0m rescued=0    ignored=0   
+
+📦 stopping sandbox container...
+sandbox: 279 file(s) changed in pilot-sandbox-msi-company-1789656026-371933
+  /root
+  /root/.ansible
+  /root/.ansible/cp
+  /root/.ansible/cp/pilot-root@192.168.122.8:22
+  /root/.ansible/pilot-factcache
+  /root/.ansible/pilot-factcache/s1_ipa-primary
+  /root/.ssh
+  /root/.ssh/known_hosts
+  /tmp
+  /tmp/pilot-extra-vars-8.yaml
+  /tmp/pilot-inventory.yaml
+  /tmp/pilot-playbook-dir
+  /tmp/pilot-playbook-dir/agent-controller-apply.yml
+  /tmp/pilot-playbook-dir/alertmanager-apply.yml
+  /tmp/pilot-playbook-dir/audit-log-forwarding-apply.yml
+  /tmp/pilot-playbook-dir/core-infra-provider-apply.yml
+  /tmp/pilot-playbook-dir/dashboard-apply.yml
+  /tmp/pilot-playbook-dir/dcgm-exporter-apply.yml
+  /tmp/pilot-playbook-dir/detection-engine-apply.yml
+  /tmp/pilot-playbook-dir/docker-apply.yml
+  ... (259 more)
+  transcript: /var/lib/libvirt/images/pilot/ipa-primary/runs/20260917T144026Z-freeipa-server-apply.log

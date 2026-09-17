@@ -1,0 +1,83 @@
+  ⚠️  ansible-lint found issues in playbooks/test/fixtures/freeipa-client-fixtures.yml:
+    WARNING  Listing 5 violation(s) that are fatal
+    Read documentation for instructions on how to ignore specific rule violations.
+
+    # Rule Violation Summary
+
+      4 name profile:moderate tags:idiom
+      1 risky-shell-pipe profile:moderate tags:command-shell
+
+    Failed: 5 failure(s), 0 warning(s) in 1 files processed of 1 encountered. Last profile that met the validation criteria was 'basic'. Rating: 1/5 star
+    risky-shell-pipe: Shells that use pipes should set the pipefail option.
+    playbooks/test/fixtures/freeipa-client-fixtures.yml:71 Task/Handler: Fixtures — kinit admin (ticket for the ipa CLI below)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/test/fixtures/freeipa-client-fixtures.yml:79:13 Task/Handler: Fixtures — ensure IPA user {{ ipa_fixture_user }} exists
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/test/fixtures/freeipa-client-fixtures.yml:94:13 Task/Handler: Fixtures — ensure sudo rule {{ ipa_fixture_sudorule }} exists (all hosts, all cmds)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/test/fixtures/freeipa-client-fixtures.yml:114:13 Task/Handler: Fixtures — attach {{ ipa_fixture_user }} to {{ ipa_fixture_sudorule }}
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/test/fixtures/freeipa-client-fixtures.yml:133:13 Task/Handler: Fixtures — set {{ ipa_fixture_sudorule }} to not require auth
+
+
+▶ ansible-playbook playbooks/test/fixtures/freeipa-client-fixtures.yml -i /tmp/pilot-inv-1387495046.yaml -l ipa-primary -e fixtures_target_group=all -e @/tmp/claude-1000/-home-kjelly-github-pilot/032b4ea6-1459-4896-b2c2-1b50071fd7c3/scratchpad/ha-test-vault.yaml
+📦 starting sandbox container (pilot-cli:latest)...
+▶ docker exec pilot-sandbox-msi-company-1789657005-2fc1f1 ansible-playbook /tmp/pilot-playbook-dir/freeipa-client-fixtures.yml -i /tmp/pilot-inventory.yaml -l ipa-primary -e fixtures_target_group=all -e @/tmp/pilot-extra-vars-8.yaml
+
+PLAY [FreeIPA client verification fixtures (run on the FreeIPA server)] ********
+
+TASK [Gate: admin password present (fail before touching the directory)] *******
+[0;32mok: [ipa-primary] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Fixtures — kinit admin (ticket for the ipa CLI below)] *******************
+[0;32mok: [ipa-primary][0m
+
+TASK [Fixtures — ensure IPA user pilotuser exists] *****************************
+[0;33mchanged: [ipa-primary][0m
+
+TASK [Fixtures — ensure sudo rule pilot-all exists (all hosts, all cmds)] ******
+[0;33mchanged: [ipa-primary][0m
+
+TASK [Fixtures — attach pilotuser to pilot-all] ********************************
+[0;33mchanged: [ipa-primary][0m
+
+TASK [Fixtures — set pilot-all to not require auth] ****************************
+[0;33mchanged: [ipa-primary][0m
+
+TASK [Fixtures — release the Kerberos ticket] **********************************
+[0;32mok: [ipa-primary][0m
+
+PLAY RECAP *********************************************************************
+[0;33mipa-primary[0m                : [0;32mok=7   [0m [0;33mchanged=4   [0m unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+
+📦 stopping sandbox container...
+sandbox: 212 file(s) changed in pilot-sandbox-msi-company-1789657005-2fc1f1
+  /root
+  /root/.ansible
+  /root/.ansible/cp
+  /root/.ansible/cp/pilot-root@192.168.122.8:22
+  /root/.ansible/pilot-factcache
+  /root/.ansible/pilot-factcache/s1_ipa-primary
+  /root/.ssh
+  /root/.ssh/known_hosts
+  /tmp
+  /tmp/pilot-extra-vars-8.yaml
+  /tmp/pilot-inventory.yaml
+  /tmp/pilot-playbook-dir
+  /tmp/pilot-playbook-dir/freeipa-audit-demo.yml
+  /tmp/pilot-playbook-dir/freeipa-audit-sim.yml
+  /tmp/pilot-playbook-dir/freeipa-audit-user-setup.yml
+  /tmp/pilot-playbook-dir/freeipa-client-fixtures.yml
+  /tmp/pilot-playbook-dir/freeipa-hostauthz-demo.yml
+  /tmp/pilot-playbook-dir/freeipa-hostauthz-sim.yml
+  /tmp/pilot-playbook-dir/freeipa-hostauthz-user-setup.yml
+  /tmp/pilot-playbook-dir/freeipa-identity-canonical-fixtures.yml
+  ... (192 more)
+  transcript: /var/lib/libvirt/images/pilot/ipa-primary/runs/20260917T145645Z-freeipa-client-fixtures.log

@@ -1,0 +1,11 @@
+Password for admin@IPA.PILOT.INTERNAL: 
+KINIT_OK_AUTO_RECOVERED
+Online status: Offline
+
+Active servers:
+IPA: ipa2.ipa.pilot.internal
+
+Discovered IPA servers:
+- ipa1.ipa.pilot.internal
+- ipa2.ipa.pilot.internal
+

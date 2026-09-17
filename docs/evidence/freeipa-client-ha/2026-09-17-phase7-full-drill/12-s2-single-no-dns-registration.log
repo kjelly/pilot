@@ -1,0 +1,1201 @@
+  ⚠️  ansible-lint found issues in playbooks/apply/freeipa-client-apply.yml:
+    WARNING  Listing 28 violation(s) that are fatal
+    Read documentation for instructions on how to ignore specific rule violations.
+
+    # Rule Violation Summary
+
+      2 command-instead-of-module profile:basic tags:command-shell,idiom
+      3 yaml profile:basic tags:formatting,yaml
+     23 name profile:basic tags:idiom
+
+    Failed: 28 failure(s), 0 warning(s) in 12 files processed of 12 encountered. Last profile that met the validation criteria was 'min'.
+    command-instead-of-module: systemctl used in place of systemd module
+    playbooks/apply/freeipa-client-apply.yml:256 Task/Handler: Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/freeipa-client-apply.yml:317:13 Task/Handler: FreeIPA client — pin this host {{ ipa_client_fqdn }} to its own IP in /etc/hosts (FQDN canonical)
+
+    command-instead-of-module: apt-get used in place of apt-get module
+    playbooks/apply/tasks/apt-cache-refresh.yml:32 Task/Handler: APT cache refresh — global apt-get update probe ({{ pilot_apt_refresh_reason | default('unspecified') }})
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:36:9 Task/Handler: APT package install ({{ pilot_apt_component | default('?') }}) — assert interface
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:58:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — set effective policy facts
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:64:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — read installed-package facts
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:69:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — compute missing packages
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:73:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — SUCCESS(already_present)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:80:9 Task/Handler: APT package install ({{ pilot_apt_component }}) — resolve a candidate, refreshing only if required
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:83:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — apt-cache policy for missing packages (one per package: apt-cache silently OMITS an entirely-unknown package from combined output instead of printing 'Candidate: (none)', which would false-positive a joined multi-package query)
+
+    yaml[line-length]: Line too long (291 > 160 characters)
+    playbooks/apply/tasks/apt-package-install.yml:83
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:93:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — determine candidate availability
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:102:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — FATAL(apt_cache_insufficient_offline)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:113:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — refresh (policy={{ _pilot_apt_policy }})
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:116:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — global refresh
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:121:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — re-check candidate after global refresh (one apt-cache policy per package; see cache-first check above for why)
+
+    yaml[line-length]: Line too long (179 > 160 characters)
+    playbooks/apply/tasks/apt-package-install.yml:121
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:131:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — determine post-global-refresh candidate
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:140:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — scoped refresh (tolerant only, required sources)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:145:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): scoped refresh disallowed
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:155:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — scoped refresh against required sources only
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:158:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — re-check candidate after scoped refresh (one apt-cache policy per package; see cache-first check above for why)
+
+    yaml[line-length]: Line too long (183 > 160 characters)
+    playbooks/apply/tasks/apt-package-install.yml:158
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:169:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — determine post-scoped-refresh candidate
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:179:21 Task/Handler: APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): scoped refresh did not recover
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:187:17 Task/Handler: APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): no candidate, refresh exhausted
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:197:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — install (single sanctioned mutation point, no ignore_errors)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/tasks/apt-package-install.yml:210:13 Task/Handler: APT package install ({{ pilot_apt_component }}) — SUCCESS
+
+
+▶ ansible-playbook playbooks/apply/freeipa-client-apply.yml -i /tmp/pilot-inv-3792247045.yaml -e target_group=freeipa-client -e freeipa_client_register_dns=false -e @/tmp/claude-1000/-home-kjelly-github-pilot/032b4ea6-1459-4896-b2c2-1b50071fd7c3/scratchpad/ha-test-vault.yaml
+📦 starting sandbox container (pilot-cli:latest)...
+▶ docker exec pilot-sandbox-msi-company-1789657735-4a1e07 ansible-playbook /tmp/pilot-playbook-dir/freeipa-client-apply.yml -i /tmp/pilot-inventory.yaml -e target_group=freeipa-client -e freeipa_client_register_dns=false -e @/tmp/pilot-extra-vars-8.yaml
+[1;35m[WARNING]: Invalid characters were found in group names but not replaced, use -vvvv to see details[0m
+
+PLAY [FreeIPA client enroll] ***************************************************
+
+TASK [FreeIPA client — gather fresh facts (bypasses fact_caching; see gather_facts: false note above)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: required vars present (fail early, before any mutation)] ***********
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: supported client OS (Debian/Ubuntu primary; EL also handled)] ******
+[1;35m[WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:153:19[0m
+[0;35m[0m
+[0;35m151         that:[0m
+[0;35m152           - ansible_os_family in ['Debian', 'RedHat'][0m
+[0;35m153         fail_msg: >-[0m
+[0;35m                      ^ column 19[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:152:13[0m
+[0;35m[0m
+[0;35m150       ansible.builtin.assert:[0m
+[0;35m151         that:[0m
+[0;35m152           - ansible_os_family in ['Debian', 'RedHat'][0m
+[0;35m                ^ column 13[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — resolve domain input for the shared task (avoid var-name collision)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — compute desired pool + effective topology mode] ****
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/freeipa-server-pool.yml for ipa-ha-client[0m
+
+TASK [FreeIPA server pool — normalize topology_mode input (default auto)] ******
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — gate: topology_mode is a legal value] **************
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — gate: exactly one freeipa-server host in inventory] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — build primary pool member] *************************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — gate: multiple replicas each need an explicit freeipa_replica_fqdn host var] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — build replica pool members] ************************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — combine primary + replicas into the full desired pool] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — gate: no duplicate FQDNs in the pool (covers primary==replica FQDN too)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — gate: no IP reused across different FQDNs] *********
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA server pool — compute effective topology mode] *******************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — gate: ha mode requires >= 2 providers] *************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — compute active pool (single mode uses primary only, even if a replica exists)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — derive fqdns/ips/dns-provider-ips from the active pool] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — observability summary (spec §22; never logs secrets)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "msg": {[0m
+[0;32m        "dns_providers": [[0m
+[0;32m            "192.168.122.8"[0m
+[0;32m        ],[0m
+[0;32m        "effective_mode": "single",[0m
+[0;32m        "providers": [[0m
+[0;32m            "ipa1.ipa.pilot.internal"[0m
+[0;32m        ],[0m
+[0;32m        "requested_mode": "auto"[0m
+[0;32m    }[0m
+[0;32m}[0m
+
+TASK [FreeIPA admin endpoint — select a live server for this playbook's own ipa CLI calls] ***
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/freeipa-admin-endpoint-select.yml for ipa-ha-client[0m
+
+TASK [FreeIPA admin endpoint — probe each active pool member's HTTPS API (read-only)] ***
+[0;32mok: [ipa-ha-client] => (item=ipa1.ipa.pilot.internal)[0m
+
+TASK [FreeIPA admin endpoint — select the first reachable pool member (desired-pool order, not reachability order)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: at least one FreeIPA server pool member reachable for admin API calls (fail closed)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client DNS — resolve which authority IP to read from (redirects off the primary-only default)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: prod requires recent staging attestation] **************************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)] *****
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Warn if no active time sync (client enrolls with --no-ntp; ntp role must cover this)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client — detect prior enrollment (/etc/ipa/default.conf)] ********
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — detect host Kerberos keytab presence (read-only, Day-2 spec §6.1)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS — resolve + preflight (plan, no mutation)] ************
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/freeipa-client-host-dns.yml for ipa-ha-client[0m
+
+TASK [FreeIPA client DNS (plan) — resolve native-DNS capability of the selected FreeIPA server] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — resolve effective register_dns] **************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: DNS registration requested but selected FreeIPA server has no native DNS (spec.md §7)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client DNS (plan) — resolve effective DNS addresses] *************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: effective DNS address list must not be empty when registration is enabled (spec.md §6)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: client FQDN is well-formed for DNS registration (spec.md §5.1)] ****
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — define the shared IP canonicalize+policy script] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — validate + canonicalize each effective DNS address (spec.md §6)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: every effective DNS address is a valid, non-reserved IP literal (spec.md §6)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — replace canonicalized, deduped desired addresses (preserve order)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: explicit DNS IPv4 must match this host's /etc/hosts canonical IPv4 (spec.md §10, fail-closed v1)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — resolve raw replace-from acknowledgement] ****
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — validate + canonicalize replace-from acknowledgement (spec.md Day-2 §4.3/§4.4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: replace-from acknowledgement, if set, must be a valid non-reserved IP literal (spec.md Day-2 §4.4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — set effective replace-from acknowledgement ('' means unset)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — query authoritative DNS: current A records] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — query authoritative DNS: current AAAA records] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — query authoritative DNS: CNAME at owner] *****
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: authoritative DNS queries must return a usable response (spec.md §8.2/§8.3, fail-closed)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — extract authoritative CNAME answers] *********
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: DNS owner must not already have a CNAME (spec.md §8.2)] ************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — compute current authoritative addresses (raw)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — canonicalize current authoritative addresses (Day-2 spec §4.3)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: every authoritative current address parses as a valid IP literal (fail-closed, not silently dropped)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — replace with canonicalized current authoritative addresses] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — compute extra/missing sets against desired (canonicalized)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — determine whether this is a replacement candidate (spec Day-2 §5.1)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — read-only host/realm match against /etc/ipa/default.conf (spec Day-2 §6.3)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS identity proof — create a dedicated Kerberos credential cache path] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS identity proof — kinit the exact host keytab principal into the dedicated ccache] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS identity proof — destroy the Kerberos ticket in the dedicated ccache] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — set identity_proven (AND of every independent check, spec Day-2 §6)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — decide the plan action (spec Day-2 §5.1 state table)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: unauthorized DNS conflict — no acknowledgement present (spec Day-2 §12.1 / S1)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: DNS conflict has more than one stale address — V1 non-goal (spec Day-2 §3.3 / S3)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: replacement authorization does not match live authoritative DNS — stale CAS (spec Day-2 §12.2 / S2)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: replacement requires proof of an already-enrolled client with the exact host keytab principal (spec Day-2 §6/§21.2 / S4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — compute identity_proof display label for the debug report] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — report plan (spec.md §13.2; Day-2 spec §7.2)] ***
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:112:22[0m
+[0;35m[0m
+[0;35m110     # This client's own FQDN (must be a resolvable, non-loopback name). Default[0m
+[0;35m111     # derives from the host's short name under the realm domain.[0m
+[0;35m112     ipa_client_fqdn: "{{ ansible_hostname | lower }}.{{ ipa_domain }}"[0m
+[0;35m                         ^ column 22[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "msg": "FreeIPA client DNS plan:\n  registration: DISABLED\n  fqdn: ipa-ha-client.ipa.pilot.internal\n  current: []\n  desired: []\n  extra: []\n  missing: []\n  replace_from: \n  action: NOOP\n  identity_proof: N/A\n"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client DNS backfill — create a dedicated Kerberos credential cache path] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS backfill — kinit admin into the dedicated ccache] *****
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS backfill — add each missing address to authoritative DNS] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS backfill — destroy the Kerberos ticket in the dedicated ccache] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — create a dedicated Kerberos credential cache path] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — kinit admin into the dedicated ccache] ******
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — re-query authoritative DNS: A records (apply-time CAS re-read)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — re-query authoritative DNS: AAAA records (apply-time CAS re-read)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — re-query authoritative DNS: CNAME at owner (apply-time CAS re-read)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: apply-time authoritative DNS re-read must be usable (spec Day-2 §8.1)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — extract apply-time CNAME answers] ***********
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — compute apply-time current authoritative addresses (raw)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — canonicalize apply-time current authoritative addresses] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: every apply-time authoritative address parses as a valid IP literal] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — set canonicalized apply-time current authoritative addresses] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — recompute extra against desired (apply-time)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: apply-time CAS still exactly matches — authoritative state changed after planning (spec Day-2 §8.1/§8.2 / S5)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — reconcile each RR family to its full desired value set] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Report DNS replace reconciliation] ***************************************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — read the record's raw stored values (for an exact-match delete)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — extract raw A/AAAA values as LDAP actually stores them] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — canonicalize each raw stored value (to match it against the authorized stale address)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — resolve the exact as-stored value for the authorized stale address] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — value-scoped removal of the authorized stale address (cross-family only)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Report DNS replace cross-family stale removal] ***************************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — destroy the Kerberos ticket in the dedicated ccache] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS verify — query authoritative DNS: A records (post-apply)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS verify — query authoritative DNS: AAAA records (post-apply)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: post-apply authoritative DNS queries must return a usable response (spec.md §9/§14, fail-closed)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: authoritative DNS matches desired addresses EXACTLY after apply (spec.md §9/§14)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client — stop cloud-init from wiping our /etc/hosts pins on next boot] ***
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/cloud-init-etc-hosts-guard.yml for ipa-ha-client[0m
+
+TASK [Cloud-init /etc/hosts guard — detect cloud-init] *************************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Cloud-init /etc/hosts guard — disable manage_etc_hosts (stop future boots from wiping the FreeIPA /etc/hosts pin)] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [Cloud-init /etc/hosts guard — no cloud-init present, guard is a no-op] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client — pin this host ipa-ha-client.ipa.pilot.internal to its own IP in /etc/hosts (FQDN canonical)] ***
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:321:15[0m
+[0;35m[0m
+[0;35m319         path: /etc/hosts[0m
+[0;35m320         regexp: '(?i)\s{{ ipa_client_fqdn | regex_escape }}(\s|$)'[0m
+[0;35m321         line: "{{ ansible_default_ipv4.address }} {{ ipa_client_fqdn }} {{ ipa_client_fqdn.split('.')[0] }}"[0m
+[0;35m                  ^ column 15[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — /etc/hosts migration: check whether the pool-aware block already exists] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — /etc/hosts migration: remove legacy unmarked primary pin (spec §6.1)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — pin the FreeIPA server pool to /etc/hosts (pool-aware managed block, spec §6)] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — set system hostname to the client FQDN (after /etc/hosts pin so sudo stays fast)] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — install ipa-client package (apt freeipa-client on Ubuntu)] ***
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/apt-package-install.yml for ipa-ha-client[0m
+
+TASK [APT package install (freeipa-client) — assert interface] *****************
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [APT package install (freeipa-client) — set effective policy facts] *******
+[0;32mok: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — read installed-package facts] *****
+[0;32mok: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — compute missing packages] *********
+[0;32mok: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — SUCCESS(already_present)] *********
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — apt-cache policy for missing packages (one per package: apt-cache silently OMITS an entirely-unknown package from combined output instead of printing 'Candidate: (none)', which would false-positive a joined multi-package query)] ***
+[0;32mok: [ipa-ha-client] => (item=freeipa-client)[0m
+
+TASK [APT package install (freeipa-client) — determine candidate availability] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — FATAL(apt_cache_insufficient_offline)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — global refresh] *******************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — re-check candidate after global refresh (one apt-cache policy per package; see cache-first check above for why)] ***
+[0;36mskipping: [ipa-ha-client] => (item=freeipa-client) [0m
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — determine post-global-refresh candidate] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — FATAL(required_source_unhealthy): scoped refresh disallowed] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — scoped refresh against required sources only] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — re-check candidate after scoped refresh (one apt-cache policy per package; see cache-first check above for why)] ***
+[0;36mskipping: [ipa-ha-client] => (item=freeipa-client) [0m
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — determine post-scoped-refresh candidate] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — FATAL(required_source_unhealthy): scoped refresh did not recover] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — FATAL(required_source_unhealthy): no candidate, refresh exhausted] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — install (single sanctioned mutation point, no ignore_errors)] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client) — SUCCESS] **************************
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "msg": "OK component=freeipa-client apt_mode=cache_hit packages=['freeipa-client'] required_sources_healthy=True\nunrelated_sources_degraded=0"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client — install ipa-client package (dnf ipa-client on EL)] ******
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:409:11[0m
+[0;35m[0m
+[0;35m407       when:[0m
+[0;35m408         - not ansible_check_mode[0m
+[0;35m409         - ansible_os_family == 'RedHat'[0m
+[0;35m              ^ column 11[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client — install host-audit daemon (auditd)] *********************
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:414:15[0m
+[0;35m[0m
+[0;35m412     - name: "FreeIPA client — install host-audit daemon (auditd)"[0m
+[0;35m413       ansible.builtin.package:[0m
+[0;35m414         name: >-[0m
+[0;35m                  ^ column 15[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — install SSSD cache tools (Debian)] **********************
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/apt-package-install.yml for ipa-ha-client[0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — assert interface] ******
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — set effective policy facts] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — read installed-package facts] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — compute missing packages] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — SUCCESS(already_present)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — apt-cache policy for missing packages (one per package: apt-cache silently OMITS an entirely-unknown package from combined output instead of printing 'Candidate: (none)', which would false-positive a joined multi-package query)] ***
+[0;32mok: [ipa-ha-client] => (item=sssd-tools)[0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — determine candidate availability] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — FATAL(apt_cache_insufficient_offline)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — global refresh] ********
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — re-check candidate after global refresh (one apt-cache policy per package; see cache-first check above for why)] ***
+[0;36mskipping: [ipa-ha-client] => (item=sssd-tools) [0m
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — determine post-global-refresh candidate] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — FATAL(required_source_unhealthy): scoped refresh disallowed] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — scoped refresh against required sources only] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — re-check candidate after scoped refresh (one apt-cache policy per package; see cache-first check above for why)] ***
+[0;36mskipping: [ipa-ha-client] => (item=sssd-tools) [0m
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — determine post-scoped-refresh candidate] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — FATAL(required_source_unhealthy): scoped refresh did not recover] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — FATAL(required_source_unhealthy): no candidate, refresh exhausted] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — install (single sanctioned mutation point, no ignore_errors)] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [APT package install (freeipa-client-sssd-tools) — SUCCESS] ***************
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "msg": "OK component=freeipa-client-sssd-tools apt_mode=cache_hit packages=['sssd-tools'] required_sources_healthy=True\nunrelated_sources_degraded=0"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client — install SSSD cache tools (RedHat)] **********************
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:445:11[0m
+[0;35m[0m
+[0;35m443       when:[0m
+[0;35m444         - not ansible_check_mode[0m
+[0;35m445         - ansible_os_family == 'RedHat'[0m
+[0;35m              ^ column 11[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA server pool — probe reachability (read-only, spec §5)] ***********
+[0;32mok: [ipa-ha-client] => (item=ipa1.ipa.pilot.internal)[0m
+
+TASK [FreeIPA server pool — compute reachable subset] **************************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: at least one FreeIPA server pool member reachable before enrollment (spec §5)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client — run ipa-client-install (enroll into IPA.PILOT.INTERNAL)] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — route sudoers lookups through SSSD (nsswitch)] **********
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — inspect the current SSSD services line] *****************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — disable socket activation for explicit SSSD responders] ***
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:618:11[0m
+[0;35m[0m
+[0;35m616       when:[0m
+[0;35m617         - not ansible_check_mode[0m
+[0;35m618         - ansible_os_family == 'Debian'[0m
+[0;35m              ^ column 11[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;33mchanged: [ipa-ha-client] => (item=sssd-nss.socket)[0m
+[0;33mchanged: [ipa-ha-client] => (item=sssd-pam.socket)[0m
+[0;33mchanged: [ipa-ha-client] => (item=sssd-pam-priv.socket)[0m
+[0;33mchanged: [ipa-ha-client] => (item=sssd-ssh.socket)[0m
+[0;33mchanged: [ipa-ha-client] => (item=sssd-autofs.socket)[0m
+
+TASK [FreeIPA client — clear stale SSSD responder socket failures] *************
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:627:11[0m
+[0;35m[0m
+[0;35m625       when:[0m
+[0;35m626         - not ansible_check_mode[0m
+[0;35m627         - ansible_os_family == 'Debian'[0m
+[0;35m              ^ column 11[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — ensure SSSD's services line does not fight socket-activated sudo] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — ensure SSSD uses IPA as the sudo provider] **************
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — set SSSD offline credential caching policy] *************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client — set SSSD offline credentials expiration (days)] *********
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client — restart SSSD after wiring responders] *******************
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — enable + start SSSD (survives reboot)] ******************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — enable socket-activated sudo responder] *****************
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:733:11[0m
+[0;35m[0m
+[0;35m731       when:[0m
+[0;35m732         - not ansible_check_mode[0m
+[0;35m733         - ansible_os_family == 'Debian'[0m
+[0;35m              ^ column 11[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — allow password/keyboard-interactive SSH (FreeIPA users may have no key yet)] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — restart sshd after enabling password auth] **************
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-client-apply.yml:770:15[0m
+[0;35m[0m
+[0;35m768     - name: "FreeIPA client — restart sshd after enabling password auth"[0m
+[0;35m769       ansible.builtin.systemd:[0m
+[0;35m770         name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"[0m
+[0;35m                  ^ column 15[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — enable GSSAPI ticket delegation within the realm (SSH client)] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client — enable + start auditd (survives reboot)] ****************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — Day-2 server-list reconciliation (krb5.conf + sssd.conf)] ***
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/freeipa-client-server-failover.yml for ipa-ha-client[0m
+
+TASK [FreeIPA client failover — compute desired krb5 server-list block] ********
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — compute desired sssd ipa_server line] **********
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — read current krb5.conf] ************************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — decode + split krb5.conf around this realm's server-list block] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — gate: realm stanza located in krb5.conf] *******
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client failover — compute desired krb5.conf content (concatenation, no regex-backreference risk)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — reconcile sssd.conf ipa_server line] ***********
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — backup current krb5.conf before mutation] ******
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — write reconciled krb5.conf (atomic)] ***********
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — restart SSSD after server-list reconciliation] ***
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — sss_cache -E after reconciliation] *************
+[0;33mchanged: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — validate: kinit with host keytab succeeds after krb5.conf mutation] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — destroy the validation ticket] *****************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — restore krb5.conf backup after failed validation] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client failover — fail loudly after restoring backup] ************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client — wait until SSSD resolves an IPA identity (spec C5)] *****
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client — fail loudly if SSSD never resolved an IPA user (spec C5)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA client — confirm host Kerberos keytab exists (spec C4)] **********
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS — existing-client backfill + post-apply verify] *******
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/freeipa-client-host-dns.yml for ipa-ha-client[0m
+
+TASK [FreeIPA client DNS (plan) — resolve native-DNS capability of the selected FreeIPA server] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — resolve effective register_dns] **************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: DNS registration requested but selected FreeIPA server has no native DNS (spec.md §7)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — resolve effective DNS addresses] *************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: effective DNS address list must not be empty when registration is enabled (spec.md §6)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: client FQDN is well-formed for DNS registration (spec.md §5.1)] ****
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — define the shared IP canonicalize+policy script] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — validate + canonicalize each effective DNS address (spec.md §6)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: every effective DNS address is a valid, non-reserved IP literal (spec.md §6)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — replace canonicalized, deduped desired addresses (preserve order)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: explicit DNS IPv4 must match this host's /etc/hosts canonical IPv4 (spec.md §10, fail-closed v1)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — resolve raw replace-from acknowledgement] ****
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — validate + canonicalize replace-from acknowledgement (spec.md Day-2 §4.3/§4.4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: replace-from acknowledgement, if set, must be a valid non-reserved IP literal (spec.md Day-2 §4.4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — set effective replace-from acknowledgement ('' means unset)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — query authoritative DNS: current A records] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — query authoritative DNS: current AAAA records] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — query authoritative DNS: CNAME at owner] *****
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: authoritative DNS queries must return a usable response (spec.md §8.2/§8.3, fail-closed)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — extract authoritative CNAME answers] *********
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: DNS owner must not already have a CNAME (spec.md §8.2)] ************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — compute current authoritative addresses (raw)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — canonicalize current authoritative addresses (Day-2 spec §4.3)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: every authoritative current address parses as a valid IP literal (fail-closed, not silently dropped)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — replace with canonicalized current authoritative addresses] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — compute extra/missing sets against desired (canonicalized)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — determine whether this is a replacement candidate (spec Day-2 §5.1)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — read-only host/realm match against /etc/ipa/default.conf (spec Day-2 §6.3)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS identity proof — create a dedicated Kerberos credential cache path] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS identity proof — kinit the exact host keytab principal into the dedicated ccache] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS identity proof — destroy the Kerberos ticket in the dedicated ccache] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — set identity_proven (AND of every independent check, spec Day-2 §6)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — decide the plan action (spec Day-2 §5.1 state table)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: unauthorized DNS conflict — no acknowledgement present (spec Day-2 §12.1 / S1)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: DNS conflict has more than one stale address — V1 non-goal (spec Day-2 §3.3 / S3)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: replacement authorization does not match live authoritative DNS — stale CAS (spec Day-2 §12.2 / S2)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: replacement requires proof of an already-enrolled client with the exact host keytab principal (spec Day-2 §6/§21.2 / S4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — compute identity_proof display label for the debug report] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS (plan) — report plan (spec.md §13.2; Day-2 spec §7.2)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS backfill — create a dedicated Kerberos credential cache path] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS backfill — kinit admin into the dedicated ccache] *****
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS backfill — add each missing address to authoritative DNS] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS backfill — destroy the Kerberos ticket in the dedicated ccache] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — create a dedicated Kerberos credential cache path] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — kinit admin into the dedicated ccache] ******
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — re-query authoritative DNS: A records (apply-time CAS re-read)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — re-query authoritative DNS: AAAA records (apply-time CAS re-read)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — re-query authoritative DNS: CNAME at owner (apply-time CAS re-read)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: apply-time authoritative DNS re-read must be usable (spec Day-2 §8.1)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — extract apply-time CNAME answers] ***********
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — compute apply-time current authoritative addresses (raw)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — canonicalize apply-time current authoritative addresses] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: every apply-time authoritative address parses as a valid IP literal] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — set canonicalized apply-time current authoritative addresses] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — recompute extra against desired (apply-time)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: apply-time CAS still exactly matches — authoritative state changed after planning (spec Day-2 §8.1/§8.2 / S5)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — reconcile each RR family to its full desired value set] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Report DNS replace reconciliation] ***************************************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — read the record's raw stored values (for an exact-match delete)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — extract raw A/AAAA values as LDAP actually stores them] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — canonicalize each raw stored value (to match it against the authorized stale address)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — resolve the exact as-stored value for the authorized stale address] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — value-scoped removal of the authorized stale address (cross-family only)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Report DNS replace cross-family stale removal] ***************************
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS replace — destroy the Kerberos ticket in the dedicated ccache] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS verify — query authoritative DNS: A records (post-apply)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA client DNS verify — query authoritative DNS: AAAA records (post-apply)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: post-apply authoritative DNS queries must return a usable response (spec.md §9/§14, fail-closed)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: authoritative DNS matches desired addresses EXACTLY after apply (spec.md §9/§14)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — reconcile pilot_annotations to FreeIPA userClass/nshostlocation] ***
+[0;36mincluded: /tmp/pilot-playbook-dir/tasks/freeipa-host-annotations.yml for ipa-ha-client[0m
+
+TASK [FreeIPA host annotations — resolve desired annotations] ******************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — define the validation script] *****************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase A) — validate desired annotations before any live read/mutation] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase A) — parse validation result] ************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: desired annotations must pass validation (spec.md §10 Phase A, fail before any live mutation)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA host annotations — set desired serialized userClass values + desired location] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — define the reconcile-plan script] *************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — check whether this host is currently enrolled (OS level)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — check-mode preview: host not yet enrolled, cannot authenticate] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — create a dedicated Kerberos credential cache path] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — kinit admin into the dedicated ccache] ********
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase B) — read the FreeIPA host object] *******
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: FreeIPA host object must exist before annotation reconcile (spec.md §9.3/§18 HOST_ABSENT)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA host annotations — check-mode preview: FreeIPA host object absent] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — record whether the host object exists (gates every task below)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase C) — extract live userClass values] ******
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase C) — extract live nshostlocation (first value, or empty)] ***
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase C/D) — compute the reconcile plan] *******
+[0;32mok: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — parse the reconcile plan] *********************
+[0;32mok: [ipa-ha-client][0m
+
+TASK [Gate: reconcile plan must have no conflicts before any mutation (spec.md §10 Phase C, fail-closed)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [FreeIPA host annotations (Phase D) — report plan (spec.md §10 Phase D)] ***
+[0;32mok: [ipa-ha-client] => {[0m
+[0;32m    "msg": "FreeIPA host annotations plan for ipa-ha-client.ipa.pilot.internal:\n  delete: []\n  add: []\n  preserve foreign userClass: []\n  native location: NOOP\n"[0m
+[0;32m}[0m
+
+TASK [FreeIPA host annotations (Phase E) — delete stale Pilot-owned userClass values] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase E) — add missing desired Pilot-owned userClass values] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase E) — set native nshostlocation (spec.md §8.4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase E) — clear native nshostlocation (spec.md §8.3/§8.4)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase F) — re-read live state for verification] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations (Phase F) — extract post-apply userClass/location] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: post-apply Pilot-owned userClass exactly matches desired (spec.md §10 Phase F/§11 idempotency)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: pre-existing foreign userClass values are all still present after apply (spec.md §7.3/§17/§10 Phase F)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [Gate: native nshostlocation matches the plan's intended outcome (spec.md §10 Phase F)] ***
+[0;36mskipping: [ipa-ha-client][0m
+
+TASK [FreeIPA host annotations — destroy the Kerberos ticket in the dedicated ccache] ***
+[0;32mok: [ipa-ha-client][0m
+
+PLAY RECAP *********************************************************************
+[0;33mipa-ha-client[0m              : [0;32mok=117 [0m [0;33mchanged=20  [0m unreachable=0    failed=0    [0;36mskipped=176 [0m rescued=0    ignored=0   
+
+📦 stopping sandbox container...
+sandbox: 356 file(s) changed in pilot-sandbox-msi-company-1789657735-4a1e07
+  /root
+  /root/.ansible
+  /root/.ansible/cp
+  /root/.ansible/cp/pilot-root@192.168.122.6:22
+  /root/.ansible/pilot-factcache
+  /root/.ansible/pilot-factcache/s1_ipa-ha-client
+  /root/.ssh
+  /root/.ssh/known_hosts
+  /tmp
+  /tmp/pilot-extra-vars-8.yaml
+  /tmp/pilot-inventory.yaml
+  /tmp/pilot-playbook-dir
+  /tmp/pilot-playbook-dir/agent-controller-apply.yml
+  /tmp/pilot-playbook-dir/alertmanager-apply.yml
+  /tmp/pilot-playbook-dir/audit-log-forwarding-apply.yml
+  /tmp/pilot-playbook-dir/core-infra-provider-apply.yml
+  /tmp/pilot-playbook-dir/dashboard-apply.yml
+  /tmp/pilot-playbook-dir/dcgm-exporter-apply.yml
+  /tmp/pilot-playbook-dir/detection-engine-apply.yml
+  /tmp/pilot-playbook-dir/docker-apply.yml
+  ... (336 more)
+  transcript: /var/lib/libvirt/images/pilot/ipa-ha-client/runs/20260917T150855Z-freeipa-client-apply.log

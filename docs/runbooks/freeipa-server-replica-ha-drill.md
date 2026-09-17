@@ -1,36 +1,57 @@
 # Runbook — freeipa-server-replica HA failover 演練計畫
 
-> 撰寫日期：2026-07-09 (UTC)。本檔已完整重跑並驗證過兩次：
-> 2026-07-10（第一次）改用 `--sandbox`/`vm-target wire`/`--json`；
-> 2026-07-10（第二次）再改用宣告式 `vm-target topology`
-> （spec：`docs/topologies/freeipa-ha-topology.yaml`）取代手動
-> `up` x3 + `wire` x2，三輪數字/行為一致。
-> 對齊：`docs/verification/freeipa-server-replica.md`（v1.0）§9、
-> `docs/verification/freeipa-server.md`、`docs/verification/freeipa-client.md`、
+> 撰寫日期：2026-07-09 (UTC)。**2026-09-17 全面改版**：`docs/tmp/now/freeipa-client-ha-spec.md`
+> 的 Phase 0-5 落地後，client 端的 HA failover **不再需要任何手動 `sed`**——
+> `playbooks/apply/freeipa-server-pool.yml`/`freeipa-client-server-failover.yml`/
+> `freeipa-admin-endpoint-select.yml` 全部走 Pilot 自己的 playbook，本檔案的舊版第 6 節手動
+> patch krb5.conf/sssd.conf 的步驟已經整段刪除，改成單純重跑
+> `pilot vm-target run ... freeipa-client-apply.yml`。
+>
+> 舊版本歷史：2026-07-10（第一次）改用 `--sandbox`/`vm-target wire`/`--json`；
+> 2026-07-10（第二次）改用宣告式 `vm-target topology`；2026-09-17（本次）驗證新的
+> server-pool/failover-reconciliation/admin-endpoint-select 機制，涵蓋 S1/S2/H1-H6 全套
+> acceptance matrix（H7/H8 未在本輪涵蓋，見 §12 說明）。
+>
+> 對齊：`docs/verification/freeipa-server-replica.md`（v1.0，C1-C16）、
+> `docs/verification/freeipa-client.md`（v1.x，C1-C12）、
+> `docs/verification/freeipa-server.md`、
 > `playbooks/apply/freeipa-server-apply.yml`、
 > `playbooks/apply/freeipa-server-replica-apply.yml`、
-> `playbooks/apply/freeipa-client-apply.yml`
-> 對照文件：完整實測敘事（含真實輸出片段）見
-> `docs/verification/freeipa-server-replica.md` §9——本檔是**可重複執行的步驟
+> `playbooks/apply/freeipa-client-apply.yml`、
+> `playbooks/apply/tasks/freeipa-server-pool.yml`、
+> `playbooks/apply/tasks/freeipa-client-server-failover.yml`、
+> `playbooks/apply/tasks/freeipa-admin-endpoint-select.yml`
+>
+> 完整實測敘事（含真實輸出片段）見
+> `docs/evidence/freeipa-client-ha/2026-09-17-phase7-full-drill/`——本檔是**可重複執行的步驟
 > 清單**，抽掉逐字輸出，方便下次直接照抄重跑。
 >
 > 本檔每一步都已在真實 vm-target sandbox（`ipa-primary`/`ipa-replica`
-> AlmaLinux 9、`ipa-ha-client` Ubuntu 24.04）實跑過三輪，全程只用
-> `go run ./cmd/pilot vm-target` 系列指令，三輪數字/結果一致。
+> AlmaLinux 9、`ipa-ha-client` Ubuntu 24.04）實跑過，全程只用
+> `go run ./cmd/pilot vm-target` 系列指令。
 
 ---
 
 ## 0. 目標
 
 證明 FreeIPA 的 multi-master HA 真的能在**任一台**server 掛掉時讓 client 不中斷，
-同時證明**兩台都掛時 client 真的無法登入**（不是靠巧合或快取誤判）：
+同時證明**兩台都掛時 client 真的無法登入**（不是靠巧合或快取誤判）——而且全程**不需要任何
+人工編輯 client 的 krb5.conf/sssd.conf**：
 
-1. primary + replica 都上線，client 正常登入/授權（基線）。
-2. 只關 primary，client 端 Kerberos 認證 + 身分查詢 + sudo 授權都繼續正常。
-3. 復原 primary、只關 replica，對稱驗證另一個方向。
+1. primary + replica 都上線，client 正常登入/授權（基線，H1）。
+2. 只關 primary，client 端 Kerberos 認證 + 身分查詢 + sudo 授權都繼續正常，用**從未在該
+   client 查過的 principal**（H2）。
+3. 復原 primary、只關 replica，對稱驗證另一個方向（H3）。
 4. **兩台都關**，確認 `kinit` 立即失敗（無離線路徑，這是「無法登入」的權威證明），
-   同時誠實記錄 SSSD 本機快取對「已查過身分」仍會回應的行為。
-5. 復原至少一台，確認 client 自動恢復。
+   同時誠實記錄 SSSD 本機快取對「已查過身分」仍會回應的行為（H4）。
+5. 復原至少一台，確認 client **不重跑 Pilot** 就自動恢復（H4 recovery）。
+6. Primary 掛著的時候幫一台全新 client 上線，desired pool 仍然保留兩台
+   （H5——這是 Phase 0 發現「installer 自己會把打不通的 server 從設定檔整個拿掉」之後，
+   Phase 4 的 server-failover reconciliation 補回來的行為）。
+7. 既有單機 client 加入 replica 後原地收斂成 HA，不需要 `--uninstall`（H6，見
+   `docs/evidence/freeipa-client-ha/2026-09-17-phase4-existing-client-reconciliation/`，
+   本檔不重複）。
+8. 單機模式（不建 replica、不啟用 DNS 註冊）仍然完整可用，backward compatible（S1/S2）。
 
 三台 vm-target 缺一不可：`ipa-primary`（EL9，realm 起點）、`ipa-replica`
 （EL9，multi-master 第二台）、`ipa-ha-client`（Ubuntu，用來觀察「登入是否可能」
@@ -45,7 +66,7 @@ go run ./cmd/pilot vm-target list
 ```
 
 **預期結果**：乾淨環境應該是空的（`no targets`）。若上次測試留了同名 VM，先
-`vm-target down`（或 `vm-target topology down --topology docs/topologies/freeipa-ha-topology.yaml`）
+`vm-target topology down --topology docs/topologies/freeipa-ha-topology.yaml`
 清掉再重來，避免 IP/狀態殘留。
 
 準備一份 admin 密碼的 vault 檔（假密碼、放 repo 外，例如 scratchpad）：
@@ -57,22 +78,22 @@ EOF
 chmod 600 /tmp/ha-test-vault.yaml
 ```
 
-**每個 `vm-target run` 都預設走 `--sandbox`**（`.agents/skills/vm-target-spec-testing`
-的新預設做法），所以還需要建一次控制節點 image（`images/Dockerfile.pilot-cli`
-——已經包好 ansible-core + `AGENTS.md` 需要的 collections + 本 repo 的
-playbook 範本，比隨便一個第三方 image 更貼近正式環境）：
+**每個 `vm-target run` 都預設走 `--sandbox`**，所以還需要建一次控制節點 image
+（`images/Dockerfile.pilot-cli`——已經包好 ansible-core + `AGENTS.md` 需要的 collections +
+本 repo 的 playbook 範本，比隨便一個第三方 image 更貼近正式環境）：
 
 ```bash
 docker build -t pilot-cli:latest -f images/Dockerfile.pilot-cli .
 ```
 
-只需要建一次（除非改了 `pilot` 原始碼或 Dockerfile）；本輪實測 image 早已快取，
-略過重建。
+只需要建一次（除非改了 `pilot` 原始碼或 Dockerfile）。
 
 三台 VM 的拓樸（image、ansible groups、`/etc/hosts` wiring）宣告在
-`docs/topologies/freeipa-ha-topology.yaml` 裡，內容摘要：
+`docs/topologies/freeipa-ha-topology.yaml` 裡（`services: local` 讓重複 `up`/`reset` 都走
+host-local cache，見 `.agents/skills/vm-target-spec-testing` §0.1）：
 
 ```yaml
+services: local
 nodes:
   - name: ipa-primary
     base_image: almalinux-9
@@ -96,86 +117,54 @@ nodes:
     wire: ["ipa-replica=ipa2.ipa.pilot.internal"]
 ```
 
-> `vm-target topology up` 會**平行** `up` 每個尚未啟動的 node（每個 node 各自
-> 一個 `*vmtarget.Manager`）——2026-07-06 的 state race 修復（`statefile`
-> flock + `Store.Mutate`，見 `pilot-vm-target-up-concurrency-race` 記憶、
-> `AGENTS.md` §5.1）已讓不同名稱的並行 `up` 安全，`topology up` 直接利用這一
-> 點縮短三台 VM 的總開機時間。
+> `groups:` 這裡是 vm-target topology 自己的標籤（`ipa_masters`/`ipa_replicas`/
+> `ipa_clients`），**不是** production 的 `freeipa-server`/`freeipa-server-replica`/
+> `freeipa-client` group 名稱。§4 的 client apply 一律改用
+> `pilot vm-target run --group freeipa-server=ipa-primary --group
+> freeipa-server-replica=ipa-replica --group freeipa-client=ipa-ha-client`
+> 組出「真正的」production role-group 名稱，這樣 `freeipa-server-pool.yml` 的
+> inventory-driven 邏輯（讀 `groups['freeipa-server']`/`groups['freeipa-server-replica']`）
+> 才會走到真實路徑，不是只靠 `-e ipa_server_ip=` override 繞過去。
 
 ---
 
-## 2. 起 3 台 VM（`vm-target topology up`）
+## 2. 起 3 台 VM
 
 ```bash
 go run ./cmd/pilot vm-target topology up --topology docs/topologies/freeipa-ha-topology.yaml
 ```
 
-`topology up` 平行 `up` 每個尚未啟動的 node（每個 node 各自一個
-`*vmtarget.Manager`，指向同一個 state/vm dir——不同名稱的並行 `up` 自
-2026-07-06 起就是安全的，見 `pilot-vm-target-up-concurrency-race` 記憶、
-`AGENTS.md` §5.1），比舊版 3× 循序 `up` 快。**本輪實測輸出**（golden image
-已快取；三個 `provisioning`/`waiting for IP` 訊息交錯出現，證明真的是平行
-執行，不是照 spec 順序循序跑）：
-
-```
-▶ provisioning ipa-ha-client...
-▶ provisioning ipa-replica...
-▶ provisioning ipa-primary...
-  ✓ reserved static IP 192.168.122.2 for ipa-ha-client (MAC 52:54:00:7f:8e:b7) on network default
-  ✓ reserved static IP 192.168.122.3 for ipa-replica (MAC 52:54:00:49:74:96) on network default
-  ✓ reserved static IP 192.168.122.4 for ipa-primary (MAC 52:54:00:3e:d9:65) on network default
-  … ipa-replica waiting for IP (elapsed 10s)  (no active lease for MAC 52:54:00:49:74:96 yet)
-  … ipa-primary waiting for IP (elapsed 10s)  (no active lease for MAC 52:54:00:3e:d9:65 yet)
-✓ ipa-ha-client up (ip=192.168.122.2)
-  … ipa-primary waiting for IP (elapsed 20s)  (no active lease for MAC 52:54:00:3e:d9:65 yet)
-  … ipa-replica waiting for IP (elapsed 20s)  (no active lease for MAC 52:54:00:49:74:96 yet)
-✓ ipa-primary up (ip=192.168.122.4)
-✓ ipa-replica up (ip=192.168.122.3)
-✓ wired ipa2.ipa.pilot.internal -> ipa-primary (192.168.122.3)
-✓ wired ipa2.ipa.pilot.internal -> ipa-ha-client (192.168.122.3)
-
-inventory : `pilot vm-target topology inventory --topology docs/topologies/freeipa-ha-topology.yaml`
-```
-
-`time` 量測：三台平行 `up`（含開機 + wire）總共 **34.5s**（`real 0m34.528s`），
-對照舊版循序 3× `up` 那輪要 3 台各自等一輪 lease/boot、總耗時明顯更長。
-
-這一步就把**舊版 §2（3× `up`）+ §4/§6 的手動 `wire`** 全部做完了：三台 VM
-起來後自動把 replica 的 IP 冪等 pin 進 primary 跟 client 的 `/etc/hosts`
-——不用再讀 IP、手動組 `wire`/`exec` 指令。
-
-確認狀態（同一輪的 `vm-target list` + `topology status`，證明平行 `up` 沒有
-丟任何一台的 state）：
+`topology up` 平行 `up` 每個尚未啟動的 node，完成後自動把 replica 的 IP 冪等 pin 進
+primary 跟 client 的 `/etc/hosts`（`wire:` 宣告），不用再手動組 `wire` 指令。
 
 ```bash
 go run ./cmd/pilot vm-target list
 go run ./cmd/pilot vm-target topology status --topology docs/topologies/freeipa-ha-topology.yaml
 ```
 
-**本輪實測**：
-
-```
-NAME           STATUS   IP             VCPU  MEM(MiB)  DISK(GiB)  CREATED
-ipa-ha-client  running  192.168.122.2  2     2048      30         2026-07-10 11:07:11
-ipa-primary    running  192.168.122.4  2     3072      30         2026-07-10 11:07:11
-ipa-replica    running  192.168.122.3  2     3072      30         2026-07-10 11:07:11
-
-NAME           STATUS   IP             GROUPS        WIRE
-ipa-primary    running  192.168.122.4  ipa_masters   ipa-replica=ipa2.ipa.pilot.internal
-ipa-replica    running  192.168.122.3  ipa_replicas  -
-ipa-ha-client  running  192.168.122.2  ipa_clients   ipa-replica=ipa2.ipa.pilot.internal
-```
-
-三個 node 全數 `running`，沒有任何一筆消失——這正是
-`TestUp_ConcurrentDifferentNames_BothPersist` 在真實 vm-target/libvirt 環境
-下的等價驗證。這一輪只用來驗證平行 `up` 本身（up → status → down），接著
-拆掉重來，§3 起的 FreeIPA 部署/演練沿用另一輪完整跑過的實測（`up` 換成序列
-或平行不影響 FreeIPA 安裝本身的行為，故不重複整套演練）。
-
-> 每次重跑分配到的 IP 不保證相同（依 dnsmasq 當時可用的 lease 而定，也可能
-> 隨平行/循序 `up` 的完成順序而不同）——後面步驟的
-> `-e ipa_server_ip=`/`-e ipa_replica_ip=` 一律照當次 `topology
-> up`/`status` 印出來的 IP 填，不要照抄本檔寫死的數字。
+> **已知環境 gotcha（每次 `up`/`reset` 後都要做，見 §12）**：這個 host 上的
+> `vm-target reset`/`topology reset` 有時會讓 VM 系統時鐘落後真實時間（曾經測到落後
+> 54-90 分鐘），`chronyd` 顯示 `active` 但從未真的同步過。Kerberos 對時鐘偏移 >5 分鐘零容忍，
+> 這會讓 `ipa-client-install`/`ipa-replica-install` 用一個完全無關的錯誤訊息失敗
+> （`ScriptError: Configuration of client side components failed!`）。**每次 `up` 或
+> `reset` 之後、跑任何 FreeIPA playbook 之前**，先校正時鐘：
+>
+> ```bash
+> # AlmaLinux（有 hwclock）
+> go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo hwclock -s
+> go run ./cmd/pilot vm-target exec --name ipa-replica -- sudo hwclock -s
+> # Ubuntu（沒有 hwclock，直接從 host 的 epoch 設定）
+> EPOCH=$(date -u +%s)
+> go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo date -s "@$EPOCH"
+> ```
+>
+> 同一個 host 上，Ubuntu client 的 apt-cacher-ng 快取索引也可能是幾個月前 image 建置時的
+> 舊版本，導致 `apt-get install freeipa-client` 找不到（已被清掉的）舊版套件檔。每次
+> `reset` 這台 Ubuntu client 之後，先手動 `apt-get update` 一次讓索引跟上：
+>
+> ```bash
+> go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo apt-get update -qq
+> ```
 
 ---
 
@@ -184,71 +173,45 @@ ipa-ha-client  running  192.168.122.2  ipa_clients   ipa-replica=ipa2.ipa.pilot.
 ```bash
 go run ./cmd/pilot vm-target run --name ipa-primary --sandbox --sandbox-image pilot-cli:latest \
     playbooks/apply/freeipa-server-apply.yml \
-    -e target_group=all -e ipa_server_ip=192.168.122.4 \
+    -e target_group=all -e ipa_server_ip=<primary-ip-from-vm-target-list> \
     -e @/tmp/ha-test-vault.yaml
 
 go run ./cmd/pilot vm-target verify --name ipa-primary \
     docs/verification/freeipa-server.md --timeout 40
 ```
 
-**本輪實測結果**：
-```
-PLAY RECAP *********************************************************************
-ipa-primary                : ok=18   changed=6    unreachable=0    failed=0    skipped=4    rescued=0    ignored=0
-
-verdict: PASS  (pass=18 fail=0 skip=0)
-```
-每次 `run` 都會自動把完整輸出寫進
-`<vm-dir>/ipa-primary/runs/<timestamp>-freeipa-server-apply.log`（路徑印在
-stderr）——這次是
-`.../ipa-primary/runs/20260710T003410Z-freeipa-server-apply.log`。需要逐字
-複查時直接 `cat` 這個檔案，不用重新用終端機捲軸手抄。
+**本輪實測**：`ok=40 changed=16 failed=0`；verify 20/20 PASS。
 
 ---
 
-## 4. 部署 replica（加入既有 realm）
+## 4. 部署 replica（加入既有 realm，DNS 現在預設跟 primary 一致）
 
-`ipa-replica-install` 會叫 primary 反過來連回這台新 replica 做 conncheck；
-沒有內建 DNS 時 primary 解析不到新節點的 FQDN 就會整個 install 失敗
-（`ERROR: Port check failed! Unable to resolve host name`）。**這一步已經在
-§2 的 `topology up` 裡自動處理過了**（`ipa-primary` 的 spec 宣告了
-`wire: ["ipa-replica=ipa2.ipa.pilot.internal"]`），不需要再手動下
+`ipa-replica-install` 會叫 primary 反過來連回這台新 replica 做 conncheck；§2 的
+`topology up` 已經自動把 replica 的 FQDN/IP pin 進 primary 的 `/etc/hosts`，不需要再手動
 `vm-target wire`。
-
-直接套用 replica apply playbook：
 
 ```bash
 go run ./cmd/pilot vm-target run --name ipa-replica --sandbox --sandbox-image pilot-cli:latest \
     playbooks/apply/freeipa-server-replica-apply.yml \
-    -e target_group=all -e ipa_server_ip=192.168.122.4 -e ipa_replica_ip=192.168.122.5 \
+    -e target_group=all -e ipa_server_ip=<primary-ip> -e ipa_replica_ip=<replica-ip> \
     -e @/tmp/ha-test-vault.yaml
 
-go run ./cmd/pilot vm-target exec --name ipa-replica -- true   # 暖 SSH 連線
 go run ./cmd/pilot vm-target verify --name ipa-replica \
     docs/verification/freeipa-server-replica.md --timeout 40
 ```
 
-**本輪實測結果**：
-```
-PLAY RECAP *********************************************************************
-ipa-replica                 : ok=17   changed=6    unreachable=0    failed=0    skipped=3    rescued=0    ignored=0
+**本輪實測**：`ok=18 changed=6 failed=0`；verify **16/16 PASS**（比舊版多一個 C16：DNS role
+是否依政策生效——`ipa_setup_dns` 現在**預設跟 primary 一樣是 `true`**，見
+`docs/evidence/freeipa-client-ha/2026-09-17-phase2-replica-dns-parity/`，這裡不重複那個
+drill）。
 
-verdict: PASS  (pass=15 fail=0 skip=0)
-```
-（C14/C15 證明雙向拓樸複寫已同步）。transcript：
-`.../ipa-replica/runs/20260710T004030Z-freeipa-server-replica-apply.log`。
-
-> 這一對 playbook（server + server-replica）各自的 `hosts:` 只需要單一目標
-> 自己的 inventory，跨主機的溝通是走 FreeIPA/Kerberos 協定本身（網路層），不是
-> 靠 ansible 在同一個 play 裡同時操作兩台主機——所以這裡**不需要** `run
-> --group`（`topology.yaml` 的 `groups:` 欄位只是給 `topology inventory`
-> 備用，這對 playbook 用不到）。`--group`/`topology inventory` 是給「同一個
-> play 真的要同時對多個 named vm-target 下手」的情境用的（見
-> `.agents/skills/vm-target-spec-testing/references/vm-target-basics.md`）。
+> 舊版本這裡的 replica 預設 `ipa_setup_dns=false`，跟 primary 的 `true` 不一致，形成「只有
+> primary 一台 DNS provider」的 SPOF——**已在 2026-09-17 修掉**，不用再自己記得帶
+> `-e freeipa_setup_dns=true`。
 
 ---
 
-## 5. 建立測試帳號 fixture（跨 host 前置，canonical 做法）
+## 5. 建立測試帳號 fixture
 
 ```bash
 go run ./cmd/pilot vm-target run --name ipa-primary --sandbox --sandbox-image pilot-cli:latest \
@@ -256,95 +219,56 @@ go run ./cmd/pilot vm-target run --name ipa-primary --sandbox --sandbox-image pi
     -e fixtures_target_group=all -e @/tmp/ha-test-vault.yaml
 ```
 
-**本輪實測結果**：`PLAY RECAP ... ok=7 changed=4 failed=0`——建立 `pilotuser`
-+ sudo 規則 `pilot-all`（hostcat=all cmdcat=all `!authenticate`）。transcript：
-`.../ipa-primary/runs/20260710T004920Z-freeipa-client-fixtures.log`。**不要**
-在別處手刻 `ipa user-add`——這是本 repo canonical 的 demo 帳號建立方式
-（`AGENTS.md` §4.1）。
-
-**`--json` 快速 triage 範例**（同一個 playbook 冪等重跑一次，這次不加
-`--sandbox`——`--json` 目前不支援跟 `--sandbox` 疊用，見
-`vm-target-basics.md`；下列輸出取自本檔第一次導入 `--json`/`--sandbox` 那輪
-的實測——`--json`/fixtures playbook 本身跟這次改用 `topology` 無關，行為不變，
-本輪未重跑）：
-
-```bash
-go run ./cmd/pilot vm-target run --name ipa-primary \
-    playbooks/test/fixtures/freeipa-client-fixtures.yml --json \
-    -e fixtures_target_group=all -e @/tmp/ha-test-vault.yaml
-```
-
-**實測結果**：`ipa-primary: ok=7 changed=0 failed=0 unreachable=0
-skipped=0`——一行就看出「這次重跑沒有任何 drift」，比在 §6 之後才用 PLAY RECAP
-反查快很多；同時也順便證實了 fixture playbook 本身是冪等的（`changed=0`）。
-（跑這步會先看到 `ansible-lint` 的預設前置檢查印出既有的 5 個非致命
-style violation——這是既有已知的 lint 雜訊，不影響本次演練，不用理它。）
+**本輪實測**：`ok=7 changed=4 failed=0`——建立 `pilotuser` + sudo 規則 `pilot-all`
+（hostcat=all cmdcat=all `!authenticate`）。**不要**在別處手刻 `ipa user-add`——這是本 repo
+canonical 的 demo 帳號建立方式（`AGENTS.md` §4.1）。
 
 ---
 
-## 6. Enroll client 向 primary + 補上 client 端 failover 設定
+## 6. Enroll client 向兩台 server（H1 基線）——全程沒有手動編輯任何檔案
 
 ```bash
-go run ./cmd/pilot vm-target run --name ipa-ha-client --sandbox --sandbox-image pilot-cli:latest \
+go run ./cmd/pilot vm-target run --name ipa-ha-client \
+    --group freeipa-server=ipa-primary \
+    --group freeipa-server-replica=ipa-replica \
+    --group freeipa-client=ipa-ha-client \
+    --sandbox --sandbox-image pilot-cli:latest \
     playbooks/apply/freeipa-client-apply.yml \
-    -e target_group=all -e ipa_server_ip=192.168.122.4 \
+    -e target_group=freeipa-client \
     -e @/tmp/ha-test-vault.yaml
 ```
 
-**本輪實測結果**：`PLAY RECAP ... ok=23 changed=11 failed=0 skipped=4`。
-transcript：`.../ipa-ha-client/runs/20260710T004948Z-freeipa-client-apply.log`。
+**本輪實測**：`ok=146 changed=21 failed=0`。全程**沒有任何手動 `sed`**——
+`freeipa-server-pool.yml`（算出 `freeipa_server_fqdns=[ipa1, ipa2]`）→
+`ipa-client-install --server=ipa1 --server=ipa2 ...`（Pilot 自己組出重複 `--server`）→
+`freeipa-client-server-failover.yml`（無條件收斂 krb5.conf/sssd.conf 到完整 desired pool）
+一次到位。
 
-replica 的 `/etc/hosts` pin **已經在 §2 的 `topology up` 做完了**（client 的
-spec 宣告了 `wire: ["ipa-replica=ipa2.ipa.pilot.internal"]`），不需要再手動
-`vm-target wire`。確認一下（本輪實測，`# BEGIN/END pilot vm-target wire` 區塊
-乾淨、沒有重複行）：
+驗證 `/etc/hosts`（pool-aware managed block，跟 client 自己的 self-pin 分開)：
 
 ```bash
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- cat /etc/hosts
 ```
 ```
-# BEGIN pilot vm-target wire
-192.168.122.5	ipa2.ipa.pilot.internal
-# END pilot vm-target wire
-192.168.122.2 ipa-ha-client.ipa.pilot.internal ipa-ha-client
-192.168.122.4 ipa1.ipa.pilot.internal ipa1
+192.168.122.6 ipa-ha-client.ipa.pilot.internal ipa-ha-client
+# BEGIN PILOT FREEIPA SERVER POOL
+192.168.122.8 ipa1.ipa.pilot.internal ipa1
+192.168.122.7 ipa2.ipa.pilot.internal ipa2
+# END PILOT FREEIPA SERVER POOL
 ```
 
-⚠ **仍然必要的手動步驟（`wire` 只處理 `/etc/hosts`，見 §14 gotcha）**：
-`freeipa-client-apply.yml` enroll 時 `/etc/krb5.conf`/`sssd.conf` 都只認
-primary 單一伺服器。要讓這台真的能在 primary 掛掉時 failover 到 replica，還是
-得手動補上 replica 的 KDC/admin/kpasswd/ipa_server 設定：
+驗證 sssd.conf/krb5.conf（Pilot 自己寫入,不是手動 sed）：
 
 ```bash
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo bash -c '
-sed -i "s/kdc = ipa1.ipa.pilot.internal:88/kdc = ipa1.ipa.pilot.internal:88\n    kdc = ipa2.ipa.pilot.internal:88/" /etc/krb5.conf
-sed -i "s/admin_server = ipa1.ipa.pilot.internal:749/admin_server = ipa1.ipa.pilot.internal:749\n    admin_server = ipa2.ipa.pilot.internal:749/" /etc/krb5.conf
-sed -i "s/kpasswd_server = ipa1.ipa.pilot.internal:464/kpasswd_server = ipa1.ipa.pilot.internal:464\n    kpasswd_server = ipa2.ipa.pilot.internal:464/" /etc/krb5.conf
-sed -i "s/^ipa_server = _srv_, ipa1.ipa.pilot.internal/ipa_server = _srv_, ipa1.ipa.pilot.internal, ipa2.ipa.pilot.internal/" /etc/sssd/sssd.conf
-systemctl restart sssd
-sss_cache -E
-'
-```
-
-> 因為 `/etc/hosts` 已經由 `topology up` 冪等寫過一次，這裡不再需要舊版那行
-> 冗餘的 `echo ... >> /etc/hosts`——單獨的 krb5/sssd sed 補丁就夠了。
->
-> 這一步的 sed 會在 `kdc =` 那行留一個無害的重複條目（因為 pattern 同時匹配到
-> `master_kdc=` 行裡的子字串），krb5 允許重複 `kdc=`，不影響功能，懶得處理就
-> 留著即可。本輪實測確認：
-
-```
-kdc = ipa1.ipa.pilot.internal:88
-kdc = ipa2.ipa.pilot.internal:88
-master_kdc = ipa1.ipa.pilot.internal:88
-kdc = ipa2.ipa.pilot.internal:88
-admin_server = ipa1.ipa.pilot.internal:749
-admin_server = ipa2.ipa.pilot.internal:749
-kpasswd_server = ipa1.ipa.pilot.internal:464
-kpasswd_server = ipa2.ipa.pilot.internal:464
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo grep ipa_server /etc/sssd/sssd.conf
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo grep "kdc = " /etc/krb5.conf
 ```
 ```
 ipa_server = _srv_, ipa1.ipa.pilot.internal, ipa2.ipa.pilot.internal
+```
+```
+    kdc = ipa1.ipa.pilot.internal:88
+    kdc = ipa2.ipa.pilot.internal:88
 ```
 
 ---
@@ -356,189 +280,208 @@ go run ./cmd/pilot vm-target exec --name ipa-ha-client -- id pilotuser@ipa.pilot
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo -l -U pilotuser
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- \
     bash -c 'printf "%s" "HaTest#Passw0rd123" | kinit admin@IPA.PILOT.INTERNAL && klist -s && echo KINIT_OK && kdestroy'
+go run ./cmd/pilot vm-target verify --name ipa-ha-client docs/verification/freeipa-client.md --timeout 40
 ```
 
-**本輪實測結果（這是後面用來對照「壞了」跟「救回來了」的黃金輸出）**：
-```
-uid=336400003(pilotuser) gid=336400003(pilotuser) groups=336400003(pilotuser)
-User pilotuser may run the following commands on ipa-ha-client:
-    (root) NOPASSWD: ALL
-KINIT_OK
-```
+**本輪實測**：`id`/`sudo -l`/`kinit` 全部 PASS；`pilot vm-target verify` **12/12 PASS**。
 
 ---
 
-## 8. 演練 A：關 primary，確認 client failover 到 replica
+## 8. 演練 H2：關 primary，用「從未查過的 principal」驗證 failover
+
+不要用已經查過的帳號（例如 `admin`/`pilotuser`）當「兩台都掛」判定依據——SSSD 本機快取對
+已查過身分會在離線時繼續回應，容易誤判。先在 primary 建一個這次 drill **專用、之前從沒在
+client 上查過**的帳號：
+
+```bash
+go run ./cmd/pilot vm-target exec --name ipa-primary -- bash -c '
+printf "%s" "HaTest#Passw0rd123" | kinit admin@IPA.PILOT.INTERNAL
+ipa user-add drilluser --first Drill --last User --password <<< $'"'"'DrillPass#456\nDrillPass#456\n'"'"'
+ipa sudorule-add-user pilot-all --users=drilluser
+'
+# 新帳號的密碼是一次性、必須改密——用一次 kinit 順便改成長期密碼
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- bash -c '
+printf "DrillPass#456\nDrillPass#789\nDrillPass#789\n" | kinit drilluser@IPA.PILOT.INTERNAL
+kdestroy
+'
+```
+
+關掉 primary，清票證+快取：
 
 ```bash
 go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo systemctl stop ipa
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo sss_cache -E
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- bash -c 'kdestroy; sudo sss_cache -E'
+```
 
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- id pilotuser@ipa.pilot.internal
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo -l -U pilotuser
+驗證（全部必須 PASS）：
+
+```bash
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- id drilluser@ipa.pilot.internal
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo -l -U drilluser
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- \
-    bash -c 'printf "%s" "HaTest#Passw0rd123" | kinit admin@IPA.PILOT.INTERNAL && echo KINIT_OK'
+    bash -c 'printf "DrillPass#789" | kinit drilluser@IPA.PILOT.INTERNAL && echo KINIT_OK'
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- dig @<replica-ip> _kerberos._udp.ipa.pilot.internal SRV +short
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo sssctl domain-status ipa.pilot.internal
 ```
 
-**本輪實測結果**：`id`/`sudo -l`/`kinit` 全部照樣成功；`sssctl domain-status`
-輸出：
-```
-Online status: Online
+**本輪實測**：全部 PASS（`sssctl domain-status` 顯示 `Active servers: IPA: ipa2...`，client
+已切去 replica）。
 
-Active servers:
-IPA: ipa2.ipa.pilot.internal
-
-Discovered IPA servers:
-- ipa1.ipa.pilot.internal
-- ipa2.ipa.pilot.internal
-```
-——client 已經切去 replica。
+> **本輪踩到的 gotcha**：`sudo -l -U drilluser` 第一次仍回報「not allowed」，即使
+> `sudorule-add-user` 早就成功且已複寫到兩台（用 `ipa sudorule-show pilot-all` 在 replica 上
+> 確認過)。單靠 `sss_cache -E` 沒能讓 SSSD 撿到這個「剛剛才加進去」的 sudo 規則成員——要
+> `sudo systemctl stop sssd && sudo rm -rf /var/lib/sss/db/* && sudo systemctl start sssd`
+> 整個重建快取才生效。這是 SSSD sudo 規則快取的既有限制，跟 primary 是否掛掉無關（同樣的坑
+> 在 Phase 3 對 `pilotuser` 也踩過一次）；也順便證明了：即使快取整個歸零，client 仍然能只靠
+> 活著的 replica 完整重建身分/sudo/DNS 資訊。
 
 ---
 
-## 9. 演練 B：復原 primary、關 replica，對稱驗證
+## 9. 演練 H3：復原 primary、關 replica，對稱驗證
 
 ```bash
 go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo systemctl start ipa
 go run ./cmd/pilot vm-target exec --name ipa-replica -- sudo systemctl stop ipa
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo sss_cache -E
-
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- id pilotuser@ipa.pilot.internal
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo -l -U pilotuser
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- bash -c '
+sudo systemctl stop sssd; sudo rm -rf /var/lib/sss/db/*; sudo systemctl start sssd
+'
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- id drilluser@ipa.pilot.internal
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo -l -U drilluser
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- \
     bash -c 'printf "%s" "HaTest#Passw0rd123" | kinit admin@IPA.PILOT.INTERNAL && echo KINIT_OK'
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- dig @<primary-ip> _kerberos._udp.ipa.pilot.internal SRV +short
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo sssctl domain-status ipa.pilot.internal
 ```
 
-**本輪實測結果**：同演練 A，但 `Active servers` 變回 `ipa1.ipa.pilot.internal`。
+**本輪實測**：同演練 H2，但 `Active servers` 變回 `ipa1.ipa.pilot.internal`——完全對稱。
 
 ---
 
-## 10. 演練 C：兩台都關，確認真的無法登入
+## 10. 演練 H4：兩台都關，確認真的無法登入；復原後不重跑 Pilot 就自動恢復
 
 ```bash
 go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo systemctl stop ipa
-go run ./cmd/pilot vm-target exec --name ipa-replica -- sudo systemctl stop ipa
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo sss_cache -E
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- bash -c 'kdestroy; sudo sss_cache -E'
 
 # 權威證明：kinit 沒有離線路徑，兩台都掛必定立即失敗
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- \
-    timeout 20 bash -c 'printf "%s" "HaTest#Passw0rd123" | kinit admin@IPA.PILOT.INTERNAL; echo "rc=$?"'
+    timeout 20 bash -c 'printf "DrillPass#789" | kinit drilluser@IPA.PILOT.INTERNAL; echo "rc=$?"'
 
 # 對照組：從未查過的身分——沒有任何快取可用，必定失敗
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- \
     bash -c 'id neverseenuser@ipa.pilot.internal; echo "rc=$?"'
 
 # 誠實補充：已快取過的身分/sudo 規則，離線期間仍會回應（SSSD 設計，不是 bug）
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- id pilotuser@ipa.pilot.internal
-go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo -l -U pilotuser
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- id drilluser@ipa.pilot.internal
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo -l -U drilluser
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo sssctl domain-status ipa.pilot.internal
 ```
 
-**本輪實測結果**：
+**本輪實測**：
 ```
 kinit: Cannot contact any KDC for realm 'IPA.PILOT.INTERNAL' while getting initial credentials
 rc=1
 id: 'neverseenuser@ipa.pilot.internal': no such user
 rc=1
 ```
-`id pilotuser`/`sudo -l -U pilotuser` 仍會成功（本機快取回應）；
-`sssctl domain-status` 顯示 `Online status: Offline`（`Active servers` 仍留著
-最後一次成功連上的 `ipa1.ipa.pilot.internal`，是快取殘留，不代表還連得上）。
+已快取身分/sudo 規則仍會成功；`sssctl domain-status` 顯示 `Online status: Offline`。
 
-**`kinit` 失敗是這場演練的判定依據**：兩台都掛 = 無法取得任何新的 Kerberos
-票證 = 無法登入。已快取身分仍可查詢是 SSSD 離線韌性設計，不代表演練失敗。
-
----
-
-## 11. 復原、確認恢復正常
+**復原、確認不用重跑 Pilot：**
 
 ```bash
 go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo systemctl start ipa
 go run ./cmd/pilot vm-target exec --name ipa-ha-client -- \
-    bash -c 'printf "%s" "HaTest#Passw0rd123" | kinit admin@IPA.PILOT.INTERNAL && echo KINIT_OK'
+    bash -c 'printf "%s" "HaTest#Passw0rd123" | kinit admin@IPA.PILOT.INTERNAL && echo KINIT_OK_AUTO_RECOVERED'
+```
+
+**本輪實測**：`KINIT_OK_AUTO_RECOVERED`——primary 一恢復立刻可登入，全程沒有重跑任何
+`freeipa-client-apply.yml`。
+
+> **Gotcha**：`sssctl domain-status` 的 `Online status` 欄位在 `kinit` 已經成功之後仍可能
+> 顯示 `Offline` 好一陣子（本輪甚至連另一台也復原了都還沒跳回來），要 `sudo systemctl
+> restart sssd` 才會馬上刷新。**判斷「有沒有恢復」要用真的 `kinit`/`id`，不要只看這個欄位**。
+
+記得把 replica 也啟動回來，恢復完整 HA 基線：
+
+```bash
 go run ./cmd/pilot vm-target exec --name ipa-replica -- sudo systemctl start ipa
-
-go run ./cmd/pilot vm-target verify --name ipa-primary docs/verification/freeipa-server.md --timeout 40
-go run ./cmd/pilot vm-target verify --name ipa-replica docs/verification/freeipa-server-replica.md --timeout 40
 ```
-
-**本輪實測結果**：`KINIT_OK`（primary 一恢復立刻可登入）；兩份 verify 都回到
-**PASS**（`freeipa-server.md` pass=18、`freeipa-server-replica.md` pass=15），
-確認整場演練沒有把任何東西跑壞。
 
 ---
 
-## 12. Cluster reset：驗證整台叢集能回到乾淨狀態重跑
-
-> 這一步會把 3 台 VM 的 disk **全部**復原回 `up` 剛開完機、FreeIPA 都還沒裝
-> 的狀態——包含上面 §11 剛裝回去、驗過 PASS 的 FreeIPA 安裝本身。所以必須
-> 放在 §11 確認完「演練沒把東西跑壞」**之後**、真正 `topology down` 銷毀
-> VM **之前**：這裡只是示範/驗證「叢集能不能整批回到乾淨狀態」這個能力本
-> 身，不是接著要再重跑一次完整部署（真的要重跑，直接接 §3 就好，本輪不
-> 需要）。
-
-`snapshot`/`rollback`/`reset` 原本都是單一 VM 的操作——要測「
-`ipa-replica-install` 從乾淨狀態能不能重跑」，得對 3 台 VM 各自
-`reset`/`rollback`，還要記得每次重做 §2 的 `wire`（`reset` 用的 `clean`
-快照是 `up` 剛開完機、`wire` 跑之前拍的，所以單機 `reset` 會連帶把
-`/etc/hosts` 的 wiring 也一起復原掉）。`vm-target topology
-snapshot/rollback/reset`（見 `cmd/pilot/cmd/vm_target_topology.go`）把這件事
-變成一個指令：對 spec 裡每台 node 平行做同一個操作，`rollback`/`reset`
-完成後再自動對每個宣告了 `wire:` 的 node 重跑一次 wiring（`snapshot`
-不需要，因為它不動 disk 狀態）。
+## 11. 演練 H5：primary 掛著的時候幫全新 client 上線
 
 ```bash
-# 印證：先確認目前的 wiring、埋一個 marker 檔證明 disk 真的會被復原
-go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo cat /etc/hosts
-go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo touch /root/pre-reset-marker
+go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo systemctl stop ipa
+go run ./cmd/pilot vm-target reset --name ipa-ha-client
+# 記得先校正時鐘 + apt-get update（見 §2 的 gotcha）
 
-go run ./cmd/pilot vm-target topology reset --topology docs/topologies/freeipa-ha-topology.yaml
-
-# 驗證：marker 檔應該消失（disk 真的回到乾淨開機狀態），wiring 應該自動補回來
-go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo ls -la /root/pre-reset-marker
-go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo cat /etc/hosts
-```
-
-**本輪實測輸出**：
-```
-✓ reset 3 node(s) to "clean" (pristine post-boot state)
-✓ wired ipa2.ipa.pilot.internal -> ipa-primary (192.168.122.4)
-✓ wired ipa2.ipa.pilot.internal -> ipa-ha-client (192.168.122.4)
-```
-```
-ls: cannot access '/root/pre-reset-marker': No such file or directory
-```
-```
-127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
-::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
-# BEGIN pilot vm-target wire
-192.168.122.4	ipa2.ipa.pilot.internal
-# END pilot vm-target wire
+go run ./cmd/pilot vm-target run --name ipa-ha-client \
+    --group freeipa-server=ipa-primary \
+    --group freeipa-server-replica=ipa-replica \
+    --group freeipa-client=ipa-ha-client \
+    --sandbox --sandbox-image pilot-cli:latest \
+    playbooks/apply/freeipa-client-apply.yml \
+    -e target_group=freeipa-client \
+    -e @/tmp/ha-test-vault.yaml
 ```
 
-Marker 檔消失，證明 `reset` 是真的把 disk 復原到 `up` 剛開完機的那一刻——連
-FreeIPA server/replica 安裝過程寫進系統的東西（例如這台先前跑過安裝時，
-`ipa-server-install` 自己在 `/etc/hosts` 加的 `ipa1.ipa.pilot.internal`
-自身主機名那一行，以及 §11 剛驗證 PASS 的整個 FreeIPA 安裝）都一併復原
-掉了，不是只清 vm-target 自己寫的東西。`wire` 區塊在 reset 後自動重新
-出現，因為 `topology reset` 在每個 node 都 `Reset` 完之後，會自動對宣告
-了 `wire:` 的 node 重跑一次 `wireTargetToPeers`（跟 `topology up` 收尾那段
-完全同一支函式）。
+**本輪實測**：`ok=144 changed=21 failed=0`——enrollment 透過 replica 成功。**關鍵驗證**：
 
-**下一輪要重測 `ipa-replica-install` 從乾淨狀態能不能重跑，就是這一步**：
 ```bash
-go run ./cmd/pilot vm-target topology reset --topology docs/topologies/freeipa-ha-topology.yaml
-# 3 台都回到剛開完機、wiring 也已補回的狀態 -> 直接從 §3 重新走一次部署
+go run ./cmd/pilot vm-target exec --name ipa-ha-client -- sudo grep ipa_server /etc/sssd/sssd.conf
 ```
-不用再手動對 3 台個別 `reset` + 重跑 `wire` 兩次（primary→client、
-client→replica）。因為這一步已經把 FreeIPA 清掉了，本輪不再重跑 §3-§10，
-直接接 §13 teardown 收尾。
+```
+ipa_server = _srv_, ipa1.ipa.pilot.internal, ipa2.ipa.pilot.internal
+```
+
+即使 `ipa1` 在 enroll 當下打不通，desired pool 仍然是 `[ipa1, ipa2]` 兩台都在——這是
+`freeipa-client-server-failover.yml` 無條件在 enrollment 後執行的結果（見 Phase 0 的發現：
+`ipa-client-install` 自己只會把打不通的 server 整個從設定檔拿掉，不會保留；沒有這個
+reconciliation 步驟的話，H5 一定會失敗）。`kinit`/`id` 透過 replica 正常；primary 復原後
+`kinit` 依然正常，rerun `changed=0`。
+
+```bash
+go run ./cmd/pilot vm-target exec --name ipa-primary -- sudo systemctl start ipa
+```
 
 ---
 
-## 13. 收尾 Teardown
+## 12. 已知未在本輪涵蓋的項目
+
+- **H6（既有單機 client 加入 replica 後原地收斂成 HA）**：已驗證,但屬於 Phase 4 的獨立
+  drill,見 `docs/evidence/freeipa-client-ha/2026-09-17-phase4-existing-client-reconciliation/`，
+  本檔不重複。
+- **H7（新增第三台 replica）/ H8（移除 replica）**：需要第三台 FreeIPA server VM（H7）或完整
+  decommission 流程（H8），本輪礙於時間/資源沒有跑活體 3-VM 版本。Phase 1 的
+  server-pool 事實運算邏輯（多 replica 需各自 `freeipa_replica_fqdn` 才能通過)已經用合成
+  3-node inventory 跑過真實 ansible-playbook（見
+  `docs/evidence/freeipa-client-ha/2026-09-17-phase1-server-pool/`），但沒有活體驗證過
+  「新增/移除一台後 client rerun 正確更新清單」這件事本身。
+- **Phase 6（contract provider pool，讓「primary down + replica up」不被 Pilot 自己的
+  site-wide 自動化部署誤判成 dependency unavailable）**：這次完全沒做，設計方向已經在
+  `docs/tmp/now/freeipa-client-ha-spec.md` 的 Phase 6 章節想清楚，留給之後。本檔證明的是
+  「client 本身的 HA runtime」+「Pilot 對已選定 client 的 Day-2 CLI 操作」都撐得住 primary
+  掛掉,不是「site-wide 自動化部署會不會跳過 freeipa-client」這個更上層的問題。
+- **S2 的「primary 本身完全沒有 integrated DNS」**：本輪測的是 client 端
+  `-e freeipa_client_register_dns=false`（client 不需要 DNS 也能正常運作),沒有另外搭一台
+  真的關掉 DNS 的 primary。
+
+---
+
+## 13. Cluster reset：驗證整台叢集能回到乾淨狀態重跑
+
+```bash
+go run ./cmd/pilot vm-target topology reset --topology docs/topologies/freeipa-ha-topology.yaml
+```
+
+`topology reset` 對 3 台 VM 平行復原到 `up` 剛開完機的狀態，並自動對宣告了 `wire:` 的 node
+重新跑一次 wiring——不用再手動對每台個別 `reset` + 補 `wire`。記得復原後照 §2 的 gotcha
+校正時鐘、跑一次 `apt-get update`。
+
+---
+
+## 14. 收尾 Teardown
 
 ```bash
 go run ./cmd/pilot vm-target topology down --topology docs/topologies/freeipa-ha-topology.yaml
@@ -546,32 +489,24 @@ go run ./cmd/pilot vm-target list   # 確認為空
 rm -f /tmp/ha-test-vault.yaml
 ```
 
-**本輪實測**：`topology down` 一個指令拆掉全部三台（取代舊版 3 條個別的
-`vm-target down`）：
-```
-✓ ipa-primary down
-✓ ipa-replica down
-✓ ipa-ha-client down
-(no targets — `pilot vm-target up` to start one)
-```
-
 **這步過了，HA 演練就算成功。**
 
 ---
 
-## 14. 已知 gotcha 一覽（跑之前先知道，少走冤枉路）
+## 15. 已知 gotcha 一覽（跑之前先知道，少走冤枉路）
 
 | 症狀 | 原因 | 解法 |
 |---|---|---|
-| `ipa-replica-install` 失敗：`ScriptError: NTP configuration cannot be updated during promotion` | promotion 模式（client-then-promote）下 `ipa-replica-install` 完全不接受任何 NTP 旗標；NTP 已經在 `ipa-client-install` 那一步決定過了 | 已修進 `freeipa-server-replica-apply.yml`——promote 步驟不再傳 `--no-ntp`。若你手動跑 `ipa-replica-install` 也一樣，別帶 NTP 旗標 |
-| `ipa-replica-install` 失敗：`ERROR: Port check failed! Unable to resolve host name '<replica-fqdn>'` | primary 在 conncheck 時會反過來連回新 replica，沒有內建 DNS 時 primary 解析不到新節點 | 見 §2：`docs/topologies/freeipa-ha-topology.yaml` 裡 `ipa-primary` 節點的 `wire:` 宣告，`topology up` 會自動把新 replica 的 FQDN/IP 冪等 pin 進 primary 的 `/etc/hosts`（不需要再手動下 `vm-target wire`） |
-| `ldapsearch -x` 查 `cn=masters,cn=ipa,cn=etc,...` 回 `result: 0 Success` 但零筆資料，看起來像複寫沒同步 | 這個系統容器**沒有**匿名讀 ACI（不像 `ou=sudoers`）,匿名查詢會「成功但沒資料」而不是報錯,很容易誤判 | 改用 `ldapsearch -Y EXTERNAL -H ldapi://%2Frun%2F<389-ds instance>.socket ...` 以 root autobind(已修進 spec C14/C15 與 apply playbook 的內部健康檢查) |
-| `sudo -l` 對任何人永遠回 `not allowed`，看起來像 sudo 規則沒生效 | `freeipa-client-apply.yml` 把 `sudo` 塞進 SSSD 的 `services=` 這行，跟現代 SSSD（≥2.3）預設的 socket-activated sudo responder 衝突，`sssd-sudo.socket` 直接啟動失敗（`systemctl status sssd-sudo.socket` 會看到 `Misconfiguration found for the sudo responder`） | 已修：`services=` 拿掉 `sudo`，交給 socket activation。若你在別的環境撞到同症狀，檢查 `systemctl status sssd-sudo.socket` 是不是 `failed` |
-| 只 pin 了 client 的 `/etc/hosts`（不管是 `topology up` 自動做的還是手動 `wire`），關掉 primary 後 client 卻卡住不會切到 replica（`sssctl domain-status` 一直顯示 `Active: ipa1` 且 `Offline`） | `/etc/krb5.conf` 的 `kdc=` 與 `sssd.conf` 的 `ipa_server=` enroll 時都寫死成單一伺服器，光靠 DNS 解析（`/etc/hosts`）不會讓這兩份設定自動變成多值；**`wire`（不論是 `topology up` 自動觸發還是手動呼叫）只處理 `/etc/hosts`，不處理 krb5/sssd 設定** | 見 §6：krb5.conf 的 `kdc=`/`admin_server=`/`kpasswd_server=` 以及 `sssd.conf` 的 `ipa_server=` 還是要手動 sed 補上多值、重啟 `sssd`——`vm-target topology` 目前沒有把這段收進宣告式流程,因為它是 playbook/OS 設定檔層級的細節,不是 vm-target 生命週期層級的事 |
-| 關掉 server 後 `id`/`sudo -l` 卻還是成功，一度誤判「HA 沒生效」或「根本沒關掉」 | SSSD 本機快取（`cache_credentials=True`）對**已經查過**的身分/sudo 規則會在離線時繼續回應，這是設計行為 | 別用 `id`/`sudo -l` 當「兩台都掛」的判定依據；改用 `kinit`（見 §10，Kerberos 取票沒有離線路徑，一定會如實失敗），或查一個從未查過的身分（也會如實失敗） |
-| `pilot vm-target run --name <某台> ...` 顯示 `skipping: no hosts matched` | apply playbook 的 `hosts:` 預設是角色 group 名（`freeipa-server`/`freeipa-server-replica`/`freeipa-client`），vm-target 單機 inventory 只有同名的 **host**、沒有這個 **group** | 一律加 `-e target_group=all` |
-| `--sandbox` 模式下 `-e @/tmp/xxx-vault.yaml` 報 `Unable to retrieve file contents ... No such file or directory` | `ansible-playbook` 是在容器**裡面**跑的，`@path` 指的是 host 路徑，容器一開始只 mount 了 SSH key、docker cp 了 playbook/inventory，vault 檔案本來沒被複製進去 | 已修：`vtRunViaContainer` 現在會自動偵測 `-e @path`/`-e@path`/`--extra-vars=@path` 這三種寫法，把對應的 host 檔案 `docker cp` 進容器並改寫成容器內路徑，不需要手動處理 |
-| `vm-target topology up` 印出 `waiting for IP ...`（`stale pre-existing lease ...` 或 `no active lease for MAC ... yet`）卡個 10–20 秒 | 同一台 host 上跑過多輪測試，dnsmasq 的 lease 檔還留著前一輪同一個 MAC 的舊 lease；或這一輪是全新 MAC，dnsmasq 還沒發出租約 | 正常現象，不是錯誤；`topology up` 現在對每個 node 平行等待，其中一台在等 lease 不會擋住其他台 |
+| `vm-target reset`/`up` 後 `ipa-client-install`/`ipa-replica-install` 失敗，錯誤訊息很籠統（`Configuration of client side components failed!`） | VM 系統時鐘落後真實時間（曾測到落後 54-90 分鐘），`chronyd` 顯示 `active` 但從未真的同步過；Kerberos 對時鐘偏移零容忍 | 每次 `up`/`reset` 後先校正時鐘：AlmaLinux `sudo hwclock -s`，Ubuntu `sudo date -s "@$(date -u +%s)"`（見 §2） |
+| Ubuntu client 上 `apt-get install freeipa-client` 因為某個依賴套件 404 而失敗 | image 建置當下快取的 apt 索引已經過時，索引裡記的套件版本早被上游清掉 | `reset` 後先手動 `sudo apt-get update` 一次（見 §2） |
+| 剛用 `ipa sudorule-add-user` 幫某帳號加了 sudo 規則，client 上 `sudo -l -U` 卻回報 not allowed，即使 `sss_cache -E` 也沒用 | SSSD 的 sudo 規則快取對「剛發生的成員異動」有時無法只靠 `sss_cache -E` 撿到，即使兩台 server 都已經複寫完成 | `sudo systemctl stop sssd && sudo rm -rf /var/lib/sss/db/* && sudo systemctl start sssd` 整個重建快取（見 §8） |
+| `sssctl domain-status` 的 `Online status` 在 server 明明已經復原、`kinit` 也已經成功之後，還是顯示 `Offline` 好一陣子 | 這個欄位不是即時的，落後於真實連線狀態 | 判斷「有沒有恢復」要用真的 `kinit`/`id`，不要只看這個欄位；要馬上刷新可以 `sudo systemctl restart sssd`（見 §10） |
+| 關掉 server 後 `id`/`sudo -l` 卻還是成功，一度誤判「HA 沒生效」或「根本沒關掉」 | SSSD 本機快取（`cache_credentials=True`）對**已經查過**的身分/sudo 規則會在離線時繼續回應，這是設計行為 | 別用 `id`/`sudo -l` 當「兩台都掛」的判定依據；改用 `kinit`（Kerberos 取票沒有離線路徑，一定會如實失敗），或查一個從未查過的身分（也會如實失敗），見 §10 |
+| `ipa-replica-install` 失敗：`ERROR: Port check failed! Unable to resolve host name '<replica-fqdn>'` | primary 在 conncheck 時會反過來連回新 replica，沒有內建 DNS 時 primary 解析不到新節點 | `docs/topologies/freeipa-ha-topology.yaml` 裡 `ipa-primary` 節點的 `wire:` 宣告，`topology up` 會自動把新 replica 的 FQDN/IP 冪等 pin 進 primary 的 `/etc/hosts`（不需要再手動下 `vm-target wire`） |
+| `sudo -l` 對任何人永遠回 `not allowed`，看起來像 sudo 規則沒生效（首次 enrollment 時） | `ipa-client-install` 在 Ubuntu 上若把 `sudo` 塞進 SSSD 的 `services=` 這行，會跟現代 SSSD（≥2.3）預設的 socket-activated sudo responder 衝突 | 已修：`freeipa-client-apply.yml` 的 `services=` 拿掉 `sudo`，交給 socket activation |
+| `pilot vm-target run --name <某台> ...` 顯示 `skipping: no hosts matched` | apply playbook 的 `hosts:` 預設是角色 group 名（`freeipa-server`/`freeipa-server-replica`/`freeipa-client`），單一 `--name` 的 vm-target inventory 只有同名的 **host**、沒有這個 **group** | 一律加 `-e target_group=all`（單台 apply）或 `-e target_group=freeipa-client`（配合 `--group` 组出多角色 inventory 時，見 §6） |
+| `--sandbox` 模式下 `-e @/tmp/xxx-vault.yaml` 報 `Unable to retrieve file contents` | `ansible-playbook` 是在容器**裡面**跑的，vault 檔案本來沒被複製進去 | 已修：`vtRunViaContainer` 會自動偵測 `-e @path` 形式，把對應的 host 檔案 `docker cp` 進容器 |
 
-更完整的逐字真實輸出（PLAY RECAP、verify ndjson、`sssctl`/`kinit` 原始輸出）見
-`docs/verification/freeipa-server-replica.md` §3/§9。
+更完整的逐字真實輸出見
+`docs/evidence/freeipa-client-ha/2026-09-17-phase7-full-drill/`（本輪）與
+`docs/evidence/freeipa-client-ha/`（Phase 0-5 各自的子目錄）。
