@@ -376,12 +376,145 @@ func TestRegression_FreeipaClientApplyPlaybook_HasCloudInitEtcHostsGuard(t *test
 	if guardIdx < 0 {
 		t.Fatalf("playbook must include tasks/cloud-init-etc-hosts-guard.yml")
 	}
-	pinIdx := strings.Index(playbook, `regexp: '\s{{ ipa_server_fqdn | regex_escape }}(\s|$)'`)
+	// docs/tmp/now/freeipa-client-ha-spec.md §6 Phase 3: the single-line
+	// lineinfile pin was replaced by a pool-aware blockinfile block (see
+	// TestRegression_FreeipaClientApplyPlaybook_PoolAwareHostsBlock below)
+	// — the guard-before-pin ordering invariant still applies to that task.
+	pinIdx := strings.Index(playbook, "PILOT FREEIPA SERVER POOL")
 	if pinIdx < 0 {
-		t.Fatalf("playbook must still pin the FreeIPA server FQDN in /etc/hosts")
+		t.Fatalf("playbook must still pin the FreeIPA server pool in /etc/hosts")
 	}
 	if guardIdx > pinIdx {
-		t.Errorf("cloud-init-etc-hosts-guard.yml must be included BEFORE the /etc/hosts server-FQDN pin, else a reboot between guard-install and pin could still wipe an unpinned host")
+		t.Errorf("cloud-init-etc-hosts-guard.yml must be included BEFORE the /etc/hosts server-pool pin, else a reboot between guard-install and pin could still wipe an unpinned host")
+	}
+}
+
+// TestRegression_FreeipaClientApplyPlaybook_PoolAwareHostsBlock locks spec
+// §6: the FreeIPA server pool is pinned into /etc/hosts via a managed
+// blockinfile block (kept separate from the client's own self-pin line),
+// and §6.1's legacy migration removes the OLD single unmarked primary line
+// — but ONLY before the pool-aware block exists. Without that gate, the
+// anchored legacy-removal regex matches the block's own primary line
+// (same "<ip> <fqdn> <shortname>" text, just inside the markers) and
+// fights the blockinfile task every single run — confirmed live via
+// vm-target: `changed` on every idempotent rerun, never settling to
+// changed=0, until the legacy-removal task was gated on the block's
+// absence.
+func TestRegression_FreeipaClientApplyPlaybook_PoolAwareHostsBlock(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-client-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	if !strings.Contains(playbook, "ansible.builtin.blockinfile") {
+		t.Errorf("server pool /etc/hosts pin must use blockinfile, not a per-line lineinfile")
+	}
+	if !strings.Contains(playbook, "freeipa_server_pool_active") {
+		t.Errorf("the hosts block must be built from freeipa_server_pool_active (single mode -> 1 entry, ha mode -> full pool)")
+	}
+
+	migrationIdx := strings.Index(playbook, "remove legacy unmarked primary pin")
+	if migrationIdx == -1 {
+		t.Fatalf("could not find the legacy migration task")
+	}
+	migrationBlock := playbook[migrationIdx:]
+	whenIdx := strings.Index(migrationBlock, "when:")
+	whenEnd := whenIdx + 100
+	if whenEnd > len(migrationBlock) {
+		whenEnd = len(migrationBlock)
+	}
+	if whenIdx == -1 || !strings.Contains(migrationBlock[whenIdx:whenEnd], "freeipa_hosts_pool_block_present.rc != 0") {
+		t.Errorf("legacy migration removal must be gated on the pool-aware block not already existing (spec §6.1) — otherwise it fights the blockinfile task's own primary-member line every run")
+	}
+}
+
+// TestRegression_FreeipaClientApplyPlaybook_DynamicServerArgv locks spec §4:
+// ipa-client-install's --server argv is built FROM freeipa_server_fqdns
+// (Phase 1's pool computation), not a single hard-coded
+// `--server={{ ipa_server_fqdn }}`. Single mode still collapses to exactly
+// one --server flag (byte-for-byte the same enrollment argv as before this
+// change), verified live in S1 (docs/evidence/freeipa-client-ha/
+// 2026-09-17-phase3-client-enrollment/). Also locks that --fixed-primary is
+// never passed (spec §4.2 — SSSD must keep _srv_ discovery as a fallback
+// alongside the fixed server list).
+func TestRegression_FreeipaClientApplyPlaybook_DynamicServerArgv(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-client-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	if strings.Contains(playbook, `"--server={{ ipa_server_fqdn }}"`) {
+		t.Errorf("ipa-client-install must not hard-code a single --server=<primary> argument — build it from freeipa_server_fqdns instead (spec §4)")
+	}
+	if !strings.Contains(playbook, "freeipa_server_fqdns | map('regex_replace', '^(.*)$', '--server=\\1')") {
+		t.Errorf("ipa-client-install argv must build repeated --server flags from freeipa_server_fqdns")
+	}
+	if strings.Contains(playbook, "--fixed-primary") {
+		t.Errorf("ipa-client-install must never pass --fixed-primary (spec §4.2)")
+	}
+}
+
+// TestRegression_FreeipaClientApplyPlaybook_ServerPoolWiredIn locks that
+// freeipa-server-pool.yml (Phase 1) is actually included by this playbook
+// — Phase 1 built the task but deliberately left it unwired; Phase 3 must
+// wire it in for real. Also locks the freeipa_domain var-name-collision fix
+// (spec-unrelated but load-bearing): passing `vars: {freeipa_domain: "{{
+// ipa_domain }}"}` directly on the include_tasks call creates a same-named
+// shadow of freeipa_domain inside the included task, and ipa_domain is
+// ITSELF defined as `{{ freeipa_domain | default(...) }}` — confirmed live
+// this causes "Recursive loop detected in template: maximum recursion depth
+// exceeded". The fix routes through an intermediate set_fact under a
+// distinct name first.
+func TestRegression_FreeipaClientApplyPlaybook_ServerPoolWiredIn(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-client-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	if !strings.Contains(playbook, "tasks/freeipa-server-pool.yml") {
+		t.Fatalf("playbook must include tasks/freeipa-server-pool.yml (Phase 1 task must be wired in by Phase 3)")
+	}
+	// The include_tasks call's own `vars:` must map freeipa_domain to the
+	// intermediate fact, not directly back to ipa_domain (which would
+	// recurse — see the function doc comment for what that looks like).
+	includeIdx := strings.Index(playbook, "tasks/freeipa-server-pool.yml")
+	includeBlock := playbook[includeIdx:min(includeIdx+400, len(playbook))]
+	if !strings.Contains(includeBlock, "freeipa_domain: \"{{ freeipa_server_pool_domain_input }}\"") {
+		t.Errorf("include_tasks vars must map freeipa_domain to the intermediate freeipa_server_pool_domain_input fact, not directly to ipa_domain (that recurses — confirmed live)")
+	}
+	if !strings.Contains(playbook, "freeipa_server_pool_domain_input: \"{{ ipa_domain }}\"") {
+		t.Errorf("must resolve the domain input via a set_fact (freeipa_server_pool_domain_input) BEFORE the include_tasks call, to avoid the freeipa_domain/ipa_domain recursion")
+	}
+}
+
+// TestRegression_FreeipaClientApplyPlaybook_ReachabilityGate locks spec §5:
+// a read-only TCP probe of every active pool member, failing closed only
+// when NONE are reachable (matching the installer's own tolerance for a
+// partially-unreachable pool, confirmed live in Phase 0 — see H4/H5 in the
+// acceptance matrix).
+func TestRegression_FreeipaClientApplyPlaybook_ReachabilityGate(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-client-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	if !strings.Contains(playbook, "freeipa_server_pool_reachable_fqdns") {
+		t.Fatalf("playbook must compute the reachable subset of the active pool")
+	}
+	gateIdx := strings.Index(playbook, "at least one FreeIPA server pool member reachable")
+	if gateIdx == -1 {
+		t.Fatalf("could not find the reachability gate")
+	}
+	if !strings.Contains(playbook[gateIdx:gateIdx+400], "(freeipa_server_pool_reachable_fqdns | default([]) | length) > 0") {
+		t.Errorf("reachability gate must fail closed only when the reachable subset is empty (>=1 reachable must be enough, per spec §5's HA decision table)")
 	}
 }
 

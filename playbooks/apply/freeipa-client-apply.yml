@@ -156,6 +156,39 @@
           {{ ansible_distribution_version }} ({{ ansible_os_family }}).
       tags: [always]
 
+    # Server pool + HA/single topology mode (docs/tmp/now/freeipa-client-ha-spec.md
+    # §3): computes freeipa_server_pool(_active)/freeipa_server_fqdns/
+    # freeipa_server_ips/freeipa_dns_server_ips/freeipa_client_topology_mode_effective
+    # from inventory role-group membership. In single mode (the default when
+    # there is no freeipa-server-replica host) this collapses to exactly one
+    # FQDN — the same primary this playbook has always enrolled against —
+    # so existing single-server inventories see no behavior change.
+    # freeipa-server-pool.yml's own contract input is the RAW freeipa_domain
+    # var (shared verbatim by every consumer); this playbook's `ipa_domain`
+    # has already resolved it against the built-in default, so pass that
+    # resolved value through explicitly — otherwise a deployment that never
+    # sets freeipa_domain anywhere would leave it genuinely undefined and
+    # error inside the included task's Jinja (`'ipa1.' ~ freeipa_domain`).
+    # MUST go through an intermediate set_fact under a DISTINCT name first:
+    # passing `vars: {freeipa_domain: "{{ ipa_domain }}"}` directly on the
+    # include_tasks call creates a same-named shadow of `freeipa_domain`
+    # inside the included task's scope, and `ipa_domain` is ITSELF defined
+    # as `{{ freeipa_domain | default(...) }}` — Jinja then re-resolves
+    # `ipa_domain` under the NEW local `freeipa_domain`, which points back
+    # at `ipa_domain`: infinite recursion (confirmed live: "Recursive loop
+    # detected in template: maximum recursion depth exceeded"). A concrete
+    # fact (evaluated once, no longer a lazy template) breaks the cycle.
+    - name: "FreeIPA server pool — resolve domain input for the shared task (avoid var-name collision)"
+      ansible.builtin.set_fact:
+        freeipa_server_pool_domain_input: "{{ ipa_domain }}"
+      tags: [always]
+
+    - name: "FreeIPA server pool — compute desired pool + effective topology mode"
+      ansible.builtin.include_tasks: tasks/freeipa-server-pool.yml
+      vars:
+        freeipa_domain: "{{ freeipa_server_pool_domain_input }}"
+      tags: [always]
+
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
         that:
@@ -256,11 +289,51 @@
         create: false
       tags: [freeipa-client, C1]
 
-    - name: "FreeIPA client — pin the FreeIPA server {{ ipa_server_fqdn }} to {{ ipa_server_ip }} in /etc/hosts"
+    # Legacy migration (spec §6.1): remove the OLD single unmarked primary
+    # pin this playbook used to write, but ONLY when it matches EXACTLY the
+    # legacy format for the CURRENT desired primary (same regex the old
+    # task used to WRITE the line, anchored start-to-end) — never touch a
+    # foreign or user-edited /etc/hosts entry.
+    #
+    # Gated on the pool-aware block NOT already existing: the block's own
+    # per-member line for the primary renders as the SAME three-field text
+    # this legacy regex targets (`<ip> <fqdn> <shortname>`), just inside the
+    # marker block instead of standalone. Without this gate, the anchored
+    # `^...$` regex can't tell "legacy standalone line" from "this exact
+    # text sitting between the block markers" and deletes the block's own
+    # primary entry every run — confirmed live: `changed` on every rerun,
+    # oscillating between this task removing it and blockinfile re-adding
+    # it. Once the block exists, migration is done; skip entirely rather
+    # than risk reaching into it.
+    - name: "FreeIPA client — /etc/hosts migration: check whether the pool-aware block already exists"
+      ansible.builtin.command:
+        argv: [grep, -qF, "BEGIN PILOT FREEIPA SERVER POOL", /etc/hosts]
+      register: freeipa_hosts_pool_block_present
+      changed_when: false
+      failed_when: false
+      tags: [freeipa-client, C3]
+
+    - name: "FreeIPA client — /etc/hosts migration: remove legacy unmarked primary pin (spec §6.1)"
       ansible.builtin.lineinfile:
         path: /etc/hosts
-        regexp: '\s{{ ipa_server_fqdn | regex_escape }}(\s|$)'
-        line: "{{ ipa_server_ip }} {{ ipa_server_fqdn }} {{ ipa_server_fqdn.split('.')[0] }}"
+        regexp: '^{{ ipa_server_ip | regex_escape }} {{ ipa_server_fqdn | regex_escape }} {{ ipa_server_fqdn.split(".")[0] | regex_escape }}$'
+        state: absent
+      when: freeipa_hosts_pool_block_present.rc != 0
+      tags: [freeipa-client, C3]
+
+    # Pool-aware managed block (spec §6): pins EVERY active pool member
+    # (primary + replicas in ha mode; just the primary in single mode, which
+    # collapses to the same single-line content the old task wrote — single
+    # mode sees no functional change). Kept separate from this client's own
+    # self-pin above, per spec §6's explicit "不要混入 server pool block".
+    - name: "FreeIPA client — pin the FreeIPA server pool to /etc/hosts (pool-aware managed block, spec §6)"
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} PILOT FREEIPA SERVER POOL"
+        block: |
+          {% for member in freeipa_server_pool_active %}
+          {{ member.ip }} {{ member.fqdn }} {{ member.fqdn.split('.')[0] }}
+          {% endfor %}
         state: present
         create: false
       tags: [freeipa-client, C3]
@@ -338,12 +411,61 @@
         - ansible_os_family == 'RedHat'
       tags: [freeipa-client, C8]
 
+    # Bootstrap reachability gate (spec §5): read-only TCP/443 probe of every
+    # ACTIVE pool member. This does NOT decide desired pool membership (that
+    # stays fixed per freeipa-server-pool.yml) — it only fails fast with a
+    # clear message when literally none are reachable, matching the installer's
+    # own behavior (confirmed live in Phase 0: ipa-client-install probes every
+    # --server given and silently drops an unreachable one from the resulting
+    # config, succeeding as long as >=1 responds). Argv order below does NOT
+    # need to be reachable-first — the installer already does its own per-
+    # server connectivity check regardless of argv order.
+    - name: "FreeIPA server pool — probe reachability (read-only, spec §5)"
+      ansible.builtin.wait_for:
+        host: "{{ item.ip }}"
+        port: 443
+        timeout: 5
+        state: started
+      loop: "{{ freeipa_server_pool_active }}"
+      loop_control: {label: "{{ item.fqdn }}"}
+      register: freeipa_server_pool_reachability
+      ignore_errors: true
+      when: not ansible_check_mode
+      tags: [freeipa-client, C1]
+
+    - name: "FreeIPA server pool — compute reachable subset"
+      ansible.builtin.set_fact:
+        freeipa_server_pool_reachable_fqdns: >-
+          {{
+            freeipa_server_pool_active
+            | zip(freeipa_server_pool_reachability.results | default([]))
+            | selectattr('1.failed', 'equalto', false)
+            | map(attribute='0.fqdn')
+            | list
+          }}
+      when: not ansible_check_mode
+      tags: [freeipa-client, C1]
+
+    - name: "Gate: at least one FreeIPA server pool member reachable before enrollment (spec §5)"
+      ansible.builtin.assert:
+        that:
+          - (freeipa_server_pool_reachable_fqdns | default([]) | length) > 0
+        fail_msg: >-
+          None of the FreeIPA server pool members
+          ({{ freeipa_server_pool_active | map(attribute='fqdn') | list }}) answered on
+          TCP/443. Cannot enroll or reconcile this client.
+      when: not ansible_check_mode
+      tags: [freeipa-client, C1]
+
     # ipa-client-install is NOT idempotent (re-running on an enrolled host errors
     # "IPA client is already configured"). `creates:` makes this a no-op once
     # /etc/ipa/default.conf exists, so the playbook is idempotent by
     # construction. no_log: true keeps the enrollment password out of Ansible's
     # logs (it is still only ever supplied from vault).
-    #   --server/--domain/--realm : explicit (no DNS SRV discovery in this pilot)
+    #   --server (repeated)       : one per active pool member (spec §4) —
+    #                               single mode collapses to exactly one, byte-
+    #                               for-byte the same as before this change.
+    #   --domain/--realm          : explicit (no DNS SRV discovery in this pilot)
     #   --mkhomedir               : create home dirs for IPA users on first login
     #   --no-ntp                  : time sync owned by the ntp role
     #   --no-dns-sshfp            : SSHFP publication stays out of scope regardless
@@ -372,19 +494,22 @@
     # itself has completed, so both converge on one registration mechanism.
     - name: "FreeIPA client — run ipa-client-install (enroll into {{ ipa_realm }})"
       ansible.builtin.command:
-        argv:
-          - ipa-client-install
-          - "-U"
-          - "--server={{ ipa_server_fqdn }}"
-          - "--domain={{ ipa_domain }}"
-          - "--realm={{ ipa_realm }}"
-          - "--principal={{ ipa_enroll_principal }}"
-          - "--password={{ ipa_enroll_password }}"
-          - "--hostname={{ ipa_client_fqdn }}"
-          - "--mkhomedir"
-          - "--no-ntp"
-          - "--no-dns-sshfp"
-          - "--force-join"
+        argv: >-
+          {{
+            ['ipa-client-install', '-U']
+            + (freeipa_server_fqdns | map('regex_replace', '^(.*)$', '--server=\1') | list)
+            + [
+              '--domain=' ~ ipa_domain,
+              '--realm=' ~ ipa_realm,
+              '--principal=' ~ ipa_enroll_principal,
+              '--password=' ~ ipa_enroll_password,
+              '--hostname=' ~ ipa_client_fqdn,
+              '--mkhomedir',
+              '--no-ntp',
+              '--no-dns-sshfp',
+              '--force-join',
+            ]
+          }}
         creates: "{{ ipa_config_marker }}"
       register: ipa_enroll
       no_log: true

@@ -137,7 +137,7 @@ sssd + krb5）；EL client 走 `dnf install ipa-client`，只有裝套件那一�
 | C9  | audit    | 稽核守護程序 auditd active                                          | 0                                           | systemctl is-active auditd |
 | C10 | audit    | kernel auditing 已啟用（稽核事件實際被捕捉）                          | ~enabled 1                                  | sudo auditctl -s |
 | C11 | dns      | FreeIPA authoritative DNS 有本 client 的 A record（非 `/etc/hosts`）  | 0                                            | dig +short @ipa1.ipa.pilot.internal "$(hostname -f)" A | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' |
-| C12 | authn    | SSH client 對本 realm 網域已開啟 GSSAPI ticket delegation（供跳板機停用密碼登入後仍可 relay） | ~yes | ssh -G dummy.ipa.pilot.internal 2>&1 | grep -qi "^gssapidelegatecredentials yes$" |
+| C12 | authn    | SSH client 對本 realm 網域已開啟 GSSAPI ticket delegation（供跳板機停用密碼登入後仍可 relay） | 0 | sh -c 'ssh -G dummy.ipa.pilot.internal 2>&1 | grep -qi "^gssapidelegatecredentials yes$"' |
 
 > **rc 型 expected（C1/C2/C3/C5/C6/C7/C9 = `0`）比對 process 退出碼**：
 > - `systemctl is-active <svc>`（C2/C9）服務 active 時自身 rc 0，否則非 0 —— 刻意用 rc 而非
