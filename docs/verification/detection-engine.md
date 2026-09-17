@@ -188,13 +188,12 @@ never makes a row PASS.
 
 ## Actual-run evidence
 
-Recorded in `docs/runbooks/detection-engine.md`: real-lane C1-C10/C12
-evidence in §2-§5 (Stage A-2 real 3-VM deployment, 12/12 Spec v2 PASS,
-idempotent changed=0), and fake-lane C11 evidence in §6.1 (fake-protocol
-topology lane, `vm-target topology test` against
-`tmp/detection-engine-fake-topology.example.yaml`, full L1-L6 PASS). See
-that runbook for the actual captured PLAY RECAP/verdict output — this spec
-does not duplicate it.
+Latest notification-correctness evidence:
+`docs/evidence/detection-engine/2026-09-17-30d6b92.md` (candidate
+`30d6b92`, fake-protocol topology L1-L6 PASS, C1-C12 12/12 PASS,
+idempotent `changed=0`, plus observed fire/60-second heartbeat/restart
+hydration/non-notifying recovery/valid resolve delivery). Earlier real-chain
+evidence remains summarized in `docs/runbooks/detection-engine.md`.
 
 ## Change record
 
@@ -202,4 +201,4 @@ does not duplicate it.
 |---|---|---|
 | 2026-08-28 | DRAFT | Stage A-2: initial Spec v2 authoring per spec §47's C1-C12. No actual-run evidence yet. |
 | 2026-08-28 | v1.0 | Real-lane + fake-lane actual-run evidence recorded (see docs/runbooks/detection-engine.md §2-§6.1); Stage A reaches VERIFICATION_READY. |
-| 2026-09-17 | v1.1 DRAFT | Extend C11's fake-lane contract with actionable notification policy, valid resolve payloads, 60-second refresh, restart hydration/reconciliation, and warning absolute/composite gates; evidence pending candidate run. |
+| 2026-09-17 | v1.1 | Extend C11's fake-lane contract with actionable notification policy, valid resolve payloads, 60-second refresh, restart hydration/reconciliation, and warning absolute/composite gates; candidate `30d6b92` L1-L6 and runtime scenario evidence PASS. |
