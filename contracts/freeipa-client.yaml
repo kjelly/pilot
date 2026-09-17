@@ -27,6 +27,11 @@ bindings:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 5}
 groupVars:
+  # HA/single-node state machine (docs/tmp/now/freeipa-client-ha-spec.md
+  # §2.2/§3). auto (default): >1 freeipa-server-pool member -> ha, else
+  # single. Forcing single/ha is a staged-rollout / troubleshooting escape
+  # hatch — see playbooks/apply/tasks/freeipa-server-pool.yml.
+  - {name: freeipa_client_topology_mode, type: string, required: false, secret: false}
   # freeipa-client-apply.yml derives this from the exactly-one freeipa-server
   # inventory host when the operator leaves it unset; an explicit value still
   # overrides that inventory default.

@@ -76,6 +76,17 @@ freeipa_domain: ipa.pilot.internal
 #   - 10.20.30.41
 #   - 2001:db8:30::41
 
+# HA / single-node topology mode (docs/tmp/now/freeipa-client-ha-spec.md
+# §2.2). 不用填 = auto:inventory 只有一台 freeipa-server 就是 single,加了
+# freeipa-server-replica 就自動變 ha,兩種情境都不需要改任何設定。只有下面
+# 兩種情境才需要覆寫:
+#   single — 即使 inventory 已經有 replica,也強制只用 primary(分階段
+#            rollout / troubleshooting 用的逃生門,見 spec §21)
+#   ha     — 強制要求至少 2 台可用 FreeIPA server,少於 2 台直接 fail closed
+#            (不要用來「檢查有沒有設定 replica」——inventory 只有一台時這樣
+#            設定會讓部署整個失敗,是刻意的 fail-closed 行為)
+# freeipa_client_topology_mode: auto
+
 # Day-2 IP migration: authorizes Pilot to replace an already-enrolled
 # client's authoritative DNS when the host's ansible_host IP changes
 # (docs/superpowers/specs/2026-09-02-freeipa-client-host-dns-ip-replacement-

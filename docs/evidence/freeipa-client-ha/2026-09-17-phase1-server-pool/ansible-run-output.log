@@ -1,0 +1,144 @@
+# Phase 1 server-pool task — real ansible-playbook evidence (2026-09-17, local ansible-core 2.19.2, ansible_connection=local synthetic inventories)
+
+## 1. single-server inventory, topology_mode=auto -> effective=single
+        ],
+        "fqdns": [
+            "ipa1.ipa.pilot.internal"
+        ],
+        "ips": [
+            "10.0.0.10"
+        ],
+        "mode_effective": "single",
+        "pool_active": [
+            "ipa1.ipa.pilot.internal"
+        ],
+        "pool_full": [
+            "ipa1.ipa.pilot.internal"
+        ]
+    }
+}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=13   changed=0    unreachable=0    failed=0    skipped=3    rescued=0    ignored=0   
+
+
+## 2. primary+replica inventory, topology_mode=auto -> effective=ha, both providers
+        ],
+        "ips": [
+            "10.0.0.10",
+            "10.0.0.11"
+        ],
+        "mode_effective": "ha",
+        "pool_active": [
+            "ipa1.ipa.pilot.internal",
+            "ipa2.ipa.pilot.internal"
+        ],
+        "pool_full": [
+            "ipa1.ipa.pilot.internal",
+            "ipa2.ipa.pilot.internal"
+        ]
+    }
+}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=14   changed=0    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0   
+
+
+## 3. forced ha with only 1 provider -> fail closed
+140   tags: [always]
+141
+142 - name: "FreeIPA server pool — gate: ha mode requires >= 2 providers"
+      ^ column 3
+
+fatal: [ipa1]: FAILED! => {
+    "assertion": "(freeipa_server_pool | length) >= 2",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "freeipa_client_topology_mode=ha requires at least 2 FreeIPA server pool members (found 1) — add a freeipa-server-replica host, or use topology_mode=auto/single (spec §2.2/§3.2)."
+}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=9    changed=0    unreachable=0    failed=1    skipped=2    rescued=0    ignored=0   
+
+
+## 4. forced single despite replica present -> pool_full has both, pool_active/fqdns/ips only primary
+        "fqdns": [
+            "ipa1.ipa.pilot.internal"
+        ],
+        "ips": [
+            "10.0.0.10"
+        ],
+        "mode_effective": "single",
+        "pool_active": [
+            "ipa1.ipa.pilot.internal"
+        ],
+        "pool_full": [
+            "ipa1.ipa.pilot.internal",
+            "ipa2.ipa.pilot.internal"
+        ]
+    }
+}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=14   changed=0    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0   
+
+
+## 5. 2 replicas, no explicit freeipa_replica_fqdn host var -> fail closed
+failed: [ipa1] (item=ipa3) => {
+    "ansible_loop_var": "item",
+    "assertion": "hostvars[item].freeipa_replica_fqdn is defined",
+    "changed": false,
+    "evaluated_to": false,
+    "item": "ipa3",
+    "msg": "ipa3: freeipa-server-replica group has more than one host, so each replica must set its own freeipa_replica_fqdn host_var (spec §3.2) — the single-replica legacy default (ipa2.<domain>) cannot disambiguate multiple replicas."
+}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=5    changed=0    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0   
+
+
+## 6. 2 replicas, explicit freeipa_replica_fqdn each -> succeeds, 3 distinct FQDNs
+            "10.0.0.11",
+            "10.0.0.12"
+        ],
+        "mode_effective": "ha",
+        "pool_active": [
+            "ipa1.ipa.pilot.internal",
+            "ipa2.ipa.pilot.internal",
+            "ipa3.ipa.pilot.internal"
+        ],
+        "pool_full": [
+            "ipa1.ipa.pilot.internal",
+            "ipa2.ipa.pilot.internal",
+            "ipa3.ipa.pilot.internal"
+        ]
+    }
+}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=15   changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
+
+
+## 7. same IP bound to two different FQDNs -> fail closed
+fatal: [ipa1]: FAILED! => {
+    "assertion": "(freeipa_server_pool | map(attribute='ip') | reject('equalto', '') | list | unique | length) == (freeipa_server_pool | map(attribute='ip') | reject('equalto', '') | list | length)",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "freeipa_server_pool has the same non-empty IP bound to more than one FQDN: ['10.0.0.10', '10.0.0.10'] (spec §3.2)."
+}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=8    changed=0    unreachable=0    failed=1    skipped=1    rescued=0    ignored=0   
+
+
+## 8. primary FQDN == replica FQDN -> fail closed
+fatal: [ipa1]: FAILED! => {
+    "assertion": "(freeipa_server_pool | map(attribute='fqdn') | list | unique | length) == (freeipa_server_pool | length)",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "freeipa_server_pool has duplicate FQDNs: ['ipa1.ipa.pilot.internal', 'ipa1.ipa.pilot.internal'] (spec §3.2 — must fail closed, not silently dedupe)."
+}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=7    changed=0    unreachable=0    failed=1    skipped=1    rescued=0    ignored=0   
+

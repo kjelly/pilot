@@ -1,0 +1,178 @@
+# Shared task — computes the FreeIPA server pool (desired state, single or
+# HA) from inventory role-group membership (docs/tmp/now/freeipa-client-ha-spec.md
+# §3). Included by any consumer that needs the full FreeIPA provider list:
+# freeipa-client enrollment/reconciliation, DNS client resolvers, replica
+# verification, and Pilot control-plane mutation tasks.
+#
+# Pool source is FIXED (spec §3.1): groups['freeipa-server'] then
+# groups['freeipa-server-replica']. Never inferred from DNS SRV, an existing
+# client's sssd.conf, or which server currently answers a probe —
+# reachability only affects bootstrap ORDERING (spec §5, implemented by
+# Phase 3 consumers), never pool membership itself.
+#
+# Inputs:
+#   freeipa_client_topology_mode : auto (default) | single | ha
+#   freeipa_domain               : realm domain, used to build default FQDNs
+#   freeipa_server_fqdn          : primary FQDN override (default ipa1.<domain>)
+#   freeipa_replica_fqdn         : single-replica legacy default (ipa2.<domain>);
+#                                  with >1 replica, EACH replica host must set
+#                                  its own freeipa_replica_fqdn host_var instead
+#                                  (spec §3.2 "Replica FQDN backward compatibility")
+#
+# Outputs (facts):
+#   freeipa_server_pool                    : FULL discovered pool (every
+#     freeipa-server + freeipa-server-replica host), regardless of
+#     topology_mode — kept complete even under a forced `single` override so
+#     Day-2 reconciliation (Phase 4) always has the true desired pool to
+#     converge toward, and switching back to auto/ha later needs no
+#     re-discovery. Each member: {inventory_host, fqdn, ip, kind, dns_provider}.
+#   freeipa_server_pool_active             : the subset actually used by this
+#     run — equal to freeipa_server_pool in ha mode, [primary] only in single
+#     mode (even when a replica is present in inventory — spec §2.1's
+#     "single is a first-class mode", not a degraded one).
+#   freeipa_server_fqdns / freeipa_server_ips / freeipa_dns_server_ips :
+#     derived from freeipa_server_pool_active (NOT the full pool).
+#   freeipa_client_topology_mode_effective : single | ha
+#
+# Fail-closed invariants enforced here (spec §3.2): illegal topology_mode
+# value, more than one freeipa-server host, ambiguous replica FQDNs, duplicate
+# FQDNs anywhere in the pool, an IP reused across two different FQDNs, and
+# ha mode requested with fewer than 2 pool members.
+---
+- name: "FreeIPA server pool — normalize topology_mode input (default auto)"
+  ansible.builtin.set_fact:
+    freeipa_client_topology_mode_input: "{{ freeipa_client_topology_mode | default('auto') }}"
+  tags: [always]
+
+- name: "FreeIPA server pool — gate: topology_mode is a legal value"
+  ansible.builtin.assert:
+    that:
+      - freeipa_client_topology_mode_input in ['auto', 'single', 'ha']
+    fail_msg: >-
+      freeipa_client_topology_mode={{ freeipa_client_topology_mode_input }} is not
+      one of auto|single|ha (spec §2.2).
+  tags: [always]
+
+- name: "FreeIPA server pool — gate: exactly one freeipa-server host in inventory"
+  ansible.builtin.assert:
+    that:
+      - (groups['freeipa-server'] | default([]) | length) == 1
+    fail_msg: >-
+      freeipa-server-pool expects exactly one freeipa-server inventory host
+      (found {{ groups['freeipa-server'] | default([]) | length }}); multiple
+      primaries are not a supported topology (spec §3).
+  tags: [always]
+
+- name: "FreeIPA server pool — build primary pool member"
+  ansible.builtin.set_fact:
+    freeipa_server_pool_primary:
+      - inventory_host: "{{ groups['freeipa-server'][0] }}"
+        fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ freeipa_domain) }}"
+        ip: "{{ hostvars[groups['freeipa-server'][0]].ansible_host | default('') }}"
+        kind: primary
+        dns_provider: "{{ hostvars[groups['freeipa-server'][0]].freeipa_setup_dns | default(true) | bool }}"
+  tags: [always]
+
+- name: "FreeIPA server pool — gate: multiple replicas each need an explicit freeipa_replica_fqdn host var"
+  ansible.builtin.assert:
+    that:
+      - hostvars[item].freeipa_replica_fqdn is defined
+    fail_msg: >-
+      {{ item }}: freeipa-server-replica group has more than one host, so each
+      replica must set its own freeipa_replica_fqdn host_var (spec §3.2) — the
+      single-replica legacy default (ipa2.<domain>) cannot disambiguate
+      multiple replicas.
+  loop: "{{ groups['freeipa-server-replica'] | default([]) }}"
+  when: (groups['freeipa-server-replica'] | default([]) | length) > 1
+  tags: [always]
+
+- name: "FreeIPA server pool — build replica pool members"
+  ansible.builtin.set_fact:
+    freeipa_server_pool_replicas: >-
+      {{
+        freeipa_server_pool_replicas | default([]) +
+        [{
+          'inventory_host': item,
+          'fqdn': (hostvars[item].freeipa_replica_fqdn
+                   if hostvars[item].freeipa_replica_fqdn is defined
+                   else ('ipa2.' ~ freeipa_domain)),
+          'ip': hostvars[item].ansible_host | default(''),
+          'kind': 'replica',
+          'dns_provider': (hostvars[item].freeipa_setup_dns | default(false) | bool)
+        }]
+      }}
+  loop: "{{ groups['freeipa-server-replica'] | default([]) }}"
+  tags: [always]
+
+- name: "FreeIPA server pool — combine primary + replicas into the full desired pool"
+  ansible.builtin.set_fact:
+    freeipa_server_pool: "{{ freeipa_server_pool_primary + (freeipa_server_pool_replicas | default([])) }}"
+  tags: [always]
+
+- name: "FreeIPA server pool — gate: no duplicate FQDNs in the pool (covers primary==replica FQDN too)"
+  ansible.builtin.assert:
+    that:
+      - (freeipa_server_pool | map(attribute='fqdn') | list | unique | length) == (freeipa_server_pool | length)
+    fail_msg: >-
+      freeipa_server_pool has duplicate FQDNs:
+      {{ freeipa_server_pool | map(attribute='fqdn') | list }} (spec §3.2 —
+      must fail closed, not silently dedupe).
+  tags: [always]
+
+- name: "FreeIPA server pool — gate: no IP reused across different FQDNs"
+  ansible.builtin.assert:
+    that: >-
+      (freeipa_server_pool | map(attribute='ip') | reject('equalto', '') | list | unique | length)
+      == (freeipa_server_pool | map(attribute='ip') | reject('equalto', '') | list | length)
+    fail_msg: >-
+      freeipa_server_pool has the same non-empty IP bound to more than one
+      FQDN: {{ freeipa_server_pool | map(attribute='ip') | list }} (spec §3.2).
+  tags: [always]
+
+- name: "FreeIPA server pool — compute effective topology mode"
+  ansible.builtin.set_fact:
+    freeipa_client_topology_mode_effective: >-
+      {{
+        'ha' if (freeipa_client_topology_mode_input == 'ha' or
+                 (freeipa_client_topology_mode_input == 'auto' and (freeipa_server_pool | length) > 1))
+        else 'single'
+      }}
+  tags: [always]
+
+- name: "FreeIPA server pool — gate: ha mode requires >= 2 providers"
+  ansible.builtin.assert:
+    that:
+      - (freeipa_server_pool | length) >= 2
+    fail_msg: >-
+      freeipa_client_topology_mode=ha requires at least 2 FreeIPA server pool
+      members (found {{ freeipa_server_pool | length }}) — add a
+      freeipa-server-replica host, or use topology_mode=auto/single (spec
+      §2.2/§3.2).
+  when: freeipa_client_topology_mode_input == 'ha'
+  tags: [always]
+
+- name: "FreeIPA server pool — compute active pool (single mode uses primary only, even if a replica exists)"
+  ansible.builtin.set_fact:
+    freeipa_server_pool_active: >-
+      {{
+        freeipa_server_pool
+        if freeipa_client_topology_mode_effective == 'ha'
+        else freeipa_server_pool_primary
+      }}
+  tags: [always]
+
+- name: "FreeIPA server pool — derive fqdns/ips/dns-provider-ips from the active pool"
+  ansible.builtin.set_fact:
+    freeipa_server_fqdns: "{{ freeipa_server_pool_active | map(attribute='fqdn') | list }}"
+    freeipa_server_ips: "{{ freeipa_server_pool_active | map(attribute='ip') | list }}"
+    freeipa_dns_server_ips: "{{ freeipa_server_pool_active | selectattr('dns_provider') | map(attribute='ip') | list }}"
+  tags: [always]
+
+- name: "FreeIPA server pool — observability summary (spec §22; never logs secrets)"
+  ansible.builtin.debug:
+    msg:
+      requested_mode: "{{ freeipa_client_topology_mode_input }}"
+      effective_mode: "{{ freeipa_client_topology_mode_effective }}"
+      providers: "{{ freeipa_server_pool_active | map(attribute='fqdn') | list }}"
+      dns_providers: "{{ freeipa_dns_server_ips }}"
+  tags: [always]
