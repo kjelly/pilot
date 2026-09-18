@@ -88,70 +88,18 @@ func (r *Resolver) ResolveUserContext(ctx context.Context, username string) (Use
 
 // LoadUserAccess is the top-level per-user, per-gateway resolve (spec.md
 // §19/§21): gateway scope ∩ effective FreeIPA SSH access, with sudo
-// detail for every host the user can actually reach. Follows the §21
-// Query Plan: one call each for gateway scope, user context, hbacrule_find
-// and sudorule_find, then one call per DISTINCT hostgroup/service-group/
-// sudo-command-group referenced by any rule (deduped) — never one call
-// per host.
+// detail for every host the user can actually reach. It is now a thin
+// wrapper over LoadPolicySnapshot + ResolveScopeAccess (docs/tmp/now/
+// spec.md §9.1/§9.2 Phase 1 refactor) — output must stay byte-for-byte
+// identical to the pre-refactor inline implementation this replaced;
+// resolver_test.go's existing assertions are the regression guard for
+// that, not a change of behavior in their own right.
 func (r *Resolver) LoadUserAccess(ctx context.Context, username string) (UserAccess, error) {
-	scope, err := r.ResolveGatewayScope(ctx)
+	snapshot, err := LoadPolicySnapshot(ctx, r.Provider, username, r.now())
 	if err != nil {
 		return UserAccess{}, err
 	}
-	userCtx, err := r.ResolveUserContext(ctx, username)
-	if err != nil {
-		return UserAccess{}, err
-	}
-	effectiveGroups := make(map[string]struct{}, len(userCtx.EffectiveGroups))
-	for _, g := range userCtx.EffectiveGroups {
-		effectiveGroups[g] = struct{}{}
-	}
-
-	hbacRules, err := r.Provider.HBACRuleFind(ctx)
-	if err != nil {
-		return UserAccess{}, fmt.Errorf("hbacrule_find: %w", err)
-	}
-	sudoRules, err := r.Provider.SudoRuleFind(ctx)
-	if err != nil {
-		return UserAccess{}, fmt.Errorf("sudorule_find: %w", err)
-	}
-
-	hostgroupHosts, err := r.expandReferencedHostgroups(ctx, hbacRules, sudoRules)
-	if err != nil {
-		return UserAccess{}, err
-	}
-	serviceGroupServices, err := r.expandReferencedServiceGroups(ctx, hbacRules)
-	if err != nil {
-		return UserAccess{}, err
-	}
-	commandGroupCommands, err := r.expandReferencedCommandGroups(ctx, sudoRules)
-	if err != nil {
-		return UserAccess{}, err
-	}
-
-	now := r.now()
-	hosts := sortedKeys(scope.Hosts)
-
-	result := UserAccess{User: username, GeneratedAt: now}
-	for _, fqdn := range hosts {
-		ssh := resolveSSHAccess(hbacRules, username, effectiveGroups, fqdn, hostgroupHosts, serviceGroupServices)
-		if !ssh.Allowed {
-			// spec.md §9.3: My Hosts only lists hosts the user can SSH to.
-			continue
-		}
-		sudo := resolveSudoAccess(sudoRules, now, username, effectiveGroups, fqdn, hostgroupHosts, commandGroupCommands)
-		// Annotations are display-only asset metadata, never an
-		// authorization input — a host_show failure (host deleted
-		// mid-session, transient LDAP hiccup, ...) must not take down the
-		// whole My Hosts listing the way an HBAC/sudo resolution failure
-		// would; the host just shows with no annotations.
-		var annotations map[string]string
-		if host, err := r.Provider.HostShow(ctx, fqdn); err == nil {
-			annotations = host.Annotations
-		}
-		result.Hosts = append(result.Hosts, HostAccess{FQDN: fqdn, SSH: ssh, Sudo: sudo, Annotations: annotations})
-	}
-	return result, nil
+	return ResolveScopeAccess(ctx, r.Provider, snapshot, r.Gateway)
 }
 
 func resolveSSHAccess(

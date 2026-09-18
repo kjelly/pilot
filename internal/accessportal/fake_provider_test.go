@@ -22,6 +22,11 @@ type fakeProvider struct {
 	hbacServiceGroups map[string]freeipaaccess.HBACServiceGroup
 	sudoRules         []freeipaaccess.SudoRule
 	sudoCommandGroups map[string]freeipaaccess.SudoCommandGroup
+
+	// hostShowCalls counts HostShow invocations per fqdn — used only by
+	// tests proving PolicySnapshot's hostAnnotationCache dedupes across
+	// multiple ResolveScopeAccess calls (docs/tmp/now/spec.md §9.3).
+	hostShowCalls map[string]int
 }
 
 var _ freeipaaccess.Provider = (*fakeProvider)(nil)
@@ -47,6 +52,10 @@ func (f *fakeProvider) GroupShow(ctx context.Context, name string) (freeipaacces
 }
 
 func (f *fakeProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
+	if f.hostShowCalls == nil {
+		f.hostShowCalls = map[string]int{}
+	}
+	f.hostShowCalls[fqdn]++
 	if err, ok := f.hostShowErr[fqdn]; ok {
 		return freeipaaccess.Host{}, err
 	}
