@@ -186,6 +186,7 @@ func Lint(hf *HostsFile) []Issue {
 	}
 	validRoles := validRoleNames()
 	validEnvs := validEnvNames()
+	derivedRoster := deriveFreeIPAReplicaRoster(hf.Hosts)
 	seen := map[string]bool{}
 	for _, h := range hf.Hosts {
 		if seen[h.Name] {
@@ -215,6 +216,9 @@ func Lint(hf *HostsFile) []Issue {
 		}
 		if hostNeedsFreeIPARoster(h.Roles) {
 			rosterPath := strings.TrimSpace(h.Extra["freeipa_roster_file"])
+			if rosterPath == "" {
+				rosterPath = derivedRoster[h.Name]
+			}
 			if rosterPath == "" {
 				issues = append(issues, Issue{h.Name, "error", "roles " + strings.Join(h.Roles, ", ") + " require freeipa_roster_file pointing to the canonical FreeIPA roster"})
 			} else if strings.Contains(rosterPath, "<FILL-ME>") {
@@ -247,6 +251,61 @@ func hostNeedsFreeIPARoster(roles []string) bool {
 	return false
 }
 
+func hasRole(roles []string, role string) bool {
+	for _, r := range roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+// deriveFreeIPAReplicaRoster returns, for every freeipa-server-replica host
+// that has no explicit freeipa_roster_file of its own, the value already set
+// on this hosts.yml's freeipa-server host. A replica and its primary must
+// always point at the identical canonical roster for multi-master
+// replication to make sense — there is no legitimate case where they
+// differ — so requiring the operator to hand-copy the same path onto every
+// replica host (and keep it in sync if it ever changes) is pure duplication
+// risk, not a safety boundary the way an unset freeipa-server value is.
+// Picks the first freeipa-server host in sorted name order for determinism
+// if more than one somehow carries a value.
+func deriveFreeIPAReplicaRoster(hosts []Host) map[string]string {
+	var primaryRoster string
+	names := make([]string, 0, len(hosts))
+	byName := make(map[string]Host, len(hosts))
+	for _, h := range hosts {
+		names = append(names, h.Name)
+		byName[h.Name] = h
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		h := byName[name]
+		if !hasRole(h.Roles, "freeipa-server") {
+			continue
+		}
+		if v := strings.TrimSpace(h.Extra["freeipa_roster_file"]); v != "" && !strings.Contains(v, "<FILL-ME>") {
+			primaryRoster = v
+			break
+		}
+	}
+	if primaryRoster == "" {
+		return nil
+	}
+
+	derived := map[string]string{}
+	for _, h := range hosts {
+		if !hasRole(h.Roles, "freeipa-server-replica") {
+			continue
+		}
+		if strings.TrimSpace(h.Extra["freeipa_roster_file"]) != "" {
+			continue
+		}
+		derived[h.Name] = primaryRoster
+	}
+	return derived
+}
+
 // HasErrors reports whether any issue is severity "error".
 func HasErrors(issues []Issue) bool {
 	for _, i := range issues {
@@ -276,6 +335,8 @@ func Generate(hf *HostsFile) (string, error) {
 		}
 		return "", fmt.Errorf("%s", b.String())
 	}
+
+	derivedRoster := deriveFreeIPAReplicaRoster(hf.Hosts)
 
 	byRole := map[string][]string{}
 	byEnv := map[string][]string{}
@@ -320,6 +381,9 @@ func Generate(hf *HostsFile) (string, error) {
 		sort.Strings(extraKeys)
 		for _, k := range extraKeys {
 			fmt.Fprintf(&sb, "      %s: %s\n", k, quoteScalar(h.Extra[k]))
+		}
+		if v, ok := derivedRoster[h.Name]; ok {
+			fmt.Fprintf(&sb, "      freeipa_roster_file: %s\n", quoteScalar(v))
 		}
 		// Annotations project into their own namespaced host var
 		// (spec.md §6.1/§6.2) rather than flattening into top-level

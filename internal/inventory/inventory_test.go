@@ -116,6 +116,51 @@ hosts:
 	t.Fatalf("expected missing roster path error, got %v", issues)
 }
 
+func TestLint_FreeIPAReplicaDerivesRosterFromPrimary(t *testing.T) {
+	hf, err := Parse([]byte(`
+hosts:
+  ipa-1:
+    ansible_host: "10.0.0.10"
+    freeipa_roster_file: ".vault/ipa-identity.yaml"
+    roles: [freeipa-server]
+  ipa-2:
+    ansible_host: "10.0.0.11"
+    roles: [freeipa-server-replica]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issues := Lint(hf)
+	if HasErrors(issues) {
+		t.Fatalf("expected replica's missing freeipa_roster_file to be derived from the primary, got errors: %v", issues)
+	}
+}
+
+func TestLint_FreeIPAReplicaStillErrorsWithoutPrimaryRoster(t *testing.T) {
+	hf, err := Parse([]byte(`
+hosts:
+  ipa-1:
+    ansible_host: "10.0.0.10"
+    roles: [freeipa-server]
+  ipa-2:
+    ansible_host: "10.0.0.11"
+    roles: [freeipa-server-replica]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issues := Lint(hf)
+	found := false
+	for _, issue := range issues {
+		if issue.Host == "ipa-2" && strings.Contains(issue.Message, "require freeipa_roster_file") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected ipa-2 to still error since the primary itself has no roster set, got %v", issues)
+	}
+}
+
 func TestLint_EmptyAnsibleHost(t *testing.T) {
 	hf, err := Parse([]byte(`
 hosts:
@@ -277,6 +322,36 @@ hosts:
 	}
 	if !strings.Contains(out, "        freeipa-nfs-client:\n          hosts:\n            client-1:\n") {
 		t.Errorf("missing freeipa > freeipa-nfs-client > client-1 nesting:\n%s", out)
+	}
+}
+
+func TestGenerate_FreeIPAReplicaInheritsRosterFromPrimary(t *testing.T) {
+	hf, err := Parse([]byte(`
+hosts:
+  ipa-1:
+    ansible_host: "10.0.0.10"
+    freeipa_roster_file: ".vault/ipa-identity.yaml"
+    roles: [freeipa-server]
+  ipa-2:
+    ansible_host: "10.0.0.11"
+    roles: [freeipa-server-replica]
+  ipa-3:
+    ansible_host: "10.0.0.12"
+    freeipa_roster_file: ".vault/other-roster.yaml"
+    roles: [freeipa-server-replica]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Generate(hf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "    ipa-2:\n      ansible_host: \"10.0.0.11\"\n      freeipa_roster_file: \".vault/ipa-identity.yaml\"\n") {
+		t.Errorf("expected ipa-2 to inherit ipa-1's roster path:\n%s", out)
+	}
+	if !strings.Contains(out, "freeipa_roster_file: \".vault/other-roster.yaml\"") {
+		t.Errorf("expected ipa-3's own explicit roster path to be preserved, not overridden:\n%s", out)
 	}
 }
 
