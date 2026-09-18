@@ -55,9 +55,16 @@ traceability:
     "docs/verification/pilot-access-gateway.md#AG12": {tags: [AG12], reason: "step 18's own configured-hostgroup assertion"}
     "docs/verification/pilot-access-gateway.md#AG32": {tags: [AG32], reason: "root-owned Portal SSH config enforces GSSAPI-only target authentication with no credential delegation or fallback"}
     "docs/verification/pilot-access-gateway.md#AG33": {tags: [AG33], reason: "Kerberos client package tasks install kinit, klist, and kdestroy for session-scoped Portal credentials"}
+    "docs/verification/pilot-access-gateway.md#AG34": {tags: [AG34], reason: "Step 14 install-pilot-session task now execs pilot portal-session instead of pilot portal"}
   exemptions:
     "docs/verification/pilot-access-gateway.md#AG19": {kind: structural-absence, tags: [], reason: "no task in this playbook ever writes under /var/lib/pilot — absence is structural, not produced by a specific task"}
     "docs/verification/pilot-access-gateway.md#AG30": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task"}
+    "docs/verification/pilot-access-gateway.md#AG35": {kind: unit-test-evidence, tags: [], reason: "valid pilot-connect grammar parsing is loader-logic proven by TestParsePortalSSHOriginalCommand_ValidConnect, not a live host property"}
+    "docs/verification/pilot-access-gateway.md#AG36": {kind: unit-test-evidence, tags: [], reason: "malformed/malicious command rejection is proven by TestParsePortalSSHOriginalCommand_Rejects"}
+    "docs/verification/pilot-access-gateway.md#AG37": {kind: unit-test-evidence, tags: [], reason: "session_id never reaching the authorize decision is an architectural property proven by TestRunPortalOneShotConnect_Allowed/_Denied"}
+    "docs/verification/pilot-access-gateway.md#AG38": {kind: unit-test-evidence, tags: [], reason: "one-shot connect always re-authorizing fresh is proven by TestRunPortalOneShotConnect_Denied"}
+    "docs/verification/pilot-access-gateway.md#AG39": {kind: unit-test-evidence, tags: [], reason: "wrong-scope deny on the one-shot path reuses the same handleConnectAuthorize as the interactive path"}
+    "docs/verification/pilot-access-gateway.md#AG40": {kind: unit-test-evidence, tags: [], reason: "ssh child exit code propagation is proven by TestRunPortalOneShotConnect_PropagatesSSHExitCode"}
 verification: {autoDeploy: false}
 # 2026-09-15 起 site.include:true(不再是 optIn/single-component-only)——
 # 使用者明確決定「把 pilot-access-gateway 加進 hosts.yml 的 roles 清單」本身

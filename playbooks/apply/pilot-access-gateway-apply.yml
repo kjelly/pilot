@@ -884,6 +884,15 @@
     # config file would be pure redundancy (deliberate simplification
     # from spec.md §33's literal script, recorded in the Phase 7
     # evidence doc).
+    #
+    # docs/tmp/now/spec.md Phase 5 (§16/§17): this script's own content is
+    # UNCHANGED from Phase 7/8 — it still never references
+    # $SSH_ORIGINAL_COMMAND itself (D7). Only what it execs into changed:
+    # `pilot portal` (always interactive, ignored SSH_ORIGINAL_COMMAND
+    # entirely) -> `pilot portal-session` (a hidden dispatcher that reads
+    # SSH_ORIGINAL_COMMAND itself, in Go, and either runs the same
+    # interactive path, runs the new one-shot `pilot-connect <session-id>
+    # <target-fqdn>` handoff, or denies — see cmd/pilot/cmd/portal_session.go).
     - name: "Step 14: install pilot-session"
       ansible.builtin.copy:
         dest: /usr/local/libexec/pilot-session
@@ -904,8 +913,8 @@
 
           export PATH=/usr/bin:/bin
 
-          exec /usr/bin/pilot portal
-      tags: [AG_service]
+          exec /usr/bin/pilot portal-session
+      tags: [AG_service, AG34]
 
     # Step 15 (spec.md §55/§29/§30): systemd socket + service units.
     - name: "Step 15: install pilot-access-gateway.socket"

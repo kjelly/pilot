@@ -1,6 +1,6 @@
 # Verification Spec — Pilot Access Gateway
 
-> 版本：DRAFT v0.6（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；AG32-AG33 的 Portal session-scoped `kinit` / GSSAPI-only Connect 已於 2026-09-16 完成 vm-target + trec E2E，見 [`docs/evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md`](../evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md)；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5；2026-09-18 追加：每次 apply 現在也會把這台 gateway 自己發布進 `pilot-gateway-<gateway_scope>`，供 `pilot-access-directory`（進行中，見 `docs/tmp/now/spec.md`）路由用，見 §5）
+> 版本：DRAFT v0.7（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；AG32-AG33 的 Portal session-scoped `kinit` / GSSAPI-only Connect 已於 2026-09-16 完成 vm-target + trec E2E，見 [`docs/evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md`](../evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md)；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5；2026-09-18 追加：每次 apply 現在也會把這台 gateway 自己發布進 `pilot-gateway-<gateway_scope>`，供 `pilot-access-directory` 路由用，見 §5；2026-09-18 再追加：ForceCommand wrapper 改 exec `pilot portal-session`，新增 `pilot-connect <session-id> <fqdn>` one-shot handoff dispatcher，AG34-AG40；同日稍後已完成真實 vm-target 活體驗證——`alice` 經 Directory（`ag-directory01`）分別 handoff 到 GPU Gateway（`ag-gw01`→`ag-target01`，`whoami`=alice）與 DMZ Gateway（`ag-gw02`→新建的 `ag-target02`，`whoami`=alice），以及把 dmz target 的 `pilot-connect` 直接送去 GPU gateway 被正確 deny（wrong-scope injection），見 [`docs/evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md`](../evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md)）
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md（Pilot Access Gateway — Stateless FreeIPA-backed Portal），§50-§58
 > 維護者：sre
 
@@ -45,6 +45,13 @@
 | AG30 | idempotency | 第二次 apply changed=0(多次重跑的性質,由 evidence doc 記錄,非單一 shell 指令可驗證) | 0 | true |
 | AG32 | ssh-policy | Portal Connect 只允許 GSSAPI，不委派 TGT 到 target，也不退回 password/kbd-interactive/pubkey | 0 | bash -c 'v="$(ssh -G -F /etc/pilot/ssh_config target.invalid 2>/dev/null)" || exit; has() { grep -qx "$1" <<< "$v"; }; has "gssapiauthentication yes" && has "gssapidelegatecredentials no" && has "preferredauthentications gssapi-with-mic" && has "batchmode yes" && has "passwordauthentication no" && has "kbdinteractiveauthentication no" && has "pubkeyauthentication false"' |
 | AG33 | kerberos | Portal session ticket helper 依賴的 Kerberos client binaries存在 | 0 | test -x /usr/bin/kinit && test -x /usr/bin/klist && test -x /usr/bin/kdestroy |
+| AG34 | handoff | ForceCommand wrapper 已改為 exec `pilot portal-session`（Phase 5 dispatcher），不再是舊版永遠互動的 `pilot portal` | 0 | grep -q 'exec /usr/bin/pilot portal-session' /usr/local/libexec/pilot-session |
+| AG35 | handoff | 合法 `pilot-connect <uuid> <fqdn>` 語法可被解析、不再落入舊版「忽略 SSH_ORIGINAL_COMMAND、一律進互動 TUI」行為 | 0 | 見 `TestParsePortalSSHOriginalCommand_ValidConnect`（unit test 覆蓋，非單一 shell 指令）；活體「一路連到真實 target」驗證待 §7 vm-target |
+| AG36 | handoff | 任意/畸形指令一律 deny，不再靜默落回互動 TUI（spec.md D7「其他全部拒絕」，Phase 5 的行為變更） | 0 | 見 `TestParsePortalSSHOriginalCommand_Rejects`（涵蓋 shell metacharacter、`user@host`、IP literal、leading `-`、trailing `.`、embedded newline、錯誤 token 數、非法 UUID、Directory 自己的 `pilot-directory-connect` 語法）；活體 SSH 探測見 §7/`scripts/pilot-access-gateway-lockout-test.sh` |
+| AG37 | handoff | session_id 完全不影響 authorize 決策（spec.md §17.2：不把 session ID 當 proof） | 0 | 架構性——`runPortalOneShotConnect` 只把 `sessionID` 用在 `slog` 結構化 log，從未傳進 `client.ConnectAuthorize`（只傳 `target`）；`TestRunPortalOneShotConnect_Allowed`/`_Denied` 用同一組 fake gateway 驗證 authorize 結果只取決於 target 是否在 scope 內 |
+| AG38 | handoff | one-shot connect 仍是每次呼叫都 fresh authorize，從未信任 Directory 先前的判斷（D1/D6） | 0 | `TestRunPortalOneShotConnect_Denied`：即使呼叫端「已經」構造出語法合法的 `pilot-connect` 指令，target 不在這台 gateway 的 `target_hostgroup` 範圍內時一樣被拒，且憑證/SSH 都不會被觸發 |
+| AG39 | handoff | wrong-scope target 經 one-shot connect 路徑一樣 deny（沿用既有 `ConnectAuthorize`，不是另一套判斷） | 0 | 同 AG38——`internal/gatewayapi.handleConnectAuthorize` 完全沒有因為呼叫來源是互動 Portal 還是 one-shot handoff而改變邏輯，兩條路徑呼叫同一個 handler |
+| AG40 | handoff | target session 結束後，one-shot connect process 以 ssh child 的 exit code 結束（spec.md §18 point 6/7） | 0 | `TestRunPortalOneShotConnect_PropagatesSSHExitCode`（用真的 `sh -c "exit 7"` 產生真的 `*exec.ExitError`，確認透過 `portalSessionExitError`/`ExitCoder` 原樣傳出） |
 
 ## 3. 不在這份 checklist 逐行覆蓋、但已用其他方式驗證過的項目
 
@@ -114,6 +121,58 @@
   基準設定（`ag-gw01`=gpu、`ag-gw02`=dmz），沒有在這兩台共用 vm-target 上留下
   殘留 drift。第二次 apply 這幾個新 task 全部 `ok`（無 `changed`）。
 
-## 6. 明確不在本 repo 範圍的項目
+## 6. Phase 5 — Directory → Gateway handoff dispatcher（2026-09-18，unit-test + vm-target 活體皆已驗證）
+
+`docs/tmp/now/spec.md` §16-§19：ForceCommand wrapper（`/usr/local/libexec/pilot-session`）
+從無條件 `exec /usr/bin/pilot portal` 改成 `exec /usr/bin/pilot portal-session`——
+一個會自己讀 `$SSH_ORIGINAL_COMMAND`（在 Go 裡，從不經過 shell）的 hidden
+dispatcher（`cmd/pilot/cmd/portal_session.go`）：
+
+- 空指令 → 沿用既有互動 `pilot portal` TUI（行為不變）。
+- 精確符合 `pilot-connect <uuid> <fqdn>` 語法 → 新的 one-shot connect
+  （`cmd/pilot/cmd/portal_session_connect.go`，`runPortalOneShotConnect`）：
+  對 `/run/pilot/access-gateway.sock` 呼叫既有、未修改的
+  `POST /v1/connect/authorize`（沒有第二套授權邏輯），拒絕就非 0 結束、
+  不碰 SSH；允許就重用既有 `buildConnectSSHCmd`/session-scoped Kerberos
+  憑證流程連到 target，process 以 ssh child 的 exit code 結束。
+- 其他任何字串（畸形語法、shell metacharacter、`user@host`、IP literal、
+  leading `-`、trailing `.`、embedded newline、非法 UUID、Directory 自己的
+  `pilot-directory-connect` 語法……）→ deny，非 0 結束，從不落入互動 TUI。
+  **這是相對 Phase 7/8 baseline 的行為變更**：舊版對任何非空指令一律靜默
+  忽略、直接進互動選單（不算安全問題——從未把指令交給 shell——但也從未
+  明確拒絕過）。
+
+`session_id` 只做 UUID 語法檢查與 `slog` 結構化 log（`session_id`/
+`target`/`user`/`gateway_id`/`gateway_scope`），從未進入 `ConnectAuthorize`
+呼叫本身（spec.md §17.2「不把 session ID 當 proof」）——真正的跨元件關聯
+（Directory 端的同一個 session_id 也要出現在這裡）是 Phase 6 的工作。
+
+單元測試（`portal_session_test.go`/`portal_session_connect_test.go`，共 9
+個）用真正的 `internal/gatewayapi.Server`（fake FreeIPA provider，非 mock）
+證明：合法語法解析正確；上面列的每一種畸形/惡意輸入都被拒絕；denied
+target 不觸發憑證或 SSH；憑證失敗不觸發 SSH；一個真的 `*exec.ExitError`
+（用 `sh -c "exit 7"` 產生，非手刻字串）會原樣透過 `portalSessionExitError`
+傳出成這個 process 自己的 exit code。
+
+**2026-09-18 已完成的 vm-target 活體驗證**（見
+[`docs/evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md`](../evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md)，
+不再是「待補」）：
+
+- 真人 `alice` 經 `pilot directory`（`ag-directory01`）Connect 到
+  `ag-target01.ipa.pilot.internal`（gpu scope，經 `ag-gw01`）——真的落地到
+  target shell，`whoami`/`id` 確認身分是 alice，回到 Directory TUI。
+- 同一使用者 Connect 到新建的 `ag-target02.ipa.pilot.internal`（dmz scope，
+  經 `ag-gw02`，臨時加入 `pilot-target-dmz` 取代不存在真實機器的
+  `dmz-a` fixture）——同樣真的落地，`whoami`=alice。
+- wrong-scope injection 活體驗證：把 `pilot-connect <uuid>
+  ag-target02.ipa.pilot.internal`（dmz target）直接送給 `ag-gw01`（GPU-only
+  gateway）——`gateway_handoff_authorize_denied`，`pilot-session: access
+  denied`，process exit 1，`ag-gw01` process tree 全程沒有任何 ssh child
+  往 target 方向啟動（AG39 從此不只有 fake-gateway 單元測試）。
+- `scripts/pilot-access-gateway-lockout-test.sh` 新增的 6 類語法拒絕探測
+  也額外用兩個具體案例（shell metacharacter、IP literal）對 `ag-gw01`
+  手動複查過，client 端訊息與 server 端 process tree 都符合預期。
+
+## 7. 明確不在本 repo 範圍的項目
 
 - **AG31 out-of-scope SSH egress blocked by network policy**：站台網路層需求（防火牆/network policy 擋非 scope 內的 SSH 流量），非本 repo 範圍——`pilot-access-gateway` 本身沒有、也不打算有網路層 enforcement 能力，這是站台網路團隊的責任。

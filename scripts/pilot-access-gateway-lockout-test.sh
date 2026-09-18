@@ -33,6 +33,17 @@
 #                                       PermitUserRC, X11Forwarding,
 #                                       AllowTcpForwarding, AllowAgentForwarding,
 #                                       PermitTunnel.
+#   6. pilot-connect grammar rejection — (spec.md §16/§17/§38, added Phase 5
+#                                       / 2026-09-18) malformed/malicious
+#                                       `pilot-connect <session-id> <fqdn>`
+#                                       shapes (shell metacharacter,
+#                                       user@host, IP literal, leading `-`,
+#                                       embedded newline, non-UUID session
+#                                       id, missing target) — verified both
+#                                       by pilot-session's own rejection
+#                                       message on the client and by the
+#                                       live process tree never showing an
+#                                       ssh child toward any target host.
 #
 # §55.1 / §0 G4 still applies in full: only ever run this against a
 # disposable vm-target, never a real/shared host — this script logs in as
@@ -230,6 +241,48 @@ check_directive lockout-directive-x11forwarding x11forwarding no
 check_directive lockout-directive-allowtcpforwarding allowtcpforwarding no
 check_directive lockout-directive-allowagentforwarding allowagentforwarding no
 check_directive lockout-directive-permittunnel permittunnel no
+
+# --- 6. Phase 5 handoff grammar rejection (docs/tmp/now/spec.md §16/§17/§38,
+#     AG35/AG36): every malformed/malicious pilot-connect-shaped
+#     SSH_ORIGINAL_COMMAND must be denied by the Go parser in
+#     cmd/pilot/cmd/portal_session.go — never executed, never silently
+#     falling back to the interactive TUI. Each case is sent as the
+#     client's requested command over a forced-PTY session (same
+#     technique as probe 1) and verified two ways: the client-side output
+#     must show pilot-session's own rejection message (a stable
+#     "pilot-session:" prefix), and the gateway's live process tree must
+#     show no ssh child ever spawned toward any target host.
+UUID="0d33c638-83fa-4d77-9811-a97a7a7af1d5"
+declare -a GRAMMAR_CASES=(
+  "pilot-connect $UUID host;id"
+  "pilot-connect $UUID host\$(id)"
+  "pilot-connect $UUID user@host.example.com"
+  "pilot-connect $UUID 1.2.3.4"
+  "pilot-connect $UUID -oProxyCommand=x"
+  "pilot-connect $UUID host.example.com."$'\n'"id"
+  "pilot-connect not-a-uuid host.example.com"
+  "pilot-connect $UUID"
+)
+for i in "${!GRAMMAR_CASES[@]}"; do
+  case_cmd="${GRAMMAR_CASES[$i]}"
+  logN=$(mktemp)
+  SSHPASS="$PORTAL_PASSWORD" sshpass -e ssh -tt "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" \
+    "$case_cmd" </dev/null >"$logN" 2>&1 &
+  CLEANUP_PIDS+=("$!")
+  sleep 2
+  treeN=$("${ADMIN_SSH[@]}" "ps -ef | grep -F '$PORTAL_USER'" 2>/dev/null)
+  kill "${CLEANUP_PIDS[-1]}" >/dev/null 2>&1 || true
+  sleep 1
+
+  if grep -qE 'ssh .*(gpu-|dmz-|target)' <<<"$treeN"; then
+    emit "lockout-handoff-grammar-$i" fail "an ssh child toward a target host appeared for case [$case_cmd]: $treeN"
+  elif ! grep -q "pilot-session:" "$logN"; then
+    emit "lockout-handoff-grammar-$i" fail "expected pilot-session's own rejection message for case [$case_cmd], got: $(cat "$logN")"
+  else
+    emit "lockout-handoff-grammar-$i" pass "rejected: $(cat "$logN")"
+  fi
+  rm -f "$logN"
+done
 
 echo "SUMMARY: $PASS_COUNT passed, $FAIL_COUNT failed" >&2
 [ "$FAIL_COUNT" -eq 0 ]
