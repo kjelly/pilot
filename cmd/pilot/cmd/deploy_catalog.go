@@ -130,6 +130,12 @@ var deployCatalog = []deployPlaybook{
 		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，僅安裝當下建立 reader service principal/keytab 用)",
 	},
 	{
+		Key: "pilot-access-directory", Label: "安裝 Pilot Access Directory(跨 scope discovery/routing 入口)",
+		Playbook: "playbooks/apply/pilot-access-directory-apply.yml", DefaultGroup: "pilot-access-directory", StageVar: "stage",
+		Note:      "site.include:true(已在 site.yml，把這個角色加進 hosts.yml 本身就是核准動作，之後每次全站部署都會照常套用);目標主機必須先完成 freeipa-client enrollment 且已有正向 DNS record；只做跨 scope 的 discovery/routing 投影(docs/tmp/now/spec.md D1)，從不取代對應 pilot-access-gateway 的 fresh authorize。⚠️ sshd ForceCommand 預設「開啟」(pilot_access_directory_install_forcecommand=true)——沒特別覆寫的話，登入這台主機的 portal 使用者會直接被導進 pilot directory、拿不到一般 shell；要暫時關閉請明確帶 -e pilot_access_directory_install_forcecommand=false。加進 hosts.yml 前務必先在該主機(或同等 disposable vm-target)跑過鎖定回歸測試。見 docs/verification/pilot-access-directory.md。",
+		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，僅安裝當下建立 reader service principal/keytab 用)",
+	},
+	{
 		Key: "reverse-proxy", Label: "Nginx reverse proxy 基礎安裝",
 		Playbook: "playbooks/apply/reverse-proxy-apply.yml", DefaultGroup: "reverse-proxy", StageVar: "stage",
 		Note: "site.yml 角色(所有 reverse-proxy group 主機都會套用);只裝 nginx、關掉 distro default site、建立 Pilot config namespace，不管任何 endpoint 的 vhost——那是 internal-endpoint 的責任。Phase-1 骨架:目前只有 placeholder task,真正的 nginx 安裝邏輯待 spec.md §63 Phase 4 補上。",

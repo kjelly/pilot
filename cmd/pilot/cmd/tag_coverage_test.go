@@ -150,6 +150,14 @@ var specTagMap = []specTagMapping{
 			"AG19": "no local DB/state under /var/lib/pilot is a structural absence (no task ever writes there) — nothing to tag",
 			"AG30": "idempotent second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task — same reasoning as freeipa-dns.md's own C12",
 		}},
+	{spec: "pilot-access-directory.md", playbook: "pilot-access-directory-apply.yml",
+		exemptRows: map[string]string{
+			"AD01": "config KnownFields(true) rejection is loader-logic proven by cmd/pilot-access-directory's own Go test, not a playbook task",
+			"AD17": "no local DB/state under /var/lib/pilot-access-directory is a structural absence (no task ever writes there) — nothing to tag",
+			"AD27": "stage/prod confirmation is a pre_tasks assert evaluated before any tagged task runs, not itself a tagged task",
+			"AD28": "idempotent second-apply changed=0 is a multi-run property recorded in an evidence doc, not a single tagged task — same reasoning as pilot-access-gateway.md's own AG30",
+			"AD30": "fresh vm-target topology E2E is a multi-host, multi-run property recorded in an evidence doc, not a single tagged task",
+		}},
 	{spec: "host-monitoring.md", playbook: "host-monitoring-apply.yml",
 		exemptRows: map[string]string{
 			"C8": "port-listening probe — verify-only outcome of the service actually running (C7)",

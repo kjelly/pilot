@@ -57,6 +57,7 @@ ARG PILOT_GIT_SHA=unknown
 ARG DETECTION_ENGINE_VERSION=0.0.0-dev
 ARG AGENT_CONTROLLER_VERSION=0.0.0-dev
 ARG PILOT_ACCESS_GATEWAY_VERSION=0.0.0-dev
+ARG PILOT_ACCESS_DIRECTORY_VERSION=0.0.0-dev
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -95,6 +96,20 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
  && cd /out \
  && sha256sum pilot-access-gateway-linux-amd64 \
       > pilot-access-gateway-linux-amd64.sha256
+
+# Same reasoning as pilot-access-gateway immediately above:
+# playbooks/apply/pilot-access-directory-apply.yml's own artifact gate
+# ("Gate: pilot-access-directory binary exists") needs this baked into the
+# image, not a separately-run scripts/build-pilot-access-directory.sh,
+# because the deploy that needs it runs from inside this container.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${PILOT_ACCESS_DIRECTORY_VERSION} -X main.commit=${PILOT_GIT_SHA}" \
+      -o /out/pilot-access-directory-linux-amd64 \
+      ./cmd/pilot-access-directory \
+ && cd /out \
+ && sha256sum pilot-access-directory-linux-amd64 \
+      > pilot-access-directory-linux-amd64.sha256
 
 # The control image is also the Ansible controller for the central Detection
 # Engine. Build the target binary in the same immutable image so a deployment
@@ -196,6 +211,8 @@ COPY --from=builder /out/pilot-agent-controller-linux-amd64.sha256 /pilot/dist/p
 COPY --from=builder /out/pilot-linux-amd64 /pilot/dist/pilot-linux-amd64
 COPY --from=builder /out/pilot-access-gateway-linux-amd64 /pilot/dist/pilot-access-gateway-linux-amd64
 COPY --from=builder /out/pilot-access-gateway-linux-amd64.sha256 /pilot/dist/pilot-access-gateway-linux-amd64.sha256
+COPY --from=builder /out/pilot-access-directory-linux-amd64 /pilot/dist/pilot-access-directory-linux-amd64
+COPY --from=builder /out/pilot-access-directory-linux-amd64.sha256 /pilot/dist/pilot-access-directory-linux-amd64.sha256
 
 WORKDIR /pilot
 COPY playbooks/ playbooks/

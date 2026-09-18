@@ -47,6 +47,7 @@ var roleContracts = []roleContract{
 	{Name: "agent-controller", Description: "Agent Monitoring Phase 1：observe-only incident controller，接收 Alertmanager webhook、派送唯讀診斷請求；experimental，只需一台 (agent-controller-apply.yml)", GroupVarsStem: "agent-controller", VaultSections: []string{"agent-controller"}},
 	{Name: "dashboard", Description: "Grafana + Loki，只需一台 (dashboard-apply.yml)", GroupVarsStem: "dashboard", VaultSections: []string{"dashboard"}},
 	{Name: "pilot-access-gateway", Description: "Stateless FreeIPA-backed SSH/sudo 存取閘道；day-2/opt-in，目標主機須先是 freeipa-client (pilot-access-gateway-apply.yml)", GroupVarsStem: "pilot-access-gateway", VaultSections: []string{"freeipa"}, HostVarsKeys: []string{"gateway_id", "gateway_scope"}},
+	{Name: "pilot-access-directory", Description: "跨 scope discovery/routing 入口(single canonical SSH ingress)，只讀 FreeIPA 投影、從不取代 Gateway 的 fresh authorize；目標主機須先是 freeipa-client (pilot-access-directory-apply.yml)", GroupVarsStem: "pilot-access-directory", VaultSections: []string{"freeipa"}, HostVarsKeys: []string{"directory_id"}},
 }
 
 func roleContractsByName() map[string]roleContract {

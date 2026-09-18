@@ -425,8 +425,8 @@ func TestDeployCatalog_PlaybooksExistAndAreWellFormed(t *testing.T) {
 	}
 	// AGENTS.md §4.3 tracks this count; keep the two in sync deliberately
 	// rather than silently drifting.
-	if len(deployCatalog) != 36 {
-		t.Fatalf("expected 36 apply playbooks in the catalog (see AGENTS.md §4.3), got %d", len(deployCatalog))
+	if len(deployCatalog) != 37 {
+		t.Fatalf("expected 37 apply playbooks in the catalog (see AGENTS.md §4.3), got %d", len(deployCatalog))
 	}
 }
 

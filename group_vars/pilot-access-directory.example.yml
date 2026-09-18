@@ -1,0 +1,64 @@
+# ============================================================================
+#  group_vars/pilot-access-directory.example.yml —— Pilot Access Directory 設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/pilot-access-directory.yml
+#    cp group_vars/pilot-access-directory.example.yml <inventory 目錄>/group_vars/pilot-access-directory.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/pilot-access-directory.md
+#  詳細設計:docs/tmp/now/spec.md（Pilot Access Directory、Gateway Handoff 與
+#  SSH Session Recording 實作規格），§10-§14/§31/§33
+#
+#  site.include=true 的 role(contracts/pilot-access-directory.yaml)——把它
+#  加進某台主機 hosts.yml 的 roles 清單,本身就是操作者的核准動作,之後每次
+#  全站部署都會照常套用。
+#
+#  目標主機必須已經是 freeipa-client(先跑 freeipa-client-apply.yml）且已有
+#  正向 DNS record;`hostCardinality: exactly-one`——同一個 topology 只能有
+#  一台 Directory instance(spec.md D4:單一 canonical SSH ingress)。
+# ============================================================================
+
+# directory_id 是這個 Directory instance 的識別碼,務必放進
+# host_vars/<主機短名>.yml,不要放進這份 group 共用檔案:
+#
+#   # host_vars/access-01.yml
+#   directory_id: access-01
+
+# 這台 Directory 的 FQDN。不填則沿用 ansible_fqdn——spec.md D4 要求這裡必須
+# 是這台主機真正 FreeIPA-enrolled 的 FQDN,不是額外 alias/CNAME。
+# directory_fqdn: ""
+
+# FreeIPA server(s)FQDN 清單。不填的話會自動從 group_vars/freeipa.yml 的
+# freeipa_domain 推導成 ["ipa1.<domain>"]——跟 pilot-access-gateway/
+# freeipa-client-apply.yml 同一套推導慣例,通常不用填。只有伺服器主機名不照
+# 這個慣例時才需要明確覆寫,而且必須是 YAML list(CLI 呼叫要用
+# `-e '{"freeipa_servers": [...]}'` 的 JSON 物件形式,不要用
+# `-e freeipa_servers=[...]`)。
+# freeipa_servers:
+#   - ipa1.ipa.pilot.internal
+
+# Kerberos realm,例如 "IPA.PILOT.INTERNAL"。不填的話會自動從 freeipa_domain
+# 推導成大寫,同上,通常不用填。
+# ipa_realm: "IPA.PILOT.INTERNAL"
+
+# 只在**安裝當下**用來建立 reader service principal + keytab;執行期完全
+# 不用。一律走 Vault,不要直接寫在這個檔案裡:
+#   vault key: ipa_admin_password(跟 freeipa-identity/freeipa-dns/
+#   pilot-access-gateway 共用同一份 vault 檔)
+# ipa_admin_password: ""
+
+# 控制端已建置好的兩個 binary 路徑(相對於 repo root,或絕對路徑)。必填——
+# 套用前會先在控制端驗證這兩個檔案存在、能正常執行 version 子指令。
+pilot_binary_path: "dist/pilot-linux-amd64"
+pilot_access_directory_binary_path: "dist/pilot-access-directory-linux-amd64"
+#   用 scripts/build-pilot-access-directory.sh 建置 pilot-access-directory 二進位檔。
+
+# Portal 使用者群組——跟 pilot-access-gateway 共用同一個群組名稱(同一批人,
+# 兩種入口:直接連對應 scope 的 Gateway,或連這台 Directory 讓它自動路由)。
+# 必須是既有的 FreeIPA 群組——這支 playbook 不會建立 local fallback group。
+# directory_portal_user_group: "role-pilot-portal-user"
+
+# 是否安裝 sshd ForceCommand。預設為 true——沒做過 vm-target 鎖定回歸測試前
+# 不得對非 disposable 主機開啟;要暫時關閉請明確取消註解設成 false。
+# pilot_access_directory_install_forcecommand: true

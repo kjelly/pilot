@@ -1,0 +1,772 @@
+# Apply playbook for docs/verification/pilot-access-directory.md
+# (docs/tmp/now/spec.md §31, Phase 4).
+#
+# Installs pilot-access-directory on ONE Directory host that is already a
+# FreeIPA client (playbooks/apply/freeipa-client-apply.yml) enrolled in
+# the same realm the target FreeIPA server(s) serve. Mirrors
+# pilot-access-gateway-apply.yml's structure/idioms exactly (staging/prod
+# gates, changed_when/failed_when/no_log discipline, artifact gates,
+# health probe, sshd ForceCommand drop-in with sshd -t before reload) —
+# this is a NEW, separate component, not a modification of the Gateway
+# playbook.
+#
+# Usage (reusing an already-provisioned FreeIPA-client vm-target — see
+# docs/evidence/pilot-access-directory/ for the exact commands used):
+#
+#   pilot vm-target run --name <directory-vm> \
+#       playbooks/apply/pilot-access-directory-apply.yml \
+#       -e target_group=all \
+#       -e directory_id=access-01 \
+#       -e '{"freeipa_servers": ["ipa1.ipa.pilot.internal"]}' \
+#       -e ipa_realm=IPA.PILOT.INTERNAL \
+#       -e pilot_binary_path=dist/pilot-linux-amd64 \
+#       -e pilot_access_directory_binary_path=dist/pilot-access-directory-linux-amd64 \
+#       -e @~/.vault/main.yaml
+#
+# Secrets: ipa_admin_password comes from a vault file, never hard-coded
+# (matching every other FreeIPA-touching apply playbook in this repo).
+---
+- name: Pilot Access Directory install
+  hosts: "{{ target_group | default('pilot-access-directory') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    # directory_id / pilot_binary_path / pilot_access_directory_binary_path
+    # are contracts/pilot-access-directory.yaml's required groupVars —
+    # deliberately NOT given a play-vars entry here, same shadowing
+    # hazard pilot-access-gateway-apply.yml's own header comment explains
+    # (play vars outrank inventory group_vars/host_vars in Ansible's
+    # precedence order).
+    directory_target_hostgroup_prefix: "pilot-target-"
+    directory_gateway_hostgroup_prefix: "pilot-gateway-"
+    directory_socket_path: /run/pilot/access-directory.sock
+    ipa_ca_file: /etc/ipa/ca.crt
+
+    pilot_directory_user: pilot-directory
+
+    pilot_binary_sha256: ""
+    pilot_access_directory_binary_sha256: ""
+
+    # directory_fqdn / directory_portal_user_group /
+    # pilot_access_directory_install_forcecommand are optional groupVars
+    # with a real default — same "_effective_" naming convention
+    # pilot-access-gateway-apply.yml uses to avoid the self-referencing-
+    # default infinite recursion this ansible-core version has.
+    directory_effective_fqdn: "{{ directory_fqdn | default(ansible_fqdn) }}"
+    directory_effective_portal_user_group: "{{ directory_portal_user_group | default('role-pilot-portal-user') }}"
+
+    # freeipa_servers / ipa_realm auto-derive from the shared realm config
+    # exactly like pilot-access-gateway-apply.yml's own
+    # gateway_effective_ipa_realm/gateway_effective_freeipa_servers.
+    directory_effective_ipa_realm: >-
+      {{ (ipa_realm | default('', true))
+         or (freeipa_realm | default('', true))
+         or ((freeipa_domain | default('ipa.pilot.internal', true)) | upper) }}
+    directory_effective_freeipa_servers: >-
+      {{ (freeipa_servers | default([], true))
+         or [ (freeipa_server_fqdn | default('', true))
+              or ('ipa1.' ~ (freeipa_domain | default('ipa.pilot.internal', true))) ] }}
+
+    # Gate for the sshd ForceCommand step below — same default-TRUE
+    # policy pilot-access-gateway-apply.yml adopted after its own
+    # lockout regression test passed on vm-target (spec.md §0 G4/§55.1's
+    # equivalent gate for Directory). Never let this install against a
+    # non-disposable host without an equivalent lockout regression test
+    # having actually been run there.
+    pilot_access_directory_effective_install_forcecommand: "{{ pilot_access_directory_install_forcecommand | default(true) }}"
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Gate: required directory identity vars"
+      ansible.builtin.assert:
+        that:
+          - directory_id | length > 0
+          - directory_effective_freeipa_servers | length > 0
+          - directory_effective_ipa_realm | length > 0
+          - ipa_admin_password is defined
+          - pilot_binary_path | length > 0
+          - pilot_access_directory_binary_path | length > 0
+        fail_msg: >-
+          Missing required vars: directory_id, ipa_admin_password (vault),
+          pilot_binary_path, pilot_access_directory_binary_path.
+          freeipa_servers/ipa_realm auto-derive from group_vars/freeipa.yml's
+          freeipa_domain if not set.
+      tags: [always]
+
+    - name: "Resolve local artifact paths (relative = repo-root relative)"
+      ansible.builtin.set_fact:
+        pilot_binary_abs_path: >-
+          {{ pilot_binary_path if (pilot_binary_path is match('^/'))
+          else (playbook_dir ~ '/../../' ~ pilot_binary_path) }}
+        pilot_access_directory_binary_abs_path: >-
+          {{ pilot_access_directory_binary_path if (pilot_access_directory_binary_path is match('^/'))
+          else (playbook_dir ~ '/../../' ~ pilot_access_directory_binary_path) }}
+      tags: [always]
+
+    # Step 2 (spec.md §31): both binaries must exist and actually run,
+    # same discipline as pilot-access-gateway-apply.yml's own artifact
+    # gate.
+    - name: "Gate: pilot binary exists on the controller"
+      ansible.builtin.stat:
+        path: "{{ pilot_binary_abs_path }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_binary_stat
+      tags: [always]
+
+    - name: "Gate: pilot binary exists"
+      ansible.builtin.assert:
+        that:
+          - pilot_binary_stat.stat.get('exists', false)
+        fail_msg: >-
+          pilot binary {{ pilot_binary_abs_path }} is missing — build it
+          first (e.g. CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o
+          dist/pilot-linux-amd64 ./cmd/pilot).
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: pilot binary's own version subcommand succeeds"
+      ansible.builtin.command:
+        argv: ["{{ pilot_binary_abs_path }}", "version"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_binary_version
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: pilot-access-directory binary exists on the controller"
+      ansible.builtin.stat:
+        path: "{{ pilot_access_directory_binary_abs_path }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_access_directory_binary_stat
+      tags: [always]
+
+    - name: "Gate: pilot-access-directory binary exists"
+      ansible.builtin.assert:
+        that:
+          - pilot_access_directory_binary_stat.stat.get('exists', false)
+        fail_msg: >-
+          pilot-access-directory binary
+          {{ pilot_access_directory_binary_abs_path }} is missing — build
+          it with scripts/build-pilot-access-directory.sh first.
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: pilot-access-directory binary's own version subcommand succeeds and matches the contract"
+      ansible.builtin.command:
+        argv: ["{{ pilot_access_directory_binary_abs_path }}", "version"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_access_directory_binary_version
+      changed_when: false
+      check_mode: false
+      failed_when: pilot_access_directory_binary_version.stdout is not match('^pilot-access-directory \S+')
+      tags: [always]
+
+  tasks:
+    # Step 3 (spec.md §31): verify FreeIPA client enrollment.
+    - name: "Step 3: verify FreeIPA client enrollment"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: directory_ipa_default_conf
+      tags: [AD_enrollment]
+
+    - name: "Step 3: gate — this host must already be FreeIPA-enrolled"
+      ansible.builtin.assert:
+        that:
+          - directory_ipa_default_conf.stat.exists
+        fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
+      tags: [AD_enrollment]
+
+    # Step 4 (spec.md §31): `ipa service-add` (Step 8, below) requires a
+    # forward DNS record — same rationale as pilot-access-gateway-apply.yml's
+    # own equivalent gate.
+    - name: "Step 4: check this host resolves in FreeIPA DNS"
+      ansible.builtin.command:
+        argv: [getent, hosts, "{{ directory_effective_fqdn }}"]
+      register: directory_dns_check
+      changed_when: false
+      failed_when: false
+      tags: [AD_enrollment]
+
+    - name: "Step 4: gate — this host must have a forward DNS record before FreeIPA service enrollment"
+      ansible.builtin.assert:
+        that:
+          - directory_dns_check.rc == 0
+        fail_msg: >-
+          {{ directory_effective_fqdn }} does not resolve. `ipa service-add`
+          (Step 9) requires a forward DNS record. Re-run
+          freeipa-client-apply.yml with DNS registration enabled, or
+          register it manually:
+          `ipa dnsrecord-add <zone> {{ directory_effective_fqdn.split('.')[0] }} --a-rec=<ip>`.
+      tags: [AD_enrollment]
+
+    - name: "Kinit admin (management-plane operations only — never shipped to this host)"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo '{{ ipa_admin_password }}' | kinit admin
+      args:
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      tags: [AD_enrollment, AD_keytab]
+
+    # Step 5 (spec.md §31/D4): this Directory host joins
+    # pilot-access-directories — the hostgroup that controls who may SSH
+    # TO the Directory itself (the single canonical ingress, D4).
+    - name: "Step 5: ensure pilot-access-directories hostgroup exists"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-add, pilot-access-directories, "--desc=Pilot Access Directory hosts"]
+      register: directory_hostgroup_add
+      changed_when: "'Added hostgroup' in (directory_hostgroup_add.stdout | default(''))"
+      failed_when:
+        - directory_hostgroup_add.rc != 0
+        - "'already exists' not in (directory_hostgroup_add.stderr | default(''))"
+      tags: [AD_enrollment]
+
+    - name: "Step 5: add this host to pilot-access-directories"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-add-member, pilot-access-directories, "--hosts={{ directory_effective_fqdn }}"]
+      register: directory_hostgroup_member_add
+      changed_when: "'Number of members added 1' in (directory_hostgroup_member_add.stdout | default(''))"
+      failed_when:
+        - directory_hostgroup_member_add.rc != 0
+        - "'already a member' not in (directory_hostgroup_member_add.stdout | default('') + directory_hostgroup_member_add.stderr | default(''))"
+      tags: [AD_enrollment]
+
+    - name: "Create pilot-directory system user"
+      ansible.builtin.user:
+        name: "{{ pilot_directory_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+        home: /nonexistent
+      tags: [AD_service]
+
+    # Step 6/7 (spec.md §31): role-pilot-portal-user + the
+    # pilot-access-directory-login HBAC rule — same self-provisioned
+    # FreeIPA scaffolding pattern pilot-access-gateway-apply.yml already
+    # established for its own analogous group/rule pair. Group membership
+    # (who is a portal user) is deliberately NOT managed here — that
+    # stays roster-owned identity data, exactly like Gateway's own split.
+    - name: "Step 6: ensure portal-user group exists"
+      ansible.builtin.command:
+        argv: [ipa, group-add, "{{ directory_effective_portal_user_group }}", "--desc=Pilot portal users"]
+      register: directory_portal_group_add
+      changed_when: "'Added group' in (directory_portal_group_add.stdout | default(''))"
+      failed_when:
+        - directory_portal_group_add.rc != 0
+        - "'already exists' not in (directory_portal_group_add.stderr | default(''))"
+      tags: [AD_service]
+
+    - name: "Step 7: ensure pilot-access-directory-login HBAC rule exists"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-add, pilot-access-directory-login]
+      register: directory_login_hbac_add
+      changed_when: "'Added HBAC rule' in (directory_login_hbac_add.stdout | default(''))"
+      failed_when:
+        - directory_login_hbac_add.rc != 0
+        - "'already exists' not in (directory_login_hbac_add.stderr | default(''))"
+      tags: [AD_service]
+
+    - name: "Step 7: ensure pilot-access-directory-login targets pilot-access-directories"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-add-host, pilot-access-directory-login, --hostgroups=pilot-access-directories]
+      register: directory_login_hbac_hostgroup
+      changed_when: "'Number of members added 1' in (directory_login_hbac_hostgroup.stdout | default(''))"
+      failed_when:
+        - directory_login_hbac_hostgroup.rc != 0
+        - "'already a member' not in (directory_login_hbac_hostgroup.stdout | default('') + directory_login_hbac_hostgroup.stderr | default(''))"
+      tags: [AD_service]
+
+    - name: "Step 7: ensure pilot-access-directory-login allows sshd"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-add-service, pilot-access-directory-login, --hbacsvcs=sshd]
+      register: directory_login_hbac_service
+      changed_when: "'Number of members added 1' in (directory_login_hbac_service.stdout | default(''))"
+      failed_when:
+        - directory_login_hbac_service.rc != 0
+        - "'already a member' not in (directory_login_hbac_service.stdout | default('') + directory_login_hbac_service.stderr | default(''))"
+      tags: [AD_service]
+
+    - name: "Step 7: ensure pilot-access-directory-login authorizes the portal-user group"
+      ansible.builtin.command:
+        argv: [ipa, hbacrule-add-user, pilot-access-directory-login, "--groups={{ directory_effective_portal_user_group }}"]
+      register: directory_login_hbac_group
+      changed_when: "'Number of members added 1' in (directory_login_hbac_group.stdout | default(''))"
+      failed_when:
+        - directory_login_hbac_group.rc != 0
+        - "'already a member' not in (directory_login_hbac_group.stdout | default('') + directory_login_hbac_group.stderr | default(''))"
+      tags: [AD_service]
+
+    - name: "Verify portal-user group resolves via SSSD (never a local fallback)"
+      ansible.builtin.command:
+        argv: [getent, group, "{{ directory_effective_portal_user_group }}"]
+      register: directory_portal_group_check
+      changed_when: false
+      failed_when: false
+      tags: [AD_service]
+
+    - name: "Gate: portal-user group must resolve via SSSD"
+      ansible.builtin.assert:
+        that:
+          - directory_portal_group_check.rc == 0
+        fail_msg: >-
+          Group {{ directory_effective_portal_user_group }} was just
+          created/confirmed in FreeIPA above but does not resolve locally
+          via getent — SSSD/enrollment problem on this host, not a
+          missing group. This playbook never creates a local fallback
+          group (nsswitch's "files" source is checked before "sss" and
+          would silently shadow the real FreeIPA group forever).
+      tags: [AD_service]
+
+    - name: "Ensure /etc/pilot exists"
+      ansible.builtin.file:
+        path: /etc/pilot
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [AD_service]
+
+    # Step 8 (spec.md §31/D2's reader-principal reuse pattern): provision
+    # the read-only reader keytab. Idempotent by construction — same
+    # "never unconditionally rotate" rule pilot-access-gateway-apply.yml's
+    # own Step 8 documents (ipa-getkeytab always increments kvno).
+    - name: "Step 8: check whether the directory keytab already exists"
+      ansible.builtin.stat:
+        path: /etc/pilot/pilot-access-directory.keytab
+      register: directory_keytab_stat
+      tags: [AD_keytab]
+
+    - name: "Step 8: create the directory service principal (idempotent)"
+      ansible.builtin.command:
+        argv: [ipa, service-add, "pilot-access-directory/{{ directory_effective_fqdn }}"]
+      register: directory_service_add
+      changed_when: "'Added service' in (directory_service_add.stdout | default(''))"
+      failed_when:
+        - directory_service_add.rc != 0
+        - "'already exists' not in (directory_service_add.stderr | default(''))"
+      tags: [AD_keytab]
+
+    - name: "Step 8: fetch the directory keytab (ONLY when it does not exist yet)"
+      ansible.builtin.command:
+        argv:
+          - ipa-getkeytab
+          - -s
+          - "{{ directory_effective_freeipa_servers[0] }}"
+          - -p
+          - "pilot-access-directory/{{ directory_effective_fqdn }}"
+          - -k
+          - /etc/pilot/pilot-access-directory.keytab
+      when: not directory_keytab_stat.stat.exists
+      changed_when: true
+      tags: [AD_keytab]
+
+    - name: "Step 8: keytab ownership/mode"
+      ansible.builtin.file:
+        path: /etc/pilot/pilot-access-directory.keytab
+        owner: "{{ pilot_directory_user }}"
+        group: "{{ pilot_directory_user }}"
+        mode: "0400"
+      tags: [AD_keytab]
+
+    # Step 9 (spec.md §31/§8.2): confirm the reader can actually list
+    # hostgroups (hostgroup_find) — Directory's one FreeIPA read
+    # capability Gateway never needed. Reuses the keytab Step 8 just
+    # fetched, exactly like Phase 0's spike proved this works with no
+    # additional grant beyond what a Gateway reader already has.
+    - name: "Step 9: obtain a ticket for the directory reader principal"
+      ansible.builtin.command:
+        argv: [kinit, -kt, /etc/pilot/pilot-access-directory.keytab, "pilot-access-directory/{{ directory_effective_fqdn }}"]
+      changed_when: false
+      tags: [AD_keytab]
+
+    - name: "Step 9: probe hostgroup_find capability"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-find, "{{ directory_target_hostgroup_prefix }}", --sizelimit=1]
+      register: directory_hostgroup_find_probe
+      changed_when: false
+      tags: [AD_keytab]
+
+    - name: "Step 9: gate — reader principal can call hostgroup_find"
+      ansible.builtin.assert:
+        that:
+          - directory_hostgroup_find_probe.rc == 0
+        fail_msg: >-
+          pilot-access-directory/{{ directory_effective_fqdn }} could not
+          call hostgroup_find — the reader role needs at least the same
+          read grant pilot-access-gateway's reader already has (spec.md
+          §8.2 Phase 0 confirmed this needs no additional privilege on a
+          stock Gateway reader).
+      tags: [AD_keytab]
+
+    - name: "Step 9: destroy the management-plane ticket"
+      ansible.builtin.command:
+        argv: [kdestroy]
+      changed_when: false
+      tags: [AD_keytab]
+
+    # Step 10/11 (spec.md §31): install both binaries.
+    - name: "Step 10: install pilot CLI"
+      ansible.builtin.copy:
+        src: "{{ pilot_binary_abs_path }}"
+        dest: /usr/bin/pilot
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [AD_service, AD19]
+
+    - name: "Ensure /usr/local/libexec exists (not all distros pre-create it)"
+      ansible.builtin.file:
+        path: /usr/local/libexec
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [AD_service]
+
+    - name: "Step 11: install pilot-access-directory binary"
+      ansible.builtin.copy:
+        src: "{{ pilot_access_directory_binary_abs_path }}"
+        dest: /usr/local/libexec/pilot-access-directory
+        owner: root
+        group: root
+        mode: "0755"
+      register: directory_binary_copy
+      tags: [AD_service]
+
+    # Step 12 (spec.md §31/§12.1): access-directory.yaml — matches
+    # cmd/pilot-access-directory/config.go's Config struct exactly. No
+    # gateway_known_hosts-style field: host-key verification for the
+    # Directory -> Gateway hop is SSSD/sss_ssh_knownhostsproxy-based
+    # (Step 13 below), not a config-managed snapshot file.
+    - name: "Step 12: install access-directory.yaml"
+      ansible.builtin.copy:
+        dest: /etc/pilot/access-directory.yaml
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          directory:
+            id: {{ directory_id }}
+            target_hostgroup_prefix: {{ directory_target_hostgroup_prefix }}
+            gateway_hostgroup_prefix: {{ directory_gateway_hostgroup_prefix }}
+            portal_user_group: {{ directory_effective_portal_user_group }}
+            socket_path: {{ directory_socket_path }}
+          freeipa:
+            servers:
+          {% for server in directory_effective_freeipa_servers %}
+              - {{ server }}
+          {% endfor %}
+            ca_file: {{ ipa_ca_file }}
+            service_principal: pilot-access-directory/{{ directory_effective_fqdn }}@{{ directory_effective_ipa_realm }}
+            keytab: /etc/pilot/pilot-access-directory.keytab
+            request_timeout: 5s
+          routing:
+            ssh_config: /etc/pilot/directory_ssh_config
+            connect_timeout: 5s
+      register: directory_config_copy
+      tags: [AD_config]
+
+    # Step 13 (spec.md §15, corrected design): Directory -> Gateway SSH
+    # config — byte-identical directive set to
+    # cmd/pilot/cmd/portal_ssh.go's pilotSSHConfig constant (only the
+    # eventual target differs: a Gateway FQDN chosen from
+    # /v1/connect/resolve, never a caller-supplied string). Host-key
+    # verification is sss_ssh_knownhostsproxy/SSSD-based — Directory is
+    # itself a FreeIPA client (freeipa-client sameHosts dependency), so
+    # the same dynamic resolution already proven for Gateway -> target
+    # applies here with zero extra apply-time state (no known_hosts
+    # snapshot file, no keyscan step — this is the whole point of the
+    # spec correction pass that removed the original
+    # directory_gateway_known_hosts design).
+    - name: "Step 13: install root-owned Directory -> Gateway SSH config"
+      ansible.builtin.copy:
+        dest: /etc/pilot/directory_ssh_config
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          Host *
+              ForwardAgent no
+              ClearAllForwardings yes
+
+              PermitLocalCommand no
+              EnableEscapeCommandline no
+              EscapeChar none
+
+              ProxyJump none
+              ProxyCommand /usr/bin/sss_ssh_knownhostsproxy -p %p %h
+
+              StrictHostKeyChecking yes
+              UserKnownHostsFile /dev/null
+              GlobalKnownHostsFile /var/lib/sss/pubconf/known_hosts
+
+              GSSAPIAuthentication yes
+              GSSAPIDelegateCredentials no
+              PreferredAuthentications gssapi-with-mic
+
+              BatchMode yes
+              PubkeyAuthentication no
+              KbdInteractiveAuthentication no
+              PasswordAuthentication no
+
+              RequestTTY force
+        validate: '/usr/bin/ssh -G -F %s target.invalid'
+      tags: [AD_config]
+
+    # Step 14 (spec.md §31/§14): pilot-directory-session ForceCommand
+    # wrapper. This shell script deliberately NEVER references
+    # $SSH_ORIGINAL_COMMAND itself (spec.md D7's absolute prohibition) —
+    # it always execs the same fixed argv, and the Go binary it execs
+    # into (cmd/pilot/cmd/directory_session.go's `pilot directory-session`)
+    # reads $SSH_ORIGINAL_COMMAND from its own inherited environment and
+    # strictly parses it there, never via any shell tokenization. Same
+    # unset/PATH-export shape as pilot-access-gateway-apply.yml's own
+    # pilot-session wrapper.
+    - name: "Step 14: install pilot-directory-session"
+      ansible.builtin.copy:
+        dest: /usr/local/libexec/pilot-directory-session
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+
+          [ -t 0 ] || exit 1
+
+          unset SSH_AUTH_SOCK
+          unset LD_PRELOAD
+          unset LD_LIBRARY_PATH
+          unset PILOT_CONFIG
+          unset PILOT_DATA_DIR
+
+          export PATH=/usr/bin:/bin
+
+          exec /usr/bin/pilot directory-session
+      tags: [AD_service]
+
+    # Step 15 (spec.md §31): systemd socket + service units — same shape
+    # as pilot-access-gateway-apply.yml's own Step 15.
+    - name: "Step 15: install pilot-access-directory.socket"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pilot-access-directory.socket
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Pilot Access Directory Socket
+
+          [Socket]
+          ListenStream={{ directory_socket_path }}
+          SocketUser={{ pilot_directory_user }}
+          SocketGroup={{ directory_effective_portal_user_group }}
+          SocketMode=0660
+          RemoveOnStop=true
+          RuntimeDirectory=pilot
+
+          [Install]
+          WantedBy=sockets.target
+      register: directory_socket_unit
+      tags: [AD_service, AD02]
+
+    - name: "Step 15: install pilot-access-directory.service"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pilot-access-directory.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Pilot Access Directory
+          Requires=pilot-access-directory.socket
+          After=network-online.target sssd.service
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ pilot_directory_user }}
+          Group={{ pilot_directory_user }}
+
+          ExecStart=/usr/local/libexec/pilot-access-directory serve --config /etc/pilot/access-directory.yaml --systemd-socket
+
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ProtectKernelTunables=true
+          ProtectKernelModules=true
+          ProtectControlGroups=true
+
+          ReadOnlyPaths=/etc/pilot
+          ReadOnlyPaths=/etc/ipa
+
+          [Install]
+          WantedBy=multi-user.target
+      register: directory_service_unit
+      tags: [AD_service]
+
+    - name: "Step 15: daemon-reload"
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: directory_socket_unit.changed or directory_service_unit.changed
+      tags: [AD_service]
+
+    - name: "Step 16: enable + start pilot-access-directory.socket"
+      ansible.builtin.systemd:
+        name: pilot-access-directory.socket
+        enabled: true
+        state: started
+      tags: [AD_service]
+
+    - name: "Restart pilot-access-directory.socket if its unit file changed"
+      ansible.builtin.systemd:
+        name: pilot-access-directory.socket
+        state: restarted
+      when: directory_socket_unit.changed
+      tags: [AD_service]
+
+    - name: "Restart pilot-access-directory.service if the binary or config changed"
+      ansible.builtin.systemd:
+        name: pilot-access-directory.service
+        state: restarted
+      when: directory_binary_copy.changed or directory_config_copy.changed
+      tags: [AD_service]
+
+    # Step 17 (spec.md §31): capability probe — a real connection over
+    # the real socket, triggering socket activation, checked via
+    # /v1/health. Skipped under --check for the same reason
+    # pilot-access-gateway-apply.yml's own Step 17 is (the systemd tasks
+    # that would actually start the service are themselves simulated in
+    # check mode; on a fresh bootstrap the socket doesn't exist yet).
+    - name: "Step 17: capability probe via /v1/health"
+      ansible.builtin.command:
+        argv: [curl, --silent, --show-error, --fail, --unix-socket, "{{ directory_socket_path }}", "http://localhost/v1/health"]
+      register: directory_health_probe
+      changed_when: false
+      retries: 3
+      delay: 2
+      until: directory_health_probe.rc == 0
+      when: not ansible_check_mode
+      tags: [AD_service]
+
+    - name: "Step 17: gate — health probe reports ok"
+      ansible.builtin.assert:
+        that:
+          - (directory_health_probe.stdout | from_json).status == 'ok'
+        fail_msg: "health probe did not report status=ok: {{ directory_health_probe.stdout }}"
+      when: not ansible_check_mode
+      tags: [AD_service]
+
+    # Step 18-20 (spec.md §31/§14): sshd ForceCommand. GATED — same
+    # opt-out-by-flag pattern pilot-access-gateway-apply.yml's own Step
+    # 19-21 uses; do not enable against a non-disposable host without an
+    # equivalent lockout regression test having actually passed there.
+    - name: "Step 18: install sshd ForceCommand drop-in (GATED)"
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          Match Group {{ directory_effective_portal_user_group }}
+              ForceCommand /usr/local/libexec/pilot-directory-session
+              PermitTTY yes
+
+              DisableForwarding yes
+              AllowAgentForwarding no
+              AllowTcpForwarding no
+              X11Forwarding no
+              PermitTunnel no
+              PermitUserRC no
+      when: pilot_access_directory_effective_install_forcecommand | bool
+      register: directory_forcecommand_dropin
+      tags: [AD_forcecommand, AD18]
+
+    - name: "Step 19: sshd -t"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+      when: pilot_access_directory_effective_install_forcecommand | bool and directory_forcecommand_dropin.changed
+      changed_when: false
+      tags: [AD_forcecommand]
+
+    - name: "Step 20: reload sshd"
+      ansible.builtin.systemd:
+        name: ssh
+        state: reloaded
+      when: pilot_access_directory_effective_install_forcecommand | bool and directory_forcecommand_dropin.changed
+      tags: [AD_forcecommand]
+
+    # Rollback path — same declarative-undo pattern
+    # pilot-access-gateway-apply.yml's own rollback tasks provide.
+    - name: "Step 18 rollback: remove sshd ForceCommand drop-in when disabled"
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
+        state: absent
+      when: not (pilot_access_directory_effective_install_forcecommand | bool)
+      register: directory_forcecommand_dropin_removed
+      tags: [AD_forcecommand]
+
+    - name: "Step 19 rollback: sshd -t after removing the drop-in"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+      when: not (pilot_access_directory_effective_install_forcecommand | bool) and directory_forcecommand_dropin_removed.changed
+      changed_when: false
+      tags: [AD_forcecommand]
+
+    - name: "Step 20 rollback: reload sshd after removing the drop-in"
+      ansible.builtin.systemd:
+        name: ssh
+        state: reloaded
+      when: not (pilot_access_directory_effective_install_forcecommand | bool) and directory_forcecommand_dropin_removed.changed
+      tags: [AD_forcecommand]
+
+    # Step 21 (spec.md §31): post-apply identity probe — a real,
+    # unauthenticated-by-username connection over the socket must at
+    # least answer /v1/health, proving the service is genuinely up after
+    # every task above (not just "systemd says started").
+    - name: "Step 21: post-apply identity probe"
+      ansible.builtin.command:
+        argv: [curl, --silent, --show-error, --fail, --unix-socket, "{{ directory_socket_path }}", "http://localhost/v1/health"]
+      register: directory_postapply_probe
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [AD_service]

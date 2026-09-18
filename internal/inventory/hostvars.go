@@ -37,6 +37,10 @@ var hostVarsKeyCatalog = map[string]hostVarsKey{
 		Name:    "gateway_scope",
 		Comment: "這台 gateway 對應的 scope 名稱;它會使用 pilot-target-<scope> hostgroup。",
 	},
+	"directory_id": {
+		Name:    "directory_id",
+		Comment: "這台 Pilot Access Directory 的唯一 instance id;docs/tmp/now/spec.md D4 限定同一個 topology 只有一台 Directory,但識別碼仍不能放在 group_vars 共用。",
+	},
 	"prometheus_site_label": {
 		Name:  "prometheus_site_label",
 		Value: "",
@@ -52,6 +56,7 @@ var hostVarsKeyCatalog = map[string]hostVarsKey{
 var hostVarsKeyOrder = []string{
 	"gateway_id",
 	"gateway_scope",
+	"directory_id",
 	"prometheus_site_label",
 }
 

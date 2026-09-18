@@ -1,0 +1,59 @@
+schemaVersion: 1
+id: pilot-access-directory
+role: pilot-access-directory
+specs:
+  - path: docs/verification/pilot-access-directory.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/pilot-access-directory-apply.yml
+regressionTests:
+  - internal/accessdirectory/resolver_test.go
+  - internal/directoryapi/server_test.go
+  - internal/directoryapi/portal_group_test.go
+  - cmd/pilot-access-directory/config_test.go
+  - cmd/pilot/cmd/directory_client_test.go
+  - cmd/pilot/cmd/directory_tui_test.go
+  - cmd/pilot/cmd/directory_ssh_test.go
+  - cmd/pilot/cmd/directory_session_test.go
+dependencies:
+  - {component: freeipa-client, required: true, relation: sameHosts}
+conflicts: []
+hostCardinality: exactly-one
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
+groupVars:
+  - {name: directory_id, type: string, required: true, secret: false}
+  - {name: directory_fqdn, type: string, required: false, secret: false}
+  - {name: freeipa_servers, type: stringList, required: false, secret: false}
+  - {name: ipa_realm, type: string, required: false, secret: false}
+  - {name: ipa_admin_password, type: string, required: true, secret: true}
+  - {name: pilot_binary_path, type: string, required: true, secret: false}
+  - {name: pilot_access_directory_binary_path, type: string, required: true, secret: false}
+  - {name: directory_portal_user_group, type: string, required: false, default: role-pilot-portal-user, secret: false}
+  - {name: pilot_access_directory_install_forcecommand, type: boolean, required: false, default: true, secret: false}
+endpoints:
+  - name: directory-socket
+    scheme: unix
+    path: /run/pilot/access-directory.sock
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: mapped
+  rows:
+    "docs/verification/pilot-access-directory.md#AD02": {tags: [AD_service], reason: "systemd socket unit install + start tasks — a TCP listener would mean the socket unit itself is misconfigured"}
+    "docs/verification/pilot-access-directory.md#AD17": {tags: [AD_service], reason: "no task in this playbook ever writes under /var/lib/pilot-access-directory — this check just confirms that structural absence on a live host"}
+    "docs/verification/pilot-access-directory.md#AD18": {tags: [AD_forcecommand], reason: "sshd ForceCommand drop-in install + sshd -t gate tasks"}
+    "docs/verification/pilot-access-directory.md#AD19": {tags: [AD_service], reason: "pilot binary install task (step 10) is what makes `pilot directory-session`'s strict SSH_ORIGINAL_COMMAND parser available on this host"}
+  exemptions:
+    "docs/verification/pilot-access-directory.md#AD01": {kind: unit-test-evidence, tags: [], reason: "config KnownFields(true) rejection is a loader-logic property (cmd/pilot-access-directory's TestLoadConfigRejectsForbiddenFields), not something a live host's already-valid config file can demonstrate"}
+    "docs/verification/pilot-access-directory.md#AD27": {kind: structural-absence, tags: [], reason: "stage/prod confirmation is a pre_tasks assert evaluated before any tagged task runs, not itself a tagged task"}
+    "docs/verification/pilot-access-directory.md#AD28": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in an evidence doc, not a single tagged task"}
+    "docs/verification/pilot-access-directory.md#AD30": {kind: idempotency-evidence, tags: [], reason: "fresh vm-target topology E2E is a multi-host, multi-run property recorded in an evidence doc, not a single tagged task"}
+verification: {autoDeploy: false}
+# order 53 放在 freeipa-client(50)/pilot-access-gateway(52)之後、
+# freeipa-nfs-server(55)之前 — Directory 依賴 freeipa-client(sameHosts)，
+# 且 docs/tmp/now/spec.md §33 要求 site.order 必須在 pilot-access-gateway
+# 之後。跟 pilot-access-gateway 一樣 site.include:true(非 single-component
+# -only)：把這個 role 加進某台主機 hosts.yml 的清單本身就是操作者的核准
+# 動作，之後每次全站部署都會照常套用。§0/§55.1 同款規則：加進 hosts.yml
+# 之前，仍要先在該主機或同等 disposable vm-target 上跑過鎖定回歸測試。
+site: {include: true, order: 53, vars: {}, tags: [pilot-access-directory], optIn: false}
