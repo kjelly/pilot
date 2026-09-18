@@ -9,6 +9,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/accessdirectory"
 	"github.com/kjelly/pilot/internal/accessportal"
+	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
 func (s *Server) routes() http.Handler {
@@ -109,11 +110,18 @@ func (s *Server) handleConnectResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := accessportal.CanonicalizeFQDN(req.Target)
+	// Generated fresh for every attempt (spec.md §21.1), not only once a
+	// ready route is found — the same ID then correlates the
+	// directory_route_resolved event below, even for a denied attempt.
+	sessionID := uuid.NewString()
 	resp := ConnectResolveResponse{Target: target}
+
+	s.Emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindDirectoryConnectRequested, User: peer.Username, UID: int(peer.UID), DirectoryID: s.Directory.ID, TargetFQDN: target})
 
 	access, err := s.loadAccess(r.Context(), peer.Username)
 	if err != nil {
 		s.Logger.Error("connect resolve: directory access failed, denying", "user", peer.Username, "target", target, "error", err)
+		s.Emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindDirectoryRouteResolved, User: peer.Username, DirectoryID: s.Directory.ID, TargetFQDN: target, Result: "directory access load failed"})
 		writeJSON(w, http.StatusOK, resp) // Allowed stays false.
 		return
 	}
@@ -127,12 +135,15 @@ func (s *Server) handleConnectResolve(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			resp.Allowed = true
-			resp.SessionID = uuid.NewString()
+			resp.SessionID = sessionID
 			resp.Route = &ConnectRouteJSON{Scope: route.Scope, GatewayCandidates: route.GatewayCandidates}
-			break
+			s.Emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindDirectoryRouteResolved, User: peer.Username, DirectoryID: s.Directory.ID, GatewayScope: route.Scope, TargetFQDN: target, Result: "ready"})
+			writeJSON(w, http.StatusOK, resp)
+			return
 		}
 		break
 	}
+	s.Emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindDirectoryRouteResolved, User: peer.Username, DirectoryID: s.Directory.ID, TargetFQDN: target, Result: "no_ready_route"})
 	writeJSON(w, http.StatusOK, resp)
 }
 

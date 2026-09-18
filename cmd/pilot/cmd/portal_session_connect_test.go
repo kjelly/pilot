@@ -6,7 +6,22 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/sessionaudit"
 )
+
+// testEmitter builds a sessionaudit.Emitter for tests. NewEmitter is
+// fail-soft by design (see its doc comment) — it never errors even when
+// the test sandbox has no reachable local syslog, falling back to
+// slog.Default() instead, so it's always safe to use here.
+func testEmitter(t *testing.T) *sessionaudit.Emitter {
+	t.Helper()
+	e, err := sessionaudit.NewEmitter("pilot-access-gateway-test")
+	if err != nil {
+		t.Fatalf("sessionaudit.NewEmitter: %v", err)
+	}
+	return e
+}
 
 // TestRunPortalOneShotConnect_Allowed proves a fresh, allowed authorize
 // launches ssh with exactly the fixed argv spec.md §31 requires — the same
@@ -24,7 +39,7 @@ func TestRunPortalOneShotConnect_Allowed(t *testing.T) {
 		return nil
 	})
 
-	if err := runPortalOneShotConnect(context.Background(), client, credentials, "/etc/pilot/ssh_config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "gpu-a.example.com"); err != nil {
+	if err := runPortalOneShotConnect(context.Background(), client, credentials, testEmitter(t), "/etc/pilot/ssh_config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "gpu-a.example.com"); err != nil {
 		t.Fatalf("runPortalOneShotConnect: %v", err)
 	}
 	if launched == nil {
@@ -53,7 +68,7 @@ func TestRunPortalOneShotConnect_Denied(t *testing.T) {
 		return nil
 	})
 
-	err := runPortalOneShotConnect(context.Background(), client, credentials, "/etc/pilot/ssh_config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "not-in-scope.example.com")
+	err := runPortalOneShotConnect(context.Background(), client, credentials, testEmitter(t), "/etc/pilot/ssh_config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "not-in-scope.example.com")
 	if err == nil {
 		t.Fatalf("expected an error for a denied target")
 	}
@@ -77,7 +92,7 @@ func TestRunPortalOneShotConnect_CredentialFailure(t *testing.T) {
 		return nil
 	})
 
-	if err := runPortalOneShotConnect(context.Background(), client, credentials, "/etc/pilot/ssh_config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "gpu-a.example.com"); err == nil {
+	if err := runPortalOneShotConnect(context.Background(), client, credentials, testEmitter(t), "/etc/pilot/ssh_config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "gpu-a.example.com"); err == nil {
 		t.Fatalf("expected an error when the credential session fails")
 	}
 	if launched {
@@ -97,7 +112,7 @@ func TestRunPortalOneShotConnect_PropagatesSSHExitCode(t *testing.T) {
 		return exec.Command("sh", "-c", "exit 7").Run()
 	})
 
-	err := runPortalOneShotConnect(context.Background(), client, credentials, "/etc/pilot/ssh_config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "gpu-a.example.com")
+	err := runPortalOneShotConnect(context.Background(), client, credentials, testEmitter(t), "/etc/pilot/ssh_config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "gpu-a.example.com")
 	if err == nil {
 		t.Fatalf("expected an error for a nonzero ssh exit")
 	}

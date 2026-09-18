@@ -14,6 +14,7 @@ import (
 	"net/http"
 
 	"github.com/kjelly/pilot/internal/freeipaaccess"
+	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
 // DirectoryConfig is this Directory instance's identity (spec.md §12.1):
@@ -43,16 +44,29 @@ type Server struct {
 	// (not instead of) the Unix socket's own SocketGroup=.
 	PortalUserGroup string
 
+	// Emitter records session-correlation metadata (docs/tmp/now/spec.md
+	// §21/§22, Phase 6) — never a second authorization source, purely
+	// observability. Defaults to a fail-soft no-syslog emitter when nil
+	// (see NewServer), so it is always safe to call.
+	Emitter *sessionaudit.Emitter
+
 	httpServer *http.Server
 }
 
 // NewServer builds a Server bound to one Directory's config, provider,
-// and hostgroup finder. logger defaults to slog.Default() when nil.
-func NewServer(dir DirectoryConfig, provider freeipaaccess.Provider, finder freeipaaccess.HostgroupFinder, logger *slog.Logger) *Server {
+// and hostgroup finder. logger defaults to slog.Default() when nil;
+// emitter defaults to a fresh sessionaudit.Emitter tagged
+// "pilot-access-directory" when nil (NewEmitter itself is fail-soft — see
+// its doc comment — so this never fails Server construction even when
+// local syslog is unreachable).
+func NewServer(dir DirectoryConfig, provider freeipaaccess.Provider, finder freeipaaccess.HostgroupFinder, emitter *sessionaudit.Emitter, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Server{Directory: dir, Provider: provider, Finder: finder, Logger: logger}
+	if emitter == nil {
+		emitter, _ = sessionaudit.NewEmitter("pilot-access-directory")
+	}
+	s := &Server{Directory: dir, Provider: provider, Finder: finder, Emitter: emitter, Logger: logger}
 	s.httpServer = &http.Server{
 		Handler:     s.routes(),
 		ConnContext: connContext(logger),

@@ -7,7 +7,22 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/sessionaudit"
 )
+
+// testDirectoryEmitter builds a sessionaudit.Emitter for tests. NewEmitter
+// is fail-soft by design (see its doc comment) — it never errors even
+// when the test sandbox has no reachable local syslog, falling back to
+// slog.Default() instead, so it's always safe to use here.
+func testDirectoryEmitter(t *testing.T) *sessionaudit.Emitter {
+	t.Helper()
+	e, err := sessionaudit.NewEmitter("pilot-access-directory-test")
+	if err != nil {
+		t.Fatalf("sessionaudit.NewEmitter: %v", err)
+	}
+	return e
+}
 
 func withDirectorySSHLauncher(t *testing.T, fn func(cmd *exec.Cmd) error) {
 	t.Helper()
@@ -28,7 +43,7 @@ func TestConnectToGatewayAllowed(t *testing.T) {
 		launched = cmd
 		return nil
 	})
-	if err := connectToGateway(context.Background(), client, credentials, "/etc/pilot/directory_ssh_config", username, "gpu-a.example.com"); err != nil {
+	if err := connectToGateway(context.Background(), client, credentials, testDirectoryEmitter(t), "/etc/pilot/directory_ssh_config", username, "gpu-a.example.com"); err != nil {
 		t.Fatalf("connectToGateway: %v", err)
 	}
 	if launched == nil {
@@ -64,7 +79,7 @@ func TestConnectToGatewayDenied(t *testing.T) {
 	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 		{Prompt: "Access changed", Confirm: boolPtr(true)},
 	}}, func() {
-		if err := connectToGateway(context.Background(), client, credentials, "/etc/pilot/directory_ssh_config", username, "not-in-scope.example.com"); err != nil {
+		if err := connectToGateway(context.Background(), client, credentials, testDirectoryEmitter(t), "/etc/pilot/directory_ssh_config", username, "not-in-scope.example.com"); err != nil {
 			t.Fatalf("connectToGateway: %v", err)
 		}
 	})
@@ -90,7 +105,7 @@ func TestConnectToGatewaySSHFailureReturnsToDirectory(t *testing.T) {
 	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 		{Prompt: "SSH session ended with an error", Confirm: boolPtr(true)},
 	}}, func() {
-		if err := connectToGateway(context.Background(), client, credentials, "/etc/pilot/directory_ssh_config", username, "gpu-a.example.com"); err != nil {
+		if err := connectToGateway(context.Background(), client, credentials, testDirectoryEmitter(t), "/etc/pilot/directory_ssh_config", username, "gpu-a.example.com"); err != nil {
 			t.Fatalf("connectToGateway must return nil on an ssh launch failure, got: %v", err)
 		}
 	})
@@ -108,7 +123,7 @@ func TestConnectToGatewayCredentialFailureReturnsToDirectory(t *testing.T) {
 	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 		{Prompt: "Kerberos authentication failed", Confirm: boolPtr(true)},
 	}}, func() {
-		if err := connectToGateway(context.Background(), client, credentials, "/etc/pilot/directory_ssh_config", username, "gpu-a.example.com"); err != nil {
+		if err := connectToGateway(context.Background(), client, credentials, testDirectoryEmitter(t), "/etc/pilot/directory_ssh_config", username, "gpu-a.example.com"); err != nil {
 			t.Fatalf("connectToGateway must return nil on credential failure, got: %v", err)
 		}
 	})
@@ -133,7 +148,7 @@ func TestConnectToGatewayFailoverTriesNextCandidate(t *testing.T) {
 		}
 		return nil
 	})
-	if err := connectToGateway(context.Background(), client, credentials, "/etc/pilot/directory_ssh_config", username, "gpu-a.example.com"); err != nil {
+	if err := connectToGateway(context.Background(), client, credentials, testDirectoryEmitter(t), "/etc/pilot/directory_ssh_config", username, "gpu-a.example.com"); err != nil {
 		t.Fatalf("connectToGateway: %v", err)
 	}
 	want := []string{"gw-gpu-01.example.com", "gw-gpu-02.example.com"}

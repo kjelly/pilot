@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+
+	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
 // defaultDirectorySSHConfigPath matches spec.md §15's
@@ -64,7 +66,12 @@ var directorySSHLauncher = func(cmd *exec.Cmd) error { return cmd.Run() }
 // failed resolve, credential failure, or nonzero ssh exit are all
 // ordinary outcomes here, never fatal errors that would unwind out of
 // runDirectory and kill the whole interactive session.
-func connectToGateway(ctx context.Context, client *directoryClient, credentials portalCredentialSession, sshConfigPath, username, targetFQDN string) error {
+//
+// emitter records session-correlation metadata (spec.md §21, Phase 6) —
+// directory_gateway_attempt before each candidate, directory_gateway_connected
+// once one succeeds. It is never an authorization input; a nil/unreachable
+// sink never affects this function's actual connect behavior.
+func connectToGateway(ctx context.Context, client *directoryClient, credentials portalCredentialSession, emitter *sessionaudit.Emitter, sshConfigPath, username, targetFQDN string) error {
 	resolved, err := client.ConnectResolve(ctx, targetFQDN)
 	if err != nil {
 		runConfirmPrompt("", fmt.Sprintf("Connect failed.\n\n%v", err), true)
@@ -81,11 +88,13 @@ func connectToGateway(ctx context.Context, client *directoryClient, credentials 
 	}
 	var lastErr error
 	for _, gatewayFQDN := range resolved.Route.GatewayCandidates {
+		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: resolved.SessionID, Kind: sessionaudit.KindDirectoryGatewayAttempt, User: username, GatewayFQDN: gatewayFQDN, GatewayScope: resolved.Route.Scope, TargetFQDN: resolved.Target})
 		cmd := buildDirectoryConnectSSHCmd(sshConfigPath, gatewayFQDN, resolved.SessionID, resolved.Target, cache)
 		if err := directorySSHLauncher(cmd); err != nil {
 			lastErr = err
 			continue
 		}
+		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: resolved.SessionID, Kind: sessionaudit.KindDirectoryGatewayConnected, User: username, GatewayFQDN: gatewayFQDN, GatewayScope: resolved.Route.Scope, TargetFQDN: resolved.Target, Result: "ok"})
 		return nil
 	}
 	if lastErr != nil {

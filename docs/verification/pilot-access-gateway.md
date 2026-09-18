@@ -142,10 +142,15 @@ dispatcher（`cmd/pilot/cmd/portal_session.go`）：
   忽略、直接進互動選單（不算安全問題——從未把指令交給 shell——但也從未
   明確拒絕過）。
 
-`session_id` 只做 UUID 語法檢查與 `slog` 結構化 log（`session_id`/
-`target`/`user`/`gateway_id`/`gateway_scope`），從未進入 `ConnectAuthorize`
-呼叫本身（spec.md §17.2「不把 session ID 當 proof」）——真正的跨元件關聯
-（Directory 端的同一個 session_id 也要出現在這裡）是 Phase 6 的工作。
+`session_id` 只做 UUID 語法檢查，從未進入 `ConnectAuthorize` 呼叫本身
+（spec.md §17.2「不把 session ID 當 proof」）——跨元件關聯（Directory 端的
+同一個 session_id 也要出現在這裡）已由這份 Directory/Gateway Handoff 規格的
+Phase 6（`internal/sessionaudit`）落地：`runPortalOneShotConnect` 改成透過
+`sessionaudit.Emitter` 送出 `gateway_authorize_allowed`/
+`gateway_authorize_denied`/`target_connect_started`/`session_ended`（不再是
+裸的 `slog.Info`/`slog.Warn`），單元測試證明內容正確，真實 syslog/中央 log
+活體重建仍待 vm-target 驗證（見
+`docs/verification/pilot-access-directory.md` AD26）。
 
 單元測試（`portal_session_test.go`/`portal_session_connect_test.go`，共 9
 個）用真正的 `internal/gatewayapi.Server`（fake FreeIPA provider，非 mock）

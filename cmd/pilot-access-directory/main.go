@@ -17,6 +17,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/directoryapi"
 	"github.com/kjelly/pilot/internal/freeipaaccess"
+	"github.com/kjelly/pilot/internal/sessionaudit"
 	"github.com/kjelly/pilot/internal/systemdactivation"
 	"github.com/spf13/cobra"
 )
@@ -95,7 +96,10 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 		TargetHostgroupPrefix:  cfg.targetHostgroupPrefix(),
 		GatewayHostgroupPrefix: cfg.gatewayHostgroupPrefix(),
 	}
-	srv := directoryapi.NewServer(dirCfg, client, client, logger)
+	// NewEmitter is fail-soft (see its doc comment): an unreachable local
+	// syslog never blocks this service from starting.
+	emitter, _ := sessionaudit.NewEmitter("pilot-access-directory")
+	srv := directoryapi.NewServer(dirCfg, client, client, emitter, logger)
 	srv.PortalUserGroup = cfg.Directory.PortalUserGroup
 
 	ln, err := listener(cfg, systemdSocket)

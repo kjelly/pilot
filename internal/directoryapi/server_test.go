@@ -107,7 +107,7 @@ func testServerWithConfig(t *testing.T, username string, configure func(*Server)
 
 	provider := &fakeProvider{username: username}
 	cfg := DirectoryConfig{ID: "access-01", TargetHostgroupPrefix: "pilot-target-", GatewayHostgroupPrefix: "pilot-gateway-"}
-	srv := NewServer(cfg, provider, provider, nil)
+	srv := NewServer(cfg, provider, provider, nil, nil)
 	if configure != nil {
 		configure(srv)
 	}

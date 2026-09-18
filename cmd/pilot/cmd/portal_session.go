@@ -26,6 +26,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+
+	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
 // portalConnectCommandPrefix is the exact, fixed grammar spec.md §16/§17.1
@@ -154,5 +156,12 @@ func runPortalSession(cmd *cobra.Command, sshOriginalCommand string) error {
 	}
 	credentials := newPortalKerberosSession()
 	defer credentials.Close()
-	return runPortalOneShotConnect(cmd.Context(), client, credentials, portalSSHConfigFlag, connect.SessionID, connect.Target)
+	// The emitter tag matches this binary's own component name — a
+	// central log consumer distinguishes Directory's vs. Gateway's events
+	// by this syslog program tag (docs/tmp/now/spec.md §22). NewEmitter
+	// never fails this command's real job (audit is best-effort — see
+	// sessionaudit.Emitter's doc comment): an unreachable local syslog
+	// degrades to logging via slog.Default() instead.
+	emitter, _ := sessionaudit.NewEmitter("pilot-access-gateway")
+	return runPortalOneShotConnect(cmd.Context(), client, credentials, emitter, portalSSHConfigFlag, connect.SessionID, connect.Target)
 }

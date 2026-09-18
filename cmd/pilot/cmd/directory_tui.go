@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/directoryapi"
+	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
 // Directory's top-menu items (spec.md §13.1) — same four-item shape as
@@ -35,10 +36,13 @@ const directoryRouteStatusReady = "ready"
 func runDirectoryWithSSHConfig(ctx context.Context, client *directoryClient, sshConfigPath string) error {
 	credentials := newPortalKerberosSessionWithPrefix("pilot-directory-")
 	defer credentials.Close()
-	return runDirectoryWithCredentials(ctx, client, credentials, sshConfigPath)
+	// NewEmitter is fail-soft (see its doc comment): an unreachable local
+	// syslog never blocks the interactive Directory TUI from starting.
+	emitter, _ := sessionaudit.NewEmitter("pilot-access-directory")
+	return runDirectoryWithCredentials(ctx, client, credentials, emitter, sshConfigPath)
 }
 
-func runDirectoryWithCredentials(ctx context.Context, client *directoryClient, credentials portalCredentialSession, sshConfigPath string) error {
+func runDirectoryWithCredentials(ctx context.Context, client *directoryClient, credentials portalCredentialSession, emitter *sessionaudit.Emitter, sshConfigPath string) error {
 	identity, err := client.Identity(ctx)
 	if err != nil {
 		return fmt.Errorf("load identity: %w", err)
@@ -55,7 +59,7 @@ func runDirectoryWithCredentials(ctx context.Context, client *directoryClient, c
 		}
 		switch directoryTopMenuItems[choice] {
 		case directoryMenuMyHosts:
-			if err := runDirectoryMyHosts(ctx, client, credentials, sshConfigPath, access); err != nil {
+			if err := runDirectoryMyHosts(ctx, client, credentials, emitter, sshConfigPath, access); err != nil {
 				return err
 			}
 		case directoryMenuMyIdentity:
@@ -127,7 +131,7 @@ func directoryTargetListLabel(t directoryapi.TargetJSON) string {
 // to, already filtered server-side to "SSH-allowed" — this function never
 // re-filters or second-guesses that list, only decides whether Connect is
 // reachable for the chosen row.
-func runDirectoryMyHosts(ctx context.Context, client *directoryClient, credentials portalCredentialSession, sshConfigPath string, access directoryapi.AccessResponse) error {
+func runDirectoryMyHosts(ctx context.Context, client *directoryClient, credentials portalCredentialSession, emitter *sessionaudit.Emitter, sshConfigPath string, access directoryapi.AccessResponse) error {
 	if len(access.Targets) == 0 {
 		runAcknowledgePrompt("My Hosts\n\n(no accessible targets across any scope)")
 		return nil
@@ -141,7 +145,7 @@ func runDirectoryMyHosts(ctx context.Context, client *directoryClient, credentia
 	if err != nil || choice == len(access.Targets) {
 		return nil
 	}
-	return runDirectoryTargetDetail(ctx, client, credentials, sshConfigPath, access.User, access.Targets[choice])
+	return runDirectoryTargetDetail(ctx, client, credentials, emitter, sshConfigPath, access.User, access.Targets[choice])
 }
 
 func directoryBreadcrumb(steps ...string) string {
@@ -154,7 +158,7 @@ const directoryActionConnect = "Connect"
 // no route is ready, Connect is not offered at all (spec.md §13.1:
 // "Connect disabled") — selecting the row only ever gets the operator to
 // this read-only detail, never a launch attempt that would just fail.
-func runDirectoryTargetDetail(ctx context.Context, client *directoryClient, credentials portalCredentialSession, sshConfigPath, username string, t directoryapi.TargetJSON) error {
+func runDirectoryTargetDetail(ctx context.Context, client *directoryClient, credentials portalCredentialSession, emitter *sessionaudit.Emitter, sshConfigPath, username string, t directoryapi.TargetJSON) error {
 	if !directoryTargetIsReady(t) {
 		runAcknowledgePrompt(directoryTargetDetail(t) + "\n\n⚠ No gateway currently serves this target's scope(s) — Connect is disabled.")
 		return nil
@@ -166,7 +170,7 @@ func runDirectoryTargetDetail(ctx context.Context, client *directoryClient, cred
 	if !runConfirmPrompt("", directoryConnectConfirmQuestion(t), !portalSudoScopeIsBroad(t.Sudo.Scope)) {
 		return nil
 	}
-	return connectToGateway(ctx, client, credentials, sshConfigPath, username, t.FQDN)
+	return connectToGateway(ctx, client, credentials, emitter, sshConfigPath, username, t.FQDN)
 }
 
 func directoryConnectConfirmQuestion(t directoryapi.TargetJSON) string {

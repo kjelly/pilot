@@ -11,8 +11,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os/exec"
+
+	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
 // portalSessionExitError lets runPortalOneShotConnect propagate a specific
@@ -44,15 +45,16 @@ func (e *portalSessionExitError) Unwrap() error { return e.err }
 //     child's exit code propagated via portalSessionExitError.
 //
 // sessionID is accepted only for structured-log correlation (spec.md
-// §17.2/§21 — Phase 6 will consume this log line for cross-component
-// correlation); it is never read by, or passed into, the authorize
-// decision above.
+// §17.2/§21, Phase 6: internal/sessionaudit.Emitter carries it into every
+// event this function emits); it is never read by, or passed into, the
+// authorize decision above.
 //
-// client/credentials/sshConfigPath are injected (mirroring connectToHost's
-// own dependency-injection shape in portal_ssh.go) so tests can exercise
-// this against a real fake-provider-backed gatewayapi.Server without a
-// real Kerberos environment or a real target host.
-func runPortalOneShotConnect(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath, sessionID, target string) error {
+// client/credentials/sshConfigPath/emitter are injected (mirroring
+// connectToHost's own dependency-injection shape in portal_ssh.go) so
+// tests can exercise this against a real fake-provider-backed
+// gatewayapi.Server without a real Kerberos environment, a real target
+// host, or a real syslog daemon.
+func runPortalOneShotConnect(ctx context.Context, client *portalClient, credentials portalCredentialSession, emitter *sessionaudit.Emitter, sshConfigPath, sessionID, target string) error {
 	identity, err := client.Identity(ctx)
 	if err != nil {
 		return fmt.Errorf("pilot-session: resolve identity: %w", err)
@@ -60,32 +62,33 @@ func runPortalOneShotConnect(ctx context.Context, client *portalClient, credenti
 
 	authz, err := client.ConnectAuthorize(ctx, target)
 	if err != nil {
-		slog.Error("gateway_handoff_authorize_denied", "session_id", sessionID, "target", target, "user", identity.Username, "reason", "authorize call failed", "error", err)
+		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindGatewayAuthorizeDenied, User: identity.Username, TargetFQDN: target, Result: "authorize call failed: " + err.Error()})
 		return fmt.Errorf("pilot-session: connect authorize failed: %w", err)
 	}
 	if !authz.Allowed {
-		slog.Warn("gateway_handoff_authorize_denied", "session_id", sessionID, "target", target, "user", identity.Username)
+		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindGatewayAuthorizeDenied, User: identity.Username, TargetFQDN: target})
 		return fmt.Errorf("pilot-session: access denied for %s", target)
 	}
-	slog.Info("gateway_handoff_authorize_allowed", "session_id", sessionID, "target", authz.Target, "user", identity.Username, "gateway_id", authz.GatewayID, "gateway_scope", authz.GatewayScope)
+	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindGatewayAuthorizeAllowed, User: identity.Username, TargetFQDN: authz.Target, GatewayID: authz.GatewayID, GatewayScope: authz.GatewayScope})
 
 	cache, err := credentials.Ensure(ctx, identity.Username)
 	if err != nil {
 		return fmt.Errorf("pilot-session: kerberos authentication failed: %w", err)
 	}
 
-	slog.Info("target_connect_started", "session_id", sessionID, "target", authz.Target)
+	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindTargetConnectStarted, User: identity.Username, TargetFQDN: authz.Target, GatewayID: authz.GatewayID, GatewayScope: authz.GatewayScope})
 	runErr := sshLauncher(buildConnectSSHCmd(sshConfigPath, authz.Target, cache))
 	if runErr == nil {
-		slog.Info("target_connect_ended", "session_id", sessionID, "target", authz.Target, "result", "ok")
+		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindSessionEnded, User: identity.Username, TargetFQDN: authz.Target, GatewayID: authz.GatewayID, GatewayScope: authz.GatewayScope, Result: "ok"})
 		return nil
 	}
 
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
-		slog.Info("target_connect_ended", "session_id", sessionID, "target", authz.Target, "result", "error", "exit_code", exitErr.ExitCode())
-		return &portalSessionExitError{err: fmt.Errorf("pilot-session: ssh exited: %w", runErr), code: exitErr.ExitCode()}
+		code := exitErr.ExitCode()
+		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindSessionEnded, User: identity.Username, TargetFQDN: authz.Target, GatewayID: authz.GatewayID, GatewayScope: authz.GatewayScope, Result: "error", ExitCode: &code})
+		return &portalSessionExitError{err: fmt.Errorf("pilot-session: ssh exited: %w", runErr), code: code}
 	}
-	slog.Info("target_connect_failed", "session_id", sessionID, "target", authz.Target, "error", runErr)
+	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindTargetConnectFailed, User: identity.Username, TargetFQDN: authz.Target, GatewayID: authz.GatewayID, GatewayScope: authz.GatewayScope, Result: runErr.Error()})
 	return fmt.Errorf("pilot-session: ssh failed to start: %w", runErr)
 }

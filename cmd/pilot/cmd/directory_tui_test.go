@@ -27,7 +27,7 @@ func TestRunDirectoryFullMenuLoop(t *testing.T) {
 	}}
 	withPromptAutomation(t, p, func() {
 		credentials := &fakePortalCredentialSession{}
-		if err := runDirectoryWithCredentials(context.Background(), client, credentials, defaultDirectorySSHConfigPath); err != nil {
+		if err := runDirectoryWithCredentials(context.Background(), client, credentials, testDirectoryEmitter(t), defaultDirectorySSHConfigPath); err != nil {
 			t.Fatalf("runDirectory: %v", err)
 		}
 	})
@@ -56,7 +56,7 @@ func TestDirectoryHostDetailConnectFlow(t *testing.T) {
 		{Prompt: "Log out", Confirm: boolPtr(true)},
 	}}
 	withPromptAutomation(t, p, func() {
-		if err := runDirectoryWithCredentials(context.Background(), client, credentials, defaultDirectorySSHConfigPath); err != nil {
+		if err := runDirectoryWithCredentials(context.Background(), client, credentials, testDirectoryEmitter(t), defaultDirectorySSHConfigPath); err != nil {
 			t.Fatalf("runDirectory: %v", err)
 		}
 	})
