@@ -271,3 +271,81 @@ func TestRegression_FreeipaServerReplicaApplyPlaybook_DNSDriftNeverDestructive(t
 		t.Errorf("the drift-warning task must be scoped to `not (ipa_setup_dns | bool)` (desired=false)")
 	}
 }
+
+// TestRegression_FreeipaServerReplicaApplyPlaybook_DNSSelfRegistration locks
+// the 2026-09-18 fix: this playbook self-registers its own A record in the
+// primary's authoritative DNS (delegated to the primary, since this host has
+// no working Kerberos config of its own yet), so an operator no longer needs
+// to manually run `ipa dnsrecord-add` before joining a replica. Also locks
+// the two delegate_to gotchas found live while implementing this:
+//   - `delegate_to:` must reference a plain variable, never a bracket-
+//     subscript expression directly (e.g. `groups['freeipa-server'][0]`) —
+//     that failed live with "object of type 'dict' has no attribute
+//     'freeipa-server'" instead of resolving.
+//   - the variable `delegate_to:` references must NEVER be left undefined by
+//     a conditional set_fact — delegate_to is templated before that block's
+//     own `when:` is evaluated, so an undefined delegate_to variable crashes
+//     the whole play even when the intent was simply to skip. It must always
+//     be assigned (with a safe self-referential fallback), and the actual
+//     skip decision belongs in the block's own `when:` instead.
+func TestRegression_FreeipaServerReplicaApplyPlaybook_DNSSelfRegistration(t *testing.T) {
+	const playbookPath = "../../playbooks/apply/freeipa-server-replica-apply.yml"
+	raw, err := os.ReadFile(playbookPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", playbookPath, err)
+	}
+	playbook := string(raw)
+
+	if !strings.Contains(playbook, "self-register this host's A record in the primary's DNS") {
+		t.Fatalf("could not find the DNS self-registration task")
+	}
+	if !strings.Contains(playbook, "dnsrecord-add") {
+		t.Errorf("self-registration must use ipa dnsrecord-add")
+	}
+	if !strings.Contains(playbook, "'no modifications to be performed' not in") {
+		t.Errorf("self-registration must be idempotent via the established 'no modifications to be performed' convention, matching tasks/freeipa-client-host-dns.yml's own DNS backfill task")
+	}
+
+	// delegate_to must never contain a raw bracket-subscript expression —
+	// only a plain variable reference.
+	for _, badDelegate := range []string{
+		`delegate_to: "{{ groups['freeipa-server'][0] }}"`,
+		"delegate_to: \"{{ groups[",
+	} {
+		if strings.Contains(playbook, badDelegate) {
+			t.Errorf("delegate_to must reference a plain variable, not a bracket-subscript expression directly (found %q) — confirmed live this fails with a nonsense dict-attribute error instead of resolving", badDelegate)
+		}
+	}
+	if !strings.Contains(playbook, `delegate_to: "{{ freeipa_replica_primary_inventory_host }}"`) {
+		t.Errorf("delegate_to must reference the plain freeipa_replica_primary_inventory_host variable")
+	}
+
+	// The variable delegate_to depends on must be assigned unconditionally
+	// (no `when:` on the set_fact task that defines it), with a safe
+	// self-referential fallback — never left undefined.
+	setFactIdx := strings.Index(playbook, "who to delegate DNS registration to")
+	if setFactIdx == -1 {
+		t.Fatalf("could not find the set_fact task computing freeipa_replica_primary_inventory_host")
+	}
+	setFactBlock := playbook[setFactIdx:min(setFactIdx+900, len(playbook))]
+	if !strings.Contains(setFactBlock, "else inventory_hostname") {
+		t.Errorf("freeipa_replica_primary_inventory_host must always resolve to a value (fallback: inventory_hostname) — leaving it undefined when there's no freeipa-server group crashes the play, since delegate_to is templated before when: is evaluated (confirmed live)")
+	}
+	// The set_fact task itself must NOT have its own top-level `when:` gate
+	// before the next task's `- name:` marker (that would reintroduce the
+	// undefined-variable crash).
+	nextTaskIdx := strings.Index(setFactBlock[1:], "\n    - name:")
+	if nextTaskIdx != -1 {
+		taskBody := setFactBlock[:nextTaskIdx+1]
+		if strings.Contains(taskBody, "\n      when:") {
+			t.Errorf("the set_fact task computing freeipa_replica_primary_inventory_host must not have its own when: gate — it must always run and always assign a value")
+		}
+	}
+
+	// The consuming block's own when: is where the real skip decision lives.
+	blockIdx := strings.Index(playbook, "self-register this host's A record in the primary's DNS")
+	blockWhen := playbook[blockIdx : blockIdx+400]
+	if !strings.Contains(blockWhen, "freeipa_replica_primary_inventory_host != inventory_hostname") {
+		t.Errorf("the self-registration block's own when: must check freeipa_replica_primary_inventory_host != inventory_hostname (this is what actually skips when there's no known primary)")
+	}
+}

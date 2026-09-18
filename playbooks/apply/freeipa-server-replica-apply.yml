@@ -22,16 +22,23 @@
 # already pulls in the client bits, so one package install covers both
 # steps.
 #
-# ⚠ REQUIRED MANUAL PRE-STEP (no built-in DNS in this pilot): before running
-# this playbook, pin THIS host's FQDN/IP into /etc/hosts on the PRIMARY (and
-# every other existing replica). `ipa-replica-install` makes the primary
-# connect BACK to this host during its own conncheck; without DNS, the
-# primary cannot resolve this host's FQDN and the install fails with
-# `ERROR: Port check failed! Unable to resolve host name '<this-host-fqdn>'`.
-# This playbook only touches ITS OWN /etc/hosts — it has no connection to the
-# primary to edit that host's files (a vm-target's generated inventory only
-# ever contains the one target it was invoked against). Confirmed by an
-# actual failed run; see docs/verification/freeipa-server-replica.md §0/§5.
+# DNS BOOTSTRAP: `ipa-replica-install` makes the primary connect BACK to this
+# host during its own conncheck, so the primary must be able to resolve this
+# host's FQDN before that step runs. When the selected primary provides
+# native DNS (freeipa_setup_dns, the common case — see freeipa-server-apply.yml),
+# this playbook now self-registers this host's own A record in the primary's
+# authoritative DNS as its very first task (delegated to the primary, which
+# already has a working Kerberos/admin setup to kinit into — this host does
+# not yet). No manual `ipa dnsrecord-add` or /etc/hosts edit needed in that
+# case.
+#
+# ⚠ MANUAL PRE-STEP STILL REQUIRED when the primary does NOT run native DNS
+# (freeipa_setup_dns: false, external-DNS deployments): register this host in
+# your own DNS before running this playbook, or pin THIS host's FQDN/IP into
+# /etc/hosts on the PRIMARY (and every other existing replica) — this
+# playbook only touches ITS OWN /etc/hosts, it has no fallback write path into
+# an external DNS system. Confirmed by an actual failed run without either;
+# see docs/verification/freeipa-server-replica.md §0/§5.
 #
 # NOT in scope of this playbook (see docs/verification/freeipa-server-replica.md
 # §5 for the full list — read it before treating a replica as "done"):
@@ -252,6 +259,114 @@
       tags: [always]
 
   tasks:
+    # Self-register this replica's own A record in the PRIMARY's authoritative
+    # DNS, BEFORE anything else — `ipa-replica-install` (step 2/2 below) makes
+    # the PRIMARY conncheck back to THIS host by FQDN, and until this record
+    # exists that resolution can only succeed via a manually-maintained
+    # /etc/hosts entry on the primary. This closes that gap: skip it entirely
+    # when the primary does NOT run native DNS (external-DNS deployments still
+    # need the operator to register it in their own DNS, or fall back to
+    # /etc/hosts on the primary — see the header comment above).
+    #
+    # Runs delegated to the PRIMARY (not this host): this host has no working
+    # Kerberos config yet (that's what step 1/2 below sets up), so it cannot
+    # kinit itself; the primary already has a fully working realm to kinit
+    # into. Idempotent by construction — a rerun after the record already
+    # exists gets ipa's own real "no modifications to be performed" error
+    # (confirmed live elsewhere in this codebase, see
+    # tasks/freeipa-client-host-dns.yml's DNS backfill task), not a fresh
+    # duplicate or a failure.
+    # Resolved into plain set_fact variables FIRST, deliberately — `delegate_to:`
+    # has its own, stricter templating pass than ordinary task fields, and a
+    # bracket-subscript expression with a hyphenated key
+    # (`groups['freeipa-server'][0]`) placed DIRECTLY inside `delegate_to:`
+    # fails live with a nonsense error ("object of type 'dict' has no
+    # attribute 'freeipa-server'") instead of resolving — confirmed on a real
+    # vm-target run. A plain variable name in `delegate_to:` has none of that
+    # risk. This also degrades gracefully: a single-host test run with no
+    # `freeipa-server` inventory group at all (e.g. `-e target_group=all`
+    # against one vm-target with an explicit `-e ipa_server_ip=` override,
+    # the convention this playbook's own vm-target testing docs already use)
+    # simply never finds a primary host to delegate to, so the self-
+    # registration block below is skipped entirely — the pre-existing manual
+    # DNS/`/etc/hosts` step is still required in that case, same as before
+    # this change.
+    # ALWAYS sets both facts (no `when:` gate on this task itself) — `delegate_to:`
+    # on the block below is templated by ansible BEFORE that block's `when:` is
+    # evaluated, so `freeipa_replica_primary_inventory_host` must never be left
+    # undefined or the whole play dies on "is undefined" even when the intent
+    # was simply to skip (confirmed live). Falls back to `inventory_hostname`
+    # itself (a harmless no-op delegate target — the subsequent `when:` below
+    # skips before it would ever actually delegate to itself) when there is no
+    # `freeipa-server` inventory group to look up at all.
+    - name: "FreeIPA replica — resolve whether the primary provides native DNS + who to delegate DNS registration to"
+      ansible.builtin.set_fact:
+        freeipa_replica_primary_native_dns: >-
+          {{
+            (hostvars[groups['freeipa-server'][0]].freeipa_setup_dns | default(true) | bool)
+            if (groups['freeipa-server'] | default([]) | length) > 0
+            else false
+          }}
+        freeipa_replica_primary_inventory_host: >-
+          {{
+            groups['freeipa-server'][0]
+            if (groups['freeipa-server'] | default([]) | length) > 0
+            else inventory_hostname
+          }}
+      tags: [freeipa-replica, R1]
+
+    - name: "FreeIPA replica — self-register this host's A record in the primary's DNS"
+      when:
+        - not ansible_check_mode
+        - freeipa_replica_primary_inventory_host != inventory_hostname
+        - freeipa_replica_primary_inventory_host != inventory_hostname
+        - freeipa_replica_primary_native_dns | default(false) | bool
+      delegate_to: "{{ freeipa_replica_primary_inventory_host }}"
+      tags: [freeipa-replica, R1]
+      block:
+        - name: "FreeIPA replica DNS self-register — create a dedicated Kerberos credential cache path"
+          ansible.builtin.tempfile:
+            state: file
+            prefix: pilot-freeipa-replica-dns-
+            suffix: .ccache
+          register: ipa_replica_dns_ccache_file
+          changed_when: false
+          check_mode: false
+
+        - name: "FreeIPA replica DNS self-register — kinit admin into the dedicated ccache"
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              printf %s "{{ ipa_enroll_password }}" | KRB5CCNAME="{{ ipa_replica_dns_ccache_file.path }}" kinit {{ ipa_enroll_principal }}@{{ ipa_realm }}
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+          check_mode: false
+
+        - name: "FreeIPA replica DNS self-register — add this host's A record"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - dnsrecord-add
+              - "{{ ipa_domain }}"
+              - "{{ ipa_replica_fqdn | regex_replace('\\.' ~ (ipa_domain | regex_escape) ~ '$', '') }}"
+              - "--a-rec={{ ipa_replica_ip }}"
+          environment:
+            KRB5CCNAME: "{{ ipa_replica_dns_ccache_file.path }}"
+          register: ipa_replica_dns_add
+          changed_when: ipa_replica_dns_add.rc | default(1) == 0
+          failed_when:
+            - ipa_replica_dns_add.rc | default(0) != 0
+            - "'no modifications to be performed' not in (ipa_replica_dns_add.stdout | default('') + ipa_replica_dns_add.stderr | default(''))"
+      always:
+        - name: "FreeIPA replica DNS self-register — destroy the Kerberos ticket in the dedicated ccache"
+          ansible.builtin.command:
+            argv: [kdestroy, -c, "{{ ipa_replica_dns_ccache_file.path }}"]
+          changed_when: false
+          failed_when: false
+          when: ipa_replica_dns_ccache_file is defined and ipa_replica_dns_ccache_file.path is defined
+          delegate_to: "{{ freeipa_replica_primary_inventory_host }}"
+
     # Both this host's own FQDN and the PRIMARY's FQDN must resolve to
     # non-loopback addresses (no built-in DNS by default — same constraint as
     # freeipa-client-apply.yml). Pin BOTH before changing the hostname so

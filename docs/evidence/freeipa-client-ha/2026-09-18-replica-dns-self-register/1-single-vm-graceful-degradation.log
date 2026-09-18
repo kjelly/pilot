@@ -1,0 +1,194 @@
+  ⚠️  ansible-lint found issues in playbooks/apply/freeipa-server-replica-apply.yml:
+    WARNING  Listing 4 violation(s) that are fatal
+    Read documentation for instructions on how to ignore specific rule violations.
+
+    # Rule Violation Summary
+
+      1 command-instead-of-module profile:basic tags:command-shell,idiom
+      3 name profile:basic tags:idiom
+
+    Failed: 4 failure(s), 0 warning(s) in 1 files processed of 1 encountered. Last profile that met the validation criteria was 'min'.
+    command-instead-of-module: systemctl used in place of systemd module
+    playbooks/apply/freeipa-server-replica-apply.yml:244 Task/Handler: Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/freeipa-server-replica-apply.yml:374:13 Task/Handler: FreeIPA replica — pin this host {{ ipa_replica_fqdn }} to {{ ipa_replica_ip }} in /etc/hosts (FQDN canonical)
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/freeipa-server-replica-apply.yml:383:13 Task/Handler: FreeIPA replica — pin the PRIMARY {{ ipa_server_fqdn }} to {{ ipa_server_ip }} in /etc/hosts
+
+    name[template]: Jinja templates should only be at the end of 'name'
+    playbooks/apply/freeipa-server-replica-apply.yml:392:13 Task/Handler: FreeIPA replica — set system hostname to {{ ipa_replica_fqdn }} (after /etc/hosts pin so sudo stays fast)
+
+
+▶ ansible-playbook playbooks/apply/freeipa-server-replica-apply.yml -i /tmp/pilot-inv-2105695171.yaml -e target_group=all -e ipa_server_ip=192.168.122.7 -e ipa_replica_ip=192.168.122.6 -e @/tmp/claude-1000/-home-kjelly-github-pilot/032b4ea6-1459-4896-b2c2-1b50071fd7c3/scratchpad/ha-test-vault.yaml
+📦 starting sandbox container (pilot-cli:latest)...
+▶ docker exec pilot-sandbox-msi-company-1789694254-904d4f ansible-playbook /tmp/pilot-playbook-dir/freeipa-server-replica-apply.yml -i /tmp/pilot-inventory.yaml -e target_group=all -e ipa_server_ip=192.168.122.7 -e ipa_replica_ip=192.168.122.6 -e @/tmp/pilot-extra-vars-10.yaml
+
+PLAY [FreeIPA server replica join (multi-master HA)] ***************************
+
+TASK [Gathering Facts] *********************************************************
+[0;32mok: [ipa-replica][0m
+
+TASK [Gate: required vars present (fail early, before any mutation)] ***********
+[0;32mok: [ipa-replica] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: this playbook installs FreeIPA NATIVELY — require EL9 host] ********
+[1;35m[WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-server-replica-apply.yml:196:19[0m
+[0;35m[0m
+[0;35m194           - ansible_os_family == 'RedHat'[0m
+[0;35m195           - (ansible_distribution_major_version | int) >= 9[0m
+[0;35m196         fail_msg: >-[0m
+[0;35m                      ^ column 19[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-server-replica-apply.yml:194:13[0m
+[0;35m[0m
+[0;35m192       ansible.builtin.assert:[0m
+[0;35m193         that:[0m
+[0;35m194           - ansible_os_family == 'RedHat'[0m
+[0;35m                ^ column 13[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;35m[DEPRECATION WARNING]: INJECT_FACTS_AS_VARS default to `True` is deprecated, top-level facts will not be auto injected after the change. This feature will be removed from ansible-core version 2.24.[0m
+[0;35mOrigin: /tmp/pilot-playbook-dir/freeipa-server-replica-apply.yml:195:13[0m
+[0;35m[0m
+[0;35m193         that:[0m
+[0;35m194           - ansible_os_family == 'RedHat'[0m
+[0;35m195           - (ansible_distribution_major_version | int) >= 9[0m
+[0;35m                ^ column 13[0m
+[0;35m[0m
+[0;35mUse `ansible_facts["fact_name"]` (no `ansible_` prefix) instead.[0m
+[0;35m[0m
+[0;32mok: [ipa-replica] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: this host must not be the primary itself] **************************
+[0;32mok: [ipa-replica] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+[0;32mok: [ipa-replica] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+[0;32mok: [ipa-replica] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Gate: prod requires recent staging attestation] **************************
+[0;36mskipping: [ipa-replica][0m
+
+TASK [Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)] *****
+[0;32mok: [ipa-replica][0m
+
+TASK [Warn if no active time sync (joins with --no-ntp; ntp role must cover this)] ***
+[0;36mskipping: [ipa-replica][0m
+
+TASK [FreeIPA replica — resolve whether the primary provides native DNS + who to delegate DNS registration to] ***
+[0;32mok: [ipa-replica][0m
+
+TASK [FreeIPA replica DNS self-register — create a dedicated Kerberos credential cache path] ***
+[0;36mskipping: [ipa-replica][0m
+
+TASK [FreeIPA replica DNS self-register — kinit admin into the dedicated ccache] ***
+[0;36mskipping: [ipa-replica][0m
+
+TASK [FreeIPA replica DNS self-register — add this host's A record] ************
+[0;36mskipping: [ipa-replica][0m
+
+TASK [FreeIPA replica DNS self-register — destroy the Kerberos ticket in the dedicated ccache] ***
+[0;36mskipping: [ipa-replica][0m
+
+TASK [FreeIPA replica — pin this host ipa2.ipa.pilot.internal to 192.168.122.6 in /etc/hosts (FQDN canonical)] ***
+[1;35m[WARNING]: Module remote_tmp /root/.ansible/tmp did not exist and was created with a mode of 0700, this may cause issues when running as another user. To avoid this, create the remote_tmp dir with the correct permissions manually[0m
+[0;33mchanged: [ipa-replica][0m
+
+TASK [FreeIPA replica — pin the PRIMARY ipa1.ipa.pilot.internal to 192.168.122.7 in /etc/hosts] ***
+[0;33mchanged: [ipa-replica][0m
+
+TASK [FreeIPA replica — set system hostname to ipa2.ipa.pilot.internal (after /etc/hosts pin so sudo stays fast)] ***
+[0;33mchanged: [ipa-replica][0m
+
+TASK [FreeIPA replica — install ipa-server package (also provides ipa-client-install for step 1)] ***
+[0;33mchanged: [ipa-replica][0m
+
+TASK [FreeIPA replica — step 1/2: ipa-client-install (enroll into IPA.PILOT.INTERNAL)] ***
+[0;33mchanged: [ipa-replica][0m
+
+TASK [FreeIPA replica — step 2/2: ipa-replica-install (promote; first run 8-12 min)] ***
+[0;31m[ERROR]: Task failed: Module failed: The command exited with a non-zero return code.[0m
+[0;31mOrigin: /tmp/pilot-playbook-dir/freeipa-server-replica-apply.yml:442:7[0m
+[0;31m[0m
+[0;31m440     # an actual failed run against a live primary+replica pair — see[0m
+[0;31m441     # docs/verification/freeipa-server-replica.md §0 for the real log.[0m
+[0;31m442     - name: "FreeIPA replica — step 2/2: ipa-replica-install (promote; first run 8-12 min)"[0m
+[0;31m          ^ column 7[0m
+[0;31m[0m
+[0;31mfatal: [ipa-replica]: FAILED! => {"censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result", "changed": true}[0m
+
+PLAY RECAP *********************************************************************
+[0;31mipa-replica[0m                : [0;32mok=13  [0m [0;33mchanged=5   [0m unreachable=0    [0;31mfailed=1   [0m [0;36mskipped=6   [0m rescued=0    ignored=0   
+
+📦 stopping sandbox container...
+sandbox: 278 file(s) changed in pilot-sandbox-msi-company-1789694254-904d4f
+  /root
+  /root/.ansible
+  /root/.ansible/cp
+  /root/.ansible/cp/pilot-root@192.168.122.6:22
+  /root/.ansible/pilot-factcache
+  /root/.ansible/pilot-factcache/s1_ipa-replica
+  /root/.ssh
+  /root/.ssh/known_hosts
+  /tmp
+  /tmp/pilot-extra-vars-10.yaml
+  /tmp/pilot-inventory.yaml
+  /tmp/pilot-playbook-dir
+  /tmp/pilot-playbook-dir/agent-controller-apply.yml
+  /tmp/pilot-playbook-dir/alertmanager-apply.yml
+  /tmp/pilot-playbook-dir/audit-log-forwarding-apply.yml
+  /tmp/pilot-playbook-dir/core-infra-provider-apply.yml
+  /tmp/pilot-playbook-dir/dashboard-apply.yml
+  /tmp/pilot-playbook-dir/dcgm-exporter-apply.yml
+  /tmp/pilot-playbook-dir/detection-engine-apply.yml
+  /tmp/pilot-playbook-dir/docker-apply.yml
+  ... (258 more)
+  transcript: /var/lib/libvirt/images/pilot/ipa-replica/runs/20260918T011734Z-freeipa-server-replica-apply.log
+  ✗ playbooks/apply/freeipa-server-replica-apply.yml
+Error: exit status 2
+Usage:
+  pilot vm-target run <playbook.yml> [<extra>...] [flags]
+
+Flags:
+      --discover string     glob pattern or directory to discover playbooks
+      --fail-fast           with --from-stdin/--discover, stop on first failure
+      --from-stdin          read playbook paths from stdin (one per line)
+      --group stringArray   combine multiple already-up vm-targets into one grouped inventory: group=target1,target2 (repeatable)
+  -h, --help                help for run
+      --json                parse ansible's json callback into a structured ok/changed/failed/unreachable summary (not supported with --sandbox)
+      --name string         target name
+      --skip-lint           skip ansible-lint preflight
+      --skip-syntax-check   skip ansible-playbook --syntax-check preflight
+
+Global Flags:
+      --config string      config file (default ~/.config/pilot/config.yaml)
+      --data-dir string    data directory for the history db and target state
+      --log-level string   diagnostic log level: debug|info|warn|error (default warn; also $PILOT_LOG_LEVEL)
+
+exit status 2
+exit status 2
