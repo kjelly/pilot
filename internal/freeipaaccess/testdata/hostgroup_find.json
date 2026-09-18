@@ -1,0 +1,108 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "ipaobject",
+          "ipahostgroup",
+          "nestedGroup",
+          "groupOfNames",
+          "top",
+          "mepOriginEntry"
+        ],
+        "ipauniqueid": [
+          "439891ae-b013-11f1-af70-52540048bfe0"
+        ],
+        "description": [
+          "Pilot Access Gateway hosts"
+        ],
+        "cn": [
+          "pilot-access-gateways"
+        ],
+        "member_host": [
+          "ag-gw01.ipa.pilot.internal",
+          "ag-gw02.ipa.pilot.internal"
+        ],
+        "memberof_hbacrule": [
+          "pilot-access-gateway-login"
+        ],
+        "dn": "cn=pilot-access-gateways,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipaobject",
+          "ipahostgroup",
+          "nestedGroup",
+          "groupOfNames",
+          "top",
+          "mepOriginEntry"
+        ],
+        "ipauniqueid": [
+          "462f8b18-b01b-11f1-8b9c-52540048bfe0"
+        ],
+        "description": [
+          "Pilot Access Gateway target scope: dmz"
+        ],
+        "cn": [
+          "pilot-target-dmz"
+        ],
+        "member_host": [
+          "dmz-a.ipa.pilot.internal"
+        ],
+        "memberof_hbacrule": [
+          "pilot-grant-login-dmz-test"
+        ],
+        "dn": "cn=pilot-target-dmz,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipaobject",
+          "ipahostgroup",
+          "nestedGroup",
+          "groupOfNames",
+          "top",
+          "mepOriginEntry"
+        ],
+        "ipauniqueid": [
+          "1499358c-b006-11f1-9d7b-52540048bfe0"
+        ],
+        "description": [
+          "GPU target scope"
+        ],
+        "cn": [
+          "pilot-target-gpu"
+        ],
+        "member_host": [
+          "gpu-a.ipa.pilot.internal",
+          "gpu-b.ipa.pilot.internal",
+          "ag-target01.ipa.pilot.internal"
+        ],
+        "memberof_sudorule": [
+          "pilot-grant-sudo-gpu-test"
+        ],
+        "memberof_hbacrule": [
+          "pilot-grant-login-gpu-test"
+        ],
+        "dn": "cn=pilot-target-gpu,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 3,
+    "truncated": false,
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": "3 hostgroups matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/ag-gw01.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "version": "4.13.1"
+}

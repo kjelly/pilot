@@ -78,6 +78,7 @@ type Client struct {
 }
 
 var _ Provider = (*Client)(nil)
+var _ HostgroupFinder = (*Client)(nil)
 
 // NewClient builds a Client. It validates cfg.Servers but does NOT load
 // the krb5 config, keytab, or CA bundle yet, and does not contact FreeIPA
@@ -330,6 +331,25 @@ func (c *Client) HostgroupShow(ctx context.Context, name string) (Hostgroup, err
 		return Hostgroup{}, err
 	}
 	return parseHostgroup(m), nil
+}
+
+// HostgroupFind implements HostgroupFinder (spec.md/docs/tmp/now/spec.md
+// §8). criteria is passed as hostgroup_find's positional search term, the
+// same substring match `ipa hostgroup-find <criteria>` performs.
+func (c *Client) HostgroupFind(ctx context.Context, criteria string) ([]HostgroupSummary, error) {
+	env, err := c.call(ctx, "hostgroup_find", []any{criteria}, map[string]any{"all": true})
+	if err != nil {
+		return nil, err
+	}
+	rows, err := decodeFind(env)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]HostgroupSummary, 0, len(rows))
+	for _, row := range rows {
+		summaries = append(summaries, parseHostgroupSummary(row))
+	}
+	return summaries, nil
 }
 
 func (c *Client) HBACRuleFind(ctx context.Context) ([]HBACRule, error) {

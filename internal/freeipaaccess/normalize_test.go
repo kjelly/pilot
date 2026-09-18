@@ -266,6 +266,26 @@ func TestParseHBACRuleFind(t *testing.T) {
 	}
 }
 
+// TestParseHostgroupFind is captured live against ag-spike-ipa/ag-gw01
+// (docs/tmp/now/spec.md §8.2 Phase 0 spike) via the existing
+// pilot-access-gateway reader principal — hostgroup_find(["pilot-"],
+// {"all": true}) — not hand-written from documentation.
+func TestParseHostgroupFind(t *testing.T) {
+	env := loadFixture(t, "hostgroup_find.json")
+	rows, err := decodeFind(env)
+	if err != nil {
+		t.Fatalf("decodeFind: %v", err)
+	}
+	var names []string
+	for _, row := range rows {
+		names = append(names, parseHostgroupSummary(row).Name)
+	}
+	want := []string{"pilot-access-gateways", "pilot-target-dmz", "pilot-target-gpu"}
+	if !stringSliceEqualUnordered(names, want) {
+		t.Fatalf("names = %v, want %v", names, want)
+	}
+}
+
 func TestParseHBACServiceGroup(t *testing.T) {
 	env := loadFixture(t, "hbacsvcgroup_show.json")
 	m, err := decodeShow(env)

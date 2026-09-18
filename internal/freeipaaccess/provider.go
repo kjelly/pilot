@@ -121,6 +121,32 @@ type Hostgroup struct {
 	IndirectMemberHosts []string
 }
 
+// HostgroupSummary is a normalized hostgroup_find(all=true) row — one entry
+// per matched hostgroup, name only. It is deliberately not a full
+// Hostgroup: hostgroup_find does not return memberindirect_host (verified
+// live against ag-spike-ipa, spec.md/docs/tmp/now/spec.md §8.2), so a
+// caller that needs the transitive host closure for a discovered group
+// must still call HostgroupShow for that name — HostgroupFind only answers
+// "which hostgroups exist under this prefix".
+type HostgroupSummary struct {
+	Name string
+}
+
+// HostgroupFinder is a narrow, additive read capability: hostgroup listing
+// by name-substring criteria (hostgroup_find). It is deliberately NOT
+// folded into Provider — every existing accessportal fake provider and
+// test would otherwise be forced to implement a method it has no use for.
+// A caller (pilot-access-directory) that needs both hostgroup discovery
+// and the rest of Provider depends on both interfaces separately.
+type HostgroupFinder interface {
+	// HostgroupFind returns every hostgroup whose cn contains criteria as a
+	// substring (FreeIPA's own *_find semantics — not a prefix-only match,
+	// though "pilot-target-"/"pilot-gateway-" style criteria behave like a
+	// prefix match in practice since cn never contains that string
+	// elsewhere).
+	HostgroupFind(ctx context.Context, criteria string) ([]HostgroupSummary, error)
+}
+
 // HBACRule is a normalized hbacrule_show/hbacrule_find(all=true) entry.
 // Deliberately parsed from FreeIPA's non-raw representation (member*_user,
 // member*_group, ... suffixed fields with plain resolved names), not

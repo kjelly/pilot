@@ -14,6 +14,7 @@ var allowedMethods = map[string]bool{
 	"group_show":        true,
 	"host_show":         true,
 	"hostgroup_show":    true,
+	"hostgroup_find":    true,
 	"hbacrule_find":     true,
 	"hbacrule_show":     true,
 	"hbacsvcgroup_show": true,

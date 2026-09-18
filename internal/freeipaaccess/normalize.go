@@ -190,6 +190,10 @@ func parseHostgroup(m map[string]any) Hostgroup {
 	}
 }
 
+func parseHostgroupSummary(m map[string]any) HostgroupSummary {
+	return HostgroupSummary{Name: attrString(m, "cn")}
+}
+
 func parseHBACRule(m map[string]any) HBACRule {
 	return HBACRule{
 		Name:               attrString(m, "cn"),
