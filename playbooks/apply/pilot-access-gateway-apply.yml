@@ -65,6 +65,14 @@
     # below is still what actually enforces their presence before anything
     # uses them.
     gateway_target_hostgroup: "pilot-target-{{ gateway_scope }}"
+    # pilot-gateway-<scope> (docs/tmp/now/spec.md §7) is a DIFFERENT
+    # hostgroup family from pilot-target-<scope> above: it lists which
+    # Gateway INSTANCES serve one scope (for pilot-access-directory
+    # routing), not which target hosts belong to it. Not to be confused
+    # with the pre-existing `pilot gateway-scope` CLI (cmd/pilot/cmd/
+    # gateway_scope.go), which only ever manages pilot-target-<scope>
+    # target membership and has nothing to do with this hostgroup.
+    gateway_instance_hostgroup: "pilot-gateway-{{ gateway_scope }}"
     gateway_socket_path: /run/pilot/access-gateway.sock
     ipa_ca_file: /etc/ipa/ca.crt
 
@@ -396,6 +404,62 @@
       register: gateway_stale_target_removed
       changed_when: "'Number of members removed 1' in (gateway_stale_target_removed.stdout | default(''))"
       failed_when: gateway_stale_target_removed.rc != 0
+      tags: [AG_enrollment]
+
+    # Step 3c (docs/tmp/now/spec.md §7): publish this gateway instance into
+    # pilot-gateway-<scope>, the live source of truth pilot-access-directory
+    # reads to route a user to the right Gateway for a scope — never derived
+    # from Gateway hostname (spec.md D3). Mirrors Step 3's
+    # add-hostgroup/add-member pattern exactly, just against the
+    # gateway_instance_hostgroup computed from this host's own
+    # gateway_scope, not pilot-access-gateways.
+    - name: "Step 3c: ensure pilot-gateway-<scope> hostgroup exists"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-add, "{{ gateway_instance_hostgroup }}", "--desc=Pilot Access Gateway instances for scope: {{ gateway_scope }}"]
+      register: gateway_instance_hostgroup_add
+      changed_when: "'Added hostgroup' in (gateway_instance_hostgroup_add.stdout | default(''))"
+      failed_when:
+        - gateway_instance_hostgroup_add.rc != 0
+        - "'already exists' not in (gateway_instance_hostgroup_add.stderr | default(''))"
+      tags: [AG_enrollment]
+
+    - name: "Step 3c: add this host to pilot-gateway-<scope>"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-add-member, "{{ gateway_instance_hostgroup }}", "--hosts={{ gateway_effective_fqdn }}"]
+      register: gateway_instance_member_add
+      changed_when: "'Number of members added 1' in (gateway_instance_member_add.stdout | default(''))"
+      failed_when:
+        - gateway_instance_member_add.rc != 0
+        - "'already a member' not in (gateway_instance_member_add.stdout | default('') + gateway_instance_member_add.stderr | default(''))"
+      tags: [AG_enrollment]
+
+    # Step 3d (spec.md §7.2): self-scrub stale pilot-gateway-<scope>
+    # membership left over from a PREVIOUS gateway_scope value — a gateway
+    # host must never be published under more than one scope at once, or
+    # pilot-access-directory could route a user to it under a scope it no
+    # longer actually serves. Same discover-then-remove shape as Step 3b,
+    # scoped to the pilot-gateway- prefix and excluding the CURRENT
+    # gateway_instance_hostgroup so this doesn't remove what Step 3c just
+    # (re)added.
+    - name: "Step 3d: discover any pilot-gateway-<scope> hostgroups this host is wrongly a member of"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-find, "--hosts={{ gateway_effective_fqdn }}", --raw]
+      register: gateway_stale_instance_memberships
+      changed_when: false
+      failed_when: false
+      tags: [AG_enrollment]
+
+    - name: "Step 3d: remove this host from every stale pilot-gateway-<scope> hostgroup"
+      ansible.builtin.command:
+        argv: [ipa, hostgroup-remove-member, "{{ item }}", "--hosts={{ gateway_effective_fqdn }}"]
+      loop: >-
+        {{ gateway_stale_instance_memberships.stdout | default('')
+           | regex_findall('^  cn: (.*)$', multiline=True)
+           | select('match', '^pilot-gateway-')
+           | reject('equalto', gateway_instance_hostgroup) | list }}
+      register: gateway_stale_instance_removed
+      changed_when: "'Number of members removed 1' in (gateway_stale_instance_removed.stdout | default(''))"
+      failed_when: gateway_stale_instance_removed.rc != 0
       tags: [AG_enrollment]
 
     # Step 4 (spec.md §55): getent works via SSSD once enrolled — proven

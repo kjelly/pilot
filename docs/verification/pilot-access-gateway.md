@@ -1,6 +1,6 @@
 # Verification Spec — Pilot Access Gateway
 
-> 版本：DRAFT v0.5（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；AG32-AG33 的 Portal session-scoped `kinit` / GSSAPI-only Connect 已於 2026-09-16 完成 vm-target + trec E2E，見 [`docs/evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md`](../evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md)；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5）
+> 版本：DRAFT v0.6（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；AG32-AG33 的 Portal session-scoped `kinit` / GSSAPI-only Connect 已於 2026-09-16 完成 vm-target + trec E2E，見 [`docs/evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md`](../evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md)；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5；2026-09-18 追加：每次 apply 現在也會把這台 gateway 自己發布進 `pilot-gateway-<gateway_scope>`，供 `pilot-access-directory`（進行中，見 `docs/tmp/now/spec.md`）路由用，見 §5）
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md（Pilot Access Gateway — Stateless FreeIPA-backed Portal），§50-§58
 > 維護者：sre
 
@@ -96,6 +96,23 @@
   **同日追加，預設改為 `true`**：使用者明確要求「這要成為預設行為，不要額外傳參數」——`pilot-access-gateway-install_forcecommand` 早就預設 `true`（Phase 8 §55.1 通過後的政策決定），本功能單獨存在時只決定「誰在 portal 群組」，不改變任何登入行為，實際的 shell-vs-portal 劫持完全由已經驗證過的 ForceCommand 機制負責；因此把兩者的預設值對齊、一起預設開啟，不需要重跑一次 §55.1 鎖定回歸測試（那個測試驗的是 ForceCommand 本身的行為，不是「誰進得了 portal 群組」）。`contracts/pilot-access-gateway.yaml` 的 `pilot_access_gateway_portal_automember` 已改成 `default: true`。**站台/gateway 若真的需要「只有 roster 明確列名的人能用 portal」**（例如多租戶、不同 scope 各自精選使用者的站台），部署時要明確帶 `-e pilot_access_gateway_portal_automember=false`——這不再是自動推導出來的行為，需要操作者主動選擇退出。
 - **2026-09-16：delegation 路徑在停用密碼登入後仍可用，但使用者端必須主動要求 GSSAPI ticket delegation**：對 `ag-gw01`/`ag-target01` 實測（見 `docs/evidence/pilot-access-gateway/2026-09-16-gssapi-no-password-fallback.md`），把兩台主機的 `PasswordAuthentication`/`KbdInteractiveAuthentication`/`ChallengeResponseAuthentication`/`PubkeyAuthentication` **全部關掉**、只留 GSSAPI，兩段連線都成功：(1) alice 帶 forwardable Kerberos ticket 用 `GSSAPIDelegateCredentials=yes` 登入 gateway，sshd 提供的認證方式只剩 `gssapi-keyex,gssapi-with-mic`；(2) 在 gateway 上用真正的 `/etc/pilot/ssh_config`（跟 `connectToHost` 完全一樣的指令 `ssh -F /etc/pilot/ssh_config <target>`）連到 `ag-target01`，同樣只靠 GSSAPI 成功——用的是 hop 1 delegate 進來的 ticket。反例對照組：不開 `GSSAPIDelegateCredentials` 的話，gateway 上的 session 完全沒有 ticket cache，hop 2 直接 `Permission denied`，證明 delegation 是此路徑的必要條件。`ipa-client-install` 產生的 `/etc/ssh/ssh_config.d/04-ipa.conf` 預設**沒有**打開 `GSSAPIAuthentication`/`GSSAPIDelegateCredentials`，一般 OpenSSH client 預設也沒開；同日的 `freeipa-client.md` v1.8 C12 已補上 enrolled client 的預設設定。這段只描述「沿用使用者既有 TGT」的 delegation 路徑；若第一跳是 SSH key、沒有可委派 TGT，則改走 AG32/AG33 已實測的 Portal session-scoped `kinit` 路徑，兩者都不會把 credential 再委派到 target。
 - **2026-09-16：`sss_ssh_knownhostsproxy` 當 `ProxyCommand` 不會自動滿足 `StrictHostKeyChecking`**——這是修 known_hosts 靜態快照問題時，在 vm-target 上真的踩到的：把 `ProxyCommand` 改成 `sss_ssh_knownhostsproxy -p %p %h` 之後，如果順手把 `GlobalKnownHostsFile` 整條拿掉（以為 ProxyCommand 自己就會處理 host key），會得到 `No ED25519 host key is known for <target> and you have requested strict checking. Host key verification failed.`——`sss_ssh_knownhostsproxy` 只負責轉送連線 bytes，不負責回答「這把 key 信不信任」這個問題。真正的答案在 `GlobalKnownHostsFile /var/lib/sss/pubconf/known_hosts`——這是 SSSD 自己持續維護、對應每台已解析主機 `ipaSshPubKey` 的快取檔，兩個設定要一起用才完整，缺一個都會連不上（缺 ProxyCommand 就沒有動態解析能力，缺 GlobalKnownHostsFile 就沒有信任來源）。
+
+- **2026-09-18：新增 Step 3c/3d——每次 apply 把這台 gateway 自己發布進 `pilot-gateway-<gateway_scope>`，並自我清掉舊 scope 殘留的成員資格**（`docs/tmp/now/spec.md` §7，這份 Directory/handoff/recording 規格的 Phase 2；evidence:
+  [`docs/evidence/pilot-access-directory/2026-09-18-phase2-gateway-scope-instance-publication.md`](../evidence/pilot-access-directory/2026-09-18-phase2-gateway-scope-instance-publication.md)）。
+  這是一個**新的、跟 `pilot-target-<scope>` 平行但完全不同**的 hostgroup 家族：
+  `pilot-target-<scope>` 回答「這個 scope 的目標主機有哪些」（既有 `pilot
+  gateway-scope` CLI 管理），`pilot-gateway-<scope>` 回答「這個 scope 由哪幾台
+  gateway *實例* 服務」（未來 `pilot-access-directory` 路由查詢用，尚未實作，
+  只有這個 playbook 端的發布邏輯先落地）。實作沿用 Step 3/3b 已經驗證過的
+  `hostgroup-add`/`hostgroup-add-member`（Step 3c）+
+  `hostgroup-find --hosts=.. --raw` 探測、`regex_findall` 挑出 `pilot-gateway-`
+  前綴、排除當前 scope 後逐一 `hostgroup-remove-member`（Step 3d）寫法，沒有
+  發明新模式。真的在 `ag-gw01`（`scope=gpu`）/`ag-gw02` 上驗證過：兩台同 scope
+  gateway 正確共存於同一個 hostgroup；把 `ag-gw02` 的 `gateway_scope` 從
+  `gpu` 改回 `dmz` 後，它會自動離開 `pilot-gateway-gpu`、加入
+  `pilot-gateway-dmz`，`ag-gw01` 不受影響；兩台主機最終都復原回本次測試前的
+  基準設定（`ag-gw01`=gpu、`ag-gw02`=dmz），沒有在這兩台共用 vm-target 上留下
+  殘留 drift。第二次 apply 這幾個新 task 全部 `ok`（無 `changed`）。
 
 ## 6. 明確不在本 repo 範圍的項目
 
