@@ -57,6 +57,14 @@ type ConnectAuthorizeRequest struct {
 }
 
 // ConnectAuthorizeResponse is POST /v1/connect/authorize's response.
+//
+// The Recording* fields (docs/tmp/now/spec.md §23/§27, Phase 7) let this
+// SAME fresh authorize call also answer "does this session record, and
+// how" — this gateway's own /etc/pilot/access-gateway.yaml is the single
+// source of truth (Server.RecordingPolicy), never a caller-supplied
+// parameter. Populated only when Allowed (a denied caller gets no
+// recording policy — there is no session to record). Zero-value
+// RecordingMode ("") means "metadata", the unconditional default (D8).
 type ConnectAuthorizeResponse struct {
 	Allowed      bool      `json:"allowed"`
 	Target       string    `json:"target"`
@@ -65,6 +73,11 @@ type ConnectAuthorizeResponse struct {
 	GatewayScope string    `json:"gateway_scope"`
 	CheckedAt    time.Time `json:"checked_at"`
 	Rules        []string  `json:"rules"`
+
+	RecordingMode            string `json:"recording_mode,omitempty"`
+	RecordingFailurePolicy   string `json:"recording_failure_policy,omitempty"`
+	RecordingQueueEvents     int    `json:"recording_queue_events,omitempty"`
+	RecordingFlushIntervalMS int64  `json:"recording_flush_interval_ms,omitempty"`
 }
 
 // HealthResponse is GET /v1/health (spec.md §22.5) — never secret/path content.

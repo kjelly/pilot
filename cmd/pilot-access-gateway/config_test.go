@@ -95,4 +95,53 @@ gateway:
 	if cfg.requestTimeout() != defaultRequestTimeout {
 		t.Fatalf("requestTimeout() = %v, want default", cfg.requestTimeout())
 	}
+	// D8: recording defaults to "metadata"/"best_effort" whenever the
+	// operator says nothing at all — the unconditional safe default this
+	// whole spec insists on, not just a config-loader convenience.
+	if cfg.recordingMode() != "metadata" {
+		t.Fatalf("recordingMode() = %q, want metadata", cfg.recordingMode())
+	}
+	if cfg.recordingFailurePolicy() != "best_effort" {
+		t.Fatalf("recordingFailurePolicy() = %q, want best_effort", cfg.recordingFailurePolicy())
+	}
+	if cfg.recordingQueueEvents() != defaultRecordingQueueEvents {
+		t.Fatalf("recordingQueueEvents() = %d, want %d", cfg.recordingQueueEvents(), defaultRecordingQueueEvents)
+	}
+	if cfg.recordingFlushInterval() != defaultRecordingFlushInterval {
+		t.Fatalf("recordingFlushInterval() = %v, want %v", cfg.recordingFlushInterval(), defaultRecordingFlushInterval)
+	}
+}
+
+func TestLoadConfigRecordingValidValues(t *testing.T) {
+	cfg := validConfig + "  recording:\n    mode: terminal_io\n    failure_policy: fail_closed\n    queue_events: 256\n    flush_interval: 250ms\n"
+	loaded, err := LoadConfig(writeConfig(t, cfg))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.recordingMode() != "terminal_io" {
+		t.Fatalf("recordingMode() = %q, want terminal_io", loaded.recordingMode())
+	}
+	if loaded.recordingFailurePolicy() != "fail_closed" {
+		t.Fatalf("recordingFailurePolicy() = %q, want fail_closed", loaded.recordingFailurePolicy())
+	}
+	if loaded.recordingQueueEvents() != 256 {
+		t.Fatalf("recordingQueueEvents() = %d, want 256", loaded.recordingQueueEvents())
+	}
+	if loaded.recordingFlushInterval() != 250*time.Millisecond {
+		t.Fatalf("recordingFlushInterval() = %v, want 250ms", loaded.recordingFlushInterval())
+	}
+}
+
+func TestLoadConfigRecordingRejectsInvalidMode(t *testing.T) {
+	cfg := validConfig + "  recording:\n    mode: full_video\n"
+	if _, err := LoadConfig(writeConfig(t, cfg)); err == nil {
+		t.Fatalf("expected an error for an invalid recording.mode")
+	}
+}
+
+func TestLoadConfigRecordingRejectsInvalidFailurePolicy(t *testing.T) {
+	cfg := validConfig + "  recording:\n    failure_policy: retry_forever\n"
+	if _, err := LoadConfig(writeConfig(t, cfg)); err == nil {
+		t.Fatalf("expected an error for an invalid recording.failure_policy")
+	}
 }

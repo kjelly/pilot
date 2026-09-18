@@ -22,13 +22,28 @@ type Config struct {
 // GatewaySection is this gateway instance's immutable identity plus
 // runtime settings (spec.md §10.2/§26).
 type GatewaySection struct {
-	ID              string         `yaml:"id"`
-	Scope           string         `yaml:"scope"`
-	FQDN            string         `yaml:"fqdn"`
-	TargetHostgroup string         `yaml:"target_hostgroup"`
-	SocketPath      string         `yaml:"socket_path"`
-	PortalUserGroup string         `yaml:"portal_user_group"`
-	FreeIPA         FreeIPASection `yaml:"freeipa"`
+	ID              string           `yaml:"id"`
+	Scope           string           `yaml:"scope"`
+	FQDN            string           `yaml:"fqdn"`
+	TargetHostgroup string           `yaml:"target_hostgroup"`
+	SocketPath      string           `yaml:"socket_path"`
+	PortalUserGroup string           `yaml:"portal_user_group"`
+	FreeIPA         FreeIPASection   `yaml:"freeipa"`
+	Recording       RecordingSection `yaml:"recording"`
+}
+
+// RecordingSection configures Phase 7's PTY session recorder (docs/tmp/
+// now/spec.md §23/§27). Every field is optional — the unconditional
+// default is Mode "metadata" (D8), which never constructs a recorder at
+// all. Deliberately does NOT have a session-store URL/token field yet
+// (spec.md §35/§49.14): that is Phase 8's contract to define once a real
+// pilot-session-store exists, not something to forward-declare here
+// unused.
+type RecordingSection struct {
+	Mode          string   `yaml:"mode"`
+	FailurePolicy string   `yaml:"failure_policy"`
+	QueueEvents   int      `yaml:"queue_events"`
+	FlushInterval duration `yaml:"flush_interval"`
 }
 
 // FreeIPASection configures the read-only internal/freeipaaccess.Client.
@@ -72,7 +87,23 @@ func (d *duration) UnmarshalYAML(value *yaml.Node) error {
 const (
 	defaultSocketPath     = "/run/pilot/access-gateway.sock"
 	defaultRequestTimeout = 5 * time.Second
+
+	// Recording defaults (spec.md §23/§27) — "metadata"/"best_effort" are
+	// the unconditional defaults everywhere in this codebase (D8); an
+	// operator must explicitly opt into anything else.
+	defaultRecordingMode          = "metadata"
+	defaultRecordingFailurePolicy = "best_effort"
+	defaultRecordingQueueEvents   = 1024
+	defaultRecordingFlushInterval = 500 * time.Millisecond
 )
+
+var validRecordingModes = map[string]bool{
+	"metadata": true, "terminal_output": true, "terminal_io": true,
+}
+
+var validRecordingFailurePolicies = map[string]bool{
+	"best_effort": true, "fail_closed": true,
+}
 
 // LoadConfig reads and validates a gateway config file.
 func LoadConfig(path string) (Config, error) {
@@ -121,7 +152,41 @@ func (c Config) validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("config missing required fields: %s", strings.Join(missing, ", "))
 	}
+	if mode := c.Gateway.Recording.Mode; mode != "" && !validRecordingModes[mode] {
+		return fmt.Errorf("gateway.recording.mode %q is not one of metadata|terminal_output|terminal_io", mode)
+	}
+	if fp := c.Gateway.Recording.FailurePolicy; fp != "" && !validRecordingFailurePolicies[fp] {
+		return fmt.Errorf("gateway.recording.failure_policy %q is not one of best_effort|fail_closed", fp)
+	}
 	return nil
+}
+
+func (c Config) recordingMode() string {
+	if c.Gateway.Recording.Mode != "" {
+		return c.Gateway.Recording.Mode
+	}
+	return defaultRecordingMode
+}
+
+func (c Config) recordingFailurePolicy() string {
+	if c.Gateway.Recording.FailurePolicy != "" {
+		return c.Gateway.Recording.FailurePolicy
+	}
+	return defaultRecordingFailurePolicy
+}
+
+func (c Config) recordingQueueEvents() int {
+	if c.Gateway.Recording.QueueEvents > 0 {
+		return c.Gateway.Recording.QueueEvents
+	}
+	return defaultRecordingQueueEvents
+}
+
+func (c Config) recordingFlushInterval() time.Duration {
+	if c.Gateway.Recording.FlushInterval > 0 {
+		return time.Duration(c.Gateway.Recording.FlushInterval)
+	}
+	return defaultRecordingFlushInterval
 }
 
 func (c Config) socketPath() string {

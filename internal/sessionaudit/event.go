@@ -45,9 +45,9 @@ type SessionAuditEvent struct {
 // SchemaVersion1 is the only schema version this package currently emits.
 const SchemaVersion1 = 1
 
-// Event kinds (spec.md §21.2's minimum list, Directory/Gateway half only
-// — recording_started/recording_gap/recording_failed belong to Phase 7's
-// terminal recorder, not this phase).
+// Event kinds (spec.md §21.2's minimum list, Directory/Gateway half from
+// Phase 6, plus Phase 7's three recording-lifecycle kinds — reusing this
+// same Emitter/facility, never a second metadata channel, per D9).
 const (
 	KindDirectoryConnectRequested = "directory_connect_requested"
 	KindDirectoryRouteResolved    = "directory_route_resolved"
@@ -59,4 +59,11 @@ const (
 	KindTargetConnectFailed       = "target_connect_failed"
 	KindSessionStarted            = "session_started"
 	KindSessionEnded              = "session_ended"
+
+	// KindRecordingStarted/KindRecordingGap/KindRecordingFailed carry no
+	// terminal bytes — only status/counts (D9: recording payload never
+	// goes through this metadata channel).
+	KindRecordingStarted = "recording_started"
+	KindRecordingGap     = "recording_gap"
+	KindRecordingFailed  = "recording_failed"
 )

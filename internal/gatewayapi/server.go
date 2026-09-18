@@ -37,7 +37,26 @@ type Server struct {
 	// permanently shadowing the real one via nsswitch's "files" source).
 	PortalUserGroup string
 
+	// RecordingPolicy is this gateway's session-recording configuration
+	// (docs/tmp/now/spec.md §23/§27, Phase 7), sourced from
+	// /etc/pilot/access-gateway.yaml and set after construction (same
+	// pattern as PortalUserGroup). The zero value's Mode == "" is
+	// authoritative for "metadata" — handleConnectAuthorize never needs a
+	// separate default-substitution step.
+	RecordingPolicy RecordingPolicy
+
 	httpServer *http.Server
+}
+
+// RecordingPolicy mirrors cmd/pilot-access-gateway/config.go's recording
+// fields — kept as a small value type here (not the config package's own
+// type, which internal/gatewayapi must not depend on) so a test can set
+// it directly without needing a whole Config/LoadConfig round trip.
+type RecordingPolicy struct {
+	Mode            string
+	FailurePolicy   string
+	QueueEvents     int
+	FlushIntervalMS int64
 }
 
 // NewServer builds a Server bound to one gateway's config, provider, and

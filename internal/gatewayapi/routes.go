@@ -112,6 +112,12 @@ func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 			break
 		}
 	}
+	if resp.Allowed {
+		resp.RecordingMode = s.RecordingPolicy.Mode
+		resp.RecordingFailurePolicy = s.RecordingPolicy.FailurePolicy
+		resp.RecordingQueueEvents = s.RecordingPolicy.QueueEvents
+		resp.RecordingFlushIntervalMS = s.RecordingPolicy.FlushIntervalMS
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 

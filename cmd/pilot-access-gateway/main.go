@@ -95,6 +95,12 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 	resolver := accessportal.NewResolver(provider, gw)
 	srv := gatewayapi.NewServer(gw, provider, resolver, logger)
 	srv.PortalUserGroup = cfg.Gateway.PortalUserGroup
+	srv.RecordingPolicy = gatewayapi.RecordingPolicy{
+		Mode:            cfg.recordingMode(),
+		FailurePolicy:   cfg.recordingFailurePolicy(),
+		QueueEvents:     cfg.recordingQueueEvents(),
+		FlushIntervalMS: cfg.recordingFlushInterval().Milliseconds(),
+	}
 
 	ln, err := listener(cfg, systemdSocket)
 	if err != nil {
