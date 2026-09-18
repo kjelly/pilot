@@ -16,6 +16,19 @@ type portalCredentialCall struct {
 	input []byte
 }
 
+// TestNewPortalKerberosSessionWithPrefix proves the constructor Directory's
+// own SSH hop reuses (docs/tmp/now/spec.md D5) actually threads its prefix
+// through to the session, distinct from the interactive Portal's default.
+func TestNewPortalKerberosSessionWithPrefix(t *testing.T) {
+	s := newPortalKerberosSessionWithPrefix("pilot-directory-")
+	if s.cacheDirPrefix != "pilot-directory-" {
+		t.Fatalf("cacheDirPrefix = %q, want pilot-directory-", s.cacheDirPrefix)
+	}
+	if newPortalKerberosSession().cacheDirPrefix != "pilot-portal-" {
+		t.Fatalf("newPortalKerberosSession()'s cacheDirPrefix changed from pilot-portal-")
+	}
+}
+
 func TestPortalKerberosSessionReusesMatchingInheritedCache(t *testing.T) {
 	var calls []portalCredentialCall
 	s := &portalKerberosSession{
@@ -58,7 +71,8 @@ func TestPortalKerberosSessionAcquiresReusesAndDestroysOwnedCache(t *testing.T) 
 	acquired := false
 	var calls []portalCredentialCall
 	s := &portalKerberosSession{
-		runtimeBase: runtimeBase,
+		runtimeBase:    runtimeBase,
+		cacheDirPrefix: "pilot-portal-",
 		readPassword: func(principal string) ([]byte, error) {
 			passwordReads++
 			if principal != "alice" {

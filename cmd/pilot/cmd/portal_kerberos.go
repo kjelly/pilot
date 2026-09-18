@@ -46,16 +46,36 @@ type portalKerberosSession struct {
 	runtimeBase  string
 	inherited    string
 
+	// cacheDirPrefix names the per-session temp directory this instance's
+	// Ensure creates (os.MkdirTemp's pattern arg) — component-specific
+	// (e.g. "pilot-portal-" vs "pilot-directory-") purely so an operator
+	// inspecting /run/user/<uid> can tell which caller owns a given
+	// leftover directory; it has no effect on behavior or security.
+	cacheDirPrefix string
+
 	ownedCache string
 	ownedDir   string
 }
 
+// newPortalKerberosSession builds a session for the interactive Portal
+// Connect flow (spec.md §32.1).
 func newPortalKerberosSession() *portalKerberosSession {
+	return newPortalKerberosSessionWithPrefix("pilot-portal-")
+}
+
+// newPortalKerberosSessionWithPrefix is newPortalKerberosSession, generalized
+// for any caller that needs this same self-managed session-scoped ticket
+// acquisition (docs/tmp/now/spec.md D5: pilot-access-directory's own SSH hop
+// to a Gateway reuses this exact mechanism rather than relying on inbound
+// GSSAPIDelegateCredentials — the same problem this file's original commit
+// found unreliable for the sibling Gateway->target hop).
+func newPortalKerberosSessionWithPrefix(cacheDirPrefix string) *portalKerberosSession {
 	return &portalKerberosSession{
-		run:          runPortalCredentialCommand,
-		readPassword: readPortalKerberosPassword,
-		runtimeBase:  portalKerberosRuntimeBase(os.Getuid()),
-		inherited:    os.Getenv("KRB5CCNAME"),
+		run:            runPortalCredentialCommand,
+		readPassword:   readPortalKerberosPassword,
+		runtimeBase:    portalKerberosRuntimeBase(os.Getuid()),
+		inherited:      os.Getenv("KRB5CCNAME"),
+		cacheDirPrefix: cacheDirPrefix,
 	}
 }
 
@@ -113,7 +133,7 @@ func (s *portalKerberosSession) Ensure(ctx context.Context, username string) (st
 		return "", errors.New("Kerberos password cannot be empty")
 	}
 
-	dir, err := os.MkdirTemp(s.runtimeBase, "pilot-portal-")
+	dir, err := os.MkdirTemp(s.runtimeBase, s.cacheDirPrefix)
 	if err != nil {
 		return "", fmt.Errorf("create session credential directory: %w", err)
 	}
