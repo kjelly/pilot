@@ -145,3 +145,53 @@ func TestLoadConfigRecordingRejectsInvalidFailurePolicy(t *testing.T) {
 		t.Fatalf("expected an error for an invalid recording.failure_policy")
 	}
 }
+
+// TestLoadConfigSessionStoreURLRequiresTokenFile proves spec.md §28.2's
+// ingest credential cannot be silently absent: a configured
+// session_store_url with no session_store_ingest_token_file must fail
+// config validation, not start a Gateway that would try to POST to the
+// store with no Authorization header.
+func TestLoadConfigSessionStoreURLRequiresTokenFile(t *testing.T) {
+	cfg := validConfig + "  recording:\n    session_store_url: https://store.linker.internal:8443\n"
+	if _, err := LoadConfig(writeConfig(t, cfg)); err == nil {
+		t.Fatalf("expected an error when session_store_url is set without session_store_ingest_token_file")
+	}
+}
+
+func TestLoadConfigSessionStoreFieldsRoundTrip(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "session-store.token")
+	if err := os.WriteFile(tokenPath, []byte("ingest-token-abc\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	cfg := validConfig + "  recording:\n" +
+		"    session_store_url: https://store.linker.internal:8443\n" +
+		"    session_store_ingest_token_file: " + tokenPath + "\n" +
+		"    session_store_ca_file: /etc/ipa/ca.crt\n"
+	loaded, err := LoadConfig(writeConfig(t, cfg))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.sessionStoreURL() != "https://store.linker.internal:8443" {
+		t.Fatalf("sessionStoreURL() = %q", loaded.sessionStoreURL())
+	}
+	if loaded.sessionStoreCAFile() != "/etc/ipa/ca.crt" {
+		t.Fatalf("sessionStoreCAFile() = %q", loaded.sessionStoreCAFile())
+	}
+	token, err := loadSessionStoreIngestToken(loaded.Gateway.Recording.SessionStoreIngestTokenFile)
+	if err != nil {
+		t.Fatalf("loadSessionStoreIngestToken: %v", err)
+	}
+	if token != "ingest-token-abc" {
+		t.Fatalf("loadSessionStoreIngestToken = %q, want %q", token, "ingest-token-abc")
+	}
+}
+
+func TestLoadSessionStoreIngestTokenRejectsWorldReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	if _, err := loadSessionStoreIngestToken(path); err == nil {
+		t.Fatalf("loadSessionStoreIngestToken accepted a mode-0644 file, want an error")
+	}
+}

@@ -78,6 +78,23 @@ type ConnectAuthorizeResponse struct {
 	RecordingFailurePolicy   string `json:"recording_failure_policy,omitempty"`
 	RecordingQueueEvents     int    `json:"recording_queue_events,omitempty"`
 	RecordingFlushIntervalMS int64  `json:"recording_flush_interval_ms,omitempty"`
+
+	// RecordingSessionStore* (docs/tmp/now/spec.md §28, Phase 8) tell the
+	// connecting client's own pilot portal-session process where — and
+	// with what credential — to ship terminal_output/terminal_io
+	// recordings, so internal/sessionrecording.HTTPSink never needs its
+	// own config file. Populated only when Allowed AND this gateway's
+	// RecordingPolicy names a session-store URL; empty otherwise (e.g.
+	// metadata mode, or a deployment still using local-file recording).
+	// The ingest token here is a write-only credential (spec.md §28.2:
+	// "ingest 憑證只有 write/append 權限，不能 read/replay") delivered over
+	// this ALREADY-SO_PEERCRED-authenticated Unix socket response, held
+	// only in the calling process's memory — never written to disk,
+	// never passed as a CLI argument, matching spec.md §28.2's
+	// prohibition on that specifically.
+	RecordingSessionStoreURL         string `json:"recording_session_store_url,omitempty"`
+	RecordingSessionStoreCAFile      string `json:"recording_session_store_ca_file,omitempty"`
+	RecordingSessionStoreIngestToken string `json:"recording_session_store_ingest_token,omitempty"`
 }
 
 // HealthResponse is GET /v1/health (spec.md §22.5) — never secret/path content.

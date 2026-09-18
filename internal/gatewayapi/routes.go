@@ -117,6 +117,9 @@ func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 		resp.RecordingFailurePolicy = s.RecordingPolicy.FailurePolicy
 		resp.RecordingQueueEvents = s.RecordingPolicy.QueueEvents
 		resp.RecordingFlushIntervalMS = s.RecordingPolicy.FlushIntervalMS
+		resp.RecordingSessionStoreURL = s.RecordingPolicy.SessionStoreURL
+		resp.RecordingSessionStoreCAFile = s.RecordingPolicy.SessionStoreCAFile
+		resp.RecordingSessionStoreIngestToken = s.RecordingPolicy.SessionStoreIngestToken
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

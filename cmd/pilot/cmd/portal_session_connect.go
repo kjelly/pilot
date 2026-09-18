@@ -81,13 +81,28 @@ type recordingConfig struct {
 	QueueEvents   int
 	FlushInterval time.Duration
 	// LocalPath is where a FileSink writes when Mode is terminal_output/
-	// terminal_io — a deliberately plain, unencrypted, transient stopgap
-	// (D9: "bounded transient buffers / runtime temp files", never durable
-	// local state) until Phase 8's real pilot-session-store sink exists.
-	// Empty means "recording enabled but nowhere to write it", which is a
-	// misconfiguration this function fails closed on rather than silently
-	// dropping every event.
+	// terminal_io AND SessionStoreURL is empty — a deliberately plain,
+	// unencrypted, transient stopgap (D9: "bounded transient buffers /
+	// runtime temp files", never durable local state) for deployments
+	// with no pilot-session-store configured yet. Empty (with
+	// SessionStoreURL also empty) means "recording enabled but nowhere to
+	// write it", which is a misconfiguration this function fails closed
+	// on rather than silently dropping every event.
 	LocalPath string
+
+	// SessionStore* (spec.md §28, Phase 8) come back on the SAME
+	// ConnectAuthorize response as everything else in this struct
+	// (gatewayapi.ConnectAuthorizeResponse.RecordingSessionStore*, sourced
+	// from this gateway's own /etc/pilot/access-gateway.yaml
+	// gateway.recording.session_store_url). When SessionStoreURL is
+	// non-empty, runPortalOneShotConnectRecorded ships events to
+	// pilot-session-store via an HTTPSink instead of LocalPath's FileSink
+	// — the durable, encrypted, centrally-replayable path spec.md §35
+	// requires before terminal_output/terminal_io can be called
+	// production-ready.
+	SessionStoreURL         string
+	SessionStoreCAFile      string
+	SessionStoreIngestToken string
 }
 
 func (c recordingConfig) enabled() bool {
@@ -151,12 +166,15 @@ func runPortalOneShotConnect(ctx context.Context, client *portalClient, credenti
 	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindGatewayAuthorizeAllowed, User: identity.Username, TargetFQDN: authz.Target, GatewayID: authz.GatewayID, GatewayScope: authz.GatewayScope})
 
 	recording := recordingConfig{
-		Mode:          authz.RecordingMode,
-		FailurePolicy: authz.RecordingFailurePolicy,
-		QueueEvents:   authz.RecordingQueueEvents,
-		FlushInterval: time.Duration(authz.RecordingFlushIntervalMS) * time.Millisecond,
+		Mode:                    authz.RecordingMode,
+		FailurePolicy:           authz.RecordingFailurePolicy,
+		QueueEvents:             authz.RecordingQueueEvents,
+		FlushInterval:           time.Duration(authz.RecordingFlushIntervalMS) * time.Millisecond,
+		SessionStoreURL:         authz.RecordingSessionStoreURL,
+		SessionStoreCAFile:      authz.RecordingSessionStoreCAFile,
+		SessionStoreIngestToken: authz.RecordingSessionStoreIngestToken,
 	}
-	if recording.enabled() {
+	if recording.enabled() && recording.SessionStoreURL == "" {
 		recording.LocalPath = defaultRecordingPath(sessionID)
 	}
 
@@ -213,8 +231,8 @@ func waitWithTimeout(cmd *exec.Cmd, timeout time.Duration) error {
 // interactive channel (Phase B) wrapped by internal/sessionrecording's
 // Recorder, so the target's own SSH authentication is never captured.
 func runPortalOneShotConnectRecorded(ctx context.Context, sshConfigPath, sessionID, target, cache, username, gatewayID, gatewayScope string, recording recordingConfig, emitter *sessionaudit.Emitter) error {
-	if recording.LocalPath == "" {
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingFailed, User: username, TargetFQDN: target, Result: "recording enabled but no local sink path configured", RecordingMode: recording.Mode})
+	if recording.SessionStoreURL == "" && recording.LocalPath == "" {
+		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingFailed, User: username, TargetFQDN: target, Result: "recording enabled but no sink is configured (no session-store URL, no local sink path)", RecordingMode: recording.Mode})
 		return fmt.Errorf("pilot-session: session recording is enabled (%s) but no sink is configured", recording.Mode)
 	}
 
@@ -235,10 +253,31 @@ func runPortalOneShotConnectRecorded(ctx context.Context, sshConfigPath, session
 	}
 	defer ptmx.Close()
 
-	sink, err := sessionrecording.NewFileSink(recording.LocalPath)
-	if err != nil {
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingFailed, User: username, TargetFQDN: target, Result: err.Error(), RecordingMode: recording.Mode})
-		return fmt.Errorf("pilot-session: %w", err)
+	// A configured session-store always wins over the local stopgap sink
+	// — spec.md §35 makes durable, encrypted, centrally-replayable
+	// storage the bar for calling terminal_output/terminal_io
+	// production-ready, so when an operator has configured it, silently
+	// falling back to an unencrypted local file instead would misrepresent
+	// what actually happened to this session's recording.
+	var sink sessionrecording.Sink
+	if recording.SessionStoreURL != "" {
+		httpSink, err := sessionrecording.NewHTTPSink(ctx, sessionrecording.HTTPSinkConfig{
+			BaseURL: recording.SessionStoreURL, IngestToken: recording.SessionStoreIngestToken,
+			CAFile: recording.SessionStoreCAFile, SessionID: sessionID, User: username,
+			GatewayID: gatewayID, Scope: gatewayScope, Target: target, RecordingMode: recording.Mode,
+		})
+		if err != nil {
+			emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingFailed, User: username, TargetFQDN: target, Result: "session-store sink: " + err.Error(), RecordingMode: recording.Mode})
+			return fmt.Errorf("pilot-session: %w", err)
+		}
+		sink = httpSink
+	} else {
+		fileSink, err := sessionrecording.NewFileSink(recording.LocalPath)
+		if err != nil {
+			emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingFailed, User: username, TargetFQDN: target, Result: err.Error(), RecordingMode: recording.Mode})
+			return fmt.Errorf("pilot-session: %w", err)
+		}
+		sink = fileSink
 	}
 
 	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingStarted, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, RecordingMode: recording.Mode})

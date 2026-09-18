@@ -147,6 +147,13 @@
 #操作者的核准動作。
 - import_playbook: apply/pilot-access-directory-apply.yml
   tags: [freeipa, pilot-access-directory]
+# docs/tmp/now/spec.md §35: pilot-session-store 依賴 freeipa-client
+# (sameHosts，跟 Gateway/Directory 各自獨立、不是同一批主機)。排序放在
+# pilot-access-directory 之後純粹是「這個 delivery 裡新元件放最後」的慣
+# 例，不是硬性相依。跟其他角色一樣不是 single-component-only:把這個 role
+# 加進 hosts.yml 的清單本身就是操作者的核准動作。
+- import_playbook: apply/pilot-session-store-apply.yml
+  tags: [freeipa, pilot-session-store]
 - import_playbook: apply/freeipa-nfs-server-apply.yml
   tags: [freeipa, freeipa-nfs-server]
 - import_playbook: apply/freeipa-nfs-client-apply.yml

@@ -1,0 +1,78 @@
+# ============================================================================
+#  group_vars/pilot-session-store.example.yml —— Pilot Session Store 設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/pilot-session-store.yml
+#    cp group_vars/pilot-session-store.example.yml <inventory 目錄>/group_vars/pilot-session-store.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/pilot-session-store.md
+#  詳細設計:docs/tmp/now/spec.md（Pilot Access Directory、Gateway Handoff 與
+#  SSH Session Recording 實作規格），§28-§29/§35
+#
+#  site.include=true 的 role(contracts/pilot-session-store.yaml)——把它加進
+#  某台主機 hosts.yml 的 roles 清單,本身就是操作者的核准動作,之後每次全站
+#  部署都會照常套用。
+#
+#  目標主機必須已經是 freeipa-client(先跑 freeipa-client-apply.yml)且已有
+#  正向 DNS record——這台主機自己的機器 keytab 是 ipa-getcert 核發 ingest
+#  TLS 憑證的基礎,不需要另外走 admin 密碼。這台主機從不是 SSH portal
+#  ingress(沒有 ForceCommand/HBAC),`hostCardinality: one-or-more`——可以有
+#  一台以上的 store instance。
+# ============================================================================
+
+# 這台 Session Store 的 FQDN。不填則沿用 ansible_fqdn——必須是這台主機真正
+# FreeIPA-enrolled 的 FQDN,不是額外 alias/CNAME(ipa-getcert 的 SAN 用它)。
+# session_store_fqdn: ""
+
+# 只在**安裝當下**用來建立 role-pilot-session-auditor group;執行期完全不
+# 用。一律走 Vault,不要直接寫在這個檔案裡:
+#   vault key: ipa_admin_password(跟 freeipa-identity/pilot-access-gateway/
+#   pilot-access-directory 共用同一份 vault 檔)
+# ipa_admin_password: ""
+
+# 控制端已建置好的兩個 binary 路徑(相對於 repo root,或絕對路徑)。必填——
+# 套用前會先在控制端驗證這兩個檔案存在、能正常執行 version 子指令。
+pilot_binary_path: "dist/pilot-linux-amd64"
+pilot_session_store_binary_path: "dist/pilot-session-store-linux-amd64"
+#   用 scripts/build-pilot-session-store.sh 建置 pilot-session-store 二進位檔。
+
+# 保留天數。沒有內建預設值——spec.md §28.5 明確禁止硬編碼公司 policy,必須
+# 由部署者明確決定並填寫,否則套用會直接失敗(pre_tasks 的必填檢查)。
+pilot_session_store_retention_days: 90
+
+# 加密金鑰的識別碼(metadata,不是金鑰本身)。輪替金鑰時務必連這個值一起換
+# 掉,否則 replay 時的 decrypt 失敗訊息會很難對應到「用了哪一把金鑰」。
+pilot_session_store_key_id: "v1"
+
+# AES-256 master key,64 個十六進位字元(32 bytes)。一律走 Vault,不要直接
+# 寫在這個檔案裡——產生方式例如:
+#   openssl rand -hex 32
+# vault key: pilot_session_store_master_key
+# pilot_session_store_master_key: ""
+
+# Ingest API 的 bearer token(pilot-access-gateway 送 recording event 時用
+# 的憑證,只有 write/append 權限,不能 read/replay)。一律走 Vault:
+#   openssl rand -hex 32
+# vault key: pilot_session_store_ingest_token
+# pilot_session_store_ingest_token: ""
+
+# Ingest HTTPS 監聽的 port。改這個值時,pilot-access-gateway 那邊
+# group_vars/host_vars 的 gateway.recording.session_store_url(host_vars 的
+# gateway_session_store_url,依實際 group_vars 慣例填寫)也要跟著改。
+# pilot_session_store_ingest_port: 8443
+
+# ----------------------------------------------------------------------------
+# pilot-access-gateway 那端需要手動對應設定(這支 playbook 不會自動幫
+# Gateway 填):
+#
+#   gateway:
+#     recording:
+#       session_store_url: "https://<session_store_fqdn>:<pilot_session_store_ingest_port>"
+#       session_store_ingest_token_file: /etc/pilot/session-store-ingest-token  # 內容 = 上面同一個 token
+#       session_store_ca_file: /etc/ipa/ca.crt   # Gateway 本身已是 freeipa-client,天然信任同一個 FreeIPA CA
+#
+# `session_store_ingest_token_file` 的內容必須跟這裡的
+# `pilot_session_store_ingest_token` 完全一致——這是同一把憑證,只是分別部
+# 署到兩台主機各自的檔案系統上。
+# ----------------------------------------------------------------------------

@@ -52,6 +52,7 @@ var topLevelOrder = []string{
 	"dashboard",
 	"pilot-access-gateway",
 	"pilot-access-directory",
+	"pilot-session-store",
 }
 
 // envOrder is the environment-dimension groups — orthogonal to role,

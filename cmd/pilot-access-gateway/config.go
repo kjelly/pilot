@@ -35,15 +35,25 @@ type GatewaySection struct {
 // RecordingSection configures Phase 7's PTY session recorder (docs/tmp/
 // now/spec.md §23/§27). Every field is optional — the unconditional
 // default is Mode "metadata" (D8), which never constructs a recorder at
-// all. Deliberately does NOT have a session-store URL/token field yet
-// (spec.md §35/§49.14): that is Phase 8's contract to define once a real
-// pilot-session-store exists, not something to forward-declare here
-// unused.
+// all.
+//
+// SessionStore* (spec.md §28/§34, Phase 8) are also optional: when unset,
+// terminal_output/terminal_io recording still works exactly as Phase 7
+// shipped it (a local FileSink under the connecting user's own runtime
+// directory) — this deployment simply has no durable, encrypted,
+// centrally-replayable copy. Per spec.md §35, a Gateway recording
+// locally without a configured session store must not be described as
+// production-ready for terminal_output/terminal_io; only "metadata" mode
+// carries that claim unconditionally.
 type RecordingSection struct {
 	Mode          string   `yaml:"mode"`
 	FailurePolicy string   `yaml:"failure_policy"`
 	QueueEvents   int      `yaml:"queue_events"`
 	FlushInterval duration `yaml:"flush_interval"`
+
+	SessionStoreURL             string `yaml:"session_store_url"`
+	SessionStoreIngestTokenFile string `yaml:"session_store_ingest_token_file"`
+	SessionStoreCAFile          string `yaml:"session_store_ca_file"`
 }
 
 // FreeIPASection configures the read-only internal/freeipaaccess.Client.
@@ -158,6 +168,9 @@ func (c Config) validate() error {
 	if fp := c.Gateway.Recording.FailurePolicy; fp != "" && !validRecordingFailurePolicies[fp] {
 		return fmt.Errorf("gateway.recording.failure_policy %q is not one of best_effort|fail_closed", fp)
 	}
+	if c.Gateway.Recording.SessionStoreURL != "" && c.Gateway.Recording.SessionStoreIngestTokenFile == "" {
+		return fmt.Errorf("gateway.recording.session_store_url is set but gateway.recording.session_store_ingest_token_file is empty")
+	}
 	return nil
 }
 
@@ -187,6 +200,35 @@ func (c Config) recordingFlushInterval() time.Duration {
 		return time.Duration(c.Gateway.Recording.FlushInterval)
 	}
 	return defaultRecordingFlushInterval
+}
+
+func (c Config) sessionStoreURL() string    { return c.Gateway.Recording.SessionStoreURL }
+func (c Config) sessionStoreCAFile() string { return c.Gateway.Recording.SessionStoreCAFile }
+
+// loadSessionStoreIngestToken reads the ingest bearer token from a
+// vault-provided, mode-0600 file (spec.md §28.2) — same discipline as
+// cmd/pilot-session-store/config.go's loadIngestToken. Called only when
+// SessionStoreURL is configured; the token is held only in memory from
+// here on and handed to a connecting client over the already-
+// SO_PEERCRED-authenticated Unix socket response (never written to disk
+// again, never a CLI argument).
+func loadSessionStoreIngestToken(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat session-store ingest token file: %w", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("session-store ingest token file %s must not be group/world accessible (mode %04o)", path, info.Mode().Perm())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read session-store ingest token file: %w", err)
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", fmt.Errorf("session-store ingest token file %s is empty", path)
+	}
+	return token, nil
 }
 
 func (c Config) socketPath() string {

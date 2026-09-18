@@ -437,7 +437,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 37 支**都有 `stage`/`confirm_staging`/
+`playbooks/apply/*.yml` 現在**全部 38 支**都有 `stage`/`confirm_staging`/
 `confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`docker`、
 `freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
 `freeipa-dns-client`、`freeipa-ca-trust`、`freeipa-nfs-server`、
@@ -446,7 +446,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 `audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
 `os-patch-sla`(用 `patch_stage`)、`host-monitoring`、`dcgm-exporter`、`prometheus`、`thanos-query`、
 `detection-engine`、`alertmanager`、`snmp-exporter`、`dashboard`、`log-shipping`、`reverse-proxy`、`internal-endpoint`、
-`agent-controller`、`gateway-scope`、`pilot-access-gateway`、`pilot-access-directory`)。
+`agent-controller`、`gateway-scope`、`pilot-access-gateway`、`pilot-access-directory`、`pilot-session-store`)。
 `freeipa-server-replica`、
 `freeipa-realm-replacement`、
 `freeipa-dns`、`freeipa-dns-client`、`freeipa-ca-trust`、`internal-endpoint`、`agent-controller` 與後五支可觀測性堆疊一樣是**還沒接進
@@ -845,3 +845,4 @@ git status --short
 | 2026-09-14 | v1.25 | pilot-access-gateway Phase 6:新增 `gateway-scope` apply playbook(`pilot gateway-scope plan/reconcile` CLI 的後端,把一個 scope 的目標主機清單發布成 FreeIPA hostgroup `pilot-target-<scope>`,day-2/opt-in、not per-host role,見 `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §9.6/§57、`docs/verification/pilot-gateway-scope.md`);§4.3 playbook 清點更新為 35 支;活體 vm-target 測試發現 `-e gateway_scope_hosts=[...]` 這種寫法會被 Ansible 當純字串(逐字元跑 diff),必須用 `-e '{"gateway_scope_hosts": [...]}'` 的 JSON 物件形式 | pilot |
 | 2026-09-14 | v1.26 | pilot-access-gateway Phase 7:新增 `pilot-access-gateway` apply playbook(裝 stateless FreeIPA-backed SSH/sudo 存取閘道到單一 gateway 主機,含 reader service principal/keytab、systemd socket-activated API、`pilot portal` 前端;ForceCommand 步驟預設關閉,留給 Phase 8,見 `docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md` §55/§0 G4、`docs/verification/pilot-access-gateway.md`);§4.3 playbook 清點更新為 36 支,登記為一般 per-host 角色(`internal/inventory` topLevelOrder/roleContracts,比照 `agent-controller`/`freeipa-server-replica`,而非像 `gateway-scope` 那樣豁免);活體 vm-target 測試抓到並修正 4 個真 bug:`ipa service-add` 要求正向 DNS record 先存在、`/usr/local/libexec` 在 Ubuntu 上不存在、local fallback group 會被 nsswitch `files` 來源永久遮蔽同名 FreeIPA 群組(已改成 fail-closed 檢查,不再建 local 群組)、`RuntimeDirectory=` declare 在錯的 systemd unit(`.service`)上會讓重啟 service 把 `.socket` 建立的 socket 檔一併刪掉(已搬到 `.socket` unit);另外在定位這組 bug 過程中先誤判成「systemd 無法可靠解析 SSSD 群組」,實際重跑驗證後已回頭修正相關文件註解為正確成因(local group shadowing) | pilot |
 | 2026-09-14 | v1.27 | pilot-access-gateway Phase 8(收尾):在人員明確核准後(啟用 ForceCommand、模擬 FreeIPA 斷線皆被 auto-mode classifier 攔下要求人工確認)對 disposable vm-target 完整跑過 §55.1 三步鎖定回歸測試(AG20/21/25)+ 新增第二台 gateway 對 AG26/27 同/異 scope 隔離做強驗證(含同一使用者對兩個 scope 都有真實 HBAC 權限但互不外溢的案例)+ FreeIPA 斷線 fail-closed 活體驗證(AG16);過程中意外發現並修正一個真的 process-crash 可用性 bug:`internal/freeipaaccess.NewClient` 原本同步載入 keytab,缺檔會讓整個 process exit,因為服務是 socket-activated 很快撞上 systemd start-rate-limit 讓**整個 socket 單元**卡死、修好 keytab 也不會自動恢復——已改成跟既有 session 建立一樣 lazy + per-call retry(`internal/freeipaaccess/kerberos_test.go` 新增兩個回歸測試);也補上 playbook 原本只能開、不能透過旗標關閉 ForceCommand 的對稱性 gap。至此 8 個 Phase(§60)全數完成 | pilot |
+| 2026-09-18 | v1.28 | Pilot Access Directory/Gateway Handoff/Session Recording delivery(`docs/superpowers/specs/2026-09-16-pilot-access-directory-session-routing-recording-spec.md`)Phase 8(收尾):新增 `pilot-session-store` apply playbook(terminal recording 的獨立 stateful persistence,加密 index + TLS ingest API + 獨立 Unix socket read/replay API;從不是 SSH portal ingress,無 ForceCommand/HBAC;依賴 freeipa-client 取得機器 keytab 走 `ipa-getcert` 核發 ingest TLS 憑證,不需要 admin 密碼;已接進 `site.yml`,見 `docs/verification/pilot-session-store.md`);§4.3 playbook 清點更新為 38 支;順手補上 `internal/sessionstore.LoadMasterKeyFile` 原本完全沒有單元測試涵蓋的缺口(`internal/sessionstore/encryption_test.go`);read socket 權限設計刻意不沿用 Gateway/Directory 共用的 `/run/pilot`(該目錄的決定性權限來自 systemd `.socket` unit 的 `SocketUser`/`SocketGroup`/`SocketMode`,而這個元件的 read API 是 process 自己 `net.Listen`,沒有 socket activation),改用專屬 `RuntimeDirectory=pilot-session-store` + `UMask=0007` + `Group=role-pilot-session-auditor` 三者搭配才能讓 auditor group 成員真的連得上 | pilot |

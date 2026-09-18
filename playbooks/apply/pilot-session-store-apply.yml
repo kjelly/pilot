@@ -1,0 +1,656 @@
+# Apply playbook for docs/verification/pilot-session-store.md
+# (docs/tmp/now/spec.md §28-§29/§35, Phase 8).
+#
+# Installs pilot-session-store on ONE host that is already a FreeIPA
+# client (playbooks/apply/freeipa-client-apply.yml) — its own service
+# principal's machine keytab is what lets `ipa-getcert request` issue an
+# ingest-TLS certificate from the FreeIPA integrated CA with zero
+# interactive/admin-password step (spec.md §28.2: "trust /etc/ipa/ca.crt" —
+# this is what makes that true: any other freeipa-client host, e.g.
+# pilot-access-gateway, already has /etc/ipa/ca.crt and can verify this
+# host's cert against it with no extra CA distribution). Mirrors
+# pilot-access-gateway-apply.yml/pilot-access-directory-apply.yml's
+# structure/idioms (staging/prod gates, changed_when/failed_when/no_log
+# discipline, artifact gates) — this is a NEW, separate component.
+#
+# Unlike Gateway/Directory, this host is never an SSH portal ingress: no
+# ForceCommand, no HBAC rule. Two listeners, two trust models, in one
+# systemd service (cmd/pilot-session-store/main.go):
+#   - ingest: TLS-mandatory HTTPS, bearer-token auth, write/append only.
+#   - read/replay: a private Unix socket, SO_PEERCRED + auditor-group
+#     gated (internal/identity.IsMemberOfGroup) — `pilot session
+#     list/show/replay` run locally by an operator who is a member of
+#     role-pilot-session-auditor via a normal (non-captive) SSH login.
+#
+# Usage (reusing an already-provisioned FreeIPA-client vm-target — see
+# docs/evidence/pilot-access-directory/ for the exact commands used):
+#
+#   pilot vm-target run --name <session-store-vm> \
+#       playbooks/apply/pilot-session-store-apply.yml \
+#       -e target_group=all \
+#       -e pilot_binary_path=dist/pilot-linux-amd64 \
+#       -e pilot_session_store_binary_path=dist/pilot-session-store-linux-amd64 \
+#       -e pilot_session_store_retention_days=90 \
+#       -e pilot_session_store_key_id=v1 \
+#       -e pilot_session_store_master_key=<64-hex-char AES-256 key> \
+#       -e pilot_session_store_ingest_token=<random bearer token> \
+#       -e @~/.vault/main.yaml
+#
+# Secrets: ipa_admin_password (vault) is used ONLY at apply-time to
+# bootstrap the role-pilot-session-auditor FreeIPA group — the master key
+# and ingest token are themselves vault-provided secrets (spec.md §28.2/
+# §28.4: "vault 提供"), never hard-coded, never logged (no_log: true on
+# every task that touches them), never passed as a CLI argument to the
+# binary itself (only written to root-readable-only files it loads at
+# startup).
+---
+- name: Pilot Session Store install
+  hosts: "{{ target_group | default('pilot-session-store') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    pilot_session_store_user: pilot-session-store
+    pilot_session_store_auditor_group: role-pilot-session-auditor
+
+    pilot_session_store_index_db_path: /var/lib/pilot-session-store/index.db
+    pilot_session_store_state_dir: /var/lib/pilot-session-store
+    pilot_session_store_runtime_dir_name: pilot-session-store
+    pilot_session_store_read_socket_path: /run/pilot-session-store/session-store.sock
+
+    pilot_session_store_cert_file: /etc/pilot/session-store-tls.crt
+    pilot_session_store_key_file: /etc/pilot/session-store-tls.key
+    pilot_session_store_master_key_file: /etc/pilot/session-store-master.key
+    pilot_session_store_ingest_token_file: /etc/pilot/session-store-ingest.token
+
+    pilot_session_store_ingest_port: 8443
+
+    pilot_binary_sha256: ""
+    pilot_session_store_binary_sha256: ""
+
+    # session_store_effective_fqdn follows the same "_effective_" naming
+    # convention pilot-access-gateway-apply.yml/pilot-access-directory-
+    # apply.yml use to sidestep this ansible-core version's
+    # self-referencing-default infinite recursion.
+    session_store_effective_fqdn: "{{ session_store_fqdn | default(ansible_fqdn) }}"
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+      when: stage == 'prod'
+      tags: [always]
+
+    # SS10 (spec.md §28.5): retention_days has no implicit default — a
+    # missing value must fail loudly here, not silently fall back to a
+    # hardcoded company policy the way cmd/pilot-session-store/config.go's
+    # own validate() also refuses to start without one.
+    - name: "Gate: required session-store identity/secret vars"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined
+          - pilot_binary_path | length > 0
+          - pilot_session_store_binary_path | length > 0
+          - pilot_session_store_retention_days is defined
+          - (pilot_session_store_retention_days | int) > 0
+          - pilot_session_store_key_id | default('') | length > 0
+          - pilot_session_store_master_key is defined
+          - pilot_session_store_master_key | length == 64
+          - pilot_session_store_ingest_token is defined
+          - pilot_session_store_ingest_token | length > 0
+        fail_msg: >-
+          Missing/invalid required vars: ipa_admin_password (vault),
+          pilot_binary_path, pilot_session_store_binary_path,
+          pilot_session_store_retention_days (int > 0, no implicit
+          default per spec.md §28.5), pilot_session_store_key_id,
+          pilot_session_store_master_key (vault, 64 hex chars = 32
+          raw bytes for AES-256), pilot_session_store_ingest_token (vault).
+      tags: [always]
+
+    - name: "Resolve local artifact paths (relative = repo-root relative)"
+      ansible.builtin.set_fact:
+        pilot_binary_abs_path: >-
+          {{ pilot_binary_path if (pilot_binary_path is match('^/'))
+          else (playbook_dir ~ '/../../' ~ pilot_binary_path) }}
+        pilot_session_store_binary_abs_path: >-
+          {{ pilot_session_store_binary_path if (pilot_session_store_binary_path is match('^/'))
+          else (playbook_dir ~ '/../../' ~ pilot_session_store_binary_path) }}
+      tags: [always]
+
+    - name: "Gate: pilot binary exists on the controller"
+      ansible.builtin.stat:
+        path: "{{ pilot_binary_abs_path }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_binary_stat
+      tags: [always]
+
+    - name: "Gate: pilot binary exists"
+      ansible.builtin.assert:
+        that:
+          - pilot_binary_stat.stat.get('exists', false)
+        fail_msg: >-
+          pilot binary {{ pilot_binary_abs_path }} is missing — build it
+          first (e.g. CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o
+          dist/pilot-linux-amd64 ./cmd/pilot).
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: pilot binary's own version subcommand succeeds"
+      ansible.builtin.command:
+        argv: ["{{ pilot_binary_abs_path }}", "version"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_binary_version
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: pilot-session-store binary exists on the controller"
+      ansible.builtin.stat:
+        path: "{{ pilot_session_store_binary_abs_path }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_session_store_binary_stat
+      tags: [always]
+
+    - name: "Gate: pilot-session-store binary exists"
+      ansible.builtin.assert:
+        that:
+          - pilot_session_store_binary_stat.stat.get('exists', false)
+        fail_msg: >-
+          pilot-session-store binary
+          {{ pilot_session_store_binary_abs_path }} is missing — build it
+          with scripts/build-pilot-session-store.sh first.
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: pilot-session-store binary's own version subcommand succeeds and matches the contract"
+      ansible.builtin.command:
+        argv: ["{{ pilot_session_store_binary_abs_path }}", "version"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: pilot_session_store_binary_version
+      changed_when: false
+      check_mode: false
+      failed_when: pilot_session_store_binary_version.stdout is not match('^pilot-session-store \S+')
+      tags: [always]
+
+  tasks:
+    # SS-enrollment (spec.md §35): verify FreeIPA client enrollment — this
+    # host's own machine keytab is what lets ipa-getcert issue a
+    # FreeIPA-CA-signed cert below with no admin-password round trip.
+    - name: "Verify FreeIPA client enrollment"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: session_store_ipa_default_conf
+      tags: [SS_enrollment]
+
+    - name: "Gate: this host must already be FreeIPA-enrolled"
+      ansible.builtin.assert:
+        that:
+          - session_store_ipa_default_conf.stat.exists
+        fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
+      tags: [SS_enrollment]
+
+    - name: "Check this host resolves in FreeIPA DNS (required for the ingest TLS cert's SAN)"
+      ansible.builtin.command:
+        argv: [getent, hosts, "{{ session_store_effective_fqdn }}"]
+      register: session_store_dns_check
+      changed_when: false
+      failed_when: false
+      tags: [SS_enrollment]
+
+    - name: "Gate: this host must have a forward DNS record before requesting a service certificate"
+      ansible.builtin.assert:
+        that:
+          - session_store_dns_check.rc == 0
+        fail_msg: >-
+          {{ session_store_effective_fqdn }} does not resolve. The
+          ipa-getcert request below needs a forward DNS record. Re-run
+          freeipa-client-apply.yml with DNS registration enabled, or
+          register it manually.
+      tags: [SS_enrollment]
+
+    - name: "Create pilot-session-store system user"
+      ansible.builtin.user:
+        name: "{{ pilot_session_store_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+        home: /nonexistent
+      tags: [SS_service]
+
+    # SS-auditor (spec.md §29): role-pilot-session-auditor is the group
+    # gating the read/replay Unix socket (read_api.go's authorizedPeer) —
+    # self-provisioned scaffolding, same pattern pilot-access-gateway/
+    # pilot-access-directory already established for their own analogous
+    # groups. Membership (who is an auditor) is deliberately NOT managed
+    # here — that stays roster-owned identity data.
+    - name: "Kinit admin (management-plane operations only — never shipped to this host)"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo '{{ ipa_admin_password }}' | kinit admin
+      args:
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      tags: [SS_enrollment, SS_cert]
+
+    - name: "Ensure role-pilot-session-auditor group exists"
+      ansible.builtin.command:
+        argv: [ipa, group-add, "{{ pilot_session_store_auditor_group }}", "--desc=Pilot Session Store read/replay auditors"]
+      register: session_store_auditor_group_add
+      changed_when: "'Added group' in (session_store_auditor_group_add.stdout | default(''))"
+      failed_when:
+        - session_store_auditor_group_add.rc != 0
+        - "'already exists' not in (session_store_auditor_group_add.stderr | default(''))"
+      tags: [SS_service]
+
+    - name: "Verify auditor group resolves via SSSD (never a local fallback)"
+      ansible.builtin.command:
+        argv: [getent, group, "{{ pilot_session_store_auditor_group }}"]
+      register: session_store_auditor_group_check
+      changed_when: false
+      failed_when: false
+      tags: [SS_service]
+
+    - name: "Gate: auditor group must resolve via SSSD"
+      ansible.builtin.assert:
+        that:
+          - session_store_auditor_group_check.rc == 0
+        fail_msg: >-
+          Group {{ pilot_session_store_auditor_group }} was just
+          created/confirmed in FreeIPA above but does not resolve locally
+          via getent — SSSD/enrollment problem on this host, not a
+          missing group. This playbook never creates a local fallback
+          group.
+      tags: [SS_service]
+
+    # SS-cert (spec.md §28.2): request the ingest TLS cert from the
+    # FreeIPA integrated CA via certmonger — same argv-list/owner-string
+    # gotchas playbooks/apply/tasks/internal-endpoint-cert-request.yml
+    # already documents (a free-form command string silently shlex-splits
+    # and truncates -C's value; -o/-O take one "user:group" OWNER string,
+    # not a separate group flag). `-w` blocks until the request finishes,
+    # so no separate poll-until-issued step is needed.
+    - name: "Ensure the pilot-session-store service principal exists"
+      ansible.builtin.command:
+        argv: [ipa, service-add, "pilot-session-store/{{ session_store_effective_fqdn }}"]
+      register: session_store_service_add
+      changed_when: "'Added service' in (session_store_service_add.stdout | default(''))"
+      failed_when:
+        - session_store_service_add.rc != 0
+        - "'already exists' not in (session_store_service_add.stderr | default(''))"
+      tags: [SS_cert]
+
+    - name: "Destroy the management-plane admin ticket"
+      ansible.builtin.command:
+        argv: [kdestroy]
+      changed_when: false
+      tags: [SS_enrollment, SS_cert]
+
+    - name: "Ensure /etc/pilot exists"
+      ansible.builtin.file:
+        path: /etc/pilot
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [SS_service]
+
+    - name: "Check for an existing certmonger tracking request for the ingest cert"
+      ansible.builtin.command: getcert list -f {{ pilot_session_store_cert_file }}
+      register: session_store_getcert_list
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [SS_cert]
+
+    - name: "Request the ingest TLS certificate via certmonger (ipa-getcert), SAN = this host's FQDN"
+      ansible.builtin.command:
+        argv:
+          - ipa-getcert
+          - request
+          - -f
+          - "{{ pilot_session_store_cert_file }}"
+          - -k
+          - "{{ pilot_session_store_key_file }}"
+          - -K
+          - "pilot-session-store/{{ session_store_effective_fqdn }}"
+          - -D
+          - "{{ session_store_effective_fqdn }}"
+          - -N
+          - "CN={{ session_store_effective_fqdn }}"
+          - -o
+          - "{{ pilot_session_store_user }}:{{ pilot_session_store_user }}"
+          - -m
+          - "0640"
+          - -O
+          - "root:root"
+          - -M
+          - "0644"
+          - -C
+          - "systemctl restart pilot-session-store.service"
+          - -w
+      when:
+        - not ansible_check_mode
+        - session_store_getcert_list.rc != 0
+      register: session_store_getcert_request
+      changed_when: session_store_getcert_request.rc == 0
+      tags: [SS_cert]
+
+    # SS-secrets (spec.md §28.2/§28.4): master key and ingest token are
+    # vault-provided, mode 0600, never logged (no_log). Content-diff
+    # writes are naturally idempotent — ansible.builtin.copy only reports
+    # changed when the file's content actually differs.
+    - name: "Install the AES-256-GCM master key file (spec.md §28.4)"
+      ansible.builtin.copy:
+        dest: "{{ pilot_session_store_master_key_file }}"
+        owner: "{{ pilot_session_store_user }}"
+        group: "{{ pilot_session_store_user }}"
+        mode: "0600"
+        content: "{{ pilot_session_store_master_key }}"
+      no_log: true
+      tags: [SS_secrets]
+
+    - name: "Install the ingest bearer token file (spec.md §28.2)"
+      ansible.builtin.copy:
+        dest: "{{ pilot_session_store_ingest_token_file }}"
+        owner: "{{ pilot_session_store_user }}"
+        group: "{{ pilot_session_store_user }}"
+        mode: "0600"
+        content: "{{ pilot_session_store_ingest_token }}"
+      no_log: true
+      tags: [SS_secrets]
+
+    # SS-storage (spec.md §28.3): index.db lives under a private,
+    # 0700-owned state directory — even though session_events rows carry
+    # only encryptor ciphertext, the containing directory being
+    # inaccessible to the auditor group (unlike the read socket below)
+    # means an auditor can never read this off disk directly, only
+    # through the app's own replay path.
+    - name: "Ensure the state directory exists (spec.md §28.3 index.db location)"
+      ansible.builtin.file:
+        path: "{{ pilot_session_store_state_dir }}"
+        state: directory
+        owner: "{{ pilot_session_store_user }}"
+        group: "{{ pilot_session_store_user }}"
+        mode: "0700"
+      tags: [SS_storage, SS17]
+
+    - name: "Install /etc/pilot/session-store.yaml"
+      ansible.builtin.copy:
+        dest: /etc/pilot/session-store.yaml
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          ingest:
+            listen_addr: "0.0.0.0:{{ pilot_session_store_ingest_port }}"
+            tls_cert_file: {{ pilot_session_store_cert_file }}
+            tls_key_file: {{ pilot_session_store_key_file }}
+            token_file: {{ pilot_session_store_ingest_token_file }}
+          storage:
+            index_db_path: {{ pilot_session_store_index_db_path }}
+            master_key_file: {{ pilot_session_store_master_key_file }}
+            key_id: {{ pilot_session_store_key_id }}
+          read:
+            socket_path: {{ pilot_session_store_read_socket_path }}
+            auditor_group: {{ pilot_session_store_auditor_group }}
+          retention:
+            retention_days: {{ pilot_session_store_retention_days }}
+      register: session_store_config_copy
+      tags: [SS_config]
+
+    - name: "Ensure /usr/local/libexec exists (not all distros pre-create it)"
+      ansible.builtin.file:
+        path: /usr/local/libexec
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [SS_service]
+
+    - name: "Install pilot-session-store binary"
+      ansible.builtin.copy:
+        src: "{{ pilot_session_store_binary_abs_path }}"
+        dest: /usr/local/libexec/pilot-session-store
+        owner: root
+        group: root
+        mode: "0755"
+      register: session_store_binary_copy
+      tags: [SS_service]
+
+    - name: "Install pilot CLI (used locally by auditors: `pilot session list/show/replay`)"
+      ansible.builtin.copy:
+        src: "{{ pilot_binary_abs_path }}"
+        dest: /usr/bin/pilot
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [SS_service]
+
+    # SS-service (spec.md §35): a private runtime directory for the read
+    # socket — NOT the shared /run/pilot Gateway/Directory use, because
+    # this is the only one of the three components whose read listener is
+    # opened directly by the Go process (net.Listen) rather than via a
+    # systemd .socket unit's deterministic SocketUser/SocketGroup/
+    # SocketMode. A shared, already-existing /run/pilot (created earlier
+    # by whichever of those other two services boots first, owned by
+    # THEIR User/Group) could leave this service unable to bind at all —
+    # a private RuntimeDirectory sidesteps that ordering hazard entirely.
+    # UMask=0007 + Group=<auditor group> is what actually makes the
+    # resulting socket file group-writable by auditors (Unix connect() to
+    # a stream socket needs write permission on the socket's directory
+    # entry, not just search): mode 0777 request & ~0007 = 0770, group =
+    # role-pilot-session-auditor. The state dir above is untouched by
+    # this UMask (ansible.builtin.file sets its mode explicitly, and only
+    # files the Go PROCESS itself creates at runtime are subject to the
+    # unit's UMask/Group).
+    - name: "Install pilot-session-store.service"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pilot-session-store.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Pilot Session Store
+          After=network-online.target sssd.service certmonger.service
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ pilot_session_store_user }}
+          Group={{ pilot_session_store_auditor_group }}
+          UMask=0007
+
+          RuntimeDirectory={{ pilot_session_store_runtime_dir_name }}
+          RuntimeDirectoryMode=0750
+
+          ExecStart=/usr/local/libexec/pilot-session-store serve --config /etc/pilot/session-store.yaml
+
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ProtectKernelTunables=true
+          ProtectKernelModules=true
+          ProtectControlGroups=true
+
+          ReadWritePaths={{ pilot_session_store_state_dir }}
+          ReadOnlyPaths=/etc/pilot
+          ReadOnlyPaths=/etc/ipa
+
+          Restart=on-failure
+          RestartSec=2
+
+          [Install]
+          WantedBy=multi-user.target
+      register: session_store_service_unit
+      tags: [SS_service]
+
+    # SS-retention (spec.md §28.5): a systemd timer runs `pilot-session-store
+    # retention-sweep` once a day — retention_days itself is required
+    # (asserted above), never hardcoded here.
+    - name: "Install pilot-session-store-retention.service (oneshot)"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pilot-session-store-retention.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Pilot Session Store retention sweep
+          After=pilot-session-store.service
+
+          [Service]
+          Type=oneshot
+          User={{ pilot_session_store_user }}
+          Group={{ pilot_session_store_user }}
+
+          ExecStart=/usr/local/libexec/pilot-session-store retention-sweep --config /etc/pilot/session-store.yaml
+
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ReadWritePaths={{ pilot_session_store_state_dir }}
+          ReadOnlyPaths=/etc/pilot
+      register: session_store_retention_service_unit
+      tags: [SS_retention]
+
+    - name: "Install pilot-session-store-retention.timer"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pilot-session-store-retention.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Daily Pilot Session Store retention sweep
+
+          [Timer]
+          OnCalendar=daily
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+      register: session_store_retention_timer_unit
+      tags: [SS_retention]
+
+    - name: "Daemon-reload"
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: >-
+        session_store_service_unit.changed or
+        session_store_retention_service_unit.changed or
+        session_store_retention_timer_unit.changed
+      tags: [SS_service]
+
+    - name: "Enable + start pilot-session-store.service"
+      ansible.builtin.systemd:
+        name: pilot-session-store.service
+        enabled: true
+        state: started
+      tags: [SS_service]
+
+    - name: "Restart pilot-session-store.service if its unit/binary/config/secrets changed"
+      ansible.builtin.systemd:
+        name: pilot-session-store.service
+        state: restarted
+      when: >-
+        session_store_service_unit.changed or session_store_binary_copy.changed or
+        session_store_config_copy.changed
+      tags: [SS_service]
+
+    - name: "Enable + start pilot-session-store-retention.timer"
+      ansible.builtin.systemd:
+        name: pilot-session-store-retention.timer
+        enabled: true
+        state: started
+      tags: [SS_retention]
+
+    # SS02 (spec.md §28.1/§28.2): capability probe — a real TLS
+    # connection, trusting the FreeIPA integrated CA, must reach the
+    # ingest API (any response, even 404/401, proves TLS+listener are
+    # live; skipped under --check for the same reason every other apply
+    # playbook's own service-start tasks are).
+    - name: "Capability probe: ingest API answers over TLS (trusting the FreeIPA CA)"
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --silent
+          - --show-error
+          - --cacert
+          - /etc/ipa/ca.crt
+          - --max-time
+          - "5"
+          - --output
+          - /dev/null
+          - --write-out
+          - "%{http_code}"
+          - "https://{{ session_store_effective_fqdn }}:{{ pilot_session_store_ingest_port }}/v1/sessions/start"
+      register: session_store_ingest_probe
+      changed_when: false
+      retries: 5
+      delay: 2
+      until: session_store_ingest_probe.rc == 0
+      when: not ansible_check_mode
+      tags: [SS_service, SS02]
+
+    - name: "Gate: ingest API answered (any HTTP status — proves TLS handshake + listener are live)"
+      ansible.builtin.assert:
+        that:
+          - session_store_ingest_probe.stdout | int >= 400
+        fail_msg: >-
+          Ingest API at {{ session_store_effective_fqdn }}:{{ pilot_session_store_ingest_port }}
+          did not answer with an HTTP status (got: {{ session_store_ingest_probe.stdout }}).
+      when: not ansible_check_mode
+      tags: [SS_service, SS02]
+
+    # SS05 (spec.md §29): the read socket must exist as a genuine Unix
+    # socket at the expected path — proving the second listener came up
+    # too, independent of the ingest probe above.
+    - name: "Capability probe: read/replay socket exists"
+      ansible.builtin.stat:
+        path: "{{ pilot_session_store_read_socket_path }}"
+      register: session_store_read_socket_stat
+      when: not ansible_check_mode
+      tags: [SS_service, SS05]
+
+    - name: "Gate: read/replay socket is a genuine Unix socket"
+      ansible.builtin.assert:
+        that:
+          - session_store_read_socket_stat.stat.get('issock', false)
+        fail_msg: "{{ pilot_session_store_read_socket_path }} does not exist or is not a socket."
+      when: not ansible_check_mode
+      tags: [SS_service, SS05]

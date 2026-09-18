@@ -52,11 +52,24 @@ type Server struct {
 // fields — kept as a small value type here (not the config package's own
 // type, which internal/gatewayapi must not depend on) so a test can set
 // it directly without needing a whole Config/LoadConfig round trip.
+//
+// SessionStore* (docs/tmp/now/spec.md §28, Phase 8) are populated only
+// when this gateway is configured to ship recordings to
+// pilot-session-store; a Gateway using local-file recording (or
+// "metadata" mode, which never records terminal content at all) leaves
+// them empty. SessionStoreIngestToken is read once from
+// cmd/pilot-access-gateway/config.go's session_store_ingest_token_file
+// (never a CLI argument, never logged, matching spec.md §28.2) and held
+// only in memory — this Server never writes it to disk.
 type RecordingPolicy struct {
 	Mode            string
 	FailurePolicy   string
 	QueueEvents     int
 	FlushIntervalMS int64
+
+	SessionStoreURL         string
+	SessionStoreCAFile      string
+	SessionStoreIngestToken string
 }
 
 // NewServer builds a Server bound to one gateway's config, provider, and

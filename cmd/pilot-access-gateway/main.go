@@ -101,6 +101,15 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 		QueueEvents:     cfg.recordingQueueEvents(),
 		FlushIntervalMS: cfg.recordingFlushInterval().Milliseconds(),
 	}
+	if url := cfg.sessionStoreURL(); url != "" {
+		token, err := loadSessionStoreIngestToken(cfg.Gateway.Recording.SessionStoreIngestTokenFile)
+		if err != nil {
+			return fmt.Errorf("load session-store ingest token: %w", err)
+		}
+		srv.RecordingPolicy.SessionStoreURL = url
+		srv.RecordingPolicy.SessionStoreCAFile = cfg.sessionStoreCAFile()
+		srv.RecordingPolicy.SessionStoreIngestToken = token
+	}
 
 	ln, err := listener(cfg, systemdSocket)
 	if err != nil {

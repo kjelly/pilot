@@ -31,6 +31,7 @@ func TestLoaderLoadsFinalFixtureDirectoryInStableOrder(t *testing.T) {
 		"freeipa-realm-replacement", "freeipa-server-replica",
 		"freeipa-server", "host-monitoring", "internal-endpoint", "keycloak-db", "keycloak", "log-server",
 		"log-shipping", "ntp", "os-patch-sla", "pam-oidc-sshd", "pilot-access-directory", "pilot-access-gateway", "pilot-gateway-scope",
+		"pilot-session-store",
 		"prometheus", "restic-backup", "reverse-proxy", "seaweedfs-s3", "snmp-exporter", "thanos-query",
 		"wazuh-fim", "wazuh-manager",
 	}
