@@ -30,15 +30,16 @@ all:
 `
 
 // completenessValidVault is a filled-in (no CHANGE-ME) .vault/main.yaml
-// covering prometheus's thanos-s3 and node-exporter-auth vault sections —
-// the only vault sections this file's fixture inventory's roles
-// (prometheus, freeipa-nfs-server) imply — so tests exercising the
-// pre-existing host_vars/roster checks don't also trip the vault
-// completeness check added alongside them.
+// covering prometheus's thanos-s3, node-exporter-auth and
+// dcgm-exporter-auth vault sections — the only vault sections this file's
+// fixture inventory's roles (prometheus, freeipa-nfs-server) imply — so
+// tests exercising the pre-existing host_vars/roster checks don't also
+// trip the vault completeness check added alongside them.
 const completenessValidVault = `---
 thanos_aws_access_key_id: "AKIAEXAMPLE1234567"
 thanos_aws_secret_access_key: "s3cr3t-not-a-placeholder"
 node_exporter_basic_auth_password: "not-a-placeholder-either"
+dcgm_exporter_basic_auth_password: "not-a-placeholder-either-dcgm"
 `
 
 func writeCompletenessFixture(t *testing.T, hostVarsContent, rosterContent, vaultContent string) (dir, inv string) {
@@ -216,7 +217,7 @@ func TestValidateDeploymentCompleteness_ReportsMissingVaultFile(t *testing.T) {
 }
 
 func TestValidateDeploymentCompleteness_ReportsVaultChangeMePlaceholder(t *testing.T) {
-	staleVault := "---\nthanos_aws_access_key_id: \"CHANGE-ME-thanos-access-key\"\nthanos_aws_secret_access_key: \"real-secret\"\nnode_exporter_basic_auth_password: \"real-password\"\n"
+	staleVault := "---\nthanos_aws_access_key_id: \"CHANGE-ME-thanos-access-key\"\nthanos_aws_secret_access_key: \"real-secret\"\nnode_exporter_basic_auth_password: \"real-password\"\ndcgm_exporter_basic_auth_password: \"real-password-too\"\n"
 	_, inv := writeCompletenessFixture(t, "---\nprometheus_site_label: site-nexus\n", rosterWithNFSEntry, staleVault)
 
 	got, err := validateDeploymentCompleteness(context.Background(), inv)

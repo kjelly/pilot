@@ -1,0 +1,172 @@
+# Test-only fixture for docs/verification/prometheus.md C16-C19 (dcgm-exporter
+# auto-discovery). A plain KVM vm-target has no NVIDIA GPU, so the REAL
+# playbooks/apply/dcgm-exporter-apply.yml gracefully no-ops on it (see
+# docs/verification/dcgm-exporter.md §5 — "no GPU" is a documented, expected
+# skip, not a bug). This fixture stands in for a genuine dcgm-exporter
+# instance on a second VM: a plain nginx site serving a static Prometheus
+# text-exposition body (including a DCGM_FI_DEV_GPU_UTIL sample) behind HTTP
+# Basic Auth on :9400 — just enough for prometheus-apply.yml's own
+# auto-discovery/auth/render logic to be exercised end to end on a disposable
+# topology, per AGENTS.md §4.1 (fixtures live here, never in playbooks/apply/).
+#
+# Usage (this VM joined to the topology's `dcgm-exporter` inventory group):
+#
+#   go run ./cmd/pilot vm-target run --name <dcgm-fixture-vm> \
+#       playbooks/test/fixtures/dcgm-exporter-fake-metrics-fixtures.yml \
+#       -e dcgm_fixture_basic_auth_password=<SAME value as
+#          -e dcgm_exporter_basic_auth_password given to prometheus-apply.yml>
+#
+# Idempotent (changed=0 on rerun with the same password). Password is never
+# logged (no_log: true on every task that touches it) and must come from a
+# test vault / -e, never committed.
+- name: "Fixture: fake dcgm-exporter metrics endpoint (prometheus.md C16-C19 vm-target testing)"
+  hosts: "{{ target_group | default('dcgm-exporter') }}"
+  become: true
+  gather_facts: true
+  vars:
+    dcgm_fixture_port: 9400
+    dcgm_fixture_basic_auth_user: prometheus
+    # dcgm_fixture_basic_auth_password is DELIBERATELY NOT declared here —
+    # same undeclared-secret convention as prometheus-apply.yml's own
+    # thanos_aws_secret_access_key. Must be the SAME value passed to
+    # prometheus-apply.yml's dcgm_exporter_basic_auth_password.
+    dcgm_fixture_htpasswd_path: /etc/nginx/.dcgm-fixture-htpasswd
+    dcgm_fixture_metrics_path: /var/www/dcgm-fixture/metrics.txt
+    dcgm_fixture_site_path: /etc/nginx/sites-available/dcgm-fixture
+  tasks:
+    - name: "Gate: dcgm_fixture_basic_auth_password required"
+      ansible.builtin.assert:
+        that:
+          - dcgm_fixture_basic_auth_password is defined
+          - dcgm_fixture_basic_auth_password | length > 0
+        fail_msg: >-
+          dcgm_fixture_basic_auth_password is required (must match the SAME
+          value given to prometheus-apply.yml's dcgm_exporter_basic_auth_password).
+
+    - name: "Install nginx and apache2-utils"
+      ansible.builtin.apt:
+        name: [nginx, apache2-utils]
+        state: present
+        update_cache: true
+
+    - name: "Ensure the fake metrics document root exists"
+      ansible.builtin.file:
+        path: "{{ dcgm_fixture_metrics_path | dirname }}"
+        state: directory
+        mode: "0755"
+
+    # Mimics the real dcgm-exporter text-exposition body closely enough for
+    # Prometheus's scrape/parse path (spec.md C16-C19): one sample per
+    # metric name, correct HELP/TYPE preamble, a realistic label set. The
+    # actual numeric value is arbitrary — only its presence/label shape is
+    # asserted by the spec.
+    - name: "Render the fake metrics body"
+      ansible.builtin.copy:
+        dest: "{{ dcgm_fixture_metrics_path }}"
+        mode: "0644"
+        content: |
+          # HELP DCGM_FI_DEV_GPU_UTIL GPU utilization (in %).
+          # TYPE DCGM_FI_DEV_GPU_UTIL gauge
+          DCGM_FI_DEV_GPU_UTIL{gpu="0",UUID="GPU-0",device="nvidia0",modelName="Fixture-GPU",Hostname="{{ inventory_hostname }}"} 42
+      register: dcgm_fixture_metrics_result
+
+    # htpasswd's MD5-crypt hashing is non-deterministic (random salt per
+    # call), so re-hashing the same password on every run would rewrite the
+    # credential file (and thrash the nginx reload below) even when nothing
+    # changed. Track a fingerprint of the plaintext instead and only touch
+    # the hash/file when it actually changes — same convention as
+    # dcgm-exporter-apply.yml's own Step 5/6/7 (real production playbook).
+    - name: "Compute a change-detection fingerprint for the Basic Auth credential"
+      ansible.builtin.set_fact:
+        dcgm_fixture_basic_auth_fingerprint: "{{ (dcgm_fixture_basic_auth_user ~ ':' ~ dcgm_fixture_basic_auth_password) | hash('sha256') }}"
+      no_log: true
+
+    - name: "Read the previously stored fingerprint, if any"
+      ansible.builtin.slurp:
+        src: "{{ dcgm_fixture_htpasswd_path | dirname }}/.dcgm-fixture-basic-auth.fingerprint"
+      register: dcgm_fixture_stored_fingerprint_raw
+      failed_when: false
+      no_log: true
+
+    - name: "Determine whether the Basic Auth credential changed"
+      ansible.builtin.set_fact:
+        dcgm_fixture_basic_auth_changed: >-
+          {{ (dcgm_fixture_stored_fingerprint_raw.content is not defined) or
+             ((dcgm_fixture_stored_fingerprint_raw.content | b64decode) != dcgm_fixture_basic_auth_fingerprint) }}
+      no_log: true
+
+    # apr1-MD5 (not bcrypt): nginx's ngx_http_auth_basic_module validates
+    # this format natively without depending on the host libc's crypt()
+    # supporting bcrypt — avoids the class of portability doubt that
+    # justified dcgm-exporter-apply.yml picking bcrypt for exporter-toolkit
+    # specifically (a different consumer, Go's own bcrypt library).
+    - name: "Compute the htpasswd line (apr1-MD5; only when the credential changed)"
+      ansible.builtin.command: "htpasswd -nbm {{ dcgm_fixture_basic_auth_user }} {{ dcgm_fixture_basic_auth_password }}"
+      register: dcgm_fixture_htpasswd_result
+      changed_when: false
+      no_log: true
+      when: dcgm_fixture_basic_auth_changed
+
+    # mode 0644 (not 0640): the nginx worker process runs as www-data, which
+    # has no read access to a root:root 0640 file — verified broken against
+    # a real vm-target run ("open() ... failed (13: Permission denied)").
+    # This is the same 0644-for-a-non-root-reading-process tradeoff already
+    # used elsewhere in this repo (e.g. prometheus-apply.yml's node-exporter
+    # password file) — content here is a salted MD5-crypt hash, not the
+    # plaintext password, so world-readable is an acceptable trade for this
+    # test-only fixture.
+    - name: "Write the Basic Auth credential file (only when the credential changed)"
+      ansible.builtin.copy:
+        dest: "{{ dcgm_fixture_htpasswd_path }}"
+        content: "{{ dcgm_fixture_htpasswd_result.stdout }}\n"
+        mode: "0644"
+      when: dcgm_fixture_basic_auth_changed
+      no_log: true
+      register: dcgm_fixture_htpasswd_file_result
+
+    - name: "Persist the Basic Auth fingerprint for future idempotency checks"
+      ansible.builtin.copy:
+        dest: "{{ dcgm_fixture_htpasswd_path | dirname }}/.dcgm-fixture-basic-auth.fingerprint"
+        content: "{{ dcgm_fixture_basic_auth_fingerprint }}"
+        mode: "0600"
+      when: dcgm_fixture_basic_auth_changed
+
+    - name: "Render the nginx site serving :9400/metrics behind Basic Auth"
+      ansible.builtin.copy:
+        dest: "{{ dcgm_fixture_site_path }}"
+        mode: "0644"
+        content: |
+          server {
+              listen {{ dcgm_fixture_port }};
+              location = /metrics {
+                  default_type "text/plain; version=0.0.4; charset=utf-8";
+                  auth_basic "dcgm-exporter fixture";
+                  auth_basic_user_file {{ dcgm_fixture_htpasswd_path }};
+                  alias {{ dcgm_fixture_metrics_path }};
+              }
+          }
+      register: dcgm_fixture_site_result
+
+    - name: "Enable the dcgm-fixture nginx site"
+      ansible.builtin.file:
+        src: "{{ dcgm_fixture_site_path }}"
+        dest: "/etc/nginx/sites-enabled/dcgm-fixture"
+        state: link
+      register: dcgm_fixture_site_enabled
+
+    - name: "Reload nginx when the fixture site/htpasswd/metrics body changed"
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
+        enabled: true
+      when: >-
+        dcgm_fixture_metrics_result is changed
+        or dcgm_fixture_htpasswd_file_result is changed
+        or dcgm_fixture_site_result is changed
+        or dcgm_fixture_site_enabled is changed
+
+    - name: "Ensure nginx is running"
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: true

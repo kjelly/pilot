@@ -1530,6 +1530,70 @@ esac
 	}
 }
 
+// An optional (Required: false) providerEndpoint dependency — e.g.
+// dcgm-exporter -> prometheus or host-monitoring -> prometheus, both
+// "genuinely optional forever" contracts (see contracts/prometheus.yaml) —
+// must NOT be auto-expanded into scope/hosts by resolveDeploymentScope,
+// unlike the Required: true case covered above. The actual auto-discovery
+// contract those two components rely on ("reconcile pulls in every
+// matching host") is implemented entirely inside the apply playbook's own
+// Ansible-runtime `groups.get(...)` lookup against the FULL rendered
+// inventory (unaffected by --limit) — not by this Go-level dependency
+// expansion, which addDependencies deliberately skips for any
+// !dependency.Required edge. This test locks that skip so a future change
+// can't silently start auto-expanding optional providers into every
+// targeted deploy's preflight/host set.
+func TestResolveDeploymentScope_OptionalProviderEndpointNotAutoIncluded(t *testing.T) {
+	catalog, err := contract.NewCatalog([]contract.Contract{
+		{ID: "consumer", Role: "consumer", Dependencies: []contract.Dependency{{Component: "provider", Required: false, Relation: "providerEndpoint"}}},
+		{ID: "provider", Role: "provider"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	invJSON := `{"_meta":{"hostvars":{"consumer-a":{},"provider-a":{}}},"consumer":{"hosts":["consumer-a"]},"provider":{"hosts":["provider-a"]}}`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '"+invJSON+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ansibleFixture := `#!/bin/sh
+case "$1" in
+  consumer)
+    printf '%s\n' '  hosts (1):' '    consumer-a'
+    ;;
+  *)
+    echo "unexpected pattern: $1" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	applied, selected, scope, hosts, expanded, err := resolveDeploymentScope(context.Background(), catalog, []string{"consumer"}, "fake-inventory.yml", "consumer-a", nil, false)
+	if err != nil {
+		t.Fatalf("resolveDeploymentScope() error = %v", err)
+	}
+	if got := contractIDs(applied); !slices.Equal(got, []string{"consumer"}) {
+		t.Fatalf("applied = %v, want [consumer]", got)
+	}
+	if got := contractIDs(selected); !slices.Equal(got, []string{"consumer"}) {
+		t.Fatalf("selected = %v, want [consumer] — an optional providerEndpoint dependency must not be auto-added", got)
+	}
+	if _, ok := scope.HostsByRole["provider"]; ok {
+		t.Fatalf("scope.HostsByRole[\"provider\"] = %v, want absent — optional dependency's role must not be resolved", scope.HostsByRole["provider"])
+	}
+	if !slices.Equal(hosts, []string{"consumer-a"}) {
+		t.Fatalf("hosts = %v, want [consumer-a] only", hosts)
+	}
+	if expanded {
+		t.Fatal("dependencyExpandedLimit = true, want false — nothing outside --limit should be pulled in for an optional dependency")
+	}
+}
+
 // A sameHosts dependency is a local prerequisite, not a remote provider. It
 // must preserve the operator's --limit, otherwise a targeted deployment of a
 // component such as alertmanager would add every Docker host to contract

@@ -140,7 +140,7 @@ var vaultSections = map[string]vaultSection{
 	},
 	"dcgm-exporter-auth": {
 		Title: "dcgm-exporter Basic Auth 相關",
-		Note:  "dcgm-exporter 自己的 HTTP Basic Auth 密碼；跟 node_exporter 的密碼是獨立的一組，不需要相同。",
+		Note:  "dcgm-exporter 與 prometheus 共用的 HTTP Basic Auth 密碼——兩邊必須是同一個值，否則 prometheus 端的 scrape 會被 401 擋下；跟 node_exporter 的密碼是獨立的一組，不需要相同。",
 		Keys: []vaultField{
 			{
 				Name:    "dcgm_exporter_basic_auth_password",

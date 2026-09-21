@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.0
+> 版本：v1.4
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -47,6 +47,9 @@
 | `node_exporter_targets` | 要 scrape 的 node_exporter target 清單（`host:port` 字串陣列）；留空時自動展開這份 inventory 的 `host-monitoring` group（見 `docs/verification/host-monitoring.md`）所有主機的 9100 port | 否 | 空陣列（自動偵測） |
 | `node_exporter_basic_auth_user` | 抓 node_exporter 用的 HTTP Basic Auth 使用者名稱（非機密） | 否 | `prometheus` |
 | `node_exporter_basic_auth_password` | 抓 node_exporter 用的 HTTP Basic Auth 密碼；**必須跟 `host-monitoring.md` 的 `node_exporter_basic_auth_password` 用同一個值**，否則會被 401 擋下，`up{job="node"}` 永遠是 0（見下方 escape hatch） | 僅在有 node-exporter target 時必填 | 無 |
+| `dcgm_exporter_targets` | 要 scrape 的 dcgm-exporter target 清單（`host:port` 字串陣列）；留空時自動展開這份 inventory 的 `dcgm-exporter` group（見 `docs/verification/dcgm-exporter.md`）所有主機的 9400 port | 否 | 空陣列（自動偵測） |
+| `dcgm_exporter_basic_auth_user` | 抓 dcgm-exporter 用的 HTTP Basic Auth 使用者名稱（非機密） | 否 | `prometheus` |
+| `dcgm_exporter_basic_auth_password` | 抓 dcgm-exporter 用的 HTTP Basic Auth 密碼；**必須跟 `dcgm-exporter.md` 的 `dcgm_exporter_basic_auth_password` 用同一個值**，否則會被 401 擋下，`up{job="dcgm"}` 永遠是 0（見下方 escape hatch）；跟 `node_exporter_basic_auth_password` 是獨立的一組，不需要相同 | 僅在有 dcgm-exporter target 時必填 | 無 |
 
 > **為何 `prometheus_site_label` 是必填、跟 `wazuh_manager_host` 不一樣**：
 > `wazuh_manager_host`/`siem_forward_host` 空著時還有「純本機」意義（本機
@@ -86,6 +89,24 @@
 > 只擋『用不到』的情況，用得到就不准漏填」設計。這組密碼**必須**跟
 > `host-monitoring.md` 那邊用同一個值，操作者責任，跟 `thanos_s3_bucket`
 > 兩邊要填同一個值是同一種契約。
+>
+> **`dcgm_exporter_targets` 自動偵測、`dcgm_exporter_basic_auth_*` 有條件必填**：
+> 跟 `node_exporter_targets` 完全同一種模式——自動從 inventory 的
+> `dcgm-exporter` group 展開所有主機（見 `dcgm-exporter.md`），只有明確要
+> override 成別的清單時才需要帶 `dcgm_exporter_targets`；只要展開出來的
+> target 清單非空，apply playbook 就會在任何 mutation 前 gate 檢查
+> `dcgm_exporter_basic_auth_user`/`password` 是否都有值，這組密碼**必須**跟
+> `dcgm-exporter.md` 那邊用同一個值。跟 node-exporter 的密碼是完全獨立的
+> 一組（不需要相同、不會互相 fallback）。「自動偵測」採 declarative
+> desired-state 語意：被指派 `dcgm-exporter` role 的主機就是應被 scrape 的
+> 主機，不是在套用時臨時掃 port——`dcgm-exporter` group 可以混編沒有 GPU
+> 的候選主機，這些主機的 target 會長期呈現 `up=0`（不是 bug，見 §5）；
+> 若不希望 scrape 這些候選主機，用 `dcgm_exporter_targets` explicit override
+> 縮小清單，不要指望本 spec 用瞬時 port probe 隱藏它們。由 Kubernetes GPU
+> Operator（或其他機制）自行管理 `:9400` 的主機，只有在它也遵守相同 Basic
+> Auth contract 時才適合掛進這個自動 job；否則應改走
+> `docs/verification/prometheus-external-targets.md` 的 external monitoring
+> profile，避免誤用共用密碼。
 
 ## 2. Checklist
 
@@ -105,7 +126,11 @@
 | C12 | http          | Prometheus 已載入 rules（`/api/v1/rules` 回含 `"name":` 的 group/rules 列表） | 0 | sh -c 'curl -fsS http://127.0.0.1:9090/api/v1/rules | grep -q "\"name\":"' |
 | C13 | config        | `prometheus.yml` 含自動探索到的 node-exporter scrape job（僅在 inventory 有 `host-monitoring` 主機、或明確帶 `node_exporter_targets` 時 render） | 0 | sh -c 'grep -qE "^[[:space:]]*job_name:[[:space:]]*node$" /etc/pilot/prometheus/prometheus.yml' |
 | C14 | metrics       | 至少一個 node-exporter target 被成功（認證通過）scrape（`up{job="node"}==1`；僅在有 node-exporter target 時適用） | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22node%22%7D' | grep -o '"value":\[[0-9.]*,"1"\]' |
-| C15 | config        | `prometheus.yml` 的 node-exporter scrape job 帶 `pilot_host` label（僅在 auto-discovery 情境下 render；明確帶 `node_exporter_targets` override 時沒有此 label，見 §5） | 0 | sh -c 'grep -qE "^[[:space:]]*pilot_host:" /etc/pilot/prometheus/prometheus.yml' |
+| C15 | config        | `prometheus.yml` 的 node-exporter scrape job 帶 `pilot_host` label（僅在 auto-discovery 情境下 render；明確帶 `node_exporter_targets` override 時沒有此 label，見 §5） | 0 | awk '/^- /{if (sec ~ /job_name: node/ && sec ~ /pilot_host:/) f=1; sec=$0 ORS; next} {sec=sec $0 ORS} END{if (sec ~ /job_name: node/ && sec ~ /pilot_host:/) f=1; print (f?0:1)}' /etc/pilot/prometheus/prometheus.yml |
+| C16 | config        | `prometheus.yml` 含自動探索到的 dcgm-exporter scrape job（僅在 inventory 有 `dcgm-exporter` 主機、或明確帶 `dcgm_exporter_targets` 時 render） | 0 | sh -c 'grep -qE "^[[:space:]]*job_name:[[:space:]]*dcgm$" /etc/pilot/prometheus/prometheus.yml' |
+| C17 | metrics       | 至少一個 dcgm-exporter target 被成功（認證通過）scrape（`up{job="dcgm"}==1`；僅在有 dcgm-exporter target 時適用） | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22dcgm%22%7D' | grep -o '"value":\[[0-9.]*,"1"\]' |
+| C18 | config        | `prometheus.yml` 的 dcgm-exporter scrape job 帶 `pilot_host` label（僅在 auto-discovery 情境下 render；明確帶 `dcgm_exporter_targets` override 時沒有此 label，見 §5） | 0 | awk '/^- /{if (sec ~ /job_name: dcgm/ && sec ~ /pilot_host:/) f=1; sec=$0 ORS; next} {sec=sec $0 ORS} END{if (sec ~ /job_name: dcgm/ && sec ~ /pilot_host:/) f=1; print (f?0:1)}' /etc/pilot/prometheus/prometheus.yml |
+| C19 | metrics       | 收到真正的 GPU 硬體指標，不只是 exporter 自身存活（`DCGM_FI_DEV_GPU_UTIL{job="dcgm"}` 至少一筆 sample；僅在有 dcgm-exporter target 時適用） | present | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=DCGM_FI_DEV_GPU_UTIL%7Bjob%3D%22dcgm%22%7D' | grep -o '"metric"' |
 
 > C7 只驗證「Prometheus 有沒有成功 scrape 到至少一個 target」，不綁定
 > 特定 job 名稱字面值以外的東西——`up` 查詢不加 label matcher，因為
@@ -136,16 +161,41 @@
 > override 時沒有這個 label（沒有 hostname 映射可用，見 §9.3），所以本行跟
 > C13/C14 一樣需要 escape hatch，但條件更窄——即使 `host-monitoring` 有主機，
 > 只要當次套用帶了 `node_exporter_targets` override，本行也預期 fail。
+> C15 與 C18 的 Command 用 `awk` 把 `pilot_host:` 的比對限定在各自
+> `job_name: node`/`job_name: dcgm` 那個 list item 的範圍內，而不是對整份
+> `prometheus.yml` 做無範圍的 `grep pilot_host:`——2026-09-21 對 vm-target
+> 實測發現：兩個 job 都會 render `pilot_host` label 時（node 沒有 target、
+> dcgm 有 target 的情境），無範圍 grep 版本的 C15 會被 dcgm job 的
+> `pilot_host` 行誤判成 PASS，即使 node-exporter 那段根本沒 render 出來。
+> 已改成範圍限定版本，兩者互不干擾，實測對「只有其中一個 job 有 target」的
+> 情境驗證過正確 PASS/FAIL。
+> C16–C19 是 dcgm-exporter 的自動 GPU scrape 整合（見 `dcgm-exporter.md` §5），
+> 跟 C13–C15 是同一套 escape hatch/驗證邏輯，只是 job 名稱換成 `dcgm`、
+> port 換成 9400：
+> C16 一樣刻意不錨 `^-\s*job_name:`（同 C13 的 `to_nice_yaml` key 字母序理由）。
+> C17 一樣對 `{`/`}` 做 percent-encoding（同 C14 的 curl globbing 理由），且
+> 同時是「`dcgm_exporter_basic_auth_*` 帶對了」的間接證明——帶錯會被 401
+> 擋下，`up{job="dcgm"}` 永遠是 0。
+> C18 跟 C15 一樣驗證 pilot Detection Engine 的 canonical subject identity
+> 前提，auto-discovery 情境下每個 host 各自帶 `labels.pilot_host`；explicit
+> override 沒有這個 label。
+> C19 驗證的是「認證後真的抓到 GPU 硬體本身的指標」，不是只抓到
+> dcgm-exporter process 自己還活著（那件事已經被 C17 的 `up==1` 間接證明）——
+> `DCGM_FI_DEV_GPU_UTIL` 是 `dcgm-exporter.md` 故意排除在自己 spec 外的
+> 端到端證明（見該檔 §2 C6/C9 註解），改由本行補上；只在有真實 GPU 的主機
+> 才會有非零 series，`dcgm-exporter` group 混編非 GPU 候選主機時，那些主機
+> 的 target 只會停在 `up=0`、抓不到任何 series，不影響本行判定（本行只要求
+> group 裡「至少一筆」）。
 
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
-- 預期 row 數：15
+- 預期 row 數：19
 
 ## 4. PASS / FAIL 規則
 
-- C1–C15 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路、node-exporter scrape 鏈路、pilot_host canonical identity 都通
+- C1–C19 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路、node-exporter/dcgm-exporter scrape 鏈路、pilot_host canonical identity 都通
 - 任一 fail → **FAIL**，常見修法：
   - C1/C2 fail → container 沒起；`docker ps -a` / `docker logs pilot-prometheus` / `docker logs pilot-thanos-sidecar`
   - C3/C4 fail → Prometheus 還沒 ready 或設定檔有誤；`docker logs pilot-prometheus`
@@ -161,6 +211,13 @@
     `node_exporter_basic_auth_user`/`password` 跟 `host-monitoring.md` 那邊不一致
     （401）——`docker logs pilot-prometheus | grep -i node` 看 scrape 錯誤訊息
   - C15 fail → 預期 fail 見 §5（inventory 沒有 `host-monitoring` 主機，或本次套用帶了 `node_exporter_targets` override）；若非預期，檢查 `prometheus-apply.yml` 的 auto-discovery 迴圈是否真的走到（`groups['host-monitoring']` 非空且未 override）
+  - C16/C17 fail → 預期 fail 見 §5（inventory 沒有 `dcgm-exporter` 主機）；若非預期，C16 fail 檢查
+    `groups['dcgm-exporter']` 是否真的有機器，C17 fail（但 C16 pass）通常是
+    `dcgm_exporter_basic_auth_user`/`password` 跟 `dcgm-exporter.md` 那邊不一致
+    （401），或該主機沒有真實 GPU（`dcgm-exporter.md` C1–C9 本身就 fail，見該檔 §5）
+    ——`docker logs pilot-prometheus | grep -i dcgm` 看 scrape 錯誤訊息
+  - C18 fail → 預期 fail 見 §5（inventory 沒有 `dcgm-exporter` 主機，或本次套用帶了 `dcgm_exporter_targets` override）；若非預期，檢查 auto-discovery 迴圈是否真的走到（`groups['dcgm-exporter']` 非空且未 override）
+  - C19 fail（但 C17 pass）→ 該 target 是真的容器活著但沒有真實 GPU 裝置傳進去；檢查 `dcgm-exporter.md` C6（GPU 裝置真的傳進容器）是否 pass
 
 ## 5. 例外與已知偏差
 
@@ -170,6 +227,9 @@
 | C11 | `alertmanager_target_host` 未填或中央 Alertmanager 尚未套用完成時，本行預期 fail（apply playbook 不會 render `alerting.alertmanagers` 區塊） | Alertmanager 尚未部署的環境 | 直到 `alertmanager.md` PASS 為止 |
 | C13, C14 | inventory 沒有 `host-monitoring` group 主機、且未明確帶 `node_exporter_targets` 時，這兩行預期 fail（apply playbook 不會 render node-exporter scrape job） | 尚未部署 `host-monitoring` 的環境 | 直到至少一台 `host-monitoring.md` PASS 為止 |
 | C15 | 同上，或本次套用明確帶了 `node_exporter_targets` override（該情況下 C13/C14 仍可能 PASS，但 C15 預期 fail——explicit override 沒有 inventory hostname 映射，見 §9.3） | 尚未部署 `host-monitoring` 的環境，或使用 `node_exporter_targets` override 的環境 | 直到 auto-discovery 情境下至少一台 `host-monitoring.md` PASS 為止 |
+| C16, C17 | inventory 沒有 `dcgm-exporter` group 主機、且未明確帶 `dcgm_exporter_targets` 時，這兩行預期 fail（apply playbook 不會 render dcgm-exporter scrape job）；`dcgm-exporter` group 若混編沒有真實 GPU 的候選主機，那些主機的 target 會長期呈現 `up=0`，這也是預期行為（desired-state 語意，不做瞬時 port probe 排除，見 §1.5） | 尚未部署 `dcgm-exporter` 的環境，或 `dcgm-exporter` group 混編非 GPU 候選主機 | 無（後者是常態設計，不會解除；前者直到至少一台 `dcgm-exporter.md` PASS 為止） |
+| C18 | 同 C16/C17，或本次套用明確帶了 `dcgm_exporter_targets` override（該情況下 C16/C17 仍可能 PASS，但 C18 預期 fail——explicit override 沒有 inventory hostname 映射） | 尚未部署 `dcgm-exporter` 的環境，或使用 `dcgm_exporter_targets` override 的環境 | 直到 auto-discovery 情境下至少一台 `dcgm-exporter.md` PASS 為止 |
+| C19 | 同 C16/C17 的前提；另外即使 C17 PASS（exporter process 活著、認證通過），若該主機實際沒有 GPU 裝置傳進容器（`dcgm-exporter.md` C6 fail 的情境），本行預期 fail——`up==1` 不保證有真實 GPU series | 尚未部署 `dcgm-exporter` 的環境，或 exporter 容器沒有真實 GPU 裝置的環境 | 直到至少一台真實 GPU 主機的 `dcgm-exporter.md` C1–C9 全數 PASS 為止 |
 
 ## 6. 變更紀錄
 
@@ -179,3 +239,4 @@
 | 2026-07-07 | v1.1 | 新增 C10–C12：seed alert rules + alerting.alertmanagers 區塊（escape hatch 跟 `alertmanager_target_host` 連動） | sre |
 | 2026-08-10 | v1.2 | 新增 C13–C14：自動從 inventory 的 `host-monitoring` group 展開 node-exporter scrape target（`node_exporter_targets`，escape hatch 跟 `alertmanager_target_host` 同一種模式），並對認證後成功 scrape 做端到端驗證（node_exporter 強制 Basic Auth，見 `host-monitoring.md` v1.1） | sre |
 | 2026-08-28 | v1.3 | 新增 C15：Detection Engine Stage A-0（見 `docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §9）需要 canonical `pilot_host` producer——auto-discovery 從 `host-monitoring` group 展開時，每個 host 改成各自一個 `static_configs` 項目並帶 `labels.pilot_host = inventory_hostname`；`node_exporter_targets` explicit override 行為不變（無 label） | sre |
+| 2026-09-21 | v1.4 | 新增 C16–C19：自動從 inventory 的 `dcgm-exporter` group 展開 GPU metrics scrape target（`dcgm_exporter_targets`，跟 `node_exporter_targets`/C13–C15 同一套 auto-discovery/escape-hatch/`pilot_host` label 模式，固定 job 名稱 `dcgm`、port 9400），並對認證後成功 scrape 到真實 GPU 硬體指標（`DCGM_FI_DEV_GPU_UTIL`，不只是 exporter 存活）做端到端驗證；補上 `dcgm-exporter.md` §5 原先列為已知留白的 Prometheus 整合。對 disposable vm-target（假 dcgm-exporter fixture）實跑 apply + `pilot verify` 全通過（C9/C11/C13/C14 因該次測試環境沒有 seaweedfs-s3/alertmanager/host-monitoring 而預期 fail，C1–C8/C10/C12/C15–C19 全 PASS）；同時修正 C15 的 Command——舊版對整份 `prometheus.yml` 做無範圍 `grep pilot_host:`，實測發現 dcgm job 有 target、node job 沒有 target時會被 dcgm 那行 label 誤判成 PASS，已改成 `awk` 範圍限定到各自 `job_name:` 區塊，C18 新增時直接採用限定版寫法 | pilot |

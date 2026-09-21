@@ -225,6 +225,8 @@ var specTagMap = []specTagMapping{
 	{spec: "prometheus.md", playbook: "prometheus-apply.yml",
 		exemptRows: map[string]string{
 			"C14": "up{job=\"node\"}==1 probe — verify-only outcome of the node-exporter scrape job rendered for C13 actually authenticating and succeeding",
+			"C17": "up{job=\"dcgm\"}==1 probe — verify-only outcome of the dcgm-exporter scrape job rendered for C16 actually authenticating and succeeding",
+			"C19": "DCGM_FI_DEV_GPU_UTIL sample probe — verify-only outcome of C17's scrape actually reaching a host with a real GPU device (dcgm-exporter.md C6), not a dedicated apply task",
 		}},
 	{spec: "prometheus-external-targets.md", playbook: "prometheus-apply.yml",
 		prefixes: []string{"ext-target"},

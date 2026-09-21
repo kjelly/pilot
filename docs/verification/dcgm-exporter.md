@@ -1,6 +1,6 @@
 # Verification Spec — dcgm-exporter（被監控主機的 GPU 監控 agent：NVIDIA DCGM Exporter）
 
-> 版本：v1.0
+> 版本：v1.1
 > 對齊規範：pilot 通用「每台受管主機都裝一份」agent 規範，跟
 > `host-monitoring.md`/`wazuh-fim.md`/`audit-log-forwarding.md` 同一類 Shape
 > （cross-cutting agent role，可疊加到任何既有主機上，不擁有專屬 role 之外
@@ -45,7 +45,7 @@
 | `dcgm_exporter_version` | 固定安裝的官方 Docker image tag（`nvidia/dcgm-exporter` on Docker Hub） | 否 | `3.3.9-3.6.1-ubuntu22.04` |
 | `dcgm_exporter_port` | exporter 監聽的 port（容器內外一致，`-p` 直通） | 否 | `9400` |
 | `dcgm_exporter_basic_auth_user` | HTTP Basic Auth 使用者名稱（非機密） | 否 | `prometheus` |
-| `dcgm_exporter_basic_auth_password` | HTTP Basic Auth 密碼；日後接上 `prometheus.md` 的 GPU scrape 設定時，兩邊必須用同一個值，否則 Prometheus 端會被 401 擋下（見本檔 §5 已知留白） | 是 | 無（空值會被 gate 擋下） |
+| `dcgm_exporter_basic_auth_password` | HTTP Basic Auth 密碼；接上 `prometheus.md` C16–C19 的 GPU scrape 設定時，兩邊必須用同一個值，否則 Prometheus 端會被 401 擋下 | 是 | 無（空值會被 gate 擋下） |
 
 > **為何用官方 Docker image，不像 `host-monitoring.md` 那樣走 pinned
 > release binary**：`dcgm-exporter` 本身要連結 DCGM 共用函式庫（`libdcgm.so`）
@@ -117,8 +117,8 @@
 > **含認證資料的內容驗證（「認證後真的能抓到 `DCGM_FI_DEV_GPU_UTIL`」）刻意
 > 不放進這份 spec**：跟 `host-monitoring.md` 同樣理由——spec 的
 > Command/Expected 是所有部署共用的固定字串，沒有地方能安全內插每個站台不同
-> 的密碼（AGENTS.md 禁止 spec 出現密碼）。這條端到端證明改由未來
-> `prometheus.md` 對應的 GPU scrape job 檢查完成（見 §5 已知留白）。
+> 的密碼（AGENTS.md 禁止 spec 出現密碼）。這條端到端證明由
+> `prometheus.md` C16–C19 對應的 GPU scrape job 檢查完成。
 
 ## 3. 證據收集
 
@@ -155,12 +155,13 @@
 | C1, C3–C6, C8, C9 | 當 `dcgm_exporter_port` 已被非本 playbook 管理的程式佔用（常見於 Kubernetes NVIDIA GPU Operator 已部署自己的 `dcgm-exporter` DaemonSet），apply 會整段跳過原生安裝；C7（port 監聽）通常仍會 pass（有別的東西在 serve），C8 視現有 exporter 是否有自己的認證機制而定 | 由 Kubernetes GPU Operator（或任何其他機制）自行管理 dcgm-exporter 的主機 | 不會解除——這種主機的健康狀態改由該機制自己的健康檢查負責 |
 | — | 只驗證過 `x86_64`；`arm64`（如 NVIDIA Jetson）需要不同的 image tag 後綴，目前 pre_tasks gate 直接 fail 非 x86_64 架構 | 非 x86_64 主機 | 需要時在 apply playbook 補上 arm64 對應的 image tag 與架構分支 |
 | — | 預設不給 `SYS_ADMIN` 且維持 Docker 預設 seccomp，以最小權限執行；但 `nvidia-smi -L` 偵測到**已建立的 MIG instance** 時，DCGM 3.6.1 的 CacheManager 否則會以 `Error: -17` 退出，playbook 因此只對該情境加入 `SYS_ADMIN` 與 `seccomp=unconfined`。這是 MIG 初始化相容性例外，不是為了開啟 DCP profiling。 | 有 active MIG instance 的 GPU 主機 | 未來 DCGM/NVIDIA 修正此相容性問題時，重新實測後再評估移除例外；非 MIG 主機始終維持最小權限。 |
-| — | 這份 spec 只驗證 exporter 本身；把 `dcgm-exporter` group 接進 `prometheus.md` 的 scrape 設定（比照 `host-monitoring.md` 的 `node_exporter_targets` 自動展開）尚未實作，屬已知留白 | 全部部署 | 待實作：`prometheus.md` 新增對應的 GPU scrape job |
+| — | 這份 spec 只驗證 exporter 本身；`dcgm-exporter` group 已接進 `prometheus.md` 的 scrape 設定（比照 `host-monitoring.md` 的 `node_exporter_targets` 自動展開，見該檔 C16–C19 與 §1.5），consumer 端 E2E 驗收（認證後成功 scrape、收到真實 `DCGM_FI_DEV_GPU_UTIL`）由 `prometheus.md` 負責，兩份 spec 職責分離 | 全部部署 | 無（已實作，責任分離是刻意設計） |
 
 ## 6. 變更紀錄
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
 | 2026-08-25 | v1.0 | C2 改驗證 running dockerd 的 `docker info` runtime list；dt-dev 證實 `daemon.json` 有 `nvidia`、但 service 尚未載入而建立容器失敗。apply 會在設定變更**或**有效 runtime 缺少時重啟 Docker，並於重啟後 assert。 | pilot |
+| 2026-09-21 | v1.1 | 關閉 §5 已知留白：`prometheus.md` C16–C19 已把 `dcgm-exporter` group 接進 Prometheus 的自動 GPU scrape，本檔無需改動（純文件指標更新），只更新 §1.5/§2/§5 對 Prometheus 整合狀態的描述 | pilot |
 | 2026-08-25 | v1.0 | MIG 相容性修正：真實 RTX PRO 6000 Blackwell MIG host 實測，原本最小權限容器以 `CacheManager Init Failed. Error: -17` 退出、9400 connection refused；僅在 `nvidia-smi -L` 回報 MIG instance 時加入 `SYS_ADMIN` + `seccomp=unconfined` 後 DCGM 初始化成功且未認證 `/metrics` 回 401。 | pilot |
 | 2026-08-24 | v1.0 | 初版：`dcgm-exporter` 官方 Docker image + NVIDIA Container Toolkit + 強制 HTTP Basic Auth；GPU 自動偵測（無 GPU 優雅跳過）；Kubernetes GPU Operator 自動偵測（DaemonSet 已管理時跳過原生安裝）。真實 GPU 主機（Ubuntu 24.04 + NVIDIA RTX PRO 6000 Blackwell）`pilot verify` 實測跑過；C1/C4/C5 因 Docker Go template `{{...}}` 撞上 ansible ad-hoc 的 Jinja finalization（跟 `dashboard.md` C14 同一個坑）改用純文字輸出寫法 | sre |

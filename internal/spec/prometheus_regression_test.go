@@ -36,6 +36,17 @@ import (
 //	       label (Detection Engine spec §9 canonical subject identity;
 //	       auto-discovery only — an explicit node_exporter_targets override
 //	       has no inventory-hostname mapping and renders no label)
+//	C16    prometheus.yml contains the auto-discovered dcgm-exporter (GPU)
+//	       scrape job (only when the dcgm-exporter group has hosts, or
+//	       dcgm_exporter_targets was set explicitly — same escape hatch
+//	       pattern as C13)
+//	C17    at least one dcgm-exporter target was successfully (and
+//	       authenticated) scraped (up{job="dcgm"}==1) — same pattern as C14
+//	C18    prometheus.yml's dcgm-exporter scrape job carries a pilot_host
+//	       label (auto-discovery only — same pattern as C15)
+//	C19    at least one real GPU hardware metric (DCGM_FI_DEV_GPU_UTIL) was
+//	       actually scraped — proves C17's up==1 reflects a host with a real
+//	       GPU device, not just a live-but-GPU-less exporter process
 //
 // Cross-row invariants locked below:
 //
@@ -80,7 +91,7 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -224,9 +235,14 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		}
 	}
 
-	// C15 must assert on a pilot_host: line — Detection Engine's canonical
-	// subject identity (spec §9). It must not anchor on a leading `^-`
-	// either, for the same to_nice_yaml key-alphabetization reason as C13.
+	// C15 must assert on a pilot_host: line SCOPED to the node-exporter
+	// job's own block (job_name: node), not a bare file-wide grep —
+	// Detection Engine's canonical subject identity (spec §9). Verified
+	// broken empirically against a real vm-target (2026-09-21, alongside
+	// landing C16-C19): once a second auto-discovery block (dcgm-exporter)
+	// can also render a pilot_host line, a bare unscoped `grep pilot_host:`
+	// spuriously PASSES off of the OTHER job's label even when
+	// node-exporter itself rendered no block at all.
 	for _, r := range s.Rows {
 		if r.ID != "C15" {
 			continue
@@ -234,11 +250,77 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		if !strings.Contains(r.Command, "pilot_host") {
 			t.Errorf("C15 must assert on a pilot_host: line; got %q", r.Command)
 		}
-		if strings.Contains(r.Command, `^-`) {
-			t.Errorf("C15 must not anchor on a leading ^- (to_nice_yaml alphabetizes keys); got %q", r.Command)
+		if !strings.Contains(r.Command, "job_name: node") {
+			t.Errorf("C15 must scope its pilot_host check to the node-exporter job's own block (job_name: node), not a bare file-wide grep (verified broken against a real vm-target); got %q", r.Command)
 		}
 		if r.Expected != "0" {
 			t.Errorf("C15 expected must be rc-based \"0\"; got %q", r.Expected)
+		}
+	}
+
+	// C16 must assert on job_name: dcgm WITHOUT anchoring on a leading `^-`
+	// — same to_nice_yaml key-alphabetization reason as C13.
+	for _, r := range s.Rows {
+		if r.ID != "C16" {
+			continue
+		}
+		if !strings.Contains(r.Command, "job_name") || !strings.Contains(r.Command, "dcgm") {
+			t.Errorf("C16 must assert on a job_name: dcgm line; got %q", r.Command)
+		}
+		if strings.Contains(r.Command, `^-`) {
+			t.Errorf("C16 must not anchor on a leading ^- (to_nice_yaml alphabetizes keys); got %q", r.Command)
+		}
+		if r.Expected != "0" {
+			t.Errorf("C16 expected must be rc-based \"0\"; got %q", r.Expected)
+		}
+	}
+
+	// C17 must query up{job="dcgm"} with the braces percent-encoded, same
+	// curl-globbing reason as C14.
+	for _, r := range s.Rows {
+		if r.ID != "C17" {
+			continue
+		}
+		if strings.Contains(r.Command, `up{job`) {
+			t.Errorf("C17 must percent-encode the { and } in the PromQL query; got %q", r.Command)
+		}
+		if !strings.Contains(r.Command, "%7Bjob%3D%22dcgm%22%7D") {
+			t.Errorf("C17 must query up%%7Bjob%%3D%%22dcgm%%22%%7D (percent-encoded up{job=\"dcgm\"}); got %q", r.Command)
+		}
+		if r.Expected != `~"1"]` {
+			t.Errorf("C17 expected must be ~\"1\"] (same grammar as C14); got %q", r.Expected)
+		}
+	}
+
+	// C18 must assert on a pilot_host: line SCOPED to the dcgm-exporter
+	// job's own block (job_name: dcgm), same job-scoping requirement and
+	// same real-vm-target-verified-broken reason as C15.
+	for _, r := range s.Rows {
+		if r.ID != "C18" {
+			continue
+		}
+		if !strings.Contains(r.Command, "pilot_host") {
+			t.Errorf("C18 must assert on a pilot_host: line; got %q", r.Command)
+		}
+		if !strings.Contains(r.Command, "job_name: dcgm") {
+			t.Errorf("C18 must scope its pilot_host check to the dcgm-exporter job's own block (job_name: dcgm), not a bare file-wide grep (verified broken against a real vm-target); got %q", r.Command)
+		}
+		if r.Expected != "0" {
+			t.Errorf("C18 expected must be rc-based \"0\"; got %q", r.Expected)
+		}
+	}
+
+	// C19 must query DCGM_FI_DEV_GPU_UTIL scoped to job="dcgm" — proves a
+	// real GPU metric was scraped, not just that the exporter process is up.
+	for _, r := range s.Rows {
+		if r.ID != "C19" {
+			continue
+		}
+		if !strings.Contains(r.Command, "DCGM_FI_DEV_GPU_UTIL") {
+			t.Errorf("C19 must query DCGM_FI_DEV_GPU_UTIL; got %q", r.Command)
+		}
+		if !strings.Contains(r.Command, `job%3D%22dcgm%22`) {
+			t.Errorf("C19 must scope the query to job=\"dcgm\" (percent-encoded); got %q", r.Command)
 		}
 	}
 
@@ -349,5 +431,72 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 	// static_configs shape — never synthesize a pilot_host label for it.
 	if !strings.Contains(applyRaw, "[{'targets': prometheus_node_exporter_targets}]") {
 		t.Errorf("prometheus-apply.yml must keep the explicit-override static_configs shape flat and unlabeled (spec §9.3)")
+	}
+
+	// dcgm-exporter auto-discovery must mirror node-exporter's: sorted ASC
+	// hosts, per-host pilot_host label, flat/unlabeled explicit override.
+	if !strings.Contains(applyRaw, "groups.get('dcgm-exporter', []) | sort") {
+		t.Errorf("prometheus-apply.yml must sort dcgm-exporter hosts ASC before building per-host pilot_host static_configs")
+	}
+	if !strings.Contains(applyRaw, "[{'targets': prometheus_dcgm_exporter_targets}]") {
+		t.Errorf("prometheus-apply.yml must keep the dcgm-exporter explicit-override static_configs shape flat and unlabeled")
+	}
+
+	// The dcgm-exporter scrape job must authenticate via basic_auth +
+	// password_file, using its OWN independent credential (not the
+	// node-exporter one).
+	dcgmBlockIdx := strings.Index(applyRaw, "Render the dcgm-exporter scrape job block")
+	if dcgmBlockIdx < 0 {
+		t.Fatalf("prometheus-apply.yml must render a dcgm-exporter scrape job block")
+	}
+	if !strings.Contains(applyRaw[dcgmBlockIdx:], "'job_name': 'dcgm'") {
+		t.Errorf("prometheus-apply.yml's dcgm-exporter scrape job must use job_name 'dcgm'")
+	}
+	if !strings.Contains(applyRaw[dcgmBlockIdx:], "dcgm_exporter_basic_auth_password_container_path") {
+		t.Errorf("prometheus-apply.yml's dcgm-exporter scrape job must authenticate with its own dcgm_exporter_basic_auth_password_container_path, not the node-exporter credential")
+	}
+
+	// The dcgm-exporter password-file render is the ONLY task allowed to
+	// embed the raw secret — it must be no_log.
+	dcgmPwFileIdx := strings.Index(applyRaw, "dcgm-exporter basic-auth password file")
+	if dcgmPwFileIdx < 0 {
+		t.Fatalf("prometheus-apply.yml must render a dcgm-exporter basic-auth password file")
+	}
+	if !strings.Contains(applyRaw[dcgmPwFileIdx:], "no_log: true") {
+		t.Errorf("prometheus-apply.yml's dcgm-exporter basic-auth password file render must be no_log: true")
+	}
+
+	// The password-file bind-mount must be conditional on there actually
+	// being dcgm-exporter targets (same stray-directory-mount trap as
+	// node-exporter's own mount).
+	if !strings.Contains(applyRaw, "if (prometheus_dcgm_exporter_targets | length > 0) else []") {
+		t.Errorf("prometheus-apply.yml's dcgm-exporter password-file volume mount must be conditional on prometheus_dcgm_exporter_targets being non-empty")
+	}
+
+	// Credentials must be gated (required) only when there are actually
+	// dcgm-exporter targets to scrape.
+	if !strings.Contains(applyRaw, "dcgm-exporter basic-auth credentials required when there are scrape targets") {
+		t.Errorf("prometheus-apply.yml must gate dcgm_exporter_basic_auth_user/password as required only when prometheus_dcgm_exporter_targets is non-empty")
+	}
+
+	// The stale dcgm-exporter password file must be removed once the target
+	// list goes back to empty — no indefinite secret residue on disk.
+	if !strings.Contains(applyRaw, "Remove stale dcgm-exporter basic-auth password file") {
+		t.Errorf("prometheus-apply.yml must remove the stale dcgm-exporter password file when prometheus_dcgm_exporter_targets is empty")
+	}
+
+	// Restart must account for dcgm-exporter credential rotation AND
+	// removal, on top of every other existing restart trigger.
+	if !strings.Contains(applyRaw, "dcgm_exporter_password_file_result is changed") {
+		t.Errorf("prometheus-apply.yml's container restart condition must include dcgm_exporter_password_file_result is changed")
+	}
+	if !strings.Contains(applyRaw, "dcgm_exporter_password_file_removed is changed") {
+		t.Errorf("prometheus-apply.yml's container restart condition must include dcgm_exporter_password_file_removed is changed")
+	}
+
+	// "dcgm" must be a reserved external-monitoring jobName, alongside the
+	// existing "prometheus"/"node" reservations, to avoid a series collision.
+	if !strings.Contains(applyRaw, "select('in', ['prometheus', 'node', 'dcgm'])") {
+		t.Errorf("prometheus-apply.yml must reserve the 'dcgm' external-target jobName, alongside 'prometheus'/'node'")
 	}
 }

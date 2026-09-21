@@ -82,6 +82,22 @@ thanos_s3_target_host: ""
 # node_exporter_basic_auth_user: prometheus
 # node_exporter_basic_auth_password: ""
 
+# dcgm-exporter(GPU 主機的監控 agent,見 docs/verification/dcgm-exporter.md)
+# 的 scrape target 也**不需要**手動加進 prometheus_scrape_configs——跟
+# node_exporter 完全同一套模式,apply playbook 會自動展開這份 inventory 的
+# `dcgm-exporter` group 所有主機的 9400 port。只有明確要 override 成別的
+# 清單時才需要填這個變數:
+# dcgm_exporter_targets: []
+
+# dcgm-exporter 強制要求 HTTP Basic Auth(見 dcgm-exporter.example.yml 的
+# 說明)。使用者名稱非機密,有安全預設;密碼**只在展開出來的 target 清單
+# 非空時才必填**,且**必須跟 dcgm-exporter.example.yml 的
+# dcgm_exporter_basic_auth_password 用同一個值**,否則會被 401 擋下,
+# `up{job="dcgm"}` 永遠是 0。跟 node_exporter 的密碼是完全獨立的一組,
+# 不需要相同。一律用 ansible-vault 加密檔帶入。
+# dcgm_exporter_basic_auth_user: prometheus
+# dcgm_exporter_basic_auth_password: ""
+
 # 本機 TSDB 保留時間、scrape 間隔,通常不用改,會沿用 playbook 內建預設:
 # prometheus_retention_time: "6h"
 # prometheus_scrape_interval: "15s"

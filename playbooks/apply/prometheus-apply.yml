@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/prometheus.md v1.1
+# Apply playbook for docs/verification/prometheus.md v1.4
 #
 # Per-site role: runs Prometheus + a Thanos Sidecar as a pair of Docker
 # containers on the SAME host, sharing Prometheus's TSDB data directory so
@@ -14,6 +14,11 @@
 # (Watchdog + PrometheusDown + HostDown) are always loaded and evaluated
 # locally, and the `alerting.alertmanagers` block is rendered only when
 # `alertmanager_target_host` is set (escape hatch, see spec §1.5).
+#
+# v1.4 also auto-discovers GPU metrics from this inventory's dcgm-exporter
+# group (docs/verification/dcgm-exporter.md), exactly mirroring the
+# node-exporter auto-discovery below (see `dcgm_exporter_targets` in spec
+# §1.5, C16-C19).
 #
 # Pre-flight: docs/verification/docker.md PASS (docker.io + docker.service).
 #
@@ -117,6 +122,15 @@
     # split as prometheus.yml and alert-rules.yml themselves).
     node_exporter_basic_auth_password_host_path: "{{ prometheus_config_dir }}/node-exporter-basic-auth-password"
     node_exporter_basic_auth_password_container_path: /etc/prometheus/node-exporter-basic-auth-password
+    # dcgm_exporter_basic_auth_user has a safe universal default (not a
+    # secret). dcgm_exporter_basic_auth_password is DELIBERATELY NOT
+    # declared here, same undeclared-secret convention as
+    # node_exporter_basic_auth_password above — it must be the SAME value
+    # given to dcgm-exporter-apply.yml's dcgm_exporter_basic_auth_password
+    # (see docs/verification/dcgm-exporter.md §1.5).
+    dcgm_exporter_basic_auth_user: prometheus
+    dcgm_exporter_basic_auth_password_host_path: "{{ prometheus_config_dir }}/dcgm-exporter-basic-auth-password"
+    dcgm_exporter_basic_auth_password_container_path: /etc/prometheus/dcgm-exporter-basic-auth-password
     # prometheus_alert_rules_file: path (relative to the playbook) to a
     # Prometheus rules YAML file. The default is the seed file shipped in
     # playbooks/apply/files/. Operators override by passing
@@ -313,6 +327,90 @@
           node_exporter_basic_auth_password.
       when: prometheus_node_exporter_targets | length > 0
 
+    # Auto-discover dcgm_exporter scrape targets (docs/verification/
+    # dcgm-exporter.md) from this inventory's dcgm-exporter group when
+    # dcgm_exporter_targets was left genuinely unset — same "explicit
+    # override wins, otherwise walk the inventory group" convention as the
+    # node-exporter auto-detect above (prometheus.md §1.5, C16/C18).
+    # Assumes each dcgm-exporter host runs on the contract's default port
+    # (9400); if a site overrode dcgm_exporter_port there, pass
+    # -e dcgm_exporter_targets=[...] here explicitly instead of relying on
+    # this auto-detect.
+    - name: "Auto-detect dcgm-exporter scrape targets from this inventory's dcgm-exporter group"
+      ansible.builtin.set_fact:
+        prometheus_dcgm_exporter_targets: >-
+          {{ (dcgm_exporter_targets | default([], true))
+             if ((dcgm_exporter_targets | default([], true)) | length > 0)
+             else (groups.get('dcgm-exporter', [])
+                   | map('extract', hostvars, 'ansible_host')
+                   | map('regex_replace', '$', ':9400')
+                   | list) }}
+      tags: [always]
+
+    # Same canonical-subject-identity requirement as node-exporter's
+    # auto-discovery (Detection Engine spec §9): an explicit
+    # dcgm_exporter_targets override keeps the old flat (unlabeled)
+    # static_configs shape (no inventory-hostname mapping to trust);
+    # auto-discovery from dcgm-exporter walks real inventory_hostname values
+    # and renders one static_configs entry PER HOST carrying
+    # labels.pilot_host = inventory_hostname. Hosts are sorted ASC for a
+    # deterministic render.
+    - name: "Auto-discover dcgm-exporter hosts, sorted ASC for deterministic rendering"
+      ansible.builtin.set_fact:
+        prometheus_dcgm_exporter_auto_hosts: "{{ groups.get('dcgm-exporter', []) | sort }}"
+      when: (dcgm_exporter_targets | default([], true)) | length == 0
+      tags: [always]
+
+    - name: "Build one static_configs entry per auto-discovered dcgm-exporter host, labelled pilot_host=inventory_hostname"
+      ansible.builtin.set_fact:
+        prometheus_dcgm_exporter_auto_static_configs: >-
+          {{ (prometheus_dcgm_exporter_auto_static_configs | default([]))
+             + [ {'targets': [ (hostvars[item].ansible_host | default(item, true)) ~ ':9400' ],
+                  'labels': {'pilot_host': item}} ] }}
+      loop: "{{ prometheus_dcgm_exporter_auto_hosts | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when: (dcgm_exporter_targets | default([], true)) | length == 0
+      tags: [always]
+
+    - name: "Resolve dcgm-exporter static_configs shape: explicit override stays flat/unlabeled, auto-discovery gets per-host pilot_host labels"
+      ansible.builtin.set_fact:
+        prometheus_dcgm_exporter_static_configs: >-
+          {{ [{'targets': prometheus_dcgm_exporter_targets}]
+             if ((dcgm_exporter_targets | default([], true)) | length > 0)
+             else (prometheus_dcgm_exporter_auto_static_configs | default([])) }}
+      tags: [always]
+
+    # Built as native list/dict + to_nice_yaml — same \n-escaping trap as
+    # prometheus_node_exporter_scrape_block above; never hand-concatenate.
+    - name: "Render the dcgm-exporter scrape job block (spec C16; empty string when no targets)"
+      ansible.builtin.set_fact:
+        prometheus_dcgm_exporter_scrape_block: >-
+          {{ ([{'job_name': 'dcgm',
+                'basic_auth': {'username': dcgm_exporter_basic_auth_user | default('', true),
+                                'password_file': dcgm_exporter_basic_auth_password_container_path},
+                'static_configs': prometheus_dcgm_exporter_static_configs}]
+             | to_nice_yaml(indent=2))
+             if (prometheus_dcgm_exporter_targets | length > 0) else '' }}
+      tags: [always]
+
+    # Gate placed right after the targets/credentials are resolved — same
+    # "required only when actually used" shape as the node-exporter gate
+    # above.
+    - name: "Gate: dcgm-exporter basic-auth credentials required when there are scrape targets"
+      ansible.builtin.assert:
+        that:
+          - (dcgm_exporter_basic_auth_user | default('', true) | length > 0)
+          - (dcgm_exporter_basic_auth_password | default('', true) | length > 0)
+        fail_msg: >-
+          prometheus_dcgm_exporter_targets resolved to at least one target,
+          but dcgm_exporter_basic_auth_user/dcgm_exporter_basic_auth_password
+          are not both set. dcgm-exporter always requires Basic Auth (see
+          docs/verification/dcgm-exporter.md §1.5) — pass the SAME
+          credential that was given to dcgm-exporter-apply.yml's
+          dcgm_exporter_basic_auth_password.
+      when: prometheus_dcgm_exporter_targets | length > 0
+
     # prometheus_site_label has no safe default (see spec §1.5 for why —
     # unlike wazuh_manager_host/siem_forward_host, a blank/placeholder
     # default would silently collide across sites once a second one is
@@ -450,14 +548,14 @@
           profiles.
       tags: [always, ext-target, ext-target-C3]
 
-    - name: "Gate: profile jobName must not use a reserved name (prometheus/node)"
+    - name: "Gate: profile jobName must not use a reserved name (prometheus/node/dcgm)"
       ansible.builtin.assert:
         that:
           - (monitoring_profiles_resolved.values() | map(attribute='jobName')
-             | select('in', ['prometheus', 'node']) | list | length) == 0
+             | select('in', ['prometheus', 'node', 'dcgm']) | list | length) == 0
         fail_msg: >-
           a profile in {{ monitoring_profiles_file }} uses a reserved
-          jobName ("prometheus" or "node" — spec.md §63); rename it.
+          jobName ("prometheus", "node", or "dcgm" — spec.md §63); rename it.
       tags: [always, ext-target, ext-target-C3]
 
     - name: "Gate: every profile authRef resolves to a complete basic-auth credential"
@@ -477,8 +575,8 @@
       tags: [always, ext-target, ext-target-C3]
 
     # Warning, not fail (spec.md §40) — an external target address that
-    # coincides with a host-monitoring-managed node_exporter is allowed
-    # (different job/profile/auth is a legitimate reason).
+    # coincides with a host-monitoring/dcgm-exporter-managed endpoint is
+    # allowed (different job/profile/auth is a legitimate reason).
     - name: "Warn if an external target's address overlaps a host-monitoring managed endpoint"
       ansible.builtin.debug:
         msg: "warning: endpoint {{ item }} is also managed by host-monitoring"
@@ -486,6 +584,15 @@
         {{ (monitoring_targets_resolved | selectattr('enabled')
             | map(attribute='address') | list)
            | intersect(prometheus_node_exporter_targets) }}
+      tags: [always, ext-target, ext-target-C3]
+
+    - name: "Warn if an external target's address overlaps a dcgm-exporter managed endpoint"
+      ansible.builtin.debug:
+        msg: "warning: endpoint {{ item }} is also managed by dcgm-exporter"
+      loop: >-
+        {{ (monitoring_targets_resolved | selectattr('enabled')
+            | map(attribute='address') | list)
+           | intersect(prometheus_dcgm_exporter_targets) }}
       tags: [always, ext-target, ext-target-C3]
 
     # One Prometheus scrape job per profile (jobName uniqueness is already
@@ -679,7 +786,7 @@
         # object storage — Thanos Compactor (on the thanos-query host) owns
         # compaction/downsampling/retention from that point on.
         - name: "Render prometheus.yml (with alerting.alertmanagers)"
-          tags: [C8, C11, C13, C15, ext-target, ext-target-C3]
+          tags: [C8, C11, C13, C15, C16, C18, ext-target, ext-target-C3]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -698,12 +805,13 @@
               scrape_configs:
               {{ prometheus_scrape_configs }}
               {{ prometheus_node_exporter_scrape_block }}
+              {{ prometheus_dcgm_exporter_scrape_block }}
               {{ prometheus_external_scrape_block }}
           register: prometheus_yml_with_am
           when: alertmanager_target_host | default('', true) | length > 0
 
         - name: "Render prometheus.yml (without alerting — alertmanager_target_host empty)"
-          tags: [C8, C13, C15, ext-target, ext-target-C3]
+          tags: [C8, C13, C15, C16, C18, ext-target, ext-target-C3]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -717,6 +825,7 @@
               scrape_configs:
               {{ prometheus_scrape_configs }}
               {{ prometheus_node_exporter_scrape_block }}
+              {{ prometheus_dcgm_exporter_scrape_block }}
               {{ prometheus_external_scrape_block }}
           register: prometheus_yml_no_am
           when: alertmanager_target_host | default('', true) | length == 0
@@ -745,6 +854,31 @@
           when: prometheus_node_exporter_targets | length > 0
           no_log: true
           register: node_exporter_password_file_result
+
+        # Same credential-file shape as node-exporter above, independent
+        # secret (dcgm-exporter's Basic Auth is its own credential, see
+        # docs/verification/prometheus.md §1.5).
+        - name: "Render dcgm-exporter basic-auth password file for Prometheus's scrape config"
+          ansible.builtin.copy:
+            dest: "{{ dcgm_exporter_basic_auth_password_host_path }}"
+            mode: "0644"
+            content: "{{ dcgm_exporter_basic_auth_password | default('', true) }}"
+          when: prometheus_dcgm_exporter_targets | length > 0
+          no_log: true
+          register: dcgm_exporter_password_file_result
+
+        # Remove the stale password file once there are no dcgm-exporter
+        # targets left (target list went from non-empty to empty, or the
+        # last GPU host was removed from the dcgm-exporter group) — the file
+        # is no longer bind-mounted into the container either way (see the
+        # conditional volumes list below), but leaving the plaintext secret
+        # on the host filesystem indefinitely is unnecessary secret residue.
+        - name: "Remove stale dcgm-exporter basic-auth password file when there are no dcgm-exporter targets"
+          ansible.builtin.file:
+            path: "{{ dcgm_exporter_basic_auth_password_host_path }}"
+            state: absent
+          when: prometheus_dcgm_exporter_targets | length == 0
+          register: dcgm_exporter_password_file_removed
 
         # ---- External monitoring targets: secrets + file_sd JSON + GC ----
         # (docs/verification/prometheus-external-targets.md, spec.md §12/
@@ -968,6 +1102,8 @@
                  or alert_rules_result is changed
                  or (snmp_alert_rules_result is defined and snmp_alert_rules_result is changed)
                  or node_exporter_password_file_result is changed
+                 or dcgm_exporter_password_file_result is changed
+                 or dcgm_exporter_password_file_removed is changed
                  or monitoring_files_changed | default(false) }}
             networks:
               - name: "{{ docker_network_name }}"
@@ -994,6 +1130,8 @@
                    prometheus_host_data_dir ~ ':/prometheus'
                  ] + ([node_exporter_basic_auth_password_host_path ~ ':' ~ node_exporter_basic_auth_password_container_path ~ ':ro']
                       if (prometheus_node_exporter_targets | length > 0) else [])
+                   + ([dcgm_exporter_basic_auth_password_host_path ~ ':' ~ dcgm_exporter_basic_auth_password_container_path ~ ':ro']
+                      if (prometheus_dcgm_exporter_targets | length > 0) else [])
                    + ([prometheus_targets_host_dir ~ ':' ~ prometheus_targets_container_dir ~ ':ro']
                       if (monitoring_profiles_resolved | length > 0) else [])
                    + ([monitoring_secrets_host_dir ~ ':' ~ monitoring_secrets_container_dir ~ ':ro']
