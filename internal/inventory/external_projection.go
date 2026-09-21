@@ -195,10 +195,11 @@ func ExternalHostgroups(root map[string]any) []ExternalHostgroup {
 	return out
 }
 
-// ExternalRosterHost is one state:present roster host (design spec
-// §11.3's freeipa_roster source side) — deliberately just name/address;
-// state:absent roster hosts are omitted, and no other roster host field
-// is exposed.
+// ExternalRosterHost is one state:present roster host mapping input (design
+// spec §11.3). It deliberately exposes only name/address; state:absent roster
+// hosts are omitted, and no other roster host field is exposed. The outbound
+// projection uses it to resolve references to hosts.yml IDs, never as a
+// second snapshot host entity.
 type ExternalRosterHost struct {
 	Name    string
 	Address string

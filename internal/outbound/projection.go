@@ -1,14 +1,16 @@
 // projection.go builds a UserHostAccessSnapshotV1 from Pilot's canonical
-// declarative sources (design spec §11, §12): hosts.yml (inventory) and
-// the workspace's FreeIPA identity roster, if any. It never guesses a
-// FreeIPA FQDN from an inventory hostname (§11.4) and never merges an
-// inventory host with a roster host, even when their address matches.
+// declarative sources (design spec §11, §12): hosts.yml supplies the host
+// entities, while the FreeIPA identity roster supplies users, groups,
+// hostgroups, and access rules. Roster host FQDNs are resolved to inventory
+// host IDs by an exact address match; an absent or ambiguous match fails
+// closed instead of creating a second host entity.
 package outbound
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/kjelly/pilot/internal/inventory"
@@ -96,7 +98,11 @@ func BuildProjection(req ProjectionRequest) ProjectionResult {
 		return unavailable(ErrorClassProjectionUnavailable)
 	}
 
-	rosterHosts, hostIDSet := buildRosterHosts(root)
+	rosterHosts := inventory.ExternalRosterHosts(root)
+	rosterToInventoryID, err := mapRosterHostsToInventory(rosterHosts, inventoryHosts)
+	if err != nil {
+		return unavailable(ErrorClassProjectionUnavailable)
+	}
 
 	users, err := buildUsers(root, req.Now)
 	if err != nil {
@@ -106,11 +112,11 @@ func BuildProjection(req ProjectionRequest) ProjectionResult {
 	if err != nil {
 		return unavailable(ErrorClassProjectionUnavailable)
 	}
-	hostgroups, err := buildHostgroups(root, hostIDSet)
+	hostgroups, err := buildHostgroups(root, rosterToInventoryID)
 	if err != nil {
 		return unavailable(ErrorClassProjectionUnavailable)
 	}
-	login, sudo, err := buildAccess(root, req.Now, req.BreakglassActivations, hostIDSet)
+	login, sudo, err := buildAccess(root, req.Now, req.BreakglassActivations, rosterToInventoryID)
 	if err != nil {
 		return unavailable(ErrorClassProjectionUnavailable)
 	}
@@ -118,7 +124,7 @@ func BuildProjection(req ProjectionRequest) ProjectionResult {
 	return ProjectionResult{
 		Available: true,
 		Snapshot: UserHostAccessSnapshotV1{
-			Hosts:      append(inventoryHosts, rosterHosts...),
+			Hosts:      inventoryHosts,
 			Users:      users,
 			Groups:     groups,
 			Hostgroups: hostgroups,
@@ -161,23 +167,30 @@ func buildInventoryHosts(hostsYMLPath string) ([]ProjectedHost, error) {
 	return out, nil
 }
 
-func buildRosterHosts(root map[string]any) ([]ProjectedHost, map[string]bool) {
-	rosterHosts := inventory.ExternalRosterHosts(root)
-	out := make([]ProjectedHost, 0, len(rosterHosts))
-	idSet := make(map[string]bool, len(rosterHosts))
-	for _, h := range rosterHosts {
-		id := rosterHostID(h.Name)
-		idSet[id] = true
-		out = append(out, ProjectedHost{
-			ID:      id,
-			Name:    h.Name,
-			Source:  "freeipa_roster",
-			FQDN:    h.Name,
-			Address: h.Address,
-			Roles:   []string{},
-		})
+func mapRosterHostsToInventory(rosterHosts []inventory.ExternalRosterHost, inventoryHosts []ProjectedHost) (map[string]string, error) {
+	byAddress := make(map[string][]string, len(inventoryHosts))
+	for _, host := range inventoryHosts {
+		address := strings.TrimSpace(host.Address)
+		if address == "" {
+			continue
+		}
+		byAddress[address] = append(byAddress[address], host.ID)
 	}
-	return out, idSet
+
+	mapping := make(map[string]string, len(rosterHosts))
+	for _, rosterHost := range rosterHosts {
+		address := strings.TrimSpace(rosterHost.Address)
+		matches := byAddress[address]
+		switch len(matches) {
+		case 0:
+			return nil, fmt.Errorf("roster host %q with address %q has no matching hosts.yml host", rosterHost.Name, address)
+		case 1:
+			mapping[rosterHostID(rosterHost.Name)] = matches[0]
+		default:
+			return nil, fmt.Errorf("roster host %q with address %q matches multiple hosts.yml hosts", rosterHost.Name, address)
+		}
+	}
+	return mapping, nil
 }
 
 func buildUsers(root map[string]any, now time.Time) ([]ProjectedUser, error) {
@@ -226,7 +239,7 @@ func buildGroups(root map[string]any) ([]ProjectedGroup, error) {
 	return out, nil
 }
 
-func buildHostgroups(root map[string]any, hostIDSet map[string]bool) ([]ProjectedHostgroup, error) {
+func buildHostgroups(root map[string]any, rosterToInventoryID map[string]string) ([]ProjectedHostgroup, error) {
 	hostgroups := inventory.ExternalHostgroups(root)
 	out := make([]ProjectedHostgroup, 0, len(hostgroups))
 	seen := map[string]bool{}
@@ -235,11 +248,11 @@ func buildHostgroups(root map[string]any, hostIDSet map[string]bool) ([]Projecte
 			return nil, fmt.Errorf("duplicate hostgroup name %q", hg.Name)
 		}
 		seen[hg.Name] = true
-		hostIDs, err := namespaceHostRefs(hg.HostIDs, hostIDSet)
+		hostIDs, err := namespaceHostRefs(hg.HostIDs, rosterToInventoryID)
 		if err != nil {
 			return nil, err
 		}
-		effectiveHostIDs, err := namespaceHostRefs(hg.EffectiveHostIDs, hostIDSet)
+		effectiveHostIDs, err := namespaceHostRefs(hg.EffectiveHostIDs, rosterToInventoryID)
 		if err != nil {
 			return nil, err
 		}
@@ -254,22 +267,22 @@ func buildHostgroups(root map[string]any, hostIDSet map[string]bool) ([]Projecte
 	return out, nil
 }
 
-// namespaceHostRefs converts roster host FQDNs into their namespaced
-// freeipa: IDs, failing closed (design spec §11.4) if any does not
-// resolve to a present roster host.
-func namespaceHostRefs(names []string, hostIDSet map[string]bool) ([]string, error) {
+// namespaceHostRefs converts roster host FQDNs into the corresponding
+// inventory IDs, failing closed if any does not resolve to a present roster
+// host with an unambiguous hosts.yml address match.
+func namespaceHostRefs(names []string, rosterToInventoryID map[string]string) ([]string, error) {
 	out := make([]string, 0, len(names))
 	for _, name := range names {
-		id := rosterHostID(name)
-		if !hostIDSet[id] {
-			return nil, fmt.Errorf("dangling host reference %q: no present roster host", name)
+		id, ok := rosterToInventoryID[rosterHostID(name)]
+		if !ok {
+			return nil, fmt.Errorf("dangling host reference %q: no matching present hosts.yml host", name)
 		}
 		out = append(out, id)
 	}
 	return out, nil
 }
 
-func buildAccess(root map[string]any, now time.Time, breakglass []inventory.BreakglassActivationInput, hostIDSet map[string]bool) ([]ProjectedLoginAccess, []ProjectedSudoAccess, error) {
+func buildAccess(root map[string]any, now time.Time, breakglass []inventory.BreakglassActivationInput, rosterToInventoryID map[string]string) ([]ProjectedLoginAccess, []ProjectedSudoAccess, error) {
 	loginIn, sudoIn, err := inventory.ExternalEffectiveAccess(root, now, breakglass)
 	if err != nil {
 		return nil, nil, err
@@ -288,7 +301,7 @@ func buildAccess(root map[string]any, now time.Time, breakglass []inventory.Brea
 		seenLogin[id] = true
 		var hostIDs []string
 		if !l.AllHosts {
-			hostIDs, err = namespaceHostRefs(l.HostIDs, hostIDSet)
+			hostIDs, err = namespaceHostRefs(l.HostIDs, rosterToInventoryID)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -318,7 +331,7 @@ func buildAccess(root map[string]any, now time.Time, breakglass []inventory.Brea
 		seenSudo[id] = true
 		var hostIDs []string
 		if !s.AllHosts {
-			hostIDs, err = namespaceHostRefs(s.HostIDs, hostIDSet)
+			hostIDs, err = namespaceHostRefs(s.HostIDs, rosterToInventoryID)
 			if err != nil {
 				return nil, nil, err
 			}

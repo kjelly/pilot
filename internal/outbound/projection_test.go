@@ -321,7 +321,7 @@ func TestOutboundProjection_P6(t *testing.T) {
 	if !found {
 		t.Fatal("expected web-hosts hostgroup")
 	}
-	want := []string{"freeipa:web1.ipa.pilot.internal", "freeipa:web2.ipa.pilot.internal"}
+	want := []string{"inventory:web1", "inventory:web2"}
 	if !reflect.DeepEqual(webHosts.EffectiveHostIDs, want) {
 		t.Fatalf("web-hosts.EffectiveHostIDs = %v, want %v", webHosts.EffectiveHostIDs, want)
 	}
@@ -341,7 +341,7 @@ func TestOutboundProjection_P7(t *testing.T) {
 	if !reflect.DeepEqual(rule.Users, []string{"alice"}) {
 		t.Fatalf("allow-team.Users = %v, want [alice] (via nested team-x-parent -> team-x)", rule.Users)
 	}
-	want := []string{"freeipa:web1.ipa.pilot.internal", "freeipa:web2.ipa.pilot.internal"}
+	want := []string{"inventory:web1", "inventory:web2"}
 	if !reflect.DeepEqual(rule.HostIDs, want) {
 		t.Fatalf("allow-team.HostIDs = %v, want %v", rule.HostIDs, want)
 	}
@@ -524,33 +524,44 @@ func TestOutboundProjection_P19(t *testing.T) {
 	}
 }
 
-// TestOutboundProjection_P20: inventory and roster hosts get distinct
-// namespaced IDs even when their address matches — never heuristically
-// merged.
+// TestOutboundProjection_P20: the snapshot emits only inventory hosts even
+// when the roster contains matching FQDN/address entries. Roster host
+// references are resolved to the inventory IDs instead of creating a second
+// host entity.
 func TestOutboundProjection_P20(t *testing.T) {
 	dir, rosterPath := writeProjectionFixture(t)
 	result := buildTestProjection(t, dir, rosterPath)
 	if !result.Available {
 		t.Fatalf("projection unavailable: %+v", result)
 	}
-	inv, ok := findHost(result.Snapshot.Hosts, "inventory:web1")
-	if !ok {
-		t.Fatal("expected inventory:web1")
+	if len(result.Snapshot.Hosts) != 2 {
+		t.Fatalf("projected host count = %d, want only the 2 hosts.yml hosts", len(result.Snapshot.Hosts))
 	}
-	roster, ok := findHost(result.Snapshot.Hosts, "freeipa:web1.ipa.pilot.internal")
-	if !ok {
-		t.Fatal("expected freeipa:web1.ipa.pilot.internal")
+	for _, host := range result.Snapshot.Hosts {
+		if !strings.HasPrefix(host.ID, "inventory:") || host.Source != "inventory" {
+			t.Fatalf("host must be inventory-sourced: %+v", host)
+		}
 	}
-	if inv.Address != roster.Address {
-		t.Fatalf("test fixture setup issue: inv.Address=%q roster.Address=%q should match", inv.Address, roster.Address)
+	if _, ok := findHost(result.Snapshot.Hosts, "freeipa:web1.ipa.pilot.internal"); ok {
+		t.Fatal("roster host must not be emitted as a second host entity")
 	}
-	if inv.Source != "inventory" || roster.Source != "freeipa_roster" {
-		t.Fatalf("sources must remain distinct: inv=%q roster=%q", inv.Source, roster.Source)
+}
+
+func TestOutboundProjection_RosterHostMappingFailsClosed(t *testing.T) {
+	inventoryHosts := []ProjectedHost{{ID: "inventory:web1", Address: "10.0.0.21"}}
+
+	if _, err := mapRosterHostsToInventory([]inventory.ExternalRosterHost{{Name: "web1.ipa.pilot.internal", Address: "10.0.0.22"}}, inventoryHosts); err == nil {
+		t.Fatal("expected an unmatched roster host address to fail closed")
+	}
+
+	ambiguous := append(append([]ProjectedHost(nil), inventoryHosts...), ProjectedHost{ID: "inventory:web2", Address: "10.0.0.21"})
+	if _, err := mapRosterHostsToInventory([]inventory.ExternalRosterHost{{Name: "web1.ipa.pilot.internal", Address: "10.0.0.21"}}, ambiguous); err == nil {
+		t.Fatal("expected an ambiguous roster host address to fail closed")
 	}
 }
 
 // TestOutboundProjection_P21: every explicit access host_id resolves to
-// a projected freeipa host.
+// a projected inventory host.
 func TestOutboundProjection_P21(t *testing.T) {
 	dir, rosterPath := writeProjectionFixture(t)
 	result := buildTestProjection(t, dir, rosterPath)
@@ -626,8 +637,13 @@ func TestOutboundProjection_P22b(t *testing.T) {
 	if !result.Available {
 		t.Fatalf("projection unavailable: %+v", result)
 	}
-	if _, ok := findHost(result.Snapshot.Hosts, "freeipa:removed.ipa.pilot.internal"); ok {
-		t.Fatal("state:absent roster host must be omitted")
+	if _, ok := findHost(result.Snapshot.Hosts, "inventory:removed"); ok {
+		t.Fatal("state:absent inventory host must be omitted")
+	}
+	for _, host := range result.Snapshot.Hosts {
+		if strings.HasPrefix(host.ID, "freeipa:") {
+			t.Fatalf("roster host must not be projected: %+v", host)
+		}
 	}
 	if _, ok := findUser(result.Snapshot.Users, "carol"); ok {
 		t.Fatal("state:absent user must be omitted")
@@ -706,8 +722,8 @@ func TestOutboundProjection_P25(t *testing.T) {
 			webHosts = hg
 		}
 	}
-	if !reflect.DeepEqual(webHosts.HostIDs, []string{"freeipa:web1.ipa.pilot.internal"}) {
-		t.Fatalf("web-hosts.HostIDs (direct) = %v, want [freeipa:web1.ipa.pilot.internal]", webHosts.HostIDs)
+	if !reflect.DeepEqual(webHosts.HostIDs, []string{"inventory:web1"}) {
+		t.Fatalf("web-hosts.HostIDs (direct) = %v, want [inventory:web1]", webHosts.HostIDs)
 	}
 	if !reflect.DeepEqual(webHosts.Hostgroups, []string{"web-hosts-2"}) {
 		t.Fatalf("web-hosts.Hostgroups (direct nested ref) = %v, want [web-hosts-2]", webHosts.Hostgroups)

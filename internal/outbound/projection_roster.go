@@ -53,8 +53,9 @@ func ResolveRosterSource(hostVars map[string]map[string]any) RosterSource {
 	}
 }
 
-// rosterHostID returns the stable namespaced ID for a freeipa-roster host
-// (design spec §11.3): lowercase FQDN without a trailing dot.
+// rosterHostID returns the canonical lookup key for a roster host FQDN:
+// lowercase without a trailing dot. It is used to resolve roster access
+// references to the corresponding hosts.yml inventory ID.
 func rosterHostID(fqdn string) string {
 	return "freeipa:" + strings.ToLower(strings.TrimSuffix(fqdn, "."))
 }

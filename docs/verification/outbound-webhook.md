@@ -372,7 +372,7 @@ row's probe never has to be renamed once its test exists:
   verifyOnly: true
 - id: C22
   category: projection
-  check: inventory and FreeIPA-roster hosts use distinct namespaced stable IDs (no heuristic FQDN merge) and every explicit access host reference resolves without a dangling target
+  check: snapshot hosts come only from hosts.yml, roster host references map to inventory IDs by one exact address match, and every explicit access host reference resolves without a dangling target
   probe: |
     go test ./internal/outbound/... -run '^TestOutboundProjection_P2[012]$' -v
   expect: {stdout: {contains: "PASS"}}

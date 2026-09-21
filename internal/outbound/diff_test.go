@@ -123,16 +123,15 @@ func TestOutboundDiff_D7(t *testing.T) {
 }
 
 // TestOutboundDiff_D15: the host diff key is the namespaced ID, not the
-// display name — two hosts with the same Name but different ID (e.g. an
-// inventory host and a freeipa-roster host that happen to share a short
-// name) must be tracked as distinct diff entities.
+// display name — a semantic host update keeps the inventory ID as its diff
+// key.
 func TestOutboundDiff_D15(t *testing.T) {
 	invHost := ProjectedHost{ID: "inventory:web1", Name: "web1", Source: "inventory"}
-	rosterHost := ProjectedHost{ID: "freeipa:web1.example.com", Name: "web1.example.com", Source: "freeipa_roster"}
+	updatedHost := ProjectedHost{ID: "inventory:web1", Name: "web1", Source: "inventory", Address: "10.0.0.21"}
 	base := UserHostAccessSnapshotV1{Hosts: []ProjectedHost{invHost}}
-	target := UserHostAccessSnapshotV1{Hosts: []ProjectedHost{invHost, rosterHost}}
+	target := UserHostAccessSnapshotV1{Hosts: []ProjectedHost{updatedHost}}
 	d := Diff(base, target, false)
-	if len(d.Hosts.Upsert) != 1 || d.Hosts.Upsert[0].ID != "freeipa:web1.example.com" {
-		t.Fatalf("Hosts.Upsert = %+v, want exactly one new entry keyed by ID freeipa:web1.example.com", d.Hosts.Upsert)
+	if len(d.Hosts.Upsert) != 1 || d.Hosts.Upsert[0].ID != "inventory:web1" {
+		t.Fatalf("Hosts.Upsert = %+v, want exactly one update keyed by ID inventory:web1", d.Hosts.Upsert)
 	}
 }

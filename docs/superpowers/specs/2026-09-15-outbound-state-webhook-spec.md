@@ -1302,7 +1302,7 @@ roster JSON
 Pilot canonical declarative sources 的 sanitized state（basis=pilot_declared）
 ```
 
-V1 projection涵蓋 inventory/roster hosts、users、identity groups、FreeIPA hostgroups，以及 resolved login/sudo access。Netgroups、NFS shares/automount、DNS/TLS/monitoring entities尚未進 projection；相關 effect 仍可觸發 operation event，但 snapshot ID MAY 不變。Consumer 不得把「event有該 effect」解讀成 payload一定含該 domain entity。
+V1 projection涵蓋 hosts.yml hosts、roster users、identity groups、FreeIPA hostgroups，以及 resolved login/sudo access。Roster hosts 只用來把 identity/access 參照解析到 hosts.yml host。Netgroups、NFS shares/automount、DNS/TLS/monitoring entities尚未進 projection；相關 effect 仍可觸發 operation event，但 snapshot ID MAY 不變。Consumer 不得把「event有該 effect」解讀成 payload一定含該 domain entity。
 
 ## 11.2 Snapshot shape
 
@@ -1363,11 +1363,12 @@ type ProjectedAccess struct {
 
 ## 11.3 Host source
 
-Host entity 是兩個 canonical source 的 deterministic union：
+Host entity 只來自 `hosts.yml`；canonical roster 的 hosts 只提供
+FreeIPA identity/access 參照，不另外產生 host entity：
 
 ```text
 <workspace>/hosts.yml              -> source=inventory
-canonical roster hosts[]           -> source=freeipa_roster
+canonical roster hosts[]           -> roster FQDN/address mapping only
 ```
 
 Inventory side 使用：
@@ -1391,10 +1392,14 @@ Stable IDs：
 
 ```text
 inventory host: inventory:<hosts.yml name>
-roster host:    freeipa:<lowercase roster FQDN without trailing dot>
 ```
 
-Roster host entity MUST include roster `name -> fqdn`、`ip_address -> address`，但 MUST NOT include arbitrary roster fields。`state: absent` roster hosts不輸出。
+Roster `hosts[]` MUST include a real FQDN and IPv4 address, but its entries
+are not emitted as `snapshot.hosts[]` entities. Each present roster host MUST
+match exactly one `hosts.yml` host by `ip_address == ansible_host`; the
+projection maps its FQDN references to that inventory host ID. Missing or
+ambiguous matches make the projection unavailable. `state: absent` roster
+hosts are omitted from the mapping.
 
 MUST NOT include：
 
@@ -1407,25 +1412,27 @@ controller filesystem paths
 
 `annotations` 已被 Pilot 定義為 descriptive non-secret metadata，因此可以進 projection。
 
-## 11.4 不猜 FreeIPA FQDN
+## 11.4 Inventory host mapping
 
-MUST NOT：
+MUST NOT invent a host mapping from a short name or reverse DNS：
 
 ```text
 short inventory hostname + domain 猜 FQDN
 IP reverse DNS 猜 FQDN
-ansible_host IP 與 roster ip_address heuristic join
 ```
 
-V1 不合併 inventory 與 roster host entity；即使兩者 address 相同也保留兩個 namespaced IDs。未來若 Pilot 增加 explicit identity mapping 才可合併。
+The current single-source projection uses an exact, unique
+`ansible_host == roster.ip_address` mapping to resolve roster access
+references to `inventory:<hosts.yml name>`. It never emits a second roster
+host entity and fails closed if the address match is missing or ambiguous.
 
-Access target MUST 使用 roster host ID：
+Access target MUST 使用 inventory host ID：
 
 ```text
-freeipa:<canonical-fqdn>
+inventory:<hosts.yml name>
 ```
 
-因此每個 `ProjectedLoginAccess.HostIDs`／`ProjectedSudoAccess.HostIDs` 都能 join 到 `snapshot.hosts[].id`。Projection builder MUST 驗證 referential integrity；任何 explicit access host 無對應 present roster host時，projection unavailable，不得輸出 dangling reference。`all_hosts=true` 的 universe 明確是 `source=freeipa_roster` 的 present hosts，不是全部 inventory hosts。
+因此每個 `ProjectedLoginAccess.HostIDs`／`ProjectedSudoAccess.HostIDs` 都能 join 到 `snapshot.hosts[].id`。Projection builder MUST 驗證 referential integrity；任何 explicit access host 無法映射到 present inventory host 時，projection unavailable，不得輸出 dangling reference。`all_hosts=true` 的 universe 是 snapshot 中的 inventory hosts。
 
 ## 11.5 Roster source
 
@@ -1656,8 +1663,8 @@ Reuse 不代表直接複製現有 return value。特別是現有 `EffectiveSudoA
 4. sudo grant 只有 `EvaluateGrantLifecycle(...) == active` 才輸出；未到 `valid_not_before` 或已過 `valid_not_after` 都 omit。仍保留 not-before/not-after，讓 consumer 在長時間沒有新 event 時也能強制終點時間。
 5. breakglass 只有 `Activation.IsActive(now)` 且 roster definition仍 present 時輸出；`ValidUntil=activation.ExpiresAt`。
 6. 每條 access 的 users 必須與「present 且 Enabled=true」user set 取交集；結果為空的 rule omit。
-7. explicit hosts/hostgroups 展開後全部轉成 `freeipa:<fqdn>` IDs；任何 dangling host reference使整個 projection unavailable。
-8. `all_hosts=true` 時 `host_ids` 必須 omitted；consumer以 snapshot 中所有 `source=freeipa_roster` present hosts作 universe。
+7. explicit hosts/hostgroups 展開後全部轉成對應的 `inventory:<hosts.yml name>` IDs；任何 dangling、missing 或 ambiguous address mapping 使整個 projection unavailable。
+8. `all_hosts=true` 時 `host_ids` 必須 omitted；consumer 以 snapshot 中的 inventory hosts 作 universe。
 
 Static sudo 的 `commands` 必須是 direct allow commands 與 allow command groups 的 resolved union；`denied_commands` 必須是 direct deny commands 與 deny command groups 的 resolved union。`run_as_users`、`run_as_groups`、`options` 必須原樣語意化、sort/dedupe 後輸出。任一 referenced user/group/host/hostgroup/command-group 不存在或 absent，必須使 projection unavailable，不得像現有 read-only helper 一樣 silent skip。
 
@@ -2169,14 +2176,6 @@ diff.target_snapshot_id
           "project": "llm-training",
           "owner": "ai-platform"
         }
-      },
-      {
-        "id": "freeipa:gpu-a01.ipa.pilot.internal",
-        "name": "gpu-a01.ipa.pilot.internal",
-        "source": "freeipa_roster",
-        "fqdn": "gpu-a01.ipa.pilot.internal",
-        "address": "10.20.30.41",
-        "roles": []
       }
     ],
 
@@ -4177,8 +4176,8 @@ README / DELIVERY 若有 command surface table，補上相關入口。
 | P17 | configured unreadable roster never becomes empty authoritative users |
 | P18 | disabled HBAC rule omitted from effective login |
 | P19 | disabled/account-expired user omitted from access users but retained as user entity |
-| P20 | inventory and roster hosts receive stable namespaced IDs without heuristic merge |
-| P21 | every explicit access host_id resolves to a projected freeipa host |
+| P20 | snapshot hosts come only from hosts.yml; roster host references map to inventory IDs by one exact address match |
+| P21 | every explicit access host_id resolves to a projected inventory host |
 | P22 | absent roster entities omitted; invalid dangling membership fails closed |
 | P23 | duplicate active breakglass records collapse to one stable entity |
 | P24 | unavailable/oversize event omits snapshot and diff rather than sending empty state |

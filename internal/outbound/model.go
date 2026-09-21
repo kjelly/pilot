@@ -19,14 +19,12 @@ type UserHostAccessSnapshotV1 struct {
 	Access     ProjectedAccess      `json:"access"`
 }
 
-// ProjectedHost is one host entity — either inventory-sourced or
-// freeipa-roster-sourced (design spec §11.3). The two sources are never
-// merged into one entity, even when their address matches (§11.4): V1
-// keeps two distinct namespaced IDs.
+// ProjectedHost is one inventory-sourced host entity. The roster contributes
+// identity and access declarations, but never creates a second host entity.
 type ProjectedHost struct {
 	ID                     string            `json:"id"`
 	Name                   string            `json:"name"`
-	Source                 string            `json:"source"` // "inventory" | "freeipa_roster"
+	Source                 string            `json:"source"` // always "inventory"
 	FQDN                   string            `json:"fqdn,omitempty"`
 	Address                string            `json:"address,omitempty"`
 	Env                    string            `json:"env,omitempty"`
