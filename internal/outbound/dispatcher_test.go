@@ -498,6 +498,20 @@ func TestOutboundDispatcher_H23(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	insecureClient, err := buildHTTPClient(TLSConfig{AllowInsecureHTTPS: true}, 2*time.Second)
+	if err != nil {
+		t.Fatalf("buildHTTPClient with insecure HTTPS opt-in: %v", err)
+	}
+	insecureTransport, ok := insecureClient.Transport.(*http.Transport)
+	if !ok || !insecureTransport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatalf("expected explicit insecure HTTPS opt-in to set InsecureSkipVerify")
+	}
+	resp, err = insecureClient.Get(server.URL)
+	if err != nil {
+		t.Fatalf("request with allow_insecure_https should succeed: %v", err)
+	}
+	resp.Body.Close()
+
 	// Invalid PEM must fail closed.
 	badPath := filepath.Join(t.TempDir(), "bad.pem")
 	if err := os.WriteFile(badPath, []byte("not a certificate"), 0o600); err != nil {

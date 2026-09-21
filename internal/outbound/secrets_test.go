@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,21 @@ import (
 var secretSentinels = []string{
 	"PILOT-SECRET-NEVER-LEAK-123",
 	"ssh-ed25519 AAAA-SECRET-KEY-FIXTURE",
+}
+
+func TestOutboundSecrets_FileSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "webhook-token")
+	if err := os.WriteFile(path, []byte("Bearer file-token\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	secret, ok := ResolveAuthSecret(AuthConfig{Type: AuthBearer, SecretFile: path}, nil)
+	if !ok || secret != "file-token" {
+		t.Fatalf("ResolveAuthSecret = %q, %v; want file-token, true", secret, ok)
+	}
+	if got := AuthSecretSource(AuthConfig{Type: AuthBearer, SecretFile: path}); got != "secret file "+path {
+		t.Fatalf("AuthSecretSource = %q", got)
+	}
 }
 
 // TestOutboundSecrets_S1: a sentinel embedded in a delivered event's

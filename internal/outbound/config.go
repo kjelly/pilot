@@ -130,17 +130,19 @@ type EventRule struct {
 	Payload    PayloadMode
 }
 
-// AuthConfig names the auth mode and the environment variable holding
-// the secret. The secret value itself is never part of this struct.
+// AuthConfig names the auth mode and exactly one runtime secret source. The
+// secret value itself is never part of this struct.
 type AuthConfig struct {
-	Type      AuthType
-	SecretEnv string
+	Type       AuthType
+	SecretEnv  string
+	SecretFile string
 }
 
 // TLSConfig is a webhook's transport trust configuration.
 type TLSConfig struct {
-	CAFile            string
-	AllowInsecureHTTP bool
+	CAFile             string
+	AllowInsecureHTTP  bool
+	AllowInsecureHTTPS bool
 }
 
 // DeliveryConfig is a webhook's timeout/retry policy.
@@ -184,13 +186,15 @@ type rawEventRule struct {
 }
 
 type rawAuthConfig struct {
-	Type      string `yaml:"type"`
-	SecretEnv string `yaml:"secret_env"`
+	Type       string `yaml:"type"`
+	SecretEnv  string `yaml:"secret_env"`
+	SecretFile string `yaml:"secret_file"`
 }
 
 type rawTLSConfig struct {
-	CAFile            string `yaml:"ca_file"`
-	AllowInsecureHTTP *bool  `yaml:"allow_insecure_http"`
+	CAFile             string `yaml:"ca_file"`
+	AllowInsecureHTTP  *bool  `yaml:"allow_insecure_http"`
+	AllowInsecureHTTPS *bool  `yaml:"allow_insecure_https"`
 }
 
 type rawDeliveryConfig struct {
@@ -260,11 +264,14 @@ func buildConfig(raw rawConfig) (*Config, error) {
 			Enabled:    *rw.Enabled,
 			Endpoint:   rw.Endpoint,
 			Projection: rw.Projection,
-			Auth:       AuthConfig{Type: AuthType(rw.Auth.Type), SecretEnv: rw.Auth.SecretEnv},
+			Auth:       AuthConfig{Type: AuthType(rw.Auth.Type), SecretEnv: rw.Auth.SecretEnv, SecretFile: rw.Auth.SecretFile},
 			TLS:        TLSConfig{CAFile: rw.TLS.CAFile},
 		}
 		if rw.TLS.AllowInsecureHTTP != nil {
 			w.TLS.AllowInsecureHTTP = *rw.TLS.AllowInsecureHTTP
+		}
+		if rw.TLS.AllowInsecureHTTPS != nil {
+			w.TLS.AllowInsecureHTTPS = *rw.TLS.AllowInsecureHTTPS
 		}
 		for _, re := range rw.Events {
 			w.Events = append(w.Events, EventRule{
@@ -431,8 +438,17 @@ func validateAuth(a AuthConfig) error {
 	if a.Type != AuthHMACSHA256 && a.Type != AuthBearer {
 		return fmt.Errorf("auth.type must be hmac_sha256 or bearer, got %q", a.Type)
 	}
-	if !secretEnvRegex.MatchString(a.SecretEnv) {
+	if a.SecretEnv == "" && a.SecretFile == "" {
+		return fmt.Errorf("exactly one of auth.secret_env or auth.secret_file is required")
+	}
+	if a.SecretEnv != "" && a.SecretFile != "" {
+		return fmt.Errorf("auth.secret_env and auth.secret_file are mutually exclusive")
+	}
+	if a.SecretEnv != "" && !secretEnvRegex.MatchString(a.SecretEnv) {
 		return fmt.Errorf("auth.secret_env %q must match %s", a.SecretEnv, secretEnvRegex.String())
+	}
+	if a.SecretFile != "" && !filepath.IsAbs(a.SecretFile) {
+		return fmt.Errorf("auth.secret_file must be an absolute path, got %q", a.SecretFile)
 	}
 	return nil
 }
@@ -511,14 +527,35 @@ func validateEffectsAny(effectsAny []string, operation OperationKind) error {
 // CheckReadiness performs the pre-mutation, filesystem-touching checks
 // Validate() deliberately does not (design spec §7.4, §21, INV-3): for
 // every ENABLED webhook whose tls.ca_file is set, the file must exist, be
-// a regular file, and contain at least one parseable PEM certificate.
-// Disabled webhooks are skipped entirely. A missing auth secret
-// environment variable is NOT checked here — that is a runtime delivery
-// failure (INV-2/INV-3: it leaves the event pending with
-// last_error_class=missing_auth_secret, it never blocks the operation).
+// a regular file, and contain at least one parseable PEM certificate. For an
+// enabled webhook using auth.secret_file, the file must exist, be regular,
+// readable, and contain a non-empty secret. Disabled webhooks are skipped
+// entirely. A missing auth secret environment variable is NOT checked here —
+// that is a runtime delivery failure (INV-2/INV-3: it leaves the event
+// pending with last_error_class=missing_auth_secret, it never blocks the
+// operation).
 func (c *Config) CheckReadiness() error {
 	for _, w := range c.Webhooks {
-		if !w.Enabled || w.TLS.CAFile == "" {
+		if !w.Enabled {
+			continue
+		}
+		if w.Auth.SecretFile != "" {
+			info, err := os.Stat(w.Auth.SecretFile)
+			if err != nil {
+				return fmt.Errorf("webhook %q: auth.secret_file %s: %w", w.Name, w.Auth.SecretFile, err)
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("webhook %q: auth.secret_file %s is not a regular file", w.Name, w.Auth.SecretFile)
+			}
+			secretData, err := os.ReadFile(w.Auth.SecretFile)
+			if err != nil {
+				return fmt.Errorf("webhook %q: auth.secret_file %s: %w", w.Name, w.Auth.SecretFile, err)
+			}
+			if _, ok := normalizeFileSecret(w.Auth.Type, secretData); !ok {
+				return fmt.Errorf("webhook %q: auth.secret_file %s is empty", w.Name, w.Auth.SecretFile)
+			}
+		}
+		if w.TLS.CAFile == "" {
 			continue
 		}
 		info, err := os.Stat(w.TLS.CAFile)

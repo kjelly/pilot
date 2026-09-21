@@ -137,10 +137,20 @@ func TestOutboundConfig_CFG8(t *testing.T) {
 	if _, err := ParseConfig([]byte(okHTTP)); err != nil {
 		t.Fatalf("http with allow_insecure_http:true should be valid: %v", err)
 	}
+
+	okHTTPS := strings.Replace(validConfigYAML, "secret_env: PILOT_EXTERNAL_DIRECTORY_WEBHOOK_SECRET",
+		"secret_env: PILOT_EXTERNAL_DIRECTORY_WEBHOOK_SECRET\n    tls:\n      allow_insecure_https: true", 1)
+	cfg, err := ParseConfig([]byte(okHTTPS))
+	if err != nil {
+		t.Fatalf("https with allow_insecure_https:true should be valid: %v", err)
+	}
+	if !cfg.Webhooks[0].TLS.AllowInsecureHTTPS {
+		t.Fatal("allow_insecure_https was not retained in the parsed config")
+	}
 }
 
 // TestOutboundConfig_CFG9 (CFG9): a secret value cannot be configured
-// directly — only auth.secret_env (an env var NAME) is a known field;
+// directly — only auth.secret_env or auth.secret_file is a known source;
 // any literal-secret-shaped field is rejected as unknown.
 func TestOutboundConfig_CFG9(t *testing.T) {
 	bad := strings.Replace(validConfigYAML,
@@ -152,7 +162,7 @@ func TestOutboundConfig_CFG9(t *testing.T) {
 }
 
 // TestOutboundConfig_CFG10 (CFG10): auth is required and strict — a
-// missing type/secret_env, or an invalid type, is rejected.
+// missing type/secret source, or an invalid type, is rejected.
 func TestOutboundConfig_CFG10(t *testing.T) {
 	badType := strings.Replace(validConfigYAML, "type: hmac_sha256", "type: none", 1)
 	if _, err := ParseConfig([]byte(badType)); err == nil {
@@ -162,6 +172,40 @@ func TestOutboundConfig_CFG10(t *testing.T) {
 	badSecretEnv := strings.Replace(validConfigYAML, "secret_env: PILOT_EXTERNAL_DIRECTORY_WEBHOOK_SECRET", "secret_env: lowercase-not-allowed", 1)
 	if _, err := ParseConfig([]byte(badSecretEnv)); err == nil {
 		t.Fatal("expected error for invalid auth.secret_env format")
+	}
+
+	missingSource := strings.Replace(validConfigYAML,
+		"      secret_env: PILOT_EXTERNAL_DIRECTORY_WEBHOOK_SECRET\n", "", 1)
+	if _, err := ParseConfig([]byte(missingSource)); err == nil {
+		t.Fatal("expected error when auth has no secret source")
+	}
+
+	bothSources := strings.Replace(validConfigYAML,
+		"      secret_env: PILOT_EXTERNAL_DIRECTORY_WEBHOOK_SECRET",
+		"      secret_env: PILOT_EXTERNAL_DIRECTORY_WEBHOOK_SECRET\n      secret_file: /tmp/webhook-token", 1)
+	if _, err := ParseConfig([]byte(bothSources)); err == nil {
+		t.Fatal("expected error when auth has both secret sources")
+	}
+}
+
+func TestOutboundConfig_AuthSecretFile(t *testing.T) {
+	fileSource := strings.Replace(validConfigYAML,
+		"      secret_env: PILOT_EXTERNAL_DIRECTORY_WEBHOOK_SECRET",
+		"      secret_file: /tmp/webhook-token", 1)
+	cfg, err := ParseConfig([]byte(fileSource))
+	if err != nil {
+		t.Fatalf("auth.secret_file should be valid: %v", err)
+	}
+	if got := cfg.Webhooks[0].Auth.SecretFile; got != "/tmp/webhook-token" {
+		t.Fatalf("secret_file = %q, want /tmp/webhook-token", got)
+	}
+	if got := cfg.Webhooks[0].Auth.SecretEnv; got != "" {
+		t.Fatalf("secret_env = %q, want empty for file source", got)
+	}
+
+	relative := strings.Replace(fileSource, "/tmp/webhook-token", "relative/webhook-token", 1)
+	if _, err := ParseConfig([]byte(relative)); err == nil {
+		t.Fatal("expected error for non-absolute auth.secret_file")
 	}
 }
 
@@ -263,6 +307,30 @@ func TestOutboundConfig_CFG13(t *testing.T) {
 	}
 	if err := cfg3.CheckReadiness(); err != nil {
 		t.Fatalf("CheckReadiness must skip disabled webhooks: %v", err)
+	}
+
+	secretFile := filepath.Join(dir, "webhook-token")
+	if err := os.WriteFile(secretFile, []byte("Bearer file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileSource := strings.Replace(validConfigYAML,
+		"      secret_env: PILOT_EXTERNAL_DIRECTORY_WEBHOOK_SECRET",
+		"      secret_file: "+secretFile, 1)
+	cfg4, err := ParseConfig([]byte(fileSource))
+	if err != nil {
+		t.Fatalf("ParseConfig with secret_file: %v", err)
+	}
+	if err := cfg4.CheckReadiness(); err != nil {
+		t.Fatalf("CheckReadiness with readable secret_file: %v", err)
+	}
+
+	missingSecretFile := strings.Replace(fileSource, secretFile, filepath.Join(dir, "missing-token"), 1)
+	cfg5, err := ParseConfig([]byte(missingSecretFile))
+	if err != nil {
+		t.Fatalf("ParseConfig with missing secret_file: %v", err)
+	}
+	if err := cfg5.CheckReadiness(); err == nil {
+		t.Fatal("expected CheckReadiness error for missing secret_file")
 	}
 }
 

@@ -39,8 +39,9 @@ type DeliverOutcome struct {
 }
 
 // SecretLookup resolves an auth.secret_env name to its runtime value.
-// Returning ok=false means the environment variable is unset (design
-// spec §20.5): missing_auth_secret, not a hard error.
+// Returning ok=false means the source is unavailable (design spec §20.5):
+// missing_auth_secret, not a hard error. auth.secret_file is resolved by
+// ResolveAuthSecret and does not call this function.
 type SecretLookup func(envVar string) (string, bool)
 
 // Dispatcher delivers claimed outbox events over HTTP.
@@ -56,7 +57,14 @@ type Dispatcher struct {
 // spec §7.4/§21: TLS 1.2 minimum, the CA file (if any) appended to the
 // OS trust store rather than replacing it, and redirects never followed.
 func buildHTTPClient(cfg TLSConfig, timeout time.Duration) (*http.Client, error) {
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	// AllowInsecureHTTPS deliberately disables certificate and hostname
+	// verification for HTTPS only. TLS encryption remains enabled, but the
+	// peer is no longer authenticated; this is an explicit operator opt-in
+	// for controlled test environments.
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: cfg.AllowInsecureHTTPS, //nolint:gosec // explicit integrations.yaml opt-in
+	}
 	if cfg.CAFile != "" {
 		pemData, err := os.ReadFile(cfg.CAFile)
 		if err != nil {
@@ -88,13 +96,13 @@ func (d *Dispatcher) DeliverOnce(ctx context.Context, claimed *ClaimedEvent, cfg
 	now := d.Now()
 	out := DeliverOutcome{EventID: claimed.EventID, WebhookName: claimed.WebhookName}
 
-	secret, ok := d.SecretLookup(cfg.Auth.SecretEnv)
+	secret, ok := ResolveAuthSecret(cfg.Auth, d.SecretLookup)
 	if !ok {
 		out.ErrorClass = ErrorClassMissingAuthSecret
 		state, err := d.Outbox.MarkAttemptFailed(ctx, DeliveryFailure{
 			EventID: claimed.EventID, ClaimOwner: claimed.ClaimOwner, Now: now,
 			Retryable: true, ErrorClass: ErrorClassMissingAuthSecret,
-			ErrorText:      fmt.Sprintf("environment variable %s is not set", cfg.Auth.SecretEnv),
+			ErrorText:      fmt.Sprintf("%s is not available", AuthSecretSource(cfg.Auth)),
 			NextAttemptAt:  now.Add(cfg.Delivery.InitialBackoff),
 			ConsumeAttempt: false,
 			MaxAttempts:    cfg.Delivery.MaxAttempts,
