@@ -72,6 +72,7 @@ func setUpWebhookCLITest(t *testing.T) (workspaceDir string, out *bytes.Buffer, 
 
 	out = &bytes.Buffer{}
 	cmd = &cobra.Command{}
+	cmd.SetContext(context.Background())
 	cmd.SetOut(out)
 	return workspaceDir, out, cmd
 }
@@ -176,5 +177,141 @@ func TestWebhookCLI_FlushDeliversDueEvent(t *testing.T) {
 	// body/cursor JSON content or the auth secret.
 	if strings.Contains(out.String(), "flush-test-secret") || strings.Contains(out.String(), `"event_id"`) {
 		t.Fatalf("status output must never print raw snapshot/body JSON or secrets: %q", out.String())
+	}
+}
+
+func TestWebhookCLI_SendTestShowsRedactedRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	dir, out, cmd := setUpWebhookCLITest(t)
+	writeIntegrationsYAML(t, dir, server.URL)
+	t.Setenv("PILOT_WEBHOOK_TEST_TOKEN", "send-test-secret")
+
+	webhookSendTestDir = dir
+	webhookSendTestName = ""
+	webhookSendTestOperation = "deploy"
+	webhookSendTestResult = "success"
+	webhookSendTestEffects = nil
+	webhookSendTestInventory = ""
+	webhookSendTestVaultPasswordFile = ""
+	webhookSendTestWorkflowID = "workflow-show-request"
+	webhookSendTestShowRequest = true
+	t.Cleanup(func() {
+		webhookSendTestDir = "."
+		webhookSendTestName = ""
+		webhookSendTestOperation = "reconcile"
+		webhookSendTestResult = "success"
+		webhookSendTestEffects = nil
+		webhookSendTestInventory = ""
+		webhookSendTestVaultPasswordFile = ""
+		webhookSendTestWorkflowID = ""
+		webhookSendTestShowRequest = false
+	})
+
+	if err := runWebhookSendTest(cmd, nil); err != nil {
+		t.Fatalf("runWebhookSendTest: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"REQUEST:",
+		"POST " + server.URL,
+		"Authorization: Bearer <redacted>",
+		`"event_type": "pilot.operation.terminal"`,
+		"← 204",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "send-test-secret") {
+		t.Fatalf("request display leaked the bearer token:\n%s", got)
+	}
+}
+
+func TestWebhookCLI_SendTestUsesSecretFile(t *testing.T) {
+	var receivedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	dir, out, cmd := setUpWebhookCLITest(t)
+	writeIntegrationsYAML(t, dir, server.URL)
+	tokenPath := filepath.Join(dir, "webhook-token")
+	if err := os.WriteFile(tokenPath, []byte("Bearer file-send-test-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "integrations.yaml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config = []byte(strings.Replace(string(config),
+		"secret_env: PILOT_WEBHOOK_TEST_TOKEN",
+		"secret_file: "+tokenPath, 1))
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("PILOT_WEBHOOK_TEST_TOKEN")
+
+	webhookSendTestDir = dir
+	webhookSendTestName = ""
+	webhookSendTestOperation = "deploy"
+	webhookSendTestResult = "success"
+	webhookSendTestEffects = nil
+	webhookSendTestInventory = ""
+	webhookSendTestVaultPasswordFile = ""
+	webhookSendTestWorkflowID = "workflow-secret-file"
+	webhookSendTestShowRequest = false
+	t.Cleanup(func() {
+		webhookSendTestDir = "."
+		webhookSendTestName = ""
+		webhookSendTestOperation = "reconcile"
+		webhookSendTestResult = "success"
+		webhookSendTestEffects = nil
+		webhookSendTestInventory = ""
+		webhookSendTestVaultPasswordFile = ""
+		webhookSendTestWorkflowID = ""
+		webhookSendTestShowRequest = false
+	})
+
+	if err := runWebhookSendTest(cmd, nil); err != nil {
+		t.Fatalf("runWebhookSendTest: %v", err)
+	}
+	if receivedAuth != "Bearer file-send-test-secret" {
+		t.Fatalf("Authorization = %q, want bearer token from secret_file", receivedAuth)
+	}
+	if strings.Contains(out.String(), "file-send-test-secret") {
+		t.Fatalf("send-test output leaked the bearer token:\n%s", out.String())
+	}
+}
+
+func TestAutoDetectWebhookTestInventory(t *testing.T) {
+	dir := t.TempDir()
+	if got := autoDetectWebhookTestInventory(dir); got != "" {
+		t.Fatalf("without an inventory, auto-detected path = %q, want empty", got)
+	}
+
+	want := filepath.Join(dir, "inventory.yml")
+	if err := os.WriteFile(want, []byte("all:\n  hosts: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := autoDetectWebhookTestInventory(dir); got != want {
+		t.Fatalf("auto-detected path = %q, want %q", got, want)
+	}
+
+	if err := os.Remove(want); err != nil {
+		t.Fatal(err)
+	}
+	want = filepath.Join(dir, "inventory.yaml")
+	if err := os.WriteFile(want, []byte("all:\n  hosts: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := autoDetectWebhookTestInventory(dir); got != want {
+		t.Fatalf("yaml auto-detected path = %q, want %q", got, want)
 	}
 }
