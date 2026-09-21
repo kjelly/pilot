@@ -4,6 +4,10 @@
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
+> 2026-09-21 C16–C19（dcgm-exporter 自動 GPU scrape）已在真實 vm-target 上
+> 完整驗證（fresh apply、認證後成功 scrape、真實 GPU 指標、冪等重跑），
+> 證據見 `docs/evidence/prometheus/2026-09-21-79172c6.md`；過程中發現並修好
+> 兩個真實 bug（見該檔 §5）。
 
 > 跟 `thanos-query.md` 是一對「站台 / 中央」關係——本檔是**每個機房/站台**
 > 各自跑一份的角色（`prometheus` group，類比 `wazuh-fim`），`thanos-query.md`
@@ -192,6 +196,10 @@
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
 - 預期 row 數：19
+- Sanitized 摘要：`docs/evidence/prometheus/2026-09-21-79172c6.md`（真實 vm-target
+  跑過 dcgm-exporter auto-discovery 的 fresh apply/認證 scrape/GPU 指標/冪等
+  重跑；C9/C11/C13/C14/C15 因該次測試 topology 沒有 seaweedfs-s3/alertmanager/
+  host-monitoring 而預期 fail，C16–C19 全 PASS）
 
 ## 4. PASS / FAIL 規則
 
