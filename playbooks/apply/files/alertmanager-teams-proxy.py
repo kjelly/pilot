@@ -94,6 +94,22 @@ def alert_facts(alert, common_labels):
     return facts[:MAX_LABEL_FACTS]
 
 
+RATIO_ANNOTATION_KEYS = ("score", "confidence")
+
+
+def as_percent(raw):
+    """Render a 0..1 ratio as a percentage to one decimal place, e.g. 0.89 -> "89.0%".
+
+    detection-engine's raw annotations carry full-precision floats (e.g.
+    0.9999722222222772); operators reading the Teams card need a stable,
+    readable magnitude, not float noise.
+    """
+    try:
+        return "{:.1f}%".format(float(raw) * 100)
+    except (TypeError, ValueError):
+        return as_text(raw)
+
+
 def anomaly_details(alert_annotations, common_annotations):
     """Render detection-engine evidence as concise human-readable card fields."""
     annotations = dict(common_annotations)
@@ -109,7 +125,8 @@ def anomaly_details(alert_annotations, common_annotations):
         ("duration_seconds", "Duration (seconds)"),
     ):
         if annotations.get(key):
-            facts.append({"title": title, "value": as_text(annotations[key])})
+            value = as_percent(annotations[key]) if key in RATIO_ANNOTATION_KEYS else as_text(annotations[key])
+            facts.append({"title": title, "value": value})
 
     text = []
     raw_contributors = annotations.get("top_contributors")
@@ -128,7 +145,7 @@ def anomaly_details(alert_annotations, common_annotations):
             if isinstance(values, dict) and values:
                 rendered = []
                 for key in sorted(values)[:5]:
-                    rendered.append("{}={}".format(key, as_text(values[key])))
+                    rendered.append("{}={}".format(key, as_percent(values[key])))
                 text.append("Observed values: {}".format(", ".join(rendered)))
         except (TypeError, ValueError):
             # A malformed annotation must never make an alert notification
