@@ -113,3 +113,118 @@ func TestFeatureProfile_ValidateNotificationDestination(t *testing.T) {
 		t.Fatal("expected unsupported notify.warning destination to be rejected")
 	}
 }
+
+func categoryOverrideTestProfile() FeatureProfile {
+	return FeatureProfile{
+		ID: "x", Version: 1,
+		Notify: NotifyPolicy{
+			Warning: "dashboard", Critical: "teams",
+			RunbookURL:        "docs/runbooks/detection-engine.md",
+			RecommendedAction: "profile-wide default action",
+		},
+		NotifyByCategory: map[string]NotifyPolicy{
+			"storage": {
+				RunbookURL:        "docs/runbooks/storage-alerts.md",
+				RecommendedAction: "check disk saturation dashboard first",
+			},
+			"thermal": {Critical: "digest"},
+		},
+		Features: []Feature{
+			{Name: "cpu_utilization", Required: true, Category: "cpu", ScaleFloor: 0.1, ValidMin: 0, ValidMax: 1, PromQL: "x"},
+			{Name: "rootfs_used_ratio", Category: "storage", ScaleFloor: 0.1, ValidMin: 0, ValidMax: 1, PromQL: "x"},
+			{Name: "thermal_max_celsius", Category: "thermal", ScaleFloor: 0.1, ValidMin: 0, ValidMax: 1, PromQL: "x"},
+		},
+	}
+}
+
+func TestFeatureProfile_EffectiveNotifyPolicyForCategory_OverrideAppliesOnlySetFields(t *testing.T) {
+	p := categoryOverrideTestProfile()
+	got := p.EffectiveNotifyPolicyForCategory("storage")
+	want := NotifyPolicy{
+		Warning: "dashboard", Critical: "teams", // inherited from profile default
+		RunbookURL:        "docs/runbooks/storage-alerts.md",
+		RecommendedAction: "check disk saturation dashboard first",
+	}
+	if got != want {
+		t.Fatalf("EffectiveNotifyPolicyForCategory(storage) = %+v, want %+v", got, want)
+	}
+}
+
+func TestFeatureProfile_EffectiveNotifyPolicyForCategory_PartialOverrideKeepsOtherDefaults(t *testing.T) {
+	p := categoryOverrideTestProfile()
+	got := p.EffectiveNotifyPolicyForCategory("thermal")
+	want := NotifyPolicy{
+		Warning:           "dashboard",
+		Critical:          "digest", // only field overridden for thermal
+		RunbookURL:        "docs/runbooks/detection-engine.md",
+		RecommendedAction: "profile-wide default action",
+	}
+	if got != want {
+		t.Fatalf("EffectiveNotifyPolicyForCategory(thermal) = %+v, want %+v", got, want)
+	}
+}
+
+func TestFeatureProfile_EffectiveNotifyPolicyForCategory_NoOverrideFallsBackToDefault(t *testing.T) {
+	p := categoryOverrideTestProfile()
+	got := p.EffectiveNotifyPolicyForCategory("cpu")
+	want := p.EffectiveNotifyPolicy()
+	if got != want {
+		t.Fatalf("EffectiveNotifyPolicyForCategory(cpu) = %+v, want profile default %+v", got, want)
+	}
+}
+
+func TestFeatureProfile_EffectiveNotifyPolicyForCategory_CompositeAndEmptyIgnoreOverrides(t *testing.T) {
+	p := categoryOverrideTestProfile()
+	want := p.EffectiveNotifyPolicy()
+	if got := p.EffectiveNotifyPolicyForCategory("composite_resource"); got != want {
+		t.Fatalf("composite_resource = %+v, want profile default %+v", got, want)
+	}
+	if got := p.EffectiveNotifyPolicyForCategory(""); got != want {
+		t.Fatalf("empty category = %+v, want profile default %+v", got, want)
+	}
+}
+
+func TestFeatureProfile_Validate_RejectsUnknownNotifyByCategoryCategory(t *testing.T) {
+	p := categoryOverrideTestProfile()
+	p.NotifyByCategory["network_error"] = NotifyPolicy{RunbookURL: "docs/x.md"}
+	if err := p.Validate(); err == nil {
+		t.Fatal("expected notifyByCategory referencing a category no feature declares to be rejected")
+	}
+}
+
+func TestFeatureProfile_Validate_RejectsInvalidNotifyByCategoryDestination(t *testing.T) {
+	p := categoryOverrideTestProfile()
+	p.NotifyByCategory["storage"] = NotifyPolicy{Critical: "pager"}
+	if err := p.Validate(); err == nil {
+		t.Fatal("expected an unsupported notifyByCategory[...].critical destination to be rejected")
+	}
+}
+
+func TestFeatureProfile_Categories_SortedDeduplicated(t *testing.T) {
+	p := categoryOverrideTestProfile()
+	got := p.Categories()
+	want := []string{"cpu", "storage", "thermal"}
+	if len(got) != len(want) {
+		t.Fatalf("Categories() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Categories() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestFeatureProfile_NotifySummaryByCategory(t *testing.T) {
+	p := categoryOverrideTestProfile()
+	summary := p.NotifySummaryByCategory()
+	byCategory := map[string]CategoryNotifySummary{}
+	for _, s := range summary {
+		byCategory[s.Category] = s
+	}
+	if s, ok := byCategory["storage"]; !ok || !s.Overridden || s.Policy.RunbookURL != "docs/runbooks/storage-alerts.md" {
+		t.Fatalf("storage summary = %+v", byCategory["storage"])
+	}
+	if s, ok := byCategory["cpu"]; !ok || s.Overridden || s.Policy.RunbookURL != "docs/runbooks/detection-engine.md" {
+		t.Fatalf("cpu summary = %+v", byCategory["cpu"])
+	}
+}

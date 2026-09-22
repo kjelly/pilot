@@ -75,6 +75,20 @@ rules at the transition/payload level:
    Teams is reserved for critical or explicitly `action_required=true`
    warnings, grouped by subject and signal rather than the absent `instance`
    label.
+8. A profile MAY set `notifyByCategory` to route/explain one resource
+   category (e.g. `storage`, `thermal`) differently than its profile-wide
+   `notify` default — only the fields an override actually sets apply; any
+   field an override leaves unset, and any category with no override at all,
+   falls back to the profile-wide default. An alert whose evidence spans more
+   than one category (`composite_resource`, see buildAlertEvidence) always
+   uses the profile-wide default, since no single category owns it. This
+   resolution is proven by `internal/detection`'s own Go unit test suite
+   (`featureprofile_test.go`'s `EffectiveNotifyPolicyForCategory`/`Validate`
+   cases, `featureprofile_edit_test.go`'s file-editing round trips, and
+   `engine_test.go::TestAlertNotification_RunbookURLDiffersByCategory`), the
+   same pattern C9/C10 already use for formula-level engine behavior — see
+   the note above. `pilot detection-engine feature-profile show/set-notify`
+   is the management-plane CLI for setting it without hand-editing YAML.
 
 ## Checks
 
@@ -202,3 +216,4 @@ evidence remains summarized in `docs/runbooks/detection-engine.md`.
 | 2026-08-28 | DRAFT | Stage A-2: initial Spec v2 authoring per spec §47's C1-C12. No actual-run evidence yet. |
 | 2026-08-28 | v1.0 | Real-lane + fake-lane actual-run evidence recorded (see docs/runbooks/detection-engine.md §2-§6.1); Stage A reaches VERIFICATION_READY. |
 | 2026-09-17 | v1.1 | Extend C11's fake-lane contract with actionable notification policy, valid resolve payloads, 60-second refresh, restart hydration/reconciliation, and warning absolute/composite gates; candidate `30d6b92` L1-L6 and runtime scenario evidence PASS. |
+| 2026-09-22 | v1.2 | Add contract point 8: `FeatureProfile.notifyByCategory` lets an operator override runbook/recommended-action/destinations per resource category instead of one profile-wide default; management-plane CLI `pilot detection-engine feature-profile show/set-notify` edits it without hand-editing YAML. No C-row added (same reasoning as C9/C10: exhaustive correctness is `internal/detection`'s own Go unit test suite, cited above); C1-C12 gate the deployed profile still parsing/loading unaffected. |

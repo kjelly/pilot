@@ -97,7 +97,7 @@ func buildAlertEvidence(fused FusedResult, current map[string]float64) alertEvid
 }
 
 func (p FeatureProfile) alertNotification(severity Severity, evidence alertEvidence) alertNotification {
-	policy := p.EffectiveNotifyPolicy()
+	policy := p.EffectiveNotifyPolicyForCategory(evidence.CategoryHint)
 	channel := policy.Warning
 	if severity == SeverityCritical {
 		channel = policy.Critical

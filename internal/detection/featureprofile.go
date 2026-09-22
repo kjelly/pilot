@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -162,7 +163,16 @@ type FeatureProfile struct {
 	Sampling  SamplingProfile `yaml:"sampling,omitempty"`
 	Lifecycle LifecyclePolicy `yaml:"lifecycle,omitempty"`
 	Notify    NotifyPolicy    `yaml:"notify,omitempty"`
-	Features  []Feature       `yaml:"features"`
+	// NotifyByCategory lets an operator route/explain one resource category
+	// (e.g. "storage", "thermal") differently than the profile-wide Notify
+	// default — a runbook written for a CPU baseline alert rarely tells an
+	// on-call responder anything useful about a disk saturation alert. Each
+	// entry only needs to set the fields it wants to override; any field left
+	// empty falls back to the profile-wide default (EffectiveNotifyPolicy),
+	// never to the NotifyPolicy zero value. A category with no entry here
+	// behaves exactly as before this field existed.
+	NotifyByCategory map[string]NotifyPolicy `yaml:"notifyByCategory,omitempty"`
+	Features         []Feature               `yaml:"features"`
 }
 
 // EffectiveNotifyPolicy fills omitted destinations with the safe default:
@@ -180,6 +190,64 @@ func (p FeatureProfile) EffectiveNotifyPolicy() NotifyPolicy {
 		n.RunbookURL = "docs/runbooks/detection-engine.md"
 	}
 	return n
+}
+
+// EffectiveNotifyPolicyForCategory resolves EffectiveNotifyPolicy and then
+// overlays any category-specific override from NotifyByCategory. Only the
+// fields an operator actually set on the override are applied — an override
+// that sets only runbookURL still inherits warning/critical/recommendedAction
+// from the profile-wide default. An empty or "composite_resource" category (a
+// local detector spanning more than one resource category, see
+// buildAlertEvidence) always resolves to the profile-wide default, since no
+// single category owns that alert.
+func (p FeatureProfile) EffectiveNotifyPolicyForCategory(category string) NotifyPolicy {
+	effective := p.EffectiveNotifyPolicy()
+	if category == "" || category == "composite_resource" {
+		return effective
+	}
+	override, ok := p.NotifyByCategory[category]
+	if !ok {
+		return effective
+	}
+	if override.Warning != "" {
+		effective.Warning = override.Warning
+	}
+	if override.Critical != "" {
+		effective.Critical = override.Critical
+	}
+	if override.RunbookURL != "" {
+		effective.RunbookURL = override.RunbookURL
+	}
+	if override.RecommendedAction != "" {
+		effective.RecommendedAction = override.RecommendedAction
+	}
+	return effective
+}
+
+// Categories returns the sorted, de-duplicated set of categories declared by
+// this profile's features.
+func (p FeatureProfile) Categories() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range p.Features {
+		if f.Category == "" || seen[f.Category] {
+			continue
+		}
+		seen[f.Category] = true
+		out = append(out, f.Category)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// hasCategory reports whether any feature in this profile declares category.
+func (p FeatureProfile) hasCategory(category string) bool {
+	for _, f := range p.Features {
+		if f.Category == category {
+			return true
+		}
+	}
+	return false
 }
 
 // EffectiveLifecyclePolicy fills omitted fields with the legacy lifecycle
@@ -305,6 +373,17 @@ func (p FeatureProfile) Validate() error {
 	}
 	if !allowedDestinations[notify.Critical] {
 		return fmt.Errorf("feature profile: notify.critical %q is not one of none, dashboard, digest, teams", notify.Critical)
+	}
+	for category, override := range p.NotifyByCategory {
+		if !p.hasCategory(category) {
+			return fmt.Errorf("feature profile: notifyByCategory references unknown category %q", category)
+		}
+		if override.Warning != "" && !allowedDestinations[override.Warning] {
+			return fmt.Errorf("feature profile: notifyByCategory[%q].warning %q is not one of none, dashboard, digest, teams", category, override.Warning)
+		}
+		if override.Critical != "" && !allowedDestinations[override.Critical] {
+			return fmt.Errorf("feature profile: notifyByCategory[%q].critical %q is not one of none, dashboard, digest, teams", category, override.Critical)
+		}
 	}
 	if p.Sampling.MaxSampleAge != "" {
 		if _, err := time.ParseDuration(p.Sampling.MaxSampleAge); err != nil {

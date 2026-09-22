@@ -202,6 +202,43 @@ func TestBuildAlertPayload_NonManagedSubjectNeverGetsPilotHost(t *testing.T) {
 	}
 }
 
+// TestAlertNotification_RunbookURLDiffersByCategory locks the actual
+// operator-facing effect notifyByCategory exists for: two alerts from the
+// same profile, differing only in which single category the evidence names,
+// end up carrying different runbook_url/recommended_action annotations once
+// they reach buildAlertPayload — the same wiring the Teams proxy renders.
+func TestAlertNotification_RunbookURLDiffersByCategory(t *testing.T) {
+	profile := categoryOverrideTestProfile()
+	now := time.Now()
+
+	storageEvidence := buildAlertEvidence(FusedResult{
+		Score: 0.95, Category: "storage", Source: "local", DetectorSource: "baseline",
+		Contributors: []Contributor{{Feature: "rootfs_used_ratio", Category: "storage", Score: 0.95}},
+	}, map[string]float64{"rootfs_used_ratio": 0.95})
+	storagePayload := buildAlertPayload("host-1", SubjectKindManagedHost, "site-a", "critical", "sig-1",
+		storageEvidence, profile.alertNotification(SeverityCritical, storageEvidence), profile.ID, now, now)
+
+	cpuEvidence := buildAlertEvidence(FusedResult{
+		Score: 0.95, Category: "cpu", Source: "local", DetectorSource: "baseline",
+		Contributors: []Contributor{{Feature: "cpu_utilization", Category: "cpu", Score: 0.95}},
+	}, map[string]float64{"cpu_utilization": 0.95})
+	cpuPayload := buildAlertPayload("host-1", SubjectKindManagedHost, "site-a", "critical", "sig-2",
+		cpuEvidence, profile.alertNotification(SeverityCritical, cpuEvidence), profile.ID, now, now)
+
+	if got := storagePayload.Annotations["runbook_url"]; got != "docs/runbooks/storage-alerts.md" {
+		t.Errorf("storage runbook_url = %q, want the category override", got)
+	}
+	if got := storagePayload.Annotations["recommended_action"]; got != "check disk saturation dashboard first" {
+		t.Errorf("storage recommended_action = %q, want the category override", got)
+	}
+	if got := cpuPayload.Annotations["runbook_url"]; got != "docs/runbooks/detection-engine.md" {
+		t.Errorf("cpu runbook_url = %q, want the profile-wide default (no cpu override configured)", got)
+	}
+	if got := cpuPayload.Annotations["recommended_action"]; got != "profile-wide default action" {
+		t.Errorf("cpu recommended_action = %q, want the profile-wide default", got)
+	}
+}
+
 // TestBuildAlertEvidence_ExplainsCompositeLocalDeviation keeps the old
 // top_contributors wire contract while adding enough evidence to distinguish
 // a multi-resource baseline deviation from a single CPU-rooted alert.
