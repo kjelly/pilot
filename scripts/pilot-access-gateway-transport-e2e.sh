@@ -11,9 +11,11 @@
 #
 #   --phase strict      gateway transport enabled, target policy present
 #                       (strict), recording metadata: AG63-AG67, AG70-AG72,
-#                       TP06 (member), TP07, TP09
+#                       TP06 (member), TP07 (-L/-D/-R/-A/-X/-w), TP09
 #   --phase remote-dev  same, target profile remote-dev: AG63 (ssh), TP08
-#   --phase recording   gateway recording terminal_output: AG69
+#   --phase recording   gateway recording terminal_output: AG69 (transport
+#                       refused; pilot-connect's local FileSink file holds
+#                       the session output while it runs)
 #   --phase not-ready   target policy absent: AG68, TP06 (not a member), TP10
 #   --phase disabled    gateway transport disabled/unset: AG62/AG73 (+AG72)
 #
@@ -104,6 +106,7 @@ BG_PIDS=()
 cleanup() {
   for p in "${BG_PIDS[@]:-}"; do kill "$p" >/dev/null 2>&1 || true; done
   as_ws "pkill -u $WS_USER -f '[s]sh -F .*pilot-e2e' ; rm -f /tmp/$MARK*; rm -rf /tmp/$MARK.tree" >/dev/null 2>&1 || true
+  on_ws "ip tuntap del dev tun97 mode tun" >/dev/null 2>&1 || true
   on_tgt "pkill -f '^python3 -m http.server $LPORT' ; rm -rf /tmp/$MARK*" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -292,12 +295,19 @@ PY
 
 # pilot-connect through the gateway with the session-scoped Kerberos
 # password, landing in the target shell (legacy path, AG72/AG69).
+# pilot-connect's session id is a caller-chosen UUID; a fixed one lets the
+# AG69 watcher find that session's FileSink file on the gateway.
+CONNECT_SID=0d33c638-83fa-4d77-9811-a97a7a7af1d5
 run_pilot_connect() {
-  local marker=$1
+  local marker=$1 hold=${2:-0} leave="exit"
+  # hold > 0 keeps the target shell open for that many seconds after the
+  # marker, so a gateway-side check can see files that only exist while the
+  # portal user is logged in (/run/user/<uid> is removed at logout).
+  [ "$hold" -gt 0 ] && leave="sleep $hold; exit"
   PORTAL_PASSWORD="$PORTAL_PASSWORD" expect -f - <<EOF 2>&1
 set timeout 45
 log_user 1
-spawn ssh -tt -i $PORTAL_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $PORTAL_USER@$GATEWAY_HOST -- pilot-connect 0d33c638-83fa-4d77-9811-a97a7a7af1d5 $TARGET_FQDN
+spawn ssh -tt -i $PORTAL_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $PORTAL_USER@$GATEWAY_HOST -- pilot-connect $CONNECT_SID $TARGET_FQDN
 expect {
   "Kerberos password" { send "\$env(PORTAL_PASSWORD)\r" }
   timeout { puts "NO-PASSWORD-PROMPT"; exit 1 }
@@ -312,9 +322,37 @@ expect {
   "$marker-$PORTAL_USER-$TARGET_FQDN" {}
   timeout { puts "NO-MARKER"; exit 1 }
 }
-send "exit\r"
+send "$leave\r"
 expect eof
 EOF
+}
+
+# AG69: poll the gateway for pilot-connect's local FileSink file
+# (<runtime dir>/pilot-session-recordings/<session>.ndjson) until its decoded
+# terminal output contains the marker. Prints "FILE <path> <owner> <mode>
+# <events>" or "NO-FILE".
+watch_recording_file() {
+  local marker=$1
+  on_gw "bash -s -- $CONNECT_SID $(printf %q "$marker")" <<'EOS'
+sid=$1 marker=$2
+for _ in $(seq 1 90); do
+  for f in /run/user/*/pilot-session-recordings/$sid.ndjson /tmp/pilot-session-recordings/$sid.ndjson; do
+    [ -f "$f" ] || continue
+    n=$(python3 - "$f" "$marker" <<'PY'
+import base64, json, sys
+data, events = b"", 0
+for line in open(sys.argv[1]):
+    events += 1
+    data += base64.b64decode(json.loads(line).get("data_base64", ""))
+print(events if sys.argv[2].encode() in data else "")
+PY
+)
+    if [ -n "$n" ]; then echo "FILE $(stat -c '%n %U %a' "$f") $n"; exit 0; fi
+  done
+  sleep 0.5
+done
+echo NO-FILE
+EOS
 }
 
 probe_pilot_connect() { # AG72 (legacy one-shot connect still works)
@@ -401,6 +439,22 @@ probe_remote_forward_refused() {
   fi
 }
 
+probe_tunnel_refused() { # TP07 -w
+  # An unprivileged ssh cannot create a tun device ("Tunnel device open
+  # failed", a client-side failure that proves nothing about the target), so
+  # root pre-creates one owned by WS_USER; the only remaining refusal is the
+  # target sshd's own.
+  local id=$1 out
+  on_ws "ip tuntap add dev tun97 mode tun user $WS_USER" >/dev/null 2>&1
+  out=$(as_ws "$TSSH -v -o ExitOnForwardFailure=yes -w 97:any $TARGET_FQDN echo TUNNEL-SESSION-RAN 2>&1; echo rc=\$?")
+  on_ws "ip tuntap del dev tun97 mode tun" >/dev/null 2>&1
+  if grep -q 'Server has rejected tunnel device forwarding' <<<"$out" && ! grep -q '^TUNNEL-SESSION-RAN' <<<"$out" && ! grep -q '^rc=0' <<<"$out"; then
+    emit "$id" pass "$(grep -E 'Server has rejected|Tunnel forwarding failed|^rc=' <<<"$out" | tr -d '\r' | tr '\n' ' ')"
+  else
+    emit "$id" fail "$(grep -i -E 'tun|rejected|^rc=' <<<"$out" | tail -6 | tr -d '\r' | tr '\n' ' ')"
+  fi
+}
+
 # ---- phases -------------------------------------------------------------------
 PHASE_START=$(on_gw "date +%s")
 case "$PHASE" in
@@ -422,6 +476,7 @@ case "$PHASE" in
     grep -qx 'AUTH_SOCK=none' <<<"$out" && emit TP07-agent-forward-refused pass "SSH_AUTH_SOCK absent on the target despite -A" || emit TP07-agent-forward-refused fail "$out"
     out=$(as_ws "DISPLAY=:99 $TSSH -X $TARGET_FQDN 'echo DISPLAY=\${DISPLAY:-none}' 2>&1")
     grep -qx 'DISPLAY=none' <<<"$out" && emit TP07-x11-forward-refused pass "DISPLAY unset on the target despite -X: $(grep -m1 -i x11 <<<"$out" || true)" || emit TP07-x11-forward-refused fail "$out"
+    probe_tunnel_refused TP07-tunnel-forward-refused
     # TP09: a non-gateway session (controller as root, direct) keeps the baseline.
     out=$(on_tgt true >/dev/null; ssh -i "$TARGET_ADMIN_KEY" "${ADMIN_OPTS[@]}" -o ExitOnForwardFailure=yes -N -L 127.0.0.1:19184:localhost:$LPORT "root@$TARGET_HOST" & sp=$!; sleep 3; code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:19184/ || true); kill $sp 2>/dev/null; echo "$code")
     [ "$out" = 200 ] && emit TP09-non-gateway-unaffected pass "direct (non-gateway) -L to target loopback still works: HTTP 200" || emit TP09-non-gateway-unaffected fail "HTTP=$out"
@@ -446,12 +501,17 @@ case "$PHASE" in
       emit AG69-pilot-connect-still-records skip "PORTAL_KEY/PORTAL_PASSWORD unset"
     else
       since=$(on_gw "date +%s")
-      out=$(run_pilot_connect "RC-$MARK")
+      wtmp=$(mktemp)
+      watch_recording_file "RC-$MARK-$PORTAL_USER-$TARGET_FQDN" >"$wtmp" 2>&1 &
+      wpid=$!
+      out=$(run_pilot_connect "RC-$MARK" 10)
+      wait "$wpid"
+      file=$(tail -1 "$wtmp"); rm -f "$wtmp"
       started=$(on_gw "journalctl -t pilot-access-gateway --since @$since --no-pager -o cat | grep -c '\"kind\":\"recording_started\"' || true")
-      if grep -q "RC-$MARK-$PORTAL_USER-$TARGET_FQDN" <<<"$out" && [ "${started:-0}" -ge 1 ]; then
-        emit AG69-pilot-connect-still-records pass "recorded pilot-connect reached the target shell; recording_started events=$started"
+      if grep -q "RC-$MARK-$PORTAL_USER-$TARGET_FQDN" <<<"$out" && [ "${started:-0}" -ge 1 ] && [ "${file%% *}" = FILE ]; then
+        emit AG69-pilot-connect-still-records pass "recorded pilot-connect reached the target shell; recording_started events=$started; ${file#FILE } (path owner mode events), output marker found in the decoded file"
       else
-        emit AG69-pilot-connect-still-records fail "recording_started=$started out=$(tail -c 400 <<<"$out")"
+        emit AG69-pilot-connect-still-records fail "recording_started=$started file=[$file] out=$(tail -c 400 <<<"$out")"
       fi
     fi
     ;;
