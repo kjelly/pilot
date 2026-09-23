@@ -59,7 +59,7 @@ func editActionRegistry() []editActionDef {
 				Description:              "set one supported non-secret host field; ansible_host on a freeipa-client host, changing between two IP literals, requires confirm (spec.md §11.7 — the Day-2 DNS-replacement acknowledgement)",
 				Required:                 []string{"host", "field", "value"},
 				Optional:                 []string{"confirm"},
-				Values:                   map[string][]string{"field": {"ansible_host", "ansible_user", "ssh_key_file", "env", "deployment_availability"}},
+				Values:                   map[string][]string{"field": {"ansible_host", "ansible_user", "ssh_key_file", "env", "deployment_availability", "ssh_recording"}},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
 				SecretHandling:           SecretHandlingNone,
@@ -2201,6 +2201,13 @@ func validateSetHostField(step editAction) error {
 		value := inventory.DeploymentAvailability(step.Value)
 		if value != inventory.DeploymentAvailabilityRequired && value != inventory.DeploymentAvailabilityOptional {
 			return fmt.Errorf("unsupported deployment_availability value %q", step.Value)
+		}
+	}
+	if step.Field == "ssh_recording" {
+		switch step.Value {
+		case sshRecordingInherit, string(inventory.SSHRecordingOff), string(inventory.SSHRecordingTerminalOutput):
+		default:
+			return fmt.Errorf("unsupported ssh_recording value %q (must be inherit|off|terminal_output)", step.Value)
 		}
 	}
 	if step.Confirm != "" && step.Confirm != "yes" && step.Confirm != "no" {

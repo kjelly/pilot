@@ -39,7 +39,7 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 
 	// host menu items: 0 ansible_host, 1 ansible_user, 2 ssh key, 3 env,
 	// 4 roles, 5 extra vars, 6 annotations, 7 deployment availability,
-	// 8 delete, 9 back-to-list
+	// 8 ssh recording, 9 delete, 10 back-to-list
 	for i := 0; i < 4; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
@@ -55,8 +55,8 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "✅ 完成" -> back to host menu
 
-	// host menu again (cursor reset to 0); navigate to "↩ 返回主機清單" (index 9)
-	for i := 0; i < 9; i++ {
+	// host menu again (cursor reset to 0); navigate to "↩ 返回主機清單" (index 10)
+	for i := 0; i < 10; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to host list
@@ -121,7 +121,7 @@ func TestEditRouter_Teatest_HostDeploymentAvailabilityOptionalAndSave(t *testing
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // optional -> host menu
 
-	for i := 0; i < 9; i++ {
+	for i := 0; i < 10; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // return to host list
@@ -145,6 +145,53 @@ func TestEditRouter_Teatest_HostDeploymentAvailabilityOptionalAndSave(t *testing
 	}
 	if got := hf.Hosts[0].DeploymentAvailability; got != inventory.DeploymentAvailabilityOptional {
 		t.Fatalf("deployment_availability = %q, want optional\n%s", got, data)
+	}
+}
+
+func TestEditRouter_Teatest_HostSSHRecordingTerminalOutputAndSave(t *testing.T) {
+	dir := t.TempDir()
+	router := newEditRouterModel(dir)
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // top menu: hosts.yml
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // default path
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // start blank
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // add host
+	tm.Type("db-1")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // host name -> host menu
+
+	for i := 0; i < 8; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // ssh recording (initial = inherit)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // terminal_output -> host menu
+
+	for i := 0; i < 10; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // return to host list
+	for i := 0; i < 3; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save
+	for i := 0; i < 10; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("read hosts.yml: %v", err)
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		t.Fatalf("parse hosts.yml: %v\n%s", err, data)
+	}
+	if got := hf.Hosts[0].SSHRecording; got != inventory.SSHRecordingTerminalOutput {
+		t.Fatalf("ssh_recording = %q, want terminal_output\n%s", got, data)
 	}
 }
 
@@ -174,6 +221,7 @@ func TestHostMenuItems_MetadataHasStableUniqueIDs(t *testing.T) {
 		"hosts.item.annotations",
 		"hosts.item.host_vars",
 		"hosts.item.deployment_availability",
+		"hosts.item.ssh_recording",
 		"hosts.item.delete",
 		"hosts.item.back",
 	} {

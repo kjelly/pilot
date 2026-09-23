@@ -54,6 +54,9 @@ func Render(hf *HostsFile) (string, error) {
 		if h.DeploymentAvailability != "" {
 			fmt.Fprintf(&sb, "    deployment_availability: %s\n", quoteScalar(string(h.DeploymentAvailability)))
 		}
+		if h.SSHRecording != "" {
+			fmt.Fprintf(&sb, "    ssh_recording: %s\n", quoteScalar(string(h.SSHRecording)))
+		}
 		for _, k := range sortedKeys(h.Extra) {
 			fmt.Fprintf(&sb, "    %s: %s\n", k, quoteScalar(h.Extra[k]))
 		}
