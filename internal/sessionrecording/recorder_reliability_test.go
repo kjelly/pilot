@@ -250,8 +250,11 @@ func TestRecorderBestEffortQueueFullDropsAndIncomplete(t *testing.T) {
 	outerPtm, outerPts := openOuterPty(t)
 	done := make(chan error, 1)
 	go func() { done <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
-	for i := 0; i < 30; i++ {
+	// Paced writes arrive as separate chunks while the sink is busy for
+	// 50ms, so the one-slot queue must overflow.
+	for i := 0; i < 40; i++ {
 		_, _ = outerPts.Write([]byte("burst\n"))
+		time.Sleep(2 * time.Millisecond)
 	}
 	time.Sleep(200 * time.Millisecond)
 	_ = cmd.Process.Kill()
@@ -410,4 +413,61 @@ type closingReader struct{ ch chan struct{} }
 func (r *closingReader) Read([]byte) (int, error) {
 	<-r.ch
 	return 0, io.EOF
+}
+
+// TestRecorderFailClosedStopsRelaying: once fail_closed trips, nothing more
+// crosses the relay in either direction, even while Run is still draining
+// and finishing (found live, per-host recording spec L13: output kept
+// flowing, unrecorded, for the length of the finish attempt).
+func TestRecorderFailClosedStopsRelaying(t *testing.T) {
+	sink := &memSink{block: true}
+	rec := New(Options{Mode: ModeTerminalOutput, SessionID: "sess-stop", FailurePolicy: FailurePolicyFailClosed, QueueEvents: 64, FlushInterval: 10 * time.Millisecond, FailureGrace: 150 * time.Millisecond}, sink, testEmitter(t))
+	childPtm, cmd := startCatChild(t)
+	outerPtm, outerPts := openOuterPty(t)
+	done := make(chan error, 1)
+	go func() { done <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	if _, err := outerPts.Write([]byte("before\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-rec.failClosedCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fail_closed never tripped against a hung sink")
+	}
+
+	var seen bytes.Buffer
+	var mu sync.Mutex
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			n, err := outerPts.Read(buf)
+			mu.Lock()
+			seen.Write(buf[:n])
+			mu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	if _, err := outerPts.Write([]byte("AFTER_TRIP_MARKER\n")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	leaked := strings.Contains(seen.String(), "AFTER_TRIP_MARKER")
+	mu.Unlock()
+	if leaked {
+		t.Fatal("input typed after fail_closed reached the child and its echo came back unrecorded")
+	}
+	_ = cmd.Process.Kill()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrRecordingFailedClosed) {
+			t.Fatalf("Run = %v, want ErrRecordingFailedClosed", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Run did not return")
+	}
 }

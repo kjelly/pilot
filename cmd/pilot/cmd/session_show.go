@@ -7,9 +7,10 @@ import (
 )
 
 var sessionShowCmd = &cobra.Command{
-	Use:   "show <session-id>",
-	Short: "Show one recorded session's index metadata",
-	Args:  cobra.ExactArgs(1),
+	Use:          "show <session-id>",
+	Short:        "Show one recorded session's index metadata",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newSessionStoreClient(sessionSocketFlag)
 		s, err := client.GetSession(cmd.Context(), args[0])

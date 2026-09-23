@@ -221,12 +221,22 @@
       ansible.builtin.stat:
         path: /etc/ipa/default.conf
       register: session_store_ipa_default_conf
-      tags: [SS_enrollment]
+      tags: [always]
+
+    # A --check preview of a host that the same run would enroll first
+    # (site.yml or a topology test on fresh VMs): freeipa-client's real
+    # enrollment is skipped in check mode, so enrollment, the forward DNS
+    # record and SSSD group resolution cannot exist yet. Only in that
+    # preview are the gates asserting them relaxed (AGENTS.md §4.0).
+    - name: "Detect a check-mode preview of a host that is not enrolled yet"
+      ansible.builtin.set_fact:
+        session_store_fresh_preview: "{{ ansible_check_mode and not session_store_ipa_default_conf.stat.exists }}"
+      tags: [always]
 
     - name: "Gate: this host must already be FreeIPA-enrolled"
       ansible.builtin.assert:
         that:
-          - session_store_ipa_default_conf.stat.exists
+          - session_store_ipa_default_conf.stat.exists or session_store_fresh_preview
         fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
       tags: [SS_enrollment]
 
@@ -241,7 +251,7 @@
     - name: "Gate: this host must have a forward DNS record before requesting a service certificate"
       ansible.builtin.assert:
         that:
-          - session_store_dns_check.rc == 0
+          - session_store_dns_check.rc == 0 or session_store_fresh_preview
         fail_msg: >-
           {{ session_store_effective_fqdn }} does not resolve. The
           ipa-getcert request below needs a forward DNS record. Re-run
@@ -295,7 +305,9 @@
     - name: "Gate: auditor group must resolve via SSSD"
       ansible.builtin.assert:
         that:
-          - session_store_auditor_group_check.rc == 0
+          # In check mode the group-add above is skipped, so a group this
+          # run would create cannot resolve yet.
+          - session_store_auditor_group_check.rc == 0 or ansible_check_mode
         fail_msg: >-
           Group {{ pilot_session_store_auditor_group }} was just
           created/confirmed in FreeIPA above but does not resolve locally

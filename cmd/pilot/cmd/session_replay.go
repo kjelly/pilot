@@ -26,7 +26,8 @@ If the recording has a gap (a missing sequence number — data lost to
 backpressure, a crashed sink, or a truncated transfer), "RECORDING
 INCOMPLETE" is printed prominently before playback, exactly as spec.md
 §29 requires it never be hidden.`,
-	Args: cobra.ExactArgs(1),
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newSessionStoreClient(sessionSocketFlag)
 		result, err := client.Replay(cmd.Context(), args[0], "replay")

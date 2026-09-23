@@ -31,8 +31,9 @@ var sessionCmd = &cobra.Command{
 }
 
 var sessionListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List recorded sessions",
+	Use:          "list",
+	Short:        "List recorded sessions",
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newSessionStoreClient(sessionSocketFlag)
 		resp, err := client.ListSessions(cmd.Context(), sessionUserFlag)

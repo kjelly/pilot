@@ -337,6 +337,10 @@ func (r *Recorder) watchResize(out io.Writer, ptyFile *os.File, events chan<- Te
 
 // relay copies src to dst, recording what it copies. The relay is
 // byte-for-byte transparent: recording is a side channel.
+//
+// Each chunk is queued before it is forwarded, and once fail_closed has
+// tripped nothing more is forwarded in either direction: the session must
+// not keep exchanging unrecorded bytes while Run drains and finishes.
 func (r *Recorder) relay(src io.Reader, dst io.Writer, stream string, echoFile *os.File, events chan<- TerminalEvent) error {
 	buf := make([]byte, copyBufSize)
 	recordInput := stream == StreamTTYInput && r.opts.Mode == ModeTerminalIO
@@ -344,13 +348,16 @@ func (r *Recorder) relay(src io.Reader, dst io.Writer, stream string, echoFile *
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
-			if _, werr := dst.Write(buf[:n]); werr != nil {
-				return werr
-			}
 			if recordInput {
 				r.enqueueInput(events, echoFile, buf[:n])
 			} else if recordOutput {
 				r.enqueue(events, TerminalEvent{Stream: StreamTTYOutput, DataBase64: base64.StdEncoding.EncodeToString(buf[:n])})
+			}
+			if r.failedClosed() {
+				return ErrRecordingFailedClosed
+			}
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return werr
 			}
 		}
 		if err != nil {
@@ -459,6 +466,16 @@ func (r *Recorder) triggerFailClosed(reason string) {
 		close(r.failClosedCh)
 		r.cancelWriter()
 	})
+}
+
+// failedClosed reports whether fail_closed has tripped.
+func (r *Recorder) failedClosed() bool {
+	select {
+	case <-r.failClosedCh:
+		return true
+	default:
+		return false
+	}
 }
 
 // startWatchdog enforces FailureGrace in wall-clock time, independently of

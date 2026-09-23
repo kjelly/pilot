@@ -341,12 +341,23 @@
       ansible.builtin.stat:
         path: /etc/ipa/default.conf
       register: gateway_ipa_default_conf
-      tags: [AG_enrollment]
+      tags: [always]
+
+    # A --check preview of a host that the same run would enroll first
+    # (site.yml or a topology test on fresh VMs): freeipa-client's real
+    # enrollment is skipped in check mode, so enrollment, the forward DNS
+    # record, the FreeIPA CA and SSSD group resolution cannot exist yet.
+    # Only in that preview are the gates asserting them relaxed
+    # (AGENTS.md §4.0).
+    - name: "Step 2: detect a check-mode preview of a host that is not enrolled yet"
+      ansible.builtin.set_fact:
+        gateway_fresh_preview: "{{ ansible_check_mode and not gateway_ipa_default_conf.stat.exists }}"
+      tags: [always]
 
     - name: "Step 2: gate — this host must already be FreeIPA-enrolled"
       ansible.builtin.assert:
         that:
-          - gateway_ipa_default_conf.stat.exists
+          - gateway_ipa_default_conf.stat.exists or gateway_fresh_preview
         fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
       tags: [AG_enrollment]
 
@@ -369,7 +380,7 @@
     - name: "Step 2: gate — this host must have a forward DNS record before FreeIPA service enrollment"
       ansible.builtin.assert:
         that:
-          - gateway_dns_check.rc == 0
+          - gateway_dns_check.rc == 0 or gateway_fresh_preview
         fail_msg: >-
           {{ gateway_effective_fqdn }} does not resolve. `ipa service-add` (step 8)
           requires a forward DNS record. Re-run freeipa-client-apply.yml
@@ -537,7 +548,7 @@
       ansible.builtin.stat:
         path: "{{ ipa_ca_file }}"
       register: gateway_ca_stat
-      failed_when: not gateway_ca_stat.stat.exists
+      failed_when: not gateway_ca_stat.stat.exists and not gateway_fresh_preview
       tags: [AG_enrollment, AG04]
 
     - name: "Create pilot-gateway system user (spec.md §25)"
@@ -641,7 +652,9 @@
     - name: "Gate: portal-user group must resolve via SSSD"
       ansible.builtin.assert:
         that:
-          - gateway_portal_group_check.rc == 0
+          # In check mode the group-add above is skipped, so a group this
+          # run would create cannot resolve yet.
+          - gateway_portal_group_check.rc == 0 or ansible_check_mode
         fail_msg: >-
           Group {{ gateway_effective_portal_user_group }} was just
           created/confirmed in FreeIPA above but does not resolve locally

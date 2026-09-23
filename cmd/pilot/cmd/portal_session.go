@@ -135,6 +135,8 @@ func parsePortalSSHOriginalCommand(raw string) (cmd *portalConnectCommand, inter
 var portalSessionCmd = &cobra.Command{
 	Use:    "portal-session",
 	Hidden: true,
+	// The user's whole SSH session: a runtime failure must not print usage.
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runPortalSession(cmd, os.Getenv("SSH_ORIGINAL_COMMAND"))
 	},

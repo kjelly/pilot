@@ -204,12 +204,22 @@
       ansible.builtin.stat:
         path: /etc/ipa/default.conf
       register: directory_ipa_default_conf
-      tags: [AD_enrollment]
+      tags: [always]
+
+    # A --check preview of a host that the same run would enroll first
+    # (site.yml or a topology test on fresh VMs): freeipa-client's real
+    # enrollment is skipped in check mode, so enrollment, the forward DNS
+    # record and SSSD group resolution cannot exist yet. Only in that
+    # preview are the gates asserting them relaxed (AGENTS.md §4.0).
+    - name: "Step 3: detect a check-mode preview of a host that is not enrolled yet"
+      ansible.builtin.set_fact:
+        directory_fresh_preview: "{{ ansible_check_mode and not directory_ipa_default_conf.stat.exists }}"
+      tags: [always]
 
     - name: "Step 3: gate — this host must already be FreeIPA-enrolled"
       ansible.builtin.assert:
         that:
-          - directory_ipa_default_conf.stat.exists
+          - directory_ipa_default_conf.stat.exists or directory_fresh_preview
         fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
       tags: [AD_enrollment]
 
@@ -227,7 +237,7 @@
     - name: "Step 4: gate — this host must have a forward DNS record before FreeIPA service enrollment"
       ansible.builtin.assert:
         that:
-          - directory_dns_check.rc == 0
+          - directory_dns_check.rc == 0 or directory_fresh_preview
         fail_msg: >-
           {{ directory_effective_fqdn }} does not resolve. `ipa service-add`
           (Step 9) requires a forward DNS record. Re-run
@@ -345,7 +355,9 @@
     - name: "Gate: portal-user group must resolve via SSSD"
       ansible.builtin.assert:
         that:
-          - directory_portal_group_check.rc == 0
+          # In check mode the group-add above is skipped, so a group this
+          # run would create cannot resolve yet.
+          - directory_portal_group_check.rc == 0 or ansible_check_mode
         fail_msg: >-
           Group {{ directory_effective_portal_user_group }} was just
           created/confirmed in FreeIPA above but does not resolve locally
@@ -398,12 +410,15 @@
       changed_when: true
       tags: [AD_keytab]
 
+    # Under --check on a fresh host the keytab retrieval above is skipped,
+    # so there is no file to fix up yet (AGENTS.md §4.0 fresh-host check).
     - name: "Step 8: keytab ownership/mode"
       ansible.builtin.file:
         path: /etc/pilot/pilot-access-directory.keytab
         owner: "{{ pilot_directory_user }}"
         group: "{{ pilot_directory_user }}"
         mode: "0400"
+      when: not (ansible_check_mode and not directory_keytab_stat.stat.exists)
       tags: [AD_keytab]
 
     # Step 9 (spec.md §31/§8.2): confirm the reader can actually list
@@ -650,25 +665,33 @@
       when: directory_socket_unit.changed or directory_service_unit.changed
       tags: [AD_service]
 
+    # A fresh host previewed with --check --diff never had the unit files
+    # written, so systemd cannot find them: skip rather than fail the
+    # preview (AGENTS.md §4.0).
     - name: "Step 16: enable + start pilot-access-directory.socket"
       ansible.builtin.systemd:
         name: pilot-access-directory.socket
         enabled: true
         state: started
+      when: not (ansible_check_mode and directory_socket_unit.changed)
       tags: [AD_service]
 
     - name: "Restart pilot-access-directory.socket if its unit file changed"
       ansible.builtin.systemd:
         name: pilot-access-directory.socket
         state: restarted
-      when: directory_socket_unit.changed
+      when:
+        - not ansible_check_mode
+        - directory_socket_unit.changed
       tags: [AD_service]
 
     - name: "Restart pilot-access-directory.service if the binary or config changed"
       ansible.builtin.systemd:
         name: pilot-access-directory.service
         state: restarted
-      when: directory_binary_copy.changed or directory_config_copy.changed
+      when:
+        - not ansible_check_mode
+        - directory_binary_copy.changed or directory_config_copy.changed
       tags: [AD_service]
 
     # Step 17 (spec.md §31): capability probe — a real connection over
