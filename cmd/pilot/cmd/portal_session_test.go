@@ -206,3 +206,14 @@ func TestRunPortalSession_TTYPolicy(t *testing.T) {
 		})
 	}
 }
+
+// TestPortalSessionCmdPrintsOneStderrLine locks the single-line error
+// contract (captive-transport spec §9.6): cobra must neither print usage nor
+// echo the error a second time — cmd/pilot/main.go already prints it, and
+// on the transport path that stderr lands verbatim in the user's terminal
+// (found live, Phase 3 evidence).
+func TestPortalSessionCmdPrintsOneStderrLine(t *testing.T) {
+	if !portalSessionCmd.SilenceUsage || !portalSessionCmd.SilenceErrors {
+		t.Fatalf("portal-session must set SilenceUsage and SilenceErrors (got %v/%v)", portalSessionCmd.SilenceUsage, portalSessionCmd.SilenceErrors)
+	}
+}

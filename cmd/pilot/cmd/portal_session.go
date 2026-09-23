@@ -193,13 +193,16 @@ func portalSessionHasAnyTTY() bool {
 // portalSessionCmd is the hidden entry point
 // `/usr/local/libexec/pilot-session`'s wrapper script execs into. Hidden
 // because it is never meant to be run interactively by an operator — it
-// exists purely as sshd's ForceCommand target. SilenceUsage keeps a denial
-// to a single stderr line: for the transport states that stderr is shown
-// straight in the user's terminal by their ProxyCommand/KnownHostsCommand.
+// exists purely as sshd's ForceCommand target. SilenceUsage and
+// SilenceErrors keep a denial to a single stderr line (cmd/pilot/main.go
+// prints the error itself; cobra would print it a second time): for the
+// transport states that stderr is shown straight in the user's terminal by
+// their ProxyCommand/KnownHostsCommand.
 var portalSessionCmd = &cobra.Command{
-	Use:          "portal-session",
-	Hidden:       true,
-	SilenceUsage: true,
+	Use:           "portal-session",
+	Hidden:        true,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runPortalSession(cmd, os.Getenv("SSH_ORIGINAL_COMMAND"))
 	},
