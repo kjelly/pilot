@@ -3,7 +3,7 @@
 // tui_confirm.go), replacing the old promptui-based
 // promptSelectIndex/promptText/promptConfirm (deploy.go used to define
 // these directly on promptui; pilot edit's equivalents are
-// runSelectProgram/runTextProgram/runConfirmProgram's cousins,
+// runSelectPrompt/runTextPrompt/runConfirmPrompt's cousins,
 // selectModel/textInputModel/confirmModel embedded in a router).
 //
 // Unlike pilot edit's router (edit_tui.go), pilot deploy does NOT use
@@ -64,15 +64,6 @@ import (
 // editRouterModel.uiFactory().
 var deployUIFactory tui.Factory = tui.NewHuhFactory()
 
-// runSelectProgram is promptSelectIndex's Bubble Tea equivalent. It
-// runs the screen wrapped in standaloneScreen (tui_screen.go) since a
-// router-embedded screen never calls tea.Quit itself — only a router
-// (or, here, standaloneScreen standing in for one) decides when a
-// one-shot prompt's Program should actually exit.
-func runSelectProgram(label string, items []string) (int, error) {
-	return runSelectPrompt("", label, items)
-}
-
 func runSelectPrompt(id, label string, items []string) (int, error) {
 	if activePromptAutomation != nil {
 		return activePromptAutomation.selectPrompt(id, label, items)
@@ -93,7 +84,7 @@ func runSelectPrompt(id, label string, items []string) (int, error) {
 	return fm.Selected(), nil
 }
 
-// runMultiSelectProgram is the checklist counterpart to runSelectProgram.
+// runMultiSelectProgram is the checklist counterpart to runSelectPrompt.
 // It returns the selected item indexes in their original menu order so the
 // caller can keep its catalog ordering deterministic while still letting the
 // operator select several actions in one wizard.
@@ -134,11 +125,6 @@ func runMultiSelectProgram(label string, items []string) ([]int, error) {
 	return indexes, nil
 }
 
-// runTextProgram is promptText's Bubble Tea equivalent.
-func runTextProgram(label, def string, validate func(string) error) (string, error) {
-	return runTextPrompt("", label, def, validate)
-}
-
 func runTextPrompt(id, label, def string, validate func(string) error) (string, error) {
 	if activePromptAutomation != nil {
 		return activePromptAutomation.textPrompt(id, label, def, validate)
@@ -153,15 +139,6 @@ func runTextPrompt(id, label, def string, validate func(string) error) (string, 
 		return "", errDeployAborted
 	}
 	return fm.Value(), nil
-}
-
-// runConfirmProgram is promptConfirm's Bubble Tea equivalent — it
-// matches promptConfirm's existing contract exactly: it never returns
-// an error, and esc/ctrl+c resolves to "no" (ConfirmScreen.Canceled()
-// is always false; see tui_confirm.go's doc comment), not a
-// wizard-level abort.
-func runConfirmProgram(question string, defaultYes bool) bool {
-	return runConfirmPrompt("", question, defaultYes)
 }
 
 func runConfirmPrompt(id, question string, defaultYes bool) bool {

@@ -209,14 +209,12 @@ func BuildComponentOutput(runtimeKind, verifySpec string, dependencyChecks []Dep
 }
 
 func classifyComponentHealth(out ComponentOutput) string {
-	degraded := false
+	degraded := out.RuntimeConfigured && !out.RuntimePresent
 	// A runtime that doesn't exist at all (docker container never
 	// created/removed) is confident evidence of "down", not a gap in
 	// evidence — RuntimePresent=false implies RuntimeRunning=false too,
 	// so this single check covers both.
-	if out.RuntimeConfigured && !out.RuntimePresent {
-		degraded = true
-	}
+
 	if out.RuntimeConfigured && out.RuntimePresent && !out.RuntimeRunning {
 		degraded = true
 	}

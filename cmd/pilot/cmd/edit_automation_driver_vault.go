@@ -20,40 +20,25 @@ import (
 	"github.com/kjelly/pilot/internal/tui"
 )
 
-// normalizeVaultFileName appends ".yaml" to file when it doesn't already end
-// in ".yaml"/".yml" — mirroring pushVaultPathPrompt's prefilled default
-// (edit_tui_vault.go, "main.yaml") and scanVaultFiles' accepted suffix set
-// (edit.go), the only two things that decide what a *human* ends up naming
-// a new vault file. Without this, a scenario step with file: "main" created
-// a literal extension-less ".vault/main" on a fresh workspace (openVaultFile
-// used to join the raw name onto ".vault/" verbatim) — a file every
-// .vault/main.yaml-hardcoded convention (deploy's defaultVaultFile,
-// checkVaultCompleteness, `pilot inventory generate`'s --vault-out default,
-// pushNFSRoleBootstrap's own ipa_admin_password reuse) then fails to find.
-func normalizeVaultFileName(file string) string {
-	if canonical, err := canonicalVaultFileName(file); err == nil {
-		return canonical
-	}
-	switch strings.ToLower(filepath.Ext(file)) {
-	case ".yaml", ".yml":
-		return file
-	default:
-		return file + ".yaml"
-	}
-}
-
 // canonicalVaultFileName converts the user-facing vault file spelling into a
 // filename relative to .vault. It is intentionally strict because scenario
-// files are agent-authored and must not escape the workspace.
+// files are agent-authored and must not escape the workspace. A bare name
+// with no ".yaml"/".yml" suffix gets ".yaml" appended, mirroring
+// pushVaultPathPrompt's prefilled default (edit_tui_vault.go, "main.yaml")
+// and scanVaultFiles' accepted suffix set (edit.go) — the only two things
+// that decide what a *human* ends up naming a new vault file. Without
+// this, a scenario step with file: "main" would create a literal
+// extension-less ".vault/main" — a file every .vault/main.yaml-hardcoded
+// convention (deploy's defaultVaultFile, checkVaultCompleteness, `pilot
+// inventory generate`'s --vault-out default, pushNFSRoleBootstrap's own
+// ipa_admin_password reuse) then fails to find.
 func canonicalVaultFileName(file string) (string, error) {
 	file = strings.TrimSpace(filepath.ToSlash(file))
 	if file == "" || filepath.IsAbs(file) {
 		return "", fmt.Errorf("vault file must be a relative path")
 	}
 	file = strings.TrimPrefix(file, "./")
-	if strings.HasPrefix(file, ".vault/") {
-		file = strings.TrimPrefix(file, ".vault/")
-	}
+	file = strings.TrimPrefix(file, ".vault/")
 	clean := filepath.Clean(filepath.FromSlash(file))
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("vault file path escapes .vault: %s", file)

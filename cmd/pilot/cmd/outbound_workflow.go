@@ -28,7 +28,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/kjelly/pilot/internal/accessgrants"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/delivery"
 	"github.com/kjelly/pilot/internal/inventory"
@@ -603,23 +602,6 @@ func buildEventDraftForWebhook(
 			return body, err
 		},
 	}, nil
-}
-
-// activeBreakglassActivations reads every recorded breakglass
-// activation (design spec §12.4) and returns only the currently-active
-// ones, for the outbound projection's breakglass login-access entities.
-func activeBreakglassActivations(now time.Time) []inventory.BreakglassActivationInput {
-	activations, err := accessgrants.Status(resolveDataDir(), "")
-	if err != nil {
-		return nil
-	}
-	out := make([]inventory.BreakglassActivationInput, 0, len(activations))
-	for _, a := range activations {
-		if a.IsActive(now) {
-			out = append(out, inventory.BreakglassActivationInput{Name: a.Name, ExpiresAt: a.ExpiresAt})
-		}
-	}
-	return out
 }
 
 // newWorkflowID generates design spec §8.1's lowercase RFC 4122 UUIDv4

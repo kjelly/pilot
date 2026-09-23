@@ -142,7 +142,7 @@ func TestSeedServicesIsIdempotentForExistingResources(t *testing.T) {
 		if strings.HasPrefix(req.URL.Path, "/pulp/api/") || strings.HasPrefix(req.URL.Path, "/api/v2.0/") {
 			assertBasicAuth(t, req, "admin", map[bool]string{true: "admin-secret", false: "pulp-secret"}[strings.HasPrefix(req.URL.Path, "/api/v2.0/")])
 		}
-		var response any = map[string]any{"results": []any{}}
+		var response any
 		switch req.URL.Path {
 		case "/api/v2.0/registries":
 			response = map[string]any{"results": []any{map[string]any{"id": float64(17), "name": "docker-hub", "type": "docker-hub", "url": "https://registry-1.docker.io"}}}

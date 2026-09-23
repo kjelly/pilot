@@ -168,7 +168,7 @@ func (p Profile) Validate() error {
 			return fmt.Errorf("name contains unsupported character %q", r)
 		}
 	}
-	if first := p.Name[0]; !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || (first >= '0' && first <= '9')) {
+	if first := p.Name[0]; (first < 'a' || first > 'z') && (first < 'A' || first > 'Z') && (first < '0' || first > '9') {
 		return errors.New("name must start with a letter or digit")
 	}
 	if p.Apt.Port < 1 || p.Apt.Port > 65535 {

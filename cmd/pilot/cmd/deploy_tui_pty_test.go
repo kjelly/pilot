@@ -4,8 +4,8 @@
 // real-binary-under-a-real-PTY harness as edit_tui_pty_test.go
 // (buildPilotBinary/ptyProc/etc., defined there and reused here since
 // both live in the same package). It drives every new Bubble Tea
-// prompt wrapper (deploy_tui.go's runSelectProgram/runTextProgram/
-// runConfirmProgram) through a real terminal, declining at the final
+// prompt wrapper (deploy_tui.go's runSelectPrompt/runTextPrompt/
+// runConfirmPrompt) through a real terminal, declining at the final
 // "確定要執行以上指令嗎？" gate so it never actually invokes
 // ansible-playbook — this test is about proving the prompt flow itself
 // works under a real PTY (raw-mode key delivery, CI=1, exit cleanup),

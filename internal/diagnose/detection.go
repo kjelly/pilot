@@ -58,14 +58,14 @@ func DetectionConfigDBPathStep() Step {
 func DetectionDBPath(stdout string) (string, error) {
 	line := strings.TrimSpace(stdout)
 	if !strings.HasPrefix(line, "dbPath:") {
-		return "", fmt.Errorf("Detection Engine config did not return a dbPath line")
+		return "", fmt.Errorf("the Detection Engine config did not return a dbPath line")
 	}
 	path := strings.TrimSpace(strings.TrimPrefix(line, "dbPath:"))
 	if len(path) >= 2 && ((path[0] == '"' && path[len(path)-1] == '"') || (path[0] == '\'' && path[len(path)-1] == '\'')) {
 		path = path[1 : len(path)-1]
 	}
 	if !detectionDBPathPattern.MatchString(path) || !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return "", fmt.Errorf("Detection Engine dbPath %q is not a safe absolute path", path)
+		return "", fmt.Errorf("the Detection Engine dbPath %q is not a safe absolute path", path)
 	}
 	return path, nil
 }

@@ -13,7 +13,7 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -112,13 +112,13 @@ func TestOpenStore_MigratesAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first OpenStore: %v", err)
 	}
-	s1.Close()
+	_ = s1.Close()
 
 	s2, err := OpenStore(dbPath)
 	if err != nil {
 		t.Fatalf("reopen OpenStore: %v", err)
 	}
-	defer s2.Close()
+	defer s2.Close() //nolint:errcheck
 	if result, err := s2.IntegrityCheck(); err != nil || result != "ok" {
 		t.Fatalf("IntegrityCheck = %q, %v", result, err)
 	}

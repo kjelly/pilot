@@ -10,36 +10,11 @@ package cmd
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/kjelly/pilot/internal/tui"
 )
 
 // ---- navigation chains (ensure*) ----------------------------------------
-
-func (d *automationDriver) ensureInternalEndpointManifestManager(r *editRouterModel) error {
-	for attempts := 0; attempts < 8; attempts++ {
-		switch automationScreenID(r) {
-		case "iep.manager":
-			return nil
-		case "edit.top":
-			if err := d.choose(r, "internal-endpoints manifest"); err != nil {
-				return err
-			}
-		case "iep.path":
-			// Only reachable when the manifest already exists — see
-			// pushInternalEndpointManifestPathPrompt.
-			if err := d.enter(r); err != nil {
-				return err
-			}
-		default:
-			if err := d.choose(r, "返回"); err != nil {
-				return fmt.Errorf("cannot navigate to internal-endpoint manifest manager from %s screen: %w", automationScreenID(r), err)
-			}
-		}
-	}
-	return fmt.Errorf("could not resolve navigation to internal-endpoint manifest manager")
-}
 
 func (d *automationDriver) ensureInternalEndpointsList(r *editRouterModel) error {
 	for attempts := 0; attempts < 8; attempts++ {
@@ -112,10 +87,9 @@ func (d *automationDriver) createInternalEndpointManifest(r *editRouterModel) er
 }
 
 // ensureInternalEndpointManifestManagerPathOnly gets to iep.path without
-// assuming the manifest already exists (unlike ensureInternalEndpointManifestManager,
-// which is only ever called once a manifest is known to be present) —
-// createInternalEndpointManifest is the ONE action whose whole point is
-// that the manifest does NOT exist yet.
+// assuming the manifest already exists — createInternalEndpointManifest
+// is the ONE action whose whole point is that the manifest does NOT
+// exist yet.
 func (d *automationDriver) ensureInternalEndpointManifestManagerPathOnly(r *editRouterModel) error {
 	for attempts := 0; attempts < 8; attempts++ {
 		switch automationScreenID(r) {
@@ -398,15 +372,4 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// atoiOrZero parses value as an int, defaulting to 0 on any error —
-// used where an action's optional numeric field arrives as a string and
-// an empty/invalid value should behave like "unset" rather than fail.
-func atoiOrZero(value string) int {
-	n, err := strconv.Atoi(value)
-	if err != nil {
-		return 0
-	}
-	return n
 }

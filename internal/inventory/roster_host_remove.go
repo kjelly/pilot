@@ -221,7 +221,7 @@ func RemoveRosterHostReferences(path, hostName string) error {
 	if err != nil {
 		return err
 	}
-	defer lock.release()
+	defer lock.release() //nolint:errcheck
 
 	data, err := os.ReadFile(path)
 	if err != nil {

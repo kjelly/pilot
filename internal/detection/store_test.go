@@ -17,7 +17,7 @@ func openTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -136,7 +136,7 @@ func openPreV2TestStore(t *testing.T) *Store {
 	if err := s.applyMigrations([]migration{schemaV1}); err != nil {
 		t.Fatalf("apply schemaV1: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -269,7 +269,7 @@ func TestSchemaV2_RequiresBackupBeforeApplying(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second OpenStore (triggers schemaV2): %v", err)
 	}
-	defer second.Close()
+	defer second.Close() //nolint:errcheck
 
 	entriesAfter, err := os.ReadDir(dir)
 	if err != nil {

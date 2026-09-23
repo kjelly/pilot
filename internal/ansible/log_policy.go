@@ -79,7 +79,7 @@ func MaintainLogWithPolicy(path string, policy LogPolicy) error {
 		return err
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("Ansible log is not a regular file: %s", path)
+		return fmt.Errorf("the Ansible log is not a regular file: %s", path)
 	}
 
 	// The old implementation created this file with mode 0644 on the

@@ -37,7 +37,7 @@ func TestMCPServe_Integration_DiagnoseToolsGatedByEnableDiagnoseFlag(t *testing.
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
@@ -68,7 +68,7 @@ func TestMCPServe_Integration_DiagnoseToolsListedWhenEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestMCPServe_Integration_DiagnoseSudoUnknownHostReturnsStructuredError(t *t
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "pilot_diagnose_sudo",
@@ -155,7 +155,7 @@ func TestMCPServe_Integration_DiagnoseDNSInvalidNameReturnsStructuredError(t *te
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "pilot_diagnose_dns",
@@ -199,7 +199,7 @@ func TestMCPServe_Integration_DiagnoseLogsNoDashboardGroupReturnsStructuredError
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "pilot_diagnose_logs",
@@ -243,7 +243,7 @@ func TestMCPServe_Integration_DiagnoseSecurityLogsNoDashboardGroupReturnsStructu
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "pilot_diagnose_security_logs",
@@ -287,7 +287,7 @@ func TestMCPServe_Integration_DiagnoseMetricsStartWithoutEndReturnsStructuredErr
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "pilot_diagnose_metrics",
@@ -326,7 +326,7 @@ func TestMCPServe_Integration_DiagnoseDetectionRequiresSignalIDOrPilotHost(t *te
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "pilot_diagnose_detection",
@@ -365,7 +365,7 @@ func TestMCPServe_Integration_DiagnoseDetectionMalformedSignalIDReturnsStructure
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "pilot_diagnose_detection",
@@ -421,7 +421,7 @@ func TestMCPServe_Integration_DiagnoseInventoryDefaultsToDirInventoryYml(t *test
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	// A deliberately-unknown host: if the <dir>/inventory.yml default had
 	// NOT been picked up, inventory resolution itself would fail first
@@ -477,7 +477,7 @@ func TestMCPServe_Integration_DiagnoseWithoutInventoryFlagOrFileDegradesAtCallTi
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	if _, err := session.ListTools(ctx, nil); err != nil {
 		t.Fatalf("ListTools() error = %v (server should start even with no inventory available)", err)
@@ -527,7 +527,7 @@ func TestMCPServe_Integration_DiagnoseRunIsIndependentOfEnableDiagnose(t *testin
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
@@ -554,7 +554,7 @@ func TestMCPServe_Integration_DiagnoseRunListedWhenRawEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
@@ -588,7 +588,7 @@ func TestMCPServe_Integration_DiagnoseRunUnknownHostReturnsStructuredError(t *te
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "pilot_diagnose_run",

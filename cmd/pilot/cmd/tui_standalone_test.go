@@ -1,6 +1,6 @@
 // TestStandaloneScreen_QuitsOnceFinished guards against regressing a
-// real bug found via a PTY test: runSelectProgram/runTextProgram/
-// runConfirmProgram (deploy_tui.go) run a bare screen directly under
+// real bug found via a PTY test: runSelectPrompt/runTextPrompt/
+// runConfirmPrompt (deploy_tui.go) run a bare screen directly under
 // tea.NewProgram without wrapping it in standaloneScreen, the Program
 // never quits — no screen this router composes calls tea.Quit itself
 // (see tui_screen.go's doc comment), so nothing ever ends the Program

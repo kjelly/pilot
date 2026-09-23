@@ -18,7 +18,7 @@ func TestAcquireMutationLock_SecondAttemptFailsFast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireMutationLock() error = %v", err)
 	}
-	defer first.release()
+	defer first.release() //nolint:errcheck
 
 	if _, err := acquireMutationLock(lockPath); !errors.Is(err, ErrMutationLocked) {
 		t.Fatalf("second acquireMutationLock() error = %v, want ErrMutationLocked", err)
@@ -38,7 +38,7 @@ func TestAcquireMutationLock_ReleaseAllowsReacquisition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireMutationLock() after release error = %v", err)
 	}
-	second.release()
+	_ = second.release()
 }
 
 func TestAcquireMutationLock_StaleLockFileAloneDoesNotBlock(t *testing.T) {
@@ -53,7 +53,7 @@ func TestAcquireMutationLock_StaleLockFileAloneDoesNotBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireMutationLock() error = %v, want success despite a pre-existing unlocked file", err)
 	}
-	lock.release()
+	_ = lock.release()
 }
 
 // ---- backup -----------------------------------------------------------------
@@ -401,7 +401,7 @@ func TestMigrateRosterFile_FailsFastWhenAlreadyLocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireMutationLock() error = %v", err)
 	}
-	defer lock.release()
+	defer lock.release() //nolint:errcheck
 
 	if _, err := MigrateRosterFile(path, RosterMigrationOptions{}); !errors.Is(err, ErrMutationLocked) {
 		t.Fatalf("MigrateRosterFile() error = %v, want ErrMutationLocked", err)

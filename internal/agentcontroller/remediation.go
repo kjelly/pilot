@@ -157,7 +157,7 @@ func (s *Store) FinishRun(planID, result, auditRef, verifyRef string, startedAt,
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -203,12 +203,12 @@ func (s *Store) RecoverOrphanedExecutingPlans(now time.Time) (recovered int, err
 	for rows.Next() {
 		var id string
 		if scanErr := rows.Scan(&id); scanErr != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, fmt.Errorf("scan executing plan: %w", scanErr)
 		}
 		ids = append(ids, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 	if err = rows.Err(); err != nil {
 		return 0, err
 	}

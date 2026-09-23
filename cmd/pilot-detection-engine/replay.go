@@ -72,10 +72,10 @@ func newReplayCmd() *cobra.Command {
 	cmd.Flags().StringVar(&profilePath, "profile", "", "path to the feature-profile.yaml to replay — point at a tuned copy to backtest a threshold change (required)")
 	cmd.Flags().StringVar(&startStr, "start", "", "RFC3339 start of the historical window, e.g. 2026-08-01T00:00:00Z (required)")
 	cmd.Flags().StringVar(&endStr, "end", "", "RFC3339 end of the historical window (required)")
-	cmd.MarkFlagRequired("thanos")
-	cmd.MarkFlagRequired("profile")
-	cmd.MarkFlagRequired("start")
-	cmd.MarkFlagRequired("end")
+	_ = cmd.MarkFlagRequired("thanos")
+	_ = cmd.MarkFlagRequired("profile")
+	_ = cmd.MarkFlagRequired("start")
+	_ = cmd.MarkFlagRequired("end")
 	return cmd
 }
 

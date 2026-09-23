@@ -44,7 +44,7 @@ func lokiStub(t *testing.T, streams []lokiStreamFixture) *httptest.Server {
 			},
 		})
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+		_, _ = w.Write(body)
 	}))
 }
 

@@ -70,7 +70,7 @@ func (s *Store) recordReapplyApprovalDecision(planID, planHash, decision, actor,
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 	if _, execErr := tx.Exec(`
@@ -106,7 +106,7 @@ func (s *Store) ListReapplyApprovals(planID string) ([]ReapplyApprovalRecord, er
 	if err != nil {
 		return nil, fmt.Errorf("list reapply approvals for %s: %w", planID, err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var out []ReapplyApprovalRecord
 	for rows.Next() {
 		var r ReapplyApprovalRecord

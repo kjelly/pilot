@@ -99,7 +99,7 @@ func startFakeDirectory(t *testing.T, username string) *directoryClient {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	provider := &fakeDirectoryProvider{username: username}
 	dirCfg := directoryapi.DirectoryConfig{ID: "directory-01", TargetHostgroupPrefix: "pilot-target-", GatewayHostgroupPrefix: "pilot-gateway-"}
@@ -133,7 +133,7 @@ func startFakeDirectoryMultiGateway(t *testing.T, username string) *directoryCli
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	provider := &fakeMultiGatewayDirectoryProvider{fakeDirectoryProvider{username: username}}
 	dirCfg := directoryapi.DirectoryConfig{ID: "directory-01", TargetHostgroupPrefix: "pilot-target-", GatewayHostgroupPrefix: "pilot-gateway-"}

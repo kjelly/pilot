@@ -604,7 +604,7 @@ func (o *SQLiteOutbox) ReconcileWebhookConfig(ctx context.Context, workspaceKey 
 	for rows.Next() {
 		var id identity
 		if err := rows.Scan(&id.sourceID, &id.webhookName); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("outbox: reconcile: scan identity: %w", err)
 		}
 		if id.sourceID != cfg.SourceID {
@@ -616,10 +616,10 @@ func (o *SQLiteOutbox) ReconcileWebhookConfig(ctx context.Context, workspaceKey 
 		}
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return fmt.Errorf("outbox: reconcile: iterate identities: %w", err)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	for _, id := range toOrphan {
 		if _, err := tx.ExecContext(ctx, `UPDATE webhook_outbox SET
@@ -684,7 +684,7 @@ func (o *SQLiteOutbox) StatusCounts(ctx context.Context, workspaceKey, sourceID,
 	if err != nil {
 		return c, fmt.Errorf("outbox: status counts: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
 		var state string
 		var n int

@@ -103,7 +103,7 @@ func testServerWithConfig(t *testing.T, username string, configure func(*Server)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	provider := &fakeProvider{username: username}
 	cfg := DirectoryConfig{ID: "access-01", TargetHostgroupPrefix: "pilot-target-", GatewayHostgroupPrefix: "pilot-gateway-"}

@@ -199,7 +199,7 @@ func TestRegression_FreeipaDNSClientApplyPlaybook_SelfFirstOrdering(t *testing.T
 	if effectiveIdx == -1 || overrideIdx == -1 || selfFirstIdx == -1 {
 		t.Fatalf("could not find the effective-servers computation (effectiveIdx=%d overrideIdx=%d selfFirstIdx=%d)", effectiveIdx, overrideIdx, selfFirstIdx)
 	}
-	if !(effectiveIdx < overrideIdx && overrideIdx < selfFirstIdx) {
+	if effectiveIdx >= overrideIdx || overrideIdx >= selfFirstIdx {
 		t.Errorf("explicit freeipa_dns_client_servers override must be checked before the self-first/auto-detect branch")
 	}
 }

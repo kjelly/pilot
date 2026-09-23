@@ -31,7 +31,7 @@ func newIncidentCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			inc, err := store.GetIncident(args[0])
 			if err != nil {
 				return err
@@ -45,7 +45,7 @@ func newIncidentCmd() *cobra.Command {
 		},
 	}
 	show.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	show.MarkFlagRequired("db")
+	_ = show.MarkFlagRequired("db")
 	incidentCmd.AddCommand(show)
 	return incidentCmd
 }
@@ -62,7 +62,7 @@ func (f *repairClientFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.pilotBinary, "pilot-binary", "pilot", "path to (or PATH-resolvable name of) the pilot binary to spawn for repair MCP calls")
 	cmd.Flags().StringVar(&f.dir, "dir", ".", "workspace root passed to the spawned `pilot mcp serve --dir` (contracts/*.yaml resolve relative to it)")
 	cmd.Flags().StringVar(&f.inventory, "inventory", "", "ansible inventory path repair actions may target (required)")
-	cmd.MarkFlagRequired("inventory")
+	_ = cmd.MarkFlagRequired("inventory")
 }
 
 func (f *repairClientFlags) client() *agentcontroller.RepairClient {
@@ -123,7 +123,7 @@ func newRemediationProposeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 
 			if err := requireManagedIncidentSubject(store, incidentID); err != nil {
 				return err
@@ -146,15 +146,15 @@ func newRemediationProposeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&incidentID, "incident", "", "incident ID this plan is for (required)")
-	cmd.MarkFlagRequired("incident")
+	_ = cmd.MarkFlagRequired("incident")
 	cmd.Flags().StringVar(&host, "host", "", "exact inventory hostname (required)")
-	cmd.MarkFlagRequired("host")
+	_ = cmd.MarkFlagRequired("host")
 	cmd.Flags().StringVar(&component, "component", "", "component ID from contracts/*.yaml (required)")
-	cmd.MarkFlagRequired("component")
+	_ = cmd.MarkFlagRequired("component")
 	cmd.Flags().StringVar(&action, "action", "", "remediation action id (required)")
-	cmd.MarkFlagRequired("action")
+	_ = cmd.MarkFlagRequired("action")
 	flags.register(cmd)
 	return cmd
 }
@@ -170,7 +170,7 @@ func newRemediationShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			p, err := store.GetPlan(args[0])
 			if err != nil {
 				return err
@@ -192,7 +192,7 @@ func newRemediationShowCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	return cmd
 }
 
@@ -207,7 +207,7 @@ func newRemediationApproveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			rec, err := store.Approve(args[0], planHash, actor, reason, time.Now())
 			if err != nil {
 				return err
@@ -217,11 +217,11 @@ func newRemediationApproveCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&planHash, "plan-hash", "", "the EXACT plan_hash shown by `remediation show` — approval is rejected if this does not match (required)")
-	cmd.MarkFlagRequired("plan-hash")
+	_ = cmd.MarkFlagRequired("plan-hash")
 	cmd.Flags().StringVar(&actor, "actor", "", "your own operator identity — never Agent-supplied text (required)")
-	cmd.MarkFlagRequired("actor")
+	_ = cmd.MarkFlagRequired("actor")
 	cmd.Flags().StringVar(&reason, "reason", "", "why you are approving this plan")
 	return cmd
 }
@@ -237,7 +237,7 @@ func newRemediationRejectCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			rec, err := store.Reject(args[0], planHash, actor, reason, time.Now())
 			if err != nil {
 				return err
@@ -247,11 +247,11 @@ func newRemediationRejectCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&planHash, "plan-hash", "", "the EXACT plan_hash shown by `remediation show` (required)")
-	cmd.MarkFlagRequired("plan-hash")
+	_ = cmd.MarkFlagRequired("plan-hash")
 	cmd.Flags().StringVar(&actor, "actor", "", "your own operator identity (required)")
-	cmd.MarkFlagRequired("actor")
+	_ = cmd.MarkFlagRequired("actor")
 	cmd.Flags().StringVar(&reason, "reason", "", "why you are rejecting this plan")
 	return cmd
 }
@@ -268,7 +268,7 @@ func newRemediationExecuteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 
 			started := time.Now()
 			p, err := store.MarkExecuting(args[0], started)
@@ -299,7 +299,7 @@ func newRemediationExecuteCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	flags.register(cmd)
 	return cmd
 }
@@ -326,7 +326,7 @@ func newRemediationAutoExecuteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 
 			now := time.Now()
 			if recovered, rerr := store.RecoverOrphanedExecutingPlans(now); rerr != nil {
@@ -439,9 +439,9 @@ func newRemediationAutoExecuteCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&environment, "environment", "", "sandbox | staging | prod — this evaluation's trust tier (required)")
-	cmd.MarkFlagRequired("environment")
+	_ = cmd.MarkFlagRequired("environment")
 	def := policy.DefaultConfig().Defaults
 	cmd.Flags().DurationVar(&cooldown, "cooldown", def.Cooldown, "minimum time between actions on the same host/component/action")
 	cmd.Flags().IntVar(&hostBudgetCount, "host-budget-count", def.HostBudgetCount, "max approved actions per host within --host-budget-window")
@@ -473,7 +473,7 @@ func newReapplyProposeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 
 			if err := requireManagedIncidentSubject(store, incidentID); err != nil {
 				return err
@@ -499,15 +499,15 @@ func newReapplyProposeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&incidentID, "incident", "", "incident ID this plan is for (required)")
-	cmd.MarkFlagRequired("incident")
+	_ = cmd.MarkFlagRequired("incident")
 	cmd.Flags().StringVar(&host, "host", "", "exact inventory hostname (required)")
-	cmd.MarkFlagRequired("host")
+	_ = cmd.MarkFlagRequired("host")
 	cmd.Flags().StringVar(&component, "component", "", "component ID from contracts/*.yaml (required)")
-	cmd.MarkFlagRequired("component")
+	_ = cmd.MarkFlagRequired("component")
 	cmd.Flags().StringVar(&action, "action", "", "R2 canonical_apply remediation action id (required)")
-	cmd.MarkFlagRequired("action")
+	_ = cmd.MarkFlagRequired("action")
 	flags.register(cmd)
 	return cmd
 }
@@ -523,7 +523,7 @@ func newReapplyShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			p, err := store.GetReapplyPlan(args[0])
 			if err != nil {
 				return err
@@ -545,7 +545,7 @@ func newReapplyShowCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	return cmd
 }
 
@@ -560,7 +560,7 @@ func newReapplyApproveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			rec, err := store.ApproveReapply(args[0], planHash, actor, reason, time.Now())
 			if err != nil {
 				return err
@@ -570,11 +570,11 @@ func newReapplyApproveCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&planHash, "plan-hash", "", "the EXACT plan_hash shown by `remediation reapply-show` — approval is rejected if this does not match (required)")
-	cmd.MarkFlagRequired("plan-hash")
+	_ = cmd.MarkFlagRequired("plan-hash")
 	cmd.Flags().StringVar(&actor, "actor", "", "your own operator identity — never Agent-supplied text (required)")
-	cmd.MarkFlagRequired("actor")
+	_ = cmd.MarkFlagRequired("actor")
 	cmd.Flags().StringVar(&reason, "reason", "", "why you are approving this plan")
 	return cmd
 }
@@ -590,7 +590,7 @@ func newReapplyRejectCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			rec, err := store.RejectReapply(args[0], planHash, actor, reason, time.Now())
 			if err != nil {
 				return err
@@ -600,11 +600,11 @@ func newReapplyRejectCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&planHash, "plan-hash", "", "the EXACT plan_hash shown by `remediation reapply-show` (required)")
-	cmd.MarkFlagRequired("plan-hash")
+	_ = cmd.MarkFlagRequired("plan-hash")
 	cmd.Flags().StringVar(&actor, "actor", "", "your own operator identity (required)")
-	cmd.MarkFlagRequired("actor")
+	_ = cmd.MarkFlagRequired("actor")
 	cmd.Flags().StringVar(&reason, "reason", "", "why you are rejecting this plan")
 	return cmd
 }
@@ -621,7 +621,7 @@ func newReapplyExecuteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 
 			now := time.Now()
 			if recovered, rerr := store.RecoverOrphanedExecutingReapplyPlans(now); rerr != nil {
@@ -659,7 +659,7 @@ func newReapplyExecuteCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	flags.register(cmd)
 	return cmd
 }

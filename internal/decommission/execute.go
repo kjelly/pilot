@@ -54,13 +54,6 @@ type ApplyInput struct {
 	Store *Store
 }
 
-func (in ApplyInput) now() time.Time {
-	if in.Now != nil {
-		return in.Now()
-	}
-	return time.Now().UTC()
-}
-
 // Apply is the full apply/resume orchestration (spec.md §10.3/§10.4): an
 // already-completed plan replays without touching anything further
 // (delegated to Finalize's own INV-15 check); otherwise it re-derives

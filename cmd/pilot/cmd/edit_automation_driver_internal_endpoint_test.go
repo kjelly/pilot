@@ -253,7 +253,7 @@ func writeInternalEndpointTestDNSManifest(t *testing.T, dir string, zones ...str
 	sb.WriteString("freeipa: {domain: ipa.pilot.internal, realm: IPA.PILOT.INTERNAL, server: ipa1.ipa.pilot.internal}\n")
 	sb.WriteString("dns:\n  defaults: {ttl: 300, records_mode: merge}\n  zones:\n")
 	for _, z := range zones {
-		sb.WriteString(fmt.Sprintf("    - name: %s\n      state: present\n      records: []\n", z))
+		fmt.Fprintf(&sb, "    - name: %s\n      state: present\n      records: []\n", z)
 	}
 	writeFile(t, dir+"/freeipa-dns.yaml", sb.String())
 }

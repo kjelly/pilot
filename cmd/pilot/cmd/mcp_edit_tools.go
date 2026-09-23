@@ -396,7 +396,7 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 		var presets []inspectRolePreset
 		if loaded, _, err := loadRolePresets(opts.Dir); err == nil {
 			for _, p := range loaded {
-				presets = append(presets, inspectRolePreset{Label: p.Label, Roles: p.Roles})
+				presets = append(presets, inspectRolePreset(p))
 			}
 		}
 

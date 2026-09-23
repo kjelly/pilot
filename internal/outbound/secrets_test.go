@@ -158,17 +158,17 @@ func TestOutboundSecrets_S5(t *testing.T) {
 		for rows.Next() {
 			var col string
 			if err := rows.Scan(&col); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				t.Fatal(err)
 			}
 			lower := strings.ToLower(col)
 			for _, f := range forbidden {
 				if strings.Contains(lower, f) {
-					rows.Close()
+					_ = rows.Close()
 					t.Fatalf("table %s has a secret-shaped column %q", table, col)
 				}
 			}
 		}
-		rows.Close()
+		_ = rows.Close()
 	}
 }

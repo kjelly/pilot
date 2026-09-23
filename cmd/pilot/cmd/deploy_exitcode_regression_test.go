@@ -174,7 +174,7 @@ func stubDeploymentConfirm(t *testing.T, answers ...bool) func() {
 // preflight-mode select (added in fb5842b's promptPreflightMode) with
 // "跳過前置檢查" so tests that exercise the apply/runtime-race path never
 // launch a real bubbletea Program — activePromptAutomation is the ONLY
-// thing runSelectProgram (called directly by promptPreflightMode, never
+// thing runSelectPrompt (called directly by promptPreflightMode, never
 // through the confirmDeployment var) checks before falling back to a real
 // TTY-backed Program.Run(), so stubDeploymentConfirm alone is never
 // sufficient for any test that calls executeRecordedDeployment with a nil

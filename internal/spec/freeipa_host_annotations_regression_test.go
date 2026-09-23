@@ -52,7 +52,7 @@ func TestRegression_FreeipaHostAnnotationsTask_StaticSafetyInvariants(t *testing
 	if dupIdx < 0 || malformedIdx < 0 || mutationIdx < 0 {
 		t.Fatal("expected CONFLICT_DUPLICATE_MANAGED_KEY, CONFLICT_MALFORMED_MANAGED_VALUE, and a userclass mutation to all be present")
 	}
-	if !(dupIdx < mutationIdx && malformedIdx < mutationIdx) {
+	if dupIdx >= mutationIdx || malformedIdx >= mutationIdx {
 		t.Errorf("duplicate/malformed conflict detection must run before any userClass mutation: dupIdx=%d malformedIdx=%d mutationIdx=%d", dupIdx, malformedIdx, mutationIdx)
 	}
 
@@ -162,7 +162,7 @@ func TestRegression_FreeipaClientApplyPlaybook_AnnotationsRunAfterEnrollment(t *
 	if healthIdx < 0 || annotationsIdx < 0 {
 		t.Fatalf("playbook must include the post-enroll health block and tasks/freeipa-host-annotations.yml")
 	}
-	if !(healthIdx < annotationsIdx) {
+	if healthIdx >= annotationsIdx {
 		t.Errorf("annotations reconcile must be included AFTER the post-enroll health/AAA checks: healthIdx=%d annotationsIdx=%d", healthIdx, annotationsIdx)
 	}
 }

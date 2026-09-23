@@ -64,7 +64,7 @@ func TestMCPServe_Integration_CapabilitiesInspectPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
@@ -251,7 +251,7 @@ func TestMCPServe_Integration_VaultPlanApplyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	scenario := editScenario{Version: 1, Title: "vault mcp round trip", Steps: []editAction{
 		{Action: "add_vault_key", File: "main.yaml", Key: "test_secret", ValueEnv: envVar},
@@ -340,7 +340,7 @@ func TestMCPServe_Integration_RosterPlanApplyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	scenario := editScenario{Version: 1, Title: "roster mcp round trip", Steps: []editAction{
 		{Action: "create_user", User: "dana"},
@@ -427,7 +427,7 @@ func TestMCPServe_Integration_RosterPasswordAndSSHKeysRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	scenario := editScenario{Version: 1, Title: "roster password + ssh key mcp round trip", Steps: []editAction{
 		{Action: "create_user", User: "erin"},
@@ -522,7 +522,7 @@ func TestMCPServe_Integration_RosterAccessAndSudoRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	scenario := editScenario{Version: 1, Title: "roster access + sudo mcp round trip", Steps: []editAction{
 		{Action: "create_group", Name: "team-web", Category: "team"},
@@ -666,7 +666,7 @@ func TestMCPServe_Integration_DNSManifestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	scenario := editScenario{Version: 1, Title: "dns manifest mcp round trip", Steps: []editAction{
 		{Action: "create_dns_manifest", Domain: "ipa.pilot.internal", Realm: "IPA.PILOT.INTERNAL", Server: "ipa1.ipa.pilot.internal"},

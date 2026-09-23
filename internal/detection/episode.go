@@ -81,7 +81,7 @@ func (s *Store) ApplyTransition(episode EpisodeRecord, history HistoryRecord, ou
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -223,7 +223,7 @@ func (s *Store) LatestAlertPayload(signalID string) (*AlertmanagerPayload, error
 	if err != nil {
 		return nil, fmt.Errorf("list signal payload history: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
 		var raw string
 		if err := rows.Scan(&raw); err != nil {
@@ -259,7 +259,7 @@ func (s *Store) ListActiveEpisodes() ([]EpisodeRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list active episodes: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	// Initialized (not nil) so an empty result JSON-marshals to `[]`, not
 	// `null` — `pilot-detection-engine signals list` on a fresh host with

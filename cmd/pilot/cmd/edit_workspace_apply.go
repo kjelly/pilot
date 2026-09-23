@@ -47,7 +47,7 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	if err != nil {
 		return nil, err
 	}
-	defer lock.release()
+	defer lock.release() //nolint:errcheck
 
 	revisionBefore, err := computeWorkspaceRevision(dir)
 	if err != nil {

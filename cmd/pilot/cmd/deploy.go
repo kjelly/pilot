@@ -415,7 +415,7 @@ func abortOrErr(err error) error {
 // ---- shared prompt helpers -------------------------------------------------
 //
 // The actual prompt/select/confirm screens live in deploy_tui.go now
-// (runSelectProgram/runTextProgram/runConfirmProgram, on top of the
+// (runSelectPrompt/runTextPrompt/runConfirmPrompt, on top of the
 // shared Bubble Tea primitives in tui_select.go/tui_textinput.go/
 // tui_confirm.go) — what's left here is dumpMenuDebug (called from
 // newSelectModel, tui_select.go) and the validators every prompt call
@@ -1305,24 +1305,6 @@ func executeRecordedDeploymentResult(ctx context.Context, runner *ansible.Runner
 	return executeRecordedDeploymentWithAuthorizationResult(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, nil, nil)
 }
 
-// executeRecordedReconcileDeployment turns a selected reconcile component and
-// its required sameHosts dependencies into one operator-approved execution
-// plan. The plan deliberately collects every interactive decision before the
-// first preflight or apply starts; individual dependency transactions then run
-// unattended in dependency-first order.
-func executeRecordedReconcileDeployment(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) error {
-	plan, err := prepareReconcileExecutionPlan(ctx, playbook, inv, limit, tags, extraVars, componentHints)
-	if err != nil {
-		return err
-	}
-	renderReconcileExecutionPlan(out, plan)
-	authorization, err := promptReconcileExecutionAuthorization(len(plan.Chain) + 1)
-	if err != nil {
-		return err
-	}
-	return executeRecordedDeploymentWithAuthorization(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, authorization, plan.DependencyLimits)
-}
-
 type reconcileExecutionPlan struct {
 	Components       []string
 	Chain            []contract.Contract
@@ -1386,15 +1368,9 @@ func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAut
 	return &deploymentAuthorization{Preflight: preflight, Preview: preview}, nil
 }
 
-func executeRecordedDeploymentWithAuthorization(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, dependencyLimits map[string]string) error {
-	_, err := executeRecordedDeploymentWithAuthorizationResult(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, authorization, dependencyLimits)
-	return err
-}
-
-// executeRecordedDeploymentWithAuthorizationResult is
-// executeRecordedDeploymentWithAuthorization's result-returning
-// counterpart (design spec §28.3's pattern): it aggregates the
-// sameHosts dependency chain's ComponentDeliveryResults with the
+// executeRecordedDeploymentWithAuthorizationResult (design spec §28.3's
+// pattern) aggregates the sameHosts dependency chain's
+// ComponentDeliveryResults with the
 // requested component's own, in execution order, for the outbound
 // webhook's terminal-publication step. On error it still returns
 // whatever DeploymentExecutionResult was accumulated so far — a partial

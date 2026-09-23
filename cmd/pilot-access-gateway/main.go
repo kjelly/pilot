@@ -63,7 +63,7 @@ func newServeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to access-gateway.yaml (required)")
 	cmd.Flags().BoolVar(&systemdSocket, "systemd-socket", false, "use the systemd-activated socket (fd 3) instead of binding socket_path directly")
-	cmd.MarkFlagRequired("config")
+	_ = cmd.MarkFlagRequired("config")
 	return cmd
 }
 
@@ -115,7 +115,7 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 	if err != nil {
 		return fmt.Errorf("build listener: %w", err)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

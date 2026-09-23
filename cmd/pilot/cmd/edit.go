@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -177,25 +176,4 @@ func scanVaultFiles(targetDir string) ([]string, error) {
 
 func isAnsibleVaultEncrypted(data []byte) bool {
 	return bytes.HasPrefix(bytes.TrimSpace(data), []byte("$ANSIBLE_VAULT;"))
-}
-
-// runAnsibleVaultEditSync shells out to the real `ansible-vault edit`
-// with stdio wired directly to the terminal. It must never be called
-// while a tea.Program is running (it would fight the Program for
-// control of the terminal) — the vault-editing wizard flow instead
-// calls this via tea.ExecProcess, which suspends the Program first;
-// see edit_tui_vault.go.
-func runAnsibleVaultEditSync(path string) error {
-	bin, err := exec.LookPath("ansible-vault")
-	if err != nil {
-		return fmt.Errorf("ansible-vault 不在 PATH 上: %w", err)
-	}
-	cmd := exec.Command(bin, "edit", path)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ansible-vault edit %s: %w", path, err)
-	}
-	return nil
 }

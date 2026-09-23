@@ -376,7 +376,7 @@ func GenerateVaultSkeleton(hf *HostsFile) string {
 	sb.WriteString("# Fill in real values, then encrypt it, e.g.:\n")
 	sb.WriteString("#   ansible-vault encrypt .vault/main.yaml\n")
 	sb.WriteString("#\n")
-	sb.WriteString(fmt.Sprintf("# Roles seen: %s\n", strings.Join(roles, ", ")))
+	fmt.Fprintf(&sb, "# Roles seen: %s\n", strings.Join(roles, ", "))
 	sb.WriteString("#\n")
 	sb.WriteString("# Not included automatically:\n")
 	sb.WriteString("#   - freeipa-identity roster schema (use playbooks/apply/freeipa-identity.roster.example.yaml)\n")
@@ -387,43 +387,43 @@ func GenerateVaultSkeleton(hf *HostsFile) string {
 	for idx, sectionID := range sectionIDs {
 		section := vaultSections[sectionID]
 		sb.WriteString("# -----------------------------------------------------------------------------\n")
-		sb.WriteString(fmt.Sprintf("# %s\n", section.Title))
+		fmt.Fprintf(&sb, "# %s\n", section.Title)
 		sb.WriteString("# -----------------------------------------------------------------------------\n")
 		if section.Note != "" {
-			sb.WriteString(fmt.Sprintf("# %s\n", section.Note))
+			fmt.Fprintf(&sb, "# %s\n", section.Note)
 		}
 		for _, key := range section.Keys {
 			if key.Comment != "" {
-				sb.WriteString(fmt.Sprintf("# %s\n", key.Comment))
+				fmt.Fprintf(&sb, "# %s\n", key.Comment)
 			}
 			if key.Optional {
 				if key.NestedMap {
-					sb.WriteString(fmt.Sprintf("# %s:\n", key.Name))
+					fmt.Fprintf(&sb, "# %s:\n", key.Name)
 					for _, line := range strings.Split(key.Value, "\n") {
-						sb.WriteString(fmt.Sprintf("#   %s\n", line))
+						fmt.Fprintf(&sb, "#   %s\n", line)
 					}
 				} else if key.Multiline {
-					sb.WriteString(fmt.Sprintf("# %s: |\n", key.Name))
+					fmt.Fprintf(&sb, "# %s: |\n", key.Name)
 					for _, line := range strings.Split(key.Value, "\n") {
-						sb.WriteString(fmt.Sprintf("#   %s\n", line))
+						fmt.Fprintf(&sb, "#   %s\n", line)
 					}
 				} else {
-					sb.WriteString(fmt.Sprintf("# %s: %q\n", key.Name, key.Value))
+					fmt.Fprintf(&sb, "# %s: %q\n", key.Name, key.Value)
 				}
 				continue
 			}
 			if key.NestedMap {
-				sb.WriteString(fmt.Sprintf("%s:\n", key.Name))
+				fmt.Fprintf(&sb, "%s:\n", key.Name)
 				for _, line := range strings.Split(key.Value, "\n") {
-					sb.WriteString(fmt.Sprintf("  %s\n", line))
+					fmt.Fprintf(&sb, "  %s\n", line)
 				}
 			} else if key.Multiline {
-				sb.WriteString(fmt.Sprintf("%s: |\n", key.Name))
+				fmt.Fprintf(&sb, "%s: |\n", key.Name)
 				for _, line := range strings.Split(key.Value, "\n") {
-					sb.WriteString(fmt.Sprintf("  %s\n", line))
+					fmt.Fprintf(&sb, "  %s\n", line)
 				}
 			} else {
-				sb.WriteString(fmt.Sprintf("%s: %q\n", key.Name, key.Value))
+				fmt.Fprintf(&sb, "%s: %q\n", key.Name, key.Value)
 			}
 		}
 		if idx < len(sectionIDs)-1 {

@@ -373,7 +373,6 @@
             line: "args = LOG_INFO LOG_LOCAL6"
           register: audisp_syslog_args_result
           when: not ansible_check_mode
-          register: audisp_syslog_args_result
 
         - name: "Step 7: Render 99-siem-forward.conf (local6.* + auth,authpriv.* -> siem-log-server)"
           tags: [C16, C17]

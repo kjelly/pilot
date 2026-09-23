@@ -43,7 +43,7 @@ func TestEditAutomationDriverVaultCreateFileAddKeySave(t *testing.T) {
 // scenario step using file: "main" (no extension) used to create a literal
 // ".vault/main" — invisible to every other .vault/main.yaml-hardcoded
 // convention (deploy's defaultVaultFile, checkVaultCompleteness, `pilot
-// inventory generate`'s --vault-out default). normalizeVaultFileName now
+// inventory generate`'s --vault-out default). canonicalVaultFileName now
 // makes the automation driver produce the exact same ".vault/main.yaml" a
 // human accepting pushVaultPathPrompt's prefilled default would.
 func TestEditAutomationDriverVaultCreateFileBareNameGetsYamlExtension(t *testing.T) {

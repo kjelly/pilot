@@ -182,7 +182,7 @@ func webhookOutboxObjectNames(t *testing.T, dbPath string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var names []string
 	for rows.Next() {
 		var name string

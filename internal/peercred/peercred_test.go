@@ -18,7 +18,7 @@ func TestFromConnSelfConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck
 
 	acceptedCh := make(chan Peer, 1)
 	errCh := make(chan error, 1)
@@ -28,7 +28,7 @@ func TestFromConnSelfConnect(t *testing.T) {
 			errCh <- err
 			return
 		}
-		defer conn.Close()
+		defer conn.Close() //nolint:errcheck
 		peer, err := FromConn(conn.(*net.UnixConn))
 		if err != nil {
 			errCh <- err
@@ -41,7 +41,7 @@ func TestFromConnSelfConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 
 	select {
 	case peer := <-acceptedCh:

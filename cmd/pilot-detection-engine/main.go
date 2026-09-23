@@ -75,7 +75,7 @@ func newConfigCmd() *cobra.Command {
 		},
 	}
 	validate.Flags().StringVar(&configPath, "config", "", "path to config.yaml (required)")
-	validate.MarkFlagRequired("config")
+	_ = validate.MarkFlagRequired("config")
 	cfgCmd.AddCommand(validate)
 	return cfgCmd
 }
@@ -90,7 +90,7 @@ func newServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to config.yaml (required)")
-	cmd.MarkFlagRequired("config")
+	_ = cmd.MarkFlagRequired("config")
 	return cmd
 }
 
@@ -145,7 +145,7 @@ func runServe(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	defer store.Close()
+	defer store.Close() //nolint:errcheck
 
 	client := detection.NewThanosClient(cfg.MetricsSourceBaseURL, detection.QueryTimeout)
 
@@ -353,7 +353,7 @@ func newDBCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			result, err := store.IntegrityCheck()
 			if err != nil {
 				return err
@@ -366,7 +366,7 @@ func newDBCmd() *cobra.Command {
 		},
 	}
 	check.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	check.MarkFlagRequired("db")
+	_ = check.MarkFlagRequired("db")
 
 	var backupSrc, backupDst string
 	backup := &cobra.Command{
@@ -401,8 +401,8 @@ func newDBCmd() *cobra.Command {
 	}
 	backup.Flags().StringVar(&backupSrc, "db", "", "path to state.db (required)")
 	backup.Flags().StringVar(&backupDst, "output", "", "path to write the backup (required)")
-	backup.MarkFlagRequired("db")
-	backup.MarkFlagRequired("output")
+	_ = backup.MarkFlagRequired("db")
+	_ = backup.MarkFlagRequired("output")
 
 	dbCmd.AddCommand(check, backup)
 	return dbCmd
@@ -424,7 +424,7 @@ func newSignalsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			episodes, err := store.ListActiveEpisodes()
 			if err != nil {
 				return err
@@ -435,7 +435,7 @@ func newSignalsCmd() *cobra.Command {
 		},
 	}
 	list.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	list.MarkFlagRequired("db")
+	_ = list.MarkFlagRequired("db")
 
 	var showDBPath string
 	show := &cobra.Command{
@@ -447,7 +447,7 @@ func newSignalsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			episode, err := store.GetEpisode(args[0])
 			if err != nil {
 				return err
@@ -461,7 +461,7 @@ func newSignalsCmd() *cobra.Command {
 		},
 	}
 	show.Flags().StringVar(&showDBPath, "db", "", "path to state.db (required)")
-	show.MarkFlagRequired("db")
+	_ = show.MarkFlagRequired("db")
 
 	signalsCmd.AddCommand(list, show)
 	return signalsCmd
@@ -523,7 +523,7 @@ func newProviderCmd() *cobra.Command {
 		},
 	}
 	probe.Flags().StringVar(&configPath, "config", "", "path to config.yaml (required)")
-	probe.MarkFlagRequired("config")
+	_ = probe.MarkFlagRequired("config")
 	providerCmd.AddCommand(probe)
 	return providerCmd
 }

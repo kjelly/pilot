@@ -47,7 +47,7 @@ func TestAddRecoveredTool_PanicDoesNotKillOtherConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	const fineCallers = 10
 	const itersPerCaller = 20

@@ -452,7 +452,7 @@ func TestNFSSiteDeploymentProjection(t *testing.T) {
 	serverPos := strings.Index(site, "apply/freeipa-nfs-server-apply.yml")
 	clientPos := strings.Index(site, "apply/freeipa-nfs-client-apply.yml")
 	freeIPAClientPos := strings.Index(site, "apply/freeipa-client-apply.yml")
-	if !(strings.Index(site, "apply/freeipa-server-apply.yml") < freeIPAClientPos && freeIPAClientPos < serverPos && serverPos < clientPos) {
+	if strings.Index(site, "apply/freeipa-server-apply.yml") >= freeIPAClientPos || freeIPAClientPos >= serverPos || serverPos >= clientPos {
 		t.Error("site.yml must deploy FreeIPA server, enroll FreeIPA clients, then deploy NFS server and NFS clients")
 	}
 

@@ -37,7 +37,7 @@ func newAutonomyStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			st, err := store.AutonomyMode()
 			if err != nil {
 				return err
@@ -58,7 +58,7 @@ func newAutonomyStatusCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	return cmd
 }
 
@@ -72,7 +72,7 @@ func newAutonomyEnableCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			st, err := store.SetAutonomyMode(mode, actor, reason, time.Now())
 			if err != nil {
 				return err
@@ -82,12 +82,12 @@ func newAutonomyEnableCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&mode, "mode", policy.ModeShadow, "shadow (evaluate/persist would_allow_auto, never mutate) or enforced (allow_auto actually authorizes execution)")
 	cmd.Flags().StringVar(&actor, "actor", "", "your own operator identity — never Agent-supplied text (required)")
-	cmd.MarkFlagRequired("actor")
+	_ = cmd.MarkFlagRequired("actor")
 	cmd.Flags().StringVar(&reason, "reason", "", "why you are enabling autonomy (required — design doc §9: persist actor/reason/time)")
-	cmd.MarkFlagRequired("reason")
+	_ = cmd.MarkFlagRequired("reason")
 	return cmd
 }
 
@@ -101,7 +101,7 @@ func newAutonomyDisableCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			st, err := store.SetAutonomyMode(policy.ModeDisabled, actor, reason, time.Now())
 			if err != nil {
 				return err
@@ -111,11 +111,11 @@ func newAutonomyDisableCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&actor, "actor", "", "your own operator identity (required)")
-	cmd.MarkFlagRequired("actor")
+	_ = cmd.MarkFlagRequired("actor")
 	cmd.Flags().StringVar(&reason, "reason", "", "why you are disabling autonomy (required)")
-	cmd.MarkFlagRequired("reason")
+	_ = cmd.MarkFlagRequired("reason")
 	return cmd
 }
 
@@ -139,7 +139,7 @@ func newAutonomyKillCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			if err := store.TripBreaker(args[0], reason, time.Now()); err != nil {
 				return err
 			}
@@ -148,9 +148,9 @@ func newAutonomyKillCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&reason, "reason", "", "why you are engaging the kill switch (required)")
-	cmd.MarkFlagRequired("reason")
+	_ = cmd.MarkFlagRequired("reason")
 	return cmd
 }
 
@@ -165,7 +165,7 @@ func newAutonomyResetBreakerCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			if err := store.ResetBreaker(args[0], actor, reason, time.Now()); err != nil {
 				return err
 			}
@@ -174,10 +174,10 @@ func newAutonomyResetBreakerCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	cmd.MarkFlagRequired("db")
+	_ = cmd.MarkFlagRequired("db")
 	cmd.Flags().StringVar(&actor, "actor", "", "your own operator identity (required) — a tripped breaker never self-clears")
-	cmd.MarkFlagRequired("actor")
+	_ = cmd.MarkFlagRequired("actor")
 	cmd.Flags().StringVar(&reason, "reason", "", "why you believe it is safe to reset (required)")
-	cmd.MarkFlagRequired("reason")
+	_ = cmd.MarkFlagRequired("reason")
 	return cmd
 }

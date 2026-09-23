@@ -287,7 +287,7 @@ func RemoveRosterUser(path, username string, opts RemoveRosterUserOptions) error
 	if err != nil {
 		return err
 	}
-	defer lock.release()
+	defer lock.release() //nolint:errcheck
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -349,7 +349,7 @@ func RemoveRosterGroup(path, groupname string, opts RemoveRosterGroupOptions) er
 	if err != nil {
 		return err
 	}
-	defer lock.release()
+	defer lock.release() //nolint:errcheck
 
 	data, err := os.ReadFile(path)
 	if err != nil {

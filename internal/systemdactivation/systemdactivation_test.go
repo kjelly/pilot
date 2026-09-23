@@ -34,7 +34,7 @@ func TestListenerInheritedSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck
 	unixLn := ln.(*net.UnixListener)
 	f, err := unixLn.File()
 	if err != nil {
@@ -68,7 +68,7 @@ func TestHelperProcessSystemdActivation(t *testing.T) {
 		fmt.Println("ERROR:", err)
 		os.Exit(1)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck
 	if _, ok := ln.(*net.UnixListener); !ok {
 		fmt.Printf("ERROR: listener is %T, want *net.UnixListener\n", ln)
 		os.Exit(1)

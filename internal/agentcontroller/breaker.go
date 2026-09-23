@@ -108,7 +108,7 @@ func (s *Store) ListBreakers() ([]BreakerRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list breakers: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var out []BreakerRecord
 	for rows.Next() {
 		var r BreakerRecord

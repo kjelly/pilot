@@ -432,7 +432,7 @@ func dnsRecordSummary(rec map[string]any) string {
 	rtype := dnsStringOr(rec, "type", "?")
 	state := dnsStringOr(rec, "state", "present")
 	host := dnsStringValue(dnsSubmap(rec, "target"), "inventory_host")
-	value := host
+	var value string
 	if host != "" {
 		value = "→inventory_host:" + host
 	} else {

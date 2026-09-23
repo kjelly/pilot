@@ -279,13 +279,13 @@ func waitPulpTask(ctx context.Context, client *http.Client, taskURL, password st
 		case "completed":
 			return task.CreatedResources, nil
 		case "failed", "canceled":
-			return nil, fmt.Errorf("Pulp task ended in state %s", task.State)
+			return nil, fmt.Errorf("the Pulp task ended in state %s", task.State)
 		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-deadline.C:
-			return nil, errors.New("Pulp task timed out")
+			return nil, errors.New("the Pulp task timed out")
 		case <-ticker.C:
 		}
 	}

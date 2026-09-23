@@ -1463,7 +1463,7 @@ func runDetectionSteps(ctx context.Context, runner diagnose.AdHocRunner, invento
 	case pathResult.RunErr != nil:
 		pathErr = fmt.Errorf("read configured Detection Engine dbPath: %w", pathResult.RunErr)
 	case pathResult.Unreachable:
-		pathErr = fmt.Errorf("Detection Engine host unreachable while reading configured dbPath")
+		pathErr = fmt.Errorf("the Detection Engine host was unreachable while reading configured dbPath")
 	case pathResult.RC != 0:
 		pathErr = fmt.Errorf("read configured Detection Engine dbPath exited with rc %d", pathResult.RC)
 	default:

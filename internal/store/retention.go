@@ -111,7 +111,7 @@ func (s *Store) PruneEvidenceArchive(ctx context.Context, archiveID string) (int
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck
 	if _, err := tx.ExecContext(ctx, `INSERT INTO evidence_admin_mode (enabled) VALUES (1)`); err != nil {
 		return 0, err
 	}
@@ -144,7 +144,7 @@ func (s *Store) finishedRunsBefore(ctx context.Context, before time.Time) ([]str
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var ids []string
 	for rows.Next() {
 		var id string
@@ -186,7 +186,7 @@ func (s *Store) rowsAsMaps(ctx context.Context, query string, args ...any) ([]ma
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, err

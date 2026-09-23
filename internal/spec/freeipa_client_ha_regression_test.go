@@ -292,7 +292,7 @@ func TestRegression_FreeipaClientServerFailoverTask_BackupAtomicValidateRollback
 			t.Fatalf("could not find the %q task", name)
 		}
 	}
-	if !(backupIdx < writeIdx && writeIdx < validateIdx && validateIdx < rollbackIdx && rollbackIdx < failIdx) {
+	if backupIdx >= writeIdx || writeIdx >= validateIdx || validateIdx >= rollbackIdx || rollbackIdx >= failIdx {
 		t.Errorf("mutation steps must run in order: backup -> write -> validate -> rollback -> fail (got backup=%d write=%d validate=%d rollback=%d fail=%d)", backupIdx, writeIdx, validateIdx, rollbackIdx, failIdx)
 	}
 	if !strings.Contains(task, "kinit, -k, -t, /etc/krb5.keytab") {

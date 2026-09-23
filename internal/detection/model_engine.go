@@ -183,8 +183,8 @@ func (e *Engine) scoreOneBatch(ctx context.Context, batch []Candidate, evaluatio
 	}
 	for _, c := range batch {
 		mu.Lock()
-		switch {
-		case resp.Status == "insufficient_data":
+		switch resp.Status {
+		case "insufficient_data":
 			fused[c.Subject.ID] = FuseInsufficientData(c.LocalScore)
 		default:
 			if rc, ok := byID[c.Subject.ID]; ok {

@@ -77,9 +77,7 @@ func buildAlertEvidence(fused FusedResult, current map[string]float64) alertEvid
 
 	categories := map[string]struct{}{}
 	for _, contributor := range fused.Contributors {
-		evidence.Contributors = append(evidence.Contributors, alertContributor{
-			Feature: contributor.Feature, Category: contributor.Category, Score: contributor.Score,
-		})
+		evidence.Contributors = append(evidence.Contributors, alertContributor(contributor))
 		if evidence.DominantFeature == "" {
 			evidence.DominantFeature = contributor.Feature
 		}

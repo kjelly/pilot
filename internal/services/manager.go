@@ -521,7 +521,7 @@ func extractTarGz(path, dest string) error {
 	if err != nil {
 		return fmt.Errorf("services: read Harbor installer gzip: %w", err)
 	}
-	defer gz.Close()
+	defer gz.Close() //nolint:errcheck
 	tr := tar.NewReader(gz)
 	for {
 		h, err := tr.Next()

@@ -98,7 +98,7 @@ func (s *Store) IngestEvent(ev IncidentEvent, now time.Time) (out IngestOutcome,
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -329,7 +329,7 @@ func (s *Store) ListIncidentsNeedingDispatch(now time.Time, limit int) ([]Incide
 	if err != nil {
 		return nil, fmt.Errorf("list dispatchable incidents: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var out []Incident
 	for rows.Next() {
@@ -389,7 +389,7 @@ func (s *Store) EnqueueRun(incidentID string, envelope IncidentEnvelopeV2, now t
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -427,7 +427,7 @@ func (s *Store) StartRun(runID, incidentID string, now time.Time) error {
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 	if _, execErr := tx.Exec(`UPDATE agent_runs SET state = ?, started_at = ? WHERE id = ?`,
@@ -460,7 +460,7 @@ func (s *Store) CompleteRunDiagnosed(runID, incidentID string, result DiagnosisR
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 	if _, execErr := tx.Exec(`UPDATE agent_runs SET state = ?, finished_at = ?, output_json = ? WHERE id = ?`,
@@ -503,7 +503,7 @@ func (s *Store) FailRunAndMaybeRetry(runID, incidentID, errorClass, errorText st
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 	if _, execErr := tx.Exec(`UPDATE agent_runs SET state = ?, finished_at = ?, error_class = ?, error_text = ? WHERE id = ?`,
@@ -551,7 +551,7 @@ func (s *Store) RecoverInFlightRuns(now time.Time) (recovered int, err error) {
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -566,13 +566,13 @@ func (s *Store) RecoverInFlightRuns(now time.Time) (recovered int, err error) {
 	for rows.Next() {
 		var p pair
 		if scanErr := rows.Scan(&p.runID, &p.incidentID); scanErr != nil {
-			rows.Close()
+			_ = rows.Close()
 			err = fmt.Errorf("scan in-flight run: %w", scanErr)
 			return 0, err
 		}
 		inFlight = append(inFlight, p)
 	}
-	rows.Close()
+	_ = rows.Close()
 	if err = rows.Err(); err != nil {
 		return 0, err
 	}

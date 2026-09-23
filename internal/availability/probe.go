@@ -193,7 +193,7 @@ func (p TCPProber) Probe(ctx context.Context, endpoint Endpoint) ProbeResult {
 	if err != nil {
 		return ProbeResult{Host: endpoint.Host, Endpoint: endpoint.Addr, State: ProbeUnreachable, Err: err}
 	}
-	conn.Close()
+	_ = conn.Close()
 	return ProbeResult{Host: endpoint.Host, Endpoint: endpoint.Addr, State: ProbeReachable}
 }
 

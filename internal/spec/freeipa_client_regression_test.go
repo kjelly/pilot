@@ -253,7 +253,7 @@ func TestRegression_FreeipaClientApplyPlaybook_HostDNSSafety(t *testing.T) {
 	if planIdx < 0 || installIdx < 0 || applyIdx < 0 {
 		t.Fatalf("playbook must include tasks/freeipa-client-host-dns.yml in both plan and apply phases, around ipa-client-install")
 	}
-	if !(planIdx < installIdx && installIdx < applyIdx) {
+	if planIdx >= installIdx || installIdx >= applyIdx {
 		t.Errorf("DNS preflight (plan) must run before ipa-client-install, and backfill+verify (apply) must run after it: planIdx=%d installIdx=%d applyIdx=%d", planIdx, installIdx, applyIdx)
 	}
 
@@ -261,7 +261,7 @@ func TestRegression_FreeipaClientApplyPlaybook_HostDNSSafety(t *testing.T) {
 	// including the /etc/hosts pin) — spec.md §16's "DNS preflight" step.
 	preTasksIdx := strings.Index(playbook, "pre_tasks:")
 	hostsPinIdx := strings.Index(playbook, "pin this host")
-	if preTasksIdx < 0 || hostsPinIdx < 0 || !(preTasksIdx < planIdx && planIdx < hostsPinIdx) {
+	if preTasksIdx < 0 || hostsPinIdx < 0 || (preTasksIdx >= planIdx || planIdx >= hostsPinIdx) {
 		t.Errorf("DNS plan-phase include must sit inside pre_tasks, before the /etc/hosts self-pin task")
 	}
 }
@@ -714,10 +714,10 @@ func TestRegression_FreeipaClientApplyPlaybook_EnrollmentProbeBeforeDNSPlan(t *t
 	if preTasksIdx < 0 || cfgStatIdx < 0 || keytabStatIdx < 0 || planIdx < 0 || tasksIdx < 0 {
 		t.Fatal("expected pre_tasks, both stat probes, the DNS plan include, and a tasks: section")
 	}
-	if !(preTasksIdx < cfgStatIdx && cfgStatIdx < planIdx) {
+	if preTasksIdx >= cfgStatIdx || cfgStatIdx >= planIdx {
 		t.Errorf("enrollment-config stat must sit inside pre_tasks, before the DNS plan include: preTasksIdx=%d cfgStatIdx=%d planIdx=%d", preTasksIdx, cfgStatIdx, planIdx)
 	}
-	if !(preTasksIdx < keytabStatIdx && keytabStatIdx < planIdx) {
+	if preTasksIdx >= keytabStatIdx || keytabStatIdx >= planIdx {
 		t.Errorf("keytab stat must sit inside pre_tasks, before the DNS plan include: preTasksIdx=%d keytabStatIdx=%d planIdx=%d", preTasksIdx, keytabStatIdx, planIdx)
 	}
 	// Only ONE stat of ipa_config_marker in the whole playbook — the

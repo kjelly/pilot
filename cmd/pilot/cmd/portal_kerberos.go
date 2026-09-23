@@ -90,7 +90,7 @@ func runPortalCredentialCommand(ctx context.Context, input []byte, path string, 
 
 func readPortalKerberosPassword(principal string) ([]byte, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return nil, errors.New("Kerberos password requires an interactive terminal")
+		return nil, errors.New("the Kerberos password requires an interactive terminal")
 	}
 	fmt.Fprintf(os.Stderr, "Kerberos password for %s: ", principal)
 	password, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -130,7 +130,7 @@ func (s *portalKerberosSession) Ensure(ctx context.Context, username string) (st
 	}
 	defer wipeBytes(password)
 	if len(password) == 0 {
-		return "", errors.New("Kerberos password cannot be empty")
+		return "", errors.New("the Kerberos password cannot be empty")
 	}
 
 	dir, err := os.MkdirTemp(s.runtimeBase, s.cacheDirPrefix)
@@ -149,13 +149,13 @@ func (s *portalKerberosSession) Ensure(ctx context.Context, username string) (st
 
 	if _, err := s.run(ctx, input, kinitBinaryPath, "-F", "-l", portalTicketLife, "-c", cache, username); err != nil {
 		_ = os.RemoveAll(dir)
-		return "", errors.New("Kerberos authentication failed; verify the password or update an expired password with kinit/kpasswd")
+		return "", errors.New("the Kerberos authentication failed; verify the password or update an expired password with kinit/kpasswd")
 	}
 	s.ownedCache = cache
 	s.ownedDir = dir
 	if !s.cacheValid(ctx, cache, username) {
 		s.destroyOwnedCache()
-		return "", errors.New("Kerberos authentication did not produce a valid ticket for the Portal user")
+		return "", errors.New("the Kerberos authentication did not produce a valid ticket for the Portal user")
 	}
 	return cache, nil
 }

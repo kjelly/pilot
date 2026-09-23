@@ -93,7 +93,7 @@ func newConfigCmd() *cobra.Command {
 		},
 	}
 	validate.Flags().StringVar(&configPath, "config", "", "path to config.yaml (required)")
-	validate.MarkFlagRequired("config")
+	_ = validate.MarkFlagRequired("config")
 	cfgCmd.AddCommand(validate)
 	return cfgCmd
 }
@@ -108,7 +108,7 @@ func newServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to config.yaml (required)")
-	cmd.MarkFlagRequired("config")
+	_ = cmd.MarkFlagRequired("config")
 	return cmd
 }
 
@@ -127,7 +127,7 @@ func runServe(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	defer store.Close()
+	defer store.Close() //nolint:errcheck
 
 	if recovered, err := store.RecoverInFlightRuns(time.Now()); err != nil {
 		return fmt.Errorf("recover in-flight runs: %w", err)
@@ -309,7 +309,7 @@ func newDBCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer store.Close() //nolint:errcheck
 			result, err := store.IntegrityCheck()
 			if err != nil {
 				return err
@@ -322,7 +322,7 @@ func newDBCmd() *cobra.Command {
 		},
 	}
 	check.Flags().StringVar(&dbPath, "db", "", "path to state.db (required)")
-	check.MarkFlagRequired("db")
+	_ = check.MarkFlagRequired("db")
 
 	var backupSrc, backupDst string
 	backup := &cobra.Command{
@@ -350,8 +350,8 @@ func newDBCmd() *cobra.Command {
 	}
 	backup.Flags().StringVar(&backupSrc, "db", "", "path to state.db (required)")
 	backup.Flags().StringVar(&backupDst, "output", "", "path to write the backup (required)")
-	backup.MarkFlagRequired("db")
-	backup.MarkFlagRequired("output")
+	_ = backup.MarkFlagRequired("db")
+	_ = backup.MarkFlagRequired("output")
 
 	dbCmd.AddCommand(check, backup)
 	return dbCmd

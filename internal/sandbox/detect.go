@@ -41,7 +41,7 @@ func InspectExistingContainer(ctx context.Context, cli, name string) (string, er
 			stderr := string(exitErr.Stderr)
 			if strings.Contains(stderr, "No such object") ||
 				strings.Contains(stderr, "Error: No such container") {
-				return "", fmt.Errorf("no container named %q", name)
+				return "", fmt.Errorf("no such container: %q", name)
 			}
 			return "", fmt.Errorf("docker inspect %q: %s", name, stderr)
 		}

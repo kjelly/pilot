@@ -39,7 +39,7 @@ func listenOnLoopback(t *testing.T) (net.Listener, int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	return ln, ln.Addr().(*net.TCPAddr).Port
 }
 
@@ -53,7 +53,7 @@ func closedLoopbackPort(t *testing.T) int {
 		t.Fatal(err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
+	_ = ln.Close()
 	return port
 }
 

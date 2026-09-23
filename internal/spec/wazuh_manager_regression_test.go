@@ -276,7 +276,7 @@ func TestRegression_WazuhManagerDashboardOffPort443(t *testing.T) {
 	if unpackIdx < 0 || remapIdx < 0 || composeUpIdx < 0 {
 		t.Fatal("could not locate Step 4/4b/8 in wazuh-manager-apply.yml")
 	}
-	if !(unpackIdx < remapIdx && remapIdx < composeUpIdx) {
+	if unpackIdx >= remapIdx || remapIdx >= composeUpIdx {
 		t.Error("the port-443 remap must run after unpacking the compose file and before compose up")
 	}
 }

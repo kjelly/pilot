@@ -71,7 +71,19 @@ func TestEditRouter_Teatest_DNSManifestFlow_CreateSkeletonThenAddZone(t *testing
 	// inspection, not a business-logic bug), not a timing fluke.
 	waitFor("realm(必須與 freeipa_realm 一致")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept the IPA.PILOT.INTERNAL default
-	waitFor("ipa1.ipa.pilot.internal")           // auto-derived default: ipa1.<domain>
+	// Checks the label's distinguishing suffix, not the pre-filled
+	// "ipa1.ipa.pilot.internal" default value: that value is bound
+	// directly into the Huh input (huhInputScreen sets s.value =
+	// spec.Default), so it renders through the same cell-level render
+	// diffing as the label text above — under CI's slower/shared CPU
+	// scheduling this can genuinely retransmit the value non-contiguously
+	// (e.g. split around the cursor placed at the end of the pre-filled
+	// text), unlike on a fast local machine where each keystroke gets its
+	// own full diff frame. The freeipa.server assertion added below (after
+	// LoadDNSManifest) independently confirms the accepted default value
+	// actually landed in the manifest, so this waitFor just needs to
+	// confirm the next screen rendered before accepting it.
+	waitFor("server FQDN(必須與 freeipa_server_fqdn 一致")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept the auto-detected default
 	waitFor("已建立最小 freeipa-dns manifest 骨架")
 
@@ -96,6 +108,10 @@ func TestEditRouter_Teatest_DNSManifestFlow_CreateSkeletonThenAddZone(t *testing
 	}
 	if v := inventory.ValidateDNSManifest(root, inventory.DNSValidateOptions{}); len(v) != 0 {
 		t.Fatalf("final manifest violations: %v", v)
+	}
+	freeipa, _ := root["freeipa"].(map[string]any)
+	if server, _ := freeipa["server"].(string); server != "ipa1.ipa.pilot.internal" {
+		t.Fatalf("freeipa.server = %q, want the auto-derived ipa1.ipa.pilot.internal default", server)
 	}
 	names, err := inventory.DNSManifestZoneNames(path)
 	if err != nil || len(names) != 1 || names[0] != "example.com." {

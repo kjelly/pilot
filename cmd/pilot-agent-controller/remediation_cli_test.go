@@ -17,7 +17,7 @@ func TestRequireManagedIncidentSubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	defer store.Close()
+	defer store.Close() //nolint:errcheck
 
 	now := time.Now()
 

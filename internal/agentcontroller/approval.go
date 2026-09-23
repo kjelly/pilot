@@ -73,7 +73,7 @@ func (s *Store) recordApprovalDecision(planID, planHash, decision, actor, reason
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 	if _, execErr := tx.Exec(`
@@ -109,7 +109,7 @@ func (s *Store) ListApprovals(planID string) ([]ApprovalRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list approvals for %s: %w", planID, err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var out []ApprovalRecord
 	for rows.Next() {
 		var r ApprovalRecord

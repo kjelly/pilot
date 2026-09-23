@@ -97,7 +97,7 @@ func startFakeGateway(t *testing.T, username string) *portalClient {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	gw := accessportal.GatewayConfig{ID: "gpu-01", Scope: "gpu", TargetHostgroup: "pilot-target-gpu"}
 	provider := &fakeGatewayProvider{username: username}

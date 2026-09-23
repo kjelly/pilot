@@ -170,7 +170,7 @@ func (s *Store) FinishReapplyRun(planID, result string, changed int, auditRef, v
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -209,12 +209,12 @@ func (s *Store) RecoverOrphanedExecutingReapplyPlans(now time.Time) (recovered i
 	for rows.Next() {
 		var id string
 		if scanErr := rows.Scan(&id); scanErr != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, fmt.Errorf("scan executing reapply plan: %w", scanErr)
 		}
 		ids = append(ids, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 	if err = rows.Err(); err != nil {
 		return 0, err
 	}

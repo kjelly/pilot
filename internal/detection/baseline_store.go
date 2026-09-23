@@ -43,7 +43,7 @@ func (s *Store) SaveBaselineSamples(records []BaselineSampleRecord, evaluationTi
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -56,7 +56,7 @@ func (s *Store) SaveBaselineSamples(records []BaselineSampleRecord, evaluationTi
 		err = fmt.Errorf("prepare upsert baseline_samples: %w", prepErr)
 		return err
 	}
-	defer upsert.Close()
+	defer upsert.Close() //nolint:errcheck
 
 	cutoff := evaluationTime - baselineWindowSeconds
 	pruned := map[[3]string]bool{}
@@ -100,7 +100,7 @@ func (s *Store) LoadBaselineHistory(now time.Time, subjectKind string) (*HostBas
 	if err != nil {
 		return nil, fmt.Errorf("query baseline_samples: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	store := NewHostBaselineStore()
 	for rows.Next() {

@@ -149,7 +149,7 @@ func (c *RepairClient) withSession(ctx context.Context, fn func(*mcp.ClientSessi
 	if err != nil {
 		return fmt.Errorf("connect to repair MCP: %w", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 	return fn(session)
 }
 

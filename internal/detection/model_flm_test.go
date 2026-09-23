@@ -117,7 +117,7 @@ func flmChatHandler(t *testing.T, respond func(userContent string) string) http.
 		}
 		content := respond(userContent)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(flmChatResponse{Message: &ollamaChatMessage{Role: "assistant", Content: content}})
+		_ = json.NewEncoder(w).Encode(flmChatResponse{Message: &ollamaChatMessage{Role: "assistant", Content: content}})
 	}
 }
 

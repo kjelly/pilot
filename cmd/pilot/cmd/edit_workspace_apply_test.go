@@ -127,7 +127,7 @@ func TestApplyEditScenario_FailsClosedWhenWorkspaceIsLocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireWorkspaceLock() error = %v", err)
 	}
-	defer lock.release()
+	defer lock.release() //nolint:errcheck
 
 	scenario := editScenario{Version: 1, Steps: []editAction{{Action: "create_host", Host: "web-01"}}}
 	_, err = applyEditScenario(dir, "session-c", scenario, editAgentSessionOptions{})

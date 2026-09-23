@@ -18,8 +18,8 @@ linters:
         - (io.Closer).Close
         - (*os.File).Close
         - (*database/sql.DB).Close
-        - (*github.com/anomalyco/pilot/internal/store.Store).Close
-        - (*github.com/anomalyco/pilot/internal/docs.ModuleIndex).Close
+        - (*github.com/kjelly/pilot/internal/store.Store).Close
+        - (*github.com/kjelly/pilot/internal/docs.ModuleIndex).Close
         # Best-effort filesystem cleanup.
         - os.Remove
         - os.RemoveAll

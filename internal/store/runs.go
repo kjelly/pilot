@@ -100,7 +100,7 @@ func (s *Store) ListRuns(filter RunFilter) ([]DeliveryRun, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list delivery runs: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	out := make([]DeliveryRun, 0)
 	for rows.Next() {
 		run, err := scanDeliveryRun(rows)
@@ -127,7 +127,7 @@ func (s *Store) GetRun(runID string) (DeliveryRun, []RunEvidence, error) {
 	if err != nil {
 		return DeliveryRun{}, nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	evidence := make([]RunEvidence, 0)
 	for rows.Next() {
 		var item RunEvidence
@@ -167,7 +167,7 @@ func (s *Store) PendingSpec(specPath string) ([]PendingSpecHost, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query pending spec %s: %w", specPath, err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	pending := make([]PendingSpecHost, 0)
 	for rows.Next() {
 		var item PendingSpecHost
@@ -213,7 +213,7 @@ func (s *Store) evidenceVerdicts(runID string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	out := make(map[string]string)
 	for rows.Next() {
 		var specPath, rowID, host, verdict string

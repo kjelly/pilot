@@ -34,7 +34,7 @@ func validateAlertmanagerReceiver(mode, value string) error {
 	case alertmanagerReceiverModeTeams:
 		u, err := url.ParseRequestURI(strings.TrimSpace(value))
 		if err != nil || u.Scheme != "https" || u.Host == "" {
-			return fmt.Errorf("Teams webhook must be a valid HTTPS URL")
+			return fmt.Errorf("the Teams webhook must be a valid HTTPS URL")
 		}
 		return nil
 	case alertmanagerReceiverModeCustom:
@@ -85,7 +85,7 @@ func saveAlertmanagerReceiver(dir, mode, value string) error {
 		return fmt.Errorf("parse Alertmanager vault: %w", err)
 	}
 	if !doc.EditableWithPreservedNestedMappings(monitoring.SNMPCredentialsKey) {
-		return fmt.Errorf("Alertmanager vault has unsupported nested YAML")
+		return fmt.Errorf("the Alertmanager vault has unsupported nested YAML")
 	}
 	doc.Set(alertmanagerReceiverModeKey, mode)
 	switch mode {

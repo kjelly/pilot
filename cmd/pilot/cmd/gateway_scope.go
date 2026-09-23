@@ -104,8 +104,8 @@ func init() {
 		sub.Flags().StringVar(&gatewayScopeTargetGroup, "target-group", "freeipa-server", "inventory group/host the playbook runs against")
 		sub.Flags().StringVar(&gatewayScopeVaultFile, "vault-file", "", "vars file defining ipa_admin_password (default: <dir>/.vault/main.yaml if it exists)")
 		sub.Flags().DurationVar(&gatewayScopeTimeout, "timeout", 5*time.Minute, "ansible-playbook timeout")
-		sub.MarkFlagRequired("scope")
-		sub.MarkFlagRequired("hosts")
+		_ = sub.MarkFlagRequired("scope")
+		_ = sub.MarkFlagRequired("hosts")
 	}
 	for _, sub := range []*cobra.Command{gatewayScopeEnableAutoCmd, gatewayScopeDisableAutoCmd} {
 		sub.Flags().StringVar(&gatewayScopeDirFlag, "dir", ".", "workspace directory containing inventory.yml and .vault/main.yaml (matches `pilot deploy --dir`)")
@@ -114,7 +114,7 @@ func init() {
 		sub.Flags().StringVar(&gatewayScopeTargetGroup, "target-group", "freeipa-server", "inventory group/host the playbook runs against")
 		sub.Flags().StringVar(&gatewayScopeVaultFile, "vault-file", "", "vars file defining ipa_admin_password (default: <dir>/.vault/main.yaml if it exists)")
 		sub.Flags().DurationVar(&gatewayScopeTimeout, "timeout", 5*time.Minute, "ansible-playbook timeout")
-		sub.MarkFlagRequired("scope")
+		_ = sub.MarkFlagRequired("scope")
 	}
 	gatewayScopeCmd.AddCommand(gatewayScopePlanCmd, gatewayScopeReconcileCmd, gatewayScopeEnableAutoCmd, gatewayScopeDisableAutoCmd)
 	rootCmd.AddCommand(gatewayScopeCmd)

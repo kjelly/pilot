@@ -117,7 +117,7 @@ func init() {
 	detectionFeatureProfileSetNotifyCmd.Flags().StringVar(&detectionFeatureProfileRunbookURLFlag, "runbook-url", "", "runbook path/URL for this category's alerts")
 	detectionFeatureProfileSetNotifyCmd.Flags().StringVar(&detectionFeatureProfileRecommendedActionFlag, "recommended-action", "", "recommended-action text for this category's alerts")
 	detectionFeatureProfileSetNotifyCmd.Flags().BoolVar(&detectionFeatureProfileClearFlag, "clear", false, "remove the whole per-category override (ignores the other flags)")
-	detectionFeatureProfileSetNotifyCmd.MarkFlagRequired("category")
+	_ = detectionFeatureProfileSetNotifyCmd.MarkFlagRequired("category")
 
 	detectionFeatureProfileCmd.AddCommand(detectionFeatureProfileShowCmd, detectionFeatureProfileSetNotifyCmd)
 	detectionEngineCmd.AddCommand(detectionFeatureProfileCmd)

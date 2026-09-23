@@ -29,7 +29,7 @@ func listToolNames(t *testing.T, ctx context.Context, binary string, args ...str
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 	result, err := session.ListTools(ctx, nil)
 	if err != nil {
 		t.Fatalf("ListTools() error = %v", err)

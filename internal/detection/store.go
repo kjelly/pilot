@@ -292,7 +292,7 @@ func (s *Store) applyMigrations(list []migration) error {
 	for rows.Next() {
 		var v int
 		if err := rows.Scan(&v); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("scan schema_migrations: %w", err)
 		}
 		applied[v] = true
@@ -300,7 +300,7 @@ func (s *Store) applyMigrations(list []migration) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	var pending []migration
 	for _, m := range list {
@@ -363,7 +363,7 @@ func (s *Store) applyMigration(m migration) (err error) {
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 	for _, stmt := range m.sql {

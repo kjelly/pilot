@@ -387,7 +387,7 @@ func applyStandaloneKey(m *standaloneScreen, msg tea.KeyPressMsg) error {
 // initStandaloneScreen runs m's Init() and drains whatever tea.Cmd
 // cascade it returns, feeding each resulting message straight back into
 // Update — exactly what a real tea.Program's event loop already does
-// for deploy_tui.go's runSelectProgram/runTextProgram/runConfirmProgram
+// for deploy_tui.go's runSelectPrompt/runTextPrompt/runConfirmPrompt
 // (which construct a real Program and call .Run()). This automation
 // path drives a standaloneScreen directly instead, so nothing else ever
 // calls Init() for it. The hand-written primitives tolerated that

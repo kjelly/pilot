@@ -205,7 +205,7 @@ func TestRepairApplyHandler_SuccessExecutesAndVerifies(t *testing.T) {
 	}
 
 	applyHandler := repairApplyHandler(opts)
-	result, out, err := applyHandler(context.Background(), &mcp.CallToolRequest{}, repairApplyInput{Plan: planOut.Plan})
+	result, out, err := applyHandler(context.Background(), &mcp.CallToolRequest{}, repairApplyInput(planOut))
 	if err != nil {
 		t.Fatalf("handler() error = %v", err)
 	}
@@ -247,7 +247,7 @@ func TestRepairApplyHandler_ExecutionFailureNeverCallsVerify(t *testing.T) {
 	}
 
 	applyHandler := repairApplyHandler(opts)
-	_, out, err := applyHandler(context.Background(), &mcp.CallToolRequest{}, repairApplyInput{Plan: planOut.Plan})
+	_, out, err := applyHandler(context.Background(), &mcp.CallToolRequest{}, repairApplyInput(planOut))
 	if err != nil {
 		t.Fatalf("handler() error = %v", err)
 	}

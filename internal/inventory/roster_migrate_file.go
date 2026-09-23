@@ -187,7 +187,7 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 	if err != nil {
 		return RosterMigrationResult{}, err
 	}
-	defer lock.release()
+	defer lock.release() //nolint:errcheck
 
 	original, err := os.ReadFile(path)
 	if err != nil {

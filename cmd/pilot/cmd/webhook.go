@@ -213,7 +213,7 @@ func runWebhookStatus(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(out, "no integrations.yaml — outbound webhook disabled")
 		return nil
 	}
-	defer closeFn()
+	defer closeFn() //nolint:errcheck
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tPENDING\tDELIVERING\tPAUSED\tDEAD\tBLOCKED\tORPHANED\tLAST-ACK")
@@ -243,7 +243,7 @@ func runWebhookFlush(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(out, "no integrations.yaml — outbound webhook disabled")
 		return nil
 	}
-	defer closeFn()
+	defer closeFn() //nolint:errcheck
 
 	var identities []outbound.WebhookIdentity
 	for _, w := range cfg.Webhooks {

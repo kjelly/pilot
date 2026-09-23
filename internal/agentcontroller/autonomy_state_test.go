@@ -42,13 +42,13 @@ func TestSetAutonomyMode_PersistsAndSurvivesReopen(t *testing.T) {
 	if _, err := s1.SetAutonomyMode(policy.ModeEnforced, "alice", "sandbox go-ahead", now); err != nil {
 		t.Fatalf("SetAutonomyMode: %v", err)
 	}
-	s1.Close()
+	_ = s1.Close()
 
 	s2, err := OpenStore(dbPath)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer s2.Close()
+	defer s2.Close() //nolint:errcheck
 	st, err := s2.AutonomyMode()
 	if err != nil {
 		t.Fatalf("AutonomyMode after reopen: %v", err)

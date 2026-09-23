@@ -11,7 +11,7 @@ func TestAcquireWorkspaceLock_SecondAcquireFailsWhileFirstHeld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first acquireWorkspaceLock() error = %v", err)
 	}
-	defer first.release()
+	defer first.release() //nolint:errcheck
 
 	_, err = acquireWorkspaceLock(dir, "session-b")
 	if !errors.Is(err, errWorkspaceLocked) {
@@ -33,5 +33,5 @@ func TestAcquireWorkspaceLock_ReleasedLockCanBeReacquired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireWorkspaceLock() after release error = %v", err)
 	}
-	defer second.release()
+	defer second.release() //nolint:errcheck
 }

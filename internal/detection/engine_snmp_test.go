@@ -58,7 +58,7 @@ func TestEngine_SNMPProfile_FixtureAnomalyProducesSignalEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		at := r.URL.Query().Get("time")
 		var atInt int64
-		fmt.Sscanf(at, "%d", &atInt)
+		_, _ = fmt.Sscanf(at, "%d", &atInt)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, snmpVectorResponse(atInt, "core-sw-01", "site-a", "edge-switches", value))
 	}))
@@ -247,7 +247,7 @@ func TestEngine_SNMPProfile_ModelFailurePreservesLocalAnomalyAndSeesOnlyAggregat
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		at := r.URL.Query().Get("time")
 		var atInt int64
-		fmt.Sscanf(at, "%d", &atInt)
+		_, _ = fmt.Sscanf(at, "%d", &atInt)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, snmpVectorResponse(atInt, "core-sw-01", "site-a", "edge-switches", value))
 	}))

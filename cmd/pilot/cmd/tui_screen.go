@@ -31,8 +31,8 @@ type screen interface {
 
 // standaloneScreen wraps a single `screen` in its own tea.Program,
 // quitting once it reports Finished() — for one-shot prompts run
-// outside any router (see deploy_tui.go's runSelectProgram/
-// runTextProgram/runConfirmProgram). The screens themselves
+// outside any router (see deploy_tui.go's runSelectPrompt/
+// runTextPrompt/runConfirmPrompt). The screens themselves
 // deliberately never call tea.Quit (see the package doc comment
 // above) because pilot edit's router needs to keep its single
 // continuous Program alive across screen transitions; a standalone

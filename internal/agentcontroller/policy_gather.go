@@ -64,7 +64,7 @@ func (s *Store) ListPolicyDecisions(planID string) ([]PolicyDecisionRecord, erro
 	if err != nil {
 		return nil, fmt.Errorf("list policy decisions for %s: %w", planID, err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var out []PolicyDecisionRecord
 	for rows.Next() {
 		var r PolicyDecisionRecord

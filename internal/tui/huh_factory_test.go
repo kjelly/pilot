@@ -54,9 +54,9 @@ func TestHuhFactorySecretInputIsMarkedSecret(t *testing.T) {
 // A whole wizard step driven only through the Pilot-owned contract:
 // no test here names a Huh type, which is the point of Core Invariant 2.
 func TestHuhFactoryDrivesAScreenThroughTheContractOnly(t *testing.T) {
-	var f Factory = NewHuhFactory()
+	var f = NewHuhFactory()
 
-	var sel SelectScreen = f.Select(SelectSpec{
+	var sel = f.Select(SelectSpec{
 		ScreenID:  "hosts.list",
 		Title:     "選擇主機",
 		Choices:   []Choice{{ID: "h1", Label: "ipa01"}, {ID: "h2", Label: "web01"}, {ID: "h3", Label: "db01"}},
@@ -72,14 +72,14 @@ func TestHuhFactoryDrivesAScreenThroughTheContractOnly(t *testing.T) {
 		t.Fatalf("select outcome: finished=%v canceled=%v id=%q", sel.Finished(), sel.Canceled(), sel.SelectedID())
 	}
 
-	var in InputScreen = f.Input(InputSpec{ScreenID: "hosts.ip", Title: "IP", Default: "10.0.0.1"})
+	var in = f.Input(InputSpec{ScreenID: "hosts.ip", Title: "IP", Default: "10.0.0.1"})
 	in.Init()
 	send(t, in, keyEnter)
 	if !in.Finished() || in.Value() != "10.0.0.1" {
 		t.Fatalf("input outcome: finished=%v value=%q", in.Finished(), in.Value())
 	}
 
-	var cf ConfirmScreen = f.Confirm(ConfirmSpec{ScreenID: "hosts.save", Title: "儲存?", Default: true})
+	var cf = f.Confirm(ConfirmSpec{ScreenID: "hosts.save", Title: "儲存?", Default: true})
 	cf.Init()
 	send(t, cf, keyEnter)
 	if !cf.Finished() || !cf.Value() || cf.Canceled() {
