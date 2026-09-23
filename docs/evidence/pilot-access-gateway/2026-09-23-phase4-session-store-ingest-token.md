@@ -80,7 +80,7 @@ key; no real vault was used.
 
 The deployed `pilot-session-store` binary was built from this same source.
 The candidate apply reported `changed=0`, including for the binary copy.
-After the commit, `go test -race -count=1 ./...` exited 0 and
+On the committed tree, `go test -race -count=1 ./...` exited 0 and
 `golangci-lint` v2.12.1 reported 0 issues on the changed packages.
 `ansible-lint` on the store playbook reported the same 6 `run-once` findings
 as the baseline, and nothing new.
