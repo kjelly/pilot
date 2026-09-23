@@ -102,7 +102,7 @@ func checkProbeFlag(changed bool, probe string) error {
 
 func runVerify(cmd *cobra.Command, args []string) error {
 	hasPositional := len(args) >= 1
-	if err := checkProbeFlag(cmd.Flags().Changed("probe"), verifyProbe); err != nil {
+	if err := checkProbeFlag(cmd != nil && cmd.Flags().Changed("probe"), verifyProbe); err != nil {
 		return err
 	}
 	if verifyProbe != "" {
