@@ -491,6 +491,54 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "set_prometheus_annotation_label",
+				Description:              "promote a hosts.yml annotation key (key) to a node/DCGM Prometheus target label (value, must be pilot_*) via group_vars/prometheus.yml prometheus_host_annotation_labels; adds the mapping or renames its label",
+				Required:                 []string{"key", "value"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      prometheusAnnotationLabelsRelPath,
+					Assertion: "prometheus_host_annotation_labels maps key to value",
+				},
+			},
+			Validate: func(step editAction) error {
+				if step.ValueEnv != "" {
+					return fmt.Errorf("set_prometheus_annotation_label does not accept value_env: label names are not secrets")
+				}
+				return validatePrometheusAnnotationLabel(strings.TrimSpace(step.Key), strings.TrimSpace(step.Value))
+			},
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setPrometheusAnnotationLabel(r, strings.TrimSpace(step.Key), strings.TrimSpace(step.Value))
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "delete_prometheus_annotation_label",
+				Description:              "stop promoting a hosts.yml annotation key to a Prometheus target label (removes it from prometheus_host_annotation_labels; removing the last one disables the feature)",
+				Required:                 []string{"key"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      prometheusAnnotationLabelsRelPath,
+					Assertion: "key no longer present in prometheus_host_annotation_labels",
+				},
+			},
+			Validate: func(step editAction) error {
+				if strings.TrimSpace(step.Key) == "" {
+					return fmt.Errorf("delete_prometheus_annotation_label requires key")
+				}
+				return nil
+			},
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.deletePrometheusAnnotationLabel(r, strings.TrimSpace(step.Key))
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "add_vault_key",
 				Description:              "add a new key to a plaintext .vault/ skeleton file (creating the file first if needed); value_env is strongly recommended for real secrets",
 				Required:                 []string{"file", "key"},

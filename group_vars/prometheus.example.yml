@@ -87,6 +87,7 @@ thanos_s3_target_host: ""
 # 成 node/dcgm auto-discovery target 的 Prometheus labels(格式:
 # <annotation key>: <pilot_* label 名稱>)。未列出的 annotations 不會進 metrics;
 # 不設定或留空 {} 即完全維持舊行為(只有 pilot_host)。
+# 建議用 `pilot edit` →「Prometheus 主機註解 labels」編輯(會先檢查再寫入)。
 #
 # 注意:
 # - label 名稱必須是 pilot_[a-z][a-z0-9_]*,且不可用 pilot_host/pilot_target/

@@ -247,8 +247,12 @@ func runEdit(cmd *cobra.Command, args []string) error {
 
 // ---- top menu ---------------------------------------------------------------
 
-func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
-	choices := []tui.Choice{
+// topMenuChoices is the top-level `pilot edit` menu. pushTopMenu
+// dispatches on Choice.ID (never on position), and tests navigate with
+// topMenuIndex(id) — so inserting an item no longer silently re-targets
+// every hard-coded DOWN count in the TUI tests.
+func topMenuChoices() []tui.Choice {
+	return []tui.Choice{
 		{ID: "top.hosts", Label: "hosts.yml — 機器清單與角色"},
 		{ID: "top.group_vars", Label: "group_vars/ — 角色的設定值(FreeIPA realm、DNS 位址...)"},
 		{ID: "top.vault", Label: ".vault/ — vault 變數檔(明文 skeleton 或 ansible-vault 加密檔)"},
@@ -257,39 +261,49 @@ func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
 		{ID: "top.internal_endpoints", Label: "internal-endpoints manifest — internal DNS/TLS/routes(day-2 reconciler，可預覽/編輯/新增)"},
 		{ID: "top.monitoring", Label: "monitoring — Prometheus external exporter targets/profiles(可預覽/編輯/新增)"},
 		{ID: "top.alertmanager_receiver", Label: "Alertmanager 通知 — null/custom/Teams receiver"},
+		{ID: "top.prometheus_labels", Label: "Prometheus 主機註解 labels — 哪些主機註解要變成 metrics label"},
 		{ID: "top.completeness_check", Label: "🔍 檢查設定完整性 — 跟 pilot deploy 共用同一套規則"},
 		{ID: "top.minimal_workspace", Label: "快速建立最小 workspace — 引導式設定並驗證可部署性"},
 		{ID: "top.quit", Label: "離開"},
 	}
+}
+
+func pushTopMenu(r *editRouterModel, dir, banner string) tea.Cmd {
+	choices := topMenuChoices()
 	spec := tui.SelectSpec{ScreenID: "edit.top", Title: "要編輯什麼？", Choices: choices}
 	return r.transitionTo(r.uiFactory().Select(spec), banner, func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.SelectScreen)
 		if m.Canceled() {
 			return quitWizard(r)
 		}
-		switch m.Selected() {
-		case 0:
+		if m.Selected() < 0 || m.Selected() >= len(choices) {
+			return nil
+		}
+		switch choices[m.Selected()].ID {
+		case "top.hosts":
 			r.afterHostsSave = nil
 			return pushHostsPathPrompt(r, dir)
-		case 1:
+		case "top.group_vars":
 			return pushGroupVarsFilePicker(r, dir, "")
-		case 2:
+		case "top.vault":
 			return pushVaultFilePicker(r, dir, "")
-		case 3:
+		case "top.roster":
 			return pushRosterPathPrompt(r, dir)
-		case 4:
+		case "top.dns":
 			return pushDNSManifestPathPrompt(r, dir)
-		case 5:
+		case "top.internal_endpoints":
 			return pushInternalEndpointManifestPathPrompt(r, dir)
-		case 6:
+		case "top.monitoring":
 			return pushMonitoringManager(r, dir, "")
-		case 7:
+		case "top.alertmanager_receiver":
 			return pushAlertmanagerReceiverManager(r, dir, "")
-		case 8:
+		case "top.prometheus_labels":
+			return pushPrometheusAnnotationLabelsManager(r, dir, "")
+		case "top.completeness_check":
 			return pushConfigCompletenessCheck(r, dir)
-		case 9:
+		case "top.minimal_workspace":
 			return pushMinimalWorkspaceWizard(r, dir, "")
-		case 10:
+		case "top.quit":
 			r.quit = true
 			return nil
 		}

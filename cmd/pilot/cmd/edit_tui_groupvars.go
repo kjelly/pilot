@@ -472,7 +472,20 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 			banner += "\n" + note
 		}
 	}
-	if keys := doc.FlowMapKeys(); len(keys) > 0 {
+	var mapKeys []string
+	for _, k := range append(doc.FlowMapKeys(), doc.BlockMapKeys()...) {
+		if k == prometheusAnnotationLabelsKey {
+			note := "ℹ️  prometheus_host_annotation_labels 請用頂層選單的「Prometheus 主機註解 labels」編輯(會檢查 label 名稱與保留字)。"
+			if banner == "" {
+				banner = note
+			} else {
+				banner += "\n" + note
+			}
+			continue
+		}
+		mapKeys = append(mapKeys, k)
+	}
+	if keys := mapKeys; len(keys) > 0 {
 		note := fmt.Sprintf("ℹ️  %s 是巢狀設定(map)，pilot edit 不支援在這裡編輯，請直接改檔案 %s。", strings.Join(keys, "、"), path)
 		if banner == "" {
 			banner = note

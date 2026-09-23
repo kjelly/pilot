@@ -16,6 +16,7 @@ func TestSemanticActionCatalogIsStable(t *testing.T) {
 		"delete_role_preset", "restore_role_presets",
 		"set_group_var", "restore_group_var_default", "save_group_vars", "discard_group_vars",
 		"configure_alertmanager_receiver",
+		"set_prometheus_annotation_label", "delete_prometheus_annotation_label",
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",
 		"create_user", "set_user_field", "set_user_password", "add_ssh_key", "delete_ssh_key",
 		"create_group", "set_group_field", "set_group_members_users", "set_group_members_groups",
@@ -99,7 +100,7 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	if schema.PilotVersion == "" {
 		t.Error("pilot_version is empty")
 	}
-	if schema.SchemaVersion != 1 || len(schema.Actions) != 109 {
+	if schema.SchemaVersion != 1 || len(schema.Actions) != 111 {
 		t.Fatalf("schema metadata = schema_version %d, actions %d", schema.SchemaVersion, len(schema.Actions))
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {
@@ -198,6 +199,7 @@ func TestActionsListIncludesEverySemanticAction(t *testing.T) {
 		"delete_role_preset", "restore_role_presets",
 		"set_group_var", "restore_group_var_default", "save_group_vars", "discard_group_vars",
 		"configure_alertmanager_receiver",
+		"set_prometheus_annotation_label", "delete_prometheus_annotation_label",
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",
 		"create_user", "set_user_field", "set_user_password", "add_ssh_key", "delete_ssh_key",
 		"create_group", "set_group_field", "set_group_members_users", "set_group_members_groups",

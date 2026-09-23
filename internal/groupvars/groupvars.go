@@ -168,6 +168,32 @@ func (d *Doc) FlowMapKeys() []string {
 	return d.keysMatching(flowMapRe)
 }
 
+// blockMapHeadRe matches an active top-level "key:" line with nothing
+// after the colon — the head of a block mapping/sequence whose content is
+// on the indented lines below. keyLineRe needs a value token, so these
+// never become Entries at all; without BlockMapKeys they were silently
+// invisible in the editor.
+var blockMapHeadRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*):\s*$`)
+
+// BlockMapKeys returns the key names of every active top-level block
+// collection ("key:" followed by indented lines) — never editable here
+// (SetValue rewrites one line), so callers surface them like
+// BlockScalarKeys/FlowMapKeys.
+func (d *Doc) BlockMapKeys() []string {
+	var out []string
+	for i, line := range d.lines {
+		m := blockMapHeadRe.FindStringSubmatch(line)
+		if m == nil || i+1 >= len(d.lines) {
+			continue
+		}
+		next := d.lines[i+1]
+		if strings.HasPrefix(next, " ") || strings.HasPrefix(next, "\t") {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
 func (d *Doc) keysMatching(re *regexp.Regexp) []string {
 	var out []string
 	seen := map[string]bool{}

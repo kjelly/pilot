@@ -264,10 +264,7 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 
 	waitForPTYOutput(t, proc.out, 5*time.Second, "✅ 已存檔")
 	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
-	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
-	for i := 0; i < 10; i++ {
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "離開"
@@ -347,10 +344,7 @@ func TestPilotEditPTY_MinimalWorkspaceRequiresHostsThenReturnsCleanly(t *testing
 	proc := startEditPTY(t, dir, 40, 100)
 
 	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
-	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
-	for i := 0; i < 9; i++ {
+	for i := 0; i < topMenuIndex(t, "top.minimal_workspace"); i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r")

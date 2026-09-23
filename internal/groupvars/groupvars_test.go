@@ -400,3 +400,16 @@ func TestListEntries_RealResticBackupExampleFile(t *testing.T) {
 		t.Fatal("restic_backup_paths not found via ListEntries() against the real example file")
 	}
 }
+
+func TestBlockMapKeys(t *testing.T) {
+	d := Parse([]byte("---\n# prometheus_host_annotation_labels:\n#   project: pilot_project\nsite: a\nprometheus_host_annotation_labels:\n  project: pilot_project\nempty_head:\nnext: 1\nrestic_paths:\n  - /etc\n"))
+	got := d.BlockMapKeys()
+	if len(got) != 2 || got[0] != "prometheus_host_annotation_labels" || got[1] != "restic_paths" {
+		t.Fatalf("BlockMapKeys() = %v, want [prometheus_host_annotation_labels restic_paths] (commented example and a bare key with no indented body excluded)", got)
+	}
+	for _, e := range d.Entries() {
+		if e.Key == "prometheus_host_annotation_labels" || e.Key == "project" {
+			t.Fatalf("block map must not surface as an editable scalar entry: %+v", e)
+		}
+	}
+}

@@ -882,7 +882,16 @@ target 的 Prometheus labels，Grafana/PromQL 就能直接依這些維度分群�
 
 ### 啟用
 
-在 `group_vars/prometheus.yml`（不要寫進 playbook、也不需要 `-e`）：
+1. 主機註解本身：`pilot edit` → `hosts.yml` → 選主機 → `註解 / 資產資訊`，存檔後
+   `pilot inventory generate` 重新產生 inventory（`pilot_annotations` 由此而來）。
+2. 要 promotion 哪些註解：`pilot edit` → `Prometheus 主機註解 labels`。清單會列出
+   `hosts.yml` 已用到的註解 key，label 名稱預設 `pilot_<key>`；每次新增/修改/刪除都
+   會用跟 playbook gate 相同的規則檢查後立即寫入 `group_vars/prometheus.yml`（只動
+   這個 key 的區塊）。可腳本化：`pilot edit --actions`，action
+   `set_prometheus_annotation_label`（`key`、`value`=label）/
+   `delete_prometheus_annotation_label`（`key`）。
+
+寫出的內容等同於在 `group_vars/prometheus.yml` 手寫（不要寫進 playbook、也不需要 `-e`）：
 
 ```yaml
 prometheus_host_annotation_labels:
@@ -1011,3 +1020,4 @@ go run ./cmd/pilot vm-target list   # 確認為空
 | 2026-09-08 | v2.3 | 新增 §7c：`pilot-alertmanager-teams-proxy`——正式環境 teams 測試訊息在 Power Automate flowbot 端必現 `Property 'type' must be 'AdaptiveCard'`，根因是 `webhook_configs` 只送 Alertmanager 自己固定的 JSON envelope，從來不是 Adaptive Card（`msteams_configs` 也不行，送的是舊版 `MessageCard`）。新增 stdlib-only Python 轉換 proxy，跟 `alertmanager` role 同一支 apply playbook、同一個 `pilot-metrics` network 安裝，只在 `alertmanager_receiver_mode=teams` 時存在；spec 升到 v1.4（新增 C8/C9）。1 台新 vm-target 實測 null/teams 兩種模式的 apply/verify/冪等重跑皆綠，並實際端到端證明 Alertmanager 真的呼叫 proxy、proxy 真的轉換+轉發+把下游狀態碼原樣傳回（`https://httpbin.org/post` 作為安全的假 Teams 端點，不觸碰正式簽章密鑰）。實跑中發現並修好一個真 bug：receiver-mode 三態切換的「預設 null 模式」`set_fact` 成 YAML `null` 而非字串 `"null"`，導致不帶任何 `-e` 的預設路徑在全新主機上必掛 gate assert | sre |
 | 2026-09-08 | v2.4 | 新增 §7d：commit 前 review 抓到 `alertmanager_forward_to_agent_controller` mirror（§7c 從未實測過的路徑）把 secret/URL 手寫內插進 YAML 字串、沒有跳脫；本機 Ansible 引擎重現＋新建 1 台 vm-target（`am-mirror-test`，事後已 teardown）端到端重現：secret 含特殊字元時容器真的 crash-loop（`yaml: ... did not find expected key`），改用 `\| to_json` 修好後重跑 `PLAY RECAP failed=0`、容器健康、渲染內容逐字元正確。同批也修正 `cmd/pilot/cmd` 因新增 Alertmanager 頂層選單項而位移、被新增前 top-menu 索引悄悄弄壞的 14 個既有 teatest/PTY 測試（`git stash` 驗證：這些測試在 main 上全綠，在本次工作樹上因索引位移而逾時失敗），以及兩個過期的 action 數量 golden test（105→106） | sre |
 | 2026-09-23 | v2.5 | 新增 §7e：`prometheus_host_annotation_labels`（hosts.yml annotations → node/DCGM target labels，opt-in），兩台 vm-target 實測（generated inventory 路徑、fail-closed、L9 churn、rollback）；順手修好 `delegate_to` 對「存在但為空」的 `seaweedfs-s3` group 直接崩潰的既有 bug（prometheus/restic-backup/thanos-query） | pilot |
+| 2026-09-23 | v2.6 | §7e 啟用步驟改用 `pilot edit`「Prometheus 主機註解 labels」選單與 `set_/delete_prometheus_annotation_label` actions（不再需要手改 group_vars） | pilot |
