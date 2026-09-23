@@ -26,6 +26,9 @@ import (
 type readPeer struct {
 	UID      uint32
 	Username string
+	// PID is the SO_PEERCRED process id, used only to read that process's
+	// kernel group credentials for the group gate (identity.PeerInGroup).
+	PID int32
 }
 
 type readPeerCtxKey struct{}
@@ -47,7 +50,7 @@ func readConnContext(logger *slog.Logger) func(ctx context.Context, c net.Conn) 
 			logger.Warn("getent passwd lookup failed", "uid", cred.UID, "error", err)
 			return ctx
 		}
-		return context.WithValue(ctx, readPeerCtxKey{}, readPeer{UID: cred.UID, Username: username})
+		return context.WithValue(ctx, readPeerCtxKey{}, readPeer{UID: cred.UID, Username: username, PID: cred.PID})
 	}
 }
 
@@ -90,7 +93,7 @@ func (s *readServer) authorizedPeer(r *http.Request) (readPeer, bool) {
 	if s.auditorGroup == "" {
 		return peer, true
 	}
-	member, err := identity.IsMemberOfGroup(r.Context(), peer.Username, s.auditorGroup)
+	member, err := identity.PeerInGroup(r.Context(), peer.PID, peer.UID, s.auditorGroup)
 	if err != nil {
 		s.logger.Warn("auditor group check failed", "user", peer.Username, "group", s.auditorGroup, "error", err)
 		return readPeer{}, false

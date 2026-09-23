@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"os/user"
 	"testing"
 )
 
@@ -97,5 +98,28 @@ func TestHandleHealth_IgnoresPortalUserGroup(t *testing.T) {
 	}
 	if got.Status != "ok" {
 		t.Fatalf("Status = %q", got.Status)
+	}
+}
+
+// TestHandleIdentity_PortalUserGroupHeldByPeerAllows: the peer process
+// carries the configured group (its own primary group) in its kernel
+// credentials, so it is served (identity.PeerInGroup).
+func TestHandleIdentity_PortalUserGroupHeldByPeerAllows(t *testing.T) {
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("user.Current unavailable: %v", err)
+	}
+	g, err := user.LookupGroupId(u.Gid)
+	if err != nil {
+		t.Skipf("LookupGroupId unavailable: %v", err)
+	}
+	client, base := testServerWithConfig(t, currentUsername(t), func(s *Server) { s.PortalUserGroup = g.Name })
+	resp, err := client.Get(base + "/v1/identity")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 when the peer holds %s", resp.StatusCode, g.Name)
 	}
 }

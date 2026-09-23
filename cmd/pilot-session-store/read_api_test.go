@@ -194,3 +194,27 @@ func TestReadAPINoAuditorGroupAllowsAnyPeer(t *testing.T) {
 		t.Fatalf("status = %d, want 200 when auditor_group is unset", resp.StatusCode)
 	}
 }
+
+// TestReadAPIAuditorGroupHeldByPeerAllows: a caller whose process carries
+// the auditor group (here, its own primary group) is served — checked on
+// the process's kernel credentials, not the SSSD-cached member list.
+func TestReadAPIAuditorGroupHeldByPeerAllows(t *testing.T) {
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("user.Current unavailable: %v", err)
+	}
+	g, err := user.LookupGroupId(u.Gid)
+	if err != nil {
+		t.Skipf("LookupGroupId unavailable: %v", err)
+	}
+	store := newTestStoreForReadAPI(t)
+	client := testReadServer(t, store, g.Name)
+	resp, err := client.Get("http://unix/v1/sessions")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 when the peer holds %s", resp.StatusCode, g.Name)
+	}
+}

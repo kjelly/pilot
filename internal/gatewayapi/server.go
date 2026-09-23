@@ -32,9 +32,11 @@ type Server struct {
 	// the Unix socket's own SocketGroup= (spec.md §29's first layer),
 	// which live vm-target testing confirmed DOES reliably enforce an
 	// SSSD/FreeIPA-backed group once nothing else on the host shadows it
-	// — see internal/identity.IsMemberOfGroup's doc comment for the real
-	// hazard this compensates for (a same-named local fallback group
-	// permanently shadowing the real one via nsswitch's "files" source).
+	// — see internal/identity.PeerInGroup's doc comment for the real
+	// hazards this compensates for (a same-named local fallback group
+	// shadowing the real one via nsswitch's "files" source) and why it
+	// checks the peer process's kernel groups, not the SSSD-cached member
+	// list.
 	PortalUserGroup string
 
 	// RecordingPolicy is this gateway's session-recording configuration
