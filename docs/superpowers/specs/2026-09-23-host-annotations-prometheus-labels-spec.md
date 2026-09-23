@@ -1,6 +1,6 @@
 # Pilot Host Annotations → Prometheus Target Labels 實作規格
 
-**文件狀態：** `IMPLEMENTATION_READY`
+**文件狀態：** `IMPLEMENTED`（2026-09-23，candidate `8fafdc6`，vm-target 驗證見 `docs/evidence/prometheus-host-metadata/2026-09-23-8fafdc6.md`）
 **規格版本：** v1.1
 **日期：** 2026-09-23
 **目標 Repository：** `kjelly/pilot`
@@ -1750,3 +1750,4 @@ playbooks/apply/prometheus-apply.yml
 |---|---|---|
 | 2026-09-23 | v1.0 | 初版 |
 | 2026-09-23 | v1.1 | 可實作性評估後修正：§8.1 改為單一 shared label builder（或 include 必須 `apply: {tags: [always]}`，避免 tag-scoped apply 靜默丟 job）；§7.5 移除不存在的 `pilot_detection_cohort`、reserved 清單改單一宣告；新增 §7.8 value `| string` 與空值處理；§18.2 移除 `pilot verify` 無法執行的 fail-case / 異狀態 row，改由 §20 render harness 與 §21 L10/L11 涵蓋；§20 指定沿用既有 Go→`ansible-playbook` 測試模式並新增 V13/V14；新增 §16.5 tag traceability（specTagMap、AlwaysTagPrerequisite）；§8.2 補 `to_nice_yaml` key 排序對 regex 的影響；§12 補 HostDown/Teams 通知影響；檔案搬到 `docs/superpowers/specs/` |
+| 2026-09-23 | v1.2 | 實作完成：採 §8.1 選項 A（單一 per-host label builder，無 task 檔）；render harness 放 `internal/spec/prometheus_host_metadata_render_test.go`（非 §15 原寫的 `cmd/pilot/cmd`）；verification spec row ID 用 repo 慣例 C1–C10（tag namespace `host-meta-Cx`）；L1–L11 於 vm-target 實跑通過，production rollout（§22 Phase 2/3）尚未進行 |

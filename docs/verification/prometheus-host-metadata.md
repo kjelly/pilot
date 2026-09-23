@@ -1,10 +1,12 @@
 # Verification Spec — prometheus-host-metadata (hosts.yml annotations → managed-host target labels)
 
-> 版本：v0.1 DRAFT
+> 版本：v1.0
 > 對齊規範：`docs/superpowers/specs/2026-09-23-host-annotations-prometheus-labels-spec.md`
 > 維護者：sre
-> 尚未在真實 vm-target 上驗證；驗證通過後本段改為測試日期、tested revision 與
-> evidence 連結。
+> 2026-09-23 已在兩台真實 vm-target 上完整驗證（candidate `8fafdc6`，tree
+> `1f9369d`）：generated-inventory 路徑、PASS pass=10 fail=0 skip=0、fresh apply +
+> 冪等重跑 `changed=0`、invalid mapping fail-closed、annotation 改值 churn、移除
+> mapping rollback。證據見 `docs/evidence/prometheus-host-metadata/2026-09-23-8fafdc6.md`。
 
 > 這份 spec 是 `prometheus.md` 的**附加 opt-in** 能力，不是獨立角色：目標主機
 > 仍是 `prometheus` group，套用同一支 `playbooks/apply/prometheus-apply.yml`。
@@ -89,6 +91,7 @@ prometheus_host_annotation_labels:
 - 工具：`pilot verify docs/verification/prometheus-host-metadata.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-host-metadata-<UTC>.{ndjson,md}`
 - 預期 row 數：10
+- Sanitized 摘要：`docs/evidence/prometheus-host-metadata/2026-09-23-8fafdc6.md`
 
 ## 4. PASS / FAIL 規則
 
@@ -117,3 +120,4 @@ prometheus_host_annotation_labels:
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
 | 2026-09-23 | v0.1 DRAFT | 初版，對應設計 spec v1.1 §18（row ID 由設計 spec 的 M1–M9 改用 repo 慣例 C1–C10，並加 C10 promtool） | pilot |
+| 2026-09-23 | v1.0 | 真實 vm-target 驗證通過（10/10），見 evidence；過程中修好 `delegate_to` 對空 `seaweedfs-s3` group 崩潰的既有 bug（commit `8fafdc6`） | pilot |
