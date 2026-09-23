@@ -2,6 +2,7 @@ package sessionaudit
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"log/syslog"
 	"sync/atomic"
@@ -66,6 +67,14 @@ func NewEmitter(tag string) (*Emitter, error) {
 // of dialing a real syslog daemon.
 func newEmitterWithWriter(tag string, w writer) *Emitter {
 	return &Emitter{tag: tag, w: w, fallback: slog.Default()}
+}
+
+// NewWriterEmitter returns an Emitter that writes one JSON line per event
+// to w instead of syslog — for other packages' tests that need to observe
+// the exact audit events a component emits. w must be safe for concurrent
+// use when events are emitted from several goroutines.
+func NewWriterEmitter(tag string, w io.Writer) *Emitter {
+	return newEmitterWithWriter(tag, w)
 }
 
 // Emit fills in SchemaVersion/EventID/Seq/Timestamp (callers never set

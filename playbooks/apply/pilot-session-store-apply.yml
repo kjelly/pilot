@@ -33,12 +33,12 @@
 #       -e pilot_session_store_retention_days=90 \
 #       -e pilot_session_store_key_id=v1 \
 #       -e pilot_session_store_master_key=<64-hex-char AES-256 key> \
-#       -e pilot_session_store_ingest_token=<random bearer token> \
+#       -e pilot_session_store_ingest_signing_key=<64-hex-char HMAC key, shared with pilot-access-gateway> \
 #       -e @~/.vault/main.yaml
 #
 # Secrets: ipa_admin_password (vault) is used ONLY at apply-time to
 # bootstrap the role-pilot-session-auditor FreeIPA group — the master key
-# and ingest token are themselves vault-provided secrets (spec.md §28.2/
+# and the ingest signing key are themselves vault-provided secrets (spec.md §28.2/
 # §28.4: "vault 提供"), never hard-coded, never logged (no_log: true on
 # every task that touches them), never passed as a CLI argument to the
 # binary itself (only written to root-readable-only files it loads at
@@ -65,7 +65,11 @@
     pilot_session_store_cert_file: /etc/pilot/session-store-tls.crt
     pilot_session_store_key_file: /etc/pilot/session-store-tls.key
     pilot_session_store_master_key_file: /etc/pilot/session-store-master.key
-    pilot_session_store_ingest_token_file: /etc/pilot/session-store-ingest.token
+    # Per-session ingest tokens (PIT1) are verified with this HMAC key,
+    # shared with every pilot-access-gateway (per-host recording spec
+    # §16/§27.2). The former static bearer token file is removed.
+    pilot_session_store_ingest_signing_key_file: /etc/pilot/session-store-ingest-signing.key
+    pilot_session_store_legacy_ingest_token_file: /etc/pilot/session-store-ingest.token
 
     pilot_session_store_ingest_port: 8443
 
@@ -119,15 +123,18 @@
           - pilot_session_store_key_id | default('') | length > 0
           - pilot_session_store_master_key is defined
           - pilot_session_store_master_key | length == 64
-          - pilot_session_store_ingest_token is defined
-          - pilot_session_store_ingest_token | length > 0
+          - pilot_session_store_ingest_signing_key is defined
+          - pilot_session_store_ingest_signing_key is match('^[0-9a-fA-F]{64}$')
         fail_msg: >-
           Missing/invalid required vars: ipa_admin_password (vault),
           pilot_binary_path, pilot_session_store_binary_path,
           pilot_session_store_retention_days (int > 0, no implicit
           default per spec.md §28.5), pilot_session_store_key_id,
           pilot_session_store_master_key (vault, 64 hex chars = 32
-          raw bytes for AES-256), pilot_session_store_ingest_token (vault).
+          raw bytes for AES-256), pilot_session_store_ingest_signing_key
+          (vault, 64 hex chars; the same value every pilot-access-gateway
+          uses). The static pilot_session_store_ingest_token is no longer
+          used.
       tags: [always]
 
     - name: "Resolve local artifact paths (relative = repo-root relative)"
@@ -381,15 +388,22 @@
       no_log: true
       tags: [SS_secrets]
 
-    - name: "Install the ingest bearer token file (spec.md §28.2)"
+    - name: "Install the ingest token signing key file (per-host recording spec §16/§27.2)"
       ansible.builtin.copy:
-        dest: "{{ pilot_session_store_ingest_token_file }}"
+        dest: "{{ pilot_session_store_ingest_signing_key_file }}"
         owner: "{{ pilot_session_store_user }}"
         group: "{{ pilot_session_store_user }}"
-        mode: "0600"
-        content: "{{ pilot_session_store_ingest_token }}"
+        mode: "0400"
+        content: "{{ pilot_session_store_ingest_signing_key | lower }}\n"
       no_log: true
-      tags: [SS_secrets]
+      register: session_store_signing_key_copy
+      tags: [SS_secrets, SS24]
+
+    - name: "Remove the former static ingest bearer token file (replaced by per-session tokens)"
+      ansible.builtin.file:
+        path: "{{ pilot_session_store_legacy_ingest_token_file }}"
+        state: absent
+      tags: [SS_secrets, SS24]
 
     # SS-storage (spec.md §28.3): index.db lives under a private,
     # 0700-owned state directory — even though session_events rows carry
@@ -417,7 +431,7 @@
             listen_addr: "0.0.0.0:{{ pilot_session_store_ingest_port }}"
             tls_cert_file: {{ pilot_session_store_cert_file }}
             tls_key_file: {{ pilot_session_store_key_file }}
-            token_file: {{ pilot_session_store_ingest_token_file }}
+            signing_key_file: {{ pilot_session_store_ingest_signing_key_file }}
           storage:
             index_db_path: {{ pilot_session_store_index_db_path }}
             master_key_file: {{ pilot_session_store_master_key_file }}
@@ -576,20 +590,27 @@
         session_store_retention_timer_unit.changed
       tags: [SS_service]
 
+    # On a fresh host previewed with --check --diff the unit file was never
+    # written (copy is skipped under check mode), so systemd cannot find the
+    # unit: skip enable/start then instead of failing the preview
+    # (AGENTS.md §4.0 fresh-host check mode).
     - name: "Enable + start pilot-session-store.service"
       ansible.builtin.systemd:
         name: pilot-session-store.service
         enabled: true
         state: started
+      when: not (ansible_check_mode and session_store_service_unit.changed)
       tags: [SS_service]
 
     - name: "Restart pilot-session-store.service if its unit/binary/config/secrets changed"
       ansible.builtin.systemd:
         name: pilot-session-store.service
         state: restarted
-      when: >-
-        session_store_service_unit.changed or session_store_binary_copy.changed or
-        session_store_config_copy.changed
+      when:
+        - not ansible_check_mode
+        - >-
+          session_store_service_unit.changed or session_store_binary_copy.changed or
+          session_store_config_copy.changed or session_store_signing_key_copy.changed
       tags: [SS_service]
 
     - name: "Enable + start pilot-session-store-retention.timer"
@@ -597,6 +618,9 @@
         name: pilot-session-store-retention.timer
         enabled: true
         state: started
+      when: >-
+        not (ansible_check_mode and
+        (session_store_retention_timer_unit.changed or session_store_retention_service_unit.changed))
       tags: [SS_retention]
 
     # SS02 (spec.md §28.1/§28.2): capability probe — a real TLS

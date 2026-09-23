@@ -697,7 +697,7 @@ writer 把 event 累積成 batch，任一條件成立就 `WriteBatch`：128 個 
 type FinishInfo struct {
     Complete bool
     LastSeq  uint64
-    Reason   string // "" | fail_closed | dropped | sink_error | drain_timeout | target_connect_failed | session_start_failed | internal_error
+    Reason   string // "" | fail_closed | dropped | sink_error | drain_timeout | aborted | target_connect_failed | session_start_failed | internal_error
 }
 
 type Sink interface {

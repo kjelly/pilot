@@ -122,6 +122,11 @@ type sessionSummaryJSON struct {
 	Bytes         int64  `json:"bytes"`
 	EventCount    int    `json:"event_count"`
 	KeyID         string `json:"key_id"`
+	// RecordingPolicySource and LastSeq come from the signed ingest token
+	// and the finish request (per-host recording spec §21.4). ingest_jti
+	// is deliberately never exposed.
+	RecordingPolicySource string `json:"recording_policy_source"`
+	LastSeq               uint64 `json:"last_seq"`
 }
 
 func toSummaryJSON(sum sessionstore.SessionSummary) sessionSummaryJSON {
@@ -130,6 +135,7 @@ func toSummaryJSON(sum sessionstore.SessionSummary) sessionSummaryJSON {
 		Scope: sum.Scope, Target: sum.Target, RecordingMode: sum.RecordingMode,
 		StartedAt: sum.StartedAt.UTC().Format(time.RFC3339Nano), Complete: sum.Complete,
 		Bytes: sum.Bytes, EventCount: sum.EventCount, KeyID: sum.KeyID,
+		RecordingPolicySource: sum.RecordingPolicySource, LastSeq: sum.LastSeq,
 	}
 	if sum.EndedAt != nil {
 		out.EndedAt = sum.EndedAt.UTC().Format(time.RFC3339Nano)

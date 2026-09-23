@@ -167,8 +167,8 @@ var specTagMap = []specTagMapping{
 	{spec: "pilot-session-store.md", playbook: "pilot-session-store-apply.yml",
 		exemptRows: map[string]string{
 			"SS01": "config KnownFields(true) rejection is loader-logic proven by cmd/pilot-session-store's own Go test, not a playbook task",
-			"SS03": "bearer-token auth/rejection needs a second unauthorized client, proven by cmd/pilot-session-store's own Go test, not a playbook task",
-			"SS04": "ingest token having no read/replay code path is a structural absence — nothing to tag",
+			"SS03": "per-session PIT1 token auth/rejection needs a second unauthorized client, proven by cmd/pilot-session-store's own Go test, not a playbook task",
+			"SS04": "the ingest signing key / PIT1 token having no read/replay code path is a structural absence — nothing to tag",
 			"SS06": "retry idempotency (identical payload no-op) is proven by internal/sessionstore's own Go test, not a playbook task",
 			"SS07": "conflict on divergent payload is proven by internal/sessionstore's own Go test, not a playbook task",
 			"SS08": "payload-not-plaintext is demonstrated by inspecting a live index.db's bytes, not a single tagged apply task",
@@ -181,6 +181,12 @@ var specTagMap = []specTagMapping{
 			"SS15": "stage/prod confirmation is a pre_tasks assert evaluated before any tagged task runs, not itself a tagged task",
 			"SS16": "site-wide deploy actually reaching this component is a deploy-time property recorded in an evidence doc, not a single tagged task",
 			"SS18": "fresh vm-target topology E2E is a multi-host, multi-run property recorded in an evidence doc, not a single tagged task",
+			"SS19": "start-body/claims binding is ingest handler logic proven by cmd/pilot-session-store's own Go test, not a playbook task",
+			"SS20": "path/event/stored-session binding to the token is ingest handler logic proven by cmd/pilot-session-store's own Go tests, not a playbook task",
+			"SS21": "finish/after-finish rules are ingest handler logic proven by cmd/pilot-session-store's own Go tests, not a playbook task",
+			"SS22": "trailing-gap completeness is a multi-event-sequence property proven by internal/sessionstore's own Go test, not a playbook task",
+			"SS23": "the v1->v2 schema migration runs in the binary at startup, proven by internal/sessionstore's own Go test, not a playbook task",
+			"SS27": "the pre-migration backup runs in the binary at startup, proven by internal/sessionstore's own Go tests, not a playbook task",
 		}},
 	{spec: "host-monitoring.md", playbook: "host-monitoring-apply.yml",
 		exemptRows: map[string]string{

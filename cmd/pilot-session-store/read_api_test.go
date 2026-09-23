@@ -88,7 +88,7 @@ func TestReadAPIListGetReplay(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("IngestEvents: %v", err)
 	}
-	if err := store.FinishSession(ctx, "sess-1", time.Now().UTC(), true); err != nil {
+	if err := store.FinishSession(ctx, "sess-1", time.Now().UTC(), true, 1); err != nil {
 		t.Fatalf("FinishSession: %v", err)
 	}
 

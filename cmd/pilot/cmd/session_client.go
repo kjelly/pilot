@@ -91,6 +91,9 @@ type sessionSummary struct {
 	Bytes         int64  `json:"bytes"`
 	EventCount    int    `json:"event_count"`
 	KeyID         string `json:"key_id"`
+
+	RecordingPolicySource string `json:"recording_policy_source"`
+	LastSeq               uint64 `json:"last_seq"`
 }
 
 // listSessionsResponse is GET /v1/sessions's body.

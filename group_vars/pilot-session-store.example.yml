@@ -51,28 +51,26 @@ pilot_session_store_key_id: "v1"
 # vault key: pilot_session_store_master_key
 # pilot_session_store_master_key: ""
 
-# Ingest API 的 bearer token(pilot-access-gateway 送 recording event 時用
-# 的憑證,只有 write/append 權限,不能 read/replay)。一律走 Vault:
+# Ingest per-session token 的 HMAC signing key(per-host recording spec
+# §16)。pilot-access-gateway 用這把 key 為每個錄影 session 簽發只能寫入該
+# session 的短效 token(PIT1),store 用同一把 key 驗證;這把 key 本身從不
+# 在網路上傳送。取代舊的全站共用 bearer token(pilot_session_store_ingest_token,
+# 已不再使用,apply 時會刪除舊的 token 檔)。一律走 Vault,64 個 hex 字元:
 #   openssl rand -hex 32
-# vault key: pilot_session_store_ingest_token
-# pilot_session_store_ingest_token: ""
+# vault key: pilot_session_store_ingest_signing_key
+# pilot_session_store_ingest_signing_key: ""
+#
+# 升級時請先保留 vault 裡舊的 pilot_session_store_ingest_token,確認升級成功
+# 後再移除——回滾到舊版需要它(見 per-host recording spec §21.3)。
 
-# Ingest HTTPS 監聽的 port。改這個值時,pilot-access-gateway 那邊
-# group_vars/host_vars 的 gateway.recording.session_store_url(host_vars 的
-# gateway_session_store_url,依實際 group_vars 慣例填寫)也要跟著改。
+# Ingest HTTPS 監聽的 port。改這個值時,pilot-access-gateway 那邊的
+# pilot_session_store_url 也要跟著改。
 # pilot_session_store_ingest_port: 8443
 
 # ----------------------------------------------------------------------------
-# pilot-access-gateway 那端需要手動對應設定(這支 playbook 不會自動幫
-# Gateway 填):
-#
-#   gateway:
-#     recording:
-#       session_store_url: "https://<session_store_fqdn>:<pilot_session_store_ingest_port>"
-#       session_store_ingest_token_file: /etc/pilot/session-store-ingest-token  # 內容 = 上面同一個 token
-#       session_store_ca_file: /etc/ipa/ca.crt   # Gateway 本身已是 freeipa-client,天然信任同一個 FreeIPA CA
-#
-# `session_store_ingest_token_file` 的內容必須跟這裡的
-# `pilot_session_store_ingest_token` 完全一致——這是同一把憑證,只是分別部
-# 署到兩台主機各自的檔案系統上。
+# pilot-access-gateway 必須使用同一個 vault key
+# `pilot_session_store_ingest_signing_key`,並設定
+# `pilot_session_store_url: "https://<session_store_fqdn>:<pilot_session_store_ingest_port>"`
+# (見 group_vars/pilot-access-gateway.example.yml)。升級時先部署 store、
+# 再部署 gateway(site.yml 依這個順序執行)。
 # ----------------------------------------------------------------------------

@@ -20,8 +20,13 @@ package sessionstore
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
 
@@ -29,7 +34,10 @@ import (
 // user_version — same house style as internal/store/sqlite.go. Bump it
 // and add a migration step whenever the schema changes shape after this
 // package has shipped to any real deployment.
-const SchemaVersion = 1
+//
+// Version 2 (per-host recording spec §21.3) adds recording_policy_source,
+// last_seq and ingest_jti to sessions.
+const SchemaVersion = 2
 
 const schema = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -45,7 +53,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     complete        INTEGER NOT NULL DEFAULT 0,
     bytes           INTEGER NOT NULL DEFAULT 0,
     event_count     INTEGER NOT NULL DEFAULT 0,
-    key_id          TEXT NOT NULL DEFAULT ''
+    key_id          TEXT NOT NULL DEFAULT '',
+    recording_policy_source TEXT NOT NULL DEFAULT '',
+    last_seq        INTEGER NOT NULL DEFAULT 0,
+    ingest_jti      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
@@ -83,10 +94,103 @@ CREATE TABLE IF NOT EXISTS retention_events (
 CREATE INDEX IF NOT EXISTS idx_retention_events_session ON retention_events(session_id);
 `
 
+// migration is one schema step from version N to N+1.
+type migration struct {
+	Description string
+	SQL         []string
+}
+
+// migrateSteps[i] moves the schema from version i+1 to i+2. Fresh
+// databases are created in the final shape by schema, so every ALTER
+// tolerates "duplicate column" (same convention as internal/store/sqlite.go).
+var migrateSteps = []migration{
+	{
+		Description: "v1 -> v2: per-host recording policy source, last_seq, ingest_jti",
+		SQL: []string{
+			`ALTER TABLE sessions ADD COLUMN recording_policy_source TEXT NOT NULL DEFAULT '';`,
+			`ALTER TABLE sessions ADD COLUMN last_seq INTEGER NOT NULL DEFAULT 0;`,
+			`ALTER TABLE sessions ADD COLUMN ingest_jti TEXT NOT NULL DEFAULT '';`,
+		},
+	},
+}
+
+// freeBytesFunc reports the bytes available to unprivileged writers on
+// dir's filesystem; a variable so tests can simulate a full disk.
+var freeBytesFunc = func(dir string) (uint64, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	return st.Bavail * uint64(st.Bsize), nil
+}
+
+// backupPath is where openDB snapshots a database before migrating it
+// from version installed.
+func backupPath(path string, installed int) string {
+	return fmt.Sprintf("%s.pre-v%d.bak", path, installed)
+}
+
+// backupBeforeMigration snapshots an existing database with VACUUM INTO
+// before any migration touches it (per-host recording spec §21.3, D-F). It
+// refuses when free space is below twice the database size, and refuses to
+// overwrite a previous backup.
+func backupBeforeMigration(db *sql.DB, path string, installed int) error {
+	dst := backupPath(path, installed)
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("refusing to migrate: backup %s already exists (move it aside after confirming the previous upgrade, see the pilot-session-store runbook)", dst)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat backup %s: %w", dst, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat index database: %w", err)
+	}
+	need := uint64(info.Size()) * 2
+	free, err := freeBytesFunc(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("check free space for migration backup: %w", err)
+	}
+	if free < need {
+		return fmt.Errorf("refusing to migrate: %d bytes free next to %s, need at least %d (2x the database) for the pre-migration backup", free, path, need)
+	}
+	// VACUUM INTO cannot run inside a transaction; it runs on its own.
+	if _, err := db.Exec(`VACUUM INTO ?`, dst); err != nil {
+		_ = os.Remove(dst)
+		return fmt.Errorf("pre-migration backup to %s: %w", dst, err)
+	}
+	if err := os.Chmod(dst, 0o600); err != nil {
+		return fmt.Errorf("chmod backup %s: %w", dst, err)
+	}
+	return nil
+}
+
+// migrate applies every step from installed to SchemaVersion, and the
+// user_version bump, in one transaction.
+func migrate(db *sql.DB, installed int) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for v := installed; v < SchemaVersion; v++ {
+		step := migrateSteps[v-1]
+		for _, stmt := range step.SQL {
+			if _, err := tx.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+				return fmt.Errorf("migration %q: %w", step.Description, err)
+			}
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d;`, SchemaVersion)); err != nil {
+		return fmt.Errorf("set user_version=%d: %w", SchemaVersion, err)
+	}
+	return tx.Commit()
+}
+
 // openDB opens (or creates) the SQLite index database at path. Schema is
 // tracked via PRAGMA user_version, matching internal/store/sqlite.go's
 // Open — no errors are swallowed, and a database newer than this binary
-// understands fails closed rather than silently truncating writes.
+// understands fails closed rather than silently truncating writes. An
+// existing older database is backed up (VACUUM INTO) before it is migrated.
 func openDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -101,11 +205,21 @@ func openDB(path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("index database is newer (%d) than this binary supports (%d); upgrade pilot-session-store", installed, SchemaVersion)
 	}
+	if installed > 0 && installed < SchemaVersion {
+		if err := backupBeforeMigration(db, path, installed); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		if err := migrate(db, installed); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
-	if installed < SchemaVersion {
+	if installed == 0 {
 		if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d;`, SchemaVersion)); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("set user_version=%d: %w", SchemaVersion, err)

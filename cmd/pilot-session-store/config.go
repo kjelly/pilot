@@ -21,14 +21,16 @@ type Config struct {
 }
 
 // IngestSection is the TLS-mandatory write-only API (spec.md §28.1/28.2).
-// TokenFile must be a vault-provided, mode-0600 file — the raw token
-// value is never accepted as a config field or CLI argument, only a
-// path to read it from at startup.
+// SigningKeyFile holds the per-session ingest token (PIT1) HMAC key shared
+// with pilot-access-gateway (per-host recording spec §16/§21.1). It must be
+// a vault-provided file that is not group/world accessible — the key is
+// never accepted as a config value or CLI argument. The former static
+// bearer `token_file` is gone; KnownFields(true) rejects it.
 type IngestSection struct {
-	ListenAddr  string `yaml:"listen_addr"`
-	TLSCertFile string `yaml:"tls_cert_file"`
-	TLSKeyFile  string `yaml:"tls_key_file"`
-	TokenFile   string `yaml:"token_file"`
+	ListenAddr     string `yaml:"listen_addr"`
+	TLSCertFile    string `yaml:"tls_cert_file"`
+	TLSKeyFile     string `yaml:"tls_key_file"`
+	SigningKeyFile string `yaml:"signing_key_file"`
 }
 
 // StorageSection configures the encrypted index (spec.md §28.3/28.4).
@@ -88,8 +90,8 @@ func (c Config) validate() error {
 	if c.Ingest.TLSKeyFile == "" {
 		missing = append(missing, "ingest.tls_key_file")
 	}
-	if c.Ingest.TokenFile == "" {
-		missing = append(missing, "ingest.token_file")
+	if c.Ingest.SigningKeyFile == "" {
+		missing = append(missing, "ingest.signing_key_file")
 	}
 	if c.Storage.IndexDBPath == "" {
 		missing = append(missing, "storage.index_db_path")
@@ -118,27 +120,4 @@ func (c Config) readSocketPath() string {
 
 func (c Config) retentionPeriod() time.Duration {
 	return time.Duration(c.Retention.RetentionDays) * 24 * time.Hour
-}
-
-// loadIngestToken reads the ingest bearer token from a vault-provided,
-// mode-0600 file (spec.md §28.2). The token value is held only in
-// memory from here on — never logged, never re-written to disk, never
-// passed as a CLI argument.
-func loadIngestToken(path string) (string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("stat ingest token file: %w", err)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("ingest token file %s must not be group/world accessible (mode %04o)", path, info.Mode().Perm())
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read ingest token file: %w", err)
-	}
-	token := strings.TrimSpace(string(raw))
-	if token == "" {
-		return "", fmt.Errorf("ingest token file %s is empty", path)
-	}
-	return token, nil
 }

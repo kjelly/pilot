@@ -27,8 +27,8 @@ func TestFileSinkRoundTrip(t *testing.T) {
 			t.Fatalf("Write(%+v): %v", ev, err)
 		}
 	}
-	if err := sink.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if err := sink.Finish(context.Background(), FinishInfo{Complete: true}); err != nil {
+		t.Fatalf("Finish: %v", err)
 	}
 
 	f, err := os.Open(path)
@@ -64,7 +64,7 @@ func TestNullSinkNeverFails(t *testing.T) {
 	if err := s.Write(context.Background(), TerminalEvent{}); err != nil {
 		t.Fatalf("NullSink.Write: %v", err)
 	}
-	if err := s.Close(); err != nil {
-		t.Fatalf("NullSink.Close: %v", err)
+	if err := s.Finish(context.Background(), FinishInfo{}); err != nil {
+		t.Fatalf("NullSink.Finish: %v", err)
 	}
 }

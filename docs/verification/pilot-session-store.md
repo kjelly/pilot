@@ -9,8 +9,15 @@
 > 環境模擬(disk full、對真實 DB 檔案的 corrupt payload 獨立活體重驗——後者
 > 已有 unit test 涵蓋，見 evidence doc「Known gaps」一節)，比照
 > AGENTS.md §5.6 誠實記錄，不假裝已驗收)
+> v1.1（2026-09-23）：per-host recording spec Phase 4——ingest 改用 per-session
+> PIT1 token（SS03/SS04 改寫，新增 SS19–SS24、SS27）、schema v2 migration 與
+> 升級前自動備份、finish 帶 `last_seq` 偵測尾端遺失。fresh-host `--check --diff`、
+> apply、第二次 apply `changed=0` 與 PIT1 活體 ingest 見
+> `docs/evidence/pilot-access-gateway/2026-09-23-phase4-session-store-ingest-token.md`。
 > 對齊規範：docs/tmp/now/spec.md §28-§29/§35（Pilot Access Directory、
-> Gateway Handoff 與 SSH Session Recording 實作規格）
+> Gateway Handoff 與 SSH Session Recording 實作規格）；
+> `docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md`
+> §16/§21/§27.2
 > 維護者：sre
 
 ## 1. 目標系統
@@ -33,7 +40,7 @@
 | `pilot_session_store_retention_days` | 保留天數，無內建預設值(spec.md §28.5 明確禁止硬編碼公司 policy) | 是 |
 | `pilot_session_store_key_id` | 加密金鑰識別碼(metadata，不是金鑰本身) | 是 |
 | `pilot_session_store_master_key` | AES-256 master key，64 hex 字元，vault 提供 | 是（secret） |
-| `pilot_session_store_ingest_token` | ingest bearer token，vault 提供 | 是（secret） |
+| `pilot_session_store_ingest_signing_key` | per-session ingest token（PIT1）的 HMAC signing key，64 hex 字元，vault 提供；與 pilot-access-gateway 使用同一個值（per-host recording spec §16）。取代舊的 `pilot_session_store_ingest_token`（已移除） | 是（secret） |
 | `pilot_session_store_ingest_port` | ingest HTTPS 監聽 port，預設 8443 | 否 |
 
 ## 2. Checklist
@@ -42,8 +49,8 @@
 |----|----------|-------|----------|---------|
 | SS01 | config | config `KnownFields(true)`，未知欄位 fail — 由 `cmd/pilot-session-store` 的 `TestLoadConfigRejectsForbiddenFields` 涵蓋，非單一 shell 指令 | 0 | true |
 | SS02 | ingest | ingest API 僅 TLS，真的能用 FreeIPA CA 驗證 | 0 | sh -c 'curl --silent --show-error --cacert /etc/ipa/ca.crt --max-time 5 --output /dev/null --write-out "%{http_code}" https://$(hostname -f):8443/v1/sessions/start \| grep -qE "^[45][0-9][0-9]$"' |
-| SS03 | ingest auth | 缺 / 錯 bearer token 一律 401 — `cmd/pilot-session-store` 的 `TestIngestAPIRejectsMissingOrWrongToken` 涵蓋，非單一 host 指令可驗證(需要第二個未授權的 client) | 0 | true |
-| SS04 | 權限分離 | ingest token 完全沒有 read/replay 能力(不同 listener，不只是不同 token) | 0 | sh -c '! grep -rq "ingest" cmd/pilot-session-store/read_api.go' |
+| SS03 | ingest auth | ingest API 只接受有效的 per-session PIT1 token（per-host recording spec §16/§21.2）；缺少、格式錯誤、簽章錯誤、過期、kid 不符（含舊式靜態 bearer）一律 401 — `cmd/pilot-session-store` 的 `TestIngestAPIRejectsInvalidSessionToken` 涵蓋，需要第二個未授權的 client，非單一 host 指令 | 0 | true |
+| SS04 | 權限分離 | ingest signing key 與 PIT1 token 完全沒有 read/replay 能力（不同 listener，read API 從不載入 signing key）— 結構性不存在，非單一 host 指令 | 0 | true |
 | SS05 | read socket | read/replay API 僅 Unix socket 存在 | 0 | test -S /run/pilot-session-store/session-store.sock |
 | SS06 | idempotency | ingest 同 seq 重送、payload 相同 → no-op success — `internal/sessionstore` 的 `TestStoreIngestIdempotentRetry` 涵蓋，非單一 shell 指令 | 0 | true |
 | SS07 | idempotency | ingest 同 seq 重送、payload 不同 → conflict — `internal/sessionstore` 的 `TestStoreIngestConflictingRetryFails`/`TestStoreStartSessionConflict` 涵蓋，非單一 shell 指令 | 0 | true |
@@ -58,6 +65,13 @@
 | SS16 | site-wide | site-wide deploy 實際跑到這個 component，不是假 success | 0 | true |
 | SS17 | stateless-except | 除了宣告的 state dir，restart 後不會在別處留下狀態 | 0 | test -d /var/lib/pilot-session-store && sh -c '! find / -xdev -maxdepth 3 -name "pilot-session-store*" -not -path "/etc/pilot/*" -not -path "/var/lib/pilot-session-store*" -not -path "/usr/local/libexec/*" -not -path "/etc/systemd/system/*" 2>/dev/null \| grep -q .' |
 | SS18 | topology | fresh vm-target topology E2E PASS（真實 Gateway → HTTPSink → ingest → `pilot session replay`）— 見 §4，本 checklist 尚未執行過 | 0 | true |
+| SS19 | ingest binding | start 的 body 必須逐欄等於 token claims（session_id/user/gateway_id/scope/target/recording_mode），否則 403 `claims_mismatch`；`directory_id` 非空 → 400 `unbound_field`（未被 token 綁定的欄位不可信）— `TestIngestAPIStartMustMatchClaims` | 0 | true |
+| SS20 | ingest binding | events/finish 的 path id 必須等於 token sid（否則 403）、event 的 session_id 必須等於 path（否則 400）；同一 sid 但 claims 或 `jti` 與已儲存的不同 → 403 `claims_mismatch`（sid 可由使用者指定，不是秘密）；已存在且未 finish 的 sid 以不同 `jti` start → 409 — `TestIngestAPISessionIDBinding`、`TestIngestAPIRejectsOtherUsersTokenForSameSID`、`TestIngestAPIRejectsSecondTokenForSameSID` | 0 | true |
+| SS21 | finish | finish 後的 events 與 start 一律 409 `session_finished`；finish 必須帶 RFC3339Nano `ended_at` 與 `last_seq`，重送相同 `ended_at`/`last_seq` 為 idempotent — `TestIngestAPIRejectsEventsAfterFinish`、`TestIngestAPIFinishIdempotentRetry`、`TestIngestAPIFinishRequiresEndedAt`、`TestIngestAPIFinishRequiresLastSeq` | 0 | true |
+| SS22 | completeness | finish 的 `last_seq` 揭露尾端遺失：`[1,last_seq]` 內任何缺口或最大已存 seq ≠ last_seq → complete=false，replay 列出尾端 gap — `internal/sessionstore` 的 `TestStoreFinishDetectsTrailingGap` | 0 | true |
+| SS23 | schema | v1 DB 升級到 v2（新增 `recording_policy_source`、`last_seq`、`ingest_jti` 三欄）後既有資料完整保留 — `internal/sessionstore` 的 `TestStoreMigratesV1ToV2` | 0 | true |
+| SS24 | secrets | ingest signing key 檔為 `pilot-session-store:pilot-session-store 400`，且舊的靜態 bearer token 檔已不存在 | 0 | test "$(stat -c '%U:%G %a' /etc/pilot/session-store-ingest-signing.key)" = "pilot-session-store:pilot-session-store 400" && test ! -e /etc/pilot/session-store-ingest.token |
+| SS27 | schema | 既有 v1 DB 升級前先以 `VACUUM INTO` 產生 `index.db.pre-v1.bak`（0600）；剩餘空間不足 2× DB 或備份檔已存在時不 migrate、啟動失敗 — `TestStoreMigrationBacksUpBeforeAlter`、`TestStoreMigrationRefusesWithoutSpace`、`TestStoreMigrationRefusesExistingBackup` | 0 | true |
 
 ## 3. 不在這份 checklist 逐行覆蓋、但已用其他方式驗證過（或該用其他方式驗證）的項目
 

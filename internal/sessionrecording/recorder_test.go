@@ -35,13 +35,22 @@ func unixIsTerminalRaw(f *os.File) (bool, error) {
 // receives for assertions, and can be told to fail every Write for
 // fail_closed testing.
 type memSink struct {
-	mu     sync.Mutex
-	events []TerminalEvent
-	fail   bool
-	closed bool
+	mu       sync.Mutex
+	events   []TerminalEvent
+	fail     bool
+	finished []FinishInfo
+	// block, when set, makes Write wait until ctx ends (a hung sink).
+	block bool
 }
 
-func (s *memSink) Write(_ context.Context, ev TerminalEvent) error {
+func (s *memSink) Write(ctx context.Context, ev TerminalEvent) error {
+	s.mu.Lock()
+	block := s.block
+	s.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fail {
@@ -51,11 +60,17 @@ func (s *memSink) Write(_ context.Context, ev TerminalEvent) error {
 	return nil
 }
 
-func (s *memSink) Close() error {
+func (s *memSink) Finish(_ context.Context, info FinishInfo) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.closed = true
+	s.finished = append(s.finished, info)
 	return nil
+}
+
+func (s *memSink) finishes() []FinishInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]FinishInfo(nil), s.finished...)
 }
 
 func (s *memSink) snapshot() []TerminalEvent {
@@ -140,7 +155,7 @@ func TestRecorderTerminalIOCapturesBothDirections(t *testing.T) {
 	outerPtm, outerPts := openOuterPty(t)
 
 	sink := &memSink{}
-	rec := New(ModeTerminalIO, "sess-io", sink, testEmitter(t), FailurePolicyBestEffort, 64, 500*time.Millisecond)
+	rec := New(Options{Mode: ModeTerminalIO, SessionID: "sess-io", FailurePolicy: FailurePolicyBestEffort, QueueEvents: 64, FailureGrace: 500 * time.Millisecond}, sink, testEmitter(t))
 
 	runDone := make(chan error, 1)
 	go func() { runDone <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
@@ -175,7 +190,7 @@ func TestRecorderTerminalOutputNeverRecordsInput(t *testing.T) {
 	outerPtm, outerPts := openOuterPty(t)
 
 	sink := &memSink{}
-	rec := New(ModeTerminalOutput, "sess-out", sink, testEmitter(t), FailurePolicyBestEffort, 64, 500*time.Millisecond)
+	rec := New(Options{Mode: ModeTerminalOutput, SessionID: "sess-out", FailurePolicy: FailurePolicyBestEffort, QueueEvents: 64, FailureGrace: 500 * time.Millisecond}, sink, testEmitter(t))
 
 	runDone := make(chan error, 1)
 	go func() { runDone <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
@@ -213,7 +228,7 @@ func TestRecorderFailClosedTerminatesSession(t *testing.T) {
 	outerPtm, outerPts := openOuterPty(t)
 
 	sink := &memSink{fail: true}
-	rec := New(ModeTerminalIO, "sess-failclosed", sink, testEmitter(t), FailurePolicyFailClosed, 8, 50*time.Millisecond)
+	rec := New(Options{Mode: ModeTerminalIO, SessionID: "sess-failclosed", FailurePolicy: FailurePolicyFailClosed, QueueEvents: 8, FailureGrace: 50 * time.Millisecond}, sink, testEmitter(t))
 
 	runDone := make(chan error, 1)
 	go func() { runDone <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
@@ -240,7 +255,7 @@ func TestRecorderResizeProducesEvent(t *testing.T) {
 	outerPtm, _ := openOuterPty(t)
 
 	sink := &memSink{}
-	rec := New(ModeTerminalIO, "sess-resize", sink, testEmitter(t), FailurePolicyBestEffort, 64, 500*time.Millisecond)
+	rec := New(Options{Mode: ModeTerminalIO, SessionID: "sess-resize", FailurePolicy: FailurePolicyBestEffort, QueueEvents: 64, FailureGrace: 500 * time.Millisecond}, sink, testEmitter(t))
 
 	runDone := make(chan error, 1)
 	go func() { runDone <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
@@ -276,7 +291,7 @@ func TestRecorderRestoresTerminalOnSinkFailure(t *testing.T) {
 	outerPtm, outerPts := openOuterPty(t)
 
 	sink := &memSink{fail: true}
-	rec := New(ModeTerminalIO, "sess-fail", sink, testEmitter(t), FailurePolicyBestEffort, 8, 200*time.Millisecond)
+	rec := New(Options{Mode: ModeTerminalIO, SessionID: "sess-fail", FailurePolicy: FailurePolicyBestEffort, QueueEvents: 8, FailureGrace: 200 * time.Millisecond}, sink, testEmitter(t))
 
 	before, err := unixIsTerminalRaw(outerPts)
 	if err != nil {

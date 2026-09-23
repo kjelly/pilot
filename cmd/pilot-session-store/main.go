@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kjelly/pilot/internal/ingesttoken"
 	"github.com/kjelly/pilot/internal/sessionstore"
 	"github.com/spf13/cobra"
 )
@@ -131,12 +132,17 @@ func runServe(ctx context.Context, configPath string) error {
 	}
 	defer func() { _ = store.Close() }()
 
-	token, err := loadIngestToken(cfg.Ingest.TokenFile)
+	signingKey, err := ingesttoken.LoadKeyFile(cfg.Ingest.SigningKeyFile)
 	if err != nil {
-		return fmt.Errorf("load ingest token: %w", err)
+		return fmt.Errorf("load ingest signing key: %w", err)
 	}
+	verifier, err := ingesttoken.NewVerifier(signingKey, nil)
+	if err != nil {
+		return fmt.Errorf("ingest signing key: %w", err)
+	}
+	logger.Info("ingest token verifier ready", "kid", verifier.KeyID())
 
-	ingestSrv := &http.Server{Handler: newIngestServer(store, token).routes()}
+	ingestSrv := &http.Server{Handler: newIngestServer(store, verifier, logger).routes()}
 	cert, err := tls.LoadX509KeyPair(cfg.Ingest.TLSCertFile, cfg.Ingest.TLSKeyFile)
 	if err != nil {
 		return fmt.Errorf("load ingest TLS certificate: %w", err)

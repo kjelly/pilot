@@ -6,11 +6,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 )
 
@@ -21,35 +21,49 @@ import (
 // validation does); an http:// BaseURL here would simply fail to dial a
 // TLS-only server rather than silently downgrading.
 type HTTPSinkConfig struct {
-	BaseURL       string
-	IngestToken   string // already resident in memory; never passed as a CLI argument (spec.md §28.2)
+	BaseURL string
+	// IngestToken is the per-session PIT1 token pilot-access-gateway minted
+	// for this session (per-host recording spec §16); already in memory,
+	// never passed as a CLI argument, never logged.
+	IngestToken   string
 	CAFile        string // e.g. /etc/ipa/ca.crt (spec.md §28.2); empty uses the system trust store
 	SessionID     string
 	User          string
-	DirectoryID   string
 	GatewayID     string
 	Scope         string
 	Target        string
 	RecordingMode string
-	Timeout       time.Duration
+	// Timeout bounds each single HTTP request (default 5s).
+	Timeout time.Duration
 }
 
 // HTTPSink is a Sink (sink.go) that ships events over HTTPS to
-// pilot-session-store instead of writing them to a local file. It
-// implements the exact same Sink interface as FileSink/NullSink — the
-// Recorder never knows which one it is writing to.
+// pilot-session-store. Transient failures (network errors, timeouts, HTTP
+// 408/429/5xx) are retried with backoff, re-sending the same event —
+// the store is idempotent per (session_id, seq). Other HTTP errors are
+// permanent and wrap ErrSinkPermanent (per-host recording spec §20.2).
 type HTTPSink struct {
 	cfg    HTTPSinkConfig
 	client *http.Client
-
-	mu      sync.Mutex
-	started bool
+	// sleep waits between retries; a variable for tests.
+	sleep func(ctx context.Context, d time.Duration) error
+	// startEndBudget bounds the retries of start and finish.
+	startEndBudget time.Duration
 }
 
-// NewHTTPSink builds an HTTPSink and eagerly announces session start
-// (POST /v1/sessions/start) before returning — a session-store outage or
-// auth failure is surfaced here, at Connect time, rather than silently
-// on the first recorded keystroke.
+// ErrSinkPermanent marks a sink error that retrying cannot fix (the store
+// rejected the request: bad token, claims mismatch, finished session, …).
+var ErrSinkPermanent = errors.New("sessionrecording: permanent session-store error")
+
+const (
+	retryBackoffStart = 100 * time.Millisecond
+	retryBackoffMax   = 2 * time.Second
+	defaultStartEnd   = 5 * time.Second
+)
+
+// NewHTTPSink builds the sink and announces the session to the store
+// (POST /v1/sessions/start), retrying transient failures for up to 5s. A
+// failure here means the caller must not start the target session.
 func NewHTTPSink(ctx context.Context, cfg HTTPSinkConfig) (*HTTPSink, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("sessionrecording: HTTPSink requires BaseURL")
@@ -58,7 +72,7 @@ func NewHTTPSink(ctx context.Context, cfg HTTPSinkConfig) (*HTTPSink, error) {
 		return nil, fmt.Errorf("sessionrecording: HTTPSink requires SessionID")
 	}
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 10 * time.Second
+		cfg.Timeout = 5 * time.Second
 	}
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if cfg.CAFile != "" {
@@ -78,11 +92,24 @@ func NewHTTPSink(ctx context.Context, cfg HTTPSinkConfig) (*HTTPSink, error) {
 			Timeout:   cfg.Timeout,
 			Transport: &http.Transport{TLSClientConfig: tlsConfig},
 		},
+		sleep:          sleepCtx,
+		startEndBudget: defaultStartEnd,
 	}
 	if err := sink.start(ctx); err != nil {
 		return nil, err
 	}
 	return sink, nil
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type sessionStartRequest struct {
@@ -98,16 +125,15 @@ type sessionStartRequest struct {
 
 func (s *HTTPSink) start(ctx context.Context) error {
 	body := sessionStartRequest{
-		SessionID: s.cfg.SessionID, User: s.cfg.User, DirectoryID: s.cfg.DirectoryID,
+		SessionID: s.cfg.SessionID, User: s.cfg.User,
 		GatewayID: s.cfg.GatewayID, Scope: s.cfg.Scope, Target: s.cfg.Target,
 		RecordingMode: s.cfg.RecordingMode, StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	if err := s.post(ctx, "/v1/sessions/start", body); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, s.startEndBudget)
+	defer cancel()
+	if err := s.postRetrying(ctx, "/v1/sessions/start", body); err != nil {
 		return fmt.Errorf("announce session start to session-store: %w", err)
 	}
-	s.mu.Lock()
-	s.started = true
-	s.mu.Unlock()
 	return nil
 }
 
@@ -115,37 +141,54 @@ type eventsRequest struct {
 	Events []TerminalEvent `json:"events"`
 }
 
-// Write ships one event to POST /v1/sessions/{id}/events. Batching
-// (spec.md §28.1: "Events 可 NDJSON batch") is left as a future
-// optimization — one event per call is correct and simple, and the
-// Recorder's own bounded queue (recorder.go) already provides
-// backpressure regardless of how the Sink batches.
+// Write ships one event, retrying transient failures until ctx ends.
 func (s *HTTPSink) Write(ctx context.Context, ev TerminalEvent) error {
-	return s.post(ctx, fmt.Sprintf("/v1/sessions/%s/events", s.cfg.SessionID), eventsRequest{Events: []TerminalEvent{ev}})
+	return s.postRetrying(ctx, fmt.Sprintf("/v1/sessions/%s/events", s.cfg.SessionID), eventsRequest{Events: []TerminalEvent{ev}})
 }
 
 type sessionFinishRequest struct {
 	EndedAt  string `json:"ended_at"`
 	Complete bool   `json:"complete"`
+	LastSeq  uint64 `json:"last_seq"`
 }
 
-// Close announces session finish. complete is always reported true here
-// — internal/sessionstore.Store.Replay independently recomputes
-// completeness from sequence continuity actually observed in storage, so
-// this claim is advisory only and can never hide a real gap.
-func (s *HTTPSink) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout)
+// Finish reports the end of the session. ended_at is computed once and
+// every retry re-sends the identical body, so the store treats a retry
+// after a client-side timeout as the same finish.
+func (s *HTTPSink) Finish(ctx context.Context, info FinishInfo) error {
+	body := sessionFinishRequest{
+		EndedAt: time.Now().UTC().Format(time.RFC3339Nano), Complete: info.Complete, LastSeq: info.LastSeq,
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.startEndBudget)
 	defer cancel()
-	return s.post(ctx, fmt.Sprintf("/v1/sessions/%s/finish", s.cfg.SessionID), sessionFinishRequest{
-		EndedAt: time.Now().UTC().Format(time.RFC3339Nano), Complete: true,
-	})
+	return s.postRetrying(ctx, fmt.Sprintf("/v1/sessions/%s/finish", s.cfg.SessionID), body)
 }
 
-func (s *HTTPSink) post(ctx context.Context, path string, body any) error {
+// postRetrying posts body, retrying transient failures with exponential
+// backoff until success, a permanent failure, or ctx ends.
+func (s *HTTPSink) postRetrying(ctx context.Context, path string, body any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
+	backoff := retryBackoffStart
+	for {
+		err := s.post(ctx, path, payload)
+		if err == nil || errors.Is(err, ErrSinkPermanent) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w (giving up: %v)", err, ctx.Err())
+		}
+		if serr := s.sleep(ctx, backoff); serr != nil {
+			return fmt.Errorf("%w (giving up: %v)", err, serr)
+		}
+		backoff = min(backoff*2, retryBackoffMax)
+	}
+}
+
+// post sends one request. It never includes the token in an error.
+func (s *HTTPSink) post(ctx context.Context, path string, payload []byte) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.BaseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return err
@@ -155,12 +198,23 @@ func (s *HTTPSink) post(ctx context.Context, path string, body any) error {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		var certErr *tls.CertificateVerificationError
+		if errors.As(err, &certErr) {
+			// An untrusted server certificate does not fix itself.
+			return fmt.Errorf("%w: session-store request to %s: %w", ErrSinkPermanent, path, err)
+		}
 		return fmt.Errorf("session-store request to %s failed: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode/100 != 2 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("session-store %s returned HTTP %d: %s", path, resp.StatusCode, respBody)
+	if resp.StatusCode/100 == 2 {
+		return nil
 	}
-	return nil
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	statusErr := fmt.Errorf("session-store %s returned HTTP %d: %s", path, resp.StatusCode, respBody)
+	switch {
+	case resp.StatusCode == http.StatusRequestTimeout, resp.StatusCode == http.StatusTooManyRequests, resp.StatusCode >= 500:
+		return statusErr
+	default:
+		return fmt.Errorf("%w: %w", ErrSinkPermanent, statusErr)
+	}
 }

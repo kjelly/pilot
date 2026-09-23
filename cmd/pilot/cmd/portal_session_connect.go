@@ -282,7 +282,11 @@ func runPortalOneShotConnectRecorded(ctx context.Context, sshConfigPath, session
 
 	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingStarted, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, RecordingMode: recording.Mode})
 
-	rec := sessionrecording.New(recording.Mode, sessionID, sink, emitter, recording.FailurePolicy, recording.QueueEvents, recording.FlushInterval)
+	rec := sessionrecording.New(sessionrecording.Options{
+		Mode: recording.Mode, SessionID: sessionID, FailurePolicy: recording.FailurePolicy,
+		QueueEvents: recording.QueueEvents, FlushInterval: recording.FlushInterval,
+		Identity: sessionrecording.AuditIdentity{User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope},
+	}, sink, emitter)
 	runErr := rec.Run(ctx, ptmx, recordingStdin, recordingStdout)
 
 	if errors.Is(runErr, sessionrecording.ErrRecordingFailedClosed) {

@@ -14,6 +14,10 @@ regressionTests:
   - cmd/pilot-session-store/read_api_test.go
   - cmd/pilot-session-store/retention_test.go
   - internal/sessionrecording/httpsink_test.go
+  - internal/sessionrecording/recorder_reliability_test.go
+  - internal/sessionstore/recording_v2_test.go
+  - internal/ingesttoken/ingesttoken_test.go
+  - cmd/pilot-session-store/read_api_v2_test.go
   - cmd/pilot/cmd/session_client_test.go
 dependencies:
   - {component: freeipa-client, required: true, relation: sameHosts}
@@ -28,7 +32,7 @@ groupVars:
   - {name: pilot_session_store_retention_days, type: integer, required: true, secret: false}
   - {name: pilot_session_store_key_id, type: string, required: true, secret: false}
   - {name: pilot_session_store_master_key, type: string, required: true, secret: true}
-  - {name: pilot_session_store_ingest_token, type: string, required: true, secret: true}
+  - {name: pilot_session_store_ingest_signing_key, type: string, required: true, secret: true}
   - {name: pilot_session_store_ingest_port, type: integer, required: false, default: 8443, secret: false}
 endpoints:
   - name: session-store-ingest
@@ -52,10 +56,11 @@ traceability:
     "docs/verification/pilot-session-store.md#SS02": {tags: [SS_service], reason: "ingest TLS capability probe — real TLS handshake against the FreeIPA-CA-issued cert"}
     "docs/verification/pilot-session-store.md#SS05": {tags: [SS_service], reason: "read/replay socket existence probe"}
     "docs/verification/pilot-session-store.md#SS17": {tags: [SS_storage], reason: "no task in this playbook ever writes recording state anywhere except the declared state dir — this check just confirms that structural placement on a live host"}
+    "docs/verification/pilot-session-store.md#SS24": {tags: [SS24], reason: "signing key install task (0400, store user) plus the task removing the former static bearer token file"}
   exemptions:
     "docs/verification/pilot-session-store.md#SS01": {kind: unit-test-evidence, tags: [], reason: "config KnownFields(true) rejection is a loader-logic property (cmd/pilot-session-store's TestLoadConfigRejectsUnknownField), not something a live host's already-valid config file can demonstrate — SS02/SS05's probes succeeding is indirect proof the rendered config parses, but that is not the same claim"}
-    "docs/verification/pilot-session-store.md#SS03": {kind: unit-test-evidence, tags: [], reason: "bearer-token auth/rejection is cmd/pilot-session-store's TestIngestAPIRejectsMissingOrWrongToken, a live host would need a second, unauthorized client to demonstrate the negative case — see §4 vm-target evidence for the live probe"}
-    "docs/verification/pilot-session-store.md#SS04": {kind: structural-absence, tags: [], reason: "the ingest token has no code path into readServer/read_api.go at all — no task in this playbook can demonstrate a negative"}
+    "docs/verification/pilot-session-store.md#SS03": {kind: unit-test-evidence, tags: [], reason: "per-session PIT1 token auth/rejection is cmd/pilot-session-store's TestIngestAPIRejectsInvalidSessionToken; a live host would need a second, unauthorized client to demonstrate the negative case"}
+    "docs/verification/pilot-session-store.md#SS04": {kind: structural-absence, tags: [], reason: "the ingest signing key and PIT1 tokens have no code path into readServer/read_api.go at all — no task in this playbook can demonstrate a negative"}
     "docs/verification/pilot-session-store.md#SS06": {kind: unit-test-evidence, tags: [], reason: "retry-idempotency (identical payload => no-op) is internal/sessionstore's TestStoreIngestIdempotentRetry, not a single tagged task"}
     "docs/verification/pilot-session-store.md#SS07": {kind: unit-test-evidence, tags: [], reason: "conflict-on-divergent-payload is internal/sessionstore's TestStoreIngestConflictingRetryFails/TestStoreStartSessionConflict, not a single tagged task"}
     "docs/verification/pilot-session-store.md#SS08": {kind: idempotency-evidence, tags: [], reason: "payload-not-plaintext is demonstrated by inspecting the live index.db file's bytes (§4), not a single tagged apply task; internal/sessionstore's TestStoreReplayTamperedCiphertextFails already proves the ciphertext is AEAD-sealed rather than stored raw"}
@@ -68,6 +73,12 @@ traceability:
     "docs/verification/pilot-session-store.md#SS15": {kind: structural-absence, tags: [], reason: "stage/prod confirmation is a pre_tasks assert evaluated before any tagged task runs, not itself a tagged task"}
     "docs/verification/pilot-session-store.md#SS16": {kind: idempotency-evidence, tags: [], reason: "site-wide deploy actually reaching this component is a deploy-time property recorded in an evidence doc, not a single tagged task"}
     "docs/verification/pilot-session-store.md#SS18": {kind: idempotency-evidence, tags: [], reason: "fresh vm-target topology E2E (real Gateway -> HTTPSink -> ingest -> replay) is a multi-host, multi-run property recorded in an evidence doc, not a single tagged task"}
+    "docs/verification/pilot-session-store.md#SS19": {kind: unit-test-evidence, tags: [], reason: "start-body/claims binding is TestIngestAPIStartMustMatchClaims"}
+    "docs/verification/pilot-session-store.md#SS20": {kind: unit-test-evidence, tags: [], reason: "path/event/stored-session binding is TestIngestAPISessionIDBinding, TestIngestAPIRejectsOtherUsersTokenForSameSID and TestIngestAPIRejectsSecondTokenForSameSID"}
+    "docs/verification/pilot-session-store.md#SS21": {kind: unit-test-evidence, tags: [], reason: "finish and after-finish rules are TestIngestAPIRejectsEventsAfterFinish, TestIngestAPIFinishIdempotentRetry, TestIngestAPIFinishRequiresEndedAt and TestIngestAPIFinishRequiresLastSeq"}
+    "docs/verification/pilot-session-store.md#SS22": {kind: unit-test-evidence, tags: [], reason: "trailing-gap completeness is internal/sessionstore's TestStoreFinishDetectsTrailingGap"}
+    "docs/verification/pilot-session-store.md#SS23": {kind: unit-test-evidence, tags: [], reason: "the v1->v2 migration is internal/sessionstore's TestStoreMigratesV1ToV2"}
+    "docs/verification/pilot-session-store.md#SS27": {kind: unit-test-evidence, tags: [], reason: "the pre-migration backup is internal/sessionstore's TestStoreMigrationBacksUpBeforeAlter, TestStoreMigrationRefusesWithoutSpace and TestStoreMigrationRefusesExistingBackup"}
 verification: {autoDeploy: false}
 # order 55 放在 pilot-access-directory(53)/freeipa-nfs-server 之後——
 # session-store 依賴 freeipa-client(sameHosts)取得自己的機器 keytab 才能

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ ingest:
   listen_addr: "127.0.0.1:8443"
   tls_cert_file: /etc/pilot/session-store-tls.crt
   tls_key_file: /etc/pilot/session-store-tls.key
-  token_file: /etc/pilot/session-store-ingest.token
+  signing_key_file: /etc/pilot/session-store-ingest-signing.key
 storage:
   index_db_path: /var/lib/pilot-session-store/index.db
   master_key_file: /etc/pilot/session-store-master.key
@@ -61,7 +62,7 @@ ingest:
   listen_addr: "127.0.0.1:8443"
   tls_cert_file: /etc/pilot/session-store-tls.crt
   tls_key_file: /etc/pilot/session-store-tls.key
-  token_file: /etc/pilot/session-store-ingest.token
+  signing_key_file: /etc/pilot/session-store-ingest-signing.key
 storage:
   index_db_path: /var/lib/pilot-session-store/index.db
   master_key_file: /etc/pilot/session-store-master.key
@@ -73,26 +74,23 @@ storage:
 	}
 }
 
-func TestLoadIngestTokenRejectsWorldReadable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(path, []byte("secret-token"), 0o644); err != nil {
-		t.Fatalf("write token file: %v", err)
-	}
-	if _, err := loadIngestToken(path); err == nil {
-		t.Fatalf("loadIngestToken accepted a mode-0644 token file, want an error")
-	}
-}
-
-func TestLoadIngestTokenReadsTrimmedValue(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(path, []byte("secret-token\n"), 0o600); err != nil {
-		t.Fatalf("write token file: %v", err)
-	}
-	token, err := loadIngestToken(path)
+// TestLoadConfig_SigningKeyFile locks per-host recording spec §21.1: the
+// static bearer token_file is gone (KnownFields rejects it) and the
+// signing key file is required.
+func TestLoadConfig_SigningKeyFile(t *testing.T) {
+	cfg, err := LoadConfig(writeTestConfig(t, validConfigYAML))
 	if err != nil {
-		t.Fatalf("loadIngestToken: %v", err)
+		t.Fatal(err)
 	}
-	if token != "secret-token" {
-		t.Fatalf("loadIngestToken = %q, want %q", token, "secret-token")
+	if cfg.Ingest.SigningKeyFile != "/etc/pilot/session-store-ingest-signing.key" {
+		t.Fatalf("SigningKeyFile = %q", cfg.Ingest.SigningKeyFile)
+	}
+	legacy := strings.Replace(validConfigYAML, "signing_key_file:", "token_file:", 1)
+	if _, err := LoadConfig(writeTestConfig(t, legacy)); err == nil {
+		t.Fatal("LoadConfig accepted the removed ingest.token_file")
+	}
+	missing := strings.Replace(validConfigYAML, "  signing_key_file: /etc/pilot/session-store-ingest-signing.key\n", "", 1)
+	if _, err := LoadConfig(writeTestConfig(t, missing)); err == nil || !strings.Contains(err.Error(), "ingest.signing_key_file") {
+		t.Fatalf("LoadConfig without signing_key_file = %v, want it reported missing", err)
 	}
 }
