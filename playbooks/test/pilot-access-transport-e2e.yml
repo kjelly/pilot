@@ -10,6 +10,7 @@
 #      pilot-access-gateway-apply.yml's Step 18 requires that hostgroup)
 #   -> pilot-access-gateway
 #   -> pilot-access-target-policy (tx-target; joins pilot-transport-ready)
+#   -> isolation fixture (tx-ws -> tx-target tcp/22 dropped)
 #
 # Every value below is only a DEFAULT: -e extra vars always win, so a run can
 # e.g. flip -e pilot_access_gateway_transport_enabled=true without editing
@@ -55,3 +56,6 @@
     # The gateway's source address as the target sees it: in this vm-target
     # topology, the gateway VM's own inventory address.
     pilot_access_target_gateway_addresses: "{{ groups['pilot-access-gateway'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+- name: Simulated site isolation (workstation cannot reach target:22 directly)
+  ansible.builtin.import_playbook: fixtures/pilot-access-transport-isolation-fixtures.yml

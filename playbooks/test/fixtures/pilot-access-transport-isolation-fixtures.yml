@@ -1,0 +1,57 @@
+---
+# Test-only network-isolation fixture for the captive SSH transport E2E
+# (docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md
+# §15.2, decision D11). Production isolation is the operator's job; here it
+# is only SIMULATED so the E2E can prove every successful SSH/SFTP/SCP/rsync
+# from the workstation really went through the gateway transport.
+#
+# On every transport target (group pilot-access-target-policy) it drops
+# tcp/22 from the workstation's address(es) (group
+# pilot-transport-workstation) in a dedicated nftables table, leaving the
+# controller and the gateway untouched. Idempotent; not persisted across a
+# reboot on purpose (disposable VMs only).
+#
+#   transport_isolation_state: present (default) | absent
+- name: Transport E2E — drop workstation -> target tcp/22 (simulated site isolation)
+  hosts: "{{ transport_isolation_target_group | default('pilot-access-target-policy') }}"
+  become: true
+  gather_facts: false
+  vars:
+    transport_isolation_state: present
+    transport_isolation_table: pilot_transport_e2e
+    transport_isolation_sources: >-
+      {{ groups[transport_workstation_group | default('pilot-transport-workstation')]
+         | map('extract', hostvars, 'ansible_host') | list }}
+  tasks:
+    - name: "Read the current isolation table (if any)"
+      ansible.builtin.command:
+        argv: [nft, list, table, inet, "{{ transport_isolation_table }}"]
+      register: transport_isolation_current
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: "Install the isolation table"
+      ansible.builtin.command:
+        argv: [nft, -f, "-"]
+        stdin: |
+          table inet {{ transport_isolation_table }} {
+            chain input {
+              type filter hook input priority -10; policy accept;
+          {% for src in transport_isolation_sources %}
+              ip saddr {{ src }} tcp dport 22 drop
+          {% endfor %}
+            }
+          }
+      when:
+        - transport_isolation_state == 'present'
+        - transport_isolation_current.rc != 0
+        - not ansible_check_mode
+
+    - name: "Remove the isolation table"
+      ansible.builtin.command:
+        argv: [nft, delete, table, inet, "{{ transport_isolation_table }}"]
+      when:
+        - transport_isolation_state == 'absent'
+        - transport_isolation_current.rc == 0
+        - not ansible_check_mode

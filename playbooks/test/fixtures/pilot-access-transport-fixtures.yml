@@ -124,6 +124,53 @@
       register: transport_user_mod
       changed_when: transport_user_mod.rc == 0
 
+    # Optional: a FreeIPA password for transportuser, needed only by the E2E
+    # probes that exercise the legacy pilot-connect path (it takes a
+    # session-scoped Kerberos password in the Portal). Supplied from a
+    # disposable secrets file (-e @<file>), never argv. Idempotent: the
+    # password is (re)set only when a kinit with it fails, and it is set
+    # non-expiring because an admin-set FreeIPA password is otherwise
+    # immediately expired.
+    - name: Fixtures — does the E2E password already work?
+      ansible.builtin.command:
+        argv: [kinit, -c, "FILE:/tmp/pilot-transport-e2e-pwcheck", "{{ transport_fixture_user_effective }}@{{ ipa_realm }}"]
+        stdin: "{{ transport_fixture_user_password }}"
+      register: transport_user_pwcheck
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: transport_fixture_user_password is defined and not ansible_check_mode
+
+    - name: Fixtures — set the E2E password (only when it does not work yet)
+      ansible.builtin.command:
+        argv: [ipa, user-mod, "{{ transport_fixture_user_effective }}", --password]
+        stdin: "{{ transport_fixture_user_password }}\n{{ transport_fixture_user_password }}"
+      no_log: true
+      when:
+        - transport_fixture_user_password is defined
+        - not ansible_check_mode
+        - transport_user_pwcheck.rc != 0
+
+    - name: Fixtures — keep the E2E password from expiring
+      ansible.builtin.command:
+        argv: [ipa, user-mod, "{{ transport_fixture_user_effective }}", "--setattr=krbPasswordExpiration=20380101000000Z"]
+      register: transport_user_pwexp
+      changed_when: transport_user_pwexp.rc == 0
+      failed_when:
+        - transport_user_pwexp.rc != 0
+        - "'no modifications' not in (transport_user_pwexp.stderr | default(''))"
+      when:
+        - transport_fixture_user_password is defined
+        - not ansible_check_mode
+        - transport_user_pwcheck.rc != 0
+
+    - name: Fixtures — drop the password-check ticket cache
+      ansible.builtin.file:
+        path: /tmp/pilot-transport-e2e-pwcheck
+        state: absent
+      changed_when: false
+      when: transport_fixture_user_password is defined
+
     - name: Fixtures — release the Kerberos ticket
       ansible.builtin.command: kdestroy
       changed_when: false

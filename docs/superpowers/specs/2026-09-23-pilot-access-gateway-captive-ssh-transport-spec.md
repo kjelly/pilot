@@ -1,6 +1,6 @@
 # Pilot Access Gateway — Captive SSH Transport Broker 實作規格
 
-- **狀態**：READY FOR IMPLEMENTATION（rev 3）
+- **狀態**：READY FOR IMPLEMENTATION（rev 4）
 - **日期**：2026-09-23
 - **Repository**：`kjelly/pilot`
 - **Baseline**：`main@c0890f66479c2aed189fd216ddeec87f72bb7306`（rev 1 的 `99a3a86` 之後只有 lint 修正，§3 事實已對 `c0890f6` 重新核對）
@@ -182,8 +182,8 @@ Host pilot-gw-gpu
 
 # 經 Gateway transport 的 target。Pattern 不得 match 上面的 gateway alias（避免 ProxyCommand 遞迴）。
 Host *.gpu.example.internal
-    ProxyCommand ssh -T pilot-gw-gpu -- pilot-transport-v1 %h
-    KnownHostsCommand ssh -T pilot-gw-gpu -- pilot-known-hosts-v1 %h
+    ProxyCommand /usr/bin/ssh -T pilot-gw-gpu -- pilot-transport-v1 %h
+    KnownHostsCommand /usr/bin/ssh -T pilot-gw-gpu -- pilot-known-hosts-v1 %h
     StrictHostKeyChecking yes
     UserKnownHostsFile /dev/null
     GlobalKnownHostsFile /dev/null
@@ -199,6 +199,7 @@ Host *.gpu.example.internal
 - `UserKnownHostsFile /dev/null` + `GlobalKnownHostsFile /dev/null`：FreeIPA 是唯一的 host key 來源，永遠不會 TOFU 或寫入 known_hosts。
 - Target DNS 解析發生在 Gateway；workstation 不需要能解析 target。
 - `%h` 只是 FQDN；Gateway 端仍會嚴格驗證。
+- `KnownHostsCommand` 的第一個參數必須是**絕對路徑**（OpenSSH 對 ORDER 與 HOSTNAME 兩次查詢各執行一次，非絕對路徑時回報 `KnownHostsCommand-ORDER path is not absolute`，然後退回「No host key is known」；Phase 5 實測）。Windows 內建 OpenSSH 用 `C:\Windows\System32\OpenSSH\ssh.exe`。
 
 ### 6.2 相容性邊界
 
@@ -702,7 +703,7 @@ Remote-dev（只列差異）：
 
 執行順序（每一步的實際指令先實跑確認，再寫進 evidence）：
 
-1. `pilot vm-target topology test --ephemeral --topology … --playbook playbooks/test/pilot-access-transport-e2e.yml --verify docs/verification/pilot-access-gateway.md=pilot-access-gateway --verify docs/verification/pilot-access-target-policy.md=pilot-access-target-policy -- -e pilot_access_gateway_transport_enabled=true …`：涵蓋 L3 check-mode（全新 VM）、apply、[host] 列、idempotency。
+1. `pilot vm-target topology down` → `topology up`（全新 VM），再跑非 ephemeral 的 `pilot vm-target topology test --topology … --playbook playbooks/test/pilot-access-transport-e2e.yml --verify docs/verification/pilot-access-gateway.md=pilot-access-gateway --verify docs/verification/pilot-access-target-policy.md=pilot-access-target-policy -- -e pilot_access_gateway_transport_enabled=true …`：涵蓋 L3 check-mode（全新 VM）、apply、[host] 列、idempotency。不用 `--ephemeral`，因為它在成功後會拆掉 VM，後續步驟就沒有環境可跑。
 2. 另一次不帶 transport 變數的 gateway apply → AG62；之後恢復為 `true`。
 3. 以 `topology inventory` 產生的 inventory 執行後續的變化步驟：strict 探測 → 切換 remote-dev → recording `terminal_output`（AG69）→ 不帶 `allow_downgrade` 改回 metadata（預期失敗，AG60）→ 帶 `allow_downgrade` 改回 → target policy `absent`（AG68/TP06/TP10）→ `transport_enabled=false`（AG73）→ TP12 各個負面輸入。
 
@@ -765,7 +766,7 @@ Remote-dev（只列差異）：
 ### Phase 5 — Topology E2E（§15）
 
 - 範圍：topology、fixtures、wrapper playbook、E2E script；AG60–AG73、TP06–TP12。
-- Gate：§15.3 全部步驟以 `--ephemeral` 對全新 VM 實跑通過；每個 probe 的 JSON 結果整理進 evidence。
+- Gate：§15.3 全部步驟在重新 `topology up` 的全新 VM 上實跑通過；每個 probe 的 JSON 結果整理進 evidence。
 
 ### Phase 6 — 文件收尾
 
@@ -890,3 +891,4 @@ S17 既有 Portal 與 pilot-connect 行為相容。
 | rev 1 | 2026-09-23 | 初稿（DRAFT） |
 | rev 2 | 2026-09-23 | 對 `c0890f6` 核對 baseline 後修訂為可實作版本：新增 `pilot-known-hosts-v1` 與 FreeIPA 權威 host key（取代未定義的 host key 分發）；target policy 改為 `Match Address`，並以 `pilot-transport-ready` hostgroup 由 server 端 gate transport（修正以 group 限制可被繞過、以及 inventory 與 FreeIPA scope 漂移）；新增 Phase 1 修正 recording 設定被 re-apply 覆寫的既有缺陷；安全宣稱改為誠實邊界（stdio 自建通道、inner identity、撤銷時機）；移除 Match 內不合法的 `PermitUserEnvironment`；驗收重新編號為 AG41–AG73 + TP01–TP12，並區分 host/unit/e2e；bridge 改為不會卡住的 half-close 語意；recording 改為 allowlist；補齊新 component 的登記清單與 AGENTS.md 規則；移除 human-owned 工作（網路隔離、GUI smoke、staging/production rollout），改列於 §2.3 |
 | rev 3 | 2026-09-23 | Phase 0 實測結果回寫：新增 F20/F21；拓樸節點改名 `tx-*`；fixture 拆成 identity/isolation 兩份，HBAC 沿用 `allow_all`；topology、identity fixture、wrapper 提前到 Phase 1 提交 |
+| rev 4 | 2026-09-23 | Phase 5 實測回寫：§6.1 的 `ProxyCommand`/`KnownHostsCommand` 改用絕對路徑 `/usr/bin/ssh`（OpenSSH 要求 KnownHostsCommand 為絕對路徑）；§15.3 改為 `topology down/up` + 非 ephemeral `topology test`，讓後續步驟有環境可跑 |
