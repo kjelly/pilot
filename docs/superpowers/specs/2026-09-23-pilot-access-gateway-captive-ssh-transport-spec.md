@@ -1,6 +1,6 @@
 # Pilot Access Gateway — Captive SSH Transport Broker 實作規格
 
-- **狀態**：READY FOR IMPLEMENTATION（rev 4）
+- **狀態**：VERIFIED / implemented（rev 4）— Phase 0–6 全部完成；全新 VM 拓樸實跑 PASS，見 `docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md` 與 `docs/runbooks/pilot-access-transport.md`
 - **日期**：2026-09-23
 - **Repository**：`kjelly/pilot`
 - **Baseline**：`main@c0890f66479c2aed189fd216ddeec87f72bb7306`（rev 1 的 `99a3a86` 之後只有 lint 修正，§3 事實已對 `c0890f6` 重新核對）
