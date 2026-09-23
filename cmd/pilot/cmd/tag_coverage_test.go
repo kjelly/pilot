@@ -237,6 +237,14 @@ var specTagMap = []specTagMapping{
 			"C7": "directory permission is a property of the ext-target-C1 directory-creation task's explicit mode: 0755",
 			"C8": "no-plaintext-password is an architectural invariant of the scrape-job compiler always emitting password_file, never password — no dedicated task",
 		}},
+	{spec: "prometheus-host-metadata.md", playbook: "prometheus-apply.yml",
+		prefixes: []string{"host-meta"},
+		exemptRows: map[string]string{
+			"C6":  "up{job=\"node\",pilot_project=...}==1 probe — verify-only outcome of the host-meta-C2 labels being rendered and the node job actually scraping",
+			"C7":  "real node_uname_info carrying promoted labels — verify-only TSDB outcome of the host-meta-C2/C3 render, no dedicated apply task",
+			"C8":  "no pilot_note series in TSDB — verify-only outcome of host-meta-C4 (unmapped annotation never rendered)",
+			"C10": "promtool check config is a post-apply, read-only pilot verify check — no apply-time task invokes promtool (same as prometheus-external-targets.md C6)",
+		}},
 	{spec: "restic-backup.md", playbook: "restic-backup-apply.yml",
 		exemptRows: map[string]string{
 			"C4": "repository connectivity probe — v1.4 deliberately stopped triggering a synchronous first backup during apply (avoids apply-time lock contention across hosts sharing one repository); satisfied by the timer's own randomized-delay schedule, not an apply task",

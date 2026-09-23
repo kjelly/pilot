@@ -214,6 +214,14 @@ Pilot MUST NOT 因 annotation value 改變：
 
 若未來真的需要 policy label，必須另建有明確 semantics 的 schema，不得偷用 `annotations`。
 
+> **Amendment（2026-09-23）**：selected annotations MAY additionally project to
+> Prometheus managed-host target labels under an explicit allowlist
+> （`prometheus_host_annotation_labels`，見
+> `docs/superpowers/specs/2026-09-23-host-annotations-prometheus-labels-spec.md`）；
+> 此 projection 只在「已被 role/inventory 選中的 target」上加 descriptive
+> dimensions，不改變本節的 descriptive-only / no-policy invariant——annotation
+> 仍不控制 monitoring selection。
+
 ### 3.3 不新增 FreeIPA LDAP schema
 
 V1 MUST NOT：

@@ -9,6 +9,7 @@ package spec
 import (
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -86,7 +87,7 @@ func TestRegression_HostMetadata_TasksAlwaysTaggedAndOrdered(t *testing.T) {
 			t.Errorf("task %q not found", n)
 			continue
 		}
-		if !strings.Contains(tasks[idx], "tags: [always]") {
+		if !strings.Contains(tasks[idx], "tags: [always") {
 			t.Errorf("task %q must be tags: [always] (prerequisite of always-tagged scrape blocks)", n)
 		}
 		if idx < prev {
@@ -162,4 +163,62 @@ func splitPlaybookTasks(pb string) []string {
 	}
 	out = append(out, cur.String())
 	return out
+}
+
+// §19 items 1–3, 11: the dedicated verification spec's shape.
+func TestRegression_HostMetadata_VerificationSpec(t *testing.T) {
+	s, err := Parse("../../docs/verification/prometheus-host-metadata.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Rows) != 10 {
+		t.Fatalf("expected 10 rows, got %d", len(s.Rows))
+	}
+	var all strings.Builder
+	for i, r := range s.Rows {
+		if want := "C" + strconv.Itoa(i+1); r.ID != want {
+			t.Errorf("row %d: ID %s, want %s (contiguous)", i, r.ID, want)
+		}
+		if strings.Contains(strings.ToLower(r.Command), "password") && !strings.Contains(r.Command, "password_file") {
+			t.Errorf("%s: verification command must never carry an exporter password: %q", r.ID, r.Command)
+		}
+		all.WriteString(r.Command + "\n")
+	}
+	cmds := all.String()
+	for _, want := range []string{"pilot_host", "pilot_project", "pilot_location", "node_uname_info", "pilot_note", "must-not-be-promoted", "job_name: dcgm"} {
+		if !strings.Contains(cmds, want) {
+			t.Errorf("verification commands must cover %q", want)
+		}
+	}
+	// Config rows scoped to the node job block, not a file-wide grep.
+	for _, id := range []string{"C1", "C2", "C3"} {
+		for _, r := range s.Rows {
+			if r.ID == id && !strings.Contains(r.Command, "job_name: node") {
+				t.Errorf("%s must scope its check to the node job block", id)
+			}
+		}
+	}
+	// §18.2: no "apply must fail" / other-deployment-state rows.
+	for _, r := range s.Rows {
+		if strings.Contains(r.Command, "ansible-playbook") || strings.Contains(r.Command, "node_exporter_targets") {
+			t.Errorf("%s: fail-closed / override cases belong in the render harness, not a verify row: %q", r.ID, r.Command)
+		}
+	}
+}
+
+// §19 item 9: the group_vars example documents opt-in / default no-op.
+func TestRegression_HostMetadata_GroupVarsExample(t *testing.T) {
+	raw, err := os.ReadFile("../../group_vars/prometheus.example.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gv := string(raw)
+	for _, want := range []string{"# prometheus_host_annotation_labels:", "#   project: pilot_project", "(只有 pilot_host)", "Alertmanager 通知"} {
+		if !strings.Contains(gv, want) {
+			t.Errorf("group_vars/prometheus.example.yml missing %q", want)
+		}
+	}
+	if regexp.MustCompile(`(?m)^prometheus_host_annotation_labels:`).MatchString(gv) {
+		t.Error("example must leave the mapping commented out (opt-in)")
+	}
 }

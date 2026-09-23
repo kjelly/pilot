@@ -883,7 +883,7 @@
         # object storage — Thanos Compactor (on the thanos-query host) owns
         # compaction/downsampling/retention from that point on.
         - name: "Render prometheus.yml (with alerting.alertmanagers)"
-          tags: [C8, C11, C13, C15, C16, C18, ext-target, ext-target-C3]
+          tags: [C8, C11, C13, C15, C16, C18, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -908,7 +908,7 @@
           when: alertmanager_target_host | default('', true) | length > 0
 
         - name: "Render prometheus.yml (without alerting — alertmanager_target_host empty)"
-          tags: [C8, C13, C15, C16, C18, ext-target, ext-target-C3]
+          tags: [C8, C13, C15, C16, C18, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"

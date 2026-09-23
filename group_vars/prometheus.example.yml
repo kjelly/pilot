@@ -82,6 +82,31 @@ thanos_s3_target_host: ""
 # node_exporter_basic_auth_user: prometheus
 # node_exporter_basic_auth_password: ""
 
+# ---- hosts.yml annotations -> managed-host target labels(opt-in)----
+# 將 hosts.yml annotations 中「穩定、適合 Grafana grouping」的欄位 promotion
+# 成 node/dcgm auto-discovery target 的 Prometheus labels(格式:
+# <annotation key>: <pilot_* label 名稱>)。未列出的 annotations 不會進 metrics;
+# 不設定或留空 {} 即完全維持舊行為(只有 pilot_host)。
+#
+# 注意:
+# - label 名稱必須是 pilot_[a-z][a-z0-9_]*,且不可用 pilot_host/pilot_target/
+#   pilot_source/pilot_protocol/pilot_subject/pilot_subject_kind;source key 不
+#   可像 secret(password/token/api_key...),不可兩個 key 對到同一個 label——
+#   違反者 apply 會在任何 mutation 前 fail。
+# - 被 promotion 的 annotation 值會出現在 Prometheus / Thanos / Grafana 以及
+#   Alertmanager 通知內容中,不只存在本機 inventory。
+# - 改值(或新增/移除 mapping)會讓該 host 所有 series 換 label set(舊新 series
+#   在 retention 內並存),也可能讓正在 firing 的告警換 fingerprint。只 promotion
+#   低變動欄位(location/project/owner/pool/rack/team),不要 promotion note、
+#   ticket、timestamp 等自由文字或高變動欄位;建議 3–8 個以內。
+# - 只作用在 auto-discovery;明確填了 node_exporter_targets /
+#   dcgm_exporter_targets 的 override 不會帶 metadata(沒有可信的 host 對應)。
+#
+# prometheus_host_annotation_labels:
+#   location: pilot_location
+#   project: pilot_project
+#   owner: pilot_owner
+
 # dcgm-exporter(GPU 主機的監控 agent,見 docs/verification/dcgm-exporter.md)
 # 的 scrape target 也**不需要**手動加進 prometheus_scrape_configs——跟
 # node_exporter 完全同一套模式,apply playbook 會自動展開這份 inventory 的
