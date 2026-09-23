@@ -95,6 +95,39 @@ type ConnectAuthorizeResponse struct {
 	RecordingSessionStoreURL         string `json:"recording_session_store_url,omitempty"`
 	RecordingSessionStoreCAFile      string `json:"recording_session_store_ca_file,omitempty"`
 	RecordingSessionStoreIngestToken string `json:"recording_session_store_ingest_token,omitempty"`
+
+	// TransportAllowed/TransportDenyReason (docs/superpowers/specs/
+	// 2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md §8.1)
+	// answer, on this SAME fresh authorize, whether the caller may also
+	// open an opaque `pilot-transport-v1` byte transport to Target. Only
+	// ever computed when Allowed; a client that finds TransportAllowed
+	// absent (an older gateway daemon) must treat it as false.
+	TransportAllowed    bool   `json:"transport_allowed,omitempty"`
+	TransportDenyReason string `json:"transport_deny_reason,omitempty"`
+}
+
+// Transport deny reasons carried in ConnectAuthorizeResponse.TransportDenyReason.
+const (
+	TransportDenyDisabled          = "disabled"
+	TransportDenyTargetNotReady    = "target_not_ready"
+	TransportDenyReadyLookupFailed = "ready_lookup_failed"
+)
+
+// TransportHostKeysRequest is POST /v1/transport/host-keys's body — like
+// ConnectAuthorizeRequest, only "target" is accepted.
+type TransportHostKeysRequest struct {
+	Target string `json:"target"`
+}
+
+// TransportHostKeysResponse is POST /v1/transport/host-keys's response
+// (captive-transport spec §8.3): the target's FreeIPA-published SSH host
+// public keys, returned only when the same fresh authorize + transport
+// gate as /v1/connect/authorize allows a transport to Target. HostKeys is
+// never nil — a denied caller gets "host_keys": [], never a reason.
+type TransportHostKeysResponse struct {
+	Allowed  bool     `json:"allowed"`
+	Target   string   `json:"target"`
+	HostKeys []string `json:"host_keys"`
 }
 
 // HealthResponse is GET /v1/health (spec.md §22.5) — never secret/path content.

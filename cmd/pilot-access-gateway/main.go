@@ -95,6 +95,7 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 	resolver := accessportal.NewResolver(provider, gw)
 	srv := gatewayapi.NewServer(gw, provider, resolver, logger)
 	srv.PortalUserGroup = cfg.Gateway.PortalUserGroup
+	srv.Transport = gatewayapi.TransportPolicy{Enabled: cfg.Gateway.Transport.Enabled}
 	srv.RecordingPolicy = gatewayapi.RecordingPolicy{
 		Mode:            cfg.recordingMode(),
 		FailurePolicy:   cfg.recordingFailurePolicy(),

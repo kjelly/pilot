@@ -45,8 +45,29 @@ type Server struct {
 	// separate default-substitution step.
 	RecordingPolicy RecordingPolicy
 
+	// Transport is this gateway's opaque SSH transport policy
+	// (docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-
+	// transport-spec.md §8.2), sourced from /etc/pilot/access-gateway.yaml
+	// gateway.transport and set after construction like RecordingPolicy.
+	// The zero value (Enabled == false) is the unconditional default.
+	Transport TransportPolicy
+
 	httpServer *http.Server
 }
+
+// TransportPolicy is the gateway.transport config section as the API
+// server needs it.
+type TransportPolicy struct {
+	Enabled bool
+}
+
+// TransportReadyHostgroup is the FreeIPA hostgroup a target must belong
+// to before any gateway will open a transport to it. Only
+// playbooks/apply/pilot-access-target-policy-apply.yml adds a host to it,
+// and only after that host's sshd forwarding policy verified cleanly —
+// so "reachable by transport" can never outrun "forwarding restricted"
+// (captive-transport spec D5). Deliberately not configurable.
+const TransportReadyHostgroup = "pilot-transport-ready"
 
 // RecordingPolicy mirrors cmd/pilot-access-gateway/config.go's recording
 // fields — kept as a small value type here (not the config package's own
