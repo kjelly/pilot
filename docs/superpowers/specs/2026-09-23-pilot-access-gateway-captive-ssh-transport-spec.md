@@ -665,7 +665,7 @@ Remote-dev（只列差異）：
 | ID | 驗證內容 |
 |----|----------|
 | TP06 | `present` 後 host 是 `pilot-transport-ready` 成員；`absent` 後不是（從 FreeIPA server 查詢） |
-| TP07 | Strict：經 transport 的 inner `-L` 到 target loopback、`-D`、`-R`、`-A`（target 上 `SSH_AUTH_SOCK` 為空）、`-X`、`-w` 全部被拒（server 端 `administratively prohibited` 或等價拒絕〔實測定稿〕） |
+| TP07 | Strict：經 transport 的 inner `-L` 到 target loopback、`-D`、`-R`、`-A`（target 上 `SSH_AUTH_SOCK` 為空）、`-X`、`-w` 全部被拒。實測的拒絕形式（OpenSSH 9.6p1）：`-L`／`-D` → `channel N: open failed: administratively prohibited: open failed`；`-R` → `Error: remote port forwarding failed for listen port N`；`-A` → target 上沒有 `SSH_AUTH_SOCK`；`-X` → target 上沒有 `DISPLAY`；`-w` → `Remote: Server has rejected tunnel device forwarding`（`-v`）＋ `Tunnel forwarding failed`，rc=255，remote command 沒有執行。`-w` 探測需要 workstation 使用者擁有的 tun device（否則 client 端先以 `Tunnel device open failed` 失敗，證明不了 target 的拒絕） |
 | TP08 | Remote-dev：`-L <local>:localhost:<port>` 與 `-D` SOCKS 到 `127.0.0.1:<port>` 成功（target 上臨時的 loopback listener）；`-L` 到非 loopback（例如 FreeIPA server:443）被拒；`-R` 被拒 |
 | TP09 | 非 Gateway 路徑不受影響：從 ansible controller 直接 SSH 到 target，`-L` 到 loopback 的行為與套用前的 baseline 相同 |
 | TP10 | `absent`：先移出 hostgroup、後刪 drop-in（以 task 順序與 log 證明）；drop-in 不存在；`sshd -t` 通過；TP05 條件仍成立 |
