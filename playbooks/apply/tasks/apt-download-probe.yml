@@ -1,0 +1,86 @@
+---
+# Shared task: `apt-get install --download-only` probe for the packages
+# apt-package-install.yml is about to install
+# (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md
+# §5 tolerant: "candidate 不存在 / install 顯示 metadata stale? → best-effort
+# global refresh → retry install"). Only ever included by
+# apt-package-install.yml, never by a capability playbook.
+#
+# A cached candidate only proves the local INDEX still lists the package:
+# on a host whose lists are weeks old (e.g. provisioned from an older
+# golden image) the .debs that index points at may already be superseded
+# on the mirror, and the install then dies with
+# "E: Failed to fetch <url>  404  Not Found" (found live 2026-09-23:
+# freeipa-client on a fresh ubuntu-24.04 vm-target, stale
+# krb5/sssd/tzdata-legacy versions). `--download-only` fetches exactly what
+# that install would fetch but never changes the installed package set, so
+# apt-package-install.yml's final `ansible.builtin.apt` task stays the
+# single sanctioned mutation point. Only a 404 on a package download counts
+# as stale metadata; any other failure is left for the real install to
+# report, unchanged.
+#
+# The probe is bounded by a wall clock (coreutils `timeout`, TERM then KILL
+# 30 s later), because a download that stalls — e.g. on a caching proxy
+# holding a half-closed connection — would otherwise block the play forever.
+# The default is generous (900 s) so a slow but progressing download is not
+# cut off. A timed-out probe is FATAL: the real install would fetch the same
+# files over the same path and hang the same way.
+#
+# Inputs:
+#   _pilot_apt_missing                 : list[str], packages to probe
+#   pilot_apt_component                : str, for messages
+#   pilot_apt_probe_stage              : cache_hit | after_global_refresh |
+#                                        after_scoped_refresh
+#   pilot_apt_download_timeout_seconds : int, default 900
+#
+# Output fact: pilot_apt_download_probe_result
+#   stage: the stage above
+#   rc: probe exit code
+#   stale: bool, a package download 404'd
+#   timed_out: bool (FATAL below when true)
+
+- name: "APT download probe ({{ pilot_apt_probe_stage }}) — apt-get install --download-only, never installs"
+  ansible.builtin.command:
+    argv: "{{ _pilot_apt_probe_argv + _pilot_apt_missing }}"
+  vars:
+    _pilot_apt_probe_argv:
+      - timeout
+      - --kill-after=30
+      - "{{ (pilot_apt_download_timeout_seconds | default(900)) | string }}"
+      - apt-get
+      - -y
+      - -o
+      - DPkg::Lock::Timeout=60
+      - install
+      - --download-only
+  register: _pilot_apt_download_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: "APT download probe ({{ pilot_apt_probe_stage }}) — set pilot_apt_download_probe_result"
+  # Timeout exit codes as the command module reports them: 124 when TERM
+  # ended the command, -9 when the --kill-after KILL was needed (137 through
+  # a shell); see apt-cache-refresh.yml. apt-get itself never uses them.
+  ansible.builtin.set_fact:
+    pilot_apt_download_probe_result:
+      stage: "{{ pilot_apt_probe_stage }}"
+      rc: "{{ _pilot_apt_download_probe.rc | default(0) }}"
+      timed_out: "{{ (_pilot_apt_download_probe.rc | default(0)) in [124, 137, -9] }}"
+      stale: >-
+        {{ (_pilot_apt_download_probe.rc | default(0)) != 0 and
+           ((_pilot_apt_download_probe.stderr | default('')) is search('^E: Failed to fetch \S+\s+404\s', multiline=True)) }}
+
+- name: "APT download probe ({{ pilot_apt_probe_stage }}) — FATAL(apt_download_timeout)"
+  ansible.builtin.fail:
+    msg: >-
+      FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
+      reason=apt_download_timeout stage={{ pilot_apt_probe_stage }}
+      timeout={{ pilot_apt_download_timeout_seconds | default(900) }}s
+      rc={{ pilot_apt_download_probe_result.rc }} —
+      apt-get install --download-only did not finish in time; the real
+      install would fetch the same files the same way. Check the mirror or
+      proxy in the host's apt configuration, then rerun.
+  when: pilot_apt_download_probe_result.timed_out | bool

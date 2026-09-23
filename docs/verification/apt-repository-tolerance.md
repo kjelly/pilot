@@ -48,7 +48,14 @@ repository.
   package-download 404 (stale metadata, spec.md §5's "install 顯示
   metadata stale" branch); an unrelated/external source failing degrades with a
   warning, never fatal; a declared *required* source (the OS archive, or
-  a Pilot-owned repository) failing is always fatal.
+  a Pilot-owned repository) failing is always fatal. On the stale-metadata
+  path the old candidate is trusted again only after a refresh that was
+  healthy for the required sources **and** a re-probe without 404s;
+  otherwise `FATAL reason=stale_metadata_unrecovered`. Every `apt-get update`
+  (`pilot_apt_update_timeout_seconds`, default 300) and every download probe
+  (`pilot_apt_download_timeout_seconds`, default 900) runs under a wall
+  clock. A timed-out refresh is recorded as `type=refresh_timeout` and never
+  counts as healthy; a timed-out probe is `FATAL reason=apt_download_timeout`.
 - `strict` (repository lifecycle / OS-patch-shaped operations): any
   classified refresh error is fatal — the entire configured package
   universe must be trustworthy, not just one required source. Not yet
@@ -92,6 +99,13 @@ unknown `NO_PUBKEY`.
   check: a cached candidate is probed with apt-get --download-only before the single sanctioned install, and a package-download 404 (stale metadata) takes the global-refresh path; the probe's regex matches a real stale-index capture and does not match real non-404 failures
   probe: |
     go test ./cmd/pilot/cmd/... -run TestAptPackageInstallStaleMetadataProbe -v
+  expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
+- id: C5
+  category: refresh-bounds
+  check: every apt-get network step (global/scoped update, download probe) runs under coreutils timeout with its documented default; a timeout (rc 124, or -9 when the KILL was needed, as Python's subprocess reports it — checked against the real coreutils timeout) is never a healthy refresh; on the stale-metadata path the install needs a healthy refresh plus a 404-free re-probe, else FATAL(stale_metadata_unrecovered)
+  probe: |
+    go test ./cmd/pilot/cmd/... -run 'TestAptNetworkStepsHaveWallClock|TestAptTimeoutExitCodes|TestAptStaleMetadataNeedsWorkingRefresh' -v
   expect: {stdout: {contains: "PASS"}}
   verifyOnly: true
 - id: T8
