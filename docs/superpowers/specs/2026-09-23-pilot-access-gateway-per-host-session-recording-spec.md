@@ -335,6 +335,7 @@ all:
   - 在 `docs/verification/pilot-access-gateway.md` §7 與 runbook 寫明 canary 的用途與限制（只偵測全站性的 ACI 錯誤）。
 - 兩個分支都由 live L3 以真實 gateway principal 證明預設 ACI 下讀得到 userclass。
 - **只實作被選中的分支**，不提供 runtime 切換或設定開關。Phase 0 evidence 記錄選擇結果；另一分支的條文視為不適用。
+- **Phase 0 結果（2026-09-23）：分支 R。** gateway service principal 以 `rights: true` 查詢得到 `attributelevelrights.userclass = "rsc"`（見 `docs/evidence/pilot-access-gateway/2026-09-23-phase0-userclass-capture.md`）。分支 N（canary、`CanaryFQDN`、AG56 的分支 N 部分、L21）不適用、不實作。
 
 Evidence：`docs/evidence/pilot-access-gateway/<date>-phase0-userclass-capture.md`（只寫 sanitized 事實與分支結論）。
 
