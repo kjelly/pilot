@@ -1117,13 +1117,17 @@
         # this mirrors. thanos-query-apply.yml has the identical block for
         # its own bucket_use, so this bucket ends up ensured regardless of
         # whether prometheus or thanos-query happens to run first.
+        # delegate_to is templated before `when`, and `pilot inventory
+        # generate` emits seaweedfs-s3 as a present-but-empty group, so the
+        # fallback host is APPENDED, never used as a groups.get() default
+        # (see internal/spec/delegate_to_empty_group_regression_test.go).
         - name: "Step: Ensure Thanos S3 bucket exists on the SeaweedFS host (idempotent)"  # noqa run-once[task]
           when: >-
             thanos_s3_alias in thanos_s3_endpoint
             and (groups.get('seaweedfs-s3', []) | length > 0)
-            and (groups.get('seaweedfs-s3', [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
+            and ((groups.get('seaweedfs-s3', []) + [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
           run_once: true
-          delegate_to: "{{ groups.get('seaweedfs-s3', [inventory_hostname]) | first }}"
+          delegate_to: "{{ (groups.get('seaweedfs-s3', []) + [inventory_hostname]) | first }}"
           block:
             - name: "Step: check Thanos S3 bucket exists"
               community.docker.docker_container_exec:
