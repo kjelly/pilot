@@ -18,7 +18,7 @@ import (
 // Emit never returns an error and never blocks/fails the connect/authorize
 // flow it describes: metadata audit here is best-effort observability, not
 // a gate (unlike Phase 7/8's later terminal-recording integrity concerns).
-// This mirrors internal/accessportal.hostAnnotationCache's "enrichment,
+// This mirrors the annotations half of internal/accessportal.hostMetadataCache ("enrichment,
 // never authorization" principle and internal/freeipaaccess.Client's lazy,
 // fail-soft credential loading (see that package's NewClient doc comment
 // for the incident that shaped this house style) — a Directory/Gateway

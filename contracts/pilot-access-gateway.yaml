@@ -8,7 +8,9 @@ playbooks:
   apply: playbooks/apply/pilot-access-gateway-apply.yml
 regressionTests:
   - internal/freeipaaccess/normalize_test.go
+  - internal/freeipaaccess/recording_policy_test.go
   - internal/accessportal/resolver_test.go
+  - internal/accessportal/recording_policy_test.go
   - internal/gatewayapi/server_test.go
   - internal/gatewayapi/portal_group_test.go
   - internal/peercred/peercred_test.go

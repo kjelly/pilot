@@ -36,7 +36,7 @@ func (f *fakeGatewayProvider) GroupShow(ctx context.Context, name string) (freei
 	return freeipaaccess.Group{}, &freeipaaccess.RPCError{Name: "NotFound"}
 }
 func (f *fakeGatewayProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
-	return freeipaaccess.Host{FQDN: fqdn}, nil
+	return freeipaaccess.NewHostWithoutPolicy(fqdn), nil
 }
 func (f *fakeGatewayProvider) HostgroupShow(ctx context.Context, name string) (freeipaaccess.Hostgroup, error) {
 	if name != "pilot-target-gpu" {

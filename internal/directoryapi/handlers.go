@@ -195,9 +195,10 @@ func toTargetJSON(t accessdirectory.DirectoryTarget) TargetJSON {
 		})
 	}
 	return TargetJSON{
-		FQDN:   t.FQDN,
-		SSH:    SSHJSON{Allowed: t.SSH.Allowed, Rules: sshRules},
-		Sudo:   SudoJSON{Scope: t.Sudo.Scope, AllowCommands: t.Sudo.AllowCommands, DenyCommands: t.Sudo.DenyCommands, Rules: sudoRules},
-		Routes: routes,
+		FQDN:      t.FQDN,
+		SSH:       SSHJSON{Allowed: t.SSH.Allowed, Rules: sshRules},
+		Sudo:      SudoJSON{Scope: t.Sudo.Scope, AllowCommands: t.Sudo.AllowCommands, DenyCommands: t.Sudo.DenyCommands, Rules: sudoRules},
+		Routes:    routes,
+		Recording: DirectoryRecordingJSON{Status: t.Recording.Status()},
 	}
 }

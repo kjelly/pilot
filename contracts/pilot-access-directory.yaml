@@ -8,6 +8,8 @@ playbooks:
   apply: playbooks/apply/pilot-access-directory-apply.yml
 regressionTests:
   - internal/accessdirectory/resolver_test.go
+  - internal/accessdirectory/recording_policy_test.go
+  - internal/directoryapi/recording_json_test.go
   - internal/directoryapi/server_test.go
   - internal/directoryapi/portal_group_test.go
   - cmd/pilot-access-directory/config_test.go

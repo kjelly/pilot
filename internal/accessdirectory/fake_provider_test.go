@@ -70,7 +70,7 @@ func (f *fakeProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess
 	if h, ok := f.hosts[fqdn]; ok {
 		return h, nil
 	}
-	return freeipaaccess.Host{FQDN: fqdn}, nil
+	return freeipaaccess.NewHostWithoutPolicy(fqdn), nil
 }
 
 func (f *fakeProvider) HostgroupShow(ctx context.Context, name string) (freeipaaccess.Hostgroup, error) {
