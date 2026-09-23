@@ -1,6 +1,6 @@
 # Verification Spec — Pilot Access Target Policy
 
-> 版本：v0.1（2026-09-23，captive-transport spec Phase 4）
+> 版本：v0.2（2026-09-23，captive-transport spec Phase 5：TP06–TP12 拓樸實跑）
 > 對齊規範：docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md §13/§14.4/§14.5
 > 維護者：sre
 
@@ -37,12 +37,14 @@
 
 ## 3. 拓樸實跑（[e2e]，不在 checklist 逐行覆蓋）
 
-依 F16 慣例列在 checklist 之外，由 `docs/topologies/pilot-access-transport-topology.yaml` 上的實跑證明，結果寫入對應 Phase 的 evidence（`docs/evidence/pilot-access-target-policy/`）。
+依 F16 慣例列在 checklist 之外，由 `docs/topologies/pilot-access-transport-topology.yaml` 上的實跑證明，結果寫入對應 Phase 的 evidence。
+
+目前有效摘要（2026-09-23，candidate `0f1a5c1`）：TP06–TP12 全部 PASS。strict 與 remote-dev 的 forwarding 探測經真實 transport 執行；`absent` 先移出 hostgroup、再刪 drop-in；每個 profile 的第二次 apply 都是 `changed=0`；7 種不合法輸入全部 rc=2，`*.conf` checksum 不變。Evidence：[`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md)（Phase 5）；首次的 profile／absent／TP12 實跑見 [`docs/evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md`](../evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md)（Phase 4）。
 
 | ID | 驗證內容 |
 |----|----------|
 | TP06 | `present` 後主機是 `pilot-transport-ready` 成員；`absent` 後不是（從 FreeIPA server 查詢） |
-| TP07 | strict：經 transport 的 inner `-L` 到 target loopback、`-D`、`-R`、`-A`（target 上沒有 `SSH_AUTH_SOCK`）、`-X`、`-w` 全部被拒 |
+| TP07 | strict：經 transport 的 inner `-L` 到 target loopback、`-D`、`-R`、`-A`（target 上沒有 `SSH_AUTH_SOCK`）、`-X`、`-w` 全部被拒（`-L`／`-D` 為 `administratively prohibited`，`-R` 為 `remote port forwarding failed`，`-w` 為 `Server has rejected tunnel device forwarding`；`-w` 探測使用 workstation 使用者擁有的 tun device，確保拒絕來自 target sshd） |
 | TP08 | remote-dev：`-L`／`-D` 到 target loopback 成功；`-L` 到非 loopback 與 `-R` 被拒 |
 | TP09 | 非 Gateway 路徑不受影響：從 controller 直接 SSH 到 target，`-L` 到 loopback 的行為與套用前的 baseline 相同 |
 | TP10 | `absent`：先移出 hostgroup、再刪 drop-in；drop-in 與 snapshot 都不存在；`sshd -t` 通過；TP05 條件仍成立 |
