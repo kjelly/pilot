@@ -20,7 +20,9 @@
 #
 # Guarantees (spec.md §25):
 #   * cache-first — apt-get update only runs when a requested package is
-#     both missing AND has no installable candidate in the current cache.
+#     both missing AND either has no installable candidate in the current
+#     cache, or its cached candidate's download 404s (stale metadata,
+#     detected by a --download-only probe before the install).
 #   * exactly one real `ansible.builtin.apt` install task, at the bottom
 #     of this file, never wrapped in ignore_errors — an in-scope failure
 #     still fails the play.
@@ -99,6 +101,43 @@
               | list | length) == (_pilot_apt_missing | length) }}
         _pilot_apt_mode: cache_hit
 
+    # Stale-metadata probe (spec.md §5 tolerant: "candidate 不存在 / install
+    # 顯示 metadata stale? → best-effort global refresh → retry install" —
+    # the second half was never implemented). A cached candidate only proves
+    # the local INDEX still lists the package: on a host whose lists are
+    # weeks old (e.g. provisioned from an older golden image) the .debs that
+    # index points at may already be superseded on the mirror, and the
+    # install below then dies with "E: Failed to fetch <url>  404  Not Found"
+    # without ever refreshing (found live 2026-09-23: freeipa-client on a
+    # fresh ubuntu-24.04 vm-target, stale krb5/sssd/tzdata-legacy versions).
+    # `--download-only` fetches exactly what that install would fetch but
+    # never changes the installed package set, so the final `ansible.builtin.apt`
+    # task stays the single sanctioned mutation point. Only a 404 on a
+    # package download counts as stale metadata; any other probe failure is
+    # left for the real install to report, unchanged.
+    - name: "APT package install ({{ pilot_apt_component }}) — stale-metadata probe (download-only, cache hit only)"
+      ansible.builtin.command:
+        argv: "{{ ['apt-get', '-y', '-o', 'DPkg::Lock::Timeout=60', 'install', '--download-only'] + _pilot_apt_missing }}"
+      register: _pilot_apt_download_probe
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when:
+        - _pilot_apt_has_candidate
+        - _pilot_apt_policy != 'offline'
+
+    - name: "APT package install ({{ pilot_apt_component }}) — cached candidate download 404 means stale metadata (take the refresh path)"
+      ansible.builtin.set_fact:
+        _pilot_apt_has_candidate: false
+        _pilot_apt_stale_metadata: true
+      when:
+        - _pilot_apt_download_probe is not skipped
+        - (_pilot_apt_download_probe.rc | default(0)) != 0
+        - >-
+          (_pilot_apt_download_probe.stderr | default('')) is search('^E: Failed to fetch \S+\s+404\s', multiline=True)
+
     - name: "APT package install ({{ pilot_apt_component }}) — FATAL(apt_cache_insufficient_offline)"
       ansible.builtin.fail:
         msg: >-
@@ -116,7 +155,7 @@
         - name: "APT package install ({{ pilot_apt_component }}) — global refresh"
           ansible.builtin.include_tasks: apt-cache-refresh.yml
           vars:
-            pilot_apt_refresh_reason: package_candidate_missing
+            pilot_apt_refresh_reason: "{{ 'package_download_404' if (_pilot_apt_stale_metadata | default(false)) else 'package_candidate_missing' }}"
 
         - name: "APT package install ({{ pilot_apt_component }}) — re-check candidate after global refresh (one apt-cache policy per package; see cache-first check above for why)"
           ansible.builtin.command:
@@ -212,6 +251,7 @@
         msg: >-
           OK component={{ pilot_apt_component }} apt_mode={{ _pilot_apt_mode }}
           packages={{ _pilot_apt_missing }}
+          stale_metadata={{ _pilot_apt_stale_metadata | default(false) }}
           required_sources_healthy={{ (pilot_apt_refresh_result.required_sources_healthy
              if pilot_apt_refresh_result is defined else true) }}
           unrelated_sources_degraded={{ ((pilot_apt_refresh_result.errors | default([]))

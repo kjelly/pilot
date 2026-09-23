@@ -43,8 +43,10 @@ repository.
 ## Policy semantics (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §5)
 
 - `tolerant` (ordinary capability installs): cache-first — only refreshes
-  when a requested package is missing AND has no candidate in the
-  current cache; an unrelated/external source failing degrades with a
+  when a requested package is missing AND either has no candidate in the
+  current cache or its cached candidate's `--download-only` probe hits a
+  package-download 404 (stale metadata, spec.md §5's "install 顯示
+  metadata stale" branch); an unrelated/external source failing degrades with a
   warning, never fatal; a declared *required* source (the OS archive, or
   a Pilot-owned repository) failing is always fatal.
 - `strict` (repository lifecycle / OS-patch-shaped operations): any
@@ -84,6 +86,20 @@ unknown `NO_PUBKEY`.
   probe: |
     go test ./cmd/pilot/cmd/... -run TestAptClassifyFailureScript -v
   expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
+- id: C4
+  category: stale-metadata
+  check: a cached candidate is probed with apt-get --download-only before the single sanctioned install, and a package-download 404 (stale metadata) takes the global-refresh path; the probe's regex matches a real stale-index capture and does not match real non-404 failures
+  probe: |
+    go test ./cmd/pilot/cmd/... -run TestAptPackageInstallStaleMetadataProbe -v
+  expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
+- id: T8
+  category: live-vm
+  check: "a host whose apt lists predate the mirror (cached Candidate exists, its .debs 404) refreshes once and installs, instead of failing with 'E: Failed to fetch ... 404' — LIVE-VERIFIED 2026-09-23 on pilot vm-target apt-stale-probe (fresh ubuntu-24.04 golden image); see Notes below"
+  probe: |
+    echo "LIVE-VERIFIED"
+  expect: {stdout: {contains: "LIVE-VERIFIED"}}
   verifyOnly: true
 - id: T1
   category: live-vm
@@ -140,6 +156,18 @@ unknown `NO_PUBKEY`.
   (§ above: real apt 404/lock/DNS-failure wording differs from the
   initially-guessed regexes) and are already reflected in
   `apt-classify-failure.yml`.
+- T8 (2026-09-23): found while provisioning a fresh ubuntu-24.04 vm-target
+  for the captive-transport E2E — `freeipa-client` had a cached
+  `Candidate: 4.11.1-2`, so the old cache-first check never refreshed,
+  and the install failed on 26 dependency `.deb`s (krb5 1.20.1-6ubuntu2.6,
+  sssd 2.9.4-1.1ubuntu6.5, tzdata-legacy) that the mirror had already
+  superseded (`E: Failed to fetch <url>  404  Not Found`). Any real host
+  whose lists sit unrefreshed for weeks hits the same thing. With the
+  `--download-only` probe, the same kind of stale host ran
+  `apt_mode=global_refresh stale_metadata=True` → `changed=1`; the second
+  run was `apt_mode=already_present` (`changed=0`); and on the now-fresh
+  index a not-yet-installed package ran `apt_mode=cache_hit
+  stale_metadata=False` with no `apt-get update`.
 - `docs/verification/freeipa-client.md` C1/C8 already cover the
   functional "does freeipa-client / sssd-tools install successfully"
   behavior on a healthy host; this spec only adds the fault-tolerance
