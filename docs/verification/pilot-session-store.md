@@ -50,7 +50,7 @@
 | ID | Category | Check | Expected | Command |
 |----|----------|-------|----------|---------|
 | SS01 | config | config `KnownFields(true)`，未知欄位 fail — 由 `cmd/pilot-session-store` 的 `TestLoadConfigRejectsForbiddenFields` 涵蓋，非單一 shell 指令 | 0 | true |
-| SS02 | ingest | ingest API 僅 TLS，真的能用 FreeIPA CA 驗證 | 0 | sh -c 'curl --silent --show-error --cacert /etc/ipa/ca.crt --max-time 5 --output /dev/null --write-out "%{http_code}" https://$(hostname -f):8443/v1/sessions/start \| grep -qE "^[45][0-9][0-9]$"' |
+| SS02 | ingest | ingest API 僅 TLS，真的能用 FreeIPA CA 驗證（TLS handshake 成功、API 回應 4xx/5xx 即代表 TLS 層通過；指令不含 `\|`，避免 Markdown 跳脫後的字面 `\|` 讓整條 pipeline 失效） | 0 | sh -c 'code=$(curl --silent --show-error --cacert /etc/ipa/ca.crt --max-time 5 --output /dev/null --write-out "%{http_code}" https://$(hostname -f):8443/v1/sessions/start); case "$code" in 4??) exit 0;; 5??) exit 0;; *) exit 1;; esac' |
 | SS03 | ingest auth | ingest API 只接受有效的 per-session PIT1 token（per-host recording spec §16/§21.2）；缺少、格式錯誤、簽章錯誤、過期、kid 不符（含舊式靜態 bearer）一律 401 — `cmd/pilot-session-store` 的 `TestIngestAPIRejectsInvalidSessionToken` 涵蓋，需要第二個未授權的 client，非單一 host 指令 | 0 | true |
 | SS04 | 權限分離 | ingest signing key 與 PIT1 token 完全沒有 read/replay 能力（不同 listener，read API 從不載入 signing key）— 結構性不存在，非單一 host 指令 | 0 | true |
 | SS05 | read socket | read/replay API 僅 Unix socket 存在 | 0 | test -S /run/pilot-session-store/session-store.sock |

@@ -89,8 +89,22 @@ func init() {
 	rootCmd.AddCommand(verifyCmd)
 }
 
+// checkProbeFlag rejects an explicitly empty --probe. Without it, a probe
+// whose command came out empty (a failed $(...) substitution in a script)
+// silently fell through to verifying every spec in docs/verification
+// against the probe's inventory — found twice during live testing.
+func checkProbeFlag(changed bool, probe string) error {
+	if changed && strings.TrimSpace(probe) == "" {
+		return fmt.Errorf("--probe needs a command; it was given an empty string")
+	}
+	return nil
+}
+
 func runVerify(cmd *cobra.Command, args []string) error {
 	hasPositional := len(args) >= 1
+	if err := checkProbeFlag(cmd.Flags().Changed("probe"), verifyProbe); err != nil {
+		return err
+	}
 	if verifyProbe != "" {
 		if hasPositional || verifyDir != "" {
 			return fmt.Errorf("--probe is standalone; do not combine it with a spec.md or --dir")
