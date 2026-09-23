@@ -1,0 +1,49 @@
+---
+# Apply chain for the Pilot Access Gateway captive SSH transport E2E
+# (docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md §15.3)
+# against docs/topologies/pilot-access-transport-topology.yaml.
+#
+# Order matters:
+#   freeipa-server -> freeipa-client (tx-gw, tx-target)
+#   -> identity fixtures (IPA user + workstation key)
+#   -> gateway-scope (publish tx-target into pilot-target-<gateway_scope>;
+#      pilot-access-gateway-apply.yml's Step 18 requires that hostgroup)
+#   -> pilot-access-gateway
+#
+# Every value below is only a DEFAULT: -e extra vars always win, so a run can
+# e.g. flip -e pilot_access_gateway_transport_enabled=true without editing
+# this file. Secrets come only from the vault file:
+#
+#   pilot vm-target topology test \
+#       --topology docs/topologies/pilot-access-transport-topology.yaml \
+#       --playbook playbooks/test/pilot-access-transport-e2e.yml \
+#       --verify docs/verification/pilot-access-gateway.md=pilot-access-gateway \
+#       -- -e @~/.vault/<sandbox>.yaml
+- name: FreeIPA server
+  ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
+
+- name: FreeIPA clients (gateway + target)
+  ansible.builtin.import_playbook: ../apply/freeipa-client-apply.yml
+
+- name: Transport E2E identity fixtures
+  ansible.builtin.import_playbook: fixtures/pilot-access-transport-fixtures.yml
+
+- name: Publish the transport target into the gateway scope
+  ansible.builtin.import_playbook: ../apply/gateway-scope-apply.yml
+  vars:
+    gateway_scope: gpu
+    gateway_scope_hosts:
+      - tx-target.ipa.pilot.internal
+
+- name: Pilot Access Gateway
+  ansible.builtin.import_playbook: ../apply/pilot-access-gateway-apply.yml
+  vars:
+    # Same identity as docs/verification/pilot-access-gateway.md's reference
+    # environment (AG01 checks id: gpu-01 / scope: gpu literally).
+    gateway_id: gpu-01
+    gateway_scope: gpu
+    # Built on the controller first (repo-root relative), e.g.
+    #   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/pilot-linux-amd64 ./cmd/pilot
+    #   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/pilot-access-gateway-linux-amd64 ./cmd/pilot-access-gateway
+    pilot_binary_path: dist/pilot-linux-amd64
+    pilot_access_gateway_binary_path: dist/pilot-access-gateway-linux-amd64

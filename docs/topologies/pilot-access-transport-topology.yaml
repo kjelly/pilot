@@ -1,0 +1,80 @@
+# Four-node topology for the Pilot Access Gateway captive SSH transport
+# (docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md §15).
+#
+#   tx-ipa     FreeIPA server (ipa1.ipa.pilot.internal)
+#   tx-gw      FreeIPA client + pilot-access-gateway
+#   tx-target  FreeIPA client + pilot-access-target-policy (the transport target)
+#   tx-ws      the "workstation": deliberately NOT enrolled in FreeIPA and only
+#              wired to the gateway's name — it has no DNS/hosts entry for the
+#              target, and playbooks/test/fixtures/pilot-access-transport-fixtures.yml
+#              additionally drops tx-ws -> tx-target tcp/22 on the target, so any
+#              successful SSH/SFTP/SCP/rsync from tx-ws provably went through
+#              the gateway transport.
+#
+#   pilot vm-target topology up        --topology docs/topologies/pilot-access-transport-topology.yaml
+#   pilot vm-target topology inventory --topology docs/topologies/pilot-access-transport-topology.yaml
+#   pilot vm-target topology down      --topology docs/topologies/pilot-access-transport-topology.yaml
+#
+# The apply chain is playbooks/test/pilot-access-transport-e2e.yml, e.g.:
+#   pilot vm-target topology test --topology docs/topologies/pilot-access-transport-topology.yaml \
+#       --playbook playbooks/test/pilot-access-transport-e2e.yml \
+#       --verify docs/verification/pilot-access-gateway.md=pilot-access-gateway \
+#       -- -e @~/.vault/<sandbox>.yaml ...
+services: local
+nodes:
+  - name: tx-ipa
+    base_image: almalinux-9
+    memory: 4096
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-server
+    wire:
+      - tx-gw=tx-gw.ipa.pilot.internal
+      - tx-target=tx-target.ipa.pilot.internal
+
+  - name: tx-gw
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-client
+      - pilot-access-gateway
+    wire:
+      - tx-ipa=ipa1.ipa.pilot.internal
+      - tx-target=tx-target.ipa.pilot.internal
+
+  - name: tx-target
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-client
+      - pilot-access-target-policy
+    wire:
+      - tx-ipa=ipa1.ipa.pilot.internal
+      - tx-gw=tx-gw.ipa.pilot.internal
+
+  - name: tx-ws
+    base_image: ubuntu-24.04
+    memory: 1536
+    vcpus: 1
+    disk: 15
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - pilot-transport-workstation
+    wire:
+      - tx-gw=tx-gw.ipa.pilot.internal

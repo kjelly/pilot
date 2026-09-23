@@ -144,6 +144,27 @@
     # having actually been run there.
     pilot_access_gateway_effective_install_forcecommand: "{{ pilot_access_gateway_install_forcecommand | default(true) }}"
 
+    # Session recording policy (docs/superpowers/specs/2026-09-23-pilot-
+    # access-gateway-captive-ssh-transport-spec.md §12.2). Before this, Step
+    # 11 rewrote /etc/pilot/access-gateway.yaml wholesale with NO recording:
+    # block, so any hand-added gateway.recording.* was silently reset to
+    # "metadata" by the next apply. The policy is now owned by these group
+    # vars (same _effective_ shadowing rule as above), and the "Recording
+    # policy" guard tasks below refuse — before anything is written — to
+    # lower an installed policy unless
+    # pilot_access_gateway_recording_allow_downgrade=true says so explicitly.
+    pilot_access_gateway_effective_recording_mode: "{{ pilot_access_gateway_recording_mode | default('metadata', true) }}"
+    pilot_access_gateway_effective_recording_failure_policy: "{{ pilot_access_gateway_recording_failure_policy | default('best_effort', true) }}"
+    pilot_access_gateway_effective_recording_session_store_url: "{{ pilot_access_gateway_recording_session_store_url | default('', true) }}"
+    pilot_access_gateway_effective_recording_session_store_ca_file: "{{ pilot_access_gateway_recording_session_store_ca_file | default('', true) }}"
+    pilot_access_gateway_effective_recording_session_store_ingest_token_file: "{{ pilot_access_gateway_recording_session_store_ingest_token_file | default('', true) }}"
+    pilot_access_gateway_effective_recording_allow_downgrade: "{{ pilot_access_gateway_recording_allow_downgrade | default(false) }}"
+    # metadata < terminal_output < terminal_io: lower rank = records less.
+    gateway_recording_mode_rank:
+      metadata: 0
+      terminal_output: 1
+      terminal_io: 2
+
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
@@ -728,6 +749,93 @@
         mode: "0400"
       tags: [AG_keytab, AG03]
 
+    # Recording policy guard (captive-transport spec §12.2). Every task here
+    # carries Step 11's exact tag set, so any tag selection that rewrites
+    # the config also re-checks it first. All of them are check-mode safe
+    # (stat/slurp/assert only), so `--check --diff` catches a would-be
+    # downgrade before a real run ever gets that far.
+    - name: "Recording policy: rendered values are valid"
+      ansible.builtin.assert:
+        that:
+          - pilot_access_gateway_effective_recording_mode in gateway_recording_mode_rank
+          - pilot_access_gateway_effective_recording_failure_policy in ['best_effort', 'fail_closed']
+          - >-
+            pilot_access_gateway_effective_recording_session_store_url | length == 0
+            or pilot_access_gateway_effective_recording_session_store_ingest_token_file | length > 0
+        fail_msg: >-
+          pilot_access_gateway_recording_mode must be metadata|terminal_output|terminal_io
+          (got {{ pilot_access_gateway_effective_recording_mode }}),
+          pilot_access_gateway_recording_failure_policy must be best_effort|fail_closed
+          (got {{ pilot_access_gateway_effective_recording_failure_policy }}), and a
+          session_store_url requires pilot_access_gateway_recording_session_store_ingest_token_file.
+      tags: [AG_config, AG01, AG41]
+
+    - name: "Recording policy: stat the session-store ingest token file"
+      ansible.builtin.stat:
+        path: "{{ pilot_access_gateway_effective_recording_session_store_ingest_token_file }}"
+      register: gateway_recording_token_stat
+      when: pilot_access_gateway_effective_recording_session_store_url | length > 0
+      tags: [AG_config, AG01, AG41]
+
+    # Same rule cmd/pilot-access-gateway/config.go's loadSessionStoreIngestToken
+    # enforces at startup — failing here keeps a bad token file from
+    # turning into a service that cannot start after Step 11 is written.
+    - name: "Recording policy: the ingest token file exists and is not group/world accessible"
+      ansible.builtin.assert:
+        that:
+          - gateway_recording_token_stat.stat.exists | default(false)
+          - (gateway_recording_token_stat.stat.mode | default('0777'))[-2:] == '00'
+        fail_msg: >-
+          {{ pilot_access_gateway_effective_recording_session_store_ingest_token_file }}
+          must exist on this host with no group/world permission bits (e.g. 0600)
+          before a session store can be configured.
+      when: pilot_access_gateway_effective_recording_session_store_url | length > 0
+      tags: [AG_config, AG01, AG41]
+
+    - name: "Recording policy: stat the currently installed gateway config"
+      ansible.builtin.stat:
+        path: /etc/pilot/access-gateway.yaml
+      register: gateway_existing_config_stat
+      tags: [AG_config, AG01, AG41]
+
+    - name: "Recording policy: read the currently installed gateway config"
+      ansible.builtin.slurp:
+        src: /etc/pilot/access-gateway.yaml
+      register: gateway_existing_config_raw
+      when: gateway_existing_config_stat.stat.exists
+      tags: [AG_config, AG01, AG41]
+
+    - name: "Recording policy: extract the installed recording policy"
+      ansible.builtin.set_fact:
+        gateway_existing_recording: >-
+          {{ (((gateway_existing_config_raw.content | b64decode | from_yaml) or {}).get('gateway') or {}).get('recording') or {}
+             if gateway_existing_config_stat.stat.exists else {} }}
+      tags: [AG_config, AG01, AG41]
+
+    - name: "Recording policy: refuse to silently lower the installed policy"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (pilot_access_gateway_effective_recording_allow_downgrade | bool)
+            or (
+              (gateway_recording_mode_rank[pilot_access_gateway_effective_recording_mode]
+                >= gateway_recording_mode_rank.get(gateway_existing_recording.get('mode') or 'metadata', 0))
+              and not (
+                (gateway_existing_recording.get('session_store_url') or '') | length > 0
+                and pilot_access_gateway_effective_recording_session_store_url | length == 0
+              )
+            )
+        fail_msg: >-
+          Refusing to lower this gateway's session-recording policy: installed
+          mode={{ gateway_existing_recording.get('mode') or 'metadata' }}
+          session_store_url={{ gateway_existing_recording.get('session_store_url') or '(none)' }},
+          requested mode={{ pilot_access_gateway_effective_recording_mode }}
+          session_store_url={{ pilot_access_gateway_effective_recording_session_store_url or '(none)' }}.
+          Set pilot_access_gateway_recording_mode / _session_store_* to keep the
+          current policy, or pass -e pilot_access_gateway_recording_allow_downgrade=true
+          to lower it on purpose.
+      tags: [AG_config, AG01, AG41]
+
     # Step 11 (spec.md §55): access-gateway.yaml — matches
     # cmd/pilot-access-gateway/config.go's Config struct exactly (kept in
     # sync manually; see docs/evidence for the cross-check test).
@@ -761,8 +869,18 @@
               service_principal: pilot-access-gateway/{{ gateway_effective_fqdn }}@{{ gateway_effective_ipa_realm }}
               keytab: /etc/pilot/pilot-access-gateway.keytab
               request_timeout: 5s
+            recording:
+              mode: {{ pilot_access_gateway_effective_recording_mode | to_json }}
+              failure_policy: {{ pilot_access_gateway_effective_recording_failure_policy | to_json }}
+          {% if pilot_access_gateway_effective_recording_session_store_url | length > 0 %}
+              session_store_url: {{ pilot_access_gateway_effective_recording_session_store_url | to_json }}
+              session_store_ingest_token_file: {{ pilot_access_gateway_effective_recording_session_store_ingest_token_file | to_json }}
+          {% if pilot_access_gateway_effective_recording_session_store_ca_file | length > 0 %}
+              session_store_ca_file: {{ pilot_access_gateway_effective_recording_session_store_ca_file | to_json }}
+          {% endif %}
+          {% endif %}
       register: gateway_config_copy
-      tags: [AG_config, AG01]
+      tags: [AG_config, AG01, AG41]
 
     # Step 12 (spec.md §55/§32): root-owned SSH client config — MUST stay
     # byte-identical to cmd/pilot/cmd/portal_ssh.go's pilotSSHConfig

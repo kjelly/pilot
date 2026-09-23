@@ -149,12 +149,6 @@ var specTagMap = []specTagMapping{
 		exemptRows: map[string]string{
 			"AG19": "no local DB/state under /var/lib/pilot is a structural absence (no task ever writes there) — nothing to tag",
 			"AG30": "idempotent second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task — same reasoning as freeipa-dns.md's own C12",
-			"AG35": "valid pilot-connect grammar parsing is proven by cmd/pilot/cmd's own TestParsePortalSSHOriginalCommand_ValidConnect, not a playbook task",
-			"AG36": "malformed/malicious command rejection is proven by cmd/pilot/cmd's own TestParsePortalSSHOriginalCommand_Rejects, not a playbook task",
-			"AG37": "session_id never reaching the authorize decision is an architectural property of runPortalOneShotConnect, proven by TestRunPortalOneShotConnect_Allowed/_Denied, not a playbook task",
-			"AG38": "one-shot connect always re-authorizing fresh is proven by TestRunPortalOneShotConnect_Denied, not a playbook task",
-			"AG39": "wrong-scope deny on the one-shot path reuses the same handleConnectAuthorize as the interactive path — same reasoning as AG38, not a playbook task",
-			"AG40": "ssh child exit code propagation is proven by TestRunPortalOneShotConnect_PropagatesSSHExitCode, not a playbook task",
 		}},
 	{spec: "pilot-access-directory.md", playbook: "pilot-access-directory-apply.yml",
 		exemptRows: map[string]string{

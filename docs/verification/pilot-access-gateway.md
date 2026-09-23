@@ -1,6 +1,7 @@
 # Verification Spec — Pilot Access Gateway
 
 > 版本：DRAFT v0.7（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；AG32-AG33 的 Portal session-scoped `kinit` / GSSAPI-only Connect 已於 2026-09-16 完成 vm-target + trec E2E，見 [`docs/evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md`](../evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md)；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5；2026-09-18 追加：每次 apply 現在也會把這台 gateway 自己發布進 `pilot-gateway-<gateway_scope>`，供 `pilot-access-directory` 路由用，見 §5；2026-09-18 再追加：ForceCommand wrapper 改 exec `pilot portal-session`，新增 `pilot-connect <session-id> <fqdn>` one-shot handoff dispatcher，AG34-AG40；同日稍後已完成真實 vm-target 活體驗證——`alice` 經 Directory（`ag-directory01`）分別 handoff 到 GPU Gateway（`ag-gw01`→`ag-target01`，`whoami`=alice）與 DMZ Gateway（`ag-gw02`→新建的 `ag-target02`，`whoami`=alice），以及把 dmz target 的 `pilot-connect` 直接送去 GPU gateway 被正確 deny（wrong-scope injection），見 [`docs/evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md`](../evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md)）
+> 2026-09-23 追加（captive-transport spec `docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md` Phase 1）：`gateway.recording` 改由 `pilot_access_gateway_recording_*` group vars 渲染，不再在每次 apply 時被整份覆寫而靜默降回 metadata；會降低已安裝錄影政策的 apply 在寫檔前失敗，除非明確帶 `pilot_access_gateway_recording_allow_downgrade=true`（AG41）。AG35–AG40 的 Command 欄從來不是可執行指令，已移出 §2 checklist，改列在 §6。
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md（Pilot Access Gateway — Stateless FreeIPA-backed Portal），§50-§58
 > 維護者：sre
 
@@ -46,12 +47,7 @@
 | AG32 | ssh-policy | Portal Connect 只允許 GSSAPI，不委派 TGT 到 target，也不退回 password/kbd-interactive/pubkey | 0 | bash -c 'v="$(ssh -G -F /etc/pilot/ssh_config target.invalid 2>/dev/null)" || exit; has() { grep -qx "$1" <<< "$v"; }; has "gssapiauthentication yes" && has "gssapidelegatecredentials no" && has "preferredauthentications gssapi-with-mic" && has "batchmode yes" && has "passwordauthentication no" && has "kbdinteractiveauthentication no" && has "pubkeyauthentication false"' |
 | AG33 | kerberos | Portal session ticket helper 依賴的 Kerberos client binaries存在 | 0 | test -x /usr/bin/kinit && test -x /usr/bin/klist && test -x /usr/bin/kdestroy |
 | AG34 | handoff | ForceCommand wrapper 已改為 exec `pilot portal-session`（Phase 5 dispatcher），不再是舊版永遠互動的 `pilot portal` | 0 | grep -q 'exec /usr/bin/pilot portal-session' /usr/local/libexec/pilot-session |
-| AG35 | handoff | 合法 `pilot-connect <uuid> <fqdn>` 語法可被解析、不再落入舊版「忽略 SSH_ORIGINAL_COMMAND、一律進互動 TUI」行為 | 0 | 見 `TestParsePortalSSHOriginalCommand_ValidConnect`（unit test 覆蓋，非單一 shell 指令）；活體「一路連到真實 target」驗證待 §7 vm-target |
-| AG36 | handoff | 任意/畸形指令一律 deny，不再靜默落回互動 TUI（spec.md D7「其他全部拒絕」，Phase 5 的行為變更） | 0 | 見 `TestParsePortalSSHOriginalCommand_Rejects`（涵蓋 shell metacharacter、`user@host`、IP literal、leading `-`、trailing `.`、embedded newline、錯誤 token 數、非法 UUID、Directory 自己的 `pilot-directory-connect` 語法）；活體 SSH 探測見 §7/`scripts/pilot-access-gateway-lockout-test.sh` |
-| AG37 | handoff | session_id 完全不影響 authorize 決策（spec.md §17.2：不把 session ID 當 proof） | 0 | 架構性——`runPortalOneShotConnect` 只把 `sessionID` 用在 `slog` 結構化 log，從未傳進 `client.ConnectAuthorize`（只傳 `target`）；`TestRunPortalOneShotConnect_Allowed`/`_Denied` 用同一組 fake gateway 驗證 authorize 結果只取決於 target 是否在 scope 內 |
-| AG38 | handoff | one-shot connect 仍是每次呼叫都 fresh authorize，從未信任 Directory 先前的判斷（D1/D6） | 0 | `TestRunPortalOneShotConnect_Denied`：即使呼叫端「已經」構造出語法合法的 `pilot-connect` 指令，target 不在這台 gateway 的 `target_hostgroup` 範圍內時一樣被拒，且憑證/SSH 都不會被觸發 |
-| AG39 | handoff | wrong-scope target 經 one-shot connect 路徑一樣 deny（沿用既有 `ConnectAuthorize`，不是另一套判斷） | 0 | 同 AG38——`internal/gatewayapi.handleConnectAuthorize` 完全沒有因為呼叫來源是互動 Portal 還是 one-shot handoff而改變邏輯，兩條路徑呼叫同一個 handler |
-| AG40 | handoff | target session 結束後，one-shot connect process 以 ssh child 的 exit code 結束（spec.md §18 point 6/7） | 0 | `TestRunPortalOneShotConnect_PropagatesSSHExitCode`（用真的 `sh -c "exit 7"` 產生真的 `*exec.ExitError`，確認透過 `portalSessionExitError`/`ExitCoder` 原樣傳出） |
+| AG41 | recording | `/etc/pilot/access-gateway.yaml` 的 `gateway.recording` 由 `pilot_access_gateway_recording_*` group vars 渲染（不再每次 apply 被覆寫成沒有 recording 區塊；captive-transport spec §12.2），`mode` 為合法值 | 0 | sh -c 'grep -A3 "^  recording:$" /etc/pilot/access-gateway.yaml | grep -Eq "^    mode: \"?(metadata|terminal_output|terminal_io)\"?$"' |
 
 ## 3. 不在這份 checklist 逐行覆蓋、但已用其他方式驗證過的項目
 
@@ -122,6 +118,15 @@
   殘留 drift。第二次 apply 這幾個新 task 全部 `ok`（無 `changed`）。
 
 ## 6. Phase 5 — Directory → Gateway handoff dispatcher（2026-09-18，unit-test + vm-target 活體皆已驗證）
+
+以下 6 項原本放在 §2 checklist，但它們的「Command」欄是指向 Go 測試的說明文字、不是可在主機上執行的指令——`pilot verify` 會真的執行它們並得到 rc=127，讓整份 spec 的 verify 從 2026-09-18 起恆為 FAIL（2026-09-23 在 captive-transport 拓樸上實測發現）。2026-09-23 起改列在這裡，由對應的 Go 測試證明，不再進 checklist／contract traceability：
+
+- **AG35**：合法 `pilot-connect <uuid> <fqdn>` 語法可被解析、不再落入舊版「忽略 SSH_ORIGINAL_COMMAND、一律進互動 TUI」行為——見 `TestParsePortalSSHOriginalCommand_ValidConnect`（unit test 覆蓋，非單一 shell 指令）；活體「一路連到真實 target」驗證待 §7 vm-target
+- **AG36**：任意/畸形指令一律 deny，不再靜默落回互動 TUI（spec.md D7「其他全部拒絕」，Phase 5 的行為變更）——見 `TestParsePortalSSHOriginalCommand_Rejects`（涵蓋 shell metacharacter、`user@host`、IP literal、leading `-`、trailing `.`、embedded newline、錯誤 token 數、非法 UUID、Directory 自己的 `pilot-directory-connect` 語法）；活體 SSH 探測見 §7/`scripts/pilot-access-gateway-lockout-test.sh`
+- **AG37**：session_id 完全不影響 authorize 決策（spec.md §17.2：不把 session ID 當 proof）——架構性——`runPortalOneShotConnect` 只把 `sessionID` 用在 `slog` 結構化 log，從未傳進 `client.ConnectAuthorize`（只傳 `target`）；`TestRunPortalOneShotConnect_Allowed`/`_Denied` 用同一組 fake gateway 驗證 authorize 結果只取決於 target 是否在 scope 內
+- **AG38**：one-shot connect 仍是每次呼叫都 fresh authorize，從未信任 Directory 先前的判斷（D1/D6）——`TestRunPortalOneShotConnect_Denied`：即使呼叫端「已經」構造出語法合法的 `pilot-connect` 指令，target 不在這台 gateway 的 `target_hostgroup` 範圍內時一樣被拒，且憑證/SSH 都不會被觸發
+- **AG39**：wrong-scope target 經 one-shot connect 路徑一樣 deny（沿用既有 `ConnectAuthorize`，不是另一套判斷）——同 AG38——`internal/gatewayapi.handleConnectAuthorize` 完全沒有因為呼叫來源是互動 Portal 還是 one-shot handoff而改變邏輯，兩條路徑呼叫同一個 handler
+- **AG40**：target session 結束後，one-shot connect process 以 ssh child 的 exit code 結束（spec.md §18 point 6/7）——`TestRunPortalOneShotConnect_PropagatesSSHExitCode`（用真的 `sh -c "exit 7"` 產生真的 `*exec.ExitError`，確認透過 `portalSessionExitError`/`ExitCoder` 原樣傳出）
 
 `docs/tmp/now/spec.md` §16-§19：ForceCommand wrapper（`/usr/local/libexec/pilot-session`）
 從無條件 `exec /usr/bin/pilot portal` 改成 `exec /usr/bin/pilot portal-session`——
