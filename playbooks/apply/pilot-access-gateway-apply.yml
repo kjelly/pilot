@@ -326,11 +326,37 @@
       register: gateway_ipa_default_conf
       tags: [AG_enrollment]
 
+    # In a check-mode preview of a fresh host whose freeipa-client play runs
+    # earlier in the SAME run (site.yml, or the captive-transport E2E
+    # wrapper), enrollment has only been simulated, so default.conf cannot
+    # exist yet. Only that case is let through; a real run, or a host that
+    # is not in freeipa-client at all, still fails closed here (found by
+    # the captive-transport Phase 5 fresh-VM L3 run).
     - name: "Step 2: gate — this host must already be FreeIPA-enrolled"
       ansible.builtin.assert:
         that:
-          - gateway_ipa_default_conf.stat.exists
+          - >-
+            gateway_ipa_default_conf.stat.exists
+            or (ansible_check_mode and 'freeipa-client' in group_names)
         fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
+      tags: [AG_enrollment]
+
+    # Everything below reads what enrollment produces (CA, host keytab, DNS
+    # record, SSSD), so a pre-enrollment preview has nothing meaningful left
+    # to simulate for this host — end it here, explicitly, instead of failing
+    # on the first enrollment artifact.
+    - name: "Step 2: check-mode preview before this run's FreeIPA enrollment — stop previewing this host"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} is not FreeIPA-enrolled yet; its freeipa-client
+          play earlier in this run only simulated enrollment, so the rest of the
+          gateway install cannot be previewed. A real run enrolls first.
+      when: ansible_check_mode and not gateway_ipa_default_conf.stat.exists
+      tags: [AG_enrollment]
+
+    - name: "Step 2: end the preview for this not-yet-enrolled host"
+      ansible.builtin.meta: end_host
+      when: ansible_check_mode and not gateway_ipa_default_conf.stat.exists
       tags: [AG_enrollment]
 
     # `ipa service-add` (step 8, below) requires this host to already

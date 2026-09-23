@@ -150,19 +150,42 @@
       when: pilot_access_target_effective_policy_state == 'present'
       tags: [always]
 
+    - name: "Check FreeIPA enrollment"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: pilot_access_target_ipa_default_conf_stat
+      tags: [always]
+
+    # A check-mode preview of a fresh host whose freeipa-client play runs
+    # earlier in the same run has only simulated enrollment; only that case
+    # passes without default.conf (same rule as pilot-access-gateway-apply.yml
+    # Step 2). Real runs fail closed.
     - name: "Gate: this host is FreeIPA-enrolled"
+      ansible.builtin.assert:
+        that:
+          - >-
+            pilot_access_target_ipa_default_conf_stat.stat.exists
+            or (ansible_check_mode and 'freeipa-client' in group_names)
+        fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
+      tags: [always]
+
+    - name: "Read this host's FreeIPA client configuration"
       ansible.builtin.slurp:
         src: /etc/ipa/default.conf
       register: pilot_access_target_ipa_default_conf
+      when: pilot_access_target_ipa_default_conf_stat.stat.exists
       tags: [always]
 
     # The FQDN FreeIPA enrolled this host under — the name the gateway's
-    # scope and pilot-transport-ready membership are keyed on.
+    # scope and pilot-transport-ready membership are keyed on (ansible_fqdn
+    # only stands in during a pre-enrollment check-mode preview, where no
+    # FreeIPA call is made).
     - name: "Resolve this host's FreeIPA FQDN"
       ansible.builtin.set_fact:
         pilot_access_target_fqdn: >-
-          {{ (pilot_access_target_ipa_default_conf.content | b64decode
-              | regex_search('(?m)^host\s*=\s*(\S+)\s*$', '\1') | first) | lower }}
+          {{ ((pilot_access_target_ipa_default_conf.content | b64decode
+               | regex_search('(?m)^host\s*=\s*(\S+)\s*$', '\1') | first)
+              if pilot_access_target_ipa_default_conf_stat.stat.exists else ansible_fqdn) | lower }}
       tags: [always]
 
   tasks:

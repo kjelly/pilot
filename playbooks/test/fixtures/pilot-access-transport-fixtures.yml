@@ -68,15 +68,20 @@
           - "/home/{{ transport_ws_user }}/.ssh/id_ed25519"
         creates: "/home/{{ transport_ws_user }}/.ssh/id_ed25519"
       become_user: "{{ transport_ws_user }}"
+      # In check mode the user task above only simulated creating the user,
+      # so becoming it would fail on a fresh host ("sudo: unknown user").
+      when: not ansible_check_mode
 
     - name: Read the workstation test user's public key
       ansible.builtin.slurp:
         src: "/home/{{ transport_ws_user }}/.ssh/id_ed25519.pub"
       register: transport_ws_pubkey_raw
+      when: not ansible_check_mode
 
     - name: Remember the public key for the FreeIPA play below
       ansible.builtin.set_fact:
         transport_ws_pubkey_line: "{{ transport_ws_pubkey_raw.content | b64decode | trim }}"
+      when: not ansible_check_mode
 
 - name: Transport E2E — publish the workstation key as the IPA user's SSH key
   hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
@@ -112,6 +117,7 @@
         argv: [ipa, user-show, "{{ transport_fixture_user_effective }}", --all]
       register: transport_user_show
       changed_when: false
+      when: not ansible_check_mode
 
     - name: Fixtures — publish the workstation key on the IPA user
       ansible.builtin.command:
@@ -120,7 +126,9 @@
           - user-mod
           - "{{ transport_fixture_user_effective }}"
           - "--sshpubkey={{ transport_ws_pubkey | trim }}"
-      when: transport_ws_pubkey_body not in transport_user_show.stdout
+      when:
+        - not ansible_check_mode
+        - transport_ws_pubkey_body not in transport_user_show.stdout
       register: transport_user_mod
       changed_when: transport_user_mod.rc == 0
 
