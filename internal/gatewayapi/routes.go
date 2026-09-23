@@ -1,10 +1,14 @@
 package gatewayapi
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/kjelly/pilot/internal/accessportal"
+	"github.com/kjelly/pilot/internal/ingesttoken"
 )
 
 func (s *Server) routes() http.Handler {
@@ -46,7 +50,7 @@ func (s *Server) handleAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "access service unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, toAccessResponse(peer.Username, s.gatewayInfo(), access))
+	writeJSON(w, http.StatusOK, toAccessResponse(peer.Username, s.gatewayInfo(), access, s.RecordingPolicy.DefaultMode))
 }
 
 // handleAccessHost is GET /v1/access/{fqdn} (spec.md §22.3): fqdn must be
@@ -68,7 +72,7 @@ func (s *Server) handleAccessHost(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, h := range access.Hosts {
 		if h.FQDN == fqdn {
-			writeJSON(w, http.StatusOK, toHostJSON(h))
+			writeJSON(w, http.StatusOK, toHostJSON(h, s.RecordingPolicy.DefaultMode))
 			return
 		}
 	}
@@ -80,6 +84,11 @@ func (s *Server) handleAccessHost(w http.ResponseWriter, r *http.Request) {
 // authorize"; this package does not cache LoadUserAccess at all yet, so
 // staleness cannot occur by construction). FreeIPA/resolve failure denies
 // rather than erroring the connect decision (spec.md §16/§34).
+//
+// Allowed is set only after the target passes HBAC/scope AND its recording
+// policy resolves AND, for a recording mode, the recording backend and
+// session id are usable (per-host recording spec §15.2). Only terminal
+// modes receive session-store coordinates and a per-session ingest token.
 func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) {
 	peer, ok := s.authorizedPeer(r)
 	if !ok {
@@ -103,25 +112,76 @@ func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, resp) // Allowed stays false.
 		return
 	}
-	for _, h := range access.Hosts {
-		if h.FQDN == target && h.SSH.Allowed {
-			resp.Allowed = true
-			for _, rs := range h.SSH.Rules {
-				resp.Rules = append(resp.Rules, rs.Rule)
-			}
+	var host *accessportal.HostAccess
+	for i := range access.Hosts {
+		if access.Hosts[i].FQDN == target && access.Hosts[i].SSH.Allowed {
+			host = &access.Hosts[i]
 			break
 		}
 	}
-	if resp.Allowed {
-		resp.RecordingMode = s.RecordingPolicy.Mode
-		resp.RecordingFailurePolicy = s.RecordingPolicy.FailurePolicy
-		resp.RecordingQueueEvents = s.RecordingPolicy.QueueEvents
-		resp.RecordingFlushIntervalMS = s.RecordingPolicy.FlushIntervalMS
-		resp.RecordingSessionStoreURL = s.RecordingPolicy.SessionStoreURL
-		resp.RecordingSessionStoreCAFile = s.RecordingPolicy.SessionStoreCAFile
-		resp.RecordingSessionStoreIngestToken = s.RecordingPolicy.SessionStoreIngestToken
+	if host == nil {
+		writeJSON(w, http.StatusOK, resp) // HBAC/scope deny: Allowed stays false.
+		return
 	}
+
+	deny := func(reason string) {
+		resp.DenyReason = reason
+		s.Logger.Info("connect authorize denied", "user", peer.Username, "target", target,
+			"gateway_id", s.Gateway.ID, "reason_code", reason, "policy_reason", host.SSHRecording.Reason)
+		writeJSON(w, http.StatusOK, resp)
+	}
+	mode, source, err := ResolveRecordingMode(s.RecordingPolicy.DefaultMode, host.SSHRecording)
+	switch {
+	case errors.Is(err, ErrRecordingPolicyUnknown):
+		deny(DenyReasonRecordingPolicyUnavailable)
+		return
+	case err != nil:
+		deny(DenyReasonRecordingPolicyInvalid)
+		return
+	}
+
+	pol := s.RecordingPolicy
+	if isTerminalRecording(mode) {
+		if pol.SessionStoreURL == "" || pol.Signer == nil {
+			deny(DenyReasonRecordingBackend)
+			return
+		}
+		if !validSessionID(req.SessionID) {
+			deny(DenyReasonRecordingSessionID)
+			return
+		}
+		token, err := pol.Signer.Mint(ingesttoken.Claims{
+			SessionID: req.SessionID, User: peer.Username, Gateway: s.Gateway.ID, Scope: s.Gateway.Scope,
+			Target: target, Mode: mode, Source: source,
+		}, pol.MaxSessionDuration)
+		if err != nil {
+			s.Logger.Error("connect authorize: mint ingest token failed", "user", peer.Username, "target", target, "error", err)
+			deny(DenyReasonRecordingBackend)
+			return
+		}
+		resp.RecordingFailurePolicy = pol.FailurePolicy
+		resp.RecordingQueueEvents = pol.QueueEvents
+		resp.RecordingFlushIntervalMS = pol.FlushIntervalMS
+		resp.RecordingFailureGraceMS = pol.FailureGraceMS
+		resp.RecordingSessionStoreURL = pol.SessionStoreURL
+		resp.RecordingSessionStoreCAFile = pol.SessionStoreCAFile
+		resp.RecordingSessionStoreIngestToken = token
+	}
+
+	resp.Allowed = true
+	for _, rs := range host.SSH.Rules {
+		resp.Rules = append(resp.Rules, rs.Rule)
+	}
+	resp.RecordingMode = mode
+	resp.RecordingPolicySource = source
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// validSessionID reports whether id is a canonical UUID (the only form
+// the one-shot and interactive connect paths generate).
+func validSessionID(id string) bool {
+	_, err := uuid.Parse(id)
+	return err == nil && len(id) == 36
 }
 
 // handleHealth is GET /v1/health (spec.md §22.5).
@@ -146,15 +206,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, resp)
 }
 
-func toAccessResponse(username string, gw GatewayInfo, access accessportal.UserAccess) AccessResponse {
+func toAccessResponse(username string, gw GatewayInfo, access accessportal.UserAccess, recordingDefault string) AccessResponse {
 	resp := AccessResponse{User: username, Gateway: gw, GeneratedAt: access.GeneratedAt, Hosts: []HostJSON{}}
+	resp.RecordingDefault = recordingDefault
+	if resp.RecordingDefault == "" {
+		resp.RecordingDefault = recordingModeMetadata
+	}
 	for _, h := range access.Hosts {
-		resp.Hosts = append(resp.Hosts, toHostJSON(h))
+		resp.Hosts = append(resp.Hosts, toHostJSON(h, recordingDefault))
 	}
 	return resp
 }
 
-func toHostJSON(h accessportal.HostAccess) HostJSON {
+func toHostJSON(h accessportal.HostAccess, recordingDefault string) HostJSON {
 	sshRules := make([]string, 0, len(h.SSH.Rules))
 	for _, r := range h.SSH.Rules {
 		sshRules = append(sshRules, r.Rule)
@@ -168,5 +232,16 @@ func toHostJSON(h accessportal.HostAccess) HostJSON {
 		SSH:         SSHJSON{Allowed: h.SSH.Allowed, Rules: sshRules},
 		Sudo:        SudoJSON{Scope: h.Sudo.Scope, AllowCommands: h.Sudo.AllowCommands, DenyCommands: h.Sudo.DenyCommands, Rules: sudoRules},
 		Annotations: h.Annotations,
+		Recording:   toRecordingJSON(h.SSHRecording, recordingDefault),
 	}
+}
+
+// toRecordingJSON reports the host's policy status and, when it resolves,
+// the effective mode a connect would use right now.
+func toRecordingJSON(p accessportal.SSHRecordingAccessPolicy, recordingDefault string) RecordingJSON {
+	out := RecordingJSON{Status: p.Status()}
+	if mode, _, err := ResolveRecordingMode(recordingDefault, p); err == nil {
+		out.Effective = mode
+	}
+	return out
 }

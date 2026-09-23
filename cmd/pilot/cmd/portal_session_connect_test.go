@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kjelly/pilot/internal/accessportal"
 	"github.com/kjelly/pilot/internal/gatewayapi"
+	"github.com/kjelly/pilot/internal/ingesttoken"
 	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
@@ -65,7 +67,17 @@ func startFakeGatewayWithRecording(t *testing.T, username string, policy gateway
 // are fake) failure surfaces instead.
 func TestRunPortalOneShotConnect_RecordingEnabledSkipsPlainPath(t *testing.T) {
 	username := currentOSUsername(t)
-	client := startFakeGatewayWithRecording(t, username, gatewayapi.RecordingPolicy{Mode: "terminal_io", FailurePolicy: "best_effort", QueueEvents: 64, FlushIntervalMS: 500})
+	signer, err := ingesttoken.NewSigner([]byte("0123456789abcdef0123456789abcdef"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake provider's hosts inherit, so the gateway-wide terminal_io
+	// default (with a configured store) is what makes this session record.
+	client := startFakeGatewayWithRecording(t, username, gatewayapi.RecordingPolicy{
+		DefaultMode: "terminal_io", FailurePolicy: "best_effort", QueueEvents: 64, FlushIntervalMS: 500,
+		FailureGraceMS: 10000, MaxSessionDuration: time.Hour,
+		SessionStoreURL: "https://session-store.invalid:8443", Signer: signer,
+	})
 	credentials := &fakePortalCredentialSession{cache: "FILE:/run/user/1000/pilot-test/krb5cc"}
 	launched := false
 	withSSHLauncher(t, func(cmd *exec.Cmd) error {
@@ -73,12 +85,12 @@ func TestRunPortalOneShotConnect_RecordingEnabledSkipsPlainPath(t *testing.T) {
 		return nil
 	})
 
-	err := runPortalOneShotConnect(context.Background(), client, credentials, testEmitter(t), t.TempDir()+"/no-such-ssh-config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "gpu-a.example.com")
+	err = runPortalOneShotConnect(context.Background(), client, credentials, testEmitter(t), t.TempDir()+"/no-such-ssh-config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "gpu-a.example.com")
 	if err == nil {
 		t.Fatalf("expected an error — Phase A pre-auth against a nonexistent ssh config/target cannot succeed in this unit test")
 	}
 	if launched {
-		t.Fatalf("sshLauncher (the plain, unrecorded path) was invoked despite RecordingPolicy.Mode=terminal_io — the fork point did not divert to the recorded path")
+		t.Fatalf("sshLauncher (the plain, unrecorded path) was invoked despite an effective terminal_io mode — the fork point did not divert to the recorded path")
 	}
 }
 

@@ -20,7 +20,9 @@ regressionTests:
   - cmd/pilot/cmd/portal_tui_test.go
   - cmd/pilot/cmd/portal_ssh_test.go
   - cmd/pilot/cmd/portal_ssh_config_sync_test.go
-  - cmd/pilot-access-gateway/config_test.go
+  - internal/gatewayconfig/config_test.go
+  - internal/gatewayapi/recording_policy_test.go
+  - internal/ingesttoken/ingesttoken_test.go
 dependencies:
   - {component: freeipa-client, required: true, relation: sameHosts}
 conflicts: []
@@ -39,6 +41,17 @@ groupVars:
   - {name: pilot_access_gateway_install_forcecommand, type: boolean, required: false, default: true, secret: false}
   - {name: pilot_access_gateway_portal_automember, type: boolean, required: false, default: true, secret: false}
   - {name: pilot_access_gateway_portal_automember_exclude_users, type: stringList, required: false, default: [admin], secret: false}
+  # SSH session recording (docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md §14/§27).
+  # pilot_session_recording_mode has no default: unset means the built-in metadata (no terminal recording).
+  - {name: pilot_session_recording_mode, type: string, required: false, secret: false}
+  - {name: pilot_session_recording_failure_policy, type: string, required: false, default: fail_closed, secret: false}
+  - {name: pilot_session_recording_queue_events, type: integer, required: false, default: 1024, secret: false}
+  - {name: pilot_session_recording_flush_interval, type: string, required: false, default: 500ms, secret: false}
+  - {name: pilot_session_recording_failure_grace, type: string, required: false, default: 10s, secret: false}
+  - {name: pilot_session_recording_max_session_duration, type: string, required: false, default: 24h, secret: false}
+  - {name: pilot_session_store_url, type: string, required: false, secret: false}
+  - {name: pilot_session_store_ca_file, type: string, required: false, default: /etc/ipa/ca.crt, secret: false}
+  - {name: pilot_session_store_ingest_signing_key, type: string, required: false, secret: true}
 endpoints:
   - name: gateway-socket
     scheme: unix
@@ -58,15 +71,25 @@ traceability:
     "docs/verification/pilot-access-gateway.md#AG32": {tags: [AG32], reason: "root-owned Portal SSH config enforces GSSAPI-only target authentication with no credential delegation or fallback"}
     "docs/verification/pilot-access-gateway.md#AG33": {tags: [AG33], reason: "Kerberos client package tasks install kinit, klist, and kdestroy for session-scoped Portal credentials"}
     "docs/verification/pilot-access-gateway.md#AG34": {tags: [AG34], reason: "Step 14 install-pilot-session task now execs pilot portal-session instead of pilot portal"}
+    "docs/verification/pilot-access-gateway.md#AG41": {tags: [AG41], reason: "Step 11 renders the recording block from the pilot_session_recording_*/pilot_session_store_* vars"}
+    "docs/verification/pilot-access-gateway.md#AG42": {tags: [AG42], reason: "signing key install (store configured) / removal (no store) tasks"}
+    "docs/verification/pilot-access-gateway.md#AG43": {tags: [AG43], reason: "task removing the former static session-store bearer token file"}
   exemptions:
     "docs/verification/pilot-access-gateway.md#AG19": {kind: structural-absence, tags: [], reason: "no task in this playbook ever writes under /var/lib/pilot — absence is structural, not produced by a specific task"}
     "docs/verification/pilot-access-gateway.md#AG30": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task"}
     "docs/verification/pilot-access-gateway.md#AG35": {kind: unit-test-evidence, tags: [], reason: "valid pilot-connect grammar parsing is loader-logic proven by TestParsePortalSSHOriginalCommand_ValidConnect, not a live host property"}
     "docs/verification/pilot-access-gateway.md#AG36": {kind: unit-test-evidence, tags: [], reason: "malformed/malicious command rejection is proven by TestParsePortalSSHOriginalCommand_Rejects"}
-    "docs/verification/pilot-access-gateway.md#AG37": {kind: unit-test-evidence, tags: [], reason: "session_id never reaching the authorize decision is an architectural property proven by TestRunPortalOneShotConnect_Allowed/_Denied"}
+    "docs/verification/pilot-access-gateway.md#AG37": {kind: unit-test-evidence, tags: [], reason: "session_id never changing the HBAC/scope decision (it is only bound into a recorded session's ingest token) is proven by TestRunPortalOneShotConnect_Allowed/_Denied and TestConnectAuthorize_SessionIDOnlyBindsToken"}
     "docs/verification/pilot-access-gateway.md#AG38": {kind: unit-test-evidence, tags: [], reason: "one-shot connect always re-authorizing fresh is proven by TestRunPortalOneShotConnect_Denied"}
     "docs/verification/pilot-access-gateway.md#AG39": {kind: unit-test-evidence, tags: [], reason: "wrong-scope deny on the one-shot path reuses the same handleConnectAuthorize as the interactive path"}
     "docs/verification/pilot-access-gateway.md#AG40": {kind: unit-test-evidence, tags: [], reason: "ssh child exit code propagation is proven by TestRunPortalOneShotConnect_PropagatesSSHExitCode"}
+    "docs/verification/pilot-access-gateway.md#AG44": {kind: unit-test-evidence, tags: [], reason: "recording precedence is the pure resolver's TestResolveRecordingMode"}
+    "docs/verification/pilot-access-gateway.md#AG45": {kind: unit-test-evidence, tags: [], reason: "unknown/invalid/reserved policy denial is TestConnectAuthorize_RecordingPolicyDenies"}
+    "docs/verification/pilot-access-gateway.md#AG46": {kind: unit-test-evidence, tags: [], reason: "terminal mode without a store is TestConnectAuthorize_TerminalWithoutStoreDenied"}
+    "docs/verification/pilot-access-gateway.md#AG47": {kind: unit-test-evidence, tags: [], reason: "metadata responses carrying no store coordinates or token is TestConnectAuthorize_MetadataCarriesNoIngestCredential"}
+    "docs/verification/pilot-access-gateway.md#AG48": {kind: unit-test-evidence, tags: [], reason: "token claims binding and per-mint jti is TestConnectAuthorize_MintsBoundIngestToken"}
+    "docs/verification/pilot-access-gateway.md#AG49": {kind: unit-test-evidence, tags: [], reason: "fresh policy on every authorize is TestConnectAuthorize_FreshPolicyEachRequest"}
+    "docs/verification/pilot-access-gateway.md#AG56": {kind: unit-test-evidence, tags: [], reason: "per-host userclass-unreadable denial (Phase 0 branch R) is TestConnectAuthorize_UserClassUnreadableDenies"}
 verification: {autoDeploy: false}
 # 2026-09-15 起 site.include:true(不再是 optIn/single-component-only)——
 # 使用者明確決定「把 pilot-access-gateway 加進 hosts.yml 的 roles 清單」本身

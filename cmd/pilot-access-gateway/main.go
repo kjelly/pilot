@@ -17,6 +17,8 @@ import (
 	"github.com/kjelly/pilot/internal/accessportal"
 	"github.com/kjelly/pilot/internal/freeipaaccess"
 	"github.com/kjelly/pilot/internal/gatewayapi"
+	"github.com/kjelly/pilot/internal/gatewayconfig"
+	"github.com/kjelly/pilot/internal/ingesttoken"
 	"github.com/kjelly/pilot/internal/systemdactivation"
 	"github.com/spf13/cobra"
 )
@@ -70,7 +72,7 @@ func newServeCmd() *cobra.Command {
 func runServe(ctx context.Context, configPath string, systemdSocket bool) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
-	cfg, err := LoadConfig(configPath)
+	cfg, err := gatewayconfig.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -80,7 +82,7 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 		CAFile:           cfg.Gateway.FreeIPA.CAFile,
 		ServicePrincipal: cfg.Gateway.FreeIPA.ServicePrincipal,
 		KeytabPath:       cfg.Gateway.FreeIPA.Keytab,
-		RequestTimeout:   cfg.requestTimeout(),
+		RequestTimeout:   cfg.RequestTimeout(),
 	}
 	provider, err := freeipaaccess.NewClient(providerCfg)
 	if err != nil {
@@ -96,19 +98,26 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 	srv := gatewayapi.NewServer(gw, provider, resolver, logger)
 	srv.PortalUserGroup = cfg.Gateway.PortalUserGroup
 	srv.RecordingPolicy = gatewayapi.RecordingPolicy{
-		Mode:            cfg.recordingMode(),
-		FailurePolicy:   cfg.recordingFailurePolicy(),
-		QueueEvents:     cfg.recordingQueueEvents(),
-		FlushIntervalMS: cfg.recordingFlushInterval().Milliseconds(),
+		DefaultMode:        cfg.RecordingDefaultModeRaw(),
+		FailurePolicy:      cfg.RecordingFailurePolicy(),
+		QueueEvents:        cfg.RecordingQueueEvents(),
+		FlushIntervalMS:    cfg.RecordingFlushInterval().Milliseconds(),
+		FailureGraceMS:     cfg.RecordingFailureGrace().Milliseconds(),
+		MaxSessionDuration: cfg.RecordingMaxSessionDuration(),
 	}
-	if url := cfg.sessionStoreURL(); url != "" {
-		token, err := loadSessionStoreIngestToken(cfg.Gateway.Recording.SessionStoreIngestTokenFile)
+	if url := cfg.Gateway.Recording.SessionStoreURL; url != "" {
+		key, err := cfg.RecordingSigningKey()
 		if err != nil {
-			return fmt.Errorf("load session-store ingest token: %w", err)
+			return fmt.Errorf("load session-store ingest signing key: %w", err)
+		}
+		signer, err := ingesttoken.NewSigner(key, nil)
+		if err != nil {
+			return fmt.Errorf("session-store ingest signing key: %w", err)
 		}
 		srv.RecordingPolicy.SessionStoreURL = url
-		srv.RecordingPolicy.SessionStoreCAFile = cfg.sessionStoreCAFile()
-		srv.RecordingPolicy.SessionStoreIngestToken = token
+		srv.RecordingPolicy.SessionStoreCAFile = cfg.Gateway.Recording.SessionStoreCAFile
+		srv.RecordingPolicy.Signer = signer
+		logger.Info("recording session store configured", "url", url, "kid", ingesttoken.KeyID(key))
 	}
 
 	ln, err := listener(cfg, systemdSocket)
@@ -125,12 +134,12 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 
 	logger.Info("pilot-access-gateway serving",
 		"gateway_id", gw.ID, "gateway_scope", gw.Scope, "target_hostgroup", gw.TargetHostgroup,
-		"socket", cfg.socketPath(), "systemd_socket", systemdSocket)
+		"socket", cfg.SocketPath(), "systemd_socket", systemdSocket)
 
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.requestTimeout())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout())
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
@@ -139,14 +148,14 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 }
 
 // listener builds either the systemd-activated listener (fd 3) or a plain
-// Unix socket bind at cfg.socketPath(), removing a stale socket file left
+// Unix socket bind at cfg.SocketPath(), removing a stale socket file left
 // behind by an unclean previous shutdown first — spec.md §29: each
 // gateway host owns its own local socket, never shared.
-func listener(cfg Config, systemdSocket bool) (net.Listener, error) {
+func listener(cfg gatewayconfig.Config, systemdSocket bool) (net.Listener, error) {
 	if systemdSocket {
 		return systemdactivation.Listener()
 	}
-	path := cfg.socketPath()
+	path := cfg.SocketPath()
 	if _, err := os.Stat(path); err == nil {
 		if err := os.Remove(path); err != nil {
 			return nil, fmt.Errorf("remove stale socket %s: %w", path, err)

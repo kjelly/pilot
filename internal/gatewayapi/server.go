@@ -8,9 +8,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/kjelly/pilot/internal/accessportal"
 	"github.com/kjelly/pilot/internal/freeipaaccess"
+	"github.com/kjelly/pilot/internal/ingesttoken"
 )
 
 // Server is pilot-access-gateway's API surface for exactly one gateway
@@ -48,28 +50,26 @@ type Server struct {
 	httpServer *http.Server
 }
 
-// RecordingPolicy mirrors cmd/pilot-access-gateway/config.go's recording
-// fields — kept as a small value type here (not the config package's own
-// type, which internal/gatewayapi must not depend on) so a test can set
-// it directly without needing a whole Config/LoadConfig round trip.
+// RecordingPolicy is this gateway's recording configuration (per-host
+// recording spec §14) as a small value type — internal/gatewayapi does not
+// depend on internal/gatewayconfig, so a test can set it directly.
 //
-// SessionStore* (docs/tmp/now/spec.md §28, Phase 8) are populated only
-// when this gateway is configured to ship recordings to
-// pilot-session-store; a Gateway using local-file recording (or
-// "metadata" mode, which never records terminal content at all) leaves
-// them empty. SessionStoreIngestToken is read once from
-// cmd/pilot-access-gateway/config.go's session_store_ingest_token_file
-// (never a CLI argument, never logged, matching spec.md §28.2) and held
-// only in memory — this Server never writes it to disk.
+// DefaultMode is the RAW configured recording.mode ("" = unset, built-in
+// metadata); the effective mode is resolved per connect from it and the
+// target host's FreeIPA policy. Signer mints the per-session ingest tokens
+// (PIT1) handed to recorded sessions; it is nil when no session store is
+// configured, and the signing key never leaves this process.
 type RecordingPolicy struct {
-	Mode            string
-	FailurePolicy   string
-	QueueEvents     int
-	FlushIntervalMS int64
+	DefaultMode        string
+	FailurePolicy      string
+	QueueEvents        int
+	FlushIntervalMS    int64
+	FailureGraceMS     int64
+	MaxSessionDuration time.Duration
 
-	SessionStoreURL         string
-	SessionStoreCAFile      string
-	SessionStoreIngestToken string
+	SessionStoreURL    string
+	SessionStoreCAFile string
+	Signer             *ingesttoken.Signer
 }
 
 // NewServer builds a Server bound to one gateway's config, provider, and

@@ -95,7 +95,7 @@ effective mode       host override > gateway recording.mode > built-in metadata
 | F4 | `session_store_url` 空白時退回 local FileSink（未加密、使用者自己擁有的檔案） | `portal_session_connect.go:177-179, 274-281` |
 | F5 | Gateway playbook Step 11 整份覆寫 `/etc/pilot/access-gateway.yaml`，其中沒有 `recording:`；contract 也沒有 recording groupVars | `playbooks/apply/pilot-access-gateway-apply.yml:741-765`、`contracts/pilot-access-gateway.yaml` |
 | F6 | authorize 成功時一律回傳 store URL/CA/ingest token，包含 metadata mode | `internal/gatewayapi/routes.go:115-123` |
-| F7 | `fail_closed` 以「距離上次成功寫入」判斷持續失敗，並把 `flush_interval`（預設 500ms）當 grace。**健康但 500ms 無終端流量的 session 會被砍** | `internal/sessionrecording/recorder.go:305-341`、`cmd/pilot-access-gateway/config.go:107` |
+| F7 | `fail_closed` 以「距離上次成功寫入」判斷持續失敗，並把 `flush_interval`（預設 500ms）當 grace。**健康但 500ms 無終端流量的 session 會被砍** | `internal/sessionrecording/recorder.go:305-341`、baseline `cmd/pilot-access-gateway` 的 `config.go:107`（現為 `internal/gatewayconfig/config.go`） |
 | F8 | `runWriter` 以 defer 呼叫 `sink.Close()`，而 HTTPSink `Close()` 固定送 `complete: true`，fail closed 後也一樣 | `recorder.go:307`、`httpsink.go:136-142` |
 | F9 | HTTPSink 一個 event 送一個 request，完全沒有 retry | `httpsink.go:123-125, 144-166` |
 | F10 | finish 不帶 last seq，store 無法偵測尾端遺失 | `internal/sessionstore/store.go:197-221`（`FinishSession`）、`:379-403`（replay 的 completeness 與 `detectGaps`） |
@@ -117,7 +117,7 @@ effective mode       host override > gateway recording.mode > built-in metadata
 | F26 | `set_host_field` 的 field 白名單與 enum 驗證在 `validateSetHostField`；driver 以 ScreenID 操作 TUI | `cmd/pilot/cmd/edit_actions_registry.go:55-70, 2176-2210`、`edit_automation_driver.go:207-216` |
 | F27 | verification 最後一列：`pilot-access-gateway.md` 為 AG40、`pilot-session-store.md` 為 SS18、`pilot-access-directory.md` 為 AD30、`freeipa-client.md` 為 C12 | — |
 | F28 | recorder 的 input relay 對 outer stdin 做 blocking read，`Run` 回傳後該 goroutine 可能仍在讀；one-shot process 會結束所以無害，但互動 TUI 會繼續執行 | `recorder.go:117-154` |
-| F29 | `Config.recordingMode()` 在未設定時直接替換成 `metadata`，resolver 無法分辨 built-in default 與明確設定 | `cmd/pilot-access-gateway/config.go:177-182` |
+| F29 | `Config.recordingMode()` 在未設定時直接替換成 `metadata`，resolver 無法分辨 built-in default 與明確設定 | baseline `cmd/pilot-access-gateway` 的 `config.go:177-182`（現為 `internal/gatewayconfig/config.go`） |
 | F30 | site order：gateway 52、directory 53、session store 55（store 在 gateway 之後） | `contracts/*.yaml` `site:`、`playbooks/site.yml:141-156` |
 | F31 | gateway socket 為 `0660`、group = portal user group；portal group 成員被 sshd `Match Group … ForceCommand` 鎖在 `pilot-session`，無法執行任意 CLI | gateway playbook `:925-938, 1068-1082` |
 | F32 | `internal/spec/pilot_access_gateway_regression_test.go:19` 鎖住完整的 AG ID 清單；`cmd/pilot/cmd/tag_coverage_test.go:148-180` 有 gateway／directory／store 的 row 豁免表（SS03 的理由提到 bearer token） | — |
@@ -441,7 +441,7 @@ func ResolveRecordingMode(gatewayDefault string, host accessportal.SSHRecordingA
 - 純函式，不做 I/O。gateway default 的合法性仍由 config loader 負責。
 - 呼叫端必須傳入 config 的**原始值**（未設定時為 `""`），不得傳入 `Config.recordingMode()` 替換過的值（F29）。`RecordingPolicy` 新增 `DefaultMode string`（原始值）；既有的 `Mode` 欄位改名或移除，避免誤用。
 
-## 14. Gateway config（`cmd/pilot-access-gateway/config.go`）
+## 14. Gateway config（`internal/gatewayconfig/config.go`）
 
 ```yaml
 gateway:
@@ -918,7 +918,7 @@ DELIVERY.md 在 §1.6（`deployment_availability`）之後新增一節，說明 
 
 ### 27.3 Contracts
 
-- `contracts/pilot-access-gateway.yaml`：groupVars 新增上述 `pilot_session_recording_*`（`pilot_session_recording_mode` 為 required: false、無 default）、`pilot_session_store_url`、`pilot_session_store_ca_file`、`pilot_session_store_ingest_signing_key`（secret, required: false）；regressionTests 新增 §34 的 test 檔，並把 `cmd/pilot-access-gateway/config_test.go` 改成 `internal/gatewayconfig/config_test.go`；traceability 對應 §33 的新 row。
+- `contracts/pilot-access-gateway.yaml`：groupVars 新增上述 `pilot_session_recording_*`（`pilot_session_recording_mode` 為 required: false、無 default）、`pilot_session_store_url`、`pilot_session_store_ca_file`、`pilot_session_store_ingest_signing_key`（secret, required: false）；regressionTests 新增 §34 的 test 檔，並把原本 gateway main package 內的 config 測試改列 `internal/gatewayconfig/config_test.go`；traceability 對應 §33 的新 row。
 - `contracts/pilot-session-store.yaml`：`pilot_session_store_ingest_token` 換成 `pilot_session_store_ingest_signing_key`；regressionTests 新增 `internal/ingesttoken/ingesttoken_test.go` 等；traceability 對應 §33。
 - `contracts/freeipa-client.yaml`：regressionTests 新增 `internal/spec/freeipa_host_access_policy_regression_test.go`。
 - `contracts/pilot-access-directory.yaml`：traceability 新增 AD31 的 unit-test-evidence exemption（regressionTests 已涵蓋 `resolver_test.go`、`directory_tui_test.go`）。
@@ -958,7 +958,7 @@ sudo pilot access recording show <host-fqdn> [--format text|json] [--config /etc
 依 D-E，由 gateway host 上的 root 執行（F31：portal user 被 ForceCommand 鎖住，admin／root 又不在 socket 的 group 內，所以不經過 gateway socket）：
 
 - 非 root（`os.Geteuid() != 0`）→ 錯誤 `must run as root on a pilot-access-gateway host`，exit 2。
-- config loader（`Config`、`LoadConfig`、驗證）從 `cmd/pilot-access-gateway/config.go` 搬到新 package `internal/gatewayconfig`，gateway daemon 與這個 CLI 共用同一份（`cmd/` 下的 main package 無法被 import，也**不得**複製一份 parser）。`cmd/pilot-access-gateway/config_test.go` 隨之搬移。CLI 從中取得原始 `recording.mode`、FreeIPA servers、keytab、service principal。
+- config loader（`Config`、`LoadConfig`、驗證）從 gateway daemon 的 main package 搬到新 package `internal/gatewayconfig`，gateway daemon 與這個 CLI 共用同一份（`cmd/` 下的 main package 無法被 import，也**不得**複製一份 parser）。原本的 config 測試隨之搬移。CLI 從中取得原始 `recording.mode`、FreeIPA servers、keytab、service principal。
 - 以同一個 `freeipaaccess` client 與 keytab 對該 host 呼叫 `host_show`（分支 R 帶 rights；分支 N 同時檢查 gateway 自己 host 的 canary），再用 `ResolveRecordingMode` 算出 effective mode 與 source。
 - **不做** HBAC 判斷，只回報 recording policy。host 不存在於 FreeIPA → `host not found in FreeIPA`，exit 1。
 - 唯讀，不讀 hosts.yml，不寫任何東西。程式位置：`cmd/pilot/cmd/access_recording_cli.go`。

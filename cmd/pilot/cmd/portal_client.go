@@ -101,8 +101,11 @@ func (c *portalClient) Access(ctx context.Context) (gatewayapi.AccessResponse, e
 // ConnectAuthorize is POST /v1/connect/authorize — a fresh, full
 // re-authorize (spec.md §16), never derived from a cached My Hosts
 // snapshot. Used by Phase 5's controlled-SSH Connect action.
-func (c *portalClient) ConnectAuthorize(ctx context.Context, target string) (gatewayapi.ConnectAuthorizeResponse, error) {
+// ConnectAuthorize asks the gateway for a fresh connect decision. sessionID
+// is bound into the per-session ingest token when the target records; it
+// never affects the HBAC/scope decision (per-host recording spec §15).
+func (c *portalClient) ConnectAuthorize(ctx context.Context, target, sessionID string) (gatewayapi.ConnectAuthorizeResponse, error) {
 	var resp gatewayapi.ConnectAuthorizeResponse
-	err := c.postJSON(ctx, "/v1/connect/authorize", gatewayapi.ConnectAuthorizeRequest{Target: target}, &resp)
+	err := c.postJSON(ctx, "/v1/connect/authorize", gatewayapi.ConnectAuthorizeRequest{Target: target, SessionID: sessionID}, &resp)
 	return resp, err
 }

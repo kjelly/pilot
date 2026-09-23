@@ -26,6 +26,9 @@ type AccessResponse struct {
 	Gateway     GatewayInfo `json:"gateway"`
 	GeneratedAt time.Time   `json:"generated_at"`
 	Hosts       []HostJSON  `json:"hosts"`
+	// RecordingDefault is this gateway's effective default recording mode
+	// (metadata when unset); per-host recording spec §17.
+	RecordingDefault string `json:"recording_default"`
 }
 
 // HostJSON is one host entry in AccessResponse / the GET /v1/access/{fqdn} response.
@@ -34,6 +37,17 @@ type HostJSON struct {
 	SSH         SSHJSON           `json:"ssh"`
 	Sudo        SudoJSON          `json:"sudo"`
 	Annotations map[string]string `json:"annotations,omitempty"`
+	Recording   RecordingJSON     `json:"recording"`
+}
+
+// RecordingJSON is a host's non-secret recording summary (per-host
+// recording spec §17). Status is the host's own policy (inherit | off |
+// terminal_output | unknown | invalid); Effective is the mode a connect
+// would use now (metadata | terminal_output | terminal_io), empty when the
+// policy is unknown or invalid. Portal renders it; it never recomputes it.
+type RecordingJSON struct {
+	Status    string `json:"status"`
+	Effective string `json:"effective,omitempty"`
 }
 
 type SSHJSON struct {
@@ -54,6 +68,10 @@ type SudoJSON struct {
 // client might try to smuggle in, rather than merely not reading them.
 type ConnectAuthorizeRequest struct {
 	Target string `json:"target"`
+	// SessionID is bound into the per-session ingest token when the
+	// effective mode records (per-host recording spec §15). It never
+	// influences the HBAC/scope decision.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // ConnectAuthorizeResponse is POST /v1/connect/authorize's response.
@@ -74,10 +92,16 @@ type ConnectAuthorizeResponse struct {
 	CheckedAt    time.Time `json:"checked_at"`
 	Rules        []string  `json:"rules"`
 
+	// DenyReason is set only for recording-related denials (per-host
+	// recording spec §15.2); HBAC/scope denials leave it empty.
+	DenyReason string `json:"deny_reason,omitempty"`
+
 	RecordingMode            string `json:"recording_mode,omitempty"`
+	RecordingPolicySource    string `json:"recording_policy_source,omitempty"`
 	RecordingFailurePolicy   string `json:"recording_failure_policy,omitempty"`
 	RecordingQueueEvents     int    `json:"recording_queue_events,omitempty"`
 	RecordingFlushIntervalMS int64  `json:"recording_flush_interval_ms,omitempty"`
+	RecordingFailureGraceMS  int64  `json:"recording_failure_grace_ms,omitempty"`
 
 	// RecordingSessionStore* (docs/tmp/now/spec.md §28, Phase 8) tell the
 	// connecting client's own pilot portal-session process where — and
@@ -92,8 +116,11 @@ type ConnectAuthorizeResponse struct {
 	// only in the calling process's memory — never written to disk,
 	// never passed as a CLI argument, matching spec.md §28.2's
 	// prohibition on that specifically.
-	RecordingSessionStoreURL         string `json:"recording_session_store_url,omitempty"`
-	RecordingSessionStoreCAFile      string `json:"recording_session_store_ca_file,omitempty"`
+	RecordingSessionStoreURL    string `json:"recording_session_store_url,omitempty"`
+	RecordingSessionStoreCAFile string `json:"recording_session_store_ca_file,omitempty"`
+	// RecordingSessionStoreIngestToken is the per-session PIT1 token minted
+	// for exactly this session (per-host recording spec §16); only terminal
+	// modes ever carry it.
 	RecordingSessionStoreIngestToken string `json:"recording_session_store_ingest_token,omitempty"`
 }
 

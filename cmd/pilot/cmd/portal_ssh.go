@@ -114,7 +114,11 @@ var sshLauncher = func(cmd *exec.Cmd) error { return cmd.Run() }
 // suspend/resume machinery is needed, and adding tea.ExecProcess would
 // only reintroduce complexity this architecture doesn't have a use for.
 func connectToHost(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath, username, fqdn string) error {
-	authz, err := client.ConnectAuthorize(ctx, fqdn)
+	// No session id yet: until the interactive path records (per-host
+	// recording spec §18), the gateway refuses any target whose effective
+	// mode records (recording_session_id_invalid) rather than letting this
+	// plain path connect unrecorded.
+	authz, err := client.ConnectAuthorize(ctx, fqdn, "")
 	if err != nil {
 		runConfirmPrompt("", fmt.Sprintf("Connect failed.\n\n%v", err), true)
 		return nil

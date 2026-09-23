@@ -80,6 +80,7 @@ type recordingConfig struct {
 	FailurePolicy string
 	QueueEvents   int
 	FlushInterval time.Duration
+	FailureGrace  time.Duration
 	// LocalPath is where a FileSink writes when Mode is terminal_output/
 	// terminal_io AND SessionStoreURL is empty — a deliberately plain,
 	// unencrypted, transient stopgap (D9: "bounded transient buffers /
@@ -154,7 +155,7 @@ func runPortalOneShotConnect(ctx context.Context, client *portalClient, credenti
 		return fmt.Errorf("pilot-session: resolve identity: %w", err)
 	}
 
-	authz, err := client.ConnectAuthorize(ctx, target)
+	authz, err := client.ConnectAuthorize(ctx, target, sessionID)
 	if err != nil {
 		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindGatewayAuthorizeDenied, User: identity.Username, TargetFQDN: target, Result: "authorize call failed: " + err.Error()})
 		return fmt.Errorf("pilot-session: connect authorize failed: %w", err)
@@ -170,6 +171,7 @@ func runPortalOneShotConnect(ctx context.Context, client *portalClient, credenti
 		FailurePolicy:           authz.RecordingFailurePolicy,
 		QueueEvents:             authz.RecordingQueueEvents,
 		FlushInterval:           time.Duration(authz.RecordingFlushIntervalMS) * time.Millisecond,
+		FailureGrace:            time.Duration(authz.RecordingFailureGraceMS) * time.Millisecond,
 		SessionStoreURL:         authz.RecordingSessionStoreURL,
 		SessionStoreCAFile:      authz.RecordingSessionStoreCAFile,
 		SessionStoreIngestToken: authz.RecordingSessionStoreIngestToken,
@@ -284,7 +286,7 @@ func runPortalOneShotConnectRecorded(ctx context.Context, sshConfigPath, session
 
 	rec := sessionrecording.New(sessionrecording.Options{
 		Mode: recording.Mode, SessionID: sessionID, FailurePolicy: recording.FailurePolicy,
-		QueueEvents: recording.QueueEvents, FlushInterval: recording.FlushInterval,
+		QueueEvents: recording.QueueEvents, FlushInterval: recording.FlushInterval, FailureGrace: recording.FailureGrace,
 		Identity: sessionrecording.AuditIdentity{User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope},
 	}, sink, emitter)
 	runErr := rec.Run(ctx, ptmx, recordingStdin, recordingStdout)

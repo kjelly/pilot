@@ -146,7 +146,7 @@ func TestPortalClientConnectAuthorize(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	allowed, err := client.ConnectAuthorize(ctx, "gpu-a.example.com")
+	allowed, err := client.ConnectAuthorize(ctx, "gpu-a.example.com", "")
 	if err != nil {
 		t.Fatalf("ConnectAuthorize: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestPortalClientConnectAuthorize(t *testing.T) {
 		t.Fatalf("ConnectAuthorize = %+v, want allowed", allowed)
 	}
 
-	denied, err := client.ConnectAuthorize(ctx, "not-in-scope.example.com")
+	denied, err := client.ConnectAuthorize(ctx, "not-in-scope.example.com", "")
 	if err != nil {
 		t.Fatalf("ConnectAuthorize: %v", err)
 	}

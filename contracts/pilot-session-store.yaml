@@ -87,4 +87,4 @@ verification: {autoDeploy: false}
 # 硬性相依。site.include:true(跟 Gateway/Directory 同一個治理慣例):把這
 # 個 role 加進某台主機 hosts.yml 的清單本身就是操作者的核准動作,之後每次
 # 全站部署都會照常套用。
-site: {include: true, order: 55, vars: {}, tags: [pilot-session-store], optIn: false}
+site: {include: true, order: 51, vars: {}, tags: [pilot-session-store], optIn: false}
