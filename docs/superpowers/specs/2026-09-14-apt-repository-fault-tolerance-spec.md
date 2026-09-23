@@ -21,6 +21,10 @@ Phase 1-5 已依 §16 Migration Plan 全數實作完成，分 5 個 commit：
    `playbooks/apply/os-patch-sla-apply.yml` 一筆合法例外）；兩者都在既有
    `.github/workflows/ci.yml` 的 `go test -race -count=1 ./...` 步驟下自動跑，未額外新增 CI job。
 6. **`fix(apt): fix 4 bugs found via live vm-target testing`** — 2026-09-14 補測，見下方。
+7. **`fix(apt)` 2026-09-23（`ad6d552`、`5b735ee`）**：`ad6d552` 補上 cached candidate
+   的 `.deb` 404 → refresh 路徑。`5b735ee` 讓每個 apt-get 網路步驟都有 wall clock，
+   並且 stale 路徑必須等到 refresh 健康、且 re-probe 不再 404，才採信 candidate
+   （§21.1 T11/T12）。實跑見 `docs/evidence/apt-repository-tolerance/2026-09-23-5b735ee.md`。
 
 **驗證完成度**：
 - `ansible-playbook --syntax-check` / `ansible-lint`（advisory）/ `go build ./...` /

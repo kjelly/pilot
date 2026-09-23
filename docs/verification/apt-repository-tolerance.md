@@ -182,6 +182,21 @@ unknown `NO_PUBKEY`.
   run was `apt_mode=already_present` (`changed=0`); and on the now-fresh
   index a not-yet-installed package ran `apt_mode=cache_hit
   stale_metadata=False` with no `apt-get update`.
+- T11/T12 and C5 (2026-09-23, candidate `5b735ee`): live on a disposable
+  vm-target whose lists were stale, using a local test proxy.
+  - Index requests that never answer: both refreshes were ended by the wall
+    clock (`rc=124`, `type=refresh_timeout`) →
+    `FATAL reason=stale_metadata_unrecovered` in 46 s, nothing installed.
+    The pre-fix code ran 726 s and then installed into the same 404s.
+  - Index requests that get 503: `apt-get update` exits 0, and the
+    classifier sees no error. The re-probes still hit 404 →
+    `FATAL reason=stale_metadata_unrecovered`. The pre-fix code installed
+    straight into the 404s.
+  - A download that never answers: `FATAL reason=apt_download_timeout
+    stage=cache_hit`.
+  - The real mirror: `global_refresh stale_metadata=True` → install, then
+    `already_present` (`changed=0`).
+  Evidence: [`docs/evidence/apt-repository-tolerance/2026-09-23-5b735ee.md`](../evidence/apt-repository-tolerance/2026-09-23-5b735ee.md).
 - `docs/verification/freeipa-client.md` C1/C8 already cover the
   functional "does freeipa-client / sssd-tools install successfully"
   behavior on a healthy host; this spec only adds the fault-tolerance
