@@ -1,6 +1,6 @@
 # Pilot Access Gateway — Captive SSH Transport Broker 實作規格
 
-- **狀態**：READY FOR IMPLEMENTATION（rev 2）
+- **狀態**：READY FOR IMPLEMENTATION（rev 3）
 - **日期**：2026-09-23
 - **Repository**：`kjelly/pilot`
 - **Baseline**：`main@c0890f66479c2aed189fd216ddeec87f72bb7306`（rev 1 的 `99a3a86` 之後只有 lint 修正，§3 事實已對 `c0890f6` 重新核對）
@@ -104,6 +104,8 @@ rsync -av ./src/ gpu01.example.internal:/workspace/
 | F17 | Lockout script 已涵蓋：`-tt` 指令注入（process tree）、`RemoteCommand`、`-L`（server 端拒絕）、SFTP subsystem、`sshd -T -C`、`pilot-connect` grammar 拒絕 | `scripts/pilot-access-gateway-lockout-test.sh` |
 | F18 | `rootCmd` 未設 `SilenceUsage`；RunE 失敗時 cobra 會把 usage 印到 stderr | `cmd/pilot/cmd/root.go` |
 | F19 | `golang.org/x/term`、`github.com/google/uuid` 已是 direct dependency；`golang.org/x/crypto` 為 indirect v0.6.0 | `go.mod` |
+| F20 | （Phase 0 實測）sshd 以 login shell 執行 ForceCommand；FreeIPA 使用者預設 `/bin/sh`（dash）不會把 `sh -c` exec 掉，所以 session 的行程樹是 `sshd → sh -c /usr/local/libexec/pilot-session → pilot portal-session` | `docs/evidence/pilot-access-gateway/2026-09-23-ad6d552.md` §1 |
+| F21 | （Phase 0 實測）Gateway service principal 以非 raw 的 `host_show(all=true)` 讀得到 `ipasshpubkey`，值是純字串 `"<type> <base64> <comment>"`；不需要額外的 FreeIPA 權限 | 同上 §2；`internal/freeipaaccess/testdata/host_show_ipasshpubkey.json` |
 
 ---
 
@@ -677,21 +679,22 @@ Remote-dev（只列差異）：
 
 | Node | Image | Groups | Wire |
 |------|-------|--------|------|
-| `ipa` | almalinux-9 | `freeipa-server` | gw、target |
-| `gw` | ubuntu-24.04 | `freeipa-client`、`pilot-access-gateway` | ipa、target |
-| `target` | ubuntu-24.04 | `freeipa-client`、`pilot-access-target-policy` | ipa、gw |
-| `ws` | ubuntu-24.04 | （無：**不** enroll FreeIPA） | 只有 gw |
+| `tx-ipa` | almalinux-9 | `freeipa-server` | tx-gw、tx-target |
+| `tx-gw` | ubuntu-24.04 | `freeipa-client`、`pilot-access-gateway` | tx-ipa、tx-target |
+| `tx-target` | ubuntu-24.04 | `freeipa-client`、`pilot-access-target-policy` | tx-ipa、tx-gw |
+| `tx-ws` | ubuntu-24.04 | `pilot-transport-workstation`（測試專用 group；**不** enroll FreeIPA） | 只有 tx-gw |
 
 `ws` 只知道 Gateway 的名稱，證明 workstation 不需要 FreeIPA，也不需要 target 的 DNS/route。記憶體大小比照 `docs/topologies/minimal-poc-topology.yaml` 的節點設定。
 
-### 15.2 Fixtures：`playbooks/test/fixtures/pilot-access-transport-fixtures.yml`
+### 15.2 Fixtures
 
-冪等（重跑 `changed=0`）；敏感 task 加 `no_log`；使用者建立一律 `import_playbook: freeipa-client-fixtures.yml`（`ipa_fixture_manage_sudorule: false`，AGENTS.md §4.1）。內容：
+冪等（重跑 `changed=0`）；敏感 task 加 `no_log`；使用者建立一律 `import_playbook: freeipa-client-fixtures.yml`（`ipa_fixture_manage_sudorule: false`，AGENTS.md §4.1）。分成兩份：
 
-1. 建立 FreeIPA 使用者 `transportuser`（canonical fixture）。
-2. `ws`：為本機使用者 `wsuser` 產生 ed25519 key（已存在就跳過）；讀出 public key。
-3. `ipa`：`ipa user-mod transportuser --sshpubkey=<pub>`（先比對再修改，維持冪等）；HBAC rule `pilot-transport-e2e`（user=`transportuser`、host=`target`、service=`sshd`）。Gateway 登入沿用 Gateway playbook 建立的 `pilot-access-gateway-login` 與 automember。
-4. `target`：nftables 規則，丟棄來源為 `ws` IP 的 tcp/22（模擬 D11 的站台隔離；不影響 controller 與 gw）。
+- `playbooks/test/fixtures/pilot-access-transport-fixtures.yml`（identity，在 gateway 之前）：
+  1. 建立 FreeIPA 使用者 `transportuser`（canonical fixture）。
+  2. `tx-ws`：為本機使用者 `wsuser` 產生 ed25519 key（已存在就跳過）；讀出 public key。
+  3. `tx-ipa`：`ipa user-mod transportuser --sshpubkey=<pub>`，先以**非 raw** 的 `user-show` 比對再修改以維持冪等（raw 輸出的 `ipaSshPubKey` 是 base64 編碼，比對不到）。HBAC 沿用 FreeIPA 預設的 `allow_all`（本拓樸不停用），transport 目標集合由 gateway scope 收斂；Gateway 登入沿用 Gateway playbook 建立的 `pilot-access-gateway-login` 與 automember。
+- `playbooks/test/fixtures/pilot-access-transport-isolation-fixtures.yml`（在 target policy 之後）：`tx-target` 上以 nftables 丟棄來源為 `tx-ws` IP 的 tcp/22（模擬 D11 的站台隔離；不影響 controller 與 gw）。
 
 ### 15.3 Wrapper playbook：`playbooks/test/pilot-access-transport-e2e.yml`
 
@@ -741,7 +744,7 @@ Remote-dev（只列差異）：
 
 ### Phase 1 — Recording 設定擁有權（§12.2）
 
-- 範圍：playbook 守門與模板、contract/group_vars/deploy_catalog 同步、AG41 [host] 列、regression test 更新；新增 §15.1 的 topology 檔（Phase 1、3、4、5 共用）。
+- 範圍：playbook 守門與模板、contract/group_vars/deploy_catalog 同步、AG41 [host] 列、regression test 更新；新增 §15.1 的 topology 檔、§15.2 的 identity fixture 與 §15.3 的 wrapper playbook（Phase 1、3、4、5 共用；isolation fixture 與 E2E script 在 Phase 5）。
 - Gate：在 §15.1 topology 上 AG41、AG60 通過；既有 AG01–AG40 不退化；gateway `changed=0`。
 
 ### Phase 2 — Go：dispatcher、broker、known-hosts、API、audit、config
@@ -886,3 +889,4 @@ S17 既有 Portal 與 pilot-connect 行為相容。
 |------|------|------|
 | rev 1 | 2026-09-23 | 初稿（DRAFT） |
 | rev 2 | 2026-09-23 | 對 `c0890f6` 核對 baseline 後修訂為可實作版本：新增 `pilot-known-hosts-v1` 與 FreeIPA 權威 host key（取代未定義的 host key 分發）；target policy 改為 `Match Address`，並以 `pilot-transport-ready` hostgroup 由 server 端 gate transport（修正以 group 限制可被繞過、以及 inventory 與 FreeIPA scope 漂移）；新增 Phase 1 修正 recording 設定被 re-apply 覆寫的既有缺陷；安全宣稱改為誠實邊界（stdio 自建通道、inner identity、撤銷時機）；移除 Match 內不合法的 `PermitUserEnvironment`；驗收重新編號為 AG41–AG73 + TP01–TP12，並區分 host/unit/e2e；bridge 改為不會卡住的 half-close 語意；recording 改為 allowlist；補齊新 component 的登記清單與 AGENTS.md 規則；移除 human-owned 工作（網路隔離、GUI smoke、staging/production rollout），改列於 §2.3 |
+| rev 3 | 2026-09-23 | Phase 0 實測結果回寫：新增 F20/F21；拓樸節點改名 `tx-*`；fixture 拆成 identity/isolation 兩份，HBAC 沿用 `allow_all`；topology、identity fixture、wrapper 提前到 Phase 1 提交 |
