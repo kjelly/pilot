@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -447,5 +448,34 @@ func TestIngestAPIEventConflictReturns409(t *testing.T) {
 	conflict.Events = []wireEvent{{SchemaVersion: 1, SessionID: sidA, Seq: 1, Stream: "tty_output", DataBase64: base64.StdEncoding.EncodeToString([]byte("different"))}}
 	if code, _ := h.post(tok, "/v1/sessions/"+sidA+"/events", conflict); code != http.StatusConflict {
 		t.Fatalf("divergent payload for an existing seq = %d, want 409", code)
+	}
+}
+
+// TestIngestAPILogsInternalErrors: a store failure (found live as SQLite
+// "database or disk is full", per-host recording spec L18) answers 500 and
+// logs the cause, since the recorder only sees a retryable error.
+func TestIngestAPILogsInternalErrors(t *testing.T) {
+	h := newIngestHarness(t)
+	c := testClaims(sidA, "alice")
+	tok := h.mint(c)
+	if code, body := h.post(tok, "/v1/sessions/start", startBody(c)); code != http.StatusOK {
+		t.Fatalf("start = %d %s", code, body)
+	}
+	var logs bytes.Buffer
+	v, err := ingesttoken.NewVerifier(ingestTestKey, h.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(newIngestServer(h.store, v, slog.New(slog.NewTextHandler(&logs, nil))).routes())
+	t.Cleanup(srv.Close)
+	h.srv = srv
+	if err := h.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := h.post(tok, "/v1/sessions/"+sidA+"/events", eventsBody(sidA, 1)); code != http.StatusInternalServerError {
+		t.Fatalf("events on a failing store = %d, want 500", code)
+	}
+	if !strings.Contains(logs.String(), "ingest request failed") || strings.Contains(logs.String(), tok) {
+		t.Fatalf("log = %q, want the failure logged without the token", logs.String())
 	}
 }

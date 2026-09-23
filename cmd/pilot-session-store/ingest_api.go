@@ -75,6 +75,14 @@ func (s *ingestServer) authenticated(next claimsHandler) http.HandlerFunc {
 	}
 }
 
+// internalError answers 500 and logs why (e.g. SQLite "database or disk is
+// full"): the recorder only sees a retryable failure, so this log line is
+// where an operator finds the cause. Never logs a token or payload.
+func (s *ingestServer) internalError(w http.ResponseWriter, r *http.Request, err error) {
+	s.logger.Error("ingest request failed", "path", r.URL.Path, "session_id", r.PathValue("id"), "error", err)
+	writeIngestError(w, http.StatusInternalServerError, "internal error")
+}
+
 func (s *ingestServer) reject(w http.ResponseWriter, r *http.Request, status int, message, reason string) {
 	s.logger.Warn("ingest request rejected", "path", r.URL.Path, "session_id", r.PathValue("id"), "status", status, "reason", reason)
 	s.metrics.authFailure(reason)
@@ -104,7 +112,7 @@ func (s *ingestServer) boundSession(w http.ResponseWriter, r *http.Request, c in
 		writeIngestError(w, http.StatusNotFound, "unknown session")
 		return "", false
 	case err != nil:
-		writeIngestError(w, http.StatusInternalServerError, "internal error")
+		s.internalError(w, r, err)
 		return "", false
 	}
 	if !sessionMatchesClaims(sum, c) {
@@ -164,7 +172,7 @@ func (s *ingestServer) handleStart(w http.ResponseWriter, r *http.Request, c ing
 	case errors.Is(err, sessionstore.ErrSessionConflict):
 		writeIngestError(w, http.StatusConflict, "session already started with different metadata")
 	default:
-		writeIngestError(w, http.StatusInternalServerError, "internal error")
+		s.internalError(w, r, err)
 	}
 }
 
@@ -226,7 +234,7 @@ func (s *ingestServer) handleEvents(w http.ResponseWriter, r *http.Request, c in
 	case errors.Is(err, sessionstore.ErrEventConflict):
 		writeIngestError(w, http.StatusConflict, "event payload conflict")
 	default:
-		writeIngestError(w, http.StatusInternalServerError, "internal error")
+		s.internalError(w, r, err)
 	}
 }
 
@@ -269,7 +277,7 @@ func (s *ingestServer) handleFinish(w http.ResponseWriter, r *http.Request, c in
 	case errors.Is(err, sessionstore.ErrLastSeqTooLow):
 		writeIngestError(w, http.StatusBadRequest, "last_seq below a stored event seq")
 	default:
-		writeIngestError(w, http.StatusInternalServerError, "internal error")
+		s.internalError(w, r, err)
 	}
 }
 
