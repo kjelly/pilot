@@ -371,3 +371,56 @@ func TestConnectAuthorize_UserClassUnreadableDenies(t *testing.T) {
 		t.Fatalf("readable host = %+v, want an allowed metadata connect", got)
 	}
 }
+
+// TestMetricsTextfileGatewayCounters locks the gateway series of per-host
+// recording spec §31: every authorize decision is counted once, by result
+// and reason, and allowed connects by mode and source. No user, session or
+// target ever becomes a label.
+func TestMetricsTextfileGatewayCounters(t *testing.T) {
+	p := &policyProvider{fakeProvider: fakeProvider{username: currentUsername(t)}}
+	p.set(absentPolicy, nil)
+	pol := storePolicy(t)
+	sockPath := filepath.Join(t.TempDir(), "gw.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	gw := accessportal.GatewayConfig{ID: "gpu-01", Scope: "gpu", TargetHostgroup: "pilot-target-gpu"}
+	srv := NewServer(gw, p, accessportal.NewResolver(p, gw), nil)
+	srv.RecordingPolicy = pol
+	srv.Metrics = NewMetrics()
+	go srv.Serve(ln)                                         //nolint:errcheck
+	t.Cleanup(func() { srv.Shutdown(context.Background()) }) //nolint:errcheck
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return net.Dial("unix", sockPath)
+	}}}
+
+	authorize(t, client, "http://unix", "gpu-a.example.com", testSID)        // allowed metadata / built_in_default
+	authorize(t, client, "http://unix", "not-in-scope.example.com", testSID) // HBAC deny
+	p.set(outputPolicy, nil)
+	authorize(t, client, "http://unix", "gpu-a.example.com", testSID) // allowed terminal_output / host
+	authorize(t, client, "http://unix", "gpu-a.example.com", "")      // recording_session_id_invalid
+	p.set(freeipaaccess.HostRecordingPolicy{Present: true, Reason: "duplicate"}, nil)
+	authorize(t, client, "http://unix", "gpu-a.example.com", testSID) // recording_policy_invalid
+
+	out := srv.Metrics.Registry.Render()
+	for _, line := range []string{
+		`pilot_gateway_connect_authorize_total{result="allowed",reason="none"} 2`,
+		`pilot_gateway_connect_authorize_total{result="denied",reason="access_denied"} 1`,
+		`pilot_gateway_connect_authorize_total{result="denied",reason="recording_session_id_invalid"} 1`,
+		`pilot_gateway_connect_authorize_total{result="denied",reason="recording_policy_invalid"} 1`,
+		`pilot_gateway_recording_authorized_sessions_total{mode="metadata",source="built_in_default"} 1`,
+		`pilot_gateway_recording_authorized_sessions_total{mode="terminal_output",source="host"} 1`,
+		`# TYPE pilot_gateway_metrics_last_write_timestamp_seconds gauge`,
+	} {
+		if !strings.Contains(out, line+"\n") {
+			t.Errorf("metrics lack %q:\n%s", line, out)
+		}
+	}
+	for _, leaked := range []string{currentUsername(t), testSID, "gpu-a.example.com"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("metrics leak high-cardinality value %q", leaked)
+		}
+	}
+}

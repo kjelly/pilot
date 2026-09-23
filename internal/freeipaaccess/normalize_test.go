@@ -2,6 +2,7 @@ package freeipaaccess
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -124,8 +125,8 @@ func TestParseAnnotations(t *testing.T) {
 	got := parseAnnotations([]string{
 		"pilot.annotation.owner=ai-platform-team",
 		"pilot.annotation.project=alpha",
-		"some-foreign-userclass-value",  // no prefix at all
-		"pilot.annotation.",             // prefix with nothing after it (no "=")
+		"some-foreign-userclass-value",   // no prefix at all
+		"pilot.annotation.",              // prefix with nothing after it (no "=")
 		"pilot.annotation.=orphan-value", // empty key
 		"pilot.annotation.note=has=equals=signs",
 	})
@@ -421,6 +422,22 @@ func TestDecodeEnvelopeRPCError(t *testing.T) {
 	}
 	if rpcErr.Code != 4001 {
 		t.Fatalf("Code = %d, want 4001", rpcErr.Code)
+	}
+}
+
+// TestIsNotFound uses the real captured NotFound error, wrapped the way a
+// caller would see it.
+func TestIsNotFound(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "rpc_error.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	_, err = decodeEnvelope(data)
+	if !IsNotFound(fmt.Errorf("host_show: %w", err)) {
+		t.Fatalf("IsNotFound(%v) = false", err)
+	}
+	if IsNotFound(errors.New("connection refused")) || IsNotFound(&RPCError{Name: "ACIError"}) || IsNotFound(nil) {
+		t.Fatal("IsNotFound matched a non-NotFound error")
 	}
 }
 

@@ -29,7 +29,7 @@ INCOMPLETE" is printed prominently before playback, exactly as spec.md
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newSessionStoreClient(sessionSocketFlag)
-		result, err := client.Replay(cmd.Context(), args[0])
+		result, err := client.Replay(cmd.Context(), args[0], "replay")
 		if err != nil {
 			return err
 		}

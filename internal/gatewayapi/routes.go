@@ -109,6 +109,7 @@ func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 	access, err := s.Resolver.LoadUserAccess(r.Context(), peer.Username)
 	if err != nil {
 		s.Logger.Error("connect authorize: resolve failed, denying", "user", peer.Username, "target", target, "error", err)
+		s.Metrics.authorizeDenied(metricsReasonError)
 		writeJSON(w, http.StatusOK, resp) // Allowed stays false.
 		return
 	}
@@ -120,12 +121,14 @@ func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if host == nil {
+		s.Metrics.authorizeDenied(metricsReasonAccessDenied)
 		writeJSON(w, http.StatusOK, resp) // HBAC/scope deny: Allowed stays false.
 		return
 	}
 
 	deny := func(reason string) {
 		resp.DenyReason = reason
+		s.Metrics.authorizeDenied(reason)
 		s.Logger.Info("connect authorize denied", "user", peer.Username, "target", target,
 			"gateway_id", s.Gateway.ID, "reason_code", reason, "policy_reason", host.SSHRecording.Reason)
 		writeJSON(w, http.StatusOK, resp)
@@ -174,6 +177,7 @@ func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 	}
 	resp.RecordingMode = mode
 	resp.RecordingPolicySource = source
+	s.Metrics.authorizeAllowed(mode, source)
 	writeJSON(w, http.StatusOK, resp)
 }
 

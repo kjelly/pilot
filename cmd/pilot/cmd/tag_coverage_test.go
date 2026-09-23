@@ -167,6 +167,7 @@ var specTagMap = []specTagMapping{
 			"AG53": "an idle healthy fail_closed session surviving is TestRecorderFailClosedIdleSessionSurvives, not a playbook task",
 			"AG54": "the pre-connect recording notice is TestPortalTargetSession_RecordingNotice, not a playbook task",
 			"AG56": "per-host userclass-unreadable denial (Phase 0 branch R) is TestConnectAuthorize_UserClassUnreadableDenies, not a playbook task",
+			"AG57": "the recording show report is TestAccessRecordingShow_*, a read-only CLI, not a playbook task",
 		}},
 	{spec: "pilot-access-directory.md", playbook: "pilot-access-directory-apply.yml",
 		exemptRows: map[string]string{
@@ -199,6 +200,7 @@ var specTagMap = []specTagMapping{
 			"SS21": "finish/after-finish rules are ingest handler logic proven by cmd/pilot-session-store's own Go tests, not a playbook task",
 			"SS22": "trailing-gap completeness is a multi-event-sequence property proven by internal/sessionstore's own Go test, not a playbook task",
 			"SS23": "the v1->v2 schema migration runs in the binary at startup, proven by internal/sessionstore's own Go test, not a playbook task",
+			"SS25": "replay/export audit events are emitted by the read API itself, proven by TestReadAPIAuditsReplayAndExport, not a playbook task",
 			"SS27": "the pre-migration backup runs in the binary at startup, proven by internal/sessionstore's own Go tests, not a playbook task",
 		}},
 	{spec: "host-monitoring.md", playbook: "host-monitoring-apply.yml",

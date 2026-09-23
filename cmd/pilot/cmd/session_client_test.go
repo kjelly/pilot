@@ -76,7 +76,7 @@ func TestSessionStoreClientReplayDecodesGapsAndEvents(t *testing.T) {
 	})
 	defer cleanup()
 
-	result, err := client.Replay(context.Background(), "sess-gap")
+	result, err := client.Replay(context.Background(), "sess-gap", "replay")
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}

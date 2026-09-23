@@ -94,3 +94,21 @@ func TestLoadConfig_SigningKeyFile(t *testing.T) {
 		t.Fatalf("LoadConfig without signing_key_file = %v, want it reported missing", err)
 	}
 }
+
+func TestLoadConfig_MetricsTextfilePath(t *testing.T) {
+	for path, ok := range map[string]bool{
+		"/var/lib/node_exporter/textfile/pilot_session_store.prom": true,
+		"relative.prom":                         false,
+		"/var/lib/node_exporter/textfile/x.txt": false,
+	} {
+		cfg := Config{
+			Ingest:    IngestSection{ListenAddr: ":8443", TLSCertFile: "/c", TLSKeyFile: "/k", SigningKeyFile: "/s"},
+			Storage:   StorageSection{IndexDBPath: "/db", MasterKeyFile: "/m", KeyID: "k1"},
+			Retention: RetentionSection{RetentionDays: 30},
+			Metrics:   MetricsSection{TextfilePath: path},
+		}
+		if err := cfg.validate(); (err == nil) != ok {
+			t.Errorf("textfile_path %q: validate = %v, want ok=%v", path, err, ok)
+		}
+	}
+}

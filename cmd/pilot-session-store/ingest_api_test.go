@@ -41,11 +41,12 @@ func newTestStoreForIngestAPI(t *testing.T) *sessionstore.Store {
 // ingestHarness is a real httptest server over a real store, a signer and
 // a verifier sharing one key, and a movable clock.
 type ingestHarness struct {
-	t     *testing.T
-	store *sessionstore.Store
-	srv   *httptest.Server
-	mu    sync.Mutex
-	now   time.Time
+	t       *testing.T
+	store   *sessionstore.Store
+	srv     *httptest.Server
+	metrics *storeMetrics
+	mu      sync.Mutex
+	now     time.Time
 }
 
 func newIngestHarness(t *testing.T) *ingestHarness {
@@ -55,7 +56,10 @@ func newIngestHarness(t *testing.T) *ingestHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.srv = httptest.NewServer(newIngestServer(h.store, v, nil).routes())
+	ingest := newIngestServer(h.store, v, nil)
+	h.metrics = newStoreMetrics()
+	ingest.metrics = h.metrics
+	h.srv = httptest.NewServer(ingest.routes())
 	t.Cleanup(h.srv.Close)
 	return h
 }

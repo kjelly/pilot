@@ -71,6 +71,8 @@
 | SS22 | completeness | finish 的 `last_seq` 揭露尾端遺失：`[1,last_seq]` 內任何缺口或最大已存 seq ≠ last_seq → complete=false，replay 列出尾端 gap — `internal/sessionstore` 的 `TestStoreFinishDetectsTrailingGap` | 0 | true |
 | SS23 | schema | v1 DB 升級到 v2（新增 `recording_policy_source`、`last_seq`、`ingest_jti` 三欄）後既有資料完整保留 — `internal/sessionstore` 的 `TestStoreMigratesV1ToV2` | 0 | true |
 | SS24 | secrets | ingest signing key 檔為 `pilot-session-store:pilot-session-store 400`，且舊的靜態 bearer token 檔已不存在 | 0 | test "$(stat -c '%U:%G %a' /etc/pilot/session-store-ingest-signing.key)" = "pilot-session-store:pilot-session-store 400" && test ! -e /etc/pilot/session-store-ingest.token |
+| SS25 | read audit | 每個 replay／export 請求（成功或失敗）都以 `pilot-session-store` 發出 `recording_replayed`／`recording_exported` audit event，帶 auditor 與被錄 session 的身分，不含任何 terminal payload；`?purpose=` 只影響 audit kind — `TestReadAPIAuditsReplayAndExport` | 0 | true |
+| SS26 | metrics | node_exporter textfile 目錄存在時寫出 0644 的 `pilot_session_store.prom`，含 `pilot_session_store_ingest_requests_total`；目錄不存在時不寫（metrics 是 soft 功能） | 0 | f=/var/lib/node_exporter/textfile/pilot_session_store.prom; if test -d /var/lib/node_exporter/textfile; then grep -q '^# TYPE pilot_session_store_ingest_requests_total counter$' "$f" && test "$(stat -c %a "$f")" = 644; else test ! -e "$f"; fi |
 | SS27 | schema | 既有 v1 DB 升級前先以 `VACUUM INTO` 產生 `index.db.pre-v1.bak`（0600）；剩餘空間不足 2× DB 或備份檔已存在時不 migrate、啟動失敗 — `TestStoreMigrationBacksUpBeforeAlter`、`TestStoreMigrationRefusesWithoutSpace`、`TestStoreMigrationRefusesExistingBackup` | 0 | true |
 
 ## 3. 不在這份 checklist 逐行覆蓋、但已用其他方式驗證過（或該用其他方式驗證）的項目

@@ -47,6 +47,10 @@ type Server struct {
 	// separate default-substitution step.
 	RecordingPolicy RecordingPolicy
 
+	// Metrics, when non-nil, counts authorize decisions for the
+	// node_exporter textfile (per-host recording spec §31).
+	Metrics *Metrics
+
 	httpServer *http.Server
 }
 

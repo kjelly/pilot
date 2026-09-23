@@ -273,3 +273,26 @@ func TestStoreStartBindsJTI(t *testing.T) {
 		t.Fatalf("stored jti/source = %q/%q", sum.IngestJTI, sum.RecordingPolicySource)
 	}
 }
+
+func TestStoreFinishSessionResultReportsGapsAndRetries(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.StartSession(ctx, SessionStart{SessionID: "sess-fr", User: "alice", GatewayID: "gw", Scope: "gpu", Target: "t", RecordingMode: "terminal_output", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.IngestEvents(ctx, "sess-fr", []IngestEvent{{Seq: 1, Stream: "tty_output", Data: []byte("a")}, {Seq: 3, Stream: "tty_output", Data: []byte("c")}}); err != nil {
+		t.Fatal(err)
+	}
+	ended := time.Now().UTC()
+	res, err := store.FinishSessionResult(ctx, "sess-fr", ended, true, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Repeated || res.Complete || res.GapRanges != 2 {
+		t.Fatalf("first finish = %+v, want a new incomplete finish with gaps 2 and 4-5", res)
+	}
+	res, err = store.FinishSessionResult(ctx, "sess-fr", ended, true, 5)
+	if err != nil || !res.Repeated || res.Complete {
+		t.Fatalf("identical retry = %+v, %v; want Repeated with the stored completeness", res, err)
+	}
+}

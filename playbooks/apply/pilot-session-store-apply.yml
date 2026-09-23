@@ -69,6 +69,9 @@
     # shared with every pilot-access-gateway (per-host recording spec
     # §16/§27.2). The former static bearer token file is removed.
     pilot_session_store_ingest_signing_key_file: /etc/pilot/session-store-ingest-signing.key
+    # Metrics (per-host recording spec §31) are written only when
+    # node_exporter's textfile collector directory already exists.
+    pilot_session_store_metrics_textfile_dir: /var/lib/node_exporter/textfile
     pilot_session_store_legacy_ingest_token_file: /etc/pilot/session-store-ingest.token
 
     pilot_session_store_ingest_port: 8443
@@ -420,6 +423,32 @@
         mode: "0700"
       tags: [SS_storage, SS17]
 
+    # Metrics (per-host recording spec §31): soft — enabled only when the
+    # node_exporter textfile directory exists, never a failure. Both tasks
+    # are tagged always because the config and the service unit read the
+    # result (AGENTS.md §4.4).
+    - name: "Metrics: check for the node_exporter textfile directory"
+      ansible.builtin.stat:
+        path: "{{ pilot_session_store_metrics_textfile_dir }}"
+      register: session_store_metrics_dir
+      tags: [always]
+
+    - name: "Metrics: decide the metrics textfile path"
+      ansible.builtin.set_fact:
+        session_store_metrics_textfile_path: >-
+          {{ session_store_metrics_dir.stat.get('isdir', false)
+             | ternary(pilot_session_store_metrics_textfile_dir ~ '/pilot_session_store.prom', '') }}
+      tags: [always]
+
+    - name: "Metrics: note that metrics stay disabled without node_exporter's textfile directory"
+      ansible.builtin.debug:
+        msg: >-
+          {{ pilot_session_store_metrics_textfile_dir }} does not exist, so
+          pilot-session-store writes no metrics textfile. Deploy host-monitoring
+          (node_exporter) and re-apply to enable them.
+      when: session_store_metrics_textfile_path | length == 0
+      tags: [SS26]
+
     - name: "Install /etc/pilot/session-store.yaml"
       ansible.builtin.copy:
         dest: /etc/pilot/session-store.yaml
@@ -441,8 +470,12 @@
             auditor_group: {{ pilot_session_store_auditor_group }}
           retention:
             retention_days: {{ pilot_session_store_retention_days }}
+          {% if session_store_metrics_textfile_path | length > 0 %}
+          metrics:
+            textfile_path: {{ session_store_metrics_textfile_path }}
+          {% endif %}
       register: session_store_config_copy
-      tags: [SS_config]
+      tags: [SS_config, SS26]
 
     - name: "Ensure /usr/local/libexec exists (not all distros pre-create it)"
       ansible.builtin.file:
@@ -521,6 +554,9 @@
           ProtectControlGroups=true
 
           ReadWritePaths={{ pilot_session_store_state_dir }}
+          {% if session_store_metrics_textfile_path | length > 0 %}
+          ReadWritePaths={{ pilot_session_store_metrics_textfile_dir }}
+          {% endif %}
           ReadOnlyPaths=/etc/pilot
           ReadOnlyPaths=/etc/ipa
 
@@ -530,7 +566,7 @@
           [Install]
           WantedBy=multi-user.target
       register: session_store_service_unit
-      tags: [SS_service]
+      tags: [SS_service, SS26]
 
     # SS-retention (spec.md §28.5): a systemd timer runs `pilot-session-store
     # retention-sweep` once a day — retention_days itself is required

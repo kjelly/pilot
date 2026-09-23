@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,6 +40,13 @@ type GatewaySection struct {
 	PortalUserGroup string           `yaml:"portal_user_group"`
 	FreeIPA         FreeIPASection   `yaml:"freeipa"`
 	Recording       RecordingSection `yaml:"recording"`
+	Metrics         MetricsSection   `yaml:"metrics"`
+}
+
+// MetricsSection configures the node_exporter textfile the gateway writes
+// (per-host recording spec §31). An empty TextfilePath disables metrics.
+type MetricsSection struct {
+	TextfilePath string `yaml:"textfile_path"`
 }
 
 // RecordingSection configures SSH session recording (per-host recording
@@ -205,6 +213,9 @@ func (c Config) validate() error {
 			return fmt.Errorf("gateway.recording.session_store_url is set but gateway.recording.session_store_ingest_signing_key_file is empty")
 		}
 	}
+	if p := c.Gateway.Metrics.TextfilePath; p != "" && (!filepath.IsAbs(p) || filepath.Ext(p) != ".prom") {
+		return fmt.Errorf("gateway.metrics.textfile_path %q must be an absolute path ending in .prom", p)
+	}
 	if (rec.Mode == "terminal_output" || rec.Mode == "terminal_io") && rec.SessionStoreURL == "" {
 		return fmt.Errorf("gateway.recording.mode %q records terminal sessions but gateway.recording.session_store_url is empty (there is no local recording fallback)", rec.Mode)
 	}
@@ -285,3 +296,6 @@ func (c Config) RecordingSigningKey() ([]byte, error) {
 	}
 	return ingesttoken.LoadKeyFile(c.Gateway.Recording.SessionStoreIngestSigningKeyFile)
 }
+
+// MetricsTextfilePath returns the metrics textfile path ("" = disabled).
+func (c Config) MetricsTextfilePath() string { return c.Gateway.Metrics.TextfilePath }

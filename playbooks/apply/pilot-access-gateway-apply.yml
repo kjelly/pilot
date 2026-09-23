@@ -111,6 +111,9 @@
     gateway_effective_session_store_url: "{{ pilot_session_store_url | default('') }}"
     gateway_effective_session_store_ca_file: "{{ pilot_session_store_ca_file | default('/etc/ipa/ca.crt') }}"
     gateway_session_store_signing_key_file: /etc/pilot/session-store-ingest-signing.key
+    # Metrics (per-host recording spec §31) are written only when
+    # node_exporter's textfile collector directory already exists.
+    gateway_metrics_textfile_dir: /var/lib/node_exporter/textfile
     # Left behind by the Phase 8 manual session-store wiring (a static
     # bearer token); per-session tokens replace it, so it is removed.
     gateway_legacy_session_store_token_file: /etc/pilot/session-store-ingest-token
@@ -782,6 +785,32 @@
     # gateway generated one into its config regardless, misleading an
     # operator into thinking access decisions are cached when they never
     # were (accessportal.LoadUserAccess always hits FreeIPA fresh).
+    # Metrics (per-host recording spec §31): soft — enabled only when the
+    # node_exporter textfile directory exists, never a failure. Both tasks
+    # are tagged always because Step 11 and the service unit read the
+    # result (AGENTS.md §4.4).
+    - name: "Metrics: check for the node_exporter textfile directory"
+      ansible.builtin.stat:
+        path: "{{ gateway_metrics_textfile_dir }}"
+      register: gateway_metrics_dir
+      tags: [always]
+
+    - name: "Metrics: decide the metrics textfile path"
+      ansible.builtin.set_fact:
+        gateway_metrics_textfile_path: >-
+          {{ gateway_metrics_dir.stat.get('isdir', false)
+             | ternary(gateway_metrics_textfile_dir ~ '/pilot_access_gateway.prom', '') }}
+      tags: [always]
+
+    - name: "Metrics: note that metrics stay disabled without node_exporter's textfile directory"
+      ansible.builtin.debug:
+        msg: >-
+          {{ gateway_metrics_textfile_dir }} does not exist, so pilot-access-gateway
+          writes no metrics textfile. Deploy host-monitoring (node_exporter) and
+          re-apply to enable them.
+      when: gateway_metrics_textfile_path | length == 0
+      tags: [AG55]
+
     - name: "Step 11: install access-gateway.yaml"
       ansible.builtin.copy:
         dest: /etc/pilot/access-gateway.yaml
@@ -819,8 +848,12 @@
               session_store_ca_file: {{ gateway_effective_session_store_ca_file }}
               session_store_ingest_signing_key_file: {{ gateway_session_store_signing_key_file }}
           {% endif %}
+          {% if gateway_metrics_textfile_path | length > 0 %}
+            metrics:
+              textfile_path: {{ gateway_metrics_textfile_path }}
+          {% endif %}
       register: gateway_config_copy
-      tags: [AG_config, AG01, AG41]
+      tags: [AG_config, AG01, AG41, AG55]
 
     # Per-session ingest token signing key (per-host recording spec §16):
     # present only when a session store is configured, owned by the service
@@ -1058,11 +1091,14 @@
 
           ReadOnlyPaths=/etc/pilot
           ReadOnlyPaths=/etc/ipa
+          {% if gateway_metrics_textfile_path | length > 0 %}
+          ReadWritePaths={{ gateway_metrics_textfile_dir }}
+          {% endif %}
 
           [Install]
           WantedBy=multi-user.target
       register: gateway_service_unit
-      tags: [AG_service]
+      tags: [AG_service, AG55]
 
     - name: "Step 15: daemon-reload"
       ansible.builtin.systemd:
@@ -1097,14 +1133,14 @@
     # binary/config instead of continuing to run the old in-memory one.
     # The socket itself is untouched (RemoveOnStop=true would drop
     # in-flight connections pointlessly here).
-    - name: "Restart pilot-access-gateway.service if the binary, config or signing key changed"
+    - name: "Restart pilot-access-gateway.service if its unit, binary, config or signing key changed"
       ansible.builtin.systemd:
         name: pilot-access-gateway.service
         state: restarted
       when:
         - not ansible_check_mode
         - >-
-          gateway_binary_copy.changed or gateway_config_copy.changed
+          gateway_service_unit.changed or gateway_binary_copy.changed or gateway_config_copy.changed
           or (gateway_signing_key_copy.changed | default(false))
           or (gateway_signing_key_remove.changed | default(false))
       tags: [AG_service]

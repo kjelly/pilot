@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/kjelly/pilot/internal/accessportal"
 	"github.com/kjelly/pilot/internal/freeipaaccess"
@@ -126,6 +127,14 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 	}
 	defer ln.Close() //nolint:errcheck
 
+	if path := cfg.MetricsTextfilePath(); path != "" {
+		srv.Metrics = gatewayapi.NewMetrics()
+		stopMetrics := srv.Metrics.Registry.StartWriter(path, metricsWriteInterval, srv.Metrics.LastWrite, func(err error) {
+			logger.Warn("write metrics textfile", "path", path, "error", err)
+		})
+		defer stopMetrics() // after Shutdown: one final write
+	}
+
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -146,6 +155,10 @@ func runServe(ctx context.Context, configPath string, systemdSocket bool) error 
 		return err
 	}
 }
+
+// metricsWriteInterval is how often the metrics textfile is rewritten
+// (per-host recording spec §31).
+const metricsWriteInterval = 15 * time.Second
 
 // listener builds either the systemd-activated listener (fd 3) or a plain
 // Unix socket bind at cfg.SocketPath(), removing a stale socket file left

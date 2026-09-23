@@ -19,6 +19,10 @@ regressionTests:
   - internal/ingesttoken/ingesttoken_test.go
   - cmd/pilot-session-store/read_api_v2_test.go
   - cmd/pilot/cmd/session_client_test.go
+  - cmd/pilot/cmd/session_export_test.go
+  - cmd/pilot-session-store/read_audit_test.go
+  - internal/sessionrecording/asciicast_test.go
+  - internal/promtext/promtext_test.go
 dependencies:
   - {component: freeipa-client, required: true, relation: sameHosts}
 conflicts: []
@@ -57,6 +61,7 @@ traceability:
     "docs/verification/pilot-session-store.md#SS05": {tags: [SS_service], reason: "read/replay socket existence probe"}
     "docs/verification/pilot-session-store.md#SS17": {tags: [SS_storage], reason: "no task in this playbook ever writes recording state anywhere except the declared state dir — this check just confirms that structural placement on a live host"}
     "docs/verification/pilot-session-store.md#SS24": {tags: [SS24], reason: "signing key install task (0400, store user) plus the task removing the former static bearer token file"}
+    "docs/verification/pilot-session-store.md#SS26": {tags: [SS26], reason: "textfile directory stat/set_fact, the config metrics block and the unit's ReadWritePaths"}
   exemptions:
     "docs/verification/pilot-session-store.md#SS01": {kind: unit-test-evidence, tags: [], reason: "config KnownFields(true) rejection is a loader-logic property (cmd/pilot-session-store's TestLoadConfigRejectsUnknownField), not something a live host's already-valid config file can demonstrate — SS02/SS05's probes succeeding is indirect proof the rendered config parses, but that is not the same claim"}
     "docs/verification/pilot-session-store.md#SS03": {kind: unit-test-evidence, tags: [], reason: "per-session PIT1 token auth/rejection is cmd/pilot-session-store's TestIngestAPIRejectsInvalidSessionToken; a live host would need a second, unauthorized client to demonstrate the negative case"}
@@ -78,6 +83,7 @@ traceability:
     "docs/verification/pilot-session-store.md#SS21": {kind: unit-test-evidence, tags: [], reason: "finish and after-finish rules are TestIngestAPIRejectsEventsAfterFinish, TestIngestAPIFinishIdempotentRetry, TestIngestAPIFinishRequiresEndedAt and TestIngestAPIFinishRequiresLastSeq"}
     "docs/verification/pilot-session-store.md#SS22": {kind: unit-test-evidence, tags: [], reason: "trailing-gap completeness is internal/sessionstore's TestStoreFinishDetectsTrailingGap"}
     "docs/verification/pilot-session-store.md#SS23": {kind: unit-test-evidence, tags: [], reason: "the v1->v2 migration is internal/sessionstore's TestStoreMigratesV1ToV2"}
+    "docs/verification/pilot-session-store.md#SS25": {kind: unit-test-evidence, tags: [], reason: "replay/export audit events are emitted by the read API, proven by TestReadAPIAuditsReplayAndExport"}
     "docs/verification/pilot-session-store.md#SS27": {kind: unit-test-evidence, tags: [], reason: "the pre-migration backup is internal/sessionstore's TestStoreMigrationBacksUpBeforeAlter, TestStoreMigrationRefusesWithoutSpace and TestStoreMigrationRefusesExistingBackup"}
 verification: {autoDeploy: false}
 # order 55 放在 pilot-access-directory(53)/freeipa-nfs-server 之後——

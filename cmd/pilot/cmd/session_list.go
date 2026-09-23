@@ -14,9 +14,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// defaultSessionStoreSocket matches spec.md §29's suggested
-// /run/pilot/session-store.sock.
-const defaultSessionStoreSocket = "/run/pilot/session-store.sock"
+// defaultSessionStoreSocket is where pilot-session-store-apply.yml puts
+// the read socket (pilot_session_store_read_socket_path): the store's own
+// RuntimeDirectory, not the shared /run/pilot that spec.md §29 first
+// suggested (see the playbook's comment on the service unit for why).
+const defaultSessionStoreSocket = "/run/pilot-session-store/session-store.sock"
 
 var (
 	sessionSocketFlag string
@@ -54,6 +56,6 @@ func printSessionList(w io.Writer, sessions []sessionSummary) error {
 func init() {
 	sessionCmd.PersistentFlags().StringVar(&sessionSocketFlag, "socket", defaultSessionStoreSocket, "pilot-session-store read-API Unix socket path")
 	sessionListCmd.Flags().StringVar(&sessionUserFlag, "user", "", "filter by user")
-	sessionCmd.AddCommand(sessionListCmd, sessionShowCmd, sessionReplayCmd)
+	sessionCmd.AddCommand(sessionListCmd, sessionShowCmd, sessionReplayCmd, sessionExportCmd)
 	rootCmd.AddCommand(sessionCmd)
 }

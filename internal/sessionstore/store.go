@@ -224,35 +224,58 @@ func payloadHash(ev IngestEvent) string {
 // endedAt instant and lastSeq) is a no-op; any other finish of an already
 // finished session is ErrSessionFinished.
 func (s *Store) FinishSession(ctx context.Context, sessionID string, endedAt time.Time, complete bool, lastSeq uint64) error {
+	_, err := s.FinishSessionResult(ctx, sessionID, endedAt, complete, lastSeq)
+	return err
+}
+
+// FinishResult reports what one FinishSessionResult call did.
+type FinishResult struct {
+	// Repeated is true for an idempotent retry of an earlier identical
+	// finish; nothing changed.
+	Repeated bool
+	// Complete is the stored completeness.
+	Complete bool
+	// GapRanges is how many missing seq ranges (including a trailing gap
+	// up to last_seq) the finish found.
+	GapRanges int
+}
+
+// FinishSessionResult is FinishSession, also reporting whether this call
+// finished the session and what it found (for the store's metrics).
+func (s *Store) FinishSessionResult(ctx context.Context, sessionID string, endedAt time.Time, complete bool, lastSeq uint64) (FinishResult, error) {
 	if endedAt.IsZero() {
-		return fmt.Errorf("sessionstore: ended_at is required")
+		return FinishResult{}, fmt.Errorf("sessionstore: ended_at is required")
 	}
 	summary, err := s.GetSession(ctx, sessionID)
 	if err != nil {
-		return err
+		return FinishResult{}, err
 	}
 	if summary.EndedAt != nil {
 		if summary.EndedAt.Equal(endedAt) && summary.LastSeq == lastSeq {
-			return nil
+			return FinishResult{Repeated: true, Complete: summary.Complete}, nil
 		}
-		return ErrSessionFinished
+		return FinishResult{}, ErrSessionFinished
 	}
 	seqs, err := s.eventSeqs(ctx, sessionID)
 	if err != nil {
-		return err
+		return FinishResult{}, err
 	}
 	var maxSeq uint64
 	for _, seq := range seqs {
 		maxSeq = max(maxSeq, seq)
 	}
 	if lastSeq < maxSeq {
-		return fmt.Errorf("%w: last_seq=%d, stored max seq=%d", ErrLastSeqTooLow, lastSeq, maxSeq)
+		return FinishResult{}, fmt.Errorf("%w: last_seq=%d, stored max seq=%d", ErrLastSeqTooLow, lastSeq, maxSeq)
 	}
-	complete = complete && maxSeq == lastSeq && len(gapsUpTo(seqs, lastSeq)) == 0
+	gaps := gapsUpTo(seqs, lastSeq)
+	complete = complete && maxSeq == lastSeq && len(gaps) == 0
 	_, err = s.db.ExecContext(ctx,
 		`UPDATE sessions SET ended_at=?, complete=?, last_seq=? WHERE session_id=?`,
 		endedAt.UTC().Format(time.RFC3339Nano), boolToInt(complete), lastSeq, sessionID)
-	return err
+	if err != nil {
+		return FinishResult{}, err
+	}
+	return FinishResult{Complete: complete, GapRanges: len(gaps)}, nil
 }
 
 func (s *Store) eventSeqs(ctx context.Context, sessionID string) ([]uint64, error) {

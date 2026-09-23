@@ -145,6 +145,8 @@ func TestLoadConfig_RecordingRejects(t *testing.T) {
 		"store without key":      {validConfig + "  recording:\n    session_store_url: https://store:8443\n", "session_store_ingest_signing_key_file"},
 		"terminal without store": {validConfig + "  recording:\n    mode: terminal_output\n", "no local recording fallback"},
 		"legacy token file":      {validConfig + "  recording:\n    session_store_url: https://store:8443\n    session_store_ingest_token_file: /t\n", "replaced by session_store_ingest_signing_key_file"},
+		"relative metrics path":  {validConfig + "  metrics:\n    textfile_path: gateway.prom\n", "gateway.metrics.textfile_path"},
+		"metrics path not .prom": {validConfig + "  metrics:\n    textfile_path: /var/lib/node_exporter/textfile/gw.txt\n", "gateway.metrics.textfile_path"},
 	}
 	for name, c := range cases {
 		_, err := Load(writeConfig(t, c.body))
@@ -201,5 +203,16 @@ func TestLoadConfig_RecordingSigningKey(t *testing.T) {
 		if _, err := withKey(path).RecordingSigningKey(); err == nil {
 			t.Errorf("%s: RecordingSigningKey accepted %s", name, path)
 		}
+	}
+}
+
+func TestLoadConfig_MetricsTextfilePath(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validConfig))
+	if err != nil || cfg.MetricsTextfilePath() != "" {
+		t.Fatalf("default metrics path = %q, %v; want disabled", cfg.MetricsTextfilePath(), err)
+	}
+	cfg, err = Load(writeConfig(t, validConfig+"  metrics:\n    textfile_path: /var/lib/node_exporter/textfile/pilot_access_gateway.prom\n"))
+	if err != nil || cfg.MetricsTextfilePath() != "/var/lib/node_exporter/textfile/pilot_access_gateway.prom" {
+		t.Fatalf("metrics path = %q, %v", cfg.MetricsTextfilePath(), err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +19,13 @@ type Config struct {
 	Storage   StorageSection   `yaml:"storage"`
 	Read      ReadSection      `yaml:"read"`
 	Retention RetentionSection `yaml:"retention"`
+	Metrics   MetricsSection   `yaml:"metrics"`
+}
+
+// MetricsSection configures the node_exporter textfile the store writes
+// (per-host recording spec §31). An empty TextfilePath disables metrics.
+type MetricsSection struct {
+	TextfilePath string `yaml:"textfile_path"`
 }
 
 // IngestSection is the TLS-mandatory write-only API (spec.md §28.1/28.2).
@@ -58,7 +66,9 @@ type RetentionSection struct {
 }
 
 const (
-	defaultReadSocketPath = "/run/pilot/session-store.sock"
+	// defaultReadSocketPath matches the playbook's RuntimeDirectory
+	// (pilot_session_store_read_socket_path), which always sets it.
+	defaultReadSocketPath = "/run/pilot-session-store/session-store.sock"
 )
 
 // LoadConfig reads and validates a pilot-session-store config file.
@@ -107,6 +117,9 @@ func (c Config) validate() error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("config missing required fields: %s", strings.Join(missing, ", "))
+	}
+	if p := c.Metrics.TextfilePath; p != "" && (!filepath.IsAbs(p) || filepath.Ext(p) != ".prom") {
+		return fmt.Errorf("metrics.textfile_path %q must be an absolute path ending in .prom", p)
 	}
 	return nil
 }

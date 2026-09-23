@@ -88,8 +88,16 @@ func (c *hostMetadataCache) get(ctx context.Context, provider freeipaaccess.Prov
 // recording-policy facts a connect decision needs (per-host recording spec
 // §11.2).
 func recordingAccessPolicy(res hostMetadataResult) SSHRecordingAccessPolicy {
-	switch p := res.Host.SSHRecording; {
-	case res.Err != nil:
+	return HostRecordingAccessPolicy(res.Host, res.Err)
+}
+
+// HostRecordingAccessPolicy converts one host_show result (host, err) to the
+// recording policy the gateway resolves against (per-host recording spec
+// §11): a failed host_show or an unreadable userclass is unknown, a
+// malformed marker is invalid.
+func HostRecordingAccessPolicy(host freeipaaccess.Host, err error) SSHRecordingAccessPolicy {
+	switch p := host.SSHRecording; {
+	case err != nil:
 		return SSHRecordingAccessPolicy{Reason: "host_show_failed"}
 	case p.Unreadable:
 		return SSHRecordingAccessPolicy{Reason: "userclass_unreadable"}

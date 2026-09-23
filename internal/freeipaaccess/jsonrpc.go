@@ -2,6 +2,7 @@ package freeipaaccess
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -73,6 +74,13 @@ type RPCError struct {
 
 func (e *RPCError) Error() string {
 	return fmt.Sprintf("freeipa %s (code %d): %s", e.Name, e.Code, e.Message)
+}
+
+// IsNotFound reports whether err is FreeIPA's NotFound error (the object
+// asked for does not exist).
+func IsNotFound(err error) bool {
+	var rpcErr *RPCError
+	return errors.As(err, &rpcErr) && rpcErr.Name == "NotFound"
 }
 
 // rpcEnvelope is the outer JSON-RPC response shape common to every method.

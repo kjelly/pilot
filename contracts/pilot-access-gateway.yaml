@@ -27,6 +27,8 @@ regressionTests:
   - internal/sessionrecording/httpsink_test.go
   - cmd/pilot/cmd/portal_session_connect_test.go
   - cmd/pilot/cmd/portal_target_session_test.go
+  - cmd/pilot/cmd/access_recording_cli_test.go
+  - internal/promtext/promtext_test.go
 dependencies:
   - {component: freeipa-client, required: true, relation: sameHosts}
 conflicts: []
@@ -78,6 +80,7 @@ traceability:
     "docs/verification/pilot-access-gateway.md#AG41": {tags: [AG41], reason: "Step 11 renders the recording block from the pilot_session_recording_*/pilot_session_store_* vars"}
     "docs/verification/pilot-access-gateway.md#AG42": {tags: [AG42], reason: "signing key install (store configured) / removal (no store) tasks"}
     "docs/verification/pilot-access-gateway.md#AG43": {tags: [AG43], reason: "task removing the former static session-store bearer token file"}
+    "docs/verification/pilot-access-gateway.md#AG55": {tags: [AG55], reason: "textfile directory stat/set_fact, Step 11 metrics block and the unit's ReadWritePaths"}
   exemptions:
     "docs/verification/pilot-access-gateway.md#AG19": {kind: structural-absence, tags: [], reason: "no task in this playbook ever writes under /var/lib/pilot — absence is structural, not produced by a specific task"}
     "docs/verification/pilot-access-gateway.md#AG30": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task"}
@@ -99,6 +102,7 @@ traceability:
     "docs/verification/pilot-access-gateway.md#AG53": {kind: unit-test-evidence, tags: [], reason: "an idle healthy fail_closed session surviving is TestRecorderFailClosedIdleSessionSurvives"}
     "docs/verification/pilot-access-gateway.md#AG54": {kind: unit-test-evidence, tags: [], reason: "the pre-connect recording notice is TestPortalTargetSession_RecordingNotice"}
     "docs/verification/pilot-access-gateway.md#AG56": {kind: unit-test-evidence, tags: [], reason: "per-host userclass-unreadable denial (Phase 0 branch R) is TestConnectAuthorize_UserClassUnreadableDenies"}
+    "docs/verification/pilot-access-gateway.md#AG57": {kind: unit-test-evidence, tags: [], reason: "the read-only recording show report is TestAccessRecordingShow_*"}
 verification: {autoDeploy: false}
 # 2026-09-15 起 site.include:true(不再是 optIn/single-component-only)——
 # 使用者明確決定「把 pilot-access-gateway 加進 hosts.yml 的 roles 清單」本身

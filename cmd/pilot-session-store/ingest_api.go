@@ -30,6 +30,8 @@ type ingestServer struct {
 	store    *sessionstore.Store
 	verifier *ingesttoken.Verifier
 	logger   *slog.Logger
+	// metrics, when non-nil, counts requests for the textfile (§31).
+	metrics *storeMetrics
 }
 
 func newIngestServer(store *sessionstore.Store, verifier *ingesttoken.Verifier, logger *slog.Logger) *ingestServer {
@@ -41,9 +43,9 @@ func newIngestServer(store *sessionstore.Store, verifier *ingesttoken.Verifier, 
 
 func (s *ingestServer) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/sessions/start", s.authenticated(s.handleStart))
-	mux.HandleFunc("POST /v1/sessions/{id}/events", s.authenticated(s.handleEvents))
-	mux.HandleFunc("POST /v1/sessions/{id}/finish", s.authenticated(s.handleFinish))
+	mux.HandleFunc("POST /v1/sessions/start", s.counted("start", s.authenticated(s.handleStart)))
+	mux.HandleFunc("POST /v1/sessions/{id}/events", s.counted("events", s.authenticated(s.handleEvents)))
+	mux.HandleFunc("POST /v1/sessions/{id}/finish", s.counted("finish", s.authenticated(s.handleFinish)))
 	return mux
 }
 
@@ -75,6 +77,7 @@ func (s *ingestServer) authenticated(next claimsHandler) http.HandlerFunc {
 
 func (s *ingestServer) reject(w http.ResponseWriter, r *http.Request, status int, message, reason string) {
 	s.logger.Warn("ingest request rejected", "path", r.URL.Path, "session_id", r.PathValue("id"), "status", status, "reason", reason)
+	s.metrics.authFailure(reason)
 	writeIngestError(w, status, message)
 }
 
@@ -156,6 +159,7 @@ func (s *ingestServer) handleStart(w http.ResponseWriter, r *http.Request, c ing
 	case err == nil:
 		w.WriteHeader(http.StatusOK)
 	case errors.Is(err, sessionstore.ErrSessionFinished):
+		s.metrics.authFailure("session_finished")
 		writeIngestError(w, http.StatusConflict, "session_finished")
 	case errors.Is(err, sessionstore.ErrSessionConflict):
 		writeIngestError(w, http.StatusConflict, "session already started with different metadata")
@@ -217,6 +221,7 @@ func (s *ingestServer) handleEvents(w http.ResponseWriter, r *http.Request, c in
 	case errors.Is(err, sessionstore.ErrUnknownSession):
 		writeIngestError(w, http.StatusNotFound, "unknown session")
 	case errors.Is(err, sessionstore.ErrSessionFinished):
+		s.metrics.authFailure("session_finished")
 		writeIngestError(w, http.StatusConflict, "session_finished")
 	case errors.Is(err, sessionstore.ErrEventConflict):
 		writeIngestError(w, http.StatusConflict, "event payload conflict")
@@ -249,13 +254,17 @@ func (s *ingestServer) handleFinish(w http.ResponseWriter, r *http.Request, c in
 		writeIngestError(w, http.StatusBadRequest, "ended_at (RFC3339Nano) and last_seq are required")
 		return
 	}
-	err = s.store.FinishSession(r.Context(), sessionID, endedAt, req.Complete, *req.LastSeq)
+	res, err := s.store.FinishSessionResult(r.Context(), sessionID, endedAt, req.Complete, *req.LastSeq)
 	switch {
 	case err == nil:
+		if !res.Repeated {
+			s.metrics.sessionFinished(c.Mode, res.Complete, res.GapRanges)
+		}
 		w.WriteHeader(http.StatusOK)
 	case errors.Is(err, sessionstore.ErrUnknownSession):
 		writeIngestError(w, http.StatusNotFound, "unknown session")
 	case errors.Is(err, sessionstore.ErrSessionFinished):
+		s.metrics.authFailure("session_finished")
 		writeIngestError(w, http.StatusConflict, "session_finished")
 	case errors.Is(err, sessionstore.ErrLastSeqTooLow):
 		writeIngestError(w, http.StatusBadRequest, "last_seq below a stored event seq")
