@@ -47,7 +47,7 @@
 | TP09 | 非 Gateway 路徑不受影響：從 controller 直接 SSH 到 target，`-L` 到 loopback 的行為與套用前的 baseline 相同 |
 | TP10 | `absent`：先移出 hostgroup、再刪 drop-in；drop-in 與 snapshot 都不存在；`sshd -t` 通過；TP05 條件仍成立 |
 | TP11 | 冪等：strict 與 remote-dev 的第二次 apply 都是 `changed=0`；strict → remote-dev 切換只改 drop-in |
-| TP12 | 不合法輸入在寫檔前失敗，且 `/etc/ssh/sshd_config.d/` 的 checksum 不變：非法 profile、空的 addresses、`*`、`0.0.0.0`、CIDR、`192.0.2.1`、畸形 IPv6（例如 `1::2::3`，由 `sshd -t -f` 擋下，並經 `rescue` 還原） |
+| TP12 | 不合法輸入不會留下任何生效中的變更，`/etc/ssh/sshd_config.d/*.conf` 的 checksum 不變：非法 profile、空的 addresses、`*`、`0.0.0.0`、CIDR、`192.0.2.1` 在 pre_tasks 就失敗；畸形 IPv6（例如 `1::2::3`）通過字元檢查與 `sshd -t`，在有效值檢查（`sshd -T -C addr=…`）失敗後由 `rescue` 還原 |
 
 ## 4. Gotcha 記錄
 

@@ -669,7 +669,7 @@ Remote-dev（只列差異）：
 | TP09 | 非 Gateway 路徑不受影響：從 ansible controller 直接 SSH 到 target，`-L` 到 loopback 的行為與套用前的 baseline 相同 |
 | TP10 | `absent`：先移出 hostgroup、後刪 drop-in（以 task 順序與 log 證明）；drop-in 不存在；`sshd -t` 通過；TP05 條件仍成立 |
 | TP11 | Idempotency：strict 與 remote-dev 各自第二次 apply `changed=0`；strict → remote-dev 切換只改 drop-in |
-| TP12 | 不合法輸入在寫檔前失敗且 `/etc/ssh/sshd_config.d/` checksum 不變：非法 profile、空的 addresses、`*`、`0.0.0.0`、CIDR、`192.0.2.1`、畸形 IPv6（例如 `1::2::3`，由 `validate` 擋下） |
+| TP12 | 不合法輸入不會留下任何生效中的變更，`/etc/ssh/sshd_config.d/*.conf` checksum 不變：非法 profile、空的 addresses、`*`、`0.0.0.0`、CIDR、`192.0.2.1` 在 pre_tasks 就失敗；畸形 IPv6（例如 `1::2::3`）通過字元檢查與 `sshd -t`，在有效值檢查失敗後由 `rescue` 還原（Phase 4 實測） |
 
 ---
 
