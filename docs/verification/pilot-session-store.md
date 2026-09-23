@@ -19,6 +19,8 @@
 > `docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md`
 > §16/§21/§27.2
 > 維護者：sre
+>
+> 2026-09-23 per-host recording Phase 7：新增 SS25（replay／export audit）與 SS26（metrics textfile）；candidate `31f5c23` 對 `phr-store` 實跑 SS24／SS26 probe PASS、第二次 apply `changed=0`，並以 root（非 auditor）觸發 replay 確認 `recording_replayed` denied audit event，見 [`docs/evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md`](../evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md)。
 
 ## 1. 目標系統
 
