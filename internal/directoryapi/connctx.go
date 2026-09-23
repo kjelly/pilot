@@ -20,6 +20,9 @@ import (
 type Peer struct {
 	UID      uint32
 	Username string
+	// PID is the SO_PEERCRED process id, used only to read that process's
+	// kernel group credentials for the group gate (identity.PeerInGroup).
+	PID int32
 }
 
 type peerCtxKey struct{}
@@ -46,7 +49,7 @@ func connContext(logger *slog.Logger) func(ctx context.Context, c net.Conn) cont
 			logger.Warn("getent passwd lookup failed", "uid", cred.UID, "error", err)
 			return ctx
 		}
-		return context.WithValue(ctx, peerCtxKey{}, Peer{UID: cred.UID, Username: username})
+		return context.WithValue(ctx, peerCtxKey{}, Peer{UID: cred.UID, Username: username, PID: cred.PID})
 	}
 }
 
@@ -72,7 +75,7 @@ func (s *Server) authorizedPeer(r *http.Request) (Peer, bool) {
 	if s.PortalUserGroup == "" {
 		return peer, true
 	}
-	member, err := identity.IsMemberOfGroup(r.Context(), peer.Username, s.PortalUserGroup)
+	member, err := identity.PeerInGroup(r.Context(), peer.PID, peer.UID, s.PortalUserGroup)
 	if err != nil {
 		s.Logger.Warn("portal user group check failed", "user", peer.Username, "group", s.PortalUserGroup, "error", err)
 		return Peer{}, false

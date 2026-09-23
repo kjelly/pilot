@@ -442,3 +442,40 @@ func stringSliceEqualUnordered(a, b []string) bool {
 	}
 	return true
 }
+
+// TestParseHostSSHPublicKeys uses the real host_show(all=true) response
+// captured as the gateway's own service principal in the captive-transport
+// Phase 0 run (docs/evidence/pilot-access-gateway/2026-09-23-ad6d552.md §2):
+// ipasshpubkey arrives as plain "<type> <base64> <comment>" strings, not
+// {"__base64__": ...} objects, and all three host keys survive parseHost.
+func TestParseHostSSHPublicKeys(t *testing.T) {
+	env := loadFixture(t, "host_show_ipasshpubkey.json")
+	m, err := decodeShow(env)
+	if err != nil {
+		t.Fatalf("decodeShow: %v", err)
+	}
+	h := parseHost(m)
+	if h.FQDN != "tx-target.ipa.pilot.internal" {
+		t.Fatalf("FQDN = %q", h.FQDN)
+	}
+	wantTypes := []string{"ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-nistp256 "}
+	if len(h.SSHPublicKeys) != len(wantTypes) {
+		t.Fatalf("SSHPublicKeys = %d entries, want %d", len(h.SSHPublicKeys), len(wantTypes))
+	}
+	for i, prefix := range wantTypes {
+		if len(h.SSHPublicKeys[i]) <= len(prefix) || h.SSHPublicKeys[i][:len(prefix)] != prefix {
+			t.Errorf("SSHPublicKeys[%d] = %.30q..., want prefix %q", i, h.SSHPublicKeys[i], prefix)
+		}
+	}
+
+	// A host with no published keys (the older host_show.json capture)
+	// yields nil, not an error.
+	env = loadFixture(t, "host_show.json")
+	m, err = decodeShow(env)
+	if err != nil {
+		t.Fatalf("decodeShow: %v", err)
+	}
+	if keys := parseHost(m).SSHPublicKeys; len(keys) != 0 {
+		t.Fatalf("host_show.json SSHPublicKeys = %v, want none", keys)
+	}
+}

@@ -1,0 +1,25 @@
+# group_vars/pilot-access-target-policy.yml 範例
+# (docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md §13,
+#  playbooks/apply/pilot-access-target-policy-apply.yml,
+#  docs/verification/pilot-access-target-policy.md)
+#
+# 套用在「要讓 Pilot Access Gateway 以 pilot-transport-v1 到達」的 target 主機上。
+# 對「來自 Gateway 位址」的每個 SSH session(不論 inner 以哪個帳號登入)拒絕
+# sshd 內建的 forwarding channel,驗證通過後才把主機加入 FreeIPA hostgroup
+# pilot-transport-ready——gateway 只會對這個 hostgroup 內的主機開 transport。
+# day-2/opt-in,不在 site.yml。主機必須先是 freeipa-client。
+
+# 必填:Gateway 連往 target 時使用的來源 IP(單一位址,不收 CIDR/hostname)。
+# 多 NIC 的 gateway 要列出所有實際會用來連 target 的位址。
+pilot_access_target_gateway_addresses: []
+#   例:["10.10.0.21", "10.10.0.22"]
+
+# strict(預設):SSH/SFTP/SCP/rsync;拒絕所有 sshd forwarding。
+# remote-dev:另外允許 local forwarding 到 target 自己的 loopback
+#             (VS Code Remote-SSH 需要;-L/-D 到非 loopback 仍被拒)。
+# pilot_access_target_forwarding_profile: strict
+
+# absent:先把主機移出 pilot-transport-ready,再移除 sshd drop-in。
+# pilot_access_target_policy_state: present
+
+# vault key: ipa_admin_password(只用於 pilot-transport-ready 成員管理)

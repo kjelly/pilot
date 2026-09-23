@@ -1,0 +1,82 @@
+{
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/tx-gw.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "result": {
+    "result": {
+      "cn": [
+        "tx-target.ipa.pilot.internal"
+      ],
+      "dn": "fqdn=tx-target.ipa.pilot.internal,cn=computers,cn=accounts,dc=ipa,dc=pilot,dc=internal",
+      "enrolledby_user": [
+        "admin"
+      ],
+      "fqdn": [
+        "tx-target.ipa.pilot.internal"
+      ],
+      "has_keytab": true,
+      "has_password": false,
+      "ipakrbokasdelegate": false,
+      "ipakrboktoauthasdelegate": false,
+      "ipakrbrequirespreauth": true,
+      "ipasshpubkey": [
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID2FYB+eiBTZfrR6SPm7Q8R5j9mxWNZe5p6TTSfCjDLY root@tx-target",
+        "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCOtYQC/7dGvRZdazqH2pfaAevtDR+31a7j1+8V8/ZxLj7F3ENIe9GaJozvplrjd3tH4x3l7Rtx/qZQugr2JGX9Q56Ztjs2vKzkY6rHiGCSMXOK61mbetzP/HtAy7XC7hG/tAga9r66rb5yFDFJWLgAiDP1oZr0PvFL1ms8/kjvavWPtLZRPsQcdWBxwxzEmbj9N0OBRtv0n6UtTJ/4glXVPI7GrrCYcyD7AZduewkX1J2fWTpnQANg8ArqP3Jvmm8rBgUCqxLfeKq9rSltJdnquRJ+o8Et3UOqStEgtSgd3cu1sgEFZLvD3sPTm0yajThcuKni/Fx65xEMdVFum8V0AFRzGzai7242QklK/y3/qj7VjP0OS1xdQ3itVmDRtKtrhE5TdzrPRz3oquW3wdW59ndm4I01Z7Be958PKhrwULYOTTs1g5nNffJikiAhf7gWecbb85kOxeqOrtsRW6xq5osTNEe+LanLKHzksjC54kMH64/OWxk/CVDvNg5WqSk= root@tx-target",
+        "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBGRT8i/ByyB2lHiEAaLUXCl0DAZlTAAgwVi1ty+6GXpqMoAJwxv7OSlu8M4Go4AcHkCVnP83GzbNrc8iITn7YFU= root@tx-target"
+      ],
+      "ipauniqueid": [
+        "46e55262-b729-11f1-8ab8-5254001b8746"
+      ],
+      "krbcanonicalname": [
+        "host/tx-target.ipa.pilot.internal@IPA.PILOT.INTERNAL"
+      ],
+      "krblastpwdchange": [
+        {
+          "__datetime__": "20260923083213Z"
+        }
+      ],
+      "krbprincipalname": [
+        "host/tx-target.ipa.pilot.internal@IPA.PILOT.INTERNAL"
+      ],
+      "managedby_host": [
+        "tx-target.ipa.pilot.internal"
+      ],
+      "managing_host": [
+        "tx-target.ipa.pilot.internal"
+      ],
+      "memberof_hostgroup": [
+        "pilot-target-txe2e"
+      ],
+      "nshardwareplatform": [
+        "x86_64"
+      ],
+      "nsosversion": [
+        "6.8.0-124-generic"
+      ],
+      "objectclass": [
+        "ipaobject",
+        "nshost",
+        "ipahost",
+        "pkiuser",
+        "ipaservice",
+        "krbprincipalaux",
+        "krbprincipal",
+        "ieee802device",
+        "ipasshhost",
+        "top",
+        "ipaSshGroupOfPubKeys"
+      ],
+      "serverhostname": [
+        "tx-target"
+      ],
+      "sshpubkeyfp": [
+        "SHA256:Je8N4QpXFUWt0ZvgUAvG7LoyCXox7M763piCC585biQ root@tx-target (ssh-ed25519)",
+        "SHA256:NWce+SKGzbY5R97VOHUdfmPiRnUEmxxRNDh4m0LDOLg root@tx-target (ssh-rsa)",
+        "SHA256:AmzWraY27SqFvF9jJfnApeYqKO9t8RaXaKApZ67c03A root@tx-target (ecdsa-sha2-nistp256)"
+      ]
+    },
+    "summary": null,
+    "value": "tx-target.ipa.pilot.internal"
+  },
+  "version": "4.13.1"
+}

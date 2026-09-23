@@ -17,10 +17,22 @@
 #       {id, class(os|pilot|external), source_file(pilot only, must live
 #        under /etc/apt/sources.list.d/)}
 #   pilot_apt_allow_scoped_refresh : bool, default true
+#   pilot_apt_update_timeout_seconds   : int, default 300 — wall clock for
+#       each apt-get update (apt-cache-refresh.yml / apt-scoped-refresh.yml)
+#   pilot_apt_download_timeout_seconds : int, default 900 — wall clock for
+#       each --download-only probe (apt-download-probe.yml)
 #
 # Guarantees (spec.md §25):
 #   * cache-first — apt-get update only runs when a requested package is
-#     both missing AND has no installable candidate in the current cache.
+#     both missing AND either has no installable candidate in the current
+#     cache, or its cached candidate's download 404s (stale metadata,
+#     detected by a --download-only probe before the install).
+#   * stale metadata is only considered fixed when a refresh succeeded for
+#     the required sources AND the same probe no longer 404s — a stale
+#     index still lists the old candidate after a failed or timed-out
+#     refresh, so "candidate exists" alone proves nothing on that path.
+#   * every apt-get network step (update, download probe) has a wall-clock
+#     bound, so a stalled mirror/proxy ends in FATAL instead of a hung play.
 #   * exactly one real `ansible.builtin.apt` install task, at the bottom
 #     of this file, never wrapped in ignore_errors — an in-scope failure
 #     still fails the play.
@@ -60,6 +72,12 @@
     _pilot_apt_policy: "{{ pilot_apt_policy | default('tolerant') }}"
     _pilot_apt_required_sources: "{{ pilot_apt_required_sources | default([]) }}"
     _pilot_apt_allow_scoped_refresh: "{{ pilot_apt_allow_scoped_refresh | default(true) }}"
+    # Reset per include: set_fact outlives the include, and a playbook that
+    # includes this file twice (freeipa-client: C1 then C8) would otherwise
+    # carry the first package's stale-metadata state into the second.
+    _pilot_apt_stale_metadata: false
+    _pilot_apt_stale_unrecovered: false
+    pilot_apt_download_probe_result: {}
 
 - name: "APT package install ({{ pilot_apt_component }}) — read installed-package facts"
   ansible.builtin.package_facts:
@@ -99,6 +117,25 @@
               | list | length) == (_pilot_apt_missing | length) }}
         _pilot_apt_mode: cache_hit
 
+    # Stale-metadata probe (spec.md §5 tolerant: "install 顯示 metadata
+    # stale → global refresh → retry install"); see apt-download-probe.yml.
+    - name: "APT package install ({{ pilot_apt_component }}) — stale-metadata probe (download-only, cache hit only)"
+      ansible.builtin.include_tasks: apt-download-probe.yml
+      vars:
+        pilot_apt_probe_stage: cache_hit
+      when:
+        - _pilot_apt_has_candidate
+        - _pilot_apt_policy != 'offline'
+
+    - name: "APT package install ({{ pilot_apt_component }}) — cached candidate download 404 means stale metadata (take the refresh path)"
+      ansible.builtin.set_fact:
+        _pilot_apt_has_candidate: false
+        _pilot_apt_stale_metadata: true
+        _pilot_apt_stale_unrecovered: true
+      when:
+        - (pilot_apt_download_probe_result.stage | default('')) == 'cache_hit'
+        - pilot_apt_download_probe_result.stale | default(false) | bool
+
     - name: "APT package install ({{ pilot_apt_component }}) — FATAL(apt_cache_insufficient_offline)"
       ansible.builtin.fail:
         msg: >-
@@ -110,13 +147,22 @@
         - not _pilot_apt_has_candidate
         - _pilot_apt_policy == 'offline'
 
+    # A block's `when:` is re-evaluated for every task inside it, so gating
+    # the refresh block on _pilot_apt_has_candidate itself would skip the
+    # rest of the block the moment a re-check flips it to true — including
+    # the stale-metadata checks that must run exactly then (found live
+    # 2026-09-23). Gate on a fact that stays fixed for the whole block.
+    - name: "APT package install ({{ pilot_apt_component }}) — does this install need a refresh?"
+      ansible.builtin.set_fact:
+        _pilot_apt_needs_refresh: "{{ not (_pilot_apt_has_candidate | bool) }}"
+
     - name: "APT package install ({{ pilot_apt_component }}) — refresh (policy={{ _pilot_apt_policy }})"
-      when: not _pilot_apt_has_candidate
+      when: _pilot_apt_needs_refresh | bool
       block:
         - name: "APT package install ({{ pilot_apt_component }}) — global refresh"
           ansible.builtin.include_tasks: apt-cache-refresh.yml
           vars:
-            pilot_apt_refresh_reason: package_candidate_missing
+            pilot_apt_refresh_reason: "{{ 'package_download_404' if (_pilot_apt_stale_metadata | default(false)) else 'package_candidate_missing' }}"
 
         - name: "APT package install ({{ pilot_apt_component }}) — re-check candidate after global refresh (one apt-cache policy per package; see cache-first check above for why)"
           ansible.builtin.command:
@@ -137,18 +183,50 @@
                   | list | length) == (_pilot_apt_missing | length) }}
             _pilot_apt_mode: global_refresh
 
-        - name: "APT package install ({{ pilot_apt_component }}) — scoped refresh (tolerant only, required sources)"
+        # Stale path: the old index still lists the old candidate, so the
+        # re-check above says "candidate exists" even when the refresh
+        # failed or timed out (found live 2026-09-23: a hung apt-get update
+        # was killed, the refresh counted as done, and the install hit the
+        # same 404s). Trust the candidate only if the refresh succeeded for
+        # the required sources and the probe no longer 404s.
+        - name: "APT package install ({{ pilot_apt_component }}) — stale metadata: a refresh that failed for the required sources cannot have fixed it"
+          ansible.builtin.set_fact:
+            _pilot_apt_has_candidate: false
           when:
-            - not _pilot_apt_has_candidate
-            - _pilot_apt_policy == 'tolerant'
+            - _pilot_apt_stale_metadata
+            - _pilot_apt_has_candidate
+            - not (pilot_apt_refresh_result.required_sources_healthy | bool)
+
+        - name: "APT package install ({{ pilot_apt_component }}) — stale metadata: re-probe after global refresh"
+          ansible.builtin.include_tasks: apt-download-probe.yml
+          vars:
+            pilot_apt_probe_stage: after_global_refresh
+          when:
+            - _pilot_apt_stale_metadata
+            - _pilot_apt_has_candidate
+
+        - name: "APT package install ({{ pilot_apt_component }}) — stale metadata: result of the re-probe after global refresh"
+          ansible.builtin.set_fact:
+            _pilot_apt_has_candidate: "{{ not (pilot_apt_download_probe_result.stale | bool) }}"
+            _pilot_apt_stale_unrecovered: "{{ pilot_apt_download_probe_result.stale | bool }}"
+          when: (pilot_apt_download_probe_result.stage | default('')) == 'after_global_refresh'
+
+        - name: "APT package install ({{ pilot_apt_component }}) — does this install need a scoped refresh?"
+          # fixed gate for the block below, for the same reason as above
+          ansible.builtin.set_fact:
+            _pilot_apt_needs_scoped_refresh: "{{ not (_pilot_apt_has_candidate | bool) and _pilot_apt_policy == 'tolerant' }}"
+
+        - name: "APT package install ({{ pilot_apt_component }}) — scoped refresh (tolerant only, required sources)"
+          when: _pilot_apt_needs_scoped_refresh | bool
           block:
             - name: "APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): scoped refresh disallowed"
               ansible.builtin.fail:
                 msg: >-
                   FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
-                  reason=required_source_unhealthy required_sources={{ _pilot_apt_required_sources | map(attribute='id') | list }}
+                  reason={{ 'stale_metadata_unrecovered' if _pilot_apt_stale_unrecovered else 'required_source_unhealthy' }}
+                  required_sources={{ _pilot_apt_required_sources | map(attribute='id') | list }}
                   global refresh_result={{ pilot_apt_refresh_result }} —
-                  no candidate after global refresh and
+                  no usable candidate after global refresh and
                   pilot_apt_allow_scoped_refresh is false.
               when: not _pilot_apt_allow_scoped_refresh
 
@@ -176,11 +254,27 @@
                       | list | length) == (_pilot_apt_missing | length) }}
                 _pilot_apt_mode: scoped_refresh
 
+            - name: "APT package install ({{ pilot_apt_component }}) — stale metadata: re-probe after scoped refresh"
+              ansible.builtin.include_tasks: apt-download-probe.yml
+              vars:
+                pilot_apt_probe_stage: after_scoped_refresh
+              when:
+                - _pilot_apt_stale_metadata
+                - _pilot_apt_has_candidate
+
+            - name: "APT package install ({{ pilot_apt_component }}) — stale metadata: result of the re-probe after scoped refresh"
+              ansible.builtin.set_fact:
+                _pilot_apt_has_candidate: "{{ not (pilot_apt_download_probe_result.stale | bool) }}"
+                _pilot_apt_stale_unrecovered: "{{ pilot_apt_download_probe_result.stale | bool }}"
+              when: (pilot_apt_download_probe_result.stage | default('')) == 'after_scoped_refresh'
+
             - name: "APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): scoped refresh did not recover"
               ansible.builtin.fail:
                 msg: >-
                   FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
-                  reason=required_source_unhealthy required_sources={{ _pilot_apt_required_sources | map(attribute='id') | list }}
+                  reason={{ 'stale_metadata_unrecovered' if _pilot_apt_stale_unrecovered else 'required_source_unhealthy' }}
+                  required_sources={{ _pilot_apt_required_sources | map(attribute='id') | list }}
+                  global refresh_result={{ pilot_apt_refresh_result }}
                   scoped_refresh_result={{ pilot_apt_scoped_refresh_result }}
               when: not _pilot_apt_has_candidate
 
@@ -188,7 +282,8 @@
           ansible.builtin.fail:
             msg: >-
               FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
-              reason=required_source_unhealthy policy={{ _pilot_apt_policy }}
+              reason={{ 'stale_metadata_unrecovered' if _pilot_apt_stale_unrecovered else 'required_source_unhealthy' }}
+              policy={{ _pilot_apt_policy }}
               refresh_result={{ pilot_apt_refresh_result }}
           when:
             - not _pilot_apt_has_candidate
@@ -212,6 +307,7 @@
         msg: >-
           OK component={{ pilot_apt_component }} apt_mode={{ _pilot_apt_mode }}
           packages={{ _pilot_apt_missing }}
+          stale_metadata={{ _pilot_apt_stale_metadata }}
           required_sources_healthy={{ (pilot_apt_refresh_result.required_sources_healthy
              if pilot_apt_refresh_result is defined else true) }}
           unrelated_sources_degraded={{ ((pilot_apt_refresh_result.errors | default([]))

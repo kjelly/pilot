@@ -58,19 +58,19 @@ pilot_session_store_key_id: "v1"
 # pilot_session_store_ingest_token: ""
 
 # Ingest HTTPS 監聽的 port。改這個值時,pilot-access-gateway 那邊
-# group_vars/host_vars 的 gateway.recording.session_store_url(host_vars 的
-# gateway_session_store_url,依實際 group_vars 慣例填寫)也要跟著改。
+# group_vars/host_vars 的 pilot_access_gateway_recording_session_store_url
+# 也要跟著改。
 # pilot_session_store_ingest_port: 8443
 
 # ----------------------------------------------------------------------------
-# pilot-access-gateway 那端需要手動對應設定(這支 playbook 不會自動幫
-# Gateway 填):
+# pilot-access-gateway 那端的對應設定(這支 playbook 不會自動幫 Gateway 填;
+# 2026-09-23 起改由 pilot-access-gateway 的 group vars 渲染,不要再手動編輯
+# /etc/pilot/access-gateway.yaml——手動加的內容會被下一次 apply 以 group vars 為準):
 #
-#   gateway:
-#     recording:
-#       session_store_url: "https://<session_store_fqdn>:<pilot_session_store_ingest_port>"
-#       session_store_ingest_token_file: /etc/pilot/session-store-ingest-token  # 內容 = 上面同一個 token
-#       session_store_ca_file: /etc/ipa/ca.crt   # Gateway 本身已是 freeipa-client,天然信任同一個 FreeIPA CA
+#   pilot_access_gateway_recording_mode: terminal_output   # 或 terminal_io
+#   pilot_access_gateway_recording_session_store_url: "https://<session_store_fqdn>:<pilot_session_store_ingest_port>"
+#   pilot_access_gateway_recording_session_store_ingest_token_file: /etc/pilot/session-store-ingest-token  # 內容 = 上面同一個 token,mode 0600
+#   pilot_access_gateway_recording_session_store_ca_file: /etc/ipa/ca.crt   # Gateway 本身已是 freeipa-client,天然信任同一個 FreeIPA CA
 #
 # `session_store_ingest_token_file` 的內容必須跟這裡的
 # `pilot_session_store_ingest_token` 完全一致——這是同一把憑證,只是分別部

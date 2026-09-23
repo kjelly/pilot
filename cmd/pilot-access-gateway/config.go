@@ -30,6 +30,16 @@ type GatewaySection struct {
 	PortalUserGroup string           `yaml:"portal_user_group"`
 	FreeIPA         FreeIPASection   `yaml:"freeipa"`
 	Recording       RecordingSection `yaml:"recording"`
+	Transport       TransportSection `yaml:"transport"`
+}
+
+// TransportSection configures the captive opaque SSH transport
+// (`pilot-transport-v1`, docs/superpowers/specs/2026-09-23-pilot-access-
+// gateway-captive-ssh-transport-spec.md §12.1). A config without a
+// transport: block — every config written before this feature — gets
+// Enabled == false, so upgrading never silently opens a new data plane.
+type TransportSection struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // RecordingSection configures Phase 7's PTY session recorder (docs/tmp/

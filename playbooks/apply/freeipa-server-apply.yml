@@ -467,7 +467,13 @@
         # rather than `systemctl enable`, so it assumes the directory already
         # exists and crashes with FileNotFoundError if it doesn't.
         - { path: /etc/systemd/system/pki-tomcatd.target.wants, mode: "0755" }
-      when: not ansible_check_mode
+      # Pre-install only, like every other installer-preparation task here:
+      # once ipa-server-install has succeeded it owns these paths (e.g. it
+      # hands /var/lib/ipa/pki-ca/publish to the CA for CRL publication), and
+      # forcing root:root 0755 back on every re-apply both undid that and
+      # broke idempotency on the first re-apply after a fresh install (found
+      # by the captive-transport Phase 5 fresh-VM topology test).
+      when: not ansible_check_mode and not ipa_cfg.stat.exists
       tags: [freeipa, freeipa-install]
 
     # ipa-server-install is NOT idempotent (re-running on a configured host

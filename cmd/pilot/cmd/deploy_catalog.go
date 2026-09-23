@@ -138,8 +138,14 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "pilot-session-store", Label: "安裝 Pilot Session Store(terminal recording 加密持久化 + ingest/read API)",
 		Playbook: "playbooks/apply/pilot-session-store-apply.yml", DefaultGroup: "pilot-session-store", StageVar: "stage",
-		Note:      "site.include:true(已在 site.yml，把這個角色加進 hosts.yml 本身就是核准動作，之後每次全站部署都會照常套用);目標主機必須先完成 freeipa-client enrollment 且已有正向 DNS record；stateful(/var/lib/pilot-session-store)，這台主機從不是 SSH portal ingress(無 ForceCommand/HBAC)。需要 pilot_session_store_retention_days(無內建預設值)、pilot_session_store_key_id、pilot_session_store_master_key(vault，64 hex 字元)、pilot_session_store_ingest_token(vault)。pilot-access-gateway 那端要另外手動設定 gateway.recording.session_store_url/session_store_ingest_token_file/session_store_ca_file 才會真的把 recording 送過來——這支 playbook 不會自動幫 Gateway 填。見 docs/verification/pilot-session-store.md。",
+		Note:      "site.include:true(已在 site.yml，把這個角色加進 hosts.yml 本身就是核准動作，之後每次全站部署都會照常套用);目標主機必須先完成 freeipa-client enrollment 且已有正向 DNS record；stateful(/var/lib/pilot-session-store)，這台主機從不是 SSH portal ingress(無 ForceCommand/HBAC)。需要 pilot_session_store_retention_days(無內建預設值)、pilot_session_store_key_id、pilot_session_store_master_key(vault，64 hex 字元)、pilot_session_store_ingest_token(vault)。pilot-access-gateway 那端要另外設定 pilot_access_gateway_recording_mode/pilot_access_gateway_recording_session_store_url/_ingest_token_file/_ca_file 這組 group vars(由 pilot-access-gateway-apply.yml 渲染進 gateway.recording)才會真的把 recording 送過來——這支 playbook 不會自動幫 Gateway 填。見 docs/verification/pilot-session-store.md。",
 		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，僅安裝當下建立 role-pilot-session-auditor group 用)+ master key/ingest token(openssl rand -hex 32)",
+	},
+	{
+		Key: "pilot-access-target-policy", Label: "套用 Pilot Access target policy(captive SSH transport 的 target 端 sshd 限制)",
+		Playbook: "playbooks/apply/pilot-access-target-policy-apply.yml", DefaultGroup: "pilot-access-target-policy", StageVar: "stage",
+		Note:      "day-2/opt-in 角色(不在 site.yml);目標主機必須先是 freeipa-client，且不可同時是 pilot-access-gateway/pilot-access-directory。必填 pilot_access_target_gateway_addresses(gateway 連往 target 的來源 IP 清單，JSON list)。對 Gateway 位址來的每個 SSH session 拒絕 sshd forwarding(strict;remote-dev 另允許到 target loopback 的 local forwarding 給 VS Code Remote-SSH)，驗證通過後才加入 FreeIPA hostgroup pilot-transport-ready——gateway 只對這個 hostgroup 開 pilot-transport-v1。pilot_access_target_policy_state=absent 先移出 hostgroup 再移除 drop-in。見 docs/verification/pilot-access-target-policy.md。",
+		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，只用於 pilot-transport-ready hostgroup 成員管理)",
 	},
 	{
 		Key: "reverse-proxy", Label: "Nginx reverse proxy 基礎安裝",

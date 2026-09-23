@@ -176,8 +176,9 @@ func parseGroup(m map[string]any) Group {
 
 func parseHost(m map[string]any) Host {
 	return Host{
-		FQDN:        attrString(m, "fqdn"),
-		Annotations: parseAnnotations(attrStrings(m, "userclass")),
+		FQDN:          attrString(m, "fqdn"),
+		Annotations:   parseAnnotations(attrStrings(m, "userclass")),
+		SSHPublicKeys: attrStrings(m, "ipasshpubkey"),
 	}
 }
 

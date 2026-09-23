@@ -3,6 +3,7 @@ package gatewayapi
 import (
 	"encoding/json"
 	"net/http"
+	"os/user"
 	"testing"
 )
 
@@ -80,4 +81,34 @@ func TestHandleHealth_IgnoresPortalUserGroup(t *testing.T) {
 	if got.Status != "ok" {
 		t.Fatalf("Status = %q", got.Status)
 	}
+}
+
+// TestHandleIdentity_PortalUserGroupHeldByPeerAllows is the positive case
+// the old member-list check could not express: the peer process carries
+// the configured group (here, its own primary group) in its kernel
+// credentials, so it is served — the same fact SocketGroup= honors.
+func TestHandleIdentity_PortalUserGroupHeldByPeerAllows(t *testing.T) {
+	g := currentPrimaryGroupName(t)
+	client, base := testServerWithConfig(t, currentUsername(t), func(s *Server) { s.PortalUserGroup = g })
+	resp, err := client.Get(base + "/v1/identity")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 when the peer holds %s", resp.StatusCode, g)
+	}
+}
+
+func currentPrimaryGroupName(t *testing.T) string {
+	t.Helper()
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("user.Current unavailable: %v", err)
+	}
+	g, err := user.LookupGroupId(u.Gid)
+	if err != nil {
+		t.Skipf("LookupGroupId unavailable: %v", err)
+	}
+	return g.Name
 }

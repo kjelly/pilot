@@ -49,6 +49,7 @@ var roleContracts = []roleContract{
 	{Name: "pilot-access-gateway", Description: "Stateless FreeIPA-backed SSH/sudo 存取閘道；day-2/opt-in，目標主機須先是 freeipa-client (pilot-access-gateway-apply.yml)", GroupVarsStem: "pilot-access-gateway", VaultSections: []string{"freeipa"}, HostVarsKeys: []string{"gateway_id", "gateway_scope"}},
 	{Name: "pilot-access-directory", Description: "跨 scope discovery/routing 入口(single canonical SSH ingress)，只讀 FreeIPA 投影、從不取代 Gateway 的 fresh authorize；目標主機須先是 freeipa-client (pilot-access-directory-apply.yml)", GroupVarsStem: "pilot-access-directory", VaultSections: []string{"freeipa"}, HostVarsKeys: []string{"directory_id"}},
 	{Name: "pilot-session-store", Description: "Terminal recording 的加密 durable persistence + TLS ingest API + Unix socket read/replay API；stateful，目標主機須先是 freeipa-client (pilot-session-store-apply.yml)", GroupVarsStem: "pilot-session-store", VaultSections: []string{"freeipa"}},
+	{Name: "pilot-access-target-policy", Description: "Pilot Access Gateway captive SSH transport 的 target 端政策：對 Gateway 來的 session 拒絕 sshd forwarding，驗證後加入 FreeIPA pilot-transport-ready；day-2/opt-in，目標主機須先是 freeipa-client (pilot-access-target-policy-apply.yml)", GroupVarsStem: "pilot-access-target-policy", VaultSections: []string{"freeipa"}},
 }
 
 func roleContractsByName() map[string]roleContract {

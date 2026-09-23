@@ -1,0 +1,185 @@
+---
+# Test-only identity fixtures for the Pilot Access Gateway captive SSH
+# transport E2E (docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md
+# §15.2). Idempotent (a second run is changed=0); no secret is ever logged.
+#
+#   1. FreeIPA user transportuser — created ONLY through the canonical
+#      freeipa-client-fixtures.yml (AGENTS.md §4.1), user only, no sudo rule.
+#   2. On the workstation (group pilot-transport-workstation): a local user
+#      wsuser with an ed25519 key pair.
+#   3. On the FreeIPA server: that public key published as transportuser's
+#      ipaSshPubKey, so the SAME key authenticates both the outer SSH hop
+#      (gateway) and the inner SSH hop (target) through SSSD's
+#      sss_ssh_authorizedkeys — no password ever has to be typed by the E2E
+#      script for the transport path.
+#
+# HBAC: this topology keeps FreeIPA's shipped allow_all rule (nothing here
+# disables it), so transportuser may reach every enrolled host; the gateway's
+# scope (pilot-target-<gateway_scope>) is what narrows the transport target
+# set, which is exactly what the E2E exercises.
+#
+# The network-isolation half (tx-ws -> tx-target tcp/22 dropped) lives in
+# pilot-access-transport-isolation-fixtures.yml and runs after the target
+# policy has been applied.
+#
+# Usage: imported by playbooks/test/pilot-access-transport-e2e.yml; needs
+#   -e @~/.vault/<sandbox>.yaml   (ipa_admin_password)
+- name: Ensure the transport E2E IPA user exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: "{{ transport_fixture_user | default('transportuser') }}"
+    ipa_fixture_user_first: Transport
+    ipa_fixture_user_last: E2E
+    ipa_fixture_manage_sudorule: false
+
+- name: Transport E2E workstation — local user and SSH key pair
+  hosts: "{{ transport_workstation_group | default('pilot-transport-workstation') }}"
+  become: true
+  gather_facts: false
+  vars:
+    transport_ws_user: wsuser
+  tasks:
+    - name: Ensure the workstation test user exists
+      ansible.builtin.user:
+        name: "{{ transport_ws_user }}"
+        shell: /bin/bash
+        create_home: true
+
+    - name: Ensure the workstation test user's ~/.ssh exists
+      ansible.builtin.file:
+        path: "/home/{{ transport_ws_user }}/.ssh"
+        state: directory
+        owner: "{{ transport_ws_user }}"
+        group: "{{ transport_ws_user }}"
+        mode: "0700"
+
+    - name: Generate the workstation test user's ed25519 key pair (once)
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -q
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -C
+          - "{{ transport_ws_user }}@pilot-transport-e2e"
+          - -f
+          - "/home/{{ transport_ws_user }}/.ssh/id_ed25519"
+        creates: "/home/{{ transport_ws_user }}/.ssh/id_ed25519"
+      become_user: "{{ transport_ws_user }}"
+      # In check mode the user task above only simulated creating the user,
+      # so becoming it would fail on a fresh host ("sudo: unknown user").
+      when: not ansible_check_mode
+
+    - name: Read the workstation test user's public key
+      ansible.builtin.slurp:
+        src: "/home/{{ transport_ws_user }}/.ssh/id_ed25519.pub"
+      register: transport_ws_pubkey_raw
+      when: not ansible_check_mode
+
+    - name: Remember the public key for the FreeIPA play below
+      ansible.builtin.set_fact:
+        transport_ws_pubkey_line: "{{ transport_ws_pubkey_raw.content | b64decode | trim }}"
+      when: not ansible_check_mode
+
+- name: Transport E2E — publish the workstation key as the IPA user's SSH key
+  hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    ipa_domain: ipa.pilot.internal
+    ipa_realm: "{{ ipa_domain | upper }}"
+    transport_fixture_user_effective: "{{ transport_fixture_user | default('transportuser') }}"
+    transport_ws_pubkey: >-
+      {{ hostvars[groups[transport_workstation_group | default('pilot-transport-workstation')][0]].transport_ws_pubkey_line }}
+    # "<type> <base64>" — the comment is irrelevant for the idempotency check.
+    transport_ws_pubkey_body: "{{ (transport_ws_pubkey | trim).split(' ')[0:2] | join(' ') }}"
+  pre_tasks:
+    - name: "Gate: admin password present (fail before touching the directory)"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+        fail_msg: "Missing ipa_admin_password — pass a vault file with -e @..."
+      tags: [always]
+  tasks:
+    - name: Fixtures — kinit admin
+      ansible.builtin.shell:
+        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+      changed_when: false
+      no_log: true
+
+    # Not --raw: raw output shows ipaSshPubKey base64-encoded (the whole
+    # "<type> <base64> <comment>" line), so the key body would never match;
+    # the default output prints it decoded as "SSH public key: ...".
+    - name: Fixtures — read the IPA user's current SSH public keys
+      ansible.builtin.command:
+        argv: [ipa, user-show, "{{ transport_fixture_user_effective }}", --all]
+      register: transport_user_show
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Fixtures — publish the workstation key on the IPA user
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - user-mod
+          - "{{ transport_fixture_user_effective }}"
+          - "--sshpubkey={{ transport_ws_pubkey | trim }}"
+      when:
+        - not ansible_check_mode
+        - transport_ws_pubkey_body not in transport_user_show.stdout
+      register: transport_user_mod
+      changed_when: transport_user_mod.rc == 0
+
+    # Optional: a FreeIPA password for transportuser, needed only by the E2E
+    # probes that exercise the legacy pilot-connect path (it takes a
+    # session-scoped Kerberos password in the Portal). Supplied from a
+    # disposable secrets file (-e @<file>), never argv. Idempotent: the
+    # password is (re)set only when a kinit with it fails, and it is set
+    # non-expiring because an admin-set FreeIPA password is otherwise
+    # immediately expired.
+    - name: Fixtures — does the E2E password already work?
+      ansible.builtin.command:
+        argv: [kinit, -c, "FILE:/tmp/pilot-transport-e2e-pwcheck", "{{ transport_fixture_user_effective }}@{{ ipa_realm }}"]
+        stdin: "{{ transport_fixture_user_password }}"
+      register: transport_user_pwcheck
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: transport_fixture_user_password is defined and not ansible_check_mode
+
+    - name: Fixtures — set the E2E password (only when it does not work yet)
+      ansible.builtin.command:
+        argv: [ipa, user-mod, "{{ transport_fixture_user_effective }}", --password]
+        stdin: "{{ transport_fixture_user_password }}\n{{ transport_fixture_user_password }}"
+      no_log: true
+      when:
+        - transport_fixture_user_password is defined
+        - not ansible_check_mode
+        - transport_user_pwcheck.rc != 0
+
+    - name: Fixtures — keep the E2E password from expiring
+      ansible.builtin.command:
+        argv: [ipa, user-mod, "{{ transport_fixture_user_effective }}", "--setattr=krbPasswordExpiration=20380101000000Z"]
+      register: transport_user_pwexp
+      changed_when: transport_user_pwexp.rc == 0
+      failed_when:
+        - transport_user_pwexp.rc != 0
+        - "'no modifications' not in (transport_user_pwexp.stderr | default(''))"
+      when:
+        - transport_fixture_user_password is defined
+        - not ansible_check_mode
+        - transport_user_pwcheck.rc != 0
+
+    - name: Fixtures — drop the password-check ticket cache
+      ansible.builtin.file:
+        path: /tmp/pilot-transport-e2e-pwcheck
+        state: absent
+      changed_when: false
+      when: transport_fixture_user_password is defined
+
+    - name: Fixtures — release the Kerberos ticket
+      ansible.builtin.command: kdestroy
+      changed_when: false
+      failed_when: false

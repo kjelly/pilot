@@ -1,0 +1,37 @@
+schemaVersion: 1
+id: pilot-access-target-policy
+role: pilot-access-target-policy
+specs:
+  - path: docs/verification/pilot-access-target-policy.md
+    rows: {all: true}
+playbooks:
+  apply: playbooks/apply/pilot-access-target-policy-apply.yml
+regressionTests:
+  - internal/spec/pilot_access_target_policy_regression_test.go
+  - internal/gatewayapi/transport_test.go
+dependencies:
+  - {component: freeipa-client, required: true, relation: sameHosts}
+# Gateway/Directory hosts carry their own ForceCommand Match block for the
+# portal group; this policy belongs on transport targets only.
+conflicts: [pilot-access-gateway, pilot-access-directory]
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 256, minDiskGiB: 1}
+groupVars:
+  - {name: pilot_access_target_policy_state, type: string, required: false, default: present, secret: false, validation: "^(present|absent)$"}
+  - {name: pilot_access_target_forwarding_profile, type: string, required: false, default: strict, secret: false, validation: "^(strict|remote-dev)$"}
+  - {name: pilot_access_target_gateway_addresses, type: stringList, required: true, secret: false}
+  - {name: ipa_admin_password, type: string, required: true, secret: true}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: mapped
+  rows:
+    "docs/verification/pilot-access-target-policy.md#TP01": {tags: [TP01], reason: "drop-in snapshot + validated install task"}
+    "docs/verification/pilot-access-target-policy.md#TP02": {tags: [TP02], reason: "sshd -t before and after the reload"}
+    "docs/verification/pilot-access-target-policy.md#TP03": {tags: [TP03], reason: "per-gateway-address sshd -T -C check + assert (common restrictions)"}
+    "docs/verification/pilot-access-target-policy.md#TP04": {tags: [TP04], reason: "same check + assert (profile-specific TCP forwarding/PermitOpen)"}
+    "docs/verification/pilot-access-target-policy.md#TP05": {tags: [TP05], reason: "baseline vs post-change byte equality for a non-gateway address and the global effective config"}
+verification: {autoDeploy: false}
+# Day-2 opt-in: tightening sshd on transport targets is a deliberate act,
+# not part of every site-wide deploy.
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

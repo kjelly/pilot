@@ -21,6 +21,10 @@ Phase 1-5 已依 §16 Migration Plan 全數實作完成，分 5 個 commit：
    `playbooks/apply/os-patch-sla-apply.yml` 一筆合法例外）；兩者都在既有
    `.github/workflows/ci.yml` 的 `go test -race -count=1 ./...` 步驟下自動跑，未額外新增 CI job。
 6. **`fix(apt): fix 4 bugs found via live vm-target testing`** — 2026-09-14 補測，見下方。
+7. **`fix(apt)` 2026-09-23（`ad6d552`、`5b735ee`）**：`ad6d552` 補上 cached candidate
+   的 `.deb` 404 → refresh 路徑。`5b735ee` 讓每個 apt-get 網路步驟都有 wall clock，
+   並且 stale 路徑必須等到 refresh 健康、且 re-probe 不再 404，才採信 candidate
+   （§21.1 T11/T12）。實跑見 `docs/evidence/apt-repository-tolerance/2026-09-23-5b735ee.md`。
 
 **驗證完成度**：
 - `ansible-playbook --syntax-check` / `ansible-lint`（advisory）/ `go build ./...` /
@@ -449,6 +453,15 @@ failed_when: false
 
 **最終 package install 不得 `ignore_errors: true`。**
 
+每次 `apt-get update`（global 與 scoped）都以 coreutils `timeout` 包住：超過
+`pilot_apt_update_timeout_seconds`（預設 300）送 TERM，30 秒後 KILL。Ansible
+command module 看到的 rc 是 124（TERM 結束）或 -9（需要 KILL；`timeout` 會 KILL
+整個 process group，包含它自己）；經過 shell 時 KILL 顯示為 137。逾時時
+`errors` 追加一筆 `type: refresh_timeout, required: true`，且
+`required_sources_healthy` 一律為 false——逾時無法判斷是哪個 source 卡住。
+（2026-09-23 實測起因：vm-target 上 `apt-get update` 卡在 caching proxy 一條
+CLOSE-WAIT 連線，沒有上限，整個 play 停住。）
+
 ---
 
 ## 10. Failure Classification
@@ -470,6 +483,7 @@ failed_when: false
 | `dependency_broken` | unmet dependencies | fatal |
 | `package_no_candidate` | no installation candidate | fatal after scoped refresh |
 | `unknown` | unknown apt failure | conservative fatal if install blocked |
+| `refresh_timeout` | `apt-get update` 超過 `pilot_apt_update_timeout_seconds`（rc 124／-9／137，不是從文字比對） | 一律視為 required source 不健康 |
 
 Classification 不得把未知 package install error 靜默降級。
 
@@ -485,7 +499,14 @@ pilot_apt_lock_delay_seconds: 10
 
 pilot_apt_network_retries: 2
 pilot_apt_network_delay_seconds: 5
+
+pilot_apt_update_timeout_seconds: 300     # 每次 apt-get update 的 wall clock
+pilot_apt_download_timeout_seconds: 900   # 每次 --download-only probe 的 wall clock
 ```
+
+逾時不 retry（lock retry 只看 lock 訊息）：卡住的 mirror/proxy 重跑通常一樣卡住。
+Download probe 逾時直接 `FATAL reason=apt_download_timeout`，因為真正的 install
+會用同一條路徑抓同一批檔案。
 
 不得 retry：
 
@@ -643,6 +664,8 @@ pilot_apt_required_sources:
 pilot_apt_cache_valid_time: 3600
 pilot_apt_allow_scoped_refresh: true
 pilot_apt_component: freeipa-client
+pilot_apt_update_timeout_seconds: 300
+pilot_apt_download_timeout_seconds: 900
 ```
 
 ### Assertions
@@ -1099,6 +1122,37 @@ Expected：
 
 ```text
 FATAL
+```
+
+#### T11 — Stale metadata, refresh fails or times out
+
+```text
+cached candidate exists, its .deb downloads 404 (stale index)
+apt-get update to the required source hangs (or fails)
+```
+
+Expected：
+
+```text
+global refresh: refresh_timeout (or classified required error), required_sources_healthy=false
+舊 index 的 candidate 不被採信，不做 install
+scoped refresh 同樣失敗 → FATAL(stale_metadata_unrecovered)
+package 沒有裝上；每次 update 在 pilot_apt_update_timeout_seconds 內結束
+```
+
+（2026-09-23 前的行為：refresh 被砍掉後仍回報 ok，舊 candidate 通過 re-check，
+install 撞上同一批 404。）
+
+#### T12 — Download probe stalls
+
+```text
+cached candidate exists, package download never completes
+```
+
+Expected：
+
+```text
+FATAL(apt_download_timeout)，在 pilot_apt_download_timeout_seconds 內結束
 ```
 
 ### 21.2 Security regression tests
