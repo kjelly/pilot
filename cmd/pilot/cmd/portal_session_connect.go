@@ -1,10 +1,15 @@
-// portal_session_connect.go is the Gateway-side half of the Directory ->
-// Gateway -> Target handoff (docs/tmp/now/spec.md §18): a one-shot,
-// non-interactive Connect invoked as sshd's entire ForceCommand session,
-// not a menu action inside a TUI loop. There is no TTY-menu context here
-// — this process IS the user's whole SSH session, so failures are
-// reported as a single stderr line + a non-zero process exit, never an
-// interactive confirm prompt.
+// portal_session_connect.go is the connect core shared by the interactive
+// Portal Connect action and the Directory -> Gateway -> Target one-shot
+// handoff (per-host recording spec §18). Both paths re-authorize fresh and
+// then take the plain or the recorded path strictly from the gateway's
+// ConnectAuthorize response; neither reads hosts.yml, the environment, a
+// CLI flag or SSH_ORIGINAL_COMMAND to decide whether a session records
+// (§18.5).
+//
+// The one-shot path runs as sshd's entire ForceCommand session, so its
+// failures are a single stderr line plus a non-zero process exit; the
+// interactive path turns the same errors into a confirm prompt and returns
+// to the Portal menu.
 package cmd
 
 import (
@@ -14,44 +19,16 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"strings"
 	"time"
 
+	"golang.org/x/term"
+
+	"github.com/kjelly/pilot/internal/gatewayapi"
+	"github.com/kjelly/pilot/internal/ingesttoken"
 	"github.com/kjelly/pilot/internal/sessionaudit"
 	"github.com/kjelly/pilot/internal/sessionrecording"
 )
-
-// recordingStdin/recordingStdout are the recorded session's outer
-// terminal (spec.md §25.1) — the real process stdio by default,
-// overridable in tests so they never need a real controlling terminal.
-var (
-	recordingStdin  io.Reader = os.Stdin
-	recordingStdout io.Writer = os.Stdout
-)
-
-// defaultRecordingPath derives one session's recording file path under
-// this process's own per-uid runtime base (the same
-// portalKerberosRuntimeBase(os.Getuid()) newRecordedConnectSession
-// already uses for its private control-socket directory, see
-// portal_ssh_recording.go) — a bounded, transient runtime location (D9:
-// "bounded transient buffers / runtime temp files", never durable local
-// state) for Phase 7's plain FileSink, a deliberate stopgap until Phase
-// 8's real pilot-session-store sink exists (spec.md §35).
-//
-// Deliberately NOT a shared location like /run/pilot/ (found live: that
-// directory is root-owned mode 0755 for the gateway daemon's own socket,
-// so the CONNECTING USER's own one-shot connect process — running as
-// them, not as the gateway service account — cannot create anything
-// under it; every recording attempt failed closed with "no such file or
-// directory" until this was found and fixed). The per-uid runtime base is
-// already correctly permissioned for exactly this "this user's own
-// process writes its own private runtime file" use, and every file
-// created under it is private (0700 dir, see defaultRecordingPath below).
-func defaultRecordingPath(sessionID string) string {
-	dir := filepath.Join(portalKerberosRuntimeBase(os.Getuid()), "pilot-session-recordings")
-	_ = os.MkdirAll(dir, 0o700)
-	return filepath.Join(dir, sessionID+".ndjson")
-}
 
 // portalSessionExitError lets runPortalOneShotConnect propagate a specific
 // process exit code (spec.md §18 point 6/7: "target session exit -> process
@@ -67,107 +44,110 @@ func (e *portalSessionExitError) Error() string { return e.err.Error() }
 func (e *portalSessionExitError) ExitCode() int { return e.code }
 func (e *portalSessionExitError) Unwrap() error { return e.err }
 
-// recordingConfig is the (optional) session-recording policy for one
-// one-shot connect (spec.md §23/§27). The zero value (Mode == "", treated
-// identically to sessionrecording.ModeMetadata) is the unconditional
-// default: runPortalOneShotConnect's behavior with a zero-value
-// recordingConfig is byte-for-byte the same direct
-// buildConnectSSHCmd/sshLauncher call this file used before recording
-// existed — recording is additive, opt-in machinery, never a default risk
-// (D8).
+// portalConnectStage says where a connect stopped, so the interactive Portal
+// can pick its prompt.
+type portalConnectStage int
+
+const (
+	portalStageAuthorizeCall portalConnectStage = iota // identity or authorize request failed
+	portalStageDenied                                  // the gateway denied the target
+	portalStageCredentials                             // Kerberos credentials could not be obtained
+	portalStageRecording                               // recording could not start; nothing was connected
+	portalStageSSH                                     // the target connection failed or ended with an error
+)
+
+// portalConnectError is a connect that ended before, or instead of, a clean
+// target session. msg is the user-facing sentence.
+type portalConnectError struct {
+	stage portalConnectStage
+	msg   string
+	err   error
+	// reason is the gateway's DenyReason for a recording deny.
+	reason string
+}
+
+func (e *portalConnectError) Error() string {
+	if e.err != nil {
+		return fmt.Sprintf("pilot-session: %s: %v", e.msg, e.err)
+	}
+	return "pilot-session: " + e.msg
+}
+
+func (e *portalConnectError) Unwrap() error { return e.err }
+
+// portalDenyReasonMessage is the user-facing sentence for a recording deny
+// reason (per-host recording spec §18.1); "" for an ordinary HBAC/scope deny.
+func portalDenyReasonMessage(reason string) string {
+	switch reason {
+	case gatewayapi.DenyReasonRecordingPolicyUnavailable:
+		return "Connection not started: this host's recording policy could not be verified."
+	case gatewayapi.DenyReasonRecordingPolicyInvalid:
+		return "Connection not started: this host's recording policy is misconfigured. Contact an administrator."
+	case gatewayapi.DenyReasonRecordingBackend:
+		return "Connection not started: session recording is required for this host but the recording service is not configured."
+	case gatewayapi.DenyReasonRecordingSessionID:
+		return "Connection not started: internal session id error."
+	case "":
+		return ""
+	default:
+		return "Connection not started: " + reason + "."
+	}
+}
+
+// portalRecordingNotice is the pre-connect notice for a recorded session
+// (per-host recording spec §24.3); "" for metadata.
+func portalRecordingNotice(mode, sessionID string) string {
+	switch mode {
+	case sessionrecording.ModeTerminalOutput:
+		return "This SSH session is recorded by Pilot (terminal output). Session ID: " + sessionID
+	case sessionrecording.ModeTerminalIO:
+		return "This SSH session is recorded by Pilot (terminal output and input; typed input is stored as redacted byte counts). Session ID: " + sessionID
+	default:
+		return ""
+	}
+}
+
+// portalSessionDeps bundles the injectable dependencies shared by both
+// connect paths (per-host recording spec §18.1).
+type portalSessionDeps struct {
+	Client        *portalClient
+	Credentials   portalCredentialSession
+	Emitter       *sessionaudit.Emitter
+	SSHConfigPath string
+	// Terminal is the outer terminal the recorded path puts in raw mode,
+	// sizes the child from and watches for SIGWINCH. nil records at 80x24
+	// without raw mode.
+	Terminal *os.File
+	// Stdin is the recorded path's outer input. On the interactive path it
+	// is a cancelreader, canceled once the session ends so no goroutine is
+	// left reading the terminal.
+	Stdin io.Reader
+	// Stdout is the recorded path's outer output.
+	Stdout io.Writer
+	// Notice receives the pre-connect recording notice (stderr).
+	Notice io.Writer
+}
+
+// recordingConfig is the recording policy one ConnectAuthorize response
+// grants (per-host recording spec §15). A metadata or empty Mode never
+// constructs a recorder.
 type recordingConfig struct {
 	Mode          string
+	PolicySource  string
 	FailurePolicy string
 	QueueEvents   int
 	FlushInterval time.Duration
 	FailureGrace  time.Duration
-	// LocalPath is where a FileSink writes when Mode is terminal_output/
-	// terminal_io AND SessionStoreURL is empty — a deliberately plain,
-	// unencrypted, transient stopgap (D9: "bounded transient buffers /
-	// runtime temp files", never durable local state) for deployments
-	// with no pilot-session-store configured yet. Empty (with
-	// SessionStoreURL also empty) means "recording enabled but nowhere to
-	// write it", which is a misconfiguration this function fails closed
-	// on rather than silently dropping every event.
-	LocalPath string
 
-	// SessionStore* (spec.md §28, Phase 8) come back on the SAME
-	// ConnectAuthorize response as everything else in this struct
-	// (gatewayapi.ConnectAuthorizeResponse.RecordingSessionStore*, sourced
-	// from this gateway's own /etc/pilot/access-gateway.yaml
-	// gateway.recording.session_store_url). When SessionStoreURL is
-	// non-empty, runPortalOneShotConnectRecorded ships events to
-	// pilot-session-store via an HTTPSink instead of LocalPath's FileSink
-	// — the durable, encrypted, centrally-replayable path spec.md §35
-	// requires before terminal_output/terminal_io can be called
-	// production-ready.
 	SessionStoreURL         string
 	SessionStoreCAFile      string
 	SessionStoreIngestToken string
 }
 
-func (c recordingConfig) enabled() bool {
-	return c.Mode == sessionrecording.ModeTerminalOutput || c.Mode == sessionrecording.ModeTerminalIO
-}
-
-// runPortalOneShotConnect implements spec.md §18's exact sequence:
-//  1. connect to the Gateway API (identity via its own SO_PEERCRED
-//     resolution — the same client used by the interactive path, nothing
-//     new needed here beyond calling it non-interactively);
-//  2. POST /v1/connect/authorize with only {"target": fqdn} — a FRESH,
-//     independent authorize (D1/D6): whatever Directory decided before
-//     sending the user here is not trusted at all;
-//  3. Allowed=false -> deny, non-zero exit, no SSH attempt;
-//  4. Allowed=true -> either the exact same controlled SSH launch the
-//     interactive Connect action uses (recording.enabled() == false, the
-//     unconditional default) or, when session recording is enabled, the
-//     two-phase ControlMaster flow (portal_ssh_recording.go) + an
-//     internal/sessionrecording.Recorder wrapping the recorded phase
-//     (spec.md §24/§25) — a real behavior fork, not a recorder-with-a-
-//     no-op-mode;
-//  5. target session exit -> this process's own exit, with the ssh
-//     child's exit code propagated via portalSessionExitError.
-//
-// sessionID is accepted only for structured-log correlation (spec.md
-// §17.2/§21, Phase 6: internal/sessionaudit.Emitter carries it into every
-// event this function emits); it is never read by, or passed into, the
-// authorize decision above.
-//
-// client/credentials/sshConfigPath/emitter are injected (mirroring
-// connectToHost's own dependency-injection shape in portal_ssh.go) so
-// tests can exercise this against a real fake-provider-backed
-// gatewayapi.Server without a real Kerberos environment, a real target
-// host, or a real syslog daemon.
-//
-// Recording policy is deliberately NOT a parameter here: it comes back on
-// the SAME fresh ConnectAuthorize response as the allow/deny decision
-// (gatewayapi.Server.RecordingPolicy, set from this gateway's own
-// /etc/pilot/access-gateway.yaml) — the Gateway daemon is the single
-// source of truth for whether/how this session records, exactly like it
-// already is for the authorize decision itself. A caller/test that never
-// sets a fake gateway's RecordingPolicy gets the zero value, which
-// authz.RecordingMode below then reports as "" — recordingConfig.enabled()
-// treats that identically to "metadata", so every pre-Phase-7 test needs
-// no change at all.
-func runPortalOneShotConnect(ctx context.Context, client *portalClient, credentials portalCredentialSession, emitter *sessionaudit.Emitter, sshConfigPath, sessionID, target string) error {
-	identity, err := client.Identity(ctx)
-	if err != nil {
-		return fmt.Errorf("pilot-session: resolve identity: %w", err)
-	}
-
-	authz, err := client.ConnectAuthorize(ctx, target, sessionID)
-	if err != nil {
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindGatewayAuthorizeDenied, User: identity.Username, TargetFQDN: target, Result: "authorize call failed: " + err.Error()})
-		return fmt.Errorf("pilot-session: connect authorize failed: %w", err)
-	}
-	if !authz.Allowed {
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindGatewayAuthorizeDenied, User: identity.Username, TargetFQDN: target})
-		return fmt.Errorf("pilot-session: access denied for %s", target)
-	}
-	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindGatewayAuthorizeAllowed, User: identity.Username, TargetFQDN: authz.Target, GatewayID: authz.GatewayID, GatewayScope: authz.GatewayScope})
-
-	recording := recordingConfig{
+func recordingConfigFrom(authz gatewayapi.ConnectAuthorizeResponse) recordingConfig {
+	return recordingConfig{
 		Mode:                    authz.RecordingMode,
+		PolicySource:            authz.RecordingPolicySource,
 		FailurePolicy:           authz.RecordingFailurePolicy,
 		QueueEvents:             authz.RecordingQueueEvents,
 		FlushInterval:           time.Duration(authz.RecordingFlushIntervalMS) * time.Millisecond,
@@ -176,41 +156,119 @@ func runPortalOneShotConnect(ctx context.Context, client *portalClient, credenti
 		SessionStoreCAFile:      authz.RecordingSessionStoreCAFile,
 		SessionStoreIngestToken: authz.RecordingSessionStoreIngestToken,
 	}
-	if recording.enabled() && recording.SessionStoreURL == "" {
-		recording.LocalPath = defaultRecordingPath(sessionID)
-	}
-
-	cache, err := credentials.Ensure(ctx, identity.Username)
-	if err != nil {
-		return fmt.Errorf("pilot-session: kerberos authentication failed: %w", err)
-	}
-
-	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindTargetConnectStarted, User: identity.Username, TargetFQDN: authz.Target, GatewayID: authz.GatewayID, GatewayScope: authz.GatewayScope})
-
-	if !recording.enabled() {
-		return runPortalOneShotConnectPlain(sshConfigPath, sessionID, authz.Target, cache, identity.Username, authz.GatewayID, authz.GatewayScope, emitter)
-	}
-	return runPortalOneShotConnectRecorded(ctx, sshConfigPath, sessionID, authz.Target, cache, identity.Username, authz.GatewayID, authz.GatewayScope, recording, emitter)
 }
 
-// runPortalOneShotConnectPlain is the unmodified pre-Phase-7 direct SSH
-// path — byte-for-byte the same buildConnectSSHCmd/sshLauncher call and
-// exit-handling this file always used before recording existed.
-func runPortalOneShotConnectPlain(sshConfigPath, sessionID, target, cache, username, gatewayID, gatewayScope string, emitter *sessionaudit.Emitter) error {
-	runErr := sshLauncher(buildConnectSSHCmd(sshConfigPath, target, cache))
-	if runErr == nil {
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindSessionEnded, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, Result: "ok"})
-		return nil
+func (c recordingConfig) enabled() bool {
+	return c.Mode == sessionrecording.ModeTerminalOutput || c.Mode == sessionrecording.ModeTerminalIO
+}
+
+// portalSessionAudit emits target-session audit events carrying the fields
+// per-host recording spec §22 requires on every one of them.
+type portalSessionAudit struct {
+	emitter *sessionaudit.Emitter
+	base    sessionaudit.SessionAuditEvent
+}
+
+func (a *portalSessionAudit) emit(kind, result string, exitCode *int) {
+	ev := a.base
+	ev.Kind, ev.Result, ev.ExitCode = kind, result, exitCode
+	a.emitter.Emit(ev)
+}
+
+// recordedTransport is the recorded path's two-phase ControlMaster SSH flow
+// (portal_ssh_recording.go).
+type recordedTransport interface {
+	authenticate(sshConfigPath, target, credentialCache string) error
+	startRecorded(sshConfigPath, target string, size sessionrecording.Winsize) (*os.File, *exec.Cmd, error)
+	closeMaster(sshConfigPath, target string)
+	cleanup()
+}
+
+// newRecordedTransport builds one recorded session's transport. Overridden
+// by tests so they can drive the recorded path without a real target.
+var newRecordedTransport = func() (recordedTransport, error) { return newRecordedConnectSession() }
+
+// runPortalOneShotConnect is the Directory handoff one-shot connect
+// (spec.md §18): the process is the user's whole SSH session, so it uses
+// the real process stdio and ends with the target session.
+func runPortalOneShotConnect(ctx context.Context, client *portalClient, credentials portalCredentialSession, emitter *sessionaudit.Emitter, sshConfigPath, sessionID, target string) error {
+	return runPortalTargetSession(ctx, portalSessionDeps{
+		Client: client, Credentials: credentials, Emitter: emitter, SSHConfigPath: sshConfigPath,
+		Terminal: os.Stdin, Stdin: os.Stdin, Stdout: os.Stdout, Notice: os.Stderr,
+	}, sessionID, target)
+}
+
+// runPortalTargetSession runs one fully authorized target session for both
+// the interactive Portal Connect action and the Directory handoff
+// one-shot path (per-host recording spec §18). It re-authorizes fresh,
+// then takes the plain or recorded path strictly from the authorize response.
+//
+// The authorize happens before credentials.Ensure, so a denied target never
+// prompts for a Kerberos password (AG38). sessionID never influences the
+// authorize decision; the gateway only binds it into a recorded session's
+// ingest token (AG37).
+func runPortalTargetSession(ctx context.Context, deps portalSessionDeps, sessionID, target string) error {
+	identity, err := deps.Client.Identity(ctx)
+	if err != nil {
+		return &portalConnectError{stage: portalStageAuthorizeCall, msg: "resolve identity", err: err}
+	}
+	audit := &portalSessionAudit{emitter: deps.Emitter, base: sessionaudit.SessionAuditEvent{
+		SessionID: sessionID, User: identity.Username, TargetFQDN: target,
+	}}
+
+	authz, err := deps.Client.ConnectAuthorize(ctx, target, sessionID)
+	if err != nil {
+		audit.emit(sessionaudit.KindGatewayAuthorizeDenied, "authorize call failed", nil)
+		return &portalConnectError{stage: portalStageAuthorizeCall, msg: "connect authorize failed", err: err}
+	}
+	audit.base.TargetFQDN = authz.Target
+	audit.base.GatewayID, audit.base.GatewayScope = authz.GatewayID, authz.GatewayScope
+	if !authz.Allowed {
+		audit.emit(sessionaudit.KindGatewayAuthorizeDenied, authz.DenyReason, nil)
+		if msg := portalDenyReasonMessage(authz.DenyReason); msg != "" {
+			return &portalConnectError{stage: portalStageDenied, msg: msg, reason: authz.DenyReason}
+		}
+		return &portalConnectError{stage: portalStageDenied, msg: "access denied for " + authz.Target}
 	}
 
+	recording := recordingConfigFrom(authz)
+	audit.base.RecordingMode, audit.base.RecordingPolicySource = recording.Mode, recording.PolicySource
+	audit.emit(sessionaudit.KindGatewayAuthorizeAllowed, "", nil)
+
+	cache, err := deps.Credentials.Ensure(ctx, identity.Username)
+	if err != nil {
+		return &portalConnectError{stage: portalStageCredentials, msg: "kerberos authentication failed", err: err}
+	}
+
+	if !recording.enabled() {
+		audit.emit(sessionaudit.KindTargetConnectStarted, "", nil)
+		return runPortalTargetSessionPlain(deps.SSHConfigPath, authz.Target, cache, audit)
+	}
+	return runPortalTargetSessionRecorded(ctx, deps, sessionID, authz.Target, cache, recording, audit)
+}
+
+// runPortalTargetSessionPlain is the metadata path: the same direct
+// buildConnectSSHCmd/sshLauncher call both connect paths used before
+// recording existed (per-host recording spec §18.2).
+func runPortalTargetSessionPlain(sshConfigPath, target, cache string, audit *portalSessionAudit) error {
+	runErr := sshLauncher(buildConnectSSHCmd(sshConfigPath, target, cache))
+	return finishTargetProcess(runErr, audit)
+}
+
+// finishTargetProcess reports how the target ssh process ended.
+func finishTargetProcess(runErr error, audit *portalSessionAudit) error {
+	if runErr == nil {
+		audit.emit(sessionaudit.KindSessionEnded, "ok", nil)
+		return nil
+	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
 		code := exitErr.ExitCode()
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindSessionEnded, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, Result: "error", ExitCode: &code})
+		audit.emit(sessionaudit.KindSessionEnded, "error", &code)
 		return &portalSessionExitError{err: fmt.Errorf("pilot-session: ssh exited: %w", runErr), code: code}
 	}
-	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindTargetConnectFailed, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, Result: runErr.Error()})
-	return fmt.Errorf("pilot-session: ssh failed to start: %w", runErr)
+	audit.emit(sessionaudit.KindTargetConnectFailed, runErr.Error(), nil)
+	return &portalConnectError{stage: portalStageSSH, msg: "ssh failed", err: runErr}
 }
 
 // waitWithTimeout waits for cmd to exit, force-killing it if it hasn't
@@ -228,74 +286,132 @@ func waitWithTimeout(cmd *exec.Cmd, timeout time.Duration) error {
 	}
 }
 
-// runPortalOneShotConnectRecorded is spec.md §24's two-phase flow: an
-// unrecorded pre-auth ControlMaster (Phase A), then a recorded
-// interactive channel (Phase B) wrapped by internal/sessionrecording's
-// Recorder, so the target's own SSH authentication is never captured.
-func runPortalOneShotConnectRecorded(ctx context.Context, sshConfigPath, sessionID, target, cache, username, gatewayID, gatewayScope string, recording recordingConfig, emitter *sessionaudit.Emitter) error {
-	if recording.SessionStoreURL == "" && recording.LocalPath == "" {
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingFailed, User: username, TargetFQDN: target, Result: "recording enabled but no sink is configured (no session-store URL, no local sink path)", RecordingMode: recording.Mode})
-		return fmt.Errorf("pilot-session: session recording is enabled (%s) but no sink is configured", recording.Mode)
+// portalTerminalSize is the recorded child's initial size: the outer
+// terminal's, or 80x24 when there is none.
+func portalTerminalSize(f *os.File) sessionrecording.Winsize {
+	if f != nil && term.IsTerminal(int(f.Fd())) {
+		if cols, rows, err := term.GetSize(int(f.Fd())); err == nil && rows > 0 && cols > 0 {
+			return sessionrecording.Winsize{Rows: rows, Cols: cols}
+		}
+	}
+	return sessionrecording.Winsize{Rows: 24, Cols: 80}
+}
+
+// releasePortalInput cancels a cancelable outer reader and waits (up to 1s)
+// for the recorder's input relay to exit, so the next TUI prompt is the only
+// reader of the terminal (per-host recording spec §18.1).
+func releasePortalInput(in io.Reader, rec *sessionrecording.Recorder) {
+	c, ok := in.(interface{ Cancel() bool })
+	if !ok {
+		return
+	}
+	c.Cancel()
+	select {
+	case <-rec.InputDone():
+	case <-time.After(time.Second):
+	}
+}
+
+// runPortalTargetSessionRecorded is the recorded path (per-host recording
+// spec §18.3): notice, store start, then the unrecorded pre-auth
+// ControlMaster (Phase A), then the recorded interactive channel (Phase B)
+// wrapped by the Recorder. Nothing connects to the target until the store
+// has accepted the session, and once it has, every exit path finishes it.
+func runPortalTargetSessionRecorded(ctx context.Context, deps portalSessionDeps, sessionID, target, cache string, recording recordingConfig, audit *portalSessionAudit) (retErr error) {
+	if recording.SessionStoreURL == "" || recording.SessionStoreIngestToken == "" {
+		audit.emit(sessionaudit.KindRecordingFailed, "authorize response carries no session-store coordinates", nil)
+		return &portalConnectError{stage: portalStageRecording, msg: portalDenyReasonMessage(gatewayapi.DenyReasonRecordingBackend)}
 	}
 
-	sess, err := newRecordedConnectSession()
+	if deps.Notice != nil {
+		_, _ = fmt.Fprintln(deps.Notice, portalRecordingNotice(recording.Mode, sessionID))
+	}
+
+	sink, err := sessionrecording.NewHTTPSink(ctx, sessionrecording.HTTPSinkConfig{
+		BaseURL: recording.SessionStoreURL, IngestToken: recording.SessionStoreIngestToken,
+		CAFile: recording.SessionStoreCAFile, SessionID: sessionID, User: audit.base.User,
+		GatewayID: audit.base.GatewayID, Scope: audit.base.GatewayScope, Target: target, RecordingMode: recording.Mode,
+	})
 	if err != nil {
-		return fmt.Errorf("pilot-session: %w", err)
+		audit.emit(sessionaudit.KindRecordingFailed, "session-store start: "+err.Error(), nil)
+		msg := "Connection not started: session recording could not start."
+		if strings.Contains(err.Error(), ingesttoken.ReasonStartWindowClosed) {
+			msg += " The recording authorization expired; connect again."
+		}
+		return &portalConnectError{stage: portalStageRecording, msg: msg, err: err}
+	}
+
+	// The store now holds a started session. Any exit that the recorder
+	// itself does not finish must report an incomplete finish.
+	var rec *sessionrecording.Recorder
+	recorderFinished := false
+	finishIncomplete := func(reason string) {
+		if recorderFinished {
+			return
+		}
+		recorderFinished = true
+		var lastSeq uint64
+		if rec != nil {
+			lastSeq = rec.LastSeq()
+		}
+		fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := sink.Finish(fctx, sessionrecording.FinishInfo{LastSeq: lastSeq, Reason: reason}); err != nil {
+			audit.emit(sessionaudit.KindRecordingFailed, "finish: "+err.Error(), nil)
+		}
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			finishIncomplete("internal_error")
+			audit.emit(sessionaudit.KindRecordingFailed, "internal error", nil)
+			retErr = &portalConnectError{stage: portalStageRecording, msg: "internal error during the recorded session", err: fmt.Errorf("%v", p)}
+		}
+	}()
+
+	audit.emit(sessionaudit.KindTargetConnectStarted, "", nil)
+	sess, err := newRecordedTransport()
+	if err != nil {
+		finishIncomplete("internal_error")
+		audit.emit(sessionaudit.KindTargetConnectFailed, err.Error(), nil)
+		return &portalConnectError{stage: portalStageSSH, msg: "prepare the recorded connection", err: err}
 	}
 	defer sess.cleanup()
 
-	if err := sess.authenticate(sshConfigPath, target, cache); err != nil {
-		return fmt.Errorf("pilot-session: %w", err)
+	if err := sess.authenticate(deps.SSHConfigPath, target, cache); err != nil {
+		finishIncomplete("target_connect_failed")
+		audit.emit(sessionaudit.KindTargetConnectFailed, err.Error(), nil)
+		return &portalConnectError{stage: portalStageSSH, msg: "target connection failed", err: err}
 	}
-	defer sess.closeMaster(sshConfigPath, target)
+	defer sess.closeMaster(deps.SSHConfigPath, target)
 
-	ptmx, cmd, err := sess.startRecorded(sshConfigPath, target)
+	size := portalTerminalSize(deps.Terminal)
+	ptmx, cmd, err := sess.startRecorded(deps.SSHConfigPath, target, size)
 	if err != nil {
-		return fmt.Errorf("pilot-session: %w", err)
+		finishIncomplete("session_start_failed")
+		audit.emit(sessionaudit.KindTargetConnectFailed, err.Error(), nil)
+		return &portalConnectError{stage: portalStageSSH, msg: "recorded session failed to start", err: err}
 	}
 	defer ptmx.Close()
 
-	// A configured session-store always wins over the local stopgap sink
-	// — spec.md §35 makes durable, encrypted, centrally-replayable
-	// storage the bar for calling terminal_output/terminal_io
-	// production-ready, so when an operator has configured it, silently
-	// falling back to an unencrypted local file instead would misrepresent
-	// what actually happened to this session's recording.
-	var sink sessionrecording.Sink
-	if recording.SessionStoreURL != "" {
-		httpSink, err := sessionrecording.NewHTTPSink(ctx, sessionrecording.HTTPSinkConfig{
-			BaseURL: recording.SessionStoreURL, IngestToken: recording.SessionStoreIngestToken,
-			CAFile: recording.SessionStoreCAFile, SessionID: sessionID, User: username,
-			GatewayID: gatewayID, Scope: gatewayScope, Target: target, RecordingMode: recording.Mode,
-		})
-		if err != nil {
-			emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingFailed, User: username, TargetFQDN: target, Result: "session-store sink: " + err.Error(), RecordingMode: recording.Mode})
-			return fmt.Errorf("pilot-session: %w", err)
-		}
-		sink = httpSink
-	} else {
-		fileSink, err := sessionrecording.NewFileSink(recording.LocalPath)
-		if err != nil {
-			emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingFailed, User: username, TargetFQDN: target, Result: err.Error(), RecordingMode: recording.Mode})
-			return fmt.Errorf("pilot-session: %w", err)
-		}
-		sink = fileSink
-	}
-
-	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingStarted, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, RecordingMode: recording.Mode})
-
-	rec := sessionrecording.New(sessionrecording.Options{
+	rec = sessionrecording.New(sessionrecording.Options{
 		Mode: recording.Mode, SessionID: sessionID, FailurePolicy: recording.FailurePolicy,
 		QueueEvents: recording.QueueEvents, FlushInterval: recording.FlushInterval, FailureGrace: recording.FailureGrace,
-		Identity: sessionrecording.AuditIdentity{User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope},
-	}, sink, emitter)
-	runErr := rec.Run(ctx, ptmx, recordingStdin, recordingStdout)
+		InitialSize: size, Terminal: deps.Terminal,
+		Identity: sessionrecording.AuditIdentity{
+			User: audit.base.User, TargetFQDN: target, GatewayID: audit.base.GatewayID, GatewayScope: audit.base.GatewayScope,
+			RecordingPolicySource: recording.PolicySource,
+		},
+	}, sink, deps.Emitter)
+	audit.emit(sessionaudit.KindRecordingStarted, "", nil)
+	runErr := rec.Run(ctx, ptmx, deps.Stdin, deps.Stdout)
+	recorderFinished = true
+	releasePortalInput(deps.Stdin, rec)
 
 	if errors.Is(runErr, sessionrecording.ErrRecordingFailedClosed) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindSessionEnded, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, Result: "recording failed closed"})
-		return fmt.Errorf("pilot-session: %w", runErr)
+		audit.emit(sessionaudit.KindSessionEnded, "recording failed closed", nil)
+		return &portalConnectError{stage: portalStageSSH, msg: "session ended: recording could not be saved", err: runErr}
 	}
 
 	// Run() returning does not by itself guarantee the child has (or ever
@@ -307,17 +423,5 @@ func runPortalOneShotConnectRecorded(ctx context.Context, sshConfigPath, session
 	// signaling the child at all. Wait with a bound, then force-kill
 	// rather than risk this process hanging forever on a child that will
 	// never exit on its own.
-	waitErr := waitWithTimeout(cmd, 5*time.Second)
-	if waitErr == nil {
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindSessionEnded, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, Result: "ok"})
-		return nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(waitErr, &exitErr) {
-		code := exitErr.ExitCode()
-		emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindSessionEnded, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, Result: "error", ExitCode: &code})
-		return &portalSessionExitError{err: fmt.Errorf("pilot-session: ssh exited: %w", waitErr), code: code}
-	}
-	emitter.Emit(sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindTargetConnectFailed, User: username, TargetFQDN: target, GatewayID: gatewayID, GatewayScope: gatewayScope, Result: waitErr.Error()})
-	return fmt.Errorf("pilot-session: ssh failed: %w", waitErr)
+	return finishTargetProcess(waitWithTimeout(cmd, 5*time.Second), audit)
 }

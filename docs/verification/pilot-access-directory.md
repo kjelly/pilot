@@ -1,6 +1,6 @@
 # Verification Spec — Pilot Access Directory
 
-> 版本：DRAFT v0.2（2026-09-18：Phase 4 的 4 項 landing gate——真人 SSH Directory
+> 版本：DRAFT v0.3（2026-09-23：per-host SSH session recording Phase 6 新增 AD31——Directory 列表依 host override 顯示 `[REC]`／`[REC ?]`，見 `docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md` §24.2；以下為 v0.2 的紀錄：2026-09-18：Phase 4 的 4 項 landing gate——真人 SSH Directory
 > TUI、arbitrary remote command 無 shell、idempotent apply、site-wide deployment
 > 實際執行 component——已對新建的 `ag-directory01` vm-target 全部真實跑過，見
 > [`docs/evidence/pilot-access-directory/2026-09-18-phase4-directory-tui-deploy-integration.md`](../evidence/pilot-access-directory/2026-09-18-phase4-directory-tui-deploy-integration.md)。
@@ -50,6 +50,7 @@ host 上的一條指令驗證的，Command 欄就是那條真指令；不能的�
 | AD27 | staging/prod gate | stage gate 符合 repo policy — apply playbook 的 `pre_tasks` assert，非單一 shell 指令 | 0 | true |
 | AD28 | idempotency | 第二次 apply changed=0（多次重跑的性質，由 evidence doc 記錄，非單一 shell 指令可驗證） | 0 | true |
 | AD30 | topology | fresh vm-target topology E2E PASS — 見 §4，本 checklist 尚未執行過 | 0 | true |
+| AD31 | recording | Directory 列表依 host override 顯示 `[REC]`（`terminal_output`）／`[REC ?]`（policy 不可讀或 invalid），inherit／off 不顯示；Directory 不知道各 gateway 的 default，實際是否錄影以 gateway 在 SSH 前印出的提示為準 — 由 `internal/accessdirectory` 的 `TestDirectoryResolve_CarriesRecordingOverride` 與 `cmd/pilot/cmd` 的 `TestDirectoryHostLabel_RecordingBadge` 涵蓋，非單一 shell 指令 | 0 | true |
 
 其餘 AD 編號（AD03-AD05、AD06-AD16、AD20-AD26、AD29）不是單一 host 的靜態設定 checklist
 row——是跨 scope 聚合、跨 host 路由、race 條件、結構性（no import）或 TUI 互動性質，逐一列

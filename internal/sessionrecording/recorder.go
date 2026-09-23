@@ -3,6 +3,7 @@ package sessionrecording
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +40,15 @@ const finishTimeout = 5 * time.Second
 // the drain window, even if a sink ignores context cancellation.
 const writerStopGrace = 5 * time.Second
 
+// Batching (per-host recording spec §19.4): the writer ships a batch as
+// soon as it holds maxBatchEvents events, its encoded events reach
+// maxBatchBytes, or its oldest event has waited FlushInterval.
+const (
+	maxBatchEvents       = 128
+	maxBatchBytes        = 64 << 10
+	defaultFlushInterval = 500 * time.Millisecond
+)
+
 // Winsize is a terminal size in character cells.
 type Winsize struct {
 	Rows int
@@ -52,6 +62,9 @@ type AuditIdentity struct {
 	TargetFQDN   string
 	GatewayID    string
 	GatewayScope string
+	// RecordingPolicySource is where the effective mode came from (host |
+	// gateway_default | built_in_default), when known.
+	RecordingPolicySource string
 }
 
 // Options configures one Recorder (per-host recording spec §19.1).
@@ -60,8 +73,10 @@ type Options struct {
 	SessionID     string
 	FailurePolicy string // best_effort | fail_closed (default best_effort)
 	QueueEvents   int    // default 1024
-	// FlushInterval is reserved for batching (the longest an event waits
-	// in a batch before being written).
+	// FlushInterval is the longest an event waits in a batch before being
+	// written; 0 means defaultFlushInterval. New caps it at half of
+	// FailureGrace so batching alone can never trip the fail_closed
+	// watchdog.
 	FlushInterval time.Duration
 	// FailureGrace is how long pending events may go unacknowledged before
 	// fail_closed terminates the session; 0 means defaultFailureGrace.
@@ -134,6 +149,12 @@ func New(opts Options, sink Sink, emitter *sessionaudit.Emitter) *Recorder {
 	if opts.FailurePolicy == "" {
 		opts.FailurePolicy = FailurePolicyBestEffort
 	}
+	if opts.FlushInterval <= 0 {
+		opts.FlushInterval = defaultFlushInterval
+	}
+	if limit := opts.FailureGrace / 2; opts.FlushInterval > limit {
+		opts.FlushInterval = limit
+	}
 	return &Recorder{
 		opts: opts, sink: sink, emitter: emitter, start: time.Now(),
 		writerStopped: make(chan struct{}),
@@ -146,6 +167,9 @@ func New(opts Options, sink Sink, emitter *sessionaudit.Emitter) *Recorder {
 // the session; the caller must kill the target session, never continue it
 // unrecorded.
 var ErrRecordingFailedClosed = errors.New("sessionrecording: sink failing, fail_closed policy terminating session")
+
+// LastSeq is the last seq this recorder has assigned (0 before any event).
+func (r *Recorder) LastSeq() uint64 { return r.seq.Load() }
 
 // InputDone is closed once the input relay goroutine has returned. A caller
 // that keeps using the outer terminal after Run (the interactive Portal)
@@ -369,14 +393,14 @@ func (r *Recorder) enqueue(events chan<- TerminalEvent, ev TerminalEvent) {
 		case <-r.writerStopped:
 		}
 		r.addPending(-1)
-		r.recordLoss("writer stopped")
+		r.recordLoss("writer stopped", 1)
 		return
 	}
 	select {
 	case events <- ev:
 	default:
 		r.addPending(-1)
-		r.recordLoss("queue full")
+		r.recordLoss("queue full", 1)
 	}
 }
 
@@ -389,12 +413,12 @@ func (r *Recorder) addPending(delta int64) {
 	r.pending += delta
 }
 
-// recordLoss marks the recording incomplete and emits a rate-limited
-// recording_gap.
-func (r *Recorder) recordLoss(why string) {
+// recordLoss marks n lost events, the recording incomplete, and emits a
+// rate-limited recording_gap.
+func (r *Recorder) recordLoss(why string, n int) {
 	r.mu.Lock()
 	r.markLostLocked("dropped")
-	r.dropped++
+	r.dropped += n
 	count := r.dropped
 	shouldEmit := time.Since(r.lastGapEmit) >= gapEmitInterval
 	if shouldEmit {
@@ -410,8 +434,9 @@ func (r *Recorder) recordLoss(why string) {
 func (r *Recorder) emit(kind, result string) {
 	id := r.opts.Identity
 	r.emitter.Emit(sessionaudit.SessionAuditEvent{
-		SessionID: r.opts.SessionID, Kind: kind, Result: result, RecordingMode: r.opts.Mode,
+		SessionID: r.opts.SessionID, Kind: kind, Result: result,
 		User: id.User, TargetFQDN: id.TargetFQDN, GatewayID: id.GatewayID, GatewayScope: id.GatewayScope,
+		RecordingMode: r.opts.Mode, RecordingPolicySource: id.RecordingPolicySource,
 	})
 }
 
@@ -470,25 +495,51 @@ func (r *Recorder) startWatchdog() func() {
 	return func() { close(done) }
 }
 
-// runWriter ships queued events to the sink until stopWriter, then drains
-// what is still queued (bounded by the drain timer cancelling writerCtx).
+// runWriter batches queued events and ships them to the sink until
+// stopWriter, then drains and flushes what is still queued (bounded by the
+// drain timer cancelling writerCtx).
 func (r *Recorder) runWriter(events <-chan TerminalEvent, stopWriter <-chan struct{}) {
 	defer close(r.writerStopped)
+	var batch []TerminalEvent
+	batchBytes := 0
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	var flushDue <-chan time.Time
+
+	flush := func() {
+		timer.Stop()
+		flushDue = nil
+		if len(batch) == 0 {
+			return
+		}
+		r.writeBatch(batch)
+		batch, batchBytes = nil, 0
+	}
+	add := func(ev TerminalEvent) {
+		if len(batch) == 0 {
+			timer.Reset(r.opts.FlushInterval)
+			flushDue = timer.C
+		}
+		batch = append(batch, ev)
+		batchBytes += encodedEventSize(ev)
+		if len(batch) >= maxBatchEvents || batchBytes >= maxBatchBytes {
+			flush()
+		}
+	}
+
 	for {
 		select {
 		case ev := <-events:
-			r.write(ev)
+			add(ev)
+		case <-flushDue:
+			flush()
 		case <-stopWriter:
 			for {
 				select {
 				case ev := <-events:
-					if r.writerCtx.Err() != nil {
-						r.addPending(-1)
-						r.recordLoss("drain cancelled")
-						continue
-					}
-					r.write(ev)
+					add(ev)
 				default:
+					flush()
 					return
 				}
 			}
@@ -496,24 +547,41 @@ func (r *Recorder) runWriter(events <-chan TerminalEvent, stopWriter <-chan stru
 	}
 }
 
-// write ships one event and settles its pending count.
-func (r *Recorder) write(ev TerminalEvent) {
-	err := r.sink.Write(r.writerCtx, ev)
+// encodedEventSize is ev's JSON size, what the batch byte threshold counts.
+func encodedEventSize(ev TerminalEvent) int {
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return len(ev.DataBase64)
+	}
+	return len(b)
+}
+
+// writeBatch ships one batch and settles its pending count. Once writerCtx
+// is cancelled (fail closed, drain timeout, Run exit) the batch is counted
+// as lost without calling the sink.
+func (r *Recorder) writeBatch(batch []TerminalEvent) {
+	n := int64(len(batch))
+	if r.writerCtx.Err() != nil {
+		r.addPending(-n)
+		r.recordLoss("drain cancelled", len(batch))
+		return
+	}
+	err := r.sink.WriteBatch(r.writerCtx, batch)
 	if err == nil {
 		r.mu.Lock()
-		r.pending--
+		r.pending -= n
 		r.progressAt = time.Now()
 		r.mu.Unlock()
 		return
 	}
-	r.addPending(-1)
+	r.addPending(-n)
 	r.mu.Lock()
 	r.markLostLocked("sink_error")
 	r.mu.Unlock()
 	if r.opts.FailurePolicy == FailurePolicyFailClosed {
-		// The event is lost: under fail_closed that alone ends the session.
+		// The batch is lost: under fail_closed that alone ends the session.
 		r.triggerFailClosed("sink error: " + err.Error())
 		return
 	}
-	r.recordLoss("sink error")
+	r.recordLoss("sink error", len(batch))
 }

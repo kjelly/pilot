@@ -40,6 +40,14 @@ type SessionAuditEvent struct {
 	ExitCode *int   `json:"exit_code,omitempty"`
 
 	RecordingMode string `json:"recording_mode,omitempty"`
+	// RecordingPolicySource is where the effective recording mode came
+	// from: host | gateway_default | built_in_default (per-host recording
+	// spec §22).
+	RecordingPolicySource string `json:"recording_policy_source,omitempty"`
+
+	// Auditor is the account that replayed or exported a recording
+	// (recording_replayed / recording_exported).
+	Auditor string `json:"auditor,omitempty"`
 }
 
 // SchemaVersion1 is the only schema version this package currently emits.
@@ -66,4 +74,9 @@ const (
 	KindRecordingStarted = "recording_started"
 	KindRecordingGap     = "recording_gap"
 	KindRecordingFailed  = "recording_failed"
+
+	// KindRecordingReplayed/KindRecordingExported record an auditor reading
+	// a stored recording (per-host recording spec §21.5/§22).
+	KindRecordingReplayed = "recording_replayed"
+	KindRecordingExported = "recording_exported"
 )

@@ -50,6 +50,7 @@ traceability:
     "docs/verification/pilot-access-directory.md#AD27": {kind: structural-absence, tags: [], reason: "stage/prod confirmation is a pre_tasks assert evaluated before any tagged task runs, not itself a tagged task"}
     "docs/verification/pilot-access-directory.md#AD28": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in an evidence doc, not a single tagged task"}
     "docs/verification/pilot-access-directory.md#AD30": {kind: idempotency-evidence, tags: [], reason: "fresh vm-target topology E2E is a multi-host, multi-run property recorded in an evidence doc, not a single tagged task"}
+    "docs/verification/pilot-access-directory.md#AD31": {kind: unit-test-evidence, tags: [], reason: "the Directory recording badge is TestDirectoryResolve_CarriesRecordingOverride and TestDirectoryHostLabel_RecordingBadge"}
 verification: {autoDeploy: false}
 # order 53 放在 freeipa-client(50)/pilot-access-gateway(52)之後、
 # freeipa-nfs-server(55)之前 — Directory 依賴 freeipa-client(sameHosts)，

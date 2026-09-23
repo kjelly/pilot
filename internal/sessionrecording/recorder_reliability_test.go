@@ -40,19 +40,19 @@ func (b *auditBuffer) events(kind string) []sessionaudit.SessionAuditEvent {
 	return out
 }
 
-// slowSink acknowledges every event after delay.
+// slowSink acknowledges every batch after delay.
 type slowSink struct {
 	memSink
 	delay time.Duration
 }
 
-func (s *slowSink) Write(ctx context.Context, ev TerminalEvent) error {
+func (s *slowSink) WriteBatch(ctx context.Context, events []TerminalEvent) error {
 	select {
 	case <-time.After(s.delay):
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return s.memSink.Write(ctx, ev)
+	return s.memSink.WriteBatch(ctx, events)
 }
 
 type runResult struct {
@@ -94,7 +94,7 @@ func killAndWait(t *testing.T, done chan runResult, within time.Duration) runRes
 func TestRecorderFailClosedIdleSessionSurvives(t *testing.T) {
 	sink := &memSink{}
 	grace := 100 * time.Millisecond
-	rec := New(Options{Mode: ModeTerminalOutput, SessionID: "sess-idle", FailurePolicy: FailurePolicyFailClosed, QueueEvents: 64, FailureGrace: grace}, sink, testEmitter(t))
+	rec := New(Options{Mode: ModeTerminalOutput, SessionID: "sess-idle", FailurePolicy: FailurePolicyFailClosed, QueueEvents: 64, FlushInterval: 10 * time.Millisecond, FailureGrace: grace}, sink, testEmitter(t))
 	childPtm, cmd := startCatChild(t)
 	outerPtm, outerPts := openOuterPty(t)
 	done := make(chan error, 1)
@@ -243,7 +243,9 @@ func TestRecorderBestEffortSinkErrorEmitsGap(t *testing.T) {
 
 func TestRecorderBestEffortQueueFullDropsAndIncomplete(t *testing.T) {
 	sink := &slowSink{delay: 50 * time.Millisecond}
-	rec := New(Options{Mode: ModeTerminalIO, SessionID: "sess-be-drop", FailurePolicy: FailurePolicyBestEffort, QueueEvents: 1, FailureGrace: 5 * time.Second}, sink, testEmitter(t))
+	// A 1ms flush keeps the writer inside slow WriteBatch calls, so the
+	// one-slot queue overflows.
+	rec := New(Options{Mode: ModeTerminalIO, SessionID: "sess-be-drop", FailurePolicy: FailurePolicyBestEffort, QueueEvents: 1, FlushInterval: time.Millisecond, FailureGrace: 5 * time.Second}, sink, testEmitter(t))
 	childPtm, cmd := startCatChild(t)
 	outerPtm, outerPts := openOuterPty(t)
 	done := make(chan error, 1)

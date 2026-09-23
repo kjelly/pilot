@@ -296,3 +296,39 @@ func TestPortalSudoScopeIsBroad(t *testing.T) {
 		}
 	}
 }
+
+// TestPortalHostRecordingDisplay locks per-host recording spec §24.1: the
+// My Hosts badge, the Host Detail line and the Connect confirmation for
+// every recording status.
+func TestPortalHostRecordingDisplay(t *testing.T) {
+	cases := []struct {
+		rec     gatewayapi.RecordingJSON
+		badge   string
+		detail  string
+		records bool
+	}{
+		{gatewayapi.RecordingJSON{Status: "terminal_output", Effective: "terminal_output"}, "[REC output]", "SSH recording: terminal output (host policy)", true},
+		{gatewayapi.RecordingJSON{Status: "inherit", Effective: "terminal_output"}, "[REC output]", "SSH recording: terminal output (gateway default)", true},
+		{gatewayapi.RecordingJSON{Status: "inherit", Effective: "terminal_io"}, "[REC input+output]", "SSH recording: input + output (gateway default; input stored as redacted byte counts)", true},
+		{gatewayapi.RecordingJSON{Status: "off", Effective: "metadata"}, "", "SSH recording: off", false},
+		{gatewayapi.RecordingJSON{Status: "inherit", Effective: "metadata"}, "", "SSH recording: off", false},
+		{gatewayapi.RecordingJSON{Status: "unknown"}, "[REC policy unavailable]", "SSH recording: policy unavailable — Connect will be refused", false},
+		{gatewayapi.RecordingJSON{Status: "invalid"}, "[REC policy invalid]", "SSH recording: policy misconfigured — Connect will be refused", false},
+	}
+	for _, c := range cases {
+		h := gatewayapi.HostJSON{FQDN: "db-prod-01.ipa.pilot.internal", Recording: c.rec}
+		wantLabel := h.FQDN
+		if c.badge != "" {
+			wantLabel += "  " + c.badge
+		}
+		if got := portalHostListLabel(portalHostEntry{host: h}); !strings.HasPrefix(got, wantLabel) || (c.badge == "" && strings.Contains(got, "[REC")) {
+			t.Errorf("%+v: label = %q, want prefix %q", c.rec, got, wantLabel)
+		}
+		if !strings.Contains(portalHostDetail(h), c.detail+"\n") {
+			t.Errorf("%+v: detail lacks %q:\n%s", c.rec, c.detail, portalHostDetail(h))
+		}
+		if got := strings.Contains(portalConnectConfirmQuestion(h), "This session will be recorded."); got != c.records {
+			t.Errorf("%+v: confirm mentions recording = %v, want %v", c.rec, got, c.records)
+		}
+	}
+}

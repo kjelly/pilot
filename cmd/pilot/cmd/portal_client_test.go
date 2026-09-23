@@ -19,6 +19,10 @@ import (
 // proved correct — not a mock of the gateway itself.
 type fakeGatewayProvider struct {
 	username string
+	// recording, when set, is every host's FreeIPA recording policy;
+	// hostShowErr makes host_show fail (policy unknown).
+	recording   *freeipaaccess.HostRecordingPolicy
+	hostShowErr error
 }
 
 var _ freeipaaccess.Provider = (*fakeGatewayProvider)(nil)
@@ -36,6 +40,12 @@ func (f *fakeGatewayProvider) GroupShow(ctx context.Context, name string) (freei
 	return freeipaaccess.Group{}, &freeipaaccess.RPCError{Name: "NotFound"}
 }
 func (f *fakeGatewayProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
+	if f.hostShowErr != nil {
+		return freeipaaccess.Host{}, f.hostShowErr
+	}
+	if f.recording != nil {
+		return freeipaaccess.Host{FQDN: fqdn, SSHRecording: *f.recording}, nil
+	}
 	return freeipaaccess.NewHostWithoutPolicy(fqdn), nil
 }
 func (f *fakeGatewayProvider) HostgroupShow(ctx context.Context, name string) (freeipaaccess.Hostgroup, error) {

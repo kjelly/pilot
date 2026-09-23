@@ -102,6 +102,7 @@ after the E2E; it intentionally never changes the production role defaults.
 | `vm-target test` child opens the wrong evidence DB | Global `--data-dir` is not forwarded to child `pilot verify` | Set `PILOT_DATA_DIR` for the whole test process |
 | Ansible hangs immediately after VM rollback | Stale local SSH ControlMaster references the pre-rollback connection | Close the stale mux before retrying |
 | A table-row probe prints literal `| grep` text | Markdown `\|` reached `sh -c` as an escaped pipe | Keep these checks pipe-free; current AG06/AG12/AG32 do so |
+| `terminal_io` recordings show no typed command text | Typed input is recorded only as redacted byte counts on the Gateway SSH relay path; terminal_io does not capture command text today (per-host recording spec §23) | Rely on the recorded terminal output; do not treat input redaction as a guarantee that secrets never reach the recording |
 
 ## 6. Latest verified evidence
 

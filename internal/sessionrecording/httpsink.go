@@ -39,7 +39,7 @@ type HTTPSinkConfig struct {
 
 // HTTPSink is a Sink (sink.go) that ships events over HTTPS to
 // pilot-session-store. Transient failures (network errors, timeouts, HTTP
-// 408/429/5xx) are retried with backoff, re-sending the same event —
+// 408/429/5xx) are retried with backoff, re-sending the same batch —
 // the store is idempotent per (session_id, seq). Other HTTP errors are
 // permanent and wrap ErrSinkPermanent (per-host recording spec §20.2).
 type HTTPSink struct {
@@ -141,9 +141,11 @@ type eventsRequest struct {
 	Events []TerminalEvent `json:"events"`
 }
 
-// Write ships one event, retrying transient failures until ctx ends.
-func (s *HTTPSink) Write(ctx context.Context, ev TerminalEvent) error {
-	return s.postRetrying(ctx, fmt.Sprintf("/v1/sessions/%s/events", s.cfg.SessionID), eventsRequest{Events: []TerminalEvent{ev}})
+// WriteBatch ships one batch of events, retrying transient failures until
+// ctx ends. Every retry re-sends the identical body; the store is
+// idempotent per (session_id, seq).
+func (s *HTTPSink) WriteBatch(ctx context.Context, events []TerminalEvent) error {
+	return s.postRetrying(ctx, fmt.Sprintf("/v1/sessions/%s/events", s.cfg.SessionID), eventsRequest{Events: events})
 }
 
 type sessionFinishRequest struct {

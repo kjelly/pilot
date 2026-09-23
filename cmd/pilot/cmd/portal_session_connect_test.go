@@ -8,11 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/kjelly/pilot/internal/accessportal"
 	"github.com/kjelly/pilot/internal/gatewayapi"
-	"github.com/kjelly/pilot/internal/ingesttoken"
 	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
@@ -29,11 +27,9 @@ func testEmitter(t *testing.T) *sessionaudit.Emitter {
 	return e
 }
 
-// startFakeGatewayWithRecording is startFakeGateway (portal_client_test.go)
-// plus a RecordingPolicy set on the server before it starts serving — a
-// separate helper rather than extending startFakeGateway's own signature,
-// which 17 other call sites across this package depend on unchanged.
-func startFakeGatewayWithRecording(t *testing.T, username string, policy gatewayapi.RecordingPolicy) *portalClient {
+// startFakeGatewayWithProvider serves a gateway backed by provider, so a
+// test controls each host's FreeIPA recording policy.
+func startFakeGatewayWithProvider(t *testing.T, provider *fakeGatewayProvider, policy gatewayapi.RecordingPolicy) *portalClient {
 	t.Helper()
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "gw.sock")
@@ -44,7 +40,6 @@ func startFakeGatewayWithRecording(t *testing.T, username string, policy gateway
 	t.Cleanup(func() { _ = ln.Close() })
 
 	gw := accessportal.GatewayConfig{ID: "gpu-01", Scope: "gpu", TargetHostgroup: "pilot-target-gpu"}
-	provider := &fakeGatewayProvider{username: username}
 	resolver := accessportal.NewResolver(provider, gw)
 	srv := gatewayapi.NewServer(gw, provider, resolver, nil)
 	srv.RecordingPolicy = policy
@@ -52,46 +47,6 @@ func startFakeGatewayWithRecording(t *testing.T, username string, policy gateway
 	t.Cleanup(func() { srv.Shutdown(context.Background()) }) //nolint:errcheck
 
 	return newPortalClient(sockPath)
-}
-
-// TestRunPortalOneShotConnect_RecordingEnabledSkipsPlainPath proves the
-// mode fork in runPortalOneShotConnect: when the gateway's own
-// RecordingPolicy (sourced from its ConnectAuthorize response, spec.md
-// §23/§27) says terminal_io, the plain sshLauncher/buildConnectSSHCmd path
-// is never taken at all — this session goes through the two-phase
-// ControlMaster + Recorder path instead (portal_ssh_recording.go), which
-// this test cannot fully exercise without a real target host/ssh binary
-// reachable over the fake config path, so it only asserts the fork
-// decision itself: sshLauncher must never be invoked, and the recorded
-// path's own (expected, since /etc/pilot/ssh_config and the target here
-// are fake) failure surfaces instead.
-func TestRunPortalOneShotConnect_RecordingEnabledSkipsPlainPath(t *testing.T) {
-	username := currentOSUsername(t)
-	signer, err := ingesttoken.NewSigner([]byte("0123456789abcdef0123456789abcdef"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The fake provider's hosts inherit, so the gateway-wide terminal_io
-	// default (with a configured store) is what makes this session record.
-	client := startFakeGatewayWithRecording(t, username, gatewayapi.RecordingPolicy{
-		DefaultMode: "terminal_io", FailurePolicy: "best_effort", QueueEvents: 64, FlushIntervalMS: 500,
-		FailureGraceMS: 10000, MaxSessionDuration: time.Hour,
-		SessionStoreURL: "https://session-store.invalid:8443", Signer: signer,
-	})
-	credentials := &fakePortalCredentialSession{cache: "FILE:/run/user/1000/pilot-test/krb5cc"}
-	launched := false
-	withSSHLauncher(t, func(cmd *exec.Cmd) error {
-		launched = true
-		return nil
-	})
-
-	err = runPortalOneShotConnect(context.Background(), client, credentials, testEmitter(t), t.TempDir()+"/no-such-ssh-config", "0d33c638-83fa-4d77-9811-a97a7a7af1d5", "gpu-a.example.com")
-	if err == nil {
-		t.Fatalf("expected an error — Phase A pre-auth against a nonexistent ssh config/target cannot succeed in this unit test")
-	}
-	if launched {
-		t.Fatalf("sshLauncher (the plain, unrecorded path) was invoked despite an effective terminal_io mode — the fork point did not divert to the recorded path")
-	}
 }
 
 // TestRunPortalOneShotConnect_Allowed proves a fresh, allowed authorize

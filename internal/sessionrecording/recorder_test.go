@@ -30,20 +30,21 @@ func unixIsTerminalRaw(f *os.File) (bool, error) {
 	return t.Lflag&unix.ICANON == 0, nil
 }
 
-// memSink is a fake Sink (no real disk I/O — FileSink gets its own
-// narrower round-trip test in sink_test.go) that records every event it
-// receives for assertions, and can be told to fail every Write for
-// fail_closed testing.
+// memSink is a fake Sink that records every event it receives for
+// assertions, and can be told to fail every WriteBatch for fail_closed
+// testing.
 type memSink struct {
 	mu       sync.Mutex
 	events   []TerminalEvent
 	fail     bool
 	finished []FinishInfo
-	// block, when set, makes Write wait until ctx ends (a hung sink).
+	// block, when set, makes WriteBatch wait until ctx ends (a hung sink).
 	block bool
+	// batches records the size of every successful WriteBatch.
+	batches []int
 }
 
-func (s *memSink) Write(ctx context.Context, ev TerminalEvent) error {
+func (s *memSink) WriteBatch(ctx context.Context, events []TerminalEvent) error {
 	s.mu.Lock()
 	block := s.block
 	s.mu.Unlock()
@@ -56,7 +57,8 @@ func (s *memSink) Write(ctx context.Context, ev TerminalEvent) error {
 	if s.fail {
 		return context_DeadlineExceededLike{}
 	}
-	s.events = append(s.events, ev)
+	s.events = append(s.events, events...)
+	s.batches = append(s.batches, len(events))
 	return nil
 }
 
@@ -319,5 +321,31 @@ func TestRecorderRestoresTerminalOnSinkFailure(t *testing.T) {
 	}
 	if before != after {
 		t.Fatalf("outer terminal raw-mode state changed across a failing sink (before raw=%v after raw=%v) — terminal left in a different mode than it started", before, after)
+	}
+}
+
+// TestRecorderInitialResizeIsFirstEvent locks per-host recording spec
+// §18.3 step 7: the caller's InitialSize is recorded as seq=1, a resize,
+// before any relayed output.
+func TestRecorderInitialResizeIsFirstEvent(t *testing.T) {
+	childPtm, cmd := startCatChild(t)
+	outerPtm, outerPts := openOuterPty(t)
+	sink := &memSink{}
+	rec := New(Options{Mode: ModeTerminalOutput, SessionID: "sess-initial", QueueEvents: 64, FlushInterval: 10 * time.Millisecond, InitialSize: Winsize{Rows: 42, Cols: 133}}, sink, testEmitter(t))
+	runDone := make(chan error, 1)
+	go func() { runDone <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
+	if _, err := outerPts.Write([]byte("hi\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, sink, func(ev TerminalEvent) bool { return ev.Stream == StreamTTYOutput }, 2*time.Second)
+	_ = cmd.Process.Kill()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after killing the child")
+	}
+	events := sink.snapshot()
+	if len(events) == 0 || events[0].Seq != 1 || events[0].Stream != StreamResize || events[0].Rows != 42 || events[0].Cols != 133 {
+		t.Fatalf("first event = %+v, want seq 1 resize 42x133", events)
 	}
 }

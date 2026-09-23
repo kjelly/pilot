@@ -23,6 +23,10 @@ regressionTests:
   - internal/gatewayconfig/config_test.go
   - internal/gatewayapi/recording_policy_test.go
   - internal/ingesttoken/ingesttoken_test.go
+  - internal/sessionrecording/recorder_reliability_test.go
+  - internal/sessionrecording/httpsink_test.go
+  - cmd/pilot/cmd/portal_session_connect_test.go
+  - cmd/pilot/cmd/portal_target_session_test.go
 dependencies:
   - {component: freeipa-client, required: true, relation: sameHosts}
 conflicts: []
@@ -89,6 +93,11 @@ traceability:
     "docs/verification/pilot-access-gateway.md#AG47": {kind: unit-test-evidence, tags: [], reason: "metadata responses carrying no store coordinates or token is TestConnectAuthorize_MetadataCarriesNoIngestCredential"}
     "docs/verification/pilot-access-gateway.md#AG48": {kind: unit-test-evidence, tags: [], reason: "token claims binding and per-mint jti is TestConnectAuthorize_MintsBoundIngestToken"}
     "docs/verification/pilot-access-gateway.md#AG49": {kind: unit-test-evidence, tags: [], reason: "fresh policy on every authorize is TestConnectAuthorize_FreshPolicyEachRequest"}
+    "docs/verification/pilot-access-gateway.md#AG50": {kind: unit-test-evidence, tags: [], reason: "the interactive Portal taking the recorded path is TestConnectToHost_TerminalModeUsesRecordedPath"}
+    "docs/verification/pilot-access-gateway.md#AG51": {kind: unit-test-evidence, tags: [], reason: "no ssh before a successful session-store start is TestPortalTargetSession_StoreStartFailureNoSSH"}
+    "docs/verification/pilot-access-gateway.md#AG52": {kind: unit-test-evidence, tags: [], reason: "no local recording file is TestPortalTargetSession_NoLocalRecordingFile"}
+    "docs/verification/pilot-access-gateway.md#AG53": {kind: unit-test-evidence, tags: [], reason: "an idle healthy fail_closed session surviving is TestRecorderFailClosedIdleSessionSurvives"}
+    "docs/verification/pilot-access-gateway.md#AG54": {kind: unit-test-evidence, tags: [], reason: "the pre-connect recording notice is TestPortalTargetSession_RecordingNotice"}
     "docs/verification/pilot-access-gateway.md#AG56": {kind: unit-test-evidence, tags: [], reason: "per-host userclass-unreadable denial (Phase 0 branch R) is TestConnectAuthorize_UserClassUnreadableDenies"}
 verification: {autoDeploy: false}
 # 2026-09-15 起 site.include:true(不再是 optIn/single-component-only)——

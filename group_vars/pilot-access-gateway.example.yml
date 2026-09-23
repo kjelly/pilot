@@ -90,6 +90,9 @@ pilot_access_gateway_binary_path: "dist/pilot-access-gateway-linux-amd64"
 # 內容),只有 hosts.yml 標了 ssh_recording 的主機才會錄。設成
 # terminal_output/terminal_io 會讓「沒有設定 ssh_recording 的每一台主機」
 # 都錄影,且必須同時設定 pilot_session_store_url。
+# terminal_io 的已知限制:typed input is recorded only as redacted byte counts
+# on the Gateway SSH relay path; terminal_io does not capture command text
+# today.(輸入端只記錄遮蔽後的位元組數,不保證 secret 不會出現在錄影的輸出內容中。)
 # pilot_session_recording_mode: terminal_output
 
 # store 無法確認寫入時的處理方式。預設 fail_closed:超過 failure_grace 仍無法

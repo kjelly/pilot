@@ -6,9 +6,18 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
+	"sync"
+
+	"github.com/google/uuid"
+	"github.com/muesli/cancelreader"
+
+	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
 // defaultSSHConfigPath / sshBinaryPath match spec.md §25/§31.
@@ -88,10 +97,32 @@ func buildConnectSSHCmd(sshConfigPath, target, credentialCache string) *exec.Cmd
 // exec'ing a real ssh session to a real host.
 var sshLauncher = func(cmd *exec.Cmd) error { return cmd.Run() }
 
-// connectToHost is Phase 5's Connect action. It performs a fresh,
-// full re-authorize immediately before connecting (spec.md §16: "Connect
-// 每次 fresh authorize" — never reusing My Hosts' cached SSH.Allowed as
-// the connect decision), then launches the controlled OpenSSH client.
+// portalStdin/portalStdout/portalStderr are the interactive Portal's
+// terminal; variables so tests can drive a recorded Connect through a pty
+// they own.
+var (
+	portalStdin  *os.File  = os.Stdin
+	portalStdout io.Writer = os.Stdout
+	portalStderr io.Writer = os.Stderr
+)
+
+// newPortalInputReader wraps the terminal for one Connect so a recorded
+// session's input relay can be released afterwards (per-host recording spec
+// §18.1). A variable so tests can observe the cancellation.
+var newPortalInputReader = func(f *os.File) (cancelreader.CancelReader, error) { return cancelreader.NewReader(f) }
+
+// portalAuditEmitter is the interactive Portal's session audit emitter,
+// created on first use and shared by every Connect of this process.
+var portalAuditEmitter = sync.OnceValue(func() *sessionaudit.Emitter {
+	e, _ := sessionaudit.NewEmitter("pilot-access-gateway")
+	return e
+})
+
+// connectToHost is the Portal's Connect action. It runs the same connect
+// core as the Directory handoff (runPortalTargetSession): a fresh, full
+// re-authorize immediately before connecting (spec.md §16: "Connect 每次
+// fresh authorize" — never reusing My Hosts' cached SSH.Allowed as the
+// connect decision), then the plain or recorded path the gateway grants.
 //
 // It always returns nil, back into runPortal's own loop (spec.md §2:
 // "退出 remote SSH 後回到同一個 pilot portal") — a failed authorize call or
@@ -110,30 +141,54 @@ var sshLauncher = func(cmd *exec.Cmd) error { return cmd.Run() }
 // deploy_tui.go already uses (see its own package doc comment for why).
 // Between any two prompts there is no active raw-mode Program to suspend,
 // so a plain blocking exec.Cmd.Run() here already leaves the terminal in
-// the right state for the next prompt's Program to start — no
-// suspend/resume machinery is needed, and adding tea.ExecProcess would
-// only reintroduce complexity this architecture doesn't have a use for.
-func connectToHost(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath, username, fqdn string) error {
-	// No session id yet: until the interactive path records (per-host
-	// recording spec §18), the gateway refuses any target whose effective
-	// mode records (recording_session_id_invalid) rather than letting this
-	// plain path connect unrecorded.
-	authz, err := client.ConnectAuthorize(ctx, fqdn, "")
-	if err != nil {
-		runConfirmPrompt("", fmt.Sprintf("Connect failed.\n\n%v", err), true)
-		return nil
+// the right state for the next prompt's Program to start. A recorded
+// session reads the terminal through a cancelreader instead, canceled and
+// waited for before the next prompt, so no goroutine is left reading
+// stdin.
+func connectToHost(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath, fqdn string) error {
+	var input io.Reader = portalStdin
+	if cr, err := newPortalInputReader(portalStdin); err == nil {
+		defer cr.Close() //nolint:errcheck
+		input = cr
+	} else {
+		// Not a pollable terminal (tests, redirected stdin): a recorded
+		// session then reads stdin directly, as before.
+		slog.Debug("portal connect: cancelable stdin unavailable", "error", err)
 	}
-	if !authz.Allowed {
-		runConfirmPrompt("", "Access changed.\nConnection was not started.", true)
-		return nil
-	}
-	cache, err := credentials.Ensure(ctx, username)
-	if err != nil {
-		runConfirmPrompt("", fmt.Sprintf("Kerberos authentication failed.\n\n%v", err), true)
-		return nil
-	}
-	if err := sshLauncher(buildConnectSSHCmd(sshConfigPath, authz.Target, cache)); err != nil {
-		runConfirmPrompt("", fmt.Sprintf("SSH session ended with an error.\n\n%v", err), true)
+	err := runPortalTargetSession(ctx, portalSessionDeps{
+		Client: client, Credentials: credentials, Emitter: portalAuditEmitter(), SSHConfigPath: sshConfigPath,
+		Terminal: portalStdin, Stdin: input, Stdout: portalStdout, Notice: portalStderr,
+	}, uuid.NewString(), fqdn)
+	if msg := portalConnectPromptMessage(err); msg != "" {
+		runConfirmPrompt("", msg, true)
 	}
 	return nil
+}
+
+// portalConnectPromptMessage is the Portal prompt for a Connect that did not
+// end cleanly; "" for a clean end.
+func portalConnectPromptMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ce *portalConnectError
+	if errors.As(err, &ce) {
+		switch ce.stage {
+		case portalStageAuthorizeCall:
+			return fmt.Sprintf("Connect failed.\n\n%v", ce.err)
+		case portalStageDenied:
+			if ce.reason != "" {
+				return ce.msg
+			}
+			return "Access changed.\nConnection was not started."
+		case portalStageCredentials:
+			return fmt.Sprintf("Kerberos authentication failed.\n\n%v", ce.err)
+		case portalStageRecording:
+			if ce.err != nil {
+				return fmt.Sprintf("%s\n\n%v", ce.msg, ce.err)
+			}
+			return ce.msg
+		}
+	}
+	return fmt.Sprintf("SSH session ended with an error.\n\n%v", err)
 }
