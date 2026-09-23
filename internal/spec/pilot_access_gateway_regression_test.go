@@ -16,7 +16,7 @@ func TestRegression_PilotAccessGatewaySpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
-	wantIDs := []string{"AG01", "AG02", "AG03", "AG04", "AG06", "AG09", "AG12", "AG19", "AG30", "AG32", "AG33", "AG34", "AG41"}
+	wantIDs := []string{"AG01", "AG02", "AG03", "AG04", "AG06", "AG09", "AG12", "AG19", "AG30", "AG32", "AG33", "AG34", "AG41", "AG42", "AG43", "AG44"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -88,6 +88,62 @@ func TestRegression_PilotAccessGatewayGSSAPIOnlyContract(t *testing.T) {
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("playbook must not allow Portal SSH fallback %q", forbidden)
+		}
+	}
+}
+
+// TestRegression_PilotAccessGatewayTransportContract locks the gateway-side
+// deployment invariants of the captive SSH transport (docs/superpowers/
+// specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md
+// §12.3-§12.5): transport defaults off, the wrapper no longer carries the
+// shell TTY check (Go enforces it per state), the ForceCommand drop-in
+// states AllowStreamLocalForwarding and never puts PermitUserEnvironment
+// inside Match (sshd -t rejects it there), and the AG43/AG44 probes check
+// exactly that.
+func TestRegression_PilotAccessGatewayTransportContract(t *testing.T) {
+	raw, err := os.ReadFile("../../playbooks/apply/pilot-access-gateway-apply.yml")
+	if err != nil {
+		t.Fatalf("read playbook: %v", err)
+	}
+	playbook := string(raw)
+	for _, required := range []string{
+		"pilot_access_gateway_transport_enabled | default(false)",
+		"            transport:\n              enabled: {{ pilot_access_gateway_effective_transport_enabled | bool | to_json }}",
+		"              AllowStreamLocalForwarding no\n",
+		"tags: [AG_forcecommand, AG43]",
+		"tags: [AG_service, AG34, AG44]",
+		"tags: [AG_config, AG01, AG41, AG42]",
+	} {
+		if !strings.Contains(playbook, required) {
+			t.Errorf("playbook missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"[ -t 0 ] || exit 1",
+		"              PermitUserEnvironment",
+	} {
+		if strings.Contains(playbook, forbidden) {
+			t.Errorf("playbook must not contain %q", forbidden)
+		}
+	}
+
+	s, err := Parse("../../docs/verification/pilot-access-gateway.md")
+	if err != nil {
+		t.Fatalf("parse spec: %v", err)
+	}
+	rows := map[string]Row{}
+	for _, row := range s.Rows {
+		rows[row.ID] = row
+	}
+	for id, tokens := range map[string][]string{
+		"AG42": {"transport:", "enabled: (true|false)"},
+		"AG43": {"AllowStreamLocalForwarding no", "! grep -q PermitUserEnvironment"},
+		"AG44": {"exec /usr/bin/pilot portal-session", `! grep -q "\[ -t 0 \]"`},
+	} {
+		for _, tok := range tokens {
+			if !strings.Contains(rows[id].Command, tok) {
+				t.Errorf("%s command must contain %q, got %q", id, tok, rows[id].Command)
+			}
 		}
 	}
 }

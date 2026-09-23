@@ -19,6 +19,10 @@ regressionTests:
   - cmd/pilot/cmd/portal_ssh_test.go
   - cmd/pilot/cmd/portal_ssh_config_sync_test.go
   - cmd/pilot-access-gateway/config_test.go
+  - cmd/pilot/cmd/portal_session_test.go
+  - cmd/pilot/cmd/portal_session_transport_test.go
+  - cmd/pilot/cmd/portal_session_known_hosts_test.go
+  - internal/gatewayapi/transport_test.go
 dependencies:
   - {component: freeipa-client, required: true, relation: sameHosts}
 conflicts: []
@@ -43,6 +47,7 @@ groupVars:
   - {name: pilot_access_gateway_recording_session_store_ca_file, type: string, required: false, default: "", secret: false}
   - {name: pilot_access_gateway_recording_session_store_ingest_token_file, type: string, required: false, default: "", secret: false}
   - {name: pilot_access_gateway_recording_allow_downgrade, type: boolean, required: false, default: false, secret: false}
+  - {name: pilot_access_gateway_transport_enabled, type: boolean, required: false, default: false, secret: false}
 endpoints:
   - name: gateway-socket
     scheme: unix
@@ -63,6 +68,9 @@ traceability:
     "docs/verification/pilot-access-gateway.md#AG33": {tags: [AG33], reason: "Kerberos client package tasks install kinit, klist, and kdestroy for session-scoped Portal credentials"}
     "docs/verification/pilot-access-gateway.md#AG34": {tags: [AG34], reason: "Step 14 install-pilot-session task now execs pilot portal-session instead of pilot portal"}
     "docs/verification/pilot-access-gateway.md#AG41": {tags: [AG41], reason: "Step 11 renders gateway.recording from the pilot_access_gateway_recording_* group vars; the Recording policy guard tasks carry the same tag"}
+    "docs/verification/pilot-access-gateway.md#AG42": {tags: [AG42], reason: "Step 11 renders gateway.transport.enabled from pilot_access_gateway_transport_enabled (default false)"}
+    "docs/verification/pilot-access-gateway.md#AG43": {tags: [AG43], reason: "Step 19 sshd ForceCommand drop-in now states AllowStreamLocalForwarding no explicitly and keeps PermitUserEnvironment out of the Match block"}
+    "docs/verification/pilot-access-gateway.md#AG44": {tags: [AG44], reason: "Step 14 wrapper no longer carries the shell TTY check; pilot portal-session enforces the per-state TTY policy in Go"}
   exemptions:
     "docs/verification/pilot-access-gateway.md#AG19": {kind: structural-absence, tags: [], reason: "no task in this playbook ever writes under /var/lib/pilot — absence is structural, not produced by a specific task"}
     "docs/verification/pilot-access-gateway.md#AG30": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task"}

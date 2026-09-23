@@ -88,3 +88,12 @@ pilot_access_gateway_binary_path: "dist/pilot-access-gateway-linux-amd64"
 # pilot_access_gateway_recording_session_store_url: "https://<session_store_fqdn>:8443"
 # pilot_access_gateway_recording_session_store_ingest_token_file: "/etc/pilot/session-store-ingest-token"  # 檔案需事先存在且 mode 0600
 # pilot_access_gateway_recording_session_store_ca_file: "/etc/ipa/ca.crt"
+
+# Captive opaque SSH transport(pilot-transport-v1 / pilot-known-hosts-v1,
+# docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md)。
+# 預設 false。開啟後,workstation 可經這台 gateway 以 OpenSSH ProxyCommand
+# 對「已套用 pilot-access-target-policy、因而在 FreeIPA hostgroup
+# pilot-transport-ready 內」的 target 建立 SSH/SFTP/SCP/rsync;gateway 本身
+# 仍然不給 shell、不開 sshd forwarding。關回 false 即停止新的 transport,
+# 不影響 portal 與 pilot-connect。
+# pilot_access_gateway_transport_enabled: false

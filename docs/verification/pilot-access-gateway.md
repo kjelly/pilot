@@ -48,6 +48,9 @@
 | AG33 | kerberos | Portal session ticket helper 依賴的 Kerberos client binaries存在 | 0 | test -x /usr/bin/kinit && test -x /usr/bin/klist && test -x /usr/bin/kdestroy |
 | AG34 | handoff | ForceCommand wrapper 已改為 exec `pilot portal-session`（Phase 5 dispatcher），不再是舊版永遠互動的 `pilot portal` | 0 | grep -q 'exec /usr/bin/pilot portal-session' /usr/local/libexec/pilot-session |
 | AG41 | recording | `/etc/pilot/access-gateway.yaml` 的 `gateway.recording` 由 `pilot_access_gateway_recording_*` group vars 渲染（不再每次 apply 被覆寫成沒有 recording 區塊；captive-transport spec §12.2），`mode` 為合法值 | 0 | sh -c 'grep -A3 "^  recording:$" /etc/pilot/access-gateway.yaml | grep -Eq "^    mode: \"?(metadata|terminal_output|terminal_io)\"?$"' |
+| AG42 | transport | `/etc/pilot/access-gateway.yaml` 渲染 `gateway.transport.enabled`（`pilot_access_gateway_transport_enabled`，預設 `false`；captive-transport spec §12.3） | 0 | sh -c 'grep -A1 "^  transport:$" /etc/pilot/access-gateway.yaml | grep -Eq "^    enabled: (true|false)$"' |
+| AG43 | ssh-policy | Gateway sshd drop-in 明列 `AllowStreamLocalForwarding no`，且 Match 區塊內沒有 sshd 不接受的 `PermitUserEnvironment`（§12.4） | 0 | sh -c 'f=/etc/ssh/sshd_config.d/90-pilot-access-gateway.conf; grep -Eq "^[[:space:]]+AllowStreamLocalForwarding no$" "$f" && ! grep -q PermitUserEnvironment "$f"' |
+| AG44 | handoff | ForceCommand wrapper 仍 `exec /usr/bin/pilot portal-session`，但已不含 shell 層的 `[ -t 0 ]`——TTY 政策改由 Go 依 state 執行（§7.3/§12.5） | 0 | sh -c 'f=/usr/local/libexec/pilot-session; grep -q "exec /usr/bin/pilot portal-session" "$f" && ! grep -q "\[ -t 0 \]" "$f"' |
 
 ## 3. 不在這份 checklist 逐行覆蓋、但已用其他方式驗證過的項目
 
@@ -186,3 +189,33 @@ target 不觸發憑證或 SSH；憑證失敗不觸發 SSH；一個真的 `*exec.
 ## 7. 明確不在本 repo 範圍的項目
 
 - **AG31 out-of-scope SSH egress blocked by network policy**：站台網路層需求（防火牆/network policy 擋非 scope 內的 SSH 流量），非本 repo 範圍——`pilot-access-gateway` 本身沒有、也不打算有網路層 enforcement 能力，這是站台網路團隊的責任。
+
+## 8. Captive SSH transport（AG45–AG73，2026-09-23）
+
+對齊 `docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md` §14。AG41–AG44 是 §2 的 host checklist 列；下列項目不是單一主機可執行的 shell 檢查，依 F16 慣例列在 checklist 之外，不進 contract traceability。
+
+### 8.1 Go 測試證明（[unit]）
+
+| ID | 驗證內容 | 測試 |
+|----|----------|------|
+| AG45 | `pilot-transport-v1 <fqdn>`／`pilot-known-hosts-v1 <fqdn>` 解析為各自的 state | `TestParsePortalSSHOriginalCommand_ValidTransport`／`_ValidKnownHosts` |
+| AG46 | 拒絕清單：port、IP、`user@host`、option、shell syntax、第二個 token、大寫、尾端 `.`、單一 label、近似的動詞 | `TestParsePortalSSHOriginalCommand_RejectsTransport` |
+| AG47 | TTY 矩陣：portal／`pilot-connect` 需要 stdin TTY；transport／known-hosts 拒絕任何 TTY，且在接觸 API 之前就拒絕 | `TestRunPortalSession_TTYPolicy` |
+| AG48 | Server 端 transport gate：disabled（不查 FreeIPA）、直接與巢狀的 ready 成員、非成員、查詢失敗、未授權 | `internal/gatewayapi` `TestConnectAuthorize_TransportGate` |
+| AG49 | 任何 deny 路徑都不做 DNS、不 dial | `TestRunPortalTransport_DeniedPathsNeverResolveOrDial` |
+| AG50 | 每次 transport 都 fresh authorize（撤銷後下一次即拒絕） | `TestRunPortalTransport_FreshAuthorizeEveryCall` |
+| AG51 | recording allowlist：只有 `""`／`metadata` 放行 | 同 AG49 |
+| AG52 | 只 resolve 一次、只 dial `<ip>:22`、從不 dial hostname、最多 3 個位址 | `TestRunPortalTransport_ResolveOnceDialExactIP22` |
+| AG53 | 拒絕特殊位址與 gateway 本機位址，允許 RFC1918／ULA | `TestFilterTransportAddrs` |
+| AG54 | 16 MiB 隨機 binary 逐 byte 一致 | `TestBridgeTransport_ByteForByte` |
+| AG55 | half-close、stdin 永不關閉時有界結束、取消時關閉 socket | `TestBridgeTransport_HalfClose` |
+| AG56 | 所有 deny／fail 路徑 stdout 為 0 bytes，stderr 為固定字串 | 同 AG49；`TestRunPortalKnownHosts` |
+| AG57 | audit：requested → connected → closed，含 IP／bytes／duration，payload 不進 audit | `TestRunPortalTransport_AuditEvents` |
+| AG58 | host key：以真實擷取的 `host_show` 解析、驗證 key、同一套 gate | `TestParseHostSSHPublicKeys`、`TestKnownHostsLine`、`TestRunPortalKnownHosts`、`TestTransportHostKeys` |
+| AG59 | config：缺少 `transport:` 時為 disabled；未知欄位被拒絕 | `cmd/pilot-access-gateway` `TestLoadConfigTransport` |
+
+Evidence：`docs/evidence/pilot-access-gateway/2026-09-23-0e865d2.md`。
+
+### 8.2 拓樸實跑（[e2e]）
+
+AG60 已於 Phase 1 驗證（`docs/evidence/pilot-access-gateway/2026-09-23-b0c12ee.md`）。AG61–AG73（擴充 lockout suite、transport 預設關閉、SSH／SFTP／SCP／rsync、FreeIPA host key、未 ready 被拒、recording 不相容、真實 sshd 的語法拒絕、journald audit、legacy 回歸、rollback）由 `scripts/pilot-access-gateway-transport-e2e.sh` 與 `scripts/pilot-access-gateway-lockout-test.sh` 在 `docs/topologies/pilot-access-transport-topology.yaml` 上驗證，結果記錄在對應 Phase 的 evidence。

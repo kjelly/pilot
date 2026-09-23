@@ -159,6 +159,12 @@
     pilot_access_gateway_effective_recording_session_store_ca_file: "{{ pilot_access_gateway_recording_session_store_ca_file | default('', true) }}"
     pilot_access_gateway_effective_recording_session_store_ingest_token_file: "{{ pilot_access_gateway_recording_session_store_ingest_token_file | default('', true) }}"
     pilot_access_gateway_effective_recording_allow_downgrade: "{{ pilot_access_gateway_recording_allow_downgrade | default(false) }}"
+    # Captive opaque SSH transport (`pilot-transport-v1`, captive-transport
+    # spec §12.3). Default FALSE and this spec must not flip it: turning it
+    # on opens a new data plane, and a target is only reachable once
+    # pilot-access-target-policy-apply.yml has put it in the FreeIPA
+    # hostgroup pilot-transport-ready.
+    pilot_access_gateway_effective_transport_enabled: "{{ pilot_access_gateway_transport_enabled | default(false) }}"
     # metadata < terminal_output < terminal_io: lower rank = records less.
     gateway_recording_mode_rank:
       metadata: 0
@@ -768,14 +774,14 @@
           pilot_access_gateway_recording_failure_policy must be best_effort|fail_closed
           (got {{ pilot_access_gateway_effective_recording_failure_policy }}), and a
           session_store_url requires pilot_access_gateway_recording_session_store_ingest_token_file.
-      tags: [AG_config, AG01, AG41]
+      tags: [AG_config, AG01, AG41, AG42]
 
     - name: "Recording policy: stat the session-store ingest token file"
       ansible.builtin.stat:
         path: "{{ pilot_access_gateway_effective_recording_session_store_ingest_token_file }}"
       register: gateway_recording_token_stat
       when: pilot_access_gateway_effective_recording_session_store_url | length > 0
-      tags: [AG_config, AG01, AG41]
+      tags: [AG_config, AG01, AG41, AG42]
 
     # Same rule cmd/pilot-access-gateway/config.go's loadSessionStoreIngestToken
     # enforces at startup — failing here keeps a bad token file from
@@ -790,27 +796,27 @@
           must exist on this host with no group/world permission bits (e.g. 0600)
           before a session store can be configured.
       when: pilot_access_gateway_effective_recording_session_store_url | length > 0
-      tags: [AG_config, AG01, AG41]
+      tags: [AG_config, AG01, AG41, AG42]
 
     - name: "Recording policy: stat the currently installed gateway config"
       ansible.builtin.stat:
         path: /etc/pilot/access-gateway.yaml
       register: gateway_existing_config_stat
-      tags: [AG_config, AG01, AG41]
+      tags: [AG_config, AG01, AG41, AG42]
 
     - name: "Recording policy: read the currently installed gateway config"
       ansible.builtin.slurp:
         src: /etc/pilot/access-gateway.yaml
       register: gateway_existing_config_raw
       when: gateway_existing_config_stat.stat.exists
-      tags: [AG_config, AG01, AG41]
+      tags: [AG_config, AG01, AG41, AG42]
 
     - name: "Recording policy: extract the installed recording policy"
       ansible.builtin.set_fact:
         gateway_existing_recording: >-
           {{ (((gateway_existing_config_raw.content | b64decode | from_yaml) or {}).get('gateway') or {}).get('recording') or {}
              if gateway_existing_config_stat.stat.exists else {} }}
-      tags: [AG_config, AG01, AG41]
+      tags: [AG_config, AG01, AG41, AG42]
 
     - name: "Recording policy: refuse to silently lower the installed policy"
       ansible.builtin.assert:
@@ -834,7 +840,7 @@
           Set pilot_access_gateway_recording_mode / _session_store_* to keep the
           current policy, or pass -e pilot_access_gateway_recording_allow_downgrade=true
           to lower it on purpose.
-      tags: [AG_config, AG01, AG41]
+      tags: [AG_config, AG01, AG41, AG42]
 
     # Step 11 (spec.md §55): access-gateway.yaml — matches
     # cmd/pilot-access-gateway/config.go's Config struct exactly (kept in
@@ -879,8 +885,10 @@
               session_store_ca_file: {{ pilot_access_gateway_effective_recording_session_store_ca_file | to_json }}
           {% endif %}
           {% endif %}
+            transport:
+              enabled: {{ pilot_access_gateway_effective_transport_enabled | bool | to_json }}
       register: gateway_config_copy
-      tags: [AG_config, AG01, AG41]
+      tags: [AG_config, AG01, AG41, AG42]
 
     # Step 12 (spec.md §55/§32): root-owned SSH client config — MUST stay
     # byte-identical to cmd/pilot/cmd/portal_ssh.go's pilotSSHConfig
@@ -1011,6 +1019,13 @@
     # SSH_ORIGINAL_COMMAND itself, in Go, and either runs the same
     # interactive path, runs the new one-shot `pilot-connect <session-id>
     # <target-fqdn>` handoff, or denies — see cmd/pilot/cmd/portal_session.go).
+    #
+    # 2026-09-23 (captive-transport spec §12.5): the wrapper's former
+    # blanket "stdin must be a TTY" shell test is gone — `pilot portal-session` now enforces the
+    # TTY policy itself (portal/pilot-connect require a TTY; the opaque
+    # pilot-transport-v1 / pilot-known-hosts-v1 states forbid one), which a
+    # shell-level blanket TTY check could not express. Step 9 installs the
+    # binary that carries that check before this step runs.
     - name: "Step 14: install pilot-session"
       ansible.builtin.copy:
         dest: /usr/local/libexec/pilot-session
@@ -1021,8 +1036,6 @@
           #!/bin/sh
           set -eu
 
-          [ -t 0 ] || exit 1
-
           unset SSH_AUTH_SOCK
           unset LD_PRELOAD
           unset LD_LIBRARY_PATH
@@ -1032,7 +1045,7 @@
           export PATH=/usr/bin:/bin
 
           exec /usr/bin/pilot portal-session
-      tags: [AG_service, AG34]
+      tags: [AG_service, AG34, AG44]
 
     # Step 15 (spec.md §55/§29/§30): systemd socket + service units.
     - name: "Step 15: install pilot-access-gateway.socket"
@@ -1184,6 +1197,13 @@
     # header comment and spec.md §0 G4/§55.1. Deliberately NOT exercised
     # by Phase 7's own vm-target run; Phase 8 owns turning this on for
     # real, only after the §55.1 lockout regression test has passed.
+    #
+    # AllowStreamLocalForwarding no is explicit (captive-transport spec
+    # §12.4) so `sshd -T -C` reports it directly, not only via
+    # DisableForwarding. PermitUserEnvironment is deliberately NOT here:
+    # sshd rejects it inside a Match block (verified live, Phase 0 evidence
+    # §6); its global default is already `no`, which the lockout script
+    # checks.
     - name: "Step 19: install sshd ForceCommand drop-in (GATED — see spec.md §55.1)"
       ansible.builtin.copy:
         dest: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
@@ -1198,12 +1218,13 @@
               DisableForwarding yes
               AllowAgentForwarding no
               AllowTcpForwarding no
+              AllowStreamLocalForwarding no
               X11Forwarding no
               PermitTunnel no
               PermitUserRC no
       when: pilot_access_gateway_effective_install_forcecommand | bool
       register: gateway_forcecommand_dropin
-      tags: [AG_forcecommand]
+      tags: [AG_forcecommand, AG43]
 
     - name: "Step 20: sshd -t"
       ansible.builtin.command:

@@ -44,6 +44,14 @@
 #                                       message on the client and by the
 #                                       live process tree never showing an
 #                                       ssh child toward any target host.
+#   7. (captive-transport spec §15.4, 2026-09-23) no-PTY arbitrary command
+#      denied; `ssh -tt ... pilot-transport-v1|pilot-known-hosts-v1` denied
+#      (those states forbid a TTY); scp to the gateway denied; -R and -D
+#      forwarding refused server-side; effective AllowStreamLocalForwarding
+#      no and global PermitUserEnvironment no; and — only when
+#      TRANSPORT_TARGET names a transport-ready target — a live
+#      pilot-transport-v1 session's `pilot portal-session` process has no
+#      child at all (no shell, no /usr/bin/ssh).
 #
 # §55.1 / §0 G4 still applies in full: only ever run this against a
 # disposable vm-target, never a real/shared host — this script logs in as
@@ -69,6 +77,11 @@
 #                        only ever exports it as SSHPASS for `sshpass -e`
 #                        (same discipline as scripts/minimal-poc-section4-
 #                        spotcheck.sh).
+#   PORTAL_KEY         — alternative to PORTAL_PASSWORD: a private key file
+#                        whose public half is the portal user's FreeIPA
+#                        ipaSshPubKey (e.g. the captive-transport E2E
+#                        fixture's disposable key). Exactly one of
+#                        PORTAL_PASSWORD / PORTAL_KEY is required.
 #   CONFIRM_DISPOSABLE — must be exactly "yes". A deliberate speed bump so
 #                        this can't be copy-pasted against a real gateway
 #                        by accident.
@@ -76,6 +89,11 @@
 # Optional env:
 #   GATEWAY_ADMIN_USER — admin account name (default root).
 #   FWD_TEST_PORT      — local port used for the forwarding probe (default 18022).
+#   TRANSPORT_TARGET   — a target FQDN the portal user may open a
+#                        pilot-transport-v1 transport to (gateway transport
+#                        enabled + target in pilot-transport-ready). When
+#                        unset, the live-transport process-tree probe is
+#                        reported as skipped.
 #
 # Output: one JSON line per probe on stdout (id/status/detail); a one-line
 # summary on stderr. Exit 0 only if every probe's expected (blocked) outcome
@@ -88,17 +106,27 @@ GATEWAY_ADMIN_KEY="${GATEWAY_ADMIN_KEY:-}"
 GATEWAY_ADMIN_USER="${GATEWAY_ADMIN_USER:-root}"
 PORTAL_USER="${PORTAL_USER:-}"
 FWD_TEST_PORT="${FWD_TEST_PORT:-18022}"
+PORTAL_KEY="${PORTAL_KEY:-}"
+TRANSPORT_TARGET="${TRANSPORT_TARGET:-}"
 
 if [ "${CONFIRM_DISPOSABLE:-}" != "yes" ]; then
   echo "ERROR: set CONFIRM_DISPOSABLE=yes to confirm GATEWAY_HOST is a disposable test gateway (spec.md §0 G4/§55.1 — never run this against a real/shared host)." >&2
   exit 2
 fi
-if [ -z "$GATEWAY_HOST" ] || [ -z "$GATEWAY_ADMIN_KEY" ] || [ -z "$PORTAL_USER" ] || [ -z "${PORTAL_PASSWORD:-}" ]; then
-  echo "ERROR: GATEWAY_HOST, GATEWAY_ADMIN_KEY, PORTAL_USER and PORTAL_PASSWORD are all required." >&2
+if [ -z "$GATEWAY_HOST" ] || [ -z "$GATEWAY_ADMIN_KEY" ] || [ -z "$PORTAL_USER" ]; then
+  echo "ERROR: GATEWAY_HOST, GATEWAY_ADMIN_KEY and PORTAL_USER are all required." >&2
   exit 2
 fi
-if ! command -v sshpass >/dev/null 2>&1; then
-  echo "ERROR: sshpass is required (used the same way as scripts/minimal-poc-section4-spotcheck.sh)." >&2
+if [ -n "${PORTAL_PASSWORD:-}" ] && [ -n "$PORTAL_KEY" ]; then
+  echo "ERROR: set exactly one of PORTAL_PASSWORD or PORTAL_KEY, not both." >&2
+  exit 2
+fi
+if [ -z "${PORTAL_PASSWORD:-}" ] && [ -z "$PORTAL_KEY" ]; then
+  echo "ERROR: one of PORTAL_PASSWORD or PORTAL_KEY is required." >&2
+  exit 2
+fi
+if [ -n "${PORTAL_PASSWORD:-}" ] && ! command -v sshpass >/dev/null 2>&1; then
+  echo "ERROR: sshpass is required for PORTAL_PASSWORD (used the same way as scripts/minimal-poc-section4-spotcheck.sh)." >&2
   exit 2
 fi
 
@@ -122,8 +150,18 @@ emit() {
   fi
 }
 
-PORTAL_SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=no
-                 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=8)
+PORTAL_SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=no -o ConnectTimeout=8)
+# PORTAL_AUTH is prefixed to every portal-user ssh/sftp/scp invocation:
+# `sshpass -e` (with SSHPASS exported once) for password auth, nothing for
+# key auth (the key goes into PORTAL_SSH_OPTS instead).
+if [ -n "$PORTAL_KEY" ]; then
+  PORTAL_AUTH=()
+  PORTAL_SSH_OPTS+=(-i "$PORTAL_KEY" -o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no)
+else
+  export SSHPASS="$PORTAL_PASSWORD"
+  PORTAL_AUTH=(sshpass -e)
+  PORTAL_SSH_OPTS+=(-o PreferredAuthentications=password -o PubkeyAuthentication=no)
+fi
 ADMIN_SSH=(ssh -i "$GATEWAY_ADMIN_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
            -o ConnectTimeout=8 "${GATEWAY_ADMIN_USER}@${GATEWAY_HOST}")
 
@@ -144,7 +182,7 @@ trap cleanup EXIT
 # --- 1. forced-PTY command injection, verified via the live process tree ---
 
 log1=$(mktemp)
-SSHPASS="$PORTAL_PASSWORD" sshpass -e ssh -tt "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" \
+"${PORTAL_AUTH[@]}" ssh -tt "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" \
   "echo $MARKER; whoami; id" </dev/null >"$log1" 2>&1 &
 CLEANUP_PIDS+=("$!")
 sleep 3
@@ -152,19 +190,26 @@ tree1=$("${ADMIN_SSH[@]}" "ps -ef | grep -F '$PORTAL_USER'" 2>/dev/null)
 kill "${CLEANUP_PIDS[-1]}" >/dev/null 2>&1 || true
 sleep 1
 
+# Since the Phase 5 dispatcher (2026-09-18) an unrecognized command is
+# denied outright ("pilot-session: unrecognized command") instead of
+# falling through to the interactive TUI, so either outcome — an explicit
+# rejection, or (older builds) pilot-session -> pilot portal in the tree —
+# proves the injected command never ran; the marker is what must be absent.
 if grep -q "$MARKER" "$log1"; then
   emit lockout-forced-pty-command-ignored fail "injected command's own marker appeared in client output: $(cat "$log1")"
-elif ! grep -q 'pilot-session' <<<"$tree1" || ! grep -q '/usr/bin/pilot portal' <<<"$tree1"; then
-  emit lockout-forced-pty-command-ignored fail "expected pilot-session -> pilot portal in the process tree, got: $tree1"
-else
+elif grep -q 'pilot-session:' "$log1"; then
+  emit lockout-forced-pty-command-ignored pass "dispatcher rejected the injected command: $(cat "$log1")"
+elif grep -q 'pilot-session' <<<"$tree1" && grep -q '/usr/bin/pilot portal' <<<"$tree1"; then
   emit lockout-forced-pty-command-ignored pass "process tree shows only pilot-session -> pilot portal; injected command never ran: $tree1"
+else
+  emit lockout-forced-pty-command-ignored fail "neither a pilot-session rejection nor pilot-session -> pilot portal was observed; output: $(cat "$log1"); tree: $tree1"
 fi
 rm -f "$log1"
 
 # --- 2. client-side RemoteCommand override ---
 
 log2=$(mktemp)
-SSHPASS="$PORTAL_PASSWORD" sshpass -e ssh -tt "${PORTAL_SSH_OPTS[@]}" -o RemoteCommand="echo $MARKER; /bin/sh -i" \
+"${PORTAL_AUTH[@]}" ssh -tt "${PORTAL_SSH_OPTS[@]}" -o RemoteCommand="echo $MARKER; /bin/sh -i" \
   "${PORTAL_USER}@${GATEWAY_HOST}" </dev/null >"$log2" 2>&1 &
 CLEANUP_PIDS+=("$!")
 sleep 3
@@ -181,7 +226,7 @@ rm -f "$log2"
 # --- 3. local port forwarding must be refused server-side ---
 
 log3=$(mktemp)
-SSHPASS="$PORTAL_PASSWORD" sshpass -e ssh -v "${PORTAL_SSH_OPTS[@]}" -o ExitOnForwardFailure=no \
+"${PORTAL_AUTH[@]}" ssh -v "${PORTAL_SSH_OPTS[@]}" -o ExitOnForwardFailure=no \
   -N -L "${FWD_TEST_PORT}:127.0.0.1:22" "${PORTAL_USER}@${GATEWAY_HOST}" >"$log3" 2>&1 &
 CLEANUP_PIDS+=("$!")
 sleep 2
@@ -197,9 +242,9 @@ else
 fi
 rm -f "$log3"
 
-# --- 4. SFTP subsystem must be refused (no PTY -> pilot-session exits 1) ---
+# --- 4. SFTP subsystem must be refused (the subsystem's SSH_ORIGINAL_COMMAND is not a recognized grammar -> denied) ---
 
-sftp_out=$(SSHPASS="$PORTAL_PASSWORD" sshpass -e sftp "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" <<<"pwd" 2>&1)
+sftp_out=$("${PORTAL_AUTH[@]}" sftp "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" <<<"pwd" 2>&1)
 sftp_rc=$?
 # NOTE: piping into sshpass (`printf ... | sshpass -e sftp -b -`) breaks
 # sshpass's own pty-based password injection and fails auth outright
@@ -241,6 +286,16 @@ check_directive lockout-directive-x11forwarding x11forwarding no
 check_directive lockout-directive-allowtcpforwarding allowtcpforwarding no
 check_directive lockout-directive-allowagentforwarding allowagentforwarding no
 check_directive lockout-directive-permittunnel permittunnel no
+check_directive lockout-directive-allowstreamlocalforwarding allowstreamlocalforwarding no
+
+# PermitUserEnvironment is not allowed inside a Match block, so the drop-in
+# cannot set it; the GLOBAL effective value is what must be "no".
+global_env=$("${ADMIN_SSH[@]}" "sshd -T" 2>&1 | grep -i '^permituserenvironment ' | awk '{print $2}')
+if [ "$global_env" = no ]; then
+  emit lockout-directive-permituserenvironment pass "global permituserenvironment = no"
+else
+  emit lockout-directive-permituserenvironment fail "global permituserenvironment = '$global_env', want 'no'"
+fi
 
 # --- 6. Phase 5 handoff grammar rejection (docs/tmp/now/spec.md §16/§17/§38,
 #     AG35/AG36): every malformed/malicious pilot-connect-shaped
@@ -266,7 +321,7 @@ declare -a GRAMMAR_CASES=(
 for i in "${!GRAMMAR_CASES[@]}"; do
   case_cmd="${GRAMMAR_CASES[$i]}"
   logN=$(mktemp)
-  SSHPASS="$PORTAL_PASSWORD" sshpass -e ssh -tt "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" \
+  "${PORTAL_AUTH[@]}" ssh -tt "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" \
     "$case_cmd" </dev/null >"$logN" 2>&1 &
   CLEANUP_PIDS+=("$!")
   sleep 2
@@ -283,6 +338,100 @@ for i in "${!GRAMMAR_CASES[@]}"; do
   fi
   rm -f "$logN"
 done
+
+# --- 7. captive-transport spec §15.4 probes (2026-09-23) ---
+
+# 7a. no-PTY arbitrary command: denied by the dispatcher, never executed.
+log7a=$(mktemp)
+"${PORTAL_AUTH[@]}" ssh -T "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" "echo $MARKER; id" </dev/null >"$log7a" 2>&1
+rc7a=$?
+if grep -q "$MARKER" "$log7a"; then
+  emit lockout-notty-command-denied fail "injected no-PTY command ran: $(cat "$log7a")"
+elif [ "$rc7a" -ne 0 ] && grep -q 'pilot-session:' "$log7a"; then
+  emit lockout-notty-command-denied pass "rc=$rc7a: $(cat "$log7a")"
+else
+  emit lockout-notty-command-denied fail "rc=$rc7a, expected a pilot-session rejection: $(cat "$log7a")"
+fi
+rm -f "$log7a"
+
+# 7b. transport / known-hosts states forbid a TTY.
+tty_target="${TRANSPORT_TARGET:-transport-probe.example.internal}"
+for verb in pilot-transport-v1 pilot-known-hosts-v1; do
+  log7b=$(mktemp)
+  timeout 20 "${PORTAL_AUTH[@]}" ssh -tt "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" -- "$verb" "$tty_target" </dev/null >"$log7b" 2>&1
+  rc7b=$?
+  if [ "$rc7b" -ne 0 ] && grep -q 'a TTY is not allowed' "$log7b"; then
+    emit "lockout-tty-$verb-denied" pass "rc=$rc7b: $(tr -d '\r' <"$log7b")"
+  else
+    emit "lockout-tty-$verb-denied" fail "rc=$rc7b, expected 'a TTY is not allowed': $(cat "$log7b")"
+  fi
+  rm -f "$log7b"
+done
+
+# 7c. scp to the gateway (both the default SFTP-based protocol and legacy -O)
+#     is refused, and nothing lands on the gateway.
+scp_src=$(mktemp)
+echo "$MARKER" >"$scp_src"
+for mode in sftp legacy; do
+  extra=()
+  [ "$mode" = legacy ] && extra=(-O)
+  scp_out=$("${PORTAL_AUTH[@]}" scp "${extra[@]}" "${PORTAL_SSH_OPTS[@]}" "$scp_src" "${PORTAL_USER}@${GATEWAY_HOST}:/tmp/lockout-scp-$mode-$$" 2>&1 </dev/null)
+  scp_rc=$?
+  landed=$("${ADMIN_SSH[@]}" "test -e /tmp/lockout-scp-$mode-$$ && echo LANDED" 2>/dev/null)
+  if [ "$scp_rc" -ne 0 ] && [ -z "$landed" ]; then
+    emit "lockout-scp-$mode-refused" pass "rc=$scp_rc, nothing written on the gateway: $scp_out"
+  else
+    emit "lockout-scp-$mode-refused" fail "rc=$scp_rc landed=[$landed]: $scp_out"
+  fi
+done
+rm -f "$scp_src"
+
+# 7d. remote (-R) forwarding is refused by the server.
+log7d=$(mktemp)
+timeout 15 "${PORTAL_AUTH[@]}" ssh -v "${PORTAL_SSH_OPTS[@]}" -o ExitOnForwardFailure=yes \
+  -N -R "$((FWD_TEST_PORT + 1)):127.0.0.1:22" "${PORTAL_USER}@${GATEWAY_HOST}" >"$log7d" 2>&1
+if grep -qiE "remote port forwarding failed|forwarding request denied|administratively prohibited" "$log7d"; then
+  emit lockout-remote-forward-refused pass "$(grep -iE 'remote port forwarding failed|forwarding request denied|administratively prohibited' "$log7d" | head -1)"
+else
+  emit lockout-remote-forward-refused fail "expected the server to refuse -R; ssh -v log: $(tail -20 "$log7d")"
+fi
+rm -f "$log7d"
+
+# 7e. dynamic (-D) forwarding: the SOCKS listener is local, but every
+#     channel it opens must be refused server-side.
+log7e=$(mktemp)
+DYN_PORT=$((FWD_TEST_PORT + 2))
+"${PORTAL_AUTH[@]}" ssh -v "${PORTAL_SSH_OPTS[@]}" -N -D "127.0.0.1:${DYN_PORT}" "${PORTAL_USER}@${GATEWAY_HOST}" >"$log7e" 2>&1 &
+CLEANUP_PIDS+=("$!")
+sleep 3
+curl -s --max-time 5 --socks5-hostname "127.0.0.1:${DYN_PORT}" "http://127.0.0.1:22/" >/dev/null 2>&1
+sleep 1
+kill "${CLEANUP_PIDS[-1]}" >/dev/null 2>&1 || true
+sleep 1
+if grep -qi "administratively prohibited" "$log7e"; then
+  emit lockout-dynamic-forward-refused pass "$(grep -i 'administratively prohibited' "$log7e" | head -1)"
+else
+  emit lockout-dynamic-forward-refused fail "expected an 'administratively prohibited' refusal for the -D channel; ssh -v log: $(tail -20 "$log7e")"
+fi
+rm -f "$log7e"
+
+# 7f. a live transport session's pilot portal-session has no child at all.
+if [ -z "$TRANSPORT_TARGET" ]; then
+  printf '{"id":"lockout-transport-no-child","status":"skip","detail":"TRANSPORT_TARGET unset"}\n'
+else
+  # Keep stdin open so the bridge stays up while the tree is inspected.
+  (sleep 8 | "${PORTAL_AUTH[@]}" ssh -T "${PORTAL_SSH_OPTS[@]}" "${PORTAL_USER}@${GATEWAY_HOST}" -- pilot-transport-v1 "$TRANSPORT_TARGET" >/dev/null 2>&1) &
+  CLEANUP_PIDS+=("$!")
+  sleep 4
+  tree7f=$("${ADMIN_SSH[@]}" "pid=\$(pgrep -u '$PORTAL_USER' -f 'pilot portal-session' | head -1); [ -n \"\$pid\" ] && { echo PID=\$pid; ps -o pid=,cmd= --ppid \$pid; }" 2>/dev/null)
+  if ! grep -q '^PID=' <<<"$tree7f"; then
+    emit lockout-transport-no-child fail "no live pilot portal-session process found for the transport session"
+  elif [ "$(grep -vc '^PID=' <<<"$tree7f")" -ne 0 ]; then
+    emit lockout-transport-no-child fail "pilot portal-session has child process(es): $tree7f"
+  else
+    emit lockout-transport-no-child pass "live transport: pilot portal-session ($(grep '^PID=' <<<"$tree7f")) has no child process"
+  fi
+fi
 
 echo "SUMMARY: $PASS_COUNT passed, $FAIL_COUNT failed" >&2
 [ "$FAIL_COUNT" -eq 0 ]
