@@ -80,6 +80,7 @@ row——是跨 scope 聚合、跨 host 路由、race 條件、結構性（no im
 
 ## 4. 尚未執行的多主機/topology 性質項目
 
+- **2026-09-24 AD31 活體觀察**：`phruser` 經 Directory 看到 `phr-tb.ipa.pilot.internal  [phr]  [REC]`、`phr-ta` 無標記，並經 handoff 連到兩台主機（見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md) 的 L1／L3）；全新 VM 上本 spec 的 verify 為 9/9。
 - **AD30 fresh vm-target topology E2E**：需要至少 `ipa1`/`directory-01`/`gw-gpu-01`/`gw-gpu-02`/`gw-dmz-01`/`gpu-target-01`/`dmz-target-01`（spec.md §45 的最小拓樸子集）全部從零 up 一次，跑 `pilot vm-target topology test`，記錄結果到新的 evidence doc。這一步仍未執行——2026-09-18 的驗收重用了既有的 `ag-spike-ipa`/`ag-gw01`/`ag-gw02`/`ag-target01` 加新建的 `ag-directory01`，不是從零 up 的完整 topology spec 跑法。
 - Phase 4 landing gate（spec.md §44）本身的四項——「真人 SSH Directory TUI」「arbitrary remote command無 shell」「idempotent apply」「site-wide deployment實際執行 component」——**已於 2026-09-18 對 `ag-directory01` 全部真實驗證通過**，見
   [`docs/evidence/pilot-access-directory/2026-09-18-phase4-directory-tui-deploy-integration.md`](../evidence/pilot-access-directory/2026-09-18-phase4-directory-tui-deploy-integration.md)。

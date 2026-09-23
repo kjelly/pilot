@@ -20,6 +20,7 @@
 > §16/§21/§27.2
 > 維護者：sre
 >
+> 2026-09-24 per-host recording Phase 8：disk full（L18）已活體驗證、SS02 改成不含 `\|` 的指令，見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md)。
 > 2026-09-23 per-host recording Phase 7：新增 SS25（replay／export audit）與 SS26（metrics textfile）；candidate `31f5c23` 對 `phr-store` 實跑 SS24／SS26 probe PASS、第二次 apply `changed=0`，並以 root（非 auditor）觸發 replay 確認 `recording_replayed` denied audit event，見 [`docs/evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md`](../evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md)。
 
 ## 1. 目標系統
@@ -98,9 +99,15 @@
 - **SS18**：真實 `alice` 密碼登入 → `pilot-connect` → Gateway(`ag-gw01`)recorder → `HTTPSink` → TLS ingest → `pilot session replay`，內容逐字元一致(含 `whoami`→`alice`、自訂 marker 字串)。
 - 額外(spec.md §44 landing gate 明列但不對應單一 SS 編號)：**store restart** 後既有 session 仍完整可列可重播。
 
+**2026-09-24 per-host recording Phase 8 活體驗收**（見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md)）：
+
+- **disk full（L18，原本未模擬，現已驗證）**：store 狀態目錄移到 disposable 48 MiB loop filesystem 並填到剩約 1.5 MB，錄影中 event 請求得到 5xx、fail_closed 結束 session；store 保留 `complete: false`、`last_seq` 與缺口範圍，並記錄 `ingest request failed … database or disk is full`。loop device 與原目錄事後還原。
+- **v1 → v2 升級與回滾（L22）**：升級前自動產生 `index.db.pre-v1.bak`（0600），升級後舊 session 可列可重播；依 `docs/runbooks/pilot-session-store.md` §4 回滾後舊 binary 可開啟還原的 v1 DB。
+- **replay／export audit（L19，SS25）**：auditor 的 replay 與 export 各留下不含 payload 的 `recording_replayed`／`recording_exported`；export 的 `.cast` 可用 asciinema 播放。
+- **全新 topology**：candidate `ad7c463` 在全新 VM 上的 fresh `--check --diff`、apply 與本 spec 的 verify 結果見同一份 evidence。
+
 **仍未在活體環境驗證**（spec.md §44 landing gate 明列，見 evidence doc「Known gaps」一節誠實記錄，不假裝已驗收）：
 
-- **disk full**：未模擬——需要獨立 loop device 或填滿共用 vm-target 的真實根磁碟，風險/設置成本超過這次驗收的範圍。
 - **corrupt payload 活體重驗**：`TestStoreReplayTamperedCiphertextFails` 已在單元測試層級驗證過(竄改 ciphertext byte 會讓 AES-GCM 認證失敗)，但沒有對活體 DB 檔案獨立重跑過。
 
 ## 5. Gotcha 記錄

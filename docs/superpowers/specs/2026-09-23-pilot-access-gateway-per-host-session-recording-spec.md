@@ -1,6 +1,6 @@
 # Pilot Access Gateway — Per-Host SSH Session Recording 實作規格
 
-> Status: IMPLEMENTATION-READY (rev 2.3)
+> Status: IMPLEMENTED — Phase 0–8 delivered and live-verified (rev 2.4, 2026-09-24; evidence `docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`)
 > Baseline repository: `https://github.com/kjelly/pilot`
 > Baseline revision: `c0890f66479c2aed189fd216ddeec87f72bb7306` (`main`, 2026-09-23)
 > Revision: rev 2.3（2026-09-23）。依 baseline 程式碼逐項核對、獨立 review 與使用者決策修訂，變更摘要見 §40。
@@ -1246,3 +1246,4 @@ ansible-playbook --list-tags playbooks/apply/freeipa-client-apply.yml
 | 2026-09-23 | rev 2.1 | 依獨立 review 與使用者決策 D-D／D-E／D-F 修訂：token 的 start window 只在 start 檢查（避免超過 5 分鐘的 session 全部失敗）；recorder 取消契約與 writer-stopped enqueue；互動 Portal 改用 cancelable stdin（F28）；policy zero value fail closed 並列出需更新的 fake（F33）；分支 N 改用 canary；`pilot access recording show` 改由 gateway root 執行並抽出 `internal/gatewayconfig`；migration 前自動備份；finish／start idempotency；asciicast 依 stream 串流解碼；`pty.StartWithSize`；resolver 使用原始 default（F29）；store site order 移到 gateway 之前（F30）；kinit 改用 `command` + `stdin`；Phase 0 fixture 依序擷取；Phase 表重排，讓 watchdog 修正早於 `fail_closed` 預設生效；補上 row 清單 regression test 與 tag 豁免表的更新 |
 | 2026-09-23 | rev 2.2 | 第二輪 review 修正：PIT1 新增 `jti`，store 在 events／finish 比對已儲存的 claims 與 `jti`，防止他人以同一 sid 取得 token 後寫入或結束別人的錄影；互動路徑的 raw mode 改用獨立的 `Options.Terminal`，並新增 `InputDone()`；分支 N canary 經 `GatewayConfig.CanaryFQDN` 實作（Directory 不檢查）；分支 R 的 userclass 不可讀統一為 unavailable；connect 順序明定 authorize → `credentials.Ensure` → notice → start，start window 改為 900s，start 後任何失敗都必須送出 incomplete finish；finish idempotency 只比對 `ended_at` 與 `last_seq`；回滾程序補上 config、vault 舊 token 與 gateway；migration 新增 `ingest_jti` 欄位；Phase 表的完成條件只包含該 Phase 交付的測試，retry／錯誤分類移到 Phase 4 |
 | 2026-09-23 | rev 2.3 | 一致性修正：`start_window_closed` 有專屬 401 body；start window 測試點移到 skew 之外（`iat+1000s`、L14 閒置 20 分鐘）；`jti` 格式驗證、唯一性測試並納入 AG48；finish 的 `ended_at` 改為必填 RFC3339Nano 並以 UTC 時間比較；`FinishInfo.Reason` 補上 `session_start_failed`／`internal_error`；PTY 大小改由 `Options.Terminal` 取得；AG56 分支 R 改為只 deny 該 host；回滾前必須先移除所有 marker，避免舊 gateway 靜默不錄；Phase 2 只要求 §34.10 第 1–16 項；列出必須改寫的 `TestRunPortalOneShotConnect_RecordingEnabledSkipsPlainPath`；canary 測試移到 §34.4；修正行號引用 |
+| 2026-09-24 | rev 2.4 | Phase 0–8 實作完成。Phase 8 活體驗收（L1–L22，L21 依分支 R 記為 N/A）與全新 topology 測試見 `docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`；過程中修正 fresh-chain check mode 的 gate、fail_closed 觸發後仍轉送未錄影 I/O、store 500 未記錄原因、SS02 無效指令，回滾程序見 `docs/runbooks/pilot-session-store.md` |
