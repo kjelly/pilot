@@ -176,6 +176,7 @@ var specTagMap = []specTagMapping{
 			"SS16": "site-wide deploy actually reaching this component is a deploy-time property recorded in an evidence doc, not a single tagged task",
 			"SS18": "fresh vm-target topology E2E is a multi-host, multi-run property recorded in an evidence doc, not a single tagged task",
 		}},
+	{spec: "pilot-access-target-policy.md", playbook: "pilot-access-target-policy-apply.yml"},
 	{spec: "host-monitoring.md", playbook: "host-monitoring-apply.yml",
 		exemptRows: map[string]string{
 			"C8": "port-listening probe — verify-only outcome of the service actually running (C7)",

@@ -23,7 +23,7 @@ func TestLintContractsLoadsCanonicalDirectory(t *testing.T) {
 		"freeipa-client", "freeipa-dns-client", "freeipa-dns", "freeipa-identity", "freeipa-nfs-client", "freeipa-nfs-server",
 		"freeipa-realm-replacement", "freeipa-server-replica",
 		"freeipa-server", "host-monitoring", "internal-endpoint", "keycloak-db", "keycloak", "log-server",
-		"log-shipping", "ntp", "os-patch-sla", "pam-oidc-sshd", "pilot-access-directory", "pilot-access-gateway", "pilot-gateway-scope",
+		"log-shipping", "ntp", "os-patch-sla", "pam-oidc-sshd", "pilot-access-directory", "pilot-access-gateway", "pilot-access-target-policy", "pilot-gateway-scope",
 		"pilot-session-store",
 		"prometheus", "restic-backup", "reverse-proxy", "seaweedfs-s3", "thanos-query",
 		"wazuh-fim", "wazuh-manager",
@@ -32,10 +32,10 @@ func TestLintContractsLoadsCanonicalDirectory(t *testing.T) {
 			t.Fatalf("output missing component %q:\n%s", component, got)
 		}
 	}
-	if !strings.Contains(got, "contracts: 39 component(s) loaded from") {
+	if !strings.Contains(got, "contracts: 40 component(s) loaded from") {
 		t.Fatalf("output missing summary:\n%s", got)
 	}
-	if !strings.Contains(got, "diagnostics coverage: 5/39 component(s)") {
+	if !strings.Contains(got, "diagnostics coverage: 5/40 component(s)") {
 		t.Fatalf("output missing diagnostics coverage summary:\n%s", got)
 	}
 }

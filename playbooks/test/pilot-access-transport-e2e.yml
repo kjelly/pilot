@@ -9,6 +9,7 @@
 #   -> gateway-scope (publish tx-target into pilot-target-<gateway_scope>;
 #      pilot-access-gateway-apply.yml's Step 18 requires that hostgroup)
 #   -> pilot-access-gateway
+#   -> pilot-access-target-policy (tx-target; joins pilot-transport-ready)
 #
 # Every value below is only a DEFAULT: -e extra vars always win, so a run can
 # e.g. flip -e pilot_access_gateway_transport_enabled=true without editing
@@ -47,3 +48,10 @@
     #   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/pilot-access-gateway-linux-amd64 ./cmd/pilot-access-gateway
     pilot_binary_path: dist/pilot-linux-amd64
     pilot_access_gateway_binary_path: dist/pilot-access-gateway-linux-amd64
+
+- name: Pilot Access target policy (transport targets)
+  ansible.builtin.import_playbook: ../apply/pilot-access-target-policy-apply.yml
+  vars:
+    # The gateway's source address as the target sees it: in this vm-target
+    # topology, the gateway VM's own inventory address.
+    pilot_access_target_gateway_addresses: "{{ groups['pilot-access-gateway'] | map('extract', hostvars, 'ansible_host') | list }}"

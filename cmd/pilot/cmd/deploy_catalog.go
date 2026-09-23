@@ -142,6 +142,12 @@ var deployCatalog = []deployPlaybook{
 		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，僅安裝當下建立 role-pilot-session-auditor group 用)+ master key/ingest token(openssl rand -hex 32)",
 	},
 	{
+		Key: "pilot-access-target-policy", Label: "套用 Pilot Access target policy(captive SSH transport 的 target 端 sshd 限制)",
+		Playbook: "playbooks/apply/pilot-access-target-policy-apply.yml", DefaultGroup: "pilot-access-target-policy", StageVar: "stage",
+		Note:      "day-2/opt-in 角色(不在 site.yml);目標主機必須先是 freeipa-client，且不可同時是 pilot-access-gateway/pilot-access-directory。必填 pilot_access_target_gateway_addresses(gateway 連往 target 的來源 IP 清單，JSON list)。對 Gateway 位址來的每個 SSH session 拒絕 sshd forwarding(strict;remote-dev 另允許到 target loopback 的 local forwarding 給 VS Code Remote-SSH)，驗證通過後才加入 FreeIPA hostgroup pilot-transport-ready——gateway 只對這個 hostgroup 開 pilot-transport-v1。pilot_access_target_policy_state=absent 先移出 hostgroup 再移除 drop-in。見 docs/verification/pilot-access-target-policy.md。",
+		VaultHint: "FreeIPA 管理員密碼(ipa_admin_password，只用於 pilot-transport-ready hostgroup 成員管理)",
+	},
+	{
 		Key: "reverse-proxy", Label: "Nginx reverse proxy 基礎安裝",
 		Playbook: "playbooks/apply/reverse-proxy-apply.yml", DefaultGroup: "reverse-proxy", StageVar: "stage",
 		Note: "site.yml 角色(所有 reverse-proxy group 主機都會套用);只裝 nginx、關掉 distro default site、建立 Pilot config namespace，不管任何 endpoint 的 vhost——那是 internal-endpoint 的責任。Phase-1 骨架:目前只有 placeholder task,真正的 nginx 安裝邏輯待 spec.md §63 Phase 4 補上。",
