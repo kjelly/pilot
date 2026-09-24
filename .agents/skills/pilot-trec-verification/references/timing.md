@@ -34,6 +34,25 @@ writes `status: failed` / `exit_code: -1` into the `.result.json`, turning a
 perfectly successful edit into red evidence. `[all four edit casts of the
 2026-07-17 minimal-poc run failed this way despite every save succeeding]`
 
+## `EXPECT_QUIET` does not prove the frame is final — guard input with `EXPECT`
+
+`[live 2026-09-24, origin/main 583df40]` On the fleet-vars add screen, after
+`TEXT_AND_ENTER scratch_var`, the renderer changed the label `變數名稱` to
+`變數值` by moving the cursor and writing only `值` plus erase-line. trec's
+emulator showed `┃ 變數名稱值`.
+
+- `EXPECT_QUIET 500` returned once the stream had been quiet for 500 ms.
+- The next `ASSERT 變數值` failed.
+- The renderer's corrective full-line redraw arrived a few milliseconds later.
+
+With `EXPECT 變數值` in place of the `ASSERT`, the same flow passed on the same
+binary.
+
+After any step that changes the screen, guard the next input with
+`EXPECT <text>`, which waits up to its timeout, not `ASSERT`, which checks once.
+A build with lipgloss v2.0.6 (ultraviolet 2026-08-11) rewrites whole lines and
+did not show the transient frame. The rule holds either way.
+
 ## A derailed run corrupts nothing
 
 `pilot edit`/`deploy` only write on an explicit save/apply step — so a run that

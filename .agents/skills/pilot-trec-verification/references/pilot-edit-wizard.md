@@ -21,6 +21,12 @@ under a bare PTY nothing answers it and the run hangs ~5s.
 Always set it — do **not** special-case it to "only when the role checklist is
 involved". `[Bubble Tea rewrite 2026-07-17]`
 
+`[live 2026-09-24]` The hang did not reproduce on bubbletea v2.0.9. Without
+`CI=1`, `origin/main` `583df40` and a build with the lipgloss v2.0.6 stack each
+rendered the top menu in under 50 ms in all 3 runs under `trec drive`, and
+exited 0. Pilot's own code never reads `CI`. Keep setting it anyway: the rule
+costs nothing, and dropping it has only been checked on those two builds.
+
 ## Text-entry fields pre-fill with the cursor at the end
 
 Every value field (`ansible_host`, `ansible_user`, ssh key path, vault entry
@@ -43,6 +49,15 @@ field 0 then sends `ENTER` again re-opens field 0, not field 1.
 other key still at `CHANGE-ME`, and the cast looks green throughout. `[live
 2026-07-17, v8: seven intended values all typed into `ipa_admin_password`,
 final state `pilot-secret-key`]`
+
+**Label-based fix `[live 2026-09-24]`:** the reset still happens, but selecting
+each key by its row text makes it harmless. The script added a probe key (row
+1), set `node_exporter_basic_auth_password` (row 0), then ran
+`ACTIVATE pilot_trec_probe = WITH ENTER` after the list had reset to row 0.
+It opened the probe key, and both values landed where intended on disk. This
+needs no index and passes `--strict`. Each row reads `<key> = <value>`, where
+the value is `<已設定>` once set, so the full `<key> =` is a unique label
+unless another key's name ends with the same text (the match is a substring).
 
 **Fix:** send `DOWN <index>` before the `ENTER` for *every* entry, recomputing
 the index from the top each time.
@@ -117,8 +132,10 @@ Don't hand-write `host_vars/*.yml` for a key this screen covers — use the wiza
 Inserting an item shifts every item at or after it by +1; the `freeipa-dns`
 insertion broke four unrelated existing teatest/PTY tests the same day, all
 fixed-count `DOWN` loops landing on the wrong item. If you must count,
-re-verify against the live item list (`PILOT_DEBUG_MENU=1`), not an old
-transcript.
+re-verify against the live item list (an MCP `trec drive --interactive`
+session's `SCREEN` reply, see `mcp-mode.md`; `PILOT_DEBUG_MENU=1` currently
+prints nothing), not an old transcript. `SELECT` needs the Huh `--pointer`
+described in `select-labels.md`.
 
 ## The FreeIPA identity roster is no longer 100% hand-authored
 
