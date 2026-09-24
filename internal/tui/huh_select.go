@@ -52,6 +52,7 @@ func NewHuhSelect(spec SelectSpec) SelectScreen {
 	}
 	keys = huhUniqueKeys(keys)
 	s.filter.keys = keys
+	dumpMenuDebug(spec.Title, keys)
 
 	options := make([]huh.Option[choiceValue], len(spec.Choices))
 	for i, c := range spec.Choices {

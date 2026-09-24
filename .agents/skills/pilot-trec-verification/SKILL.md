@@ -133,19 +133,16 @@ grep -n 'Name:' internal/inventory/contracts.go       # pilot edit's role checkl
   edited (existing hosts, existing group_vars keys including ones
   buried in commented-out example prose, existing vault keys). A static
   `grep` on source can't tell you this; you need the live menu.
-- **`PILOT_DEBUG_MENU=1` currently prints nothing `[2026-09-24]`.**
-  `dumpMenuDebug` (`cmd/pilot/cmd/deploy.go`) lost its only caller,
-  `newSelectModel` in `tui_select.go`, when `521366e` (2026-08-21)
-  deleted the hand-written widgets. The Huh menus never call it, and a
-  live `pilot edit` run with the variable set printed no `[pilot:menu]`
-  line. The Huh migration spec requires an equivalent capability, so
-  this is a Pilot regression to fix in code. Until then, read the live
-  item list from an MCP `trec drive --interactive` session's `SCREEN`
-  reply (`references/mcp-mode.md`). The rest of this bullet describes
-  the intended behaviour once it is wired back in.
 - **Set `PILOT_DEBUG_MENU=1` to get the live item list for free**, for
-  *every* `promptSelectIndex` menu in `pilot edit`/`pilot deploy`
-  (shared helper, `cmd/pilot/cmd/deploy.go`): it prints each menu's full
+  every single-choice menu in `pilot edit`/`pilot deploy` (the
+  `internal/tui` Huh select adapter; checklists are not dumped). Each
+  item is printed as the row renders, label plus description column.
+  `[2026-09-24]` Between `521366e` (2026-08-21) and the fix that moved
+  the dump into `internal/tui`, the variable printed nothing: the dump
+  lost its only caller when the hand-written widgets were deleted. On
+  a binary from that window, read the item list from an MCP
+  `trec drive --interactive` session's `SCREEN` reply instead
+  (`references/mcp-mode.md`). The dump prints each menu's full
   item list to stderr, one line per item, 0-based and in the exact
   order `DOWN <n>` counts from (cursor always starts at row 0 on a
   fresh menu) — e.g. `[pilot:menu]   3: 離開`. Stderr is captured into
@@ -181,9 +178,9 @@ PILOT_DEBUG_MENU=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   (this session's `Bash` tool included), you cannot hold `trec drive
   --interactive`'s stdin open across calls to do this — use `trec
   mcp`'s stateful tools instead (`references/mcp-mode.md`): start a
-  `trec drive --interactive` session and read each step's `SCREEN`
-  reply, rather than guessing from a short throwaway script and hoping
-  it matches.
+  `trec drive --interactive` session with `PILOT_DEBUG_MENU=1` set on
+  the driven process and read each step's `SCREEN` reply, rather than
+  guessing from a short throwaway script and hoping it matches.
 
 See `references/index-computation.md` for a worked walkthrough.
 
@@ -365,7 +362,7 @@ because you have not read its reference.**
 | 1 | Set `CI=1` on **every** `pilot edit`/`pilot deploy` invocation, full stop. Without it the run hung ~5s on bubbletea's OSC background-colour query under a bare PTY (not reproduced on bubbletea v2.0.9, 2026-09-24). | `references/pilot-edit-wizard.md` |
 | 2 | Pass `--presentation` on every TREC-wrapped `pilot edit`/`deploy`/`reconcile`. | §4 |
 | 3 | Recompute every catalog/checklist index from current source each session; never reuse a number from a prior run or from the runbook prose. | §2, `references/index-computation.md` |
-| 4 | Never combine `PILOT_DEBUG_MENU=1` with `SELECT` in a recorded run — its stderr lines confuse `SELECT`'s screen scan. Use it for exploration only. (It currently prints nothing; see §2.) | §2 |
+| 4 | Never combine `PILOT_DEBUG_MENU=1` with `SELECT` in a recorded run — its stderr lines confuse `SELECT`'s screen scan. Use it for exploration only. | §2 |
 | 5 | Verify success **by content** (`✅ 已存檔`, `✅ 套用完成`), never by exit code — a derailed script exits 0 just as cleanly. | `references/timing.md` |
 | 6 | After every save, `grep` the file on disk and compare each value against what you meant to type. A green cast proves a save happened, not that the right fields got the right values. | `references/pilot-edit-wizard.md` |
 | 7 | `EXPECT <text unique to the screen you expect to be on>` immediately after every `ENTER`, so a missed transition fails at the step it happened. Guard input after a screen change with `EXPECT` (it waits), not `ASSERT` (it checks once): `EXPECT_QUIET` does not prove the frame is final. | `references/role-checklist.md`, `references/timing.md` |
