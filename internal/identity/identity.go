@@ -38,8 +38,18 @@ func LookupUsername(ctx context.Context, uid uint32) (string, error) {
 	return fields[0], nil
 }
 
-// IsMemberOfGroup reports whether username is a member of group, via
-// `getent group <group>` (fixed argv, no shell).
+// IsMemberOfGroup reports whether username is a member of group: first
+// from the user's own group list (`id -Gn -- <user>`, NSS initgroups), then
+// from the group's member list (`getent group <group>`). Fixed argv, no
+// shell.
+//
+// The user's group list comes first because SSSD answers the two lookups
+// from different cache entries. A group entry cached before a user was
+// added keeps listing the old members until it expires (up to 90 minutes
+// by default), so a brand-new Portal user or auditor was rejected even
+// though `id` already showed the membership (found live on the per-host
+// recording test topology). initgroups is resolved per user and refreshed
+// at every login, which is when these checks run.
 //
 // This is a defense-in-depth check for the application layer, alongside
 // (not instead of) the Unix socket's own SocketGroup= filesystem
@@ -58,21 +68,44 @@ func LookupUsername(ctx context.Context, uid uint32) (string, error) {
 // operational mistake) would silently reopen the same hole at the
 // filesystem-permission layer alone.
 func IsMemberOfGroup(ctx context.Context, username, group string) (bool, error) {
+	var idOut bytes.Buffer
+	idCmd := exec.CommandContext(ctx, "id", "-Gn", "--", username)
+	idCmd.Stdout = &idOut
+	if err := idCmd.Run(); err == nil && idGroupsInclude(idOut.String(), group) {
+		return true, nil
+	}
+
 	cmd := exec.CommandContext(ctx, "getent", "group", group)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
 		return false, fmt.Errorf("identity: getent group %s: %w", group, err)
 	}
-	line := strings.TrimSpace(stdout.String())
-	fields := strings.SplitN(line, ":", 4)
+	return getentGroupListsMember(stdout.String(), username), nil
+}
+
+// idGroupsInclude reports whether `id -Gn` output (space-separated group
+// names) contains group.
+func idGroupsInclude(output, group string) bool {
+	for _, name := range strings.Fields(output) {
+		if name == group {
+			return true
+		}
+	}
+	return false
+}
+
+// getentGroupListsMember reports whether a `getent group` line
+// (name:passwd:gid:member,member) lists username as a member.
+func getentGroupListsMember(line, username string) bool {
+	fields := strings.SplitN(strings.TrimSpace(line), ":", 4)
 	if len(fields) < 4 {
-		return false, nil
+		return false
 	}
 	for _, member := range strings.Split(fields[3], ",") {
 		if member == username {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
