@@ -124,9 +124,14 @@
       # sourceparts, which is the only way to make apt-get read ONLY the
       # required sources without touching the real /etc/apt/sources.list*
       # files (spec.md §12.3) — a raw apt-get invocation is required here.
+      # Bounded the same way as apt-cache-refresh.yml's global probe.
       ansible.builtin.command:
         cmd: >-
+          timeout {{ pilot_apt_update_timeout_seconds | default(300) }}
           apt-get
+          -o Acquire::http::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}
+          -o Acquire::https::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}
+          -o Acquire::Retries={{ pilot_apt_acquire_retries | default(3) }}
           -o Dir::Etc::sourcelist={{ _pilot_apt_scoped_dir.path }}/sources.list
           -o Dir::Etc::sourceparts={{ _pilot_apt_scoped_dir.path }}/sources.list.d
           -o APT::Get::List-Cleanup=0
@@ -139,7 +144,8 @@
         DEBIAN_FRONTEND: noninteractive
       until: >-
         (_pilot_apt_scoped_run.rc | default(1)) == 0 or
-        not ((_pilot_apt_scoped_run.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
+        not (((_pilot_apt_scoped_run.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
+             or (_pilot_apt_scoped_run.rc | default(1)) == 124)
       retries: "{{ pilot_apt_lock_retries | default(6) }}"
       delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
 

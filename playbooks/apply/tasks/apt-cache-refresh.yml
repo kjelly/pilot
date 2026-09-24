@@ -25,13 +25,34 @@
 # and repository-lifecycle callers need the *entire* configured package
 # universe to be trustworthy, not just one required source). The retry
 # below is bounded and only fires for lock-contention-shaped failures
-# (`apt_lock`) — deterministic failures (NO_PUBKEY, invalid signature,
-# missing Release, wrong distribution, package not found) are never
-# retried (spec.md §11).
+# (`apt_lock`) or an attempt that hit its timeout (rc 124) — deterministic
+# failures (NO_PUBKEY, invalid signature, missing Release, wrong
+# distribution, package not found) are never retried (spec.md §11).
+#
+#   pilot_apt_update_timeout_seconds: int, default 300 (one attempt)
+#   pilot_apt_http_timeout_seconds  : int, default 30  (apt per request)
+#   pilot_apt_acquire_retries       : int, default 3   (apt per request)
 
 - name: "APT cache refresh — global apt-get update probe ({{ pilot_apt_refresh_reason | default('unspecified') }})"
+  # Bounded: on a fresh vm-target an apt-get update with no network
+  # connection left open hung for over 38 minutes and stalled a whole
+  # topology run (2026-09-24). timeout(1) caps each attempt, apt's own
+  # per-request timeout and retries handle a slow mirror, and a timed-out
+  # attempt (rc 124) is retried like lock contention. One that still
+  # times out stays an unclassified non-zero rc, which the health check
+  # below never reads as healthy.
   ansible.builtin.command:
-    cmd: apt-get update
+    argv:
+      - timeout
+      - "{{ pilot_apt_update_timeout_seconds | default(300) }}"
+      - apt-get
+      - -o
+      - "Acquire::http::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}"
+      - -o
+      - "Acquire::https::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}"
+      - -o
+      - "Acquire::Retries={{ pilot_apt_acquire_retries | default(3) }}"
+      - update
   register: _pilot_apt_global_refresh
   changed_when: false
   failed_when: false
@@ -40,7 +61,8 @@
     DEBIAN_FRONTEND: noninteractive
   until: >-
     (_pilot_apt_global_refresh.rc | default(1)) == 0 or
-    not ((_pilot_apt_global_refresh.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
+    not (((_pilot_apt_global_refresh.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
+         or (_pilot_apt_global_refresh.rc | default(1)) == 124)
   retries: "{{ pilot_apt_lock_retries | default(6) }}"
   delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
 

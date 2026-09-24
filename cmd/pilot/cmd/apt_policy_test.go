@@ -521,3 +521,28 @@ func toTaskList(items []any) []map[string]any {
 	}
 	return out
 }
+
+// TestAptUpdateIsBounded: every apt-get update the shared framework runs is
+// capped by timeout(1) and apt's own per-request timeout, and a timed-out
+// attempt (rc 124) is retried. An unbounded refresh hung a fresh-host
+// topology run for over 38 minutes (2026-09-24).
+func TestAptUpdateIsBounded(t *testing.T) {
+	for _, name := range []string{"apt-cache-refresh.yml", "apt-scoped-refresh.yml"} {
+		data, err := os.ReadFile(filepath.Join("../../../playbooks/apply/tasks", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		for _, want := range []string{
+			"pilot_apt_update_timeout_seconds | default(300)",
+			"Acquire::http::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}",
+			"Acquire::https::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}",
+			"Acquire::Retries={{ pilot_apt_acquire_retries | default(3) }}",
+			"| default(1)) == 124)",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s: apt-get update must be bounded; missing %q", name, want)
+			}
+		}
+	}
+}
