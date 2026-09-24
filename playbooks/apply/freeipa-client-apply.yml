@@ -184,7 +184,10 @@
       tags: [always]
 
     - name: "FreeIPA server pool — compute desired pool + effective topology mode"
-      ansible.builtin.include_tasks: tasks/freeipa-server-pool.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-server-pool.yml
+        apply:
+          tags: [always]
       vars:
         freeipa_domain: "{{ freeipa_server_pool_domain_input }}"
       tags: [always]
@@ -196,7 +199,10 @@
     # that stays pinned to a single server even after HA client
     # enrollment).
     - name: "FreeIPA admin endpoint — select a live server for this playbook's own ipa CLI calls"
-      ansible.builtin.include_tasks: tasks/freeipa-admin-endpoint-select.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-admin-endpoint-select.yml
+        apply:
+          tags: [always]
       tags: [always]
 
     # freeipa-client-host-dns.yml's authoritative-DNS reads (plan/apply/
@@ -280,19 +286,22 @@
       ansible.builtin.stat:
         path: "{{ ipa_config_marker }}"
       register: ipa_cfg
-      tags: [freeipa-client, C1]
+      tags: [freeipa-client, C1, C11]
 
     - name: "FreeIPA client — detect host Kerberos keytab presence (read-only, Day-2 spec §6.1)"
       ansible.builtin.stat:
         path: /etc/krb5.keytab
       register: ipa_client_dns_keytab_stat
-      tags: [freeipa-client, C1]
+      tags: [freeipa-client, C1, C11]
 
     # Host DNS registration preflight (spec.md freeipa-client-host-dns-registration
     # §9/§16: "DNS preflight" must run before ANY mutation, including the
     # /etc/hosts pin below — hence pre_tasks, not tasks. All read-only.
     - name: "FreeIPA client DNS — resolve + preflight (plan, no mutation)"
-      ansible.builtin.include_tasks: tasks/freeipa-client-host-dns.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-client-host-dns.yml
+        apply:
+          tags: [freeipa-client, C11]
       vars:
         freeipa_client_dns_phase: plan
       tags: [freeipa-client, C11]
@@ -311,7 +320,10 @@
     # its template on every boot and silently drops them again (see
     # cloud-init-freeipa-incident-report.md, 2026-08-18: yk-pro6k-dev-01/02/03).
     - name: "FreeIPA client — stop cloud-init from wiping our /etc/hosts pins on next boot"
-      ansible.builtin.include_tasks: tasks/cloud-init-etc-hosts-guard.yml
+      ansible.builtin.include_tasks:
+        file: tasks/cloud-init-etc-hosts-guard.yml
+        apply:
+          tags: [freeipa-client, C1, C3]
       tags: [freeipa-client, C1, C3]
 
     - name: "FreeIPA client — pin this host {{ ipa_client_fqdn }} to its own IP in /etc/hosts (FQDN canonical)"
@@ -409,14 +421,33 @@
         - ansible_os_family == 'RedHat'
       tags: [freeipa-client, C1]
 
-    - name: "FreeIPA client — install host-audit daemon (auditd)"
+    # Debian through the apt framework, like C1/C8: a plain package install
+    # uses whatever apt index the host already has and 404s when it is
+    # stale (AGENTS.md §4.5 point 9).
+    - name: "FreeIPA client — install host-audit daemon (auditd, Debian)"
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [freeipa-client, C9]
+      vars:
+        pilot_apt_packages: "{{ ipa_audit_packages_debian }}"
+        pilot_apt_policy: tolerant
+        pilot_apt_component: freeipa-client-auditd
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
+      tags: [freeipa-client, C9]
+
+    - name: "FreeIPA client — install host-audit daemon (audit, RedHat)"
       ansible.builtin.package:
-        name: >-
-          {{ ipa_audit_packages_debian
-             if ansible_os_family == 'Debian'
-             else ipa_audit_packages_redhat }}
+        name: "{{ ipa_audit_packages_redhat }}"
         state: present
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'RedHat'
       tags: [freeipa-client, C9]
 
     - name: "FreeIPA client — install SSSD cache tools (Debian)"
@@ -834,7 +865,10 @@
     # matrix for where this actually gets exercised, on the dedicated HA
     # topology).
     - name: "FreeIPA client — Day-2 server-list reconciliation (krb5.conf + sssd.conf)"
-      ansible.builtin.include_tasks: tasks/freeipa-client-server-failover.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-client-server-failover.yml
+        apply:
+          tags: [freeipa-client, C1]
       when: not ansible_check_mode
       tags: [freeipa-client, C1]
 
@@ -901,7 +935,10 @@
     # authoritative DNS and failing loudly (never rolling back enrollment) if
     # it still doesn't match desired.
     - name: "FreeIPA client DNS — existing-client backfill + post-apply verify"
-      ansible.builtin.include_tasks: tasks/freeipa-client-host-dns.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-client-host-dns.yml
+        apply:
+          tags: [freeipa-client, C11]
       vars:
         freeipa_client_dns_phase: apply
       tags: [freeipa-client, C11]
@@ -913,5 +950,8 @@
     # included, even when pilot_annotations is unset (a no-op reconcile in
     # that case, or a prune if annotations were previously set and removed).
     - name: "FreeIPA host annotations — reconcile pilot_annotations to FreeIPA userClass/nshostlocation"
-      ansible.builtin.include_tasks: tasks/freeipa-host-annotations.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-host-annotations.yml
+        apply:
+          tags: [freeipa-client, host-annotations]
       tags: [freeipa-client, host-annotations]

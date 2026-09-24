@@ -152,10 +152,33 @@
       tags: [always, C5, C6, C7, C8]
 
   tasks:
-    - name: "Install NFSv4 and ACL packages"
+    # Debian through the apt framework: a plain package install uses
+    # whatever apt index the host already has and 404s when it is stale
+    # (AGENTS.md §4.5 point 9). The framework is skipped in check mode like
+    # every other call site; nothing later in a check-mode run needs the
+    # packages installed.
+    - name: "Install NFSv4 and ACL packages (Debian)"
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [C3]
+      vars:
+        pilot_apt_packages: "{{ nfs_server_packages }}"
+        pilot_apt_policy: tolerant
+        pilot_apt_component: freeipa-nfs-server
+        pilot_apt_required_sources:
+          - id: distro-os
+            class: os
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
+      tags: [C3]
+
+    - name: "Install NFSv4 and ACL packages (RedHat)"
       ansible.builtin.package:
         name: "{{ nfs_server_packages }}"
         state: present
+      when: ansible_os_family == 'RedHat'
       tags: [C3]
 
     - name: "Ensure the managed exports directory exists"

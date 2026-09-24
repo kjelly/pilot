@@ -86,15 +86,9 @@ var updateCacheTruePattern = regexp.MustCompile(`update_cache:\s*true\b`)
 // already has, so a stale index 404s and fails the apply (2026-09-24:
 // tasks/freeipa-dns-client-resolver.yml's dnsutils install on the vm-target
 // golden image, docs/evidence/freeipa-dns-client/2026-09-24-583df40.md).
-// The entries below were found by the same sweep and not migrated yet:
-// moving each one changes which apt path its playbook runs and needs its
-// own vm-target run. Keys are "<file>|<package list>".
-var aptDirectInstallAllowlist = map[string]string{
-	"playbooks/apply/dcgm-exporter-apply.yml|apache2-utils":                                                                                     "not yet migrated (2026-09-24 sweep)",
-	"playbooks/apply/freeipa-client-apply.yml|{{ ipa_audit_packages_debian":                                                                     "not yet migrated (2026-09-24 sweep); package name is chosen per OS family",
-	"playbooks/apply/freeipa-nfs-client-apply.yml|{{ ['nfs-utils', 'autofs'] if ansible_os_family == 'RedHat' else ['nfs-common', 'autofs'] }}": "not yet migrated (2026-09-24 sweep); package name is chosen per OS family",
-	"playbooks/apply/freeipa-nfs-server-apply.yml|{{ nfs_server_packages }}":                                                                    "not yet migrated (2026-09-24 sweep)",
-}
+// The same sweep migrated every other such install, so it is empty; an
+// entry needs a reason. Keys are "<file>|<package list>".
+var aptDirectInstallAllowlist = map[string]string{}
 
 // TestAptDirectInstallAllowlist fails on any Debian-reachable package
 // install in playbooks/apply that bypasses tasks/apt-package-install.yml
