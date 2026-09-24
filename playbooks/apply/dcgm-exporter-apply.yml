@@ -323,10 +323,20 @@
               and restart. Active runtimes: {{ dcgm_exporter_docker_runtimes_after.stdout }}
           when: not ansible_check_mode
 
+        # Through the apt framework (AGENTS.md §4.5 point 9). Untagged, like
+        # Steps 4-6 around it; skipped in check mode like every framework call
+        # site, which is what the Step 6 note below expects.
         - name: "Step 3: Install htpasswd (apache2-utils) — generates the bcrypt hash below, not a web server"
-          ansible.builtin.apt:
-            name: apache2-utils
-            state: present
+          ansible.builtin.include_tasks:
+            file: tasks/apt-package-install.yml
+          vars:
+            pilot_apt_packages: [apache2-utils]
+            pilot_apt_policy: tolerant
+            pilot_apt_component: dcgm-exporter-htpasswd
+            pilot_apt_required_sources:
+              - id: ubuntu-os
+                class: os
+          when: not ansible_check_mode
 
         - name: "Step 4: Ensure {{ dcgm_exporter_webconfig_path | dirname }} exists"
           ansible.builtin.file:
@@ -360,9 +370,9 @@
                  ((dcgm_exporter_stored_fingerprint_raw.content | b64decode) != dcgm_exporter_basic_auth_fingerprint) }}
           no_log: true
 
-        # Step 3's htpasswd package install is only SIMULATED under --check
-        # on a from-scratch host (the apt task above doesn't set
-        # check_mode: false), so the binary genuinely isn't there yet here;
+        # Step 3's htpasswd package install does not run under --check (the
+        # apt framework is skipped in check mode), so on a from-scratch host
+        # the binary genuinely isn't there yet here;
         # deferred to the real apply, same pattern as
         # host-monitoring-apply.yml's Step 8.
         - name: "Step 6: Generate bcrypt hash for basic auth (spec C9; only when the credential changed)"

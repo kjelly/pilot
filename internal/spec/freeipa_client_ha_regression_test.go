@@ -276,13 +276,21 @@ func TestRegression_FreeipaClientServerFailoverTask_BackupAtomicValidateRollback
 	}
 	task := string(raw)
 
-	if !strings.Contains(task, "krb5.conf.pilot-backup") {
-		t.Errorf("must back up /etc/krb5.conf before mutating it")
+	if !strings.Contains(task, `dest: "{{ freeipa_client_krb5_path }}.pilot-backup"`) {
+		t.Errorf("must back up the krb5 realm file before mutating it")
 	}
-	backupIdx := strings.Index(task, "backup current krb5.conf before mutation")
-	writeIdx := strings.Index(task, "write reconciled krb5.conf (atomic)")
+	// 2026-09-24: AlmaLinux 9's ipa-client-install puts the realm block in
+	// /etc/krb5.conf.d/freeipa-realm, not /etc/krb5.conf; the reconcile must
+	// look in both instead of failing every EL client.
+	for _, want := range []string{"for f in /etc/krb5.conf /etc/krb5.conf.d/freeipa-realm; do", `src: "{{ freeipa_client_krb5_path }}"`} {
+		if !strings.Contains(task, want) {
+			t.Errorf("krb5 realm file must be located, not assumed to be /etc/krb5.conf: missing %q", want)
+		}
+	}
+	backupIdx := strings.Index(task, "backup current krb5 realm file before mutation")
+	writeIdx := strings.Index(task, "write reconciled krb5 realm file (atomic)")
 	validateIdx := strings.Index(task, "validate: kinit with host keytab")
-	rollbackIdx := strings.Index(task, "restore krb5.conf backup after failed validation")
+	rollbackIdx := strings.Index(task, "restore krb5 realm file backup after failed validation")
 	failIdx := strings.Index(task, "fail loudly after restoring backup")
 	for name, idx := range map[string]int{
 		"backup": backupIdx, "write": writeIdx, "validate": validateIdx,

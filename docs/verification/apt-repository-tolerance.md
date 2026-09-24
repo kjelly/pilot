@@ -202,3 +202,14 @@ unknown `NO_PUBKEY`.
   behavior on a healthy host; this spec only adds the fault-tolerance
   dimension (does an *unrelated broken* repository stay non-fatal, and
   does a *required* repository failure stay fatal).
+- Scoped refresh in check mode (2026-09-24, `07b44f7`): the scoped refresh
+  runs for real during `--check`, but four tasks touching its temp dir were
+  simulated, so the real `cp` into a never-created `sources.list.d` failed
+  in L3 on a fresh vm-target (reached because security.ubuntu.com
+  intermittently served a BADSIG `noble-security` InRelease). Every task
+  touching `_pilot_apt_scoped_dir` is now `check_mode: false`
+  (`cmd/pilot/cmd/apt_policy_test.go::TestAptScopedRefreshTempDirTasksRunInCheckMode`).
+  The same migration moved the remaining direct Debian installs (auditd,
+  NFS client/server packages, dcgm-exporter's apache2-utils) onto the
+  framework (`TestAptDirectInstallAllowlist`). Evidence:
+  `docs/evidence/include-apply-tags-apt-framework/2026-09-24-dfb58a5.md`.
