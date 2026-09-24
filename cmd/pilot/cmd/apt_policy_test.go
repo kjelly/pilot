@@ -422,3 +422,102 @@ func TestAptClassifyFailureScriptUnknown(t *testing.T) {
 		t.Fatalf("expected an 'unknown' classified entry, got %+v", result.Errors)
 	}
 }
+
+// TestAptInstallRetriesOnlyAfterStaleIndexFetch locks the install's
+// rescue path: a fetch failure from stale cached indexes (captured live
+// on a fresh cloud image behind an apt proxy) refreshes once and retries;
+// every other failure, and any failure under the offline policy, stays
+// FATAL (spec.md §5 tolerant flow, §25 "unknown install failure
+// conservative fatal", T10).
+func TestAptInstallRetriesOnlyAfterStaleIndexFetch(t *testing.T) {
+	data, err := os.ReadFile("../../../playbooks/apply/tasks/apt-package-install.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tasks []map[string]any
+	if err := yaml.Unmarshal(data, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	var install map[string]any
+	var find func([]map[string]any)
+	find = func(ts []map[string]any) {
+		for _, task := range ts {
+			if name, _ := task["name"].(string); strings.Contains(name, "install, refreshing once if the cached indexes are stale") {
+				install = task
+			}
+			for _, key := range []string{"block", "rescue"} {
+				if nested, ok := task[key].([]any); ok {
+					find(toTaskList(nested))
+				}
+			}
+		}
+	}
+	find(tasks)
+	if install == nil {
+		t.Fatal("the final install block with its stale-index rescue is missing")
+	}
+	block := toTaskList(install["block"].([]any))
+	rescue := toTaskList(install["rescue"].([]any))
+	if len(block) != 1 || block[0]["ansible.builtin.apt"] == nil {
+		t.Fatalf("the block must hold only the single install, got %v", block)
+	}
+	for _, task := range append(append([]map[string]any{}, block...), rescue...) {
+		if _, ok := task["ignore_errors"]; ok {
+			t.Errorf("task %q must not use ignore_errors (spec.md §25)", task["name"])
+		}
+	}
+	if len(rescue) != 5 {
+		t.Fatalf("rescue must be: fatal gate, refresh, health gate, one retry, mode fact; got %d tasks", len(rescue))
+	}
+	gate, _ := rescue[0]["when"].(string)
+	if rescue[0]["ansible.builtin.fail"] == nil || !strings.Contains(gate, "_pilot_apt_policy == 'offline' or") {
+		t.Fatalf("the rescue must first re-raise every non-stale failure and every offline failure, got when=%q", gate)
+	}
+	if inc, _ := rescue[1]["ansible.builtin.include_tasks"].(string); inc != "apt-cache-refresh.yml" {
+		t.Errorf("the rescue must refresh through apt-cache-refresh.yml, got %v", rescue[1])
+	}
+	if when, _ := rescue[2]["when"].(string); rescue[2]["ansible.builtin.fail"] == nil || when != "not pilot_apt_refresh_result.required_sources_healthy" {
+		t.Errorf("a refresh that leaves a required source unhealthy must be FATAL, got %v", rescue[2])
+	}
+	if rescue[3]["ansible.builtin.apt"] == nil {
+		t.Errorf("the rescue must retry the install once, got %v", rescue[3])
+	}
+
+	m := regexp.MustCompile(`is search\('([^']+)'\)`).FindStringSubmatch(gate)
+	if m == nil {
+		t.Fatalf("no search() pattern in the gate %q", gate)
+	}
+	stale := regexp.MustCompile(m[1])
+	raw, err := os.ReadFile("testdata/apt-install-stale-index-404.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captured []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "#") {
+			captured = append(captured, line)
+		}
+	}
+	if !stale.MatchString(strings.Join(captured, "\n")) {
+		t.Errorf("pattern %q must match the captured stale-index failure", m[1])
+	}
+	// Real captures of failures a refresh does not fix (Ubuntu 24.04).
+	for _, msg := range []string{
+		"E: Unable to locate package nosuchpkg-xyz",
+		"E: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)\nE: Unable to lock directory /var/lib/apt/lists/",
+	} {
+		if stale.MatchString(msg) {
+			t.Errorf("pattern %q must not retry %q", m[1], msg)
+		}
+	}
+}
+
+func toTaskList(items []any) []map[string]any {
+	var out []map[string]any
+	for _, item := range items {
+		if task, ok := item.(map[string]any); ok {
+			out = append(out, task)
+		}
+	}
+	return out
+}

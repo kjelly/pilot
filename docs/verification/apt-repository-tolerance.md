@@ -85,6 +85,13 @@ unknown `NO_PUBKEY`.
     go test ./cmd/pilot/cmd/... -run TestAptClassifyFailureScript -v
   expect: {stdout: {contains: "PASS"}}
   verifyOnly: true
+- id: C4
+  category: static-policy
+  check: the final install's rescue retries once only after apt's stale-index fetch failure ("Unable to fetch some archives", matched against a real capture) and a healthy global refresh; every other failure and every offline failure stays FATAL(install_failed), and nothing uses ignore_errors (spec.md §21 T11, T10)
+  probe: |
+    go test ./cmd/pilot/cmd/... -run TestAptInstallRetriesOnlyAfterStaleIndexFetch -v
+  expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
 - id: T1
   category: live-vm
   check: "unrelated GPG key failure (HashiCorp NO_PUBKEY) does not block freeipa-client (C1) or sssd-tools (C8) install on a host with a healthy Ubuntu archive — LIVE-VERIFIED 2026-09-14 on pilot vm-target apt-tolerance-test (ubuntu-24.04); see Notes below for the captured evidence"
@@ -102,6 +109,13 @@ unknown `NO_PUBKEY`.
 - id: T7
   category: live-vm
   check: "a Pilot-owned required repository (class=pilot) with an invalid signature is FATAL and never falls back to unauthenticated install — LIVE-VERIFIED 2026-09-14 on the same vm-target using wazuh-fim-apply.yml; see Notes below"
+  probe: |
+    echo "LIVE-VERIFIED"
+  expect: {stdout: {contains: "LIVE-VERIFIED"}}
+  verifyOnly: true
+- id: T11
+  category: live-vm
+  check: "a fresh cloud image whose cached indexes name superseded versions (install fails with 404 Failed to fetch) recovers with SUCCESS(stale_index_refresh) after one global refresh, and a re-run is already_present with changed=0 — LIVE-VERIFIED 2026-09-24 on vm-target apt-stale (ubuntu-24.04); see Notes below"
   probe: |
     echo "LIVE-VERIFIED"
   expect: {stdout: {contains: "LIVE-VERIFIED"}}
@@ -140,6 +154,17 @@ unknown `NO_PUBKEY`.
   (§ above: real apt 404/lock/DNS-failure wording differs from the
   initially-guessed regexes) and are already reflected in
   `apt-classify-failure.yml`.
+- T11 was live-verified 2026-09-24 on a fresh `pilot vm-target`
+  (`apt-stale`, ubuntu-24.04, indexes from the image, 2026-07-07). The
+  cache named `krb5-user 1.20.1-6ubuntu2.6`. With the previous task file
+  the install failed: `E: Failed to fetch …/libkadm5clnt-mit12_1.20.1-6ubuntu2.6_amd64.deb
+  404  Not Found`, then `E: Unable to fetch some archives`, `failed=1`. With
+  the current one: `rescued=1 failed=0`, `apt_mode=stale_index_refresh`,
+  `required_sources_healthy=True`. The re-run was `apt_mode=already_present`,
+  `changed=0`. The same failure had stopped the 2026-09-23 per-host
+  recording ephemeral topology run behind an apt proxy
+  (`freeipa-client=4.11.1-2`); its captured message is the test fixture
+  `cmd/pilot/cmd/testdata/apt-install-stale-index-404.txt`.
 - `docs/verification/freeipa-client.md` C1/C8 already cover the
   functional "does freeipa-client / sssd-tools install successfully"
   behavior on a healthy host; this spec only adds the fault-tolerance

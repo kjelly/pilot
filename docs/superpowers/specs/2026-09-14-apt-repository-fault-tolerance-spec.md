@@ -1101,6 +1101,22 @@ Expected：
 FATAL
 ```
 
+#### T11 — Stale cached candidate: install fetch fails
+
+```text
+package missing, cache names a candidate (cache_hit)
+install fails: 404 Failed to fetch … / Unable to fetch some archives
+global refresh keeps required sources healthy
+```
+
+Expected：
+
+```text
+retry install once
+SUCCESS(stale_index_refresh)
+any other install failure, or offline policy → FATAL(install_failed)
+```
+
 ### 21.2 Security regression tests
 
 必須 grep/assert repository 中不存在新增：

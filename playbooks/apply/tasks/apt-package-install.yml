@@ -21,9 +21,12 @@
 # Guarantees (spec.md §25):
 #   * cache-first — apt-get update only runs when a requested package is
 #     both missing AND has no installable candidate in the current cache.
-#   * exactly one real `ansible.builtin.apt` install task, at the bottom
-#     of this file, never wrapped in ignore_errors — an in-scope failure
-#     still fails the play.
+#   * one real `ansible.builtin.apt` install, at the bottom of this file,
+#     never wrapped in ignore_errors — an in-scope failure still fails the
+#     play. Its rescue retries it exactly once, only after apt reported a
+#     stale-index fetch failure ("Unable to fetch some archives") and a
+#     global refresh kept the required sources healthy; every other
+#     failure is re-raised as FATAL(install_failed).
 #   * every non-offline, non-ready path ends in either "proceed to the
 #     final install" or an explicit `ansible.builtin.fail` (never a
 #     silent fall-through) so a required-source failure is always fatal.
@@ -194,18 +197,69 @@
             - not _pilot_apt_has_candidate
             - not (_pilot_apt_policy == 'tolerant')
 
-    - name: "APT package install ({{ pilot_apt_component }}) — install (single sanctioned mutation point, no ignore_errors)"
-      ansible.builtin.apt:
-        name: "{{ _pilot_apt_missing }}"
-        state: present
-      environment:
-        DEBIAN_FRONTEND: noninteractive
-      register: _pilot_apt_install
-      until: >-
-        _pilot_apt_install is success or
-        not ((_pilot_apt_install.msg | default('')) is search('Could not (get|open) lock|Unable to lock'))
-      retries: "{{ pilot_apt_lock_retries | default(6) }}"
-      delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+    - name: "APT package install ({{ pilot_apt_component }}) — install, refreshing once if the cached indexes are stale"
+      block:
+        - name: "APT package install ({{ pilot_apt_component }}) — install (single sanctioned mutation point, no ignore_errors)"
+          ansible.builtin.apt:
+            name: "{{ _pilot_apt_missing }}"
+            state: present
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          register: _pilot_apt_install
+          until: >-
+            _pilot_apt_install is success or
+            not ((_pilot_apt_install.msg | default('')) is search('Could not (get|open) lock|Unable to lock'))
+          retries: "{{ pilot_apt_lock_retries | default(6) }}"
+          delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+      rescue:
+        # The cache named a candidate, but the archive no longer serves
+        # that version: a fresh cloud image's cached indexes 404 on every
+        # superseded .deb (seen directly and through an apt proxy), and
+        # apt says "E: Unable to fetch some archives, maybe run apt-get
+        # update" (captured live, see
+        # cmd/pilot/cmd/testdata/apt-install-stale-index-404.txt). spec.md
+        # §5 tolerant: "install 顯示 metadata stale → global refresh →
+        # retry install". Any other install failure stays fatal (§25),
+        # and offline never refreshes.
+        - name: "APT package install ({{ pilot_apt_component }}) — FATAL(install_failed): not a stale-index fetch failure"
+          ansible.builtin.fail:
+            msg: >-
+              FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
+              reason=install_failed policy={{ _pilot_apt_policy }}
+              error={{ _pilot_apt_install.msg | default('unknown') }}
+          when: >-
+            _pilot_apt_policy == 'offline' or
+            not ((_pilot_apt_install.msg | default('')) is search('Unable to fetch some archives'))
+
+        - name: "APT package install ({{ pilot_apt_component }}) — global refresh after a stale-index fetch failure"
+          ansible.builtin.include_tasks: apt-cache-refresh.yml
+          vars:
+            pilot_apt_refresh_reason: install_fetch_failed
+
+        - name: "APT package install ({{ pilot_apt_component }}) — FATAL(required_source_unhealthy): refresh after a fetch failure"
+          ansible.builtin.fail:
+            msg: >-
+              FATAL component={{ pilot_apt_component }} package={{ _pilot_apt_missing }}
+              reason=required_source_unhealthy refresh_reason=install_fetch_failed
+              refresh_result={{ pilot_apt_refresh_result }}
+          when: not pilot_apt_refresh_result.required_sources_healthy
+
+        - name: "APT package install ({{ pilot_apt_component }}) — retry the install once with refreshed indexes (no ignore_errors)"
+          ansible.builtin.apt:
+            name: "{{ _pilot_apt_missing }}"
+            state: present
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          register: _pilot_apt_install
+          until: >-
+            _pilot_apt_install is success or
+            not ((_pilot_apt_install.msg | default('')) is search('Could not (get|open) lock|Unable to lock'))
+          retries: "{{ pilot_apt_lock_retries | default(6) }}"
+          delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+
+        - name: "APT package install ({{ pilot_apt_component }}) — record the stale-index recovery"
+          ansible.builtin.set_fact:
+            _pilot_apt_mode: stale_index_refresh
 
     - name: "APT package install ({{ pilot_apt_component }}) — SUCCESS"
       ansible.builtin.debug:
