@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -294,5 +295,91 @@ func TestRegression_FreeipaServerApplyPlaybook_BoundsWsgiSocketTimeout(t *testin
 	}
 	if strings.Contains(playbook, "socket-timeout=2147483647") {
 		t.Error("freeipa-server-apply.yml must not restore the effectively infinite WSGI socket timeout")
+	}
+}
+
+// TestRegression_FreeipaServerApplyPlaybook_WaitsForAuditFlush locks the C16
+// fix of 2026-09-24. 389-ds buffers the audit log, so the dummy write that
+// the audit block makes for C16 reached the file 8-29 s later; on a topology
+// with no client enrolling after the server play, verify ran 16 s after the
+// apply and C16 failed on an empty file. The block must wait for the flush
+// right after the dummy write, with wait_for (stat + until marks the task
+// failed when retries run out, even with failed_when: false), and then gate
+// on the file being non-empty.
+func TestRegression_FreeipaServerApplyPlaybook_WaitsForAuditFlush(t *testing.T) {
+	raw, err := os.ReadFile("../../playbooks/apply/freeipa-server-apply.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc []any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var block []any
+	var find func(n any)
+	find = func(n any) {
+		switch v := n.(type) {
+		case []any:
+			for _, c := range v {
+				find(c)
+			}
+		case map[string]any:
+			if name, _ := v["name"].(string); strings.Contains(name, "389-ds audit log: enable directory-service auditing") {
+				block, _ = v["block"].([]any)
+				return
+			}
+			for _, c := range v {
+				find(c)
+			}
+		}
+	}
+	find(doc)
+	if block == nil {
+		t.Fatal("audit-log block not found")
+	}
+	index := func(prefix string) (int, map[string]any) {
+		for i, item := range block {
+			task, _ := item.(map[string]any)
+			if name, _ := task["name"].(string); strings.Contains(name, prefix) {
+				return i, task
+			}
+		}
+		t.Fatalf("audit block has no task containing %q", prefix)
+		return -1, nil
+	}
+	write, _ := index("write dummy description to trigger audit log")
+	wait, waitTask := index("wait until the buffered entries reach the audit file")
+	stat, statTask := index("read the audit file size")
+	gate, gateTask := index("Gate: the 389-ds audit file is non-empty")
+	if write >= wait || wait >= stat || stat >= gate {
+		t.Fatalf("audit block order must be dummy write (%d) < wait (%d) < stat (%d) < gate (%d)", write, wait, stat, gate)
+	}
+
+	args, _ := waitTask["ansible.builtin.wait_for"].(map[string]any)
+	if args == nil {
+		t.Fatal("the wait must use ansible.builtin.wait_for")
+	}
+	if path, _ := args["path"].(string); !strings.HasSuffix(path, "/audit") {
+		t.Errorf("wait_for path = %q, want the audit file", path)
+	}
+	if re, _ := args["search_regex"].(string); re == "" {
+		t.Error("wait_for needs a search_regex, or it only waits for the file to exist")
+	}
+	if timeout, _ := args["timeout"].(int); timeout < 60 {
+		t.Errorf("wait_for timeout = %d s; flushes took up to 29 s, keep at least 60", timeout)
+	}
+	if fw, ok := waitTask["failed_when"].(bool); !ok || fw {
+		t.Error("the wait must not fail by itself (failed_when: false); the gate decides")
+	}
+	if _, ok := waitTask["until"]; ok {
+		t.Error("do not use until for the wait: exhausted retries fail the task even with failed_when: false")
+	}
+	if args, _ := statTask["ansible.builtin.stat"].(map[string]any); args == nil {
+		t.Error("the wait must be followed by a stat of the audit file")
+	}
+	assert, _ := gateTask["ansible.builtin.assert"].(map[string]any)
+	that := fmt.Sprint(assert["that"])
+	if !strings.Contains(that, "stat.size > 0") {
+		t.Errorf("gate must require a non-empty audit file, got that=%s", that)
 	}
 }
