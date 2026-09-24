@@ -64,11 +64,39 @@
   become: true
   gather_facts: true
   vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
     internal_endpoint_baseline_target_group: all
     freeipa_ca_trust_source_host: "{{ groups['freeipa-server'][0] | default('') }}"
 
+  # This play changes every managed host's resolver (C9) and CA trust (C10),
+  # so it takes the same `always` stage gates as the reconcile play below.
+  # Before 2026-09-24 it had none: a staging/prod run without the confirm
+  # flag changed the whole fleet and only then stopped at the reconcile
+  # play's gate.
   pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+
+    - name: "Gate: prod requires recent staging attestation"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - stage != 'prod'
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+
     - name: "Gate: a freeipa-server host is present in inventory"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - freeipa_ca_trust_source_host | length > 0
@@ -78,7 +106,10 @@
     # Spec: docs/verification/internal-endpoint.md C10
     - name: "Apply the FreeIPA CA trust baseline to this managed host"
       tags: [C10]
-      ansible.builtin.include_tasks: tasks/freeipa-ca-trust.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-ca-trust.yml
+        apply:
+          tags: [C10]
       when: freeipa_ca_trust_source_host not in (pilot_deferred_hosts | default([]))
 
     # Spec: docs/verification/internal-endpoint.md C9. Genuinely fleet-wide
@@ -89,7 +120,10 @@
     # 2026-08-14 while fixing the resolver logic itself).
     - name: "Apply the FreeIPA DNS resolver baseline to this managed host"
       tags: [C9]
-      ansible.builtin.include_tasks: tasks/freeipa-dns-client-resolver.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-dns-client-resolver.yml
+        apply:
+          tags: [C9]
 
 - name: Internal endpoint reconcile
   hosts: "{{ target_group | default('freeipa-server') }}"
@@ -117,8 +151,19 @@
     # the last-known-good ledger is never overwritten by a partial result.
     internal_endpoint_ledger_file: /var/lib/pilot/internal-endpoint/state.json
 
+  # Tags (2026-09-24): every pre_task is `always`. They only load the
+  # manifests and ledger, normalize them, and gate stage/inputs, and every
+  # tagged task below reads what they set — before this, any --tags run
+  # (including the decommission provider's `--tags iep_decommission_verify`
+  # query) skipped them and then read undefined facts. The mutation-safety
+  # gates in tasks: carry the row tags of the mutation they protect (C27
+  # upstream checks, C22 delete confirmations, the route-owner check for
+  # every present-endpoint mutation, the C7/C8 DNS gates for the C4-C6
+  # route records, the C12 enrollment preflight for C13/C15) rather than
+  # `always`, so a read-only query run is not blocked by them.
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (stage == 'sandbox') or
@@ -127,6 +172,7 @@
         fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
 
     - name: "Gate: prod requires recent staging attestation"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - stage != 'prod'
@@ -135,6 +181,7 @@
       when: stage == 'prod'
 
     - name: "Gate: internal_endpoint_manifest_file is required"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - internal_endpoint_manifest_file is defined
@@ -142,6 +189,7 @@
         fail_msg: "-e internal_endpoint_manifest_file=/absolute/path/to/internal-endpoints.yaml is required (spec.md §8)."
 
     - name: "Gate: freeipa_dns_manifest_file is required (spec.md §11.1-§11.3 cross-check)"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - freeipa_dns_manifest_file is defined
@@ -149,16 +197,19 @@
         fail_msg: "-e freeipa_dns_manifest_file=/absolute/path/to/freeipa-dns.yaml is required — internal-endpoint gates every DNS write against it."
 
     - name: "Load internal-endpoints manifest under a namespace"
+      tags: [always]
       ansible.builtin.include_vars:
         file: "{{ internal_endpoint_manifest_file }}"
         name: internal_endpoint_manifest
 
     - name: "Load freeipa-dns manifest under a namespace (read-only cross-check)"
+      tags: [always]
       ansible.builtin.include_vars:
         file: "{{ freeipa_dns_manifest_file }}"
         name: internal_endpoint_freeipa_dns_manifest
 
     - name: "Gate: internal-endpoints manifest schema_version is 1"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (internal_endpoint_manifest.schema_version | default(0)) | int == 1
@@ -170,12 +221,14 @@
     # doesn't exist yet" is not a failure — an empty ledger is the correct
     # starting state (spec.md's own example schema, endpoints: {}).
     - name: "Load the ownership ledger (spec.md §29), if one exists yet"
+      tags: [always]
       ansible.builtin.slurp:
         src: "{{ internal_endpoint_ledger_file }}"
       register: iep_ledger_raw
       failed_when: false
 
     - name: "Decode the ownership ledger (defaulting to an empty one on first-ever reconcile)"
+      tags: [always]
       ansible.builtin.set_fact:
         internal_endpoint_ledger: >-
           {{ (iep_ledger_raw.content | b64decode | from_json)
@@ -189,6 +242,7 @@
     # implementations that must agree on the same invariants, not one
     # calling the other).
     - name: "Compute normalized per-endpoint desired state"
+      tags: [always]
       ansible.builtin.set_fact:
         internal_endpoint_normalized: "{{ (internal_endpoint_normalized | default([])) + [entry] }}"
       # NOTE: every optional nested field below is read with `.get(key,
@@ -293,6 +347,7 @@
       loop_control: {label: "{{ item.fqdn | default('unnamed') }}"}
 
     - name: "Filter normalized endpoints into the sets this phase's tasks loop over"
+      tags: [always]
       ansible.builtin.set_fact:
         internal_endpoint_present: >-
           {{ internal_endpoint_normalized | default([])
@@ -310,15 +365,18 @@
              | selectattr('state', 'equalto', 'absent') | list }}
 
     - name: "Filter present endpoints further to tls.mode == freeipa (certificate lifecycle applies — direct and reverse_proxy alike)"
+      tags: [always]
       ansible.builtin.set_fact:
         internal_endpoint_freeipa: "{{ internal_endpoint_present | selectattr('tls_mode', 'equalto', 'freeipa') | list }}"
 
   tasks:
     # --- Phase 1: inventory / dependency / live preflight (spec.md §28) ---
 
-    # Spec: docs/verification/internal-endpoint.md C7 (spec.md §11.1/§11.2)
+    # Spec: docs/verification/internal-endpoint.md C7 (spec.md §11.1/§11.2).
+    # Also tagged C4-C6: the route DNS reconcile below runs under those tags
+    # and has no zone check of its own.
     - name: "Gate: endpoint's DNS zone exists in freeipa-dns manifest with effective records_mode merge"
-      tags: [C7]
+      tags: [C7, C4, C5, C6]
       ansible.builtin.assert:
         that:
           - zone_entry | length > 0
@@ -336,9 +394,10 @@
       loop: "{{ internal_endpoint_present }}"
       loop_control: {label: "{{ item.fqdn }}"}
 
-    # Spec: docs/verification/internal-endpoint.md C8 (spec.md §11.3)
+    # Spec: docs/verification/internal-endpoint.md C8 (spec.md §11.3).
+    # Also tagged C4-C6, for the same reason as the C7 gate.
     - name: "Gate: no DNS ownership collision with an explicit freeipa-dns.yaml record"
-      tags: [C8]
+      tags: [C8, C4, C5, C6]
       ansible.builtin.assert:
         that:
           - not collision
@@ -362,6 +421,7 @@
     # mutation (the vhost render) only happens later, once every reverse_proxy
     # endpoint here has passed all four gates.
     - name: "Gate: upstream.scheme is required and must be http or https (spec.md §12.3)"
+      tags: [C27]
       ansible.builtin.assert:
         that:
           - item.upstream_scheme in ['http', 'https']
@@ -372,6 +432,7 @@
       loop_control: {label: "{{ item.fqdn }}"}
 
     - name: "Gate: upstream.port is in range 1..65535 (spec.md §12.3)"
+      tags: [C27]
       ansible.builtin.assert:
         that:
           - (item.upstream_port | int) >= 1
@@ -383,6 +444,7 @@
       loop_control: {label: "{{ item.fqdn }}"}
 
     - name: "Gate: upstream.tls.verify is required when upstream.scheme=https, forbidden when http (spec.md §12.4.1/§12.4.4)"
+      tags: [C27]
       ansible.builtin.assert:
         that:
           - (item.upstream_scheme != 'https') or item.upstream_tls_verify_set
@@ -396,6 +458,7 @@
       loop_control: {label: "{{ item.fqdn }}"}
 
     - name: "Gate: a verified HTTPS upstream must have a derivable SNI — never guessed from a literal address (spec.md §12.4.6)"
+      tags: [C27]
       ansible.builtin.assert:
         that:
           - (item.upstream_scheme != 'https') or (not item.upstream_tls_verify) or (item.upstream_sni | length > 0)
@@ -407,10 +470,15 @@
       loop: "{{ internal_endpoint_reverse_proxy }}"
       loop_control: {label: "{{ item.fqdn }}"}
 
-    # Spec: docs/verification/internal-endpoint.md C12 (spec.md §16)
+    # Spec: docs/verification/internal-endpoint.md C12 (spec.md §16).
+    # Also tagged C13/C15, so the service-principal and certificate tasks
+    # never run under their own tags without this enrollment check.
     - name: "Preflight: TLS certificate owner host has live FreeIPA enrollment"
-      tags: [C12]
-      ansible.builtin.include_tasks: tasks/internal-endpoint-cert-preflight.yml
+      tags: [C12, C13, C15]
+      ansible.builtin.include_tasks:
+        file: tasks/internal-endpoint-cert-preflight.yml
+        apply:
+          tags: [C12, C13, C15]
       loop: "{{ internal_endpoint_freeipa }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
       when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))
@@ -422,6 +490,7 @@
     # itself is unchanged and stays real; it was already independently
     # proven fail-closed via a real negative-path VM test in Phase 8.
     - name: "Gate: state=absent requires manifest safety.allow_endpoint_delete AND -e confirm_endpoint_delete=true"
+      tags: [C22]
       ansible.builtin.assert:
         that:
           - internal_endpoint_manifest.get('safety', {}).get('allow_endpoint_delete', false)
@@ -437,6 +506,7 @@
     # spec.md §32. No spec.md-verification-doc tag: this row (formerly C23)
     # was retired 2026-08-14 — see the C21 comment above for why.
     - name: "Gate: a destructive request for an endpoint absent from the ownership ledger fails closed"
+      tags: [C22]
       ansible.builtin.assert:
         that:
           - item.fqdn in internal_endpoint_ledger.endpoints
@@ -451,6 +521,7 @@
     # spec.md §30. No spec.md-verification-doc tag: this row (formerly C24)
     # was retired 2026-08-14 — see the C21 comment above for why.
     - name: "Gate: in-place route-owner migration is rejected (v1 fail closed)"
+      tags: [C4, C5, C6, C12, C13, C15, C27]
       ansible.builtin.assert:
         that:
           - (ledger_entry | length == 0) or
@@ -491,7 +562,7 @@
     # regardless of tls_mode (a tls.disabled endpoint still gets a real DNS
     # record) and reuse this same kinit rather than kiniting again.
     - name: "Kinit as IPA admin (identity + DNS reconcile)"
-      tags: [C13]
+      tags: [C13, C4, C5, C6]
       ansible.builtin.shell: |
         set -o pipefail
         printf '%s' "{{ ipa_admin_password }}" | kinit admin
@@ -505,7 +576,10 @@
 
     - name: "Create HTTP/<fqdn> service principal and managedBy delegation"
       tags: [C13]
-      ansible.builtin.include_tasks: tasks/internal-endpoint-cert-identity.yml
+      ansible.builtin.include_tasks:
+        file: tasks/internal-endpoint-cert-identity.yml
+        apply:
+          tags: [C13]
       loop: "{{ internal_endpoint_freeipa }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
 
@@ -517,7 +591,10 @@
     # private-key boundary requires the key be generated and stay there.
     - name: "Request/converge the endpoint certificate via certmonger (ipa-getcert)"
       tags: [C15]
-      ansible.builtin.include_tasks: tasks/internal-endpoint-cert-request.yml
+      ansible.builtin.include_tasks:
+        file: tasks/internal-endpoint-cert-request.yml
+        apply:
+          tags: [C15]
       loop: "{{ internal_endpoint_freeipa }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
       when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))
@@ -527,7 +604,10 @@
     # Spec: docs/verification/internal-endpoint.md C27 (spec.md §12.3/§12.4/§13)
     - name: "Render the per-endpoint nginx vhost (http/https upstream), nginx -t, reload, local backend readiness check"
       tags: [C27]
-      ansible.builtin.include_tasks: tasks/internal-endpoint-reverse-proxy-vhost.yml
+      ansible.builtin.include_tasks:
+        file: tasks/internal-endpoint-reverse-proxy-vhost.yml
+        apply:
+          tags: [C27]
       loop: "{{ internal_endpoint_reverse_proxy }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
       when: iep_endpoint.route_owner_host not in (pilot_deferred_hosts | default([]))
@@ -542,7 +622,10 @@
     # CHANGED LAST" (spec.md §28).
     - name: "Reconcile route A/AAAA records — direct target or reverse_proxy proxy host, never the upstream (DNS changed last)"
       tags: [C4, C5, C6]
-      ansible.builtin.include_tasks: tasks/internal-endpoint-direct-dns.yml
+      ansible.builtin.include_tasks:
+        file: tasks/internal-endpoint-direct-dns.yml
+        apply:
+          tags: [C4, C5, C6]
       loop: "{{ internal_endpoint_present }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
 
@@ -554,7 +637,10 @@
     # Spec: docs/verification/internal-endpoint.md C22 (spec.md §32-§34)
     - name: "Delete sequence for each confirmed, ledger-known state=absent endpoint"
       tags: [C22]
-      ansible.builtin.include_tasks: tasks/internal-endpoint-delete.yml
+      ansible.builtin.include_tasks:
+        file: tasks/internal-endpoint-delete.yml
+        apply:
+          tags: [C22]
       loop: "{{ internal_endpoint_absent }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
       when:
@@ -562,6 +648,11 @@
         - iep_endpoint.get('cert_owner', '') not in (pilot_deferred_hosts | default([]))
 
     # --- Phase 9: atomically update the ownership ledger (spec.md §28, §29) ---
+    # Deliberately untagged, so only a full run rewrites the ledger. The new
+    # ledger is computed from internal_endpoint_present alone; a --tags run
+    # that skipped the C22 delete would otherwise drop still-live absent
+    # endpoints from it, and the §32 gate would then refuse to ever delete
+    # them.
 
     - name: "Compute each present endpoint's ownership-ledger entry"
       ansible.builtin.include_tasks: tasks/internal-endpoint-ledger-entry.yml

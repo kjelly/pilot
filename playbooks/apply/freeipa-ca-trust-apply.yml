@@ -33,8 +33,12 @@
     target_group: all
     freeipa_ca_trust_source_host: "{{ groups['freeipa-server'][0] | default('') }}"
 
+  # The gates are `always`: the C2 include passes its tag down with
+  # `apply`, so an untagged gate would be skipped by `--tags C2` while the
+  # CA install still ran (for example at stage=prod without confirm_prod).
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (stage == 'sandbox') or
@@ -43,6 +47,7 @@
         fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
 
     - name: "Gate: prod requires recent staging attestation"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - stage != 'prod'
@@ -51,6 +56,7 @@
       when: stage == 'prod'
 
     - name: "Gate: a freeipa-server host is present in inventory"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - freeipa_ca_trust_source_host | length > 0
@@ -60,5 +66,8 @@
     # Spec: docs/verification/freeipa-ca-trust.md C2
     - name: "Fetch and install the FreeIPA CA bundle into the OS trust store"
       tags: [C2]
-      ansible.builtin.include_tasks: tasks/freeipa-ca-trust.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-ca-trust.yml
+        apply:
+          tags: [C2]
       when: freeipa_ca_trust_source_host not in (pilot_deferred_hosts | default([]))

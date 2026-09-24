@@ -272,7 +272,10 @@
     # cloud-init-freeipa-incident-report.md, 2026-08-18: same class of bug
     # found on the client side, applies equally to the server's own pin).
     - name: "FreeIPA — stop cloud-init from wiping our /etc/hosts pin on next boot"
-      ansible.builtin.include_tasks: tasks/cloud-init-etc-hosts-guard.yml
+      ansible.builtin.include_tasks:
+        file: tasks/cloud-init-etc-hosts-guard.yml
+        apply:
+          tags: [freeipa, freeipa-hosts]
       tags: [freeipa, freeipa-hosts]
 
     - name: "FreeIPA — pin server FQDN to its LAN IP (FQDN canonical) in /etc/hosts"

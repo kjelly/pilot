@@ -11,39 +11,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// taggedIncludeWithoutApplyAllowlist is a ratchet of dynamic include_tasks
-// calls that carry `tags:` but no `apply: {tags: ...}`. Such tags select
-// only the include statement: the tasks it pulls in do not inherit them, so
+// taggedIncludeWithoutApplyAllowlist lists dynamic include_tasks calls that
+// may carry `tags:` without `apply: {tags: ...}`. Such tags select only the
+// include statement: the tasks it pulls in do not inherit them, so
 // `--tags <tag>` runs the include and then skips every included task that
 // has no tag of its own, with no error (AGENTS.md §4.5 point 8; confirmed
 // with ansible-core 2.19.2 on 2026-09-24). Site deploys pass --tags too
 // when a --limit pulls in provider hosts (effectiveDeploymentTagScopes).
-//
-// These were found by the 2026-09-24 sweep and not migrated yet. Adding
-// `apply` changes which tasks run in a tag-scoped run, and an included task
-// may then read a fact that the same --tags run never set (§4.4), so each
-// one needs its own tag-scoped vm-target run. Keys are
-// "<playbook>|<included file>"; an entry covers every such include of that
-// file in that playbook.
-var taggedIncludeWithoutApplyAllowlist = map[string]bool{
-	"playbooks/apply/freeipa-ca-trust-apply.yml|tasks/freeipa-ca-trust.yml":                       true,
-	"playbooks/apply/freeipa-client-apply.yml|tasks/cloud-init-etc-hosts-guard.yml":               true,
-	"playbooks/apply/freeipa-client-apply.yml|tasks/freeipa-admin-endpoint-select.yml":            true,
-	"playbooks/apply/freeipa-client-apply.yml|tasks/freeipa-client-host-dns.yml":                  true,
-	"playbooks/apply/freeipa-client-apply.yml|tasks/freeipa-client-server-failover.yml":           true,
-	"playbooks/apply/freeipa-client-apply.yml|tasks/freeipa-host-annotations.yml":                 true,
-	"playbooks/apply/freeipa-client-apply.yml|tasks/freeipa-server-pool.yml":                      true,
-	"playbooks/apply/freeipa-identity-apply.yml|tasks/freeipa-group-history-marker.yml":           true,
-	"playbooks/apply/freeipa-server-apply.yml|tasks/cloud-init-etc-hosts-guard.yml":               true,
-	"playbooks/apply/internal-endpoint-apply.yml|tasks/freeipa-ca-trust.yml":                      true,
-	"playbooks/apply/internal-endpoint-apply.yml|tasks/freeipa-dns-client-resolver.yml":           true,
-	"playbooks/apply/internal-endpoint-apply.yml|tasks/internal-endpoint-cert-identity.yml":       true,
-	"playbooks/apply/internal-endpoint-apply.yml|tasks/internal-endpoint-cert-preflight.yml":      true,
-	"playbooks/apply/internal-endpoint-apply.yml|tasks/internal-endpoint-cert-request.yml":        true,
-	"playbooks/apply/internal-endpoint-apply.yml|tasks/internal-endpoint-delete.yml":              true,
-	"playbooks/apply/internal-endpoint-apply.yml|tasks/internal-endpoint-direct-dns.yml":          true,
-	"playbooks/apply/internal-endpoint-apply.yml|tasks/internal-endpoint-reverse-proxy-vhost.yml": true,
-}
+// The 2026-09-24 sweep migrated every such call, so it is empty; an entry
+// needs a reason. Keys are "<playbook>|<included file>".
+var taggedIncludeWithoutApplyAllowlist = map[string]bool{}
 
 // TestRegression_TaggedIncludeTasksUseApply is a repo-wide lint over
 // playbooks/**: every include_tasks with tags must also pass tags down with

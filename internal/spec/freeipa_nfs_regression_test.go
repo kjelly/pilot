@@ -1,10 +1,14 @@
 package spec
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestRegression_FreeIPANFSSpecs(t *testing.T) {
@@ -136,7 +140,7 @@ func TestRegression_FreeIPAClientPreservesConfiguredAutofsResponder(t *testing.T
 	}
 	for _, required := range []string{
 		"Ensure SSSD keeps the autofs responder enabled",
-		"services = nss, pam, ssh, autofs",
+		`line: "services = nss, pam, ssh{{ ', sudo' if ansible_os_family == 'RedHat' else '' }}, autofs"`,
 		"Restart SSSD after enabling automount",
 	} {
 		if !strings.Contains(string(nfsData), required) {
@@ -357,4 +361,76 @@ func TestRegression_FreeIPANFSServerAcceptsCurrentRosterSchema(t *testing.T) {
 	if nfsList != identityList {
 		t.Errorf("freeipa-nfs-server-apply.yml's schema gate (%s) must match freeipa-identity-apply.yml's (%s)", nfsList, identityList)
 	}
+}
+
+// TestRegression_FreeIPAClientKeepsExplicitSudoResponderOnEL locks the
+// 2026-09-24 EL fix: on AlmaLinux 9 sssd-sudo.socket ships disabled and the
+// socket-activated responder cannot reach the backend, so dropping "sudo"
+// from services= left every IPA user without sudo rules (spec C8). Every
+// playbook that rewrites SSSD's services= line (the base client, the NFS
+// overlay, the NFS client decommission) must start from the same base, so
+// none of them undoes the others. The writers are discovered, not listed:
+// the decommission playbook was a third writer that still dropped "sudo".
+func TestRegression_FreeIPAClientKeepsExplicitSudoResponderOnEL(t *testing.T) {
+	const base = "services = nss, pam, ssh{{ ', sudo' if ansible_os_family == 'RedHat' else '' }}"
+	writers := map[string]string{}
+	err := filepath.WalkDir(filepath.Join("..", "..", "playbooks"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".yml") {
+			return err
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var doc any
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		for i, line := range sssdServicesLines(doc) {
+			writers[fmt.Sprintf("%s#%d", filepath.ToSlash(path), i)] = line
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(writers) < 3 {
+		t.Fatalf("found %d services= writers, expected at least freeipa-client, freeipa-nfs-client and its decommission: %v", len(writers), writers)
+	}
+	for where, line := range writers {
+		if !strings.HasPrefix(line, base) {
+			t.Errorf("%s writes %q; every SSSD services= writer must start with %q", where, line, base)
+		}
+	}
+}
+
+// sssdServicesLines returns the `line:` of every lineinfile task in doc
+// that rewrites /etc/sssd/sssd.conf's services= line.
+func sssdServicesLines(doc any) []string {
+	var out []string
+	var walk func(n any)
+	walk = func(n any) {
+		switch v := n.(type) {
+		case []any:
+			for _, c := range v {
+				walk(c)
+			}
+		case map[string]any:
+			for _, key := range []string{"ansible.builtin.lineinfile", "lineinfile"} {
+				args, _ := v[key].(map[string]any)
+				if path, _ := args["path"].(string); path != "/etc/sssd/sssd.conf" {
+					continue
+				}
+				if re, _ := args["regexp"].(string); strings.HasPrefix(re, "^services") {
+					line, _ := args["line"].(string)
+					out = append(out, line)
+				}
+			}
+			for _, c := range v {
+				walk(c)
+			}
+		}
+	}
+	walk(doc)
+	return out
 }
