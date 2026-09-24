@@ -96,14 +96,14 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return strings.Contains(string(b), "管理 ")
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	for range defaultRolePresets() {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // add a preset
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return strings.Contains(string(b), "角色範本名稱")
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Type("test monitored node")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	// tm.Output() is a draining reader: once a WaitFor reads past a
@@ -117,7 +117,7 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 	teed := io.TeeReader(tm.Output(), &checklistOutput)
 	teatest.WaitFor(t, teed, func(_ []byte) bool {
 		return strings.Contains(checklistOutput.String(), `範本 "test monitored node" 的角色`)
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeySpace}) // first catalog role
 	// Checks "•]" rather than "[x]": this screen is now Huh-backed (see
 	// docs/superpowers/specs/2026-08-19-pilot-tui-v2-huh-migration-spec.md),
@@ -132,11 +132,11 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 	teatest.WaitFor(t, teed, func(_ []byte) bool {
 		screen := checklistOutput.String()
 		return strings.Contains(screen, "•]") && strings.Contains(screen, inventory.Roles()[0].Name)
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return strings.Contains(string(b), "✅ 已儲存 ")
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	waitForRolePresetOverride(t, dir)
 	// Esc here now steps back to the roles menu rather than quitting (see
 	// edit_tui.go's package doc comment); this test only cares about the
@@ -144,7 +144,7 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	presets, customized, err := loadRolePresets(dir)
 	if err != nil {
@@ -175,7 +175,7 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnCreateReturnsToManager(t *te
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("管理 ")
@@ -191,7 +191,7 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnCreateReturnsToManager(t *te
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	if _, customized, err := loadRolePresets(dir); err != nil || customized {
 		t.Fatalf("esc-canceling a create should not have persisted a preset: customized=%v err=%v", customized, err)
@@ -212,7 +212,7 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnRenameReturnsToAction(t *tes
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("管理 ")
@@ -227,7 +227,7 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnRenameReturnsToAction(t *tes
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	if presets, customized, err := loadRolePresets(dir); err != nil || customized || len(presets) != len(defaultRolePresets()) {
 		t.Fatalf("esc-canceling a rename should leave the default presets untouched: presets=%+v customized=%v err=%v", presets, customized, err)

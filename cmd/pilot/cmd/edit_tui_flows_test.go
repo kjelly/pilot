@@ -73,7 +73,7 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
 	if err != nil {
@@ -130,7 +130,7 @@ func TestEditRouter_Teatest_HostDeploymentAvailabilityOptionalAndSave(t *testing
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
 	if err != nil {
@@ -204,7 +204,7 @@ func TestEditRouter_Teatest_MinimalWorkspaceRequiresHostsBeforeScaffolding(t *te
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	for i := 0; i < topMenuIndex(t, "top.minimal_workspace"); i++ {
@@ -218,7 +218,7 @@ func TestEditRouter_Teatest_MinimalWorkspaceRequiresHostsBeforeScaffolding(t *te
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc})
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 }
 
 func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksAndOffersRoute(t *testing.T) {
@@ -234,7 +234,7 @@ func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksAndOffersRoute(t *tes
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(3*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	for i := 0; i < topMenuIndex(t, "top.minimal_workspace"); i++ {
@@ -257,13 +257,13 @@ func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksAndOffersRoute(t *tes
 		out := string(b)
 		return strings.Contains(out, filepath.Join("host_vars", "nexus.yml")) &&
 			strings.Contains(out, "前往 hosts 設定")
-	}, teatest.WithDuration(3*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // readiness -> quick wizard
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // quick wizard -> top menu
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> quit
 
-	final, err := io.ReadAll(tm.FinalOutput(t, teatest.WithFinalTimeout(3*time.Second)))
+	final, err := io.ReadAll(tm.FinalOutput(t, teatest.WithFinalTimeout(teatestFinalTimeout)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestEditRouter_Teatest_FleetVarsFlow_AddEditDeleteAndSave(t *testing.T) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("共用變數")
@@ -380,7 +380,7 @@ func TestEditRouter_Teatest_FleetVarsFlow_AddEditDeleteAndSave(t *testing.T) {
 		}
 		menu := out[i:]
 		return strings.Contains(menu, "ansible_user = admin") && !strings.Contains(menu, "scratch_var")
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // fleet vars menu -> host list
 	waitFor("💾 存檔並離開")
@@ -391,7 +391,7 @@ func TestEditRouter_Teatest_FleetVarsFlow_AddEditDeleteAndSave(t *testing.T) {
 	waitFor("要編輯什麼")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> quit
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -421,7 +421,7 @@ func TestEditRouter_Teatest_HostsFlow_CancelAnywhereQuitsTheWholeWizard(t *testi
 	// promptConfirm's esc->no semantics mean this particular esc just
 	// answers "no" (declining to start blank), which pushLoadOrInitHosts
 	// maps to quitWizard — matching the original errDeployAborted path.
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	if _, err := os.Stat(filepath.Join(dir, "hosts.yml")); err == nil {
 		t.Fatal("expected no hosts.yml to be written after declining to start blank")
@@ -435,7 +435,7 @@ func TestEditRouter_Teatest_HostsFlow_EscOnSelectQuitsWholeWizard(t *testing.T) 
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // esc on the very first (top menu) screen
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 }
 
 // TestEditRouter_Teatest_EscWalksBackThroughDeepChainThenQuitsAtTopMenu walks
@@ -453,7 +453,7 @@ func TestEditRouter_Teatest_EscWalksBackThroughDeepChainThenQuitsAtTopMenu(t *te
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // top menu -> hosts.yml
@@ -491,7 +491,7 @@ func TestEditRouter_Teatest_EscWalksBackThroughDeepChainThenQuitsAtTopMenu(t *te
 	waitFor("要編輯什麼")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> the one screen that still quits for real
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	if _, err := os.Stat(filepath.Join(dir, "hosts.yml")); !os.IsNotExist(err) {
 		t.Fatalf("expected no hosts.yml to be written after discarding, stat err=%v", err)
@@ -512,7 +512,7 @@ func TestEditRouter_Teatest_ExtraVarsFlow_EscStepsBackInsteadOfQuitting(t *testi
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("ipa_server_ip = 10.0.0.9")
@@ -582,7 +582,7 @@ func TestEditRouter_Teatest_ExtraVarsFlow_EscStepsBackInsteadOfQuitting(t *testi
 	waitFor("要編輯什麼")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> whole-wizard quit
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	if hf.Hosts[0].Extra["foo_key"] != "" {
 		t.Fatalf("expected foo_key to not be added after esc-cancel, got %q", hf.Hosts[0].Extra["foo_key"])
@@ -608,7 +608,7 @@ func TestEditRouter_Teatest_HostVarsFlow_ScaffoldsEditsAndSaves(t *testing.T) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("host_vars/nexus.yml")
@@ -627,7 +627,7 @@ func TestEditRouter_Teatest_HostVarsFlow_ScaffoldsEditsAndSaves(t *testing.T) {
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		out := string(b)
 		return strings.Contains(out, "已建立") && strings.Contains(out, "尚未填寫，必填！")
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "prometheus_site_label = ...  [...]" (cursor 0)
 	waitFor("修改值")
@@ -651,7 +651,7 @@ func TestEditRouter_Teatest_HostVarsFlow_ScaffoldsEditsAndSaves(t *testing.T) {
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(dir, "host_vars", "nexus.yml"))
 	if err != nil {
@@ -675,7 +675,7 @@ func TestEditRouter_Teatest_HostVarsFlow_NotOfferedWithoutApplicableRole(t *test
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return strings.Contains(string(b), "🗑  下架 / Decommission 主機")
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 
 	// Esc here now steps back to the host list rather than quitting (see
 	// edit_tui.go's package doc comment); this test only cares about the
@@ -684,7 +684,7 @@ func TestEditRouter_Teatest_HostVarsFlow_NotOfferedWithoutApplicableRole(t *test
 		t.Fatal(err)
 	}
 
-	final, err := io.ReadAll(tm.FinalOutput(t, teatest.WithFinalTimeout(3*time.Second)))
+	final, err := io.ReadAll(tm.FinalOutput(t, teatest.WithFinalTimeout(teatestFinalTimeout)))
 	if err != nil {
 		t.Fatalf("read final output: %v", err)
 	}
@@ -708,7 +708,7 @@ func TestEditRouter_Teatest_HostVarsFlow_EscMirrorsDirtyDiscardGate(t *testing.T
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("尚未填寫，必填！")
@@ -739,7 +739,7 @@ func TestEditRouter_Teatest_HostVarsFlow_EscMirrorsDirtyDiscardGate(t *testing.T
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(dir, "host_vars", "nexus.yml"))
 	if err != nil {
@@ -771,7 +771,7 @@ func TestEditRouter_Teatest_RoleChecklistFlow_AddingFreeIPANFSServerAutofixesRos
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("freeipa-nfs-server")
@@ -792,7 +792,7 @@ func TestEditRouter_Teatest_RoleChecklistFlow_AddingFreeIPANFSServerAutofixesRos
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	has, err := inventory.RosterHasNFSServer(rosterPath, "nexus.ipa.pilot.internal")
 	if err != nil {
@@ -826,7 +826,7 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("prometheus")
@@ -867,7 +867,7 @@ func TestEditRouter_Teatest_RoleChecklistFlow_PrometheusForcesHostVarsPrompt(t *
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(dir, "host_vars", "nexus.yml"))
 	if err != nil {
@@ -888,7 +888,7 @@ func TestEditRouter_Teatest_RoleChecklistFlow_BootstrapsMissingNFSRoster(t *test
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("freeipa-nfs-server")
@@ -905,7 +905,7 @@ func TestEditRouter_Teatest_RoleChecklistFlow_BootstrapsMissingNFSRoster(t *test
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	h := hf.Hosts[0]
 	wantRosterPath, err := filepath.Abs(filepath.Join(dir, ".vault", "ipa-identity.yaml"))
@@ -955,7 +955,7 @@ func TestEditRouter_Teatest_RoleChecklistFlow_NFSBootstrapReusesExistingAdminPas
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("freeipa-nfs-server")
@@ -969,7 +969,7 @@ func TestEditRouter_Teatest_RoleChecklistFlow_NFSBootstrapReusesExistingAdminPas
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	rosterPath := hf.Hosts[0].Extra["freeipa_roster_file"]
 	data, err := os.ReadFile(rosterPath)
@@ -1023,7 +1023,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_FiltersToUsedRolesAndAutofillsHostVar(
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // top menu -> group_vars/ (index 1)
@@ -1045,7 +1045,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_FiltersToUsedRolesAndAutofillsHostVar(
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // file picker -> top menu
 	waitFor("要編輯什麼")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> whole-wizard quit
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(dir, "group_vars", "freeipa.yml"))
 	if err != nil {
@@ -1094,7 +1094,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable(t *
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // top menu -> group_vars/ (index 1)
@@ -1106,7 +1106,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable(t *
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(dir, "group_vars", "dns", "zones.yaml"))
 	if err != nil {
@@ -1168,7 +1168,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(dir, "group_vars", "dns.yml"))
 	if err != nil {
@@ -1205,7 +1205,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_ListEntryAddEditRemoveAndSave(t *testi
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("restic_backup_paths = [/etc]")
@@ -1258,7 +1258,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_ListEntryAddEditRemoveAndSave(t *testi
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1294,7 +1294,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_EscMirrorsDirtyDiscardGate(t *testing.
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("dns_forwarders")
@@ -1319,7 +1319,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_EscMirrorsDirtyDiscardGate(t *testing.
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(gvDir, "dns.yml"))
 	if err != nil {
@@ -1366,7 +1366,7 @@ func TestEditRouter_Teatest_VaultFlow_CreateAddKeyAndSave(t *testing.T) {
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(dir, ".vault", "main.yaml"))
 	if err != nil {
@@ -1410,7 +1410,7 @@ func TestEditRouter_Teatest_VaultFlow_PickingRosterShapedFileStaysInWizard(t *te
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	// picker items: 0 ipa-identity.yaml, 1 main.yaml, 2 輸入其他, 3 返回.
@@ -1424,7 +1424,7 @@ func TestEditRouter_Teatest_VaultFlow_PickingRosterShapedFileStaysInWizard(t *te
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		out := string(b)
 		return strings.Contains(out, "roster — FreeIPA") && strings.Contains(out, "選一個")
-	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // now pick main.yaml — wizard must still work
@@ -1433,7 +1433,7 @@ func TestEditRouter_Teatest_VaultFlow_PickingRosterShapedFileStaysInWizard(t *te
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 }
 
 // TestEditRouter_Teatest_VaultFlow_EscMirrorsDirtyDiscardGate is the vault
@@ -1456,7 +1456,7 @@ func TestEditRouter_Teatest_VaultFlow_EscMirrorsDirtyDiscardGate(t *testing.T) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("foo = ")
@@ -1484,7 +1484,7 @@ func TestEditRouter_Teatest_VaultFlow_EscMirrorsDirtyDiscardGate(t *testing.T) {
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(filepath.Join(vaultDir, "main.yaml"))
 	if err != nil {
@@ -1514,7 +1514,7 @@ func TestEditRouter_Teatest_RosterFlow_TopMenuReachesManager(t *testing.T) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster, 4 離開
@@ -1529,7 +1529,7 @@ func TestEditRouter_Teatest_RosterFlow_TopMenuReachesManager(t *testing.T) {
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 }
 
 // TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate
@@ -1551,7 +1551,7 @@ func TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate(t *test
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("👤 Users")
@@ -1602,7 +1602,7 @@ func TestEditRouter_Teatest_RosterFlow_AddUserAndGroupWithValidationGate(t *test
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	users, err := inventory.RosterUserNames(path)
 	if err != nil {
@@ -1645,7 +1645,7 @@ func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("Command groups")
@@ -1663,7 +1663,7 @@ func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	rule := newRosterSudoRule("ops-status-sudo", []string{"role-ops"}, []string{"ops-status"}, nil)
 	if got, _ := rule["options"].([]string); len(got) != 0 {
@@ -1680,7 +1680,7 @@ func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
 		t.Helper()
 		teatest.WaitFor(t, ruleTM.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 	ruleWaitFor("allow.commands")
 	ruleTM.Send(tea.KeyPressMsg{Code: tea.KeyDown})
@@ -1694,7 +1694,7 @@ func TestEditRouter_Teatest_RosterSudoFlow(t *testing.T) {
 	if err := ruleTM.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	ruleTM.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	ruleTM.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	stored, found, err := inventory.RosterSudoRule(path, "ops-status-sudo")
 	if err != nil || !found {
@@ -1718,18 +1718,18 @@ func TestEditRouter_Teatest_RosterSudoRuleCanSetExplicitAllowAll(t *testing.T) {
 	var router editRouterModel
 	pushRosterSudoRuleDetail(&router, dir, path, "ops-sudo", "")
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "allow.command_category") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "allow.command_category") }, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "Allow all commands") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "Allow all commands") }, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "確認 allow all") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "確認 allow all") }, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	tm.Type("y")
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "✅ 已更新") }, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), "✅ 已更新") }, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	stored, found, err := inventory.RosterSudoRule(path, "ops-sudo")
 	if err != nil || !found {
@@ -1763,7 +1763,7 @@ func TestEditRouter_Teatest_RosterFlow_UserDetailPreviewAndScalarEditRoundTrips(
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	// full field-detail preview: every known field rendered, unset ones as
@@ -1783,7 +1783,7 @@ func TestEditRouter_Teatest_RosterFlow_UserDetailPreviewAndScalarEditRoundTrips(
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	fields, found, err := inventory.RosterUser(path, "alice")
 	if err != nil {
@@ -1812,7 +1812,7 @@ func TestEditRouter_Teatest_RosterFlow_GroupMembershipChecklistEditRoundTrips(t 
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("membership.users（共 0 位）")
@@ -1831,7 +1831,7 @@ func TestEditRouter_Teatest_RosterFlow_GroupMembershipChecklistEditRoundTrips(t 
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	fields, found, err := inventory.RosterGroup(path, "team-ops")
 	if err != nil {
@@ -1864,7 +1864,7 @@ func TestEditRouter_Teatest_RosterFlow_DisablingUserSynchronizesEnabled(t *testi
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("enabled：true")
@@ -1891,7 +1891,7 @@ func TestEditRouter_Teatest_RosterFlow_DisablingUserSynchronizesEnabled(t *testi
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	fields, found, err := inventory.RosterUser(path, "alice")
 	if err != nil {
@@ -1931,7 +1931,7 @@ func TestEditRouter_Teatest_RosterFlow_MissingRosterOffersToCreateSkeleton(t *te
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("要建立最小 roster 骨架嗎")
@@ -1946,7 +1946,7 @@ func TestEditRouter_Teatest_RosterFlow_MissingRosterOffersToCreateSkeleton(t *te
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	violations, err := inventory.ValidateRosterFile(path)
 	if err != nil {
@@ -1990,7 +1990,7 @@ func TestEditRouter_Teatest_RosterFlow_CreateSkeletonReusesExistingAdminPassword
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
 	waitFor("要建立最小 roster 骨架嗎")
@@ -2000,7 +2000,7 @@ func TestEditRouter_Teatest_RosterFlow_CreateSkeletonReusesExistingAdminPassword
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(path)
 	if err != nil {

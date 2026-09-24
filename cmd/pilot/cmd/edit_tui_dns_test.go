@@ -32,7 +32,7 @@ func newDNSTeatestModel(t *testing.T, router editRouterModel) (*teatest.TestMode
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 	return tm, waitFor
 }
@@ -100,7 +100,7 @@ func TestEditRouter_Teatest_DNSManifestFlow_CreateSkeletonThenAddZone(t *testing
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	root, err := inventory.LoadDNSManifest(path)
 	if err != nil {
@@ -160,7 +160,7 @@ func TestEditRouter_Teatest_DNSRecordFlow_AddARecordFromInventoryHost(t *testing
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	record, found, err := inventory.DNSManifestRecord(path, "example.com.", "grafana", "A")
 	if err != nil || !found {
@@ -241,7 +241,7 @@ func TestEditRouter_Teatest_DNSRecordFlow_CreateThreeServiceRecords(t *testing.T
 		if err := tm.Quit(); err != nil {
 			t.Fatal(err)
 		}
-		tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+		tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 	}
 
 	addOne("grafana")
@@ -327,7 +327,7 @@ func TestEditRouter_Teatest_DNSRecordFlow_RejectsInvalidCNAMEWithoutWriting(t *t
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	afterBytes, err := os.ReadFile(path)
 	if err != nil {
@@ -376,7 +376,7 @@ func TestEditRouter_Teatest_DNSZoneFlow_ToggleStateToAbsent(t *testing.T) {
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	zone, found, err := inventory.DNSManifestZone(path, "old-svc.example.com.")
 	if err != nil || !found {

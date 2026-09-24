@@ -87,7 +87,7 @@ const newProgramSettle = 150 * time.Millisecond
 
 func waitForNewDeployScreen(t *testing.T, proc *ptyProc, want string) {
 	t.Helper()
-	waitForPTYOutput(t, proc.out, 5*time.Second, want)
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, want)
 	time.Sleep(newProgramSettle)
 }
 
@@ -143,7 +143,7 @@ func TestPilotDeployPTY_DeclineAtFinalConfirmNeverRunsAnsible(t *testing.T) {
 	waitForNewDeployScreen(t, proc, "確定要執行正式套用指令嗎")
 	proc.press(t, "n") // decline — must exit cleanly without ever running ansible-playbook
 
-	code := proc.waitExit(t, 10*time.Second)
+	code := proc.waitExit(t, ptyExitTimeout)
 	final := proc.out.String()
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (a decline is a clean abort, not an error), output:\n%s", code, final)
