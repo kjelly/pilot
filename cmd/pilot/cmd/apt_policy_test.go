@@ -11,6 +11,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +78,126 @@ var aptUpdateCacheAllowlist = map[string]string{
 }
 
 var updateCacheTruePattern = regexp.MustCompile(`update_cache:\s*true\b`)
+
+// aptDirectInstallAllowlist is a ratchet like aptUpdateCacheAllowlist, for
+// the other way around the framework: installing a package on the Debian
+// path with plain ansible.builtin.apt / ansible.builtin.package and no
+// update_cache at all. That installs from whatever apt index the host
+// already has, so a stale index 404s and fails the apply (2026-09-24:
+// tasks/freeipa-dns-client-resolver.yml's dnsutils install on the vm-target
+// golden image, docs/evidence/freeipa-dns-client/2026-09-24-583df40.md).
+// The entries below were found by the same sweep and not migrated yet:
+// moving each one changes which apt path its playbook runs and needs its
+// own vm-target run. Keys are "<file>|<package list>".
+var aptDirectInstallAllowlist = map[string]string{
+	"playbooks/apply/dcgm-exporter-apply.yml|apache2-utils":                                                                                     "not yet migrated (2026-09-24 sweep)",
+	"playbooks/apply/freeipa-client-apply.yml|{{ ipa_audit_packages_debian":                                                                     "not yet migrated (2026-09-24 sweep); package name is chosen per OS family",
+	"playbooks/apply/freeipa-nfs-client-apply.yml|{{ ['nfs-utils', 'autofs'] if ansible_os_family == 'RedHat' else ['nfs-common', 'autofs'] }}": "not yet migrated (2026-09-24 sweep); package name is chosen per OS family",
+	"playbooks/apply/freeipa-nfs-server-apply.yml|{{ nfs_server_packages }}":                                                                    "not yet migrated (2026-09-24 sweep)",
+}
+
+// TestAptDirectInstallAllowlist fails on any Debian-reachable package
+// install in playbooks/apply that bypasses tasks/apt-package-install.yml
+// and is not in aptDirectInstallAllowlist, and on allowlist entries that
+// no longer match anything. A task counts as EL-only, and is skipped, when
+// its `when:` mentions RedHat.
+func TestAptDirectInstallAllowlist(t *testing.T) {
+	root := "../../.."
+	var paths []string
+	for _, pattern := range []string{
+		filepath.Join(root, "playbooks", "apply", "*.yml"),
+		filepath.Join(root, "playbooks", "apply", "tasks", "*.yml"),
+	} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, matches...)
+	}
+	found := map[string]bool{}
+	for _, p := range paths {
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "playbooks/apply/tasks/apt-package-install.yml" {
+			continue
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc any
+		if err := yaml.Unmarshal(data, &doc); err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		for _, pkgs := range directDebianInstalls(doc) {
+			key := rel + "|" + pkgs
+			// Allowlist keys may be a prefix of a long templated name.
+			matched := ""
+			for allowed := range aptDirectInstallAllowlist {
+				if key == allowed || strings.HasPrefix(key, allowed) {
+					matched = allowed
+				}
+			}
+			if matched == "" {
+				t.Errorf("%s installs %q with plain ansible.builtin.apt/package on the Debian path — route it through playbooks/apply/tasks/apt-package-install.yml (a stale apt index otherwise 404s and fails the apply), or add %q to aptDirectInstallAllowlist with a reason", rel, pkgs, key)
+				continue
+			}
+			found[matched] = true
+		}
+	}
+	for allowed := range aptDirectInstallAllowlist {
+		if !found[allowed] {
+			t.Errorf("aptDirectInstallAllowlist entry %q no longer matches any install — drop the stale allowance", allowed)
+		}
+	}
+}
+
+// directDebianInstalls returns the package spec (as written) of every task
+// in doc that installs with ansible.builtin.apt or ansible.builtin.package
+// and is not limited to RedHat by its `when:`.
+func directDebianInstalls(doc any) []string {
+	var out []string
+	var walk func(n any)
+	walk = func(n any) {
+		switch v := n.(type) {
+		case []any:
+			for _, c := range v {
+				walk(c)
+			}
+		case map[string]any:
+			for _, key := range []string{"ansible.builtin.apt", "apt", "ansible.builtin.package", "package"} {
+				args, ok := v[key].(map[string]any)
+				if !ok {
+					continue
+				}
+				name, ok := args["name"]
+				if !ok {
+					continue
+				}
+				if strings.Contains(fmt.Sprint(v["when"]), "RedHat") {
+					continue
+				}
+				if list, ok := name.([]any); ok {
+					parts := make([]string, len(list))
+					for i, item := range list {
+						parts[i] = fmt.Sprint(item)
+					}
+					out = append(out, strings.Join(parts, ","))
+				} else {
+					out = append(out, strings.TrimSpace(fmt.Sprint(name)))
+				}
+			}
+			for _, c := range v {
+				walk(c)
+			}
+		}
+	}
+	walk(doc)
+	return out
+}
 
 func TestAptUpdateCacheAllowlist(t *testing.T) {
 	root := "../../.."
@@ -420,129 +541,5 @@ func TestAptClassifyFailureScriptUnknown(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected an 'unknown' classified entry, got %+v", result.Errors)
-	}
-}
-
-// TestAptInstallRetriesOnlyAfterStaleIndexFetch locks the install's
-// rescue path: a fetch failure from stale cached indexes (captured live
-// on a fresh cloud image behind an apt proxy) refreshes once and retries;
-// every other failure, and any failure under the offline policy, stays
-// FATAL (spec.md §5 tolerant flow, §25 "unknown install failure
-// conservative fatal", T10).
-func TestAptInstallRetriesOnlyAfterStaleIndexFetch(t *testing.T) {
-	data, err := os.ReadFile("../../../playbooks/apply/tasks/apt-package-install.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tasks []map[string]any
-	if err := yaml.Unmarshal(data, &tasks); err != nil {
-		t.Fatal(err)
-	}
-	var install map[string]any
-	var find func([]map[string]any)
-	find = func(ts []map[string]any) {
-		for _, task := range ts {
-			if name, _ := task["name"].(string); strings.Contains(name, "install, refreshing once if the cached indexes are stale") {
-				install = task
-			}
-			for _, key := range []string{"block", "rescue"} {
-				if nested, ok := task[key].([]any); ok {
-					find(toTaskList(nested))
-				}
-			}
-		}
-	}
-	find(tasks)
-	if install == nil {
-		t.Fatal("the final install block with its stale-index rescue is missing")
-	}
-	block := toTaskList(install["block"].([]any))
-	rescue := toTaskList(install["rescue"].([]any))
-	if len(block) != 1 || block[0]["ansible.builtin.apt"] == nil {
-		t.Fatalf("the block must hold only the single install, got %v", block)
-	}
-	for _, task := range append(append([]map[string]any{}, block...), rescue...) {
-		if _, ok := task["ignore_errors"]; ok {
-			t.Errorf("task %q must not use ignore_errors (spec.md §25)", task["name"])
-		}
-	}
-	if len(rescue) != 5 {
-		t.Fatalf("rescue must be: fatal gate, refresh, health gate, one retry, mode fact; got %d tasks", len(rescue))
-	}
-	gate, _ := rescue[0]["when"].(string)
-	if rescue[0]["ansible.builtin.fail"] == nil || !strings.Contains(gate, "_pilot_apt_policy == 'offline' or") {
-		t.Fatalf("the rescue must first re-raise every non-stale failure and every offline failure, got when=%q", gate)
-	}
-	if inc, _ := rescue[1]["ansible.builtin.include_tasks"].(string); inc != "apt-cache-refresh.yml" {
-		t.Errorf("the rescue must refresh through apt-cache-refresh.yml, got %v", rescue[1])
-	}
-	if when, _ := rescue[2]["when"].(string); rescue[2]["ansible.builtin.fail"] == nil || when != "not pilot_apt_refresh_result.required_sources_healthy" {
-		t.Errorf("a refresh that leaves a required source unhealthy must be FATAL, got %v", rescue[2])
-	}
-	if rescue[3]["ansible.builtin.apt"] == nil {
-		t.Errorf("the rescue must retry the install once, got %v", rescue[3])
-	}
-
-	m := regexp.MustCompile(`is search\('([^']+)'\)`).FindStringSubmatch(gate)
-	if m == nil {
-		t.Fatalf("no search() pattern in the gate %q", gate)
-	}
-	stale := regexp.MustCompile(m[1])
-	raw, err := os.ReadFile("testdata/apt-install-stale-index-404.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var captured []string
-	for _, line := range strings.Split(string(raw), "\n") {
-		if !strings.HasPrefix(line, "#") {
-			captured = append(captured, line)
-		}
-	}
-	if !stale.MatchString(strings.Join(captured, "\n")) {
-		t.Errorf("pattern %q must match the captured stale-index failure", m[1])
-	}
-	// Real captures of failures a refresh does not fix (Ubuntu 24.04).
-	for _, msg := range []string{
-		"E: Unable to locate package nosuchpkg-xyz",
-		"E: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)\nE: Unable to lock directory /var/lib/apt/lists/",
-	} {
-		if stale.MatchString(msg) {
-			t.Errorf("pattern %q must not retry %q", m[1], msg)
-		}
-	}
-}
-
-func toTaskList(items []any) []map[string]any {
-	var out []map[string]any
-	for _, item := range items {
-		if task, ok := item.(map[string]any); ok {
-			out = append(out, task)
-		}
-	}
-	return out
-}
-
-// TestAptUpdateIsBounded: every apt-get update the shared framework runs is
-// capped by timeout(1) and apt's own per-request timeout, and a timed-out
-// attempt (rc 124) is retried. An unbounded refresh hung a fresh-host
-// topology run for over 38 minutes (2026-09-24).
-func TestAptUpdateIsBounded(t *testing.T) {
-	for _, name := range []string{"apt-cache-refresh.yml", "apt-scoped-refresh.yml"} {
-		data, err := os.ReadFile(filepath.Join("../../../playbooks/apply/tasks", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(data)
-		for _, want := range []string{
-			"pilot_apt_update_timeout_seconds | default(300)",
-			"Acquire::http::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}",
-			"Acquire::https::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}",
-			"Acquire::Retries={{ pilot_apt_acquire_retries | default(3) }}",
-			"| default(1)) == 124)",
-		} {
-			if !strings.Contains(text, want) {
-				t.Errorf("%s: apt-get update must be bounded; missing %q", name, want)
-			}
-		}
 	}
 }

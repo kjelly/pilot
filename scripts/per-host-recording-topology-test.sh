@@ -76,7 +76,7 @@ export PILOT_INPUT_GATEWAY_SCOPE="$GATEWAY_SCOPE"
   -e "pilot_session_store_binary_path=$DIST_ABS/pilot-session-store" \
   -e "pilot_access_directory_binary_path=$DIST_ABS/pilot-access-directory" \
   -e "directory_id=rec-dir1" \
-  -e "pilot_session_store_url=https://rec-store.ipa.pilot.internal:8443" \
+  -e "pilot_access_gateway_recording_session_store_url=https://rec-store.ipa.pilot.internal:8443" \
   -e "pilot_session_store_retention_days=30" \
   -e "pilot_session_store_key_id=rec-1" \
   -e "@$VAULT_ABS"

@@ -47,6 +47,10 @@ hosts:
   # 不控制 Ansible 行為(role/env/deploy/HBAC/sudo 都不受影響);禁止存
   # password/token/key 等秘密資料。freeipa-client apply 成功 enrollment 後,
   # 會把它們投影到該 host 的 FreeIPA userClass(pilot.annotation.<key>)。
+  # prometheus role 可選擇(group_vars 的 prometheus_host_annotation_labels,
+  # 見 group_vars/prometheus.example.yml)把部分 annotation 複製成 target
+  # labels,但只是在「已經被選中的 target」上加 descriptive dimensions,
+  # 不會因 annotation 決定是否監控。
   web-1:
     ansible_host: "<FILL-ME>"        # 例 10.0.0.21
     roles: [freeipa-client, freeipa-dns-client, linux-servers, audit-log-forwarding, wazuh-fim, restic-backup]

@@ -28,33 +28,44 @@ settle pause (~150ms was reliable) *before* sending that screen's first
 keystroke. Don't rely on `EXPECT` succeeding as proof the new Program is already
 reading input.
 
-## Prefer `DOWN <n>` over `SELECT` for `pilot deploy`'s menus
+## Select `pilot deploy`'s menus by label
 
-**Symptom:** right after the scope-select screen (`單一元件`) transitioned into
-the 20-item catalog select, `SELECT <first catalog label>` immediately mismatched
-and drove the pointer to the *last* row, then reported "not reached after 150
-presses" stuck at the bottom — even though the catalog screen's cursor genuinely
-starts at row 0 (confirmed by removing `SELECT` entirely and using a bare
-`ENTER`, which worked).
+`[live 2026-09-24]` With the Huh `--pointer` (`select-labels.md`),
+`ACTIVATE <row text> WITH ENTER` picked the right row on every menu of a
+single-component run. Each new screen got `EXPECT <prompt>`,
+`EXPECT_QUIET 200` and a guard (`ENTER_IF`/`TEXT_IF`/the `ACTIVATE` itself)
+before its first keystroke. The menus covered: 單一元件, the catalog (row 22
+of 29), the stage, and the preflight mode. The script passed
+`trec drive lint --strict`, and the run went through preview and the real
+apply to `✅ 套用完成`.
 
-**Cause:** `SELECT`'s row-scan can lock onto a stale pointer marker left in
-scrollback by the *just-exited* scope-select Program — still visible above the
-new screen, since neither Program uses the alt-screen buffer — and compute the
-wrong direction from that stale position. A different mechanism from the
-keystroke-swallowing gap above, but the same root cause: many short-lived
-Programs, not one.
+Use labels rather than counting. The catalog is now contract-driven
+(`挑一個要佈署的元件 (contract 驅動)`), and its order no longer matches
+`deploy_catalog.go`'s `Key:` order (`../SKILL.md` §2).
 
-`DOWN <n>` (absolute count from `deploy_catalog.go`'s `Key:` order, per
-`../SKILL.md` §2) doesn't do a screen row-scan, so a stale pointer elsewhere in
-scrollback can't mislead it.
+The prompts of that run, in order (sandbox stage, no `staging`/`prod` group):
 
-Use `SELECT` for `pilot deploy` only if you've verified it against the current
-build for that specific screen transition; default to `DOWN <n>`.
+1. `Inventory 檔路徑` (default `inventory.yml`)
+2. `要不要先看一下這份 inventory 的拓樸圖？` `[Y/n]`
+3. `要佈署什麼？` — 全站部署 / 單一元件
+4. `挑一個要佈署的元件 (contract 驅動)`
+5. `要限定只套用到哪個 group/host 嗎？` (`-e target_group=`; empty = the component's group)
+6. `要套用到哪個 stage？`
+7. `--limit`, then `--tags` (empty = none)
+8. `偵測到 …/.vault/main.yaml，這次佈署要用它當密碼變數檔嗎？` `[Y/n]`
+9. `這次套用要手動輸入 sudo(become)密碼嗎？` `[y/N]`
+10. `還有其他 -e 變數要帶嗎？`
+11. `要先跑前置檢查(preflight)嗎？` — full / static only / skip
+12. the confirm chain below
 
-`[live 2026-07-17, 3-VM-demo re-verification — finding recorded in
-`docs/runbooks/archived/3vm-freeipa-wazuh-grafana-demo.md` §7, archived as a
-strict subset of `docs/runbooks/minimal-poc-architecture.md`; the finding itself
-still stands]`
+**History (pre-Huh, 2026-07-17):** `SELECT <first catalog label>` right after
+the scope select mismatched and drove the pointer to the last row ("not reached
+after 150 presses"). The cause was a stale pointer marker left in scrollback by
+the just-exited scope-select Program; `DOWN <n>` from `deploy_catalog.go`
+avoided it at the time. That finding is recorded in
+`docs/runbooks/archived/3vm-freeipa-wazuh-grafana-demo.md` §7. It did not
+reproduce on 2026-09-24, and the `DOWN <n>`-from-source fallback it relied on
+now counts the wrong list.
 
 ## Two easily-missed prompts before the confirm chain
 

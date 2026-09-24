@@ -210,6 +210,13 @@ all:
     pilot-access-gateway:
       hosts: {}                 # 例:專門一台 → hosts: { gw-01: }
 
+    # -- Pilot Access target policy:captive SSH transport 的 target 端政策
+    #    (pilot-access-target-policy-apply.yml),day-2/opt-in，目標主機須先是
+    #    freeipa-client，不可與 pilot-access-gateway/directory 同台，見
+    #    docs/verification/pilot-access-target-policy.md ------------------
+    pilot-access-target-policy:
+      hosts: {}                 # 例:要經 gateway transport 到達的主機 → hosts: { gpu-01: }
+
     # -- 環境維度(與角色正交;讓你能用 group 交集精準鎖定)------------------
     #    例:只對「prod 環境的 dns 機器」套用 →  -e target_group='dns:&prod'
     #        只跑 sandbox                    →  --limit sandbox

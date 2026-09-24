@@ -26,6 +26,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -116,6 +118,13 @@ func (b *ptySafeBuffer) String() string {
 
 func startEditPTY(t *testing.T, dir string, rows, cols uint16) *ptyProc {
 	t.Helper()
+	return startEditPTYWithEnv(t, dir, rows, cols)
+}
+
+// startEditPTYWithEnv is startEditPTY with extra KEY=value entries
+// appended to the child's environment.
+func startEditPTYWithEnv(t *testing.T, dir string, rows, cols uint16, extraEnv ...string) *ptyProc {
+	t.Helper()
 	bin := buildPilotBinary(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -123,6 +132,7 @@ func startEditPTY(t *testing.T, dir string, rows, cols uint16) *ptyProc {
 
 	cmd := exec.CommandContext(ctx, bin, "edit", "--dir", dir)
 	cmd.Env = append(append([]string{}, os.Environ()...), "TERM=xterm-256color", "CI=1")
+	cmd.Env = append(cmd.Env, extraEnv...)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
 	if err != nil {
@@ -266,10 +276,7 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 
 	waitForPTYOutput(t, proc.out, 5*time.Second, "✅ 已存檔")
 	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
-	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
-	for i := 0; i < 10; i++ {
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "離開"
@@ -296,6 +303,51 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 	}
 	if !hasRole(hf.Hosts[0].Roles, inventory.Roles()[0].Name) {
 		t.Fatalf("expected role %q to be set, got %v", inventory.Roles()[0].Name, hf.Hosts[0].Roles)
+	}
+}
+
+// TestPilotEditPTY_DebugMenuDumpsLiveItemList drives the real binary with
+// PILOT_DEBUG_MENU=1 and checks that the top menu's item list reaches the
+// PTY as [pilot:menu] lines — the stream trec records and that the
+// pilot-trec-verification skill tells scripts to read. The dump lost its
+// only caller when 521366e replaced the hand-written select widget with
+// Huh, and nothing noticed because no test drove a real menu with the
+// variable set. Without the variable, no [pilot:menu] line may appear.
+func TestPilotEditPTY_DebugMenuDumpsLiveItemList(t *testing.T) {
+	proc := startEditPTYWithEnv(t, t.TempDir(), 40, 100, "PILOT_DEBUG_MENU=1")
+	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	out := waitForPTYOutput(t, proc.out, 5*time.Second, ": 離開")
+
+	header := regexp.MustCompile(`\[pilot:menu\] 要編輯什麼？ \((\d+) 項，DOWN <n> 從 0 起算\)`).FindStringSubmatch(out)
+	if header == nil {
+		t.Fatalf("no [pilot:menu] header for the top menu in output:\n%s", out)
+	}
+	quit := regexp.MustCompile(`\[pilot:menu\]\s+(\d+): 離開`).FindStringSubmatch(out)
+	if quit == nil {
+		t.Fatalf("no [pilot:menu] row for 離開 in output:\n%s", out)
+	}
+	count, _ := strconv.Atoi(header[1])
+	if idx, _ := strconv.Atoi(quit[1]); idx != count-1 {
+		t.Fatalf("離開 dumped at index %d, want the last of %d items", idx, count)
+	}
+	if !strings.Contains(out, "[pilot:menu]   0: hosts.yml") {
+		t.Fatalf("row 0 should be the hosts.yml item; output:\n%s", out)
+	}
+	time.Sleep(escAfterTransitionSettle)
+	proc.press(t, "\x1b")
+	if code := proc.waitExit(t, 5*time.Second); code != 0 {
+		t.Fatalf("exit code = %d, want 0; output:\n%s", code, proc.out.String())
+	}
+
+	quiet := startEditPTY(t, t.TempDir(), 40, 100)
+	waitForPTYOutput(t, quiet.out, 5*time.Second, "要編輯什麼")
+	time.Sleep(escAfterTransitionSettle)
+	quiet.press(t, "\x1b")
+	if code := quiet.waitExit(t, 5*time.Second); code != 0 {
+		t.Fatalf("exit code without PILOT_DEBUG_MENU = %d, want 0", code)
+	}
+	if strings.Contains(quiet.out.String(), "[pilot:menu]") {
+		t.Fatalf("[pilot:menu] printed without PILOT_DEBUG_MENU:\n%s", quiet.out.String())
 	}
 }
 
@@ -349,10 +401,7 @@ func TestPilotEditPTY_MinimalWorkspaceRequiresHostsThenReturnsCleanly(t *testing
 	proc := startEditPTY(t, dir, 40, 100)
 
 	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
-	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
-	for i := 0; i < 9; i++ {
+	for i := 0; i < topMenuIndex(t, "top.minimal_workspace"); i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r")

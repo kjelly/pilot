@@ -193,9 +193,9 @@
           when: >-
             thanos_s3_alias in thanos_s3_endpoint
             and (groups.get('seaweedfs-s3', []) | length > 0)
-            and (groups.get('seaweedfs-s3', [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
+            and ((groups.get('seaweedfs-s3', []) + [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
           run_once: true
-          delegate_to: "{{ groups.get('seaweedfs-s3', [inventory_hostname]) | first }}"
+          delegate_to: "{{ (groups.get('seaweedfs-s3', []) + [inventory_hostname]) | first }}"
           block:
             - name: "Step: check Thanos S3 bucket exists"
               community.docker.docker_container_exec:

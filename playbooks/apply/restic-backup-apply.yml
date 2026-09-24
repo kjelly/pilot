@@ -226,12 +226,12 @@
       when: >-
         restic_s3_alias in restic_repository
         and (groups.get('seaweedfs-s3', []) | length > 0)
-        and (groups.get('seaweedfs-s3', [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
+        and ((groups.get('seaweedfs-s3', []) + [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
         and not ansible_check_mode
       run_once: true
       # Use the current host as a valid delegate even when the optional group
       # is absent; the block-level `when` then skips the bucket probe cleanly.
-      delegate_to: "{{ groups.get('seaweedfs-s3', [inventory_hostname]) | first }}"
+      delegate_to: "{{ (groups.get('seaweedfs-s3', []) + [inventory_hostname]) | first }}"
       block:
         - name: "Step 2b: check destination bucket exists"
           community.docker.docker_container_exec:

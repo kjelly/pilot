@@ -63,16 +63,22 @@ pilot_session_store_key_id: "v1"
 # 升級時請先保留 vault 裡舊的 pilot_session_store_ingest_token,確認升級成功
 # 後再移除——回滾到舊版需要它(見 per-host recording spec §21.3)。
 
-# Ingest HTTPS 監聽的 port。改這個值時,pilot-access-gateway 那邊的
-# pilot_session_store_url 也要跟著改。
+# Ingest HTTPS 監聽的 port。改這個值時,pilot-access-gateway 那邊
+# group_vars/host_vars 的 pilot_access_gateway_recording_session_store_url
+# 也要跟著改。
 # pilot_session_store_ingest_port: 8443
 
 # ----------------------------------------------------------------------------
-# pilot-access-gateway 必須使用同一個 vault key
-# `pilot_session_store_ingest_signing_key`,並設定
-# `pilot_session_store_url: "https://<session_store_fqdn>:<pilot_session_store_ingest_port>"`
-# (見 group_vars/pilot-access-gateway.example.yml)。升級時先部署 store、
-# 再部署 gateway(site.yml 依這個順序執行)。
+# pilot-access-gateway 那端的對應設定(由 pilot-access-gateway 的 group vars
+# 渲染,不要手動編輯 /etc/pilot/access-gateway.yaml——手動加的內容會被下一次
+# apply 以 group vars 為準,見 group_vars/pilot-access-gateway.example.yml):
+#
+#   pilot_access_gateway_recording_session_store_url: "https://<session_store_fqdn>:<pilot_session_store_ingest_port>"
+#   pilot_access_gateway_recording_session_store_ca_file: /etc/ipa/ca.crt   # Gateway 本身已是 freeipa-client,天然信任同一個 FreeIPA CA
+#
+# 兩邊必須使用同一個 vault key `pilot_session_store_ingest_signing_key`:
+# store 用它驗證、gateway 用它簽發每個 session 的 PIT1 ingest token。
+# 升級時先部署 store、再部署 gateway(site.yml 依這個順序執行)。
 # ----------------------------------------------------------------------------
 
 # Metrics(per-host recording spec §31):不需要設定變數。這台主機上已有

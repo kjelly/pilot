@@ -186,6 +186,24 @@
     # nothing).
     snmp_exporter_endpoint: "pilot-snmp-exporter:9116"
 
+    # ---- Host annotations -> managed-host target labels
+    # (docs/superpowers/specs/2026-09-23-host-annotations-prometheus-labels-spec.md) ----
+    # prometheus_host_annotation_labels (annotation key -> pilot_* label
+    # name) is DELIBERATELY NOT declared here — same play-vars-shadow-
+    # group_vars reason as node_exporter_targets above; every use point
+    # reads it via `| default({}, true)`, so unset/{} keeps the pre-feature
+    # rendering (only pilot_host). This reserved list is internal, not an
+    # operator knob: canonical identity / external-target / Detection
+    # Engine subject labels an annotation must never be mapped onto
+    # (spec §7.5). The validation gate below is its only reader.
+    _pilot_prometheus_reserved_target_labels:
+      - pilot_host
+      - pilot_target
+      - pilot_source
+      - pilot_protocol
+      - pilot_subject
+      - pilot_subject_kind
+
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
@@ -237,6 +255,85 @@
         and (groups.get('alertmanager', []) | length > 0)
       tags: [always]
 
+    # ---- Host annotations -> managed-host target labels (host-metadata
+    # spec §7/§8). Pure computation, no mutation; runs before either
+    # node/dcgm auto-discovery loop below reads _pilot_prometheus_host_labels.
+    # All tagged `always`: they are prerequisites of the always-tagged
+    # scrape-block tasks (AGENTS.md §4.4). Error messages name only
+    # mapping keys / label names, never an annotation value (spec §16.1).
+    - name: "Gate: prometheus_host_annotation_labels must be a mapping (host-metadata spec §7.1)"
+      ansible.builtin.assert:
+        that:
+          - prometheus_host_annotation_labels | default({}, true) is mapping
+        fail_msg: >-
+          prometheus_host_annotation_labels must be a mapping of
+          <annotation key>: <pilot_* label name>, e.g.
+          {project: pilot_project}; got a
+          {{ (prometheus_host_annotation_labels | default({}, true)) | type_debug }}.
+      tags: [always]
+
+    - name: "Resolve host-annotation label mapping, sorted by source key (host-metadata spec §8.2)"
+      ansible.builtin.set_fact:
+        _pilot_prometheus_annotation_label_items: >-
+          {{ prometheus_host_annotation_labels | default({}, true)
+             | dict2items | sort(attribute='key') }}
+      tags: [always]
+
+    - name: "Gate: host-annotation label mapping is valid (host-metadata spec §7.2-§7.6)"
+      ansible.builtin.assert:
+        that:
+          - _bad_source | length == 0
+          - _secret_source | length == 0
+          - _bad_dest | length == 0
+          - _reserved_dest | length == 0
+          - _dup_dest | length == 0
+        fail_msg: >-
+          prometheus_host_annotation_labels is invalid —
+          source keys not matching ^[a-z][a-z0-9_.-]{0,62}$: {{ _bad_source }};
+          secret-like source keys: {{ _secret_source }};
+          destination labels not matching ^pilot_[a-z][a-z0-9_]*$: {{ _bad_dest }};
+          reserved destination labels: {{ _reserved_dest }};
+          duplicate destination labels: {{ _dup_dest }}.
+      vars:
+        _src: "{{ _pilot_prometheus_annotation_label_items | map(attribute='key') | map('string') | list }}"
+        _dst: "{{ _pilot_prometheus_annotation_label_items | map(attribute='value') | map('string') | list }}"
+        _bad_source: "{{ _src | reject('match', '^[a-z][a-z0-9_.-]{0,62}$') | list }}"
+        _secret_source: "{{ _src | select('search', '(?i)(password|passwd|secret|token|api[_-]?key|private[_-]?key|vault|credential)') | list }}"
+        _bad_dest: "{{ _dst | reject('match', '^pilot_[a-z][a-z0-9_]*$') | list }}"
+        _reserved_dest: "{{ _dst | select('in', _pilot_prometheus_reserved_target_labels) | list }}"
+        # groupby -> (label, [items]); '1.1' is defined only when a label has >=2 sources.
+        _dup_dest: "{{ _pilot_prometheus_annotation_label_items | groupby('value') | selectattr('1.1', 'defined') | map('first') | list }}"
+      tags: [always]
+
+    - name: "Reset per-host managed target labels (host-metadata spec §8.1)"
+      ansible.builtin.set_fact:
+        _pilot_prometheus_host_labels: {}
+      tags: [always]
+
+    # One labels dict per managed host, shared by BOTH the node and dcgm
+    # auto-discovery loops below (spec I6): starts from pilot_host (never
+    # overridable — the gate above rejects pilot_host as a destination),
+    # adds only allowlisted annotations that are present and non-empty
+    # after `| string` (I11, §7.8), values verbatim (I10).
+    - name: "Build managed-host target labels: pilot_host + allowlisted annotations (host-metadata spec §8.1)"
+      ansible.builtin.set_fact:
+        _pilot_prometheus_host_labels: >-
+          {{ _pilot_prometheus_host_labels
+             | combine({item: ({'pilot_host': item}
+                               | combine(dict(_present | map(attribute='value')
+                                              | zip(_present | map(attribute='key')
+                                                    | map('extract', _ann) | map('string')))
+                                         | dict2items | rejectattr('value', 'equalto', '')
+                                         | items2dict))}) }}
+      vars:
+        _ann_raw: "{{ hostvars[item]['pilot_annotations'] | default({}, true) }}"
+        _ann: "{{ _ann_raw if (_ann_raw is mapping) else {} }}"
+        _present: "{{ _pilot_prometheus_annotation_label_items | selectattr('key', 'in', _ann) | list }}"
+      loop: "{{ (groups.get('host-monitoring', []) + groups.get('dcgm-exporter', [])) | unique | sort }}"
+      loop_control:
+        label: "{{ item }}"
+      tags: [always]
+
     # Auto-discover node_exporter scrape targets (docs/verification/
     # host-monitoring.md) from this inventory's host-monitoring group when
     # node_exporter_targets was left genuinely unset — same "explicit
@@ -277,7 +374,7 @@
         prometheus_node_exporter_auto_static_configs: >-
           {{ (prometheus_node_exporter_auto_static_configs | default([]))
              + [ {'targets': [ (hostvars[item].ansible_host | default(item, true)) ~ ':9100' ],
-                  'labels': {'pilot_host': item}} ] }}
+                  'labels': _pilot_prometheus_host_labels[item]} ] }}
       loop: "{{ prometheus_node_exporter_auto_hosts | default([]) }}"
       loop_control:
         label: "{{ item }}"
@@ -366,7 +463,7 @@
         prometheus_dcgm_exporter_auto_static_configs: >-
           {{ (prometheus_dcgm_exporter_auto_static_configs | default([]))
              + [ {'targets': [ (hostvars[item].ansible_host | default(item, true)) ~ ':9400' ],
-                  'labels': {'pilot_host': item}} ] }}
+                  'labels': _pilot_prometheus_host_labels[item]} ] }}
       loop: "{{ prometheus_dcgm_exporter_auto_hosts | default([]) }}"
       loop_control:
         label: "{{ item }}"
@@ -786,7 +883,7 @@
         # object storage — Thanos Compactor (on the thanos-query host) owns
         # compaction/downsampling/retention from that point on.
         - name: "Render prometheus.yml (with alerting.alertmanagers)"
-          tags: [C8, C11, C13, C15, C16, C18, ext-target, ext-target-C3]
+          tags: [C8, C11, C13, C15, C16, C18, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -811,7 +908,7 @@
           when: alertmanager_target_host | default('', true) | length > 0
 
         - name: "Render prometheus.yml (without alerting — alertmanager_target_host empty)"
-          tags: [C8, C13, C15, C16, C18, ext-target, ext-target-C3]
+          tags: [C8, C13, C15, C16, C18, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -1020,13 +1117,17 @@
         # this mirrors. thanos-query-apply.yml has the identical block for
         # its own bucket_use, so this bucket ends up ensured regardless of
         # whether prometheus or thanos-query happens to run first.
+        # delegate_to is templated before `when`, and `pilot inventory
+        # generate` emits seaweedfs-s3 as a present-but-empty group, so the
+        # fallback host is APPENDED, never used as a groups.get() default
+        # (see internal/spec/delegate_to_empty_group_regression_test.go).
         - name: "Step: Ensure Thanos S3 bucket exists on the SeaweedFS host (idempotent)"  # noqa run-once[task]
           when: >-
             thanos_s3_alias in thanos_s3_endpoint
             and (groups.get('seaweedfs-s3', []) | length > 0)
-            and (groups.get('seaweedfs-s3', [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
+            and ((groups.get('seaweedfs-s3', []) + [inventory_hostname]) | first) not in (pilot_deferred_hosts | default([]))
           run_once: true
-          delegate_to: "{{ groups.get('seaweedfs-s3', [inventory_hostname]) | first }}"
+          delegate_to: "{{ (groups.get('seaweedfs-s3', []) + [inventory_hostname]) | first }}"
           block:
             - name: "Step: check Thanos S3 bucket exists"
               community.docker.docker_container_exec:

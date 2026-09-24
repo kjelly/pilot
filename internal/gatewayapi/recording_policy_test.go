@@ -339,7 +339,7 @@ func (p *twoHostProvider) HBACRuleFind(ctx context.Context) ([]freeipaaccess.HBA
 	}}, nil
 }
 
-// TestConnectAuthorize_UserClassUnreadableDenies locks AG56 (Phase 0 branch
+// TestConnectAuthorize_UserClassUnreadableDenies locks AG95 (Phase 0 branch
 // R): when the gateway principal cannot read one host's userclass, only
 // that host's connects are denied with recording_policy_unavailable; a
 // readable host in the same snapshot is unaffected.

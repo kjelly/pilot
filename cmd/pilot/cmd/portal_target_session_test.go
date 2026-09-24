@@ -297,7 +297,7 @@ func TestPortalTargetSession_MetadataPlainPathUnchanged(t *testing.T) {
 	}
 }
 
-// TestConnectToHost_TerminalModeUsesRecordedPath locks AG50: the
+// TestConnectToHost_TerminalModeUsesRecordedPath locks AG89: the
 // interactive Portal Connect records a host whose policy asks for it,
 // through the same recorded path as the Directory handoff.
 func TestConnectToHost_TerminalModeUsesRecordedPath(t *testing.T) {
@@ -342,7 +342,7 @@ func TestConnectToHost_TerminalModeUsesRecordedPath(t *testing.T) {
 	}
 }
 
-// TestPortalTargetSession_StoreStartFailureNoSSH locks AG51: when the store
+// TestPortalTargetSession_StoreStartFailureNoSSH locks AG90: when the store
 // refuses the session start, no ssh process runs, Phase A included.
 func TestPortalTargetSession_StoreStartFailureNoSSH(t *testing.T) {
 	client, store := recordingGateway(t, &hostOutputPolicy)
@@ -367,7 +367,7 @@ func TestPortalTargetSession_StoreStartFailureNoSSH(t *testing.T) {
 	}
 }
 
-// TestPortalTargetSession_NoLocalRecordingFile locks AG52: a recorded
+// TestPortalTargetSession_NoLocalRecordingFile locks AG91: a recorded
 // session leaves nothing on the gateway's disk; the former FileSink path
 // is gone.
 func TestPortalTargetSession_NoLocalRecordingFile(t *testing.T) {
@@ -402,7 +402,7 @@ func TestPortalTargetSession_NoLocalRecordingFile(t *testing.T) {
 	}
 }
 
-// TestPortalTargetSession_RecordingNotice locks AG54: terminal modes print
+// TestPortalTargetSession_RecordingNotice locks AG93: terminal modes print
 // the pre-connect notice with the session id; metadata prints nothing.
 func TestPortalTargetSession_RecordingNotice(t *testing.T) {
 	t.Run("terminal_output", func(t *testing.T) {

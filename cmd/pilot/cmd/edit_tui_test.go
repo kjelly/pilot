@@ -123,3 +123,17 @@ func TestEditRouter_UnfinishedScreenDoesNotInvokeCallback(t *testing.T) {
 		t.Fatalf("expected the same screen still showing, got:\n%s", viewContent(r2.View()))
 	}
 }
+
+// topMenuIndex returns the top-menu position of the item with id, so tests
+// navigate by ID instead of hard-coding a DOWN count that breaks whenever
+// an item is inserted.
+func topMenuIndex(t testing.TB, id string) int {
+	t.Helper()
+	for i, c := range topMenuChoices() {
+		if c.ID == id {
+			return i
+		}
+	}
+	t.Fatalf("top menu has no item %q", id)
+	return -1
+}

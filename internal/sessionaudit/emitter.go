@@ -63,6 +63,25 @@ func NewEmitter(tag string) (*Emitter, error) {
 	return &Emitter{tag: tag, w: w, fallback: fallback}, nil
 }
 
+// NewEmitterWithWriter returns an Emitter that writes one JSON line per
+// event to w instead of local syslog — for callers (and other packages'
+// tests) that need to capture or redirect the audit stream. w must be safe
+// for the caller's own concurrency; Emit itself does not serialize writes.
+func NewEmitterWithWriter(tag string, w io.Writer) *Emitter {
+	return newEmitterWithWriter(tag, newlineWriter{w: w})
+}
+
+// newlineWriter terminates each Emit's single Write with '\n' — syslog
+// frames each message itself, but a plain stream needs a line delimiter.
+type newlineWriter struct{ w io.Writer }
+
+func (n newlineWriter) Write(p []byte) (int, error) {
+	if _, err := n.w.Write(append(append([]byte(nil), p...), '\n')); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
 // newEmitterWithWriter is NewEmitter for tests: injects w directly instead
 // of dialing a real syslog daemon.
 func newEmitterWithWriter(tag string, w writer) *Emitter {

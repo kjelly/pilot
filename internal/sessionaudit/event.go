@@ -17,7 +17,8 @@ import "time"
 // milestone (spec.md §21.2), correlated across Directory and Gateway by
 // SessionID — the whole point of Phase 6. Field shape matches the spec's
 // Go struct literal exactly; do not rename/reorder without updating the
-// spec doc too.
+// spec doc too. The trailing transport fields are specified separately in
+// docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md §11.2.
 type SessionAuditEvent struct {
 	SchemaVersion int       `json:"schema_version"`
 	EventID       string    `json:"event_id"`
@@ -48,6 +49,17 @@ type SessionAuditEvent struct {
 	// Auditor is the account that replayed or exported a recording
 	// (recording_replayed / recording_exported).
 	Auditor string `json:"auditor,omitempty"`
+
+	// Captive-transport fields (docs/superpowers/specs/2026-09-23-pilot-
+	// access-gateway-captive-ssh-transport-spec.md §11.2): additive and
+	// omitempty, so SchemaVersion stays 1 and every pre-existing event
+	// kind serializes exactly as before. Only metadata — an opaque
+	// transport never sees (and must never record) inner SSH content.
+	TargetIP            string `json:"target_ip,omitempty"`
+	BytesClientToTarget *int64 `json:"bytes_client_to_target,omitempty"`
+	BytesTargetToClient *int64 `json:"bytes_target_to_client,omitempty"`
+	DurationMS          *int64 `json:"duration_ms,omitempty"`
+	HostKeyCount        *int   `json:"host_key_count,omitempty"`
 }
 
 // SchemaVersion1 is the only schema version this package currently emits.
@@ -79,4 +91,18 @@ const (
 	// a stored recording (per-host recording spec §21.5/§22).
 	KindRecordingReplayed = "recording_replayed"
 	KindRecordingExported = "recording_exported"
+)
+
+// Captive SSH transport kinds (pilot-transport-v1 / pilot-known-hosts-v1,
+// captive-transport spec §11.1). Result carries the stable reason class
+// (e.g. "authorize_denied", "dns", "ok") — never free-form error text
+// that might leak inner-session detail.
+const (
+	KindGatewayTransportRequested = "gateway_transport_requested"
+	KindGatewayTransportDenied    = "gateway_transport_denied"
+	KindGatewayTransportFailed    = "gateway_transport_failed"
+	KindGatewayTransportConnected = "gateway_transport_connected"
+	KindGatewayTransportClosed    = "gateway_transport_closed"
+	KindGatewayKnownHostsServed   = "gateway_known_hosts_served"
+	KindGatewayKnownHostsDenied   = "gateway_known_hosts_denied"
 )

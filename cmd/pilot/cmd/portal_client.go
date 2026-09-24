@@ -109,3 +109,13 @@ func (c *portalClient) ConnectAuthorize(ctx context.Context, target, sessionID s
 	err := c.postJSON(ctx, "/v1/connect/authorize", gatewayapi.ConnectAuthorizeRequest{Target: target, SessionID: sessionID}, &resp)
 	return resp, err
 }
+
+// TransportHostKeys is POST /v1/transport/host-keys — the target's
+// FreeIPA-published SSH host keys, returned only when the same fresh
+// authorize + transport gate as ConnectAuthorize allows a transport to it
+// (captive-transport spec §8.3/§8.5).
+func (c *portalClient) TransportHostKeys(ctx context.Context, target string) (gatewayapi.TransportHostKeysResponse, error) {
+	var resp gatewayapi.TransportHostKeysResponse
+	err := c.postJSON(ctx, "/v1/transport/host-keys", gatewayapi.TransportHostKeysRequest{Target: target}, &resp)
+	return resp, err
+}

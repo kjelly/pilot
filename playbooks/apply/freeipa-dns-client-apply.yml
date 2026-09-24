@@ -102,4 +102,11 @@
   tasks:
     - name: "Apply the FreeIPA DNS resolver baseline to this host"
       tags: [C1, C3, C4, C5, C6]
-      ansible.builtin.include_tasks: tasks/freeipa-dns-client-resolver.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-dns-client-resolver.yml
+        # Tags on a dynamic include_tasks select only the include itself;
+        # the tasks it pulls in do not inherit them (AGENTS.md §4.5 point 8).
+        # Without `apply`, `--tags C3` ran this include and then skipped
+        # every resolver task, with no error.
+        apply:
+          tags: [C1, C3, C4, C5, C6]

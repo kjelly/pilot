@@ -181,9 +181,10 @@ func parseHost(m map[string]any) Host {
 		policy = HostRecordingPolicy{Unreadable: true, Reason: "userclass_unreadable"}
 	}
 	return Host{
-		FQDN:         attrString(m, "fqdn"),
-		Annotations:  parseAnnotations(userClass),
-		SSHRecording: policy,
+		FQDN:          attrString(m, "fqdn"),
+		Annotations:   parseAnnotations(userClass),
+		SSHRecording:  policy,
+		SSHPublicKeys: attrStrings(m, "ipasshpubkey"),
 	}
 }
 

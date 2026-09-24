@@ -1,0 +1,472 @@
+# Apply playbook for docs/verification/pilot-access-target-policy.md
+# (docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md §13).
+#
+# Target-side half of the Pilot Access Gateway captive SSH transport. On
+# every host in this group it:
+#
+#   1. installs /etc/ssh/sshd_config.d/06-pilot-access-target-policy.conf, a
+#      `Match Address <gateway addresses>` block that — for EVERY session
+#      arriving from a Pilot Access Gateway, whatever inner username it
+#      authenticates as — refuses sshd's own forwarding channels: remote
+#      TCP/StreamLocal forwarding, agent, X11, tun, and local TCP forwarding
+#      (strict profile) or local forwarding to anything but the target's
+#      own loopback (remote-dev profile, for VS Code Remote-SSH). Matching
+#      on the gateway ADDRESS rather than a user group is deliberate: an
+#      opaque transport cannot enforce the inner SSH username, so a
+#      group-keyed Match would be bypassed by any account outside the group
+#      (spec D7). Sessions from any other address are left exactly as they
+#      were (verified on every run, TP05).
+#   2. only after that policy validated and took effect, adds the host to
+#      the FreeIPA hostgroup pilot-transport-ready — the gateway opens a
+#      transport only to members of that hostgroup (spec D5), so "reachable
+#      by transport" can never get ahead of "forwarding restricted".
+#
+# pilot_access_target_policy_state=absent reverses it in the safe order:
+# leave pilot-transport-ready FIRST, then remove the drop-in.
+#
+# Limits (spec §5.2, stated honestly): sshd forwarding settings do not stop
+# a user who has a shell on the target from building their own tunnel over
+# the session's stdio, and none of this is L3 network isolation — target
+# egress policy is the operator's (spec §5.3).
+#
+# Usage (vm-target / real host alike; secrets only from vault):
+#
+#   ansible-playbook -i <inventory> playbooks/apply/pilot-access-target-policy-apply.yml \
+#       -e '{"pilot_access_target_gateway_addresses": ["192.0.2.10"]}' \
+#       -e pilot_access_target_forwarding_profile=strict \
+#       -e @~/.vault/<site>.yaml
+---
+- name: Pilot Access target policy (captive SSH transport)
+  hosts: "{{ target_group | default('pilot-access-target-policy') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    # Optional groupVars get _effective_ names (same inventory-shadowing rule
+    # as pilot-access-gateway-apply.yml). pilot_access_target_gateway_addresses
+    # is required with no default and is deliberately NOT declared here, so
+    # inventory group_vars/host_vars can supply it.
+    pilot_access_target_effective_policy_state: "{{ pilot_access_target_policy_state | default('present', true) }}"
+    pilot_access_target_effective_forwarding_profile: "{{ pilot_access_target_forwarding_profile | default('strict', true) }}"
+
+    pilot_access_target_dropin: /etc/ssh/sshd_config.d/06-pilot-access-target-policy.conf
+    pilot_access_target_dropin_backup: /etc/ssh/sshd_config.d/06-pilot-access-target-policy.conf.pre-pilot-access-target-policy.bak
+    # Must stay byte-identical to internal/gatewayapi.TransportReadyHostgroup
+    # (internal/spec/pilot_access_target_policy_regression_test.go locks it).
+    pilot_access_target_ready_hostgroup: pilot-transport-ready
+    # TEST-NET-1: never a gateway, used to prove non-gateway sessions are
+    # unaffected (TP05). The pre_tasks refuse it as a gateway address.
+    pilot_access_target_testnet_addr: 192.0.2.1
+    pilot_access_target_sshd_service: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+
+    # Effective `sshd -T -C` lines each profile must produce for a gateway
+    # address (captured live, docs/evidence/pilot-access-gateway/2026-09-23-ad6d552.md §3).
+    pilot_access_target_expected_common:
+      - allowstreamlocalforwarding no
+      - permitlisten none
+      - gatewayports no
+      - allowagentforwarding no
+      - x11forwarding no
+      - permittunnel no
+    pilot_access_target_expected_profile:
+      strict:
+        - allowtcpforwarding no
+        - permitopen none
+      remote-dev:
+        - allowtcpforwarding local
+        - permitopen localhost:* 127.0.0.1:* [::1]:*
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+      when: stage == 'prod'
+      tags: [always]
+
+    # A gateway/directory host runs its own ForceCommand Match block for the
+    # portal group; layering this policy on top would make first-match
+    # ordering between the two a correctness question. contracts/ also
+    # declares the conflict.
+    - name: "Gate: never on a Pilot Access Gateway or Directory host"
+      ansible.builtin.assert:
+        that:
+          - "'pilot-access-gateway' not in group_names"
+          - "'pilot-access-directory' not in group_names"
+        fail_msg: "{{ inventory_hostname }} is a pilot-access-gateway/directory host; pilot-access-target-policy belongs on transport targets only."
+      tags: [always]
+
+    - name: "Gate: policy inputs are valid (fail before touching sshd)"
+      ansible.builtin.assert:
+        that:
+          - pilot_access_target_effective_policy_state in ['present', 'absent']
+          - pilot_access_target_effective_forwarding_profile in pilot_access_target_expected_profile
+          - ipa_admin_password is defined and ipa_admin_password | length > 0
+        fail_msg: >-
+          pilot_access_target_policy_state must be present|absent (got
+          {{ pilot_access_target_effective_policy_state }}),
+          pilot_access_target_forwarding_profile must be strict|remote-dev (got
+          {{ pilot_access_target_effective_forwarding_profile }}), and
+          ipa_admin_password must come from the vault.
+      tags: [always]
+
+    - name: "Gate: gateway addresses are single IP addresses (present only)"
+      ansible.builtin.assert:
+        that:
+          - pilot_access_target_gateway_addresses is defined
+          - pilot_access_target_gateway_addresses is sequence
+          - pilot_access_target_gateway_addresses is not string
+          - pilot_access_target_gateway_addresses | length > 0
+          - (pilot_access_target_gateway_addresses | reject('match', '^[0-9A-Fa-f:.]+$') | list | length) == 0
+          - (pilot_access_target_gateway_addresses | select('in', ['0.0.0.0', '::', pilot_access_target_testnet_addr]) | list | length) == 0
+        fail_msg: >-
+          pilot_access_target_gateway_addresses must be a non-empty list of
+          the gateways' single source IP addresses (no CIDR, wildcard,
+          hostname, 0.0.0.0, :: or {{ pilot_access_target_testnet_addr }});
+          got {{ pilot_access_target_gateway_addresses | default('(unset)') }}.
+          Pass it as JSON, e.g. -e '{"pilot_access_target_gateway_addresses": ["192.0.2.10"]}'.
+      when: pilot_access_target_effective_policy_state == 'present'
+      tags: [always]
+
+    - name: "Check FreeIPA enrollment"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: pilot_access_target_ipa_default_conf_stat
+      tags: [always]
+
+    # A check-mode preview of a fresh host whose freeipa-client play runs
+    # earlier in the same run has only simulated enrollment; only that case
+    # passes without default.conf (same rule as pilot-access-gateway-apply.yml
+    # Step 2). Real runs fail closed.
+    - name: "Gate: this host is FreeIPA-enrolled"
+      ansible.builtin.assert:
+        that:
+          - >-
+            pilot_access_target_ipa_default_conf_stat.stat.exists
+            or (ansible_check_mode and 'freeipa-client' in group_names)
+        fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
+      tags: [always]
+
+    - name: "Read this host's FreeIPA client configuration"
+      ansible.builtin.slurp:
+        src: /etc/ipa/default.conf
+      register: pilot_access_target_ipa_default_conf
+      when: pilot_access_target_ipa_default_conf_stat.stat.exists
+      tags: [always]
+
+    # The FQDN FreeIPA enrolled this host under — the name the gateway's
+    # scope and pilot-transport-ready membership are keyed on (ansible_fqdn
+    # only stands in during a pre-enrollment check-mode preview, where no
+    # FreeIPA call is made).
+    - name: "Resolve this host's FreeIPA FQDN"
+      ansible.builtin.set_fact:
+        pilot_access_target_fqdn: >-
+          {{ ((pilot_access_target_ipa_default_conf.content | b64decode
+               | regex_search('(?m)^host\s*=\s*(\S+)\s*$', '\1') | first)
+              if pilot_access_target_ipa_default_conf_stat.stat.exists else ansible_fqdn) | lower }}
+      tags: [always]
+
+  tasks:
+    # ---- present ---------------------------------------------------------
+    - name: "Target policy — present"
+      when: pilot_access_target_effective_policy_state == 'present'
+      tags: [pilot-access-target-policy]
+      block:
+        - name: "TP05 baseline: effective sshd settings for a non-gateway address"
+          ansible.builtin.command:
+            argv: [sshd, -T, -C, "user=root,host=pilot-baseline,addr={{ pilot_access_target_testnet_addr }}"]
+          register: pilot_access_target_baseline_testnet
+          changed_when: false
+          check_mode: false
+          tags: [TP05]
+
+        - name: "TP05 baseline: global effective sshd settings"
+          ansible.builtin.command:
+            argv: [sshd, -T]
+          register: pilot_access_target_baseline_global
+          changed_when: false
+          check_mode: false
+          tags: [TP05]
+
+        - name: "Read the currently installed policy drop-in (if any)"
+          ansible.builtin.stat:
+            path: "{{ pilot_access_target_dropin }}"
+          register: pilot_access_target_dropin_stat
+          tags: [TP01]
+
+        - name: "Read the currently installed policy drop-in content"
+          ansible.builtin.slurp:
+            src: "{{ pilot_access_target_dropin }}"
+          register: pilot_access_target_dropin_existing_raw
+          when: pilot_access_target_dropin_stat.stat.exists
+          tags: [TP01]
+
+        - name: "Render the policy drop-in"
+          ansible.builtin.set_fact:
+            pilot_access_target_dropin_existing: >-
+              {{ (pilot_access_target_dropin_existing_raw.content | b64decode)
+                 if pilot_access_target_dropin_stat.stat.exists else '' }}
+            pilot_access_target_dropin_content: |
+              # Managed by pilot-access-target-policy-apply.yml — do not edit by hand.
+              # pilot-access-target-policy profile: {{ pilot_access_target_effective_forwarding_profile }}
+              Match Address {{ pilot_access_target_gateway_addresses | join(',') }}
+                  AllowTcpForwarding {{ 'no' if pilot_access_target_effective_forwarding_profile == 'strict' else 'local' }}
+                  AllowStreamLocalForwarding no
+                  PermitOpen {{ 'none' if pilot_access_target_effective_forwarding_profile == 'strict' else 'localhost:* 127.0.0.1:* [::1]:*' }}
+                  PermitListen none
+                  GatewayPorts no
+                  AllowAgentForwarding no
+                  X11Forwarding no
+                  PermitTunnel no
+          tags: [TP01]
+
+        - name: "Install the policy (validated, reverted on any failure)"
+          block:
+            # Snapshot only when the drop-in is about to change, so a rerun
+            # stays changed=0 (AGENTS.md §4: snapshot before mutating /etc).
+            - name: "Snapshot the previous drop-in before replacing it"
+              ansible.builtin.copy:
+                dest: "{{ pilot_access_target_dropin_backup }}"
+                content: "{{ pilot_access_target_dropin_existing }}"
+                owner: root
+                group: root
+                mode: "0600"
+              when:
+                - pilot_access_target_dropin_stat.stat.exists
+                - pilot_access_target_dropin_existing != pilot_access_target_dropin_content
+              tags: [TP01]
+
+            - name: "TP01: install the policy drop-in (sshd -t -f validates it first)"
+              ansible.builtin.copy:
+                dest: "{{ pilot_access_target_dropin }}"
+                content: "{{ pilot_access_target_dropin_content }}"
+                owner: root
+                group: root
+                mode: "0644"
+                validate: /usr/sbin/sshd -t -f %s
+              register: pilot_access_target_dropin_write
+              tags: [TP01]
+
+            - name: "TP02: full sshd configuration is valid"
+              ansible.builtin.command:
+                argv: [sshd, -t]
+              changed_when: false
+              when: not ansible_check_mode
+              tags: [TP02]
+
+            - name: "TP03/TP04: effective sshd settings for each gateway address"
+              ansible.builtin.command:
+                argv: [sshd, -T, -C, "user=root,host=pilot-gateway,addr={{ item }}"]
+              loop: "{{ pilot_access_target_gateway_addresses }}"
+              register: pilot_access_target_effective
+              changed_when: false
+              when: not ansible_check_mode
+              tags: [TP03, TP04]
+
+            - name: "TP03/TP04: gateway-originated sessions get exactly the profile's restrictions"
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    ((pilot_access_target_expected_common
+                      + pilot_access_target_expected_profile[pilot_access_target_effective_forwarding_profile])
+                     | difference(item.stdout_lines)) | length == 0
+                fail_msg: >-
+                  sshd -T for gateway address {{ item.item }} is missing
+                  {{ (pilot_access_target_expected_common
+                      + pilot_access_target_expected_profile[pilot_access_target_effective_forwarding_profile])
+                     | difference(item.stdout_lines) }}
+                quiet: true
+              loop: "{{ pilot_access_target_effective.results }}"
+              loop_control:
+                label: "{{ item.item }}"
+              when: not ansible_check_mode
+              tags: [TP03, TP04]
+
+            - name: "TP05: effective sshd settings for a non-gateway address after the change"
+              ansible.builtin.command:
+                argv: [sshd, -T, -C, "user=root,host=pilot-baseline,addr={{ pilot_access_target_testnet_addr }}"]
+              register: pilot_access_target_after_testnet
+              changed_when: false
+              when: not ansible_check_mode
+              tags: [TP05]
+
+            - name: "TP05: global effective sshd settings after the change"
+              ansible.builtin.command:
+                argv: [sshd, -T]
+              register: pilot_access_target_after_global
+              changed_when: false
+              when: not ansible_check_mode
+              tags: [TP05]
+
+            # Byte-for-byte equality proves the Match block neither applies
+            # to non-gateway sessions nor leaks into later configuration.
+            - name: "TP05: non-gateway sessions and global settings are unchanged"
+              ansible.builtin.assert:
+                that:
+                  - pilot_access_target_after_testnet.stdout == pilot_access_target_baseline_testnet.stdout
+                  - pilot_access_target_after_global.stdout == pilot_access_target_baseline_global.stdout
+                fail_msg: >-
+                  Installing the policy changed sshd's effective settings for a
+                  non-gateway address or globally — refusing to keep it.
+                quiet: true
+              when: not ansible_check_mode
+              tags: [TP05]
+
+            - name: "Reload sshd so new sessions get the policy"
+              ansible.builtin.systemd:
+                name: "{{ pilot_access_target_sshd_service }}"
+                state: reloaded
+              when: pilot_access_target_dropin_write is changed and not ansible_check_mode
+              tags: [TP01]
+
+            - name: "TP02: sshd configuration is still valid after the reload"
+              ansible.builtin.command:
+                argv: [sshd, -t]
+              changed_when: false
+              when: not ansible_check_mode
+              tags: [TP02]
+          rescue:
+            - name: "Rollback: restore the previous drop-in"
+              ansible.builtin.copy:
+                dest: "{{ pilot_access_target_dropin }}"
+                content: "{{ pilot_access_target_dropin_existing }}"
+                owner: root
+                group: root
+                mode: "0644"
+              when: pilot_access_target_dropin_stat.stat.exists
+
+            - name: "Rollback: remove the new drop-in (there was none before)"
+              ansible.builtin.file:
+                path: "{{ pilot_access_target_dropin }}"
+                state: absent
+              when: not pilot_access_target_dropin_stat.stat.exists
+
+            - name: "Rollback: sshd configuration is valid again"
+              ansible.builtin.command:
+                argv: [sshd, -t]
+              changed_when: false
+
+            - name: "Rollback: reload sshd"
+              ansible.builtin.systemd:
+                name: "{{ pilot_access_target_sshd_service }}"
+                state: reloaded
+
+            - name: "Rollback: fail the play"
+              ansible.builtin.fail:
+                msg: >-
+                  pilot-access-target-policy was NOT applied to {{ inventory_hostname }}
+                  and the previous sshd drop-in state was restored. See the failed
+                  task above ({{ ansible_failed_task.name | default('?') }}).
+
+        # Only after the policy is verified: make the host transport-ready.
+        - name: "Kinit admin (FreeIPA hostgroup membership only)"
+          ansible.builtin.command:
+            argv: [kinit, admin]
+            stdin: "{{ ipa_admin_password }}"
+          changed_when: false
+          no_log: true
+          when: not ansible_check_mode
+
+        - name: "Ensure the {{ pilot_access_target_ready_hostgroup }} hostgroup exists"
+          ansible.builtin.command:
+            argv: [ipa, hostgroup-add, "{{ pilot_access_target_ready_hostgroup }}", "--desc=Pilot captive SSH transport targets with a verified sshd forwarding policy"]
+          register: pilot_access_target_hostgroup_add
+          changed_when: "'Added hostgroup' in (pilot_access_target_hostgroup_add.stdout | default(''))"
+          failed_when:
+            - pilot_access_target_hostgroup_add.rc != 0
+            - "'already exists' not in (pilot_access_target_hostgroup_add.stderr | default(''))"
+          when: not ansible_check_mode
+
+        - name: "Add this host to {{ pilot_access_target_ready_hostgroup }}"
+          ansible.builtin.command:
+            argv: [ipa, hostgroup-add-member, "{{ pilot_access_target_ready_hostgroup }}", "--hosts={{ pilot_access_target_fqdn }}"]
+          register: pilot_access_target_member_add
+          changed_when: "'Number of members added 1' in (pilot_access_target_member_add.stdout | default(''))"
+          failed_when:
+            - pilot_access_target_member_add.rc != 0
+            - "'already a member' not in (pilot_access_target_member_add.stdout | default(''))"
+          when: not ansible_check_mode
+
+        - name: "Release the Kerberos ticket"
+          ansible.builtin.command: kdestroy
+          changed_when: false
+          failed_when: false
+          when: not ansible_check_mode
+
+    # ---- absent: leave pilot-transport-ready FIRST, then drop the policy --
+    - name: "Target policy — absent"
+      when: pilot_access_target_effective_policy_state == 'absent'
+      tags: [pilot-access-target-policy]
+      block:
+        - name: "Kinit admin (FreeIPA hostgroup membership only)"
+          ansible.builtin.command:
+            argv: [kinit, admin]
+            stdin: "{{ ipa_admin_password }}"
+          changed_when: false
+          no_log: true
+          when: not ansible_check_mode
+
+        # rc=1 "This entry is not a member" and rc=2 "host group not found"
+        # both mean "already not transport-ready" (real output: Phase 0
+        # evidence §4).
+        - name: "Remove this host from {{ pilot_access_target_ready_hostgroup }}"
+          ansible.builtin.command:
+            argv: [ipa, hostgroup-remove-member, "{{ pilot_access_target_ready_hostgroup }}", "--hosts={{ pilot_access_target_fqdn }}"]
+          register: pilot_access_target_member_remove
+          changed_when: "'Number of members removed 1' in (pilot_access_target_member_remove.stdout | default(''))"
+          failed_when:
+            - pilot_access_target_member_remove.rc != 0
+            - "'is not a member' not in (pilot_access_target_member_remove.stdout | default(''))"
+            - "'host group not found' not in (pilot_access_target_member_remove.stderr | default(''))"
+          when: not ansible_check_mode
+
+        - name: "Release the Kerberos ticket"
+          ansible.builtin.command: kdestroy
+          changed_when: false
+          failed_when: false
+          when: not ansible_check_mode
+
+        - name: "Remove the policy drop-in"
+          ansible.builtin.file:
+            path: "{{ pilot_access_target_dropin }}"
+            state: absent
+          register: pilot_access_target_dropin_removed
+
+        - name: "Remove the pre-change snapshot"
+          ansible.builtin.file:
+            path: "{{ pilot_access_target_dropin_backup }}"
+            state: absent
+
+        - name: "sshd configuration is valid without the policy"
+          ansible.builtin.command:
+            argv: [sshd, -t]
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Reload sshd after removing the policy"
+          ansible.builtin.systemd:
+            name: "{{ pilot_access_target_sshd_service }}"
+            state: reloaded
+          when: pilot_access_target_dropin_removed is changed and not ansible_check_mode

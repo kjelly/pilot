@@ -216,3 +216,27 @@ func TestLoadConfig_MetricsTextfilePath(t *testing.T) {
 		t.Fatalf("metrics path = %q, %v", cfg.MetricsTextfilePath(), err)
 	}
 }
+
+// TestLoadConfigTransport is captive-transport spec AG59: a config without
+// a transport: block (every config written before the feature) loads with
+// transport disabled, enabled: true round-trips, and an unknown key under
+// transport: is rejected like any other unknown field.
+func TestLoadConfigTransport(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Gateway.Transport.Enabled {
+		t.Fatalf("transport must default to disabled when the block is absent")
+	}
+	cfg, err = Load(writeConfig(t, validConfig+"  transport:\n    enabled: true\n"))
+	if err != nil {
+		t.Fatalf("Load(enabled): %v", err)
+	}
+	if !cfg.Gateway.Transport.Enabled {
+		t.Fatalf("transport.enabled: true did not round-trip")
+	}
+	if _, err := Load(writeConfig(t, validConfig+"  transport:\n    enabled: true\n    port: 2222\n")); err == nil {
+		t.Fatalf("expected an unknown transport field (port) to be rejected")
+	}
+}

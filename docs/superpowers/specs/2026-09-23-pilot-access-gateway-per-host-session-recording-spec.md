@@ -889,6 +889,13 @@ DELIVERY.md 在 §1.6（`deployment_availability`）之後新增一節，說明 
 
 ## 27. Gateway / Store 部署（playbooks + contracts，修正 F5）
 
+> **2026-09-24 與 captive transport 合併後的現況**（`docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md` §12.2）：
+> gateway 的錄影變數改用 `pilot_access_gateway_recording_*` 命名——`_mode`（仍無預設值）、`_failure_policy`（預設 `fail_closed`）、
+> `_queue_events`、`_flush_interval`、`_failure_grace`、`_max_session_duration`、`_session_store_url`、`_session_store_ca_file`，
+> 並保留 captive transport 的降級守門 `_allow_downgrade`。`pilot_session_store_ingest_signing_key` 名稱不變；captive transport
+> 原本的靜態 `_session_store_ingest_token_file` 由本 spec 的 per-session PIT1 token 取代。本 spec 的 gateway verification rows
+> 重新編號為 AG81–AG96（原 AG42–AG57，+39），原 AG41 併入 captive transport 的 AG41。下文保留原始命名作為設計紀錄。
+
 ### 27.1 `playbooks/apply/pilot-access-gateway-apply.yml`
 
 - vars 預設：`pilot_session_recording_failure_policy: fail_closed`、`pilot_session_recording_queue_events: 1024`、`pilot_session_recording_flush_interval: 500ms`、`pilot_session_recording_failure_grace: 10s`、`pilot_session_recording_max_session_duration: 24h`、`pilot_session_store_url: ""`、`pilot_session_store_ca_file: /etc/ipa/ca.crt`。

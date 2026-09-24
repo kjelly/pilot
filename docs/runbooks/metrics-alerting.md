@@ -857,6 +857,96 @@ row——C8/C9 只驗 Teams proxy 本身,不驗 agent-controller mirror receiver
 
 ---
 
+## 7e. hosts.yml annotations → node/DCGM target labels（opt-in，2026-09-23）
+
+### 背景
+
+`hosts.yml` 的 `annotations`（`location`/`project`/`owner`...）已經以
+`pilot_annotations` 進 generated inventory。`prometheus_host_annotation_labels`
+讓 operator 以 **allowlist** 把其中穩定的欄位複製成 node/DCGM auto-discovery
+target 的 Prometheus labels，Grafana/PromQL 就能直接依這些維度分群。設計見
+`docs/superpowers/specs/2026-09-23-host-annotations-prometheus-labels-spec.md`，
+驗收見 `docs/verification/prometheus-host-metadata.md`。
+
+### 事實快照（2026-09-23，candidate `8fafdc6`）
+
+- 目標：兩台 disposable vm-target（`meta-prom`：docker + prometheus +
+  host-monitoring；`meta-node`：host-monitoring + dcgm-exporter group），
+  inventory 由 `pilot inventory generate` 從 `hosts.yml` 產生，mapping 寫在
+  generated `group_vars/prometheus.yml`。測完已 teardown。
+- `pilot verify docs/verification/prometheus-host-metadata.md` →
+  **PASS pass=10 fail=0 skip=0**；fresh apply `changed=11`、重跑 `changed=0`；
+  invalid mapping 三種皆在任何 mutation 前 fail；移除 mapping 後 `prometheus.md`
+  C13–C16/C18 PASS。
+- 完整摘要：`docs/evidence/prometheus-host-metadata/2026-09-23-8fafdc6.md`。
+
+### 啟用
+
+1. 主機註解本身：`pilot edit` → `hosts.yml` → 選主機 → `註解 / 資產資訊`，存檔後
+   `pilot inventory generate` 重新產生 inventory（`pilot_annotations` 由此而來）。
+2. 要 promotion 哪些註解：`pilot edit` → `Prometheus 主機註解 labels`。清單會列出
+   `hosts.yml` 已用到的註解 key，label 名稱預設 `pilot_<key>`；每次新增/修改/刪除都
+   會用跟 playbook gate 相同的規則檢查後立即寫入 `group_vars/prometheus.yml`（只動
+   這個 key 的區塊）。可腳本化：`pilot edit --actions`，action
+   `set_prometheus_annotation_label`（`key`、`value`=label）/
+   `delete_prometheus_annotation_label`（`key`）。
+
+寫出的內容等同於在 `group_vars/prometheus.yml` 手寫（不要寫進 playbook、也不需要 `-e`）：
+
+```yaml
+prometheus_host_annotation_labels:
+  location: pilot_location
+  project: pilot_project
+  owner: pilot_owner
+```
+
+照常 apply `playbooks/apply/prometheus-apply.yml`。rendered target（實測輸出節錄）：
+
+```yaml
+  - labels:
+      pilot_host: meta-node
+      pilot_location: DC1/Rack-A03/U18
+      pilot_owner: ai-platform
+      pilot_project: llm-training
+    targets:
+    - 192.168.122.3:9100
+```
+
+沒有該 annotation 的主機就沒有該 label（不會 render 空字串）；未列進 mapping 的
+annotation（例如 `note`）不會進 metrics。明確填了 `node_exporter_targets`/
+`dcgm_exporter_targets` 的 override 不會帶 metadata。
+
+### Grafana / PromQL
+
+```promql
+label_values(up{job="node"}, pilot_project)
+label_values(up{job="node", pilot_project=~"$project"}, pilot_location)
+avg by (pilot_project) (rate(node_cpu_seconds_total{job="node", mode!="idle"}[5m]))
+```
+
+### 上線前必讀
+
+- **Label churn**：改 mapping 或改某台的 annotation 值，會讓該 host 所有 series 換
+  label set。實測（L9）：`project` 改成 `project-b` 後，舊 `llm-training` series
+  停止收 sample、新 series 開始，兩者在 lookback/retention 內並存——這是
+  Prometheus 語意，不是 bug。只 promotion 低變動欄位。
+- **告警**：seed rule `HostDown`（`up != 1`）保留全部 target labels，所以啟用或改
+  mapping 可能讓正在 firing 的告警換 Alertmanager fingerprint；promoted labels 也會
+  出現在 Teams 通知內容。避開有重要告警 firing 的時段。
+- **可見性**：被 promotion 的值會出現在 Prometheus/Thanos/Grafana/Alertmanager，
+  不只存在本機 inventory。
+- **錯誤 mapping**：source key 像 secret、destination 不是 `pilot_*`、用到
+  `pilot_host` 等保留名、兩個 key 對到同一 label，apply 會在任何 mutation 前 fail，
+  錯誤訊息只列 key/label 名稱。
+
+### Rollback
+
+從 `group_vars/prometheus.yml` 移除 `prometheus_host_annotation_labels`（或設成
+`{}`）再 apply。實測：config 只剩 `pilot_host`、重跑 `changed=0`；舊 metadata series
+依 TSDB retention 自然消退。不需要動 `hosts.yml` annotations、FreeIPA 或 exporter。
+
+---
+
 ## 8. 各角色 Verify / Idempotency 總表
 
 | 角色 | target | verify | 冪等重跑 |
@@ -871,6 +961,7 @@ row——C8/C9 只驗 Teams proxy 本身,不驗 agent-controller mirror receiver
 | `thanos-query`（+ `pilot_host`/`site` real chain，§7b） | nexus + prom-test | pass=9 fail=1（C8，跟本次改動無關；C9/C10 全 pass，見 §7b） | changed=0 |
 | `alertmanager`（null 模式 + teams proxy 不存在，§7c） | am-teams-proxy | PASS pass=9 fail=0 skip=0 | changed=0 |
 | `alertmanager`（teams 模式 + proxy running，§7c） | am-teams-proxy | PASS pass=9 fail=0 skip=0 | changed=0 |
+| `prometheus`（+ host annotations → target labels，§7e） | meta-prom + meta-node | `prometheus-host-metadata.md` PASS pass=10 fail=0 skip=0；移除 mapping 後 `prometheus.md` pass=15 fail=4（C9/C11/C17/C19 拓樸例外） | changed=0 |
 
 三份原始 spec 全數 PASS；`host-monitoring` 兩種 distro 皆 PASS；`prometheus`
 的 node-exporter 整合相關 rows（C13/C14）皆 PASS。所有 apply 的第二次
@@ -928,3 +1019,5 @@ go run ./cmd/pilot vm-target list   # 確認為空
 | 2026-08-28 | v2.2 | 新增 §7b：Detection Engine Stage A-0（`docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §9/§51）——`prometheus-apply.yml` 的 node-exporter auto-discovery 改成逐 host render `labels.pilot_host = inventory_hostname`，並修正 `contracts/thanos-query.yaml` 的 `query` endpoint port（10902→10912，跟 §7a/§9 同一類、但這次是 contract 檔沒跟上）。3 台新 vm-target 實測全鏈路：`prom-test` 的 `prometheus.yml` 正確渲染 `pilot_host: hm-ubuntu`（新增 spec row C15 PASS），真實中央 Thanos Query `:10912` 的 `/api/v1/query?query=up` 回傳結果同時帶 `pilot_host=hm-ubuntu` 與 `site=test-site`（`thanos-query.md` C9/C10 PASS）。兩份 apply 冪等重跑皆 `changed=0`。實跑中踩到一個操作性坑（非 playbook bug）：`nexus` 忘了先套用 `docker-apply.yml` 就直接跑 `thanos-query-apply.yml`，`Ensure docker network pilot-metrics exists` 失敗，playbook 自己的 rollback 正確清掉 objstore secret 檔 | sre |
 | 2026-09-08 | v2.3 | 新增 §7c：`pilot-alertmanager-teams-proxy`——正式環境 teams 測試訊息在 Power Automate flowbot 端必現 `Property 'type' must be 'AdaptiveCard'`，根因是 `webhook_configs` 只送 Alertmanager 自己固定的 JSON envelope，從來不是 Adaptive Card（`msteams_configs` 也不行，送的是舊版 `MessageCard`）。新增 stdlib-only Python 轉換 proxy，跟 `alertmanager` role 同一支 apply playbook、同一個 `pilot-metrics` network 安裝，只在 `alertmanager_receiver_mode=teams` 時存在；spec 升到 v1.4（新增 C8/C9）。1 台新 vm-target 實測 null/teams 兩種模式的 apply/verify/冪等重跑皆綠，並實際端到端證明 Alertmanager 真的呼叫 proxy、proxy 真的轉換+轉發+把下游狀態碼原樣傳回（`https://httpbin.org/post` 作為安全的假 Teams 端點，不觸碰正式簽章密鑰）。實跑中發現並修好一個真 bug：receiver-mode 三態切換的「預設 null 模式」`set_fact` 成 YAML `null` 而非字串 `"null"`，導致不帶任何 `-e` 的預設路徑在全新主機上必掛 gate assert | sre |
 | 2026-09-08 | v2.4 | 新增 §7d：commit 前 review 抓到 `alertmanager_forward_to_agent_controller` mirror（§7c 從未實測過的路徑）把 secret/URL 手寫內插進 YAML 字串、沒有跳脫；本機 Ansible 引擎重現＋新建 1 台 vm-target（`am-mirror-test`，事後已 teardown）端到端重現：secret 含特殊字元時容器真的 crash-loop（`yaml: ... did not find expected key`），改用 `\| to_json` 修好後重跑 `PLAY RECAP failed=0`、容器健康、渲染內容逐字元正確。同批也修正 `cmd/pilot/cmd` 因新增 Alertmanager 頂層選單項而位移、被新增前 top-menu 索引悄悄弄壞的 14 個既有 teatest/PTY 測試（`git stash` 驗證：這些測試在 main 上全綠，在本次工作樹上因索引位移而逾時失敗），以及兩個過期的 action 數量 golden test（105→106） | sre |
+| 2026-09-23 | v2.5 | 新增 §7e：`prometheus_host_annotation_labels`（hosts.yml annotations → node/DCGM target labels，opt-in），兩台 vm-target 實測（generated inventory 路徑、fail-closed、L9 churn、rollback）；順手修好 `delegate_to` 對「存在但為空」的 `seaweedfs-s3` group 直接崩潰的既有 bug（prometheus/restic-backup/thanos-query） | pilot |
+| 2026-09-23 | v2.6 | §7e 啟用步驟改用 `pilot edit`「Prometheus 主機註解 labels」選單與 `set_/delete_prometheus_annotation_label` actions（不再需要手改 group_vars） | pilot |

@@ -41,6 +41,16 @@ type GatewaySection struct {
 	FreeIPA         FreeIPASection   `yaml:"freeipa"`
 	Recording       RecordingSection `yaml:"recording"`
 	Metrics         MetricsSection   `yaml:"metrics"`
+	Transport       TransportSection `yaml:"transport"`
+}
+
+// TransportSection configures the captive opaque SSH transport
+// (`pilot-transport-v1`, docs/superpowers/specs/2026-09-23-pilot-access-
+// gateway-captive-ssh-transport-spec.md §12.1). A config without a
+// transport: block — every config written before this feature — gets
+// Enabled == false, so upgrading never silently opens a new data plane.
+type TransportSection struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // MetricsSection configures the node_exporter textfile the gateway writes

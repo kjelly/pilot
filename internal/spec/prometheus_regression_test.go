@@ -422,7 +422,10 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 	if !strings.Contains(applyRaw, "groups.get('host-monitoring', []) | sort") {
 		t.Errorf("prometheus-apply.yml must sort host-monitoring hosts ASC before building per-host pilot_host static_configs (spec §9.2 determinism)")
 	}
-	if !strings.Contains(applyRaw, "'labels': {'pilot_host': item}") {
+	// Since the host-annotations → target-labels feature the labels come
+	// from one shared per-host builder that always starts from
+	// {'pilot_host': item} (see prometheus_host_metadata_regression_test.go).
+	if !strings.Contains(applyRaw, "({'pilot_host': item}") || !strings.Contains(applyRaw, "'labels': _pilot_prometheus_host_labels[item]") {
 		t.Errorf("prometheus-apply.yml must label each auto-discovered static_configs entry with labels.pilot_host = inventory_hostname (spec §9.2)")
 	}
 

@@ -1,6 +1,7 @@
 package gatewayapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -17,6 +18,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/access", s.handleAccess)
 	mux.HandleFunc("GET /v1/access/{fqdn}", s.handleAccessHost)
 	mux.HandleFunc("POST /v1/connect/authorize", s.handleConnectAuthorize)
+	mux.HandleFunc("POST /v1/transport/host-keys", s.handleTransportHostKeys)
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 	return mux
 }
@@ -80,8 +82,7 @@ func (s *Server) handleAccessHost(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleConnectAuthorize is POST /v1/connect/authorize (spec.md §22.4): a
-// fresh, full resolve on every call (spec.md §16 — "Connect 每次 fresh
-// authorize"; this package does not cache LoadUserAccess at all yet, so
+// fresh, per-request authorization decision (no cache, so resolver
 // staleness cannot occur by construction). FreeIPA/resolve failure denies
 // rather than erroring the connect decision (spec.md §16/§34).
 //
@@ -100,51 +101,27 @@ func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	target := accessportal.CanonicalizeFQDN(req.Target)
-	resp := ConnectAuthorizeResponse{
-		Target: target, Username: peer.Username,
-		GatewayID: s.Gateway.ID, GatewayScope: s.Gateway.Scope,
-		CheckedAt: time.Now().UTC(),
-	}
-	access, err := s.Resolver.LoadUserAccess(r.Context(), peer.Username)
-	if err != nil {
-		s.Logger.Error("connect authorize: resolve failed, denying", "user", peer.Username, "target", target, "error", err)
-		s.Metrics.authorizeDenied(metricsReasonError)
-		writeJSON(w, http.StatusOK, resp) // Allowed stays false.
-		return
-	}
-	var host *accessportal.HostAccess
-	for i := range access.Hosts {
-		if access.Hosts[i].FQDN == target && access.Hosts[i].SSH.Allowed {
-			host = &access.Hosts[i]
-			break
-		}
-	}
-	if host == nil {
-		s.Metrics.authorizeDenied(metricsReasonAccessDenied)
-		writeJSON(w, http.StatusOK, resp) // HBAC/scope deny: Allowed stays false.
-		return
-	}
-
+	d := s.authorizeConnect(r.Context(), peer, req.Target)
+	resp := d.resp
 	deny := func(reason string) {
-		resp.DenyReason = reason
+		resp = d.denied(reason)
 		s.Metrics.authorizeDenied(reason)
-		s.Logger.Info("connect authorize denied", "user", peer.Username, "target", target,
-			"gateway_id", s.Gateway.ID, "reason_code", reason, "policy_reason", host.SSHRecording.Reason)
+		s.Logger.Info("connect authorize denied", "user", peer.Username, "target", resp.Target,
+			"gateway_id", s.Gateway.ID, "reason_code", reason, "policy_reason", d.policyReason)
 		writeJSON(w, http.StatusOK, resp)
 	}
-	mode, source, err := ResolveRecordingMode(s.RecordingPolicy.DefaultMode, host.SSHRecording)
 	switch {
-	case errors.Is(err, ErrRecordingPolicyUnknown):
-		deny(DenyReasonRecordingPolicyUnavailable)
+	case d.metricReason == metricsReasonError || d.metricReason == metricsReasonAccessDenied:
+		s.Metrics.authorizeDenied(d.metricReason)
+		writeJSON(w, http.StatusOK, resp) // Allowed stays false.
 		return
-	case err != nil:
-		deny(DenyReasonRecordingPolicyInvalid)
+	case d.metricReason != "":
+		deny(d.metricReason)
 		return
 	}
 
 	pol := s.RecordingPolicy
-	if isTerminalRecording(mode) {
+	if isTerminalRecording(resp.RecordingMode) {
 		if pol.SessionStoreURL == "" || pol.Signer == nil {
 			deny(DenyReasonRecordingBackend)
 			return
@@ -155,10 +132,10 @@ func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 		}
 		token, err := pol.Signer.Mint(ingesttoken.Claims{
 			SessionID: req.SessionID, User: peer.Username, Gateway: s.Gateway.ID, Scope: s.Gateway.Scope,
-			Target: target, Mode: mode, Source: source,
+			Target: resp.Target, Mode: resp.RecordingMode, Source: resp.RecordingPolicySource,
 		}, pol.MaxSessionDuration)
 		if err != nil {
-			s.Logger.Error("connect authorize: mint ingest token failed", "user", peer.Username, "target", target, "error", err)
+			s.Logger.Error("connect authorize: mint ingest token failed", "user", peer.Username, "target", resp.Target, "error", err)
 			deny(DenyReasonRecordingBackend)
 			return
 		}
@@ -170,14 +147,151 @@ func (s *Server) handleConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 		resp.RecordingSessionStoreCAFile = pol.SessionStoreCAFile
 		resp.RecordingSessionStoreIngestToken = token
 	}
+	s.Metrics.authorizeAllowed(resp.RecordingMode, resp.RecordingPolicySource)
+	writeJSON(w, http.StatusOK, resp)
+}
 
-	resp.Allowed = true
-	for _, rs := range host.SSH.Rules {
-		resp.Rules = append(resp.Rules, rs.Rule)
+// connectDecision is authorizeConnect's result. metricReason is "" when
+// the connect is allowed so far, metricsReasonError / metricsReasonAccessDenied
+// for a resolve failure / HBAC-scope deny, or a DenyReasonRecording* code
+// when the target's recording policy cannot be resolved.
+type connectDecision struct {
+	resp         ConnectAuthorizeResponse
+	metricReason string
+	policyReason string
+}
+
+// denied is the response for a connect refused after authorizeConnect let
+// it through (or for a recording-policy refusal): Allowed, rules, recording
+// and transport fields all back to zero, with reason as DenyReason.
+func (d connectDecision) denied(reason string) ConnectAuthorizeResponse {
+	r := d.resp
+	return ConnectAuthorizeResponse{
+		Target: r.Target, Username: r.Username, GatewayID: r.GatewayID, GatewayScope: r.GatewayScope,
+		CheckedAt: r.CheckedAt, DenyReason: reason,
 	}
-	resp.RecordingMode = mode
-	resp.RecordingPolicySource = source
-	s.Metrics.authorizeAllowed(mode, source)
+}
+
+// authorizeConnect is the one HBAC ∩ gateway-scope decision every connect
+// path shares — /v1/connect/authorize and /v1/transport/host-keys both
+// call it, so there is exactly one authorization semantics
+// (captive-transport spec §8.2), never a second ACL. It also resolves the
+// target's effective recording mode (per-host recording spec §4), which the
+// transport path's recording allowlist (captive-transport spec D8) reads.
+// It never mints an ingest token and never counts metrics: only the
+// connect path does.
+func (s *Server) authorizeConnect(ctx context.Context, peer Peer, rawTarget string) connectDecision {
+	target := accessportal.CanonicalizeFQDN(rawTarget)
+	d := connectDecision{resp: ConnectAuthorizeResponse{
+		Target: target, Username: peer.Username,
+		GatewayID: s.Gateway.ID, GatewayScope: s.Gateway.Scope,
+		CheckedAt: time.Now().UTC(),
+	}}
+	access, err := s.Resolver.LoadUserAccess(ctx, peer.Username)
+	if err != nil {
+		s.Logger.Error("connect authorize: resolve failed, denying", "user", peer.Username, "target", target, "error", err)
+		d.metricReason = metricsReasonError
+		return d // Allowed stays false.
+	}
+	var host *accessportal.HostAccess
+	for i := range access.Hosts {
+		if access.Hosts[i].FQDN == target && access.Hosts[i].SSH.Allowed {
+			host = &access.Hosts[i]
+			break
+		}
+	}
+	if host == nil {
+		d.metricReason = metricsReasonAccessDenied
+		return d // HBAC/scope deny: Allowed stays false.
+	}
+	mode, source, err := ResolveRecordingMode(s.RecordingPolicy.DefaultMode, host.SSHRecording)
+	switch {
+	case errors.Is(err, ErrRecordingPolicyUnknown):
+		d.metricReason, d.policyReason = DenyReasonRecordingPolicyUnavailable, host.SSHRecording.Reason
+		d.resp = d.denied(d.metricReason)
+		return d
+	case err != nil:
+		d.metricReason, d.policyReason = DenyReasonRecordingPolicyInvalid, host.SSHRecording.Reason
+		d.resp = d.denied(d.metricReason)
+		return d
+	}
+	d.resp.Allowed = true
+	for _, rs := range host.SSH.Rules {
+		d.resp.Rules = append(d.resp.Rules, rs.Rule)
+	}
+	d.resp.RecordingMode = mode
+	d.resp.RecordingPolicySource = source
+	s.applyTransportGate(ctx, &d.resp)
+	return d
+}
+
+// applyTransportGate sets TransportAllowed only when this gateway enables
+// transport AND the (already authorized) target is a member of
+// TransportReadyHostgroup, direct or nested. Any lookup failure fails
+// closed. Disabled gateways never touch FreeIPA for this.
+func (s *Server) applyTransportGate(ctx context.Context, resp *ConnectAuthorizeResponse) {
+	if !s.Transport.Enabled {
+		resp.TransportDenyReason = TransportDenyDisabled
+		return
+	}
+	hg, err := s.Provider.HostgroupShow(ctx, TransportReadyHostgroup)
+	if err != nil {
+		s.Logger.Warn("transport gate: ready hostgroup lookup failed, denying transport", "hostgroup", TransportReadyHostgroup, "target", resp.Target, "error", err)
+		resp.TransportDenyReason = TransportDenyReadyLookupFailed
+		return
+	}
+	for _, members := range [][]string{hg.MemberHosts, hg.IndirectMemberHosts} {
+		for _, h := range members {
+			if accessportal.CanonicalizeFQDN(h) == resp.Target {
+				resp.TransportAllowed = true
+				return
+			}
+		}
+	}
+	resp.TransportDenyReason = TransportDenyTargetNotReady
+}
+
+// handleTransportHostKeys is POST /v1/transport/host-keys (captive-
+// transport spec §8.3): the FreeIPA-published SSH host keys of a target
+// the caller may open a transport to right now, so the workstation's
+// inner OpenSSH can verify the target end to end without TOFU. Uses the
+// exact same authorizeConnect + transport gate as /v1/connect/authorize;
+// a denied caller gets allowed=false and an empty key list, never a
+// reason.
+func (s *Server) handleTransportHostKeys(w http.ResponseWriter, r *http.Request) {
+	peer, ok := s.authorizedPeer(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req TransportHostKeysRequest
+	if err := decodeStrictJSON(r.Body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	d := s.authorizeConnect(r.Context(), peer, req.Target)
+	if d.metricReason == DenyReasonRecordingPolicyUnavailable {
+		// The target's FreeIPA host entry could not be read, so neither its
+		// recording policy nor its keys are known: the same 503 as a failed
+		// host_show below, not a denial.
+		s.Logger.Error("transport host keys: host policy unreadable", "user", peer.Username, "target", d.resp.Target, "policy_reason", d.policyReason)
+		writeError(w, http.StatusServiceUnavailable, "access service unavailable")
+		return
+	}
+	authz := d.resp
+	resp := TransportHostKeysResponse{Target: authz.Target, HostKeys: []string{}}
+	if !authz.Allowed || !authz.TransportAllowed {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	host, err := s.Provider.HostShow(r.Context(), authz.Target)
+	if err != nil {
+		s.Logger.Error("transport host keys: host_show failed", "user", peer.Username, "target", authz.Target, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "access service unavailable")
+		return
+	}
+	resp.Allowed = true
+	resp.HostKeys = append(resp.HostKeys, host.SSHPublicKeys...)
 	writeJSON(w, http.StatusOK, resp)
 }
 

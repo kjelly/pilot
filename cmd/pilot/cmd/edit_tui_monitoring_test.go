@@ -21,9 +21,6 @@ func TestEditRouter_Teatest_MonitoringFlow_AddProfileAddTargetAndSave(t *testing
 	router := newEditRouterModel(dir)
 	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
 
-	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
 	for i := 0; i < 6; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
@@ -91,8 +88,8 @@ func TestEditRouter_Teatest_MonitoringFlow_AddProfileAddTargetAndSave(t *testing
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> back to top menu
 
-	// top menu: quit (index 10, see the comment at the top of this test)
-	for i := 0; i < 10; i++ {
+	// top menu: quit
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
@@ -141,7 +138,7 @@ func TestEditRouter_Teatest_MonitoringFlow_EmptyWorkspaceHasNoMonitoringFiles(t 
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> back to top menu
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit

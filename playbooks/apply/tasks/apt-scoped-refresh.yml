@@ -15,8 +15,13 @@
 # Output fact: pilot_apt_scoped_refresh_result
 #   status: healthy | degraded
 #   mode: scoped
-#   errors: [...]
+#   errors: [...]   (plus a type=refresh_timeout entry when the wall
+#                    clock ran out; see apt-cache-refresh.yml)
 #   required_sources_healthy: bool
+#
+# The apt-get update below has the same wall clock as the global refresh
+# (pilot_apt_update_timeout_seconds, default 300; TERM, then KILL 30 s
+# later).
 #
 # Never touches /etc/apt/sources.list* — only reads from it (for the "os"
 # class) or from the caller-declared source_file (for the "pilot" class)
@@ -124,18 +129,19 @@
       # sourceparts, which is the only way to make apt-get read ONLY the
       # required sources without touching the real /etc/apt/sources.list*
       # files (spec.md §12.3) — a raw apt-get invocation is required here.
-      # Bounded the same way as apt-cache-refresh.yml's global probe.
       ansible.builtin.command:
-        cmd: >-
-          timeout {{ pilot_apt_update_timeout_seconds | default(300) }}
-          apt-get
-          -o Acquire::http::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}
-          -o Acquire::https::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}
-          -o Acquire::Retries={{ pilot_apt_acquire_retries | default(3) }}
-          -o Dir::Etc::sourcelist={{ _pilot_apt_scoped_dir.path }}/sources.list
-          -o Dir::Etc::sourceparts={{ _pilot_apt_scoped_dir.path }}/sources.list.d
-          -o APT::Get::List-Cleanup=0
-          update
+        argv:
+          - timeout
+          - --kill-after=30
+          - "{{ (pilot_apt_update_timeout_seconds | default(300)) | string }}"
+          - apt-get
+          - -o
+          - "Dir::Etc::sourcelist={{ _pilot_apt_scoped_dir.path }}/sources.list"
+          - -o
+          - "Dir::Etc::sourceparts={{ _pilot_apt_scoped_dir.path }}/sources.list.d"
+          - -o
+          - APT::Get::List-Cleanup=0
+          - update
       register: _pilot_apt_scoped_run
       changed_when: false
       failed_when: false
@@ -144,8 +150,7 @@
         DEBIAN_FRONTEND: noninteractive
       until: >-
         (_pilot_apt_scoped_run.rc | default(1)) == 0 or
-        not (((_pilot_apt_scoped_run.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
-             or (_pilot_apt_scoped_run.rc | default(1)) == 124)
+        not ((_pilot_apt_scoped_run.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
       retries: "{{ pilot_apt_lock_retries | default(6) }}"
       delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
 
@@ -168,7 +173,16 @@
         pilot_apt_scoped_refresh_result:
           status: "{{ 'healthy' if _pilot_apt_scoped_required_healthy else 'degraded' }}"
           mode: scoped
-          errors: "{{ pilot_apt_classification_result.errors }}"
+          # A timed-out run already fails the rc == 0 health test above; the
+          # extra entry only makes the reason visible in the FATAL message.
+          errors: >-
+            {{ pilot_apt_classification_result.errors
+               + ([{'source': 'unknown', 'type': 'refresh_timeout', 'key_id': none,
+                    'required': true, 'required_source_id': none,
+                    'raw': 'scoped apt-get update did not finish within '
+                           ~ (pilot_apt_update_timeout_seconds | default(300)) ~ 's (rc='
+                           ~ _pilot_apt_scoped_run.rc ~ ')'}]
+                  if ((_pilot_apt_scoped_run.rc | default(0)) in [124, 137, -9]) else []) }}
           required_sources_healthy: "{{ _pilot_apt_scoped_required_healthy }}"
   always:
     - name: "APT scoped refresh — cleanup execution-scoped temp directory"

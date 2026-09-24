@@ -76,43 +76,52 @@ pilot_access_gateway_binary_path: "dist/pilot-access-gateway-linux-amd64"
 
 # ----------------------------------------------------------------------------
 # SSH session recording(per-host recording spec,docs/superpowers/specs/
-# 2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md)
+# 2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md;錄影設定
+# 由 group vars 擁有,captive-transport spec §12.2)
 #
 # 要錄影哪台主機,由 hosts.yml 每台主機的 `ssh_recording: off|terminal_output`
 # 決定(經 freeipa-client 投影成 FreeIPA 的 pilot.policy.ssh-recording marker),
 # gateway 每次 Connect 都即時讀取,host 的設定優先於下面的 gateway 預設值。
 # host 端目前只接受 off/terminal_output——terminal_io(連使用者輸入一起錄)
 # 保留給之後的版本,在 hosts.yml 寫 terminal_io 會被 lint 擋下。
+#
+# 這些值會渲染進 /etc/pilot/access-gateway.yaml 的 gateway.recording;不要再
+# 手動編輯該檔——每次 apply 都以這裡的值為準。若這台 gateway 目前已安裝更高的
+# 錄影等級(metadata < terminal_output < terminal_io)或已設定 session store,
+# 而這裡沒有對應設定,apply 會在寫檔前失敗,避免靜默降級;真的要降級時才帶
+# -e pilot_access_gateway_recording_allow_downgrade=true。
 # ----------------------------------------------------------------------------
 
 # gateway 預設 recording mode:metadata|terminal_output|terminal_io。刻意沒有
 # 預設值——不設定時 gateway 用 built-in metadata(只記 audit 事件、不錄終端
 # 內容),只有 hosts.yml 標了 ssh_recording 的主機才會錄。設成
 # terminal_output/terminal_io 會讓「沒有設定 ssh_recording 的每一台主機」
-# 都錄影,且必須同時設定 pilot_session_store_url。
+# 都錄影,且必須同時設定 pilot_access_gateway_recording_session_store_url。
 # terminal_io 的已知限制:typed input is recorded only as redacted byte counts
 # on the Gateway SSH relay path; terminal_io does not capture command text
 # today.(輸入端只記錄遮蔽後的位元組數,不保證 secret 不會出現在錄影的輸出內容中。)
-# pilot_session_recording_mode: terminal_output
+# 錄影中的主機不能走 captive transport(只有 metadata 才放行,
+# captive-transport spec D8)。
+# pilot_access_gateway_recording_mode: terminal_output
 
 # store 無法確認寫入時的處理方式。預設 fail_closed:超過 failure_grace 仍無法
 # 寫入就結束該 session——標記要錄影的主機絕不會靜默變成沒錄影。
 # best_effort 會讓連線繼續,但把該筆錄影標為 incomplete。
-# pilot_session_recording_failure_policy: fail_closed
-# pilot_session_recording_queue_events: 1024
-# pilot_session_recording_flush_interval: 500ms
-# pilot_session_recording_failure_grace: 10s       # >= 1s 且 >= 2x flush_interval
-# pilot_session_recording_max_session_duration: 24h  # ingest token lifetime,1h-168h
+# pilot_access_gateway_recording_failure_policy: fail_closed
+# pilot_access_gateway_recording_queue_events: 1024
+# pilot_access_gateway_recording_flush_interval: 500ms
+# pilot_access_gateway_recording_failure_grace: 10s       # >= 1s 且 >= 2x flush_interval
+# pilot_access_gateway_recording_max_session_duration: 24h  # ingest token lifetime,1h-168h
 
-# pilot-session-store 的 ingest URL(必須是 https://)。不設定時,任何
-# effective mode 為 terminal 的連線都會被拒絕(recording_backend_unavailable),
-# 沒有本機錄影檔的 fallback。
-# pilot_session_store_url: "https://<session_store_fqdn>:8443"
-# pilot_session_store_ca_file: /etc/ipa/ca.crt
+# pilot-session-store 的 ingest URL(必須是 https://,見
+# group_vars/pilot-session-store.example.yml)。不設定時,任何 effective mode 為
+# terminal 的連線都會被拒絕(recording_backend_unavailable),沒有本機錄影檔的
+# fallback。
+# pilot_access_gateway_recording_session_store_url: "https://<session_store_fqdn>:8443"
+# pilot_access_gateway_recording_session_store_ca_file: /etc/ipa/ca.crt
 
 # PIT1 ingest token 的 HMAC signing key,必須跟 pilot-session-store 用同一個
-# vault 值(見 group_vars/pilot-session-store.example.yml)。一律走 Vault,
-# 64 個 hex 字元(openssl rand -hex 32):
+# vault 值。一律走 Vault,64 個 hex 字元(openssl rand -hex 32):
 #   vault key: pilot_session_store_ingest_signing_key
 # pilot_session_store_ingest_signing_key: ""
 
@@ -120,3 +129,12 @@ pilot_access_gateway_binary_path: "dist/pilot-access-gateway-linux-amd64"
 # node_exporter 的 textfile 目錄(/var/lib/node_exporter/textfile,由
 # host-monitoring 建立)時,gateway 會自動寫出 pilot_access_gateway.prom;
 # 沒有時只印出說明、不影響套用。
+
+# Captive opaque SSH transport(pilot-transport-v1 / pilot-known-hosts-v1,
+# docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md)。
+# 預設 false。開啟後,workstation 可經這台 gateway 以 OpenSSH ProxyCommand
+# 對「已套用 pilot-access-target-policy、因而在 FreeIPA hostgroup
+# pilot-transport-ready 內」的 target 建立 SSH/SFTP/SCP/rsync;gateway 本身
+# 仍然不給 shell、不開 sshd forwarding。關回 false 即停止新的 transport,
+# 不影響 portal 與 pilot-connect。
+# pilot_access_gateway_transport_enabled: false

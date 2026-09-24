@@ -27,7 +27,9 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 
 # Verification Spec — Pilot Access Gateway
 
-> 版本：DRAFT v0.9（2026-09-24：改為 Spec v2；row ID 與 probe 不變，AG01 改以 inputs `gateway_id`/`gateway_scope` 比對實際部署值，不再寫死 `gpu-01`/`gpu`，見 §Checks。以下為 v0.8 的紀錄——2026-09-23：per-host SSH session recording Phase 5——gateway 依 host policy 解析 effective recording mode、簽發 per-session PIT1 ingest token，新增 AG41–AG49、AG56，改寫 AG37；Phase 6 再新增 AG50–AG54（互動式 Portal 與 Directory handoff 共用同一個連線核心），Phase 7 再新增 AG55（metrics textfile）與 AG57（`pilot access recording show`），candidate `31f5c23` 已對 `phr-gw`／`phr-store` 實跑（textfile 目錄存在與不存在兩種情形的 AG55 probe 皆 PASS、第二次 apply `changed=0`），見 [`docs/evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md`](../evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md)，見 `docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md`；candidate `e50827d` 已對 vm-target `phr-gw` 實跑：fresh `--check --diff` `failed=0`、apply 後第二次 `changed=0`、AG41–AG43 probe PASS，見 [`docs/evidence/pilot-access-gateway/2026-09-23-phase5-gateway-recording-policy.md`](../evidence/pilot-access-gateway/2026-09-23-phase5-gateway-recording-policy.md)；以下為 v0.7 之前的紀錄：vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；AG32-AG33 的 Portal session-scoped `kinit` / GSSAPI-only Connect 已於 2026-09-16 完成 vm-target + trec E2E，見 [`docs/evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md`](../evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md)；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5；2026-09-18 追加：每次 apply 現在也會把這台 gateway 自己發布進 `pilot-gateway-<gateway_scope>`，供 `pilot-access-directory` 路由用，見 §5；2026-09-18 再追加：ForceCommand wrapper 改 exec `pilot portal-session`，新增 `pilot-connect <session-id> <fqdn>` one-shot handoff dispatcher，AG34-AG40；同日稍後已完成真實 vm-target 活體驗證——`alice` 經 Directory（`ag-directory01`）分別 handoff 到 GPU Gateway（`ag-gw01`→`ag-target01`，`whoami`=alice）與 DMZ Gateway（`ag-gw02`→新建的 `ag-target02`，`whoami`=alice），以及把 dmz target 的 `pilot-connect` 直接送去 GPU gateway 被正確 deny（wrong-scope injection），見 [`docs/evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md`](../evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md)）
+> 版本：DRAFT v1.0（2026-09-24：改為 Spec v2，AG01 以 inputs `gateway_id`/`gateway_scope` 比對實際部署值，不再寫死 `gpu-01`/`gpu`；與 captive transport 合併：transport 的 AG41–AG73 保留原編號，per-host SSH session recording 的 rows 重新編號為 AG81–AG96（原 AG42–AG57），原 AG41 併入 AG41，見 §Checks；per-host recording 的最新活體證據見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-recording-follow-up.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-recording-follow-up.md)）
+> 以下為 v0.7 之前的紀錄：DRAFT v0.7（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；AG32-AG33 的 Portal session-scoped `kinit` / GSSAPI-only Connect 已於 2026-09-16 完成 vm-target + trec E2E，見 [`docs/evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md`](../evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md)；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5；2026-09-18 追加：每次 apply 現在也會把這台 gateway 自己發布進 `pilot-gateway-<gateway_scope>`，供 `pilot-access-directory` 路由用，見 §5；2026-09-18 再追加：ForceCommand wrapper 改 exec `pilot portal-session`，新增 `pilot-connect <session-id> <fqdn>` one-shot handoff dispatcher，AG34-AG40；同日稍後已完成真實 vm-target 活體驗證——`alice` 經 Directory（`ag-directory01`）分別 handoff 到 GPU Gateway（`ag-gw01`→`ag-target01`，`whoami`=alice）與 DMZ Gateway（`ag-gw02`→新建的 `ag-target02`，`whoami`=alice），以及把 dmz target 的 `pilot-connect` 直接送去 GPU gateway 被正確 deny（wrong-scope injection），見 [`docs/evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md`](../evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md)；2026-09-23 追加：captive SSH transport（AG41–AG73），全新 VM 拓樸實跑見 [`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md)）
+> 2026-09-23 追加（captive-transport spec `docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md` Phase 1）：`gateway.recording` 改由 `pilot_access_gateway_recording_*` group vars 渲染，不再在每次 apply 時被整份覆寫而靜默降回 metadata；會降低已安裝錄影政策的 apply 在寫檔前失敗，除非明確帶 `pilot_access_gateway_recording_allow_downgrade=true`（AG41）。AG35–AG40 的 Command 欄從來不是可執行指令，已移出 §2 checklist，改列在 §6。
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md（Pilot Access Gateway — Stateless FreeIPA-backed Portal），§50-§58
 > 維護者：sre
 
@@ -56,20 +58,26 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 | `pilot_access_gateway_install_forcecommand` | 是否安裝 sshd ForceCommand；§55.1 鎖定回歸測試通過前必須是 `false` | 否，**預設 `true`**（2026-09-14 起；§55.1 已在 Phase 8 通過） |
 | `pilot_access_gateway_portal_automember` | **預設 `true`**（2026-09-16 起）：本 playbook 自己在 `gateway_effective_portal_user_group` 上建立 FreeIPA automember rule（`uid=.*`），讓每個 FreeIPA 帳號自動成為 portal 使用者，不用在 freeipa-identity roster 逐一列名單——跟預設已開的 `pilot_access_gateway_install_forcecommand` 相加，「FreeIPA 帳號登入這台 gateway 只能進 portal、拿不到 shell」是預設行為，不需要額外傳參數。要改回「只有 roster 明確列出的人才是 portal 使用者」，明確帶 `-e pilot_access_gateway_portal_automember=false`；設回 `false` 不會自動撤銷已建立的 automember rule（比照 `gateway_portal_user_group`/HBAC rule 的 additive-only 原則，見 §5 gotcha） | 否，**預設 `true`** |
 | `pilot_access_gateway_portal_automember_exclude_users` | `pilot_access_gateway_portal_automember` 為 `true` 時，永遠不自動加入 portal 群組的帳號清單（見 §5 gotcha：`admin` 的 break-glass 例外） | 否，預設 `["admin"]` |
-| `pilot_session_recording_mode` | gateway 預設 recording mode（`metadata`／`terminal_output`／`terminal_io`）。**刻意沒有預設值**：未設定時 config 不寫 `mode:`，gateway 用 built-in `metadata`，resolver 的 source 為 `built_in_default`；host 的 FreeIPA `pilot.policy.ssh-recording` marker 會覆蓋它（per-host recording spec §4）。terminal mode 需要 `pilot_session_store_url` | 否 |
-| `pilot_session_recording_failure_policy` | `fail_closed`（store 無法確認寫入時結束 session）或 `best_effort`（繼續連線但把錄影標為 incomplete）；對 metadata session 無效果 | 否，預設 `fail_closed` |
-| `pilot_session_recording_queue_events` / `_flush_interval` / `_failure_grace` / `_max_session_duration` | recorder queue 大小、batch 最長等待、fail_closed 的寬限期（≥1s 且 ≥2×flush_interval）、ingest token lifetime（1h–168h） | 否，預設 `1024` / `500ms` / `10s` / `24h` |
-| `pilot_session_store_url` | `pilot-session-store` 的 ingest URL，必須是 `https://`；未設定時 gateway 不簽發任何 ingest token，effective mode 為 terminal 的連線一律 deny `recording_backend_unavailable` | 否 |
-| `pilot_session_store_ca_file` | 驗證 store TLS 憑證用的 CA | 否，預設 `/etc/ipa/ca.crt` |
-| `pilot_session_store_ingest_signing_key` | PIT1 ingest token 的 HMAC signing key（64 個 hex 字元），必須與 `pilot-session-store` 的同名變數相同；只能來自 vault，安裝成 `/etc/pilot/session-store-ingest-signing.key`（0400） | 設定 `pilot_session_store_url` 時必填 |
+| `pilot_access_gateway_recording_mode` | gateway 預設 recording mode（`metadata`／`terminal_output`／`terminal_io`）。**刻意沒有預設值**：未設定時 config 不寫 `mode:`，gateway 用 built-in `metadata`，resolver 的 source 為 `built_in_default`；host 的 FreeIPA `pilot.policy.ssh-recording` marker（由 `hosts.yml` 的 `ssh_recording` 投影）優先。錄影中的主機不能走 captive transport（D8） | 否 |
+| `pilot_access_gateway_recording_failure_policy` | `fail_closed`（store 無法確認寫入時結束 session）或 `best_effort`（繼續連線但把錄影標為 incomplete）；對 metadata session 無效果 | 否，預設 `fail_closed` |
+| `pilot_access_gateway_recording_queue_events` / `_flush_interval` / `_failure_grace` / `_max_session_duration` | recorder queue 大小、batch 最長等待、fail_closed 的寬限期（≥1s 且 ≥2×flush_interval）、ingest token lifetime（1h–168h） | 否，預設 `1024` / `500ms` / `10s` / `24h` |
+| `pilot_access_gateway_recording_session_store_url` | `pilot-session-store` 的 ingest URL，必須是 `https://`；未設定時 gateway 不簽發任何 ingest token，effective mode 為 terminal 的連線一律 deny `recording_backend_unavailable` | 否 |
+| `pilot_access_gateway_recording_session_store_ca_file` | 驗證 store TLS 憑證用的 CA | 否，預設 `/etc/ipa/ca.crt` |
+| `pilot_access_gateway_recording_allow_downgrade` | `true` 才允許把已安裝的錄影等級或 session store 設定調低（captive-transport spec §12.2 的降級守門） | 否，預設 `false` |
+| `pilot_session_store_ingest_signing_key` | PIT1 ingest token 的 HMAC signing key（64 個 hex 字元），必須與 `pilot-session-store` 的同名變數相同；只能來自 vault，安裝成 `/etc/pilot/session-store-ingest-signing.key`（0400） | 設定 `pilot_access_gateway_recording_session_store_url` 時必填 |
+| `pilot_access_gateway_transport_enabled` | captive opaque SSH transport（`pilot-transport-v1`）；見 captive-transport spec §12.3 | 否，預設 `false` |
 
 ## Checks
 
-每一列都是 read-only probe，`expect: {exitCode: 0}` 與 v1 的 Expected `0` 同義（2026-09-24 由 v1 表格轉成 Spec v2，
-row ID 與 probe 不變；只有 AG01 改用 inputs）。AG01 比對的是這台 gateway **實際部署的** `gateway_id`/`gateway_scope`，
-不再寫死 `gpu-01`/`gpu`：以 `--input gateway_id=<id> --input gateway_scope=<scope>`、環境變數
-`PILOT_INPUT_GATEWAY_ID`/`PILOT_INPUT_GATEWAY_SCOPE`（`vm-target topology test --verify` 會繼承），或 inventory host var
-`pilot_inputs: {gateway_id: ..., gateway_scope: ...}`（同一份 inventory 有多台不同 scope 的 gateway 時用這個）提供。
+每一列都是 read-only probe，`expect: {exitCode: 0}` 與 v1 的 Expected `0` 同義（2026-09-24 由 v1 表格轉成 Spec v2）。
+AG01 比對的是這台 gateway **實際部署的** `gateway_id`/`gateway_scope`，不再寫死 `gpu-01`/`gpu`：以
+`--input gateway_id=<id> --input gateway_scope=<scope>`、環境變數 `PILOT_INPUT_GATEWAY_ID`/`PILOT_INPUT_GATEWAY_SCOPE`
+（`vm-target topology test --verify` 會繼承），或 inventory host var `pilot_inputs: {gateway_id: ..., gateway_scope: ...}`
+（同一份 inventory 有多台不同 scope 的 gateway 時用這個）提供。
+
+AG41–AG44 是 captive-transport spec 的 config/sshd/wrapper rows；AG81–AG96 是 per-host SSH session recording 的 rows
+（per-host recording spec 原本的 AG42–AG57，與 captive transport 合併時重新編號，編號一律 +39；原本的 AG41 併入這裡的 AG41）。
+AG45–AG73 見 §8（captive transport 的 Go 測試與拓樸實跑）。
 
 ```yaml
 - id: AG01
@@ -80,213 +88,226 @@ row ID 與 probe 不變；只有 AG01 改用 inputs）。AG01 比對的是這台
     grep -qxF "  id: $PILOT_VAR_GATEWAY_ID" "$c" &&
       grep -qxF "  scope: $PILOT_VAR_GATEWAY_SCOPE" "$c" &&
       grep -qxF "  target_hostgroup: pilot-target-$PILOT_VAR_GATEWAY_SCOPE" "$c"
+    
   expect: {exitCode: 0}
 - id: AG02
   category: "identity"
   check: "pilot-gateway service account存在"
   probe: |
     id pilot-gateway
+    
   expect: {exitCode: 0}
 - id: AG03
   category: "keytab"
   check: "service keytab owner/mode正確"
   probe: |
     test "$(stat -c '%U:%G %a' /etc/pilot/pilot-access-gateway.keytab)" = "pilot-gateway:pilot-gateway 400"
+    
   expect: {exitCode: 0}
 - id: AG04
   category: "freeipa"
   check: "FreeIPA CA存在"
   probe: |
     test -s /etc/ipa/ca.crt
+    
   expect: {exitCode: 0}
 - id: AG06
   category: "freeipa"
   check: "FreeIPA JSON-RPC ping（透過 /v1/health）"
   probe: |
     sh -c 'v="$(curl -fsS --unix-socket /run/pilot/access-gateway.sock http://localhost/v1/health)" || exit; case "$v" in *"\"freeipa\":\"reachable\""*) exit 0;; *) exit 1;; esac'
+    
   expect: {exitCode: 0}
 - id: AG09
   category: "socket"
   check: "Unix socket name/mode/group正確"
   probe: |
     test "$(stat -c '%U:%G %a' /run/pilot/access-gateway.sock)" = "pilot-gateway:role-pilot-portal-user 660"
+    
   expect: {exitCode: 0}
 - id: AG12
   category: "scope"
   check: "configured target hostgroup存在"
   probe: |
     sh -c 'v="$(curl -fsS --unix-socket /run/pilot/access-gateway.sock http://localhost/v1/health)" || exit; case "$v" in *"\"target_scope\":\"ok\""*) exit 0;; *) exit 1;; esac'
+    
   expect: {exitCode: 0}
 - id: AG19
   category: "stateless"
   check: "沒有 local DB/state"
   probe: |
     test ! -d /var/lib/pilot
+    
   expect: {exitCode: 0}
 - id: AG30
   category: "idempotency"
   check: "第二次 apply changed=0(多次重跑的性質,由 evidence doc 記錄,非單一 shell 指令可驗證)"
   probe: |
     true
+    
   expect: {exitCode: 0}
 - id: AG32
   category: "ssh-policy"
   check: "Portal Connect 只允許 GSSAPI，不委派 TGT 到 target，也不退回 password/kbd-interactive/pubkey"
   probe: |
     bash -c 'v="$(ssh -G -F /etc/pilot/ssh_config target.invalid 2>/dev/null)" || exit; has() { grep -qx "$1" <<< "$v"; }; has "gssapiauthentication yes" && has "gssapidelegatecredentials no" && has "preferredauthentications gssapi-with-mic" && has "batchmode yes" && has "passwordauthentication no" && has "kbdinteractiveauthentication no" && has "pubkeyauthentication false"'
+    
   expect: {exitCode: 0}
 - id: AG33
   category: "kerberos"
   check: "Portal session ticket helper 依賴的 Kerberos client binaries存在"
   probe: |
     test -x /usr/bin/kinit && test -x /usr/bin/klist && test -x /usr/bin/kdestroy
+    
   expect: {exitCode: 0}
 - id: AG34
   category: "handoff"
   check: "ForceCommand wrapper 已改為 exec `pilot portal-session`（Phase 5 dispatcher），不再是舊版永遠互動的 `pilot portal`"
   probe: |
     grep -q 'exec /usr/bin/pilot portal-session' /usr/local/libexec/pilot-session
-  expect: {exitCode: 0}
-- id: AG35
-  category: "handoff"
-  check: "合法 `pilot-connect <uuid> <fqdn>` 語法可被解析、不再落入舊版「忽略 SSH_ORIGINAL_COMMAND、一律進互動 TUI」行為 — 由 `TestParsePortalSSHOriginalCommand_ValidConnect` 涵蓋，非單一 shell 指令；活體「一路連到真實 target」驗證見 §6"
-  probe: |
-    true
-  expect: {exitCode: 0}
-- id: AG36
-  category: "handoff"
-  check: "任意/畸形指令一律 deny，不再靜默落回互動 TUI（spec.md D7「其他全部拒絕」，Phase 5 的行為變更） — 由 `TestParsePortalSSHOriginalCommand_Rejects`（涵蓋 shell metacharacter、`user@host`、IP literal、leading `-`、trailing `.`、embedded newline、錯誤 token 數、非法 UUID、Directory 自己的 `pilot-directory-connect` 語法）；活體 SSH 探測見 §7/`scripts/pilot-access-gateway-lockout-test.sh` 涵蓋，非單一 shell 指令"
-  probe: |
-    true
-  expect: {exitCode: 0}
-- id: AG37
-  category: "handoff"
-  check: "`session_id` 不影響 HBAC／scope 決策（spec.md §17.2：不把 session ID 當 proof）；只在 effective recording mode 為 terminal 時要求它是合法 UUID，並綁進 ingest token（per-host recording spec §17） — 由 `TestRunPortalOneShotConnect_Allowed`／`_Denied`（authorize 結果只取決於 target 是否在 scope 內）與 `internal/gatewayapi` 的 `TestConnectAuthorize_SessionIDOnlyBindsToken`（空、非 UUID、合法 UUID 三種 sid 對 metadata 連線結果相同、都不能讓 scope 外 target 變成 allow；terminal mode 下非 UUID 一律 deny `recording_session_id_invalid`） 涵蓋，非單一 shell 指令"
-  probe: |
-    true
-  expect: {exitCode: 0}
-- id: AG38
-  category: "handoff"
-  check: "one-shot connect 仍是每次呼叫都 fresh authorize，從未信任 Directory 先前的判斷（D1/D6） — 由 `TestRunPortalOneShotConnect_Denied`：即使呼叫端「已經」構造出語法合法的 `pilot-connect` 指令，target 不在這台 gateway 的 `target_hostgroup` 範圍內時一樣被拒，且憑證/SSH 都不會被觸發 涵蓋，非單一 shell 指令"
-  probe: |
-    true
-  expect: {exitCode: 0}
-- id: AG39
-  category: "handoff"
-  check: "wrong-scope target 經 one-shot connect 路徑一樣 deny（沿用既有 `ConnectAuthorize`，不是另一套判斷） — 與 AG38 相同：`internal/gatewayapi.handleConnectAuthorize` 完全沒有因為呼叫來源是互動 Portal 還是 one-shot handoff而改變邏輯，兩條路徑呼叫同一個 handler，非單一 shell 指令"
-  probe: |
-    true
-  expect: {exitCode: 0}
-- id: AG40
-  category: "handoff"
-  check: "target session 結束後，one-shot connect process 以 ssh child 的 exit code 結束（spec.md §18 point 6/7） — 由 `TestRunPortalOneShotConnect_PropagatesSSHExitCode`（用真的 `sh -c \"exit 7\"` 產生真的 `*exec.ExitError`，確認透過 `portalSessionExitError`/`ExitCoder` 原樣傳出） 涵蓋，非單一 shell 指令"
-  probe: |
-    true
+    
   expect: {exitCode: 0}
 - id: AG41
   category: "recording"
-  check: "`access-gateway.yaml` 含 playbook 產生的 `recording:` 區塊；`failure_policy` 為合法值；`mode` 未設定（built-in metadata）或為合法值"
+  check: "`/etc/pilot/access-gateway.yaml` 的 `gateway.recording` 由 `pilot_access_gateway_recording_*` group vars 渲染（不再每次 apply 被覆寫成沒有 recording 區塊；captive-transport spec §12.2）：`failure_policy` 為合法值；`mode` 只在 `pilot_access_gateway_recording_mode` 有設定時才寫出，寫出時必須是合法值（未設定＝built-in metadata，per-host recording spec §14）"
   probe: |
-    grep -Eq '^  recording:$' /etc/pilot/access-gateway.yaml && grep -Eq '^    failure_policy: (fail_closed|best_effort)$' /etc/pilot/access-gateway.yaml && if grep -Eq '^    mode: ' /etc/pilot/access-gateway.yaml; then grep -Eq '^    mode: (metadata|terminal_output|terminal_io)$' /etc/pilot/access-gateway.yaml; fi
+    r="$(grep -A12 '^  recording:$' /etc/pilot/access-gateway.yaml)" || exit 1
+    printf '%s\n' "$r" | grep -Eq '^    failure_policy: "?(fail_closed|best_effort)"?$' || exit 1
+    if printf '%s\n' "$r" | grep -Eq '^    mode: '; then
+      printf '%s\n' "$r" | grep -Eq '^    mode: "?(metadata|terminal_output|terminal_io)"?$'
+    fi
   expect: {exitCode: 0}
 - id: AG42
+  category: "transport"
+  check: "`/etc/pilot/access-gateway.yaml` 渲染 `gateway.transport.enabled`（`pilot_access_gateway_transport_enabled`，預設 `false`；captive-transport spec §12.3）"
+  probe: |
+    sh -c 'grep -A1 "^  transport:$" /etc/pilot/access-gateway.yaml | grep -Eq "^    enabled: (true|false)$"'
+  expect: {exitCode: 0}
+- id: AG43
+  category: "ssh-policy"
+  check: "Gateway sshd drop-in 明列 `AllowStreamLocalForwarding no`，且 Match 區塊內沒有 sshd 不接受的 `PermitUserEnvironment`（§12.4）"
+  probe: |
+    sh -c 'f=/etc/ssh/sshd_config.d/90-pilot-access-gateway.conf; grep -Eq "^[[:space:]]+AllowStreamLocalForwarding no$" "$f" && ! grep -q PermitUserEnvironment "$f"'
+  expect: {exitCode: 0}
+- id: AG44
+  category: "handoff"
+  check: "ForceCommand wrapper 仍 `exec /usr/bin/pilot portal-session`，但已不含 shell 層的 `[ -t 0 ]`——TTY 政策改由 Go 依 state 執行（§7.3/§12.5）"
+  probe: |
+    sh -c 'f=/usr/local/libexec/pilot-session; grep -q "exec /usr/bin/pilot portal-session" "$f" && ! grep -q "\[ -t 0 \]" "$f"'
+  expect: {exitCode: 0}
+- id: AG81
   category: "recording"
   check: "設定 session store 時，PIT1 signing key 檔為 `pilot-gateway:pilot-gateway 400`；未設定 store 時該檔不存在"
   probe: |
     if grep -q '^    session_store_url: ' /etc/pilot/access-gateway.yaml; then test "$(stat -c '%U:%G %a' /etc/pilot/session-store-ingest-signing.key)" = "pilot-gateway:pilot-gateway 400"; else test ! -e /etc/pilot/session-store-ingest-signing.key; fi
+    
   expect: {exitCode: 0}
-- id: AG43
+- id: AG82
   category: "recording"
   check: "舊版靜態 bearer token 檔 `/etc/pilot/session-store-ingest-token` 已移除"
   probe: |
     test ! -e /etc/pilot/session-store-ingest-token
+    
   expect: {exitCode: 0}
-- id: AG44
+- id: AG83
   category: "recording"
   check: "resolver 依 per-host recording spec §4 precedence（host override > gateway default > built-in metadata）產生 mode 與 source — 由 `internal/gatewayapi` 的 `TestResolveRecordingMode`（table-driven，含 raw default `\"\"` → `built_in_default`） 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG45
+- id: AG84
   category: "recording"
   check: "host policy unknown／invalid／保留值 `terminal_io` → Allowed=false 且帶對應 `deny_reason` — 由 `TestConnectAuthorize_RecordingPolicyDenies`（host_show 失敗、userclass 不可讀 → `recording_policy_unavailable`；重複 marker、保留值、zero-value policy → `recording_policy_invalid`） 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG46
+- id: AG85
   category: "recording"
   check: "effective mode 為 terminal 但沒有設定 session store → deny `recording_backend_unavailable`（沒有 local recording fallback） — 由 `TestConnectAuthorize_TerminalWithoutStoreDenied` 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG47
+- id: AG86
   category: "recording"
   check: "metadata 回應不含 store URL／CA／ingest token／recorder 參數 — 由 `TestConnectAuthorize_MetadataCarriesNoIngestCredential`（host 未設定與 `off` 兩種情形都比對原始 JSON） 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG48
+- id: AG87
   category: "recording"
   check: "terminal 回應的 ingest token claims 綁定 sid／user／gateway／scope／target／mode／source，lifetime = `max_session_duration`，且每次簽發的 `jti` 都不同 — 由 `TestConnectAuthorize_MintsBoundIngestToken` 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG49
+- id: AG88
   category: "recording"
   check: "兩次 authorize 之間 host policy 由 absent 改為 `terminal_output`，第二次立即生效（gateway 沒有跨 request 的 policy cache） — 由 `TestConnectAuthorize_FreshPolicyEachRequest` 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG50
+- id: AG89
   category: "recording"
   check: "互動式 Portal Connect 對 effective terminal mode 走 recorded path（與 Directory handoff 共用 `runPortalTargetSession`），不走 plain ssh — 由 `cmd/pilot/cmd` 的 `TestConnectToHost_TerminalModeUsesRecordedPath` 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG51
+- id: AG90
   category: "recording"
   check: "recorded path 在 session store start 失敗時不啟動任何 ssh process（Phase A 也不做） — 由 `TestPortalTargetSession_StoreStartFailureNoSSH`；start 之後 Phase A／Phase B 失敗仍送 `complete=false` 的 finish，見 `TestPortalTargetSession_FailureAfterStartFinishesIncomplete` 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG52
+- id: AG91
   category: "recording"
   check: "terminal mode 不在 gateway 寫任何 local recording file（FileSink fallback 已移除） — 由 `TestPortalTargetSession_NoLocalRecordingFile` 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG53
+- id: AG92
   category: "recording"
   check: "`fail_closed` 下閒置但健康（沒有 pending event）的 session 超過 3×`failure_grace` 仍存活 — 由 `internal/sessionrecording` 的 `TestRecorderFailClosedIdleSessionSurvives`（6×grace） 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG54
+- id: AG93
   category: "recording"
   check: "terminal mode 在 SSH 前印出錄影提示（含 session id）；metadata 不印 — 由 `TestPortalTargetSession_RecordingNotice` 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG55
+- id: AG94
   category: "metrics"
   check: "node_exporter textfile 目錄存在時，gateway 被 socket 喚醒後寫出 0644 的 `pilot_access_gateway.prom`，含 `pilot_gateway_connect_authorize_total`；目錄不存在時不寫（metrics 是 soft 功能）"
   probe: |
     curl -fsS --unix-socket /run/pilot/access-gateway.sock -o /dev/null http://localhost/v1/health; f=/var/lib/node_exporter/textfile/pilot_access_gateway.prom; if test -d /var/lib/node_exporter/textfile; then for i in 1 2 3 4 5; do test -s "$f" && break; sleep 1; done; grep -q '^# TYPE pilot_gateway_connect_authorize_total counter$' "$f" && test "$(stat -c %a "$f")" = 644; else test ! -e "$f"; fi
+    
   expect: {exitCode: 0}
-- id: AG56
+- id: AG95
   category: "recording"
   check: "Phase 0 分支 R：gateway principal 對某台 host 的 `userclass` 沒有讀取權限 → 只有該 host 的連線 deny `recording_policy_unavailable`，同一 snapshot 的其他 host 不受影響 — 由 `internal/gatewayapi` 的 `TestConnectAuthorize_UserClassUnreadableDenies`；rights 解析見 `internal/freeipaaccess` 的 `TestParseHost_UserClassUnreadableIsUnavailable` 涵蓋，非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
-- id: AG57
+- id: AG96
   category: "recording"
   check: "`sudo pilot access recording show <host>` 以 gateway 自己的 keytab 讀 host policy，依 §29 輸出 host policy、gateway default、effective、source（text／json）；非 root exit 2、host 不存在 exit 1 — 由 `cmd/pilot/cmd` 的 `TestAccessRecordingShow_*` 涵蓋（活體 L20 見 §4），非單一 shell 指令"
   probe: |
     true
+    
   expect: {exitCode: 0}
 ```
-
 ## 3. 不在這份 checklist 逐行覆蓋、但已用其他方式驗證過的項目
 
 以下 AG 編號直接引用 spec.md §52 的原始清單，但**不是**每一項都適合寫成單一 shell checklist row——很多是 unit test 的性質（`internal/peercred`、`internal/identity`、`internal/freeipaaccess`、`internal/accessportal`、`internal/gatewayapi` 各自的測試套件），不是 apply playbook 的某個 task 產生的結果：
@@ -301,7 +322,6 @@ row ID 與 probe 不變；只有 AG01 改用 inputs）。AG01 比對的是這台
 
 ## 4. Phase 8 完成的項目（多主機/多 session 性質，非單一 host 的 shell checklist row）
 
-- **2026-09-24 per-host SSH session recording L1–L22**（candidate `ad7c463`，見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md)）：Directory handoff 與互動式 Portal 對標記 `terminal_output` 的主機都會錄影（notice、`complete: true`、replay 看得到 marker），未標記主機維持 metadata；policy 無效、重複、大小寫變體、保留值 `terminal_io` 一律 deny 且 target 沒有任何登入；store 停止時不建立 SSH；store 中途不可達或磁碟滿時 fail_closed 在約 `failure_grace` 後結束 session，且觸發後不再轉送任何未錄影的 I/O；閒置超過 20 分鐘的錄影 session 仍然 `complete: true`；token 不能跨 session／跨使用者使用；`pilot access recording show` 對真實 FreeIPA 回報正確；回滾程序可還原。全新 VM 上本 spec 的 verify 為 35/35。
 - **AG20 portal ForceCommand / AG21 admin shell unaffected / AG25 remote whoami == portal user**：spec.md §55.1 的 3 步鎖定回歸測試已對 `ag-gw01`（disposable vm-target）完整跑過並取得人員核准（見 Phase 8 evidence doc）：(1) `alice`（`role-pilot-portal-user` 成員）SSH 登入直接進入 `pilot portal` TUI，畫面顯示 `User alice`，Ctrl+C 結束整個連線而非取得 shell，`ssh alice@host whoami`（無 PTY）不執行請求的指令、exit 1；(2) `root`（非 portal-user）SSH 登入拿到完全正常的 interactive shell（`whoami` → `root`）；(3) 把旗標設回 `false` 重新 apply，drop-in 被移除、sshd reload，兩種帳號都恢復正常 shell（`alice` 的 `whoami` → `alice`）。過程中還發現並修正一個真的可用性 gap：新增了 rollback 用的 Step 19/20/21 對應任務，讓旗標從 `true` 改回 `false` 時 playbook 會真的移除 drop-in，而不是只是跳過重新安裝。
 
 - **AG32/AG33 session-scoped Kerberos login E2E**：第一跳用 SSH key 進 Portal；Connect 時由 Portal 以遮罩輸入取得該 SSH 使用者的 Kerberos 密碼，固定 principal 為該使用者、以 fixed argv `kinit -F -l 1h` 取得不可轉送的一小時 TGT、把 ccache 放在 user-owned runtime temp dir；同一 Portal session 重用有效 TGT，失效/遺失後重新提示；Portal 結束只清理自己建立的 ccache。目標主機停用 password/kbd-interactive 時仍須以 GSSAPI 成功，且失敗時不得出現 target password prompt。本項需以互動 TUI vm-target evidence 驗證，不能只靠 checklist 靜態設定。
@@ -313,13 +333,10 @@ row ID 與 probe 不變；只有 AG01 改用 inputs）。AG01 比對的是這台
 - **2026-09-16 My Hosts 顯示主機註解/資產資訊**（見 `docs/evidence/pilot-access-gateway/2026-09-16-host-annotations-in-portal.md`）：`internal/freeipaaccess.Provider.HostShow`早就存在但從沒被 resolver 呼叫過；現在 `LoadUserAccess` 對每台通過 SSH-allowed 篩選的主機都會呼叫它，解析 `userclass` 裡 `pilot.annotation.*` 前綴的值（host-annotations spec，2026-09-09）填進 `HostAccess.Annotations`，一路透傳到 `gatewayapi.HostJSON` 與 portal TUI。My Hosts 列表行會加一段排序過的 `[key=value, ...]` 摘要，選進主機明細畫面則顯示完整 `Annotations:` 區塊；沒有註解的主機兩處都不顯示。刻意把它當成「錦上添花」而非授權輸入——單一主機 `host_show` 失敗不會讓整個 `/v1/access` 掛掉，只是那台主機沒有註解資訊。真的在 `ag-spike-ipa` 用 admin kinit + `ipa host-mod` 對 `ag-target01` 設了真實 userClass（非捏造 fixture），透過真正的 `pilot portal` TUI（純 GSSAPI）驗證兩處畫面都正確顯示。順手修了 `runPortalMyHosts` 的「無可存取主機」訊息同一種 Yes/No-顯示唯讀訊息 的舊 bug（跟前一條的 My Identity/Refresh 同一類，前次漏抓）。
 - **2026-09-16 `pilot_access_gateway_portal_automember` end-to-end**（實測當下預設仍是 `false`，需明確帶 `-e ...=true`；同日稍後改成預設 `true`，見下方 §5 gotcha，行為本身未變）：對 `ag-spike-ipa`/`ag-gw01` 實測（見 `docs/evidence/pilot-access-gateway/2026-09-16-portal-automember.md`）——`-e pilot_access_gateway_portal_automember=true` 首次 apply 建立 automember rule + inclusive/exclusive condition（`changed`），第二次 apply 四個 automember task 全部 `ok`（idempotent）；既有帳號（`bob`）透過全量 `automember-rebuild` 正確回填進 `role-pilot-portal-user`；全新建立的帳號（`newhire01`）在 `ipa user-add` 當下就立即是群組成員，不需要等 rebuild；`admin` 帳號在整個過程中從未被自動加入（exclusive-regex 生效）；`ag-gw01` 上的 `getent group role-pilot-portal-user` 也正確反映更新後的成員（SSSD 傳播）。測試後已手動清掉全部 fixture（`newhire01` 帳號、automember rule/condition、把 `role-pilot-portal-user` 還原成只有 `alice`），恢復 Phase 8 的既有基準狀態。
 - **grant / breakglass active rule**：`pilot-access-gateway` 架構上完全不讀 grant JSON（spec.md §57 明文）——它只讀 FreeIPA 當下的 HBAC/sudo rule 狀態，不區分某條 rule 是手動建立還是由 `internal/inventory` 的 grant compiler（`pilot access breakglass activate` 等）產生。這個屬性已經被 Phase 8 的 AG26/27 測試間接證明：`pilot-grant-login-gpu-test`/`pilot-grant-sudo-gpu-test`（沿用 grant compiler 的命名慣例）與新建的 `pilot-grant-login-dmz-test` 全部是真實、當下 active 的 FreeIPA rule，gateway 對它們的處理跟任何其他 HBAC/sudo rule 完全一樣——沒有任何特殊分支代碼路徑。
+- **2026-09-24 per-host SSH session recording L1–L22**（candidate `ad7c463`，見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md)）：Directory handoff 與互動式 Portal 對標記 `terminal_output` 的主機都會錄影（notice、`complete: true`、replay 看得到 marker），未標記主機維持 metadata；policy 無效、重複、大小寫變體、保留值 `terminal_io` 一律 deny 且 target 沒有任何登入；store 停止時不建立 SSH；store 中途不可達或磁碟滿時 fail_closed 在約 `failure_grace` 後結束 session，且觸發後不再轉送任何未錄影的 I/O；閒置超過 20 分鐘的錄影 session 仍然 `complete: true`；token 不能跨 session／跨使用者使用；`pilot access recording show` 對真實 FreeIPA 回報正確；回滾程序可還原。全新 VM 上本 spec 的 verify 為 35/35。
 
 ## 5. Gotcha 記錄
 
-- **2026-09-23：per-host SSH session recording（Phase 5）**——三件操作者需要知道的事：
-  (1) **每次 authorize 都即時讀 FreeIPA**，沒有跨 request 的 policy cache：`hosts.yml` 改了 `ssh_recording` 但 `freeipa-client` 尚未 reconcile 到 FreeIPA 時，gateway 依 FreeIPA 現況決定（AG49）。
-  (2) **Phase 0 分支 R**：gateway principal 以 `host_show` + `rights: true` 讀 `attributelevelrights.userclass`，沒有 `r` 權限就把該 host 視為 policy 不可讀，deny `recording_policy_unavailable`（AG56）；FreeIPA 不會因為沒有讀取權限就靜默回傳空 `userclass` 被誤判成「沒有設定」。
-  (3) **`site.yml` 的順序已改成 `pilot-session-store` 在 `pilot-access-gateway` 之前**（contract `site.order` 51），讓全站部署時 gateway 第一次指向 store 前，store 已經在跑且 signing key 已就位；兩邊的 `pilot_session_store_ingest_signing_key` 必須是同一個 vault 值，否則每個錄影 session 的 start 都會被 store 以 401 拒絕，fail_closed 下使用者連不上 target。舊版靜態 bearer token（`/etc/pilot/session-store-ingest-token`）由本 playbook 刪除（AG43）。
 - **2026-09-15：`site.include` 改成 `true`，`pilot-access-gateway` 不再是 single-component-only**——一路上發現兩次真的問題：全站部署（`playbooks/site.yml`）從架構上就無法跑到這個元件（從沒被 `import_playbook` 進去），`pilot deploy` 的 wizard 卻仍然把它列進「已選擇/已部署」，一次還被記成 delivery 歷史的 `success` run，實際上主機從沒被真的套用過。討論後拍板：與其永遠維持「single-component-only、每次都要單獨呼叫」，改成跟其他角色一致的語意——`hosts.yml` 把 `pilot-access-gateway` 加進某台主機的 roles 清單，本身就是操作者的核准動作,之後每次全站部署都會照常套用。`site.yml` 已補上 `import_playbook: apply/pilot-access-gateway-apply.yml`（`tags: [freeipa, pilot-access-gateway]`，緊接在 `freeipa-client` 之後,對應 sameHosts 依賴）;`contracts/pilot-access-gateway.yaml` 的 `site` 區塊改成 `{include: true, order: 52, tags: [pilot-access-gateway], optIn: false}`。**§0 G4/§55.1 的規則沒有變，只是核准時機點改變**：把 role 加進 `hosts.yml` 之前,仍然要先在該主機或同等 disposable vm-target 上跑過鎖定回歸測試——加了 role 之後,之後每次全站部署都不會再重新問一次。`cmd/pilot/cmd/site_yml_consistency_test.go` 的 `TestSiteYMLImportsEveryReachableComponent` 會鎖住這個 `site.include`/`site.yml` 一致性,避免第三次重演同一種落差。
 - **2026-09-15：`freeipa_servers`/`ipa_realm` 改成 `required: false`，會自動推導**——真實站台實測時發現：`group_vars/pilot-access-gateway.yml` 若還是原始範本的 `freeipa_servers: []`/`ipa_realm: ""`，contract 的 `required: true` 會讓 `pilot deploy` 在連 ansible 都還沒跑之前就直接擋下（`requires input "freeipa_servers"`），即使該站台的 `group_vars/freeipa.yml` 早就正確設好 `freeipa_domain`。已改成比照 `freeipa-client-apply.yml` 自己的既有慣例：`gateway_effective_ipa_realm`/`gateway_effective_freeipa_servers` 依序檢查「明確填的 `ipa_realm`/`freeipa_servers`」→「`freeipa_realm`/`freeipa_server_fqdn`」→「`freeipa_domain` 推導成 `大寫(domain)`/`ipa1.<domain>`」，跟同一份 inventory 上其他 freeipa-client 主機使用的是同一條推導路徑，不需要重複填一次已經在 `group_vars/freeipa.yml` 設定過的資訊。`default(X, true)` 讓「明確設成空字串/空陣列」（範本沒填完就直接套用的常見情況）也一起走推導，不會被誤判成「使用者刻意覆寫成空」。
 - `-e freeipa_servers=[...]` 這種寫法 Ansible 不會可靠解析成 list（同 Phase 6 發現的坑），必須用 `-e '{"freeipa_servers": [...]}'` 的 JSON 物件形式。
@@ -359,8 +376,21 @@ row ID 與 probe 不變；只有 AG01 改用 inputs）。AG01 比對的是這台
   `pilot-gateway-dmz`，`ag-gw01` 不受影響；兩台主機最終都復原回本次測試前的
   基準設定（`ag-gw01`=gpu、`ag-gw02`=dmz），沒有在這兩台共用 vm-target 上留下
   殘留 drift。第二次 apply 這幾個新 task 全部 `ok`（無 `changed`）。
+- **2026-09-23：per-host SSH session recording（Phase 5）**——三件操作者需要知道的事：
+  (1) **每次 authorize 都即時讀 FreeIPA**，沒有跨 request 的 policy cache：`hosts.yml` 改了 `ssh_recording` 但 `freeipa-client` 尚未 reconcile 到 FreeIPA 時，gateway 依 FreeIPA 現況決定（AG88）。
+  (2) **Phase 0 分支 R**：gateway principal 以 `host_show` + `rights: true` 讀 `attributelevelrights.userclass`，沒有 `r` 權限就把該 host 視為 policy 不可讀，deny `recording_policy_unavailable`（AG95）；FreeIPA 不會因為沒有讀取權限就靜默回傳空 `userclass` 被誤判成「沒有設定」。
+  (3) **`site.yml` 的順序已改成 `pilot-session-store` 在 `pilot-access-gateway` 之前**（contract `site.order` 51），讓全站部署時 gateway 第一次指向 store 前，store 已經在跑且 signing key 已就位；兩邊的 `pilot_session_store_ingest_signing_key` 必須是同一個 vault 值，否則每個錄影 session 的 start 都會被 store 以 401 拒絕，fail_closed 下使用者連不上 target。舊版靜態 bearer token（`/etc/pilot/session-store-ingest-token`）由本 playbook 刪除（AG82）。
 
 ## 6. Phase 5 — Directory → Gateway handoff dispatcher（2026-09-18，unit-test + vm-target 活體皆已驗證）
+
+以下 6 項原本放在 §2 checklist，但它們的「Command」欄是指向 Go 測試的說明文字、不是可在主機上執行的指令——`pilot verify` 會真的執行它們並得到 rc=127，讓整份 spec 的 verify 從 2026-09-18 起恆為 FAIL（2026-09-23 在 captive-transport 拓樸上實測發現）。2026-09-23 起改列在這裡，由對應的 Go 測試證明，不再進 checklist／contract traceability：
+
+- **AG35**：合法 `pilot-connect <uuid> <fqdn>` 語法可被解析、不再落入舊版「忽略 SSH_ORIGINAL_COMMAND、一律進互動 TUI」行為——見 `TestParsePortalSSHOriginalCommand_ValidConnect`（unit test 覆蓋，非單一 shell 指令）；活體「一路連到真實 target」驗證待 §7 vm-target
+- **AG36**：任意/畸形指令一律 deny，不再靜默落回互動 TUI（spec.md D7「其他全部拒絕」，Phase 5 的行為變更）——見 `TestParsePortalSSHOriginalCommand_Rejects`（涵蓋 shell metacharacter、`user@host`、IP literal、leading `-`、trailing `.`、embedded newline、錯誤 token 數、非法 UUID、Directory 自己的 `pilot-directory-connect` 語法）；活體 SSH 探測見 §7/`scripts/pilot-access-gateway-lockout-test.sh`
+- **AG37**：session_id 完全不影響 authorize 決策（spec.md §17.2：不把 session ID 當 proof）——架構性——`runPortalOneShotConnect` 只把 `sessionID` 用在 `slog` 結構化 log，從未傳進 `client.ConnectAuthorize`（只傳 `target`）；`TestRunPortalOneShotConnect_Allowed`/`_Denied` 用同一組 fake gateway 驗證 authorize 結果只取決於 target 是否在 scope 內
+- **AG38**：one-shot connect 仍是每次呼叫都 fresh authorize，從未信任 Directory 先前的判斷（D1/D6）——`TestRunPortalOneShotConnect_Denied`：即使呼叫端「已經」構造出語法合法的 `pilot-connect` 指令，target 不在這台 gateway 的 `target_hostgroup` 範圍內時一樣被拒，且憑證/SSH 都不會被觸發
+- **AG39**：wrong-scope target 經 one-shot connect 路徑一樣 deny（沿用既有 `ConnectAuthorize`，不是另一套判斷）——同 AG38——`internal/gatewayapi.handleConnectAuthorize` 完全沒有因為呼叫來源是互動 Portal 還是 one-shot handoff而改變邏輯，兩條路徑呼叫同一個 handler
+- **AG40**：target session 結束後，one-shot connect process 以 ssh child 的 exit code 結束（spec.md §18 point 6/7）——`TestRunPortalOneShotConnect_PropagatesSSHExitCode`（用真的 `sh -c "exit 7"` 產生真的 `*exec.ExitError`，確認透過 `portalSessionExitError`/`ExitCoder` 原樣傳出）
 
 `docs/tmp/now/spec.md` §16-§19：ForceCommand wrapper（`/usr/local/libexec/pilot-session`）
 從無條件 `exec /usr/bin/pilot portal` 改成 `exec /usr/bin/pilot portal-session`——
@@ -420,3 +450,35 @@ target 不觸發憑證或 SSH；憑證失敗不觸發 SSH；一個真的 `*exec.
 ## 7. 明確不在本 repo 範圍的項目
 
 - **AG31 out-of-scope SSH egress blocked by network policy**：站台網路層需求（防火牆/network policy 擋非 scope 內的 SSH 流量），非本 repo 範圍——`pilot-access-gateway` 本身沒有、也不打算有網路層 enforcement 能力，這是站台網路團隊的責任。
+
+## 8. Captive SSH transport（AG45–AG73，2026-09-23）
+
+對齊 `docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md` §14。AG41–AG44 是 §2 的 host checklist 列；下列項目不是單一主機可執行的 shell 檢查，依 F16 慣例列在 checklist 之外，不進 contract traceability。
+
+### 8.1 Go 測試證明（[unit]）
+
+| ID | 驗證內容 | 測試 |
+|----|----------|------|
+| AG45 | `pilot-transport-v1 <fqdn>`／`pilot-known-hosts-v1 <fqdn>` 解析為各自的 state | `TestParsePortalSSHOriginalCommand_ValidTransport`／`_ValidKnownHosts` |
+| AG46 | 拒絕清單：port、IP、`user@host`、option、shell syntax、第二個 token、大寫、尾端 `.`、單一 label、近似的動詞 | `TestParsePortalSSHOriginalCommand_RejectsTransport` |
+| AG47 | TTY 矩陣：portal／`pilot-connect` 需要 stdin TTY；transport／known-hosts 拒絕任何 TTY，且在接觸 API 之前就拒絕 | `TestRunPortalSession_TTYPolicy` |
+| AG48 | Server 端 transport gate：disabled（不查 FreeIPA）、直接與巢狀的 ready 成員、非成員、查詢失敗、未授權 | `internal/gatewayapi` `TestConnectAuthorize_TransportGate` |
+| AG49 | 任何 deny 路徑都不做 DNS、不 dial | `TestRunPortalTransport_DeniedPathsNeverResolveOrDial` |
+| AG50 | 每次 transport 都 fresh authorize（撤銷後下一次即拒絕） | `TestRunPortalTransport_FreshAuthorizeEveryCall` |
+| AG51 | recording allowlist：只有 `""`／`metadata` 放行 | 同 AG49 |
+| AG52 | 只 resolve 一次、只 dial `<ip>:22`、從不 dial hostname、最多 3 個位址 | `TestRunPortalTransport_ResolveOnceDialExactIP22` |
+| AG53 | 拒絕特殊位址與 gateway 本機位址，允許 RFC1918／ULA | `TestFilterTransportAddrs` |
+| AG54 | 16 MiB 隨機 binary 逐 byte 一致 | `TestBridgeTransport_ByteForByte` |
+| AG55 | half-close、stdin 永不關閉時有界結束、取消時關閉 socket | `TestBridgeTransport_HalfClose` |
+| AG56 | 所有 deny／fail 路徑 stdout 為 0 bytes，stderr 為固定字串 | 同 AG49；`TestRunPortalKnownHosts` |
+| AG57 | audit：requested → connected → closed，含 IP／bytes／duration，payload 不進 audit | `TestRunPortalTransport_AuditEvents` |
+| AG58 | host key：以真實擷取的 `host_show` 解析、驗證 key、同一套 gate | `TestParseHostSSHPublicKeys`、`TestKnownHostsLine`、`TestRunPortalKnownHosts`、`TestTransportHostKeys` |
+| AG59 | config：缺少 `transport:` 時為 disabled；未知欄位被拒絕 | `cmd/pilot-access-gateway` `TestLoadConfigTransport` |
+
+Evidence：`docs/evidence/pilot-access-gateway/2026-09-23-0e865d2.md`。
+
+### 8.2 拓樸實跑（[e2e]）
+
+目前有效摘要（2026-09-23，topology test 用 candidate `875066d`，E2E 用 `0f1a5c1`，`docs/topologies/pilot-access-transport-topology.yaml` 上從未套用過的 VM）：topology test L1–L6 全過（L5 gateway 16/16、target 5/5；L6 `changed=0`）；E2E strict 20/20、remote-dev 5/5、recording 2/2、not-ready 4/4、disabled（明確 `false` 與未設定各一次）4/4；lockout suite 在 transport 開啟時 29/29、關閉時 28/28；AG60 的 downgrade 拒絕與 `allow_downgrade` 放行也在同一輪重跑。Evidence：[`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md)。
+
+AG60 首次於 Phase 1 驗證（`docs/evidence/pilot-access-gateway/2026-09-23-b0c12ee.md`）。AG61–AG73（擴充 lockout suite、transport 預設關閉、SSH／SFTP／SCP／rsync、FreeIPA host key、未 ready 被拒、recording 不相容、真實 sshd 的語法拒絕、journald audit、legacy 回歸、rollback）由 `scripts/pilot-access-gateway-transport-e2e.sh` 與 `scripts/pilot-access-gateway-lockout-test.sh` 在 `docs/topologies/pilot-access-transport-topology.yaml` 上驗證，結果記錄在對應 Phase 的 evidence。

@@ -373,35 +373,6 @@ func TestAutoFillMonitoringFilesForSelected_CoversSiteDeploymentRoute(t *testing
 		t.Fatalf("explicit monitoring vars were overwritten: got %v, want %v", got, explicit)
 	}
 }
-
-// TestDumpMenuDebug covers the PILOT_DEBUG_MENU=1 escape hatch used by
-// trec-scripted runs to read a promptui.Select menu's real, live item
-// list (and 0-based DOWN <n> index) from the recorded terminal output,
-// instead of recomputing it from source or eyeballing the rendered
-// screen — see .agents/skills/pilot-trec-verification/SKILL.md §2.
-func TestDumpMenuDebug(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	orig := os.Stderr
-	os.Stderr = w
-	dumpMenuDebug("測試選單", []string{"item-a", "item-b"})
-	w.Close()
-	os.Stderr = orig
-
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(out)
-	for _, want := range []string{"測試選單", "2 項", "0: item-a", "1: item-b"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("dumpMenuDebug output missing %q; got:\n%s", want, got)
-		}
-	}
-}
-
 func TestDeployCatalog_PlaybooksExistAndAreWellFormed(t *testing.T) {
 	root := repoRootForTest(t)
 	seen := map[string]bool{}
@@ -425,8 +396,8 @@ func TestDeployCatalog_PlaybooksExistAndAreWellFormed(t *testing.T) {
 	}
 	// AGENTS.md §4.3 tracks this count; keep the two in sync deliberately
 	// rather than silently drifting.
-	if len(deployCatalog) != 38 {
-		t.Fatalf("expected 38 apply playbooks in the catalog (see AGENTS.md §4.3), got %d", len(deployCatalog))
+	if len(deployCatalog) != 39 {
+		t.Fatalf("expected 39 apply playbooks in the catalog (see AGENTS.md §4.3), got %d", len(deployCatalog))
 	}
 }
 

@@ -414,29 +414,11 @@ func abortOrErr(err error) error {
 
 // ---- shared prompt helpers -------------------------------------------------
 //
-// The actual prompt/select/confirm screens live in deploy_tui.go now
+// The actual prompt/select/confirm screens live in deploy_tui.go
 // (runSelectPrompt/runTextPrompt/runConfirmPrompt, on top of the
-// shared Bubble Tea primitives in tui_select.go/tui_textinput.go/
-// tui_confirm.go) — what's left here is dumpMenuDebug (called from
-// newSelectModel, tui_select.go) and the validators every prompt call
-// site still uses.
-
-// dumpMenuDebug prints label's live item list, one per line with its
-// 0-based DOWN-arrow index, to stderr. It exists for scripted/`trec`-
-// driven runs: several of this wizard's menus (group_vars keys, vault
-// keys, host lists) have an item count that depends on file contents
-// rather than fixed source order, so a script computing `DOWN <n>`
-// from a source-code read (or a remembered prior session) can silently
-// miscount. Setting PILOT_DEBUG_MENU=1 lets a driving script/agent read
-// the real item list straight from the recorded terminal output instead
-// of recomputing or eyeballing it. Gated behind the env var so normal
-// interactive use (and the rendered menu itself) is unaffected.
-func dumpMenuDebug(label string, items []string) {
-	fmt.Fprintf(os.Stderr, "[pilot:menu] %s (%d 項，DOWN <n> 從 0 起算)\n", label, len(items))
-	for i, item := range items {
-		fmt.Fprintf(os.Stderr, "[pilot:menu]   %d: %s\n", i, item)
-	}
-}
+// internal/tui Huh adapters, which also own the PILOT_DEBUG_MENU item
+// dump) — what's left here are the validators every prompt call site
+// still uses.
 
 func validateFileExists(p string) error {
 	p = strings.TrimSpace(p)

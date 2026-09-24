@@ -105,6 +105,13 @@ type Host struct {
 	FQDN         string
 	Annotations  map[string]string
 	SSHRecording HostRecordingPolicy
+	// SSHPublicKeys is the host's FreeIPA-published SSH host public keys
+	// (ipaSshPubKey, "<type> <base64>[ <comment>]" per entry) — the same
+	// authoritative source sss_ssh_knownhostsproxy verifies against.
+	// pilot-access-gateway serves them to workstations for the captive
+	// transport (docs/superpowers/specs/2026-09-23-pilot-access-gateway-
+	// captive-ssh-transport-spec.md §8.4). Public data, never a secret.
+	SSHPublicKeys []string
 }
 
 // HostRecordingPolicy is the parsed pilot.policy.ssh-recording marker state

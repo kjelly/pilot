@@ -68,10 +68,7 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save and return to top menu
 
-	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
-	for i := 0; i < 10; i++ {
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
@@ -129,7 +126,7 @@ func TestEditRouter_Teatest_HostDeploymentAvailabilityOptionalAndSave(t *testing
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save
-	for i := 0; i < 10; i++ {
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
@@ -176,7 +173,7 @@ func TestEditRouter_Teatest_HostSSHRecordingTerminalOutputAndSave(t *testing.T) 
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save
-	for i := 0; i < 10; i++ {
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
@@ -258,10 +255,7 @@ func TestEditRouter_Teatest_MinimalWorkspaceRequiresHostsBeforeScaffolding(t *te
 		}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
-	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
-	for i := 0; i < 9; i++ {
+	for i := 0; i < topMenuIndex(t, "top.minimal_workspace"); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -291,10 +285,7 @@ func TestEditRouter_Teatest_MinimalWorkspaceReadinessBlocksAndOffersRoute(t *tes
 		}, teatest.WithDuration(3*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
-	// top menu: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
-	for i := 0; i < 9; i++ {
+	for i := 0; i < topMenuIndex(t, "top.minimal_workspace"); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -425,9 +416,18 @@ func TestEditRouter_Teatest_FleetVarsFlow_AddEditDeleteAndSave(t *testing.T) {
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "刪除" -> back to fleet vars menu
 
+	// Only inspect output after the fleet vars menu header was last drawn:
+	// how much of the preceding action-menu frame (whose header names
+	// scratch_var) lands in this read window depends on renderer diffing
+	// and scheduling, notably under -race.
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		out := string(b)
-		return strings.Contains(out, "ansible_user = admin") && !strings.Contains(out, "scratch_var")
+		i := strings.LastIndex(out, "共用變數")
+		if i < 0 {
+			return false
+		}
+		menu := out[i:]
+		return strings.Contains(menu, "ansible_user = admin") && !strings.Contains(menu, "scratch_var")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // fleet vars menu -> host list
@@ -1211,10 +1211,7 @@ func TestEditRouter_Teatest_GroupVarsFlow_CreateFromExampleEditAndSave(t *testin
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to top menu
 
-	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
-	for i := 0; i < 10; i++ {
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
@@ -1412,10 +1409,7 @@ func TestEditRouter_Teatest_VaultFlow_CreateAddKeyAndSave(t *testing.T) {
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to top menu
 
-	// top menu items: 0 hosts.yml, 1 group_vars, 2 vault, 3 roster,
-	// 4 freeipa-dns manifest, 5 internal-endpoints manifest, 6 monitoring,
-	// 7 Alertmanager 通知, 8 檢查設定完整性, 9 快速建立最小 workspace, 10 離開
-	for i := 0; i < 10; i++ {
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit

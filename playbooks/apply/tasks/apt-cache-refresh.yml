@@ -11,12 +11,29 @@
 #   pilot_apt_refresh_reason    : str, free-form label for evidence/logs
 #   pilot_apt_lock_retries      : int, default 6  (spec.md §11)
 #   pilot_apt_lock_delay_seconds: int, default 10
+#   pilot_apt_update_timeout_seconds: int, default 300 — wall clock per
+#       apt-get update attempt (spec.md §11)
 #
 # Output fact: pilot_apt_refresh_result
 #   status: healthy | degraded
 #   mode: global
-#   errors: [...]
-#   required_sources_healthy: bool
+#   errors: [...]   (plus a type=refresh_timeout entry when the wall
+#                    clock ran out)
+#   required_sources_healthy: bool (always false after a timeout)
+#
+# Wall clock: coreutils `timeout` sends TERM after
+# pilot_apt_update_timeout_seconds and KILL 30 s later. A
+# stalled `apt-get update` otherwise blocks the whole play: found live
+# 2026-09-23 on a vm-target, where apt-get update sat on a half-closed
+# (CLOSE-WAIT) connection to a caching proxy with no end. A timeout says
+# nothing about which source stalled, so it always counts against the
+# required sources.
+#
+# Timeout exit codes as Ansible's command module reports them: 124 when
+# TERM ended apt-get, -9 when the KILL was needed (`timeout` KILLs its whole
+# process group, itself included, so Python sees the signal); 137 is the
+# same KILL seen through a shell. apt-get itself never exits with any of
+# them.
 #
 # tolerant: `changed_when: false` / `failed_when: false` below means this
 # is a probe, not a gate — the caller (apt-package-install.yml) decides
@@ -25,34 +42,13 @@
 # and repository-lifecycle callers need the *entire* configured package
 # universe to be trustworthy, not just one required source). The retry
 # below is bounded and only fires for lock-contention-shaped failures
-# (`apt_lock`) or an attempt that hit its timeout (rc 124) — deterministic
-# failures (NO_PUBKEY, invalid signature, missing Release, wrong
-# distribution, package not found) are never retried (spec.md §11).
-#
-#   pilot_apt_update_timeout_seconds: int, default 300 (one attempt)
-#   pilot_apt_http_timeout_seconds  : int, default 30  (apt per request)
-#   pilot_apt_acquire_retries       : int, default 3   (apt per request)
+# (`apt_lock`) — deterministic failures (NO_PUBKEY, invalid signature,
+# missing Release, wrong distribution, package not found) are never
+# retried (spec.md §11).
 
 - name: "APT cache refresh — global apt-get update probe ({{ pilot_apt_refresh_reason | default('unspecified') }})"
-  # Bounded: on a fresh vm-target an apt-get update with no network
-  # connection left open hung for over 38 minutes and stalled a whole
-  # topology run (2026-09-24). timeout(1) caps each attempt, apt's own
-  # per-request timeout and retries handle a slow mirror, and a timed-out
-  # attempt (rc 124) is retried like lock contention. One that still
-  # times out stays an unclassified non-zero rc, which the health check
-  # below never reads as healthy.
   ansible.builtin.command:
-    argv:
-      - timeout
-      - "{{ pilot_apt_update_timeout_seconds | default(300) }}"
-      - apt-get
-      - -o
-      - "Acquire::http::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}"
-      - -o
-      - "Acquire::https::Timeout={{ pilot_apt_http_timeout_seconds | default(30) }}"
-      - -o
-      - "Acquire::Retries={{ pilot_apt_acquire_retries | default(3) }}"
-      - update
+    argv: ['timeout', '--kill-after=30', "{{ (pilot_apt_update_timeout_seconds | default(300)) | string }}", 'apt-get', 'update']
   register: _pilot_apt_global_refresh
   changed_when: false
   failed_when: false
@@ -61,10 +57,13 @@
     DEBIAN_FRONTEND: noninteractive
   until: >-
     (_pilot_apt_global_refresh.rc | default(1)) == 0 or
-    not (((_pilot_apt_global_refresh.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
-         or (_pilot_apt_global_refresh.rc | default(1)) == 124)
+    not ((_pilot_apt_global_refresh.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
   retries: "{{ pilot_apt_lock_retries | default(6) }}"
   delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+
+- name: "APT cache refresh — did the global refresh hit its wall clock?"
+  ansible.builtin.set_fact:
+    _pilot_apt_global_timed_out: "{{ (_pilot_apt_global_refresh.rc | default(0)) in [124, 137, -9] }}"
 
 - name: "APT cache refresh — classify global refresh output"
   ansible.builtin.include_tasks: apt-classify-failure.yml
@@ -89,7 +88,8 @@
       {{ (pilot_apt_classification_result.errors
           | selectattr('required', 'equalto', true) | list | length) == 0
          and not ((_pilot_apt_global_refresh.rc | default(1)) != 0 and
-                  (pilot_apt_classification_result.errors | length) == 0) }}
+                  (pilot_apt_classification_result.errors | length) == 0)
+         and not (_pilot_apt_global_timed_out | bool) }}
 
 - name: "APT cache refresh — set pilot_apt_refresh_result"
   ansible.builtin.set_fact:
@@ -100,7 +100,14 @@
                (pilot_apt_classification_result.errors | length) == 0)
            else 'degraded' }}
       mode: global
-      errors: "{{ pilot_apt_classification_result.errors }}"
+      errors: >-
+        {{ pilot_apt_classification_result.errors
+           + ([{'source': 'unknown', 'type': 'refresh_timeout', 'key_id': none,
+                'required': true, 'required_source_id': none,
+                'raw': 'apt-get update did not finish within '
+                       ~ (pilot_apt_update_timeout_seconds | default(300)) ~ 's (rc='
+                       ~ _pilot_apt_global_refresh.rc ~ ')'}]
+              if (_pilot_apt_global_timed_out | bool) else []) }}
       required_sources_healthy: "{{ _pilot_apt_global_required_healthy }}"
 
 - name: "APT cache refresh — FATAL(strict): configured package universe is not fully trustworthy"

@@ -71,7 +71,7 @@ Full results, candidate/tree and scenario verdicts are in the
    `su` goes through the PAM account stack, which refreshes it.
 
    The playbook removes the former `/etc/pilot/session-store-ingest.token`.
-4. Apply the gateway playbook with `pilot_session_store_url` and the same
+4. Apply the gateway playbook with `pilot_access_gateway_recording_session_store_url` and the same
    signing key. Then set `ssh_recording` on hosts in `hosts.yml` and apply
    `freeipa-client`.
 5. After the upgrade is confirmed, delete `index.db.pre-v1.bak` by hand and
@@ -134,7 +134,7 @@ if they must be retained.
 | A recorded session is ended mid-way with "recording could not be saved" | `fail_closed`: the store made no progress for `failure_grace` (10s default), for example unreachable or disk full | Fix the store; the store keeps the partial recording as `complete: false` with the missing seq range |
 | Ingest 500s and the recorder fails closed | The store's filesystem is full (SQLite "database or disk is full") | The store now logs `ingest request failed` with the error; free space. `pilot_session_store_ingest_requests_total{code="5xx"}` counts them |
 | New store refuses to start after an upgrade attempt | `index.db.pre-v1.bak` already exists, or less than 2× the DB size is free | Move the old backup away / free space; nothing was migrated |
-| An existing user who was just added to the auditor or Portal group is denied (`unauthorized`, or `permission denied` on the socket) | SSSD still serves that user's cached group list (`id -Gn -- <user>` lacks the group). The services check the user's own group list first, so a brand-new user is recognized at once even while `getent group <group>` still lists only the old members | The user logs in again: a PAM login (`ssh`, `su`) refreshes the list, `runuser` does not. Otherwise `sss_cache -E` on that host |
+| An existing user who was just added to the auditor or Portal group is denied (`unauthorized`, or `permission denied` on the socket) | The services check the connecting process's own group credentials (`identity.PeerInGroup`), which come from the login session. A brand-new user gets them fresh at first login, but an existing user's session, or a `runuser`, still carries SSSD's cached group list (`id -Gn -- <user>` lacks the group) | The user logs in again: a PAM login (`ssh`, `su`) refreshes the list, `runuser` does not. Otherwise `sss_cache -E` on that host |
 | `pilot session replay` / `export` fails with `decrypt/authenticate event (session=… seq=N …): cipher: message authentication failed` (HTTP 500) | The stored ciphertext of that event was altered or damaged. The sequence number is authenticated too, so a row copied from another seq fails the same way | The store returns nothing from that session and export writes no file; the read audit event has `result: error`. Restore `index.db` from a backup to recover the recording |
 | `pilot session replay` cannot reach the store | Older `pilot` builds defaulted to `/run/pilot/session-store.sock` | Current builds default to `/run/pilot-session-store/session-store.sock`, where the playbook serves it |
 
