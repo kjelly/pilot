@@ -43,7 +43,7 @@ var (
 )
 
 var verifyCmd = &cobra.Command{
-	Use:   "verify <spec.md>",
+	Use:   "verify <spec.md> | --dir <directory> | --probe <command>",
 	Short: "Run each row of a verification spec against the inventory and emit a report",
 	Long: `pilot verify closes the spec → apply loop.
 
@@ -58,7 +58,8 @@ Use --local for the smoke-test case where the spec tests the host pilot
 itself is running on. Use --inventory + --limit for fleet verification.
 `,
 	// Allow either: positional <spec.md> (single-spec mode), or no
-	// positional with --dir=<path> (multi-spec mode).
+	// positional with an explicit --dir=<path> (multi-spec mode), or
+	// --probe alone.
 	Args: cobra.ArbitraryArgs,
 	RunE: runVerify,
 }
@@ -114,21 +115,15 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	if hasPositional && verifyDir != "" {
 		return fmt.Errorf("positional spec.md and --dir are mutually exclusive; pass either one, not both")
 	}
-	if verifyDir != "" || !hasPositional {
+	if verifyDir != "" {
 		// Multi-spec mode: walk --dir for *.md, run each, print rollup table.
-		dir := verifyDir
-		if dir == "" {
-			// default fallback: docs/verification under --root or cwd.
-			root := verifyRoot
-			if root == "" {
-				root = os.Getenv("PILOT_ROOT")
-			}
-			if root == "" {
-				root, _ = os.Getwd()
-			}
-			dir = filepath.Join(root, "docs", "verification")
-		}
-		return runVerifyMulti(cmd, dir)
+		return runVerifyMulti(cmd, verifyDir)
+	}
+	if !hasPositional {
+		// No implicit default directory: a script whose spec argument came
+		// out empty used to verify every spec in docs/verification against
+		// its inventory and record those verdicts.
+		return fmt.Errorf("pilot verify needs a spec.md, or --dir <directory> to verify every spec in it (for example --dir docs/verification)")
 	}
 	return runVerifyOne(cmd, args[0])
 }
