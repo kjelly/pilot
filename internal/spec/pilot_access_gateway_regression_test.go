@@ -91,3 +91,43 @@ func TestRegression_PilotAccessGatewayGSSAPIOnlyContract(t *testing.T) {
 		}
 	}
 }
+
+// AG01 checks the deployed gateway_id/gateway_scope, supplied as required
+// Spec v2 inputs, instead of a hardcoded example deployment.
+func TestRegression_PilotAccessGatewayAG01UsesInputs(t *testing.T) {
+	const specPath = "../../docs/verification/pilot-access-gateway.md"
+	s, err := Parse(specPath)
+	if err != nil {
+		t.Fatalf("parse %s: %v", specPath, err)
+	}
+	if s.SchemaVersion != 2 {
+		t.Fatalf("schemaVersion=%d want 2", s.SchemaVersion)
+	}
+	required := map[string]bool{}
+	for _, in := range s.Inputs {
+		required[in.Name] = in.Required
+	}
+	for _, name := range []string{"gateway_id", "gateway_scope"} {
+		if !required[name] {
+			t.Errorf("input %s must be declared and required", name)
+		}
+	}
+	var ag01 Row
+	for _, row := range s.Rows {
+		if row.ID == "AG01" {
+			ag01 = row
+		}
+	}
+	for _, want := range []string{
+		`"  id: $PILOT_VAR_GATEWAY_ID"`,
+		`"  scope: $PILOT_VAR_GATEWAY_SCOPE"`,
+		`"  target_hostgroup: pilot-target-$PILOT_VAR_GATEWAY_SCOPE"`,
+	} {
+		if !strings.Contains(ag01.Command, want) {
+			t.Errorf("AG01 probe must match the whole config line %s", want)
+		}
+	}
+	if strings.Contains(ag01.Command, "gpu") {
+		t.Errorf("AG01 must not hardcode an example deployment: %q", ag01.Command)
+	}
+}

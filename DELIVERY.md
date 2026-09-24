@@ -476,6 +476,12 @@ docker run --rm -it \
   `pilot verify --dir docs/verification -i inventory.yml` 一次驗完並印
   rollup 總表（注意：`--dir` 會跑目錄下**每一份** spec，只部署部分元件時
   沒部署的 spec 會 FAIL，這種情況請逐份指定）。
+- 有 Spec v2 必填 inputs 的 spec 要先給值，否則該份 spec 直接報錯、不跑任何
+  row。例如 `pilot-access-gateway.md` 需要這台 gateway 部署時的
+  `gateway_id`/`gateway_scope`：單份驗收用
+  `--input gateway_id=<id> --input gateway_scope=<scope>`；`--dir` 或多台不同
+  scope 的 gateway 時，在 inventory 該主機加
+  `pilot_inputs: {gateway_id: <id>, gateway_scope: <scope>}`。
 
 ### 定期重驗（交付後的持續正確）
 
