@@ -6,6 +6,33 @@
 
 ---
 
+## Huh v2 menus need a custom `--pointer`
+
+`[live 2026-09-24]` Since the Huh v2 adapters (`internal/tui`, `5cc7ab1`,
+2026-08-20), every `pilot edit` menu row is drawn behind Huh's `┃ ` field
+border, so the pointer row reads `┃ > hosts.yml — …`. `trec drive`'s default
+`--pointer` (`^\s*(?:❯|▸|›|→|»|>)\s`) is anchored at the start of the line and
+never matches it.
+
+A strict-lint-clean script whose only navigation was `ACTIVATE 離開 WITH ENTER`
+on the top menu failed on both `origin/main` `583df40` and a build with the
+newer Charm stack:
+
+```
+SELECT "離開": not reached after 150 presses (no pointer row found)
+```
+
+The same script exited 0 with:
+
+```bash
+--pointer '^\s*┃?\s*>\s'
+```
+
+Pass it on every `trec drive` run, script or `--interactive`, that uses
+`SELECT`, `FOCUS`, `ACTIVATE`, `CHOOSE` or `TOGGLE`. The `┃?` keeps plain `> `
+rows matching too. `pilot deploy` renders through the same `internal/tui`
+adapters (`deploy_tui.go`), but only `pilot edit` was re-checked.
+
 ## `SELECT` is the recommended default for `pilot edit`
 
 `pilot edit` is **one continuous Bubble Tea `tea.Program` for the whole
@@ -22,15 +49,18 @@ default `--pointer`) covering top menu → hosts.yml → add host → host menu 
 roles menu → role checklist (toggle + confirm) → **back to roles menu, then host
 menu, then host list, all via `SELECT` immediately after the checklist** → save →
 top menu → quit: every `SELECT` matched on the first try, exit 0, expected file
-written.
+written. (That run predates the Huh v2 adapters. The same walkthrough now needs
+the `--pointer` above.)
 
 Prefer `SELECT` over `DOWN <n>` here because it survives a menu's item count
 drifting (see `../SKILL.md` §2) without recomputing an index.
 
 **Two standing caveats:**
 
-- **Exception: the role checklist** (`multiSelect` toggle-many-rows screen) — use
-  `DOWN <n>` + `SPACE` there. See `role-checklist.md`.
+- **The role checklist** (multi-select) — pre-Huh this was an exception that
+  needed `DOWN <n>` + `SPACE`. The Huh checklist renders every row, and
+  `TOGGLE <row-unique text>` works there (live 2026-09-24). See
+  `role-checklist.md`.
 - **`SELECT` only moves the pointer — it does not submit.** Every `SELECT` needs
   its own following `ENTER`.
 

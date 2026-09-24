@@ -599,9 +599,21 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
 8. **`include_tasks` 的 `tags:` 只作用在 include 那一行,不會傳給被 include
    進來的 task**。`374780b`:帶 `--tags C1` 時 apt framework 什麼都沒裝,也
    不報錯。要讓 `--tags` 篩選生效,寫成
-   `include_tasks: {file: ..., apply: {tags: [...]}}`。目前只有 apt 的呼叫點由
-   `cmd/pilot/cmd/apt_policy_test.go::TestAptPackageInstallCallSitesUseApplyTags`
-   鎖住。
+   `include_tasks: {file: ..., apply: {tags: [...]}}`。2026-09-24 已用
+   ansible-core 2.19.2 實測確認。全 repo 由
+   `internal/spec/include_tasks_apply_tags_regression_test.go::TestRegression_TaggedIncludeTasksUseApply`
+   鎖住；當時尚未遷移的 17 處列在該測試的 ratchet allowlist，只准減少——遷移
+   任一處都要對該 playbook 跑一次 tag-scoped 的 vm-target 測試，因為加上
+   `apply` 之後，被 include 的 task 可能讀到同一次 `--tags` run 沒設過的 fact
+   （§4.4）。被多個 caller 共用的 task 檔裡再 include 別的檔案時，無法寫出
+   caller 的 row tag，用 `apply: {tags: [always]}`（代表「這個 include 有跑就跑」，
+   例：`tasks/freeipa-dns-client-resolver.yml` 的 dig 安裝）。
+9. **`ansible.builtin.apt`/`package` 直接裝套件、不走 apt framework，會吃當下
+   主機上的 apt index**：index 過期時下載 404，apply 在真正要做的事之前就失敗
+   （2026-09-24，`tasks/freeipa-dns-client-resolver.yml` 在 vm-target golden
+   image 上）。Debian 路徑一律用 `tasks/apt-package-install.yml`；
+   `cmd/pilot/cmd/apt_policy_test.go::TestAptDirectInstallAllowlist` 鎖住，
+   尚未遷移的 4 處列在 ratchet allowlist。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
@@ -1219,3 +1231,4 @@ git status --short
 | 2026-09-23 | v1.29 | Captive SSH transport(`docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md`)Phase 4:新增第 39 支 apply playbook `pilot-access-target-policy-apply.yml`(transport target 端的 sshd 政策:以 `Match Address <gateway 位址>` 對 Gateway 來的每個 session 拒絕 sshd forwarding——刻意不用 `Match Group`,因為 opaque transport 無法強制 inner username;驗證通過後才加入 FreeIPA hostgroup `pilot-transport-ready`,gateway 只對這個 hostgroup 開 `pilot-transport-v1`;`absent` 先移出 hostgroup 再移除 drop-in;day-2/opt-in,不接進 `site.yml`,與 `pilot-access-gateway`/`pilot-access-directory` 互斥);§4.3 清點更新為 39 支;§4.2 不需新增 restic 範例(只寫 `/etc`,已被預設 `["/etc"]` 涵蓋) | pilot |
 | 2026-09-23 | v1.30 | 回顧最近 20 個 fix commit(`9550b38`~`5b735ee`,2026-09-15~09-23)後新增四條規則:§4.5(Ansible 語意陷阱:block `when:` 在每個 task 各自重新判斷、重複 include 的狀態外洩、play `vars:` 蓋掉 inventory、check mode 被跳過的 register、installer 準備 task 每次重設 owner、重複 YAML key)、§5.7(同一件事記在兩處時必須有一致性測試或單一來源,列出現有的四個一致性測試;起因:20 個 fix 裡 8 個屬於這類,`9550b38`/`c58d63a` 是同類第二次)、§5.8(沒有 error 不等於成功:`ansible.Runner` 失敗只記在 `Result.ExitCode`、網路步驟要有 timeout、修復失敗不准沿用舊資料、lint 設定/輸出上限會靜默失效)、§5.9(決策讀權威來源不讀快取/快照:SSSD member list、apply 時的 `ssh-keyscan`、過期 apt index、detection refresh;需要清快取才正確的結果要當 bug 處理);§6 補四條對應 ❌ 提醒 | pilot |
 | 2026-09-24 | v1.31 | 再往前回顧 50 個 fix commit(`27ec586`~`81f7090`,2026-08-24~09-15)後新增 §5.10~§5.15:§5.10(修 bug 先掃同類,會在新程式碼重犯的做成全 repo lint;起因:play `vars:` 覆蓋、include 兩次 fact 殘留、`dig` 診斷、validator 形狀、`pipefail` 都是修一處後在別處重犯)、§5.11(路徑在入口正規化一次,7 個 fix 是容器/全新 runtime/不同 cwd 下路徑解析不同)、§5.12(gate/matcher/`changed_when` 要有證明會觸發的測試,8 個 fix 是永遠比對不到的檢查)、§5.13(主機身分統一用小寫 FQDN,`ansible_host` 不是身分)、§5.14(移除/撤銷/清理路徑與冪等 teardown)、§5.15(從真實入口測到底、round-trip、每個 commit 單獨可 build);§4.5 補第 7 點(`shell` 預設 `/bin/sh`=dash 不認得 `pipefail`,新增全 repo lint `internal/spec/shell_pipefail_regression_test.go`,同時修正它抓到的 5 個 task,含 `tasks/freeipa-dns-client-resolver.yml` 在 Debian/Ubuntu 上從未生效的 rescue ROLLBACK)與第 8 點(`include_tasks` 的 `tags:` 不會傳給被 include 的 task),並在第 2、3 點補上第一次修的 commit;§6 補七條對應 ❌ 提醒 | pilot |
+| 2026-09-24 | v1.32 | §4.5 第 8 點改寫：`include_tasks` 帶 tags 卻沒有 `apply` 的寫法改由全 repo lint `TestRegression_TaggedIncludeTasksUseApply` 鎖住（17 處尚未遷移的列入 ratchet allowlist），並補上共用 task 檔巢狀 include 用 `apply: {tags: [always]}` 的寫法；新增第 9 點（直接用 `ansible.builtin.apt`/`package` 裝套件會吃過期的 apt index，`TestAptDirectInstallAllowlist` 鎖住，4 處列入 allowlist）。起因：`freeipa-dns-client` 的 vm-target 實跑（`docs/evidence/freeipa-dns-client/2026-09-24-583df40.md`） | pilot |

@@ -34,15 +34,24 @@ follow-up keystroke in a later call to the *same* process.
 Full contract: the global `trec-mcp` skill. DSL syntax and reliability rules: the
 global `trec-tui-drive` skill. This file duplicates neither.
 
-- **`terminal_start`** — launch the wizard (e.g. `pilot edit --dir
-  "$SCRATCH/demo"`), always with `CI=1`, and with `PILOT_DEBUG_MENU=1` to get each
-  menu's live item list for free. Keep the returned `session_id`.
-- **`terminal_write`** — send one DSL line at a time to that session (`TEXT`,
-  `ENTER`, `SNAPSHOT`, `EXPECT ...`, `SELECT <label>`, …) — same vocabulary as a
-  `--script` file, one step per call.
-- **`terminal_read`** — pull the accumulated `OK|ERR` / `CURSOR` / `SCREEN` reply
-  and decide the next step from the actual rendered screen, instead of a
-  remembered or assumed item order.
+What `terminal_write` does depends on what `terminal_start` launched
+`[live 2026-09-24]`:
+
+| `terminal_start` launches | `terminal_write` sends | How to observe |
+|---|---|---|
+| `trec drive --interactive` wrapping the wizard, e.g. `trec drive --interactive --pointer '^\s*┃?\s*>\s' -o "$SCRATCH/casts/exploration/<name>.cast" -- env CI=1 pilot edit --presentation --dir "$SCRATCH/demo"` | one newline-terminated DSL line per call (`EXPECT …`, `ACTIVATE <label> WITH ENTER`, `TEXT …`, `SNAPSHOT`, …) — the same vocabulary as a `--script` file | `terminal_read` returns `OK`/`ERR`, `CURSOR` and `SCREEN` for each line; the child's exit shows up as `trec drive: process exited 0` with `running=false` |
+| the wizard itself, e.g. `env CI=1 pilot edit --presentation --dir "$SCRATCH/demo"` | raw bytes, typed verbatim | `terminal_key` for keys (`ENTER`, `DOWN`, `ESCAPE`, `CTRLU`, …), `terminal_write` only for literal text, `terminal_expect` / `terminal_read_screen` to see the screen |
+
+- **In the raw mode a DSL line is just text.** `ENTER\n` typed the word `ENTER`
+  into the `hosts.yml 路徑` field (the path became `…/hosts.ymlENTER`), and the
+  trailing `\n` — Ctrl+J, not Enter — submitted it.
+- **Give `trec drive --interactive` an `-o` path under `$SCRATCH`.** Without one
+  it writes `record_<timestamp>.cast` and its `.result.json` into the MCP
+  server's working directory, which was the repo root.
+- **`--pointer '^\s*┃?\s*>\s'` applies here too**; see `select-labels.md`.
+  `WAIT_CHILD_EXIT` and `ASSERT_EXIT` are script-only.
+- **`terminal_read_screen` can lag the raw stream.** Wait with `terminal_expect`
+  or `terminal_wait_quiet` before reading it.
 - **`terminal_close`** — call once the exploration is done, every time. An
   unclosed session leaks the child process; `session_list` can audit for ones you
   forgot.

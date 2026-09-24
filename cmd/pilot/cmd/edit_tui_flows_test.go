@@ -368,9 +368,18 @@ func TestEditRouter_Teatest_FleetVarsFlow_AddEditDeleteAndSave(t *testing.T) {
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "刪除" -> back to fleet vars menu
 
+	// Only inspect output after the fleet vars menu header was last drawn:
+	// how much of the preceding action-menu frame (whose header names
+	// scratch_var) lands in this read window depends on renderer diffing
+	// and scheduling, notably under -race.
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		out := string(b)
-		return strings.Contains(out, "ansible_user = admin") && !strings.Contains(out, "scratch_var")
+		i := strings.LastIndex(out, "共用變數")
+		if i < 0 {
+			return false
+		}
+		menu := out[i:]
+		return strings.Contains(menu, "ansible_user = admin") && !strings.Contains(menu, "scratch_var")
 	}, teatest.WithDuration(2*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // fleet vars menu -> host list
