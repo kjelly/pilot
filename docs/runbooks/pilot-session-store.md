@@ -25,9 +25,12 @@ unrecorded.
 | Vault keys (names only) | `ipa_admin_password`, `pilot_session_store_master_key`, `pilot_session_store_ingest_signing_key`; for rollback only, the previous `pilot_session_store_ingest_token` (ansible-vault encrypted in the rehearsal) |
 | Previous revision used for rollback | `c0890f6` (the branch base: schema v1, static bearer token, gateway without recording) |
 | Alignment | The store role group is the inventory's `pilot-session-store` group, as the spec's §1 target table expects |
+| Re-verified after the merge with `main` | candidate `fcd3c03` (2026-09-24): store spec 27/27 on the fresh per-host recording topology (`rec-store`) and on the transport topology (`mx-store`); recorded connects landed in the store with `complete=1`, and a store port dropped mid-session ended the session under `fail_closed` with the store row `complete=0`. The upgrade rehearsal above (on `bded49e`) was not repeated |
 
 Full results, candidate/tree and scenario verdicts are in the
-[latest evidence record](../evidence/pilot-access-gateway/2026-09-24-per-host-recording-follow-up.md).
+[latest evidence record](../evidence/pilot-access-gateway/2026-09-24-fcd3c03.md);
+the upgrade rehearsal is in the
+[pre-merge evidence record](../evidence/pilot-access-gateway/2026-09-24-per-host-recording-follow-up.md).
 
 ## 1. Scope and prerequisites
 
@@ -150,3 +153,4 @@ if they must be retained.
 | Rollback | backup restored; `c0890f6` store playbook `changed=7`; the old binary replayed the v1 session; no marker left on any phr host; `c0890f6` gateway authorizes B as `metadata` |
 | Re-upgrade and cleanup | re-applied and migrated again; after deleting the backup and removing the old token from the vault, store and gateway re-apply `changed=0`. Without `-e stage`, or without `confirm_staging`, the apply stops at its gate |
 | Evidence record | [follow-up evidence](../evidence/pilot-access-gateway/2026-09-24-per-host-recording-follow-up.md) |
+| Re-verified after the merge with `main` | candidate `fcd3c03`, tree `59aa59ee4b17dd410b29afc60ee154b21d95b579`: store spec 27/27 on two fresh topologies, recording and `fail_closed` live; upgrade and rollback not repeated. [Evidence record](../evidence/pilot-access-gateway/2026-09-24-fcd3c03.md) |
