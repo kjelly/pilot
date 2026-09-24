@@ -186,7 +186,12 @@
       fi
     done
     if [ {{ ansible_os_family | quote }} = RedHat ] && command -v nmcli >/dev/null; then
-      active="$(nmcli -t -f NAME,DEVICE connection show --active | head -n1)"
+      # First line in bash, not `| head -n1`: under pipefail, head exiting
+      # before nmcli finishes writing makes the pipeline exit 141 (SIGPIPE)
+      # and `set -e` stops the snapshot. The regression test's fake nmcli
+      # hit that intermittently in CI (2026-09-24).
+      active="$(nmcli -t -f NAME,DEVICE connection show --active)"
+      active="${active%%$'\n'*}"
       if [ -n "$active" ]; then
         printf '%s' "${active%%:*}" > "$snap/nm.conn"
         printf '%s' "${active#*:}" > "$snap/nm.device"

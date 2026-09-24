@@ -596,6 +596,16 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    對全部 `playbooks/**` 檢查 `pipefail` 這一項。rescue 裡的 rollback 如果用
    `failed_when: false`,要 register 結果,並在後續訊息如實說明有沒有還原,
    不准寫死「已還原」。
+   設了 `pipefail` 之後,也不准 pipe 進會提早結束的 reader(`head`、
+   `grep -q`/`-m`、`sed …q`、`awk …exit`):reader 先結束時 writer 收到
+   SIGPIPE,整條 pipeline 以 rc=141 結束,搭配 `set -e` 就直接中止,即使
+   reader 已經拿到要的資料。2026-09-24 `tasks/freeipa-dns-client-resolver.yml`
+   的 snapshot 用了 `nmcli … | head -n1`,讓
+   `TestFreeipaDNSClientRollback_ELRestoresNetworkManagerSettings` 約 1% 機率
+   失敗,main CI 因此兩度變紅。改成讀完整個輸出(`sed -n 1p`、`grep -c`)或在
+   bash 裡取第一行(`${out%%$'\n'*}`);
+   `TestRegression_PipefailShellTasksHaveNoEarlyExitReader` 對全部
+   `playbooks/**` 檢查。
 8. **`include_tasks` 的 `tags:` 只作用在 include 那一行,不會傳給被 include
    進來的 task**。`374780b`:帶 `--tags C1` 時 apt framework 什麼都沒裝,也
    不報錯。要讓 `--tags` 篩選生效,寫成
@@ -1248,3 +1258,4 @@ git status --short
 | 2026-09-24 | v1.32 | §4.5 第 8 點改寫：`include_tasks` 帶 tags 卻沒有 `apply` 的寫法改由全 repo lint `TestRegression_TaggedIncludeTasksUseApply` 鎖住（17 處尚未遷移的列入 ratchet allowlist），並補上共用 task 檔巢狀 include 用 `apply: {tags: [always]}` 的寫法；新增第 9 點（直接用 `ansible.builtin.apt`/`package` 裝套件會吃過期的 apt index，`TestAptDirectInstallAllowlist` 鎖住，4 處列入 allowlist）。起因：`freeipa-dns-client` 的 vm-target 實跑（`docs/evidence/freeipa-dns-client/2026-09-24-583df40.md`） | pilot |
 | 2026-09-24 | v1.33 | §4.5 第 8、9 點：帶 tags 沒 `apply` 的 17 組 `include_tasks` 與 4 個繞過 apt framework 的套件安裝全部遷移，兩個 ratchet allowlist 清空；補上遷移時的規則（前置 fact 帶對應 tag、只讀 pre_tasks 標 `always`、mutation 安全 gate 標它保護的 row tag） | pilot |
 | 2026-09-24 | v1.34 | §4.5 第 8 點：安全 gate 的 tag 要涵蓋它保護的每一個 mutation。修正 PR #10 review 抓到的兩個 `--tags` 繞過（`freeipa-ca-trust` stage gate 改 `always`；`internal-endpoint` C7/C8 gate 補 C4–C6、C12 preflight 補 C13/C15，fleet-wide baseline play 補上 stage gate），新增全 repo lint `TestRegression_PreTaskGatesRunUnderApplyTags`（allowlist 列 4 支既有、留給後續 repo-wide stage gate 修正的 playbook） | pilot |
+| 2026-09-24 | v1.35 | §4.5 第 7 點：`pipefail` 下不准 pipe 進 `head`/`grep -q` 這類提早結束的 reader（SIGPIPE → rc=141）。修正 `tasks/freeipa-dns-client-resolver.yml` snapshot 的 `nmcli … \| head -n1`（讓 main CI 偶發紅燈），新增全 repo lint `TestRegression_PipefailShellTasksHaveNoEarlyExitReader` | pilot |
