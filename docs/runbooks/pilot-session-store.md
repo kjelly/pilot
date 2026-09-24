@@ -63,6 +63,11 @@ Full results, candidate/tree and scenario verdicts are in the
    runuser -u <auditor> -- /usr/bin/pilot session replay --raw <old-session-id>
    ```
 
+   `runuser` uses the auditor's cached group list. For an auditor added to
+   `role-pilot-session-auditor` since their last login, use
+   `su -s /bin/sh <auditor> -c '/usr/bin/pilot session list'` instead:
+   `su` goes through the PAM account stack, which refreshes it.
+
    The playbook removes the former `/etc/pilot/session-store-ingest.token`.
 4. Apply the gateway playbook with `pilot_session_store_url` and the same
    signing key. Then set `ssh_recording` on hosts in `hosts.yml` and apply
@@ -121,7 +126,7 @@ if they must be retained.
 | A recorded session is ended mid-way with "recording could not be saved" | `fail_closed`: the store made no progress for `failure_grace` (10s default), for example unreachable or disk full | Fix the store; the store keeps the partial recording as `complete: false` with the missing seq range |
 | Ingest 500s and the recorder fails closed | The store's filesystem is full (SQLite "database or disk is full") | The store now logs `ingest request failed` with the error; free space. `pilot_session_store_ingest_requests_total{code="5xx"}` counts them |
 | New store refuses to start after an upgrade attempt | `index.db.pre-v1.bak` already exists, or less than 2× the DB size is free | Move the old backup away / free space; nothing was migrated |
-| A newly added auditor or Portal user is denied (`unauthorized`) for up to 90 minutes | SSSD still serves a cached group entry from before the user was added (`getent group <group>` lists no member) | `sss_cache -E` on the store, gateway and directory hosts |
+| An existing user who was just added to the auditor or Portal group is denied (`unauthorized`, or `permission denied` on the socket) | SSSD still serves that user's cached group list (`id -Gn -- <user>` lacks the group). The services check the user's own group list first, so a brand-new user is recognized at once even while `getent group <group>` still lists only the old members | The user logs in again: a PAM login (`ssh`, `su`) refreshes the list, `runuser` does not. Otherwise `sss_cache -E` on that host |
 | `pilot session replay` cannot reach the store | Older `pilot` builds defaulted to `/run/pilot/session-store.sock` | Current builds default to `/run/pilot-session-store/session-store.sock`, where the playbook serves it |
 
 ## 6. Latest verified evidence
