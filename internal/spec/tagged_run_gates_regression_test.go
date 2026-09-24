@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // preTaskGateNotAlwaysAllowlist lists pre_tasks gates that a tag-scoped

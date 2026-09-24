@@ -14,7 +14,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // ansibleVaultView decrypts path's ansible-vault-encrypted content into

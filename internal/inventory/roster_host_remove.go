@@ -29,7 +29,7 @@ import (
 	"os"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // SimulateRemoveRosterHost reports what validating the roster at path

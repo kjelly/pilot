@@ -19,7 +19,7 @@ import (
 	"bytes"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // Entry is one top-level scalar key in a vault file.
