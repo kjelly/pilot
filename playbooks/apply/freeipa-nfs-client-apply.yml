@@ -171,7 +171,9 @@
       ansible.builtin.lineinfile:
         path: /etc/sssd/sssd.conf
         regexp: '^services\s*='
-        line: "services = nss, pam, ssh, autofs"
+        # Same line freeipa-client-apply.yml writes, so the two never flip it
+        # back and forth: EL keeps "sudo" as an explicit responder there.
+        line: "services = nss, pam, ssh{{ ', sudo' if ansible_os_family == 'RedHat' else '' }}, autofs"
         state: present
         create: false
       when: not ansible_check_mode

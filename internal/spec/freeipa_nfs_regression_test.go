@@ -136,7 +136,7 @@ func TestRegression_FreeIPAClientPreservesConfiguredAutofsResponder(t *testing.T
 	}
 	for _, required := range []string{
 		"Ensure SSSD keeps the autofs responder enabled",
-		"services = nss, pam, ssh, autofs",
+		`line: "services = nss, pam, ssh{{ ', sudo' if ansible_os_family == 'RedHat' else '' }}, autofs"`,
 		"Restart SSSD after enabling automount",
 	} {
 		if !strings.Contains(string(nfsData), required) {
@@ -356,5 +356,23 @@ func TestRegression_FreeIPANFSServerAcceptsCurrentRosterSchema(t *testing.T) {
 	identityList := identity[identityIdx : identityIdx+strings.Index(identity[identityIdx:], "]")+1]
 	if nfsList != identityList {
 		t.Errorf("freeipa-nfs-server-apply.yml's schema gate (%s) must match freeipa-identity-apply.yml's (%s)", nfsList, identityList)
+	}
+}
+
+// TestRegression_FreeIPAClientKeepsExplicitSudoResponderOnEL locks the
+// 2026-09-24 EL fix: on AlmaLinux 9 sssd-sudo.socket ships disabled and the
+// socket-activated responder cannot reach the backend, so dropping "sudo"
+// from services= left every IPA user without sudo rules (spec C8). Both the
+// base client and the NFS overlay must keep it on RedHat, in the same
+// position, so neither playbook rewrites the other's line.
+func TestRegression_FreeIPAClientKeepsExplicitSudoResponderOnEL(t *testing.T) {
+	for _, name := range []string{"freeipa-client-apply.yml", "freeipa-nfs-client-apply.yml"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "playbooks", "apply", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "services = nss, pam, ssh{{ ', sudo' if ansible_os_family == 'RedHat' else '' }}") {
+			t.Errorf("%s must keep the explicit sudo responder on RedHat", name)
+		}
 	}
 }

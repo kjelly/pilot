@@ -671,6 +671,13 @@
     # explicit responders, so their matching socket units must be disabled
     # before SSSD is restarted; otherwise systemd starts a second copy and
     # `sssd_check_socket_activated_responders` fails with exit status 17.
+    # EL is different (2026-09-24, AlmaLinux 9, sssd 2.9.8): sssd-sudo.socket
+    # ships disabled, and when enabled the socket-activated responder dies
+    # with "check_file failed for /var/lib/sss/pipes/private/sbus-dp_<domain>"
+    # (it cannot reach the backend), so `sudo -l` reported "not allowed" for
+    # every IPA user (spec C8). On RedHat "sudo" therefore stays in
+    # `services=` as an explicit responder, which is what worked live; the
+    # socket unit is only enabled on Debian (below).
     # Preserve the optional autofs responder installed by the NFS client role.
     # site.yml deliberately runs this base client role before the NFS overlay;
     # on later site runs, replacing the whole line with only nss/pam/ssh would
@@ -726,7 +733,7 @@
         path: /etc/sssd/sssd.conf
         regexp: '^services\s*='
         line: >-
-          services = nss, pam, ssh{{ ', autofs'
+          services = nss, pam, ssh{{ ', sudo' if ansible_os_family == 'RedHat' else '' }}{{ ', autofs'
           if 'autofs' in
           ((ipa_sssd_services_current.stdout | default(''))
           | split(',') | map('trim') | list) else '' }}
