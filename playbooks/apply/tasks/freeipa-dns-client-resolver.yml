@@ -188,8 +188,9 @@
     if [ {{ ansible_os_family | quote }} = RedHat ] && command -v nmcli >/dev/null; then
       # First line in bash, not `| head -n1`: under pipefail, head exiting
       # before nmcli finishes writing makes the pipeline exit 141 (SIGPIPE)
-      # and `set -e` stops the snapshot. The regression test's fake nmcli
-      # hit that intermittently in CI (2026-09-24).
+      # and `set -e` stops the snapshot. The fake nmcli in the regression
+      # test hit that intermittently in CI (2026-09-24). No apostrophes in
+      # these comments: the Ansible split_args counts them as open quotes.
       active="$(nmcli -t -f NAME,DEVICE connection show --active)"
       active="${active%%$'\n'*}"
       if [ -n "$active" ]; then
