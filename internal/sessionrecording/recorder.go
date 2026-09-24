@@ -228,6 +228,17 @@ func (r *Recorder) Run(ctx context.Context, ptyFile *os.File, outerIn io.Reader,
 	case <-ctx.Done():
 		runErr = ctx.Err()
 	}
+	// OnFailClosed usually ends the child itself, so the relay can finish
+	// before failClosedCh closes. A trip that has begun still owns the
+	// result: wait until it completes (OnFailClosed has returned) and
+	// report it.
+	r.mu.Lock()
+	tripping := r.failed
+	r.mu.Unlock()
+	if tripping {
+		<-r.failClosedCh
+		runErr = ErrRecordingFailedClosed
+	}
 
 	// Drain: the writer flushes what is queued, bounded by FailureGrace.
 	drainTimer := time.AfterFunc(r.opts.FailureGrace, func() {

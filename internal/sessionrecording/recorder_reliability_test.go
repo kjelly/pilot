@@ -495,6 +495,9 @@ func TestRecorderFailClosedEndsChildAtTrip(t *testing.T) {
 	go func() { done <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
 	exited := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(exited) }()
+	// Runs before startCatChild's cleanup, whose own Wait must not race
+	// this goroutine's when the test fails early.
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
 
 	if _, err := outerPts.Write([]byte("pending\n")); err != nil {
 		t.Fatal(err)
