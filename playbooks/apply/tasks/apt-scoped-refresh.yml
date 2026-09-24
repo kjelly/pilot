@@ -53,9 +53,16 @@
   changed_when: false
   check_mode: false
 
+# Every task that touches the execution-scoped temp dir runs with
+# check_mode: false, like the tempfile allocation and the apt-get update
+# itself: the scoped refresh really runs during a --check preview, and a
+# simulated mkdir/copy followed by a real cp into it failed with "No such
+# file or directory" (2026-09-24, reverse-proxy's nginx install on a fresh
+# vm-target in L3), while a simulated cleanup would leak the temp dir.
 - name: "APT scoped refresh — scoped-view lifecycle (temp dir always cleaned up)"
   block:
     - name: "APT scoped refresh — lock down execution directory (root:root 0700)"
+      check_mode: false
       ansible.builtin.file:
         path: "{{ _pilot_apt_scoped_dir.path }}"
         state: directory
@@ -65,6 +72,7 @@
       changed_when: false
 
     - name: "APT scoped refresh — create empty sourceparts directory"
+      check_mode: false
       ansible.builtin.file:
         path: "{{ _pilot_apt_scoped_dir.path }}/sources.list.d"
         state: directory
@@ -112,6 +120,7 @@
         - _pilot_apt_os_view_check.stdout_lines | default([]) | length == 0
 
     - name: "APT scoped refresh — copy pilot-owned required source files into the scoped view"
+      check_mode: false
       ansible.builtin.copy:
         src: "{{ item.source_file }}"
         dest: "{{ _pilot_apt_scoped_dir.path }}/sources.list.d/{{ item.source_file | basename }}"
@@ -186,6 +195,7 @@
           required_sources_healthy: "{{ _pilot_apt_scoped_required_healthy }}"
   always:
     - name: "APT scoped refresh — cleanup execution-scoped temp directory"
+      check_mode: false
       ansible.builtin.file:
         path: "{{ _pilot_apt_scoped_dir.path }}"
         state: absent

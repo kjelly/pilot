@@ -537,3 +537,52 @@ func TestAptClassifyFailureScriptUnknown(t *testing.T) {
 		t.Fatalf("expected an 'unknown' classified entry, got %+v", result.Errors)
 	}
 }
+
+// TestAptScopedRefreshTempDirTasksRunInCheckMode locks the 2026-09-24 fix:
+// the scoped refresh really runs during a --check preview (tempfile and
+// apt-get update are check_mode: false), so every task touching its
+// execution-scoped temp dir must be too. A simulated mkdir followed by a
+// real cp into it failed L3 on a fresh vm-target, and a simulated cleanup
+// would leak the dir.
+func TestAptScopedRefreshTempDirTasksRunInCheckMode(t *testing.T) {
+	data, err := os.ReadFile("../../../playbooks/apply/tasks/apt-scoped-refresh.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tasks []map[string]any
+	if err := yaml.Unmarshal(data, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	var all []map[string]any
+	for _, task := range tasks {
+		all = append(all, task)
+		for _, part := range []string{"block", "rescue", "always"} {
+			inner, _ := task[part].([]any)
+			for _, raw := range inner {
+				if m, ok := raw.(map[string]any); ok {
+					all = append(all, m)
+				}
+			}
+		}
+	}
+	checked := 0
+	for _, task := range all {
+		if _, isBlock := task["block"]; isBlock {
+			continue
+		}
+		body, err := yaml.Marshal(task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), "_pilot_apt_scoped_dir") {
+			continue
+		}
+		checked++
+		if task["check_mode"] != false {
+			t.Errorf("task %q touches the scoped temp dir but check_mode = %v, want false", task["name"], task["check_mode"])
+		}
+	}
+	if checked < 6 {
+		t.Fatalf("found only %d tasks touching _pilot_apt_scoped_dir; the file layout changed, update this test", checked)
+	}
+}
