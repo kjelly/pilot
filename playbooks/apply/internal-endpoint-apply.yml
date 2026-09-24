@@ -64,10 +64,37 @@
   become: true
   gather_facts: true
   vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
     internal_endpoint_baseline_target_group: all
     freeipa_ca_trust_source_host: "{{ groups['freeipa-server'][0] | default('') }}"
 
+  # This play changes every managed host's resolver (C9) and CA trust (C10),
+  # so it takes the same `always` stage gates as the reconcile play below.
+  # Before 2026-09-24 it had none: a staging/prod run without the confirm
+  # flag changed the whole fleet and only then stopped at the reconcile
+  # play's gate.
   pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+
+    - name: "Gate: prod requires recent staging attestation"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - stage != 'prod'
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+
     - name: "Gate: a freeipa-server host is present in inventory"
       tags: [always]
       ansible.builtin.assert:
@@ -131,8 +158,9 @@
   # query) skipped them and then read undefined facts. The mutation-safety
   # gates in tasks: carry the row tags of the mutation they protect (C27
   # upstream checks, C22 delete confirmations, the route-owner check for
-  # every present-endpoint mutation) rather than `always`, so a read-only
-  # query run is not blocked by them.
+  # every present-endpoint mutation, the C7/C8 DNS gates for the C4-C6
+  # route records, the C12 enrollment preflight for C13/C15) rather than
+  # `always`, so a read-only query run is not blocked by them.
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
       tags: [always]
@@ -344,9 +372,11 @@
   tasks:
     # --- Phase 1: inventory / dependency / live preflight (spec.md §28) ---
 
-    # Spec: docs/verification/internal-endpoint.md C7 (spec.md §11.1/§11.2)
+    # Spec: docs/verification/internal-endpoint.md C7 (spec.md §11.1/§11.2).
+    # Also tagged C4-C6: the route DNS reconcile below runs under those tags
+    # and has no zone check of its own.
     - name: "Gate: endpoint's DNS zone exists in freeipa-dns manifest with effective records_mode merge"
-      tags: [C7]
+      tags: [C7, C4, C5, C6]
       ansible.builtin.assert:
         that:
           - zone_entry | length > 0
@@ -364,9 +394,10 @@
       loop: "{{ internal_endpoint_present }}"
       loop_control: {label: "{{ item.fqdn }}"}
 
-    # Spec: docs/verification/internal-endpoint.md C8 (spec.md §11.3)
+    # Spec: docs/verification/internal-endpoint.md C8 (spec.md §11.3).
+    # Also tagged C4-C6, for the same reason as the C7 gate.
     - name: "Gate: no DNS ownership collision with an explicit freeipa-dns.yaml record"
-      tags: [C8]
+      tags: [C8, C4, C5, C6]
       ansible.builtin.assert:
         that:
           - not collision
@@ -439,13 +470,15 @@
       loop: "{{ internal_endpoint_reverse_proxy }}"
       loop_control: {label: "{{ item.fqdn }}"}
 
-    # Spec: docs/verification/internal-endpoint.md C12 (spec.md §16)
+    # Spec: docs/verification/internal-endpoint.md C12 (spec.md §16).
+    # Also tagged C13/C15, so the service-principal and certificate tasks
+    # never run under their own tags without this enrollment check.
     - name: "Preflight: TLS certificate owner host has live FreeIPA enrollment"
-      tags: [C12]
+      tags: [C12, C13, C15]
       ansible.builtin.include_tasks:
         file: tasks/internal-endpoint-cert-preflight.yml
         apply:
-          tags: [C12]
+          tags: [C12, C13, C15]
       loop: "{{ internal_endpoint_freeipa }}"
       loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
       when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))

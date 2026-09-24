@@ -57,6 +57,12 @@
 
 # --- Steps 2-3: remove the nginx vhost if Pilot-owned, validate, reload
 #     (reverse_proxy endpoints only) ---
+# route_owner is "" when the route used a literal address (a direct
+# endpoint to an IP). delegate_to is templated before `when`, so an empty
+# value is a hard error ("Empty hostname produced from delegate_to"), not a
+# skip, and deleting such an endpoint failed at step 2. Same fallback as
+# steps 4-6 below: the `when:` also requires a route_owner, so the
+# inventory_hostname fallback is never acted on.
 - name: "Remove the Pilot-owned nginx vhost, if this was a reverse_proxy endpoint (delete step 2)"
   ansible.builtin.file:
     path: "{{ iep_ledger.nginx_file }}"
@@ -65,7 +71,8 @@
   when:
     - iep_ledger.get('route_mode', '') == 'reverse_proxy'
     - iep_ledger.get('nginx_file', '') | length > 0
-  delegate_to: "{{ iep_ledger.route_owner }}"
+    - iep_ledger.get('route_owner', '') | length > 0
+  delegate_to: "{{ iep_ledger.get('route_owner', '') or inventory_hostname }}"
 
 - name: "Validate nginx config after vhost removal (delete step 3)"
   ansible.builtin.command: nginx -t
@@ -74,7 +81,7 @@
   failed_when: false
   check_mode: false
   when: iep_delete_nginx_file.get('changed', false)
-  delegate_to: "{{ iep_ledger.route_owner }}"
+  delegate_to: "{{ iep_ledger.get('route_owner', '') or inventory_hostname }}"
 
 - name: "Gate: nginx config must remain valid after vhost removal"
   ansible.builtin.assert:
@@ -93,7 +100,7 @@
   when:
     - not ansible_check_mode
     - iep_delete_nginx_file.get('changed', false)
-  delegate_to: "{{ iep_ledger.route_owner }}"
+  delegate_to: "{{ iep_ledger.get('route_owner', '') or inventory_hostname }}"
 
 # delegate_to is templated before `when` is evaluated, and a tls.mode:
 # disabled endpoint's ledger entry has certificate_owner "" — an empty

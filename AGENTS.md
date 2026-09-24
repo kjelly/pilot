@@ -610,6 +610,18 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    vm-target 測試。被多個 caller 共用的 task 檔裡再 include 別的檔案時，無法寫出
    caller 的 row tag，用 `apply: {tags: [always]}`（代表「這個 include 有跑就跑」，
    例：`tasks/freeipa-dns-client-resolver.yml` 的 dig 安裝）。
+   安全 gate 的 tag 要涵蓋它保護的**每一個** mutation 的 row tag，不只是 gate
+   自己那一列：PR #10 的 review 抓到遷移後的兩個繞過——`freeipa-ca-trust` 的
+   stage gate 沒帶 tag，`--tags C2 -e stage=prod` 沒帶 `confirm_prod` 也照樣
+   裝 CA；`internal-endpoint` 的 C7/C8 DNS gate 只標 `[C7]`/`[C8]`，`--tags C4`
+   就能在不檢查 zone/collision 的情況下改 DNS record。有 `apply` include 的
+   play，pre_tasks 裡的 assert/fail 一律標 `always`（或帶齊該 play 所有 include
+   apply 的 tag），由
+   `internal/spec/tagged_run_gates_regression_test.go::TestRegression_PreTaskGatesRunUnderApplyTags`
+   鎖住（allowlist 只列遷移前就能被 `--tags` 跳過的 4 支，留給 repo-wide 的
+   stage gate 後續修正）；`tasks:` 裡的 gate 對 mutation 的對應無法從 YAML
+   推導，要像 `TestRegression_InternalEndpointGatesCoverTaggedMutations` 那樣
+   逐一鎖住。
 9. **`ansible.builtin.apt`/`package` 直接裝套件、不走 apt framework，會吃當下
    主機上的 apt index**：index 過期時下載 404，apply 在真正要做的事之前就失敗
    （2026-09-24，`tasks/freeipa-dns-client-resolver.yml` 在 vm-target golden
@@ -1235,3 +1247,4 @@ git status --short
 | 2026-09-24 | v1.31 | 再往前回顧 50 個 fix commit(`27ec586`~`81f7090`,2026-08-24~09-15)後新增 §5.10~§5.15:§5.10(修 bug 先掃同類,會在新程式碼重犯的做成全 repo lint;起因:play `vars:` 覆蓋、include 兩次 fact 殘留、`dig` 診斷、validator 形狀、`pipefail` 都是修一處後在別處重犯)、§5.11(路徑在入口正規化一次,7 個 fix 是容器/全新 runtime/不同 cwd 下路徑解析不同)、§5.12(gate/matcher/`changed_when` 要有證明會觸發的測試,8 個 fix 是永遠比對不到的檢查)、§5.13(主機身分統一用小寫 FQDN,`ansible_host` 不是身分)、§5.14(移除/撤銷/清理路徑與冪等 teardown)、§5.15(從真實入口測到底、round-trip、每個 commit 單獨可 build);§4.5 補第 7 點(`shell` 預設 `/bin/sh`=dash 不認得 `pipefail`,新增全 repo lint `internal/spec/shell_pipefail_regression_test.go`,同時修正它抓到的 5 個 task,含 `tasks/freeipa-dns-client-resolver.yml` 在 Debian/Ubuntu 上從未生效的 rescue ROLLBACK)與第 8 點(`include_tasks` 的 `tags:` 不會傳給被 include 的 task),並在第 2、3 點補上第一次修的 commit;§6 補七條對應 ❌ 提醒 | pilot |
 | 2026-09-24 | v1.32 | §4.5 第 8 點改寫：`include_tasks` 帶 tags 卻沒有 `apply` 的寫法改由全 repo lint `TestRegression_TaggedIncludeTasksUseApply` 鎖住（17 處尚未遷移的列入 ratchet allowlist），並補上共用 task 檔巢狀 include 用 `apply: {tags: [always]}` 的寫法；新增第 9 點（直接用 `ansible.builtin.apt`/`package` 裝套件會吃過期的 apt index，`TestAptDirectInstallAllowlist` 鎖住，4 處列入 allowlist）。起因：`freeipa-dns-client` 的 vm-target 實跑（`docs/evidence/freeipa-dns-client/2026-09-24-583df40.md`） | pilot |
 | 2026-09-24 | v1.33 | §4.5 第 8、9 點：帶 tags 沒 `apply` 的 17 組 `include_tasks` 與 4 個繞過 apt framework 的套件安裝全部遷移，兩個 ratchet allowlist 清空；補上遷移時的規則（前置 fact 帶對應 tag、只讀 pre_tasks 標 `always`、mutation 安全 gate 標它保護的 row tag） | pilot |
+| 2026-09-24 | v1.34 | §4.5 第 8 點：安全 gate 的 tag 要涵蓋它保護的每一個 mutation。修正 PR #10 review 抓到的兩個 `--tags` 繞過（`freeipa-ca-trust` stage gate 改 `always`；`internal-endpoint` C7/C8 gate 補 C4–C6、C12 preflight 補 C13/C15，fleet-wide baseline play 補上 stage gate），新增全 repo lint `TestRegression_PreTaskGatesRunUnderApplyTags`（allowlist 列 4 支既有、留給後續 repo-wide stage gate 修正的 playbook） | pilot |
